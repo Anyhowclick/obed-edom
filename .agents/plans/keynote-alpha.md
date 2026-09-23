@@ -12,10 +12,9 @@ the code is the source of truth.** One sub-doc kept: [`../research/kpf_renderer_
 2. **P2 — alpha-capture / Magic-Move feasibility probe.** A gate, not an assumption: an offline
    adversarial probe with real output + an honest RED stop-line. **DONE — all findings green, shipping
    in PR #158** (`feat/keynote-alpha-p2-html-mm`). Details below.
-3. **P3 — transparent animation export** in DSK→Exporter. **STARTED, INCOMPLETE** (owner, 2026-09-23:
-   work began the week of 2026-09-14; focus is still P2). Work in progress, not yet on main: no P3 PR,
-   branch or commit exists on the remote. Still gated behind P2 + an owner asset-timing contract before it
-   is wired. (P3 is a separate workstream/session — not covered here.)
+3. **P3 — transparent animation export** in DSK→Exporter. **NOT STARTED — restart from scratch** (owner,
+   2026-09-23: earlier P3 work was never committed or pushed; start again from scratch). Gated behind P2 + an
+   owner asset-timing contract before it is wired. Focus is still P2.
 
 ## P2 status — the probe & its findings
 Offline, no Keynote: `scripts/p2_recovery_html_adversarial.py` (`--reuse-export --disposable
@@ -96,5 +95,5 @@ The findings, grouped:
 - **Renderer probe (kept):** `.agents/research/kpf_renderer_probe_2026-09-12.md` — settled native stage
   PNGs are the working alpha path; there is NO scriptable intermediate animation frame (P3 animated
   transparent movies stay blocked on that renderer).
-- **Next:** P2 stays the focus (PR #158 merged); P3 is started and incomplete (gated, separate); then the MM z-order-flip validation follow-up
+- **Next:** P2 stays the focus (PR #158 merged); P3 restarts from scratch (gated, separate); then the MM z-order-flip validation follow-up
   (scoped to build after P2 lands).
