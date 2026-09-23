@@ -10,7 +10,7 @@
 - **Injection.** Armed arms use the product path `LiveOutputHost(..., gl_replay="auto")`, asserted per arm (`injection.inject == product`). `output.continuity.glReplay = {mode: injected, version: 1, sha256: 4f8850e0…}`. The control uses the host default.
 - **Observation-only splices.** An order probe goes after `<script id="obed-gl-replay">`. For `fail:<r>` arms, a `debugForceFail` seed goes immediately before that tag. Late arms are set by CDP at P2c on `#2`. Late `contextLost` is a real `WEBGL_lose_context.loseContext()`.
 - **Harness and results.** Harness `output/live-visible-content/g3/{common,g3_flow,analyse_g3,validate_r2_instruments}.py`, `run_arms.sh`, and `output/gates-g3/{run_gates_g3.sh,summarise_gates.py}`. Results in `output/live-visible-content/g3/r3/<arm>/result.json`, `r3/gates.json`, `r3/r2-instrument-validation.json` and `output/gates-g3/gp2-a9637d62/` (`summary.json`, `gp2-verdict.json`).
-- **Pass conditions.** Plan rev 2 §6, the coordinator rulings (recorded as `specNote`s), and the A2 / G2-fix checks of `a2-advice.md`.
+- **Pass conditions.** Plan rev 2 §6, the coordinator rulings (recorded as `specNote`s), and the A2 / G2-fix checks of `a2-advice.md` (pruned; `git show a56474f3:.agents/reviews/gl-replay-g3/a2-advice.md`).
 - **Browser discipline.** At most 3 headless Chromes. `run_gates`, the go-to arms and Q3 each ran alone. `pgrep -f headless=new` was empty before every batch. No Keynote, no OBS, no port 9222.
 
 | Batch (1920×1080 unless noted) | Start | Duration | Load before → after |

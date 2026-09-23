@@ -274,7 +274,9 @@ class ChromeCdp:
         return _png_to_rgba(base64.b64decode(b64)), list(raw.get("layers") or [])
 
     async def key(self, key: str, code: str, vk: int) -> None:
-        common = {"key": key, "code": code, "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk}
+        # No nativeVirtualKeyCode: macOS Chrome routes it through AppKit key equivalents,
+        # hides the page and stalls CDP (as `live_host.ChromeCdp.key`).
+        common = {"key": key, "code": code, "windowsVirtualKeyCode": vk}
         await self.call("Input.dispatchKeyEvent", type="keyDown", **common)
         await self.call("Input.dispatchKeyEvent", type="keyUp", **common)
 

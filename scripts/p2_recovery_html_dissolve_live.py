@@ -253,6 +253,7 @@ MEDIA_PROBE_JS = r"""
                         && r.top < (window.innerHeight || 0));
     let why = null;
     if (!attached) why = 'detached';
+    else if (document.hidden) why = 'page-hidden';
     else if (st && st.display === 'none') why = 'display-none';
     else if (!(r.width > 0 && r.height > 0)) why = 'zero-size';
     else if (st && st.visibility === 'hidden') why = 'hidden';
@@ -266,6 +267,7 @@ MEDIA_PROBE_JS = r"""
       // The RAW readings the two fields above are a function of, so the same
       // decision can be recomputed off-page and required to agree.
       inDocument: attached,
+      documentHidden: document.hidden,
       display: st ? String(st.display) : null,
       visibility: st ? String(st.visibility) : null,
       opacityProduct: op,

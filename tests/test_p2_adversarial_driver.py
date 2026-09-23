@@ -451,7 +451,7 @@ def test_freeze_bracket_starts_chrome_inside_its_try():
     import inspect
 
     src = inspect.getsource(p2._run_freeze_bracket)
-    body = src[src.index("chrome = ChromeCdp("):]
+    body = src[src.index("chrome = _chrome("):]
     body = body[: body.index("finally:")]
     assert body.index("try:") < body.index("await chrome.start()"), (
         "chrome.start() runs outside the try that closes it"
@@ -573,17 +573,19 @@ def test_burst_offsets_come_from_the_probe():
     assert len(set(p2.BURST_OFFSETS_MS)) == len(p2.BURST_OFFSETS_MS)
 
 
-def test_findings_inventory_is_still_fourteen_and_renamed():
+def test_findings_inventory_names_both_1to2_slots_and_is_otherwise_unchanged():
+    """Slot 5 has two literals: `refusedCarry1to2` (off) and `glReplayCarry1to2`
+    (auto, swapped in by id). Every other finding appears exactly once."""
     import re
 
     ids = re.findall(
         r'"id": "(\w+)"',
         (REPO / "scripts" / "p2_recovery_html_adversarial.py").read_text(encoding="utf-8"),
     )
-    assert len(ids) == 14
-    assert "refusedCarry1to2" in ids
+    assert len(ids) == 15
+    assert len(set(ids)) == 15
+    assert {"refusedCarry1to2", "glReplayCarry1to2", "freezeControlCaughtByCounter"} <= set(ids)
     assert "continueThroughMagicMove1to2" not in ids
-    assert "freezeControlCaughtByCounter" in ids
 
 
 # --------------------------------------------------------------------------- #
@@ -609,3 +611,192 @@ def test_chrome_start_kills_its_process_when_the_attach_fails(tmp_path, monkeypa
     assert c.proc is not None
     assert c.proc.poll() is not None, "Chrome survived a failed start()"
     assert isinstance(c.proc, subprocess.Popen)
+
+
+# --- P2 input / lifecycle (2026-09-23) -------------------------------------- #
+def test_key_events_omit_native_key_code(tmp_path):
+    """A Windows VK sent as `nativeVirtualKeyCode` makes macOS Chrome route the
+    key through AppKit key equivalents: the page goes `hidden` on the first key
+    (rAF runs only when a screenshot forces a frame) and, with the page kept
+    visible, the slide-2 drain hangs at #4 with CDP unresponsive. Omitting it
+    (as the product host does) kept the page visible and drained 24/24 keys."""
+    if str(REPO / "scripts") not in sys.path:
+        sys.path.insert(0, str(REPO / "scripts"))
+    import p2_alpha_spike as spike
+
+    c = spike.ChromeCdp(Path("chrome"), tmp_path / "profile")
+    calls: list[tuple[str, dict]] = []
+
+    async def call(method, **params):
+        calls.append((method, params))
+        return {}
+
+    c.call = call
+    asyncio.run(c.key("ArrowRight", "ArrowRight", 39))
+    assert [p["type"] for _, p in calls] == ["keyDown", "keyUp"]
+    for method, params in calls:
+        assert method == "Input.dispatchKeyEvent"
+        assert "nativeVirtualKeyCode" not in params
+        assert params["windowsVirtualKeyCode"] == 39
+
+
+_COLLECTOR_HARNESS = r"""
+var rafQ = [], now = 0, videos = [], hash = '#7', keyListeners = [];
+global.performance = {now: function () { return now; }};
+global.location = {hash: hash};
+global.requestAnimationFrame = function (f) { rafQ.push(f); };
+global.document = {querySelectorAll: function () { return videos; }};
+global.window = {
+  addEventListener: function (type, f) { if (type === 'keydown') keyListeners.push(f); },
+  removeEventListener: function () {},
+  __OBED_P2_PROBE__: {hash: function () { return hash; }},
+  __OBED_P2_PRESERVE__: {
+    footprintOwnerDecoderId: function (r) { return {elId: 4, key: 'movie1', via: 'stub'}; },
+    snapshot: function () { return []; }
+  }
+};
+eval(%(src)s);
+var C = window.__OBED_CAP_COLLECT__;
+now = 1000; C.start(%(bound)s);
+function tick(t, h) { now = t; hash = h; var q = rafQ; rafQ = []; q.forEach(function (f) { f(); }); }
+function video(spec) {
+  return {__obedElId: spec.elId === undefined ? 4 : spec.elId, __obedGen: spec.gen === undefined ? 0 : spec.gen,
+          __obedMotion: {started: spec.motion, generation: spec.generation === undefined ? 0 : spec.generation,
+                         boundary: {movieKey: spec.key || 'movie1', atScene: spec.atScene === undefined ? 8 : spec.atScene}},
+          play: function () {}};
+}
+%(plan)s.forEach(function (step) {
+  if (step.advance !== undefined) {
+    keyListeners.forEach(function (f) {
+      f({type: 'keydown', key: 'ArrowRight', isTrusted: true, repeat: false, timeStamp: step.advance});
+    });
+  }
+  if (step.videos !== undefined) videos = step.videos.map(video);
+  tick(step.t, step.hash);
+});
+var d = C.dump();
+console.log(JSON.stringify({flipT: d.flipT, flipVia: d.flipVia,
+                            progress: d.rows.map(function (r) { return r.progress; })}));
+"""
+
+
+def _run_collector(plan: list[dict], bound=4) -> dict:
+    src = p2.CAPTURE_COLLECTOR_JS.replace(p2.MEDIA_PROBE_JS.strip(), "null")
+    harness = _COLLECTOR_HARNESS % {
+        "src": json.dumps(src), "plan": json.dumps(plan), "bound": json.dumps(bound),
+    }
+    out = subprocess.run(["node", "-e", harness], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def _plan_with(stamp: dict, advance=1120) -> list[dict]:
+    return [
+        {"t": 1100, "hash": "#7"},
+        {"t": 1200, "hash": "#7", "advance": advance, "videos": [stamp]},
+        {"t": 1900, "hash": "#8"},
+        {"t": 2650, "hash": "#8"},
+    ]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_collector_starts_the_modelled_move_at_the_bound_decoders_motion_stamp():
+    """The product starts moving the carried video during #7 (`__obedMotion`);
+    starting the modelled query at #8 left it ~1.7 s behind the video, and the
+    owner resolver (IoU >= 0.75) returned none for the whole lag."""
+    got = _run_collector(_plan_with({"motion": 1150}))
+    assert got["flipVia"] == "motion"
+    assert got["flipT"] == 1150
+    assert got["progress"][0] == 0
+    assert got["progress"][2] == pytest.approx(750 / (p2.TRANS_S * 1000))
+    assert got["progress"][3] == 1
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+@pytest.mark.parametrize("stamp,advance,bound", [
+    pytest.param({"motion": 1110}, 1120, 4, id="stamp-before-the-advance"),
+    pytest.param({"motion": 1150}, None, 4, id="no-advance-seen"),
+    pytest.param({"motion": 1150, "elId": 99}, 1120, 4, id="sibling-decoder"),
+    pytest.param({"motion": 1150}, 1120, None, id="no-bound-decoder"),
+    pytest.param({"motion": 1150, "key": "movie2"}, 1120, 4, id="another-movie"),
+    pytest.param({"motion": 1150, "atScene": 3}, 1120, 4, id="wrong-boundary"),
+    pytest.param({"motion": 1150, "generation": 0, "gen": 1}, 1120, 4, id="stale-generation"),
+    pytest.param({"motion": 999999}, 1120, 4, id="future-stamp"),
+    pytest.param({"motion": None}, 1120, 4, id="null-stamp"),
+    pytest.param({"motion": "1150"}, 1120, 4, id="non-number-stamp"),
+])
+def test_collector_falls_back_to_the_slide4_hash_without_the_bound_decoders_fresh_stamp(
+    stamp, advance, bound
+):
+    plan = _plan_with(stamp, advance=advance)
+    if advance is None:
+        del plan[1]["advance"]
+    got = _run_collector(plan, bound=bound)
+    assert got["flipVia"] == "hash"
+    assert got["flipT"] == 1900
+    assert got["progress"] == [0, 0, 0, pytest.approx(750 / (p2.TRANS_S * 1000))]
+
+
+_TAIL_HARNESS = r"""
+var rafQ = [], timers = [], done = [];
+global.requestAnimationFrame = function (f) { rafQ.push(f); };
+global.setTimeout = function (f, ms) { timers.push([f, ms]); };
+function flush() { var q = rafQ; rafQ = []; q.forEach(function (f) { f(); }); }
+function settled(tag) { return new Promise(function (r) { setImmediate(function () { r(done.slice()); }); }); }
+eval(%s).then(function () { done.push('settled'); });
+(async function () {
+  var steps = %s, out = {};
+  for (var i = 0; i < steps.length; i++) {
+    if (steps[i] === 'frame') flush();
+    if (steps[i] === 'timeout') timers.forEach(function (t) { t[0](); });
+    out[i] = await settled();
+  }
+  out.timeoutMs = timers.length ? timers[0][1] : null;
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+def _run_tail(steps: list[str]) -> dict:
+    harness = _TAIL_HARNESS % (json.dumps(p2.COLLECTOR_TRAILING_ROW_JS), json.dumps(steps))
+    out = subprocess.run(["node", "-e", harness], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_collector_tail_settles_after_two_frames_and_not_after_one():
+    """The last capture needs a collector row AFTER its frame to be bracketed."""
+    got = _run_tail(["frame", "frame"])
+    assert got["0"] == [], "settled after only one frame"
+    assert got["1"] == ["settled"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_collector_tail_settles_on_the_timeout_when_no_frame_comes():
+    got = _run_tail(["timeout"])
+    assert got["0"] == ["settled"]
+    assert got["timeoutMs"] == 1000
+
+
+def test_driver_awaits_the_collector_tail_before_dumping():
+    """The tail wait must be awaited (`await_promise=True`) and must precede the
+    one collector dump, or the last capture can go unbracketed."""
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(p2._advance_to_slide4_capture)))
+    evaluates = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Await) and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute) and node.value.func.attr == "evaluate"
+    ]
+    evaluates.sort(key=lambda n: (n.lineno, n.col_offset))
+    args = [ast.unparse(n.value.args[0]) for n in evaluates]
+    tail = args.index("COLLECTOR_TRAILING_ROW_JS")
+    dump = args.index("'window.__OBED_CAP_COLLECT__.dump()'")
+    assert tail < dump
+    assert all(a != "COLLECTOR_TRAILING_ROW_JS" for a in args[tail + 1:])
+    keywords = {k.arg: ast.unparse(k.value) for k in evaluates[tail].value.keywords}
+    assert keywords.get("await_promise") == "True"
