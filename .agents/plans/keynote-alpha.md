@@ -66,7 +66,7 @@ The findings, grouped:
   matching red-without-the-fix demonstration (`--disable-bridge34`).
 - **Freeze negative control** (`freezeControlCaughtByCounter`, Arm A): an A-B-A bracket on the MOVING
   3→4 Magic Move (re-bracketed off the static 1→2, whose carry the baseline refuses — there is no
-  carried movie to freeze there; see `.agents/plans/p2_freeze_control_3to4.plan.md`) injects a partial
+  carried movie to freeze there; see PR #187) injects a partial
   stale cover, re-tracked every rAF through the translate+scale, over the counter while the decoder stays LIVE, so
   `index_run` goes RED ("freeze run at cut") while rVFC stays green — isolating the RED to the counter,
   proving the gate is not vacuous. Two-tier scorer: hold-INTEGRITY failures → `inconclusive`;

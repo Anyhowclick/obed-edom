@@ -14,7 +14,7 @@ explicit request; Opus plans / Sonnet implements / Codex reviews; hands off Keyn
 | Research evidence | `output/gate-runner-archive/{research-harnesses,requal-paint-oracle,run_gates.sh}` (git-ignored, 2.0 GB). |
 
 ## GL-replay opacity fix — stage G2, offline half SHIPPED (#200)
-Plan `.agents/plans/keynote_live_gl_replay_opacity.plan.md` rev 2; owner accepted decisions 1–5 (arithmetic blend
+Plan: the opacity plan rev 2 (PR #200; removed from the tree 2026-09-23); owner accepted decisions 1–5 (arithmetic blend
 reference over a READ background + α=0 identity control; patch on air — it REMOVES the build-1 pop; tolerance = settled
 leaf rect / MVP ≤ 1 px / ablation ≤ grid+2 px; additive behind `OBED_LIVE_GL_REPLAY`; green ROI → `{800,690,330×90}`).
 Shipped: `_check_effect_encoding` (one recursive schema of validator combinators; unmeasured ⇒ refuse) and
