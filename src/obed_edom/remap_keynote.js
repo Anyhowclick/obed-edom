@@ -704,8 +704,17 @@ function geometryPathForSlide(n, asGeom, suppressGeometry) {
   return "jxa";
 }
 
+function countHides(specs) {
+  let n = 0;
+  for (let t = 0; t < specs.length; t++) {
+    if (specs[t].role === "hide") n += 1;
+  }
+  return n;
+}
+
 function applyNonReuseSlide(
-  doc, Keynote, n, transforms, collectionsOut, missReasons, asGeom, suppressGeometry
+  doc, Keynote, n, transforms, collectionsOut, missReasons, asGeom, suppressGeometry,
+  offlineHideSlides
 ) {
   const specs = transformsForSlide(transforms, n);
   let applied = 0;
@@ -743,6 +752,10 @@ function applyNonReuseSlide(
     if (TIMING) _trec("phase:jxaPos:slide" + n, _now() - _tp, null);
   }
   const _td = _now();
+  if (offlineHideSlides && offlineHideSlides.indexOf(n) !== -1) {
+    _stage("hides", _td);
+    return { applied: applied, missed: missed, hidesDeferred: countHides(specs) };
+  }
   const rd = deleteHides(doc.slides(), Keynote, specs, missReasons);
   _stage("hides", _td);
   if (TIMING) _trec("phase:deleteHides:slide" + n, _now() - _td, null);
@@ -767,6 +780,7 @@ function run(argv) {
   const transforms = plan.transforms || [];
   const asGeom = plan.asGeom || null;
   const suppressGeometry = plan.suppressGeometry || null;
+  const offlineHideSlides = plan.offlineHideSlides || null;
   const width = Number(plan.width) || 1920;
   const height = Number(plan.height) || 1080;
   const collections = {};
@@ -825,15 +839,18 @@ function run(argv) {
   const order = slidesInPlan(transforms);
   let appliedFirst = 0;
   let missedFirst = 0;
+  let hidesDeferred = 0;
   for (let i = 0; i < order.length; i++) {
     const n = order[i];
     const rn = applyNonReuseSlide(
-      doc, Keynote, n, transforms, collections, missReasons, asGeom, suppressGeometry
+      doc, Keynote, n, transforms, collections, missReasons, asGeom, suppressGeometry,
+      offlineHideSlides
     );
     appliedFirst += rn.applied;
     missedFirst += rn.missed;
+    hidesDeferred += rn.hidesDeferred || 0;
   }
-  if (appliedFirst === 0) {
+  if (appliedFirst === 0 && hidesDeferred === 0) {
     try {
       Keynote.close(doc, { saving: "no" });
     } catch (eAbort) {}
@@ -842,6 +859,7 @@ function run(argv) {
       dest: plan.dest,
       applied: 0,
       missed: missedFirst,
+      hidesDeferred: hidesDeferred,
       width: actualWidth,
       height: actualHeight,
       sizeProp: sizeProp,
@@ -895,6 +913,7 @@ function run(argv) {
     dest: plan.dest,
     applied: appliedFirst,
     missed: missedFirst,
+    hidesDeferred: hidesDeferred,
     width: actualWidth,
     height: actualHeight,
     sizeProp: sizeProp,
@@ -926,6 +945,7 @@ if (typeof module !== "undefined" && module.exports) {
     writesAttrs: writesAttrs,
     slidesInPlan: slidesInPlan,
     applyNonReuseSlide: applyNonReuseSlide,
+    run: run,
     _stage: _stage,
     _resetStages: _resetStages,
     STAGES: STAGES,

@@ -212,13 +212,41 @@ def offline_maskcrop_enabled(
     return True
 
 
-def _debug_snapshot_pass1(dest: Path, say: Callable[[str], None] | None = None) -> None:
+def offline_hides_mode(
+    explicit: str | None = None, *, offline_mode: str | None = None,
+    say: Callable[[str], None] | None = None,
+) -> str:
+    """`off` (default, pass 1 deletes hides in Keynote), `on` (pass 1 defers the hides of
+    eligible slides; the IWA writer deletes them after the save) or `verify` (plus a
+    whole-deck reference check). Env `OBED_OFFLINE_HIDES`; unknown tokens fall back to
+    `off`. Forced `off` when `offline_mode` is `off` (kill switch; also covers a missing
+    `iwa` extra via `probe_iwa_extra`)."""
+    raw = (explicit if explicit is not None else os.environ.get("OBED_OFFLINE_HIDES", "")).strip().lower()
+    if raw in {"", "off"}:
+        return "off"
+    if raw not in {"on", "verify"}:
+        if say:
+            say(f"Unknown OBED_OFFLINE_HIDES value {raw!r}; forcing offline hides off.")
+        return "off"
+    if offline_mode == "off":
+        if say:
+            say(f"OBED_OFFLINE_HIDES={raw!r} needs OBED_OFFLINE_WRITE on; forcing offline hides off.")
+        return "off"
+    return raw
+
+
+def _debug_snapshot_pass1(
+    dest: Path, say: Callable[[str], None] | None = None, *, variant: str | None = None,
+) -> None:
     """Diagnostic: when `OBED_DEBUG_PASS1_SNAPSHOT` is a path, copy the pass-1-saved deck
     there for an offline `naturalSize` census (the owner-gated text experiment's conversion
-    ceiling). No-op otherwise; never fails the run."""
+    ceiling); `variant` writes `<stem>.<variant>.key` beside it instead. No-op otherwise;
+    never fails the run."""
     target = os.environ.get("OBED_DEBUG_PASS1_SNAPSHOT", "").strip()
     if not target:
         return
+    if variant:
+        target = str(Path(target).with_name(f"{Path(target).stem}.{variant}.key"))
     try:
         import shutil  # noqa: PLC0415
 
@@ -1543,6 +1571,14 @@ def remap_keynote(
                 "offline (surgical IWA patch)."
             )
         suppressed = env_suppressed | offline_slides
+        hides_mode = offline_hides_mode(offline_mode=offline_mode, say=say)
+        hide_slides: set[int] = set()
+        if hides_mode != "off":
+            hide_slides = offline_write.offline_hide_slides(transform_dicts, wall, wanted)
+            say(
+                f"OBED_OFFLINE_HIDES={hides_mode}: {len(hide_slides)} slide(s) defer their "
+                "hides to the offline delete after the pass-1 save."
+            )
         plan: dict[str, Any] = {
             "dest": str(dest),
             "template": str(layout_src),
@@ -1567,6 +1603,8 @@ def remap_keynote(
         if wanted:
             plan["slides"] = wanted
             plan["range"] = [wanted[0], wanted[-1]]
+        if hides_mode != "off":
+            plan["offlineHideSlides"] = sorted(hide_slides)
         if write_timing_enabled():
             plan["timing"] = {"slowMs": 120}
             say("OBED_WRITE_TIMING on: recording per-slide/per-phase write timing.")
@@ -1608,9 +1646,10 @@ def remap_keynote(
         _say_write_timing(jxa["timing"], say)
     applied = int(jxa.get("applied") or 0)
     missed = int(jxa.get("missed") or 0)
+    hides_deferred = int(jxa.get("hidesDeferred") or 0)
     if jxa.get("collections"):
         say(f"Keynote collections: {jxa.get('collections')}")
-    if applied == 0:
+    if applied + hides_deferred == 0:
         detail = ""
         if jxa.get("collections"):
             detail += f" collections={jxa.get('collections')}"
@@ -1620,7 +1659,6 @@ def remap_keynote(
             "Keynote remap moved 0 objects; the copy was left at the wall canvas size."
             f" Planned {len(transforms)} transform(s), missed {missed}.{detail}"
         )
-    say(f"Applied {applied}, missed {missed}.")
     for reason in jxa.get("missReasons") or []:
         say(f"WARNING remap: {reason}")
     layouts = jxa.get("layouts") or {}
@@ -1634,6 +1672,21 @@ def remap_keynote(
             f"{len(applied_layouts)} slide(s)."
         )
     _require_pass1_saved_closed(jxa)
+    expected_deferred = sum(
+        1 for t in transform_dicts if t.get("role") == "hide" and int(t.get("slide", -1)) in hide_slides
+    )
+    if hides_deferred != expected_deferred:
+        raise RuntimeError(
+            f"pass 1 deferred {hides_deferred} hide(s), expected {expected_deferred} on "
+            f"slide(s) {sorted(hide_slides)}; refusing to delete hides by position."
+        )
+    hides_info = offline_write.run_offline_hides(
+        dest, hides_mode, hide_slides, transform_dicts, wall, say,
+    )
+    if hides_info is not None:
+        applied += hides_info["deleted"]
+        missed += hides_info["missed"]
+    say(f"Applied {applied}, missed {missed}.")
     _debug_snapshot_pass1(dest, say)
     text_reposition = offline_text_reposition_enabled(offline_mode=offline_mode, say=say)
     mask_crop = offline_maskcrop_enabled(offline_mode=offline_mode, say=say)
@@ -1832,6 +1885,8 @@ def remap_keynote(
     }
     if offline_write_info is not None:
         result["offlineWrite"] = offline_write_info
+    if hides_info is not None:
+        result["offlineHides"] = hides_info
     if zorder_mode != "off":
         merged_zorder = dict(zorder_write_info) if zorder_write_info is not None else {
             "mode": zorder_mode, "slides": [], "zorderSlides": 0, "zorderStatRaised": 0,
