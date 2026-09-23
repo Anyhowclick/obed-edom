@@ -3761,7 +3761,7 @@ class TestArmedScoring:
     knowing is False, never None."""
 
     def test_the_r3_two_pooled_shape_is_green(self) -> None:
-        scored = probe.score_armed(_armed_reads(), ARMED, json.loads(json.dumps(GL_CONTINUITY)))
+        scored = probe.score_armed(_armed_reads(), ARMED, json.loads(json.dumps(GL_CONTINUITY)), owner_ids=[1, 1])
         assert scored["verdict"] is True, scored
         assert all(scored["checks"].values())
 
@@ -3770,7 +3770,7 @@ class TestArmedScoring:
         clause, mutate = ARMED_CLAUSE_MUTATIONS[name]
         reads, continuity = _armed_reads(), json.loads(json.dumps(GL_CONTINUITY))
         mutate(reads, continuity)
-        scored = probe.score_armed(reads, ARMED, continuity)
+        scored = probe.score_armed(reads, ARMED, continuity, owner_ids=[1, 1])
         assert scored["verdict"] is False
         assert {key for key, ok in scored["checks"].items() if not ok} == {clause}
 
@@ -3778,13 +3778,13 @@ class TestArmedScoring:
         reads = _armed_reads()
         for read in reads:
             _events_without(read, "glreplay-carried")
-        scored = probe.score_armed(reads, ARMED, GL_CONTINUITY)
+        scored = probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[1, 1])
         assert scored["verdict"] is False
         assert not scored["checks"]["events"] and not scored["checks"]["pool"]
 
     @pytest.mark.parametrize("reads", [None, [], "x", [_armed_read(1000.0, 10, 5.0)], [{"glReplay": None}, {"glReplay": None}]])
     def test_missing_reads_are_false_never_none(self, reads: Any) -> None:
-        scored = probe.score_armed(reads, ARMED, GL_CONTINUITY)
+        scored = probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[1, 1])
         assert scored["verdict"] is False
 
     def test_the_r3_forced_shape_is_red(self) -> None:
@@ -3793,13 +3793,21 @@ class TestArmedScoring:
             _gl(read)["api"].update(state="RETIRED", standDowns=["posterAmbiguous"])
             _events_without(read, "glreplay-live")
             _gl(read)["coreEvents"].append(_ev("glreplay-zone", **{"from": "armed"}, to="retired", reason="moduleRetired"))
-        scored = probe.score_armed(reads, ARMED, GL_CONTINUITY)
+        scored = probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[1, 1])
         assert scored["verdict"] is False
         assert not scored["checks"]["live"] and not scored["checks"]["events"]
 
     def test_positive_halves_score_the_armed_boundary_for_an_armed_set(self) -> None:
         scored = probe.score_positive_halves({"armed1to2": _armed_reads()}, {"retire": None, "armed": ARMED}, True, GL_CONTINUITY)
-        assert list(scored) == ["armed1to2"] and scored["armed1to2"]["verdict"] is True
+        assert list(scored) == ["armed1to2"] and scored["armed1to2"]["checks"]["owner"] is False
+        samples = [{"scene": 1, "videos": [
+            {"src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 1}},
+            {"src": "untitled.mov", "rect": dict(SMALL_INSTANCE), "footprintOwner": {"elId": 2}},
+        ]}, {"scene": 2, "videos": [{"src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 2}}]}]
+        scored = probe.score_positive_halves(
+            {"armed1to2": _armed_reads()}, {"retire": None, "armed": ARMED}, True, GL_CONTINUITY, samples,
+        )
+        assert scored["armed1to2"]["verdict"] is True, scored
 
     def test_positive_halves_are_todays_refusals_for_the_off_set(self) -> None:
         retire = probe.retire_fact(synthetic_plan(), RETIRED_RUNTIME, BOUNDARY_KEYS)
@@ -3926,7 +3934,7 @@ class TestHandbackScoring:
         (lambda r: r["painting"][0]["rect"].update(x=r["painting"][0]["rect"]["x"] + 1.0), "painting"),
         (lambda r: r["painting"].append(dict(r["painting"][0])), "painting"),
         (lambda r: r.update(painting={"error": "x"}), "painting"),
-        (lambda r: r["after"]["coreEvents"][1]["detail"].update(mode="retire"), "release"),
+        (lambda r: r["after"]["coreEvents"][1]["detail"].update(mode="retire"), "release+handoff"),
         (lambda r: r["after"]["coreEvents"][1]["detail"].update(retired=[]), "release"),
         (lambda r: r["before"].update(pool={"error": "x"}), "release"),
         (lambda r: r["after"]["coreEvents"].append(_ev("remount-done", elId=1)), "noRemount"),
@@ -3937,7 +3945,7 @@ class TestHandbackScoring:
         mutate(record)
         scored = self._score(g_rec=record)
         assert scored["verdict"] is False
-        assert {key for key, ok in scored["carry"]["checks"].items() if not ok} == {check}
+        assert {key for key, ok in scored["carry"]["checks"].items() if not ok} == set(check.split("+"))
 
     def test_a_remount_of_an_unrelated_decoder_is_irrelevant(self) -> None:
         record = _hb_vgl_record()
@@ -4381,3 +4389,97 @@ class TestForcedFailScoring:
     ])
     def test_every_deviation_is_forced_fail(self, override: dict[str, Any]) -> None:
         assert self._score(**override)["status"] == "forced-fail"
+
+
+class TestCodexR1ProbeFixes:
+    """Codex r1 (stream P): each finding's known-bad, forced."""
+
+    def test_a_substituted_sibling_is_red_on_the_owner_clause_alone(self) -> None:
+        """The note names the sibling (2) and the sibling's clock runs plausibly,
+        but the decoder that owned the footprint before the flip was 1."""
+        reads = _armed_reads()
+        for read in reads:
+            _set_detail(read, "glreplay-carried", elId=2)
+        _gl(reads[0])["pool"][1]["currentTime"] = 3.0
+        _gl(reads[1])["pool"][1]["currentTime"] = 3.6
+        scored = probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[1, 1])
+        assert scored["verdict"] is False
+        assert {k for k, ok in scored["checks"].items() if not ok} == {"owner"}
+        assert probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[2, 2])["verdict"] is True
+
+    @pytest.mark.parametrize("owners", [None, [], [1, None], [1, 2]])
+    def test_missing_or_mixed_owners_are_red(self, owners: Any) -> None:
+        scored = probe.score_armed(_armed_reads(), ARMED, GL_CONTINUITY, owner_ids=owners)
+        assert {k for k, ok in scored["checks"].items() if not ok} == {"owner"}
+
+    def test_pre_flip_owners_read_only_the_instance_rect_before_the_flip(self) -> None:
+        samples = [
+            {"scene": 0, "videos": [{"src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 1}}]},
+            {"scene": 1, "videos": [{"src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": None}]},
+            {"scene": 1, "videos": [{"src": "other.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 9}}]},
+            {"scene": 2, "videos": [{"src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 7}}]},
+        ]
+        assert probe.pre_flip_owner_ids(samples, ARMED) == [1, None]
+
+    def test_a_setup_time_system_exit_stamps_forced_fail(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        def boom(*a: Any, **k: Any) -> Any:
+            raise SystemExit("fixture does not derive a continuity plan")
+
+        monkeypatch.setattr(probe, "prepare_export", boom)
+        artifact = tmp_path / "forced.json"
+        args = probe.parse_args(["--gl-replay", "auto", "--gl-force-fail", "posterAmbiguous", "--artifact", str(artifact)])
+        probe.run_forced_fail_cli(args)
+        saved = json.loads(artifact.read_text())
+        assert saved["status"] == "forced-fail"
+        assert "does not derive" in saved["error"]
+
+    def test_readiness_never_accepts_a_stand_down_for_the_hand_off(self) -> None:
+        read = _hb_read("#3")
+        read["api"]["events"].append(_ev("glreplay-standdown", reason="glError"))
+        read["coreEvents"].append(_ev("glreplay-release", mode="retire"))
+        assert probe._handback_ready(read, 3, True) is False
+        assert probe._handback_ready(_hb_read("#3", handoff=True), 3, True) is True
+        twice = _hb_read("#3", handoff=True)
+        twice["api"]["events"].append(_ev("glreplay-handoff"))
+        assert probe._handback_ready(twice, 3, True) is False
+        retire = _hb_read("#3", handoff=True)
+        retire["coreEvents"][0]["detail"]["mode"] = "retire"
+        assert probe._handback_ready(retire, 3, True) is False
+
+    def test_final_scoring_requires_the_module_hand_off(self) -> None:
+        record = _hb_vgl_record()
+        record["after"]["api"]["events"] = [_ev("glreplay-standdown", reason="glError")]
+        v, g = _hb_frames()
+        scored = probe.score_handback(_hb_v_record(), v, record, g, ARMED)
+        assert scored["verdict"] is False
+        assert {k for k, ok in scored["carry"]["checks"].items() if not ok} == {"handoff"}
+
+    @pytest.mark.parametrize("value", ["#3junk", "#3-1", " #3", "#", "3.0", None])
+    def test_hash_numbers_full_match(self, value: Any) -> None:
+        assert probe.hash_number(value) is None
+
+    def test_a_malformed_hash_is_red_in_armed_scoring(self) -> None:
+        reads = _armed_reads()
+        _gl(reads[1]).update(hash="#2junk")
+        failing = {k for k, ok in probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[1, 1])["checks"].items() if not ok}
+        assert failing == {"live"}
+        reads = _armed_reads()
+        for read in reads:
+            _set_detail(read, "glreplay-arm", sceneHash="#1junk")
+        failing = {k for k, ok in probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[1, 1])["checks"].items() if not ok}
+        assert failing == {"events"}
+
+    def test_a_malformed_hash_never_captures_a_hand_back(self) -> None:
+        clock = FakeClock()
+        host = ArmedHost([_hb_read("#2"), _hb_read("#3junk")])
+        record, frame = probe.capture_handback(host, ARMED, expect_handoff=False, now=clock.now, sleep=clock.sleep)
+        assert record["status"] == "inconclusive" and frame is None and host.transport.captures == 0
+
+    def test_an_unknown_reason_is_forced_fail_even_when_otherwise_green(self) -> None:
+        scored = probe.score_forced(
+            v_pass=_forced_pass([True] * 4), g_pass=_forced_pass([True] * 4), refusal={"verdict": True},
+            g_handback=_forced_after("bogusReason"), parity={"verdict": True}, reason="bogusReason",
+            splice={"splices": 1},
+        )
+        assert scored["status"] == "forced-fail"
+        assert {k for k, ok in scored["checks"].items() if not ok} == {"knownReason"}

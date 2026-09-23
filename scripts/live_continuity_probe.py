@@ -1446,7 +1446,7 @@ def score_refusals(
 
 
 def hash_number(value: Any) -> int | None:
-    match = re.match(r"^#?(\d+)", str(value or ""))
+    match = re.fullmatch(r"#?(\d+)", str(value or ""))
     return int(match.group(1)) if match else None
 
 
@@ -1599,13 +1599,32 @@ def _armed_pool(states: list[dict[str, Any]], armed: dict[str, Any], carried: An
     return (c1 > c0 and low <= rate <= high), {"clock": clock, "rate": rate}
 
 
-def score_armed(reads: Any, armed: dict[str, Any], continuity: Any) -> dict[str, Any]:
+def pre_flip_owner_ids(samples: list[dict[str, Any]], armed: dict[str, Any]) -> list[Any]:
+    """Every footprint owner the runtime resolved for the movie at its instance rect
+    before the flip (authored samples with `scene < atScene`); an unresolved owner is
+    recorded as None."""
+    owners: list[Any] = []
+    for sample in samples or []:
+        scene = sample.get("scene")
+        if not isinstance(scene, (int, float)) or scene >= armed["atScene"]:
+            continue
+        for video in sample.get("videos") or []:
+            if matches_asset_keys(video.get("src"), armed["assetKeys"]) and rect_matches(video.get("rect"), armed["instanceRect"]):
+                owner = video.get("footprintOwner")
+                owners.append(owner.get("elId") if isinstance(owner, dict) else None)
+    return owners
+
+
+def score_armed(
+    reads: Any, armed: dict[str, Any], continuity: Any, *, owner_ids: Any = None
+) -> dict[str, Any]:
     """The armed 1->2 verdict (plan g5g6 §3.3), True iff all five clauses hold on
     two settled reads: the pinned module injected; LIVE on both reads with the loop
     progressing in one epoch; exactly the arm/live/zone/carried notes of a clean arm;
     no painting `<video>` over the movie; and the pool is {carried} plus siblings,
-    out of the document, the carried clock running in real time. Missing is False."""
-    checks = {"mode": False, "live": False, "events": False, "noPainting": False, "pool": False}
+    out of the document, the carried clock running in real time. Every pre-flip
+    footprint owner must be that single carried decoder. Missing is False."""
+    checks = {"mode": False, "live": False, "events": False, "noPainting": False, "pool": False, "owner": False}
     detail: dict[str, Any] = {}
     gl = continuity.get("glReplay") if isinstance(continuity, dict) else None
     checks["mode"] = (
@@ -1620,7 +1639,11 @@ def score_armed(reads: Any, armed: dict[str, Any], continuity: Any) -> dict[str,
         checks["live"], detail["live"] = _armed_live(states, armed)
         checks["events"], detail["events"] = _armed_events(states[-1], armed)
         checks["noPainting"], detail["paintingOverRect"] = _armed_no_painting(reads, armed)
-        checks["pool"], detail["pool"] = _armed_pool(states, armed, _carried_el_id(states[-1]))
+        carried = _carried_el_id(states[-1])
+        checks["pool"], detail["pool"] = _armed_pool(states, armed, carried)
+        owners = list(owner_ids) if isinstance(owner_ids, list) else []
+        checks["owner"] = carried is not None and bool(owners) and all(o == carried for o in owners)
+        detail["preFlipOwners"] = sorted({str(o) for o in owners})
     else:
         detail["reason"] = "the armed slide was not read twice"
     failing = [name for name, ok in checks.items() if not ok]
@@ -1631,13 +1654,16 @@ def score_armed(reads: Any, armed: dict[str, Any], continuity: Any) -> dict[str,
 
 
 def score_positive_halves(
-    evidence: dict[str, Any], facts: dict[str, Any], runtime_installed: bool, continuity: Any
+    evidence: dict[str, Any], facts: dict[str, Any], runtime_installed: bool, continuity: Any,
+    samples: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """`score_refusals` plus, for an armed fact set, its `armed1to2`."""
     scored = score_refusals(evidence, facts, runtime_installed)
     armed = facts.get("armed")
     if armed:
-        scored[armed["verdictKey"]] = score_armed(evidence.get(armed["verdictKey"]), armed, continuity)
+        scored[armed["verdictKey"]] = score_armed(
+            evidence.get(armed["verdictKey"]), armed, continuity, owner_ids=pre_flip_owner_ids(samples or [], armed),
+        )
     return scored
 
 
@@ -1683,7 +1709,7 @@ def run_arm(
         result["stageFit"] = score_stage_fit(samples, expected_stage)
         runtime_installed = result["continuity"].get("mode") == "qualified"
         result.update(score_boundaries(samples, arm_facts, runtime_installed))
-        result.update(score_positive_halves(evidence, arm_facts, runtime_installed, result["continuity"]))
+        result.update(score_positive_halves(evidence, arm_facts, runtime_installed, result["continuity"], samples))
     finally:
         try:
             player.stop()
@@ -1785,7 +1811,7 @@ def run_attach_arm(
                 result["stageFit"] = score_stage_fit(samples, expected_stage)
                 runtime_installed = result["continuity"].get("mode") == "qualified"
                 result.update(score_boundaries(samples, attach_facts, runtime_installed))
-                result.update(score_positive_halves(evidence, attach_facts, runtime_installed, result["continuity"]))
+                result.update(score_positive_halves(evidence, attach_facts, runtime_installed, result["continuity"], samples))
             finally:
                 try:
                     player.stop()
@@ -2476,8 +2502,18 @@ def _handback_ready(read: Any, target: int, expect_handoff: bool) -> bool:
         return False
     if not expect_handoff:
         return True
-    ended = _notes(read, "glreplay-handoff", "api") or _notes(read, "glreplay-standdown", "api")
-    return bool(ended) and bool(_notes(read, "glreplay-release"))
+    return _handed_off(read)
+
+
+def _handed_off(read: Any) -> bool:
+    """Exactly one module `glreplay-handoff` and exactly one runtime release, a hand-off."""
+    if not isinstance(read, dict):
+        return False
+    releases = _notes(read, "glreplay-release")
+    return (
+        len(_notes(read, "glreplay-handoff", "api")) == 1
+        and len(releases) == 1 and releases[0].get("mode") == "handoff"
+    )
 
 
 def capture_handback(
@@ -2612,10 +2648,11 @@ def score_handback_carry(record: Any, armed: dict[str, Any]) -> dict[str, Any]:
     """Vgl after build 1: the carried decoder alone paints movie1 at its authored
     rect, the release was a hand-off retiring exactly the siblings, and neither it
     nor its facade was ever remounted to the stage or footprint."""
-    checks = {"painting": False, "release": False, "noRemount": False}
+    checks = {"painting": False, "release": False, "noRemount": False, "handoff": False}
     detail: dict[str, Any] = {}
     record = record if isinstance(record, dict) else {}
     after = record.get("after") if isinstance(record.get("after"), dict) else {}
+    checks["handoff"] = _handed_off(after)
     before = record.get("before") if isinstance(record.get("before"), dict) else {}
     carried = _carried_el_id(after)
     stage_map = record.get("stageMap")
@@ -2729,6 +2766,7 @@ def score_forced(
         ),
         "noLive": after is not None and not _notes(after, "glreplay-live") and not _notes(after, "glreplay-live", "api"),
         "parity": isinstance(parity, dict) and parity.get("verdict") is True,
+        "knownReason": reason in GL_FORCE_FAIL_REASONS,
     }
     failing = [key for key, ok in checks.items() if not ok]
     return {"status": "forced-fail" if failing else "forced-ok", "checks": checks, "reason": f"failed {failing}" if failing else None}
@@ -3736,7 +3774,7 @@ def run_forced_fail_cli(args: argparse.Namespace) -> None:
     save()
     try:
         result.update(run_forced_fail(args))
-    except Exception as exc:  # noqa: BLE001 - always leave a readable artifact behind
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - always leave a readable artifact behind
         result["status"] = "forced-fail"
         result["error"] = str(exc)
     finally:

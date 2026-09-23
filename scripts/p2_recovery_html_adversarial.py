@@ -488,6 +488,19 @@ def _out_root(gl_auto: bool) -> Path:
     return OUT / GL_REPLAY_DIR if gl_auto else OUT
 
 
+def _unmodified_export(root: Path, *, reuse: bool, gl_auto: bool) -> Path:
+    """The export every strip/patch step runs on. Auto with `--reuse-export` works on
+    a private copy under `root`: the strip rewrites in place, and the shared
+    `OUT/html-unmodified` is the next flag-off run's input."""
+    if not (reuse and gl_auto):
+        return root / "html-unmodified"
+    copy = root / "html-unmodified"
+    if copy.exists():
+        shutil.rmtree(copy)
+    shutil.copytree(OUT / "html-unmodified", copy)
+    return copy
+
+
 def _gl_info_js(canvas: dict) -> str:
     width, height = int(canvas["width"]), int(canvas["height"])
     return (
@@ -598,9 +611,17 @@ def _gl_boot_ok(check: object) -> bool:
 
 
 def _sample_frame_index_roi(width: int, height: int) -> tuple[int, int, int, int]:
-    """The counter patch inside a `sampleFrame` JPEG: the top-left 120x48 of the
-    1920x540 source, inset off the grating edge and the JPEG block it rings into."""
-    return (2, 1, max(1, round(width * 120 / 1920) - 6), max(1, round(height * 48 / 540) - 3))
+    """INDEX_PATCH_ROI's insets, as fractions of the on-screen counter patch it sits
+    in (the top-left 120x48 of the 1920x540 source), applied to a `sampleFrame`
+    image. Live calibration is G6-0 (A7)."""
+    screen_w, screen_h = MOVIE_ROI[2] * 120 / 1920, MOVIE_ROI[3] * 48 / 540
+    patch_w, patch_h = width * 120 / 1920, height * 48 / 540
+    return (
+        round((INDEX_PATCH_ROI[0] - MOVIE_ROI[0]) / screen_w * patch_w),
+        round((INDEX_PATCH_ROI[1] - MOVIE_ROI[1]) / screen_h * patch_h),
+        max(1, round(INDEX_PATCH_ROI[2] / screen_w * patch_w)),
+        max(1, round(INDEX_PATCH_ROI[3] / screen_h * patch_h)),
+    )
 
 
 def _sample_frame_index(frame: object, save_to: Path | None = None) -> int | None:
@@ -3143,7 +3164,7 @@ async def _run(player: Path) -> dict:
         },
     )
 
-    unmodified = (OUT if reuse else root) / "html-unmodified"
+    unmodified = _unmodified_export(root, reuse=reuse, gl_auto=gl_auto)
     disposable_dir = root / "html-disposable"
     player_dir = root / "html-player"
     if reuse:
@@ -3421,6 +3442,7 @@ async def _run(player: Path) -> dict:
         }
         gl_state_s2 = await chrome.evaluate(GL_STATE_JS) if gl_auto else None
         gl_slide2_reads = await _gl_slide2_reads(chrome, run_dir) if gl_auto else None
+        gl_states_s2 = [gl_state_s2, await chrome.evaluate(GL_STATE_JS)] if gl_auto else None
         await _ensure_videos_playing(chrome)
         media_mid = await _media_snapshot_with_pool(chrome)
         h_mid = _norm_hash(
@@ -4129,6 +4151,7 @@ async def _run(player: Path) -> dict:
             flip_index,
             [r.get("frameIndex") for r in gl_slide2_reads],
             [f.get("decoderId") for f in dense_frames_a[:flip_index]] if flip_index is not None else [],
+            gl_states_s2,
             gl_state_after,
             hash1,
             hash2,
@@ -4140,7 +4163,7 @@ async def _run(player: Path) -> dict:
             "status": "failed-by-player" if player_build_errors else None,
             "detail": {
                 "glReplayCarry1to2": gl_carry,
-                "glStateOnSlide2": gl_state_s2,
+                "glStatesOnSlide2": gl_states_s2,
                 "glStateAfterDrain": gl_state_after,
                 "glCarryCensus": gl_carry_census,
                 "glSlide2Reads": gl_slide2_reads,
@@ -4280,7 +4303,7 @@ async def _run(player: Path) -> dict:
             "mode": "auto",
             "inject": gl_inject,
             "glReplayCarry1to2": gl_carry,
-            "stateOnSlide2": gl_state_s2,
+            "statesOnSlide2": gl_states_s2,
             "stateAfterDrain": gl_state_after,
             "carryCensus": gl_carry_census,
             "slide2Reads": gl_slide2_reads,

@@ -1239,6 +1239,45 @@ def glCarryCensusVerdict(census: object, carried_el_id: object) -> dict:
     }
 
 
+def glLiveOnSlide2(states: object, *, min_reads: int = 2) -> dict:
+    """The module is LIVE at settled slide 2 itself, not merely once: at least
+    `min_reads` state reads, each `LIVE` with no stand-downs, `loopMode == "rvfc"`,
+    zero GL errors, one epoch, and `iter`/`uploads` strictly increasing."""
+    reads = states if isinstance(states, list) else []
+    problems = []
+    if len(reads) < min_reads:
+        problems.append(f"{len(reads)} slide-2 state reads, need {min_reads}")
+    stats = []
+    for i, r in enumerate(reads):
+        st = r.get("stats") if isinstance(r, dict) and isinstance(r.get("stats"), dict) else None
+        if st is None:
+            problems.append(f"state read {i} missing")
+            continue
+        if r.get("state") != "LIVE":
+            problems.append(f"state read {i} is {r.get('state')!r}")
+        if r.get("standDowns") != []:
+            problems.append(f"state read {i} stand-downs {r.get('standDowns')!r}")
+        if st.get("loopMode") != "rvfc":
+            problems.append(f"state read {i} loopMode {st.get('loopMode')!r}")
+        if st.get("glErrors") != 0:
+            problems.append(f"state read {i} glErrors {st.get('glErrors')!r}")
+        stats.append(st)
+    if len(stats) == len(reads) and len(stats) >= 2:
+        if len({s.get("epoch") for s in stats}) != 1:
+            problems.append("epoch changed across slide-2 reads")
+        for field in ("iter", "uploads"):
+            vals = [_finite(s.get(field)) for s in stats]
+            if any(x is None for x in vals) or not all(b > a for a, b in zip(vals, vals[1:])):
+                problems.append(f"{field} not strictly increasing: {vals!r}")
+    return {
+        "ok": not problems,
+        "problems": problems,
+        "reads": [
+            {k: s.get(k) for k in ("epoch", "iter", "uploads", "glErrors", "loopMode")} for s in stats
+        ],
+    }
+
+
 def _gl_zone_handoff_verdict(
     preserve_events: list[dict],
     carried_el_id: object,
@@ -1301,6 +1340,7 @@ def glReplayCarry1to2(
     flip_index: int | None,
     sample_frame_indices: list,
     pre_flip_owner_ids: list,
+    gl_states_s2: object,
     gl_state_after: object,
     hash1: object,
     hash2: object,
@@ -1316,11 +1356,11 @@ def glReplayCarry1to2(
     `fallback == "retire"`; (b) zone exactly `pending->armed moduleReady,
     armed->released handoff`, one arm at `#at_scene-1`, one live, one carried
     (delta <= `max_delta`), one `handoff` release that retired exactly the pooled
-    siblings, and no refusal note for the key at `#at_scene`; (c) the split carry
+    siblings, no refusal note for the key at `#at_scene`, and `glLiveOnSlide2`; (c) the split carry
     census; (d) every slide-2 pool read; (e) nothing painting over the slide-1/2
     footprints on settled slide 2; (f) `progressingIndexAfterFlip`; (g)
     `carriedClock1to2`; (h) after build 1 the module RETIRED on `canvasRemoved`
-    alone, a valid forward 1->2 hash and no player build error."""
+    alone, the hash exactly `#at_scene-1 -> #at_scene` and no player build error."""
     boundaries = (injected_plan or {}).get("boundaries") or []
     entry = next(
         (
@@ -1348,11 +1388,12 @@ def glReplayCarry1to2(
     state = gl_state_after if isinstance(gl_state_after, dict) else {}
     from_n = _strict_hash_num(hash1)
     to_n = _strict_hash_num(hash2)
-    hash_ok = from_n is not None and to_n is not None and to_n > from_n and to_n >= at_scene
+    hash_ok = from_n == at_scene - 1 and to_n == at_scene
+    live = glLiveOnSlide2(gl_states_s2)
     retired_ok = state.get("standDowns") == [GL_HANDOFF_STAND_DOWN] and state.get("state") == "RETIRED"
     clauses = {
         "a": entry is not None,
-        "b": zone["ok"],
+        "b": bool(zone["ok"] and live["ok"]),
         "c": census["ok"],
         "d": pool["ok"],
         "e": no_painting,
@@ -1364,7 +1405,7 @@ def glReplayCarry1to2(
     if not clauses["a"]:
         reasons.append("(a) no glReplay retire-fallback entry for the target key")
     if not clauses["b"]:
-        reasons.append("(b) " + "; ".join(zone["problems"]))
+        reasons.append("(b) " + "; ".join(zone["problems"] + live["problems"]))
     if not clauses["c"]:
         reasons.append("(c) " + str(census.get("reason")))
     if not clauses["d"]:
@@ -1391,6 +1432,7 @@ def glReplayCarry1to2(
         "planEntry": entry,
         "carriedElId": carried_el_id,
         "zone": zone,
+        "liveOnSlide2": live,
         "carryCensus": census,
         "poolReads": pool,
         "paintingCount": painting,

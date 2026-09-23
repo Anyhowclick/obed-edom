@@ -133,6 +133,18 @@ def _index_samples() -> list[dict]:
     return pre + post
 
 
+def _live_state(it=100, up=90, **over):
+    stats = {"epoch": 1, "iter": it, "uploads": up, "glErrors": 0, "loopMode": "rvfc"}
+    stats.update(over.pop("stats", {}))
+    state = {"state": "LIVE", "standDowns": [], "stats": stats, "sceneHash": "#2"}
+    state.update(over)
+    return state
+
+
+def _live_states():
+    return [_live_state(), _live_state(it=160, up=150)]
+
+
 def _gl_args(**over) -> dict:
     reads = _pool_reads()
     args = {
@@ -145,6 +157,7 @@ def _gl_args(**over) -> dict:
         "flip_index": 3,
         "sample_frame_indices": [r["frameIndex"] for r in reads],
         "pre_flip_owner_ids": [CARRIED, None, CARRIED],
+        "gl_states_s2": _live_states(),
         "gl_state_after": {"state": "RETIRED", "standDowns": ["canvasRemoved"]},
         "hash1": "#1",
         "hash2": "#2",
@@ -238,6 +251,27 @@ def _set_detail(i, **kw):
 )
 def test_gl_carry_b_each_zone_or_seam_defect_is_red_alone(mutate):
     _only_red(_gl(preserve_events=_events_with(mutate)), "b")
+
+
+@pytest.mark.parametrize(
+    "states",
+    [
+        pytest.param([_live_state()], id="one-read"),
+        pytest.param(None, id="no-reads"),
+        pytest.param([_live_state(), _live_state(state="RETIRED", it=160, up=150)], id="not-live"),
+        pytest.param([_live_state(), _live_state(standDowns=["contextLost"], it=160, up=150)], id="stand-down"),
+        pytest.param([_live_state(), _live_state(it=160, up=150, stats={"loopMode": "raf"})], id="not-rvfc"),
+        pytest.param([_live_state(), _live_state(it=160, up=150, stats={"glErrors": 1})], id="gl-error"),
+        pytest.param([_live_state(), _live_state(it=160, up=150, stats={"epoch": 2})], id="epoch-changed"),
+        pytest.param([_live_state(), _live_state(it=100, up=150)], id="iter-stalled"),
+        pytest.param([_live_state(), _live_state(it=160, up=90)], id="uploads-stalled"),
+        pytest.param([_live_state(), {"state": "LIVE", "standDowns": []}], id="stats-missing"),
+    ],
+)
+def test_gl_carry_b_needs_the_module_live_at_settled_slide_2(states):
+    """A historical `glreplay-live` note is not enough: the module must be LIVE and
+    advancing across two slide-2 reads."""
+    _only_red(_gl(gl_states_s2=states), "b")
 
 
 def test_gl_carry_b_ignores_refusals_outside_slide_2_and_for_other_movies():
@@ -452,6 +486,8 @@ def test_carried_clock_rate_band(rate, ok):
         pytest.param({"gl_state_after": {"state": "LIVE", "standDowns": []}}, id="never-stood-down"),
         pytest.param({"gl_state_after": None}, id="module-absent"),
         pytest.param({"hash2": "#1"}, id="no-forward-hash"),
+        pytest.param({"hash1": "#0", "hash2": "#2"}, id="jump-0-to-2"),
+        pytest.param({"hash1": "#1", "hash2": "#3"}, id="jump-1-to-3"),
         pytest.param({"hash2": "#2junk"}, id="malformed-hash"),
         pytest.param({"player_build_errors": [{"kind": "player-build-error"}]}, id="build-error"),
     ],
@@ -474,6 +510,7 @@ def test_gl_carry_an_off_run_scored_by_it_is_red():
         index_samples=_index_samples()[:3] + [{"index": 22}] * 6,
         sample_frame_indices=[None] * 4,
         gl_state_after=None,
+        gl_states_s2=[None, None],
     )
     assert verdict["ok"] is False
     assert {k for k, ok in verdict["clauses"].items() if not ok} >= {"b", "c", "d", "f", "g", "h"}
@@ -674,6 +711,43 @@ def test_off_writes_to_out_and_auto_only_under_gl_replay(tmp_path, monkeypatch):
     monkeypatch.setattr(drv, "OUT", tmp_path)
     assert drv._out_root(False) == tmp_path
     assert drv._out_root(True) == tmp_path / "gl-replay"
+
+
+def _fake_export(root: Path) -> Path:
+    d = root / "html-unmodified"
+    d.mkdir(parents=True)
+    (d / "index.html").write_text("shared", encoding="utf-8")
+    return d
+
+
+def test_auto_reuse_strips_a_private_copy_never_the_shared_export(tmp_path, monkeypatch):
+    monkeypatch.setattr(drv, "OUT", tmp_path)
+    shared = _fake_export(tmp_path)
+    root = drv._out_root(True)
+    stale = root / "html-unmodified"
+    stale.mkdir(parents=True)
+    (stale / "old.txt").write_text("stale")
+    got = drv._unmodified_export(root, reuse=True, gl_auto=True)
+    assert got == root / "html-unmodified"
+    assert not (got / "old.txt").exists()
+    (got / "index.html").write_text("stripped", encoding="utf-8")
+    assert (shared / "index.html").read_text(encoding="utf-8") == "shared"
+
+
+def test_off_and_fresh_exports_use_the_root_export(tmp_path, monkeypatch):
+    monkeypatch.setattr(drv, "OUT", tmp_path)
+    assert drv._unmodified_export(tmp_path, reuse=True, gl_auto=False) == tmp_path / "html-unmodified"
+    assert drv._unmodified_export(tmp_path / "gl-replay", reuse=False, gl_auto=True) == tmp_path / "gl-replay" / "html-unmodified"
+    assert not (tmp_path / "gl-replay").exists()
+
+
+def test_sample_frame_roi_is_index_patch_roi_scaled_to_the_frame():
+    """Derived, not tuned: at the movie footprint's own size it reproduces INDEX_PATCH_ROI's
+    offset and size exactly."""
+    x, y, w, h = drv._sample_frame_index_roi(drv.MOVIE_ROI[2], drv.MOVIE_ROI[3])
+    assert (x + drv.MOVIE_ROI[0], y + drv.MOVIE_ROI[1], w, h) == drv.INDEX_PATCH_ROI
+    x, y, w, h = drv._sample_frame_index_roi(320, 90)
+    assert x + w <= 320 * 120 / 1920 and y + h <= 90 * 48 / 540
 
 
 def test_run_refuses_an_unknown_gl_replay_mode_before_any_destructive_work(tmp_path, monkeypatch):
