@@ -1254,8 +1254,10 @@ def remap_keynote(
     offline_read: str | None = None,
     plan_out: dict[str, Any] | None = None,
     log: Callable[[str], None] | None = None,
+    offline_hides: str | None = None,
 ) -> dict[str, Any]:
-    """Copy wall `source` to `dest` and remap in place from the CG template crop."""
+    """Copy wall `source` to `dest` and remap in place from the CG template crop.
+    `offline_hides` overrides `OBED_OFFLINE_HIDES` (None keeps the env)."""
     def say(message: str) -> None:
         if log:
             log(message)
@@ -1571,7 +1573,7 @@ def remap_keynote(
                 "offline (surgical IWA patch)."
             )
         suppressed = env_suppressed | offline_slides
-        hides_mode = offline_hides_mode(offline_mode=offline_mode, say=say)
+        hides_mode = offline_hides_mode(offline_hides, offline_mode=offline_mode, say=say)
         hide_slides: set[int] = set()
         if hides_mode != "off":
             hide_slides = offline_write.offline_hide_slides(transform_dicts, wall, wanted)
@@ -1676,9 +1678,10 @@ def remap_keynote(
         1 for t in transform_dicts if t.get("role") == "hide" and int(t.get("slide", -1)) in hide_slides
     )
     if hides_deferred != expected_deferred:
-        raise RuntimeError(
-            f"pass 1 deferred {hides_deferred} hide(s), expected {expected_deferred} on "
-            f"slide(s) {sorted(hide_slides)}; refusing to delete hides by position."
+        raise offline_write.OfflineHidesAborted(
+            "pass 1 deferred a different number of hides than planned",
+            f"deferred {hides_deferred}, expected {expected_deferred} on slide(s) "
+            f"{sorted(hide_slides)}; refusing to delete hides by position",
         )
     hides_info = offline_write.run_offline_hides(
         dest, hides_mode, hide_slides, transform_dicts, wall, say,
@@ -1976,6 +1979,7 @@ def remap_and_inspect(
     plan_out: dict[str, Any] | None = None,
     offline_read: str | None = None,
     log: Callable[[str], None] | None = None,
+    offline_hides: str | None = None,
 ) -> dict[str, Any]:
     info = remap_keynote(
         source,
@@ -1992,6 +1996,7 @@ def remap_and_inspect(
         export_dir=export_dir if not validate else None,
         offline_read=offline_read,
         log=log,
+        offline_hides=offline_hides,
     )
     if not validate:
         if export_dir and not info.get("exported"):

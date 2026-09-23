@@ -1594,3 +1594,142 @@ def test_write_outline_pdf_propagates_a_vanished_destination_as_job_error(tmp_pa
     with pytest.raises(ValueError, match="no longer a directory"):
         app_mod._write_outline_pdf(job, vanished / "findings.pdf", {"rows": [], "outlineFlags": []})
     assert not logs
+
+
+def _stub_resize_propose(monkeypatch, fake_remap):
+    import obed_edom.web.app as app_mod
+
+    def fake_acquire(source, *, slide_range, mode, say):
+        return {"slideWidth": 7680, "slideHeight": 1080, "slideCount": 1, "slides": []}
+
+    def fake_propose(wall, template, **kwargs):
+        return {
+            "wallDigests": ["d0"],
+            "templateDigest": "t0",
+            "pages": [
+                {
+                    "slide": 1,
+                    "index": 0,
+                    "autoTemplateSlide": 2,
+                    "autoFellBack": False,
+                    "needsAttention": False,
+                    "noUsableFraming": False,
+                    "candidates": [],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(app_mod, "remap_and_inspect", fake_remap)
+    monkeypatch.setattr(app_mod, "acquire_wall_payload", fake_acquire)
+    monkeypatch.setattr(app_mod, "inspect_keynote", lambda path, **kw: {"slides": []})
+    monkeypatch.setattr(app_mod, "propose_framings", fake_propose)
+
+
+def _propose(client, tmp_path, **extra):
+    deck = tmp_path / "Wall.key"
+    deck.write_text("placeholder")
+    template = tmp_path / "CG.key"
+    template.write_text("placeholder")
+    return client.post(
+        "/api/resize",
+        data={"path": str(deck), "template_path": str(template), "export": "false", **extra},
+    )
+
+
+def test_resize_offline_hides_abort_is_structured_and_the_rerun_can_switch_them_off(
+    tmp_path, monkeypatch
+):
+    """Owner decision 4: a whole-deck refusal aborts the remap with `OfflineHidesAborted`.
+    The job ends in error, keeps its framing proposal so Apply stays available, and
+    carries `offlineHidesAborted: <reason>` for the Resize tab to key on (no message
+    parsing). The operator's re-apply sends `offlineHides: "off"`, which reaches the
+    remap as `offline_hides="off"`, and a fresh apply clears the stale abort field."""
+    from obed_edom.offline_write import OfflineHidesAborted
+
+    calls = []
+
+    def fake_remap(path, dest, **kwargs):
+        calls.append(kwargs.get("offline_hides"))
+        if len(calls) == 1:
+            raise OfflineHidesAborted("slide 19 group order changed across the save")
+        return {"dest": str(dest), "counts": {}, "applied": 1, "missed": 0}
+
+    _stub_resize_propose(monkeypatch, fake_remap)
+    client = TestClient(app)
+    job_id = _propose(client, tmp_path).json()["id"]
+    assert _wait(client, job_id)["status"] == "done"
+
+    assert client.post(f"/api/resize/{job_id}/apply", json={}).status_code == 200
+    aborted = _wait(client, job_id)
+    assert aborted["status"] == "error"
+    assert "slide 19 group order changed" in aborted["error"]
+    assert aborted["result"]["offlineHidesAborted"] == "slide 19 group order changed across the save"
+    assert aborted["result"]["phase"] == "framing"
+    assert calls == [None]
+
+    assert client.post(f"/api/resize/{job_id}/apply", json={"offlineHides": "off"}).status_code == 200
+    rerun = _wait(client, job_id)
+    assert rerun["status"] == "done", rerun.get("error")
+    assert calls == [None, "off"]
+    assert "offlineHidesAborted" not in rerun["result"]
+    assert any("Offline hides switched off" in line for line in rerun["logs"])
+
+
+def test_resize_rerun_failing_otherwise_does_not_keep_a_stale_hides_abort(tmp_path, monkeypatch):
+    from obed_edom.offline_write import OfflineHidesAborted
+
+    calls = []
+
+    def fake_remap(path, dest, **kwargs):
+        calls.append(kwargs.get("offline_hides"))
+        if len(calls) == 1:
+            raise OfflineHidesAborted("identity unproven")
+        raise RuntimeError("Keynote went away")
+
+    _stub_resize_propose(monkeypatch, fake_remap)
+    client = TestClient(app)
+    job_id = _propose(client, tmp_path).json()["id"]
+    _wait(client, job_id)
+    client.post(f"/api/resize/{job_id}/apply", json={})
+    assert _wait(client, job_id)["result"]["offlineHidesAborted"] == "identity unproven"
+
+    client.post(f"/api/resize/{job_id}/apply", json={"offlineHides": "off"})
+    failed = _wait(client, job_id)
+    assert failed["status"] == "error"
+    assert failed["error"] == "Keynote went away"
+    assert "offlineHidesAborted" not in failed["result"]
+
+
+def test_resize_start_records_offline_hides_off_and_apply_default_passes_none(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_remap(path, dest, **kwargs):
+        seen.append(kwargs.get("offline_hides"))
+        return {"dest": str(dest), "counts": {}, "applied": 1, "missed": 0}
+
+    _stub_resize_propose(monkeypatch, fake_remap)
+    client = TestClient(app)
+    job_id = _propose(client, tmp_path, offline_hides="off").json()["id"]
+    assert _wait(client, job_id)["result"]["offlineHides"] == "off"
+
+    client.post(f"/api/resize/{job_id}/apply", json={})
+    assert _wait(client, job_id)["status"] == "done"
+    assert seen == [None]
+
+    plain_id = _propose(client, tmp_path).json()["id"]
+    assert "offlineHides" not in _wait(client, plain_id)["result"]
+
+
+@pytest.mark.parametrize("value", ["on", "verify", "bogus"])
+def test_resize_endpoints_only_accept_switching_offline_hides_off(tmp_path, monkeypatch, value):
+    _stub_resize_propose(monkeypatch, lambda path, dest, **kw: {})
+    client = TestClient(app)
+    res = _propose(client, tmp_path, offline_hides=value)
+    assert res.status_code == 400
+    assert "offline_hides" in res.json()["detail"]
+
+    job_id = _propose(client, tmp_path).json()["id"]
+    _wait(client, job_id)
+    res = client.post(f"/api/resize/{job_id}/apply", json={"offlineHides": value})
+    assert res.status_code == 400
+    assert _wait(client, job_id)["result"]["phase"] == "framing"

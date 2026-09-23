@@ -50,6 +50,7 @@ type ResizeResult = FramingProposal & {
   exportDir?: string;
   resolvedExportDir?: string;
   proposalExportDir?: string;
+  offlineHidesAborted?: string;
   applied?: number;
   missed?: number;
   counts?: { map?: number; pin?: number; list?: number; total?: number };
@@ -75,6 +76,13 @@ export function ResizeTab() {
   const [exportDir, setExportDir] = useSessionPath("obed-edom.resize.exportDir");
   const defaultExportDir = useDefaultExportDir();
   const result = (job?.result || undefined) as ResizeResult | undefined;
+  const [hidesOff, setHidesOff] = useState<{ jobId: string; reason: string } | null>(null);
+  const hidesAborted = result?.offlineHidesAborted;
+  const offlineHides = hidesOff && hidesOff.jobId === job?.id ? ("off" as const) : undefined;
+
+  useEffect(() => {
+    if (job && hidesAborted) setHidesOff({ jobId: job.id, reason: hidesAborted });
+  }, [job?.id, hidesAborted]);
 
   useEffect(() => {
     const path = result?.path;
@@ -108,7 +116,9 @@ export function ResizeTab() {
         templatePath: template.path,
         slides: parsedSlides ?? undefined,
         validate,
+        offlineHides,
       });
+      if (offlineHides && hidesOff) setHidesOff({ ...hidesOff, jobId: created.id });
       upsert(created);
       await track(created);
     } catch (err) {
@@ -124,7 +134,7 @@ export function ResizeTab() {
       upsert(tick);
     });
     upsert(done);
-    if (done.status === "error") setError(done.error || "Resize failed.");
+    if (done.status === "error" && !done.result?.offlineHidesAborted) setError(done.error || "Resize failed.");
     return done;
   }
 
@@ -146,7 +156,7 @@ export function ResizeTab() {
     setBusy(true);
     setError(null);
     try {
-      await track(await applyResize(job.id, decisions, exportDir));
+      await track(await applyResize(job.id, decisions, exportDir, offlineHides));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -313,9 +323,16 @@ export function ResizeTab() {
           <ArtifactActions artifacts={[{ label: "CG.key", path: result.destPath }]} onError={setError} />
         </>
       )}
+      <ErrorNotice
+        message={
+          offlineHides &&
+          `Offline hides aborted: ${hidesOff?.reason}. Offline hides are switched off for the next run.`
+        }
+        onDismiss={() => setHidesOff(null)}
+      />
       <ErrorNotice message={error || openError || rangeError} onDismiss={error ? () => setError(null) : undefined} />
       {busy && <LoadingOverlay title="Remapping map and pins…" logs={logs} />}
-      {job && (
+      {job && !(job.status === "error" && hidesAborted) && (
         <InspectResultView
           job={job}
           onOpen={setOpen}

@@ -3,7 +3,7 @@ pure eligibility, `run_offline_hides` orchestration + AppleScript delete fallbac
 `remap_keynote` wiring (plan field, abort, Applied accounting, call order).
 
 Keynote-free: `iwa_hides.patch_deck_hides` (Stream B) is replaced by a stub module in
-`sys.modules`, and every osascript call goes through a stub or `_fake_osascript`.
+`sys.modules`, and every osascript call goes through a stub.
 """
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from pathlib import Path
 
 import pytest
 
-from conftest import _fake_osascript
 from obed_edom import offline_write
 from obed_edom import remap_keynote as rk
 from obed_edom.map_remap import ItemTransform, Plan
@@ -52,21 +51,33 @@ def _move(slide, kind, ki):
     return {"slide": slide, "kind": kind, "kindIndex": ki, "role": "map", "x": 1, "y": 2}
 
 
+class _HidesWriteFailed(Exception):
+    pass
+
+
 def _install_writer(monkeypatch, fn):
     """Stand in for Stream B's module; `from obed_edom.iwa_hides import ...` resolves here."""
     mod = types.ModuleType("obed_edom.iwa_hides")
     mod.patch_deck_hides = fn
+    mod.HidesWriteFailed = _HidesWriteFailed
     monkeypatch.setitem(sys.modules, "obed_edom.iwa_hides", mod)
 
 
-def _record_fallback(monkeypatch, *, ok=True, missed_lines=()):
+def _record_fallback(monkeypatch, *, returncode=0, stdout=None, stderr="", raises=None):
+    """Replace osascript for the hide-fallback session; records each script it would run."""
+    from obed_edom.osascript_runner import OsaResult
+
     calls = []
 
-    def fake(dest, scripts, say, *, suffix=".offline-fallback", marker=None):
-        calls.append({"scripts": list(scripts), "suffix": suffix, "marker": marker})
-        return ok, ([Path(str(dest) + suffix + ".applescript")] if not ok else []), list(missed_lines)
+    def fake(script, *, launch=False, timeout=None, dump_on_failure=None, is_cancelled=None):
+        calls.append({"script": script, "dump": dump_on_failure})
+        if raises is not None:
+            raise raises
+        out = offline_write.HIDE_FALLBACK_OK if stdout is None else stdout
+        return OsaResult(argv=["osascript"], returncode=returncode, stdout=out, stderr=stderr,
+                         elapsed=0.0, dump=dump_on_failure if returncode else None)
 
-    monkeypatch.setattr(offline_write, "_run_fallback_scripts", fake)
+    monkeypatch.setattr(offline_write, "run_applescript", fake)
     return calls
 
 
@@ -165,43 +176,76 @@ def test_eligibility_excludes_unaddressable_hide():
     assert offline_write.offline_hide_slides(t, WALL, None) == {1}
 
 
-# --- fallback body ------------------------------------------------------------------------
+def test_eligibility_excludes_dual_membership_hide_targets():
+    """Astra H #3: a custom-path text box sits in shapes AND textItems (the shape copy carries
+    `duplicateOf`); deleting it shifts both collections, so its slide keeps the Keynote delete.
+    Either face of the dual excludes the slide; an unrelated shape does not."""
+    wall = {"slides": [
+        {"number": 5, "items": [
+            {"kind": "text", "kindIndex": 0}, {"kind": "text", "kindIndex": 1},
+            {"kind": "shape", "kindIndex": 0},
+            {"kind": "shape", "kindIndex": 1, "duplicateOf": {"kind": "text", "kindIndex": 1}},
+        ]},
+    ]}
+    assert offline_write.offline_hide_slides([_hide(5, "text", 1)], wall, None) == set()
+    assert offline_write.offline_hide_slides([_hide(5, "shape", 1)], wall, None) == set()
+    assert offline_write.offline_hide_slides([_hide(5, "text", 0)], wall, None) == {5}
+    assert offline_write.offline_hide_slides([_hide(5, "shape", 0)], wall, None) == {5}
+
+
+# --- fallback session -------------------------------------------------------------------
 
 
 def test_hide_delete_body_follows_deletehides_order_and_as_index():
     """deleteHides order within a slide: kind ascending, kindIndex descending; AppleScript
-    index = kindIndex + 1; delete, else opacity 0 + the miss marker."""
+    index = kindIndex + 1."""
     body = offline_write._hide_delete_body(
         [_hide(4, "text", 0), _hide(4, "image", 2), _hide(4, "text", 5), _hide(4, "image", 7)], 4,
     )
     deletes = [ln.strip() for ln in body.splitlines() if ln.strip().startswith("delete ")]
     assert deletes == ["delete image 8", "delete image 3", "delete text item 6", "delete text item 1"]
-    assert body.splitlines()[:2] == ["with timeout of 3600 seconds", "tell slide 4"]
-    assert "set opacity of image 8 to 0" in body
-    assert 'log "OBED_HIDE_MISSED slide=4 kind=image kindIndex=7"' in body
-    assert body.index("delete image 8") < body.index("set opacity of image 8 to 0")
+    assert body.splitlines()[0].strip() == "tell slide 4"
 
 
-def test_run_fallback_scripts_hides_suffix_and_marker(monkeypatch, tmp_path):
-    _fake_osascript(
-        monkeypatch, returncode=1,
-        stderr="OBED_GEOM_UNWRITABLE slide=1 kind=shape kindIndex=0\n"
-               "OBED_HIDE_MISSED slide=2 kind=image kindIndex=0\n",
-    )
+def test_hide_delete_body_stops_at_first_error_without_opacity():
+    """Astra H #5: the first delete error raises out of the session (with the marker);
+    nothing is retried through a positional address."""
+    body = offline_write._hide_delete_body([_hide(4, "image", 2), _hide(4, "image", 7)], 4)
+    assert "opacity" not in body
+    assert "log " not in body
+    assert body.count('error "OBED_HIDE_MISSED slide=4 kind=image kindIndex=') == 2
+    assert body.index("delete image 8") < body.index("kindIndex=7") < body.index("delete image 3")
+
+
+def test_fallback_script_binds_by_exact_resolved_path_before_any_delete(tmp_path):
+    """Astra H #6: verify `file of theDoc` against the exact resolved path before mutating;
+    no name-prefix match, no closing of other same-name documents."""
+    dest = tmp_path / "sub" / ".." / "out.key"
+    script = offline_write._hide_fallback_script(dest, {3: "      tell slide 3\n      end tell"})
+    resolved = str(dest.resolve())
+    assert f'set theDoc to open (POSIX file "{resolved}")' in script
+    assert f'if docPath is not "{resolved}" then error' in script
+    assert script.index(f'if docPath is not "{resolved}"') < script.index("tell slide 3")
+    assert "starts with" not in script and "start with" not in script
+    assert "every document whose name" not in script
+    assert "document 1" not in script
+
+
+def test_fallback_script_saves_and_confirms_close(tmp_path):
+    """Astra H #4: the save and the close are not swallowed; after closing, no document at
+    the exact path may remain open; the success token is returned only at the end.
+    A delete error closes WITHOUT saving and re-raises."""
     dest = tmp_path / "out.key"
-    ok, dumps, lines = offline_write._run_fallback_scripts(
-        dest, ["S"], lambda m: None, suffix=".hides-fallback", marker=offline_write.HIDE_MISSED_MARKER,
-    )
-    assert ok is False
-    assert dumps == [tmp_path / "out.hides-fallback.applescript"]
-    assert lines == ["OBED_HIDE_MISSED slide=2 kind=image kindIndex=0"]
-
-
-def test_run_fallback_scripts_default_suffix_unchanged(monkeypatch, tmp_path):
-    _fake_osascript(monkeypatch, returncode=1)
-    ok, dumps, _ = offline_write._run_fallback_scripts(tmp_path / "out.key", ["A", "B"], lambda m: None)
-    assert dumps == [tmp_path / "out.offline-fallback-1.applescript",
-                     tmp_path / "out.offline-fallback-2.applescript"]
+    script = offline_write._hide_fallback_script(dest, {3: "      tell slide 3\n      end tell"})
+    lines = [ln.strip() for ln in script.splitlines()]
+    save = lines.index("save theDoc")
+    close = lines.index("close theDoc saving yes")
+    assert lines[close - 1] == "end try"
+    assert lines[close + 1] != "end try"
+    assert save < close
+    assert lines.index("close theDoc saving no") > save
+    assert "document still open after close" in script
+    assert lines.index(f'return "{offline_write.HIDE_FALLBACK_OK}"') > close
 
 
 # --- run_offline_hides --------------------------------------------------------------------
@@ -255,14 +299,12 @@ def test_run_offline_hides_order_proven_refusal_goes_to_applescript_delete(monke
     info = offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, said.append)
 
     assert len(fb) == 1
-    assert fb[0]["suffix"] == ".hides-fallback"
-    assert fb[0]["marker"] == offline_write.HIDE_MISSED_MARKER
-    script = fb[0]["scripts"][0]
+    assert fb[0]["dump"] == deck.with_suffix(".hides-fallback.applescript")
+    script = fb[0]["script"]
     assert "tell slide 3" in script and "tell slide 1" not in script
     assert script.index("delete group 1") < script.index("delete text item 1")
     assert info["offlineDeleted"] == 2 and info["fallbackDeleted"] == 2
     assert info["deleted"] == 4
-    assert "missed" not in info
     assert info["refused"] == [{"slide": 3, "reason": "R5 build ref"}]
     assert any("slide 3 R5 build ref" in m for m in said)
 
@@ -280,27 +322,63 @@ def test_identity_or_address_refusal_aborts_before_any_keynote_reopen(monkeypatc
     _install_writer(monkeypatch, lambda d, h, **kw: _HidesResult(
         {1: _proven_refusal(), 3: _SlideHides(0, True, reason, order_proven=False)}))
     fb = _record_fallback(monkeypatch)
-    with pytest.raises(RuntimeError, match=r"refused slide\(s\) \[3\] before proving the saved order"):
+    with pytest.raises(offline_write.OfflineHidesAborted) as err:
         offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, lambda m: None)
     assert fb == []
+    assert err.value.reason == "slide(s) [3] refused before the saved order was proven"
+    assert "Rerun with OBED_OFFLINE_HIDES=off" in str(err.value)
 
 
-def test_any_hide_missed_marker_is_fatal(monkeypatch, deck):
-    """Codex r1 #3: a failed delete (opacity 0 at best) leaves the drawable in its kind
-    collection, so `source - hides` no longer holds; the stage must abort, not count a miss."""
+def test_hide_missed_marker_is_fatal(monkeypatch, deck):
+    """Codex r1 #3 / Astra H #5: a failed delete leaves the drawable in its kind collection,
+    so `source - hides` no longer holds; the stage aborts rather than counting a miss."""
     _install_writer(monkeypatch, lambda d, h, **kw: _HidesResult(
         {1: _SlideHides(2), 3: _proven_refusal()}))
-    _record_fallback(monkeypatch, missed_lines=["OBED_HIDE_MISSED slide=3 kind=text kindIndex=0"])
-    with pytest.raises(RuntimeError, match="could not delete 1 hide"):
+    _record_fallback(monkeypatch, returncode=1, stdout="",
+                     stderr="execution error: OBED_HIDE_MISSED slide=3 kind=text kindIndex=0: nope (-2700)")
+    with pytest.raises(offline_write.OfflineHidesAborted) as err:
         offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, lambda m: None)
+    assert err.value.reason == "a hide delete failed"
+    assert "fresh --out" in str(err.value) and "never replay" in str(err.value)
 
 
-def test_run_offline_hides_fallback_failure_raises(monkeypatch, deck):
+@pytest.mark.parametrize("returncode,stdout,stderr", [
+    (1, "", "execution error: hides fallback bound the wrong document: /x/y.key"),
+    (1, "", "execution error: hides fallback: document still open after close"),
+    (1, "", "execution error: Keynote got an error: The document could not be saved."),
+    (0, "", ""),
+    (0, "something else", ""),
+])
+def test_fallback_session_without_confirmed_success_aborts(monkeypatch, deck, returncode, stdout, stderr):
+    """Astra H #4/#6: a wrong-document bind, a failed save, an unconfirmed close, or a zero
+    exit without the success token all abort."""
     _install_writer(monkeypatch, lambda d, h, **kw: _HidesResult({1: _proven_refusal("x"),
                                                                   3: _SlideHides(2)}))
-    _record_fallback(monkeypatch, ok=False)
-    with pytest.raises(RuntimeError, match="offline hides fallback failed"):
+    _record_fallback(monkeypatch, returncode=returncode, stdout=stdout, stderr=stderr)
+    with pytest.raises(offline_write.OfflineHidesAborted) as err:
         offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, lambda m: None)
+    assert err.value.reason == "hide fallback session failed"
+
+
+def test_fallback_timeout_aborts(monkeypatch, deck):
+    """Astra H #4: a timeout or runner failure aborts, and exactly one session was attempted."""
+    _install_writer(monkeypatch, lambda d, h, **kw: _HidesResult({1: _proven_refusal("x"),
+                                                                  3: _proven_refusal("y")}))
+    fb = _record_fallback(monkeypatch, raises=TimeoutError("osascript timed out"))
+    with pytest.raises(offline_write.OfflineHidesAborted) as err:
+        offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, lambda m: None)
+    assert err.value.reason == "hide fallback session did not finish"
+    assert len(fb) == 1
+
+
+def test_fallback_is_one_session_for_every_refused_slide(monkeypatch, deck):
+    """Astra H #5: no chunking, so nothing runs after a failed session."""
+    _install_writer(monkeypatch, lambda d, h, **kw: _HidesResult({1: _proven_refusal("x"),
+                                                                  3: _proven_refusal("y")}))
+    fb = _record_fallback(monkeypatch)
+    offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, lambda m: None)
+    assert len(fb) == 1
+    assert "tell slide 1" in fb[0]["script"] and "tell slide 3" in fb[0]["script"]
 
 
 def test_run_offline_hides_debug_refuse_is_passed_as_force_refuse(monkeypatch, deck):
@@ -317,16 +395,10 @@ def test_run_offline_hides_debug_refuse_is_passed_as_force_refuse(monkeypatch, d
     assert seen["force_refuse"] == frozenset({3, 7})
 
 
-def _assert_all_to_fallback(fb, info):
-    assert len(fb) == 1
-    script = fb[0]["scripts"][0]
-    assert "tell slide 1" in script and "tell slide 3" in script
-    assert info["offlineDeleted"] == 0
-    assert info["deleted"] == 4
-    assert [r["slide"] for r in info["refused"]] == [1, 3]
-
-
-def test_disk_guard_refusal_routes_every_eligible_slide_to_fallback(monkeypatch, deck):
+def test_whole_deck_refusal_aborts_without_fallback(monkeypatch, deck):
+    """Owner decision (reverses r1): `OfflineWriteRefused` proves nothing was written, not that
+    the saved order matches the source (Keynote's save reorders same-kind groups), so it
+    aborts instead of deleting by position."""
     iwa_write = pytest.importorskip("obed_edom.iwa_write")
 
     def writer(d, h, **kw):
@@ -334,45 +406,43 @@ def test_disk_guard_refusal_routes_every_eligible_slide_to_fallback(monkeypatch,
 
     _install_writer(monkeypatch, writer)
     fb = _record_fallback(monkeypatch)
-    said = []
-    info = offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, said.append)
-    _assert_all_to_fallback(fb, info)
-    assert any(m.startswith("WARNING offline hides refused before writing") for m in said)
-
-
-def test_refused_with_changed_deck_stamp_still_falls_back(monkeypatch, deck):
-    """Codex r1 #7 control: the typed `OfflineWriteRefused` signal decides, not the file's
-    stat (a pre-write touch of the deck must not flip it to an abort)."""
-    iwa_write = pytest.importorskip("obed_edom.iwa_write")
-
-    def writer(d, h, **kw):
-        Path(d).write_bytes(b"different-size-and-mtime")
-        raise iwa_write.OfflineWriteRefused("undecodable member")
-
-    _install_writer(monkeypatch, writer)
-    fb = _record_fallback(monkeypatch)
-    info = offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, lambda m: None)
-    _assert_all_to_fallback(fb, info)
+    with pytest.raises(offline_write.OfflineHidesAborted) as err:
+        offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, lambda m: None)
+    assert fb == []
+    assert err.value.reason == "the IWA writer refused the deck before writing"
+    assert "free space" in str(err.value)
+    assert "Rerun with OBED_OFFLINE_HIDES=off" in str(err.value)
 
 
 @pytest.mark.parametrize("exc", [
-    RuntimeError("hides read-back slide 1: lists != expected"),
+    RuntimeError("unexpected"),
     KeyError("bug before writing"),
     ValueError("slide numbers are 1-based"),
 ])
 def test_any_other_writer_exception_aborts_without_fallback(monkeypatch, deck, exc):
-    """Codex r1 #7 control: the deck is untouched here (same stamp), yet only
-    `OfflineWriteRefused` proves nothing was written, so everything else aborts."""
+    """Codex r1 #7: only `OfflineWriteRefused` proves nothing was written; anything else
+    leaves the deck's state unknown -- not an `OfflineHidesAborted` (a rerun needs a fresh
+    --out, not just the flag)."""
     def writer(d, h, **kw):
         raise exc
 
     _install_writer(monkeypatch, writer)
     fb = _record_fallback(monkeypatch)
-    before = deck.read_bytes()
-    with pytest.raises(RuntimeError, match="state of .* is unknown"):
+    with pytest.raises(RuntimeError, match="fresh --out") as err:
         offline_write.run_offline_hides(deck, "verify", {1, 3}, TRANSFORMS, WALL, lambda m: None)
+    assert not isinstance(err.value, offline_write.OfflineHidesAborted)
     assert fb == []
-    assert deck.read_bytes() == before
+
+
+def test_hides_write_failed_propagates_distinct_with_fresh_out(monkeypatch, deck):
+    def writer(d, h, **kw):
+        raise _HidesWriteFailed("hides read-back slide 1: lists != expected")
+
+    _install_writer(monkeypatch, writer)
+    fb = _record_fallback(monkeypatch)
+    with pytest.raises(_HidesWriteFailed, match="lists != expected.*fresh --out"):
+        offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, lambda m: None)
+    assert fb == []
 
 
 def test_writer_import_failure_aborts_without_fallback(monkeypatch, deck):
@@ -392,10 +462,23 @@ def test_offline_write_corrupted_propagates_without_fallback(monkeypatch, deck):
     _install_writer(monkeypatch, writer)
     fb = _record_fallback(monkeypatch)
     said = []
-    with pytest.raises(iwa_write.OfflineWriteCorrupted):
+    with pytest.raises(iwa_write.OfflineWriteCorrupted) as err:
         offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, said.append)
+    assert not isinstance(err.value, offline_write.OfflineHidesAborted)
     assert fb == []
-    assert any("OFFLINE-HIDES CORRUPTED" in m and "RECOVERY" in m for m in said)
+    assert any("OFFLINE-HIDES CORRUPTED" in m and "RECOVERY" in m and "fresh --out" in m for m in said)
+
+
+def test_map_readback_is_diagnostic_only():
+    """Astra H #7: `mapReadback` is only ever printed, never checked."""
+    import inspect as _inspect
+
+    src = _inspect.getsource(rk.remap_keynote)
+    uses = [ln.strip() for ln in src.splitlines() if "mapReadback" in ln]
+    assert uses == [
+        'if jxa.get("mapReadback") and map_slide not in offline_slides:',
+        "say(f\"Map object after apply: {jxa.get('mapReadback')}\")",
+    ]
 
 
 # --- snapshots --------------------------------------------------------------------------
@@ -519,7 +602,7 @@ def _wire(monkeypatch, *, hides_env, jxa, events=None, hides_info=None):
     return captured, hides_calls
 
 
-def _run(tmp_path, said=None):
+def _run(tmp_path, said=None, **kw):
     source, template, dest = _touch_paths(tmp_path)
     wall_payload = {"slideWidth": 7680, "slideHeight": 1080,
                     "slides": [{"number": 1, "items": [{"kind": "image"}, {"kind": "image"}, {"kind": "text"}]}]}
@@ -527,6 +610,7 @@ def _run(tmp_path, said=None):
     return rk.remap_keynote(
         source, dest, template=template, wall_payload=wall_payload,
         template_payload=template_payload, log=(said.append if said is not None else lambda m: None),
+        **kw,
     )
 
 
@@ -637,6 +721,30 @@ def test_deferred_count_mismatch_refuses_before_any_deck_stage(monkeypatch, tmp_
     a positional delete: the hides may already be gone."""
     events = []
     _wire(monkeypatch, hides_env="on", jxa={**JXA_OK, "hidesDeferred": 0}, events=events)
-    with pytest.raises(RuntimeError, match="deferred 0 hide"):
+    with pytest.raises(offline_write.OfflineHidesAborted, match="deferred 0, expected 2") as err:
         _run(tmp_path)
+    assert err.value.reason == "pass 1 deferred a different number of hides than planned"
     assert "runOfflineHides" not in events and "runOfflineWrite" not in events
+
+
+def test_offline_hides_argument_overrides_the_env(monkeypatch, tmp_path):
+    plan, hides_calls = _wire(monkeypatch, hides_env=None, jxa={**JXA_OK, "hidesDeferred": 2},
+                              hides_info={"deleted": 2})
+    _run(tmp_path, offline_hides="verify")
+    assert plan["offlineHideSlides"] == [1]
+    assert hides_calls == [{"mode": "verify", "slides": {1}}]
+
+
+def test_offline_hides_argument_off_overrides_env_on(monkeypatch, tmp_path):
+    plan, hides_calls = _wire(monkeypatch, hides_env="on", jxa=JXA_OK)
+    _run(tmp_path, offline_hides="off")
+    assert "offlineHideSlides" not in plan
+    assert hides_calls[0]["mode"] == "off"
+
+
+def test_remap_and_inspect_threads_offline_hides(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(rk, "remap_keynote", lambda *a, **k: seen.update(k) or {"exported": True})
+    source, template, dest = _touch_paths(tmp_path)
+    rk.remap_and_inspect(source, dest, template=template, validate=False, offline_hides="on")
+    assert seen["offline_hides"] == "on"

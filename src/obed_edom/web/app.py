@@ -119,6 +119,7 @@ from obed_edom.map_remap import (
 )
 from obed_edom.models import Flag
 from obed_edom.offline_inspect import offline_wall_payload
+from obed_edom.offline_write import OfflineHidesAborted
 from obed_edom.outline_check import (
     SemanticOutlineError,
     correspondence,
@@ -188,6 +189,7 @@ class FramingsBody(BaseModel):
 
     decisions: list[dict[str, Any]] | None = None
     exportDir: str | None = None
+    offlineHides: str | None = None
 
 
 class DskDecisionsBody(BaseModel):
@@ -1014,10 +1016,12 @@ def create_app() -> FastAPI:
         # Form field `validate` would shadow BaseModel.validate; alias keeps the wire name.
         run_validation: str = Form("true", alias="validate"),
         export_dir: str = Form(""),
+        offline_hides: str = Form(""),
     ) -> dict:
         key = Path(path).expanduser()
         if not key.exists():
             raise HTTPException(400, f"Not found: {path}")
+        hides = _offline_hides_field(offline_hides)
         resolved_export_dir = ""
         if export_dir.strip():
             try:
@@ -1043,8 +1047,8 @@ def create_app() -> FastAPI:
             raise HTTPException(400, str(err))
         job = RUNNER.submit(
             "resize",
-            lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists, va=do_validate, ed=resolved_export_dir: (
-                _run_resize_propose(j, p, t, sl, ex, lists, va, export_dir=ed)
+            lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists, va=do_validate, ed=resolved_export_dir, oh=hides: (
+                _run_resize_propose(j, p, t, sl, ex, lists, va, export_dir=ed, offline_hides=oh)
             ),
             feature="resize",
         )
@@ -1110,6 +1114,7 @@ def create_app() -> FastAPI:
         template = Path(str(result.get("templatePath") or "")).expanduser()
         if not key.exists() or not template.exists():
             raise HTTPException(400, "The wall deck or template has moved since proposing.")
+        hides = _offline_hides_field(payload.offlineHides if payload else None)
         export_dir: str | None = None
         resolved_export_dir: str | None = None
         if payload and payload.exportDir is not None:
@@ -1141,6 +1146,9 @@ def create_app() -> FastAPI:
             RUNNER.update_result(job_id, current)
         job = RUNNER.get(job_id)
         result = dict((job.result if job else None) or {})
+        if "offlineHidesAborted" in result:
+            result.pop("offlineHidesAborted")
+            RUNNER.update_result(job_id, result)
         overrides = _overrides_from_result(result)
         side_content = _side_content_slides_from_result(result)
         raw_range = result.get("slideRange")
@@ -1151,8 +1159,8 @@ def create_app() -> FastAPI:
         try:
             updated = RUNNER.rerun(
                 job_id,
-                lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists, ov=overrides, side=side_content, va=do_validate: (
-                    _run_resize(j, p, t, sl, ex, lists, ov, side, va)
+                lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists, ov=overrides, side=side_content, va=do_validate, oh=hides: (
+                    _run_resize(j, p, t, sl, ex, lists, ov, side, va, offline_hides=oh)
                 ),
             )
         except RuntimeError as exc:
@@ -2986,6 +2994,16 @@ def _run_dsk_export_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _offline_hides_field(raw: str | None) -> str | None:
+    """The dashboard may only switch offline hides off; blank keeps the env default."""
+    value = (raw or "").strip().lower()
+    if not value:
+        return None
+    if value != "off":
+        raise HTTPException(400, f"offline_hides must be blank or 'off', not {raw!r}.")
+    return value
+
+
 def _run_resize_propose(
     job: Job,
     path: Path,
@@ -2995,6 +3013,7 @@ def _run_resize_propose(
     keep_side_panels: bool = False,
     validate: bool = True,
     export_dir: str = "",
+    offline_hides: str | None = None,
 ) -> dict[str, Any]:
     typed = slide_range
     label = format_slide_range(slide_range)
@@ -3097,6 +3116,7 @@ def _run_resize_propose(
         "validate": validate,
         "export": export,
         **({"exportDir": export_dir} if export_dir else {}),
+        **({"offlineHides": offline_hides} if offline_hides else {}),
         "resolvedExportDir": resolved_export_dir,
         "proposalExportDir": resolved_export_dir,
         **proposal,
@@ -3118,6 +3138,7 @@ def _run_resize(
     framing_overrides: dict[int, int] | None = None,
     side_content_slides: set[int] | None = None,
     validate: bool = True,
+    offline_hides: str | None = None,
 ) -> dict[str, Any]:
     dest_dir = default_output_root() / ".resize" / job.name
     resolved_export_dir = (job.result or {}).get("resolvedExportDir")
@@ -3131,18 +3152,25 @@ def _run_resize(
     if not keep_side_panels and not side_content_slides:
         job.log("Side-panel content dropped (whitelist a slide in the framing review to keep it).")
     ensure_export_dir(dest.parent)
-    info = remap_and_inspect(
-        path,
-        dest,
-        template=template,
-        slide_range=slide_range,
-        keep_side_panels=keep_side_panels,
-        export_dir=export_dir,
-        framing_overrides=framing_overrides,
-        side_content_slides=side_content_slides,
-        validate=validate,
-        log=job.log,
-    )
+    if offline_hides:
+        job.log("Offline hides switched off for this run.")
+    try:
+        info = remap_and_inspect(
+            path,
+            dest,
+            template=template,
+            slide_range=slide_range,
+            keep_side_panels=keep_side_panels,
+            export_dir=export_dir,
+            framing_overrides=framing_overrides,
+            side_content_slides=side_content_slides,
+            validate=validate,
+            offline_hides=offline_hides,
+            log=job.log,
+        )
+    except OfflineHidesAborted as exc:
+        job.result = {**(job.result or {}), "offlineHidesAborted": exc.reason}
+        raise
     inspect = info.get("inspect") or {}
     names = list(info.get("previewFiles") or [])
     if export_dir and not names:
