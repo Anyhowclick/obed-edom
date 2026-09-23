@@ -35,7 +35,7 @@ todos:
       increment buys nothing and the wall-time lever is unreachable without an offline autosize
       text layout engine, which is out of scope; say so and close the family as live-bound.
       Cheap: one run, no new refusal logic, the dump is throwaway and never merged.
-      DONE 2026-09-23 (record: `.agents/reviews/groups-census-2026-09-19/spec_shape_2026-09-23.md`):
+      DONE 2026-09-23 (record: `.agents/reviews/offline-fallback-2026-09-23/README.md`):
       one full-deck run, fallback line identical to baseline (group-residual 83). Buckets: (a) 0,
       (b) scaled 27, (c) `children` 56. Bar failed -> STOP: the groups family is live-bound.
       Hook reverted, never committed.

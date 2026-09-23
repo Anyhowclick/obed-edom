@@ -1,8 +1,8 @@
 """m1 analysis: effective anchor, b_h, width delta, slide make-up, h_new predictability, fallback timing."""
 import json, re, sys
 from collections import Counter, defaultdict
-sys.path.insert(0, ".agents/reviews/regrow-2026-09-23")
-from m0_census import rows as census_rows
+sys.path.insert(0, ".agents/reviews/offline-fallback-2026-09-23")
+from regrow_m0_census import rows as census_rows
 
 DUMP, LOG = "output/regrow-m1/regrow_specs.jsonl", "output/regrow-m1/run.log"
 WALL = "/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Full_Report_Card_Wall.key"

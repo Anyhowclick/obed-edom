@@ -1,7 +1,8 @@
 ---
 name: Offline text — grow-height regrow width write (OBED_OFFLINE_TEXT_REGROW)
 overview: >-
-  2026-09-23. Offline width write for `text-grow-height-width` (88/234 fallback specs on the
+  2026-09-23. PARKED at lower priority after m0+m1 (owner, 2026-09-23): the write is sound and 84/88
+  convertible, but the fallback session is only ~79 s of a ~22-min run; pass 1 is the lever. Offline width write for `text-grow-height-width` (88/234 fallback specs on the
   2026-09-23 full-deck run, the largest remaining family). Grow-height = stored w > 0, stored h == 0;
   pass 1 leaves w at 0.25x so the writer misses it (`iwa_write.py:714-721`, PR #169). Prior negative
   result c70540de3 (2026-09-05, "Keynote re-shrink-wraps on open") is CONFOUNDED: that write also used
@@ -14,14 +15,14 @@ overview: >-
 todos:
   - id: m0-offline-census
     content: >-
-      MEASURE, no Keynote. Scratch script under `.agents/reviews/regrow-2026-09-23/` over the
+      MEASURE, no Keynote. Scratch script under `.agents/reviews/offline-fallback-2026-09-23/` over the
       existing post-fallback deck `output/groups-measure/Full_Report_Card_CG.key`: for every text box
       with stored w > 0, tabulate h (0 vs > 0 — answers whether the fallback's `height:spec.h` write,
       `remap_keynote.py:578-588`, turned grow-height boxes into fixed-height, which would make arm A
       and arm B different box types), `geometry_flags` (`iwa_text_shape.py:32`, width-fixed bit 0x1),
       `_vertical_alignment` incl. None (`iwa_geometry.py:198-205`), paragraph alignment, `_path_source`
       key, rotation. Output `m0.md`.
-      DONE 2026-09-23 (`.agents/reviews/regrow-2026-09-23/m0.md`): CG deck 102 h==0 boxes (wall 123), all
+      DONE 2026-09-23 (`.agents/reviews/offline-fallback-2026-09-23/README.md`): CG deck 102 h==0 boxes (wall 123), all
       width-fixed (flags 1), none rotated, all bezierPathSource, NO None vertical alignment. The fallback
       did NOT change box type (h==0 before and after) so A and B are the same kind. 14 boxes are nw>0/nh==0
       post-fallback (the half-filled cache DOES occur today; K5 must tolerate it). Anchor mix: 91 MIDDLE +
@@ -51,12 +52,13 @@ todos:
       Decide offline whether h_new is predictable for the 91 single-line middle labels (candidate:
       spec.h when the recipe is the wrap-preserving affine, since font and width scale together).
       KILL: if h_new is not predictable for ≥ ~60 of the 88, stop and record.
-      DONE 2026-09-23 (`.agents/reviews/regrow-2026-09-23/m1.md`). Effective anchor == style on all 88;
+      DONE 2026-09-23 (`.agents/reviews/offline-fallback-2026-09-23/README.md`). Effective anchor == style on all 88;
       b_h ≈ 0 for every alignment (stored x is the left edge, no anchor term in pos_x); stored.w == rep.w;
       fallback writes w == spec.w and stored centre == spec.y + nh/2. h_new via spec.h is within 1.5 px for
       73 of 77 middle boxes (role other); refuse title/list (multi-line slot rects). Predictable: 84/88 —
       bar PASSED. BUT the fallback session is 78.7 s of a ~22-min run (pass 1 dominates); the whole family
-      buys ≈20–30 s. OWNER DECISION PENDING: build for fallback-surface reduction, or stop here.
+      buys ≈20–30 s. OWNER DECISION 2026-09-23: LOWER PRIORITY, NOT CLOSED — streams A/B/C and the
+      gates stay pending; pass-1 profiling comes first (see the review README §5).
     status: completed
   - id: impl-writer
     content: >-
