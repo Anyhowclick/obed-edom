@@ -1,6 +1,6 @@
 # GL-replay G3 + G4 plan — real seam in the core, host flag (one PR)
 
-Status: **rev 2 (Opus EXTRA HIGH critique of §1–§2, 2026-09-23)** — supersedes rev 1 (Opus MAX planner, same day). Spec:
+Status: **rev 3 (post round 1, 2026-09-23)** — §8 amends §1, §2, §6 and §7 as implemented; read §8 first. Rev 2 (Opus EXTRA HIGH critique of §1–§2) superseded rev 1 (Opus MAX planner, same day). Spec:
 `.agents/handovers/keynote-live-continuity-2026-09-22-g3.md`. Parents: `keynote_live_gl_replay_g2.plan.md` rev 2 (§2.0, §2.5, **§2.6
 seam**, §2.7, §4), `keynote_live_gl_replay_arming.plan.md` (§2, §3, §5, §10, §11). Owner go 2026-09-23 (OD-1..3 defaults taken). Next step:
 implement per §5. Code cites are `9ad4fc69` (`live_continuity_js.py` unless another file is named; G2 = `live_gl_replay_js.py`).
@@ -305,3 +305,48 @@ It is installed on `window.__OBED_P2_PRESERVE__.glReplay` **only when the plan h
 - (3) The re-run list must add gate 6 (semantics change) and gate 1 on the product injection path.
 - (4) The stub's unlisted approximation: authored px stamped as screen px.
 - (5) There is no pinned core-sha literal to "re-pin" today.
+
+## 8. Rev 3 amendments (round 1: gates r1, Opus R-A/R-B, A2 advisor, owner decisions)
+
+Evidence: `.agents/reviews/gl-replay-g3/{gates-r1,opus-r1-a,opus-r1-b,a2-advice}.md`. Owner decisions 2026-09-23: A2 = (a) + guard G +
+stash rule; gate-6 frozen frame fixed in G2 in this PR; no further Opus review rounds, straight to Codex.
+
+**§1 zone (R-A A1, A3, A9, A13).**
+- Row 7 sweep, armed: today's sweep minus `__obedGlPooled` decoders (was "no retire"). Released: unchanged (pin).
+- Transitions: `armed → retired` on `hn ≥ retireZoneEnd` (`leftDestination`, A3) and on `disabled` (A9).
+- K16 now reads: every in-zone same-asset decoder except the memo is retired at release.
+- The "out of the zone, armed is unreachable" claim holds only with the A3 watchdog.
+- Released: the carried decoder and any facade bound to it never take the top-z stage append (`glreplay-hold {via:'stage'}`,
+  guard G); a detach of the carried decoder keeps its last own rect (no `captureLayout` overwrite).
+- The facade swap observer checks the decoder is live (A13, was the K20 NIT).
+
+**§2 seam.**
+- Candidates: additionally `__obedGlPooled` and never a facade stub (A1, A7).
+- Row 5: the upper bound is now reached through the A3 watchdog, so `release` answers `notArmed` there.
+- Row 6: `noCarried` also when the memo's key ≠ `movieKey` (A6).
+- Row 7: the near-origin guard runs on `toScreen(instanceRect)`.
+- Row 10: `v.__obedRect = toScreen(instanceRect)`; G2's `rect` is validated (row 7), not used for placement (A2(a)).
+
+**§3 P2 (R-B, implementer B).** F10 was wrong: the P2 script's kept event kinds needed `glreplay-zone`/`glreplay-live`. They now
+come from `p2_verdict.PRESERVE_EVENT_KEEP_KINDS` with a coverage test. `refusedCarry1to2` requires `glReplayFallback ==
+expected_gl_fallback` (`moduleAbsent`); `neverPooledEvidence` rejects an armed zone.
+
+**G2 fix (gate 6).** G2's ARM-POST poster snapshot was read after the per-clear uploads had replaced the poster texture, so a
+stand-down restored a crop of the last movie frame (10 arms, not 2; the crop arms passed only because the counter decoder cannot read
+the crop). The snapshot moves before the first upload, and a settle-time stand-down repaints. G2's pinned sha moves.
+
+**§6 gates (coordinator rulings, r1 → r2).**
+- Gate 4/4b: hand-off at `toScreen(instanceRect)` ± 0.5 px; gating tail = carried rect within 0.5 px at P3/P4/T4/T5, ring parity
+  (slot minus instance) armed vs control, zero `remount-done`/`remount-footprint-rect` for the carried elId or its facade after the
+  hand-off, samples inside the 2→3 transition window.
+- Gate 6: pixel parity INSIDE the movie rect vs control (P2c/P3/P4; late arms P2d vs control P2c).
+- Late `contextLost` uses a real `loseContext()`; its P2d in-rect parity is report-only (a real loss blanks the context, which the
+  control cannot do); P3/P4 gate.
+- Gate 7: host `goTo` calls `clear()` first, so the zone retires `cleared` on `#1`; go-to slide 3 settles at `#7`.
+- Arms where G2 never calls `release` (e.g. forced `runtimeSeamAbsent`) may retire `moduleRetired`/`unengaged`.
+- G-P2: success equals G-0 per run (the no-bridge run is False by design). Heap flat: max ≤ 1.25 × min.
+
+**§7 risks.** R2 resolved at build 1 (the LIVE-phase 2 % stretch remains until G2 draws into the inner instance rect, option (c)).
+R3: the footprint fallback no longer fires for the carried decoder; `keepAtFootprint` still holds its origin, now the instance.
+New R9: the 2→3 transition window, covered by guard G. F9's ≈4 px pop was held by the stale pin loop (advisor).
+
