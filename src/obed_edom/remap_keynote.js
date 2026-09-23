@@ -9,6 +9,13 @@ var TIMING = null;
 function _now() {
   return +new Date();
 }
+var STAGES = {};
+function _stage(name, t0) {
+  STAGES[name] = (STAGES[name] || 0) + (_now() - t0);
+}
+function _resetStages() {
+  for (const k in STAGES) delete STAGES[k];
+}
 function _trec(bucket, ms, desc) {
   if (!TIMING) return;
   if (!TIMING.buckets[bucket]) TIMING.buckets[bucket] = { ms: 0, n: 0 };
@@ -681,33 +688,39 @@ function applyNonReuseSlide(
   let missed = 0;
   const path = geometryPathForSlide(n, asGeom, suppressGeometry);
   if (path === "attrs") {
-    const _ta = TIMING ? _now() : 0;
+    const _ta = _now();
     const r = applyTransforms(doc.slides(), specs, collectionsOut, missReasons, "attrs");
+    _stage("attrs", _ta);
     if (TIMING) _trec("phase:attrsSuppressed:slide" + n, _now() - _ta, null);
     applied += r.applied;
     missed += r.missed;
   } else if (path === "as") {
-    const _ta = TIMING ? _now() : 0;
+    const _ta = _now();
     const r = applyTransforms(doc.slides(), specs, collectionsOut, missReasons, "attrs");
+    _stage("attrs", _ta);
     if (TIMING) _trec("phase:attrs:slide" + n, _now() - _ta, null);
     applied += r.applied;
     missed += r.missed;
-    const _tg = TIMING ? _now() : 0;
+    const _tg = _now();
     runSlideGeomScript(doc, asGeom, n, missReasons);
+    _stage("asScript", _tg);
     if (TIMING) _trec("phase:asGeomScript:slide" + n, _now() - _tg, null);
     // AppleScript geometry does not yank, so the first position write sticks.
   } else {
-    const _tf = TIMING ? _now() : 0;
+    const _tf = _now();
     const r = applyTransforms(doc.slides(), specs, collectionsOut, missReasons, "full");
+    _stage("attrs", _tf);
     if (TIMING) _trec("phase:jxaFull:slide" + n, _now() - _tf, null);
     applied += r.applied;
     missed += r.missed;
-    const _tp = TIMING ? _now() : 0;
+    const _tp = _now();
     applyTransforms(doc.slides(), specs, null, missReasons, "pos");
+    _stage("attrs", _tp);
     if (TIMING) _trec("phase:jxaPos:slide" + n, _now() - _tp, null);
   }
-  const _td = TIMING ? _now() : 0;
+  const _td = _now();
   const rd = deleteHides(doc.slides(), Keynote, specs, missReasons);
+  _stage("hides", _td);
   if (TIMING) _trec("phase:deleteHides:slide" + n, _now() - _td, null);
   applied += rd.applied;
   missed += rd.missed;
@@ -715,6 +728,8 @@ function applyNonReuseSlide(
 }
 
 function run(argv) {
+  _resetStages();
+  const tRun = _now();
   const plan = readJSON(argv[0]);
   TIMING = plan.timing
     ? { buckets: {}, slow: [], slowMs: Number(plan.timing.slowMs) || 120 }
@@ -722,7 +737,9 @@ function run(argv) {
   KEYNOTE_BUNDLE_ID = plan.bundleId || KEYNOTE_BUNDLE_ID;
   const Keynote = Application(KEYNOTE_BUNDLE_ID);
   Keynote.includeStandardAdditions = true;
+  let t0 = _now();
   const doc = Keynote.open(Path(plan.dest));
+  _stage("open", t0);
   const transforms = plan.transforms || [];
   const asGeom = plan.asGeom || null;
   const suppressGeometry = plan.suppressGeometry || null;
@@ -731,6 +748,7 @@ function run(argv) {
   const collections = {};
   const missReasons = [];
   const layoutReport = { imported: [], applied: [], extraDeleted: 0, names: [] };
+  t0 = _now();
   const sizeProp = setSlideSize(doc, width, height);
   let actualWidth = width;
   let actualHeight = height;
@@ -738,23 +756,46 @@ function run(argv) {
     actualWidth = Number(doc.width()) || width;
     actualHeight = Number(doc.height()) || height;
   } catch (eSz) {}
+  _stage("slideSize", t0);
   const origN = countOf(doc.slides());
   const wanted = wantedFromPlan(plan, origN);
   if (plan.template) {
     let templateDoc = null;
     try {
-      templateDoc = Keynote.open(Path(plan.template));
-      layoutReport.imported = importCgLayouts(doc, templateDoc, Keynote);
-      layoutReport.applied = applyCgLayouts(doc, origN, wanted);
-      layoutReport.extraDeleted = deleteTrailingSlides(doc, Keynote, origN);
-      layoutReport.names = layoutNames(doc);
+      t0 = _now();
+      try {
+        templateDoc = Keynote.open(Path(plan.template));
+      } finally {
+        _stage("templateOpen", t0);
+      }
+      t0 = _now();
+      try {
+        layoutReport.imported = importCgLayouts(doc, templateDoc, Keynote);
+      } finally {
+        _stage("layoutImport", t0);
+      }
+      t0 = _now();
+      try {
+        layoutReport.applied = applyCgLayouts(doc, origN, wanted);
+      } finally {
+        _stage("layoutApply", t0);
+      }
+      t0 = _now();
+      try {
+        layoutReport.extraDeleted = deleteTrailingSlides(doc, Keynote, origN);
+        layoutReport.names = layoutNames(doc);
+      } finally {
+        _stage("trailingDelete", t0);
+      }
     } catch (eLay) {
       layoutReport.error = String(eLay);
     }
     if (templateDoc) {
+      t0 = _now();
       try {
         Keynote.close(templateDoc, { saving: "no" });
       } catch (eT) {}
+      _stage("templateClose", t0);
     }
   }
   const order = slidesInPlan(transforms);
@@ -772,6 +813,7 @@ function run(argv) {
     try {
       Keynote.close(doc, { saving: "no" });
     } catch (eAbort) {}
+    _stage("total", tRun);
     return JSON.stringify({
       dest: plan.dest,
       applied: 0,
@@ -783,16 +825,26 @@ function run(argv) {
       missReasons: missReasons,
       layouts: layoutReport,
       saved: false,
+      stages: STAGES,
+      saveRetried: false,
+      saveFirstError: null,
     });
   }
+  t0 = _now();
   const mapReadback = readMapGeom(doc.slides(), transforms);
   let skippedSlides = 0;
   skippedSlides = skipOutsideRange(doc.slides(), wanted);
+  _stage("finish", t0);
   let saved = true;
   let saveError = null;
+  let saveRetried = false;
+  let saveFirstError = null;
+  t0 = _now();
   try {
     Keynote.save(doc);
   } catch (eSave) {
+    saveRetried = true;
+    saveFirstError = String(eSave);
     try {
       Keynote.save(doc, { in: Path(plan.dest) });
     } catch (eSave2) {
@@ -800,8 +852,10 @@ function run(argv) {
       saveError = String(eSave2);
     }
   }
+  _stage("save", t0);
   let closed = true;
   let closeError = null;
+  t0 = _now();
   try {
     Keynote.close(doc, { saving: "yes" });
     if (!saved) {
@@ -811,6 +865,8 @@ function run(argv) {
     closed = false;
     closeError = String(eClose);
   }
+  _stage("close", t0);
+  _stage("total", tRun);
   return JSON.stringify({
     dest: plan.dest,
     applied: appliedFirst,
@@ -828,6 +884,9 @@ function run(argv) {
     closed: closed,
     closeError: closeError,
     timing: TIMING,
+    stages: STAGES,
+    saveRetried: saveRetried,
+    saveFirstError: saveFirstError,
   });
 }
 
@@ -840,5 +899,12 @@ if (typeof module !== "undefined" && module.exports) {
     applyGeom: applyGeom,
     applyGroupChildren: applyGroupChildren,
     slidesInPlan: slidesInPlan,
+    applyNonReuseSlide: applyNonReuseSlide,
+    _stage: _stage,
+    _resetStages: _resetStages,
+    STAGES: STAGES,
+    setTiming: function (t) {
+      TIMING = t;
+    },
   };
 }

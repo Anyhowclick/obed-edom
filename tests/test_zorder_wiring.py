@@ -298,7 +298,7 @@ def test_run_offline_zorder_off_mode_is_noop(zorder_deck):
 def test_run_offline_zorder_patch_readback_mismatch_reports_failure_without_raising(zorder_deck, monkeypatch):
     from obed_edom import iwa_zorder, offline_write
 
-    monkeypatch.setattr(iwa_zorder, "read_slide_zorder", lambda deck, n: (["bogus"], ["bogus"]))
+    monkeypatch.setattr(iwa_zorder, "read_deck_zorders", lambda deck, ns: {n: (["bogus"], ["bogus"]) for n in ns})
     said = []
     targets = {1: {"stat": ["300"], "badge": []}}
     result = offline_write.run_offline_zorder(zorder_deck, "on", targets, said.append)
@@ -314,7 +314,7 @@ def test_run_offline_zorder_patch_readback_mismatch_reports_failure_without_rais
 def test_run_offline_zorder_verify_mismatch_reports_failure_without_raising(zorder_deck, monkeypatch):
     from obed_edom import iwa_write, offline_write
 
-    monkeypatch.setattr(iwa_write, "read_slide_zorder", lambda deck, n: (["bogus"], ["bogus"]))
+    monkeypatch.setattr(iwa_write, "read_deck_zorders", lambda deck, ns: {n: (["bogus"], ["bogus"]) for n in ns})
     said = []
     targets = {1: {"stat": ["300"], "badge": []}}
     result = offline_write.run_offline_zorder(zorder_deck, "verify", targets, said.append)
@@ -327,13 +327,58 @@ def test_run_offline_zorder_verify_mismatch_reports_failure_without_raising(zord
     assert any("zorderRefused(s=1" in s for s in said)
 
 
+
+def test_run_offline_zorder_verify_loads_deck_once_per_read_back(zorder_deck, monkeypatch):
+    """Two patched slides in verify mode: one decode for the patch read-back and one for the
+    verify pass, not one per slide per pass."""
+    from obed_edom import iwa_write, offline_write
+
+    calls = []
+    real_load = iwa_write._load_deck
+
+    def counting_load(path, *args, **kwargs):
+        calls.append(path)
+        return real_load(path, *args, **kwargs)
+
+    monkeypatch.setattr(iwa_write, "_load_deck", counting_load)
+    targets = {1: {"stat": ["300"], "badge": []}, 2: {"stat": ["400"], "badge": []}}
+    result = offline_write.run_offline_zorder(zorder_deck, "verify", targets, lambda s: None)
+    assert result["slides"] == [1, 2]
+    assert result["zorderRefused"] == 0
+    assert len(calls) == 2
+
+
+def test_run_offline_zorder_verify_batch_read_failure_fails_only_the_bad_slide(zorder_deck, monkeypatch):
+    """A batch read ValueError falls back to per-slide reads: slide 2's read fails and is refused
+    as a read failure, while slide 1 reads back correctly and stays patched."""
+    from obed_edom import iwa_write, offline_write
+
+    def raising_batch(deck, ns):
+        raise ValueError("slide 2 out of range")
+
+    def per_slide(deck, n):
+        if n == 2:
+            raise ValueError("slide 2 out of range")
+        return ["302", "300"], ["302", "300"]
+
+    monkeypatch.setattr(iwa_write, "read_deck_zorders", raising_batch)
+    monkeypatch.setattr(iwa_write, "read_slide_zorder", per_slide)
+    said = []
+    targets = {1: {"stat": ["300"], "badge": []}, 2: {"stat": ["400"], "badge": []}}
+    result = offline_write.run_offline_zorder(zorder_deck, "verify", targets, said.append)
+    assert result["slides"] == [1]
+    assert result["zorderRefused"] == 1
+    assert result["failures"] == [(2, "deck already written; zorder verify read failed: slide 2 out of range")]
+    assert "zorderRefused(s=2,reason=verify read failed: slide 2 out of range)" in said
+    assert not any("zorderRefused(s=1" in s for s in said)
+
 def test_run_offline_zorder_verify_read_raises_reports_failure_without_raising(zorder_deck, monkeypatch):
     from obed_edom import iwa_write, offline_write
 
-    def raising_read(deck, n):
+    def raising_read(deck, ns):
         raise ValueError("slide index out of range")
 
-    monkeypatch.setattr(iwa_write, "read_slide_zorder", raising_read)
+    monkeypatch.setattr(iwa_write, "read_deck_zorders", raising_read)
     said = []
     targets = {1: {"stat": ["300"], "badge": []}}
     result = offline_write.run_offline_zorder(zorder_deck, "verify", targets, said.append)

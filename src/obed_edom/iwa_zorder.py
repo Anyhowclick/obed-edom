@@ -18,7 +18,7 @@ from obed_edom.iwa_write import (
     _patch_zorder_member,
     _rewrite_members,
     bridge_kind_index,
-    read_slide_zorder,
+    read_deck_zorders,
 )
 from obed_edom.map_remap import COINCIDENT_DUP_TOL
 
@@ -302,10 +302,10 @@ def patch_deck_zorder(deck: Path | str, orders_by_slide: dict[int, list[str]]) -
     ``_rewrite_members`` / ``PatchResult`` and their ``value_clean`` /
     ``OfflineWriteCorrupted`` semantics exactly.
 
-    Read-back verify runs always, after the rewrite: each patched slide is re-read via
-    ``read_slide_zorder`` and checked for (a) an unchanged id multiset, (b)
-    ``ownedDrawables == drawablesZOrder``, (c) the order matching what was requested. A
-    mismatch raises ``ValueError`` naming the slide -- the deck is already written at
+    Read-back verify runs always, after the rewrite: all non-refused patched slides are
+    re-read in one ``read_deck_zorders`` call and each is checked for (a) an unchanged id
+    multiset, (b) ``ownedDrawables == drawablesZOrder``, (c) the order matching what was
+    requested. A mismatch raises ``ValueError`` naming the slide -- the deck is already written at
     that point.
     """
     if 0 in orders_by_slide:
@@ -374,11 +374,10 @@ def patch_deck_zorder(deck: Path | str, orders_by_slide: dict[int, list[str]]) -
                                              target_member=prev.target_member)
             return results
 
-    for n, result in results.items():
-        if result.refused:
-            continue
+    patched = [n for n, r in results.items() if not r.refused]
+    readback = read_deck_zorders(deck, patched) if patched else {}
+    for n, (z, owned) in readback.items():
         want = orders_by_slide[n]
-        z, owned = read_slide_zorder(deck, n)
         if Counter(z) != Counter(want):
             raise ValueError(f"zorder read-back id-set mismatch on slide {n}: got {z}, want {want}")
         if owned != z:

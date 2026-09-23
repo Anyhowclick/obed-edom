@@ -25,7 +25,7 @@ import shutil
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from google.protobuf.json_format import MessageToDict, ParseDict
 from keynote_parser.codec import IWAFile, import_version
@@ -197,7 +197,12 @@ def bridge_specs_kindindex(specs: list[dict]) -> list[dict]:
 
 
 def read_slide_zorder(deck: Path, slide_number: int) -> tuple[list[str], list[str]]:
-    """(drawablesZOrder ids, ownedDrawables ids) as strings, via _load_deck + slide_order."""
+    """(drawablesZOrder ids, ownedDrawables ids) as strings, via read_deck_zorders."""
+    return read_deck_zorders(deck, [slide_number])[slide_number]
+
+
+def read_deck_zorders(deck: Path, slide_numbers: Iterable[int]) -> dict[int, tuple[list[str], list[str]]]:
+    """{slide: (drawablesZOrder ids, ownedDrawables ids)} from one _load_deck + slide_order."""
     try:
         objects, _id_to_file, _file_ids = _load_deck(deck)
     except Exception as exc:  # noqa: BLE001 — surfaced as a hint, not swallowed
@@ -206,12 +211,16 @@ def read_slide_zorder(deck: Path, slide_number: int) -> tuple[list[str], list[st
             "15.3.1-authored member — check the installed keynote_parser version)"
         ) from exc
     order = slide_order(objects)
-    if not (1 <= slide_number <= len(order)):
-        raise ValueError(f"slide {slide_number} out of range (deck has {len(order)} slides)")
-    slide = objects[order[slide_number - 1][0]]
-    z = [str(r["identifier"]) for r in slide.get("drawablesZOrder") or []]
-    owned = [str(r["identifier"]) for r in slide.get("ownedDrawables") or []]
-    return z, owned
+    out: dict[int, tuple[list[str], list[str]]] = {}
+    for n in slide_numbers:
+        if not (1 <= n <= len(order)):
+            raise ValueError(f"slide {n} out of range (deck has {len(order)} slides)")
+        slide = objects[order[n - 1][0]]
+        out[n] = (
+            [str(r["identifier"]) for r in slide.get("drawablesZOrder") or []],
+            [str(r["identifier"]) for r in slide.get("ownedDrawables") or []],
+        )
+    return out
 
 
 def expected_base_counts(source_counts: dict[str, int], specs: list[dict]) -> dict[str, int]:
