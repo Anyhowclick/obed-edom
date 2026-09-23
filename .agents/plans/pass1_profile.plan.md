@@ -139,6 +139,17 @@ todos:
       unused since the groups branch stopped) and whether the read can be narrowed to the kinds and
       slides that need a seed. Gate: projected saving ≥ 60 s; needs one owner-gated live run.
     status: pending
+  - id: h-hides-offline
+    content: >-
+      NEXT (owner 2026-09-23, own session; handover `.agents/handovers/pass1-hides-offline-2026-09-23.md`).
+      Hides ≈ 82–118 s for 947 deletes, almost all of it the per-object `Keynote.delete` AppleEvent.
+      Keynote-side batching DROPPED (owner): a one-event bulk delete needs a contiguous index range or a
+      `whose` clause, and Keynote items expose no stable marker to filter on — revisit only if Apple's
+      scripting dictionary improves. Lever: delete hide targets offline in the IWA writer after the pass-1
+      save (remove from drawablesZOrder/ownedDrawables + the object), keeping the "source − hides" index
+      model every later stage assumes (`iwa_write.expected_base_counts`). New surgical write ⇒ own plan,
+      own live gate, ID-insensitive slide diff vs the Keynote-deleted deck.
+    status: pending
   - id: design-offline-attrs
     content: >-
       Only if attrs still ≥ 60 s after h-attrs-roundtrips: move font/size/color/opacity for
