@@ -21,7 +21,14 @@ todos:
       and arm B different box types), `geometry_flags` (`iwa_text_shape.py:32`, width-fixed bit 0x1),
       `_vertical_alignment` incl. None (`iwa_geometry.py:198-205`), paragraph alignment, `_path_source`
       key, rotation. Output `m0.md`.
-    status: pending
+      DONE 2026-09-23 (`.agents/reviews/regrow-2026-09-23/m0.md`): CG deck 102 h==0 boxes (wall 123), all
+      width-fixed (flags 1), none rotated, all bezierPathSource, NO None vertical alignment. The fallback
+      did NOT change box type (h==0 before and after) so A and B are the same kind. 14 boxes are nw>0/nh==0
+      post-fallback (the half-filled cache DOES occur today; K5 must tolerate it). Anchor mix: 91 MIDDLE +
+      centre-aligned, 11 top (5 right, 4 left, 2 centre). Slides 96/103 are 6/7 and 15/16 middle+centre
+      single-line 'CHC …' labels. => a top-only v1 converts ≤11 and trips the m1 kill; the middle-anchor
+      write (v2-middle) is the real work and m1 must be designed to decide it.
+    status: completed
   - id: m1-live-measure
     content: >-
       MEASURE, OWNER-GATED (Keynote). One default full-deck run (`--slides 1-129,135-143,145-155`) with
@@ -37,8 +44,13 @@ todos:
       `scripts/text_mask_visual_oracle.py:177-182`, reads it as a centre/right anchor — conflict);
       (3) stored[2] vs rep[2]; (4) how many of the 88 sit on slides whose ONLY fallback family is
       grow-height (slide 103 = 16 can leave; slide 96 cannot, masked-media 1); (5) fallback seconds
-      and session count (`build_fallback_scripts`, 300 KB chunking). KILL: effective-top < ~20 of 88 →
-      stop here and record.
+      and session count (`build_fallback_scripts`, 300 KB chunking). After m0 the kill is REFRAMED:
+      top-only v1 is expected to fail its bar, so m1 must ALSO capture what decides v2-middle: spec.h
+      and role per box, the recipe provenance (affine `other` vs slot/translated), fontSize, the SOURCE
+      wall box h/nh (join by slide+kindIndex against the wall census), and rep[3] (narrow-wrap height).
+      Decide offline whether h_new is predictable for the 91 single-line middle labels (candidate:
+      spec.h when the recipe is the wrap-preserving affine, since font and width scale together).
+      KILL: if h_new is not predictable for ≥ ~60 of the 88, stop and record.
     status: pending
   - id: impl-writer
     content: >-
@@ -80,8 +92,8 @@ todos:
       on this axis too. Regrow verdict row: for each spec A missed as text-grow-height-width
       (`fallbackReasonsBySlide`), B's live w vs spec.w (≤0.5 px), x/top vs spec (≤1 px) — the direct
       "width discarded" detector `verify_live_frames` cannot see (text x/y only,
-      `offline_write.py:684-690`) — plus a post-save re-decode: stored w kept, nh refilled (a
-      half-filled cache nw>0/nh==0 does not occur today). Oracle `autosize_left` (:177): width-fixed
+      `offline_write.py:684-690`) — plus a post-save re-decode: stored w kept, nh refilled or unchanged (14 boxes are
+      already nw>0/nh==0 after today's fallback per m0, so nh==0 alone is not a failure). Oracle `autosize_left` (:177): width-fixed
       boxes use the m1-measured b_h rule. Note `offline_write_ab.py:232` pins
       OBED_DEBUG_PASS1_SNAPSHOT to "" — the wrap control snapshot comes from the m1 run.
     status: pending
@@ -101,7 +113,7 @@ todos:
     status: pending
   - id: v2-middle
     content: >-
-      DEFERRED. Middle/bottom anchors need the NEW laid-out height (pos_y = spec.y + a·h_new); the
+      AFTER m0: LIKELY THE MAIN WORK (91 of 102 grow-height boxes are middle-anchored); decide on m1. Middle/bottom anchors need the NEW laid-out height (pos_y = spec.y + a·h_new); the
       delta form is off by a·(rep_h − h_new) where rep_h is the narrow-wrap height. spec.h is NOT a
       safe h_new: role "other" also covers body text (`map_remap.py:2602`), corner-translated text
       (:2534), demoted list (:2554-2555); style-matched boxes use src.h·ratio clamped ≥8 (:2117-2118)
