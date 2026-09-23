@@ -195,15 +195,16 @@ def test_owned_drawables_diverging_from_zorder_refuses(tmp_path):
 def test_readback_failure_raises(tmp_path, monkeypatch):
     deck = _build_deck(tmp_path / "badread.key", [(100, [300, 301], "Index/Slide-100.iwa")])
 
-    def _fake_read_slide_zorder(deck_arg, slide_number):
+    def _fake_read_deck_zorders(deck_arg, slide_numbers):
         objects, _id_to_file, _file_ids = _load_deck(deck_arg)
         order = slide_order(objects)
-        slide = objects[order[slide_number - 1][0]]
+        assert list(slide_numbers) == [1]
+        slide = objects[order[0][0]]
         on_disk = [str(r["identifier"]) for r in slide.get("drawablesZOrder") or []]
         assert on_disk == ["301", "300"]  # the rewrite already landed on disk
-        return ["300", "301"], ["300", "301"]  # deliberately wrong order vs. what was requested
+        return {1: (["300", "301"], ["300", "301"])}  # deliberately wrong order vs. what was requested
 
-    monkeypatch.setattr("obed_edom.iwa_zorder.read_slide_zorder", _fake_read_slide_zorder)
+    monkeypatch.setattr("obed_edom.iwa_zorder.read_deck_zorders", _fake_read_deck_zorders)
     with pytest.raises(ValueError, match="order mismatch"):
         patch_deck_zorder(deck, {1: ["301", "300"]})
 
@@ -230,3 +231,81 @@ def test_rewrite_corrupted_propagates(tmp_path, monkeypatch):
     monkeypatch.setattr("obed_edom.iwa_zorder._rewrite_members", _corrupt)
     with pytest.raises(OfflineWriteCorrupted):
         patch_deck_zorder(deck, {1: ["301", "300"]})
+
+
+def test_readback_loads_deck_once_for_many_slides(tmp_path, monkeypatch):
+    """The read-back decodes the whole deck; it must happen once per patch, not once per slide."""
+    from obed_edom import iwa_write
+
+    deck = _build_deck(tmp_path / "three.key", [
+        (100, [300, 301], "Index/Slide-100.iwa"),
+        (110, [400, 401], "Index/Slide-110.iwa"),
+        (120, [500, 501], "Index/Slide-120.iwa"),
+    ])
+    calls = []
+    real_load = iwa_write._load_deck
+
+    def counting_load(path, *args, **kwargs):
+        calls.append(path)
+        return real_load(path, *args, **kwargs)
+
+    monkeypatch.setattr(iwa_write, "_load_deck", counting_load)
+    results = patch_deck_zorder(deck, {1: ["301", "300"], 2: ["401", "400"], 3: ["501", "500"]})
+    assert not any(r.refused for r in results.values())
+    assert len(calls) == 1
+
+
+def test_read_deck_zorders_reads_each_slide_and_rejects_out_of_range(tmp_path):
+    from obed_edom.iwa_write import read_deck_zorders
+
+    deck = tmp_path / "distinct.key"
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 101}, {"identifier": 111}]}})
+    nodes = [_arch(sid + 1, "KN.SlideNodeArchive", {"slide": {"identifier": sid}, "isSkipped": False})
+             for sid in (100, 110)]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, *nodes]))
+        z.writestr("Index/Slide-100.iwa", _member([_slide(100, [300, 301], owned_ids=[301, 300]),
+                                                   _shape(300), _shape(301)]))
+        z.writestr("Index/Slide-110.iwa", _member([_slide(110, [400, 401, 402], owned_ids=[402, 400]),
+                                                   _shape(400), _shape(401), _shape(402)]))
+    deck.write_bytes(buf.getvalue())
+
+    assert read_deck_zorders(deck, [2, 1]) == {
+        1: (["300", "301"], ["301", "300"]),
+        2: (["400", "401", "402"], ["402", "400"]),
+    }
+    assert read_slide_zorder(deck, 2) == (["400", "401", "402"], ["402", "400"])
+    with pytest.raises(ValueError, match="slide 3 out of range"):
+        read_deck_zorders(deck, [1, 3])
+
+
+def test_read_deck_zorders_load_failure_raises_runtime_error_with_hint(tmp_path, monkeypatch):
+    from obed_edom import iwa_write
+
+    deck = tmp_path / "broken.key"
+
+    def boom(_path):
+        raise KeyError("undecodable member")
+
+    monkeypatch.setattr(iwa_write, "_load_deck", boom)
+    with pytest.raises(RuntimeError) as info:
+        iwa_write.read_deck_zorders(deck, [1])
+    msg = str(info.value)
+    assert f"_load_deck failed on {deck}" in msg
+    assert "keynote_parser" in msg and "check the installed keynote_parser version" in msg
+    assert isinstance(info.value.__cause__, KeyError)
+
+
+def test_all_refused_patch_skips_readback(tmp_path, monkeypatch):
+    deck = _build_deck(tmp_path / "shared.key", [
+        (100, [300, 301], "Index/Slide-shared.iwa"),
+        (110, [400, 401], "Index/Slide-shared.iwa"),
+    ])
+
+    def must_not_read(*_a, **_k):
+        raise AssertionError("read-back must not run when every slide is refused")
+
+    monkeypatch.setattr("obed_edom.iwa_zorder.read_deck_zorders", must_not_read)
+    results = patch_deck_zorder(deck, {1: ["301", "300"], 2: ["401", "400"]})
+    assert results[1].refused and results[2].refused

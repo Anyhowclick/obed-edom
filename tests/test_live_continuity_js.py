@@ -1712,7 +1712,7 @@ console.log(JSON.stringify(P.snapshot().map(x => [x.key, x.movieKey, !!x.fromDom
 
 # --- G3: the glReplay zone and its seam ---------------------------------
 #
-# Plan `.agents/plans/keynote_live_gl_replay_g3g4.plan.md` rev 2 §1–§2. A
+# Plan: the G3+G4 plan rev 2 §1–§2 (PR #214). A
 # `glReplay` boundary is the retire zone run as a one-shot state machine
 # (`pending -> armed | retired`, `armed -> released | retired`, `released ->
 # retired`). The GL module is faked here as the plain object it publishes

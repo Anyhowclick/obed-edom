@@ -385,7 +385,9 @@ def _patch_offline_slides(
         try:
             from obed_edom import inspect as _inspect  # noqa: PLC0415
 
+            say(f"Offline-write: bulk live seed read of {len(soft_slides)} slide(s)…")
             bulk = _inspect.bulk_geometry(dest, slides=sorted(soft_slides), log=say)
+            say("Offline-write: bulk seed read done; patching members.")
             reported_by_slide = _reported_from_bulk_rows(bulk)
             reported_by_slide = _drop_unreadable_seed_rows(
                 reported_by_slide, _inspect.LAST_BULK_ERRORS, say=say)
@@ -1349,7 +1351,7 @@ def run_offline_zorder(
         return None
     from obed_edom.iwa_kindindex import derive_kind_index  # noqa: PLC0415 (optional iwa extra)
     from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: PLC0415 (optional iwa extra)
-    from obed_edom.iwa_write import read_slide_zorder  # noqa: PLC0415 (optional iwa extra)
+    from obed_edom.iwa_write import read_deck_zorders, read_slide_zorder  # noqa: PLC0415 (optional iwa extra)
     from obed_edom.iwa_zorder import patch_deck_zorder, plan_slide_order  # noqa: PLC0415
 
     objects, _id_to_file, _file_ids = _load_deck(dest)
@@ -1432,31 +1434,33 @@ def run_offline_zorder(
                 noop += 1
 
         if mode == "verify" and patch_results:
-            for n in sorted(orders_by_slide):
-                if getattr(patch_results.get(n), "refused", False):
-                    continue
+            verify_slides = [n for n in sorted(orders_by_slide)
+                             if not getattr(patch_results.get(n), "refused", False)]
+            try:
+                readback = read_deck_zorders(dest, verify_slides)
+            except ValueError:
+                readback = {}
+            for n in verify_slides:
                 want = orders_by_slide[n]
                 try:
-                    z, owned = read_slide_zorder(dest, n)
-                    mismatch = z != want or owned != z
+                    z, owned = readback[n] if n in readback else read_slide_zorder(dest, n)
                 except ValueError as exc:
-                    z = None
-                    mismatch = True
-                    reason = f"deck already written; zorder verify read failed: {exc}"
+                    detail = f"verify read failed: {exc}"
                 else:
-                    reason = f"deck already written; zorder verify mismatch: got {z}, want {want}"
-                if mismatch:
-                    say(f"zorderRefused(s={n},reason=verify mismatch: got {z}, want {want})")
-                    refused_n += 1
-                    suppressed_failed.add(n)
-                    failures.append((n, reason))
-                    zorder_slides -= 1
-                    patched_slides.remove(n)
-                    targets = targets_by_slide[n]
-                    stat_raised -= len(targets.get("stat") or [])
-                    badge_raised -= len(targets.get("badge") or [])
-                    if pre_order[n] == want:
-                        noop -= 1
+                    if z == want and owned == z:
+                        continue
+                    detail = f"verify mismatch: got {z}, want {want}"
+                say(f"zorderRefused(s={n},reason={detail})")
+                refused_n += 1
+                suppressed_failed.add(n)
+                failures.append((n, f"deck already written; zorder {detail}"))
+                zorder_slides -= 1
+                patched_slides.remove(n)
+                targets = targets_by_slide[n]
+                stat_raised -= len(targets.get("stat") or [])
+                badge_raised -= len(targets.get("badge") or [])
+                if pre_order[n] == want:
+                    noop -= 1
 
     kind_index_map: dict[str, dict[str, dict[str, int]]] = {}
     for n in patched_slides:

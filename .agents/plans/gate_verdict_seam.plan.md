@@ -210,8 +210,8 @@ proves the counter would have advanced were it not covered.
   instead by the composite screenshots + `coverPatchStable` + 100% `elementFromPoint`-on-
   cover over the frames that did log + `loopLive`; `maxRafGapMs` is a diagnostic only.
   **Superseded — owned elsewhere, do not duplicate.** The moving 3->4 case IS scoped and
-  implemented on branch `feat/p2-freeze-control-3to4`, plan
-  `.agents/plans/p2_freeze_control_3to4.plan.md` (SS2 hold/trigger/geometry, SS4 tiers, SS9
+  implemented and merged in PR #187 (branch `feat/p2-freeze-control-3to4`); its plan
+  (SS2 hold/trigger/geometry, SS4 tiers, SS9
   correction, SS10 measurements rounds 4-7), Codex reviews r1-r5 (raw rounds pruned
   after merge; in git history). There the freeze control is re-bracketed at 3->4 with
   per-screenshot attestation: the cover is re-painted and tracked per rAF against the bound

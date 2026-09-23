@@ -1,6 +1,6 @@
 # Handover — Alpha Keynote live continuity, state at 2026-09-22 (evening)
 
-Supersedes `keynote-live-continuity-2026-09-22.md` (its facts hold). Owner rules unchanged: no merge without an
+Supersedes `keynote-live-continuity-2026-09-22.md` (removed 2026-09-23; in git history). Owner rules unchanged: no merge without an
 explicit request; Opus plans / Sonnet implements / Codex reviews; hands off Keynote unless told it is free.
 
 ## Where things are (verified after #200 merged, `7b826f13`)
@@ -14,7 +14,7 @@ explicit request; Opus plans / Sonnet implements / Codex reviews; hands off Keyn
 | Research evidence | `output/gate-runner-archive/{research-harnesses,requal-paint-oracle,run_gates.sh}` (git-ignored, 2.0 GB). |
 
 ## GL-replay opacity fix — stage G2, offline half SHIPPED (#200)
-Plan `.agents/plans/keynote_live_gl_replay_opacity.plan.md` rev 2; owner accepted decisions 1–5 (arithmetic blend
+Plan: the opacity plan rev 2 (PR #200; removed from the tree 2026-09-23); owner accepted decisions 1–5 (arithmetic blend
 reference over a READ background + α=0 identity control; patch on air — it REMOVES the build-1 pop; tolerance = settled
 leaf rect / MVP ≤ 1 px / ablation ≤ grid+2 px; additive behind `OBED_LIVE_GL_REPLAY`; green ROI → `{800,690,330×90}`).
 Shipped: `_check_effect_encoding` (one recursive schema of validator combinators; unmeasured ⇒ refuse) and
@@ -46,7 +46,7 @@ geometry-equal pairs`), which is a whole-deck refusal — gate 4→5 / 6→7 as 
   opacity plan §2 runtime half (ARM-POST proofs, rest-Opacity == 1.0, per-draw `uniform1f` inside the `replaying`
   counter, `progOpacityBefore` write-back, `contextLost` exemption, `glreplay-opacity-unproven` notes,
   `GL_REPLAY_VERSION`). Gated on Q3 (20-min long-run, context loss injected — NOT measured) and Q0b at n = 2 headless only.
-  Must publish `window.__OBED_GL_ORACLE__` (contract in the 2026-09-22 handover).
+  Must publish `window.__OBED_GL_ORACLE__` (as built in `src/obed_edom/live_gl_replay_js.py`).
 - Then G3–G6 per the arming plan; green-ROI relocation (O4) needs the composited margins re-measured in the patched state.
 - Still open elsewhere: go-to autoplay (in flight in the other worktree) · `instanceCheck.painting` 1↔2 on slide 3 ·
   freeze-control fixture refresh (owner-gated) · DeckLink venue test 2026-10-10.

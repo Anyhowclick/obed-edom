@@ -2,7 +2,7 @@
 
 Status: **rev 2 (2026-09-23)** — Fable HIGH rev 0, Opus EXTRA HIGH critique → rev 1; **owner accepted every recommended answer to the open questions (1–11) on 2026-09-23** → rev 2. Implementation in progress on `feat/gl-replay-g5g6`.
 Spec: `.agents/handovers/keynote-live-continuity-2026-09-23-g5.md`. Parents: `keynote_live_gl_replay_arming.plan.md` §5, §9–§11;
-`keynote_live_gl_replay_g3g4.plan.md` rev 3 §8; `.agents/reviews/gl-replay-g3/gates-r3.md`. Cites at `a56474f3`.
+the G3+G4 plan rev 3 §8 (merged with #214, removed from the tree; git history); `.agents/reviews/gl-replay-g3/gates-r3.md`. Cites at `a56474f3`.
 probe = `scripts/live_continuity_probe.py`, hap = `src/obed_edom/html_alpha_probe.py`, p2v = `src/obed_edom/p2_verdict.py`,
 p2s = `scripts/p2_recovery_html_adversarial.py`, G2 = `src/obed_edom/live_gl_replay_js.py`, core = `src/obed_edom/live_continuity_js.py`,
 host = `src/obed_edom/live_host.py`. **No product file changes:** core, G2, host, `live_continuity.py`, `live_runtime.py` keep their

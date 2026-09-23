@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -461,6 +462,98 @@ def _say_write_timing(timing: dict[str, Any], say: Callable[[str], None]) -> Non
                 f"role={d.get('role','') or '-'} @({d.get('x')},{d.get('y')})"
             )
         say(f"    ({len(slow)} object(s) over threshold total)")
+
+
+_PASS1_JS_STAGES = (
+    "open", "slideSize", "templateOpen", "layoutImport", "layoutApply", "trailingDelete",
+    "templateClose", "attrs", "asScript", "hides", "finish", "save", "close",
+)
+
+
+def _path_bytes(path: Path) -> int:
+    if path.is_file():
+        return path.stat().st_size
+    return sum(p.stat().st_size for p in path.rglob("*") if p.is_file() and not p.is_symlink())
+
+
+def _fmt_bytes(n: int) -> str:
+    return f"{n / 1e9:.2f} GB" if n >= 1e9 else f"{n / 1e6:.1f} MB"
+
+
+def _say_pass1_stages(
+    py_stages: dict[str, float],
+    jxa: dict[str, Any],
+    say: Callable[[str], None],
+    py_notes: dict[str, str] | None = None,
+) -> None:
+    """Python stages in seconds; `jxa["stages"]` in ms."""
+    notes = py_notes or {}
+    for name, sec in py_stages.items():
+        note = f" ({notes[name]})" if name in notes else ""
+        say(f"Pass 1 stage {name}: {sec:.1f} s{note}")
+    stages = jxa.get("stages")
+    if not isinstance(stages, dict):
+        return
+    attributed = 0.0
+    for name in _PASS1_JS_STAGES:
+        if name not in stages:
+            continue
+        ms = float(stages[name] or 0)
+        attributed += ms
+        note = ""
+        if name == "slideSize" and jxa.get("sizeProp"):
+            note = f" (sizeProp: {jxa['sizeProp']})"
+        elif name == "save":
+            retried = "yes" if jxa.get("saveRetried") else "no"
+            err = jxa.get("saveFirstError")
+            note = f" (retried: {retried}{f'; first error: {err}' if err else ''})"
+        say(f"Pass 1 stage {name}: {ms / 1000:.1f} s{note}")
+    if "total" not in stages:
+        return
+    total = float(stages["total"] or 0)
+    say(f"Pass 1 stage total: {total / 1000:.1f} s")
+    wall = py_stages.get("runJxa")
+    launch = f"{wall - total / 1000:.1f} s" if wall is not None else "n/a"
+    say(f"Pass 1 unattributed: js {(total - attributed) / 1000:.1f} s, osascript/launch {launch}")
+
+
+def _pass1_census(
+    transform_dicts: list[dict[str, Any]],
+    suppressed: set[int] | frozenset[int],
+    as_geom_slides: set[int] | frozenset[int],
+) -> dict[str, int]:
+    """Mirror of js `geometryPathForSlide` over `slidesInPlan`, plus per-spec cost classes."""
+    slides = {int(t["slide"]) for t in transform_dicts if t.get("slide") is not None}
+    attrs = {n for n in slides if n in suppressed}
+    as_path = {n for n in slides - attrs if n in as_geom_slides}
+    attrs_or_as = attrs | as_path
+    specs = [t for t in transform_dicts if t.get("role") != "hide"]
+    return {
+        "attrs": len(attrs),
+        "as": len(as_path),
+        "jxa": len(slides) - len(attrs) - len(as_path),
+        "specs": len(specs),
+        "hides": len(transform_dicts) - len(specs),
+        "noAttr": sum(
+            1 for t in specs
+            if int(t.get("slide") or 1) in attrs_or_as
+            and not t.get("font")
+            and not t.get("fontSize")
+            and len(t.get("color") or ()) < 3
+            and t.get("opacity") is None
+            and not t.get("locked")
+        ),
+        "locked": sum(1 for t in specs if t.get("locked")),
+        "groupChildren": sum(1 for t in specs if t.get("children")),
+    }
+
+
+def _say_pass1_census(census: dict[str, int], say: Callable[[str], None]) -> None:
+    say(
+        f"Pass 1 census: slides attrs={census['attrs']} as={census['as']} jxa={census['jxa']}; "
+        f"specs {census['specs']} (hides {census['hides']}, no-attr {census['noAttr']}, "
+        f"locked {census['locked']}, group-children {census['groupChildren']})"
+    )
 
 
 def _as_num(value: Any) -> str:
@@ -1412,12 +1505,23 @@ def remap_keynote(
             "Use the original 7680 wall .key, not a previous CG output."
         )
     say(f"Copying {source.name} → {dest.name}…")
+    source_bytes = _path_bytes(source)
+    template_bytes = _path_bytes(template_path)
+    t_prep = time.monotonic()
+    py_stages: dict[str, float] = {}
+    py_notes: dict[str, str] = {}
+    t0 = time.monotonic()
     copy_keynote(source, dest)
+    py_stages["copyDeck"] = time.monotonic() - t0
+    py_notes["copyDeck"] = _fmt_bytes(source_bytes)
     layout_dir = Path(tempfile.mkdtemp(prefix="obed-layouts-"))
     layout_src = layout_dir / template_path.name
     try:
         say(f"Copying 16:9 slide layouts from {template_path.name} onto the wall copy…")
+        t0 = time.monotonic()
         copy_keynote(template_path, layout_src)
+        py_stages["copyTemplate"] = time.monotonic() - t0
+        py_notes["copyTemplate"] = _fmt_bytes(template_bytes)
         say("Setting 16:9 canvas, applying CG layouts, then map/pin positions…")
         transform_dicts = [t.as_dict() for t in transforms]
         child_written = sum(1 for t in transform_dicts if t.get("children"))
@@ -1484,9 +1588,22 @@ def remap_keynote(
             ]
             if group_collapse_refused:
                 plan_out["groupCollapseRefused"] = group_collapse_refused
+        _say_pass1_census(
+            _pass1_census(
+                transform_dicts, suppressed, {int(k) for k in plan.get("asGeom") or {}}
+            ),
+            say,
+        )
+        py_stages = {
+            "prep": time.monotonic() - t_prep - py_stages["copyDeck"] - py_stages["copyTemplate"],
+            **py_stages,
+        }
+        t0 = time.monotonic()
         jxa = _run_jxa(plan)
+        py_stages["runJxa"] = time.monotonic() - t0
     finally:
         shutil.rmtree(layout_dir, ignore_errors=True)
+    _say_pass1_stages(py_stages, jxa, say, py_notes)
     if jxa.get("timing"):
         _say_write_timing(jxa["timing"], say)
     applied = int(jxa.get("applied") or 0)
@@ -1676,7 +1793,9 @@ def remap_keynote(
             "OBED_ZORDER_WRITE=off knowingly skips every z-order raise."
         )
     _require_pass1_saved_closed(jxa)
+    say("Z-order patch…")
     zorder_write_info = offline_write.run_offline_zorder(dest, zorder_mode, zorder_targets, say)
+    say("Builds/transitions: reading source and output decks…")
     # Builds/transitions follow the source. Unconditional and runs last — verify-all,
     # patch-none when the slide set is empty; must keep running LAST, after the z-order write.
     build_result = restore_source_builds(dest, source, set(), say)

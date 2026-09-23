@@ -111,7 +111,9 @@ todos:
       open/save/close fallback session alive on a substantial slide set, and that session dominates cost,
       not per-object writes. Text conversion shrinks the session body (~704→~280 specs): a modest speed
       win + a real coverage/correctness win. Deleting the pass needs offset crops + groups.
-    status: pending
+      CLOSED 2026-09-23 (owner): informational note, not a task; wall-time work continues in
+      `pass1_profile.plan.md`.
+    status: closed
 ---
 
 # Offline text — middle-anchor reposition (completed 2026-09-21)

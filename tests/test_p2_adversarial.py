@@ -870,7 +870,7 @@ def test_moving_continuity_fails_closed_on_rvfc_rewind():
 # `_score_freeze_control` — Phase-2 A-B-A composited-freeze verdict (pure logic),
 # re-bracketed at the 3->4 moving Magic Move (the 1->2 carry is refused, so there
 # is no carried movie to freeze there — see
-# `.agents/plans/p2_freeze_control_3to4.plan.md`).
+# the freeze-control 3->4 plan, PR #187).
 #
 # Arm A holds a partial stale cover, tracking the MOVING measured footprint, over
 # the burnt-in counter for the middle run only, so `movingIndexRunAtCut` goes RED

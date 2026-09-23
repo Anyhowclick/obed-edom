@@ -2693,7 +2693,7 @@ def _moving_index_run_at_cut(
 # moving Magic Move, none of which the partial left-cover touches.
 # `movingIndexRunAtCut` and `continueThroughMovingMagicMove3to4Pass` are
 # DELIBERATELY excluded — they are what the freeze flips RED in B (plan
-# p2_freeze_control_3to4.plan.md §4, "the slide-1/2 composition keys go").
+# of PR #187 §4, "the slide-1/2 composition keys go").
 _ISOLATION_KEYS = (
     "movingContinuityOk",
     "movingContinuityFailedEmpty",
@@ -3321,7 +3321,7 @@ def _score_freeze_control(
     legacy_unrecorded_cadence: tuple[int, ...] | None = None,
 ) -> dict:
     """Pure A-B-A verdict for `freezeControlCaughtByCounter`, re-bracketed at the
-    3->4 moving Magic Move (plan p2_freeze_control_3to4.plan.md §4; the 1->2 carry
+    3->4 moving Magic Move (plan of PR #187 §4; the 1->2 carry
     is refused, so there is no carried movie to freeze there).
 
     Passes IFF the injected freeze turns the at-cut counter RED for the right
