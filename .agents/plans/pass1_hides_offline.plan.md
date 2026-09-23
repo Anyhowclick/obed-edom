@@ -524,6 +524,9 @@ earlier fixes closed. Each round adds one line to §Review log. At merge the raw
 5. Twin slides whose disambiguation would rest on approximate (`needs_keynote`) geometry are excluded BEFORE deferral and
    stay on the Keynote delete, like builds and duals (owner agreed, 2026-09-23, after the round-4 FRC dry run refused slide 20).
    `iwa_hides.pre_deferral_twin_risk` must be a superset of the saved-deck refusal; the post-save check stays as the backstop.
+   The payload carries no `needs_keynote`, so the first proxy excluded 17 FRC slides (≈190 hides, ≈23 s). Owner chose (b):
+   the offline reader records the flag on payload items. The predicate uses it when present and falls back to the proxy
+   for JXA or cached payloads.
 
 ## Owner questions (resolved above)
 
