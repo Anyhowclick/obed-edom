@@ -7,6 +7,8 @@ overview: >-
   critique). One always-on stage map in remap_keynote.js plus four Python timers, printed as `say`
   lines with closure residuals; one owner-gated run; then levers gated on the measured stage.
   MEASURE BEFORE BUILDING: only the first two todos are ungated.
+  PROFILED 2026-09-23 (see `.agents/reviews/pass1-profile-2026-09-23/README.md`): pass 1 is 36%, not the assumed 55%; the z-order patch (23%,
+  Python) and the bulk seed read (19%) are the other two levers; copy/save/layouts are dead or below gate.
 todos:
   - id: m1-stage-timer
     content: >-
@@ -33,7 +35,9 @@ todos:
       that out), non-hide specs, hides, specs carrying no font/fontSize/color/opacity, locked
       specs, group specs with `children` (attrs mode still resolves every child via getItem and
       writes nothing, js:218-219/170-174).
-    status: pending
+      DONE 2026-09-23 (f3f7d0d2 + 65e7342e elapsed-seconds log prefix + bb5d8180 progress lines); Opus +
+      Codex reviewed, fix-then-ship findings applied; full suite green.
+    status: completed
   - id: m1-run
     content: >-
       ONE owner-gated run: same command/env as the m1 regrow run (defaults, `--slides
@@ -44,7 +48,11 @@ todos:
       `.agents/reviews/pass1-profile-<date>/README.md` and rank the stages. No lever below may
       start before this record exists. (Note: ditto preserves the source mtime on the copy, so the
       earlier "12 min from mtimes" cannot be decomposed and is context only.)
-    status: pending
+      DONE 2026-09-23, three runs, record `.agents/reviews/pass1-profile-2026-09-23/README.md`. Pass 1 = 267–280 s (36%) of a 769–785 s run — NOT 12 min
+      (the mtime estimate was never decomposable). R1 0.1 s, R2 0.9 s, null control identical. Inside pass 1:
+      attrs ~97 s + hides ~114 s = 79%. Outside: offline z-order patch 183 s (23%, pure Python), bulk live seed
+      read 150 s (19%), fallback 81 s, stat-finalize 44 s.
+    status: completed
   - id: h-attrs-roundtrips
     content: >-
       GATE: attrs + hides ≥ 60 s and projected saving ≥ 30 s. Measured cost model per non-hide
@@ -59,6 +67,8 @@ todos:
       Applied/missed must stay identical (attrs specs count as applied js:460; 0-applied drives
       the abort js:771-786 and py:1496-1507). Oracle: same Applied/missed, same fallback line,
       pass-1 deck slide members byte-equal before/after (unzip -l + CRC diff).
+      GATE MET (2026-09-23): attrs + hides ≈ 212 s. Census: 2443 no-attr specs, 947 hides at 122 ms, 1 slide on
+      the full jxa path (identify it first). Next lever to build, after the two NEW todos are profiled offline.
     status: pending
   - id: h-copy-clone
     content: >-
@@ -68,7 +78,8 @@ todos:
       m1-run pass criteria repeat. "Save as" from the source is REJECTED (opens the owner's source,
       still writes 6.7 GB); the offline writer cannot replace the copy (pass 1 still needs Keynote
       for canvas + layouts). The template copy is small — measure before touching.
-    status: pending
+      DEAD 2026-09-23: copy 5 s.
+    status: closed-not-pursued
   - id: h-save
     content: >-
       GATE: save + close ≥ 60 s. If `saveRetried`: the first `Keynote.save` (js:794) threw —
@@ -77,7 +88,8 @@ todos:
       Lever: drop the retry when the first save is still in flight (check dirty before close).
       Never drop save/close (`_require_pass1_saved_closed` py:1108-1117). If not retried: record
       that the save is the 6.7 GB package rewrite, no cheap lever.
-    status: pending
+      DEAD 2026-09-23: save 0.9 s, never retried.
+    status: closed-not-pursued
   - id: h-layouts
     content: >-
       GATE: layoutImport + layoutApply + trailingDelete ≥ 60 s. Cost: findLayout (js:532-543) =
@@ -87,13 +99,31 @@ todos:
       slides; deleteTrailingSlides (:636-654) fetches dest.slides() twice per deleted slide.
       Lever: build a name→layout map once per doc and skip the read-back. If the time is in the
       baseLayout SET itself, record, no lever.
-    status: pending
+      BELOW GATE 2026-09-23: 39 s total (layoutApply 30 s).
+    status: closed-below-gate
   - id: h-open-size
     content: >-
       RECORD ONLY: Keynote.open (js:725; a -1712 here is uncaught and would fail the run, so it
       did not time out) and setSlideSize (:734; e1 swallowed, retried via slideWidth :350-362 —
       `sizeProp` now logged). No cheap lever; reordering vs layouts is a correctness change
       needing its own plan.
+      RECORDED 2026-09-23: open 3.6 s, slideSize 6.0 s, sizeProp width.
+    status: completed
+  - id: h-zorder-patch
+    content: >-
+      NEW from the profile (2026-09-23): `run_offline_zorder` takes 183 s (23% of the run) for 83
+      slides — pure Python, no Keynote. MEASURE FIRST, offline: cProfile the call on the run-3 output
+      deck (or a copy of the pass-1 snapshot + the same zorder targets from the run record) and name
+      the hot path (per-slide full-deck decode? re-encode per member? verify decode?). Gate: a
+      projected saving ≥ 60 s. Owner-gated live run only for the null control after a change.
+    status: pending
+  - id: h-bulk-seed-read
+    content: >-
+      NEW from the profile (2026-09-23): the bulk live seed read (`inspect.bulk_geometry`,
+      `bulk_geometry.js`) takes 150 s (19%) for 104 slides ≈ 1.4 s/slide. Establish what it reads
+      per slide versus what the writer consumes (`_OFFLINE_SOFT_SEED_KINDS` = text only; group rows
+      unused since the groups branch stopped) and whether the read can be narrowed to the kinds and
+      slides that need a seed. Gate: projected saving ≥ 60 s; needs one owner-gated live run.
     status: pending
   - id: design-offline-attrs
     content: >-
