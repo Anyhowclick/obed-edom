@@ -2822,3 +2822,90 @@ class TestOracleCombiner:
         assert combined["verdict"] is None
         assert combined["status"] == "inconclusive"
         assert combined["reason"] == "noise floor above threshold"
+
+
+class TestOccludedCells:
+    """GL-replay G5 plan §3.5: `score_live_coverage(..., occluded_cells=...)`. Cells
+    are `(row, col)` in SCREEN orientation (row 0 = top) on the same 16x8 grid the
+    bands use; the caller flips the GL mask (row 0 = bottom) before passing it.
+    `None` must reproduce today's result byte for byte; with a mask, band means run
+    over non-occluded cells only and a fully occluded band is excluded, not dead."""
+
+    CLIPPED = {"x": 111, "y": 797, "w": 948, "h": 264}
+
+    def _cell_box(self, row, col, cols=16, rows=8):
+        c = self.CLIPPED
+        x0 = c["x"] + round(col * c["w"] / cols)
+        x1 = c["x"] + round((col + 1) * c["w"] / cols)
+        y0 = c["y"] + round(row * c["h"] / rows)
+        y1 = c["y"] + round((row + 1) * c["h"] / rows)
+        return (x0, y0, x1 - x0, y1 - y0)
+
+    def _live_except(self, cells):
+        frames = _static_burst()
+        _paint_live(frames, _rect_box(BIG_RECT))
+        for row, col in cells:
+            _paint_static(frames, self._cell_box(row, col))
+        return frames
+
+    def _score(self, frames, **kwargs):
+        from obed_edom.html_alpha_probe import liveness_mask, score_live_coverage
+
+        return score_live_coverage(liveness_mask(frames), BIG_RECT, **kwargs)
+
+    @pytest.mark.parametrize("static_cells", [[], [(r, 15) for r in range(8)], [(0, c) for c in range(16)]])
+    def test_none_is_todays_result_exactly(self, static_cells):
+        frames = self._live_except(static_cells)
+        assert self._score(frames, occluded_cells=None) == self._score(frames)
+
+    def test_a_fully_occluded_column_is_excluded_not_dead(self):
+        column = [(r, 15) for r in range(8)]
+        frames = self._live_except(column)
+        assert self._score(frames)["deadColumnBands"] == [15]
+        masked = self._score(frames, occluded_cells=column)
+        assert masked["verdict"] is True
+        assert masked["deadColumnBands"] == [] and masked["deadRowBands"] == []
+        assert masked["excludedColumnBands"] == [15] and masked["excludedRowBands"] == []
+        assert masked["occludedCells"] == sorted(column)
+
+    def test_a_dead_band_outside_the_mask_stays_dead(self):
+        frames = self._live_except([(r, 3) for r in range(8)])
+        masked = self._score(frames, occluded_cells=[(r, 15) for r in range(8)])
+        assert masked["verdict"] is False
+        assert masked["deadColumnBands"] == [3]
+        assert masked["reason"] == "dead bands"
+
+    def test_a_partly_occluded_band_is_judged_on_its_visible_cells(self):
+        """Seven occluded cells cannot vouch for the eighth: a dead visible cell
+        keeps column 15 dead."""
+        frames = self._live_except([(r, 15) for r in range(8)])
+        masked = self._score(frames, occluded_cells=[(r, 15) for r in range(7)])
+        assert masked["verdict"] is False
+        assert masked["deadColumnBands"] == [15]
+        assert masked["excludedColumnBands"] == []
+
+    def test_live_fraction_is_over_visible_cells(self):
+        cells = [(r, c) for r in range(8) for c in range(8, 16)]
+        frames = self._live_except(cells)
+        assert self._score(frames)["verdict"] is False
+        masked = self._score(frames, occluded_cells=cells)
+        assert masked["liveFrac"] == pytest.approx(1.0)
+        assert masked["verdict"] is True
+
+    def test_every_cell_occluded_is_never_a_pass(self):
+        every = [(r, c) for r in range(8) for c in range(16)]
+        masked = self._score(self._live_except([]), occluded_cells=every)
+        assert masked["verdict"] is False
+        assert masked["reason"] == "every cell occluded"
+
+    def test_an_empty_mask_scores_like_no_mask(self):
+        frames = self._live_except([(r, 15) for r in range(8)])
+        masked = self._score(frames, occluded_cells=[])
+        plain = self._score(frames)
+        assert {k: masked[k] for k in plain} == plain
+        assert masked["occludedCells"] == []
+
+    @pytest.mark.parametrize("cell", [(8, 0), (0, 16), (-1, 0), ("a", 0), (0,)])
+    def test_an_out_of_grid_cell_fails_loudly(self, cell):
+        with pytest.raises(ValueError):
+            self._score(self._live_except([]), occluded_cells=[cell])

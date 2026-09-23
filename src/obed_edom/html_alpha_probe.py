@@ -13,7 +13,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1652,12 +1652,22 @@ def score_live_coverage(
     band_live_frac: float = LIVE_BAND_MIN_FRAC,
     min_live_frac: float = LIVE_RECT_MIN_FRAC,
     inset_px: int = LIVE_RECT_INSET_PX,
+    occluded_cells: Iterable[tuple[int, int]] | None = None,
 ) -> dict[str, Any]:
     """Require every column AND row band of a movie rect to be live (plan §1.2.1).
 
     Bands beat a whole-rect fraction: an interior opaque occluder never blanks a
     full band, while a sub-rect live patch blanks the bands it does not reach.
+
+    ``occluded_cells`` (screen ``(row, col)``, row 0 = top) are excluded: band means
+    and ``liveFrac`` run over the remaining cells, and a fully occluded band is
+    reported as excluded, never dead. ``None`` is the unmasked score.
     """
+    if occluded_cells is not None:
+        return _score_live_coverage_occluded(
+            mask, rect, occluded_cells, cols=cols, rows=rows, band_live_frac=band_live_frac,
+            min_live_frac=min_live_frac, inset_px=inset_px,
+        )
     height, width = mask.shape[:2]
     clipped = _clip_rect(rect, height, width, inset_px=inset_px)
     if clipped is None or clipped[2] < cols or clipped[3] < rows:
@@ -1704,6 +1714,80 @@ def score_live_coverage(
         "deadRowBands": dead_rows,
         "rect": {"x": x, "y": y, "w": w, "h": h},
         "reason": reason,
+    }
+
+
+def _score_live_coverage_occluded(
+    mask: np.ndarray,
+    rect: dict[str, float],
+    occluded_cells: Iterable[tuple[int, int]],
+    *,
+    cols: int,
+    rows: int,
+    band_live_frac: float,
+    min_live_frac: float,
+    inset_px: int,
+) -> dict[str, Any]:
+    cells: set[tuple[int, int]] = set()
+    for cell in occluded_cells:
+        if (
+            not isinstance(cell, (tuple, list)) or len(cell) != 2
+            or not all(isinstance(v, int) and not isinstance(v, bool) for v in cell)
+            or not (0 <= cell[0] < rows and 0 <= cell[1] < cols)
+        ):
+            raise ValueError(f"occluded cell {cell!r} is not on the {rows}x{cols} band grid")
+        cells.add((int(cell[0]), int(cell[1])))
+    height, width = mask.shape[:2]
+    clipped = _clip_rect(rect, height, width, inset_px=inset_px)
+    base = {"occludedCells": sorted(cells), "excludedColumnBands": [], "excludedRowBands": []}
+    if clipped is None or clipped[2] < cols or clipped[3] < rows:
+        out_rect = {"x": clipped[0], "y": clipped[1], "w": clipped[2], "h": clipped[3]} if clipped else None
+        return {
+            "verdict": False, "liveFrac": 0.0, "deadColumnBands": [], "deadRowBands": [],
+            "rect": out_rect, "reason": "rect outside image or too small", **base,
+        }
+    x, y, w, h = clipped
+    sub = mask[y : y + h, x : x + w]
+    col_edges = [round(i * w / cols) for i in range(cols + 1)]
+    row_edges = [round(i * h / rows) for i in range(rows + 1)]
+    visible = np.ones((h, w), dtype=bool)
+    for row, col in cells:
+        visible[row_edges[row] : row_edges[row + 1], col_edges[col] : col_edges[col + 1]] = False
+    rect_out = {"x": x, "y": y, "w": w, "h": h}
+    if not visible.any():
+        return {
+            "verdict": False, "liveFrac": 0.0, "deadColumnBands": [], "deadRowBands": [],
+            "rect": rect_out, "reason": "every cell occluded", **base,
+        }
+
+    def band_mean(region: np.ndarray, seen: np.ndarray) -> float | None:
+        return float(region[seen].mean()) if seen.any() else None
+
+    col_means = [
+        band_mean(sub[:, col_edges[i] : col_edges[i + 1]], visible[:, col_edges[i] : col_edges[i + 1]])
+        for i in range(cols)
+    ]
+    row_means = [
+        band_mean(sub[row_edges[i] : row_edges[i + 1], :], visible[row_edges[i] : row_edges[i + 1], :])
+        for i in range(rows)
+    ]
+    live_frac = float(sub[visible].mean())
+    dead_cols = [i for i, m in enumerate(col_means) if m is not None and m < band_live_frac]
+    dead_rows = [i for i, m in enumerate(row_means) if m is not None and m < band_live_frac]
+    verdict = not dead_cols and not dead_rows and live_frac >= min_live_frac
+    reason = None
+    if not verdict:
+        reason = "dead bands" if dead_cols or dead_rows else "live fraction below threshold"
+    return {
+        "verdict": bool(verdict),
+        "liveFrac": live_frac,
+        "deadColumnBands": dead_cols,
+        "deadRowBands": dead_rows,
+        "rect": rect_out,
+        "reason": reason,
+        "occludedCells": base["occludedCells"],
+        "excludedColumnBands": [i for i, m in enumerate(col_means) if m is None],
+        "excludedRowBands": [i for i, m in enumerate(row_means) if m is None],
     }
 
 
