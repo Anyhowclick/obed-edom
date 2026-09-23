@@ -1286,12 +1286,14 @@ def test_run_offline_zorder_kind_index_map_omits_rolled_back_slide(monkeypatch):
         raising=False,
     )
 
-    def fake_read_slide_zorder(dest, n):
-        if n == 1:
-            return (["b", "a"], ["b", "a"])  # matches the patched order -> keeps slide 1
-        return (["bogus"], ["bogus"])  # mismatches slide 2's patched order -> rolls back
+    def fake_read_deck_zorders(dest, ns):
+        assert list(ns) == [1, 2]
+        return {
+            1: (["b", "a"], ["b", "a"]),  # matches the patched order -> keeps slide 1
+            2: (["bogus"], ["bogus"]),  # mismatches slide 2's patched order -> rolls back
+        }
 
-    monkeypatch.setattr(iwa_write, "read_slide_zorder", fake_read_slide_zorder)
+    monkeypatch.setattr(iwa_write, "read_deck_zorders", fake_read_deck_zorders)
 
     targets = {1: {"stat": ["a"], "badge": []}, 2: {"stat": ["x"], "badge": []}}
     result = offline_write.run_offline_zorder(Path("dummy.key"), "verify", targets, lambda s: None)
