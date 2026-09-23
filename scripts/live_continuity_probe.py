@@ -1641,8 +1641,9 @@ def score_armed(
     two settled reads: the pinned module injected; LIVE on both reads with the loop
     progressing in one epoch; exactly the arm/live/zone/carried notes of a clean arm;
     no painting `<video>` over the movie; and the pool is {carried} plus siblings,
-    out of the document, the carried clock running in real time. Every pre-flip
-    footprint owner must be that single carried decoder. Missing is False."""
+    out of the document, the carried clock running in real time. At least one pre-flip
+    footprint owner resolved, and every resolved one is that single carried decoder
+    (unresolved reads are dropped, as P2's `carriedClock1to2`). Missing is False."""
     checks = {"mode": False, "live": False, "events": False, "noPainting": False, "pool": False, "owner": False}
     detail: dict[str, Any] = {}
     gl = continuity.get("glReplay") if isinstance(continuity, dict) else None
@@ -1660,7 +1661,7 @@ def score_armed(
         checks["noPainting"], detail["paintingOverRect"] = _armed_no_painting(reads, armed)
         carried = _carried_el_id(states[-1])
         checks["pool"], detail["pool"] = _armed_pool(states, armed, carried)
-        owners = list(owner_ids) if isinstance(owner_ids, list) else []
+        owners = [o for o in owner_ids if o is not None] if isinstance(owner_ids, list) else []
         checks["owner"] = carried is not None and bool(owners) and all(o == carried for o in owners)
         detail["preFlipOwners"] = sorted({str(o) for o in owners})
     else:
@@ -2504,7 +2505,8 @@ def score_vgl_armed_slide(entry: Any, armed: dict[str, Any]) -> dict[str, Any]:
             slide=slide.get("verdict") is True,
             inpageLive=inpage.get("verdict") is True,
             pausedDead=paused.get("verdict") is False,
-            screenshotLive=(oracles.get("screenshot") or {}).get("verdict") is True,
+            screenshotLive=rect.get("expect") == LIVE and (oracles.get("screenshot") or {}).get("status") == "live"
+            and (oracles.get("screenshot") or {}).get("verdict") is True,
             masked=(rect.get("occlusion") or {}).get("status") == "ok",
             noPainting=isinstance(painting, list) and not any(
                 isinstance(v, dict) and isinstance(v.get("authored"), dict)

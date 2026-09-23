@@ -4107,7 +4107,7 @@ def _vgl_slide(ordinal: int, *, armed: bool = False) -> dict[str, Any]:
         rect.update(
             label=f"{BIG_ASSET}#1",
             oracles={
-                "screenshot": {"verdict": True},
+                "screenshot": {"verdict": True, "status": "live"},
                 "inpage": {"verdict": True, "status": "live", "controls": {"pausedDecoder": {"verdict": False}}},
             },
             occlusion={"status": "ok", "cells": 20},
@@ -4419,10 +4419,15 @@ class TestCodexR1ProbeFixes:
         assert {k for k, ok in scored["checks"].items() if not ok} == {"owner"}
         assert probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[2, 2])["verdict"] is True
 
-    @pytest.mark.parametrize("owners", [None, [], [1, None], [1, 2]])
-    def test_missing_or_mixed_owners_are_red(self, owners: Any) -> None:
+    @pytest.mark.parametrize("owners", [None, [], [None], [None, None], [1, 2], [2, None]])
+    def test_no_resolved_owner_or_a_sibling_owner_is_red(self, owners: Any) -> None:
         scored = probe.score_armed(_armed_reads(), ARMED, GL_CONTINUITY, owner_ids=owners)
         assert {k for k, ok in scored["checks"].items() if not ok} == {"owner"}
+
+    @pytest.mark.parametrize("owners", [[1, None], [None, 1, 1]])
+    def test_an_unresolved_owner_read_is_dropped(self, owners: Any) -> None:
+        """Owner 2026-09-23, mirroring P2's carriedClock1to2: gates r2 saw ['1', None]."""
+        assert probe.score_armed(_armed_reads(), ARMED, GL_CONTINUITY, owner_ids=owners)["verdict"] is True
 
     def test_pre_flip_owners_read_only_the_instance_rect_before_the_flip(self) -> None:
         samples = [
@@ -4520,3 +4525,42 @@ class TestArmedReadWaitsForDestination:
         probe.boundary_observer(host, {"retire": None, "armed": ARMED}, out, sleep=clock.sleep, now=clock.now)(2)
         assert probe.GL_REPLAY_READ_JS not in host.transport.evaluations
         assert probe.score_armed(out["armed1to2"], ARMED, GL_CONTINUITY, owner_ids=[1, 1])["verdict"] is False
+
+
+class TestVglScreenshotLiveIsPhysical:
+    """Gate runner r2: `oracles.screenshot.verdict` means "met expectation", so a
+    DEAD-expected rect that read dead must not count as a LIVE screenshot."""
+
+    def _slide(self, record: dict[str, Any]) -> dict[str, Any]:
+        entry = _vgl_pass()
+        entry["slides"][1]["perRect"] = [record]
+        return entry
+
+    def test_a_dead_expected_rect_that_read_dead_is_red(self) -> None:
+        met_dead = probe.combine_rect_oracles(
+            {"expect": probe.DEAD, "verdict": True, "label": f"{BIG_ASSET}#1", "liveFrac": 0.0},
+            {"verdict": False, "status": "dead", "reason": None, "controls": {"pausedDecoder": {"verdict": False}}},
+        )
+        met_dead["occlusion"] = {"status": "ok"}
+        assert met_dead["oracles"]["screenshot"] == {"verdict": True, "status": "dead", "liveFrac": 0.0}
+        scored = probe.score_vgl_armed_slide(self._slide(met_dead), ARMED)
+        assert scored["checks"]["screenshotLive"] is False and scored["verdict"] is False
+
+    def test_a_live_expected_rect_that_read_live_is_green(self) -> None:
+        met_live = probe.combine_rect_oracles(
+            {"expect": probe.LIVE, "verdict": True, "label": f"{BIG_ASSET}#1", "liveFrac": 0.9},
+            {"verdict": True, "status": "live", "reason": None, "controls": {"pausedDecoder": {"verdict": False}}},
+        )
+        met_live["occlusion"] = {"status": "ok"}
+        scored = probe.score_vgl_armed_slide(self._slide(met_live), ARMED)
+        assert scored["verdict"] is True, scored
+
+    @pytest.mark.parametrize("mutate", [
+        lambda r: r["oracles"]["screenshot"].update(status="pass"),
+        lambda r: r["oracles"]["screenshot"].pop("status"),
+        lambda r: r.update(expect=probe.DEAD),
+    ])
+    def test_status_or_expectation_other_than_live_is_red(self, mutate: Any) -> None:
+        entry = _vgl_pass()
+        mutate(entry["slides"][1]["perRect"][0])
+        assert probe.score_vgl_armed_slide(entry, ARMED)["checks"]["screenshotLive"] is False
