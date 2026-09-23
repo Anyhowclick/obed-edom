@@ -81,6 +81,12 @@ function collectionNamed(slide, name) {
   return null;
 }
 
+function collectionOf(slide, name, cache) {
+  if (!cache) return collectionNamed(slide, name);
+  if (!Object.prototype.hasOwnProperty.call(cache, name)) cache[name] = collectionNamed(slide, name);
+  return cache[name];
+}
+
 function itemAt(col, index) {
   const n = countOf(col);
   if (index < 0 || index >= n) return null;
@@ -91,17 +97,17 @@ function itemAt(col, index) {
   return null;
 }
 
-function getItem(slide, spec) {
+function getItem(slide, spec, cache) {
   const kind = spec.kind || "";
   const kindIndex = spec.kindIndex != null ? Number(spec.kindIndex) : Number(spec.itemIndex);
   const colName = kindColName(kind);
   if (colName && !isNaN(kindIndex)) {
-    const typed = itemAt(collectionNamed(slide, colName), kindIndex);
+    const typed = itemAt(collectionOf(slide, colName, cache), kindIndex);
     if (typed) return typed;
   }
   const itemIndex = Number(spec.itemIndex);
   if (!isNaN(itemIndex)) {
-    return itemAt(collectionNamed(slide, "iWorkItems"), itemIndex);
+    return itemAt(collectionOf(slide, "iWorkItems", cache), itemIndex);
   }
   return null;
 }
@@ -173,6 +179,7 @@ function xyOf(obj) {
 // group's live frame (the union of whatever landed) becomes a phantom straddling both
 // the old and new positions with no repair path.
 function applyGroupChildren(obj, spec, mode) {
+  if (mode === "attrs") return false;
   const kids = spec.children || [];
   const resolved = [];
   for (let i = 0; i < kids.length; i++) {
@@ -201,6 +208,16 @@ function applyGroupChildren(obj, spec, mode) {
     }
   }
   return wrote;
+}
+
+function writesAttrs(spec) {
+  return (
+    spec.opacity != null ||
+    Boolean(spec.font) ||
+    Boolean(spec.fontSize) ||
+    Boolean(spec.color && spec.color.length >= 3) ||
+    Boolean(spec.locked)
+  );
 }
 
 // Never size in a pos-only pass (JXA yank). Line width=length / height=0 — size places the rule.
@@ -432,6 +449,7 @@ function applyTransforms(slides, transforms, collectionsOut, missReasons, mode) 
   mode = mode || "full";
   let applied = 0;
   let missed = 0;
+  const cache = mode === "attrs" ? {} : null;
   for (let t = 0; t < transforms.length; t++) {
     const spec = transforms[t];
     const slideNo = Number(spec.slide) || 1;
@@ -451,7 +469,7 @@ function applyTransforms(slides, transforms, collectionsOut, missReasons, mode) 
     }
     // Hides are deleted, not opacity 0 (ghosts still catch clicks). Defer to deleteHides after geometry so kindIndex lookups stay valid.
     if (spec.role === "hide") continue;
-    const obj = getItem(slide, spec);
+    const obj = getItem(slide, spec, cache && (cache[slideNo] || (cache[slideNo] = {})));
     if (!obj) {
       missed += 1;
       if (missReasons.length < 8) {
@@ -459,6 +477,10 @@ function applyTransforms(slides, transforms, collectionsOut, missReasons, mode) 
           "slide " + slideNo + " " + (spec.kind || "item") + "[" + spec.kindIndex + "] missing"
         );
       }
+      continue;
+    }
+    if (mode === "attrs" && !writesAttrs(spec)) {
+      applied += 1;
       continue;
     }
     const _t0 = TIMING ? _now() : 0;
@@ -898,6 +920,8 @@ if (typeof module !== "undefined" && module.exports) {
     tempScriptPath: tempScriptPath,
     applyGeom: applyGeom,
     applyGroupChildren: applyGroupChildren,
+    applyTransforms: applyTransforms,
+    writesAttrs: writesAttrs,
     slidesInPlan: slidesInPlan,
     applyNonReuseSlide: applyNonReuseSlide,
     _stage: _stage,

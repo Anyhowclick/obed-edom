@@ -539,6 +539,7 @@ def _pass1_census(
             and not t.get("fontSize")
             and len(t.get("color") or ()) < 3
             and t.get("opacity") is None
+            and not t.get("locked")
         ),
         "locked": sum(1 for t in specs if t.get("locked")),
         "groupChildren": sum(1 for t in specs if t.get("children")),
