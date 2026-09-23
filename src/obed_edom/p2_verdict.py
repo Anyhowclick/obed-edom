@@ -978,6 +978,9 @@ GL_CLOCK_RATE_MAX = 1.25
 GL_INDEX_MAX_STEP = 64
 GL_INDEX_MIN_AFTER_FLIP = 4
 GL_SAMPLE_FRAME_MIN_READS = 3
+GL_PROBE_MIN_READS = 3
+GL_PROBE_PAIR_MAX_DELTA = 2
+GL_PROBE_PAIRS_MIN_AGREE = 12
 GL_HANDOFF_STAND_DOWN = "canvasRemoved"
 
 
@@ -1024,11 +1027,14 @@ def progressingIndexAfterFlip(
     index_samples: list[dict],
     flip_index: int | None,
     sample_frame_indices: list,
+    gl_probe_indices: list,
     *,
     min_after: int = GL_INDEX_MIN_AFTER_FLIP,
     min_sample_frames: int = GL_SAMPLE_FRAME_MIN_READS,
+    min_gl_probes: int = GL_PROBE_MIN_READS,
 ) -> dict:
-    """Clause (f) (plan §4.2 f): composite and `sampleFrame` counters advance after the flip."""
+    """Clause (f) (plan §4.2 f; GL-replay (c) N5): the composite, `sampleFrame` and GL `probe`
+    counters advance after the flip."""
     if not isinstance(flip_index, int) or not isinstance(index_samples, list) or not 0 <= flip_index <= len(index_samples):
         composite = {"ok": False, "reason": "no scene-hash flip observed", "nDecoded": 0}
     else:
@@ -1037,14 +1043,60 @@ def progressingIndexAfterFlip(
             min_decoded=min_after,
         )
     source = _index_series_progress(list(sample_frame_indices or []), min_decoded=min_sample_frames)
+    gl = _index_series_progress(list(gl_probe_indices or []), min_decoded=min_gl_probes)
     return {
-        "ok": bool(composite["ok"] and source["ok"]),
+        "ok": bool(composite["ok"] and source["ok"] and gl["ok"]),
         "composite": composite,
         "sourceSampleFrame": source,
+        "glProbe": gl,
         "agreementNonGating": {
             "compositeForward": sum(composite.get("deltas") or []),
             "sourceForward": sum(source.get("deltas") or []),
+            "glForward": sum(gl.get("deltas") or []),
         },
+    }
+
+
+def _is_index(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def glProbeSampleFramePairing(
+    runs: object,
+    *,
+    lag: int = 0,
+    max_delta: int = GL_PROBE_PAIR_MAX_DELTA,
+    min_agree: int = GL_PROBE_PAIRS_MIN_AGREE,
+) -> dict:
+    """A7′ (GL-replay (c) plan §8): each probe counter against the same read's `sampleFrame`
+    counter, pooled over runs' `glSlide2Reads`. `lag=1` pairs with the previous read (the
+    known-bad). An `ok` probe with `alphaMin` < 255 is an instrument escalation, never agreement."""
+    pairs, alpha_below = [], []
+    for run_i, reads in enumerate(runs if isinstance(runs, list) else []):
+        reads = reads if isinstance(reads, list) else []
+        for i, read in enumerate(reads):
+            read = read if isinstance(read, dict) else {}
+            meta = read.get("glProbeMeta") if isinstance(read.get("glProbeMeta"), dict) else {}
+            if meta.get("ok") is True and meta.get("alphaMin") != 255:
+                alpha_below.append({"run": run_i, "read": i, "alphaMin": meta.get("alphaMin")})
+            src = reads[i - lag] if 0 <= i - lag < len(reads) and isinstance(reads[i - lag], dict) else {}
+            probe, frame = read.get("glProbeIndex"), src.get("frameIndex")
+            delta = None
+            if _is_index(probe) and _is_index(frame):
+                half = INDEX_PATCH_MODULO // 2
+                delta = (probe - frame + half) % INDEX_PATCH_MODULO - half
+            pairs.append({"run": run_i, "read": i, "glProbeIndex": probe, "frameIndex": frame, "delta": delta})
+    agree = sum(1 for pair in pairs if pair["delta"] is not None and abs(pair["delta"]) <= max_delta)
+    return {
+        "ok": bool(agree >= min_agree and not alpha_below),
+        "instrumentEscalation": bool(alpha_below),
+        "nPairs": len(pairs),
+        "nAgree": agree,
+        "minAgree": min_agree,
+        "maxDelta": max_delta,
+        "lag": lag,
+        "alphaBelow255": alpha_below,
+        "pairs": pairs,
     }
 
 
@@ -1336,6 +1388,7 @@ def glReplayCarry1to2(
     index_samples: list[dict],
     flip_index: int | None,
     sample_frame_indices: list,
+    gl_probe_indices: list,
     pre_flip_owner_ids: list,
     gl_states_s2: object,
     gl_state_after: object,
@@ -1370,7 +1423,7 @@ def glReplayCarry1to2(
     census = glCarryCensusVerdict(gl_carry_census, carried_el_id)
     painting = lingering.get("paintingCount") if isinstance(lingering, dict) else None
     no_painting = isinstance(painting, int) and not isinstance(painting, bool) and painting == 0
-    progress = progressingIndexAfterFlip(index_samples, flip_index, sample_frame_indices)
+    progress = progressingIndexAfterFlip(index_samples, flip_index, sample_frame_indices, gl_probe_indices)
     clock = carriedClock1to2(pre_flip_owner_ids, pool_reads, carried_el_id)
     state = gl_state_after if isinstance(gl_state_after, dict) else {}
     from_n = _strict_hash_num(hash1)
@@ -1400,10 +1453,10 @@ def glReplayCarry1to2(
     if not clauses["e"]:
         reasons.append(f"(e) paintingCount {painting!r} on settled slide 2")
     if not clauses["f"]:
-        reasons.append(
-            f"(f) composite {progress['composite'].get('reason')!r}, "
-            f"sampleFrame {progress['sourceSampleFrame'].get('reason')!r}"
-        )
+        series = {"composite": "composite", "sampleFrame": "sourceSampleFrame", "glProbe": "glProbe"}
+        reasons.append("(f) " + ", ".join(
+            f"{name} {progress[key].get('reason')!r}" for name, key in series.items() if not progress[key]["ok"]
+        ))
     if not clauses["g"]:
         reasons.append("(g) " + str(clock["reason"]))
     if not retired_ok:

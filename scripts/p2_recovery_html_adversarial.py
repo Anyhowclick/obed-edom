@@ -80,7 +80,7 @@ from obed_edom.html_alpha_probe import (  # noqa: E402
     write_patched_export,
 )
 from obed_edom.html_preview import export_html  # noqa: E402
-from obed_edom.live_gl_replay_js import GL_REPLAY_VERSION, gl_replay_script  # noqa: E402
+from obed_edom.live_gl_replay_js import GL_REPLAY_VERSION, gl_replay_script, validate_gl_replay_entry  # noqa: E402
 from obed_edom.live_gl_replay_js import js_sha256 as gl_replay_js_sha256  # noqa: E402
 from obed_edom.live_runtime import (  # noqa: E402
     PLAYER_SHA256,
@@ -451,6 +451,18 @@ GL_SLIDE2_READ_JS = r"""(() => {
   };
 })()""".replace("__CARRIED_KIND__", json.dumps("glreplay-carried"))
 
+# The one P2 read of the oracle handle (GL-replay (c) plan §4 carve-out): `probe` only, raced at 2 s.
+GL_PROBE_READ_JS = r"""(async () => {
+  const h = window.__OBED_GL_ORACLE__;
+  if (!h || typeof h.probe !== 'function') return {ok: false, reason: 'noProbe'};
+  const timeout = new Promise((resolve) => setTimeout(() => resolve({ok: false, reason: 'timeout'}), 2000));
+  try {
+    return await Promise.race([h.probe(__ROI__), timeout]);
+  } catch (e) {
+    return {ok: false, reason: 'threw', error: String(e)};
+  }
+})()"""
+
 # Module state only: never the oracle handle, never `handle.gl`.
 GL_STATE_JS = r"""(() => {
   const m = window.__OBED_GL_REPLAY__;
@@ -676,13 +688,42 @@ def _sample_frame_index(frame: object, save_to: Path | None = None) -> int | Non
     return _decode_index_patch(arr, _sample_frame_index_roi(arr.shape[1], arr.shape[0]))
 
 
-async def _gl_slide2_reads(chrome: ChromeCdp, run_dir: Path) -> list[dict]:
-    """Settled-slide-2 pool + `sampleFrame` reads, each paired with a screenshot (plan §4.1)."""
+def _gl_probe_read_js(plan: dict) -> str:
+    x, y, w, h = index_patch_roi_for(validate_gl_replay_entry(plan)["instanceRect"])
+    return GL_PROBE_READ_JS.replace("__ROI__", json.dumps({"x": x, "y": y, "w": w, "h": h}))
+
+
+def _gl_probe_array(result: object) -> np.ndarray | None:
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        return None
+    w, h, pixels = result.get("width"), result.get("height"), result.get("pixels")
+    if not (isinstance(w, int) and isinstance(h, int) and w > 0 and h > 0):
+        return None
+    if not isinstance(pixels, list) or len(pixels) != w * h * 4:
+        return None
+    return np.asarray(pixels, dtype=np.uint8).reshape(h, w, 4)
+
+
+def _gl_probe_index(result: object, save_to: Path | None = None) -> int | None:
+    """The GL readback counter; a failed read or `alphaMin` < 255 is None (GL-replay (c) plan §4)."""
+    arr = _gl_probe_array(result)
+    if arr is None:
+        return None
+    if save_to is not None:
+        Image.fromarray(arr).save(save_to)
+    if result.get("alphaMin") != 255:
+        return None
+    return _decode_index_patch(arr, (0, 0, arr.shape[1], arr.shape[0]))
+
+
+async def _gl_slide2_reads(chrome: ChromeCdp, run_dir: Path, probe_js: str) -> list[dict]:
+    """Settled-slide-2 pool + `sampleFrame` + GL `probe` reads, each paired with a screenshot (plan §4.1)."""
     reads = []
     for i in range(GL_POOL_READS_N):
         if i:
             await asyncio.sleep(GL_POOL_READ_GAP_S)
         r = await chrome.evaluate(GL_SLIDE2_READ_JS)
+        probe = await chrome.evaluate(probe_js, await_promise=True)
         shot = await chrome.screenshot()
         Image.fromarray(shot).save(run_dir / f"gl-slide2-{i}.png")
         if not isinstance(r, dict):
@@ -690,6 +731,8 @@ async def _gl_slide2_reads(chrome: ChromeCdp, run_dir: Path) -> list[dict]:
             continue
         frame = r.pop("frame", None)
         r["frameIndex"] = _sample_frame_index(frame, run_dir / f"gl-sample-frame-{i}.jpg")
+        r["glProbeIndex"] = _gl_probe_index(probe, run_dir / f"gl-probe-{i}.png")
+        r["glProbeMeta"] = {k: v for k, v in probe.items() if k != "pixels"} if isinstance(probe, dict) else None
         r["screenIndexNonGating"] = _decode_index_patch(np.asarray(shot))
         r["frameMeta"] = {k: v for k, v in (frame or {}).items() if k != "dataURL" and k != "snap"}
         reads.append(r)
@@ -3520,7 +3563,9 @@ async def _run(player: Path) -> dict:
             "error": "pool census unavailable"
         }
         gl_state_s2 = await chrome.evaluate(GL_STATE_JS) if gl_auto else None
-        gl_slide2_reads = await _gl_slide2_reads(chrome, run_dir) if gl_auto else None
+        gl_slide2_reads = (
+            await _gl_slide2_reads(chrome, run_dir, _gl_probe_read_js(continuity_plan)) if gl_auto else None
+        )
         gl_states_s2 = [gl_state_s2, await chrome.evaluate(GL_STATE_JS)] if gl_auto else None
         await _ensure_videos_playing(chrome)
         media_mid = await _media_snapshot_with_pool(chrome)
@@ -4229,6 +4274,7 @@ async def _run(player: Path) -> dict:
             index_samples,
             flip_index,
             [r.get("frameIndex") for r in gl_slide2_reads],
+            [r.get("glProbeIndex") for r in gl_slide2_reads],
             [f.get("decoderId") for f in dense_frames_a[:flip_index]] if flip_index is not None else [],
             gl_states_s2,
             gl_state_after,
