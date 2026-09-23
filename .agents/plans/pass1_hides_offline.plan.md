@@ -527,6 +527,10 @@ earlier fixes closed. Each round adds one line to §Review log. At merge the raw
    The payload carries no `needs_keynote`, so the first proxy excluded 17 FRC slides (≈190 hides, ≈23 s). Owner chose (b):
    the offline reader records the flag on payload items. The predicate uses it when present and falls back to the proxy
    for JXA or cached payloads.
+   After S4 the owner chose (i): eligibility evaluates the flag at each item's PLANNED transform (scale), so a
+   source-clean twin that pass 1's scaling would make approximate (e.g. an off-axis mask crossing `_MASK_TRUST_PX`) is
+   excluded before deferral. There is no generic `group-residual` error bound, and excluding every twin was rejected on
+   cost. The saved-deck check stays as the backstop.
 
 ## Owner questions (resolved above)
 
