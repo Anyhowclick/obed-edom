@@ -521,6 +521,10 @@ earlier fixes closed. Each round adds one line to §Review log. At merge the raw
    reason and switches offline hides off for the operator's next run. A per-slide refusal still falls back only when
    `order_proven`.
 
+5. Twin slides whose disambiguation would rest on approximate (`needs_keynote`) geometry are excluded BEFORE deferral and
+   stay on the Keynote delete, like builds and duals (owner agreed, 2026-09-23, after the round-4 FRC dry run refused slide 20).
+   `iwa_hides.pre_deferral_twin_risk` must be a superset of the saved-deck refusal; the post-save check stays as the backstop.
+
 ## Owner questions (resolved above)
 
 1. **ZIP member removal.** Keynote never saves an unreferenced data (I6, 3/3 decks). Mirroring that
