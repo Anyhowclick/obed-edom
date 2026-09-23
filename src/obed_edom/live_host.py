@@ -852,11 +852,11 @@ class LiveOutputHost:
     def _derive_runtime(self, **kwargs: Any) -> tuple[ContinuityPlan, dict[str, Any]] | Unsupported:
         try:
             plan = derive_plan(self.export_root, self.slides, resolver=self.resolver, **kwargs)
+            if isinstance(plan, Unsupported):
+                return plan
+            runtime = plan.to_runtime()
         except Exception as exc:  # noqa: BLE001 - fail closed, never let derivation crash the host
             return Unsupported(str(exc))
-        if isinstance(plan, Unsupported):
-            return plan
-        runtime = plan.to_runtime()
         if isinstance(runtime, Unsupported):
             return runtime
         return plan, runtime
@@ -1017,7 +1017,7 @@ class LiveOutputHost:
             display=(self.display.display_id if self.display else None),
             attachEndpoint=self._attach_endpoint, attachMatch=self._attach_match,
             headless=self.headless, advanceMode=self._advance_mode,
-            goToAutoplayMode=self._goto_autoplay_mode,
+            goToAutoplayMode=self._goto_autoplay_mode, glReplayPreference=self._gl_replay_preference,
         )
         try:
             self._validate_export()

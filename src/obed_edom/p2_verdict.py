@@ -124,6 +124,33 @@ BRIDGE_EVENT_KIND = "bridge-3to4"
 
 # Preserve notes that mean a movie was actually carried (pooled decoder reused,
 # placed or swapped back in) — the notes a retire zone must never produce.
+# Event kinds the P2 script fetches from the page (every other kind is dropped before
+# the verdicts see it): the refusal notes, the pool-consuming and engagement notes the
+# 1->2 gates key off, and the glReplay zone/live notes `refusedCarry1to2` reads.
+PRESERVE_EVENT_KEEP_KINDS = (
+    "createElement-video",
+    "dom-swap",
+    "facade-block-clear",
+    "glreplay-live",
+    "glreplay-zone",
+    "mo-no-stage",
+    "mo-prepaint-draw",
+    "mo-prepaint-skip",
+    "player-build-error",
+    "pool-cleared",
+    "preserve-refused",
+    "remount-error",
+    "retire-boundary",
+    "retire-on-start-movie",
+    "reuse-decoder",
+    "reuse-skip-boundary",
+    "texture-feed-draw",
+    "texture-feed-skip",
+    "texture-feed-skip-canvas",
+    "texture-feed-start",
+    "texture-feed-stop",
+)
+
 CARRY_EVENT_KINDS = frozenset({
     "remount-scheduled",
     "remount-done",
@@ -774,14 +801,15 @@ def refusedCarry1to2(
     retire_scene: int = SLIDE2_MIN_HASH,
     zone_scene: int = RETIRE_ZONE_MIN_HASH,
     restart_scene: int = SLIDE3_MIN_HASH,
+    expected_gl_fallback: str = "moduleAbsent",
 ) -> dict:
     """Fail-CLOSED verdict that the 1->2 carry was REFUSED and slide 2 therefore
     looks exactly like the raw export (plan §4).
 
     All of: (a) the injected plan retires `target_key` at `retire_scene`, as a
     literal `retire` or a `glReplay` with `fallback == "retire"` — the latter must
-    also show >= 1 `glreplay-zone` note to `retired`, none to `armed`/`released`
-    and no `glreplay-live`;
+    also show exactly one `glreplay-zone` note to `retired`, with reason
+    `expected_gl_fallback`, none to `armed`/`released` and no `glreplay-live`;
     (b) a positive refusal event at scene >= `zone_scene` (the runtime declines
     to preserve during the transition scene, which the player still hashes as
     `retire_scene - 1`); (c) zero carry notes for that movie anywhere in the
@@ -806,15 +834,11 @@ def refusedCarry1to2(
         None,
     )
     gl_replay = bool(plan_retire and plan_retire.get("action") == "glReplay")
-    zone_notes = [
-        e["detail"]
-        for e in preserve_events
-        if e.get("kind") == "glreplay-zone" and isinstance(e.get("detail"), dict)
-    ]
+    zone_notes = _gl_zone_notes(preserve_events)
     zone_retired = [d.get("reason") for d in zone_notes if d.get("to") == "retired"]
-    zone_fell_back = bool(zone_retired) and not any(
-        d.get("to") in ("armed", "released") for d in zone_notes
-    )
+    zone_clean = bool(zone_retired) and not _gl_zone_armed(zone_notes)
+    fallback_expected = zone_retired == [expected_gl_fallback]
+    zone_fell_back = zone_clean and fallback_expected
     went_live = any(e.get("kind") == "glreplay-live" for e in preserve_events)
     gl_replay_ok = not gl_replay or (zone_fell_back and not went_live)
     refusals = refusalEvents(preserve_events, target_key, zone_scene)
@@ -847,10 +871,12 @@ def refusedCarry1to2(
     reasons = []
     if not plan_retire:
         reasons.append("injected plan has no retire boundary for the target key")
-    if gl_replay and not zone_fell_back:
+    if gl_replay and not zone_clean:
         reasons.append("glReplay zone never fell back to retire")
+    if gl_replay and zone_retired and not fallback_expected:
+        reasons.append(f"glReplay fell back for {zone_retired!r}, expected [{expected_gl_fallback!r}]")
     if gl_replay and went_live:
-        reasons.append("glReplay went live inside the refused zone")
+        reasons.append("glReplay went live")
     if not refusals:
         reasons.append("no preserve-refused/retire-boundary event in the retire zone")
     if not carried["ok"]:
@@ -881,6 +907,18 @@ def refusedCarry1to2(
     }
 
 
+def _gl_zone_notes(preserve_events: list[dict]) -> list[dict]:
+    return [
+        e["detail"]
+        for e in preserve_events
+        if e.get("kind") == "glreplay-zone" and isinstance(e.get("detail"), dict)
+    ]
+
+
+def _gl_zone_armed(zone_notes: list[dict]) -> bool:
+    return any(d.get("to") in ("armed", "released") for d in zone_notes)
+
+
 def neverPooledEvidence(
     preserve_events: list[dict],
     carry_census: object = None,
@@ -898,16 +936,19 @@ def neverPooledEvidence(
     `fromDom` preserved entry for the key — a detached decoder can sit in the
     pool through slide 2 without ever being reused, so silence is not evidence.
     An invalid census invalidates the route (the original positive pair is then
-    required).
+    required). A glReplay zone that ever armed or released pooled the carried
+    decoder, so it also fails the route.
     """
     refusals = refusalEvents(preserve_events, target_key, zone_scene)
     carried = carryCensusVerdict(
         carry_census, preserve_events, target_key, zone_scene, restart_scene
     )
     pooled = poolCensusVerdict(pool_census, target_key, zone_scene, restart_scene)
+    gl_armed = _gl_zone_armed(_gl_zone_notes(preserve_events))
     return {
-        "ok": bool(refusals and carried["ok"] and pooled["ok"]),
+        "ok": bool(refusals and carried["ok"] and pooled["ok"] and not gl_armed),
         "refusalEventsN": len(refusals),
+        "glReplayArmed": gl_armed,
         "carryInRetireZone": carried,
         "carryEventsInRetireZoneN": carried["total"],
         "poolCensus": pooled,

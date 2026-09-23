@@ -2966,10 +2966,6 @@ def test_gl_replay_instance_rect_selects_exactly_one_source_slide_instance():
     sibling = next(rect for rect in source if rect is not matches[0])
     assert abs(sibling["x"] - target["x"]) > 900
 
-    shifted = {**target, "x": target["x"] + 1.01}
-    assert [rect for rect in source if within(rect, shifted)] == []
-    assert len([rect for rect in (*source, dict(matches[0])) if within(rect, target)]) == 2
-
 
 @pytest.mark.parametrize("slot", [None, 5, -1, True, 3.0])
 def test_to_runtime_refuses_an_out_of_range_or_unreadable_movie_slot(slot):

@@ -2122,7 +2122,8 @@ def spy_real_derive_plan(monkeypatch) -> list[dict[str, Any]]:
 
 
 def forbid_gl_module(monkeypatch) -> None:
-    """Force the off path: any call into the GL builder or its validator is a failure."""
+    """Force the off path: off never builds, validates or injects the GL module; only its
+    version and sha are reported. Any call into the builder or its validator is a failure."""
     def boom(*_a, **_k):
         raise AssertionError("the GL-replay module must not be touched on the off path")
 
@@ -2148,9 +2149,10 @@ def ready(monkeypatch) -> None:
 @pytest.mark.parametrize("version", [4, 5])
 @pytest.mark.parametrize("how", ["unset", "ctor-off", "env-off", "env-blank", "env-off-padded", "continuity-off"])
 def test_gl_replay_off_never_touches_the_module_and_serves_todays_recipe(tmp_path, monkeypatch, how, version):
-    """Off is the default. It must derive exactly as today (no `gl_replay` kwarg), inject exactly
-    `_continuity_scripts(plan, canvas)`, and never call into `live_gl_replay_js` -- forced by
-    making the builder and its validator raise. Continuity off turns GL off even when asked."""
+    """Off is the default. It must derive exactly as today (no `gl_replay` kwarg) and inject exactly
+    `_continuity_scripts(plan, canvas)`. Off never builds, validates or injects the GL module; only
+    its version and sha are reported -- forced by making the builder and its validator raise.
+    Continuity off turns GL off even when asked."""
     monkeypatch.setattr(live_host, "CONTINUITY_VERSION", version)
     gl_replay = {"ctor-off": "off", "continuity-off": "auto"}.get(how)
     output = host_with_continuity(tmp_path, monkeypatch, gl_replay=gl_replay)
@@ -2339,7 +2341,67 @@ def test_gl_replay_auto_is_not_reported_injected_when_the_codec_refuses_continui
 
     assert output._continuity_mode == "unsupported"
     assert output._server.continuity_script == ""
-    assert output.output["continuity"]["glReplay"]["mode"] != "injected"
+    assert output.output["continuity"]["glReplay"] == {
+        "mode": "unavailable", "reason": "continuity unsupported",
+        "version": live_gl_replay_js.GL_REPLAY_VERSION, "sha256": live_gl_replay_js.js_sha256(),
+    }
+
+
+def test_gl_replay_auto_falls_back_to_off_when_the_flag_on_to_runtime_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    output = host_with_continuity(tmp_path, monkeypatch, gl_replay="auto")
+    calls = fake_plan_pair(monkeypatch)
+    real_to_runtime = _FakePlan.to_runtime
+
+    def to_runtime(self):
+        runtime = real_to_runtime(self)
+        if runtime["boundaries"][0]["action"] == "glReplay":
+            raise ValueError("glReplay translation blew up")
+        return runtime
+
+    monkeypatch.setattr(_FakePlan, "to_runtime", to_runtime)
+    ready(monkeypatch)
+    output.observe()
+
+    assert [kwargs.get("gl_replay") for kwargs in calls] == [True, None]
+    assert output._continuity_mode == "qualified"
+    assert output._continuity_runtime_plan == _fake_runtime(gl=False)
+    assert 'id="obed-gl-replay"' not in output._server.continuity_script
+    assert output.output["continuity"]["glReplay"]["mode"] == "unavailable"
+    assert output.output["continuity"]["glReplay"]["reason"] == "glReplay translation blew up"
+
+
+def test_continuity_is_unsupported_not_a_crash_when_to_runtime_raises(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch)
+
+    class RaisingPlan:
+        def to_runtime(self):
+            raise ValueError("cannot translate")
+
+    monkeypatch.setattr(live_host, "derive_plan", lambda *a, **k: RaisingPlan())
+    output.observe()
+    assert output._continuity_mode == "unsupported"
+    assert output.output["continuity"]["reason"] == "cannot translate"
+    assert output._server.continuity_script == ""
+
+
+@pytest.mark.parametrize("ctor,env,expected", [
+    (None, None, "off"),
+    (None, " Auto ", "auto"),
+    ("auto", None, "auto"),
+    ("off", "auto", "off"),
+])
+def test_start_log_records_the_requested_gl_replay_preference(tmp_path, monkeypatch, ctor, env, expected):
+    """Under continuity off or attach the continuity record cannot show that `auto` was asked for."""
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+    monkeypatch.setenv(live_host.CONTINUITY_ENV, "off")
+    output = host_with_continuity(tmp_path, monkeypatch, gl_replay=ctor)
+    if env is not None:
+        monkeypatch.setenv(live_host.GL_REPLAY_ENV, env)
+    output.start()
+    records = read_log(output)
+    assert next(r for r in records if r["kind"] == "start")["glReplayPreference"] == expected
+    assert next(r for r in records if r["kind"] == "continuity")["glReplay"]["mode"] == "off"
 
 
 @pytest.mark.parametrize("ctor,env,expected", [

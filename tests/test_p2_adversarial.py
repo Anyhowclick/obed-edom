@@ -3087,14 +3087,34 @@ def test_refused_carry_fails_when_gl_replay_went_live():
     events = _refusal_events() + [{"kind": "glreplay-live", "detail": {"sceneHash": "#2"}}]
     verdict = _refused(preserve_events=events)
     assert verdict["ok"] is False
-    assert "glReplay went live inside the refused zone" in verdict["reasons"]
+    assert "glReplay went live" in verdict["reasons"]
 
 
 def test_refused_carry_reports_the_first_retired_zone_reason_as_the_fallback():
+    """`retired` is terminal, so two retired notes are a malformed zone and fail."""
     events = _refusal_events() + [_zone_note(reason="entryInvalid")]
     verdict = _refused(preserve_events=events)
-    assert verdict["ok"] is True
+    assert verdict["ok"] is False
     assert verdict["glReplayFallback"] == "moduleAbsent"
+    assert "glReplay fell back for ['moduleAbsent', 'entryInvalid'], expected ['moduleAbsent']" in verdict["reasons"]
+
+
+def test_refused_carry_fails_when_the_gl_replay_zone_fell_back_for_another_reason():
+    """G-P2 qualifies the module-absent fallback on a VALID entry: a zone that retired
+    `entryInvalid` (the core rejecting the entry the Python validator accepts) must not pass."""
+    events = [_zone_note(reason="entryInvalid")] + [e for e in _refusal_events() if e["kind"] != "glreplay-zone"]
+    verdict = _refused(preserve_events=events)
+    assert verdict["ok"] is False
+    assert verdict["glReplayFallback"] == "entryInvalid"
+    assert "glReplay fell back for ['entryInvalid'], expected ['moduleAbsent']" in verdict["reasons"]
+    assert "glReplay zone never fell back to retire" not in verdict["reasons"]
+
+
+def test_refused_carry_accepts_the_named_expected_fallback():
+    events = [_zone_note(reason="entryInvalid")] + [e for e in _refusal_events() if e["kind"] != "glreplay-zone"]
+    verdict = p2.refusedCarry1to2(**_refused_args(preserve_events=events), expected_gl_fallback="entryInvalid")
+    assert verdict["ok"] is True
+    assert verdict["reasons"] == []
 
 
 def test_refused_carry_fails_without_a_positive_refusal_event():
@@ -3273,6 +3293,21 @@ def test_never_pooled_evidence_dies_on_a_stash_consumed_in_the_retire_zone():
     assert evidence["carryEventsInRetireZoneN"] == 1
 
 
+@pytest.mark.parametrize("to", ["armed", "released"])
+def test_never_pooled_evidence_dies_when_the_gl_replay_zone_armed_or_released(to):
+    """`armed` pools the carried decoder, so an armed or released zone is not "never pooled"."""
+    events = _refusal_events() + [_zone_note(to=to, reason="moduleReady" if to == "armed" else "handoff")]
+    evidence = p2.neverPooledEvidence(events, _carry_census(), _pool_census())
+    assert evidence["ok"] is False
+    assert evidence["glReplayArmed"] is True
+
+
+def test_never_pooled_evidence_accepts_a_zone_that_only_retired():
+    evidence = p2.neverPooledEvidence(_refusal_events(), _carry_census(), _pool_census())
+    assert evidence["ok"] is True
+    assert evidence["glReplayArmed"] is False
+
+
 def test_never_pooled_evidence_ignores_another_movies_reuse():
     events = _refusal_events() + [
         {"kind": "reuse-decoder", "detail": {"key": "movie2", "newElId": 7, "sceneHash": "#4"}},
@@ -3332,6 +3367,25 @@ def test_footprint_fully_live_fails_closed_on_a_truncated_burst():
 # --------------------------------------------------------------------------- #
 # Injected plan shape + the findings inventory.
 # --------------------------------------------------------------------------- #
+def test_preserve_event_keep_kinds_hold_every_kind_the_verdicts_read():
+    """The P2 fetch filter drops every event kind it does not keep, so a verdict clause
+    that reads a dropped kind silently sees nothing (the `glreplay-live` absence clause
+    would fail OPEN). The kinds live in one constant the script substitutes in."""
+    assert {"preserve-refused", "retire-boundary", "glreplay-zone", "glreplay-live"} <= set(
+        p2.PRESERVE_EVENT_KEEP_KINDS
+    )
+    assert isinstance(p2.PRESERVE_EVENT_KEEP_KINDS, tuple)
+    assert list(p2.PRESERVE_EVENT_KEEP_KINDS) == sorted(set(p2.PRESERVE_EVENT_KEEP_KINDS))
+
+
+def test_the_p2_fetch_filter_substitutes_the_keep_kinds_instead_of_a_literal_list():
+    source = (REPO / "scripts" / "p2_recovery_html_adversarial.py").read_text(encoding="utf-8")
+    assert source.count("const keep = __KEEP_KINDS__;") == 1
+    assert source.count('.replace("__KEEP_KINDS__", json.dumps(sorted(PRESERVE_EVENT_KEEP_KINDS)))') == 1
+    assert "const keep = [" not in source
+    assert "'glreplay-zone'" not in source
+
+
 def _expected_gl_replay_runtime_plan() -> dict:
     """`EXPECTED_GL_REPLAY_RUNTIME_PLAN` from tests/test_live_continuity.py. Loaded as a
     module, not `eval`ed: the literal names `REAL_SLOT4_OPACITY`."""
