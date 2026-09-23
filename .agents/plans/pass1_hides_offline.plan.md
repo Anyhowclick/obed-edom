@@ -586,3 +586,5 @@ disjoint.
 
 - P1 (2026-09-23, Opus xhigh planner): first-pass plan. Keynote-free census of the source deck; five handover questions answered.
 - P2 (2026-09-23, Opus xhigh critic): 1 BLOCKER (failure semantics), 4 MAJOR (Data/ mojibake names, reference-scan holes, R4 false refusals, oracle blind to writer edits), all folded in (§Critique (pass 2)).
+- E (2026-09-23, offline dry run on FRC copy): PASS. 941 hides on 130 slides, 0 refusals (slide 122 excluded), 46 `Data/` (49.8 MB) dropped, 27.0 s at load ~7, differing slides = eligible set. Checker quirk: survivors' parent refs (`.super`, `SlideNodeArchive.slide`) show as diffs when their slide changes.
+- C1 (2026-09-23, Codex GPT-5.6 Sol): BLOCK. 3 BLOCKER (fallback on an identity-refused slide uses source kindIndex; swapped equal-signature twins; opacity-0 fallback continues), 7 MAJOR (untouched-component data liveness, same-component ambiguous ids, header-less child refs, stat-based failure phase, slide re-encode not checked exactly/MM transition, checker blind to nested fieldInfos refs and to same-count uuid swaps). One is a new class (#8), the rest are edge cases of known ones.
