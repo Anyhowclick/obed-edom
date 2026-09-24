@@ -52,6 +52,8 @@ Supersedes `pass1-hides-offline-2026-09-23.md` for this work. Plan and single so
      - Close is confirmed.
    - Owner playback of 2–3 Magic Move transitions into and out of hide-heavy slides on the B final deck (owner condition, decision 1).
    - Keynote opens the patched deck with no repair prompt: Metadata/`Data/` removal has only offline precedent for additions.
+   - FIRST (Opus O10 #6): the B subset run in `verify` mode with `OBED_DEBUG_PASS1_SNAPSHOT`, then patch its `.pre-hides.key`
+     offline. Every earlier 0-refusal dry run used the source deck, not a Keynote-saved post-pass-1 deck.
    - Interleaved A/B pairs: A,B then B,A, with `uptime` per run. Whole run ≥ 45 s faster; `runJxa` ≥ 60 s faster.
 4. After a GREEN gate: `g-flip-docs` (default on; README, SKILL.md §Offline writes, and the `pass1_profile.plan.md` todo),
    one integration PR, never merge.
