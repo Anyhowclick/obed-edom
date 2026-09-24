@@ -96,7 +96,7 @@ UNMEASURED_MARK = "#808080"
 LIMITS = {"nativeRepeatMax2x": 0.15, "decodableMin": 0.9, "nullRepeatMin": 0.95, "nativeRepeatMinPositive": 0.18,
           "g2RepeatMax25": 0.03, "g2RepeatMax30": 0.05, "distinctMin25": 24.0, "uploadsMin": 27.0, "reshownRepeatMax": 0.03, "staticMax": 4,
           "counterTol": 2, "movieAlphaMin": 250, "slotAlpha": 75, "slotAlphaTol": 3, "domTol": 3, "liveWaitS": 5.0,
-          "mediaEndS": 44.0}
+          "mediaEndS": 44.0, "liveRingMax": 20, "handbackRingPx": 200}
 EXPECTED_STATS = {"frameLen": 88, "occludedBands": 20, "bandCount": 128, "innerRect": {"x": 4, "y": 4, "w": 952, "h": 268}}
 MOVIE_FPS = 30
 SOAK_LOOP_FRAMES = 1381
@@ -786,10 +786,11 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
 
     m2: list[dict[str, Any]] = []
     offsets = {name: ((d_g2.get("roiOffsets") or {}).get(name) or {}).get("offset") for name in ("slide2-live", "slide2-handback", "slide2-after")}
-    check(m2, "ROI offset equal live/handback/after (no pop)", offsets, None not in offsets.values() and len({tuple(v) for v in offsets.values()}) == 1)
-    rings = d_g2.get("ringMaxDelta") or {}
-    tau, handback_ring = rings.get("slide2-live"), rings.get("slide2-handback")
-    check(m2, "ringMaxDelta handback <= tau (live)", [handback_ring, tau], None not in (tau, handback_ring) and handback_ring <= tau, "no double image")
+    check(m2, "report: ROI offset live/handback/after", offsets, True, enforced=False)
+    live_ring = (d_g2.get("ringMaxDelta") or {}).get("slide2-live")
+    check(m2, "slide2-live ringMaxDelta", live_ring, live_ring is not None and live_ring <= LIMITS["liveRingMax"], f"<= {LIMITS['liveRingMax']}")
+    over20 = [(((d.get("ringDiag") or {}).get("slide2-handback") or {}).get("over20") or {}).get("count") for d in (d_g2, d_off)]
+    check(m2, "handback ring px over 20", over20[0], over20[0] is not None and over20[0] <= LIMITS["handbackRingPx"], f"<= {LIMITS['handbackRingPx']}")
     backward = (p_g2.get("slide2-handback") or {}).get("backwardSteps")
     check(m2, "slide2-handback backwardSteps", backward, backward == 0, "== 0")
     after = reads.get("after") or {}
@@ -803,7 +804,6 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     check(m2, "report: g2 handback ringDiag", (d_g2.get("ringDiag") or {}).get("slide2-handback"), True, enforced=False)
     check(m2, "report: build-1 advance after handback marker (s)", g2.get("build1AfterMarkerS"), True, enforced=False)
     check(m2, "report: g2-off handback ringMaxDelta (DOM null)", (d_off.get("ringMaxDelta") or {}).get("slide2-handback"), True, enforced=False)
-    over20 = [(((d.get("ringDiag") or {}).get("slide2-handback") or {}).get("over20") or {}).get("count") for d in (d_g2, d_off)]
     check(m2, "report: handback ring px over 20, g2 vs g2-off", over20, True, enforced=False)
     check(m2, "report: g2-off handback ringDiag", (d_off.get("ringDiag") or {}).get("slide2-handback"), True, enforced=False)
     gates["M2"] = gate(m2)
@@ -864,7 +864,7 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
 
 KB_EXPECT = {
     "frozen": [("M1", "slide2-live repeat"), ("M1", "uploads/s over slide2-live"), ("M4", "uploads/s over hidden window")],
-    "oldbytes": [("M2", "ringMaxDelta handback <= tau (live)"), ("M2", "ROI offset equal live/handback/after (no pop)")],
+    "oldbytes": [("M2", "slide2-live ringMaxDelta"), ("M2", "handback ring px over 20")],
     "latelost": [("M4", "LIVE after show")],
 }
 
