@@ -19,6 +19,7 @@ Keynote traps this suite locks (kept out of the production file):
 - Never drop text; least-overlapping placement + report the overlap.
 - Off-slide leftovers must never teach an affine.
 """
+import math
 from functools import lru_cache
 
 import pytest
@@ -5548,3 +5549,565 @@ def test_gold_roster_is_dropped_on_every_slide_after_the_church_list():
     s21 = next(s for s in wall["slides"] if s.get("number") == 21)
     gct = {int(k): v for k, v in (s21.get("groupChildText") or {}).items()}
     assert len(name_column_ids(s21["items"], gct)) == 2
+
+
+# --- Off-canvas Magic Move partners (.agents/plans/mm_offcanvas_partners.plan.md) ---
+#
+# The payloads below carry `magicMoveOut` / `mmKeys` directly, in the shape
+# `iwa_runs.attach_magic_move` produces: `magicMoveOut` on slide n pairs n with n+1,
+# and `mmKeys` is {kind: {kindIndex: content key}}. Every recipe is one affine over the
+# whole wall; the default (s=1, tx=-2880) is the centre-panel crop, so anything above or
+# below the wall stays far off the CG canvas unless a test shifts it with `ty`.
+
+
+def _mm_recipe(s: float = 1.0, tx: float = -2880.0, ty: float = 0.0, **extra) -> dict:
+    return {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "groups": [{"s": s, "tx": tx, "ty": ty, "src": {"x": 0.0, "y": 0.0, "w": 7680.0, "h": 1080.0}}],
+        **extra,
+    }
+
+
+def _mm_slide(number: int, items: list[dict], keys: dict | None = None, *, mm_out: bool = False, **extra) -> dict:
+    slide: dict = {"number": number, "items": items, **extra}
+    if keys is not None:
+        slide["mmKeys"] = keys
+    if mm_out:
+        slide["magicMoveOut"] = True
+    return slide
+
+
+def _mm_wall(*slides: dict) -> dict:
+    return {"slideWidth": 7680, "slideHeight": 1080, "slides": list(slides)}
+
+
+def _harbour(y: float, *, kind_index: int = 0, x: float = 3000.0) -> dict:
+    return _item(kind="text", kindIndex=kind_index, text="Harbour", x=x, y=y, w=200, h=50, size=40)
+
+
+_HARBOUR_KEYS = {"text": {0: "text:harbour"}}
+
+
+def _spec(plan, slide: int, kind: str, kind_index: int):
+    matches = [t for t in plan.transforms if (t.slide_number, t.kind, t.kind_index) == (slide, kind, kind_index)]
+    assert len(matches) == 1, matches
+    return matches[0]
+
+
+def _strip_mm(wall: dict) -> dict:
+    return _mm_wall(
+        *({k: v for k, v in s.items() if k not in {"mmKeys", "magicMoveOut"}} for s in wall["slides"])
+    )
+
+
+def _clear_of_canvas(t, margin: float = 0.0) -> bool:
+    return (
+        t.x + t.w + margin <= 0
+        or t.y + t.h + margin <= 0
+        or t.x - margin >= 1920
+        or t.y - margin >= 1080
+    )
+
+
+def test_mm_partner_above_the_wall_is_kept_off_canvas_on_its_own_affine():
+    """Positive: an above-wall text on slide 1 whose Magic Move partner is visible on
+    slide 2 is kept rather than deleted — role other, no opacity pin, a font size, and
+    wholly above the CG canvas (plus margin). The recipe is fit-to-frame-shaped (no
+    `templateSlide`), which must not raise. The partner's spec is untouched."""
+    from obed_edom.map_remap import MM_EDGE_MARGIN
+
+    wall = _mm_wall(
+        _mm_slide(1, [_harbour(-200)], _HARBOUR_KEYS, mm_out=True),
+        _mm_slide(2, [_harbour(500)], _HARBOUR_KEYS),
+    )
+    recipe = _mm_recipe(source="fit-to-frame")
+    plan = plan_payload(wall, recipe)
+    baseline = plan_payload(_strip_mm(wall), recipe)
+
+    kept = _spec(plan, 1, "text", 0)
+    assert kept.role == "other"
+    assert kept.opacity is None
+    assert kept.font_size is not None and kept.font_size > 0
+    assert kept.hide_reason is None
+    assert kept.y + kept.h + MM_EDGE_MARGIN <= 0
+    assert _spec(baseline, 1, "text", 0).role == "hide"
+    assert _spec(plan, 2, "text", 0).as_dict() == _spec(baseline, 2, "text", 0).as_dict()
+    assert plan.mm_partners == [
+        {
+            "slide": 1,
+            "kind": "text",
+            "kindIndex": 0,
+            "partners": [{"slide": 2, "kindIndex": 0}],
+            "ambiguous": False,
+            "edge": None,
+        }
+    ]
+    assert [t.slide_number for t in plan.transforms] == [t.slide_number for t in baseline.transforms]
+
+
+def test_mm_partner_kept_with_string_kind_indexes_after_a_json_round_trip():
+    """`mmKeys` crosses a JSON cache, where the kindIndex keys become strings."""
+    import json
+
+    wall = json.loads(json.dumps(_mm_wall(
+        _mm_slide(1, [_harbour(-200)], _HARBOUR_KEYS, mm_out=True),
+        _mm_slide(2, [_harbour(500)], _HARBOUR_KEYS),
+    )))
+    assert _spec(plan_payload(wall, _mm_recipe()), 1, "text", 0).role == "other"
+
+
+def test_mm_partner_below_the_wall_on_the_later_slide_pairs_backwards():
+    """Reverse direction: slide 1's transition out pairs it with slide 2, so an
+    off-wall object below the wall on slide 2 is kept for its visible partner on 1."""
+    wall = _mm_wall(
+        _mm_slide(1, [_harbour(500)], _HARBOUR_KEYS, mm_out=True),
+        _mm_slide(2, [_harbour(1300)], _HARBOUR_KEYS),
+    )
+    plan = plan_payload(wall, _mm_recipe())
+    kept = _spec(plan, 2, "text", 0)
+    assert kept.role == "other"
+    assert kept.y >= 1080
+    assert plan.mm_partners[0]["partners"] == [{"slide": 1, "kindIndex": 0}]
+
+
+def test_mm_direction_pairs_the_slide_with_the_next_one_only():
+    """MM on slide 2 pairs 2↔3, not 1↔2: slide 1's off-wall copy stays hidden while
+    slide 3's is kept."""
+    wall = _mm_wall(
+        _mm_slide(1, [_harbour(-200)], _HARBOUR_KEYS),
+        _mm_slide(2, [_harbour(500)], _HARBOUR_KEYS, mm_out=True),
+        _mm_slide(3, [_harbour(-200)], _HARBOUR_KEYS),
+    )
+    plan = plan_payload(wall, _mm_recipe())
+    assert _spec(plan, 1, "text", 0).role == "hide"
+    assert _spec(plan, 3, "text", 0).role == "other"
+    assert [row["slide"] for row in plan.mm_partners] == [3]
+
+
+@pytest.mark.parametrize(
+    ("src", "rect", "edge", "expected"),
+    [
+        (Rect(3000, -100, 100, 50), Rect(500, 400, 100, 50), "top", Rect(500, -74, 100, 50)),
+        (Rect(3000, 1200, 100, 50), Rect(500, 400, 100, 50), "bottom", Rect(500, 1104, 100, 50)),
+        (Rect(-300, 500, 100, 50), Rect(500, 400, 100, 50), "left", Rect(-124, 400, 100, 50)),
+        (Rect(7800, 500, 100, 50), Rect(500, 400, 100, 50), "right", Rect(1944, 400, 100, 50)),
+    ],
+)
+def test_push_past_edge_leaves_through_the_edge_the_source_is_beyond(src, rect, edge, expected):
+    from obed_edom.map_remap import _push_past_edge
+
+    assert _push_past_edge(rect, src, 7680, 1080, 1920, 1080) == (expected, edge)
+
+
+def test_push_past_edge_corner_takes_the_smallest_shift():
+    """A source beyond both the top and the left wall edges leaves through whichever
+    of those two is nearer on the CG canvas."""
+    from obed_edom.map_remap import _push_past_edge
+
+    corner = Rect(-300, -100, 100, 50)
+    near_top = Rect(500, 30, 100, 50)
+    assert _push_past_edge(near_top, corner, 7680, 1080, 1920, 1080) == (Rect(500, -74, 100, 50), "top")
+    near_left = Rect(20, 800, 100, 50)
+    assert _push_past_edge(near_left, corner, 7680, 1080, 1920, 1080) == (Rect(-124, 800, 100, 50), "left")
+
+
+def test_push_past_edge_ties_go_top_bottom_left_right():
+    from obed_edom.map_remap import _push_past_edge
+
+    top_left = Rect(-300, -100, 100, 50)
+    assert _push_past_edge(Rect(100, 100, 50, 50), top_left, 7680, 1080, 1920, 1080)[1] == "top"
+    bottom_right = Rect(7800, 1200, 100, 50)
+    assert _push_past_edge(Rect(1800, 960, 50, 50), bottom_right, 7680, 1080, 1920, 1080)[1] == "bottom"
+    bottom_left = Rect(-300, 1200, 100, 50)
+    assert _push_past_edge(Rect(96, 960, 50, 50), bottom_left, 7680, 1080, 1920, 1080)[1] == "bottom"
+
+
+@pytest.mark.parametrize(
+    ("gap", "pushed"),
+    [(0.0, True), (10.0, True), (23.9, True), (24.0, False), (30.0, False)],
+)
+def test_push_past_edge_margin_is_part_of_the_trigger(gap, pushed):
+    """A rect ending `gap` above the canvas is pushed only while the gap is under
+    MM_EDGE_MARGIN; exactly the margin or more is left where it is."""
+    from obed_edom.map_remap import MM_EDGE_MARGIN, _push_past_edge
+
+    assert MM_EDGE_MARGIN == 24.0
+    rect = Rect(500, -50 - gap, 100, 50)
+    out, edge = _push_past_edge(rect, Rect(3000, -100, 100, 50), 7680, 1080, 1920, 1080)
+    if pushed:
+        assert edge == "top" and out.y + out.h == pytest.approx(-MM_EDGE_MARGIN)
+    else:
+        assert (out, edge) == (rect, None)
+
+
+def test_mm_edge_push_moves_line_endpoints_and_group_children_with_the_object():
+    """ty=+400 maps objects 100pt above the wall onto the canvas; the kept text, the
+    line (with both endpoints) and the child-written group are all pushed out through
+    the top by the same delta, and the group's child targets follow its final y."""
+    from obed_edom.map_remap import MM_EDGE_MARGIN
+
+    line1 = _item(kind="line", kindIndex=0, x=3000, y=-100, w=200, h=0, start=[3000, -100], end=[3200, -100])
+    line2 = _item(kind="line", kindIndex=0, x=3000, y=500, w=200, h=0, start=[3000, 500], end=[3200, 500])
+    group1 = _item(kind="group", kindIndex=0, x=3300, y=-100, w=100, h=50)
+    group2 = _item(kind="group", kindIndex=0, x=3300, y=500, w=100, h=50)
+    child = {"kind": "text", "kindIndex": 0, "x": 3310, "y": -95, "w": 50, "h": 20}
+    keys = {"text": {0: "text:harbour"}, "line": {0: "line"}, "group": {0: "group:g"}}
+    wall = _mm_wall(
+        _mm_slide(1, [_harbour(-100), line1, group1], keys, mm_out=True, groupChildren={0: [child]}),
+        _mm_slide(2, [_harbour(500), line2, group2], keys),
+    )
+    plan = plan_payload(wall, _mm_recipe(ty=400.0))
+
+    text = _spec(plan, 1, "text", 0)
+    assert text.role == "other" and text.y + text.h == pytest.approx(-MM_EDGE_MARGIN)
+    line = _spec(plan, 1, "line", 0)
+    assert line.role == "line"
+    assert line.start == pytest.approx((120.0, -MM_EDGE_MARGIN))
+    assert line.end == pytest.approx((320.0, -MM_EDGE_MARGIN))
+    group = _spec(plan, 1, "group", 0)
+    assert group.y == pytest.approx(-50 - MM_EDGE_MARGIN)
+    children = group.as_dict()["children"]
+    assert children[0]["y"] == pytest.approx(group.y + 5)
+    assert {row["kind"]: row["edge"] for row in plan.mm_partners} == {"text": "top", "line": "top", "group": "top"}
+
+
+def test_mm_size_refused_group_is_pushed_at_its_source_size():
+    """Keynote draws a size-refused group at its source size, so the push tests that
+    rect: at s=0.25 the mapped box clears the canvas, but the 380pt source-size box
+    reaches onto it and is pushed. The same group with its children readable is
+    resized and left alone (null control)."""
+    from obed_edom.map_remap import MM_EDGE_MARGIN
+
+    def wall(unavailable: bool) -> dict:
+        extra = {"groupAutosize": {0: True}, "groupChildrenUnavailable": True} if unavailable else {}
+        keys = {"group": {0: "group:g"}}
+        return _mm_wall(
+            _mm_slide(1, [_item(kind="group", kindIndex=0, x=3000, y=-800, w=400, h=380)], keys, mm_out=True, **extra),
+            _mm_slide(2, [_item(kind="group", kindIndex=0, x=3000, y=500, w=400, h=380)], keys),
+        )
+
+    recipe = _mm_recipe(s=0.25, tx=0.0)
+    refused = _spec(plan_payload(wall(True), recipe), 1, "group", 0)
+    assert refused.size_refused == "group-children-unavailable"
+    assert refused.y + 380 == pytest.approx(-MM_EDGE_MARGIN)
+
+    resized = _spec(plan_payload(wall(False), recipe), 1, "group", 0)
+    assert resized.size_refused is None
+    assert resized.y == pytest.approx(-200)
+
+
+def _true_aabb(t, rotation: float):
+    """The box Keynote draws for a written spec: x/y is the rotated AABB top-left
+    (iwa_geometry._frame_rect, iwa_write's rotated-anchor correction), w/h the
+    unrotated size, so only the extent turns."""
+    theta = math.radians(rotation)
+    c, s = abs(math.cos(theta)), abs(math.sin(theta))
+    return Rect(t.x, t.y, t.w * c + t.h * s, t.w * s + t.h * c)
+
+
+def _aabb_clear_of_canvas(r: Rect, margin: float) -> bool:
+    return r.x + r.w + margin <= 0 or r.y + r.h + margin <= 0 or r.x - margin >= 1920 or r.y - margin >= 1080
+
+
+@pytest.mark.parametrize("rotation", [90.0, 45.0, 270.0])
+def test_mm_rotated_partner_is_pushed_by_its_rotated_bounds(rotation):
+    """Payload x/y of a rotated item is its rotated AABB top-left, so a 200x20 bar turned
+    90 degrees at (3000, -250) spans y -250..-50 on the wall. ty=+150 maps it to
+    y=-100: the flat bar (20 tall) clears the canvas by 80pt, but the turned bar's true
+    box reaches y=+100 and is pushed until its true bottom sits MM_EDGE_MARGIN above the
+    canvas. The x/y stays the AABB top-left: only the extent is rotated, never re-centred."""
+    from obed_edom.map_remap import MM_EDGE_MARGIN
+
+    keys = {"shape": {0: "shape:bar"}}
+
+    def plan_for(rot: float):
+        bar = _item(kind="shape", kindIndex=0, x=3000, y=-250, w=200, h=20, rotation=rot)
+        return plan_payload(_mm_wall(
+            _mm_slide(1, [bar], keys, mm_out=True),
+            _mm_slide(2, [_item(kind="shape", kindIndex=0, x=3000, y=500, w=200, h=20)], keys),
+        ), _mm_recipe(ty=150.0))
+
+    flat = plan_for(0.0)
+    assert _spec(flat, 1, "shape", 0).y == pytest.approx(-100)
+    assert flat.mm_partners[0]["edge"] is None
+
+    turned = plan_for(rotation)
+    shape = _spec(turned, 1, "shape", 0)
+    assert (shape.w, shape.h) == (200, 20)
+    drawn = _true_aabb(shape, rotation)
+    assert drawn.y + drawn.h == pytest.approx(-MM_EDGE_MARGIN)
+    assert _aabb_clear_of_canvas(drawn, MM_EDGE_MARGIN - 1e-6)
+    assert turned.mm_partners[0]["edge"] == "top"
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "rotation"),
+    [
+        ([3000, -300], [3000, -100], 90.0),
+        ([3000, -100], [3000, -300], 270.0),
+        ([3000, -300], [3200, -100], 45.0),
+        ([3200, -300], [3000, -100], 135.0),
+    ],
+)
+def test_mm_rotated_line_is_pushed_by_its_endpoints_not_rotated_again(start, end, rotation):
+    """A line's bounds come from its endpoints, which already carry the rotation: a
+    vertical or diagonal line spanning y -300..-100 on the wall, mapped by ty=+250 onto
+    y -50..150, is pushed until its lower endpoint sits exactly MM_EDGE_MARGIN above the
+    canvas. Rotating that endpoint box again would park it at the wrong height."""
+    from obed_edom.map_remap import MM_EDGE_MARGIN
+
+    keys = {"line": {0: "line"}}
+    line1 = _item(kind="line", kindIndex=0, x=3000, y=-300, w=200, h=0, start=start, end=end, rotation=rotation)
+    line2 = _item(kind="line", kindIndex=0, x=3000, y=500, w=200, h=0, start=[3000, 500], end=[3200, 500])
+    plan = plan_payload(_mm_wall(
+        _mm_slide(1, [line1], keys, mm_out=True),
+        _mm_slide(2, [line2], keys),
+    ), _mm_recipe(ty=250.0))
+
+    line = _spec(plan, 1, "line", 0)
+    assert line.role == "line"
+    ys = (line.start[1], line.end[1])
+    xs = (line.start[0], line.end[0])
+    assert max(ys) == pytest.approx(-MM_EDGE_MARGIN)
+    assert min(ys) == pytest.approx(-MM_EDGE_MARGIN - 200)
+    assert sorted(xs) == pytest.approx(sorted([start[0] - 2880, end[0] - 2880]))
+    assert plan.mm_partners[0]["edge"] == "top"
+
+
+def test_mm_zero_size_off_slide_item_is_refused_and_stays_hidden():
+    """A zero-size object inside the wall is off-slide by `is_visible` but lies beyond
+    no wall edge, so there is no real direction to park it: the hide stays."""
+    dot = _item(kind="shape", kindIndex=0, x=3000, y=500, w=0, h=0)
+    keys = {"shape": {0: "shape:dot"}}
+    wall = _mm_wall(
+        _mm_slide(1, [dot], keys, mm_out=True),
+        _mm_slide(2, [_item(kind="shape", kindIndex=0, x=3000, y=500, w=20, h=20)], keys),
+    )
+    plan = plan_payload(wall, _mm_recipe())
+    baseline = plan_payload(_strip_mm(wall), _mm_recipe())
+    assert _spec(plan, 1, "shape", 0).as_dict() == _spec(baseline, 1, "shape", 0).as_dict()
+    assert _spec(plan, 1, "shape", 0).role == "hide"
+    assert plan.mm_partners == [
+        {
+            "slide": 1,
+            "kind": "shape",
+            "kindIndex": 0,
+            "partners": [{"slide": 2, "kindIndex": 0}],
+            "ambiguous": False,
+            "edge": None,
+            "refused": "mm-no-edge",
+        }
+    ]
+
+
+def _roster_partner_wall() -> dict:
+    """Slides 1-3 share one roster, so slide 3 drops it; slide 2's off-wall 'CHC Place0'
+    copy has only slide 3's roster-hidden row as its partner."""
+    keys = {"text": {0: "text:chc place0"}}
+    s1 = _roster_slide(1)
+    s2 = _roster_slide(2)
+    s2["items"].append(_item(kind="text", kindIndex=50, text="CHC Place0", x=3000, y=-300, w=215, h=58, size=42))
+    s2["mmKeys"] = {"text": {50: "text:chc place0"}}
+    s2["magicMoveOut"] = True
+    s3 = _roster_slide(3, extra=_item(kind="group", kindIndex=99, x=100, y=100, w=50, h=50))
+    s3["mmKeys"] = keys
+    return _mm_wall(s1, s2, s3)
+
+
+def _null_control_walls() -> dict[str, tuple[dict, dict, dict]]:
+    """name -> (wall, plan kwargs, (slide, kind, kindIndex) of the off-wall object)."""
+    partner = _harbour(500)
+    return {
+        "no MM transition": (
+            _mm_wall(_mm_slide(1, [_harbour(-200)], _HARBOUR_KEYS), _mm_slide(2, [partner], _HARBOUR_KEYS)),
+            {}, (1, "text", 0),
+        ),
+        "MM but a different key": (
+            _mm_wall(
+                _mm_slide(1, [_harbour(-200)], _HARBOUR_KEYS, mm_out=True),
+                _mm_slide(2, [partner], {"text": {0: "text:quay"}}),
+            ),
+            {}, (1, "text", 0),
+        ),
+        "partner hidden as chrome": (
+            _mm_wall(
+                _mm_slide(1, [_item(kind="image", kindIndex=0, fileName="x.png", x=3000, y=-1200, w=1920, h=1080)],
+                          {"image": {0: "image:d"}}, mm_out=True),
+                _mm_slide(2, [_item(kind="image", kindIndex=0, fileName="map BG.png", x=1920, y=0, w=1920, h=1080)],
+                          {"image": {0: "image:d"}}),
+            ),
+            {}, (1, "image", 0),
+        ),
+        "partner hidden on a side panel": (
+            _mm_wall(
+                _mm_slide(1, [_harbour(-200)], _HARBOUR_KEYS, mm_out=True),
+                _mm_slide(2, [_harbour(500, x=500)], _HARBOUR_KEYS),
+            ),
+            {}, (1, "text", 0),
+        ),
+        "partner hidden by the roster drop": (_roster_partner_wall(), {}, (2, "text", 50)),
+        "partner itself off-wall": (
+            _mm_wall(
+                _mm_slide(1, [_harbour(-200)], _HARBOUR_KEYS, mm_out=True),
+                _mm_slide(2, [_harbour(-300)], _HARBOUR_KEYS),
+            ),
+            {}, (1, "text", 0),
+        ),
+        "partner is a duplicateOf shape copy": (
+            _mm_wall(
+                _mm_slide(1, [_harbour(-200)], _HARBOUR_KEYS, mm_out=True),
+                _mm_slide(2, [{**partner, "duplicateOf": 7}], _HARBOUR_KEYS),
+            ),
+            {}, (1, "text", 0),
+        ),
+        "skipped neighbour": (
+            _mm_wall(
+                _mm_slide(1, [_harbour(-200)], _HARBOUR_KEYS, mm_out=True),
+                _mm_slide(2, [partner], _HARBOUR_KEYS, skipped=True),
+            ),
+            {}, (1, "text", 0),
+        ),
+        "out-of-range neighbour": (
+            _mm_wall(
+                _mm_slide(1, [_harbour(-200)], _HARBOUR_KEYS, mm_out=True),
+                _mm_slide(2, [partner], _HARBOUR_KEYS),
+            ),
+            {"slide_range": (1, 1)}, (1, "text", 0),
+        ),
+        "neighbour absent from the payload": (
+            _mm_wall(_mm_slide(1, [_harbour(-200)], _HARBOUR_KEYS, mm_out=True)),
+            {}, (1, "text", 0),
+        ),
+        "no mmKeys at all": (
+            _mm_wall(_mm_slide(1, [_harbour(-200)], mm_out=True), _mm_slide(2, [partner])),
+            {}, (1, "text", 0),
+        ),
+        "off-canvas chrome with a partner": (
+            _mm_wall(
+                _mm_slide(1, [_item(kind="image", kindIndex=0, fileName="map BG.png", x=3000, y=-1200, w=1920, h=1080)],
+                          {"image": {0: "image:d"}}, mm_out=True),
+                _mm_slide(2, [_item(kind="image", kindIndex=0, fileName="x.png", x=2000, y=100, w=1000, h=500)],
+                          {"image": {0: "image:d"}}),
+            ),
+            {}, (1, "image", 0),
+        ),
+    }
+
+
+@pytest.mark.parametrize("name", list(_null_control_walls()))
+def test_mm_null_controls_keep_todays_hide(name):
+    """Each case has an off-wall object that today's planner hides; none of them may
+    be converted, and the hide is byte-identical to the plan without MM data."""
+    wall, kwargs, (slide, kind, ki) = _null_control_walls()[name]
+    recipe = _mm_recipe()
+    plan = plan_payload(wall, recipe, **kwargs)
+    baseline = plan_payload(_strip_mm(wall), recipe, **kwargs)
+    spec = _spec(plan, slide, kind, ki)
+    assert spec.role == "hide" and spec.opacity == 0.0
+    assert spec.as_dict() == _spec(baseline, slide, kind, ki).as_dict()
+    assert [t.as_dict() for t in plan.transforms] == [t.as_dict() for t in baseline.transforms]
+    assert plan.mm_partners == []
+    assert plan.child_resize == baseline.child_resize
+
+
+def test_mm_roster_null_control_really_drops_the_partner():
+    """Guard for the roster null control above: slide 3 does drop its roster, so the
+    partner row is hidden there, and slide 2's off-wall copy was a real candidate."""
+    plan = plan_payload(_roster_partner_wall(), _mm_recipe())
+    assert 3 in plan.roster["drop"]
+    assert _spec(plan, 3, "text", 0).role == "hide"
+    assert _spec(plan, 2, "text", 50).hide_reason == "offslide"
+
+
+def test_offslide_hide_reason_skips_chrome_and_pure_roster_carriers():
+    """Only hides that no later rule would make carry `offslide`: an off-wall chrome
+    tile and a roster row on a drop slide stay untagged; a plain leftover is tagged."""
+    names = [
+        _item(kind="text", kindIndex=i, text=f"CHC Place{i}", x=3000, y=960 + i * 60, w=215, h=58, size=42)
+        for i in range(3)
+    ]
+    chrome = _item(kind="image", kindIndex=0, fileName="map BG.png", x=3000, y=-1200, w=1920, h=1080)
+    plain = _item(kind="shape", kindIndex=0, x=3000, y=-200, w=50, h=50)
+    slide = {"number": 1, "items": [*names, chrome, plain]}
+    out = plan_slide_transforms(slide, _mm_recipe(), wall_size=(7680, 1080), drop_roster=True)
+    by_key = {(t.kind, t.kind_index): t for t in out}
+    assert by_key[("text", 2)].role == "hide" and by_key[("text", 2)].hide_reason is None
+    assert by_key[("image", 0)].role == "hide" and by_key[("image", 0)].hide_reason is None
+    assert by_key[("shape", 0)].hide_reason == "offslide"
+
+    kept_roster = plan_slide_transforms(slide, _mm_recipe(), wall_size=(7680, 1080))
+    assert {(t.kind, t.kind_index): t for t in kept_roster}[("text", 2)].hide_reason == "offslide"
+
+
+def test_offslide_hide_reason_needs_a_wall_size():
+    """wall_size=None: no off-slide rule runs, so nothing is tagged."""
+    slide = {"number": 1, "items": [_item(kind="shape", kindIndex=0, x=3000, y=-200, w=50, h=50)]}
+    out = plan_slide_transforms(slide, _mm_recipe(), wall_size=None)
+    assert all(t.hide_reason is None and t.role != "hide" for t in out)
+
+
+def test_mm_ambiguous_class_keeps_every_member():
+    """Two off-wall copies share one key with one visible partner: both are kept and
+    both rows say `ambiguous`."""
+    keys1 = {"text": {0: "text:harbour", 1: "text:harbour"}}
+    wall = _mm_wall(
+        _mm_slide(1, [_harbour(-200), _harbour(-400, kind_index=1, x=3400)], keys1, mm_out=True),
+        _mm_slide(2, [_harbour(500)], _HARBOUR_KEYS),
+    )
+    plan = plan_payload(wall, _mm_recipe())
+    assert _spec(plan, 1, "text", 0).role == "other"
+    assert _spec(plan, 1, "text", 1).role == "other"
+    assert [(r["kindIndex"], r["ambiguous"]) for r in plan.mm_partners] == [(0, True), (1, True)]
+
+
+def test_mm_coincident_off_canvas_anchor_is_kept_and_its_dup_stays_hidden():
+    """The coincident-duplicate hide runs first and is untagged, so only the anchor
+    of an off-canvas coincident pair can be converted."""
+    keys1 = {"text": {0: "text:harbour", 1: "text:harbour"}}
+    wall = _mm_wall(
+        _mm_slide(1, [_harbour(-200), _harbour(-200, kind_index=1)], keys1, mm_out=True),
+        _mm_slide(2, [_harbour(500)], _HARBOUR_KEYS),
+    )
+    plan = plan_payload(wall, _mm_recipe())
+    assert _spec(plan, 1, "text", 0).role == "other"
+    dup = _spec(plan, 1, "text", 1)
+    assert dup.role == "hide" and dup.hide_reason is None
+    assert [r["kindIndex"] for r in plan.mm_partners] == [0]
+
+
+def test_mm_kept_group_gets_a_stat_row_and_the_report_stays_slide_sorted():
+    """A kept group takes the normal `other` group bookkeeping: a pass-2 stat row with
+    its scale, child signature and twin flag. The row is added after slide 2's rows
+    were built, and the report is re-sorted by slide."""
+    gct = {0: "UPG", 1: "UPG"}
+    anchor = _item(kind="group", kindIndex=0, x=3000, y=-400, w=200, h=100, childCount=2)
+    twin = _item(kind="group", kindIndex=1, x=3000, y=-400, w=200, h=100, childCount=2)
+    keys = {"group": {0: "group:upg", 1: "group:upg"}}
+    wall = _mm_wall(
+        _mm_slide(1, [anchor, twin], keys, mm_out=True, groupChildText=gct,
+                  builds=[{"kind": "group", "kindIndex": 1}]),
+        _mm_slide(2, [_item(kind="group", kindIndex=0, x=3000, y=500, w=200, h=100)],
+                  {"group": {0: "group:upg"}}, groupChildText={0: "UPG"}),
+    )
+    plan = plan_payload(wall, _mm_recipe(s=0.5, tx=-1000.0))
+    assert _spec(plan, 1, "group", 0).role == "other"
+    assert [r["slide"] for r in plan.child_resize] == [1, 1, 2]
+    rows = [r for r in plan.child_resize if r["slide"] == 1]
+    assert rows == [
+        {"slide": 1, "groupIndex": 1, "childSig": "UPG", "captionPt": 0.0, "twin": True, "s": 0.5},
+        {"slide": 1, "groupIndex": 2, "childSig": "UPG", "captionPt": 0.0, "twin": True, "s": 0.5},
+    ]
+
+
+def test_mm_kept_spec_as_dict_has_a_size_and_no_opacity_or_reason():
+    wall = _mm_wall(
+        _mm_slide(1, [_item(kind="image", kindIndex=0, fileName="p.pdf", x=3000, y=-500, w=300, h=200)],
+                  {"image": {0: "image:d"}}, mm_out=True),
+        _mm_slide(2, [_item(kind="image", kindIndex=0, fileName="p.pdf", x=3000, y=500, w=300, h=200)],
+                  {"image": {0: "image:d"}}),
+    )
+    d = _spec(plan_payload(wall, _mm_recipe()), 1, "image", 0).as_dict()
+    assert {"w", "h"} <= d.keys()
+    assert "opacity" not in d and "hide_reason" not in d and "hideReason" not in d
+    assert d["role"] == "other"

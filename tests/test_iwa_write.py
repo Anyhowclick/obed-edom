@@ -2030,6 +2030,40 @@ def test_fixed_frame_text_unaffected_by_reposition_flag():
     assert edits["1"]["size_h"] == pytest.approx(90.0)  # full soft-class write, size included
 
 
+def _fixed_text_objects(angle: float):
+    text_super = _shape_super(700, 374, 200.0, 60.0, nw=200.0, nh=60.0)
+    text_super["super"] = _geom(700, 374, 200.0, 60.0, angle)
+    return {
+        "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "super": text_super},
+    }
+
+
+def test_rotated_fixed_frame_text_hard_misses_to_the_fallback():
+    # The fixed-frame text write keeps pos_x absolute and has no rotated-anchor correction
+    # (shapes/images get `_rotated_anchor_delta`), so a rotated box would land off its
+    # requested rotated-AABB top-left -- e.g. an off-canvas Magic Move partner parked
+    # 24pt past an edge could be written back onto the canvas. Miss to the live fallback.
+    specs = [{"kind": "text", "kindIndex": 0, "x": 1990.0, "y": 404.0, "w": 200.0, "h": 60.0, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 200.0, 60.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, _fixed_text_objects(90.0), {"1": "M"}, [("100", False)], reported=reported)
+    assert refuse_reason is None
+    assert missed_specs == specs
+    assert miss_reasons == ["text-rotated"]
+    assert edits == {}
+
+
+def test_unrotated_fixed_frame_text_still_writes_offline():
+    # Null control for the rotated guard: angle 0 keeps the offline fixed-frame write.
+    specs = [{"kind": "text", "kindIndex": 0, "x": 1990.0, "y": 404.0, "w": 200.0, "h": 60.0, "role": "other"}]
+    reported = {("text", 0): [700.0, 374.0, 200.0, 60.0]}
+    _tm, edits, _soft, missed_specs, _mr, refuse_reason = _slide_edits(
+        1, specs, _fixed_text_objects(0.0), {"1": "M"}, [("100", False)], reported=reported)
+    assert refuse_reason is None and not missed_specs
+    assert edits["1"]["pos_x"] == pytest.approx(1990.0)
+
+
 def test_autosize_width_text_hard_misses_to_the_fallback():
     # Symmetric with the height sentinel: stored width == 0.0 is Keynote's own render
     # cache too (naturalSize.width), and only a live write refreshes it -- a real stored

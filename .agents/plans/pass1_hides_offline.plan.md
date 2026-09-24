@@ -75,7 +75,8 @@ todos:
       hide set is unchanged by this feature: 685 hidden in both the Keynote-delete run 1 and the offline run 3). Fix
       in the planner: keep MM-matched off-canvas objects and place them off-canvas in CG space, so MM still animates
       them. Own plan; not part of this feature's gate (owner chose to finish this feature first).
-    status: pending
+      Now planned in `.agents/plans/mm_offcanvas_partners.plan.md` (2026-09-24); tracked there.
+    status: completed
   - id: followup-single-rewrite
     content: >-
       GATED FOLLOW-UP, not in this round. Fold the hide delete into `patch_deck_geometry`'s rewrite
