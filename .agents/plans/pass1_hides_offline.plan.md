@@ -532,6 +532,12 @@ earlier fixes closed. Each round adds one line to §Review log. At merge the raw
    excluded before deferral. There is no generic `group-residual` error bound, and excluding every twin was rejected on
    cost. The saved-deck check stays as the backstop.
 
+6. Dashboard recovery after a fallback timeout (`needs_fresh_output`) is SIMPLIFIED (owner, 2026-09-24, after S8: 5 rounds of
+   lifecycle races, all edge cases). A process-wide, in-memory lock is set by the worker when the abort happens. While it is set,
+   every resize Apply is refused, and the worker also re-checks it before touching any destination. The notice says: close
+   <file> in Keynote, then restart the dashboard. Restarting clears the lock. This replaces the per-job/per-path confirmation,
+   the abort generations and the closure checkbox. The "offline hides off for the next run" setting stays.
+
 ## Owner questions (resolved above)
 
 1. **ZIP member removal.** Keynote never saves an unreferenced data (I6, 3/3 decks). Mirroring that
