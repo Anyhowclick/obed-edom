@@ -1107,9 +1107,15 @@ def create_app() -> FastAPI:
 
     @app.post("/api/resize/{job_id}/apply")
     def apply_resize(job_id: str, payload: FramingsBody = Body(default=FramingsBody())) -> dict:
+        with RUNNER.job_lock(job_id):
+            return _apply_resize_locked(job_id, payload)
+
+    def _apply_resize_locked(job_id: str, payload: FramingsBody) -> dict:
         job = RUNNER.get(job_id)
         if not job or not job.result:
             raise HTTPException(404, "Unknown job")
+        if job.status in {"queued", "running"}:
+            raise HTTPException(409, "Job is already queued or running")
         result = dict(job.result)
         key = Path(str(result.get("path") or "")).expanduser()
         template = Path(str(result.get("templatePath") or "")).expanduser()
@@ -1159,11 +1165,13 @@ def create_app() -> FastAPI:
         do_export = bool(result.get("export", True))
         do_lists = bool(result.get("includeLists", False))
         do_validate = bool(result.get("validate", True))
+        resolved = result.get("resolvedExportDir")
+        root = Path(resolved) if resolved else export_destination(job)
         try:
             updated = RUNNER.rerun(
                 job_id,
-                lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists, ov=overrides, side=side_content, va=do_validate, oh=hides: (
-                    _run_resize(j, p, t, sl, ex, lists, ov, side, va, offline_hides=oh)
+                lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists, ov=overrides, side=side_content, va=do_validate, oh=hides, er=root: (
+                    _run_resize(j, p, t, sl, ex, lists, ov, side, va, offline_hides=oh, export_root=er)
                 ),
             )
         except RuntimeError as exc:
@@ -3154,10 +3162,12 @@ def _run_resize(
     side_content_slides: set[int] | None = None,
     validate: bool = True,
     offline_hides: str | None = None,
+    export_root: Path | None = None,
 ) -> dict[str, Any]:
     dest_dir = default_output_root() / ".resize" / job.name
-    resolved_export_dir = (job.result or {}).get("resolvedExportDir")
-    export_root = Path(resolved_export_dir) if resolved_export_dir else export_destination(job)
+    if export_root is None:
+        resolved_export_dir = (job.result or {}).get("resolvedExportDir")
+        export_root = Path(resolved_export_dir) if resolved_export_dir else export_destination(job)
     dest = export_root / f"{path.stem}_CG.key"
     export_dir = dest_dir / "previews" if export else None
     label = format_slide_range(slide_range)

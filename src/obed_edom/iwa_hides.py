@@ -1038,8 +1038,13 @@ def _prepare(
             model.member_of[aid] for aid, obj in model.objects.items() if obj.get("_pbtype") == "KN.SlideArchive")
         cache: dict = {}
 
+        aliases = Counter(sid for sid, _skipped in order)
         planned: dict[int, tuple] = {}
         for n in sorted(wanted):
+            if 1 <= n <= len(order) and aliases[order[n - 1][0]] > 1:
+                refuse(n, f"slide archive {order[n - 1][0]} appears under {aliases[order[n - 1][0]]} slide numbers",
+                       False)
+                continue
             try:
                 plan = _plan_slide(
                     n, wanted[n], model, order, slide_count_by_member,
@@ -1061,12 +1066,6 @@ def _prepare(
                 refuse(n, str(exc), True)
             except Exception as exc:
                 refuse(n, f"planning failed: {exc!r}", True)
-
-        slide_ids = Counter(p[0] for p in planned.values())
-        for n in list(planned):
-            if slide_ids[planned[n][0]] > 1:
-                refuse(n, "slide archive shared with another slide number", False)
-                del planned[n]
 
         targets = set().union(*(p[3] | p[4] for p in planned.values())) if planned else set()
         referrers, uuid_refs = _scan(model, targets, pm_id) if planned else ({}, {})

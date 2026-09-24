@@ -548,7 +548,7 @@ def test_resize_apply_rejects_private_root_export_dir(tmp_path, monkeypatch):
     from obed_edom.paths import output_root
     from obed_edom.web.jobs import Job
 
-    job = Job(id="job-1", kind="resize", feature="resize", name="job-1", result={"phase": "framing"})
+    job = Job(id="job-1", kind="resize", feature="resize", name="job-1", status="done", result={"phase": "framing"})
     monkeypatch.setattr(app_mod.RUNNER, "get", lambda job_id: job if job_id == "job-1" else None)
 
     client = TestClient(app)
@@ -562,7 +562,7 @@ def test_resize_apply_writes_valid_export_dir_to_result(tmp_path, monkeypatch):
     import obed_edom.web.app as app_mod
     from obed_edom.web.jobs import Job
 
-    job = Job(id="job-1", kind="resize", feature="resize", name="job-1", result={"phase": "framing"})
+    job = Job(id="job-1", kind="resize", feature="resize", name="job-1", status="done", result={"phase": "framing"})
     app_mod.RUNNER._jobs[job.id] = job
     monkeypatch.setattr(app_mod.RUNNER, "rerun", lambda job_id, fn: app_mod.RUNNER.get(job_id))
 
@@ -623,7 +623,7 @@ def test_resize_apply_explicit_empty_export_dir_resets_to_default(tmp_path, monk
         id="job-1",
         kind="resize",
         feature="resize",
-        name="job-1",
+        name="job-1", status="done",
         result={"phase": "framing", "exportDir": str(export_dir), "resolvedExportDir": str(export_dir)},
     )
     app_mod.RUNNER._jobs[job.id] = job
@@ -1492,7 +1492,7 @@ def test_resize_apply_failed_custom_export_dir_leaves_resolved_export_dir_untouc
         id="job-1",
         kind="resize",
         feature="resize",
-        name="job-1",
+        name="job-1", status="done",
         result={"phase": "framing", "resolvedExportDir": str(output_root())},
     )
     app_mod.RUNNER._jobs[job.id] = job
@@ -1518,7 +1518,7 @@ def test_resize_apply_valid_export_dir_with_missing_wall_deck_leaves_result_unto
         id="job-1",
         kind="resize",
         feature="resize",
-        name="job-1",
+        name="job-1", status="done",
         result={
             "phase": "framing",
             "path": str(tmp_path / "missing-wall.key"),
@@ -1778,6 +1778,60 @@ def test_resize_concurrent_apply_on_a_queued_job_is_rejected(tmp_path, monkeypat
     release.set()
     assert _wait(client, first)["status"] == "done"
     assert _wait(client, second)["status"] == "done"
+
+
+def test_resize_second_apply_with_another_destination_on_a_queued_job_changes_nothing(
+    tmp_path, monkeypatch
+):
+    """Sol r9 #2: Apply A queues the job for destination A; Apply B (other folder, other
+    framing) arrives while it is still queued. B is rejected before touching the job's
+    framings, export folder or result, and the worker still writes to A."""
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+    dests = []
+
+    def fake_remap(path, dest, **kwargs):
+        dests.append(Path(dest))
+        if len(dests) == 1:
+            started.set()
+            assert release.wait(10)
+        return {"dest": str(dest), "counts": {}, "applied": 1, "missed": 0}
+
+    _stub_resize_propose(monkeypatch, fake_remap)
+    client = TestClient(app)
+    blocker = _propose(client, tmp_path).json()["id"]
+    job_id = _propose(client, tmp_path).json()["id"]
+    _wait(client, blocker)
+    _wait(client, job_id)
+    folder_a = tmp_path / "exports-a"
+    folder_b = tmp_path / "exports-b"
+    folder_a.mkdir()
+    folder_b.mkdir()
+    client.post(f"/api/resize/{blocker}/apply", json={})
+    assert started.wait(10)
+
+    assert client.post(f"/api/resize/{job_id}/apply", json={"exportDir": str(folder_a)}).status_code == 200
+    before = client.get(f"/api/jobs/{job_id}").json()
+    assert before["status"] == "queued"
+
+    rejected = client.post(
+        f"/api/resize/{job_id}/apply",
+        json={
+            "exportDir": str(folder_b),
+            "decisions": [{"wallIndex": 0, "state": "pinned", "templateSlide": 5}],
+        },
+    )
+    assert rejected.status_code == 409
+    assert "queued or running" in rejected.json()["detail"]
+    assert client.get(f"/api/jobs/{job_id}").json()["result"] == before["result"]
+
+    release.set()
+    assert _wait(client, blocker)["status"] == "done"
+    done = _wait(client, job_id)
+    assert done["status"] == "done", done.get("error")
+    assert dests[1].parent.resolve() == folder_a.resolve()
 
 
 def test_resize_rerun_failing_otherwise_does_not_keep_a_stale_hides_abort(tmp_path, monkeypatch):

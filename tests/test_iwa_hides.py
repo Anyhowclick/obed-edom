@@ -1665,7 +1665,7 @@ def test_shared_slide_id_is_an_unproven_refusal(tmp_path):
     hides = {1: HIDES[1], 3: HIDES[1]}
     res = _run(path, hides)
     for n in (1, 3):
-        assert res.slides[n].refused and "shared with another slide number" in res.slides[n].reason
+        assert res.slides[n].refused and "appears under 2 slide numbers" in res.slides[n].reason
         assert not res.slides[n].order_proven
     assert _raw_members(path)[S1] == before[S1]
 
@@ -1683,3 +1683,23 @@ def test_shared_slide_id_aborts_before_any_applescript_fallback(tmp_path, monkey
     with pytest.raises(offline_write.OfflineHidesAborted, match="before the saved order was proven"):
         offline_write.run_offline_hides(path, "on", {1, 3}, transforms, wall, lambda _m: None)
     assert calls == []
+
+
+def test_one_target_with_an_untargeted_alias_aborts_with_zero_byte_change(tmp_path, monkeypatch):
+    """Only slide 1 is targeted; slide 3 is an untargeted alias of the same archive 101."""
+    from obed_edom import offline_write
+
+    path = _build(tmp_path / "alias.key", mutate=_shared_slide_id)
+    before = _raw_members(path)
+    res = _run(path, {1: HIDES[1]})
+    assert res.slides[1].refused and "appears under 2 slide numbers" in res.slides[1].reason
+    assert not res.slides[1].order_proven and res.members == []
+    assert _raw_members(path) == before
+
+    items = _payload(path)
+    wall = {"slides": [{"number": n, "items": items[n]} for n in sorted(items)]}
+    calls: list = []
+    monkeypatch.setattr(offline_write, "_run_hide_fallback", lambda *a, **k: calls.append(a))
+    with pytest.raises(offline_write.OfflineHidesAborted, match="before the saved order was proven"):
+        offline_write.run_offline_hides(path, "on", {1}, [{**h, "slide": 1} for h in HIDES[1]], wall, lambda _m: None)
+    assert calls == [] and _raw_members(path) == before

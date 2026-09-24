@@ -28,6 +28,8 @@ import pytest
 
 pytest.importorskip("keynote_parser")
 
+from keynote_parser.codec import IWAFile  # noqa: E402
+
 from scripts import deck_decode_diff as ddd  # noqa: E402
 from test_iwa_write import _arch, _build_effect, _geom, _member, _shape_super  # noqa: E402
 from test_stroke_probe import _with_refs  # noqa: E402
@@ -767,7 +769,7 @@ def test_duplicate_archive_id_cannot_compare_green(tmp_path, capsys):
     assert "archive id 400 at Index/Slide-102.iwa#1 and Index/Slide-102.iwa#3" in str(exc.value)
     assert ddd.main([str(one), str(two)]) == 2
     assert ddd.main([str(one), str(one)]) == 2
-    assert "duplicate archive" in capsys.readouterr().err
+    assert "invalid deck" in capsys.readouterr().err
 
 
 def test_duplicate_archive_id_across_members_rejected(tmp_path):
@@ -787,7 +789,54 @@ def test_second_package_metadata_rejected(tmp_path, capsys):
         spec["members"]["Index/Metadata.iwa"].append(second)
 
     deck = _variant(tmp_path, "twometa", edit)
-    with pytest.raises(ddd.DuplicateArchive, match="TSP.PackageMetadata at Index/Metadata.iwa#0 and Index/Metadata.iwa#2"):
+    with pytest.raises(ddd.DuplicateArchive,
+                       match=r"TSP.PackageMetadata at Index/Metadata.iwa#0.objects\[0\] and Index/Metadata.iwa#2.objects\[0\]"):
         ddd.load_deck(deck)
     assert ddd.main([str(deck), str(deck)]) == 2
-    assert "duplicate archive" in capsys.readouterr().err
+    assert "invalid deck" in capsys.readouterr().err
+
+
+def _later_object_metadata(spec):
+    holder = _archive(spec, "Index/Metadata.iwa", 6)
+    holder["header"]["messageInfos"].append(copy.deepcopy(_archive(spec, "Index/Metadata.iwa", 5)["header"]["messageInfos"][0]))
+    holder["objects"].append(copy.deepcopy(_metadata(spec)))
+
+
+def test_later_object_package_metadata_rejected(tmp_path, capsys):
+    deck = _variant(tmp_path, "laterobj", _later_object_metadata)
+    with zipfile.ZipFile(deck) as zf:
+        decoded = IWAFile.from_buffer(zf.read("Index/Metadata.iwa")).to_dict()
+    holder = decoded["chunks"][0]["archives"][1]
+    assert [o["_pbtype"] for o in holder["objects"]] == ["TSP.DataMetadataMap", "TSP.PackageMetadata"]
+
+    with pytest.raises(ddd.DuplicateArchive,
+                       match=r"at Index/Metadata.iwa#0.objects\[0\] and Index/Metadata.iwa#1.objects\[1\]"):
+        ddd.load_deck(deck)
+    assert ddd.main([str(deck), str(deck)]) == 2
+    assert "invalid deck" in capsys.readouterr().err
+
+
+def test_package_metadata_only_as_later_object_rejected(tmp_path, capsys):
+    def edit(spec):
+        _later_object_metadata(spec)
+        _drop_archive(spec, "Index/Metadata.iwa", 5)
+
+    deck = _variant(tmp_path, "onlylater", edit)
+    with pytest.raises(ddd.MetadataPlacement, match=r"Index/Metadata.iwa#0.objects\[1\], expected objects\[0\]"):
+        ddd.load_deck(deck)
+    assert ddd.main([str(deck), str(deck)]) == 2
+    assert "invalid deck" in capsys.readouterr().err
+
+
+def test_package_metadata_outside_metadata_member_rejected(tmp_path):
+    def edit(spec):
+        spec["members"]["Index/Other.iwa"] = [_archive(spec, "Index/Metadata.iwa", 5)]
+        _drop_archive(spec, "Index/Metadata.iwa", 5)
+
+    with pytest.raises(ddd.MetadataPlacement, match="Index/Other.iwa#0.objects"):
+        ddd.load_deck(_variant(tmp_path, "elsewhere", edit))
+
+
+def test_missing_package_metadata_rejected(tmp_path):
+    with pytest.raises(ddd.MetadataPlacement, match="no TSP.PackageMetadata"):
+        ddd.load_deck(_variant(tmp_path, "nometa", lambda spec: _drop_archive(spec, "Index/Metadata.iwa", 5)))

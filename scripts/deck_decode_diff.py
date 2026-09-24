@@ -19,7 +19,8 @@ field, so every difference has a key such as ``slide:12:KN.SlideArchive.drawable
 ``metadata:Slide-101:dataReferences``, ``datas:photo.jpg`` or ``zip:Data/photo.jpg``.
 
 Exit 0 iff every difference key matches an ``--allow`` regex; exit 2 when a deck has an
-undecodable member, a duplicate archive id, or a second ``TSP.PackageMetadata``.
+undecodable member, a duplicate archive id, or anything but exactly one ``TSP.PackageMetadata``
+(scanned over every object), placed as the first object of an archive in ``Index/Metadata.iwa``.
 
 Usage:
     uv run python scripts/deck_decode_diff.py A.key B.key [--allow REGEX ...] [--json OUT]
@@ -60,8 +61,16 @@ _COMPONENT_PROJECTED = frozenset({
 })
 
 
-class DuplicateArchive(Exception):
+class InvalidDeck(Exception):
+    """The deck cannot be compared unambiguously."""
+
+
+class DuplicateArchive(InvalidDeck):
     """Two archives share an identifier, or a deck carries a second PackageMetadata."""
+
+
+class MetadataPlacement(InvalidDeck):
+    """``TSP.PackageMetadata`` is missing, or is not the first object of an archive in ``Index/Metadata.iwa``."""
 
 
 @dataclass
@@ -115,7 +124,7 @@ def load_deck(path: str | Path) -> Deck:
 
     deck = Deck(Path(path))
     seen: dict[str, tuple[str, int]] = {}
-    metadata_at: tuple[str, int] | None = None
+    metadata_at: str | None = None
     with zipfile.ZipFile(path) as zf:
         for info in zf.infolist():
             name = info.filename
@@ -138,17 +147,24 @@ def load_deck(path: str | Path) -> Deck:
                 seen[ident] = (name, index)
                 objs = arch.get("objects") or []
                 pbtype = str((objs[0] if objs else {}).get("_pbtype"))
-                if pbtype == PACKAGE_METADATA:
-                    if metadata_at is not None:
-                        raise DuplicateArchive(
-                            f"{path}: {PACKAGE_METADATA} at {metadata_at[0]}#{metadata_at[1]} and {name}#{index}"
-                        )
-                    metadata_at = (name, index)
-                    if name == METADATA_MEMBER:
-                        deck.metadata = objs[0]
+                for position, obj in enumerate(objs):
+                    if obj.get("_pbtype") != PACKAGE_METADATA:
                         continue
+                    where = f"{name}#{index}.objects[{position}]"
+                    if metadata_at is not None:
+                        raise DuplicateArchive(f"{path}: {PACKAGE_METADATA} at {metadata_at} and {where}")
+                    if name != METADATA_MEMBER or position != 0:
+                        raise MetadataPlacement(
+                            f"{path}: {PACKAGE_METADATA} at {where}, expected objects[0] in {METADATA_MEMBER}"
+                        )
+                    metadata_at = where
+                if pbtype == PACKAGE_METADATA:
+                    deck.metadata = objs[0]
+                    continue
                 deck.archives[ident] = Archive(name, pbtype, arch["header"], objs)
                 ids.append(ident)
+    if metadata_at is None:
+        raise MetadataPlacement(f"{path}: no {PACKAGE_METADATA} in {METADATA_MEMBER}")
     for entry in deck.metadata.get("datas") or []:
         label = entry.get("digest") or entry.get("preferredFileName") or entry.get("fileName") or ""
         deck.data_labels[str(entry.get("identifier"))] = f"data:{label}"
@@ -474,8 +490,8 @@ def main(argv: list[str] | None = None) -> int:
     except UndecodableIWAMember as exc:
         print(f"undecodable member: {exc}", file=sys.stderr)
         return 2
-    except DuplicateArchive as exc:
-        print(f"duplicate archive: {exc}", file=sys.stderr)
+    except InvalidDeck as exc:
+        print(f"invalid deck: {exc}", file=sys.stderr)
         return 2
     for d in report["diffs"]:
         print(f"{'allowed ' if d['allowed'] else 'DIFF    '}{d['key']}")
