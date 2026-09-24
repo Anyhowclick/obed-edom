@@ -18,7 +18,7 @@
  },
  "goldenVersion": 1,
  "inspectVersion": 5,
- "planSha256": "6a875d7e7262ea3c23e72410b7607cc3183f2940bdf97ab942e4493f021d24f1",
+ "planSha256": "35002feee2c97bdf03dd97564ebe8112992906c84bbb15993399a03057c39cfb",
  "plannerEnv": {
   "faces": {
    "Amplitude-Bold|True|False": "Amplitude-Bold|Amplitude",
@@ -234,31 +234,31 @@
    "statJobs": 0
   },
   {
-   "asGeomLines": 316,
-   "asGeomSha": "becdf3d06656",
+   "asGeomLines": 463,
+   "asGeomSha": "7ce1eeb1dae0",
    "badgeRaises": 7,
    "groupRemoves": 0,
    "n": 36,
    "roles": {
-    "hide": 21,
+    "hide": 14,
     "line": 1,
     "map": 6,
-    "other": 8
+    "other": 15
    },
    "slide": 16,
    "statJobs": 0
   },
   {
-   "asGeomLines": 401,
-   "asGeomSha": "c53369501c27",
+   "asGeomLines": 506,
+   "asGeomSha": "c694fc0a9c48",
    "badgeRaises": 7,
    "groupRemoves": 0,
    "n": 27,
    "roles": {
-    "hide": 9,
+    "hide": 4,
     "line": 1,
     "map": 6,
-    "other": 10,
+    "other": 15,
     "pin": 1
    },
    "slide": 17,
@@ -1900,18 +1900,18 @@
    "statJobs": 0
   },
   {
-   "asGeomLines": 88,
-   "asGeomSha": "7dc8306588a2",
+   "asGeomLines": 298,
+   "asGeomSha": "d60abfca04f7",
    "badgeRaises": 0,
    "groupRemoves": 0,
    "n": 21,
    "roles": {
-    "hide": 17,
+    "hide": 7,
     "map": 3,
-    "other": 1
+    "other": 11
    },
    "slide": 130,
-   "statJobs": 0
+   "statJobs": 7
   },
   {
    "asGeomLines": 298,
@@ -2310,6 +2310,7 @@
   126,
   127,
   128,
+  130,
   131,
   132,
   133,
@@ -2327,8 +2328,8 @@
   "badgeRaises": 324,
   "groupRemoves": 0,
   "reuses": 0,
-  "statJobs": 392,
-  "statSlides": 51,
+  "statJobs": 399,
+  "statSlides": 52,
   "suppressGeometry": 0,
   "transforms": 4658
  },

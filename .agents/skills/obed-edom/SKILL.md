@@ -262,6 +262,24 @@ hides it entirely, side band or centre band alike. A roster carrier may be a per
 GROUP whose names live only in its child text, so the rule is evaluated from
 `groupChildText` and fires independently of `--keep-side-panels`.
 
+### Off-canvas Magic Move partners
+
+An object wholly off the wall is normally hidden. It is kept instead when it is a Magic
+Move partner: its slide and a neighbour are joined by an MM transition (text delivery
+by object) and the neighbour keeps a content-identical object on the wall. Identity is
+content, not archive id: text, image/movie data digest, aspect-normalised shape path,
+or a group's leaf list (`attach_magic_move` → `magicMoveOut`/`mmKeys`).
+
+* Both slides of the pair must be planned: inside `--slides` and not skipped. An
+  out-of-range or skipped neighbour keeps today's hide.
+* The kept object takes its own slide's affine. If that lands on the CG canvas or
+  within 24pt of it, it is pushed just past the CG edge it was beyond on the wall.
+* A repeated identity class is kept whole and reported `ambiguous`: a wrong hide breaks
+  the move, a wrong keep only parks an unseen object off-canvas.
+* The run prints one `Magic Move: kept N …` line and returns `mmPartners`.
+* The dashboard framing preview plans one slide at a time, so it shows kept partners
+  as not in the output (`willBeInOutput: false`). They are off-canvas either way.
+
 ### Loose text
 
 Classify wall text by what lies beneath it:
@@ -558,8 +576,7 @@ surgical rewrite, restoring the "source − hides" deck later stages address by 
   Metadata uuid/data refs, and any `Data/` member left unreferenced deck-wide; strong,
   weak and forbidden (comment/highlight/pencil/change) references are classified, and
   anything unclassified refuses.
-* the planner's off-slide-leftover rule also hides Magic Move partners (pre-existing;
-  `followup-mm-leftovers`).
+* off-canvas Magic Move partners are kept, not hidden (§Off-canvas Magic Move partners).
 * `scripts/deck_decode_diff.py` is the ID-insensitive A/B oracle: template slides are
   labelled by name, `builds` is compared as a multiset, and `st-`/`mt-` thumbnails by
   content. Its A-vs-A null on FRC is 0 slides.

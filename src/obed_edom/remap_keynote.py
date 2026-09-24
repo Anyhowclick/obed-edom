@@ -1224,6 +1224,16 @@ def prepare_wall_payload(
         )
 
     try:
+        from obed_edom.iwa_runs import attach_magic_move  # noqa: PLC0415
+
+        attach_magic_move(source, wall, deck=deck)
+    except Exception as exc:  # noqa: BLE001 — off-canvas MM partners keep today's hide
+        say(
+            f"Magic Move read unavailable ({type(exc).__name__}: {exc}); "
+            "off-canvas Magic Move partners stay hidden."
+        )
+
+    try:
         from obed_edom.iwa_runs import _load_deck  # noqa: PLC0415
         from obed_edom.iwa_write import card_styles, select_card_styles  # noqa: PLC0415
 
@@ -1243,6 +1253,24 @@ def prepare_wall_payload(
         )
 
     return card_stroke
+
+
+def _say_mm_partners(rows: list[dict[str, Any]], say: Callable[[str], None]) -> None:
+    kept = [r for r in rows if not r.get("refused")]
+    refused = [r for r in rows if r.get("refused")]
+    if kept:
+        slides = ", ".join(str(n) for n in sorted({int(r["slide"]) for r in kept}))
+        ambiguous = sum(1 for r in kept if r.get("ambiguous"))
+        pushed = sum(1 for r in kept if r.get("edge"))
+        say(
+            f"Magic Move: kept {len(kept)} off-canvas partner(s) off-frame on slide(s) {slides} "
+            f"({ambiguous} in repeated-object classes, {pushed} pushed past an edge)."
+        )
+    if refused:
+        detail = ", ".join(
+            f"slide {r['slide']} {r.get('kind')} {r.get('kindIndex')} ({r['refused']})" for r in refused
+        )
+        say(f"Magic Move: {len(refused)} off-canvas partner(s) stay hidden: {detail}.")
 
 
 def _require_pass1_saved_closed(jxa: dict[str, Any]) -> None:
@@ -1358,6 +1386,7 @@ def remap_keynote(
     badge_raises = plan.badge_raises
     card_grid = plan.card_grid
     roster = plan.roster
+    mm_partners = plan.mm_partners
     hidden_addresses = {
         (t.slide_number, t.kind, t.kind_index) for t in transforms if t.role == "hide"
     }
@@ -1443,6 +1472,7 @@ def remap_keynote(
             f"{len(offframe)} object(s) visible on the wall land outside the CG frame "
             f"({detail}). They are still in the deck — drag them back or adjust the template."
         )
+    _say_mm_partners(mm_partners, say)
     card_rows = [r for r in child_resize if r.get("captionPt")]
     if recipe.get("cardSamples"):
         resolved = _resolve_template_card_sample(recipe.get("cardSamples"))
@@ -1939,6 +1969,8 @@ def remap_keynote(
                 "deck saved; resolve the failure and re-run with OBED_ZORDER_WRITE=on. "
                 "OBED_ZORDER_WRITE=off knowingly skips every z-order raise."
             )
+    if mm_partners:
+        result["mmPartners"] = mm_partners
     result["cardStroke"] = card_stroke_result
     result["builds"] = build_result
     return result

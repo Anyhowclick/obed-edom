@@ -303,6 +303,7 @@ def test_propose_auto_rects_match_apply_transforms(monkeypatch: pytest.MonkeyPat
 
     differing: list[int] = []
     detail: list[str] = []
+    mm_only_slides: list[int] = []
     for page in proposal.get("pages") or []:
         slide_no = int(page["slide"])
         propose_rows = [
@@ -311,12 +312,27 @@ def test_propose_auto_rects_match_apply_transforms(monkeypatch: pytest.MonkeyPat
             if r["role"] in ROLE_SET
         ]
         apply_rows = apply_by_slide.get(slide_no, [])
+        # Off-canvas Magic Move partners are kept by a cross-slide post-pass that the per-slide
+        # preview cannot see (accepted in .agents/plans/mm_offcanvas_partners.plan.md). Those are the
+        # only rows apply may add, and each must sit wholly off the 1920x1080 CG canvas.
+        propose_left = list(propose_rows)
+        apply_only = []
+        for row in apply_rows:
+            if row in propose_left:
+                propose_left.remove(row)
+            else:
+                apply_only.append(row)
+        if not propose_left and apply_only:
+            if all(r[2] + r[4] <= 0 or r[2] >= 1920 or r[3] + r[5] <= 0 or r[3] >= 1080 for r in apply_only):
+                mm_only_slides.append(slide_no)
+                apply_rows = [r for r in apply_rows if r not in apply_only]
         if apply_rows != propose_rows:
             differing.append(slide_no)
             if len(detail) < 3:
                 detail.append(f"slide {slide_no}: apply={apply_rows} propose={propose_rows}")
 
     assert differing == [], "\n".join([f"{len(differing)} slide(s) differ", *detail])
+    assert mm_only_slides == [16, 17, 130]
 
 
 @pytest.mark.parametrize(

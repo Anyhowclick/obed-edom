@@ -131,6 +131,7 @@ class ItemTransform:
     # `w`/`h` at all — the source-sized group survives intact rather than collapsing.
     size_refused: str | None = None
     group_collapse_refused: str | None = None
+    hide_reason: str | None = field(default=None, compare=False)
 
     def _child_payload(self) -> list[dict[str, Any]] | None:
         if not self.child_src or self.src is None or self.src.w <= 0 or self.src.h <= 0:
@@ -2260,6 +2261,66 @@ def _hide_item_transform(
     )
 
 
+def _group_child_src(
+    slide: dict, kind_index: int
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """(child_src, size_refused) for a group written child-by-child."""
+    child_src = (slide.get("groupChildren") or {}).get(kind_index)
+    if (
+        child_src is None
+        and (slide.get("groupAutosize") or {}).get(kind_index)
+        and slide.get("groupChildrenUnavailable")
+    ):
+        return None, "group-children-unavailable"
+    return child_src, None
+
+
+def _book_group(
+    group_tf: ItemTransform,
+    slide: dict,
+    src_rect: Rect,
+    pre_snap_s: float,
+    child_resize_report: list[dict[str, Any]] | None,
+    *,
+    carded: bool = False,
+    sig: str | None = None,
+    caption_pt: float = 0.0,
+    caption_refusal: str | None = None,
+    twin_sigs: set[str] | frozenset[str] = frozenset(),
+) -> None:
+    """Collapse refusal and the pass-2 stat row for a planned group."""
+    number = group_tf.slide_number
+    kind_index = int(group_tf.kind_index if group_tf.kind_index is not None else group_tf.item_index)
+    if (
+        not carded
+        and (slide.get("groupAutosize") or {}).get(kind_index)
+        and src_rect.w > 0
+        and src_rect.h > 0
+        and slide.get("groupChildrenUnavailable")
+        and (group_tf.w * 3.0 <= src_rect.w or group_tf.h * 3.0 <= src_rect.h)
+    ):
+        group_tf.group_collapse_refused = f"groupCollapseRefused(s={number},idx={kind_index + 1})"
+    if group_tf.role != "other" or child_resize_report is None:
+        return
+    row: dict[str, Any] = {
+        "slide": number,
+        "groupIndex": kind_index + 1,
+        "childSig": sig,
+        "captionPt": caption_pt,
+    }
+    if caption_refusal:
+        row["captionRefusal"] = caption_refusal
+    if sig is not None and sig in twin_sigs:
+        row["twin"] = True
+    # Keynote does not scale a group's child fonts on resize, so pass 2 applies the
+    # pass-1 factor; a refused group was not scaled, so its fonts must not be either.
+    refused = group_tf.size_refused
+    row["s"] = 1.0 if refused else pre_snap_s
+    if refused:
+        row["sizeRefused"] = refused
+    child_resize_report.append(row)
+
+
 GRID_MARGIN = 16.0  # matches the group x<16 clamp above
 GRID_MIN_CLEAR = 7.0  # batch-1 border inequality: gutter - stroke >= 7 (fallback pitch only)
 # Measured wall card-border stroke (restore_card_stroke_widths); used only if the caller
@@ -2432,8 +2493,6 @@ def plan_slide_transforms(
     body_for_body = slide_body_text_item(slide, wall_size)
     body_item = body_for_body if body_dst is not None else None
     badge_dsts = dict(recipe.get("badgeSlots") or {})
-    group_children: dict[int, list[dict[str, Any]]] = slide.get("groupChildren") or {}
-    group_autosize: dict[int, bool] = slide.get("groupAutosize") or {}
     styles_pre = list(recipe.get("characterStyles") or [])
     overlay_ids = sparkle_overlays(slide, body_for_body)
     body_final_size: float | None = None
@@ -2497,7 +2556,14 @@ def plan_slide_transforms(
             continue
         # Hide off-slide leftovers; the 16:9 canvas scales every still-owned object back on-frame.
         if wall_size and not is_visible(item, wall_w, wall_h):
-            out.append(_hide_item_transform(item, number, item_index, kind_index))
+            hide = _hide_item_transform(item, number, item_index, kind_index)
+            if not is_chrome_bg(item) and not (
+                drop_roster
+                and id(item) in name_col_ids
+                and not roster_group_rest(item, group_child_text)
+            ):
+                hide.hide_reason = "offslide"
+            out.append(hide)
             continue
         if is_chrome_bg(item):
             out.append(_hide_item_transform(item, number, item_index, kind_index))
@@ -2735,17 +2801,15 @@ def plan_slide_transforms(
             )
         child_src: list[dict[str, Any]] | None = None
         size_refused: str | None = None
-        pending_group_row: dict[str, Any] | None = None
         group_src_rect: Rect | None = None
-        group_kind_index: int | None = None
         group_pre_snap_s: float = 1.0
+        _sig: str | None = None
+        caption_pt = 0.0
+        caption_refusal: str | None = None
         if str(item.get("kind") or "") == "group":
             _sig = group_child_text.get(kind_index)
             _src_rect = item_rect(item)
             group_src_rect = _src_rect
-            group_kind_index = kind_index
-            caption_pt = 0.0
-            caption_refusal: str | None = None
             if role == "other":
                 card = _card_sample_for(_src_rect, _sig, card_samples) if card_samples else None
                 if card is not None:
@@ -2803,24 +2867,7 @@ def plan_slide_transforms(
                 # takes the child-write path (fix3).
             group_pre_snap_s = (mapped.w / _src_rect.w) if _src_rect.w else 1.0
             if ("group", kind_index) not in card_keys and badge_dst is None:
-                child_src = group_children.get(kind_index)
-                if (
-                    child_src is None
-                    and group_autosize.get(kind_index)
-                    and slide.get("groupChildrenUnavailable")
-                ):
-                    size_refused = "group-children-unavailable"
-            if role == "other" and child_resize_report is not None:
-                pending_group_row = {
-                    "slide": number,
-                    "groupIndex": kind_index + 1,
-                    "childSig": _sig,
-                    "captionPt": caption_pt,
-                }
-                if caption_refusal:
-                    pending_group_row["captionRefusal"] = caption_refusal
-                if _sig is not None and _sig in twin_sigs:
-                    pending_group_row["twin"] = True
+                child_src, size_refused = _group_child_src(slide, kind_index)
         start = end = None
         if role == "line" or item.get("start") or item.get("end"):
             if item.get("start"):
@@ -2889,33 +2936,19 @@ def plan_slide_transforms(
                 size_refused=size_refused,
             )
         )
-        if group_kind_index is not None:
-            group_tf = out[-1]
-            src_w = group_src_rect.w if group_src_rect else 0.0
-            src_h = group_src_rect.h if group_src_rect else 0.0
-            collapse = bool(
-                ("group", group_kind_index) not in card_keys
-                and badge_dst is None
-                and group_autosize.get(group_kind_index)
-                and src_w > 0
-                and src_h > 0
-                and slide.get("groupChildrenUnavailable")
-                and (group_tf.w * 3.0 <= src_w or group_tf.h * 3.0 <= src_h)
+        if group_src_rect is not None:
+            _book_group(
+                out[-1],
+                slide,
+                group_src_rect,
+                group_pre_snap_s,
+                child_resize_report,
+                carded=("group", kind_index) in card_keys or badge_dst is not None,
+                sig=_sig,
+                caption_pt=caption_pt,
+                caption_refusal=caption_refusal,
+                twin_sigs=twin_sigs,
             )
-            refused = group_tf.size_refused
-            if collapse:
-                group_tf.group_collapse_refused = (
-                    f"groupCollapseRefused(s={number},idx={group_kind_index + 1})"
-                )
-            if pending_group_row is not None:
-                # The factor pass 1 scales this group by; Keynote does not scale a
-                # group's child fonts on resize, so the font pass applies the same
-                # factor. A refused group's geometry was not scaled, so pass 2 must
-                # not scale its fonts.
-                pending_group_row["s"] = 1.0 if refused else group_pre_snap_s
-                if refused:
-                    pending_group_row["sizeRefused"] = refused
-                child_resize_report.append(pending_group_row)
     if pack_lists:
         _pack_list_transforms(out, recipe)
     if card_keys:
@@ -3687,6 +3720,241 @@ def roster_slides(slides: list[dict]) -> tuple[set[int], set[int]]:
     return keep, drop
 
 
+MM_EDGE_MARGIN = 24.0
+_WALL_EDGES = ("top", "bottom", "left", "right")
+
+
+def _wall_edges(src: Rect, wall_w: float, wall_h: float) -> list[str]:
+    """Wall edges `src` lies wholly beyond, with `is_visible`'s zero-size rule."""
+    w = src.w if src.w > 0 else 1.0
+    h = src.h if src.h > 0 else 1.0
+    beyond = {
+        "top": src.y + h <= 0,
+        "bottom": src.y >= wall_h,
+        "left": src.x + w <= 0,
+        "right": src.x >= wall_w,
+    }
+    return [e for e in _WALL_EDGES if beyond[e]]
+
+
+def _drawn_rect(rect: Rect, rotation: Any) -> Rect:
+    theta = math.radians(_f(rotation))
+    if not theta:
+        return rect
+    c, s = abs(math.cos(theta)), abs(math.sin(theta))
+    w = rect.w * c + rect.h * s
+    h = rect.w * s + rect.h * c
+    cx, cy = rect.center()
+    return Rect(cx - w / 2.0, cy - h / 2.0, w, h)
+
+
+def _push_past_edge(
+    rect: Rect, src: Rect, wall_w: float, wall_h: float, dest_w: float, dest_h: float
+) -> tuple[Rect, str | None]:
+    """Move `rect` MM_EDGE_MARGIN past the nearest CG edge its wall source is beyond."""
+    m = MM_EDGE_MARGIN
+    if (
+        rect.x - m >= dest_w
+        or rect.x + rect.w + m <= 0
+        or rect.y - m >= dest_h
+        or rect.y + rect.h + m <= 0
+    ):
+        return rect, None
+    shifts = {
+        "top": (0.0, -(rect.y + rect.h) - m),
+        "bottom": (0.0, dest_h + m - rect.y),
+        "left": (-(rect.x + rect.w) - m, 0.0),
+        "right": (dest_w + m - rect.x, 0.0),
+    }
+    edges = _wall_edges(src, wall_w, wall_h)
+    if not edges:
+        return rect, None
+    edge = min(edges, key=lambda e: abs(shifts[e][0] + shifts[e][1]))
+    dx, dy = shifts[edge]
+    return Rect(rect.x + dx, rect.y + dy, rect.w, rect.h), edge
+
+
+def _mm_partner_transform(
+    hide: ItemTransform,
+    item: dict,
+    slide: dict,
+    recipe: dict[str, Any],
+    wall_size: tuple[float, float],
+    child_resize_report: list[dict[str, Any]] | None,
+) -> tuple[ItemTransform, str | None] | None:
+    """Keep an off-wall Magic Move partner on its own slide's affine, parked off the CG canvas."""
+    aff, _ = _group_for_item(item, _groups_from_recipe(recipe))
+    if aff is None:
+        return None
+    kind = hide.kind
+    kind_index = int(hide.kind_index if hide.kind_index is not None else hide.item_index)
+    src = item_rect(item)
+    font_size: float | None = None
+    font: str | None = None
+    start = end = None
+    child_src: list[dict[str, Any]] | None = None
+    size_refused: str | None = None
+    if kind == "text":
+        style = match_character_style(
+            item,
+            list(recipe.get("characterStyles") or []),
+            size_ratio=aff.s,
+            prefer_slide=recipe.get("templateSlide"),
+        )
+        mapped, font_size, _face, _colour = _style_text_box(item, aff, style)
+        font = _source_face(item) if style else None
+    else:
+        mapped = aff.apply_rect(src)
+        if item.get("start"):
+            start = (aff.s * _f(item["start"][0]) + aff.tx, aff.s * _f(item["start"][1]) + aff.ty)
+        if item.get("end"):
+            end = (aff.s * _f(item["end"][0]) + aff.tx, aff.s * _f(item["end"][1]) + aff.ty)
+    pre_snap_s = (mapped.w / src.w) if src.w else 1.0
+    if kind == "group":
+        child_src, size_refused = _group_child_src(slide, kind_index)
+    aspect = _item_aspect(item)
+    if kind in {"image", "movie", "group"} and aspect is not None and not child_src:
+        snapped_h = float(round(mapped.h))
+        mapped = Rect(float(round(mapped.x)), float(round(mapped.y)), snapped_h * aspect, snapped_h)
+    drawn = _drawn_rect(
+        Rect(mapped.x, mapped.y, src.w, src.h) if size_refused else mapped, item.get("rotation")
+    )
+    pushed, edge = _push_past_edge(
+        drawn,
+        src,
+        wall_size[0],
+        wall_size[1],
+        _f(recipe.get("destWidth"), CG_WIDTH),
+        _f(recipe.get("destHeight"), CG_HEIGHT),
+    )
+    dx, dy = pushed.x - drawn.x, pushed.y - drawn.y
+    kept = ItemTransform(
+        slide_number=hide.slide_number,
+        item_index=hide.item_index,
+        kind=kind,
+        x=mapped.x + dx,
+        y=mapped.y + dy,
+        w=mapped.w,
+        h=mapped.h,
+        locked=hide.locked,
+        font_size=font_size,
+        font=font,
+        start=(start[0] + dx, start[1] + dy) if start is not None else None,
+        end=(end[0] + dx, end[1] + dy) if end is not None else None,
+        role="line" if kind == "line" else "other",
+        kind_index=hide.kind_index,
+        src=src,
+        child_src=child_src,
+        size_refused=size_refused,
+    )
+    if kind == "group":
+        gct = {int(k): v for k, v in (slide.get("groupChildText") or {}).items()}
+        _book_group(
+            kept,
+            slide,
+            src,
+            pre_snap_s,
+            child_resize_report,
+            sig=gct.get(kind_index),
+            twin_sigs=coincident_build_twin_sigs(slide),
+        )
+    return kept, edge
+
+
+def _slide_number(slide: dict) -> int:
+    return int(slide.get("number") or (int(slide.get("index") or 0) + 1))
+
+
+def _mm_keys(slide: dict) -> dict[tuple[str, int], str]:
+    return {
+        (str(kind), int(ki)): str(key)
+        for kind, by_index in (slide.get("mmKeys") or {}).items()
+        for ki, key in (by_index or {}).items()
+    }
+
+
+def _keep_mm_partners(
+    transforms: list[ItemTransform],
+    payload: dict[str, Any],
+    framing_recipes: dict[int, dict[str, Any]],
+    wall_size: tuple[float, float],
+    child_resize_report: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Turn off-slide hides with a surviving Magic Move partner into off-canvas keeps, in place."""
+    wall_w, wall_h = wall_size
+    slides = {
+        _slide_number(s): s
+        for s in payload.get("slides") or []
+        if _slide_number(s) in framing_recipes
+    }
+    neighbours: dict[int, list[int]] = {}
+    for number, slide in slides.items():
+        if slide.get("magicMoveOut") and number + 1 in slides:
+            neighbours.setdefault(number, []).append(number + 1)
+            neighbours.setdefault(number + 1, []).append(number)
+    if not neighbours:
+        return []
+    keys = {n: _mm_keys(slides[n]) for n in neighbours}
+    hidden = {(t.slide_number, t.kind, t.kind_index) for t in transforms if t.role == "hide"}
+    items: dict[int, dict[tuple[str, int], dict]] = {}
+    survivors: dict[int, dict[str, list[int]]] = {}
+    for n in neighbours:
+        items[n] = {}
+        survivors[n] = {}
+        for i, it in enumerate(slides[n].get("items") or []):
+            kind = str(it.get("kind") or "image")
+            ki = _item_kind_index(it, _item_index(it, i))
+            items[n][(kind, ki)] = it
+            key = keys[n].get((kind, ki))
+            if (
+                key is None
+                or not is_visible(it, wall_w, wall_h)
+                or it.get("duplicateOf")
+                or (n, kind, ki) in hidden
+            ):
+                continue
+            survivors[n].setdefault(key, []).append(ki)
+    rows: list[dict[str, Any]] = []
+    for pos, spec in enumerate(transforms):
+        a = spec.slide_number
+        if spec.hide_reason != "offslide" or a not in neighbours:
+            continue
+        ident = (spec.kind, int(spec.kind_index if spec.kind_index is not None else spec.item_index))
+        key = keys[a].get(ident)
+        item = items[a].get(ident)
+        if key is None or item is None:
+            continue
+        partners = [
+            {"slide": b, "kindIndex": ki}
+            for b in neighbours[a]
+            for ki in survivors[b].get(key, [])
+        ]
+        if not partners:
+            continue
+        row: dict[str, Any] = {
+            "slide": a,
+            "kind": spec.kind,
+            "kindIndex": ident[1],
+            "partners": partners,
+            "ambiguous": any(
+                list(keys[n].values()).count(key) > 1 for n in (a, *neighbours[a])
+            ),
+            "edge": None,
+        }
+        if not _wall_edges(item_rect(item), wall_w, wall_h):
+            row["refused"] = "mm-no-edge"
+        else:
+            kept = _mm_partner_transform(
+                spec, item, slides[a], framing_recipes[a], wall_size, child_resize_report
+            )
+            if kept is None:
+                row["refused"] = "mm-no-affine"
+            else:
+                transforms[pos], row["edge"] = kept
+        rows.append(row)
+    return rows
+
+
 @dataclass
 class Plan:
     transforms: list[ItemTransform]
@@ -3701,6 +3969,7 @@ class Plan:
     roster: dict[str, set[int]]
     framing_recipes: dict[int, dict[str, Any]] = field(default_factory=dict)
     framing_context: dict[int, FramingContext] = field(default_factory=dict)
+    mm_partners: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -3925,6 +4194,12 @@ def plan_payload(
         )
         transforms.extend(planned)
         prev = _next_framing_context(number, slide, slide_recipe, wall_w, wall_h, min_on_canvas)
+    stat_rows = len(child_resize_report)
+    mm_partners = _keep_mm_partners(
+        transforms, payload, framing_recipes, (wall_w, wall_h), child_resize_report
+    )
+    if len(child_resize_report) != stat_rows:
+        child_resize_report.sort(key=lambda row: row["slide"])
     return Plan(
         transforms=transforms,
         placements=placement_report,
@@ -3938,6 +4213,7 @@ def plan_payload(
         roster=roster_report,
         framing_recipes=framing_recipes,
         framing_context=framing_context,
+        mm_partners=mm_partners,
     )
 
 
