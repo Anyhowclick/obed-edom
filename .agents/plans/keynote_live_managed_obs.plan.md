@@ -1,6 +1,6 @@
 # Managed OBS v1 — Alpha Keynote runs its own hidden OBS for fill + key
 
-**Rev 2, DRAFT for owner review** (2026-09-24). Rev 1 by Opus EXTRA HIGH; critique by Opus HIGH (3 blockers, 9 others; §13),
+**Rev 2, DRAFT for owner review** (2026-09-24; owner answers in §14, OD-M10 open). Rev 1 by Opus EXTRA HIGH; critique by Opus HIGH (3 blockers, 9 others; §13),
 folded by the coordinator. Nothing is implemented.
 Parents: `decklink-field-test-runbook.md` (§0 OBS setup, §3 cadence note), `keynote-live-continuity-2026-09-23-c.md` ("OBS rate +
 output cadence"), [`keynote_live_gl_replay_arming.plan.md`](keynote_live_gl_replay_arming.plan.md) (G2 attach qualification OD-2
@@ -287,14 +287,20 @@ the snapshot/`lsof` logic (§2, Q-I) · self-generated goldens would pass a brok
 lifetime; orphans never adopted; W3 split into crash vs waiting; password permissions not relied on; W8 is a session warning;
 `--disable-shutdown-check` does not exist; Q-C/Q-D settled from source.
 
-## 14. OPEN OWNER DECISIONS
+## 14. Owner decisions on the open items (2026-09-24)
 
-- **OD-M1** Ship 30 as well as 25 in v1 (after Q-H), or 25 only?
-- **OD-M3** Device setup by the one-time visible-OBS flow (recommended)?
-- **OD-M4** Version pin: exactly 32.2.2 for v1 (recommended), or any 32.2.x?
-- **OD-M5** Websocket on with a fresh random password per launch (recommended; it is LAN-reachable while AK runs), or off (no
-  version check, no W11)?
-- **OD-M10** While AK's engine runs, it owns the UltraStudio and sends a transparent key even with no show. Acceptable, or must the
-  engine run only while a show is loaded (slower start, ~2–5 s)?
+- **OD-M1 — 30 fps ships with 25**, after Q-H measures canvas 30 / source 60 (the owner will test it).
+- **OD-M3 — one-time visible-OBS device setup: accepted.**
+- **OD-M4 — pin the latest stable OBS, exactly.** Today that is 32.2.2 (GitHub releases, 2026-08-14; the installed version). The pin
+  moves only by a deliberate change after the qualification harness passes on the new release.
+- **OD-M5 — websocket on, strong password entropy:** `secrets.token_urlsafe(32)` = 256 bits from the OS CSPRNG, a new password every
+  launch, never logged or returned by the API (tested).
+- **OD-M10 — OPEN, redirected by the owner:** ProPresenter 7 can switch its output on and off. When ProPresenter's output is off,
+  AK takes over the UltraStudio; when ProPresenter's output is on, AK stands down. The owner sees this as the only clash.
+  Pending: are AK and ProPresenter on the SAME Mac? If they are on different Macs, the Thunderbolt cable decides ownership and AK needs
+  no coordination; if they share one Mac, research first: (1) whether ProPresenter 7's network API reports its SDI output state;
+  (2) whether ProPresenter releases the DeckLink device while its output is off; (3) AK stands down by quitting its OBS (the DeckLink
+  output cannot be stopped safely over the websocket, §6) and takes over by relaunching with auto-start.
+
 Resolved without the owner (critique, from facts): 50/60 deferred (60-fps cap); W8 Keyer-only, warn-only; W6 deferred; external
-attach kept unchanged; lazy engine start (unless OD-M10 says otherwise); no code-signature check in v1.
+attach kept unchanged; lazy engine start (revisit with OD-M10); no code-signature check in v1.
