@@ -36,8 +36,8 @@ failure reports `unavailable`. Full suite at `b255c6b6`'s product diff: 7369 pas
 
 ## Remaining (resume)
 
-- Baseline `--arm both --rate 25 --takes 2` (native `2x`/`positive` with `gl_replay="off"`) — expect the `2x` native bounds to be
-  affected by the rAF latch; report, don't loosen.
+- Baseline `--arm both --rate 25`: take 1 DONE 23:10 (load ~9) PASS — native `2x` 10.8 %, `positive` (source = canvas) 27.1 %,
+  positive > 2x; one more take for n=2 (`baseline.log`).
 - Rate 30 diagnostic takes (explicit `auto`), report-only.
 - Re-run failsafe + soak on the final code (harness changed after they ran; product default at 25 unchanged).
 - M7 owner eyeball (shown, `--keep-recordings`), M8 rest, docs (plan §6), Codex (plan §7 brief + the rate/reshow changes), PR.
