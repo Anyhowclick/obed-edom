@@ -169,3 +169,51 @@ def test_decode_recording_reports_phases_endpoints_rings_and_skips_hidden(monkey
     assert result["ringMaxDelta"] == {"slide2-live": 0, "slide2-handback": 255}
     assert result["handbackCounters"] == list(range(40, 60))
     assert result["codec"] == meta["codec"]
+
+
+def test_static_check_passes_a_still_movie_rect_and_fails_a_moving_counter(monkeypatch):
+    still = [synthetic_frame("slide2-live", None) for _ in range(10)]
+    for frame in still:
+        frame[800:1000, 200:900] = (90, 120, 60)
+    moving = [synthetic_frame("slide2-live", n) for n in range(10)]
+    meta = {"codec": sorted(decode.LOSSLESS_CODECS)[0], "pix_fmt": "yuv420p", "fps": 25.0, "size": (1920, 1080)}
+    rect = (float(decode.INDEX_PATCH_ROI[0] - 20), float(decode.INDEX_PATCH_ROI[1] - 20), 400.0, 200.0)
+    for frames, expect in ((still, 0), (moving, None)):
+        monkeypatch.setattr(decode, "read_frames", lambda _path, frames=frames: (meta, iter(frames)))
+        value = decode.decode_recording(Path("x.avi"), statics=[rect])["staticMaxDelta"]["slide2-live"]
+        if expect is None:
+            assert value > 4
+        else:
+            assert value == expect
+
+
+def test_static_mask_is_the_rect_eroded_four_px():
+    mask = decode.static_mask((400, 400, 3), RECT)
+    ys, xs = np.nonzero(mask)
+    assert (xs.min(), xs.max(), ys.min(), ys.max()) == (104, 145, 204, 225)
+
+
+def test_ring_diag_locates_the_worst_frame_and_saves_crops(monkeypatch, tmp_path):
+    frames = [synthetic_frame("slide2-live", n) for n in range(6)] + [
+        synthetic_frame("slide2-handback", n, poke=n == 9) for n in range(6, 12)]
+    meta = {"codec": sorted(decode.LOSSLESS_CODECS)[0], "pix_fmt": "yuv420p", "fps": 25.0, "size": (1920, 1080)}
+    monkeypatch.setattr(decode, "read_frames", lambda _path: (meta, iter(frames)))
+    result = decode.decode_recording(Path("x.avi"), rings=[RING_RECT], crops_dir=tmp_path)
+    diag = result["ringDiag"]["slide2-handback"]
+    x, y = int(RING_RECT[0]) + 10, int(RING_RECT[1]) - 4
+    assert diag["worstFrame"] == 9 and diag["firstFrame"] == 6 and diag["worstSinceFirstS"] == 0.12
+    assert diag["overTau"] == {"tau": 0, "count": 1, "bbox": [x, y, x + 1, y + 1]}
+    assert len(diag["crops"]) == 3 and all(Path(p).exists() for p in diag["crops"])
+
+
+def test_ring_exclude_masks_a_band_around_another_slot_edge(monkeypatch):
+    poke_x, poke_y = int(RING_RECT[0]) + 10, int(RING_RECT[1]) - 4
+    frames = [synthetic_frame("slide2-handback", n) for n in range(4)]
+    frames[-1][poke_y, poke_x] = 255
+    meta = {"codec": sorted(decode.LOSSLESS_CODECS)[0], "pix_fmt": "yuv420p", "fps": 25.0, "size": (1920, 1080)}
+    slot_edge_at_poke = (float(poke_x - 2), 700.0, 100.0, 200.0)
+    far_slot = (1500.0, 100.0, 50.0, 50.0)
+    for exclude, expect in (([slot_edge_at_poke], 0), ([far_slot], 255)):
+        monkeypatch.setattr(decode, "read_frames", lambda _path: (meta, iter(frames)))
+        result = decode.decode_recording(Path("x.avi"), rings=[RING_RECT], ring_exclude=exclude)
+        assert result["ringMaxDelta"]["slide2-handback"] == expect

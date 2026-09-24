@@ -6,7 +6,8 @@ searched per phase (slide 1's native movie sits a few px off), the grey offset c
 over every decoded frame, and `rawRepeatFrac` (raw grey unchanged) is reported independently
 of the fit. `backwardSteps` excludes loop wraps (`wrapSteps`, given `--loop-frames`);
 `ringMaxDelta` is the max |RGB delta| in the 2..8 px ring around each `--ring` rect vs the phase's
-first frame. Only codecs in `LOSSLESS_CODECS` are decoded.
+first frame (`ringDiag`: worst frame, pixels over the slide2-live ring and over 20, optional crops);
+`staticMaxDelta` is the same inside each `--static` rect eroded 4 px. Only codecs in `LOSSLESS_CODECS` are decoded.
 
 usage: uv run python scripts/obs_cadence_decode.py <recording> [--json out.json] [--ring X,Y,W,H] [--loop-frames N]
 """
@@ -23,6 +24,7 @@ from typing import Any, Iterable, Iterator, Sequence
 
 import imageio_ffmpeg
 import numpy as np
+from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from p2_recovery_html_adversarial import INDEX_PATCH_ROI, _decode_index_patch  # noqa: E402
@@ -40,6 +42,9 @@ PHASES: dict[str, tuple[int, int, int]] = {
 NOT_DECODED = frozenset({"slide2-hidden"})
 LOSSLESS_CODECS = frozenset({"utvideo"})
 RING_PX = (2, 8)
+STATIC_ERODE_PX = 4
+EDGE_BAND_PX = 4
+CROP_PAD = 24
 WRAP_TOL = 2
 MARK_BOX = (4, 20)
 MARK_MAX_DIST = 40.0
@@ -169,6 +174,15 @@ def ring_mask(shape: tuple[int, ...], rect: Rect, inner: int = RING_PX[0], outer
     return mask
 
 
+def edge_band(shape: tuple[int, ...], rect: Rect, px: int = EDGE_BAND_PX) -> np.ndarray:
+    mask = np.zeros(shape[:2], bool)
+    x0, y0, x1, y1 = dilate(rect, px, shape)
+    mask[y0:y1, x0:x1] = True
+    x0, y0, x1, y1 = dilate(rect, -px, shape)
+    mask[y0:y1, x0:x1] = False
+    return mask
+
+
 def ring_max_delta(reference: np.ndarray, frame: np.ndarray, rect: Rect, mask: np.ndarray | None = None) -> int:
     mask = ring_mask(frame.shape, rect) if mask is None else mask
     if not mask.any():
@@ -176,12 +190,47 @@ def ring_max_delta(reference: np.ndarray, frame: np.ndarray, rect: Rect, mask: n
     return int(np.abs(frame[mask].astype(np.int16) - reference[mask].astype(np.int16)).max())
 
 
+def static_mask(shape: tuple[int, ...], rect: Rect, erode: int = STATIC_ERODE_PX) -> np.ndarray:
+    mask = np.zeros(shape[:2], bool)
+    x0, y0, x1, y1 = dilate(rect, -erode, shape)
+    mask[y0:y1, x0:x1] = True
+    return mask
+
+
+def masked_max_delta(reference: np.ndarray, frame: np.ndarray, mask: np.ndarray) -> int:
+    if not mask.any():
+        return 0
+    return int(np.abs(frame[mask].astype(np.int16) - reference[mask].astype(np.int16)).max())
+
+
+def over_threshold(reference: np.ndarray, frame: np.ndarray, mask: np.ndarray, tau: int) -> dict[str, Any]:
+    over = mask & (np.abs(frame.astype(np.int16) - reference.astype(np.int16)).max(axis=2) > tau)
+    ys, xs = np.nonzero(over)
+    return {"tau": tau, "count": int(over.sum()),
+            "bbox": [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1] if xs.size else None}
+
+
+def save_crops(crops_dir: Path, phase: str, frames: dict[str, np.ndarray], rects: Sequence[Rect]) -> list[str]:
+    shape = next(iter(frames.values())).shape
+    boxes = [dilate(rect, RING_PX[1] + CROP_PAD, shape) for rect in rects]
+    x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+    x1, y1 = max(b[2] for b in boxes), max(b[3] for b in boxes)
+    crops_dir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for tag, frame in frames.items():
+        path = crops_dir / f"{phase}-{tag}.png"
+        Image.fromarray(np.ascontiguousarray(frame[y0:y1, x0:x1])).save(path)
+        paths.append(str(path))
+    return paths
+
+
 def endpoints(counter: list[int | None], index: list[int]) -> dict[str, list[int] | None]:
     decoded = [(i, n) for i, n in zip(index, counter) if n is not None]
     return {"first": list(decoded[0]) if decoded else None, "last": list(decoded[-1]) if decoded else None}
 
 
-def decode_recording(recording: Path, *, rings: Sequence[Rect] | None = None, loop_frames: int | None = None) -> dict[str, Any]:
+def decode_recording(recording: Path, *, rings: Sequence[Rect] | None = None, statics: Sequence[Rect] | None = None,
+                     ring_exclude: Sequence[Rect] = (), loop_frames: int | None = None, crops_dir: Path | None = None) -> dict[str, Any]:
     meta, frames = read_frames(recording)
     check_lossless(meta)
     fps = float(meta["fps"])
@@ -189,7 +238,12 @@ def decode_recording(recording: Path, *, rings: Sequence[Rect] | None = None, lo
     indices: dict[str, list[int]] = {name: [] for name in PHASES}
     ring_refs: dict[str, np.ndarray] = {}
     ring_max: dict[str, int] = {}
+    ring_worst: dict[str, tuple[int, np.ndarray]] = {}
+    ring_last: dict[str, tuple[int, np.ndarray]] = {}
     masks: list[np.ndarray] | None = None
+    static_refs: dict[str, np.ndarray] = {}
+    static_max: dict[str, int] = {}
+    smask: np.ndarray | None = None
     total = unmarked = 0
     for index, frame in enumerate(frames):
         total += 1
@@ -203,11 +257,23 @@ def decode_recording(recording: Path, *, rings: Sequence[Rect] | None = None, lo
         windows[name].append(patch_window(frame))
         if rings:
             if masks is None:
-                masks = [ring_mask(frame.shape, rect) for rect in rings]
+                excluded = np.zeros(frame.shape[:2], bool)
+                for rect in ring_exclude:
+                    excluded |= edge_band(frame.shape, rect)
+                masks = [ring_mask(frame.shape, rect) & ~excluded for rect in rings]
             if name not in ring_refs:
                 ring_refs[name] = frame.copy()
             delta = max(ring_max_delta(ring_refs[name], frame, rect, mask) for rect, mask in zip(rings, masks))
+            if delta > ring_max.get(name, -1):
+                ring_worst[name] = (index, frame.copy())
             ring_max[name] = max(ring_max.get(name, 0), delta)
+            ring_last[name] = (index, frame)
+        if statics:
+            if smask is None:
+                smask = np.logical_or.reduce([static_mask(frame.shape, rect) for rect in statics])
+            if name not in static_refs:
+                static_refs[name] = frame.copy()
+            static_max[name] = max(static_max.get(name, 0), masked_max_delta(static_refs[name], frame, smask))
     offsets: dict[str, Any] = {}
     greys: dict[str, list[int | None]] = {}
     for name, wins in windows.items():
@@ -217,6 +283,19 @@ def decode_recording(recording: Path, *, rings: Sequence[Rect] | None = None, lo
         offsets[name] = {"offset": list(offset), "sampledDecodable": hits, "sampled": sampled}
         greys[name] = [decode_window(w, offset) for w in wins]
     c, residual, residual_c0 = fit_grey_offset(g for seq in greys.values() for g in seq if g is not None)
+    ring_diag: dict[str, Any] = {}
+    if rings and masks is not None:
+        union = np.logical_or.reduce(masks)
+        tau = ring_max.get("slide2-live", 0)
+        for name, (worst, frame) in ring_worst.items():
+            first = indices[name][0]
+            diag = {"worstFrame": worst, "worstSinceFirstS": round((worst - first) / fps, 3), "firstFrame": first,
+                    "lastFrame": ring_last[name][0], "overTau": over_threshold(ring_refs[name], frame, union, tau),
+                    "over20": over_threshold(ring_refs[name], frame, union, 20)}
+            if crops_dir is not None:
+                diag["crops"] = save_crops(crops_dir, name, {"reference": ring_refs[name], "worst": frame,
+                                                             "last": ring_last[name][1]}, rings)
+            ring_diag[name] = diag
     return {
         "file": str(recording),
         "codec": meta.get("codec"),
@@ -234,6 +313,11 @@ def decode_recording(recording: Path, *, rings: Sequence[Rect] | None = None, lo
         "loopFrames": loop_frames,
         "rings": [list(r) for r in rings] if rings else None,
         "ringMaxDelta": ring_max if rings else None,
+        "ringExclude": [list(r) for r in ring_exclude],
+        "ringPixels": int(np.logical_or.reduce(masks).sum()) if masks else None,
+        "ringDiag": ring_diag if rings else None,
+        "statics": [list(r) for r in statics] if statics else None,
+        "staticMaxDelta": static_max if statics else None,
         "phases": {name: (phase_stats(seq, c, fps, loop_frames) if seq else None) for name, seq in greys.items()},
         "endpoints": {name: endpoints(counters(trimmed(seq), c), trimmed(indices[name])) for name, seq in greys.items()},
         "handbackCounters": counters(greys.get("slide2-handback") or [], c),
@@ -245,14 +329,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("recording", type=Path)
     parser.add_argument("--json", type=Path, help="write the decode result here")
     parser.add_argument("--ring", action="append", default=[], help="X,Y,W,H rect (output px) for ringMaxDelta; repeatable")
+    parser.add_argument("--static", action="append", default=[], help="X,Y,W,H rect (output px) for staticMaxDelta; repeatable")
     parser.add_argument("--loop-frames", type=int, help="the looping movie's frame count, for wrapSteps")
+    parser.add_argument("--crops", type=Path, help="save ring crops (reference, worst, last frame) here")
     args = parser.parse_args(argv)
     rings = [tuple(float(v) for v in ring.split(",")) for ring in args.ring]
-    result = decode_recording(args.recording, rings=rings or None, loop_frames=args.loop_frames)
+    statics = [tuple(float(v) for v in rect.split(",")) for rect in args.static]
+    result = decode_recording(args.recording, rings=rings or None, statics=statics or None, loop_frames=args.loop_frames,
+                              crops_dir=args.crops)
     print(f"{result['nFrames']} frames @ {result['fps']} fps ({result['codec']}/{result['pixFmt']}), unmarked {result['unmarkedFrames']}, "
           f"fit c {result['c']} (max residual {result['maxResidual']}, c=0 {result['residualAtC0']})")
     for name, stats in result["phases"].items():
-        print(f"  {name:18s} offset {result['roiOffsets'][name]['offset']}  ring {(result['ringMaxDelta'] or {}).get(name)}  {stats}")
+        print(f"  {name:18s} offset {result['roiOffsets'][name]['offset']}  ring {(result['ringMaxDelta'] or {}).get(name)}"
+              f"  static {(result['staticMaxDelta'] or {}).get(name)}  {stats}")
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps(result, indent=1))

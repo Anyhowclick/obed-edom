@@ -76,6 +76,7 @@ from live_continuity_probe import (  # noqa: E402
     load_slides,
     matches_asset_keys,
     score_armed,
+    wait_for_destination_hash,
 )
 from live_host_probe import wait_for_settlement  # noqa: E402
 
@@ -93,7 +94,7 @@ NATIVE_PHASES = ("slide1-native",)
 NULL_PHASE = "slide1-paused"
 UNMEASURED_MARK = "#808080"
 LIMITS = {"nativeRepeatMax2x": 0.15, "decodableMin": 0.9, "nullRepeatMin": 0.95, "nativeRepeatMinPositive": 0.18,
-          "g2RepeatMax25": 0.03, "g2RepeatMax30": 0.05, "distinctMin25": 24.0, "uploadsMin": 27.0, "reshownRepeatMax": 0.03,
+          "g2RepeatMax25": 0.03, "g2RepeatMax30": 0.05, "distinctMin25": 24.0, "uploadsMin": 27.0, "reshownRepeatMax": 0.03, "staticMax": 4,
           "counterTol": 2, "movieAlphaMin": 250, "slotAlpha": 75, "slotAlphaTol": 3, "domTol": 3, "liveWaitS": 5.0,
           "mediaEndS": 44.0}
 EXPECTED_STATS = {"frameLen": 88, "occludedBands": 20, "bandCount": 128, "innerRect": {"x": 4, "y": 4, "w": 952, "h": 268}}
@@ -105,6 +106,8 @@ SOAK_WINDOW_MINUTES = (2, 8)
 PRECHECK_S = 105.0
 MARKER_RECT = {"x": 0, "y": 0, "w": 24, "h": 24}
 REGION_PAD = 2
+T_ERODE_PX = 6
+SLOT_OPACITY = 0.2947
 
 G2_SHA = "10a5b36a1f6008a3213bd90729915f6c15284448406f2a62dbc74ae884fe5288"
 KB_SHAS = {"frozen": "413a00ba4e36dd5edf9c07425ab3c92589eb23d51c60914448621b7a456b8b67",
@@ -443,11 +446,12 @@ def smoke_walk(s: Session) -> list[dict[str, Any]]:
     return steps
 
 
-def g2_script(kb: str | None) -> Callable[[Session], None]:
+def g2_script(kb: str | None, armed: dict[str, Any]) -> Callable[[Session], None]:
     def script(s: Session) -> None:
         slide1_phases(s)
         s.execute("advance")
         s.wait_live()
+        s.out["destinationHash"] = wait_for_destination_hash(s.host, armed["atScene"])
         started = s.phase("slide2-live")
         s.out["armed"] = armed_evidence(s.host._require_transport())
         s.read("liveStart")
@@ -469,6 +473,7 @@ def g2_script(kb: str | None) -> Callable[[Session], None]:
         hold(started, 3.8)
         s.read("reshownEnd")
         started = s.phase("slide2-handback")
+        s.out["build1AfterMarkerS"] = round(time.monotonic() - started, 3)
         s.execute("advance")
         hold(started, 4)
         started = s.phase("slide2-after")
@@ -649,21 +654,31 @@ def rect_mask(shape: tuple[int, ...], rect: dict[str, float], pad: int = 0) -> n
     return mask
 
 
+def erode(mask: np.ndarray, px: int) -> np.ndarray:
+    out = mask.copy()
+    padded = np.pad(mask, px, constant_values=False)
+    for dy in range(2 * px + 1):
+        for dx in range(2 * px + 1):
+            out &= padded[dy:dy + mask.shape[0], dx:dx + mask.shape[1]]
+    return out
+
+
 def regions(armed: dict[str, Any], shape: tuple[int, ...]) -> dict[str, np.ndarray]:
     """Output-px gate regions at scale 1: O (outside movie, slot T, marker), movie, T (the override slot minus every
-    other slot but the full-stage background), marker."""
+    other slot but the full-stage background, eroded to its plateau), edge (T's erosion band), marker."""
     if len(armed["overrideSlots"]) != 1:
         raise RuntimeError(f"expected one opacity-override slot, got {armed['overrideSlots']}")
     slot_t = armed["overrideSlots"][0]
     slots = armed["slotRects"]
     marker = rect_mask(shape, MARKER_RECT, REGION_PAD)
     movie = armed["instanceRect"]
-    t = rect_mask(shape, slots[slot_t], -REGION_PAD) & ~marker
+    t = rect_mask(shape, slots[slot_t]) & ~marker
     for index, rect in enumerate(slots):
         if index != slot_t and not (rect["w"] >= shape[1] and rect["h"] >= shape[0]):
-            t &= ~rect_mask(shape, rect, REGION_PAD)
+            t &= ~rect_mask(shape, rect)
+    plateau = erode(t, T_ERODE_PX)
     outside = ~(marker | rect_mask(shape, movie, REGION_PAD) | rect_mask(shape, slots[slot_t], REGION_PAD))
-    return {"O": outside, "movie": rect_mask(shape, movie, -REGION_PAD), "T": t, "marker": marker,
+    return {"O": outside, "movie": rect_mask(shape, movie, -REGION_PAD), "T": plateau, "edge": t & ~plateau, "marker": marker,
             "markerCore": rect_mask(shape, {"x": 4, "y": 4, "w": 16, "h": 16})}
 
 
@@ -683,6 +698,12 @@ def alpha_range(img: np.ndarray | None, mask: np.ndarray) -> list[int] | None:
         return None
     alpha = img[..., 3][mask]
     return [int(alpha.min()), int(alpha.max())]
+
+
+def scaled_alpha_delta(img: np.ndarray | None, ref: np.ndarray | None, mask: np.ndarray, scale: float) -> int | None:
+    if img is None or ref is None or not mask.any():
+        return None
+    return int(np.abs(img[..., 3][mask].astype(np.int16) - np.round(ref[..., 3][mask] * scale).astype(np.int16)).max())
 
 
 def continuity_of(session: dict[str, Any]) -> dict[str, Any]:
@@ -753,8 +774,12 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
         check(m1, key, stats.get(key), stats.get(key) == want, f"== {want} (headless r2)")
     null = (p_g2.get(NULL_PHASE) or {}).get("repeatFrac")
     check(m1, "null: slide1-paused repeat", null, null is not None and null >= LIMITS["nullRepeatMin"], f">= {LIMITS['nullRepeatMin']}")
-    poster = (p_off.get("slide2-live") or {}).get("repeatFrac")
-    check(m1, "null: g2-off slide2-live (poster) repeat", poster, poster is not None and poster >= LIMITS["nullRepeatMin"], f">= {LIMITS['nullRepeatMin']}")
+    static_off = (d_off.get("staticMaxDelta") or {}).get("slide2-live")
+    static_g2 = (d_g2.get("staticMaxDelta") or {}).get("slide2-live")
+    check(m1, "null: g2-off slide2-live movie rect static", static_off, static_off is not None and static_off <= LIMITS["staticMax"],
+          f"<= {LIMITS['staticMax']}")
+    check(m1, "KB: g2 slide2-live movie rect fails the static check", static_g2, static_g2 is not None and static_g2 > LIMITS["staticMax"],
+          f"> {LIMITS['staticMax']}")
     off_scored = score_armed(off.get("armed"), armed, continuity_of(off))
     check(m1, "KB: g2-off score_armed False", off_scored["verdict"], off_scored["verdict"] is False, "False")
     gates["M1"] = gate(m1)
@@ -775,6 +800,12 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     handback = p_g2.get("slide2-handback") or {}
     check(m2, "report: handback repeat/gaps", [handback.get("repeatFrac"), handback.get("gapsGE3")], True, enforced=False)
     check(m2, "report: handoff completedMs", [h.get("completedMs") for h in handoffs], True, enforced=False)
+    check(m2, "report: g2 handback ringDiag", (d_g2.get("ringDiag") or {}).get("slide2-handback"), True, enforced=False)
+    check(m2, "report: build-1 advance after handback marker (s)", g2.get("build1AfterMarkerS"), True, enforced=False)
+    check(m2, "report: g2-off handback ringMaxDelta (DOM null)", (d_off.get("ringMaxDelta") or {}).get("slide2-handback"), True, enforced=False)
+    over20 = [(((d.get("ringDiag") or {}).get("slide2-handback") or {}).get("over20") or {}).get("count") for d in (d_g2, d_off)]
+    check(m2, "report: handback ring px over 20, g2 vs g2-off", over20, True, enforced=False)
+    check(m2, "report: g2-off handback ringDiag", (d_off.get("ringDiag") or {}).get("slide2-handback"), True, enforced=False)
     gates["M2"] = gate(m2)
 
     m3: list[dict[str, Any]] = []
@@ -790,6 +821,16 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     check(m3, "T: G2-S vs G2-P3 (DOM)", t_dom, t_dom is not None and t_dom <= LIMITS["domTol"], f"<= {LIMITS['domTol']}")
     t_pre = max_delta(p3_g2, p3_off, reg["T"])
     check(m3, "prerequisite: G2-P3 T == g2-off-P3 T", t_pre, t_pre == 0, "== 0")
+    band = reg["edge"]
+    check(m3, "edge band non-empty", int(band.sum()), bool(band.any()), "> 0")
+    fidelity = scaled_alpha_delta(s_g2, s_off, band, SLOT_OPACITY)
+    check(m3, "edge: G2-S alpha == round(g2-off-S alpha x 0.2947)", fidelity, fidelity is not None and fidelity <= tol, f"<= {tol}")
+    unscaled = scaled_alpha_delta(s_g2, s_off, band, 1.0)
+    check(m3, "KB: edge vs unscaled g2-off-S alpha fails", unscaled, unscaled is not None and unscaled > tol, f"> {tol}")
+    edge_dom = max_delta(s_g2, p3_g2, band)
+    edge_count = int((band & (np.abs(s_g2.astype(np.int16) - p3_g2.astype(np.int16)).max(axis=2) > LIMITS["domTol"])).sum()) \
+        if s_g2 is not None and p3_g2 is not None else None
+    check(m3, "report: edge G2-S vs G2-P3 (player vs DOM softness) max, px > 3", [edge_dom, edge_count], True, enforced=False)
     off_alpha = alpha_range(s_off, reg["T"])
     check(m3, "KB: g2-off-S T alpha fails the slot check", off_alpha,
           off_alpha is not None and not (want - tol <= off_alpha[0] and off_alpha[1] <= want + tol), f"not {want} +- {tol}")
@@ -1035,8 +1076,8 @@ def sessions_for(arm: str, ctx: dict[str, Any], args: argparse.Namespace, armed:
     if arm in ("2x", "positive"):
         return [run_session("rec", rec_script, ctx, gl_replay="off", record=True)]
     if arm == "g2":
-        return [run_session("g2", g2_script(args.kb), ctx, record=True),
-                run_session("g2-off", g2_script(None), ctx, gl_replay="off", record=True),
+        return [run_session("g2", g2_script(args.kb, armed), ctx, record=True),
+                run_session("g2-off", g2_script(None, armed), ctx, gl_replay="off", record=True),
                 run_session("hidden-arm", hidden_arm_script, ctx)]
     if arm == "failsafe":
         return [run_session("fail-module", failsafe_script(False), ctx, seed="planUnreadable"),
@@ -1053,14 +1094,21 @@ def sessions_for(arm: str, ctx: dict[str, Any], args: argparse.Namespace, armed:
             run_session("soak-off", soak_off_script, ctx, gl_replay="off", allow=None if allow is None else {})]
 
 
+def ring_exclusions(armed: dict[str, Any]) -> list[tuple[float, float, float, float]]:
+    """Every slot but the movie's own and the full-stage background: their edges sharpen GL -> DOM at build 1."""
+    return [rect_tuple(r) for i, r in enumerate(armed["slotRects"])
+            if i != armed["movieSlot"] and not (r["w"] >= 1920 and r["h"] >= 1080)]
+
+
 def decode_session(session: dict[str, Any], recording: str | None, *, rings: list[Any] | None, loop_frames: int | None,
-                   keep: bool) -> dict[str, Any] | None:
+                   keep: bool, crops_dir: Path | None = None, ring_exclude: list[Any] = ()) -> dict[str, Any] | None:
     path = Path(recording) if recording else None
     if path is None or not path.exists():
         return None
     print(f"  decoding {session['session']} {path}", flush=True)
     try:
-        return obs_cadence_decode.decode_recording(path, rings=rings, loop_frames=loop_frames)
+        return obs_cadence_decode.decode_recording(path, rings=rings, statics=rings, ring_exclude=ring_exclude,
+                                                   loop_frames=loop_frames, crops_dir=crops_dir if keep and rings else None)
     except obs_cadence_decode.NotLossless as exc:
         return {"notLossless": str(exc)}
     finally:
@@ -1121,9 +1169,11 @@ def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, args: ar
 
     looping = args.fixture != FIXTURE
     rings = [rect_tuple(armed["instanceRect"])] if arm == "g2" else None
+    ring_exclude = ring_exclusions(armed) if arm == "g2" else []
     for session in run["sessions"]:
         if session.get("recording"):
-            session["decode"] = decode_session(session, session["recording"], rings=rings, loop_frames=None, keep=args.keep_recordings)
+            session["decode"] = decode_session(session, session["recording"], rings=rings, loop_frames=None, keep=args.keep_recordings,
+                                               crops_dir=shots / f"{session['session']}-crops", ring_exclude=ring_exclude)
         for window in session.get("windows") or []:
             window["decode"] = decode_session(session, window["recording"], rings=None,
                                               loop_frames=SOAK_LOOP_FRAMES if looping else None, keep=args.keep_recordings)
