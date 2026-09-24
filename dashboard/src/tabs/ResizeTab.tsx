@@ -51,9 +51,7 @@ type ResizeResult = FramingProposal & {
   resolvedExportDir?: string;
   proposalExportDir?: string;
   offlineHides?: string;
-  outputCloseRequired?: string;
-  outputCloseUpTo?: number;
-  offlineHidesAborted?: { reason: string; detail?: string; needsFreshOutput?: boolean; outputPath?: string; generation?: number };
+  offlineHidesAborted?: { reason: string; detail?: string; needsFreshOutput?: boolean; outputPath?: string };
   applied?: number;
   missed?: number;
   counts?: { map?: number; pin?: number; list?: number; total?: number };
@@ -79,30 +77,20 @@ export function ResizeTab() {
   const [exportDir, setExportDir] = useSessionPath("obed-edom.resize.exportDir");
   const defaultExportDir = useDefaultExportDir();
   const result = (job?.result || undefined) as ResizeResult | undefined;
-  const [closedFor, setClosedFor] = useState<string | null>(null);
   const hidesAborted = result?.offlineHidesAborted;
   const offlineHides = result?.offlineHides === "off" ? ("off" as const) : undefined;
-  const closePath = hidesAborted?.needsFreshOutput ? hidesAborted.outputPath : result?.outputCloseRequired;
-  const closeUpTo = hidesAborted?.needsFreshOutput ? hidesAborted.generation : result?.outputCloseUpTo;
-  const outputName = closePath?.split("/").pop() || "the output deck";
-  const needsClose = Boolean(hidesAborted?.needsFreshOutput || result?.outputCloseRequired);
-  const closeKey =
-    needsClose && job ? `${job.id}|${job.startedAt ?? ""}|${closePath ?? ""}|${closeUpTo ?? ""}|${exportDir ?? ""}` : null;
-  const outputClosed = closeKey != null && closedFor === closeKey;
   const hidesNotice =
     hidesAborted &&
     [
       `Offline hides aborted: ${hidesAborted.reason}.`,
       hidesAborted.detail,
       "Offline hides are switched off for the next run.",
-      needsClose ? `Close ${outputName} in Keynote before re-applying.` : "",
+      hidesAborted.needsFreshOutput
+        ? `Close ${hidesAborted.outputPath?.split("/").pop() || "the output deck"} in Keynote, then restart the dashboard.`
+        : "",
     ]
       .filter(Boolean)
       .join(" ");
-
-  useEffect(() => {
-    setClosedFor(null);
-  }, [closeKey]);
 
   useEffect(() => {
     const path = result?.path;
@@ -172,18 +160,10 @@ export function ResizeTab() {
 
   async function applyFramings(decisions: FramingDecision[]) {
     if (!job) return;
-    if (needsClose && !outputClosed) {
-      setError(`Close ${outputName} in Keynote and tick “I’ve closed ${outputName} in Keynote” before re-applying.`);
-      return;
-    }
-    setClosedFor(null);
     setBusy(true);
     setError(null);
     try {
-      await track(await applyResize(job.id, decisions, exportDir, {
-          offlineHides,
-          ...(outputClosed ? { outputClosed: closePath, outputClosedUpTo: closeUpTo } : {}),
-        }));
+      await track(await applyResize(job.id, decisions, exportDir, offlineHides));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -310,16 +290,6 @@ export function ResizeTab() {
           </div>
           {offlineHides && !hidesAborted && (
             <p className="note">Offline hides are switched off for this run after the last abort.</p>
-          )}
-          {needsClose && (
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={outputClosed}
-                onChange={(e) => setClosedFor(e.target.checked ? closeKey : null)}
-              />
-              <span>I’ve closed {outputName} in Keynote</span>
-            </label>
           )}
           <FramingReview
             proposal={result}

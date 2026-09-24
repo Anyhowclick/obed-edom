@@ -83,7 +83,8 @@ class _Model:
     archives: dict[str, dict]
     member_of: dict[str, str]
     member_ids: dict[str, list[str]]
-    duplicates: set[str]
+    duplicates: dict[str, list[str]]
+    package_metadata_members: list[str]
     objects: dict[str, dict]
     namelist: list[str]
 
@@ -106,7 +107,8 @@ def _load_model(zf: zipfile.ZipFile) -> _Model:
     archives: dict[str, dict] = {}
     member_of: dict[str, str] = {}
     member_ids: dict[str, list[str]] = {}
-    duplicates: set[str] = set()
+    duplicates: dict[str, list[str]] = {}
+    package_metadata_members: list[str] = []
     namelist = zf.namelist()
     for name in namelist:
         if not name.endswith(".iwa"):
@@ -120,13 +122,24 @@ def _load_model(zf: zipfile.ZipFile) -> _Model:
             for arch in chunk["archives"]:
                 aid = str(arch["header"]["identifier"])
                 ids.append(aid)
+                package_metadata_members.extend(
+                    name for o in arch.get("objects") or [] if o.get("_pbtype") == _PACKAGE_METADATA_PBTYPE)
                 if aid in archives:
-                    duplicates.add(aid)
+                    duplicates.setdefault(aid, [member_of[aid]]).append(name)
                     continue
                 archives[aid] = arch
                 member_of[aid] = name
     objects = {aid: arch["objects"][0] for aid, arch in archives.items() if arch.get("objects")}
-    return _Model(archives, member_of, member_ids, duplicates, objects, namelist)
+    return _Model(archives, member_of, member_ids, duplicates, package_metadata_members, objects, namelist)
+
+
+def _require_unambiguous_package(model: _Model, exc_type: type[Exception]) -> None:
+    if model.duplicates:
+        aid, members = next(iter(sorted(model.duplicates.items())))
+        raise exc_type(f"{len(model.duplicates)} duplicate archive id(s), e.g. {aid} in {members}")
+    if model.package_metadata_members != [_METADATA_MEMBER]:
+        raise exc_type(f"{_PACKAGE_METADATA_PBTYPE} found in {model.package_metadata_members}, "
+                       f"need exactly one in {_METADATA_MEMBER}")
 
 
 def _header_refs(header: dict) -> list[str]:
@@ -564,8 +577,6 @@ def _plan_slide(
     slide = model.objects.get(slide_id)
     if slide is None or slide.get("_pbtype") != "KN.SlideArchive":
         raise _Refuse(f"slide archive {slide_id} not decoded")
-    if slide_id in model.duplicates:
-        raise _Refuse(f"slide archive id {slide_id} is duplicated in the deck")
     member = model.member_of[slide_id]
     if slide_count_by_member[member] != 1:
         raise _Refuse(f"member {member} holds {slide_count_by_member[member]} slide archives")
@@ -619,14 +630,6 @@ def _plan_slide(
     _identity_check(records, items, model.objects, data_index, group_text, cache)
     _check_unambiguous(records, hides, items, slide, model.objects, data_index, group_text, cache)
     return slide_id, member, hide_ids
-
-
-def _subtree_of(slide_id: str, member: str, hide_ids: list[str], model: _Model) -> tuple[set[str], set[str]]:
-    subtree, boundary = _close_subtree(hide_ids, slide_id, member, model)
-    dup = subtree & model.duplicates
-    if dup:
-        raise _Refuse(f"subtree ids duplicated in the deck: {sorted(dup)[:5]}")
-    return subtree, boundary
 
 
 def _prove_references(
@@ -928,9 +931,8 @@ def _check_metadata_invariants(pm: dict, removed: set[str], orphans: set[str], w
 def _verify_deck(deck: Path, removed: set[str], orphans: set[str]) -> None:
     with zipfile.ZipFile(deck) as zf:
         model = _load_model(zf)
+    _require_unambiguous_package(model, HidesWriteFailed)
     pm_id, pm = _package_metadata(model)
-    if pm is None:
-        raise HidesWriteFailed("hides verify: no PackageMetadata")
     referrers, _uuids = _scan(model, removed, pm_id)
     if referrers:
         t, refs = next(iter(referrers.items()))
@@ -1022,9 +1024,8 @@ def _prepare(
 
     with zipfile.ZipFile(deck) as zf:
         model = _load_model(zf)
+        _require_unambiguous_package(model, OfflineWriteRefused)
         pm_id, pm = _package_metadata(model)
-        if pm is None:
-            raise OfflineWriteRefused(f"no {_PACKAGE_METADATA_PBTYPE} in {_METADATA_MEMBER}")
         order = slide_order(model.objects)
         data_index = _build_data_index(model.namelist)
         comp_of_member = _components_by_member(pm, list(model.member_ids))
@@ -1055,7 +1056,7 @@ def _prepare(
                 refuse(n, "forced refusal", True)
                 continue
             try:
-                planned[n] = (*plan, *_subtree_of(*plan[:2], plan[2], model))
+                planned[n] = (*plan, *_close_subtree(plan[2], plan[0], plan[1], model))
             except _Refuse as exc:
                 refuse(n, str(exc), True)
             except Exception as exc:
@@ -1064,7 +1065,7 @@ def _prepare(
         slide_ids = Counter(p[0] for p in planned.values())
         for n in list(planned):
             if slide_ids[planned[n][0]] > 1:
-                refuse(n, "slide archive shared with another slide number", True)
+                refuse(n, "slide archive shared with another slide number", False)
                 del planned[n]
 
         targets = set().union(*(p[3] | p[4] for p in planned.values())) if planned else set()

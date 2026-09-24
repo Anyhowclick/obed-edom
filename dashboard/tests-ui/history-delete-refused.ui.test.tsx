@@ -3,11 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { HistoryTab } from "../src/tabs/HistoryTab";
 import { makeJob } from "./fakes/doc";
 
-// The backend refuses (409) to delete a run whose offline-hides abort may have left its
-// output deck open in Keynote; History must show that message and keep the run listed.
-const DETAIL =
-  "Run resize-1 left Wall_CG.key possibly open in Keynote. Close it, confirm that in the " +
-  "Resize tab and re-apply before deleting this run.";
+// Any backend refusal of a delete must reach the operator, with the run still listed.
+const DETAIL = "Could not delete resize-1: its output folder is in use.";
 
 const job = makeJob({ kind: "resize", feature: "resize", name: "resize-1", result: { phase: "framing" } });
 

@@ -1647,15 +1647,6 @@ def _hides_abort(reason, detail="", needs_fresh_output=False):
     return exc
 
 
-def _closure(client, job_id):
-    """The Apply body confirming the output path this job shows as possibly open."""
-    result = client.get(f"/api/jobs/{job_id}").json()["result"]
-    abort = result.get("offlineHidesAborted") or {}
-    if abort.get("needsFreshOutput"):
-        return {"outputClosed": abort["outputPath"], "outputClosedUpTo": abort["generation"]}
-    return {"outputClosed": result["outputCloseRequired"], "outputClosedUpTo": result["outputCloseUpTo"]}
-
-
 def test_resize_offline_hides_abort_is_structured_and_the_rerun_keeps_them_off(
     tmp_path, monkeypatch
 ):
@@ -1700,164 +1691,18 @@ def test_resize_offline_hides_abort_is_structured_and_the_rerun_keeps_them_off(
     assert any("Offline hides switched off" in line for line in rerun["logs"])
 
 
-def test_resize_fallback_timeout_needs_a_closed_output_before_re_apply(tmp_path, monkeypatch):
-    """Astra r2 #5: a fallback-session timeout may leave the destination open or partly
-    edited in Keynote, and re-Apply replaces that same destination. The abort publishes the
-    recovery detail and `needsFreshOutput`; Apply is refused (nothing saved, nothing run)
-    until the request confirms the operator closed the output deck."""
-    detail = "Keynote did not finish; close Wall_CG.key without saving, then re-apply into fresh output."
-    calls = []
-
-    def fake_remap(path, dest, **kwargs):
-        calls.append(kwargs.get("offline_hides"))
-        if len(calls) == 1:
-            raise _hides_abort("hide fallback session did not finish", detail, needs_fresh_output=True)
-        return {"dest": str(dest), "counts": {}, "applied": 1, "missed": 0}
-
-    _stub_resize_propose(monkeypatch, fake_remap)
-    client = TestClient(app)
-    job_id = _propose(client, tmp_path).json()["id"]
-    _wait(client, job_id)
-    client.post(f"/api/resize/{job_id}/apply", json={})
-    abort = _wait(client, job_id)["result"]["offlineHidesAborted"]
-    assert abort == {
-        "reason": "hide fallback session did not finish",
-        "detail": detail,
-        "needsFreshOutput": True,
-        "outputPath": abort["outputPath"],
-        "generation": abort["generation"],
-    }
-
-    blocked = client.post(
-        f"/api/resize/{job_id}/apply",
-        json={"decisions": [{"wallIndex": 0, "state": "pinned", "templateSlide": 5}]},
-    )
-    assert blocked.status_code == 409
-    assert "Close Wall_CG.key in Keynote" in blocked.json()["detail"]
-    after_block = client.get(f"/api/jobs/{job_id}").json()
-    assert after_block["status"] == "error"
-    assert after_block["result"]["offlineHidesAborted"]["needsFreshOutput"] is True
-    assert after_block["result"]["pages"][0]["decision"]["state"] != "pinned"
-    assert calls == [None]
-
-    assert client.post(f"/api/resize/{job_id}/apply", json=_closure(client, job_id)).status_code == 200
-    assert _wait(client, job_id)["status"] == "done"
-    assert calls == [None, "off"]
-
-
-def test_resize_fallback_timeout_closure_carries_into_a_fresh_proposal(tmp_path, monkeypatch):
-    """Astra r3 #4: timeout → Propose framings → Apply. The fresh proposal is a new job that
-    writes the same `<export dir>/<source>_CG.key` (which `copy_keynote` unlinks first), so the
-    unresolved closure requirement is keyed by that canonical output path, not by job: the new
-    proposal flags it, its Apply is refused until closure is confirmed, and the confirmation
-    resolves it on the aborted job too."""
-    calls = []
-
-    def fake_remap(path, dest, **kwargs):
-        calls.append(kwargs.get("offline_hides"))
-        if len(calls) == 1:
-            raise _hides_abort("hide fallback session did not finish", "close it", needs_fresh_output=True)
-        return {"dest": str(dest), "counts": {}, "applied": 1, "missed": 0}
-
-    _stub_resize_propose(monkeypatch, fake_remap)
-    client = TestClient(app)
-    first = _propose(client, tmp_path).json()["id"]
-    _wait(client, first)
-    client.post(f"/api/resize/{first}/apply", json={})
-    output = _wait(client, first)["result"]["offlineHidesAborted"]["outputPath"]
-
-    second = _propose(client, tmp_path, offline_hides="off").json()["id"]
-    proposal = _wait(client, second)["result"]
-    assert proposal["offlineHides"] == "off"
-    assert proposal["outputCloseRequired"] == output
-
-    blocked = client.post(f"/api/resize/{second}/apply", json={})
-    assert blocked.status_code == 409
-    assert f"Close {Path(output).name} in Keynote" in blocked.json()["detail"]
-    assert calls == [None]
-
-    assert client.post(f"/api/resize/{second}/apply", json=_closure(client, second)).status_code == 200
-    assert _wait(client, second)["status"] == "done"
-    assert calls == [None, "off"]
-    assert client.get(f"/api/jobs/{first}").json()["result"]["offlineHidesAborted"]["needsFreshOutput"] is False
-
-    third = _propose(client, tmp_path).json()["id"]
-    assert "outputCloseRequired" not in _wait(client, third)["result"]
-
-
-def _timed_out_job(client, tmp_path, monkeypatch, calls):
-    def fake_remap(path, dest, **kwargs):
-        calls.append(kwargs.get("offline_hides"))
-        if len(calls) == 1:
-            raise _hides_abort("hide fallback session did not finish", "close it", needs_fresh_output=True)
-        return {"dest": str(dest), "counts": {}, "applied": 1, "missed": 0}
-
-    _stub_resize_propose(monkeypatch, fake_remap)
-    job_id = _propose(client, tmp_path).json()["id"]
-    _wait(client, job_id)
-    client.post(f"/api/resize/{job_id}/apply", json={})
-    assert _wait(client, job_id)["result"]["offlineHidesAborted"]["needsFreshOutput"] is True
-    return job_id
-
-
-def test_resize_timeout_job_cannot_be_deleted_until_closure_is_confirmed(tmp_path, monkeypatch):
-    """Sol r4 #3: the aborted job's result is the only record that its output may still be
-    open in Keynote, so deleting it would let a later proposal replace that path unconfirmed.
-    Deletion is refused until the closure is confirmed through an Apply."""
-    calls = []
-    client = TestClient(app)
-    job_id = _timed_out_job(client, tmp_path, monkeypatch, calls)
-
-    refused = client.delete(f"/api/jobs/{job_id}")
-    assert refused.status_code == 409
-    assert "Wall_CG.key" in refused.json()["detail"]
-    assert client.get(f"/api/jobs/{job_id}").status_code == 200
-
-    fresh = _propose(client, tmp_path, offline_hides="off").json()["id"]
-    assert "outputCloseRequired" in _wait(client, fresh)["result"]
-    assert client.post(f"/api/resize/{fresh}/apply", json={}).status_code == 409
-
-    assert client.post(f"/api/resize/{fresh}/apply", json=_closure(client, fresh)).status_code == 200
-    _wait(client, fresh)
-    assert client.delete(f"/api/jobs/{job_id}").status_code == 200
-    assert calls == [None, "off"]
-
-
-def test_resize_timeout_blocks_delete_all_so_a_fresh_proposal_still_needs_closure(
-    tmp_path, monkeypatch
-):
-    """timeout → delete all (refused, nothing deleted) → fresh proposal → Apply refused
-    until closure is confirmed."""
-    calls = []
-    client = TestClient(app)
-    job_id = _timed_out_job(client, tmp_path, monkeypatch, calls)
-    before = {job["id"] for job in client.get("/api/jobs").json()["jobs"]}
-
-    refused = client.delete("/api/jobs")
-    assert refused.status_code == 409
-    assert "Wall_CG.key" in refused.json()["detail"]
-    assert {job["id"] for job in client.get("/api/jobs").json()["jobs"]} >= before
-
-    fresh = _propose(client, tmp_path, offline_hides="off").json()["id"]
-    assert _wait(client, fresh)["result"]["outputCloseRequired"].endswith("Wall_CG.key")
-    blocked = client.post(f"/api/resize/{fresh}/apply", json={})
-    assert blocked.status_code == 409
-    assert calls == [None]
-
-    assert client.post(f"/api/resize/{fresh}/apply", json=_closure(client, fresh)).status_code == 200
-    assert _wait(client, fresh)["status"] == "done"
-    assert calls == [None, "off"]
-    assert client.get(f"/api/jobs/{job_id}").json()["result"]["offlineHidesAborted"]["needsFreshOutput"] is False
-
-
-def test_resize_in_flight_fallback_cannot_be_deleted_before_it_records_the_timeout(
-    tmp_path, monkeypatch
-):
-    """Sol r6 #2: in-flight fallback → delete → timeout → fresh proposal. Deleting the running
-    job (singly or via Delete All) would detach it, so its later `needsFreshOutput` abort
-    would never persist and a fresh proposal could replace the deck still open in Keynote."""
+def test_resize_fallback_timeout_blocks_every_apply_until_the_dashboard_restarts(tmp_path, monkeypatch):
+    """Owner decision 6: a fallback timeout (`needs_fresh_output`) may leave the output deck
+    open in Keynote. The worker sets a process-wide, in-memory lock at the abort, independent
+    of any job record: every Apply is refused, deleting the job does not lift it, a job that
+    was already queued is refused at worker start before touching its destination, and only a
+    restart (a fresh process; simulated by a fresh app over an empty lock) clears it. The
+    persisted `needsFreshOutput` on the job is display-only and never re-blocks."""
     import threading
 
+    import obed_edom.web.app as app_mod
+
+    monkeypatch.setattr(app_mod, "_unclosed_outputs", [])
     started = threading.Event()
     release = threading.Event()
     calls = []
@@ -1872,146 +1717,36 @@ def test_resize_in_flight_fallback_cannot_be_deleted_before_it_records_the_timeo
 
     _stub_resize_propose(monkeypatch, fake_remap)
     client = TestClient(app)
-    job_id = _propose(client, tmp_path).json()["id"]
-    _wait(client, job_id)
-    client.post(f"/api/resize/{job_id}/apply", json={})
-    assert started.wait(10)
-
-    refused = client.delete(f"/api/jobs/{job_id}")
-    assert refused.status_code == 409
-    assert "still running" in refused.json()["detail"]
-    client.delete("/api/jobs")
-    assert client.get(f"/api/jobs/{job_id}").status_code == 200
-
-    release.set()
-    assert _wait(client, job_id)["result"]["offlineHidesAborted"]["needsFreshOutput"] is True
-    fresh = _propose(client, tmp_path, offline_hides="off").json()["id"]
-    assert _wait(client, fresh)["result"]["outputCloseRequired"].endswith("Wall_CG.key")
-    assert client.post(f"/api/resize/{fresh}/apply", json={}).status_code == 409
-
-    assert client.post(f"/api/resize/{fresh}/apply", json=_closure(client, fresh)).status_code == 200
-    assert _wait(client, fresh)["status"] == "done"
-    assert client.delete(f"/api/jobs/{job_id}").status_code == 200
-
-
-def test_delete_all_rechecks_status_under_the_job_lock(tmp_path):
-    from obed_edom.web.jobs import Job, JobRunner
-
-    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path)
-    for job_id, status in [("a", "done"), ("b", "running"), ("c", "queued"), ("d", "error")]:
-        runner._jobs[job_id] = Job(id=job_id, kind="resize", name=job_id, status=status)
-    seen = []
-
-    def guard(job):
-        seen.append(job.id)
-        return job.id != "d"
-
-    assert runner.delete_all(purge=False, guard=guard) == 1
-    assert sorted(seen) == ["a", "d"]
-    assert sorted(runner._jobs) == ["b", "c", "d"]
-
-
-def test_resize_confirming_output_a_does_not_clear_unclosed_output_b(tmp_path, monkeypatch):
-    """Sol r7 #1: the operator confirmed output A, then the Apply destination became B, whose
-    deck an earlier abort left possibly open. The confirmation names A, not the destination
-    this Apply resolves to, so B's marker stands and Apply is refused."""
-    calls = []
-    client = TestClient(app)
-    job_id = _timed_out_job(client, tmp_path, monkeypatch, calls)
-    output_b = _closure(client, job_id)["outputClosed"]
-    output_a = str(tmp_path / "exports-a" / "Wall_CG.key")
-
-    fresh = _propose(client, tmp_path, offline_hides="off").json()["id"]
-    assert _wait(client, fresh)["result"]["outputCloseRequired"] == output_b
-    for confirmation in ({"outputClosed": output_a}, {"outputClosed": True}, {}):
-        refused = client.post(f"/api/resize/{fresh}/apply", json=confirmation)
-        assert refused.status_code in {409, 422}
-    assert client.get(f"/api/jobs/{job_id}").json()["result"]["offlineHidesAborted"]["needsFreshOutput"] is True
-    assert calls == [None]
-
-    assert client.post(f"/api/resize/{fresh}/apply", json=_closure(client, fresh)).status_code == 200
-    assert _wait(client, fresh)["status"] == "done"
-    assert calls == [None, "off"]
-
-
-def test_resize_confirmation_does_not_cover_a_newer_timeout_on_the_same_output(tmp_path, monkeypatch):
-    """Tick, then a new timeout on the same path, then submit: the confirmation only covers
-    the marker generations the operator saw, so the newer marker keeps Apply refused."""
-    calls = []
-
-    def fake_remap(path, dest, **kwargs):
-        calls.append(kwargs.get("offline_hides"))
-        if len(calls) <= 2:
-            raise _hides_abort("hide fallback session did not finish", "close it", needs_fresh_output=True)
-        return {"dest": str(dest), "counts": {}, "applied": 1, "missed": 0}
-
-    _stub_resize_propose(monkeypatch, fake_remap)
-    client = TestClient(app)
     first = _propose(client, tmp_path).json()["id"]
-    _wait(client, first)
-    client.post(f"/api/resize/{first}/apply", json={})
-    first_abort = _wait(client, first)["result"]["offlineHidesAborted"]
-
-    fresh = _propose(client, tmp_path, offline_hides="off").json()["id"]
-    _wait(client, fresh)
-    ticked = _closure(client, fresh)
-    assert ticked["outputClosedUpTo"] == first_abort["generation"]
-
+    queued = _propose(client, tmp_path).json()["id"]
     other = _propose(client, tmp_path).json()["id"]
-    _wait(client, other)
-    assert client.post(f"/api/resize/{other}/apply", json=_closure(client, first)).status_code == 200
-    newer = _wait(client, other)["result"]["offlineHidesAborted"]
-    assert newer["generation"] > first_abort["generation"]
-
-    refused = client.post(f"/api/resize/{fresh}/apply", json=ticked)
-    assert refused.status_code == 409
-    assert "Close Wall_CG.key in Keynote" in refused.json()["detail"]
-    assert client.get(f"/api/jobs/{other}").json()["result"]["offlineHidesAborted"]["needsFreshOutput"] is True
-    assert calls == [None, None]
-
-    reticked = {**ticked, "outputClosedUpTo": newer["generation"]}
-    assert client.post(f"/api/resize/{fresh}/apply", json=reticked).status_code == 200
-    assert _wait(client, fresh)["status"] == "done"
-    assert calls == [None, None, "off"]
-
-
-def test_resize_queued_apply_behind_a_new_timeout_is_refused_at_worker_start(tmp_path, monkeypatch):
-    """Sol r7 #1: proposal B is queued while A runs; A then records a fallback timeout on the
-    same output. B's Apply passed the request-time check, so the worker rechecks immediately
-    before touching the destination and fails B without remapping."""
-    import threading
-
-    started = threading.Event()
-    release = threading.Event()
-    calls = []
-
-    def fake_remap(path, dest, **kwargs):
-        calls.append(kwargs.get("offline_hides"))
-        if len(calls) == 1:
-            started.set()
-            assert release.wait(10)
-            raise _hides_abort("hide fallback session did not finish", "close it", needs_fresh_output=True)
-        return {"dest": str(dest), "counts": {}, "applied": 1, "missed": 0}
-
-    _stub_resize_propose(monkeypatch, fake_remap)
-    client = TestClient(app)
-    first = _propose(client, tmp_path).json()["id"]
-    second = _propose(client, tmp_path).json()["id"]
-    _wait(client, first)
-    _wait(client, second)
+    for job_id in (first, queued, other):
+        _wait(client, job_id)
     client.post(f"/api/resize/{first}/apply", json={})
     assert started.wait(10)
-    assert client.post(f"/api/resize/{second}/apply", json={}).status_code == 200
+    assert client.post(f"/api/resize/{queued}/apply", json={}).status_code == 200
 
     release.set()
-    assert _wait(client, first)["result"]["offlineHidesAborted"]["needsFreshOutput"] is True
-    refused = _wait(client, second)
-    assert refused["status"] == "error"
-    assert "Close Wall_CG.key in Keynote" in refused["error"]
+    abort = _wait(client, first)["result"]["offlineHidesAborted"]
+    assert abort["needsFreshOutput"] is True
+    message = "Close Wall_CG.key in Keynote, then restart the dashboard."
+    refused_at_start = _wait(client, queued)
+    assert refused_at_start["status"] == "error"
+    assert refused_at_start["error"] == message
     assert calls == [None]
 
-    assert client.post(f"/api/resize/{second}/apply", json=_closure(client, first)).status_code == 200
-    assert _wait(client, second)["status"] == "done"
+    for job_id in (first, queued, other):
+        refused = client.post(f"/api/resize/{job_id}/apply", json={})
+        assert refused.status_code == 409
+        assert refused.json()["detail"] == message
+    assert client.delete(f"/api/jobs/{first}").status_code == 200
+    assert client.post(f"/api/resize/{other}/apply", json={}).status_code == 409
+    assert calls == [None]
+
+    monkeypatch.setattr(app_mod, "_unclosed_outputs", [])
+    restarted = TestClient(app_mod.create_app())
+    assert restarted.post(f"/api/resize/{queued}/apply", json={}).status_code == 200
+    assert _wait(restarted, queued)["status"] == "done"
     assert calls == [None, None]
 
 

@@ -10,7 +10,8 @@ const NOTICE = `Offline hides aborted: ${REASON}. Offline hides are switched off
 const TIMEOUT_DETAIL = "Keynote did not finish; close wall_CG.key without saving, then re-apply into fresh output.";
 const TIMEOUT_NOTICE =
   `Offline hides aborted: hide fallback session did not finish. ${TIMEOUT_DETAIL} ` +
-  "Offline hides are switched off for the next run. Close wall_CG.key in Keynote before re-applying.";
+  "Offline hides are switched off for the next run. Close wall_CG.key in Keynote, then restart the dashboard.";
+const RESTART = "Close wall_CG.key in Keynote, then restart the dashboard.";
 
 const proposal = {
   phase: "framing",
@@ -59,7 +60,6 @@ const timedOut: Job = {
       detail: TIMEOUT_DETAIL,
       needsFreshOutput: true,
       outputPath: "/tmp/out/wall_CG.key",
-      generation: 7,
     },
   },
 };
@@ -77,7 +77,6 @@ vi.mock("../src/api", async (importOriginal) => {
     getJob: vi.fn(async () => aborted),
     pollJob: vi.fn(async () => aborted),
     startResize: vi.fn(actual.startResize),
-    chooseFolder: vi.fn(async () => ({ path: "/tmp/exports-b", name: "exports-b" })),
   };
 });
 
@@ -198,104 +197,26 @@ describe("Resize tab after an offline-hides abort", () => {
     expect(applyBody(fetchSpy).offlineHides).toBe("off");
   });
 
-  it("a timeout abort shows the recovery detail and blocks re-Apply until the output is confirmed closed", async () => {
+  it("a timeout abort shows the reason, recovery detail and restart instruction; Apply shows the server's refusal", async () => {
+    // Owner decision 6: the server holds an in-memory lock until the dashboard restarts, so
+    // there is no confirmation in the UI; Apply just surfaces the 409.
     vi.mocked(getJob).mockImplementation(async () => timedOut);
     vi.mocked(pollJob).mockImplementation(async () => timedOut);
-    const fetchSpy = spyFetch(timedOut);
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({ detail: RESTART }),
+    } as Response);
     renderOpenRun();
     expect(await screen.findByText(TIMEOUT_NOTICE)).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /closed/ })).not.toBeInTheDocument();
 
     await clickApply();
-    expect(fetchSpy.mock.calls.some(([url]) => String(url).endsWith("/apply"))).toBe(false);
-    expect(
-      screen.getByText(
-        "Close wall_CG.key in Keynote and tick “I’ve closed wall_CG.key in Keynote” before re-applying."
-      )
-    ).toBeInTheDocument();
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole("checkbox", { name: "I’ve closed wall_CG.key in Keynote" }));
-    });
-    await clickApply();
-
-    expect(applyBody(fetchSpy)).toMatchObject({ offlineHides: "off", outputClosed: "/tmp/out/wall_CG.key", outputClosedUpTo: 7 });
-  });
-
-  it("a confirmed retry that times out again needs a fresh confirmation", async () => {
-    // Sol r6 #3: the second abort keeps the job ID; only its new run generation differs.
-    const first: Job = { ...timedOut, startedAt: 100 };
-    const second: Job = { ...timedOut, startedAt: 200 };
-    vi.mocked(getJob).mockImplementation(async () => first);
-    vi.mocked(pollJob).mockImplementation(async () => second);
-    const fetchSpy = spyFetch(second);
-    renderOpenRun();
-    await screen.findByText(TIMEOUT_NOTICE);
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole("checkbox", { name: "I’ve closed wall_CG.key in Keynote" }));
-    });
-    await clickApply();
-    expect(applyBody(fetchSpy)).toMatchObject({ outputClosed: "/tmp/out/wall_CG.key", outputClosedUpTo: 7 });
-
-    const checkbox = await screen.findByRole("checkbox", { name: "I’ve closed wall_CG.key in Keynote" });
-    expect(checkbox).not.toBeChecked();
-    fetchSpy.mockClear();
-    await clickApply();
-    expect(fetchSpy.mock.calls.some(([url]) => String(url).endsWith("/apply"))).toBe(false);
-    expect(
-      screen.getByText(
-        "Close wall_CG.key in Keynote and tick “I’ve closed wall_CG.key in Keynote” before re-applying."
-      )
-    ).toBeInTheDocument();
-  });
-
-  it("changing the export folder clears the closure confirmation", async () => {
-    // Sol r7 #1: a confirmation for one output must not ride along to another destination.
-    vi.mocked(getJob).mockImplementation(async () => timedOut);
-    vi.mocked(pollJob).mockImplementation(async () => timedOut);
-    const fetchSpy = spyFetch(timedOut);
-    renderOpenRun();
-    await screen.findByText(TIMEOUT_NOTICE);
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole("checkbox", { name: "I’ve closed wall_CG.key in Keynote" }));
-    });
-    expect(screen.getByRole("checkbox", { name: "I’ve closed wall_CG.key in Keynote" })).toBeChecked();
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Export to…" }));
-    });
-    expect(await screen.findByText("/tmp/exports-b")).toBeInTheDocument();
-    expect(screen.getByRole("checkbox", { name: "I’ve closed wall_CG.key in Keynote" })).not.toBeChecked();
-
-    await clickApply();
-    expect(fetchSpy.mock.calls.some(([url]) => String(url).endsWith("/apply"))).toBe(false);
-  });
-
-  it("a fresh proposal after a timeout still requires confirming the shared output is closed", async () => {
-    // The backend keys the unresolved closure by output path, so the new proposal job
-    // carries `outputCloseRequired` even though it has no abort of its own.
-    const fresh: Job = {
-      ...aborted,
-      id: "job-2",
-      status: "done",
-      error: null,
-      result: { ...proposal, offlineHides: "off", outputCloseRequired: "/tmp/out/wall_CG.key", outputCloseUpTo: 7 },
-    };
-    vi.mocked(getJob).mockImplementation(async () => fresh);
-    vi.mocked(pollJob).mockImplementation(async () => fresh);
-    const fetchSpy = spyFetch(fresh);
-    renderOpenRun("job-2");
-
-    await clickApply();
-    expect(fetchSpy.mock.calls.some(([url]) => String(url).endsWith("/apply"))).toBe(false);
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole("checkbox", { name: "I’ve closed wall_CG.key in Keynote" }));
-    });
-    await clickApply();
-
-    expect(applyBody(fetchSpy, "job-2")).toMatchObject({ offlineHides: "off", outputClosed: "/tmp/out/wall_CG.key", outputClosedUpTo: 7 });
+    const body = applyBody(fetchSpy);
+    expect(body.offlineHides).toBe("off");
+    expect(Object.keys(body).sort()).toEqual(["decisions", "exportDir", "offlineHides"]);
+    expect(await screen.findByText(RESTART)).toBeInTheDocument();
   });
 
   it("an ordinary error shows its message and leaves offline hides alone", async () => {
@@ -305,12 +226,10 @@ describe("Resize tab after an offline-hides abort", () => {
     renderOpenRun();
     await screen.findByRole("button", { name: "Resize with these framings" });
     expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
-    expect(screen.queryByRole("checkbox", { name: /closed/ })).not.toBeInTheDocument();
 
     await clickApply();
 
     expect(applyBody(fetchSpy)).not.toHaveProperty("offlineHides");
-    expect(applyBody(fetchSpy)).not.toHaveProperty("outputClosed");
     expect((await screen.findAllByText("Keynote went away")).length).toBeGreaterThan(0);
   });
 });

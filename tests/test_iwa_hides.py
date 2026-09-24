@@ -1620,3 +1620,66 @@ def test_subtree_refusals_keep_order_proven_for_the_per_slide_fallback(tmp_path,
     res = _run(path)
     _assert_refused_only(path, before, res, 1, needle)
     assert res.slides[1].order_proven
+
+
+# ---------------------------------------------------------------- Sol r8 #5: ambiguous package, #6: shared slide id
+
+
+def _duplicate_with_hidden_ref(members):
+    """A second archive 303 in the Document member whose body (a build) points at hide 301:
+    the first-occurrence model would never see that reference."""
+    members[DOC].append(_a(303, "KN.BuildArchive", {"drawable": {"identifier": 301}, "delivery": "", "attributes": {}},
+                           refs=[301]))
+
+
+def test_duplicate_archive_id_refuses_the_stage_with_zero_byte_change(tmp_path):
+    path = _build(tmp_path / "dup.key", mutate=_duplicate_with_hidden_ref)
+    before = _raw_members(path)
+    with pytest.raises(OfflineWriteRefused, match=r"duplicate archive id.*303 in \[.Index/Document.iwa., .Index/Slide-101.iwa.\]"):
+        _run(path)
+    assert _raw_members(path) == before
+
+
+@pytest.mark.parametrize("where", [META, DOC])
+def test_second_package_metadata_refuses_the_stage_with_zero_byte_change(tmp_path, where):
+    path = _build(tmp_path / "pm2.key")
+    with zipfile.ZipFile(path) as zf:
+        decoded = IWAFile.from_buffer(zf.read(where), where).to_dict()
+    extra = _a(6, "TSP.PackageMetadata", {"lastObjectIdentifier": "1000"})
+    decoded["chunks"][0]["archives"].append(extra)
+    iwa_write._rewrite_members(path, {where: IWAFile.from_dict(decoded).to_buffer()})
+    before = _raw_members(path)
+    with pytest.raises(OfflineWriteRefused, match="PackageMetadata found in"):
+        _run(path)
+    assert _raw_members(path) == before
+
+
+def _shared_slide_id(members):
+    """Slide nodes 10 and 12 both point at slide archive 101 (slide numbers 1 and 3)."""
+    members[DOC][3] = _a(12, "KN.SlideNodeArchive", {"slide": {"identifier": 101}, "isSkipped": False}, refs=[101])
+
+
+def test_shared_slide_id_is_an_unproven_refusal(tmp_path):
+    path = _build(tmp_path / "shared.key", mutate=_shared_slide_id)
+    before = _raw_members(path)
+    hides = {1: HIDES[1], 3: HIDES[1]}
+    res = _run(path, hides)
+    for n in (1, 3):
+        assert res.slides[n].refused and "shared with another slide number" in res.slides[n].reason
+        assert not res.slides[n].order_proven
+    assert _raw_members(path)[S1] == before[S1]
+
+
+def test_shared_slide_id_aborts_before_any_applescript_fallback(tmp_path, monkeypatch):
+    from obed_edom import offline_write
+
+    path = _build(tmp_path / "shared.key", mutate=_shared_slide_id)
+    items = _payload(path)
+    wall = {"slides": [{"number": n, "items": items[n]} for n in sorted(items)]}
+    transforms = [{**h, "slide": n} for n in (1, 3) for h in HIDES[1]]
+    calls: list = []
+    monkeypatch.setattr(offline_write, "_run_hide_fallback", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(offline_write, "_run_fallback_scripts", lambda *a, **k: calls.append(a) or (True, [], []))
+    with pytest.raises(offline_write.OfflineHidesAborted, match="before the saved order was proven"):
+        offline_write.run_offline_hides(path, "on", {1, 3}, transforms, wall, lambda _m: None)
+    assert calls == []
