@@ -19,6 +19,7 @@ from obed_edom.inspect import (
     preview_pngs,
     slide_plain_text,
 )
+from obed_edom.iwa_runs import attach_magic_move_if_available
 from obed_edom.models import Flag
 from obed_edom.rendered import (
     CENTER_WALL,
@@ -1701,6 +1702,8 @@ def compare_inspects(
         left_ocr = {i: shot.ocr for i, shot in left_shots.items() if getattr(shot, "ocr_used", False)}
         right_ocr = {i: shot.ocr for i, shot in right_shots.items() if getattr(shot, "ocr_used", False)}
         inspect_flags: list[Flag] = []
+        attach_magic_move_if_available(str(left.get("path") or ""), left)
+        attach_magic_move_if_available(str(right.get("path") or ""), right)
         inspect_flags.extend(
             validate_inspect(
                 left,

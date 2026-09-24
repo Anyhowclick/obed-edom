@@ -793,3 +793,47 @@ def test_lock_blocks_a_racing_reset_from_clearing_kept_open_ownership(deck, tmp_
     assert ownership_seen_by_a == [str(deck.resolve())]
     assert closed == [deck.resolve()]
     assert result_a["out"]["exported"] is False
+
+
+@pytest.mark.parametrize("entry", ["checker", "legacy"])
+@pytest.mark.parametrize("export", [False, True], ids=["json-hit", "export-repair-hit"])
+def test_cache_hit_reports_the_current_path_after_the_original_deck_moved(
+    deck, monkeypatch, tmp_path, entry, export,
+):
+    # The digest cache is content-keyed, so a hit carries the path of whichever deck
+    # first populated it. After that deck is renamed away, readers of payload["path"]
+    # (the checker's Magic Move attach, deck-type sniffing) must see the deck asked for.
+    _seed_cache(deck, {"reader": "offline", "path": str(deck), "slideCount": 1,
+                       "slides": [{"index": 0, "number": 1, "items": [{"runs": []}]}]})
+    moved = deck.with_name("Renamed_DSK.key")
+    deck.rename(moved)
+
+    def boom(*a, **k):  # pragma: no cover - must not run
+        raise AssertionError("a cache hit must not rebuild")
+
+    def fake_export(key_path, export_dir, **kwargs):
+        Path(export_dir).mkdir(parents=True, exist_ok=True)
+        (Path(export_dir) / "slide-1.png").write_bytes(b"\x89PNG")
+
+    monkeypatch.setattr(inspect_mod, "_build_checker_offline", boom)
+    monkeypatch.setattr(inspect_mod, "run_jxa", boom)
+    monkeypatch.setattr(inspect_mod, "export_slide_images", fake_export)
+    read = inspect_mod.inspect_keynote_checker if entry == "checker" else inspect_mod.inspect_keynote
+    out = read(moved, export_dir=tmp_path / "dest" if export else None, use_cache=True)
+    assert out["_cached"] is True
+    assert out["path"] == str(moved.resolve())
+
+
+def test_checker_attaches_magic_move_from_the_current_path_on_a_cache_hit(deck, monkeypatch, tmp_path):
+    from obed_edom import iwa_runs
+    from obed_edom.diff_keynotes import compare_inspects
+
+    _seed_cache(deck, {"reader": "offline", "path": str(deck), "slideWidth": 1920, "slideHeight": 1080,
+                       "slideCount": 1, "slides": [{"index": 0, "number": 1, "items": [{"runs": []}]}]})
+    moved = deck.with_name("Renamed_DSK.key")
+    deck.rename(moved)
+    attached: list[str] = []
+    monkeypatch.setattr(iwa_runs, "attach_magic_move", lambda key_path, payload, **_: attached.append(str(key_path)))
+    payload = inspect_mod.inspect_keynote_checker(moved, use_cache=True)
+    compare_inspects(payload, dict(payload), tmp_path, tmp_path, tmp_path / "heat", use_ocr=False)
+    assert attached == [str(moved.resolve())] * 2

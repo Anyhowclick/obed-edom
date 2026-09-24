@@ -1910,3 +1910,44 @@ def test_resize_endpoints_only_accept_switching_offline_hides_off(tmp_path, monk
     res = client.post(f"/api/resize/{job_id}/apply", json={"offlineHides": value})
     assert res.status_code == 400
     assert _wait(client, job_id)["result"]["phase"] == "framing"
+
+
+def _mm_flip_attach(key_path, payload, **_):
+    """Stand-in attach_magic_move: slide 1 → 2 is a Magic Move whose two text boxes swap."""
+    first, second = payload["slides"]
+    first["magicMoveOut"] = True
+    first["mmKeys"] = second["mmKeys"] = {"text": {0: "text:a", 1: "text:b"}}
+    first["mmOrder"], second["mmOrder"] = [["text", 0], ["text", 1]], [["text", 1], ["text", 0]]
+    payload["attachedFrom"] = str(key_path)
+
+
+@pytest.mark.parametrize("attach_fails", [False, True])
+def test_run_inspect_refreshes_magic_move_before_validating(tmp_path, monkeypatch, attach_fails):
+    # The inspect payload may be a cache hit that predates mmOrder, so the job attaches
+    # Magic Move data itself from the deck path. A failing attach (no IWA extra, a
+    # non-zip deck) leaves mm.zorder_flip silent and never fails the inspect.
+    import obed_edom.iwa_runs as iwa_runs
+    import obed_edom.web.app as app_mod
+    from obed_edom.web.jobs import Job
+
+    deck = tmp_path / "Wall.key"
+    payload = {
+        "path": str(deck), "slideWidth": 1920, "slideHeight": 1080, "slideCount": 2,
+        "slides": [{"number": 1, "index": 0, "items": []}, {"number": 2, "index": 1, "items": []}],
+    }
+    monkeypatch.setattr(app_mod, "inspect_keynote", lambda *a, **k: payload)
+
+    def failing(*_a, **_k):
+        raise RuntimeError("no iwa")
+
+    monkeypatch.setattr(iwa_runs, "attach_magic_move", failing if attach_fails else _mm_flip_attach)
+    result = app_mod._run_inspect(Job(id="job-1", kind="inspect"), deck, False, None)
+    mm = [f for f in result["flags"] if f["rule"] == "mm.zorder_flip"]
+    if attach_fails:
+        assert mm == []
+    else:
+        assert payload["attachedFrom"] == str(deck)
+        assert [(f["slide"], f["message"]) for f in mm] == [
+            (1, "'text #0' and 'text #1' swap stacking order slide 1→2; "
+                "Magic Move will snap the layering at the cut."),
+        ]

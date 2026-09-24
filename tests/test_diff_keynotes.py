@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
 from obed_edom.diff_keynotes import ALIGN_THRESHOLD, align_slides, compare_inspects, text_score
@@ -1401,3 +1402,40 @@ def test_select_text_sources_attempt_order():
         b_text=b_full, b_typed="", b_clean="Faith",
     )
     assert attempts[-1] == ("full", a_full, b_full, "filter-asymmetric")
+
+
+@pytest.mark.parametrize("attach_fails", [False, True])
+def test_check_refreshes_magic_move_on_both_decks_before_validating(tmp_path, monkeypatch, attach_fails):
+    # The check pass reads match-pass inspect JSON that predates mmOrder, so it
+    # re-attaches Magic Move data from each payload's own .key. A failure is silent.
+    import obed_edom.iwa_runs as iwa_runs
+
+    attached: list[str] = []
+
+    def fake_attach(key_path, payload, **_):
+        attached.append(str(key_path))
+        if attach_fails:
+            raise RuntimeError("no iwa")
+        first, second = payload["slides"]
+        first["magicMoveOut"] = True
+        first["mmKeys"] = second["mmKeys"] = {"text": {0: "text:a", 1: "text:b"}}
+        first["mmOrder"], second["mmOrder"] = [["text", 0], ["text", 1]], [["text", 1], ["text", 0]]
+
+    monkeypatch.setattr(iwa_runs, "attach_magic_move", fake_attach)
+
+    def deck(name):
+        return {
+            "path": str(tmp_path / name), "slideWidth": 1920, "slideHeight": 1080, "slideCount": 2,
+            "slides": [
+                {"number": 1, "index": 0, "items": [{"kind": "text", "text": "a"}]},
+                {"number": 2, "index": 1, "items": [{"kind": "text", "text": "b"}]},
+            ],
+        }
+
+    result = compare_inspects(
+        deck("A_LW.key"), deck("B_DSK.key"), tmp_path, tmp_path, tmp_path / "heat",
+        left_label="LW", right_label="DSK", use_ocr=False,
+    )
+    assert attached == [str(tmp_path / "A_LW.key"), str(tmp_path / "B_DSK.key")]
+    mm = [(f.deck, f.slide) for f in result["flags"] if f.rule == "mm.zorder_flip"]
+    assert mm == ([] if attach_fails else [("lw", 1), ("dsk", 1)])

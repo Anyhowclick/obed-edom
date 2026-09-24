@@ -406,3 +406,333 @@ def test_punctuation_inside_bold_word_run_is_not_flagged():
     from obed_edom.models import Run
 
     assert _punct_flags(Run(text="Amen!", bold=True)) == []
+
+
+# --------------------------------------------------------------------------
+# mm.zorder_flip — Magic Move tweens geometry, not stacking, so a matched pair
+# whose back/front order inverts across the cut snaps at the transition.
+# Pairing follows what live Keynote was observed to do
+# (output/mm-dup-pairing/, 2026-09-24): unique content pairs directly; repeated
+# identical media pair by the least total centre distance (optimal, not greedy);
+# shapes and lines are not checked because our shape identity disagrees with
+# Keynote's (it paired green↔green and black↔black on Minimal Alpha_DSK 1→2).
+# --------------------------------------------------------------------------
+_BLACK, _GREEN = "shape:scalarPathSource:0:black", "shape:scalarPathSource:0:green"
+_SMALL, _BIG, _CLIP = "movie:WA0125=", "movie:UNTITLED=", "movie:SAME="
+_SQ = "image:SQ="
+_TITLE, _VERSE = "text:Welcome", "text:John 3:16"
+_NAMES = {_SMALL: "IMG-WA0125.mp4", _BIG: "untitled.mov", _CLIP: "clip.mov", _SQ: "sq.png"}
+
+
+def _mm_slide(number, objects, *, out=False, skipped=False):
+    """``objects`` back→front: a key, or (key, (x, y, side)) for a square on the slide.
+    kindIndex follows stacking order within each kind."""
+    by_kind: dict[str, dict[int, str]] = {}
+    items, order = [], []
+    for entry in objects:
+        key, rect = entry if isinstance(entry, tuple) else (entry, None)
+        kind = key.split(":", 1)[0]
+        ki = len(by_kind.setdefault(kind, {}))
+        by_kind[kind][ki] = key
+        item = {"kind": kind, "kindIndex": ki, "text": "", "fileName": _NAMES.get(key, "")}
+        if kind == "text":
+            item["text"] = key.split(":", 1)[1]
+        if rect:
+            x, y, side = rect
+            item.update(x=x, y=y, w=side, h=side)
+        items.append(item)
+        order.append([kind, ki])
+    slide = {"number": number, "index": number - 1, "items": items, "mmKeys": by_kind, "mmOrder": order}
+    if out:
+        slide["magicMoveOut"] = True
+    if skipped:
+        slide["skipped"] = True
+    return slide
+
+
+def _mm_payload(*slides) -> dict:
+    return {"path": "wall.key", "slideWidth": 1920, "slideHeight": 1080, "slides": list(slides)}
+
+
+def _zorder(payload):
+    from obed_edom.validate import _mm_zorder_flags
+
+    return _mm_zorder_flags(payload, "wall.key", deck="dsk")
+
+
+def _pairs(flags):
+    return [f.message.split(" swap ")[0] for f in flags]
+
+
+def _matches(before, after):
+    from obed_edom.validate import _mm_matches
+
+    return sorted(_mm_matches(_mm_slide(1, before, out=True), _mm_slide(2, after)))
+
+
+def test_mm_zorder_flip_names_the_one_swapped_pair():
+    payload = _mm_payload(
+        _mm_slide(1, [_SMALL, _TITLE, _BIG], out=True),
+        _mm_slide(2, [_TITLE, _SMALL, _BIG]),
+    )
+    flags = _zorder(payload)
+    assert len(flags) == 1
+    flag = flags[0]
+    assert (flag.rule, flag.severity, flag.slide, flag.deck) == ("mm.zorder_flip", "warning", 1, "dsk")
+    assert flag.location == "wall.key slide 1"
+    assert flag.message == (
+        "'IMG-WA0125.mp4' and 'Welcome' swap stacking order slide 1→2; "
+        "Magic Move will snap the layering at the cut."
+    )
+
+
+def test_mm_zorder_flip_reaches_validate_inspect_one_flag_per_inverted_pair():
+    # Slide 2 fully reverses slide 1's four objects: all six pairs invert, and each is
+    # its own flag (dedupe keys on the message, which names the pair). Order follows
+    # slide 1's back→front stacking.
+    payload = _mm_payload(
+        _mm_slide(1, [_TITLE, _SMALL, _BIG, _VERSE], out=True),
+        _mm_slide(2, [_VERSE, _BIG, _SMALL, _TITLE]),
+    )
+    flags = [
+        f for f in validate_inspect(payload, use_ocr=False, check_passages=False)
+        if f.rule == "mm.zorder_flip"
+    ]
+    assert _pairs(flags) == [
+        "'Welcome' and 'IMG-WA0125.mp4'",
+        "'Welcome' and 'untitled.mov'",
+        "'Welcome' and 'John 3:16'",
+        "'IMG-WA0125.mp4' and 'untitled.mov'",
+        "'IMG-WA0125.mp4' and 'John 3:16'",
+        "'untitled.mov' and 'John 3:16'",
+    ]
+    assert flags == _zorder(payload)
+
+
+@pytest.mark.parametrize(
+    "slides",
+    [
+        pytest.param(
+            [_mm_slide(1, [_SMALL, _TITLE]), _mm_slide(2, [_TITLE, _SMALL])],
+            id="no-magic-move-out",
+        ),
+        pytest.param(
+            [_mm_slide(1, [_TITLE, _SMALL, _BIG], out=True), _mm_slide(2, [_TITLE, _SMALL, _BIG])],
+            id="same-order",
+        ),
+        pytest.param(
+            [_mm_slide(1, [_SMALL, _TITLE, _TITLE], out=True), _mm_slide(2, [_TITLE, _SMALL])],
+            id="repeated-text-before",
+        ),
+        pytest.param(
+            [_mm_slide(1, [_SMALL, _TITLE], out=True), _mm_slide(2, [_TITLE, _SMALL, _TITLE])],
+            id="repeated-text-after",
+        ),
+        pytest.param(
+            [
+                {**_mm_slide(1, [_SMALL, _TITLE], out=True), "mmOrder": None},
+                _mm_slide(2, [_TITLE, _SMALL]),
+            ],
+            id="missing-order",
+        ),
+        pytest.param(
+            [_mm_slide(1, [_SMALL, _TITLE], out=True), _mm_slide(2, [_TITLE, _SMALL], skipped=True)],
+            id="skipped-neighbour",
+        ),
+        pytest.param(
+            [_mm_slide(1, [_SMALL, _TITLE], out=True, skipped=True), _mm_slide(2, [_TITLE, _SMALL])],
+            id="skipped-self",
+        ),
+        pytest.param(
+            [_mm_slide(1, [_SMALL, _TITLE], out=True), _mm_slide(3, [_TITLE, _SMALL])],
+            id="absent-neighbour",
+        ),
+        pytest.param(
+            [_mm_slide(1, [_SMALL, _TITLE], out=True), _mm_slide(2, [_TITLE, _BIG])],
+            id="key-on-one-slide-only",
+        ),
+    ],
+)
+def test_mm_zorder_flip_null_controls(slides):
+    assert _zorder(_mm_payload(*slides)) == []
+
+
+def test_mm_zorder_flip_no_mm_data_is_silent():
+    payload = _mm_payload(
+        {"number": 1, "items": [{"kind": "shape"}]},
+        {"number": 2, "items": [{"kind": "shape"}]},
+    )
+    assert _zorder(payload) == []
+
+
+def test_mm_zorder_flip_never_checks_shapes_or_lines():
+    # Fixture-like Minimal Alpha_DSK 1→2: the black and green squares swap stacking
+    # against each other and against the movie. The old shape key paired same-size
+    # squares of different fill, so it would have flagged; shapes are not checked now.
+    payload = _mm_payload(
+        _mm_slide(1, [_BLACK, _SMALL, _GREEN, "line"], out=True),
+        _mm_slide(2, ["line", _GREEN, _SMALL, _BLACK]),
+    )
+    assert _zorder(payload) == []
+
+
+@pytest.mark.parametrize(
+    "group",
+    [
+        pytest.param("group:text:UPG\nshape:scalarPathSource:0:abc", id="shape-leaf"),
+        # A shape leaf whose text is whitespace-only is dropped from the group key, so
+        # this key carries no shape: leaf although the group holds a shape.
+        pytest.param("group:text:UPG\nimage:PDF1=", id="whitespace-text-shape-dropped-from-key"),
+    ],
+)
+def test_mm_zorder_flip_never_checks_groups(group):
+    payload = _mm_payload(
+        _mm_slide(1, [group, _SMALL], out=True),
+        _mm_slide(2, [_SMALL, group]),
+    )
+    assert _zorder(payload) == []
+    assert _matches([group, _TITLE], [_TITLE, group]) == [(("text", 0), ("text", 0))]
+
+
+# The live Keynote experiment geometries (gen.py `V`): squares (x, y, side) of one
+# image; slide-1 lists are back→front creation order.
+_A, _B = (100, 100, 200), (1300, 500, 500)
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "expected"),
+    [
+        pytest.param([_A, _B], [(800, 400, 300)], [(1, 0)], id="Z0-big-B-to-C"),
+        pytest.param([_B, _A], [(800, 400, 300)], [(0, 0)], id="Z1-big-B-to-C"),
+        pytest.param([_A, _B], [(150, 150, 250)], [(0, 0)], id="N0-A-to-C"),
+        pytest.param([_B, _A], [(150, 150, 250)], [(1, 0)], id="N1-A-to-C"),
+        pytest.param([_A, _B], [(1350, 550, 300)], [(1, 0)], id="D0-B-to-C"),
+        pytest.param([_A, _B], [(150, 150, 250)], [(0, 0)], id="D1-A-to-C"),
+        pytest.param([_A, _B], [(1300, 100, 300), (100, 500, 300)], [(0, 1), (1, 0)], id="M2-A-down-B-up"),
+        pytest.param([(100, 100, 100), (400, 100, 600)], [(300, 100, 100)], [(0, 0)], id="C1-small-to-target"),
+        # Greedy would take the 50pt 600→550 pair first and leave 100→1150; Keynote
+        # (and the optimal assignment) moves both right instead.
+        pytest.param(
+            [(100, 400, 150), (600, 400, 150)], [(550, 400, 150), (1150, 400, 150)], [(0, 0), (1, 1)],
+            id="G1-optimal-not-greedy",
+        ),
+    ],
+)
+def test_mm_duplicate_media_pair_like_keynote(before, after, expected):
+    got = _matches([(_SQ, r) for r in before], [(_SQ, r) for r in after])
+    assert got == [(("image", i), ("image", j)) for i, j in expected]
+
+
+def test_mm_zorder_flip_fires_on_a_flip_among_duplicated_movies():
+    # M2 geometry with movies: A (back) pairs with the (100, 500) copy, B (front) with
+    # the (1300, 100) copy — which slide 2 stacks behind A's partner. Both are clip.mov,
+    # so the labels carry their kind/kindIndex.
+    before = [(_CLIP, _A), (_CLIP, _B)]
+    payload = _mm_payload(
+        _mm_slide(1, before, out=True),
+        _mm_slide(2, [(_CLIP, (1300, 100, 300)), (_CLIP, (100, 500, 300))]),
+    )
+    assert _pairs(_zorder(payload)) == ["'clip.mov (movie #0)' and 'clip.mov (movie #1)'"]
+    same = _mm_payload(
+        _mm_slide(1, before, out=True),
+        _mm_slide(2, [(_CLIP, (100, 500, 300)), (_CLIP, (1300, 100, 300))]),
+    )
+    assert _zorder(same) == []
+
+
+def test_mm_duplicate_media_tie_is_skipped():
+    # The target sits exactly between the two copies: either pairing is as close, so
+    # the class is ambiguous and nothing is matched (a unique title still is).
+    assert _matches(
+        [(_SQ, (0, 0, 100)), (_SQ, (200, 0, 100)), _TITLE],
+        [_TITLE, (_SQ, (100, 0, 100))],
+    ) == [(("text", 0), ("text", 0))]
+
+
+def test_mm_duplicate_media_near_tie_at_large_totals_keeps_the_strict_minimum():
+    # Totals near 1e8 differ by 0.02pt: a relative tolerance would call this a tie,
+    # the absolute 1e-6 does not.
+    assert _matches(
+        [(_SQ, (0, 0, 100)), (_SQ, (200_000_000, 0, 100))],
+        [(_SQ, (100_000_000 - 0.01, 0, 100))],
+    ) == [(("image", 0), ("image", 0))]
+
+
+def test_mm_duplicate_media_without_geometry_is_skipped():
+    assert _matches([(_SQ, (0, 0, 100)), _SQ], [(_SQ, (0, 0, 100))]) == []
+
+
+def test_mm_duplicate_media_unequal_counts_match_the_smaller_side():
+    got = _matches(
+        [(_SQ, (0, 0, 100)), (_SQ, (900, 0, 100)), (_SQ, (1800, 0, 100))],
+        [(_SQ, (1750, 0, 100)), (_SQ, (50, 0, 100))],
+    )
+    assert got == [(("image", 0), ("image", 1)), (("image", 2), ("image", 0))]
+    assert _matches([(_SQ, (0, 0, 100))], [(_SQ, (900, 0, 100)), (_SQ, (50, 0, 100))]) == [
+        (("image", 0), ("image", 1)),
+    ]
+
+
+def test_mm_duplicate_media_class_too_large_is_skipped():
+    before = [(_SQ, (i * 200, 0, 100)) for i in range(8)]
+    after = [(_SQ, (i * 200 + 10, 0, 100)) for i in range(8)]
+    assert _matches(before, after) == []
+    assert len(_matches(before[:7], after[:7])) == 7
+
+
+def test_mm_zorder_flip_disambiguates_colliding_labels_after_a_json_round_trip():
+    # Two different clips both called clip.mov: without the kind/kindIndex suffix the
+    # two inverted pairs would share a message and dedupe_flags would drop one.
+    import json
+
+    first, second = "movie:A=", "movie:B="
+    payload = json.loads(json.dumps(_mm_payload(
+        _mm_slide(1, [first, second, _TITLE], out=True),
+        _mm_slide(2, [_TITLE, first, second]),
+    )))
+    for item in payload["slides"][0]["items"]:
+        if item["kind"] == "movie":
+            item["fileName"] = "clip.mov"
+    flags = [
+        f for f in validate_inspect(payload, use_ocr=False, check_passages=False)
+        if f.rule == "mm.zorder_flip"
+    ]
+    assert _pairs(flags) == [
+        "'clip.mov (movie #0)' and 'Welcome'",
+        "'clip.mov (movie #1)' and 'Welcome'",
+    ]
+
+
+def test_mm_zorder_flip_labels_text_by_snippet():
+    long = "text:" + "Grace upon grace " * 3
+    payload = _mm_payload(
+        _mm_slide(1, [long, _SMALL], out=True),
+        _mm_slide(2, [_SMALL, long]),
+    )
+    (flag,) = _zorder(payload)
+    assert flag.message.startswith("'Grace upon grace Grace upon g…' and 'IMG-WA0125.mp4'")
+
+
+def test_mm_zorder_flip_labels_stay_distinct_when_a_raw_name_matches_a_disambiguated_one():
+    # Adversarial: a third clip is literally named "clip.mov (movie #0)", which is the
+    # label the first of two "clip.mov" movies is given, and a fourth is named after the
+    # label that resolving that second collision produces. Every inverted pair must keep
+    # its own message so dedupe_flags drops none of them.
+    keys = ["movie:A=", "movie:B=", "movie:C=", "movie:D="]
+    payload = _mm_payload(
+        _mm_slide(1, [*keys, _TITLE], out=True),
+        _mm_slide(2, [_TITLE, *keys]),
+    )
+    names = ["clip.mov", "clip.mov", "clip.mov (movie #0)", "clip.mov (movie #0) (movie #0)"]
+    for item, name in zip([i for i in payload["slides"][0]["items"] if i["kind"] == "movie"], names):
+        item["fileName"] = name
+    flags = [
+        f for f in validate_inspect(payload, use_ocr=False, check_passages=False)
+        if f.rule == "mm.zorder_flip"
+    ]
+    assert _pairs(flags) == [
+        "'clip.mov (movie #0) (movie #0) (movie #0)' and 'Welcome'",
+        "'clip.mov (movie #1)' and 'Welcome'",
+        "'clip.mov (movie #0) (movie #2)' and 'Welcome'",
+        "'clip.mov (movie #0) (movie #0) (movie #3)' and 'Welcome'",
+    ]

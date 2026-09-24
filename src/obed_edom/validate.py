@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import itertools
+import math
 import re
+from collections import Counter
 from pathlib import Path
 
 import yaml
@@ -215,6 +218,7 @@ def validate_inspect(
             payload, prefix, deck=deck, png_map=png_map, evidence_dir=evidence_dir
         )
     )
+    flags.extend(_mm_zorder_flags(payload, prefix, deck=deck))
     if check_passages:
         flags.extend(
             check_slide_passages(payload, rendered_map, prefix, deck, ocr=seen, pngs=png_map)
@@ -839,6 +843,143 @@ def _bounds_flags(
                     )
                     if flag:
                         flags.append(flag)
+    return flags
+
+
+MM_MAX_ASSIGNMENTS = 5040
+
+_Address = tuple[str, int]
+
+
+def _mm_items(slide: dict) -> dict[_Address, dict]:
+    items: dict[_Address, dict] = {}
+    for i, item in enumerate(slide.get("items") or []):
+        ki = next((v for v in (item.get("kindIndex"), item.get("index")) if v is not None), i)
+        items.setdefault((str(item.get("kind") or ""), int(ki)), item)
+    return items
+
+
+def _mm_labels(slide: dict, addresses: list[_Address]) -> dict[_Address, str]:
+    """Operator-facing name per drawable; colliding names get their kind/kindIndex."""
+    items = _mm_items(slide)
+    names: dict[_Address, str] = {}
+    tags: dict[_Address, str] = {}
+    for kind, ki in addresses:
+        item = items.get((kind, ki)) or {}
+        text = fold_spaces(str(item.get("text") or "")).strip()
+        tags[(kind, ki)] = f"{kind} #{ki}"
+        names[(kind, ki)] = (
+            str(item.get("fileName") or "").strip()
+            or (text if len(text) <= 30 else text[:29] + "…")
+            or tags[(kind, ki)]
+        )
+    labels = names
+    while True:
+        counts = Counter(labels.values())
+        if all(n == 1 for n in counts.values()):
+            return labels
+        labels = {a: label if counts[label] == 1 else f"{label} ({tags[a]})" for a, label in labels.items()}
+
+
+def _mm_classes(slide: dict) -> dict[str, list[_Address]]:
+    """{key: addresses back→front} from mmOrder + mmKeys (kindIndex may be a JSON string)."""
+    keys = {
+        (str(kind), int(ki)): str(key)
+        for kind, by_index in (slide.get("mmKeys") or {}).items()
+        for ki, key in (by_index or {}).items()
+    }
+    classes: dict[str, list[_Address]] = {}
+    for kind, ki in slide.get("mmOrder") or []:
+        key = keys.get((str(kind), int(ki)))
+        if key is not None:
+            classes.setdefault(key, []).append((str(kind), int(ki)))
+    return classes
+
+
+def _mm_centre(item: dict | None) -> tuple[float, float] | None:
+    if not item or any(item.get(f) is None for f in ("x", "y", "w", "h")):
+        return None
+    w, h = float(item["w"]), float(item["h"])
+    if w <= 0 or h <= 0:
+        return None
+    return float(item["x"]) + w / 2, float(item["y"]) + h / 2
+
+
+def _mm_nearest(
+    before: list[_Address], after: list[_Address], before_items: dict, after_items: dict
+) -> list[tuple[_Address, _Address]] | None:
+    """Keynote pairs repeated media by the assignment with the least total centre distance.
+    None when geometry is missing, the search is too large, or the best total ties."""
+    before_centres = [_mm_centre(before_items.get(addr)) for addr in before]
+    after_centres = [_mm_centre(after_items.get(addr)) for addr in after]
+    if None in before_centres or None in after_centres:
+        return None
+    swapped = len(before_centres) > len(after_centres)
+    smaller, larger = (after_centres, before_centres) if swapped else (before_centres, after_centres)
+    if math.perm(len(larger), len(smaller)) > MM_MAX_ASSIGNMENTS:
+        return None
+    ranked = sorted(
+        (sum(math.dist(smaller[i], larger[j]) for i, j in enumerate(chosen)), chosen)
+        for chosen in itertools.permutations(range(len(larger)), len(smaller))
+    )
+    if len(ranked) > 1 and math.isclose(ranked[0][0], ranked[1][0], rel_tol=0.0, abs_tol=1e-6):
+        return None
+    return [
+        (before[j], after[i]) if swapped else (before[i], after[j]) for i, j in enumerate(ranked[0][1])
+    ]
+
+
+def _mm_matches(slide: dict, after: dict) -> list[tuple[_Address, _Address]]:
+    """Drawables Magic Move pairs across the cut, as far as Keynote's pairing is known:
+    unique text/media keys directly, repeated media by nearest position. Shapes, lines
+    and groups are left out until shape identity matches Keynote."""
+    before_classes, after_classes = _mm_classes(slide), _mm_classes(after)
+    before_items, after_items = _mm_items(slide), _mm_items(after)
+    matches: list[tuple[_Address, _Address]] = []
+    for key, before in before_classes.items():
+        after_side = after_classes.get(key)
+        kind = before[0][0]
+        if not after_side or kind not in ("text", "image", "movie"):
+            continue
+        if len(before) == len(after_side) == 1:
+            matches.append((before[0], after_side[0]))
+        elif kind in ("image", "movie"):
+            matches.extend(_mm_nearest(before, after_side, before_items, after_items) or [])
+    return matches
+
+
+def _mm_zorder_flags(payload: dict, location: str, *, deck: str = "") -> list[Flag]:
+    """Magic Move pairs stacked in opposite relative order across the cut."""
+    slides = {
+        int(s.get("number") or s.get("index", i) + 1): s
+        for i, s in enumerate(payload.get("slides") or [])
+    }
+    flags: list[Flag] = []
+    for num in sorted(slides):
+        slide, after = slides[num], slides.get(num + 1)
+        if not slide.get("magicMoveOut") or after is None or slide.get("skipped") or after.get("skipped"):
+            continue
+        if not slide.get("mmOrder") or not after.get("mmOrder"):
+            continue
+        before_pos = {(str(k), int(i)): pos for pos, (k, i) in enumerate(slide["mmOrder"])}
+        after_pos = {(str(k), int(i)): pos for pos, (k, i) in enumerate(after["mmOrder"])}
+        matched = sorted(_mm_matches(slide, after), key=lambda pair: before_pos[pair[0]])
+        labels = _mm_labels(slide, [low for low, _ in matched])
+        for i, (low, low_after) in enumerate(matched):
+            for high, high_after in matched[i + 1:]:
+                if after_pos[low_after] < after_pos[high_after]:
+                    continue
+                flag = make_flag(
+                    "mm.zorder_flip",
+                    "mm",
+                    f"'{labels[low]}' and '{labels[high]}' swap stacking order "
+                    f"slide {num}→{num + 1}; Magic Move will snap the layering at the cut.",
+                    location=f"{location} slide {num}",
+                    slide=num,
+                    deck=deck,
+                )
+                if flag:
+                    flags.append(flag)
     return flags
 
 
