@@ -543,6 +543,16 @@ earlier fixes closed. Each round adds one line to §Review log. At merge the raw
    <file> in Keynote, then restart the dashboard. Restarting clears the lock. This replaces the per-job/per-path confirmation,
    the abort generations and the closure checkbox. The "offline hides off for the next run" setting stays.
 
+7. Hide identity is proven by STABLE SOURCE ID (owner, 2026-09-24, after the live pre-step). Run 2 refused the 16
+   image-twin slides because pass 1's canvas change maps every rect (x/4, y/4+405, w/4, h/4) and the ±1 pt source-vs-saved
+   geometry check can never match. Measured on the Keynote-saved snapshot: 68/68 slide ids and 2,105/2,105 surviving
+   drawable ids + UUIDs are unchanged, and per-kind order is identical. The offline payload items carry the source archive
+   id; after the save, each hide's (kind, kindIndex) must resolve to that same id and UUID, otherwise the slide is refused
+   unproven (abort). A payload without ids (JXA or an old cache) makes NO slide eligible: its hides stay on the Keynote
+   delete. This retires the twin-geometry machinery of decisions 5/5b/5c (`pre_deferral_twin_risk`, `planned`,
+   `suppressed`, the unkeyed-write rule, group child-text identity) and the `needsKeynote` field if nothing else reads it.
+   Builds, duals and non-AS kinds stay pre-excluded.
+
 ## Owner questions (resolved above)
 
 1. **ZIP member removal.** Keynote never saves an unreferenced data (I6, 3/3 decks). Mirroring that
@@ -635,3 +645,4 @@ disjoint.
 - S9 fix round (2026-09-24): #1, #2 and #4 fixed (#3 refuted by decision 6). Suites: 6863 passed; test:ui 246 (one unidentified failure at load ~35, not reproduced in 4 reruns). FRC has no shared slide archives. Owner: round 10 reviews use Opus first.
 - O10 (2026-09-24, Opus HIGH, round 10 on 042bc6b4, owner: Opus first): PASS with minor fixes, no BLOCKER or MAJOR. S9 #1, #2, #4 CLOSED; #3 refuted by design. 8 MINOR: HidesWriteFailed not routed to OfflineHidesAborted on the dashboard (MAJOR once default-on); CLI prints a traceback instead of `detail`; unreachable `except Exception` branch plus its stub-only test; the `Applied` line moved even when hides are off; the notice shows CLI-only advice; gate process (run B's subset in verify mode and patch its `.pre-hides.key` offline before a full pair); `_rewrite_members` phase typing changes 11 callers with no pinning test; positional tuples and long private docstrings. Fix round 11 (2026-09-24): all MINORs fixed; suites 6864 passed, test:ui 246. #6 is folded into `f-live-gate`: before pair 1, run the B subset in `verify` mode with `OBED_DEBUG_PASS1_SNAPSHOT` and patch its `.pre-hides.key` offline. It is the first measurement on a Keynote-saved post-pass-1 deck.
 - S10 (2026-09-24, Sol H, round 10b on 3d02bd99, after Opus O10): PASS, no BLOCKER or MAJOR. All S9 and O10 items CLOSED except O10 #6, which was only written into the review log; it is now in `f-live-gate`, §O4 and §Gate. Offline review is complete; the live gate is next.
+- Live pre-step (2026-09-24, pinned 7ceaa47b, `--slides 1-60,118-125`, verify): run 1 read a pre-5b cache (44 slides; fixed as stale-cache 7ceaa47b). Run 2: 60 deferred; the post-save writer refused the 16 image-twin slides (geometry in source space vs the resized saved deck) and the run aborted as designed, with no wrong deletion and the source unchanged. Pass 1 took 71 s (JS hides stage 2.5 s) vs 94 s (16.9 s). Led to decision 7.
