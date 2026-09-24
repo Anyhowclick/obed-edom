@@ -18,7 +18,8 @@ field, so every difference has a key such as ``slide:12:KN.SlideArchive.drawable
 ``member:Index/Document.iwa:KN.SlideNodeArchive.thumbnails``,
 ``metadata:Slide-101:dataReferences``, ``datas:photo.jpg`` or ``zip:Data/photo.jpg``.
 
-Exit 0 iff every difference key matches an ``--allow`` regex.
+Exit 0 iff every difference key matches an ``--allow`` regex; exit 2 when a deck has an
+undecodable member, a duplicate archive id, or a second ``TSP.PackageMetadata``.
 
 Usage:
     uv run python scripts/deck_decode_diff.py A.key B.key [--allow REGEX ...] [--json OUT]
@@ -57,6 +58,10 @@ _COMPONENT_PROJECTED = frozenset({
     "identifier", "saveToken", "objectUuidMapEntries", "featureInfos", "dataReferences",
     "externalReferences", "versionedExternalReferences", "ambiguousObjectIdentifiers",
 })
+
+
+class DuplicateArchive(Exception):
+    """Two archives share an identifier, or a deck carries a second PackageMetadata."""
 
 
 @dataclass
@@ -109,6 +114,8 @@ def load_deck(path: str | Path) -> Deck:
     from keynote_parser.codec import IWAFile  # noqa: PLC0415 (optional iwa extra)
 
     deck = Deck(Path(path))
+    seen: dict[str, tuple[str, int]] = {}
+    metadata_at: tuple[str, int] | None = None
     with zipfile.ZipFile(path) as zf:
         for info in zf.infolist():
             name = info.filename
@@ -121,16 +128,27 @@ def load_deck(path: str | Path) -> Deck:
             except Exception as exc:
                 raise UndecodableIWAMember(name) from exc
             ids = deck.members.setdefault(name, [])
-            for chunk in decoded["chunks"]:
-                for arch in chunk["archives"]:
-                    ident = str(arch["header"]["identifier"])
-                    objs = arch.get("objects") or []
-                    pbtype = str((objs[0] if objs else {}).get("_pbtype"))
-                    if pbtype == PACKAGE_METADATA and name == METADATA_MEMBER:
+            archives = [arch for chunk in decoded["chunks"] for arch in chunk["archives"]]
+            for index, arch in enumerate(archives):
+                ident = str(arch["header"]["identifier"])
+                if ident in seen:
+                    raise DuplicateArchive(
+                        f"{path}: archive id {ident} at {seen[ident][0]}#{seen[ident][1]} and {name}#{index}"
+                    )
+                seen[ident] = (name, index)
+                objs = arch.get("objects") or []
+                pbtype = str((objs[0] if objs else {}).get("_pbtype"))
+                if pbtype == PACKAGE_METADATA:
+                    if metadata_at is not None:
+                        raise DuplicateArchive(
+                            f"{path}: {PACKAGE_METADATA} at {metadata_at[0]}#{metadata_at[1]} and {name}#{index}"
+                        )
+                    metadata_at = (name, index)
+                    if name == METADATA_MEMBER:
                         deck.metadata = objs[0]
                         continue
-                    deck.archives.setdefault(ident, Archive(name, pbtype, arch["header"], objs))
-                    ids.append(ident)
+                deck.archives[ident] = Archive(name, pbtype, arch["header"], objs)
+                ids.append(ident)
     for entry in deck.metadata.get("datas") or []:
         label = entry.get("digest") or entry.get("preferredFileName") or entry.get("fileName") or ""
         deck.data_labels[str(entry.get("identifier"))] = f"data:{label}"
@@ -455,6 +473,9 @@ def main(argv: list[str] | None = None) -> int:
         report = run(args.a, args.b, allow=args.allow)
     except UndecodableIWAMember as exc:
         print(f"undecodable member: {exc}", file=sys.stderr)
+        return 2
+    except DuplicateArchive as exc:
+        print(f"duplicate archive: {exc}", file=sys.stderr)
         return 2
     for d in report["diffs"]:
         print(f"{'allowed ' if d['allowed'] else 'DIFF    '}{d['key']}")

@@ -186,9 +186,10 @@ def test_eligibility_excludes_slide_flagged_by_twin_risk(monkeypatch, _no_twin_r
     assert gt3 == {1: "sig"}
 
 
-def test_eligibility_passes_planned_sizes_to_twin_risk(monkeypatch):
-    """Owner decision 5c: the predicate sees each slide's planned target sizes from its
-    non-hide transforms (`w`/`h`); hides and size-less transforms are omitted."""
+def test_eligibility_passes_planned_writes_to_twin_risk(monkeypatch):
+    """Owner decision 5c / sol-r7 #3: every non-hide transform pass 1 applies before the
+    hides gets an entry (presence = pre-hide write): x/y/w/h and line endpoints when present,
+    else empty; a group-child write keys to its group. Hides are omitted."""
     import obed_edom.iwa_hides as mod
 
     seen = {}
@@ -201,18 +202,41 @@ def test_eligibility_passes_planned_sizes_to_twin_risk(monkeypatch):
     t = [
         _hide(3, "group", 0),
         {"slide": 3, "kind": "group", "kindIndex": 1, "role": "map", "x": 1, "y": 2, "w": 40, "h": 30.5},
-        {"slide": 3, "kind": "text", "kindIndex": 0, "role": "map", "x": 1, "y": 2},
-        {"slide": 3, "kind": "image", "kindIndex": 0, "role": "map", "x": 1, "y": 2, "w": 10, "h": None},
-        {"slide": 3, "kind": "image", "kindIndex": None, "role": "map", "w": 5, "h": 5},
+        {"slide": 3, "kind": "text", "kindIndex": 0, "role": "map", "x": 5, "y": 6},
+        {"slide": 3, "kind": "image", "kindIndex": 0, "role": "map", "x": None, "y": None, "w": 10, "h": None},
+        {"slide": 3, "kind": "shape", "kindIndex": 0, "role": "map", "font": "x"},
+        {"slide": 3, "kind": "line", "kindIndex": 0, "role": "map", "start": (1, 2), "end": (3, 4)},
+        {"slide": 3, "kind": "group", "kindIndex": 2, "role": "map",
+         "children": [{"kindIndex": 0, "x": 1, "y": 1}]},
         {"slide": 1, "kind": "image", "kindIndex": 1, "role": "map", "w": 9, "h": 9},
         _hide(1, "image", 0),
     ]
     assert offline_write.offline_hide_slides(t, WALL, None) == {1, 3}
-    assert seen[frozenset({("group", 0)})] == {("group", 1): {"w": 40.0, "h": 30.5}}
+    assert seen[frozenset({("group", 0)})] == {
+        ("group", 1): {"x": 1.0, "y": 2.0, "w": 40.0, "h": 30.5},
+        ("text", 0): {"x": 5.0, "y": 6.0},
+        ("image", 0): {"w": 10.0},
+        ("shape", 0): {},
+        ("line", 0): {"start": [1, 2], "end": [3, 4]},
+        ("group", 2): {},
+    }
     assert seen[frozenset({("image", 0)})] == {("image", 1): {"w": 9.0, "h": 9.0}}
 
 
-def test_eligibility_suppressed_slide_gets_no_planned_sizes(monkeypatch):
+def test_eligibility_excludes_unsuppressed_slide_with_unkeyed_transform():
+    """A non-hide transform with no kindIndex (addressed by match text) could move a twin
+    before the hides go and cannot be keyed in `planned`, so its slide keeps the Keynote
+    delete; on a suppressed slide pass 1 writes no geometry, so it stays eligible."""
+    t = [
+        _hide(1, "image", 0),
+        _hide(3, "group", 0),
+        {"slide": 3, "kind": "text", "kindIndex": None, "role": "map", "matchText": "x", "x": 1, "y": 2},
+    ]
+    assert offline_write.offline_hide_slides(t, WALL, None) == {1}
+    assert offline_write.offline_hide_slides(t, WALL, None, suppressed={3}) == {1, 3}
+
+
+def test_eligibility_suppressed_slide_gets_no_planned_writes(monkeypatch):
     """Round 6: pass 1 writes no geometry on a suppressed slide (offline-write or
     env-suppressed) before the hides go, so its planned sizes must not feed the twin check."""
     import obed_edom.iwa_hides as mod
@@ -227,12 +251,13 @@ def test_eligibility_suppressed_slide_gets_no_planned_sizes(monkeypatch):
     t = [
         _hide(3, "group", 0),
         {"slide": 3, "kind": "group", "kindIndex": 1, "role": "map", "w": 40, "h": 30},
+        {"slide": 3, "kind": "text", "kindIndex": 0, "role": "map", "x": 5, "y": 6},
         _hide(1, "image", 0),
-        {"slide": 1, "kind": "image", "kindIndex": 1, "role": "map", "w": 9, "h": 9},
+        {"slide": 1, "kind": "image", "kindIndex": 1, "role": "map", "x": 3, "y": 4},
     ]
     assert offline_write.offline_hide_slides(t, WALL, None, suppressed={3}) == {1, 3}
     assert seen[frozenset({("group", 0)})] == {}
-    assert seen[frozenset({("image", 0)})] == {("image", 1): {"w": 9.0, "h": 9.0}}
+    assert seen[frozenset({("image", 0)})] == {("image", 1): {"x": 3.0, "y": 4.0}}
 
 
 def test_eligibility_clean_twin_risk_keeps_slide(_no_twin_risk):

@@ -52,7 +52,8 @@ type ResizeResult = FramingProposal & {
   proposalExportDir?: string;
   offlineHides?: string;
   outputCloseRequired?: string;
-  offlineHidesAborted?: { reason: string; detail?: string; needsFreshOutput?: boolean; outputPath?: string };
+  outputCloseUpTo?: number;
+  offlineHidesAborted?: { reason: string; detail?: string; needsFreshOutput?: boolean; outputPath?: string; generation?: number };
   applied?: number;
   missed?: number;
   counts?: { map?: number; pin?: number; list?: number; total?: number };
@@ -82,9 +83,11 @@ export function ResizeTab() {
   const hidesAborted = result?.offlineHidesAborted;
   const offlineHides = result?.offlineHides === "off" ? ("off" as const) : undefined;
   const closePath = hidesAborted?.needsFreshOutput ? hidesAborted.outputPath : result?.outputCloseRequired;
+  const closeUpTo = hidesAborted?.needsFreshOutput ? hidesAborted.generation : result?.outputCloseUpTo;
   const outputName = closePath?.split("/").pop() || "the output deck";
   const needsClose = Boolean(hidesAborted?.needsFreshOutput || result?.outputCloseRequired);
-  const closeKey = needsClose && job ? `${job.id}|${job.startedAt ?? ""}|${closePath ?? ""}` : null;
+  const closeKey =
+    needsClose && job ? `${job.id}|${job.startedAt ?? ""}|${closePath ?? ""}|${closeUpTo ?? ""}|${exportDir ?? ""}` : null;
   const outputClosed = closeKey != null && closedFor === closeKey;
   const hidesNotice =
     hidesAborted &&
@@ -177,7 +180,10 @@ export function ResizeTab() {
     setBusy(true);
     setError(null);
     try {
-      await track(await applyResize(job.id, decisions, exportDir, { offlineHides, outputClosed }));
+      await track(await applyResize(job.id, decisions, exportDir, {
+          offlineHides,
+          ...(outputClosed ? { outputClosed: closePath, outputClosedUpTo: closeUpTo } : {}),
+        }));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

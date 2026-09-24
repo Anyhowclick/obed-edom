@@ -198,21 +198,6 @@ _TEXTUAL = frozenset({"text", "shape"})
 _ASSET = frozenset({"image", "movie"})
 
 
-def _has_masked_descendant(group_id: str, objects: dict[str, dict], seen: set[str]) -> bool:
-    if group_id in seen:
-        return False
-    seen.add(group_id)
-    for ref in (objects.get(group_id) or {}).get("children") or []:
-        child_id = str(ref.get("identifier"))
-        child = objects.get(child_id) or {}
-        if child.get("_pbtype") == "TSD.GroupArchive":
-            if _has_masked_descendant(child_id, objects, seen):
-                return True
-        elif child.get("_pbtype") in ("TSD.ImageArchive", "TSD.MovieArchive") and _mask_geom(child, objects):
-            return True
-    return False
-
-
 def _item_from_record(
     rec: dict,
     objects: dict[str, dict],
@@ -256,10 +241,6 @@ def _item_from_record(
     reason: str | None = None
     needs = rec.get("needs_keynote")
     item["needsKeynote"] = needs
-    if kind in _ASSET:
-        item["maskGeom"] = [*_xywha(_geom_dict(obj)), *_xywha(mask_geom)] if mask_geom else None
-    elif kind == "group":
-        item["maskedDescendant"] = _has_masked_descendant(rec["id"], objects, set())
     if needs is not None and needs not in VOUCHED_NEEDS_KEYNOTE:
         reason = needs
 

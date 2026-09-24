@@ -1280,8 +1280,8 @@ def _patch_s1(ident, *, extra_obj=None, super_extra=None, refs=None, add=(), add
                 obj["super"] = {**obj.get("super", {}), **super_extra}
             hdr = a["header"]["messageInfos"][0].get("objectReferences") or []
             out.append(_a(ident, a["objects"][0]["_pbtype"], obj, refs=refs if refs is not None else hdr))
-        members[S1] = out + list(add)
-        members[SHEET].extend(add_sheet)
+        members[S1] = out + copy.deepcopy(list(add))
+        members[SHEET].extend(copy.deepcopy(list(add_sheet)))
     return mutate
 
 
@@ -1420,23 +1420,34 @@ def test_masked_twin_without_a_pre_hide_write_stays_eligible(tmp_path):
     assert not res.slides[3].refused, res.slides[3].reason
 
 
-def test_pre_hide_write_on_a_group_with_a_masked_descendant_counts_as_approximate():
-    def group(ki, masked):
-        return {**_item("group", ki, w=100, h=40), "needsKeynote": None, "maskedDescendant": masked}
+def test_any_pre_hide_write_on_a_twin_class_member_excludes_it():
+    """Presence of a ``planned`` entry means a pre-hide write, whatever keys it holds
+    (line endpoints, group-child writes keyed to the group, or none at all)."""
+    def group(ki):
+        return {**_item("group", ki, w=100, h=40), "needsKeynote": None}
 
-    items = [group(0, True), group(1, True)]
-    written = {("group", 1): {"w": 100, "h": 40}}
-    assert pre_deferral_twin_risk(items, {("group", 0)}, {0: "", 1: ""}, planned=written) == {("group", 0)}
-    assert pre_deferral_twin_risk(items, {("group", 0)}, {0: "", 1: ""}, planned={}) == set()
-    plain = [group(0, False), group(1, False)]
-    assert pre_deferral_twin_risk(plain, {("group", 0)}, {0: "", 1: ""}, planned=written) == set()
+    items = [group(0), group(1)]
+    gt = {0: "", 1: ""}
+    for entry in ({"w": 100, "h": 40}, {"x": 5}, {}):
+        assert pre_deferral_twin_risk(items, {("group", 0)}, gt, planned={("group", 1): entry}) == {("group", 0)}
+    assert pre_deferral_twin_risk(items, {("group", 0)}, gt, planned={}) == set()
+    assert pre_deferral_twin_risk(items, {("group", 0)}, gt, planned={("image", 0): {}}) == set()
+    lines = [{**_item("line", 0), "needsKeynote": None}, {**_item("line", 1), "needsKeynote": None}]
+    assert pre_deferral_twin_risk(lines, {("line", 0)}, None, planned={("line", 1): {"start": [0, 0]}}) == {("line", 0)}
 
 
-def test_planned_without_size_fields_stays_conservative():
-    stale = [{**_item("image", 0, fileName="a.png", w=10, h=10), "needsKeynote": None},
-             {**_item("image", 1, fileName="a.png", w=10, h=10), "needsKeynote": None}]
-    assert pre_deferral_twin_risk(stale, {("image", 0)}, None) == set()
-    assert pre_deferral_twin_risk(stale, {("image", 0)}, None, planned={}) == {("image", 0)}
+def test_survivor_moved_onto_the_hide_rectangle_is_pre_excluded(tmp_path):
+    """Pass 1 moves the survivor twin exactly onto the hide's source rectangle before the
+    hide stage: nothing tells them apart after the save, so the class is excluded up front."""
+    path, _h, _s = _twin_deck(tmp_path / "t.key", "text", surv_at=(600, 700))
+    items = _slide3_offline_items(path)
+    hide = next(it for it in items if (it["kind"], it["kindIndex"]) == ("text", 1))
+    onto_hide = {("text", 2): {k: hide[k] for k in ("x", "y", "w", "h")}}
+    assert pre_deferral_twin_risk(items, {("image", 0), ("text", 1)}, None, planned=onto_hide) == {("text", 1)}
+    assert pre_deferral_twin_risk(items, {("image", 0), ("text", 1)}, None, planned={}) == set()
+    moved, _h, _s = _twin_deck(tmp_path / "moved.key", "text", surv_at=(40, 400))
+    res = _run(moved, _twin_hides("text"), items={**_payload(path), 3: items}, counts=deck_kind_counts(path))
+    assert res.slides[3].refused and not res.slides[3].order_proven
 
 
 # ---------------------------------------------------------------- Sol r5 #2: nested attachment / comment / pencil refs
@@ -1451,8 +1462,8 @@ def _storage_with(table, entry_obj_id, extra_archs=(), sheet_archs=(), storage_r
                 obj = {"text": ["Hide me"], table: {"entries": [{"characterIndex": 0, "object": {"identifier": entry_obj_id}}]}}
                 a = _a(311, "TSWP.StorageArchive", obj, refs=[entry_obj_id, *storage_refs])
             out.append(a)
-        members[S1] = out + list(extra_archs)
-        members[SHEET].extend(sheet_archs)
+        members[S1] = out + copy.deepcopy(list(extra_archs))
+        members[SHEET].extend(copy.deepcopy(list(sheet_archs)))
     return mutate
 
 
@@ -1581,3 +1592,31 @@ def test_unresolved_forbidden_reference_refuses(tmp_path):
     before = _raw_members(path)
     res = _run(path)
     _assert_refused_only(path, before, res, 1, "forbidden super.comment references 99999")
+
+
+# ---------------------------------------------------------------- Sol r7 #2: subtree refusals keep the order proof
+
+
+def _header_only_ref(members):
+    members[S1] = [a if str(a["header"]["identifier"]) != "305"
+                   else _a(305, "TSD.ImageArchive", a["objects"][0], refs=[900, 741], data=[52]) for a in members[S1]]
+    members[S1].append(_a(741, "TSWP.StorageArchive", {"text": ["x"]}))
+
+
+PROVEN_REFUSALS = {
+    "header-only": (_header_only_ref, "no decoded body reference"),
+    "comment": (_patch_s1(305, super_extra={"comment": {"identifier": 705}}, refs=[900, 705], add=[_standin(705)]),
+                "forbidden super.comment"),
+    "highlight": (NESTED_REFUSALS["highlight-table"][0], "forbidden tableHighlight"),
+    "unclassified": (NESTED_REFUSALS["unclassified-header-listed"][0], "unclassified tableSmartfield"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(PROVEN_REFUSALS))
+def test_subtree_refusals_keep_order_proven_for_the_per_slide_fallback(tmp_path, case):
+    mutate, needle = PROVEN_REFUSALS[case]
+    path = _build(tmp_path / f"{case}.key", mutate=mutate)
+    before = _raw_members(path)
+    res = _run(path)
+    _assert_refused_only(path, before, res, 1, needle)
+    assert res.slides[1].order_proven

@@ -748,3 +748,46 @@ def test_datas_file_name_id_suffix_ignored(base, tmp_path):
         _metadata(spec)["datas"][1]["fileName"] = "orphan-8888.png"
 
     assert ddd.run(base, _variant(tmp_path, "fn", edit))["diffs"] == []
+
+
+# --------------------------------------------------------------------------
+# Duplicate archive ids / a second PackageMetadata are rejected at load.
+# --------------------------------------------------------------------------
+def _duplicate_shape_400(spec, x):
+    dup = copy.deepcopy(_archive(spec, "Index/Slide-102.iwa", 400))
+    dup["objects"][0]["super"]["super"]["geometry"]["position"]["x"] = x
+    spec["members"]["Index/Slide-102.iwa"].append(dup)
+
+
+def test_duplicate_archive_id_cannot_compare_green(tmp_path, capsys):
+    one = _variant(tmp_path, "dup1", lambda spec: _duplicate_shape_400(spec, 1))
+    two = _variant(tmp_path, "dup2", lambda spec: _duplicate_shape_400(spec, 2))
+    with pytest.raises(ddd.DuplicateArchive) as exc:
+        ddd.run(one, two)
+    assert "archive id 400 at Index/Slide-102.iwa#1 and Index/Slide-102.iwa#3" in str(exc.value)
+    assert ddd.main([str(one), str(two)]) == 2
+    assert ddd.main([str(one), str(one)]) == 2
+    assert "duplicate archive" in capsys.readouterr().err
+
+
+def test_duplicate_archive_id_across_members_rejected(tmp_path):
+    def edit(spec):
+        spec["members"]["Index/DocumentStylesheet.iwa"].append(copy.deepcopy(_archive(spec, "Index/Slide-102.iwa", 401)))
+
+    with pytest.raises(ddd.DuplicateArchive, match="archive id 401 at .*#\\d+ and .*#\\d+"):
+        ddd.load_deck(_variant(tmp_path, "cross", edit))
+
+
+def test_second_package_metadata_rejected(tmp_path, capsys):
+    def edit(spec):
+        second = copy.deepcopy(_archive(spec, "Index/Metadata.iwa", 5))
+        second["header"]["identifier"] = 55
+        for info in second["header"]["messageInfos"]:
+            info["identifier"] = 55
+        spec["members"]["Index/Metadata.iwa"].append(second)
+
+    deck = _variant(tmp_path, "twometa", edit)
+    with pytest.raises(ddd.DuplicateArchive, match="TSP.PackageMetadata at Index/Metadata.iwa#0 and Index/Metadata.iwa#2"):
+        ddd.load_deck(deck)
+    assert ddd.main([str(deck), str(deck)]) == 2
+    assert "duplicate archive" in capsys.readouterr().err

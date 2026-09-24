@@ -163,8 +163,6 @@ def _walk_refs(value: Any, ids: list[str], uuids: list[tuple[str, str]] | None) 
 
 
 def _body_refs(arch: dict) -> list[tuple[str, str]]:
-    """[(top-level field, referenced id)] over every object; fields of objects past the
-    first are prefixed ``#i.``."""
     out: list[tuple[str, str]] = []
     for i, obj in enumerate(arch.get("objects") or []):
         for key, value in obj.items():
@@ -178,8 +176,6 @@ def _body_refs(arch: dict) -> list[tuple[str, str]]:
 def _scan(
     model: _Model, targets: set[str], pm_id: str | None,
 ) -> tuple[dict[str, list[tuple[str, str]]], dict[tuple[str, str], list[str]]]:
-    """Strict reference scan over every object of every archive. ({target: [(referrer,
-    field)]}, {uuid outside Metadata: [referrer]}); the PackageMetadata archive is skipped."""
     referrers: dict[str, list[tuple[str, str]]] = {}
     uuid_refs: dict[tuple[str, str], list[str]] = {}
     for aid, arch in model.archives.items():
@@ -251,7 +247,6 @@ def _stored_i4(comp: dict) -> Counter:
 def _recompute_tables(
     headers: dict[str, dict], member: str, member_of: dict[str, str], comp_of_member: dict[str, dict],
 ) -> tuple[Counter, set]:
-    """(I3, I4) recomputed from ``headers`` ({archive id: header}) of one member."""
     i3: Counter = Counter()
     i4: set = set()
     for aid, header in headers.items():
@@ -376,17 +371,16 @@ def pre_deferral_twin_risk(
     items: list[dict], hide_keys: set[tuple[str, int]], group_text: dict | None,
     *, planned: dict[tuple[str, int], dict] | None = None,
 ) -> set[tuple[str, int]]:
-    """Hide keys ``_check_unambiguous`` could refuse after the save for approximate geometry.
+    """Hide keys ``_check_unambiguous`` could refuse after the save.
 
     A hide is at risk when its twin class (the writer's signature, from the payload) holds
-    a survivor and a member whose saved geometry may be approximate. Offline-read items
-    carry the reader's ``needsKeynote`` (``None`` when exact). ``planned`` holds only the
-    size writes pass 1 makes BEFORE the hide stage (``{(kind, kindIndex): {"w", "h"}}``;
-    empty for slides whose pass-1 geometry is suppressed). Until Keynote's sequential
-    width/height mask scaling is live-proven, any such write on a masked image, or on a
-    group with a masked descendant, counts as approximate (rotated-masked / group-residual
-    are the only size-dependent flags). Payloads without these fields fall back to
-    counting every kind the composer can flag (text, image, movie, group).
+    a survivor and either a member whose saved geometry may be approximate, or a member
+    pass 1 writes BEFORE the hide stage. ``planned`` keys every such pre-hide write
+    (``{(kind, kindIndex): {...}}``, any keys or none; empty for slides whose pass-1
+    geometry is suppressed): until the projection is proven, any write can move a survivor
+    onto the hide's source rectangle, so its class is excluded. Offline-read items carry
+    the reader's ``needsKeynote``; payloads without it count every kind the composer can
+    flag (text, image, movie, group) as approximate.
     """
     def sig(item: dict) -> str | None:
         kind = str(item.get("kind") or "")
@@ -399,22 +393,15 @@ def pre_deferral_twin_risk(
         return None
 
     flagged = bool(items) and all("needsKeynote" in it for it in items)
-    sized = flagged and all(
-        ("maskGeom" in it) if it.get("kind") in ("image", "movie")
-        else ("maskedDescendant" in it) if it.get("kind") == "group" else True
-        for it in items)
+    written = set(planned or ())
     by_key = {(str(it.get("kind") or ""), int(it.get("kindIndex", -1))): it for it in items}
     sigs = {k: sig(it) for k, it in by_key.items()}
 
     def approximate(key: tuple[str, int]) -> bool:
         item = by_key[key]
-        if not flagged or (planned is not None and not sized):
+        if not flagged:
             return key[0] in _APPROXIMABLE_KINDS
-        if item.get("needsKeynote"):
-            return True
-        if planned is None or key not in planned:
-            return False
-        return bool(item.get("maskGeom")) or (key[0] == "group" and bool(item.get("maskedDescendant")))
+        return bool(item.get("needsKeynote"))
 
     risky: set[tuple[str, int]] = set()
     for key in hide_keys:
@@ -423,7 +410,7 @@ def pre_deferral_twin_risk(
             continue
         s = sigs[key]
         twins = [k for k, v in sigs.items() if k[0] == key[0] and (s is None or v is None or v == s)]
-        if any(k not in hide_keys for k in twins) and any(approximate(k) for k in twins):
+        if any(k not in hide_keys for k in twins) and any(k in written or approximate(k) for k in twins):
             risky.add(key)
     return risky
 
@@ -449,8 +436,6 @@ _FORBIDDEN_ARCHIVE_TYPE = re.compile(r"Comment|Highlight|PencilAnnotation|Change
 
 
 def _descriptor_refs(obj: dict, descriptor: Any, path: str, out: list[tuple[str, str]], unknown: list[str]) -> None:
-    """(dotted field path, id) for every field the schema types as ``TSP.Reference``;
-    ``unknown`` collects paths the schema cannot type that still carry an identifier."""
     for key, value in obj.items():
         if key == "_pbtype":
             continue
@@ -550,7 +535,6 @@ def _close_subtree(hide_ids: list[str], slide_id: str, member: str, model: _Mode
 
 
 def _metadata_refs(comp: dict) -> list[tuple[str, str]]:
-    """(field, id) for every object reference a Metadata component carries."""
     out: list[tuple[str, str]] = []
     for f in ("externalReferences", "versionedExternalReferences"):
         for e in comp.get(f) or []:
@@ -572,8 +556,8 @@ def _plan_slide(
     slide_count_by_member: Counter, *, source_counts: dict[str, int] | None,
     items: list[dict] | None, group_text: dict[int, str] | None, data_index: dict[str, str],
     comp_of_member: dict[str, dict], cache: dict,
-) -> tuple[str, str, list[str], set[str], set[str]]:
-    """R1-R4 and the subtree closure. (slide_id, member, hide_ids, subtree, external boundary)."""
+) -> tuple[str, str, list[str]]:
+    """R1-R4 plus identity and twin ambiguity: a refusal here leaves the saved order unproven."""
     if not (1 <= n <= len(order)):
         raise _Refuse(f"slide {n} out of range (deck has {len(order)})")
     slide_id = order[n - 1][0]
@@ -634,12 +618,15 @@ def _plan_slide(
         raise _Refuse("payload items missing")
     _identity_check(records, items, model.objects, data_index, group_text, cache)
     _check_unambiguous(records, hides, items, slide, model.objects, data_index, group_text, cache)
+    return slide_id, member, hide_ids
 
+
+def _subtree_of(slide_id: str, member: str, hide_ids: list[str], model: _Model) -> tuple[set[str], set[str]]:
     subtree, boundary = _close_subtree(hide_ids, slide_id, member, model)
     dup = subtree & model.duplicates
     if dup:
         raise _Refuse(f"subtree ids duplicated in the deck: {sorted(dup)[:5]}")
-    return slide_id, member, hide_ids, subtree, boundary
+    return subtree, boundary
 
 
 def _prove_references(
@@ -1067,7 +1054,12 @@ def _prepare(
             if n in force_refuse:
                 refuse(n, "forced refusal", True)
                 continue
-            planned[n] = plan
+            try:
+                planned[n] = (*plan, *_subtree_of(*plan[:2], plan[2], model))
+            except _Refuse as exc:
+                refuse(n, str(exc), True)
+            except Exception as exc:
+                refuse(n, f"planning failed: {exc!r}", True)
 
         slide_ids = Counter(p[0] for p in planned.values())
         for n in list(planned):

@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import zipfile
 from collections.abc import Iterable, Mapping, Sequence
@@ -190,7 +191,8 @@ class FramingsBody(BaseModel):
     decisions: list[dict[str, Any]] | None = None
     exportDir: str | None = None
     offlineHides: str | None = None
-    outputClosed: bool = False
+    outputClosed: str | None = None
+    outputClosedUpTo: int | None = None
 
 
 class DskDecisionsBody(BaseModel):
@@ -1137,20 +1139,21 @@ def create_app() -> FastAPI:
                         raise HTTPException(400, str(exc)) from exc
         target_root = resolved_export_dir if payload.exportDir is not None else result.get("resolvedExportDir")
         dest = _resize_dest(key, Path(target_root) if target_root else export_destination(job))
-        unclosed = _unclosed_outputs(dest)
-        if unclosed and not payload.outputClosed:
-            raise HTTPException(
-                409,
-                f"Close {dest.name} in Keynote and confirm it is closed before re-applying; "
-                "an earlier run may have left it open or partly edited.",
-            )
-        for other in unclosed:
-            other_result = dict(other.result or {})
-            other_result["offlineHidesAborted"] = {
-                **other_result["offlineHidesAborted"],
-                "needsFreshOutput": False,
-            }
-            RUNNER.update_result(other.id, other_result)
+        with _OUTPUT_LOCK:
+            unclosed = _unclosed_outputs(dest)
+            if unclosed and not (
+                _same_path(payload.outputClosed, dest)
+                and payload.outputClosedUpTo is not None
+                and _latest_generation(unclosed) <= payload.outputClosedUpTo
+            ):
+                raise HTTPException(409, _close_first(dest))
+            for other in unclosed:
+                other_result = dict(other.result or {})
+                other_result["offlineHidesAborted"] = {
+                    **other_result["offlineHidesAborted"],
+                    "needsFreshOutput": False,
+                }
+                RUNNER.update_result(other.id, other_result)
         if payload and payload.decisions is not None:
             save_resize_framings(job_id, payload)
         if payload and payload.exportDir is not None:
@@ -3012,6 +3015,40 @@ def _run_dsk_export_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_OUTPUT_LOCK = threading.Lock()
+_last_generation = 0
+
+
+def _next_generation() -> int:
+    """Strictly increasing marker generation; call under `_OUTPUT_LOCK`."""
+    global _last_generation
+    _last_generation = max(time.time_ns(), _last_generation + 1)
+    return _last_generation
+
+
+def _latest_generation(jobs: list[Job]) -> int:
+    return max(int((job.result or {})["offlineHidesAborted"].get("generation") or 0) for job in jobs)
+
+
+def _close_required(dest: Path) -> dict[str, Any]:
+    with _OUTPUT_LOCK:
+        unclosed = _unclosed_outputs(dest)
+        if not unclosed:
+            return {}
+        return {"outputCloseRequired": str(dest), "outputCloseUpTo": _latest_generation(unclosed)}
+
+
+def _same_path(raw: str | None, dest: Path) -> bool:
+    return bool(raw) and Path(str(raw)).expanduser().resolve() == dest.expanduser().resolve()
+
+
+def _close_first(dest: Path) -> str:
+    return (
+        f"Close {dest.name} in Keynote and confirm it is closed before re-applying; "
+        "an earlier run may have left it open or partly edited."
+    )
+
+
 def _resize_dest(source: Path, export_root: Path) -> Path:
     return export_root / f"{source.stem}_CG.key"
 
@@ -3177,7 +3214,7 @@ def _run_resize_propose(
         "export": export,
         **({"exportDir": export_dir} if export_dir else {}),
         **({"offlineHides": offline_hides} if offline_hides else {}),
-        **({"outputCloseRequired": str(dest)} if _unclosed_outputs(dest) else {}),
+        **_close_required(dest),
         "resolvedExportDir": resolved_export_dir,
         "proposalExportDir": resolved_export_dir,
         **proposal,
@@ -3212,6 +3249,9 @@ def _run_resize(
     job.log(f"CG template (16:9 layouts copied onto the wall copy): {template.name}.")
     if not keep_side_panels and not side_content_slides:
         job.log("Side-panel content dropped (whitelist a slide in the framing review to keep it).")
+    with _OUTPUT_LOCK:
+        if _unclosed_outputs(dest):
+            raise RuntimeError(_close_first(dest))
     ensure_export_dir(dest.parent)
     if offline_hides:
         job.log("Offline hides switched off for this run.")
@@ -3230,16 +3270,18 @@ def _run_resize(
             log=job.log,
         )
     except OfflineHidesAborted as exc:
-        job.result = {
-            **(job.result or {}),
-            "offlineHides": "off",
-            "offlineHidesAborted": {
-                "reason": exc.reason,
-                "detail": getattr(exc, "detail", ""),
-                "needsFreshOutput": bool(getattr(exc, "needs_fresh_output", False)),
-                "outputPath": str(dest),
-            },
-        }
+        with _OUTPUT_LOCK:
+            job.result = {
+                **(job.result or {}),
+                "offlineHides": "off",
+                "offlineHidesAborted": {
+                    "reason": exc.reason,
+                    "detail": getattr(exc, "detail", ""),
+                    "needsFreshOutput": bool(getattr(exc, "needs_fresh_output", False)),
+                    "outputPath": str(dest),
+                    "generation": _next_generation(),
+                },
+            }
         raise
     inspect = info.get("inspect") or {}
     names = list(info.get("previewFiles") or [])
