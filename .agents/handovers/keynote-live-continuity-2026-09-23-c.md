@@ -34,7 +34,20 @@ gate 2 FAIL (never armed, version). One v1-diagnostic arm (not a gate): LIVE, in
 29.93 old bytes, N1 0, all hand-off checks green.
 
 ## Next
-1. OBS attach qualification on the final G2 (OD-2), incl. the ≈14/s OBS upload rate.
+1. OBS attach qualification on the final G2 (OD-2). The ≈14/s upload-rate item is CLOSED (2026-09-24, below).
+
+## OBS rate + output cadence (2026-09-24, `b3127ed5`, G2 `10a5b36a`, OBS 32.2.2, P2 fixture)
+Scratch harness (G2 armed under attach by an in-memory `DiagHost` lifting the attach guard; module spliced only for tick timing and
+toggles), main checkout `output/obs-rate/`. No product change.
+- **In page, the ≈14/s did not reproduce:** OBS rAF 30/s, G2 rVFC ticks + uploads 29.3–30.2/s, 0 GL errors — for the final G2 and the
+  pre-(c) bytes (`4f8850e0`), interleaved, and with two headless Chromes alongside (load 25–30). OBS tick p50 ≈ 7.5 ms (readback 4–5 ms,
+  upload 0.3 ms) vs 5 ms headless. Cause of the 09-23 figure unknown (its script is gone).
+- **Pooled decoder `droppedVideoFrames` ≈ 40 %** was the harness: a detached video counts every unconsumed frame as dropped; while G2
+  uploads it is 0–0.33/s of 30.
+- **Rate is not the on-air metric.** Lossless OBS recordings, burnt-in counter decoded per output frame (null control: paused decoder
+  = 100 % repeats; `rec` session + `decode2.py`). Repeated frames at canvas 25: browser source 30 Hz (default) G2 13 % / native 14–23 %;
+  source 25 (matched) G2 19.5 % / native 25–27 %; **source 50: G2 0.5–1 %, native 8–12 % (2 takes)**. Canvas 30 (diagnostic): G2 4 %.
+  ⇒ render the page at 2× the canvas; recorded in `decklink-field-test-runbook.md` §0/§3. "Small" H.264 recordings fail the controls.
 
 ## Lessons
 - A plan claim "X is unchanged" needs a cross-module test, not a grep of Python constants: both planners missed the core's own version

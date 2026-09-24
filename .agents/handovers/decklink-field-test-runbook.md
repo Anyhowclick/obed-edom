@@ -90,7 +90,8 @@ field tool without `OBED_LIVE_ATTACH`, `--display <id>`, must print `transport=h
   `/Applications/OBS.app/Contents/MacOS/OBS --remote-debugging-port=9222`
   Settings → Video: Base and Output **1920×1080**, **FPS = 25** (Common FPS → 25 PAL). One scene, one **Browser** source, **1920×1080**,
   "Shutdown source when not visible" **OFF**, "Refresh browser when scene becomes active" **OFF**, fit to
-  canvas with no crop/scale, **"Use custom frame rate" = 25**. Tools → **Decklink Output**: device, mode =
+  canvas with no crop/scale, **"Use custom frame rate" ticked, FPS = 50** (2× the canvas, NOT 25; §3 cadence note).
+  Tools → **Decklink Output**: device, mode =
   **1080p25**, **Keyer =
   External**, pixel format **BGRA (8-bit)** → Start. (Verified 2026-09-19 on OBS 32.2.2 = Chromium 127;
   DeckLink output itself not yet seen.)
@@ -103,7 +104,7 @@ look like ProPresenter's matte does (white = opaque):
 - [ ] opaque **BLACK** patch: black on In3, **solid white on In4** ← the critical one
 - [ ] empty areas black on In4; 50 % patches mid-grey on In4; both ramps smooth on In4
 - [ ] **H** ⇒ In4 all black · **B** ⇒ In4 all white (In3 black) · **G** ⇒ In4 uniform mid-grey · **1** = back
-- [ ] both widgets still read `HDTV 1080p 25Hz`; on-card fps ≈ 25
+- [ ] both widgets still read `HDTV 1080p 25Hz`; on-card fps ≈ 50 (it counts the page's frames = the browser-source rate, not the output)
 That proves the alpha path up to the Pulse. Only the edge/pre-multiplied check below needs the downstream
 composite — do it if staff offer programme/preview of the keyed result. Then tick, in this order:
 - [ ] opaque **BLACK** patch is solid black (not see-through) ← the critical one
@@ -111,7 +112,7 @@ composite — do it if staff offer programme/preview of the keyed result. Then t
 - [ ] 50 % patches look half-mixed; both ramps smooth and monotonic, no banding / crush at the ends
 - [ ] soft discs + EDGE TEST: at the downstream keyer (staff-operated, unidentified), toggle **Pre-Multiplied Key**; keep the setting with clean
       edges (dark or glowing fringe = wrong one). **Write down which setting won.**
-- [ ] sweep bars smooth, no double image / field tearing; on-card fps ≈ output rate
+- [ ] sweep bars smooth, no double image / field tearing; on-card fps ≈ 50 (the browser-source rate)
 - [ ] frame-edge border fully visible; card reads `1920 x 1080`, `devicePixelRatio 1`; note its Chromium version
 - [ ] buttons: **H** = pure camera · **B** = full opaque black · **G** = 50 % veil · **1** = back
 If black is transparent or everything is opaque: Keyer = External? BGRA mode? key input routed? key type
@@ -141,6 +142,11 @@ playback; a frozen grating is the failure).
 **Cadence note:** the fixture movies are ~30 fps (`Untitled.mov` 30.0, `WA0125` 29.98) and the venue is 25p ⇒
 ~5 skipped frames per second, seen as a regular hiccup in the flicker. That is cadence, not a freeze — judge
 freezes by the on-screen counter, never by the flicker feel.
+**Browser-source rate (measured 2026-09-24, OBS 32.2.2, canvas 25, lossless recordings of this fixture's counter, 2 takes at 50):**
+share of output frames that REPEAT the previous movie frame (ideal 0) —
+source FPS 25 (matched): native movie 25–27 % · default 30 Hz: 14–23 % · **50: 8–12 %**, and a GL-replayed movie
+(not in the build under test yet) 0.5–1 %. Matching the canvas is the worst setting; render the page at 2× the canvas.
+Harness and runs: main checkout `output/obs-rate/` (`rate.py rec` + `decode2.py`; only LOSSLESS recordings read the counter reliably).
 **Known before going in (2026-09-20, `keynote-live-continuity-2026-09-20.md`):** a movie continuing through a
 Magic Move is unreliable on screen. On `62e1ab7`, slide 2 shows a **static poster with a stray copy on top** — the
 carried `<video>` decodes but cannot paint (a Magic-Move-settled slide is one stage-wide WebGL canvas, DOM layers at
@@ -178,7 +184,7 @@ and go back to the field tool. Presenter closing/reopening must not stop playbac
 | Stop reports it could not blank the page | — | press Stop / `q` again (it retries only the blanking); worst case hide the source in OBS |
 | In3 shows fill but In4 shows no key (all white / all black) | OBS Decklink Output: Keyer=External, BGRA 8-bit, mode 1080p25 | fix the OBS output settings; do not touch the Pulse |
 | edges fringed | — | pre-multiplied mismatch: ask staff to flip it at the downstream keyer, or note it (ProPresenter's setting is the reference) |
-| judder / 30 fps look | OBS stats (View → Stats), OBS FPS / browser-source FPS / DeckLink mode all **25**, on-card fps | match them; a 5-per-second hiccup on the grating is the 30→25 cadence (§3); note dropped frames from the OBS log |
+| judder / 30 fps look | OBS stats (View → Stats); OBS FPS and DeckLink mode **25**, browser-source custom FPS **50**, on-card fps ≈ 50 | set them; a browser source at 25 repeats ~1 in 4 frames (§3); a 5-per-second hiccup on the grating is the 30→25 cadence (§3); note dropped frames from the OBS log |
 | anything else | newest `$W/output/.html-preview/live-logs/*.jsonl` | read it (below), record, ask the owner before changing code |
 
 Reading the newest session log:
