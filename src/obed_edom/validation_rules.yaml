@@ -101,6 +101,9 @@ rules:
   bounds.straddles: warning
   bounds.offcanvas: warning
   bounds.canvas: off
+  # Magic Move tweens position, not stacking, so a matched pair whose layering
+  # inverts across the cut snaps at the transition.
+  mm.zorder_flip: warning
 
   # Scripture
   bible.mismatch: error
@@ -159,6 +162,7 @@ titles:
   diff.skip_mismatch: Diff Skip Mismatch
   bounds.straddles: Bounds Straddles
   bounds.offcanvas: Bounds Offcanvas
+  mm.zorder_flip: Magic Move layering flips
   bible.mismatch: Bible Mismatch
   bible.wrong_reference: Bible Wrong Reference
   bible.unchecked: Bible Unchecked

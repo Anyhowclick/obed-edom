@@ -244,6 +244,7 @@ def inspect_keynote(
             have = 0 if png_dir is None else len(preview_pngs(png_dir))
             if dest is None or have == expected_pngs:
                 payload["_cached"] = True
+                payload["path"] = str(key_path)
                 payload["_digest"] = digest
                 payload["_timing"] = timing
                 if dest is not None:
@@ -254,6 +255,7 @@ def inspect_keynote(
             t_export = time.perf_counter()
             err = export_slide_images(key_path, png_dir, expected=expected_pngs)
             payload["_cached"] = True
+            payload["path"] = str(key_path)
             payload["_digest"] = digest
             _set_export_state(payload, png_dir, err, failed=True, expected=expected_pngs)
             payload["previewDir"] = str(png_dir)
@@ -624,6 +626,7 @@ def inspect_keynote_checker(
                 have = 0 if png_dir is None else len(preview_pngs(png_dir))
                 if dest is None or have == expected_pngs:
                     cached["_cached"] = True
+                    cached["path"] = str(key_path)
                     cached["_digest"] = digest
                     cached["_timing"] = timing
                     if dest is not None:
@@ -634,6 +637,7 @@ def inspect_keynote_checker(
                 t_export = time.perf_counter()
                 err = export_slide_images(key_path, png_dir, expected=expected_pngs)
                 cached["_cached"] = True
+                cached["path"] = str(key_path)
                 cached["_digest"] = digest
                 _set_export_state(cached, png_dir, err, failed=True, expected=expected_pngs)
                 cached["previewDir"] = str(png_dir)

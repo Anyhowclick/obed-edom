@@ -268,7 +268,10 @@ An object wholly off the wall is normally hidden. It is kept instead when it is 
 Move partner: its slide and a neighbour are joined by an MM transition (text delivery
 by object) and the neighbour keeps a content-identical object on the wall. Identity is
 content, not archive id: text, image/movie data digest, aspect-normalised shape path,
-or a group's leaf list (`attach_magic_move` → `magicMoveOut`/`mmKeys`).
+or a group's leaf list (`attach_magic_move` → `magicMoveOut`/`mmKeys`, plus `mmOrder`,
+the `[kind, kindIndex]` addresses back→front, which only the validation rule
+`mm.zorder_flip` reads; it checks only text and media, pairs repeated media by nearest
+position, and skips shapes, lines and groups until shape identity matches Keynote's).
 
 * Both slides of the pair must be planned: inside `--slides` and not skipped. An
   out-of-range or skipped neighbour keeps today's hide.

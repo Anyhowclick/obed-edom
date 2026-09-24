@@ -5,7 +5,7 @@ description: >-
   Gateway, contrast, Trinity caps, book names, highlighted punctuation, en-dash
   dates, quote attributions, center-wall 3840x1080 bounds, and text overflow.
   Also the stable validation rule ids (text.*, photo.*, bible.*, style.*,
-  bounds.*) and their severities. Diffs never rewrite .key files. Use when
+  bounds.*, mm.*) and their severities. Diffs never rewrite .key files. Use when
   validating slides, running the dashboard ValidationPanel, tuning validation
   noise, or reviewing Keynote copy.
 ---
@@ -101,6 +101,7 @@ Every `Flag` carries a stable `rule` id, plus `slide`, `deck` and an optional
 | `diff.count` / `diff.missing` / `diff.unmatched` / `diff.skip_mismatch` | Pairing |
 | `bounds.straddles` | Object crosses a wall boundary, so it is visibly cut. Carries evidence |
 | `bounds.offcanvas` | Object sits outside the canvas |
+| `mm.zorder_flip` | Two Magic Move–matched objects stack in opposite order across the cut, so the layering snaps. Only text and media are checked: unique text and media pair by content, repeated media by nearest position (least total centre distance; ties skipped). Shapes, lines and groups are not checked yet (pending the shape-identity follow-up). Report only; nothing is reordered |
 | `cue.lw_count` / `cue.dsk_count` | The outline's cue count for a deck disagrees with its slide count |
 | `cue.uncued_slide` | A deck slide no cue accounts for |
 | `cue.no_slide` | A cue with no slide left on that deck |

@@ -110,6 +110,7 @@ from obed_edom.inspect import (
     preview_media_type,
     preview_pngs,
 )
+from obed_edom.iwa_runs import attach_magic_move_if_available
 from obed_edom.map_remap import (
     expand_slide_range,
     format_slide_range,
@@ -1830,6 +1831,7 @@ def _run_inspect(
     elif job_dir:
         job.log(payload.get("exportError") or "Preview export produced no PNGs.")
     evidence_dir = (job_dir / "evidence") if job_dir else None
+    attach_magic_move_if_available(path, payload)
     flags = validate_inspect(
         payload,
         location_prefix=path.name,

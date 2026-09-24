@@ -1734,6 +1734,8 @@ def test_attach_magic_move_keys_survive_a_json_round_trip(tmp_path):
         assert after.get("magicMoveOut") == before.get("magicMoveOut")
         restored = {kind: {int(ki): key for ki, key in by_index.items()} for kind, by_index in after["mmKeys"].items()}
         assert restored == before["mmKeys"]
+        assert after["mmOrder"] == before["mmOrder"]
+        assert all(isinstance(kind, str) and isinstance(ki, int) for kind, ki in after["mmOrder"])
         assert all(isinstance(ki, int) for by_index in before["mmKeys"].values() for ki in by_index)
 
 
@@ -1743,16 +1745,73 @@ def test_attach_magic_move_replaces_stale_fields_from_a_prior_annotation(tmp_pat
     extra = {f"t{i}": _text_box(f"s{i}") for i in range(3)} | {f"s{i}": _storage(f"T{i}") for i in range(3)}
     deck = _mm_deck([(_transition(_MM_EFFECT), ["t0"]), (None, ["t1"]), (None, ["t2"])], extra)
     payload = {"slides": [
-        {"index": 0, "items": [], "mmKeys": {"text": {0: "text:stale"}}},
+        {"index": 0, "items": [], "mmKeys": {"text": {0: "text:stale"}}, "mmOrder": [["text", 5]]},
         {"index": 1, "items": [], "magicMoveOut": True},
-        {"index": 2, "items": [], "magicMoveOut": True, "mmKeys": {"text": {0: "text:T2"}}},
+        {"index": 2, "items": [], "magicMoveOut": True, "mmKeys": {"text": {0: "text:T2"}}, "mmOrder": [["text", 0]]},
     ]}
     iwa.attach_magic_move(_empty_key(tmp_path), payload, deck=deck)
     assert payload["slides"] == [
-        {"index": 0, "items": [], "magicMoveOut": True, "mmKeys": {"text": {0: "text:T0"}}},
-        {"index": 1, "items": [], "mmKeys": {"text": {0: "text:T1"}}},
+        {"index": 0, "items": [], "magicMoveOut": True, "mmKeys": {"text": {0: "text:T0"}}, "mmOrder": [["text", 0]]},
+        {"index": 1, "items": [], "mmKeys": {"text": {0: "text:T1"}}, "mmOrder": [["text", 0]]},
         {"index": 2, "items": []},
     ]
+
+
+def test_attach_magic_move_order_is_back_to_front_across_kinds(tmp_path):
+    # mmKeys buckets by kind (text before shape before movie), so it cannot say which
+    # object sits on top. mmOrder lists [kind, kindIndex] addresses in drawablesZOrder
+    # order: here a movie at the back, a triangle, a text box, then an image in front.
+    # Unkeyed drawables (the bare shape = shape 1, the empty text box = text 1) take no
+    # slot. Slide 2 is outside every pair: no mmOrder.
+    extra = {
+        "m0": {"_pbtype": "TSD.MovieArchive", "movieData": {"identifier": "dm"}},
+        "p0": _triangle(1.0),
+        "bare": {"_pbtype": "TSWP.ShapeInfoArchive"},
+        "t0": _text_box("s0"), "s0": _storage("Caption"),
+        "te": _text_box("se"), "se": _storage("  "),
+        "i0": {"_pbtype": "TSD.ImageArchive", "data": {"identifier": "di"}},
+    }
+    datas = [{"identifier": "dm", "digest": "MOV="}, {"identifier": "di", "digest": "IMG="}]
+    deck = _mm_deck(
+        [(_transition(_MM_EFFECT), ["m0", "p0", "bare", "t0", "te", "i0"]), (None, ["i0", "m0"]), (None, ["t0"])],
+        extra,
+        datas,
+    )
+    slides = _attach(tmp_path, deck, range(3))
+    assert slides[0]["mmOrder"] == [["movie", 0], ["shape", 0], ["text", 0], ["image", 0]]
+    assert slides[1]["mmOrder"] == [["image", 0], ["movie", 0]]
+    assert "mmOrder" not in slides[2] and "mmKeys" not in slides[2]
+
+
+def test_attach_magic_move_order_lists_a_dual_text_shape_once(tmp_path):
+    # A custom-path text box is two records (text + duplicate shape) but one drawable:
+    # one mmOrder entry, its text address.
+    extra = {
+        "t1": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "s1"},
+            "super": {"pathsource": {"editableBezierPathSource": {"naturalSize": {"width": 5.0, "height": 5.0}}}},
+        },
+        "s1": _storage("Pill"),
+        "p0": _triangle(1.0),
+    }
+    deck = _mm_deck([(_transition(_MM_EFFECT), ["p0", "t1"]), (None, [])], extra)
+    slide = _attach(tmp_path, deck, range(2))[0]
+    assert slide["mmOrder"] == [["shape", 0], ["text", 0]]
+    assert "text:Pill" == slide["mmKeys"]["text"][0] and 1 not in slide["mmKeys"]["shape"]
+
+
+def test_attach_magic_move_order_tells_duplicate_media_apart(tmp_path):
+    # Two movies sharing one digest share one key; their addresses still differ, so the
+    # detector can pair each copy by position.
+    extra = {
+        "m0": {"_pbtype": "TSD.MovieArchive", "movieData": {"identifier": "d0"}},
+        "m1": {"_pbtype": "TSD.MovieArchive", "movieData": {"identifier": "d1"}},
+    }
+    datas = [{"identifier": "d0", "digest": "SAME="}, {"identifier": "d1", "digest": "SAME="}]
+    deck = _mm_deck([(_transition(_MM_EFFECT), ["m1", "m0"]), (None, [])], extra, datas)
+    slide = _attach(tmp_path, deck, range(2))[0]
+    assert slide["mmKeys"] == {"movie": {0: "movie:SAME=", 1: "movie:SAME="}}
+    assert slide["mmOrder"] == [["movie", 0], ["movie", 1]]
 
 
 def test_attach_magic_move_failure_after_a_keyed_pair_leaves_no_annotation(tmp_path, monkeypatch):
