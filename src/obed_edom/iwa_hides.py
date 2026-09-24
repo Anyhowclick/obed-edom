@@ -17,19 +17,8 @@ from typing import Any
 
 from keynote_parser.codec import IWAFile, import_version
 
-from obed_edom.iwa_kindindex import (
-    KIND_ORDER,
-    TEXT_PLACEHOLDER_SLACK,
-    derive_kind_index,
-    derived_kind_counts,
-    reconcile_counts,
-)
-from obed_edom.iwa_geometry import compose_geometry
-from obed_edom.iwa_runs import (
-    _group_child_signature,
-    _normalize_text,
-    slide_order,
-)
+from obed_edom.iwa_kindindex import derive_kind_index, derived_kind_counts, reconcile_counts
+from obed_edom.iwa_runs import slide_order
 from obed_edom.iwa_write import (
     _METADATA_MEMBER,
     _PACKAGE_METADATA_PBTYPE,
@@ -43,8 +32,7 @@ from obed_edom.iwa_write import (
     OfflineWriteRefused,
     expected_base_counts,
 )
-from obed_edom.map_remap import is_placeholder_text
-from obed_edom.offline_inspect import _build_data_index, _data_identifier, data_member_index
+from obed_edom.offline_inspect import data_member_index, uuid_strings
 
 _HIDE_PBTYPES = frozenset(
     {"TSWP.ShapeInfoArchive", "TSD.ImageArchive", "TSD.MovieArchive", "TSD.GroupArchive"}
@@ -304,138 +292,6 @@ def _check_tables(comp: dict, i3: Counter, i4: set, where: str) -> None:
         raise _Refuse(f"{where}: component externalReferences != recompute (I4)")
 
 
-def _identity_check(
-    records: list[dict], items: list[dict], objects: dict[str, dict],
-    data_index: dict[str, str], group_text: dict[int, str] | None, cache: dict,
-) -> None:
-    derived_by_kind = {k: [r for r in records if r["kind"] == k] for k in KIND_ORDER}
-    for kind in KIND_ORDER:
-        derived = derived_by_kind[kind]
-        payload = sorted(
-            (it for it in items if (it.get("kind") or "") == kind),
-            key=lambda it: int(it.get("kindIndex", -1)),
-        )
-        if [int(it.get("kindIndex", -1)) for it in payload] != list(range(len(payload))):
-            raise _Refuse(f"payload {kind} kindIndex is not 0..n-1")
-        extra = payload[len(derived):]
-        if len(payload) < len(derived) or (extra and (
-            kind != "text" or len(extra) > TEXT_PLACEHOLDER_SLACK
-            or not all(is_placeholder_text(it) for it in extra)
-        )):
-            raise _Refuse(f"payload has {len(payload)} {kind} items, deck has {len(derived)}")
-        for rec, item in zip(derived, payload):
-            ki = rec["kindIndex"]
-            if kind in ("text", "shape"):
-                if _normalize_text(rec.get("text")) != _normalize_text(item.get("text")):
-                    raise _Refuse(f"{kind} {ki} text differs from the payload")
-            elif kind in ("image", "movie"):
-                did = _data_identifier(objects.get(rec["id"]) or {})
-                name = data_index.get(did) if did is not None else None
-                if (name or "") != (item.get("fileName") or ""):
-                    raise _Refuse(f"{kind} {ki} file {name!r} != payload {item.get('fileName')!r}")
-            elif kind == "group" and group_text is not None:
-                want = group_text.get(ki)
-                if want is None or _group_child_signature(rec["id"], objects, cache) != want:
-                    raise _Refuse(f"group {ki} child-text signature differs from the payload")
-
-
-_GEOM_TOL = 1.0
-
-
-def _content_signature(
-    rec: dict, objects: dict[str, dict], data_index: dict[str, str], group_text: dict[int, str] | None, cache: dict,
-) -> str | None:
-    """The identity ``_identity_check`` verified against the source; ``None`` = unverified."""
-    kind = rec["kind"]
-    if kind in ("text", "shape"):
-        return _normalize_text(rec.get("text"))
-    if kind in ("image", "movie"):
-        did = _data_identifier(objects.get(rec["id"]) or {})
-        return data_index.get(did) if did is not None else None
-    if kind == "group" and group_text is not None:
-        return _group_child_signature(rec["id"], objects, cache)
-    return None
-
-
-def _rect(d: dict | None) -> tuple[float, ...] | None:
-    try:
-        return tuple(float(d[k]) for k in ("x", "y", "w", "h"))
-    except (KeyError, TypeError, ValueError):
-        return None
-
-
-def _near(a: tuple[float, ...] | None, b: tuple[float, ...] | None) -> bool:
-    return a is not None and b is not None and all(abs(p - q) <= _GEOM_TOL for p, q in zip(a, b))
-
-
-def _check_unambiguous(
-    records: list[dict], hides: list[dict], items: list[dict], slide: dict,
-    objects: dict[str, dict], data_index: dict[str, str], group_text: dict[int, str] | None, cache: dict,
-) -> None:
-    """Refuse a hide whose survivor twin (same kind + signature) geometry cannot separate from it."""
-    hide_keys = {(str(h.get("kind")), int(h.get("kindIndex", -1))) for h in hides}
-    sigs = {(r["kind"], r["kindIndex"]): _content_signature(r, objects, data_index, group_text, cache)
-            for r in records}
-    composed = {(r["kind"], r["kindIndex"]): r for r in compose_geometry(slide, objects)}
-    geom = {k: _rect(r) for k, r in composed.items()}
-    payload = {(str(it.get("kind")), int(it.get("kindIndex", -1))): it for it in items}
-    for key in sorted(hide_keys):
-        sig = sigs[key]
-        survivors = [k for k in sigs if k[0] == key[0] and k not in hide_keys
-                     and (sig is None or sigs[k] is None or sigs[k] == sig)]
-        if not survivors:
-            continue
-        competing = [k for k in sigs if k[0] == key[0] and (sig is None or sigs[k] is None or sigs[k] == sig)]
-        approximate = {f"{k[0]} {k[1]}": composed[k]["needs_keynote"]
-                       for k in competing if (composed.get(k) or {}).get("needs_keynote")}
-        if approximate:
-            raise _Refuse(f"{key[0]} {key[1]} has a survivor twin and approximate saved geometry {approximate}")
-        want = _rect(payload.get(key))
-        if not _near(geom.get(key), want) or any(_near(geom.get(k), want) for k in survivors):
-            raise _Refuse(f"{key[0]} {key[1]} has a survivor twin that geometry cannot tell apart")
-
-
-_APPROXIMABLE_KINDS = frozenset({"text", "image", "movie", "group"})
-
-
-def pre_deferral_twin_risk(
-    items: list[dict], hide_keys: set[tuple[str, int]], group_text: dict | None,
-    *, planned: dict[tuple[str, int], dict] | None = None,
-) -> set[tuple[str, int]]:
-    """Hides whose twin class holds a survivor and an approximate-geometry or pre-hide-written (``planned``) member."""
-    def sig(item: dict) -> str | None:
-        kind = str(item.get("kind") or "")
-        if kind in ("text", "shape"):
-            return _normalize_text(item.get("text"))
-        if kind in ("image", "movie"):
-            return item.get("fileName") or None
-        if kind == "group" and group_text is not None:
-            return group_text.get(int(item.get("kindIndex", -1)))
-        return None
-
-    flagged = bool(items) and all("needsKeynote" in it for it in items)
-    written = set(planned or ())
-    by_key = {(str(it.get("kind") or ""), int(it.get("kindIndex", -1))): it for it in items}
-    sigs = {k: sig(it) for k, it in by_key.items()}
-
-    def approximate(key: tuple[str, int]) -> bool:
-        item = by_key[key]
-        if not flagged:
-            return key[0] in _APPROXIMABLE_KINDS
-        return bool(item.get("needsKeynote"))
-
-    risky: set[tuple[str, int]] = set()
-    for key in hide_keys:
-        if key not in sigs:
-            risky.add(key)
-            continue
-        s = sigs[key]
-        twins = [k for k, v in sigs.items() if k[0] == key[0] and (s is None or v is None or v == s)]
-        if any(k not in hide_keys for k in twins) and any(k in written or approximate(k) for k in twins):
-            risky.add(key)
-    return risky
-
-
 _STRONG_REF_FIELDS = frozenset({
     "children", "ownedStorage", "deprecatedStorage", "mask", "fakeShapeForEmptyGroup",
     "title", "caption", "drawable", "containedStorage", "calloutSubStorages", "subStorages",
@@ -572,10 +428,9 @@ _EDITED_METADATA_FIELDS = frozenset({"objectUuidMapEntries", "dataReferences"})
 def _plan_slide(
     n: int, hides: list[dict], model: _Model, order: list[tuple[str, bool]],
     slide_count_by_member: Counter, *, source_counts: dict[str, int] | None,
-    items: list[dict] | None, group_text: dict[int, str] | None, data_index: dict[str, str],
-    comp_of_member: dict[str, dict], cache: dict,
+    items: list[dict] | None, uuids: dict[str, str], comp_of_member: dict[str, dict],
 ) -> _Target:
-    """R1-R4 plus identity and twin ambiguity: a refusal here leaves the saved order unproven."""
+    """R1-R4 plus source-id identity of every hide: a refusal here leaves the saved order unproven."""
     if not (1 <= n <= len(order)):
         raise _Refuse(f"slide {n} out of range (deck has {len(order)})")
     slide_id = order[n - 1][0]
@@ -630,10 +485,17 @@ def _plan_slide(
         if hid in hide_ids:
             raise _Refuse(f"two hide specs resolve to {hid}")
         hide_ids.append(hid)
-    if items is None:
-        raise _Refuse("payload items missing")
-    _identity_check(records, items, model.objects, data_index, group_text, cache)
-    _check_unambiguous(records, hides, items, slide, model.objects, data_index, group_text, cache)
+    payload = {(str(it.get("kind") or ""), int(it.get("kindIndex", -1))): it for it in items or []}
+    for spec, hid in zip(hides, hide_ids):
+        key = (str(spec.get("kind")), int(spec.get("kindIndex", -1)))
+        source_id = (payload.get(key) or {}).get("iwaId")
+        if source_id is None:
+            raise _Refuse(f"hide {key[0]} {key[1]} has no source iwaId")
+        if str(source_id) != hid:
+            raise _Refuse(f"hide {key[0]} {key[1]} resolves to {hid}, source id {source_id}")
+        source_uuid = payload[key].get("iwaUuid")
+        if source_uuid is not None and uuids.get(hid) != source_uuid:
+            raise _Refuse(f"hide {key[0]} {key[1]} uuid {uuids.get(hid)} != source {source_uuid}")
     return _Target(slide_id, member, hide_ids)
 
 
@@ -964,12 +826,12 @@ def patch_deck_hides(
     items_by_slide: dict[int, list[dict]],
     verify: bool = False,
     force_refuse: frozenset[int] | set[int] = frozenset(),
-    group_text_by_slide: dict[int, dict[int, str]] | None = None,
 ) -> HidesResult:
     """Delete each slide's role=hide targets (WALL kindIndex; the deck still holds them).
 
-    Per-slide refusal leaves that slide's member byte-identical; ``order_proven`` marks a
-    refused slide whose saved kind order was proven to match the payload. Every failure
+    Each hide's saved ``(kind, kindIndex)`` must resolve to the payload item's source
+    ``iwaId`` (and ``iwaUuid`` when carried). Per-slide refusal leaves that slide's member
+    byte-identical; ``order_proven`` marks a refused slide whose hides were all proven by id. Every failure
     before the first byte is written raises ``OfflineWriteRefused`` (deck untouched);
     ``OfflineWriteCorrupted`` propagates; any failure after that raises ``HidesWriteFailed``.
     """
@@ -977,7 +839,7 @@ def patch_deck_hides(
     try:
         prep = _prepare(
             deck, hides_by_slide, source_counts_by_slide, items_by_slide,
-            force_refuse, group_text_by_slide or {})
+            force_refuse)
     except OfflineWriteRefused:
         raise
     except Exception as exc:
@@ -1013,7 +875,6 @@ def patch_deck_hides(
 def _prepare(
     deck: Path, hides_by_slide: dict[int, list[dict]], source_counts_by_slide: dict[int, dict[str, int]],
     items_by_slide: dict[int, list[dict]], force_refuse: frozenset[int] | set[int],
-    group_text_by_slide: dict[int, dict[int, str]],
 ) -> _Prepared:
     if 0 in hides_by_slide:
         raise OfflineWriteRefused("slide numbers are 1-based")
@@ -1032,7 +893,7 @@ def _prepare(
         _require_unambiguous_package(model, OfflineWriteRefused)
         pm_id, pm = _package_metadata(model)
         order = slide_order(model.objects)
-        data_index = _build_data_index(model.namelist)
+        uuids = uuid_strings(pm)
         comp_of_member = _components_by_member(pm, list(model.member_ids))
         unresolved_live = _validate_all_components(model, pm, comp_of_member)
         datas_ids = {str(d.get("identifier")) for d in pm.get("datas") or []}
@@ -1041,8 +902,6 @@ def _prepare(
             raise OfflineWriteRefused(f"datas unreferenced before the edit (I6): {sorted(unreferenced)[:5]}")
         slide_count_by_member = Counter(
             model.member_of[aid] for aid, obj in model.objects.items() if obj.get("_pbtype") == "KN.SlideArchive")
-        cache: dict = {}
-
         aliases = Counter(sid for sid, _skipped in order)
         planned: dict[int, _Target] = {}
         for n in sorted(wanted):
@@ -1054,8 +913,7 @@ def _prepare(
                 target = _plan_slide(
                     n, wanted[n], model, order, slide_count_by_member,
                     source_counts=source_counts_by_slide.get(n), items=items_by_slide.get(n),
-                    group_text=group_text_by_slide.get(n), data_index=data_index,
-                    comp_of_member=comp_of_member, cache=cache)
+                    uuids=uuids, comp_of_member=comp_of_member)
             except _Refuse as exc:
                 refuse(n, str(exc), False)
                 continue

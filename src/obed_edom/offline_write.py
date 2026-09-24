@@ -140,45 +140,19 @@ def _dual_keys(items: list[dict[str, Any]]) -> set[tuple[str, int]]:
     return out
 
 
-def _planned_writes_by_slide(
-    transform_dicts: list[dict[str, Any]],
-) -> dict[int, dict[tuple[str, int], dict[str, Any]]]:
-    """`{slide: {(kind, kindIndex): writes}}` with an entry for EVERY non-hide transform pass 1
-    applies before deleting hides (unless the slide's geometry is suppressed): x/y/w/h and
-    line endpoints when present, else empty. A group's child writes ride on the group's own
-    transform, so they key to the group."""
-    out: dict[int, dict[tuple[str, int], dict[str, Any]]] = {}
-    for t in transform_dicts:
-        if t.get("role") == "hide" or t.get("kindIndex") is None:
-            continue
-        writes: dict[str, Any] = {k: float(t[k]) for k in ("x", "y", "w", "h") if t.get(k) is not None}
-        writes.update({k: list(t[k]) for k in ("start", "end") if t.get(k) is not None})
-        out.setdefault(int(t.get("slide", -1)), {})[(str(t.get("kind") or ""), int(t["kindIndex"]))] = writes
-    return out
-
-
 def offline_hide_slides(
     transform_dicts: list[dict[str, Any]],
     wall: dict[str, Any],
     wanted: list[int] | None,
-    *,
-    suppressed: set[int] | frozenset[int] = frozenset(),
 ) -> set[int]:
-    """Slides whose hides the IWA writer deletes after the pass-1 save: slides with a
-    hide, within `wanted`, minus slides where a hide is a source build target, a dual, has
-    no AppleScript address, or is a group twin the writer could not disambiguate after the
-    save (`pre_deferral_twin_risk`), and unsuppressed slides with a non-hide transform
-    that has no kindIndex (its pre-hide write cannot be keyed); those stay on the Keynote
-    delete. `suppressed` is the plan's `suppressGeometry` set: those slides write no
-    geometry before the hides, so the twin check sees no planned writes for them."""
-    from obed_edom.iwa_hides import pre_deferral_twin_risk  # noqa: PLC0415 (optional iwa extra)
+    """Slides whose hides the IWA writer deletes after the pass-1 save: slides with a hide,
+    within `wanted`, where every hide's payload item carries its source `iwaId`; minus
+    slides where a hide is a source build target, a dual, or has no AppleScript address.
+    Those stay on the Keynote delete."""
     from obed_edom.remap_keynote import _AS_KIND_NAMES  # noqa: PLC0415 (avoid a module cycle)
 
     hides = _hide_specs_by_slide(transform_dicts)
     slides = _wall_slides_by_number(wall)
-    planned = _planned_writes_by_slide(transform_dicts)
-    unkeyed = {int(t.get("slide", -1)) for t in transform_dicts
-               if t.get("role") != "hide" and t.get("kindIndex") is None}
     out: set[int] = set()
     for n, specs in hides.items():
         if wanted and n not in wanted:
@@ -187,18 +161,19 @@ def offline_hide_slides(
                for s in specs):
             continue
         slide = slides.get(n) or {}
-        excluded = _dual_keys(slide.get("items") or []) | {
+        items = slide.get("items") or []
+        hide_keys = {(str(s.get("kind")), int(s["kindIndex"])) for s in specs}
+        with_id = {
+            (str(it.get("kind") or ""), int(it["kindIndex"]))
+            for it in items if it.get("kindIndex") is not None and it.get("iwaId") is not None
+        }
+        if not hide_keys <= with_id:
+            continue
+        excluded = _dual_keys(items) | {
             (str(b.get("kind") or ""), int(b.get("kindIndex") or 0))
             for b in slide.get("builds") or []
         }
-        if n in unkeyed and n not in suppressed:
-            continue
-        hide_keys = {(str(s.get("kind")), int(s["kindIndex"])) for s in specs}
         if hide_keys & excluded:
-            continue
-        group_text = {int(k): v for k, v in (slide.get("groupChildText") or {}).items()}
-        if pre_deferral_twin_risk(slide.get("items") or [], hide_keys, group_text,
-                                  planned={} if n in suppressed else planned.get(n, {})):
             continue
         out.add(n)
     return out
@@ -354,10 +329,6 @@ def _patch_hides(
             hides_by_slide,
             source_counts_by_slide={n: counts.get(n, {}) for n in hides_by_slide},
             items_by_slide={n: list((slides.get(n) or {}).get("items") or []) for n in hides_by_slide},
-            group_text_by_slide={
-                n: {int(k): v for k, v in ((slides.get(n) or {}).get("groupChildText") or {}).items()}
-                for n in hides_by_slide
-            },
             verify=verify,
             force_refuse=_debug_force_refuse(),
         )

@@ -334,15 +334,15 @@ def _merge_legacy_slides(
         slide["groupChildrenUnavailable"] = True
 
 
-def _offline_payload_carries_needs_keynote(payload: dict[str, Any] | None) -> bool:
-    """Every item of every offline-decoded slide carries `needsKeynote` (value may be None);
-    JXA-fallback slides (`groupChildrenUnavailable`) and non-offline payloads are exempt."""
+def _offline_payload_carries_iwa_ids(payload: dict[str, Any] | None) -> bool:
+    """Every item of every offline-decoded slide carries its source `iwaId`; JXA-fallback
+    slides (`groupChildrenUnavailable`) and non-offline payloads are exempt."""
     if not isinstance(payload, dict) or payload.get("reader") != "offline":
         return True
     for slide in payload.get("slides") or []:
         if slide.get("groupChildrenUnavailable"):
             continue
-        if any("needsKeynote" not in item for item in slide.get("items") or []):
+        if any(item.get("iwaId") is None for item in slide.get("items") or []):
             return False
     return True
 
@@ -363,8 +363,8 @@ def acquire_wall_payload(
     rejected_cache = cached is not None
     usable = complete_cached_wall_payload(cached) and cached.get("reader") in allowed_readers
     carries_aspect = wall_payload_carries_aspect(cached)
-    carries_needs = _offline_payload_carries_needs_keynote(cached)
-    carries = mode != "on" or (carries_aspect and carries_needs)
+    carries_ids = _offline_payload_carries_iwa_ids(cached)
+    carries = mode != "on" or (carries_aspect and carries_ids)
     # A cached JXA read is coordinate-space-incompatible with `groupChildren` (archive
     # offsets vs a JXA group's live union frame — see attach_group_children's gate), so in
     # mode "on" it must not be served merely because a fresh offline decode would succeed;
@@ -401,9 +401,9 @@ def acquire_wall_payload(
     if rejected_cache and mode == "on" and usable and not carries_aspect:
         say(f"Cached {cached['reader']} read of {source.name} predates per-item aspect; "
             "re-reading.")
-    elif rejected_cache and mode == "on" and usable and not carries_needs:
+    elif rejected_cache and mode == "on" and usable and not carries_ids:
         say(f"Cached {cached['reader']} read of {source.name} predates per-item "
-            "needsKeynote; re-reading.")
+            "source ids; re-reading.")
 
     legacy_cache_arg = {"use_cache": False} if rejected_cache else {}
     if mode == "off":
@@ -1594,9 +1594,7 @@ def remap_keynote(
         hides_mode = offline_hides_mode(offline_hides, offline_mode=offline_mode, say=say)
         hide_slides: set[int] = set()
         if hides_mode != "off":
-            hide_slides = offline_write.offline_hide_slides(
-                transform_dicts, wall, wanted, suppressed=suppressed,
-            )
+            hide_slides = offline_write.offline_hide_slides(transform_dicts, wall, wanted)
             say(
                 f"OBED_OFFLINE_HIDES={hides_mode}: {len(hide_slides)} slide(s) defer their "
                 "hides to the offline delete after the pass-1 save."

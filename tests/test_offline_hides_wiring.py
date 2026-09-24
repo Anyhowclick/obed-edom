@@ -88,10 +88,19 @@ def deck(tmp_path):
     return p
 
 
+def _item(kind, ki, iwa_id="auto", **extra):
+    item = {"kind": kind, "kindIndex": ki, **extra}
+    if iwa_id is not None:
+        item["iwaId"] = f"{kind}{ki}" if iwa_id == "auto" else iwa_id
+    return item
+
+
+SLIDE1_ITEMS = [_item("image", 0), _item("image", 1), _item("text", 0)]
+
 WALL = {"slides": [
-    {"number": 1, "items": [{"kind": "image"}, {"kind": "image"}, {"kind": "text"}]},
-    {"number": 2, "items": [{"kind": "shape"}], "builds": [{"kind": "shape", "kindIndex": 0}]},
-    {"number": 3, "items": [{"kind": "text"}, {"kind": "group"}], "groupChildText": {"1": "sig"}},
+    {"number": 1, "items": SLIDE1_ITEMS},
+    {"number": 2, "items": [_item("shape", 0)], "builds": [{"kind": "shape", "kindIndex": 0}]},
+    {"number": 3, "items": [_item("text", 0), _item("group", 0)]},
 ]}
 
 
@@ -145,126 +154,25 @@ def test_offline_hides_mode_forced_off_when_iwa_extra_missing(monkeypatch):
 # --- eligibility ------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def _no_twin_risk(monkeypatch):
-    """Stand in for Stream B's `pre_deferral_twin_risk` (clean by default) so eligibility
-    tests do not depend on B's module; tests that need a flag override `twin_risk`."""
-    import importlib
-
-    try:
-        mod = importlib.import_module("obed_edom.iwa_hides")
-    except Exception:  # noqa: BLE001
-        mod = types.ModuleType("obed_edom.iwa_hides")
-        monkeypatch.setitem(sys.modules, "obed_edom.iwa_hides", mod)
-    calls = []
-
-    def fake(items, hide_keys, group_text, *, planned=None):
-        calls.append({"items": items, "hide_keys": set(hide_keys), "group_text": group_text})
-        return set()
-
-    monkeypatch.setattr(mod, "pre_deferral_twin_risk", fake, raising=False)
-    return calls
+def test_eligibility_requires_a_source_id_on_every_hide():
+    """Decision 7: the writer proves each hide by its source archive id, so a hide whose
+    payload item has no `iwaId` (JXA payload, old cache) keeps its slide on the Keynote delete."""
+    t = [_hide(1, "image", 0), _hide(1, "image", 1), _hide(3, "text", 0)]
+    wall = {"slides": [
+        {"number": 1, "items": [_item("image", 0), _item("image", 1, iwa_id=None), _item("text", 0)]},
+        {"number": 3, "items": [_item("text", 0), _item("group", 0, iwa_id=None)]},
+    ]}
+    assert offline_write.offline_hide_slides(t, wall, None) == {3}
 
 
-def test_eligibility_excludes_slide_flagged_by_twin_risk(monkeypatch, _no_twin_risk):
-    """FRC slide 20: two text-less groups with approximate geometry cannot be told apart
-    after the save, so the slide stays on the Keynote delete instead of aborting later."""
-    import obed_edom.iwa_hides as mod
-
-    seen = []
-
-    def flag(items, hide_keys, group_text, *, planned=None):
-        seen.append((items, set(hide_keys), group_text))
-        return {("group", 0)} if ("group", 0) in hide_keys else set()
-
-    monkeypatch.setattr(mod, "pre_deferral_twin_risk", flag, raising=False)
+def test_eligibility_id_less_payload_makes_no_slide_eligible():
+    jxa_wall = {"slides": [
+        {"number": n, "items": [{k: v for k, v in it.items() if k != "iwaId"} for it in sl["items"]]}
+        for n, sl in ((1, WALL["slides"][0]), (3, WALL["slides"][2]))
+    ]}
     t = [_hide(1, "image", 0), _hide(3, "group", 0)]
-    assert offline_write.offline_hide_slides(t, WALL, None) == {1}
-    by_keys = {frozenset(k): (items, gt) for items, k, gt in seen}
-    items3, gt3 = by_keys[frozenset({("group", 0)})]
-    assert items3 == WALL["slides"][2]["items"]
-    assert gt3 == {1: "sig"}
-
-
-def test_eligibility_passes_planned_writes_to_twin_risk(monkeypatch):
-    """Owner decision 5c / sol-r7 #3: every non-hide transform pass 1 applies before the
-    hides gets an entry (presence = pre-hide write): x/y/w/h and line endpoints when present,
-    else empty; a group-child write keys to its group. Hides are omitted."""
-    import obed_edom.iwa_hides as mod
-
-    seen = {}
-
-    def spy(items, hide_keys, group_text, *, planned=None):
-        seen[frozenset(hide_keys)] = planned
-        return set()
-
-    monkeypatch.setattr(mod, "pre_deferral_twin_risk", spy, raising=False)
-    t = [
-        _hide(3, "group", 0),
-        {"slide": 3, "kind": "group", "kindIndex": 1, "role": "map", "x": 1, "y": 2, "w": 40, "h": 30.5},
-        {"slide": 3, "kind": "text", "kindIndex": 0, "role": "map", "x": 5, "y": 6},
-        {"slide": 3, "kind": "image", "kindIndex": 0, "role": "map", "x": None, "y": None, "w": 10, "h": None},
-        {"slide": 3, "kind": "shape", "kindIndex": 0, "role": "map", "font": "x"},
-        {"slide": 3, "kind": "line", "kindIndex": 0, "role": "map", "start": (1, 2), "end": (3, 4)},
-        {"slide": 3, "kind": "group", "kindIndex": 2, "role": "map",
-         "children": [{"kindIndex": 0, "x": 1, "y": 1}]},
-        {"slide": 1, "kind": "image", "kindIndex": 1, "role": "map", "w": 9, "h": 9},
-        _hide(1, "image", 0),
-    ]
+    assert offline_write.offline_hide_slides(t, jxa_wall, None) == set()
     assert offline_write.offline_hide_slides(t, WALL, None) == {1, 3}
-    assert seen[frozenset({("group", 0)})] == {
-        ("group", 1): {"x": 1.0, "y": 2.0, "w": 40.0, "h": 30.5},
-        ("text", 0): {"x": 5.0, "y": 6.0},
-        ("image", 0): {"w": 10.0},
-        ("shape", 0): {},
-        ("line", 0): {"start": [1, 2], "end": [3, 4]},
-        ("group", 2): {},
-    }
-    assert seen[frozenset({("image", 0)})] == {("image", 1): {"w": 9.0, "h": 9.0}}
-
-
-def test_eligibility_excludes_unsuppressed_slide_with_unkeyed_transform():
-    """A non-hide transform with no kindIndex (addressed by match text) could move a twin
-    before the hides go and cannot be keyed in `planned`, so its slide keeps the Keynote
-    delete; on a suppressed slide pass 1 writes no geometry, so it stays eligible."""
-    t = [
-        _hide(1, "image", 0),
-        _hide(3, "group", 0),
-        {"slide": 3, "kind": "text", "kindIndex": None, "role": "map", "matchText": "x", "x": 1, "y": 2},
-    ]
-    assert offline_write.offline_hide_slides(t, WALL, None) == {1}
-    assert offline_write.offline_hide_slides(t, WALL, None, suppressed={3}) == {1, 3}
-
-
-def test_eligibility_suppressed_slide_gets_no_planned_writes(monkeypatch):
-    """Round 6: pass 1 writes no geometry on a suppressed slide (offline-write or
-    env-suppressed) before the hides go, so its planned sizes must not feed the twin check."""
-    import obed_edom.iwa_hides as mod
-
-    seen = {}
-
-    def spy(items, hide_keys, group_text, *, planned=None):
-        seen[frozenset(hide_keys)] = planned
-        return set()
-
-    monkeypatch.setattr(mod, "pre_deferral_twin_risk", spy, raising=False)
-    t = [
-        _hide(3, "group", 0),
-        {"slide": 3, "kind": "group", "kindIndex": 1, "role": "map", "w": 40, "h": 30},
-        {"slide": 3, "kind": "text", "kindIndex": 0, "role": "map", "x": 5, "y": 6},
-        _hide(1, "image", 0),
-        {"slide": 1, "kind": "image", "kindIndex": 1, "role": "map", "x": 3, "y": 4},
-    ]
-    assert offline_write.offline_hide_slides(t, WALL, None, suppressed={3}) == {1, 3}
-    assert seen[frozenset({("group", 0)})] == {}
-    assert seen[frozenset({("image", 0)})] == {("image", 1): {"x": 3.0, "y": 4.0}}
-
-
-def test_eligibility_clean_twin_risk_keeps_slide(_no_twin_risk):
-    t = [_hide(1, "image", 0), _hide(3, "group", 0)]
-    assert offline_write.offline_hide_slides(t, WALL, None) == {1, 3}
-    assert {frozenset(c["hide_keys"]) for c in _no_twin_risk} == {
-        frozenset({("image", 0)}), frozenset({("group", 0)})}
 
 
 def test_eligibility_slides_with_hides_only():
@@ -278,7 +186,8 @@ def test_eligibility_excludes_slide_whose_build_targets_a_hide():
 
 
 def test_eligibility_build_on_a_non_hide_keeps_the_slide():
-    wall = {"slides": [{"number": 2, "items": [], "builds": [{"kind": "shape", "kindIndex": 3}]}]}
+    wall = {"slides": [{"number": 2, "items": [_item("shape", 0)],
+                        "builds": [{"kind": "shape", "kindIndex": 3}]}]}
     assert offline_write.offline_hide_slides([_hide(2, "shape", 0)], wall, None) == {2}
 
 
@@ -304,9 +213,8 @@ def test_eligibility_excludes_dual_membership_hide_targets():
     Either face of the dual excludes the slide; an unrelated shape does not."""
     wall = {"slides": [
         {"number": 5, "items": [
-            {"kind": "text", "kindIndex": 0}, {"kind": "text", "kindIndex": 1},
-            {"kind": "shape", "kindIndex": 0},
-            {"kind": "shape", "kindIndex": 1, "duplicateOf": {"kind": "text", "kindIndex": 1}},
+            _item("text", 0), _item("text", 1), _item("shape", 0),
+            _item("shape", 1, duplicateOf={"kind": "text", "kindIndex": 1}),
         ]},
     ]}
     assert offline_write.offline_hide_slides([_hide(5, "text", 1)], wall, None) == set()
@@ -502,7 +410,7 @@ def test_run_offline_hides_all_deleted_offline(monkeypatch, deck):
     assert seen["verify"] is True
     assert seen["source_counts_by_slide"][1] == {"image": 2, "text": 1}
     assert seen["items_by_slide"][3] == WALL["slides"][2]["items"]
-    assert seen["group_text_by_slide"][3] == {1: "sig"}
+    assert "group_text_by_slide" not in seen
     assert seen["force_refuse"] == frozenset()
     assert any(m.startswith("Offline hides (verify): 2 slide(s), 4 deleted, 0 refused") for m in said)
 
@@ -817,7 +725,7 @@ def _wire(monkeypatch, *, hides_env, jxa, events=None, hides_info=None):
 def _run(tmp_path, said=None, **kw):
     source, template, dest = _touch_paths(tmp_path)
     wall_payload = {"slideWidth": 7680, "slideHeight": 1080,
-                    "slides": [{"number": 1, "items": [{"kind": "image"}, {"kind": "image"}, {"kind": "text"}]}]}
+                    "slides": [{"number": 1, "items": SLIDE1_ITEMS}]}
     template_payload = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
     return rk.remap_keynote(
         source, dest, template=template, wall_payload=wall_payload,
@@ -893,7 +801,7 @@ def test_applied_line_prints_after_the_hides_stage(monkeypatch, tmp_path):
 
     rk.remap_keynote(
         source, dest, template=template,
-        wall_payload={"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]},
+        wall_payload={"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": SLIDE1_ITEMS}]},
         template_payload={"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]},
         log=log,
     )
@@ -961,25 +869,6 @@ def test_remap_and_inspect_threads_offline_hides(monkeypatch, tmp_path):
     source, template, dest = _touch_paths(tmp_path)
     rk.remap_and_inspect(source, dest, template=template, validate=False, offline_hides="on")
     assert seen["offline_hides"] == "on"
-
-
-def test_eligibility_uses_the_suppression_set_sent_to_jxa(monkeypatch, tmp_path):
-    """The twin check's suppression set is the very set pass 1 receives as
-    `plan["suppressGeometry"]` (offline-write slides plus `OBED_SUPPRESS_GEOMETRY`)."""
-    plan, _ = _wire(monkeypatch, hides_env="on", jxa={**JXA_OK, "hidesDeferred": 2},
-                    hides_info={"deleted": 2})
-    monkeypatch.setenv("OBED_SUPPRESS_GEOMETRY", "7")
-    seen = {}
-    real = rk.offline_write.offline_hide_slides
-
-    def spy(transform_dicts, wall, wanted, *, suppressed=frozenset()):
-        seen["suppressed"] = set(suppressed)
-        return real(transform_dicts, wall, wanted, suppressed=suppressed)
-
-    monkeypatch.setattr(rk.offline_write, "offline_hide_slides", spy)
-    _run(tmp_path)
-    assert seen["suppressed"] == {1, 7}
-    assert sorted(seen["suppressed"]) == plan["suppressGeometry"]
 
 
 def test_off_mode_applied_line_keeps_its_original_position(monkeypatch, tmp_path):

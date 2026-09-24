@@ -40,10 +40,8 @@ pytest.importorskip("keynote_parser")
 from keynote_parser.codec import IWAFile  # noqa: E402
 
 from obed_edom import iwa_hides, iwa_write  # noqa: E402
-from obed_edom.iwa_hides import HidesResult, HidesWriteFailed, patch_deck_hides, pre_deferral_twin_risk  # noqa: E402
-from obed_edom.iwa_geometry import compose_geometry  # noqa: E402
-from obed_edom.iwa_kindindex import deck_kind_counts, derive_kind_index  # noqa: E402
-from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: E402
+from obed_edom.iwa_hides import HidesResult, HidesWriteFailed, patch_deck_hides  # noqa: E402
+from obed_edom.iwa_kindindex import deck_kind_counts  # noqa: E402
 from obed_edom.iwa_write import (  # noqa: E402
     OfflineWriteCorrupted,
     OfflineWriteRefused,
@@ -51,8 +49,8 @@ from obed_edom.iwa_write import (  # noqa: E402
     _rewrite_members,
     patch_deck_geometry,
 )
-from obed_edom.offline_inspect import _build_data_index, _data_identifier, offline_wall_payload  # noqa: E402
-from test_iwa_write import _arch, _geom, _mask_super, _member, _shape_super, _transition_dict  # noqa: E402
+from obed_edom.offline_inspect import offline_wall_payload  # noqa: E402
+from test_iwa_write import _arch, _geom, _member, _shape_super, _transition_dict  # noqa: E402
 
 SHEET = "Index/DocumentStylesheet.iwa"
 DOC = "Index/Document.iwa"
@@ -265,25 +263,8 @@ def _build(path: Path, *, mutate=None, meta_mutate=None, data_names=None, dmm=()
 
 
 def _payload(path: Path) -> dict[int, list[dict]]:
-    """JXA-shaped items per slide (kind, kindIndex, text, fileName) off the undeleted deck."""
-    objects, _idf, _fi = _load_deck(path)
-    with zipfile.ZipFile(path) as zf:
-        data_index = _build_data_index(zf.namelist())
-    out: dict[int, list[dict]] = {}
-    for n, (sid, _skipped) in enumerate(slide_order(objects), 1):
-        items = []
-        geom = {(r["kind"], r["kindIndex"]): r for r in compose_geometry(objects[sid], objects)}
-        for rec in derive_kind_index(objects[sid], objects):
-            g = geom.get((rec["kind"], rec["kindIndex"])) or {}
-            item = {"kind": rec["kind"], "kindIndex": rec["kindIndex"], "text": rec["text"], "fileName": "",
-                    **{k: g.get(k) for k in ("x", "y", "w", "h")}}
-            if rec["kind"] in ("image", "movie"):
-                item["fileName"] = data_index.get(_data_identifier(objects[rec["id"]]) or "", "")
-            if rec.get("duplicateOf"):
-                item["duplicateOf"] = rec["duplicateOf"]
-            items.append(item)
-        out[n] = items
-    return out
+    """The offline reader's payload items per slide, each carrying its source ``iwaId``/``iwaUuid``."""
+    return {s["number"]: s["items"] for s in offline_wall_payload(path)["slides"]}
 
 
 def _run(path: Path, hides=None, *, items=None, counts=None, **kw) -> HidesResult:
@@ -631,20 +612,92 @@ def test_b5_refusal_leaves_slide_byte_identical_and_patches_others(tmp_path, cas
     _assert_refused_only(path, before, res, slide, needle)
 
 
-def test_b5_identity_mismatch_refuses(deck):
-    items = _payload(deck)
-    items[1] = [dict(it, text="Other") if it["kind"] == "text" else it for it in items[1]]
-    before = _raw_members(deck)
-    res = _run(deck, items=items)
-    _assert_refused_only(deck, before, res, 1, "text 0 text differs")
+def _with_item(items, slide, kind, ki, **change):
+    out = dict(items)
+    out[slide] = [dict(it, **change) if (it["kind"], it["kindIndex"]) == (kind, ki) else it for it in items[slide]]
+    return out
 
 
-def test_b5_image_identity_mismatch_refuses(deck):
+def test_payload_items_carry_source_id_and_uuid(deck):
+    item = next(it for it in _payload(deck)[1] if (it["kind"], it["kindIndex"]) == ("shape", 0))
+    assert item["iwaId"] == 301 and item["iwaUuid"] == "301:7"
+
+
+def test_every_offline_item_carries_its_iwa_id_including_empty_placeholder_boxes(tmp_path):
+    """The cache freshness check needs ``iwaId`` on every offline item: add an empty 0x0
+    text box (a layout placeholder seed) to slide 3 and check every item on every slide."""
+    def mutate(members):
+        members[S3][0] = _slide(103, [500, 501, 502])
+        members[S3].extend([
+            _a(502, "TSWP.ShapeInfoArchive", {"isTextBox": True, "ownedStorage": {"identifier": 512},
+                                               "super": {"style": {"identifier": 901}, **_shape_super(0, 0, 0, 0)}},
+               refs=[512, 901]),
+            _a(512, "TSWP.StorageArchive", {"text": [""]}),
+        ])
+    path = _build(tmp_path / "ph.key", mutate=mutate)
+    payload = _payload(path)
+    assert all(isinstance(it.get("iwaId"), int) for items in payload.values() for it in items)
+    assert 502 in {it["iwaId"] for it in payload[3]}
+
+
+def test_id_mismatch_refuses_unproven(deck):
+    before = _raw_members(deck)
+    res = _run(deck, items=_with_item(_payload(deck), 1, "image", 2, iwaId=303))
+    _assert_refused_only(deck, before, res, 1, "image 2 resolves to 304, source id 303")
+    assert not res.slides[1].order_proven
+
+
+def test_missing_iwa_id_refuses_unproven(deck):
     items = _payload(deck)
-    items[2] = [dict(it, fileName="wrong.png") if it["kind"] == "image" else it for it in items[2]]
+    items[2] = [{k: v for k, v in it.items() if k != "iwaId"} for it in items[2]]
     before = _raw_members(deck)
     res = _run(deck, items=items)
-    _assert_refused_only(deck, before, res, 2, "image 0 file")
+    _assert_refused_only(deck, before, res, 2, "has no source iwaId")
+    assert not res.slides[2].order_proven
+
+
+def test_uuid_mismatch_refuses_unproven(deck):
+    before = _raw_members(deck)
+    res = _run(deck, items=_with_item(_payload(deck), 3, "image", 0, iwaUuid="1:2"))
+    _assert_refused_only(deck, before, res, 3, "uuid 501:7 != source 1:2")
+    assert not res.slides[3].order_proven
+
+
+def test_reordered_saved_deck_refuses_unproven(tmp_path):
+    """The save swaps hidden image 304 and surviving image 303 (same file): kindIndex 2 now
+    holds the survivor, so its id no longer matches the payload's and nothing is deleted."""
+    source = _build(tmp_path / "src.key")
+    saved = _build(tmp_path / "saved.key", mutate=lambda m: m[S1].__setitem__(
+        0, _slide(101, [300, 301, 302, 304, 303, 305, 306])))
+    before = _raw_members(saved)
+    res = _run(saved, items=_payload(source), counts=deck_kind_counts(source))
+    _assert_refused_only(saved, before, res, 1, "image 2 resolves to 303, source id 304")
+    assert not res.slides[1].order_proven
+
+
+def _canvas_resized(members):
+    """Pass 1's 7680 -> 1920 canvas change on slide 1: x/4, y/4 + 405, w/4, h/4."""
+    def walk(v):
+        if isinstance(v, dict):
+            g = v.get("geometry")
+            if isinstance(g, dict) and "position" in g and "size" in g:
+                g["position"] = {"x": g["position"]["x"] / 4, "y": g["position"]["y"] / 4 + 405}
+                g["size"] = {"width": g["size"]["width"] / 4, "height": g["size"]["height"] / 4}
+            for x in v.values():
+                walk(x)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x)
+    for a in members[S1]:
+        walk(a["objects"])
+
+
+def test_canvas_resized_saved_deck_is_patched_because_geometry_no_longer_matters(tmp_path):
+    source = _build(tmp_path / "src.key")
+    saved = _build(tmp_path / "saved.key", mutate=_canvas_resized)
+    res = _run(saved, items=_payload(source), counts=deck_kind_counts(source), verify=True)
+    assert all(not s.refused for s in res.slides.values()), {n: s.reason for n, s in res.slides.items()}
+    assert set(res.slides[1].removed_ids) == SUBTREE_1
 
 
 def test_b5_reconcile_mismatch_refuses(deck):
@@ -673,36 +726,6 @@ def test_b5_forced_refusal(deck):
     before = _raw_members(deck)
     res = _run(deck, force_refuse=frozenset({2}))
     _assert_refused_only(deck, before, res, 2, "forced")
-
-
-def test_group_identity_uses_child_text_signature(deck):
-    good = _run(deck, group_text_by_slide={1: {0: "G child"}})
-    assert not good.slides[1].refused
-
-
-def test_group_identity_mismatch_refuses(deck):
-    before = _raw_members(deck)
-    res = _run(deck, group_text_by_slide={1: {0: "Something else"}})
-    _assert_refused_only(deck, before, res, 1, "group 0")
-
-
-def test_b12_tail_placeholder_text_items_do_not_refuse(deck):
-    items = _payload(deck)
-    items[3] = items[3] + [{"kind": "text", "kindIndex": 1, "text": "", "w": 0, "h": 0, "fileName": ""}]
-    counts = deck_kind_counts(deck)
-    counts[3] = {**counts[3], "text": counts[3]["text"] + 1}
-    res = _run(deck, items=items, counts=counts)
-    assert not res.slides[3].refused, res.slides[3].reason
-
-
-def test_b12_non_placeholder_extra_text_item_refuses(deck):
-    items = _payload(deck)
-    items[3] = items[3] + [{"kind": "text", "kindIndex": 1, "text": "real", "w": 90, "h": 20, "fileName": ""}]
-    counts = deck_kind_counts(deck)
-    counts[3] = {**counts[3], "text": counts[3]["text"] + 1}
-    before = _raw_members(deck)
-    res = _run(deck, items=items, counts=counts)
-    _assert_refused_only(deck, before, res, 3, "payload has 2 text items")
 
 
 def test_b12_undecodable_member_raises_before_write(tmp_path):
@@ -924,81 +947,6 @@ def test_b8_re_encode_that_alters_the_transition_refuses_the_slide(tmp_path, mon
     assert _raw_members(path)[S1] == before[S1]
 
 
-# ---------------------------------------------------------------- #2: survivor twins
-
-
-def _twin_archs(kind, hide_at, surv_at):
-    """(archives, hide id, survivor id) for two same-content drawables of ``kind``."""
-    if kind == "text":
-        return [*_text(503, 513, "Twin", at=hide_at), *_text(504, 514, "Twin", at=surv_at)], 503, 504
-    if kind == "image":
-        return [_image(505, 51, at=hide_at), _image(506, 51, at=surv_at)], 505, 506
-    if kind == "group":
-        out = []
-        for gid, at in ((520, hide_at), (523, surv_at)):
-            out.append(_a(gid, "TSD.GroupArchive", {"children": [{"identifier": gid + 1}], "super": _geom(*at, 100, 40)},
-                          refs=[gid + 1]))
-            out.extend(_text(gid + 1, gid + 2, "GT", at=(0, 0), parent=gid))
-        return out, 520, 523
-    line = {"isTextBox": False}
-    return [
-        _a(530, "TSWP.ShapeInfoArchive", {**line, "super": _shape_super(*hide_at, 140, 0, nw=140, nh=0, line=True)}),
-        _a(531, "TSWP.ShapeInfoArchive", {**line, "super": _shape_super(*surv_at, 140, 0, nw=140, nh=0, line=True)}),
-    ], 530, 531
-
-
-_TWIN_HIDE = {"text": 1, "image": 1, "group": 0, "line": 0}
-
-
-def _twin_deck(path, kind, *, surv_at, swap=False):
-    archs, hide, surv = _twin_archs(kind, (40, 400), surv_at)
-    z = [500, 501, surv, hide] if swap else [500, 501, hide, surv]
-
-    def mutate(members):
-        members[S3] = [_slide(103, z), *_text(500, 510, "Stay"), _image(501, 54), *archs]
-    return _build(path, mutate=mutate), str(hide), str(surv)
-
-
-def _twin_hides(kind):
-    return {**HIDES, 3: [HIDES[3][0], {"role": "hide", "kind": kind, "kindIndex": _TWIN_HIDE[kind]}]}
-
-
-@pytest.mark.parametrize("kind", ["text", "image", "group", "line"])
-def test_twin_with_moved_survivor_deletes_the_hide(tmp_path, kind):
-    path, hide, surv = _twin_deck(tmp_path / "t.key", kind, surv_at=(600, 700))
-    res = _run(path, _twin_hides(kind))
-    assert not res.slides[3].refused, res.slides[3].reason
-    assert hide in res.slides[3].removed_ids and surv not in res.slides[3].removed_ids
-
-
-@pytest.mark.parametrize("kind", ["text", "image", "group", "line"])
-def test_twin_reordered_by_the_save_refuses(tmp_path, kind):
-    """Payload from the source order; the saved deck holds the survivor at the hide's index."""
-    source, _h, _s = _twin_deck(tmp_path / "src.key", kind, surv_at=(600, 700))
-    saved, _h, _s = _twin_deck(tmp_path / "saved.key", kind, surv_at=(600, 700), swap=True)
-    before = _raw_members(saved)
-    res = _run(saved, _twin_hides(kind), items=_payload(source), counts=deck_kind_counts(source))
-    assert res.slides[3].refused and "survivor twin" in res.slides[3].reason
-    assert not res.slides[3].order_proven
-    assert _raw_members(saved)[S3] == before[S3]
-
-
-@pytest.mark.parametrize("kind", ["text", "image", "line"])
-def test_twin_at_the_same_geometry_refuses(tmp_path, kind):
-    path, _h, _s = _twin_deck(tmp_path / "t.key", kind, surv_at=(40, 400))
-    res = _run(path, _twin_hides(kind))
-    assert res.slides[3].refused and "survivor twin" in res.slides[3].reason
-
-
-def test_twins_that_are_both_hidden_do_not_refuse(tmp_path):
-    path, hide, surv = _twin_deck(tmp_path / "t.key", "text", surv_at=(40, 400))
-    hides = {**HIDES, 3: [*HIDES[3], {"role": "hide", "kind": "text", "kindIndex": 1},
-                          {"role": "hide", "kind": "text", "kindIndex": 2}]}
-    res = _run(path, hides)
-    assert not res.slides[3].refused, res.slides[3].reason
-    assert {hide, surv} <= set(res.slides[3].removed_ids)
-
-
 # ---------------------------------------------------------------- #7: typed failure phases, order_proven
 
 
@@ -1039,10 +987,10 @@ def test_planning_bug_is_refused_before_write(deck, monkeypatch):
 def test_order_proven_values(tmp_path):
     items_path = _build(tmp_path / "a.key", mutate=_build_ref)
     items = _payload(items_path)
-    items[2] = [dict(it, fileName="wrong.png") if it["kind"] == "image" else it for it in items[2]]
+    items = _with_item(items, 2, "image", 1, iwaId=400)
     res = _run(items_path, items=items, force_refuse=frozenset({3}))
     assert res.slides[1].refused and "330" in res.slides[1].reason and res.slides[1].order_proven
-    assert res.slides[2].refused and "file" in res.slides[2].reason and not res.slides[2].order_proven
+    assert res.slides[2].refused and "source id 400" in res.slides[2].reason and not res.slides[2].order_proven
     assert res.slides[3].refused and res.slides[3].reason == "forced refusal" and res.slides[3].order_proven
 
 
@@ -1059,14 +1007,6 @@ def test_patched_slides_report_order_proven(deck):
     assert all(s.order_proven and not s.refused for s in res.slides.values())
 
 
-def test_twin_hide_not_at_its_payload_geometry_refuses(tmp_path):
-    path, _h, _s = _twin_deck(tmp_path / "t.key", "text", surv_at=(600, 700))
-    items = _payload(path)
-    items[3] = [dict(it, x=it["x"] + 50) if (it["kind"], it["kindIndex"]) == ("text", 1) else it for it in items[3]]
-    res = _run(path, _twin_hides("text"), items=items)
-    assert res.slides[3].refused and "survivor twin" in res.slides[3].reason
-
-
 def test_hiding_every_drawable_on_a_slide(deck):
     hides = {**HIDES, 2: [*HIDES[2], {"role": "hide", "kind": "image", "kindIndex": 0}]}
     res = _run(deck, hides)
@@ -1076,45 +1016,7 @@ def test_hiding_every_drawable_on_a_slide(deck):
     assert set(_decoded(deck, S2)) == {"102"}
 
 
-# ---------------------------------------------------------------- Astra r2 #1: group twins, #3: read-back
-
-
-def _media_group_twins(swap):
-    """Groups 520 ("GT" + image of data 51) and 540 ("GT" + image of data 52): same child
-    text (the signature checked against the source), different media."""
-    archs = []
-    for gid, data, at in ((520, 51, (40, 400)), (540, 52, (600, 700))):
-        archs.append(_a(gid, "TSD.GroupArchive",
-                        {"children": [{"identifier": gid + 1}, {"identifier": gid + 3}], "super": _geom(*at, 100, 40)},
-                        refs=[gid + 1, gid + 3]))
-        archs.extend(_text(gid + 1, gid + 2, "GT", at=(0, 0), parent=gid))
-        archs.append(_image(gid + 3, data, at=(0, 0)))
-    z = [500, 501, 540, 520] if swap else [500, 501, 520, 540]
-
-    def mutate(members):
-        members[S3] = [_slide(103, z), *_text(500, 510, "Stay"), _image(501, 54), *archs]
-    return mutate
-
-
-_GROUP_HIDES = {**HIDES, 3: [HIDES[3][0], {"role": "hide", "kind": "group", "kindIndex": 0}]}
-_GROUP_TEXT = {3: {0: "GT", 1: "GT"}}
-
-
-def test_same_text_different_media_group_swap_refuses(tmp_path):
-    source = _build(tmp_path / "src.key", mutate=_media_group_twins(False))
-    saved = _build(tmp_path / "saved.key", mutate=_media_group_twins(True))
-    before = _raw_members(saved)
-    res = _run(saved, _GROUP_HIDES, items=_payload(source), counts=deck_kind_counts(source),
-               group_text_by_slide=_GROUP_TEXT)
-    assert res.slides[3].refused and "survivor twin" in res.slides[3].reason
-    assert _raw_members(saved)[S3] == before[S3]
-
-
-def test_same_text_different_media_group_in_source_order_deletes_the_hide(tmp_path):
-    path = _build(tmp_path / "g.key", mutate=_media_group_twins(False))
-    res = _run(path, _GROUP_HIDES, group_text_by_slide=_GROUP_TEXT)
-    assert not res.slides[3].refused, res.slides[3].reason
-    assert "520" in res.slides[3].removed_ids and "540" not in res.slides[3].removed_ids
+# ---------------------------------------------------------------- Astra r2 #3: read-back
 
 
 def test_read_back_catches_metadata_naming_a_removed_id(deck, monkeypatch):
@@ -1129,37 +1031,7 @@ def test_read_back_catches_metadata_naming_a_removed_id(deck, monkeypatch):
         _run(deck, {2: [HIDES[2][0]]})
 
 
-# ---------------------------------------------------------------- Astra r3 #1: approximate geometry, #2: later objects
-
-
-def _rotated_group_twins(swap):
-    """Hide group 520 is rotated 30 degrees: its composed (translation-only) rect is
-    approximate (``needs_keynote="rotated-group"``). Survivor group 540, same child text,
-    sits exactly on the rect the source reported for the rotated hide."""
-    archs = []
-    for gid, at, angle in ((520, (40, 400), 30.0), (540, (130, 70), 0.0)):
-        archs.append(_a(gid, "TSD.GroupArchive", {"children": [{"identifier": gid + 1}],
-                                                  "super": _geom(*at, 100, 40, angle)}, refs=[gid + 1]))
-        archs.extend(_text(gid + 1, gid + 2, "GT", at=(0, 0), parent=gid))
-    z = [500, 501, 540, 520] if swap else [500, 501, 520, 540]
-
-    def mutate(members):
-        members[S3] = [_slide(103, z), *_text(500, 510, "Stay"), _image(501, 54), *archs]
-    return mutate
-
-
-def test_rotated_group_swap_refuses_unproven(tmp_path):
-    source = _build(tmp_path / "src.key", mutate=_rotated_group_twins(False))
-    saved = _build(tmp_path / "saved.key", mutate=_rotated_group_twins(True))
-    items = _payload(source)
-    survivor_rect = next(it for it in items[3] if (it["kind"], it["kindIndex"]) == ("group", 1))
-    items[3] = [dict(it, **{k: survivor_rect[k] for k in "xywh"})
-                if (it["kind"], it["kindIndex"]) == ("group", 0) else it for it in items[3]]
-    before = _raw_members(saved)
-    res = _run(saved, _GROUP_HIDES, items=items, counts=deck_kind_counts(source), group_text_by_slide=_GROUP_TEXT)
-    assert res.slides[3].refused and "rotated-group" in res.slides[3].reason, res.slides[3].reason
-    assert not res.slides[3].order_proven
-    assert _raw_members(saved)[S3] == before[S3]
+# ---------------------------------------------------------------- Astra r3 #2: later objects
 
 
 def test_second_object_ownership_cross_member_without_header_refuses(tmp_path):
@@ -1179,86 +1051,6 @@ def test_second_object_ownership_cross_member_without_header_refuses(tmp_path):
     before = _raw_members(path)
     res = _run(path)
     _assert_refused_only(path, before, res, 1, "owns 320")
-
-
-# ---------------------------------------------------------------- pre-deferral twin risk (payload-only)
-
-
-def _item(kind, ki, **kw):
-    return {"kind": kind, "kindIndex": ki, "text": "", "fileName": "", **kw}
-
-
-def test_twin_risk_flags_slide_20_shape():
-    """FRC slide 20: two text-less groups (both group-residual in the writer), group 0 hidden."""
-    items = [_item("group", 0, x=5773, y=0, w=1920, h=1080), _item("group", 1, x=3840, y=0, w=1920, h=1080)]
-    assert pre_deferral_twin_risk(items, {("group", 0)}, {0: "", 1: ""}) == {("group", 0)}
-    assert pre_deferral_twin_risk(items, {("group", 0)}, {}) == {("group", 0)}
-    assert pre_deferral_twin_risk(items, {("group", 0)}, None) == {("group", 0)}
-
-
-def test_twin_risk_ignores_clean_twins():
-    items = [
-        _item("shape", 0, text="Same"), _item("shape", 1, text="Same"),
-        _item("image", 0, fileName="a.png"), _item("image", 1, fileName="b.png"),
-        _item("text", 0, text="Twin"), _item("text", 1, text="Twin"),
-        _item("line", 0), _item("line", 1),
-        _item("group", 0), _item("group", 1),
-    ]
-    hides = {("shape", 0), ("image", 0), ("text", 0), ("text", 1), ("line", 0), ("group", 0)}
-    assert pre_deferral_twin_risk(items, hides, {0: "A", 1: "B"}) == set()
-
-
-def test_twin_risk_flags_approximable_kinds_with_a_survivor_twin():
-    items = [_item("image", 0, fileName="a.png"), _item("image", 1, fileName="a.png"),
-             _item("text", 0, text="T"), _item("text", 1, text=" T "),
-             _item("group", 0), _item("group", 1)]
-    hides = {("image", 0), ("text", 1), ("group", 1)}
-    assert pre_deferral_twin_risk(items, hides, {0: "G", 1: "G"}) == hides
-
-
-def test_twin_risk_flags_a_hide_missing_from_the_payload():
-    assert pre_deferral_twin_risk([_item("image", 0)], {("image", 3)}, None) == {("image", 3)}
-
-
-def test_twin_risk_is_a_superset_of_the_writer_refusal_on_the_rotated_group(tmp_path):
-    source = _build(tmp_path / "src.key", mutate=_rotated_group_twins(False))
-    items = _payload(source)[3]
-    hide_keys = {("image", 0), ("group", 0)}
-    assert ("group", 0) in pre_deferral_twin_risk(items, hide_keys, _GROUP_TEXT[3])
-    res = _run(source, _GROUP_HIDES, group_text_by_slide=_GROUP_TEXT)
-    assert res.slides[3].refused and "approximate" in res.slides[3].reason
-
-
-def test_twin_risk_uses_the_reader_flag_on_offline_items():
-    def off(kind, ki, needs=None, **kw):
-        return {**_item(kind, ki, **kw), "needsKeynote": needs}
-
-    slide20 = [off("group", 0, "group-residual"), off("group", 1, "group-residual")]
-    assert pre_deferral_twin_risk(slide20, {("group", 0)}, {0: "", 1: ""}) == {("group", 0)}
-    clean = [off("image", 0, fileName="a.png"), off("image", 1, fileName="a.png"),
-             off("text", 0, text="T"), off("text", 1, text="T"), off("group", 0), off("group", 1)]
-    assert pre_deferral_twin_risk(clean, {("image", 0), ("text", 0), ("group", 0)}, {0: "G", 1: "G"}) == set()
-    masked = [off("image", 0, fileName="a.png"), off("image", 1, "masked-unresolved", fileName="a.png")]
-    assert pre_deferral_twin_risk(masked, {("image", 0)}, None) == {("image", 0)}
-    no_survivor = [off("image", 0, "rotated-masked", fileName="a.png"), off("image", 1, fileName="b.png")]
-    assert pre_deferral_twin_risk(no_survivor, {("image", 0)}, None) == set()
-    partial = [off("image", 0, fileName="a.png"), _item("image", 1, fileName="a.png")]
-    assert pre_deferral_twin_risk(partial, {("image", 0)}, None) == {("image", 0)}
-
-
-def test_offline_reader_flag_matches_the_writer_on_real_payloads(tmp_path):
-    """Offline-read payload items carry ``needsKeynote``; the predicate flags the rotated
-    group twin (which the writer refuses) and clears the clean image twin (which it accepts)."""
-    rotated = _build(tmp_path / "rot.key", mutate=_rotated_group_twins(False))
-    items = offline_wall_payload(rotated)["slides"][2]["items"]
-    assert all("needsKeynote" in it for it in items)
-    assert ("group", 0) in pre_deferral_twin_risk(items, {("image", 0), ("group", 0)}, _GROUP_TEXT[3])
-
-    clean, _h, _s = _twin_deck(tmp_path / "img.key", "image", surv_at=(600, 700))
-    payload = {s["number"]: s["items"] for s in offline_wall_payload(clean)["slides"]}
-    assert pre_deferral_twin_risk(payload[3], {("image", 0), ("image", 1)}, None) == set()
-    res = _run(clean, _twin_hides("image"), items=payload)
-    assert not res.slides[3].refused, res.slides[3].reason
 
 
 # ---------------------------------------------------------------- Sol r4 #2: reference classification, #4: Metadata exactness
@@ -1352,102 +1144,6 @@ def test_metadata_re_encode_that_alters_data_metadata_map_refuses(deck, monkeypa
     with pytest.raises(OfflineWriteRefused, match="PackageMetadata != intended"):
         _run(deck)
     assert _raw_members(deck) == before
-
-
-# ---------------------------------------------------------------- planned transform (Sol r4 Part 1, option i)
-
-
-def _masked_twins(mw=180.0, mh=80.0, angle=0.5, survivor_w=None):
-    """Slide 3 gains masked image twins 505 (hide) and 506 (survivor), same file, each
-    with a frame-sized mask at ``angle`` degrees. ``survivor_w`` resizes the survivor's
-    frame and mask width, as pass 1's width write would on a full-JXA slide."""
-    def mutate(members):
-        archs = []
-        for ident, x in ((505, 40), (506, 600)):
-            w = survivor_w if (ident == 506 and survivor_w) else mw
-            archs.append(_a(ident, "TSD.ImageArchive",
-                            {"data": {"identifier": 51}, "mask": {"identifier": ident + 10},
-                             "style": {"identifier": 900}, "super": _geom(x, 400, w, mh)},
-                            refs=[ident + 10, 900], data=[51]))
-            mask = _mask_super(0, 0, w, mh, angle=angle)
-            mask["super"]["parent"] = {"identifier": ident}
-            archs.append(_a(ident + 10, "TSD.MaskArchive", mask, refs=[ident]))
-        members[S3] = [_slide(103, [500, 501, 505, 506]), *_text(500, 510, "Stay"), _image(501, 54), *archs]
-    return mutate
-
-
-def _slide3_offline_items(path):
-    return {s["number"]: s["items"] for s in offline_wall_payload(path)["slides"]}[3]
-
-
-_MASKED_HIDES = {**HIDES, 3: [{"role": "hide", "kind": "image", "kindIndex": k} for k in (0, 1)]}
-
-
-def test_pre_hide_masked_size_write_excludes_the_twin_class_at_the_99_51_threshold(tmp_path):
-    """Raw 99.51 x 50 mask at 0.865 degrees: clean at source (residual ~0.748 px). The payload
-    width rounds to 100, so 200/100 = 2x predicts 1.497 px (still clean), but the real
-    200/99.51 scale crosses 1.5 px. On a full-JXA slide pass 1 writes that width before the
-    hide stage, so the class is pre-excluded without trusting any scaling model."""
-    path = _build(tmp_path / "m.key", mutate=_masked_twins(99.51, 50.0, 0.865))
-    items = _slide3_offline_items(path)
-    survivor = next(it for it in items if (it["kind"], it["kindIndex"]) == ("image", 2))
-    assert survivor["needsKeynote"] is None and survivor["w"] == 100
-    hides = {("image", 0), ("image", 1)}
-    full_jxa = {("image", 2): {"w": 200.0, "h": 50.0}}
-    assert pre_deferral_twin_risk(items, hides, None, planned=full_jxa) == {("image", 1)}
-
-
-def test_the_99_51_threshold_write_would_have_aborted_after_the_save(tmp_path):
-    """Backstop control: the saved deck with the survivor at width 200 flags rotated-masked,
-    so the writer refuses the slide unproven (a whole-run abort) -- why it is pre-excluded."""
-    source = _build(tmp_path / "src.key", mutate=_masked_twins(99.51, 50.0, 0.865))
-    saved = _build(tmp_path / "saved.key", mutate=_masked_twins(99.51, 50.0, 0.865, survivor_w=200.0))
-    res = _run(saved, _MASKED_HIDES, items={**_payload(source), 3: _slide3_offline_items(source)},
-               counts=deck_kind_counts(source))
-    assert res.slides[3].refused and "rotated-masked" in res.slides[3].reason
-    assert not res.slides[3].order_proven
-
-
-def test_masked_twin_without_a_pre_hide_write_stays_eligible(tmp_path):
-    """Offline slides suppress pass-1 geometry: no pre-hide write, so the source flags hold."""
-    path = _build(tmp_path / "m.key", mutate=_masked_twins())
-    items = _slide3_offline_items(path)
-    hides = {("image", 0), ("image", 1)}
-    assert pre_deferral_twin_risk(items, hides, None, planned={}) == set()
-    assert pre_deferral_twin_risk(items, hides, None, planned={("text", 0): {"w": 10, "h": 10}}) == set()
-    assert pre_deferral_twin_risk(items, hides, None) == set()
-    res = _run(path, _MASKED_HIDES, items={**_payload(path), 3: items})
-    assert not res.slides[3].refused, res.slides[3].reason
-
-
-def test_any_pre_hide_write_on_a_twin_class_member_excludes_it():
-    """Presence of a ``planned`` entry means a pre-hide write, whatever keys it holds
-    (line endpoints, group-child writes keyed to the group, or none at all)."""
-    def group(ki):
-        return {**_item("group", ki, w=100, h=40), "needsKeynote": None}
-
-    items = [group(0), group(1)]
-    gt = {0: "", 1: ""}
-    for entry in ({"w": 100, "h": 40}, {"x": 5}, {}):
-        assert pre_deferral_twin_risk(items, {("group", 0)}, gt, planned={("group", 1): entry}) == {("group", 0)}
-    assert pre_deferral_twin_risk(items, {("group", 0)}, gt, planned={}) == set()
-    assert pre_deferral_twin_risk(items, {("group", 0)}, gt, planned={("image", 0): {}}) == set()
-    lines = [{**_item("line", 0), "needsKeynote": None}, {**_item("line", 1), "needsKeynote": None}]
-    assert pre_deferral_twin_risk(lines, {("line", 0)}, None, planned={("line", 1): {"start": [0, 0]}}) == {("line", 0)}
-
-
-def test_survivor_moved_onto_the_hide_rectangle_is_pre_excluded(tmp_path):
-    """Pass 1 moves the survivor twin exactly onto the hide's source rectangle before the
-    hide stage: nothing tells them apart after the save, so the class is excluded up front."""
-    path, _h, _s = _twin_deck(tmp_path / "t.key", "text", surv_at=(600, 700))
-    items = _slide3_offline_items(path)
-    hide = next(it for it in items if (it["kind"], it["kindIndex"]) == ("text", 1))
-    onto_hide = {("text", 2): {k: hide[k] for k in ("x", "y", "w", "h")}}
-    assert pre_deferral_twin_risk(items, {("image", 0), ("text", 1)}, None, planned=onto_hide) == {("text", 1)}
-    assert pre_deferral_twin_risk(items, {("image", 0), ("text", 1)}, None, planned={}) == set()
-    moved, _h, _s = _twin_deck(tmp_path / "moved.key", "text", surv_at=(40, 400))
-    res = _run(moved, _twin_hides("text"), items={**_payload(path), 3: items}, counts=deck_kind_counts(path))
-    assert res.slides[3].refused and not res.slides[3].order_proven
 
 
 # ---------------------------------------------------------------- Sol r5 #2: nested attachment / comment / pencil refs
