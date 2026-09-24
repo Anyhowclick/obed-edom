@@ -222,6 +222,39 @@ contests were measured).
 - Evidence: `output/mm-shape-id/golden/` in the worktree holds the before/after captures and
   `zflags_*`.
 
+## 3b. Status 2026-09-24 23:15 (commits 4821f566 and the build-exclusion commit)
+- Owner decisions on 2026-09-24/25, after the FRC review:
+  - **(b) Overlap filter:** flag an inverted pair only when the straight-line morph boxes overlap at
+    some t, checked exactly per axis. Box-based, so the transparent areas of images count; this is
+    an accepted false-positive source (FRC 16→17: the yellow map vs the Klang label, owner saw no
+    snap).
+  - **Builds:** objects that build in on the destination, or build out on the source, never pair
+    (owner saw this live on 102→103). `movie-start` and Action builds don't exclude. Applied in
+    BOTH `mm.zorder_flip` and partner keeping.
+  - **Reviewer for this branch = Opus peer** (Codex quota is low).
+- Cuts reviewed live on `<main>/output/mm-shape-id/review/FRC_review.key` (a Keynote-made copy;
+  the FRC source sha1 was verified unchanged):
+  - 7→8 and 8→9: invisible inversions (badge vs map), removed by the filter.
+  - 16→17: pairing correct; the flags are box false positives.
+  - **84→85: a real snap, confirmed** (the shrinking map covers the badge).
+  - 102→103: explained by the build-ins.
+- FRC flags: 22 before → 53 with shapes → 15 with the overlap filter → **11** with the build
+  exclusion (16→17 ×6, 84→85 ×4, 130→131 ×1). Minimal Alpha and Gold: 0.
+- Golden plan: FRC is still `e621efe8…`, and the build exclusion doesn't change it (the 7 keeps on
+  slide 16 are the off-canvas dots). Gold is unchanged.
+- **Next:**
+  1. Review 130→131 ("Suntec New 2.png" vs "CHC").
+  2. Re-baseline the golden plan, and the propose/apply MM address list in
+     `test_propose_auto_rects_match_apply_transforms`.
+  3. Run the full suites (pytest, `test:ui`, `test:maps`).
+  4. Opus peer review.
+  5. Open the PR.
+  6. Afterwards, trash the review deck and `runs/`.
+- Open questions from the implementer:
+  - The partner row's `ambiguous` flag still counts objects excluded by builds.
+  - The build-out rule is unobserved live (FRC slide 147 only).
+  - One Action (blink) build on an MM slide still pairs.
+
 ## 4. Owner decisions (taken)
 
 - **D1 — the palette deck.** (a) The owner hand-authors one slide of ~16 styled shapes to a spec I
