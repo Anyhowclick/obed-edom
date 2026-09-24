@@ -40,25 +40,14 @@ Supersedes `pass1-hides-offline-2026-09-23.md` for this work. Plan and single so
 
 ## Next steps
 
-Status as of 2026-09-24 (a390efde): offline review COMPLETE. Opus O10 and Sol S10 both PASS, with no BLOCKER or MAJOR. The
-FRC dry run passes: 129 slides, 929 hides, 0 refused, 28.4 s at load ~7. Owner decisions 1–6 are in the plan. Items 1–2 below
-are done; the live gate is next.
+Status 2026-09-24: **DONE and ready for review.** The live gate is GREEN (record
+`.agents/reviews/pass1-hides-offline-2026-09-24/README.md`), owner decisions 1–7 are in the plan, `OBED_OFFLINE_HIDES` defaults to
+on, and one integration PR is open. Never merge it.
 
-1. DONE: FRC dry run after round 7 on a quiet machine.
-2. DONE: review to PASS (rounds S7–S10, O10).
-3. **Live gate** (`f-live-gate`, plan §Oracles O1–O4 and §Gate). This needs the owner's go or a peer's all-clear, because
-   Keynote is shared with the AK and GL-replay sessions. Add these to the plan's gate:
-   - Live-only checks:
-     - In a real AppleScript fallback session (force it with `OBED_DEBUG_HIDES_REFUSE=<eligible slide>`), `POSIX path of ((file of d) as alias)` works.
-     - The `do shell script` path check works.
-     - Close is confirmed.
-   - Owner playback of 2–3 Magic Move transitions into and out of hide-heavy slides on the B final deck (owner condition, decision 1).
-   - Keynote opens the patched deck with no repair prompt: Metadata/`Data/` removal has only offline precedent for additions.
-   - FIRST (Opus O10 #6): the B subset run in `verify` mode with `OBED_DEBUG_PASS1_SNAPSHOT`, then patch its `.pre-hides.key`
-     offline. Every earlier 0-refusal dry run used the source deck, not a Keynote-saved post-pass-1 deck.
-   - Interleaved A/B pairs: A,B then B,A, with `uptime` per run. Whole run ≥ 45 s faster; `runJxa` ≥ 60 s faster.
-4. After a GREEN gate: `g-flip-docs` (default on; README, SKILL.md §Offline writes, and the `pass1_profile.plan.md` todo),
-   one integration PR, never merge.
+- After merge: delete the raw review rounds in this worktree's git-ignored `output/pass1-hides-offline-review/` (owner rule), then
+  remove the worktrees `pass1-hides-offline-review-0930ce`, `pass1-hides-live-c37d924a` and `pass1-hides-gate-A`.
+- Follow-up (separate plan): `followup-mm-leftovers`. The planner's off-slide-leftover rule deletes Magic Move partners;
+  this is pre-existing on main.
 
 ## Implementer roster used
 
