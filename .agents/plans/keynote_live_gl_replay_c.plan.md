@@ -1,6 +1,6 @@
 # GL-replay option (c) — movie into the texture's inner instance sub-rect, plus G2 readback `probe(rect)`
 
-Status: **rev 1 (2026-09-23)**. rev 0 by the first planner (Opus EXTRA HIGH); rev 1 is the second planner's critique pass (Opus HIGH, §13). Owner accepted 2026-09-23 (§0, §11). Implementation started.
+Status: **rev 1 (2026-09-23)**. rev 0 by the first planner (Opus EXTRA HIGH); rev 1 is the second planner's critique pass (Opus HIGH, §13). Owner accepted 2026-09-23 (§0, §11). **Merged as #218 (2026-09-24).**
 Spec: `.agents/handovers/keynote-live-continuity-2026-09-23-g5.md` "Next" item 4. Parents: `keynote_live_gl_replay_arming.plan.md` §5, §10;
 `keynote_live_gl_replay_g5g6.plan.md` C8, D4, owner decision 4, R5; `.agents/reviews/gl-replay-g3/gates-r3.md`; `.agents/reviews/gl-replay-g5g6/gates-r1.md`.
 Cites are at `d56fb0dd` (branch `feat/gl-replay-c`). Abbreviations: G2 = `src/obed_edom/live_gl_replay_js.py`, core = `src/obed_edom/live_continuity_js.py`,
@@ -203,7 +203,7 @@ Every new check must read RED on its known-bad (KB) and 0 / identical control-vs
 - **G5:** P5-A ×3 plus 2 reps at 2560 (+N3), P5-H ×3, P5-F, P5-7, P5-L.
 - **G6:** P2 auto fast ×2 / slow / no-bridge (+N5) and A7′.
 - Then the full suites: `uv run pytest tests/ -n auto --dist loadfile`, `npm run test:ui`, `npm run test:maps`.
-- The record goes in `.agents/reviews/gl-replay-c/gates-r1.md`.
+- The record goes in `.agents/reviews/gl-replay-c/gates-r2.md` (r1 superseded, pruned after merge).
 
 **Reused, not re-run.**
 - G-0 baseline = `output/gates-g5g6/{g0,r3}` (F10: runtime bytes identical to `d56fb0dd`).
