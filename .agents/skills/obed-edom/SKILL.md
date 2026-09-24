@@ -277,6 +277,10 @@ flip is flagged only if the boxes overlap at some moment of the straight-line mo
 
 * Both slides of the pair must be planned: inside `--slides` and not skipped. An
   out-of-range or skipped neighbour keeps today's hide.
+* Magic Move never pairs an object that builds in on the destination slide or builds
+  out on the source slide (live FRC 102→103; a movie's `apple:movie-start` is not a
+  build-in). `attach_magic_move` lists them per slide as `mmBuildIn`/`mmBuildOut`; for
+  each pair both the partner search and `mm.zorder_flip` ignore them on that side.
 * The kept object takes its own slide's affine. If that lands on the CG canvas or
   within 24pt of it, it is pushed just past the CG edge it was beyond on the wall.
 * A repeated identity class is kept whole and reported `ambiguous`: a wrong hide breaks

@@ -3876,6 +3876,10 @@ def _mm_keys(slide: dict) -> dict[tuple[str, int], str]:
     }
 
 
+def _mm_built(slide: dict, field: str) -> set[tuple[str, int]]:
+    return {(str(kind), int(ki)) for kind, ki in slide.get(field) or []}
+
+
 def _keep_mm_partners(
     transforms: list[ItemTransform],
     payload: dict[str, Any],
@@ -3883,7 +3887,8 @@ def _keep_mm_partners(
     wall_size: tuple[float, float],
     child_resize_report: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
-    """Turn off-slide hides with a surviving Magic Move partner into off-canvas keeps, in place."""
+    """Turn off-slide hides with a surviving Magic Move partner into off-canvas keeps, in place.
+    Neither side of a pair counts when it builds out of the source or into the destination."""
     wall_w, wall_h = wall_size
     slides = {
         _slide_number(s): s
@@ -3898,9 +3903,11 @@ def _keep_mm_partners(
     if not neighbours:
         return []
     keys = {n: _mm_keys(slides[n]) for n in neighbours}
+    built_in = {n: _mm_built(slides[n], "mmBuildIn") for n in neighbours}
+    built_out = {n: _mm_built(slides[n], "mmBuildOut") for n in neighbours}
     hidden = {(t.slide_number, t.kind, t.kind_index) for t in transforms if t.role == "hide"}
     items: dict[int, dict[tuple[str, int], dict]] = {}
-    survivors: dict[int, dict[str, list[int]]] = {}
+    survivors: dict[int, dict[str, list[tuple[str, int]]]] = {}
     for n in neighbours:
         items[n] = {}
         survivors[n] = {}
@@ -3916,7 +3923,7 @@ def _keep_mm_partners(
                 or (n, kind, ki) in hidden
             ):
                 continue
-            survivors[n].setdefault(key, []).append(ki)
+            survivors[n].setdefault(key, []).append((kind, ki))
     rows: list[dict[str, Any]] = []
     for pos, spec in enumerate(transforms):
         a = spec.slide_number
@@ -3930,7 +3937,9 @@ def _keep_mm_partners(
         partners = [
             {"slide": b, "kindIndex": ki}
             for b in neighbours[a]
-            for ki in survivors[b].get(key, [])
+            if ident not in (built_out[a] if b == a + 1 else built_in[a])
+            for kind, ki in survivors[b].get(key, [])
+            if (kind, ki) not in (built_in[b] if b == a + 1 else built_out[b])
         ]
         if not partners:
             continue

@@ -787,14 +787,18 @@ def attach_magic_move(key_path: str | Path, payload: dict, *, deck: Any = None) 
     Magic Move, and slide['mmKeys'] = {kind: {kindIndex: key}} plus slide['mmOrder'] ([kind, kindIndex]
     addresses back→front, one per keyable drawable) on both slides of each such pair. Keyed shapes and lines
     also get slide['mmPrefs'] = {kind: {kindIndex: [stroke+opacity, raw path, style id]}} (``_mm_prefs``).
-    All-or-nothing: prior fields are cleared first and written only after every slide is keyed. Read-only;
-    transitions come from iwa_builds.deck_builds."""
+    Keyed addresses whose drawable builds in / out (``_appearance_builds``) are listed in slide['mmBuildIn'] /
+    slide['mmBuildOut']; Magic Move pairs neither as a destination / source. All-or-nothing: prior fields are
+    cleared first and written only after every slide is keyed. Read-only; transitions and builds come from
+    iwa_builds.deck_builds."""
     slides = payload.get("slides") or []
     for slide in slides:
         slide.pop("magicMoveOut", None)
         slide.pop("mmKeys", None)
         slide.pop("mmOrder", None)
         slide.pop("mmPrefs", None)
+        slide.pop("mmBuildIn", None)
+        slide.pop("mmBuildOut", None)
     from obed_edom.iwa_builds import deck_builds  # noqa: PLC0415
     from obed_edom.iwa_kindindex import derive_kind_index  # noqa: PLC0415
 
@@ -805,7 +809,7 @@ def attach_magic_move(key_path: str | Path, payload: dict, *, deck: Any = None) 
     paired = mm_out | {idx + 1 for idx in mm_out}
     order = slide_order(objects)
     digests = _data_digests(objects)
-    staged: list[tuple[dict, bool, dict[str, dict[int, str]], list[list], dict[str, dict[int, list[str]]]]] = []
+    staged: list[tuple[dict, bool, dict[str, dict[int, str]], list[list], dict[str, dict[int, list[str]]], dict]] = []
     for slide in slides:
         idx = slide.get("index")
         if idx is None:
@@ -813,13 +817,16 @@ def attach_magic_move(key_path: str | Path, payload: dict, *, deck: Any = None) 
         keys: dict[str, dict[int, str]] = {}
         stacked: dict[int, list] = {}
         prefs: dict[str, dict[int, list[str]]] = {}
+        built: dict[str, list[list]] = {}
         slide_archive = objects.get(order[idx][0]) if idx in paired and 0 <= idx < len(order) else None
         if slide_archive is not None:
             z_pos = {
                 str(ref.get("identifier")): pos
                 for pos, ref in enumerate(slide_archive.get("drawablesZOrder") or [])
             }
-            for rec in derive_kind_index(slide_archive, objects):
+            records = derive_kind_index(slide_archive, objects)
+            build_ids = _appearance_builds((by_number.get(idx + 1) or {}).get("builds") or [], records)
+            for rec in records:
                 key = _mm_identity(rec, objects, digests)
                 if key is not None:
                     keys.setdefault(rec["kind"], {})[int(rec["kindIndex"])] = key
@@ -828,8 +835,11 @@ def attach_magic_move(key_path: str | Path, payload: dict, *, deck: Any = None) 
                         prefs.setdefault(rec["kind"], {})[int(rec["kindIndex"])] = _mm_prefs(
                             objects[str(rec["id"])], objects
                         )
-        staged.append((slide, idx in mm_out, keys, [stacked[pos] for pos in sorted(stacked)], prefs))
-    for slide, out, keys, mm_order, prefs in staged:
+                    for field, ids in build_ids.items():
+                        if rec["id"] in ids:
+                            built.setdefault(field, []).append([rec["kind"], int(rec["kindIndex"])])
+        staged.append((slide, idx in mm_out, keys, [stacked[pos] for pos in sorted(stacked)], prefs, built))
+    for slide, out, keys, mm_order, prefs, built in staged:
         if out:
             slide["magicMoveOut"] = True
         if keys:
@@ -837,6 +847,21 @@ def attach_magic_move(key_path: str | Path, payload: dict, *, deck: Any = None) 
             slide["mmOrder"] = mm_order
         if prefs:
             slide["mmPrefs"] = prefs
+        slide.update(built)
+
+
+def _appearance_builds(builds: list[dict], records: list[dict]) -> dict[str, set[str]]:
+    """Drawable ids with a build-in / build-out, as {"mmBuildIn": ids, "mmBuildOut": ids}. A movie's
+    ``apple:movie-start`` only plays it and actions only animate it, so neither counts."""
+    ids = {(rec["kind"], int(rec["kindIndex"])): rec["id"] for rec in records}
+    out: dict[str, set[str]] = {"mmBuildIn": set(), "mmBuildOut": set()}
+    for build in builds:
+        field = {"In": "mmBuildIn", "Out": "mmBuildOut"}.get(build.get("animationType"))
+        drawable = ids.get((build.get("kind"), int(build.get("kindIndex"))))
+        if field is None or drawable is None or build.get("effect") == "apple:movie-start":
+            continue
+        out[field].add(drawable)
+    return out
 
 
 def attach_magic_move_if_available(key_path: str | Path, payload: dict) -> None:

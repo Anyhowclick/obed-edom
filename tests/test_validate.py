@@ -745,6 +745,64 @@ def test_mm_minimal_alpha_fixture_like_pairs_black_and_green_by_tier1():
     assert _matches(before, after) == [(("shape", 0), ("shape", 0)), (("shape", 1), ("shape", 4))]
 
 
+def _built(slide, field, addresses):
+    slide[field] = [list(a) for a in addresses]
+    return slide
+
+
+def test_mm_destination_that_builds_in_is_not_paired():
+    # Live FRC 102→103 (owner, 2026-09-24): an object that builds in on slide N+1 is
+    # off screen at the cut, so Magic Move never pairs it; the source fades out.
+    before = _mm_slide(1, [_TITLE, _SMALL], out=True)
+    after = _built(_mm_slide(2, [_SMALL, _TITLE]), "mmBuildIn", [("text", 0)])
+    from obed_edom.validate import _mm_matches
+
+    assert _mm_matches(before, after) == [(("movie", 0), ("movie", 0))]
+    assert _zorder(_mm_payload(before, after)) == []
+
+
+def test_mm_source_that_builds_out_is_not_paired():
+    # Owner-approved by the same logic: an object that builds out on slide N has left
+    # before the cut and does not pair either.
+    before = _built(_mm_slide(1, [_TITLE, _SMALL], out=True), "mmBuildOut", [("movie", 0)])
+    after = _mm_slide(2, [_SMALL, _TITLE])
+    from obed_edom.validate import _mm_matches
+
+    assert _mm_matches(before, after) == [(("text", 0), ("text", 0))]
+    assert _zorder(_mm_payload(before, after)) == []
+
+
+def test_mm_build_exclusion_is_per_side_of_the_pair():
+    # mmBuildIn on the SOURCE slide and mmBuildOut on the DESTINATION slide belong to
+    # the neighbouring pairs, not this one: both objects still pair and flip.
+    before = _built(_mm_slide(1, [_TITLE, _SMALL], out=True), "mmBuildIn", [("text", 0), ("movie", 0)])
+    after = _built(_mm_slide(2, [_SMALL, _TITLE]), "mmBuildOut", [("text", 0), ("movie", 0)])
+    assert len(_zorder(_mm_payload(before, after))) == 1
+
+
+def test_mm_build_in_removes_a_competitor_and_changes_the_pairing():
+    # Two identical shapes on slide 2: the near one (ki 0) would win on distance, but
+    # it builds in, so the far one (ki 1) is the only candidate left and pairs.
+    from obed_edom.validate import _mm_matches
+
+    before = _mm_slide(1, [(_SHAPE, (100, 400, 150))], out=True)
+    after = _mm_slide(2, [(_SHAPE, (150, 400, 150)), (_SHAPE, (1500, 400, 150))])
+    assert _mm_matches(before, after) == [(("shape", 0), ("shape", 0))]
+    assert _mm_matches(before, _built(after, "mmBuildIn", [("shape", 0)])) == [(("shape", 0), ("shape", 1))]
+
+
+def test_mm_build_addresses_survive_a_json_round_trip():
+    import json
+
+    from obed_edom.validate import _mm_matches
+
+    payload = json.loads(json.dumps(_mm_payload(
+        _mm_slide(1, [(_SHAPE, (100, 400, 150))], out=True),
+        _built(_mm_slide(2, [(_SHAPE, (150, 400, 150)), (_SHAPE, (1500, 400, 150))]), "mmBuildIn", [("shape", 0)]),
+    )))
+    assert _mm_matches(*payload["slides"]) == [(("shape", 0), ("shape", 1))]
+
+
 def test_mm_prefs_survive_a_json_round_trip():
     # mmKeys/mmPrefs kindIndex become strings after JSON; the tier1 case still resolves.
     import json
@@ -780,6 +838,9 @@ def test_mm_real_minimal_alpha_pairs_black_and_green_like_keynote():
     matches = _mm_matches(slides[1], slides[2])
     assert (("shape", 0), ("shape", 0)) in matches
     assert (("shape", 1), ("shape", 4)) in matches
+    # The theme yellow/red/pink squares (slide 2 ki 1–3) build in: never paired.
+    assert slides[2]["mmBuildIn"] == [["shape", 1], ["shape", 2], ["shape", 3]]
+    assert not {after for _, after in matches} & {("shape", 1), ("shape", 2), ("shape", 3)}
 
 
 # The live Keynote experiment geometries (gen.py `V`): squares (x, y, side) of one

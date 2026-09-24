@@ -1998,6 +1998,98 @@ def test_attach_magic_move_replaces_stale_fields_from_a_prior_annotation(tmp_pat
     ]
 
 
+def _add_builds(deck, slide_index, builds):
+    """``builds``: [(drawable id, animationType, effect)] added to ``slide{slide_index}``."""
+    objects = deck[0]
+    refs = objects[f"slide{slide_index}"].setdefault("builds", [])
+    for drawable, animation_type, effect in builds:
+        bid = f"b{slide_index}_{len(refs)}"
+        objects[bid] = {
+            "_pbtype": "KN.BuildArchive",
+            "drawable": {"identifier": drawable},
+            "attributes": {"animationAttributes": {"animationType": animation_type, "effect": effect}},
+        }
+        refs.append({"identifier": bid})
+
+
+def _build_deck():
+    # Pair 0→1 and pair 1→2: slide 1 is the destination of one and the source of the next.
+    # Slide 1: text t1 builds in, movie m0 only has movie-start, image i0 has an action and
+    # builds out, the bare (unkeyed) shape 0 and triangle p0 (shape 1) build in.
+    extra = {
+        "t0": _text_box("s0"), "s0": _storage("A"),
+        "t1": _text_box("s1"), "s1": _storage("B"),
+        "m0": {"_pbtype": "TSD.MovieArchive", "movieData": {"identifier": "dm"}},
+        "i0": {"_pbtype": "TSD.ImageArchive", "data": {"identifier": "di"}},
+        "p0": _triangle(1.0),
+        "bare": {"_pbtype": "TSWP.ShapeInfoArchive"},
+    }
+    datas = [{"identifier": "dm", "digest": "MOV="}, {"identifier": "di", "digest": "IMG="}]
+    deck = _mm_deck(
+        [
+            (_transition(_MM_EFFECT), ["t0"]),
+            (_transition(_MM_EFFECT), ["t1", "m0", "i0", "bare", "p0"]),
+            (None, ["t0"]),
+            (None, ["t0"]),
+        ],
+        extra,
+        datas,
+    )
+    _add_builds(deck, 0, [("t0", "In", "apple:dissolve")])
+    _add_builds(deck, 1, [
+        ("t1", "In", "apple:dissolve"),
+        ("m0", "In", "apple:movie-start"),
+        ("i0", "Action", "apple:action-pop"),
+        ("i0", "Out", "apple:dissolve"),
+        ("p0", "In", "apple:zoom"),
+        ("bare", "In", "apple:dissolve"),
+    ])
+    _add_builds(deck, 3, [("t0", "Out", "apple:dissolve")])
+    return deck
+
+
+def test_attach_magic_move_lists_build_in_and_build_out_addresses(tmp_path):
+    # Appearance builds only: movie-start (plays the movie) and actions do not exclude.
+    # Slide 0's build-in and slide 3's build-out are written as well (slide 0 is in a
+    # pair); slide 3 is outside every pair, so nothing. Unkeyed drawables are not listed.
+    slides = _attach(tmp_path, _build_deck(), range(4))
+    assert slides[0]["mmBuildIn"] == [["text", 0]] and "mmBuildOut" not in slides[0]
+    assert slides[1]["mmBuildIn"] == [["text", 0], ["shape", 1]]
+    assert slides[1]["mmBuildOut"] == [["image", 0]]
+    assert slides[1]["mmKeys"]["movie"] == {0: "movie:MOV="}
+    assert "mmBuildIn" not in slides[2] and "mmBuildOut" not in slides[2]
+    assert "mmBuildOut" not in slides[3] and "mmKeys" not in slides[3]
+
+
+def test_attach_magic_move_build_addresses_are_cleared_and_round_trip(tmp_path):
+    import json  # noqa: PLC0415
+
+    payload = {"slides": [{"index": i, "items": []} for i in range(4)]}
+    payload["slides"][2]["mmBuildIn"] = [["text", 0]]
+    payload["slides"][3]["mmBuildOut"] = [["text", 0]]
+    iwa.attach_magic_move(_empty_key(tmp_path), payload, deck=_build_deck())
+    assert "mmBuildIn" not in payload["slides"][2] and "mmBuildOut" not in payload["slides"][3]
+    loaded = json.loads(json.dumps(payload))
+    assert [s.get("mmBuildIn") for s in loaded["slides"]] == [s.get("mmBuildIn") for s in payload["slides"]]
+    assert [s.get("mmBuildOut") for s in loaded["slides"]] == [s.get("mmBuildOut") for s in payload["slides"]]
+
+
+def test_attach_magic_move_build_addresses_follow_a_dual_text_shape(tmp_path):
+    # A custom-path text box is one drawable with two records; the build addresses its
+    # first membership (text). mmBuildIn lists the keyed address, the same one mmKeys uses.
+    extra = {
+        "t1": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "s1"},
+            "super": {"pathsource": {"editableBezierPathSource": {"naturalSize": {"width": 5.0, "height": 5.0}}}},
+        },
+        "s1": _storage("Pill"),
+    }
+    deck = _mm_deck([(_transition(_MM_EFFECT), []), (None, ["t1"])], extra)
+    _add_builds(deck, 1, [("t1", "In", "apple:dissolve")])
+    slide = _attach(tmp_path, deck, range(2))[1]
+    assert slide["mmBuildIn"] == [["text", 0]]
+
+
 def test_attach_magic_move_order_is_back_to_front_across_kinds(tmp_path):
     # mmKeys buckets by kind (text before shape before movie), so it cannot say which
     # object sits on top. mmOrder lists [kind, kindIndex] addresses in drawablesZOrder

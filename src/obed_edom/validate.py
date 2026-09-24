@@ -881,13 +881,16 @@ def _mm_labels(slide: dict, addresses: list[_Address]) -> dict[_Address, str]:
         labels = {a: label if counts[label] == 1 else f"{label} ({tags[a]})" for a, label in labels.items()}
 
 
-def _mm_classes(slide: dict) -> dict[str, list[_Address]]:
-    """{key: addresses back→front} from mmOrder + mmKeys (kindIndex may be a JSON string)."""
+def _mm_classes(slide: dict, built: str) -> dict[str, list[_Address]]:
+    """{key: addresses back→front} from mmOrder + mmKeys (kindIndex may be a JSON string),
+    leaving out the addresses listed in slide[built]."""
     keys = {
         (str(kind), int(ki)): str(key)
         for kind, by_index in (slide.get("mmKeys") or {}).items()
         for ki, key in (by_index or {}).items()
     }
+    for kind, ki in slide.get(built) or []:
+        keys.pop((str(kind), int(ki)), None)
     classes: dict[str, list[_Address]] = {}
     for kind, ki in slide.get("mmOrder") or []:
         key = keys.get((str(kind), int(ki)))
@@ -982,9 +985,10 @@ def _mm_nearest(
 
 
 def _mm_matches(slide: dict, after: dict) -> list[tuple[_Address, _Address]]:
-    """Drawables Magic Move pairs across the cut: a key unique on both sides pairs
-    directly, a repeated media/shape/line key by `_mm_nearest`; other repeats are skipped."""
-    before_classes, after_classes = _mm_classes(slide), _mm_classes(after)
+    """Drawables Magic Move pairs across the cut, ignoring sources that build out and
+    destinations that build in: a key unique on both sides pairs directly, a repeated
+    media/shape/line key by `_mm_nearest`; other repeats are skipped."""
+    before_classes, after_classes = _mm_classes(slide, "mmBuildOut"), _mm_classes(after, "mmBuildIn")
     before_items, after_items = _mm_items(slide), _mm_items(after)
     before_prefs, after_prefs = _mm_prefs(slide), _mm_prefs(after)
     matches: list[tuple[_Address, _Address]] = []
