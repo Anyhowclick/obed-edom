@@ -3288,24 +3288,19 @@ console.log(JSON.stringify({
     }, result["module"]
 
 
-def test_the_real_core_and_module_install_with_the_p2_loop_runtime(monkeypatch):
+def test_the_real_core_and_module_install_with_the_p2_loop_runtime():
     """Loopmode plan L0-d: the looping deck's runtime carries a top-level `loops` annex that
     neither JS module reads. Installed as-is on the real core and the real module, the core
     must still come up ready and arm the zone, and the module must not stand down on
     `planUnreadable`; the Python validator must accept its glReplay entry too."""
-    from test_live_continuity import (
-        P2_LOOP_GL_REPLAY_PLAN_SHA256,
-        SLIDES,
-        _loop_tree,
-        _recorded_runtime,
-        _resolver,
-    )
+    from test_live_continuity import P2_LOOP_GL_REPLAY_PLAN_SHA256, SLIDES, _loop_tree, _resolver
     from test_live_continuity_js import _IDENTITY_STAGE, _run_full_core_in_node
 
     from obed_edom.live_continuity import derive_plan, plan_signature
 
     plan = derive_plan(_loop_tree(), SLIDES, resolver=_resolver, gl_replay=True)
-    _, runtime = _recorded_runtime(monkeypatch, plan)
+    runtime = plan.to_runtime()
+    assert isinstance(runtime, dict)
     assert plan_signature(runtime) == P2_LOOP_GL_REPLAY_PLAN_SHA256
     assert len(runtime["loops"]) == 5
 

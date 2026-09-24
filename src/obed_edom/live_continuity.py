@@ -628,6 +628,8 @@ QUALIFIED_PLAN_SHA256: frozenset[str] = frozenset(
     {
         "bafe26cad55cf3a390154bce2c0fdcc771b9b1821293b6aec76119d25180e81e",
         "6a0596da54532493aee74d22fe91b7cbf3628795aca586dd3cf7dc61a37cc635",
+        "3dc6755853692a178696a35495c1929662005a8173f932607855876bfc299c5d",
+        "2ba6fbed8fc959c804e53d2f21712945230eac6dcbf90d522fe3a6a688bef924",
     }
 )
 

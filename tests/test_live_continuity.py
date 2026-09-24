@@ -3166,8 +3166,8 @@ P2_LOOP_LOOPS = [
     {"scene": 8, "asset": "untitled.mov", "rect": {"x": 327, "y": 709, "w": 1266, "h": 356}},
 ]
 
-# Pinned here until the gate commit (plan section 2.5) appends them to QUALIFIED_PLAN_SHA256.
-# They match the plan's F5 values, computed independently by the planner.
+# Qualified by gates L1/L2/L4/L5 on `output/p2-loop` (plan section 2.5). They match the plan's
+# F5 values, computed independently by the planner.
 P2_LOOP_PLAN_SHA256 = "3dc6755853692a178696a35495c1929662005a8173f932607855876bfc299c5d"
 P2_LOOP_GL_REPLAY_PLAN_SHA256 = "2ba6fbed8fc959c804e53d2f21712945230eac6dcbf90d522fe3a6a688bef924"
 
@@ -3236,10 +3236,10 @@ def test_non_looping_p2_fixture_is_byte_identical_and_has_no_loop_annex():
         assert "loop" not in plan.to_json().lower()
 
 
-def test_p2_loop_derives_the_p2_plan_plus_the_loop_annex(monkeypatch):
+def test_p2_loop_derives_the_p2_plan_plus_the_loop_annex():
     """L0-d: every `untitled.mov` instance loops, so every Magic Move agrees -- the plan, its
-    refusals and `as_dict()` are P2's exactly; only the runtime grows `loops`, which moves the
-    signature off the allowlist until the gates qualify it."""
+    refusals and `as_dict()` are P2's exactly; only the runtime grows `loops`, which signs it
+    as its own allowlist entry, distinct from P2's."""
     from obed_edom import live_continuity
 
     tree = _loop_tree()
@@ -3262,15 +3262,15 @@ def test_p2_loop_derives_the_p2_plan_plus_the_loop_annex(monkeypatch):
     assert "vid-20250608-wa0125.mp4" in plan.slide_instances[2]
     assert set(plan.loop_instances[2]) == {"untitled.mov"}
 
-    result, runtime = _recorded_runtime(monkeypatch, plan)
-    assert result == Unsupported(NOT_YET_QUALIFIED)
+    runtime = plan.to_runtime()
     assert runtime == {**EXPECTED_RUNTIME_PLAN, "loops": P2_LOOP_LOOPS}
     assert list(runtime) == ["movies", "boundaries", "loops"]
     assert live_continuity.plan_signature(runtime) == P2_LOOP_PLAN_SHA256
-    assert P2_LOOP_PLAN_SHA256 not in live_continuity.QUALIFIED_PLAN_SHA256
+    assert P2_LOOP_PLAN_SHA256 in live_continuity.QUALIFIED_PLAN_SHA256
+    assert P2_LOOP_PLAN_SHA256 != EXPECTED_PLAN_SHA256
 
 
-def test_p2_loop_flag_on_arms_gl_replay_and_signs_its_own_sha(monkeypatch):
+def test_p2_loop_flag_on_arms_gl_replay_and_signs_its_own_sha():
     """Arming rules 1-5 are unchanged (plan section 2.3): a looping pair that agrees arms
     like any other, and the annex keeps its sha apart from P2's `6a0596da...`."""
     from obed_edom import live_continuity
@@ -3283,13 +3283,13 @@ def test_p2_loop_flag_on_arms_gl_replay_and_signs_its_own_sha(monkeypatch):
     assert plan.refusals == baseline.refusals
     assert plan.refusals[0]["glReplay"] is True
 
-    result, runtime = _recorded_runtime(monkeypatch, plan)
-    assert result == Unsupported(NOT_YET_QUALIFIED)
+    runtime = plan.to_runtime()
     baseline_runtime = baseline.to_runtime()
     assert isinstance(baseline_runtime, dict)
     assert runtime == {**baseline_runtime, "loops": P2_LOOP_LOOPS}
     assert live_continuity.plan_signature(runtime) == P2_LOOP_GL_REPLAY_PLAN_SHA256
-    assert P2_LOOP_GL_REPLAY_PLAN_SHA256 not in live_continuity.QUALIFIED_PLAN_SHA256
+    assert P2_LOOP_GL_REPLAY_PLAN_SHA256 in live_continuity.QUALIFIED_PLAN_SHA256
+    assert P2_LOOP_GL_REPLAY_PLAN_SHA256 != GL_REPLAY_RUNTIME_PLAN_SHA256
 
 
 def test_p2_loop_splice_leaves_wa0125_and_every_other_key_alone():
@@ -3309,7 +3309,7 @@ def test_p2_loop_splice_leaves_wa0125_and_every_other_key_alone():
 
 
 @pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")
-def test_real_p2_export_spliced_the_same_way_signs_the_same_two_shas(tmp_path, monkeypatch):
+def test_real_p2_export_spliced_the_same_way_signs_the_same_two_shas(tmp_path):
     """The trimmed fixture spliced must stand for the real export spliced (what
     `scripts/loop_fixture.py` builds `output/p2-loop` from): same runtime, same shas."""
     import shutil
@@ -3327,7 +3327,9 @@ def test_real_p2_export_spliced_the_same_way_signs_the_same_two_shas(tmp_path, m
         fixture = derive_plan(_loop_tree(), SLIDES, resolver=_resolver, gl_replay=flag)
         assert isinstance(real, ContinuityPlan)
         assert isinstance(fixture, ContinuityPlan)
-        _, real_runtime = _recorded_runtime(monkeypatch, real)
+        real_runtime = real.to_runtime()
+        assert isinstance(real_runtime, dict)
+        assert real_runtime == fixture.to_runtime()
         assert live_continuity.plan_signature(real_runtime) == sha
         assert real.refusals == fixture.refusals
 
@@ -3370,7 +3372,8 @@ def test_a_looping_movie_no_boundary_carries_is_still_in_the_annex(monkeypatch):
     plan = derive_plan(_loop_tree(P2_LOOP_OBJECT_IDS + (P2_WA0125_OBJECT_ID,)), SLIDES, resolver=_resolver)
     assert isinstance(plan, ContinuityPlan)
     assert plan.refusals == _plan().refusals
-    _, runtime = _recorded_runtime(monkeypatch, plan)
+    result, runtime = _recorded_runtime(monkeypatch, plan)
+    assert result == Unsupported(NOT_YET_QUALIFIED)
     wa0125 = [entry for entry in runtime["loops"] if entry["asset"] != "untitled.mov"]
     assert wa0125 == [
         {"scene": 6, "asset": "vid-20250608-wa0125.mp4", "rect": wa0125[0]["rect"]},
