@@ -1,6 +1,6 @@
 """Decode a lossless OBS recording of the managed-OBS `rec` session into per-phase cadence.
 
-Per output frame: the phase from the 24 px corner marker, and the burnt-in movie counter
+Per output frame: the phase from the 24 px corner marker (grey or anything else = unmeasured), and the burnt-in movie counter
 (grey = round(N * 255/219 + c), N mod 220) from the fixture's index patch. The patch ROI is
 searched per phase (slide 1's native movie sits a few px off), the grey offset c is fitted
 over every decoded frame, and `rawRepeatFrac` (raw grey unchanged) is reported independently
@@ -27,10 +27,8 @@ from p2_recovery_html_adversarial import INDEX_PATCH_ROI, _decode_index_patch  #
 
 PHASES: dict[str, tuple[int, int, int]] = {
     "slide1-native": (255, 0, 0),
-    "slide2-live": (0, 255, 0),
-    "slide2-paused": (0, 0, 255),
-    "slide2-resumed": (255, 255, 0),
-    "slide2-afterBuild": (255, 0, 255),
+    "slide1-paused": (0, 0, 255),
+    "slide1-resumed": (255, 255, 0),
 }
 MARK_BOX = (4, 20)
 MARK_MAX_DIST = 40.0

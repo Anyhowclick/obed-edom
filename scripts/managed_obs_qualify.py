@@ -4,9 +4,10 @@ Each take: product `ManagedObs` (scratch home, lossless recording profile) -> we
 the `rec` session on the P2 fixture through `LiveOutputHost` attached to the engine's page ->
 StopRecord -> clean quit -> `obs_cadence_decode` -> assertions -> `<out>/runs/<arm>-<ts>.json`.
 
-Phases (24 px corner marker): slide1-native 6 s red, advance, slide2-live 8 s green, paused 3 s blue
-(every playing <video> paused: the null control), resumed 4 s yellow, advance (build 1), afterBuild
-6 s magenta. GL replay is refused under attach, so every phase measures native playback.
+Measured phases, all on slide 1 (24 px corner marker): slide1-native 8 s red, slide1-paused 3 s blue
+(every playing <video> paused: the null control), slide1-resumed 4 s yellow. The marker then turns
+neutral grey (unmeasured) before the smoke walk: advance to slide 2, advance (build 1), report-only.
+GL replay is refused under attach, so slide 2 shows the export's poster, not the movie.
 
 Arms: 2x (source = 2 x canvas, the product setting) and positive (source = canvas, the positive
 control). Cadence is asserted at rate 25 and report-only at 30; lifecycle and validity always.
@@ -55,8 +56,9 @@ KEYER = "off"
 READY_TIMEOUT_S = 40.0
 QUIT_TIMEOUT_S = 20.0
 
-NATIVE_PHASES = ("slide1-native", "slide2-live")
-NULL_PHASE = "slide2-paused"
+NATIVE_PHASES = ("slide1-native",)
+NULL_PHASE = "slide1-paused"
+UNMEASURED_MARK = "#808080"
 LIMITS = {"nativeRepeatMax2x": 0.15, "decodableMin": 0.9, "nullRepeatMin": 0.95, "nativeRepeatMinPositive": 0.18}
 
 MARK_JS = ("(function(c){var m=document.getElementById('obs-mark'); if(!m){m=document.createElement('div'); m.id='obs-mark';"
@@ -158,18 +160,13 @@ def rec_session(endpoint: str, target_id: str, rate: int, tag: str) -> dict[str,
         host.execute("show")
         time.sleep(1.2)
         out["viewport"] = ev("[window.innerWidth, window.innerHeight, window.devicePixelRatio]")
-        phase("slide1-native", "#ff0000", 6)
-        host.execute("advance")
-        wait_for_settlement(host, timeout_s=30.0)
-        time.sleep(0.8)
-        phase("slide2-live", "#00ff00", 8)
+        phase("slide1-native", "#ff0000", 8)
         out["pausedVideos"] = ev(PAUSE_JS)
-        phase("slide2-paused", "#0000ff", 3)
+        phase("slide1-paused", "#0000ff", 3)
         out["resumedVideos"] = ev(RESUME_JS)
-        phase("slide2-resumed", "#ffff00", 4)
-        host.execute("advance")
-        wait_for_settlement(host, timeout_s=30.0)
-        phase("slide2-afterBuild", "#ff00ff", 6)
+        phase("slide1-resumed", "#ffff00", 4)
+        ev(MARK_JS % UNMEASURED_MARK)
+        out["smoke"] = smoke_walk(host, ev)
     except Exception:
         out["fatal"] = traceback.format_exc()[-3000:]
         print(out["fatal"], flush=True)
@@ -179,6 +176,23 @@ def rec_session(endpoint: str, target_id: str, rate: int, tag: str) -> dict[str,
         finally:
             shutil.rmtree(dest.parent, ignore_errors=True)
     return out
+
+
+def smoke_walk(host: LiveOutputHost, ev: Any) -> list[dict[str, Any]]:
+    """Advance to slide 2 and through build 1; report-only, nothing here is measured."""
+    steps = []
+    for name in ("advance to slide 2", "advance build 1"):
+        try:
+            host.execute("advance")
+            observed, seconds = wait_for_settlement(host, timeout_s=30.0)
+            steps.append({"step": name, "ok": True, "settleS": round(seconds, 2), "hash": ev("String(location.hash)"),
+                          "observed": observed})
+        except Exception:
+            steps.append({"step": name, "ok": False, "error": traceback.format_exc()[-1500:]})
+            break
+        time.sleep(1.0)
+    print("    smoke " + ", ".join(f"{s['step']}: {'ok' if s['ok'] else 'FAIL'}" for s in steps), flush=True)
+    return steps
 
 
 def cadence_checks(arm: str, decode: dict[str, Any]) -> list[dict[str, Any]]:
@@ -262,6 +276,9 @@ def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, keep_rec
     run["sleepEvents"] = sleep_events(started, ended)
     run["valid"] = not run["sleepEvents"]
     life = run["lifecycle"]
+    smoke = (run.get("session") or {}).get("smoke") or []
+    run["checks"].append({"check": "slide 2 smoke walk", "value": [s["step"] for s in smoke if s["ok"]],
+                          "limit": "2 steps ok", "ok": len(smoke) == 2 and all(s["ok"] for s in smoke), "enforced": False})
     seeded = (run.get("sourceSettings") or {}).get("fps")
     run["checks"].append({"check": "browser source fps", "value": seeded, "limit": f"== {source}", "ok": seeded == source, "enforced": True})
     for name, ok in (("session ran", "fatal" not in run and "fatal" not in (run.get("session") or {})),
@@ -339,7 +356,7 @@ def main(argv: list[str] | None = None) -> int:
         top_2x = max((v for v in by_arm["2x"] if v is not None), default=None)
         low_pos = min((v for v in by_arm["positive"] if v is not None), default=None)
         ok = top_2x is not None and low_pos is not None and low_pos > top_2x
-        checks.append({"check": "positive native repeat above every 2x take", "value": [low_pos, top_2x], "ok": ok, "enforced": args.rate == 25})
+        checks.append({"check": "every positive slide1-native repeat above every 2x one", "value": [low_pos, top_2x], "ok": ok, "enforced": args.rate == 25})
     summary["checks"] = checks
     summary["passed"] = all(r["passed"] for r in runs) and all(c["ok"] for c in checks if c["enforced"])
     dest = args.out / "runs" / f"summary-{stamp()}.json"
