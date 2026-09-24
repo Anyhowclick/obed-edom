@@ -67,6 +67,15 @@ todos:
       writes (new bullet: hide deletion + Metadata tables), and `pass1_profile.plan.md`
       `h-hides-offline`. Run the full suites.
     status: pending
+  - id: followup-mm-leftovers
+    content: >-
+      SEPARATE PLANNER ITEM (owner, 2026-09-24, after reviewing the pre-step deck, slides 16→17). The planner's
+      off-slide-leftover hide rule (`map_remap.py:2498`) deletes off-canvas objects that are Magic Move partners of
+      on-canvas objects on the neighbouring slide, so the MM transition loses them. This is PRE-EXISTING on main (the
+      hide set is unchanged by this feature: 685 hidden in both the Keynote-delete run 1 and the offline run 3). Fix
+      in the planner: keep MM-matched off-canvas objects and place them off-canvas in CG space, so MM still animates
+      them. Own plan; not part of this feature's gate (owner chose to finish this feature first).
+    status: pending
   - id: followup-single-rewrite
     content: >-
       GATED FOLLOW-UP, not in this round. Fold the hide delete into `patch_deck_geometry`'s rewrite
@@ -650,3 +659,4 @@ disjoint.
 - O11 (2026-09-24, Opus HIGH, on 05ccaed2, focused on decision 7): PASS, no BLOCKER or MAJOR. Id identity is sound and fail-safe; no code regressions. 4 MINOR stale plan sections and one docstring, all fixed.
 - Live pre-step PASS (2026-09-24, pinned e218607f, `--slides 1-60,118-125`, verify, load ~5–16): 61 slides deferred (only 122 excluded, builds); the offline delete on the Keynote-saved deck removed 679 hides, 0 refused, verify pass, 22.6 s. Pass 1 70 s (JS hides 1.0 s) vs run 1's 94 s (16.9 s). Applied 2119 / missed 0 and the z-order detail match run 1; source unchanged. A one-time 339 s cache rebuild (iwaId).
 - S11 (2026-09-24, Sol H, on ffe1a719, decision 7): PASS, no BLOCKER or MAJOR, no findings. The offline review of decision 7 is complete (O11 + S11).
+- 2026-09-24: owner spotted MM partners deleted on slides 16→17 of the pre-step deck. Pre-existing planner behaviour (map_remap unchanged vs main; 685 hidden in run 1 and run 3); filed as `followup-mm-leftovers`. The owner chose to finish this feature's live gate first; the gate's MM check compares A vs B.
