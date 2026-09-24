@@ -216,14 +216,15 @@ def offline_hides_mode(
     explicit: str | None = None, *, offline_mode: str | None = None,
     say: Callable[[str], None] | None = None,
 ) -> str:
-    """`off` (default, pass 1 deletes hides in Keynote), `on` (pass 1 defers the hides of
-    eligible slides; the IWA writer deletes them after the save) or `verify` (plus a
-    whole-deck reference check). Env `OBED_OFFLINE_HIDES`; unknown tokens fall back to
-    `off`. Forced `off` when `offline_mode` is `off` (kill switch; also covers a missing
-    `iwa` extra via `probe_iwa_extra`)."""
+    """`on` (default: pass 1 defers the hides of eligible slides; the IWA writer deletes them
+    after the save), `off` (kill switch: pass 1 deletes hides in Keynote) or `verify` (plus a
+    whole-deck reference check). Env `OBED_OFFLINE_HIDES`; unknown tokens force `off`, as in
+    `offline_maskcrop_enabled`. Forced `off` when `offline_mode` is `off` (also covers a
+    missing `iwa` extra via `probe_iwa_extra`)."""
     raw = (explicit if explicit is not None else os.environ.get("OBED_OFFLINE_HIDES", "")).strip().lower()
-    if raw in {"", "off"}:
+    if raw == "off":
         return "off"
+    raw = raw or "on"
     if raw not in {"on", "verify"}:
         if say:
             say(f"Unknown OBED_OFFLINE_HIDES value {raw!r}; forcing offline hides off.")

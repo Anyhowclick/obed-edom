@@ -537,6 +537,33 @@ Load-bearing rules:
   Keynote permutes on save, so never read `builds` order as reveal order (measured:
   chain-coherent 45/45 under `buildChunks` vs 13/45 under `builds` — D8).
 
+#### Offline hide delete
+
+`OBED_OFFLINE_HIDES` = `on` (default since the 2026-09-24 live gate) | `off` | `verify`;
+forced `off` without the `iwa` extra or when `offline_write_mode()` is `off`. Pass 1
+defers eligible slides' hides (`plan.offlineHideSlides`, JS returns `hidesDeferred`);
+after `_require_pass1_saved_closed`, `iwa_hides.patch_deck_hides` deletes them in one
+surgical rewrite, restoring the "source − hides" deck later stages address by kindIndex.
+
+* identity is the stable source archive id: offline payload items carry `iwaId`/`iwaUuid`,
+  which survive Keynote's save (measured on all 2,105 surviving FRC drawables). The saved
+  (kind, kindIndex) must resolve to the same id, else the slide is refused unproven. Never
+  prove identity by geometry: pass 1's canvas change maps every rect (x/4, y/4+405).
+* ineligible (stay on the Keynote delete): build targets, text/shape duals, kinds with no
+  AppleScript address, and any payload without ids (JXA or an old cache).
+* a refused slide with proven order goes to a per-slide AppleScript delete session bound by
+  exact path; an unproven refusal or a whole-deck refusal raises `OfflineHidesAborted`
+  (the CLI prints the rerun hint, the dashboard switches hides off for the next run).
+* the writer removes each hide's owned subtree, its slide-list and header refs, its
+  Metadata uuid/data refs, and any `Data/` member left unreferenced deck-wide; strong,
+  weak and forbidden (comment/highlight/pencil/change) references are classified, and
+  anything unclassified refuses.
+* the planner's off-slide-leftover rule also hides Magic Move partners (pre-existing;
+  `followup-mm-leftovers`).
+* `scripts/deck_decode_diff.py` is the ID-insensitive A/B oracle: template slides are
+  labelled by name, `builds` is compared as a multiset, and `st-`/`mt-` thumbnails by
+  content. Its A-vs-A null on FRC is 0 slides.
+
 #### Offline z-order (W2)
 
 `OBED_ZORDER_WRITE` = `on` (default) | `off` | `verify`; forced `off` without the `iwa`

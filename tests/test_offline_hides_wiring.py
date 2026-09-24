@@ -107,11 +107,21 @@ WALL = {"slides": [
 # --- mode helper ----------------------------------------------------------------------
 
 
-def test_offline_hides_mode_defaults_off(monkeypatch):
+def test_offline_hides_mode_defaults_on_and_off_is_the_kill_switch(monkeypatch):
+    """Owner decision 2 (green live gate, 2026-09-24): unset or empty means on."""
     monkeypatch.delenv("OBED_OFFLINE_HIDES", raising=False)
-    assert rk.offline_hides_mode(offline_mode="on") == "off"
-    assert rk.offline_hides_mode("", offline_mode="on") == "off"
+    assert rk.offline_hides_mode(offline_mode="on") == "on"
+    assert rk.offline_hides_mode("", offline_mode="on") == "on"
+    assert rk.offline_hides_mode("  ", offline_mode="verify") == "on"
     assert rk.offline_hides_mode("off", offline_mode="on") == "off"
+    assert rk.offline_hides_mode(" OFF ", offline_mode="on") == "off"
+    monkeypatch.setenv("OBED_OFFLINE_HIDES", "off")
+    assert rk.offline_hides_mode(offline_mode="on") == "off"
+
+
+def test_offline_hides_default_is_still_forced_off_with_offline_write_off(monkeypatch):
+    monkeypatch.delenv("OBED_OFFLINE_HIDES", raising=False)
+    assert rk.offline_hides_mode(offline_mode="off") == "off"
 
 
 def test_offline_hides_mode_on_and_verify(monkeypatch):
@@ -737,8 +747,16 @@ def _run(tmp_path, said=None, **kw):
 JXA_OK = {"applied": 1, "missed": 0, "saved": True, "closed": True}
 
 
+def test_unset_env_defaults_to_on_through_remap(monkeypatch, tmp_path):
+    plan, hides_calls = _wire(monkeypatch, hides_env=None, jxa={**JXA_OK, "hidesDeferred": 2},
+                              hides_info={"deleted": 2})
+    _run(tmp_path)
+    assert plan["offlineHideSlides"] == [1]
+    assert hides_calls == [{"mode": "on", "slides": {1}}]
+
+
 def test_plan_field_absent_when_off(monkeypatch, tmp_path):
-    plan, hides_calls = _wire(monkeypatch, hides_env=None, jxa=JXA_OK)
+    plan, hides_calls = _wire(monkeypatch, hides_env="off", jxa=JXA_OK)
     _run(tmp_path)
     assert "offlineHideSlides" not in plan
     assert hides_calls == [{"mode": "off", "slides": set()}]
@@ -809,7 +827,7 @@ def test_applied_line_prints_after_the_hides_stage(monkeypatch, tmp_path):
 
 
 def test_off_mode_applied_line_unchanged(monkeypatch, tmp_path):
-    _wire(monkeypatch, hides_env=None, jxa={**JXA_OK, "applied": 3822})
+    _wire(monkeypatch, hides_env="off", jxa={**JXA_OK, "applied": 3822})
     said = []
     info = _run(tmp_path, said)
     assert "Applied 3822, missed 0." in said
@@ -826,13 +844,13 @@ def test_zero_applied_with_deferred_hides_does_not_abort(monkeypatch, tmp_path):
 
 
 def test_zero_applied_and_nothing_deferred_aborts(monkeypatch, tmp_path):
-    _wire(monkeypatch, hides_env=None, jxa={**JXA_OK, "applied": 0})
+    _wire(monkeypatch, hides_env="off", jxa={**JXA_OK, "applied": 0})
     with pytest.raises(RuntimeError, match="moved 0 objects"):
         _run(tmp_path)
 
 
 def test_bare_jxa_dict_without_hidesdeferred_is_tolerated(monkeypatch, tmp_path):
-    _wire(monkeypatch, hides_env=None, jxa={"applied": 1, "missed": 0, "saved": True, "closed": True})
+    _wire(monkeypatch, hides_env="off", jxa={"applied": 1, "missed": 0, "saved": True, "closed": True})
     _run(tmp_path)
 
 
@@ -875,7 +893,7 @@ def test_off_mode_applied_line_keeps_its_original_position(monkeypatch, tmp_path
     """Default-off output is unchanged: `Applied …` prints before the pass-1 saved/closed
     check and the WARNING remap lines, exactly as before offline hides existed."""
     events = []
-    _wire(monkeypatch, hides_env=None, jxa={**JXA_OK, "applied": 5, "missReasons": ["slide 2 x"]},
+    _wire(monkeypatch, hides_env="off", jxa={**JXA_OK, "applied": 5, "missReasons": ["slide 2 x"]},
           events=events)
     said = []
 

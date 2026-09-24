@@ -66,7 +66,7 @@ todos:
       the kill switch). Update README remap section, `.agents/skills/obed-edom/SKILL.md` §Offline
       writes (new bullet: hide deletion + Metadata tables), and `pass1_profile.plan.md`
       `h-hides-offline`. Run the full suites.
-    status: pending
+    status: completed
   - id: followup-mm-leftovers
     content: >-
       SEPARATE PLANNER ITEM (owner, 2026-09-24, after reviewing the pre-step deck, slides 16→17). The planner's
@@ -662,3 +662,4 @@ disjoint.
 - 2026-09-24: owner spotted MM partners deleted on slides 16→17 of the pre-step deck. Pre-existing planner behaviour (map_remap unchanged vs main; 685 hidden in run 1 and run 3); filed as `followup-mm-leftovers`. The owner chose to finish this feature's live gate first; the gate's MM check compares A vs B.
 - LIVE GATE (2026-09-24): all measured items PASS. Record: `.agents/reviews/pass1-hides-offline-2026-09-24/README.md`. Whole run −63 s / −88 s, runJxa −84 s / −103 s, 0 refused, O1 identical, O3 0 slides (after a checker fix for per-run churn, 2f2eea88), forced AppleScript fallback worked live. Pending owner: MM playback and the no-repair-prompt open.
 - Owner checks (2026-09-24): MM playback OK, no repair prompt. **Live gate GREEN.** `g-flip-docs` next (owner decision 2: default on).
+- g-flip-docs (2026-09-24): `OBED_OFFLINE_HIDES` defaults to on (an unknown value forces off, like maskcrop); SKILL.md §Offline hide delete added; `pass1_profile` h-hides-offline closed. The README documents no remap offline flags, so it was left unchanged.
