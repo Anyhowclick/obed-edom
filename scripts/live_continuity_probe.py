@@ -128,6 +128,7 @@ FORCE_WRAP_MIN_FRAMES = 10
 FORCE_WRAP_SEEK_TIMEOUT_S = 1.5
 FORCE_WRAP_TOLERANCE_MS = 100.0
 FORCE_WRAP_WINDOW_AFTER_SEEK_MS = 1000.0
+G2_ACTIVE_STATES = ("LIVE", "ARM-PRE", "ARM-POST")
 
 BURST_POKE_JS = (
     "(function(){var d=document.getElementById('__orpoke');"
@@ -1278,19 +1279,23 @@ def _owns_itself(row: dict[str, Any]) -> bool:
 
 
 def _wrap_seek_unowned(rows: list[dict[str, Any]], row: dict[str, Any], wrap_times: list[float]) -> bool:
-    """The browser's loop seek: the post-wrap sample of a classified wrap, not ready
-    (`readyState < 2`), unowned (`via == 'none'`, no other element named), between two
-    samples of the same element that own the footprint. `footprintOwnerDecoderId` fails
+    """The browser's loop seek: the post-wrap sample of a classified wrap, with a finite
+    `readyState < 2`, unowned (`via == 'none'`, no other element named), between two samples
+    carrying the same non-null `elId` that own the footprint. `footprintOwnerDecoderId` fails
     closed on a not-ready decoder, so only that one sample may go unowned."""
     owner = row.get("footprintOwner")
-    if row["t"] not in wrap_times or (_finite_number(row.get("readyState")) or 0) >= 2:
+    ready = _finite_number(row.get("readyState"))
+    el_id = row.get("elId")
+    if row["t"] not in wrap_times or ready is None or ready >= 2 or el_id is None:
         return False
     if not (isinstance(owner, dict) and owner.get("via") == "none" and owner.get("elId") is None):
         return False
     index = next((i for i, r in enumerate(rows) if r is row or r["t"] == row["t"]), None)
     if index is None or index == 0 or index + 1 >= len(rows):
         return False
-    return _owns_itself(rows[index - 1]) and _owns_itself(rows[index + 1])
+    return all(
+        neighbour.get("elId") == el_id and _owns_itself(neighbour) for neighbour in (rows[index - 1], rows[index + 1])
+    )
 
 
 def continuity_window(
@@ -4253,7 +4258,7 @@ def _gl_states(reads: Any) -> list[dict[str, Any]]:
 
 def armed_carry(reads: Any, armed: dict[str, Any], recorder: Any) -> tuple[bool, dict[str, Any]]:
     """The armed 1->2 carry held: armed on the source, LIVE after settle with no stand-down,
-    carrying the seeked element."""
+    carrying the seeked element, and no `<video>` painting over the armed rect."""
     states = _gl_states(reads)
     if len(states) != 2:
         return False, {"reason": "the destination was not read twice"}
@@ -4262,13 +4267,17 @@ def armed_carry(reads: Any, armed: dict[str, Any], recorder: Any) -> tuple[bool,
     live, live_detail = _armed_live(states, armed)
     carried = _carried_el_id(states[-1])
     seeked = recorder.get("elId") if isinstance(recorder, dict) else None
+    no_painting, painting = _armed_no_painting(reads, armed)
     checks = {
         "armSeen": any(hash_number(note.get("sceneHash")) == armed["atScene"] - 1 for note in arms),
         "live": live,
         "noStandDown": not downs,
         "carriesSeeked": carried is not None and carried == seeked,
+        "noPainting": no_painting,
     }
-    return all(checks.values()), {"checks": checks, "live": live_detail, "carriedElId": carried, "seekedElId": seeked}
+    return all(checks.values()), {
+        "checks": checks, "live": live_detail, "carriedElId": carried, "seekedElId": seeked, "paintingOverRect": painting,
+    }
 
 
 def score_raw_restart(
@@ -4309,19 +4318,25 @@ def preserved_painting(reads: Any, rects: list[dict[str, float]]) -> tuple[bool 
 def fallback_outcome(
     reads: Any, *, armed_boundary: bool, restart: dict[str, Any], rects: list[dict[str, float]]
 ) -> tuple[str | None, dict[str, Any]]:
-    """Which listed fail-closed fallback the take took, if any (OQ-4)."""
+    """Which listed fail-closed fallback the take took, if any (OQ-4). On the armed boundary a
+    raw restart counts only once G2 is no longer active and its zone is retired (or never
+    opened), so no carried canvas can still be painting."""
     states = _gl_states(reads)
     last = states[-1] if states else {}
     api = last.get("api") if isinstance(last.get("api"), dict) else {}
     stand_downs = api.get("standDowns") if isinstance(api.get("standDowns"), list) else None
     zones = [(z.get("from"), z.get("to"), z.get("reason")) for z in _notes(last, "glreplay-zone")] if last else []
     painting, over = preserved_painting(reads, rects)
-    detail = {"standDowns": stand_downs, "zones": zones, "restart": restart, "preservedPainting": over}
+    g2_inactive = api.get("state") not in G2_ACTIVE_STATES and (not zones or zones[-1][1] == "retired")
+    detail = {
+        "standDowns": stand_downs, "zones": zones, "restart": restart, "preservedPainting": over,
+        "g2State": api.get("state"), "g2Inactive": g2_inactive,
+    }
     if armed_boundary and stand_downs == ["videoNotReady"]:
         return "videoNotReady", detail
     if armed_boundary and stand_downs == [] and any(to == "retired" and why == "notPooled" for _, to, why in zones):
         return "notPooled", detail
-    if restart.get("verdict") is True and painting is False:
+    if restart.get("verdict") is True and painting is False and (g2_inactive or not armed_boundary):
         return "rawRestart", detail
     return None, detail
 

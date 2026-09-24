@@ -5359,7 +5359,9 @@ class TestScoreForcedWrap:
     def test_armed_carry_holds(self) -> None:
         result = _fw_score(boundary="1to2", reads=_fw_reads(), armed=ARMED, continuity={"verdict": False})
         assert (result["status"], result["outcome"]) == ("pass", "carried"), result
-        assert result["carry"]["checks"] == {"armSeen": True, "live": True, "noStandDown": True, "carriesSeeked": True}
+        assert result["carry"]["checks"] == {
+            "armSeen": True, "live": True, "noStandDown": True, "carriesSeeked": True, "noPainting": True,
+        }
 
     def test_armed_carry_of_another_element_fails(self) -> None:
         result = _fw_score(boundary="1to2", reads=_fw_reads(carried=2), armed=ARMED)
@@ -5681,7 +5683,7 @@ class TestForceWrapCliExit:
         assert json.loads((tmp_path / "fw.json").read_text())["status"] == status
 
 
-L2_ARTIFACTS = Path("/Users/anyhowclick/Desktop/work/obed-edom/output/loop-gates/l2")
+FORCED_WRAP_FIXTURES = REPO / "tests" / "fixtures" / "live_continuity" / "forced_wrap"
 
 
 def _armed_reads_at(end: float) -> list[dict[str, Any]]:
@@ -5769,9 +5771,8 @@ class TestArmedRecorderWindow:
         probe.score_force_wrap_run(result, self._gt(), "1to2", 375.0)
         assert result["status"] == "fail"
 
-    @pytest.mark.skipif(not (L2_ARTIFACTS / "1to2_0.json").is_file(), reason="L2 artifacts not available")
     def test_real_1to2_0_recorder_holds_under_the_take_window(self) -> None:
-        artifact = json.loads((L2_ARTIFACTS / "1to2_0.json").read_text())
+        artifact = json.loads((FORCED_WRAP_FIXTURES / "1to2_0.min.json").read_text())
         window = probe.armed_recorder_window(artifact["recorder"], artifact["reads"])
         clock = probe.score_recorder_clock(artifact["recorder"], window)
         assert clock["verdict"] is True and clock["wraps"] == 1, clock
@@ -5864,9 +5865,8 @@ class TestWrapOwnerExcuse:
         _unown(samples[index - 1], ready=4)
         assert self._score(samples)["verdict"] is False
 
-    @pytest.mark.skipif(not (L2_ARTIFACTS / "3to4_750.json").is_file(), reason="L2 artifacts not available")
     def test_real_3to4_750_passes_with_its_one_loop_seek_excused(self) -> None:
-        artifact = json.loads((L2_ARTIFACTS / "3to4_750.json").read_text())
+        artifact = json.loads((FORCED_WRAP_FIXTURES / "3to4_750.min.json").read_text())
         root = REPO / "tests" / "fixtures" / "live_continuity"
         plan = probe.derive_plan(root, probe.load_slides(root), resolver=lambda r, rel: r / rel)
         facts = probe.ground_truth_facts(plan)
@@ -5916,3 +5916,81 @@ class TestRescoreForceWrapCli:
         assert seen == [(Path("f"), Path("i"), "1to2", "auto")]
         assert (report["statusBefore"], report["status"], report["outcome"]) == ("fail", "pass", "carried")
         assert report["recorderWindow"]["rule"].startswith("armed")
+
+
+class TestArmedCarryPainting:
+    """Codex r2 F1: a fresh raw-player `<video>` painting the armed slot is not a carry, even
+    while the recorder and G2 stay LIVE; and a raw restart on the armed boundary counts only
+    once G2 is no longer active."""
+
+    def _fresh_painting(self, reads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        for read in reads:
+            read["painting"] = [{"src": "untitled.mov", "elId": None, "rect": dict(BIG_INSTANCE)}]
+        return reads
+
+    def test_known_bad_fresh_video_over_the_armed_rect_is_not_carried(self) -> None:
+        result = _fw_score(boundary="1to2", reads=self._fresh_painting(_fw_reads()), armed=ARMED)
+        assert result["status"] == "fail"
+        checks = result["carry"]["checks"]
+        assert checks["noPainting"] is False
+        assert all(value for key, value in checks.items() if key != "noPainting")
+
+    def test_known_bad_armed_raw_restart_while_g2_is_live_is_not_a_fallback(self) -> None:
+        result = _fw_score(
+            boundary="1to2", reads=self._fresh_painting(_fw_reads()), armed=ARMED,
+            recorder=_fw_recorder(), restart={"verdict": True},
+        )
+        assert result["status"] == "fail"
+        assert result["fallback"]["g2Inactive"] is False
+
+    def test_armed_raw_restart_after_g2_retired_is_a_fallback(self) -> None:
+        reads = self._fresh_painting(_fw_reads(zones=[("armed", "retired", "failure")]))
+        for read in reads:
+            read["glReplay"]["api"]["state"] = "RETIRED"
+        result = _fw_score(boundary="1to2", reads=reads, armed=ARMED, restart={"verdict": True})
+        assert (result["status"], result["outcome"]) == ("pass", "rawRestart")
+
+    def test_armed_raw_restart_with_the_zone_still_armed_is_not_a_fallback(self) -> None:
+        reads = self._fresh_painting(_fw_reads())
+        for read in reads:
+            read["glReplay"]["api"]["state"] = "RETIRED"
+        result = _fw_score(boundary="1to2", reads=reads, armed=ARMED, restart={"verdict": True})
+        assert result["status"] == "fail"
+
+
+class TestWrapOwnerExcuseFailsClosed:
+    """Codex r2 F2: the excuse needs a finite readyState < 2, a non-null elId, and both
+    neighbours carrying that same elId."""
+
+    def _score(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
+        return probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, True, loop_period_s=LOOP_P)
+
+    @pytest.mark.parametrize("ready", ["missing", None, float("nan"), "1"])
+    def test_known_bad_unreadable_ready_state_is_not_excused(self, ready: Any) -> None:
+        samples = _excuse_samples()
+        row = samples[_wrap_index(samples)]
+        _unown(row)
+        if ready == "missing":
+            del row["videos"][0]["readyState"]
+        else:
+            row["videos"][0]["readyState"] = ready
+        result = self._score(samples)
+        assert result["verdict"] is False and result["wrapOwnerExcused"] == []
+
+    def test_known_bad_null_el_id_is_not_excused(self) -> None:
+        samples = _excuse_samples()
+        row = samples[_wrap_index(samples)]
+        _unown(row)
+        row["videos"][0]["elId"] = None
+        assert self._score(samples)["wrapOwnerExcused"] == []
+
+    @pytest.mark.parametrize("side", [-1, 1])
+    def test_known_bad_a_retagged_neighbour_is_not_excused(self, side: int) -> None:
+        samples = _excuse_samples()
+        index = _wrap_index(samples)
+        _unown(samples[index])
+        neighbour = samples[index + side]["videos"][0]
+        neighbour["elId"] = 5
+        neighbour["footprintOwner"] = {"elId": 5, "key": "movie1", "via": "footprint-video", "contextType": None}
+        result = self._score(samples)
+        assert result["verdict"] is False and result["wrapOwnerExcused"] == []
