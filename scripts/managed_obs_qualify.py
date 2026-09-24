@@ -104,6 +104,8 @@ SOAK_WINDOW_S = 20.0
 SOAK_WINDOW_LEAD_S = 10.0
 SOAK_WINDOW_MINUTES = (2, 8)
 PRECHECK_S = 105.0
+RAF_JS = ("(()=>{if(!window.__obedRafN){window.__obedRafN=1;(function t(){window.__obedRafN++;requestAnimationFrame(t);})();}"
+          "return [performance.now(), window.__obedRafN];})()")
 MARKER_RECT = {"x": 0, "y": 0, "w": 24, "h": 24}
 REGION_PAD = 2
 T_ERODE_PX = 6
@@ -310,7 +312,7 @@ class Session:
     def phase(self, name: str, color: str | None = None) -> float:
         perf = self.ev(MARK_JS % (color or hex_of(name)))
         self.out["phases"].append({"name": name, "perf": perf, "wall": time.time(), "hash": self.ev("String(location.hash)"),
-                                   "videos": self.ev(VIDEOS_JS)})
+                                   "videos": self.ev(VIDEOS_JS), "raf": self.ev(RAF_JS)})
         print(f"    [{self.name}] phase {name} {self.out['phases'][-1]['hash']}", flush=True)
         return time.monotonic()
 
@@ -710,6 +712,15 @@ def continuity_of(session: dict[str, Any]) -> dict[str, Any]:
     return (session.get("outputAtStop") or session.get("output") or {}).get("continuity") or {}
 
 
+def raf_rates(session: dict[str, Any]) -> dict[str, float | None]:
+    marks = [(p["name"], p.get("raf")) for p in session.get("phases") or []]
+    rates: dict[str, float | None] = {}
+    for (name, a), (_, b) in zip(marks, marks[1:]):
+        ok = isinstance(a, list) and isinstance(b, list) and b[0] > a[0]
+        rates[name] = round((b[1] - a[1]) * 1000.0 / (b[0] - a[0]), 1) if ok else None
+    return rates
+
+
 def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     sessions = {s["session"]: s for s in run["sessions"]}
     g2, off, hidden_arm = sessions.get("g2") or {}, sessions.get("g2-off") or {}, sessions.get("hidden-arm") or {}
@@ -782,6 +793,7 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
           f"> {LIMITS['staticMax']}")
     off_scored = score_armed(off.get("armed"), armed, continuity_of(off))
     check(m1, "KB: g2-off score_armed False", off_scored["verdict"], off_scored["verdict"] is False, "False")
+    check(m1, "report: page rAF Hz from each phase start", raf_rates(g2), True, enforced=False)
     gates["M1"] = gate(m1)
 
     m2: list[dict[str, Any]] = []
