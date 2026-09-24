@@ -89,7 +89,7 @@ class LiveSessionService:
                 "outputVisible": False,
                 "autoPlayDeferred": None,
                 "slides": slides,
-                "output": {**deepcopy(identity.get("output", {})), "transport": "hdmi", "alpha": False, "audio": False},
+                "output": {"transport": "hdmi", "alpha": False, **deepcopy(identity.get("output", {})), "audio": False},
                 "capabilities": self._disabled_capabilities(),
             }
             session = _Session(adapter=adapter, state=state)

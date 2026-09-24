@@ -254,6 +254,27 @@ def test_start_claims_asset_and_retains_detected_output(tmp_path):
     assert "thumbnailUrl" not in state["slides"][2]
 
 
+def test_loading_snapshot_keeps_the_fill_key_transport_of_keyer_output(tmp_path):
+    loading = []
+    service = LiveSessionService(claim=lambda *args: None, release=lambda *args: None)
+    adapter = Adapter()
+    observe = adapter.observe
+
+    def observe_while_loading():
+        loading.append(dict(service._session.state["output"]))
+        return observe()
+
+    adapter.observe = observe_while_loading
+    identity = {**_identity(), "output": {"transport": "fill-key", "alpha": True, "audio": False, "bridge": "obs-managed",
+                                          "width": 1920, "height": 1080}}
+    state = service.start(adapter, export_key="preview-a", export_root=tmp_path, identity=identity)
+
+    assert loading[0]["transport"] == "fill-key"
+    assert loading[0]["alpha"] is True
+    assert loading[0]["bridge"] == "obs-managed"
+    assert state["output"]["transport"] == "fill-key"
+
+
 def test_command_stays_accepted_until_observation_settles(tmp_path):
     service, adapter, state, _claims, _releases = make_service(tmp_path)
 
