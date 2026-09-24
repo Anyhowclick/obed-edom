@@ -461,6 +461,19 @@ def test_settings_roundtrip(tmp_path, monkeypatch):
     assert client.get("/api/settings").json()["reuseThreshold"] == 0.8
 
 
+def test_generic_settings_put_keeps_alpha_keynote_output_settings(tmp_path, monkeypatch):
+    from obed_edom import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "settings_path", lambda root=None: tmp_path / "settings.json")
+    settings_mod.save_settings({"akOutputMode": "keyer", "akOutputRate": 30, "akKeyer": "off"}, validate_dir=False)
+    client = TestClient(app)
+    put = client.put("/api/settings", json={"reusePreviews": False})
+    assert put.status_code == 200
+    got = client.get("/api/settings").json()
+    assert got["reusePreviews"] is False
+    assert (got["akOutputMode"], got["akOutputRate"], got["akKeyer"]) == ("keyer", 30, "off")
+
+
 def test_settings_remember_templates_without_touching_other_fields(tmp_path, monkeypatch):
     from obed_edom import settings as settings_mod
 

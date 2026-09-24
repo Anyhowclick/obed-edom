@@ -3,13 +3,102 @@ from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from obed_edom import live_runtime
+from obed_edom import settings as settings_mod
 from obed_edom.live_host import LiveOutputHost, OutputDisplay
 from obed_edom.live_session import LiveSessionService, PlayerObservation
 from obed_edom.web import live
+
+
+@pytest.fixture(autouse=True)
+def _isolated_settings(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_mod, 'settings_path', lambda root=None: tmp_path / 'settings.json')
+
+
+class FakeEngine:
+    def __init__(self, events=None):
+        self.events = events if events is not None else []
+        self.calls = []
+        self.status = 'stopped'
+        self.warnings = []
+        self.orphan = False
+        self.rate, self.keyer = 25, 'external'
+        self.reason = None
+        self.setup = None
+
+    def _call(self, *call):
+        self.calls.append(call)
+        self.events.append(('engine',) + call)
+
+    @property
+    def cdp_endpoint(self):
+        return 'http://127.0.0.1:9333' if self.status in ('starting', 'ready', 'blocked') else None
+
+    @property
+    def target_id(self):
+        return 'TARGET-1' if self.status == 'ready' else None
+
+    def state(self):
+        return {'state': self.status, 'obs': {'path': '/Applications/OBS.app', 'version': '32.2.2', 'pinned': '32.2.2'},
+                'rate': {'output': self.rate, 'canvas': '25 PAL', 'source': 50},
+                'device': {'name': None, 'set': False}, 'keyer': self.keyer, 'setup': self.setup,
+                'warnings': list(self.warnings), **({'reason': self.reason} if self.reason else {})}
+
+    @property
+    def setup_active(self):
+        return self.setup is not None
+
+    def configure(self, rate, keyer):
+        self.rate, self.keyer = rate, keyer
+        self._call('configure', rate, keyer)
+
+    def has_orphan(self):
+        self._call('has_orphan')
+        return self.orphan
+
+    def ensure_started(self, rate, keyer):
+        self._call('ensure_started', rate, keyer)
+        self.status = 'ready'
+
+    def restart(self, rate, keyer):
+        self._call('restart', rate, keyer)
+        self.status, self.warnings = 'ready', []
+
+    def quit(self):
+        self._call('quit')
+        self.status = 'stopped'
+
+    def check(self, reset_page=False):
+        self._call('check', reset_page)
+
+    def apply_settings(self, mode, rate, keyer):
+        self._call('apply_settings', mode, rate, keyer)
+
+    def show(self):
+        self._call('show')
+
+    def setup_device_begin(self, rate):
+        self._call('setup_device_begin', rate)
+        self._settle_setup(rate)
+
+    def setup_device_done(self):
+        self._call('setup_device_done')
+        self._settle_setup(None)
+
+    def _settle_setup(self, rate):
+        self.status, self.reason, self.setup = ('blocked', 'deviceSetup', rate) if rate else ('stopped', None, None)
+
+    def shutdown(self, timeout):
+        self._call('shutdown', timeout)
+        self.status = 'stopped'
+        return True
+
+    def actions(self):
+        return [call[0] for call in self.calls if call[0] not in ('configure', 'has_orphan')]
 
 
 class Adapter:
@@ -17,6 +106,7 @@ class Adapter:
 
     def __init__(self, *args, **kwargs):
         self.continuity = kwargs.get("continuity", "auto")
+        self.kwargs = kwargs
         self.visible = False
         self.clicks = 0
         self.wait: Event | None = None
@@ -48,7 +138,7 @@ class Adapter:
             self.release.set()
 
 
-def client_for(tmp_path, monkeypatch):
+def client_for(tmp_path, monkeypatch, engine=None, events=None):
     thumb = tmp_path / 'thumbnail.jpeg'
     thumb.write_bytes(b'jpeg')
     job = SimpleNamespace(id='prepared', kind='html-preview', status='done', result={
@@ -63,8 +153,15 @@ def client_for(tmp_path, monkeypatch):
     monkeypatch.setattr(live, 'file_sha256', lambda *_: live.PLAYER_SHA256)
     monkeypatch.setattr(live, 'load_header', lambda *_: ({'slideWidth': 1920, 'slideHeight': 1080, 'showMode': 0}, 'header.json'))
     claims, releases = [], []
-    service = LiveSessionService(claim=lambda *args: claims.append(args), release=lambda *args: releases.append(args))
+    events = events if events is not None else []
+
+    def release(*args):
+        releases.append(args)
+        events.append(('release',) + args)
+
+    service = LiveSessionService(claim=lambda *args: claims.append(args), release=release)
     adapters = []
+    engine = engine or FakeEngine(events)
 
     def host_factory(*args, **kwargs):
         adapter = Adapter(*args, **kwargs)
@@ -73,7 +170,7 @@ def client_for(tmp_path, monkeypatch):
 
     app = FastAPI()
     app.include_router(live.live_router(runner, service=service, host_factory=host_factory,
-        displays=lambda: [OutputDisplay(42, 1920, 0, 2560, 1440, False)]))
+        displays=lambda: [OutputDisplay(42, 1920, 0, 2560, 1440, False)], engine_factory=lambda: engine))
     return TestClient(app, base_url='http://127.0.0.1'), claims, releases, job, adapters, service
 
 
@@ -286,3 +383,272 @@ def test_live_api_snapshot_surfaces_auto_play_deferred_and_advance_clears_it(tmp
 
     advanced = client.post(f'/api/live/{session}/commands', json={'requestId': 'a', 'operation': 'advance'}).json()
     assert advanced['state']['autoPlayDeferred'] is None
+
+
+ENGINE_STATE_KEYS = {'state', 'obs', 'rate', 'device', 'keyer', 'setup', 'warnings'}
+W5 = {'id': 'obsExited', 'severity': 'block', 'action': 'restart',
+      'text': 'OBS stopped unexpectedly — nothing is going to the keyer. Press Restart output engine.'}
+
+
+def engine_client(tmp_path, monkeypatch, **settings):
+    events = []
+    engine = FakeEngine(events)
+    if settings:
+        settings_mod.save_settings({**settings_mod.load_settings(), **settings}, validate_dir=False)
+    client, _claims, _releases, _job, adapters, _service = client_for(tmp_path, monkeypatch, engine=engine, events=events)
+    return client, engine, adapters, events
+
+
+def test_engine_get_configures_from_settings_and_never_starts(tmp_path, monkeypatch):
+    client, engine, _, _ = engine_client(tmp_path, monkeypatch, akOutputMode='keyer', akOutputRate=30, akKeyer='off')
+    with client:
+        body = client.get('/api/live/engine').json()
+        assert client.get('/api/live/output-settings').json() == {'akOutputMode': 'keyer', 'akOutputRate': 30, 'akKeyer': 'off'}
+        client.get('/api/live')
+    assert body['state'] == 'stopped'
+    assert body['rate']['output'] == 30 and body['keyer'] == 'off'
+    assert ('configure', 30, 'off') in engine.calls
+    assert engine.actions() == []
+
+
+def test_engine_state_json_never_carries_a_password(tmp_path, monkeypatch):
+    client, engine, _, _ = engine_client(tmp_path, monkeypatch)
+    engine.status = 'ready'
+    body = client.get('/api/live/engine').json()
+    assert ENGINE_STATE_KEYS <= set(body) <= ENGINE_STATE_KEYS | {'reason'}
+    assert 'password' not in client.get('/api/live/engine').text.lower()
+
+
+def test_engine_actions_dispatch_with_settings_rate_and_keyer(tmp_path, monkeypatch):
+    client, engine, _, _ = engine_client(tmp_path, monkeypatch, akOutputMode='keyer', akOutputRate=30, akKeyer='off')
+    for action in ('start', 'restart', 'show', 'quit', 'setupDevice', 'setupDone'):
+        response = client.post(f'/api/live/engine/{action}')
+        assert response.status_code == 200, (action, response.text)
+        assert set(response.json()) >= ENGINE_STATE_KEYS
+    assert [call for call in engine.calls if call[0] != 'configure'] == [
+        ('ensure_started', 30, 'off'), ('restart', 30, 'off'), ('show',), ('quit',),
+        ('setup_device_begin', 30), ('setup_device_done',)]
+    assert client.post('/api/live/engine/bogus').status_code == 422
+
+
+def test_engine_check_asks_for_a_page_reset_only_without_a_loaded_session(tmp_path, monkeypatch):
+    client, engine, _, _ = engine_client(tmp_path, monkeypatch, akOutputMode='keyer')
+    assert client.post('/api/live/engine/check').status_code == 200
+    assert engine.calls[-1] == ('check', True)
+    engine.status = 'ready'
+    assert client.post('/api/live', json={'previewJobId': 'prepared'}).status_code == 200
+    assert client.post('/api/live/engine/check').status_code == 200
+    assert engine.calls[-1] == ('check', False)
+    assert engine.actions() == ['check', 'check']
+
+
+def test_engine_changes_are_refused_while_a_session_is_loaded(tmp_path, monkeypatch):
+    client, engine, _, _ = engine_client(tmp_path, monkeypatch, akOutputMode='keyer')
+    engine.status = 'ready'
+    assert client.post('/api/live', json={'previewJobId': 'prepared'}).status_code == 200
+    for action in ('start', 'restart', 'quit', 'setupDevice', 'setupDone'):
+        response = client.post(f'/api/live/engine/{action}')
+        assert response.status_code == 409, action
+        assert response.json() == {'detail': 'Stop the show first.'}
+    response = client.put('/api/live/output-settings', json={'akOutputRate': 30})
+    assert response.status_code == 409
+    assert response.json() == {'detail': 'Stop the show first.'}
+    assert settings_mod.load_settings()['akOutputRate'] == 25
+    engine.warnings = [{'id': 'obsWaiting', 'severity': 'block', 'text': 'waiting'}]
+    assert client.post('/api/live/engine/restart').status_code == 409
+    assert client.post('/api/live/engine/show').status_code == 200
+    assert engine.actions() == ['show']
+    assert client.get('/api/live').json()['status'] != 'stopped'
+
+
+@pytest.mark.parametrize('warning_id', ['obsExited', 'obsPageLost', 'engineError', 'obsUnreachable'])
+def test_restart_after_dead_output_stops_the_dead_session_first(tmp_path, monkeypatch, warning_id):
+    client, engine, adapters, events = engine_client(tmp_path, monkeypatch, akOutputMode='keyer')
+    engine.status = 'ready'
+    session = client.post('/api/live', json={'previewJobId': 'prepared'}).json()['sessionId']
+    engine.status, engine.warnings = 'blocked', [{**W5, 'id': warning_id}]
+    assert client.post('/api/live/engine/quit').status_code == 409
+    response = client.post('/api/live/engine/restart')
+    assert response.status_code == 200
+    assert adapters[-1].stopped
+    assert client.get('/api/live').json()['status'] == 'stopped'
+    order = [event[0] if event[0] == 'release' else event[1] for event in events]
+    assert order.index('release') < order.index('restart')
+    assert any(event[0] == 'release' and event[2] == session for event in events)
+
+
+def test_keyer_start_requires_a_ready_engine(tmp_path, monkeypatch):
+    client, engine, adapters, _ = engine_client(tmp_path, monkeypatch, akOutputMode='keyer')
+    response = client.post('/api/live', json={'previewJobId': 'prepared'})
+    assert response.status_code == 409
+    assert response.json()['detail'] == 'The output engine is not ready. Press Take output.'
+    engine.status = 'blocked'
+    engine.warnings = [{'id': 'noDevice', 'severity': 'warn', 'text': 'warn first'}, W5]
+    response = client.post('/api/live', json={'previewJobId': 'prepared'})
+    assert response.status_code == 409
+    assert response.json()['detail'] == W5['text']
+    assert not adapters
+    assert engine.actions() == []
+
+
+def test_keyer_start_attaches_to_the_engine_target_and_ignores_display(tmp_path, monkeypatch):
+    client, engine, adapters, _ = engine_client(tmp_path, monkeypatch, akOutputMode='keyer', akOutputRate=30)
+    engine.status = 'ready'
+    response = client.post('/api/live', json={'previewJobId': 'prepared', 'displayId': '42'})
+    assert response.status_code == 200, response.text
+    assert adapters[-1].kwargs == {
+        'display_id': None, 'continuity': 'auto', 'attach_endpoint': 'http://127.0.0.1:9333',
+        'attach_match': 'TARGET-1', 'bridge': 'obs-managed', 'output_rate': 30,
+    }
+    assert engine.actions() == []
+
+
+def test_screen_start_passes_no_engine_kwargs(tmp_path, monkeypatch):
+    client, engine, adapters, _ = engine_client(tmp_path, monkeypatch)
+    engine.status = 'ready'
+    assert client.post('/api/live', json={'previewJobId': 'prepared', 'displayId': '42'}).status_code == 200
+    assert adapters[-1].kwargs == {'display_id': 42, 'continuity': 'auto'}
+    assert engine.actions() == []
+
+
+def test_output_settings_put_saves_clamped_values_and_hands_them_to_the_engine(tmp_path, monkeypatch):
+    client, engine, _, _ = engine_client(tmp_path, monkeypatch)
+    response = client.put('/api/live/output-settings', json={'akOutputMode': 'keyer', 'akOutputRate': 60, 'akKeyer': 'off'})
+    assert response.status_code == 200
+    assert response.json() == {'akOutputMode': 'keyer', 'akOutputRate': 25, 'akKeyer': 'off'}
+    stored = settings_mod.load_settings()
+    assert (stored['akOutputMode'], stored['akOutputRate'], stored['akKeyer']) == ('keyer', 25, 'off')
+    assert stored['reusePreviews'] is True
+    assert client.put('/api/live/output-settings', json={'akOutputRate': 30}).json()['akOutputRate'] == 30
+    assert client.put('/api/live/output-settings', json={'akOutputMode': 'screen'}).status_code == 200
+    assert [call for call in engine.calls if call[0] != 'has_orphan'] == [
+        ('apply_settings', 'keyer', 25, 'off'), ('apply_settings', 'keyer', 30, 'off'), ('apply_settings', 'screen', 30, 'off')]
+
+
+def test_startup_checks_the_engine_only_when_an_orphan_exists(tmp_path, monkeypatch):
+    client, engine, _, _ = engine_client(tmp_path, monkeypatch)
+    with client:
+        assert engine.calls == [('has_orphan',)]
+    assert engine.actions() == []
+    engine = FakeEngine()
+    engine.orphan = True
+    client, *_ = client_for(tmp_path, monkeypatch, engine=engine)
+    with client:
+        assert engine.actions() == ['check']
+    assert engine.actions() == ['check', 'shutdown']
+    assert engine.calls[-1] == ('shutdown', 35)
+
+
+def test_shutdown_stops_the_session_before_releasing_the_engine(tmp_path, monkeypatch):
+    client, engine, adapters, events = engine_client(tmp_path, monkeypatch, akOutputMode='keyer')
+    with client:
+        assert client.post('/api/live/engine/start').status_code == 200
+        assert client.post('/api/live', json={'previewJobId': 'prepared'}).status_code == 200
+    assert adapters[-1].stopped
+    tail = [event[0] if event[0] == 'release' else event[1] for event in events][-2:]
+    assert tail == ['release', 'shutdown']
+    assert engine.calls[-1] == ('shutdown', 35)
+    assert 'quit' not in engine.actions()
+
+
+def test_shutdown_leaves_an_unused_engine_alone(tmp_path, monkeypatch):
+    client, engine, _, _ = engine_client(tmp_path, monkeypatch)
+    with client:
+        client.get('/api/live/engine')
+    assert engine.actions() == []
+
+
+class DeferredEngine(FakeEngine):
+    """Publishes the pending state synchronously; the work runs only when `run_pending` is called."""
+
+    def __init__(self, events=None):
+        super().__init__(events)
+        self.pending = []
+
+    def run_pending(self):
+        for settle in self.pending:
+            settle()
+        self.pending.clear()
+
+    def _defer(self, published, settle):
+        self.status = published
+        self.pending.append(settle)
+
+    def quit(self):
+        self._call('quit')
+        self._defer('quitting', lambda: setattr(self, 'status', 'stopped'))
+
+    def restart(self, rate, keyer):
+        self._call('restart', rate, keyer)
+        self._defer('starting', lambda: setattr(self, 'status', 'ready'))
+
+    def setup_device_begin(self, rate):
+        self._call('setup_device_begin', rate)
+        self._defer('starting', lambda: self._settle_setup(rate))
+
+    def setup_device_done(self):
+        self._call('setup_device_done')
+        self._defer('quitting', lambda: self._settle_setup(None))
+
+    def check(self, reset_page=False):
+        self._call('check', reset_page)
+        if reset_page:
+            self._defer('starting', lambda: setattr(self, 'status', 'ready'))
+
+
+@pytest.mark.parametrize(('action', 'pending'), [('quit', 'quitting'), ('restart', 'starting'), ('setupDevice', 'starting'), ('check', 'starting')])
+def test_keyer_start_is_refused_while_an_engine_action_is_pending(tmp_path, monkeypatch, action, pending):
+    settings_mod.save_settings({**settings_mod.load_settings(), 'akOutputMode': 'keyer'}, validate_dir=False)
+    engine = DeferredEngine()
+    engine.status = 'ready'
+    client, _claims, _releases, _job, adapters, _service = client_for(tmp_path, monkeypatch, engine=engine)
+    assert client.post(f'/api/live/engine/{action}').json()['state'] == pending
+    response = client.post('/api/live', json={'previewJobId': 'prepared'})
+    assert response.status_code == 409
+    assert response.json()['detail'] == 'The output engine is not ready. Press Take output.'
+    assert not adapters
+    engine.run_pending()
+    expected = 200 if action in ('restart', 'check') else 409
+    assert client.post('/api/live', json={'previewJobId': 'prepared'}).status_code == expected
+
+
+def test_device_setup_settles_blocked_and_refuses_output_settings_until_done(tmp_path, monkeypatch):
+    settings_mod.save_settings({**settings_mod.load_settings(), 'akOutputMode': 'keyer', 'akOutputRate': 30}, validate_dir=False)
+    engine = DeferredEngine()
+    client, _claims, _releases, _job, adapters, _service = client_for(tmp_path, monkeypatch, engine=engine)
+    assert client.post('/api/live/engine/setupDevice').json()['state'] == 'starting'
+    engine.run_pending()
+    body = client.get('/api/live/engine').json()
+    assert (body['state'], body['reason'], body['setup']) == ('blocked', 'deviceSetup', 30)
+    response = client.put('/api/live/output-settings', json={'akOutputMode': 'screen'})
+    assert response.status_code == 409
+    assert response.json() == {'detail': 'Finish device setup first.'}
+    assert settings_mod.load_settings()['akOutputMode'] == 'keyer'
+    assert client.post('/api/live', json={'previewJobId': 'prepared'}).status_code == 409
+    assert client.post('/api/live/engine/setupDone').json()['state'] == 'quitting'
+    engine.run_pending()
+    body = client.get('/api/live/engine').json()
+    assert (body['state'], body['setup']) == ('stopped', None)
+    assert 'reason' not in body
+    assert client.put('/api/live/output-settings', json={'akOutputMode': 'screen'}).status_code == 200
+    assert engine.actions() == ['setup_device_begin', 'setup_device_done', 'apply_settings']
+    assert not adapters
+
+
+def test_routes_only_use_engine_attributes_the_real_managed_obs_has():
+    # The route tests run against FakeEngine, so a method the routes call but ManagedObs lacks would only
+    # fail on a live dashboard. Parse every engine attribute web/live.py touches and check the real class.
+    import re
+
+    from obed_edom.managed_obs import ManagedObs
+
+    source = (Path(__file__).resolve().parents[1] / "src/obed_edom/web/live.py").read_text()
+    receivers = r'(?:\bmanaged|\bused_engine\(\)|\bengine\(\)|engine_slot\["engine"\])'
+    used = set(re.findall(receivers + r"\.([A-Za-z_]+)", source))
+    assert {"ensure_started", "shutdown", "apply_settings", "check", "setup_active", "target_id"} <= used
+    missing = sorted(name for name in used if not hasattr(ManagedObs, name))
+    assert missing == []
+    import inspect
+
+    assert "reset_page" in inspect.signature(ManagedObs.check).parameters
+    assert list(inspect.signature(ManagedObs.apply_settings).parameters)[1:] == ["mode", "rate", "keyer"]

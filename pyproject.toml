@@ -24,6 +24,7 @@ dependencies = [
     # macOS Vision OCR. Keynote's scripting API cannot read text inside groups
     # or baked into images, so rendered previews are read instead.
     "pyobjc-framework-Vision>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
     "imageio-ffmpeg>=0.6.0",
 ]
 

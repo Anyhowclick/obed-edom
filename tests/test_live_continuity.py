@@ -1435,6 +1435,48 @@ def test_codec_report_keeps_two_different_assets_independent():
     }
 
 
+def test_codec_report_omits_fps_unless_requested():
+    tmp = _tree_with_movie_files()
+    probed = []
+    report = codec_report(
+        tmp, SLIDES, resolver=_resolver, probe=lambda _path: "avc1", probe_fps=lambda path: probed.append(path) or 25.0,
+    )
+    assert all("fps" not in entry for entry in report)
+    assert probed == []
+
+
+def test_codec_report_rounds_fps_agreed_by_every_slide_folders_copy():
+    tmp = _tree_with_movie_files()
+    report = codec_report(
+        tmp, SLIDES, resolver=_resolver, probe=lambda _path: "avc1", probe_fps=lambda _path: 30000 / 1001, with_fps=True,
+    )
+    assert _entry(report, "untitled.mov")["fps"] == 29.97
+
+
+def test_codec_report_fps_is_none_when_slide_folders_copies_disagree():
+    tmp = _tree_with_movie_files()
+    rates = {SLIDE1: 25.0, SLIDE2: 25.0, SLIDE3: 30.0, SLIDE4: 25.0}
+    report = codec_report(
+        tmp, SLIDES, resolver=_resolver, probe=lambda _path: "avc1",
+        probe_fps=lambda path: rates.get(path.parent.parent.name), with_fps=True,
+    )
+    entry = _entry(report, "untitled.mov")
+    assert entry["fps"] is None
+    # an fps disagreement never touches the codec verdict.
+    assert entry["codec"] == "avc1"
+    assert "mixed" not in entry
+
+
+def test_codec_report_fps_is_none_when_any_copy_has_unreadable_fps():
+    tmp = _tree_with_movie_files()
+    rates = {SLIDE1: 25.0, SLIDE2: 25.0, SLIDE3: None, SLIDE4: 25.0}
+    report = codec_report(
+        tmp, SLIDES, resolver=_resolver, probe=lambda _path: "avc1",
+        probe_fps=lambda path: rates.get(path.parent.parent.name), with_fps=True,
+    )
+    assert _entry(report, "untitled.mov")["fps"] is None
+
+
 def test_codec_report_counts_one_file_for_two_instances_of_the_same_movie_on_a_slide():
     # Slide 1 authors Untitled.mov twice; both instances are the same file on disk.
     tmp = _tree_with_movie_files()
@@ -1600,6 +1642,15 @@ def test_real_export_movies_report_h264():
     # the export stores its own copy of Untitled.mov under each of the four slide folders,
     # and every one of them is probed.
     assert next(entry for entry in report if entry["asset"] == "untitled.mov")["files"] == 4
+
+
+@pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")
+def test_real_export_untitled_movie_reports_30_fps():
+    def resolver(root: Path, relative: str) -> Path:
+        return root / relative
+
+    report = codec_report(REAL_PLAYER_ROOT, SLIDES, resolver=resolver, with_fps=True)
+    assert _entry(report, "untitled.mov")["fps"] == pytest.approx(30.0, abs=0.01)
 
 
 @pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")

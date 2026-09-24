@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import RLock
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -22,12 +22,24 @@ from obed_edom.html_preview import (
 )
 from obed_edom.live_runtime import PLAYER_SHA256, RUNTIME_VERSION
 from obed_edom.live_session import LiveSessionService
+from obed_edom.settings import load_settings, save_settings
+
+STOP_SHOW_FIRST = "Stop the show first."
+DEAD_OUTPUT_WARNINGS = ("obsExited", "obsPageLost", "engineError", "obsUnreachable")
+ENGINE_NOT_READY = "The output engine is not ready. Press Take output."
+EngineAction = Literal["start", "restart", "check", "show", "quit", "setupDevice", "setupDone"]
 
 
 class StartBody(BaseModel):
     previewJobId: str = Field(min_length=1, max_length=200)
     displayId: str | None = None
     continuity: Literal["auto", "off"] = "auto"
+
+
+class OutputSettingsBody(BaseModel):
+    akOutputMode: Any = None
+    akOutputRate: Any = None
+    akKeyer: Any = None
 
 
 class CommandBody(BaseModel):
@@ -45,21 +57,50 @@ def _same_origin(request: Request) -> None:
         raise HTTPException(403, "Live controls require the dashboard origin.")
 
 
-def live_router(runner, *, service=None, host_factory=None, displays=None) -> APIRouter:
+def _output_settings(settings: dict) -> dict:
+    return {key: settings[key] for key in ("akOutputMode", "akOutputRate", "akKeyer")}
+
+
+def live_router(runner, *, service=None, host_factory=None, displays=None, engine_factory=None) -> APIRouter:
     from obed_edom.live_host import LiveOutputHost, list_displays
+    from obed_edom.managed_obs import ManagedObs
 
     sessions = service or LiveSessionService()
     make_host = host_factory or LiveOutputHost
     get_displays = displays or list_displays
+    make_engine = engine_factory or ManagedObs
     lock = RLock()
     roots: dict[str, Path] = {}
+    engine_slot: dict[str, Any] = {}
+
+    def engine():
+        with lock:
+            if "engine" not in engine_slot:
+                engine_slot["engine"] = make_engine()
+            return engine_slot["engine"]
+
+    def used_engine():
+        engine_slot["used"] = True
+        return engine()
+
+    def loaded_session():
+        current = sessions.state()
+        return current if current and current["status"] != "stopped" else None
+
+    def stop_session(current) -> None:
+        sessions.command(current["sessionId"], uuid4().hex, "stop")
 
     @asynccontextmanager
     async def lifespan(_app):
+        with lock:
+            if engine().has_orphan():
+                used_engine().check()
         yield
-        current = sessions.state()
-        if current and current["status"] != "stopped":
-            sessions.command(current["sessionId"], uuid4().hex, "stop")
+        current = loaded_session()
+        if current:
+            stop_session(current)
+        if engine_slot.get("used"):
+            engine_slot["engine"].shutdown(timeout=35)
 
     router = APIRouter(
         prefix="/api/live", dependencies=[Depends(_same_origin)], lifespan=lifespan,
@@ -103,11 +144,62 @@ def live_router(runner, *, service=None, host_factory=None, displays=None) -> AP
             })
         return rows
 
+    @router.get("/engine")
+    def engine_state():
+        settings = load_settings()
+        managed = engine()
+        managed.configure(settings["akOutputRate"], settings["akKeyer"])
+        return managed.state()
+
+    @router.post("/engine/{action}")
+    def engine_action(action: EngineAction):
+        with lock:
+            settings = load_settings()
+            rate, keyer = settings["akOutputRate"], settings["akKeyer"]
+            managed = used_engine()
+            current = loaded_session()
+            if current and action in ("start", "restart", "quit", "setupDevice", "setupDone"):
+                dead = any(item["id"] in DEAD_OUTPUT_WARNINGS for item in managed.state()["warnings"])
+                if action != "restart" or not dead:
+                    raise HTTPException(409, STOP_SHOW_FIRST)
+                stop_session(current)
+                current = None
+            if action == "start":
+                managed.ensure_started(rate, keyer)
+            elif action == "restart":
+                managed.restart(rate, keyer)
+            elif action == "check":
+                managed.check(reset_page=not current)
+            elif action == "show":
+                managed.show()
+            elif action == "quit":
+                managed.quit()
+            elif action == "setupDevice":
+                managed.setup_device_begin(rate)
+            else:
+                managed.setup_device_done()
+            return managed.state()
+
+    @router.get("/output-settings")
+    def output_settings():
+        return _output_settings(load_settings())
+
+    @router.put("/output-settings")
+    def put_output_settings(body: OutputSettingsBody):
+        with lock:
+            if loaded_session():
+                raise HTTPException(409, STOP_SHOW_FIRST)
+            if engine().setup_active:
+                raise HTTPException(409, "Finish device setup first.")
+            changes = {key: value for key, value in body.model_dump().items() if value is not None}
+            saved = save_settings({**load_settings(), **changes}, validate_dir=False)
+            used_engine().apply_settings(saved["akOutputMode"], saved["akOutputRate"], saved["akKeyer"])
+            return _output_settings(saved)
+
     @router.post("")
     def start(body: StartBody):
         with lock:
-            current = sessions.state()
-            if current and current["status"] != "stopped":
+            if loaded_session():
                 raise HTTPException(409, "Stop the active session before loading another deck.")
             job = runner.get(body.previewJobId)
             if not job or job.kind != "html-preview" or job.status != "done":
@@ -129,7 +221,18 @@ def live_router(runner, *, service=None, host_factory=None, displays=None) -> AP
                 slides = [dict(row) for row in result.get("slides", [])]
                 if any(row.get("unsupportedMedia") for row in slides):
                     raise ValueError("This deck contains unsupported media.")
-                host = make_host(root, slides, display_id=int(body.displayId) if body.displayId else None, continuity=body.continuity)
+                settings = load_settings()
+                if settings["akOutputMode"] == "keyer":
+                    managed = engine()
+                    status = managed.state()
+                    endpoint, target = managed.cdp_endpoint, managed.target_id
+                    if status["state"] != "ready" or not endpoint or not target:
+                        blocks = [item["text"] for item in status["warnings"] if item["severity"] == "block"]
+                        raise HTTPException(409, blocks[0] if blocks else ENGINE_NOT_READY)
+                    host = make_host(root, slides, display_id=None, continuity=body.continuity, attach_endpoint=endpoint,
+                                     attach_match=target, bridge="obs-managed", output_rate=settings["akOutputRate"])
+                else:
+                    host = make_host(root, slides, display_id=int(body.displayId) if body.displayId else None, continuity=body.continuity)
                 identity = {
                     "sourceDigest": result["sourceDigest"],
                     "playerDigest": digest,

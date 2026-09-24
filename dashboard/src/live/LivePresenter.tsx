@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { liveClient, type LiveClient, type LiveContinuity, type LiveDisplay, type LiveOperation, type LivePreparedDeck, type LiveSlide, type LiveSnapshot } from "./api";
+import { liveClient, type LiveClient, type LiveContinuity, type LiveDisplay, type LiveEngine, type LiveOperation, type LiveOutputSettings, type LivePreparedDeck, type LiveSlide, type LiveSnapshot } from "./api";
+import { engineBlocks, OutputEngine } from "./OutputEngine";
 import "./live.css";
 
 function Still({ slide, label }: { slide?: LiveSlide; label: string }) {
@@ -32,12 +33,12 @@ function ContinuityStatus({ continuity }: { continuity?: LiveContinuity }) {
   </div>;
 }
 
-function CodecWarnings({ warnings }: { warnings?: string[] }) {
+function MovieWarnings({ warnings, heading }: { warnings?: string[]; heading: string }) {
   if (!warnings?.length) return null;
   const visible = warnings.slice(0, 5);
   const hidden = warnings.length - visible.length;
   return <div className="live-codecs" aria-live="polite">
-    <span className="live-continuity-badge" data-mode="unsupported">Some movies may not play in this output</span>
+    <span className="live-continuity-badge" data-mode="unsupported">{heading}</span>
     <ul className="note">
       {visible.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}
       {hidden > 0 && <li>+{hidden} more</li>}
@@ -45,7 +46,7 @@ function CodecWarnings({ warnings }: { warnings?: string[] }) {
   </div>;
 }
 
-export function LivePresenter({ client = liveClient, previewJobId = "", pollMs = 1000 }: { client?: LiveClient; previewJobId?: string; pollMs?: number }) {
+export function LivePresenter({ client = liveClient, previewJobId = "", pollMs = 1000, enginePollMs = 2000 }: { client?: LiveClient; previewJobId?: string; pollMs?: number; enginePollMs?: number }) {
   const [snapshot, setSnapshot] = useState<LiveSnapshot | null>(null);
   const observed = useRef<LiveSnapshot | null>(null);
   const [connected, setConnected] = useState(false);
@@ -66,6 +67,9 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
   const [target, setTarget] = useState("");
   const [digits, setDigits] = useState("");
   const [upcomingCount, setUpcomingCount] = useState(3);
+  const [outputSettings, setOutputSettings] = useState<LiveOutputSettings | null>(null);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [engine, setEngine] = useState<LiveEngine | null>(null);
 
   const accept = useCallback((next: LiveSnapshot | null) => {
     const current = observed.current;
@@ -122,6 +126,28 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
     void loadChoices();
     return () => { cancelled = true; };
   }, [client]);
+
+  useEffect(() => {
+    let cancelled = false;
+    client.outputSettings().then((settings) => { if (!cancelled) setOutputSettings(settings); }).catch((error) => {
+      if (!cancelled) setMessage(error instanceof Error ? error.message : String(error));
+    });
+    return () => { cancelled = true; };
+  }, [client]);
+
+  async function saveOutputSettings(patch: Partial<LiveOutputSettings>) {
+    if (!outputSettings || savingSettings) return;
+    setSavingSettings(true);
+    setMessage("");
+    try {
+      const saved = await client.saveOutputSettings({ ...outputSettings, ...patch });
+      if (mounted.current) setOutputSettings(saved);
+    } catch (error) {
+      if (mounted.current) setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (mounted.current) setSavingSettings(false);
+    }
+  }
 
   useEffect(() => {
     if (awaitingObservation && snapshot && (snapshot.status === "ready" || snapshot.status === "error" || snapshot.status === "stopped")) {
@@ -193,15 +219,16 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
   }, [digits, goTo, send]);
 
   async function start() {
-    if (inFlight.current || !connected || !jobId.trim()) return;
+    if (inFlight.current || !connected || !jobId.trim() || engineReason) return;
     inFlight.current = true;
     setPending(true);
     const epoch = ++generation.current;
     setMessage("");
     try {
+      const display = keyer ? undefined : displayId || undefined;
       const next = continuityEnabled
-        ? await client.start(jobId, displayId || undefined)
-        : await client.start(jobId, displayId || undefined, "off");
+        ? await client.start(jobId, display)
+        : await client.start(jobId, display, "off");
       if (mounted.current && epoch === generation.current) accept(next);
     } catch (error) {
       if (mounted.current) setMessage(error instanceof Error ? error.message : String(error));
@@ -213,7 +240,10 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
   const currentIndex = available.findIndex((slide) => slide.originalOrdinal === snapshot?.originalSlide);
   const upcoming = currentIndex < 0 ? [] : available.slice(currentIndex + 1, currentIndex + 1 + upcomingCount);
   const visibilityOperation = snapshot?.outputVisible ? "hide" : "show";
-  const active = snapshot && snapshot.status !== "stopped";
+  const active = !!snapshot && snapshot.status !== "stopped";
+  const keyer = outputSettings?.akOutputMode === "keyer";
+  const engineReason = keyer ? engineBlocks(engine) : "";
+  const outputLocked = !outputSettings || savingSettings || active;
   return <section className="live-presenter" aria-label="Live presenter">
     <h1>Alpha Keynote</h1>
     <p className="lede">Experimental silent HDMI output. The picture is 16:9 within the detected display. DeckLink fill + key is not qualified.</p>
@@ -221,27 +251,49 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
     <p role="status">{connected ? snapshot ? `Player ${snapshot.status} · Output ${snapshot.outputVisible ? "visible" : "hidden"}` : "No active session" : connectionError ? "Disconnected · Reconnecting…" : "Connecting…"}</p>
     {connectionError && <p role="alert">{connectionError}. Existing output may still be running; commands are disabled until reconnected.</p>}
     {(message || awaitingObservation || snapshot?.error) && <p role="alert">{message || (awaitingObservation ? "Command accepted; waiting for observed player state." : snapshot?.error)}</p>}
+    <div className="actions live-output-settings">
+      <label>Output
+        <select aria-label="Output" value={outputSettings?.akOutputMode ?? "screen"} disabled={outputLocked} title={active ? "Stop the show first." : ""} onChange={(event) => void saveOutputSettings({ akOutputMode: event.target.value as LiveOutputSettings["akOutputMode"] })}>
+          <option value="screen">Screen (HDMI)</option>
+          <option value="keyer">Keyer (fill + key via UltraStudio)</option>
+        </select>
+      </label>
+      {keyer && outputSettings && <>
+        <label>Match the standard the Pulse shows
+          <select aria-label="Output rate" value={outputSettings.akOutputRate} disabled={outputLocked} title={active ? "Stop the show first." : ""} onChange={(event) => void saveOutputSettings({ akOutputRate: Number(event.target.value) as LiveOutputSettings["akOutputRate"] })}>
+            <option value={25}>25 fps</option>
+            <option value={30}>30 fps</option>
+          </select>
+        </label>
+        <label>
+          <input type="checkbox" checked={outputSettings.akKeyer === "external"} disabled={outputLocked} onChange={(event) => void saveOutputSettings({ akKeyer: event.target.checked ? "external" : "off" })} />
+          Keyer on
+        </label>
+      </>}
+    </div>
+    {keyer && outputSettings && <OutputEngine client={client} sessionLoaded={active} pollMs={enginePollMs} onEngine={setEngine} />}
     {!active && <form className="actions" onSubmit={(event) => { event.preventDefault(); void start(); }}>
       <label>Prepared deck
         <select aria-label="Prepared deck" value={jobId} onChange={(event) => setJobId(event.target.value)} disabled={!decks.length}>
           {decks.length ? decks.map((deck) => <option key={deck.previewJobId} value={deck.previewJobId}>{deck.name} · {deck.slides} slides</option>) : <option value="">No prepared decks available</option>}
         </select>
       </label>
-      <label>Output display
+      {!keyer && <label>Output display
         <select aria-label="Output display" value={displayId} onChange={(event) => setDisplayId(event.target.value)} disabled={!displays.length}>
           {displays.length ? displays.map((display) => <option key={display.id} value={display.id}>{display.name} · {display.width} × {display.height}{display.primary ? " · Primary" : ""}</option>) : <option value="">No display detected</option>}
         </select>
-      </label>
+      </label>}
       <label className="live-continuity-choice">
         <input type="checkbox" checked={continuityEnabled} disabled={pending} onChange={(event) => setContinuityEnabled(event.target.checked)} />
         Enable movie continuity when qualified
       </label>
       <p className="note live-continuity-help">Applies to the next session. Check its continuity status before showing output.</p>
       {!decks.length && <p className="note">Prepare a deck in Sermon Checker with Build Preview first. Live output never creates a new export.</p>}
-      <button className="btn" disabled={!connected || pending || !jobId || !displays.length}>Start output session</button>
+      <button className="btn" disabled={!connected || pending || !jobId || (keyer ? !!engineReason : !displays.length)} title={engineReason}>Start output session</button>
     </form>}
     {active && <ContinuityStatus continuity={snapshot.continuity} />}
-    {active && <CodecWarnings warnings={snapshot.output.codecWarnings} />}
+    {active && <MovieWarnings warnings={snapshot.output.codecWarnings} heading="Some movies may not play in this output" />}
+    {active && <MovieWarnings warnings={snapshot.output.rateWarnings} heading="Some movies do not match the output rate" />}
     {snapshot && <>
       <p className="note">Slide {snapshot.originalSlide ?? "unknown"} · Build {snapshot.buildIndex ?? "unknown"} · Display {snapshot.output.width} × {snapshot.output.height} · Audio off</p>
       {snapshot.autoPlayDeferred && <p className="note" aria-live="polite">{snapshot.autoPlayDeferred}</p>}

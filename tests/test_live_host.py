@@ -594,6 +594,37 @@ def test_pick_target_with_match_requires_exactly_one_match_not_a_silent_fallback
     assert "2 http://x/obs-b" in str(excinfo.value)
 
 
+def test_pick_target_matches_an_exact_target_id_whatever_the_page_url(tmp_path):
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, None, attach_endpoint="http://127.0.0.1:9222", attach_match="ABC123")
+    pages = [
+        {"type": "page", "id": "ABC123", "url": "http://127.0.0.1:5000/program.html", "title": "program", "webSocketDebuggerUrl": "ws://a"},
+        {"type": "page", "id": "DEF456", "url": "about:blank", "title": "", "webSocketDebuggerUrl": "ws://b"},
+    ]
+    assert transport._pick_target(pages)["webSocketDebuggerUrl"] == "ws://a"
+    transport.attach_match = "ABC12"
+    with pytest.raises(live_host.LiveHostError, match="did not select exactly one"):
+        transport._pick_target(pages)
+
+
+def test_pick_target_url_substring_match_still_works_beside_id_match(tmp_path):
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, None, attach_endpoint="http://127.0.0.1:9222", attach_match="#obed-ak")
+    pages = [
+        {"type": "page", "id": "1", "url": "about:blank#obed-ak", "title": "", "webSocketDebuggerUrl": "ws://a"},
+        {"type": "page", "id": "2", "url": "about:blank", "title": "", "webSocketDebuggerUrl": "ws://b"},
+    ]
+    assert transport._pick_target(pages)["webSocketDebuggerUrl"] == "ws://a"
+
+
+def test_pick_target_id_match_is_ambiguous_when_another_page_also_matches_by_url(tmp_path):
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, None, attach_endpoint="http://127.0.0.1:9222", attach_match="ABC123")
+    pages = [
+        {"type": "page", "id": "ABC123", "url": "about:blank", "title": "", "webSocketDebuggerUrl": "ws://a"},
+        {"type": "page", "id": "2", "url": "http://x/ABC123", "title": "", "webSocketDebuggerUrl": "ws://b"},
+    ]
+    with pytest.raises(live_host.LiveHostError, match="did not select exactly one"):
+        transport._pick_target(pages)
+
+
 def test_pick_target_without_match_never_falls_back_on_multiple_pages(tmp_path):
     display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
     transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, attach_endpoint="http://127.0.0.1:9222")
@@ -935,7 +966,7 @@ def host_with_continuity(
     tmp_path, monkeypatch, *, attach: bool = False, continuity: str = "auto", headless: bool = True,
     movie_bytes: bytes | None = None, extra_movie_bytes: bytes | None = None,
     movie_bytes_by_slide: dict[str, bytes] | None = None,
-    artwork_above_on_s2: bool = False, masked: bool = False, gl_replay: str | None = None,
+    artwork_above_on_s2: bool = False, masked: bool = False, gl_replay: str | None = None, **host_kwargs: Any,
 ) -> live_host.LiveOutputHost:
     export_root = tmp_path / "export"
     write_one_movie_export(
@@ -962,7 +993,7 @@ def host_with_continuity(
         kwargs["gl_replay"] = gl_replay
     return live_host.LiveOutputHost(
         export_root, slides_with_uuid(), headless=headless, transport_factory=FakeCdp,
-        server_factory=FakeServer, resolver=continuity_resolver(export_root), continuity=continuity, **kwargs,
+        server_factory=FakeServer, resolver=continuity_resolver(export_root), continuity=continuity, **kwargs, **host_kwargs,
     )
 
 
@@ -2462,3 +2493,133 @@ def test_gl_replay_output_shape_before_and_after_start(tmp_path, monkeypatch):
     records = read_log(output)
     record = next(r for r in records if r["kind"] == "continuity")
     assert record["glReplay"] == info
+
+
+def attach_host(tmp_path, monkeypatch, **kwargs):
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+    (tmp_path / "main.js").write_bytes(player_bytes())
+    (tmp_path / "header.json").write_text('{"slideWidth":1920,"slideHeight":1080,"showMode":0}')
+    monkeypatch.setattr(live_runtime, "PLAYER_SHA256", hashlib.sha256(player_bytes()).hexdigest())
+    return live_host.LiveOutputHost(
+        tmp_path, [], attach_endpoint="http://127.0.0.1:9222", transport_factory=FakeCdp, server_factory=FakeServer, resolver=resolver, **kwargs,
+    )
+
+
+def test_managed_bridge_is_reported_in_attach_output(tmp_path, monkeypatch):
+    result = attach_host(tmp_path, monkeypatch, bridge="obs-managed").output
+    assert result["bridge"] == "obs-managed"
+    assert result["transport"] == "fill-key"
+    assert result["alpha"] is True
+
+
+def test_default_attach_output_has_obs_cdp_bridge_and_no_rate_warnings_key(tmp_path, monkeypatch):
+    result = attach_host(tmp_path, monkeypatch).output
+    assert result["bridge"] == "obs-cdp"
+    assert "rateWarnings" not in result
+
+
+def test_screen_mode_output_has_no_rate_warnings_key(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch)
+    output._codec_report = [{"asset": "movie.mov", "codec": "avc1", "family": "h264", "files": 1, "fps": 25.0}]
+    assert "rateWarnings" not in output.output
+    assert "bridge" not in output.output
+
+
+@pytest.mark.parametrize(
+    ("fps", "rate", "warns"),
+    [
+        (30.0, 30, False),
+        (29.978, 30, False),
+        (29.97, 30, False),
+        (30.05, 30, False),
+        (30.07, 30, True),
+        (29.93, 30, True),
+        (25.0, 30, True),
+        (30.0, 25, True),
+        (25.0, 25, False),
+        (None, 30, False),
+    ],
+)
+def test_rate_warnings_use_a_relative_two_tenths_percent_tolerance(tmp_path, monkeypatch, fps, rate, warns):
+    output = attach_host(tmp_path, monkeypatch, bridge="obs-managed", output_rate=rate)
+    output._codec_report = [{"asset": "clip.mov", "codec": "avc1", "family": "h264", "files": 1, "fps": fps}]
+    assert bool(output.output["rateWarnings"]) is warns
+
+
+@pytest.mark.parametrize(
+    ("fps", "rate", "shown"),
+    [(29.97, 25, "29.97"), (25.0, 30, "25"), (23.976, 30, "23.976"), (50.0, 25, "50")],
+)
+def test_rate_warning_wording(tmp_path, monkeypatch, fps, rate, shown):
+    output = attach_host(tmp_path, monkeypatch, bridge="obs-managed", output_rate=rate)
+    output._codec_report = [
+        {"asset": "clip.mov", "codec": "avc1", "family": "h264", "files": 1, "fps": fps},
+        {"asset": "unknown.mov", "codec": None, "family": "other", "files": 1, "fps": None},
+    ]
+    assert output.output["rateWarnings"] == [
+        f"clip.mov is {shown} fps but the output is {rate} fps, so it will judder slightly. Re-export it at {rate} fps for smooth motion."
+    ]
+
+
+def test_rate_warnings_empty_list_when_every_movie_matches(tmp_path, monkeypatch):
+    output = attach_host(tmp_path, monkeypatch, bridge="obs-managed", output_rate=30)
+    assert output.output["rateWarnings"] == []
+
+
+def test_gl_replay_attach_refusal_unchanged_under_managed_bridge(tmp_path, monkeypatch):
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+    output = host_with_continuity(tmp_path, monkeypatch, attach=True, gl_replay="auto", bridge="obs-managed", output_rate=30)
+    calls = fake_plan_pair(monkeypatch)
+    forbid_gl_module(monkeypatch)
+    ready(monkeypatch)
+    output.observe()
+
+    assert calls and all("gl_replay" not in kwargs for kwargs in calls)
+    assert 'id="obed-gl-replay"' not in output._server.continuity_script
+    result = output.output
+    assert result["bridge"] == "obs-managed"
+    assert result["continuity"]["glReplay"]["mode"] == "unavailable"
+    assert result["continuity"]["glReplay"]["reason"] == "attach output not qualified"
+
+
+@pytest.mark.parametrize(("host_kwargs", "with_fps"), [({}, False), ({"output_rate": 30}, True)])
+def test_codec_report_probes_fps_only_when_an_output_rate_is_set(tmp_path, monkeypatch, host_kwargs, with_fps):
+    seen = []
+    monkeypatch.setattr(live_host, "codec_report", lambda *_a, **kwargs: seen.append(kwargs) or [])
+    output = host_with_continuity(tmp_path, monkeypatch, attach=True, **host_kwargs)
+    output._resolve_codecs()
+    assert seen and seen[0]["with_fps"] is with_fps
+
+
+REAL_PLAYER_ROOT = Path(__file__).resolve().parents[1] / "output" / "p2-recovery" / "html-adversarial" / "html-player"
+REAL_SLIDES = [
+    {"playerIndex": index, "originalOrdinal": index + 1, "exportedUuid": uuid, "skipped": False}
+    for index, uuid in enumerate([
+        "08C861A1-CB39-4832-B189-6DF95B7F3396", "0C652BEB-F445-48CF-BFD0-4194C6B7A438",
+        "D4D95253-4C37-40CF-A4A4-62D8DE24EF2A", "7A851F4D-4648-4545-A491-58838A7CD843",
+    ])
+]
+
+
+@pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")
+@pytest.mark.parametrize(
+    ("rate", "expected"),
+    [
+        (25, [
+            "untitled.mov is 30 fps but the output is 25 fps, so it will judder slightly. Re-export it at 25 fps for smooth motion.",
+            "vid-20250608-wa0125.mp4 is 29.978 fps but the output is 25 fps, so it will judder slightly. Re-export it at 25 fps for smooth motion.",
+        ]),
+        # 29.978 is within 0.2 % of 30, so the phone clip does not warn either.
+        (30, []),
+    ],
+)
+def test_real_export_rate_warnings_come_from_probed_movie_fps(tmp_path, monkeypatch, rate, expected):
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+    output = live_host.LiveOutputHost(
+        REAL_PLAYER_ROOT, REAL_SLIDES, attach_endpoint="http://127.0.0.1:9222", transport_factory=FakeCdp,
+        server_factory=FakeServer, resolver=lambda root, relative: root / relative, bridge="obs-managed", output_rate=rate,
+    )
+    output._codec_report, output._codec_warnings = output._resolve_codecs()
+    assert {entry["asset"]: entry["fps"] for entry in output._codec_report} == {"untitled.mov": 30.0, "vid-20250608-wa0125.mp4": 29.978}
+    assert output.output["rateWarnings"] == expected
