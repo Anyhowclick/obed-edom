@@ -195,7 +195,9 @@ decode+encode+reparse of the 131 members plus Metadata 12.5 s. Expect a 15–30 
 iwa_kindindex.py:13). Tables, charts and audio are never payload items, so they can never be hides.
 The writer still refuses any other pbtype. What stays on Keynote:
 - Before pass 1, from the wall payload: slides where any hide is the target of a build
-  (`wall.slides[].builds`, attached py:1169-1171). The benchmark has 1 such slide and 6 hides.
+  (`wall.slides[].builds`, attached py:1169-1171; the benchmark has 1 such slide and 6 hides), duals,
+  hides with no AppleScript address, and any hide whose payload item lacks `iwaId` (JXA or old cache;
+  decision 7).
 - After pass 1: any slide refused by R1–R8. It gets the per-slide AppleScript delete fallback (§Wiring),
   which runs before the first Keynote reopen.
 
@@ -231,12 +233,9 @@ Per slide, pure, over the single decode. Any failure refuses that slide only, an
   {`TSWP.ShapeInfoArchive`, `TSD.ImageArchive`, `TSD.MovieArchive`, `TSD.GroupArchive`}. No two specs may
   resolve to the same id. A target with two memberships (a text/shape dual,
   `derive_kind_index`, iwa_kindindex.py:98) refuses: deleting it would remove two kind slots
-  against one hide spec. The per-kind identity sequence must equal the payload's over every
-  derived record. Payload text items past the derived count are allowed only if they are tail
-  placeholders (`map_remap.is_placeholder_text`, at most `TEXT_PLACEHOLDER_SLACK`; JXA appends them
-  last, iwa_kindindex.py:21). Identity is normalised text for text/shape, data file name for
-  image/movie (`offline_inspect._data_identifier` :74 + `_build_data_index` :44, built once per
-  deck), and the child-text signature for groups. Lines are count-only.
+  against one hide spec. Each hide's payload item must carry `iwaId`; the saved (kind, kindIndex)
+  must resolve to that id, and to `iwaUuid` when carried, else refuse unproven (decision 7; this
+  replaced the per-kind text/file/group-signature identity sequence and the twin-geometry check).
 - R5: build the subtree S(d) as in §Census. Every archive in S must live in the slide's member.
   The reference scan is over a **strict** decode (`UndecodableIWAMember`, iwa_runs.py:247; a
   skipped member could hide a referrer). It walks every object of every archive, not `objs[0]` as
@@ -307,7 +306,8 @@ diagnostic "Map object after apply" line (py:1689) can change there. It is not p
   value becomes off with a `say`. Forced off when `offline_mode == "off"`: it needs the `iwa` extra and
   the offline-write kill switch covers it.
 - `offline_write.offline_hide_slides(transform_dicts, wall, wanted) -> set[int]`, pure: slides with ≥ 1
-  hide, ∩ wanted, minus slides where a payload build targets a hide `(kind, kindIndex)`. Computed at
+  hide, ∩ wanted, minus slides where a payload build targets a hide `(kind, kindIndex)`, a hide is a
+  dual or has no AppleScript address, or a hide's payload item lacks `iwaId` (decision 7). Computed at
   py:1540, passed as `plan["offlineHideSlides"]` only when the mode is not off. `plan_out` is unchanged,
   so `tests/test_golden_plan.py` stays green (its pins force offline write off, scripts/golden_plan.py:48-56).
 - py:1613: abort when `jxa.applied + jxa.hidesDeferred == 0`, tolerating a dict without
@@ -437,7 +437,7 @@ FAIL on any slide diff, a dangling ref, or a repair prompt: keep the default off
   - B3: a group hide removes the children.
   - B4: every untouched member is byte-identical, other slides included.
   - B5: each refusal R1–R8 leaves the deck byte-identical and the other slides patched (build ref,
-    shared mask, connection-line ref, dual target, non-top-level target, identity mismatch, reconcile
+    shared mask, connection-line ref, dual target, non-top-level target, id/uuid mismatch or missing id, reconcile
     mismatch, I1/I2/I3/I4 pre-violation, DataMetadataMap orphan, shared member).
   - B6: an injected post-write corruption makes the read-back raise.
   - B7: exactly one whole-deck decode for N slides with `verify=False`. Count `IWAFile.from_buffer`
@@ -456,7 +456,7 @@ FAIL on any slide diff, a dangling ref, or a repair prompt: keep the default off
     - a text/shape dual target;
     - an archive in S living in another member;
     - an undecodable member (strict).
-    - Positive case: tail placeholder text items in the payload do not refuse.
+    - Positive cases: a reordered saved deck refuses unproven; a resized canvas (x/4, y/4+405) still patches.
   - B13: Metadata edit order. The surviving entries keep their original order, and the post-edit
     tables equal the from-scratch recompute. A pre-state that the recompute cannot reproduce refuses.
   - B14: a movie hide on a component with `featureInfos` refuses.
@@ -526,7 +526,7 @@ earlier fixes closed. Each round adds one line to §Review log. At merge the raw
    reason and switches offline hides off for the operator's next run. A per-slide refusal still falls back only when
    `order_proven`.
 
-5. Twin slides whose disambiguation would rest on approximate (`needs_keynote`) geometry are excluded BEFORE deferral and
+5. SUPERSEDED by 7. Twin slides whose disambiguation would rest on approximate (`needs_keynote`) geometry are excluded BEFORE deferral and
    stay on the Keynote delete, like builds and duals (owner agreed, 2026-09-23, after the round-4 FRC dry run refused slide 20).
    `iwa_hides.pre_deferral_twin_risk` must be a superset of the saved-deck refusal; the post-save check stays as the backstop.
    The payload carries no `needs_keynote`, so the first proxy excluded 17 FRC slides (≈190 hides, ≈23 s). Owner chose (b):
@@ -647,3 +647,4 @@ disjoint.
 - S10 (2026-09-24, Sol H, round 10b on 3d02bd99, after Opus O10): PASS, no BLOCKER or MAJOR. All S9 and O10 items CLOSED except O10 #6, which was only written into the review log; it is now in `f-live-gate`, §O4 and §Gate. Offline review is complete; the live gate is next.
 - Live pre-step (2026-09-24, pinned 7ceaa47b, `--slides 1-60,118-125`, verify): run 1 read a pre-5b cache (44 slides; fixed as stale-cache 7ceaa47b). Run 2: 60 deferred; the post-save writer refused the 16 image-twin slides (geometry in source space vs the resized saved deck) and the run aborted as designed, with no wrong deletion and the source unchanged. Pass 1 took 71 s (JS hides stage 2.5 s) vs 94 s (16.9 s). Led to decision 7.
 - Decision 7 implemented (e218607f, 2026-09-24): net −575 lines; suites 6836 passed (twin tests retired), test:ui 246. Offline check on the kept run-2 snapshot: the 60 deferred slides give 667 hides, 0 refused; new eligibility is 61 slides (only 122 excluded). Slide 20 can't be tested on that snapshot because Keynote already deleted its hides there.
+- O11 (2026-09-24, Opus HIGH, on 05ccaed2, focused on decision 7): PASS, no BLOCKER or MAJOR. Id identity is sound and fail-safe; no code regressions. 4 MINOR stale plan sections and one docstring, all fixed.

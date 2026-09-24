@@ -355,8 +355,8 @@ def run_offline_hides(
     say: Callable[[str], None],
 ) -> dict[str, Any] | None:
     """Delete the hides pass 1 deferred on `hide_slides`: one surgical IWA rewrite, then one
-    AppleScript delete session for refused slides whose saved order the writer proved equal
-    to the source order (`order_proven`). `None` (no decode) when off or nothing is eligible.
+    AppleScript delete session for refused slides whose every hide the writer proved by source
+    id (`order_proven`). `None` (no decode) when off or nothing is eligible.
 
     Raises `OfflineHidesAborted` for a whole-deck refusal, any unproven refused slide, or any
     fallback failure: a hide left in place, or deleted by an unproven position, makes every
