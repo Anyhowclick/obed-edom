@@ -26,7 +26,7 @@ HEADLESS_CHROME_HEIGHT_PAD = 32
 
 FIXTURE = Path("output/p2-recovery/html-adversarial/html-player")
 ORIGINAL_INDEX = Path("output/p2-recovery/html-adversarial/html-unmodified/index.html")
-ARTIFACT = Path("output/keynote-live-planning-2026-09-19/live-host-headless-proof.json")
+ARTIFACT = Path("output/live-probes/live-host-headless-proof.json")
 PROBE_DIGEST = "a" * 64
 
 

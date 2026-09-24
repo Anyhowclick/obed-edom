@@ -336,7 +336,7 @@ host output `fill-key`, alpha true, transparent background. Page returned to `ab
 - **C5 go-to freeze CONFIRMED in the real output path:** goTo 3 and goTo 1-back ⇒ 0 `<video>`, liveFrac 0.000 at +1 s and
   +6 s, 1/8 unique shas (a fully static frame); one advance ⇒ 0.991 live.
 
-## Paint-oracle A12 re-measurement + re-qualification (2026-09-22, Fable; evidence, after the gate-runner prune, in the main checkout's `output/gate-runner-archive/research-harnesses/live-visible-content/{alt-oracle/a12-*,alt-cef/c1a12-*}` and `output/gate-runner-archive/requal-paint-oracle/`)
+## Paint-oracle A12 re-measurement + re-qualification (2026-09-22, Fable; raw evidence pruned 2026-09-24, see git history)
 The owner chose 12 shots at ≥360 ms (`(0,360,730,1090,1460,1820,2190,2550,2920,3280,3650,4010)`, plan §14) over E0's
 8-shot A. A12 measured with gate12 and A alongside as controls (all matched their E0 numbers):
 - Headless S-GL, 3 viewports × 3 sessions: positive LIVE 9/9 (liveFrac 0.805–0.806; in-page readPixels LIVE 9/9),
