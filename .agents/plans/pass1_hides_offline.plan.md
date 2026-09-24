@@ -26,23 +26,23 @@ todos:
       Stream A. `scripts/deck_decode_diff.py` + `tests/test_deck_decode_diff.py`: the ID-insensitive,
       reference-aware per-slide decode diff, with null and positive controls of the checker itself.
       See §Oracles/O2.
-    status: pending
+    status: completed
   - id: b-writer
     content: >-
       Stream B. New `src/obed_edom/iwa_hides.py` (`patch_deck_hides`), an optional `drop=` on
       `iwa_write._rewrite_members`, and `tests/test_iwa_hides.py`. See §Writer.
-    status: pending
+    status: completed
   - id: c-js
     content: >-
       Stream C. `remap_keynote.js`: skip `deleteHides` on `plan.offlineHideSlides`, return
       `hidesDeferred`, fix the 0-applied abort; `tests/offline_hides.test.js`. See §JS.
-    status: pending
+    status: completed
   - id: d-wiring
     content: >-
       Stream D. Flag helper, pure eligibility, `run_offline_hides` orchestration + AppleScript
       fallback, insertion at py:1636/1637, Applied accounting, pre/post snapshots, wiring tests.
       See §Wiring.
-    status: pending
+    status: completed
   - id: e-offline-dryrun
     content: >-
       After A+B+D, Keynote-free: dry-run `patch_deck_hides` on a scratch COPY of the source deck. Hides
@@ -51,7 +51,7 @@ todos:
       `uptime`). Checker: source vs dry-run differs on exactly the eligible slides, and per slide only
       in the removed subtree pbtypes (§Census counts). Dropped `Data/` = the orphan set. Needs ≈ 21 GB
       free (copy + 2.1× rewrite guard, iwa_write.py:919). Delete the copy after recording.
-    status: pending
+    status: completed
   - id: f-live-gate
     content: >-
       OWNER-GATED (Keynote shared with AK / GL-replay: owner go or peer all-clear first). Pre-step
@@ -59,7 +59,7 @@ todos:
       `patch_deck_hides` offline on its `.pre-hides.key` (the first Keynote-saved post-pass-1 deck), and
       stop on any refusal. Then two interleaved A/B pairs, pass/fail per §Gate. Record in
       `.agents/reviews/pass1-hides-offline-<date>/README.md`.
-    status: pending
+    status: completed
   - id: g-flip-docs
     content: >-
       After a GREEN gate and owner approval: default `OBED_OFFLINE_HIDES` to on (explicit off stays
@@ -661,3 +661,4 @@ disjoint.
 - S11 (2026-09-24, Sol H, on ffe1a719, decision 7): PASS, no BLOCKER or MAJOR, no findings. The offline review of decision 7 is complete (O11 + S11).
 - 2026-09-24: owner spotted MM partners deleted on slides 16→17 of the pre-step deck. Pre-existing planner behaviour (map_remap unchanged vs main; 685 hidden in run 1 and run 3); filed as `followup-mm-leftovers`. The owner chose to finish this feature's live gate first; the gate's MM check compares A vs B.
 - LIVE GATE (2026-09-24): all measured items PASS. Record: `.agents/reviews/pass1-hides-offline-2026-09-24/README.md`. Whole run −63 s / −88 s, runJxa −84 s / −103 s, 0 refused, O1 identical, O3 0 slides (after a checker fix for per-run churn, 2f2eea88), forced AppleScript fallback worked live. Pending owner: MM playback and the no-repair-prompt open.
+- Owner checks (2026-09-24): MM playback OK, no repair prompt. **Live gate GREEN.** `g-flip-docs` next (owner decision 2: default on).

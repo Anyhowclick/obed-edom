@@ -75,7 +75,9 @@ The A-vs-A null gave 152 differing slides. The checker was fixed in 2f2eea88, an
 
 **PASS.**
 
-## Owner checks (pending)
+## Owner checks
 
-- Magic Move playback of 2–3 transitions, `p2-B-final.key` vs `p2-A-final.key`. Slides 16→17 lose their MM partners in both, from the pre-existing planner rule (todo `followup-mm-leftovers`).
-- Keynote opens the B final deck with no repair prompt.
+- Magic Move playback, `p2-B-final.key` vs `p2-A-final.key`: **OK** (owner, 2026-09-24).
+- Keynote opens the B final deck with **no repair prompt** (owner, 2026-09-24).
+
+**Gate: GREEN.**
