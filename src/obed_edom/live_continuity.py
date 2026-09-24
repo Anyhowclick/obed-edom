@@ -1577,6 +1577,7 @@ def codec_report(
     resolver: Callable[[Path, str], Path] = safe_export_file,
     probe: Callable[[Path], str | None] = movie_codec,
     probe_fps: Callable[[Path], float | None] = movie_fps,
+    with_fps: bool = False,
 ) -> list[dict[str, Any]]:
     """Codec of every movie asset any non-skipped slide's events reference, independent
     of whether the deck qualifies for continuity (a rotated or ambiguous movie's codec
@@ -1586,19 +1587,21 @@ def codec_report(
     Each entry covers all `files` the key resolves to: it reports a codec only when they
     all agree, and otherwise fails closed to an unreadable (`codec: None`, family
     `other`) entry, flagged `mixed` when the disagreement is between readable codecs.
-    `fps` (rounded to 3 decimals) likewise is reported only when every file agrees."""
+    With `with_fps`, entries also carry `fps` (rounded to 3 decimals), likewise set only
+    when every file agrees."""
     assets = _referenced_movies(export_root, slides, resolver=resolver)
     report = []
     for asset, paths in sorted(assets.items()):
         fourccs = {probe(path) if path is not None else None for path in paths}
         mixed = len(fourccs) > 1 and None not in fourccs
         fourcc = fourccs.pop() if len(fourccs) == 1 else None
-        rates = {probe_fps(path) if path is not None else None for path in paths}
-        fps = rates.pop() if len(rates) == 1 else None
         entry: dict[str, Any] = {
             "asset": asset, "codec": fourcc, "family": codec_family(fourcc), "files": len(paths),
-            "fps": round(fps, 3) if fps is not None else None,
         }
+        if with_fps:
+            rates = {probe_fps(path) if path is not None else None for path in paths}
+            fps = rates.pop() if len(rates) == 1 else None
+            entry["fps"] = round(fps, 3) if fps is not None else None
         if mixed:
             entry["mixed"] = True
         report.append(entry)

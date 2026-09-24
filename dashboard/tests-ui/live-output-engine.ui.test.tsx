@@ -7,9 +7,10 @@ function engineState(overrides: Partial<LiveEngine> = {}): LiveEngine {
   return {
     state: "ready",
     obs: { path: "/Applications/OBS.app", version: "32.2.2", pinned: "32.2.2" },
-    rate: { output: 25, canvas: 25, source: 50 },
+    rate: { output: 25, canvas: "25 PAL", source: 50 },
     device: { name: "UltraStudio HD Mini", set: true },
     keyer: "external",
+    setup: null,
     warnings: [],
     ...overrides,
   };
@@ -41,7 +42,22 @@ const WARNINGS: [LiveEngineWarning, string[]][] = [
   [{ id: "deviceInactive", severity: "block", text: "Alpha Keynote cannot open the UltraStudio. If ProPresenter is running, remove its SDI screen in Screen Configuration or quit ProPresenter; otherwise check the Thunderbolt cable and Desktop Video. Then press Release output and Take output again." }, ["Release output", "Take output"]],
   [{ id: "stuck", severity: "block", text: "OBS is not responding to Quit. Press Show OBS and quit it from the OBS menu, then press Check again." }, ["Show OBS"]],
   [{ id: "ownedElsewhere", severity: "block", text: "The output engine is being used by another dashboard window (pid 4242). Close that dashboard first." }, ["Check again"]],
+  [{ id: "obsUnreachable", severity: "block", text: "Alpha Keynote cannot reach OBS. Press Restart output engine.", action: "restart" }, ["Restart output engine"]],
 ];
+
+const ENABLED_WHILE_LOADED: Record<string, string[]> = {
+  obsMissing: ["Check again"],
+  obsVersion: ["Check again"],
+  obsUncleanExit: [],
+  obsWaiting: ["Show OBS", "Check again"],
+  obsSafeMode: [],
+  obsExited: ["Restart output engine"],
+  noDevice: [],
+  deviceInactive: [],
+  stuck: ["Show OBS"],
+  ownedElsewhere: ["Check again"],
+  obsUnreachable: ["Restart output engine"],
+};
 
 const ACTIONS: Record<string, LiveEngineAction> = {
   "Check again": "check",
@@ -56,7 +72,7 @@ describe("OutputEngine", () => {
   it.each(WARNINGS)("shows the $id warning with its action buttons", async (warning, buttons) => {
     const blocked = engineState({ state: warning.id === "stuck" ? "stuck" : "blocked", warnings: [warning] });
     const api = client({ engine: vi.fn(async () => blocked), engineAction: vi.fn(async () => blocked) });
-    render(<OutputEngine client={api} rate={25} sessionLoaded={false} pollMs={60_000} />);
+    render(<OutputEngine client={api} sessionLoaded={false} pollMs={60_000} />);
     const item = await screen.findByRole("listitem", { name: warning.text });
     expect(item).toHaveAttribute("data-severity", warning.severity);
     expect(within(item).queryAllByRole("button").map((button) => button.textContent)).toEqual(buttons);
@@ -69,10 +85,32 @@ describe("OutputEngine", () => {
     expect(api.engineAction).toHaveBeenCalledTimes(buttons.length);
   });
 
+  it.each(WARNINGS)("while a session is loaded, allows only check, show and dead-output restart for $id", async (warning, buttons) => {
+    const api = client({ engine: vi.fn(async () => engineState({ state: "blocked", warnings: [warning] })) });
+    render(<OutputEngine client={api} sessionLoaded pollMs={60_000} />);
+    await screen.findByText(warning.text);
+    const item = screen.getByText(warning.text).closest("li")!;
+    const enabled = within(item).queryAllByRole("button").filter((button) => !(button as HTMLButtonElement).disabled).map((button) => button.textContent);
+    expect(enabled).toEqual(ENABLED_WHILE_LOADED[warning.id]);
+    expect(buttons).toEqual(expect.arrayContaining(ENABLED_WHILE_LOADED[warning.id]));
+    for (const take of screen.getAllByRole("button", { name: "Take output" })) expect(take).toBeDisabled();
+  });
+
+  it.each(["obsPageLost", "engineError"])("offers Restart output engine during a session for %s", async (id) => {
+    const warning: LiveEngineWarning = { id, severity: "block", text: `${id} text` };
+    const api = client({ engine: vi.fn(async () => engineState({ state: "blocked", warnings: [warning] })) });
+    render(<OutputEngine client={api} sessionLoaded pollMs={60_000} />);
+    const item = (await screen.findByText(warning.text)).closest("li")!;
+    const restart = within(item).getByRole("button", { name: "Restart output engine" });
+    expect(restart).toBeEnabled();
+    await act(async () => { fireEvent.click(restart); });
+    expect(api.engineAction).toHaveBeenCalledWith("restart");
+  });
+
   it("raises the engine-exited warning as an alert during a session", async () => {
     const warning = WARNINGS.find(([entry]) => entry.id === "obsExited")![0];
     const api = client({ engine: vi.fn(async () => engineState({ state: "blocked", warnings: [warning] })) });
-    render(<OutputEngine client={api} rate={25} sessionLoaded pollMs={60_000} />);
+    render(<OutputEngine client={api} sessionLoaded pollMs={60_000} />);
     expect(await screen.findByRole("alert")).toHaveTextContent(warning.text);
   });
 
@@ -81,7 +119,7 @@ describe("OutputEngine", () => {
       engine: vi.fn(async () => engineState({ state: "stopped" })),
       engineAction: vi.fn(async (action: LiveEngineAction) => engineState({ state: action === "start" ? "ready" : "stopped" })),
     });
-    render(<OutputEngine client={api} rate={25} sessionLoaded={false} pollMs={60_000} />);
+    render(<OutputEngine client={api} sessionLoaded={false} pollMs={60_000} />);
     await screen.findByText("Output engine · Released");
     expect(screen.getByRole("button", { name: "Release output" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Take output" }));
@@ -96,13 +134,13 @@ describe("OutputEngine", () => {
 
   it("does not start the engine on mount", async () => {
     const api = client({ engine: vi.fn(async () => engineState({ state: "stopped" })) });
-    render(<OutputEngine client={api} rate={25} sessionLoaded={false} pollMs={60_000} />);
+    render(<OutputEngine client={api} sessionLoaded={false} pollMs={60_000} />);
     await screen.findByText("Output engine · Released");
     expect(api.engineAction).not.toHaveBeenCalled();
   });
 
   it("disables Release output while a session is loaded", async () => {
-    render(<OutputEngine client={client()} rate={25} sessionLoaded pollMs={60_000} />);
+    render(<OutputEngine client={client()} sessionLoaded pollMs={60_000} />);
     await screen.findByText("Output engine · Ready");
     expect(screen.getByRole("button", { name: "Release output" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Release output" })).toHaveAttribute("title", "Stop the show first.");
@@ -110,26 +148,28 @@ describe("OutputEngine", () => {
 
   it("shows a refused action's detail", async () => {
     const api = client({ engineAction: vi.fn(async () => { throw new Error("Stop the show first."); }) });
-    render(<OutputEngine client={api} rate={25} sessionLoaded={false} pollMs={60_000} />);
+    render(<OutputEngine client={api} sessionLoaded={false} pollMs={60_000} />);
     await screen.findByText("Output engine · Ready");
     fireEvent.click(screen.getByRole("button", { name: "Release output" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Stop the show first.");
   });
 
-  it("walks the one-time device setup: Set up output device, instructions, Done", async () => {
+  it("walks the one-time device setup from the polled setup rate", async () => {
     const noDevice = WARNINGS.find(([entry]) => entry.id === "noDevice")![0];
     const noDevice30 = { ...noDevice, text: noDevice.text.replace("25 fps", "30 fps") };
     const api = client({
       engine: vi.fn(async () => engineState({ device: { name: null, set: false }, warnings: [noDevice30] })),
       engineAction: vi.fn(async (action: LiveEngineAction) => action === "setupDone"
         ? engineState()
-        : engineState({ state: "starting", device: { name: null, set: false }, warnings: [noDevice30] })),
+        : engineState({ state: "blocked", reason: "deviceSetup", setup: 30, device: { name: null, set: false }, warnings: [noDevice30] })),
     });
-    render(<OutputEngine client={api} rate={30} sessionLoaded={false} pollMs={60_000} />);
+    render(<OutputEngine client={api} sessionLoaded={false} pollMs={60_000} />);
     expect(await screen.findByText("Output device · Not set up")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Done" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Set up output device" }));
     await waitFor(() => expect(api.engineAction).toHaveBeenCalledWith("setupDevice"));
     expect(await screen.findByText("In OBS: Tools → Decklink Output → pick UltraStudio HD Mini, Mode 1080p30, Keyer External, Pixel format BGRA 8-bit, tick Auto start, press Start, then OK. Then press Done here.")).toBeInTheDocument();
+    expect(screen.queryByText("deviceSetup")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Done" }));
     await waitFor(() => expect(api.engineAction).toHaveBeenCalledWith("setupDone"));
     await waitFor(() => expect(screen.queryByRole("button", { name: "Done" })).not.toBeInTheDocument());
@@ -137,21 +177,47 @@ describe("OutputEngine", () => {
     expect(screen.getByText("Output device · UltraStudio HD Mini")).toBeInTheDocument();
   });
 
+  it("shows the instructions and Done when mounted into an active setup", async () => {
+    const api = client({ engine: vi.fn(async () => engineState({ state: "blocked", reason: "deviceSetup", setup: 25, device: { name: null, set: false } })) });
+    render(<OutputEngine client={api} sessionLoaded={false} pollMs={60_000} />);
+    expect(await screen.findByText(/Mode 1080p25, Keyer External/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Done" })).toBeEnabled();
+    expect(api.engineAction).not.toHaveBeenCalled();
+  });
+
+  it("hides the instructions when a poll shows setup ended elsewhere", async () => {
+    const engine = vi.fn()
+      .mockResolvedValueOnce(engineState({ state: "blocked", reason: "deviceSetup", setup: 25 }))
+      .mockResolvedValue(engineState());
+    vi.useFakeTimers();
+    try {
+      render(<OutputEngine client={client({ engine })} sessionLoaded={false} pollMs={2000} />);
+      await act(async () => {});
+      expect(screen.getByRole("button", { name: "Done" })).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      expect(screen.queryByRole("button", { name: "Done" })).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps the setup instructions when Done is refused", async () => {
-    const noDevice = WARNINGS.find(([entry]) => entry.id === "noDevice")![0];
+    const setup = engineState({ state: "blocked", reason: "deviceSetup", setup: 25, device: { name: null, set: false } });
     const api = client({
-      engine: vi.fn(async () => engineState({ device: { name: null, set: false }, warnings: [noDevice] })),
-      engineAction: vi.fn(async (action: LiveEngineAction) => {
-        if (action === "setupDone") throw new Error("OBS did not write the device file.");
-        return engineState({ state: "starting", device: { name: null, set: false }, warnings: [noDevice] });
-      }),
+      engine: vi.fn(async () => setup),
+      engineAction: vi.fn(async () => { throw new Error("OBS did not write the device file."); }),
     });
-    render(<OutputEngine client={api} rate={25} sessionLoaded={false} pollMs={60_000} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Set up output device" }));
+    render(<OutputEngine client={api} sessionLoaded={false} pollMs={60_000} />);
     fireEvent.click(await screen.findByRole("button", { name: "Done" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("OBS did not write the device file.");
     expect(screen.getByRole("button", { name: "Done" })).toBeInTheDocument();
     expect(screen.getByText(/Mode 1080p25/)).toBeInTheDocument();
+  });
+
+  it("disables Done while a session is loaded", async () => {
+    const api = client({ engine: vi.fn(async () => engineState({ state: "blocked", reason: "deviceSetup", setup: 25 })) });
+    render(<OutputEngine client={api} sessionLoaded pollMs={60_000} />);
+    expect(await screen.findByRole("button", { name: "Done" })).toBeDisabled();
   });
 
   it("polls the engine state and reports it to the parent", async () => {
@@ -161,7 +227,7 @@ describe("OutputEngine", () => {
       .mockResolvedValue(engineState());
     vi.useFakeTimers();
     try {
-      const view = render(<OutputEngine client={client({ engine })} rate={25} sessionLoaded={false} pollMs={2000} onEngine={onEngine} />);
+      const view = render(<OutputEngine client={client({ engine })} sessionLoaded={false} pollMs={2000} onEngine={onEngine} />);
       await act(async () => {});
       expect(screen.getByText("Output engine · Starting")).toBeInTheDocument();
       await act(async () => { await vi.advanceTimersByTimeAsync(2000); });

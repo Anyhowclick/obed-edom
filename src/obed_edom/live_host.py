@@ -820,7 +820,7 @@ class LiveOutputHost:
         this must stay populated even when continuity is off or unsupported. A failure to
         probe never blocks the session -- an unreadable codec is just reported as such."""
         try:
-            report = codec_report(self.export_root, self.slides, resolver=self.resolver)
+            report = codec_report(self.export_root, self.slides, resolver=self.resolver, with_fps=self._output_rate is not None)
         except Exception:  # noqa: BLE001 - fail closed, never let codec probing crash the host
             return [], []
         attach = self._attach_endpoint is not None

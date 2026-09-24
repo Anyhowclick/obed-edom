@@ -25,6 +25,7 @@ from obed_edom.managed_obs import (
     render_tree,
     write_tree,
 )
+from obed_edom.obs_websocket import ObsWebsocketTimeout
 from tests.test_obs_websocket import FakeObsWebsocket
 
 # ---------------------------------------------------------------------------
@@ -220,36 +221,60 @@ class FakeCdp:
 
 
 class FakeLauncher:
+    """Fake OBS processes: `alive_pids` are running OBS apps, `dates` their launch dates and
+    `homes` the CFFIXED_USER_HOME each was started with (None: no marker)."""
+
     def __init__(self) -> None:
         self.launches: list[dict[str, Any]] = []
         self.alive_pids: set[int] = set()
-        self.dates: dict[int, float] = {}
+        self.dates: dict[int, float | None] = {}
+        self.homes: dict[int, str | None] = {}
+        self.marker_unknown: set[int] = set()
         self.terminated: list[int] = []
         self.shown: list[int] = []
         self.quits = True
         self.next_pid = 4242
+        self.launch_date: Callable[[], float | None] = time.time
+        self.block: threading.Event | None = None
+        self.entered = threading.Event()
         self.on_launch: Callable[["FakeLauncher", int], None] | None = None
+        self.on_terminate: Callable[[int], None] | None = None
 
-    def launch(self, app: Path, args: list[str], env: dict[str, str], *, hidden: bool) -> tuple[int, float]:
+    def add(self, pid: int, date: float | None, home: Path | str | None) -> None:
+        self.alive_pids.add(pid)
+        self.dates[pid] = date
+        self.homes[pid] = None if home is None else str(home)
+
+    def launch(self, app, args, env, *, hidden, on_launched):
+        self.entered.set()
+        if self.block is not None:
+            assert self.block.wait(15)
         pid = self.next_pid
         self.next_pid += 1
-        self.dates[pid] = time.time()
-        self.alive_pids.add(pid)
+        self.add(pid, self.launch_date(), env.get("CFFIXED_USER_HOME"))
         self.launches.append({"app": app, "args": list(args), "env": dict(env), "hidden": hidden, "pid": pid})
+        on_launched(pid, self.dates[pid])
         if self.on_launch is not None:
             self.on_launch(self, pid)
         return pid, self.dates[pid]
 
-    def alive(self, pid: int, launch_date: float | None) -> bool:
-        return pid in self.alive_pids
+    def processes(self):
+        return [(pid, self.dates.get(pid)) for pid in sorted(self.alive_pids)]
 
-    def terminate(self, pid: int, launch_date: float | None) -> bool:
+    def env_marker(self, pid, home):
+        if pid in self.marker_unknown:
+            return None
+        return pid in self.alive_pids and self.homes.get(pid) == str(home)
+
+    def terminate(self, pid):
         self.terminated.append(pid)
+        if self.on_terminate is not None:
+            self.on_terminate(pid)
         if self.quits:
             self.alive_pids.discard(pid)
         return True
 
-    def show(self, pid: int, launch_date: float | None) -> bool:
+    def show(self, pid):
         self.shown.append(pid)
         return True
 
@@ -287,9 +312,11 @@ class Rig:
             self._ports = [self.cdp.port, self.ws_port]
         return self._ports.pop(0)
 
-    def make(self) -> ManagedObs:
-        engine = ManagedObs(self.home, launcher=self.launcher, clock=self.clock, sleep=self.clock.sleep, obs_app=self.app,
-                            pick_port=self._pick_port, ready_timeout_s=2.0, liveness_s=3600.0)
+    def make(self, **overrides: Any) -> ManagedObs:
+        options: dict[str, Any] = {"launcher": self.launcher, "clock": self.clock, "sleep": self.clock.sleep, "obs_app": self.app,
+                                   "pick_port": self._pick_port, "ready_timeout_s": 2.0, "liveness_s": 3600.0}
+        options.update(overrides)
+        engine = ManagedObs(self.home, **options)
         self.engines.append(engine)
         return engine
 
@@ -307,6 +334,8 @@ class Rig:
         return engine.state()
 
     def close(self) -> None:
+        if self.launcher.block is not None:
+            self.launcher.block.set()
         for engine in self.engines:
             engine.close()
         self.cdp.close()
@@ -392,18 +421,35 @@ def test_engine_record_written_with_ports_and_clean_exit(rig):
     assert r.record()["cleanExit"] is True
 
 
-def test_record_written_before_seeding(rig):
+def test_record_written_only_once_launch_returned_a_pid(rig):
     r = rig()
     seen: dict[str, Any] = {}
     original = r.engine._seed
 
     def spy(cfg):
-        seen["record"] = r.record()
+        seen["exists"] = (r.home / "ak-engine.json").exists()
         original(cfg)
 
     r.engine._seed = spy
     r.run(lambda: r.engine.ensure_started(25, "external"))
-    assert seen["record"]["cleanExit"] is False and seen["record"]["pid"] is None
+    assert seen["exists"] is False
+    assert r.record()["pid"] == 4242 and r.record()["cleanExit"] is False
+
+
+def test_failed_launch_writes_no_record_and_no_w3_next_time(rig):
+    r = rig()
+    real_launch = r.launcher.launch
+
+    def failing(*args, **kwargs):
+        raise ManagedObsError("OBS could not be launched")
+
+    r.launcher.launch = failing
+    state = r.run(lambda: r.engine.ensure_started(25, "external"))
+    assert state["reason"] == "engineError"
+    assert not (r.home / "ak-engine.json").exists()
+    r.launcher.launch = real_launch
+    state = r.run(lambda: r.engine.restart(25, "external"))
+    assert state["state"] == "ready" and "obsUncleanExit" not in _ids(state)
 
 
 # --- discovery ----------------------------------------------------------------
@@ -646,7 +692,7 @@ def test_w11_websocket_errors_are_unknown_reads(rig, monkeypatch):
         def __exit__(self, *args): return None
 
     monkeypatch.setattr(managed_obs, "ObsWebsocket", Broken)
-    for _ in range(3):
+    for _ in range(2):
         r.engine._liveness()
     assert r.engine.state()["state"] == "ready"
     monkeypatch.setattr(managed_obs, "ObsWebsocket", real)
@@ -731,6 +777,9 @@ def test_operator_closing_obs_during_setup_is_not_w5(rig):
     r.engine._liveness()
     state = r.engine.state()
     assert "obsExited" not in _ids(state) and state["reason"] == "deviceSetup"
+    assert r.record()["cleanExit"] is False
+    state = r.run(lambda: r.engine.ensure_started(25, "external"))
+    assert "obsUncleanExit" in _ids(state)
 
 
 # --- quit / stuck / show ------------------------------------------------------
@@ -765,7 +814,7 @@ def test_quit_timeout_is_stuck_and_never_kills(rig, monkeypatch):
     r.launcher.alive_pids.clear()
     state = r.run(r.engine.check)
     assert state["state"] == "stopped" and "stuck" not in _ids(state)
-    assert r.record()["cleanExit"] is True
+    assert r.record()["cleanExit"] is False, "only AK's own confirmed quit is clean"
 
 
 def test_stuck_restart_does_not_relaunch_or_reseed(rig):
@@ -823,7 +872,7 @@ def test_orphan_is_always_quit_then_relaunched(rig):
     r = rig()
     r.home.mkdir(parents=True)
     (r.home / "ak-engine.json").write_text(json.dumps({"pid": 999, "launchDate": 1.0, "cdpPort": 1, "wsPort": 2, "cleanExit": False}))
-    r.launcher.alive_pids.add(999)
+    r.launcher.add(999, 1.0, r.home)
     state = r.run(lambda: r.engine.ensure_started(25, "external"))
     assert r.launcher.terminated == [999]
     assert [launch["pid"] for launch in r.launcher.launches] == [4242]
@@ -835,7 +884,7 @@ def test_orphan_is_quit_on_first_check(rig):
     r = rig()
     r.home.mkdir(parents=True)
     (r.home / "ak-engine.json").write_text(json.dumps({"pid": 999, "launchDate": 1.0, "cdpPort": 1, "wsPort": 2, "cleanExit": False}))
-    r.launcher.alive_pids.add(999)
+    r.launcher.add(999, 1.0, r.home)
     state = r.run(r.engine.check)
     assert r.launcher.terminated == [999] and r.launcher.launches == []
     assert state["state"] == "stopped"
@@ -969,7 +1018,7 @@ def test_has_orphan(rig):
     r.home.mkdir(parents=True)
     (r.home / "ak-engine.json").write_text(json.dumps({"pid": 999, "launchDate": 1.0, "cdpPort": 1, "wsPort": 2, "cleanExit": False}))
     assert r.engine.has_orphan() is False
-    r.launcher.alive_pids.add(999)
+    r.launcher.add(999, 1.0, r.home)
     assert r.engine.has_orphan() is True
     assert r.engine._thread is None and r.engine._lock_file is None
     assert not (r.home / "ak-engine.lock").exists()
@@ -979,15 +1028,84 @@ def test_has_orphan(rig):
     assert r.engine.has_orphan() is False
 
 
-def test_has_orphan_checks_the_launch_date(rig):
+def test_pid_reuse_by_a_non_ak_obs_is_untouched(rig):
     r = rig()
     r.home.mkdir(parents=True)
-    (r.home / "ak-engine.json").write_text(json.dumps({"pid": 999, "launchDate": 1.0, "cleanExit": False}))
-    r.launcher.alive_pids.add(999)
-    seen: list[tuple[int, Any]] = []
-    r.launcher.alive = lambda pid, launch_date: seen.append((pid, launch_date)) or False
+    (r.home / "ak-engine.json").write_text(json.dumps({"pid": 999, "launchDate": 1.0, "cdpPort": 1, "wsPort": 2, "cleanExit": True}))
+    r.launcher.add(999, 1.0, None)
+    r.launcher.add(998, 5.0, "/Users/someone")
     assert r.engine.has_orphan() is False
-    assert seen == [(999, 1.0)]
+    state = r.run(lambda: r.engine.ensure_started(25, "external"))
+    assert state["state"] == "ready"
+    assert r.launcher.terminated == []
+    r.run(r.engine.quit)
+    r.run(r.engine.show)
+    assert r.launcher.terminated == [4242] and r.launcher.shown == []
+    assert {998, 999} <= r.launcher.alive_pids
+
+
+def test_orphan_without_any_launch_date_is_found_by_marker(rig):
+    r = rig()
+    r.home.mkdir(parents=True)
+    (r.home / "ak-engine.json").write_text(json.dumps({"pid": 999, "cdpPort": 1, "wsPort": 2, "cleanExit": False}))
+    r.launcher.add(999, None, r.home)
+    assert r.engine.has_orphan() is True
+    state = r.run(lambda: r.engine.ensure_started(25, "external"))
+    assert r.launcher.terminated == [999] and state["state"] == "ready"
+
+
+def test_crash_after_launch_before_record_is_quit_before_seeding(rig):
+    r = rig()
+    r.home.mkdir(parents=True)
+    (r.home / "ak-engine.json").write_text(json.dumps({"pid": 555, "launchDate": 1.0, "cdpPort": 1, "wsPort": 2, "cleanExit": True}))
+    r.launcher.add(777, 50.0, r.home)
+    config = r.tree / "plugin_config/obs-websocket/config.json"
+    seeded_at_terminate: list[bool] = []
+    r.launcher.on_terminate = lambda pid: seeded_at_terminate.append(config.exists())
+    state = r.run(lambda: r.engine.ensure_started(25, "external"))
+    assert r.launcher.terminated == [777]
+    assert seeded_at_terminate == [False]
+    assert state["state"] == "ready" and 777 not in r.launcher.alive_pids
+
+
+def test_stuck_orphan_blocks_seeding(rig):
+    r = rig()
+    r.launcher.add(777, 50.0, r.home)
+    r.launcher.quits = False
+    state = r.run(lambda: r.engine.ensure_started(25, "external"))
+    assert state["state"] == "stuck"
+    assert r.launcher.launches == [] and not r.tree.exists()
+    r.run(r.engine.show)
+    assert r.launcher.shown == [777]
+
+
+def test_current_engine_with_incomplete_identity_is_never_acted_on(rig):
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    r.launcher.dates[4242] = None
+    state = r.run(r.engine.quit)
+    assert r.launcher.terminated == []
+    assert state["state"] == "stuck"
+    r.run(r.engine.show)
+    assert r.launcher.shown == []
+
+
+def test_unknown_marker_is_never_acted_on(rig):
+    r = rig()
+    r.launcher.add(777, 50.0, r.home)
+    r.launcher.marker_unknown.add(777)
+    assert r.engine.has_orphan() is False
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    assert 777 not in r.launcher.terminated
+
+
+def test_launch_without_a_date_is_still_ours_by_marker(rig):
+    r = rig()
+    r.launcher.launch_date = lambda: None
+    assert r.run(lambda: r.engine.ensure_started(25, "external"))["state"] == "ready"
+    assert r.record()["launchDate"] is None
+    assert r.run(r.engine.quit)["state"] == "stopped"
+    assert r.launcher.terminated == [4242]
 
 
 def test_our_own_engine_is_not_an_orphan(rig):
@@ -995,3 +1113,211 @@ def test_our_own_engine_is_not_an_orphan(rig):
     r.run(lambda: r.engine.ensure_started(25, "external"))
     assert r.record()["pid"] == 4242
     assert r.engine.has_orphan() is False
+
+
+# --- synchronous pending state (B1) -----------------------------------------
+
+
+def test_actions_publish_pending_state_before_the_engine_runs_them(rig):
+    r = rig()
+    assert r.engine.active is False
+    r.launcher.block = threading.Event()
+    r.engine.ensure_started(25, "external")
+    assert r.engine.state()["state"] == "starting" and "reason" not in r.engine.state()
+    assert r.engine.active is True
+    assert r.launcher.entered.wait(5)
+    r.engine.quit()
+    assert r.engine.state()["state"] == "quitting"
+    r.engine.restart(25, "external")
+    assert r.engine.state()["state"] == "starting"
+    r.engine.setup_device_begin(25)
+    assert r.engine.state()["state"] == "starting"
+    r.engine.setup_device_done()
+    assert r.engine.state()["state"] == "quitting"
+    assert r.engine.active is True
+    r.launcher.block.set()
+    assert r.engine.wait_idle(15)
+    state = r.engine.state()
+    assert state["state"] == "stopped" and state["setup"] is None
+    assert r.engine.active is False
+
+
+def test_quit_is_quitting_until_the_engine_confirms(rig):
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    hold = threading.Event()
+    r.launcher.on_terminate = lambda pid: hold.wait(15)
+    r.engine.quit()
+    assert r.engine.state()["state"] == "quitting" and r.engine.active is True
+    assert r.engine.cdp_endpoint is not None
+    hold.set()
+    assert r.engine.wait_idle(15)
+    assert r.engine.state()["state"] == "stopped" and r.engine.active is False
+
+
+def test_noop_ensure_started_does_not_flash_starting(rig):
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    r.launcher.block = threading.Event()
+    r.engine.ensure_started(25, "external")
+    assert r.engine.state()["state"] == "ready"
+    r.launcher.block.set()
+    assert r.engine.wait_idle(15)
+
+
+def test_active_follows_the_running_pid(rig):
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    assert r.engine.active is True
+    r.launcher.alive_pids.clear()
+    r.engine._liveness()
+    assert r.engine.active is False
+
+
+# --- shutdown / close (B3) --------------------------------------------------
+
+
+def test_shutdown_during_a_full_readiness_wait_quits_and_releases(rig):
+    r = rig()
+    r.cdp.targets = []
+    engine = r.make(clock=time.monotonic, sleep=time.sleep, ready_timeout_s=20.0, poll_s=0.05)
+    launched = threading.Event()
+    r.launcher.on_launch = lambda launcher, pid: launched.set()
+    r.engine.close()
+    engine.ensure_started(25, "external")
+    assert launched.wait(5)
+    started = time.monotonic()
+    assert engine.shutdown(10) is True
+    assert time.monotonic() - started < 5
+    assert r.launcher.terminated == [4242] and 4242 not in r.launcher.alive_pids
+    assert engine._thread is None and engine._lock_file is None
+    assert r.record()["cleanExit"] is True
+    engine.ensure_started(25, "external")
+    assert len(r.launcher.launches) == 1, "no action runs after shutdown"
+    other = r.make()
+    assert r.run(other.check, engine=other)["state"] == "stopped"
+
+
+def test_shutdown_keeps_the_lock_when_the_worker_does_not_finish(rig):
+    r = rig()
+    r.run(r.engine.check)
+    r.launcher.block = threading.Event()
+    r.engine.ensure_started(25, "external")
+    assert r.launcher.entered.wait(5)
+    assert r.engine.shutdown(0.2) is False
+    assert r.engine._lock_file is not None
+    other = r.make()
+    assert r.run(other.check, engine=other)["reason"] == "ownedElsewhere"
+    r.launcher.block.set()
+    r.engine._thread.join(15)
+    assert r.launcher.terminated == [4242], "the queued clean quit still runs"
+
+
+def test_close_never_releases_the_lock_while_the_worker_is_alive(rig):
+    r = rig()
+    r.run(r.engine.check)
+    r.launcher.block = threading.Event()
+    r.engine.ensure_started(25, "external")
+    assert r.launcher.entered.wait(5)
+    assert r.engine.close(timeout=0.2) is False
+    assert r.engine._lock_file is not None
+    r.launcher.block.set()
+    assert r.engine.close(timeout=15) is True
+    assert r.engine._lock_file is None
+
+
+def test_shutdown_without_a_worker_releases_the_lock(rig):
+    r = rig()
+    assert r.engine.shutdown(1) is True
+    assert r.launcher.terminated == []
+
+
+# --- bounded fail-closed liveness (M3) --------------------------------------
+
+
+def test_three_cdp_failures_are_page_lost_and_a_success_resets(rig, monkeypatch):
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    real = managed_obs._cdp_targets
+
+    def broken(port, timeout=1.0):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(managed_obs, "_cdp_targets", broken)
+    r.engine._liveness()
+    r.engine._liveness()
+    monkeypatch.setattr(managed_obs, "_cdp_targets", real)
+    r.engine._liveness()
+    monkeypatch.setattr(managed_obs, "_cdp_targets", broken)
+    r.engine._liveness()
+    r.engine._liveness()
+    assert r.engine.state()["state"] == "ready"
+    r.engine._liveness()
+    state = r.engine.state()
+    assert state["reason"] == "pageLost" and "obsPageLost" in _ids(state)
+    monkeypatch.setattr(managed_obs, "_cdp_targets", real)
+    r.engine._liveness()
+    assert r.engine.state()["state"] == "ready"
+
+
+def test_three_websocket_failures_are_obs_unreachable(rig, monkeypatch):
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    real = managed_obs.ObsWebsocket
+
+    class Broken:
+        def __init__(self, *args, **kwargs): pass
+        def __enter__(self): raise ObsWebsocketTimeout("no answer")
+        def __exit__(self, *args): return None
+
+    monkeypatch.setattr(managed_obs, "ObsWebsocket", Broken)
+    r.engine._liveness()
+    r.engine._liveness()
+    assert r.engine.state()["state"] == "ready"
+    r.engine._liveness()
+    state = r.engine.state()
+    assert state["state"] == "blocked" and state["reason"] == "obsUnreachable"
+    w = next(w for w in state["warnings"] if w["id"] == "obsUnreachable")
+    assert w == {"id": "obsUnreachable", "severity": "block", "action": "restart",
+                 "text": "Alpha Keynote cannot reach OBS. Press Restart output engine."}
+    monkeypatch.setattr(managed_obs, "ObsWebsocket", real)
+    r.engine._liveness()
+    state = r.engine.state()
+    assert state["state"] == "ready" and "obsUnreachable" not in _ids(state)
+
+
+def test_readiness_needs_page_and_version_in_the_same_pass(rig, monkeypatch):
+    r = rig()
+    pages = iter(["T1"] + [None] * 100)
+    versions = iter([None] + [PINNED_OBS] * 100)
+    monkeypatch.setattr(ManagedObs, "_page_target", lambda self: next(pages))
+    monkeypatch.setattr(ManagedObs, "_obs_version", lambda self: next(versions))
+    state = r.run(lambda: r.engine.ensure_started(25, "external"))
+    assert state["state"] == "blocked" and state["reason"] == "timeout"
+
+
+def test_readiness_accepts_a_later_pass_with_both(rig, monkeypatch):
+    r = rig()
+    pages = iter(["T1", "T1"])
+    versions = iter([None, PINNED_OBS])
+    monkeypatch.setattr(ManagedObs, "_page_target", lambda self: next(pages))
+    monkeypatch.setattr(ManagedObs, "_obs_version", lambda self: next(versions))
+    state = r.run(lambda: r.engine.ensure_started(25, "external"))
+    assert state["state"] == "ready" and r.engine.target_id == "T1"
+
+
+# --- version fix then check (M5) --------------------------------------------
+
+
+def test_version_mismatch_then_install_then_check_is_ready(rig):
+    r = rig(version="32.3.0")
+    state = r.run(lambda: r.engine.ensure_started(25, "external"))
+    assert state["reason"] == "obsVersion"
+    _fake_app(r.app.parent, version="32.3.0")
+    state = r.run(r.engine.check)
+    assert state["reason"] == "obsVersion" and r.launcher.terminated == []
+    _fake_app(r.app.parent, version=PINNED_OBS)
+    r.ws.version = PINNED_OBS
+    state = r.run(r.engine.check)
+    assert state["state"] == "ready" and "obsVersion" not in _ids(state)
+    assert r.launcher.terminated == [4242] and len(r.launcher.launches) == 2

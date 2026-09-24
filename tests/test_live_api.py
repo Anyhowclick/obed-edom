@@ -80,12 +80,14 @@ class FakeEngine:
     def setup_device_done(self):
         self._call('setup_device_done')
 
-    def wait_idle(self, timeout=None):
-        self._call('wait_idle', timeout)
-        return True
+    @property
+    def active(self):
+        return self.status != 'stopped'
 
-    def close(self):
-        self._call('close')
+    def shutdown(self, timeout):
+        self._call('shutdown', timeout)
+        self.status = 'stopped'
+        return True
 
     def actions(self):
         return [call[0] for call in self.calls if call[0] not in ('configure', 'has_orphan')]
@@ -437,7 +439,7 @@ def test_engine_changes_are_refused_while_a_session_is_loaded(tmp_path, monkeypa
     client, engine, _, _ = engine_client(tmp_path, monkeypatch, akOutputMode='keyer')
     engine.status = 'ready'
     assert client.post('/api/live', json={'previewJobId': 'prepared'}).status_code == 200
-    for action in ('restart', 'quit', 'setupDevice', 'setupDone'):
+    for action in ('start', 'restart', 'quit', 'setupDevice', 'setupDone'):
         response = client.post(f'/api/live/engine/{action}')
         assert response.status_code == 409, action
         assert response.json() == {'detail': 'Stop the show first.'}
@@ -452,7 +454,7 @@ def test_engine_changes_are_refused_while_a_session_is_loaded(tmp_path, monkeypa
     assert client.get('/api/live').json()['status'] != 'stopped'
 
 
-@pytest.mark.parametrize('warning_id', ['obsExited', 'obsPageLost', 'engineError'])
+@pytest.mark.parametrize('warning_id', ['obsExited', 'obsPageLost', 'engineError', 'obsUnreachable'])
 def test_restart_after_dead_output_stops_the_dead_session_first(tmp_path, monkeypatch, warning_id):
     client, engine, adapters, events = engine_client(tmp_path, monkeypatch, akOutputMode='keyer')
     engine.status = 'ready'
@@ -548,7 +550,8 @@ def test_startup_checks_the_engine_only_when_an_orphan_exists(tmp_path, monkeypa
     client, *_ = client_for(tmp_path, monkeypatch, engine=engine)
     with client:
         assert engine.actions() == ['check']
-    assert engine.actions() == ['check', 'quit', 'wait_idle', 'close']
+    assert engine.actions() == ['check', 'shutdown']
+    assert engine.calls[-1] == ('shutdown', 35)
 
 
 def test_shutdown_stops_the_session_before_releasing_the_engine(tmp_path, monkeypatch):
@@ -557,9 +560,10 @@ def test_shutdown_stops_the_session_before_releasing_the_engine(tmp_path, monkey
         assert client.post('/api/live/engine/start').status_code == 200
         assert client.post('/api/live', json={'previewJobId': 'prepared'}).status_code == 200
     assert adapters[-1].stopped
-    tail = [event[0] if event[0] == 'release' else event[1] for event in events][-4:]
-    assert tail == ['release', 'quit', 'wait_idle', 'close']
-    assert ('wait_idle', 12) in engine.calls
+    tail = [event[0] if event[0] == 'release' else event[1] for event in events][-2:]
+    assert tail == ['release', 'shutdown']
+    assert engine.calls[-1] == ('shutdown', 35)
+    assert 'quit' not in engine.actions()
 
 
 def test_shutdown_leaves_an_unused_engine_alone(tmp_path, monkeypatch):
@@ -567,3 +571,73 @@ def test_shutdown_leaves_an_unused_engine_alone(tmp_path, monkeypatch):
     with client:
         client.get('/api/live/engine')
     assert engine.actions() == []
+
+
+class DeferredEngine(FakeEngine):
+    """Publishes the pending state synchronously; the work runs only when `run_pending` is called."""
+
+    def __init__(self, events=None):
+        super().__init__(events)
+        self.pending = []
+
+    def run_pending(self):
+        for status in self.pending:
+            self.status = status
+        self.pending.clear()
+
+    def quit(self):
+        self._call('quit')
+        self.status = 'quitting'
+        self.pending.append('stopped')
+
+    def restart(self, rate, keyer):
+        self._call('restart', rate, keyer)
+        self.status = 'starting'
+        self.pending.append('ready')
+
+    def setup_device_begin(self, rate):
+        self._call('setup_device_begin', rate)
+        self.status = 'quitting'
+        self.pending.append('ready')
+
+
+@pytest.mark.parametrize(('action', 'pending'), [('quit', 'quitting'), ('restart', 'starting'), ('setupDevice', 'quitting')])
+def test_keyer_start_is_refused_while_an_engine_action_is_pending(tmp_path, monkeypatch, action, pending):
+    settings_mod.save_settings({**settings_mod.load_settings(), 'akOutputMode': 'keyer'}, validate_dir=False)
+    engine = DeferredEngine()
+    engine.status = 'ready'
+    client, _claims, _releases, _job, adapters, _service = client_for(tmp_path, monkeypatch, engine=engine)
+    assert client.post(f'/api/live/engine/{action}').json()['state'] == pending
+    response = client.post('/api/live', json={'previewJobId': 'prepared'})
+    assert response.status_code == 409
+    assert response.json()['detail'] == 'The output engine is not ready. Press Take output.'
+    assert not adapters
+    engine.run_pending()
+    expected = 409 if action == 'quit' else 200
+    assert client.post('/api/live', json={'previewJobId': 'prepared'}).status_code == expected
+
+
+def test_output_settings_put_uses_engine_activity_not_the_cdp_endpoint(tmp_path, monkeypatch):
+    settings_mod.save_settings({**settings_mod.load_settings(), 'akOutputMode': 'keyer'}, validate_dir=False)
+    engine = DeferredEngine()
+    engine.status = 'ready'
+    client, *_ = client_for(tmp_path, monkeypatch, engine=engine)
+    client.post('/api/live/engine/setupDevice')
+    assert engine.cdp_endpoint is None
+    client.put('/api/live/output-settings', json={'akOutputMode': 'screen'})
+    assert engine.actions() == ['setup_device_begin', 'quit']
+
+
+def test_routes_only_use_engine_attributes_the_real_managed_obs_has():
+    # The route tests run against FakeEngine, so a method the routes call but ManagedObs lacks would only
+    # fail on a live dashboard. Parse every engine attribute web/live.py touches and check the real class.
+    import re
+
+    from obed_edom.managed_obs import ManagedObs
+
+    source = (Path(__file__).resolve().parents[1] / "src/obed_edom/web/live.py").read_text()
+    receivers = r'(?:\bmanaged|\bused_engine\(\)|\bengine\(\)|engine_slot\["engine"\])'
+    used = set(re.findall(receivers + r"\.([A-Za-z_]+)", source))
+    assert {"ensure_started", "shutdown", "active", "target_id"} <= used
+    missing = sorted(name for name in used if not hasattr(ManagedObs, name))
+    assert missing == []

@@ -1599,7 +1599,7 @@ def test_h264_movie_qualifies_with_no_codec_warning(tmp_path, monkeypatch):
     assert output._continuity_mode == "qualified"
     assert output.output["codecWarnings"] == []
     # both slide folders hold their own copy of the movie, and both are probed.
-    assert output.output["codecs"] == [{"asset": "movie.mov", "codec": "avc1", "family": "h264", "files": 2, "fps": None}]
+    assert output.output["codecs"] == [{"asset": "movie.mov", "codec": "avc1", "family": "h264", "files": 2}]
 
 
 def test_unplanned_hevc_movie_does_not_block_continuity_but_warns(tmp_path, monkeypatch):
@@ -1653,7 +1653,7 @@ def test_planned_movie_whose_slide_copies_disagree_is_unsupported_even_headful(t
     )
     output._codec_report, output._codec_warnings = output._resolve_codecs()
     assert output._codec_report == [
-        {"asset": "movie.mov", "codec": None, "family": "other", "files": 2, "fps": None, "mixed": True},
+        {"asset": "movie.mov", "codec": None, "family": "other", "files": 2, "mixed": True},
     ]
     assert output._codec_warnings == ["movie.mov (mixed codecs) may not play in this output"]
     mode, reason, runtime = output._resolve_continuity_static()
@@ -2581,3 +2581,45 @@ def test_gl_replay_attach_refusal_unchanged_under_managed_bridge(tmp_path, monke
     assert result["bridge"] == "obs-managed"
     assert result["continuity"]["glReplay"]["mode"] == "unavailable"
     assert result["continuity"]["glReplay"]["reason"] == "attach output not qualified"
+
+
+@pytest.mark.parametrize(("host_kwargs", "with_fps"), [({}, False), ({"output_rate": 30}, True)])
+def test_codec_report_probes_fps_only_when_an_output_rate_is_set(tmp_path, monkeypatch, host_kwargs, with_fps):
+    seen = []
+    monkeypatch.setattr(live_host, "codec_report", lambda *_a, **kwargs: seen.append(kwargs) or [])
+    output = host_with_continuity(tmp_path, monkeypatch, attach=True, **host_kwargs)
+    output._resolve_codecs()
+    assert seen and seen[0]["with_fps"] is with_fps
+
+
+REAL_PLAYER_ROOT = Path(__file__).resolve().parents[1] / "output" / "p2-recovery" / "html-adversarial" / "html-player"
+REAL_SLIDES = [
+    {"playerIndex": index, "originalOrdinal": index + 1, "exportedUuid": uuid, "skipped": False}
+    for index, uuid in enumerate([
+        "08C861A1-CB39-4832-B189-6DF95B7F3396", "0C652BEB-F445-48CF-BFD0-4194C6B7A438",
+        "D4D95253-4C37-40CF-A4A4-62D8DE24EF2A", "7A851F4D-4648-4545-A491-58838A7CD843",
+    ])
+]
+
+
+@pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")
+@pytest.mark.parametrize(
+    ("rate", "expected"),
+    [
+        (25, [
+            "untitled.mov is 30 fps but the output is 25 fps, so it will judder slightly. Re-export it at 25 fps for smooth motion.",
+            "vid-20250608-wa0125.mp4 is 29.978 fps but the output is 25 fps, so it will judder slightly. Re-export it at 25 fps for smooth motion.",
+        ]),
+        # 29.978 is within 0.2 % of 30, so the phone clip does not warn either.
+        (30, []),
+    ],
+)
+def test_real_export_rate_warnings_come_from_probed_movie_fps(tmp_path, monkeypatch, rate, expected):
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+    output = live_host.LiveOutputHost(
+        REAL_PLAYER_ROOT, REAL_SLIDES, attach_endpoint="http://127.0.0.1:9222", transport_factory=FakeCdp,
+        server_factory=FakeServer, resolver=lambda root, relative: root / relative, bridge="obs-managed", output_rate=rate,
+    )
+    output._codec_report, output._codec_warnings = output._resolve_codecs()
+    assert {entry["asset"]: entry["fps"] for entry in output._codec_report} == {"untitled.mov": 30.0, "vid-20250608-wa0125.mp4": 29.978}
+    assert output.output["rateWarnings"] == expected

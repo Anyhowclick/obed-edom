@@ -52,9 +52,10 @@ export type LiveEngine = {
   state: "unavailable" | "stopped" | "starting" | "ready" | "blocked" | "stuck" | "quitting";
   reason?: string;
   obs: { path: string | null; version: string | null; pinned: string };
-  rate: { output: number; canvas: number | null; source: number | null };
+  rate: { output: number; canvas: "25 PAL" | "30" | null; source: number | null };
   device: { name: string | null; set: boolean };
   keyer: LiveKeyer;
+  setup: LiveOutputRate | null;
   warnings: LiveEngineWarning[];
 };
 export interface LiveClient {

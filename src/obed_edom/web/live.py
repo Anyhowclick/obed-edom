@@ -25,7 +25,7 @@ from obed_edom.live_session import LiveSessionService
 from obed_edom.settings import load_settings, save_settings
 
 STOP_SHOW_FIRST = "Stop the show first."
-DEAD_OUTPUT_WARNINGS = ("obsExited", "obsPageLost", "engineError")
+DEAD_OUTPUT_WARNINGS = ("obsExited", "obsPageLost", "engineError", "obsUnreachable")
 ENGINE_NOT_READY = "The output engine is not ready. Press Take output."
 EngineAction = Literal["start", "restart", "check", "show", "quit", "setupDevice", "setupDone"]
 
@@ -100,10 +100,7 @@ def live_router(runner, *, service=None, host_factory=None, displays=None, engin
         if current:
             stop_session(current)
         if engine_slot.get("used"):
-            managed = engine_slot["engine"]
-            managed.quit()
-            managed.wait_idle(12)
-            managed.close()
+            engine_slot["engine"].shutdown(timeout=35)
 
     router = APIRouter(
         prefix="/api/live", dependencies=[Depends(_same_origin)], lifespan=lifespan,
@@ -161,7 +158,7 @@ def live_router(runner, *, service=None, host_factory=None, displays=None, engin
             rate, keyer = settings["akOutputRate"], settings["akKeyer"]
             managed = used_engine()
             current = loaded_session()
-            if current and action in ("restart", "quit", "setupDevice", "setupDone"):
+            if current and action in ("start", "restart", "quit", "setupDevice", "setupDone"):
                 dead = any(item["id"] in DEAD_OUTPUT_WARNINGS for item in managed.state()["warnings"])
                 if action != "restart" or not dead:
                     raise HTTPException(409, STOP_SHOW_FIRST)
@@ -201,7 +198,7 @@ def live_router(runner, *, service=None, host_factory=None, displays=None, engin
             rate, keyer = saved["akOutputRate"], saved["akKeyer"]
             managed = engine()
             managed.configure(rate, keyer)
-            if managed.cdp_endpoint is not None:
+            if managed.active:
                 if saved["akOutputMode"] == "screen":
                     used_engine().quit()
                 elif (rate, keyer) != (before["akOutputRate"], before["akKeyer"]):

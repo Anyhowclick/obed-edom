@@ -271,7 +271,7 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
         </label>
       </>}
     </div>
-    {keyer && outputSettings && <OutputEngine client={client} rate={outputSettings.akOutputRate} sessionLoaded={active} pollMs={enginePollMs} onEngine={setEngine} />}
+    {keyer && outputSettings && <OutputEngine client={client} sessionLoaded={active} pollMs={enginePollMs} onEngine={setEngine} />}
     {!active && <form className="actions" onSubmit={(event) => { event.preventDefault(); void start(); }}>
       <label>Prepared deck
         <select aria-label="Prepared deck" value={jobId} onChange={(event) => setJobId(event.target.value)} disabled={!decks.length}>

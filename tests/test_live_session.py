@@ -275,6 +275,30 @@ def test_loading_snapshot_keeps_the_fill_key_transport_of_keyer_output(tmp_path)
     assert state["output"]["transport"] == "fill-key"
 
 
+def test_screen_loading_snapshot_output_matches_the_previous_shape_and_key_order(tmp_path):
+    import json
+
+    from obed_edom.live_host import OutputDisplay
+
+    screen = {**OutputDisplay(42, 1920, 0, 2560, 1440, False).as_output(), "width": 2560, "height": 1440,
+              "canvas": {"width": 1920, "height": 1080}}
+    for identity_output in (screen, {"width": 1920, "height": 1080}, {}):
+        loading = []
+        service = LiveSessionService(claim=lambda *args: None, release=lambda *args: None)
+        adapter = Adapter()
+        observe = adapter.observe
+
+        def observe_while_loading(observe=observe, loading=loading, service=service):
+            loading.append(json.dumps(service._session.state["output"]))
+            return observe()
+
+        adapter.observe = observe_while_loading
+        service.start(adapter, export_key="preview-a", export_root=tmp_path,
+                      identity={**_identity(), "output": identity_output})
+        previous = {**identity_output, "transport": "hdmi", "alpha": False, "audio": False}
+        assert loading[0] == json.dumps(previous)
+
+
 def test_command_stays_accepted_until_observation_settles(tmp_path):
     service, adapter, state, _claims, _releases = make_service(tmp_path)
 

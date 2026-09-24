@@ -89,7 +89,7 @@ class LiveSessionService:
                 "outputVisible": False,
                 "autoPlayDeferred": None,
                 "slides": slides,
-                "output": {"transport": "hdmi", "alpha": False, **deepcopy(identity.get("output", {})), "audio": False},
+                "output": self._loading_output(identity.get("output", {})),
                 "capabilities": self._disabled_capabilities(),
             }
             session = _Session(adapter=adapter, state=state)
@@ -99,6 +99,14 @@ class LiveSessionService:
             except Exception as exc:
                 self._fail(session, exc)
             return deepcopy(session.state)
+
+    @staticmethod
+    def _loading_output(identity_output: dict[str, Any]) -> dict[str, Any]:
+        output = deepcopy(identity_output)
+        if output.get("transport") != "fill-key":
+            output["transport"], output["alpha"] = "hdmi", False
+        output["audio"] = False
+        return output
 
     @staticmethod
     def _disabled_capabilities() -> dict[str, dict[str, Any]]:

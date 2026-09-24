@@ -18,11 +18,21 @@ const WARNING_ACTIONS: Record<string, LiveEngineAction[]> = {
   obsWaiting: ["show", "check"],
   obsSafeMode: ["restart"],
   obsExited: ["restart"],
+  obsPageLost: ["restart"],
+  engineError: ["restart"],
+  obsUnreachable: ["restart"],
   noDevice: ["setupDevice"],
   deviceInactive: ["quit", "start"],
   stuck: ["show"],
   ownedElsewhere: ["check"],
 };
+
+const DEAD_OUTPUT = new Set(["obsExited", "obsPageLost", "engineError", "obsUnreachable"]);
+
+function allowedWhileLoaded(action: LiveEngineAction, warningId?: string): boolean {
+  if (action === "check" || action === "show") return true;
+  return action === "restart" && !!warningId && DEAD_OUTPUT.has(warningId);
+}
 
 const STATE_LABELS: Record<LiveEngine["state"], string> = {
   unavailable: "Unavailable",
@@ -45,9 +55,8 @@ function warningActions(warning: LiveEngineWarning): LiveEngineAction[] {
   return WARNING_ACTIONS[warning.id] ?? (warning.action && warning.action in ACTION_LABELS ? [warning.action as LiveEngineAction] : []);
 }
 
-export function OutputEngine({ client, rate, sessionLoaded, pollMs = 2000, onEngine }: {
+export function OutputEngine({ client, sessionLoaded, pollMs = 2000, onEngine }: {
   client: LiveClient;
-  rate: number;
   sessionLoaded: boolean;
   pollMs?: number;
   onEngine?: (engine: LiveEngine | null) => void;
@@ -55,7 +64,6 @@ export function OutputEngine({ client, rate, sessionLoaded, pollMs = 2000, onEng
   const [engine, setEngine] = useState<LiveEngine | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
-  const [settingUp, setSettingUp] = useState(false);
   const mounted = useRef(false);
   const generation = useRef(0);
 
@@ -92,10 +100,7 @@ export function OutputEngine({ client, rate, sessionLoaded, pollMs = 2000, onEng
     const epoch = ++generation.current;
     try {
       const next = await client.engineAction(action);
-      if (!mounted.current) return;
-      if (epoch === generation.current) accept(next);
-      if (action === "setupDevice") setSettingUp(true);
-      if (action === "setupDone") setSettingUp(false);
+      if (mounted.current && epoch === generation.current) accept(next);
     } catch (error) {
       if (mounted.current) setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -104,24 +109,26 @@ export function OutputEngine({ client, rate, sessionLoaded, pollMs = 2000, onEng
   }
 
   const state = engine?.state;
-  const takeDisabled = busy || !engine || state === "starting" || state === "ready" || state === "quitting";
-  const releaseDisabled = busy || sessionLoaded || !engine || state === "stopped" || state === "unavailable" || state === "quitting";
+  const setup = engine?.setup ?? null;
+  const locked = (action: LiveEngineAction, warningId?: string) => busy || (sessionLoaded && !allowedWhileLoaded(action, warningId));
+  const takeDisabled = locked("start") || !engine || state === "starting" || state === "ready" || state === "quitting";
+  const releaseDisabled = locked("quit") || !engine || state === "stopped" || state === "unavailable" || state === "quitting";
   return <div className="live-engine" aria-label="Output engine">
     <p className="live-engine-state">
       <span className="live-continuity-badge" data-mode={state === "ready" ? "qualified" : state === "blocked" || state === "stuck" ? "unsupported" : "unknown"}>
         Output engine · {engine ? STATE_LABELS[engine.state] : "Checking"}
       </span>
-      {engine?.reason && <span className="note"> {engine.reason}</span>}
+      {engine?.reason && setup === null && <span className="note"> {engine.reason}</span>}
     </p>
     <p className="note">Output device · {engine?.device.set ? engine.device.name || "Set up" : "Not set up"}</p>
     <div className="actions">
-      <button type="button" className="btn" disabled={takeDisabled} onClick={() => void run("start")}>{ACTION_LABELS.start}</button>
+      <button type="button" className="btn" disabled={takeDisabled} title={sessionLoaded ? "Stop the show first." : ""} onClick={() => void run("start")}>{ACTION_LABELS.start}</button>
       <button type="button" className="btn secondary" disabled={releaseDisabled} title={sessionLoaded ? "Stop the show first." : ""} onClick={() => void run("quit")}>{ACTION_LABELS.quit}</button>
     </div>
     {message && <p role="alert">{message}</p>}
-    {settingUp && <div className="live-engine-setup" aria-label="Output device setup">
-      <p>In OBS: Tools → Decklink Output → pick UltraStudio HD Mini, Mode 1080p{rate}, Keyer External, Pixel format BGRA 8-bit, tick Auto start, press Start, then OK. Then press Done here.</p>
-      <button type="button" className="btn" disabled={busy} onClick={() => void run("setupDone")}>{ACTION_LABELS.setupDone}</button>
+    {setup !== null && <div className="live-engine-setup" aria-label="Output device setup">
+      <p>In OBS: Tools → Decklink Output → pick UltraStudio HD Mini, Mode 1080p{setup}, Keyer External, Pixel format BGRA 8-bit, tick Auto start, press Start, then OK. Then press Done here.</p>
+      <button type="button" className="btn" disabled={locked("setupDone")} onClick={() => void run("setupDone")}>{ACTION_LABELS.setupDone}</button>
     </div>}
     {!!engine?.warnings.length && <ul className="live-engine-warnings">
       {engine.warnings.map((warning) => <li
@@ -131,7 +138,7 @@ export function OutputEngine({ client, rate, sessionLoaded, pollMs = 2000, onEng
         aria-label={warning.text}
       >
         <span>{warning.text}</span>
-        {warningActions(warning).map((action) => <button type="button" key={action} className="btn secondary" disabled={busy} onClick={() => void run(action)}>{ACTION_LABELS[action]}</button>)}
+        {warningActions(warning).map((action) => <button type="button" key={action} className="btn secondary" disabled={locked(action, warning.id)} title={locked(action, warning.id) && sessionLoaded ? "Stop the show first." : ""} onClick={() => void run(action)}>{ACTION_LABELS[action]}</button>)}
       </li>)}
     </ul>}
   </div>;

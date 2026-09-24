@@ -33,9 +33,10 @@ function engineState(overrides: Partial<LiveEngine> = {}): LiveEngine {
   return {
     state: "ready",
     obs: { path: "/Applications/OBS.app", version: "32.2.2", pinned: "32.2.2" },
-    rate: { output: 25, canvas: 25, source: 50 },
+    rate: { output: 25, canvas: "25 PAL", source: 50 },
     device: { name: "UltraStudio HD Mini", set: true },
     keyer: "external",
+    setup: null,
     warnings: [],
     ...overrides,
   };
