@@ -657,6 +657,63 @@ for the parked `iwa-surgical-write-generator` feature.
 
 ---
 
+## Alpha Keynote managed OBS (Keyer output)
+
+`src/obed_edom/managed_obs.py` (`ManagedObs`, one per dashboard process, owned by `web/live.py`'s
+`live_router`). Plan: `.agents/plans/keynote_live_managed_obs.plan.md`. Operator guide: README "Keyer output
+(managed OBS)".
+
+* **Pin.** `PINNED_OBS = "32.2.2"`, bundle `com.obsproject.obs-studio` at `/Applications/OBS.app`. Info.plist is the
+  first check; obs-websocket `GetVersion.obsVersion` after launch is authoritative. Moving the pin is a deliberate
+  change after the harness passes on the new release.
+* **Lifetime = explicit handover.** The engine runs only between **Take output** (`POST /api/live/engine/start`)
+  and **Release output** (`.../quit`), a switch to Screen mode, or dashboard shutdown (the router stops the
+  session first, then `shutdown(timeout=35)`). Nothing starts it implicitly. At startup an OBS carrying our home
+  marker is quit cleanly (never adopted, never relaunched).
+* **Isolation.** Home `~/Library/Application Support/Obed-Edom/managed-obs/` (never under `~/Desktop`: TCC);
+  OBS reads `<home>/Library/Application Support/obs-studio/`. Launch via NSWorkspace
+  `openApplicationAtURL…` with `environment = {CFFIXED_USER_HOME, HOME} = <home>`, new instance, hidden; never
+  exec the binary. The user's OBS tree is never read or written.
+* **Arguments:** always `--multi --disable-updater --disable-missing-files-check --remote-debugging-port=<cdp>`,
+  plus `--minimize-to-tray` when hidden. `--multi` disables OBS's crash check, so no Safe-Mode prompt can
+  appear or steal focus.
+* **Seeding** (`render_tree`/`write_tree`) rewrites AK's files before every launch and is refused while any
+  managed OBS is alive. Logs, CEF cache, `plugin_manager` and **`.sentinel` are OBS's; AK never reads, writes or
+  deletes `.sentinel`.** The DeckLink props file is written only when a device is recorded for the rate.
+* **Unclean exit** is AK's own: `<home>/ak-engine.json` `{pid, launchDate, cdpPort, wsPort, cleanExit}`;
+  `cleanExit` is false from launch until AK's own quit completes; a launch that finds it false raises W3
+  (`obsUncleanExit`).
+* **Ownership.** A process is ours only if it is a running OBS by bundle id, its environment carries
+  `CFFIXED_USER_HOME=<home>` (`ps -E`), and its launch date matches when one is recorded. Quit/show touch nothing
+  else. Quit = `NSRunningApplication.terminate()`, wait 10 s, else `stuck`. **Never SIGKILL.**
+* **Lock.** `fcntl.flock` on `<home>/ak-engine.lock`, held for the dashboard process's lifetime from the first
+  engine action; a second holder ⇒ `ownedElsewhere`.
+* **Readiness** (20 s): pid alive, exactly one CDP page containing `#obed-ak` (its target **id** is recorded),
+  websocket `GetVersion == PINNED_OBS`, no Safe-Mode line in the newest log. Liveness every 2 s matches the
+  target by id, never by URL (the page moves to the asset server mid-show).
+* **Websocket.** Product requests are read-only (`GetVersion`, `GetOutputStatus`); only the harness records.
+  A fresh `secrets.token_urlsafe(32)` password per launch, loopback only, never in API JSON, logs or URLs.
+* **Routes** (`/api/live/engine`, `/engine/{start|restart|check|show|quit|setupDevice|setupDone}`,
+  `/output-settings`): while a session is loaded, start/restart/quit/setupDevice/setupDone and the settings PUT
+  return 409 "Stop the show first."; the exception is **restart** under a dead-output warning (`obsExited`,
+  `obsPageLost`, `engineError`, `obsUnreachable`), which stops the session first. Check and Show are always
+  allowed. Keyer session start needs engine `ready`, else 409 with the first block text.
+* **Settings** (`settings.json`, per worktree): `akOutputMode` (`screen`|`keyer`), `akOutputRate` (25|30),
+  `akKeyer` (`external`|`off`). Canvas `25 PAL`/`30`, browser source 50/60 (2×). Changing rate/keyer restarts
+  a running engine; switching to screen quits it.
+* **Device record** (per user): `<home>/ak-device.json` `{deviceHash, deviceName, modeIds: {"25"|"30": …},
+  pixelFormat}`, written by Set up output device → Done from the file OBS wrote.
+* **Host.** Keyer start attaches `LiveOutputHost` with `bridge="obs-managed"`, `attach_match=<target id>` and
+  `output_rate`; `output.rateWarnings` (W8, ±0.2 %) sits beside `codecWarnings`. GL replay stays refused under
+  any attach ("attach output not qualified"), so Keyer output ships with native `<video>` cadence.
+* **Qualification harness:** `uv run python scripts/managed_obs_qualify.py --arm both --rate 25 --takes 2 --out DIR`
+  (scratch home, lossless recording; refuses to start while any OBS runs; `caffeinate`; a Sleep/Wake in the take
+  marks it INVALID). Limits at rate 25 (report-only at 30): decodable ≥ 0.9 in both arms; 2× arm native repeat ≤ 0.15;
+  null (paused) repeat ≥ 0.95; positive control (source = canvas) repeat ≥ 0.18 and every positive run above every 2×
+  run. Lifecycle always enforced: clean quit, `cleanExit` true, user OBS tree and `.sentinel` unchanged.
+
+---
+
 ## LW deck facts
 
 * Wall verses may be duplicated across centre panels; collapse identical

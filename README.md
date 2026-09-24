@@ -135,7 +135,82 @@ attempted in headful launch mode — never headless launch, never the OBS attach
 output — and a deck's continuity plan reports `unsupported` if a movie it needs
 is not playable this way. The original movie file is never transcoded.
 
-### DeckLink fill/key via OBS (experimental, UNQUALIFIED)
+### Keyer output (managed OBS)
+
+**Output = Keyer (fill + key via UltraStudio)** sends the show as fill + key
+through a Blackmagic UltraStudio. Alpha Keynote runs its own hidden OBS 32.2.2
+with its own configuration under
+`~/Library/Application Support/Obed-Edom/managed-obs/`; your own OBS setup is
+never read or changed. The DeckLink path is still untested on the venue hardware.
+
+**Needs:** OBS **32.2.2** at `/Applications/OBS.app` (exactly this version; any
+other version is refused) and Blackmagic **Desktop Video**.
+
+1. In **Alpha Keynote**, set **Output** to **Keyer (fill + key via
+   UltraStudio)**, choose the rate under **Match the standard the Pulse shows**
+   (25 or 30), and leave **Keyer on** ticked (untick for fill only). The page
+   renders at 2× the rate automatically. The display picker is hidden in this
+   mode.
+2. **Take output** starts the engine; wait for **Output engine · Ready**.
+   **Start output session** stays disabled until then.
+3. First time per rate only: **Set up output device** opens OBS visibly. Follow
+   the on-screen steps (Tools → Decklink Output → UltraStudio HD Mini, Mode
+   1080p25 or 1080p30, Keyer External, BGRA 8-bit, Auto start, Start, OK), then
+   press **Done**. This is the only time OBS is shown.
+4. **Release output** after the show quits the engine and frees the
+   UltraStudio. Switching Output back to **Screen (HDMI)** or closing the
+   dashboard also releases it.
+
+Output rate, keyer, device setup, Take/Release and Restart are refused with
+"Stop the show first." while a session is loaded. The one exception is
+**Restart output engine** after a dead-output warning, which stops the session
+first.
+
+| Warning | What to do |
+|---|---|
+| Output engine not installed. Install OBS 32.2.2 into Applications, then press Check again. | Install 32.2.2, **Check again** |
+| Output engine is OBS {found}; Alpha Keynote needs OBS 32.2.2. Install 32.2.2, then press Check again. | Install 32.2.2, **Check again** |
+| OBS closed unexpectedly last time. It has been restarted; check the output before going live. | Check the Pulse multiview before going live |
+| OBS is waiting for an answer or a permission. Press Show OBS, answer it, then press Check again. | **Show OBS**, answer, **Check again** |
+| OBS started in Safe Mode, so Alpha Keynote cannot watch it. Press Restart output engine and choose Normal Mode when OBS asks. | **Restart output engine** |
+| OBS stopped unexpectedly — nothing is going to the keyer. Press Restart output engine. OBS may then ask a question (see Show OBS). | **Restart output engine** (allowed mid-show) |
+| OBS lost the Alpha Keynote page — nothing is going to the keyer. Press Restart output engine. | **Restart output engine** (allowed mid-show) |
+| Alpha Keynote cannot reach OBS. Press Restart output engine. | **Restart output engine** (allowed mid-show) |
+| The output engine hit an internal error. Press Restart output engine. | **Restart output engine** (allowed mid-show) |
+| No output device set for {rate} fps — the keyer receives nothing. With the UltraStudio connected, press Set up output device (one time). | **Set up output device** |
+| Alpha Keynote cannot open the UltraStudio. If ProPresenter is running, remove its SDI screen in Screen Configuration or quit ProPresenter; otherwise check the Thunderbolt cable and Desktop Video. Then press Release output and Take output again. | See ProPresenter below; **Release output**, **Take output** |
+| OBS is not responding to Quit. Press Show OBS and quit it from the OBS menu, then press Check again. | **Show OBS**, OBS → Quit |
+| The output engine is being used by another dashboard window (pid {pid}). Close that dashboard first. | Close the other dashboard, **Check again** |
+
+A movie whose frame rate differs from the output rate is listed under "Some
+movies do not match the output rate" and judders slightly. Export movies at the
+output rate.
+
+**ProPresenter on the same Mac.** Only one app can drive the UltraStudio, and
+ProPresenter's SDI screens are always on. Before **Take output**, remove its SDI
+screen in Screen Configuration or quit ProPresenter; after **Release output**,
+re-add the screen or reopen ProPresenter. Fallback: run Alpha Keynote on the
+backup Mac and move the UltraStudio's Thunderbolt cable to it.
+
+**During a show:**
+
+- The Mac must not sleep. After a sleep the page renders at the wrong rate
+  until the engine is restarted, and nothing warns about it.
+- Double-clicking OBS while Alpha Keynote holds the output just activates
+  Alpha Keynote's hidden OBS. Press **Release output** first, or open your own
+  OBS from Terminal with `open -n -a OBS` and choose **Launch Anyway**.
+- If the dashboard dies mid-show, OBS keeps keying the last picture. Relaunch
+  the dashboard: it quits the old engine. Then press **Take output** again.
+- GL replay is not active under Keyer output. Movies play at the native
+  `<video>` cadence, with some repeated frames.
+
+**Qualification** (developer, launches OBS on this Mac; no other OBS may be running):
+`uv run python scripts/managed_obs_qualify.py --arm both --rate 25 --takes 2 --out DIR`.
+
+### DeckLink fill/key via OBS (developer fallback, UNQUALIFIED)
+
+Operators use **Keyer output** above. This external-attach path, driven by
+environment variables with no dashboard controls, is kept for development.
 
 Instead of driving its own Chrome window, the host can attach to a page already
 open inside OBS's Browser Source (an offscreen CEF browser) and hand it to OBS's
