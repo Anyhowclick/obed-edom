@@ -40,10 +40,12 @@ Supersedes `pass1-hides-offline-2026-09-23.md` for this work. Plan and single so
 
 ## Next steps
 
-1. **FRC dry run first**, at load average under 10: an APFS clone in the scratchpad, trashed afterwards, recording `uptime`.
-   - Gates: 0 refusals; only slides 20 and 122 excluded; stage ≤ 30 s; `planSha256` unchanged.
-   - If the header-only-ref rule refuses real hides, list the fields and decide with the owner.
-2. Sol H round 7 on HEAD. Give it the previous raw rounds (`sol-r6.md` and earlier), then fix, rerun the suites, and commit until it returns no BLOCKER or MAJOR.
+Status as of 2026-09-24 (a390efde): offline review COMPLETE. Opus O10 and Sol S10 both PASS, with no BLOCKER or MAJOR. The
+FRC dry run passes: 129 slides, 929 hides, 0 refused, 28.4 s at load ~7. Owner decisions 1–6 are in the plan. Items 1–2 below
+are done; the live gate is next.
+
+1. DONE: FRC dry run after round 7 on a quiet machine.
+2. DONE: review to PASS (rounds S7–S10, O10).
 3. **Live gate** (`f-live-gate`, plan §Oracles O1–O4 and §Gate). This needs the owner's go or a peer's all-clear, because
    Keynote is shared with the AK and GL-replay sessions. Add these to the plan's gate:
    - Live-only checks:
