@@ -3738,14 +3738,12 @@ def _wall_edges(src: Rect, wall_w: float, wall_h: float) -> list[str]:
 
 
 def _drawn_rect(rect: Rect, rotation: Any) -> Rect:
+    """Keynote's drawn box for a payload rect: x/y is already the rotated AABB top-left, w/h unrotated."""
     theta = math.radians(_f(rotation))
     if not theta:
         return rect
     c, s = abs(math.cos(theta)), abs(math.sin(theta))
-    w = rect.w * c + rect.h * s
-    h = rect.w * s + rect.h * c
-    cx, cy = rect.center()
-    return Rect(cx - w / 2.0, cy - h / 2.0, w, h)
+    return Rect(rect.x, rect.y, rect.w * c + rect.h * s, rect.w * s + rect.h * c)
 
 
 def _push_past_edge(
@@ -3816,9 +3814,14 @@ def _mm_partner_transform(
     if kind in {"image", "movie", "group"} and aspect is not None and not child_src:
         snapped_h = float(round(mapped.h))
         mapped = Rect(float(round(mapped.x)), float(round(mapped.y)), snapped_h * aspect, snapped_h)
-    drawn = _drawn_rect(
-        Rect(mapped.x, mapped.y, src.w, src.h) if size_refused else mapped, item.get("rotation")
-    )
+    if start is not None and end is not None:
+        drawn = Rect(
+            min(start[0], end[0]), min(start[1], end[1]), abs(end[0] - start[0]), abs(end[1] - start[1])
+        )
+    else:
+        drawn = _drawn_rect(
+            Rect(mapped.x, mapped.y, src.w, src.h) if size_refused else mapped, item.get("rotation")
+        )
     pushed, edge = _push_past_edge(
         drawn,
         src,

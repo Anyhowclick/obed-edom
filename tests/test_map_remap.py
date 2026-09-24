@@ -19,6 +19,7 @@ Keynote traps this suite locks (kept out of the production file):
 - Never drop text; least-overlapping placement + report the overlap.
 - Off-slide leftovers must never teach an affine.
 """
+import math
 from functools import lru_cache
 
 import pytest
@@ -5796,25 +5797,82 @@ def test_mm_size_refused_group_is_pushed_at_its_source_size():
     assert resized.y == pytest.approx(-200)
 
 
-def test_mm_rotated_partner_is_pushed_by_its_rotated_bounds():
-    """A 90° turn makes a 200×20 bar 200 tall: unrotated it clears the canvas by 30pt,
-    rotated its drawn box reaches 60pt onto it and is pushed."""
+def _true_aabb(t, rotation: float):
+    """The box Keynote draws for a written spec: x/y is the rotated AABB top-left
+    (iwa_geometry._frame_rect, iwa_write's rotated-anchor correction), w/h the
+    unrotated size, so only the extent turns."""
+    theta = math.radians(rotation)
+    c, s = abs(math.cos(theta)), abs(math.sin(theta))
+    return Rect(t.x, t.y, t.w * c + t.h * s, t.w * s + t.h * c)
+
+
+def _aabb_clear_of_canvas(r: Rect, margin: float) -> bool:
+    return r.x + r.w + margin <= 0 or r.y + r.h + margin <= 0 or r.x - margin >= 1920 or r.y - margin >= 1080
+
+
+@pytest.mark.parametrize("rotation", [90.0, 45.0, 270.0])
+def test_mm_rotated_partner_is_pushed_by_its_rotated_bounds(rotation):
+    """Payload x/y of a rotated item is its rotated AABB top-left, so a 200x20 bar turned
+    90 degrees at (3000, -250) spans y -250..-50 on the wall. ty=+150 maps it to
+    y=-100: the flat bar (20 tall) clears the canvas by 80pt, but the turned bar's true
+    box reaches y=+100 and is pushed until its true bottom sits MM_EDGE_MARGIN above the
+    canvas. The x/y stays the AABB top-left: only the extent is rotated, never re-centred."""
+    from obed_edom.map_remap import MM_EDGE_MARGIN
+
     keys = {"shape": {0: "shape:bar"}}
 
-    def plan_for(rotation: float):
-        bar = _item(kind="shape", kindIndex=0, x=3000, y=-50, w=200, h=20, rotation=rotation)
+    def plan_for(rot: float):
+        bar = _item(kind="shape", kindIndex=0, x=3000, y=-250, w=200, h=20, rotation=rot)
         return plan_payload(_mm_wall(
             _mm_slide(1, [bar], keys, mm_out=True),
             _mm_slide(2, [_item(kind="shape", kindIndex=0, x=3000, y=500, w=200, h=20)], keys),
-        ), _mm_recipe())
+        ), _mm_recipe(ty=150.0))
 
     flat = plan_for(0.0)
-    assert _spec(flat, 1, "shape", 0).y == pytest.approx(-50)
+    assert _spec(flat, 1, "shape", 0).y == pytest.approx(-100)
     assert flat.mm_partners[0]["edge"] is None
-    turned = plan_for(90.0)
+
+    turned = plan_for(rotation)
     shape = _spec(turned, 1, "shape", 0)
-    assert shape.y + 10 + 100 == pytest.approx(-24)
+    assert (shape.w, shape.h) == (200, 20)
+    drawn = _true_aabb(shape, rotation)
+    assert drawn.y + drawn.h == pytest.approx(-MM_EDGE_MARGIN)
+    assert _aabb_clear_of_canvas(drawn, MM_EDGE_MARGIN - 1e-6)
     assert turned.mm_partners[0]["edge"] == "top"
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "rotation"),
+    [
+        ([3000, -300], [3000, -100], 90.0),
+        ([3000, -100], [3000, -300], 270.0),
+        ([3000, -300], [3200, -100], 45.0),
+        ([3200, -300], [3000, -100], 135.0),
+    ],
+)
+def test_mm_rotated_line_is_pushed_by_its_endpoints_not_rotated_again(start, end, rotation):
+    """A line's bounds come from its endpoints, which already carry the rotation: a
+    vertical or diagonal line spanning y -300..-100 on the wall, mapped by ty=+250 onto
+    y -50..150, is pushed until its lower endpoint sits exactly MM_EDGE_MARGIN above the
+    canvas. Rotating that endpoint box again would park it at the wrong height."""
+    from obed_edom.map_remap import MM_EDGE_MARGIN
+
+    keys = {"line": {0: "line"}}
+    line1 = _item(kind="line", kindIndex=0, x=3000, y=-300, w=200, h=0, start=start, end=end, rotation=rotation)
+    line2 = _item(kind="line", kindIndex=0, x=3000, y=500, w=200, h=0, start=[3000, 500], end=[3200, 500])
+    plan = plan_payload(_mm_wall(
+        _mm_slide(1, [line1], keys, mm_out=True),
+        _mm_slide(2, [line2], keys),
+    ), _mm_recipe(ty=250.0))
+
+    line = _spec(plan, 1, "line", 0)
+    assert line.role == "line"
+    ys = (line.start[1], line.end[1])
+    xs = (line.start[0], line.end[0])
+    assert max(ys) == pytest.approx(-MM_EDGE_MARGIN)
+    assert min(ys) == pytest.approx(-MM_EDGE_MARGIN - 200)
+    assert sorted(xs) == pytest.approx(sorted([start[0] - 2880, end[0] - 2880]))
+    assert plan.mm_partners[0]["edge"] == "top"
 
 
 def test_mm_zero_size_off_slide_item_is_refused_and_stays_hidden():

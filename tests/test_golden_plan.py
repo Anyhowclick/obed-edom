@@ -4,6 +4,7 @@ See `scripts/golden_plan.py` for the capture mechanism and canonicalisation."""
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from obed_edom import baseline  # noqa: E402
 from obed_edom import framing  # noqa: E402
 from obed_edom import iwa_builds  # noqa: E402
 from obed_edom import remap_keynote  # noqa: E402
+from obed_edom.map_remap import MM_EDGE_MARGIN  # noqa: E402
 from obed_edom.offline_inspect import offline_wall_payload  # noqa: E402
 
 DECKS = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs")
@@ -293,17 +295,49 @@ def test_propose_auto_rects_match_apply_transforms(monkeypatch: pytest.MonkeyPat
         deck, TEMPLATE, wall_payload=fresh_wall, template_payload=fresh_template, log=lambda _m: None
     )
 
+    # Off-canvas Magic Move partners are kept by a cross-slide post-pass that the per-slide
+    # preview cannot see (accepted in .agents/plans/mm_offcanvas_partners.plan.md). Apply may
+    # add exactly the plan's Oracle 22, addressed by kindIndex, and each one's true drawn
+    # box (x/y is the rotated AABB top-left, only the extent turns) grown by MM_EDGE_MARGIN
+    # must miss the 1920x1080 CG canvas.
+    oracle = {
+        (16, "text", 0), (16, "image", 3), (16, "image", 4),
+        *((16, "shape", i) for i in (7, 8, 9, 10)),
+        (17, "text", 0), (17, "image", 1), (17, "image", 6), (17, "shape", 0), (17, "shape", 2),
+        (130, "image", 3), (130, "image", 4), (130, "shape", 1),
+        *((130, "group", i) for i in range(7)),
+    }
+    assert len(oracle) == 22
+    rotation = {
+        (int(s.get("number") or s["index"] + 1), it["kind"], it.get("kindIndex")): float(it.get("rotation") or 0.0)
+        for s in fresh_wall["slides"]
+        for it in s.get("items") or []
+    }
     apply_by_slide: dict[int, list[tuple]] = {}
+    mm_kept: dict[tuple, dict] = {}
     for t in plan["transforms"]:
         if t["role"] not in ROLE_SET:
+            continue
+        address = (int(t["slide"]), t["kind"], t.get("kindIndex"))
+        if address in oracle:
+            mm_kept[address] = t
             continue
         apply_by_slide.setdefault(int(t["slide"]), []).append(
             (t["role"], t["kind"], round(t["x"]), round(t["y"]), round(t["w"]), round(t["h"]))
         )
 
+    assert set(mm_kept) == oracle
+    m = MM_EDGE_MARGIN
+    for address, t in sorted(mm_kept.items()):
+        assert t["role"] == "other", address
+        theta = math.radians(rotation[address])
+        c, sn = abs(math.cos(theta)), abs(math.sin(theta))
+        w, h = t["w"] * c + t["h"] * sn, t["w"] * sn + t["h"] * c
+        x, y = t["x"], t["y"]
+        assert x + w + m <= 0 or y + h + m <= 0 or x - m >= 1920 or y - m >= 1080, (address, x, y, w, h)
+
     differing: list[int] = []
     detail: list[str] = []
-    mm_only_slides: list[int] = []
     for page in proposal.get("pages") or []:
         slide_no = int(page["slide"])
         propose_rows = [
@@ -312,27 +346,12 @@ def test_propose_auto_rects_match_apply_transforms(monkeypatch: pytest.MonkeyPat
             if r["role"] in ROLE_SET
         ]
         apply_rows = apply_by_slide.get(slide_no, [])
-        # Off-canvas Magic Move partners are kept by a cross-slide post-pass that the per-slide
-        # preview cannot see (accepted in .agents/plans/mm_offcanvas_partners.plan.md). Those are the
-        # only rows apply may add, and each must sit wholly off the 1920x1080 CG canvas.
-        propose_left = list(propose_rows)
-        apply_only = []
-        for row in apply_rows:
-            if row in propose_left:
-                propose_left.remove(row)
-            else:
-                apply_only.append(row)
-        if not propose_left and apply_only:
-            if all(r[2] + r[4] <= 0 or r[2] >= 1920 or r[3] + r[5] <= 0 or r[3] >= 1080 for r in apply_only):
-                mm_only_slides.append(slide_no)
-                apply_rows = [r for r in apply_rows if r not in apply_only]
         if apply_rows != propose_rows:
             differing.append(slide_no)
             if len(detail) < 3:
                 detail.append(f"slide {slide_no}: apply={apply_rows} propose={propose_rows}")
 
     assert differing == [], "\n".join([f"{len(differing)} slide(s) differ", *detail])
-    assert mm_only_slides == [16, 17, 130]
 
 
 @pytest.mark.parametrize(

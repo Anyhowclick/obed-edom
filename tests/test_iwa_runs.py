@@ -1621,6 +1621,41 @@ def test_attach_magic_move_shape_key_is_size_invariant_but_radius_sensitive(tmp_
     assert 5 not in shapes
 
 
+def _path_shape(points, width, height):
+    elements = [{"type": "moveTo", "points": [{"x": points[0][0], "y": points[0][1]}]}]
+    elements += [{"type": "lineTo", "points": [{"x": x, "y": y}]} for x, y in points[1:]]
+    return {
+        "_pbtype": "TSWP.ShapeInfoArchive",
+        "super": {"pathsource": {"bezierPathSource": {
+            "naturalSize": {"width": width, "height": height}, "path": {"elements": elements},
+        }}},
+    }
+
+
+def test_attach_magic_move_shape_key_resolution_tolerates_save_noise_but_splits_distinct_paths(tmp_path):
+    # The key rounds naturalSize-normalised coordinates to 1e-3. Measured on FRC
+    # (2026-09-24): every collision at that resolution is Keynote save noise between
+    # identical shapes (at most 2.2e-7 normalised); 1e-6 already splits the 17x17 pin-dot
+    # class (1.1e-7 apart), and exact ratios split two more. A split re-creates the broken
+    # move, a collision only keeps one more object parked off the canvas, so the
+    # resolution stays coarse.
+    # s0/s1: one 1000pt path, s1 carrying 2e-7 relative noise -> one key.
+    # s2: the same path with its apex 5pt (5e-3 normalised) over on a 1000pt natural
+    # size -> a different key (near-but-distinct null control).
+    base = [(0.0, 0.0), (1000.0, 0.0), (500.0, 800.0)]
+    noisy = [(x * (1 + 2e-7), y * (1 + 2e-7)) for x, y in base]
+    moved = [(0.0, 0.0), (1000.0, 0.0), (505.0, 800.0)]
+    extra = {
+        "s0": _path_shape(base, 1000.0, 800.0),
+        "s1": _path_shape(noisy, 1000.0, 800.0),
+        "s2": _path_shape(moved, 1000.0, 800.0),
+    }
+    deck = _mm_deck([(_transition(_MM_EFFECT), ["s0", "s1", "s2"]), (None, [])], extra)
+    shapes = _attach(tmp_path, deck, range(2))[0]["mmKeys"]["shape"]
+    assert shapes[0] == shapes[1]
+    assert shapes[2] != shapes[0]
+
+
 def test_attach_magic_move_empty_text_gets_no_key_and_dual_shape_is_skipped(tmp_path):
     # t0: whitespace/object-replacement-only text -> no key. t1: a custom-path text box
     # (dual: text 1 AND shape 0) -> keyed once, on its text record; the dual shape record
@@ -1700,6 +1735,52 @@ def test_attach_magic_move_keys_survive_a_json_round_trip(tmp_path):
         restored = {kind: {int(ki): key for ki, key in by_index.items()} for kind, by_index in after["mmKeys"].items()}
         assert restored == before["mmKeys"]
         assert all(isinstance(ki, int) for by_index in before["mmKeys"].values() for ki in by_index)
+
+
+def test_attach_magic_move_replaces_stale_fields_from_a_prior_annotation(tmp_path):
+    # A payload annotated before (e.g. a reused dict) carries fields for slides the
+    # current deck no longer pairs: they are cleared, and current pairs are rewritten.
+    extra = {f"t{i}": _text_box(f"s{i}") for i in range(3)} | {f"s{i}": _storage(f"T{i}") for i in range(3)}
+    deck = _mm_deck([(_transition(_MM_EFFECT), ["t0"]), (None, ["t1"]), (None, ["t2"])], extra)
+    payload = {"slides": [
+        {"index": 0, "items": [], "mmKeys": {"text": {0: "text:stale"}}},
+        {"index": 1, "items": [], "magicMoveOut": True},
+        {"index": 2, "items": [], "magicMoveOut": True, "mmKeys": {"text": {0: "text:T2"}}},
+    ]}
+    iwa.attach_magic_move(_empty_key(tmp_path), payload, deck=deck)
+    assert payload["slides"] == [
+        {"index": 0, "items": [], "magicMoveOut": True, "mmKeys": {"text": {0: "text:T0"}}},
+        {"index": 1, "items": [], "mmKeys": {"text": {0: "text:T1"}}},
+        {"index": 2, "items": []},
+    ]
+
+
+def test_attach_magic_move_failure_after_a_keyed_pair_leaves_no_annotation(tmp_path, monkeypatch):
+    # Pairs (0,1) and (2,3). Keying fails on slide 2's record, after slide 0 and 1 were
+    # fully keyed: no slide may keep a partial annotation (it could still convert hides),
+    # and a stale field from a prior annotation is cleared too.
+    extra = {f"t{i}": _text_box(f"s{i}") for i in range(4)} | {f"s{i}": _storage(f"T{i}") for i in range(4)}
+    deck = _mm_deck(
+        [(_transition(_MM_EFFECT), ["t0"]), (None, ["t1"]), (_transition(_MM_EFFECT), ["t2"]), (None, ["t3"])],
+        extra,
+    )
+    real_identity = iwa._mm_identity
+    keyed: list[str] = []
+
+    def failing_identity(rec, objects, digests):
+        if rec.get("text") == "T2":
+            raise RuntimeError("unreadable archive")
+        key = real_identity(rec, objects, digests)
+        keyed.append(key)
+        return key
+
+    monkeypatch.setattr(iwa, "_mm_identity", failing_identity)
+    payload = {"slides": [{"index": i, "items": []} for i in range(4)]}
+    payload["slides"][3]["mmKeys"] = {"text": {0: "text:stale"}}
+    with pytest.raises(RuntimeError, match="unreadable archive"):
+        iwa.attach_magic_move(_empty_key(tmp_path), payload, deck=deck)
+    assert keyed == ["text:T0", "text:T1"]
+    assert payload["slides"] == [{"index": i, "items": []} for i in range(4)]
 
 
 def test_attach_magic_move_real_decks_report_the_census_transitions():

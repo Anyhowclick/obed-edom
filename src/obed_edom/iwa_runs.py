@@ -701,7 +701,12 @@ def _mm_identity(rec: dict, objects: dict[str, dict], digests: dict[str, str]) -
 def attach_magic_move(key_path: str | Path, payload: dict, *, deck: Any = None) -> None:
     """Attach slide['magicMoveOut'] = True when the slide's transition out is a by-object
     Magic Move, and slide['mmKeys'] = {kind: {kindIndex: key}} on both slides of each such
-    pair. Read-only; transitions come from iwa_builds.deck_builds."""
+    pair. All-or-nothing: prior fields are cleared first and written only after every slide
+    is keyed. Read-only; transitions come from iwa_builds.deck_builds."""
+    slides = payload.get("slides") or []
+    for slide in slides:
+        slide.pop("magicMoveOut", None)
+        slide.pop("mmKeys", None)
     from obed_edom.iwa_builds import deck_builds  # noqa: PLC0415
     from obed_edom.iwa_kindindex import derive_kind_index  # noqa: PLC0415
 
@@ -712,22 +717,22 @@ def attach_magic_move(key_path: str | Path, payload: dict, *, deck: Any = None) 
     paired = mm_out | {idx + 1 for idx in mm_out}
     order = slide_order(objects)
     digests = _data_digests(objects)
-    for slide in payload.get("slides") or []:
+    staged: list[tuple[dict, bool, dict[str, dict[int, str]]]] = []
+    for slide in slides:
         idx = slide.get("index")
         if idx is None:
             continue
-        if idx in mm_out:
-            slide["magicMoveOut"] = True
-        if idx not in paired or not 0 <= idx < len(order):
-            continue
-        slide_archive = objects.get(order[idx][0])
-        if slide_archive is None:
-            continue
         keys: dict[str, dict[int, str]] = {}
-        for rec in derive_kind_index(slide_archive, objects):
-            key = _mm_identity(rec, objects, digests)
-            if key is not None:
-                keys.setdefault(rec["kind"], {})[int(rec["kindIndex"])] = key
+        slide_archive = objects.get(order[idx][0]) if idx in paired and 0 <= idx < len(order) else None
+        if slide_archive is not None:
+            for rec in derive_kind_index(slide_archive, objects):
+                key = _mm_identity(rec, objects, digests)
+                if key is not None:
+                    keys.setdefault(rec["kind"], {})[int(rec["kindIndex"])] = key
+        staged.append((slide, idx in mm_out, keys))
+    for slide, out, keys in staged:
+        if out:
+            slide["magicMoveOut"] = True
         if keys:
             slide["mmKeys"] = keys
 
