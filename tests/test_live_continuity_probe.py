@@ -5962,8 +5962,7 @@ class TestWrapOwnerExcuseFailsClosed:
     """Codex r2 F2: the excuse needs a finite readyState < 2, a non-null elId, and both
     neighbours carrying that same elId."""
 
-    def _score(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
-        return probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, True, loop_period_s=LOOP_P)
+    _score = TestWrapOwnerExcuse._score
 
     @pytest.mark.parametrize("ready", ["missing", None, float("nan"), "1"])
     def test_known_bad_unreadable_ready_state_is_not_excused(self, ready: Any) -> None:

@@ -6,7 +6,7 @@ Status: **rev 2, APPROVED by the owner 2026-09-24 — OQ-1..4 all (a)** ("church
 1–5), OD-2 plan `keynote_live_gl_replay_managed_obs.plan.md` (unpushed branch `claude/od-2-gl-replay-managed-obs-5bd03f`,
 6 commits over main; §4 "Soak fixture", OQ-3a splice). Style: `~/.AGENTS.md`.
 
-**Progress (2026-09-24):** WS-A/WS-B implemented (`1fb55c59`); gate commit `21944ddb` allowlists the p2-loop shas; Codex r1 folded (`229e409b`); L2 harness fixes (`96eb6d68`: armed 1→2 recorder window grounded in the take; wrap-row owner excuse for the loop seek's readyState 1). Gates: L4 == `bd9ae9f4`; L1 PASS; L2 3to4 6/6 carried, 1to2 every offset carried in ≥1 valid take, 6/16 1to2 takes INVALID (≈200 ms decoder gap ~300 ms after the press when the loop is about to wrap; below `MAX_STALL_S`) = OQ-4(a) residual. Open: Codex r2, WS-C + L5 after OD-2 merges, HALL entry, full suites, PR.
+**Progress (2026-09-24):** WS-A/WS-B implemented (`1fb55c59`); gate commit `21944ddb` allowlists the p2-loop shas; Codex r1 folded (`229e409b`); L2 harness fixes (`96eb6d68`: armed 1→2 recorder window grounded in the take; wrap-row owner excuse for the loop seek's readyState 1). Gates: L4 == `bd9ae9f4`; L1 PASS; L2 3to4 6/6 carried, 1to2 every offset carried in ≥1 valid take, 6/16 1to2 takes INVALID (≈200 ms decoder gap ~300 ms after the press when the loop is about to wrap; below `MAX_STALL_S`) = OQ-4(a) residual. Codex r2 folded (`cc270631`), r3 clean on spec. Full suites at `cc270631`: pytest 7543 passed / 88 skipped / 1 xfailed, `test:ui` 305/305, `test:maps` pass. Gate record `.agents/reviews/continuity-loopmode/gates-r1.md`. Open: WS-C + L5 after OD-2 merges, HALL entry, PR.
 
 ## 0. Verified facts (offline; each re-verified in rev 2)
 
