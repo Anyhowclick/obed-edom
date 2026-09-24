@@ -463,6 +463,7 @@ export async function startResize(
     export?: boolean;
     includeLists?: boolean;
     validate?: boolean;
+    offlineHides?: "off";
   }
 ): Promise<Job> {
   const body = new FormData();
@@ -474,6 +475,7 @@ export async function startResize(
   body.set("export", opts.export === false ? "false" : "true");
   body.set("include_lists", opts.includeLists ? "true" : "false");
   body.set("validate", opts.validate === false ? "false" : "true");
+  if (opts.offlineHides) body.set("offline_hides", opts.offlineHides);
   const res = await fetch("/api/resize", { method: "POST", body });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
@@ -500,11 +502,13 @@ export async function saveResizeFramings(jobId: string, decisions: FramingDecisi
 export async function applyResize(
   jobId: string,
   decisions?: FramingDecision[],
-  exportDir?: string
+  exportDir?: string,
+  offlineHides?: "off"
 ): Promise<Job> {
-  const body: { decisions?: FramingDecision[]; exportDir?: string } = {};
+  const body: { decisions?: FramingDecision[]; exportDir?: string; offlineHides?: "off" } = {};
   if (decisions) body.decisions = decisions;
   if (exportDir !== undefined) body.exportDir = exportDir;
+  if (offlineHides) body.offlineHides = offlineHides;
   const res = await fetch(`/api/resize/${jobId}/apply`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

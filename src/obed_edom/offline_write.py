@@ -88,6 +88,324 @@ def _offline_write_slides(
     return offline
 
 
+HIDE_MISSED_MARKER = "OBED_HIDE_MISSED"
+HIDE_FALLBACK_OK = "OBED_HIDES_FALLBACK_OK"
+
+
+class OfflineHidesAborted(RuntimeError):
+    """Offline hides stopped the run before any later deck stage; a rerun with
+    `OBED_OFFLINE_HIDES=off` avoids it. `reason` is short and operator-readable, `detail`
+    is the full operator message with the recovery steps. `needs_fresh_output` is True when
+    the fallback session may have left the destination open in Keynote or partly edited."""
+
+    def __init__(self, reason: str, context: str = "", *, needs_fresh_output: bool = False) -> None:
+        self.reason = reason
+        self.needs_fresh_output = needs_fresh_output
+        recovery = (
+            "Close the destination deck in Keynote WITHOUT saving if it is still open, then "
+            "rerun from the original source into a fresh --out with OBED_OFFLINE_HIDES=off; "
+            "never replay the delete script."
+            if needs_fresh_output else "Rerun with OBED_OFFLINE_HIDES=off."
+        )
+        self.detail = f"Offline hides aborted: {reason}{f' ({context})' if context else ''}. {recovery}"
+        super().__init__(self.detail)
+
+
+def _hide_specs_by_slide(transform_dicts: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
+    out: dict[int, list[dict[str, Any]]] = {}
+    for spec in transform_dicts:
+        if spec.get("role") == "hide":
+            out.setdefault(int(spec.get("slide", -1)), []).append(spec)
+    return out
+
+
+def _wall_slides_by_number(wall: dict[str, Any]) -> dict[int, dict[str, Any]]:
+    return {
+        int(slide.get("number") or i + 1): slide
+        for i, slide in enumerate(wall.get("slides") or [])
+    }
+
+
+def _dual_keys(items: list[dict[str, Any]]) -> set[tuple[str, int]]:
+    """Both kind slots of every dual (a custom-path text box in shapes AND textItems)."""
+    out: set[tuple[str, int]] = set()
+    for item in items:
+        twin = item.get("duplicateOf")
+        if not twin:
+            continue
+        if item.get("kindIndex") is not None:
+            out.add((str(item.get("kind") or ""), int(item["kindIndex"])))
+        if twin.get("kindIndex") is not None:
+            out.add((str(twin.get("kind") or ""), int(twin["kindIndex"])))
+    return out
+
+
+def offline_hide_slides(
+    transform_dicts: list[dict[str, Any]],
+    wall: dict[str, Any],
+    wanted: list[int] | None,
+) -> set[int]:
+    """Slides whose hides the IWA writer deletes after the pass-1 save: slides with a hide,
+    within `wanted`, where every hide's payload item carries its source `iwaId`; minus
+    slides where a hide is a source build target, a dual, or has no AppleScript address.
+    Those stay on the Keynote delete."""
+    from obed_edom.remap_keynote import _AS_KIND_NAMES  # noqa: PLC0415 (avoid a module cycle)
+
+    hides = _hide_specs_by_slide(transform_dicts)
+    slides = _wall_slides_by_number(wall)
+    out: set[int] = set()
+    for n, specs in hides.items():
+        if wanted and n not in wanted:
+            continue
+        if any(s.get("kindIndex") is None or str(s.get("kind") or "") not in _AS_KIND_NAMES
+               for s in specs):
+            continue
+        slide = slides.get(n) or {}
+        items = slide.get("items") or []
+        hide_keys = {(str(s.get("kind")), int(s["kindIndex"])) for s in specs}
+        with_id = {
+            (str(it.get("kind") or ""), int(it["kindIndex"]))
+            for it in items if it.get("kindIndex") is not None and it.get("iwaId") is not None
+        }
+        if not hide_keys <= with_id:
+            continue
+        excluded = _dual_keys(items) | {
+            (str(b.get("kind") or ""), int(b.get("kindIndex") or 0))
+            for b in slide.get("builds") or []
+        }
+        if hide_keys & excluded:
+            continue
+        out.add(n)
+    return out
+
+
+def _hide_delete_body(specs: list[dict[str, Any]], slide_no: int) -> str:
+    """AppleScript deletes for one slide in `deleteHides` order (kind asc, kindIndex desc).
+    The first failed delete stops the session with `HIDE_MISSED_MARKER`; nothing else is
+    retried through a positional address."""
+    from obed_edom.remap_keynote import _AS_KIND_NAMES  # noqa: PLC0415 (avoid a module cycle)
+
+    ordered = sorted(specs, key=lambda s: (str(s.get("kind") or ""), -int(s["kindIndex"])))
+    body = [f"      tell slide {int(slide_no)}"]
+    for spec in ordered:
+        kind = str(spec.get("kind") or "")
+        addr = f"{_AS_KIND_NAMES[kind]} {int(spec['kindIndex']) + 1}"
+        body += [
+            "        try",
+            f"          delete {addr}",
+            "        on error errMsg",
+            f'          error "{HIDE_MISSED_MARKER} slide={int(slide_no)} kind={kind} '
+            f'kindIndex={int(spec["kindIndex"])}: " & errMsg',
+            "        end try",
+        ]
+    return "\n".join(body + ["      end tell"])
+
+
+_SAME_PATH_SH = (
+    'p="${p%/}"; d=$(cd "$(dirname "$p")" 2>/dev/null && pwd -P) || exit 1; '
+    '[ "$d/$(basename "$p")" = "$t" ] && printf 1'
+)
+
+
+def _same_path_handler() -> str:
+    """`obedIsTarget(p, t)`: true iff canonicalised `p` equals `t` byte for byte (compared in the shell)."""
+    same_sh = _as_escape(_SAME_PATH_SH)
+    return "\n".join([
+        "on obedIsTarget(p, t)",
+        '  if p is "" then return false',
+        "  try",
+        f'    do shell script "p=" & quoted form of p & "; t=" & quoted form of t & "; " & "{same_sh}"',
+        "    return true",
+        "  on error",
+        "    return false",
+        "  end try",
+        "end obedIsTarget",
+    ])
+
+
+def _hide_fallback_script(dest: Path, bodies_by_slide: dict[int, str]) -> str:
+    """One session: bind the unique document at realpath(`dest`), delete, save, close, confirm closed."""
+    import os  # noqa: PLC0415
+
+    target = _as_escape(os.path.realpath(dest))
+    return "\n".join([
+        _same_path_handler(),
+        "",
+        "on obedMatches(target)",
+        "  set found to {}",
+        f"  {_keynote_terms()}",
+        f"  {_keynote_tell()}",
+        "    repeat with d in documents",
+        '      set p to ""',
+        "      try",
+        "        set p to POSIX path of ((file of d) as alias)",
+        "      end try",
+        "      if my obedIsTarget(p, target) then set end of found to (contents of d)",
+        "    end repeat",
+        "  end tell",
+        "  end using terms from",
+        "  return found",
+        "end obedMatches",
+        "",
+        _keynote_terms(),
+        _keynote_tell(),
+        "  activate",
+        "  with timeout of 3600 seconds",
+        f'    open (POSIX file "{target}")',
+        f'    set matches to my obedMatches("{target}")',
+        "    if (count of matches) is not 1 then",
+        f'      error "hides fallback bound " & (count of matches) & " document(s) at {target}"',
+        "    end if",
+        "    set theDoc to item 1 of matches",
+        "    try",
+        "      tell theDoc",
+        *(bodies_by_slide[n] for n in sorted(bodies_by_slide)),
+        "      end tell",
+        "      save theDoc",
+        "    on error errMsg",
+        "      try",
+        "        close theDoc saving no",
+        "      end try",
+        "      error errMsg",
+        "    end try",
+        "    close theDoc saving yes",
+        f'    if (count of (my obedMatches("{target}"))) is not 0 then error "hides fallback: document still open after close"',
+        f'    return "{HIDE_FALLBACK_OK}"',
+        "  end timeout",
+        "end tell",
+        "end using terms from",
+    ])
+
+
+def _run_hide_fallback(
+    dest: Path, hides_by_slide: dict[int, list[dict[str, Any]]], say: Callable[[str], None],
+) -> None:
+    """Run the hide-delete session; raise `OfflineHidesAborted` (fresh output needed) unless
+    it deleted every hide, saved, and confirmed the close."""
+    script = _hide_fallback_script(
+        dest, {n: _hide_delete_body(specs, n) for n, specs in hides_by_slide.items()})
+    try:
+        proc = run_applescript(
+            script, launch=True, dump_on_failure=dest.with_suffix(".hides-fallback.applescript"))
+    except Exception as exc:  # noqa: BLE001 — a timeout or runner failure leaves the deck unknown
+        raise OfflineHidesAborted("hide fallback session did not finish",
+                                  f"{type(exc).__name__}: {exc}", needs_fresh_output=True) from exc
+    out = (proc.stdout or "").strip()
+    if proc.returncode == 0 and out.endswith(HIDE_FALLBACK_OK):
+        return
+    missed = [ln.strip() for ln in (proc.stderr or "").splitlines() if HIDE_MISSED_MARKER in ln]
+    say(f"Offline hides fallback session failed (script kept: {proc.dump}): "
+        f"{proc.stderr or proc.stdout}")
+    reason = "a hide delete failed" if missed else "hide fallback session failed"
+    raise OfflineHidesAborted(reason, missed[0] if missed else (proc.stderr or out)[:200],
+                              needs_fresh_output=True)
+
+
+def _debug_force_refuse() -> frozenset[int]:
+    import os  # noqa: PLC0415
+
+    raw = os.environ.get("OBED_DEBUG_HIDES_REFUSE", "")
+    return frozenset(int(t) for t in raw.replace(",", " ").split() if t.strip().isdigit())
+
+
+def _patch_hides(
+    dest: Path,
+    hides_by_slide: dict[int, list[dict[str, Any]]],
+    wall: dict[str, Any],
+    *,
+    verify: bool,
+    say: Callable[[str], None],
+) -> Any:
+    """`patch_deck_hides`' result. `OfflineWriteRefused` and `HidesWriteFailed` raise
+    `OfflineHidesAborted`; `OfflineWriteCorrupted` propagates."""
+    from obed_edom.iwa_hides import HidesWriteFailed, patch_deck_hides  # noqa: PLC0415 (optional iwa extra)
+    from obed_edom.iwa_write import OfflineWriteCorrupted, OfflineWriteRefused  # noqa: PLC0415
+
+    slides = _wall_slides_by_number(wall)
+    counts = counts_from_payload(wall)
+    try:
+        return patch_deck_hides(
+            dest,
+            hides_by_slide,
+            source_counts_by_slide={n: counts.get(n, {}) for n in hides_by_slide},
+            items_by_slide={n: list((slides.get(n) or {}).get("items") or []) for n in hides_by_slide},
+            verify=verify,
+            force_refuse=_debug_force_refuse(),
+        )
+    except OfflineWriteRefused as exc:
+        raise OfflineHidesAborted("the IWA writer refused the deck before writing", str(exc)) from exc
+    except OfflineWriteCorrupted as exc:
+        tmp_path = Path(dest).parent / f".{Path(dest).name}.obedwrite.tmp"
+        say(
+            f"OFFLINE-HIDES CORRUPTED: {exc} — {dest} may be TRUNCATED. RECOVERY: copy "
+            f'{tmp_path} back over {dest} (e.g. `cp "{tmp_path}" "{dest}"`), or rerun into a '
+            "fresh --out. NOT falling back to AppleScript — the deck cannot be safely opened like this."
+        )
+        raise
+    except HidesWriteFailed as exc:
+        raise OfflineHidesAborted("the offline delete failed after writing", str(exc)) from exc
+
+
+def run_offline_hides(
+    dest: Path,
+    mode: str,
+    hide_slides: set[int],
+    transform_dicts: list[dict[str, Any]],
+    wall: dict[str, Any],
+    say: Callable[[str], None],
+) -> dict[str, Any] | None:
+    """Delete the hides pass 1 deferred on `hide_slides`: one surgical IWA rewrite, then one
+    AppleScript delete session for refused slides whose every hide the writer proved by source
+    id (`order_proven`). `None` (no decode) when off or nothing is eligible.
+
+    Raises `OfflineHidesAborted` for a whole-deck refusal, any unproven refused slide, or any
+    fallback failure: a hide left in place, or deleted by an unproven position, makes every
+    later positional stage address the wrong object."""
+    if mode == "off" or not hide_slides:
+        return None
+    import time  # noqa: PLC0415
+
+    from obed_edom.remap_keynote import _debug_snapshot_pass1  # noqa: PLC0415 (avoid a module cycle)
+
+    dest = Path(dest)
+    all_hides = _hide_specs_by_slide(transform_dicts)
+    hides_by_slide = {n: all_hides[n] for n in sorted(hide_slides)}
+    _debug_snapshot_pass1(dest, say, variant="pre-hides")
+    t0 = time.monotonic()
+    result = _patch_hides(dest, hides_by_slide, wall, verify=(mode == "verify"), say=say)
+    refused = {n: str(r.reason) for n, r in result.slides.items() if r.refused}
+    offline_deleted = sum(r.deleted for r in result.slides.values() if not r.refused)
+    reasons = "; ".join(f"slide {n} {r}" for n, r in sorted(refused.items()))
+    say(
+        f"Offline hides ({mode}): {len(hides_by_slide)} slide(s), {offline_deleted} deleted, "
+        f"{len(refused)} refused{' (' + reasons + ')' if reasons else ''}, "
+        f"{len(result.dropped_data)} orphan data dropped, {time.monotonic() - t0:.1f}s."
+    )
+    unproven = sorted(n for n, r in result.slides.items() if r.refused and not r.order_proven)
+    if unproven:
+        raise OfflineHidesAborted(
+            f"slide(s) {unproven} refused before the saved order was proven",
+            "; ".join(f"slide {n} {refused[n]}" for n in unproven)
+            + "; an AppleScript delete by source kindIndex could remove the wrong object",
+        )
+    fallback_deleted = 0
+    if refused:
+        fallback = {n: hides_by_slide[n] for n in sorted(refused)}
+        fallback_deleted = sum(len(v) for v in fallback.values())
+        say(f"Offline hides fallback: {len(fallback)} slide(s) ({fallback_deleted} hide(s)) "
+            "via AppleScript delete.")
+        _run_hide_fallback(dest, fallback, say)
+    return {
+        "mode": mode,
+        "slides": sorted(hides_by_slide),
+        "refused": [{"slide": n, "reason": r} for n, r in sorted(refused.items())],
+        "offlineDeleted": offline_deleted,
+        "fallbackDeleted": fallback_deleted,
+        "deleted": offline_deleted + fallback_deleted,
+        "droppedData": len(result.dropped_data),
+    }
+
+
 def counts_from_payload(wall: dict[str, Any]) -> dict[int, dict[str, int]]:
     """Per-slide per-kind item counts straight from the wall payload — no second IWA decode."""
     out: dict[int, dict[str, int]] = {}

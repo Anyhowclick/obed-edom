@@ -212,13 +212,42 @@ def offline_maskcrop_enabled(
     return True
 
 
-def _debug_snapshot_pass1(dest: Path, say: Callable[[str], None] | None = None) -> None:
+def offline_hides_mode(
+    explicit: str | None = None, *, offline_mode: str | None = None,
+    say: Callable[[str], None] | None = None,
+) -> str:
+    """`on` (default: pass 1 defers the hides of eligible slides; the IWA writer deletes them
+    after the save), `off` (kill switch: pass 1 deletes hides in Keynote) or `verify` (plus a
+    whole-deck reference check). Env `OBED_OFFLINE_HIDES`; unknown tokens force `off`, as in
+    `offline_maskcrop_enabled`. Forced `off` when `offline_mode` is `off` (also covers a
+    missing `iwa` extra via `probe_iwa_extra`)."""
+    raw = (explicit if explicit is not None else os.environ.get("OBED_OFFLINE_HIDES", "")).strip().lower()
+    if raw == "off":
+        return "off"
+    raw = raw or "on"
+    if raw not in {"on", "verify"}:
+        if say:
+            say(f"Unknown OBED_OFFLINE_HIDES value {raw!r}; forcing offline hides off.")
+        return "off"
+    if offline_mode == "off":
+        if say:
+            say(f"OBED_OFFLINE_HIDES={raw!r} needs OBED_OFFLINE_WRITE on; forcing offline hides off.")
+        return "off"
+    return raw
+
+
+def _debug_snapshot_pass1(
+    dest: Path, say: Callable[[str], None] | None = None, *, variant: str | None = None,
+) -> None:
     """Diagnostic: when `OBED_DEBUG_PASS1_SNAPSHOT` is a path, copy the pass-1-saved deck
     there for an offline `naturalSize` census (the owner-gated text experiment's conversion
-    ceiling). No-op otherwise; never fails the run."""
+    ceiling); `variant` writes `<stem>.<variant>.key` beside it instead. No-op otherwise;
+    never fails the run."""
     target = os.environ.get("OBED_DEBUG_PASS1_SNAPSHOT", "").strip()
     if not target:
         return
+    if variant:
+        target = str(Path(target).with_name(f"{Path(target).stem}.{variant}.key"))
     try:
         import shutil  # noqa: PLC0415
 
@@ -306,6 +335,19 @@ def _merge_legacy_slides(
         slide["groupChildrenUnavailable"] = True
 
 
+def _offline_payload_carries_iwa_ids(payload: dict[str, Any] | None) -> bool:
+    """Every item of every offline-decoded slide carries its source `iwaId`; JXA-fallback
+    slides (`groupChildrenUnavailable`) and non-offline payloads are exempt."""
+    if not isinstance(payload, dict) or payload.get("reader") != "offline":
+        return True
+    for slide in payload.get("slides") or []:
+        if slide.get("groupChildrenUnavailable"):
+            continue
+        if any(item.get("iwaId") is None for item in slide.get("items") or []):
+            return False
+    return True
+
+
 def acquire_wall_payload(
     source: Path,
     *,
@@ -321,7 +363,9 @@ def acquire_wall_payload(
     allowed_readers = {"jxa", "offline"} if mode == "on" else {"jxa"}
     rejected_cache = cached is not None
     usable = complete_cached_wall_payload(cached) and cached.get("reader") in allowed_readers
-    carries = mode != "on" or wall_payload_carries_aspect(cached)
+    carries_aspect = wall_payload_carries_aspect(cached)
+    carries_ids = _offline_payload_carries_iwa_ids(cached)
+    carries = mode != "on" or (carries_aspect and carries_ids)
     # A cached JXA read is coordinate-space-incompatible with `groupChildren` (archive
     # offsets vs a JXA group's live union frame — see attach_group_children's gate), so in
     # mode "on" it must not be served merely because a fresh offline decode would succeed;
@@ -355,9 +399,12 @@ def acquire_wall_payload(
         say(f"Cached offline read of {source.name} is not from a mixed-slide-tagged "
             "two-tier read; re-reading offline.")
 
-    if rejected_cache and mode == "on" and usable and not carries:
+    if rejected_cache and mode == "on" and usable and not carries_aspect:
         say(f"Cached {cached['reader']} read of {source.name} predates per-item aspect; "
             "re-reading.")
+    elif rejected_cache and mode == "on" and usable and not carries_ids:
+        say(f"Cached {cached['reader']} read of {source.name} predates per-item "
+            "source ids; re-reading.")
 
     legacy_cache_arg = {"use_cache": False} if rejected_cache else {}
     if mode == "off":
@@ -1226,8 +1273,10 @@ def remap_keynote(
     offline_read: str | None = None,
     plan_out: dict[str, Any] | None = None,
     log: Callable[[str], None] | None = None,
+    offline_hides: str | None = None,
 ) -> dict[str, Any]:
-    """Copy wall `source` to `dest` and remap in place from the CG template crop."""
+    """Copy wall `source` to `dest` and remap in place from the CG template crop.
+    `offline_hides` overrides `OBED_OFFLINE_HIDES` (None keeps the env)."""
     def say(message: str) -> None:
         if log:
             log(message)
@@ -1543,6 +1592,14 @@ def remap_keynote(
                 "offline (surgical IWA patch)."
             )
         suppressed = env_suppressed | offline_slides
+        hides_mode = offline_hides_mode(offline_hides, offline_mode=offline_mode, say=say)
+        hide_slides: set[int] = set()
+        if hides_mode != "off":
+            hide_slides = offline_write.offline_hide_slides(transform_dicts, wall, wanted)
+            say(
+                f"OBED_OFFLINE_HIDES={hides_mode}: {len(hide_slides)} slide(s) defer their "
+                "hides to the offline delete after the pass-1 save."
+            )
         plan: dict[str, Any] = {
             "dest": str(dest),
             "template": str(layout_src),
@@ -1567,6 +1624,8 @@ def remap_keynote(
         if wanted:
             plan["slides"] = wanted
             plan["range"] = [wanted[0], wanted[-1]]
+        if hides_mode != "off":
+            plan["offlineHideSlides"] = sorted(hide_slides)
         if write_timing_enabled():
             plan["timing"] = {"slowMs": 120}
             say("OBED_WRITE_TIMING on: recording per-slide/per-phase write timing.")
@@ -1608,9 +1667,10 @@ def remap_keynote(
         _say_write_timing(jxa["timing"], say)
     applied = int(jxa.get("applied") or 0)
     missed = int(jxa.get("missed") or 0)
+    hides_deferred = int(jxa.get("hidesDeferred") or 0)
     if jxa.get("collections"):
         say(f"Keynote collections: {jxa.get('collections')}")
-    if applied == 0:
+    if applied + hides_deferred == 0:
         detail = ""
         if jxa.get("collections"):
             detail += f" collections={jxa.get('collections')}"
@@ -1620,7 +1680,8 @@ def remap_keynote(
             "Keynote remap moved 0 objects; the copy was left at the wall canvas size."
             f" Planned {len(transforms)} transform(s), missed {missed}.{detail}"
         )
-    say(f"Applied {applied}, missed {missed}.")
+    if hides_mode == "off":
+        say(f"Applied {applied}, missed {missed}.")
     for reason in jxa.get("missReasons") or []:
         say(f"WARNING remap: {reason}")
     layouts = jxa.get("layouts") or {}
@@ -1634,6 +1695,22 @@ def remap_keynote(
             f"{len(applied_layouts)} slide(s)."
         )
     _require_pass1_saved_closed(jxa)
+    expected_deferred = sum(
+        1 for t in transform_dicts if t.get("role") == "hide" and int(t.get("slide", -1)) in hide_slides
+    )
+    if hides_deferred != expected_deferred:
+        raise offline_write.OfflineHidesAborted(
+            "pass 1 deferred a different number of hides than planned",
+            f"deferred {hides_deferred}, expected {expected_deferred} on slide(s) "
+            f"{sorted(hide_slides)}; refusing to delete hides by position",
+        )
+    hides_info = offline_write.run_offline_hides(
+        dest, hides_mode, hide_slides, transform_dicts, wall, say,
+    )
+    if hides_info is not None:
+        applied += hides_info["deleted"]
+    if hides_mode != "off":
+        say(f"Applied {applied}, missed {missed}.")
     _debug_snapshot_pass1(dest, say)
     text_reposition = offline_text_reposition_enabled(offline_mode=offline_mode, say=say)
     mask_crop = offline_maskcrop_enabled(offline_mode=offline_mode, say=say)
@@ -1832,6 +1909,8 @@ def remap_keynote(
     }
     if offline_write_info is not None:
         result["offlineWrite"] = offline_write_info
+    if hides_info is not None:
+        result["offlineHides"] = hides_info
     if zorder_mode != "off":
         merged_zorder = dict(zorder_write_info) if zorder_write_info is not None else {
             "mode": zorder_mode, "slides": [], "zorderSlides": 0, "zorderStatRaised": 0,
@@ -1922,6 +2001,7 @@ def remap_and_inspect(
     plan_out: dict[str, Any] | None = None,
     offline_read: str | None = None,
     log: Callable[[str], None] | None = None,
+    offline_hides: str | None = None,
 ) -> dict[str, Any]:
     info = remap_keynote(
         source,
@@ -1938,6 +2018,7 @@ def remap_and_inspect(
         export_dir=export_dir if not validate else None,
         offline_read=offline_read,
         log=log,
+        offline_hides=offline_hides,
     )
     if not validate:
         if export_dir and not info.get("exported"):

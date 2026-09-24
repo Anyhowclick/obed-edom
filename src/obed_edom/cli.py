@@ -664,6 +664,7 @@ def _run_dsk_assemble(args: argparse.Namespace) -> int:
 
 
 def _run_remap(args: argparse.Namespace) -> int:
+    from obed_edom.offline_write import OfflineHidesAborted
     from obed_edom.remap_keynote import remap_and_inspect, remap_keynote
 
     source = Path(args.keynote).expanduser()
@@ -705,31 +706,35 @@ def _run_remap(args: argparse.Namespace) -> int:
     if source_previews and not source_previews.is_dir():
         print(f"Wall preview folder not found: {source_previews}", file=sys.stderr)
         return 1
-    if args.no_export:
-        info = remap_keynote(
-            source,
-            dest,
-            template=template,
-            slide_range=slide_range,
-            keep_side_panels=keep_all,
-            side_content_slides=side,
-            source_previews=source_previews,
-            log=log,
-        )
-    else:
-        export_dir = dest.parent / "previews" / dest.stem
-        info = remap_and_inspect(
-            source,
-            dest,
-            template=template,
-            slide_range=slide_range,
-            keep_side_panels=keep_all,
-            side_content_slides=side,
-            export_dir=export_dir,
-            source_previews=source_previews,
-            validate=args.validate,
-            log=log,
-        )
+    try:
+        if args.no_export:
+            info = remap_keynote(
+                source,
+                dest,
+                template=template,
+                slide_range=slide_range,
+                keep_side_panels=keep_all,
+                side_content_slides=side,
+                source_previews=source_previews,
+                log=log,
+            )
+        else:
+            export_dir = dest.parent / "previews" / dest.stem
+            info = remap_and_inspect(
+                source,
+                dest,
+                template=template,
+                slide_range=slide_range,
+                keep_side_panels=keep_all,
+                side_content_slides=side,
+                export_dir=export_dir,
+                source_previews=source_previews,
+                validate=args.validate,
+                log=log,
+            )
+    except OfflineHidesAborted as exc:
+        print(exc.detail, file=sys.stderr)
+        return 1
     print(f"Wrote {info['dest']}")
     counts = info.get("counts") or {}
     print(

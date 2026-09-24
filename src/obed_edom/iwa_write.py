@@ -901,7 +901,7 @@ def recovery_tmp_path(deck: Path) -> Path:
     return deck.parent / f".{deck.name}.obedwrite.tmp"
 
 
-def _rewrite_members(deck: Path, edits: dict[str, bytes]) -> None:
+def _rewrite_members(deck: Path, edits: dict[str, bytes], *, drop: Iterable[str] = ()) -> None:
     """Stream every zip member into a same-volume temp file (peak RAM = largest member,
     not the whole deck), then copy the bytes back INTO THE ORIGINAL INODE via ``open(deck,
     "wb")`` (O_TRUNC on the SAME inode; never ``os.replace``, which would lose the inode
@@ -912,9 +912,35 @@ def _rewrite_members(deck: Path, edits: dict[str, bytes]) -> None:
     Escape hatch (measured, not built): Index/*.iwa are the last ~857 KB of the 1.16 GB
     Map output (first .iwa header at 99.93%), so an append+central-directory rewrite
     would be sub-second but leaves orphaned bytes Keynote has never been probed on.
+
+    ``drop`` names raw ``namelist()`` members to omit from the rewrite; a name that is
+    missing or also in ``edits`` refuses before any write.
+
+    Phase is typed: every failure before the copy-back opens the deck raises
+    ``OfflineWriteRefused`` (deck untouched), a failed copy-back raises
+    ``OfflineWriteCorrupted``, and anything else was raised after the deck was written.
     """
     deck = Path(deck)
+    drop = set(drop)
     tmp_path = recovery_tmp_path(deck)
+    try:
+        _write_temp_zip(deck, tmp_path, edits, drop)
+    except OfflineWriteRefused:
+        raise
+    except Exception as exc:
+        raise OfflineWriteRefused(f"temp rewrite failed, {deck.name} untouched: {exc!r}") from exc
+
+    try:
+        with open(str(deck), "wb") as out_fp, open(tmp_path, "rb") as tmp_fp:
+            shutil.copyfileobj(tmp_fp, out_fp, 8 << 20)
+            out_fp.flush()
+            os.fsync(out_fp.fileno())
+    except Exception as exc:
+        raise OfflineWriteCorrupted(f"{deck} truncated; recover from {tmp_path}") from exc
+    tmp_path.unlink()
+
+
+def _write_temp_zip(deck: Path, tmp_path: Path, edits: dict[str, bytes], drop: set[str]) -> None:
     # temp zip + full copy-back reallocation (worst case: deck is an APFS clone source).
     required = deck.stat().st_size * 2.1
     if shutil.disk_usage(deck.parent).free < required:
@@ -924,9 +950,17 @@ def _rewrite_members(deck: Path, edits: dict[str, bytes]) -> None:
         missing = set(edits) - set(zin.namelist())
         if missing:
             raise OfflineWriteRefused(f"edits name members not in {deck.name}: {sorted(missing)}")
+        missing_drop = drop - set(zin.namelist())
+        if missing_drop:
+            raise OfflineWriteRefused(f"drop names members not in {deck.name}: {sorted(missing_drop)}")
+        both = drop & set(edits)
+        if both:
+            raise OfflineWriteRefused(f"members both edited and dropped: {sorted(both)}")
         try:
             with zipfile.ZipFile(tmp_path, "w") as zout:
                 for zi in zin.infolist():
+                    if zi.filename in drop:
+                        continue
                     out_info = _preserve_raw_name(zi)
                     data = edits.get(zi.filename)
                     if data is not None:
@@ -937,15 +971,6 @@ def _rewrite_members(deck: Path, edits: dict[str, bytes]) -> None:
         except Exception:
             tmp_path.unlink(missing_ok=True)
             raise  # nothing useful in the temp; deck untouched
-
-    try:
-        with open(str(deck), "wb") as out_fp, open(tmp_path, "rb") as tmp_fp:
-            shutil.copyfileobj(tmp_fp, out_fp, 8 << 20)
-            out_fp.flush()
-            os.fsync(out_fp.fileno())
-    except Exception as exc:
-        raise OfflineWriteCorrupted(f"{deck} truncated; recover from {tmp_path}") from exc
-    tmp_path.unlink()
 
 
 def patch_deck_geometry(

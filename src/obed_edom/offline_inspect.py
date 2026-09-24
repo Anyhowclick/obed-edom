@@ -198,11 +198,20 @@ _TEXTUAL = frozenset({"text", "shape"})
 _ASSET = frozenset({"image", "movie"})
 
 
+def uuid_strings(package_metadata: dict) -> dict[str, str]:
+    """``{archive id: "lower:upper"}`` from a ``TSP.PackageMetadata``'s uuid map entries."""
+    return {
+        str(e.get("identifier")): f"{(e.get('uuid') or {}).get('lower')}:{(e.get('uuid') or {}).get('upper')}"
+        for c in package_metadata.get("components") or [] for e in c.get("objectUuidMapEntries") or []
+    }
+
+
 def _item_from_record(
     rec: dict,
     objects: dict[str, dict],
     data_index: dict[str, str],
     style_cache: dict,
+    uuids: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     """JXA-shaped item plus guard reason (None if vouched). Omits master/runs/childCount."""
     obj = objects.get(rec["id"]) or {}
@@ -240,6 +249,10 @@ def _item_from_record(
 
     reason: str | None = None
     needs = rec.get("needs_keynote")
+    item["iwaId"] = int(rec["id"]) if str(rec["id"]).isdigit() else str(rec["id"])
+    uuid = (uuids or {}).get(str(rec["id"]))
+    if uuid is not None:
+        item["iwaUuid"] = uuid
     if needs is not None and needs not in VOUCHED_NEEDS_KEYNOTE:
         reason = needs
 
@@ -289,6 +302,7 @@ def offline_wall_payload(
     width, height = _canvas_size(objects)
     order = slide_order(objects)
 
+    uuids = next((uuid_strings(o) for o in objects.values() if o.get("_pbtype") == "TSP.PackageMetadata"), {})
     style_cache: dict = {}
     slides_out: list[dict[str, Any]] = []
     guard: list[dict[str, Any]] = []
@@ -300,7 +314,7 @@ def offline_wall_payload(
         records = compose_geometry(slide, objects)
         items: list[dict[str, Any]] = []
         for item_index, rec in enumerate(records):
-            item, reason = _item_from_record(rec, objects, data_index, style_cache)
+            item, reason = _item_from_record(rec, objects, data_index, style_cache, uuids)
             item["index"] = item_index
             items.append(item)
             if reason is not None:

@@ -266,10 +266,12 @@ def test_stale_mixed_offline_cache_is_rejected_and_reread_in_mode_on(monkeypatch
     assert any("mixed-slide-tagged" in line for line in logs)
 
 
-def _image_item(*, aspect: object = "missing") -> dict:
+def _image_item(*, aspect: object = "missing", iwa_id: object = None) -> dict:
     item = {"kind": "image", "kindIndex": 0, "start": [0, 0], "end": [1, 1]}
     if aspect != "missing":
         item["aspect"] = aspect
+    if iwa_id is not None:
+        item["iwaId"] = iwa_id
     return item
 
 
@@ -358,7 +360,7 @@ def test_stale_mixed_cache_serves_the_cached_payload_when_offline_read_genuinely
     source.touch()
     cached = _cached_wall("offline")
     del cached["offlineFallbackTagged"]
-    cached["slides"][0]["items"] = [_image_item(aspect=1.5)]
+    cached["slides"][0]["items"] = [_image_item(aspect=1.5, iwa_id="301")]
     monkeypatch.setattr(rk, "cached_payload", lambda _source: cached)
 
     def fake_inspect(key_path, *, export_dir=None, slide_range=None, use_cache=None,
@@ -397,7 +399,7 @@ def test_aspect_complete_offline_cache_is_served(monkeypatch, tmp_path):
     source = tmp_path / "wall.key"
     source.touch()
     cached = _cached_wall("offline")
-    cached["slides"][0]["items"] = [_image_item(aspect=1.5)]
+    cached["slides"][0]["items"] = [_image_item(aspect=1.5, iwa_id="301")]
     monkeypatch.setattr(rk, "cached_payload", lambda _source: cached)
     import obed_edom.offline_inspect as offline_mod
 
@@ -409,6 +411,67 @@ def test_aspect_complete_offline_cache_is_served(monkeypatch, tmp_path):
     out = rk.acquire_wall_payload(source, slide_range=None, mode="on", say=lambda _m: None)
 
     assert out is cached
+
+
+def test_id_less_offline_cache_is_rejected_and_reread(monkeypatch, tmp_path):
+    """An offline cache written before items carried their source `iwaId` makes no slide
+    eligible for offline hides; re-read it like an aspect-less cache."""
+    source = tmp_path / "wall.key"
+    source.touch()
+    cached = _cached_wall("offline")
+    cached["slides"][0]["items"] = [_image_item(aspect=1.5)]
+    offline_payload = {"slideCount": 3, "slides": _cached_wall("offline")["slides"],
+                        "_offline": {"bulk_ok": True}}
+    logs: list[str] = []
+    monkeypatch.setattr(rk, "cached_payload", lambda _source: cached)
+    monkeypatch.setattr(rk, "inspect_keynote", _fail_inspect)
+    import obed_edom.inspect as inspect_mod
+    import obed_edom.offline_inspect as offline_mod
+
+    monkeypatch.setattr(inspect_mod, "bulk_geometry", _no_bulk_geometry)
+    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", lambda *a, **k: offline_payload)
+
+    out = rk.acquire_wall_payload(source, slide_range=None, mode="on", say=logs.append)
+
+    assert out is offline_payload
+    assert any("predates per-item source ids; re-reading" in line for line in logs)
+
+
+def test_id_bearing_offline_cache_is_served_and_fallback_slides_are_exempt(monkeypatch, tmp_path):
+    """A cache whose offline-decoded items carry `iwaId` is reused; JXA-fallback slides
+    (`groupChildrenUnavailable`) never carry it and do not make it stale."""
+    source = tmp_path / "wall.key"
+    source.touch()
+    cached = _cached_wall("offline")
+    cached["slides"][0]["items"] = [_image_item(aspect=1.5, iwa_id="301")]
+    cached["slides"][1]["items"] = [_image_item(aspect=1.5, iwa_id="302")]
+    cached["slides"][2]["items"] = [_image_item(aspect=1.5)]
+    cached["slides"][2]["groupChildrenUnavailable"] = True
+    monkeypatch.setattr(rk, "cached_payload", lambda _source: cached)
+    import obed_edom.offline_inspect as offline_mod
+
+    def boom(*a, **k):
+        pytest.fail("two_tier_wall_payload should not be called")
+
+    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", boom)
+
+    out = rk.acquire_wall_payload(source, slide_range=None, mode="on", say=lambda _m: None)
+
+    assert out is cached
+
+
+def test_id_less_jxa_cache_is_unaffected(monkeypatch, tmp_path):
+    source = tmp_path / "wall.key"
+    source.touch()
+    cached = _cached_wall("jxa")
+    cached["slides"][0]["items"] = [_image_item(aspect=1.5)]
+    monkeypatch.setattr(rk, "cached_payload", lambda _source: cached)
+    monkeypatch.setattr(rk, "inspect_keynote", _fail_inspect)
+
+    out = rk.acquire_wall_payload(source, slide_range=None, mode="off", say=lambda _m: None)
+
+    assert out is cached
+    assert rk._offline_payload_carries_iwa_ids(cached) is True
 
 
 def test_wall_payload_carries_aspect_accepts_none_for_masked():

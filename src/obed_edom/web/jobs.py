@@ -169,8 +169,8 @@ class JobRunner:
                 job = self._jobs.get(job_id)
                 if not job:
                     return None
-                if job_id in self._running or job.status == "running":
-                    raise RuntimeError("Job is already running")
+                if job_id in self._running or job.status in {"queued", "running"}:
+                    raise RuntimeError("Job is already queued or running")
                 job.status = "queued"
                 job.error = None
                 job.started_at = None

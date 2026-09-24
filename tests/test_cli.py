@@ -448,3 +448,27 @@ def test_dsk_assemble_content_only_layout_preserve_warns(tmp_path, capsys, monke
     )
     assert rc == 0
     assert "layout preserved; stage PNGs may export opaque" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("extra", [["--no-export"], []])
+def test_remap_offline_hides_abort_prints_detail_and_exits_1(tmp_path, capsys, monkeypatch, extra):
+    """Both remap paths turn an `OfflineHidesAborted` into its operator detail on stderr
+    and exit 1 (no traceback)."""
+    import obed_edom.remap_keynote as rk
+    from obed_edom.offline_write import OfflineHidesAborted
+
+    def boom(*_a, **_k):
+        raise OfflineHidesAborted("the IWA writer refused the deck before writing", "disk guard")
+
+    monkeypatch.setattr(rk, "remap_keynote", boom)
+    monkeypatch.setattr(rk, "remap_and_inspect", boom)
+    source = tmp_path / "wall.key"
+    template = tmp_path / "tpl.key"
+    source.touch()
+    template.touch()
+    rc = cli.main(["remap", str(source), "--template", str(template),
+                   "--out", str(tmp_path / "out.key"), *extra])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "Offline hides aborted: the IWA writer refused the deck before writing (disk guard)." in err
+    assert "Rerun with OBED_OFFLINE_HIDES=off." in err
