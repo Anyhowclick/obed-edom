@@ -1608,3 +1608,57 @@ def test_close_then_shutdown_still_quits(rig):
     assert 4242 in r.launcher.alive_pids
     assert r.engine.shutdown(5) is True
     assert r.launcher.terminated == [4242] and 4242 not in r.launcher.alive_pids
+
+
+# --- orphan cleanup latches W3 (r3) -----------------------------------------
+
+
+def test_startup_orphan_check_then_take_output_shows_w3(rig):
+    r = rig()
+    r.home.mkdir(parents=True)
+    (r.home / "ak-engine.json").write_text(json.dumps({"pid": 999, "launchDate": 1.0, "cdpPort": 1, "wsPort": 2, "cleanExit": False}))
+    r.launcher.add(999, 1.0, r.home)
+    assert r.engine.has_orphan() is True
+    state = r.run(r.engine.check)
+    assert r.launcher.terminated == [999] and state["state"] == "stopped"
+    assert r.record()["cleanExit"] is False
+    state = r.run(lambda: r.engine.ensure_started(25, "external"))
+    assert state["state"] == "ready"
+    assert "obsUncleanExit" in _ids(state)
+    assert r.record()["pid"] == 4242 and r.record()["cleanExit"] is False
+
+
+def test_orphan_cleanup_latches_unclean_even_over_a_clean_record(rig):
+    r = rig()
+    r.home.mkdir(parents=True)
+    (r.home / "ak-engine.json").write_text(json.dumps({"pid": 555, "launchDate": 1.0, "cdpPort": 1, "wsPort": 2, "cleanExit": True}))
+    r.launcher.add(777, 50.0, r.home)
+    r.run(r.engine.check)
+    assert r.record()["cleanExit"] is False
+    state = r.run(lambda: r.engine.ensure_started(25, "external"))
+    assert "obsUncleanExit" in _ids(state)
+    r.run(r.engine.quit)
+    state = r.run(lambda: r.engine.ensure_started(25, "external"))
+    assert "obsUncleanExit" not in _ids(state), "W3 lasts only until the next launch after a clean quit"
+
+
+# --- setup_active -------------------------------------------------------------
+
+
+def test_setup_active_covers_queued_running_and_waiting_setup(rig):
+    r = rig()
+    assert r.engine.setup_active is False
+    release = _hold(r.engine)
+    r.engine.setup_device_begin(25)
+    assert r.engine.setup_active is True, "queued"
+    release.set()
+    assert r.engine.wait_idle(15)
+    assert r.engine.setup_active is True, "OBS visible, waiting for Done"
+    release = _hold(r.engine)
+    r.engine.setup_device_done()
+    assert r.engine.setup_active is True
+    release.set()
+    assert r.engine.wait_idle(15)
+    assert r.engine.setup_active is False
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    assert r.engine.setup_active is False

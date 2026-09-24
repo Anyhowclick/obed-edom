@@ -318,6 +318,24 @@ the snapshot/`lsof` logic (§2, Q-I) · self-generated goldens would pass a brok
 lifetime; orphans never adopted; W3 split into crash vs waiting; password permissions not relied on; W8 is a session warning;
 `--disable-shutdown-check` does not exist; Q-C/Q-D settled from source.
 
+## 13b. Codex GPT-5.6 Sol review log (implementation, 2026-09-24)
+
+- **r1** (3 blockers, 6 majors, 2 minors) — all accepted and fixed: synchronous pending state; env-marker ownership
+  (`CFFIXED_USER_HOME=<home>` read via `ps -Eww`) + recorded pid/date; cancellable, terminal shutdown; `cleanExit` only after
+  AK's own confirmed quit; bounded fail-closed liveness (`obsPageLost`, new `obsUnreachable`); W2 recovery on Check; Take output
+  refused while a show is loaded; setup state polled; Screen output byte-identical (fps opt-in; loading snapshot key order).
+- **r2** (3 blockers, 4 majors, 1 minor) — all fixed except R2-6 partially by owner-simplicity decision: tri-state identity
+  (unknown ⇒ new block `obsIdentityUnknown`, no launch, no tree write, no terminate); terminate/show act on the same verified
+  `NSRunningApplication` (re-checked immediately before); NO per-launch nonce (only AK sets `CFFIXED_USER_HOME` to its home);
+  coalescing `apply_settings` (never launches because Keyer was selected); Check + page reset as one job.
+- **r3** — converged: no new-class blocker/major. Fixed: W3 latch across the startup orphan-recovery path (must-fix); output
+  settings refused during device setup; route-fake fidelity. **Deferred residuals (edge cases in closed classes):** (1) no
+  launch-pending record for a dashboard crash in the milliseconds between seeding and the OS launch (the next start's orphan scan
+  finds the process by its env marker once it exists); (2) `close()` followed by `shutdown()` quits without re-taking the flock —
+  not a product path (product teardown calls `shutdown()` only).
+- Live harness (product engine, real OBS 32.2.2, lossless, 25 fps): 4/4 takes PASS after r1 and after r2 — 2× native repeats
+  9–13 %, positive control 23–30 %, paused 100 %, clean quit via identity, user OBS config unchanged, `.sentinel` untouched.
+
 ## 14. Owner decisions on the open items (2026-09-24)
 
 - **OD-M1 — 30 fps ships with 25**, after Q-H measures canvas 30 / source 60 (the owner will test it).

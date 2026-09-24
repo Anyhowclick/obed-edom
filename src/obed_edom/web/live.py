@@ -189,6 +189,8 @@ def live_router(runner, *, service=None, host_factory=None, displays=None, engin
         with lock:
             if loaded_session():
                 raise HTTPException(409, STOP_SHOW_FIRST)
+            if engine().setup_active:
+                raise HTTPException(409, "Finish device setup first.")
             changes = {key: value for key, value in body.model_dump().items() if value is not None}
             saved = save_settings({**load_settings(), **changes}, validate_dir=False)
             used_engine().apply_settings(saved["akOutputMode"], saved["akOutputRate"], saved["akKeyer"])

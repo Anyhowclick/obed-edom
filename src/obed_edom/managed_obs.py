@@ -368,6 +368,7 @@ class ManagedObs:
         self._apply_queued = False
         self._launched: tuple[int, str] | None = None
         self._setup_rate: int | None = None
+        self._setup_jobs = 0
         self._warnings: dict[str, dict[str, Any]] = {}
         self._pid: int | None = None
         self._launch_date: float | None = None
@@ -393,6 +394,12 @@ class ManagedObs:
         """True while our OBS runs (as last observed) or an action that may launch or quit it is pending."""
         with self._lock:
             return self._pending > 0 or self._pid is not None
+
+    @property
+    def setup_active(self) -> bool:
+        """True while device setup is queued, in progress, or waiting for Done."""
+        with self._lock:
+            return self._setup_jobs > 0 or self._setup_rate is not None
 
     def device(self) -> dict[str, Any] | None:
         return _read_json(self.home / "ak-device.json")
@@ -486,10 +493,23 @@ class ManagedObs:
 
     def setup_device_begin(self, rate: int) -> None:
         self._validate(rate, self._keyer)
-        self._submit(lambda: self._setup_begin(rate), "starting")
+        self._submit_setup(lambda: self._setup_begin(rate), "starting")
 
     def setup_device_done(self) -> None:
-        self._submit(self._setup_done, "quitting")
+        self._submit_setup(self._setup_done, "quitting")
+
+    def _submit_setup(self, job: Callable[[], Any], pending: str) -> None:
+        def run() -> None:
+            try:
+                job()
+            finally:
+                with self._lock:
+                    self._setup_jobs -= 1
+
+        with self._lock:
+            self._setup_jobs += 1
+            if not self._submit(run, pending):
+                self._setup_jobs -= 1
 
     def wait_idle(self, timeout: float | None = None) -> bool:
         """Block until every action submitted so far has run (for tests)."""
@@ -534,6 +554,7 @@ class ManagedObs:
             if item is not None and item[1]:
                 self._finish_pending()
         self._apply_queued = False
+        self._setup_jobs = 0
 
     def _start_worker(self) -> None:
         self._worker_exiting = False
@@ -775,11 +796,16 @@ class ManagedObs:
 
     def _quit_orphans(self) -> bool:
         """Quit every OBS that carries our home marker but is not our engine. False (and
-        nothing written or launched) when one is stuck or ownership cannot be determined."""
+        nothing written or launched) when one is stuck or ownership cannot be determined.
+        The record is latched unclean first, so the next launch shows W3."""
         orphans = self._orphans()
         if orphans is None:
             self._identity_unknown()
             return False
+        if orphans:
+            record = _read_json(self._record_path()) or {}
+            record["cleanExit"] = False
+            _write_json(self._record_path(), record)
         for process in orphans:
             log.info("quitting orphaned managed OBS pid %s", process.pid)
             with self._lock:
@@ -792,8 +818,6 @@ class ManagedObs:
             if outcome == "rejected":
                 self._identity_unknown()
                 return False
-            if outcome == "terminated":
-                self._mark_clean(process.pid)
             with self._lock:
                 self._set(*previous)
         with self._lock:
@@ -842,9 +866,9 @@ class ManagedObs:
     def _launch(self, rate: int, keyer: str, *, hidden: bool) -> None:
         if self._stopping.is_set() or not self._discover():
             return
-        previous_clean = (_read_json(self._record_path()) or {}).get("cleanExit")
         if not self._quit_orphans():
             return
+        previous_clean = (_read_json(self._record_path()) or {}).get("cleanExit")
         cdp_port, ws_port, password = self._pick_port(), self._pick_port(), secrets.token_urlsafe(32)
         with self._lock:
             self._warnings = {}

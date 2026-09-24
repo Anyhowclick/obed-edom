@@ -27,6 +27,8 @@ class FakeEngine:
         self.warnings = []
         self.orphan = False
         self.rate, self.keyer = 25, 'external'
+        self.reason = None
+        self.setup = None
 
     def _call(self, *call):
         self.calls.append(call)
@@ -43,8 +45,12 @@ class FakeEngine:
     def state(self):
         return {'state': self.status, 'obs': {'path': '/Applications/OBS.app', 'version': '32.2.2', 'pinned': '32.2.2'},
                 'rate': {'output': self.rate, 'canvas': '25 PAL', 'source': 50},
-                'device': {'name': None, 'set': False}, 'keyer': self.keyer, 'setup': None,
-                'warnings': list(self.warnings)}
+                'device': {'name': None, 'set': False}, 'keyer': self.keyer, 'setup': self.setup,
+                'warnings': list(self.warnings), **({'reason': self.reason} if self.reason else {})}
+
+    @property
+    def setup_active(self):
+        return self.setup is not None
 
     def configure(self, rate, keyer):
         self.rate, self.keyer = rate, keyer
@@ -77,9 +83,14 @@ class FakeEngine:
 
     def setup_device_begin(self, rate):
         self._call('setup_device_begin', rate)
+        self._settle_setup(rate)
 
     def setup_device_done(self):
         self._call('setup_device_done')
+        self._settle_setup(None)
+
+    def _settle_setup(self, rate):
+        self.status, self.reason, self.setup = ('blocked', 'deviceSetup', rate) if rate else ('stopped', None, None)
 
     def shutdown(self, timeout):
         self._call('shutdown', timeout)
@@ -555,30 +566,34 @@ class DeferredEngine(FakeEngine):
         self.pending = []
 
     def run_pending(self):
-        for status in self.pending:
-            self.status = status
+        for settle in self.pending:
+            settle()
         self.pending.clear()
+
+    def _defer(self, published, settle):
+        self.status = published
+        self.pending.append(settle)
 
     def quit(self):
         self._call('quit')
-        self.status = 'quitting'
-        self.pending.append('stopped')
+        self._defer('quitting', lambda: setattr(self, 'status', 'stopped'))
 
     def restart(self, rate, keyer):
         self._call('restart', rate, keyer)
-        self.status = 'starting'
-        self.pending.append('ready')
+        self._defer('starting', lambda: setattr(self, 'status', 'ready'))
 
     def setup_device_begin(self, rate):
         self._call('setup_device_begin', rate)
-        self.status = 'starting'
-        self.pending.append('ready')
+        self._defer('starting', lambda: self._settle_setup(rate))
+
+    def setup_device_done(self):
+        self._call('setup_device_done')
+        self._defer('quitting', lambda: self._settle_setup(None))
 
     def check(self, reset_page=False):
         self._call('check', reset_page)
         if reset_page:
-            self.status = 'starting'
-            self.pending.append('ready')
+            self._defer('starting', lambda: setattr(self, 'status', 'ready'))
 
 
 @pytest.mark.parametrize(('action', 'pending'), [('quit', 'quitting'), ('restart', 'starting'), ('setupDevice', 'starting'), ('check', 'starting')])
@@ -593,8 +608,31 @@ def test_keyer_start_is_refused_while_an_engine_action_is_pending(tmp_path, monk
     assert response.json()['detail'] == 'The output engine is not ready. Press Take output.'
     assert not adapters
     engine.run_pending()
-    expected = 409 if action == 'quit' else 200
+    expected = 200 if action in ('restart', 'check') else 409
     assert client.post('/api/live', json={'previewJobId': 'prepared'}).status_code == expected
+
+
+def test_device_setup_settles_blocked_and_refuses_output_settings_until_done(tmp_path, monkeypatch):
+    settings_mod.save_settings({**settings_mod.load_settings(), 'akOutputMode': 'keyer', 'akOutputRate': 30}, validate_dir=False)
+    engine = DeferredEngine()
+    client, _claims, _releases, _job, adapters, _service = client_for(tmp_path, monkeypatch, engine=engine)
+    assert client.post('/api/live/engine/setupDevice').json()['state'] == 'starting'
+    engine.run_pending()
+    body = client.get('/api/live/engine').json()
+    assert (body['state'], body['reason'], body['setup']) == ('blocked', 'deviceSetup', 30)
+    response = client.put('/api/live/output-settings', json={'akOutputMode': 'screen'})
+    assert response.status_code == 409
+    assert response.json() == {'detail': 'Finish device setup first.'}
+    assert settings_mod.load_settings()['akOutputMode'] == 'keyer'
+    assert client.post('/api/live', json={'previewJobId': 'prepared'}).status_code == 409
+    assert client.post('/api/live/engine/setupDone').json()['state'] == 'quitting'
+    engine.run_pending()
+    body = client.get('/api/live/engine').json()
+    assert (body['state'], body['setup']) == ('stopped', None)
+    assert 'reason' not in body
+    assert client.put('/api/live/output-settings', json={'akOutputMode': 'screen'}).status_code == 200
+    assert engine.actions() == ['setup_device_begin', 'setup_device_done', 'apply_settings']
+    assert not adapters
 
 
 def test_routes_only_use_engine_attributes_the_real_managed_obs_has():
@@ -607,7 +645,7 @@ def test_routes_only_use_engine_attributes_the_real_managed_obs_has():
     source = (Path(__file__).resolve().parents[1] / "src/obed_edom/web/live.py").read_text()
     receivers = r'(?:\bmanaged|\bused_engine\(\)|\bengine\(\)|engine_slot\["engine"\])'
     used = set(re.findall(receivers + r"\.([A-Za-z_]+)", source))
-    assert {"ensure_started", "shutdown", "apply_settings", "check", "target_id"} <= used
+    assert {"ensure_started", "shutdown", "apply_settings", "check", "setup_active", "target_id"} <= used
     missing = sorted(name for name in used if not hasattr(ManagedObs, name))
     assert missing == []
     import inspect
