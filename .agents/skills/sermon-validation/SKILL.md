@@ -101,7 +101,7 @@ Every `Flag` carries a stable `rule` id, plus `slide`, `deck` and an optional
 | `diff.count` / `diff.missing` / `diff.unmatched` / `diff.skip_mismatch` | Pairing |
 | `bounds.straddles` | Object crosses a wall boundary, so it is visibly cut. Carries evidence |
 | `bounds.offcanvas` | Object sits outside the canvas |
-| `mm.zorder_flip` | Two Magic Move–matched objects stack in opposite order across the cut, so the layering snaps. Only text and media are checked: unique text and media pair by content, repeated media by nearest position (least total centre distance; ties skipped). Shapes, lines and groups are not checked yet (pending the shape-identity follow-up). Report only; nothing is reordered |
+| `mm.zorder_flip` | Two Magic Move–matched objects stack in opposite order across the cut, so the layering snaps. Text, media, shapes, lines and groups are checked; a key unique on both sides pairs directly (text and groups by content). Shapes and lines key by Keynote's measured gate (shape type + outline normalised to its bounds + text; lines also stroke and ends). Repeated media, shapes and lines prefer matching stroke/opacity, then stored path, then style, then least total centre distance; ties skipped. Repeated text and groups are skipped (unmeasured). Report only; nothing is reordered |
 | `cue.lw_count` / `cue.dsk_count` | The outline's cue count for a deck disagrees with its slide count |
 | `cue.uncued_slide` | A deck slide no cue accounts for |
 | `cue.no_slide` | A cue with no slide left on that deck |

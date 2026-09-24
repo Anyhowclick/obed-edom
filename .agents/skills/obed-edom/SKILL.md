@@ -270,8 +270,9 @@ by object) and the neighbour keeps a content-identical object on the wall. Ident
 content, not archive id: text, image/movie data digest, aspect-normalised shape path,
 or a group's leaf list (`attach_magic_move` → `magicMoveOut`/`mmKeys`, plus `mmOrder`,
 the `[kind, kindIndex]` addresses back→front, which only the validation rule
-`mm.zorder_flip` reads; it checks only text and media, pairs repeated media by nearest
-position, and skips shapes, lines and groups until shape identity matches Keynote's).
+`mm.zorder_flip` reads; it pairs unique text and groups by content, and repeated media,
+shapes and lines preferring matching stroke/opacity, then stored path, then style
+(`mmPrefs`), then least total centre distance; ties and repeated text/groups skipped).
 
 * Both slides of the pair must be planned: inside `--slides` and not skipped. An
   out-of-range or skipped neighbour keeps today's hide.

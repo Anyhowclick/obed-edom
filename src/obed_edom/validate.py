@@ -896,6 +896,15 @@ def _mm_classes(slide: dict) -> dict[str, list[_Address]]:
     return classes
 
 
+def _mm_prefs(slide: dict) -> dict[_Address, tuple]:
+    """{address: (tier1, tier2, tier3)} from mmPrefs (kindIndex may be a JSON string)."""
+    return {
+        (str(kind), int(ki)): tuple(tiers)
+        for kind, by_index in (slide.get("mmPrefs") or {}).items()
+        for ki, tiers in (by_index or {}).items()
+    }
+
+
 def _mm_centre(item: dict | None) -> tuple[float, float] | None:
     if not item or any(item.get(f) is None for f in ("x", "y", "w", "h")):
         return None
@@ -906,45 +915,67 @@ def _mm_centre(item: dict | None) -> tuple[float, float] | None:
 
 
 def _mm_nearest(
-    before: list[_Address], after: list[_Address], before_items: dict, after_items: dict
+    before: list[_Address],
+    after: list[_Address],
+    before_items: dict,
+    after_items: dict,
+    before_prefs: dict,
+    after_prefs: dict,
 ) -> list[tuple[_Address, _Address]] | None:
-    """Keynote pairs repeated media by the assignment with the least total centre distance.
-    None when geometry is missing, the search is too large, or the best total ties."""
+    """Keynote pairs a repeated class by the assignment minimising per-tier preference
+    mismatches (tier1, then tier2, then tier3), then total centre distance.
+    Summing mismatches per tier over many objects is assumed; only 2-way contests were measured.
+    None when geometry is missing, the search is too large, or the best assignment ties."""
     before_centres = [_mm_centre(before_items.get(addr)) for addr in before]
     after_centres = [_mm_centre(after_items.get(addr)) for addr in after]
     if None in before_centres or None in after_centres:
         return None
+    no_prefs = (None, None, None)
+    before_tiers = [before_prefs.get(addr, no_prefs) for addr in before]
+    after_tiers = [after_prefs.get(addr, no_prefs) for addr in after]
     swapped = len(before_centres) > len(after_centres)
     smaller, larger = (after_centres, before_centres) if swapped else (before_centres, after_centres)
+    small_tiers, large_tiers = (after_tiers, before_tiers) if swapped else (before_tiers, after_tiers)
     if math.perm(len(larger), len(smaller)) > MM_MAX_ASSIGNMENTS:
         return None
+    mismatches = [
+        [tuple(int(a != b) for a, b in zip(small_tiers[i], large_tiers[j])) for j in range(len(larger))]
+        for i in range(len(smaller))
+    ]
+
+    def cost(chosen: tuple[int, ...]) -> tuple[tuple[int, ...], float]:
+        tiers = tuple(map(sum, zip(*(mismatches[i][j] for i, j in enumerate(chosen)))))
+        return tiers, sum(math.dist(smaller[i], larger[j]) for i, j in enumerate(chosen))
+
     ranked = sorted(
-        (sum(math.dist(smaller[i], larger[j]) for i, j in enumerate(chosen)), chosen)
-        for chosen in itertools.permutations(range(len(larger)), len(smaller))
+        (cost(chosen), chosen) for chosen in itertools.permutations(range(len(larger)), len(smaller))
     )
-    if len(ranked) > 1 and math.isclose(ranked[0][0], ranked[1][0], rel_tol=0.0, abs_tol=1e-6):
-        return None
+    if len(ranked) > 1:
+        (best_tiers, best_dist), (next_tiers, next_dist) = ranked[0][0], ranked[1][0]
+        if best_tiers == next_tiers and math.isclose(best_dist, next_dist, rel_tol=0.0, abs_tol=1e-6):
+            return None
     return [
         (before[j], after[i]) if swapped else (before[i], after[j]) for i, j in enumerate(ranked[0][1])
     ]
 
 
 def _mm_matches(slide: dict, after: dict) -> list[tuple[_Address, _Address]]:
-    """Drawables Magic Move pairs across the cut, as far as Keynote's pairing is known:
-    unique text/media keys directly, repeated media by nearest position. Shapes, lines
-    and groups are left out until shape identity matches Keynote."""
+    """Drawables Magic Move pairs across the cut: a key unique on both sides pairs
+    directly, a repeated media/shape/line key by `_mm_nearest`; other repeats are skipped."""
     before_classes, after_classes = _mm_classes(slide), _mm_classes(after)
     before_items, after_items = _mm_items(slide), _mm_items(after)
+    before_prefs, after_prefs = _mm_prefs(slide), _mm_prefs(after)
     matches: list[tuple[_Address, _Address]] = []
     for key, before in before_classes.items():
         after_side = after_classes.get(key)
-        kind = before[0][0]
-        if not after_side or kind not in ("text", "image", "movie"):
+        if not after_side:
             continue
         if len(before) == len(after_side) == 1:
             matches.append((before[0], after_side[0]))
-        elif kind in ("image", "movie"):
-            matches.extend(_mm_nearest(before, after_side, before_items, after_items) or [])
+        elif before[0][0] in ("image", "movie", "shape", "line"):
+            matches.extend(
+                _mm_nearest(before, after_side, before_items, after_items, before_prefs, after_prefs) or []
+            )
     return matches
 
 
