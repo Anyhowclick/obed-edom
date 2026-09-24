@@ -89,6 +89,18 @@ GL_REPLAY_JS = r"""
   function finite(v){ return typeof v === 'number' && isFinite(v); }
   function rectOf(a){ return {x: a[0], y: a[1], w: a[2], h: a[3]}; }
 
+  function innerRectOf(e){
+    var S = rectOf(e.slotRects[e.movieSlot]), T = e.slotSizes[e.movieSlot], I = e.instanceRect;
+    if (I.x - S.x < -0.5 || I.y - S.y < -0.5 ||
+        S.x + S.w - (I.x + I.w) < -0.5 || S.y + S.h - (I.y + I.h) < -0.5) return null;
+    var sx = T[0] / S.w, sy = T[1] / S.h;
+    var edge = function(v, hi){ return Math.min(Math.max(Math.round(v), 0), hi); };
+    var x0 = edge((I.x - S.x) * sx, T[0]), x1 = edge((I.x + I.w - S.x) * sx, T[0]);
+    var y0 = edge((I.y - S.y) * sy, T[1]), y1 = edge((I.y + I.h - S.y) * sy, T[1]);
+    if (x1 - x0 < 1 || y1 - y0 < 1) return null;
+    return {x: x0, y: y0, w: x1 - x0, h: y1 - y0};
+  }
+
   function validEntry(e, plan){
     if (!e || typeof e !== 'object') return null;
     if (e.action !== 'glReplay' || e.fallback !== 'retire') return null;
@@ -120,6 +132,7 @@ GL_REPLAY_JS = r"""
     if (!finite(ir.x) || !finite(ir.y) || !finite(ir.w) || !finite(ir.h) || ir.w <= 0 || ir.h <= 0) return null;
     if (typeof e.movieSlot !== 'number' || e.movieSlot !== Math.floor(e.movieSlot)) return null;
     if (e.movieSlot < 0 || e.movieSlot >= sizes.length) return null;
+    if (!innerRectOf(e)) return null;
     return e;
   }
 
@@ -147,7 +160,8 @@ GL_REPLAY_JS = r"""
     mutationScanMs: null, posterSnapshotMs: null, occluded: null, mask: null,
     paused: false, pausedByUs: false, geometry: null, buffers: null,
     loopMode: null, videoEnded: false, armVfc: null, contextLostListener: null,
-    collectors: [], observer: null
+    collectors: [], observer: null,
+    inner: ENTRY ? innerRectOf(ENTRY) : null, innerCanvas: null, innerCtx: null, probes: []
   };
 
   function now(){ return performance.now(); }
@@ -218,7 +232,8 @@ GL_REPLAY_JS = r"""
       }),
       greenAuthored: state.geometry ? state.geometry.greenAuthored : null,
       greenRoi: state.geometry ? state.geometry.green : null,
-      geometry: state.geometry, canvasId: state.canvas ? state.canvas.id : null
+      geometry: state.geometry, canvasId: state.canvas ? state.canvas.id : null,
+      innerRect: state.inner
     };
   }
 
@@ -322,22 +337,37 @@ GL_REPLAY_JS = r"""
   }
 
   // ------------------------------------------------------------ GL utilities
-  function uploadInto(tex, up, source){
-    var g = state.gl;
+  // The video goes only into the texture's inner rect, under the poster's own unpack
+  // flags; with FLIP_Y the GL row of the inner rect's bottom edge is `T.h - y1`.
+  function uploadVideo(){
+    var g = state.gl, up = state.posterUpload, R = state.inner;
+    var texH = ENTRY.slotSizes[MOVIE_SLOT][1];
+    var saved = false, sb = null, fy = false, pm = false, failure = null;
+    var fail = function(e){ if (!failure) failure = {call: 'uploadVideo', error: String(e)}; };
     state.replaying++;
     try {
-      var sb = g.getParameter(g.TEXTURE_BINDING_2D);
-      var fy = g.getParameter(g.UNPACK_FLIP_Y_WEBGL);
-      var pm = g.getParameter(g.UNPACK_PREMULTIPLY_ALPHA_WEBGL);
-      g.bindTexture(g.TEXTURE_2D, tex);
+      sb = g.getParameter(g.TEXTURE_BINDING_2D);
+      fy = g.getParameter(g.UNPACK_FLIP_Y_WEBGL);
+      pm = g.getParameter(g.UNPACK_PREMULTIPLY_ALPHA_WEBGL);
+      saved = true;
+      state.innerCtx.drawImage(state.video, 0, 0, R.w, R.h);
+      g.bindTexture(g.TEXTURE_2D, state.posterTex);
       g.pixelStorei(g.UNPACK_FLIP_Y_WEBGL, up.flipY);
       g.pixelStorei(g.UNPACK_PREMULTIPLY_ALPHA_WEBGL, up.premul);
-      g.texImage2D(g.TEXTURE_2D, 0, up.intFmt, up.extFmt, up.type, source);
-      g.pixelStorei(g.UNPACK_FLIP_Y_WEBGL, fy);
-      g.pixelStorei(g.UNPACK_PREMULTIPLY_ALPHA_WEBGL, pm);
-      g.bindTexture(g.TEXTURE_2D, sb);
-    } catch (e) {}
-    state.replaying--;
+      g.texSubImage2D(g.TEXTURE_2D, 0, R.x, texH - (R.y + R.h), up.extFmt, up.type, state.innerCanvas);
+    } catch (e) {
+      fail(e);
+    } finally {
+      if (saved){
+        try { g.pixelStorei(g.UNPACK_FLIP_Y_WEBGL, fy); } catch (e) { fail(e); }
+        try { g.pixelStorei(g.UNPACK_PREMULTIPLY_ALPHA_WEBGL, pm); } catch (e) { fail(e); }
+        try { g.bindTexture(g.TEXTURE_2D, sb); } catch (e) { fail(e); }
+      }
+      state.replaying--;
+    }
+    if (failure) return requireGlClean(false, failure);
+    state.uploads++;
+    return true;
   }
 
   function paintTexture(tex, up, r, gr, b){
@@ -423,8 +453,8 @@ GL_REPLAY_JS = r"""
     return ok;
   }
 
-  // Taken before the first video upload redefines the poster texture; after it the
-  // texture holds the video and a readback is a crop of the last video frame.
+  // Taken before the first video upload; after it the texture's inner rect holds the
+  // video and a readback is no longer the player's poster.
   function snapshotPoster(){
     if (state.poster) return true;
     var t0 = now();
@@ -443,8 +473,7 @@ GL_REPLAY_JS = r"""
     var v = state.video;
     if (!assertOr('videoNotReady', v.readyState >= 2, {readyState: v.readyState})) return;
     if (!snapshotPoster()) return;
-    uploadInto(state.posterTex, state.posterUpload, v);
-    state.uploads++;
+    uploadVideo();
   }
 
   function resolveVideo(){
@@ -850,6 +879,8 @@ GL_REPLAY_JS = r"""
     state.hot = false;
     state.collectors.forEach(function(c){ c.resolve(c.out); });
     state.collectors = [];
+    state.probes.forEach(function(p){ p.resolve({ok: false, reason: 'standDown'}); });
+    state.probes = [];
     var g = state.gl;
     var lost = reason === CONTEXT_LOST;
     try { lost = lost || !g || (typeof g.isContextLost === 'function' && g.isContextLost()); }
@@ -936,6 +967,7 @@ GL_REPLAY_JS = r"""
       rect: {x: ENTRY.instanceRect.x, y: ENTRY.instanceRect.y, w: ENTRY.instanceRect.w, h: ENTRY.instanceRect.h},
       canvasId: state.canvas.id,
       sample: function(n){ return collect(n); },
+      probe: function(rect){ return requestProbe(rect); },
       markerBands: function(){
         var m = markerSwap();
         return Promise.resolve(m ? {dark: m.dark, light: m.light, epoch: state.epoch} : null);
@@ -977,6 +1009,50 @@ GL_REPLAY_JS = r"""
     state.collectors = keep;
   }
 
+  function requestProbe(r){
+    if (!r || !finite(r.x) || !finite(r.y) || !finite(r.w) || !finite(r.h) || r.w <= 0 || r.h <= 0){
+      return Promise.resolve({ok: false, reason: 'badRect'});
+    }
+    if (state.down) return Promise.resolve({ok: false, reason: 'standDown'});
+    var rect = {x: r.x, y: r.y, w: r.w, h: r.h};
+    return new Promise(function(resolve){ state.probes.push({rect: rect, resolve: resolve}); });
+  }
+
+  // Plan (c) §4: read inside the tick that just replayed, because the drawing buffer
+  // is not preserved; a failed read stands down, which resolves every pending probe.
+  function serveProbes(sample){
+    if (!state.probes.length) return;
+    var g = state.gl, reads = [], err = 0, thrown = null;
+    state.replaying++;
+    try {
+      for (var i = 0; i < state.probes.length; i++){
+        var roi = toBuffer(state.probes[i].rect);
+        var buf = new Uint8Array(roi.w * roi.h * 4);
+        readInto(roi, buf);
+        reads.push({roi: roi, buf: buf});
+      }
+      err = g.getError();
+    } catch (e) { err = -1; thrown = String(e); }
+    state.replaying--;
+    if (err){
+      state.glErrors++;
+      requireGlClean(false, {call: 'probe', glErr: err, error: thrown});
+      return;
+    }
+    var due = state.probes;
+    state.probes = [];
+    var H = state.canvas.height;
+    for (var k = 0; k < due.length; k++){
+      var b = reads[k].roi, px = reads[k].buf, row = b.w * 4;
+      var out = new Uint8Array(px.length), alphaMin = 255;
+      for (var y = 0; y < b.h; y++) out.set(px.subarray((b.h - 1 - y) * row, (b.h - y) * row), y * row);
+      for (var a = 3; a < out.length; a += 4) if (out[a] < alphaMin) alphaMin = out[a];
+      due[k].resolve({ok: true, epoch: state.epoch, iter: state.iter, t: sample.t, vt: sample.vt,
+        rect: {x: b.x, y: H - (b.y + b.h), w: b.w, h: b.h}, width: b.w, height: b.h,
+        alphaMin: alphaMin, pixels: Array.from(out)});
+    }
+  }
+
   // Both the `webglcontextlost` listener and the per-tick guard come through here.
   function contextLostNow(fromEvent){
     var g = state.gl;
@@ -1005,10 +1081,13 @@ GL_REPLAY_JS = r"""
     if (!requireGlClean(clean, {phase: 'live'})) return false;
     if (state.video) state.videoEnded = !!state.video.ended;
     if (fresh && !state.paused) perLiveUpload();
+    if (state.down) return false;
     replayFrame();
     if (state.down) return false;
     var sample = sampleOnce(meta);
     state.iter++;
+    if (state.down) return false;
+    serveProbes(sample);
     if (state.down) return false;
     feedCollectors(sample);
     return true;
@@ -1016,8 +1095,7 @@ GL_REPLAY_JS = r"""
 
   function perLiveUpload(){
     if (!state.video || state.video.readyState < 2) return;
-    uploadInto(state.posterTex, state.posterUpload, state.video);
-    state.uploads++;
+    uploadVideo();
   }
 
   // LIVE never depends on rVFC alone: end-of-media, a paused decoder or a
@@ -1198,6 +1276,13 @@ GL_REPLAY_JS = r"""
   // -------------------------------------------------------------- install
   if (!refuseInstall('planUnreadable', !!ENTRY)) return;
   if (!requireWrappers(!!window.WebGLRenderingContext)) return;
+  try {
+    state.innerCanvas = document.createElement('canvas');
+    state.innerCanvas.width = state.inner.w;
+    state.innerCanvas.height = state.inner.h;
+    state.innerCtx = state.innerCanvas.getContext('2d');
+  } catch (e) { state.innerCtx = null; }
+  if (!requireWrappers(!!state.innerCtx)) return;
 
   var origGetContext = HTMLCanvasElement.prototype.getContext;
   if (!origGetContext.__obedGlReplay){
@@ -1232,9 +1317,37 @@ def _finite(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def _round_half_up(value: float) -> int:
+    return math.floor(value + 0.5)
+
+
+def inner_texel_rect(entry: dict[str, Any]) -> dict[str, int] | None:
+    """The top-down texel rect of the movie slot's texture that `instanceRect` covers,
+    or None when the instance leaves the slot by more than 0.5 px or covers less than
+    one texel. Mirrors the in-page `innerRectOf` operation for operation."""
+    slot = entry["movieSlot"]
+    sx, sy, sw, sh = entry["slotRects"][slot]
+    tw, th = entry["slotSizes"][slot]
+    rect = entry["instanceRect"]
+    ix, iy, iw, ih = rect["x"], rect["y"], rect["w"], rect["h"]
+    if ix - sx < -0.5 or iy - sy < -0.5 or sx + sw - (ix + iw) < -0.5 or sy + sh - (iy + ih) < -0.5:
+        return None
+    scale_x, scale_y = tw / sw, th / sh
+
+    def edge(value: float, high: int) -> int:
+        return min(max(_round_half_up(value), 0), high)
+
+    x0, x1 = edge((ix - sx) * scale_x, tw), edge((ix + iw - sx) * scale_x, tw)
+    y0, y1 = edge((iy - sy) * scale_y, th), edge((iy + ih - sy) * scale_y, th)
+    if x1 - x0 < 1 or y1 - y0 < 1:
+        return None
+    return {"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0}
+
+
 def validate_gl_replay_entry(runtime_plan: Any) -> dict[str, Any] | None:
     """The one `glReplay` boundary of a runtime plan, or None when the plan carries
-    none, carries more than one, or the entry fails any shape check of plan §2.0/§2.8.
+    none, carries more than one, or the entry fails any shape check of plan §2.0/§2.8
+    or has no inner texel rect (`inner_texel_rect`).
     Mirrors the in-page re-validation, which fails closed to `planUnreadable`."""
     if not isinstance(runtime_plan, dict):
         return None
@@ -1296,6 +1409,8 @@ def validate_gl_replay_entry(runtime_plan: Any) -> dict[str, Any] | None:
         return None
     slot = entry.get("movieSlot")
     if not _is_int(slot) or not 0 <= slot < len(sizes):
+        return None
+    if inner_texel_rect(entry) is None:
         return None
     return entry
 

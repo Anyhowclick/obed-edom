@@ -272,6 +272,7 @@ HANDLE_FIELD_JS: dict[str, str] = {
     ),
     "pause": "async function(){ bumpIf('pause'); paused = true; }",
     "resume": "async function(){ bumpIf('resume'); paused = false; }",
+    "probe": "async function(){ bumpIf('probe'); return {ok: false, reason: 'badRect'}; }",
 }
 
 _HARNESS = r"""

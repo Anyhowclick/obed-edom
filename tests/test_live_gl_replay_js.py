@@ -137,7 +137,7 @@ OPACITY_UNPROVEN_REASONS = [
 
 # `js_sha256()` of the shipped bytes. Recompute and re-pin whenever the module's
 # JS changes on purpose; a surprise here means the bytes moved without a decision.
-PINNED_JS_SHA256 = "4f8850e05177d12051eadd37f84e091938b46e8fd0e2b7ecf03e7637bed6351e"
+PINNED_JS_SHA256 = "10a5b36a1f6008a3213bd90729915f6c15284448406f2a62dbc74ae884fe5288"
 
 
 # =======================================================================================
@@ -501,6 +501,12 @@ def test_settle_frame_measured_patch_is_exact_alpha_arithmetic():
 #   * records each texture's last upload (source kind, size, format, flipY, premul),
 #     and REDEFINES its level 0 on every `texImage2D`: size and texels follow the
 #     source, so a framebuffer readback of it returns what was last uploaded;
+#   * gives `texSubImage2D` real sub-region semantics: the size is kept, the region
+#     is composited over the previous texels, and a region out of bounds raises
+#     INVALID_VALUE and writes nothing. A texture's `colour` (what a draw of it
+#     reports) is the colour of the layer covering its centre texel;
+#   * has a 2D context on every canvas whose `drawImage(src, ...)` copies the
+#     source's colour onto that canvas (and can be made to throw);
 #   * on a draw, records {slot, Opacity, decoded rect, source colour}, and clears
 #     that list on `clear`;
 #   * computes `readPixels` by filling each recorded draw's rect, in order, with
@@ -544,7 +550,7 @@ const GLC = {
   FRAMEBUFFER: 36160, FRAMEBUFFER_BINDING: 36006, COLOR_ATTACHMENT0: 36064,
   FRAMEBUFFER_COMPLETE: 36053, FRAMEBUFFER_INCOMPLETE_ATTACHMENT: 36054,
   UNPACK_FLIP_Y_WEBGL: 37440, UNPACK_PREMULTIPLY_ALPHA_WEBGL: 37441,
-  NO_ERROR: 0, INVALID_OPERATION: 1282,
+  NO_ERROR: 0, INVALID_VALUE: 1281, INVALID_OPERATION: 1282,
   TEXTURE_BINDING_2D: 32873, ACTIVE_TEXTURE: 34016,
   ARRAY_BUFFER: E.ARRAY_BUFFER, ELEMENT_ARRAY_BUFFER: E.ELEMENT_ARRAY_BUFFER,
   BLEND: E.BLEND, SRC_ALPHA: E.SRC_ALPHA, ONE_MINUS_SRC_ALPHA: E.ONE_MINUS_SRC_ALPHA,
@@ -566,12 +572,38 @@ function decodeRect(mvp, w, h, bw, bh) {
 // the uploaded source, exactly as in WebGL. Source texels vary with position and
 // texel (0,0) is the source's base colour, so a crop of the 1920x540 video read back
 // at the poster's 960x276 is distinguishable from the poster itself (a2-advice E12).
-function sourceTexel(c) {
+// A TexImageSource's rows are top-down, and its BOTTOM row carries the base colour.
+// `UNPACK_FLIP_Y_WEBGL` puts that bottom row at texture row 0 (GL y-up, upright);
+// without it the source's top row lands at row 0 and the texture is upside down.
+function sourceTexel(c, h, flipY) {
   const a = c[3] === undefined ? 255 : c[3];
-  return (x, y) => [(c[0] + x) & 255, (c[1] + y) & 255, (c[2] + (x >> 8) + 8 * (y >> 8)) & 255, a];
+  const at = (x, y) => [(c[0] + x) & 255, (c[1] + y) & 255, (c[2] + (x >> 8) + 8 * (y >> 8)) & 255, a];
+  return flipY ? at : (x, y) => at(x, h - 1 - y);
 }
 function pixelsTexel(data, w) {
   return (x, y) => { const i = (y * w + x) * 4; return [data[i], data[i + 1], data[i + 2], data[i + 3]]; };
+}
+// Level 0 is a base layer plus sub-uploads composited over it, most recent on top.
+function setLevel0(tex, w, h, texel, colour) {
+  tex.w = w; tex.h = h; tex.base = texel; tex.baseColour = colour; tex.subs = [];
+  composeTexture(tex);
+}
+function composeTexture(tex) {
+  const subs = tex.subs, base = tex.base;
+  const layerAt = (x, y) => {
+    for (let i = subs.length - 1; i >= 0; i--) {
+      const s = subs[i];
+      if (x >= s.x && x < s.x + s.w && y >= s.y && y < s.y + s.h) return s;
+    }
+    return null;
+  };
+  tex.texel = base ? (x, y) => { const s = layerAt(x, y); return s ? s.texel(x - s.x, y - s.y) : base(x, y); }
+                   : null;
+  const centre = layerAt(tex.w >> 1, tex.h >> 1);
+  tex.colour = centre ? centre.colour.slice() : (tex.baseColour ? tex.baseColour.slice() : null);
+}
+function sourceKind(src) {
+  return src.tagName === 'CANVAS' ? 'canvas' : (src.tagName === 'VIDEO' ? 'video' : 'other');
 }
 function textureDigest(tex) {
   if (!tex || !tex.texel) return null;
@@ -610,7 +642,8 @@ function FakeGL(canvas) {
   this._rec = function (name) { gl.callLog.push({ m: name }); };
   this._tex = function (id) {
     if (!gl._textures.has(id)) {
-      gl._textures.set(id, { id: id, upload: null, colour: null, w: 0, h: 0, texel: null });
+      gl._textures.set(id, { id: id, upload: null, colour: null, w: 0, h: 0, texel: null,
+                             base: null, baseColour: null, subs: [] });
     }
     return gl._textures.get(id);
   };
@@ -663,7 +696,19 @@ Object.assign(FakeGL.prototype, GLC);
 // FRAMEBUFFER_BINDING). A WebGL1 context has none of these constants.
 const GL2 = { READ_FRAMEBUFFER: 36008, DRAW_FRAMEBUFFER: 36009, READ_FRAMEBUFFER_BINDING: 36010 };
 if (CFG.webgl2) Object.assign(FakeGL.prototype, GL2);
-FakeGL.prototype.isContextLost = function () { return this._lost; };
+// The stand-down's first GL touch is its `isContextLost()` check, so the unpack state
+// captured there is what a failed upload handed back, before the rest replay rebinds.
+FakeGL.prototype.isContextLost = function () {
+  if (world.captureUnpackAtNextLostCheck) {
+    world.captureUnpackAtNextLostCheck = false;
+    world.unpackAfterFailure = unpackOf(this);
+  }
+  return this._lost;
+};
+function unpackOf(gl) {
+  return { flipY: gl._flipY, premul: gl._premul, activeUnit: gl._activeUnit,
+           bound: gl._units[gl._activeUnit] ? gl._units[gl._activeUnit].id : null };
+}
 FakeGL.prototype.getError = function () { const e = this._error; this._error = GLC.NO_ERROR; return e; };
 FakeGL.prototype.getExtension = function (name) {
   const gl = this;
@@ -734,22 +779,57 @@ FakeGL.prototype.texImage2D = function () {
   if (a.length >= 9) {                       // target, level, ifmt, w, h, border, fmt, type, px
     upload = { srcType: 'pixels', w: a[3], h: a[4], format: a[6], type: a[7] };
     const px = a[8];
-    if (px && px.length >= 4) tex.colour = [px[0], px[1], px[2], px[3]];
-    tex.texel = px ? pixelsTexel(Uint8Array.from(px), a[3]) : null;
+    setLevel0(tex, a[3], a[4], px ? pixelsTexel(Uint8Array.from(px), a[3]) : null,
+              px && px.length >= 4 ? [px[0], px[1], px[2], px[3]] : tex.colour);
   } else {                                   // target, level, ifmt, fmt, type, source
     const src = a[5] || {};
-    const kind = src.tagName === 'CANVAS' ? 'canvas' : (src.tagName === 'VIDEO' ? 'video' : 'other');
+    const kind = sourceKind(src);
     upload = { srcType: kind, w: kind === 'video' ? src.videoWidth : src.width,
                h: kind === 'video' ? src.videoHeight : src.height, format: a[3], type: a[4] };
-    tex.colour = src.__colour ? src.__colour.slice() : null;
-    tex.texel = sourceTexel(src.__colour || [0, 0, 0, 255]);
+    setLevel0(tex, upload.w, upload.h, sourceTexel(src.__colour || [0, 0, 0, 255], upload.h, this._flipY),
+              src.__colour ? src.__colour.slice() : null);
   }
-  tex.w = upload.w; tex.h = upload.h;
+  upload.call = 'texImage2D';
   upload.flipY = this._flipY; upload.premultiplyAlpha = this._premul;
+  upload.phase = M ? M.state : null;
   tex.upload = upload;
-  world.uploads.push({ tex: tex.id, upload: upload });
+  world.uploads.push({ tex: tex.id, player: world.inPlayerUpload, upload: upload });
 };
-FakeGL.prototype.texSubImage2D = function () { return FakeGL.prototype.texImage2D.apply(this, arguments); };
+FakeGL.prototype.texSubImage2D = function () {
+  this._rec('texSubImage2D');
+  const a = arguments, tex = this._units[this._activeUnit];
+  if (!tex) { this._error = GLC.INVALID_OPERATION; return; }
+  if (this._texSubImageThrows) {
+    world.captureUnpackAtNextLostCheck = true;
+    throw new Error('texSubImage2D refused');
+  }
+  let sub, srcType, srcCanvas = -1;
+  if (a.length >= 9) {                       // target, level, x, y, w, h, fmt, type, px
+    const px = a[8];
+    srcType = 'pixels';
+    sub = { x: a[2], y: a[3], w: a[4], h: a[5], texel: pixelsTexel(Uint8Array.from(px), a[4]),
+            colour: [px[0], px[1], px[2], px[3]] };
+  } else {                                   // target, level, x, y, fmt, type, source
+    const src = a[6] || {};
+    srcType = sourceKind(src);
+    srcCanvas = world.createdCanvases.indexOf(src);
+    const colour = (src.__colour || [0, 0, 0, 255]).slice();
+    const h = srcType === 'video' ? src.videoHeight : src.height;
+    sub = { x: a[2], y: a[3], w: srcType === 'video' ? src.videoWidth : src.width, h: h,
+            texel: sourceTexel(colour, h, this._flipY), colour: colour };
+  }
+  const inBounds = !!tex.texel && sub.x >= 0 && sub.y >= 0 &&
+    sub.x + sub.w <= tex.w && sub.y + sub.h <= tex.h;
+  world.uploads.push({ tex: tex.id, player: world.inPlayerUpload, upload: {
+    call: 'texSubImage2D', srcType: srcType, srcCanvas: srcCanvas,
+    x: sub.x, y: sub.y, w: sub.w, h: sub.h, texW: tex.w, texH: tex.h, written: inBounds,
+    flipY: this._flipY, premultiplyAlpha: this._premul, phase: M ? M.state : null } });
+  if (!inBounds) { this._error = GLC.INVALID_VALUE; return; }
+  tex.subs = tex.subs.filter((s) => !(s.x >= sub.x && s.y >= sub.y &&
+    s.x + s.w <= sub.x + sub.w && s.y + s.h <= sub.y + sub.h));
+  tex.subs.push(sub);
+  composeTexture(tex);
+};
 FakeGL.prototype.texParameteri = function () {};
 FakeGL.prototype.clearColor = function (r, g, b, a) {
   this._rec('clearColor');
@@ -809,6 +889,10 @@ FakeGL.prototype.readPixels = function (x, y, w, h, fmt, type, out) {
     }
     return;
   }
+  world.bufferReads.push({ x: x, y: y, w: w, h: h, drawn: this._drawn.length });
+  // A wrapped call made from inside the read: forwarded while the module's
+  // `replaying` depth is up, an `unflaggedPlayerCall` stand-down at depth 0.
+  if (this._readCallsWrapped) this.flush();
   for (let i = 0; i < w * h; i++) {
     out[i * 4] = this._clearColour[0]; out[i * 4 + 1] = this._clearColour[1];
     out[i * 4 + 2] = this._clearColour[2]; out[i * 4 + 3] = this._clearColour[3];
@@ -884,9 +968,26 @@ function FakeCanvas(id, w, h) {
 FakeCanvas.prototype = Object.create(FakeElement.prototype);
 FakeCanvas.prototype.constructor = FakeCanvas;
 FakeCanvas.prototype.getContext = function (kind) {
+  if (kind === '2d') {
+    this._ctx2dArgCounts = (this._ctx2dArgCounts || []).concat([arguments.length]);
+    if (CFG.no2d) return null;
+    if (!this._ctx2d) this._ctx2d = new Fake2D(this);
+    return this._ctx2d;
+  }
   if (kind !== 'webgl' && kind !== 'experimental-webgl' && kind !== 'webgl2') return null;
   if (!this._ctx) { this._ctx = new FakeGL(this); world.contexts.push(this._ctx); }
   return this._ctx;
+};
+
+function Fake2D(canvas) { this.canvas = canvas; }
+Fake2D.prototype.drawImage = function (src) {
+  if (world.drawImageThrows) {
+    world.captureUnpackAtNextLostCheck = true;
+    throw new Error('drawImage refused');
+  }
+  world.drawImages.push({ video: src === world.video, args: Array.prototype.slice.call(arguments, 1),
+                          canvas: world.createdCanvases.indexOf(this.canvas) });
+  this.canvas.__colour = (src.__colour || [0, 0, 0, 255]).slice();
 };
 
 function FakeVideo(src) {
@@ -914,6 +1015,7 @@ const world = {
   uploads: [], clears: [], contexts: [], videoCalls: [], seamCalls: [],
   mutationCallbacks: [], harnessErrors: [], presented: 0, playerClears: 0, originalPoster: null,
   fbosCreated: 0, fbosDeleted: 0,
+  createdCanvases: [], drawImages: [], bufferReads: [], drawImageThrows: false, inPlayerUpload: false,
   observerThrows: !!CFG.observerThrows,
   fireMutation(records) {
     for (const cb of this.mutationCallbacks) {
@@ -943,7 +1045,10 @@ const document = {
   querySelectorAll() { return []; },
   addEventListener() {}, removeEventListener() {},
   createElement(tag) {
-    return tag === 'canvas' ? new FakeCanvas('', 1, 1) : new FakeElement('', tag);
+    if (tag !== 'canvas') return new FakeElement('', tag);
+    const c = new FakeCanvas('', 1, 1);
+    world.createdCanvases.push(c);
+    return c;
   },
 };
 
@@ -1065,7 +1170,9 @@ function playerUpload(gl, texId, w, h, colour) {
   gl.bindTexture(GLC.TEXTURE_2D, gl._tex(texId));
   gl.pixelStorei(GLC.UNPACK_FLIP_Y_WEBGL, true);
   gl.pixelStorei(GLC.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
-  gl.texImage2D(GLC.TEXTURE_2D, 0, GLC.RGBA, GLC.RGBA, GLC.UNSIGNED_BYTE, src);
+  world.inPlayerUpload = true;
+  try { gl.texImage2D(GLC.TEXTURE_2D, 0, GLC.RGBA, GLC.RGBA, GLC.UNSIGNED_BYTE, src); }
+  finally { world.inPlayerUpload = false; }
 }
 
 // ------------------------------------------------------------------ the timeline
@@ -1121,14 +1228,23 @@ function snapshotState() {
     fbos: { created: world.fbosCreated, deleted: world.fbosDeleted,
             read: gl && gl._readFbo ? gl._readFbo.id : null,
             draw: gl && gl._drawFbo ? gl._drawFbo.id : null },
-    unpack: gl ? { flipY: gl._flipY, premul: gl._premul, activeUnit: gl._activeUnit,
-                   bound: gl._units[gl._activeUnit] ? gl._units[gl._activeUnit].id : null } : null,
+    unpack: gl ? unpackOf(gl) : null,
     drawnColours: gl ? gl._drawn.map((d) => d.colour) : null,
     // Digesting a 1920x540 texture costs real time, so only the tests that read it ask.
     originalPoster: CFG.trackPoster ? world.originalPoster : null,
     posterTexture: CFG.trackPoster && gl
       ? textureDigest(gl._tex(FIXTURE.textureUploads[MOVIE_SLOT_JS].tex)) : null,
     harnessErrors: world.harnessErrors,
+    wrapped: !!FakeGL.prototype.clear.__obedGlReplay || !!FakeCanvas.prototype.getContext.__obedGlReplay,
+    createdCanvases: world.createdCanvases.map((c) => ({
+      id: c.id, connected: c.isConnected, attached: !!c.parentNode, w: c.width, h: c.height,
+      ctx2dArgCounts: c._ctx2dArgCounts || [] })),
+    drawImages: world.drawImages.length,
+    drawImageSample: world.drawImages.slice(0, 2),
+    moduleUploads: world.uploads.filter((u) => !u.player).map((u) => u.upload),
+    posterTexels: CFG.texelPoints && gl
+      ? CFG.texelPoints.map((p) => gl._tex(FIXTURE.textureUploads[MOVIE_SLOT_JS].tex).texel(p[0], p[1])) : null,
+    originalTexels: world.originalTexels || null,
     opacityAfter: gl ? FIXTURE.programs.map(
       (p) => gl._programs.get(p.prog).uniforms.get('Opacity').value) : null,
     stats: stats,
@@ -1169,6 +1285,10 @@ async function armAndGoLive(out) {
   if (CFG.trackPoster) {
     world.originalPoster = textureDigest(gl._tex(FIXTURE.textureUploads[MOVIE_SLOT_JS].tex));
   }
+  if (CFG.texelPoints) {
+    const poster = gl._tex(FIXTURE.textureUploads[MOVIE_SLOT_JS].tex);
+    world.originalTexels = CFG.texelPoints.map((p) => poster.texel(p[0], p[1]));
+  }
   if (CFG.secondPosterTexture) {
     const poster = FIXTURE.slotSizes[MOVIE_SLOT_JS];
     playerUpload(gl, 900, poster[0], poster[1]);
@@ -1179,6 +1299,11 @@ async function armAndGoLive(out) {
     if (CFG.forceMidMove && f === 1) {
       out.atForce = { uploads: M.stats().uploads, state: M.state };
       M.debugForceFail = CFG.forceMidMove;
+    }
+    // The player redefines its poster texture at another size mid-move.
+    if (CFG.redefinePosterAtFrame === f) {
+      const poster = FIXTURE.textureUploads[MOVIE_SLOT_JS];
+      playerUpload(gl, poster.tex, poster.width >> 1, poster.height >> 1, FIXTURE.draws[MOVIE_SLOT_JS].sourceColour);
     }
     if (CFG.distinctPlayerFbos && f === 0) {
       gl._readFbo = { id: 'player-read', tex: null };
@@ -1465,6 +1590,69 @@ async function main() {
     out.final = snapshotState();
     return out;
   }
+  if (CFG.scenario === 'upload_throws') {
+    // The player's own texture and unpack state, which differ from the poster's
+    // flags, so a failed upload that skipped its restore would leave them changed.
+    gl._flipY = false; gl._premul = false;
+    gl._units[gl._activeUnit] = gl._tex(777);
+    out.atFailure = { uploads: M.stats().uploads, state: M.state };
+    if (CFG.failAt === 'drawImage') world.drawImageThrows = true;
+    else gl._texSubImageThrows = true;
+    await settle(4);
+    out.unpackAfterFailure = world.unpackAfterFailure || null;
+    out.final = snapshotState();
+    return out;
+  }
+  if (CFG.scenario === 'probe') {
+    const handle = window.__OBED_GL_ORACLE__;
+    const track = (p) => { const box = { v: null }; p.then((v) => { box.v = v; }); return box; };
+    const flush = async () => { for (let i = 0; i < 4; i++) await null; };
+    gl._readCallsWrapped = true;
+
+    // A pending probe is served by the next tick, and by nothing before it.
+    gl.callLog.length = 0;
+    const readsBefore = world.bufferReads.length;
+    const straddle = track(handle.probe(CFG.straddleRect));
+    out.syncGlCalls = gl.callLog.length;
+    out.syncReads = world.bufferReads.length - readsBefore;
+    await flush();
+    out.resolvedBeforeTick = straddle.v !== null;
+    const iterBefore = M.stats().iter;
+    tickRvfc();
+    await flush();
+    out.servedTickIter = M.stats().iter;
+    out.ticksToServe = M.stats().iter - iterBefore;
+    out.straddle = straddle.v;
+    out.probeReads = world.bufferReads.slice(readsBefore);
+
+    const clamped = CFG.clampRects.map((r) => track(handle.probe(r)));
+    tickRvfc();
+    await flush();
+    out.clamped = clamped.map((b) => b.v);
+
+    const bad = CFG.badRects.map((r) => track(handle.probe(r)));
+    await flush();
+    out.bad = bad.map((b) => b.v);
+
+    await pumpUntil(handle.pause());
+    const paused = track(handle.probe(CFG.straddleRect));
+    for (let i = 0; i < 6 && paused.v === null; i++) { tickRaf(); await flush(); }
+    out.paused = paused.v;
+    out.loopModeWhilePaused = M.stats().loopMode;
+    await pumpUntil(handle.resume());
+
+    out.handleEpoch = handle.epoch;
+    out.standDownsBeforeRemoval = M.standDowns.slice();
+    const pending = track(handle.probe(CFG.straddleRect));
+    stage.removeChild(world.canvas);
+    await flush();
+    out.pendingAtStandDown = pending.v;
+    const stale = track(handle.probe(CFG.straddleRect));
+    await flush();
+    out.staleHandle = stale.v;
+    out.final = snapshotState();
+    return out;
+  }
   if (CFG.scenario === 'writeback_fails') {
     gl._uniform1fThrows = true;
     stage.removeChild(world.canvas);
@@ -1613,7 +1801,7 @@ def test_published_handle_carries_exactly_the_plan_fields():
     assert live["handlePresent"] is True
     assert live["handleFields"] == sorted([
         "gl", "canvas", "video", "epoch", "sceneId", "instanceId", "rect", "canvasId",
-        "sample", "markerBands", "pause", "resume",
+        "sample", "markerBands", "pause", "resume", "probe",
     ])
     scalars = live["handleScalars"]
     assert scalars["sceneId"] == GL_REPLAY_ENTRY["atScene"] - 1
@@ -2452,8 +2640,8 @@ def test_milestones_reach_the_seam_note_on_the_move_scene_then_live():
 
 # --- gate 6: the poster snapshot and the settle-time repaint (a2-advice "Gate 6", F1/F2) --
 #
-# The per-clear upload REDEFINES the poster texture as the 1920x540 video. A snapshot
-# taken after the first such upload is a 960x276 crop of the last video frame, and the
+# The per-clear upload writes the video into the poster texture's inner rect (plan (c)
+# D1). A snapshot taken after the first such upload holds video there, and the
 # stand-down then "restores" that crop — ten gate-6 arms showed it, zoomed, where the
 # control shows the player's poster. These tests read the poster texture's texels
 # after the stand-down and compare them, byte for byte, with the texels the player
@@ -2462,7 +2650,6 @@ def test_milestones_reach_the_seam_note_on_the_move_scene_then_live():
 POSTER_COLOUR = SETTLE_FRAME["draws"][MOVIE_SLOT]["sourceColour"]
 POSTER_SIZE = (SETTLE_FRAME["textureUploads"][MOVIE_SLOT]["width"],
                SETTLE_FRAME["textureUploads"][MOVIE_SLOT]["height"])
-VIDEO_SIZE = (1920, 540)
 VIDEO_COLOUR = [80, 90, 100, 255]
 REST_OPACITIES = [p["restOpacity"] for p in SETTLE_FRAME["programs"]]
 
@@ -2471,17 +2658,100 @@ def _size(digest: dict) -> tuple[int, int]:
     return digest["w"], digest["h"]
 
 
-def test_fake_gl_redefines_the_poster_texture_on_the_video_upload():
-    """The instrument's positive control. While LIVE the poster texture must hold the
-    VIDEO — its size and texels — or every restore assertion below passes for free."""
-    out = _run_sandbox(scenario="happy", trackPoster=True)
+# The fixture's inner texel rect (plan (c) §2), top-down, and where it lands in GL rows.
+INNER_RECT = {"x": 4, "y": 4, "w": 952, "h": 268}
+INNER_GL_REGION = (4, POSTER_SIZE[1] - 272, 952, 268)
+# Texels of the poster texture, in GL coordinates: the frame margin on every side, and
+# the inner rect's corners and centre.
+MARGIN_TEXELS = [[0, 0], [3, 3], [3, 150], [956, 150], [959, 275], [480, 3], [480, 272], [100, 275]]
+INTERIOR_TEXELS = [[4, 4], [955, 271], [480, 138], [4, 271], [955, 4]]
+
+
+def _video_texel(x: int, y: int, origin: tuple[int, int] = (4, 4)) -> list[int]:
+    """The fake's texel for a video-coloured source written at `origin`."""
+    dx, dy = x - origin[0], y - origin[1]
+    c = VIDEO_COLOUR
+    return [(c[0] + dx) & 255, (c[1] + dy) & 255, (c[2] + (dx >> 8) + 8 * (dy >> 8)) & 255, 255]
+
+
+def _video_uploads(final: dict) -> list[dict]:
+    return [u for u in final["moduleUploads"] if u["srcType"] in ("canvas", "video")]
+
+
+def test_live_video_upload_writes_only_the_inner_rect_of_the_poster_texture():
+    """Plan (c) test 1, the instrument's positive control (it replaces the stretch
+    control, which pinned the whole-texture 1920x540 redefinition). While LIVE the
+    poster texture keeps the poster's size, only the inner rect holds video, and the
+    frame margin is the player's poster texel for texel. Every restore assertion
+    below relies on this: the texture differs from the poster after an upload."""
+    points = MARGIN_TEXELS + INTERIOR_TEXELS
+    out = _run_sandbox(scenario="happy", trackPoster=True, texelPoints=points)
     final = _assert_clean(out)
     assert final["state"] == "LIVE", final["state"]
     assert _size(final["originalPoster"]) == POSTER_SIZE, final["originalPoster"]
-    assert _size(final["posterTexture"]) == VIDEO_SIZE, final["posterTexture"]
+    assert _size(final["posterTexture"]) == POSTER_SIZE, final["posterTexture"]
     assert final["posterTexture"]["digest"] != final["originalPoster"]["digest"]
     assert final["drawnColours"][MOVIE_SLOT] == VIDEO_COLOUR, final["drawnColours"]
     assert POSTER_COLOUR != VIDEO_COLOUR
+
+    uploads = _video_uploads(final)
+    assert uploads, "no video upload ran; vacuous"
+    assert not [u for u in final["moduleUploads"]
+                if u["call"] == "texImage2D" and u["srcType"] == "video"], final["moduleUploads"]
+    for upload in uploads:
+        assert upload["call"] == "texSubImage2D", upload
+        assert upload["srcType"] == "canvas" and upload["srcCanvas"] == 0, upload
+        assert (upload["x"], upload["y"], upload["w"], upload["h"]) == INNER_GL_REGION, upload
+        assert (upload["texW"], upload["texH"]) == POSTER_SIZE, upload
+        assert upload["written"] is True, upload
+        assert (upload["flipY"], upload["premultiplyAlpha"]) == (True, True), upload
+    assert len(uploads) == final["stats"]["uploads"], (len(uploads), final["stats"]["uploads"])
+
+    texels = dict(zip(map(tuple, points), final["posterTexels"]))
+    original = dict(zip(map(tuple, points), final["originalTexels"]))
+    for point in map(tuple, MARGIN_TEXELS):
+        assert texels[point] == original[point], (point, texels[point], original[point])
+    for point in map(tuple, INTERIOR_TEXELS):
+        assert texels[point] == _video_texel(*point), (point, texels[point])
+        assert texels[point] != original[point], point
+
+
+def test_inner_video_is_upright_in_the_poster_texture():
+    """codex r1 (G2 minor). The fake's source rows are top-down and differ top to
+    bottom, and `UNPACK_FLIP_Y_WEBGL` decides which end lands at texture row 0. The
+    player's poster is flipped (upright in GL y-up), so the inner video must be too:
+    the source's TOP row belongs at the inner rect's top GL row (`T.h - y0 - 1`),
+    its BOTTOM row at the bottom one (`T.h - y1`). An unflipped upload swaps them."""
+    top_row, bottom_row = POSTER_SIZE[1] - INNER_RECT["y"] - 1, POSTER_SIZE[1] - INNER_RECT["y"] - INNER_RECT["h"]
+    column = 480
+    points = [[column, top_row], [column, bottom_row], [column, POSTER_SIZE[1] - 1], [column, 0]]
+    out = _run_sandbox(scenario="happy", texelPoints=points)
+    final = _assert_clean(out)
+    assert final["state"] == "LIVE", final["state"]
+    top, bottom, poster_top, poster_bottom = final["posterTexels"]
+    green = VIDEO_COLOUR[1]
+    source_top, source_bottom = (green + INNER_RECT["h"] - 1) & 255, green
+    assert source_top != source_bottom, "the source's rows do not differ; vacuous"
+    assert top[1] == source_top, ("inner top row", top)
+    assert bottom[1] == source_bottom, ("inner bottom row", bottom)
+    # The control: the player's own flipped poster has the same orientation.
+    poster_green = POSTER_COLOUR[1]
+    assert poster_top[1] == (poster_green + POSTER_SIZE[1] - 1) & 255, poster_top
+    assert poster_bottom[1] == poster_green, poster_bottom
+
+
+def test_inner_rect_is_written_at_the_flipped_gl_row():
+    """An instance that is not vertically centred in its slot tells the flip apart:
+    the top-down rect {x0, 10, w, 260} lands at GL row `T.h - y1` = 6, not 10."""
+    entry = _mutated(instanceRect={"x": 109.35, "y": 801.0, "w": 951.54, "h": 260.0})
+    assert live_gl_replay_js.inner_texel_rect(entry) == {"x": 4, "y": 10, "w": 952, "h": 260}
+    out = _run_sandbox(scenario="happy", plan=_plan_with(entry))
+    final = _assert_clean(out)
+    assert final["state"] == "LIVE", final["state"]
+    uploads = _video_uploads(final)
+    assert uploads
+    for upload in uploads:
+        assert (upload["x"], upload["y"], upload["w"], upload["h"]) == (4, 6, 952, 260), upload
 
 
 # Every stand-down reachable AFTER the first per-clear upload, each driven through its
@@ -2713,7 +2983,306 @@ def test_restore_with_a_silent_gl_error_is_not_reported_restored(late_force):
     assert final["standDowns"] == [late_force], final["standDowns"]
     assert _standdown_detail(final).get("posterRestored") is False, _standdown_detail(final)
     assert final["posterTexture"] != final["originalPoster"], "the fake restored it anyway"
-    assert _size(final["posterTexture"]) == VIDEO_SIZE, final["posterTexture"]
+    # Plan (c) §7 test 6: the failed restore leaves the poster-sized texture with the
+    # video in its inner rect, not a texture redefined at the video's size.
+    assert _size(final["posterTexture"]) == POSTER_SIZE, final["posterTexture"]
     if late_force == "glError":
         assert final["drawnColours"][MOVIE_SLOT] == VIDEO_COLOUR, final["drawnColours"]
         assert final["drawnOpacities"] == REST_OPACITIES, final["drawnOpacities"]
+
+
+# --- plan (c): the inner texel rect, the compositor canvas, the probe --------------------
+
+
+def test_per_clear_uploads_during_the_move_use_the_inner_rect_path():
+    """Plan (c) test 2. The ARM-PRE per-clear upload goes through the same sub-upload
+    as LIVE: no whole-texture video upload happens during the move either."""
+    out = _run_sandbox(scenario="happy", trackPoster=True)
+    final = _assert_clean(out)
+    during_move = [u for u in _video_uploads(final) if u["phase"] == "ARM-PRE"]
+    assert during_move, "no per-clear upload during the move; vacuous"
+    for upload in during_move:
+        assert upload["call"] == "texSubImage2D", upload
+        assert upload["srcType"] == "canvas", upload
+        assert (upload["x"], upload["y"], upload["w"], upload["h"]) == INNER_GL_REGION, upload
+    assert [u["phase"] for u in _video_uploads(final)].count("LIVE") > 0
+
+
+def _slot_rect(x: float, y: float, w: float, h: float) -> list:
+    rects = copy.deepcopy(GL_REPLAY_ENTRY["slotRects"])
+    rects[MOVIE_SLOT] = [x, y, w, h]
+    return rects
+
+
+# (label, entry changes, expected inner rect or None). The half-texel case is the one
+# Python's banker's `round` gets wrong ({4, 2, 952, 270}); the page rounds half up.
+INNER_RECT_CASES: list[tuple[str, dict, dict | None]] = [
+    ("fixture", {}, INNER_RECT),
+    ("texture_scale_2x", {"slotSizes": [[1920, 1080], [671, 195], [266, 236], [1920, 552], [178, 157]]},
+     {"x": 8, "y": 8, "w": 1904, "h": 536}),
+    ("half_texel_edges", {"slotRects": _slot_rect(100.0, 200.0, 960.0, 276.0),
+                          "instanceRect": {"x": 104.5, "y": 202.5, "w": 951.0, "h": 270.0}},
+     {"x": 5, "y": 3, "w": 951, "h": 270}),
+    ("instance_equals_slot", {"slotRects": _slot_rect(100.0, 200.0, 960.0, 276.0),
+                              "instanceRect": {"x": 100.0, "y": 200.0, "w": 960.0, "h": 276.0}},
+     {"x": 0, "y": 0, "w": 960, "h": 276}),
+    ("margin_minus_0_4_clamped", {"slotRects": _slot_rect(100.0, 200.0, 960.0, 276.0),
+                                  "instanceRect": {"x": 99.6, "y": 200.0, "w": 960.4, "h": 276.0}},
+     {"x": 0, "y": 0, "w": 960, "h": 276}),
+    ("left_margin_minus_0_6", {"slotRects": _slot_rect(100.0, 200.0, 960.0, 276.0),
+                               "instanceRect": {"x": 99.4, "y": 200.0, "w": 960.6, "h": 276.0}}, None),
+    ("bottom_margin_minus_0_6", {"slotRects": _slot_rect(100.0, 200.0, 960.0, 276.0),
+                                 "instanceRect": {"x": 100.0, "y": 200.0, "w": 960.0, "h": 276.6}}, None),
+    ("under_one_texel", {"slotRects": _slot_rect(100.0, 200.0, 960.0, 276.0),
+                         "instanceRect": {"x": 110.0, "y": 210.0, "w": 0.2, "h": 100.0}}, None),
+]
+
+
+@pytest.mark.parametrize("label,changes,expected", INNER_RECT_CASES, ids=[c[0] for c in INNER_RECT_CASES])
+def test_inner_rect_math_matches_between_page_and_python(label, changes, expected):
+    """Plan (c) test 3. The page's `innerRectOf` and `inner_texel_rect` agree on every
+    case, and an entry without an inner rect fails closed on both sides."""
+    entry = _mutated(**changes)
+    plan = _plan_with(entry)
+    assert live_gl_replay_js.inner_texel_rect(entry) == expected, label
+    out = _run_sandbox(scenario="install_only", plan=plan)
+    final = out["final"]
+    assert final["installThrew"] is None, final["installThrew"]
+    if expected is None:
+        assert live_gl_replay_js.validate_gl_replay_entry(plan) is None
+        assert live_gl_replay_js.gl_replay_script(plan) == ""
+        assert final["standDowns"] == ["planUnreadable"], final["standDowns"]
+        assert final["wrapped"] is False
+    else:
+        assert live_gl_replay_js.validate_gl_replay_entry(plan) is not None
+        assert final["standDowns"] == [], final["standDowns"]
+        assert final["stats"]["innerRect"] == expected, final["stats"]["innerRect"]
+
+
+def test_inner_rect_rounds_half_up_not_to_even():
+    """The half-up rule is what keeps Python and the page on the same texel."""
+    assert live_gl_replay_js._round_half_up(2.5) == 3
+    assert live_gl_replay_js._round_half_up(4.5) == 5
+    assert live_gl_replay_js._round_half_up(-0.5) == 0
+    assert round(2.5) == 2, "the control: Python's own round is banker's rounding"
+
+
+def test_compositor_canvas_is_created_once_detached_and_reused():
+    """Plan (c) test 4. One id-less canvas of the inner rect's size, never attached,
+    with one plain 2D context (no `willReadFrequently`) reused for every upload."""
+    out = _run_sandbox(scenario="happy")
+    final = _assert_clean(out)
+    assert final["state"] == "LIVE", final["state"]
+    assert final["createdCanvases"] == [{
+        "id": "", "connected": False, "attached": False,
+        "w": INNER_RECT["w"], "h": INNER_RECT["h"], "ctx2dArgCounts": [1],
+    }], final["createdCanvases"]
+    assert final["drawImages"] == final["stats"]["uploads"] > 1, final["drawImages"]
+    for draw in final["drawImageSample"]:
+        assert draw == {"video": True, "args": [0, 0, INNER_RECT["w"], INNER_RECT["h"]], "canvas": 0}, draw
+
+
+def test_missing_2d_context_refuses_install_and_wraps_nothing():
+    out = _run_sandbox(scenario="install_only", no2d=True)
+    final = out["final"]
+    assert final["installThrew"] is None, final["installThrew"]
+    assert final["standDowns"] == ["glReplayUnavailable"], final["standDowns"]
+    assert final["state"] == "RETIRED", final["state"]
+    assert final["wrapped"] is False, "a prototype was wrapped before the refusal"
+    control = _run_sandbox(scenario="install_only")["final"]
+    assert control["wrapped"] is True and control["standDowns"] == [], control
+
+
+@pytest.mark.parametrize("fail_at", ["drawImage", "texSubImage2D"])
+def test_throwing_video_upload_stands_down_once_and_restores_state(fail_at):
+    """Plan (c) test 5. A throw anywhere in the upload is a `glError` stand-down, never
+    a silent freeze: the player's unpack flags and binding come back, the poster is
+    restored, the failed upload is not counted, and the stand-down's rest replay is
+    the last frame drawn (no patched LIVE replay after it)."""
+    out = _run_sandbox(scenario="upload_throws", failAt=fail_at, trackPoster=True)
+    final = _assert_clean(out)
+    assert out["atFailure"]["state"] == "LIVE", out["atFailure"]
+    assert final["standDowns"] == ["glError"], final["standDowns"]
+    [event] = [e for e in final["events"] if e["kind"] == "glreplay-standdown"]
+    assert event["detail"]["call"] == "uploadVideo", event["detail"]
+    assert fail_at in event["detail"]["error"], event["detail"]
+    assert out["unpackAfterFailure"] == {"flipY": False, "premul": False, "activeUnit": 0, "bound": 777}, (
+        out["unpackAfterFailure"])
+    assert event["detail"]["posterRestored"] is True, event["detail"]
+    assert final["posterTexture"] == final["originalPoster"]
+    assert final["stats"]["uploads"] == out["atFailure"]["uploads"], final["stats"]["uploads"]
+    assert final["drawnOpacities"] == REST_OPACITIES, final["drawnOpacities"]
+    assert final["drawnColours"][MOVIE_SLOT] == POSTER_COLOUR, final["drawnColours"]
+    assert len([c for c in final["seamCalls"] if c["fn"] == "release"]) == 1
+
+
+def test_poster_redefined_off_size_mid_move_stands_down_before_live():
+    """Plan (c) test 5, D3. A sub-upload into a texture that is no longer poster-sized
+    writes nothing and latches INVALID_VALUE; ARM-POST's first read turns it into a
+    `glError` stand-down before LIVE. No upload ever redefines the texture with video."""
+    out = _run_sandbox(scenario="arm_only", redefinePosterAtFrame=1)
+    final = _assert_clean(out)
+    assert final["standDowns"] == ["glError"], final["standDowns"]
+    assert "glreplay-live" not in final["eventKinds"], final["eventKinds"]
+    assert final["handlePresent"] is False
+    rejected = [u for u in _video_uploads(final) if not u["written"]]
+    assert rejected and all(u["phase"] == "ARM-PRE" for u in rejected), final["moduleUploads"]
+    assert all((u["texW"], u["texH"]) == (POSTER_SIZE[0] >> 1, POSTER_SIZE[1] >> 1) for u in rejected)
+    assert not [u for u in final["moduleUploads"] if u["srcType"] == "video"], final["moduleUploads"]
+    assert not [u for u in _video_uploads(final) if u["call"] == "texImage2D"], final["moduleUploads"]
+
+
+def test_stats_report_the_inner_rect():
+    out = _run_sandbox(scenario="happy")
+    assert _assert_clean(out)["stats"]["innerRect"] == INNER_RECT
+
+
+# The movie's top edge in the fake's drawing buffer, in authored rows: rows above it
+# show slot 0, rows from it down show the video. x 200..209 is clear of every other slot.
+STRADDLE_RECT = {"x": 200.0, "y": 780.0, "w": 10.0, "h": 20.0}
+PROBE_CLAMP_RECTS = [
+    ({"x": -5.4, "y": 779.6, "w": 20.6, "h": 20.2}, {"x": 0, "y": 780, "w": 21, "h": 20}),
+    ({"x": 1915.2, "y": -3.0, "w": 10.0, "h": 5.4}, {"x": 1915, "y": 0, "w": 5, "h": 2}),
+]
+PROBE_BAD_RECTS = [
+    None,
+    {"x": float("nan"), "y": 0, "w": 1, "h": 1},
+    {"x": 0, "y": float("inf"), "w": 1, "h": 1},
+    {"x": 0, "y": 0, "w": 0, "h": 1},
+    {"x": 0, "y": 0, "w": 1, "h": -1},
+    {"x": "1", "y": 0, "w": 1, "h": 1},
+    {"x": 0, "y": 0, "w": 1},
+]
+
+
+def _movie_top_row() -> int:
+    """Authored row of the movie draw's top edge, decoded exactly as the fake does."""
+    program = SETTLE_FRAME["programs"][SETTLE_FRAME["draws"][MOVIE_SLOT]["prog"]]
+    mvp = next(u["value"] for u in program["uniforms"] if u["name"] == "MVPMatrix")
+    tex_h = SETTLE_FRAME["slotSizes"][MOVIE_SLOT][1]
+    y0 = (mvp[13] + 1) / 2 * 1080
+    y1 = (mvp[5] * tex_h + mvp[13] + 1) / 2 * 1080
+    bottom, height = round(min(y0, y1)), round(abs(y1 - y0))
+    return 1080 - (bottom + height)
+
+
+def _rows(result: dict) -> list[list[list[int]]]:
+    px, w = result["pixels"], result["width"]
+    return [[px[(r * w + c) * 4:(r * w + c) * 4 + 4] for c in range(w)] for r in range(result["height"])]
+
+
+def _run_probe() -> dict:
+    out = _run_sandbox(scenario="probe", straddleRect=STRADDLE_RECT,
+                       clampRects=[r for r, _ in PROBE_CLAMP_RECTS], badRects=PROBE_BAD_RECTS)
+    _assert_clean(out)
+    return out
+
+
+def test_probe_is_served_on_the_next_tick_after_the_replayed_draws():
+    """Plan (c) §4. `probe()` issues nothing synchronously and resolves only when the
+    next tick has replayed the frame. The fake's read makes a wrapped GL call, so a
+    read served outside the module's `replaying` depth would stand down as
+    `unflaggedPlayerCall`."""
+    out = _run_probe()
+    assert (out["syncGlCalls"], out["syncReads"]) == (0, 0), out
+    assert out["resolvedBeforeTick"] is False
+    assert out["ticksToServe"] == 1, out["ticksToServe"]
+    result = out["straddle"]
+    assert result["ok"] is True, result
+    assert result["iter"] == out["servedTickIter"], (result["iter"], out["servedTickIter"])
+    [read] = [r for r in out["probeReads"] if (r["w"], r["h"]) == (10, 20)]
+    assert read["drawn"] == len(SETTLE_FRAME["draws"]), read
+    assert out["standDownsBeforeRemoval"] == [], out["standDownsBeforeRemoval"]
+
+
+def test_probe_returns_top_down_rgba_rows_and_alpha_min():
+    out = _run_probe()
+    result = out["straddle"]
+    assert result["rect"] == {"x": 200, "y": 780, "w": 10, "h": 20}, result["rect"]
+    assert (result["width"], result["height"]) == (10, 20)
+    assert len(result["pixels"]) == 10 * 20 * 4
+    rows = _rows(result)
+    top = _movie_top_row()
+    assert 780 < top < 800, top
+    background = SETTLE_FRAME["draws"][0]["sourceColour"]
+    assert background != VIDEO_COLOUR
+    for r, row in enumerate(rows):
+        want = background if 780 + r < top else VIDEO_COLOUR
+        assert all(p == want for p in row), (780 + r, row[0], want)
+    assert result["alphaMin"] == min(result["pixels"][3::4]) == 255, result["alphaMin"]
+    assert result["epoch"] == out["handleEpoch"] == 1
+    assert isinstance(result["t"], (int, float)) and isinstance(result["vt"], (int, float))
+
+
+@pytest.mark.parametrize("index", range(len(PROBE_CLAMP_RECTS)))
+def test_probe_rounds_and_clamps_the_rect_and_returns_what_it_read(index):
+    out = _run_probe()
+    result = out["clamped"][index]
+    expected = PROBE_CLAMP_RECTS[index][1]
+    assert result["ok"] is True, result
+    assert result["rect"] == expected, result["rect"]
+    assert (result["width"], result["height"]) == (expected["w"], expected["h"])
+    assert len(result["pixels"]) == expected["w"] * expected["h"] * 4
+
+
+def test_probe_rejects_a_bad_rect_immediately():
+    out = _run_probe()
+    assert out["bad"] == [{"ok": False, "reason": "badRect"}] * len(PROBE_BAD_RECTS), out["bad"]
+
+
+def test_probe_is_served_while_paused_on_the_raf_loop():
+    out = _run_probe()
+    assert out["loopModeWhilePaused"] == "raf", out["loopModeWhilePaused"]
+    assert out["paused"] is not None and out["paused"]["ok"] is True, out["paused"]
+    assert out["paused"]["rect"] == out["straddle"]["rect"]
+
+
+def test_pending_probe_resolves_stand_down_and_a_stale_handle_answers_the_same():
+    out = _run_probe()
+    assert out["pendingAtStandDown"] == {"ok": False, "reason": "standDown"}, out["pendingAtStandDown"]
+    assert out["staleHandle"] == {"ok": False, "reason": "standDown"}, out["staleHandle"]
+    final = out["final"]
+    assert final["standDowns"] == [NORMAL_EXIT_REASON], final["standDowns"]
+    assert final["handlePresent"] is False
+
+
+# --- the real core against the real module ----------------------------------------------
+#
+# The core's G3 tests fake this module as the plain object it publishes. This one runs
+# the real `PRESERVE_CORE_JS` and the real `GL_REPLAY_JS` in one page, in page order
+# (plan < core < module, then load), so a module the core would refuse -- a version the
+# core's `m.version !== 1` gate does not accept -- fails here and not first on a gate.
+
+_REAL_MODULE_AFTER_CORE = r"""
+function CanvasElement() {}
+CanvasElement.prototype.getContext = function () { return null; };
+function GLContext() {}
+GLContext.prototype.clear = function () {};
+GLContext.prototype.drawElements = function () {};
+window.WebGLRenderingContext = GLContext;
+window.__OBED_CONTINUITY_INFO__ = {authoredWidth: 1920, authoredHeight: 1080};
+new Function('HTMLCanvasElement', 'WebGLRenderingContext', __MODULE_SOURCE__)(CanvasElement, GLContext);
+""" + "document.readyState = 'complete';\n"
+
+
+def test_the_real_core_arms_the_zone_for_the_real_module():
+    from test_live_continuity_js import _IDENTITY_STAGE, _run_full_core_in_node
+
+    result = _run_full_core_in_node(
+        plan=RUNTIME_PLAN, stage=_IDENTITY_STAGE,
+        after_core=_REAL_MODULE_AFTER_CORE.replace(
+            "__MODULE_SOURCE__", json.dumps(live_gl_replay_js.GL_REPLAY_JS)),
+        script=r"""
+const m = window.__OBED_GL_REPLAY__;
+const module = m ? {version: m.version, state: m.state, standDowns: m.standDowns.slice()} : null;
+P.glReplay.carried('movie1');
+console.log(JSON.stringify({
+  module: module,
+  zones: P.events.filter((e) => e.kind === 'glreplay-zone')
+    .map((e) => [e.detail.from, e.detail.to, e.detail.reason]),
+}));
+""")
+    assert result["zones"] == [["pending", "armed", "moduleReady"]], result["zones"]
+    assert result["module"] == {
+        "version": live_gl_replay_js.GL_REPLAY_VERSION, "state": "IDLE", "standDowns": [],
+    }, result["module"]
