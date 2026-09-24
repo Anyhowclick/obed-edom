@@ -572,9 +572,13 @@ function decodeRect(mvp, w, h, bw, bh) {
 // the uploaded source, exactly as in WebGL. Source texels vary with position and
 // texel (0,0) is the source's base colour, so a crop of the 1920x540 video read back
 // at the poster's 960x276 is distinguishable from the poster itself (a2-advice E12).
-function sourceTexel(c) {
+// A TexImageSource's rows are top-down, and its BOTTOM row carries the base colour.
+// `UNPACK_FLIP_Y_WEBGL` puts that bottom row at texture row 0 (GL y-up, upright);
+// without it the source's top row lands at row 0 and the texture is upside down.
+function sourceTexel(c, h, flipY) {
   const a = c[3] === undefined ? 255 : c[3];
-  return (x, y) => [(c[0] + x) & 255, (c[1] + y) & 255, (c[2] + (x >> 8) + 8 * (y >> 8)) & 255, a];
+  const at = (x, y) => [(c[0] + x) & 255, (c[1] + y) & 255, (c[2] + (x >> 8) + 8 * (y >> 8)) & 255, a];
+  return flipY ? at : (x, y) => at(x, h - 1 - y);
 }
 function pixelsTexel(data, w) {
   return (x, y) => { const i = (y * w + x) * 4; return [data[i], data[i + 1], data[i + 2], data[i + 3]]; };
@@ -782,7 +786,7 @@ FakeGL.prototype.texImage2D = function () {
     const kind = sourceKind(src);
     upload = { srcType: kind, w: kind === 'video' ? src.videoWidth : src.width,
                h: kind === 'video' ? src.videoHeight : src.height, format: a[3], type: a[4] };
-    setLevel0(tex, upload.w, upload.h, sourceTexel(src.__colour || [0, 0, 0, 255]),
+    setLevel0(tex, upload.w, upload.h, sourceTexel(src.__colour || [0, 0, 0, 255], upload.h, this._flipY),
               src.__colour ? src.__colour.slice() : null);
   }
   upload.call = 'texImage2D';
@@ -810,9 +814,9 @@ FakeGL.prototype.texSubImage2D = function () {
     srcType = sourceKind(src);
     srcCanvas = world.createdCanvases.indexOf(src);
     const colour = (src.__colour || [0, 0, 0, 255]).slice();
-    sub = { x: a[2], y: a[3], w: srcType === 'video' ? src.videoWidth : src.width,
-            h: srcType === 'video' ? src.videoHeight : src.height,
-            texel: sourceTexel(colour), colour: colour };
+    const h = srcType === 'video' ? src.videoHeight : src.height;
+    sub = { x: a[2], y: a[3], w: srcType === 'video' ? src.videoWidth : src.width, h: h,
+            texel: sourceTexel(colour, h, this._flipY), colour: colour };
   }
   const inBounds = !!tex.texel && sub.x >= 0 && sub.y >= 0 &&
     sub.x + sub.w <= tex.w && sub.y + sub.h <= tex.h;
@@ -2710,6 +2714,30 @@ def test_live_video_upload_writes_only_the_inner_rect_of_the_poster_texture():
     for point in map(tuple, INTERIOR_TEXELS):
         assert texels[point] == _video_texel(*point), (point, texels[point])
         assert texels[point] != original[point], point
+
+
+def test_inner_video_is_upright_in_the_poster_texture():
+    """codex r1 (G2 minor). The fake's source rows are top-down and differ top to
+    bottom, and `UNPACK_FLIP_Y_WEBGL` decides which end lands at texture row 0. The
+    player's poster is flipped (upright in GL y-up), so the inner video must be too:
+    the source's TOP row belongs at the inner rect's top GL row (`T.h - y0 - 1`),
+    its BOTTOM row at the bottom one (`T.h - y1`). An unflipped upload swaps them."""
+    top_row, bottom_row = POSTER_SIZE[1] - INNER_RECT["y"] - 1, POSTER_SIZE[1] - INNER_RECT["y"] - INNER_RECT["h"]
+    column = 480
+    points = [[column, top_row], [column, bottom_row], [column, POSTER_SIZE[1] - 1], [column, 0]]
+    out = _run_sandbox(scenario="happy", texelPoints=points)
+    final = _assert_clean(out)
+    assert final["state"] == "LIVE", final["state"]
+    top, bottom, poster_top, poster_bottom = final["posterTexels"]
+    green = VIDEO_COLOUR[1]
+    source_top, source_bottom = (green + INNER_RECT["h"] - 1) & 255, green
+    assert source_top != source_bottom, "the source's rows do not differ; vacuous"
+    assert top[1] == source_top, ("inner top row", top)
+    assert bottom[1] == source_bottom, ("inner bottom row", bottom)
+    # The control: the player's own flipped poster has the same orientation.
+    poster_green = POSTER_COLOUR[1]
+    assert poster_top[1] == (poster_green + POSTER_SIZE[1] - 1) & 255, poster_top
+    assert poster_bottom[1] == poster_green, poster_bottom
 
 
 def test_inner_rect_is_written_at_the_flipped_gl_row():
