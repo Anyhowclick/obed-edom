@@ -1275,6 +1275,20 @@ def _slide_movie_instances(
     return instances
 
 
+def _sorted_rects(
+    instances: dict[str, list[_MovieInstance]], *, loop_only: bool = False
+) -> dict[str, list[dict[str, float]]]:
+    projected = {
+        asset: [
+            instance.rect.as_dict()
+            for instance in sorted(found, key=lambda i: (i.rect.x, i.rect.y, i.rect.w, i.rect.h))
+            if instance.loop or not loop_only
+        ]
+        for asset, found in sorted(instances.items())
+    }
+    return {asset: rects for asset, rects in projected.items() if rects}
+
+
 def _boundary_transition(events: list[Any], slide_name: str) -> dict[str, Any] | None:
     transitions: list[dict[str, Any]] = []
 
@@ -1458,29 +1472,13 @@ def derive_plan(
     }
 
     slide_instances = {
-        player_index: {
-            asset: [
-                instance.rect.as_dict()
-                for instance in sorted(found, key=lambda i: (i.rect.x, i.rect.y, i.rect.w, i.rect.h))
-            ]
-            for asset, found in sorted(instances.items())
-        }
-        for player_index, instances in instances_by_player.items()
+        player_index: _sorted_rects(instances) for player_index, instances in instances_by_player.items()
     }
-
-    loop_instances: dict[int, dict[str, list[dict[str, float]]]] = {}
-    for player_index, instances in instances_by_player.items():
-        looping = {
-            asset: [
-                instance.rect.as_dict()
-                for instance in sorted(found, key=lambda i: (i.rect.x, i.rect.y, i.rect.w, i.rect.h))
-                if instance.loop
-            ]
-            for asset, found in sorted(instances.items())
-            if any(instance.loop for instance in found)
-        }
-        if looping:
-            loop_instances[player_index] = looping
+    loop_instances = {
+        player_index: _sorted_rects(instances, loop_only=True)
+        for player_index, instances in instances_by_player.items()
+        if any(instance.loop for found in instances.values() for instance in found)
+    }
 
     boundaries: list[SlideBoundary] = []
     for index, (player_index, uuid) in enumerate(ordered):

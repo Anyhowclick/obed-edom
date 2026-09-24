@@ -128,7 +128,6 @@ FORCE_WRAP_MIN_FRAMES = 10
 FORCE_WRAP_SEEK_TIMEOUT_S = 1.5
 FORCE_WRAP_TOLERANCE_MS = 100.0
 FORCE_WRAP_WINDOW_AFTER_SEEK_MS = 1000.0
-FORCE_WRAP_FALLBACKS = ("videoNotReady", "notPooled", "rawRestart")
 
 BURST_POKE_JS = (
     "(function(){var d=document.getElementById('__orpoke');"
@@ -427,6 +426,7 @@ FORCE_WRAP_READ_JS = r"""
   var v = rec.video;
   return {t: performance.now(), seekedT: rec.seekedT, seekFrom: rec.seekFrom, target: rec.target,
           frames: rec.frames.slice(), id: v.id, elId: v.__obedElId == null ? null : v.__obedElId,
+          probeId: v.__obedProbeId == null ? null : v.__obedProbeId,
           loop: v.loop, ended: v.ended, paused: v.paused, isConnected: v.isConnected,
           duration: isFinite(v.duration) ? v.duration : null, playbackRate: v.playbackRate};
 })()
@@ -1253,16 +1253,18 @@ def unwrap_clock(
     rows: list[dict[str, Any]], period_s: float, fps: float = WRAP_FPS
 ) -> tuple[list[dict[str, Any]], list[float]]:
     """`rows` (time-ordered) with `currentTime` unwrapped across loop wraps, plus each wrap's
-    `t`. A step back `a -> b` is a wrap only when `a >= P - tol` and `b <= tol`, with
-    `tol = 2/fps + (t_b - t_a)`; every other drop is left in place to be scored."""
+    `t`. A step back `a -> b` is a wrap only when the step spans at most `MAX_STALL_S`,
+    `a >= P - tol` and `b <= tol`, with `tol = 2/fps + (t_b - t_a)`; every other drop
+    (including one hidden in a sampling gap) is left in place to be scored."""
     unwrapped: list[dict[str, Any]] = []
     wraps: list[float] = []
     offset = 0.0
     for index, row in enumerate(rows):
         if index:
             a = rows[index - 1]
-            if row["currentTime"] < a["currentTime"]:
-                tol = 2.0 / fps + (row["t"] - a["t"]) / 1000.0
+            step_s = (row["t"] - a["t"]) / 1000.0
+            if row["currentTime"] < a["currentTime"] and step_s <= MAX_STALL_S:
+                tol = 2.0 / fps + step_s
                 if a["currentTime"] >= period_s - tol and row["currentTime"] <= tol:
                     offset += period_s
                     wraps.append(row["t"])
@@ -4330,8 +4332,16 @@ def score_forced_wrap(
         held, carry = armed_carry(reads, armed, recorder)
         held = held and clock.get("verdict") is True
     else:
-        held = continuity.get("verdict") is True and continuity.get("wraps") == 1
-        carry = {"wraps": continuity.get("wraps")}
+        tracked = continuity.get("elementId")
+        seeked = recorder.get("probeId") if isinstance(recorder, dict) else None
+        checks = {
+            "continuity": continuity.get("verdict") is True,
+            "oneWrap": continuity.get("wraps") == 1,
+            "recorderClock": clock.get("verdict") is True,
+            "tracksSeeked": tracked is not None and tracked == seeked,
+        }
+        held = all(checks.values())
+        carry = {"checks": checks, "wraps": continuity.get("wraps"), "trackedId": tracked, "seekedProbeId": seeked}
     result["carry"] = carry
     if held:
         return {**result, "status": "pass", "outcome": "carried", "reasons": []}
@@ -4480,11 +4490,14 @@ def run_force_wrap_cli(args: argparse.Namespace) -> None:
         "status": result.get("status"), "outcome": forced.get("outcome"), "reasons": forced.get("reasons"),
         "wrapFromPressMs": forced.get("wrapFromPressMs"), "error": result.get("error"),
     }, indent=2, default=str))
+    if result.get("status") != "pass":
+        raise SystemExit(1)
 
 
 def rescore_artifact(path: Path, period_s: float) -> dict[str, Any]:
     """L2 CvC: re-score a standard host artifact's arms with the strict and the wrap-aware
-    scorer; without a wrap in the samples the verdict dicts must be identical."""
+    scorer; `ok` needs every arm's two re-scores identical and the strict one equal to the
+    verdicts stored in the artifact."""
     result = json.loads(path.read_text())
     facts = result["groundTruth"]
     entries = [*((f"arm {name}", arm) for name, arm in (result.get("arms") or {}).items()), ("attach", result.get("attach"))]
@@ -4506,7 +4519,9 @@ def rescore_artifact(path: Path, period_s: float) -> dict[str, Any]:
             "wrapTimes": wraps,
         }
     return {"artifact": str(path), "loopPeriodS": period_s, "arms": out,
-            "identical": all(item.get("identical") is True for item in out.values())}
+            "ok": all(
+                item.get("identical") is True and item.get("strictMatchesArtifact") is True for item in out.values()
+            )}
 
 
 def run_rescore_cli(args: argparse.Namespace) -> None:
@@ -4515,7 +4530,7 @@ def run_rescore_cli(args: argparse.Namespace) -> None:
     facts = ground_truth_facts(ground_truth_plan(export, slides))
     report = rescore_artifact(args.rescore, loop_period_of(movie_nodes(export, slides), facts["asset"]))
     print(json.dumps(report, indent=2, default=str))
-    if not report["identical"]:
+    if not report["ok"]:
         raise SystemExit(1)
 
 

@@ -3506,3 +3506,60 @@ def test_a_loop_annex_without_a_scene_index_is_refused():
     assert isinstance(plan, ContinuityPlan)
     orphan = replace(plan, loop_instances={**plan.loop_instances, 9: plan.loop_instances[0]})
     assert orphan.to_runtime() == Unsupported("a looping movie instance has no scene index")
+
+
+def _add_audio_only_movie(loop_mode, keep_video_layer: bool = False):
+    """Slide 1 gains a synthetic audio-only movie node: `isAudioOnly` true and no video
+    sub-layer (the player's `renderAudioOnlyEffect` path, which also sets `loop` from the same
+    two literals). `_ABSENT_LOOP_MODE` leaves the key out; `keep_video_layer` is the positive
+    control."""
+
+    def transform(data):
+        events = copy.deepcopy(data["events"])
+        clone = copy.deepcopy(_find_movie_nodes(events)[0])
+        clone["objectID"] = "SYNTHETIC-AUDIO-ONLY"
+        clone["movie"] = {**clone["movie"], "asset": "Audio.m4a-0.0000-10.0000", "isAudioOnly": True}
+        if loop_mode is not _ABSENT_LOOP_MODE:
+            clone["movie"]["loopMode"] = loop_mode
+        if not keep_video_layer:
+            clone["baseLayer"]["layers"] = []
+        events[0]["clonedMovies"] = [clone]
+        assets = {
+            **data["assets"],
+            "Audio.m4a-0.0000-10.0000": {"type": "audio", "url": {"web": "assets/Audio.m4a-0.0000-10.0000.m4a"}},
+        }
+        return {**data, "events": events, "assets": assets}
+
+    return transform
+
+
+_ABSENT_LOOP_MODE = object()
+
+
+@pytest.mark.parametrize("gl_replay", [False, True])
+@pytest.mark.parametrize(
+    "loop_mode",
+    [_ABSENT_LOOP_MODE, "looping", "loopBackAndForth", "bogus", None, True, {"mode": "looping"}],
+    ids=["absent", "looping", "loopBackAndForth", "bogus", "None", "True", "object"],
+)
+def test_an_audio_only_movie_is_refused_upstream_whatever_its_loop_mode(loop_mode, gl_replay):
+    """Codex r1 F7: audio-only movies stay unmeasured (plan section 8 risk 3). They are refused
+    before any loop rule runs -- `_movie_rect` needs exactly one video sub-layer -- so no loop
+    value on one, qualified or not, can reach a runtime. The object value trips the vocabulary
+    walk even earlier, which is also a whole-deck refusal."""
+    tree = _mutate_slide(SLIDE1, _add_audio_only_movie(loop_mode))
+    plan = derive_plan(tree, SLIDES, resolver=_resolver, gl_replay=gl_replay)
+    assert isinstance(plan, Unsupported)
+    if isinstance(loop_mode, dict):
+        assert plan.reason.endswith("(possible mask): <movie node>.movie.loopMode")
+    else:
+        assert plan.reason == f"movie node on slide {SLIDE1} has 0 video sub-layers, expected 1"
+
+
+def test_the_synthetic_audio_node_derives_when_its_video_sub_layer_is_kept():
+    """Positive control for the test above: the same clone with its video sub-layer kept
+    derives, so the refusal there is the missing sub-layer and nothing else in the synthetic."""
+    tree = _mutate_slide(SLIDE1, _add_audio_only_movie("looping", keep_video_layer=True))
+    plan = derive_plan(tree, SLIDES, resolver=_resolver)
+    assert isinstance(plan, ContinuityPlan)
+    assert plan.loop_instances == {0: {"audio.m4a": [_rect(*SLIDE1_BIG)]}}

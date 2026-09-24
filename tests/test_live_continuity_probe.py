@@ -5135,7 +5135,7 @@ def _fw_recorder(
         frames.append({"now": t, "mediaTime": media, "presentedFrames": len(frames)})
         t += dt
     return {
-        "seekedT": FW_SEEKED, "target": period - lead_s, "frames": frames, "elId": el_id, "loop": wrap,
+        "seekedT": FW_SEEKED, "target": period - lead_s, "frames": frames, "elId": el_id, "probeId": 1, "loop": wrap,
         "duration": period, "playbackRate": 1, "ended": not wrap,
     }
 
@@ -5157,7 +5157,7 @@ def _fw_score(
     return probe.score_forced_wrap(
         boundary=boundary, offset_ms=offset_ms, take=_fw_take() if take is None else take, recorder=recorder,
         node_period_s=FW_PERIOD,
-        continuity={"verdict": True, "wraps": 1} if continuity is None else continuity,
+        continuity={"verdict": True, "wraps": 1, "elementId": 1} if continuity is None else continuity,
         clock=probe.score_recorder_clock(recorder, _fw_window()) if clock is None else clock,
         reads=reads, armed=armed, restart={"verdict": False} if restart is None else restart,
         rects=[dict(BIG_INSTANCE)], page_errors=list(page_errors) if page_errors is not None else None,
@@ -5328,10 +5328,24 @@ class TestScoreForcedWrap:
         assert (result["status"], result["outcome"]) == ("pass", "carried")
         assert result["wrapFromPressMs"] == pytest.approx(375.0, abs=1000.0 / 30.0)
 
-    @pytest.mark.parametrize("continuity", [{"verdict": True, "wraps": 0}, {"verdict": True, "wraps": 2}, {"verdict": False, "wraps": 1}])
+    @pytest.mark.parametrize("continuity", [
+        {"verdict": True, "wraps": 0, "elementId": 1}, {"verdict": True, "wraps": 2, "elementId": 1},
+        {"verdict": False, "wraps": 1, "elementId": 1},
+    ])
     def test_bridge_needs_a_true_verdict_and_exactly_one_wrap(self, continuity: dict[str, Any]) -> None:
         result = _fw_score(continuity=continuity)
         assert result["status"] == "fail"
+
+    @pytest.mark.parametrize("tracked", [2, None])
+    def test_known_bad_bridge_scoring_another_element_than_the_seeked_one_fails(self, tracked: Any) -> None:
+        result = _fw_score(continuity={"verdict": True, "wraps": 1, "elementId": tracked})
+        assert result["status"] == "fail"
+        assert result["carry"]["checks"]["tracksSeeked"] is False
+
+    def test_known_bad_bridge_with_a_frozen_recorder_fails(self) -> None:
+        result = _fw_score(recorder=_fw_recorder(stop_at=FW_SEEKED + 4000.0))
+        assert result["status"] == "fail"
+        assert result["carry"]["checks"]["recorderClock"] is False
 
     def test_known_bad_a_non_loop_movie_ends_in_window_and_fails(self) -> None:
         recorder = _fw_recorder(wrap=False)
@@ -5452,13 +5466,47 @@ class TestRescoreArtifact:
 
     def test_samples_without_a_wrap_rescore_identically(self, tmp_path: Path) -> None:
         report = probe.rescore_artifact(self._artifact(tmp_path, rows_around_boundary()), LOOP_P)
-        assert report["identical"] is True
-        assert all(arm["strictMatchesArtifact"] for arm in report["arms"].values())
+        assert report["ok"] is True
+        assert all(arm["strictMatchesArtifact"] and arm["identical"] for arm in report["arms"].values())
 
     def test_samples_with_a_wrap_do_not(self, tmp_path: Path) -> None:
         report = probe.rescore_artifact(self._artifact(tmp_path, wrap_samples()), LOOP_P)
-        assert report["identical"] is False
+        assert report["ok"] is False and report["arms"]["arm A"]["identical"] is False
         assert len(report["arms"]["arm A"]["wrapTimes"]["continue1to2"]) == 1
+
+    def test_known_bad_a_stored_verdict_the_strict_rescore_does_not_reproduce_fails(self, tmp_path: Path) -> None:
+        path = self._artifact(tmp_path, rows_around_boundary())
+        data = json.loads(path.read_text())
+        data["attach"]["continue1to2"]["verdict"] = not data["attach"]["continue1to2"]["verdict"]
+        path.write_text(json.dumps(data))
+        report = probe.rescore_artifact(path, LOOP_P)
+        assert report["arms"]["attach"]["identical"] is True
+        assert report["arms"]["attach"]["strictMatchesArtifact"] is False
+        assert report["ok"] is False
+
+    def test_an_arm_without_samples_fails_closed(self, tmp_path: Path) -> None:
+        path = self._artifact(tmp_path, rows_around_boundary())
+        data = json.loads(path.read_text())
+        del data["attach"]["samples"]
+        path.write_text(json.dumps(data))
+        assert probe.rescore_artifact(path, LOOP_P)["ok"] is False
+
+    @pytest.mark.parametrize("ok", [True, False])
+    def test_cli_exits_nonzero_unless_ok(self, ok: bool, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setattr(probe, "prepare_export", lambda *a: tmp_path)
+        monkeypatch.setattr(probe, "load_slides", lambda *a: [])
+        monkeypatch.setattr(probe, "ground_truth_plan", lambda *a, **k: None)
+        monkeypatch.setattr(probe, "ground_truth_facts", lambda *a, **k: {"asset": ASSET})
+        monkeypatch.setattr(probe, "movie_nodes", lambda *a: [])
+        monkeypatch.setattr(probe, "loop_period_of", lambda *a: LOOP_P)
+        monkeypatch.setattr(probe, "rescore_artifact", lambda *a: {"ok": ok})
+        args = probe.parse_args(["--rescore", str(tmp_path / "host.json")])
+        if ok:
+            probe.run_rescore_cli(args)
+        else:
+            with pytest.raises(SystemExit) as exc:
+                probe.run_rescore_cli(args)
+            assert exc.value.code == 1
 
 
 class _WrapTransport:
@@ -5526,7 +5574,7 @@ class TestRunForceWrap:
 
         def continuity(*args: Any, **kwargs: Any) -> dict[str, Any]:
             scored.update(kwargs)
-            return {"verdict": True, "wraps": 1}
+            return {"verdict": True, "wraps": 1, "elementId": 1}
 
         node = {"playerIndex": 2, "objectId": "98D59E27-X", "asset": ASSET, "startTime": 0, "endTime": FW_PERIOD, "rect": dict(SRC_RECT)}
         monkeypatch.setattr(probe, "LiveOutputHost", host)
@@ -5545,6 +5593,7 @@ class TestRunForceWrap:
         monkeypatch.setattr(probe, "check_no_leftover_chrome", lambda: "")
         monkeypatch.setattr(probe, "CLICK_DELAY_S", 0.0)
         monkeypatch.setattr(probe, "POST_ADVANCE_SETTLE_S", 0.0)
+        monkeypatch.setattr(probe, "forced_window", lambda *a: _fw_window())
 
         args = probe.parse_args(["--force-wrap", "3to4:375", "--fixture", str(tmp_path)])
         result = probe.run_force_wrap(args)
@@ -5587,3 +5636,45 @@ class TestForcedWrapPageErrors:
         assert probe.page_errors_in(notes, FW_SEEKED, window) == [PAGE_ERROR]
         assert probe.page_errors_in(None, FW_SEEKED, window) is None
         assert probe.page_errors_in(notes, None, window) is None
+
+
+class TestWrapScorerSparseGap:
+    def test_known_bad_a_sparse_mid_period_restart_is_not_a_wrap(self) -> None:
+        rows = [{"t": 0.0, "currentTime": 30.0}, {"t": 20000.0, "currentTime": 10.0}]
+        assert probe.unwrap_clock(rows, LOOP_P)[1] == []
+
+    def test_known_bad_a_sparse_30_to_10_restart_fails_the_scorer(self) -> None:
+        samples = _loop_fields(rows_around_boundary(start_time=29.7, n_after=20))
+        after = [row for row in samples if row["scene"] == 2.0]
+        for row in after:
+            row["t"] += 20000.0
+            for v in row["videos"]:
+                v["t"] = row["t"]
+                v["currentTime"] -= 20.0
+        result = probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, True, loop_period_s=LOOP_P, pad_s=30.0)
+        assert result["wraps"] == 0
+        assert result["verdict"] is False and result["maxDropS"] > 19.0
+
+    def test_a_step_at_the_stall_limit_still_wraps(self) -> None:
+        step = probe.MAX_STALL_S * 1000.0
+        rows = [{"t": 0.0, "currentTime": LOOP_P - 0.1}, {"t": step, "currentTime": 0.1}]
+        assert probe.unwrap_clock(rows, LOOP_P)[1] == [step]
+
+
+class TestForceWrapCliExit:
+    @pytest.mark.parametrize("status,code", [("pass", None), ("fail", 1), ("invalid", 1), ("error", 1)])
+    def test_exits_nonzero_unless_pass(self, status: str, code: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        def run(args: Any) -> dict[str, Any]:
+            if status == "error":
+                raise RuntimeError("boom")
+            return {"status": status, "forced": {"status": status}}
+
+        monkeypatch.setattr(probe, "run_force_wrap", run)
+        args = probe.parse_args(["--force-wrap", "1to2:0", "--artifact", str(tmp_path / "fw.json")])
+        if code is None:
+            probe.run_force_wrap_cli(args)
+        else:
+            with pytest.raises(SystemExit) as exc:
+                probe.run_force_wrap_cli(args)
+            assert exc.value.code == code
+        assert json.loads((tmp_path / "fw.json").read_text())["status"] == status
