@@ -7,6 +7,8 @@ import type { Job } from "../src/api";
 
 const REASON = "the IWA writer refused the deck before writing";
 const NOTICE = `Offline hides aborted: ${REASON}. Offline hides are switched off for the next run.`;
+// CLI recovery text a dashboard operator cannot act on; shown only with needsFreshOutput.
+const CLI_DETAIL = "slide 19 order unproven. Rerun with OBED_OFFLINE_HIDES=off.";
 const TIMEOUT_DETAIL = "Keynote did not finish; close wall_CG.key without saving, then re-apply into fresh output.";
 const TIMEOUT_NOTICE =
   `Offline hides aborted: hide fallback session did not finish. ${TIMEOUT_DETAIL} ` +
@@ -42,7 +44,12 @@ const aborted: Job = {
   result: {
     ...proposal,
     offlineHides: "off",
-    offlineHidesAborted: { reason: REASON, detail: "", needsFreshOutput: false, outputPath: "/tmp/out/wall_CG.key" },
+    offlineHidesAborted: {
+      reason: REASON,
+      detail: CLI_DETAIL,
+      needsFreshOutput: false,
+      outputPath: "/tmp/out/wall_CG.key",
+    },
   },
   createdAt: 0,
   updatedAt: 0,
@@ -130,6 +137,7 @@ describe("Resize tab after an offline-hides abort", () => {
     renderOpenRun();
     expect(await screen.findByText(NOTICE)).toBeInTheDocument();
     expect(screen.queryByText(aborted.error!)).not.toBeInTheDocument();
+    expect(screen.queryByText(/OBED_OFFLINE_HIDES/)).not.toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "Resize with these framings" })).toBeInTheDocument();
   });
 

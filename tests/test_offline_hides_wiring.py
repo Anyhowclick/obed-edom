@@ -639,35 +639,22 @@ def test_whole_deck_refusal_aborts_without_fallback(monkeypatch, deck):
     assert "Rerun with OBED_OFFLINE_HIDES=off" in str(err.value)
 
 
-@pytest.mark.parametrize("exc", [
-    RuntimeError("unexpected"),
-    KeyError("bug before writing"),
-    ValueError("slide numbers are 1-based"),
-])
-def test_any_other_writer_exception_aborts_without_fallback(monkeypatch, deck, exc):
-    """Codex r1 #7: only `OfflineWriteRefused` proves nothing was written; anything else
-    leaves the deck's state unknown -- not an `OfflineHidesAborted` (a rerun needs a fresh
-    --out, not just the flag)."""
-    def writer(d, h, **kw):
-        raise exc
-
-    _install_writer(monkeypatch, writer)
-    fb = _record_fallback(monkeypatch)
-    with pytest.raises(RuntimeError, match="fresh --out") as err:
-        offline_write.run_offline_hides(deck, "verify", {1, 3}, TRANSFORMS, WALL, lambda m: None)
-    assert not isinstance(err.value, offline_write.OfflineHidesAborted)
-    assert fb == []
-
-
-def test_hides_write_failed_propagates_distinct_with_fresh_out(monkeypatch, deck):
+def test_hides_write_failed_aborts_with_shared_message(monkeypatch, deck):
+    """A read-back or verify failure after the write is an `OfflineHidesAborted`, so the CLI
+    and the dashboard share one message and the dashboard turns hides off; the rerun copies
+    the source afresh, so no fresh-output flag is set."""
     def writer(d, h, **kw):
         raise _HidesWriteFailed("hides read-back slide 1: lists != expected")
 
     _install_writer(monkeypatch, writer)
     fb = _record_fallback(monkeypatch)
-    with pytest.raises(_HidesWriteFailed, match="lists != expected.*fresh --out"):
+    with pytest.raises(offline_write.OfflineHidesAborted) as err:
         offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, lambda m: None)
     assert fb == []
+    assert err.value.reason == "the offline delete failed after writing"
+    assert err.value.needs_fresh_output is False
+    assert "lists != expected" in err.value.detail
+    assert "Rerun with OBED_OFFLINE_HIDES=off" in err.value.detail
 
 
 def test_writer_import_failure_aborts_without_fallback(monkeypatch, deck):
@@ -993,3 +980,28 @@ def test_eligibility_uses_the_suppression_set_sent_to_jxa(monkeypatch, tmp_path)
     _run(tmp_path)
     assert seen["suppressed"] == {1, 7}
     assert sorted(seen["suppressed"]) == plan["suppressGeometry"]
+
+
+def test_off_mode_applied_line_keeps_its_original_position(monkeypatch, tmp_path):
+    """Default-off output is unchanged: `Applied …` prints before the pass-1 saved/closed
+    check and the WARNING remap lines, exactly as before offline hides existed."""
+    events = []
+    _wire(monkeypatch, hides_env=None, jxa={**JXA_OK, "applied": 5, "missReasons": ["slide 2 x"]},
+          events=events)
+    said = []
+
+    def log(m):
+        said.append(m)
+        if m.startswith("Applied "):
+            events.append("appliedLine")
+
+    source, template, dest = _touch_paths(tmp_path)
+    rk.remap_keynote(
+        source, dest, template=template,
+        wall_payload={"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]},
+        template_payload={"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]},
+        log=log,
+    )
+    assert said.count("Applied 5, missed 0.") == 1
+    assert said.index("Applied 5, missed 0.") < said.index("WARNING remap: slide 2 x")
+    assert events.index("appliedLine") < events.index("requireSavedClosed")

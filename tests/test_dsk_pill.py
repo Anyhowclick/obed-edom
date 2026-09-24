@@ -1153,3 +1153,30 @@ def test_verify_catches_a_correct_plus_conflicting_style_reference_pair(
     _strip_own_pill(deck, "Index/Slide-15156371.iwa", "15156371", "15156374")
     with pytest.raises(P.OfflineWriteRefused, match="non-conflicting"):
         P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")
+
+
+@needs_gold
+def test_temp_zip_failure_surfaces_as_assembly_refusal_with_decks_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_rewrite_members` types a temp-zip-phase failure as `OfflineWriteRefused` (nothing
+    written); the pill pass must still refuse the assembly and leave both decks as they were."""
+    import hashlib
+
+    from obed_edom import dsk_assemble as A
+
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    digest = hashlib.sha256(deck.read_bytes()).hexdigest()
+    monkeypatch.setattr(A, "_pill_specs", lambda *_a, **_k: _all_specs(GOLD_WIDTHS))
+
+    def boom(self, *_a, **_k):
+        raise OSError("disk full mid zip build")
+
+    monkeypatch.setattr(zipfile.ZipFile, "writestr", boom)
+    with pytest.raises(A.AssemblyRefusal, match="pill write refused: rewrite failed: temp rewrite failed"):
+        A._write_pill_pass(deck, None, None, [], lambda _m: None)
+    monkeypatch.undo()
+    assert hashlib.sha256(deck.read_bytes()).hexdigest() == digest
+    out = deck.with_name("gold-pill.key")
+    assert not out.exists() or hashlib.sha256(out.read_bytes()).hexdigest() == digest
+    assert not list(tmp_path.glob(".*.obedwrite.tmp"))

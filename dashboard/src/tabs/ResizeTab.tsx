@@ -83,7 +83,7 @@ export function ResizeTab() {
     hidesAborted &&
     [
       `Offline hides aborted: ${hidesAborted.reason}.`,
-      hidesAborted.detail,
+      hidesAborted.needsFreshOutput ? hidesAborted.detail : "",
       "Offline hides are switched off for the next run.",
       hidesAborted.needsFreshOutput
         ? `Close ${hidesAborted.outputPath?.split("/").pop() || "the output deck"} in Keynote, then restart the dashboard.`

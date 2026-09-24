@@ -1663,6 +1663,8 @@ def remap_keynote(
             "Keynote remap moved 0 objects; the copy was left at the wall canvas size."
             f" Planned {len(transforms)} transform(s), missed {missed}.{detail}"
         )
+    if hides_mode == "off":
+        say(f"Applied {applied}, missed {missed}.")
     for reason in jxa.get("missReasons") or []:
         say(f"WARNING remap: {reason}")
     layouts = jxa.get("layouts") or {}
@@ -1690,7 +1692,8 @@ def remap_keynote(
     )
     if hides_info is not None:
         applied += hides_info["deleted"]
-    say(f"Applied {applied}, missed {missed}.")
+    if hides_mode != "off":
+        say(f"Applied {applied}, missed {missed}.")
     _debug_snapshot_pass1(dest, say)
     text_reposition = offline_text_reposition_enabled(offline_mode=offline_mode, say=say)
     mask_crop = offline_maskcrop_enabled(offline_mode=offline_mode, say=say)

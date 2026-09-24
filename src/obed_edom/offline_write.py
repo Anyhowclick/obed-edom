@@ -169,9 +169,8 @@ def offline_hide_slides(
     no AppleScript address, or is a group twin the writer could not disambiguate after the
     save (`pre_deferral_twin_risk`), and unsuppressed slides with a non-hide transform
     that has no kindIndex (its pre-hide write cannot be keyed); those stay on the Keynote
-    delete. `suppressed` is the
-    plan's `suppressGeometry` set: those slides write no geometry before the hides, so the
-    twin check sees no planned writes for them."""
+    delete. `suppressed` is the plan's `suppressGeometry` set: those slides write no
+    geometry before the hides, so the twin check sees no planned writes for them."""
     from obed_edom.iwa_hides import pre_deferral_twin_risk  # noqa: PLC0415 (optional iwa extra)
     from obed_edom.remap_keynote import _AS_KIND_NAMES  # noqa: PLC0415 (avoid a module cycle)
 
@@ -234,9 +233,7 @@ _SAME_PATH_SH = (
 
 
 def _same_path_handler() -> str:
-    """`obedIsTarget(p, t)`: true iff `p`, canonicalised (symlinks, /tmp vs /private/tmp, a
-    package's trailing slash), equals `t` byte for byte. The comparison runs in the shell,
-    so AppleScript's case-insensitive `is` never decides identity."""
+    """`obedIsTarget(p, t)`: true iff canonicalised `p` equals `t` byte for byte (compared in the shell)."""
     same_sh = _as_escape(_SAME_PATH_SH)
     return "\n".join([
         "on obedIsTarget(p, t)",
@@ -252,11 +249,7 @@ def _same_path_handler() -> str:
 
 
 def _hide_fallback_script(dest: Path, bodies_by_slide: dict[int, str]) -> str:
-    """One session: open `dest`, bind the unique open document whose `file … as alias` path
-    is byte-identical to `os.path.realpath(dest)` after canonicalisation, delete, save,
-    close, and confirm by the same identity that no such document stays open. A binding
-    failure closes nothing; any failure after binding closes the bound document without
-    saving; only a full success returns `HIDE_FALLBACK_OK`."""
+    """One session: bind the unique document at realpath(`dest`), delete, save, close, confirm closed."""
     import os  # noqa: PLC0415
 
     target = _as_escape(os.path.realpath(dest))
@@ -340,9 +333,6 @@ def _debug_force_refuse() -> frozenset[int]:
     return frozenset(int(t) for t in raw.replace(",", " ").split() if t.strip().isdigit())
 
 
-_FRESH_OUT = "the deck may already be written — rerun from the source into a fresh --out"
-
-
 def _patch_hides(
     dest: Path,
     hides_by_slide: dict[int, list[dict[str, Any]]],
@@ -351,9 +341,8 @@ def _patch_hides(
     verify: bool,
     say: Callable[[str], None],
 ) -> Any:
-    """`patch_deck_hides`' result. `OfflineWriteRefused` (nothing written) raises
-    `OfflineHidesAborted`; `OfflineWriteCorrupted` and `HidesWriteFailed` propagate; any
-    other failure raises `RuntimeError`, since the deck's state is then unknown."""
+    """`patch_deck_hides`' result. `OfflineWriteRefused` and `HidesWriteFailed` raise
+    `OfflineHidesAborted`; `OfflineWriteCorrupted` propagates."""
     from obed_edom.iwa_hides import HidesWriteFailed, patch_deck_hides  # noqa: PLC0415 (optional iwa extra)
     from obed_edom.iwa_write import OfflineWriteCorrupted, OfflineWriteRefused  # noqa: PLC0415
 
@@ -383,11 +372,7 @@ def _patch_hides(
         )
         raise
     except HidesWriteFailed as exc:
-        raise HidesWriteFailed(f"{exc}; {_FRESH_OUT}") from exc
-    except Exception as exc:
-        raise RuntimeError(
-            f"offline hides failed ({type(exc).__name__}: {exc}); {_FRESH_OUT}."
-        ) from exc
+        raise OfflineHidesAborted("the offline delete failed after writing", str(exc)) from exc
 
 
 def run_offline_hides(
