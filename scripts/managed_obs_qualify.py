@@ -1086,10 +1086,10 @@ def sessions_for(arm: str, ctx: dict[str, Any], args: argparse.Namespace, armed:
                 run_session("goto2", failsafe_script(True), ctx),
                 run_session("off", failsafe_script(False), ctx, gl_replay="off"),
                 run_session("off-2", failsafe_script(False), ctx, gl_replay="off")]
-    allow = {} if ctx["fixture"] != FIXTURE else None
+    allow = {} if ctx["fixture"].resolve() != FIXTURE.resolve() else None
     if args.precheck:
         return [run_session("precheck", precheck_script(armed), ctx, allow=allow)]
-    looping = ctx["fixture"] != FIXTURE
+    looping = ctx["fixture"].resolve() != FIXTURE.resolve()
     return [run_session("soak", soak_script(args.soak_minutes, armed, looping), ctx, allow=allow),
             run_session("soak-off", soak_off_script, ctx, gl_replay="off", allow=None if allow is None else {})]
 
@@ -1167,7 +1167,7 @@ def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, args: ar
                      (".sentinel untouched", life["sentinel"]["unchanged"])):
         run["checks"].append({"check": name, "ok": bool(ok), "enforced": True})
 
-    looping = args.fixture != FIXTURE
+    looping = args.fixture.resolve() != FIXTURE.resolve()
     rings = [rect_tuple(armed["instanceRect"])] if arm == "g2" else None
     ring_exclude = ring_exclusions(armed) if arm == "g2" else []
     for session in run["sessions"]:
@@ -1228,7 +1228,7 @@ def arm_gates(arm: str, run: dict[str, Any], args: argparse.Namespace, armed: di
         return failsafe_gates(run, armed)
     if args.precheck:
         return precheck_gates(run, args.fixture)
-    return soak_gates(run, armed, args.fixture != FIXTURE)
+    return soak_gates(run, armed, args.fixture.resolve() != FIXTURE.resolve())
 
 
 def print_run(run: dict[str, Any], dest: Path) -> None:
@@ -1350,7 +1350,7 @@ def main(argv: list[str] | None = None) -> int:
         args.kb_splice = apply_kb(args.kb)
     armed = None
     if args.arm not in ("2x", "positive", "both"):
-        allow: dict[str, Any] | None = {} if args.fixture != FIXTURE else None
+        allow: dict[str, Any] | None = {} if args.fixture.resolve() != FIXTURE.resolve() else None
         armed = fixture_facts(args.fixture, allow)
         print("ARMED", json.dumps({k: armed[k] for k in ("instanceRect", "movieSlot", "overrideSlots", "assetKeys")}), flush=True)
         if allow is not None:
