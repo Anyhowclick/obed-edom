@@ -3478,7 +3478,7 @@ class TestOverallStatusG:
 
 
 # --------------------------------------------------------------------------
-# GL replay G5 (`.agents/plans/keynote_live_gl_replay_g5g6.plan.md` §3): the
+# GL replay G5 (`git show ed7ff63c:.agents/plans/keynote_live_gl_replay_g5g6.plan.md` §3): the
 # probe's `--gl-replay auto` arms, the armed 1->2 verdict, the Vgl pass, the
 # hand-back capture, occluded cells and the forced-fail splice. Flag off must
 # change nothing: every test below that touches an off path asserts it.
@@ -4613,7 +4613,7 @@ class TestForcedFixtureValidationIsCaught:
 
 
 # --------------------------------------------------------------------------
-# GL replay (c) N3 (`.agents/plans/keynote_live_gl_replay_c.plan.md` §2 "Filter
+# GL replay (c) N3 (`git show ed7ff63c:.agents/plans/keynote_live_gl_replay_c.plan.md` §2 "Filter
 # footprint", §5, §7, §8): V vs Vgl over the movie slot's ring while LIVE, i.e.
 # toScreen(S) - dilate(toScreen(I), 2) - dilate(override and green slots, 2),
 # rasterised with the hand-back parity's floor/ceil rule.
