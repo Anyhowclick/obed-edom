@@ -2,7 +2,7 @@
 name: Pass-1 hides offline — delete hide targets in the IWA writer after the pass-1 save
 overview: >-
   2026-09-23, first-pass plan (Opus, extra-high), from handover
-  `.agents/handovers/pass1-hides-offline-2026-09-23.md` and `pass1_profile.plan.md` todo
+  the 2026-09-23 handover (in git history, pruned after #220) and `pass1_profile.plan.md` todo
   `h-hides-offline`. pass-1 `deleteHides` costs 82–118 s for 947 one-AppleEvent deletes
   (≈122 ms each). Keynote-side batching is DROPPED (owner). Lever: pass 1 skips the delete on
   eligible slides; right after the pass-1 save a new surgical writer deletes each hide's owned
@@ -510,7 +510,7 @@ Integration order: A, B and C land first, then D, then `e-offline-dryrun`, then 
 Review artifacts: raw reviewer rounds (Codex/Opus) stay out of git, in the session scratchpad or git-ignored
 `output/pass1-hides-offline-review/`, while the loop runs, so later rounds can classify findings and check that
 earlier fixes closed. Each round adds one line to §Review log. At merge the raw rounds are deleted. The gate record
-(`f-live-gate` README) and the measurement write-ups stay.
+(`f-live-gate` README) and the measurement write-ups stay. The raw rounds were deleted after #220 merged; this review log is the record.
 
 ## Must not change
 
@@ -663,3 +663,4 @@ disjoint.
 - LIVE GATE (2026-09-24): all measured items PASS. Record: `.agents/reviews/pass1-hides-offline-2026-09-24/README.md`. Whole run −63 s / −88 s, runJxa −84 s / −103 s, 0 refused, O1 identical, O3 0 slides (after a checker fix for per-run churn, 2f2eea88), forced AppleScript fallback worked live. Pending owner: MM playback and the no-repair-prompt open.
 - Owner checks (2026-09-24): MM playback OK, no repair prompt. **Live gate GREEN.** `g-flip-docs` next (owner decision 2: default on).
 - g-flip-docs (2026-09-24): `OBED_OFFLINE_HIDES` defaults to on (an unknown value forces off, like maskcrop); SKILL.md §Offline hide delete added; `pass1_profile` h-hides-offline closed. The README documents no remap offline flags, so it was left unchanged.
+- 2026-09-24: #220 merged (ffe2ff1a). Pruned both hides-offline handovers and the raw review rounds; the gate record and this plan's open follow-ups stay.
