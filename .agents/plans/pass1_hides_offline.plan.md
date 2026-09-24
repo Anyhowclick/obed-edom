@@ -54,8 +54,10 @@ todos:
     status: pending
   - id: f-live-gate
     content: >-
-      OWNER-GATED (Keynote shared with AK / GL-replay: owner go or peer all-clear first). Two
-      interleaved A/B pairs, pass/fail per §Gate. Record in
+      OWNER-GATED (Keynote shared with AK / GL-replay: owner go or peer all-clear first). Pre-step
+      (Opus O10 #6): one B subset run in `verify` mode with `OBED_DEBUG_PASS1_SNAPSHOT`, then run
+      `patch_deck_hides` offline on its `.pre-hides.key` (the first Keynote-saved post-pass-1 deck), and
+      stop on any refusal. Then two interleaved A/B pairs, pass/fail per §Gate. Record in
       `.agents/reviews/pass1-hides-offline-<date>/README.md`.
     status: pending
   - id: g-flip-docs
@@ -383,6 +385,8 @@ diagnostic "Map object after apply" line (py:1689) can change there. It is not p
 - **O4: live A/B.**
   - A = detached `origin/main` worktree sharing this worktree's `.cache`; B = branch with
     `OBED_OFFLINE_HIDES`. Order: pair 1 A,B (B in `verify`), pair 2 B,A (B in `on`, the timing pair).
+  - Pre-step, before pair 1: a B subset run in `verify` mode with `OBED_DEBUG_PASS1_SNAPSHOT`; then an offline
+    `patch_deck_hides` on its `.pre-hides.key` must give 0 refusals, apart from the pre-excluded slides.
   - Command per handover (`--slides 1-129,135-143,145-155 --no-export`, one shared `--out`), with
     `OBED_DEBUG_PASS1_SNAPSHOT` set. Record `uptime` before each run.
   - Plus one short subset run each of A and B, B with `OBED_DEBUG_HIDES_REFUSE=<one eligible slide>`:
@@ -394,6 +398,7 @@ diagnostic "Map object after apply" line (py:1689) can change there. It is not p
 ## Gate
 
 PASS iff all of the following hold:
+- The pre-step (§O4): an offline patch of the Keynote-saved `.pre-hides.key` refuses nothing.
 - O1 holds in all runs.
 - The O2 null is 0 slides and the O2 positive is exactly the eligible set.
 - O3 has 0 slide diffs, non-slide diffs ⊆ the list, and the final-deck compare ⊆ its null.
@@ -629,3 +634,4 @@ disjoint.
 - S9 (2026-09-24, Sol H, round 9 on 5f1f36a0): BLOCK, 4 MAJOR. S8 #1, #2 and #4 CLOSED as moot by decision 6; S8 #5 and the decision-6 lock CLOSED. Open: (1) shared-slide detection counts only targeted aliases, so a one-target/two-alias archive is patched; (2) a rejected concurrent Apply still mutates a queued job's destination (general, not recovery-specific); (4) the checker recognises PackageMetadata only as objects[0]. (3) "deletion guard regressed" is REFUTED by design: decision 6 removed the closure-based deletion refusal. The in-memory lock protects the deck regardless of job records, and Apply's 409 carries the restart message.
 - S9 fix round (2026-09-24): #1, #2 and #4 fixed (#3 refuted by decision 6). Suites: 6863 passed; test:ui 246 (one unidentified failure at load ~35, not reproduced in 4 reruns). FRC has no shared slide archives. Owner: round 10 reviews use Opus first.
 - O10 (2026-09-24, Opus HIGH, round 10 on 042bc6b4, owner: Opus first): PASS with minor fixes, no BLOCKER or MAJOR. S9 #1, #2, #4 CLOSED; #3 refuted by design. 8 MINOR: HidesWriteFailed not routed to OfflineHidesAborted on the dashboard (MAJOR once default-on); CLI prints a traceback instead of `detail`; unreachable `except Exception` branch plus its stub-only test; the `Applied` line moved even when hides are off; the notice shows CLI-only advice; gate process (run B's subset in verify mode and patch its `.pre-hides.key` offline before a full pair); `_rewrite_members` phase typing changes 11 callers with no pinning test; positional tuples and long private docstrings. Fix round 11 (2026-09-24): all MINORs fixed; suites 6864 passed, test:ui 246. #6 is folded into `f-live-gate`: before pair 1, run the B subset in `verify` mode with `OBED_DEBUG_PASS1_SNAPSHOT` and patch its `.pre-hides.key` offline. It is the first measurement on a Keynote-saved post-pass-1 deck.
+- S10 (2026-09-24, Sol H, round 10b on 3d02bd99, after Opus O10): PASS, no BLOCKER or MAJOR. All S9 and O10 items CLOSED except O10 #6, which was only written into the review log; it is now in `f-live-gate`, §O4 and §Gate. Offline review is complete; the live gate is next.
