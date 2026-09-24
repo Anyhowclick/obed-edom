@@ -5,9 +5,13 @@ Each deck is decoded once. Archives are canonicalised with ``identifier``,
 ``randomNumberSeed``, ``saveToken`` and UUIDs dropped. A body reference and each header
 ``objectReferences`` entry (direct or in ``fieldInfos``) becomes the target's content label
 (pbtype + ref-free body hash, ``<dangling>`` when the target is missing); a data reference
-becomes the data's digest. A slide archive is labelled by position instead (slide_order, or
-its member for a template slide), so a slide edit does not cascade into every reference to
-the slide; the slide's own content is still compared in its slide scope. Slides (by
+becomes the data's digest. A slide archive is labelled by position instead (slide_order; a
+template slide by its unique name, else its member), so a slide edit does not cascade into
+every reference to the slide; the slide's own content is still compared in its slide scope.
+UUID-named thumbnails (``st-``/``mt-`` + UUID) in ``datas`` and ``Data/`` compare by content
+multiset under ``st-<uuid>``/``mt-<uuid>``, since each import renames them.
+``KN.SlideArchive.builds`` compares as a multiset: Keynote reorders it between identical runs,
+and the reveal order lives in ``buildChunks``. Slides (by
 ``slide_order``) and the other ``.iwa`` members compare as multisets of archives.
 ``Index/Metadata.iwa`` compares per component of ``components`` and ``versionedComponents``
 (by locator) in label space, the other ``TSP.PackageMetadata`` fields except the churn in
@@ -52,6 +56,9 @@ _DROP_KEYS = frozenset({"identifier", "randomNumberSeed", "saveToken"})
 _REF_KEYS = frozenset({"identifier", "deprecatedType", "deprecatedIsExternal"})
 _DATA_MEMBER = re.compile(r"^(?P<base>Data/.+)-\d+(?P<ext>\.[^./]+)$")
 _LOCATOR_SUFFIX = re.compile(r"-\d+$")
+_UUID_THUMBNAIL = re.compile(
+    r"(?<![^/])(?P<prefix>st|mt)-[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}(?P<ext>\.[^./]+)$"
+)
 _FILE_NAME_ID = re.compile(r"-\d+(?=\.[^.]+$)")
 METADATA_CHURN = frozenset({"saveToken", "revision", "lastObjectIdentifier"})
 _METADATA_PROJECTED = frozenset({"components", "versionedComponents", "datas"})
@@ -119,6 +126,11 @@ def normalise_zip_name(raw: str) -> str:
     return f"{m.group('base')}{m.group('ext')}" if m else name
 
 
+def thumbnail_name(name: str) -> str:
+    """``st-``/``mt-`` + UUID thumbnails get a fresh UUID per import; compare them by content only."""
+    return _UUID_THUMBNAIL.sub(r"\g<prefix>-<uuid>\g<ext>", name)
+
+
 def load_deck(path: str | Path) -> Deck:
     from keynote_parser.codec import IWAFile  # noqa: PLC0415 (optional iwa extra)
 
@@ -130,7 +142,7 @@ def load_deck(path: str | Path) -> Deck:
             name = info.filename
             if not name.endswith(".iwa"):
                 if not info.is_dir():
-                    deck.zip_entries.append((normalise_zip_name(name), info.CRC, info.file_size))
+                    deck.zip_entries.append((thumbnail_name(normalise_zip_name(name)), info.CRC, info.file_size))
                 continue
             try:
                 decoded = IWAFile.from_buffer(zf.read(name), name).to_dict()
@@ -178,14 +190,15 @@ def load_deck(path: str | Path) -> Deck:
 
 def _slide_labels(deck: Deck) -> dict[str, str]:
     objects = {i: arch.objects[0] for i, arch in deck.archives.items() if arch.objects}
-    out = {
-        ident: f"{arch.pbtype}@{arch.member}"
-        for ident, arch in deck.archives.items()
-        if arch.pbtype == SLIDE
+    shown = {sid: n for n, (sid, _skipped) in enumerate(slide_order(objects), start=1)}
+    templates = {
+        ident: arch for ident, arch in deck.archives.items() if arch.pbtype == SLIDE and ident not in shown
     }
-    for n, (sid, _skipped) in enumerate(slide_order(objects), start=1):
-        if sid in out:
-            out[sid] = f"{SLIDE}@slide:{n}"
+    names = Counter(arch.objects[0].get("name") for arch in templates.values())
+    out = {sid: f"{SLIDE}@slide:{n}" for sid, n in shown.items() if sid in deck.archives}
+    for ident, arch in templates.items():
+        name = arch.objects[0].get("name")
+        out[ident] = f"{SLIDE}@template:{name}" if name and names[name] == 1 else f"{SLIDE}@{arch.member}"
     return out
 
 
@@ -261,6 +274,8 @@ def _canon_archive(
         out.update(bodies[0])
     else:
         out["objects"] = bodies
+    if arch.pbtype == SLIDE and isinstance(out.get("builds"), list):
+        out["builds"] = sorted(out["builds"])
     if header and labels is not None:
         infos = arch.header.get("messageInfos") or []
         out["@objectReferences"] = sorted(
@@ -399,8 +414,9 @@ def _package_fields(deck: Deck) -> dict[str, Any]:
 def _data_entry(entry: dict) -> tuple[Any, Any, str]:
     rest = {k: v for k, v in entry.items() if k not in ("identifier", "preferredFileName", "digest")}
     if "fileName" in rest:
-        rest["fileName"] = _FILE_NAME_ID.sub("", str(rest["fileName"]))
-    return entry.get("preferredFileName"), entry.get("digest"), json.dumps(rest, sort_keys=True)
+        rest["fileName"] = thumbnail_name(_FILE_NAME_ID.sub("", str(rest["fileName"])))
+    name = entry.get("preferredFileName")
+    return thumbnail_name(name) if name else name, entry.get("digest"), json.dumps(rest, sort_keys=True)
 
 
 def compare(a: Deck, b: Deck, *, refs: bool = True) -> list[dict]:

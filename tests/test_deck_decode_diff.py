@@ -840,3 +840,115 @@ def test_package_metadata_outside_metadata_member_rejected(tmp_path):
 def test_missing_package_metadata_rejected(tmp_path):
     with pytest.raises(ddd.MetadataPlacement, match="no TSP.PackageMetadata"):
         ddd.load_deck(_variant(tmp_path, "nometa", lambda spec: _drop_archive(spec, "Index/Metadata.iwa", 5)))
+
+
+# --------------------------------------------------------------------------
+# Per-run Keynote noise: template slide ids/members, and builds list order.
+# --------------------------------------------------------------------------
+def _with_templates(spec, *, title_id=7100, photo_id=7200, assign="Title"):
+    ids = {"Title": title_id, "Photo": photo_id}
+    for name, ident in ids.items():
+        spec["members"][f"Index/TemplateSlide-{ident}.iwa"] = [_arch(ident, "KN.SlideArchive", {"name": name})]
+    _obj(spec, "Index/Slide-102.iwa", 102)["templateSlide"] = {"identifier": ids[assign]}
+    _set_header_refs(spec, "Index/Slide-102.iwa", 102, [400, 401, ids[assign]])
+
+
+def test_null_template_slide_renumbered_per_run(tmp_path):
+    one = _variant(tmp_path, "t1", _with_templates)
+    two = _variant(tmp_path, "t2", lambda spec: _with_templates(spec, title_id=7300, photo_id=7400))
+    report = ddd.run(one, two)
+    assert report["differing_slides"] == []
+    assert sorted({d["key"] for d in report["diffs"]}) == [
+        "member:Index/TemplateSlide-7100.iwa", "member:Index/TemplateSlide-7200.iwa",
+        "member:Index/TemplateSlide-7300.iwa", "member:Index/TemplateSlide-7400.iwa",
+    ]
+    assert ddd.load_deck(one).labels["7100"] == "KN.SlideArchive@template:Title"
+
+
+def test_changed_template_assignment_reported(tmp_path):
+    one = _variant(tmp_path, "t1", _with_templates)
+    two = _variant(tmp_path, "t2", lambda spec: _with_templates(spec, assign="Photo"))
+    report = ddd.run(one, two)
+    assert report["differing_slides"] == [2]
+    [entry] = [d for d in report["diffs"] if d["key"] == "slide:2:KN.SlideArchive.templateSlide"]
+    assert (entry["a"], entry["b"]) == ("KN.SlideArchive@template:Title", "KN.SlideArchive@template:Photo")
+    assert "slide:2:KN.SlideArchive.@objectReferences" in _keys(report)
+
+
+def test_duplicate_template_names_fall_back_to_member(tmp_path):
+    def edit(spec):
+        _with_templates(spec)
+        _obj(spec, "Index/TemplateSlide-7200.iwa", 7200)["name"] = "Title"
+
+    deck = ddd.load_deck(_variant(tmp_path, "dupname", edit))
+    assert deck.labels["7100"] == "KN.SlideArchive@Index/TemplateSlide-7100.iwa"
+    assert deck.labels["7200"] == "KN.SlideArchive@Index/TemplateSlide-7200.iwa"
+
+
+def test_null_builds_list_order(base, tmp_path):
+    def edit(spec):
+        slide = _obj(spec, "Index/Slide-101.iwa", 101)
+        slide["builds"] = list(reversed(slide["builds"]))
+
+    assert ddd.run(base, _variant(tmp_path, "reordered", edit))["diffs"] == []
+
+
+def test_changed_build_set_reported(base, tmp_path):
+    def edit(spec):
+        _obj(spec, "Index/Slide-101.iwa", 101)["builds"] = [{"identifier": 500}, {"identifier": 500}]
+
+    report = ddd.run(base, _variant(tmp_path, "buildset", edit))
+    assert "slide:1:KN.SlideArchive.builds" in _keys(report)
+    assert report["differing_slides"] == [1]
+
+
+def test_build_chunks_order_still_compared(base, tmp_path):
+    def with_chunks(order):
+        def edit(spec):
+            _obj(spec, "Index/Slide-101.iwa", 101)["buildChunks"] = [{"identifier": i} for i in order]
+        return edit
+
+    one = _variant(tmp_path, "c1", with_chunks([300, 301]))
+    two = _variant(tmp_path, "c2", with_chunks([301, 300]))
+    assert _keys(ddd.run(one, two)) == ["slide:1:KN.SlideArchive.buildChunks"]
+
+
+_UUID_A = "0F6B17CB-9892-4628-AAA6-FEBF55D9BB66"
+_UUID_B = "1669E61E-6A60-4F19-8540-26FEEDE3C92E"
+
+
+def _with_thumbnail(uuid, *, content=b"thumb", digest=b"thumb-digest"):
+    def edit(spec):
+        name = f"st-{uuid}.jpg"
+        _metadata(spec)["datas"].append({
+            "identifier": 7003, "digest": base64.b64encode(digest).decode(),
+            "preferredFileName": name, "fileName": f"st-{uuid}-7003.jpg",
+        })
+        spec["files"][f"Data/st-{uuid}-7003.jpg"] = content
+    return edit
+
+
+def test_thumbnail_name():
+    assert ddd.thumbnail_name(f"st-{_UUID_A}.jpg") == "st-<uuid>.jpg"
+    assert ddd.thumbnail_name(f"Data/mt-{_UUID_A.lower()}.png") == "Data/mt-<uuid>.png"
+    assert ddd.thumbnail_name(f"photo-st-{_UUID_A}.jpg") == f"photo-st-{_UUID_A}.jpg"
+    assert ddd.thumbnail_name("st-notauuid.jpg") == "st-notauuid.jpg"
+
+
+def test_null_thumbnail_renamed_per_import(tmp_path):
+    one = _variant(tmp_path, "th1", _with_thumbnail(_UUID_A))
+    two = _variant(tmp_path, "th2", _with_thumbnail(_UUID_B))
+    assert ddd.run(one, two)["diffs"] == []
+
+
+def test_changed_thumbnail_content_reported(tmp_path):
+    one = _variant(tmp_path, "th1", _with_thumbnail(_UUID_A))
+    two = _variant(tmp_path, "th2", _with_thumbnail(_UUID_B, content=b"other", digest=b"other-digest"))
+    assert _keys(ddd.run(one, two)) == ["datas:st-<uuid>.jpg", "zip:Data/st-<uuid>.jpg"]
+
+
+def test_non_thumbnail_names_still_compared_by_name(base, tmp_path):
+    def edit(spec):
+        _metadata(spec)["datas"][1]["preferredFileName"] = "renamed.png"
+
+    assert _keys(ddd.run(base, _variant(tmp_path, "renamed", edit))) == ["datas:orphan.png", "datas:renamed.png"]
