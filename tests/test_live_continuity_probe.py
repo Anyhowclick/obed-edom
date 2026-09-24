@@ -17,6 +17,7 @@ import argparse
 import base64
 import importlib.util
 import json
+import math
 import shutil
 import subprocess
 import sys
@@ -3477,7 +3478,7 @@ class TestOverallStatusG:
 
 
 # --------------------------------------------------------------------------
-# GL replay G5 (`.agents/plans/keynote_live_gl_replay_g5g6.plan.md` §3): the
+# GL replay G5 (`git show ed7ff63c:.agents/plans/keynote_live_gl_replay_g5g6.plan.md` §3): the
 # probe's `--gl-replay auto` arms, the armed 1->2 verdict, the Vgl pass, the
 # hand-back capture, occluded cells and the forced-fail splice. Flag off must
 # change nothing: every test below that touches an off path asserts it.
@@ -4142,6 +4143,7 @@ def _auto_result() -> dict[str, Any]:
         result["visible"][name]["continuity"]["glReplay"] = {"mode": "off"}
     result["visible"]["Vgl"] = _vgl_pass()
     result["handback"] = {"verdict": True, "reason": None}
+    result["liveRing"] = {"verdict": True, "reason": None}
     return result
 
 
@@ -4214,6 +4216,19 @@ class TestAutoOverallStatus:
         assert probe.overall_status(result)[0] == "inconclusive"
         del result["handback"]
         assert probe.overall_status(result)[0] == "inconclusive"
+
+    def test_a_red_live_ring_fails_and_an_unknown_one_is_inconclusive(self) -> None:
+        """Plan (c) N3: `liveRing` False fails the run; None or missing is inconclusive."""
+        result = _auto_result()
+        result["liveRing"] = {"verdict": False, "reason": "7 px differ in the live ring"}
+        status, reasons = probe.overall_status(result)
+        assert status == "fail" and "live ring failed: 7 px differ in the live ring" in reasons
+        result["liveRing"] = {"verdict": None, "reason": "a live capture is missing"}
+        status, reasons = probe.overall_status(result)
+        assert status == "inconclusive" and "live ring inconclusive: a live capture is missing" in reasons
+        del result["liveRing"]
+        status, reasons = probe.overall_status(result)
+        assert status == "inconclusive" and "live ring inconclusive: not captured" in reasons
 
     def test_an_off_result_never_consults_gl_modes(self) -> None:
         result = TestOverallStatusTruthTable()._base_result()
@@ -4595,3 +4610,305 @@ class TestForcedFixtureValidationIsCaught:
         saved = json.loads(artifact.read_text())
         assert saved["status"] == "forced-fail" and "stale" not in saved
         assert "unavailable" in saved["error"]
+
+
+# --------------------------------------------------------------------------
+# GL replay (c) N3 (`git show ed7ff63c:.agents/plans/keynote_live_gl_replay_c.plan.md` §2 "Filter
+# footprint", §5, §7, §8): V vs Vgl over the movie slot's ring while LIVE, i.e.
+# toScreen(S) - dilate(toScreen(I), 2) - dilate(override and green slots, 2),
+# rasterised with the hand-back parity's floor/ceil rule.
+# --------------------------------------------------------------------------
+
+# The fixture's real geometry (plan F3): slot 3 and the DOM instance rect.
+C_SLOT = {"x": 105.123, "y": 790.847, "w": 960.0, "h": 276.0}
+C_INSTANCE = {"x": 109.35, "y": 795.04, "w": 951.54, "h": 267.62}
+C_ARMED = {
+    "atScene": 2, "originalOrdinal": 2, "movieSlot": 1, "overrideSlots": [], "instanceRect": dict(C_INSTANCE),
+    "slotRects": [{"x": 0.0, "y": 0.0, "w": 1920.0, "h": 1080.0}, dict(C_SLOT)],
+}
+STAGE_2560 = {"s": 4 / 3, "sy": 4 / 3, "ox": 0.0, "oy": 0.0, "offsetWidth": 2560.0, "offsetHeight": 1440.0}
+STAGE_1920 = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0}
+FRAME_BG, FRAME_VIDEO = 50, 200
+
+
+def _live_frames(stage: dict[str, Any], shape: tuple[int, int], instance: dict[str, float]) -> tuple[np.ndarray, np.ndarray]:
+    """V and Vgl identical everywhere, both showing video exactly over toScreen(I)."""
+    v = np.full((*shape, 3), FRAME_BG, dtype=np.uint8)
+    screen = probe.to_screen_rect(instance, stage)
+    v[round(screen["y"]):round(screen["y"] + screen["h"]), round(screen["x"]):round(screen["x"] + screen["w"])] = FRAME_VIDEO
+    return v, v.copy()
+
+
+def _sink(frame: Any, stage: Any) -> dict[str, Any]:
+    return {"live": {"stageMap": None if stage is None else dict(stage), "frame": frame, "reason": None}}
+
+
+def _ring(v: np.ndarray, g: np.ndarray, armed: dict[str, Any], stage: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    return probe.score_live_ring(_sink(v, stage), _sink(g, stage), armed, **kwargs)
+
+
+class TestLiveRingScoring:
+    def test_identical_frames_are_green(self) -> None:
+        v, g = _live_frames(STAGE_2560, (1440, 2560), C_INSTANCE)
+        scored = _ring(v, g, C_ARMED, STAGE_2560)
+        assert scored["verdict"] is True, scored
+        assert scored["maxRing"] == 0 and scored["nRing"] > 0 and scored["dilatePx"] == probe.HANDBACK_DILATE_PX == 2
+
+    def test_the_stretched_video_filling_the_ring_is_red(self) -> None:
+        """The old-bytes known-bad: the whole texture (slot S) is video in Vgl."""
+        v, g = _live_frames(STAGE_2560, (1440, 2560), C_INSTANCE)
+        screen = probe.to_screen_rect(C_SLOT, STAGE_2560)
+        g[round(screen["y"]):round(screen["y"] + screen["h"]), round(screen["x"]):round(screen["x"] + screen["w"])] = FRAME_VIDEO
+        scored = _ring(v, g, C_ARMED, STAGE_2560)
+        assert scored["verdict"] is False
+        assert scored["maxRing"] == FRAME_VIDEO - FRAME_BG and scored["nChangedRing"] > 1000
+
+    @pytest.mark.parametrize("dilate_px,verdict", [(1, False), (2, True)])
+    def test_a_one_pixel_edge_bleed_at_2560_needs_the_two_pixel_dilation(self, dilate_px: int, verdict: bool) -> None:
+        """Plan §2 "Filter footprint" / §13 B1: LINEAR texture filtering plus the
+        bilinear CSS scale bleed video one canvas pixel past each inner edge,
+        which at 2560 reaches screen row 1058 (top) and column 1416 (right) --
+        outside a 1 px dilation of toScreen(I), inside a 2 px one. With 1 px, (c)
+        itself would read RED."""
+        v, g = _live_frames(STAGE_2560, (1440, 2560), C_INSTANCE)
+        screen = probe.to_screen_rect(C_INSTANCE, STAGE_2560)
+        top, right = math.floor(screen["y"]) - 2, math.ceil(screen["x"] + screen["w"]) + 1
+        assert (top, right) == (1058, 1416)
+        y0, y1 = math.floor(screen["y"]), math.ceil(screen["y"] + screen["h"])
+        x0, x1 = math.floor(screen["x"]), math.ceil(screen["x"] + screen["w"])
+        g[top, x0:x1] = FRAME_BG + 30
+        g[y0:y1, right] = FRAME_BG + 30
+        scored = _ring(v, g, C_ARMED, STAGE_2560, dilate_px=dilate_px)
+        assert scored["verdict"] is verdict, scored
+        if not verdict:
+            assert scored["maxRing"] == 30
+
+    def test_the_two_pixel_dilation_still_sees_the_third_pixel(self) -> None:
+        v, g = _live_frames(STAGE_2560, (1440, 2560), C_INSTANCE)
+        screen = probe.to_screen_rect(C_INSTANCE, STAGE_2560)
+        g[math.floor(screen["y"]) - 3, 600] = FRAME_BG + 1
+        scored = _ring(v, g, C_ARMED, STAGE_2560)
+        assert scored["verdict"] is False and scored["nChangedRing"] == 1
+
+    def test_pixels_outside_the_slot_are_not_the_ring(self) -> None:
+        v, g = _live_frames(STAGE_2560, (1440, 2560), C_INSTANCE)
+        slot = probe.to_screen_rect(C_SLOT, STAGE_2560)
+        g[math.floor(slot["y"]) - 1, 600] = 0
+        g[10, 10] = 0
+        assert _ring(v, g, C_ARMED, STAGE_2560)["verdict"] is True
+
+    def test_the_override_and_green_slots_are_masked(self) -> None:
+        """Synthetic ARMED: slot 2 is both the override and the green slot and
+        overlaps the movie slot's right ring edge (x 1063-1064) above y 987."""
+        assert ARMED["overrideSlots"] == [2] and probe.green_slot(ARMED["slotRects"], ARMED["movieSlot"]) == 2
+        v, g = _live_frames(STAGE_1920, (1080, 1920), BIG_INSTANCE)
+        g[800, 1063] = 0
+        assert _ring(v, g, ARMED, STAGE_1920)["verdict"] is True
+        g[1000, 1063] = 0
+        scored = _ring(v, g, ARMED, STAGE_1920)
+        assert scored["verdict"] is False and scored["nChangedRing"] == 1
+
+    def test_the_ring_follows_the_stage_map(self) -> None:
+        """At s=2 with an offset, a diff on the scaled ring is RED, and a diff at the
+        unscaled ring's position (now inside the dilated instance) is ignored."""
+        stage = {"s": 2.0, "sy": 2.0, "ox": -100.0, "oy": -1000.0, "offsetWidth": 3840.0, "offsetHeight": 2160.0}
+        v, g = _live_frames(stage, (1200, 2100), BIG_INSTANCE)
+        g[791, 500] = 0
+        assert _ring(v, g, ARMED, stage)["verdict"] is True
+        g[583, 500] = 0
+        scored = _ring(v, g, ARMED, stage)
+        assert scored["verdict"] is False and scored["nChangedRing"] == 1
+
+    def test_the_mask_matches_the_hand_back_rasterisation(self) -> None:
+        """Every dilated rect is rasterised floor/ceil, as `handback_parity` does."""
+        mask = probe.live_ring_mask(C_ARMED, [STAGE_2560], (1440, 2560))
+        slot = probe.to_screen_rect(C_SLOT, STAGE_2560)
+        inst = probe.to_screen_rect(C_INSTANCE, STAGE_2560)
+        rows = np.flatnonzero(mask.any(axis=1))
+        cols = np.flatnonzero(mask.any(axis=0))
+        assert rows[0] == math.floor(slot["y"]) and rows[-1] == math.ceil(slot["y"] + slot["h"]) - 1
+        assert cols[0] == math.floor(slot["x"]) and cols[-1] == math.ceil(slot["x"] + slot["w"]) - 1
+        hole = ~mask[math.floor(slot["y"]):math.ceil(slot["y"] + slot["h"]), math.floor(slot["x"]):math.ceil(slot["x"] + slot["w"])]
+        hole_rows, hole_cols = np.flatnonzero(hole.any(axis=1)), np.flatnonzero(hole.any(axis=0))
+        assert hole_rows[0] + math.floor(slot["y"]) == math.floor(inst["y"] - 2)
+        assert hole_cols[-1] + math.floor(slot["x"]) == math.ceil(inst["x"] + inst["w"] + 2) - 1
+
+    @pytest.mark.parametrize("which", ["v", "g"])
+    @pytest.mark.parametrize("sink", [
+        None, {}, {"live": None}, {"live": {"stageMap": None, "frame": None, "reason": "live capture failed: boom"}},
+    ])
+    def test_a_missing_or_failed_capture_is_inconclusive(self, which: str, sink: Any) -> None:
+        v, g = _live_frames(STAGE_1920, (1080, 1920), BIG_INSTANCE)
+        sinks = [_sink(v, STAGE_1920), _sink(g, STAGE_1920)]
+        sinks[0 if which == "v" else 1] = sink
+        scored = probe.score_live_ring(*sinks, ARMED)
+        assert scored["verdict"] is None
+        if isinstance(sink, dict) and sink.get("live"):
+            assert scored["reason"] == "live capture failed: boom"
+
+    @pytest.mark.parametrize("stage", [None, {"s": 1.0, "sy": 1.2, "ox": 0.0, "oy": 0.0, "offsetWidth": 1.0, "offsetHeight": 1.0}])
+    def test_an_untrustworthy_stage_map_is_inconclusive(self, stage: Any) -> None:
+        v, g = _live_frames(STAGE_1920, (1080, 1920), BIG_INSTANCE)
+        assert probe.score_live_ring(_sink(v, STAGE_1920), _sink(g, stage), ARMED)["verdict"] is None
+
+    def test_mismatched_shapes_and_an_empty_ring_are_inconclusive(self) -> None:
+        v, _ = _live_frames(STAGE_1920, (1080, 1920), BIG_INSTANCE)
+        assert probe.score_live_ring(_sink(v, STAGE_1920), _sink(v[:10], STAGE_1920), ARMED)["verdict"] is None
+        small = np.zeros((20, 20, 3), dtype=np.uint8)
+        scored = probe.score_live_ring(_sink(small, STAGE_1920), _sink(small, STAGE_1920), ARMED)
+        assert scored == {"verdict": None, "reason": "the live ring is empty"}
+
+
+class OrderedHost(ArmedHost):
+    """Records how many screenshots were taken when the build-1 advance ran."""
+
+    def __init__(self, reads: list[Any]) -> None:
+        super().__init__(reads)
+        self.captures_at_advance: list[int] = []
+
+    def execute(self, operation: str, *args: Any) -> None:
+        self.captures_at_advance.append(self.transport.captures)
+        super().execute(operation, *args)
+
+
+def _hook_host() -> OrderedHost:
+    return OrderedHost([_hb_read("#2"), _hb_read("#3"), _hb_read("#3")])
+
+
+class TestLiveCaptureHook:
+    def _run(self, host: ArmedHost, ordinal: int = 2, **kwargs: Any) -> dict[str, Any]:
+        sink: dict[str, Any] = {}
+        probe.handback_hook(ARMED, sink, expect_handoff=False, **kwargs)(host, {"originalOrdinal": ordinal}, {})
+        return sink
+
+    def test_live_is_captured_before_the_advance_only_when_asked(self) -> None:
+        host = _hook_host()
+        sink = self._run(host, capture_live=True)
+        live = sink["live"]
+        assert live["reason"] is None and live["frame"].shape == (32, 64, 3) and live["stageMap"] == GL_STAGE
+        assert host.captures_at_advance == [1] and host.transport.captures == 2
+        assert sink["record"]["status"] == "ok"
+        evaluations = host.transport.evaluations
+        assert evaluations.index(probe.TWO_RAF_JS) < evaluations.index(probe.GL_REPLAY_READ_JS)
+
+    def test_by_default_nothing_new_is_captured(self) -> None:
+        host = _hook_host()
+        sink = self._run(host)
+        assert set(sink) == {"record", "frame"}
+        assert host.captures_at_advance == [0] and host.transport.captures == 1
+        assert probe.HASH_JS not in host.transport.evaluations
+
+    def test_other_slides_capture_nothing(self) -> None:
+        host = _hook_host()
+        assert self._run(host, ordinal=1, capture_live=True) == {}
+        assert host.transport.captures == 0 and host.executed == []
+
+    @pytest.mark.parametrize("hashes", [["#1"], ["#2", "#3"], ["#3"]])
+    def test_a_capture_off_the_armed_scene_is_inconclusive(self, hashes: list[str]) -> None:
+        host = _hook_host()
+        host.hashes = list(hashes)
+        live = self._run(host, capture_live=True)["live"]
+        assert live["frame"] is None and live["reason"].startswith("live capture off #2")
+        assert probe.score_live_ring({"live": live}, {"live": live}, ARMED)["verdict"] is None
+
+    def test_a_failed_screenshot_is_inconclusive_and_the_hand_back_still_runs(self) -> None:
+        host = _hook_host()
+        calls = {"n": 0}
+        original = host.transport.call
+
+        def call(method: str, **params: Any) -> dict[str, Any]:
+            if method == "Page.captureScreenshot":
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise RuntimeError("boom")
+            return original(method, **params)
+
+        host.transport.call = call  # type: ignore[method-assign]
+        sink = self._run(host, capture_live=True)
+        assert sink["live"] == {"stageMap": None, "frame": None, "reason": "live capture failed: boom"}
+        assert sink["record"]["status"] == "ok"
+
+    def test_the_live_shot_is_written_as_evidence(self, tmp_path: Path) -> None:
+        sink = self._run(_hook_host(), capture_live=True)
+        probe.write_handback_shot(tmp_path, "Vgl", sink)
+        assert sink["live"]["shot"] == str(tmp_path / "Vgl-live.png") and (tmp_path / "Vgl-live.png").is_file()
+        assert (tmp_path / "Vgl-handback.png").is_file()
+
+
+class TestLiveRingWiring:
+    """Forced, not grepped: drive `main` (auto and off) and `run_forced_fail` with
+    their heavy steps stubbed, record every `handback_hook` and fire each hook
+    at the armed slide against a fake host."""
+
+    @pytest.fixture
+    def driven(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
+        seen: dict[str, Any] = {"hooks": [], "passes": {}, "hosts": {}}
+        original_hook = probe.handback_hook
+
+        def hook(armed: Any, sink: Any, **kwargs: Any) -> Any:
+            seen["hooks"].append(kwargs)
+            return original_hook(armed, sink, **kwargs)
+
+        def visible_pass(name: str, *args: Any, after_slide: Any = None, **kwargs: Any) -> dict[str, Any]:
+            seen["passes"][name] = after_slide
+            if after_slide is not None:
+                host = _hook_host()
+                after_slide(host, {"originalOrdinal": ARMED["originalOrdinal"]}, {})
+                seen["hosts"][name] = host
+            return {"pass": name}
+
+        facts = {
+            key: None for key in (
+                "asset", "onset1to2", "boundaryPlayerIndex", "restartScene", "bridgeScene", "pinRect",
+                "bridgeSrcRect", "destRect", "canvas", "refusals",
+            )
+        }
+        facts.update(retire={"boundaryKey": ARMED["boundaryKey"]}, refusedBoundaries=[], rectExpectations={"V": {}, "Voff": {}})
+        monkeypatch.setattr(probe, "handback_hook", hook)
+        monkeypatch.setattr(probe, "run_visible_pass", visible_pass)
+        monkeypatch.setattr(probe, "prepare_export", lambda *a: tmp_path)
+        monkeypatch.setattr(probe, "load_slides", lambda *a: [])
+        monkeypatch.setattr(probe, "ground_truth_plan", lambda *a, **k: None)
+        monkeypatch.setattr(probe, "ground_truth_facts", lambda *a, **k: facts)
+        monkeypatch.setattr(probe, "expected_stage_fit", lambda *a: {})
+        monkeypatch.setattr(probe, "gl_ground_truth", lambda *a: (None, {"armed": ARMED, "armedBoundaries": []}, {}))
+        monkeypatch.setattr(probe, "run_arm", lambda *a, **k: {})
+        monkeypatch.setattr(probe, "run_attach_arm", lambda *a, **k: {})
+        monkeypatch.setattr(probe, "check_no_leftover_chrome", lambda: [])
+        seen["tmp"] = tmp_path
+        return seen
+
+    def _main(self, seen: dict[str, Any], monkeypatch: pytest.MonkeyPatch, *gl: str) -> dict[str, Any]:
+        tmp = seen["tmp"]
+        index = tmp / "index.html"
+        index.write_text("x")
+        artifact = tmp / "out" / "probe.json"
+        argv = ["x", "--fixture", str(tmp), "--original-index", str(index), "--artifact", str(artifact), *gl]
+        monkeypatch.setattr(sys, "argv", argv)
+        probe.main()
+        return json.loads(artifact.read_text())
+
+    def test_the_auto_run_captures_live_in_v_and_vgl_and_scores_the_ring(self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+        result = self._main(driven, monkeypatch, "--gl-replay", "auto")
+        assert driven["hooks"] == [
+            {"expect_handoff": False, "capture_live": True}, {"expect_handoff": True, "capture_live": True},
+        ]
+        assert {name: host.captures_at_advance for name, host in driven["hosts"].items()} == {"V": [1], "Vgl": [1]}
+        ring = result["liveRing"]
+        assert ring["verdict"] is None and ring["reason"] == "the live ring is empty"
+        assert result["visible"]["V"]["live"]["reason"] is None and "frame" not in result["visible"]["V"]["live"]
+        assert result["visible"]["Vgl"]["live"]["shot"].endswith("Vgl-live.png")
+
+    def test_the_off_run_records_nothing_new(self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+        result = self._main(driven, monkeypatch)
+        assert driven["hooks"] == [] and driven["passes"] == {"V": None, "Voff": None}
+        assert "liveRing" not in result and "live" not in result["visible"]["V"]
+
+    def test_the_forced_fail_run_records_nothing_new(self, driven: dict[str, Any]) -> None:
+        tmp = driven["tmp"]
+        args = probe.parse_args(["--gl-replay", "auto", "--gl-force-fail", "posterAmbiguous", "--artifact", str(tmp / "f.json")])
+        result = probe.run_forced_fail(args)
+        assert driven["hooks"] == [{"expect_handoff": False}, {"expect_handoff": False, "refusal": True}]
+        assert {name: host.captures_at_advance for name, host in driven["hosts"].items()} == {"V": [0], "VglForced": [0]}
+        assert all(probe.HASH_JS not in host.transport.evaluations for host in driven["hosts"].values())
+        assert "liveRing" not in result and "live" not in result["visible"]["V"]

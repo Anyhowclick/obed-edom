@@ -1,10 +1,12 @@
-"""G6 (plan `.agents/plans/keynote_live_gl_replay_g5g6.plan.md` rev 2 §4): P2 under
+"""G6 (plan `git show ed7ff63c:.agents/plans/keynote_live_gl_replay_g5g6.plan.md` rev 2 §4): P2 under
 `--gl-replay auto`.
 
 Verdict half: `glReplayCarry1to2` clauses (a)-(h), each forced RED ALONE against the
 r3 2-pooled GREEN fixture (carried decoder 1 + sibling 2, `release.retired == [2]`),
 plus `progressingIndexAfterFlip` wrap/null runs and the `carriedClock1to2`
-sibling-clock defence.
+sibling-clock defence. GL-replay (c) (plan `git show ed7ff63c:.agents/plans/keynote_live_gl_replay_c.plan.md` §4, §7, §8):
+clause (f) gates a third series, the G2 `probe(rect)` readback counter, and the A7′
+probe-vs-`sampleFrame` pairing scores the instrument.
 
 Driver half: the flag-off contract (fetch JS / census JS / injected HTML byte-identical,
 no `gl-replay/` root), the auto injection order, INFO only in auto, `main.js` served
@@ -105,6 +107,7 @@ def _pool_reads(n=4, gap_ms=350.0, rate=1.0) -> list[dict]:
             "carried": CARRIED,
             "pool": [_pool_entry(CARRIED, 5.0 + rate * i * gap_ms / 1000.0), _pool_entry(SIBLING, 2.1)],
             "frameIndex": 40 + 11 * i,
+            "glProbeIndex": 41 + 11 * i,
         }
         for i in range(n)
     ]
@@ -159,6 +162,7 @@ def _gl_args(**over) -> dict:
         "index_samples": _index_samples(),
         "flip_index": 3,
         "sample_frame_indices": [r["frameIndex"] for r in reads],
+        "gl_probe_indices": [r["glProbeIndex"] for r in reads],
         "pre_flip_owner_ids": [CARRIED, None, CARRIED],
         "gl_states_s2": _live_states(),
         "gl_state_after": {"state": "RETIRED", "standDowns": ["canvasRemoved"]},
@@ -421,38 +425,76 @@ def test_gl_carry_e_a_painting_or_unread_video_on_slide_2_is_red_alone(lingering
         pytest.param({"sample_frame_indices": [40, None, None, 73]}, id="sample-frame-sparse"),
         pytest.param({"sample_frame_indices": [40, 40, 40, 40]}, id="sample-frame-frozen"),
         pytest.param({"sample_frame_indices": [40, 51, 200, 211]}, id="sample-frame-jump"),
+        pytest.param({"gl_probe_indices": [41, None, None, 74]}, id="gl-probe-sparse"),
+        pytest.param({"gl_probe_indices": [41, 41, 41, 41]}, id="gl-probe-frozen"),
+        pytest.param({"gl_probe_indices": [41, 52, 201, 212]}, id="gl-probe-jump"),
+        pytest.param({"gl_probe_indices": [None] * 4}, id="gl-probe-no-reads"),
+        pytest.param({"gl_probe_indices": []}, id="gl-probe-absent"),
     ],
 )
 def test_gl_carry_f_each_counter_defect_is_red_alone(over):
     _only_red(_gl(**over), "f")
 
 
+def test_gl_carry_f_the_gl_series_gates_even_with_both_other_series_green():
+    """N5 known-bad shape (frozen-upload): the decoder and `sampleFrame` keep running
+    while the GL composite freezes. (f) must fail naming the GL series only."""
+    verdict = _gl(gl_probe_indices=[41, 41, 41, 41])
+    _only_red(verdict, "f")
+    progress = verdict["progressingIndexAfterFlip"]
+    assert progress["composite"]["ok"] is True and progress["sourceSampleFrame"]["ok"] is True
+    assert progress["glProbe"]["reason"] == "counter never advanced"
+    (reason,) = [r for r in verdict["reasons"] if r.startswith("(f)")]
+    assert "glProbe 'counter never advanced'" in reason
+    assert "composite" not in reason and "sampleFrame" not in reason
+
+
+def test_gl_carry_f_reason_names_every_failing_series():
+    verdict = _gl(sample_frame_indices=[None] * 4, gl_probe_indices=[None] * 4)
+    (reason,) = [r for r in verdict["reasons"] if r.startswith("(f)")]
+    assert "sampleFrame 'insufficient decoded reads'" in reason
+    assert "glProbe 'insufficient decoded reads'" in reason
+    assert "composite" not in reason
+
+
 def test_progressing_index_wraps_mod_256():
     samples = [{"index": 240}] + [{"index": x} for x in (250, 254, 2, 6)]
-    got = v.progressingIndexAfterFlip(samples, 1, [253, 5, 13])
+    got = v.progressingIndexAfterFlip(samples, 1, [253, 5, 13], [254, 6, 14])
     assert got["ok"] is True
     assert got["composite"]["deltas"] == [4, 4, 4]
     assert got["sourceSampleFrame"]["deltas"] == [8, 8]
+    assert got["glProbe"]["deltas"] == [8, 8]
 
 
 def test_progressing_index_skips_null_runs_but_counts_only_decoded_reads():
-    ok = v.progressingIndexAfterFlip([{"index": x} for x in (10, None, None, 18, None, 22, 30)], 0, [1, 2, 3])
+    ok = v.progressingIndexAfterFlip([{"index": x} for x in (10, None, None, 18, None, 22, 30)], 0, [1, 2, 3], [2, 3, 4])
     assert ok["ok"] is True
     assert ok["composite"]["nDecoded"] == 4 and ok["composite"]["nNull"] == 3
-    short = v.progressingIndexAfterFlip([{"index": x} for x in (10, None, None, 18, None, 22)], 0, [1, 2, 3])
+    short = v.progressingIndexAfterFlip([{"index": x} for x in (10, None, None, 18, None, 22)], 0, [1, 2, 3], [2, 3, 4])
     assert short["ok"] is False
     assert short["composite"]["reason"] == "insufficient decoded reads"
 
 
 def test_progressing_index_agreement_is_report_only():
-    got = v.progressingIndexAfterFlip([{"index": x} for x in (0, 1, 2, 3)], 0, [0, 60, 120])
+    got = v.progressingIndexAfterFlip([{"index": x} for x in (0, 1, 2, 3)], 0, [0, 60, 120], [1, 2, 62])
     assert got["ok"] is True
-    assert got["agreementNonGating"] == {"compositeForward": 3, "sourceForward": 120}
+    assert got["agreementNonGating"] == {"compositeForward": 3, "sourceForward": 120, "glForward": 61}
 
 
 def test_progressing_index_step_bound_is_exclusive_at_64():
-    assert v.progressingIndexAfterFlip([{"index": x} for x in (0, 63, 126, 189)], 0, [0, 1, 2])["ok"] is True
-    assert v.progressingIndexAfterFlip([{"index": x} for x in (0, 64, 128, 192)], 0, [0, 1, 2])["ok"] is False
+    assert v.progressingIndexAfterFlip([{"index": x} for x in (0, 63, 126, 189)], 0, [0, 1, 2], [0, 63, 126])["ok"] is True
+    assert v.progressingIndexAfterFlip([{"index": x} for x in (0, 64, 128, 192)], 0, [0, 1, 2], [0, 1, 2])["ok"] is False
+    assert v.progressingIndexAfterFlip([{"index": x} for x in (0, 63, 126, 189)], 0, [0, 1, 2], [0, 64, 128])["ok"] is False
+
+
+@pytest.mark.parametrize(
+    "gl_probe_indices,ok",
+    [([1, 2, 3], True), ([1, None, 3], False), ([1, 2], False), ([None, None, None], False), (None, False)],
+)
+def test_progressing_index_needs_three_decoded_gl_probe_reads(gl_probe_indices, ok):
+    got = v.progressingIndexAfterFlip([{"index": x} for x in (0, 1, 2, 3)], 0, [0, 1, 2], gl_probe_indices)
+    assert got["ok"] is ok
+    assert got["glProbe"]["ok"] is ok
 
 
 # ---- (g) ------------------------------------------------------------------ #
@@ -531,6 +573,7 @@ def test_gl_carry_an_off_run_scored_by_it_is_red():
         pool_reads=[dict(r, pool=[]) for r in _pool_reads()],
         index_samples=_index_samples()[:3] + [{"index": 22}] * 6,
         sample_frame_indices=[None] * 4,
+        gl_probe_indices=[None] * 4,
         gl_state_after=None,
         gl_states_s2=[None, None],
     )
@@ -570,6 +613,22 @@ def test_gl_reads_never_touch_the_oracle_handle():
         assert "__OBED_GL_ORACLE__" not in js
         assert ".gl" not in js.replace(".glReplay", "")
         assert "markerBands" not in js and ".pause(" not in js
+
+
+def test_the_probe_read_is_the_one_oracle_carve_out_and_touches_only_probe():
+    """Plan §4 carve-out from the g5g6 "no oracle in arms" rule: `GL_PROBE_READ_JS` is
+    the only P2 read of `__OBED_GL_ORACLE__`, and it may call `handle.probe` once and
+    nothing else (never `.gl`, `markerBands`, `pause` or `resume`)."""
+    import re
+
+    js = drv.GL_PROBE_READ_JS
+    assert js.count("window.__OBED_GL_ORACLE__") == 1
+    assert js.count(".probe(") == 1
+    assert ".gl" not in js
+    assert "markerBands" not in js and ".pause(" not in js and ".resume(" not in js
+    handle = re.search(r"const (\w+) = window\.__OBED_GL_ORACLE__;", js).group(1)
+    assert set(re.findall(rf"\b{handle}\.(\w+)", js)) == {"probe"}
+    assert "__ROI__" in js
 
 
 # --------------------------------------------------------------------------- #
@@ -711,6 +770,7 @@ def test_boot_check_green():
         {"obedLive": False},
         {"runtimeVersion": None},
         {"glVersion": None},
+        {"glVersion": 2},
         {"glState": "RETIRED"},
         {"info": None},
     ],
@@ -921,31 +981,310 @@ def test_boot_check_requires_webgl():
     assert drv._gl_boot_ok(_boot_check(webgl=None)) is False
 
 
-class _ReadChrome:
-    def __init__(self):
-        self.calls = []
+def _probe_result(level: int = 121, w: int = 41, h: int = 14, alpha: int = 255, **over) -> dict:
+    pixels = [level, level, level, alpha] * (w * h)
+    result = {
+        "ok": True,
+        "epoch": 1,
+        "iter": 200,
+        "t": 10_000.0,
+        "vt": 5.0,
+        "rect": {"x": 111, "y": 795, "w": w, "h": h},
+        "width": w,
+        "height": h,
+        "alphaMin": alpha,
+        "pixels": pixels,
+    }
+    result.update(over)
+    return result
 
-    async def evaluate(self, js):
-        self.calls.append("read")
+
+class _ReadChrome:
+    def __init__(self, probe=None):
+        self.calls = []
+        self.probe = _probe_result() if probe is None else probe
+
+    async def evaluate(self, js, await_promise=False):
+        if js.startswith("(async () => {") and "__OBED_GL_ORACLE__" in js:
+            self.calls.append(("probe", await_promise))
+            return copy.deepcopy(self.probe)
+        self.calls.append(("read", await_promise))
         return {"t": 1.0, "sceneHash": "#2", "carried": 1, "pool": [], "frame": _sample_frame(120)}
 
     async def screenshot(self):
-        self.calls.append("shot")
+        self.calls.append(("shot", None))
         return np.zeros((1080, 1920, 4), dtype=np.uint8)
 
 
-def test_slide2_reads_pair_every_sample_frame_with_a_screenshot(tmp_path, monkeypatch):
+def _probe_js():
+    return drv._gl_probe_read_js(v.build_continuity_plan(True))
+
+
+def test_slide2_reads_pair_every_sample_frame_with_a_probe_then_a_screenshot(tmp_path, monkeypatch):
+    """Auto read order (plan §7): `sampleFrame` then the awaited probe, both before the
+    screenshot, so the A7′ pair is taken one tick apart."""
     import asyncio
 
     monkeypatch.setattr(drv, "GL_POOL_READ_GAP_S", 0.0)
     chrome = _ReadChrome()
-    reads = asyncio.run(drv._gl_slide2_reads(chrome, tmp_path))
-    assert chrome.calls == ["read", "shot"] * drv.GL_POOL_READS_N
+    reads = asyncio.run(drv._gl_slide2_reads(chrome, tmp_path, _probe_js()))
+    assert chrome.calls == [("read", False), ("probe", True), ("shot", None)] * drv.GL_POOL_READS_N
     assert all(abs(r["frameIndex"] - 120) <= 2 for r in reads)
+    assert all(r["glProbeIndex"] == 121 for r in reads)
     assert all("dataURL" not in r["frameMeta"] for r in reads)
+    for r in reads:
+        assert "pixels" not in r["glProbeMeta"]
+        assert r["glProbeMeta"]["alphaMin"] == 255 and r["glProbeMeta"]["rect"] == {"x": 111, "y": 795, "w": 41, "h": 14}
     for i in range(drv.GL_POOL_READS_N):
         assert (tmp_path / f"gl-slide2-{i}.png").is_file()
         assert (tmp_path / f"gl-sample-frame-{i}.jpg").is_file()
+        assert (tmp_path / f"gl-probe-{i}.png").is_file()
+
+
+def test_slide2_reads_record_a_failed_probe_as_a_null_reading(tmp_path, monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(drv, "GL_POOL_READ_GAP_S", 0.0)
+    chrome = _ReadChrome(probe={"ok": False, "reason": "timeout"})
+    reads = asyncio.run(drv._gl_slide2_reads(chrome, tmp_path, _probe_js()))
+    assert all(r["glProbeIndex"] is None for r in reads)
+    assert all(r["glProbeMeta"] == {"ok": False, "reason": "timeout"} for r in reads)
+    assert not any(tmp_path.glob("gl-probe-*.png"))
+
+
+def test_probe_roi_is_the_index_patch_roi_of_the_injected_instance_rect():
+    """The ROI is computed in Python from the injected plan's entry and substituted as a
+    literal (plan §5): `index_patch_roi_for(instanceRect)` == (111, 795, 41, 14)."""
+    from obed_edom.html_alpha_probe import index_patch_roi_for
+
+    plan = v.build_continuity_plan(True)
+    (entry,) = [b for b in plan["boundaries"] if b.get("action") == "glReplay"]
+    x, y, w, h = index_patch_roi_for(entry["instanceRect"])
+    assert (x, y, w, h) == (111, 795, 41, 14)
+    js = drv._gl_probe_read_js(plan)
+    assert "__ROI__" not in js
+    assert json.dumps({"x": x, "y": y, "w": w, "h": h}) in js
+    assert js == drv.GL_PROBE_READ_JS.replace("__ROI__", json.dumps({"x": x, "y": y, "w": w, "h": h}))
+
+
+@pytest.mark.parametrize("level", [0, 16, 121, 235, 255])
+def test_gl_probe_counter_decodes_the_flat_patch(level, tmp_path):
+    assert drv._gl_probe_index(_probe_result(level), tmp_path / "p.png") == level
+    saved = np.asarray(Image.open(tmp_path / "p.png"))
+    assert saved.shape == (14, 41, 4)
+
+
+def test_gl_probe_pixels_are_read_top_down():
+    """`pixels` rows are top-down (plan §4): row 0 is the ROI's top row."""
+    w, h = 3, 2
+    pixels = [10, 10, 10, 255] * w + [200, 200, 200, 255] * w
+    arr = drv._gl_probe_array(_probe_result(width=w, height=h, pixels=pixels))
+    assert arr.shape == (2, 3, 4)
+    assert arr[0, 0, 0] == 10 and arr[1, 0, 0] == 200
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        pytest.param(None, id="no-result"),
+        pytest.param({"ok": False, "reason": "standDown"}, id="stand-down"),
+        pytest.param({"ok": False, "reason": "noProbe"}, id="no-probe"),
+        pytest.param(_probe_result(alpha=254), id="alpha-below-255"),
+        pytest.param(_probe_result(alphaMin=None), id="alpha-missing"),
+        pytest.param(_probe_result(pixels=[121, 121, 121, 255] * 10), id="short-buffer"),
+        pytest.param(_probe_result(width=0, pixels=[]), id="empty"),
+        pytest.param(_probe_result(pixels=None), id="no-pixels"),
+        pytest.param(_probe_result(ok="true"), id="ok-not-true"),
+        pytest.param(_probe_result(width=True, height=1, pixels=[121, 121, 121, 255]), id="bool-width"),
+        pytest.param(_probe_result(width=1, height=True, pixels=[121, 121, 121, 255]), id="bool-height"),
+        pytest.param(_probe_result(width=1, height=1, pixels=[121, 121, True, 255]), id="bool-pixel"),
+        pytest.param(_probe_result(width=1, height=1, pixels=[121, 121, 256, 255]), id="pixel-above-255"),
+        pytest.param(_probe_result(width=1, height=1, pixels=[121, 121, -1, 255]), id="pixel-negative"),
+        pytest.param(_probe_result(width=1, height=1, pixels=[121, 121, 121.0, 255]), id="float-pixel"),
+        pytest.param(_probe_result(width=1, height=1, pixels=[121, 121, "121", 255]), id="string-pixel"),
+        pytest.param(_probe_result(width=1, height=1, pixels=[121, 121, None, 255]), id="null-pixel"),
+        pytest.param(_probe_result(width=1, height=1, pixels=[121, 121, 121, 254]), id="computed-alpha-below-255"),
+    ],
+)
+def test_a_failed_probe_read_is_none_never_a_raise(result):
+    """Consumer rule (plan §4): `ok: false`, `alphaMin` < 255 or a missing probe is a
+    failed read."""
+    assert drv._gl_probe_index(result) is None
+
+
+def test_a_non_flat_probe_patch_decodes_to_none():
+    w, h = 41, 14
+    pixels = [v for i in range(w * h) for v in ((i % 2) * 255,) * 3 + (255,)]
+    assert drv._gl_probe_index(_probe_result(width=w, height=h, pixels=pixels)) is None
+
+
+def _run_probe_read(handle_js: str, *, fast_timeout: bool = False, window_js: str | None = None) -> dict:
+    harness = (
+        (
+            "global.setTimeout = function (f, ms) { global.__timeoutMs = ms; f(); return 0; };\n"
+            if fast_timeout else ""
+        )
+        + (window_js or f"global.window = {{__OBED_GL_ORACLE__: {handle_js}}};") + "\n"
+        + f"Promise.resolve({_probe_js()}).then((r) => {{"
+        " console.log(JSON.stringify({result: r, timeoutMs: global.__timeoutMs === undefined ? null : global.__timeoutMs,"
+        " calls: global.__calls || []})); process.exit(0); });\n"
+    )
+    out = subprocess.run(["node", "-e", harness], capture_output=True, text=True, check=False, timeout=20)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_probe_read_js_passes_the_roi_literal_and_returns_the_probe_result():
+    got = _run_probe_read(
+        "{rect: {x: 0}, probe: function (r) { (global.__calls = global.__calls || []).push(r);"
+        " return Promise.resolve({ok: true, width: 1}); }}"
+    )
+    assert got["result"] == {"ok": True, "width": 1}
+    assert got["calls"] == [{"x": 111, "y": 795, "w": 41, "h": 14}]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+@pytest.mark.parametrize(
+    "handle,reason",
+    [
+        pytest.param("undefined", "noProbe", id="no-handle"),
+        pytest.param("{rect: {}}", "noProbe", id="no-probe-method"),
+        pytest.param("{probe: function () { throw new Error('boom'); }}", "threw", id="probe-throws"),
+        pytest.param("{probe: function () { return Promise.reject(new Error('boom')); }}", "threw", id="probe-rejects"),
+        pytest.param("{get probe() { throw new Error('boom'); }}", "threw", id="probe-getter-throws"),
+    ],
+)
+def test_probe_read_js_fails_a_read_it_cannot_make(handle, reason):
+    got = _run_probe_read(handle)
+    assert got["result"]["ok"] is False
+    assert got["result"]["reason"] == reason
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_probe_read_js_races_a_never_resolving_probe_at_two_seconds():
+    got = _run_probe_read("{probe: function () { return new Promise(function () {}); }}", fast_timeout=True)
+    assert got["result"] == {"ok": False, "reason": "timeout"}
+    assert got["timeoutMs"] == 2000
+
+
+# --------------------------------------------------------------------------- #
+# A7′ instrument (plan §8): probe vs `sampleFrame`, same read, pooled over runs.
+# --------------------------------------------------------------------------- #
+def _a7_reads(offset=1, alpha=255, n=4) -> list[dict]:
+    return [
+        {
+            "frameIndex": 40 + 15 * i,
+            "glProbeIndex": 40 + 15 * i + offset,
+            "glProbeMeta": {"ok": True, "alphaMin": alpha, "epoch": 1},
+        }
+        for i in range(n)
+    ]
+
+
+def test_a7_prime_sixteen_same_read_pairs_agree():
+    got = v.glProbeSampleFramePairing([_a7_reads() for _ in range(4)])
+    assert got["ok"] is True
+    assert got["nPairs"] == 16 and got["nAgree"] == 16
+    assert got["instrumentEscalation"] is False
+    assert {p["delta"] for p in got["pairs"]} == {1}
+
+
+def test_a7_prime_known_bad_previous_read_pairing_is_red():
+    """Pairing each probe with the previous read's `sampleFrame` (≈ 350 ms apart)."""
+    got = v.glProbeSampleFramePairing([_a7_reads() for _ in range(4)], lag=1)
+    assert got["ok"] is False
+    assert got["nAgree"] == 0
+    assert {p["delta"] for p in got["pairs"] if p["delta"] is not None} == {16}
+
+
+@pytest.mark.parametrize("broken,ok", [(4, True), (5, False)])
+def test_a7_prime_needs_twelve_of_sixteen(broken, ok):
+    runs = [_a7_reads() for _ in range(4)]
+    for k in range(broken):
+        runs[k // 4][k % 4]["glProbeIndex"] = None if k % 2 else runs[k // 4][k % 4]["frameIndex"] + 3
+    got = v.glProbeSampleFramePairing(runs)
+    assert got["nAgree"] == 16 - broken
+    assert got["ok"] is ok
+
+
+def test_a7_prime_delta_is_signed_mod_256():
+    runs = [[{"frameIndex": 255, "glProbeIndex": 1, "glProbeMeta": {"ok": True, "alphaMin": 255}}]]
+    got = v.glProbeSampleFramePairing(runs, min_agree=1)
+    assert got["pairs"][0]["delta"] == 2 and got["ok"] is True
+
+
+def test_a7_prime_alpha_below_255_is_an_instrument_escalation_not_a_pass():
+    """A control read with `alphaMin` < 255 is an instrument fact to escalate (plan §4,
+    §13), never scored as agreement."""
+    runs = [_a7_reads() for _ in range(4)]
+    runs[2][1]["glProbeMeta"]["alphaMin"] = 254
+    got = v.glProbeSampleFramePairing(runs)
+    assert got["ok"] is False
+    assert got["instrumentEscalation"] is True
+    assert got["alphaBelow255"] == [{"run": 2, "read": 1, "alphaMin": 254}]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_probe_read_js_fails_a_throwing_oracle_getter():
+    """Accessor failures on `window.__OBED_GL_ORACLE__` itself are a failed read, never a
+    rejected evaluate."""
+    got = _run_probe_read(
+        "",
+        window_js="global.window = {}; Object.defineProperty(global.window, '__OBED_GL_ORACLE__',"
+        " {get: function () { throw new Error('boom'); }});",
+    )
+    assert got["result"]["ok"] is False
+    assert got["result"]["reason"] == "threw"
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [
+        pytest.param({"ok": False, "reason": "standDown", "alphaMin": 255}, id="probe-failed"),
+        pytest.param(None, id="meta-missing"),
+        pytest.param({"ok": True}, id="alpha-missing"),
+        pytest.param({"ok": True, "alphaMin": True}, id="alpha-bool"),
+        pytest.param({"ok": "true", "alphaMin": 255}, id="ok-not-true"),
+    ],
+)
+def test_a7_prime_a_pair_without_a_clean_probe_read_has_no_delta(meta):
+    """Known-bads: a decoded-looking counter on a failed or unattested probe read is
+    never scored as agreement."""
+    runs = [_a7_reads() for _ in range(4)]
+    for reads in runs:
+        for read in reads:
+            if meta is None:
+                read.pop("glProbeMeta")
+            else:
+                read["glProbeMeta"] = dict(meta)
+    got = v.glProbeSampleFramePairing(runs)
+    assert got["ok"] is False
+    assert got["nAgree"] == 0
+    assert all(p["delta"] is None for p in got["pairs"])
+
+
+@pytest.mark.parametrize(
+    "probe,frame",
+    [
+        pytest.param(True, 1, id="bool-probe"),
+        pytest.param(1, False, id="bool-frame"),
+        pytest.param(256, 255, id="probe-above-255"),
+        pytest.param(-1, 0, id="probe-negative"),
+        pytest.param(40, 296, id="frame-above-255"),
+        pytest.param(41.0, 40, id="float-probe"),
+    ],
+)
+def test_a7_prime_counters_must_be_integers_in_0_255(probe, frame):
+    runs = [[{"frameIndex": frame, "glProbeIndex": probe, "glProbeMeta": {"ok": True, "alphaMin": 255}}]]
+    got = v.glProbeSampleFramePairing(runs, min_agree=1)
+    assert got["pairs"][0]["delta"] is None
+    assert got["ok"] is False
+
+
+@pytest.mark.parametrize("runs", [None, [], [None], "x"])
+def test_a7_prime_fails_closed_without_reads(runs):
+    assert v.glProbeSampleFramePairing(runs)["ok"] is False
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")

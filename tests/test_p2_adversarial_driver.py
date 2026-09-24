@@ -800,3 +800,21 @@ def test_driver_awaits_the_collector_tail_before_dumping():
     assert all(a != "COLLECTOR_TRAILING_ROW_JS" for a in args[tail + 1:])
     keywords = {k.arg: ast.unparse(k.value) for k in evaluates[tail].value.keywords}
     assert keywords.get("await_promise") == "True"
+
+
+def test_auto_run_feeds_the_gl_probe_series_into_clause_f():
+    """GL-replay (c) N5 (plan §5, §8): the settled-slide-2 reads take the probe ROI
+    from the injected plan, and `glReplayCarry1to2` receives the probe counters as the
+    series right after the `sampleFrame` counters."""
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(p2._run)))
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+    (reads,) = [n for n in calls if n.func.id == "_gl_slide2_reads"]
+    assert [ast.unparse(a) for a in reads.args] == ["chrome", "run_dir", "_gl_probe_read_js(continuity_plan)"]
+    (carry,) = [n for n in calls if n.func.id == "glReplayCarry1to2"]
+    args = [ast.unparse(a) for a in carry.args]
+    i = args.index("[r.get('frameIndex') for r in gl_slide2_reads]")
+    assert args[i + 1] == "[r.get('glProbeIndex') for r in gl_slide2_reads]"
