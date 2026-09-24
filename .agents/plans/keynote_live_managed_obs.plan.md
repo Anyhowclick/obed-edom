@@ -1,6 +1,6 @@
 # Managed OBS v1 — Alpha Keynote runs its own hidden OBS for fill + key
 
-**Rev 2, DRAFT for owner review** (2026-09-24; owner answers in §14, OD-M10 open). Rev 1 by Opus EXTRA HIGH; critique by Opus HIGH (3 blockers, 9 others; §13),
+**Rev 2, DRAFT for owner review** (2026-09-24; owner answers in §14, all resolved). Rev 1 by Opus EXTRA HIGH; critique by Opus HIGH (3 blockers, 9 others; §13),
 folded by the coordinator. Nothing is implemented.
 Parents: `decklink-field-test-runbook.md` (§0 OBS setup, §3 cadence note), `keynote-live-continuity-2026-09-23-c.md` ("OBS rate +
 output cadence"), [`keynote_live_gl_replay_arming.plan.md`](keynote_live_gl_replay_arming.plan.md) (G2 attach qualification OD-2
@@ -18,7 +18,8 @@ is a dashboard warning, AK never clears OBS's crash marker; (3) OBS is not modif
 an output-rate setting; a dashboard warning when OBS crashed or is blocked.
 
 **In v1.** A new AK output mode **Keyer (fill + key via UltraStudio)**. AK finds the pinned OBS.app, seeds an isolated config tree,
-launches it hidden, waits for readiness, and quits it cleanly. It drives the Browser-source page through `LiveOutputHost`'s existing
+launches it hidden when the operator presses **Take output**, waits for readiness, and quits it cleanly on **Release output** — the
+explicit same-Mac handover with ProPresenter (OD-M10, §5). It drives the Browser-source page through `LiveOutputHost`'s existing
 attach path on an AK-chosen CDP port. Persisted: output mode, output rate (25 / 30), keyer on/off; the DeckLink device record lives
 in the engine's own folder (§6). Warnings W1–W5, W8–W13 (§4).
 
@@ -137,7 +138,7 @@ impossible at 50/60 (owner decision 4); they need their own measurement (v2).
 | W8 movieRate | a deck movie's fps outside ±0.2 % of the output rate (Keyer mode only) | warn | "{asset} is {f} fps but the output is {r} fps, so it will judder slightly. Re-export it at {r} fps for smooth motion." | — |
 | W9 noDevice | no device record for this rate | warn | "No output device set for {r} fps — the keyer receives nothing. With the UltraStudio connected, press Set up output device (one time)." | Set up |
 | W10 staleMarker | `.sentinel/run_*` present before launch | info | "OBS may ask a question when it starts (it did not close properly last time)." | — |
-| W11 deviceInactive | device recorded and `GetOutputStatus.outputActive` false 5 s after ready | warn | "The UltraStudio output is not running. Check the Thunderbolt cable and Desktop Video, then press Restart output engine." | Restart |
+| W11 deviceInactive | device recorded and `GetOutputStatus.outputActive` false 5 s after ready (DeckLink output is exclusive to one app: `EnableVideoOutput` ⇒ `E_ACCESSDENIED` while another holds it [M, Blackmagic SDK]) | block | "Alpha Keynote cannot open the UltraStudio. If ProPresenter is running, remove its SDI screen in Screen Configuration or quit ProPresenter; otherwise check the Thunderbolt cable and Desktop Video. Then press Release output and Take output again." | Release · Take |
 | W12 stuck | no quit within 10 s | block | "OBS is not responding to Quit. Press Show OBS and quit it from the OBS menu, then press Check again." | Show OBS |
 | W13 ownedElsewhere | engine lock held by another process | block | "The output engine is being used by another dashboard window (pid {p}). Close that dashboard first." | Check again |
 
@@ -155,8 +156,10 @@ never raising; `codec_report` entries gain `"fps": float | None`; `LiveOutputHos
 (after W5 the route stops the dead session first). The quit/relaunch runs on the engine thread; no route waits for it while holding
 `lock` (the thumbnail route shares it [C `web/live.py:153`]). Keyer start returns 409 with the first block text unless
 `engine.state == "ready"`. Shutdown order: the router stops the session, then quits the engine.
-The engine starts lazily (the AK tab mounts in Keyer mode, or the first Keyer start) and stays up until the dashboard exits or the
-mode returns to Screen.
+**Engine lifetime = explicit handover (OD-M10).** The engine runs only while AK holds the UltraStudio: **Take output**
+(`POST /api/live/engine/start`) launches it; **Release output** (`POST /api/live/engine/quit`, refused while a session is loaded)
+quits it cleanly so ProPresenter can drive the device again; dashboard exit and a switch to Screen mode also release. Nothing starts
+the engine implicitly (no lazy start on tab mount), so AK never holds the device or sends a transparent key while idle.
 
 **State JSON (`GET /api/live/engine`):** `{state: "unavailable"|"stopped"|"starting"|"ready"|"blocked"|"stuck"|"quitting", reason?,
 obs: {path, version, pinned}, rate: {output, canvas, source}, device: {name, set}, keyer, warnings: [{id, severity:
@@ -164,7 +167,8 @@ obs: {path, version, pinned}, rate: {output, canvas, source}, device: {name, set
 
 **Dashboard.** `LivePresenter.tsx` gains an Output selector ("Screen (HDMI)" / "Keyer (fill + key via UltraStudio)"). Keyer mode
 shows the rate (25 / 30, labelled "Match the standard the Pulse shows"), keyer on/off, the device name, and a new `OutputEngine.tsx`
-panel (engine state, warnings, action buttons; polls every 2 s); `rateWarnings` shows beside `codecWarnings`. The Display picker is
+panel (engine state, **Take output / Release output**, warnings, action buttons; polls every 2 s; Start output session is disabled
+until the output is taken and ready); `rateWarnings` shows beside `codecWarnings`. The Display picker is
 hidden in Keyer mode. The lede "DeckLink fill + key is not qualified" [C] stays until the hardware day passes. `api.ts` gains the
 engine and output-settings types and methods, `bridge?`, `rateWarnings?`. Note [C]: `live_session.start` writes `transport: "hdmi"`
 into the loading snapshot until the first observation; Keyer mode must not flash "hdmi" — fixed in S5 with a test.
@@ -190,7 +194,10 @@ is visible.
 **Hardware-day checklist** (appended to `decklink-field-test-runbook.md`): Desktop Video installed, device listed · setup flow writes
 the file; record `device_hash`/`mode_id` · hidden relaunch auto-starts the key on In4 without a click · `outputActive` true; W11
 fires with the cable unplugged (record the log line) · runbook §1 test-card alpha checks through the managed engine · rate 25 → 30
-→ 25 (restart; the Pulse widget follows) · keyer off ⇒ fill only · does the device hash survive a replug / another port?
+→ 25 (restart; the Pulse widget follows) · keyer off ⇒ fill only · does the device hash survive a replug / another port? ·
+**ProPresenter handover:** with ProPresenter driving the HD Mini, press Take output with (a) its SDI screen present ⇒ W11 expected,
+(b) its SDI screen deleted, (c) ProPresenter quit — record which frees the device; then Release output ⇒ ProPresenter reclaims it
+(re-add the screen / relaunch) with fill + key on In3/In4.
 
 ## 7. Security — obs-websocket listens on every interface [M, source: no bind-address option]
 
@@ -271,7 +278,9 @@ gate untouched? (8) can any engine action run while a session is loaded?
 6. The DeckLink path has had zero hardware contact; §6 is entirely on-the-day.
 7. The one-time setup shows OBS to an operator (OD-M3).
 8. If the dashboard dies mid-show, OBS keeps keying the last slide on air until the dashboard is relaunched (it quits the old engine).
-9. While the engine runs, the UltraStudio is owned by AK's OBS and sends a transparent key even with no show running (OD-M10).
+9. ProPresenter cannot share the UltraStudio: its SDI screens are always on (Renewed Vision KB) and DeckLink output is exclusive to
+   one app. Worst case the operator quits ProPresenter before **Take output** and reopens it after **Release output** (owner-accepted);
+   whether deleting ProPresenter's SDI screen frees the device without quitting is a hardware-day item (§6).
 
 ## 12. v2 (deferred)
 
@@ -295,12 +304,19 @@ lifetime; orphans never adopted; W3 split into crash vs waiting; password permis
   moves only by a deliberate change after the qualification harness passes on the new release.
 - **OD-M5 — websocket on, strong password entropy:** `secrets.token_urlsafe(32)` = 256 bits from the OS CSPRNG, a new password every
   launch, never logged or returned by the API (tested).
-- **OD-M10 — OPEN, redirected by the owner:** ProPresenter 7 can switch its output on and off. When ProPresenter's output is off,
+- **OD-M10 — RESOLVED (2026-09-24): explicit Take / Release output (§5).** History — ProPresenter 7 can switch its output on and off. When ProPresenter's output is off,
   AK takes over the UltraStudio; when ProPresenter's output is on, AK stands down. The owner sees this as the only clash.
   Pending: are AK and ProPresenter on the SAME Mac? If they are on different Macs, the Thunderbolt cable decides ownership and AK needs
   no coordination; if they share one Mac, research first: (1) whether ProPresenter 7's network API reports its SDI output state;
   (2) whether ProPresenter releases the DeckLink device while its output is off; (3) AK stands down by quitting its OBS (the DeckLink
   output cannot be stopped safely over the websocket, §6) and takes over by relaunching with auto-start.
 
+  Research (Renewed Vision KB + Blackmagic SDK): ProPresenter's SDI screens are always on (the Audience/Stage toggles and the API's
+  `PUT /v1/status/audience_screens` do not affect SDI); clearing layers only changes content; DeckLink output is exclusive per device
+  (`E_ACCESSDENIED` for a second app until `DisableVideoOutput`); PP 7's API (7.9+, default port 50001, no auth) can read screen
+  toggles but cannot identify the SDI screen or release the device. Owner: same Mac first (explicit handover; worst case quit
+  ProPresenter before Take output, reopen after Release — acceptable); fallback = the venue's backup Mac with the UltraStudio cable
+  moved. A ProPresenter-status hint via its API is out of v1.
+
 Resolved without the owner (critique, from facts): 50/60 deferred (60-fps cap); W8 Keyer-only, warn-only; W6 deferred; external
-attach kept unchanged; lazy engine start (revisit with OD-M10); no code-signature check in v1.
+attach kept unchanged; no code-signature check in v1.
