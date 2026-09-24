@@ -334,6 +334,19 @@ def _merge_legacy_slides(
         slide["groupChildrenUnavailable"] = True
 
 
+def _offline_payload_carries_needs_keynote(payload: dict[str, Any] | None) -> bool:
+    """Every item of every offline-decoded slide carries `needsKeynote` (value may be None);
+    JXA-fallback slides (`groupChildrenUnavailable`) and non-offline payloads are exempt."""
+    if not isinstance(payload, dict) or payload.get("reader") != "offline":
+        return True
+    for slide in payload.get("slides") or []:
+        if slide.get("groupChildrenUnavailable"):
+            continue
+        if any("needsKeynote" not in item for item in slide.get("items") or []):
+            return False
+    return True
+
+
 def acquire_wall_payload(
     source: Path,
     *,
@@ -349,7 +362,9 @@ def acquire_wall_payload(
     allowed_readers = {"jxa", "offline"} if mode == "on" else {"jxa"}
     rejected_cache = cached is not None
     usable = complete_cached_wall_payload(cached) and cached.get("reader") in allowed_readers
-    carries = mode != "on" or wall_payload_carries_aspect(cached)
+    carries_aspect = wall_payload_carries_aspect(cached)
+    carries_needs = _offline_payload_carries_needs_keynote(cached)
+    carries = mode != "on" or (carries_aspect and carries_needs)
     # A cached JXA read is coordinate-space-incompatible with `groupChildren` (archive
     # offsets vs a JXA group's live union frame — see attach_group_children's gate), so in
     # mode "on" it must not be served merely because a fresh offline decode would succeed;
@@ -383,9 +398,12 @@ def acquire_wall_payload(
         say(f"Cached offline read of {source.name} is not from a mixed-slide-tagged "
             "two-tier read; re-reading offline.")
 
-    if rejected_cache and mode == "on" and usable and not carries:
+    if rejected_cache and mode == "on" and usable and not carries_aspect:
         say(f"Cached {cached['reader']} read of {source.name} predates per-item aspect; "
             "re-reading.")
+    elif rejected_cache and mode == "on" and usable and not carries_needs:
+        say(f"Cached {cached['reader']} read of {source.name} predates per-item "
+            "needsKeynote; re-reading.")
 
     legacy_cache_arg = {"use_cache": False} if rejected_cache else {}
     if mode == "off":
