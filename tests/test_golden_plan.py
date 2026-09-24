@@ -297,17 +297,19 @@ def test_propose_auto_rects_match_apply_transforms(monkeypatch: pytest.MonkeyPat
 
     # Off-canvas Magic Move partners are kept by a cross-slide post-pass that the per-slide
     # preview cannot see (accepted in .agents/plans/mm_offcanvas_partners.plan.md). Apply may
-    # add exactly the plan's Oracle 22, addressed by kindIndex, and each one's true drawn
+    # add exactly the plan's Oracle 22 plus slide 16's seven off-canvas pin dots (shapes 0-6),
+    # which the shape gate key pairs with slide 17's pin (.agents/plans/mm_shape_identity.plan.md
+    # §3a), addressed by kindIndex, and each one's true drawn
     # box (x/y is the rotated AABB top-left, only the extent turns) grown by MM_EDGE_MARGIN
     # must miss the 1920x1080 CG canvas.
     oracle = {
         (16, "text", 0), (16, "image", 3), (16, "image", 4),
-        *((16, "shape", i) for i in (7, 8, 9, 10)),
+        *((16, "shape", i) for i in range(11)),
         (17, "text", 0), (17, "image", 1), (17, "image", 6), (17, "shape", 0), (17, "shape", 2),
         (130, "image", 3), (130, "image", 4), (130, "shape", 1),
         *((130, "group", i) for i in range(7)),
     }
-    assert len(oracle) == 22
+    assert len(oracle) == 29
     rotation = {
         (int(s.get("number") or s["index"] + 1), it["kind"], it.get("kindIndex")): float(it.get("rotation") or 0.0)
         for s in fresh_wall["slides"]
