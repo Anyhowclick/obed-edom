@@ -20,6 +20,7 @@ from obed_edom.managed_obs import (
     PINNED_OBS,
     ManagedObs,
     ManagedObsError,
+    ObsProcess,
     TreeConfig,
     last_version,
     render_tree,
@@ -230,6 +231,8 @@ class FakeLauncher:
         self.dates: dict[int, float | None] = {}
         self.homes: dict[int, str | None] = {}
         self.marker_unknown: set[int] = set()
+        self.processes_fail = False
+        self.stale: list[ObsProcess] = []
         self.terminated: list[int] = []
         self.shown: list[int] = []
         self.quits = True
@@ -259,14 +262,23 @@ class FakeLauncher:
         return pid, self.dates[pid]
 
     def processes(self):
-        return [(pid, self.dates.get(pid)) for pid in sorted(self.alive_pids)]
+        if self.processes_fail:
+            raise OSError("LaunchServices unavailable")
+        return [ObsProcess(pid, self.dates.get(pid), handle=("app", pid, self.dates.get(pid))) for pid in sorted(self.alive_pids)]
+
+    def _verified(self, process):
+        live = ("app", process.pid, self.dates.get(process.pid))
+        return process.pid in self.alive_pids and process.handle == live
 
     def env_marker(self, pid, home):
         if pid in self.marker_unknown:
             return None
         return pid in self.alive_pids and self.homes.get(pid) == str(home)
 
-    def terminate(self, pid):
+    def terminate(self, process):
+        if not self._verified(process):
+            return False
+        pid = process.pid
         self.terminated.append(pid)
         if self.on_terminate is not None:
             self.on_terminate(pid)
@@ -274,8 +286,10 @@ class FakeLauncher:
             self.alive_pids.discard(pid)
         return True
 
-    def show(self, pid):
-        self.shown.append(pid)
+    def show(self, process):
+        if not self._verified(process):
+            return False
+        self.shown.append(process.pid)
         return True
 
 
@@ -860,7 +874,7 @@ def test_reset_page_navigates_the_target_back_to_blank(rig):
     r = rig()
     r.run(lambda: r.engine.ensure_started(25, "external"))
     r.cdp.targets = [r.cdp.page("T1", "http://127.0.0.1:9/program.html")]
-    r.run(r.engine.reset_page)
+    r.run(lambda: r.engine.check(reset_page=True))
     assert r.cdp.navigations == [("T1", PAGE_URL)]
     assert r.engine.state()["state"] == "ready"
 
@@ -877,7 +891,8 @@ def test_orphan_is_always_quit_then_relaunched(rig):
     assert r.launcher.terminated == [999]
     assert [launch["pid"] for launch in r.launcher.launches] == [4242]
     assert state["state"] == "ready"
-    assert "obsUncleanExit" not in _ids(state)
+    assert "obsUncleanExit" in _ids(state), "W3 is snapshotted before orphan cleanup"
+    assert r.record()["pid"] == 4242
 
 
 def test_orphan_is_quit_on_first_check(rig):
@@ -1085,18 +1100,127 @@ def test_current_engine_with_incomplete_identity_is_never_acted_on(rig):
     r.launcher.dates[4242] = None
     state = r.run(r.engine.quit)
     assert r.launcher.terminated == []
-    assert state["state"] == "stuck"
+    assert state["state"] == "blocked" and state["reason"] == "identityUnknown"
     r.run(r.engine.show)
     assert r.launcher.shown == []
 
 
-def test_unknown_marker_is_never_acted_on(rig):
+def _tree_bytes(tree: Path) -> dict[str, bytes]:
+    return {str(path.relative_to(tree)): path.read_bytes() for path in tree.rglob("*") if path.is_file()}
+
+
+IDENTITY_UNKNOWN_TEXT = ("Alpha Keynote cannot confirm which OBS is its own, so it will not start or stop OBS. "
+                         "Quit any OBS you opened yourself, then press Check again.")
+
+
+@pytest.mark.parametrize("failure", ["marker", "processes"])
+def test_unknown_identity_launches_nothing_writes_nothing_terminates_nothing(rig, failure):
     r = rig()
-    r.launcher.add(777, 50.0, r.home)
-    r.launcher.marker_unknown.add(777)
-    assert r.engine.has_orphan() is False
     r.run(lambda: r.engine.ensure_started(25, "external"))
+    r.run(r.engine.quit)
+    before = _tree_bytes(r.tree)
+    record = (r.home / "ak-engine.json").read_bytes()
+    r.launcher.add(777, 50.0, r.home)
+    if failure == "marker":
+        r.launcher.marker_unknown.add(777)
+    else:
+        r.launcher.processes_fail = True
+    assert r.engine.has_orphan() is True, "unknown must make S5 run check() so the warning shows"
+    for action in (lambda: r.engine.ensure_started(25, "external"), lambda: r.engine.restart(30, "off"),
+                   lambda: r.engine.setup_device_begin(25), r.engine.check, r.engine.quit):
+        state = r.run(action)
+        assert state["state"] == "blocked" and state["reason"] == "identityUnknown"
+    warning = next(w for w in state["warnings"] if w["id"] == "obsIdentityUnknown")
+    assert warning == {"id": "obsIdentityUnknown", "severity": "block", "action": "check", "text": IDENTITY_UNKNOWN_TEXT}
+    assert len(r.launcher.launches) == 1 and r.launcher.terminated == [4242]
+    assert _tree_bytes(r.tree) == before
+    assert (r.home / "ak-engine.json").read_bytes() == record
+    r.launcher.marker_unknown.clear()
+    r.launcher.processes_fail = False
+    r.launcher.homes[777] = "/Users/someone"
+    state = r.run(r.engine.check)
+    assert state["state"] == "stopped" and "obsIdentityUnknown" not in _ids(state)
     assert 777 not in r.launcher.terminated
+
+
+def test_readiness_requires_verified_ownership(rig):
+    r = rig()
+    r.launcher.on_launch = lambda launcher, pid: launcher.marker_unknown.add(pid)
+    state = r.run(lambda: r.engine.ensure_started(25, "external"))
+    assert state["state"] == "blocked" and state["reason"] == "identityUnknown"
+    assert r.engine.target_id is None
+    r.launcher.marker_unknown.clear()
+    assert r.run(r.engine.check)["state"] == "ready"
+
+
+@pytest.mark.parametrize("failure", ["marker", "processes"])
+def test_liveness_on_unknown_identity_has_a_bounded_grace(rig, failure):
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    requests_before = len(r.ws.requests)
+    if failure == "marker":
+        r.launcher.marker_unknown.add(4242)
+    else:
+        r.launcher.processes_fail = True
+    r.engine._liveness()
+    r.engine._liveness()
+    assert r.engine.state()["state"] == "ready"
+    assert len(r.ws.requests) == requests_before + 2, "read-only probes keep running during the grace"
+    r.engine._liveness()
+    state = r.engine.state()
+    assert state["reason"] == "identityUnknown" and "obsIdentityUnknown" in _ids(state)
+    state = r.run(r.engine.quit)
+    assert r.launcher.terminated == [] and state["reason"] == "identityUnknown"
+    r.launcher.marker_unknown.clear()
+    r.launcher.processes_fail = False
+    r.engine._liveness()
+    assert r.engine.state()["state"] == "ready"
+
+
+def test_terminate_acts_only_on_the_verified_process_object(rig):
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    real = r.launcher.terminate
+
+    def reuse_pid_then_terminate(process):
+        r.launcher.dates[4242] = 9999.0
+        r.launcher.homes[4242] = None
+        return real(process)
+
+    r.launcher.terminate = reuse_pid_then_terminate
+    state = r.run(r.engine.quit)
+    assert r.launcher.terminated == []
+    assert 4242 in r.launcher.alive_pids
+    assert state["state"] == "stopped"
+    assert r.record()["cleanExit"] is False, "an exit AK did not cause is never clean"
+
+
+class _FakeNSApp:
+    def __init__(self, pid, bundle, date, terminated=False):
+        self.pid, self.bundle, self.date, self.dead, self.terminate_calls = pid, bundle, date, terminated, 0
+
+    def processIdentifier(self): return self.pid
+    def bundleIdentifier(self): return self.bundle
+    def isTerminated(self): return self.dead
+    def launchDate(self): return None if self.date is None else type("D", (), {"timeIntervalSince1970": lambda _self: self.date})()
+    def terminate(self):
+        self.terminate_calls += 1
+        return True
+
+
+@pytest.mark.parametrize("app, recorded, acts", [
+    (_FakeNSApp(5, "com.obsproject.obs-studio", 100.0), 100.0, True),
+    (_FakeNSApp(5, "com.obsproject.obs-studio", 100.0, terminated=True), 100.0, False),
+    (_FakeNSApp(6, "com.obsproject.obs-studio", 100.0), 100.0, False),
+    (_FakeNSApp(5, "org.example.other", 100.0), 100.0, False),
+    (_FakeNSApp(5, "com.obsproject.obs-studio", 200.0), 100.0, False),
+    (_FakeNSApp(5, "com.obsproject.obs-studio", None), 100.0, False),
+    (_FakeNSApp(5, "com.obsproject.obs-studio", None), None, True),
+])
+def test_appkit_launcher_rechecks_the_same_object_before_acting(app, recorded, acts):
+    process = ObsProcess(5, recorded, app)
+    assert managed_obs.AppKitLauncher().terminate(process) is acts
+    assert app.terminate_calls == (1 if acts else 0)
 
 
 def test_launch_without_a_date_is_still_ours_by_marker(rig):
@@ -1321,3 +1445,166 @@ def test_version_mismatch_then_install_then_check_is_ready(rig):
     state = r.run(r.engine.check)
     assert state["state"] == "ready" and "obsVersion" not in _ids(state)
     assert r.launcher.terminated == [4242] and len(r.launcher.launches) == 2
+
+
+# --- check(reset_page) (R2-1) -----------------------------------------------
+
+
+def _hold(engine: ManagedObs) -> threading.Event:
+    release = threading.Event()
+    engine._submit(lambda: release.wait(15))
+    return release
+
+
+def test_check_reset_page_publishes_starting_until_it_has_run(rig):
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    r.cdp.targets = [r.cdp.page("T1", "http://127.0.0.1:9/program.html")]
+    release = _hold(r.engine)
+    r.engine.check(reset_page=True)
+    assert r.engine.state()["state"] == "starting" and r.engine.active is True
+    assert r.cdp.navigations == []
+    release.set()
+    assert r.engine.wait_idle(15)
+    assert r.engine.state()["state"] == "ready"
+    assert r.cdp.navigations == [("T1", PAGE_URL)]
+
+
+def test_check_without_reset_publishes_nothing(rig):
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    release = _hold(r.engine)
+    r.engine.check()
+    assert r.engine.state()["state"] == "ready"
+    release.set()
+    assert r.engine.wait_idle(15)
+    assert r.cdp.navigations == []
+
+
+def test_check_reset_page_skips_an_engine_that_is_not_ready(rig):
+    r = rig()
+    r.cdp.targets = []
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    state = r.run(lambda: r.engine.check(reset_page=True))
+    assert state["reason"] == "timeout" and r.cdp.navigations == []
+
+
+# --- apply_settings (R2-2) --------------------------------------------------
+
+
+def test_apply_settings_validates(rig):
+    r = rig()
+    for args in (("hdmi", 25, "external"), ("keyer", 50, "external"), ("screen", 25, "internal")):
+        with pytest.raises(ValueError):
+            r.engine.apply_settings(*args)
+    assert r.engine._thread is None
+
+
+@pytest.mark.parametrize("rate", [25, 30])
+def test_apply_settings_keyer_never_launches(rig, rate):
+    r = rig()
+    release = _hold(r.engine)
+    r.engine.apply_settings("screen", 25, "external")
+    r.engine.apply_settings("keyer", rate, "external")
+    assert r.engine.state()["state"] == "stopped"
+    assert r.engine.state()["rate"]["output"] == rate
+    release.set()
+    assert r.engine.wait_idle(15)
+    assert r.launcher.launches == [] and r.engine.state()["state"] == "stopped"
+    assert r.engine._lock_file is None
+
+
+def test_apply_settings_screen_then_keyer_same_rate_coalesces_to_no_change(rig):
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    release = _hold(r.engine)
+    r.engine.apply_settings("screen", 25, "external")
+    assert r.engine.state()["state"] == "quitting"
+    r.engine.apply_settings("keyer", 25, "external")
+    release.set()
+    assert r.engine.wait_idle(15)
+    assert r.engine.state()["state"] == "ready"
+    assert r.launcher.terminated == [] and len(r.launcher.launches) == 1
+
+
+def test_apply_settings_screen_then_keyer_new_rate_restarts_once(rig):
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    release = _hold(r.engine)
+    r.engine.apply_settings("screen", 25, "external")
+    r.engine.apply_settings("keyer", 30, "external")
+    assert r.engine.state()["state"] in ("quitting", "starting")
+    release.set()
+    assert r.engine.wait_idle(15)
+    state = r.engine.state()
+    assert state["state"] == "ready" and state["rate"]["output"] == 30
+    assert r.launcher.terminated == [4242] and len(r.launcher.launches) == 2
+
+
+def test_apply_settings_keyer_rate_change_while_running_is_one_restart(rig):
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    release = _hold(r.engine)
+    r.engine.apply_settings("keyer", 30, "external")
+    assert r.engine.state()["state"] == "starting" and r.engine.active is True
+    r.engine.apply_settings("keyer", 30, "off")
+    release.set()
+    assert r.engine.wait_idle(15)
+    state = r.engine.state()
+    assert state["state"] == "ready" and state["keyer"] == "off" and state["rate"]["output"] == 30
+    assert r.launcher.terminated == [4242] and len(r.launcher.launches) == 2
+    assert "FPSCommon=30\n" in (r.tree / "basic/profiles/AK/basic.ini").read_text()
+
+
+def test_apply_settings_keyer_to_screen_quits(rig):
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    release = _hold(r.engine)
+    r.engine.apply_settings("screen", 25, "external")
+    assert r.engine.state()["state"] == "quitting"
+    release.set()
+    assert r.engine.wait_idle(15)
+    state = r.engine.state()
+    assert state["state"] == "stopped" and r.engine.active is False
+    assert r.launcher.terminated == [4242] and r.record()["cleanExit"] is True
+
+
+def test_apply_settings_keyer_same_settings_is_a_noop(rig):
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    r.engine.apply_settings("keyer", 25, "external")
+    assert r.engine.state()["state"] == "ready"
+    assert r.engine.wait_idle(15)
+    assert r.launcher.terminated == [] and len(r.launcher.launches) == 1
+
+
+# --- shutdown is terminal (R2-7) --------------------------------------------
+
+
+def test_shutdown_then_close_keeps_the_clean_quit_before_releasing_the_lock(rig):
+    r = rig()
+    r.run(r.engine.check)
+    r.launcher.block = threading.Event()
+    lock_held_at_terminate: list[bool] = []
+    r.launcher.on_terminate = lambda pid: lock_held_at_terminate.append(r.engine._lock_file is not None)
+    r.engine.ensure_started(25, "external")
+    assert r.launcher.entered.wait(5)
+    assert r.engine.shutdown(0.1) is False
+    assert r.engine.close(0.1) is False
+    assert r.engine._lock_file is not None
+    r.launcher.block.set()
+    assert r.engine.close(15) is True
+    assert r.launcher.terminated == [4242] and 4242 not in r.launcher.alive_pids
+    assert lock_held_at_terminate == [True]
+    assert r.engine._lock_file is None
+    assert r.engine.shutdown(1) is True
+    assert r.launcher.terminated == [4242]
+
+
+def test_close_then_shutdown_still_quits(rig):
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    assert r.engine.close(5) is True
+    assert 4242 in r.launcher.alive_pids
+    assert r.engine.shutdown(5) is True
+    assert r.launcher.terminated == [4242] and 4242 not in r.launcher.alive_pids

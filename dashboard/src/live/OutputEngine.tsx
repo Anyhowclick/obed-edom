@@ -23,7 +23,8 @@ const WARNING_ACTIONS: Record<string, LiveEngineAction[]> = {
   obsUnreachable: ["restart"],
   noDevice: ["setupDevice"],
   deviceInactive: ["quit", "start"],
-  stuck: ["show"],
+  stuck: ["show", "check"],
+  obsIdentityUnknown: ["check"],
   ownedElsewhere: ["check"],
 };
 

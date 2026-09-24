@@ -40,9 +40,10 @@ const WARNINGS: [LiveEngineWarning, string[]][] = [
   [{ id: "obsExited", severity: "block", text: "OBS stopped unexpectedly — nothing is going to the keyer. Press Restart output engine. OBS may then ask a question (see Show OBS)." }, ["Restart output engine"]],
   [{ id: "noDevice", severity: "warn", text: "No output device set for 25 fps — the keyer receives nothing. With the UltraStudio connected, press Set up output device (one time)." }, ["Set up output device"]],
   [{ id: "deviceInactive", severity: "block", text: "Alpha Keynote cannot open the UltraStudio. If ProPresenter is running, remove its SDI screen in Screen Configuration or quit ProPresenter; otherwise check the Thunderbolt cable and Desktop Video. Then press Release output and Take output again." }, ["Release output", "Take output"]],
-  [{ id: "stuck", severity: "block", text: "OBS is not responding to Quit. Press Show OBS and quit it from the OBS menu, then press Check again." }, ["Show OBS"]],
+  [{ id: "stuck", severity: "block", text: "OBS is not responding to Quit. Press Show OBS and quit it from the OBS menu, then press Check again." }, ["Show OBS", "Check again"]],
   [{ id: "ownedElsewhere", severity: "block", text: "The output engine is being used by another dashboard window (pid 4242). Close that dashboard first." }, ["Check again"]],
   [{ id: "obsUnreachable", severity: "block", text: "Alpha Keynote cannot reach OBS. Press Restart output engine.", action: "restart" }, ["Restart output engine"]],
+  [{ id: "obsIdentityUnknown", severity: "block", text: "Alpha Keynote cannot confirm which OBS is its own, so it will not start or stop OBS. Quit any OBS you opened yourself, then press Check again.", action: "check" }, ["Check again"]],
 ];
 
 const ENABLED_WHILE_LOADED: Record<string, string[]> = {
@@ -54,9 +55,10 @@ const ENABLED_WHILE_LOADED: Record<string, string[]> = {
   obsExited: ["Restart output engine"],
   noDevice: [],
   deviceInactive: [],
-  stuck: ["Show OBS"],
+  stuck: ["Show OBS", "Check again"],
   ownedElsewhere: ["Check again"],
   obsUnreachable: ["Restart output engine"],
+  obsIdentityUnknown: ["Check again"],
 };
 
 const ACTIONS: Record<string, LiveEngineAction> = {

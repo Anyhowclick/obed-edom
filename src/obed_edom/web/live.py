@@ -169,10 +169,7 @@ def live_router(runner, *, service=None, host_factory=None, displays=None, engin
             elif action == "restart":
                 managed.restart(rate, keyer)
             elif action == "check":
-                ready = managed.state()["state"] == "ready"
-                managed.check()
-                if ready and not current:
-                    managed.reset_page()
+                managed.check(reset_page=not current)
             elif action == "show":
                 managed.show()
             elif action == "quit":
@@ -192,17 +189,9 @@ def live_router(runner, *, service=None, host_factory=None, displays=None, engin
         with lock:
             if loaded_session():
                 raise HTTPException(409, STOP_SHOW_FIRST)
-            before = load_settings()
             changes = {key: value for key, value in body.model_dump().items() if value is not None}
-            saved = save_settings({**before, **changes}, validate_dir=False)
-            rate, keyer = saved["akOutputRate"], saved["akKeyer"]
-            managed = engine()
-            managed.configure(rate, keyer)
-            if managed.active:
-                if saved["akOutputMode"] == "screen":
-                    used_engine().quit()
-                elif (rate, keyer) != (before["akOutputRate"], before["akKeyer"]):
-                    used_engine().restart(rate, keyer)
+            saved = save_settings({**load_settings(), **changes}, validate_dir=False)
+            used_engine().apply_settings(saved["akOutputMode"], saved["akOutputRate"], saved["akKeyer"])
             return _output_settings(saved)
 
     @router.post("")

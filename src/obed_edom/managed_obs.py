@@ -21,7 +21,7 @@ import threading
 import time
 import urllib.request
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -54,6 +54,7 @@ WARNINGS: dict[str, tuple[str, str, str | None]] = {
     "obsExited": ("block", "OBS stopped unexpectedly — nothing is going to the keyer. Press Restart output engine. OBS may then ask a question (see Show OBS).", "restart"),
     "obsPageLost": ("block", "OBS lost the Alpha Keynote page — nothing is going to the keyer. Press Restart output engine.", "restart"),
     "obsUnreachable": ("block", "Alpha Keynote cannot reach OBS. Press Restart output engine.", "restart"),
+    "obsIdentityUnknown": ("block", "Alpha Keynote cannot confirm which OBS is its own, so it will not start or stop OBS. Quit any OBS you opened yourself, then press Check again.", "check"),
     "noDevice": ("warn", "No output device set for {rate} fps — the keyer receives nothing. With the UltraStudio connected, press Set up output device (one time).", "setupDevice"),
     "deviceInactive": ("block", "Alpha Keynote cannot open the UltraStudio. If ProPresenter is running, remove its SDI screen in Screen Configuration or quit ProPresenter; otherwise check the Thunderbolt cable and Desktop Video. Then press Release output and Take output again.", "quit"),
     "stuck": ("block", "OBS is not responding to Quit. Press Show OBS and quit it from the OBS menu, then press Check again.", "show"),
@@ -177,24 +178,35 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+@dataclass(frozen=True)
+class ObsProcess:
+    """One running OBS app as enumerated; `handle` is the object terminate/show act on."""
+
+    pid: int
+    launch_date: float | None
+    handle: Any = field(default=None, compare=False, repr=False)
 
 
 class Launcher(Protocol):
     def launch(self, app: Path, args: list[str], env: dict[str, str], *, hidden: bool,
                on_launched: Callable[[int, float | None], None]) -> tuple[int, float | None]: ...
-    def processes(self) -> list[tuple[int, float | None]]: ...
+    def processes(self) -> list[ObsProcess]: ...
     def env_marker(self, pid: int, home: Path) -> bool | None: ...
-    def terminate(self, pid: int) -> bool: ...
-    def show(self, pid: int) -> bool: ...
+    def terminate(self, process: ObsProcess) -> bool: ...
+    def show(self, process: ObsProcess) -> bool: ...
 
 
 def _home_marker(command: str, home: Path) -> bool:
     return re.search("(?:^| )CFFIXED_USER_HOME=" + re.escape(str(home)) + r"(?=$| [A-Za-z_][A-Za-z0-9_]*=)", command.strip()) is not None
 
 
+def _epoch(date: Any) -> float | None:
+    return date.timeIntervalSince1970() if date is not None else None
+
+
 class AppKitLauncher:
     """NSWorkspace launch; running OBS apps by bundle id; the CFFIXED_USER_HOME marker via `ps -E`.
-    ManagedObs checks identity before it asks this to terminate or show a pid."""
+    terminate/show act on the enumerated NSRunningApplication itself, re-checked just before acting."""
 
     _LAUNCH_TIMEOUT_S = 15.0
 
@@ -215,8 +227,7 @@ class AppKitLauncher:
         def handler(running: Any, error: Any) -> None:
             try:
                 if running is not None:
-                    launched = running.launchDate()
-                    result["launched"] = (int(running.processIdentifier()), launched.timeIntervalSince1970() if launched is not None else None)
+                    result["launched"] = (int(running.processIdentifier()), _epoch(running.launchDate()))
                     on_launched(*result["launched"])
                 result["error"] = error
             except Exception as exc:
@@ -235,16 +246,12 @@ class AppKitLauncher:
             raise ManagedObsError(f"OBS could not be launched: {result.get('error')}")
         return result["launched"]
 
-    def processes(self) -> list[tuple[int, float | None]]:
+    def processes(self) -> list[ObsProcess]:
         import AppKit
 
-        found = []
-        for app in AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_(OBS_BUNDLE_ID):
-            if app.isTerminated():
-                continue
-            launched = app.launchDate()
-            found.append((int(app.processIdentifier()), launched.timeIntervalSince1970() if launched is not None else None))
-        return found
+        return [ObsProcess(int(app.processIdentifier()), _epoch(app.launchDate()), app)
+                for app in AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_(OBS_BUNDLE_ID)
+                if not app.isTerminated()]
 
     def env_marker(self, pid: int, home: Path) -> bool | None:
         try:
@@ -256,20 +263,25 @@ class AppKitLauncher:
         return _home_marker(result.stdout, home)
 
     @staticmethod
-    def _app(pid: int) -> Any:
-        import AppKit
+    def _verified(process: ObsProcess) -> Any:
+        app = process.handle
+        if app is None or app.isTerminated() or int(app.processIdentifier()) != process.pid or app.bundleIdentifier() != OBS_BUNDLE_ID:
+            return None
+        launched = _epoch(app.launchDate())
+        if (launched is None) != (process.launch_date is None):
+            return None
+        if launched is not None and abs(launched - process.launch_date) > 1.0:
+            return None
+        return app
 
-        app = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
-        return app if app is not None and app.bundleIdentifier() == OBS_BUNDLE_ID else None
-
-    def terminate(self, pid: int) -> bool:
-        app = self._app(pid)
+    def terminate(self, process: ObsProcess) -> bool:
+        app = self._verified(process)
         return bool(app is not None and app.terminate())
 
-    def show(self, pid: int) -> bool:
+    def show(self, process: ObsProcess) -> bool:
         import AppKit
 
-        app = self._app(pid)
+        app = self._verified(process)
         if app is None:
             return False
         app.unhide()
@@ -313,17 +325,19 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
 
 
 _FAILURE_LIMIT = 3
-_RECHECKABLE = ("timeout", "safeMode", "pageLost", "obsUnreachable", "engineError")
-_TRANSIENT_WARNINGS = ("obsWaiting", "obsSafeMode", "obsPageLost", "obsUnreachable", "deviceInactive", "engineError")
+_RECHECKABLE = ("timeout", "safeMode", "pageLost", "obsUnreachable", "engineError", "identityUnknown")
+_TRANSIENT_WARNINGS = ("obsWaiting", "obsSafeMode", "obsPageLost", "obsUnreachable", "obsIdentityUnknown", "deviceInactive", "engineError")
+OUTPUT_MODES = ("screen", "keyer")
 
 
 class ManagedObs:
     """One per dashboard process. Public actions return at once; the work runs on
     a single engine thread in submission order. `state()` is the dashboard JSON.
 
-    An OBS process is ours only when it is a running OBS app whose environment
-    carries `CFFIXED_USER_HOME=<home>` and, when a launch date is recorded, whose
-    launch date matches. AK never terminates or shows anything else."""
+    Identity is tri-state. An OBS process is ours only when it is a running OBS app
+    whose environment carries `CFFIXED_USER_HOME=<home>` and, when a launch date is
+    recorded, whose launch date matches. When that cannot be established AK fails
+    closed: it launches nothing, writes no tree file and terminates nothing."""
 
     def __init__(self, home: Path = DEFAULT_HOME, *, launcher: Launcher | None = None, clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], None] = time.sleep, obs_app: Path = OBS_APP, pick_port: Callable[[], int] = free_port,
@@ -340,6 +354,9 @@ class ManagedObs:
         self._jobs: "queue.Queue[tuple[Callable[[], Any], bool] | None]" = queue.Queue()
         self._thread: threading.Thread | None = None
         self._stopping = threading.Event()
+        self._drained = False
+        self._quit_on_exit = False
+        self._worker_exiting = False
         self._lock_file: Any = None
         self._obs: dict[str, Any] | None = None
         self._state = "stopped"
@@ -347,6 +364,8 @@ class ManagedObs:
         self._pending = 0
         self._pending_state: str | None = None
         self._rate, self._keyer = 25, "external"
+        self._desired: tuple[str, int, str] | None = None
+        self._apply_queued = False
         self._launched: tuple[int, str] | None = None
         self._setup_rate: int | None = None
         self._warnings: dict[str, dict[str, Any]] = {}
@@ -357,7 +376,7 @@ class ManagedObs:
         self._ws_password: str | None = None
         self._target_id: str | None = None
         self._ready_at: float | None = None
-        self._inactive_reads = self._cdp_failures = self._ws_failures = 0
+        self._inactive_reads = self._cdp_failures = self._ws_failures = self._unknown_ticks = 0
 
     @property
     def cdp_endpoint(self) -> str | None:
@@ -371,7 +390,7 @@ class ManagedObs:
 
     @property
     def active(self) -> bool:
-        """True while our OBS runs (as last observed) or a launch/restart/quit/setup is pending."""
+        """True while our OBS runs (as last observed) or an action that may launch or quit it is pending."""
         with self._lock:
             return self._pending > 0 or self._pid is not None
 
@@ -393,7 +412,7 @@ class ManagedObs:
                 warnings.append(self._warning("noDevice", rate=self._rate))
             if self._pending_state is not None:
                 state, reason = self._pending_state, None
-            elif discovery is not None and self._pid is None:
+            elif discovery is not None and self._pid is None and self._reason != "identityUnknown":
                 state, reason = "unavailable", discovery["id"]
             else:
                 state, reason = self._state, self._reason
@@ -416,9 +435,32 @@ class ManagedObs:
         with self._lock:
             self._rate, self._keyer = rate, keyer
 
+    def apply_settings(self, mode: str, rate: int, keyer: str) -> None:
+        """Converge a running engine on the latest output settings: Screen quits it, a Keyer
+        rate/keyer change restarts it; selecting Keyer never launches. Queued calls coalesce."""
+        if mode not in OUTPUT_MODES:
+            raise ValueError(f"Unsupported output mode {mode!r}; supported: {list(OUTPUT_MODES)}.")
+        self._validate(rate, keyer)
+        with self._lock:
+            self._rate, self._keyer = rate, keyer
+            self._desired = (mode, rate, keyer)
+            taken = self._pid is not None or self._pending_state == "starting"
+            publish = ""
+            if mode == "screen" and self.active:
+                publish = "quitting"
+            elif mode == "keyer" and taken and (rate, keyer) != self._launched:
+                publish = "starting"
+            if self._apply_queued:
+                if publish:
+                    self._pending_state = publish
+                return
+            self._apply_queued = self._submit(self._apply, publish)
+
     def has_orphan(self) -> bool:
-        """True when a running OBS carries our home marker and is not our current engine."""
-        return bool(self._orphans())
+        """True when a running OBS carries our home marker and is not our current engine, or when
+        that cannot be determined (so a `check()` surfaces obsIdentityUnknown)."""
+        orphans = self._orphans()
+        return orphans is None or bool(orphans)
 
     def ensure_started(self, rate: int, keyer: str) -> None:
         self._validate(rate, keyer)
@@ -434,14 +476,13 @@ class ManagedObs:
     def quit(self) -> None:
         self._submit(lambda: self._acquire() and self._quit() and self._quit_orphans(), "quitting")
 
-    def check(self) -> None:
-        self._submit(self._check)
+    def check(self, reset_page: bool = False) -> None:
+        """Re-evaluate the engine; with `reset_page`, also return a ready engine's page to
+        `about:blank#obed-ak`, publishing "starting" until that has run."""
+        self._submit(lambda: self._check(reset_page), "starting" if reset_page else None)
 
     def show(self) -> None:
         self._submit(self._show)
-
-    def reset_page(self) -> None:
-        self._submit(self._reset_page)
 
     def setup_device_begin(self, rate: int) -> None:
         self._validate(rate, self._keyer)
@@ -456,56 +497,62 @@ class ManagedObs:
         return self._submit(done.set) and done.wait(timeout)
 
     def shutdown(self, timeout: float) -> bool:
-        """Cancel queued actions and readiness waits, quit our OBS cleanly (never a kill),
-        then stop the engine thread. The engine lock is released only once the thread has
-        ended; False means it did not end in time and the lock stays held."""
+        """Terminal and idempotent: drop queued actions, cancel readiness waits, then quit our
+        OBS cleanly (never a kill) as the engine thread's last act. The engine lock is released
+        only once that thread has ended; False means it has not yet (call again to keep waiting)."""
         with self._lock:
             self._stopping.set()
+            self._quit_on_exit = True
+            self._drain_once()
+            if (self._thread is None or self._worker_exiting) and self._pid is not None:
+                self._start_worker()
             thread = self._thread
-            self._drain()
-        if thread is None:
-            self._release_lock()
-            return True
-        self._jobs.put((self._quit, False))
-        self._jobs.put(None)
+            if thread is not None:
+                self._jobs.put(None)
         return self._join(thread, timeout)
 
     def close(self, timeout: float = 5.0) -> bool:
-        """Stop the engine thread without quitting OBS; the lock is released only once the thread has ended."""
+        """Stop the engine thread; OBS is quit only if `shutdown()` asked for it. The lock is
+        released only once the thread has ended."""
         with self._lock:
             self._stopping.set()
+            self._drain_once()
             thread = self._thread
-            self._drain()
-        if thread is None:
-            self._release_lock()
-            return True
-        self._jobs.put(None)
+            if thread is not None:
+                self._jobs.put(None)
         return self._join(thread, timeout)
 
-    def _drain(self) -> None:
+    def _drain_once(self) -> None:
+        if self._drained:
+            return
+        self._drained = True
         while True:
             try:
                 item = self._jobs.get_nowait()
             except queue.Empty:
-                return
+                break
             if item is not None and item[1]:
                 self._finish_pending()
+        self._apply_queued = False
 
-    def _join(self, thread: threading.Thread, timeout: float) -> bool:
-        thread.join(timeout)
-        if thread.is_alive():
-            log.warning("managed OBS engine thread did not stop within %ss; keeping the engine lock", timeout)
-            return False
-        with self._lock:
-            self._thread = None
-        self._release_lock()
-        return True
+    def _start_worker(self) -> None:
+        self._worker_exiting = False
+        self._thread = threading.Thread(target=self._run, name="managed-obs", daemon=True)
+        self._thread.start()
 
-    def _release_lock(self) -> None:
+    def _join(self, thread: threading.Thread | None, timeout: float) -> bool:
+        if thread is not None:
+            thread.join(timeout)
+            if thread.is_alive():
+                log.warning("managed OBS engine thread did not stop within %ss; keeping the engine lock", timeout)
+                return False
         with self._lock:
+            if self._thread is thread:
+                self._thread = None
             if self._lock_file is not None:
                 self._lock_file.close()
                 self._lock_file = None
+        return True
 
     @staticmethod
     def _validate(rate: int, keyer: str) -> None:
@@ -515,15 +562,17 @@ class ManagedObs:
             raise ValueError(f"Unsupported keyer {keyer!r}; supported: {list(KEYERS)}.")
 
     def _submit(self, job: Callable[[], Any], pending: str | None = None) -> bool:
+        """Queue `job`. A `pending` string (even "") counts as pending for `active`; a
+        non-empty one is also published as the state until the queue has run it."""
         with self._lock:
             if self._stopping.is_set():
                 return False
             if self._thread is None:
-                self._thread = threading.Thread(target=self._run, name="managed-obs", daemon=True)
-                self._thread.start()
+                self._start_worker()
             if pending is not None:
                 self._pending += 1
-                self._pending_state = pending
+                if pending:
+                    self._pending_state = pending
             self._jobs.put((job, pending is not None))
         return True
 
@@ -542,6 +591,16 @@ class ManagedObs:
                     continue
                 item = (self._liveness, False)
             if item is None:
+                with self._lock:
+                    quit_now = self._quit_on_exit
+                    self._worker_exiting = not quit_now
+                if quit_now:
+                    try:
+                        self._quit()
+                    except Exception as exc:
+                        log.error("managed OBS shutdown quit failed: %s", type(exc).__name__)
+                with self._lock:
+                    self._worker_exiting = True
                 return
             job, counted = item
             try:
@@ -577,6 +636,10 @@ class ManagedObs:
         with self._lock:
             self._set("blocked", reason)
             self._warnings[warning_id] = self._warning(warning_id, **fields)
+
+    def _identity_unknown(self) -> None:
+        log.warning("cannot confirm which OBS is the managed one; refusing to start or stop OBS")
+        self._block("identityUnknown", "obsIdentityUnknown")
 
     def _record_path(self) -> Path:
         return self.home / "ak-engine.json"
@@ -623,44 +686,61 @@ class ManagedObs:
                 self._set("stopped")
         return warning is None
 
-    def _identity(self, pid: int, launch_date: float | None) -> str:
-        """"ours", "gone" (no such OBS, pid reused, or not our home) or "unknown" (cannot tell)."""
+    def _identify(self, pid: int, launch_date: float | None) -> tuple[str, ObsProcess | None]:
+        """("ours", process) · ("gone", None): no such OBS, pid reused or not our home · ("unknown", None)."""
         try:
-            processes = dict(self._launcher.processes())
+            process = next((item for item in self._launcher.processes() if item.pid == pid), None)
         except Exception:
-            return "unknown"
-        if pid not in processes:
-            return "gone"
-        started = processes[pid]
+            return "unknown", None
+        if process is None:
+            return "gone", None
         if launch_date is not None:
-            if started is None:
-                return "unknown"
-            if abs(started - launch_date) > 1.0:
-                return "gone"
+            if process.launch_date is None:
+                return "unknown", None
+            if abs(process.launch_date - launch_date) > 1.0:
+                return "gone", None
         marker = self._launcher.env_marker(pid, self.home)
-        return "unknown" if marker is None else "ours" if marker else "gone"
+        if marker is None:
+            return "unknown", None
+        return ("ours", process) if marker else ("gone", None)
 
-    def _orphans(self) -> list[tuple[int, float | None]]:
+    def _identity(self, pid: int, launch_date: float | None) -> str:
+        return self._identify(pid, launch_date)[0]
+
+    def _orphans(self) -> list[ObsProcess] | None:
+        """Running OBS apps with our home marker other than the current engine; None when unknown."""
         with self._lock:
             current = self._pid
         try:
             processes = self._launcher.processes()
         except Exception:
-            return []
-        return [(pid, started) for pid, started in processes if pid != current and self._launcher.env_marker(pid, self.home) is True]
+            return None
+        orphans = []
+        for process in processes:
+            if process.pid == current:
+                continue
+            marker = self._launcher.env_marker(process.pid, self.home)
+            if marker is None:
+                return None
+            if marker:
+                orphans.append(process)
+        return orphans
 
-    def _terminate_and_wait(self, pid: int, launch_date: float | None) -> bool:
-        identity = self._identity(pid, launch_date)
+    def _terminate_and_wait(self, pid: int, launch_date: float | None) -> str:
+        """"gone" (already gone) · "rejected" (not verifiably ours; nothing sent) · "terminated" · "stuck"."""
+        identity, process = self._identify(pid, launch_date)
         if identity == "gone":
-            return True
-        if identity == "ours":
-            self._launcher.terminate(pid)
+            return "gone"
+        if identity == "unknown" or process is None:
+            return "rejected"
+        if not self._launcher.terminate(process):
+            return "gone" if self._identity(pid, launch_date) == "gone" else "rejected"
         deadline = self._clock() + self._quit_timeout_s
         while self._identity(pid, launch_date) != "gone":
             if self._clock() >= deadline:
-                return False
+                return "stuck"
             self._sleep(self._poll_s)
-        return True
+        return "terminated"
 
     def _stuck(self, pid: int, launch_date: float | None) -> None:
         log.warning("managed OBS pid %s did not quit within %ss", pid, self._quit_timeout_s)
@@ -676,11 +756,16 @@ class ManagedObs:
         if pid is not None:
             with self._lock:
                 self._set("quitting")
-            if not self._terminate_and_wait(pid, launch_date):
+            outcome = self._terminate_and_wait(pid, launch_date)
+            if outcome == "stuck":
                 self._stuck(pid, launch_date)
                 return False
-            self._mark_clean(pid)
-            log.info("managed OBS pid %s quit cleanly", pid)
+            if outcome == "rejected":
+                self._identity_unknown()
+                return False
+            if outcome == "terminated":
+                self._mark_clean(pid)
+                log.info("managed OBS pid %s quit cleanly", pid)
         with self._lock:
             self._forget_process()
             self._warnings = {}
@@ -689,18 +774,32 @@ class ManagedObs:
         return True
 
     def _quit_orphans(self) -> bool:
-        """Quit every OBS that carries our home marker but is not our engine; False if one is stuck."""
-        for pid, started in self._orphans():
-            log.info("quitting orphaned managed OBS pid %s", pid)
+        """Quit every OBS that carries our home marker but is not our engine. False (and
+        nothing written or launched) when one is stuck or ownership cannot be determined."""
+        orphans = self._orphans()
+        if orphans is None:
+            self._identity_unknown()
+            return False
+        for process in orphans:
+            log.info("quitting orphaned managed OBS pid %s", process.pid)
             with self._lock:
                 previous = (self._state, self._reason)
                 self._set("quitting")
-            if not self._terminate_and_wait(pid, started):
-                self._stuck(pid, started)
+            outcome = self._terminate_and_wait(process.pid, process.launch_date)
+            if outcome == "stuck":
+                self._stuck(process.pid, process.launch_date)
                 return False
-            self._mark_clean(pid)
+            if outcome == "rejected":
+                self._identity_unknown()
+                return False
+            if outcome == "terminated":
+                self._mark_clean(process.pid)
             with self._lock:
                 self._set(*previous)
+        with self._lock:
+            if self._reason == "identityUnknown" and self._pid is None:
+                self._warnings.pop("obsIdentityUnknown", None)
+                self._set("stopped")
         return True
 
     def _mark_clean(self, pid: int) -> None:
@@ -727,20 +826,35 @@ class ManagedObs:
         if self._acquire() and self._quit():
             self._launch(rate, keyer, hidden=True)
 
-    def _launch(self, rate: int, keyer: str, *, hidden: bool) -> None:
-        if self._stopping.is_set() or not self._discover() or not self._quit_orphans():
+    def _apply(self) -> None:
+        with self._lock:
+            self._apply_queued = False
+            desired, self._desired = self._desired, None
+            pid, launched, setup = self._pid, self._launched, self._setup_rate
+        if desired is None or pid is None or not self._acquire():
             return
-        previous = _read_json(self._record_path()) or {}
+        mode, rate, keyer = desired
+        if mode == "screen":
+            self._quit()
+        elif (rate, keyer) != launched and setup is None:
+            self._restart(rate, keyer)
+
+    def _launch(self, rate: int, keyer: str, *, hidden: bool) -> None:
+        if self._stopping.is_set() or not self._discover():
+            return
+        previous_clean = (_read_json(self._record_path()) or {}).get("cleanExit")
+        if not self._quit_orphans():
+            return
         cdp_port, ws_port, password = self._pick_port(), self._pick_port(), secrets.token_urlsafe(32)
         with self._lock:
             self._warnings = {}
-            if previous.get("cleanExit") is False:
+            if previous_clean is False:
                 self._warnings["obsUncleanExit"] = self._warning("obsUncleanExit")
             self._rate, self._keyer = rate, keyer
             self._launched = (rate, keyer)
             self._setup_rate = None if hidden else rate
             self._cdp_port, self._ws_port, self._ws_password = cdp_port, ws_port, password
-            self._inactive_reads = self._cdp_failures = self._ws_failures = 0
+            self._inactive_reads = self._cdp_failures = self._ws_failures = self._unknown_ticks = 0
             self._set("starting")
         self._seed(TreeConfig(rate=rate, keyer=keyer, ws_port=ws_port, ws_password=password, device=self.device(), record_dir=self._record_dir))
         with self._lock:
@@ -768,10 +882,11 @@ class ManagedObs:
         self._await_ready(min(launch_date or launched_at, launched_at))
 
     def _seed(self, cfg: TreeConfig) -> None:
+        """The only writer of the OBS tree: refuses unless no OBS of ours is (or may be) running."""
         with self._lock:
             pid, launch_date = self._pid, self._launch_date
-        if (pid is not None and self._identity(pid, launch_date) != "gone") or self._orphans():
-            raise ManagedObsError("Refusing to seed the OBS tree while a managed OBS is running.")
+        if (pid is not None and self._identity(pid, launch_date) != "gone") or self._orphans() != []:
+            raise ManagedObsError("Refusing to seed the OBS tree while a managed OBS is or may be running.")
         files = render_tree(cfg)
         write_tree(self.tree, files)
         if DECKLINK_PROPS not in files:
@@ -806,12 +921,13 @@ class ManagedObs:
             return None
 
     def _await_ready(self, since: float) -> None:
-        """Ready only when one pass sees both the marked page and a pinned GetVersion."""
+        """Ready only when one pass verifies the pid is ours and sees both the marked page and a pinned GetVersion."""
         deadline = self._clock() + self._ready_timeout_s
         with self._lock:
             pid, launch_date = self._pid, self._launch_date
         while not self._stopping.is_set():
-            if self._identity(pid, launch_date) == "gone":
+            identity = self._identity(pid, launch_date)
+            if identity == "gone":
                 self._on_exit()
                 return
             if self._safe_mode_logged(since):
@@ -822,17 +938,19 @@ class ManagedObs:
                 log.warning("managed OBS reports version %s, pinned %s", version, PINNED_OBS)
                 self._block("obsVersion", "obsVersion", found=version)
                 return
-            if target_id and version:
+            if identity == "ours" and target_id and version:
                 log.info("managed OBS ready: OBS %s, page target %s", version, target_id)
                 with self._lock:
                     self._target_id, self._ready_at = target_id, self._clock()
-                    self._inactive_reads = self._cdp_failures = self._ws_failures = 0
+                    self._inactive_reads = self._cdp_failures = self._ws_failures = self._unknown_ticks = 0
                     for warning_id in _TRANSIENT_WARNINGS:
                         self._warnings.pop(warning_id, None)
                     self._set("blocked", "deviceSetup") if self._setup_rate is not None else self._set("ready")
                 return
             if self._clock() >= deadline:
-                if target_id:
+                if identity == "unknown":
+                    self._identity_unknown()
+                elif target_id:
                     self._block("safeMode", "obsSafeMode")
                 else:
                     self._block("timeout", "obsWaiting")
@@ -860,8 +978,9 @@ class ManagedObs:
         if identity == "gone":
             self._on_exit()
             return
-        if identity == "unknown" or reason in ("timeout", "safeMode", "obsVersion", "engineError", "deviceSetup") or target_id is None:
+        if reason in ("timeout", "safeMode", "obsVersion", "engineError", "deviceSetup", "stuck") or target_id is None:
             return
+        self._unknown_ticks = self._unknown_ticks + 1 if identity == "unknown" else 0
         try:
             ids: set[str] | None = {str(item.get("id")) for item in _cdp_targets(self._cdp_port)}
             self._cdp_failures = 0
@@ -889,25 +1008,25 @@ class ManagedObs:
             self._inactive_reads = 0
         elif active is False:
             self._inactive_reads += 1
-        page_lost = (ids is not None and target_id not in ids) or self._cdp_failures >= _FAILURE_LIMIT
-        unreachable = self._ws_failures >= _FAILURE_LIMIT
-        inactive = self._inactive_reads >= 2 or (reason == "deviceInactive" and active is None)
+        conditions = (
+            ("identityUnknown", "obsIdentityUnknown", self._unknown_ticks >= _FAILURE_LIMIT),
+            ("pageLost", "obsPageLost", (ids is not None and target_id not in ids) or self._cdp_failures >= _FAILURE_LIMIT),
+            ("obsUnreachable", "obsUnreachable", self._ws_failures >= _FAILURE_LIMIT),
+            ("deviceInactive", "deviceInactive", self._inactive_reads >= 2 or (reason == "deviceInactive" and active is None)),
+        )
         with self._lock:
-            for warning_id, raised in (("obsPageLost", page_lost), ("obsUnreachable", unreachable), ("deviceInactive", inactive)):
+            for _, warning_id, raised in conditions:
                 if raised:
                     self._warnings[warning_id] = self._warning(warning_id)
                 else:
                     self._warnings.pop(warning_id, None)
-            if page_lost:
-                self._set("blocked", "pageLost")
-            elif unreachable:
-                self._set("blocked", "obsUnreachable")
-            elif inactive:
-                self._set("blocked", "deviceInactive")
+            blocking = next((condition_reason for condition_reason, _, raised in conditions if raised), None)
+            if blocking is not None:
+                self._set("blocked", blocking)
             elif self._state != "ready":
                 self._set("ready")
 
-    def _check(self) -> None:
+    def _check(self, reset_page: bool = False) -> None:
         if not self._acquire():
             return
         self._discover()
@@ -928,22 +1047,26 @@ class ManagedObs:
                 launched, setup = self._launched, self._setup_rate
             if fixed and launched is not None and setup is None:
                 self._restart(*launched)
-            return
-        if state == "blocked" and reason in _RECHECKABLE:
+        elif state == "blocked" and reason in _RECHECKABLE:
             with self._lock:
                 self._set("starting")
-                self._inactive_reads = self._cdp_failures = self._ws_failures = 0
+                self._inactive_reads = self._cdp_failures = self._ws_failures = self._unknown_ticks = 0
                 for warning_id in _TRANSIENT_WARNINGS:
                     self._warnings.pop(warning_id, None)
             self._await_ready(launch_date or 0.0)
-            return
-        self._liveness()
+        else:
+            self._liveness()
+        if reset_page and self._state == "ready":
+            self._reset_page()
 
     def _show(self) -> None:
         with self._lock:
             pid, launch_date = self._pid, self._launch_date
-        if pid is not None and self._identity(pid, launch_date) == "ours":
-            self._launcher.show(pid)
+        if pid is None:
+            return
+        identity, process = self._identify(pid, launch_date)
+        if identity == "ours" and process is not None:
+            self._launcher.show(process)
 
     def _reset_page(self) -> None:
         with self._lock:
