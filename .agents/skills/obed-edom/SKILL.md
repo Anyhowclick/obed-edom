@@ -272,7 +272,8 @@ or a group's leaf list (`attach_magic_move` → `magicMoveOut`/`mmKeys`, plus `m
 the `[kind, kindIndex]` addresses back→front, which only the validation rule
 `mm.zorder_flip` reads; it pairs unique text and groups by content, and repeated media,
 shapes and lines preferring matching stroke/opacity, then stored path, then style
-(`mmPrefs`), then least total centre distance; ties and repeated text/groups skipped).
+(`mmPrefs`), then least total centre distance; ties and repeated text/groups skipped; a
+flip is flagged only if the boxes overlap at some moment of the straight-line morph).
 
 * Both slides of the pair must be planned: inside `--slides` and not skipped. An
   out-of-range or skipped neighbour keeps today's hide.

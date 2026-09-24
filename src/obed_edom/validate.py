@@ -905,13 +905,35 @@ def _mm_prefs(slide: dict) -> dict[_Address, tuple]:
     }
 
 
-def _mm_centre(item: dict | None) -> tuple[float, float] | None:
+def _mm_box(item: dict | None) -> tuple[float, float, float, float] | None:
     if not item or any(item.get(f) is None for f in ("x", "y", "w", "h")):
         return None
-    w, h = float(item["w"]), float(item["h"])
-    if w <= 0 or h <= 0:
+    return float(item["x"]), float(item["y"]), float(item["w"]), float(item["h"])
+
+
+def _mm_centre(item: dict | None) -> tuple[float, float] | None:
+    box = _mm_box(item)
+    if box is None or box[2] < 0 or box[3] < 0 or box[2] == box[3] == 0:
         return None
-    return float(item["x"]) + w / 2, float(item["y"]) + h / 2
+    x, y, w, h = box
+    return x + w / 2, y + h / 2
+
+
+def _mm_paths_overlap(a: tuple, b: tuple) -> bool:
+    """Whether two boxes, each moving linearly from (x, y, w, h) at t=0 to t=1, strictly
+    overlap at some t in [0, 1]. Every overlap condition is linear in t."""
+    lo, hi = 0.0, 1.0
+    for axis in (0, 1):
+        for p, q in ((a, b), (b, a)):
+            f0, f1 = (p[t][axis] - q[t][axis] - q[t][axis + 2] for t in (0, 1))
+            if f0 == f1:
+                if f0 >= 0:
+                    return False
+            elif f1 > f0:
+                hi = min(hi, f0 / (f0 - f1))
+            else:
+                lo = max(lo, f0 / (f0 - f1))
+    return lo < hi
 
 
 def _mm_nearest(
@@ -980,7 +1002,8 @@ def _mm_matches(slide: dict, after: dict) -> list[tuple[_Address, _Address]]:
 
 
 def _mm_zorder_flags(payload: dict, location: str, *, deck: str = "") -> list[Flag]:
-    """Magic Move pairs stacked in opposite relative order across the cut."""
+    """Magic Move pairs stacked in opposite relative order across the cut whose boxes
+    overlap at some point of the morph (kept when geometry is missing)."""
     slides = {
         int(s.get("number") or s.get("index", i) + 1): s
         for i, s in enumerate(payload.get("slides") or [])
@@ -992,6 +1015,7 @@ def _mm_zorder_flags(payload: dict, location: str, *, deck: str = "") -> list[Fl
             continue
         if not slide.get("mmOrder") or not after.get("mmOrder"):
             continue
+        before_items, after_items = _mm_items(slide), _mm_items(after)
         before_pos = {(str(k), int(i)): pos for pos, (k, i) in enumerate(slide["mmOrder"])}
         after_pos = {(str(k), int(i)): pos for pos, (k, i) in enumerate(after["mmOrder"])}
         matched = sorted(_mm_matches(slide, after), key=lambda pair: before_pos[pair[0]])
@@ -999,6 +1023,12 @@ def _mm_zorder_flags(payload: dict, location: str, *, deck: str = "") -> list[Fl
         for i, (low, low_after) in enumerate(matched):
             for high, high_after in matched[i + 1:]:
                 if after_pos[low_after] < after_pos[high_after]:
+                    continue
+                paths = [
+                    (_mm_box(before_items.get(start)), _mm_box(after_items.get(end)))
+                    for start, end in ((low, low_after), (high, high_after))
+                ]
+                if None not in (*paths[0], *paths[1]) and not _mm_paths_overlap(*paths):
                     continue
                 flag = make_flag(
                     "mm.zorder_flip",
