@@ -10,7 +10,7 @@ Arms:
   2x, positive  one `rec` session with gl_replay="off": slide1-native 8 s, slide1-paused 3 s (every playing <video>
                 paused: the null control), slide1-resumed 4 s, then a report-only smoke walk (slide 2, build 1).
                 Source = 2 x canvas (product) or = canvas (positive control). Cadence gated at rate 25 only.
-  g2            sessions g2 (product default: no gl_replay kwarg), g2-off (gl_replay="off"), both recorded, and an
+  g2            sessions g2 (product default at 25: no gl_replay kwarg; explicit auto at 30), g2-off (gl_replay="off"), both recorded, and an
                 unrecorded hidden-arm. g2/g2-off: slide 1 as above -> advance -> LIVE (<= 5 s) -> slide2-live 10 s
                 (screenshot S) -> hide, slide2-hidden 3 s (screenshot H) -> show, slide2-reshown 4 s ->
                 slide2-handback (advance = build 1) 4 s -> slide2-after 3 s (screenshot P3). Gates M0-M4.
@@ -759,7 +759,7 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     m1: list[dict[str, Any]] = []
     info, expected_sha = continuity_of(g2).get("glReplay") or {}, KB_SHAS.get(kb or "", G2_SHA)
     pref = (g2.get("startLog") or {}).get("glReplayPreference")
-    check(m1, "glReplayPreference (product default)", pref, pref == "auto", "== auto")
+    check(m1, "glReplayPreference (product default at 25; explicit auto at 30)", pref, pref == "auto", "== auto")
     check(m1, "glReplay mode/version/sha", info, info.get("mode") == "injected" and info.get("version") == 1 and info.get("sha256") == expected_sha,
           f"injected v1 {expected_sha[:8]}")
     scale = continuity_of(g2).get("scale")
@@ -856,7 +856,10 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     hidden_rate = upload_rate(reads.get("hiddenStart"), reads.get("hiddenEnd"))
     check(m4, "uploads/s over hidden window", hidden_rate, hidden_rate is not None and hidden_rate >= LIMITS["uploadsMin"], f">= {LIMITS['uploadsMin']}")
     reshown = (p_g2.get("slide2-reshown") or {}).get("repeatFrac")
-    check(m4, "slide2-reshown repeat", reshown, reshown is not None and reshown <= LIMITS["reshownRepeatMax"], f"<= {LIMITS['reshownRepeatMax']}")
+    native_repeat_frac = native.get("repeatFrac")
+    check(m4, "slide2-reshown repeat < slide1-native repeat", [reshown, native_repeat_frac],
+          None not in (reshown, native_repeat_frac) and reshown < native_repeat_frac, "relative to native (owner 2026-09-24)")
+    check(m4, "report: slide2-reshown repeat", reshown, True, f"<= {LIMITS['reshownRepeatMax']}", enforced=False)
     ends = d_g2.get("endpoints") or {}
     last, first = (ends.get("slide2-live") or {}).get("last"), (ends.get("slide2-reshown") or {}).get("first")
     drift = None
@@ -875,7 +878,8 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
 
 
 KB_EXPECT = {
-    "frozen": [("M1", "slide2-live repeat"), ("M1", "uploads/s over slide2-live"), ("M4", "uploads/s over hidden window")],
+    "frozen": [("M1", "KB: g2 slide2-live movie rect fails the static check"), ("M1", "uploads/s over slide2-live"),
+               ("M4", "uploads/s over hidden window")],
     "oldbytes": [("M2", "slide2-live ringMaxDelta"), ("M2", "handback ring px over 20")],
     "latelost": [("M4", "LIVE after show")],
 }
@@ -1088,7 +1092,7 @@ def sessions_for(arm: str, ctx: dict[str, Any], args: argparse.Namespace, armed:
     if arm in ("2x", "positive"):
         return [run_session("rec", rec_script, ctx, gl_replay="off", record=True)]
     if arm == "g2":
-        return [run_session("g2", g2_script(args.kb, armed), ctx, record=True),
+        return [run_session("g2", g2_script(args.kb, armed), ctx, gl_replay=None if args.rate == 25 else "auto", record=True),
                 run_session("g2-off", g2_script(None, armed), ctx, gl_replay="off", record=True),
                 run_session("hidden-arm", hidden_arm_script, ctx)]
     if arm == "failsafe":

@@ -2436,7 +2436,7 @@ def test_start_log_records_the_requested_gl_replay_preference(tmp_path, monkeypa
     """Under continuity off or attach the continuity record cannot show that `auto` was asked for."""
     monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
     monkeypatch.setenv(live_host.CONTINUITY_ENV, "off")
-    kwargs = {"attach": True, "bridge": "obs-managed"} if managed else {}
+    kwargs = {"attach": True, "bridge": "obs-managed", "output_rate": 25} if managed else {}
     output = host_with_continuity(tmp_path, monkeypatch, gl_replay=ctor, **kwargs)
     if env is not None:
         monkeypatch.setenv(live_host.GL_REPLAY_ENV, env)
@@ -2586,6 +2586,7 @@ def test_rate_warnings_empty_list_when_every_movie_matches(tmp_path, monkeypatch
 
 def managed_host(tmp_path, monkeypatch, **kwargs):
     monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+    kwargs.setdefault("output_rate", 25)
     return host_with_continuity(tmp_path, monkeypatch, attach=True, bridge="obs-managed", **kwargs)
 
 
@@ -2630,6 +2631,33 @@ def test_gl_replay_defaults_to_auto_under_the_managed_bridge(tmp_path, monkeypat
     assert calls == [{"resolver": output.resolver, "gl_replay": True}]
     assert output.output["continuity"]["glReplay"] == _injected_info()
     assert next(r for r in read_log(output) if r["kind"] == "start")["glReplayPreference"] == "auto"
+
+
+@pytest.mark.parametrize("rate", [30, None])
+def test_gl_replay_managed_default_is_off_outside_the_qualified_rate(tmp_path, monkeypatch, rate):
+    """OQ-2 contingency (2026-09-24): under managed OBS, page rAF latches to 30 once a movie plays, so at
+    output 30 G2 read worse than native in some takes. Only output 25 defaults on; env `auto` still opts in."""
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    output = managed_host(tmp_path, monkeypatch, output_rate=rate)
+    forbid_gl_module(monkeypatch)
+    calls = fake_plan_pair(monkeypatch)
+    ready(monkeypatch)
+    output.start()
+
+    assert all("gl_replay" not in call for call in calls)
+    assert output.output["continuity"]["glReplay"]["mode"] == "off"
+    assert next(r for r in read_log(output) if r["kind"] == "start")["glReplayPreference"] == "off"
+
+
+def test_gl_replay_env_auto_opts_in_at_managed_rate_30(tmp_path, monkeypatch):
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    output = managed_host(tmp_path, monkeypatch, output_rate=30)
+    monkeypatch.setenv(live_host.GL_REPLAY_ENV, "auto")
+    fake_plan_pair(monkeypatch)
+    ready(monkeypatch)
+    output.start()
+
+    assert output.output["continuity"]["glReplay"] == _injected_info()
 
 
 @pytest.mark.parametrize("host", ["managed-default", "hdmi-auto"])
