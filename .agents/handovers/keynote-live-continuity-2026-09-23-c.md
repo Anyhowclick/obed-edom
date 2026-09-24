@@ -1,13 +1,13 @@
 # Handover — GL-replay option (c), state at 2026-09-24 (merged as #218)
 
-Supersedes the "Next" list of `keynote-live-continuity-2026-09-23-g5.md` (G5+G6 merged as #217). Owner rules unchanged: no merge
+Supersedes the earlier GL-replay handovers (09-22-opacity, 09-22-g3, 09-23-g5; pruned after #218, see `git show ed7ff63c:.agents/handovers/`). Owner rules unchanged: no merge
 without an explicit request; hands off Keynote; full local suites for every code PR (no CI).
 
 ## Where things are
 | Item | State |
 |---|---|
 | Branch | `feat/gl-replay-c` (dev worktree `.claude/worktrees/autoprompts-toggle-cfdda0`), off `origin/main` d56fb0dd. Merged as #218 (`ed7ff63c`). |
-| Plan | `.agents/plans/keynote_live_gl_replay_c.plan.md` rev 1 (Opus EXTRA HIGH → Opus HIGH critique §13). All OQs closed by the owner (§0); OQ-2 reversed (below). |
+| Plan | `git show ed7ff63c:.agents/plans/keynote_live_gl_replay_c.plan.md` rev 1 (completed, pruned) (Opus EXTRA HIGH → Opus HIGH critique §13). All OQs closed by the owner (§0); OQ-2 reversed (below). |
 | Commits | f6a44dfe plan · 4ce4fb1f probe N3 live-ring · ca08e2e4 G2 inner-rect upload + `probe(rect)` · d5c71661 P2 GL probe series in (f) + A7′ scorer · 9989e8bf G2 stays version 1 + real-core arming test |
 | G2 sha | `10a5b36a1f6008a3213bd90729915f6c15284448406f2a62dbc74ae884fe5288` (was `4f8850e0…`). Core `e9338aff` untouched; off path byte-identical. |
 | Full suites at c58f4403 | pytest 6705 passed / 88 skipped / 1 xfailed; `test:ui` 238; `test:maps` 542 + perf 2. |

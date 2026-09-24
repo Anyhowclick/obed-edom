@@ -1,10 +1,10 @@
-"""G6 (plan `.agents/plans/keynote_live_gl_replay_g5g6.plan.md` rev 2 §4): P2 under
+"""G6 (plan `git show ed7ff63c:.agents/plans/keynote_live_gl_replay_g5g6.plan.md` rev 2 §4): P2 under
 `--gl-replay auto`.
 
 Verdict half: `glReplayCarry1to2` clauses (a)-(h), each forced RED ALONE against the
 r3 2-pooled GREEN fixture (carried decoder 1 + sibling 2, `release.retired == [2]`),
 plus `progressingIndexAfterFlip` wrap/null runs and the `carriedClock1to2`
-sibling-clock defence. GL-replay (c) (plan `keynote_live_gl_replay_c.plan.md` §4, §7, §8):
+sibling-clock defence. GL-replay (c) (plan `git show ed7ff63c:.agents/plans/keynote_live_gl_replay_c.plan.md` §4, §7, §8):
 clause (f) gates a third series, the G2 `probe(rect)` readback counter, and the A7′
 probe-vs-`sampleFrame` pairing scores the instrument.
 

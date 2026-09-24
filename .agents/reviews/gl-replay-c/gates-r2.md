@@ -1,6 +1,6 @@
 # GL-replay option (c) headless gates r2 (2026-09-23/24; phase 1 `9989e8bf`, phase 2 `bef57a23`)
 
-Plan: `.agents/plans/keynote_live_gl_replay_c.plan.md` rev 1, §8. This round supersedes r1 (pruned after merge; git history of #218), which stopped at
+Plan: `git show ed7ff63c:.agents/plans/keynote_live_gl_replay_c.plan.md` rev 1, §8. This round supersedes r1 (pruned after merge; git history of #218), which stopped at
 gate 2 because the core refused G2 v2 (`moduleVersion`). The owner chose v1 (`9989e8bf`). Phase 1 ran on 2026-09-23 up to
 the 23:25 cut-off and was finished on 2026-09-24. Phase 2 ran on `bef57a23` (Codex r1 P2 hardening; P2 files and tests only).
 
