@@ -5500,6 +5500,7 @@ class TestRescoreArtifact:
         monkeypatch.setattr(probe, "movie_nodes", lambda *a: [])
         monkeypatch.setattr(probe, "loop_period_of", lambda *a: LOOP_P)
         monkeypatch.setattr(probe, "rescore_artifact", lambda *a: {"ok": ok})
+        (tmp_path / "host.json").write_text(json.dumps({"kind": "live-continuity-probe"}))
         args = probe.parse_args(["--rescore", str(tmp_path / "host.json")])
         if ok:
             probe.run_rescore_cli(args)
@@ -5678,3 +5679,240 @@ class TestForceWrapCliExit:
                 probe.run_force_wrap_cli(args)
             assert exc.value.code == code
         assert json.loads((tmp_path / "fw.json").read_text())["status"] == status
+
+
+L2_ARTIFACTS = Path("/Users/anyhowclick/Desktop/work/obed-edom/output/loop-gates/l2")
+
+
+def _armed_reads_at(end: float) -> list[dict[str, Any]]:
+    reads = _fw_reads()
+    reads[0]["glReplay"]["t"] = end - 500.0
+    reads[1]["glReplay"]["t"] = end
+    return reads
+
+
+class TestArmedRecorderWindow:
+    """L2 BUG 1: with G2 armed the sampler never sees the detached carried element, so the
+    recorder's window comes from the take: seekedT + 1 s to the last destination read."""
+
+    def test_window_is_grounded_in_the_take(self) -> None:
+        window = probe.armed_recorder_window(_fw_recorder(), _armed_reads_at(FW_SEEKED + 6000.0))
+        assert window["start"] == FW_SEEKED + probe.FORCE_WRAP_WINDOW_AFTER_SEEK_MS
+        assert window["end"] == FW_SEEKED + 6000.0
+        assert window["rule"].startswith("armed")
+
+    @pytest.mark.parametrize("case", ["no-reads", "no-seek", "read-before-start"])
+    def test_missing_evidence_gives_no_window(self, case: str) -> None:
+        recorder, reads = _fw_recorder(), _armed_reads_at(FW_SEEKED + 6000.0)
+        if case == "no-reads":
+            reads = None
+        elif case == "no-seek":
+            recorder["seekedT"] = None
+        else:
+            reads = _armed_reads_at(FW_SEEKED + 900.0)
+        assert probe.armed_recorder_window(recorder, reads) is None
+        assert probe.score_recorder_clock(recorder, None)["verdict"] is False
+
+    def test_steady_recorder_holds(self) -> None:
+        window = probe.armed_recorder_window(_fw_recorder(), _armed_reads_at(FW_SEEKED + 6000.0))
+        assert probe.score_recorder_clock(_fw_recorder(), window)["verdict"] is True
+
+    def test_known_bad_frozen_recorder_fails(self) -> None:
+        recorder = _fw_recorder(stop_at=FW_SEEKED + 4000.0)
+        window = probe.armed_recorder_window(recorder, _armed_reads_at(FW_SEEKED + 6000.0))
+        assert probe.score_recorder_clock(recorder, window)["verdict"] is False
+
+    def test_known_bad_mid_period_jump_fails(self) -> None:
+        recorder = _fw_recorder()
+        for frame in recorder["frames"]:
+            if frame["now"] > FW_SEEKED + 4000.0:
+                frame["mediaTime"] += 10.0
+        window = probe.armed_recorder_window(recorder, _armed_reads_at(FW_SEEKED + 6000.0))
+        result = probe.score_recorder_clock(recorder, window)
+        assert result["verdict"] is False and result["wraps"] == 1 and result["maxJumpS"] > 9.0
+
+    def test_a_one_frame_forward_step_is_tolerated(self) -> None:
+        recorder = _fw_recorder()
+        for frame in recorder["frames"]:
+            if frame["now"] > FW_SEEKED + 4000.0:
+                frame["mediaTime"] += 1.0 / 30.0
+        window = probe.armed_recorder_window(recorder, _armed_reads_at(FW_SEEKED + 6000.0))
+        assert probe.score_recorder_clock(recorder, window)["verdict"] is True
+
+    def test_known_bad_no_frames_in_window_fails(self) -> None:
+        recorder = _fw_recorder(stop_at=FW_SEEKED + 900.0)
+        window = probe.armed_recorder_window(recorder, _armed_reads_at(FW_SEEKED + 6000.0))
+        result = probe.score_recorder_clock(recorder, window)
+        assert result["verdict"] is False and "no recorded frame" in result["reason"]
+
+    def _gt(self) -> dict[str, Any]:
+        return {
+            "facts": {"asset": ASSET}, "factsOn": {"armed": ARMED}, "source": {"periodS": FW_PERIOD},
+            "scene": 2, "srcRect": dict(BIG_INSTANCE), "dstRect": dict(BIG_INSTANCE), "transition": None,
+        }
+
+    def test_the_armed_take_is_scored_from_its_own_window(self) -> None:
+        result = {
+            "continuity": GL_CONTINUITY, "samples": [], "recorder": _fw_recorder(), "take": _fw_take(),
+            "reads": _armed_reads_at(FW_SEEKED + 6000.0), "pageErrorNotes": [],
+        }
+        probe.score_force_wrap_run(result, self._gt(), "1to2", 375.0)
+        assert result["continuityVerdict"]["verdict"] is not True
+        assert result["recorderClock"]["window"]["rule"].startswith("armed")
+        assert (result["status"], result["forced"]["outcome"]) == ("pass", "carried")
+
+    def test_the_armed_take_with_a_frozen_recorder_fails(self) -> None:
+        result = {
+            "continuity": GL_CONTINUITY, "samples": [], "recorder": _fw_recorder(stop_at=FW_SEEKED + 4000.0),
+            "take": _fw_take(), "reads": _armed_reads_at(FW_SEEKED + 6000.0), "pageErrorNotes": [],
+        }
+        probe.score_force_wrap_run(result, self._gt(), "1to2", 375.0)
+        assert result["status"] == "fail"
+
+    @pytest.mark.skipif(not (L2_ARTIFACTS / "1to2_0.json").is_file(), reason="L2 artifacts not available")
+    def test_real_1to2_0_recorder_holds_under_the_take_window(self) -> None:
+        artifact = json.loads((L2_ARTIFACTS / "1to2_0.json").read_text())
+        window = probe.armed_recorder_window(artifact["recorder"], artifact["reads"])
+        clock = probe.score_recorder_clock(artifact["recorder"], window)
+        assert clock["verdict"] is True and clock["wraps"] == 1, clock
+        held, carry = probe.armed_carry(artifact["reads"], _real_armed(), artifact["recorder"])
+        assert held, carry
+
+
+def _real_armed() -> dict[str, Any]:
+    root = REPO / "tests" / "fixtures" / "live_continuity"
+    plan = probe.derive_plan(root, probe.load_slides(root), resolver=lambda r, rel: r / rel, gl_replay=True)
+    return probe.armed_fact(plan, plan.to_runtime(), {2: "continue1to2", 6: "restart2to3", 8: "continue3to4"})
+
+
+def _excuse_samples() -> list[dict[str, Any]]:
+    return wrap_samples(lead_s=0.5)
+
+
+def _track(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row["videos"][0] | {"t": row["t"]} for row in samples]
+
+
+def _wrap_index(samples: list[dict[str, Any]]) -> int:
+    track = _track(samples)
+    index = next(i for i in range(1, len(track)) if track[i]["currentTime"] < track[i - 1]["currentTime"])
+    assert samples[index]["scene"] == 2.0, "the wrap must land on an owner-checked (after-cut) row"
+    return index
+
+
+def _unown(row: dict[str, Any], *, ready: int = 1, owner: Any = None) -> None:
+    v = row["videos"][0]
+    v["readyState"] = ready
+    v["footprintOwner"] = owner if owner is not None else {"elId": None, "key": None, "via": "none", "contextType": None}
+
+
+class TestWrapOwnerExcuse:
+    """L2 BUG 2: `footprintOwnerDecoderId` fails closed on the not-ready decoder at the
+    browser's loop seek; exactly that sample may go unowned, nothing else."""
+
+    def _score(self, samples: list[dict[str, Any]], period: float | None = LOOP_P) -> dict[str, Any]:
+        return probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, True, loop_period_s=period)
+
+    def test_the_loop_seek_sample_is_excused_and_reported(self) -> None:
+        samples = _excuse_samples()
+        index = _wrap_index(samples)
+        _unown(samples[index])
+        result = self._score(samples)
+        assert result["verdict"] is True, result
+        assert result["ownerMismatches"] == []
+        assert [e["t"] for e in result["wrapOwnerExcused"]] == [samples[index]["t"]]
+
+    def test_a_clean_wrap_reports_an_empty_excuse_list(self) -> None:
+        assert self._score(_excuse_samples())["wrapOwnerExcused"] == []
+
+    def test_the_strict_scorer_never_excuses(self) -> None:
+        samples = _excuse_samples()
+        _unown(samples[_wrap_index(samples)])
+        result = self._score(samples, period=None)
+        assert result["verdict"] is False and "wrapOwnerExcused" not in result
+
+    def test_known_bad_via_none_away_from_a_wrap_fails(self) -> None:
+        samples = _excuse_samples()
+        _unown(samples[_wrap_index(samples) + 3])
+        result = self._score(samples)
+        assert result["verdict"] is False and len(result["ownerMismatches"]) == 1
+
+    def test_known_bad_wrap_row_owned_by_another_element_fails(self) -> None:
+        samples = _excuse_samples()
+        _unown(samples[_wrap_index(samples)], owner={"elId": 999, "key": "movie1", "via": "footprint-video"})
+        result = self._score(samples)
+        assert result["verdict"] is False and result["wrapOwnerExcused"] == []
+
+    def test_known_bad_ready_wrap_row_unowned_fails(self) -> None:
+        samples = _excuse_samples()
+        _unown(samples[_wrap_index(samples)], ready=4)
+        assert self._score(samples)["verdict"] is False
+
+    def test_known_bad_two_consecutive_unowned_rows_at_a_wrap_fail(self) -> None:
+        samples = _excuse_samples()
+        index = _wrap_index(samples)
+        _unown(samples[index])
+        _unown(samples[index + 1])
+        result = self._score(samples)
+        assert result["verdict"] is False
+        assert len(result["ownerMismatches"]) == 2
+
+    def test_known_bad_unowned_row_before_the_wrap_row_fails(self) -> None:
+        samples = _excuse_samples()
+        index = _wrap_index(samples)
+        _unown(samples[index])
+        _unown(samples[index - 1], ready=4)
+        assert self._score(samples)["verdict"] is False
+
+    @pytest.mark.skipif(not (L2_ARTIFACTS / "3to4_750.json").is_file(), reason="L2 artifacts not available")
+    def test_real_3to4_750_passes_with_its_one_loop_seek_excused(self) -> None:
+        artifact = json.loads((L2_ARTIFACTS / "3to4_750.json").read_text())
+        root = REPO / "tests" / "fixtures" / "live_continuity"
+        plan = probe.derive_plan(root, probe.load_slides(root), resolver=lambda r, rel: r / rel)
+        facts = probe.ground_truth_facts(plan)
+        kwargs = dict(transition_scene=facts["bridgeScene"] - 1, loop_period_s=artifact["recorder"]["duration"],
+                      min_window_start=artifact["recorder"]["seekedT"] + probe.FORCE_WRAP_WINDOW_AFTER_SEEK_MS)
+        args = (artifact["samples"], facts["asset"], facts["bridgeScene"], facts["bridgeSrcRect"], facts["destRect"], True)
+        result = probe.score_continuity(*args, **kwargs)
+        assert result["verdict"] is True, result
+        assert [round(e["t"], 1) for e in result["wrapOwnerExcused"]] == [15745.8]
+        assert probe.score_continuity(*args, **{**kwargs, "loop_period_s": None})["verdict"] is False
+
+
+class TestRescoreForceWrapCli:
+    @pytest.mark.parametrize("status,code", [("pass", None), ("fail", 1), ("invalid", 1)])
+    def test_a_force_wrap_artifact_is_rescored_and_exits_nonzero_unless_pass(
+        self, status: str, code: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        path = tmp_path / "fw.json"
+        path.write_text(json.dumps({"kind": "live-continuity-probe-force-wrap"}))
+        monkeypatch.setattr(probe, "rescore_force_wrap", lambda p: {"status": status})
+        monkeypatch.setattr(probe, "rescore_artifact", lambda *a: pytest.fail("host re-score must not run"))
+        args = probe.parse_args(["--rescore", str(path)])
+        if code is None:
+            probe.run_rescore_cli(args)
+        else:
+            with pytest.raises(SystemExit) as exc:
+                probe.run_rescore_cli(args)
+            assert exc.value.code == code
+
+    def test_rescore_force_wrap_rescores_the_saved_take_in_place(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        saved = {
+            "kind": "live-continuity-probe-force-wrap", "status": "fail", "fixture": "f", "originalIndex": "i",
+            "forceWrap": {"boundary": "1to2", "offsetMs": 375}, "glReplay": {"requested": "auto"},
+            "continuity": GL_CONTINUITY, "samples": [], "recorder": _fw_recorder(), "take": _fw_take(),
+            "reads": _armed_reads_at(FW_SEEKED + 6000.0), "pageErrorNotes": [],
+        }
+        path = tmp_path / "fw.json"
+        path.write_text(json.dumps(saved))
+        seen: list[Any] = []
+
+        def gt(*args: Any) -> dict[str, Any]:
+            seen.append(args)
+            return TestArmedRecorderWindow()._gt()
+
+        monkeypatch.setattr(probe, "force_wrap_ground_truth", gt)
+        report = probe.rescore_force_wrap(path)
+        assert seen == [(Path("f"), Path("i"), "1to2", "auto")]
+        assert (report["statusBefore"], report["status"], report["outcome"]) == ("fail", "pass", "carried")
+        assert report["recorderWindow"]["rule"].startswith("armed")

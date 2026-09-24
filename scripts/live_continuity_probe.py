@@ -588,8 +588,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--rescore", type=Path, default=None, metavar="ARTIFACT",
-        help="L2 control: re-score a standard host artifact's arms strict and wrap-aware (period from --fixture); "
-        "exits 1 unless every verdict dict is identical",
+        help="L2 control: re-score a standard host artifact's arms strict and wrap-aware (period from --fixture), "
+        "or re-score a --force-wrap artifact offline; exits 1 unless ok / pass",
     )
     args = parser.parse_args(argv)
     if args.gl_force_fail is not None and (args.gl_replay != "auto" or args.only_pass is not None):
@@ -1272,6 +1272,27 @@ def unwrap_clock(
     return unwrapped, wraps
 
 
+def _owns_itself(row: dict[str, Any]) -> bool:
+    owner = row.get("footprintOwner")
+    return isinstance(owner, dict) and owner.get("elId") is not None and owner.get("elId") == row.get("elId")
+
+
+def _wrap_seek_unowned(rows: list[dict[str, Any]], row: dict[str, Any], wrap_times: list[float]) -> bool:
+    """The browser's loop seek: the post-wrap sample of a classified wrap, not ready
+    (`readyState < 2`), unowned (`via == 'none'`, no other element named), between two
+    samples of the same element that own the footprint. `footprintOwnerDecoderId` fails
+    closed on a not-ready decoder, so only that one sample may go unowned."""
+    owner = row.get("footprintOwner")
+    if row["t"] not in wrap_times or (_finite_number(row.get("readyState")) or 0) >= 2:
+        return False
+    if not (isinstance(owner, dict) and owner.get("via") == "none" and owner.get("elId") is None):
+        return False
+    index = next((i for i, r in enumerate(rows) if r is row or r["t"] == row["t"]), None)
+    if index is None or index == 0 or index + 1 >= len(rows):
+        return False
+    return _owns_itself(rows[index - 1]) and _owns_itself(rows[index + 1])
+
+
 def continuity_window(
     samples: list[dict[str, Any]], boundary_scene: float, *, pad_s: float = WINDOW_PAD_S,
     transition_scene: float | None = None,
@@ -1410,12 +1431,17 @@ def score_continuity(
         motion["errors"].append("settled source not observed")
 
     owner_mismatches: list[dict[str, Any]] = []
+    wrap_owner_excused: list[dict[str, Any]] = []
     if runtime_installed:
         for r in [*move_rows, *completed_move_rows, *after_rows]:
             owner = r.get("footprintOwner")
             owned = isinstance(owner, dict) and owner.get("elId") is not None and owner.get("elId") == r.get("elId")
             if not owned:
-                owner_mismatches.append({"t": r["t"], "footprintOwner": owner, "elId": r.get("elId")})
+                entry = {"t": r["t"], "footprintOwner": owner, "elId": r.get("elId")}
+                if wraps is not None and _wrap_seek_unowned(rows, r, wraps):
+                    wrap_owner_excused.append(entry)
+                else:
+                    owner_mismatches.append(entry)
 
     rect_mismatches: list[dict[str, Any]] = []
     for r in before_rows:
@@ -1459,7 +1485,7 @@ def score_continuity(
         "window": window,
     }
     if wraps is not None:
-        scored.update(wraps=len(wraps), wrapTimes=wraps)
+        scored.update(wraps=len(wraps), wrapTimes=wraps, wrapOwnerExcused=wrap_owner_excused)
     return scored
 
 
@@ -4184,7 +4210,8 @@ def score_recorder_clock(
     max_stall_s: float = MAX_STALL_S, max_drop_s: float = MAX_DROP_S,
 ) -> dict[str, Any]:
     """The seeked element's own rVFC clock over `window`, wrap-aware: exactly one wrap, no
-    other drop, no presentation gap or frozen run over `max_stall_s`, and real advance."""
+    other drop, no forward jump beyond wall time by more than `2/fps + max_drop_s`, no
+    presentation gap or frozen run over `max_stall_s`, and real advance."""
     if not isinstance(recorder, dict) or window is None:
         return {"verdict": False, "reason": "no recorder or no window"}
     period = _finite_number(recorder.get("duration"))
@@ -4198,16 +4225,21 @@ def score_recorder_clock(
         return {"verdict": False, "reason": "no recorded frame inside the window", "window": window}
     rows, wraps = unwrap_clock([{"t": f["now"], "currentTime": f["mediaTime"]} for f in frames], period, fps)
     max_drop = max([0.0, *(a["currentTime"] - b["currentTime"] for a, b in zip(rows, rows[1:]))])
+    max_jump = max([0.0, *(
+        (b["currentTime"] - a["currentTime"]) - (b["t"] - a["t"]) / 1000.0 for a, b in zip(rows, rows[1:])
+    )])
     edges = [window["start"], *(r["t"] for r in rows), window["end"]]
     longest_gap_s = max(b - a for a, b in zip(edges, edges[1:])) / 1000.0
     stall = _longest_stall_run(rows, max_stall_s)
     advance = rows[-1]["currentTime"] - rows[0]["currentTime"]
     ok = (
-        len(wraps) == 1 and max_drop <= max_drop_s and longest_gap_s <= max_stall_s
+        len(wraps) == 1 and max_drop <= max_drop_s and max_jump <= 2.0 / fps + max_drop_s
+        and longest_gap_s <= max_stall_s
         and not stall["stalled"] and advance >= min_advance_s
     )
     return {
         "verdict": ok, "wraps": len(wraps), "wrapTimes": wraps, "maxDropS": round(max_drop, 3),
+        "maxJumpS": round(max_jump, 3),
         "longestGapS": round(longest_gap_s, 3), "longestStallS": stall["longestStallS"],
         "windowAdvanceS": round(advance, 3), "frameCount": len(rows), "window": window,
     }
@@ -4395,28 +4427,82 @@ def force_wrap_take(
     return take
 
 
-def run_force_wrap(args: argparse.Namespace) -> dict[str, Any]:
-    """L2: one take of a wrap forced `offset_ms` from the advance press at one boundary."""
-    boundary, offset_ms = args.force_wrap["boundary"], args.force_wrap["offsetMs"]
-    src_ordinal, dst_ordinal = FORCE_WRAP_BOUNDARIES[boundary]
-    export = prepare_export(args.fixture, args.original_index, "force-wrap")
+def force_wrap_ground_truth(fixture: Path, original_index: Path, boundary: str, gl_replay: str) -> dict[str, Any]:
+    """The boundary's scene, rects and seeked source instance, derived offline from the fixture."""
+    src_ordinal = FORCE_WRAP_BOUNDARIES[boundary][0]
+    export = prepare_export(fixture, original_index, "force-wrap")
     slides = load_slides(export)
     plan = ground_truth_plan(export, slides)
     facts = ground_truth_facts(plan)
-    facts_on = gl_ground_truth(export, slides, facts)[1] if args.gl_replay == "auto" else None
+    facts_on = gl_ground_truth(export, slides, facts)[1] if gl_replay == "auto" else None
     if boundary == "1to2":
         scene, src_rect, dst_rect, transition = facts["onset1to2"], facts["pinRect"], facts["pinRect"], None
     else:
         scene, src_rect, dst_rect, transition = facts["bridgeScene"], facts["bridgeSrcRect"], facts["destRect"], facts["bridgeScene"] - 1
     src_player = sorted(plan.scene_index_by_player)[src_ordinal - 1]
-    source = source_instance(movie_nodes(export, slides), src_player, facts["asset"], src_rect)
+    return {
+        "export": export, "slides": slides, "facts": facts, "factsOn": facts_on, "scene": scene,
+        "srcRect": src_rect, "dstRect": dst_rect, "transition": transition,
+        "source": source_instance(movie_nodes(export, slides), src_player, facts["asset"], src_rect),
+    }
+
+
+def armed_recorder_window(recorder: Any, reads: Any) -> dict[str, Any] | None:
+    """The armed boundary's recorder window, from the take alone (the page sampler never sees
+    the detached carried element): one second after the seek, to the last destination read,
+    the read that must itself prove the carry LIVE."""
+    seeked = _finite_number(recorder.get("seekedT")) if isinstance(recorder, dict) else None
+    states = _gl_states(reads)
+    end = _finite_number(states[-1].get("t")) if states else None
+    if seeked is None or end is None or end <= seeked + FORCE_WRAP_WINDOW_AFTER_SEEK_MS:
+        return None
+    return {"start": seeked + FORCE_WRAP_WINDOW_AFTER_SEEK_MS, "end": end, "rule": "armed: seekedT + 1 s .. last destination read"}
+
+
+def score_force_wrap_run(result: dict[str, Any], gt: dict[str, Any], boundary: str, offset_ms: float) -> None:
+    """Score one force-wrap take in place from what it recorded (live, or re-read from its artifact)."""
+    facts, source, scene = gt["facts"], gt["source"], gt["scene"]
+    arm_facts = facts_for(result.get("continuity"), facts, gt["factsOn"])
+    armed = arm_facts.get("armed")
+    armed_boundary = armed is not None and armed.get("boundaryKey") == f"continue{boundary}"
+    samples = result.get("samples") or []
+    recorder = result.get("recorder")
+    seeked = _finite_number(recorder.get("seekedT")) if isinstance(recorder, dict) else None
+    period = _finite_number(recorder.get("duration")) if isinstance(recorder, dict) else None
+    installed = continuity_mode(result) == "qualified"
+    result["continuityVerdict"] = score_continuity(
+        samples, facts["asset"], scene, gt["srcRect"], gt["dstRect"], installed, transition_scene=gt["transition"],
+        loop_period_s=period or source["periodS"], min_window_start=(seeked or 0.0) + FORCE_WRAP_WINDOW_AFTER_SEEK_MS,
+    )
+    if armed_boundary:
+        window = armed_recorder_window(recorder, result.get("reads"))
+    else:
+        window = forced_window(samples, scene, gt["transition"], seeked) if seeked is not None else None
+        if window is not None:
+            window["rule"] = "sampler: continuity window, start clipped to seekedT + 1 s"
+    result["recorderClock"] = score_recorder_clock(recorder, window)
+    result["restart"] = score_raw_restart(samples, facts["asset"], scene)
+    result["forced"] = score_forced_wrap(
+        boundary=boundary, offset_ms=offset_ms, take=result.get("take") or {}, recorder=recorder,
+        node_period_s=source["periodS"], continuity=result["continuityVerdict"], clock=result["recorderClock"],
+        reads=result.get("reads"), armed=armed, restart=result["restart"], rects=[gt["dstRect"]],
+        page_errors=page_errors_in(result.get("pageErrorNotes"), seeked, window),
+    )
+    result["status"] = result["forced"]["status"]
+
+
+def run_force_wrap(args: argparse.Namespace) -> dict[str, Any]:
+    """L2: one take of a wrap forced `offset_ms` from the advance press at one boundary."""
+    boundary, offset_ms = args.force_wrap["boundary"], args.force_wrap["offsetMs"]
+    src_ordinal, dst_ordinal = FORCE_WRAP_BOUNDARIES[boundary]
+    gt = force_wrap_ground_truth(args.fixture, args.original_index, boundary, args.gl_replay)
+    source, scene = gt["source"], gt["scene"]
     result: dict[str, Any] = {"source": source, "boundaryScene": scene}
     force_viewport(*args.viewport)
-    player = LiveOutputHost(export, slides, headless=True, gl_replay=args.gl_replay)
+    player = LiveOutputHost(gt["export"], gt["slides"], headless=True, gl_replay=args.gl_replay)
     try:
         player.start()
         result["continuity"] = player.output["continuity"]
-        arm_facts = facts_for(result["continuity"], facts, facts_on)
         transport = player._require_transport()
         transport.evaluate(SAMPLER_JS)
         transport.evaluate(ENSURE_PLAYING_JS)
@@ -4441,28 +4527,28 @@ def run_force_wrap(args: argparse.Namespace) -> dict[str, Any]:
             player.stop()
         except Exception as exc:  # noqa: BLE001 - record, never mask an earlier failure
             result["stopError"] = str(exc)
-    samples, _ = convert_samples_to_authored(raw_samples if isinstance(raw_samples, list) else [])
-    result["samples"] = samples
-    recorder = result.get("recorder")
-    seeked = _finite_number(recorder.get("seekedT")) if isinstance(recorder, dict) else None
-    period = _finite_number(recorder.get("duration")) if isinstance(recorder, dict) else None
-    installed = continuity_mode(result) == "qualified"
-    result["continuityVerdict"] = score_continuity(
-        samples, facts["asset"], scene, src_rect, dst_rect, installed, transition_scene=transition,
-        loop_period_s=period or source["periodS"], min_window_start=(seeked or 0.0) + FORCE_WRAP_WINDOW_AFTER_SEEK_MS,
-    )
-    window = forced_window(samples, scene, transition, seeked) if seeked is not None else None
-    result["recorderClock"] = score_recorder_clock(recorder, window)
-    result["restart"] = score_raw_restart(samples, facts["asset"], scene)
-    result["forced"] = score_forced_wrap(
-        boundary=boundary, offset_ms=offset_ms, take=result.get("take") or {}, recorder=recorder,
-        node_period_s=source["periodS"], continuity=result["continuityVerdict"], clock=result["recorderClock"],
-        reads=result.get("reads"), armed=arm_facts.get("armed"), restart=result["restart"], rects=[dst_rect],
-        page_errors=page_errors_in(result.get("pageErrorNotes"), seeked, window),
-    )
-    result["status"] = result["forced"]["status"]
+    result["samples"] = convert_samples_to_authored(raw_samples if isinstance(raw_samples, list) else [])[0]
+    score_force_wrap_run(result, gt, boundary, offset_ms)
     result["leftoverChrome"] = check_no_leftover_chrome()
     return result
+
+
+def rescore_force_wrap(path: Path) -> dict[str, Any]:
+    """Re-score a saved force-wrap artifact with today's scorer; no browser."""
+    result = json.loads(path.read_text())
+    boundary, offset_ms = result["forceWrap"]["boundary"], result["forceWrap"]["offsetMs"]
+    gt = force_wrap_ground_truth(
+        Path(result["fixture"]), Path(result["originalIndex"]), boundary, (result.get("glReplay") or {}).get("requested", "off"),
+    )
+    before = result.get("status")
+    score_force_wrap_run(result, gt, boundary, offset_ms)
+    forced = result["forced"]
+    return {
+        "artifact": str(path), "statusBefore": before, "status": result["status"], "outcome": forced.get("outcome"),
+        "reasons": forced.get("reasons"), "wrapFromPressMs": forced.get("wrapFromPressMs"),
+        "carry": forced.get("carry"), "wrapOwnerExcused": result["continuityVerdict"].get("wrapOwnerExcused"),
+        "recorderWindow": result["recorderClock"].get("window"),
+    }
 
 
 def run_force_wrap_cli(args: argparse.Namespace) -> None:
@@ -4512,6 +4598,7 @@ def rescore_artifact(path: Path, period_s: float) -> dict[str, Any]:
         wraps = {key: aware[key].pop("wrapTimes", None) for key in aware}
         for key in aware:
             aware[key].pop("wraps", None)
+            aware[key].pop("wrapOwnerExcused", None)
         stored = {key: entry.get(key) for key in strict}
         out[label] = {
             "identical": json.dumps(strict, sort_keys=True, default=str) == json.dumps(aware, sort_keys=True, default=str),
@@ -4525,6 +4612,12 @@ def rescore_artifact(path: Path, period_s: float) -> dict[str, Any]:
 
 
 def run_rescore_cli(args: argparse.Namespace) -> None:
+    if json.loads(args.rescore.read_text()).get("kind") == "live-continuity-probe-force-wrap":
+        report = rescore_force_wrap(args.rescore)
+        print(json.dumps(report, indent=2, default=str))
+        if report["status"] != "pass":
+            raise SystemExit(1)
+        return
     export = prepare_export(args.fixture, args.original_index, "rescore")
     slides = load_slides(export)
     facts = ground_truth_facts(ground_truth_plan(export, slides))
