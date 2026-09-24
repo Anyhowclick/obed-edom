@@ -99,6 +99,12 @@ continuity badge, one line per cut. A movie whose layers do not read as an
 unmasked rectangle — an unreadable layer shape, or a possible mask — makes the
 whole deck `unsupported` instead.
 
+Looping movies (Keynote's Repeat → Loop) carry like any other movie when every
+instance of that movie on both sides of a Magic Move loops. If only some of them
+loop, that cut is declined and listed on `notCarried`, because a carried decoder
+keeps its source slide's loop setting. Repeat → Back and Forth makes the whole
+deck `unsupported` (not yet measured).
+
 Set `OBED_LIVE_CONTINUITY=off` before starting the dashboard server to disable it
 outright.
 
