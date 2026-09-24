@@ -1,26 +1,30 @@
-# GL-replay option (c) headless gates r2: PARTIAL, all run gates PASS (2026-09-23, `9989e8bf`)
+# GL-replay option (c) headless gates r2 (2026-09-23/24; phase 1 `9989e8bf`, phase 2 `bef57a23`)
 
-Plan: `.agents/plans/keynote_live_gl_replay_c.plan.md` rev 1, §8. This round supersedes r1 (`gates-r1.md`, stopped
-at gate 2 on the core `moduleVersion` refusal of G2 v2). The owner chose v1, and the fix is `9989e8bf`. The round ended at
-the owner's 23:25 cut-off for starting batches, and the last batch finished at 23:23. The not-run list below gives the
-exact commands to resume.
+Plan: `.agents/plans/keynote_live_gl_replay_c.plan.md` rev 1, §8. This round supersedes r1 (`gates-r1.md`), which stopped at
+gate 2 because the core refused G2 v2 (`moduleVersion`). The owner chose v1 (`9989e8bf`). Phase 1 ran on 2026-09-23 up to
+the 23:25 cut-off and was finished on 2026-09-24. Phase 2 ran on `bef57a23` (Codex r1 P2 hardening; P2 files and tests only).
+
+**Verdict:** every gate and new check PASSes. A7 (re-run) PASSes at the **owner-widened limit |Δ| ≤ 3** (2026-09-24): 16/16 within ±3 (12/16 within ±2), because the probe read sits between `sampleFrame` and the screenshot (details below). Q3 PASS. All `analyse_g3` gates for the r2 root (1, 2, 4, 4b, 6, 7, Q3) read PASS on one commit.
+
 
 ## Provenance
-- **Commit.** Clean detached worktree `.claude/worktrees/gates-glc-r2` at `9989e8bf`, not dirty at start or end.
-  Set up with `uv sync --all-extras --all-groups` and a fixture symlink to main-checkout `output/p2-recovery/html-adversarial`.
-- **Shas (start == end).** G2 `10a5b36a…` v1 (host reports `injected` v1 `10a5b36a…`). Core `e9338aff…`, unchanged. Fixture:
-  `index.html` `5908d479…`, `preserve-inject.json` `53cf8339…` and `continuity-plan-inject.json` `91a29d5e…`.
-  Evidence: `output/gates-glc/r2/shas-{start,end}.txt`.
-- **KB splices** (harness only, `output/gl-replay-c-harness/splices/splice.py`, one asserted substitution each).
-  - `oldbytes` = the `d56fb0dd` text, sha `4f8850e0…`.
-  - `frozen` was rebuilt on the new bytes: sha `413a00ba…`. It is not used yet (P2).
-  - `-v1diag` is obsolete, since the new G2 sha equals the r1 v1diag sha `10a5b36a…`.
-- **Discipline.** There were ≤ 3 Chromes per batch. Go-to arms, G-OFF and each probe ran alone, with `uptime` in each
-  `batches.txt` (load 3–45). `pgrep -f headless=new` was empty before every batch except gate 6. There it showed one PID
-  (37424) that had exited by the next check, almost certainly the G-OFF host's Chrome shutting down. So gate 6 may have
-  overlapped one exiting Chrome. It passed, so this is noted, not re-run. No Keynote, no OBS.
+- **Phase 1.** Clean detached worktree `.claude/worktrees/gates-glc-r2` at `9989e8bf`.
+- **Phase 2.** Fresh clean detached worktree `.claude/worktrees/gates-glc-p2` at `bef57a23`.
+- **Setup (both).** `uv sync --all-extras --all-groups` and a fixture symlink to main-checkout `output/p2-recovery/html-adversarial`.
+  Neither worktree was dirty at start or end.
+- **Shas (start == end in both).** G2 `10a5b36a…` v1 (host reports `injected` v1 `10a5b36a…`). Core `e9338aff…`, unchanged.
+  Fixture: `index.html` `5908d479…`, `preserve-inject.json` `53cf8339…` and `continuity-plan-inject.json` `91a29d5e…`.
+  Evidence: `output/gates-glc/r2/shas-*.txt` and `output/gates-glc/r2/p2/shas-*.txt`.
+- **KB splices** (harness only, `output/gl-replay-c-harness/splices/splice.py`, one asserted substitution each):
+  - `oldbytes` = the `d56fb0dd` text, sha `4f8850e0…`;
+  - `frozen` = the LIVE `perLiveUpload()` call removed. It re-applies on `bef57a23` with 1 substitution, sha `413a00ba…`;
+  - the r1 `-v1diag` arm is obsolete, since the new G2 sha equals it.
+- **Discipline.** ≤ 3 Chromes per batch. Go-to arms, host/G-OFF runs, each probe run, each P2 run and Q3 each ran alone.
+  `uptime` is recorded in each `batches.txt` (load 3–80). `pgrep -f headless=new` was empty before every batch except
+  r2 gate 6, where it showed one PID (37424) that had exited by the next check, almost certainly the preceding G-OFF
+  Chrome shutting down. Gate 6 passed, so it was not re-run. No Keynote, no OBS.
 
-## Results
+## Phase 1 (`9989e8bf`)
 
 | Gate | Verdict | Numbers |
 |---|---|---|
@@ -31,53 +35,50 @@ exact commands to resume.
 | N2 KB (`armed-oldbytes`) | RED, right reason | B00–B02 match neither (vs P2c ≈ 252, vs P3 255, fracOver8 0.77) |
 | N2 pass | PASS | Every armed/armed-2/armed-lb B-shot ≤ 2 vs control P2c or P3 |
 | Gate 1 install order | PASS | 245 wrapped at install, order plan < core < gl-replay < fit < #stage < main.js, host `injected` v1 |
-| Gate 2 | PASS | frameLen 88, occluded 20/128, oracle LIVE n=24, paused DEAD, carried/pool, innerRect {4,4,952,268}. **Uploads 29.90 / 29.89 / 29.90 /s** (armed/-2/-lb) vs old bytes 29.97/s (same batch) and r3 ≈ 30/s: no drop |
-| G-OFF host ×3 (blocking) | PASS on verdicts; 1600 key set differs | Summary (status, arm modes, all boundary verdicts, visible slides) == G-0′ at 2560, 1600 and 1920. Key sets == G-0′ at 2560 and 1920. **At 1600, arm C `continue3to4`** (bridge disabled, False in both) took the "sampled, failed" path instead of G-0′'s "no decoder id spans the boundary" path. The verdict is the same. The off path's code is unchanged, so this is likely timing under load (45 at the start), but it is **not proven**. A 1600 re-run is listed below |
+| Gate 2 | PASS | frameLen 88, occluded 20/128, oracle LIVE n=24, paused DEAD, carried/pool, innerRect {4,4,952,268}. **Uploads 29.90 / 29.89 / 29.90 /s** vs old bytes 29.97/s (same batch) and r3 ≈ 30/s: no drop |
+| G-OFF host ×3 (blocking) | PASS | Summary == G-0′ at all three viewports. Key sets == G-0′ at 2560 and 1920 (first run) and at 1600 (re-run, below) |
+| G-OFF 1600 caveat | **Settled** | First run (load 45): arm C `continue3to4` took the "decoder sampled, all samples missing" path, still False. The quiet re-run (2026-09-24, load 25 → 59) reproduces G-0′'s "no decoder id spans the boundary" path, with summary and key sets byte-equal to G-0′. The first run was timing, not an off-path change |
 | Gate 4 / 4b | PASS | All existing hand-off checks plus N1/N2, at 1920 (armed, armed-2) and 1600 letterbox |
 | Gate 6 fail-closed | PASS | 20 forced + late `contextLost`/`frameLengthChanged`/`glError`, all PASS. Late `canvasRemoved` is report-only |
 | Gate 7 go-to | PASS | goto2, goto3walk and fullDeckWalk |
-| P5-7 | PASS | goTo 3 → goTo 1 → advance 2: zone `armed → retired (cleared)`, 0 `glreplay-live`, P7/P7b slide-2 shots byte-identical to the flag-off twin (same sha, parity 0) |
-| P5-A (3 viewports + 1 rep at 2560) | PASS 4/4 | `armed1to2` A and C True. Vgl armed slide True. Hand-back parity maxOutside 0 |
-| **N3** | PASS | liveRing max 0 at 2560 (10251 px), 2560-rep2 (10251), 1600 (2690) and 1920 (4740). Dilation 2 |
+| P5-7 | PASS | goTo 3 → goTo 1 → advance 2: zone `armed → retired (cleared)`, 0 `glreplay-live`, P7/P7b slide-2 shots byte-identical to the flag-off twin |
+| P5-A ×3 viewports + 2 reps at 2560 (+ 1 rep each at 1600/1920) | PASS 7/7 | `armed1to2` A and C True, Vgl armed slide True, hand-back parity maxOutside 0 |
+| **N3** | PASS | liveRing max 0 in all 7 runs (ring px: 2560 10251, 1600 2690, 1920 4740). Dilation 2 |
 | N3 KB (Vgl-oldbytes, 2560) | RED, right reason | liveRing max 245, 10251/10251 px. Status `fail` with the single reason "live ring failed". Hand-back, `armed1to2` and armed slide all still green |
-| N3 CvC | 0 at 2560 only | V vs V 0 and Vgl vs Vgl 0 (2560 vs 2560-rep2). **Not run at 1600/1920** (needs a second run per viewport) |
-| P5-A/H KBs and controls (offline `rescore_p5.py`) | RED / 0 | Vgl vs facts_off RED 4/4. V as armed slide RED 4/4. V-as-Vgl hand-back RED, 1-px poke RED, synthetic ring px RED undilated / GREEN dilated (4/4). Own facts 0. V/V and Vgl/Vgl hand-back 0. Two Vgl runs identical |
-| P5-L | Recorded | mutationScanMs 0–0.1. Hand-off completedMs 3.3–3.5 |
+| N3 CvC | 0 at every viewport | V vs V and Vgl vs Vgl: 2560 (base/rep2/rep3 pairs), 1600 (base/rep2), 1920 (base/rep2), all max 0 |
+| P5-A/H KBs and controls (offline `rescore_p5.py`) | RED / 0 | Vgl vs facts_off RED 7/7. V as armed slide RED 7/7. V-as-Vgl hand-back RED, 1-px poke RED, synthetic ring px RED undilated / GREEN dilated (7/7). Own facts 0. V/V and Vgl/Vgl hand-back 0 at each viewport. Two Vgl runs identical |
+| P5-F (2560) | PASS | `planUnreadable`, `rvfcUnavailable`, `posterAmbiguous`, `occlusionTooHigh`: `forced-ok` (all 10 checks). KB `bogusReason` ⇒ `forced-fail` (slides, matchesV, refused, zone, noLive, knownReason False) |
+| P5-L | Recorded | mutationScanMs 0–0.1. Hand-off completedMs 3.0–3.7 |
 
-## DONE / NOT RUN
-- **DONE:** N1 and N2 (KB, CvC, pass); gates 1, 2, 4 and 4b; G-OFF host ×3; gate 6; gate 7; P5-7; P5-A ×3 plus 1 rep at 2560;
-  N3 plus its KB; N3 CvC at 2560; P5-H (from the P5-A runs); P5-L.
-- **NOT RUN:**
-  - a second rep at 2560 (the plan asks for 2);
-  - N3 CvC at 1600 and 1920;
-  - a G-OFF host 1600 re-run, to settle the key-set difference;
-  - P5-F;
-  - all of phase 2: G-OFF P2 off fast/slow/no-bridge, G6 P2 auto fast ×2/slow/no-bridge with N5 and the frozen KB,
-    off-report-scored KB, fast vs fast-rep2 CvC, A7′, and the A7 re-run;
-  - Q3 (20-min soak).
+## Phase 2 (`bef57a23`)
 
-## Resume commands (from main checkout `output/`; `G=…/.claude/worktrees/gates-glc-r2`, `O=…/output/gates-glc/r2`; run `pgrep -f headless=new` first)
-```
-P="$G/.venv/bin/python -u"; F=output/p2-recovery/html-adversarial; cd $G; export PYTHONPATH=$G/src
-# P5-A reps (N3 CvC per viewport) — one at a time
-for V in 2560x1440:2560x1440-rep3 1600x1000:1600x1000-rep2 1920x1080:1920x1080-rep2; do mkdir -p $O/p5a/${V#*:}; $P scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport ${V%%:*} --gl-replay auto --artifact $O/p5a/${V#*:}/probe.json > $O/p5a/${V#*:}/run.log 2>&1; done
-# P5-F (2560), each alone: planUnreadable rvfcUnavailable posterAmbiguous occlusionTooHigh bogusReason
-mkdir -p $O/p5f/R; $P scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport 2560x1440 --gl-replay auto --gl-force-fail R --artifact $O/p5f/R/probe.json > $O/p5f/R/run.log 2>&1
-# G-OFF host 1600 re-run
-VIEWPORTS=1600x1000 output/gates-glc/run_gates_glc.sh $G $O/goff-1600-rerun host
-# Q3 (alone; >10 min, run in background)
-output/gl-replay-c-harness/g3/run_arms.sh $G $O/g3 1 q3
-# rescore
-$G/.venv/bin/python output/gl-replay-c-harness/rescore_p5.py $G <run dirs>; $G/.venv/bin/python output/gl-replay-c-harness/g3/analyse_g3.py gates $O/g3
-```
-Phase 2 needs its own worktree at `9989e8bf`, which already contains the P2 stream. It runs `run_gates_glc.sh … p2fast|p2nobridge|p2slow`
-for G-OFF P2, then the auto P2 runs, with `splices/run_spliced.py frozen $G $G/scripts/p2_recovery_html_adversarial.py …` for the N5 KB.
+| Gate | Verdict | Numbers |
+|---|---|---|
+| G-OFF P2 off fast / slow / no-bridge (blocking) | PASS | Fast and slow: success, 14 True. No-bridge: False only on `continueThroughMovingMagicMove3to4`. Finding (id, pass, status) == g5g6 r3 **and** G-0′ in all three. Report key sets (depth 4) == r3. Against G-0′ they differ only by the keys the g5g6 harness fix added on purpose (`freezeControl/collectors/*/flipVia`, `…/visibleCompetitors/pageHidden`). Freeze control `freezeControlCaughtByCounter` True in all three |
+| G6-P2 auto fast ×2 / slow / no-bridge + **N5** | PASS | `glReplayCarry1to2` True (a–h) in all four; no-bridge `success` False only on 3→4. Carried elId 1, `#1→#2`, clock rate 0.99993–1.00008. **GL probe series 4/4 decoded and progressing** (fast [13,29,45,62], rep2 [15,30,47,62], slow [227,242,3,19], no-bridge [58,75,91,107]), `glForward` 47–49 vs `sourceForward` 48–49. Composite 13–15 decoded |
+| N5 KB frozen-upload (`413a00ba…`, fast) | RED, named series | `glReplayCarry1to2` False. (f) names **`glProbe` 'insufficient decoded reads'** (0/4; the frozen GL shows the restored poster, which has no counter). Also red: `composite` in (f) (0/13) and (b) "uploads not strictly increasing [91, 91]". `sourceSampleFrame` stays green (4/4, decoder running). Only `glReplayCarry1to2` is False among findings |
+| KB off report scored (offline, `kb_off_scored.py`) | RED | Fast/slow/no-bridge off reports ⇒ False (b,c,d,f,g,h). (f) names composite, sampleFrame and glProbe. The same rebuild applied to the four auto reports ⇒ True (a–h), so the rebuild is sound. For off reports, (g) gets `[]` pre-flip owners (off reports do not record them) |
+| CvC fast vs fast-rep2 | Identical | Every finding (id, pass, status) equal |
+| **A7′** (`glProbeSampleFramePairing`, 4 runs × 4 reads) | PASS | lag 0: **16/16** \|Δ\| ≤ 2 (Δ −1…2, mostly +1). KB lag 1: 0/16 (Δ 15–18). `instrumentEscalation` False, no `alphaMin` < 255 read (every probe `ok`, alphaMin 255) |
+| **A7 re-run** (sampleFrame vs same-read screenshot) | **PASS at \|Δ\| ≤ 3** (owner 2026-09-24: widened from 2) | lag 0: **16/16** within ±3 (12/16 within ±2), Δ −1…−3 (typically −2; r1 was −1, max 2). KB lag 1: 0/12 (Δ 16–19). Reason for the widening: the screenshot now comes about 1 counter step (~33 ms) later because the awaited probe read sits between `sampleFrame` and it; the instrument still separates same-read from previous-read (≤ 3 vs ≥ 16) and never mis-decodes, and the (f) series gate on progress, not pairing. Rescored from the saved deltas in `output/gates-glc/r2/p2/a7.txt`, no re-run. |
+| **Q3** 20-min soak (`9989e8bf`, same G2 bytes; alone, load 8–30) | PASS | 0 GL errors in all 20 samples; heap 9.65–10.97 MB (flat, max ≤ 1.25× min); dropped 0/1381 frames; rVFC → rAF at end of media (the movie ends at 46 s, so all 1369 uploads happen before minute 1 and the rest of the soak is rAF replay, as in r3); `loseContext` at minute 10 ⇒ `contextLost` stand-down, write-back skipped, zone `retired failure/contextLost`; P3/P4 == control (parity 0, inside 0) |
 
 ## Harness changes since r1
 - `splices/splice.py` and `g3/analyse_g3.py`: the expected G2 sha is now `10a5b36a…`.
-- `output/gates-glc/run_gates_glc.sh`: `VIEWPORTS` env selects host viewports, so each Bash call stays under 10 min.
-- Everything else is as listed in r1 (the `-oldbytes` arm, the 3 s uploads/s window, the N1/N2 rows and the integrity checks).
+- `output/gates-glc/run_gates_glc.sh`: `VIEWPORTS` env selects host viewports.
+- New `output/gates-glc/run_auto_glc.sh`: a copy of `gates-g5g6/r3/g6p2/run_auto.sh`. Its only change is that `RUNNER` is
+  word-split (`${=RUNNER}`), so it can hold `splices/run_spliced.py frozen <gate> <script>`.
+- New `output/gates-glc/r2/p2/kb_off_scored.py`: rebuilds `glReplayCarry1to2` arguments from a report (plan, preserve
+  events, census, reads, lingering, index sequence plus flipIndex, pre-flip owners from the carry detail) and scores it.
+- The A7/A7′ scoring is inline in `output/gates-glc/r2/p2/a7.txt` (it calls `p2_verdict.glProbeSampleFramePairing`, and for A7
+  `frameIndex` vs `screenIndexNonGating`, modulo 256).
+- Everything else is as listed in r1: the `-oldbytes` arm, the 3 s uploads/s window, the N1/N2 rows and the integrity checks.
 
-## Evidence
-`output/gates-glc/r2/`: `g3/` (all g3h arms plus `gates.json`), `goff/` (host ×3), `p5a/` (4 runs, the oldbytes KB,
-`n3-cvc.txt`, `rescore.json`) and `shas-{start,end}.txt`.
+## Evidence (main checkout `output/gates-glc/r2/`)
+- `g3/`: all g3h arms incl. go-to, gate 6, P5-7 and Q3, plus `gates.json`.
+- `goff/`, `goff-1600-rerun/`.
+- `p5a/`: 7 runs plus the oldbytes KB, `n3-cvc*.txt`, `rescore*.json`.
+- `p5f/`.
+- `p2/goff/`.
+- `p2/g6/{auto-fast,auto-fast-rep2,auto-slow,auto-nobridge,kb-frozen}/` (report, inject and runs).
+- `p2/kb-off-scored.txt`, `p2/a7.txt`.

@@ -16,6 +16,8 @@ g3h = main-checkout `output/gl-replay-g3-harness/g3/` (git-ignored), r3 = `g3h/r
 - OD-2 stands: attach stays not injected (host :866-867). The OBS/CEF upload-rate gap (≈14/s in OBS vs ≈30/s headless, measured 2026-09-23) is out of scope. It belongs to the attach qualification that follows (c).
 - `OBED_LIVE_GL_REPLAY` stays default `off`. The off path stays byte-identical because G2 is injected only in `auto` (host :864-880).
 
+- **A7 limit widened to |Δ| ≤ 3** (owner, 2026-09-24): the probe read now sits between `sampleFrame` and the screenshot (~1 counter step later); previous-read pairing stays ≥ 16. See `.agents/reviews/gl-replay-c/gates-r2.md`.
+
 ## 1. Problem and measured current behaviour
 
 | # | Fact | Source |
