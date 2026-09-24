@@ -21,7 +21,7 @@ an output-rate setting; a dashboard warning when OBS crashed or is blocked.
 launches it hidden when the operator presses **Take output**, waits for readiness, and quits it cleanly on **Release output** — the
 explicit same-Mac handover with ProPresenter (OD-M10, §5). It drives the Browser-source page through `LiveOutputHost`'s existing
 attach path on an AK-chosen CDP port. Persisted: output mode, output rate (25 / 30), keyer on/off; the DeckLink device record lives
-in the engine's own folder (§6). Warnings W1–W5, W8–W13 (§4).
+in the engine's own folder (§6). Warnings W1–W5, W8, W9, W11–W13 (§4).
 
 **Unchanged.** HDMI (Screen) mode; every byte of the continuity, GL-replay and runtime JS; the `_resolve_gl_replay` attach refusal
 ("attach output not qualified") — GL replay stays off under managed OBS until OD-2, so managed OBS ships with native `<video>`
@@ -76,10 +76,10 @@ New dependency: `pyobjc-framework-Cocoa` (darwin) in `pyproject.toml` (S1 owns i
 lifetime** (not only while OBS runs), so another dashboard cannot slip in between a quit and a relaunch. A second holder ⇒ W13.
 `<home>/ak-engine.json` (`{pid, launchDate, cdpPort, wsPort}`) is written before seeding.
 
-**Readiness** (all within 20 s; measured ~2 s [M]): (a) process alive; (b) CDP `/json/list` has exactly one page whose URL contains
+**Readiness** (all within 20 s; measured ~2 s [M]; W3b if a macOS permission or other dialog holds it): (a) process alive; (b) CDP `/json/list` has exactly one page whose URL contains
 `#obed-ak` — record its CDP **target id**; (c) obs-websocket Identify ok and `GetVersion.obsVersion == PINNED_OBS`; (d) the newest
-log in `<tree>/logs/` (mtime ≥ launch) has neither `Crash or unclean shutdown detected` [M] nor `[Safe Mode] Safe mode launch
-selected` [M, source]. Outcomes: `ready` · `blocked:crashPrompt` · `blocked:safeMode` · `blocked:timeout` · `exited`.
+log in `<tree>/logs/` (mtime ≥ launch) has no `[Safe Mode] Safe mode launch selected` [M, source] (defensive: under `--multi` OBS
+never prompts, Q-E). Outcomes: `ready` · `blocked:safeMode` · `blocked:timeout` · `exited`.
 
 **Liveness (v1, every 2 s on the engine thread):** pid alive — gone without AK asking ⇒ `exited` + W5; CDP target **id** still
 listed (never matched by URL: during a show the page is on the asset server's URL [C `live_host.py:1051`]). No stats history, no
@@ -100,9 +100,9 @@ on a switch to Screen mode, and on restart.
 **Orphans (v1).** At startup, a live pid recorded in `ak-engine.json` with a matching launch date is always quit cleanly and
 relaunched — never adopted.
 
-**Crash marker (owner decision 2).** `.sentinel/run_*` is advisory only (W10 before launch). Blocking is detected by readiness + log,
-never by the marker (a clean quit after a recovery still left two files [M]). The engine never deletes it; a test asserts it. OBS has
-no option to skip the crash check [M, source], and none is wanted.
+**Unclean exits (owner decision 2, Q-E).** `--multi` turns OBS's own crash check off (no prompt can appear or steal focus), so AK
+tracks it: `ak-engine.json.cleanExit` is false from launch until AK's own quit completes; finding it false at the next launch ⇒ W3.
+AK never reads, writes or deletes OBS's `.sentinel` (a test asserts it is byte-identical).
 
 ## 3. Output standard
 
@@ -131,18 +131,17 @@ impossible at 50/60 (owner decision 4); they need their own measurement (v2).
 |---|---|---|---|---|
 | W1 obsMissing | no bundle at `/Applications/OBS.app` | block | "Output engine not installed. Install OBS 32.2.2 into Applications, then press Check again." | Check again |
 | W2 obsVersion | plist or `GetVersion` ≠ pin | block | "Output engine is OBS {found}; Alpha Keynote needs OBS 32.2.2. Install 32.2.2, then press Check again." | Check again |
-| W3a obsCrashPrompt | crash-prompt line in the log | block | "OBS needs attention: it did not close properly last time and is waiting for an answer. Press Show OBS, choose Normal Mode, then press Check again." | Show OBS · Check again |
+| W3 obsUncleanExit | `ak-engine.json` says the previous engine did not end with AK's own quit (`cleanExit` false; OBS's own crash check is off under `--multi`, Q-E) | warn | "OBS closed unexpectedly last time. It has been restarted; check the output before going live." | — |
 | W3b obsWaiting | not ready by 20 s, process alive, no crash line | block | "OBS is waiting for an answer or a permission. Press Show OBS, answer it, then press Check again." | Show OBS · Check again |
 | W4 obsSafeMode | Safe-Mode line in the log, or CDP up with the websocket down | block | "OBS started in Safe Mode, so Alpha Keynote cannot watch it. Press Restart output engine and choose Normal Mode when OBS asks." | Restart |
 | W5 obsExited | process gone without AK asking | block (live: red banner) | "OBS stopped unexpectedly — nothing is going to the keyer. Press Restart output engine. OBS may then ask a question (see Show OBS)." | Restart |
 | W8 movieRate | a deck movie's fps outside ±0.2 % of the output rate (Keyer mode only) | warn | "{asset} is {f} fps but the output is {r} fps, so it will judder slightly. Re-export it at {r} fps for smooth motion." | — |
 | W9 noDevice | no device record for this rate | warn | "No output device set for {r} fps — the keyer receives nothing. With the UltraStudio connected, press Set up output device (one time)." | Set up |
-| W10 staleMarker | `.sentinel/run_*` present before launch | info | "OBS may ask a question when it starts (it did not close properly last time)." | — |
 | W11 deviceInactive | device recorded and `GetOutputStatus.outputActive` false 5 s after ready (DeckLink output is exclusive to one app: `EnableVideoOutput` ⇒ `E_ACCESSDENIED` while another holds it [M, Blackmagic SDK]) | block | "Alpha Keynote cannot open the UltraStudio. If ProPresenter is running, remove its SDI screen in Screen Configuration or quit ProPresenter; otherwise check the Thunderbolt cable and Desktop Video. Then press Release output and Take output again." | Release · Take |
 | W12 stuck | no quit within 10 s | block | "OBS is not responding to Quit. Press Show OBS and quit it from the OBS menu, then press Check again." | Show OBS |
 | W13 ownedElsewhere | engine lock held by another process | block | "The output engine is being used by another dashboard window (pid {p}). Close that dashboard first." | Check again |
 
-**Two lists.** W1–W5 and W9–W13 are the engine's `warnings` (§5 JSON). **W8 is a session warning:** `live_codec.movie_fps(path) ->
+**Two lists.** W1–W5, W9 and W11–W13 are the engine's `warnings` (§5 JSON). **W8 is a session warning:** `live_codec.movie_fps(path) ->
 float | None` reads `mdhd` (timescale) and `stts` in the video `trak` the codec parser already walks [C], within the same box budget,
 never raising; `codec_report` entries gain `"fps": float | None`; `LiveOutputHost(output_rate=…)` puts W8 strings in
 `output["rateWarnings"]` beside `codecWarnings` [C]. Unreadable fps ⇒ no warning ("fps unknown"). S6 shows both lists.
@@ -218,13 +217,36 @@ version check and W11 (the only confirmation that the key is actually running). 
 Resolved from source (critique): the 60-fps cap (was Q-C); no websocket bind address (was Q-D). Deferred with W6: the page-rate probe
 (Q-F) and sleep/wake recovery (Q-G).
 
+### Q0 results (2026-09-24, OBS 32.2.2, this Mac; evidence main checkout `output/obs-managed-spike/`)
+
+- **Q-I PASS.** `NSWorkspace.openApplicationAtURL…` with `arguments`, `environment` (`CFFIXED_USER_HOME`, `HOME`),
+  `createsNewApplicationInstance`, `hides` returns the `NSRunningApplication` (pid == `pgrep`), args intact, tree isolated (user
+  config untouched). The `open -n --env` + snapshot fallback is not needed.
+- **Q-E — design change.** Without `--multi`, a crash puts OBS's Safe/Normal prompt **on screen with keyboard focus even though OBS
+  was launched hidden** (the owner's spacebar, typed into another app, answered it; default button = Normal). **With `--multi`, OBS
+  has no crash detection at all** (32.2.2 source: multi-instance mode default-constructs `CrashHandler`, so `hasUncleanShutdown()`
+  is always false) and starts normally after a force-kill [M]. ⇒ AK always passes `--multi`, the prompt can never appear or steal
+  focus, and **AK detects an unclean exit itself** (owner decision 2 kept): `ak-engine.json` gains `cleanExit` (false at launch,
+  true only after AK's own quit completes); a launch that finds it false shows W3. `.sentinel` is ignored entirely (W10 dropped);
+  W4 (Safe Mode) stays only as a defensive log check.
+- **Q-A PASS with a finding.** With AK's hidden OBS running, the user's normal OBS (`open -n`, own config) shows "OBS is already
+  running! … Launch Anyway / Cancel"; **Launch Anyway** runs both side by side, each tree untouched by the other. A plain
+  `open -a OBS` (a normal double-click) does **not** start the user's OBS: macOS activates AK's hidden tray instance, so it looks
+  like nothing happened. ⇒ runbook note: "while Alpha Keynote holds the output, press Release output first — or open your own OBS
+  from Terminal with `open -n -a OBS` and choose Launch Anyway".
+- **Q-B PASS.** `NSRunningApplication.terminate()` by pid quits only AK's instance; the user's OBS keeps running; the user's config
+  is unchanged except OBS's own saved window geometry.
+- **Q-H PASS (canvas 30, lossless, 3 takes interleaved).** Page 60 (2×): G2 LIVE 2.1 % / 1.3 % repeated frames, native 12–13 %;
+  page 30 (matched): G2 0.9 %, native 13–17 %; paused 100 %; OBS 0 skipped frames. At 30 the page rate barely matters (movie, page
+  and canvas share one clock); the 2× rule is kept for simplicity (harmless: page 60.4, 0 skipped). **30 ships with 25.**
+
 ## 9. Tests
 
 **Unit, no OBS** (`tests/test_managed_obs.py`, `tests/test_obs_websocket.py`): tree goldens **pinned to the spike's `seed.py` output
 at rate 25** (ignoring UUIDs, password, port, page URL) — not self-generated; `LastVersion` formula; `FPSCommon` / source fps per
 §3; DeckLink file only when a device is recorded; keyer 0/1; launch configuration via a fake launcher; readiness matrix against a fake
 CDP HTTP server (`/json/list`), a fake obs-websocket (`websockets.sync.server`: Hello with auth, Identify, `GetVersion`,
-`GetOutputStatus`) and log fixtures ⇒ ready / crashPrompt / safeMode / timeout / exited / wrong version; liveness by target id (a URL
+`GetOutputStatus`) and log fixtures ⇒ ready / safeMode / timeout / exited / wrong version; `cleanExit` false on the previous run ⇒ W3; liveness by target id (a URL
 change mid-show stays ready); W5 on a vanished pid; quit timeout ⇒ `stuck`, never kill; orphan always quit-and-relaunch; second lock
 holder ⇒ W13; **`.sentinel` byte-identical before/after every flow**; seeding refused while the pid is alive; the password never
 appears in `state()` or logs.
