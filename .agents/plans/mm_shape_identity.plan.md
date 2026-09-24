@@ -198,6 +198,30 @@ contests were measured).
   are new). Spot-check any new FRC flag against Keynote playback or an export.
 - The full local suites (pytest, `test:ui`, `test:maps`), per the no-CI rule.
 
+## 3a. Status 2026-09-24 21:45 (WIP commit on `claude/mm-shape-identity`)
+- Implemented: stream A (`iwa_runs.py`: gate key, line keys, text in shape key, `mmPrefs`) and stream B
+  (`validate.py`: all keyed kinds; repeated classes pair only for image/movie/shape/line by tiers then
+  distance; repeated text/groups skipped; both SKILL.md rows).
+  - `test_iwa_runs` + `test_validate`: 148 passed, 2 skipped.
+  - Minimal Alpha 1→2 now pairs black↔black and green↔big green.
+- Golden plan:
+  - Gold is unchanged (`a16046f1…`).
+  - FRC `35002fee…` → `e621efe8…`: slide 16 keeps 7 off-canvas 16×16 shapes that now have a partner
+    on slide 17.
+  - Two tests fail until they are re-baselined: `test_golden_apply_plan_full_report_card_wall`, and
+    `test_propose_auto_rects_match_apply_transforms`, whose hard-coded MM address list needs the 7.
+- `mm.zorder_flip` on FRC goes from 22 → 53 flags (+31 new, 0 gone), on slide pairs 7, 8, 16, 56, 84,
+  102 and 130. Shapes are labelled "shape #N", which may need a better label for operators.
+  Minimal Alpha and Gold: 0.
+- **Next** (after the Mac restart):
+  1. Owner review of the 7 slide-16 keeps and the new flags; spot-check a few against Keynote playback.
+  2. Re-baseline the golden plan and the propose/apply list.
+  3. Run the full suites.
+  4. Codex review.
+  5. Open the PR.
+- Evidence: `output/mm-shape-id/golden/` in the worktree holds the before/after captures and
+  `zflags_*`.
+
 ## 4. Owner decisions (taken)
 
 - **D1 — the palette deck.** (a) The owner hand-authors one slide of ~16 styled shapes to a spec I
