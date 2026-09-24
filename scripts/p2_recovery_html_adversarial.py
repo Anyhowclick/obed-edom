@@ -453,10 +453,10 @@ GL_SLIDE2_READ_JS = r"""(() => {
 
 # The one P2 read of the oracle handle (GL-replay (c) plan §4 carve-out): `probe` only, raced at 2 s.
 GL_PROBE_READ_JS = r"""(async () => {
-  const h = window.__OBED_GL_ORACLE__;
-  if (!h || typeof h.probe !== 'function') return {ok: false, reason: 'noProbe'};
-  const timeout = new Promise((resolve) => setTimeout(() => resolve({ok: false, reason: 'timeout'}), 2000));
   try {
+    const h = window.__OBED_GL_ORACLE__;
+    if (!h || typeof h.probe !== 'function') return {ok: false, reason: 'noProbe'};
+    const timeout = new Promise((resolve) => setTimeout(() => resolve({ok: false, reason: 'timeout'}), 2000));
     return await Promise.race([h.probe(__ROI__), timeout]);
   } catch (e) {
     return {ok: false, reason: 'threw', error: String(e)};
@@ -697,11 +697,19 @@ def _gl_probe_array(result: object) -> np.ndarray | None:
     if not isinstance(result, dict) or result.get("ok") is not True:
         return None
     w, h, pixels = result.get("width"), result.get("height"), result.get("pixels")
-    if not (isinstance(w, int) and isinstance(h, int) and w > 0 and h > 0):
+    if not (type(w) is int and type(h) is int and w > 0 and h > 0):
         return None
     if not isinstance(pixels, list) or len(pixels) != w * h * 4:
         return None
-    return np.asarray(pixels, dtype=np.uint8).reshape(h, w, 4)
+    if not all(type(p) is int and 0 <= p <= 255 for p in pixels):
+        return None
+    try:
+        arr = np.asarray(pixels, dtype=np.uint8).reshape(h, w, 4)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if int(arr[:, :, 3].min()) != 255 or result.get("alphaMin") != 255:
+        return None
+    return arr
 
 
 def _gl_probe_index(result: object, save_to: Path | None = None) -> int | None:
@@ -711,8 +719,6 @@ def _gl_probe_index(result: object, save_to: Path | None = None) -> int | None:
         return None
     if save_to is not None:
         Image.fromarray(arr).save(save_to)
-    if result.get("alphaMin") != 255:
-        return None
     return _decode_index_patch(arr, (0, 0, arr.shape[1], arr.shape[0]))
 
 

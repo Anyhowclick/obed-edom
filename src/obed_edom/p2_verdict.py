@@ -1058,7 +1058,7 @@ def progressingIndexAfterFlip(
 
 
 def _is_index(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
+    return type(value) is int and 0 <= value < INDEX_PATCH_MODULO
 
 
 def glProbeSampleFramePairing(
@@ -1077,12 +1077,13 @@ def glProbeSampleFramePairing(
         for i, read in enumerate(reads):
             read = read if isinstance(read, dict) else {}
             meta = read.get("glProbeMeta") if isinstance(read.get("glProbeMeta"), dict) else {}
-            if meta.get("ok") is True and meta.get("alphaMin") != 255:
+            clean = meta.get("ok") is True and type(meta.get("alphaMin")) is int and meta.get("alphaMin") == 255
+            if meta.get("ok") is True and not clean:
                 alpha_below.append({"run": run_i, "read": i, "alphaMin": meta.get("alphaMin")})
             src = reads[i - lag] if 0 <= i - lag < len(reads) and isinstance(reads[i - lag], dict) else {}
             probe, frame = read.get("glProbeIndex"), src.get("frameIndex")
             delta = None
-            if _is_index(probe) and _is_index(frame):
+            if clean and _is_index(probe) and _is_index(frame):
                 half = INDEX_PATCH_MODULO // 2
                 delta = (probe - frame + half) % INDEX_PATCH_MODULO - half
             pairs.append({"run": run_i, "read": i, "glProbeIndex": probe, "frameIndex": frame, "delta": delta})

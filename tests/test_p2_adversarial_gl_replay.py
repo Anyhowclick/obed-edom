@@ -1095,6 +1095,15 @@ def test_gl_probe_pixels_are_read_top_down():
         pytest.param(_probe_result(width=0, pixels=[]), id="empty"),
         pytest.param(_probe_result(pixels=None), id="no-pixels"),
         pytest.param(_probe_result(ok="true"), id="ok-not-true"),
+        pytest.param(_probe_result(width=True, height=1, pixels=[121, 121, 121, 255]), id="bool-width"),
+        pytest.param(_probe_result(width=1, height=True, pixels=[121, 121, 121, 255]), id="bool-height"),
+        pytest.param(_probe_result(width=1, height=1, pixels=[121, 121, True, 255]), id="bool-pixel"),
+        pytest.param(_probe_result(width=1, height=1, pixels=[121, 121, 256, 255]), id="pixel-above-255"),
+        pytest.param(_probe_result(width=1, height=1, pixels=[121, 121, -1, 255]), id="pixel-negative"),
+        pytest.param(_probe_result(width=1, height=1, pixels=[121, 121, 121.0, 255]), id="float-pixel"),
+        pytest.param(_probe_result(width=1, height=1, pixels=[121, 121, "121", 255]), id="string-pixel"),
+        pytest.param(_probe_result(width=1, height=1, pixels=[121, 121, None, 255]), id="null-pixel"),
+        pytest.param(_probe_result(width=1, height=1, pixels=[121, 121, 121, 254]), id="computed-alpha-below-255"),
     ],
 )
 def test_a_failed_probe_read_is_none_never_a_raise(result):
@@ -1109,13 +1118,13 @@ def test_a_non_flat_probe_patch_decodes_to_none():
     assert drv._gl_probe_index(_probe_result(width=w, height=h, pixels=pixels)) is None
 
 
-def _run_probe_read(handle_js: str, *, fast_timeout: bool = False) -> dict:
+def _run_probe_read(handle_js: str, *, fast_timeout: bool = False, window_js: str | None = None) -> dict:
     harness = (
         (
             "global.setTimeout = function (f, ms) { global.__timeoutMs = ms; f(); return 0; };\n"
             if fast_timeout else ""
         )
-        + f"global.window = {{__OBED_GL_ORACLE__: {handle_js}}};\n"
+        + (window_js or f"global.window = {{__OBED_GL_ORACLE__: {handle_js}}};") + "\n"
         + f"Promise.resolve({_probe_js()}).then((r) => {{"
         " console.log(JSON.stringify({result: r, timeoutMs: global.__timeoutMs === undefined ? null : global.__timeoutMs,"
         " calls: global.__calls || []})); process.exit(0); });\n"
@@ -1143,6 +1152,7 @@ def test_probe_read_js_passes_the_roi_literal_and_returns_the_probe_result():
         pytest.param("{rect: {}}", "noProbe", id="no-probe-method"),
         pytest.param("{probe: function () { throw new Error('boom'); }}", "threw", id="probe-throws"),
         pytest.param("{probe: function () { return Promise.reject(new Error('boom')); }}", "threw", id="probe-rejects"),
+        pytest.param("{get probe() { throw new Error('boom'); }}", "threw", id="probe-getter-throws"),
     ],
 )
 def test_probe_read_js_fails_a_read_it_cannot_make(handle, reason):
@@ -1213,6 +1223,63 @@ def test_a7_prime_alpha_below_255_is_an_instrument_escalation_not_a_pass():
     assert got["ok"] is False
     assert got["instrumentEscalation"] is True
     assert got["alphaBelow255"] == [{"run": 2, "read": 1, "alphaMin": 254}]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_probe_read_js_fails_a_throwing_oracle_getter():
+    """Accessor failures on `window.__OBED_GL_ORACLE__` itself are a failed read, never a
+    rejected evaluate."""
+    got = _run_probe_read(
+        "",
+        window_js="global.window = {}; Object.defineProperty(global.window, '__OBED_GL_ORACLE__',"
+        " {get: function () { throw new Error('boom'); }});",
+    )
+    assert got["result"]["ok"] is False
+    assert got["result"]["reason"] == "threw"
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [
+        pytest.param({"ok": False, "reason": "standDown", "alphaMin": 255}, id="probe-failed"),
+        pytest.param(None, id="meta-missing"),
+        pytest.param({"ok": True}, id="alpha-missing"),
+        pytest.param({"ok": True, "alphaMin": True}, id="alpha-bool"),
+        pytest.param({"ok": "true", "alphaMin": 255}, id="ok-not-true"),
+    ],
+)
+def test_a7_prime_a_pair_without_a_clean_probe_read_has_no_delta(meta):
+    """Known-bads: a decoded-looking counter on a failed or unattested probe read is
+    never scored as agreement."""
+    runs = [_a7_reads() for _ in range(4)]
+    for reads in runs:
+        for read in reads:
+            if meta is None:
+                read.pop("glProbeMeta")
+            else:
+                read["glProbeMeta"] = dict(meta)
+    got = v.glProbeSampleFramePairing(runs)
+    assert got["ok"] is False
+    assert got["nAgree"] == 0
+    assert all(p["delta"] is None for p in got["pairs"])
+
+
+@pytest.mark.parametrize(
+    "probe,frame",
+    [
+        pytest.param(True, 1, id="bool-probe"),
+        pytest.param(1, False, id="bool-frame"),
+        pytest.param(256, 255, id="probe-above-255"),
+        pytest.param(-1, 0, id="probe-negative"),
+        pytest.param(40, 296, id="frame-above-255"),
+        pytest.param(41.0, 40, id="float-probe"),
+    ],
+)
+def test_a7_prime_counters_must_be_integers_in_0_255(probe, frame):
+    runs = [[{"frameIndex": frame, "glProbeIndex": probe, "glProbeMeta": {"ok": True, "alphaMin": 255}}]]
+    got = v.glProbeSampleFramePairing(runs, min_agree=1)
+    assert got["pairs"][0]["delta"] is None
+    assert got["ok"] is False
 
 
 @pytest.mark.parametrize("runs", [None, [], [None], "x"])
