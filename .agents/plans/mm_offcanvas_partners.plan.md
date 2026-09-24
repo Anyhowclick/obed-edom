@@ -21,31 +21,31 @@ todos:
     content: >-
       Stream A. `src/obed_edom/iwa_runs.py`: new `attach_magic_move(key_path, payload, *, deck=None)` →
       per-slide `magicMoveOut` + `mmKeys` (§Stream A). Tests in `tests/test_iwa_runs.py`.
-    status: pending
+    status: completed
   - id: b-planner
     content: >-
       Stream B. `src/obed_edom/map_remap.py`: `hide_reason` tag on the off-slide hide, the partner
       post-pass in `plan_payload`, `_mm_partner_transform`, `_push_past_edge`, `Plan.mm_partners`, a shared
       group-bookkeeping helper (§Stream B). Tests in `tests/test_map_remap.py`.
-    status: pending
+    status: completed
   - id: c-wiring
     content: >-
       Stream C. `src/obed_edom/remap_keynote.py`: call `attach_magic_move` in `prepare_wall_payload`,
       print one operator line, add `result["mmPartners"]`. Tests in `tests/test_remap_keynote.py`. Docs: SKILL.md
       §CG resizer + §Offline hide delete bullet, `pass1_hides_offline.plan.md` `followup-mm-leftovers` → pointer
       here (§Stream C).
-    status: pending
+    status: completed
   - id: d-golden
     content: >-
       After A+B+C are merged on the branch: Keynote-free `scripts/golden_plan.py capture` on FRC before/after and
       diff against the §Oracle. Then `update --deck Full_Report_Card_Wall.key`; Gold must be byte-identical
       (no update). Full suites.
-    status: pending
+    status: completed
   - id: e-live
     content: >-
       COORDINATOR-RUN, owner-checked. FRC remap `--slides 15-18,55-57,129-131` with production defaults. Owner plays
       MM 15→18, 55→57 and 129→131 against the wall deck (§Live). Record the result in this plan's review log.
-    status: pending
+    status: completed
 ---
 
 # Off-canvas Magic Move partners
@@ -359,3 +359,17 @@ None change the design. For owner veto only:
     - builds are identity-based, and offline-hide eligibility is hides-only;
     - the transition field names;
     - `deck_builds` takes 0.05s, so the second read is cheap.
+- Implementation (2026-09-24, Opus medium ×3, streams A/B/C): FRC plan diff equals §Oracle exactly (22 hide→other,
+  2 top pushes on 16, statJobs +7 on 130, asGeom only 16/17/130); Gold unchanged. FRC golden re-baselined
+  (35002fee…); `test_offline_write` aspect pins re-measured (+13 candidates: 12 asserted, 1 masked); propose-vs-apply
+  parity pins the 22 apply-only rows.
+- C1 (Codex GPT-5.6 Sol H): BLOCK, 1 MAJOR (rotated/line push extent recentred the rotated AABB) + 3 MINOR
+  (non-transactional MM read; 3-decimal shape key; loose parity pin). Fixed #1, #2, #4; #3 refuted by measurement
+  (finer precision splits save-noise twins and re-hides real partners). C2: all CLOSED; 1 new MINOR (fixed-frame
+  text writer has no rotated-anchor correction) → rotated fixed-frame text misses to the live fallback
+  (`text-rotated`; 0 rotated text on FRC/Gold). C3: PASS.
+- LIVE (2026-09-24, owner playback, `be358922`): `--slides 15-18,55-57,129-131` kept 22, pushed 2, applied 277,
+  missed 0, offline hides 70/0 refused — MM OK. `--slides 84-86` (Thailand → SEA → China; no partners, 9
+  side-panel hides): OK. Thailand fades 100→0 and China 0→100 as on the wall; the SEA map lands within <1px. The wall's MM
+  reads slightly more seamless, likely the canvas-size difference. Suites: 7039 passed / 88 skipped / 1 xfailed,
+  test:ui 246, test:maps 542 + 2.
