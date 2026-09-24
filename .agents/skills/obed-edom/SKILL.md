@@ -358,9 +358,9 @@ z-order (W2)" below), and `verify_live_frames_multiset` covers the one remaining
 and `uncovered` must be empty for the gate to go green.
 
 The 2026-09-07 Full bank under
-`output/bank/2026-09-07/write-gate-full/` completed RED but is reusable:
-both A/B decks and run records are present, so diagnose and re-run comparisons
-Keynote-free before paying for another live gate. The surgical writer's own
+`output/bank/2026-09-07/write-gate-full/` completed RED. Only its run records
+remain (the A/B decks and previews are pruned), so it can be read for diagnosis
+but not re-compared. The surgical writer's own
 consistency and live geometry verify passed at 0.00px, but pass-2 parity and 12
 slides' identity geometry failed. Those defects were fixed (PRs #57/#59/#73/#78/#80/#94/
 #104/#115) and the strict full gate went GREEN 2026-09-12; the W1 default flipped to
@@ -640,6 +640,7 @@ reuse v3/v4/v5/v6 records. A reused v3 record simply lacks
 round (re-running the planner against the original source+template, reading
 `B_flagged.key` back with `derive_deck_kind_index`) to prove the addressing/coverage
 arithmetic on real decks — it does not prove Keynote agrees; only a live gate does that.
+No current bank still holds a `B_flagged.key`, so bank a fresh round first.
 
 ### External reference: KeynoteKit
 

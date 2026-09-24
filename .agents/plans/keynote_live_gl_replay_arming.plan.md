@@ -6,7 +6,7 @@ boundary), [`keynote_live_paint_oracle.plan.md`](keynote_live_paint_oracle.plan.
 owner answered D-b land now / D-c inconclusive-and-fail / D-d attach first / D-e full re-qualification), and the
 results at the bottom of [`keynote_live_alternatives_research.md`](keynote_live_alternatives_research.md).
 Every measured fact below is cited from those results and is NOT re-derived here.
-Reference flow (git-ignored): `output/live-visible-content/alt-perclear/{js,e2}.py`.
+Reference flow: pruned with the research archive (2026-09-24); see git history.
 
 ## 1. Scope and non-goals
 
@@ -168,7 +168,7 @@ its own decks and should set the build start directly rather than warn.
 
 | # | Files (disjoint) | Work |
 |---|---|---|
-| G0 | none (scratch under `output/live-visible-content/alt-cef/`) | Q1–Q3. **Blocks G1–G5.** |
+| G0 | none (scratch; pruned 2026-09-24) | Q1–Q3. **Blocks G1–G5.** |
 | G1 | `src/obed_edom/live_continuity.py` + `tests/test_live_continuity.py` | `glReplay` derivation (§2 offline proofs), `glReplay`/`glReplayReason` on the refusal record, `to_runtime` guards, new allowlist sha |
 | G2 | `src/obed_edom/live_gl_replay_js.py` (new) + `tests/test_live_gl_replay_js.py` | wrapper, recorder, marker swap, rVFC loop, `sample()`, MutationObserver stand-down, `GL_REPLAY_VERSION`/sha. Node-sandbox tests with a fake GL context |
 | G3 | `src/obed_edom/live_continuity_js.py` + tests | `glReplay` zone: pool-but-never-mount, stand-down remount handoff, notes, `CONTINUITY_VERSION` 5 |

@@ -21,7 +21,7 @@ Worktrees: `friendly-sammet-32dab4` (now on the #158 branch; its ignored `output
 and the research harness) · `gate-runner` (detached on the #158 tip; ALL browser gates run from here; own 198 MB copy of
 the git-ignored H.264 fixture bank) · `decklink-field-test-2ad808` (detached) · `pr158-handover-findings-4366b9` (DSK
 branch). `agent-consolidated` was RETIRED 2026-09-20 (its diff was byte-identical to `c567fefd`, already on `main`). Do NOT delete `friendly-sammet-32dab4` or `gate-runner` — the fixture copies are not in git.
-Safety bundles of every deleted branch: MAIN checkout `output/branch-cleanup-2026-09-19/`.
+Safety bundles of the deleted branches were pruned 2026-09-24.
 The main checkout is on `main` and the venv is an editable install of it ⇒ ALWAYS `PYTHONPATH=<worktree>/src`.
 Gate runner: `run_gates.sh <gate-worktree> <outdir>` (copy in `output/live-continuity-i3/`); one full round ≈ 13 min;
 **one browser user at a time** for gates. Next DeckLink venue test: 2026-10-10 (`decklink-field-test-runbook.md`).

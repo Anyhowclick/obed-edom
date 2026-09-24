@@ -95,7 +95,7 @@ import live_host_probe  # noqa: E402 - reuse the headless window-size compensati
 
 FIXTURE = REPO / "output/p2-recovery/html-adversarial/html-player"
 ORIGINAL_INDEX = REPO / "output/p2-recovery/html-adversarial/html-unmodified/index.html"
-ARTIFACT = Path("output/keynote-live-planning-2026-09-19/live-continuity-probe.json")
+ARTIFACT = Path("output/live-probes/live-continuity-probe.json")
 PROBE_DIGEST = "b" * 64
 CHROME = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 
