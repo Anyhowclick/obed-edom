@@ -4167,7 +4167,7 @@ _FAILS_JSON = find_repo_root() / "tests/fixtures/as-geometry-rounding/fails.json
     not (_FULL_DECK.exists() and _BASE_TEMPLATE.exists()), reason="local gold deck only"
 )
 def test_full_deck_plan_is_aspect_consistent():
-    """71/674/633 (and the derived 1378/1440) are measured pins on
+    """71/675/645 (and the derived 1391/1453) are measured pins on
     ``Full_Report_Card_Wall.key`` — a change in any of them is a re-measurement
     decision, not a fixture bump."""
     import obed_edom.remap_keynote as rk
@@ -4246,7 +4246,7 @@ def test_full_deck_plan_is_aspect_consistent():
         asserted.add((slide, kind, kind_index))
         buckets["asserted"] += 1
 
-    assert candidates == 1440
+    assert candidates == 1453
     assert candidates == (
         buckets["slide36"] + buckets["child"] + buckets["no_id"]
         + buckets["card_badge"] + buckets["masked"] + len(asserted)
@@ -4254,16 +4254,16 @@ def test_full_deck_plan_is_aspect_consistent():
     assert buckets["no_id"] == 0, buckets
     assert buckets["slide36"] == 6
     assert buckets["child"] == 56
-    assert buckets["masked"] == 674
+    assert buckets["masked"] == 675
     assert buckets["card_badge"] == 71
-    assert len(asserted) == 633
+    assert len(asserted) == 645
     assert buckets["asserted"] == len(asserted)
-    assert buckets["masked"] + buckets["card_badge"] + len(asserted) == 1378
+    assert buckets["masked"] + buckets["card_badge"] + len(asserted) == 1391
 
     assert all(geom_sources.get(obj_id) == "mask" for obj_id in dropped_no_aspect_ids), (
         dropped_no_aspect_ids
     )
-    assert len(dropped_no_aspect_ids) == 674
+    assert len(dropped_no_aspect_ids) == 675
     assert all(row[1] == "group" for row in card_badge_rows), card_badge_rows
 
     missing = banked_fail_addrs - asserted

@@ -565,6 +565,178 @@ def attach_slide_builds(key_path: str | Path, payload: dict, *, deck: Any = None
             ]
 
 
+def _is_magic_move_out(transition: dict | None) -> bool:
+    """Magic Move delivering text by object; word/character delivery pairs partial strings."""
+    from obed_edom.iwa_builds import _transition_effect_duration  # noqa: PLC0415
+
+    found = _transition_effect_duration(transition)
+    if not found or "magic-move" not in str(found[0] or ""):
+        return False
+    delivery = ((transition or {}).get("attributes") or {}).get("customTextDeliveryType")
+    return delivery is None or str(delivery).endswith("ByObject")
+
+
+def _data_digests(objects: dict[str, dict]) -> dict[str, str]:
+    """{data id: TSP.PackageMetadata digest}."""
+    out: dict[str, str] = {}
+    for obj in objects.values():
+        if obj.get("_pbtype") != "TSP.PackageMetadata":
+            continue
+        for data in obj.get("datas") or []:
+            ident, digest = data.get("identifier"), data.get("digest")
+            if ident is not None and digest:
+                out[str(ident)] = str(digest)
+    return out
+
+
+def _mm_media_key(obj: dict, digests: dict[str, str]) -> str | None:
+    from obed_edom.offline_inspect import _data_identifier  # noqa: PLC0415
+
+    data_id = _data_identifier(obj)
+    if data_id is None:
+        return None
+    return digests.get(data_id) or f"id:{data_id}"
+
+
+def _unit_path(node: Any, width: float, height: float) -> Any:
+    if isinstance(node, dict):
+        out: dict[str, Any] = {}
+        for key, value in node.items():
+            if key == "naturalSize":
+                continue
+            if key == "x" and width and isinstance(value, (int, float)):
+                out[key] = round(value / width, 3)
+            elif key == "y" and height and isinstance(value, (int, float)):
+                out[key] = round(value / height, 3)
+            else:
+                out[key] = _unit_path(value, width, height)
+        return out
+    if isinstance(node, list):
+        return [_unit_path(value, width, height) for value in node]
+    return node
+
+
+def _mm_shape_key(obj: dict) -> str | None:
+    """Path-source key + preset type + sha1 of the path in naturalSize units (size-invariant)."""
+    found = _path_source(obj)
+    if not found:
+        return None
+    key, sub = found
+    ns = sub.get("naturalSize") or {}
+    unit = _unit_path(sub, ns.get("width") or 0, ns.get("height") or 0)
+    digest = hashlib.sha1(json.dumps(unit, sort_keys=True, default=str).encode()).hexdigest()[:12]
+    return f"{key}:{sub.get('type', '')}:{digest}"
+
+
+def _mm_group_leaves(
+    group_id: str, objects: dict[str, dict], digests: dict[str, str], seen: set[str], out: list[str]
+) -> bool:
+    """``_collect_group_content``'s DFS with media by digest and shapes by ``_mm_shape_key``.
+    False if any leaf is unresolvable."""
+    if group_id in seen:
+        return True
+    seen.add(group_id)
+    group = objects.get(group_id)
+    if not group:
+        return False
+    for ref in group.get("children") or []:
+        child_id = ref.get("identifier")
+        child = objects.get(str(child_id)) if child_id is not None else None
+        if not child:
+            return False
+        ptype = child.get("_pbtype")
+        if ptype == "TSD.GroupArchive":
+            if not _mm_group_leaves(str(child_id), objects, digests, seen, out):
+                return False
+            continue
+        media_kind = _MEDIA_PBTYPE_KIND.get(ptype)
+        if media_kind is not None:
+            media = _mm_media_key(child, digests)
+            if media is None:
+                return False
+            out.append(f"{media_kind}:{media}")
+            continue
+        if ptype != "TSWP.ShapeInfoArchive":
+            return False
+        stor_id = (child.get("ownedStorage") or {}).get("identifier")
+        storage = objects.get(str(stor_id)) if stor_id is not None else None
+        text = "".join(storage.get("text") or []) if storage and storage.get("_pbtype") == "TSWP.StorageArchive" else ""
+        if text:
+            norm = _normalize_text(text)
+            if norm:
+                out.append(f"text:{norm}")
+            continue
+        shape = _mm_shape_key(child)
+        if shape is None:
+            return False
+        out.append(f"shape:{shape}")
+    return True
+
+
+def _mm_identity(rec: dict, objects: dict[str, dict], digests: dict[str, str]) -> str | None:
+    """Content identity Keynote's Magic Move pairs on; None never matches."""
+    kind = rec["kind"]
+    obj = objects.get(str(rec["id"])) or {}
+    if kind == "text":
+        norm = _normalize_text(rec.get("text"))
+        return f"text:{norm}" if norm else None
+    if kind in ("image", "movie"):
+        media = _mm_media_key(obj, digests)
+        return f"{kind}:{media}" if media else None
+    if kind == "shape":
+        if rec.get("duplicateOf"):
+            return None
+        shape = _mm_shape_key(obj)
+        return f"shape:{shape}" if shape else None
+    if kind == "group":
+        leaves: list[str] = []
+        if not _mm_group_leaves(str(rec["id"]), objects, digests, set(), leaves) or not leaves:
+            return None
+        return "group:" + _SIG_JOIN.join(leaves)
+    if kind == "line":
+        return "line"
+    return None
+
+
+def attach_magic_move(key_path: str | Path, payload: dict, *, deck: Any = None) -> None:
+    """Attach slide['magicMoveOut'] = True when the slide's transition out is a by-object
+    Magic Move, and slide['mmKeys'] = {kind: {kindIndex: key}} on both slides of each such
+    pair. All-or-nothing: prior fields are cleared first and written only after every slide
+    is keyed. Read-only; transitions come from iwa_builds.deck_builds."""
+    slides = payload.get("slides") or []
+    for slide in slides:
+        slide.pop("magicMoveOut", None)
+        slide.pop("mmKeys", None)
+    from obed_edom.iwa_builds import deck_builds  # noqa: PLC0415
+    from obed_edom.iwa_kindindex import derive_kind_index  # noqa: PLC0415
+
+    deck = deck if deck is not None else _load_deck(key_path)
+    objects = deck[0]
+    by_number = deck_builds(key_path, deck=deck)
+    mm_out = {number - 1 for number, rec in by_number.items() if _is_magic_move_out(rec.get("transition"))}
+    paired = mm_out | {idx + 1 for idx in mm_out}
+    order = slide_order(objects)
+    digests = _data_digests(objects)
+    staged: list[tuple[dict, bool, dict[str, dict[int, str]]]] = []
+    for slide in slides:
+        idx = slide.get("index")
+        if idx is None:
+            continue
+        keys: dict[str, dict[int, str]] = {}
+        slide_archive = objects.get(order[idx][0]) if idx in paired and 0 <= idx < len(order) else None
+        if slide_archive is not None:
+            for rec in derive_kind_index(slide_archive, objects):
+                key = _mm_identity(rec, objects, digests)
+                if key is not None:
+                    keys.setdefault(rec["kind"], {})[int(rec["kindIndex"])] = key
+        staged.append((slide, idx in mm_out, keys))
+    for slide, out, keys in staged:
+        if out:
+            slide["magicMoveOut"] = True
+        if keys:
+            slide["mmKeys"] = keys
+
+
 def _single_text_leaf(group_id: str, objects: dict[str, dict]) -> dict | None:
     """This group's one non-empty text leaf (direct or nested); None if zero or more than one."""
     found: list[dict] = []

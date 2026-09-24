@@ -1430,3 +1430,374 @@ def test_group_child_records_reads_non_bezier_natural_size():
     assert text["autosize"] is True
     assert text["w"] == pytest.approx(120.0)
     assert text["h"] == pytest.approx(32.0)
+
+
+# --------------------------------------------------------------------------
+# attach_magic_move — per-slide `magicMoveOut` + `mmKeys` content identity
+# (mm_offcanvas_partners.plan.md §Partner rule / §Stream A). Synthetic archives
+# only; deck_builds needs a real zip for its data index, so an empty one is used.
+# --------------------------------------------------------------------------
+_MM_EFFECT = "apple:magic-move-implied-motion-path"
+_BY_OBJECT = "TransitionCustomAttributesTextDeliveryTypeByObject"
+_BY_WORD = "TransitionCustomAttributesTextDeliveryTypeByWord"
+
+
+def _transition(effect, delivery=None):
+    attrs = {"animationAttributes": {"animationType": "Transition", "effect": effect}}
+    if delivery is not None:
+        attrs["customTextDeliveryType"] = delivery
+    return {"attributes": attrs}
+
+
+def _triangle(scale):
+    points = [(0.0, 0.0), (10.0, 0.0), (5.0, 8.0)]
+    elements = [{"type": "moveTo", "points": [{"x": points[0][0] * scale, "y": points[0][1] * scale}]}]
+    elements += [{"type": "lineTo", "points": [{"x": x * scale, "y": y * scale}]} for x, y in points[1:]]
+    elements.append({"type": "closePath"})
+    return {
+        "_pbtype": "TSWP.ShapeInfoArchive",
+        "super": {"pathsource": {"bezierPathSource": {
+            "naturalSize": {"width": 10.0 * scale, "height": 8.0 * scale},
+            "path": {"elements": elements},
+        }}},
+    }
+
+
+def _rounded_rect(width, height, radius):
+    return {
+        "_pbtype": "TSWP.ShapeInfoArchive",
+        "super": {"pathsource": {"scalarPathSource": {
+            "type": 0, "scalar": radius, "naturalSize": {"width": width, "height": height},
+        }}},
+    }
+
+
+def _mm_deck(slides, extra, datas=()):
+    """``slides``: [(transition, [drawable ids])]; ``extra``: drawable/storage objects.
+    ``datas``: PackageMetadata ``datas`` records."""
+    objects = dict(extra)
+    tree = []
+    for i, (transition, drawables) in enumerate(slides):
+        node, sid = f"node{i}", f"slide{i}"
+        tree.append({"identifier": node})
+        objects[node] = {"_pbtype": "KN.SlideNodeArchive", "slide": {"identifier": sid}}
+        objects[sid] = {
+            "_pbtype": "KN.SlideArchive",
+            "drawablesZOrder": [{"identifier": d} for d in drawables],
+        }
+        if transition is not None:
+            objects[sid]["transition"] = transition
+    objects["show"] = {"_pbtype": "KN.ShowArchive", "slideTree": {"slides": tree}}
+    objects["meta"] = {"_pbtype": "TSP.PackageMetadata", "datas": list(datas)}
+    return objects, {}, {}
+
+
+def _empty_key(tmp_path):
+    import zipfile  # noqa: PLC0415
+
+    path = tmp_path / "mm.key"
+    with zipfile.ZipFile(path, "w"):
+        pass
+    return path
+
+
+def _text_box(storage_id):
+    return {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": storage_id}}
+
+
+def _storage(text):
+    return {"_pbtype": "TSWP.StorageArchive", "text": [text]}
+
+
+def _attach(tmp_path, deck, indices):
+    payload = {"slides": [{"index": i, "items": []} for i in indices]}
+    iwa.attach_magic_move(_empty_key(tmp_path), payload, deck=deck)
+    return payload["slides"]
+
+
+def test_attach_magic_move_gates_on_effect_and_by_object_delivery(tmp_path):
+    # Slide 0: dissolve (no pair). Slide 1: MM, no delivery field (default). Slide 2:
+    # MM by object. Slide 3: MM by word -- partial-string pairing, not modelled, so not
+    # a pair. Slide 4: last slide, no transition.
+    extra = {f"t{i}": _text_box(f"s{i}") for i in range(5)} | {f"s{i}": _storage(f"Title {i}") for i in range(5)}
+    deck = _mm_deck(
+        [
+            (_transition("apple:dissolve"), ["t0"]),
+            (_transition(_MM_EFFECT), ["t1"]),
+            (_transition(_MM_EFFECT, _BY_OBJECT), ["t2"]),
+            (_transition(_MM_EFFECT, _BY_WORD), ["t3"]),
+            (None, ["t4"]),
+        ],
+        extra,
+    )
+    slides = _attach(tmp_path, deck, range(5))
+    assert [s.get("magicMoveOut") for s in slides] == [None, True, True, None, None]
+    # Pairs are (1,2) and (2,3): keys on 1, 2, 3 only. Slide 0 (dissolve out, no MM in)
+    # and slide 4 (after the by-word transition) are in no pair.
+    assert ["mmKeys" in s for s in slides] == [False, True, True, True, False]
+    assert slides[1]["mmKeys"] == {"text": {0: "text:Title 1"}}
+
+
+def test_attach_magic_move_reads_database_effect_fallback(tmp_path):
+    transition = {"attributes": {"databaseEffect": _MM_EFFECT}}
+    extra = {"t0": _text_box("s0"), "s0": _storage("A")}
+    deck = _mm_deck([(transition, ["t0"]), (None, [])], extra)
+    slides = _attach(tmp_path, deck, range(2))
+    assert slides[0]["magicMoveOut"] is True
+
+
+def test_attach_magic_move_direction_is_out_of_the_slide(tmp_path):
+    # MM on slide 1 pairs 1<->2, never 0<->1.
+    extra = {f"t{i}": _text_box(f"s{i}") for i in range(3)} | {f"s{i}": _storage("Same") for i in range(3)}
+    deck = _mm_deck([(None, ["t0"]), (_transition(_MM_EFFECT), ["t1"]), (None, ["t2"])], extra)
+    slides = _attach(tmp_path, deck, range(3))
+    assert "magicMoveOut" not in slides[0] and "mmKeys" not in slides[0]
+    assert slides[1]["magicMoveOut"] is True
+    assert "magicMoveOut" not in slides[2]
+    assert slides[1]["mmKeys"] == slides[2]["mmKeys"] == {"text": {0: "text:Same"}}
+
+
+def test_attach_magic_move_keys_by_true_slide_index_on_a_sliced_payload(tmp_path):
+    extra = {f"t{i}": _text_box(f"s{i}") for i in range(3)} | {f"s{i}": _storage(f"T{i}") for i in range(3)}
+    deck = _mm_deck([(None, ["t0"]), (_transition(_MM_EFFECT), ["t1"]), (None, ["t2"])], extra)
+    slides = _attach(tmp_path, deck, [2, 9])
+    assert slides[0]["mmKeys"] == {"text": {0: "text:T2"}}
+    assert "magicMoveOut" not in slides[0]
+    assert slides[1] == {"index": 9, "items": []}
+
+
+def test_attach_magic_move_media_keys_by_digest_not_file_name(tmp_path):
+    # Images 0/1: two data ids sharing one digest (a re-imported copy) -> one key.
+    # Images 2/3: both `pasted-image.pdf` but different digests -> different keys
+    # (FRC has dozens of distinct pasted-image.pdf). Image 4: data id missing from
+    # PackageMetadata -> falls back to the data id. Movie: digest, `movie:` prefix.
+    extra = {
+        "i0": {"_pbtype": "TSD.ImageArchive", "data": {"identifier": "d0"}},
+        "i1": {"_pbtype": "TSD.ImageArchive", "data": {"identifier": "d1"}},
+        "i2": {"_pbtype": "TSD.ImageArchive", "data": {"identifier": "d2"}},
+        "i3": {"_pbtype": "TSD.ImageArchive", "data": {"identifier": "d3"}},
+        "i4": {"_pbtype": "TSD.ImageArchive", "data": {"identifier": "d4"}},
+        "i5": {"_pbtype": "TSD.ImageArchive"},
+        "m0": {"_pbtype": "TSD.MovieArchive", "movieData": {"identifier": "d5"}},
+    }
+    datas = [
+        {"identifier": "d0", "digest": "SAME=", "fileName": "a-d0.png"},
+        {"identifier": "d1", "digest": "SAME=", "fileName": "b-d1.png"},
+        {"identifier": "d2", "digest": "ONE=", "fileName": "pasted-image.pdf"},
+        {"identifier": "d3", "digest": "TWO=", "fileName": "pasted-image.pdf"},
+        {"identifier": "d5", "digest": "MOV=", "fileName": "clip.mov"},
+    ]
+    deck = _mm_deck([(_transition(_MM_EFFECT), ["i0", "i1", "i2", "i3", "i4", "i5", "m0"]), (None, [])], extra, datas)
+    keys = _attach(tmp_path, deck, range(2))[0]["mmKeys"]
+    images = keys["image"]
+    assert images[0] == images[1] == "image:SAME="
+    assert images[2] == "image:ONE=" and images[3] == "image:TWO="
+    assert images[4] == "image:id:d4"
+    assert 5 not in images  # no data reference: unresolvable, no key, never matches
+    assert keys["movie"] == {0: "movie:MOV="}
+
+
+def test_attach_magic_move_shape_key_is_size_invariant_but_radius_sensitive(tmp_path):
+    # Shape 0/1: the same triangle at 1x and 2.5x -> one key (a resized copy on the
+    # neighbouring slide still pairs). Shape 2/3: rounded rects of different size but
+    # one 10pt radius -> one key. Shape 4: same rect, 20pt radius -> a different key.
+    # Shape 5: no path source -> no key.
+    extra = {
+        "p0": _triangle(1.0),
+        "p1": _triangle(2.5),
+        "r0": _rounded_rect(100.0, 40.0, 10.0),
+        "r1": _rounded_rect(300.0, 60.0, 10.0),
+        "r2": _rounded_rect(100.0, 40.0, 20.0),
+        "bare": {"_pbtype": "TSWP.ShapeInfoArchive"},
+    }
+    deck = _mm_deck([(_transition(_MM_EFFECT), ["p0", "p1", "r0", "r1", "r2", "bare"]), (None, [])], extra)
+    shapes = _attach(tmp_path, deck, range(2))[0]["mmKeys"]["shape"]
+    assert shapes[0] == shapes[1]
+    assert shapes[0].startswith("shape:bezierPathSource::")
+    assert shapes[2] == shapes[3]
+    assert shapes[2].startswith("shape:scalarPathSource:0:")
+    assert shapes[4] != shapes[2]
+    assert shapes[0] != shapes[2]
+    assert 5 not in shapes
+
+
+def _path_shape(points, width, height):
+    elements = [{"type": "moveTo", "points": [{"x": points[0][0], "y": points[0][1]}]}]
+    elements += [{"type": "lineTo", "points": [{"x": x, "y": y}]} for x, y in points[1:]]
+    return {
+        "_pbtype": "TSWP.ShapeInfoArchive",
+        "super": {"pathsource": {"bezierPathSource": {
+            "naturalSize": {"width": width, "height": height}, "path": {"elements": elements},
+        }}},
+    }
+
+
+def test_attach_magic_move_shape_key_resolution_tolerates_save_noise_but_splits_distinct_paths(tmp_path):
+    # The key rounds naturalSize-normalised coordinates to 1e-3. Measured on FRC
+    # (2026-09-24): every collision at that resolution is Keynote save noise between
+    # identical shapes (at most 2.2e-7 normalised); 1e-6 already splits the 17x17 pin-dot
+    # class (1.1e-7 apart), and exact ratios split two more. A split re-creates the broken
+    # move, a collision only keeps one more object parked off the canvas, so the
+    # resolution stays coarse.
+    # s0/s1: one 1000pt path, s1 carrying 2e-7 relative noise -> one key.
+    # s2: the same path with its apex 5pt (5e-3 normalised) over on a 1000pt natural
+    # size -> a different key (near-but-distinct null control).
+    base = [(0.0, 0.0), (1000.0, 0.0), (500.0, 800.0)]
+    noisy = [(x * (1 + 2e-7), y * (1 + 2e-7)) for x, y in base]
+    moved = [(0.0, 0.0), (1000.0, 0.0), (505.0, 800.0)]
+    extra = {
+        "s0": _path_shape(base, 1000.0, 800.0),
+        "s1": _path_shape(noisy, 1000.0, 800.0),
+        "s2": _path_shape(moved, 1000.0, 800.0),
+    }
+    deck = _mm_deck([(_transition(_MM_EFFECT), ["s0", "s1", "s2"]), (None, [])], extra)
+    shapes = _attach(tmp_path, deck, range(2))[0]["mmKeys"]["shape"]
+    assert shapes[0] == shapes[1]
+    assert shapes[2] != shapes[0]
+
+
+def test_attach_magic_move_empty_text_gets_no_key_and_dual_shape_is_skipped(tmp_path):
+    # t0: whitespace/object-replacement-only text -> no key. t1: a custom-path text box
+    # (dual: text 1 AND shape 0) -> keyed once, on its text record; the dual shape record
+    # carries no key. l0: an open two-point path is a line -> the loose `line` key.
+    extra = {
+        "t0": _text_box("s0"),
+        "s0": _storage(" \n￼\xa0"),
+        "t1": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "s1"},
+            "super": {"pathsource": {"editableBezierPathSource": {"naturalSize": {"width": 5.0, "height": 5.0}}}},
+        },
+        "s1": _storage("Pill  caption"),
+        "l0": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "super": {"pathsource": {"bezierPathSource": {
+                "naturalSize": {"width": 100.0, "height": 0.0},
+                "path": {"elements": [{"type": "moveTo"}, {"type": "lineTo"}]},
+            }}},
+        },
+    }
+    deck = _mm_deck([(_transition(_MM_EFFECT), ["t0", "t1", "l0"]), (None, [])], extra)
+    keys = _attach(tmp_path, deck, range(2))[0]["mmKeys"]
+    assert keys["text"] == {1: "text:Pill caption"}
+    assert "shape" not in keys
+    assert keys["line"] == {0: "line"}
+
+
+def _mm_group(child_ids):
+    return {"_pbtype": "TSD.GroupArchive", "children": [{"identifier": c} for c in child_ids]}
+
+
+def test_attach_magic_move_group_key_is_dfs_leaves_by_digest_and_normalised_shape(tmp_path):
+    # g0 / g1: identical text + a pasted-image.pdf leaf, but the PDFs' digests differ
+    # -> different keys (fileName-keyed leaves would collide). g2: g0's content with its
+    # triangle leaf resized and the image inside a nested group -> same key as g0 (DFS
+    # order, shape leaves size-invariant). g3: an unrepresentable child -> no key.
+    extra = {
+        "g0": _mm_group(["g0t", "g0i", "g0p"]),
+        "g0t": _text_box("g0s"), "g0s": _storage("UPG"),
+        "g0i": {"_pbtype": "TSD.ImageArchive", "data": {"identifier": "dA"}},
+        "g0p": _triangle(1.0),
+        "g1": _mm_group(["g1t", "g1i", "g1p"]),
+        "g1t": _text_box("g1s"), "g1s": _storage("UPG"),
+        "g1i": {"_pbtype": "TSD.ImageArchive", "data": {"identifier": "dB"}},
+        "g1p": _triangle(1.0),
+        "g2": _mm_group(["g2t", "g2n", "g2p"]),
+        "g2t": _text_box("g2s"), "g2s": _storage(" UPG "),
+        "g2n": _mm_group(["g2i"]),
+        "g2i": {"_pbtype": "TSD.ImageArchive", "data": {"identifier": "dC"}},
+        "g2p": _triangle(3.0),
+        "g3": _mm_group(["g3t", "g3x"]),
+        "g3t": _text_box("g3s"), "g3s": _storage("UPG"),
+        "g3x": {"_pbtype": "TSD.SomeOtherArchive"},
+    }
+    datas = [
+        {"identifier": "dA", "digest": "PDF1=", "fileName": "pasted-image.pdf"},
+        {"identifier": "dB", "digest": "PDF2=", "fileName": "pasted-image.pdf"},
+        {"identifier": "dC", "digest": "PDF1=", "fileName": "pasted-image-dC.pdf"},
+    ]
+    deck = _mm_deck([(_transition(_MM_EFFECT), ["g0", "g1", "g2", "g3"]), (None, [])], extra, datas)
+    groups = _attach(tmp_path, deck, range(2))[0]["mmKeys"]["group"]
+    assert groups[0] != groups[1]
+    assert groups[0] == groups[2]
+    assert groups[0].startswith("group:text:UPG\nimage:PDF1=\nshape:bezierPathSource::")
+    assert 3 not in groups
+
+
+def test_attach_magic_move_keys_survive_a_json_round_trip(tmp_path):
+    import json  # noqa: PLC0415
+
+    extra = {"t0": _text_box("s0"), "s0": _storage("A"), "p0": _triangle(1.0)}
+    deck = _mm_deck([(_transition(_MM_EFFECT), ["t0", "p0"]), (None, ["t0"])], extra)
+    slides = _attach(tmp_path, deck, range(2))
+    loaded = json.loads(json.dumps(slides))
+    for before, after in zip(slides, loaded):
+        assert after.get("magicMoveOut") == before.get("magicMoveOut")
+        restored = {kind: {int(ki): key for ki, key in by_index.items()} for kind, by_index in after["mmKeys"].items()}
+        assert restored == before["mmKeys"]
+        assert all(isinstance(ki, int) for by_index in before["mmKeys"].values() for ki in by_index)
+
+
+def test_attach_magic_move_replaces_stale_fields_from_a_prior_annotation(tmp_path):
+    # A payload annotated before (e.g. a reused dict) carries fields for slides the
+    # current deck no longer pairs: they are cleared, and current pairs are rewritten.
+    extra = {f"t{i}": _text_box(f"s{i}") for i in range(3)} | {f"s{i}": _storage(f"T{i}") for i in range(3)}
+    deck = _mm_deck([(_transition(_MM_EFFECT), ["t0"]), (None, ["t1"]), (None, ["t2"])], extra)
+    payload = {"slides": [
+        {"index": 0, "items": [], "mmKeys": {"text": {0: "text:stale"}}},
+        {"index": 1, "items": [], "magicMoveOut": True},
+        {"index": 2, "items": [], "magicMoveOut": True, "mmKeys": {"text": {0: "text:T2"}}},
+    ]}
+    iwa.attach_magic_move(_empty_key(tmp_path), payload, deck=deck)
+    assert payload["slides"] == [
+        {"index": 0, "items": [], "magicMoveOut": True, "mmKeys": {"text": {0: "text:T0"}}},
+        {"index": 1, "items": [], "mmKeys": {"text": {0: "text:T1"}}},
+        {"index": 2, "items": []},
+    ]
+
+
+def test_attach_magic_move_failure_after_a_keyed_pair_leaves_no_annotation(tmp_path, monkeypatch):
+    # Pairs (0,1) and (2,3). Keying fails on slide 2's record, after slide 0 and 1 were
+    # fully keyed: no slide may keep a partial annotation (it could still convert hides),
+    # and a stale field from a prior annotation is cleared too.
+    extra = {f"t{i}": _text_box(f"s{i}") for i in range(4)} | {f"s{i}": _storage(f"T{i}") for i in range(4)}
+    deck = _mm_deck(
+        [(_transition(_MM_EFFECT), ["t0"]), (None, ["t1"]), (_transition(_MM_EFFECT), ["t2"]), (None, ["t3"])],
+        extra,
+    )
+    real_identity = iwa._mm_identity
+    keyed: list[str] = []
+
+    def failing_identity(rec, objects, digests):
+        if rec.get("text") == "T2":
+            raise RuntimeError("unreadable archive")
+        key = real_identity(rec, objects, digests)
+        keyed.append(key)
+        return key
+
+    monkeypatch.setattr(iwa, "_mm_identity", failing_identity)
+    payload = {"slides": [{"index": i, "items": []} for i in range(4)]}
+    payload["slides"][3]["mmKeys"] = {"text": {0: "text:stale"}}
+    with pytest.raises(RuntimeError, match="unreadable archive"):
+        iwa.attach_magic_move(_empty_key(tmp_path), payload, deck=deck)
+    assert keyed == ["text:T0", "text:T1"]
+    assert payload["slides"] == [{"index": i, "items": []} for i in range(4)]
+
+
+def test_attach_magic_move_real_decks_report_the_census_transitions():
+    pytest.importorskip("keynote_parser")
+    wall_dir = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs")
+    expected = {
+        "Full_Report_Card_Wall.key": [7, 8, 16, 19, 35, 56, 70, 84, 85, 102, 108, 109, 112, 117, 123, 126, 130, 146,
+                                      150, 151, 152],
+        "Gold_Wall_Input.key": [11, 19, 22],
+    }
+    for name, out_numbers in expected.items():
+        path = wall_dir / name
+        if not path.exists():
+            pytest.skip(f"local deck missing: {path}")
+        deck = iwa._load_deck(path)
+        payload = {"slides": [{"index": i, "items": []} for i in range(len(iwa.slide_order(deck[0])))]}
+        iwa.attach_magic_move(path, payload, deck=deck)
+        assert [s["index"] + 1 for s in payload["slides"] if s.get("magicMoveOut")] == out_numbers
+        paired = {n - 1 for n in out_numbers} | {n for n in out_numbers}
+        assert {s["index"] for s in payload["slides"] if s.get("mmKeys")} == paired

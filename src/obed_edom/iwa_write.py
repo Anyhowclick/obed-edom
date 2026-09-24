@@ -733,6 +733,9 @@ def _slide_edits(
                     _miss("text-autosize")
                     continue
             else:
+                if _is_rotated(stored[4]):
+                    _miss("text-rotated")
+                    continue
                 wants_h = spec.get("h") is not None
                 if (spec.get("w") is not None or wants_h) and not _natural_writable(obj, both_axes=wants_h):
                     _miss("text-resize-unwritable")
