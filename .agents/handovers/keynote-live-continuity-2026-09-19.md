@@ -16,8 +16,8 @@ source decks untouched.
   using `.claude/worktrees/pr158-handover-findings-4366b9` READ-ONLY for OBS checks while you work, and
   will not edit files. Commit small, scoped commits; push your branch; owner integrates.
 - Plan: `.agents/plans/keynote_live_continuity.plan.md` · P2 index: `.agents/plans/keynote-alpha.md` ·
-  README "Alpha Keynote" section · local (ignored) notes + run sheet:
-  `/Users/anyhowclick/Desktop/work/obed-edom/output/keynote-live-planning-2026-09-19/{HANDOVER,DECKLINK-RUNSHEET}.md`.
+  README "Alpha Keynote" section. The local notes + run sheet were pruned 2026-09-24; the DeckLink runbook
+  `.agents/handovers/decklink-field-test-runbook.md` replaces them.
 - Code: `src/obed_edom/live_continuity_js.py` (shared preserve runtime — P2 re-exports it; ONE copy of the
   bytes; `CONTINUITY_VERSION`, `js_sha256()`), `live_continuity.py` (`derive_plan`, `to_runtime`,
   `QUALIFIED_PLAN_SHA256` allowlist), `live_host.py` (launch + `OBED_LIVE_ATTACH` attach mode, continuity
