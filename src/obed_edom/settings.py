@@ -16,7 +16,14 @@ DEFAULTS = {
     "highlightColour": "#e8772a",
     "lwTemplate": "",
     "dskTemplate": "",
+    "akOutputMode": "screen",
+    "akOutputRate": 25,
+    "akKeyer": "external",
 }
+
+_AK_OUTPUT_MODES = ("screen", "keyer")
+_AK_OUTPUT_RATES = (25, 30)
+_AK_KEYERS = ("external", "off")
 
 _HEX_COLOUR_RE = re.compile(r"^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 
@@ -52,6 +59,16 @@ def _clamp(data: dict) -> dict:
     for key in ("lwTemplate", "dskTemplate"):
         if key in data:
             out[key] = str(data[key] or "").strip()
+    if "akOutputMode" in data:
+        value = str(data["akOutputMode"]).strip()
+        out["akOutputMode"] = value if value in _AK_OUTPUT_MODES else DEFAULTS["akOutputMode"]
+    if "akOutputRate" in data:
+        value = str(data["akOutputRate"]).strip()
+        rates = {str(rate): rate for rate in _AK_OUTPUT_RATES}
+        out["akOutputRate"] = rates.get(value, DEFAULTS["akOutputRate"])
+    if "akKeyer" in data:
+        value = str(data["akKeyer"]).strip()
+        out["akKeyer"] = value if value in _AK_KEYERS else DEFAULTS["akKeyer"]
     return out
 
 

@@ -1,7 +1,7 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LivePresenter } from "../src/live/LivePresenter";
-import { liveClient, type LiveClient, type LiveCommand, type LiveContinuity, type LiveResult, type LiveSnapshot } from "../src/live/api";
+import { liveClient, type LiveClient, type LiveCommand, type LiveContinuity, type LiveEngine, type LiveOutputSettings, type LiveResult, type LiveSnapshot } from "../src/live/api";
 
 function state(overrides: Partial<LiveSnapshot> = {}): LiveSnapshot {
   return {
@@ -29,6 +29,21 @@ function state(overrides: Partial<LiveSnapshot> = {}): LiveSnapshot {
   };
 }
 
+function engineState(overrides: Partial<LiveEngine> = {}): LiveEngine {
+  return {
+    state: "ready",
+    obs: { path: "/Applications/OBS.app", version: "32.2.2", pinned: "32.2.2" },
+    rate: { output: 25, canvas: 25, source: 50 },
+    device: { name: "UltraStudio HD Mini", set: true },
+    keyer: "external",
+    warnings: [],
+    ...overrides,
+  };
+}
+
+const screenSettings: LiveOutputSettings = { akOutputMode: "screen", akOutputRate: 25, akKeyer: "external" };
+const keyerSettings: LiveOutputSettings = { akOutputMode: "keyer", akOutputRate: 25, akKeyer: "external" };
+
 function client(overrides: Partial<LiveClient> = {}): LiveClient {
   return {
     state: vi.fn(async () => null),
@@ -36,6 +51,10 @@ function client(overrides: Partial<LiveClient> = {}): LiveClient {
     displays: vi.fn(async () => [{ id: "screen-2", name: "HDMI projector", width: 1920, height: 1080, x: 0, y: 0, primary: true }]),
     start: vi.fn(async () => state()),
     command: vi.fn(async (_sessionId: string, command: LiveCommand): Promise<LiveResult> => ({ requestId: command.requestId, outcome: "completed", state: state() })),
+    engine: vi.fn(async () => engineState()),
+    engineAction: vi.fn(async () => engineState()),
+    outputSettings: vi.fn(async () => screenSettings),
+    saveOutputSettings: vi.fn(async (settings: LiveOutputSettings) => settings),
     ...overrides,
   };
 }
@@ -362,6 +381,173 @@ describe("live start request", () => {
         method: "POST",
         body: JSON.stringify({ previewJobId: "prepared-1", displayId: "screen-2", ...(continuity ? { continuity } : {}) }),
       }));
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+});
+
+describe("LivePresenter output mode", () => {
+  beforeEach(() => {
+    let nextRequestId = 0;
+    vi.stubGlobal("crypto", { randomUUID: () => `request-${++nextRequestId}` });
+  });
+
+  it("does not poll the output engine in Screen mode", async () => {
+    const api = client();
+    render(<LivePresenter client={api} pollMs={60_000} enginePollMs={60_000} />);
+    await screen.findByRole("option", { name: /Sunday service/ });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Output" })).toBeEnabled());
+    expect(screen.getByRole("combobox", { name: "Output" })).toHaveValue("screen");
+    expect(screen.getByRole("combobox", { name: "Output display" })).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Output rate" })).not.toBeInTheDocument();
+    expect(api.engine).not.toHaveBeenCalled();
+  });
+
+  it("switching to Keyer saves the mode, hides the Display picker and shows the engine panel", async () => {
+    const api = client();
+    render(<LivePresenter client={api} pollMs={60_000} enginePollMs={60_000} />);
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Output" })).toBeEnabled());
+    fireEvent.change(screen.getByRole("combobox", { name: "Output" }), { target: { value: "keyer" } });
+    await waitFor(() => expect(api.saveOutputSettings).toHaveBeenCalledWith(keyerSettings));
+    expect(await screen.findByText("Output engine · Ready")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Output display" })).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Output rate" })).toHaveValue("25");
+    expect(screen.getByText("Match the standard the Pulse shows")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Keyer on" })).toBeChecked();
+    expect(api.engine).toHaveBeenCalled();
+    fireEvent.change(screen.getByRole("combobox", { name: "Output" }), { target: { value: "screen" } });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Output display" })).toBeInTheDocument());
+    expect(screen.queryByText(/^Output engine ·/)).not.toBeInTheDocument();
+  });
+
+  it("saves the rate and keyer choices", async () => {
+    const api = client({ outputSettings: vi.fn(async () => keyerSettings) });
+    render(<LivePresenter client={api} pollMs={60_000} enginePollMs={60_000} />);
+    const rate = await screen.findByRole("combobox", { name: "Output rate" });
+    fireEvent.change(rate, { target: { value: "30" } });
+    await waitFor(() => expect(api.saveOutputSettings).toHaveBeenCalledWith({ ...keyerSettings, akOutputRate: 30 }));
+    await waitFor(() => expect(screen.getByRole("checkbox", { name: "Keyer on" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("checkbox", { name: "Keyer on" }));
+    await waitFor(() => expect(api.saveOutputSettings).toHaveBeenCalledWith({ ...keyerSettings, akOutputRate: 30, akKeyer: "off" }));
+    expect(screen.getByRole("checkbox", { name: "Keyer on" })).not.toBeChecked();
+  });
+
+  it("shows a refused settings change and keeps the saved mode", async () => {
+    const api = client({ saveOutputSettings: vi.fn(async () => { throw new Error("Stop the show first."); }) });
+    render(<LivePresenter client={api} pollMs={60_000} enginePollMs={60_000} />);
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Output" })).toBeEnabled());
+    fireEvent.change(screen.getByRole("combobox", { name: "Output" }), { target: { value: "keyer" } });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Stop the show first.");
+    expect(screen.getByRole("combobox", { name: "Output" })).toHaveValue("screen");
+  });
+
+  it("starts a Keyer session without a display once the engine is ready", async () => {
+    const api = client({ outputSettings: vi.fn(async () => keyerSettings) });
+    render(<LivePresenter client={api} pollMs={60_000} enginePollMs={60_000} />);
+    await screen.findByText("Output engine · Ready");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Start output session" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Start output session" }));
+    await waitFor(() => expect(api.start).toHaveBeenCalledWith("prepared-1", undefined));
+  });
+
+  it.each([
+    ["stopped", []],
+    ["starting", []],
+    ["blocked", [{ id: "obsMissing", severity: "block", text: "Output engine not installed. Install OBS 32.2.2 into Applications, then press Check again." }]],
+    ["ready", [{ id: "deviceInactive", severity: "block", text: "Alpha Keynote cannot open the UltraStudio." }]],
+  ] as const)("disables Start output session while the engine is %s with blocks %j", async (engine, warnings) => {
+    const api = client({
+      outputSettings: vi.fn(async () => keyerSettings),
+      engine: vi.fn(async () => engineState({ state: engine, warnings: [...warnings] })),
+    });
+    render(<LivePresenter client={api} pollMs={60_000} enginePollMs={60_000} />);
+    await screen.findByRole("option", { name: /Sunday service/ });
+    await waitFor(() => expect(api.engine).toHaveBeenCalled());
+    await act(async () => {});
+    const start = screen.getByRole("button", { name: "Start output session" });
+    expect(start).toBeDisabled();
+    if (warnings.length) expect(start).toHaveAttribute("title", warnings[0].text);
+  });
+
+  it("keeps Start enabled on a warn-only engine warning", async () => {
+    const text = "OBS closed unexpectedly last time. It has been restarted; check the output before going live.";
+    const api = client({
+      outputSettings: vi.fn(async () => keyerSettings),
+      engine: vi.fn(async () => engineState({ warnings: [{ id: "obsUncleanExit", severity: "warn", text }] })),
+    });
+    render(<LivePresenter client={api} pollMs={60_000} enginePollMs={60_000} />);
+    await screen.findByText(text);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Start output session" })).toBeEnabled());
+  });
+
+  it("locks the mode, rate and keyer controls while a session is loaded", async () => {
+    const api = client({
+      state: vi.fn(async () => state({ output: { ...state().output, transport: "fill-key", bridge: "obs-managed" } })),
+      outputSettings: vi.fn(async () => keyerSettings),
+    });
+    render(<LivePresenter client={api} pollMs={60_000} enginePollMs={60_000} />);
+    await screen.findByRole("button", { name: "Advance" });
+    await screen.findByText("Output engine · Ready");
+    expect(screen.getByRole("combobox", { name: "Output" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "Output rate" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Keyer on" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Release output" })).toBeDisabled();
+  });
+
+  it("shows rate warnings beside codec warnings", async () => {
+    const codecWarnings = ["clip.mov (hvc1) may not play in this output"];
+    const rateWarnings = ["walk.mov is 29.97 fps but the output is 25 fps, so it will judder slightly. Re-export it at 25 fps for smooth motion."];
+    const api = client({ state: vi.fn(async () => state({ output: { ...state().output, codecWarnings, rateWarnings } })) });
+    render(<LivePresenter client={api} pollMs={60_000} enginePollMs={60_000} />);
+    const codecs = await screen.findByText("Some movies may not play in this output");
+    const rates = screen.getByText("Some movies do not match the output rate");
+    expect(screen.getByText(rateWarnings[0])).toBeInTheDocument();
+    expect(codecs.compareDocumentPosition(rates) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(rates.parentElement!).getByText(rateWarnings[0])).toBeInTheDocument();
+  });
+
+  it("says nothing about the output rate when the host omits rate warnings", async () => {
+    const api = client({ state: vi.fn(async () => state()) });
+    render(<LivePresenter client={api} pollMs={60_000} enginePollMs={60_000} />);
+    await screen.findByRole("button", { name: "Advance" });
+    expect(screen.queryByText("Some movies do not match the output rate")).not.toBeInTheDocument();
+  });
+});
+
+describe("live engine and output-settings requests", () => {
+  it.each(["start", "restart", "check", "show", "quit", "setupDevice", "setupDone"] as const)("posts %s to its engine route", async (action) => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(engineState()), { status: 200 }));
+    try {
+      await liveClient.engineAction(action);
+      expect(fetch).toHaveBeenCalledWith(`/api/live/engine/${action}`, { method: "POST" });
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  it("reads the engine state and output settings with GET and saves settings with PUT", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify(keyerSettings), { status: 200 }));
+    try {
+      await liveClient.engine();
+      await liveClient.outputSettings();
+      await liveClient.saveOutputSettings(keyerSettings);
+      expect(fetch).toHaveBeenNthCalledWith(1, "/api/live/engine", undefined);
+      expect(fetch).toHaveBeenNthCalledWith(2, "/api/live/output-settings", undefined);
+      expect(fetch).toHaveBeenNthCalledWith(3, "/api/live/output-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(keyerSettings),
+      });
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  it("surfaces a 409 detail", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ detail: "Stop the show first." }), { status: 409 }));
+    try {
+      await expect(liveClient.engineAction("quit")).rejects.toThrow("Stop the show first.");
     } finally {
       fetch.mockRestore();
     }

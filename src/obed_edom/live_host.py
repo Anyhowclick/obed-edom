@@ -553,7 +553,7 @@ class ChromeCdp:
     def _pick_target(self, targets: list[dict[str, Any]]) -> dict[str, Any]:
         pages = [item for item in targets if item.get("type") == "page" and item.get("webSocketDebuggerUrl")]
         if self.attach_match:
-            matched = [item for item in pages if any(self.attach_match in item.get(field, "") for field in ("url", "title"))]
+            matched = [item for item in pages if item.get("id") == self.attach_match or any(self.attach_match in item.get(field, "") for field in ("url", "title"))]
             if len(matched) != 1:
                 raise LiveHostError(
                     f"CDP attach match {self.attach_match!r} did not select exactly one page target; "
@@ -744,13 +744,26 @@ class _GoToAutoplayResult:
     deferred_reason: str | None
 
 
+def _rate_warnings(report: list[dict[str, Any]], rate: int) -> list[str]:
+    warnings = []
+    for entry in report:
+        fps = entry.get("fps")
+        if fps is None or abs(fps - rate) <= rate * 0.002:
+            continue
+        shown = f"{fps:.3f}".rstrip("0").rstrip(".")
+        warnings.append(f"{entry['asset']} is {shown} fps but the output is {rate} fps, so it will judder slightly. Re-export it at {rate} fps for smooth motion.")
+    return warnings
+
+
 class LiveOutputHost:
-    def __init__(self, export_root: Path, slides: list[dict[str, Any]], *, display_id: int | None = None, chrome_path: Path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"), headless: bool = False, transport_factory: Callable[..., ChromeCdp] = ChromeCdp, server_factory: Callable[..., _AssetServer] = _AssetServer, resolver: Callable[[Path, str], Path] = safe_export_file, timeout_s: float = 12.0, attach_endpoint: str | None = _UNSET, attach_match: str | None = None, continuity: str = "auto", gl_replay: str = _UNSET) -> None:
+    def __init__(self, export_root: Path, slides: list[dict[str, Any]], *, display_id: int | None = None, chrome_path: Path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"), headless: bool = False, transport_factory: Callable[..., ChromeCdp] = ChromeCdp, server_factory: Callable[..., _AssetServer] = _AssetServer, resolver: Callable[[Path, str], Path] = safe_export_file, timeout_s: float = 12.0, attach_endpoint: str | None = _UNSET, attach_match: str | None = None, continuity: str = "auto", gl_replay: str = _UNSET, bridge: str | None = None, output_rate: int | None = None) -> None:
         if continuity not in ("auto", "off"):
             raise LiveHostError("Continuity must be auto or off.")
         if gl_replay is not _UNSET and gl_replay not in ("auto", "off"):
             raise LiveHostError("GL replay must be auto or off.")
         self._continuity_preference = continuity
+        self._bridge = bridge if bridge is not None else "obs-cdp"
+        self._output_rate = output_rate
         self._gl_replay_request = gl_replay
         self._gl_replay_preference = "off"
         self.export_root, self.slides = export_root, slides
@@ -974,7 +987,7 @@ class LiveOutputHost:
         """Detected physical output geometry, available before browser startup."""
         if self._attach_endpoint:
             result: dict[str, Any] = {
-                "transport": "fill-key", "alpha": True, "audio": False, "bridge": "obs-cdp",
+                "transport": "fill-key", "alpha": True, "audio": False, "bridge": self._bridge,
                 "viewport": dict(self._viewport), "canvas": dict(self._canvas),
                 "width": self._viewport["width"], "height": self._viewport["height"],
             }
@@ -991,6 +1004,8 @@ class LiveOutputHost:
         result["continuity"] = self._continuity_info()
         result["codecs"] = list(self._codec_report)
         result["codecWarnings"] = list(self._codec_warnings)
+        if self._output_rate is not None:
+            result["rateWarnings"] = _rate_warnings(self._codec_report, self._output_rate)
         return result
 
     def start(self) -> PlayerObservation:

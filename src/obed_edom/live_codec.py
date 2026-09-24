@@ -8,7 +8,10 @@ headers, seeking past `mdat` payloads rather than loading them, and returns
 from __future__ import annotations
 
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Callable, TypeVar
+
+_T = TypeVar("_T")
+_VideoTrak = tuple[str, tuple[int, int], tuple[int, int]]
 
 _HEADER_SIZE = 8
 _EXTENDED_HEADER_SIZE = 16
@@ -111,7 +114,7 @@ def _first_sample_fourcc(f: BinaryIO, start: int, end: int) -> str | None:
     return fourcc.decode("ascii").lower()
 
 
-def _video_fourcc_in_trak(f: BinaryIO, start: int, end: int, budget: list[int]) -> str | None:
+def _video_trak(f: BinaryIO, start: int, end: int, budget: list[int]) -> _VideoTrak | None:
     mdia = _find_box(f, b"mdia", start, end, budget)
     if mdia is None:
         return None
@@ -127,12 +130,68 @@ def _video_fourcc_in_trak(f: BinaryIO, start: int, end: int, budget: list[int]) 
     stsd = _find_box(f, b"stsd", *stbl, budget)
     if stsd is None:
         return None
-    return _first_sample_fourcc(f, *stsd)
+    fourcc = _first_sample_fourcc(f, *stsd)
+    if fourcc is None:
+        return None
+    return fourcc, mdia, stbl
 
 
-def movie_codec(path: Path) -> str | None:
-    """First video sample entry's fourcc (e.g. `avc1`, `hvc1`), or `None` when the
-    file is unreadable or has no video track. Never raises."""
+def _mdhd_timescale(f: BinaryIO, start: int, end: int) -> int | None:
+    """`mdhd` payload: version+flags(4), then creation and modification times (4 bytes each
+    in version 0, 8 in version 1) before the timescale."""
+    if end - start < 4:
+        return None
+    f.seek(start)
+    version = f.read(1)
+    if len(version) != 1 or version[0] not in (0, 1):
+        return None
+    offset = 4 + (16 if version[0] == 1 else 8)
+    if end - start < offset + 4:
+        return None
+    f.seek(start + offset)
+    raw = f.read(4)
+    if len(raw) != 4:
+        return None
+    return int.from_bytes(raw, "big")
+
+
+def _stts_totals(f: BinaryIO, start: int, end: int) -> tuple[int, int] | None:
+    """`stts` payload: version+flags(4) entry_count(4) then (sample_count, sample_delta)
+    pairs; returns the total samples and the total duration in media timescale units."""
+    if end - start < 8:
+        return None
+    f.seek(start + 4)
+    raw = f.read(4)
+    if len(raw) != 4:
+        return None
+    count = int.from_bytes(raw, "big")
+    if end - start < 8 + count * 8:
+        return None
+    table = f.read(count * 8)
+    if len(table) != count * 8:
+        return None
+    samples = duration = 0
+    for i in range(0, len(table), 8):
+        sample_count = int.from_bytes(table[i : i + 4], "big")
+        samples += sample_count
+        duration += sample_count * int.from_bytes(table[i + 4 : i + 8], "big")
+    return samples, duration
+
+
+def _trak_fps(f: BinaryIO, mdia: tuple[int, int], stbl: tuple[int, int], budget: list[int]) -> float | None:
+    mdhd = _find_box(f, b"mdhd", *mdia, budget)
+    stts = _find_box(f, b"stts", *stbl, budget)
+    if mdhd is None or stts is None:
+        return None
+    timescale = _mdhd_timescale(f, *mdhd)
+    totals = _stts_totals(f, *stts)
+    if not timescale or totals is None or not totals[0] or not totals[1]:
+        return None
+    samples, duration = totals
+    return samples * timescale / duration
+
+
+def _probe_video_trak(path: Path, read: Callable[[BinaryIO, _VideoTrak, list[int]], _T]) -> _T | None:
     try:
         with open(path, "rb") as f:
             size = f.seek(0, 2)
@@ -141,12 +200,24 @@ def movie_codec(path: Path) -> str | None:
             if moov is None:
                 return None
             for trak_start, trak_end in _each_box(f, b"trak", *moov, budget):
-                fourcc = _video_fourcc_in_trak(f, trak_start, trak_end, budget)
-                if fourcc is not None:
-                    return fourcc
+                video = _video_trak(f, trak_start, trak_end, budget)
+                if video is not None:
+                    return read(f, video, budget)
     except OSError:
         return None
     return None
+
+
+def movie_codec(path: Path) -> str | None:
+    """First video sample entry's fourcc (e.g. `avc1`, `hvc1`), or `None` when the
+    file is unreadable or has no video track. Never raises."""
+    return _probe_video_trak(path, lambda _f, video, _budget: video[0])
+
+
+def movie_fps(path: Path) -> float | None:
+    """Frame rate of the track `movie_codec` reads, from its `mdhd` timescale and `stts`
+    sample table, or `None` when either is missing, unreadable or zero. Never raises."""
+    return _probe_video_trak(path, lambda f, video, budget: _trak_fps(f, video[1], video[2], budget))
 
 
 def codec_family(fourcc: str | None) -> str:

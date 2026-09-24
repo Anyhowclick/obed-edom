@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from obed_edom.live_codec import codec_family, movie_codec
+from obed_edom.live_codec import codec_family, movie_codec, movie_fps
 
 # --- synthetic ISO-BMFF/QuickTime box builders --------------------------------------------
 
@@ -223,6 +223,159 @@ def test_stsd_too_short_to_hold_an_entry_returns_none(tmp_path):
     path = tmp_path / "movie.mov"
     path.write_bytes(movie_with_stsd_payload(b"\x00" * 4 + (1).to_bytes(4, "big")))
     assert movie_codec(path) is None
+
+
+# --- movie_fps --------------------------------------------------------------------------------
+
+REAL_UNTITLED_MOV = (
+    Path(__file__).resolve().parents[1] / "output" / "p2-recovery" / "html-adversarial" / "html-player"
+    / "assets" / "08C861A1-CB39-4832-B189-6DF95B7F3396" / "assets" / "Untitled.mov-0.0000-46.0333.mov"
+)
+
+
+def mdhd(timescale: int, *, version: int = 0) -> bytes:
+    """`mdhd`: version+flags(4), creation+modification times (4 bytes each in v0, 8 in v1),
+    timescale(4), duration (4 in v0, 8 in v1), language(2), pre_defined(2)."""
+    times = b"\x00" * (16 if version == 1 else 8)
+    duration = b"\x00" * (8 if version == 1 else 4)
+    payload = bytes([version]) + b"\x00" * 3 + times + timescale.to_bytes(4, "big") + duration + b"\x00" * 4
+    return box(b"mdhd", payload)
+
+
+def stts(entries: list[tuple[int, int]]) -> bytes:
+    """`stts`: version+flags(4) entry_count(4) then (sample_count, sample_delta) pairs."""
+    table = b"".join(count.to_bytes(4, "big") + delta.to_bytes(4, "big") for count, delta in entries)
+    return box(b"stts", b"\x00" * 4 + len(entries).to_bytes(4, "big") + table)
+
+
+def timed_trak(
+    subtype: bytes, *, timescale: int | None, entries: list[tuple[int, int]] | None, fourcc: bytes = b"avc1",
+    raw_stts: bytes | None = None,
+) -> bytes:
+    stbl_body = stsd(fourcc)
+    if raw_stts is not None:
+        stbl_body += raw_stts
+    elif entries is not None:
+        stbl_body += stts(entries)
+    mdia_body = (mdhd(timescale) if timescale is not None else b"") + hdlr(subtype) + box(b"minf", box(b"stbl", stbl_body))
+    return box(b"trak", box(b"mdia", mdia_body))
+
+
+def timed_movie(*traks: bytes) -> bytes:
+    return ftyp() + box(b"moov", b"".join(traks))
+
+
+def test_fps_of_ntsc_timescale_30000_with_delta_1001_is_29_97(tmp_path):
+    path = tmp_path / "movie.mov"
+    path.write_bytes(timed_movie(timed_trak(b"vide", timescale=30000, entries=[(300, 1001)])))
+    assert movie_fps(path) == pytest.approx(30000 / 1001)
+    assert round(movie_fps(path), 3) == 29.97
+
+
+def test_fps_of_a_25_fps_track(tmp_path):
+    path = tmp_path / "movie.mov"
+    path.write_bytes(timed_movie(timed_trak(b"vide", timescale=25, entries=[(250, 1)])))
+    assert movie_fps(path) == 25.0
+
+
+def test_fps_averages_every_stts_entry(tmp_path):
+    # 29 frames at 1/30 s and one final frame of 2/30 s: 30 frames over 31/30 s.
+    path = tmp_path / "movie.mov"
+    path.write_bytes(timed_movie(timed_trak(b"vide", timescale=600, entries=[(29, 20), (1, 40)])))
+    assert movie_fps(path) == pytest.approx(30 * 600 / 620)
+
+
+def test_fps_reads_a_version_1_mdhd(tmp_path):
+    body = mdhd(24000, version=1) + hdlr(b"vide") + box(b"minf", box(b"stbl", stsd(b"avc1") + stts([(48, 1001)])))
+    path = tmp_path / "movie.mov"
+    path.write_bytes(timed_movie(box(b"trak", box(b"mdia", body))))
+    assert movie_fps(path) == pytest.approx(24000 / 1001)
+
+
+def test_missing_stts_returns_none(tmp_path):
+    path = tmp_path / "movie.mov"
+    path.write_bytes(timed_movie(timed_trak(b"vide", timescale=25, entries=None)))
+    assert movie_fps(path) is None
+    # the codec is still readable: only the rate is unknown.
+    assert movie_codec(path) == "avc1"
+
+
+def test_missing_mdhd_returns_none(tmp_path):
+    path = tmp_path / "movie.mov"
+    path.write_bytes(timed_movie(timed_trak(b"vide", timescale=None, entries=[(250, 1)])))
+    assert movie_fps(path) is None
+
+
+@pytest.mark.parametrize(
+    "timescale,entries",
+    [(0, [(250, 1)]), (25, [(250, 0)]), (25, [(0, 1)]), (25, [])],
+)
+def test_zero_timescale_samples_or_duration_returns_none(tmp_path, timescale, entries):
+    path = tmp_path / "movie.mov"
+    path.write_bytes(timed_movie(timed_trak(b"vide", timescale=timescale, entries=entries)))
+    assert movie_fps(path) is None
+
+
+def test_stts_declaring_more_entries_than_it_holds_returns_none(tmp_path):
+    lying = box(b"stts", b"\x00" * 4 + (5).to_bytes(4, "big") + (250).to_bytes(4, "big") + (1).to_bytes(4, "big"))
+    path = tmp_path / "movie.mov"
+    path.write_bytes(timed_movie(timed_trak(b"vide", timescale=25, entries=None, raw_stts=lying)))
+    assert movie_fps(path) is None
+
+
+def test_stts_too_short_for_its_entry_count_returns_none(tmp_path):
+    path = tmp_path / "movie.mov"
+    path.write_bytes(timed_movie(timed_trak(b"vide", timescale=25, entries=None, raw_stts=box(b"stts", b"\x00" * 4))))
+    assert movie_fps(path) is None
+
+
+def test_truncated_file_returns_none_for_fps(tmp_path):
+    data = timed_movie(timed_trak(b"vide", timescale=25, entries=[(250, 1)]))
+    path = tmp_path / "movie.mov"
+    path.write_bytes(data[: len(data) - 6])
+    assert movie_fps(path) is None
+
+
+def test_non_video_trak_timing_is_ignored(tmp_path):
+    # The audio trak comes first with a 48 kHz timescale and 1024-sample packets; its
+    # 46.875 "fps" must never be reported as the video's rate.
+    audio = timed_trak(b"soun", timescale=48000, entries=[(100, 1024)], fourcc=b"mp4a")
+    video = timed_trak(b"vide", timescale=25, entries=[(250, 1)])
+    path = tmp_path / "movie.mov"
+    path.write_bytes(timed_movie(audio, video))
+    assert movie_fps(path) == 25.0
+
+
+def test_audio_only_movie_has_no_fps(tmp_path):
+    path = tmp_path / "audio.mov"
+    path.write_bytes(timed_movie(timed_trak(b"soun", timescale=48000, entries=[(100, 1024)], fourcc=b"mp4a")))
+    assert movie_fps(path) is None
+
+
+def test_fps_comes_from_the_same_trak_movie_codec_reads(tmp_path):
+    # The first video trak has an unreadable sample entry, so movie_codec skips it; the
+    # rate must come from the second trak, the one whose codec is reported.
+    unreadable = timed_trak(b"vide", timescale=30, entries=[(300, 1)], fourcc=b"\x00\x01\x02\xff")
+    readable = timed_trak(b"vide", timescale=25, entries=[(250, 1)], fourcc=b"hvc1")
+    path = tmp_path / "movie.mov"
+    path.write_bytes(timed_movie(unreadable, readable))
+    assert movie_codec(path) == "hvc1"
+    assert movie_fps(path) == 25.0
+
+
+def test_missing_file_has_no_fps(tmp_path):
+    assert movie_fps(tmp_path / "does-not-exist.mov") is None
+
+
+def test_garbage_bytes_have_no_fps(tmp_path):
+    path = tmp_path / "movie.mov"
+    path.write_bytes(b"\xffnot a real movie file at all, just garbage\x00\x01\x02" * 20)
+    assert movie_fps(path) is None
+
+
+@pytest.mark.skipif(not REAL_UNTITLED_MOV.is_file(), reason="P2 fixture movie not available")
+def test_real_p2_fixture_movie_is_30_fps():
+    assert movie_fps(REAL_UNTITLED_MOV) == pytest.approx(30.0, abs=0.01)
 
 
 # --- codec_family -----------------------------------------------------------------------------

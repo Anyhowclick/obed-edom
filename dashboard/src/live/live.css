@@ -19,3 +19,14 @@
 .live-codecs .note { margin: 8px 0 0; padding-left: 20px; overflow-wrap: anywhere; }
 .live-deck { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; padding: 0; }
 @media (max-width: 650px) { .live-upcoming { flex-wrap: wrap; } .live-upcoming .live-still { flex-basis: 40%; } }
+.live-output-settings { margin: 16px 0; }
+.live-engine { margin: 16px 0; }
+.live-engine-state { margin: 0 0 8px; }
+.live-engine-setup { margin: 12px 0; padding: 12px; border: 1px solid var(--warn); border-radius: 8px; }
+.live-engine-setup p { margin: 0 0 8px; }
+.live-engine-warnings { display: grid; gap: 8px; list-style: none; padding: 0; margin: 12px 0 0; }
+.live-engine-warnings li { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; border-left: 3px solid var(--warn); overflow-wrap: anywhere; }
+.live-engine-warnings li span { flex: 1 1 280px; }
+.live-engine-warnings li[data-severity="block"] { border-left-color: var(--err); }
+.live-engine-warnings li[data-severity="info"] { border-left-color: var(--muted); }
+.live-engine-warnings li[role="alert"] { background: color-mix(in srgb, var(--err) 14%, transparent); }
