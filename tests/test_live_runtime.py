@@ -13,8 +13,10 @@ from obed_edom import live_runtime
 
 
 def test_unknown_player_is_refused():
-    with pytest.raises(live_runtime.LiveRuntimeUnsupported):
+    with pytest.raises(live_runtime.LiveRuntimeUnsupported, match="live output"):
         live_runtime.patch_player(b"unknown player")
+    with pytest.raises(live_runtime.LiveRuntimeUnsupported, match="preview"):
+        live_runtime.patch_rendering(b"unknown player")
 
 
 def test_patch_requires_exactly_one_hook(monkeypatch):
@@ -189,26 +191,44 @@ def test_mm_opacity_off_is_byte_identical_to_the_hook_only_output(monkeypatch):
     assert hashlib.sha256(reverted).hexdigest() == hashlib.sha256(off).hexdigest()
 
 
+def test_patch_rendering_is_the_live_output_minus_the_observation_hook(monkeypatch):
+    # The preview serves patch_rendering; live serves patch_player. They must differ only by the hook.
+    player = _synthetic_player()
+    _pin(monkeypatch, player)
+    rendering = live_runtime.patch_rendering(player)
+    assert live_runtime.patch_player(player) == _hook_only(rendering)
+    assert live_runtime._INSTALL not in rendering
+    assert rendering.count(live_runtime._ANCHOR) == 1
+    for before, after in live_runtime._MM_OPACITY_REPLACEMENTS:
+        assert rendering.count(before) == 0 and rendering.count(after) == 1
+
+
+# Each patcher that applies the Magic Move opacity replacements: live output and the dashboard preview.
+MM_PATCHERS = {"patch_player": live_runtime.patch_player, "patch_rendering": live_runtime.patch_rendering}
+
+
+@pytest.mark.parametrize("patcher", MM_PATCHERS)
 @pytest.mark.parametrize("index", range(len(live_runtime._MM_OPACITY_REPLACEMENTS)))
 @pytest.mark.parametrize("count", [0, 2])
-def test_mm_opacity_refuses_a_missing_or_duplicated_anchor(monkeypatch, index, count):
+def test_mm_opacity_refuses_a_missing_or_duplicated_anchor(monkeypatch, index, count, patcher):
     anchors = [before for before, _ in live_runtime._MM_OPACITY_REPLACEMENTS]
     anchors[index : index + 1] = [anchors[index]] * count
     player = _synthetic_player(anchors)
     _pin(monkeypatch, player)
     with pytest.raises(live_runtime.LiveRuntimeUnsupported, match="Magic Move opacity anchor"):
-        live_runtime.patch_player(player)
+        MM_PATCHERS[patcher](player)
     # The off path never looks at these anchors.
     assert live_runtime.patch_player(player, mm_opacity=False) == _hook_only(player)
 
 
+@pytest.mark.parametrize("patcher", MM_PATCHERS)
 @pytest.mark.parametrize("index", range(len(live_runtime._MM_OPACITY_REPLACEMENTS)))
-def test_mm_opacity_refuses_a_replacement_that_is_not_unique(monkeypatch, index):
+def test_mm_opacity_refuses_a_replacement_that_is_not_unique(monkeypatch, index, patcher):
     # The anchor is unique but its replacement text already occurs once, so it would occur twice after.
     player = _synthetic_player() + b";" + live_runtime._MM_OPACITY_REPLACEMENTS[index][1]
     _pin(monkeypatch, player)
     with pytest.raises(live_runtime.LiveRuntimeUnsupported, match="Magic Move opacity patch"):
-        live_runtime.patch_player(player)
+        MM_PATCHERS[patcher](player)
 
 
 def _real_player() -> bytes:
@@ -231,6 +251,26 @@ def test_mm_opacity_anchors_are_unique_on_the_real_player():
         assert patched.count(before) == 0
         assert patched.count(after) == 1
     assert live_runtime.patch_player(player, mm_opacity=False) == _hook_only(player)
+
+
+# sha256 of patch_player(real, mm_opacity=...) recorded on 3eb3b0fe, before patch_rendering was split out.
+REAL_PATCHED_SHA256 = {
+    True: "21476f78a584d978796c8580cb302749a568536394fc01b616344c7d98655afe",
+    False: "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
+}
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_patch_player_output_is_pinned_on_the_real_player(flag):
+    player = _real_player()
+    assert hashlib.sha256(live_runtime.patch_player(player, mm_opacity=flag)).hexdigest() == REAL_PATCHED_SHA256[flag]
+
+
+def test_patch_rendering_is_the_live_output_minus_the_hook_on_the_real_player():
+    player = _real_player()
+    rendering = live_runtime.patch_rendering(player)
+    assert _hook_only(rendering) == live_runtime.patch_player(player)
+    assert b"__obedLive" not in rendering
 
 
 SWAP_HIDE_DEFERRED = b"setTimeout(this.handleAnimateEffectDidBegin"
@@ -314,6 +354,9 @@ def test_mm_opacity_patched_real_player_parses(tmp_path):
         path = tmp_path / f"main-{flag}.js"
         path.write_bytes(live_runtime.patch_player(player, mm_opacity=flag))
         subprocess.run([node, "--check", str(path)], check=True, capture_output=True)
+    path = tmp_path / "main-rendering.js"
+    path.write_bytes(live_runtime.patch_rendering(player))
+    subprocess.run([node, "--check", str(path)], check=True, capture_output=True)
 
 
 def _cut(source: str, start: str, end: str) -> str:
@@ -389,6 +432,8 @@ def test_mm_opacity_real_patched_methods_draw_the_authored_opacity_on_p2_1_to_2(
     # Rows are p = 0, 0.5, 1; columns are the eB slots in effect.textures order. Slot 1 is the leaf fade.
     assert stock == [[1, 1, 1, 1, 1], [1, 0, 1, 1, 1], [1, 0, 1, 1, 1]]
     assert patched == [[1, 1, 1, 1, SLOT4_ALPHA], [1, 0, 1, 1, SLOT4_ALPHA], [1, 0, 1, 1, SLOT4_ALPHA]]
+    # The dashboard preview's bytes (no observation hook) draw the same values.
+    assert _run_extracted(node, live_runtime.patch_rendering(player).decode(), True, effect) == patched
     # The Python mirror below agrees with the real bytes on every slot and point.
     assert [[new for _, new in row] for row in _mirror(effect)] == patched
     assert [[old for old, _ in row] for row in _mirror(effect)] == stock

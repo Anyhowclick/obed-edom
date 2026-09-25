@@ -4468,7 +4468,15 @@ class TestCodexR1ProbeFixes:
 
         monkeypatch.setattr(probe, "prepare_export", boom)
         artifact = tmp_path / "forced.json"
-        args = probe.parse_args(["--gl-replay", "auto", "--gl-force-fail", "posterAmbiguous", "--artifact", str(artifact)])
+        # Hermetic: the default fixture lives in git-ignored output/; check_fixture must pass so the failure is prepare_export's.
+        fixture = tmp_path / "html-player"
+        fixture.mkdir()
+        original_index = tmp_path / "index.html"
+        original_index.write_text("<html></html>")
+        args = probe.parse_args([
+            "--gl-replay", "auto", "--gl-force-fail", "posterAmbiguous", "--artifact", str(artifact),
+            "--fixture", str(fixture), "--original-index", str(original_index),
+        ])
         probe.run_forced_fail_cli(args)
         saved = json.loads(artifact.read_text())
         assert saved["status"] == "forced-fail"
