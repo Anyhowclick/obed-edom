@@ -2346,11 +2346,17 @@ def test_gl_replay_auto_with_an_unsupported_flag_on_plan_falls_back_to_off(tmp_p
     }
 
 
-def test_gl_replay_auto_in_attach_mode_is_not_injected(tmp_path, monkeypatch):
-    """OD-2: the pool keep-warm and stash order are unmeasured inside OBS CEF."""
+@pytest.mark.parametrize("bridge", [None, "obs-cdp"])
+@pytest.mark.parametrize("source", ["ctor", "env"])
+def test_gl_replay_auto_in_attach_mode_is_not_injected(tmp_path, monkeypatch, source, bridge):
+    """OD-2 is lifted only for the managed OBS: an external attach (bridge omitted normalises
+    to `obs-cdp`) keeps refusing, since the pool keep-warm and stash order are unmeasured there."""
     monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
     monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
-    output = host_with_continuity(tmp_path, monkeypatch, attach=True, gl_replay="auto")
+    kwargs = {} if bridge is None else {"bridge": bridge}
+    output = host_with_continuity(tmp_path, monkeypatch, attach=True, gl_replay="auto" if source == "ctor" else None, **kwargs)
+    if source == "env":
+        monkeypatch.setenv(live_host.GL_REPLAY_ENV, "auto")
     calls = fake_plan_pair(monkeypatch)
     forbid_gl_module(monkeypatch)
     ready(monkeypatch)
@@ -2359,6 +2365,7 @@ def test_gl_replay_auto_in_attach_mode_is_not_injected(tmp_path, monkeypatch):
     assert calls and all("gl_replay" not in kwargs for kwargs in calls)
     assert output._continuity_runtime_plan == {**_fake_runtime(gl=False), "transparentBackground": True}
     assert 'id="obed-gl-replay"' not in output._server.continuity_script
+    assert output.output["bridge"] == "obs-cdp"
     info = output.output["continuity"]["glReplay"]
     assert info["mode"] == "unavailable"
     assert info["reason"] == "attach output not qualified"
@@ -2416,17 +2423,21 @@ def test_continuity_is_unsupported_not_a_crash_when_to_runtime_raises(tmp_path, 
     assert output._server.continuity_script == ""
 
 
-@pytest.mark.parametrize("ctor,env,expected", [
-    (None, None, "off"),
-    (None, " Auto ", "auto"),
-    ("auto", None, "auto"),
-    ("off", "auto", "off"),
+@pytest.mark.parametrize("managed,ctor,env,expected", [
+    (False, None, None, "off"),
+    (False, None, " Auto ", "auto"),
+    (False, "auto", None, "auto"),
+    (False, "off", "auto", "off"),
+    (True, None, None, "auto"),
+    (True, None, "off", "off"),
+    (True, "off", None, "off"),
 ])
-def test_start_log_records_the_requested_gl_replay_preference(tmp_path, monkeypatch, ctor, env, expected):
+def test_start_log_records_the_requested_gl_replay_preference(tmp_path, monkeypatch, managed, ctor, env, expected):
     """Under continuity off or attach the continuity record cannot show that `auto` was asked for."""
     monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
     monkeypatch.setenv(live_host.CONTINUITY_ENV, "off")
-    output = host_with_continuity(tmp_path, monkeypatch, gl_replay=ctor)
+    kwargs = {"attach": True, "bridge": "obs-managed", "output_rate": 25} if managed else {}
+    output = host_with_continuity(tmp_path, monkeypatch, gl_replay=ctor, **kwargs)
     if env is not None:
         monkeypatch.setenv(live_host.GL_REPLAY_ENV, env)
     output.start()
@@ -2435,17 +2446,22 @@ def test_start_log_records_the_requested_gl_replay_preference(tmp_path, monkeypa
     assert next(r for r in records if r["kind"] == "continuity")["glReplay"]["mode"] == "off"
 
 
-@pytest.mark.parametrize("ctor,env,expected", [
-    (None, "auto", "injected"),
-    (None, " AUTO ", "injected"),
-    (None, "off", "off"),
-    ("off", "auto", "off"),
-    ("auto", "off", "injected"),
-    ("auto", "bogus", "injected"),
+@pytest.mark.parametrize("managed,ctor,env,expected", [
+    (False, None, "auto", "injected"),
+    (False, None, " AUTO ", "injected"),
+    (False, None, "off", "off"),
+    (False, "off", "auto", "off"),
+    (False, "auto", "off", "injected"),
+    (False, "auto", "bogus", "injected"),
+    (True, "off", "auto", "off"),
+    (True, "auto", "off", "injected"),
 ])
-def test_gl_replay_constructor_wins_over_the_env(tmp_path, monkeypatch, ctor, env, expected):
+def test_gl_replay_constructor_wins_over_the_env(tmp_path, monkeypatch, managed, ctor, env, expected):
     monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
-    output = host_with_continuity(tmp_path, monkeypatch, gl_replay=ctor)
+    if managed:
+        output = managed_host(tmp_path, monkeypatch, gl_replay=ctor)
+    else:
+        output = host_with_continuity(tmp_path, monkeypatch, gl_replay=ctor)
     monkeypatch.setenv(live_host.GL_REPLAY_ENV, env)
     fake_plan_pair(monkeypatch)
     ready(monkeypatch)
@@ -2463,9 +2479,11 @@ def test_gl_replay_constructor_rejects_anything_but_auto_or_off(tmp_path, monkey
         live_host.LiveOutputHost(tmp_path, [], headless=True, transport_factory=FakeCdp, server_factory=FakeServer, resolver=resolver, gl_replay=value)
 
 
+@pytest.mark.parametrize("managed", [False, True])
 @pytest.mark.parametrize("value", ["on", "1", "true", "auto-ish"])
-def test_invalid_gl_replay_env_refuses_before_starting_resources(tmp_path, monkeypatch, value):
-    output = host_with_continuity(tmp_path, monkeypatch)
+def test_invalid_gl_replay_env_refuses_before_starting_resources(tmp_path, monkeypatch, value, managed):
+    """A mistyped Keyer opt-out (`false`, `0`) refuses loudly rather than silently defaulting to auto."""
+    output = managed_host(tmp_path, monkeypatch) if managed else host_with_continuity(tmp_path, monkeypatch)
     monkeypatch.setenv(live_host.GL_REPLAY_ENV, value)
     with pytest.raises(live_host.LiveHostError, match="OBED_LIVE_GL_REPLAY must be off or auto."):
         output.start()
@@ -2566,21 +2584,177 @@ def test_rate_warnings_empty_list_when_every_movie_matches(tmp_path, monkeypatch
     assert output.output["rateWarnings"] == []
 
 
-def test_gl_replay_attach_refusal_unchanged_under_managed_bridge(tmp_path, monkeypatch):
-    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+def managed_host(tmp_path, monkeypatch, **kwargs):
     monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
-    output = host_with_continuity(tmp_path, monkeypatch, attach=True, gl_replay="auto", bridge="obs-managed", output_rate=30)
+    kwargs.setdefault("output_rate", 25)
+    return host_with_continuity(tmp_path, monkeypatch, attach=True, bridge="obs-managed", **kwargs)
+
+
+def _injected_info() -> dict[str, Any]:
+    return {"mode": "injected", "version": live_gl_replay_js.GL_REPLAY_VERSION, "sha256": live_gl_replay_js.js_sha256()}
+
+
+def test_gl_replay_auto_injects_under_the_managed_bridge(tmp_path, monkeypatch):
+    """OD-2 is lifted for the managed OBS only: the flag-on plan and the module are served
+    exactly as on HDMI, with the attach-mode transparent background merged into the runtime."""
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    output = managed_host(tmp_path, monkeypatch, gl_replay="auto", output_rate=30)
+    calls = fake_plan_pair(monkeypatch)
+    ready(monkeypatch)
+    output.observe()
+
+    assert calls == [{"resolver": output.resolver, "gl_replay": True}]
+    runtime = output._continuity_runtime_plan
+    assert runtime == {**_fake_runtime(gl=True), "transparentBackground": True}
+    tag = live_gl_replay_js.gl_replay_script(runtime)
+    assert tag.startswith('<script id="obed-gl-replay">')
+    assert output._server.continuity_script == live_host._continuity_scripts(runtime, output._canvas) + tag
+    script = output._server.continuity_script
+    assert script.index('id="obed-continuity-core"') < script.index('id="obed-gl-replay"')
+    assert output._continuity_mode == "qualified"
+    result = output.output
+    assert result["bridge"] == "obs-managed"
+    assert result["continuity"]["glReplay"] == _injected_info()
+
+
+@pytest.mark.parametrize("env", [None, "", "auto", " AUTO "])
+def test_gl_replay_defaults_to_auto_under_the_managed_bridge(tmp_path, monkeypatch, env):
+    """Keyer passes no `gl_replay` kwarg; the managed host's own default is `auto`."""
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    output = managed_host(tmp_path, monkeypatch)
+    if env is not None:
+        monkeypatch.setenv(live_host.GL_REPLAY_ENV, env)
+    calls = fake_plan_pair(monkeypatch)
+    ready(monkeypatch)
+    output.start()
+
+    assert calls == [{"resolver": output.resolver, "gl_replay": True}]
+    assert output.output["continuity"]["glReplay"] == _injected_info()
+    assert next(r for r in read_log(output) if r["kind"] == "start")["glReplayPreference"] == "auto"
+
+
+@pytest.mark.parametrize("rate", [25, 30, None])
+def test_gl_replay_managed_default_is_auto_at_every_output_rate(tmp_path, monkeypatch, rate):
+    """Owner 2026-09-25: the binary-counter re-measurement showed 30 as clean as 25, so the managed default
+    does not depend on the output rate."""
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    output = managed_host(tmp_path, monkeypatch, output_rate=rate)
+    fake_plan_pair(monkeypatch)
+    ready(monkeypatch)
+    output.start()
+
+    assert output.output["continuity"]["glReplay"] == _injected_info()
+    assert next(r for r in read_log(output) if r["kind"] == "start")["glReplayPreference"] == "auto"
+
+
+@pytest.mark.parametrize("host", ["managed-default", "hdmi-auto"])
+def test_gl_replay_reports_unavailable_when_the_stage_gate_fails(tmp_path, monkeypatch, host):
+    """OQ-4: the page stage gate disables the core, so an injected module can never arm;
+    the report must say so exactly as the HEVC path does, on either output."""
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    if host == "managed-default":
+        output = managed_host(tmp_path, monkeypatch)
+    else:
+        monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+        output = host_with_continuity(tmp_path, monkeypatch, gl_replay="auto")
+    output.timeout_s = .05
+    fake_plan_pair(monkeypatch)
+    real_evaluate = FakeCdp.evaluate
+    disable_calls = []
+
+    def evaluate(self, expression):
+        if "disable" in expression:
+            disable_calls.append(expression)
+            return True
+        if "__OBED_CONTINUITY_INFO__" in expression:
+            return {"ready": True, "info": {"installed": True}, "stage": stage_geometry(1024, 768, 0, 0, 1024, 768)}
+        return real_evaluate(self, expression)
+
+    monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
+    output.start()
+
+    assert disable_calls
+    assert output._continuity_mode == "unsupported"
+    assert output.output["continuity"]["reason"] == "stage is not the authored size"
+    expected = {
+        "mode": "unavailable", "reason": "continuity unsupported",
+        "version": live_gl_replay_js.GL_REPLAY_VERSION, "sha256": live_gl_replay_js.js_sha256(),
+    }
+    assert output.output["continuity"]["glReplay"] == expected
+    assert next(r for r in read_log(output) if r["kind"] == "continuity")["glReplay"] == expected
+
+
+@pytest.mark.parametrize("env", ["off", " Off "])
+def test_gl_replay_env_off_wins_over_the_managed_default(tmp_path, monkeypatch, env):
+    """The Keyer opt-out: no `gl_replay` kwarg from the caller, so the env still decides."""
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    output = managed_host(tmp_path, monkeypatch)
+    monkeypatch.setenv(live_host.GL_REPLAY_ENV, env)
     calls = fake_plan_pair(monkeypatch)
     forbid_gl_module(monkeypatch)
     ready(monkeypatch)
     output.observe()
 
     assert calls and all("gl_replay" not in kwargs for kwargs in calls)
+    assert output._continuity_mode == "qualified"
     assert 'id="obed-gl-replay"' not in output._server.continuity_script
-    result = output.output
-    assert result["bridge"] == "obs-managed"
-    assert result["continuity"]["glReplay"]["mode"] == "unavailable"
-    assert result["continuity"]["glReplay"]["reason"] == "attach output not qualified"
+    assert 'id="obed-gl-replay"' not in served_html(output, tmp_path)
+    assert output.output["continuity"]["glReplay"]["mode"] == "off"
+
+
+@pytest.mark.parametrize("host", ["hdmi", "external-attach", "hdmi-managed-bridge"])
+def test_gl_replay_default_stays_off_outside_the_managed_bridge(tmp_path, monkeypatch, host):
+    """The managed default needs both the attach endpoint and the managed bridge: HDMI and an
+    external attach stay opt-in, and `bridge="obs-managed"` without attach cannot turn it on."""
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+    kwargs = {
+        "hdmi": {},
+        "external-attach": {"attach": True},
+        "hdmi-managed-bridge": {"bridge": "obs-managed"},
+    }[host]
+    output = host_with_continuity(tmp_path, monkeypatch, **kwargs)
+    calls = fake_plan_pair(monkeypatch)
+    forbid_gl_module(monkeypatch)
+    ready(monkeypatch)
+    output.start()
+
+    assert calls and all("gl_replay" not in kwargs for kwargs in calls)
+    assert 'id="obed-gl-replay"' not in output._server.continuity_script
+    info = output.output["continuity"]["glReplay"]
+    assert info["mode"] == "off"
+    assert "reason" not in info
+    assert next(r for r in read_log(output) if r["kind"] == "start")["glReplayPreference"] == "off"
+
+
+@pytest.mark.parametrize("how", ["ctor", "env"])
+def test_gl_replay_managed_default_is_off_when_continuity_is_off(tmp_path, monkeypatch, how):
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    output = managed_host(tmp_path, monkeypatch, **({"continuity": "off"} if how == "ctor" else {}))
+    if how == "env":
+        monkeypatch.setenv(live_host.CONTINUITY_ENV, "off")
+    calls = fake_plan_pair(monkeypatch)
+    forbid_gl_module(monkeypatch)
+    output.observe()
+
+    assert calls == []
+    assert output._continuity_mode == "off"
+    assert output._server.continuity_script == ""
+    assert output.output["continuity"]["glReplay"]["mode"] == "off"
+
+
+def test_gl_replay_under_the_managed_bridge_reports_continuity_unsupported_for_hevc(tmp_path, monkeypatch):
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    output = managed_host(tmp_path, monkeypatch, movie_bytes=_movie_bytes(b"hvc1"))
+    fake_plan_pair(monkeypatch)
+    output.observe()
+
+    assert output._continuity_mode == "unsupported"
+    assert output._server.continuity_script == ""
+    assert output.output["continuity"]["glReplay"] == {
+        "mode": "unavailable", "reason": "continuity unsupported",
+        "version": live_gl_replay_js.GL_REPLAY_VERSION, "sha256": live_gl_replay_js.js_sha256(),
+    }
 
 
 @pytest.mark.parametrize(("host_kwargs", "with_fps"), [({}, False), ({"output_rate": 30}, True)])

@@ -216,7 +216,7 @@ exact blend; `Opacity` is persistent program state ⇒ write 1.0 back on stand-d
 MEASURE a provable draw→export-object mapping (fixture: draw idx 83 / tex 6); assert the `Opacity` uniform exists; when
 the mapping cannot be proven for a boundary, replay with the player's own (opaque) look and emit a presenter note — do
 not refuse the carry. D3: the two-movie and equal-size-poster decks must be authored and MEASURED refusing before v1
-ships. D4: accepted. D5: arming stays `off` by default until a second deck is qualified.
+ships. D4: accepted. D5: arming stays `off` by default until a second deck is qualified. **Superseded for Keyer (owner 2026-09-24/25, `keynote_live_gl_replay_managed_obs.plan.md`):** the managed OBS defaults to `auto`; HDMI stays `off`; continuity's plan allowlist still bounds which decks can arm.
 
 ## 9. Coordinator review (2026-09-20) — amendments before this plan is approved
 - **Q0 (new, blocks everything, headless, no decks needed): the POOLED decoder as the texture source is UNMEASURED.**

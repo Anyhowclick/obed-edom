@@ -717,13 +717,26 @@ for the parked `iwa-surgical-write-generator` feature.
 * **Device record** (per user): `<home>/ak-device.json` `{deviceHash, deviceName, modeIds: {"25"|"30": …},
   pixelFormat}`, written by Set up output device → Done from the file OBS wrote.
 * **Host.** Keyer start attaches `LiveOutputHost` with `bridge="obs-managed"`, `attach_match=<target id>` and
-  `output_rate`; `output.rateWarnings` (W8, ±0.2 %) sits beside `codecWarnings`. GL replay stays refused under
-  any attach ("attach output not qualified"), so Keyer output ships with native `<video>` cadence.
+  `output_rate`; `output.rateWarnings` (W8, ±0.2 %) sits beside `codecWarnings`. GL replay (OD-2 lifted
+  2026-09-25): the managed bridge defaults to `auto` (both output rates); precedence = ctor `gl_replay` → env
+  `OBED_LIVE_GL_REPLAY` (`off`|`auto`, else refuse) → managed ⇒ `auto` → `off`. External attach
+  (`obs-cdp`) stays refused ("attach output not qualified"). A page-side stage-gate failure reports GL replay
+  `unavailable` ("continuity unsupported"). Known limits: page rAF latches to the video's 30 fps once the output is shown with a movie playing and nothing
+  else changing per frame (Chromium throttling; until OBS relaunches; keep-alive fix is a follow-up), which does not hurt cadence at 25 (binary counter: 0 % repeats) and costs 1–3 % in some takes at 30 (native and G2 alike); Chromium's native video layer applies
+  a midtone tone curve that drawImage/texImage2D (hence the G2 canvas) do not (≤ +11/255, identical in headless
+  Chrome), so footage brightness can step at G2 takeover and at the build-1 hand-back; timing is continuous (±1–2
+  frames). Grey-coded counters therefore misread across the two paths — qualify with the binary counter fixture.
 * **Qualification harness:** `uv run python scripts/managed_obs_qualify.py --arm both --rate 25 --takes 2 --out DIR`
   (scratch home, lossless recording; refuses to start while any OBS runs; `caffeinate`; a Sleep/Wake in the take
   marks it INVALID). Limits at rate 25 (report-only at 30): decodable ≥ 0.9 in both arms; 2× arm native repeat ≤ 0.15;
   null (paused) repeat ≥ 0.95; positive control (source = canvas) repeat ≥ 0.18 and every positive run above every 2×
-  run. Lifecycle always enforced: clean quit, `cleanExit` true, user OBS tree and `.sentinel` unchanged.
+  run. Lifecycle always enforced: clean quit, `cleanExit` true, user OBS tree and `.sentinel` unchanged. GL replay
+  arms `g2` / `failsafe` / `soak` take the binary counter fixture explicitly (`--fixture <main>/output/p2-binary`; its
+  `fixture.json` movie sha256s are verified at startup and recorded per run). Binary limits: G2 repeat ≤ 1 % and ≤
+  native + 1 %; reshow ≤ 2 % and ≤ native + 2 %; distinct ≥ 0.96 × rate; hand-back max step ≤ 3 per elapsed output
+  frame with every hand-back frame decodable; 2× native ≤ 1 %; positive ≥ 5 %. Absolute repeat bounds at 25 only;
+  distinct (relative to rate), native-relative bounds and 2× vs positive enforced at both rates. `--soak-minutes` ≥ 4;
+  a non-looping soak fixture gates engine health, the context-loss stand-down and P3/P4 parity only.
 
 ---
 

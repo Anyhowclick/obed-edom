@@ -770,6 +770,7 @@ class LiveOutputHost:
         if attach_endpoint is _UNSET:
             attach_endpoint = os.environ.get(ATTACH_ENV) or None
         self._attach_endpoint = _validate_loopback_endpoint(attach_endpoint.strip()) if attach_endpoint and attach_endpoint.strip() else None
+        self._managed_obs = self._attach_endpoint is not None and self._bridge == "obs-managed"
         self._attach_match = (attach_match if attach_match is not None else os.environ.get(ATTACH_MATCH_ENV)) or None
         if self._attach_endpoint:
             self.display: OutputDisplay | None = None
@@ -876,8 +877,9 @@ class LiveOutputHost:
 
     def _resolve_gl_replay(self) -> tuple[str, str | None, tuple[ContinuityPlan, dict[str, Any]] | None, str]:
         """GL replay `(mode, reason, flag-on derivation, script)` for `auto`. The derivation
-        is None unless the module is injected; the caller then derives exactly as the off path."""
-        if self._attach_endpoint:
+        is None unless the module is injected; the caller then derives exactly as the off path.
+        External attach is refused; the managed OBS is qualified (OD-2)."""
+        if self._attach_endpoint and not self._managed_obs:
             return "unavailable", "attach output not qualified", None, ""
         if CONTINUITY_VERSION < 5:
             return "unavailable", "continuity core predates GL replay", None, ""
@@ -1022,7 +1024,7 @@ class LiveOutputHost:
             env_gl_replay = os.environ.get(GL_REPLAY_ENV, "").strip().lower()
             if env_gl_replay not in ("", "off", "auto"):
                 raise LiveHostError("OBED_LIVE_GL_REPLAY must be off or auto.")
-            self._gl_replay_preference = env_gl_replay or "off"
+            self._gl_replay_preference = env_gl_replay or ("auto" if self._managed_obs else "off")
         self._goto_autoplay_mode = "off" if os.environ.get(GOTO_AUTOPLAY_ENV, "").strip().lower() == "off" else "on"
         self._log_path = _new_log_path()
         self._logger = _SessionLogger(self._log_path)
@@ -1069,6 +1071,8 @@ class LiveOutputHost:
                 self._continuity_mode, self._continuity_reason, stage_geometry, self._continuity_scale = (
                     self._resolve_continuity_pending()
                 )
+                if self._continuity_mode != "qualified" and self._gl_replay_mode == "injected":
+                    self._gl_replay_mode, self._gl_replay_reason, self._gl_replay_script = "unavailable", "continuity unsupported", ""
             self._logger.log(
                 "continuity", mode=self._continuity_mode, reason=self._continuity_reason,
                 runtimePlan=self._continuity_runtime_plan, stage=stage_geometry, scale=self._continuity_scale,

@@ -492,6 +492,7 @@ def test_keyer_start_requires_a_ready_engine(tmp_path, monkeypatch):
 
 
 def test_keyer_start_attaches_to_the_engine_target_and_ignores_display(tmp_path, monkeypatch):
+    """The exact kwargs (no `gl_replay`) are the Keyer contract that `OBED_LIVE_GL_REPLAY=off` wins over the managed host's `auto` default."""
     client, engine, adapters, _ = engine_client(tmp_path, monkeypatch, akOutputMode='keyer', akOutputRate=30)
     engine.status = 'ready'
     response = client.post('/api/live', json={'previewJobId': 'prepared', 'displayId': '42'})
