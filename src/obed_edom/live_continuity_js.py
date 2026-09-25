@@ -1668,8 +1668,10 @@ PRESERVE_CORE_JS = r"""
         try {
           const parent = stub.parentNode;
           const next = stub.nextSibling;
+          beginMove(stub);
           parent.removeChild(stub);
           if (real.parentNode && real.parentNode !== parent) {
+            beginMove(real);
             try { real.parentNode.removeChild(real); } catch (e2) {}
           }
           if (next) parent.insertBefore(real, next); else parent.appendChild(real);
@@ -1681,6 +1683,18 @@ PRESERVE_CORE_JS = r"""
           }
           note('dom-swap', {elId: real.__obedElId, t: real.currentTime, paused: real.paused});
           mo.disconnect();
+          // The stub's slot sits under the destination's WebGL poster until the
+          // player's own movie starts, which a stub never does (live D5 slide 3:
+          // clock advancing, pixels frozen). Re-home the decoder above its poster
+          // canvas in this layer, at the holding entry's `dst.rect`.
+          const hold = real.__obedHold;
+          const screen = hold && hold.dst && hold.dst.rect ? toScreen(hold.dst.rect) : null;
+          if (screen) {
+            real.__obedLayer = nearestLayer(parent) || real.__obedLayer;
+            real.__obedParent = null;
+            real.__obedRect = screen;
+            scheduleRemount(real, 'pin-rehome');
+          }
         } catch (e) {
           note('dom-swap-error', String(e && e.message || e));
         }
