@@ -5,6 +5,98 @@ Plan (source of truth): `.agents/plans/keynote_live_continuity_generalisation.pl
 - **S2** is on branch **`claude/continuity-generalisation-s2`**, pushed as a backup with **no PR** (owner, 2026-09-25).
   Do not merge; nothing in it is qualified.
 
+## Resume r1 (2026-09-25 night, 20:15–22:00): READ THIS FIRST
+- **Rebased onto main `45290c5f` (#238, hand-back geometry).** New branch **`claude/keynote-live-continuity-resume-8d49da`**
+  (pushed, no PR). It supersedes `claude/continuity-generalisation-s2`, which is left untouched as the pre-rebase backup.
+  - Conflicts: two, trivial (the `fixture` import and a docstring in `managed_obs_qualify.py` and its test).
+  - Follow-up commit `4a2ea70f` routes #238's new `p2-binary` paths through `fixture()`. Without it the S2 guard
+    `test_fixture_paths` fails.
+  - #238 touches only the player patch (`live_runtime.py` R6–R8). The continuity core is unchanged (`9c4fc61f`). One
+    functional interaction: R8 preloads scene B+1 before a Magic Move, near where the core detects teardown.
+- **Suites green at `4a2ea70f`:** pytest 8698 passed, 89 skipped, 1 xfailed, 0 failed; `test:ui` 305/305; `test:maps`
+  542 + 2, 0 failed.
+- **P2 harness arms at `4a2ea70f`** (`run_gates.sh` P2 section only; evidence in main checkout
+  `output/evidence/s2-dev/p2-4a2ea70f/`): `DONE failed=4 pending=0`.
+  - **MATCH (the §3.4 Q2 table equals main's):**
+    - fast and slow: 14 unique checks (the "15" counts `preserveDidNotBlockRestart` twice);
+    - `--disable-bridge34`: red exactly on continueThroughMovingMagicMove3to4;
+    - `--strip bridge@8`;
+    - `--gl-replay auto`.
+    - Slide-3 restart clock (fast) is t = 0.094 s, inside main's stock band (limit 0.35 s), so R8 costs no margin here.
+  - **MISMATCH × 4, all in registrations made on the S1 core. None is registered yet.**
+    - `--core-variant stash-any`:
+      - Extra reds `refusedCarry1to2`, `overlayRemovedOnLeave` and `preserveDidNotBlockRestart`; freeze still
+        inconclusive.
+      - The stashed slide-1 `untitled.mov` remounts across the refused 1→2 boundary (15 carry events in the retire zone)
+        and lingers.
+      - Matches the v6 host set (slide-1 retire plus strays on slides 2–4).
+    - `--strip restart@6`:
+      - Now **all green**; the registration expected red on 3→4 plus inconclusive freeze.
+      - Matches the v6 host set `()` and its reason in `RED_ARM_EXPECTATIONS`: slide 2's source is retired at 2 and
+        never carried, so the entry is inert.
+      - Consequence: this arm no longer shows that P2 depends on the restart entry.
+    - `--strip glReplay@2` (GL off and `--gl-replay auto`):
+      - `noStrayVideo` turns green and `preserveDidNotBlockRestart` turns red.
+      - The red is an **instrument false red**. Every negative clause is clean: empty pool census, zero carries in the
+        zone, no reuse after the boundary.
+      - Only the "never pooled" positive route fails: `refusalEventsN` is 0, against 2 at baseline. With the entry
+        stripped, v6 never names slide 1's decoder, so it emits no `preserve-refused` note.
+      - `noStrayVideo` is green because v6 no longer FIFO-pools an unnamed decoder.
+  - **Decision needed before any re-registration:**
+    - `stash-any` and `restart@6`: re-register to the v6 sets, with the reasons above.
+    - `glReplay@2`: either re-register with `preserveDidNotBlockRestart` red, or teach the check that "nothing named
+      the key, so no note can fire". **Rec: re-register.** The instrument change would also touch main's S1 check.
+- **R8 control:** the four mismatching arms were re-run on the pre-rebase gate worktree `s2-gate-089a0393` (same core).
+  Evidence: `output/evidence/s2-dev/p2ctrl-089a0393/`. Result: `stash-any`, `strip glReplay@2` (off) and `strip restart@6`
+  give **identical** red sets pre-rebase. The P2 registration mismatches are therefore v6-core changes and have nothing
+  to do with #238. The auto-mode `glReplay@2` arm was not re-run because it has the same mechanism.
+- **Decks at 2560×1440 on the rebased head** (`4a2ea70f`; evidence `output/evidence/s2-dev/decks-4a2ea70f/`):
+  - Results: D2 and D3 pass. D1, D4 and D6 fail in arm C (bridges stripped). D5 fails in `attach`, which is forced to
+    1920.
+  - The round was stopped early to run the controls. **The 1600×1000 round and Pass G have not run.** The partial
+    `ABORTED-D1-1600x1000.*` is void.
+  - **New finding: an intermittent one-frame detach of the carried decoder at the `Playing` onset (leans R8; not
+    proven).**
+    - Every failure has the same signature: one rAF sample where `document.querySelectorAll('video')` is **empty**,
+      the first `Playing` sample of the transition.
+    - Everything else about the carry is clean: same element, smooth clock, no owner or rect mismatch.
+    - A synchronous re-home can't be seen between frames, so the decoder was really out of the DOM across a frame
+      boundary. That is a real one-frame blink.
+  - **Scan of every deck artifact** (empty samples flanked by non-empty ones):
+
+    | Head | Deck runs | Runs with an empty sample at `Playing` onset |
+    |---|---|---|
+    | Pre-rebase (i1–i4 + control D1 @ 2560) | 25 | **0** (only 2 at `SettingUpScene`, in pre-fix i2/i3 D6) |
+    | Rebased, 2560 round | 6 | **6** |
+    | Rebased, D1 repeat | 1 | 0 |
+
+  - Not load: i4 ran at load 24–40 and stayed clean. Not viewport: D5's attach arm runs at 1920. Intermittent: the D1
+    repeat passed.
+  - Hypothesis: the player's teardown removes the decoder's container, and the core re-homes the decoder a task later.
+    #238's R8 (`loadScene(B+1)` before a Magic Move) adds work at transition start, which pushes the re-home past a
+    frame.
+  - **Interleaved A/B** (D4 @ 2560, 4 runs per head alternating, 21:15–21:31; `output/evidence/s2-dev/ab-r8-D4/`):
+    rebased 1/4 (rebased-3, arm C `b1to2`, same signature); pre-rebase 0/4.
+  - **Totals: rebased 7/11, pre-rebase 0/29.** Six of the rebased hits fell in one cluster (the 20:52–21:03 round);
+    outside it the rebased head is 1/5.
+  - Verdict: **it leans toward #238/R8 but is not proven.** The cluster is unexplained. That round ran right after the
+    nine P2 arms, at load 6–11, with nothing else running.
+  - Next session: a larger interleaved A/B (≥ 10 per head). Better still, a direct test: the rebased head with R8's
+    third replacement dropped, since `mm_opacity` off removes R6–R8 together. Instrument the core's re-home with
+    `performance.now()` against the rAF timestamps to see the gap directly.
+  - **Fix direction (not started):** re-home in the same task as the teardown, e.g. a MutationObserver or a hook on the
+    player's removal, rather than on the next tick. Or keep the decoder outside the player's torn-down subtree. Decide
+    after the A/B.
+- **Next, in order:**
+  1. **The one-frame detach.** Pin down the cause (see the A/B verdict above). Then fix it in the core (the sha changes,
+     so every red-arm variant sha re-derives), and re-run the dev loop on D1–D6 at 1920 and 2560.
+  2. The owner's registration decision above; register with the reasons, citing the pre-rebase control.
+  3. Finish step 2: the 1600×1000 round and Pass G for D1–D6.
+  4. Step 3: a full `run_gates.sh` without `--allow-record` on the rebased head.
+  5. Step 4, review. The list below is otherwise unchanged.
+- The scratch runners used tonight (a P2-only slice of `run_gates.sh`, the deck loop and the A/B) were one-offs in the
+  session scratchpad. Nothing in the repo changed apart from `4a2ea70f` and this handover.
+
 ## State at the stop (2026-09-25 evening)
 - **Head:** `claude/continuity-generalisation-s2`, core v6, sha `9c4fc61f…` since `089a0393`. The branch is pushed; there
   is no PR.
