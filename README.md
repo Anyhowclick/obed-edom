@@ -93,19 +93,61 @@ the runtime's version and sha256):
   qualified, `output.continuity` also carries `scale` (the uniform factor applied
   to the authored stage, e.g. `1.3333`).
 
-A qualified session can still decline individual cuts: when the destination slide
-draws artwork above the carried movie, that boundary retires the movie (it
-restarts or freezes there) while the rest of the deck stays continuous. Declined
-cuts appear on `output.continuity.notCarried` and under the presenter's
-continuity badge, one line per cut. A movie whose layers do not read as an
-unmasked rectangle — an unreadable layer shape, or a possible mask — makes the
-whole deck `unsupported` instead.
+**What is carried.** Policy: every Magic Move where the same movie continues is
+carried, whether or not its geometry changes. Continuity follows each movie
+instance through the deck, so a movie can be carried across several Magic Moves in
+a row. Keynote's "Play across slides" is not in the export, so the carry is
+inferred from the Magic Move alone.
 
-Looping movies (Keynote's Repeat → Loop) carry like any other movie when every
-instance of that movie on both sides of a Magic Move loops. If only some of them
-loop, that cut is declined and listed on `notCarried`, because a carried decoder
-keeps its source slide's loop setting. Repeat → Back and Forth makes the whole
-deck `unsupported` (not yet measured).
+- **Magic Move, same geometry:** the live decoder is pinned in place.
+- **Magic Move, moving or resizing:** the live decoder moves with the transition.
+  The motion is linear from start to end rect, not Keynote's easing.
+- **Dissolve or no transition:** the movie restarts, as the export plays it.
+- **Movie ends:** a carried movie with no instance on the next slide is handed back
+  to the player.
+- **Repeated movies:** when a slide shows the same movie more than once, each
+  instance is paired with its partner by minimum total distance, as Keynote pairs
+  images.
+- **Loops:** a carried pair must agree on Repeat → Loop. A carried decoder keeps
+  its source slide's loop setting. Repeat → Back and Forth makes the whole deck
+  `unsupported` (not yet measured).
+
+**Declined cuts.** A qualified session can still decline one cut for one movie
+instance. That instance plays as the export plays it (it restarts or freezes
+there), and the rest of the deck stays continuous. Each declined cut appears once
+per instance on `output.continuity.notCarried`, with its slides, movie, the
+instance's `objectId`, a refusal `code` and a `reason`, and under the presenter's
+continuity badge. The codes:
+
+- `R1`: two pairings of a repeated movie are within 16 px of each other.
+- `R1b`: the paired instances differ in opacity, so Keynote may pair them
+  differently.
+- `R2`: a continuing instance builds in on the destination or out on the source.
+- `R4`: the pair disagrees on Repeat → Loop.
+- `R7`: the movie is a web video or an image movie.
+- `R8`: the pair is trimmed differently.
+- `overlap`: artwork above the carried movie on the destination slide (GL replay
+  may still carry it; see below).
+
+Deck-wide refusals make the whole deck `unsupported`, with the code at the start
+of the `reason`: `R3` (a transition is not on the slide's last build), `R5` (an
+object ID repeats across slides) and `R6` (the carried instances do not chain from
+slide to slide). A movie whose layers do not read as an unmasked rectangle (an
+unreadable layer shape or a possible mask) also makes the deck `unsupported`.
+
+**Not carried (named residuals).**
+
+- `R-res-1`: a "Play across slides" movie at a Dissolve or no-transition cut
+  continues in Keynote but restarts here.
+- `R-res-2`: a second copy of the carried movie entering at a Magic Move shares
+  the carried clock in Keynote but plays from 0 here.
+- `R-res-3`: a Magic Move out of a movie with "Play across slides" off restarts
+  midway in Keynote. Here it is carried. Validation flags it as an authoring error.
+
+**Allowlist.** Until the structural refusals are fully qualified, a deck's
+runtime plan must also match a signature on a pinned allowlist
+(`live_continuity.QUALIFIED_PLAN_SHA256`). Any other deck reports `unsupported`
+until its plan has passed the gates and been added.
 
 Set `OBED_LIVE_CONTINUITY=off` before starting the dashboard server to disable it
 outright.
@@ -120,9 +162,11 @@ fixed at 1920x1080.
 
 **Qualification**: `scripts/live_continuity_probe.py` drives `LiveOutputHost`
 itself (not a bare page) through a known fixture's Magic Move and dissolve
-boundaries, in three arms — continuity on, `OBED_LIVE_CONTINUITY=off`, and
-continuity on with the bridging boundary disabled — plus one attach-mode run, and
-scores decoder identity + playback-clock continuity at each cut.
+boundaries, with continuity on, `OBED_LIVE_CONTINUITY=off` and red arms that strip
+one plan entry or swap in a faulty core, plus one attach-mode run. It scores one
+verdict per planned (cut, movie instance) from the plan itself: decoder identity,
+playback-clock continuity and landing rect at each cut, and no stray movie on any
+settled slide.
 
 **GL replay**: keeps a movie live across a click-driven Magic Move whose
 destination draws artwork above it, by replaying the player's own WebGL frame
