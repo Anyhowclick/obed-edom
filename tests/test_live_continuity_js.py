@@ -36,7 +36,7 @@ def test_js_sha256_matches_pinned_bytes():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "a1a962d521356f7c9b04517bf7f1a451189a6416954c5a0ad7e950b731a738f4"
+PINNED_CORE_SHA256 = "1ea684bfea610b0ff3ea828fd063723c9f876203a38b6daa542eeb9ce27180f9"
 
 
 def test_js_sha256_matches_the_pinned_literal():
@@ -3646,6 +3646,32 @@ console.log(JSON.stringify({
     assert result["stubRemounts"] == 0
     assert result["owner"]["elId"] == result["aId"]
     assert result["owner"]["via"] == "footprint-video"
+
+
+@pytest.mark.parametrize("sibling", ["unplanned", "planned"])
+def test_footprint_owner_prefers_the_planned_decoder_over_an_unplanned_same_asset_copy(sibling):
+    """RT-C (F5 `footprintOwnerDecoderId`): an unplanned copy of the same asset
+    painting at the carried instance's rect must not make the owner ambiguous;
+    a tie between two planned decoders still fails closed."""
+    plan = _CONTRACT["d5"]
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing(ID[0]);
+goToScene(1);
+detach(a);
+goToScene(2);
+const b = fresh(ID[1]);
+insert(b);
+const copy = playing(__COPY__);
+[a, copy].forEach((v) => { v.readyState = 4; v.videoWidth = 1920;
+  v._rect = {left: 160, top: 700, width: 640, height: 180}; });
+copy.parentNode = bodyEl;
+console.log(JSON.stringify({owner: P.footprintOwnerDecoderId({x: 160, y: 700, w: 640, h: 180}), aId: a.__obedElId}));
+""".replace("__COPY__", "'ENTERING'" if sibling == "unplanned" else "ID[2]"), src="https://host/counter-a.mov")
+    if sibling == "unplanned":
+        assert result["owner"] == {"elId": result["aId"], "key": "movie1", "via": "footprint-video", "contextType": None}
+    else:
+        assert result["owner"] == {"elId": None, "key": None, "via": "ambiguous", "contextType": None}
 
 
 def test_a_suppressed_bridge_destination_really_clears_when_its_slide_ends():
