@@ -545,6 +545,13 @@ def test_inject_player_diagnostics_reports_a_note_once_on_the_existing_channel()
     assert injected.count(note) == 1
 
 
+def test_inject_player_diagnostics_note_cannot_close_the_script():
+    injected = inject_player_diagnostics("<html><head></head></html>", note="a</script><b>")
+    # Only the diagnostics script's own closing tag remains; the note is escaped as `<\/`.
+    assert injected.count("</script>") == 1
+    assert 'var note = "a<\\/script><b>";' in injected
+
+
 def _pinned_player(monkeypatch) -> bytes:
     from obed_edom import live_runtime
     from tests.test_live_runtime import _synthetic_player

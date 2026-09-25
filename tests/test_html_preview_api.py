@@ -347,3 +347,36 @@ def test_html_preview_unsupported_or_invalid_serves_stock_with_one_player_note(t
     assert served.headers["x-obed-mm-opacity"] == mode
     page = client.get(f"/api/html-preview/{ready['id']}/player/index.html")
     assert page.content.count(PREVIEW_MM_OPACITY_NOTES[mode].encode()) == 1
+
+
+def test_html_preview_patches_a_case_variant_player_path(tmp_path, monkeypatch):
+    from obed_edom import live_runtime
+
+    monkeypatch.delenv(live_runtime.MM_OPACITY_ENV, raising=False)
+    stock = _pinned_player(monkeypatch)
+    client, _deck, ready = _ready_job(tmp_path, monkeypatch, "mm-opacity-case", stock)
+    root = Path(ready["result"]["exportRoot"])
+    if not (root / "assets" / "Player" / "MAIN.JS").is_file():
+        pytest.skip("case-sensitive filesystem")
+    # A case-insensitive volume serves the same file; it must not bypass the patch or the no-cache header.
+    served = client.get(f"/api/html-preview/{ready['id']}/player/assets/Player/MAIN.JS")
+    assert served.status_code == 200
+    assert served.content == live_runtime.patch_rendering(stock)
+    assert served.headers["x-obed-mm-opacity"] == "on"
+    assert served.headers["cache-control"] == "no-cache"
+
+
+def test_html_preview_index_survives_an_unreadable_player(tmp_path, monkeypatch):
+    from obed_edom import live_runtime
+
+    monkeypatch.delenv(live_runtime.MM_OPACITY_ENV, raising=False)
+    client, _deck, ready = _ready_job(tmp_path, monkeypatch, "mm-opacity-unreadable")
+    player = Path(ready["result"]["exportRoot"]) / "assets" / "player" / "main.js"
+    player.chmod(0)
+    try:
+        # The preview never refuses over the opacity patch: index.html still loads, with no note.
+        page = client.get(f"/api/html-preview/{ready['id']}/player/index.html")
+    finally:
+        player.chmod(0o644)
+    assert page.status_code == 200
+    assert b"var note = null;" in page.content

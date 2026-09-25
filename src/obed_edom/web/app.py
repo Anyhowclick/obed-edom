@@ -1000,19 +1000,19 @@ def create_app() -> FastAPI:
             path = safe_export_file(root, relative)
         except PreviewError as exc:
             raise HTTPException(404, str(exc)) from exc
-        if path == root / PLAYER_JS:
+        if path.relative_to(root).as_posix().lower() == PLAYER_JS.as_posix():
             body, mode = preview_player(path.read_bytes())
             return Response(
                 body,
-                media_type="text/javascript",
+                media_type=_player_media_type(path),
                 headers={"Cache-Control": "no-cache", "X-Obed-Mm-Opacity": mode},
             )
         if Path(relative).name.lower() == "index.html":
             try:
-                player = safe_export_file(root, PLAYER_JS.as_posix())
-            except PreviewError:
+                player = safe_export_file(root, PLAYER_JS.as_posix()).read_bytes()
+            except (PreviewError, OSError):
                 player = None
-            note = PREVIEW_MM_OPACITY_NOTES.get(preview_player(player.read_bytes())[1]) if player else None
+            note = PREVIEW_MM_OPACITY_NOTES.get(preview_player(player)[1]) if player is not None else None
             body = inject_player_diagnostics(path.read_text(encoding="utf-8"), note=note)
             return HTMLResponse(body, headers={"Cache-Control": "no-cache"})
         response = FileResponse(path, media_type=_player_media_type(path))

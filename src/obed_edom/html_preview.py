@@ -122,7 +122,7 @@ def inject_player_diagnostics(html: str, *, note: str | None = None) -> str:
     """Put capture hooks in the player document before any exported scripts or assets; `note` is reported once."""
     if _DIAGNOSTICS_MARK in html:
         return html
-    script = _PLAYER_DIAGNOSTICS_SCRIPT.replace("__OBED_PREVIEW_NOTE__", json.dumps(note))
+    script = _PLAYER_DIAGNOSTICS_SCRIPT.replace("__OBED_PREVIEW_NOTE__", json.dumps(note).replace("</", "<\\/"))
     snippet = f'<script {_DIAGNOSTICS_MARK}="1">{script}</script>'
     match = re.search(r"<head[^>]*>", html, flags=re.IGNORECASE)
     if match:
