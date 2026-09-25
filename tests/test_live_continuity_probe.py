@@ -7372,10 +7372,10 @@ class TestOpusR3:
 # --------------------------------------------------------------------------
 # S2 dev loop i1 (`output/evidence/s2-dev/i1-8207b263`, S2 head 8207b263, core v6): the
 # instrument defects the first deck run found, each pinned on the run's own samples
-# (`tests/fixtures/live_continuity_probe_i1`, arm A excerpts), plus the red it must keep.
+# (`tests/fixtures/live_continuity_probe_devloop`, arm A excerpts), plus the red it must keep.
 # --------------------------------------------------------------------------
 
-I1 = json.loads(gzip.decompress((REPO / "tests" / "fixtures" / "live_continuity_probe_i1" / "i1_arm_a_excerpts.json.gz").read_bytes()))
+I1 = json.loads(gzip.decompress((REPO / "tests" / "fixtures" / "live_continuity_probe_devloop" / "i1_arm_a_excerpts.json.gz").read_bytes()))
 
 
 def _deck_facts(name: str) -> dict[str, Any]:
@@ -7480,3 +7480,49 @@ class TestArrivalStarts:
         """i1 Voff: every autostarting destination read live (the export restarts it)."""
         expectations = _deck_facts(deck)["rectExpectations"]
         assert all(state == "live" for per in expectations["Voff"].values() for label, state in per.items() if label.startswith("counter-a.mov#1"))
+
+
+# S2 dev loop i3 (`output/evidence/s2-dev/i3-3ce02bd6`): while the player rests at the end of a
+# scene it already shows the NEXT scene's hash (main.js `updateNavigationButtons`), so a note's
+# `sceneHash` cannot open the retire zone. The zone is placed in page time from the samples.
+I3 = json.loads(gzip.decompress((REPO / "tests" / "fixtures" / "live_continuity_probe_devloop" / "i3_d3_retire.json.gz").read_bytes()))
+D3_ENDS = "b1to2:counter-a.mov#1->end:retire"
+
+
+class TestRetireZoneInPageTime:
+    def test_the_zone_opens_when_the_player_leaves_its_rest_not_at_the_hash(self) -> None:
+        start, end = probe.retire_zone_times(I3["D3_A_samples"], 4, 6)
+        rows = sorted(I3["D3_A_samples"], key=lambda r: r["t"])
+        rest = [r for r in rows if r["scene"] < 3 and r["busy"] is False]
+        assert rest[-1]["t"] < start == min(r["t"] for r in rows if r["t"] > rest[-1]["t"])
+        assert next(r for r in rows if r["t"] == start)["scene"] == 2
+        assert next(r for r in rows if r["t"] == end)["scene"] == 4 and start < end
+        hashed_at_rest = [
+            e for e in I3["D3_A_retire_evidence"]["coreEvents"]
+            if (e.get("detail") or {}).get("sceneHash") == "#3" and e["t"] < start
+        ]
+        assert hashed_at_rest, "the artifact must show '#3' notes while the player still rests on scene 2"
+
+    def test_d3_ending_movie_retires_cleanly(self) -> None:
+        spec = _spec(_deck_facts("D3"), D3_ENDS)
+        scored = probe.score_retire(I3["D3_A_retire_evidence"], spec, True, I3["D3_A_samples"])
+        assert scored["verdict"] is True, scored.get("reason")
+        assert {n["kind"] for n in scored["retireNotes"]} >= {"retire-boundary"} and scored["carryNotes"] == []
+
+    def test_known_bad_a_remount_inside_the_transition_stays_red(self) -> None:
+        """i2's shape: the held decoder remounted after the press, during the outgoing move."""
+        spec = _spec(_deck_facts("D3"), D3_ENDS)
+        start, _ = probe.retire_zone_times(I3["D3_A_samples"], 4, 6)
+        evidence = copy.deepcopy(I3["D3_A_retire_evidence"])
+        remount = next(e for e in evidence["coreEvents"] if e["kind"] == "remount-into-authored-layer")
+        evidence["coreEvents"].append(dict(remount, t=start + 50.0))
+        scored = probe.score_retire(evidence, spec, True, I3["D3_A_samples"])
+        assert scored["verdict"] is False and "carry note" in scored["reason"]
+
+    def test_without_timed_samples_the_zone_falls_back_to_the_notes_scene(self) -> None:
+        assert probe.retire_zone_times([], 4, 6) is None
+        assert probe.leave_rest_t([{"t": 1.0, "scene": 2, "busy": False}], 3) is None
+
+    def test_the_zone_is_open_ended_on_the_last_slide(self) -> None:
+        rows = [{"t": 1.0, "scene": 0, "busy": False}, {"t": 2.0, "scene": 0, "busy": True}, {"t": 3.0, "scene": 2, "busy": False}]
+        assert probe.retire_zone_times(rows, 2, None) == (2.0, math.inf)

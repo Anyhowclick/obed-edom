@@ -2579,6 +2579,33 @@ def score_raw_handback(samples: Any, spec: dict[str, Any]) -> dict[str, Any]:
     return {"verdict": False, "reason": f"{dom_id} is present but never connected at its authored rect", **detail}
 
 
+def leave_rest_t(samples: Any, transition_scene: int) -> float | None:
+    """When the player leaves its rest for `transition_scene`: the first row after the last settled
+    row (busy False) on an earlier scene. The page hash is no clock for this -- while idle at the
+    end of a scene the player already shows the NEXT scene's hash (main.js
+    `updateNavigationButtons`), so `#transition_scene` appears at rest."""
+    rows = sorted(
+        (r for r in samples if isinstance(r, dict) and _finite_number(r.get("t")) is not None and r.get("scene") is not None),
+        key=lambda r: r["t"],
+    ) if isinstance(samples, list) else []
+    rest = [i for i, r in enumerate(rows) if r["scene"] < transition_scene and r.get("busy") is False]
+    if not rest or rest[-1] + 1 >= len(rows):
+        return None
+    return rows[rest[-1] + 1]["t"]
+
+
+def retire_zone_times(samples: Any, at_scene: int, until_scene: int | None) -> tuple[float, float] | None:
+    """The retire zone in page time: from leaving the source slide's rest for the outgoing
+    transition (`at_scene - 1`) to leaving the destination slide's rest for its own (`until_scene
+    - 1`), open-ended on the last slide. None when the samples cannot place the start (a legacy
+    artifact scores by the notes' scene)."""
+    start = leave_rest_t(samples, at_scene - 1)
+    if start is None:
+        return None
+    end = leave_rest_t(samples, until_scene - 1) if until_scene is not None else None
+    return start, end if end is not None and end > start else math.inf
+
+
 def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, samples: Any = None) -> dict[str, Any]:
     """The positive half of a refused carry, or of a carried decoder the plan ends: the raw
     player's own element for the destination instance, if any (`score_raw_handback`, from the
@@ -2587,8 +2614,9 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
     "retire"): at least one refusal note for the movie in the zone `[atScene - 1, the next
     slide's transition scene)`, `preserve-refused` (key, via, scene) from a declining hook or
     `retire-boundary` (key, elIds, atScene) from the keep-warm sweep of decoders pooled before
-    the zone, and no carry note (`CARRY_EVENT_KINDS`) for its key or elements in that zone.
-    Unreadable evidence is INCONCLUSIVE."""
+    the zone, and no carry note (`CARRY_EVENT_KINDS`) for its key or elements in that zone. The
+    zone is placed in page time from the samples (`retire_zone_times`) when the notes carry `t`,
+    never by the page hash. Unreadable evidence is INCONCLUSIVE."""
     if not isinstance(sample, dict):
         return _inconclusive("no refusal evidence was sampled on the destination slide")
     if not stage_map_valid(sample.get("stageMap")):
@@ -2615,9 +2643,18 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
     if movie_key is None:
         return _inconclusive("the retire verdict is bound to no runtime movie key")
     zone_end = spec["zoneUntilScene"] - 1 if spec.get("zoneUntilScene") is not None else math.inf
+    timed = retire_zone_times(samples, scene, spec.get("zoneUntilScene"))
 
     def in_zone(value: Any) -> bool:
         return value is not None and scene - 1 <= value < zone_end
+
+    def event_in_zone(event: dict[str, Any], scene_value: Any, unplaced: bool = False) -> bool:
+        """By page time when both the zone and the note have one; else by the note's scene (a
+        note with neither counts as in the zone when `unplaced`)."""
+        t = _finite_number(event.get("t"))
+        if timed is not None and t is not None:
+            return timed[0] <= t < timed[1]
+        return unplaced if scene_value is None else in_zone(scene_value)
 
     def keyed(detail: dict[str, Any]) -> bool:
         key = detail.get("key")
@@ -2634,7 +2671,7 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
             (e.get("kind") == "retire-boundary" and d.get("atScene") == scene and isinstance(d.get("elIds"), list))
             or (
                 e.get("kind") == "preserve-refused" and isinstance(d.get("via"), str) and d["via"]
-                and in_zone(_finite_number(d.get("scene")))
+                and event_in_zone(e, _finite_number(d.get("scene")))
             )
         )
     ]
@@ -2642,7 +2679,7 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
         e for e, d in details
         if e.get("kind") in CARRY_EVENT_KINDS
         and (keyed(d) or any(d.get(f) in el_ids for f in ("elId", "newElId") if d.get(f) is not None))
-        and (_event_scene_of(e) is None or in_zone(_event_scene_of(e)))
+        and event_in_zone(e, _event_scene_of(e), unplaced=True)
     ]
     scored = score_refusal(sample, spec, runtime_installed, handed_back)
     reasons = [scored["reason"]] if scored.get("reason") else []
@@ -2653,6 +2690,7 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
     return {
         **scored, "verdict": not reasons, "reason": "; ".join(reasons) or None,
         "retireNotes": notes, "carryNotes": carries, "handback": handback,
+        "zoneTimes": list(timed) if timed is not None else None,
     }
 
 
