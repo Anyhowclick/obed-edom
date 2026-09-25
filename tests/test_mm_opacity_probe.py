@@ -65,7 +65,7 @@ def make_run(gl: str = "off", slot_value: float = ALPHA, *, frames: int = MOVE_F
     opacity = slot_value if settle_opacity is None else settle_opacity
     settle = {
         "mm12": {"frame": move[-1]["i"], "ord": 4, "el": move[-1]["el"], "g2": g2, "B": [c for p in B_PIXELS for c in p],
-                 "P": _blend(opacity), "w": 1920, "h": 1080, "hash": hash12},
+                 "P": _blend(opacity), "w": 1920, "h": 1080, "hash": hash12, "masks": [[103, 11, 965, 281]]},
         "mm34": {"frame": move34[-1]["i"], "ord": 2, "el": move34[-1]["el"], "g2": move34[-1]["g2"], "B": None, "P": None,
                  "w": 1920, "h": 1080, "hash": hash34},
     }
@@ -122,10 +122,45 @@ def test_settle_residual_is_zero_for_the_true_blend_and_large_for_opaque_or_squa
 
 
 def test_settle_residual_refuses_a_translucent_twin():
+    # Q0b: with a 4-px erosion the square's anti-aliased edge column read alpha 218 in the patch-off twin, so P != S there.
     on, off = make_run(), make_run(slot_value=1.0)
-    off["log"]["settle"]["mm12"]["P"][3] = 200
+    off["log"]["settle"]["mm12"]["P"][3] = 218
     residual, problems = probe.settle_residual(on, off, ALPHA)
-    assert residual is None and problems
+    assert residual is None and any("min alpha 218" in p for p in problems)
+    assert probe.score_mo1(on, off)["verdict"] == "INCONCLUSIVE"
+
+
+def test_settle_roi_erodes_geometry_plus_the_settled_scale():
+    assert probe.SETTLED_SCALE == pytest.approx(313 / 157)
+    # 4 px alone is Q0b's ROI, whose x = 793 column carries the magnified edge texel.
+    assert probe.settle_roi(4) == [793, 205, 16, 148]
+    assert probe.settle_roi() == probe.settle_roi(4 + 2) == [795, 207, 12, 144]
+
+
+def test_settle_roi_matches_the_effect_fixture_slot_4():
+    effect = json.loads(EFFECT_1_TO_2.read_text())
+    wrapper = effect["baseLayer"]["layers"][-1]
+    leaf = wrapper["layers"][0]
+    assert (wrapper["initialState"]["position"]["pointX"], wrapper["initialState"]["position"]["pointY"]) == probe.SLOT_FROM_CENTER
+    assert (leaf["initialState"]["width"], leaf["initialState"]["height"]) == probe.SLOT_TEX
+
+
+def test_movie_masks_come_from_the_plan_boundary_padded_to_gl_rects():
+    runtime = {"boundaries": [
+        {"atScene": 6, "movieSlot": 0, "slotRects": [[0, 0, 10, 10]], "instanceRect": {"x": 0, "y": 0, "w": 10, "h": 10}},
+        {"atScene": 2, "movieSlot": 1, "slotRects": [[0, 0, 1920, 1080], [105.12, 790.85, 960.0, 276.0]],
+         "instanceRect": {"x": 109.35, "y": 795.04, "w": 951.54, "h": 267.62}},
+    ]}
+    assert probe.movie_masks(runtime) == [[103, 11, 965, 281], [107, 15, 956, 272]]
+    assert probe.movie_masks({"boundaries": []}) == []
+    assert probe.gl_mask([10, 20, 5, 5], pad=0) == [10, 1055, 5, 5]
+
+
+def test_mo1_settle_hash_without_a_movie_mask_is_inconclusive():
+    a = arms()
+    a["on"]["log"]["settle"]["mm12"]["masks"] = []
+    result = probe.score_mo1(a["on"], a["off"])
+    assert result["verdict"] == "INCONCLUSIVE" and any("movie mask" in p for p in result["problems"])
 
 
 def test_square_splice_anchor_is_unique_in_the_patch_and_refuses_otherwise():
@@ -449,3 +484,53 @@ def test_logger_parses_and_touches_only_the_declared_gl_surface():
         assert f"wrap('{name}'" in probe.LOGGER_JS
     assert probe.LOGGER_JS.count("wrap('") == 6
     assert "getUniform'" not in probe.LOGGER_JS and "getUniform(" not in probe.LOGGER_JS
+
+
+def _run_logger(node: str, movie_value: int, square_value: int) -> dict:
+    # A fake WebGL context in Node: pixels left of x = 2 are the "movie" (varies per run), the rest follow the draw count.
+    script = """
+const window = globalThis;
+function WebGLRenderingContext(){}
+const P = WebGLRenderingContext.prototype;
+Object.assign(P, {FRAMEBUFFER_BINDING: 1, RGBA: 2, UNSIGNED_BYTE: 3, drawingBufferWidth: 8, drawingBufferHeight: 6,
+  getUniformLocation(p, n){ return {p: p, n: n}; }, useProgram(){}, uniform1f(){}, clear(){ this.drawn = 0; },
+  drawArrays(){ this.drawn++; }, drawElements(){ this.drawn++; }, getParameter(){ return null; },
+  readPixels(x, y, w, h, f, t, out){
+    for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) for (let c = 0; c < 4; c++)
+      out[(j * w + i) * 4 + c] = x + i < 2 ? %d : this.drawn * %d;
+  }});
+%s
+const gl = new WebGLRenderingContext();
+const progs = [{}, {}];
+const locs = progs.map(p => gl.getUniformLocation(p, 'Opacity'));
+window.__OBED_MMO__.setLabel('mm12', {settleFromMs: 0, roi: [1, 1, 2, 2], roiOrdinal: 1, masks: [[0, 0, 2, 6]]});
+for (let f = 0; f < 3; f++){
+  gl.clear(16384);
+  progs.forEach((p, k) => { gl.useProgram(p); if (f === 0) gl.uniform1f(locs[k], k ? 0.25 : 1); gl.drawArrays(4, 0, 6); });
+}
+const M = window.__OBED_MMO__;
+console.log(JSON.stringify({frames: M.frames, settle: M.settle, errors: M.errors}));
+""" % (movie_value, square_value, probe.LOGGER_JS)
+    return json.loads(subprocess.run([node, "-e", script], check=True, text=True, capture_output=True).stdout)
+
+
+def test_logger_records_value_in_effect_and_one_masked_settle_read_on_the_last_frame():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required to run the logger")
+    a, b, c = _run_logger(node, 7, 10), _run_logger(node, 99, 10), _run_logger(node, 7, 11)
+    assert a["errors"] == []
+    assert [f["draws"] for f in a["frames"]] == [[[0, 1], [1, 0.25]]] * 3
+    settle = a["settle"]["mm12"]
+    assert settle["frame"] == 2 and settle["ord"] == 1
+    assert settle["B"] == [7, 7, 7, 7, 10, 10, 10, 10] * 2
+    assert settle["P"] == [7, 7, 7, 7, 20, 20, 20, 20] * 2
+    assert a["settle"]["mm12"]["hash"] == b["settle"]["mm12"]["hash"]
+    assert a["settle"]["mm12"]["hash"] != c["settle"]["mm12"]["hash"]
+
+
+def test_wait_for_hash_returns_the_expected_hash_once_seen_else_the_last_read():
+    reads = iter(["#1", "#1", "#2", "#3"])
+    assert probe.wait_for_hash(lambda _e: next(reads), "x", "#2", timeout_s=5) == "#2"
+    assert probe.wait_for_hash(lambda _e: "#9", "x", "#8", timeout_s=0) == "#9"
+    assert probe.wait_for_hash(lambda _e: "#4", "x", None) == "#4"

@@ -4,7 +4,10 @@
 One fresh headless Chrome per arm, driven through `LiveOutputHost` on the binary-counter fixture (`output/p2-binary`) at
 1920x1080. An innermost logger (`Page.addScriptToEvaluateOnNewDocument`, true natives) records, per clear-delimited frame,
 every draw's program and the `Opacity` value in effect for it, and at the settle frame of each Magic Move one readPixels pair:
-the settle ROI before slot 4 and the full buffer after the frame's last draw (settle ROI + hash).
+the settle ROI before slot 4 and the full buffer after the frame's last draw (settle ROI + hash). The logger reads the value
+in effect per program, never a per-frame `uniform1f`: the player's per-qualifier cache writes `Opacity` only on the move's
+first frame and on slot 1's fade steps, so the settle frame carries no `uniform1f(Opacity)` at all (the F-10 sentinel does
+not hold on the real player).
 
 Arms, per GL-replay mode (`off`, `auto`):
   on    mm_opacity="auto" (the patch)
@@ -16,10 +19,14 @@ Gates (each counts only if its CvC reads 0 and its KB FAILs, else INCONCLUSIVE; 
   MO-1  every slot-4 draw of the 1->2 move (>= 20) and every G2 LIVE draw of its program reads Opacity == alpha (float32);
         every other ordinal of 1->2 and every ordinal of 3->4 matches the patch-off twin; settle max |P - E| <= 1 with
         E = alpha*S + (1 - alpha*S_a)*B (premultiplied, S = the twin's settle P). A GL-on gate is VOID if G2 stands down in
-        either twin.
+        either twin. The settle ROI is the from/to intersection of slot 4 eroded by 4 px of geometry plus ceil(settled scale)
+        px: the texture's anti-aliased edge texel is magnified by the settled scale (~1.99), and Q0b measured alpha 218 one
+        px inside a 4-px erosion. The scorer also refuses (INCONCLUSIVE) unless every twin S pixel in the ROI is opaque.
   MO-4  (GL auto) patch on: unproven == [{4, rest-opacity}], rest slot 4 == alpha; patch off: unproven == [], rest
         [1,0,1,1,1]; LIVE screenshot ROI_top identical on vs off.
-  MO-5  settle-frame hash of 3->4 identical on vs off; of 1->2 different.
+  MO-5  settle-frame hash of 3->4 identical on vs off; of 1->2 different. The 1->2 hash masks the carried movie (the plan's
+        movie slot rect and instance rect, padded 2 px): with GL replay on, its texture holds whichever video frame was
+        current at the advance.
 
 usage: uv run python scripts/mm_opacity_probe.py --out DIR [--gl off,auto] [--arms on,off,off2,sq]
        uv run python scripts/mm_opacity_probe.py --score DIR
@@ -30,6 +37,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import shutil
 import struct
 import subprocess
@@ -55,17 +63,23 @@ MIN_SLOT_DRAWS = 20
 SETTLE_TOL = 1.0
 MOVE_MS = 1500.0
 SETTLE_WINDOW_MS = 60.0
-SETTLE_ROI_GL = (793, 205, 16, 148)
+SLOT_FROM_CENTER = (724.8616027832031, 801.4578094482422)
+SLOT_TEX = (178, 157)
+SLOT_TO_RECT = (788.725538103768, 672.9158876261134, 353.0, 313.0)
+SETTLED_SCALE = max(SLOT_TO_RECT[2] / SLOT_TEX[0], SLOT_TO_RECT[3] / SLOT_TEX[1])
+GEOMETRY_EROSION_PX = 4
+MASK_PAD_PX = 2
 ROI_TOP = (793, 727, 16, 58)
 REST_OFF = [1, 0, 1, 1, 1]
 UNPROVEN_ON = [{"slot": SLOT, "reason": "rest-opacity"}]
 G2_FRAMES = ("ARM-POST", "LIVE")
 LIVE_WAIT_S = 15.0
 LIVE_HOLD_S = 2.5
+HASH_WAIT_S = 2.0
 MAX_HEADLESS = 3
 ARMS = {"on": "auto", "off": "off", "off2": "off", "sq": "auto"}
 PLAN = (
-    ("mm12", ("#1", "#2"), {"settleFromMs": MOVE_MS - SETTLE_WINDOW_MS, "roi": list(SETTLE_ROI_GL), "roiOrdinal": SLOT}),
+    ("mm12", ("#1", "#2"), {"settleFromMs": MOVE_MS - SETTLE_WINDOW_MS, "roiOrdinal": SLOT}),
     ("b1", None, {}),
     ("b2", None, {}),
     ("b3", None, {}),
@@ -102,18 +116,21 @@ LOGGER_JS = r"""
     nat(g, 'readPixels').call(g, r[0], r[1], r[2], r[3], g.RGBA, g.UNSIGNED_BYTE, px);
     return Array.prototype.slice.call(px);
   }
-  function readFull(g, r){
-    var w = g.drawingBufferWidth, h = g.drawingBufferHeight, px = new Uint8Array(w * h * 4);
+  function readFull(g, r, masks){
+    var w = g.drawingBufferWidth, h = g.drawingBufferHeight, px = new Uint8Array(w * h * 4), P = null;
     nat(g, 'readPixels').call(g, 0, 0, w, h, g.RGBA, g.UNSIGNED_BYTE, px);
+    if (r){
+      P = [];
+      for (var y = r[1]; y < r[1] + r[3]; y++)
+        for (var k = (y * w + r[0]) * 4, e = k + r[2] * 4; k < e; k++) P.push(px[k]);
+    }
+    (masks || []).forEach(function(m){
+      for (var my = Math.max(0, m[1]); my < Math.min(h, m[1] + m[3]); my++)
+        px.fill(0, (my * w + Math.max(0, m[0])) * 4, (my * w + Math.min(w, m[0] + m[2])) * 4);
+    });
     var u = new Uint32Array(px.buffer), a = 0x811c9dc5, b = 0x9747b28c;
     for (var i = 0; i < u.length; i++){ a = Math.imul(a ^ u[i], 16777619); b = Math.imul(b ^ u[i], 2246822519) ^ (b >>> 13); }
-    var out = {w: w, h: h, hash: (a >>> 0).toString(16) + ':' + (b >>> 0).toString(16), P: null};
-    if (r){
-      out.P = [];
-      for (var y = r[1]; y < r[1] + r[3]; y++)
-        for (var k = (y * w + r[0]) * 4, e = k + r[2] * 4; k < e; k++) out.P.push(px[k]);
-    }
-    return out;
+    return {w: w, h: h, hash: (a >>> 0).toString(16) + ':' + (b >>> 0).toString(16), P: P};
   }
   function wrap(name, fn){
     protos.forEach(function(P){
@@ -160,9 +177,9 @@ LOGGER_JS = r"""
     var rv = orig.apply(this, args);
     try {
       if (tail && s.lastPlayerDraws != null && ord === s.lastPlayerDraws - 1){
-        var full = readFull(this, cfg.roi || null);
+        var full = readFull(this, cfg.roi || null, cfg.masks);
         M.settle[f.label] = {frame: f.i, ord: ord, el: f.el, g2: f.g2, B: f.B, P: full.P, w: full.w, h: full.h,
-                             hash: full.hash};
+                             hash: full.hash, roi: cfg.roi || null, masks: cfg.masks || []};
       }
     } catch (e) { M.errors.push(String(e)); }
     return rv;
@@ -182,6 +199,33 @@ def f32(value: Any) -> float | None:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
     return struct.unpack("<f", struct.pack("<f", float(value)))[0]
+
+
+def settle_roi(erosion: float | None = None) -> list[int]:
+    """Slot 4's from-rect and to-rect intersection, eroded, as a GL readPixels rect (bottom-up) on the 1920x1080 buffer."""
+    e = GEOMETRY_EROSION_PX + math.ceil(SETTLED_SCALE) if erosion is None else erosion
+    fx0, fy0 = SLOT_FROM_CENTER[0] - SLOT_TEX[0] / 2, SLOT_FROM_CENTER[1] - SLOT_TEX[1] / 2
+    tx0, ty0, tw, th = SLOT_TO_RECT
+    x0, y0 = math.ceil(max(fx0, tx0) + e), math.ceil(max(fy0, ty0) + e)
+    x1 = math.floor(min(fx0 + SLOT_TEX[0], tx0 + tw) - e)
+    y1 = math.floor(min(fy0 + SLOT_TEX[1], ty0 + th) - e)
+    return [x0, VIEWPORT[1] - y1, x1 - x0, y1 - y0]
+
+
+def gl_mask(rect: Any, pad: float = MASK_PAD_PX) -> list[int]:
+    """An authored top-down rect ([x, y, w, h] or {x, y, w, h}), padded, as a GL bottom-up integer rect."""
+    x, y, w, h = (rect[k] for k in ("x", "y", "w", "h")) if isinstance(rect, dict) else rect
+    x0, y0 = math.floor(x - pad), math.floor(y - pad)
+    x1, y1 = math.ceil(x + w + pad), math.ceil(y + h + pad)
+    return [x0, VIEWPORT[1] - y1, x1 - x0, y1 - y0]
+
+
+def movie_masks(runtime: dict[str, Any], at_scene: int = 2) -> list[list[int]]:
+    """The carried movie's slot rect and instance rect of the G2 boundary entering `at_scene`, from the continuity plan."""
+    for entry in runtime.get("boundaries") or []:
+        if entry.get("atScene") == at_scene and entry.get("slotRects") and entry.get("movieSlot") is not None:
+            return [gl_mask(entry["slotRects"][entry["movieSlot"]]), gl_mask(entry["instanceRect"])]
+    return []
 
 
 def square_splice(player: bytes) -> bytes:
@@ -281,6 +325,8 @@ def run_problems(run: dict[str, Any]) -> list[str]:
             problems.append(f"{label}: settle read is not the last draw of the last player frame")
         if roi and (settle.get("ord") != SLOT or not settle.get("B") or not settle.get("P")):
             problems.append(f"{label}: settle ROI pair missing or not at slot {SLOT}")
+        if roi and not settle.get("masks"):
+            problems.append(f"{label}: settle hash has no movie mask")
     return problems
 
 
@@ -295,7 +341,7 @@ def settle_residual(cand: dict[str, Any], twin: dict[str, Any], alpha: float) ->
     if not (B.shape == P.shape == S.shape):
         return None, ["settle ROI sizes differ"]
     if not np.all(S[:, 3] == 1.0):
-        return None, ["twin settle ROI is not opaque, so its P is not S"]
+        return None, [f"twin settle ROI is not opaque (min alpha {int(S[:, 3].min() * 255)}), so its P is not S"]
     E = alpha * S + (1.0 - alpha * S[:, 3:4]) * B
     return float(np.max(np.abs(P - E * 255.0))), []
 
@@ -509,6 +555,16 @@ def square_player(active: bool) -> Iterator[None]:
         live_host.patch_player = real
 
 
+def wait_for_hash(evaluate: Any, expression: str, expected: str | None, timeout_s: float = HASH_WAIT_S) -> str:
+    """The first hash equal to `expected` within the timeout, else the last read (G2 moves the hash after settle)."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        value = evaluate(expression)
+        if expected is None or value == expected or time.monotonic() >= deadline:
+            return value
+        time.sleep(0.02)
+
+
 def run_arm(fixture: Path, gl: str, arm: str) -> dict[str, Any]:
     import live_continuity_probe as probe
     import live_host_probe
@@ -523,7 +579,11 @@ def run_arm(fixture: Path, gl: str, arm: str) -> dict[str, Any]:
     record: dict[str, Any] = {"gl": gl, "arm": arm, "mmOpacityKwarg": ARMS[arm], "steps": []}
     probe.force_viewport(*VIEWPORT)
     dest = probe.prepare_export(fixture / "html-player", fixture / "html-unmodified" / "index.html", f"mmo-{gl}-{arm}")
-    host = LiveOutputHost(dest, probe.load_slides(dest), headless=True, gl_replay=gl, mm_opacity=ARMS[arm],
+    slides = probe.load_slides(dest)
+    record["masks"] = movie_masks(probe.runtime_of(probe.ground_truth_plan(dest, slides, gl_replay=True)))
+    record["roi"] = settle_roi()
+    extra = {"mm12": {"roi": record["roi"], "masks": record["masks"]}}
+    host = LiveOutputHost(dest, slides, headless=True, gl_replay=gl, mm_opacity=ARMS[arm],
                           transport_factory=LoggedCdp)
     try:
         with square_player(arm == "sq"):
@@ -539,10 +599,11 @@ def run_arm(fixture: Path, gl: str, arm: str) -> dict[str, Any]:
             "return {x:r.x,y:r.y,width:r.width,height:r.height};})()")
         time.sleep(2.0)
         for label, expect, cfg in PLAN:
-            evaluate(f"window.__OBED_MMO__.setLabel({json.dumps(label)}, {json.dumps(cfg)})")
+            evaluate(f"window.__OBED_MMO__.setLabel({json.dumps(label)}, {json.dumps({**cfg, **extra.get(label, {})})})")
             step: dict[str, Any] = {"label": label, "expectHash": expect, "hashBefore": evaluate(probe.HASH_JS)}
             host.execute("advance")
             _, step["settleS"] = live_host_probe.wait_for_settlement(host, timeout_s=30)
+            step["hashAfter"] = wait_for_hash(evaluate, probe.HASH_JS, expect[1] if expect else None)
             if label == "mm12" and gl == "auto":
                 started = time.monotonic()
                 while time.monotonic() - started < LIVE_WAIT_S:
@@ -557,7 +618,6 @@ def run_arm(fixture: Path, gl: str, arm: str) -> dict[str, Any]:
                 record["liveGreen"] = frame[y:y + h, x:x + w].reshape(-1).tolist()
             else:
                 time.sleep(LIVE_HOLD_S if label.startswith("mm") else 1.5)
-            step["hashAfter"] = evaluate(probe.HASH_JS)
             record["steps"].append(step)
         record["log"] = evaluate(LOG_READ_JS, deadline_s=60)
     except Exception:  # noqa: BLE001
