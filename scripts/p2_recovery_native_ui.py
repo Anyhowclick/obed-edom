@@ -26,6 +26,7 @@ from PIL import Image
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
+from obed_edom.fixture_paths import fixture
 from obed_edom import keynote_app
 from obed_edom.dsk_live import LiveBatch, keynote_running
 from obed_edom.dsk_stage_export import StageCountAmbiguous, export_stage_pngs, stage_counts, validate_alpha
@@ -39,7 +40,7 @@ from obed_edom.html_alpha_probe import (
 )
 
 DEFAULT_SOURCE = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Alpha_DSK.key")
-OUT = REPO / "output" / "p2-recovery"
+OUT = fixture("p2-recovery")
 SENTINEL = OUT / "sentinel-black-opaque.png"
 SLIDE = 3  # Genesis
 SENTINEL_XY = (40, 40)

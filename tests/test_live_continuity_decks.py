@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from obed_edom import live_continuity
+from obed_edom.fixture_paths import fixture
 from obed_edom.live_continuity import ContinuityPlan, Unsupported, derive_plan
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "live_continuity"
@@ -15,10 +16,10 @@ MINIMAL_ROOT = FIXTURE_ROOT / "minimal_alpha_dsk"
 POSITIVE_ROOT = FIXTURE_ROOT / "positive_control"
 LOOP_ROOT = FIXTURE_ROOT / "minimal_alpha_dsk_loop"
 
-GL_DECKS_ROOT = Path("/Users/anyhowclick/Desktop/work/obed-edom/output/gl-decks")
+GL_DECKS_ROOT = fixture("gl-decks")
 MINIMAL_REAL_ROOT = GL_DECKS_ROOT / "Minimal Alpha_DSK" / "html"
 POSITIVE_REAL_ROOT = GL_DECKS_ROOT / "Positive Control" / "html"
-SOAK_LOOP_REAL_ROOT = Path("/Users/anyhowclick/Desktop/work/obed-edom/output/p2-soak-loop/html-unmodified")
+SOAK_LOOP_REAL_ROOT = fixture("p2-soak-loop") / "html-unmodified"
 
 
 def _resolver(root: Path, relative: str) -> Path:
@@ -154,7 +155,7 @@ def test_positive_control_fixture_parity_with_real_export():
 # --- looping movies (keynote_live_continuity_loopmode plan sections 2 and 4) ---------------
 #
 # `minimal_alpha_dsk_loop/` is the owner's Repeat -> Loop export of Minimal Alpha_DSK
-# (`output/p2-soak-loop/html-unmodified`), slides 4 and 5 only: both slide JSONs are Keynote's
+# (`output/fixtures/p2-soak-loop/html-unmodified`), slides 4 and 5 only: both slide JSONs are Keynote's
 # bytes verbatim, and the header is trimmed to the two slides like `minimal_alpha_dsk/`'s.
 # Keynote wrote exactly one key for the loop, `movie.loopMode: "looping"`, on each slide's one
 # `untitled.mov` instance; S4 -> S5 is the same Magic Move pin as the non-looping deck.

@@ -89,7 +89,8 @@ if (( START_LOAD > GATE_MAX_START_LOAD )); then
     "runs. Let it settle and start again (or set GATE_MAX_START_LOAD). No run launched." >&2; exit 2
 fi
 PY=/Users/anyhowclick/Desktop/work/obed-edom/.venv/bin/python; cd $G || exit 1; mkdir -p $O
-export PYTHONPATH=$G/src; F=$G/output/p2-recovery/html-adversarial
+export PYTHONPATH=$G/src; F=$($PY -c 'from obed_edom.fixture_paths import fixture; print(fixture("p2-recovery"))')/html-adversarial
+[[ -d $F ]] || { echo "no P2 fixture at $F; no run launched" >&2; exit 2; }
 if (( ALLOW_RECORD )); then
   echo "################################################################################"
   echo "## --allow-record: DISCOVERY RUN. RECORD arms are not gated; this is NOT a pass. ##"

@@ -8,7 +8,7 @@ container, geometry, rate, duration and scrolling neutral grating (`_write_h264_
 background, `GUTTER` apart, in the order start marker (white, black), `DATA_BITS` index bits MSB first, one even-parity
 bit, end marker (black, white). Large frame digits are burnt in below the strip for humans.
 
-The fixture builder copies the P2 fixture (never writing under output/p2-recovery/), swaps every H.264 test-pattern
+The fixture builder copies the P2 fixture (never writing under output/fixtures/p2-recovery/), swaps every H.264 test-pattern
 `Untitled.mov-*.mov` (html-player and html-disposable; html-unmodified keeps the Keynote originals and only its
 index.html is read) for this movie at the matching duration, and writes `fixture.json`.
 
@@ -31,9 +31,11 @@ import imageio_ffmpeg
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from obed_edom.fixture_paths import fixture
+
 REPO = Path(__file__).resolve().parents[1]
-P2_FIXTURE = REPO / "output/p2-recovery/html-adversarial"
-BINARY_FIXTURE = P2_FIXTURE.resolve().parents[1] / "p2-binary"
+P2_FIXTURE = fixture("p2-recovery") / "html-adversarial"
+BINARY_FIXTURE = fixture("p2-binary")
 FIXTURE_BASE = "p2-recovery/html-adversarial"
 MANIFEST = "fixture.json"
 GENERATOR = "scripts/binary_counter_movie.py"
@@ -154,7 +156,7 @@ def verify_fixture(fixture: Path) -> dict[str, Any] | None:
 def build_fixture(dest: Path = BINARY_FIXTURE, source: Path = P2_FIXTURE) -> dict[str, Any]:
     source, dest = source.resolve(), dest.expanduser().resolve()
     if "p2-recovery" in dest.parts or dest == source:
-        raise SystemExit(f"refusing to write {dest}: never under output/p2-recovery/")
+        raise SystemExit(f"refusing to write {dest}: never under output/fixtures/p2-recovery/")
     if dest.exists() and any(dest.iterdir()):
         if read_manifest(dest).get("generator") != GENERATOR:
             raise SystemExit(f"refusing to replace {dest}: not empty and its {MANIFEST} does not name {GENERATOR}")

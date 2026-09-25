@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from obed_edom.fixture_paths import fixture
 from obed_edom.live_continuity import (
     ContinuityPlan,
     MovieContinuity,
@@ -22,9 +23,9 @@ from obed_edom.live_continuity import (
 )
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "live_continuity"
-REAL_EXPORT_ROOT = Path(__file__).resolve().parents[1] / "output" / "p2-recovery" / "html-adversarial" / "html-unmodified"
+REAL_EXPORT_ROOT = fixture("p2-recovery") / "html-adversarial" / "html-unmodified"
 
-REAL_PLAYER_ROOT = Path(__file__).resolve().parents[1] / "output" / "p2-recovery" / "html-adversarial" / "html-player"
+REAL_PLAYER_ROOT = fixture("p2-recovery") / "html-adversarial" / "html-player"
 
 SLIDE1 = "08C861A1-CB39-4832-B189-6DF95B7F3396"
 SLIDE2 = "0C652BEB-F445-48CF-BFD0-4194C6B7A438"
@@ -1236,7 +1237,7 @@ def test_the_measured_vocabulary_is_the_real_exports_and_nothing_more():
 
     measured = _measured_subtree_vocabulary(REAL_PLAYER_ROOT)
     # `movie.loopMode` is the one key measured elsewhere: the owner's Repeat -> Loop export
-    # (`output/p2-soak-loop`, parity-tested in test_live_continuity_decks.py). P2's export
+    # (`output/fixtures/p2-soak-loop`, parity-tested in test_live_continuity_decks.py). P2's export
     # carries no looping movie, so the key must be absent there and is added by hand.
     assert "loopMode" not in measured["movie"]
     measured["movie"].add("loopMode")
@@ -3166,7 +3167,7 @@ P2_LOOP_LOOPS = [
     {"scene": 8, "asset": "untitled.mov", "rect": {"x": 327, "y": 709, "w": 1266, "h": 356}},
 ]
 
-# Qualified by gates L1/L2/L4/L5 on `output/p2-loop` (plan section 2.5). They match the plan's
+# Qualified by gates L1/L2/L4/L5 on `output/fixtures/p2-loop` (plan section 2.5). They match the plan's
 # F5 values, computed independently by the planner.
 P2_LOOP_PLAN_SHA256 = "3dc6755853692a178696a35495c1929662005a8173f932607855876bfc299c5d"
 P2_LOOP_GL_REPLAY_PLAN_SHA256 = "2ba6fbed8fc959c804e53d2f21712945230eac6dcbf90d522fe3a6a688bef924"
@@ -3311,7 +3312,7 @@ def test_p2_loop_splice_leaves_wa0125_and_every_other_key_alone():
 @pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")
 def test_real_p2_export_spliced_the_same_way_signs_the_same_two_shas(tmp_path):
     """The trimmed fixture spliced must stand for the real export spliced (what
-    `scripts/loop_fixture.py` builds `output/p2-loop` from): same runtime, same shas."""
+    `scripts/loop_fixture.py` builds `output/fixtures/p2-loop` from): same runtime, same shas."""
     import shutil
 
     from obed_edom import live_continuity

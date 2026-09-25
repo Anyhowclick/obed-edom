@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from obed_edom import live_runtime
+from obed_edom.fixture_paths import fixture, main_checkout
 
 
 def test_unknown_player_is_refused():
@@ -150,8 +151,8 @@ console.log(JSON.stringify(results));
     assert absent["slideNumberShowing"] is False
 
 
-MAIN_OUTPUT = Path("/Users/anyhowclick/Desktop/work/obed-edom/output")
-REAL_PLAYER = MAIN_OUTPUT / "p2-binary" / "html-player" / "assets" / "player" / "main.js"
+MAIN_OUTPUT = main_checkout() / "output"
+REAL_PLAYER = fixture("p2-binary") / "html-player" / "assets" / "player" / "main.js"
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "live_continuity"
 EFFECT_1_TO_2 = FIXTURE_ROOT / "effect_1_to_2.json"
 SOURCE_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Minimal Alpha_DSK.key")

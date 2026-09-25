@@ -36,6 +36,7 @@ from p2_recovery_html_dissolve_live import (  # noqa: E402
     _trigger_advance,
     inject_preserve,
 )
+from obed_edom.fixture_paths import fixture  # noqa: E402
 from obed_edom.p2_verdict import _norm_hash  # noqa: E402
 from obed_edom.html_alpha_probe import (  # noqa: E402
     analyze_rgba,
@@ -44,9 +45,9 @@ from obed_edom.html_alpha_probe import (  # noqa: E402
     write_patched_export,
 )
 
-OUT = REPO / "output" / "p2-recovery" / "html-alpha-surfaces"
-BASELINE = REPO / "output" / "p2-recovery" / "html-dissolve-preserve" / "html-unmodified"
-FALLBACK = REPO / "output" / "p2-recovery" / "html-dissolve-live" / "html-unmodified"
+OUT = fixture("p2-recovery") / "html-alpha-surfaces"
+BASELINE = fixture("p2-recovery") / "html-dissolve-preserve" / "html-unmodified"
+FALLBACK = fixture("p2-recovery") / "html-dissolve-live" / "html-unmodified"
 # Corners that should be empty on Minimal Alpha_DSK (transparent DSK plate).
 EMPTY_PTS = [(8, 8), (8, 1912), (1072, 8), (1072, 1912), (540, 50), (50, 960)]
 

@@ -14,6 +14,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from obed_edom import live_host as live_host_module
+from obed_edom.fixture_paths import fixture
 from obed_edom.html_preview import cache_dir
 from obed_edom.live_host import LiveOutputHost, OutputDisplay
 from obed_edom.live_runtime import RUNTIME_VERSION
@@ -24,8 +25,8 @@ from obed_edom.live_runtime import RUNTIME_VERSION
 HEADLESS_CHROME_HEIGHT_PAD = 32
 
 
-FIXTURE = Path("output/p2-recovery/html-adversarial/html-player")
-ORIGINAL_INDEX = Path("output/p2-recovery/html-adversarial/html-unmodified/index.html")
+FIXTURE = fixture("p2-recovery") / "html-adversarial/html-player"
+ORIGINAL_INDEX = fixture("p2-recovery") / "html-adversarial/html-unmodified/index.html"
 ARTIFACT = Path("output/live-probes/live-host-headless-proof.json")
 PROBE_DIGEST = "a" * 64
 
