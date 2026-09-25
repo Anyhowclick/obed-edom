@@ -1,6 +1,6 @@
 # Dashboard preview: draw Magic Move leaves at Keynote's opacity
 
-**APPROVED (owner, 2026-09-25): decisions 1–3 as recommended.** Base note: the parent branch gained a fifth
+**IMPLEMENTED — merged #235 (`2a2ce095`, 2026-09-25).** **APPROVED (owner, 2026-09-25): decisions 1–3 as recommended.** Base note: the parent branch gained a fifth
 replacement (`0f6d0380`, synchronous DOM hide at the GL handover); the split must carry every `_MM_OPACITY_REPLACEMENTS` entry.
 
 **DRAFT rev 1**, 2026-09-25, Opus planner. Plan only: no product code, no commits, no browser, no Keynote.
@@ -151,3 +151,13 @@ Before editing, record on `66567617` `sha256(patch_player(real, mm_opacity=True)
   full suites.
 - Stacked on `claude/mm-translucent-opacity`. After the parent PR merges, rebase onto `main`, re-run the full suites, and open
   the PR against `main`. Never merge without the owner.
+
+## 9. Review log
+
+- Opus r1 (code, no written round): nothing blocking. Folded: an unreadable `main.js` keeps `index.html` serving, a
+  case-insensitive `main.js` match, `</` escaped in the note, and the shared media type. Left: `index.html` builds the
+  full patch to learn the mode (~5 ms).
+- Patch cost on the real player is ~5.4 ms per request, so there's no cache. The `patch_player` shas are pinned in
+  `tests/test_live_runtime.py`.
+- Also fixed in #235: `test_live_continuity_probe.py::…test_a_setup_time_system_exit_stamps_forced_fail` was not
+  self-contained (it needed the git-ignored `output/p2-recovery` fixture).
