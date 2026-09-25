@@ -110,6 +110,26 @@ R8 now preloads only when the event about to play is a Magic Move. `src/` is cle
   - 0 page exceptions, console errors or warnings, player build errors and logger errors in all 3 runs.
 - **Served shas.** `on` 574274e8…, `off` 7cf00b56….
 
-### P2 items (pending the P2 slot hand-off)
+### P2 items (slot handed over by the peer; run serially 18:31–19:12)
 
-Pending: bridge-off (fix ×6 interleaved with stock ×3), fast/slow, GL fast (2 fix + 2 stock), and the 3→4 freeze bracket.
+Before every launch `pgrep -f p2_recovery_html_adversarial` was empty. Each report and `runs/` was copied out right after
+its run. All runs used `--reuse-export --disposable`. Load averages were 9–58.
+
+| Gate | Verdict | Key numbers |
+|---|---|---|
+| P2 bridge-off, fix ×6 interleaved with stock ×3 (`r2/p2-nobridge/`) | PASS (red fixed) | Every run is False only on `continueThroughMovingMagicMove3to4`, the negative arm. Slide-3 restart clock t (limit 0.35 s) below |
+| P2 fast / slow, fix (`r2/p2/`) | PASS 14/14 each | t 0.146 / 0.137 (r1: 0.262 / 0.294) |
+| P2 with GL replay on, fast, 2 fix + 2 stock interleaved (`r2/p2gl/`) | PASS 14/14 ×4 | Fix `mmPatchExercised` true, stock false. t: fix 0.116 / 0.137, stock 0.098 / 0.129. Margin to 0.35 ≥ 0.21 s (r1 fix: 0.212 / 0.330) |
+| 3→4 freeze bracket + slide-3 playback | PASS | `freezeControlCaughtByCounter` verdict `pass` in fix fast/slow and both GL fix runs, and also in both stock GL runs. `continueThroughMovingMagicMove3to4` True in all 6 bridged runs. `deliberateRestart2to3` True, with progression, in all 15 runs. In bridge-off the bracket reads `skipped` ("bridge disabled"), which is by design and non-blocking |
+
+Slide-3 restart clock t in bridge-off:
+- fix (574274e8): 0.122, 0.113, 0.118, 0.094, 0.119, 0.145. Median 0.118, max 0.145;
+- stock (7cf00b56): 0.120, 0.160, 0.099;
+- r1 for comparison: fix 0.28–0.41 (3 of 6 over the limit), stock 0.11–0.22, R8 dropped 0.10–0.14;
+- history: 0.10–0.18.
+
+With 3b, the fix sits inside the stock and R8-dropped band, so the r1 shift is gone.
+
+**r2 verdict:** every headless gate passes at `0bb21fcc`. The only P2 finding is `continueThroughMovingMagicMove3to4`,
+the expected red of the negative bridge-off arm. The preload now fires at slide-3 idle, before the 3→4 Magic Move, and
+leaves the freeze control, the 3→4 carry and slide-3 playback unchanged. The last W4 P2 run ended **19:12:37**.
