@@ -43,7 +43,7 @@ decks' MM pairs. This counts multiset matches only, not which pairs match:
 Most matched shapes are **repeated** keys (279 matched vs 3 unique on Gold), so the tie-break
 decides most of the outcome, not the key.
 
-Housekeeping: `output/mm-dup-pairing/FX.key` disappeared at about 17:23 today. I did not remove it;
+Housekeeping: `output/evidence/mm-dup-pairing/FX.key` disappeared at about 17:23 today. I did not remove it;
 another session probably cleaned up. Keynote was running when I started and had exited by then. I
 did not touch it.
 
@@ -54,7 +54,7 @@ did not touch it.
   a Magic Move of 2 s, and a ProRes 30 fps QuickTime export. One AppleScript file runs a batch. It is
   launched unsandboxed with a per-batch deadline and a `quit` at the end. Guard the quit hang seen
   in run3 by closing documents first and checking `pgrep -x Keynote` afterwards. Everything lives
-  under `output/mm-shape-id/`.
+  under `output/evidence/mm-shape-id/`.
 - **Colour-agnostic readout:** take the non-black mask of the **mid-transition frame** (t = 0.5)
   and compute its blob centroids and sizes.
   - A morph appears as one blob at the midpoint of source→target, with interpolated size.
@@ -108,7 +108,7 @@ around it.
 
 ## 2. Results (live, 2026-09-24): 58 decks, 0 INCONCLUSIVE, palette checksum OK after every deck
 
-Evidence lives in `<main>/output/mm-shape-id/runs/`: `<name>.key`, `<name>.m4v`, batch logs, and
+Evidence lives in `<main>/output/evidence/mm-shape-id/runs/`: `<name>.key`, `<name>.m4v`, batch logs, and
 `results.json` in the worktree harness. Every verdict was cross-checked by eye on contact sheets
 (TM2, TG1, TG1b, TD0, TD1, TZ1, E2c). An offline audit confirmed that every run deck holds exactly
 the specified objects and geometry.
@@ -221,7 +221,7 @@ contests were measured).
   3. Run the full suites.
   4. Codex review.
   5. Open the PR.
-- Evidence: `output/mm-shape-id/golden/` in the worktree holds the before/after captures and
+- Evidence: `output/evidence/mm-shape-id/golden/` in the worktree holds the before/after captures and
   `zflags_*`.
 
 ## 3b. Status 2026-09-24 23:15 (commits 4821f566 and the build-exclusion commit)
@@ -234,7 +234,7 @@ contests were measured).
     (owner saw this live on 102→103). `movie-start` and Action builds don't exclude. Applied in
     BOTH `mm.zorder_flip` and partner keeping.
   - **Reviewer for this branch = Opus peer** (Codex quota is low).
-- Cuts reviewed live on `<main>/output/mm-shape-id/review/FRC_review.key` (a Keynote-made copy;
+- Cuts reviewed live on `<main>/output/evidence/mm-shape-id/review/FRC_review.key` (a Keynote-made copy;
   the FRC source sha1 was verified unchanged):
   - 7→8 and 8→9: invisible inversions (badge vs map), removed by the filter.
   - 16→17: pairing correct; the flags are box false positives.
@@ -273,7 +273,7 @@ contests were measured).
   Keynote is free.
 
 ## Harness status (2026-09-24)
-- **Palette** (`<main>/output/mm-shape-id/palette.key`, owner-authored; used only via copies). One
+- **Palette** (`<main>/output/evidence/mm-shape-id/palette.key`, owner-authored; used only via copies). One
   slide. Offline facts:
   - roles R, R2, OV, TRI, ED and RR10t all use the theme red style directly;
   - RR10v and RR60v share one variation with an identical resolved fill (the E5 pair is RR10v vs
@@ -283,7 +283,7 @@ contests were measured).
   - Keynote merges identical variations: a shape drawn fresh with equal values reused the same
     style, and Paste Style snapped back to the theme style. So in real decks "same values, different
     style object" occurs mainly across parent styles.
-- **Harness** (`<worktree>/output/mm-shape-id/`, gitignored):
+- **Harness** (`<worktree>/output/evidence/mm-shape-id/`, gitignored):
   - `roles.py`: offline dump and palette contract;
   - `gen.py`: 50 variants, geometry lint, probe → asmap, batches;
   - `read.py`: max-over-frames midpoint coverage;
@@ -302,7 +302,7 @@ contests were measured).
   4. An offline `roles.py runs/<name>.key` audit of the styles in each run deck.
 
 ## Review log
-- 2026-09-24 owner: D1 (a) — the owner authors ONE palette deck (`output/mm-shape-id/palette.key`, spec in chat);
+- 2026-09-24 owner: D1 (a) — the owner authors ONE palette deck (`output/evidence/mm-shape-id/palette.key`, spec in chat);
   D2 agreed — `mm.zorder_flip` lands first with shapes excluded; D3 (a) bucket semantics; D4 — the owner pings
   when Keynote is free.
 - 2026-09-24 live run incident: Keynote's `save doc in <path>` saves a COPY and leaves the open document

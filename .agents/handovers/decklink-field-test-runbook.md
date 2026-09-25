@@ -180,7 +180,7 @@ freezes by the on-screen counter, never by the flicker feel.
 share of output frames that REPEAT the previous movie frame (ideal 0) —
 source FPS 25 (matched): native movie 25–27 % · default 30 Hz: 14–23 % · **50: 8–12 %**, and a GL-replayed movie
 (on by default under Keyer output at 25 and 30 fps since OD-2, `claude/od-2-gl-replay-managed-obs-5bd03f`) 0.5–2 %. Matching the canvas is the worst setting; render the page at 2× the canvas.
-Harness and runs: main checkout `output/obs-rate/` (`rate.py rec` + `decode2.py`; only LOSSLESS recordings read the counter reliably).
+Harness and runs: main checkout `output/evidence/obs-rate/` (`rate.py rec` + `decode2.py`; only LOSSLESS recordings read the counter reliably).
 **Known before going in (2026-09-20, `keynote-live-continuity-2026-09-20.md`):** a movie continuing through a
 Magic Move is unreliable on screen. On `62e1ab7`, slide 2 shows a **static poster with a stray copy on top** — the
 carried `<video>` decodes but cannot paint (a Magic-Move-settled slide is one stage-wide WebGL canvas, DOM layers at

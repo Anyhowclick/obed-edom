@@ -412,7 +412,7 @@ def test_punctuation_inside_bold_word_run_is_not_flagged():
 # mm.zorder_flip — Magic Move tweens geometry, not stacking, so a matched pair
 # whose back/front order inverts across the cut snaps at the transition.
 # Pairing follows what live Keynote was observed to do
-# (output/mm-dup-pairing/ and output/mm-shape-id/, 2026-09-24): a key (Keynote's
+# (output/evidence/mm-dup-pairing/ and output/evidence/mm-shape-id/, 2026-09-24): a key (Keynote's
 # hard gate) unique on both sides pairs directly; a repeated key pairs by the
 # assignment preferring equal tier1 (stroke+opacity), then equal tier2 (raw stored
 # path), then equal tier3 (style), then the least total centre distance (optimal,
