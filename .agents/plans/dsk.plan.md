@@ -635,7 +635,7 @@ overlapping edits to those boundary files without coordination.
     capped 45pt text still exceeds the slot REFUSES rather than shrinking below the slot lead;
     `SplitPart` gained per-part `scale`+`slot_capped` so the `--text-fit shrink` refit uses the
     part's own scale and preserves the 50pt cap. Claude high-effort was not used; Claude planned,
-    Sonnet implemented, GPT-5.6 Sol r1/r2 under `.agents/reviews/dsk-split-cap/`. (a) MAJOR latent
+    Sonnet implemented, GPT-5.6 Sol r1/r2 (raw rounds deleted; `git show 6fc85b78:.agents/reviews/dsk-split-cap/`; both r2 findings verified fixed 2026-09-25: the one-part rect is clamped `min(h, band.height)` and the GW38 one-part test asserts the capped wrapped height). (a) MAJOR latent
     emphasis-cap/scale gap + (b) MINOR one-part height both closed; offline only, full suite green.
 13. **C5: split is never re-run after a refit** — a part's geometry is corrected, never
     re-windowed live; enforced explicitly in `_build_refit_round`.

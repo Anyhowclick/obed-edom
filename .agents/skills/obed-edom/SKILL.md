@@ -390,7 +390,8 @@ controls (8px for text; 2–8px for crops) and a second, independent arm-A null 
 phase-correlation bar independently caps text translation at 8px; horizontal and vertical
 alignment determine both A and projected-B footprints. Composed crop geometry stays under
 2px, and wholly off-canvas objects compare at whole-slide scope. The A/B/null PNG manifests,
-both deck digests, and oracle-code digest bind the report to the recorded run.
+both deck digests, and oracle-code digest bind the report to the recorded run (the preview PNGs themselves were not retained after
+2026-09-25; the report and run records are kept).
 Only exact `(slide, drawable id)` rows from a passing report may delegate autosize archive x
 or masked raw-size checks; type, flips, mask angle, crop frame, and identity still gate.
 Generate the report with `scripts/text_mask_visual_oracle.py --previews-null-a ...`, then pass it to

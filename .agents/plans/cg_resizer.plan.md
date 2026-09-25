@@ -29,7 +29,7 @@ todos:
       339 autosize labels and 130 changed mask regions; 27 labels and 13 masks were wholly off-canvas,
       maximum measured text translation was 7px, and maximum composed crop delta was 1.281px. Both
       banked arms were then inspected independently through Keynote with complete live-verify coverage
-      before the final reuse replay. Bank: `output/bank/2026-09-21/text-mask-default-flip/`. Defaults
+      before the final reuse replay. Bank: `output/bank/2026-09-21/text-mask-default-flip/` (previews not retained; report + run records kept). Defaults
       flipped on; explicit `off`/`0`/`false`/`no` remain kill switches, and unknown values fail closed.
     status: completed
   - id: w2-final-live-gate
