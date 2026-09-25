@@ -76,7 +76,9 @@ _MM_OPACITY_REPLACEMENTS = (
     ),
     (
         b"this.textureManager.loadScene(B)}unloadTextures(){",
-        b"this.textureManager.loadScene(B),B+1<A.numScenes&&this.textureManager.loadScene(B+1)}unloadTextures(){",
+        b"this.textureManager.loadScene(B);var M=A.events[B],N=M&&M.effects&&M.effects[0];"
+        b'N&&"apple:magic-move-implied-motion-path"===N.name&&B+1<A.numScenes&&this.textureManager.loadScene(B+1)}'
+        b"unloadTextures(){",
     ),
 )
 

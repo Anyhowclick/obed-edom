@@ -256,10 +256,10 @@ def test_mm_opacity_anchors_are_unique_on_the_real_player():
 # sha256 of patch_player(real, mm_opacity=...). False: recorded on 3eb3b0fe (hook only, unchanged since).
 # True: with the hand-back replacements R6-R8 (keynote_live_handback_geometry.plan.md); was 21476f78... with R1-R5.
 REAL_PATCHED_SHA256 = {
-    True: "e17264c0a0067c6651ab5582efbdd2656536b696c5d39f078a08ba836dacd2f3",
+    True: "574274e88485745a6f55a8563d43ddfb91299db6e4d749fd34719436ade751bf",
     False: "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
 }
-REAL_RENDERING_SHA256 = "5797b302a3d58a27a5bcf80cd2f7544b026015779736d5b6fb9420a0ebee524c"
+REAL_RENDERING_SHA256 = "fd81193887728094df6d017fff5dfac99a5058fab02b3c9a1b92bd93ac88fe23"
 
 
 @pytest.mark.parametrize("flag", [True, False])

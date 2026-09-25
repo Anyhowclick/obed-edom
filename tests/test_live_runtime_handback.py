@@ -22,6 +22,7 @@ from tests.test_live_runtime import (
     EFFECT_1_TO_2,
     FIXTURE_ROOT,
     MAIN_OUTPUT,
+    REAL_PLAYER,
     _cut,
     _hook_only,
     _node,
@@ -401,3 +402,71 @@ def test_handback_census_mirror_affects_only_p2_1_to_2_slots_2_and_4_across_real
     stats, affected = _census(pairs)
     assert stats["one_to_two"] >= 1 and stats["effects"] > stats["one_to_two"]
     assert affected == {(True, SENTINEL), (True, GREEN)}
+
+
+# R8 (decision 3b): at idle, `preloadTextures` resolves B (the next scene in `IdleAtFinalState`, else the current one)
+# and loads its slide; the patch also loads scene B+1's slide only when event B is a Magic Move, so R6 finds the
+# destination cached at MM setup. P2 scenes: slide 1 = 0-1 (movie, MM 1->2), slide 2 = 2-5 (builds, dissolve 2->3),
+# slide 3 = 6-7 (movie, MM 3->4), slide 4 = 8-9 (movie, dissolve).
+FINAL, INITIAL = "IdleAtFinalState", "IdleAtInitialState"
+
+
+def _p2_events(root: Path = FIXTURE_ROOT / "assets") -> list[dict]:
+    events = []
+    for slide in json.loads((root / "header.json").read_text())["slideList"]:
+        data = json.loads((root / slide / f"{slide}.json").read_text())
+        events += [{"effects": [{"name": e["name"]} for e in event["effects"]]} for event in data["events"]]
+    return events
+
+
+def _preload(player: bytes, events: list[dict], states: list[tuple[str, int]], loop: bool = False) -> list[list[int]]:
+    """Scenes passed to `textureManager.loadScene` by the real `preloadTextures`, per (state, currentSceneIndex)."""
+    method = _cut(player.decode(), "preloadTextures(){", "unloadTextures(){")
+    script = """
+const tg="IdleAtFinalState";
+class P{%s}
+const script={events:%s,loopSlideshow:%s};script.numScenes=script.events.length;
+console.log(JSON.stringify(%s.map(([state,scene])=>{const loads=[];const p=new P();
+  Object.assign(p,{script,state,currentSceneIndex:scene,textureManager:{loadScene:(s)=>loads.push(s)}});
+  p.preloadTextures();return loads})));
+""" % (method, json.dumps(events), "true" if loop else "false", json.dumps(states))
+    result = subprocess.run([_node(), "-e", script], check=True, text=True, capture_output=True)
+    return json.loads(result.stdout)
+
+
+def test_real_preload_adds_the_next_slide_only_before_a_magic_move_on_p2():
+    player = _real_player()
+    events = _p2_events()
+    assert events == _p2_events(REAL_PLAYER.parents[1])
+    assert [event["effects"][0]["name"] == MM for event in events] == [
+        False, True, False, False, False, False, False, True, False, False]
+    states = [(state, scene) for state in (INITIAL, FINAL) for scene in range(len(events))]
+    stock = _preload(_hook_only(player), events, states)
+    patched = _preload(_patched(player), events, states)
+    extra = {}
+    for state, old, new in zip(states, stock, patched):
+        assert new[: len(old)] == old
+        if len(new) > len(old):
+            extra[state] = new[len(old):]
+    # Idle on slide 1 before 1->2 and on slide 3 before 3->4 (settled after the movie build, or restarted at the
+    # MM scene by a go-to); never while idle on slide 2 before the 2->3 dissolve, nor on slide 4.
+    assert extra == {(FINAL, 0): [2], (INITIAL, 1): [2], (FINAL, 6): [8], (INITIAL, 7): [8]}
+    assert _preload(live_runtime.patch_rendering(player), events, states) == patched
+    assert _preload(live_runtime.patch_player(player, mm_opacity=False), events, states) == stock
+
+
+def test_real_preload_at_the_last_scene_and_across_a_loop_wrap():
+    player = _real_player()
+    movie, mm = {"effects": [{"name": "apple:movie-start"}]}, {"effects": [{"name": MM}]}
+    # A deck whose last event is a Magic Move: without a loop there is no next scene to load.
+    last = [movie, movie, mm]
+    assert _preload(_patched(player), last, [(FINAL, 1), (INITIAL, 2), (FINAL, 2)]) == [[2], [2], [2]]
+    # Looping: at the last scene the player wraps B to 0; R8 follows event 0, and never loads past the wrap.
+    looped = [mm, movie, mm]
+    stock = _preload(_hook_only(player), looped, [(FINAL, 2), (FINAL, 1)], loop=True)
+    patched = _preload(_patched(player), looped, [(FINAL, 2), (FINAL, 1)], loop=True)
+    assert stock == [[0], [2]]
+    assert patched == [[0, 1], [2]]
+    assert _preload(_patched(player), [movie, movie], [(FINAL, 1)], loop=True) == [[0]]
+    # No script events at a negative scene (before the first `setCurrentSceneIndexTo`): stock load only.
+    assert _preload(_patched(player), last, [(INITIAL, -1)]) == [[-1]]
