@@ -135,13 +135,21 @@ class TestLoopFrames:
         q.check_loop_frames(looped)
 
 
-def _post_handback(state: str = "RETIRED", mode: str = "handoff", el_id: Any = 7, handoffs: int = 1) -> dict[str, Any]:
-    """A post-build-1 `GL_REPLAY_READ_JS` read: G2 retired by one canvas-removed hand-off, the runtime released `el_id`."""
+def _post_handback(state: str = "RETIRED", mode: str = "handoff", el_id: Any = 7, handoffs: int = 1,
+                   module: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A post-build-1 `GL_REPLAY_READ_JS` read: G2 retired by one canvas-removed hand-off, the runtime released `el_id`.
+
+    Mirrors the real emitters: the runtime's `glRelease` notes `glreplay-release` with {ok, reason, mode, elId, retired}
+    (live_continuity_js.py), and the G2 module embeds that same object as `glreplay-handoff.detail.released` before
+    setting `API.state = 'RETIRED'` (live_gl_replay_js.py). `module` overrides fields of the embedded copy only."""
+    released = {"ok": True, "reason": None, "mode": mode, "elId": el_id, "retired": []}
+    handoff = {"released": {**released, **(module or {})}, "writebackFailed": False, "posterRestored": True,
+               "completedMs": 3.5, "reason": "canvasRemoved"}
     return {
         "api": {"state": state, "standDowns": ["canvasRemoved"] if state == "RETIRED" else [],
-                "events": [{"kind": "glreplay-handoff", "detail": {"reason": "canvasRemoved"}}] * handoffs},
+                "events": [{"kind": "glreplay-handoff", "detail": handoff}] * handoffs},
         "coreEvents": [{"kind": "glreplay-carried", "detail": {"elId": el_id}},
-                       {"kind": "glreplay-release", "detail": {"ok": True, "mode": mode, "elId": el_id, "reason": None}}],
+                       {"kind": "glreplay-release", "detail": released}],
     }
 
 
@@ -222,8 +230,11 @@ class TestPrecheckA:
 
     @pytest.mark.parametrize("post", [
         _post_handback(state="LIVE"), _post_handback(mode="retire"), _post_handback(el_id=8), _post_handback(handoffs=0),
-        None,
-    ], ids=["g2-still-live", "retired-not-handed-off", "other-element-released", "no-module-handoff", "no-post-read"])
+        _post_handback(handoffs=2), None,
+        _post_handback(module={"mode": "retire"}), _post_handback(module={"elId": 8}), _post_handback(module={"ok": False}),
+        _post_handback(module={"elId": None}),
+    ], ids=["g2-still-live", "retired-not-handed-off", "other-element-released", "no-module-handoff", "two-module-handoffs",
+            "no-post-read", "module-mode-retire", "module-other-id", "module-not-ok", "module-no-id"])
     def test_without_a_matching_handoff_fails(self, looped: Path, post: Any) -> None:
         """Codex r4 #5: `.loop` on a DOM element proves nothing unless G2 retired by handing off that same element."""
         session = _session(reads={"postHandback": {"gl": post}})
@@ -251,6 +262,17 @@ class TestPrecheckA:
         result = _precheck(_session(), looped)
         assert result["failing"] == ["(a) loop representation"]
         assert any(f"loopMode={value}" in k for k in _check(result, "(a) loop representation")["value"]["addedLoopKeys"])
+
+    def test_a_module_handoff_without_its_released_object_fails(self, looped: Path) -> None:
+        post = _post_handback()
+        del post["api"]["events"][0]["detail"]["released"]
+        session = _session(reads={"postHandback": {"gl": post}})
+        assert _precheck(session, looped)["failing"] == ["(a) video.loop on the handed-back carried element"]
+
+    def test_control_module_and_runtime_agree_with_the_element(self, looped: Path) -> None:
+        value = _check(_precheck(_session(), looped), "(a) video.loop on the handed-back")["value"]["handback"]
+        assert value == {"state": "RETIRED", "releases": [{"mode": "handoff", "elId": 7}],
+                         "moduleReleased": [{"ok": True, "mode": "handoff", "elId": 7}]}
 
     def test_a_deleted_unspliced_base_jsonp_fails(self, looped: Path) -> None:
         """Codex r4 #4: a file missing from the fixture (not only an extra or changed one) is a difference."""

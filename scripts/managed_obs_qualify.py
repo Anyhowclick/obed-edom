@@ -1117,7 +1117,10 @@ def precheck_gates(run: dict[str, Any], fixture: Path) -> dict[str, Any]:
 def handback_of(read: Any) -> dict[str, Any]:
     api = (read or {}).get("api") if isinstance(read, dict) else None
     releases = _notes(read, "glreplay-release") if isinstance(read, dict) else []
-    return {"state": (api or {}).get("state"), "releases": [{"mode": r.get("mode"), "elId": r.get("elId")} for r in releases]}
+    handoffs = _notes(read, "glreplay-handoff", "api") if isinstance(read, dict) else []
+    module = [h.get("released") if isinstance(h.get("released"), dict) else {} for h in handoffs]
+    return {"state": (api or {}).get("state"), "releases": [{"mode": r.get("mode"), "elId": r.get("elId")} for r in releases],
+            "moduleReleased": [{"ok": m.get("ok"), "mode": m.get("mode"), "elId": m.get("elId")} for m in module]}
 
 
 def handed_back_loops(handed: Any, post: Any) -> bool:
@@ -1128,7 +1131,8 @@ def handed_back_loops(handed: Any, post: Any) -> bool:
         return False
     handback = handback_of(post)
     return (handback["state"] == "RETIRED" and _handed_off(post)
-            and handback["releases"] == [{"mode": "handoff", "elId": element["elId"]}])
+            and handback["releases"] == [{"mode": "handoff", "elId": element["elId"]}]
+            and handback["moduleReleased"] == [{"ok": True, "mode": "handoff", "elId": element["elId"]}])
 
 
 def json_paths(tree: Path) -> set[str]:
