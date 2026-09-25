@@ -229,7 +229,19 @@ def test_harness_ground_truth_derives_the_fixture_plan(tmp_path):
     assert plan.scene_index_by_player == SCENES
 
 
-def test_harness_ground_truth_refuses_an_export_that_does_not_derive():
-    """The six-slide copy's two same-rect movie1 pairs are whole-deck ambiguous today."""
-    with pytest.raises(SystemExit, match="does not derive"):
-        drv._p2_ground_truth(FIXTURE_ROOT / "minimal_alpha_dsk")
+def test_harness_ground_truth_refuses_an_export_that_does_not_derive(tmp_path):
+    """An ambiguous pairing now refuses only its boundary, so the whole-deck refusal comes from
+    identity instead: slide 2's movie reuses slide 1's objectID (R5), which the runtime cannot key."""
+    root = tmp_path / "export"
+    shutil.copytree(FIXTURE_ROOT, root)
+    header_path = root / "assets" / "header.json"
+    header = json.loads(header_path.read_text())
+    header["slideList"] = [s["exportedUuid"] for s in SLIDES]
+    header_path.write_text(json.dumps(header))
+    slide2 = SLIDES[1]["exportedUuid"]
+    slide2_path = root / "assets" / slide2 / f"{slide2}.json"
+    raw = slide2_path.read_text()
+    assert raw.count("F9AFED1B-E2D7-47D4-942E-14992C808383") > 0
+    slide2_path.write_text(raw.replace("F9AFED1B-E2D7-47D4-942E-14992C808383", "6BB39942-6C61-4763-839D-777C09E7E594"))
+    with pytest.raises(SystemExit, match="does not derive a continuity plan: R5: movie object 6BB39942"):
+        drv._p2_ground_truth(root)
