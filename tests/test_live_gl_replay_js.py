@@ -3295,20 +3295,24 @@ console.log(JSON.stringify({
 
 
 def test_the_real_core_and_module_install_with_the_p2_loop_runtime():
-    """Loopmode plan L0-d: the looping deck's runtime carries a top-level `loops` annex that
-    neither JS module reads. Installed as-is on the real core and the real module, the core
-    must still come up ready and arm the zone, and the module must not stand down on
-    `planUnreadable`; the Python validator must accept its glReplay entry too."""
+    """The looping deck's derived schema-2 runtime (per-entry `loop`, no `loops` annex) on
+    the real core and the real module: the core comes up ready and arms the zone, the
+    module does not stand down on `planUnreadable`, the Python validator accepts its
+    glReplay entry, and the looping source decoder the armed zone pools keeps `loop`."""
     from test_live_continuity import P2_LOOP_GL_REPLAY_PLAN_SHA256, SLIDES, _loop_tree, _resolver
     from test_live_continuity_js import _IDENTITY_STAGE, _run_full_core_in_node
 
-    from obed_edom.live_continuity import derive_plan, plan_signature
+    from obed_edom.live_continuity import QUALIFIED_PLAN_SHA256, derive_plan, plan_signature
 
     plan = derive_plan(_loop_tree(), SLIDES, resolver=_resolver, gl_replay=True)
     runtime = plan.to_runtime()
     assert isinstance(runtime, dict)
     assert plan_signature(runtime) == P2_LOOP_GL_REPLAY_PLAN_SHA256
-    assert len(runtime["loops"]) == 5
+    assert P2_LOOP_GL_REPLAY_PLAN_SHA256 in QUALIFIED_PLAN_SHA256
+    assert runtime["schema"] == 2
+    assert "loops" not in runtime
+    carries = [b for b in runtime["boundaries"] if b["action"] in ("pin", "bridge", "glReplay")]
+    assert carries and all(b["loop"] is True for b in carries)
 
     entry = live_gl_replay_js.validate_gl_replay_entry(runtime)
     assert entry is not None
@@ -3323,18 +3327,28 @@ def test_the_real_core_and_module_install_with_the_p2_loop_runtime():
 const m = window.__OBED_GL_REPLAY__;
 const module = m ? {version: m.version, state: m.state, standDowns: m.standDowns.slice()} : null;
 const ready = P.ready;
+const entry = window.__OBED_CONTINUITY__.boundaries[0];
+location.hash = '#' + (entry.atScene - 1);
 P.glReplay.carried('movie1');
+const src = video(entry.src.objectId);
+src.setAttribute('src', 'https://host/' + window.__OBED_CONTINUITY__.movies.movie1.assetKeys[0]);
+src.readyState = 4; src.currentTime = 1; src.paused = false; src.parentNode = bodyEl;
+src.loop = true;
+detach(src);
 console.log(JSON.stringify({
   ready: ready,
-  loops: window.__OBED_CONTINUITY__.loops.length,
   module: module,
   zones: P.events.filter((e) => e.kind === 'glreplay-zone')
     .map((e) => [e.detail.from, e.detail.to, e.detail.reason]),
+  pooled: P.snapshot().filter((x) => !x.fromDom).map((x) => x.instance),
+  loop: src.loop,
+  srcInstance: entry.src.objectId,
 }));
 """)
     assert result["ready"] is True, result
-    assert result["loops"] == 5, result
     assert result["zones"] == [["pending", "armed", "moduleReady"]], result["zones"]
     assert result["module"] == {
         "version": live_gl_replay_js.GL_REPLAY_VERSION, "state": "IDLE", "standDowns": [],
     }, result["module"]
+    assert result["pooled"] == [result["srcInstance"]], result
+    assert result["loop"] is True
