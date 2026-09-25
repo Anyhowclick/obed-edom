@@ -5,6 +5,12 @@ Each gate must PASS on the patched run, FAIL on each known-bad (patch off, the a
 stand-down), and read
 INCONCLUSIVE (never PASS) when the instrument's integrity, its control-vs-control or its KB does not hold. A GL-on run where
 G2 stands down is VOID.
+
+Hand-back geometry (plan keynote_live_handback_geometry §3.4, W3): the patch-on baseline is G2 unproven [{4, size}]
+(patch off: []; `frameLen` 96 / 88 is reported only, it is timing-dependent); every run must show the hand-back fix
+engaged exactly per its patch mode (patch on: 1->2 ordinals 0, 2 and 4 have a `mixFactor` in effect; patch off: only
+0, Keynote's own crossfade, as measured headless), else it is INCONCLUSIVE, so a twin whose engagement flaked can never read as a stock twin; MO-4's ROI_top starts past the
+stock GL edge ramp.
 """
 
 from __future__ import annotations
@@ -44,25 +50,32 @@ def _blend(opacity: float) -> list[int]:
     return out
 
 
-def _frames(label: str, values_per_frame: list[list[float]], progs: list[int], g2: str | None, start: int) -> list[dict]:
+def _frames(label: str, values_per_frame: list[list[float]], progs: list[int], g2: str | None, start: int,
+            mix: list[int] = ()) -> list[dict]:
+    last = max(len(values_per_frame) - 1, 1)
     return [
-        {"label": label, "ctx": 0, "i": start + n, "el": n * 50.0, "g2": g2, "draws": [[p, v] for p, v in zip(progs, values)], "B": None}
+        {"label": label, "ctx": 0, "i": start + n, "el": n * 50.0, "g2": g2, "draws": [[p, v] for p, v in zip(progs, values)],
+         "mix": [[o, n / last] for o in mix], "B": None}
         for n, values in enumerate(values_per_frame)
     ]
 
 
 def make_run(gl: str = "off", slot_value: float = ALPHA, *, frames: int = MOVE_FRAMES, fade_offset: float = 0.0,
              settle_opacity: float | None = None, hash12: str = "h12", hash34: str = "h34", live_value: float | None = None,
-             rest4: float | None = None, unproven: list | None = None, green: int = 60) -> dict[str, Any]:
+             rest4: float | None = None, unproven: list | None = None, green: int = 60,
+             blended: list[int] | None = None) -> dict[str, Any]:
     g2 = "ARM-PRE" if gl == "auto" else None
+    patched = slot_value != 1
     fade = [max(0.0, 1.0 - (n + fade_offset) / (frames - 1)) for n in range(frames)]
     fade[-1] = 0.0
-    move = _frames("mm12", [[1, f, 1, 1, slot_value] for f in fade], [0, 1, 2, 3, 4], g2, 0)
+    blended = (probe.BLENDED_ON if patched else probe.STOCK_BLENDED) if blended is None else blended
+    move = _frames("mm12", [[1, f, 1, 1, slot_value] for f in fade], [0, 1, 2, 3, 4], g2, 0, blended)
     log_frames = list(move)
     if gl == "auto":
         live = ALPHA if live_value is None else live_value
         log_frames += _frames("mm12", [[1, 0, 1, 1, live]] * 10, [0, 1, 2, 3, 4], "LIVE", len(log_frames))
-    move34 = _frames("mm34", [[1, 1, 0]] * 25, [5, 6, 7], "RETIRED" if gl == "auto" else None, len(log_frames) + 5)
+    # 3->4's movie leaf carries Keynote's own `contents` crossfade in every arm: only 1->2 counts for engagement.
+    move34 = _frames("mm34", [[1, 1, 0]] * 25, [5, 6, 7], "RETIRED" if gl == "auto" else None, len(log_frames) + 5, [2])
     log_frames += move34
     opacity = slot_value if settle_opacity is None else settle_opacity
     settle = {
@@ -72,7 +85,7 @@ def make_run(gl: str = "off", slot_value: float = ALPHA, *, frames: int = MOVE_F
                  "w": 1920, "h": 1080, "hash": hash34},
     }
     run: dict[str, Any] = {
-        "gl": gl, "arm": "x",
+        "gl": gl, "arm": "x", "mmOpacityKwarg": "auto" if patched else "off",
         "steps": [{"label": "mm12", "expectHash": ["#1", "#2"], "hashBefore": "#1", "hashAfter": "#2"},
                   {"label": "mm34", "expectHash": ["#7", "#8"], "hashBefore": "#7", "hashAfter": "#8"}],
         "log": {"frames": log_frames, "settle": settle, "errors": [], "labelStart": {}},
@@ -82,7 +95,7 @@ def make_run(gl: str = "off", slot_value: float = ALPHA, *, frames: int = MOVE_F
         rest = [1, 0, 1, 1, slot_value if rest4 is None else rest4]
         run["g2"] = {"api": {"state": "LIVE", "events": [{"kind": "glreplay-live"}], "stats": {
             "restOpacity": rest, "opacityUnproven": ([] if slot_value == 1 else probe.UNPROVEN_ON) if unproven is None else unproven,
-            "occludedBands": 20 if slot_value == 1 else 0}}}
+            "occludedBands": 20 if slot_value == 1 else 0, "frameLen": 96 if patched else 88}}}
         run["liveGreen"] = [0, green, 0] * 12
     return run
 
@@ -439,6 +452,7 @@ def test_mo4_patch_off_run_fails_the_patched_expectations():
     (lambda a: a["on"].__setitem__("liveGreen", [0, 61, 0] * 12), "liveGreenEqual"),
     (lambda a: a["on"]["g2"]["api"]["stats"].__setitem__("occludedBands", 20), "occludedBandsOn"),
     (lambda a: a["off"]["g2"]["api"]["stats"].__setitem__("occludedBands", 0), "occludedBandsOff"),
+    (lambda a: a["on"]["g2"]["api"]["stats"].__setitem__("opacityUnproven", [{"slot": 4, "reason": "rest-opacity"}]), "unprovenOn"),
 ])
 def test_mo4_fails_each_moved_fact(mutate, check):
     a = arms("auto")
@@ -478,6 +492,74 @@ def test_mo4_void_when_g2_stands_down():
     a = arms("auto")
     a["off"]["g2"]["api"]["state"] = "STANDDOWN"
     assert probe.score_mo4(a["on"], a["off"])["verdict"] == "VOID"
+
+
+def _edge_columns(tex_inset: float, scale: float, origin: float = 789.0, cols: range = range(785, 815)) -> np.ndarray:
+    """1-D model of a texture's left content edge drawn with linear filtering: texel i is box-covered from `tex_inset`,
+    the quad starts at `origin` and magnifies by `scale` (hand-back plan §1.2 insets, green square)."""
+    coverage = np.clip(np.arange(64) + 1 - tex_inset, 0.0, 1.0)
+    u = (np.array(cols) + 0.5 - origin) / scale
+    return np.interp(u, np.arange(64) + 0.5, coverage)
+
+
+def test_mo4_roi_top_sits_past_the_stock_gl_edge_ramp():
+    # Stock: the 178-texel slide-1 texture (content from 1.634) magnified 353/178 onto the 1->2 end quad at x 789. The
+    # hand-back fix and the DOM: the 353-texel slide-2 texture (content from 1.153) at 1:1 on the same quad.
+    cols = range(785, 815)
+    stock, fixed = _edge_columns(1.634, 353 / 178, cols=cols), _edge_columns(1.153, 1.0, cols=cols)
+    col = {c: k for k, c in enumerate(cols)}
+    assert stock[col[793]] < fixed[col[793]] - 0.1, "the old ROI_top column 793 is inside the stock ramp"
+    x, _, w, _ = probe.ROI_TOP
+    assert x >= 797 and x + w <= 809
+    assert all(stock[col[c]] == fixed[col[c]] == 1.0 for c in range(x, x + w))
+
+
+def test_blended_ordinals_read_1_to_2_player_frames_only():
+    a = arms("auto")
+    assert probe.blended_ordinals(a["on"]) == probe.BLENDED_ON == [0, 2, 4]
+    assert probe.blended_ordinals(a["off"]) == probe.STOCK_BLENDED == [0]
+    assert probe.blended_ordinals(a["off"], "mm34") == [2]
+    for f in a["off"]["log"]["frames"]:
+        if f["g2"] == "LIVE":
+            f["mix"] = [[4, 1.0]]
+    assert probe.blended_ordinals(a["off"]) == [0]
+
+
+@pytest.mark.parametrize("arm, blended", [("on", [0]), ("on", [0, 4]), ("on", [0, 2, 3, 4]), ("on", [2, 4]), ("off", [0, 2, 4]),
+                                           ("off", [])])
+@pytest.mark.parametrize("gl", ["off", "auto"])
+def test_engagement_that_disagrees_with_the_patch_mode_is_inconclusive(gl, arm, blended):
+    a = arms(gl)
+    for f in probe.player_frames(a[arm], "mm12"):
+        f["mix"] = [[o, 1.0] for o in blended]
+    result = probe.score_mo1(a["on"], a["off"], ALPHA, tol_of(a))
+    assert result["verdict"] == "INCONCLUSIVE"
+    assert any("hand-back fix" in p for p in result["problems"])
+    assert probe.score_mode(gl, a)["MO-1"]["verdict"] == "INCONCLUSIVE"
+    if gl == "auto":
+        assert probe.score_mo4(a["on"], a["off"])["verdict"] == "INCONCLUSIVE"
+        assert probe.score_mode(gl, a)["MO-4"]["verdict"] == "INCONCLUSIVE"
+
+
+def test_unengaged_patch_on_run_with_the_pre_fix_g2_stats_is_inconclusive_not_a_stock_twin():
+    # Critique finding 3: a queued advance never engages the fix; that run replays stock geometry with the pre-fix G2 stats
+    # (frameLen 88, unproven rest-opacity). It must not read as PASS against old expectations, nor FAIL the fix.
+    a = arms("auto")
+    for f in probe.player_frames(a["on"], "mm12"):
+        f["mix"] = [[0, 1.0]]
+    a["on"]["g2"]["api"]["stats"].update(frameLen=88, opacityUnproven=[{"slot": 4, "reason": "rest-opacity"}])
+    assert probe.score_mo4(a["on"], a["off"])["verdict"] == "INCONCLUSIVE"
+    assert probe.score_mo1(a["on"], a["off"], ALPHA, tol_of(a))["verdict"] == "INCONCLUSIVE"
+
+
+@pytest.mark.parametrize("which", ["off2", "sq"])
+def test_gate_is_inconclusive_when_a_control_or_kb_run_has_the_wrong_engagement(which):
+    a = arms("auto")
+    for f in probe.player_frames(a[which], "mm12"):
+        f["mix"] = [[o, 1.0] for o in ([0] if which == "sq" else [0, 2, 4])]
+    gates = probe.score_mode("auto", a)
+    assert gates["MO-1"]["verdict"] == "INCONCLUSIVE"
+    assert gates["MO-4"]["verdict"] == "INCONCLUSIVE"
 
 
 # ------------------------------------------------------------------------------------------------ MO-4 forced stand-down
@@ -673,10 +755,13 @@ Object.assign(P, {FRAMEBUFFER_BINDING: 1, RGBA: 2, UNSIGNED_BYTE: 3, drawingBuff
 const gl = new WebGLRenderingContext();
 const progs = [{}, {}];
 const locs = progs.map(p => gl.getUniformLocation(p, 'Opacity'));
+const mixLoc = gl.getUniformLocation(progs[1], 'mixFactor');
 window.__OBED_MMO__.setLabel('mm12', {settleFromMs: 0, roi: [1, 1, 2, 2], roiOrdinal: 1, masks: [[0, 0, 2, 6]]});
 for (let f = 0; f < 3; f++){
   gl.clear(16384);
-  progs.forEach((p, k) => { gl.useProgram(p); if (f === 0) gl.uniform1f(locs[k], k ? 0.25 : 1); gl.drawArrays(4, 0, 6); });
+  progs.forEach((p, k) => {
+    gl.useProgram(p); if (f === 0) gl.uniform1f(locs[k], k ? 0.25 : 1); if (k) gl.uniform1f(mixLoc, f / 2); gl.drawArrays(4, 0, 6);
+  });
 }
 const M = window.__OBED_MMO__;
 console.log(JSON.stringify({frames: M.frames, settle: M.settle, errors: M.errors}));
@@ -691,6 +776,7 @@ def test_logger_records_value_in_effect_and_one_masked_settle_read_on_the_last_f
     a, b, c = _run_logger(node, 7, 10), _run_logger(node, 99, 10), _run_logger(node, 7, 11)
     assert a["errors"] == []
     assert [f["draws"] for f in a["frames"]] == [[[0, 1], [1, 0.25]]] * 3
+    assert [f["mix"] for f in a["frames"]] == [[[1, 0]], [[1, 0.5]], [[1, 1]]]
     settle = a["settle"]["mm12"]
     assert settle["frame"] == 2 and settle["ord"] == 1
     assert settle["B"] == [7, 7, 7, 7, 10, 10, 10, 10] * 2

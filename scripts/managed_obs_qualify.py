@@ -37,7 +37,8 @@ an undecodable-free hand-back.
 --kb frozen|oldbytes swaps the G2 module text in this process (asserted sha, read back from the host's own report);
 --kb latelost forces contextLost while hidden. Refuses to start while any OBS runs or OBED_LIVE_GL_REPLAY or
 OBED_LIVE_MM_OPACITY is set (every session passes mm_opacity explicitly); keeps the Mac awake; a Sleep/Wake, a non-lossless
-recording or a g2 movie past 44 s of media marks a take INVALID.
+recording, a g2 movie past 44 s of media, or a patch-on G2 session with the pre-fix unproven set (rest-opacity: the
+hand-back fix did not engage, `UNENGAGED_STATS`) marks a take INVALID.
 
 usage: uv run python scripts/managed_obs_qualify.py --arm g2 --rate 25 --takes 2 --out DIR
        uv run python scripts/managed_obs_qualify.py --score DIR
@@ -65,6 +66,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 from unittest import mock
 
+import imageio_ffmpeg
 import numpy as np
 from PIL import Image
 
@@ -72,7 +74,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
-from obed_edom import live_gl_replay_js, managed_obs, obs_websocket  # noqa: E402
+from obed_edom import live_gl_replay_js, managed_obs, mm_handback_score, obs_websocket  # noqa: E402
 from obed_edom.html_preview import cache_dir  # noqa: E402
 from obed_edom.live_continuity import Unsupported  # noqa: E402
 from obed_edom.live_host import GL_REPLAY_ENV, MM_OPACITY_ENV, ChromeCdp, LiveOutputHost  # noqa: E402
@@ -117,16 +119,19 @@ LIMITS = {"nativeRepeatMax2x": 0.15, "decodableMin": 0.9, "nullRepeatMin": 0.95,
           "counterTol": 2, "movieAlphaMin": 250, "slotAlpha": 75, "slotAlphaTol": 3, "domTol": 3, "liveWaitS": 5.0,
           "mediaEndS": 44.0, "binaryRepeatMax": 0.01, "binaryReshownMax": 0.02, "binaryNativeTol": 0.01, "binaryPositiveMin": 0.05, "binaryDistinctFrac": 0.96, "liveRingMax": 20, "handbackRingPx": 200, "handbackMaxStepPerFrame": 3,
           "build1AfterMarkerMinS": 0.3}
-G2_STATS = {"frameLen": 88, "bandCount": 128, "innerRect": {"x": 4, "y": 4, "w": 952, "h": 268}}
-EXPECTED_STATS = {"on": {**G2_STATS, "occludedBands": 0, "opacityUnproven": [{"slot": 4, "reason": "rest-opacity"}]},
-                  "off": {**G2_STATS, "occludedBands": 20, "opacityUnproven": []}}
+G2_STATS = {"bandCount": 128, "innerRect": {"x": 4, "y": 4, "w": 952, "h": 268}}
+EXPECTED_STATS = {"on": {**G2_STATS, "frameLen": 96, "occludedBands": 0, "opacityUnproven": [{"slot": 4, "reason": "size"}]},
+                  "off": {**G2_STATS, "frameLen": 88, "occludedBands": 20, "opacityUnproven": []}}
+#: Patch on, hand-back fix not engaged (timing-dependent, hand-back plan §3.4): the pre-fix on-mode unproven set (Texture still
+#: holds the 178x157 source, so `size` passes and `rest-opacity` fails). Not `frameLen`: it can vary with timing.
+UNENGAGED_STATS = {"opacityUnproven": [{"slot": 4, "reason": "rest-opacity"}]}
+_FIRST_CEF = "first CEF measurement is this value; a mismatch is a finding to root-cause, not a threshold to retune"
 EXPECTED_STATS_SOURCE = {
     "on": {**{k: "CEF, OD-2" for k in G2_STATS},
-           "occludedBands": "headless Q0b only, first CEF measurement is this value; a mismatch is a finding to root-cause, "
-                            "not a threshold to retune",
-           "opacityUnproven": "headless Q0b only, first CEF measurement is this value; a mismatch is a finding to root-cause, "
-                              "not a threshold to retune"},
-    "off": {**{k: "CEF, OD-2" for k in G2_STATS}, "occludedBands": "CEF, OD-2", "opacityUnproven": "CEF, OD-2"},
+           "frameLen": f"headless hand-back plan §3.3 only (+8 calls for the two blended leaves), {_FIRST_CEF}",
+           "occludedBands": f"headless Q0b only, {_FIRST_CEF}",
+           "opacityUnproven": f"headless hand-back plan §3.3 only (Texture holds the destination, so `size` fails first), {_FIRST_CEF}"},
+    "off": {**{k: "CEF, OD-2" for k in G2_STATS}, "frameLen": "CEF, OD-2", "occludedBands": "CEF, OD-2", "opacityUnproven": "CEF, OD-2"},
 }
 MM_MODES = {"auto": "on", "off": "off"}
 MOVIE_FPS = 30
@@ -168,6 +173,10 @@ MMO_ALPHA_FLOOR_MAX = 0.1
 MMO_SLIDE1_S = 6.0
 MMO_LIVE_S = 4.0
 MMO_CEF_GL = ("off", "auto")
+#: HB-OBS (hand-back plan §4, decision 7a: report-only): max |DOM - GL| edge move at build 1 on the recording's tv-range Y plane.
+HB_OBS_MAX_PX = 0.25
+HB_OBS_WHITE = 235
+HB_OBS_SIZE = (1920, 1080)
 
 G2_SHA = "10a5b36a1f6008a3213bd90729915f6c15284448406f2a62dbc74ae884fe5288"
 KB_SHAS = {"frozen": "413a00ba4e36dd5edf9c07425ab3c92589eb23d51c60914448621b7a456b8b67",
@@ -872,6 +881,15 @@ def g2_stats_checks(checks: list[dict[str, Any]], stats: dict[str, Any], mode: s
               f"== {want} (patch {mode}; expected from {EXPECTED_STATS_SOURCE[mode][key]})")
 
 
+def handback_unengaged(session: dict[str, Any]) -> str | None:
+    """A patch-on G2 session whose hand-back fix did not engage replays today's geometry: its take is INVALID, never a stock
+    twin read as a pass or a failure of the fix."""
+    stats = api_of((session.get("reads") or {}).get("liveEnd")).get("stats") or {}
+    if mm_mode(session) != "on" or any(stats.get(k) != v for k, v in UNENGAGED_STATS.items()):
+        return None
+    return f"{session.get('session')}: hand-back fix not engaged (G2 frameLen {stats.get('frameLen')}, unproven rest-opacity)"
+
+
 def raf_rates(session: dict[str, Any]) -> dict[str, float | None]:
     marks = [(p["name"], p.get("raf")) for p in session.get("phases") or []]
     rates: dict[str, float | None] = {}
@@ -963,7 +981,8 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     off_scored = score_armed(off.get("armed"), armed, continuity_of(off))
     check(m1, "KB: g2-off score_armed False", off_scored["verdict"], off_scored["verdict"] is False, "False")
     check(m1, "report: page rAF Hz from each phase start", raf_rates(g2), True, enforced=False)
-    gates["M1"] = gate(m1)
+    unengaged = handback_unengaged(g2)
+    gates["M1"] = gate(m1, unengaged)
 
     m2: list[dict[str, Any]] = []
     offsets = {name: ((d_g2.get("roiOffsets") or {}).get(name) or {}).get("offset") for name in ("slide2-live", "slide2-handback", "slide2-after")}
@@ -1017,8 +1036,11 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     band = reg["edge"]
     check(m3, "edge band non-empty", int(band.sum()), bool(band.any()), "> 0")
     check(m3, "prerequisite: mm-off twin is patch off (opaque reference)", mm_mode(mm_off), mm_mode(mm_off) == "off", "== off")
-    fidelity = scaled_alpha_delta(s_g2, s_opaque, band, SLOT_OPACITY)
-    check(m3, "edge: G2-S alpha == round(mm-off-S alpha x 0.2947)", fidelity, fidelity is not None and fidelity <= tol, f"<= {tol}")
+    fidelity = scaled_alpha_delta(s_g2, p3_g2, band, 1.0)
+    check(m3, "edge: G2-S alpha == G2-P3 (DOM) alpha", fidelity, fidelity is not None and fidelity <= tol, f"<= {tol}")
+    stock = scaled_alpha_delta(p3_g2, s_opaque, band, SLOT_OPACITY)
+    check(m3, "KB: edge, G2-P3 vs round(mm-off-S alpha x 0.2947) (stock geometry) fails", stock, stock is not None and stock > tol,
+          f"> {tol}")
     unscaled = scaled_alpha_delta(s_g2, s_opaque, band, 1.0)
     check(m3, "KB: edge vs unscaled mm-off-S alpha fails", unscaled, unscaled is not None and unscaled > tol, f"> {tol}")
     edge_dom = max_delta(s_g2, p3_g2, band)
@@ -1033,7 +1055,7 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     off_alpha = alpha_range(s_off, reg["T"])
     check(m3, "T alpha (g2-off-S, patch on, GL replay off)", off_alpha,
           off_alpha is not None and want - tol <= off_alpha[0] and off_alpha[1] <= want + tol, f"{want} +- {tol}")
-    gates["M3"] = gate(m3, gates["M0"]["invalid"])
+    gates["M3"] = gate(m3, gates["M0"]["invalid"] or unengaged)
 
     m4: list[dict[str, Any]] = []
     check(m4, "H alpha outside marker", h_alpha, h_alpha is not None and h_alpha[1] == 0, "== 0")
@@ -1151,16 +1173,67 @@ def mmo_frame(series: dict[str, np.ndarray], row: int, bad: np.ndarray, s_off: n
             "alphaEffOverBlack": round(float(mean[1] / s_off[:, 1].mean()), 3)}
 
 
+def first_change_row(series: dict[str, np.ndarray], phases: tuple[str, ...]) -> int | None:
+    top = series["pixels.top"].astype(float)
+    changed = np.r_[False, np.abs(np.diff(top, axis=0)).max(axis=(1, 2)) > 0]
+    rows = np.nonzero(changed & phase_rows(series, phases))[0]
+    return int(rows[0]) if len(rows) else None
+
+
 def mmo_handovers(series: dict[str, np.ndarray], bad: np.ndarray, s_off: np.ndarray) -> dict[str, Any]:
     """The first ROI_top change inside `MMO_WINDOW` (slide-1 DOM -> move) and inside slide2-handback (GL -> DOM at build 1),
     each with its predecessor frame."""
-    top = series["pixels.top"].astype(float)
-    changed = np.r_[False, np.abs(np.diff(top, axis=0)).max(axis=(1, 2)) > 0]
     out: dict[str, Any] = {}
     for name, phases in (("moveStart", MMO_WINDOW), ("build1", ("slide2-handback",))):
-        rows = np.nonzero(changed & phase_rows(series, phases))[0]
-        out[name] = [mmo_frame(series, r, bad, s_off) for r in (rows[0] - 1, rows[0])] if len(rows) else None
+        row = first_change_row(series, phases)
+        out[name] = [mmo_frame(series, r, bad, s_off) for r in (row - 1, row)] if row is not None else None
     return out
+
+
+def recording_y(recording: Path, first: int, last: int, size: tuple[int, int] = HB_OBS_SIZE) -> Iterator[tuple[int, np.ndarray]]:
+    """(frame index, Y plane) for frames first..last of a yuv420p recording, tv range as recorded (`-pix_fmt gray` would
+    range-expand it)."""
+    w, h = size
+    cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-v", "error", "-i", str(recording), "-vf", f"select=between(n\\,{first}\\,{last})",
+           "-vsync", "0", "-frames:v", str(last - first + 1), "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"]
+    frame_bytes = w * h * 3 // 2
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE) as proc:
+        for index in range(first, last + 1):
+            raw = proc.stdout.read(frame_bytes)
+            if len(raw) < frame_bytes:
+                raise RuntimeError(f"{recording}: frame {index} missing")
+            yield index, np.frombuffer(raw, np.uint8, w * h).reshape(h, w)
+
+
+def handback_geometry(recording: Path, series: dict[str, np.ndarray], size: Any) -> dict[str, Any]:
+    """HB-OBS: W2's scorer on the build-1 pair (last GL frame, first DOM frame) of the Y plane, plus a GL null (the two
+    frames before) and a DOM null (the two after). The pair is the first ROI_top change in slide2-handback (`mmo_handovers`);
+    without one (the fixed GL settle can equal the DOM), the consecutive handback pair whose hand-back edges move most."""
+    if tuple(size or ()) != HB_OBS_SIZE:
+        return {"error": f"frame size {size} is not the 1920x1080 stage"}
+    handback = np.nonzero(phase_rows(series, ("slide2-handback",)))[0]
+    if len(handback) < 2:
+        return {"error": "fewer than two slide2-handback frames"}
+    row, locator = first_change_row(series, ("slide2-handback",)), "ROI_top build-1 change"
+    index = series["index"]
+    if row is not None and 2 <= row < len(index) - 1:
+        frames = dict(recording_y(recording, int(index[row - 2]), int(index[row + 1])))
+    else:
+        locator = "largest hand-back edge step in slide2-handback"
+        frames = dict(recording_y(recording, int(index[max(handback[0] - 2, 0)]), int(index[min(handback[-1] + 1, len(index) - 1)])))
+        edges = {int(index[r]): mm_handback_score.measure_edges(frames[int(index[r])], mm_handback_score.HANDBACK_EDGES,
+                                                                white=HB_OBS_WHITE) for r in handback}
+        row = max(handback[1:-1], key=lambda r: mm_handback_score.max_abs(
+            mm_handback_score.deltas(edges[int(index[r - 1])], edges[int(index[r])])))
+    n = [int(index[r]) for r in (row - 2, row - 1, row, row + 1)]
+
+    def score(a: int, b: int) -> dict[str, Any]:
+        return mm_handback_score.score_handback_pair(frames[a], frames[b], white=HB_OBS_WHITE)
+
+    pair = score(n[1], n[2])
+    return {"locator": locator, "gl": n[1], "dom": n[2], "max": round(pair["max"], 3), "static": round(pair["static"], 3),
+            "delta": {k: round(v, 3) for k, v in pair["delta"].items()}, "weak": pair["weak"],
+            "nullGL": round(score(n[0], n[1])["max"], 3), "nullDOM": round(score(n[2], n[3])["max"], 3)}
 
 
 def mmo_series_checks(series: dict[str, np.ndarray] | None, s_off: np.ndarray | None, tau: float | None,
@@ -1279,6 +1352,12 @@ def mmo_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     check(checks, f"{MMO_CVC[1]} {r2_name}", {k: cvc_on.get(k) for k in ("R2", "R2Frame", "R2Over", "R2Frames")},
           None not in (cvc_on["R2"], limit) and cvc_on["R2"] <= limit, f"<= max(tau {tau}, {MMO_R2_FLOOR})")
     check(checks, "report: shot M G2 state before/after", {n: sess.get("shotM") for n, sess in sessions.items()}, True, enforced=False)
+    for name, sess in sessions.items():
+        hb = (sess.get("decode") or {}).get("handbackGeometry") or {}
+        fixed = mm_mode(sess) == "on"
+        check(checks, f"report: {name} HB-OBS hand-back geometry max |DOM - GL| px (decision 7a)", hb,
+              hb.get("max") is not None and (hb["max"] <= HB_OBS_MAX_PX) == fixed,
+              f"<= {HB_OBS_MAX_PX} with the fix; stock (patch off) ~2.77", enforced=False)
 
     m4: list[dict[str, Any]] = []
     for name in ("g2-on", "g2-mmoff"):
@@ -1291,7 +1370,7 @@ def mmo_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     reasons = [*([] if premise_ok else [f"slide-1 badness {calibration} > {MMO_CALIB_MAX} (premise: neutral backgrounds)"]),
                *([] if chroma_ok else [f"alphaFloor {alpha_floor} > {MMO_ALPHA_FLOOR_MAX} (premise: a coloured square)"])]
     invalid = f"MO-2 INCONCLUSIVE: {'; '.join(reasons)}" if reasons else None
-    return {"MO-2": gate(checks, invalid), "MO-4": gate(m4),
+    return {"MO-2": gate(checks, invalid), "MO-4": gate(m4, handback_unengaged(sessions.get("g2-on") or {})),
             "mmoCalibration": {"tau": tau, "r2Limit": limit, "alphaFloor": alpha_floor, "tauKey": tau_key, "cvc": cvc, "perSession": per,
                                "doubleFrameAlpha": round(MM_ALPHA * (2 - MM_ALPHA), 3)}}
 
@@ -1643,12 +1722,21 @@ def decode_session(session: dict[str, Any], recording: str | None, *, rings: lis
         if series is not None and series_path is not None:
             np.savez_compressed(series_path, **series)
             result["seriesPath"] = str(series_path)
+        if series is not None and masks:
+            result["handbackGeometry"] = handback_geometry_safe(path, series, result.get("size"))
         return result
     except obs_cadence_decode.NotLossless as exc:
         return {"notLossless": str(exc)}
     finally:
         if not keep:
             path.unlink(missing_ok=True)
+
+
+def handback_geometry_safe(recording: Path, series: dict[str, np.ndarray], size: Any) -> dict[str, Any]:
+    try:
+        return handback_geometry(recording, series, size)
+    except Exception as exc:  # noqa: BLE001  report-only: never fails a take
+        return {"error": f"{type(exc).__name__}: {exc}"}
 
 
 def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, args: argparse.Namespace,
@@ -1775,13 +1863,15 @@ def arm_gates(arm: str, run: dict[str, Any], args: argparse.Namespace, armed: di
         run["mediaTimeAtAfter"] = media
         if media is None or media + 3 > LIMITS["mediaEndS"]:
             invalid.append(f"media time at slide2-after {media} (+3 s) past {LIMITS['mediaEndS']} s or unreadable")
-        return g2_gates(run, armed)
+        gates = g2_gates(run, armed)
+        if gates["M1"]["invalid"]:
+            invalid.append(gates["M1"]["invalid"])
+        return gates
     if arm == "failsafe":
         return failsafe_gates(run, armed)
     if arm == "mmo":
         gates = mmo_gates(run, armed)
-        if gates["MO-2"]["invalid"]:
-            invalid.append(gates["MO-2"]["invalid"])
+        invalid += [gates[g]["invalid"] for g in ("MO-2", "MO-4") if gates[g]["invalid"]]
         return gates
     if arm == "mmo-cef":
         return mmo_cef_gates(run)
@@ -1866,6 +1956,10 @@ def score_mmo(root: Path) -> int:
             invalid.append(f"fixture identity changed since the take: {identity[fixture]}")
         if fixture not in facts:
             facts[fixture] = fixture_facts(Path(fixture))
+        for sess in run["sessions"]:
+            rec, ser = sess.get("recording"), load_series(sess)
+            if rec and Path(rec).exists() and ser is not None and sess.get("decode"):
+                sess["decode"]["handbackGeometry"] = handback_geometry_safe(Path(rec), ser, sess["decode"].get("size"))
         gates = mmo_gates(run, facts[fixture])
         mo2, cal = gates["MO-2"], gates["mmoCalibration"]
         if mo2["invalid"]:
@@ -1882,6 +1976,11 @@ def score_mmo(root: Path) -> int:
         for name, per in cal["perSession"].items():
             frames = [{k: f[k] for k in ("index", "phase", "badness", "background")} for f in per.get("R2Frames", [])[:3]]
             print(f"    {name:12s} R1 {per.get('R1')}  R2 {per.get('R2')} over tau {per.get('R2Over')}  {frames}", flush=True)
+        for sess in run["sessions"]:
+            hb = (sess.get("decode") or {}).get("handbackGeometry") or {}
+            print(f"    {sess['session']:12s} HB-OBS max {hb.get('max')} px (report-only, {HB_OBS_MAX_PX} with the fix)  "
+                  f"frames {hb.get('gl')}->{hb.get('dom')}  nulls {hb.get('nullGL')}/{hb.get('nullDOM')}  {hb.get('error') or ''}",
+                  flush=True)
     dest = root / f"rescore-{stamp()}.json"
     dest.write_text(json.dumps(results, indent=1, default=str))
     print(f"-> {dest}", flush=True)

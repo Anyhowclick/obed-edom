@@ -8,6 +8,11 @@ facts in the MO-2 takes and their provenance, the MO-3 mapping onto `mm_opacity_
 logger payload), and the session wiring (mm_opacity passed explicitly, logger transport, alpha-squared splice, forced
 stand-down seed).
 
+Hand-back geometry (plan keynote_live_handback_geometry §3.4, W3): the patch-on G2 baseline is `frameLen` 96 and unproven
+[{4, size}] (patch off 88, []); M3's edge band is enforced against the DOM (G2-P3), its KB is the mm-off twin's stock
+geometry at slot opacity; a patch-on G2 session whose fix did not engage (the pre-fix unproven rest-opacity) makes the
+take INVALID, never a pass or a fail of the fix.
+
 Looping soak fixture (loopMode plan §10 WS-C): `output/p2-loop`, built by `scripts/loop_fixture.py`, must qualify on
 product code: the harness no longer splices the continuity allowlist in-process. A fixture is looping iff its
 `fixture.json` carries the `loop` record the builder adds; the P2 family is the P2 base without that key. Pre-check (a)
@@ -83,12 +88,15 @@ def test_main_refuses_mmo_arms_on_a_grey_counter_fixture(monkeypatch, tmp_path, 
 
 # --- EXPECTED_STATS by patch mode ----------------------------------------------------------------------------------------
 
-def test_expected_stats_differ_only_in_occluded_bands_and_the_unproven_set():
+MODE_KEYED = ("frameLen", "occludedBands", "opacityUnproven")
+
+
+def test_expected_stats_differ_only_in_frame_len_occluded_bands_and_the_unproven_set():
     on, off = q.EXPECTED_STATS["on"], q.EXPECTED_STATS["off"]
+    assert on["frameLen"] == 96 and off["frameLen"] == 88
     assert on["occludedBands"] == 0 and off["occludedBands"] == 20
-    assert on["opacityUnproven"] == [{"slot": 4, "reason": "rest-opacity"}] and off["opacityUnproven"] == []
-    assert {k: v for k, v in on.items() if k not in ("occludedBands", "opacityUnproven")} == \
-        {k: v for k, v in off.items() if k not in ("occludedBands", "opacityUnproven")} == q.G2_STATS
+    assert on["opacityUnproven"] == [{"slot": 4, "reason": "size"}] and off["opacityUnproven"] == []
+    assert {k: v for k, v in on.items() if k not in MODE_KEYED} == {k: v for k, v in off.items() if k not in MODE_KEYED} == q.G2_STATS
 
 
 @pytest.mark.parametrize("mode", ["on", "off"])
@@ -99,7 +107,7 @@ def test_g2_stats_checks_pass_their_own_mode_and_fail_the_other(mode):
     assert all(c["ok"] for c in good)
     bad: list[dict[str, Any]] = []
     q.g2_stats_checks(bad, dict(q.EXPECTED_STATS[other]), mode)
-    assert {c["check"] for c in bad if not c["ok"]} == {"occludedBands", "opacityUnproven"}
+    assert {c["check"] for c in bad if not c["ok"]} == set(MODE_KEYED)
 
 
 def test_g2_stats_checks_record_the_measured_value_and_state_the_expectation_source():
@@ -109,9 +117,12 @@ def test_g2_stats_checks_record_the_measured_value_and_state_the_expectation_sou
     q.g2_stats_checks(checks, {**q.EXPECTED_STATS["on"], "occludedBands": 3}, "on")
     by = {c["check"]: c for c in checks}
     assert by["occludedBands"]["value"] == 3 and not by["occludedBands"]["ok"] and by["occludedBands"]["enforced"]
-    for key in ("occludedBands", "opacityUnproven"):
-        assert "headless Q0b only" in by[key]["limit"] and "root-cause, not a threshold to retune" in by[key]["limit"]
-    assert "CEF, OD-2" in by["frameLen"]["limit"]
+    assert "headless Q0b only" in by["occludedBands"]["limit"]
+    for key in ("frameLen", "opacityUnproven"):
+        assert "headless hand-back plan §3.3 only" in by[key]["limit"]
+    for key in MODE_KEYED:
+        assert "root-cause, not a threshold to retune" in by[key]["limit"]
+    assert "CEF, OD-2" in by["bandCount"]["limit"]
     off: list[dict[str, Any]] = []
     q.g2_stats_checks(off, dict(q.EXPECTED_STATS["off"]), "off")
     assert all("CEF, OD-2" in c["limit"] for c in off[1:])
@@ -127,29 +138,43 @@ def test_g2_stats_checks_fail_closed_without_a_reported_mode():
 
 # --- M3: opaque reference on the mm-off twin -----------------------------------------------------------------------------
 
-def slot_shot(alpha: int) -> np.ndarray:
+# Content inset from the slot rect's left/top (px): the DOM and the fixed GL settle draw the slide-2 texture (content from
+# 790.15 on the 788.7 slot rect); stock GL draws the magnified slide-1 texture ~2 px further in (hand-back plan §1.3).
+DOM_INSET, STOCK_INSET = 1, 3
+EDGE = "edge: G2-S alpha == G2-P3 (DOM) alpha"
+EDGE_KB = "KB: edge, G2-P3 vs round(mm-off-S alpha x 0.2947) (stock geometry) fails"
+
+
+def slot_shot(alpha: int, inset: int = DOM_INSET) -> np.ndarray:
     img = np.zeros((*SHAPE, 4), np.uint8)
-    img[q.rect_mask(SHAPE, ARMED["slotRects"][4])] = (0, 175, 0, alpha)
+    r = ARMED["slotRects"][4]
+    img[q.rect_mask(SHAPE, {"x": r["x"] + inset, "y": r["y"] + inset, "w": r["w"] - 2 * inset, "h": r["h"] - 2 * inset})] = \
+        (0, 175, 0, alpha)
     return img
 
 
-def m3_run(tmp_path: Path, mm_off_alpha: int, g2_off_alpha: int = 75) -> dict[str, Any]:
+def m3_run(tmp_path: Path, mm_off_alpha: int, g2_off_alpha: int = 75, g2_inset: int = DOM_INSET,
+           mm_off_inset: int = STOCK_INSET, g2_stats: dict[str, Any] | None = None) -> dict[str, Any]:
     sessions = []
-    for name, alpha, mode in (("g2", 75, "on"), ("g2-off", g2_off_alpha, "on"), ("mm-off", mm_off_alpha, "off")):
+    for name, alpha, mode, inset in (("g2", 75, "on", g2_inset), ("g2-off", g2_off_alpha, "on", DOM_INSET),
+                                     ("mm-off", mm_off_alpha, "off", mm_off_inset)):
         shots = {}
         for tag in ("S", "P3"):
             path = tmp_path / f"{name}-{tag}.png"
-            Image.fromarray(slot_shot(alpha if tag == "S" else 75)).save(path)
+            Image.fromarray(slot_shot(alpha, inset) if tag == "S" else slot_shot(75)).save(path)
             shots[tag] = str(path)
         sessions.append({"session": name, "shots": shots, "output": {"mmOpacity": {"mode": mode}}})
+    if g2_stats is not None:
+        sessions[0]["reads"] = {"liveEnd": {"gl": {"api": {"stats": g2_stats}}}}
     return {"sessions": sessions, "rate": 25}
 
 
-def test_m3_edge_and_kb_read_against_the_opaque_mm_off_twin(tmp_path):
+def test_m3_edge_reads_against_the_dom_and_its_kb_against_the_stock_geometry_twin(tmp_path):
     m3 = checks_of(q.g2_gates(m3_run(tmp_path, mm_off_alpha=255), ARMED)["M3"])
     assert m3["prerequisite: mm-off twin is patch off (opaque reference)"]["ok"]
     assert m3["T alpha (G2-S)"]["ok"]
-    assert m3["edge: G2-S alpha == round(mm-off-S alpha x 0.2947)"]["ok"]
+    assert m3[EDGE]["ok"] and m3[EDGE]["enforced"] and m3[EDGE]["value"] == 0
+    assert m3[EDGE_KB]["ok"] and m3[EDGE_KB]["enforced"] and m3[EDGE_KB]["value"] == 75
     assert m3["KB: edge vs unscaled mm-off-S alpha fails"]["ok"]
     assert m3["KB: mm-off-S T alpha fails the slot check"]["ok"]
     assert m3["prerequisite: mm-off-S T alpha is opaque (the KB reference)"]["ok"]
@@ -165,11 +190,25 @@ def test_m3_fails_a_g2_off_square_that_is_not_the_patchs_alpha(tmp_path, g2_off_
 
 
 def test_m3_with_a_translucent_reference_fails_the_edge_check_and_the_kb(tmp_path):
-    """What the old g2-off reference reads once the patch is on: the edge squares and the KB passes the slot check."""
+    """What the old g2-off reference reads once the patch is on: the KB passes the slot check."""
     m3 = checks_of(q.g2_gates(m3_run(tmp_path, mm_off_alpha=75), ARMED)["M3"])
-    assert not m3["edge: G2-S alpha == round(mm-off-S alpha x 0.2947)"]["ok"]
     assert not m3["KB: mm-off-S T alpha fails the slot check"]["ok"]
     assert not m3["prerequisite: mm-off-S T alpha is opaque (the KB reference)"]["ok"]
+
+
+def test_m3_edge_fails_a_g2_settle_with_the_stock_geometry(tmp_path):
+    # The known-bad for the re-cast edge check: G2 replaying today's (pre-fix) settle, ~2 px inside the DOM edge.
+    m3 = q.g2_gates(m3_run(tmp_path, mm_off_alpha=255, g2_inset=STOCK_INSET), ARMED)["M3"]
+    assert EDGE in m3["failing"]
+    assert checks_of(m3)[EDGE]["value"] == 75
+
+
+def test_m3_edge_kb_fails_closed_when_the_twin_has_the_dom_geometry(tmp_path):
+    # If the mm-off twin's settle were already on the DOM geometry, the KB cannot show the edge check sees a geometry
+    # error: the KB check itself fails (the gate FAILs), it never passes silently.
+    m3 = q.g2_gates(m3_run(tmp_path, mm_off_alpha=255, mm_off_inset=DOM_INSET), ARMED)["M3"]
+    assert EDGE_KB in m3["failing"]
+    assert checks_of(m3)[EDGE_KB]["value"] == 0
 
 
 def test_m3_refuses_an_mm_off_twin_that_ran_with_the_patch(tmp_path):
@@ -188,6 +227,42 @@ def test_m1_reads_g2_stats_by_the_g2_sessions_patch_mode(tmp_path):
     assert m1["opacityUnproven"]["ok"]
     run["sessions"][0]["reads"]["liveEnd"]["gl"]["api"]["stats"]["occludedBands"] = 20
     assert not checks_of(q.g2_gates(run, ARMED)["M1"])["occludedBands"]["ok"]
+
+
+@pytest.mark.parametrize("mode, stats, unengaged", [
+    ("on", dict(q.UNENGAGED_STATS), True),
+    ("on", {**q.EXPECTED_STATS["on"], **q.UNENGAGED_STATS}, True),
+    ("on", dict(q.EXPECTED_STATS["on"]), False),
+    ("on", {**q.EXPECTED_STATS["on"], "frameLen": 88}, False),
+    ("on", {**q.EXPECTED_STATS["on"], "frameLen": 86, **q.UNENGAGED_STATS}, True),
+    ("on", {}, False),
+    ("off", dict(q.EXPECTED_STATS["off"]), False),
+    ("off", {**q.EXPECTED_STATS["off"], **q.UNENGAGED_STATS}, False),
+])
+def test_handback_unengaged_is_exactly_the_pre_fix_patch_on_signature(mode, stats, unengaged):
+    session = {"session": "g2", "output": {"mmOpacity": {"mode": mode}}, "reads": {"liveEnd": {"gl": {"api": {"stats": stats}}}}}
+    reason = q.handback_unengaged(session)
+    assert (reason is not None) is unengaged
+    if unengaged:
+        assert "hand-back fix not engaged" in reason
+
+
+def test_g2_take_with_an_unengaged_fix_is_invalid_not_failed(tmp_path):
+    # Critique finding 3: the pre-fix stats and the stock settle geometry, from a run where the fix did not engage.
+    stats = {**q.EXPECTED_STATS["on"], **q.UNENGAGED_STATS}
+    run = m3_run(tmp_path, mm_off_alpha=255, g2_inset=STOCK_INSET, g2_stats=stats)
+    gates = q.g2_gates(run, ARMED)
+    assert gates["M1"]["verdict"] == "INVALID" and gates["M3"]["verdict"] == "INVALID"
+    assert "hand-back fix not engaged" in gates["M3"]["invalid"]
+    invalid: list[str] = []
+    q.arm_gates("g2", run, types.SimpleNamespace(), ARMED, invalid)
+    assert any("hand-back fix not engaged" in r for r in invalid)
+
+
+def test_g2_take_with_an_engaged_fix_is_not_invalidated(tmp_path):
+    gates = q.g2_gates(m3_run(tmp_path, mm_off_alpha=255, g2_stats=dict(q.EXPECTED_STATS["on"])), ARMED)
+    assert gates["M1"]["invalid"] is None and gates["M3"]["invalid"] is None
+    assert checks_of(gates["M1"])["frameLen"]["ok"] and checks_of(gates["M1"])["opacityUnproven"]["ok"]
 
 
 # --- MO-2 masks ------------------------------------------------------------------------------------------------------------
@@ -619,7 +694,107 @@ def test_score_rescores_saved_takes_without_obs(monkeypatch, tmp_path, capsys):
 
 def test_mmo_mo4_reads_g2_facts_per_patch_mode(tmp_path):
     gates = q.mmo_gates(mmo_run(tmp_path, **{"stats:g2-on": dict(q.EXPECTED_STATS["off"])}), ARMED)
-    assert set(gates["MO-4"]["failing"]) == {"g2-on: occludedBands", "g2-on: opacityUnproven"}
+    assert set(gates["MO-4"]["failing"]) == {"g2-on: frameLen", "g2-on: occludedBands", "g2-on: opacityUnproven"}
+
+
+def test_mmo_mo4_fails_an_unproven_set_that_is_neither_baseline(tmp_path):
+    stats = {**q.EXPECTED_STATS["on"], "opacityUnproven": [{"slot": 2, "reason": "size"}, {"slot": 4, "reason": "size"}]}
+    gates = q.mmo_gates(mmo_run(tmp_path, **{"stats:g2-on": stats}), ARMED)
+    assert gates["MO-4"]["verdict"] == "FAIL" and gates["MO-4"]["failing"] == ["g2-on: opacityUnproven"]
+
+
+def test_mmo_take_with_an_unengaged_fix_is_invalid(tmp_path):
+    run = mmo_run(tmp_path, **{"stats:g2-on": {**q.EXPECTED_STATS["on"], "frameLen": 88, **q.UNENGAGED_STATS}})
+    assert q.mmo_gates(run, ARMED)["MO-4"]["verdict"] == "INVALID"
+    invalid: list[str] = []
+    q.arm_gates("mmo", run, types.SimpleNamespace(), ARMED, invalid)
+    assert invalid == ["g2-on: hand-back fix not engaged (G2 frameLen 88, unproven rest-opacity)"]
+
+
+# --- HB-OBS hand-back geometry (report-only, decision 7a) ---------------------------------------------------------------
+
+DOM_GREEN, STOCK_GREEN = (790, 675, 1141, 985), (792, 676, 1139, 983)
+
+
+def y_plane(green: tuple[int, int, int, int]) -> np.ndarray:
+    """A tv-range Y plane on the P2 layout: the green square (Y 100), the sentinel's 4-px white stroke, the white movie."""
+    y = np.full((1080, 1920), 16, np.uint8)
+    y[790:1060, 104:1066] = 235
+    y[722:880, 543:723] = 235
+    y[726:880, 547:719] = 16
+    x0, y0, x1, y1 = green
+    y[y0:y1, x0:x1] = 100
+    return y
+
+
+def hb_series(change_row: int | None = 5, n: int = 10) -> dict[str, np.ndarray]:
+    top = np.zeros((n, 4, 3), np.uint8)
+    if change_row is not None:
+        top[change_row:] = 7
+    return {"index": np.arange(100, 100 + n), "phase": np.array(["slide2-live"] * 2 + ["slide2-handback"] * (n - 2)),
+            "pixels.top": top}
+
+
+def fake_recording(monkeypatch, dom_from: int, gl: tuple[int, ...] = STOCK_GREEN) -> list[tuple[int, int]]:
+    reads: list[tuple[int, int]] = []
+
+    def recording_y(recording, first, last, size=q.HB_OBS_SIZE):
+        reads.append((first, last))
+        for n in range(first, last + 1):
+            yield n, y_plane(DOM_GREEN if n >= dom_from else gl)
+
+    monkeypatch.setattr(q, "recording_y", recording_y)
+    return reads
+
+
+def test_hb_obs_scores_the_build1_pair_found_by_the_roi_top_change(monkeypatch):
+    reads = fake_recording(monkeypatch, dom_from=105)
+    hb = q.handback_geometry(Path("x.avi"), hb_series(5), (1920, 1080))
+    assert (hb["locator"], hb["gl"], hb["dom"]) == ("ROI_top build-1 change", 104, 105)
+    assert reads == [(103, 106)]
+    assert hb["delta"]["green.left"] == -2.0 and hb["delta"]["green.right"] == 2.0 and hb["delta"]["green.bottom"] == 2.0
+    assert hb["max"] == 2.0 and hb["static"] == 0.0 and hb["weak"] == []
+    assert hb["nullGL"] == hb["nullDOM"] == 0.0
+
+
+def test_hb_obs_reads_zero_when_the_settle_already_matches_the_dom(monkeypatch):
+    fake_recording(monkeypatch, dom_from=105, gl=DOM_GREEN)
+    hb = q.handback_geometry(Path("x.avi"), hb_series(5), (1920, 1080))
+    assert hb["max"] == 0.0 and hb["nullGL"] == hb["nullDOM"] == 0.0
+
+
+def test_hb_obs_without_a_roi_top_change_takes_the_largest_edge_step_in_the_handback(monkeypatch):
+    fake_recording(monkeypatch, dom_from=106)
+    hb = q.handback_geometry(Path("x.avi"), hb_series(None), (1920, 1080))
+    assert (hb["locator"], hb["gl"], hb["dom"], hb["max"]) == ("largest hand-back edge step in slide2-handback", 105, 106, 2.0)
+
+
+def test_hb_obs_is_report_only_and_never_fails_a_take(tmp_path, monkeypatch):
+    assert "error" in q.handback_geometry(Path("x.avi"), hb_series(5), (1280, 720))
+    monkeypatch.setattr(q, "handback_geometry", lambda *a: 1 / 0)
+    assert q.handback_geometry_safe(Path("x.avi"), hb_series(5), (1920, 1080)) == {"error": "ZeroDivisionError: division by zero"}
+    run = mmo_run(tmp_path)
+    for sess in run["sessions"]:
+        sess["decode"]["handbackGeometry"] = {"max": 2.765}
+    gates = q.mmo_gates(run, ARMED)
+    assert gates["MO-2"]["verdict"] == "PASS"
+    report = checks_of(gates["MO-2"])["report: g2-on HB-OBS hand-back geometry max |DOM - GL| px (decision 7a)"]
+    assert report["value"] == {"max": 2.765} and not report["ok"] and not report["enforced"]
+    assert checks_of(gates["MO-2"])["report: g2-mmoff HB-OBS hand-back geometry max |DOM - GL| px (decision 7a)"]["ok"]
+
+
+RECORDING = Path.home() / "Library/Application Support/Obed-Edom/qualify-home/recordings/mmo-20260925-143530/2026-09-25 14-35-31.avi"
+SERIES = Path("/Users/anyhowclick/Desktop/work/obed-edom/output/mmo-gates/obs-mo7/shots/mmo-20260925-143530/g2-on-series.npz")
+
+
+@pytest.mark.skipif(not (RECORDING.exists() and SERIES.exists()), reason="REAL: the pre-fix mmo recording (g2-on, 25 fps) is not on this Mac")
+def test_hb_obs_reads_the_stock_jump_on_a_real_pre_fix_recording():
+    # Known-bad end to end: the plan's §1.3 table (Δ green right +2.765 at frames 408 -> 409), GL and DOM nulls 0.
+    with np.load(SERIES) as data:
+        ser = {k: data[k] for k in data.files}
+    hb = q.handback_geometry(RECORDING, ser, (1920, 1080))
+    assert (hb["gl"], hb["dom"], hb["max"], hb["nullGL"], hb["nullDOM"], hb["static"]) == (408, 409, 2.765, 0.0, 0.0, 0.0)
+    assert hb["delta"]["green.left"] == -2.059
 
 
 def test_mmo_summary_needs_both_rates_and_each_rates_cvc():
@@ -766,7 +941,7 @@ def test_mo3_script_drives_the_logger_with_the_settle_roi_and_armed_movie_masks(
     rec = session.out["mo1"]
     assert rec["masks"] == mm12["masks"] and rec["roi"] == mm12["roi"] and rec["mmOpacityKwarg"] == "auto"
     assert [rec["steps"][0]["hashBefore"], rec["steps"][0]["hashAfter"]] == ["#1", "#2"]
-    assert len(rec["liveGreen"]) == 16 * 58 * 3
+    assert len(rec["liveGreen"]) == 12 * 58 * 3
 
 
 class FakeHost:
