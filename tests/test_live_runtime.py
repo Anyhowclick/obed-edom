@@ -322,6 +322,83 @@ def test_mm_opacity_real_patched_methods_draw_the_authored_opacity_on_p2_1_to_2(
     assert [[old for old, _ in row] for row in _mirror(effect)] == stock
 
 
+def _anim(prop: str, start, end, fill: str = "both") -> dict:
+    return {"property": prop, "from": {"scalar": start}, "to": {"scalar": end}, "fillMode": fill,
+            "beginTime": 0, "duration": 1.5, "timingFunction": "Linear"}
+
+
+def _group(*animations: dict) -> dict:
+    return {"animations": list(animations), "fillMode": "both", "beginTime": 0, "duration": 1.5}
+
+
+def _layer(opacity: float = 1, animations=(), layers=None, texture: str | None = None) -> dict:
+    node = {
+        "initialState": {"opacity": opacity, "hidden": False, "width": 10, "height": 10,
+                         "anchorPoint": {"pointX": 0.5, "pointY": 0.5}, "rotation": 0, "scale": 1},
+        "animations": list(animations),
+    }
+    if texture:
+        node["texture"], node["texturedRectangle"] = texture, {}
+    else:
+        node["layers"] = layers or []
+    return node
+
+
+def _wrapped(*wrapper_animations: dict, model: float = 0.4) -> dict:
+    """Root -> one wrapper (model opacity `model`, the given animation groups) -> one constant 0.5 leaf."""
+    return _layer(layers=[_layer(model, wrapper_animations, [_layer(0.5, texture="leaf")])])
+
+
+# Each tree: (root layer, expected patched Opacity per leaf; None = unchanged from the stock value).
+SYNTHETIC_TREES = {
+    "wrapper-fade": (_wrapped(_group(_anim("opacity", 1, 0))), [None]),
+    "non-both-constant": (_wrapped(_group(_anim("opacity", 0.4, 0.4, fill="forwards"))), [None]),
+    "two-opacity-animations": (_wrapped(_group(_anim("opacity", 0.4, 0.4), _anim("opacity", 0.4, 0.4))), [None]),
+    "hidden-animation": (_wrapped(_group(_anim("opacity", 0.4, 0.4), _anim("hidden", True, True))), [None]),
+    # F4: an opacity animation two groups deep is not read by the node rule, so it must not fall back to the
+    # model value (0.4 here, which would give 0.2 instead of the stock 0.5).
+    "nested-group-animation": (_wrapped(_group(_group(_anim("opacity", 1, 1)))), [None]),
+    "textured-root": (_layer(0.6, texture="root"), [None]),
+    # 1 (root) x 0.4 (wrapper, constant `both`) x 0.5 (leaf model).
+    "constant-translucent-wrapper": (_wrapped(_group(_anim("opacity", 0.4, 0.4))), [1 * 0.4 * 0.5]),
+    # The faded middle node B makes both leaves under it (direct, and via constant C) unchanged; the sibling
+    # leaf under A still gets A's chain value.
+    "null-from-a-middle-node": (
+        _layer(layers=[_layer(0.4, [_group(_anim("opacity", 0.4, 0.4))], [
+            _layer(1, [_group(_anim("opacity", 1, 0))], [
+                _layer(0.5, texture="b-leaf"),
+                _layer(0.5, [_group(_anim("opacity", 0.5, 0.5))], [_layer(0.5, texture="c-leaf")]),
+            ]),
+            _layer(0.5, texture="a-leaf"),
+        ])]),
+        [None, None, 1 * 0.4 * 0.5],
+    ),
+    # Decision 5 residual: a leaf fade under a translucent constant wrapper keeps the stock fade.
+    "leaf-fade-under-constant-wrapper": (
+        _layer(layers=[_layer(0.4, [_group(_anim("opacity", 0.4, 0.4))],
+                              [_layer(0.5, [_group(_anim("opacity", 1, 0))], texture="leaf")])]),
+        [None],
+    ),
+}
+
+
+@pytest.mark.parametrize("name", SYNTHETIC_TREES)
+def test_mm_opacity_real_patched_methods_agree_with_the_mirror_on_synthetic_trees(name):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required to run the extracted player methods")
+    player = _real_player()
+    root, expected = SYNTHETIC_TREES[name]
+    effect = {"duration": 1.5, "baseLayer": root}
+    stock = _run_extracted(node, _hook_only(player).decode(), False, effect)
+    patched = _run_extracted(node, live_runtime.patch_player(player).decode(), True, effect)
+    mirror = _mirror(effect)
+    assert [[old for old, _ in row] for row in mirror] == stock
+    assert [[new for _, new in row] for row in mirror] == patched
+    for stock_row, patched_row in zip(stock, patched):
+        assert patched_row == [old if want is None else want for old, want in zip(stock_row, expected)]
+
+
 # §5 census mirror: old vs new Opacity per eB-drawn leaf, in Python, following the player's arithmetic
 # (`fB.textureInfoFromEffect`, `QB.renderFrameWithContext`, `eB.drawFrame`) and R1-R4. Easing is taken
 # as linear: it only feeds from != to animations, and those never reach a non-null chain value.
@@ -343,7 +420,7 @@ def _node_opacity(node: dict) -> float | None:
     for animation in _animations(node):
         if animation.get("property") == "opacity":
             opacity, count = animation, count + 1
-        elif animation.get("property") == "hidden":
+        elif animation.get("property") == "hidden" or animation.get("animations") is not None:
             count = 2
     if state.get("hidden") or count > 1:
         return None

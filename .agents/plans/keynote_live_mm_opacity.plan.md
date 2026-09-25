@@ -157,7 +157,7 @@ has one definition and one caller (`eB.drawFrame`); `new eB(` occurs twice, in `
 
 Census over every export under the main checkout's `output/` (the 20 `header.json` roots), with effects de-duplicated by
 content. Scratch `scratchpad/census_b.py` mirrors old vs new in Python at p ∈ {0, 0.5, 1}:
-- 26 Magic Move transitions, 0 shimmer/sparkle transitions, **110 `eB`-drawn leaves**, 0 unexpressible chains;
+- 26 Magic Move transitions, 0 shimmer/sparkle transitions, **110 `eB`-drawn leaves**; 51 fall back to the legacy value (all via a leaf `hidden` animation; values unchanged, Opus r1 F11);
 - rev 4's four-anchor mirror (`census_c.py`) gives the same result;
 - **exactly one leaf changes: the 1→2 Magic Move slot 4, 1 → 0.2947 at all three points** (P2, `p2-binary`, `p2-loop` and
   `gl-decks/Minimal Alpha_DSK` share the same effect);
@@ -232,7 +232,7 @@ Why (iii) is safe:
 
 | Harness | How it gets the patch | Re-baselines |
 |---|---|---|
-| `scripts/live_continuity_probe.py` | through `LiveOutputHost` (default `auto`); KB arms pass `mm_opacity="off"` | G2 facts of §7 where asserted; V/Voff expectations re-confirmed, never retuned |
+| `scripts/live_continuity_probe.py` | through `LiveOutputHost` (default `auto`); no MMO KB arm here (the MMO known-bad lives in `mm_opacity_probe.py`; Opus r1 F5) | no G2 fact asserted; V/Voff re-confirmed at default `auto` (round `01a9ff55`: identical to baseline) |
 | `scripts/managed_obs_qualify.py` | through `LiveOutputHost`; refuses to start if `OBED_LIVE_MM_OPACITY` is set (as for GL replay, :27); new `mm-off` twin sessions pass `mm_opacity="off"` | `EXPECTED_STATS.occludedBands`. M3's edge check `round(g2-off-S × 0.2947)` and its KB assume `g2-off` is opaque, so the opaque reference moves to the `mm-off` twin. `T alpha (G2-S)` 75 is unchanged |
 | `scripts/p2_recovery_html_adversarial.py` | today it serves the **stock** `main.js` from disk unless `--gl-replay auto` (`_patched_main_js` is called only under `gl_auto`, :3332). Gains `--mm-opacity auto\|off` (default `auto`): `auto` serves `patch_player(raw, mm_opacity=True)` in **every** arm; `off` keeps today's bytes per arm (stock for non-GL arms, `mm_opacity=False` under GL). Records `mmOpacity` beside `patchedMainJsSha256` (not pinned). The test's `patch_player` monkeypatch lambda (`test_p2_adversarial_gl_replay.py:739`) takes the new kwarg | slide-2 screenshot scores (`greenFront` still greenish over a neutral grating, since G − R ≈ 43 > 15); `greenTranslucentPre` is on DOM slide 1, so it is unchanged; any move is root-caused |
 | `src/obed_edom/html_alpha_probe.py`, `html_preview.py` | serve the unmodified `main.js` (a paint-oracle probe and the dashboard preview, not on air) | none; out of scope (§13) |

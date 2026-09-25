@@ -11,8 +11,9 @@ _ANCHOR = b"UC=new Eg,UC.displayManager.showWaitingIndicator()"
 _MM_OPACITY_NODE = (
     b'__obedNodeOpacity(A){try{var B=A.initialState,g=null,C=0,Q=A.animations||[];for(var e=0;e<Q.length;e++)'
     b'for(var t=Q[e].property?[Q[e]]:Q[e].animations||[],i=0;i<t.length;i++)"opacity"===t[i].property?(g=t[i],C++)'
-    b':"hidden"===t[i].property&&(C=2);var o=B.hidden||C>1?null:g?g.from.scalar===g.to.scalar&&"both"===g.fillMode'
-    b'?g.to.scalar:null:B.opacity;return"number"==typeof o&&isFinite(o)?o:null}catch(E){return null}}'
+    b':("hidden"===t[i].property||t[i].animations)&&(C=2);var o=B.hidden||C>1?null:g?'
+    b'g.from.scalar===g.to.scalar&&"both"===g.fillMode?g.to.scalar:null:B.opacity;'
+    b'return"number"==typeof o&&isFinite(o)?o:null}catch(E){return null}}'
     b"__obedChainOpacity(X,A){if(null===X)return null;var B=this.__obedNodeOpacity(A);"
     b"return null===B?null:(void 0===X?1:X)*B}"
 )
