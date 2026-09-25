@@ -202,3 +202,15 @@ the new telemetry line shows any blips it absorbs.
   - pid-reuse and real-process `env_marker` tests;
   - route test dropped;
   - L1 triggered by app churn, with controls relabelled.
+- Implementation `11162175` (Opus MEDIUM).
+- Codex GPT-5.6 Sol r1:
+  - no correctness findings;
+  - two MAJOR findings are the pending live gates (the L1 exit control and L2);
+  - NIT (liveness re-read CDP after F2 had already corroborated the sample) folded in `90b921e1`.
+- Merged origin/main (#229). Full pytest 7480/88/1, test:ui 305, test:maps green.
+- Live L1 (real OBS 32.2.2, 2026-09-25):
+  - origin/main code, 10 min: 8 raw LaunchServices absences, all with `env_marker` True; 1 false "gone" while the
+    kernel was alive (the instrument's positive control);
+  - fixed code, 9 min: 5 absences, all with marker True; 0 false "gone"; 1 downgrade logged; 0 `obsExited`; clean
+    quit with `cleanExit` true;
+  - `lsof`: the CDP listener is the OBS main pid.
