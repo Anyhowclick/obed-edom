@@ -281,10 +281,9 @@ hand-back would decode wrong. The binary decoder is wrap-aware (`is_wrap(..., mo
 5. **Pre-check (a) enforced:** `video.loop` true on every slide-1 `untitled.mov` (`slide1Videos`), and on the carried element
    after hand-back (read `.loop` on the handed-back element, not G2 `stats.loopMode` — F6). `loop_representation`: the
    differing JSONs equal the `loop-splice.json` file list and every loop key is `loopMode="looping"` — enforced.
-6. **Soak.** Re-read at OD-2 `56b5904b`: `--soak-minutes` defaults to 5 ("20 before a show or on a looping fixture");
-   windows fire only `if minute in SOAK_WINDOW_MINUTES (2, 8) and minute < lose_at` with `lose_at = max(2, minutes // 2)`,
-   so a 5-minute soak records **no** wrap window. L5 therefore runs `--soak-minutes 20` (windows at 2 and 8), unless OD-2
-   makes the schedule scale with the length. With a real looping fixture, `soak_gates`' `enforced=looping` checks and `kb_verdict`'s `fixtureLooping`
+6. **Soak.** OD-2 `af76ed97` places the wrap windows relative to the length (`soak_schedule`: windows at minute 1 and
+   just before the context loss; 5 min ⇒ windows 1, 2, loss 3) and gates "wrap windows recorded == expected" on a looping
+   fixture; soaks < 3 min are refused. L5 runs the 5-minute default per PR and 20 minutes before a show. With a real looping fixture, `soak_gates`' `enforced=looping` checks and `kb_verdict`'s `fixtureLooping`
    become live (Opus r1 #8 on OD-2 stops being vacuous). Wrap windows decoded with `counter="binary"` + `loop_frames=1381`.
 7. **L1/L2 re-run on the rebuilt fixture** (headless, ≈ 25 min; clock-based, expected unchanged) so every gate reads one
    fixture; record in `gates-r2.md`.
