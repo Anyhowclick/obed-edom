@@ -44,7 +44,7 @@ MO-7: final-commit take (`67c7d12e`) 25 + 30 PASS; recordings kept at `qualify-h
 
 ## Review
 
-Opus r2 `opus-r2.md`: R5 sound (no blank-frame path); F1 R2 floor 8.0, F3 `--score` keeps validity/lifecycle, F4 colour
+Opus r2 (raw round deleted at merge; `git show aea02049:.agents/reviews/mm-opacity/opus-r2.md`): R5 sound (no blank-frame path); F1 R2 floor 8.0, F3 `--score` keeps validity/lifecycle, F4 colour
 premise, F6 test, F7 natspec folded (`f7ecda5d`); F2 re-runs recorded above.
-Opus r1 `opus-r1.md`: F1–F11 folded (`60009ce3`, `5178be70`, `102d4ca4`); F5/F11 plan corrections; F8 min/max refuted (rAF
+Opus r1 (raw round deleted at merge; `git show aea02049:.agents/reviews/mm-opacity/opus-r1.md`): F1–F11 folded (`60009ce3`, `5178be70`, `102d4ca4`); F5/F11 plan corrections; F8 min/max refuted (rAF
 timing), time-interpolated match instead.
