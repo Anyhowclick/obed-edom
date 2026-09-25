@@ -247,6 +247,17 @@ Why (iii) is safe:
   - It validates the MO-1 instrument: patched reads exact, patch-off FAILs, and two patch-off runs read identically.
   - It records the settle-frame buffer hash of the 1→2 and 3→4 moves, twice per mode, to prove MO-5's CvC reads 0.
   - It reconciles the F-10 sentinel with the §0 cache (fixture provenance only).
+- **Q0b RESULT (2026-09-25, headless, 8 runs + 2 full-call, load 7.5–11.4):** slot 4 written α once at the move's first
+  draw and α on all 84 move draws (off: 1); ordinals 0/2/3 and 3→4 identical on vs off; slot-1 fade differs only by frame
+  timing (on–off 0.0039 ≤ off–off 0.0045). G2 patch on: rest = after-proofs `[1,0,1,1,0.2947]`, unproven exactly
+  `[{4, rest-opacity}]`, **occludedBands 0/128**, LIVE, frameLen 88, 0 glErrors; patch off identical to today (20/128).
+  LIVE green on vs off ±0 (≈ 8.9, 51.6, 0, 74). 3→4 settle hash equal in every pairing; 1→2 differs on vs off.
+  **Instrument amendments:** (1) the 4-px erosion catches the square's 1-px AA edge at ~2× (x = 793, α 218 → 3.06–10.7);
+  scale-aware erosion (≥ 5 px) reads ≤ 0.50, and the scorer requires S opaque in the ROI; (2) GL-on 1→2 settle hash
+  carries the movie frame at the advance, so the movie instance rect is masked. **F-10 sentinel does not hold on the real
+  player:** no settle-frame `uniform1f(Opacity)` for any program (cache writes only on the first frame and slot-1 fade
+  steps); harmless, G2 writes `Opacity` before every replayed draw. Every GL-on run retires `canvasRemoved` after the slide
+  change, on and off alike. W6 not needed (only `managed_obs_qualify.EXPECTED_STATS` asserts occludedBands).
 - **Q0c.** Q0b's logger in managed OBS CEF, one take. One OBS at a time, with no headless Chrome alongside.
 
 ## 10. Gates (blocking unless marked report-only)
