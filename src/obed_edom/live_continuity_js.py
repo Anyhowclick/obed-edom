@@ -6,52 +6,61 @@ injected bytes, versioned and hashed. Verbatim carry-over from
 dead canvas texture-feed stack removed (I0 step B) and the fixture constants
 parameterised via one injected plan object (I0 step C).
 
-Plan object (`window.__OBED_CONTINUITY__`, set before this script runs; absent
-=> the core installs nothing):
+Plan object (`window.__OBED_CONTINUITY__`, set before this script runs; absent,
+or any `schema` other than 2 => the core installs nothing):
     {
+      "schema": 2,
       "movies": {
         "<movieKey>": {"assetKeys": ["<substring(s) of the <video> src>"],
                         "footprint": {"x": int, "y": int, "w": int, "h": int}}
       },
-      "boundaries": [
-        {"atScene": <scene index>, "action": "restart" | "bridge" | "retire",
-         "rect": {"x": int, "y": int, "w": int, "h": int},   // "bridge" only
+      "boundaries": [   // one entry per (boundary, planned instance)
+        {"atScene": <scene index>, "action": "pin" | "bridge" | "restart" | "retire" | "glReplay",
          "movieKey": "<movieKey>",
-         "srcRect": {"x": int, "y": int, "w": int, "h": int},
-         "durationSeconds": <positive exported duration>}                            // "bridge" only
+         "src": {"objectId": "<export objectID>", "rect": {"x", "y", "w", "h"}},
+         "dst": {"objectId": ..., "rect": ...},        // pin/bridge/glReplay; restart optional
+         "loop": <bool>,                               // pin/bridge/glReplay
+         "durationSeconds": <positive exported duration>,   // bridge
+         "reason": "refused" | "ends"}                 // retire
       ],
       "transparentBackground": <bool, optional, default false>
     }
+`movies[k].footprint` (the asset's first planned instance rect) is read only
+by `footprintOwnerDecoderId`, for the instrument; nothing positions from it.
 `transparentBackground` gates `forceTransparentChrome()`: true for the
 alpha/attach output and for the P2 scripts (their fixed black background is
 the runtime's, not the player's), false for HDMI where the player's own black
 background must show through untouched (owner decision 2a).
-A scene index at or after a boundary's `atScene` (and before any later
-boundary) is in that boundary's zone; before the first boundary the implicit
-action is "pin" (the movie continues across the cut at a static footprint —
-the existing 1->2 handling, which needs no boundary entry). "restart" retires
-the preserved decoder so the export's fresh element plays; "bridge" carries
-the preserved decoder to `rect`, suppressing the export's fresh element. A
-plan is derived from export data and restricted to the measured allowlist.
 
-"retire" (at most one, before the first restart and any bridge) is a
-per-boundary REFUSAL: from the boundary's TRANSITION scene (`atScene - 1`,
-where the player already detaches the movie) until the next restart/bridge
-`atScene` (the end of the deck when there is none), `movieKey` is handed back
-to the raw player. Inside that zone nothing is pooled, remounted, facaded or
-reused, and the `src` clear / `removeAttribute('src')` the hooks normally
-swallow really runs, so the movie behaves exactly as the unmodified export
-does. Every declining hook notes `preserve-refused` (once per key+via), and
-the keep-warm interval sweeps decoders pooled before the zone, noting
-`retire-boundary` — refusal is asserted by a positive event, never by silence.
+Instance identity is the export's objectID: the player sets a movie element's
+`id` to `objectID + "-video"` before its `src`, so the src hooks stamp
+`__obedInstance`; a carry re-stamps the carried decoder to the entry's
+`dst.objectId` (after a bridge its DOM id still names the old source). A
+decoder is pooled only when the entry naming its instance as `src` is a
+pin/bridge/glReplay (or a restart of a decoder the runtime already holds, so
+the outgoing movie survives the Dissolve); every other `<video>` passes
+through. At the fresh `dst` element of a pin/bridge the one candidate (pooled
+or held) whose instance is the entry's `src` is carried: a pin facades the
+fresh element onto it, a bridge moves it `src.rect -> dst.rect` over the
+transition scene and suppresses the fresh element. Zero or several
+candidates, or a `loop` mismatch, refuse that one boundary (`preserve-refused`
+with `reason`) and the fresh element plays raw. A restart retires a held
+`src` decoder when a fresh element of the same movie sets `src` at or after
+`atScene`. A retire hands `src` back to the raw player from the transition
+scene (`atScene - 1`, where the player already detaches the movie): nothing
+pooled, clears really run, every declining hook notes `preserve-refused`
+(once per instance and hook) and the keep-warm interval sweeps held/pooled
+decoders, noting `retire-boundary` -- refusal is asserted by a positive event,
+never by silence.
 
-A "glReplay" boundary (`fallback: "retire"`, `instanceRect` authored px) is the
+A "glReplay" entry (`fallback: "retire"`, `instanceRect` authored px) is the
 same retire-class zone run as a one-shot state machine for the GL-replay module
-(`live_gl_replay_js.py`): `pending -> armed | retired`, `armed -> released |
-retired`, `released -> retired`, each transition noted `glreplay-zone
-{key, from, to, reason}`. `pending` and `retired` refuse like the retire zone;
-`armed` pools the detached carried movie but never mounts or paints it;
-`released` is pin. The module talks to it only through
+(`live_gl_replay_js.py`), keyed on its src/dst instances from `atScene - 1` to
+the next entry naming `dst` as `src`: `pending -> armed | retired`, `armed ->
+released | retired`, `released -> retired`, each transition noted
+`glreplay-zone {key, from, to, reason}`. `pending` and `retired` refuse like
+the retire zone; `armed` pools the detached `src` decoder but never mounts or
+paints it; `released` is pin. The module talks to it only through
 `window.__OBED_P2_PRESERVE__.glReplay` (installed only for such a plan).
 Plan: the G3+G4 plan §1–§2 (PR #214).
 
@@ -65,7 +74,7 @@ Scaled-stage mapping (I3): the player scales `#stage` with a CSS transform, so
 is not the authored canvas size. `stageMap()` reads both live (no caching) and
 returns `{s, ox, oy, authoredWidth, authoredHeight}`, `null` when `#stage` is
 missing, degenerate, or non-uniformly scaled. Plan rects (`movies[k].footprint`,
-boundary `rect`/`srcRect`) are authored px; `getBoundingClientRect()`
+entry `src.rect`/`dst.rect`) are authored px; `getBoundingClientRect()`
 measurements are screen px. Stage-level overlays (appended to `document.body`)
 write screen px via `toScreen()`; in-layer remounts (inside `#stage`) divide by
 `s`. `disable()` clears preserved state and makes every hook a pass-through
@@ -78,19 +87,19 @@ from __future__ import annotations
 
 import hashlib
 
-CONTINUITY_VERSION = 5
+CONTINUITY_VERSION = 6
 
 PRESERVE_CORE_JS = r"""
 (function(){
   // Fail-closed: no plan, no install. The caller (P2 script or, later, the
   // live host) injects window.__OBED_CONTINUITY__ before this script tag runs.
   var OBED_PLAN = window.__OBED_CONTINUITY__;
-  if (!OBED_PLAN) return;
+  if (!OBED_PLAN || OBED_PLAN.schema !== 2) return;
   if (window.__OBED_P2_PRESERVE__) return;
   let disabled = false;
   let everPreserved = false;
   window.__OBED_P2_PRESERVE__ = {
-    version: 8,
+    version: 9,
     mode: 'decoder-preserve',
     events: [],
     poolKeys: [],
@@ -124,7 +133,9 @@ PRESERVE_CORE_JS = r"""
       suppressRemount = true;
       try {
         pool.clear();
-        document.querySelectorAll('video[data-obed-preserved="1"]').forEach(function(v) {
+        const dropped = held.splice(0, held.length);
+        Array.from(document.querySelectorAll('video[data-obed-preserved="1"]')).concat(dropped).forEach(function(v) {
+          if (v.__obedGen === -1) return;
           try {
             v.pause();
             delete v.dataset.obedPreserved;
@@ -149,6 +160,7 @@ PRESERVE_CORE_JS = r"""
           out.push({
             key: key,
             movieKey: movieAssetKey(key) || v.__obedMovieKey || null,
+            instance: v.__obedInstance || null,
             elId: v.__obedElId,
             currentTime: v.currentTime,
             paused: v.paused,
@@ -166,6 +178,7 @@ PRESERVE_CORE_JS = r"""
           key: assetKey(src),
           // A really-cleared src leaves `key` empty; the stamp still attributes it.
           movieKey: movieKeyFor(v, src),
+          instance: v.__obedInstance || null,
           elId: v.__obedElId,
           currentTime: v.currentTime,
           paused: v.paused,
@@ -364,63 +377,54 @@ PRESERVE_CORE_JS = r"""
     const m = /^#?(\d+)/.exec(String(location.hash || ''));
     return m ? parseInt(m[1], 10) : null;
   }
-  // Boundaries are {atScene, action: 'restart'|'bridge', rect?, movieKey?},
-  // generic scene-index cut points the plan supplies (I0 step C). The lowest
-  // atScene for a given action is that action's onset.
-  function boundariesByAction(action) {
-    const arr = (OBED_PLAN && Array.isArray(OBED_PLAN.boundaries)) ? OBED_PLAN.boundaries : [];
-    return arr.filter(function(b) { return b && b.action === action && typeof b.atScene === 'number'; });
+  // One entry per (boundary, planned instance); `src`/`dst` name export objectIDs.
+  const CARRY_ACTIONS = ['pin', 'bridge', 'glReplay'];
+  const ENTRIES = (Array.isArray(OBED_PLAN.boundaries) ? OBED_PLAN.boundaries : []).filter(function(b) {
+    return !!b && typeof b.atScene === 'number' && typeof b.action === 'string'
+      && !!b.src && typeof b.src.objectId === 'string';
+  });
+  // The entry naming `inst` as its src: that instance's next boundary (at most one).
+  function nextEntry(inst) {
+    if (inst == null) return null;
+    for (let i = 0; i < ENTRIES.length; i++) {
+      if (ENTRIES[i].src.objectId === inst) return ENTRIES[i];
+    }
+    return null;
   }
-  function restartMinHash() {
-    const restarts = boundariesByAction('restart');
-    if (!restarts.length) return Infinity;
-    return restarts.reduce(function(m, b) { return Math.min(m, b.atScene); }, Infinity);
+  // The pin/bridge whose fresh `dst` element is `inst`.
+  function carryEntryTo(inst) {
+    if (inst == null) return null;
+    for (let i = 0; i < ENTRIES.length; i++) {
+      const b = ENTRIES[i];
+      if ((b.action === 'pin' || b.action === 'bridge') && b.dst && b.dst.objectId === inst) return b;
+    }
+    return null;
   }
-  // First scene of the bridged destination (e.g. the 3->4 magic-move slide).
-  // The dissolve restart zone is [restartMinHash, slide4MinHash); at/after
-  // slide4MinHash a fresh element is the export's broken autoplay-from-0 for a
-  // magic move that is AUTHORED continuity ("Play across slides") and must be
-  // BRIDGED (reuse the live decoder), not retired. null => no bridge.
-  function slide4MinHash() {
-    const bridges = boundariesByAction('bridge');
-    if (!bridges.length) return null;
-    return bridges.reduce(function(m, b) { return Math.min(m, b.atScene); }, Infinity);
+  // The player sets `id = objectID + "-video"` before `src` (F1), so the src hooks can stamp it.
+  function instanceFromId(v) {
+    const id = String((v && v.id) || '');
+    return /-video$/.test(id) ? id.slice(0, -6) : null;
   }
-  function bridgeBoundary() {
-    const bridges = boundariesByAction('bridge');
-    if (!bridges.length) return null;
-    return bridges.reduce(function(a, b) { return b.atScene < a.atScene ? b : a; });
+  function instanceOf(v) {
+    return v && v.__obedInstance != null ? v.__obedInstance : null;
   }
-  // The plan may carry at most one retire-class boundary ('retire' or 'glReplay').
-  function retireBoundary() {
-    const retires = boundariesByAction('retire').concat(boundariesByAction('glReplay'));
-    if (!retires.length) return null;
-    return retires.reduce(function(a, b) { return b.atScene < a.atScene ? b : a; });
+  function namesInstance(b, inst) {
+    return inst != null && (b.src.objectId === inst || (!!b.dst && b.dst.objectId === inst));
   }
-  function glReplayBoundary() {
-    const b = retireBoundary();
-    return b && b.action === 'glReplay' ? b : null;
-  }
-  // The refusal ends where the movie's next flow starts: the smallest restart /
-  // bridge atScene above the retire (the export itself plays whatever that
-  // boundary creates), Infinity when there is none.
-  function retireZoneEnd(b) {
-    let end = Infinity;
-    ['restart', 'bridge'].forEach(function(action) {
-      boundariesByAction(action).forEach(function(x) {
-        if (x.atScene > b.atScene && x.atScene < end) end = x.atScene;
-      });
-    });
-    return end;
+  function glZoneEnd() {
+    const n = GL.dst ? nextEntry(GL.dst.objectId) : null;
+    return n ? n.atScene : Infinity;
   }
   // The zone OPENS on the transition scene (`atScene - 1`, the same convention
   // keepThroughBridge uses for the move scene): the player detaches the movie
   // while the hash is still the transition's, so a zone starting at atScene
-  // would pool and remount the refused movie for the whole Magic Move.
+  // would pool and remount the refused movie for the whole Magic Move. A retire
+  // names only its `src` instance, so it needs no end; a glReplay zone ends at
+  // the next entry naming its `dst`.
   function inRetireZone(b) {
     const hn = currentHashNum();
     if (hn == null) return false;
-    return hn >= b.atScene - 1 && hn < retireZoneEnd(b);
+    return hn >= b.atScene - 1 && (b !== GL || hn < glZoneEnd());
   }
   // Identity must survive a real src clear: inside the zone the hooks let the
   // player's clear through, so `movieAssetKey(src)` goes null on a decoder we
@@ -442,7 +446,10 @@ PRESERVE_CORE_JS = r"""
     if (!next) return;
     const prev = v.__obedAssetKey != null ? v.__obedAssetKey : assetKey(v.currentSrc || v.src || '');
     v.__obedAssetKey = next;
-    if (prev === next) return;
+    if (prev === next) {
+      if (v.__obedInstance === undefined) v.__obedInstance = instanceFromId(v);
+      return;
+    }
     if (GL) {
       v.__obedGlPooled = false;
       const gi = glPooled.indexOf(v);
@@ -452,19 +459,21 @@ PRESERVE_CORE_JS = r"""
       delete v.__obedAuthoredRectScene;
     }
     if (prev) {
-      const empties = [];
-      pool.forEach(function(q, key) {
-        const left = (q || []).filter(function(x) { return x !== v; });
-        if (left.length === (q || []).length) return;
-        if (left.length) pool.set(key, left); else empties.push(key);
-      });
-      empties.forEach(function(key) { pool.delete(key); });
+      unpool(v);
+      const hi = held.indexOf(v);
+      if (hi >= 0) held.splice(hi, 1);
+      delete v.__obedHold;
       delete v.dataset.obedPreserved;
     }
     v.__obedMovieKey = movieAssetKey(value);
+    v.__obedInstance = instanceFromId(v);
   }
   const holdNoted = {};
-  const GL = glReplayBoundary();
+  // Decoders the runtime carries (facaded pin, bridge overlay, released glReplay):
+  // the player never detaches them, so they never reach `stash`.
+  const held = [];
+  const GL = ENTRIES.filter(function(b) { return b.action === 'glReplay'; })
+    .reduce(function(a, b) { return a && a.atScene <= b.atScene ? a : b; }, null);
   const GL_NOTE_KINDS = ['glreplay-arm', 'glreplay-live', 'glreplay-standdown', 'glreplay-handoff',
     'glreplay-opacity-unproven', 'glreplay-retained-frame'];
   let zone = GL ? 'pending' : null;
@@ -473,23 +482,28 @@ PRESERVE_CORE_JS = r"""
   let carriedMemo = null;
   const glPooled = [];
   /**
-   * How this movie may be preserved at the current scene: 'allow' (pin/bridge/
-   * restart as today), 'refuse' (retire zone), or, for a glReplay zone, 'armed'
-   * (pool-but-never-mount) / 'released' (pin). Always evaluates `zoneState()` first.
+   * How this instance may be preserved at the current scene: 'allow', 'refuse'
+   * (a retire zone for its `src`, or a pending/retired glReplay zone), or, for a
+   * glReplay zone, 'armed' (pool-but-never-mount) / 'released' (pin). Always
+   * evaluates `zoneState()` first.
    */
-  function zoneMode(v, src) {
+  function zoneMode(v) {
     const z = zoneState(false);
-    const b = retireBoundary();
-    if (!b || movieKeyFor(v, src) !== b.movieKey || !inRetireZone(b)) return 'allow';
-    if (b === GL && (z === 'armed' || z === 'released')) return z;
-    return 'refuse';
+    const inst = instanceOf(v);
+    if (inst == null) return 'allow';
+    if (GL && namesInstance(GL, inst) && inRetireZone(GL)) {
+      return (z === 'armed' || z === 'released') ? z : 'refuse';
+    }
+    const n = nextEntry(inst);
+    return n && n.action === 'retire' && inRetireZone(n) ? 'refuse' : 'allow';
   }
-  function noteRefused(v, src, via) {
+  function noteRefused(v, src, via, extra) {
     const key = movieKeyFor(v, src);
-    const seen = key + '|' + via;
+    const inst = instanceOf(v);
+    const seen = [key, via, inst, extra ? extra.reason : ''].join('|');
     if (refusedNoted[seen]) return;
     refusedNoted[seen] = true;
-    note('preserve-refused', {key: key, scene: currentHashNum(), via: via});
+    note('preserve-refused', Object.assign({key: key, scene: currentHashNum(), via: via, instance: inst}, extra || {}));
   }
   function noteHold(v, src, via) {
     const key = movieKeyFor(v, src);
@@ -505,7 +519,7 @@ PRESERVE_CORE_JS = r"""
   }
   function glEntryValid() {
     return GL.fallback === 'retire' && Object.prototype.hasOwnProperty.call(planMovies(), GL.movieKey)
-      && finiteRect(GL.instanceRect, 0);
+      && finiteRect(GL.instanceRect, 0) && !!GL.dst && typeof GL.dst.objectId === 'string';
   }
   function setZone(to, reason, extra) {
     const from = zone;
@@ -541,7 +555,7 @@ PRESERVE_CORE_JS = r"""
       const m = window.__OBED_GL_REPLAY__;
       if (!inRelease && m && m.state === 'RETIRED') retireZone('moduleRetired');
       else if (hn != null && hn >= GL.atScene && !armSeen) retireZone('unengaged');
-      else if (hn != null && hn >= retireZoneEnd(GL)) retireZone('leftDestination');
+      else if (hn != null && hn >= glZoneEnd()) retireZone('leftDestination');
     } else if (zone === 'released' && hn != null && hn < GL.atScene) {
       retireZone('leftDestination');
     }
@@ -583,6 +597,7 @@ PRESERVE_CORE_JS = r"""
     pool.forEach(function(q) {
       (q || []).forEach(function(v) {
         if (cands.indexOf(v) >= 0 || document.contains(v)) return;
+        if (v.__obedInstance !== GL.src.objectId) return;
         if (movieKeyFor(v, v.currentSrc || v.src || '') !== movieKey) return;
         if (!isLive(v) || v.ended || v.dataset.obedRemounted === '1' || !v.__obedGlPooled || v.__obedFacadeFor) return;
         cands.push(v);
@@ -670,7 +685,7 @@ PRESERVE_CORE_JS = r"""
     if (primary !== 'canvasRemoved') return retire('failure', {standDown: primary == null ? null : String(primary)});
     if (!liveSeen) return retire('notLive');
     const hn = currentHashNum();
-    if (!(hn != null && hn >= GL.atScene && hn < retireZoneEnd(GL))) return retire('notOnDestination');
+    if (!(hn != null && hn >= GL.atScene && hn < glZoneEnd())) return retire('notOnDestination');
     const v = carriedMemo;
     if (!v || !isLive(v) || movieKeyFor(v, v.currentSrc || v.src || '') !== GL.movieKey) return retire('noCarried');
     if (v.ended) return retire('ended');
@@ -689,6 +704,7 @@ PRESERVE_CORE_JS = r"""
     v.__obedRect = screen;
     v.__obedParent = null;
     v.__obedGlNoWarm = false;
+    hold(v, GL);
     setZone('released', 'handoff');
     tryRemount(v);
     if (!(v.parentNode === canvas.parentNode && v.previousSibling === canvas)) return retire('remountFailed');
@@ -713,6 +729,35 @@ PRESERVE_CORE_JS = r"""
     if (!v.__obedElId) v.__obedElId = nextId++;
     if (v.__obedGen == null) v.__obedGen = preserveGeneration;
     return v.__obedElId;
+  }
+  /**
+   * Pool only a decoder whose instance's next entry carries it, or one the
+   * runtime already holds into a restart (it keeps painting through the Dissolve
+   * until the fresh element retires it). Every other `<video>` passes through.
+   */
+  function poolable(v) {
+    const n = nextEntry(instanceOf(v));
+    return !!n && (CARRY_ACTIONS.indexOf(n.action) >= 0 || (n.action === 'restart' && held.indexOf(v) >= 0));
+  }
+  function isPooled(v) {
+    let found = false;
+    pool.forEach(function(q) { if ((q || []).indexOf(v) >= 0) found = true; });
+    return found;
+  }
+  function unpool(v) {
+    const empties = [];
+    pool.forEach(function(q, key) {
+      const left = (q || []).filter(function(x) { return x !== v; });
+      if (left.length === (q || []).length) return;
+      if (left.length) pool.set(key, left); else empties.push(key);
+    });
+    empties.forEach(function(key) { pool.delete(key); });
+  }
+  // The carried decoder now IS the destination instance (F1: a bridge leaves its DOM id stale).
+  function hold(v, entry) {
+    v.__obedInstance = entry.dst.objectId;
+    v.__obedHold = entry;
+    if (held.indexOf(v) < 0) held.push(v);
   }
   function stash(v, why) {
     if (disabled) return;
@@ -743,12 +788,14 @@ PRESERVE_CORE_JS = r"""
     // footprint on later slides (seen on slide 4 in OBS, 2026-09-19).
     if (!movieAssetKey(src)) return;
     v.__obedMovieKey = movieAssetKey(src);
-    const mode = zoneMode(v, src);
-    const armedPool = mode === 'armed' && currentHashNum() === GL.atScene - 1 && !document.contains(v);
+    const mode = zoneMode(v);
+    const armedPool = mode === 'armed' && instanceOf(v) === GL.src.objectId
+      && currentHashNum() === GL.atScene - 1 && !document.contains(v);
     if (mode === 'refuse' || (mode === 'armed' && !armedPool)) {
       noteRefused(v, src, 'stash');
       return;
     }
+    if (!armedPool && !poolable(v)) return;
     if (!(v.readyState >= 2 || v.currentTime > 0.05)) return;
     tag(v);
     if (armedPool) {
@@ -809,7 +856,7 @@ PRESERVE_CORE_JS = r"""
   function scheduleRemount(v, why) {
     if (disabled) return;
     const scheduleSrc = v ? (v.currentSrc || v.src || '') : '';
-    const mode = zoneMode(v, scheduleSrc);
+    const mode = zoneMode(v);
     if (mode === 'armed') {
       noteHold(v, scheduleSrc, 'remount');
       return;
@@ -847,6 +894,11 @@ PRESERVE_CORE_JS = r"""
     window.addEventListener('hashchange', onHash);
   }
 
+  // A pin hold ends at a restart of its instance, so the restart teardown is untouched.
+  function pinEnd(v) {
+    const n = nextEntry(instanceOf(v));
+    return n && n.action === 'restart' ? n.atScene : Infinity;
+  }
   /**
    * Hold a remounted continuing movie's <video> at the on-screen footprint EVERY
    * frame through the 1->2 Magic Move. The video is re-parented into the movie's
@@ -857,8 +909,8 @@ PRESERVE_CORE_JS = r"""
    * on a drifted capture, failing the after-window decoder-stability check). A rAF
    * loop re-applies the measure-and-correct offset every frame so the RENDERED rect
    * stays at (tx,ty) despite the containing layer's transform, keeping authored
-   * z-order (no reparent, no forced z-index). Runs only through the 1->2 window and
-   * stops at the 2->3 restart boundary / retire so the restart teardown is untouched.
+   * z-order (no reparent, no forced z-index). Runs until a restart of the held
+   * instance (`pinEnd`) or a retire, so the restart teardown is untouched.
    */
   function keepAtFootprint(v, tx, ty) {
     if (v.__obedPinning) return;
@@ -868,7 +920,7 @@ PRESERVE_CORE_JS = r"""
         v.__obedPinning = false; return;
       }
       const hn = currentHashNum();
-      if (hn != null && hn >= restartMinHash()) { v.__obedPinning = false; return; }
+      if (hn != null && hn >= pinEnd(v)) { v.__obedPinning = false; return; }
       if (v.dataset.obedRemounted === '1') {
         const cur = v.getBoundingClientRect();
         if (cur.width > 1 && cur.height > 1) {
@@ -905,25 +957,23 @@ PRESERVE_CORE_JS = r"""
    * bridge engage until the decoder retires (`__obedRemountEpoch === -1` is the
    * bridge's OWN sentinel here, so this loop ignores it) or leaves the DOM.
    */
-  function slide4Rect() {
-    const b = bridgeBoundary();
-    const r = b && b.rect;
+  function dstRect(entry) {
+    const r = entry && entry.dst && entry.dst.rect;
     if (r && typeof r === 'object' && r.w > 1 && r.h > 1) return r;
     return null;
   }
   function keepThroughBridge(v) {
-    const boundary = bridgeBoundary();
+    const boundary = nextEntry(instanceOf(v));
     const hn = currentHashNum();
-    if (!boundary || hn !== boundary.atScene - 1
-        || movieAssetKey(v.currentSrc || v.src || '') !== boundary.movieKey
-        || !boundary.srcRect || !(boundary.durationSeconds > 0)) return false;
+    if (!boundary || boundary.action !== 'bridge' || hn !== boundary.atScene - 1
+        || !dstRect(boundary) || !boundary.src.rect || !(boundary.durationSeconds > 0)) return false;
     const generation = preserveGeneration;
     if (!v.__obedMotion || v.__obedMotion.generation !== generation
         || v.__obedMotion.boundary !== boundary) {
       v.__obedMotion = {started: performance.now(), generation: generation, boundary: boundary};
     }
     const started = v.__obedMotion.started;
-    const src = boundary.srcRect, dest = boundary.rect;
+    const src = boundary.src.rect, dest = boundary.dst.rect;
     const stage = document.getElementById('body') || document.body;
     if (v.parentNode !== stage) {
       beginMove(v);
@@ -939,7 +989,7 @@ PRESERVE_CORE_JS = r"""
     v.dataset.obedRemounted = '1';
     function frame() {
       const scene = currentHashNum();
-      if (generation !== preserveGeneration || v.__obedRemountEpoch === -1
+      if (generation !== preserveGeneration || v.__obedGen === -1
           || v.ended || !document.contains(v) || scene !== boundary.atScene - 1) {
         v.__obedMotionPinning = false;
         return;
@@ -1025,18 +1075,24 @@ PRESERVE_CORE_JS = r"""
     }
     return true;
   }
-  function keepAtSlot(real, stub) {
+  function keepAtSlot(real, entry) {
     if (real.__obedSlotPinning) return;
     real.__obedSlotPinning = true;
-    const s4 = slide4MinHash();
     function frame() {
       const hn = currentHashNum();
-      if (real.ended || (s4 != null && hn != null && hn < s4)) {
+      if (real.ended || (hn != null && hn < entry.atScene) || real.__obedHold !== entry) {
         real.__obedSlotPinning = false; return;
       }
       if (!slotLive(real)) {
         retireSlot(real);
         real.__obedSlotPinning = false; return;
+      }
+      // A held overlay is never detached, so the next bridge's move starts here.
+      const next = nextEntry(instanceOf(real));
+      if (next && next.action === 'bridge' && hn === next.atScene - 1) {
+        real.__obedSlotPinning = false;
+        keepThroughBridge(real);
+        return;
       }
       if (!document.contains(real) && !reattachToSlot(real)) {
         real.__obedSlotPinning = false; return;
@@ -1045,7 +1101,7 @@ PRESERVE_CORE_JS = r"""
       // holds through the containing layer's magic-move transform), so neither
       // the layer's transform nor a re-detach drags the bridged decoder off the
       // slide-4 slot at the #8->#9 boundary.
-      const destAuthored = slide4Rect();
+      const destAuthored = dstRect(entry);
       const dest = destAuthored ? toScreen(destAuthored) : null;
       if (destAuthored && !dest) noteStageMapUnavailable('keepAtSlot');
       const cur = real.getBoundingClientRect();
@@ -1093,11 +1149,11 @@ PRESERVE_CORE_JS = r"""
    * root-stage append lands on top, covering the export's poster/hidden restart);
    * keepAtSlot then holds it there through the layer transform and any re-detach.
    */
-  function bridgeTo34(v) {
+  function bridgeTo34(v, entry) {
     v.__obedBridged34 = true;
     v.__obedRemountEpoch = -1;   // cancel any pending 1->2 remount for v
     v.__obedPinning = false;
-    const destAuthored = slide4Rect();
+    const destAuthored = dstRect(entry);
     const dest = destAuthored ? toScreen(destAuthored) : null;
     if (destAuthored && !dest) noteStageMapUnavailable('bridgeTo34');
     const stage = bridgeStage();
@@ -1125,7 +1181,7 @@ PRESERVE_CORE_JS = r"""
     } catch (e) {
       note('bridge-3to4-error', {elId: v.__obedElId, message: String(e && e.message || e)});
     }
-    keepAtSlot(v, null);
+    keepAtSlot(v, entry);
   }
   /**
    * Keep the export's suppressed 3->4 restart element hidden every frame. A
@@ -1264,6 +1320,8 @@ PRESERVE_CORE_JS = r"""
     delete v.dataset.obedRemounted;
     v.__obedRemountEpoch = -1;
     v.__obedGen = -1;
+    const hi = held.indexOf(v);
+    if (hi >= 0) held.splice(hi, 1);
     return v.__obedElId;
   }
   /**
@@ -1274,28 +1332,30 @@ PRESERVE_CORE_JS = r"""
    */
   function sweepRetireZone() {
     zoneState(false);
-    const b = retireBoundary();
-    if (!b || !inRetireZone(b)) return;
-    if (b === GL && zone === 'released') return;
-    if (b === GL && zone === 'armed') {
-      retireVictims(b, zoneVictims(b, []).filter(function(v) { return !v.__obedGlPooled; }), true);
-      return;
-    }
-    retireVictims(b, zoneVictims(b, []), true);
+    ENTRIES.forEach(function(b) {
+      if ((b.action !== 'retire' && b !== GL) || !inRetireZone(b)) return;
+      if (b === GL && zone === 'released') return;
+      if (b === GL && zone === 'armed') {
+        retireVictims(b, zoneVictims(b, []).filter(function(v) { return !v.__obedGlPooled; }), true);
+        return;
+      }
+      retireVictims(b, zoneVictims(b, []), true);
+    });
   }
+  /**
+   * Every decoder the runtime preserves for the instance(s) `b` hands back: a
+   * retire's `src`, a glReplay's `src` or `dst`. By the instance stamp, never
+   * the live src — a real in-zone clear empties that.
+   */
   function zoneVictims(b, victims) {
     function take(v) {
-      if (victims.indexOf(v) < 0) victims.push(v);
+      const inst = instanceOf(v);
+      const mine = b === GL ? namesInstance(b, inst) : inst === b.src.objectId;
+      if (mine && v.__obedGen !== -1 && victims.indexOf(v) < 0) victims.push(v);
     }
-    // By the POOL'S key (an asset filename the plan maps the same way a src is
-    // mapped), never the live src — a real in-zone clear empties that.
-    pool.forEach(function(q, key) {
-      if (movieAssetKey(key) !== b.movieKey) return;
-      (q || []).forEach(take);
-    });
-    document.querySelectorAll('video[data-obed-preserved="1"]').forEach(function(v) {
-      if (movieKeyFor(v, v.currentSrc || v.src || '') === b.movieKey) take(v);
-    });
+    pool.forEach(function(q) { (q || []).forEach(take); });
+    held.forEach(take);
+    document.querySelectorAll('video[data-obed-preserved="1"]').forEach(take);
     return victims;
   }
   function retireVictims(b, victims, noteIt) {
@@ -1310,14 +1370,20 @@ PRESERVE_CORE_JS = r"""
       if (left.length) pool.set(key, left); else empties.push(key);
     });
     empties.forEach(function(key) { pool.delete(key); });
-    if (noteIt) note('retire-boundary', {key: b.movieKey, elIds: elIds, atScene: b.atScene});
+    if (noteIt) note('retire-boundary', {key: b.movieKey, elIds: elIds, atScene: b.atScene, instance: b.src.objectId});
     return elIds;
+  }
+  // Where this instance rests on its slide: the holding entry's `dst.rect`, else its next entry's `src.rect`.
+  function restingRect(v) {
+    if (v.__obedHold && v.__obedHold.dst) return v.__obedHold.dst.rect || null;
+    const n = nextEntry(instanceOf(v));
+    return n ? n.src.rect || null : null;
   }
   function tryRemount(v, epoch) {
     if (disabled) return;
     if (!v || suppressRemount) return;
     const remountSrc = v.currentSrc || v.src || '';
-    const mode = zoneMode(v, remountSrc);
+    const mode = zoneMode(v);
     if (mode === 'armed') {
       noteHold(v, remountSrc, 'remount');
       return;
@@ -1379,17 +1445,16 @@ PRESERVE_CORE_JS = r"""
     const nearStageOrigin = !!boxMap && Math.abs(box.x - boxMap.ox) < 2 && Math.abs(box.y - boxMap.oy) < 2;
     // Detach can leave getBoundingClientRect at the literal viewport origin (no
     // layout box) or at the live stage origin (a zero-layout attached parent).
-    // Fall back to the authored movie footprint (its real on-screen slot).
+    // Fall back to the instance's planned resting rect (its real on-screen slot).
     if (!(box.w > 1 && box.h > 1) || nearZero || nearStageOrigin) {
-      const movies = planMovies();
-      const fps = Object.keys(movies).map(function(k) { return movies[k].footprint; }).filter(Boolean);
+      const rest = restingRect(v);
       let fp;
-      if (fps.length) {
+      if (rest) {
         if (!boxMap) {
           noteStageMapUnavailable('remount-footprint-rect');
           return;
         }
-        fp = toScreen(fps[((v.__obedElId || 1) - 1) % fps.length], boxMap);
+        fp = toScreen(rest, boxMap);
       } else {
         fp = {x: 0, y: 0, w: box.w, h: box.h};
       }
@@ -1664,12 +1729,15 @@ PRESERVE_CORE_JS = r"""
 
   /**
    * A src clear/removal: swallow it (true) so the decoder keeps its resource, or
-   * let the real clear run (false). Armed: a detached armed-pooled decoder is
-   * held; a detached one on the move scene is swallowed only if `stash` pooled
-   * it; anything else really clears, so it never keeps painting.
+   * let the real clear run (false). Only a decoder `stash` pooled, or one the
+   * runtime holds, is swallowed; a suppressed bridge `dst` element really clears
+   * when the player ends its slide, so a chain of bridges leaks no hidden
+   * decoder. Armed: a detached armed-pooled decoder is held; a detached one on
+   * the move scene is swallowed only if `stash` pooled it; anything else really
+   * clears, so it never keeps painting.
    */
   function swallowClear(v, cur, why, via) {
-    const mode = zoneMode(v, cur);
+    const mode = zoneMode(v);
     if (mode === 'armed') {
       if (v.__obedGlPooled && !document.contains(v)) {
         noteHold(v, cur, via);
@@ -1681,7 +1749,7 @@ PRESERVE_CORE_JS = r"""
       }
     } else if (mode !== 'refuse') {
       stash(v, why);
-      return true;
+      return isPooled(v) || held.indexOf(v) >= 0;
     }
     noteRefused(v, cur, via);
     return false;
@@ -1730,6 +1798,117 @@ PRESERVE_CORE_JS = r"""
     });
   }).observe(document.documentElement, {childList: true, subtree: true});
 
+  // Pooled ∪ held: a held decoder is never detached, so it never reaches the pool.
+  function carryCandidates() {
+    const out = [];
+    function take(v) {
+      if (v.__obedGen !== -1 && out.indexOf(v) < 0) out.push(v);
+    }
+    pool.forEach(function(q) { (q || []).forEach(take); });
+    held.forEach(take);
+    return out;
+  }
+  function isCarrySource(c, entry) {
+    return c.__obedInstance === entry.src.objectId;
+  }
+  /**
+   * The one live candidate whose instance is `entry.src`, or null after noting
+   * why this boundary is refused (the fresh element then plays raw).
+   */
+  function pickCarried(el, value, entry) {
+    const found = [];
+    carryCandidates().forEach(function(c) {
+      if (c === el || !isCarrySource(c, entry)) return;
+      if ((c.__obedGen == null ? 0 : c.__obedGen) < preserveGeneration) {
+        note('reuse-skip-stale', {
+          key: assetKey(value), elId: c.__obedElId,
+          gen: c.__obedGen, current: preserveGeneration
+        });
+        return;
+      }
+      found.push(c);
+    });
+    const reason = found.length === 0 ? 'absent'
+      : found.length > 1 ? 'ambiguous'
+      : !!found[0].loop !== !!entry.loop ? 'loopMismatch' : null;
+    if (!reason) return found[0];
+    noteRefused(el, value, 'reuse', {
+      reason: reason, atScene: entry.atScene, src: entry.src.objectId,
+      candidates: found.map(function(c) { return c.__obedElId; })
+    });
+    return null;
+  }
+  function authoredOfScreen(r) {
+    const m = stageMap();
+    if (!m || !r) return null;
+    return {x: (r.x - m.ox) / m.s, y: (r.y - m.oy) / m.s, w: r.w / m.s, h: r.h / m.s};
+  }
+  /**
+   * Carry `preserved` into the fresh `dst` element `el`. A pin facades `el` onto
+   * it; a bridge keeps it as a visible overlay at `dst.rect` (bridgeTo34 +
+   * keepAtSlot) and SUPPRESSES `el`, the export's broken autoplay-from-0, so
+   * only the continuing decoder composites. A visibility-gated footprint owner
+   * then resolves the overlay, not the hidden restart. The bridge does NOT
+   * bindFacade (a one-shot DOM swap did not survive slide-4's second build):
+   * the overlay is authoritative, el is inert. The rects on the note are
+   * diagnostic only; identity is the objectID.
+   */
+  function carry(el, value, preserved, entry) {
+    const key = assetKey(value);
+    const bridge = entry.action === 'bridge';
+    unpool(preserved);
+    hold(preserved, entry);
+    tag(preserved);
+    note(bridge ? 'bridge-3to4' : 'reuse-decoder', {
+      key: key, newElId: el.__obedElId, oldElId: preserved.__obedElId,
+      preservedT: preserved.currentTime, paused: preserved.paused,
+      readyState: preserved.readyState,
+      oldGen: preserved.__obedGen, generation: preserveGeneration,
+      queueLeft: (pool.get(key) || []).length,
+      atScene: entry.atScene, src: entry.src.objectId, dst: entry.dst.objectId,
+      srcRect: entry.src.rect || null, measuredRect: authoredOfScreen(preserved.__obedRect)
+    });
+    if (bridge) {
+      bridgeTo34(preserved, entry);
+      el.__obedSuppressed34 = true;
+      keepSuppressed(el);
+      return;
+    }
+    if (preserved.__obedBridged34) {
+      preserved.__obedBridged34 = false;
+      preserved.__obedRemountEpoch = remountEpoch;
+    }
+    try {
+      if (el.id) preserved.id = el.id;
+      const st = el.getAttribute('style');
+      if (st) preserved.setAttribute('style', st);
+    } catch (e) {}
+    bindFacade(el, preserved);
+  }
+  /**
+   * A fresh element of a restarted movie at/after the restart's `atScene` is
+   * the authored fresh Start Movie — never stitch a preserved decoder onto it.
+   * Retire the decoders still carrying THIS restart's `src` so they stop
+   * remounting over the restart movie; any other instance is never touched.
+   * Not at `atScene - 1`: that would blank the outgoing movie during the Dissolve.
+   */
+  function retireRestarted(el, value) {
+    const mk = movieAssetKey(value);
+    const hn = currentHashNum();
+    if (mk == null || hn == null) return;
+    ENTRIES.forEach(function(b) {
+      if (b.action !== 'restart' || b.movieKey !== mk || hn < b.atScene) return;
+      const olds = carryCandidates().filter(function(c) { return c !== el && isCarrySource(c, b); });
+      if (!olds.length) return;
+      const key = assetKey(value);
+      note('reuse-skip-boundary', {key: key, newElId: el.__obedElId, hashNum: hn, boundary: b.atScene, queueLen: olds.length});
+      const elIds = olds.map(function(c) {
+        unpool(c);
+        return retireDecoder(c);
+      });
+      note('retire-on-start-movie', {key: key, elIds: elIds, hashNum: hn});
+    });
+  }
   const origCreate = Document.prototype.createElement;
   Document.prototype.createElement = function(name, opts) {
     const el = origCreate.call(this, name, opts);
@@ -1739,87 +1918,17 @@ PRESERVE_CORE_JS = r"""
     note('createElement-video', {elId: el.__obedElId, gen: preserveGeneration});
     const origSA = el.setAttribute.bind(el);
     el.setAttribute = function(attr, value) {
-      const isSrc = !disabled && String(attr).toLowerCase() === 'src';
-      if (isSrc) reidentify(el, value);
-      const mode = isSrc ? zoneMode(el, value) : null;
+      if (disabled || String(attr).toLowerCase() !== 'src') return origSA(attr, value);
+      reidentify(el, value);
+      const mode = zoneMode(el);
       if (mode === 'armed') noteHold(el, value, 'reuse');
-      if (mode === 'allow' || mode === 'released') {
-        const key = assetKey(value);
-        const hn = currentHashNum();
-        const boundary = restartMinHash();
-        const s4 = slide4MinHash();
-        const q = pool.get(key);
-        // Retire ONLY inside the 2->3 dissolve restart zone [boundary, s4). A
-        // fresh element at/after s4 is the 3->4 magic-move destination (authored
-        // continuity broken by the export's autoplay-from-0) and falls through to
-        // the reuse path below so the live decoder BRIDGES the moving cut.
-        const inDissolveRestartZone = hn != null && hn >= boundary
-          && (s4 == null || hn < s4);
-        if (inDissolveRestartZone && q && q.length) {
-          // On/after the restart boundary this is the authored fresh Start
-          // Movie — never stitch a preserved decoder onto it.
-          note('reuse-skip-boundary', {key: key, newElId: el.__obedElId, hashNum: hn, boundary: boundary, queueLen: q.length});
-          // Retire the old decoders for THIS key only so they stop remounting
-          // over the restart movie and polluting slide-3 clock scoring. A
-          // continuing movie under a different key is never touched.
-          const elIds = [];
-          while (q.length) {
-            elIds.push(retireDecoder(q.shift()));
-          }
-          pool.delete(key);
-          note('retire-on-start-movie', {key: key, elIds: elIds, hashNum: hn});
-        } else {
-          // Never reuse a decoder from an older preserve generation.
-          let preserved = null;
-          if (q && q.length) {
-            while (q.length) {
-              const cand = q.shift();
-              if ((cand.__obedGen == null ? 0 : cand.__obedGen) < preserveGeneration) {
-                note('reuse-skip-stale', {
-                  key: key, elId: cand.__obedElId,
-                  gen: cand.__obedGen, current: preserveGeneration
-                });
-                continue;
-              }
-              preserved = cand;
-              break;
-            }
-            if (q.length === 0) pool.delete(key);
-          }
-          if (preserved && preserved !== el) {
-            tag(preserved);
-            const bridging34 = s4 != null && hn != null && hn >= s4;
-            note(bridging34 ? 'bridge-3to4' : 'reuse-decoder', {
-              key: key, newElId: el.__obedElId, oldElId: preserved.__obedElId,
-              preservedT: preserved.currentTime, paused: preserved.paused,
-              readyState: preserved.readyState,
-              oldGen: preserved.__obedGen, generation: preserveGeneration,
-              queueLeft: q ? q.length : 0
-            });
-            if (bridging34) {
-              // 3->4 magic-move continuity: keep the preserved live decoder as a
-              // visible overlay at the slide-4 destination (bridgeTo34 + keepAtSlot)
-              // and SUPPRESS the export's fresh autoplay-from-0 element so only the
-              // continuing decoder composites. A visibility-gated footprint owner
-              // then resolves the overlay, not the hidden restart. We do NOT
-              // bindFacade here (a one-shot DOM swap did not survive slide-4's
-              // second build): the overlay is authoritative, el is inert.
-              bridgeTo34(preserved);
-              el.__obedSuppressed34 = true;
-              keepSuppressed(el);
-              return origSA(attr, value);
-            }
-            try {
-              if (el.id) preserved.id = el.id;
-              const st = el.getAttribute('style');
-              if (st) preserved.setAttribute('style', st);
-            } catch (e) {}
-            bindFacade(el, preserved);
-            return;
-          }
-        }
-      }
-      return origSA(attr, value);
+      if (mode !== 'allow') return origSA(attr, value);
+      retireRestarted(el, value);
+      const entry = carryEntryTo(instanceOf(el));
+      const preserved = entry ? pickCarried(el, value, entry) : null;
+      if (!preserved) return origSA(attr, value);
+      carry(el, value, preserved, entry);
+      if (entry.action === 'bridge') return origSA(attr, value);
     };
     return el;
   };
