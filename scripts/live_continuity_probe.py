@@ -64,7 +64,7 @@ import urllib.request
 from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator, Sequence
+from typing import Any, Callable, Collection, Iterator, Sequence
 
 import cv2
 import numpy as np
@@ -336,17 +336,6 @@ PRESERVE_SNAPSHOT_JS = r"""
 })()
 """
 
-def handback_js(dom_id: str) -> str:
-    """The player-created element of one destination instance (F1: `objectID + "-video"`)."""
-    return (
-        "(function(){var v=document.getElementById(" + json.dumps(dom_id) + ");"
-        "if(!v)return {present:false};"
-        "return {present:true,tag:String(v.tagName||'').toLowerCase(),connected:v.isConnected===true,"
-        "preserved:!!(v.dataset&&v.dataset.obedPreserved),remounted:!!(v.dataset&&v.dataset.obedRemounted),"
-        "facade:!!v.__obedFacadeFor,suppressed:!!v.__obedSuppressed34};})()"
-    )
-
-
 # The core's own notes a retire verdict needs (F5 `retire-boundary` plus every carry/refusal
 # kind), read once with the refusal evidence; `null` when no core is installed.
 CORE_EVENTS_JS = r"""
@@ -426,6 +415,10 @@ SAMPLER_JS = r"""
         readyState: v.readyState,
         videoWidth: v.videoWidth,
         isConnected: document.contains(v),
+        domId: v.id || null,
+        preserved: !!(v.dataset && v.dataset.obedPreserved),
+        remounted: !!(v.dataset && v.dataset.obedRemounted),
+        facade: !!v.__obedFacadeFor,
         rect: rect,
         footprintOwner: ownerOf(rect, v.currentSrc || v.src || '', map)
       });
@@ -979,6 +972,7 @@ def verdict_specs(plan: ContinuityPlan) -> list[dict[str, Any]]:
                 elif movie.refusal is not None:
                     add(
                         "retire", "refused", True, originalOrdinal=destination + 1, dstRect=movie.dst_rect.as_dict(),
+                        zoneUntilScene=later[0] if later else None,
                         rects=[
                             _authored_rect(rect)
                             for asset, instances in (plan.slide_instances.get(destination) or {}).items()
@@ -989,6 +983,7 @@ def verdict_specs(plan: ContinuityPlan) -> list[dict[str, Any]]:
             elif movie.action == "restart":
                 add(
                     "restart", "restart", True, srcRect=movie.src_rect.as_dict(), dstRect=movie.dst_rect.as_dict(),
+                    sourceScene=plan.scene_index_by_player.get(source),
                     settleUntilScene=later[0] if later else None,
                 )
             else:
@@ -1219,20 +1214,34 @@ def advance_until_original_slide(
         raise RuntimeError(f"did not reach slide {target}; stopped at {observed.original_slide}")
 
 
+def carry_destination_players(facts: dict[str, Any]) -> frozenset[int]:
+    """Player indices whose arrival crosses a carry boundary of the plan."""
+    return frozenset(spec["toPlayer"] for spec in facts.get("verdicts") or [] if spec["kind"] == "carry")
+
+
 def drive_and_sample(
-    player: LiveOutputHost, *, observer: Callable[[int], None] | None = None
+    player: LiveOutputHost, *, observer: Callable[[int], None] | None = None,
+    carry_into: Collection[int] = (),
 ) -> list[dict[str, Any]]:
     """Advance through every original slide in order (on P2: 2 is the 1->2 magic move, 3 the
     dissolve, which may straddle slide-2 builds, 4 the 3->4 magic move). `observer` is called
     once on each slide, slide 1 included -- the only hook the refusal evidence needs, and never
-    a screenshot."""
+    a screenshot. Before the press into a `carry_into` player index (other than the second
+    slide, which follows slide 1's own `CLICK_DELAY_S`), the source slide is let settle and
+    held `CLICK_DELAY_S` (1.5 s, P2's fast-profile `clickDelayS` before its 3->4 press), so
+    the carry's settled-source phase is always sampled."""
     transport = player._require_transport()
     transport.evaluate(SAMPLER_JS)
     transport.evaluate(ENSURE_PLAYING_JS)
     wait_for_decode(player)
     time.sleep(CLICK_DELAY_S)
-    ordinals = sorted(slide["originalOrdinal"] for slide in player.slides if not slide.get("skipped"))
-    for ordinal in ordinals:
+    shown = sorted((s for s in player.slides if not s.get("skipped")), key=lambda s: s["originalOrdinal"])
+    ordinals = [slide["originalOrdinal"] for slide in shown]
+    for index, slide in enumerate(shown):
+        ordinal = slide["originalOrdinal"]
+        if index >= 2 and slide.get("playerIndex") in carry_into:
+            wait_until_settled(player)
+            time.sleep(CLICK_DELAY_S)
         if ordinal != ordinals[0]:
             advance_until_original_slide(player, ordinal)
         if observer is not None:
@@ -1840,10 +1849,7 @@ def refusal_observer(
             return
         wait_until_settled(player)
         transport = player._require_transport()
-        read = {**refusal_evidence(transport), "coreEvents": transport.evaluate(CORE_EVENTS_JS)}
-        if retire.get("dstDomId"):
-            read["handback"] = {"domId": retire["dstDomId"], "element": transport.evaluate(handback_js(retire["dstDomId"]))}
-        out[retire["verdictKey"]] = read
+        out[retire["verdictKey"]] = {**refusal_evidence(transport), "coreEvents": transport.evaluate(CORE_EVENTS_JS)}
 
     return observe
 
@@ -2229,7 +2235,9 @@ def score_restart_strict(
 ) -> dict[str, Any]:
     """A restart inside a validated boundary window: a decoder never seen before the boundary
     starts near zero at the destination instance's rect, and every decoder seen at the source
-    instance's rect before the boundary is absent or disconnected after it."""
+    instance's rect anywhere on the source slide (`sourceScene` .. the boundary; not bounded by
+    the pad window, which a transition scene longer than `WINDOW_PAD_S` with no `<video>` would
+    swallow) is absent or disconnected inside the window after it."""
     errors = sample_schema_errors(samples)
     if errors:
         return _inconclusive("sample schema is invalid", schemaErrors=errors)
@@ -2255,9 +2263,14 @@ def score_restart_strict(
 
     if not any(settled(r) for r in windowed(samples)):
         return _inconclusive("no sample on the settled destination scene", window=window)
+    first = spec.get("sourceScene")
     source_ids = sorted(
         i for i, rows in tracks.items()
-        if any(r["scene"] < scene and rect_matches(r.get("rect"), spec["srcRect"], rect_tolerance) for r in windowed(rows))
+        if any(
+            r.get("scene") is not None and (first is None or r["scene"] >= first) and r["scene"] < scene
+            and rect_matches(r.get("rect"), spec["srcRect"], rect_tolerance)
+            for r in rows
+        )
     )
     if not source_ids:
         return _inconclusive("no decoder at the source instance before the boundary", window=window)
@@ -2298,13 +2311,52 @@ def _event_scene_of(event: dict[str, Any]) -> int | None:
     return hash_number(detail.get("sceneHash"))
 
 
-def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool) -> dict[str, Any]:
+def score_raw_handback(samples: Any, spec: dict[str, Any]) -> dict[str, Any]:
+    """Raw-player hand-back from the retained sampler rows: in the retire zone `[atScene,
+    zoneUntilScene)` the player's own element for the destination instance (`dstDomId`, F1)
+    is connected at `dstRect` on a settled row, was never seen before `atScene`, and is never
+    preserved, remounted or facaded. Never DOM-present in the zone (a WebGL poster, or rows
+    from a sampler without `domId`) is INCONCLUSIVE, never False."""
+    dom_id, lo, hi = spec.get("dstDomId"), spec["atScene"], spec.get("zoneUntilScene")
+    if not dom_id:
+        return _inconclusive("the retire verdict names no destination DOM id")
+    errors = sample_schema_errors(samples)
+    if errors:
+        return _inconclusive("sample schema is invalid", schemaErrors=errors)
+    if not any("domId" in v for row in samples for v in row["videos"]):
+        return _inconclusive("the samples carry no DOM ids")
+    rows = [(row, v) for row in samples for v in row["videos"] if v.get("domId") == dom_id]
+    if any(any(not isinstance(v.get(flag), bool) for flag in ("preserved", "remounted", "facade")) for _, v in rows):
+        return _inconclusive(f"{dom_id} rows carry unreadable preserve/remount/facade flags")
+    before = [row["t"] for row, _ in rows if row.get("scene") is not None and row["scene"] < lo]
+    zone = [
+        (row, v) for row, v in rows
+        if row.get("scene") is not None and row["scene"] >= lo and (hi is None or row["scene"] < hi)
+    ]
+    flagged = [row["t"] for row, v in zone if v["preserved"] or v["remounted"] or v["facade"]]
+    settled = [
+        (row, v) for row, v in zone
+        if row.get("busy") is False and row.get("playerState") != "Playing"
+    ]
+    handed = [row["t"] for row, v in settled if v["isConnected"] and rect_matches(v.get("rect"), spec["dstRect"])]
+    detail = {"domId": dom_id, "rowsInZone": len(zone), "settledAtRect": len(handed), "seenBefore": before[:5], "flagged": flagged[:5]}
+    if before or flagged:
+        return {"verdict": False, "reason": f"{dom_id} was carried (seen before the boundary or preserved/remounted/facaded)", **detail}
+    if handed:
+        return {"verdict": True, "reason": None, **detail}
+    if not settled:
+        return _inconclusive(f"{dom_id} is never DOM-present on a settled row of the retire zone", **detail)
+    return {"verdict": False, "reason": f"{dom_id} is present but never connected at its authored rect", **detail}
+
+
+def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, samples: Any = None) -> dict[str, Any]:
     """The positive half of a refused carry: the raw player's own element for the destination
-    instance (hand-back), `score_refusal`'s settled DOM/pool checks, and -- when the runtime is
-    installed -- the core's contract (module docstring, "retire"): at least one refusal note for
-    the movie from the transition scene on, `preserve-refused` (key, via, scene) from a declining
-    hook or `retire-boundary` (key, elIds, atScene) from the keep-warm sweep of decoders pooled
-    before the zone, and no carry note (`CARRY_EVENT_KINDS`) for its key or elements in the zone.
+    instance (`score_raw_handback`, from the retained samples), `score_refusal`'s settled DOM/pool
+    checks, and -- when the runtime is installed -- the core's contract (module docstring,
+    "retire"): at least one refusal note for the movie in the zone `[atScene - 1, the next
+    slide's transition scene)`, `preserve-refused` (key, via, scene) from a declining hook or
+    `retire-boundary` (key, elIds, atScene) from the keep-warm sweep of decoders pooled before
+    the zone, and no carry note (`CARRY_EVENT_KINDS`) for its key or elements in that zone.
     Unreadable evidence is INCONCLUSIVE."""
     if not isinstance(sample, dict):
         return _inconclusive("no refusal evidence was sampled on the destination slide")
@@ -2314,21 +2366,14 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool) -> 
         painting_videos(sample.get("painting"), sample["stageMap"])
     except VisiblePassError as exc:
         return _inconclusive(str(exc))
-    handback = sample.get("handback")
-    element = handback.get("element") if isinstance(handback, dict) else None
-    if not spec.get("dstDomId") or not isinstance(handback, dict) or handback.get("domId") != spec["dstDomId"]:
-        return _inconclusive("no raw-player hand-back read for the destination instance")
-    if not isinstance(element, dict) or not isinstance(element.get("present"), bool):
-        return _inconclusive(f"the hand-back read is unreadable: {element!r}")
-    handed_back = element["present"] and element.get("tag") == "video" and element.get("connected") is True and not any(
-        element.get(flag) is not False for flag in ("preserved", "remounted", "facade")
-    )
-    if not handed_back:
-        refused = score_refusal(sample, spec, runtime_installed)
-        return {**refused, "verdict": False, "handback": element,
-                "reason": f"no connected raw player <video id={spec['dstDomId']}> on the destination: {element}"}
+    handback = score_raw_handback(samples, spec)
+    if handback["verdict"] is False:
+        return {**score_refusal(sample, spec, runtime_installed), "verdict": False, "handback": handback,
+                "reason": handback["reason"]}
+    if handback["verdict"] is None:
+        return _inconclusive(f"hand-back: {handback['reason']}", handback=handback)
     if not runtime_installed:
-        return {**score_refusal(sample, spec, runtime_installed), "handback": element}
+        return {**score_refusal(sample, spec, runtime_installed), "handback": handback}
     events = sample.get("coreEvents")
     if not isinstance(sample.get("poolSnapshot"), list):
         return _inconclusive(f"preserve snapshot is unreadable: {sample.get('poolSnapshot')!r}")
@@ -2337,6 +2382,10 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool) -> 
     movie_key, scene = spec.get("movieKey"), spec["atScene"]
     if movie_key is None:
         return _inconclusive("the retire verdict is bound to no runtime movie key")
+    zone_end = spec["zoneUntilScene"] - 1 if spec.get("zoneUntilScene") is not None else math.inf
+
+    def in_zone(value: Any) -> bool:
+        return value is not None and scene - 1 <= value < zone_end
 
     def keyed(detail: dict[str, Any]) -> bool:
         key = detail.get("key")
@@ -2353,7 +2402,7 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool) -> 
             (e.get("kind") == "retire-boundary" and d.get("atScene") == scene and isinstance(d.get("elIds"), list))
             or (
                 e.get("kind") == "preserve-refused" and isinstance(d.get("via"), str) and d["via"]
-                and _finite_number(d.get("scene")) is not None and d["scene"] >= scene - 1
+                and in_zone(_finite_number(d.get("scene")))
             )
         )
     ]
@@ -2361,17 +2410,17 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool) -> 
         e for e, d in details
         if e.get("kind") in CARRY_EVENT_KINDS
         and (keyed(d) or any(d.get(f) in el_ids for f in ("elId", "newElId") if d.get(f) is not None))
-        and (_event_scene_of(e) is None or _event_scene_of(e) >= scene - 1)
+        and (_event_scene_of(e) is None or in_zone(_event_scene_of(e)))
     ]
     scored = score_refusal(sample, spec, runtime_installed)
     reasons = [scored["reason"]] if scored.get("reason") else []
     if not notes:
-        reasons.append(f"no preserve-refused/retire-boundary note for {movie_key} from scene {scene - 1}")
+        reasons.append(f"no preserve-refused/retire-boundary note for {movie_key} in scenes [{scene - 1}, {zone_end})")
     if carries:
         reasons.append(f"{len(carries)} carry note(s) for {movie_key} in the retire zone")
     return {
         **scored, "verdict": not reasons, "reason": "; ".join(reasons) or None,
-        "retireNotes": notes, "carryNotes": carries, "handback": element,
+        "retireNotes": notes, "carryNotes": carries, "handback": handback,
     }
 
 
@@ -2419,7 +2468,12 @@ def score_armed_strict(reads: Any, armed: dict[str, Any], continuity: Any, sampl
     problem = armed_reads_problem(reads)
     if problem:
         return _inconclusive(problem, evidence=reads if isinstance(reads, dict) else None)
-    return score_armed(reads, armed, continuity, owner_ids=pre_flip_owner_ids(samples if isinstance(samples, list) else [], armed))
+    if not isinstance(continuity, dict):
+        return _inconclusive(f"the host continuity read is unreadable: {continuity!r}")
+    owners = pre_flip_owner_ids(samples if isinstance(samples, list) else [], armed)
+    if not any(owner is not None for owner in owners):
+        return _inconclusive("no pre-flip sample at the armed instance rect resolved an owner")
+    return score_armed(reads, armed, continuity, owner_ids=owners)
 
 
 def score_verdicts(
@@ -2436,7 +2490,7 @@ def score_verdicts(
         elif kind == "restart":
             scored[spec["id"]] = score_restart_strict(samples, spec)
         elif kind == "retire":
-            scored[spec["id"]] = score_retire(evidence.get(spec_key(spec)), spec, runtime_installed)
+            scored[spec["id"]] = score_retire(evidence.get(spec_key(spec)), spec, runtime_installed, samples)
         elif kind == "armed":
             armed = facts.get("armed")
             if not isinstance(armed, dict) or armed.get("verdictId") != spec["id"]:
@@ -2592,7 +2646,7 @@ def run_arm(
         if census:
             result["censusRaw"] = {}
             observer = census_observer(player, observer, result["censusRaw"])
-        raw_samples = drive_and_sample(player, observer=observer)
+        raw_samples = drive_and_sample(player, observer=observer, carry_into=carry_destination_players(arm_facts))
         samples, invalid_count = convert_samples_to_authored(raw_samples)
         result["samples"] = samples
         result["sampleCount"] = len(samples)
@@ -2699,7 +2753,10 @@ def run_attach_arm(
                 computed_background = transport.evaluate("getComputedStyle(document.documentElement).backgroundColor")
                 result["transparentBackground"] = {"plan": bool(plan_transparent), "computedBackground": computed_background}
                 evidence: dict[str, Any] = {}
-                raw_samples = drive_and_sample(player, observer=boundary_observer(player, attach_facts, evidence))
+                raw_samples = drive_and_sample(
+                    player, observer=boundary_observer(player, attach_facts, evidence),
+                    carry_into=carry_destination_players(attach_facts),
+                )
                 samples, invalid_count = convert_samples_to_authored(raw_samples)
                 result["samples"] = samples
                 result["sampleCount"] = len(samples)
@@ -5581,14 +5638,17 @@ def _plain(value: Any) -> Any:
     return json.loads(json.dumps(value, default=str))
 
 
-def _rederivable(spec: dict[str, Any], evidence: Any) -> str | None:
+def _rederivable(spec: dict[str, Any], evidence: Any, samples: Any = None) -> str | None:
     """Why a stored verdict cannot be re-derived from what the artifact retained, else None."""
     if spec["kind"] in ("carry", "restart"):
         return None
     read = evidence.get(spec_key(spec)) if isinstance(evidence, dict) else None
     if spec["kind"] == "retire":
-        return None if isinstance(read, dict) and "coreEvents" in read and "handback" in read else (
-            "no retained refusal evidence with core events and the hand-back read"
+        has_dom_ids = isinstance(samples, list) and any(
+            isinstance(row, dict) and any(isinstance(v, dict) and "domId" in v for v in row.get("videos") or []) for row in samples
+        )
+        return None if isinstance(read, dict) and "coreEvents" in read and has_dom_ids else (
+            "no retained refusal evidence with core events, or samples without DOM ids (hand-back)"
         )
     if spec["kind"] == "armed":
         problem = armed_reads_problem(read)
@@ -5626,7 +5686,7 @@ def rescore_generated(result: dict[str, Any], facts: dict[str, Any], facts_on: d
             key = spec_key(spec)
             stored = entry.get(key)
             stored_verdict = stored.get("verdict") if isinstance(stored, dict) else None
-            why = _rederivable(spec, evidence)
+            why = _rederivable(spec, evidence, entry["samples"])
             if why is not None:
                 rows[key] = {"id": spec["id"], "match": None, "storedVerdict": stored_verdict, "reason": f"inconclusive: {why}"}
                 counts["notRederivable"] += 1

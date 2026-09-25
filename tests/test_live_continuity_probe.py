@@ -6374,15 +6374,38 @@ class TestRestartVerdict:
         assert self._score(samples)["verdict"] is None
 
 
-HANDED_BACK = {"present": True, "tag": "video", "connected": True, "preserved": False, "remounted": False, "facade": False, "suppressed": False}
-
-
-def _retire_read(events: Any = (), *, painting: Any = (), pool: Any = (), element: Any = HANDED_BACK) -> dict[str, Any]:
+def _retire_read(events: Any = (), *, painting: Any = (), pool: Any = ()) -> dict[str, Any]:
     return {
         "stageMap": dict(IDENTITY_STAGE_MAP), "painting": list(painting), "poolSnapshot": list(pool) if isinstance(pool, tuple) else pool,
         "coreEvents": list(events) if isinstance(events, tuple) else events,
-        "handback": {"domId": P2_SLIDE2_DOM_ID, "element": dict(element) if isinstance(element, dict) else element},
     }
+
+
+def _dom(v: dict[str, Any], dom_id: Any = None, **flags: Any) -> dict[str, Any]:
+    return {**v, "domId": dom_id, "preserved": False, "remounted": False, "facade": False, **flags}
+
+
+def _handback_samples(
+    *, present: bool = True, before: bool = False, settled: bool = True, connected: bool = True,
+    rect: dict[str, float] | None = None, **flags: Any,
+) -> list[dict[str, Any]]:
+    """P2's real layout (r1 evidence): no `<video>` on scenes 1-3; the raw player's slide-2
+    element appears on scene 4 (its Start Movie build); slide 3 (scene 6) has its own."""
+    pin = _p2_facts()["pinRect"]
+    rows = []
+    for i, scene in enumerate([1] * 10 + [2] * 10 + [3] * 10 + [4] * 20 + [5] * 10 + [6] * 10):
+        t = i * 50.0
+        videos = []
+        if present and (scene == 4 or (before and scene == 1)):
+            videos.append(_dom(video(id=5, el_id=None, t=t, scene=scene, current_time=t / 1000, rect=dict(rect or pin),
+                                     is_connected=connected), P2_SLIDE2_DOM_ID, **flags))
+        if scene == 6:
+            videos.append(_dom(video(id=6, el_id=None, t=t, scene=6, current_time=t / 1000, rect=dict(pin)), "OTHER-video"))
+        row = sample(t, scene, *videos)
+        moving = scene == 4 and not settled
+        row.update(playerState="Playing" if moving else "IdleAtFinalState", busy=moving)
+        rows.append(row)
+    return rows
 
 
 RETIRE_NOTE = _ev("retire-boundary", key="movie1", elIds=[3], atScene=2, sceneHash="#2")
@@ -6392,29 +6415,36 @@ REFUSED_NOTE = _ev("preserve-refused", key="movie1", scene=1, via="stash", scene
 
 
 class TestRetireVerdict:
-    """Codex r1 #8 / live gate r1: at least one refusal note (`preserve-refused` or `retire-boundary`)
-    per the core's documented contract, no carry note in the zone, the hand-back, and the settled checks."""
+    """Codex r1 #8 / live gate r1 / Opus r3 N1: at least one refusal note in the zone, no carry
+    note there, the raw player's own element for the destination instance on the retained
+    samples, and the settled checks."""
 
-    def _score(self, read: Any, installed: bool = True) -> dict[str, Any]:
-        return probe.score_retire(read, _spec(_p2_facts(), P2_RETIRE12), installed)
+    def _score(self, read: Any, installed: bool = True, samples: Any = None) -> dict[str, Any]:
+        return probe.score_retire(read, _spec(_p2_facts(), P2_RETIRE12), installed, _handback_samples() if samples is None else samples)
+
+    def test_the_zone_is_the_destination_slide(self) -> None:
+        spec = _spec(_p2_facts(), P2_RETIRE12)
+        assert (spec["atScene"], spec["zoneUntilScene"], spec["dstRect"]) == (2, 6, _p2_facts()["pinRect"])
 
     @pytest.mark.parametrize("notes", [(REFUSED_NOTE,), (RETIRE_NOTE,), (REFUSED_NOTE, RETIRE_NOTE), (RETIRE_NOTE, RETIRE_NOTE)])
     def test_any_refusal_note_for_the_movie_in_the_zone_is_green(self, notes: tuple[Any, ...]) -> None:
         scored = self._score(_retire_read(notes))
         assert scored["verdict"] is True and len(scored["retireNotes"]) == len(notes)
-        assert {note["kind"] for note in scored["retireNotes"]} == {note["kind"] for note in notes}
 
-    def test_the_live_p2_zone_shape_is_green(self) -> None:
-        """Gate r1: one preserve-refused, no retire-boundary -> refused1to2 must read True."""
-        assert self._score(_retire_read((REFUSED_NOTE,)))["verdict"] is True
+    def test_the_live_p2_shape_is_green(self) -> None:
+        """Gate r1: one preserve-refused, no retire-boundary, no <video> until scene 4."""
+        scored = self._score(_retire_read((REFUSED_NOTE,)))
+        assert scored["verdict"] is True and scored["handback"]["verdict"] is True
 
     @pytest.mark.parametrize("notes", [
         (), (_ev("retire-boundary", key="movie1", elIds=[3], atScene=6),), (_ev("retire-boundary", key="movie2", elIds=[3], atScene=2),),
         (_ev("retire-boundary", key="movie1", atScene=2),), (_ev("preserve-refused", key="movie1", scene=0, via="stash"),),
         (_ev("preserve-refused", key="movie2", scene=1, via="stash"),), (_ev("preserve-refused", key="movie1", scene=1),),
         (_ev("preserve-refused", key="movie1", scene=None, via="stash"),),
+        (_ev("preserve-refused", key="movie1", scene=5, via="stash"),), (_ev("preserve-refused", key="movie1", scene=7, via="stash"),),
     ])
-    def test_known_bad_no_matching_refusal_note_is_red(self, notes: tuple[Any, ...]) -> None:
+    def test_known_bad_no_matching_refusal_note_in_the_zone_is_red(self, notes: tuple[Any, ...]) -> None:
+        """The zone is [atScene - 1, next slide's transition scene): a later note of the same key does not count."""
         scored = self._score(_retire_read(notes))
         assert scored["verdict"] is False and "no preserve-refused/retire-boundary note" in scored["reason"]
 
@@ -6427,8 +6457,11 @@ class TestRetireVerdict:
         scored = self._score(_retire_read((carry, RETIRE_NOTE)))
         assert scored["verdict"] is False and scored["carryNotes"] == [carry]
 
-    def test_a_carry_note_before_the_zone_or_for_another_movie_is_not(self) -> None:
-        events = (_ev("remount-done", elId=5, key="untitled.mov", sceneHash="#0"), _ev("remount-done", elId=8, key="other.mov", sceneHash="#2"), RETIRE_NOTE)
+    def test_a_carry_note_outside_the_zone_or_for_another_movie_is_not(self) -> None:
+        events = (
+            _ev("remount-done", elId=5, key="untitled.mov", sceneHash="#0"), _ev("remount-done", elId=8, key="other.mov", sceneHash="#2"),
+            _ev("reuse-decoder", key="untitled.mov", newElId=7, oldElId=3, sceneHash="#8"), RETIRE_NOTE,
+        )
         assert self._score(_retire_read(events))["verdict"] is True
 
     def test_known_bad_the_settled_checks_still_hold(self) -> None:
@@ -6447,39 +6480,47 @@ class TestRetireVerdict:
         assert self._score(_retire_read(None), installed=False)["verdict"] is True
 
     @pytest.mark.parametrize("change", [
-        {"present": False}, {"connected": False}, {"tag": "iframe"}, {"preserved": True}, {"remounted": True}, {"facade": True},
+        {"before": True}, {"preserved": True}, {"remounted": True}, {"facade": True}, {"connected": False},
+        {"rect": {"x": 400.0, "y": 100.0, "w": 300.0, "h": 100.0}},
     ])
     @pytest.mark.parametrize("installed", [True, False])
-    def test_known_bad_no_raw_player_element_for_the_destination_instance_is_red(self, change: dict[str, Any], installed: bool) -> None:
-        """Coordinator R1-8: a blank destination with a well-formed retire note is not a hand-back."""
-        scored = self._score(_retire_read((RETIRE_NOTE,), element={**HANDED_BACK, **change}), installed)
+    def test_known_bad_a_carried_or_absent_raw_element_is_red(self, change: dict[str, Any], installed: bool) -> None:
+        scored = self._score(_retire_read((RETIRE_NOTE,)), installed, _handback_samples(**change))
         assert scored["verdict"] is False and P2_SLIDE2_DOM_ID in scored["reason"]
 
-    @pytest.mark.parametrize("handback", [None, {"domId": "other-video", "element": HANDED_BACK}, {"domId": P2_SLIDE2_DOM_ID, "element": None},
-                                          {"domId": P2_SLIDE2_DOM_ID, "element": {"error": "x"}}])
-    def test_a_missing_or_unreadable_hand_back_read_is_inconclusive(self, handback: Any) -> None:
-        read = _retire_read((RETIRE_NOTE,))
-        read["handback"] = handback
-        assert self._score(read)["verdict"] is None
+    @pytest.mark.parametrize("samples", ["never", "noDomIds", "onlyMoving", "notList", "badFlags"])
+    def test_a_hand_back_the_samples_cannot_show_is_inconclusive_not_red(self, samples: str) -> None:
+        """The destination element never DOM-present on a settled zone row (e.g. a WebGL poster) is not a red."""
+        rows: Any
+        if samples == "never":
+            rows = _handback_samples(present=False)
+        elif samples == "noDomIds":
+            rows = _p2_run_samples()
+        elif samples == "onlyMoving":
+            rows = _handback_samples(settled=False)
+        elif samples == "notList":
+            rows = {"samples": []}
+        else:
+            rows = _handback_samples(preserved=None)
+        assert self._score(_retire_read((RETIRE_NOTE,)), samples=rows)["verdict"] is None
 
     def test_a_spec_without_its_dom_id_is_inconclusive(self) -> None:
         spec = {k: v for k, v in _spec(_p2_facts(), P2_RETIRE12).items() if k != "dstDomId"}
-        assert probe.score_retire(_retire_read((RETIRE_NOTE,)), spec, True)["verdict"] is None
+        assert probe.score_retire(_retire_read((RETIRE_NOTE,)), spec, True, _handback_samples())["verdict"] is None
 
-    def test_the_observer_retains_the_core_events_and_the_hand_back_read(self) -> None:
-        retire = dict(probe.retire_fact(synthetic_plan(), RETIRED_RUNTIME, BOUNDARY_KEYS), dstDomId=P2_SLIDE2_DOM_ID)
+    def test_the_observer_retains_the_core_events(self) -> None:
+        retire = probe.retire_fact(synthetic_plan(), RETIRED_RUNTIME, BOUNDARY_KEYS)
         out: dict[str, Any] = {}
         host = ArmedHost([])
         probe.boundary_observer(host, {"retire": retire}, out)(2)
-        read = out["refused1to2"]
-        assert "coreEvents" in read and probe.CORE_EVENTS_JS in host.transport.evaluations
-        assert read["handback"]["domId"] == P2_SLIDE2_DOM_ID and probe.handback_js(P2_SLIDE2_DOM_ID) in host.transport.evaluations
+        assert "coreEvents" in out["refused1to2"] and probe.CORE_EVENTS_JS in host.transport.evaluations
 
-    def test_the_hand_back_expression_names_the_instance_and_reads_every_flag(self) -> None:
-        js = probe.handback_js(P2_SLIDE2_DOM_ID)
-        assert json.dumps(P2_SLIDE2_DOM_ID) in js
-        for term in ("isConnected", "obedPreserved", "obedRemounted", "__obedFacadeFor"):
-            assert term in js
+    def test_the_sampler_records_the_dom_id_and_every_carry_flag(self) -> None:
+        for term in ("domId: v.id", "obedPreserved", "obedRemounted", "__obedFacadeFor"):
+            assert term in probe.SAMPLER_JS
+
+
+PRE_FLIP = [{"scene": 1, "videos": [{"src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 1}}]}]
 
 
 class TestArmedVerdict:
@@ -6489,7 +6530,13 @@ class TestArmedVerdict:
 
     def test_readable_reads_are_score_armed(self) -> None:
         reads = _armed_reads()
-        assert probe.score_armed_strict(reads, ARMED, GL_CONTINUITY, []) == probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[])
+        assert probe.score_armed_strict(reads, ARMED, GL_CONTINUITY, PRE_FLIP) == probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[1])
+
+    @pytest.mark.parametrize(("continuity", "samples"), [(None, "ok"), ("x", "ok"), (GL_CONTINUITY, "none"), (GL_CONTINUITY, "unresolved")])
+    def test_an_unreadable_continuity_read_or_no_pre_flip_owner_is_inconclusive(self, continuity: Any, samples: str) -> None:
+        """Opus r3 R1-3: neither is a fully observed contrary behaviour."""
+        rows = {"ok": PRE_FLIP, "none": [], "unresolved": [dict(PRE_FLIP[0], videos=[dict(PRE_FLIP[0]["videos"][0], footprintOwner=None)])]}[samples]
+        assert probe.score_armed_strict(_armed_reads(), ARMED, continuity, rows)["verdict"] is None
 
     def test_an_armed_spec_without_its_armed_fact_is_inconclusive(self) -> None:
         facts = probe.ground_truth_facts(_p2_plan(gl=True))
@@ -6505,6 +6552,12 @@ def _stored_artifact(*, evidence: bool = False, arms: tuple[str, ...] = ("A", "B
     """A host artifact as the S1 base probe stored it (legacy scorers, no raw evidence unless asked)."""
     facts = _p2_facts()
     samples = _p2_run_samples()
+    if evidence:
+        pin = facts["pinRect"]
+        for row in samples:
+            row["videos"] = [_dom(v) for v in row["videos"]]
+            if row["scene"] == 5:
+                row["videos"].append(_dom(video(id=5, el_id=None, t=row["t"], scene=5, current_time=1.0, rect=dict(pin)), P2_SLIDE2_DOM_ID))
     stored: dict[str, Any] = {}
     for name in arms:
         mode = "off" if name == "B" else "qualified"
@@ -6512,7 +6565,7 @@ def _stored_artifact(*, evidence: bool = False, arms: tuple[str, ...] = ("A", "B
         read = _retire_read((RETIRE_NOTE,))
         arm: dict[str, Any] = {"continuity": {"mode": mode}, "samples": samples}
         arm.update(_plain(probe.score_boundaries(samples, facts, installed)))
-        arm["refused1to2"] = _plain(probe.score_retire(read, _spec(facts, P2_RETIRE12), installed))
+        arm["refused1to2"] = _plain(probe.score_retire(read, _spec(facts, P2_RETIRE12), installed, samples))
         if evidence:
             arm["evidence"] = {"refused1to2": read}
         stored[name] = arm
@@ -7034,7 +7087,7 @@ class TestCoordinatorR2:
         for read in reads:
             read["glReplay"]["api"] = None
         assert probe.armed_reads_problem(reads) is None
-        assert probe.score_armed_strict(reads, ARMED, GL_CONTINUITY, [])["verdict"] is False
+        assert probe.score_armed_strict(reads, ARMED, GL_CONTINUITY, PRE_FLIP)["verdict"] is False
 
     @pytest.mark.parametrize(("evidence", "rederivable"), [
         ({}, False), ({"armed1to2": {"reason": "x"}}, False), ({"armed1to2": _armed_reads()[:1]}, False), ({"armed1to2": _armed_reads()}, True),
@@ -7042,3 +7095,51 @@ class TestCoordinatorR2:
     def test_armed_evidence_is_rederivable_only_as_two_schema_valid_reads(self, evidence: dict[str, Any], rederivable: bool) -> None:
         spec = _spec(_p2_facts(gl=True), P2_ARMED12)
         assert (probe._rederivable(spec, evidence) is None) is rederivable
+
+
+class TestOpusR3:
+    def test_restart_finds_its_source_across_a_transition_longer_than_the_pad(self) -> None:
+        """N3: P2's scene-5 dissolve is ~2 s with no <video>; the source is on scenes 2-4."""
+        rows = []
+        for row in _p2_run_samples():
+            if row["scene"] == 5:
+                continue
+            rows.append(row)
+        shifted = []
+        pin = _p2_facts()["pinRect"]
+        for i in range(20):
+            t = 3000.0 + i * 50.0
+            row = sample(t, 4, video(id=1, el_id=1, t=t, scene=4, current_time=8 + i * 0.05, rect=dict(pin)))
+            row.update(playerState="IdleAtFinalState", busy=False)
+            shifted.append(row)
+        for i in range(int(probe.WINDOW_PAD_S * 20) + 20):
+            row = sample(4000.0 + i * 50.0, 5)
+            row.update(playerState="Playing", busy=True)
+            shifted.append(row)
+        offset = shifted[-1]["t"] + 50.0 - next(r["t"] for r in rows if r["scene"] == 6)
+        later = []
+        for row in rows:
+            if row["scene"] >= 6:
+                row = dict(row, t=row["t"] + offset, videos=[dict(v) for v in row["videos"]])
+            later.append(row)
+        samples = sorted([r for r in later if r["scene"] < 6] + shifted + [r for r in later if r["scene"] >= 6], key=lambda r: r["t"])
+        spec = _spec(_p2_facts(), P2_RESTART23)
+        assert spec["sourceScene"] == 2
+        scored = probe.score_restart_strict(samples, spec)
+        assert scored["verdict"] is True and scored["sourceIds"] == [1]
+        assert probe.score_restart(samples, "untitled.mov", 6)["verdict"] is True
+
+    def test_every_arm_holds_the_source_slide_of_a_carry_before_its_press(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Stash-any r1: the 3->4 settled source must always be sampled; P2's clickDelayS (1.5 s)."""
+        calls: list[Any] = []
+        monkeypatch.setattr(probe, "wait_for_decode", lambda player: True)
+        monkeypatch.setattr(probe, "wait_until_settled", lambda player: calls.append("settle"))
+        monkeypatch.setattr(probe, "advance_until_original_slide", lambda player, ordinal: calls.append(("advance", ordinal)))
+        monkeypatch.setattr(probe.time, "sleep", lambda s: calls.append(("sleep", s)))
+        player = _SlidesPlayer(4)
+        player.transport.evaluate = lambda expression: []
+        probe.drive_and_sample(player, carry_into=probe.carry_destination_players(_p2_facts()))
+        assert probe.carry_destination_players(_p2_facts()) == {1, 3}
+        index = calls.index(("advance", 4))
+        assert calls[index - 2:index] == ["settle", ("sleep", probe.CLICK_DELAY_S)] and probe.CLICK_DELAY_S == 1.5
+        assert calls.count("settle") == 1
