@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import dataclasses
+import gzip
 import importlib.util
 import json
 import math
@@ -6368,8 +6370,11 @@ class TestCarryVerdict:
         assert {key: value["verdict"] for key, value in legacy.items()} == {
             "continue1to2": True, "restart2to3": True, "continue3to4": True,
         }
-        for key in ("continue1to2", "continue3to4"):
-            assert _plain(scored[key]) == _plain(legacy[key])
+        assert _plain(scored["continue3to4"]) == _plain(legacy["continue3to4"])
+        # S2 i1: the 1->2 window now stops before slide 2's own outgoing transition (scene 5).
+        clipped = _plain(scored["continue1to2"])
+        assert clipped["verdict"] is True and clipped["window"].pop("chainClipped") == {"end": legacy["continue1to2"]["window"]["end"]}
+        assert clipped["window"]["end"] < min(r["t"] for r in samples if r["scene"] == 5)
         assert scored["restart2to3"]["verdict"] is True
 
     @needs_base
@@ -7344,8 +7349,10 @@ class TestOpusR3:
         assert scored["verdict"] is True and scored["sourceIds"] == [1]
         assert probe.score_restart(samples, "untitled.mov", 6)["verdict"] is True
 
-    def test_every_arm_holds_the_source_slide_of_a_carry_before_its_press(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Stash-any r1: the 3->4 settled source must always be sampled; P2's clickDelayS (1.5 s)."""
+    def test_every_arm_holds_the_source_and_destination_of_a_carry_before_its_press(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Stash-any r1: the 3->4 settled source must always be sampled; P2's clickDelayS (1.5 s).
+        S2 i1 (D2): a carry destination is held too before the press out of it, so its settled
+        destination phase is sampled before the next boundary."""
         calls: list[Any] = []
         monkeypatch.setattr(probe, "wait_for_decode", lambda player: True)
         monkeypatch.setattr(probe, "wait_until_settled", lambda player: calls.append("settle"))
@@ -7355,6 +7362,121 @@ class TestOpusR3:
         player.transport.evaluate = lambda expression: []
         probe.drive_and_sample(player, carry_into=probe.carry_destination_players(_p2_facts()))
         assert probe.carry_destination_players(_p2_facts()) == {1, 3}
-        index = calls.index(("advance", 4))
-        assert calls[index - 2:index] == ["settle", ("sleep", probe.CLICK_DELAY_S)] and probe.CLICK_DELAY_S == 1.5
-        assert calls.count("settle") == 1
+        for target in (3, 4):
+            index = calls.index(("advance", target))
+            assert calls[index - 2:index] == ["settle", ("sleep", probe.CLICK_DELAY_S)] and probe.CLICK_DELAY_S == 1.5
+        assert calls.count("settle") == 2
+        assert calls[:2] == [("sleep", probe.FIRST_CLICK_DWELL_S), ("advance", 2)] and probe.FIRST_CLICK_DWELL_S == 3.0
+
+
+# --------------------------------------------------------------------------
+# S2 dev loop i1 (`output/evidence/s2-dev/i1-8207b263`, S2 head 8207b263, core v6): the
+# instrument defects the first deck run found, each pinned on the run's own samples
+# (`tests/fixtures/live_continuity_probe_i1`, arm A excerpts), plus the red it must keep.
+# --------------------------------------------------------------------------
+
+I1 = json.loads(gzip.decompress((REPO / "tests" / "fixtures" / "live_continuity_probe_i1" / "i1_arm_a_excerpts.json.gz").read_bytes()))
+
+
+def _deck_facts(name: str) -> dict[str, Any]:
+    root = QUAL_ROOT / name
+    slides = probe.load_slides(root)
+    plan = _deck_plan(name)
+    facts = probe.ground_truth_facts(plan, arrival=probe.arrival_starts(root, slides, plan))
+    probe.bind_dom_ids(facts, probe.movie_nodes(root, slides))
+    return facts
+
+
+class TestChainCarryWindow:
+    D2_CARRY12 = "b0to1:counter-a.mov#1->counter-a.mov#1:carry"
+
+    def test_a_carry_window_ends_before_its_destinations_outgoing_transition(self) -> None:
+        """D2: the 1->2 bridge's padded window used to run past slide 2's Dissolve into slide 3,
+        where the restart rightly retires the carried decoder -- a false red on a clean carry."""
+        spec = _spec(_deck_facts("D2"), self.D2_CARRY12)
+        assert (spec["sourceScene"], spec["untilScene"]) == (0, 4)
+        scored = probe.score_carry(I1["D2_A_samples"], spec, True)
+        assert scored["verdict"] is True, scored.get("reason")
+        assert scored["window"]["end"] < min(r["t"] for r in I1["D2_A_samples"] if r["scene"] == 3)
+        assert "end" in scored["window"]["chainClipped"]
+
+    def test_known_bad_without_the_clip_the_next_boundary_leaks_in(self) -> None:
+        spec = {k: v for k, v in _spec(_deck_facts("D2"), self.D2_CARRY12).items() if k not in ("sourceScene", "untilScene")}
+        scored = probe.score_carry(I1["D2_A_samples"], spec, True)
+        assert scored["verdict"] is False and scored["missingSamples"]
+
+    def test_the_v6_early_move_on_a_settled_slide_stays_red(self) -> None:
+        """D1 (runtime finding, not clipped away): the carried decoder starts toward slide 3's
+        rect while slide 2 is settled (scene 2, busy False), before any press."""
+        spec = _spec(_deck_facts("D1"), "b0to1:counter-a.mov#1->counter-a.mov#1:carry")
+        scored = probe.score_carry(I1["D1_A_samples"], spec, True)
+        assert scored["verdict"] is False
+        after = [m for m in scored["rectMismatches"] if m["phase"] == "after"]
+        assert after and all(
+            next(r for r in I1["D1_A_samples"] if r["t"] == m["t"])["scene"] == 2 for m in after
+        )
+
+    def test_a_spec_without_chain_fields_is_not_clipped(self) -> None:
+        assert probe.carry_window_clip(I1["D2_A_samples"], {"atScene": 2}) == (None, None)
+
+    def test_a_single_scene_destination_is_not_clipped_at_its_own_arrival(self) -> None:
+        rows = [{"t": 1.0, "scene": 2}, {"t": 2.0, "scene": 3}]
+        assert probe.carry_window_clip(rows, {"atScene": 2, "untilScene": 3, "sourceScene": 0}) == (1.0, None)
+
+
+class TestRetireHandback:
+    RETIRE = "b3to4:counter-a.mov#1->counter-a.mov#1:retire"
+
+    def test_the_raw_players_own_destination_element_is_not_an_overlap(self) -> None:
+        """D6 (R4 retire, S4->S5): the export restarts S5's movie, so its own
+        `<objectID>-video` paints at the retired rect -- exactly the hand-back, not a stray."""
+        spec = _spec(_deck_facts("D6"), self.RETIRE)
+        scored = probe.score_retire(I1["D6_A_refused4to5"], spec, True, I1["D6_A_samples"])
+        assert scored["verdict"] is True, scored.get("reason")
+        assert scored["handback"]["elIds"] == [6] and scored["retireNotes"]
+
+    def test_known_bad_any_other_painter_over_the_retired_rect_stays_red(self) -> None:
+        spec = _spec(_deck_facts("D6"), self.RETIRE)
+        sample = copy.deepcopy(I1["D6_A_refused4to5"])
+        sample["painting"].append(dict(sample["painting"][0], elId=99))
+        scored = probe.score_retire(sample, spec, True, I1["D6_A_samples"])
+        assert scored["verdict"] is False and [v["elId"] for v in scored["paintingOverRect"]] == [99]
+
+    def test_known_bad_a_preserved_destination_element_is_never_excused(self) -> None:
+        spec = _spec(_deck_facts("D6"), self.RETIRE)
+        samples = copy.deepcopy(I1["D6_A_samples"])
+        for row in samples:
+            for video in row["videos"]:
+                if video.get("domId") == spec["dstDomId"]:
+                    video["preserved"] = True
+        assert probe.score_retire(I1["D6_A_refused4to5"], spec, True, samples)["verdict"] is False
+
+
+class TestArrivalStarts:
+    def test_a_click_started_movie_is_not_started_on_arrival(self) -> None:
+        """D4: A-far's movie-start is event 1 (click 1); A-near's is event 0 (automatic)."""
+        root = QUAL_ROOT / "D4"
+        starts = probe.arrival_starts(root, probe.load_slides(root), _deck_plan("D4"))
+        assert starts[0] == {"counter-a.mov#1": True, "counter-a.mov#2": False}
+
+    def test_a_movie_start_grouped_under_another_build_counts(self) -> None:
+        """D3 slide 1: B's movie-start nests in A's (a build "with previous")."""
+        root = QUAL_ROOT / "D3"
+        starts = probe.arrival_starts(root, probe.load_slides(root), _deck_plan("D3"))
+        assert starts[0] == {"counter-a.mov#1": True, "counter-b.mov#1": True}
+
+    def test_p2s_click_started_slide_two_and_its_expectations_are_unchanged(self) -> None:
+        plan = _p2_plan()
+        starts = probe.arrival_starts(P2_ROOT, probe.load_slides(P2_ROOT), plan)
+        assert starts[1] == {"untitled.mov#1": False}
+        assert probe.ground_truth_facts(plan, arrival=starts)["rectExpectations"] == probe.ground_truth_facts(plan)["rectExpectations"]
+
+    def test_d4_slide_one_far_copy_is_dead_until_its_click_in_both_passes(self) -> None:
+        expectations = _deck_facts("D4")["rectExpectations"]
+        assert expectations["V"][0] == expectations["Voff"][0] == {"counter-a.mov#1": "live", "counter-a.mov#2": "dead"}
+
+    @pytest.mark.parametrize("deck", ["D1", "D5", "D6"])
+    def test_an_autostarting_pin_destination_plays_raw_from_zero_with_the_runtime_off(self, deck: str) -> None:
+        """i1 Voff: every autostarting destination read live (the export restarts it)."""
+        expectations = _deck_facts(deck)["rectExpectations"]
+        assert all(state == "live" for per in expectations["Voff"].values() for label, state in per.items() if label.startswith("counter-a.mov#1"))
