@@ -509,6 +509,46 @@ def test_mmo_gates_pass_the_counter_under_the_square_and_fail_one_double_frame(t
     assert gates["mmoCalibration"]["doubleFrameAlpha"] == pytest.approx(value["R2Frames"][0]["alphaEffOverBlack"], abs=0.01)
 
 
+def test_mmo_gates_pass_chroma_rounding_over_the_white_counter_under_the_floor(tmp_path):
+    # Review r2 F1: live, a correct square over the white counter reads up to 4.31 (blend rounding), over a tau calibrated on
+    # black only (4.57); the next rounding step would false-FAIL. R2's limit is max(tau, MMO_R2_FLOOR): ~5 levels of chroma
+    # error over B >= 150 PASS (and stay listed as tau crossings, with their background), a double frame still FAILs.
+    bright = series("counter")
+    bright["pixels.top"][13] = np.round(over(255) + (5, 0, 0)).astype(np.uint8)
+    gates = q.mmo_gates(mmo_run(tmp_path, **{"series:g2off-on": bright}), ARMED)
+    assert gates["MO-2"]["verdict"] == "PASS", gates["MO-2"]["failing"]
+    tau, limit = gates["mmoCalibration"]["tau"], gates["mmoCalibration"]["r2Limit"]
+    assert tau < 5 < limit == q.MMO_R2_FLOOR
+    value = checks_of(gates["MO-2"])["g2off-on R2: neutral-background badness (R3 folded in)"]["value"]
+    assert tau < value["R2"] <= limit and value["R2Over"] == 1
+    assert value["R2Frames"][0]["index"] == 113 and value["R2Frames"][0]["background"] >= 150
+    double = series("counter", double=11)
+    double["pixels.top"][13] = bright["pixels.top"][13]
+    failed = q.mmo_gates(mmo_run(tmp_path, rate=30, **{"series:g2off-on": double}), ARMED)
+    assert failed["MO-2"]["failing"] == ["g2off-on R2: neutral-background badness (R3 folded in)"]
+
+
+def test_mmo_gates_gate_the_cvc_sessions_r2(tmp_path):
+    # Review r2 F1: g2-on-2 is a patch-on sample too; a double frame in the move (outside the CvC phases) fails its R2.
+    gates = q.mmo_gates(mmo_run(tmp_path, **{"series:g2-on-2": series("on", double=12)}), ARMED)
+    assert gates["MO-2"]["failing"] == ["g2-on-2 R2: neutral-background badness (R3 folded in)"]
+    assert gates["mmoCalibration"]["perSession"]["g2-on-2"]["R2Frame"] == 112
+
+
+def test_mmo_gates_are_inconclusive_when_the_square_is_grey(tmp_path):
+    # Review r2 F4: R2 sees an alpha error only as delta-alpha * spread(S_off); a grey square hides it, so MO-2 is
+    # INCONCLUSIVE rather than PASS. The live square (spread 172) has alphaFloor ~0.047.
+    grey = series("off")
+    grey["pixels.top"][16:24] = 120
+    gates = q.mmo_gates(mmo_run(tmp_path, **{"series:g2off-mmoff": grey}), ARMED)
+    assert gates["MO-2"]["verdict"] == "INVALID"
+    assert "alphaFloor" in gates["MO-2"]["invalid"] and "coloured square" in gates["MO-2"]["invalid"]
+    assert not checks_of(gates["MO-2"])["premise: S_off is coloured (R2's alphaFloor = limit / min channel spread)"]["ok"]
+    (tmp_path / "ok").mkdir()
+    ok = q.mmo_gates(mmo_run(tmp_path / "ok"), ARMED)["mmoCalibration"]["alphaFloor"]
+    assert ok == pytest.approx(q.MMO_R2_FLOOR / (OPAQUE.max() - OPAQUE.min()), abs=1e-3) and ok <= q.MMO_ALPHA_FLOOR_MAX
+
+
 def test_mmo_gates_are_inconclusive_when_slide1_backgrounds_are_not_neutral(tmp_path):
     tinted = {}
     for name, kind in (("g2-on", "on"), ("g2-mmoff", "off-live"), ("g2off-on", "on"), ("g2off-mmoff", "off"), ("g2-on-2", "on")):
@@ -525,20 +565,42 @@ def test_mmo_gates_are_inconclusive_when_slide1_backgrounds_are_not_neutral(tmp_
 
 
 def test_score_rescores_saved_takes_without_obs(monkeypatch, tmp_path, capsys):
+    # Review r2 F3: --score reads MO-2 takes only (not mmo-cef), and carries each take's live validity, lifecycle checks and
+    # fixture identity into its verdict, so a take that failed clean quit live cannot rescore as PASS.
     (tmp_path / "runs").mkdir()
-    for rate, over_ in ((25, {}), (30, {"series:g2off-on": series("on", double=11)})):
-        run = {**mmo_run(tmp_path, rate=rate, **over_), "arm": "mmo", "fixture": str(tmp_path / "p2-binary")}
-        (tmp_path / "runs" / f"mmo-{rate}.json").write_text(json.dumps(run))
+    identity = {"manifestSha256": "m", "movieSha256": ["a"]}
+    clean_quit = {"check": "clean quit", "ok": True, "enforced": True}
+    takes = {
+        "mmo-25": (25, {}, {}),
+        "mmo-30": (30, {"series:g2off-on": series("on", double=11)}, {}),
+        "mmo-31": (25, {}, {"checks": [{**clean_quit, "ok": False}]}),
+        "mmo-32": (25, {}, {"valid": False, "invalid": ["Mac slept", "MO-2 INCONCLUSIVE: stale"]}),
+        "mmo-33": (25, {}, {"fixtureIdentity": {"manifestSha256": "old", "movieSha256": ["a"]}}),
+    }
+    for stem, (rate, over_, extra) in takes.items():
+        (tmp_path / stem).mkdir()
+        run = {**mmo_run(tmp_path / stem, rate=rate, **over_), "arm": "mmo", "fixture": str(tmp_path / "p2-binary"),
+               "fixtureIdentity": identity, "valid": True, "invalid": [], "checks": [clean_quit], **extra}
+        (tmp_path / "runs" / f"{stem}.json").write_text(json.dumps(run))
+    (tmp_path / "runs" / "mmo-cef-x.json").write_text(json.dumps({"arm": "mmo-cef", "sessions": []}))
     (tmp_path / "runs" / "summary-x.json").write_text("{}")
     facts: list[Path] = []
     monkeypatch.setattr(q, "fixture_facts", lambda fixture, allow: facts.append(fixture) or ARMED)
+    monkeypatch.setattr(q.binary_counter_movie, "verify_fixture", lambda fixture: identity)
     monkeypatch.setattr(q, "obs_running", lambda: pytest.fail("--score must not look for OBS"))
     assert q.main(["--score", str(tmp_path)]) == 1
     assert facts == [tmp_path / "p2-binary"]
-    results = json.loads(next(tmp_path.glob("rescore-*.json")).read_text())
-    assert [(r["rate"], r["MO-2"], r["failing"]) for r in results] == [
-        (25, "PASS", []), (30, "FAIL", ["g2off-on R2: neutral-background badness (R3 folded in)"])]
-    assert "[mmo rate 30] MO-2 FAIL" in capsys.readouterr().out
+    results = {r["run"]: r for r in json.loads(next(tmp_path.glob("rescore-*.json")).read_text())}
+    assert sorted(results) == [f"{stem}.json" for stem in takes]
+    got = {k: (r["rate"], r["verdict"], r["MO-2"], r["failing"], r["lifecycle"], r["invalid"]) for k, r in results.items()}
+    assert got["mmo-25.json"] == (25, "PASS", "PASS", [], [], [])
+    assert got["mmo-30.json"] == (30, "FAIL", "FAIL", ["g2off-on R2: neutral-background badness (R3 folded in)"], [], [])
+    assert got["mmo-31.json"] == (25, "FAIL", "PASS", [], ["clean quit"], [])
+    assert got["mmo-32.json"] == (25, "INVALID", "PASS", [], [], ["Mac slept"])
+    assert got["mmo-33.json"][:5] == (25, "INVALID", "PASS", [], [])
+    assert "fixture identity changed" in got["mmo-33.json"][5][0]
+    out = capsys.readouterr().out
+    assert "[mmo rate 30 mmo-30] FAIL  MO-2 FAIL" in out and "[mmo rate 25 mmo-31] FAIL  MO-2 PASS" in out
 
 
 def test_mmo_mo4_reads_g2_facts_per_patch_mode(tmp_path):

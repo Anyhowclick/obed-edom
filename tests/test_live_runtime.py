@@ -250,37 +250,59 @@ def test_mm_opacity_hides_the_swapped_node_synchronously_on_the_real_player():
     assert off.count(SWAP_HIDE_DEFERRED) == 1 and off.count(after) == 0
 
 
-def _run_animate_effect_will_begin(node: str, player: str) -> dict:
-    """Run the real `animateEffectWillBegin` + `handleAnimateEffectDidBegin` cut out of `player` with a stub
-    renderer whose animation loop is already running (as it is for a slide transition), and record the swapped
-    node's opacity at the moment the method returns and after the event loop drains."""
+def _run_animate_effect_will_begin(node: str, player: str, started: bool = True) -> dict:
+    """Run the real `animateEffectWillBegin` + `handleAnimateEffectDidBegin` cut out of `player` with a stub renderer
+    and record, in order, draw / animate / hide (the swapped node's opacity set) when the method returns and after the
+    event loop drains. started=True: the renderer's loop already runs (every effect `animateEffects` starts), so
+    `animate` must not be called; False: a fresh renderer (a child effect from `handleEffectDidComplete`), whose
+    `animate` draws the first frame synchronously. This proves task order only; that the hide and the first GL frame
+    reach the same painted frame rests on the browser running rAF callbacks before paint."""
     methods = _cut(player, "animateEffectWillBegin(A){", "handleEffectDidComplete(A){")
     script = """
-const node={style:{opacity:''}};
+const events=[];
+const node={style:{_o:'',get opacity(){return this._o},set opacity(v){events.push('hide');this._o=v}}};
 const document={getElementById:(id)=>id==='swap'?node:null};
-const drawn=[];
-class P{constructor(){this.glRenderer={c:{animationStarted:true,draw:(e)=>drawn.push(e),animate(){throw new Error('loop already running')}}}}%s}
+const started=%s;
+class P{constructor(){this.glRenderer={c:{animationStarted:started,draw:(e)=>events.push('draw'),
+  animate(){if(started)throw new Error('loop already running');events.push('animate')}}}}%s}
 new P().animateEffectWillBegin({canvasId:'c',effect:'mm',nodeToSwapId:'swap'});
-const sync={drawn:drawn.length,opacity:node.style.opacity};
+const sync={events:[...events],opacity:node.style.opacity};
 new P().animateEffectWillBegin({canvasId:'c',effect:'mm',nodeToSwapId:'absent'});
-setTimeout(()=>console.log(JSON.stringify({sync,drained:{drawn:drawn.length,opacity:node.style.opacity}})),5);
-""" % methods
+setTimeout(()=>console.log(JSON.stringify({sync,drained:{events,opacity:node.style.opacity}})),5);
+""" % ("true" if started else "false", methods)
     result = subprocess.run([node, "-e", script], check=True, text=True, capture_output=True)
     return json.loads(result.stdout)
 
 
-def test_mm_opacity_swapped_node_is_hidden_in_the_same_task_as_the_first_draw():
+def _node() -> str:
     node = shutil.which("node")
     if not node:
         pytest.skip("Node is required to run the extracted player methods")
-    player = _real_player()
+    return node
+
+
+def test_mm_opacity_swapped_node_is_hidden_in_the_same_task_as_the_first_draw():
+    node, player = _node(), _real_player()
     stock = _run_animate_effect_will_begin(node, _hook_only(player).decode())
     patched = _run_animate_effect_will_begin(node, live_runtime.patch_player(player).decode())
     # Stock: the draw is queued but the outgoing node is still visible when the task ends, so a rAF that
     # lands before the setTimeout(0) paints both the GL frame and the DOM copy.
-    assert stock == {"sync": {"drawn": 1, "opacity": ""}, "drained": {"drawn": 2, "opacity": 0}}
+    assert stock == {"sync": {"events": ["draw"], "opacity": ""}, "drained": {"events": ["draw", "draw", "hide"], "opacity": 0}}
     # Patched: hidden before the task ends; a missing node is still a no-op.
-    assert patched == {"sync": {"drawn": 1, "opacity": 0}, "drained": {"drawn": 2, "opacity": 0}}
+    assert patched == {"sync": {"events": ["draw", "hide"], "opacity": 0},
+                       "drained": {"events": ["draw", "hide", "draw"], "opacity": 0}}
+
+
+def test_mm_opacity_hides_the_swapped_node_after_a_fresh_loops_first_frame():
+    # Review r2 F6: with the draw loop not yet started, `animate()` draws the first frame synchronously; the patched
+    # hide follows it in the same task (draw -> animate -> hide), stock hides one timer later.
+    node, player = _node(), _real_player()
+    stock = _run_animate_effect_will_begin(node, _hook_only(player).decode(), started=False)
+    patched = _run_animate_effect_will_begin(node, live_runtime.patch_player(player).decode(), started=False)
+    assert stock["sync"] == {"events": ["draw", "animate"], "opacity": ""}
+    assert stock["drained"]["events"] == ["draw", "animate", "draw", "animate", "hide"]
+    assert patched["sync"] == {"events": ["draw", "animate", "hide"], "opacity": 0}
+    assert patched["drained"] == {"events": ["draw", "animate", "hide", "draw", "animate"], "opacity": 0}
 
 
 def test_mm_opacity_patched_real_player_parses(tmp_path):
