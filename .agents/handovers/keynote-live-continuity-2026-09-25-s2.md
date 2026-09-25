@@ -6,8 +6,10 @@ Plan (source of truth): `.agents/plans/keynote_live_continuity_generalisation.pl
   Do not merge; nothing in it is qualified.
 
 ## Resume r1 (2026-09-25 night, 20:15–22:00): READ THIS FIRST
-- **Rebased onto main `45290c5f` (#238, hand-back geometry).** New branch **`claude/keynote-live-continuity-resume-8d49da`**
-  (pushed, no PR). It supersedes `claude/continuity-generalisation-s2`, which is left untouched as the pre-rebase backup.
+- **Rebased onto main `45290c5f` (#238, hand-back geometry).** The branch **`claude/continuity-generalisation-s2`** was
+  synced to the rebased head (owner, 2026-09-25) and is still the one S2 branch, with no PR. The pre-rebase head was
+  `51023b1e`, which the gate worktree `s2-gate-089a0393` keeps for A/B. The interim branch
+  `claude/keynote-live-continuity-resume-8d49da` was deleted from the remote.
   - Conflicts: two, trivial (the `fixture` import and a docstring in `managed_obs_qualify.py` and its test).
   - Follow-up commit `4a2ea70f` routes #238's new `p2-binary` paths through `fixture()`. Without it the S2 guard
     `test_fixture_paths` fails.
