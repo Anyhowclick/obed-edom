@@ -273,6 +273,8 @@ are red on pristine `main` (unrelated).
 - [ ] GL replay: on slide 2 the movie keeps playing under the translucent green square, and In4 keys that
       square like the DOM does after build 1 (≈ 29 % opaque, not solid). Note any brightness step at takeover / build 1.
       Fallback: restart the dashboard with `OBED_LIVE_GL_REPLAY=off`.
+- [ ] Magic Move opacity: the green square stays ≈ 29 % opaque from the first frame of the 1→2 move (no opaque flash,
+      no double image). Fallback (exported player's opaque look): restart the dashboard with `OBED_LIVE_MM_OPACITY=off`.
 - [ ] Does the device hash survive a replug / another Thunderbolt port?
 - [ ] **ProPresenter handover:** with ProPresenter driving the HD Mini, press Take output with (a) its SDI screen
       present ⇒ "cannot open the UltraStudio" expected, (b) its SDI screen deleted, (c) ProPresenter quit — record

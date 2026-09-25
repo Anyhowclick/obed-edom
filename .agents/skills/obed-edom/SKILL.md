@@ -729,6 +729,20 @@ for the parked `iwa-surgical-write-generator` feature.
   a midtone tone curve that drawImage/texImage2D (hence the G2 canvas) do not (≤ +11/255, identical in headless
   Chrome), so footage brightness can step at G2 takeover and at the build-1 hand-back; timing is continuous (±1–2
   frames). Grey-coded counters therefore misread across the two paths — qualify with the binary counter fixture.
+* **Magic Move opacity** (`keynote_live_mm_opacity.plan.md`): `patch_player(player, mm_opacity=True)` applies five
+  count-checked, in-memory replacements on the pinned player (sha `e9b2fad4…`, else `LiveRuntimeUnsupported`). R1–R4:
+  each `eB` leaf draws at its chain opacity (per node, a constant `both` opacity animation's value, else the model value);
+  a fade, `hidden`, several or nested animations leave the subtree at today's value. R5: the swapped DOM node hides in
+  the same task as the first GL draw (no one-frame DOM+GL double image). `mm_opacity=False` is byte-identical to the
+  observation-only player. Precedence = ctor `mm_opacity` (`auto`|`off` exact, else `LiveHostError`) → env
+  `OBED_LIVE_MM_OPACITY` (trimmed, any case; `off`|`auto`, else refuse) → `auto`, on every output (HDMI, managed OBS,
+  external attach), independent of continuity and GL replay. Report: `output.mmOpacity = {mode: on|off, sha256}` (served
+  `main.js`); start log `mmOpacityPreference`. `RUNTIME_VERSION` stays 2. G2 is unchanged: with the patch on, the P2
+  fixture reports exactly `opacityUnproven = [{4, "rest-opacity"}]` (expected: the player already draws 0.2947, LIVE
+  replays it) and `occludedBands` 0/128 (patch off: `[]`, 20/128). Preview (`html_preview.py`) and paint oracle
+  (`html_alpha_probe.py`) serve the stock player. Harnesses: `scripts/mm_opacity_probe.py` (headless MO-1/4/5 + forced
+  stand-down), `managed_obs_qualify.py --arm mmo` (MO-2; `--score` rescores) / `--arm mmo-cef` (MO-3),
+  `p2_recovery_html_adversarial.py --mm-opacity auto|off` (non-GL arms run `--disable-gpu`, so only the GL arm exercises it).
 * **Qualification harness:** `uv run python scripts/managed_obs_qualify.py --arm both --rate 25 --takes 2 --out DIR`
   (scratch home, lossless recording; refuses to start while any OBS runs; `caffeinate`; a Sleep/Wake in the take
   marks it INVALID). Limits at rate 25 (report-only at 30): decodable ≥ 0.9 in both arms; 2× arm native repeat ≤ 0.15;

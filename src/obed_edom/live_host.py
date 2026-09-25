@@ -7,6 +7,7 @@ the authority for whether an input has settled.
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import math
@@ -42,6 +43,7 @@ ATTACH_MATCH_ENV = "OBED_LIVE_ATTACH_MATCH"
 ADVANCE_ENV = "OBED_LIVE_ADVANCE"
 CONTINUITY_ENV = "OBED_LIVE_CONTINUITY"
 GL_REPLAY_ENV = "OBED_LIVE_GL_REPLAY"
+MM_OPACITY_ENV = "OBED_LIVE_MM_OPACITY"
 GOTO_AUTOPLAY_ENV = "OBED_LIVE_GOTO_AUTOPLAY"
 GOTO_AUTOPLAY_DEFERRED_NOTE = "Movies idle until next advance"
 _UNSET = object()
@@ -756,16 +758,21 @@ def _rate_warnings(report: list[dict[str, Any]], rate: int) -> list[str]:
 
 
 class LiveOutputHost:
-    def __init__(self, export_root: Path, slides: list[dict[str, Any]], *, display_id: int | None = None, chrome_path: Path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"), headless: bool = False, transport_factory: Callable[..., ChromeCdp] = ChromeCdp, server_factory: Callable[..., _AssetServer] = _AssetServer, resolver: Callable[[Path, str], Path] = safe_export_file, timeout_s: float = 12.0, attach_endpoint: str | None = _UNSET, attach_match: str | None = None, continuity: str = "auto", gl_replay: str = _UNSET, bridge: str | None = None, output_rate: int | None = None) -> None:
+    def __init__(self, export_root: Path, slides: list[dict[str, Any]], *, display_id: int | None = None, chrome_path: Path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"), headless: bool = False, transport_factory: Callable[..., ChromeCdp] = ChromeCdp, server_factory: Callable[..., _AssetServer] = _AssetServer, resolver: Callable[[Path, str], Path] = safe_export_file, timeout_s: float = 12.0, attach_endpoint: str | None = _UNSET, attach_match: str | None = None, continuity: str = "auto", gl_replay: str = _UNSET, mm_opacity: str = _UNSET, bridge: str | None = None, output_rate: int | None = None) -> None:
         if continuity not in ("auto", "off"):
             raise LiveHostError("Continuity must be auto or off.")
         if gl_replay is not _UNSET and gl_replay not in ("auto", "off"):
             raise LiveHostError("GL replay must be auto or off.")
+        if mm_opacity is not _UNSET and mm_opacity not in ("auto", "off"):
+            raise LiveHostError("Magic Move opacity must be auto or off.")
         self._continuity_preference = continuity
         self._bridge = bridge if bridge is not None else "obs-cdp"
         self._output_rate = output_rate
         self._gl_replay_request = gl_replay
         self._gl_replay_preference = "off"
+        self._mm_opacity_request = mm_opacity
+        self._mm_opacity_preference = "auto"
+        self._mm_opacity_info: dict[str, str] | None = None
         self.export_root, self.slides = export_root, slides
         if attach_endpoint is _UNSET:
             attach_endpoint = os.environ.get(ATTACH_ENV) or None
@@ -1003,6 +1010,8 @@ class LiveOutputHost:
             }
         if self._log_path is not None:
             result["logPath"] = str(self._log_path)
+        if self._mm_opacity_info is not None:
+            result["mmOpacity"] = dict(self._mm_opacity_info)
         result["continuity"] = self._continuity_info()
         result["codecs"] = list(self._codec_report)
         result["codecWarnings"] = list(self._codec_warnings)
@@ -1025,6 +1034,13 @@ class LiveOutputHost:
             if env_gl_replay not in ("", "off", "auto"):
                 raise LiveHostError("OBED_LIVE_GL_REPLAY must be off or auto.")
             self._gl_replay_preference = env_gl_replay or ("auto" if self._managed_obs else "off")
+        if self._mm_opacity_request is not _UNSET:
+            self._mm_opacity_preference = self._mm_opacity_request
+        else:
+            env_mm_opacity = os.environ.get(MM_OPACITY_ENV, "").strip().lower()
+            if env_mm_opacity not in ("", "off", "auto"):
+                raise LiveHostError("OBED_LIVE_MM_OPACITY must be off or auto.")
+            self._mm_opacity_preference = env_mm_opacity or "auto"
         self._goto_autoplay_mode = "off" if os.environ.get(GOTO_AUTOPLAY_ENV, "").strip().lower() == "off" else "on"
         self._log_path = _new_log_path()
         self._logger = _SessionLogger(self._log_path)
@@ -1035,6 +1051,7 @@ class LiveOutputHost:
             attachEndpoint=self._attach_endpoint, attachMatch=self._attach_match,
             headless=self.headless, advanceMode=self._advance_mode,
             goToAutoplayMode=self._goto_autoplay_mode, glReplayPreference=self._gl_replay_preference,
+            mmOpacityPreference=self._mm_opacity_preference,
         )
         try:
             self._validate_export()
@@ -1043,8 +1060,10 @@ class LiveOutputHost:
             self._logger.log("codecs", report=self._codec_report, warnings=self._codec_warnings)
             self._continuity_mode, self._continuity_reason, self._continuity_runtime_plan = self._resolve_continuity_static()
             player = self.resolver(self.export_root, "assets/player/main.js").read_bytes()
-            try: patched = patch_player(player)
+            mm_opacity_on = self._mm_opacity_preference == "auto"
+            try: patched = patch_player(player, mm_opacity=mm_opacity_on)
             except LiveRuntimeUnsupported as exc: raise LiveHostError(str(exc)) from exc
+            self._mm_opacity_info = {"mode": "on" if mm_opacity_on else "off", "sha256": hashlib.sha256(patched).hexdigest()}
             self._profile = Path(tempfile.mkdtemp(prefix="obed-live-chrome-"))
             continuity_script = (
                 _continuity_scripts(self._continuity_runtime_plan, self._canvas) + self._gl_replay_script
