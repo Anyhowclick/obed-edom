@@ -22,6 +22,9 @@ What is pinned here:
 - the host arm matrix (owner decision 2026-10-09): 2560x1440 and 1600x1000 skip attach, B and Voff,
   1920x1080 skips C; every host arm runs at least once a round or the round is refused; a host gate
   passes only when its artifact records exactly that skip and holds exactly the other arms;
+- the S0 deck red arms (S2, plan §3.4 Q3): every `DECK_ARMS` entry goes through the same queue as a host
+  red run on its deck's own `html-unmodified` export, after the P2 host red arms and before the P2 arms,
+  is checked after the wait in the same order, and runs in the full tier only;
 - the P2 arm list: no `--strip bridge@8` arm, `--skip-freeze-bracket` on every arm but the two
   positive freeze-bracket arms (and refused on those), and the `Freeze bracket:` header checked;
 - `--tier dev` runs the 1920x1080 + 1600x1000 host gates and three P2 arms, says DEV loudly and
@@ -89,6 +92,7 @@ PROBE_STUB = _STUB_COMMON + r'''
 artifact = Path(arg("--artifact"))
 stem = artifact.stem
 event(f"probe {stem} viewport={arg('--viewport')} skip={arg('--skip-arms')} start")
+event(f"probeargs {stem} fixture={arg('--fixture')} index={arg('--original-index')} argv={json.dumps(sys.argv[1:])}")
 mode = mode_of(stem)
 act(mode, artifact.with_suffix(""))
 given = (arg("--skip-arms") or "").split(",")
@@ -348,7 +352,7 @@ def test_the_pattern_cache_is_prewarmed_and_verified_before_the_first_timed_run(
     events = gates["events"]()
     assert events[:2] == ["prewarm html-unmodified", "prewarm html-unmodified"], "the fill, then the verifying lookup"
     assert all(not e.startswith("prewarm") for e in events[2:])
-    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + 8
+    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + 22 + 8
     assert f"h264 pattern prewarm 46.0333s: encoded key={'k' * 64}" in done.stdout
     assert f"h264 pattern cache verified 46.0333s: hit key={'k' * 64} sha256={'s' * 64}" in done.stdout
     assert "cache hit" in gates["run"](outdir=gates["tmp"] / "out2").stdout
@@ -494,6 +498,17 @@ FULL_P2_ARMS = [
     ["--wait-profile", "fast", "--gl-replay", "auto", "--strip", "glReplay@2", "--skip-freeze-bracket"],
 ]
 DEV_P2_ARMS = [FULL_P2_ARMS[0], FULL_P2_ARMS[1], FULL_P2_ARMS[6]]
+DECK_ARMS = [
+    ("D1", "--strip bridge@2"), ("D1", "--strip bridge@4"), ("D1", "--strip pin@6"),
+    ("D2", "--strip bridge@2"), ("D2", "--strip restart@4"), ("D2", "--strip pin@6"), ("D2", "--strip bridge@8"),
+    ("D3", "--strip pin@2"), ("D3", "--strip bridge@2"), ("D3", "--strip retire@4"), ("D3", "--strip pin@4"),
+    ("D3", "--strip bridge@6"),
+    ("D4", "--core-variant wrong-instance"), ("D4", "--core-variant fifo-reuse"), ("D4", "--strip bridge@3"),
+    ("D4", "--strip pin@5"),
+    ("D5", "--core-variant stash-any"), ("D5", "--core-variant fifo-reuse"), ("D5", "--strip pin@2"), ("D5", "--strip pin@4"),
+    ("D6", "--strip bridge@2"), ("D6", "--strip retire@8"),
+]
+DECK_RED_STEMS = [f"host-red{deck}{args.replace(' ', '')}" for deck, args in DECK_ARMS]
 ARMS = ("A", "B", "C", "V", "Voff", "attach")
 
 
@@ -526,7 +541,9 @@ def test_the_full_round_host_arm_matrix(gates) -> None:
     assert {k: v for k, v in runs.items() if k.startswith("host-") and not k.startswith("host-red")} == {
         f"host-{v}": (v, skip) for v, skip in FULL_HOST_SKIPS.items()
     }
-    assert {k: v for k, v in runs.items() if k.startswith("host-red")} == {s: ("1920x1080", "None") for s in HOST_RED_STEMS}
+    assert {k: v for k, v in runs.items() if k.startswith("host-red")} == {
+        s: ("1920x1080", "None") for s in HOST_RED_STEMS | set(DECK_RED_STEMS)
+    }
     ran = {name: [v for v, skip in FULL_HOST_SKIPS.items() if name not in skip.split(",")] for name in ARMS}
     assert ran == {
         "A": list(FULL_HOST_SKIPS), "V": list(FULL_HOST_SKIPS), "C": ["2560x1440", "1600x1000"],
@@ -579,6 +596,47 @@ def test_known_bad_the_dev_tier_is_held_to_the_same_coverage(gates) -> None:
     assert gates["run"](script=script, timeout=20).returncode != 2, "full still runs C at 2560x1440"
     done = gates["run"]("--tier", "dev", script=script, timeout=20, outdir=gates["tmp"] / "dev-out")
     assert done.returncode == 2 and "host arm C runs in no dev-tier host gate" in done.stderr
+
+
+def _probe_args(events: list[str]) -> dict[str, tuple[str, str, list[str]]]:
+    runs = {}
+    for e in events:
+        m = re.fullmatch(r"probeargs (\S+) fixture=(\S+) index=(\S+) argv=(.+)", e)
+        if m:
+            runs[m.group(1)] = (m.group(2), m.group(3), json.loads(m.group(4)))
+    return runs
+
+
+def test_the_deck_red_arms_run_on_their_own_export_through_the_queue_in_order(gates) -> None:
+    """S2 (plan §3.4 Q3): the 22 S0 deck red arms are host red runs on the deck's `html-unmodified`
+    export (both fixture and original index), launched after the P2 host red arms and before the P2
+    arms, and checked after the wait in the same order."""
+    done = gates["run"](GATE_JOBS="1")
+    events = gates["events"]()
+    starts = [e.split()[1] for e in events if e.endswith(" start")]
+    p2_host_red = [s for s in starts if s.startswith("host-red--")]
+    assert [s for s in starts if s.startswith("host-redD")] == DECK_RED_STEMS
+    assert starts.index(DECK_RED_STEMS[0]) == starts.index(p2_host_red[-1]) + 1
+    assert starts.index(DECK_RED_STEMS[-1]) + 1 == next(i for i, s in enumerate(starts) if s.startswith("p2"))
+    args = _probe_args(events)
+    for (deck, arm), stem in zip(DECK_ARMS, DECK_RED_STEMS, strict=True):
+        fixture, index, argv = args[stem]
+        assert Path(fixture).parts[-3:] == ("qual-decks", deck, "html-unmodified"), fixture
+        assert index == f"{fixture}/index.html"
+        assert argv[-len(arm.split()):] == arm.split()
+    for stem in HOST_RED_STEMS:
+        assert Path(args[stem][0]).parts[-2:] == ("html-adversarial", "html-player")
+    failed = [line for line in done.stdout.splitlines() if line.startswith("    GATE FAILED: HOST red D")]
+    assert failed == [f"    GATE FAILED: HOST red {deck} {arm}" for deck, arm in DECK_ARMS], "a stub artifact is no red artifact"
+    first_deck_check = done.stdout.index("GATE FAILED: HOST red D1 --strip bridge@2")
+    assert done.stdout.index("GATE FAILED: HOST red --strip glReplay@2 --gl-replay auto") < first_deck_check
+    assert first_deck_check < done.stdout.index("[P2 --wait-profile fast]")
+
+
+def test_known_bad_a_deck_red_run_that_writes_no_status_fails_closed(gates) -> None:
+    done = gates["run"](STUB_MODES=json.dumps({"host-redD4--core-variantwrong-instance": "die"}))
+    assert "[HOST D4 --core-variant wrong-instance] no fresh status (missing) -> MISMATCH" in done.stdout, done.stdout
+    assert "GATE FAILED: HOST red D4 --core-variant wrong-instance" in done.stdout
 
 
 def test_the_full_round_p2_arm_list(gates) -> None:

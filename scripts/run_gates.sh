@@ -46,6 +46,17 @@ if [[ $TIER == full ]]; then
 else
   HOST_RED_ARMS=()
 fi
+# S0 deck arms (plan §3.4 Q3): every (deck, arm) the probe's RED_ARM_EXPECTATIONS registers, run as host red arms at
+# 1920x1080 on the deck's own export (HOST_DECK). Full tier only.
+DECK_ARMS=(
+  "D1 --strip bridge@2" "D1 --strip bridge@4" "D1 --strip pin@6"
+  "D2 --strip bridge@2" "D2 --strip restart@4" "D2 --strip pin@6" "D2 --strip bridge@8"
+  "D3 --strip pin@2" "D3 --strip bridge@2" "D3 --strip retire@4" "D3 --strip pin@4" "D3 --strip bridge@6"
+  "D4 --core-variant wrong-instance" "D4 --core-variant fifo-reuse" "D4 --strip bridge@3" "D4 --strip pin@5"
+  "D5 --core-variant stash-any" "D5 --core-variant fifo-reuse" "D5 --strip pin@2" "D5 --strip pin@4"
+  "D6 --strip bridge@2" "D6 --strip retire@8"
+)
+[[ $TIER == full ]] || DECK_ARMS=()
 # P2 arms: p2 <tier> "<expected red>" "<expected inconclusive>" <args>; tier dev runs in both tiers, full only in full.
 # --skip-freeze-bracket goes on every arm but the two positive bracket arms, which must run it. As in P2 itself, the flag
 # is refused on any arm that is not a red arm (--core-variant, --strip, --disable-bridge34) unless it is a DOM
@@ -90,6 +101,7 @@ if (( START_LOAD > GATE_MAX_START_LOAD )); then
 fi
 PY=/Users/anyhowclick/Desktop/work/obed-edom/.venv/bin/python; cd $G || exit 1; mkdir -p $O
 export PYTHONPATH=$G/src; F=$($PY -c 'from obed_edom.fixture_paths import fixture; print(fixture("p2-recovery"))')/html-adversarial
+Q=$($PY -c 'from obed_edom.fixture_paths import fixture; print(fixture("qual-decks"))')
 [[ -d $F ]] || { echo "no P2 fixture at $F; no run launched" >&2; exit 2; }
 if (( ALLOW_RECORD )); then
   echo "################################################################################"
@@ -251,14 +263,18 @@ check_host(){ rc=$(status_of $O/host-$1); [[ $rc == 0 ]] || fail "HOST $1 exit $
 # checked in full: every key present and typed, redArm equal to the label the CLI arguments imply, expectedCoreSha256
 # the arm's sha, `unknown` an empty list, the census stray/duplicate multiset reconciled with redSet, and the red and
 # expected multisets equal (Counter). A "record" arm returns 3 only when all of that holds with status recorded.
-run_host_red(){ n=$(echo "$*" | tr -d ' '); queue $O/host-red$n $PY -u scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport 1920x1080 --artifact $O/host-red$n.json "$@"; }
-check_host_red(){ n=$(echo "$*" | tr -d ' '); rc=$(status_of $O/host-red$n)
-  [[ $rc == <-> ]] || { echo "[HOST $*] no fresh status ($rc) -> MISMATCH"; return 1; }
+# run_host_red runs on P2; `HOST_DECK=Dn run_host_red ...` runs the same arm on an S0 deck (its html-unmodified export is
+# both fixture and original index: the qual decks need no asset replacement). check_host_red takes the same HOST_DECK.
+run_host_red(){ n=${HOST_DECK:-}$(echo "$*" | tr -d ' '); fix=$F/html-player; idx=$F/html-unmodified/index.html
+  if [[ -n ${HOST_DECK:-} ]]; then fix=$Q/$HOST_DECK/html-unmodified; idx=$fix/index.html; fi
+  queue $O/host-red$n $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $idx --viewport 1920x1080 --artifact $O/host-red$n.json "$@"; }
+check_host_red(){ n=${HOST_DECK:-}$(echo "$*" | tr -d ' '); rc=$(status_of $O/host-red$n)
+  [[ $rc == <-> ]] || { echo "[HOST ${HOST_DECK:+$HOST_DECK }$*] no fresh status ($rc) -> MISMATCH"; return 1; }
   $PY - "$O/host-red$n.json" "$rc" "$@" <<'PYEOF'
 import json,sys
 from collections import Counter
 sys.path.insert(0,"scripts")
-from continuity_core_variants import parse_strip, variant_sha
+from continuity_core_variants import parse_strip, strip_label, variant_sha
 from obed_edom.live_continuity_js import js_sha256
 path,rc,args=sys.argv[1],int(sys.argv[2]),sys.argv[3:]
 label=" ".join(args)
@@ -268,7 +284,7 @@ problems=[]
 def strs(v): return isinstance(v,list) and all(isinstance(x,str) for x in v)
 variant=args[args.index("--core-variant")+1] if "--core-variant" in args else None
 strip=parse_strip(args[args.index("--strip")+1]) if "--strip" in args else None
-want_arm=f"core:{variant}" if variant else f"strip:{strip[0]}"+("" if strip[1] is None else f"@{strip[1]}")
+want_arm=f"core:{variant}" if variant else strip_label(*strip)
 want_sha=variant_sha(variant) if variant else js_sha256()
 status,arm_label,exp,got,unknown,sha=(d.get(k) for k in ("status","redArm","expectedRedSet","redSet","unknown","expectedCoreSha256"))
 arm=d.get("arm"); census=arm.get("census") if isinstance(arm,dict) else None
@@ -309,6 +325,7 @@ sys.exit((3 if exp=="record" else 0) if ok else 1)
 PYEOF
 }
 for A in $HOST_RED_ARMS; do run_host_red ${=A}; done
+for DA in "${DECK_ARMS[@]}"; do d=${DA%% *}; A=${DA#* }; HOST_DECK=$d run_host_red ${=A}; done
 # Each P2 arm runs in its own --out-dir.
 run_p2(){ shift 2; n=$(echo "$*" | tr -d ' ')
   queue "$O/p2$n" $PY scripts/p2_recovery_html_adversarial.py --reuse-export --disposable --out-dir "$O/p2$n" "$@"; }
@@ -317,6 +334,7 @@ for A in "${P2_ARMS[@]}"; do run_p2 "${(@Q)${(z)A}}"; done
 wait
 for V in $HOST_VIEWPORTS; do check_host $V; done
 for A in $HOST_RED_ARMS; do check_host_red ${=A}; tally $? "HOST red $A"; done
+for DA in "${DECK_ARMS[@]}"; do d=${DA%% *}; A=${DA#* }; HOST_DECK=$d check_host_red ${=A}; tally $? "HOST red $d $A"; done
 for A in "${P2_ARMS[@]}"; do check_p2 "${(@Q)${(z)A}}"; done
 $PY -c "from obed_edom.live_continuity_js import js_sha256; print('runtime sha at end', js_sha256())"
 pgrep -fl obed-live-chrome | cut -c1-80 | head -2
