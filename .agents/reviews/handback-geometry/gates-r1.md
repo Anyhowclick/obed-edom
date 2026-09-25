@@ -3,7 +3,7 @@
 Plan `.agents/plans/keynote_live_handback_geometry.plan.md` rev 2, §5 item 5. The code under test is `7cd51e9f` (R6–R8 in
 `live_runtime.py`). `src/` was unchanged through `7b260aa6`, which only touched `mm_handback_score.py`. The runtime sha was
 `e9338aff…`. Fixtures (main checkout): P2 `output/p2-recovery/html-adversarial` (symlinked) and `output/p2-binary`.
-Evidence: `output/evidence/handback-geometry/w4/`, with `batches.txt` in each subfolder (time, `uptime` and the Chrome
+Evidence: main checkout `output/evidence/handback-geometry/w4/` (reports, logs, `batches.txt`; raw P2 `runs/` not retained), with `batches.txt` in each subfolder (time, `uptime` and the Chrome
 count before each run). Each run used one fresh headless Chrome and ran serially. Load averages were 15–76, since other
 agents were active.
 
@@ -142,9 +142,9 @@ leaves the freeze control, the 3→4 carry and slide-3 playback unchanged. The l
 | `--arm mmo-cef` (MO-3) | PASS | all sessions in CEF |
 | `--arm g2 --rate 25` (M0–M4) | PASS | M3 edge re-cast: G2-S vs G2-P3 (DOM) 0 (KB stock geometry 73, unscaled KB 180); `frameLen` 96 |
 
-Recordings: `qualify-home/recordings/mmo-20260925-193948/` (25) and `mmo-20260925-194247/` (30). Runs: worktree
+Recordings: `qualify-home/recordings/mmo-20260925-193948/` (25) and `mmo-20260925-194247/` (30). Runs: main checkout
 `output/evidence/handback-geometry/obs-hb{1,2-cef,3-g2}/`. Eyeball copies (H.264, decision 8a): `output/evidence/handback-geometry/eyeball/`
 — `…LEFT-thisPR_RIGHT-mainMMOonly…` pairs this PR's `g2off-on` (19-40-35) with main's MMO-only `g2off-on` from the MO-7 take
-(`mmo-20260925-143530/14-36-16.avi`; same frame timing, jump at 435), at speed, mm-move stepped 8×, build 1 stepped 8×. The
+(`mmo-20260925-143530/14-36-16.avi`, recording not retained — the paired clips keep it; same frame timing, jump at 435), at speed, mm-move stepped 8×, build 1 stepped 8×. The
 `…LEFT-fix_RIGHT-stock…` pairs compare against patch off (opaque square), so they mix the opacity fix with this one.
 Owner eyeball (decision 8a): PASS (owner, 2026-09-25) — no visible blending/ghosting vs main MMO-only; build-1 snap gone.

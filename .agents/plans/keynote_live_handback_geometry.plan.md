@@ -1,9 +1,9 @@
 # Magic Move hand-back geometry: the settled GL frame must land on the DOM layout
 
-**APPROVED rev 2 — owner 2026-09-25: decisions 1–8 as recommended (1a, 2a, 3a, 4a, 5b, 6a, 7a, 8a).** **Amended 2026-09-25 (owner): decision 3 → 3b** — always-on R8 made P2 bridge-off red (slide-3 restart clock +0.2 s; slide-4 render overlapping the 2→3 dissolve; `.agents/reviews/handback-geometry/gates-r1.md`). 2026-09-25, Opus investigator; rev 2 = Opus HIGH critique (log in §9). Plan only: no product code, no commits, no OBS
+**LANDED #238 (`45290c5f`, 2026-09-25).** **APPROVED rev 2 — owner 2026-09-25: decisions 1–8 as recommended (1a, 2a, 3a, 4a, 5b, 6a, 7a, 8a).** **Amended 2026-09-25 (owner): decision 3 → 3b** — always-on R8 made P2 bridge-off red (slide-3 restart clock +0.2 s; slide-4 render overlapping the 2→3 dissolve; `.agents/reviews/handback-geometry/gates-r1.md`). 2026-09-25, Opus investigator; rev 2 = Opus HIGH critique (log in §9). Plan only: no product code, no commits, no OBS
 launch, no Keynote. Base: `main` @ `0df5ea10` (MM opacity #233/#234 and preview #235/#236 merged). Player `main.js` sha
 `e9b2fad4…` (= `live_runtime.PLAYER_SHA256`); every offset below is a **byte** offset (`grep -bo` convention, as the MMO plan's
-§3). Evidence: worktree `output/evidence/handback-geometry/` (gitignored; JSON tables, crops, scratch probe/scorer/candidate).
+§3). Evidence: main checkout `output/evidence/handback-geometry/` (gitignored; JSON tables, crops, scratch probe/scorer/candidate; raw P2 `runs/` screenshots not retained).
 Parents: `keynote_live_mm_opacity.plan.md` (R1–R5, §7 G2), `keynote_live_gl_replay_arming.plan.md`,
 `keynote_live_gl_replay_managed_obs.plan.md`, `dashboard_preview_mm_opacity.plan.md`.
 
@@ -93,7 +93,7 @@ GL end quad = offset + to + anchor − scale·anchor gives (789.000, 673.000, 35
 
 ### 1.4 Instrument and controls (OBS recordings, UtVideo lossless, Y plane, tv-range)
 
-- **Recordings.** `qualify-home/recordings/mmo-20260925-143530/` (25 fps) and `…-144012/` (30 fps). `14-37-02.avi` is
+- **Recordings.** `qualify-home/recordings/mmo-20260925-143530/` (25 fps) and `…-144012/` (30 fps) (recording not retained: trashed 2026-09-25; H.264 copies in main checkout `output/evidence/mmo-gates/obs-mo7/eyeball/`); measured edges kept in main checkout `output/evidence/handback-geometry/obs-recordings-edges.json`. `14-37-02.avi` is
   `g2-on-2`, the MO-7 control twin of `g2-on` (`obs-mo7/run.log`: "decoding g2-on-2"). The hand-back frames are found
   automatically (first green-right jump): 25 fps 409/408/407/435/436, 30 fps 493/492/491/525/520.
 - **Metrics.**
@@ -447,3 +447,13 @@ content edges match `predicted-geometry.txt`); all three anchors `count == 1` at
 
 Holds: root cause, the (b)/(c) candidate rule-outs, anchor safety, MMO composition, G2 fail-closed meaning, continuity
 core / 3→4 / freeze untouched, HB-1 margins and load independence.
+
+## 10. Review log
+
+- Critique r1 (Opus HIGH, plan): §9 above.
+- Code review Opus r1 (raw round deleted at merge; `git show 45290c5f:.agents/reviews/handback-geometry/opus-r1.md`): 4 minor
+  (HB-2 `frameLen`, engagement on every patch-on G2 session, partial-run PASS, settled-GL premise) folded in `572d1fbf` / `7b260aa6`; nits
+  kept (R6 walk ignores hidden ancestors/transforms, `W` reuse, per-setup texture never freed like stock).
+- Opus r2 (same file): R8 3b correct on the real bytes; r2-2/r2-3 doc fixes folded `e46ac0e7`; r2-1 (`A.events` guard) kept, real scripts always have it.
+- Gates: `.agents/reviews/handback-geometry/gates-r1.md` — headless r1 (P2 bridge-off red → decision 3b), r2 (green), managed OBS r1 PASS,
+  owner eyeball PASS.

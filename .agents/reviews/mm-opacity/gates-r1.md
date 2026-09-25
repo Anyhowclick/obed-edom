@@ -33,7 +33,7 @@ Instrument amendments found live: R2 = neutral-background blend consistency (the
 empty patch is not empty during the move); τ_key read slide 1's covered patch (113 → 1.15); R4's KB is enforced on the G2-less
 twin only (G2's LIVE override makes the g2 patch-off settle key translucent — timing luck, 5/10 takes). Headless overlap probe
 for R5 was INCONCLUSIVE (its positive control read 0) and is not evidence; R5 rests on the Node task-order test + MO-2 ×10.
-MO-7: final-commit take (`67c7d12e`) 25 + 30 PASS; recordings kept at `qualify-home/recordings/mmo-20260925-143530/` (25) and `mmo-20260925-144012/` (30) — `g2off-on` (fix, no G2) vs `g2off-mmoff` (stock) side by side; owner eyeball done (found the pre-existing build-1 geometry jump below).
+MO-7: final-commit take (`67c7d12e`) 25 + 30 PASS; recordings were `qualify-home/recordings/mmo-20260925-143530/` (25) and `mmo-20260925-144012/` (30) (recording not retained: trashed 2026-09-25; H.264 copies in main checkout `output/evidence/mmo-gates/obs-mo7/eyeball/`) — `g2off-on` (fix, no G2) vs `g2off-mmoff` (stock) side by side; owner eyeball done (found the pre-existing build-1 geometry jump below).
 
 ## Findings outside this PR
 
