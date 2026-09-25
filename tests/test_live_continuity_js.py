@@ -36,7 +36,7 @@ def test_js_sha256_matches_pinned_bytes():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "e189c1d2329daa5bdab1a7e85d34a45c4f904aa63045fc5ae748ab679c41f8d4"
+PINNED_CORE_SHA256 = "cc4444a0caeccf42b2979b0f2ffa2641e8bcd183bbf7a7b68469c65dd186c1cd"
 
 
 def test_js_sha256_matches_the_pinned_literal():
@@ -808,7 +808,8 @@ function video(inst) {
   if (inst) v.setAttribute('id', inst + '-video');
   return v;
 }
-const performance = {now: () => 0};
+let nowMs = 0;
+const performance = {now: () => nowMs};
 const rafQueue = [];
 const requestAnimationFrame = (fn) => { rafQueue.push(fn); return 0; };
 /** Run every animation frame queued so far, once (the loops re-queue themselves). */
@@ -3926,6 +3927,53 @@ console.log(JSON.stringify({idle, retire, m1: {gen: m1.__obedGen, paused: m1.pau
     assert result["retire"] == [[result["a"], [result["m1Id"]], "#3"]]
     assert result["m1"] == {"gen": -1, "paused": True, "inDocument": False}
     assert result["after"] == []
+
+
+def test_the_footprint_hold_of_a_pin_ends_when_the_next_bridge_moves_the_decoder():
+    """Live D2 b3to4: the pin's footprint hold (`keepAtFootprint`) outlived the
+    next bridge's move and, once the hash settled past the transition, dragged
+    the landed decoder back to the source slot at the destination size
+    (960,400 at 640x180). The move must end the hold."""
+    plan = {
+        "schema": 2, "movies": _MOVIE_PLAN["movies"],
+        "boundaries": [
+            _MOVIE_PLAN["boundaries"][0],
+            {"atScene": 4, "action": "bridge", "movieKey": "movie1", "durationSeconds": 1.5, "loop": False,
+             "src": _inst("A2", _FOOTPRINT), "dst": _inst("A3", _RECT_S3)},
+        ],
+    }
+    result = _run_chain(plan, r"""
+const posterParent = {__screenOrigin: {x: 0, y: 0}, __scale: 1,
+  insertBefore(node) { node.parentNode = this; node.__inStage = true; },
+  appendChild(node) { node.parentNode = this; node.__inStage = true; },
+  removeChild(node) { node.parentNode = null; node.__inStage = false; }};
+canvases.push({id: 'poster', parentNode: posterParent, nextSibling: null,
+  getBoundingClientRect: () => ({left: 100, top: 200, width: 300, height: 150})});
+goToScene(0);
+const a = playing('A1');
+a._rect = {left: 100, top: 200, width: 300, height: 150};
+goToScene(1);
+detach(a);
+const holding = !!a.__obedPinning;
+goToScene(2);
+fresh('A2');
+goToScene(3);
+posterParent.removeChild(a);
+bodyEl.__screenOrigin = {x: 0, y: 0};
+detach(a);
+nowMs = 5000;
+pump();
+const moved = {left: a.style.left, top: a.style.top};
+location.hash = '#4';
+pump(); pump(); pump();
+console.log(JSON.stringify({holding, moved, settled: {left: a.style.left, top: a.style.top},
+  pinning: !!a.__obedPinning, moves: notesOf('bridge-motion-start').length}));
+""")
+    assert result["holding"] is True
+    assert result["moves"] == 1
+    assert result["pinning"] is False
+    assert result["moved"] == {"left": f"{_RECT_S3['x']}px", "top": f"{_RECT_S3['y']}px"}
+    assert result["settled"] == result["moved"]
 
 
 def test_a_suppressed_bridge_destination_really_clears_when_its_slide_ends():
