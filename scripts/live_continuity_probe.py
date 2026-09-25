@@ -120,6 +120,15 @@ MAX_ADVANCE_STEPS = 40
 # `live_continuity_js.py`'s `scheduleRemount`) -- a freeze inside that retry
 # window is exactly the failure mode this instrument exists to catch.
 WINDOW_PAD_S = 2.0
+WRAP_FPS = 30.0
+FORCE_WRAP_BOUNDARIES = {"1to2": (1, 2), "3to4": (3, 4)}
+FORCE_WRAP_PRESS_AFTER_SEEK_S = 2.0
+FORCE_WRAP_MIN_PRESS_AFTER_SEEK_MS = 1500.0
+FORCE_WRAP_MIN_FRAMES = 10
+FORCE_WRAP_SEEK_TIMEOUT_S = 1.5
+FORCE_WRAP_TOLERANCE_MS = 100.0
+FORCE_WRAP_WINDOW_AFTER_SEEK_MS = 1000.0
+G2_ACTIVE_STATES = ("LIVE", "ARM-PRE", "ARM-POST")
 
 BURST_POKE_JS = (
     "(function(){var d=document.getElementById('__orpoke');"
@@ -344,6 +353,9 @@ SAMPLER_JS = r"""
         src: src,
         currentTime: v.currentTime,
         paused: v.paused,
+        ended: v.ended,
+        loop: v.loop,
+        duration: isFinite(v.duration) ? v.duration : null,
         readyState: v.readyState,
         videoWidth: v.videoWidth,
         isConnected: document.contains(v),
@@ -365,6 +377,71 @@ ENSURE_PLAYING_JS = (
     "Array.from(document.querySelectorAll('video')).forEach(function(v){"
     "try{v.muted=true;var p=v.play();if(p&&p.catch)p.catch(function(){});}catch(e){}});true"
 )
+
+# Harness-only (L2): seek the source instance's own <video> near its end and log its rVFC
+# frames; the wrap itself is the browser's loop.
+FORCE_WRAP_SEEK_JS = r"""
+(function(domId, leadS){
+  var found = Array.from(document.querySelectorAll('video')).filter(function(v){ return v.id === domId; });
+  var out = {domId: domId, count: found.length, t: performance.now()};
+  if (found.length !== 1) return out;
+  var v = found[0];
+  if (window.__obedWrapRecorder__) { out.error = 'a wrap recorder is already installed'; return out; }
+  if (typeof v.requestVideoFrameCallback !== 'function') { out.error = 'requestVideoFrameCallback is unavailable'; return out; }
+  var rec = {frames: [], seekedT: null, seekFrom: v.currentTime, target: v.duration - leadS, stopped: false};
+  Object.defineProperty(rec, 'video', {value: v, enumerable: false});
+  window.__obedWrapRecorder__ = rec;
+  function onFrame(now, meta){
+    rec.frames.push({now: now, mediaTime: meta.mediaTime, presentedFrames: meta.presentedFrames});
+    if (!rec.stopped) v.requestVideoFrameCallback(onFrame);
+  }
+  v.requestVideoFrameCallback(onFrame);
+  v.addEventListener('seeked', function(){ if (rec.seekedT == null) rec.seekedT = performance.now(); });
+  v.currentTime = rec.target;
+  out.duration = isFinite(v.duration) ? v.duration : null;
+  out.loop = v.loop;
+  out.playbackRate = v.playbackRate;
+  out.seekFrom = rec.seekFrom;
+  out.target = rec.target;
+  return out;
+})
+"""
+
+FORCE_WRAP_STATUS_JS = r"""
+(function(){
+  var rec = window.__obedWrapRecorder__;
+  if (!rec) return null;
+  var after = rec.seekedT == null ? [] : rec.frames.filter(function(f){ return f.now >= rec.seekedT; });
+  var v = rec.video;
+  return {t: performance.now(), seekedT: rec.seekedT, framesAfterSeek: after.length,
+          last: after.length ? after[after.length - 1] : null,
+          duration: isFinite(v.duration) ? v.duration : null, playbackRate: v.playbackRate};
+})()
+"""
+
+FORCE_WRAP_READ_JS = r"""
+(function(){
+  var rec = window.__obedWrapRecorder__;
+  if (!rec) return null;
+  rec.stopped = true;
+  var v = rec.video;
+  return {t: performance.now(), seekedT: rec.seekedT, seekFrom: rec.seekFrom, target: rec.target,
+          frames: rec.frames.slice(), id: v.id, elId: v.__obedElId == null ? null : v.__obedElId,
+          probeId: v.__obedProbeId == null ? null : v.__obedProbeId,
+          loop: v.loop, ended: v.ended, paused: v.paused, isConnected: v.isConnected,
+          duration: isFinite(v.duration) ? v.duration : null, playbackRate: v.playbackRate};
+})()
+"""
+
+PAGE_NOW_JS = "performance.now()"
+
+PAGE_ERRORS_JS = r"""
+(function(){
+  var core = window.__OBED_P2_PRESERVE__;
+  if (!core || !Array.isArray(core.events)) return null;
+  return JSON.parse(JSON.stringify(core.events.filter(function(e){ return e && e.kind === 'player-build-error'; })));
+})()
+"""
 
 # Use only the runtime-published handle; never acquire a context here.
 _INPAGE_LIVENESS_JS_TEMPLATE = r"""
@@ -505,9 +582,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="With --gl-replay auto: seed the module's debugForceFail and run only V and a forced Vgl "
         f"(one of {', '.join(GL_FORCE_FAIL_REASONS)}); status is forced-ok/forced-fail, never pass",
     )
+    parser.add_argument(
+        "--force-wrap", type=parse_force_wrap, default=None, metavar="{1to2,3to4}:OFFSET_MS",
+        help="L2: one take that seeks the boundary's source movie so its loop wraps OFFSET_MS after the "
+        "advance press, scored wrap-aware; status is pass/fail/invalid",
+    )
+    parser.add_argument(
+        "--rescore", type=Path, default=None, metavar="ARTIFACT",
+        help="L2 control: re-score a standard host artifact's arms strict and wrap-aware (period from --fixture), "
+        "or re-score a --force-wrap artifact offline; exits 1 unless ok / pass",
+    )
     args = parser.parse_args(argv)
     if args.gl_force_fail is not None and (args.gl_replay != "auto" or args.only_pass is not None):
         parser.error("--gl-force-fail requires --gl-replay auto and the full run")
+    if args.force_wrap is not None and (args.gl_force_fail is not None or args.only_pass is not None or args.rescore):
+        parser.error("--force-wrap runs on its own (no --pass, --gl-force-fail or --rescore)")
+    if args.rescore is not None and (args.gl_force_fail is not None or args.only_pass is not None):
+        parser.error("--rescore runs on its own (no --pass or --gl-force-fail)")
     return args
 
 
@@ -1159,6 +1250,85 @@ def _longest_stall_run(rows: list[dict[str, Any]], max_stall_s: float) -> dict[s
     return {"longestStallS": round(longest_s, 3), "stalled": stalled, "longestStallEndMs": longest_end_ms}
 
 
+def unwrap_clock(
+    rows: list[dict[str, Any]], period_s: float, fps: float = WRAP_FPS
+) -> tuple[list[dict[str, Any]], list[float]]:
+    """`rows` (time-ordered) with `currentTime` unwrapped across loop wraps, plus each wrap's
+    `t`. A step back `a -> b` is a wrap only when the step spans at most `MAX_STALL_S`,
+    `a >= P - tol` and `b <= tol`, with `tol = 2/fps + (t_b - t_a)`; every other drop
+    (including one hidden in a sampling gap) is left in place to be scored."""
+    unwrapped: list[dict[str, Any]] = []
+    wraps: list[float] = []
+    offset = 0.0
+    for index, row in enumerate(rows):
+        if index:
+            a = rows[index - 1]
+            step_s = (row["t"] - a["t"]) / 1000.0
+            if row["currentTime"] < a["currentTime"] and step_s <= MAX_STALL_S:
+                tol = 2.0 / fps + step_s
+                if a["currentTime"] >= period_s - tol and row["currentTime"] <= tol:
+                    offset += period_s
+                    wraps.append(row["t"])
+        unwrapped.append({**row, "currentTime": row["currentTime"] + offset})
+    return unwrapped, wraps
+
+
+def _owns_itself(row: dict[str, Any]) -> bool:
+    owner = row.get("footprintOwner")
+    return isinstance(owner, dict) and owner.get("elId") is not None and owner.get("elId") == row.get("elId")
+
+
+def _wrap_seek_unowned(rows: list[dict[str, Any]], row: dict[str, Any], wrap_times: list[float]) -> bool:
+    """The browser's loop seek: the post-wrap sample of a classified wrap, with a finite
+    `readyState < 2`, unowned (`via == 'none'`, no other element named), between two samples
+    carrying the same non-null `elId` that own the footprint. `footprintOwnerDecoderId` fails
+    closed on a not-ready decoder, so only that one sample may go unowned."""
+    owner = row.get("footprintOwner")
+    ready = _finite_number(row.get("readyState"))
+    el_id = row.get("elId")
+    if row["t"] not in wrap_times or ready is None or ready >= 2 or el_id is None:
+        return False
+    if not (isinstance(owner, dict) and owner.get("via") == "none" and owner.get("elId") is None):
+        return False
+    index = next((i for i, r in enumerate(rows) if r is row or r["t"] == row["t"]), None)
+    if index is None or index == 0 or index + 1 >= len(rows):
+        return False
+    return all(
+        neighbour.get("elId") == el_id and _owns_itself(neighbour) for neighbour in (rows[index - 1], rows[index + 1])
+    )
+
+
+def continuity_window(
+    samples: list[dict[str, Any]], boundary_scene: float, *, pad_s: float = WINDOW_PAD_S,
+    transition_scene: float | None = None,
+) -> dict[str, float] | None:
+    """`score_continuity`'s scoring window: the padded crossing, grounded at the from-slide's
+    first settled sample when a moving transition precedes the boundary."""
+    window = find_boundary_window(samples, boundary_scene, pad_s=pad_s)
+    if window is None or transition_scene is None:
+        return window
+    # Ground the window's start at the first SETTLED sample of the from-slide's
+    # own scene (transition_scene - 1), not a blind pad_s before the crossing
+    # into transition_scene: a deliberate decoder restart can sit right before
+    # the move, and padding further back reaches into the PRIOR scene, before
+    # that restart, where the continuing decoder cannot exist yet -- any
+    # missing sample there would be a false failure, not evidence of anything.
+    # Grounding here still covers the entire move (which starts later, inside
+    # transition_scene) and the settled source phase that precedes it.
+    settled_source_times = [
+        s["t"]
+        for s in samples
+        if s.get("scene") == transition_scene - 1 and s.get("busy") is False
+    ]
+    if settled_source_times:
+        window["start"] = min(window["start"], min(settled_source_times))
+    else:
+        move_window = find_boundary_window(samples, transition_scene, pad_s=pad_s)
+        if move_window is not None:
+            window["start"] = min(window["start"], move_window["start"])
+    return window
+
+
 def score_continuity(
     samples: list[dict[str, Any]],
     asset_substr: str,
@@ -1173,6 +1343,9 @@ def score_continuity(
     rect_tolerance: float = RECT_TOLERANCE_PX,
     pad_s: float = WINDOW_PAD_S,
     transition_scene: float | None = None,
+    loop_period_s: float | None = None,
+    loop_fps: float = WRAP_FPS,
+    min_window_start: float | None = None,
 ) -> dict[str, Any]:
     """Pure: samples in, verdict dict out. Scores continuity of ONE tracked decoder
     across `boundary_scene`, evaluated only within the crossing window (reviewer
@@ -1186,33 +1359,19 @@ def score_continuity(
       - a monotonic clock (no drop beyond float jitter);
       - the longest zero-advance run at or under `max_stall_s`;
       - total clock advance within the window at least `min_advance_s`.
+    With `loop_period_s`, the clock is unwrapped across loop wraps (`unwrap_clock`) before
+    the drop, stall and advance checks, and `wraps` is reported; `None` is the strict clock.
+    `min_window_start` clips the window's start (a forced wrap's seek stays outside it).
     """
     tracks = track_by_id(samples, asset_substr)
     if not decoded_anywhere(tracks):
         return {"verdict": None, "reason": "inconclusive: movie never decoded"}
-    window = find_boundary_window(samples, boundary_scene, pad_s=pad_s)
+    window = continuity_window(samples, boundary_scene, pad_s=pad_s, transition_scene=transition_scene)
     if window is None:
         return {"verdict": False, "reason": "boundary crossing not observed in samples"}
-    if transition_scene is not None:
-        # Ground the window's start at the first SETTLED sample of the from-slide's
-        # own scene (transition_scene - 1), not a blind pad_s before the crossing
-        # into transition_scene: a deliberate decoder restart can sit right before
-        # the move, and padding further back reaches into the PRIOR scene, before
-        # that restart, where the continuing decoder cannot exist yet -- any
-        # missing sample there would be a false failure, not evidence of anything.
-        # Grounding here still covers the entire move (which starts later, inside
-        # transition_scene) and the settled source phase that precedes it.
-        settled_source_times = [
-            s["t"]
-            for s in samples
-            if s.get("scene") == transition_scene - 1 and s.get("busy") is False
-        ]
-        if settled_source_times:
-            window["start"] = min(window["start"], min(settled_source_times))
-        else:
-            move_window = find_boundary_window(samples, transition_scene, pad_s=pad_s)
-            if move_window is not None:
-                window["start"] = min(window["start"], move_window["start"])
+    if min_window_start is not None:
+        window["groundedStart"] = window["start"]
+        window["start"] = max(window["start"], min_window_start)
     windowed = {
         element_id: [r for r in rows if window["start"] <= r["t"] <= window["end"]]
         for element_id, rows in tracks.items()
@@ -1247,6 +1406,9 @@ def score_continuity(
 
     element_id = max(sorted(common), key=lambda i: _candidate_score(windowed[i]))
     rows = sorted(windowed[element_id], key=lambda r: r["t"])
+    wraps: list[float] | None = None
+    if loop_period_s is not None:
+        rows, wraps = unwrap_clock(rows, loop_period_s, loop_fps)
     before_rows = [r for r in rows if r["scene"] is not None and r["scene"] < boundary_scene]
     after_rows = [r for r in rows if r["scene"] is not None and r["scene"] >= boundary_scene]
 
@@ -1274,12 +1436,17 @@ def score_continuity(
         motion["errors"].append("settled source not observed")
 
     owner_mismatches: list[dict[str, Any]] = []
+    wrap_owner_excused: list[dict[str, Any]] = []
     if runtime_installed:
         for r in [*move_rows, *completed_move_rows, *after_rows]:
             owner = r.get("footprintOwner")
             owned = isinstance(owner, dict) and owner.get("elId") is not None and owner.get("elId") == r.get("elId")
             if not owned:
-                owner_mismatches.append({"t": r["t"], "footprintOwner": owner, "elId": r.get("elId")})
+                entry = {"t": r["t"], "footprintOwner": owner, "elId": r.get("elId")}
+                if wraps is not None and _wrap_seek_unowned(rows, r, wraps):
+                    wrap_owner_excused.append(entry)
+                else:
+                    owner_mismatches.append(entry)
 
     rect_mismatches: list[dict[str, Any]] = []
     for r in before_rows:
@@ -1307,7 +1474,7 @@ def score_continuity(
         and not stage_map_invalid
         and (motion is None or not motion["errors"])
     )
-    return {
+    scored = {
         "verdict": ok,
         "elementId": element_id,
         "windowAdvanceS": round(advance, 3),
@@ -1322,6 +1489,9 @@ def score_continuity(
         "motion": motion,
         "window": window,
     }
+    if wraps is not None:
+        scored.update(wraps=len(wraps), wrapTimes=wraps, wrapOwnerExcused=wrap_owner_excused)
+    return scored
 
 
 def score_restart(
@@ -1350,16 +1520,44 @@ def score_restart(
     return {"verdict": ok, "elementId": element_id, "startTimeS": start_time, "freshIds": sorted(fresh_ids)}
 
 
-def score_boundaries(samples: list[dict[str, Any]], facts: dict[str, Any], runtime_installed: bool) -> dict[str, Any]:
+def score_boundaries(
+    samples: list[dict[str, Any]], facts: dict[str, Any], runtime_installed: bool, *,
+    loop_period_s: float | None = None,
+) -> dict[str, Any]:
     """Pure: samples + ground truth in, the three boundary verdicts out."""
     asset = facts["asset"]
-    v12 = score_continuity(samples, asset, facts["onset1to2"], facts["pinRect"], facts["pinRect"], runtime_installed)
+    v12 = score_continuity(
+        samples, asset, facts["onset1to2"], facts["pinRect"], facts["pinRect"], runtime_installed,
+        loop_period_s=loop_period_s,
+    )
     v23 = score_restart(samples, asset, facts["restartScene"])
     v34 = score_continuity(
         samples, asset, facts["bridgeScene"], facts["bridgeSrcRect"], facts["destRect"], runtime_installed,
-        transition_scene=facts["bridgeScene"] - 1,
+        transition_scene=facts["bridgeScene"] - 1, loop_period_s=loop_period_s,
     )
     return {"continue1to2": v12, "restart2to3": v23, "continue3to4": v34}
+
+
+def unplanned_wraps(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every clock drop over half its period by a sampled `<video>` that reports `loop`: a
+    wrap the standard arms did not plan, which makes the take INVALID (retake), not a FAIL."""
+    last: dict[Any, dict[str, Any]] = {}
+    found: list[dict[str, Any]] = []
+    for sample in sorted(samples, key=lambda s: s.get("t") or 0.0):
+        for video_row in sample.get("videos") or []:
+            key = video_row.get("id")
+            previous = last.get(key)
+            last[key] = video_row
+            if previous is None or not (video_row.get("loop") or previous.get("loop")):
+                continue
+            period = _finite_number(video_row.get("duration")) or _finite_number(previous.get("duration"))
+            before, after = _finite_number(previous.get("currentTime")), _finite_number(video_row.get("currentTime"))
+            if period and before is not None and after is not None and before - after > period / 2:
+                found.append({
+                    "id": key, "elId": video_row.get("elId"), "src": video_row.get("src"), "t": sample.get("t"),
+                    "scene": sample.get("scene"), "from": before, "to": after, "duration": period,
+                })
+    return found
 
 
 def rects_overlap(a: dict[str, float], b: dict[str, float], min_px: float = REFUSAL_OVERLAP_MIN_PX) -> bool:
@@ -1707,6 +1905,7 @@ def run_arm(
         samples, invalid_count = convert_samples_to_authored(raw_samples)
         result["samples"] = samples
         result["sampleCount"] = len(samples)
+        result["unplannedWraps"] = unplanned_wraps(samples)
         result["stageMapInvalidCount"] = invalid_count
         result["stageMap"] = stage_map_summary(samples)
         result["stageFit"] = score_stage_fit(samples, expected_stage)
@@ -1809,6 +2008,7 @@ def run_attach_arm(
                 samples, invalid_count = convert_samples_to_authored(raw_samples)
                 result["samples"] = samples
                 result["sampleCount"] = len(samples)
+                result["unplannedWraps"] = unplanned_wraps(samples)
                 result["stageMapInvalidCount"] = invalid_count
                 result["stageMap"] = stage_map_summary(samples)
                 result["stageFit"] = score_stage_fit(samples, expected_stage)
@@ -3670,9 +3870,17 @@ def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     active -- arms A/C must actually have qualified continuity installed, arm B
     must actually have it off, and the attach arm's page must actually be
     transparent, or the verdict is not trustworthy even if the boundary math
-    passed."""
+    passed. A standard arm that sampled a loop wrap is INVALID: its strict clock cannot
+    score that take."""
     arms = result.get("arms", {})
     attach = result.get("attach", {})
+    wrapped = [
+        f"{label} sampled {len(entry['unplannedWraps'])} unplanned loop wrap(s); retake"
+        for label, entry in [*((f"arm {name}", arm) for name, arm in arms.items()), ("attach", attach)]
+        if isinstance(entry, dict) and entry.get("unplannedWraps")
+    ]
+    if wrapped:
+        return "invalid", wrapped
     a, b, c = arms.get("A", {}), arms.get("B", {}), arms.get("C", {})
     a_armed, c_armed = gl_replay_mode(a) == "injected", gl_replay_mode(c) == "injected"
     all_gated = [
@@ -3871,12 +4079,581 @@ def run_forced_fail_cli(args: argparse.Namespace) -> None:
     print(json.dumps({"status": result.get("status"), "forced": result.get("forced")}, indent=2, default=str))
 
 
+def parse_force_wrap(value: str) -> dict[str, Any]:
+    match = re.fullmatch(r"(1to2|3to4):(-?\d+)", value or "")
+    if match is None:
+        raise argparse.ArgumentTypeError(f"invalid --force-wrap {value!r}: expected {{1to2,3to4}}:<offset_ms>")
+    return {"boundary": match.group(1), "offsetMs": int(match.group(2))}
+
+
+def movie_nodes(export_root: Path, slides: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every movie node the derivation reads, with its objectID, asset key, trim and authored rect."""
+    nodes = []
+    for slide in slides:
+        uuid = slide["exportedUuid"]
+        data = json.loads((export_root / "assets" / uuid / f"{uuid}.json").read_text())
+        for node in live_continuity_module._find_movie_nodes(data["events"]):
+            movie = node["movie"]
+            nodes.append({
+                "playerIndex": slide["playerIndex"], "objectId": node.get("objectID"),
+                "asset": live_continuity_module._normalize_asset_key(data["assets"], movie.get("asset")),
+                "startTime": movie.get("startTime"), "endTime": movie.get("endTime"),
+                "rect": live_continuity_module._movie_rect(node, uuid).as_dict(),
+            })
+    return nodes
+
+
+def source_instance(
+    nodes: list[dict[str, Any]], player_index: int, asset: str, rect: dict[str, float]
+) -> dict[str, Any]:
+    """The one authored instance of `asset` at `rect` on the source slide; fails closed."""
+    found = [
+        node for node in nodes
+        if node["playerIndex"] == player_index and node["asset"] == asset and rect_matches(node["rect"], rect)
+    ]
+    if len(found) != 1 or not isinstance(found[0]["objectId"], str) or not found[0]["objectId"]:
+        raise SystemExit(f"{len(found)} instance(s) of {asset!r} at {rect} on player index {player_index}, expected one")
+    node = found[0]
+    start, end = _finite_number(node["startTime"]), _finite_number(node["endTime"])
+    if start is None or end is None or end <= start:
+        raise SystemExit(f"movie {node['objectId']} has no usable trim: {node['startTime']!r}..{node['endTime']!r}")
+    return {**node, "domId": f"{node['objectId']}-video", "periodS": end - start}
+
+
+def loop_period_of(nodes: list[dict[str, Any]], asset: str) -> float:
+    periods = {
+        round(node["endTime"] - node["startTime"], 6) for node in nodes
+        if node["asset"] == asset and _finite_number(node["endTime"]) is not None and _finite_number(node["startTime"]) is not None
+    }
+    if len(periods) != 1:
+        raise SystemExit(f"asset {asset!r} has {len(periods)} distinct trims, expected one: {sorted(periods)}")
+    return periods.pop()
+
+
+def recorded_wrap(recorder: Any) -> dict[str, Any] | None:
+    """The first recorder frame after the seek whose media time drops by over half the period."""
+    if not isinstance(recorder, dict):
+        return None
+    period, seeked = _finite_number(recorder.get("duration")), _finite_number(recorder.get("seekedT"))
+    if period is None or seeked is None:
+        return None
+    frames = [f for f in recorder.get("frames") or [] if (_finite_number(f.get("now")) or -1.0) >= seeked]
+    for a, b in zip(frames, frames[1:]):
+        if a["mediaTime"] - b["mediaTime"] > period / 2:
+            return {"t": b["now"], "from": a["mediaTime"], "to": b["mediaTime"], "fromT": a["now"]}
+    return None
+
+
+def force_wrap_invalid(
+    take: dict[str, Any], recorder: Any, *, offset_ms: float, node_period_s: float, fps: float = WRAP_FPS
+) -> list[str]:
+    """Why a forced-wrap take cannot be scored at all (retake), never a FAIL."""
+    select = take.get("select") if isinstance(take.get("select"), dict) else {}
+    if select.get("count") != 1:
+        return [f"{select.get('count')!r} <video> elements have id {take.get('domId')!r}, expected exactly one"]
+    if select.get("error"):
+        return [str(select["error"])]
+    if not isinstance(recorder, dict):
+        return ["the wrap recorder was not read back"]
+    reasons: list[str] = []
+    seeked = _finite_number(recorder.get("seekedT"))
+    press = _finite_number(take.get("pressT"))
+    duration = _finite_number(recorder.get("duration"))
+    if take.get("error"):
+        reasons.append(f"harness error: {take['error']}")
+    if seeked is None:
+        reasons.append("the seek never completed")
+    if press is None:
+        reasons.append("the advance was never pressed")
+    if recorder.get("playbackRate") != 1:
+        reasons.append(f"playbackRate={recorder.get('playbackRate')!r}, expected 1")
+    if duration is None or abs(duration - node_period_s) > 1.0 / fps:
+        reasons.append(f"element duration {duration!r} is not the node's endTime - startTime {node_period_s!r} within one frame")
+    if seeked is not None and press is not None:
+        if press - seeked < FORCE_WRAP_MIN_PRESS_AFTER_SEEK_MS:
+            reasons.append(f"pressed {press - seeked:.0f} ms after the seek, expected >= {FORCE_WRAP_MIN_PRESS_AFTER_SEEK_MS:.0f}")
+        settled = [f for f in recorder.get("frames") or [] if seeked <= f["now"] < press]
+        if len(settled) < FORCE_WRAP_MIN_FRAMES:
+            reasons.append(f"{len(settled)} frame(s) between the seek and the press, expected >= {FORCE_WRAP_MIN_FRAMES}")
+        elif abs(settled[0]["mediaTime"] - (_finite_number(recorder.get("target")) or math.inf)) > 2.0 / fps + 0.1:
+            reasons.append(f"the seek landed at {settled[0]['mediaTime']!r}, asked {recorder.get('target')!r}")
+        wrap = recorded_wrap(recorder)
+        if wrap is not None and abs(wrap["t"] - press - offset_ms) > FORCE_WRAP_TOLERANCE_MS:
+            reasons.append(
+                f"the recorded wrap is {wrap['t'] - press:.0f} ms from the press, asked {offset_ms} +/- {FORCE_WRAP_TOLERANCE_MS:.0f}"
+            )
+    if take.get("reached") is not True:
+        reasons.append("the timed press did not land on the destination slide")
+    return reasons
+
+
+def page_errors_in(notes: Any, seeked_t: float | None, window: dict[str, float] | None) -> list[dict[str, Any]] | None:
+    """The core's `player-build-error` notes from the seek to the end of the scored window;
+    None when they could not be read."""
+    if not isinstance(notes, list) or seeked_t is None:
+        return None
+    end = window["end"] if window is not None else math.inf
+    return [
+        note for note in notes
+        if isinstance(note, dict) and seeked_t <= (_finite_number(note.get("t")) or -math.inf) <= end
+    ]
+
+
+def forced_window(
+    samples: list[dict[str, Any]], boundary_scene: float, transition_scene: float | None, seeked_t: float
+) -> dict[str, float] | None:
+    window = continuity_window(samples, boundary_scene, transition_scene=transition_scene)
+    if window is None:
+        return None
+    window["groundedStart"] = window["start"]
+    window["start"] = max(window["start"], seeked_t + FORCE_WRAP_WINDOW_AFTER_SEEK_MS)
+    return window
+
+
+def score_recorder_clock(
+    recorder: Any, window: dict[str, float] | None, *, fps: float = WRAP_FPS, min_advance_s: float = MIN_ADVANCE_S,
+    max_stall_s: float = MAX_STALL_S, max_drop_s: float = MAX_DROP_S,
+) -> dict[str, Any]:
+    """The seeked element's own rVFC clock over `window`, wrap-aware: exactly one wrap, no
+    other drop, no forward jump beyond wall time by more than `2/fps + max_drop_s`, no
+    presentation gap or frozen run over `max_stall_s`, and real advance."""
+    if not isinstance(recorder, dict) or window is None:
+        return {"verdict": False, "reason": "no recorder or no window"}
+    period = _finite_number(recorder.get("duration"))
+    if period is None:
+        return {"verdict": False, "reason": "the recorded element has no finite duration"}
+    frames = sorted(
+        (f for f in recorder.get("frames") or [] if window["start"] <= (_finite_number(f.get("now")) or -1.0) <= window["end"]),
+        key=lambda f: f["now"],
+    )
+    if not frames:
+        return {"verdict": False, "reason": "no recorded frame inside the window", "window": window}
+    rows, wraps = unwrap_clock([{"t": f["now"], "currentTime": f["mediaTime"]} for f in frames], period, fps)
+    max_drop = max([0.0, *(a["currentTime"] - b["currentTime"] for a, b in zip(rows, rows[1:]))])
+    max_jump = max([0.0, *(
+        (b["currentTime"] - a["currentTime"]) - (b["t"] - a["t"]) / 1000.0 for a, b in zip(rows, rows[1:])
+    )])
+    edges = [window["start"], *(r["t"] for r in rows), window["end"]]
+    longest_gap_s = max(b - a for a, b in zip(edges, edges[1:])) / 1000.0
+    stall = _longest_stall_run(rows, max_stall_s)
+    advance = rows[-1]["currentTime"] - rows[0]["currentTime"]
+    ok = (
+        len(wraps) == 1 and max_drop <= max_drop_s and max_jump <= 2.0 / fps + max_drop_s
+        and longest_gap_s <= max_stall_s
+        and not stall["stalled"] and advance >= min_advance_s
+    )
+    return {
+        "verdict": ok, "wraps": len(wraps), "wrapTimes": wraps, "maxDropS": round(max_drop, 3),
+        "maxJumpS": round(max_jump, 3),
+        "longestGapS": round(longest_gap_s, 3), "longestStallS": stall["longestStallS"],
+        "windowAdvanceS": round(advance, 3), "frameCount": len(rows), "window": window,
+    }
+
+
+def _gl_states(reads: Any) -> list[dict[str, Any]]:
+    if not isinstance(reads, list):
+        return []
+    return [read["glReplay"] for read in reads if isinstance(read, dict) and isinstance(read.get("glReplay"), dict)]
+
+
+def armed_carry(reads: Any, armed: dict[str, Any], recorder: Any) -> tuple[bool, dict[str, Any]]:
+    """The armed 1->2 carry held: armed on the source, LIVE after settle with no stand-down,
+    carrying the seeked element, and no `<video>` painting over the armed rect."""
+    states = _gl_states(reads)
+    if len(states) != 2:
+        return False, {"reason": "the destination was not read twice"}
+    arms = _notes(states[-1], "glreplay-arm")
+    downs = _notes(states[-1], "glreplay-standdown") + _notes(states[-1], "glreplay-handoff")
+    live, live_detail = _armed_live(states, armed)
+    carried = _carried_el_id(states[-1])
+    seeked = recorder.get("elId") if isinstance(recorder, dict) else None
+    no_painting, painting = _armed_no_painting(reads, armed)
+    checks = {
+        "armSeen": any(hash_number(note.get("sceneHash")) == armed["atScene"] - 1 for note in arms),
+        "live": live,
+        "noStandDown": not downs,
+        "carriesSeeked": carried is not None and carried == seeked,
+        "noPainting": no_painting,
+    }
+    return all(checks.values()), {
+        "checks": checks, "live": live_detail, "carriedElId": carried, "seekedElId": seeked, "paintingOverRect": painting,
+    }
+
+
+def score_raw_restart(
+    samples: list[dict[str, Any]], asset: str, boundary_scene: float, *, min_advance_s: float = MIN_ADVANCE_S
+) -> dict[str, Any]:
+    """`score_restart`, and the fresh decoder then actually plays."""
+    scored = score_restart(samples, asset, boundary_scene)
+    if scored.get("verdict") is not True:
+        return scored
+    rows = sorted(
+        (r for r in track_by_id(samples, asset)[scored["elementId"]] if r["scene"] is not None and r["scene"] >= boundary_scene),
+        key=lambda r: r["t"],
+    )
+    advance = rows[-1]["currentTime"] - rows[0]["currentTime"]
+    return {**scored, "verdict": advance >= min_advance_s, "advanceS": round(advance, 3)}
+
+
+def preserved_painting(reads: Any, rects: list[dict[str, float]]) -> tuple[bool | None, list[Any]]:
+    """Runtime-tagged (`elId`) `<video>`s painting over `rects` on the settled destination;
+    None when a read cannot answer."""
+    if not isinstance(reads, list) or not reads:
+        return None, ["no destination read"]
+    over: list[Any] = []
+    for read in reads:
+        stage_map = read.get("stageMap") if isinstance(read, dict) else None
+        if not stage_map_valid(stage_map):
+            return None, ["stage map is missing or untrustworthy"]
+        try:
+            videos = painting_videos(read.get("painting"), stage_map)
+        except VisiblePassError as exc:
+            return None, [str(exc)]
+        over.extend(
+            v for v in videos if v.get("elId") is not None and any(rects_overlap(v["authored"], r) for r in rects)
+        )
+    return bool(over), over
+
+
+def fallback_outcome(
+    reads: Any, *, armed_boundary: bool, restart: dict[str, Any], rects: list[dict[str, float]]
+) -> tuple[str | None, dict[str, Any]]:
+    """Which listed fail-closed fallback the take took, if any (OQ-4). On the armed boundary a
+    raw restart counts only once G2 is no longer active and its zone is retired (or never
+    opened), so no carried canvas can still be painting."""
+    states = _gl_states(reads)
+    last = states[-1] if states else {}
+    api = last.get("api") if isinstance(last.get("api"), dict) else {}
+    stand_downs = api.get("standDowns") if isinstance(api.get("standDowns"), list) else None
+    zones = [(z.get("from"), z.get("to"), z.get("reason")) for z in _notes(last, "glreplay-zone")] if last else []
+    painting, over = preserved_painting(reads, rects)
+    g2_inactive = api.get("state") not in G2_ACTIVE_STATES and (not zones or zones[-1][1] == "retired")
+    detail = {
+        "standDowns": stand_downs, "zones": zones, "restart": restart, "preservedPainting": over,
+        "g2State": api.get("state"), "g2Inactive": g2_inactive,
+    }
+    if armed_boundary and stand_downs == ["videoNotReady"]:
+        return "videoNotReady", detail
+    if armed_boundary and stand_downs == [] and any(to == "retired" and why == "notPooled" for _, to, why in zones):
+        return "notPooled", detail
+    if restart.get("verdict") is True and painting is False and (g2_inactive or not armed_boundary):
+        return "rawRestart", detail
+    return None, detail
+
+
+def fallback_events(reads: Any) -> dict[str, Any]:
+    states = _gl_states(reads)
+    last = states[-1] if states else {}
+    api = last.get("api") if isinstance(last.get("api"), dict) else {}
+    return {
+        "standDowns": api.get("standDowns"), "state": api.get("state"),
+        "apiEvents": api.get("events"), "coreEvents": last.get("coreEvents"),
+    }
+
+
+def score_forced_wrap(
+    *, boundary: str, offset_ms: float, take: dict[str, Any], recorder: Any, node_period_s: float,
+    continuity: dict[str, Any], clock: dict[str, Any], reads: Any, armed: dict[str, Any] | None,
+    restart: dict[str, Any], rects: list[dict[str, float]], page_errors: list[dict[str, Any]] | None,
+    fps: float = WRAP_FPS,
+) -> dict[str, Any]:
+    """L2: INVALID (retake), or PASS when the carry held across exactly one wrap or the take
+    took a listed fail-closed fallback after a real wrap, else FAIL. Any page error from the
+    seek to the end of the window FAILs, as in the P2 gate (no benign-error allowance)."""
+    wrap = recorded_wrap(recorder)
+    press = _finite_number(take.get("pressT"))
+    result: dict[str, Any] = {
+        "boundary": boundary, "offsetMs": offset_ms,
+        "recordedWrap": wrap, "wrapFromPressMs": wrap["t"] - press if wrap and press is not None else None,
+        "fallbackEvents": fallback_events(reads), "pageErrors": page_errors,
+    }
+    invalid = force_wrap_invalid(take, recorder, offset_ms=offset_ms, node_period_s=node_period_s, fps=fps)
+    if page_errors is None:
+        invalid.append("the core's page-error notes could not be read")
+    if invalid:
+        return {**result, "status": "invalid", "outcome": None, "reasons": invalid}
+    if page_errors:
+        return {**result, "status": "fail", "outcome": None, "reasons": [f"{len(page_errors)} page error(s) after the seek"]}
+    armed_boundary = armed is not None and armed.get("boundaryKey") == f"continue{boundary}"
+    if armed_boundary:
+        held, carry = armed_carry(reads, armed, recorder)
+        held = held and clock.get("verdict") is True
+    else:
+        tracked = continuity.get("elementId")
+        seeked = recorder.get("probeId") if isinstance(recorder, dict) else None
+        checks = {
+            "continuity": continuity.get("verdict") is True,
+            "oneWrap": continuity.get("wraps") == 1,
+            "recorderClock": clock.get("verdict") is True,
+            "tracksSeeked": tracked is not None and tracked == seeked,
+        }
+        held = all(checks.values())
+        carry = {"checks": checks, "wraps": continuity.get("wraps"), "trackedId": tracked, "seekedProbeId": seeked}
+    result["carry"] = carry
+    if held:
+        return {**result, "status": "pass", "outcome": "carried", "reasons": []}
+    outcome, detail = (None, {}) if wrap is None else fallback_outcome(
+        reads, armed_boundary=armed_boundary, restart=restart, rects=rects,
+    )
+    result["fallback"] = detail
+    if outcome is not None:
+        return {**result, "status": "pass", "outcome": outcome, "reasons": []}
+    reasons = ["no wrap was recorded" if wrap is None else "the carry did not hold and no listed fallback was taken"]
+    return {**result, "status": "fail", "outcome": None, "reasons": reasons}
+
+
+def force_wrap_take(
+    player: LiveOutputHost, dom_id: str, offset_ms: float, *, press_after_seek_s: float = FORCE_WRAP_PRESS_AFTER_SEEK_S,
+) -> dict[str, Any]:
+    """Seek the source element to `duration - lead`, wait for `seeked` plus rVFC frames, then
+    press advance so the browser's own loop wraps `offset_ms` after the press."""
+    transport = player._require_transport()
+    lead_s = press_after_seek_s + offset_ms / 1000.0
+    take: dict[str, Any] = {"domId": dom_id, "offsetMs": offset_ms, "leadS": lead_s}
+    take["select"] = transport.evaluate(f"{FORCE_WRAP_SEEK_JS}({json.dumps(dom_id)}, {lead_s!r})")
+    if not isinstance(take["select"], dict) or take["select"].get("count") != 1 or take["select"].get("error"):
+        return take
+    deadline = time.monotonic() + FORCE_WRAP_SEEK_TIMEOUT_S
+    status = None
+    while time.monotonic() < deadline:
+        status = transport.evaluate(FORCE_WRAP_STATUS_JS)
+        if isinstance(status, dict) and status.get("seekedT") is not None and status.get("framesAfterSeek", 0) >= FORCE_WRAP_MIN_FRAMES:
+            break
+        time.sleep(0.02)
+    take["status"] = status
+    if not (isinstance(status, dict) and status.get("framesAfterSeek", 0) >= FORCE_WRAP_MIN_FRAMES and status.get("duration")):
+        take["error"] = "the seek did not settle in time"
+        return take
+    last = status["last"]
+    take["plannedWrapT"] = last["now"] + (status["duration"] - last["mediaTime"]) * 1000.0 / (status["playbackRate"] or 1.0)
+    take["plannedPressT"] = take["plannedWrapT"] - offset_ms
+    before = time.monotonic()
+    page_now = transport.evaluate(PAGE_NOW_JS)
+    clock_offset_s = (before + time.monotonic()) / 2.0 - page_now / 1000.0
+    delay = take["plannedPressT"] / 1000.0 + clock_offset_s - time.monotonic()
+    if delay > 0:
+        time.sleep(delay)
+    take["pressT"] = transport.evaluate(PAGE_NOW_JS)
+    try:
+        player.execute("advance")
+    except PlayerCommandRejected as exc:
+        take["error"] = f"advance rejected: {exc}"
+    take["pressReturnedT"] = transport.evaluate(PAGE_NOW_JS)
+    return take
+
+
+def force_wrap_ground_truth(fixture: Path, original_index: Path, boundary: str, gl_replay: str) -> dict[str, Any]:
+    """The boundary's scene, rects and seeked source instance, derived offline from the fixture."""
+    src_ordinal = FORCE_WRAP_BOUNDARIES[boundary][0]
+    export = prepare_export(fixture, original_index, "force-wrap")
+    slides = load_slides(export)
+    plan = ground_truth_plan(export, slides)
+    facts = ground_truth_facts(plan)
+    facts_on = gl_ground_truth(export, slides, facts)[1] if gl_replay == "auto" else None
+    if boundary == "1to2":
+        scene, src_rect, dst_rect, transition = facts["onset1to2"], facts["pinRect"], facts["pinRect"], None
+    else:
+        scene, src_rect, dst_rect, transition = facts["bridgeScene"], facts["bridgeSrcRect"], facts["destRect"], facts["bridgeScene"] - 1
+    src_player = sorted(plan.scene_index_by_player)[src_ordinal - 1]
+    return {
+        "export": export, "slides": slides, "facts": facts, "factsOn": facts_on, "scene": scene,
+        "srcRect": src_rect, "dstRect": dst_rect, "transition": transition,
+        "source": source_instance(movie_nodes(export, slides), src_player, facts["asset"], src_rect),
+    }
+
+
+def armed_recorder_window(recorder: Any, reads: Any) -> dict[str, Any] | None:
+    """The armed boundary's recorder window, from the take alone (the page sampler never sees
+    the detached carried element): one second after the seek, to the last destination read,
+    the read that must itself prove the carry LIVE."""
+    seeked = _finite_number(recorder.get("seekedT")) if isinstance(recorder, dict) else None
+    states = _gl_states(reads)
+    end = _finite_number(states[-1].get("t")) if states else None
+    if seeked is None or end is None or end <= seeked + FORCE_WRAP_WINDOW_AFTER_SEEK_MS:
+        return None
+    return {"start": seeked + FORCE_WRAP_WINDOW_AFTER_SEEK_MS, "end": end, "rule": "armed: seekedT + 1 s .. last destination read"}
+
+
+def score_force_wrap_run(result: dict[str, Any], gt: dict[str, Any], boundary: str, offset_ms: float) -> None:
+    """Score one force-wrap take in place from what it recorded (live, or re-read from its artifact)."""
+    facts, source, scene = gt["facts"], gt["source"], gt["scene"]
+    arm_facts = facts_for(result.get("continuity"), facts, gt["factsOn"])
+    armed = arm_facts.get("armed")
+    armed_boundary = armed is not None and armed.get("boundaryKey") == f"continue{boundary}"
+    samples = result.get("samples") or []
+    recorder = result.get("recorder")
+    seeked = _finite_number(recorder.get("seekedT")) if isinstance(recorder, dict) else None
+    period = _finite_number(recorder.get("duration")) if isinstance(recorder, dict) else None
+    installed = continuity_mode(result) == "qualified"
+    result["continuityVerdict"] = score_continuity(
+        samples, facts["asset"], scene, gt["srcRect"], gt["dstRect"], installed, transition_scene=gt["transition"],
+        loop_period_s=period or source["periodS"], min_window_start=(seeked or 0.0) + FORCE_WRAP_WINDOW_AFTER_SEEK_MS,
+    )
+    if armed_boundary:
+        window = armed_recorder_window(recorder, result.get("reads"))
+    else:
+        window = forced_window(samples, scene, gt["transition"], seeked) if seeked is not None else None
+        if window is not None:
+            window["rule"] = "sampler: continuity window, start clipped to seekedT + 1 s"
+    result["recorderClock"] = score_recorder_clock(recorder, window)
+    result["restart"] = score_raw_restart(samples, facts["asset"], scene)
+    result["forced"] = score_forced_wrap(
+        boundary=boundary, offset_ms=offset_ms, take=result.get("take") or {}, recorder=recorder,
+        node_period_s=source["periodS"], continuity=result["continuityVerdict"], clock=result["recorderClock"],
+        reads=result.get("reads"), armed=armed, restart=result["restart"], rects=[gt["dstRect"]],
+        page_errors=page_errors_in(result.get("pageErrorNotes"), seeked, window),
+    )
+    result["status"] = result["forced"]["status"]
+
+
+def run_force_wrap(args: argparse.Namespace) -> dict[str, Any]:
+    """L2: one take of a wrap forced `offset_ms` from the advance press at one boundary."""
+    boundary, offset_ms = args.force_wrap["boundary"], args.force_wrap["offsetMs"]
+    src_ordinal, dst_ordinal = FORCE_WRAP_BOUNDARIES[boundary]
+    gt = force_wrap_ground_truth(args.fixture, args.original_index, boundary, args.gl_replay)
+    source, scene = gt["source"], gt["scene"]
+    result: dict[str, Any] = {"source": source, "boundaryScene": scene}
+    force_viewport(*args.viewport)
+    player = LiveOutputHost(gt["export"], gt["slides"], headless=True, gl_replay=args.gl_replay)
+    try:
+        player.start()
+        result["continuity"] = player.output["continuity"]
+        transport = player._require_transport()
+        transport.evaluate(SAMPLER_JS)
+        transport.evaluate(ENSURE_PLAYING_JS)
+        wait_for_decode(player)
+        time.sleep(CLICK_DELAY_S)
+        for ordinal in range(2, src_ordinal + 1):
+            advance_until_original_slide(player, ordinal)
+        wait_until_settled(player)
+        time.sleep(CLICK_DELAY_S)
+        take = result["take"] = force_wrap_take(player, source["domId"], offset_ms)
+        if take.get("pressT") is not None:
+            take["reached"] = (
+                wait_for_destination_hash(player, scene) and player.observe().original_slide == dst_ordinal
+            )
+            result["reads"] = armed_evidence(transport)
+        time.sleep(POST_ADVANCE_SETTLE_S)
+        result["recorder"] = transport.evaluate(FORCE_WRAP_READ_JS)
+        result["pageErrorNotes"] = transport.evaluate(PAGE_ERRORS_JS)
+        raw_samples = transport.evaluate("window.__obedContinuityProbe__.samples")
+    finally:
+        try:
+            player.stop()
+        except Exception as exc:  # noqa: BLE001 - record, never mask an earlier failure
+            result["stopError"] = str(exc)
+    result["samples"] = convert_samples_to_authored(raw_samples if isinstance(raw_samples, list) else [])[0]
+    score_force_wrap_run(result, gt, boundary, offset_ms)
+    result["leftoverChrome"] = check_no_leftover_chrome()
+    return result
+
+
+def rescore_force_wrap(path: Path) -> dict[str, Any]:
+    """Re-score a saved force-wrap artifact with today's scorer; no browser."""
+    result = json.loads(path.read_text())
+    boundary, offset_ms = result["forceWrap"]["boundary"], result["forceWrap"]["offsetMs"]
+    gt = force_wrap_ground_truth(
+        Path(result["fixture"]), Path(result["originalIndex"]), boundary, (result.get("glReplay") or {}).get("requested", "off"),
+    )
+    before = result.get("status")
+    score_force_wrap_run(result, gt, boundary, offset_ms)
+    forced = result["forced"]
+    return {
+        "artifact": str(path), "statusBefore": before, "status": result["status"], "outcome": forced.get("outcome"),
+        "reasons": forced.get("reasons"), "wrapFromPressMs": forced.get("wrapFromPressMs"),
+        "carry": forced.get("carry"), "wrapOwnerExcused": result["continuityVerdict"].get("wrapOwnerExcused"),
+        "recorderWindow": result["recorderClock"].get("window"),
+    }
+
+
+def run_force_wrap_cli(args: argparse.Namespace) -> None:
+    artifact = args.artifact
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    result: dict[str, Any] = {
+        "kind": "live-continuity-probe-force-wrap", "status": "running",
+        "fixture": str(args.fixture), "originalIndex": str(args.original_index), "forceWrap": args.force_wrap,
+        "glReplay": {"requested": args.gl_replay}, "viewport": {"width": args.viewport[0], "height": args.viewport[1]},
+    }
+
+    def save() -> None:
+        artifact.write_text(json.dumps(result, indent=2, default=str) + "\n")
+
+    save()
+    try:
+        result.update(run_force_wrap(args))
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - always leave a readable artifact behind
+        result["status"] = "error"
+        result["error"] = str(exc)
+    finally:
+        save()
+    forced = result.get("forced") or {}
+    print(json.dumps({
+        "status": result.get("status"), "outcome": forced.get("outcome"), "reasons": forced.get("reasons"),
+        "wrapFromPressMs": forced.get("wrapFromPressMs"), "error": result.get("error"),
+    }, indent=2, default=str))
+    if result.get("status") != "pass":
+        raise SystemExit(1)
+
+
+def rescore_artifact(path: Path, period_s: float) -> dict[str, Any]:
+    """L2 CvC: re-score a standard host artifact's arms with the strict and the wrap-aware
+    scorer; `ok` needs every arm's two re-scores identical and the strict one equal to the
+    verdicts stored in the artifact."""
+    result = json.loads(path.read_text())
+    facts = result["groundTruth"]
+    entries = [*((f"arm {name}", arm) for name, arm in (result.get("arms") or {}).items()), ("attach", result.get("attach"))]
+    out: dict[str, Any] = {}
+    for label, entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("samples"), list):
+            out[label] = {"identical": None, "reason": "no samples"}
+            continue
+        installed = continuity_mode(entry) == "qualified"
+        strict = score_boundaries(entry["samples"], facts, installed)
+        aware = score_boundaries(entry["samples"], facts, installed, loop_period_s=period_s)
+        wraps = {key: aware[key].pop("wrapTimes", None) for key in aware}
+        for key in aware:
+            aware[key].pop("wraps", None)
+            aware[key].pop("wrapOwnerExcused", None)
+        stored = {key: entry.get(key) for key in strict}
+        out[label] = {
+            "identical": json.dumps(strict, sort_keys=True, default=str) == json.dumps(aware, sort_keys=True, default=str),
+            "strictMatchesArtifact": json.loads(json.dumps(strict, default=str)) == stored,
+            "wrapTimes": wraps,
+        }
+    return {"artifact": str(path), "loopPeriodS": period_s, "arms": out,
+            "ok": all(
+                item.get("identical") is True and item.get("strictMatchesArtifact") is True for item in out.values()
+            )}
+
+
+def run_rescore_cli(args: argparse.Namespace) -> None:
+    if json.loads(args.rescore.read_text()).get("kind") == "live-continuity-probe-force-wrap":
+        report = rescore_force_wrap(args.rescore)
+        print(json.dumps(report, indent=2, default=str))
+        if report["status"] != "pass":
+            raise SystemExit(1)
+        return
+    export = prepare_export(args.fixture, args.original_index, "rescore")
+    slides = load_slides(export)
+    facts = ground_truth_facts(ground_truth_plan(export, slides))
+    report = rescore_artifact(args.rescore, loop_period_of(movie_nodes(export, slides), facts["asset"]))
+    print(json.dumps(report, indent=2, default=str))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
 def main() -> None:
     args = parse_args()
     if args.gl_force_fail is not None:
         run_forced_fail_cli(args)
         return
     check_fixture(args)
+    if args.rescore is not None:
+        run_rescore_cli(args)
+        return
+    if args.force_wrap is not None:
+        run_force_wrap_cli(args)
+        return
     if args.only_pass == "G":
         run_pass_g_cli(args)
         return

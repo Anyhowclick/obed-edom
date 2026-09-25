@@ -104,7 +104,7 @@ What `gates-r1.md` shows:
 - MO-6 (host probe ×3, P2 fast/slow, bridge-off) at `01a9ff55`;
 - the full suites at `102d4ca4`.
 
-Both predate R5. Headless MO-1/4/5 were re-run at `0f6d0380` (`output/mmo-gates/probe-0f6d0380/verdict.json`, overall PASS), but
+Both predate R5. Headless MO-1/4/5 were re-run at `0f6d0380` (`output/evidence/mmo-gates/probe-0f6d0380/verdict.json`, overall PASS), but
 that run is not in the record.
 
 **Fix:**

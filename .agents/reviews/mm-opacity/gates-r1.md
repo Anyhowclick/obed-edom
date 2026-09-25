@@ -1,7 +1,7 @@
 # MM opacity gates — r1
 
 Plan `.agents/plans/keynote_live_mm_opacity.plan.md` rev 4 (§10). Fixture `output/p2-binary` (main checkout). Evidence under
-main checkout `output/mmo-gates/`. Gate worktree `mmo-gate-p2`, detached at the commit named per row.
+main checkout `output/evidence/mmo-gates/`. Gate worktree `mmo-gate-p2`, detached at the commit named per row.
 
 ## Headless (blocking)
 
@@ -16,7 +16,7 @@ main checkout `output/mmo-gates/`. Gate worktree `mmo-gate-p2`, detached at the 
 | MO-6 P2 bridge-off | `01a9ff55` | default | expected red | only `continueThroughMovingMagicMove3to4` False (the negative arm) |
 | MO-6 suites | `f7ecda5d` | | PASS | pytest 7761 passed / 88 skipped / 1 xfailed; test:ui 305/305; test:maps 542 + 2 |
 | MO-6 host probe ×3 + P2 ×3, after R5 | `7c20dde4` | default | PASS / as baseline | host V/Voff all True at 3 viewports; P2 fast/slow 14/14; bridge-off red only on its negative check |
-| MO-1/4/5 + stand-down, after R5 | `0f6d0380` | off, auto | PASS | output `output/mmo-gates/probe-0f6d0380/` |
+| MO-1/4/5 + stand-down, after R5 | `0f6d0380` | off, auto | PASS | output `output/evidence/mmo-gates/probe-0f6d0380/` |
 
 Q0b (scratch, `f6a87ee8`-era bytes) is recorded in the plan §9.
 

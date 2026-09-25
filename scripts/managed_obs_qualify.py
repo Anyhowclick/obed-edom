@@ -28,9 +28,9 @@ Arms:
                 fsdoff (10 sessions, one launch). Binary fixture only.
   soak          g2 held on slide 2 for --soak-minutes (>= 4) with per-minute reads, 20 s recordings around a loop wrap at
                 minute 1 and just before loseContext (after the first half), build 1, P3/P4; an off twin. Gate M6.
-                --precheck: the loop pre-check. --build-fixture KEY: export the owner's looping copy (needs
-                --i-have-owner-go; drives Keynote).
---fixture: the soak fixture (default output/p2-soak-loop), or for the other arms the P2 fixture (default) or its binary-counter
+                --precheck: the loop pre-check.
+--fixture: the soak fixture (default output/p2-loop, `loop_fixture.py`; its fixture.json `loop` key marks it looping, and it
+must qualify on product code), or for the other arms the P2 fixture (default) or its binary-counter
 copy (`binary_counter_movie.py --build-fixture`, output/p2-binary): its fixture.json selects the decoder's binary counter (its
 movie sha256s are checked at startup and recorded per run), and M2 then enforces the hand-back max step per elapsed frame and
 an undecodable-free hand-back.
@@ -72,9 +72,9 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
-from obed_edom import live_continuity, live_gl_replay_js, managed_obs, obs_websocket  # noqa: E402
+from obed_edom import live_gl_replay_js, managed_obs, obs_websocket  # noqa: E402
 from obed_edom.html_preview import cache_dir  # noqa: E402
-from obed_edom.live_continuity import Unsupported, derive_plan  # noqa: E402
+from obed_edom.live_continuity import Unsupported  # noqa: E402
 from obed_edom.live_host import GL_REPLAY_ENV, MM_OPACITY_ENV, ChromeCdp, LiveOutputHost  # noqa: E402
 from obed_edom.managed_obs import ManagedObs  # noqa: E402
 from obed_edom.obs_websocket import ObsWebsocket  # noqa: E402
@@ -86,6 +86,7 @@ from live_continuity_probe import (  # noqa: E402
     GL_REPLAY_READ_JS,
     PAINTING_VIDEOS_JS,
     _carried_el_id,
+    _handed_off,
     _movie_entries,
     _notes,
     armed_evidence,
@@ -100,8 +101,7 @@ from live_continuity_probe import (  # noqa: E402
 from live_host_probe import wait_for_settlement  # noqa: E402
 
 FIXTURE = REPO / "output/p2-recovery/html-adversarial"
-SOAK_FIXTURE = REPO / "output/p2-soak-loop"
-P2_SOURCE = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Minimal Alpha_DSK.key")
+SOAK_FIXTURE = REPO / "output/p2-loop"
 DEFAULT_HOME = Path.home() / "Library/Application Support/Obed-Edom/qualify-home"
 USER_OBS_TREE = Path.home() / "Library/Application Support/obs-studio"
 WS_CONFIG = "plugin_config/obs-websocket/config.json"
@@ -183,6 +183,9 @@ MARK_JS = ("(function(c){var m=document.getElementById('obs-mark'); if(!m){m=doc
            " document.documentElement.appendChild(m);} m.style.background=c; return performance.now();})('%s')")
 VIDEOS_JS = ("Array.prototype.map.call(document.querySelectorAll('video'), function(v){"
              "return {src:String(v.currentSrc).split('/').pop(), paused:v.paused, rs:v.readyState, t:v.currentTime, loop:v.loop};})")
+HANDED_BACK_JS = ("(function(id){return Array.prototype.filter.call(document.querySelectorAll('video'), function(v){return v.__obedElId===id;})"
+                  ".map(function(v){return {elId:id, loop:v.loop, isConnected:v.isConnected, facade:!!v.__obedFacadeFor, paused:v.paused,"
+                  " t:v.currentTime};});})(%s)")
 PAUSE_JS = ("(function(){var vs=Array.prototype.filter.call(document.querySelectorAll('video'), function(v){return !v.paused;});"
             " vs.forEach(function(v){v.pause();}); window.__OBS_QUALIFY_PAUSED__=vs; return vs.length;})()")
 RESUME_JS = ("(function(){var vs=window.__OBS_QUALIFY_PAUSED__||[]; vs.forEach(function(v){v.play();});"
@@ -296,42 +299,25 @@ def make_export(tag: str, fixture: Path) -> tuple[Path, list[dict[str, Any]]]:
     return dest, load_slides(dest)
 
 
-@contextlib.contextmanager
-def allow_soak_plan(export_root: Path, slides: list[dict[str, Any]], record: dict[str, Any]) -> Iterator[None]:
-    """Harness-only (OQ-3a): add the soak fixture's runtime-plan shas to the continuity allowlist in this process."""
-    seen: list[str] = []
-    real = live_continuity.plan_signature
-
-    def capture(runtime: dict[str, Any]) -> str:
-        seen.append(real(runtime))
-        return seen[-1]
-
-    with mock.patch.object(live_continuity, "plan_signature", capture):
-        for gl in (False, True):
-            plan = derive_plan(export_root, slides, gl_replay=gl)
-            if isinstance(plan, Unsupported):
-                raise SystemExit(f"soak fixture does not derive a continuity plan (gl_replay={gl}): {plan.reason}")
-            plan.to_runtime()
-    original = live_continuity.QUALIFIED_PLAN_SHA256
-    added = sorted(set(seen) - original)
-    if not 1 <= len(set(seen)) <= 2:
-        raise SystemExit(f"soak allowlist splice: {len(set(seen))} distinct plan shas, want 1 or 2")
-    record.update({"planShas": sorted(set(seen)), "added": added, "alreadyQualified": sorted(set(seen) & original)})
-    with mock.patch.object(live_continuity, "QUALIFIED_PLAN_SHA256", original | frozenset(added)):
-        for gl in (False, True):
-            runtime = derive_plan(export_root, slides, gl_replay=gl).to_runtime()
-            if isinstance(runtime, Unsupported):
-                raise SystemExit(f"soak allowlist splice did not qualify the plan (gl_replay={gl}): {runtime.reason}")
-        yield
-
-
 def fixture_counter(fixture: Path) -> str:
     return binary_counter_movie.read_manifest(fixture).get("counter", "grey")
 
 
 def p2_family(fixture: Path) -> bool:
-    """The P2 fixture or a counter-swapped copy of it: its plan is qualified as is and its movie does not loop."""
-    return fixture.resolve() == FIXTURE.resolve() or binary_counter_movie.read_manifest(fixture).get("base") == binary_counter_movie.FIXTURE_BASE
+    """The P2 fixture or a counter-swapped copy of it that does not loop."""
+    manifest = binary_counter_movie.read_manifest(fixture)
+    return fixture.resolve() == FIXTURE.resolve() or (manifest.get("base") == binary_counter_movie.FIXTURE_BASE and "loop" not in manifest)
+
+
+def fixture_loops(fixture: Path) -> bool:
+    return "loop" in binary_counter_movie.read_manifest(fixture)
+
+
+def check_loop_frames(fixture: Path) -> None:
+    manifest = binary_counter_movie.read_manifest(fixture)
+    frames = {m.get("frames") for m in manifest.get("movies") or []}
+    if (frames or "loop" in manifest) and frames != {SOAK_LOOP_FRAMES}:
+        raise SystemExit(f"{fixture}: movie frames {sorted(frames, key=str)} are not the soak loop period {SOAK_LOOP_FRAMES}")
 
 
 def movie_geometry(armed: dict[str, Any] | None) -> tuple[float, float, float]:
@@ -341,12 +327,16 @@ def movie_geometry(armed: dict[str, Any] | None) -> tuple[float, float, float]:
     return (rect["x"], rect["y"], rect["w"] / binary_counter_movie.WIDTH)
 
 
-def fixture_facts(fixture: Path, allow: dict[str, Any] | None) -> dict[str, Any]:
+def fixture_facts(fixture: Path) -> dict[str, Any]:
     """The flag-on armed boundary (slot table, instance rect, asset keys), derived offline from the fixture."""
     dest, slides = make_export("facts", fixture)
     try:
-        with allow_soak_plan(dest, slides, allow) if allow is not None else contextlib.nullcontext():
-            return ground_truth_facts(ground_truth_plan(dest, slides, gl_replay=True), armed=True)["armed"]
+        plans = {gl: ground_truth_plan(dest, slides, gl_replay=gl) for gl in (False, True)}
+        for gl, plan in plans.items():
+            runtime = plan.to_runtime()
+            if isinstance(runtime, Unsupported):
+                raise SystemExit(f"fixture does not qualify on product code (gl_replay={gl}): {runtime.reason}")
+        return ground_truth_facts(plans[True], armed=True)["armed"]
     finally:
         shutil.rmtree(dest.parent, ignore_errors=True)
 
@@ -441,8 +431,8 @@ class LoggedCdp(ChromeCdp):
 
 
 def run_session(name: str, script: Callable[[Session], None], ctx: dict[str, Any], *, gl_replay: str | None = None,
-                mm_opacity: str = "auto", seed: str | None = None, record: bool = False, allow: dict[str, Any] | None = None,
-                logger: bool = False, square: bool = False) -> dict[str, Any]:
+                mm_opacity: str = "auto", seed: str | None = None, record: bool = False, logger: bool = False,
+                square: bool = False) -> dict[str, Any]:
     fixture = ctx["fixture"]
     dest, slides = make_export(f"{ctx['tag']}-{name}", fixture)
     kwargs: dict[str, Any] = {"mm_opacity": mm_opacity} if gl_replay is None else {"gl_replay": gl_replay, "mm_opacity": mm_opacity}
@@ -453,9 +443,6 @@ def run_session(name: str, script: Callable[[Session], None], ctx: dict[str, Any
     try:
         with contextlib.ExitStack() as stack:
             stack.enter_context(mm_opacity_probe.square_player(square))
-            if allow is not None:
-                stack.enter_context(allow_soak_plan(dest, slides, allow))
-                out["allowlistSplice"] = allow
             if seed is not None:
                 out["seedSplice"] = stack.enter_context(forced_fail_seed(seed))
             if record:
@@ -465,6 +452,7 @@ def run_session(name: str, script: Callable[[Session], None], ctx: dict[str, Any
             host = LiveOutputHost(dest, slides, attach_endpoint=ctx["endpoint"], attach_match=ctx["target"], bridge="obs-managed",
                                   output_rate=ctx["rate"], **kwargs)
             session = Session(name, host, ctx)
+            started = time.monotonic()
             try:
                 host.observe()
                 session.out["output"] = host.output
@@ -473,6 +461,7 @@ def run_session(name: str, script: Callable[[Session], None], ctx: dict[str, Any
                 session.out["fatal"] = traceback.format_exc()[-3000:]
                 print(session.out["fatal"], flush=True)
             finally:
+                session.out["timingS"] = {"script": round(time.monotonic() - started, 2)}
                 session.out["outputAtStop"] = host.output
                 host.stop()
                 session.out["startLog"] = start_log(host)
@@ -750,6 +739,11 @@ def precheck_script(armed: dict[str, Any]) -> Callable[[Session], None]:
                             "carriedT": carried_time(read, armed)})
             time.sleep(2)
         s.out["samples"] = samples
+        carried = _carried_el_id(s.read("preHandback")["gl"])
+        s.execute("advance")
+        time.sleep(1.5)
+        s.out["handedBack"] = s.ev(HANDED_BACK_JS % json.dumps(carried))
+        s.read("postHandback")
     return script
 
 
@@ -1500,8 +1494,14 @@ def precheck_gates(run: dict[str, Any], fixture: Path) -> dict[str, Any]:
     samples = session.get("samples") or []
     checks: list[dict[str, Any]] = []
     static = loop_representation(fixture)
-    check(checks, "(a) loop representation (report)", static, True, enforced=False)
-    check(checks, "(a) video.loop on slide 1", [v.get("loop") for v in session.get("slide1Videos") or []], True, enforced=False)
+    check(checks, "(a) loop representation", static, static["ok"], "differing JSON == loop-splice.json; added loop keys all loopMode=\"looping\"")
+    slide1 = [v for v in session.get("slide1Videos") or [] if isinstance(v, dict) and "untitled.mov" in str(v.get("src")).lower()]
+    check(checks, "(a) video.loop on every slide-1 untitled.mov", [v.get("loop") for v in slide1],
+          bool(slide1) and all(v.get("loop") is True for v in slide1), "all true")
+    handed = session.get("handedBack")
+    post = ((session.get("reads") or {}).get("postHandback") or {}).get("gl")
+    check(checks, "(a) video.loop on the handed-back carried element", {"elements": handed, "handback": handback_of(post)},
+          handed_back_loops(handed, post), "one connected non-facade element, loop true, G2 RETIRED by a hand-off of that id")
     continuity = continuity_of(session)
     check(checks, "(b) continuity qualified, glReplay injected", [continuity.get("mode"), (continuity.get("glReplay") or {}).get("mode")],
           continuity.get("mode") == "qualified" and (continuity.get("glReplay") or {}).get("mode") == "injected")
@@ -1517,19 +1517,53 @@ def precheck_gates(run: dict[str, Any], fixture: Path) -> dict[str, Any]:
     return {"precheck": gate(checks)}
 
 
-def loop_representation(fixture: Path) -> dict[str, Any]:
-    ours, p2 = fixture / "html-unmodified", FIXTURE / "html-unmodified"
-    differing = []
-    for path in sorted(ours.rglob("*.json")):
-        other = p2 / path.relative_to(ours)
-        if not other.exists() or other.read_bytes() != path.read_bytes():
-            differing.append(str(path.relative_to(ours)))
-    loop_keys = set()
-    for path in sorted(ours.rglob("*.json")):
+def handback_of(read: Any) -> dict[str, Any]:
+    api = (read or {}).get("api") if isinstance(read, dict) else None
+    releases = _notes(read, "glreplay-release") if isinstance(read, dict) else []
+    handoffs = _notes(read, "glreplay-handoff", "api") if isinstance(read, dict) else []
+    module = [h.get("released") if isinstance(h.get("released"), dict) else {} for h in handoffs]
+    return {"state": (api or {}).get("state"), "releases": [{"mode": r.get("mode"), "elId": r.get("elId")} for r in releases],
+            "moduleReleased": [{"ok": m.get("ok"), "mode": m.get("mode"), "elId": m.get("elId")} for m in module]}
+
+
+def handed_back_loops(handed: Any, post: Any) -> bool:
+    if not (isinstance(handed, list) and len(handed) == 1 and isinstance(handed[0], dict)):
+        return False
+    element = handed[0]
+    if element.get("elId") is None or element.get("loop") is not True or element.get("isConnected") is not True or element.get("facade") is not False:
+        return False
+    handback = handback_of(post)
+    return (handback["state"] == "RETIRED" and _handed_off(post)
+            and handback["releases"] == [{"mode": "handoff", "elId": element["elId"]}]
+            and handback["moduleReleased"] == [{"ok": True, "mode": "handoff", "elId": element["elId"]}])
+
+
+def json_paths(tree: Path) -> set[str]:
+    return {str(p.relative_to(tree)) for p in tree.rglob("*.json*") if p.is_file() and p.suffix in (".json", ".jsonp")}
+
+
+def loop_keys(tree: Path) -> set[str]:
+    keys = set()
+    for path in sorted(tree.rglob("*.json*")):
+        if path.suffix not in (".json", ".jsonp"):
+            continue
         for key, value in re.findall(r'"(\w*[Ll]oop\w*)"\s*:\s*([^,}\]]+)', path.read_text(errors="ignore")):
-            loop_keys.add(f"{path.relative_to(ours)}:{key}={value.strip()}")
+            keys.add(f"{path.relative_to(tree)}:{key}={value.strip()}")
+    return keys
+
+
+def loop_representation(fixture: Path) -> dict[str, Any]:
+    """The fixture's `html-unmodified` against the P2 base: only the spliced files differ, and every loop key they add is `loopMode="looping"`."""
+    ours, p2 = fixture / "html-unmodified", FIXTURE / "html-unmodified"
+    differing = [rel for rel in sorted(json_paths(ours) | json_paths(p2))
+                 if not ((ours / rel).is_file() and (p2 / rel).is_file() and (ours / rel).read_bytes() == (p2 / rel).read_bytes())]
+    record = fixture / "loop-splice.json"
+    spliced = sorted(str(Path(f["path"]).relative_to("html-unmodified")) for f in json.loads(record.read_text())["files"]
+                     if Path(f["path"]).parts[0] == "html-unmodified") if record.is_file() else None
+    added = sorted(loop_keys(ours) - loop_keys(p2))
+    ok = spliced is not None and differing == spliced and bool(added) and all(k.split(":", 1)[1] == 'loopMode="looping"' for k in added)
     main_js = next(iter(ours.rglob("main.js")), None)
-    return {"differingJson": differing[:40], "loopKeys": sorted(loop_keys)[:40],
+    return {"ok": ok, "differing": differing, "spliced": spliced, "addedLoopKeys": added,
             "mainJsLoopMentions": main_js.read_text(errors="ignore").count("loop") if main_js else None}
 
 
@@ -1579,12 +1613,10 @@ def sessions_for(arm: str, ctx: dict[str, Any], args: argparse.Namespace, armed:
                 run_session("goto2", failsafe_script(True), ctx),
                 run_session("off", failsafe_script(False), ctx, gl_replay="off"),
                 run_session("off-2", failsafe_script(False), ctx, gl_replay="off")]
-    looping = not p2_family(ctx["fixture"])
-    allow = {} if looping else None
     if args.precheck:
-        return [run_session("precheck", precheck_script(armed), ctx, allow=allow)]
-    return [run_session("soak", soak_script(args.soak_minutes, armed, looping), ctx, allow=allow),
-            run_session("soak-off", soak_off_script, ctx, gl_replay="off", allow=None if allow is None else {})]
+        return [run_session("precheck", precheck_script(armed), ctx)]
+    return [run_session("soak", soak_script(args.soak_minutes, armed, fixture_loops(ctx["fixture"])), ctx),
+            run_session("soak-off", soak_off_script, ctx, gl_replay="off")]
 
 
 def ring_exclusions(armed: dict[str, Any]) -> list[tuple[float, float, float, float]]:
@@ -1638,9 +1670,13 @@ def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, args: ar
     user_before = tree_snapshot(USER_OBS_TREE)
     sentinel_before = tree_snapshot(engine.tree / ".sentinel")
     started = datetime.now()
+    take_started = time.monotonic()
+    timing = run["timingS"] = {}
     print(f"[{arm} rate {rate} source {source} {args.launch} take {take}] launching", flush=True)
     try:
+        t = time.monotonic()
         creds = launch_engine(engine, rate, source, args.launch, run)
+        timing["launch"] = round(time.monotonic() - t, 2)
         ctx = {"endpoint": engine.cdp_endpoint, "target": engine.target_id, "rate": rate, "creds": creds, "shots": shots,
                "fixture": args.fixture, "tag": f"{arm}{rate}{take}{ts}",
                "engineState": lambda: {k: engine.state().get(k) for k in ("state", "warnings")}}
@@ -1649,8 +1685,10 @@ def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, args: ar
         run["fatal"] = traceback.format_exc()[-3000:]
         print(run["fatal"], flush=True)
     finally:
+        t = time.monotonic()
         engine.quit()
         engine.wait_idle(QUIT_TIMEOUT_S + 10)
+        timing["quit"] = round(time.monotonic() - t, 2)
         run["engineAfterQuit"] = engine.state()
         engine.close()
     ended = datetime.now()
@@ -1671,20 +1709,24 @@ def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, args: ar
                      (".sentinel untouched", life["sentinel"]["unchanged"])):
         run["checks"].append({"check": name, "ok": bool(ok), "enforced": True})
 
-    looping = not p2_family(args.fixture)
+    loop_frames = SOAK_LOOP_FRAMES if fixture_loops(args.fixture) else None
     rings = [rect_tuple(armed["instanceRect"])] if arm == "g2" else None
     ring_exclude = ring_exclusions(armed) if arm == "g2" else []
     counter, geometry = run["counter"], movie_geometry(armed)
     masks = mmo_masks(armed, (1080, 1920)) if arm == "mmo" else None
     for session in run["sessions"]:
+        t = time.monotonic()
         if session.get("recording"):
             session["decode"] = decode_session(session, session["recording"], rings=rings, loop_frames=None, keep=args.keep_recordings,
                                                crops_dir=shots / f"{session['session']}-crops", ring_exclude=ring_exclude,
                                                counter=counter, geometry=geometry, masks=masks,
                                                series_path=shots / f"{session['session']}-series.npz")
         for window in session.get("windows") or []:
-            window["decode"] = decode_session(session, window["recording"], rings=None, loop_frames=SOAK_LOOP_FRAMES if looping else None,
+            w = time.monotonic()
+            window["decode"] = decode_session(session, window["recording"], rings=None, loop_frames=loop_frames,
                                               keep=args.keep_recordings, counter=counter, geometry=geometry)
+            window["decodeS"] = round(time.monotonic() - w, 2)
+        session.setdefault("timingS", {})["decode"] = round(time.monotonic() - t, 2)
     decodes = [s.get("decode") for s in run["sessions"] if s.get("recording")] + [
         w.get("decode") for s in run["sessions"] for w in s.get("windows") or []]
     if any(d is None for d in decodes):
@@ -1707,6 +1749,7 @@ def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, args: ar
     run["kbResult"] = kb_verdict(args.kb, arm, run["gates"]) if args.kb and not args.precheck else None
     lifecycle_ok = all(c["ok"] for c in run["checks"] if c["enforced"])
     run["passed"] = run["valid"] and lifecycle_ok and (run["kbResult"]["caught"] if run["kbResult"] else gate_ok)
+    timing["total"] = round(time.monotonic() - take_started, 2)
     dest = out_dir / "runs" / f"{arm}-{ts}.json"
     dest.write_text(json.dumps(run, indent=1, default=str))
     print_run(run, dest)
@@ -1744,7 +1787,16 @@ def arm_gates(arm: str, run: dict[str, Any], args: argparse.Namespace, armed: di
         return mmo_cef_gates(run)
     if args.precheck:
         return precheck_gates(run, args.fixture)
-    return soak_gates(run, armed, not p2_family(args.fixture))
+    return soak_gates(run, armed, fixture_loops(args.fixture))
+
+
+def timing_summary(run: dict[str, Any]) -> dict[str, Any]:
+    timing = run.get("timingS") or {}
+    sessions = {s.get("session"): s.get("timingS") or {} for s in run.get("sessions") or []}
+    return {"arm": run.get("arm"), "take": run.get("take"), "launch": timing.get("launch"),
+            "script": round(sum(t.get("script") or 0 for t in sessions.values()), 2),
+            "quit": timing.get("quit"), "decode": round(sum(t.get("decode") or 0 for t in sessions.values()), 2),
+            "total": timing.get("total"), "sessions": sessions}
 
 
 def print_run(run: dict[str, Any], dest: Path) -> None:
@@ -1813,7 +1865,7 @@ def score_mmo(root: Path) -> int:
         if identity[fixture] != run.get("fixtureIdentity"):
             invalid.append(f"fixture identity changed since the take: {identity[fixture]}")
         if fixture not in facts:
-            facts[fixture] = fixture_facts(Path(fixture), None)
+            facts[fixture] = fixture_facts(Path(fixture))
         gates = mmo_gates(run, facts[fixture])
         mo2, cal = gates["MO-2"], gates["mmoCalibration"]
         if mo2["invalid"]:
@@ -1836,31 +1888,6 @@ def score_mmo(root: Path) -> int:
     return 0 if results and all(r["verdict"] == "PASS" for r in results) else 1
 
 
-def build_fixture(key: Path, dest: Path) -> int:
-    """Owner-go only (drives Keynote): export the owner's looping copy with the P2 pipeline's own steps into `dest`."""
-    from obed_edom.html_alpha_probe import file_identity, strip_export_pdf_bg_fills, write_json, write_patched_export
-    from obed_edom.html_preview import export_html
-    from p2_recovery_html_dissolve_live import _replace_hevc_movies
-
-    before = file_identity(key)
-    dest.mkdir(parents=True, exist_ok=True)
-    unmodified, disposable = dest / "html-unmodified", dest / "html-disposable"
-    for path in (unmodified, disposable):
-        if path.exists():
-            shutil.rmtree(path)
-    export_html(key, unmodified, log=print)
-    shutil.copytree(unmodified, disposable)
-    write_json(dest / "asset-replace.json", _replace_hevc_movies(disposable))
-    write_json(dest / "pdf-strip.json", strip_export_pdf_bg_fills(disposable))
-    write_patched_export(disposable, dest / "html-player")
-    after = file_identity(key)
-    record = {"source": before.as_dict(), "sourceAfter": after.as_dict(), "sourceUnchanged": before.sha256 == after.sha256,
-              "unmodified": file_identity(unmodified).as_dict(), "player": file_identity(dest / "html-player").as_dict()}
-    write_json(dest / "fingerprints.json", record)
-    print("BUILT", dest, json.dumps(record, default=str), flush=True)
-    return 0 if record["sourceUnchanged"] else 1
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Live qualification of the managed OBS (launches OBS; one OBS at a time).")
     parser.add_argument("--arm", choices=("2x", "positive", "both", "g2", "failsafe", "soak", "mmo", "mmo-cef"), default="both")
@@ -1872,8 +1899,6 @@ def main(argv: list[str] | None = None) -> int:
                         f"its binary-counter copy ({binary_counter_movie.BINARY_FIXTURE})")
     parser.add_argument("--precheck", action="store_true", help="soak: the loop pre-check instead of the soak")
     parser.add_argument("--soak-minutes", type=int, default=5, help=f">= {SOAK_MIN_MINUTES}; 20 before a show")
-    parser.add_argument("--build-fixture", type=Path, metavar="KEY", help="soak: export the owner's looping .key copy into --fixture")
-    parser.add_argument("--i-have-owner-go", action="store_true", help="required by --build-fixture (it drives Keynote)")
     parser.add_argument("--out", type=Path, help="writes <out>/runs/<arm>-<ts>.json, <out>/shots/ and a summary")
     parser.add_argument("--home", type=Path, default=DEFAULT_HOME, help="scratch ManagedObs home (never under ~/Desktop)")
     parser.add_argument("--keep-recordings", action="store_true", help="keep the lossless recordings (~0.5 GB per session)")
@@ -1884,27 +1909,19 @@ def main(argv: list[str] | None = None) -> int:
     args.kb_splice = None
     if args.arm == "soak":
         args.fixture = (args.fixture or SOAK_FIXTURE).expanduser().resolve()
+        check_loop_frames(args.fixture)
     elif args.fixture is not None:
         args.fixture = args.fixture.expanduser().resolve()
         if not p2_family(args.fixture):
-            parser.error(f"--fixture for --arm {args.arm} must be {FIXTURE} or a binary_counter_movie.py copy of it.")
+            parser.error(f"--fixture for --arm {args.arm} must be {FIXTURE} or a non-looping binary_counter_movie.py copy of it.")
     else:
         args.fixture = FIXTURE
     if args.arm in ("mmo", "mmo-cef") and fixture_counter(args.fixture) != "binary":
         parser.error(f"--arm {args.arm} needs the binary-counter fixture ({binary_counter_movie.BINARY_FIXTURE}).")
     if args.arm == "soak" and args.soak_minutes < SOAK_MIN_MINUTES:
         parser.error(f"--soak-minutes must be >= {SOAK_MIN_MINUTES} (two wrap windows, then context loss, then at least a minute after it).")
-    if (args.precheck or args.build_fixture) and args.arm != "soak":
-        parser.error("--precheck and --build-fixture apply to --arm soak only.")
-    if args.build_fixture:
-        key = args.build_fixture.expanduser().resolve()
-        if not args.i_have_owner_go:
-            parser.error("--build-fixture drives Keynote: pass --i-have-owner-go only with the owner's explicit go.")
-        if key == P2_SOURCE.resolve() or not key.suffix == ".key" or not key.exists():
-            parser.error("--build-fixture needs the owner's looping .key copy, never the P2 source deck.")
-        if "p2-recovery" in args.fixture.parts:
-            parser.error("--build-fixture never writes output/p2-recovery/.")
-        return build_fixture(key, args.fixture)
+    if args.precheck and args.arm != "soak":
+        parser.error("--precheck applies to --arm soak only.")
     if args.out is None:
         parser.error("--out is required.")
     if GL_REPLAY_ENV in os.environ:
@@ -1927,15 +1944,12 @@ def main(argv: list[str] | None = None) -> int:
         args.kb_splice = apply_kb(args.kb)
     armed = None
     if args.arm not in ("2x", "positive", "both"):
-        allow: dict[str, Any] | None = None if p2_family(args.fixture) else {}
-        armed = fixture_facts(args.fixture, allow)
+        armed = fixture_facts(args.fixture)
         print("ARMED", json.dumps({k: armed[k] for k in ("instanceRect", "movieSlot", "overrideSlots", "assetKeys")}), flush=True)
         if args.arm == "mmo":
             top = mmo_masks(armed, (1080, 1920))["top"]
             ys, xs = np.nonzero(top)
             print("MO-2 ROI_top", [int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())], int(top.sum()), "px", flush=True)
-        if allow is not None:
-            print("ALLOWLIST SPLICE (harness-only)", json.dumps(allow), flush=True)
     (args.out / "runs").mkdir(parents=True, exist_ok=True)
     arms = ("2x", "positive") if args.arm == "both" else (args.arm,)
     takes = 1 if args.arm in ("failsafe", "soak", "mmo", "mmo-cef") else args.takes
@@ -1968,12 +1982,14 @@ def main(argv: list[str] | None = None) -> int:
                        "enforced": binary or args.rate == 25})
     checks += cross_take(runs, armed) + mmo_summary(runs)
     summary["checks"] = checks
+    summary["timingS"] = [timing_summary(r) for r in runs]
     summary["passed"] = all(r["passed"] for r in runs) and all(c["ok"] for c in checks if c["enforced"])
     dest = args.out / "runs" / f"summary-{stamp()}.json"
     dest.write_text(json.dumps(summary, indent=1, default=str))
     print(f"SUMMARY {'PASS' if summary['passed'] else 'FAIL'} -> {dest}", flush=True)
     for c in checks:
         print(f"    {'ok  ' if c['ok'] else 'FAIL'} {c['check']} = {c['value']}", flush=True)
+    print("TIMING " + json.dumps([{k: v for k, v in t.items() if k != "sessions"} for t in summary["timingS"]]), flush=True)
     return 0 if summary["passed"] else 1
 
 
