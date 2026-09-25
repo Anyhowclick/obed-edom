@@ -35,7 +35,7 @@ from .live_continuity import ContinuityPlan, Unsupported, codec_report, derive_p
 from .live_continuity_js import CONTINUITY_VERSION, PRESERVE_CORE_JS, js_sha256
 from .live_gl_replay_js import GL_REPLAY_VERSION, gl_replay_script
 from .live_gl_replay_js import js_sha256 as gl_replay_js_sha256
-from .live_runtime import RUNTIME_VERSION, LiveRuntimeUnsupported, patch_player
+from .live_runtime import MM_OPACITY_ENV, RUNTIME_VERSION, LiveRuntimeUnsupported, patch_player
 from .live_session import PlayerCommandRejected, PlayerObservation
 
 ATTACH_ENV = "OBED_LIVE_ATTACH"
@@ -43,7 +43,6 @@ ATTACH_MATCH_ENV = "OBED_LIVE_ATTACH_MATCH"
 ADVANCE_ENV = "OBED_LIVE_ADVANCE"
 CONTINUITY_ENV = "OBED_LIVE_CONTINUITY"
 GL_REPLAY_ENV = "OBED_LIVE_GL_REPLAY"
-MM_OPACITY_ENV = "OBED_LIVE_MM_OPACITY"
 GOTO_AUTOPLAY_ENV = "OBED_LIVE_GOTO_AUTOPLAY"
 GOTO_AUTOPLAY_DEFERRED_NOTE = "Movies idle until next advance"
 _UNSET = object()

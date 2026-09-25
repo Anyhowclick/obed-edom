@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 
 RUNTIME_VERSION = 2
+MM_OPACITY_ENV = "OBED_LIVE_MM_OPACITY"
 PLAYER_SHA256 = "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354"
 _ANCHOR = b"UC=new Eg,UC.displayManager.showWaitingIndicator()"
 
@@ -138,12 +139,21 @@ def patch_player(player: bytes, *, mm_opacity: bool = True) -> bytes:
         _ANCHOR,
         b"UC=new Eg," + _INSTALL + b",UC.displayManager.showWaitingIndicator()",
     )
-    if not mm_opacity:
-        return patched
+    return _apply_mm_opacity(patched) if mm_opacity else patched
+
+
+def patch_rendering(player: bytes) -> bytes:
+    """Apply only the Magic Move opacity rendering patch of `patch_player`, without the observation hook."""
+    if hashlib.sha256(player).hexdigest() != PLAYER_SHA256:
+        raise LiveRuntimeUnsupported("This Keynote HTML player version is not supported for the preview opacity patch.")
+    return _apply_mm_opacity(player)
+
+
+def _apply_mm_opacity(player: bytes) -> bytes:
     for before, after in _MM_OPACITY_REPLACEMENTS:
-        if patched.count(before) != 1:
+        if player.count(before) != 1:
             raise LiveRuntimeUnsupported("The supported player Magic Move opacity anchor is missing or ambiguous.")
-        patched = patched.replace(before, after)
-        if patched.count(after) != 1:
+        player = player.replace(before, after)
+        if player.count(after) != 1:
             raise LiveRuntimeUnsupported("The supported player Magic Move opacity patch is ambiguous.")
-    return patched
+    return player

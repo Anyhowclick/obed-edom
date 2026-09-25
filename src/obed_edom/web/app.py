@@ -18,7 +18,7 @@ from uuid import uuid4
 
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from pydantic import BaseModel, StrictInt
@@ -80,10 +80,13 @@ from obed_edom.dsk_stage_export import (
     write_manifest,
 )
 from obed_edom.html_preview import (
+    PLAYER_JS,
+    PREVIEW_MM_OPACITY_NOTES,
     PreviewError,
     apply_preview,
     cleanup_preview,
     inject_player_diagnostics,
+    preview_player,
     propose_preview,
     registered_export_root,
     safe_export_file,
@@ -997,8 +1000,20 @@ def create_app() -> FastAPI:
             path = safe_export_file(root, relative)
         except PreviewError as exc:
             raise HTTPException(404, str(exc)) from exc
+        if path == root / PLAYER_JS:
+            body, mode = preview_player(path.read_bytes())
+            return Response(
+                body,
+                media_type="text/javascript",
+                headers={"Cache-Control": "no-cache", "X-Obed-Mm-Opacity": mode},
+            )
         if Path(relative).name.lower() == "index.html":
-            body = inject_player_diagnostics(path.read_text(encoding="utf-8"))
+            try:
+                player = safe_export_file(root, PLAYER_JS.as_posix())
+            except PreviewError:
+                player = None
+            note = PREVIEW_MM_OPACITY_NOTES.get(preview_player(player.read_bytes())[1]) if player else None
+            body = inject_player_diagnostics(path.read_text(encoding="utf-8"), note=note)
             return HTMLResponse(body, headers={"Cache-Control": "no-cache"})
         response = FileResponse(path, media_type=_player_media_type(path))
         if path.suffix.lower() in {".html", ".htm"}:

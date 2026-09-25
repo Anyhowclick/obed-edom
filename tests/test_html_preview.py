@@ -33,6 +33,8 @@ from obed_edom.html_preview import (
     header_export_contract,
     cleanup_preview,
     inject_player_diagnostics,
+    PREVIEW_MM_OPACITY_NOTES,
+    preview_player,
     current_keynote_identity,
     discover_export_assets,
     file_sha256,
@@ -530,6 +532,51 @@ def test_inject_player_diagnostics_runs_before_exported_scripts():
     injected = inject_player_diagnostics(html)
     assert injected.index("data-obed-preview-diagnostics") < injected.index("assets/player/main.js")
     assert inject_player_diagnostics(injected) == injected
+    assert '__OBED_PREVIEW_NOTE__' not in injected
+    assert 'var note = null;' in injected
+
+
+def test_inject_player_diagnostics_reports_a_note_once_on_the_existing_channel():
+    html = "<html><head></head><body></body></html>"
+    note = PREVIEW_MM_OPACITY_NOTES["unsupported"]
+    injected = inject_player_diagnostics(html, note=note)
+    assert f"var note = {json.dumps(note)};" in injected
+    assert 'if (note) send("preview", note);' in injected
+    assert injected.count(note) == 1
+
+
+def _pinned_player(monkeypatch) -> bytes:
+    from obed_edom import live_runtime
+    from tests.test_live_runtime import _synthetic_player
+
+    player = _synthetic_player()
+    monkeypatch.setattr(live_runtime, "PLAYER_SHA256", hashlib.sha256(player).hexdigest())
+    return player
+
+
+@pytest.mark.parametrize("env", [None, "", "auto", " AUTO "])
+def test_preview_player_patches_a_supported_player_by_default(monkeypatch, env):
+    from obed_edom import live_runtime
+
+    if env is None:
+        monkeypatch.delenv(live_runtime.MM_OPACITY_ENV, raising=False)
+    else:
+        monkeypatch.setenv(live_runtime.MM_OPACITY_ENV, env)
+    player = _pinned_player(monkeypatch)
+    assert preview_player(player) == (live_runtime.patch_rendering(player), "on")
+
+
+def test_preview_player_serves_stock_bytes_when_off_unsupported_or_invalid(monkeypatch):
+    from obed_edom import live_runtime
+
+    player = _pinned_player(monkeypatch)
+    monkeypatch.setenv(live_runtime.MM_OPACITY_ENV, " Off ")
+    assert preview_player(player) == (player, "off")
+    monkeypatch.setenv(live_runtime.MM_OPACITY_ENV, "bogus")
+    assert preview_player(player) == (player, "invalid")
+    # Another Keynote player version is never refused: stock bytes, reported as unsupported.
+    monkeypatch.delenv(live_runtime.MM_OPACITY_ENV, raising=False)
+    assert preview_player(b"/* keynote player */\n") == (b"/* keynote player */\n", "unsupported")
 
 
 def test_symlink_cache_cannot_delete_or_serve_another_cache(tmp_path, monkeypatch):

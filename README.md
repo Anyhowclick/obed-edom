@@ -59,7 +59,9 @@ deck and a detected display in **Alpha Keynote**. Starting creates one hidden
 output session; **Show output** makes it visible. The 16:9 picture fits inside
 the display without stretching. HDMI hiding produces black and leaves playback
 running. Type an original slide number and press Enter to restart that slide at
-its initial state. Skipped slides are unavailable.
+its initial state. Skipped slides are unavailable. Build Preview and live output
+both draw Magic Move objects at Keynote's opacity; `OBED_LIVE_MM_OPACITY=off`
+turns this off for both.
 
 Switching tabs or closing the presenter does not stop output. **Stop session**
 ends it. Keep the dashboard server running; restarting the server does not restore

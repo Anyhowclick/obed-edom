@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from obed_edom import keynote_app
+from obed_edom import keynote_app, live_runtime
 from obed_edom.baseline import deck_digest
 from obed_edom.dsk_live import LiveBatch, _as_escape, _keynote_tell, _keynote_terms, _osascript_path
 from obed_edom.iwa_runs import _normalize_text
@@ -108,15 +108,22 @@ _PLAYER_DIAGNOSTICS_SCRIPT = """
       return XS.apply(xhr, arguments);
     };
   }
+  var note = __OBED_PREVIEW_NOTE__;
+  if (note) send("preview", note);
 })();
 """.strip()
+PREVIEW_MM_OPACITY_NOTES = {
+    "unsupported": "Magic Move opacity patch is not supported for this Keynote player; showing stock opacity",
+    "invalid": "OBED_LIVE_MM_OPACITY must be off or auto; showing stock Magic Move opacity",
+}
 
 
-def inject_player_diagnostics(html: str) -> str:
-    """Put capture hooks in the player document before any exported scripts or assets."""
+def inject_player_diagnostics(html: str, *, note: str | None = None) -> str:
+    """Put capture hooks in the player document before any exported scripts or assets; `note` is reported once."""
     if _DIAGNOSTICS_MARK in html:
         return html
-    snippet = f'<script {_DIAGNOSTICS_MARK}="1">{_PLAYER_DIAGNOSTICS_SCRIPT}</script>'
+    script = _PLAYER_DIAGNOSTICS_SCRIPT.replace("__OBED_PREVIEW_NOTE__", json.dumps(note))
+    snippet = f'<script {_DIAGNOSTICS_MARK}="1">{script}</script>'
     match = re.search(r"<head[^>]*>", html, flags=re.IGNORECASE)
     if match:
         return html[: match.end()] + snippet + html[match.end() :]
@@ -124,6 +131,19 @@ def inject_player_diagnostics(html: str) -> str:
     if match:
         return html[: match.end()] + snippet + html[match.end() :]
     return snippet + html
+
+
+def preview_player(stock: bytes) -> tuple[bytes, str]:
+    """Return the player bytes to serve and the Magic Move opacity mode: on, off, unsupported or invalid."""
+    mode = os.environ.get(live_runtime.MM_OPACITY_ENV, "").strip().lower()
+    if mode == "off":
+        return stock, "off"
+    if mode not in ("", "auto"):
+        return stock, "invalid"
+    try:
+        return live_runtime.patch_rendering(stock), "on"
+    except live_runtime.LiveRuntimeUnsupported:
+        return stock, "unsupported"
 
 
 class PreviewError(ValueError):
