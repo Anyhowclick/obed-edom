@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import dataclasses
 import importlib.util
 import json
 import math
+import re
 import shutil
 import subprocess
 import sys
@@ -1909,38 +1911,74 @@ SLIDE_INSTANCES = {
 }
 
 RUNTIME_MOVIES = {"movie1": {"assetKeys": ["untitled.mov"], "footprint": {"x": 109, "y": 795, "w": 952, "h": 268}}}
-RESTART_BOUNDARY = {"atScene": 6, "action": "restart"}
-BRIDGE_BOUNDARY = {
-    "atScene": 8, "action": "bridge", "movieKey": "movie1",
-    "srcRect": {"x": 198, "y": 797, "w": 952, "h": 268}, "durationSeconds": 1.5,
-    "rect": {"x": 327, "y": 709, "w": 1266, "h": 356},
-}
-RETIRE_BOUNDARY = {"atScene": 2, "action": "retire", "movieKey": "movie1"}
+# The big Untitled instance's objectID on each slide (player index).
+BIG_OBJECT_IDS = {0: "OBJ-S1-BIG", 1: "OBJ-S2-BIG", 2: "OBJ-S3-BIG", 3: "OBJ-S4-BIG"}
 
-CARRIED_RUNTIME = {"movies": RUNTIME_MOVIES, "boundaries": [RESTART_BOUNDARY, BRIDGE_BOUNDARY]}
-RETIRED_RUNTIME = {"movies": RUNTIME_MOVIES, "boundaries": [RETIRE_BOUNDARY, RESTART_BOUNDARY, BRIDGE_BOUNDARY]}
-BRIDGE_ONLY_RUNTIME = {"movies": RUNTIME_MOVIES, "boundaries": [BRIDGE_BOUNDARY]}
+
+def _end(player: int) -> dict[str, Any]:
+    return {"objectId": BIG_OBJECT_IDS[player], "rect": {k: int(v) for k, v in BIG_INSTANCE.items()}}
+
+
+# Schema-2 entries (plan §2.1) for the synthetic P2 shape: the 1->2 pin (or its refusal), the
+# 2->3 restart and the 3->4 bridge, each naming its src/dst instance by objectId.
+PIN_BOUNDARY = {"atScene": 2, "action": "pin", "movieKey": "movie1", "loop": False, "src": _end(0), "dst": _end(1)}
+RESTART_BOUNDARY = {"atScene": 6, "action": "restart", "movieKey": "movie1", "src": _end(1), "dst": _end(2)}
+BRIDGE_BOUNDARY = {
+    "atScene": 8, "action": "bridge", "movieKey": "movie1", "durationSeconds": 1.5, "loop": False,
+    "src": _end(2), "dst": _end(3),
+}
+RETIRE_BOUNDARY = {"atScene": 2, "action": "retire", "movieKey": "movie1", "reason": "refused", "src": _end(0)}
+
+CARRIED_RUNTIME = {"schema": 2, "movies": RUNTIME_MOVIES, "boundaries": [PIN_BOUNDARY, RESTART_BOUNDARY, BRIDGE_BOUNDARY]}
+RETIRED_RUNTIME = {"schema": 2, "movies": RUNTIME_MOVIES, "boundaries": [RETIRE_BOUNDARY, RESTART_BOUNDARY, BRIDGE_BOUNDARY]}
+BRIDGE_ONLY_RUNTIME = {"schema": 2, "movies": RUNTIME_MOVIES, "boundaries": [BRIDGE_BOUNDARY]}
 
 BOUNDARY_KEYS = {2: "continue1to2", 6: "restart2to3", 8: "continue3to4"}
+BIG1, BIG2, OTHER1 = f"{BIG_ASSET}#1", f"{BIG_ASSET}#2", f"{OTHER_ASSET}#1"
+
+
+def synthetic_boundaries() -> tuple[Any, ...]:
+    """The plan movies behind the runtimes above: the 1->2 pin refused (so RETIRED_RUNTIME
+    proves it), the 2->3 restart and the 3->4 bridge, all on the big instance."""
+    rect = probe.live_continuity_module.Rect(**BIG_INSTANCE)
+    movie = probe.live_continuity_module.MovieContinuity
+    boundary = probe.live_continuity_module.SlideBoundary
+
+    def between(action: str, source: int, **extra: Any) -> Any:
+        return boundary(source, source + 1, (movie(
+            BIG_ASSET, action, rect, rect,
+            src_object_id=BIG_OBJECT_IDS[source], dst_object_id=BIG_OBJECT_IDS[source + 1], **extra,
+        ),))
+
+    return (between("pin", 0, refusal="overlap", code="overlap"), between("restart", 1), between("bridge", 2))
 
 
 def synthetic_plan(
     scene_index: dict[int, int] | None = None, instances: dict[int, Any] | None = None
 ) -> Any:
-    """A `ContinuityPlan` carrying only what the expectation model reads: the scene
-    onset of each slide and every authored movie instance on it."""
+    """A `ContinuityPlan` carrying what the expectation model reads: the scene onset of each
+    slide, every authored movie instance on it, and the plan movies naming them by objectId."""
     return probe.ContinuityPlan(
         canvas={"width": 1920, "height": 1080},
         scene_index_by_player=dict(SCENE_INDEX_BY_PLAYER if scene_index is None else scene_index),
         slide_rects={},
-        boundaries=(),
+        boundaries=synthetic_boundaries(),
         slide_instances=dict(SLIDE_INSTANCES if instances is None else instances),
     )
 
 
+def synthetic_retires(runtime: dict[str, Any], plan: Any = None) -> list[dict[str, Any]]:
+    return probe.retire_facts(runtime, probe.verdict_specs(synthetic_plan() if plan is None else plan))
+
+
+def synthetic_retire(runtime: dict[str, Any] = RETIRED_RUNTIME) -> dict[str, Any]:
+    (retire,) = synthetic_retires(runtime)
+    return retire
+
+
 class TestRectExpectationModel:
-    """The whole live/dead table, derived from the plan alone (plan §4, "V/Voff
-    expectation model")."""
+    """The whole live/dead table, per authored instance, derived from the schema-2 runtime plan
+    bound to the plan's instances by objectId (plan §4, "V/Voff expectation model")."""
 
     def test_a_plan_without_a_retire_is_todays_model_unchanged(self) -> None:
         """V live everywhere; Voff dead only at the geometry-static pin's
@@ -1949,16 +1987,16 @@ class TestRectExpectationModel:
         on = probe.rect_expectations(plan, CARRIED_RUNTIME, continuity_on=True)
         off = probe.rect_expectations(plan, CARRIED_RUNTIME, continuity_on=False)
         assert on == {
-            0: {BIG_ASSET: "live", OTHER_ASSET: "live"},
-            1: {BIG_ASSET: "live"},
-            2: {BIG_ASSET: "live"},
-            3: {BIG_ASSET: "live"},
+            0: {BIG1: "live", OTHER1: "live"},
+            1: {BIG1: "live"},
+            2: {BIG1: "live", BIG2: "live"},
+            3: {BIG1: "live"},
         }
         assert off == {
-            0: {BIG_ASSET: "live", OTHER_ASSET: "live"},
-            1: {BIG_ASSET: "dead"},
-            2: {BIG_ASSET: "live"},
-            3: {BIG_ASSET: "live"},
+            0: {BIG1: "live", OTHER1: "live"},
+            1: {BIG1: "dead"},
+            2: {BIG1: "live", BIG2: "live"},
+            3: {BIG1: "live"},
         }
 
     def test_the_fixture_plan_with_a_retire_at_scene_two_is_dead_in_both_passes(self) -> None:
@@ -1966,30 +2004,65 @@ class TestRectExpectationModel:
         refused boundary leaves the destination looking exactly like the raw export."""
         plan = synthetic_plan()
         expected = {
-            0: {BIG_ASSET: "live", OTHER_ASSET: "live"},
-            1: {BIG_ASSET: "dead"},
-            2: {BIG_ASSET: "live"},
-            3: {BIG_ASSET: "live"},
+            0: {BIG1: "live", OTHER1: "live"},
+            1: {BIG1: "dead"},
+            2: {BIG1: "live", BIG2: "live"},
+            3: {BIG1: "live"},
         }
         assert probe.rect_expectations(plan, RETIRED_RUNTIME, continuity_on=True) == expected
         assert probe.rect_expectations(plan, RETIRED_RUNTIME, continuity_on=False) == expected
 
-    def test_a_bridge_only_plan_keeps_every_uncut_boundary_implicitly_pinned(self) -> None:
-        """No restart and no retire: the bridge destination is live in both passes,
-        every other destination is a carried pin."""
+    def test_an_instance_no_entry_names_plays_raw_and_is_live_in_both_passes(self) -> None:
+        """Schema 2 has no implicit pin: with only the bridge planned, every other destination
+        plays raw from its own start."""
         plan = synthetic_plan()
         on = probe.rect_expectations(plan, BRIDGE_ONLY_RUNTIME, continuity_on=True)
         off = probe.rect_expectations(plan, BRIDGE_ONLY_RUNTIME, continuity_on=False)
-        assert [on[i][BIG_ASSET] for i in (0, 1, 2, 3)] == ["live", "live", "live", "live"]
-        assert [off[i][BIG_ASSET] for i in (0, 1, 2, 3)] == ["live", "dead", "dead", "live"]
+        assert on == off
+        assert all(state == "live" for per in on.values() for state in per.values())
 
-    def test_only_the_retired_asset_goes_dead_on_a_refused_destination(self) -> None:
-        """A second movie on the same destination slide follows its own (carried)
-        expectation -- the refusal is per movie, not per slide."""
+    def test_only_the_retired_instance_goes_dead_on_a_refused_destination(self) -> None:
+        """A second movie on the same destination slide follows its own expectation -- the
+        refusal is per instance, not per slide."""
         instances = dict(SLIDE_INSTANCES)
         instances[1] = {BIG_ASSET: [BIG_INSTANCE], OTHER_ASSET: [OTHER_INSTANCE]}
         on = probe.rect_expectations(synthetic_plan(instances=instances), RETIRED_RUNTIME, continuity_on=True)
-        assert on[1] == {BIG_ASSET: "dead", OTHER_ASSET: "live"}
+        assert on[1] == {BIG1: "dead", OTHER1: "live"}
+
+    def test_a_second_instance_of_the_carried_asset_is_not_the_pinned_one(self) -> None:
+        """D5's shape: an entering same-asset instance plays raw (live in both passes) while the
+        pinned instance beside it is dead with the runtime off."""
+        instances = dict(SLIDE_INSTANCES)
+        instances[1] = {BIG_ASSET: [BIG_INSTANCE, SMALL_INSTANCE]}
+        off = probe.rect_expectations(synthetic_plan(instances=instances), CARRIED_RUNTIME, continuity_on=False)
+        assert off[1] == {BIG1: "dead", BIG2: "live"}
+
+    def test_a_refused_bridge_reads_as_the_raw_export_restart(self) -> None:
+        """A retired bridge hands back to the raw player, which restarts a moving movie: live."""
+        movie = probe.live_continuity_module.MovieContinuity
+        boundaries = list(synthetic_boundaries())
+        rect = probe.live_continuity_module.Rect(**BIG_INSTANCE)
+        boundaries[0] = probe.live_continuity_module.SlideBoundary(0, 1, (movie(
+            BIG_ASSET, "bridge", rect, rect, refusal="overlap", code="overlap",
+            src_object_id=BIG_OBJECT_IDS[0], dst_object_id=BIG_OBJECT_IDS[1],
+        ),))
+        plan = dataclasses.replace(synthetic_plan(), boundaries=tuple(boundaries))
+        assert probe.rect_expectations(plan, RETIRED_RUNTIME, continuity_on=False)[1] == {BIG1: "live"}
+
+    def test_a_retire_that_ends_a_movie_states_nothing_on_the_far_side(self) -> None:
+        runtime = {**RETIRED_RUNTIME, "boundaries": [dict(RETIRE_BOUNDARY, reason="ends")]}
+        movie = probe.live_continuity_module.MovieContinuity
+        rect = probe.live_continuity_module.Rect(**BIG_INSTANCE)
+        ends = probe.live_continuity_module.SlideBoundary(0, 1, (movie(
+            BIG_ASSET, "retire", rect, None, src_object_id=BIG_OBJECT_IDS[0],
+        ),))
+        plan = dataclasses.replace(synthetic_plan(), boundaries=(ends,))
+        assert probe.rect_expectations(plan, runtime, continuity_on=False)[1] == {BIG1: "live"}
+
+    def test_an_entry_naming_an_instance_the_plan_does_not_name_fails_closed(self) -> None:
+        runtime = {**CARRIED_RUNTIME, "boundaries": [dict(PIN_BOUNDARY, dst={"objectId": "NOPE", "rect": {}})]}
+        with pytest.raises(SystemExit, match="which no plan movie names"):
+            probe.rect_expectations(synthetic_plan(), runtime, continuity_on=True)
 
     def test_both_passes_are_derived_in_one_call(self) -> None:
         plan = synthetic_plan()
@@ -1998,32 +2071,52 @@ class TestRectExpectationModel:
         assert both["Voff"] == probe.rect_expectations(plan, RETIRED_RUNTIME, continuity_on=False)
 
 
-class TestRetireFact:
-    def test_no_retire_is_none_so_nothing_downstream_changes(self) -> None:
-        assert probe.retire_fact(synthetic_plan(), CARRIED_RUNTIME, BOUNDARY_KEYS) is None
+class TestRetireFacts:
+    def test_no_retire_is_an_empty_list_so_nothing_downstream_changes(self) -> None:
+        assert synthetic_retires(CARRIED_RUNTIME) == []
 
     def test_the_retire_resolves_to_its_boundary_slide_asset_keys_and_rects(self) -> None:
-        retire = probe.retire_fact(synthetic_plan(), RETIRED_RUNTIME, BOUNDARY_KEYS)
+        retire = synthetic_retire()
         assert retire["boundaryKey"] == "continue1to2"
         assert retire["verdictKey"] == "refused1to2"
+        assert retire["verdictId"] == f"b0to1:{BIG1}->{BIG1}:retire"
         assert retire["playerIndex"] == 1 and retire["originalOrdinal"] == 2
         assert retire["assetKeys"] == ["untitled.mov"]
         assert retire["rects"] == [BIG_INSTANCE]
+        assert retire["reason"] == "refused" and retire["srcObjectId"] == BIG_OBJECT_IDS[0].lower()
+
+    def test_a_retire_whose_src_no_plan_retire_names_fails_closed(self) -> None:
+        runtime = {**RETIRED_RUNTIME, "boundaries": [dict(RETIRE_BOUNDARY, src=_end(1))]}
+        with pytest.raises(SystemExit, match="matches 0 plan verdicts"):
+            synthetic_retires(runtime)
 
     def test_a_retire_at_a_scene_no_boundary_under_test_owns_fails_closed(self) -> None:
-        runtime = {"movies": RUNTIME_MOVIES, "boundaries": [{"atScene": 4, "action": "retire", "movieKey": "movie1"}]}
+        runtime = {**RETIRED_RUNTIME, "boundaries": [dict(RETIRE_BOUNDARY, atScene=4)]}
         with pytest.raises(SystemExit):
-            probe.retire_fact(synthetic_plan(), runtime, BOUNDARY_KEYS)
+            synthetic_retires(runtime)
 
     def test_a_retire_naming_an_undefined_movie_key_fails_closed(self) -> None:
-        runtime = {"movies": RUNTIME_MOVIES, "boundaries": [dict(RETIRE_BOUNDARY, movieKey="movie9")]}
+        runtime = {**RETIRED_RUNTIME, "boundaries": [dict(RETIRE_BOUNDARY, movieKey="movie9")]}
         with pytest.raises(SystemExit):
-            probe.retire_fact(synthetic_plan(), runtime, BOUNDARY_KEYS)
+            synthetic_retires(runtime)
 
-    def test_more_than_one_retire_is_outside_the_contract_and_fails_closed(self) -> None:
-        runtime = {"movies": RUNTIME_MOVIES, "boundaries": [RETIRE_BOUNDARY, dict(RETIRE_BOUNDARY, atScene=6)]}
-        with pytest.raises(SystemExit):
-            probe.retire_fact(synthetic_plan(), runtime, BOUNDARY_KEYS)
+    def test_every_retire_binds_to_its_own_verdict_and_ends_have_no_carry(self) -> None:
+        """D3's shape: one refused retire and one `ends` retire in one plan."""
+        movie = probe.live_continuity_module.MovieContinuity
+        rect = probe.live_continuity_module.Rect(**BIG_INSTANCE)
+        ends = probe.live_continuity_module.SlideBoundary(1, 2, (movie(
+            BIG_ASSET, "retire", rect, None, src_object_id=BIG_OBJECT_IDS[1],
+        ),))
+        boundaries = synthetic_boundaries()
+        plan = dataclasses.replace(synthetic_plan(), boundaries=(boundaries[0], ends, boundaries[2]))
+        runtime = {**RETIRED_RUNTIME, "boundaries": [
+            RETIRE_BOUNDARY, {"atScene": 6, "action": "retire", "movieKey": "movie1", "reason": "ends", "src": _end(1)},
+            BRIDGE_BOUNDARY,
+        ]}
+        refused, ended = synthetic_retires(runtime, plan)
+        assert refused["verdictKey"] == "refused1to2" and refused["boundaryKey"] == "continue1to2"
+        assert ended["verdictId"] == ended["boundaryKey"] == ended["verdictKey"] == f"b1to2:{BIG1}->end:retire"
+        assert ended["reason"] == "ends" and ended["rects"] == [BIG_INSTANCE] and ended["originalOrdinal"] == 3
 
 
 class TestRefusalScoring:
@@ -2099,7 +2192,7 @@ class TestRefusalScoring:
         assert scored["verdict"] is False
 
     def test_score_refusals_is_keyed_by_the_plans_own_boundary(self) -> None:
-        retire = probe.retire_fact(synthetic_plan(), RETIRED_RUNTIME, BOUNDARY_KEYS)
+        retire = synthetic_retire()
         scored = probe.score_refusals({"refused1to2": self._sample()}, {"retire": retire}, True)
         assert list(scored) == ["refused1to2"]
         assert scored["refused1to2"]["verdict"] is True
@@ -3490,8 +3583,9 @@ GL_BOUNDARY = {
     "slotSizes": [[1920, 1080], [960, 276], [178, 157]], "slotRects": GL_SLOT_RECTS,
     "opacityOverrides": [{"slot": 2, "opacity": 0.3, "texW": 178, "texH": 157}],
     "instanceId": f"{BIG_ASSET}#1", "instanceRect": dict(BIG_INSTANCE), "movieSlot": 1,
+    "loop": False, "src": _end(0), "dst": _end(1),
 }
-GL_RUNTIME = {"movies": RUNTIME_MOVIES, "boundaries": [GL_BOUNDARY, RESTART_BOUNDARY, BRIDGE_BOUNDARY]}
+GL_RUNTIME = {"schema": 2, "movies": RUNTIME_MOVIES, "boundaries": [GL_BOUNDARY, RESTART_BOUNDARY, BRIDGE_BOUNDARY]}
 GL_REPLAY_VERSION = probe.GL_REPLAY_VERSION
 GL_CONTINUITY = {"mode": "qualified", "glReplay": {"mode": "injected", "version": GL_REPLAY_VERSION, "sha256": probe.gl_replay_js_sha256()}}
 ARMED = probe.armed_fact(synthetic_plan(), GL_RUNTIME, BOUNDARY_KEYS)
@@ -3607,6 +3701,7 @@ class TestArmedFact:
         assert armed["instanceId"] == f"{BIG_ASSET}#1" and armed["instanceRect"] == BIG_INSTANCE
         assert armed["movieSlot"] == 1 and armed["overrideSlots"] == [2]
         assert armed["slotRects"][1] == {"x": 105.0, "y": 790.0, "w": 960.0, "h": 276.0}
+        assert armed["srcObjectId"] == "obj-s1-big" and armed["dstObjectId"] == "obj-s2-big"
 
     @pytest.mark.parametrize("boundaries", [
         [RESTART_BOUNDARY, BRIDGE_BOUNDARY],
@@ -3619,7 +3714,7 @@ class TestArmedFact:
     @pytest.mark.parametrize("change", [
         {"atScene": 4}, {"atScene": 6}, {"movieKey": "movie9"}, {"instanceId": f"{BIG_ASSET}#2"},
         {"instanceRect": dict(BIG_INSTANCE, x=110.0)}, {"movieSlot": 3}, {"slotRects": None},
-        {"opacityOverrides": [{"slot": 7}]},
+        {"opacityOverrides": [{"slot": 7}]}, {"src": None}, {"dst": {"objectId": "", "rect": BIG_INSTANCE}},
     ])
     def test_an_unscorable_entry_fails_closed(self, change: dict[str, Any]) -> None:
         runtime = {"movies": RUNTIME_MOVIES, "boundaries": [dict(GL_BOUNDARY, **change)]}
@@ -3635,9 +3730,12 @@ def _gl_plan(gl: bool = False) -> Any:
     boundary = probe.live_continuity_module.SlideBoundary
     pin = movie(
         BIG_ASSET, "pin", rect(**BIG_INSTANCE), rect(**BIG_INSTANCE), refusal="overlap", gl_replay={"x": 1} if gl else None,
+        src_object_id=BIG_OBJECT_IDS[0], dst_object_id=BIG_OBJECT_IDS[1], code="overlap",
     )
     src, dst = {"x": 198.0, "y": 797.0, "w": 952.0, "h": 268.0}, {"x": 327.0, "y": 709.0, "w": 1266.0, "h": 356.0}
-    bridge = movie(BIG_ASSET, "bridge", rect(**src), rect(**dst))
+    bridge = movie(
+        BIG_ASSET, "bridge", rect(**src), rect(**dst), src_object_id=BIG_OBJECT_IDS[2], dst_object_id=BIG_OBJECT_IDS[3],
+    )
     return probe.ContinuityPlan(
         canvas={"width": 1920, "height": 1080}, scene_index_by_player=dict(SCENE_INDEX_BY_PLAYER),
         slide_rects={}, boundaries=(boundary(0, 1, (pin,)), boundary(2, 3, (bridge,))),
@@ -3683,7 +3781,7 @@ class TestFactsPerArm:
         assert probe.facts_for({"glReplay": {"mode": "injected"}}, off, None) is off
 
     def test_the_off_observer_is_todays_refusal_observer(self) -> None:
-        retire = probe.retire_fact(synthetic_plan(), RETIRED_RUNTIME, BOUNDARY_KEYS)
+        retire = synthetic_retire()
         out: dict[str, Any] = {}
         host = ArmedHost([])
         probe.boundary_observer(host, {"retire": retire}, out)(2)
@@ -3830,7 +3928,7 @@ class TestArmedScoring:
         assert scored["armed1to2"]["verdict"] is True, scored
 
     def test_positive_halves_are_todays_refusals_for_the_off_set(self) -> None:
-        retire = probe.retire_fact(synthetic_plan(), RETIRED_RUNTIME, BOUNDARY_KEYS)
+        retire = synthetic_retire()
         evidence = {"refused1to2": {"stageMap": dict(GL_STAGE), "painting": [], "poolSnapshot": []}}
         facts = {"retire": retire}
         assert probe.score_positive_halves(evidence, facts, True, {"mode": "qualified"}) == probe.score_refusals(evidence, facts, True)
@@ -3841,11 +3939,11 @@ class TestRectExpectationModelGl:
         plan = synthetic_plan()
         on = probe.rect_expectations(plan, GL_RUNTIME, continuity_on=True)
         off = probe.rect_expectations(plan, GL_RUNTIME, continuity_on=False)
-        assert on[1] == {BIG_ASSET: "live"} and off[1] == {BIG_ASSET: "dead"}
+        assert on[1] == {BIG1: "live"} and off[1] == {BIG1: "dead"}
         assert on == probe.rect_expectations(plan, CARRIED_RUNTIME, continuity_on=True)
         assert off == probe.rect_expectations(plan, CARRIED_RUNTIME, continuity_on=False)
 
-    def test_vgl_may_differ_from_v_only_at_the_armed_movie(self) -> None:
+    def test_vgl_may_differ_from_v_only_at_the_armed_instance(self) -> None:
         plan = synthetic_plan()
         v = probe.rect_expectations(plan, RETIRED_RUNTIME, continuity_on=True)
         vgl = probe.rect_expectations(plan, GL_RUNTIME, continuity_on=True)
@@ -6194,14 +6292,28 @@ class TestVerdictSpecsFromThePlan:
 class TestGroundTruthFactsIsGeneral:
     @needs_base
     @pytest.mark.parametrize("gl", [False, True])
-    def test_p2_facts_equal_the_s1_base_facts_plus_the_verdicts_and_sha(self, gl: bool) -> None:
+    def test_p2_facts_equal_the_s1_base_facts_plus_the_verdicts_sha_and_instance_ids(self, gl: bool) -> None:
+        """P2 stays the oracle: on the schema-2 plan every S1 fact is unchanged once the S2
+        additions are set aside (objectIds, `retires`, the retire's `reason`) and the per-instance
+        expectations are read per asset -- every P2 instance of one asset states the same."""
         plan = _p2_plan(gl)
         base = _plain(S1_BASE.ground_truth_facts(plan, armed=gl))
         current = _plain(probe.ground_truth_facts(plan, armed=gl))
         assert current.pop("verdicts")[0]["id"] == P2_CARRY12
         assert current.pop("planSha256") in probe.P2_PLAN_SHA256
+        retires = current.pop("retires")
+        assert retires == ([] if gl else [current["retire"]])
         positive = current["armed"] if gl else current["retire"]
         assert positive.pop("verdictId") == (P2_ARMED12 if gl else P2_RETIRE12)
+        for key in ("srcObjectId", "dstObjectId", "reason"):
+            positive.pop(key, None)
+        per_asset: dict[str, dict[str, dict[str, str]]] = {}
+        for name, by_player in current["rectExpectations"].items():
+            for player, per_instance in by_player.items():
+                for label, state in per_instance.items():
+                    asset = label.rsplit("#", 1)[0]
+                    assert per_asset.setdefault(name, {}).setdefault(player, {}).setdefault(asset, state) == state
+        current["rectExpectations"] = per_asset
         assert current == base
 
     def test_legacy_slot_facts_only_for_a_pinned_p2_plan(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6218,9 +6330,12 @@ class TestGroundTruthFactsIsGeneral:
         assert probe.plan_signature(_p2_plan().to_runtime()) == probe.P2_OFF_PLAN_SHA256
 
     def test_a_deck_without_p2_shape_derives_facts_and_keeps_the_armed_contract(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        pin = _MOVIE(BIG_ASSET, "pin", _RECT(**BIG_INSTANCE), _RECT(**BIG_INSTANCE), refusal="overlap", gl_replay={"x": 1})
+        pin = _MOVIE(
+            BIG_ASSET, "pin", _RECT(**BIG_INSTANCE), _RECT(**BIG_INSTANCE), refusal="overlap", gl_replay={"x": 1},
+            src_object_id=BIG_OBJECT_IDS[0], dst_object_id=BIG_OBJECT_IDS[1],
+        )
         plan = _plan((_BOUNDARY(0, 1, (pin,)),), {0: 0, 1: 2}, {0: {BIG_ASSET: [BIG_INSTANCE]}, 1: {BIG_ASSET: [BIG_INSTANCE]}})
-        monkeypatch.setattr(probe, "runtime_of", lambda plan: {"movies": RUNTIME_MOVIES, "boundaries": [GL_BOUNDARY]})
+        monkeypatch.setattr(probe, "runtime_of", lambda plan: {"schema": 2, "movies": RUNTIME_MOVIES, "boundaries": [GL_BOUNDARY]})
         facts = probe.ground_truth_facts(plan, armed=True)
         assert "bridgeScene" not in facts and "asset" not in facts
         assert facts["armed"]["instanceRect"] == BIG_INSTANCE and facts["armed"]["verdictKey"] == "armed1to2"
@@ -6235,7 +6350,6 @@ class TestGroundTruthFactsIsGeneral:
 
     def test_retire_and_armed_facts_key_off_generated_ids_without_an_alias(self) -> None:
         keys = {2: f"b0to1:{P2_ID}:carry"}
-        assert probe.retire_fact(synthetic_plan(), RETIRED_RUNTIME, keys)["verdictKey"] == P2_RETIRE12
         assert probe.armed_fact(synthetic_plan(), GL_RUNTIME, keys)["verdictKey"] == P2_ARMED12
         with pytest.raises(SystemExit):
             probe.armed_fact(synthetic_plan(), GL_RUNTIME, {2: f"b0to1:{P2_ID}:restart"})
@@ -6517,7 +6631,7 @@ class TestRetireVerdict:
         assert probe.score_retire(_retire_read((RETIRE_NOTE,)), spec, True, _handback_samples())["verdict"] is None
 
     def test_the_observer_retains_the_core_events(self) -> None:
-        retire = probe.retire_fact(synthetic_plan(), RETIRED_RUNTIME, BOUNDARY_KEYS)
+        retire = synthetic_retire()
         out: dict[str, Any] = {}
         host = ArmedHost([])
         probe.boundary_observer(host, {"retire": retire}, out)(2)
@@ -6668,7 +6782,7 @@ class TestDriveEverySlide:
 
 
 class TestRedArmInjection:
-    PLAN = {"movies": RUNTIME_MOVIES, "boundaries": [RETIRE_BOUNDARY, RESTART_BOUNDARY, BRIDGE_BOUNDARY]}
+    PLAN = {"schema": 2, "movies": RUNTIME_MOVIES, "boundaries": [RETIRE_BOUNDARY, RESTART_BOUNDARY, BRIDGE_BOUNDARY]}
 
     def _injected(self) -> dict[str, Any]:
         script = probe.live_host_module._continuity_scripts(self.PLAN, {"width": 1920, "height": 1080})
@@ -6692,6 +6806,13 @@ class TestRedArmInjection:
             with pytest.raises(ValueError):
                 self._injected()
 
+    def test_a_keyed_strip_removes_only_the_entry_naming_the_key(self) -> None:
+        with probe.stripped_runtime("restart", 6, BIG_OBJECT_IDS[2]):
+            assert [b["atScene"] for b in self._injected()["boundaries"]] == [2, 8]
+        with probe.stripped_runtime("restart", 6, "movie9"):
+            with pytest.raises(ValueError):
+                self._injected()
+
     def test_strip_never_touches_the_derivation(self) -> None:
         with probe.stripped_runtime("retire", 2):
             assert _p2_plan().to_runtime()["boundaries"][0]["action"] == "retire"
@@ -6702,14 +6823,16 @@ class TestRedArmInjection:
         with probe.injected_core_variant(name) as sha:
             core = probe.live_host_module._continuity_core_script()
             assert sha == probe.variant_sha(name) == probe.live_host_module.js_sha256()
-            assert (core == core_before) is (name == "fifo-reuse")
+            assert core != core_before
         assert probe.live_host_module._continuity_core_script() == core_before
         assert probe.live_host_module.js_sha256() == probe.js_sha256()
 
 
 class TestRedArmArgs:
-    @pytest.mark.parametrize(("value", "expected"), [("bridge@8", ("bridge", 8)), ("retire", ("retire", None))])
-    def test_strip_parses(self, value: str, expected: tuple[str, int | None]) -> None:
+    @pytest.mark.parametrize(("value", "expected"), [
+        ("bridge@8", ("bridge", 8, None)), ("retire", ("retire", None, None)), ("pin@4:movie2", ("pin", 4, "movie2")),
+    ])
+    def test_strip_parses(self, value: str, expected: tuple[str, int | None, str | None]) -> None:
         assert probe.parse_args(["--strip", value]).strip == expected
 
     def test_core_variant_parses_and_rejects_unknown_names(self) -> None:
@@ -6728,31 +6851,107 @@ class TestRedArmArgs:
             probe.parse_args(["--strip", "bridge@8", *extra])
 
 
+QUAL_ROOT = REPO / "tests" / "fixtures" / "live_continuity" / "qual_decks"
+
+
+def _deck_plan(name: str) -> Any:
+    root = P2_ROOT if name == "P2" else QUAL_ROOT / name
+    return probe.derive_plan(root, probe.load_slides(root), resolver=lambda r, rel: r / rel)
+
+
+REGISTERED_DECKS = ("P2", "D1", "D2", "D3", "D4", "D5", "D6")
+
+
 class TestRedArmRegistration:
-    def test_every_registered_id_is_a_p2_verdict_or_a_stray_on_a_p2_slide(self) -> None:
-        ids = {spec["id"] for gl in (False, True) for spec in probe.verdict_specs(_p2_plan(gl))}
-        assets = {asset.lower() for per in _p2_plan().slide_instances.values() for asset in per}
-        for (sha, label, gl), expected in probe.RED_ARM_EXPECTATIONS.items():
-            assert sha == probe.P2_OFF_PLAN_SHA256 and gl in ("off", "auto")
-            for red_id in () if expected == probe.RECORD else expected:
+    def test_the_deck_shas_are_the_committed_exports_plans(self) -> None:
+        shas = {name: probe.plan_signature(_deck_plan(name).to_runtime()) for name in REGISTERED_DECKS}
+        assert shas["P2"] == probe.P2_OFF_PLAN_SHA256
+        assert {name: sha for name, sha in shas.items() if name != "P2"} == probe.DECK_PLAN_SHA256
+
+    def test_every_registered_id_is_a_verdict_or_a_stray_on_its_decks_slide(self) -> None:
+        plans = {probe.plan_signature(_deck_plan(name).to_runtime()): name for name in REGISTERED_DECKS}
+        for key in [*probe.RED_ARM_EXPECTATIONS, *probe.RED_ARM_REQUIRED]:
+            sha, label, gl = key
+            deck = plans[sha]
+            plan = _deck_plan(deck)
+            ids = {spec["id"] for spec in probe.verdict_specs(plan)}
+            if gl == "auto":
+                ids |= {spec["id"] for spec in probe.verdict_specs(_p2_plan(True))}
+            assets = {asset.lower() for per in plan.slide_instances.values() for asset in per}
+            expected = probe.RED_ARM_EXPECTATIONS.get(key)
+            registered = [*(() if expected in (None, probe.RECORD) else expected), *probe.RED_ARM_REQUIRED.get(key, ())]
+            assert gl in ("off", "auto") and (gl == "off" or deck == "P2"), key
+            for red_id in registered:
                 if red_id.startswith("stray:"):
                     _, slide, asset = red_id.split(":")
-                    assert asset in assets and 1 <= int(slide.removeprefix("slide")) <= 4
+                    assert asset in assets and 1 <= int(slide.removeprefix("slide")) <= len(plan.scene_index_by_player), key
                 else:
-                    assert red_id in ids, red_id
+                    assert red_id in ids, (key, red_id)
+            if label.startswith("strip:"):
+                action, scene, strip_key = probe.parse_strip(label.removeprefix("strip:"))
+                runtime = probe.runtime_of(plan) if gl == "off" else _p2_plan(True).to_runtime()
+                probe.strip_entries(runtime, action, scene, strip_key)
 
-    def test_the_pre_registered_sets_are_the_plans(self) -> None:
-        """Plan §3 G-S1c/G-S1d: stash-any reds only the slide-4 WA0125 stray; each strip only its boundary."""
-        expected = {label: value for (_, label, _), value in probe.RED_ARM_EXPECTATIONS.items()}
-        assert expected["core:stash-any"] == ("stray:slide4:vid-20250608-wa0125.mp4",)
-        assert expected["strip:bridge@8"] == (P2_CARRY34,)
-        assert expected["strip:retire@2"] == (P2_CARRY12, P2_RETIRE12, "stray:slide2:untitled.mov")
-        assert expected["strip:glReplay@2"] == (P2_ARMED12, "stray:slide2:untitled.mov")
-        assert expected["strip:restart@6"] == (P2_CARRY34,)  # post-hoc from discovery r2 (8ac39a42)
+    def test_every_red_is_on_the_stripped_boundary_or_a_stray(self) -> None:
+        """Plan §4: a strip arm turns red only its own boundary (plus the strays its held decoder
+        leaves); every carry/retire/armed id in a strip set sits at the stripped scene."""
+        plans = {probe.plan_signature(_deck_plan(name).to_runtime()): _deck_plan(name) for name in REGISTERED_DECKS}
+        for (sha, label, gl), expected in probe.RED_ARM_EXPECTATIONS.items():
+            if not label.startswith("strip:") or expected == probe.RECORD:
+                continue
+            plan = plans[sha]
+            scene = probe.parse_strip(label.removeprefix("strip:"))[1]
+            player = next(p for p, s in plan.scene_index_by_player.items() if s == scene)
+            for red_id in expected:
+                if not red_id.startswith("stray:"):
+                    assert red_id.startswith(f"b{player - 1}to{player}:"), (label, red_id)
+
+    def test_the_p2_sets_are_the_plans(self) -> None:
+        """Plan §3.4 Q2/Q3: stash-any must red the slide-4 WA0125 stray; each strip only its boundary."""
+        p2 = {label: value for (sha, label, _), value in probe.RED_ARM_EXPECTATIONS.items() if sha == probe.P2_OFF_PLAN_SHA256}
+        assert p2["core:stash-any"] == probe.RECORD
+        assert probe.RED_ARM_REQUIRED[(probe.P2_OFF_PLAN_SHA256, "core:stash-any", "off")] == (
+            "stray:slide4:vid-20250608-wa0125.mp4",
+        )
+        assert p2["strip:bridge@8"] == (P2_CARRY34,)
+        assert p2["strip:retire@2"] == (P2_RETIRE12,)
+        assert p2["strip:glReplay@2"] == (P2_ARMED12,)
+        assert p2["strip:restart@6"] == ()
+
+    def test_d4_wrong_instance_must_red_the_far_copys_carry(self) -> None:
+        """Plan §4 identity red: the carried clock is A-near's, not A-far's."""
+        key = (probe.DECK_PLAN_SHA256["D4"], "core:wrong-instance", "off")
+        (carry,) = probe.RED_ARM_REQUIRED[key]
+        spec = next(s for s in probe.verdict_specs(_deck_plan("D4")) if s["id"] == carry)
+        assert spec["kind"] == "carry" and spec["action"] == "bridge" and spec["srcInstance"] == "counter-a.mov#2"
+        assert probe.RED_ARM_EXPECTATIONS[key] == probe.RECORD
+
+    def test_every_action_type_has_a_pre_registered_strip_arm(self) -> None:
+        """Plan §3.4 Q3: one --strip arm per action type (pin, bridge, restart, retire, glReplay)."""
+        registered = {
+            probe.parse_strip(label.removeprefix("strip:"))[0]
+            for (_, label, _), value in probe.RED_ARM_EXPECTATIONS.items()
+            if label.startswith("strip:") and value != probe.RECORD
+        }
+        assert registered == {"pin", "bridge", "restart", "retire", "glReplay"}
+
+    def test_run_gates_runs_every_registered_deck_arm(self) -> None:
+        """`scripts/run_gates.sh`'s DECK_ARMS is exactly the registry's S0-deck keys."""
+        text = (REPO / "scripts" / "run_gates.sh").read_text()
+        block = text.split("DECK_ARMS=(", 1)[1].split("\n)", 1)[0]
+        listed = set()
+        for item in re.findall(r'"(D\d) ([^"]+)"', block):
+            deck, args = item
+            parts = args.split()
+            label = f"core:{parts[1]}" if parts[0] == "--core-variant" else probe.strip_label(*probe.parse_strip(parts[1]))
+            listed.add((probe.DECK_PLAN_SHA256[deck], label, "off"))
+        registered = {key for key in probe.RED_ARM_EXPECTATIONS if key[0] in probe.DECK_PLAN_SHA256.values()}
+        assert listed == registered
 
     @pytest.mark.parametrize(("core", "strip", "label"), [
-        ("stash-any", None, "core:stash-any"), (None, ("bridge", 8), "strip:bridge@8"),
-        (None, ("bridge", None), "strip:bridge@8"), (None, ("restart", None), "strip:restart"),
+        ("stash-any", None, "core:stash-any"), (None, ("bridge", 8, None), "strip:bridge@8"),
+        (None, ("bridge", None, None), "strip:bridge@8"), (None, ("restart", None, None), "strip:restart"),
+        (None, ("pin", 4, "movie2"), "strip:pin@4:movie2"),
     ])
     def test_labels(self, core: Any, strip: Any, label: str) -> None:
         runtime = {"boundaries": [RETIRE_BOUNDARY, RESTART_BOUNDARY, BRIDGE_BOUNDARY, dict(RESTART_BOUNDARY, atScene=10)]}
@@ -6789,6 +6988,14 @@ class TestRedArmStatus:
     def test_record_and_unregistered_never_pass(self) -> None:
         assert probe.red_arm_status(_red_result([], expected=probe.RECORD))[0] == "recorded"
         assert probe.red_arm_status(_red_result([], expected=None))[0] == "unregistered"
+
+    def test_a_record_arm_missing_a_required_red_fails(self) -> None:
+        stray = "stray:slide4:vid-20250608-wa0125.mp4"
+        result = _red_result([P2_CARRY34], expected=probe.RECORD)
+        result["requiredRed"] = [stray]
+        assert probe.red_arm_status(result) == ("fail", [f"required red but green: {stray}"])
+        result["redSet"] = sorted([P2_CARRY34, stray])
+        assert probe.red_arm_status(result)[0] == "recorded"
 
     def test_a_variant_arm_must_report_the_variants_sha(self) -> None:
         stray = "stray:slide4:vid-20250608-wa0125.mp4"

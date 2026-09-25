@@ -5,6 +5,7 @@
 G=$1; O=$2; ALLOW_RECORD=0; [[ "$3" == "--allow-record" ]] && ALLOW_RECORD=1
 PY=/Users/anyhowclick/Desktop/work/obed-edom/.venv/bin/python; mkdir -p $O; cd $G || exit 1
 export PYTHONPATH=$G/src; F=$($PY -c 'from obed_edom.fixture_paths import fixture; print(fixture("p2-recovery"))')/html-adversarial
+Q=$($PY -c 'from obed_edom.fixture_paths import fixture; print(fixture("qual-decks"))')
 [[ -d $F ]] || { echo "no P2 fixture at $F"; exit 1; }
 if (( ALLOW_RECORD )); then
   echo "################################################################################"
@@ -88,11 +89,15 @@ done
 # checked in full: every key present and typed, redArm equal to the label the CLI arguments imply, expectedCoreSha256
 # the arm's sha, `unknown` an empty list, the census stray/duplicate multiset reconciled with redSet, and the red and
 # expected multisets equal (Counter). A "record" arm returns 3 only when all of that holds with status recorded.
-host_red(){ n=$(echo "$*" | tr -d ' '); $PY -u scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport 1920x1080 --artifact $O/host-red$n.json "$@" > $O/host-red$n.log 2>&1; rc=$?; $PY - "$O/host-red$n.json" "$rc" "$@" <<'PYEOF'
+# host_red runs on P2; `HOST_DECK=Dn host_red ...` runs the same arm on an S0 deck (its html-unmodified export is both
+# fixture and original index: the qual decks need no asset replacement).
+host_red(){ n=${HOST_DECK:-}$(echo "$*" | tr -d ' '); fix=$F/html-player; idx=$F/html-unmodified/index.html
+  if [[ -n ${HOST_DECK:-} ]]; then fix=$Q/$HOST_DECK/html-unmodified; idx=$fix/index.html; fi
+  $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $idx --viewport 1920x1080 --artifact $O/host-red$n.json "$@" > $O/host-red$n.log 2>&1; rc=$?; $PY - "$O/host-red$n.json" "$rc" "$@" <<'PYEOF'
 import json,sys
 from collections import Counter
 sys.path.insert(0,"scripts")
-from continuity_core_variants import parse_strip, variant_sha
+from continuity_core_variants import parse_strip, strip_label, variant_sha
 from obed_edom.live_continuity_js import js_sha256
 path,rc,args=sys.argv[1],int(sys.argv[2]),sys.argv[3:]
 label=" ".join(args)
@@ -102,7 +107,7 @@ problems=[]
 def strs(v): return isinstance(v,list) and all(isinstance(x,str) for x in v)
 variant=args[args.index("--core-variant")+1] if "--core-variant" in args else None
 strip=parse_strip(args[args.index("--strip")+1]) if "--strip" in args else None
-want_arm=f"core:{variant}" if variant else f"strip:{strip[0]}"+("" if strip[1] is None else f"@{strip[1]}")
+want_arm=f"core:{variant}" if variant else strip_label(*strip)
 want_sha=variant_sha(variant) if variant else js_sha256()
 status,arm_label,exp,got,unknown,sha=(d.get(k) for k in ("status","redArm","expectedRedSet","redSet","unknown","expectedCoreSha256"))
 arm=d.get("arm"); census=arm.get("census") if isinstance(arm,dict) else None
@@ -144,6 +149,18 @@ PYEOF
 }
 for A in "--core-variant stash-any" "--strip bridge@8" "--strip retire@2" "--strip restart@6" "--strip glReplay@2 --gl-replay auto"; do
   host_red ${=A}; tally $? "HOST red $A"
+done
+# S0 deck arms (plan §3.4 Q3): every (deck, arm) the probe's RED_ARM_EXPECTATIONS registers, RECORD ones included.
+DECK_ARMS=(
+  "D1 --strip bridge@2" "D1 --strip bridge@4" "D1 --strip pin@6"
+  "D2 --strip bridge@2" "D2 --strip restart@4" "D2 --strip pin@6" "D2 --strip bridge@8"
+  "D3 --strip pin@2" "D3 --strip bridge@2" "D3 --strip retire@4" "D3 --strip pin@4" "D3 --strip bridge@6"
+  "D4 --core-variant wrong-instance" "D4 --core-variant fifo-reuse" "D4 --strip bridge@3" "D4 --strip pin@5"
+  "D5 --core-variant stash-any" "D5 --core-variant fifo-reuse" "D5 --strip pin@2" "D5 --strip pin@4"
+  "D6 --strip bridge@2" "D6 --strip retire@8"
+)
+for DA in "${DECK_ARMS[@]}"; do
+  d=${DA%% *}; A=${DA#* }; HOST_DECK=$d host_red ${=A}; tally $? "HOST red $d $A"
 done
 run_p2(){ spec=$1; inc=$2; shift 2; n=$(echo "$*" | tr -d ' '); $PY scripts/p2_recovery_html_adversarial.py --reuse-export --disposable "$@" > "$O/p2$n.log" 2>&1; rc=$?; echo "[P2 $*] exit=$rc $(grep -m1 '^success' "$O/p2$n.log") True=$(grep -cE '^- [A-Za-z0-9]+: \*\*True\*\*' "$O/p2$n.log") False: $(grep -oE '^- [A-Za-z0-9]+: \*\*False\*\*' "$O/p2$n.log" | tr '\n' ' ')"; r=$F/report.json; [[ "$*" == *"--gl-replay auto"* ]] && r=$F/gl-replay/report.json; cp $r "$O/p2$n.report.json" 2>/dev/null; expect "$O/p2$n.log" "$rc" "$spec" "$inc" "$@"; tally $? "P2 $*"; }
 # run_p2 "<expected red>" "<expected inconclusive>" <args>

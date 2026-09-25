@@ -38,11 +38,16 @@ sleep as proof. If the tracked movie never decodes, the verdict is INCONCLUSIVE,
 a false pass/fail.
 
 Every boundary verdict is generated from `ContinuityPlan.boundaries[].movies[]`
-(`verdict_specs`), one per (boundary, movie, kind), id `b{from}to{to}:{asset}:{kind}`;
-P2's names (`continue1to2`, `restart2to3`, `continue3to4`, `refused*`, `armed1to2`) are
-emitted alongside as aliases. `--strip ACTION[@atScene]` and `--core-variant NAME` run one
-red arm on its own and compare its red set with the arm's pre-registered one
-(`RED_ARM_EXPECTATIONS`); `--rescore` re-scores a stored artifact with both scorers.
+(`verdict_specs`), one per (boundary, movie instance, kind), id
+`b{from}to{to}:{asset}#{src}->{asset}#{dst}:{kind}`; P2's names (`continue1to2`, `restart2to3`,
+`continue3to4`, `refused*`, `armed1to2`) are emitted alongside as aliases. The schema-2 runtime
+plan's entries are bound to those instances by objectId. `--strip ACTION[@atScene[:KEY]]` and
+`--core-variant NAME` run one red arm on its own and compare its red set with the arm's
+pre-registered one (`RED_ARM_EXPECTATIONS`, plus `RED_ARM_REQUIRED` for a RECORD arm);
+`--rescore` re-scores a stored artifact with both scorers.
+
+Any deck runs as `--fixture <export> --original-index <export>/index.html`; an S0 deck's
+`html-unmodified` export is both (its counter movies need no asset replacement).
 
 Does not qualify HDMI, alpha compositing, or audio. Offline/local Chrome only.
 """
@@ -77,7 +82,7 @@ from obed_edom.fixture_paths import fixture  # noqa: E402
 from obed_edom import live_host as live_host_module  # noqa: E402
 from obed_edom import live_continuity as live_continuity_module  # noqa: E402
 from obed_edom.html_preview import cache_dir, safe_export_file  # noqa: E402
-from obed_edom.live_continuity import ContinuityPlan, Unsupported, derive_plan, plan_signature  # noqa: E402
+from obed_edom.live_continuity import ContinuityPlan, MovieContinuity, Unsupported, derive_plan, plan_signature  # noqa: E402
 from obed_edom.live_continuity_js import js_sha256  # noqa: E402
 from obed_edom.html_alpha_probe import (  # noqa: E402
     INPAGE_BAND_COUNT,
@@ -102,7 +107,7 @@ except ImportError:  # pragma: no cover - stream B is landing this constant conc
     GOTO_AUTOPLAY_ENV = "OBED_LIVE_GOTO_AUTOPLAY"
 
 import live_host_probe  # noqa: E402 - reuse the headless window-size compensation
-from continuity_core_variants import VARIANTS, parse_strip, strip_entries, variant_core, variant_sha  # noqa: E402
+from continuity_core_variants import VARIANTS, parse_strip, strip_entries, strip_label, variant_core, variant_sha  # noqa: E402
 
 FIXTURE = fixture("p2-recovery") / "html-adversarial/html-player"
 ORIGINAL_INDEX = fixture("p2-recovery") / "html-adversarial/html-unmodified/index.html"
@@ -118,6 +123,9 @@ MAX_DROP_S = 0.05
 RESTART_MAX_START_S = 0.5
 RECT_TOLERANCE_PX = 3.0
 CLICK_DELAY_S = 1.5
+# Plan §4 identity red: on D4 the far copy starts on click 1, so its clock trails the near copy's
+# by at least this dwell before the first press.
+FIRST_CLICK_DWELL_S = 3.0
 POST_ADVANCE_SETTLE_S = 1.8
 VIDEO_DECODE_TIMEOUT_S = 8.0
 MAX_ADVANCE_STEPS = 40
@@ -166,34 +174,78 @@ REFUSAL_VERDICT_KEY = {
 # plan's expectation, or `stray:slide{ordinal}:{asset}` for a painting `<video>` the settled
 # slide's instances do not claim. RECORD = report the current behaviour, never pass/fail.
 RECORD = "record"
-P2_OFF_PLAN_SHA256 = "bafe26cad55cf3a390154bce2c0fdcc771b9b1821293b6aec76119d25180e81e"
+# The schema-2 runtime plans (`CONTINUITY_VERSION` 6; `tests/fixtures/live_continuity/runtime_v2_examples.json`
+# for P2 off/on, D1, D3, D5; the rest derived from the S0 exports). D2 and D2-across derive the same plan:
+# the export does not encode play-across (plan §5, R-res-1).
+P2_OFF_PLAN_SHA256 = "283f5eecd18c3412172e28a40bc716c69173a7c72bcd37379dcd3d7d6a96dd4e"
 # The pinned P2 runtime plans (off, gl-replay on; p2-loop off, on): the only decks whose status
 # is P2's legacy slot table. Every other deck is scored by `generated_status`.
 P2_PLAN_SHA256 = frozenset({
     P2_OFF_PLAN_SHA256,
-    "6a0596da54532493aee74d22fe91b7cbf3628795aca586dd3cf7dc61a37cc635",
-    "3dc6755853692a178696a35495c1929662005a8173f932607855876bfc299c5d",
-    "2ba6fbed8fc959c804e53d2f21712945230eac6dcbf90d522fe3a6a688bef924",
+    "2fbf977277a5eef1cde701c12bb157905e40ac2b0a5ed85e30bf1056a3e65c18",
+    "866de785864ad19b11ecd8cdfb4ad1729798ccf9f1764aa59718de03034ba7a5",
+    "d860a09f4f6a8e24a81e2ad0c3b37bc8a3f2b4ce3947836ca315671031870131",
 })
+DECK_PLAN_SHA256 = {
+    "D1": "4d466b2f0ee035928486dc3e61f23a5d92e3cc4e76d5d02f367e115331cc0b00",
+    "D2": "029a4c427d2f7ebe2cf7410e2010fdc03834f370f5c6d25aeea9e05c2fbc20f7",
+    "D3": "01b74c88f4622e5a0650d334d7721a247a2039a1767f232d792e823405a21b1b",
+    "D4": "e166c385753364cdc159307b8f7d9092979533b71aee93ea4b8ebbea7a366076",
+    "D5": "73d1153f086381996b5490d6f66eae2ee6996eb05b4a1dcd0af0fce70a018f5e",
+    "D6": "149e813cfe68b6bac7c5c4ea0b5829f20e017ee1d0ce742ece3444fd1f60eed1",
+}
+_P2 = "untitled.mov#1->untitled.mov#1"
+_A = "counter-a.mov#1->counter-a.mov#1"
+_B = "counter-b.mov#1->counter-b.mov#1"
+_A_FAR = "counter-a.mov#2->counter-a.mov#1"
+_D1, _D2, _D3, _D4, _D5, _D6 = (DECK_PLAN_SHA256[f"D{n}"] for n in range(1, 7))
+# Derived from the plan and the v6 core's documented behaviour (WS-R, S2): a stripped carry's
+# destination plays raw and, when the next entry names that raw element's instance, the chain
+# resumes from it; a facaded pin no entry names is detached at the next slide change and stops;
+# a bridge overlay no entry names is held at its rect indefinitely (a stray on later slides); a
+# retire/restart of a raw (never carried) src is inert apart from `retire`'s preserve-refused notes.
 RED_ARM_EXPECTATIONS: dict[tuple[str, str, str], tuple[str, ...] | str] = {
+    (P2_OFF_PLAN_SHA256, "core:stash-any", "off"): RECORD,
+    (P2_OFF_PLAN_SHA256, "strip:bridge@8", "off"): (f"b2to3:{_P2}:carry",),
+    # Nothing names slide 1's raw decoder, so nothing is pooled or noted: the carry reads False
+    # as the plan expects, and only the retire's note clause goes red.
+    (P2_OFF_PLAN_SHA256, "strip:retire@2", "off"): (f"b0to1:{_P2}:retire",),
+    (P2_OFF_PLAN_SHA256, "strip:glReplay@2", "auto"): (f"b0to1:{_P2}:armed",),
+    # The restart's src (slide 2) is retired at 2 and never carried, so the entry is inert.
+    (P2_OFF_PLAN_SHA256, "strip:restart@6", "off"): (),
+    (_D1, "strip:bridge@2", "off"): (f"b0to1:{_A}:carry",),
+    (_D1, "strip:bridge@4", "off"): (f"b1to2:{_A}:carry", "stray:slide3:counter-a.mov", "stray:slide4:counter-a.mov"),
+    (_D1, "strip:pin@6", "off"): RECORD,
+    (_D2, "strip:bridge@2", "off"): (f"b0to1:{_A}:carry",),
+    (_D2, "strip:restart@4", "off"): RECORD,
+    (_D2, "strip:pin@6", "off"): RECORD,
+    (_D2, "strip:bridge@8", "off"): (f"b3to4:{_A}:carry",),
+    (_D3, "strip:pin@2", "off"): (f"b0to1:{_A}:carry",),
+    (_D3, "strip:bridge@2", "off"): (f"b0to1:{_B}:carry",),
+    (_D3, "strip:retire@4", "off"): ("b1to2:counter-a.mov#1->end:retire",),
+    (_D3, "strip:pin@4", "off"): RECORD,
+    (_D3, "strip:bridge@6", "off"): (f"b2to3:{_B}:carry",),
+    (_D4, "core:wrong-instance", "off"): RECORD,
+    (_D4, "core:fifo-reuse", "off"): RECORD,
+    (_D4, "strip:bridge@3", "off"): (f"b0to1:{_A_FAR}:carry",),
+    (_D4, "strip:pin@5", "off"): RECORD,
+    (_D5, "core:stash-any", "off"): RECORD,
+    (_D5, "core:fifo-reuse", "off"): RECORD,
+    (_D5, "strip:pin@2", "off"): RECORD,
+    (_D5, "strip:pin@4", "off"): (f"b1to2:{_A}:carry",),
+    (_D6, "strip:bridge@2", "off"): (f"b0to1:{_A_FAR}:carry",),
+    (_D6, "strip:retire@8", "off"): (f"b3to4:{_A}:retire",),
+}
+# Ids a RECORD arm must still turn red (plan §3.4 Q2/Q3, §4): the stray red and the identity red.
+# Its exact set is not derivable offline, but an arm missing one of these fails.
+RED_ARM_REQUIRED: dict[tuple[str, str, str], tuple[str, ...]] = {
     (P2_OFF_PLAN_SHA256, "core:stash-any", "off"): ("stray:slide4:vid-20250608-wa0125.mp4",),
-    (P2_OFF_PLAN_SHA256, "strip:bridge@8", "off"): ("b2to3:untitled.mov#1->untitled.mov#1:carry",),
-    (P2_OFF_PLAN_SHA256, "strip:retire@2", "off"): (
-        "b0to1:untitled.mov#1->untitled.mov#1:carry", "b0to1:untitled.mov#1->untitled.mov#1:retire",
-        "stray:slide2:untitled.mov",
-    ),
-    (P2_OFF_PLAN_SHA256, "strip:glReplay@2", "auto"): (
-        "b0to1:untitled.mov#1->untitled.mov#1:armed", "stray:slide2:untitled.mov",
-    ),
-    # Post-hoc from discovery round r2 (8ac39a42), not pre-registered: with the restart entry
-    # stripped, the un-retired pre-restart decoder breaks the 3->4 carry while the export's own
-    # 2->3 restart still scores green.
-    (P2_OFF_PLAN_SHA256, "strip:restart@6", "off"): ("b2to3:untitled.mov#1->untitled.mov#1:carry",),
+    (_D4, "core:wrong-instance", "off"): (f"b0to1:{_A_FAR}:carry",),
 }
 GROUND_TRUTH_KEYS = (
     "asset", "onset1to2", "boundaryPlayerIndex", "restartScene", "bridgeScene",
     "pinRect", "bridgeSrcRect", "destRect", "canvas",
-    "retire", "refusedBoundaries", "refusals", "rectExpectations", "verdicts", "planSha256",
+    "retire", "retires", "refusedBoundaries", "refusals", "rectExpectations", "verdicts", "planSha256",
 )
 # A painting `<video>` overlaps a retired movie's rect when it does so by more
 # than this in authored px -- edge-touching and AA seams are not an overlap.
@@ -410,6 +462,7 @@ SAMPLER_JS = r"""
       videos.push({
         id: idFor(v),
         elId: (v.__obedElId != null ? v.__obedElId : null),
+        instance: (v.__obedInstance != null ? String(v.__obedInstance) : null),
         src: src,
         currentTime: v.currentTime,
         paused: v.paused,
@@ -614,7 +667,7 @@ def parse_viewport_arg(value: str) -> tuple[int, int]:
     return width, height
 
 
-def parse_strip_arg(value: str) -> tuple[str, int | None]:
+def parse_strip_arg(value: str) -> tuple[str, int | None, str | None]:
     try:
         return parse_strip(value)
     except ValueError as exc:
@@ -664,9 +717,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "or re-score a --force-wrap artifact offline; exits 1 unless ok / pass",
     )
     parser.add_argument(
-        "--strip", type=parse_strip_arg, default=None, metavar="ACTION[@atScene]",
+        "--strip", type=parse_strip_arg, default=None, metavar="ACTION[@atScene[:KEY]]",
         help="Red arm: one continuity-on arm with the matching runtime-plan entries stripped at injection "
-        "(e.g. bridge@8, retire@2, glReplay@2 with --gl-replay auto), scored against its pre-registered red set",
+        "(e.g. bridge@8, pin@4:movie2, retire@2, glReplay@2 with --gl-replay auto; KEY = movieKey or a src/dst "
+        "objectId), scored against its pre-registered red set",
     )
     parser.add_argument(
         "--core-variant", choices=VARIANTS, default=None,
@@ -747,50 +801,49 @@ def runtime_asset_keys(runtime: dict[str, Any], movie_key: Any) -> list[str]:
     return [str(key).lower() for key in keys] if isinstance(keys, list) else []
 
 
-def retire_fact(
-    plan: ContinuityPlan, runtime: dict[str, Any], boundary_keys: dict[int, str]
-) -> dict[str, Any] | None:
-    """The one `retire` a runtime plan may carry, resolved to the boundary verdict it
-    refuses, the destination slide it lands on, and the asset keys and authored rects
-    its positive check needs. No retire => None, and every expectation below stays
-    exactly what it was before refusals existed."""
-    entries = [
+def entry_object_id(entry: dict[str, Any], end: str) -> str | None:
+    """The lowercased objectId of a schema-2 entry's `src` or `dst`, or None."""
+    value = entry.get(end)
+    object_id = value.get("objectId") if isinstance(value, dict) else None
+    return object_id.lower() if isinstance(object_id, str) and object_id else None
+
+
+def runtime_entries(runtime: dict[str, Any], action: str) -> list[dict[str, Any]]:
+    return [
         boundary for boundary in runtime.get("boundaries") or []
-        if isinstance(boundary, dict) and boundary.get("action") == "retire"
+        if isinstance(boundary, dict) and boundary.get("action") == action
     ]
-    if not entries:
-        return None
-    if len(entries) > 1:
-        raise SystemExit("runtime plan carries more than one retire boundary")
-    entry = entries[0]
-    scene, movie_key = entry.get("atScene"), entry.get("movieKey")
-    boundary_key = boundary_keys.get(scene)
-    if boundary_key is None:
-        raise SystemExit(f"retire boundary at scene {scene!r} is not one of the boundaries under test")
-    asset_keys = runtime_asset_keys(runtime, movie_key)
-    if not asset_keys:
-        raise SystemExit(f"retire boundary names movie key {movie_key!r}, which the plan does not define")
-    player_index = next((p for p, s in plan.scene_index_by_player.items() if s == scene), None)
-    if player_index is None:
-        raise SystemExit(f"retire boundary at scene {scene} has no destination slide")
-    rects = [
-        _authored_rect(rect)
-        for asset, instances in (plan.slide_instances.get(player_index) or {}).items()
-        if matches_asset_keys(asset, asset_keys)
-        for rect in instances
-    ]
-    if not rects:
-        raise SystemExit(f"retired movie {movie_key!r} has no authored instance on player index {player_index}")
-    return {
-        "movieKey": movie_key,
-        "atScene": scene,
-        "boundaryKey": boundary_key,
-        "verdictKey": positive_key(boundary_key, "refused"),
-        "playerIndex": player_index,
-        "originalOrdinal": player_index + 1,
-        "assetKeys": asset_keys,
-        "rects": rects,
-    }
+
+
+def retire_facts(runtime: dict[str, Any], specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every schema-2 `retire` entry bound to the one plan `retire` verdict naming the same
+    (atScene, src objectId), with the destination slide, asset keys and authored rects its
+    positive check needs; fails closed on an entry no verdict (or several) proves."""
+    facts: list[dict[str, Any]] = []
+    for entry in runtime_entries(runtime, "retire"):
+        scene, movie_key, src = entry.get("atScene"), entry.get("movieKey"), entry_object_id(entry, "src")
+        asset_keys = runtime_asset_keys(runtime, movie_key)
+        if not asset_keys:
+            raise SystemExit(f"retire boundary names movie key {movie_key!r}, which the plan does not define")
+        matches = [
+            spec for spec in specs
+            if spec["kind"] == "retire" and spec["atScene"] == scene and spec.get("srcObjectId") == src
+        ]
+        if src is None or len(matches) != 1:
+            raise SystemExit(f"retire at scene {scene!r} of {src!r} matches {len(matches)} plan verdicts")
+        spec = matches[0]
+        if not matches_asset_keys(spec["asset"], asset_keys):
+            raise SystemExit(f"retire at scene {scene!r} names {movie_key!r}, not the plan's {spec['asset']!r}")
+        prefix = spec["id"].rsplit(":", 1)[0]
+        carry = next((s for s in specs if s["kind"] == "carry" and s["id"].rsplit(":", 1)[0] == prefix), None)
+        spec["movieKey"] = movie_key
+        facts.append({
+            "movieKey": movie_key, "atScene": scene, "reason": entry.get("reason"), "srcObjectId": src,
+            "verdictId": spec["id"], "verdictKey": spec_key(spec), "boundaryKey": spec_key(carry or spec),
+            "playerIndex": spec["toPlayer"], "originalOrdinal": spec["toPlayer"] + 1,
+            "assetKeys": asset_keys, "rects": spec["rects"],
+        })
+    return facts
 
 
 def armed_fact(
@@ -842,6 +895,9 @@ def armed_fact(
     instance_id = entry.get("instanceId")
     if labelled.get(instance_id) != instance_rect:
         raise SystemExit(f"glReplay instance {instance_id!r} is not the authored destination instance it names")
+    src_id, dst_id = entry_object_id(entry, "src"), entry_object_id(entry, "dst")
+    if src_id is None or dst_id is None:
+        raise SystemExit("glReplay boundary names no src/dst objectId")
     return {
         "movieKey": movie_key,
         "atScene": scene,
@@ -856,48 +912,90 @@ def armed_fact(
         "movieSlot": movie_slot,
         "slotRects": slot_rects,
         "overrideSlots": override_slots,
+        "srcObjectId": src_id,
+        "dstObjectId": dst_id,
     }
+
+
+def plan_instances(plan: ContinuityPlan) -> dict[str, tuple[int, str]]:
+    """Every objectId the plan's movies name (lowercased) -> (player index, `asset#index` label)."""
+    found: dict[str, tuple[int, str]] = {}
+    for boundary in plan.boundaries:
+        for movie in boundary.movies:
+            ends = (
+                (boundary.from_player_index, movie.src_rect, movie.src_object_id),
+                (boundary.to_player_index, movie.dst_rect, movie.dst_object_id),
+            )
+            for player, rect, object_id in ends:
+                if player is None or rect is None or not object_id:
+                    continue
+                bound = (player, instance_label(plan, player, movie.asset, rect))
+                if found.setdefault(object_id.lower(), bound) != bound:
+                    raise SystemExit(f"objectId {object_id} names {found[object_id.lower()]} and {bound}")
+    return found
+
+
+def plan_movie_at(plan: ContinuityPlan, scene: Any, src_object_id: str | None) -> MovieContinuity:
+    """The one plan movie at the boundary landing on `scene` whose source is `src_object_id`; fails closed."""
+    found = [
+        movie for boundary in plan.boundaries
+        if boundary.to_player_index is not None and plan.scene_index_by_player.get(boundary.to_player_index) == scene
+        for movie in boundary.movies
+        if src_object_id is not None and (movie.src_object_id or "").lower() == src_object_id
+    ]
+    if len(found) != 1:
+        raise SystemExit(f"{len(found)} plan movie(s) at scene {scene!r} have source {src_object_id!r}, expected one")
+    return found[0]
 
 
 def rect_expectations(
     plan: ContinuityPlan, runtime: dict[str, Any], *, continuity_on: bool
 ) -> dict[int, dict[str, str]]:
-    """Per slide, per asset: live or dead, derived from the plan alone.
+    """Per slide, per authored instance (`asset#index`): live or dead, from the schema-2
+    runtime plan, each entry bound to its instance by objectId (`plan_instances`).
 
-    The first slide is live. The destination of a restart or a bridge is live in
-    both passes (the export starts a fresh element there). The destination of a
-    RETIRED boundary is dead in both. The destination of a carried (implicit pin)
-    boundary is live with the runtime installed and dead without it -- a
-    geometry-static Magic Move leaves the raw player's movie frozen.
+    The first slide is live. The destination of a restart or a bridge is live in both
+    passes (the export starts a fresh element there). A pin or glReplay destination is live
+    with the runtime installed and dead without it -- a geometry-static Magic Move leaves the
+    raw player's movie frozen. A `retire` hands its refused pair back to the raw player, so its
+    destination reads as that pair reads with the runtime off; a retire with no paired
+    destination (`ends`, a refused pairing) states nothing. Every instance no entry names plays
+    raw from its own start and is live.
     """
-    retired_by_scene: dict[Any, list[str]] = {}
-    action_by_scene: dict[Any, str] = {}
-    for boundary in runtime.get("boundaries") or []:
-        if not isinstance(boundary, dict):
+    instances = plan_instances(plan)
+
+    def bound(object_id: str | None, entry: dict[str, Any]) -> tuple[int, str]:
+        if object_id is None or object_id not in instances:
+            raise SystemExit(f"{entry.get('action')} at scene {entry.get('atScene')!r} names {object_id!r}, "
+                             "which no plan movie names")
+        return instances[object_id]
+
+    stated: dict[int, dict[str, str]] = {}
+    for entry in runtime.get("boundaries") or []:
+        if not isinstance(entry, dict):
             continue
-        scene = boundary.get("atScene")
-        if boundary.get("action") == "retire":
-            retired_by_scene.setdefault(scene, []).extend(runtime_asset_keys(runtime, boundary.get("movieKey")))
+        action = entry.get("action")
+        if action == "retire":
+            movie = plan_movie_at(plan, entry.get("atScene"), entry_object_id(entry, "src"))
+            if movie.dst_rect is None or not movie.dst_object_id:
+                continue
+            player, label = bound(movie.dst_object_id.lower(), entry)
+            state = LIVE if movie.action == "bridge" else DEAD
         else:
-            action_by_scene[scene] = str(boundary.get("action"))
+            dst = entry_object_id(entry, "dst")
+            if dst is None:
+                continue
+            player, label = bound(dst, entry)
+            state = LIVE if action in ("restart", "bridge") or continuity_on else DEAD
+        stated.setdefault(player, {})[label] = state
     expectations: dict[int, dict[str, str]] = {}
     for position, player_index in enumerate(sorted(plan.scene_index_by_player)):
-        scene = plan.scene_index_by_player[player_index]
-        action = action_by_scene.get(scene)
-        retired = retired_by_scene.get(scene) or []
-        per_asset: dict[str, str] = {}
-        for asset in plan.slide_instances.get(player_index) or {}:
-            if position == 0:
-                per_asset[asset] = LIVE
-            elif matches_asset_keys(asset, retired):
-                per_asset[asset] = DEAD
-            elif action in ("restart", "bridge"):
-                per_asset[asset] = LIVE
-            elif action == "glReplay":
-                per_asset[asset] = LIVE if continuity_on else DEAD
-            else:
-                per_asset[asset] = LIVE if continuity_on else DEAD
-        expectations[player_index] = per_asset
+        per_instance: dict[str, str] = {}
+        for asset, rects in sorted((plan.slide_instances.get(player_index) or {}).items()):
+            for index in range(1, len(rects) + 1):
+                label = f"{asset}#{index}"
+                per_instance[label] = LIVE if position == 0 else (stated.get(player_index) or {}).get(label, LIVE)
+        expectations[player_index] = per_instance
     return expectations
 
 
@@ -926,11 +1024,13 @@ def verdict_specs(plan: ContinuityPlan) -> list[dict[str, Any]]:
     """One verdict per (boundary, movie instance, kind), generated from
     `plan.boundaries[].movies[]` alone, so the scorer never depends on the runtime plan's
     schema. Kinds: `carry` (pin or bridge; True when carried, False when refused, ungated `None`
-    when G2 arms it), `restart`, `retire` (the positive half of a refused carry) and `armed` (a
-    G2-armed refusal); any other action is kept as an `unhandled` verdict that always scores
-    INCONCLUSIVE. The id is `b{from}to{to}:{asset}#{srcIndex}->{asset}#{dstIndex}:{kind}`
-    (player indices; `slide_instances` 1-based indices). A boundary with one movie also gets
-    P2's legacy name (`continue1to2`, `restart2to3`, `refused1to2`, `armed1to2`) as an alias."""
+    when G2 arms it), `restart`, `retire` (the positive half of a refused carry, or a carried
+    decoder the plan ends) and `armed` (a G2-armed refusal); any other action is kept as an
+    `unhandled` verdict that always scores INCONCLUSIVE. The id is
+    `b{from}to{to}:{asset}#{srcIndex}->{asset}#{dstIndex}:{kind}` (player indices;
+    `slide_instances` 1-based indices; `end` when the movie has no destination instance). A
+    boundary with one movie also gets P2's legacy name (`continue1to2`, `restart2to3`,
+    `refused1to2`, `armed1to2`) as an alias."""
     specs: list[dict[str, Any]] = []
     ordered = sorted(plan.scene_index_by_player)
     for boundary in plan.boundaries:
@@ -943,11 +1043,18 @@ def verdict_specs(plan: ContinuityPlan) -> list[dict[str, Any]]:
         later = [plan.scene_index_by_player[player] for player in ordered if player > destination]
         suffix = f"{source + 1}to{destination + 1}" if len(boundary.movies) == 1 else None
         for movie in boundary.movies:
-            if movie.src_rect is None or movie.dst_rect is None:
+            if movie.src_rect is None or (movie.dst_rect is None and movie.action in ("pin", "bridge")):
                 raise SystemExit(f"{movie.action} of {movie.asset!r} at scene {scene} is missing a rect")
             src = instance_label(plan, source, movie.asset, movie.src_rect)
-            dst = instance_label(plan, destination, movie.asset, movie.dst_rect)
+            dst = "end" if movie.dst_rect is None else instance_label(plan, destination, movie.asset, movie.dst_rect)
             asset_keys = [movie.asset.lower()]
+            dst_rect = movie.dst_rect.as_dict() if movie.dst_rect is not None else None
+            asset_rects = [
+                _authored_rect(rect)
+                for asset, instances in (plan.slide_instances.get(destination) or {}).items()
+                if matches_asset_keys(asset, asset_keys)
+                for rect in instances
+            ]
 
             def add(kind: str, legacy: str | None, expect: bool | None, **detail: Any) -> None:
                 spec_id = f"b{source}to{destination}:{src}->{dst}:{kind}"
@@ -957,36 +1064,37 @@ def verdict_specs(plan: ContinuityPlan) -> list[dict[str, Any]]:
                     "id": spec_id, "alias": f"{legacy}{suffix}" if suffix and legacy else None, "kind": kind,
                     "expect": expect, "action": movie.action, "asset": movie.asset, "assetKeys": asset_keys,
                     "srcInstance": src, "dstInstance": dst,
+                    "srcObjectId": (movie.src_object_id or "").lower() or None,
+                    "dstObjectId": (movie.dst_object_id or "").lower() or None,
                     "fromPlayer": source, "toPlayer": destination, "atScene": scene, **detail,
                 })
 
             if movie.action in ("pin", "bridge"):
                 if movie.action == "pin":
-                    rect = movie.dst_rect
-                    src_rect, dst_rect, transition = rect, rect, None
+                    src_rect, transition = dst_rect, None
                 else:
-                    src_rect, dst_rect, transition = movie.src_rect, movie.dst_rect, scene - 1
+                    src_rect, transition = movie.src_rect.as_dict(), scene - 1
                 armed = movie.refusal is not None and movie.gl_replay is not None
                 add(
                     "carry", "continue", None if armed else movie.refusal is None,
-                    srcRect=src_rect.as_dict(), dstRect=dst_rect.as_dict(), transitionScene=transition,
+                    srcRect=src_rect, dstRect=dst_rect, transitionScene=transition,
                 )
                 if armed:
                     add("armed", "armed", True)
                 elif movie.refusal is not None:
                     add(
-                        "retire", "refused", True, originalOrdinal=destination + 1, dstRect=movie.dst_rect.as_dict(),
-                        zoneUntilScene=later[0] if later else None,
-                        rects=[
-                            _authored_rect(rect)
-                            for asset, instances in (plan.slide_instances.get(destination) or {}).items()
-                            if matches_asset_keys(asset, asset_keys)
-                            for rect in instances
-                        ],
+                        "retire", "refused", True, originalOrdinal=destination + 1, dstRect=dst_rect,
+                        zoneUntilScene=later[0] if later else None, rects=asset_rects,
                     )
+            elif movie.action == "retire":
+                add(
+                    "retire", None, True, originalOrdinal=destination + 1, dstRect=None,
+                    zoneUntilScene=later[0] if later else None, rects=[movie.src_rect.as_dict()],
+                )
             elif movie.action == "restart":
                 add(
-                    "restart", "restart", True, srcRect=movie.src_rect.as_dict(), dstRect=movie.dst_rect.as_dict(),
+                    "restart", "restart", True, srcRect=movie.src_rect.as_dict(), dstRect=dst_rect,
+                    dstRects=[dst_rect] if dst_rect is not None else asset_rects,
                     sourceScene=plan.scene_index_by_player.get(source),
                     settleUntilScene=later[0] if later else None,
                 )
@@ -1056,7 +1164,10 @@ def bind_positive_fact(fact: dict[str, Any] | None, specs: list[dict[str, Any]],
     matches = [
         spec for spec in specs
         if spec["kind"] == kind and spec["atScene"] == fact["atScene"] and matches_asset_keys(spec["asset"], fact["assetKeys"])
-        and (kind != "armed" or str(spec["dstInstance"]).lower() == str(fact.get("instanceId")).lower())
+        and (kind != "armed" or (
+            str(spec["dstInstance"]).lower() == str(fact.get("instanceId")).lower()
+            and spec.get("dstObjectId") == fact.get("dstObjectId") and spec.get("srcObjectId") == fact.get("srcObjectId")
+        ))
     ]
     if len(matches) != 1:
         raise SystemExit(f"the runtime's {kind} at scene {fact['atScene']} matches {len(matches)} plan verdicts")
@@ -1067,19 +1178,20 @@ def bind_positive_fact(fact: dict[str, Any] | None, specs: list[dict[str, Any]],
 
 
 def bind_dom_ids(facts: dict[str, Any], nodes: list[dict[str, Any]]) -> None:
-    """Give every retire verdict (and the retire fact it proves) the DOM id the player gives its
-    destination instance (F1: `objectID + "-video"`), from the export's movie nodes."""
+    """Give every retire verdict with a destination instance (and the retire facts it proves) the
+    DOM id the player gives that instance (F1: `objectID + "-video"`), from the export's movie nodes."""
     for spec in facts.get("verdicts") or []:
-        if spec["kind"] == "retire":
+        if spec["kind"] == "retire" and spec.get("dstRect") is not None:
             spec["dstDomId"] = source_instance(nodes, spec["toPlayer"], spec["asset"], spec["dstRect"])["domId"]
-            retire = facts.get("retire")
-            if isinstance(retire, dict) and retire.get("verdictId") == spec["id"]:
-                retire["dstDomId"] = spec["dstDomId"]
+            for retire in [facts.get("retire"), *(facts.get("retires") or [])]:
+                if isinstance(retire, dict) and retire.get("verdictId") == spec["id"]:
+                    retire["dstDomId"] = spec["dstDomId"]
 
 
 def ground_truth_facts(plan: ContinuityPlan, *, armed: bool = False) -> dict[str, Any]:
     """Independent, offline ground truth (never injected into the host): the plan-generated
-    `verdicts` (see `verdict_specs`), the retire and armed facts their positive halves need,
+    `verdicts` (see `verdict_specs`), the retire facts (`retires`; `retire` is the first, or
+    None) and the armed fact their positive halves need,
     the runtime plan's signature, and -- for a pinned P2 plan only (`P2_PLAN_SHA256`) -- P2's
     legacy slot facts. The `["armed"]` contract is unchanged."""
     specs = verdict_specs(plan)
@@ -1091,10 +1203,10 @@ def ground_truth_facts(plan: ContinuityPlan, *, armed: bool = False) -> dict[str
         spec["atScene"]: spec_key(spec)
         for kind in ("restart", "carry") for spec in specs if spec["kind"] == kind
     }
-    retire = retire_fact(plan, runtime, boundary_keys)
-    bind_positive_fact(retire, specs, "retire")
-    facts["retire"] = retire
-    facts["refusedBoundaries"] = [retire["boundaryKey"]] if retire else []
+    retires = retire_facts(runtime, specs)
+    facts["retires"] = retires
+    facts["retire"] = retires[0] if retires else None
+    facts["refusedBoundaries"] = [retire["boundaryKey"] for retire in retires]
     facts["refusals"] = [dict(item) for item in getattr(plan, "refusals", ()) if isinstance(item, dict)]
     facts["rectExpectations"] = visible_expectations(plan, runtime)
     if armed:
@@ -1122,7 +1234,7 @@ def facts_for(
 def check_vgl_expectations(
     v: dict[int, dict[str, str]], vgl: dict[int, dict[str, str]], armed: dict[str, Any]
 ) -> None:
-    """Vgl may differ from V only at the armed movie, dead in V and live in Vgl."""
+    """Vgl may differ from V only at the armed instance, dead in V and live in Vgl."""
     diffs = {
         (index, asset)
         for index in set(v) | set(vgl)
@@ -1130,7 +1242,7 @@ def check_vgl_expectations(
         if (v.get(index) or {}).get(asset) != (vgl.get(index) or {}).get(asset)
     }
     index = armed["playerIndex"]
-    wanted = {(index, asset) for asset in vgl.get(index) or {} if matches_asset_keys(asset, armed["assetKeys"])}
+    wanted = {(index, label) for label in vgl.get(index) or {} if label.lower() == str(armed["instanceId"]).lower()}
     if not wanted or diffs != wanted or any(
         v[i][asset] != DEAD or vgl[i][asset] != LIVE for i, asset in wanted
     ):
@@ -1138,8 +1250,8 @@ def check_vgl_expectations(
 
 
 @contextmanager
-def stripped_runtime(action: str, at_scene: int | None = None) -> Iterator[None]:
-    """Red arm `--strip ACTION[@atScene]`: drop the matching entries (`strip_entries`) from the
+def stripped_runtime(action: str, at_scene: int | None = None, key: str | None = None) -> Iterator[None]:
+    """Red arm `--strip ACTION[@atScene[:KEY]]`: drop the matching entries (`strip_entries`) from the
     runtime plan the host injects, inside this probe PROCESS only -- a monkeypatch of
     `live_host._continuity_plan_script`, the one seam every derivation path reaches (a
     `to_runtime` patch cannot strip `glReplay`: the host would re-derive the flag-off plan and
@@ -1147,7 +1259,7 @@ def stripped_runtime(action: str, at_scene: int | None = None) -> Iterator[None]
     original = live_host_module._continuity_plan_script
 
     def patched(plan: dict[str, Any], canvas: dict[str, int]) -> str:
-        return original(strip_entries(plan, action, at_scene), canvas)
+        return original(strip_entries(plan, action, at_scene, key), canvas)
 
     live_host_module._continuity_plan_script = patched
     try:
@@ -1157,9 +1269,9 @@ def stripped_runtime(action: str, at_scene: int | None = None) -> Iterator[None]
 
 
 def bridge_disabled() -> Any:
-    """Arm C: `--strip bridge`. With no bridge entry the runtime's own `slide4MinHash()` is
-    null, so the 3->4 magic move falls through to the export's native (broken) restart; the
-    pin (1->2) and restart (2->3) behaviour are untouched."""
+    """Arm C: `--strip bridge`. With no bridge entry the runtime carries nothing across that
+    boundary, so each moving Magic Move falls through to the export's native (broken) restart;
+    every other entry is untouched."""
     return stripped_runtime("bridge")
 
 
@@ -1230,7 +1342,7 @@ def drive_and_sample(
     """Advance through every original slide in order (on P2: 2 is the 1->2 magic move, 3 the
     dissolve, which may straddle slide-2 builds, 4 the 3->4 magic move). `observer` is called
     once on each slide, slide 1 included -- the only hook the refusal evidence needs, and never
-    a screenshot. Before the press into a `carry_into` player index (other than the second
+    a screenshot. Slide 1 is held `FIRST_CLICK_DWELL_S` before the first press. Before the press into a `carry_into` player index (other than the second
     slide, which follows slide 1's own `CLICK_DELAY_S`), the source slide is let settle and
     held `CLICK_DELAY_S` (1.5 s, P2's fast-profile `clickDelayS` before its 3->4 press), so
     the carry's settled-source phase is always sampled."""
@@ -1238,7 +1350,7 @@ def drive_and_sample(
     transport.evaluate(SAMPLER_JS)
     transport.evaluate(ENSURE_PLAYING_JS)
     wait_for_decode(player)
-    time.sleep(CLICK_DELAY_S)
+    time.sleep(FIRST_CLICK_DWELL_S)
     shown = sorted((s for s in player.slides if not s.get("skipped")), key=lambda s: s["originalOrdinal"])
     ordinals = [slide["originalOrdinal"] for slide in shown]
     for index, slide in enumerate(shown):
@@ -1841,19 +1953,30 @@ def refusal_evidence(transport: Any) -> dict[str, Any]:
     }
 
 
+def facts_retires(facts: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every retire fact; a facts dict from before `retires` existed carries only `retire`."""
+    retires = facts.get("retires")
+    if isinstance(retires, list):
+        return [retire for retire in retires if isinstance(retire, dict)]
+    return [facts["retire"]] if isinstance(facts.get("retire"), dict) else []
+
+
 def refusal_observer(
     player: Any, facts: dict[str, Any], out: dict[str, Any]
 ) -> Callable[[int], None] | None:
-    retire = facts.get("retire")
-    if not retire:
+    retires = facts_retires(facts)
+    if not retires:
         return None
 
     def observe(ordinal: int) -> None:
-        if ordinal != retire["originalOrdinal"]:
+        mine = [retire for retire in retires if retire["originalOrdinal"] == ordinal]
+        if not mine:
             return
         wait_until_settled(player)
         transport = player._require_transport()
-        out[retire["verdictKey"]] = {**refusal_evidence(transport), "coreEvents": transport.evaluate(CORE_EVENTS_JS)}
+        evidence = {**refusal_evidence(transport), "coreEvents": transport.evaluate(CORE_EVENTS_JS)}
+        for retire in mine:
+            out[retire["verdictKey"]] = evidence
 
     return observe
 
@@ -1895,11 +2018,10 @@ def score_refusal(sample: Any, retire: dict[str, Any], runtime_installed: bool) 
 def score_refusals(
     evidence: dict[str, Any], facts: dict[str, Any], runtime_installed: bool
 ) -> dict[str, Any]:
-    retire = facts.get("retire")
-    if not retire:
-        return {}
-    key = retire["verdictKey"]
-    return {key: score_refusal(evidence.get(key), retire, runtime_installed)}
+    return {
+        retire["verdictKey"]: score_refusal(evidence.get(retire["verdictKey"]), retire, runtime_installed)
+        for retire in facts_retires(facts)
+    }
 
 
 def hash_number(value: Any) -> int | None:
@@ -2238,7 +2360,8 @@ def score_restart_strict(
     rect_tolerance: float = RECT_TOLERANCE_PX, pad_s: float = WINDOW_PAD_S,
 ) -> dict[str, Any]:
     """A restart inside a validated boundary window: a decoder never seen before the boundary
-    starts near zero at the destination instance's rect, and every decoder seen at the source
+    starts near zero at the destination instance's rect (any of the asset's `dstRects` when the
+    plan names no single destination), and every decoder seen at the source
     instance's rect anywhere on the source slide (`sourceScene` .. the boundary; not bounded by
     the pad window, which a transition scene longer than `WINDOW_PAD_S` with no `<video>` would
     swallow) is absent or disconnected inside the window after it."""
@@ -2287,7 +2410,11 @@ def score_restart_strict(
         for i, rows in tracks.items()
         if not any(r.get("scene") is not None and r["scene"] < scene for r in rows)
     }
-    bound = {i: rows for i, rows in fresh.items() if rows and all(rect_matches(r.get("rect"), spec["dstRect"], rect_tolerance) for r in rows)}
+    targets = [spec["dstRect"]] if spec.get("dstRect") is not None else spec.get("dstRects") or []
+    bound = {
+        i: rows for i, rows in fresh.items()
+        if rows and all(any(rect_matches(r.get("rect"), t, rect_tolerance) for t in targets) for r in rows)
+    }
     if not bound:
         return {
             "verdict": False, "reason": "no fresh decoder at the destination instance", "freshIds": sorted(fresh),
@@ -2320,7 +2447,10 @@ def score_raw_handback(samples: Any, spec: dict[str, Any]) -> dict[str, Any]:
     zoneUntilScene)` the player's own element for the destination instance (`dstDomId`, F1)
     is connected at `dstRect` on a settled row, was never seen before `atScene`, and is never
     preserved, remounted or facaded. Never DOM-present in the zone (a WebGL poster, or rows
-    from a sampler without `domId`) is INCONCLUSIVE, never False."""
+    from a sampler without `domId`) is INCONCLUSIVE, never False. A retire with no destination
+    instance (`ends`, a refused pairing) hands nothing back: True, marked not applicable."""
+    if spec.get("dstRect") is None:
+        return {"verdict": True, "reason": None, "applicable": False}
     dom_id, lo, hi = spec.get("dstDomId"), spec["atScene"], spec.get("zoneUntilScene")
     if not dom_id:
         return _inconclusive("the retire verdict names no destination DOM id")
@@ -2354,8 +2484,9 @@ def score_raw_handback(samples: Any, spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, samples: Any = None) -> dict[str, Any]:
-    """The positive half of a refused carry: the raw player's own element for the destination
-    instance (`score_raw_handback`, from the retained samples), `score_refusal`'s settled DOM/pool
+    """The positive half of a refused carry, or of a carried decoder the plan ends: the raw
+    player's own element for the destination instance, if any (`score_raw_handback`, from the
+    retained samples), `score_refusal`'s settled DOM/pool
     checks, and -- when the runtime is installed -- the core's contract (module docstring,
     "retire"): at least one refusal note for the movie in the zone `[atScene - 1, the next
     slide's transition scene)`, `preserve-refused` (key, via, scene) from a declining hook or
@@ -2996,9 +3127,10 @@ def expected_screen_rects(
     instances: dict[int, dict[str, list[Any]]], player_index: int, stage_map: dict[str, Any],
     expectations: dict[int, dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Each authored instance rect plus the expectation the plan states for it. An
-    asset the expectations do not mention is expected LIVE -- the stricter reading
-    in both passes, and what every rect was before refusals existed."""
+    """Each authored instance rect plus the expectation the plan states for it, by its
+    `asset#index` label (or, in an artifact from before per-instance expectations, by its
+    asset). An instance the expectations do not mention is expected LIVE -- the stricter
+    reading in both passes, and what every rect was before refusals existed."""
     by_asset = instances.get(player_index)
     if by_asset is None:
         raise VisiblePassError(f"plan has no slide_instances for player index {player_index}")
@@ -3007,11 +3139,12 @@ def expected_screen_rects(
     for asset in sorted(by_asset):
         for index, rect in enumerate(by_asset[asset], start=1):
             authored = _authored_rect(rect)
+            label = f"{asset}#{index}"
             rects.append({
-                "label": f"{asset}#{index}",
+                "label": label,
                 "authored": authored,
                 "screen": to_screen_rect(authored, stage_map),
-                "expect": DEAD if stated.get(asset) == DEAD else LIVE,
+                "expect": DEAD if stated.get(label, stated.get(asset)) == DEAD else LIVE,
             })
     return rects
 
@@ -4939,16 +5072,18 @@ def run_forced_fail(args: argparse.Namespace) -> dict[str, Any]:
     return result
 
 
-def red_arm_label(core_variant: str | None, strip: tuple[str, int | None] | None, runtime: dict[str, Any]) -> str:
-    """`core:NAME`, or `strip:ACTION@SCENE` (the scene filled in when an unscened strip matches one entry)."""
+def red_arm_label(
+    core_variant: str | None, strip: tuple[str, int | None, str | None] | None, runtime: dict[str, Any]
+) -> str:
+    """`core:NAME`, or `strip:ACTION@SCENE[:KEY]` (the scene filled in when an unscened strip matches one entry)."""
     if core_variant is not None:
         return f"core:{core_variant}"
     assert strip is not None
-    action, scene = strip
+    action, scene, key = strip
     if scene is None:
         scenes = {b.get("atScene") for b in runtime.get("boundaries") or [] if isinstance(b, dict) and b.get("action") == action}
         scene = next(iter(scenes)) if len(scenes) == 1 else None
-    return f"strip:{action}" + ("" if scene is None else f"@{scene}")
+    return strip_label(action, scene, key)
 
 
 def red_arm_status(result: dict[str, Any]) -> tuple[str, list[str]]:
@@ -4971,6 +5106,9 @@ def red_arm_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     if expected is None:
         return "unregistered", [f"no pre-registered red set for {result.get('redArm')!r} on this deck; red={result.get('redSet')}"]
     if expected == RECORD:
+        missing = sorted(set(result.get("requiredRed") or []) - set(result.get("redSet") or []))
+        if missing:
+            return "fail", [f"required red but green: {red_id}" for red_id in missing]
         return "recorded", [f"red={result.get('redSet')}"]
     observed, wanted = Counter(result.get("redSet") or []), Counter(expected)
     reasons = [f"unexpectedly red: {red_id}" for red_id in sorted((observed - wanted).elements())]
@@ -5001,6 +5139,7 @@ def run_red_arm(args: argparse.Namespace) -> dict[str, Any]:
     result: dict[str, Any] = {
         "redArm": label, "planSha256": sha,
         "expectedRedSet": list(expected) if isinstance(expected, tuple) else expected,
+        "requiredRed": list(RED_ARM_REQUIRED.get((sha, label, args.gl_replay), ())),
         "expectedCoreSha256": variant_sha(args.core_variant) if args.core_variant else js_sha256(),
         "groundTruth": {key: facts[key] for key in GROUND_TRUTH_KEYS if key in facts},
     }
