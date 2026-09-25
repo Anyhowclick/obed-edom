@@ -133,6 +133,18 @@ and where the slide's first build hands the movie back; timing stays continuous.
 `scripts/p2_recovery_html_adversarial.py --gl-replay auto` and, under Keyer
 output, `scripts/managed_obs_qualify.py --arm g2|failsafe|soak`.
 
+**Magic Move opacity**: Keynote's exported player draws a translucent object
+opaque during a Magic Move. Live output serves the player with an in-memory
+patch (pinned to the supported player version) that draws each object at its
+authored opacity from the first frame of the move; an object that fades, hides,
+or carries several or nested animations keeps the player's own look. It is on by default for every output,
+independent of continuity and GL replay. `OBED_LIVE_MM_OPACITY=off` serves the
+unpatched player; `auto` keeps it on; any other value refuses to start.
+`output.mmOpacity` reports `mode` (`on`/`off`) and the served player's `sha256`.
+The dashboard preview still shows the unpatched player. Qualify it with
+`scripts/mm_opacity_probe.py`, `scripts/p2_recovery_html_adversarial.py --mm-opacity auto|off`
+and, under Keyer output, `scripts/managed_obs_qualify.py --arm mmo|mmo-cef`.
+
 ### Codec report
 
 Every session probes each movie the export references (reading its box tree
@@ -212,6 +224,9 @@ backup Mac and move the UltraStudio's Thunderbolt cable to it.
   slide (GL replay); its midtones may shift slightly in brightness when GL replay
   takes over and at that slide's first build. To fall back to a frozen poster,
   start the dashboard with `OBED_LIVE_GL_REPLAY=off`.
+- A translucent object stays translucent through a Magic Move, as in Keynote.
+  To fall back to the exported player's look (opaque during the move), start
+  the dashboard with `OBED_LIVE_MM_OPACITY=off`.
 
 **Qualification** (developer, launches OBS on this Mac; no other OBS may be running):
 `uv run python scripts/managed_obs_qualify.py --arm both --rate 25 --takes 2 --out DIR`, and for GL replay

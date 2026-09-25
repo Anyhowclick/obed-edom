@@ -1,6 +1,6 @@
 # Magic Move translucent opacity: draw the authored opacity from the first frame of the move
 
-**APPROVED (owner, 2026-09-25)**, **rev 4**, 2026-09-25. Rev 1: Opus planner. Rev 2: Opus critic. Rev 3: Opus planner, rewritten for
+**IMPLEMENTED (2026-09-25, pending PR)** on `claude/mm-translucent-opacity`. **APPROVED (owner, 2026-09-25)**, **rev 4**, 2026-09-25. Rev 1: Opus planner. Rev 2: Opus critic. Rev 3: Opus planner, rewritten for
 **route (B)**, the owner's choice: a sha-pinned, in-memory player patch. Rev 4: Opus critic (§14 Critique log). Plan only: no product code, no
 commits, no OBS, no Keynote.
 **Builds on OD-2**: MERGED as #229 (`8fe3b551`); this branch (`claude/mm-translucent-opacity`) is rebased on it. It holds the
@@ -109,15 +109,16 @@ contributes exactly one value, its animated one when it has a constant animation
 ## 3. Exact replacements (all on sha `e9b2fad4…`; each anchor `count == 1` before replacing, each replacement `count == 1` after)
 
 The existing `_ANCHOR` observation hook is unchanged. The replacements live in one tuple, `_MM_OPACITY_REPLACEMENTS`, applied
-only when `mm_opacity=True`. Rev 4 cut rev 3's six anchors to **four**: the leaf is valued by the same node rule at setup, so
+only when `mm_opacity=True`. Rev 4 cut rev 3's six anchors to **four** (R5, added after live MO-2, makes **five**; R1 also refuses nested animation groups, Opus r1 F4): the leaf is valued by the same node rule at setup, so
 the per-frame `__obedOp` flag (rev 3 R3, R4) and its fade arithmetic are gone.
 
 | # | Where (byte) | Before | After |
 |---|---|---|---|
-| R1 | `fB.textureInfoFromEffect` definition (2263373) | `textureInfoFromEffect(A,B,g,C,Q){var e={};if(e.offset={pointX:g.pointX+A.bounds.offset.pointX,pointY:g.pointY+A.bounds.offset.pointY},e.parentOpacity=C,A.textureId){` | `__obedNodeOpacity(A){try{var B=A.initialState,g=null,C=0,Q=A.animations\|\|[];for(var e=0;e<Q.length;e++)for(var t=Q[e].property?[Q[e]]:Q[e].animations\|\|[],i=0;i<t.length;i++)"opacity"===t[i].property?(g=t[i],C++):"hidden"===t[i].property&&(C=2);var o=B.hidden\|\|C>1?null:g?g.from.scalar===g.to.scalar&&"both"===g.fillMode?g.to.scalar:null:B.opacity;return"number"==typeof o&&isFinite(o)?o:null}catch(E){return null}}__obedChainOpacity(X,A){if(null===X)return null;var B=this.__obedNodeOpacity(A);return null===B?null:(void 0===X?1:X)*B}textureInfoFromEffect(A,B,g,C,Q,X){var e={};if(e.offset={pointX:g.pointX+A.bounds.offset.pointX,pointY:g.pointY+A.bounds.offset.pointY},e.parentOpacity=C,e.obedOpacity=void 0===X?null:this.__obedChainOpacity(X,A),A.textureId){` |
+| R1 | `fB.textureInfoFromEffect` definition (2263373) | `textureInfoFromEffect(A,B,g,C,Q){var e={};if(e.offset={pointX:g.pointX+A.bounds.offset.pointX,pointY:g.pointY+A.bounds.offset.pointY},e.parentOpacity=C,A.textureId){` | `__obedNodeOpacity(A){try{var B=A.initialState,g=null,C=0,Q=A.animations\|\|[];for(var e=0;e<Q.length;e++)for(var t=Q[e].property?[Q[e]]:Q[e].animations\|\|[],i=0;i<t.length;i++)"opacity"===t[i].property?(g=t[i],C++):("hidden"===t[i].property\|\|t[i].animations)&&(C=2);var o=B.hidden\|\|C>1?null:g?g.from.scalar===g.to.scalar&&"both"===g.fillMode?g.to.scalar:null:B.opacity;return"number"==typeof o&&isFinite(o)?o:null}catch(E){return null}}__obedChainOpacity(X,A){if(null===X)return null;var B=this.__obedNodeOpacity(A);return null===B?null:(void 0===X?1:X)*B}textureInfoFromEffect(A,B,g,C,Q,X){var e={};if(e.offset={pointX:g.pointX+A.bounds.offset.pointX,pointY:g.pointY+A.bounds.offset.pointY},e.parentOpacity=C,e.obedOpacity=void 0===X?null:this.__obedChainOpacity(X,A),A.textureId){` |
 | R2 | recursion (2264160) | `this.textureInfoFromEffect(A.layers[E],B,e.offset,e.parentOpacity,Q)` | `this.textureInfoFromEffect(A.layers[E],B,e.offset,e.parentOpacity,Q,this.__obedChainOpacity(X,A))` |
 | R3 | `QB.renderFrameWithContext` Opacity write (2190397) | `d!==U&&(T=d+(U-d)*K),A.setGLFloat(T,"Opacity")` | `d!==U&&(T=d+(U-d)*K),null!=e.obedOpacity&&(T=e.obedOpacity),A.setGLFloat(T,"Opacity")` |
 | R4 | `eB.drawFrame` no-animation branch (2192650) | `var w=e.initialState.hidden?0:this.parentOpacity*e.initialState.opacity;` | `var w=e.initialState.hidden?0:null!=e.obedOpacity?e.obedOpacity:this.parentOpacity*e.initialState.opacity;` |
+| R5 (added in implementation) | `animateEffectWillBegin` DOM swap (2317031) | `Q&&setTimeout(this.handleAnimateEffectDidBegin.bind(this,Q),0)` | `Q&&this.handleAnimateEffectDidBegin(Q)` |
 
 (`\|` above is a Markdown escape of `|`.)
 
@@ -181,9 +182,9 @@ behavioural test on the real extracted methods, so it cannot drift from the byte
   (observation hook only; pinned by a test that hashes the synthetic-player output both ways).
 - **Switch.**
   - `LiveOutputHost(mm_opacity=_UNSET)`, where the ctor wins over env `OBED_LIVE_MM_OPACITY`. Values are `off|auto` (trimmed,
-    any case). Anything else raises in `start()` before the log, the server or CDP, like `GL_REPLAY_ENV` (`:1024–1027`).
+    any case). Anything else raises in `start()` before the log, the server or CDP, like `GL_REPLAY_ENV` (`live_host.py:1037–1043`).
   - Default **`auto` on every output**: HDMI, managed OBS, external attach.
-  - `start()` calls `patch_player(player, mm_opacity=pref == "auto")` (`:1046`).
+  - `start()` calls `patch_player(player, mm_opacity=pref == "auto")` (`live_host.py:1064`).
   - `web/live.py` passes no kwarg (env default), so it needs no code change.
 - **Report.**
   - `output.mmOpacity = {"mode": "on"|"off", "sha256": <sha of the served main.js>}` (`:1006` area). It reaches the session
@@ -369,6 +370,8 @@ per-frame `readPixels` pair (a sync stall on every frame, inside G2's recording 
   and its own on/off parity test. Separate small PR after this one lands.
 - G2's LIVE semantics.
 - The midtone LUT (OD-2 finding 1).
+- **Fixed in implementation (R5):** a one-frame DOM+GL double image at a translucent Magic Move start (seen in managed OBS;
+  0 of 30 sessions after the fix).
 
 ## 14. Critique log
 

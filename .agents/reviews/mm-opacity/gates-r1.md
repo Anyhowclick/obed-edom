@@ -18,11 +18,20 @@ main checkout `output/mmo-gates/`. Gate worktree `mmo-gate-p2`, detached at the 
 
 Q0b (scratch, `f6a87ee8`-era bytes) is recorded in the plan §9.
 
-## Managed OBS (pending owner go)
+## Managed OBS (owner go 2026-09-25; lossless utvideo; binary fixture)
 
-- MO-2 `--arm mmo` (rates 25, 30; per-rate CvC), MO-3 `--arm mmo-cef`, `g2` arm re-run (M1 stats incl. CEF occludedBands, M3 via
-  `mm-off` twin, enforced g2-off T alpha).
-- MO-7 owner eyeball.
+| Gate | Commit | Verdict | Key numbers |
+|---|---|---|---|
+| MO-3 MO-1..MO-5 inside CEF (`--arm mmo-cef`) | `66567617` | PASS | every sub-gate PASS in OBS CEF, incl. MO-4 (occludedBands 0 / 20) and the stand-down |
+| G2 arm re-run (`--arm g2`, 2 takes @25) | `66567617` | PASS | M0–M4 PASS ×2; M1 mode-keyed stats; M3 via the `mm-off` twin |
+| MO-2 before R5 (`--arm mmo`, 25 + 30) | `66567617`, rescored at `67c7d12e` | 25 PASS, 30 FAIL | one frame: first GL frame of the move (30 fps, `g2off-on`) reads (12,87,0), α_eff 0.498 = DOM + GL squares overlapping |
+| MO-2 after R5, 5 runs × 25 + 30 | `0f6d0380`, rescored at `67c7d12e` | PASS ×10 | 0 of 30 patch-on sessions over τ (4.57); CvC 0; τ_key 1.15; twins fail R1/R2 and the G2-less R4 KB (180) |
+
+Instrument amendments found live: R2 = neutral-background blend consistency (the white counter crosses under the square; the
+empty patch is not empty during the move); τ_key read slide 1's covered patch (113 → 1.15); R4's KB is enforced on the G2-less
+twin only (G2's LIVE override makes the g2 patch-off settle key translucent — timing luck, 5/10 takes). Headless overlap probe
+for R5 was INCONCLUSIVE (its positive control read 0) and is not evidence; R5 rests on the Node task-order test + MO-2 ×10.
+MO-7 owner eyeball: recordings from the final commit under `output/mmo-gates/obs-mo7/` (kept).
 
 ## Review
 
