@@ -1,15 +1,20 @@
 # Magic Move translucent opacity: draw the authored opacity from the first frame of the move
 
-DRAFT for owner review, **rev 2**, 2026-09-25. Rev 1: Opus planner. Rev 2: Opus critic (see §12 Critique log).
-Plan only: no product code, no commits, no OBS, no Keynote.
-**Builds on OD-2**: MERGED as #229 (`8fe3b551`, 2026-09-25); this branch is rebased on it. It holds the GL-replay default in
-Keyer mode, the binary-counter fixture and `scripts/managed_obs_qualify.py` / `scripts/obs_cadence_decode.py`. Line numbers
-below were read at `386f28f2`; OD-2 changes only `live_host.py` in `src/` (≤ 4 lines shift) and leaves the G2 bytes identical.
-Parents: `keynote_live_gl_replay_arming.plan.md` (owner answer D2: fix opacity without editing `main.js`), the pruned
+DRAFT for owner review, **rev 4**, 2026-09-25. Rev 1: Opus planner. Rev 2: Opus critic. Rev 3: Opus planner, rewritten for
+**route (B)**, the owner's choice: a sha-pinned, in-memory player patch. Rev 4: Opus critic (§14 Critique log). Plan only: no product code, no
+commits, no OBS, no Keynote.
+**Builds on OD-2**: MERGED as #229 (`8fe3b551`); this branch (`claude/mm-translucent-opacity`) is rebased on it. It holds the
+GL-replay default in Keyer mode, the binary-counter fixture and `scripts/managed_obs_qualify.py` / `scripts/obs_cadence_decode.py`.
+Line numbers are read on this branch (`1de28cc2`).
+Parents: `keynote_live_gl_replay_arming.plan.md` (owner answer D2, re-opened by decision 0 and now answered by B), the pruned
 opacity plan `git show 0d511a9c^:.agents/plans/keynote_live_gl_replay_opacity.plan.md` (§0 measurements, F-1…F-12),
 `.agents/reviews/gl-replay-managed/gates-r1.md` (M7 known limit).
 
 ## 0. Facts (code-read and offline, 2026-09-25; rev 2 re-read every player citation)
+
+Offsets in §0 are **character** offsets into the UTF-8-decoded file (rev 1/2 convention). Byte offsets, which
+`patch_player` works on, are +15 at every site cited here (e.g. `var T=…` is char 2190382, byte 2190397). §3 anchors are
+exact byte strings, so offsets are informative only.
 
 **Finding (owner, M7 2026-09-25).** P2 fixture, Magic Move 1→2. Slot 4 is the green square (authored α 0.29468628764152527).
 Keynote draws it translucent for the whole move. The export's WebGL draws it opaque. With GL replay ON it is opaque during the
@@ -58,11 +63,6 @@ Keynote's presented opacity is the product over the chain of each node's animate
 has no animation: 1 × 0.2947 = **0.2947, constant for the whole move and after** (after the move the model values give
 0.2947 × 1, the same). The player computes 1 × 1 = **1**.
 
-**Absolute, not multiplicative.** For a chain whose every opacity animation is constant, the authored value is a constant, so
-MMO writes that absolute value. A correction factor `authored / playerComputed` is equal here and buys nothing in v1; it would
-only matter for fades, which v1 excludes (§1). A later fade extension would have to track the player's own `Opacity` writes
-per program and scale them, because the player's cache hides unchanged values.
-
 **Census of every export on disk.** 26 distinct Magic Move effects under the main checkout's `output/` (`gl-decks`, `p2-*`,
 `qual-decks/D1–D6`; scratch scripts `scan_mm2.py`, `eoo.py`):
 - exactly **one** translucent Magic Move slot: this slot 4 (P2 deck, Minimal Alpha_DSK, and the loop copy);
@@ -71,276 +71,290 @@ per program and scale them, because the player's cache hides unchanged values.
 - `effect_opacity_overrides` returns `Unsupported` for 17 of the 26 effects (`texturedRectangle.textColor` on text leaves,
   D1–D6; `transform.rotation.z`, Minimal S6→S7).
 
-## 1. v1 scope: what is patched
 
-MMO's patch set for a move is **exactly** `effect_opacity_overrides(effect)["opacityOverrides"]` (unchanged function, so
-G2's `glReplay` entry and MMO can never disagree), minus slots that fail the MMO-only rules. That function already enforces:
-closed vocabulary (`_check_effect_encoding`), single chain, no fade on any node, no `hidden`, product == `singleTextureOpacity`
-within 1e-6, α < 1, unique size.
+## 1. What the patched player computes (v1 semantics: faithful or unchanged)
 
-MMO-only rules (offline, per slot):
-1. The transition name is `apple:magic-move-implied-motion-path`.
-2. No `contents` animation on the leaf (keeps `mixFactor` 0 during the move, so unit 0 is the sampled texture).
-3. Every animation on the leaf shares one `timingFunction`, `beginTime` and `duration` (so the player's MVP lies on the
-   from→to segment at one z; §0 Geometry).
+The patched player computes one **static** per-leaf value at effect setup: the product, from the effect root down to and
+including the textured leaf, of each node's value.
+- **Node value** (`__obedNodeOpacity`, the same rule for the root, wrappers and the leaf):
+  - with no `opacity` animation: `initialState.opacity`;
+  - with exactly one `opacity` animation that has from == to and `fillMode "both"`: that constant. `fillMode "both"` holds the
+    value before `beginTime` and after `beginTime + duration`, so the node is constant for the whole effect and the settle
+    frame, whatever its timing;
+  - otherwise the node is **unexpressible**: a from ≠ to animation (any fade, wrapper or leaf), two opacity animations, a
+    constant animation with another `fillMode`, a `hidden` animation, `initialState.hidden`, a non-finite value, or a throw.
+- One unexpressible node makes every leaf below it **legacy**: today's arithmetic, unchanged (per subtree, never global).
+  A textured root is legacy too.
+- So leaf fades keep exactly today's per-frame lerp. On disk every fade has ancestors at 1, where Keynote and today's player
+  agree; a fade under a translucent constant wrapper stays today's look (residual, decision 5).
+- Untouched on purpose: `e.parentOpacity` (still the root value, read elsewhere in the player).
 
-Failures become `excluded{slot, reason}`; an `Unsupported` transition becomes `excluded: [{"slot": null, reason}]`. Everything
-excluded keeps today's look. Multiple translucent slots in one move are supported when each passes; none exists on disk (D3).
+For slot 4 the root is 1 (no animation), the wrapper animates 1→1 `both` (so 1, **not** its model 0.2947), and the leaf animates
+0.2947→0.2947 `both` (so 0.2947). The product is **0.2947**, the same at t = 0, mid and settle. Nothing squares: each node
+contributes exactly one value, its animated one when it has a constant animation and its model one otherwise.
 
 ## 2. Where the fix lives
 
-**(a) A standalone player-draw patch module: CHOSEN.**
-- New file `src/obed_edom/live_mm_opacity_js.py` ("MMO"), a sibling of G2 with its own `MM_OPACITY_VERSION = 1` and
-  `js_sha256`. It sets `Opacity` for identified draws on every player frame of the move, including the settle frame.
-- It is injected by the host **independently of continuity and GL replay**, so the GL-replay-on path, the GL-replay-off path,
-  decks with no movies and HDMI are all covered.
-- No `main.js` edit (arming D2): prototype wrapping only, like G2. The host's `patch_player` stays an observation hook
-  (`live_runtime.py:94`) and already refuses any other player sha.
+- **(B) CHOSEN: an anchored, count-checked replacement set in `src/obed_edom/live_runtime.py:patch_player`** (:94–103). The
+  patch is in memory only, so nothing on disk changes, and it is pinned to `PLAYER_SHA256` `e9b2fad4…`: any other player
+  already refuses live output (:96).
+  - Every WebGL effect that draws through `eB` is covered on every output: Magic Move (`pB`) and the content-aware
+    `ca-text-shimmer`/`-sparkle` transitions (`SB`; `new eB(` occurs exactly twice).
+  - It needs no GL wrapping, no draw identification and no G2 coupling.
+- **Rejected: (A) MMO**, a GL-prototype-wrapping module with per-draw identification, MVP proofs and a G2 suspend/resume
+  coupling. See rev 2 at `1de28cc2` (§1–§9 there). It was rejected by the owner for its surface, not because it was wrong.
+- (b) continuity core and (c) G2-only stay rejected for rev 2's reasons: a DOM-only core, and G2 acts only from ARM-POST on
+  allowlisted decks.
 
-**(b) Inside the continuity core: rejected.** The core is DOM-only and injected only when a continuity plan qualifies
-(`live_host.py:1047`); every core byte re-opens P2 (pinned `e9338aff…`, `test_live_continuity_js.py:38`).
+## 3. Exact replacements (all on sha `e9b2fad4…`; each anchor `count == 1` before replacing, each replacement `count == 1` after)
 
-**(c) Inside G2 only: rejected.** G2 is injected only for an allowlisted `glReplay` boundary with GL replay on
-(`live_host.py:877–890`) and acts only from ARM-POST (`live_gl_replay_js.py:1157`); the GL-off path and every other deck would
-stay opaque.
+The existing `_ANCHOR` observation hook is unchanged. The replacements live in one tuple, `_MM_OPACITY_REPLACEMENTS`, applied
+only when `mm_opacity=True`. Rev 4 cut rev 3's six anchors to **four**: the leaf is valued by the same node rule at setup, so
+the per-frame `__obedOp` flag (rev 3 R3, R4) and its fade arithmetic are gone.
 
-**G2's override stays necessary.** While G2 owns the canvas (ARM-POST, LIVE) MMO steps aside (§5), because G2's proofs and
-ablation replays must see the player's own uniform state.
+| # | Where (byte) | Before | After |
+|---|---|---|---|
+| R1 | `fB.textureInfoFromEffect` definition (2263373) | `textureInfoFromEffect(A,B,g,C,Q){var e={};if(e.offset={pointX:g.pointX+A.bounds.offset.pointX,pointY:g.pointY+A.bounds.offset.pointY},e.parentOpacity=C,A.textureId){` | `__obedNodeOpacity(A){try{var B=A.initialState,g=null,C=0,Q=A.animations\|\|[];for(var e=0;e<Q.length;e++)for(var t=Q[e].property?[Q[e]]:Q[e].animations\|\|[],i=0;i<t.length;i++)"opacity"===t[i].property?(g=t[i],C++):"hidden"===t[i].property&&(C=2);var o=B.hidden\|\|C>1?null:g?g.from.scalar===g.to.scalar&&"both"===g.fillMode?g.to.scalar:null:B.opacity;return"number"==typeof o&&isFinite(o)?o:null}catch(E){return null}}__obedChainOpacity(X,A){if(null===X)return null;var B=this.__obedNodeOpacity(A);return null===B?null:(void 0===X?1:X)*B}textureInfoFromEffect(A,B,g,C,Q,X){var e={};if(e.offset={pointX:g.pointX+A.bounds.offset.pointX,pointY:g.pointY+A.bounds.offset.pointY},e.parentOpacity=C,e.obedOpacity=void 0===X?null:this.__obedChainOpacity(X,A),A.textureId){` |
+| R2 | recursion (2264160) | `this.textureInfoFromEffect(A.layers[E],B,e.offset,e.parentOpacity,Q)` | `this.textureInfoFromEffect(A.layers[E],B,e.offset,e.parentOpacity,Q,this.__obedChainOpacity(X,A))` |
+| R3 | `QB.renderFrameWithContext` Opacity write (2190397) | `d!==U&&(T=d+(U-d)*K),A.setGLFloat(T,"Opacity")` | `d!==U&&(T=d+(U-d)*K),null!=e.obedOpacity&&(T=e.obedOpacity),A.setGLFloat(T,"Opacity")` |
+| R4 | `eB.drawFrame` no-animation branch (2192650) | `var w=e.initialState.hidden?0:this.parentOpacity*e.initialState.opacity;` | `var w=e.initialState.hidden?0:null!=e.obedOpacity?e.obedOpacity:this.parentOpacity*e.initialState.opacity;` |
 
-## 3. Offline contract (`live_continuity.py`)
+(`\|` above is a Markdown escape of `|`.)
 
-- New `mm_opacity_table(export_root, slides, *, resolver=safe_export_file) -> dict | Unsupported`. It walks non-skipped
-  slides in player order with the same scene arithmetic as `derive_plan`. Extract the header read and cumulative-events loop
-  (`live_continuity.py:1376–1416`) into one helper used by both; `derive_plan` output must stay byte-identical. It must **not**
-  inherit `derive_plan`'s whole-deck refusal of unknown transitions (`:1467`): non-Magic-Move transitions are simply skipped.
-- For each slide whose transition is a Magic Move and that has a next slide, one move entry keyed by
-  `moveScene = scene(dst) − 1` (the hash the player holds for the whole move: `p2_verdict.py:95`, G2 `:1250`):
+- **How it works.**
+  - `setupTexture`'s call (byte 2263111) is **not** changed. It passes 5 arguments, so `X` is `undefined` at the root: the root
+    (textured or not) gets `obedOpacity` `null`, and R2 multiplies the root's own node value at the first descent.
+  - At a textured leaf, R1 stores the full product including the leaf's own node value, or `null` (legacy).
+  - R3 and R4 compute today's `T`/`w` first, unchanged, and replace it only when `obedOpacity` is set. In
+    `renderFrameWithContext`, `e` is the loop's `g.textureInfo` and is never reassigned in the loop; in R4 `e` is
+    `this.texture`. Both are the objects R1 built (`setupTexture` → `textures` → `eB`).
+  - Class bodies are strict mode; every added name is a method, a parameter or a property (no implicit globals). Every name
+    carries an `__obed`/`obed` prefix, which occurs 0 times in the stock player.
+- **Measured, 2026-09-25, scratch** (`scratchpad/patch_c.py`, `beh_c.py`, `census_c.py`; no Chrome):
+  - all four anchors `count == 1` on the real bytes, every replacement `count == 1` after; `node --check` passes;
+  - the real patched `QB` and `fB` methods, extracted and run in Node on `effect_1_to_2.json` (easing stubbed linear), give
+    Opacity per slot `[1,1,1,1,0.2947]` at p = 0, `[1,0,1,1,0.2947]` at 0.5 and 1; stock gives `[1,1,1,1,1]` / `[1,0,1,1,1]`.
+    Identical to rev 3's six-anchor result.
+- **Refusal.** A missing or duplicated anchor raises `LiveRuntimeUnsupported`, as `_ANCHOR` does. On the pinned sha this is a
+  static fact that the tests prove.
 
-  `{"canvas": {w, h}, "moves": [{"moveScene", "slotCount", "patches": [{"slot", "opacity", "texW", "texH", "fromRect",
-  "toRect"}], "excluded": [...]}]}`
+## 4. Why the patch is safe to reason about
 
-- `slotCount`, `opacity`, `texW/texH`, `toRect` come straight from `effect_opacity_overrides` (`slotSizes`, `opacityOverrides`,
-  `slotRects`). `fromRect` is the same rect formula (`:559–576`) with the `from` values; extract that formula into a helper
-  taking `from`/`to`, with a byte-identity test on `effect_opacity_overrides` for P2, `gl-decks` and every pinned fixture.
-- Only an unreadable export makes the whole table `Unsupported`. Entries with no patches are dropped; empty `moves` means
-  `notApplicable`.
+- **One writer.** The player's own `setGLFloat(T,"Opacity")` carries the corrected T. The per-qualifier cache (§0) then writes
+  `uniform1f` once for a constant T, exactly as today. No external `uniform1f`, so there is no stickiness to undo and nothing
+  that can double-apply.
+- **Static per effect.** The whole product is computed once in `setupTexture` (per effect, per play); no per-frame logic is
+  added.
+- **Faithful or unchanged.** Every case the rule cannot express keeps today's arithmetic (§1).
 
-## 4. Runtime module (MMO)
+## 5. Blast radius (census, offline, pinned as a test)
 
-**Install.**
-- `<script id="obed-mm-opacity">` with the validated table embedded (`</` escaped, as `gl_replay_script` does at :1418).
-  Served before the continuity plan/core/G2 tags and before `main.js`.
-- It wraps `WebGLRenderingContext.prototype` (and WebGL2 when present): `activeTexture`, `bindTexture`, `texImage2D`,
-  `texSubImage2D`, `uniformMatrix4fv`, `clear`, `drawArrays`, `drawElements`, `getUniform`.
-- It captures the native function of **every** GL method it calls, wrapped or not (`uniform1f`, `useProgram`,
-  `getParameter`, `getUniform`, `getUniformLocation`, `getActiveUniform`, `getProgramParameter`, `isContextLost`), at install,
-  and calls only those. G2 later wraps MMO's wrappers (`wrapContexts`, :285) and never sees or records MMO's own calls.
-- It refuses to install (`installRefused`, nothing wrapped) if any target method already carries `__obedGlReplay`, or if
-  WebGL is absent.
-- It publishes `window.__OBED_MM_OPACITY__ = {version: 1, events, stats()}`. A `debugForceFail` seed is taken only from a
-  pre-existing partial object, exactly like G2's (:20–22, :65).
+Scope: only `eB` consumes the changed value (R3, R4). Verified on the bytes: `textureInfoFromEffect` has one definition, one
+caller (`fB.setupTexture`) and the recursion; `setupTexture` has one caller (`fB.draw`, every effect type); `renderFrameWithContext`
+has one definition and one caller (`eB.drawFrame`); `new eB(` occurs twice, in `pB` (Magic Move) and `SB` (whose subclasses `RB`,
+`uB` are the `ca-text-shimmer`/`-sparkle` transitions; their text leaves go to `JB`/`mB`, not `eB`). Builds (`buildIn`/`Out`,
+`smartBuild`) never construct `pB`/`SB`/`eB`. Every other class receives `obedOpacity` on its textures and never reads it.
 
-**Always-on bookkeeping** (every context, cheap, rare calls): texture → last upload size (same size derivation as G2's
-`onPlayerUpload`), per-unit bindings, per-program last `uniformMatrix4fv`. Uploads happen before the move's first draw, so
-this cannot wait for arming.
+Census over every export under the main checkout's `output/` (the 20 `header.json` roots), with effects de-duplicated by
+content. Scratch `scratchpad/census_b.py` mirrors old vs new in Python at p ∈ {0, 0.5, 1}:
+- 26 Magic Move transitions, 0 shimmer/sparkle transitions, **110 `eB`-drawn leaves**, 0 unexpressible chains;
+- rev 4's four-anchor mirror (`census_c.py`) gives the same result;
+- **exactly one leaf changes: the 1→2 Magic Move slot 4, 1 → 0.2947 at all three points** (P2, `p2-binary`, `p2-loop` and
+  `gl-decks/Minimal Alpha_DSK` share the same effect);
+- every other leaf, including the 3→4 move, the Positive Control moves, the D1–D6 text moves and every fade, is identical.
 
-**Identification during the move** (per context, WeakMap state; nothing keyed on minified names):
-- *Arm.* At the context's first draw: hash number == some `M.moveScene`; `gl.canvas.id` matches `^\d+-canvas$`; the canvas is
-  inside `#stage`; canvas backing size == table `canvas` (G2's `canvasShape`, :1230; viewport-independent, §0).
-- *Frame.* A frame is delimited by `clear`. The k-th draw of a frame maps to slot k.
-- *Pin*, at the first draw with ordinal k that has a patch:
-  - `P = getParameter(CURRENT_PROGRAM)` (client-side state in Chrome), not pinned to another slot;
-  - P's active uniforms include `MVPMatrix, Opacity, mixFactor, Texture, Texture2`;
-  - `getUniform(P, mixFactor) === 0`;
-  - the texture bound on the unit `Texture2` samples has a last upload of exactly `texW×texH`;
-  - P's last `uniformMatrix4fv`, decoded like G2's `decodeMvp` (:713), lies on `lerp(fromRect, toRect, z)` within **1 px per
-    edge** for one fitted z ∈ [−0.01, 1.01];
-  - then read `playerValue = getUniform(P, Opacity)` once.
-- *Every later draw at ordinal k*: same program, texture size and MVP checks; then native `uniform1f(loc, opacity)` and
-  forward. **Set before every draw, absolute**, so the player's cache never matters during the move.
-- *Frame check.* At each `clear`, the previous frame's draw count must equal `slotCount`, and a pinned program must never
-  appear at another ordinal. (The settle frame has no following `clear`; its per-draw checks still apply.)
-- *Fail closed.* Any failed check → `stop(reason)`, reasons `count`, `program`, `uniforms`, `mixfactor`, `size`, `mvp`,
-  `canvas`, `glError`:
-  - write back `playerValue` to every pinned program (native `useProgram(P)`, `uniform1f`, restore the previous program),
-    then one native `getError` (→ `glError` note only; **never** a per-draw `getError`: it stalls and clears the flag);
-  - then pass through for that context for good (today's look from that frame on);
-  - emit `mmopacity-stop{moveScene, slot, reason}`. Write-back is skipped on `isContextLost()`; canvas removal needs none.
-- *Lifetime.* A pinned program is patched until stop or canvas removal, whatever the hash does, except while G2 owns the
-  canvas (§5).
-- *Cost.* Idle: one WeakMap lookup per wrapped call. Armed: per patched draw, one client-side `getParameter`, a 4×4 decode,
-  one map lookup, one `uniform1f`. Sync `getUniform`/`getActiveUniform` reads happen once per pin. Report-only in MO-2.
+**Pinned test** (W1): the same old/new mirror lives in `tests/test_live_runtime.py`. It runs on the committed
+`tests/fixtures/live_continuity/` effects (P2 1→2 must change slot 4 only; every other committed effect must be unchanged) and,
+REAL-gated, sweeps `output/` and asserts the changed set equals `{1→2 slot 4}`. "Unchanged" is **exact float equality**
+(the scratch used 1e-9): an unchanged leaf must feed the same bits to `uniform1f`. The mirror is backed by the Node
+behavioural test on the real extracted methods, so it cannot drift from the bytes unnoticed.
 
-## 5. Interaction with G2
+## 6. Versioning, switch, host wiring
 
-**Why G2 needs MMO out of the way.** MMO leaves `Opacity` = α sticky on program 4. G2 captures `restOpacity` by `getUniform`
-in a capture replay (:516–521) and requires `restOpacity === 1` (:807). Its ablation replays (`only: i, value: 0`) must also
-reach the GPU unaltered. Without a hand-back G2 would mark slot 4 `rest-opacity` unproven and LIVE would replay **opaque**.
+- **`RUNTIME_VERSION` stays 2; no new version constant.** It versions the observation contract, not rendering. Its
+  consumers (in-page literal `live_runtime.py:63`; start log `live_host.py:1033`; goto-autoplay gate `:1159`, `:1316`;
+  `web/live.py:239` `runtimeRevision`; P2 boot check `p2_recovery_html_adversarial.py:662`; `scripts/live_host_probe.py:130`;
+  tests `test_live_host.py:36`, `test_p2_adversarial_gl_replay.py:752`) all concern the hook, which B leaves byte-identical.
+  A bump would defer every goto autoplay (constant only) or break off-path identity (constant + literal). Rev 3's
+  `PLAYER_PATCH_VERSION` is dropped: the served `main.js` sha already identifies the rendering bytes exactly.
+- **API.** `patch_player(player, *, mm_opacity: bool = True)`. With `False`, the output is byte-identical to today's
+  (observation hook only; pinned by a test that hashes the synthetic-player output both ways).
+- **Switch.**
+  - `LiveOutputHost(mm_opacity=_UNSET)`, where the ctor wins over env `OBED_LIVE_MM_OPACITY`. Values are `off|auto` (trimmed,
+    any case). Anything else raises in `start()` before the log, the server or CDP, like `GL_REPLAY_ENV` (`:1024–1027`).
+  - Default **`auto` on every output**: HDMI, managed OBS, external attach.
+  - `start()` calls `patch_player(player, mm_opacity=pref == "auto")` (`:1046`).
+  - `web/live.py` passes no kwarg (env default), so it needs no code change.
+- **Report.**
+  - `output.mmOpacity = {"mode": "on"|"off", "sha256": <sha of the served main.js>}` (`:1006` area). It reaches the session
+    identity (`web/live.py:240`, `"output": {**host.output, …}`) automatically.
+  - The start log gains `mmOpacityPreference`.
+  - Nothing runtime to surface: there are no runtime proofs.
 
-**Hand-back (D4; rec: implicit suspend, no G2 bytes).**
-- MMO's `drawArrays`/`drawElements`/`getUniform` wrappers, on an armed context, read `window.__OBED_GL_REPLAY__`. When it is
-  `version === 1`, `state` is `ARM-POST` or `LIVE`, and its last `glreplay-arm` event's `canvasId` is this context's canvas,
-  MMO is **suspended**: on entering suspension it writes back `playerValue` natively (as in stop), then passes through.
-- When G2 later reads `STANDDOWN`/`RETIRED` while the canvas still draws, MMO **resumes** (per-draw absolute write), so G2's
-  stand-down replay (`replayFrame({rest: true})`, :927) shows the translucent square instead of opaque.
-- Every G2 draw and uniform read in ARM-POST passes through MMO first (G2 replays call the prototype, whose inner layer is MMO),
-  so the property "G2 never sees α" does not depend on G2's internal call order.
-- `version` and `state` are already a public cross-module contract: the core reads both (`live_continuity_js.py:528–533`).
-- G2's bytes, sha, OD-2's `G2_SHA`/`KB_SHAS` and G2's qualification are **untouched**. MO-4 is the interplay gate.
-- *Alternative (explicit release):* one guarded `mmo.release(state.gl)` as the first statement of `armPost()` (:1157). It makes
-  the hand-off visible in G2's bytes but changes G2's sha (re-pin `PINNED_JS_SHA256` :140, OD-2 `G2_SHA` and the `frozen` KB
-  sha; `GL_REPLAY_VERSION` stays 1 because the core retires any other version, :531), forces a targeted G2 re-qualification
-  (headless gates 1, 2, 6, N1–N3, the P2 G2 arm, managed M1–M5), and leaves every stand-down from ARM-POST on opaque until
-  build 1.
+## 7. G2 interaction (patch on; with patch off G2 is byte- and behaviour-identical to today)
 
-**No double application.** Both modules write the same absolute value from the same function (§1). Neither multiplies by the
-current uniform, so 0.29² cannot arise. MO-1's α² splice is the KB that proves the gate would see it.
+With B the player writes `Opacity` 0.2947 for slot 4's program on the first frame. G2's capture replay reads
+`restOpacity = [1, 0, 1, 1, 0.2947]`, and `proveOpacity` requires `restOpacity === 1` (`live_gl_replay_js.py:807`). So slot 4
+becomes `glreplay-opacity-unproven{slot 4, "rest-opacity"}`: no override is applied, and LIVE replays **rest = 0.2947**, the
+correct pixels. The stand-down replay (`rest: true`, :927) is now translucent (better than today).
 
-**No flash.** Suspension, `markerSwap`, `proveOpacity` and the first LIVE `tickOnce` run in one rAF task (`poll` → `armPost`,
-:1266–1268, :1180); only the task's final buffer is presented. G2 records only player calls, so the settle frame is unchanged
-(88 calls).
+| Option | G2 bytes | Plan/allowlist | Reporting | Cost |
+|---|---|---|---|---|
+| **(iii) leave G2 as is: RECOMMENDED** | unchanged | unchanged | one `rest-opacity` note on slot 4. This is the documented fail-closed meaning ("the player already draws its own value; keep it"), and it is now correct pixels | none; re-baseline the facts below |
+| (i) accept `\|rest − override\| ≤ 1e-6` as proven no-op | +1 line at :807 | unchanged | clean | re-pin `PINNED_JS_SHA256` (`tests/test_live_gl_replay_js.py:140`), OD-2 `G2_SHA` and the `frozen` KB sha; `GL_REPLAY_VERSION` stays 1 (core :531); targeted re-qualification (headless gates 1, 2, 6, N1–N3, P2 G2 arm, managed M1–M5) |
+| (ii) drop the override offline when the patch is on | unchanged | `derive_plan`/`to_runtime` depend on the patch mode, so a second `QUALIFIED_PLAN_SHA256` entry, P2 plan literals, host plumbing | clean | largest; couples continuity derivation to a player option |
 
-**Residuals (D5).**
-- G2 goes LIVE with slot 4 `opacity-unproven` for another reason (ablation, size, mvp): LIVE replays rest → the square pops
-  translucent → opaque at LIVE until build 1. Today it is opaque throughout.
-- MMO `stop` mid-move: translucent → opaque pop until build 1 (or G2 LIVE).
-- With the explicit-release alternative only: any G2 stand-down from ARM-POST on → opaque until build 1.
+Why (iii) is safe:
+- No gate asserts `opacityUnproven == []` on a live run. It is asserted only in Node sandbox tests over the fake settle frame
+  (rest 1), which are unaffected.
+- `p2_verdict` only keeps the note kind (:162). The core only lists it (`live_continuity_js.py:469`).
+- **No double application by construction**: G2 applies no override on slot 4 (`unproven` deletes it, :670), and the player
+  wrote the value once. MO-4 proves it on pixels: patch-on G2 LIVE == patch-off G2 LIVE (override α), ±0; an α² bug reads
+  darker.
+- Re-checked paths: `rest-opacity` fails before any ablation replay of slot 4 (:807), so `skip`/`only` replays never run for
+  it; LIVE `opacityFor` returns rest 0.2947 (:495–499); `standDown` writes back only slots with overrides (none) and replays
+  rest (:888–927), translucent; `score_armed` (`live_continuity_probe.py:1554`) does not read unproven notes; `p2_verdict`
+  lists the kind only as a fetch filter (`GL_REPLAY_KEEP_KINDS`, :156).
+- With the note now expected, a harness that reads notes asserts the **exact** set `[{4, "rest-opacity"}]` (patch on) and
+  `[]` (patch off), so a second unproven slot cannot hide behind it.
 
-## 6. Host wiring (`live_host.py`)
+**Re-baselines under (iii)** (measured in Q0, never retuned):
+- `restOpacity` / `opacityAfterProofs` slot 4 = 0.2947.
+- `opacityUnproven = [{4, "rest-opacity"}]`.
+- **`occludedBands`**: G2's marker swap runs before any override, and now sees the square translucent, so the bands under it
+  stop reading occluded. This is expected in `managed_obs_qualify.EXPECTED_STATS` (:106, 20/128), in the gate-r2 and OD-2
+  records, and in any probe expectation. Those bands then score as live, which is correct. The probe's V arms read G2's own
+  mask (`occluded_screen_cells`, `live_continuity_probe.py:2405`) and follow automatically.
+- **M3** (`managed_obs_qualify.py:880–905`): with the patch on, `g2-off-S` is translucent, so "edge: G2-S == round(g2-off-S ×
+  0.2947)" would square and "KB: g2-off-S T alpha fails the slot check" would pass. Both move to the `mm-off` twin (§8).
 
-- **Flag.** `LiveOutputHost(mm_opacity=…)` wins over env `OBED_LIVE_MM_OPACITY`, values `off|auto` (trimmed, any case);
-  anything else raises before logs, the server or CDP start, exactly like `GL_REPLAY_ENV` (:1019–1025). Default `auto` on
-  every output (D2), independent of the continuity checkbox and of GL replay.
-- **Resolve.** `_resolve_mm_opacity()` runs before `_resolve_continuity_static`: `Unsupported` → `unavailable` + reason; no
-  moves → `notApplicable`; otherwise `injected` with `mm_opacity_script(table)`. No G2 equality guard: equality holds by
-  construction (§1) and is pinned by a W1 test on P2.
-- **Inject.** `continuity_script = mmo_script + (continuity + G2 if plan else "")` (:1047). Served order
-  `overlay < mmo < plan < core < G2 < fit < main.js` (`:431`).
-- **Report.** `output.mmOpacity = {mode, reason?, version, sha256, moves}` and a `mmOpacity` start-log record. Runtime
-  `mmopacity-stop` events stay in the page API (D2).
-- **Off.** Nothing is injected or evaluated; every served byte is today's.
+## 8. Harness parity
 
-## 7. Qualification before product code (Q0, scratch, headless first)
+| Harness | How it gets the patch | Re-baselines |
+|---|---|---|
+| `scripts/live_continuity_probe.py` | through `LiveOutputHost` (default `auto`); KB arms pass `mm_opacity="off"` | G2 facts of §7 where asserted; V/Voff expectations re-confirmed, never retuned |
+| `scripts/managed_obs_qualify.py` | through `LiveOutputHost`; refuses to start if `OBED_LIVE_MM_OPACITY` is set (as for GL replay, :27); new `mm-off` twin sessions pass `mm_opacity="off"` | `EXPECTED_STATS.occludedBands`. M3's edge check `round(g2-off-S × 0.2947)` and its KB assume `g2-off` is opaque, so the opaque reference moves to the `mm-off` twin. `T alpha (G2-S)` 75 is unchanged |
+| `scripts/p2_recovery_html_adversarial.py` | today it serves the **stock** `main.js` from disk unless `--gl-replay auto` (`_patched_main_js` is called only under `gl_auto`, :3332). Gains `--mm-opacity auto\|off` (default `auto`): `auto` serves `patch_player(raw, mm_opacity=True)` in **every** arm; `off` keeps today's bytes per arm (stock for non-GL arms, `mm_opacity=False` under GL). Records `mmOpacity` beside `patchedMainJsSha256` (not pinned). The test's `patch_player` monkeypatch lambda (`test_p2_adversarial_gl_replay.py:739`) takes the new kwarg | slide-2 screenshot scores (`greenFront` still greenish over a neutral grating, since G − R ≈ 43 > 15); `greenTranslucentPre` is on DOM slide 1, so it is unchanged; any move is root-caused |
+| `src/obed_edom/html_alpha_probe.py`, `html_preview.py` | serve the unmodified `main.js` (a paint-oracle probe and the dashboard preview, not on air) | none; out of scope (§13) |
 
-- **Q0a.** Headless, `output/p2-binary`, GL replay off and on. A scratch **innermost** logger (§8 install rule) records every
-  call of the 1→2 move per frame: draws/frame, program per ordinal, unit bindings and upload sizes, `mixFactor`, every
-  `uniform1f`/`uniformMatrix4fv` per program, the canvas and hash at first draw.
-  - Must show 5 draws in every frame, a stable program per ordinal, unit-0 texture 178×157 at ordinal 4, the MVP on the
-    from→to segment within 1 px, and one new canvas/context per move.
-  - Must read B under ROI_top (§8) every frame: it must equal the empty-canvas patch within 1, or ROI_top is shrunk.
-  - Must show the 3→4 move leaves MMO idle (no entry, no arm).
-  - Reconcile the F-10 sentinel ("the frame re-sets `Opacity` for programs 0–3 but not 4",
-    `tests/test_live_gl_replay_js.py:26–31`) with the per-qualifier cache of §0. The design does not depend on it; the
-    fixture's provenance does.
-  - Output: sanitized `tests/fixtures/mm_opacity/move_frames.json` with `_provenance`.
-- **Q0b.** Scratch patch plus the MO-1 instrument on the same run: patched reads exact, unpatched FAILs (KB), two unpatched
-  runs read identically (CvC).
-- **Q0c.** Q0a in managed OBS CEF, one take. One OBS at a time, no headless Chrome alongside.
+## 9. Qualification before product code (Q0; one headless Chrome at most)
 
-## 8. Gates (blocking unless marked report-only)
+- **Q0a (done offline, §3).** Anchor counts, `node --check`, and the Node behavioural run on the extracted methods.
+- **Q0b (headless, `output/p2-binary`, GL replay off and on, patch on and off).**
+  - A scratch innermost logger (§10 install rule) records per frame every `uniform1f(Opacity)` per program.
+  - It must show slot 4's program written 0.2947 at the effect's first draw, and every other program identical on vs off.
+  - It reads the G2 facts of §7 (rest, unproven, **occludedBands**).
+  - It validates the MO-1 instrument: patched reads exact, patch-off FAILs, and two patch-off runs read identically.
+  - It records the settle-frame buffer hash of the 1→2 and 3→4 moves, twice per mode, to prove MO-5's CvC reads 0.
+  - It reconciles the F-10 sentinel with the §0 cache (fixture provenance only).
+- **Q0c.** Q0b's logger in managed OBS CEF, one take. One OBS at a time, with no headless Chrome alongside.
 
-**Rule.** A check counts only if its KB (today's bytes) FAILs and its null/CvC reads 0 first. Lossless recordings only
-(`utvideo/yuv420p`); binary-counter fixture `output/p2-binary`; one OBS at a time, no headless Chrome during OBS runs; at most
-3 headless Chromes.
+## 10. Gates (blocking unless marked report-only)
 
-**Instrument (in page, harness-only; `scripts/mm_opacity_probe.py`).**
-- Installed with `Page.addScriptToEvaluateOnNewDocument`, so it runs before every page script and is the **innermost**
-  wrapper holding true natives. It sees player draws, MMO's writes and G2's replays alike, and its own `readPixels` never pass
-  through G2 (a later, outermost install would be recorded into G2's settle frame and trip G2's unflagged-call guard in LIVE).
-- At each ordinal-k draw it reads `B` (ROI, before the native draw) and `P` (after).
-- ROI: `fromRect ∩ toRect`, eroded 4 px: inside the square at every z.
-- `S` from the MMO-off twin, where `P = S` whatever `B` is; S must be constant, max − min ≤ 1.
-- Per pixel, per frame: `E = α·S + (1 − α·S_a)·B`, over premultiplied RGBA; also `α_eff` fitted on G.
+**Rule.**
+- A check counts only if its KB (**patch off = today's player bytes**) FAILs and its null / control-vs-control (CvC) reads 0
+  first.
+- Lossless recordings only (`utvideo/yuv420p`), on the binary-counter fixture `output/p2-binary`.
+- One OBS at a time, no headless Chrome during OBS runs, and at most 3 headless Chromes.
 
-**Recording reference (OBS).**
-- ROI_top = `fromRect ∩ toRect` minus the movie `instanceRect` (pad 2), eroded 4 px ≈ x 793–810, y 727–785 (Q0a confirms
-  what lies beneath).
-- `E = α·S_off + (1−α)·B_frame`: `S_off` = the MMO-off take's ROI median over its move frames; `B_frame` = same-frame read
-  of an empty canvas patch (x 1150–1200, y 690–780). No RGB value is hard-coded; the tone curve (OD-2 finding 1) is absorbed
-  by τ, which is calibrated on slide-1 DOM frames of the same take.
+**Instrument** (`scripts/mm_opacity_probe.py`). With B the shader is untouched and the only change is the value the player
+passes to `uniform1f`, so the headless proof is the uniform in effect at each draw, plus one pixel check at settle. Rev 3's
+per-frame `readPixels` pair (a sync stall on every frame, inside G2's recording window) is dropped.
+- It is installed with `Page.addScriptToEvaluateOnNewDocument`, so it is innermost and holds true natives. It wraps
+  `useProgram`, `uniform1f`, `clear`, `drawArrays`, `drawElements`; it only records (program → last `Opacity` value, and at
+  each draw the value in effect for the current program with its clear-delimited ordinal). Its only own GL calls are
+  `getUniformLocation`/`getParameter` once per program and one `readPixels` pair at the settle draw, all skipped by G2's
+  `SKIP` (`live_gl_replay_js.py:251`).
+- Pixel check, settle draw only (the last player frame of the move, at ordinal 4): B (ROI, before) and P (after), ROI =
+  `fromRect ∩ toRect` eroded 4 px; S from the patch-off twin (P = S whatever B is); `E = α·S + (1 − α·S_a)·B` over
+  premultiplied RGBA.
+- A GL-on run is **void** (neither pass nor fail) if G2 stands down in either twin.
+- The **recording reference** is rev 2's ROI_top (≈ x 793–810, y 727–785; under it only the transparent canvas or the black
+  sentinel). `E = α·S_off + (1−α)·B_frame`, where B_frame is a same-frame read of an empty canvas patch. τ is calibrated on
+  slide-1 DOM frames of the same take.
 
 | Gate | Pass | KB (must FAIL) | Null / CvC |
 |---|---|---|---|
-| **MO-1 per-frame exactness, headless** (GL off; GL on; 1920×1080) | every player frame of the move is probed (probed == frames, ≥ 20); each frame to build 1: max \|P − E\| ≤ 1, α_eff within 1/255 of α | MMO off → α_eff = 1; splice α² → FAIL | MMO-off vs MMO-off-2: residual 0 with α = 1, S series identical; 3→4 move pixel-identical MMO on vs off |
-| **MO-2 managed OBS recording** (`--arm mmo`, rates 25 and 30 × sessions g2 and g2-off, MMO `auto` and `off`, n = 1; CvC pair at g2/25; new phase `mm-move` just before `advance`) | R1: 0 frames within τ of `S_off` on ROI_top from `mm-move` to build 1. R2: every frame \|ROI_top − E\| ≤ τ. R3: first GL move frame vs last slide-1 DOM frame, last pre-build-1 frame vs first DOM frame, each ≤ τ. R4: key alpha (GetSourceScreenshot at settle, g2-off) on ROI_top within τ_key of the slide-1 DOM key on the same ROI. Report-only: wrapper time per frame p50/p95, cadence | `off` twin FAILs R1–R4 | τ = max(on vs off slide-1 DOM frames, instrument \|DOM − E\| on slide-1 frames) + 1; τ_key likewise from slide-1 key frames; CvC reads ≤ 2 before τ is set |
-| **MO-3 MO-1 inside CEF** (one extra **unrecorded** managed session) | same pass as MO-1 | | |
-| **MO-4 G2 interplay** (headless P2 G2 arm + one managed g2 take from MO-2) | `restOpacity[4] === 1`; `opacityUnproven == []`; override applied; MMO suspended exactly once, 1 program written back, 0 MMO writes while suspended; G2 LIVE `greenRGB` equal to the MMO-off G2 run (±0); frameLen 88; occluded 20/128. Forced G2 stand-down in ARM-POST: the stand-down replay reads α_eff = α | splice MMO without the suspend check → `rest-opacity` unproven and LIVE opaque | MMO-off G2 vs itself |
-| **MO-5 MMO fail-closed** | Node sandbox: every reason. Headless: `mvp` (at pin) and `count` (mid-move) via seed: one `mmopacity-stop`, write-back done, α_eff = 1 from the failing frame on, 0 GL errors | bogus reason must not read as expected | MMO-off frames equal |
-| **MO-6 regression** | P2 verdict fast/slow/bridge-off (MMO injected via W5), probe A/B/C + V/Voff at 3 viewports, `2x`/`positive` cadence arms within OD-2 limits, M8, full suites (`uv run pytest tests/ -n auto --dist loadfile`, `npm run test:ui`, `npm run test:maps`) | any change is root-caused, never retuned | |
-| **MO-7 owner eyeball** | on vs off, GL on and off, side by side (`--keep-recordings`) | | |
+| **MO-1 uniform + settle blend, headless** (GL replay off; on; 1920×1080) | every slot-4 draw of the move, from the **first** (≥ 20 draws), and every G2 LIVE replay draw to build 1: `Opacity` in effect == α (float32); every other ordinal's value sequence identical to the patch-off twin; settle max \|P − E\| ≤ 1 | patch off → 1; splice `__obedNodeOpacity` returning the model value → α² → FAIL | patch-off vs patch-off-2: uniform logs identical, settle P identical |
+| **MO-2 managed OBS recording** (`--arm mmo`: rates 25 and 30 × GL-replay sessions g2 and g2-off × patch on/off, n = 1; CvC pair at g2/25; phase `mm-move` just before `advance`) | R1: 0 frames within τ of `S_off` on ROI_top from `mm-move` to build 1. R2: every frame \|ROI_top − E\| ≤ τ. R3: first GL move frame vs last slide-1 DOM frame, and last pre-build-1 frame vs first DOM frame, each ≤ τ. R4: key alpha (GetSourceScreenshot at settle) on ROI_top within τ_key of the slide-1 DOM key. Report-only: cadence vs patch-off | patch-off twin FAILs R1–R4 | τ = max(on vs off slide-1 DOM frames, instrument \|DOM − E\| on slide-1 frames) + 1; τ_key likewise; CvC reads ≤ 2 before τ is set |
+| **MO-3 MO-1 inside CEF** (one extra **unrecorded** managed session) | as MO-1 | as MO-1 | as MO-1 |
+| **MO-4 G2 interplay** (headless P2 G2 arm + the MO-2 g2 takes) | option (iii) facts of §7; LIVE `greenRGB` and the MO-1 residual equal to the patch-off G2 run (±0); a forced stand-down (`debugForceFail` seed) replays at α_eff = α; with patch off, every G2 fact equals gates-r2/OD-2 (rest `[1,0,1,1,1]`, 20/128) | patch-on with the α² splice of MO-1 → LIVE darker than patch-off → FAIL | patch-off G2 vs itself |
+| **MO-5 blast radius** | offline census test (§5) green; live: the **settle-frame** buffer hash of the 3→4 move and of one Positive Control Magic Move, patch on vs off, identical (per-frame hashes depend on rAF timing and cannot be compared across runs) | the 1→2 settle hashes differ on vs off | on vs on identical first (Q0b) |
+| **MO-6 regression** | P2 verdict fast/slow/bridge-off (patched via W5), probe A/B/C + V/Voff at 3 viewports, OD-2 M-gates touched by §8's re-baselines, `2x`/`positive` cadence arms within OD-2 limits, full suites (`uv run pytest tests/ -n auto --dist loadfile`, `npm run test:ui`, `npm run test:maps`) | any change is root-caused, never retuned | |
+| **MO-7 owner eyeball** | patch on vs off, GL replay on and off, side by side (`--keep-recordings`) | | |
 
-## 9. Work streams (disjoint files; Opus MEDIUM implementers; only the coordinator commits)
+## 11. Work streams (disjoint files; Opus MEDIUM implementers; only the coordinator commits)
 
 | # | Files | Work |
 |---|---|---|
-| W0 | scratch | Q0a–Q0c. **Blocks all.** |
-| W1 | `src/obed_edom/live_continuity.py`, `tests/test_live_continuity.py` | §3; byte-identity tests for `effect_opacity_overrides` and `derive_plan`; MMO-only exclusions; P2 table == G2 entry overrides; `gl-decks` parity (one patch, slot 4) |
-| W2 | `src/obed_edom/live_mm_opacity_js.py`, `tests/test_live_mm_opacity_js.py`, `tests/fixtures/mm_opacity/` | §4–§5; Node sandbox with a scripted multi-frame fake GL: pin rules, set-before-every-draw, write-back ordering, every stop reason, suspend/resume on G2 state and canvas id, install refusal after G2, pinned sha, table validator mirrored in Python; cross-module test with the real G2 bytes (rest 1, override applied, one suspension) |
-| W3 | `src/obed_edom/live_host.py`, `tests/test_live_host.py` | §6: precedence table, invalid env refused before resources, served order, off byte-identity, report |
-| W4a | `scripts/mm_opacity_probe.py`, `tests/test_mm_opacity_probe.py` | instrument, scorer, KB splices (synthetic tests) |
-| W4b | `scripts/managed_obs_qualify.py`, `scripts/obs_cadence_decode.py`, their tests | `--arm mmo`, phase `mm-move`, ROI series, R1–R4; imports W4a |
-| W5 | `scripts/p2_recovery_html_adversarial.py`, its tests | inject MMO first (`GL_SERVED_ORDER` :351 gains `mmo`), parity with the product |
+| W0 | scratch | Q0b–Q0c. **Blocks W4 re-baselines and the gates**; W1–W3 may start from §3. |
+| W1 | `src/obed_edom/live_runtime.py`, `tests/test_live_runtime.py` | §3 replacements (four), `mm_opacity` kwarg. Tests: count-check refusal per anchor (0 and 2) on synthetic players (monkeypatched sha, as today); off byte-identity; REAL-gated anchors-on-real-bytes + `node --check` + the Node behavioural test on extracted methods (§3); the §5 census mirror |
+| W2 | `src/obed_edom/live_host.py`, `tests/test_live_host.py` | §6 precedence, refusal before resources, report, start log |
+| W3 | `scripts/mm_opacity_probe.py`, `tests/test_mm_opacity_probe.py` | instrument, scorer, KB splices (synthetic tests) |
+| W4 | `scripts/managed_obs_qualify.py`, `scripts/obs_cadence_decode.py`, their tests | `--arm mmo`, `mm-off` twins, phase `mm-move`, ROI series, R1–R4, M3 reference move, env refusal, `EXPECTED_STATS` re-baseline |
+| W5 | `scripts/p2_recovery_html_adversarial.py`, its tests | `--mm-opacity`; serve the patched bytes in every arm under `auto` (§8); report field |
+| W6 | `scripts/live_continuity_probe.py`, its tests | only if Q0b shows an asserted G2 fact moving (§7) |
 
-- If D4 = explicit release, W2 adds `release(gl)` and a W6 edits `live_gl_replay_js.py` + re-pins, and the G2
-  re-qualification list of §5 joins the gates.
-- **Order.** W0 → (W1 ∥ W2) → (W3 ∥ W4a) → W4b → W5 → gates → docs (README, SKILL, runbook, handover, hall) → Opus review →
-  one PR. No merge without the owner.
+- **Order.** W0 ∥ (W1 → (W2 ∥ W3)) → (W4 ∥ W5 ∥ W6) → gates → docs (README, SKILL, runbook, handover, hall, the arming plan's
+  D2 line) → Opus review → one PR. No merge without the owner.
 - **Reviewer brief.**
-  1. Can MMO ever patch a draw that §4 did not prove?
-  2. Can any path leave α on a program while G2 reads or replays it?
-  3. Does MMO call only natives, so none of its calls reach G2's recorder?
-  4. Does `off` inject nothing?
+  1. Is every anchor unique and every replacement unique on the pinned bytes?
+  2. Is the legacy path's arithmetic exactly today's?
+  3. Can any chain get the wrapper's model value instead of its animated value?
+  4. Does `off` serve today's bytes?
   5. Does every threshold trace to a measurement or an in-run CvC?
 
-## 10. Owner decisions (each with a recommendation)
+## 12. Owner decisions (each with a recommendation)
 
-0. **Route (coordinator, re-opens arming D2).** D2 said "no `main.js` edit" because an edit breaks on a Keynote update. The
-   host already serves an in-memory, sha-pinned, anchor-counted patch of `main.js` (`live_runtime.patch_player`,
-   `live_runtime.py:94–103`), and any other player sha already refuses live output, so that failure mode is fail-closed today.
-   The defect sits in one unique expression (`var T=i.hidden?0:e.parentOpacity*i.opacity;d!==U&&(T=d+(U-d)*K)`, count 1,
-   byte 2190382) plus the parent-opacity recursion (byte 2264145) and the no-animation branch (byte 2192635).
-   - **(A) MMO, this plan:** GL prototype wrapping, per-draw identification + MVP proofs, G2 suspend coupling; no player bytes.
-   - **(B) Player patch:** two or three anchored replacements in `patch_player` so the player computes Keynote's value itself
-     (chain product of each node's animated-else-model opacity; constant leaf animations honoured). No GL wrapping, no draw
-     identification, every Magic Move and every output covered, no G2 suspension. Costs: rendering (not just observation)
-     moves into `patch_player` (`RUNTIME_VERSION` bump, P2/probe re-run); G2 would read `restOpacity` 0.2947 ≠ 1 on slot 4, so
-     G2 needs a decision (accept rest == override as proven — G2 re-pin + targeted re-qualification — or drop the override
-     offline); wrapper-level fades stay out of scope as in (A).
-   *Rec: (B)* — far smaller surface and generic; if chosen, the planner redoes §2–§9 for (B) as rev 3 (§0, §1 census, §7 Q0
-   and the §8 gate instruments carry over). Decisions 1–5 below were written for (A); 1–3 and 5 still apply to (B).
+0. **Route: ANSWERED (B)**, 2026-09-25.
+1. **Scope: MOOT.** B is inherent to every `eB` effect on every output, and the census shows only slot 4 changes on disk.
+2. **Default and surfacing.** *Rec: `auto` on HDMI, managed OBS and external attach*, independent of the continuity checkbox and
+   GL replay. `OBED_LIVE_MM_OPACITY=off` (or ctor `mm_opacity="off"`) serves today's bytes. Reported as
+   `output.mmOpacity` plus the start log; there is no runtime surfacing because there are no runtime proofs.
+3. **v1 support set.** *Rec: faithful-or-unchanged as in §1*: chains of constant (`both`) values exact; any fade, `hidden`,
+   multi-animation or non-`both` node leaves its subtree unchanged. Before default-on the owner authors one small Q-deck (a
+   translucent object fading across a Magic Move, two translucent objects, one in a group, α₁ → α₂ between slides, a
+   translucent wrapper that fades). Each case is measured either exact or unchanged, never wrong.
+4. **G2 with B.** *Rec: (iii) leave G2 as is.* The `rest-opacity` note on slot 4 is G2's documented fail-closed path, and it
+   now yields correct pixels. Zero G2 bytes, zero allowlist change, no G2 re-qualification; harnesses assert the exact note
+   set. Choose (i) if the note must disappear, at a G2 re-pin plus a targeted re-qualification.
+5. **Residuals.** *Rec: accept for v1*:
+   - fades under a translucent constant wrapper, and wrapper fades, keep today's look (none on disk);
+   - the dashboard preview (`html_preview.py`) and the paint-oracle probe still serve the stock player, so the preview shows
+     the square opaque during the move while the output is translucent.
 
-1. **Scope.** *Rec: every Magic Move in the deck*, gated per transition by the closed vocabulary. Alternative: `glReplay`
-   boundaries only, which leaves GL-off and movie-free decks opaque.
-2. **Default and surfacing.** *Rec: `auto` on HDMI, managed OBS and external attach*, independent of the continuity checkbox
-   and GL replay; `OBED_LIVE_MM_OPACITY=off` opts out; `mmopacity-stop` goes to the page API and session log only in v1.
-   Alternative: mirror GL replay (on only under managed OBS).
-3. **v1 support set.** *Rec: constant-opacity slots only (§1).* Before default-on, the owner authors one small Q-deck: a
-   translucent object that fades across a Magic Move, two translucent objects, a translucent object in a group, and α₁ → α₂
-   between slides, so the exclusions are **measured** refusing (precedent: arming D3).
-4. **G2 hand-back.** *Rec: implicit suspend* on G2's public `state` + armed `canvasId` (§5): no G2 bytes change, no G2
-   re-qualification, stand-downs stay translucent. Alternative: explicit `release` line in G2's `armPost` (visible in G2's
-   bytes; costs a G2 re-pin, a targeted re-qualification incl. managed M1–M5, and opaque stand-downs).
-5. **Residuals.** *Rec: accept for v1* the §5 residual pops (G2 slot-4 unproven at LIVE; MMO stop mid-move); follow up if
-   ever seen on air.
-## 11. Risks and out of scope
+(Rev 3's decision 6 is closed as a fact: `RUNTIME_VERSION` stays 2 and no new version constant is added, §6.)
+
+6. **Authored-value oracle (IWA).** *Rec: add one offline test*: read the P2 square's authored opacity from the source `.key`
+   with the existing shape-style resolver (`iwa_runs.py:671`) and assert it equals the patch's chain product (0.2947); run the
+   same on the Q-deck's shapes. It replaces the export's self-consistency check (product == `singleTextureOpacity`) with an
+   independent one. Shapes only; no runtime or host dependency.
+
+## 13. Risks and out of scope
 
 **Risks.**
-1. Player-internal structure (one draw per texture in order, one program per `eB`, unit 0 sampled, one mat4 uniform) rests on
-   the §0 code-read plus Q0. A Keynote update changes the player sha and `patch_player` refuses the host outright
-   (`live_runtime.py:96`).
-2. Only **one** translucent-Magic-Move instance exists on disk; every other shape is excluded by rule until D3's deck exists.
-3. 17/26 real Magic Move effects fall outside the vocabulary and get no patch (none is translucent today).
-4. Wrapper order: asserted at MMO install; the W2 cross-module test pins it.
+1. B edits rendering bytes. A Keynote update changes the sha and the host refuses it as today (`live_runtime.py:96`). The
+   anchors are exact strings, so a silently shifted meaning is impossible on the pinned bytes.
+2. Only **one** translucent `eB` leaf exists on disk. Every other shape is argued from the code-read until decision 3's deck
+   exists.
+3. The mirror/census uses exact equality; a future export with a non-1 root would change bits on "unchanged" leaves
+   (`(1·root)·…` vs `root·leaf`) and the REAL-gated census would flag it before release.
+4. G2 re-baselines (occluded bands) may move probe/managed expectations. They are re-measured with a KB, never retuned.
 5. The instrument's `readPixels` perturbs timing, so it never runs in a recorded or cadence session.
-6. Recording YUV/4:2:0 and tone-curve error are absorbed by in-take τ, never assumed 0.
-7. Suspension reads G2's `state` and events: a future G2 change to either must keep the W2 cross-module test green.
+6. Recording YUV/4:2:0 and tone-curve error are absorbed by an in-take τ, never assumed 0.
 
-**Out of scope.** Fades or any from ≠ to opacity; wrapper fades; groups; other WebGL effects that share `eB` (content-aware
-builds and transitions, `class SB`, byte 2260586; a WebGL build drawing on the move canvas fails closed on `count`); extending
-the vocabulary; go-to and backward navigation (DOM-painted destinations; if the player ever animated one, MMO arms by hash and
-applies the same proofs); any `main.js` edit; G2's LIVE semantics; the midtone LUT (OD-2 finding 1).
+**Out of scope.**
+- Per-frame wrapper fades.
+- Leaf `hidden` animations.
+- Non-`eB` WebGL effects (their own classes never read the changed values).
+- Extending the `effect_opacity_overrides` vocabulary.
+- The unpatched preview/paint-oracle paths.
+- G2's LIVE semantics.
+- The midtone LUT (OD-2 finding 1).
 
-## 12. Critique log (rev 1 → rev 2)
+## 14. Critique log
+
+### rev 1 → rev 2
 
 Coordinator (post rev 2): OD-2 merged (#229), base updated, old D6 (timing) dropped; decision 0 added.
 
@@ -360,3 +374,34 @@ Coordinator (post rev 2): OD-2 merged (#229), base updated, old D6 (timing) drop
 | 12 | gate | MO-3 key alpha folded into MO-2 as R4 and referenced to the slide-1 DOM key, not a hard-coded 75 ± 3 (tone curve). MO-8 cost folded into MO-2 report-only. MO-2 trimmed to n = 1 per cell plus one CvC pair. MO-5 headless reduced to one pin-time and one mid-move reason; all reasons in the sandbox. |
 | 13 | missing | Q0a now checks what lies under ROI_top each frame, one context per move, and the 3→4 idle case. |
 | 14 | simplification | Work streams 8 → 7 (G2 edit only under the explicit alternative); owner decisions 10 → 6: dropped gate reference (D7) and P2 parity (D9) as technical, merged surfacing into default, merged re-qualification into hand-back. |
+
+### rev 2 → rev 3 (owner chose route B; Opus planner)
+
+| # | Class | Change |
+|---|---|---|
+| 15 | route | §2–§11 rewritten for (B), the in-memory player patch. MMO (A) reduced to a pointer to `1de28cc2`. §0 facts, the census, the Q0 idea and the blend instruments kept. |
+| 16 | correctness | §0 offsets labelled as character offsets; byte offsets are +15 at every cited site. §3 anchors are byte strings with `count == 1` measured on the real bytes. |
+| 17 | correctness | Exact R1–R6 replacements. The wrapper's **animated** value is used, not its model value (slot 4: 1, not 0.2947, so 0.2947 and not 0.2947²). A has-animation flag replaces `d !== U`. The no-animation branch is covered. `setupTexture`'s call is unchanged (root handled at first descent). `e.parentOpacity` is untouched (53 other readers). |
+| 18 | decision | Wrapper fade / `hidden` / multi-animation / non-`both` constant → legacy for the whole chain (faithful or unchanged). Leaf fades are multiplied by the parent product (Keynote-correct; identical on disk). |
+| 19 | measured | Scratch `patch_b.py`/`beh.py`: anchors unique, `node --check` OK, extracted real methods give slot 4 = 0.2947 at p 0/0.5/1 with all other slots unchanged. |
+| 20 | blast radius | Only `eB` consumes the change (Magic Move + shimmer/sparkle). Census `census_b.py`: 110 `eB` leaves on disk, one change (1→2 slot 4). Pinned as a W1 test (committed fixtures + REAL-gated sweep). |
+| 21 | deviation | `RUNTIME_VERSION` not bumped: it versions the observation contract, and a bump either defers every goto autoplay (constant only) or breaks off-path byte identity (constant + literal). Added `PLAYER_PATCH_VERSION` instead; owner decision 6. |
+| 22 | G2 | With B, G2 reads rest 0.2947 on slot 4, so it is `rest-opacity` unproven and LIVE replays the correct rest. Recommended (iii): no G2 change. (i) and (ii) costed. Re-baseline found: G2's marker-swap `occludedBands` (20/128) changes because the occluder is now translucent. |
+| 23 | harness | P2 calls `patch_player` directly and needs `--mm-opacity`. Host-based harnesses inherit the default. Managed M3's opaque reference moves from `g2-off` to an `mm-off` twin. Preview/paint-oracle stay stock (out of scope). |
+| 24 | correction | Rev 2 row 10's rationale is inaccurate: G2 never wraps `get*`/`read*` (`SKIP`, `live_gl_replay_js.py:251`), so an outer instrument's `readPixels` would not be recorded. The `addScriptToEvaluateOnNewDocument` install is kept anyway (true natives, simplest reasoning). |
+| 25 | simplification | Dropped `mm_opacity_table`, the MMO JS module, runtime proofs, fail-closed runtime reasons (MO-5 of rev 2) and the G2 suspend coupling. Work streams 7 → 7 but far smaller (W1 is the core); owner decisions 1 moot, 4 re-cast for B, 6 new. |
+
+### rev 3 → rev 4 (Opus critic)
+
+| # | Class | Change |
+|---|---|---|
+| 26 | verified | Re-ran all rev 3 anchor counts (6 × `count == 1`), `node --check`, `beh.py` and `census_b.py` on the real bytes: results reproduce. R1–R6 were correct: no squaring (each node contributes one value), per-subtree fallback, `fillMode both` makes a constant node constant for any `beginTime`/`duration` and at settle. |
+| 27 | simplification | Six anchors → **four**. The leaf is valued by the same node rule at setup (R1 stores the full product), so rev 3's R3/R4 per-frame `__obedOp` flag and the fade arithmetic are gone; R3 (was R5) becomes one `null!=e.obedOpacity&&(T=…)`. Scratch `patch_c.py`/`beh_c.py`/`census_c.py`: anchors unique, `node --check` OK, same outputs, same census (1 of 110 leaves changes). |
+| 28 | decision | Leaf fades are now **unchanged** (legacy) instead of multiplied by the parent product: identical on disk, removes untested new behaviour; a fade under a translucent wrapper joins the residuals (decision 5). |
+| 29 | correctness | Census class list verified on the bytes (one `textureInfoFromEffect` caller, one `renderFrameWithContext` caller, `new eB(` only in `pB` and `SB`; `RB`/`uB` extend `SB`; builds never reach `eB`). Census/mirror must use exact float equality, not 1e-9. |
+| 30 | correctness | P2 adversarial serves the **stock** `main.js` unless `--gl-replay auto` (`_patched_main_js` only under `gl_auto`, :3332): rev 3's "passed through" would leave P2's fast/slow/bridge-off arms unpatched. `auto` now serves the patched bytes in every arm; the test's monkeypatch lambda takes the kwarg. |
+| 31 | simplification | `PLAYER_PATCH_VERSION` dropped (the served `main.js` sha identifies the bytes); decision 6 closed as a fact. `RUNTIME_VERSION` consumers re-checked: all concern the unchanged hook; `output.mmOpacity` reaches the session identity via `host.output`. |
+| 32 | G2 | (iii) re-checked on every path (proof order, LIVE `opacityFor`, stand-down write-back/replay, `score_armed`, `p2_verdict` filter, core relay): safe. Added: harnesses assert the exact unproven set so a second unproven slot cannot hide; M3's two checks named explicitly; V-arm occlusion follows G2's mask. |
+| 33 | gate | MO-1 re-cast as uniform-in-effect at every slot-4 draw + one settle pixel blend (B leaves the shader untouched); drops the per-frame `readPixels` stall inside G2's recording window. GL-on runs void on any G2 stand-down. |
+| 34 | gate | MO-5 per-frame hashes are not comparable across runs (the move is paced by wall-clock rAF); replaced by settle-frame hashes, CvC in Q0b. |
+
