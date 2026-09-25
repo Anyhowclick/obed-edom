@@ -30,6 +30,7 @@ probe = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(probe)
 
 from obed_edom import mm_handback_score as hb
+from obed_edom.fixture_paths import fixture
 
 DOM = {
     "green.left": 790.153, "green.right": 1140.989, "green.top": 674.900, "green.bottom": 984.968,
@@ -232,7 +233,7 @@ def test_layer_rects_round_half_up_like_the_player_and_flag_duplicate_textures()
     assert len(hb.premise_problems(premise)) == 1
 
 
-REAL_EXPORT = Path("/Users/anyhowclick/Desktop/work/obed-edom/output/p2-binary/html-player")
+REAL_EXPORT = fixture("p2-binary") / "html-player"
 
 
 @pytest.mark.skipif(not (REAL_EXPORT / "assets" / "header.json").is_file(), reason="P2 binary fixture not present")

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Headless HB-1..HB-4 instrument for the Magic Move hand-back geometry fix (plan `keynote_live_handback_geometry` §4).
 
-One fresh headless Chrome per arm, driven through `LiveOutputHost` on the binary-counter fixture (`output/p2-binary`). The
+One fresh headless Chrome per arm, driven through `LiveOutputHost` on the binary-counter fixture (`fixture("p2-binary")`). The
 arm switch is the existing `mm_opacity` switch: `on`/`on2` = "auto" (MMO + R6-R8), `off`/`off2` = "off" (today's bytes).
 Evidence per run: CDP screenshot pairs 0.5 s apart (slide 1; the settled 1->2 GL frame 2.5 s after settle, or the G2 LIVE
 frame under GL auto; the DOM 2 s after build 1; the DOM 2 s after 3->4), the 3->4 settle frame's in-page alpha, the
