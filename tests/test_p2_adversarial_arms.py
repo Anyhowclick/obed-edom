@@ -53,9 +53,10 @@ def test_core_variant_injects_the_variant_and_reports_its_sha(monkeypatch, name)
     assert injected == v.build_continuity_plan(True)
 
 
-def test_fifo_reuse_reports_todays_core_sha_and_stash_any_does_not(monkeypatch):
-    assert _arm(monkeypatch, "--core-variant=fifo-reuse")[2]["coreSha256"] == js_sha256()
-    assert _arm(monkeypatch, "--core-variant=stash-any")[2]["coreSha256"] != js_sha256()
+def test_every_variant_reports_its_own_sha_never_the_cores(monkeypatch):
+    shas = [_arm(monkeypatch, f"--core-variant={name}")[2]["coreSha256"] for name in ("stash-any", "wrong-instance", "fifo-reuse")]
+    assert js_sha256() not in shas
+    assert len(set(shas)) == 3
 
 
 @pytest.mark.parametrize("strip, kept", [
