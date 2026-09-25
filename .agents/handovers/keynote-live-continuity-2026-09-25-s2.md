@@ -81,6 +81,20 @@ Plan (source of truth): `.agents/plans/keynote_live_continuity_generalisation.pl
     outside it the rebased head is 1/5.
   - Verdict: **it leans toward #238/R8 but is not proven.** The cluster is unexplained. That round ran right after the
     nine P2 arms, at load 6–11, with nothing else running.
+  - **Link to #238's documented R8 limit** (owner pointer; `keynote_live_handback_geometry.plan.md` §R8 and SKILL "R8
+    preloads the destination slide only when…"):
+    - An automatic-play MM with no idle stop before it is never preloaded and stays stock.
+    - Engagement is timing-dependent.
+    - Slide g+1's render now runs in the idle **before** the move, so a fast advance can overlap it with the MM's first
+      frames. That case is **UNVERIFIED** in #238.
+    - In every D deck, each slide runs `movie-start` (`automaticPlay: true`) and then an on-click MM
+      (`automaticPlay: false`). So every D-deck MM has an idle stop and R8 can engage. Whether it does depends on whether
+      the g+1 render finishes before the probe's click.
+    - That matches an intermittent, clustered failure better than a constant cost. All failures sit at the MM's
+      `Playing` onset, mostly in arm C, where the bridge is stripped and the decoder stays inside the player's MM
+      subtree.
+    - Test: log R8 engagement per MM next to the blink, e.g. `mixFactor` as `mm_opacity_probe` does, or `slideCache[g+1]`
+      ready at MM setup. If the blink occurs only with engagement or overlap, R8's timing is the cause.
   - Next session: a larger interleaved A/B (≥ 10 per head). Better still, a direct test: the rebased head with R8's
     third replacement dropped, since `mm_opacity` off removes R6–R8 together. Instrument the core's re-home with
     `performance.now()` against the rAF timestamps to see the gap directly.
