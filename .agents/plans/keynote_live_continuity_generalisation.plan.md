@@ -1,11 +1,10 @@
 # Live continuity — generalisation: retire `QUALIFIED_PLAN_SHA256`
 
-Status: **rev 2 + S0, APPROVED by the owner 2026-09-25. OQ-1 is (c), objectID-only runtime identity; every other OQ follows its recommendation (see §6). Nothing implemented.** Read-only against
+Status: **rev 2 + S0, APPROVED by the owner 2026-09-25. OQ-1 is (c), objectID-only runtime identity; every other OQ follows its recommendation (see §6).** **S1 LANDED #237 (`2ee95223`, 2026-09-25); S2 in progress on `claude/continuity-generalisation-s2` (no PR), see §3 S2.** Read-only against
 `386f28f2` (origin/main, #228), `claude/continuity-loopmode` @ `67643332` (local; rev 1 read `b3b57fc8`; the later
 commits are docs only), and `origin/claude/od-2-gl-replay-managed-obs-5bd03f` @ `af76ed97` (rev 1 read `1dd21207`;
 `af76ed97` makes the soak wrap windows length-relative, soak ≥ 3 min, and requires both windows on a looping fixture).
-Supersedes the brief `keynote_live_continuity_generalisation.md` (2026-09-19, stale; keep it until this plan is approved,
-then delete it). Parents: `keynote_live_continuity.plan.md` (policy 3a), `keynote_live_gl_replay_arming.plan.md` §11,
+Supersedes the brief `keynote_live_continuity_generalisation.md` (2026-09-19; deleted, `git show 6fc85b78:.agents/plans/keynote_live_continuity_generalisation.md`). Parents: `keynote_live_continuity.plan.md` (policy 3a), `keynote_live_gl_replay_arming.plan.md` §11,
 `keynote_live_continuity_loopmode.plan.md`, `keynote_live_gl_replay_managed_obs.plan.md`. Style: `~/.AGENTS.md`.
 Citations: `lc` = `src/obed_edom/live_continuity.py`, `js` = `live_continuity_js.py`, `g2` = `live_gl_replay_js.py`.
 
@@ -196,7 +195,7 @@ worktree pinned to a commit, with at most 3 headless Chromes; OBS only on the ow
 
 ### S1: instrument first (no product bytes; after loopMode merges, since it shares the probe)
 
-**S1 DONE 2026-09-25 (gates PASS at merge `421b4f39`; record `.agents/reviews/continuity-generalisation/s1-gates-r1.md`).** Unmerged; awaiting owner.
+**S1 DONE 2026-09-25 (gates PASS at merge `421b4f39`; record `.agents/reviews/continuity-generalisation/s1-gates-r1.md`).** Merged as #237 (`2ee95223`).
 
 | WS | Files (exclusive) | Work |
 |---|---|---|
