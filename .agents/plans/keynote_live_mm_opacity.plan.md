@@ -348,7 +348,12 @@ per-frame `readPixels` pair (a sync stall on every frame, inside G2's recording 
 - Leaf `hidden` animations.
 - Non-`eB` WebGL effects (their own classes never read the changed values).
 - Extending the `effect_opacity_overrides` vocabulary.
-- The unpatched preview/paint-oracle paths.
+- The paint-oracle probe (`html_alpha_probe.py`) stays stock by design: it refuses a changed `main.js` (`:3024`) and measures
+  the player as exported.
+- **Follow-up (owner 2026-09-25, not urgent):** dashboard preview (`html_preview.py`) serves the same rendering replacements, so
+  authors see Keynote's opacity. Needs the replacements split from the observation hook in `live_runtime.py` (a
+  rendering-only function), the preview's `player_digest` / cache contract (`html_preview.py:686`) to key on the served bytes,
+  and its own on/off parity test. Separate small PR after this one lands.
 - G2's LIVE semantics.
 - The midtone LUT (OD-2 finding 1).
 
