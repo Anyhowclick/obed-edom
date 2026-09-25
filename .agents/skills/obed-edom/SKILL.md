@@ -697,13 +697,16 @@ for the parked `iwa-surgical-write-generator` feature.
   `cleanExit` is false from launch until AK's own quit completes; a launch that finds it false raises W3
   (`obsUncleanExit`).
 * **Ownership.** A process is ours only if it is a running OBS by bundle id, its environment carries
-  `CFFIXED_USER_HOME=<home>` (`ps -E`), and its launch date matches when one is recorded. Quit/show touch nothing
-  else. Quit = `NSRunningApplication.terminate()`, wait 10 s, else `stuck`. **Never SIGKILL.**
+  `CFFIXED_USER_HOME=<home>` (`ps -E`), and its launch date matches when one is recorded. LaunchServices can
+  briefly list no OBS at all, so absence from it counts as gone only when `ps -E` agrees; otherwise identity is
+  unknown. Quit/show touch nothing else. Quit = `NSRunningApplication.terminate()`, wait 10 s, else `stuck`.
+  **Never SIGKILL.**
 * **Lock.** `fcntl.flock` on `<home>/ak-engine.lock`, held for the dashboard process's lifetime from the first
   engine action; a second holder ⇒ `ownedElsewhere`.
 * **Readiness** (20 s): pid alive, exactly one CDP page containing `#obed-ak` (its target **id** is recorded),
   websocket `GetVersion == PINNED_OBS`, no Safe-Mode line in the newest log. Liveness every 2 s matches the
-  target by id, never by URL (the page moves to the asset server mid-show).
+  target by id, never by URL (the page moves to the asset server mid-show), and before W5 (`obsExited`) it asks
+  CDP once: a listed target id makes that sample unknown instead.
 * **Websocket.** Product requests are read-only (`GetVersion`, `GetOutputStatus`); only the harness records.
   A fresh `secrets.token_urlsafe(32)` password per launch, loopback only, never in API JSON, logs or URLs.
 * **Routes** (`/api/live/engine`, `/engine/{start|restart|check|show|quit|setupDevice|setupDone}`,

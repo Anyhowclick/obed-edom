@@ -708,13 +708,18 @@ class ManagedObs:
         return warning is None
 
     def _identify(self, pid: int, launch_date: float | None) -> tuple[str, ObsProcess | None]:
-        """("ours", process) · ("gone", None): no such OBS, pid reused or not our home · ("unknown", None)."""
+        """("ours", process) · ("gone", None): no such OBS, pid reused or not our home · ("unknown", None).
+        Absence from LaunchServices is "gone" only when `ps -E` agrees the pid is not ours."""
         try:
             process = next((item for item in self._launcher.processes() if item.pid == pid), None)
         except Exception:
             return "unknown", None
         if process is None:
-            return "gone", None
+            marker = self._launcher.env_marker(pid, self.home)
+            if marker is False:
+                return "gone", None
+            log.info("LaunchServices does not list OBS pid %s but ps -E marker is %s; identity unknown", pid, marker)
+            return "unknown", None
         if launch_date is not None:
             if process.launch_date is None:
                 return "unknown", None
@@ -999,6 +1004,15 @@ class ManagedObs:
             pid, launch_date, target_id, ready_at, reason = self._pid, self._launch_date, self._target_id, self._ready_at, self._reason
             launched_rate = self._launched[0] if self._launched else None
         identity = self._identity(pid, launch_date)
+        ids: set[str] | None = None
+        if identity == "gone" and target_id is not None:
+            try:
+                ids = {str(item.get("id")) for item in _cdp_targets(self._cdp_port)}
+            except Exception:
+                ids = None
+            if ids is not None and target_id in ids:
+                log.info("OBS pid %s reads gone but CDP still lists target %s; identity unknown", pid, target_id)
+                identity = "unknown"
         if identity == "gone":
             self._on_exit()
             return
@@ -1006,10 +1020,10 @@ class ManagedObs:
             return
         self._unknown_ticks = self._unknown_ticks + 1 if identity == "unknown" else 0
         try:
-            ids: set[str] | None = {str(item.get("id")) for item in _cdp_targets(self._cdp_port)}
+            if ids is None:
+                ids = {str(item.get("id")) for item in _cdp_targets(self._cdp_port)}
             self._cdp_failures = 0
         except Exception:
-            ids = None
             self._cdp_failures += 1
         device = self.device() or {}
         device_due = (bool(device.get("deviceHash")) and str(launched_rate) in (device.get("modeIds") or {})

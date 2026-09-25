@@ -5,6 +5,8 @@ import logging
 import os
 import plistlib
 import re
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -193,10 +195,12 @@ class FakeClock:
 
 
 class FakeCdp:
-    """Serves `/json/list` over HTTP and page websockets on the same loopback port."""
+    """Serves `/json/list` over HTTP and page websockets on the same loopback port. `/json/list`
+    answers 503 while `alive()` is False (the Rig ties it to its last launched OBS)."""
 
     def __init__(self) -> None:
         self.navigations: list[tuple[str, str]] = []
+        self.alive: Callable[[], bool] = lambda: True
         self.server = serve(self._handler, "127.0.0.1", 0, process_request=self._http)
         self.port = int(self.server.socket.getsockname()[1])
         self.targets: list[dict[str, Any]] = [self.page("T1", PAGE_URL)]
@@ -207,6 +211,8 @@ class FakeCdp:
 
     def _http(self, connection: Any, request: Any) -> Any:
         if request.path == "/json/list":
+            if not self.alive():
+                return connection.respond(503, "")
             return connection.respond(200, json.dumps(self.targets))
         return None
 
@@ -223,7 +229,8 @@ class FakeCdp:
 
 class FakeLauncher:
     """Fake OBS processes: `alive_pids` are running OBS apps, `dates` their launch dates and
-    `homes` the CFFIXED_USER_HOME each was started with (None: no marker)."""
+    `homes` the CFFIXED_USER_HOME each was started with (None: no marker). `ls_hidden` pids are
+    left out of `processes()` (a LaunchServices blip) while `env_marker` (the kernel) still answers."""
 
     def __init__(self) -> None:
         self.launches: list[dict[str, Any]] = []
@@ -231,6 +238,7 @@ class FakeLauncher:
         self.dates: dict[int, float | None] = {}
         self.homes: dict[int, str | None] = {}
         self.marker_unknown: set[int] = set()
+        self.ls_hidden: set[int] = set()
         self.processes_fail = False
         self.stale: list[ObsProcess] = []
         self.terminated: list[int] = []
@@ -264,7 +272,7 @@ class FakeLauncher:
     def processes(self):
         if self.processes_fail:
             raise OSError("LaunchServices unavailable")
-        return [ObsProcess(pid, self.dates.get(pid), handle=("app", pid, self.dates.get(pid))) for pid in sorted(self.alive_pids)]
+        return [ObsProcess(pid, self.dates.get(pid), handle=("app", pid, self.dates.get(pid))) for pid in sorted(self.alive_pids - self.ls_hidden)]
 
     def _verified(self, process):
         live = ("app", process.pid, self.dates.get(process.pid))
@@ -310,12 +318,18 @@ class Rig:
         self.clock = FakeClock()
         self.launcher = FakeLauncher()
         self.cdp = FakeCdp()
+        self.cdp.alive = self._obs_alive
         self.ws = FakeObsWebsocket(self._tree_password, version=version, output_active=output_active)
         self.ws_port = self.ws.port if ws_alive else managed_obs.free_port()
         self._ports: list[int] = []
         self.engines: list[ManagedObs] = []
         self.app = _fake_app(tmp_path)
         self.engine = self.make()
+
+    def _obs_alive(self) -> bool:
+        """CEF's DevTools server lives in the OBS process: it answers only while our last launched OBS runs."""
+        launches = self.launcher.launches
+        return bool(launches) and launches[-1]["pid"] in self.launcher.alive_pids
 
     def _tree_password(self) -> str | None:
         config = self.home / managed_obs.TREE_RELPATH / "plugin_config/obs-websocket/config.json"
@@ -1662,3 +1676,202 @@ def test_setup_active_covers_queued_running_and_waiting_setup(rig):
     assert r.engine.setup_active is False
     r.run(lambda: r.engine.ensure_started(25, "external"))
     assert r.engine.setup_active is False
+
+
+# --- LaunchServices blips (plan: managed_obs_false_exit rev 2) ----------------
+# LaunchServices (`processes()`) sometimes returns an empty list for a few ms while the pid is
+# alive. `_identify` must then ask the kernel (`env_marker`, i.e. `ps -E`) before saying "gone",
+# and liveness must ask CDP for the target id before raising W5.
+
+
+def _blip_engine(r: Rig, on_sleep: Callable[[], None]) -> ManagedObs:
+    """Replace the rig's engine with one whose poll sleeps call `on_sleep()` before advancing the fake clock."""
+
+    def sleep(seconds: float) -> None:
+        on_sleep()
+        r.clock.sleep(seconds)
+
+    r.engine.close()
+    r.engine = r.make(sleep=sleep)
+    return r.engine
+
+
+def test_ls_blip_on_one_liveness_tick_is_not_w5(rig, caplog):
+    caplog.set_level(logging.INFO, logger="obed_edom.managed_obs")
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    # One sample where LaunchServices leaves our pid out; the kernel still sees it with our marker.
+    r.launcher.ls_hidden.add(4242)
+    r.engine._liveness()
+    state = r.engine.state()
+    assert state["state"] == "ready" and "obsExited" not in _ids(state)
+    assert r.engine._unknown_ticks == 1
+    assert r.engine.cdp_endpoint is not None, "the pid is not forgotten"
+    assert "LaunchServices does not list OBS pid 4242 but ps -E marker is True" in caplog.text
+    # The next clean sample resets the unknown counter.
+    r.launcher.ls_hidden.clear()
+    r.engine._liveness()
+    assert r.engine._unknown_ticks == 0
+    assert r.engine.state()["state"] == "ready"
+
+
+def test_ls_blip_during_readiness_still_reaches_ready(rig):
+    r = rig()
+    hidden_at_sleep: list[bool] = []
+
+    def on_sleep() -> None:
+        hidden_at_sleep.append(bool(r.launcher.ls_hidden))
+        if len(hidden_at_sleep) == 3:
+            r.launcher.ls_hidden.clear()
+
+    engine = _blip_engine(r, on_sleep)
+    # LaunchServices has not listed the pid yet when readiness starts polling.
+    r.launcher.on_launch = lambda launcher, pid: launcher.ls_hidden.add(pid)
+    state = r.run(lambda: engine.ensure_started(25, "external"))
+    assert hidden_at_sleep == [True, True, True], "readiness kept polling while the pid was hidden"
+    assert state["state"] == "ready" and "obsExited" not in _ids(state)
+    assert engine.target_id == "T1"
+
+
+def test_ls_blip_during_terminate_wait_keeps_waiting(rig):
+    r = rig()
+    clean_at_sleep: list[bool] = []
+
+    def on_sleep() -> None:
+        if not r.launcher.terminated:
+            return
+        clean_at_sleep.append(r.record()["cleanExit"])
+        if len(clean_at_sleep) == 3:
+            r.launcher.alive_pids.discard(4242)  # OBS really finishes quitting now
+
+    engine = _blip_engine(r, on_sleep)
+    r.run(lambda: engine.ensure_started(25, "external"))
+    # OBS takes a while to quit, and LaunchServices drops it from the list the moment Quit is sent.
+    r.launcher.quits = False
+    r.launcher.on_terminate = lambda pid: r.launcher.ls_hidden.add(pid)
+    state = r.run(engine.quit)
+    assert r.launcher.terminated == [4242]
+    assert clean_at_sleep == [False, False, False], "cleanExit is not written while the process still exists"
+    assert state["state"] == "stopped"
+    assert r.record()["cleanExit"] is True
+
+
+def test_ls_blip_on_ensure_started_does_not_relaunch_or_reseed(rig):
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    tree = _tree_bytes(r.tree)
+    record = (r.home / "ak-engine.json").read_bytes()
+    r.launcher.ls_hidden.add(4242)
+    state = r.run(lambda: r.engine.ensure_started(25, "external"))
+    # Before the fix "gone" was permission: a second OBS on the same tree while ours still ran.
+    assert len(r.launcher.launches) == 1 and r.launcher.terminated == []
+    assert _tree_bytes(r.tree) == tree
+    assert (r.home / "ak-engine.json").read_bytes() == record
+    assert state["state"] == "ready"
+
+
+def test_ls_blip_on_check_of_a_stuck_engine_stays_stuck(rig):
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    r.launcher.quits = False
+    assert r.run(r.engine.quit)["state"] == "stuck"
+    r.launcher.ls_hidden.add(4242)
+    state = r.run(r.engine.check)
+    assert state["state"] == "stuck" and "stuck" in _ids(state)
+    r.launcher.ls_hidden.clear()
+    r.run(r.engine.show)
+    assert r.launcher.shown == [4242], "the stuck OBS was not forgotten"
+
+
+def test_ls_blip_with_unreadable_kernel_is_identity_unknown_never_w5(rig):
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    r.launcher.ls_hidden.add(4242)
+    r.launcher.marker_unknown.add(4242)  # `ps -E` cannot be read either
+    r.engine._liveness()
+    r.engine._liveness()
+    assert r.engine.state()["state"] == "ready"
+    r.engine._liveness()
+    state = r.engine.state()
+    assert state["reason"] == "identityUnknown" and "obsIdentityUnknown" in _ids(state)
+    assert "obsExited" not in _ids(state)
+    r.launcher.ls_hidden.clear()
+    r.launcher.marker_unknown.clear()
+    r.engine._liveness()
+    state = r.engine.state()
+    assert state["state"] == "ready" and "obsIdentityUnknown" not in _ids(state)
+
+
+def test_liveness_asks_cdp_before_declaring_w5(rig, caplog):
+    caplog.set_level(logging.INFO, logger="obed_edom.managed_obs")
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    # Both LaunchServices and the kernel say gone, yet CDP still lists our page target.
+    r.launcher.alive_pids.discard(4242)
+    r.cdp.alive = lambda: True
+    r.engine._liveness()
+    state = r.engine.state()
+    assert state["state"] == "ready" and "obsExited" not in _ids(state)
+    assert r.engine.cdp_endpoint is not None
+    assert "OBS pid 4242 reads gone but CDP still lists target T1" in caplog.text
+    # CDP goes away too: W5 on that tick.
+    r.cdp.alive = lambda: False
+    r.engine._liveness()
+    state = r.engine.state()
+    assert state["state"] == "blocked" and state["reason"] == "exited" and "obsExited" in _ids(state)
+
+
+def test_ls_blip_with_pid_reused_by_another_home_is_gone(rig):
+    r = rig()
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    date = r.launcher.dates[4242]
+    r.launcher.ls_hidden.add(4242)
+    r.launcher.homes[4242] = "/Users/someone"  # the pid is alive but now belongs to a process without our marker
+    assert r.engine._identify(4242, date) == ("gone", None)
+    r.cdp.alive = lambda: False  # our OBS, and CEF's DevTools server with it, is gone
+    r.engine._liveness()
+    state = r.engine.state()
+    assert state["reason"] == "exited" and "obsExited" in _ids(state)
+
+
+def test_engine_thread_absorbs_ls_blips_and_still_sees_a_real_exit(rig):
+    r = rig()
+    r.engine = ManagedObs(r.home, launcher=r.launcher, clock=r.clock, sleep=r.clock.sleep, obs_app=r.app,
+                          pick_port=r._pick_port, ready_timeout_s=2.0, liveness_s=0.05)
+    r.engines.append(r.engine)
+    r.run(lambda: r.engine.ensure_started(25, "external"))
+    samples = [0]
+    real_marker = r.launcher.env_marker
+
+    def counting_marker(pid, home):
+        samples[0] += 1
+        return real_marker(pid, home)
+
+    r.launcher.env_marker = counting_marker
+    r.launcher.ls_hidden.add(4242)
+    deadline = time.monotonic() + 5
+    while samples[0] < 20 and time.monotonic() < deadline:
+        assert r.engine.state().get("reason") != "exited"
+        time.sleep(0.02)
+    assert samples[0] >= 20, "liveness ticked ~20 times with the pid hidden"
+    assert "obsExited" not in _ids(r.engine.state())
+    r.launcher.alive_pids.clear()
+    deadline = time.monotonic() + 5
+    while r.engine.state().get("reason") != "exited" and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert r.engine.state()["reason"] == "exited"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="AppKitLauncher.env_marker reads the environment via macOS `ps -E`")
+def test_appkit_env_marker_on_real_processes(tmp_path):
+    launcher = managed_obs.AppKitLauncher()
+    reaped = subprocess.Popen([sys.executable, "-c", "pass"])
+    reaped.wait()
+    assert launcher.env_marker(reaped.pid, tmp_path) is False, "a reaped pid is gone to the kernel"
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], env={"CFFIXED_USER_HOME": str(tmp_path)})
+    try:
+        assert launcher.env_marker(child.pid, tmp_path) is True
+        assert launcher.env_marker(child.pid, tmp_path / "other") is False
+    finally:
+        child.kill()
+        child.wait()
