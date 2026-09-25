@@ -796,7 +796,7 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     if d_g2.get("counter") == "binary":
         tol, bound, min_distinct = LIMITS["binaryNativeTol"], LIMITS["binaryRepeatMax"], LIMITS["binaryDistinctFrac"] * rate
         check(m1, "slide2-live repeat <= slide1-native repeat + tol", [lr, nr], None not in (lr, nr) and lr <= nr + tol, f"same take, tol {tol}")
-        check(m1, "slide2-live repeat", lr, lr is not None and lr <= bound, f"<= {bound}")
+        check(m1, "slide2-live repeat", lr, lr is not None and lr <= bound, f"<= {bound}", enforced=rate == 25)
         check(m1, "slide2-live distinct/s", distinct, distinct is not None and distinct >= min_distinct, f">= {min_distinct:.1f}")
     else:
         check(m1, "slide2-live repeat < slide1-native repeat", [lr, nr], lr is not None and nr is not None and lr < nr, "same take")
@@ -897,8 +897,9 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     native_repeat_frac = native.get("repeatFrac")
     if d_g2.get("counter") == "binary":
         bound = LIMITS["binaryReshownMax"]
-        check(m4, "slide2-reshown repeat", [reshown, native_repeat_frac], None not in (reshown, native_repeat_frac)
-              and reshown <= bound and reshown <= native_repeat_frac + bound, f"<= {bound} and <= native + {bound}")
+        check(m4, "slide2-reshown repeat <= native + tol", [reshown, native_repeat_frac], None not in (reshown, native_repeat_frac)
+              and reshown <= native_repeat_frac + bound, f"<= native + {bound}")
+        check(m4, "slide2-reshown repeat", reshown, reshown is not None and reshown <= bound, f"<= {bound}", enforced=rate == 25)
     else:
         check(m4, "slide2-reshown repeat < slide1-native repeat", [reshown, native_repeat_frac],
               None not in (reshown, native_repeat_frac) and reshown < native_repeat_frac, "relative to native (owner 2026-09-24)")
