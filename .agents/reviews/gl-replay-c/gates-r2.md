@@ -14,8 +14,8 @@ the 23:25 cut-off and was finished on 2026-09-24. Phase 2 ran on `bef57a23` (Cod
   Neither worktree was dirty at start or end.
 - **Shas (start == end in both).** G2 `10a5b36a…` v1 (host reports `injected` v1 `10a5b36a…`). Core `e9338aff…`, unchanged.
   Fixture: `index.html` `5908d479…`, `preserve-inject.json` `53cf8339…` and `continuity-plan-inject.json` `91a29d5e…`.
-  Evidence: `output/gates-glc/r2/shas-*.txt` and `output/gates-glc/r2/p2/shas-*.txt`.
-- **KB splices** (harness only, `output/gl-replay-c-harness/splices/splice.py`, one asserted substitution each):
+  Evidence: `output/evidence/gates-glc/r2/shas-*.txt` and `output/evidence/gates-glc/r2/p2/shas-*.txt`.
+- **KB splices** (harness only, `output/evidence/gl-replay-c-harness/splices/splice.py`, one asserted substitution each):
   - `oldbytes` = the `d56fb0dd` text, sha `4f8850e0…`;
   - `frozen` = the LIVE `perLiveUpload()` call removed. It re-applies on `bef57a23` with 1 substitution, sha `413a00ba…`;
   - the r1 `-v1diag` arm is obsolete, since the new G2 sha equals it.
@@ -60,21 +60,21 @@ the 23:25 cut-off and was finished on 2026-09-24. Phase 2 ran on `bef57a23` (Cod
 | KB off report scored (offline, `kb_off_scored.py`) | RED | Fast/slow/no-bridge off reports ⇒ False (b,c,d,f,g,h). (f) names composite, sampleFrame and glProbe. The same rebuild applied to the four auto reports ⇒ True (a–h), so the rebuild is sound. For off reports, (g) gets `[]` pre-flip owners (off reports do not record them) |
 | CvC fast vs fast-rep2 | Identical | Every finding (id, pass, status) equal |
 | **A7′** (`glProbeSampleFramePairing`, 4 runs × 4 reads) | PASS | lag 0: **16/16** \|Δ\| ≤ 2 (Δ −1…2, mostly +1). KB lag 1: 0/16 (Δ 15–18). `instrumentEscalation` False, no `alphaMin` < 255 read (every probe `ok`, alphaMin 255) |
-| **A7 re-run** (sampleFrame vs same-read screenshot) | **PASS at \|Δ\| ≤ 3** (owner 2026-09-24: widened from 2) | lag 0: **16/16** within ±3 (12/16 within ±2), Δ −1…−3 (typically −2; r1 was −1, max 2). KB lag 1: 0/12 (Δ 16–19). Reason for the widening: the screenshot now comes about 1 counter step (~33 ms) later because the awaited probe read sits between `sampleFrame` and it; the instrument still separates same-read from previous-read (≤ 3 vs ≥ 16) and never mis-decodes, and the (f) series gate on progress, not pairing. Rescored from the saved deltas in `output/gates-glc/r2/p2/a7.txt`, no re-run. |
+| **A7 re-run** (sampleFrame vs same-read screenshot) | **PASS at \|Δ\| ≤ 3** (owner 2026-09-24: widened from 2) | lag 0: **16/16** within ±3 (12/16 within ±2), Δ −1…−3 (typically −2; r1 was −1, max 2). KB lag 1: 0/12 (Δ 16–19). Reason for the widening: the screenshot now comes about 1 counter step (~33 ms) later because the awaited probe read sits between `sampleFrame` and it; the instrument still separates same-read from previous-read (≤ 3 vs ≥ 16) and never mis-decodes, and the (f) series gate on progress, not pairing. Rescored from the saved deltas in `output/evidence/gates-glc/r2/p2/a7.txt`, no re-run. |
 | **Q3** 20-min soak (`9989e8bf`, same G2 bytes; alone, load 8–30) | PASS | 0 GL errors in all 20 samples; heap 9.65–10.97 MB (flat, max ≤ 1.25× min); dropped 0/1381 frames; rVFC → rAF at end of media (the movie ends at 46 s, so all 1369 uploads happen before minute 1 and the rest of the soak is rAF replay, as in r3); `loseContext` at minute 10 ⇒ `contextLost` stand-down, write-back skipped, zone `retired failure/contextLost`; P3/P4 == control (parity 0, inside 0) |
 
 ## Harness changes since r1
 - `splices/splice.py` and `g3/analyse_g3.py`: the expected G2 sha is now `10a5b36a…`.
-- `output/gates-glc/run_gates_glc.sh`: `VIEWPORTS` env selects host viewports.
-- New `output/gates-glc/run_auto_glc.sh`: a copy of `gates-g5g6/r3/g6p2/run_auto.sh`. Its only change is that `RUNNER` is
+- `output/evidence/gates-glc/run_gates_glc.sh`: `VIEWPORTS` env selects host viewports.
+- New `output/evidence/gates-glc/run_auto_glc.sh`: a copy of `gates-g5g6/r3/g6p2/run_auto.sh`. Its only change is that `RUNNER` is
   word-split (`${=RUNNER}`), so it can hold `splices/run_spliced.py frozen <gate> <script>`.
-- New `output/gates-glc/r2/p2/kb_off_scored.py`: rebuilds `glReplayCarry1to2` arguments from a report (plan, preserve
+- New `output/evidence/gates-glc/r2/p2/kb_off_scored.py`: rebuilds `glReplayCarry1to2` arguments from a report (plan, preserve
   events, census, reads, lingering, index sequence plus flipIndex, pre-flip owners from the carry detail) and scores it.
-- The A7/A7′ scoring is inline in `output/gates-glc/r2/p2/a7.txt` (it calls `p2_verdict.glProbeSampleFramePairing`, and for A7
+- The A7/A7′ scoring is inline in `output/evidence/gates-glc/r2/p2/a7.txt` (it calls `p2_verdict.glProbeSampleFramePairing`, and for A7
   `frameIndex` vs `screenIndexNonGating`, modulo 256).
 - Everything else is as listed in r1: the `-oldbytes` arm, the 3 s uploads/s window, the N1/N2 rows and the integrity checks.
 
-## Evidence (main checkout `output/gates-glc/r2/`)
+## Evidence (main checkout `output/evidence/gates-glc/r2/`)
 - `g3/`: all g3h arms incl. go-to, gate 6, P5-7 and Q3, plus `gates.json`.
 - `goff/`, `goff-1600-rerun/`.
 - `p5a/`: 7 runs plus the oldbytes KB, `n3-cvc*.txt`, `rescore*.json`.

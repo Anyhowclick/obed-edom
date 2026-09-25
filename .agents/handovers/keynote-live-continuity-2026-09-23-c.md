@@ -38,7 +38,7 @@ gate 2 FAIL (never armed, version). One v1-diagnostic arm (not a gate): LIVE, in
 
 ## OBS rate + output cadence (2026-09-24, `b3127ed5`, G2 `10a5b36a`, OBS 32.2.2, P2 fixture)
 Scratch harness (G2 armed under attach by an in-memory `DiagHost` lifting the attach guard; module spliced only for tick timing and
-toggles), main checkout `output/obs-rate/`. No product change.
+toggles), main checkout `output/evidence/obs-rate/`. No product change.
 - **In page, the ≈14/s did not reproduce:** OBS rAF 30/s, G2 rVFC ticks + uploads 29.3–30.2/s, 0 GL errors — for the final G2 and the
   pre-(c) bytes (`4f8850e0`), interleaved, and with two headless Chromes alongside (load 25–30). OBS tick p50 ≈ 7.5 ms (readback 4–5 ms,
   upload 0.3 ms) vs 5 ms headless. Cause of the 09-23 figure unknown (its script is gone).
