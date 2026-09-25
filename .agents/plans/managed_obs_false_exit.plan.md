@@ -1,4 +1,4 @@
-# Managed OBS: false `obsExited` from a LaunchServices blip (plan rev 2, 2026-09-25)
+# Managed OBS: false `obsExited` from a LaunchServices blip (plan rev 2, approved 2026-09-25)
 
 ## The bug
 
@@ -152,7 +152,7 @@ No route test: the API shape does not change. The dead-output restart exception 
 
 Main session only. One OBS at a time, never while another session's OBS runs. Hands off Keynote.
 
-**L1 stress** (`scripts/managed_obs_liveness_stress.py`; §5 Q3 decides whether it is committed)
+**L1 stress** (scratch-only script, not committed — owner Q3)
 - Setup: scratch home, a real `ManagedObs` Take, liveness at the production 2 s tick, plus a side thread sampling
   `_identify` at ~50 Hz. Run until ≥5 raw LaunchServices absences are seen or 30 minutes pass, and report the rate.
   Launching and quitting a throwaway app (e.g. TextEdit) on a timer may be used as the trigger. CPU burners are optional.
@@ -174,7 +174,6 @@ Main session only. One OBS at a time, never while another session's OBS runs. Ha
 - Tests: `tests/test_managed_obs.py`.
 - Docs: SKILL.md "Alpha Keynote managed OBS", the Ownership and Readiness bullets (the absence rule and the liveness
   CDP corroboration).
-- Optionally the L1 script.
 - No dashboard or API change. W5 text unchanged.
 
 The OD-2 branch's `--arm soak` stays theirs. After merge, OD-2 rebases and re-runs its soak as the end-to-end check;
@@ -186,6 +185,8 @@ the new telemetry line shows any blips it absorbs.
 - **Q2.** Add a consecutive-"gone" requirement on top of F1 + F2? Recommended: no, because it costs 2 s per real exit.
 - **Q3.** L1 stress script: keep it scratch-only (critic; the OD-2 soak plus telemetry cover re-runs, and it avoids a third
   liveness harness), or commit it (coordinator's lean; re-runnable on the show Mac before 10-10)?
+
+**Owner answers 2026-09-25:** Q1 residual (documented, no code); Q2 no consecutive-sample rule; Q3 L1 stays scratch-only.
 
 ## 6. Review log
 
