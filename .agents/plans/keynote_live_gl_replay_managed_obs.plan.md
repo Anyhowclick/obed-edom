@@ -1,6 +1,6 @@
 # Plan: GL replay under managed OBS (lifting OD-2)
 
-Status: **rev 2 APPROVED by the owner** (OQ-3a + OQ-4 as proposed), 2026-09-24 (rev 1 critiqued against the code; changes in §9). Planned read-only against `d12a5e14` (origin/main, #226 merged). Nothing is implemented.
+Status: **rev 2 APPROVED by the owner** (OQ-3a + OQ-4 as proposed), 2026-09-24; **implemented** — see §10 for the 2026-09-25 decisions (rev 1 critiqued against the code; changes in §9). Planned read-only against `d12a5e14` (origin/main, #226 merged). Nothing is implemented.
 Parents: `keynote_live_gl_replay_arming.plan.md` (OD-1..3, gates; D5 superseded for Keyer — §6), `keynote_live_managed_obs.plan.md` (§1 "Unchanged", §10 Codex item 7, §11 risk 5), handover `keynote-live-continuity-2026-09-23-c.md` (Next 1), gate record `.agents/reviews/gl-replay-c/gates-r2.md` (gate numbering). Style: `~/.AGENTS.md` (minimal natspec, no inline comments, match local style, keep it simple).
 
 **Owner decisions (final, 2026-09-24):** (1) lifted for the managed OBS only (`bridge="obs-managed"`); external attach (`obs-cdp`) stays refused with "attach output not qualified". (2) GL replay defaults ON in Keyer mode, `OBED_LIVE_GL_REPLAY=off` opts out; HDMI stays opt-in. (3, answers to rev 2 OQs) OQ-1: ship default-on regardless; no usable screenshot alpha moves M3 to hardware day, not a blocker. OQ-2 **confirmed**: rate 30 is judged relative to native. OQ-3: the soak uses a separate looping-movie fixture (§4 "Soak fixture").
@@ -155,3 +155,14 @@ Order: P ∥ H on one branch (disjoint files; the coordinator commits) → unit 
 9. **New risks:** media-time budget vs the 46 s movie (§2.6, INVALID guard); OBS source settings and page-reload paths checked (§2.5, `managed_obs.py:103–104`, `web/live.py:163–172`); stage-gate reporting gap (§1.7, OQ-4); mistyped opt-out now blocks Keyer starts (§1.3).
 10. **Factual fixes:** unit test 8's (`"off"`, None) row would `TypeError` (`monkeypatch.setenv` with None); `bridge=None` ≡ `"obs-cdp"` (line 765) so test 4/5 params collapse; `transparentBackground` merge is line 861 (not 862); Codex item 7 is line 287 (not 290); SKILL Host bullet 709–711 (not 707); rate-30 G2 has only a diagnostic 4 %, not a qualified range.
 11. Verified as stated in rev 1: `live_host.py:772/880/1019–1025`, `managed_obs.RATES` + `fps_custom` (`managed_obs.py:44,103`), `live_continuity_js.py:1595`, `p2_verdict.py:520`, all named tests/fixtures (`host_with_continuity`, `forbid_gl_module`, `fake_plan_pair`, `ready`, `read_log`), `score_armed`, `forced_fail_seed`, `GL_REPLAY_READ_JS`, `EXPECTED_GL_MODES`, G2 sha `10a5b36a…`, `__obedOutput.hide()` = `#body` opacity 0 under attach (`live_host.py:414`), engine `configure`/`setup_device_begin`/`quit`/`record_dir`.
+
+## 10. Addendum 2026-09-25 (owner decisions after the live round; gate record `.agents/reviews/gl-replay-managed/gates-r1.md`)
+
+- **Binary counter fixture** (main checkout `output/p2-binary/`, `scripts/binary_counter_movie.py`) replaces the grey counter:
+  Chromium tone-maps native `<video>` midtones but not `drawImage`/`texImage2D`, so grey counters misread across native and G2.
+- **Managed default = `auto` at every output rate** (`812fd9d5`). The §1.6 rate-30 contingency was applied on 2026-09-24
+  (`b255c6b6`) on grey-counter evidence and reverted once the binary counter showed 30 clean; OQ-2's rule (30 judged relative to
+  native, absolute bound report-only) stands.
+- Binary limits: G2 repeat ≤ 1 % and ≤ native + 1 %; reshow ≤ 2 % and ≤ native + 2 %; distinct ≥ 0.96 × rate; hand-back max
+  forward step ≤ 3; 2× native ≤ 1 %; positive control ≥ 5 %. Absolute bounds enforced at 25 only.
+- Soak default 5 min (20 before a show or on a looping fixture). rAF keep-alive fix parked. Reviewer: Opus (Codex limit).

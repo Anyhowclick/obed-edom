@@ -116,15 +116,22 @@ boundaries, in three arms — continuity on, `OBED_LIVE_CONTINUITY=off`, and
 continuity on with the bridging boundary disabled — plus one attach-mode run, and
 scores decoder identity + playback-clock continuity at each cut.
 
-**GL replay (opt-in)**: `OBED_LIVE_GL_REPLAY=auto` (default `off`) keeps a movie
-live across a click-driven Magic Move whose destination draws artwork above it,
-by replaying the player's own WebGL frame with the live movie as the texture.
+**GL replay**: keeps a movie live across a click-driven Magic Move whose
+destination draws artwork above it, by replaying the player's own WebGL frame
+with the live movie as the texture. It is on by default under **Keyer output** and off
+for screen output and the developer OBS attach path. `OBED_LIVE_GL_REPLAY=off`
+turns it off everywhere; `auto` turns it on for screen output. Any other value
+refuses to start.
 `output.continuity.glReplay.mode` reports `off`, `injected`, `notApplicable` or
-`unavailable`; with GL replay `auto` and continuity on, the OBS attach output
-reports `unavailable` (otherwise `off`), and `notCarried` still lists that
-boundary while GL replay is injected. Qualify it with
-`scripts/live_continuity_probe.py --gl-replay auto` and
-`scripts/p2_recovery_html_adversarial.py --gl-replay auto`.
+`unavailable`; the developer attach path reports `unavailable` ("attach output
+not qualified") when asked for `auto`, and `notCarried` still lists that
+boundary while GL replay is injected. Chromium draws a native `<video>` with a
+midtone tone curve that the replayed frames do not get, so real footage can
+shift in brightness (up to about 4 % in the midtones) where GL replay takes over
+and where the slide's first build hands the movie back; timing stays continuous. Qualify it with
+`scripts/live_continuity_probe.py --gl-replay auto`,
+`scripts/p2_recovery_html_adversarial.py --gl-replay auto` and, under Keyer
+output, `scripts/managed_obs_qualify.py --arm g2|failsafe|soak`.
 
 ### Codec report
 
@@ -201,8 +208,10 @@ backup Mac and move the UltraStudio's Thunderbolt cable to it.
   OBS from Terminal with `open -n -a OBS` and choose **Launch Anyway**.
 - If the dashboard dies mid-show, OBS keeps keying the last picture. Relaunch
   the dashboard: it quits the old engine. Then press **Take output** again.
-- GL replay is not active under Keyer output. Movies play at the native
-  `<video>` cadence, with some repeated frames.
+- A movie carried through a click-driven Magic Move keeps playing on the next
+  slide (GL replay); its midtones may shift slightly in brightness when GL replay
+  takes over and at that slide's first build. To fall back to a frozen poster,
+  start the dashboard with `OBED_LIVE_GL_REPLAY=off`.
 
 **Qualification** (developer, launches OBS on this Mac; no other OBS may be running):
 `uv run python scripts/managed_obs_qualify.py --arm both --rate 25 --takes 2 --out DIR`.
