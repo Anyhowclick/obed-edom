@@ -33,13 +33,16 @@ tally(){ case $1 in 0) ;; 3) PENDING=$((PENDING+1)); echo "    PENDING REGISTRAT
 # the process exit agrees (0 when the set is empty, 1 otherwise), and the injected core sha equals the arm's (variant
 # sha for --core-variant, else today's). A finding rendered `**False** (inconclusive)` is never red: any inconclusive
 # finding fails the arm's integrity. Under --gl-replay auto `glReplayCarry1to2` must be present and `refusedCarry1to2`
-# absent (the reverse otherwise), so the GL path cannot be skipped silently. "RECORD" registers no set: it prints the
+# absent (the reverse otherwise), so the GL path cannot be skipped silently. The report's `Core variant:` / `Strip:` header
+# lines must name the arm's own arguments ("none" when not passed), and a strip arm's injected plan sha must differ from
+# the unstripped plan's (`build_continuity_plan`). "RECORD" registers no set: it prints the
 # observed set and returns 3 only when those integrity checks hold (exit 0 or 1).
 expect(){ $PY - "$@" <<'PYEOF'
-import re,sys
+import hashlib,json,re,sys
 sys.path.insert(0,"scripts")
 from continuity_core_variants import variant_sha
 from obed_edom.live_continuity_js import js_sha256
+from obed_edom.p2_verdict import build_continuity_plan
 log,rc,spec,args=sys.argv[1],int(sys.argv[2]),sys.argv[3],sys.argv[4:]
 try: text=open(log,encoding="utf-8",errors="replace").read()
 except OSError as e: print(f"    no log ({e}) -> MISMATCH"); sys.exit(1)
@@ -52,14 +55,21 @@ slot_ok=("glReplayCarry1to2" in ids and "refusedCarry1to2" not in ids) if auto e
 core=re.search(r"injected core sha256: ([0-9a-f]{64})",text)
 success=re.search(r"^success: \*\*(True|False)\*\*",text,re.M)
 unchanged=re.search(r"^Source unchanged: \*\*True\*\*",text,re.M)
-variant=next((a.split("=",1)[1] for a in args if a.startswith("--core-variant=")),None) or next((args[i+1] for i,a in enumerate(args[:-1]) if a=="--core-variant"),None)
+def arg(name): return next((a.split("=",1)[1] for a in args if a.startswith(name+"=")),None) or next((args[i+1] for i,a in enumerate(args[:-1]) if a==name),None)
+variant,strip=arg("--core-variant"),arg("--strip")
+head_core=re.search(r"^Core variant: (\S+) · injected core sha256: ",text,re.M)
+head_strip=re.search(r"^Strip: (\S+) · injected plan sha256: ([0-9a-f]{64})$",text,re.M)
+unstripped=hashlib.sha256(json.dumps(build_continuity_plan("--disable-bridge34" not in args)).encode()).hexdigest()
+header_ok=(bool(head_core) and head_core.group(1)==(variant or "none") and bool(head_strip) and head_strip.group(1)==(strip or "none")
+           and (strip is None or head_strip.group(2)!=unstripped))
 want_sha=variant_sha(variant) if variant else js_sha256()
 sha_ok=bool(core) and core.group(1)==want_sha
 count_ok=len(found)==15 and len(ids)==15
 exit_ok=(rc==0)==(success is not None and success.group(1)=="True") and rc in (0,1)
 print(f"    core sha {core.group(1) if core else None} expected {want_sha} {'MATCH' if sha_ok else 'MISMATCH'}")
+print(f"    header core {head_core.group(1) if head_core else None} strip {head_strip.group(1) if head_strip else None} plan sha {head_strip.group(2) if head_strip else None} (unstripped {unstripped}) {'OK' if header_ok else 'WRONG'}")
 print(f"    exit {rc}; findings {len(found)}/15; source unchanged {bool(unchanged)}; success {success.group(1) if success else None}; 1->2 slot {'glReplayCarry1to2' if auto else 'refusedCarry1to2'} {'OK' if slot_ok else 'WRONG'}; inconclusive: {inconclusive or '{}'}; observed red: {sorted(red) or '{}'}")
-integrity=sha_ok and count_ok and bool(unchanged) and bool(success) and exit_ok and slot_ok and not inconclusive
+integrity=sha_ok and count_ok and bool(unchanged) and bool(success) and exit_ok and slot_ok and not inconclusive and header_ok
 if spec=="RECORD":
     print(f"    expected red: (none registered) -> {'RECORDED' if integrity else 'MISMATCH'}")
     sys.exit(3 if integrity else 1)
