@@ -1377,7 +1377,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fixture", type=Path, help=f"soak fixture root (default {SOAK_FIXTURE}); other arms: {FIXTURE} (default) or "
                         f"its binary-counter copy ({binary_counter_movie.BINARY_FIXTURE})")
     parser.add_argument("--precheck", action="store_true", help="soak: the loop pre-check instead of the soak")
-    parser.add_argument("--soak-minutes", type=int, default=20)
+    parser.add_argument("--soak-minutes", type=int, default=5, help="20 before a show or on a looping fixture")
     parser.add_argument("--build-fixture", type=Path, metavar="KEY", help="soak: export the owner's looping .key copy into --fixture")
     parser.add_argument("--i-have-owner-go", action="store_true", help="required by --build-fixture (it drives Keynote)")
     parser.add_argument("--out", type=Path, help="writes <out>/runs/<arm>-<ts>.json, <out>/shots/ and a summary")
