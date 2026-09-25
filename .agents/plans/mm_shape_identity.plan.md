@@ -108,8 +108,8 @@ around it.
 
 ## 2. Results (live, 2026-09-24): 58 decks, 0 INCONCLUSIVE, palette checksum OK after every deck
 
-Evidence lives in `<main>/output/evidence/mm-shape-id/runs/`: `<name>.key`, `<name>.m4v`, batch logs, and
-`results.json` in the worktree harness. Every verdict was cross-checked by eye on contact sheets
+Evidence: the batch logs in `<main>/output/evidence/mm-shape-id/runs/` and `results.json` in its `harness/`. The run
+decks and movies were trashed on 2026-09-25; the harness plus `palette.key` regenerate them. Every verdict was cross-checked by eye on contact sheets
 (TM2, TG1, TG1b, TD0, TD1, TZ1, E2c). An offline audit confirmed that every run deck holds exactly
 the specified objects and geometry.
 
@@ -221,7 +221,7 @@ contests were measured).
   3. Run the full suites.
   4. Codex review.
   5. Open the PR.
-- Evidence: `output/evidence/mm-shape-id/golden/` in the worktree holds the before/after captures and
+- Evidence: `<main>/output/evidence/mm-shape-id/golden/` (moved out of the worktree 2026-09-25) holds the before/after captures and
   `zflags_*`.
 
 ## 3b. Status 2026-09-24 23:15 (commits 4821f566 and the build-exclusion commit)
@@ -251,7 +251,7 @@ contests were measured).
   3. Run the full suites (pytest, `test:ui`, `test:maps`).
   4. Opus peer review.
   5. Open the PR.
-  6. Afterwards, trash the review deck and `runs/`.
+  6. Afterwards, trash the review deck and `runs/` (done 2026-09-25).
 - Open questions from the implementer:
   - The partner row's `ambiguous` flag still counts objects excluded by builds.
   - The build-out rule is unobserved live (FRC slide 147 only).
@@ -283,7 +283,8 @@ contests were measured).
   - Keynote merges identical variations: a shape drawn fresh with equal values reused the same
     style, and Paste Style snapped back to the theme style. So in real decks "same values, different
     style object" occurs mainly across parent styles.
-- **Harness** (`<worktree>/output/evidence/mm-shape-id/`, gitignored):
+- **Harness** (`<main>/output/evidence/mm-shape-id/harness/`, gitignored; copied out of the worktree on
+  2026-09-25, and `run.sh` points `PYTHONPATH` at the main checkout's `src`):
   - `roles.py`: offline dump and palette contract;
   - `gen.py`: 50 variants, geometry lint, probe → asmap, batches;
   - `read.py`: max-over-frames midpoint coverage;
