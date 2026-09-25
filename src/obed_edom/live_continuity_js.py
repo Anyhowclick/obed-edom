@@ -773,6 +773,9 @@ PRESERVE_CORE_JS = r"""
     // must not remount it onto the footprint where it would paint its grating over
     // the bridged decoder (covering the composited counter patch).
     if (v.__obedSuppressed34) return;
+    // A facade stub is never a decoder: pooled when the dom-swap took it out, it
+    // was remounted beside the carried decoder, two painters for one instance.
+    if (v.__obedFacadeFor) return;
     if ((v.__obedGen == null ? 0 : v.__obedGen) < preserveGeneration) {
       note('stash-stale-gen', {
         elId: v.__obedElId, why: why,
