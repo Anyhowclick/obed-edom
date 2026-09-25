@@ -1,8 +1,9 @@
 """Synthetic tests for `scripts/managed_obs_qualify.py` Magic Move opacity paths (plan keynote_live_mm_opacity §7, §8, §10); no OBS.
 
 Covered: the OBED_LIVE_MM_OPACITY refusal, `EXPECTED_STATS` keyed by patch mode, M3's opaque reference moved to the
-`mm-off` twin (and its KB still FAILing), the M3 g2-off T-alpha check (patch on, GL replay off), the MO-2 scorers (tau, R1-R4,
-a CvC per rate, KB = patch-off twins), the MO-4 G2 facts in the MO-2 takes and their provenance, the MO-3 mapping onto
+`mm-off` twin (and its KB still FAILing), the M3 g2-off T-alpha check (patch on, GL replay off), the MO-2 scorers (tau, R1,
+the neutral-background R2 with R3's handovers folded in, R4 and its tau_key, the premise-INCONCLUSIVE path, a CvC per rate,
+KB = patch-off twins, the offline `--score` re-scorer), the MO-4 G2 facts in the MO-2 takes and their provenance, the MO-3 mapping onto
 `mm_opacity_probe`'s scorer and its shared driver (the logger payload), and the session wiring (mm_opacity passed explicitly,
 logger transport, alpha-squared splice, forced stand-down seed).
 """
@@ -200,9 +201,15 @@ GL_ROWS = set(range(11, 16)) | set(range(16, 24)) | set(range(24, 28))
 MOVE_GL_ROWS = set(range(11, 16))
 
 
-def series(kind: str, poke: int | None = None, offset: float = 0.0) -> dict[str, np.ndarray]:
+def over(background: float, alpha: float = q.MM_ALPHA) -> np.ndarray:
+    return np.round(alpha * OPAQUE + (1 - alpha) * background)
+
+
+def series(kind: str, poke: int | None = None, offset: float = 0.0, double: int | None = None) -> dict[str, np.ndarray]:
     """on: GL draws the square translucent (== DOM); off: GL opaque until build 1; off-live: opaque until G2 LIVE (slide2-live);
-    square: alpha-squared GL; poke: one opaque frame at that row."""
+    square: alpha-squared GL; counter: translucent GL over a white/grey/black counter passing under half of ROI_top during
+    the move (as the live p2-binary counter does); poke: one opaque frame at that row; double: at that row the DOM and GL
+    squares overlap (alpha * (2 - alpha) over black)."""
     top = np.zeros((len(PHASES), K, 3))
     for row in range(len(PHASES)):
         value = DOM
@@ -212,8 +219,12 @@ def series(kind: str, poke: int | None = None, offset: float = 0.0) -> dict[str,
             elif kind == "square":
                 value = np.round(q.MM_ALPHA ** 2 * OPAQUE)
         top[row] = value + offset
+        if kind == "counter" and row in MOVE_GL_ROWS:
+            top[row, : K // 2] = over((0, 255, 128)[row % 3])
     if poke is not None:
         top[poke] = OPAQUE
+    if double is not None:
+        top[double] = np.round(q.MM_ALPHA * (2 - q.MM_ALPHA) * OPAQUE)
     return {"index": np.arange(len(PHASES)) + 100, "phase": np.array(PHASES), "pixels.top": np.clip(top, 0, 255).astype(np.uint8),
             "means.empty": np.zeros((len(PHASES), 3))}
 
@@ -225,12 +236,19 @@ def test_phase_median_and_reference_are_the_opaque_slide2_live_square():
     assert q.phase_median(series("on"), ("slide2-hidden",)) is None
 
 
-def test_expected_top_blends_s_off_over_the_frames_empty_patch():
-    ser = series("on")
-    ser["means.empty"][3] = (10.0, 20.0, 30.0)
-    e = q.expected_top(ser, np.tile(OPAQUE, (K, 1)))
-    assert np.allclose(e[0], q.MM_ALPHA * OPAQUE)
-    assert np.allclose(e[3], q.MM_ALPHA * OPAQUE + (1 - q.MM_ALPHA) * np.array([10.0, 20.0, 30.0]))
+def test_badness_accepts_the_square_over_any_neutral_background_and_rejects_the_rest():
+    s_off = np.tile(OPAQUE, (K, 1))
+    for background in (0, 64, 128, 255):
+        top = np.tile(over(background), (1, K, 1))
+        assert q.mmo_badness(top, s_off)[0] <= 1.0, background
+    opaque = q.mmo_badness(np.tile(OPAQUE, (1, K, 1)), s_off)[0]
+    assert opaque == pytest.approx((1 - q.MM_ALPHA) * (OPAQUE.max() - OPAQUE.min()))
+    squared = q.mmo_badness(np.tile(np.round(q.MM_ALPHA ** 2 * OPAQUE), (1, K, 1)), s_off)[0]
+    assert squared > 30
+    tinted = q.mmo_badness(np.tile(over(0) + (0, 10, 0), (1, K, 1)), s_off)[0]
+    assert tinted == pytest.approx(10, abs=1)
+    too_bright = q.mmo_badness(np.full((1, K, 3), 255.0), np.zeros((K, 3)))[0]
+    assert too_bright == pytest.approx(q.MM_ALPHA * 255)
 
 
 def all_series(**over: dict[str, np.ndarray]) -> dict[str, dict[str, np.ndarray]]:
@@ -242,8 +260,10 @@ def test_tau_is_the_worst_slide1_component_plus_one():
     s_off = np.tile(OPAQUE, (K, 1))
     cal = q.mmo_tau(all_series(), s_off)
     assert cal["domOnOff"] == {"g2-on/g2-mmoff": 0.0, "g2off-on/g2off-mmoff": 0.0}
-    instrument = round(float(np.abs(DOM - q.MM_ALPHA * OPAQUE).max()), 2)
+    instrument = round(float(q.mmo_badness(np.tile(DOM, (1, K, 1)), s_off)[0]), 2)
+    assert instrument < 1
     assert set(cal["instrument"].values()) == {instrument}
+    assert cal["calibration"] == instrument
     assert cal["tau"] == round(instrument + 1, 2)
 
 
@@ -261,21 +281,58 @@ def test_series_checks_pass_the_patched_player_and_fail_every_patch_off_twin():
     s_off = np.tile(OPAQUE, (K, 1))
     tau = q.mmo_tau(all_series(), s_off)["tau"]
     on = q.mmo_series_checks(series("on"), s_off, tau)
-    assert on["frames"] == 24 and on["R1"] == 0 and on["R2"] <= tau and on["R3"] == 0
-    for kind in ("off", "off-live"):
-        off = q.mmo_series_checks(series(kind), s_off, tau)
-        assert off["R1"] > 0 and off["R2"] > tau and off["R3"] > tau
-    assert q.mmo_series_checks(series("off-live"), s_off, tau)["R1First"] == 111
+    assert on["frames"] == 24 and on["R1"] == 0 and on["R2"] <= tau and on["R2Over"] == 0 and on["R2Frames"] == []
+    assert on["handovers"] == {"moveStart": None, "build1": None}
+    off_live = q.mmo_series_checks(series("off-live"), s_off, tau)
+    assert off_live["R1"] == 5 and off_live["R1First"] == 111 and off_live["R2"] > tau and off_live["R2Over"] == 5
+    off = q.mmo_series_checks(series("off"), s_off, tau)
+    assert off["R1"] == 17 and off["R2"] > tau and off["R2Over"] == 17
+    assert [f["index"] for f in off["R2Frames"]][:2] == [111, 112]
+    assert off["R2Frames"][0]["alphaEffOverBlack"] == 1.0
+
+
+def test_series_checks_pass_the_translucent_square_over_a_moving_white_counter():
+    # The live failure of the old R2 (E from the empty patch) and R3 (raw steps): a white/grey/black counter passes under
+    # the translucent square; each pixel is alpha * S + (1 - alpha) * B with B neutral, so the badness stays at the
+    # slide-1 calibration while raw frame-to-frame steps reach ~180.
+    s_off = np.tile(OPAQUE, (K, 1))
+    tau = q.mmo_tau(all_series(), s_off)["tau"]
+    counter = q.mmo_series_checks(series("counter"), s_off, tau)
+    assert np.abs(np.diff(series("counter")["pixels.top"].astype(float), axis=0)).max() > 170
+    assert counter["R1"] == 0 and counter["R2"] <= tau and counter["R2Over"] == 0
+    assert counter["handovers"]["moveStart"][1]["index"] == 111
 
 
 def test_series_checks_catch_a_one_frame_opaque_pop_and_the_alpha_squared_player():
     s_off = np.tile(OPAQUE, (K, 1))
     tau = q.mmo_tau(all_series(), s_off)["tau"]
     pop = q.mmo_series_checks(series("on", poke=26), s_off, tau)
-    assert pop["R1"] == 1 and pop["R2Frame"] == 126 and pop["R2"] > tau and pop["R3"] > tau
-    assert pop["R3At"][1:] in (["slide2-handback", "slide2-handback"],)
+    assert pop["R1"] == 1 and pop["R2Frame"] == 126 and pop["R2"] > tau and pop["R2Over"] == 1
+    assert pop["R2Frames"][0]["phase"] == "slide2-handback" and pop["R2Frames"][0]["row"] == 26
     square = q.mmo_series_checks(series("square"), s_off, tau)
-    assert square["R1"] == 0 and square["R2"] > tau and square["R3"] > tau
+    assert square["R1"] == 0 and square["R2"] > tau and square["R2Over"] == 17
+
+
+def test_series_checks_catch_a_double_frame_and_estimate_its_alpha():
+    # One frame where the DOM and GL squares overlap: over black it reads alpha * (2 - alpha) * S (~0.50), as the live
+    # 30 fps g2off-on take does at the first GL frame of the move. No allowance: it FAILs and is reported.
+    s_off = np.tile(OPAQUE, (K, 1))
+    tau = q.mmo_tau(all_series(), s_off)["tau"]
+    double = q.mmo_series_checks(series("on", double=11), s_off, tau)
+    assert double["R1"] == 0 and double["R2Over"] == 1 and double["R2Frame"] == 111
+    frame = double["R2Frames"][0]
+    assert frame["phase"] == "mm-move"
+    assert frame["alphaEffOverBlack"] == pytest.approx(q.MM_ALPHA * (2 - q.MM_ALPHA), abs=0.01)
+    assert double["handovers"]["moveStart"][1] == frame
+
+
+def test_series_checks_report_the_handover_frames_of_the_patch_off_twin():
+    s_off = np.tile(OPAQUE, (K, 1))
+    handovers = q.mmo_series_checks(series("off"), s_off, 2.0)["handovers"]
+    assert [f["index"] for f in handovers["moveStart"]] == [110, 111]
+    assert [f["phase"] for f in handovers["moveStart"]] == ["mm-move", "mm-move"]
+    assert [f["index"] for f in handovers["build1"]] == [127, 128]
+    assert handovers["build1"][0]["badness"] > 2.0 >= handovers["build1"][1]["badness"]
 
 
 def test_series_checks_ignore_frames_outside_the_window():
@@ -292,9 +349,11 @@ def test_series_checks_read_none_without_a_reference_or_tau():
 
 # --- MO-2 key (R4) and CvC -----------------------------------------------------------------------------------------------
 
-def key_shot(alpha: int) -> np.ndarray:
+def key_shot(alpha: int, empty: int = 0) -> np.ndarray:
     img = np.zeros((*SHAPE, 4), np.uint8)
-    img[q.mmo_masks(ARMED, SHAPE)["top"]] = (0, 175, 0, alpha)
+    masks = q.mmo_masks(ARMED, SHAPE)
+    img[masks["top"]] = (0, 175, 0, alpha)
+    img[masks["empty"]] = (255, 255, 255, empty)
     return img
 
 
@@ -308,6 +367,20 @@ def test_key_r4_passes_translucent_settle_and_fails_the_opaque_twins():
     assert key["domOnOff"] == {"g2-on/g2-mmoff": 0.0, "g2off-on/g2off-mmoff": 0.0}
     assert key["tauKey"] == round(abs(75 - q.MM_ALPHA * 255) + 1, 2)
     assert key["R4"] == {"g2-on": 0.0, "g2-mmoff": 180.0, "g2off-on": 0.0, "g2off-mmoff": 180.0}
+
+
+def test_tau_key_takes_the_background_from_the_slide2_settle_shot_not_slide1():
+    # Live MO-2 r1: slide-1 content covers the empty patch in D (alpha 128/255), so E_key from D's patch read ~188 against a
+    # DOM key of 75 and tau_key came out 114. The patch is empty only on slide 2 (mmo_masks), so M supplies it.
+    shots = key_shots()
+    for pair in shots.values():
+        pair["D"] = key_shot(75, empty=255)
+    key = q.mmo_key(shots, q.mmo_masks(ARMED, SHAPE))
+    assert key["tauKey"] == round(abs(75 - q.MM_ALPHA * 255) + 1, 2)
+    assert key["tauKey"] < 2
+    shots["g2-on"]["M"] = key_shot(75, empty=100)
+    assert q.mmo_key(shots, q.mmo_masks(ARMED, SHAPE))["instrument"]["g2-on"] == pytest.approx(
+        abs(75 - (q.MM_ALPHA * 255 + (1 - q.MM_ALPHA) * 100)))
 
 
 def test_key_r4_catches_an_opaque_settle_and_is_none_without_the_reference():
@@ -358,7 +431,7 @@ def test_mmo_gates_pass_the_patched_player_with_every_kb_failing(tmp_path):
     assert gates["MO-4"]["verdict"] == "PASS", gates["MO-4"]["failing"]
     checks = checks_of(gates["MO-2"])
     for off in ("g2-mmoff", "g2off-mmoff"):
-        for r in ("R1", "R2: max |ROI_top - E|", "R3: max frame-to-frame step", "R4: key alpha |M - D|"):
+        for r in ("R1", "R2: neutral-background badness (R3 folded in)", "R4: key alpha |M - D|"):
             assert checks[f"KB: {off} {r}"]["ok"]
     assert checks["CvC g2-on vs g2-on-2 before tau"]["value"]["max"] == 0.0
     assert gates["mmoCalibration"]["cvc"]["max"] == 0.0
@@ -368,14 +441,14 @@ def test_mmo_gates_fail_a_one_frame_opaque_pop_in_the_patched_session(tmp_path):
     gates = q.mmo_gates(mmo_run(tmp_path, **{"series:g2-on": series("on", poke=20)}), ARMED)
     failing = gates["MO-2"]["failing"]
     assert "g2-on R1: frames within tau of S_off" in failing
-    assert "g2-on R2: max |ROI_top - E|" in failing and "g2-on R3: max frame-to-frame step" in failing
+    assert "g2-on R2: neutral-background badness (R3 folded in)" in failing
     assert "g2-on-2" not in " ".join(failing)
 
 
 def test_mmo_gates_fail_when_the_patch_off_twin_reads_like_the_patch(tmp_path):
     gates = q.mmo_gates(mmo_run(tmp_path, **{"series:g2-mmoff": series("on")}), ARMED)
     assert "KB: g2-mmoff R1" in gates["MO-2"]["failing"]
-    assert "KB: g2-mmoff R2: max |ROI_top - E|" in gates["MO-2"]["failing"]
+    assert "KB: g2-mmoff R2: neutral-background badness (R3 folded in)" in gates["MO-2"]["failing"]
 
 
 def test_mmo_gates_fail_a_cvc_over_two(tmp_path):
@@ -410,6 +483,48 @@ def test_mmo_gates_fail_without_the_opaque_reference(tmp_path):
     failing = q.mmo_gates(run, ARMED)["MO-2"]["failing"]
     assert "S_off: g2off-mmoff slide2-live ROI_top" in failing
     assert "g2-on R1: frames within tau of S_off" in failing
+
+
+def test_mmo_gates_pass_the_counter_under_the_square_and_fail_one_double_frame(tmp_path):
+    gates = q.mmo_gates(mmo_run(tmp_path, **{"series:g2off-on": series("counter")}), ARMED)
+    assert gates["MO-2"]["verdict"] == "PASS", gates["MO-2"]["failing"]
+    gates = q.mmo_gates(mmo_run(tmp_path, rate=30, **{"series:g2off-on": series("counter", double=11)}), ARMED)
+    assert gates["MO-2"]["failing"] == ["g2off-on R2: neutral-background badness (R3 folded in)"]
+    value = checks_of(gates["MO-2"])["g2off-on R2: neutral-background badness (R3 folded in)"]["value"]
+    assert value["R2Over"] == 1 and value["R2Frames"][0]["index"] == 111
+    assert gates["mmoCalibration"]["doubleFrameAlpha"] == pytest.approx(value["R2Frames"][0]["alphaEffOverBlack"], abs=0.01)
+
+
+def test_mmo_gates_are_inconclusive_when_slide1_backgrounds_are_not_neutral(tmp_path):
+    tinted = {}
+    for name, kind in (("g2-on", "on"), ("g2-mmoff", "off-live"), ("g2off-on", "on"), ("g2off-mmoff", "off"), ("g2-on-2", "on")):
+        ser = series(kind)
+        ser["pixels.top"][:8] = np.round(over(0) + (0, 20, 0)).astype(np.uint8)
+        tinted[f"series:{name}"] = ser
+    gates = q.mmo_gates(mmo_run(tmp_path, **tinted), ARMED)
+    assert gates["MO-2"]["verdict"] == "INVALID"
+    assert "INCONCLUSIVE" in gates["MO-2"]["invalid"]
+    assert not checks_of(gates["MO-2"])["premise: slide-1 badness (neutral backgrounds under ROI_top)"]["ok"]
+    run, invalid = mmo_run(tmp_path, **tinted), []
+    q.arm_gates("mmo", run, types.SimpleNamespace(), ARMED, invalid)
+    assert invalid and "INCONCLUSIVE" in invalid[0]
+
+
+def test_score_rescores_saved_takes_without_obs(monkeypatch, tmp_path, capsys):
+    (tmp_path / "runs").mkdir()
+    for rate, over_ in ((25, {}), (30, {"series:g2off-on": series("on", double=11)})):
+        run = {**mmo_run(tmp_path, rate=rate, **over_), "arm": "mmo", "fixture": str(tmp_path / "p2-binary")}
+        (tmp_path / "runs" / f"mmo-{rate}.json").write_text(json.dumps(run))
+    (tmp_path / "runs" / "summary-x.json").write_text("{}")
+    facts: list[Path] = []
+    monkeypatch.setattr(q, "fixture_facts", lambda fixture, allow: facts.append(fixture) or ARMED)
+    monkeypatch.setattr(q, "obs_running", lambda: pytest.fail("--score must not look for OBS"))
+    assert q.main(["--score", str(tmp_path)]) == 1
+    assert facts == [tmp_path / "p2-binary"]
+    results = json.loads(next(tmp_path.glob("rescore-*.json")).read_text())
+    assert [(r["rate"], r["MO-2"], r["failing"]) for r in results] == [
+        (25, "PASS", []), (30, "FAIL", ["g2off-on R2: neutral-background badness (R3 folded in)"])]
+    assert "[mmo rate 30] MO-2 FAIL" in capsys.readouterr().out
 
 
 def test_mmo_mo4_reads_g2_facts_per_patch_mode(tmp_path):

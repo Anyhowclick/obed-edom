@@ -19,9 +19,10 @@ Arms:
   mmo           MO-2 (Magic Move opacity plan §10): one launch per rate (25, 30; --rate ignored), sessions g2 / g2-off x patch
                 on / off (g2-on, g2-mmoff, g2off-on, g2off-mmoff) plus a CvC g2-on-2 at each rate, all recorded: slide1-native 6 s (key
                 shot D) -> mm-move -> advance (key shot M at settle) -> [LIVE] -> slide2-live 4 s -> slide2-handback (build 1)
-                -> slide2-after. ROI_top series and an empty-canvas patch are decoded per frame; gates MO-2 (R1-R4, KB =
-                the patch-off twins, tau and tau_key per take from its own slide-1 DOM frames, gated by that take's CvC) and
-                MO-4 (G2 facts per patch mode). Binary fixture only.
+                -> slide2-after. ROI_top series and an empty-canvas patch are decoded per frame; gates MO-2 (R1, R2 = the
+                neutral-background test with R3's handovers folded in, R4; KB = the patch-off twins, tau and tau_key per take
+                from its own slide-1 DOM frames, gated by that take's CvC) and MO-4 (G2 facts per patch mode). Binary fixture
+                only. --score DIR re-scores the saved takes under DIR/runs without OBS.
   mmo-cef       MO-3: the MO-1 logger, step loop (`mm_opacity_probe.drive`) and scorer of mm_opacity_probe inside the OBS
                 CEF, unrecorded; GL replay off x arms on, off, off2, sq and auto x those plus the forced stand-down pair fsd,
                 fsdoff (10 sessions, one launch). Binary fixture only.
@@ -39,6 +40,7 @@ OBED_LIVE_MM_OPACITY is set (every session passes mm_opacity explicitly); keeps 
 recording or a g2 movie past 44 s of media marks a take INVALID.
 
 usage: uv run python scripts/managed_obs_qualify.py --arm g2 --rate 25 --takes 2 --out DIR
+       uv run python scripts/managed_obs_qualify.py --score DIR
 """
 
 from __future__ import annotations
@@ -152,6 +154,7 @@ MMO_FROM_RECT = {"x": 635.86, "y": 722.97, "w": 178.0, "h": 157.0}
 MMO_EMPTY_RECT = {"x": 1150, "y": 690, "w": 50, "h": 90}
 MMO_ERODE_PX = 6
 MMO_CVC_MAX = 2
+MMO_CALIB_MAX = 7.0
 MMO_SLIDE1_S = 6.0
 MMO_LIVE_S = 4.0
 MMO_CEF_GL = ("off", "auto")
@@ -1106,45 +1109,70 @@ def median_delta(a: np.ndarray | None, b: np.ndarray | None) -> float | None:
     return None if a is None or b is None else round(float(np.abs(a - b).max()), 2)
 
 
-def expected_top(series: dict[str, np.ndarray], s_off: np.ndarray, alpha: float = MM_ALPHA) -> np.ndarray:
-    """Per frame E = alpha * S_off + (1 - alpha) * B_frame (B_frame = that frame's empty-patch mean)."""
-    return alpha * s_off[None] + (1.0 - alpha) * series["means.empty"][:, None, :]
+def mmo_badness(top: np.ndarray, s_off: np.ndarray, alpha: float = MM_ALPHA) -> np.ndarray:
+    """Per frame, in output levels, how far ROI_top is from the square at `alpha` over a neutral background. The residual
+    R = P - alpha * S_off is (1 - alpha) * B; premise (the p2-binary fixture): every background under the square is neutral
+    (black canvas and sentinel, black/white counter, grey grating), so R's channels agree and lie in [0, (1 - alpha) * 255].
+    Badness = max over ROI_top of max(channel spread of R, excess of R outside that range)."""
+    r = top.astype(float) - alpha * s_off[None]
+    hi, lo = r.max(axis=-1), r.min(axis=-1)
+    return np.maximum.reduce([hi - lo, hi - (1.0 - alpha) * 255, -lo]).max(axis=-1)
 
 
 def slide1_instrument(series: dict[str, np.ndarray] | None, s_off: np.ndarray | None, alpha: float = MM_ALPHA) -> float | None:
-    """max |DOM - E| over slide-1 frames: how well E predicts the (Keynote-correct) DOM square."""
+    """Max badness over slide-1 frames: the (Keynote-correct) DOM square read by the same test."""
     if series is None or s_off is None or not phase_rows(series, MMO_SLIDE1).any():
         return None
-    rows = phase_rows(series, MMO_SLIDE1)
-    return round(float(np.abs(series["pixels.top"][rows].astype(float) - expected_top(series, s_off, alpha)[rows]).max()), 2)
+    return round(float(mmo_badness(series["pixels.top"][phase_rows(series, MMO_SLIDE1)], s_off, alpha).max()), 2)
 
 
 def mmo_tau(series: dict[str, dict[str, np.ndarray] | None], s_off: np.ndarray | None, alpha: float = MM_ALPHA) -> dict[str, Any]:
-    """tau = max(patch on vs off slide-1 DOM medians per GL mode, instrument |DOM - E| per session) + 1."""
+    """tau = max(patch on vs off slide-1 DOM medians per GL mode, slide-1 badness per session) + 1."""
     dom = {f"{on}/{off}": median_delta(phase_median(series.get(on), MMO_SLIDE1), phase_median(series.get(off), MMO_SLIDE1))
            for on, off in MMO_PAIRS}
     instrument = {name: slide1_instrument(ser, s_off, alpha) for name, ser in series.items()}
     values = [*dom.values(), *instrument.values()]
     tau = round(max(values) + 1, 2) if values and None not in values else None
-    return {"tau": tau, "domOnOff": dom, "instrument": instrument}
+    calibration = max(instrument.values()) if instrument and None not in instrument.values() else None
+    return {"tau": tau, "domOnOff": dom, "instrument": instrument, "calibration": calibration}
+
+
+def mmo_frame(series: dict[str, np.ndarray], row: int, bad: np.ndarray, s_off: np.ndarray) -> dict[str, Any]:
+    """alphaEffOverBlack = mean G / S_off's mean G: alpha over black, alpha * (2 - alpha) where the DOM and GL squares overlap."""
+    mean = series["pixels.top"][row].astype(float).mean(axis=0)
+    return {"row": int(row), "index": int(series["index"][row]), "phase": str(series["phase"][row]), "badness": round(float(bad[row]), 2),
+            "mean": np.round(mean, 1).tolist(), "alphaEffOverBlack": round(float(mean[1] / s_off[:, 1].mean()), 3)}
+
+
+def mmo_handovers(series: dict[str, np.ndarray], bad: np.ndarray, s_off: np.ndarray) -> dict[str, Any]:
+    """The first ROI_top change inside `MMO_WINDOW` (slide-1 DOM -> move) and inside slide2-handback (GL -> DOM at build 1),
+    each with its predecessor frame."""
+    top = series["pixels.top"].astype(float)
+    changed = np.r_[False, np.abs(np.diff(top, axis=0)).max(axis=(1, 2)) > 0]
+    out: dict[str, Any] = {}
+    for name, phases in (("moveStart", MMO_WINDOW), ("build1", ("slide2-handback",))):
+        rows = np.nonzero(changed & phase_rows(series, phases))[0]
+        out[name] = [mmo_frame(series, r, bad, s_off) for r in (rows[0] - 1, rows[0])] if len(rows) else None
+    return out
 
 
 def mmo_series_checks(series: dict[str, np.ndarray] | None, s_off: np.ndarray | None, tau: float | None,
                       alpha: float = MM_ALPHA) -> dict[str, Any]:
-    """Over the frames from mm-move to past build 1 (`MMO_WINDOW`): R1 frames whose ROI_top mean is within tau of S_off's,
-    R2 max |ROI_top - E|, R3 max |ROI_top| step between consecutive frames (covers DOM -> GL and GL -> DOM)."""
+    """Over the frames from mm-move to past build 1 (`MMO_WINDOW`): R1 frames whose ROI_top mean is within tau of S_off's;
+    R2 max `mmo_badness`, every frame over tau listed. R3 is folded into R2 (its handover frames are window frames) and
+    reported as `handovers`."""
     if series is None or s_off is None or tau is None or not phase_rows(series, MMO_WINDOW).any():
-        return {"frames": 0, "R1": None, "R2": None, "R3": None}
+        return {"frames": 0, "R1": None, "R2": None}
     rows = phase_rows(series, MMO_WINDOW)
     top = series["pixels.top"][rows].astype(float)
     near = np.abs(top.mean(axis=1) - s_off.mean(axis=0)).max(axis=1) <= tau
-    r2 = np.abs(top - expected_top(series, s_off, alpha)[rows]).max(axis=(1, 2))
-    steps = np.abs(np.diff(top, axis=0)).max(axis=(1, 2)) if len(top) > 1 else np.zeros(1)
-    worst = int(steps.argmax())
-    index, phase = series["index"][rows], series["phase"][rows]
-    return {"frames": int(rows.sum()), "R1": int(near.sum()), "R1First": int(index[near][0]) if near.any() else None,
-            "R2": round(float(r2.max()), 2), "R2Frame": int(index[int(r2.argmax())]), "R3": round(float(steps.max()), 2),
-            "R3At": [int(index[worst]), str(phase[worst]), str(phase[min(worst + 1, len(phase) - 1)])]}
+    bad = mmo_badness(series["pixels.top"], s_off, alpha)
+    window = np.nonzero(rows)[0]
+    over = window[bad[window] > tau]
+    return {"frames": int(rows.sum()), "R1": int(near.sum()), "R1First": int(series["index"][rows][near][0]) if near.any() else None,
+            "R2": round(float(bad[window].max()), 2), "R2Frame": int(series["index"][window[int(bad[window].argmax())]]),
+            "R2Over": len(over), "R2Frames": [mmo_frame(series, r, bad, s_off) for r in over[:20]],
+            "handovers": mmo_handovers(series, bad, s_off)}
 
 
 def shot_alpha(img: np.ndarray | None, mask: np.ndarray) -> np.ndarray | None:
@@ -1153,7 +1181,8 @@ def shot_alpha(img: np.ndarray | None, mask: np.ndarray) -> np.ndarray | None:
 
 def mmo_key(shots: dict[str, dict[str, np.ndarray | None]], masks: dict[str, np.ndarray], alpha: float = MM_ALPHA) -> dict[str, Any]:
     """R4 on the key: per session max |M - D| alpha on ROI_top (M at settle, D on slide 1); tau_key = max(D patch on vs off per GL
-    mode, |D - E_key| per session) + 1, E_key = alpha * the reference's M alpha + (1 - alpha) * that D's empty-patch alpha."""
+    mode, |D - E_key| per session) + 1, E_key = alpha * the reference's M alpha + (1 - alpha) * that session's M empty-patch
+    alpha. The patch is empty on slide 2 only (`mmo_masks`); on slide 1 other content covers it, so D cannot supply it."""
     top, empty = masks["top"], masks["empty"]
     ref = shot_alpha((shots.get(MMO_REFERENCE) or {}).get("M"), top)
     dom: dict[str, float | None] = {}
@@ -1164,10 +1193,10 @@ def mmo_key(shots: dict[str, dict[str, np.ndarray | None]], masks: dict[str, np.
     r4: dict[str, float | None] = {}
     for name, pair in shots.items():
         d, m = shot_alpha(pair.get("D"), top), shot_alpha(pair.get("M"), top)
-        if d is None or ref is None:
+        if d is None or m is None or ref is None:
             instrument[name] = None
         else:
-            instrument[name] = float(np.abs(d - (alpha * ref + (1.0 - alpha) * pair["D"][..., 3][empty].mean())).max())
+            instrument[name] = float(np.abs(d - (alpha * ref + (1.0 - alpha) * pair["M"][..., 3][empty].mean())).max())
         r4[name] = None if d is None or m is None else float(np.abs(m - d).max())
     values = [*dom.values(), *instrument.values()]
     tau_key = round(max(values) + 1, 2) if values and None not in values else None
@@ -1208,6 +1237,9 @@ def mmo_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     premise = None if dom_ref is None or s_off is None else round(float(np.abs(s_off.mean(axis=0) - dom_ref.mean(axis=0)).max()), 2)
     check(checks, "premise: S_off differs from the slide-1 DOM square by > tau", [premise, tau],
           None not in (premise, tau) and premise > tau, "> tau")
+    calibration = cal["calibration"]
+    premise_ok = calibration is None or calibration <= MMO_CALIB_MAX
+    check(checks, "premise: slide-1 badness (neutral backgrounds under ROI_top)", calibration, premise_ok, f"<= {MMO_CALIB_MAX}")
     per: dict[str, Any] = {}
     for on, off in MMO_PAIRS:
         r_on, r_off = (mmo_series_checks(series.get(n), s_off, tau) for n in (on, off))
@@ -1215,13 +1247,15 @@ def mmo_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
         check(checks, f"{on} frames in window", r_on["frames"], r_on["frames"] > 0, "> 0")
         check(checks, f"{on} R1: frames within tau of S_off", r_on["R1"], r_on["R1"] == 0, "== 0")
         check(checks, f"KB: {off} R1", r_off["R1"], r_off["R1"] is not None and r_off["R1"] > 0, "> 0")
-        for name, value, limit in (("R2: max |ROI_top - E|", "R2", tau), ("R3: max frame-to-frame step", "R3", tau),
-                                   ("R4: key alpha |M - D|", None, tau_key)):
-            v_on = r_on[value] if value else key["R4"].get(on)
-            v_off = r_off[value] if value else key["R4"].get(off)
-            label = "tau_key" if value is None else "tau"
-            check(checks, f"{on} {name}", v_on, None not in (v_on, limit) and v_on <= limit, f"<= {label} {limit}")
-            check(checks, f"KB: {off} {name}", v_off, None not in (v_off, limit) and v_off > limit, f"> {label} {limit}")
+        name = "R2: neutral-background badness (R3 folded in)"
+        check(checks, f"{on} {name}", {k: r_on.get(k) for k in ("R2", "R2Frame", "R2Over", "R2Frames")},
+              None not in (r_on["R2"], tau) and r_on["R2"] <= tau, f"<= tau {tau}")
+        check(checks, f"KB: {off} {name}", {k: r_off.get(k) for k in ("R2", "R2Frame", "R2Over")},
+              None not in (r_off["R2"], tau) and r_off["R2"] > tau, f"> tau {tau}")
+        check(checks, f"report: {on} R3 handover frames", r_on.get("handovers"), True, enforced=False)
+        v_on, v_off = key["R4"].get(on), key["R4"].get(off)
+        check(checks, f"{on} R4: key alpha |M - D|", v_on, None not in (v_on, tau_key) and v_on <= tau_key, f"<= tau_key {tau_key}")
+        check(checks, f"KB: {off} R4: key alpha |M - D|", v_off, None not in (v_off, tau_key) and v_off > tau_key, f"> tau_key {tau_key}")
         cadence = {n: {ph: {k: ((((sessions.get(n) or {}).get("decode") or {}).get("phases") or {}).get(ph) or {}).get(k)
                             for k in ("repeatFrac", "distinctPerS")} for ph in ("mm-move", "slide2-live")} for n in (on, off)}
         check(checks, f"report: cadence {on} vs {off}", cadence, True, enforced=False)
@@ -1235,7 +1269,10 @@ def mmo_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
         g2_stats_checks(m4, api_of((sess.get("reads") or {}).get("liveEnd")).get("stats") or {}, mm_mode(sess), f"{name}: ")
     live = median_delta(phase_median(series.get("g2-on"), ("slide2-live",)), phase_median(series.get("g2-mmoff"), ("slide2-live",)))
     check(m4, "report: g2-on vs g2-mmoff slide2-live ROI_top (LIVE equal)", live, True, "~0 (headless MO-4 enforces 0)", enforced=False)
-    return {"MO-2": gate(checks), "MO-4": gate(m4), "mmoCalibration": {"tau": tau, "tauKey": tau_key, "cvc": cvc, "perSession": per}}
+    invalid = None if premise_ok else f"MO-2 INCONCLUSIVE: slide-1 badness {calibration} > {MMO_CALIB_MAX} (premise: neutral backgrounds)"
+    return {"MO-2": gate(checks, invalid), "MO-4": gate(m4),
+            "mmoCalibration": {"tau": tau, "tauKey": tau_key, "cvc": cvc, "perSession": per,
+                               "doubleFrameAlpha": round(MM_ALPHA * (2 - MM_ALPHA), 3)}}
 
 
 def mmo_cef_gates(run: dict[str, Any]) -> dict[str, Any]:
@@ -1672,7 +1709,10 @@ def arm_gates(arm: str, run: dict[str, Any], args: argparse.Namespace, armed: di
     if arm == "failsafe":
         return failsafe_gates(run, armed)
     if arm == "mmo":
-        return mmo_gates(run, armed)
+        gates = mmo_gates(run, armed)
+        if gates["MO-2"]["invalid"]:
+            invalid.append(gates["MO-2"]["invalid"])
+        return gates
     if arm == "mmo-cef":
         return mmo_cef_gates(run)
     if args.precheck:
@@ -1721,6 +1761,29 @@ def cross_take(runs: list[dict[str, Any]], armed: dict[str, Any] | None) -> list
     return checks
 
 
+def score_mmo(root: Path) -> int:
+    """Re-score the MO-2 takes under `root`/runs from their JSON, series npz and key shots; writes `root`/rescore-<ts>.json."""
+    facts: dict[str, dict[str, Any]] = {}
+    results = []
+    for path in sorted((root / "runs").glob("mmo-*.json")):
+        run = json.loads(path.read_text())
+        if run["fixture"] not in facts:
+            facts[run["fixture"]] = fixture_facts(Path(run["fixture"]), None)
+        gates = mmo_gates(run, facts[run["fixture"]])
+        mo2 = gates["MO-2"]
+        results.append({"run": path.name, "rate": run["rate"], "MO-2": mo2["verdict"], "failing": mo2["failing"],
+                        "invalid": mo2["invalid"], "MO-4": gates["MO-4"]["verdict"], "calibration": gates["mmoCalibration"],
+                        "checks": mo2["checks"]})
+        print(f"[mmo rate {run['rate']}] MO-2 {mo2['verdict']} {mo2['invalid'] or mo2['failing']}  MO-4 {gates['MO-4']['verdict']}"
+              f"  tau {gates['mmoCalibration']['tau']}  tau_key {gates['mmoCalibration']['tauKey']}", flush=True)
+        for name, per in gates["mmoCalibration"]["perSession"].items():
+            print(f"    {name:12s} R1 {per.get('R1')}  R2 {per.get('R2')} over {per.get('R2Over')}  {per.get('R2Frames', [])[:3]}", flush=True)
+    dest = root / f"rescore-{stamp()}.json"
+    dest.write_text(json.dumps(results, indent=1, default=str))
+    print(f"-> {dest}", flush=True)
+    return 0 if results and all(r["MO-2"] == "PASS" for r in results) else 1
+
+
 def build_fixture(key: Path, dest: Path) -> int:
     """Owner-go only (drives Keynote): export the owner's looping copy with the P2 pipeline's own steps into `dest`."""
     from obed_edom.html_alpha_probe import file_identity, strip_export_pdf_bg_fills, write_json, write_patched_export
@@ -1762,7 +1825,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, help="writes <out>/runs/<arm>-<ts>.json, <out>/shots/ and a summary")
     parser.add_argument("--home", type=Path, default=DEFAULT_HOME, help="scratch ManagedObs home (never under ~/Desktop)")
     parser.add_argument("--keep-recordings", action="store_true", help="keep the lossless recordings (~0.5 GB per session)")
+    parser.add_argument("--score", type=Path, metavar="DIR", help="re-score the saved MO-2 takes under DIR/runs (no OBS)")
     args = parser.parse_args(argv)
+    if args.score is not None:
+        return score_mmo(args.score.expanduser().resolve())
     args.kb_splice = None
     if args.arm == "soak":
         args.fixture = (args.fixture or SOAK_FIXTURE).expanduser().resolve()
