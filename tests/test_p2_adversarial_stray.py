@@ -97,7 +97,7 @@ def test_exact_match_on_every_settled_slide_is_true():
     assert verdict["verdict"] == "pass", verdict["reason"]
     assert verdict["ok"] is True
     assert verdict["failingSlides"] == []
-    assert [s["composited"] for s in verdict["slides"]] == [[], ["untitled.mov#1"], [], []]
+    assert [len(s["claims"]["untitled.mov#1"]) for s in verdict["slides"]] == [1, 0, 1, 1]
     assert verdict["slides"][3]["claims"]["untitled.mov#1"][0]["decoderId"] == 4
 
 
@@ -129,23 +129,35 @@ def test_an_extra_painting_video_on_an_authored_rect_is_a_duplicate():
     assert "painted more than once" in verdict["reason"]
 
 
-def test_a_missing_authored_instance_is_false():
+def test_presence_is_not_scored_an_unpainted_instance_does_not_red():
+    """Codex r1 #9 (coordinator decision): `noStrayVideo` claims no presence. An
+    authored instance nothing paints -- slide 2's WebGL composite, or a movie gone
+    entirely -- is left to the other P2 findings."""
     snaps = _green_snapshots()
+    snaps[1]["videos"] = []
     snaps[2]["videos"] = [r for r in snaps[2]["videos"] if r["decoderId"] != 5]
-    verdict = _score(snaps)
-    assert verdict["verdict"] == "fail"
-    assert verdict["failingSlides"] == [2]
-    assert verdict["slides"][2]["missing"] == ["vid-20250608-wa0125.mp4#1"]
-
-
-def test_a_suppressed_element_alone_does_not_account_for_its_instance():
-    """The runtime's own suppressed restart element is not the player's composite:
-    with the bridged decoder gone, slide 4's instance is missing."""
-    snaps = _green_snapshots()
     snaps[3]["videos"] = [r for r in snaps[3]["videos"] if r["suppressed34"]]
     verdict = _score(snaps)
+    assert verdict["verdict"] == "pass", verdict["reason"]
+    assert "missing" not in verdict["slides"][2]
+    assert verdict["slides"][2]["claims"]["vid-20250608-wa0125.mp4#1"] == []
+
+
+def test_a_hidden_video_at_an_authored_rect_satisfies_nothing_and_reds_nothing():
+    """A connected, unsuppressed opacity-0 `<video>` on an authored rect -- whatever
+    its asset -- is not a painter: it claims no instance, is not a stray, and cannot
+    turn a duplicate painter green."""
+    wa0125 = "assets/VID-20250608-WA0125.mp4-0.0000-45.1381.mp4"
+    snaps = _green_snapshots()
+    snaps[1]["videos"] = [_row(_authored(1), decoder=11, painting=False, src=wa0125)]
+    verdict = _score(snaps)
+    assert verdict["verdict"] == "pass", verdict["reason"]
+    assert verdict["slides"][1]["claims"]["untitled.mov#1"] == []
+    assert verdict["slides"][1]["unexpected"] == []
+    snaps[1]["videos"] += [_row(_authored(1), decoder=12), _row(_authored(1), decoder=13)]
+    verdict = _score(snaps)
     assert verdict["verdict"] == "fail"
-    assert verdict["slides"][3]["missing"] == ["untitled.mov#1"]
+    assert [r["decoderId"] for r in verdict["slides"][1]["claims"]["untitled.mov#1"]] == [12, 13]
 
 
 def test_a_suppressed_painting_element_is_not_a_painter():

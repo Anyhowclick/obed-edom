@@ -3952,36 +3952,24 @@ def _stray_slide(player: int, scene_hash: object, rows: list[dict], expected: li
             claims[best_label].append(_stray_row(row))
         else:
             unexpected.append({**_stray_row(row), "bestIou": round(best_iou, 4), "bestLabel": best_label})
-    composited = [
-        e["label"] for e in expected
-        if not claims[e["label"]] and any(
-            r["visible"] is False and r["suppressed34"] is False and r["hiddenBy"] == "hidden"
-            and (_iou(r["rect"], e["rect"]) or 0.0) >= STRAY_IOU_MIN
-            for r in rows
-        )
-    ]
     duplicates = [label for label, found in claims.items() if len(found) > 1]
-    missing = [label for label, found in claims.items() if not found and label not in composited]
     return {
         "playerIndex": player,
         "hash": scene_hash,
-        "ok": not unexpected and not duplicates and not missing,
+        "ok": not unexpected and not duplicates,
         "expected": expected,
         "claims": claims,
         "unexpected": unexpected,
         "duplicates": duplicates,
-        "missing": missing,
-        "composited": composited,
         "rows": [_stray_row(r) for r in rows],
     }
 
 
 def noStrayVideo(snapshots: object, slide_instances: object, scene_index_by_player: object) -> dict:
-    """On every settled slide, the painting `<video>`s (`visible && !suppressed34`, re-derived
-    from the raw readings) match the authored instances one-to-one by rect (IoU >= 0.75). An
-    instance nothing paints is accounted for only by a connected, unsuppressed `<video>` at its
-    rect held at opacity 0 (`hiddenBy == 'hidden'`, the player's WebGL composite); otherwise it
-    is missing. Any malformed or disagreeing reading is INCONCLUSIVE, never a verdict."""
+    """On every settled slide, each painting `<video>` (`visible && !suppressed34`, re-derived
+    from the raw readings) claims an authored instance by rect (IoU >= 0.75) and no instance is
+    claimed twice. Presence is not scored here: a non-painting video satisfies and reds nothing.
+    Any malformed or disagreeing reading is INCONCLUSIVE, never a verdict."""
     result: dict = {"ok": False, "verdict": "inconclusive", "reason": None, "iouMin": STRAY_IOU_MIN,
                     "failingSlides": [], "slides": []}
 
@@ -4033,7 +4021,6 @@ def noStrayVideo(snapshots: object, slide_instances: object, scene_index_by_play
             part for part in (
                 f"{len(s['unexpected'])} painting video(s) match no authored instance" if s["unexpected"] else "",
                 f"{s['duplicates']} painted more than once" if s["duplicates"] else "",
-                f"{s['missing']} missing" if s["missing"] else "",
             ) if part
         )
         for s in failing

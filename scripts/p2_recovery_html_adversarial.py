@@ -4351,12 +4351,13 @@ async def _run(player: Path) -> dict:
                 "note": (
                     "One settled snapshot per slide (boot, settled slide 2, slide 3 at the "
                     "pre-move hash, slide 4 after the burst). Every painting <video> "
-                    "(visible && !suppressed34, re-derived off-page) must claim exactly one "
-                    "authored instance of `ContinuityPlan.slide_instances` for that slide "
-                    f"(IoU >= {no_stray['iouMin']}), no instance painted twice, and every "
-                    "instance painted or held connected at its rect under the player's own "
-                    "opacity-0 WebGL composite. Malformed or non-re-derivable rows, an "
-                    "unsampled slide or a hash off the authored slides are INCONCLUSIVE."
+                    "(visible && !suppressed34, re-derived off-page) must claim an authored "
+                    "instance of `ContinuityPlan.slide_instances` for that slide "
+                    f"(IoU >= {no_stray['iouMin']}) and no instance may be painted twice. "
+                    "Presence is NOT scored here (slide 2 is drawn by the player's WebGL "
+                    "composite; the other P2 findings cover its composition). Malformed or "
+                    "non-re-derivable rows, an unsampled slide or a hash off the authored "
+                    "slides are INCONCLUSIVE."
                 ),
             },
         },
