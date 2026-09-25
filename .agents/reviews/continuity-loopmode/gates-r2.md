@@ -23,11 +23,12 @@ Supersedes the verdict of `gates-r1.md` (kept for the r1 history and the harness
 
 | Gate | Verdict | Numbers |
 |---|---|---|
-| L0 unit | PASS | Full suite at `3ee7b345`: 7738 passed / 88 skipped / 1 xfailed; `test:ui` 305/305; `test:maps` 542 + 2 |
+| L0 unit | PASS | Full suite at `cfc61c13` (final): 7767 passed / 88 skipped / 1 xfailed; `test:ui` 305/305; `test:maps` 542 + 2 |
 | L4 P2 regression | PASS | `run_gates.sh` at `3ee7b345` line-for-line identical to `8fe3b551` (host ×3, P2 fast/slow 14/14, `--disable-bridge34` red only on the 3→4 bridge) |
 | L1 host on `p2-loop-grey` | PASS | 3 viewports + take 2 pass, V/Voff 4/4; `--gl-replay auto` Vgl 4/4. KB: `8fe3b551` exits 1 |
 | L2 on `p2-loop` (`3ee7b345`) | PASS | 3→4 6/6 carried; 1→2 4/6 carried, 2 INVALID (wrap +115/+211 ms late); KBs FAIL ("no wrap was recorded"); rescore CvC vs `8fe3b551` host artifacts identical |
 | L5 pre-check (managed OBS 32.2.2, rate 25) | PASS | (a) loop keys == splice, `video.loop` on both slide-1 instances and on the handed-back carried element; (b) qualified + injected on product code (no splice); (c) 2 wraps LIVE, no stand-down, uploads ≈ 30/s. 131 s |
+| L5 re-run on the Codex r4 fold (`184cb3bd`) | PASS | pre-check incl. the hand-back read (G2 `RETIRED`, one `handoff` release of the element); re-scored offline with `cfc61c13`'s nested-release check: PASS (module and runtime release and element all `elId` 1). Soak 5 min: LIVE 29.98–30.0/s, windows 1 and 2 one wrap each, `maxWrapStep` 4, context loss retired, P3/P4 == off |
 | L5 soak, 5 min (`bda4a537`) | PASS | LIVE 29.6–29.9 uploads/s each minute; windows at minutes 1 and 2 each 1 wrap, 0 backward, `maxWrapStep` 4; loseContext → contextLost stand-down, zone retired; P3/P4 == off twin. 345 s |
 
 ## Wrap rule (owner option 1, 2026-09-25)
@@ -38,7 +39,11 @@ may advance at most `WRAP_TOL + LOOP_SEEK_SKIP` = 4 frames through the loop poin
 stay backward; `maxWrapStep` is reported.
 
 ## Residuals
-- Both soak wraps read `maxWrapStep` 4 — at the bound. A 3-frame browser loop-seek skip (not yet seen in 40 headless
+- All four OBS soak wraps (two runs) read `maxWrapStep` 4 — at the bound every time. A 3-frame browser loop-seek skip (not yet seen in 40 headless
   wraps) would fail the soak; that would be a finding, not a reason to widen further.
 - 1→2 forced-wrap takes are INVALID in ≈ 1/3 of takes (≈ 200 ms decoder gap ~300 ms after the press when the loop
   point is within ≈ 2 s), below `MAX_STALL_S`; see `gates-r1.md`.
+
+## Reviews
+Codex (gpt-5.6-sol) r4 on `e57a6be9`: 1 high (negative `wrap_step` on an out-of-range binary read) + 5 medium/low folded
+(`184cb3bd`); r5: every fold closed except the nested module-release identity, folded in `cfc61c13`.
