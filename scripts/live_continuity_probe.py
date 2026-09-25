@@ -181,7 +181,9 @@ RED_ARM_EXPECTATIONS: dict[tuple[str, str, str], tuple[str, ...] | str] = {
         "b0to1:untitled.mov#1->untitled.mov#1:carry", "b0to1:untitled.mov#1->untitled.mov#1:retire",
         "stray:slide2:untitled.mov",
     ),
-    (P2_OFF_PLAN_SHA256, "strip:glReplay@2", "auto"): ("b0to1:untitled.mov#1->untitled.mov#1:armed",),
+    (P2_OFF_PLAN_SHA256, "strip:glReplay@2", "auto"): (
+        "b0to1:untitled.mov#1->untitled.mov#1:armed", "stray:slide2:untitled.mov",
+    ),
     (P2_OFF_PLAN_SHA256, "strip:restart@6", "off"): RECORD,
 }
 GROUND_TRUTH_KEYS = (
@@ -2297,10 +2299,13 @@ def _event_scene_of(event: dict[str, Any]) -> int | None:
 
 
 def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool) -> dict[str, Any]:
-    """The positive half of a refused carry: `score_refusal`'s settled DOM/pool checks, plus --
-    when the runtime is installed -- exactly one F5 `retire-boundary` note for the movie at
-    this boundary and no carry note (`CARRY_EVENT_KINDS`) for its key or elements from the
-    transition scene on. Unreadable evidence is INCONCLUSIVE."""
+    """The positive half of a refused carry: the raw player's own element for the destination
+    instance (hand-back), `score_refusal`'s settled DOM/pool checks, and -- when the runtime is
+    installed -- the core's contract (module docstring, "retire"): at least one refusal note for
+    the movie from the transition scene on, `preserve-refused` (key, via, scene) from a declining
+    hook or `retire-boundary` (key, elIds, atScene) from the keep-warm sweep of decoders pooled
+    before the zone, and no carry note (`CARRY_EVENT_KINDS`) for its key or elements in the zone.
+    Unreadable evidence is INCONCLUSIVE."""
     if not isinstance(sample, dict):
         return _inconclusive("no refusal evidence was sampled on the destination slide")
     if not stage_map_valid(sample.get("stageMap")):
@@ -2343,9 +2348,14 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool) -> 
         for value in [d.get("elId"), d.get("newElId"), *(d.get("elIds") or [])] if value is not None
     }
     notes = [
-        d for e, d in details
-        if e.get("kind") == "retire-boundary" and d.get("key") == movie_key and d.get("atScene") == scene
-        and isinstance(d.get("elIds"), list)
+        {"kind": e.get("kind"), **d} for e, d in details
+        if d.get("key") == movie_key and (
+            (e.get("kind") == "retire-boundary" and d.get("atScene") == scene and isinstance(d.get("elIds"), list))
+            or (
+                e.get("kind") == "preserve-refused" and isinstance(d.get("via"), str) and d["via"]
+                and _finite_number(d.get("scene")) is not None and d["scene"] >= scene - 1
+            )
+        )
     ]
     carries = [
         e for e, d in details
@@ -2355,8 +2365,8 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool) -> 
     ]
     scored = score_refusal(sample, spec, runtime_installed)
     reasons = [scored["reason"]] if scored.get("reason") else []
-    if len(notes) != 1:
-        reasons.append(f"{len(notes)} retire-boundary note(s) for {movie_key} at scene {scene}, expected exactly 1")
+    if not notes:
+        reasons.append(f"no preserve-refused/retire-boundary note for {movie_key} from scene {scene - 1}")
     if carries:
         reasons.append(f"{len(carries)} carry note(s) for {movie_key} in the retire zone")
     return {

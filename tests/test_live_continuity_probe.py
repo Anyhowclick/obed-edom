@@ -6386,23 +6386,37 @@ def _retire_read(events: Any = (), *, painting: Any = (), pool: Any = (), elemen
 
 
 RETIRE_NOTE = _ev("retire-boundary", key="movie1", elIds=[3], atScene=2, sceneHash="#2")
+# Live gate r1 (331f944d): what today's core emits on P2 -- one preserve-refused at the transition
+# scene and no retire-boundary (nothing was pooled before the zone for the sweep to retire).
+REFUSED_NOTE = _ev("preserve-refused", key="movie1", scene=1, via="stash", sceneHash="#1")
 
 
 class TestRetireVerdict:
-    """Codex r1 #8: the F5 `retire-boundary` note, no carry note in the zone, and the settled checks."""
+    """Codex r1 #8 / live gate r1: at least one refusal note (`preserve-refused` or `retire-boundary`)
+    per the core's documented contract, no carry note in the zone, the hand-back, and the settled checks."""
 
     def _score(self, read: Any, installed: bool = True) -> dict[str, Any]:
         return probe.score_retire(read, _spec(_p2_facts(), P2_RETIRE12), installed)
 
-    def test_one_note_and_nothing_carried_is_green(self) -> None:
-        scored = self._score(_retire_read((RETIRE_NOTE, _ev("preserve-refused", key="movie1", scene=1, via="stash"))))
-        assert scored["verdict"] is True and scored["retireNotes"] == [RETIRE_NOTE["detail"]]
-
-    @pytest.mark.parametrize("notes", [(), (RETIRE_NOTE, RETIRE_NOTE), (_ev("retire-boundary", key="movie1", elIds=[3], atScene=6),),
-                                       (_ev("retire-boundary", key="movie2", elIds=[3], atScene=2),), (_ev("retire-boundary", key="movie1", atScene=2),)])
-    def test_known_bad_anything_but_exactly_one_matching_note_is_red(self, notes: tuple[Any, ...]) -> None:
+    @pytest.mark.parametrize("notes", [(REFUSED_NOTE,), (RETIRE_NOTE,), (REFUSED_NOTE, RETIRE_NOTE), (RETIRE_NOTE, RETIRE_NOTE)])
+    def test_any_refusal_note_for_the_movie_in_the_zone_is_green(self, notes: tuple[Any, ...]) -> None:
         scored = self._score(_retire_read(notes))
-        assert scored["verdict"] is False and "retire-boundary note(s)" in scored["reason"]
+        assert scored["verdict"] is True and len(scored["retireNotes"]) == len(notes)
+        assert {note["kind"] for note in scored["retireNotes"]} == {note["kind"] for note in notes}
+
+    def test_the_live_p2_zone_shape_is_green(self) -> None:
+        """Gate r1: one preserve-refused, no retire-boundary -> refused1to2 must read True."""
+        assert self._score(_retire_read((REFUSED_NOTE,)))["verdict"] is True
+
+    @pytest.mark.parametrize("notes", [
+        (), (_ev("retire-boundary", key="movie1", elIds=[3], atScene=6),), (_ev("retire-boundary", key="movie2", elIds=[3], atScene=2),),
+        (_ev("retire-boundary", key="movie1", atScene=2),), (_ev("preserve-refused", key="movie1", scene=0, via="stash"),),
+        (_ev("preserve-refused", key="movie2", scene=1, via="stash"),), (_ev("preserve-refused", key="movie1", scene=1),),
+        (_ev("preserve-refused", key="movie1", scene=None, via="stash"),),
+    ])
+    def test_known_bad_no_matching_refusal_note_is_red(self, notes: tuple[Any, ...]) -> None:
+        scored = self._score(_retire_read(notes))
+        assert scored["verdict"] is False and "no preserve-refused/retire-boundary note" in scored["reason"]
 
     @pytest.mark.parametrize("carry", [
         _ev("remount-done", elId=5, key="untitled.mov", sceneHash="#1"),
@@ -6672,7 +6686,7 @@ class TestRedArmRegistration:
         assert expected["core:stash-any"] == ("stray:slide4:vid-20250608-wa0125.mp4",)
         assert expected["strip:bridge@8"] == (P2_CARRY34,)
         assert expected["strip:retire@2"] == (P2_CARRY12, P2_RETIRE12, "stray:slide2:untitled.mov")
-        assert expected["strip:glReplay@2"] == (P2_ARMED12,)
+        assert expected["strip:glReplay@2"] == (P2_ARMED12, "stray:slide2:untitled.mov")
         assert expected["strip:restart@6"] == probe.RECORD
 
     @pytest.mark.parametrize(("core", "strip", "label"), [
