@@ -141,7 +141,7 @@ Before editing, record on `66567617` `sha256(patch_player(real, mm_opacity=True)
 
 ## 8. Work stream
 
-- One implementer (Sonnet, per the delegation rule). Files: `live_runtime.py`, `live_host.py` (import move only),
+- One implementer (Opus MEDIUM, per the delegation rule). Files: `live_runtime.py`, `live_host.py` (import move only),
   `html_preview.py`, `web/app.py`, the three test files, `README.md`, the parent plan bullet. Opus reviewer (owner 2026-09-24: Codex limit low). Only the
   coordinator commits.
 - Order: record T1b constants → split `live_runtime` + T1–T3 → `preview_player` + unit tests → route + API tests → docs →
