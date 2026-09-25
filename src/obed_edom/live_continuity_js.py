@@ -1604,7 +1604,11 @@ PRESERVE_CORE_JS = r"""
       note('remount-error', {elId: v.__obedElId, message: String(e && e.message || e)});
     }
   }
-  function bindFacade(stub, real) {
+  /**
+   * `rehomed`: the runtime placed `real` itself (a pin out of a held bridge
+   * overlay), so an inserted stub is only taken out, never swapped for `real`.
+   */
+  function bindFacade(stub, real, rehomed) {
     stub.__obedFacadeFor = real;
     stub.dataset.obedFacade = '1';
     stub.play = function(){ return real.play(); };
@@ -1638,6 +1642,14 @@ PRESERVE_CORE_JS = r"""
     }
     const mo = new MutationObserver(function(){
       if (stub.parentNode && real !== stub && real.__obedGen === preserveGeneration && real.__obedRemountEpoch !== -1) {
+        if (rehomed) {
+          try {
+            beginMove(stub);
+            stub.parentNode.removeChild(stub);
+          } catch (e) {}
+          mo.disconnect();
+          return;
+        }
         if (GL && zone === 'released' && real === carriedMemo) {
           const layerCanvas = findMovieCanvas(real.__obedRect, real);
           if (!layerCanvas || stub.parentNode !== layerCanvas.parentNode) {
@@ -1911,16 +1923,27 @@ PRESERVE_CORE_JS = r"""
       keepSuppressed(el);
       return;
     }
-    if (preserved.__obedBridged34) {
+    // Out of a held bridge overlay the player's own layer paints under its
+    // WebGL poster (live D1/D3/D4: clock advancing, pixels frozen), so re-home
+    // the decoder the way a pooled pin is remounted: into the destination
+    // poster's authored layer, measure-and-corrected at `dst.rect`.
+    const rehome = !!preserved.__obedBridged34;
+    if (rehome) {
       preserved.__obedBridged34 = false;
       preserved.__obedRemountEpoch = remountEpoch;
     }
     try {
-      if (el.id) preserved.id = el.id;
+      if (el.id) preserved.id = preserved.__obedId = el.id;
       const st = el.getAttribute('style');
-      if (st) preserved.setAttribute('style', st);
+      if (st && !rehome) preserved.setAttribute('style', st);
     } catch (e) {}
-    bindFacade(el, preserved);
+    bindFacade(el, preserved, rehome);
+    if (rehome) {
+      const screen = toScreen(entry.dst.rect);
+      if (screen) preserved.__obedRect = screen;
+      preserved.__obedParent = null;
+      scheduleRemount(preserved, 'pin-rehome');
+    }
   }
   /**
    * A fresh element of a restarted movie at/after the restart's `atScene` is

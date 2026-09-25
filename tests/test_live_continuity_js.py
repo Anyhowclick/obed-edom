@@ -36,7 +36,7 @@ def test_js_sha256_matches_pinned_bytes():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "ce240d84f369f72feeb1e0064adb7a1fb216d92e7fb7827d5d7415b6a283cc52"
+PINNED_CORE_SHA256 = "6b0db51eb31b7b02a105924eb650703ef1355bb3a654df0ee5f78a77e87c1fde"
 
 
 def test_js_sha256_matches_the_pinned_literal():
@@ -3731,6 +3731,62 @@ console.log(JSON.stringify({idle, moves: notesOf('bridge-motion-start').map(n =>
     dst1, dst2 = plan["boundaries"][0]["dst"]["rect"], plan["boundaries"][1]["dst"]["rect"]
     assert result["idle"] == {"moves": 1, "left": f"{dst1['x']}px", "width": f"{dst1['w']}px"}
     assert result["moves"] == [dst1, dst2]
+
+
+def test_a_pin_out_of_a_held_bridge_overlay_is_re_homed_into_the_destination_poster_layer():
+    """RT-E (live D1 s4, D3 s3, D4 s3: clock advancing, pixels frozen). After a
+    bridge the carried decoder sits on `#body`; the pin must not swap it into the
+    player's layer under the WebGL poster but re-home it the way a pooled pin is
+    remounted: next to the destination's poster canvas, at `dst.rect`, with the
+    player's stub taken out and no swap."""
+    plan = _CONTRACT["d1"]
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing(ID[0]);
+goToScene(1);
+detach(a);
+goToScene(2);
+const b = fresh(ID[1]);
+b.parentNode = bodyEl;
+goToScene(3);
+detach(b);
+pump();
+goToScene(4);
+const c = fresh(ID[2]);
+c.parentNode = bodyEl;
+goToScene(5);
+detach(c);
+pump();
+goToScene(6);
+const DST = window.__OBED_CONTINUITY__.boundaries[2].dst.rect;
+const layer = {
+  __screenOrigin: {x: 0, y: 0}, __scale: 1,
+  insertBefore(node) { node.parentNode = this; node.__inStage = true; node.previousSibling = poster; },
+  appendChild(node) { node.parentNode = this; node.__inStage = true; },
+  removeChild(node) { node.parentNode = null; node.__inStage = false; },
+};
+const poster = {id: 'dst-canvas', parentNode: layer, nextSibling: null,
+  getBoundingClientRect: () => ({left: DST.x, top: DST.y, width: DST.w, height: DST.h})};
+canvases.push(poster);
+const d = fresh(ID[3]);
+d.parentNode = layer;
+moCallbacks.slice().forEach((cb) => cb([{addedNodes: [d], removedNodes: []}]));
+console.log(JSON.stringify({
+  facade: d.__obedFacadeFor === a, stubConnected: document.contains(d),
+  inLayer: a.parentNode === layer && a.previousSibling === poster,
+  rendered: a.getBoundingClientRect(), id: a.id, swaps: notesOf('dom-swap').length,
+  landed: notesOf('remount-into-authored-layer').map(n => n.elId), aId: a.__obedElId,
+}));
+""", src="https://host/counter-a.mov")
+    dst = plan["boundaries"][2]["dst"]
+    assert result["facade"] is True
+    assert result["stubConnected"] is False
+    assert result["inLayer"] is True
+    assert result["rendered"] == pytest.approx(
+        {"left": dst["rect"]["x"], "top": dst["rect"]["y"], "width": dst["rect"]["w"], "height": dst["rect"]["h"]})
+    assert result["id"] == dst["objectId"] + "-video"
+    assert result["swaps"] == 0
+    assert result["aId"] in result["landed"]
 
 
 def test_a_suppressed_bridge_destination_really_clears_when_its_slide_ends():
