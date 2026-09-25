@@ -20,6 +20,8 @@ from typing import Any
 
 import pytest
 
+from obed_edom.fixture_paths import fixture, main_checkout
+
 REPO = Path(__file__).resolve().parent.parent
 COMMITTED = REPO / "tests" / "fixtures" / "live_continuity" / "assets"
 
@@ -241,7 +243,7 @@ def _binary_manifest(frames: int = 1381) -> dict[str, Any]:
 
 
 class TestBinarySource:
-    """`--source <main>/output/p2-binary`: the same splice, plus the binary-counter manifest carried with a `loop` key."""
+    """`--source <main>/output/fixtures/p2-binary`: the same splice, plus the binary-counter manifest carried with a `loop` key."""
 
     def _source(self, root: Path, manifest: dict[str, Any]) -> Path:
         source = _committed_source(root)
@@ -295,21 +297,19 @@ class TestBinarySource:
             loop_fixture.build(source, tmp_path / "p2-loop")
 
     def test_cli_accepts_a_binary_source(self) -> None:
-        main = loop_fixture.main_checkout()
-        args = loop_fixture.parse_args(["--source", str(main / "output/p2-binary"), "--force"])
-        assert args.source == main / "output/p2-binary" and args.force is True
+        args = loop_fixture.parse_args(["--source", str(fixture("p2-binary")), "--force"])
+        assert args.source == fixture("p2-binary") and args.force is True
 
 
 class TestCli:
-    def test_cli_defaults_point_at_the_main_checkout(self) -> None:
+    def test_cli_defaults_point_at_the_main_checkout_fixtures(self) -> None:
         args = loop_fixture.parse_args([])
-        main = loop_fixture.main_checkout()
-        assert args.source == main / "output/p2-recovery/html-adversarial"
-        assert args.dest == main / "output/p2-loop"
+        assert args.source == main_checkout() / "output/fixtures/p2-recovery/html-adversarial"
+        assert args.dest == main_checkout() / "output/fixtures/p2-loop"
         assert args.force is False
 
 
-REAL_SOURCE = loop_fixture.main_checkout() / "output/p2-recovery/html-adversarial"
+REAL_SOURCE = fixture("p2-recovery") / "html-adversarial"
 
 
 @pytest.mark.skipif(not (REAL_SOURCE / "html-player").is_dir(), reason="real P2 export not available")
