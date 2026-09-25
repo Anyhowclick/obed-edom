@@ -224,6 +224,74 @@ class TestBuild:
         with pytest.raises(loop_fixture.FixtureError, match="payload differs"):
             loop_fixture.build(source, tmp_path / "p2-loop")
 
+    def test_a_source_without_a_manifest_writes_none(self, tmp_path: Path) -> None:
+        dest = tmp_path / "p2-loop"
+        loop_fixture.build(_committed_source(tmp_path / "src"), dest)
+        assert not (dest / loop_fixture.MANIFEST).exists()
+
+
+def _binary_manifest(frames: int = 1381) -> dict[str, Any]:
+    """The shape `binary_counter_movie.py --build-fixture` writes (fields the builder reads, plus a few it must keep)."""
+    return {
+        "counter": "binary", "base": "p2-recovery/html-adversarial", "generator": "scripts/binary_counter_movie.py",
+        "movies": [{"sha256": "ab" * 32, "seconds": 46.0333, "fps": 30, "frames": frames}],
+        "replaced": [{"path": "html-player/assets/x/assets/Untitled.mov-0.0000-46.0333.mov", "sha256": "ab" * 32},
+                     {"path": "html-disposable/assets/x/assets/Untitled.mov-0.0000-46.0333.mov", "sha256": "ab" * 32}],
+    }
+
+
+class TestBinarySource:
+    """`--source <main>/output/p2-binary`: the same splice, plus the binary-counter manifest carried with a `loop` key."""
+
+    def _source(self, root: Path, manifest: dict[str, Any]) -> Path:
+        source = _committed_source(root)
+        (source / loop_fixture.MANIFEST).write_text(json.dumps(manifest, indent=1))
+        return source
+
+    def test_manifest_is_copied_with_the_loop_record_added(self, tmp_path: Path) -> None:
+        manifest = _binary_manifest()
+        source = self._source(tmp_path / "src", manifest)
+        before = _tree_bytes(source)
+        dest = tmp_path / "p2-loop"
+        record = loop_fixture.build(source, dest)
+        assert _tree_bytes(source) == before, "the read-only source (manifest included) is untouched"
+        assert loop_fixture.MANIFEST in record["sourceSha256"], "the manifest is part of the proven-unchanged source"
+        written = json.loads((dest / loop_fixture.MANIFEST).read_text())
+        assert written == {**manifest, "replaced": manifest["replaced"][:1],
+                           "loop": {"objectIds": list(loop_fixture.LOOP_OBJECT_IDS),
+                                    "planSha256": loop_fixture.EXPECTED_PLAN_SHA256}}, (
+            "only the copied trees' movies stay in `replaced` (html-disposable is not copied), so "
+            "binary_counter_movie.verify_fixture can check every listed movie on disk"
+        )
+        assert written["loop"]["planSha256"] == record["planSha256"]
+
+    def test_binary_source_splices_the_same_files_and_shas(self, tmp_path: Path) -> None:
+        plain = loop_fixture.build(_committed_source(tmp_path / "plain"), tmp_path / "plain-loop")
+        binary = loop_fixture.build(self._source(tmp_path / "bin", _binary_manifest()), tmp_path / "bin-loop")
+        assert binary["planSha256"] == plain["planSha256"] == loop_fixture.EXPECTED_PLAN_SHA256
+        assert [(f["path"], f["preSha256"], f["postSha256"]) for f in binary["files"]] == [
+            (f["path"], f["preSha256"], f["postSha256"]) for f in plain["files"]
+        ]
+
+    @pytest.mark.parametrize("frames", [1380, 1382, None])
+    def test_a_movie_frame_count_other_than_the_loop_period_is_refused(self, tmp_path: Path, frames: Any) -> None:
+        source = self._source(tmp_path / "src", _binary_manifest(frames))
+        with pytest.raises(loop_fixture.FixtureError, match="not the loop period 1381"):
+            loop_fixture.build(source, tmp_path / "p2-loop")
+        assert not (tmp_path / "p2-loop").exists() and not (tmp_path / "p2-loop.partial").exists()
+
+    def test_a_manifest_that_already_loops_is_refused(self, tmp_path: Path) -> None:
+        source = self._source(tmp_path / "src", {**_binary_manifest(), "loop": {}})
+        with pytest.raises(loop_fixture.FixtureError, match="already carries a loop key"):
+            loop_fixture.build(source, tmp_path / "p2-loop")
+
+    def test_cli_accepts_a_binary_source(self) -> None:
+        main = loop_fixture.main_checkout()
+        args = loop_fixture.parse_args(["--source", str(main / "output/p2-binary"), "--force"])
+        assert args.source == main / "output/p2-binary" and args.force is True
+
+
+class TestCli:
     def test_cli_defaults_point_at_the_main_checkout(self) -> None:
         args = loop_fixture.parse_args([])
         main = loop_fixture.main_checkout()

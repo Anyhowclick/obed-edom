@@ -3,9 +3,10 @@
 Repeat -> Loop key (`"loopMode":"looping"`, the only change such an export carries) spliced
 into the named movies, byte-for-byte everywhere else.
 
-Reads `output/p2-recovery/html-adversarial` (never written; every source file's sha is
-asserted equal before and after) and writes `output/p2-loop` in the main checkout. Refuses
-to overwrite an existing fixture unless `--force`.
+Reads `output/p2-recovery/html-adversarial` or its binary-counter copy `output/p2-binary`
+(never written; every source file's sha is asserted equal before and after) and writes
+`output/p2-loop` in the main checkout. A source `fixture.json` is copied with a `loop` key
+added. Refuses to overwrite an existing fixture unless `--force`.
 """
 from __future__ import annotations
 
@@ -35,6 +36,8 @@ EXPECTED_PLAN_SHA256 = {
     "on": "2ba6fbed8fc959c804e53d2f21712945230eac6dcbf90d522fe3a6a688bef924",
 }
 RECORD = "loop-splice.json"
+MANIFEST = "fixture.json"
+LOOP_FRAMES = 1381
 
 MOVIE_OBJECT = re.compile(r'"movie":\{[^{}]*\}')
 JSONP = re.compile(r"\A(\w+\(\s*)(.*?)(\s*\)\s*)\Z", re.DOTALL)
@@ -62,6 +65,8 @@ def sha256_file(path: Path) -> str:
 
 def source_shas(source: Path) -> dict[str, str]:
     paths = [source / name for name in FILES]
+    if (source / MANIFEST).is_file():
+        paths.append(source / MANIFEST)
     for tree in TREES:
         paths.extend(sorted(p for p in (source / tree).rglob("*") if p.is_file()))
     missing = [str(p) for p in paths if not p.is_file()]
@@ -194,6 +199,19 @@ def _resolve(root: Path, relative: str) -> Path:
     return path
 
 
+def read_manifest(source: Path) -> dict[str, Any] | None:
+    path = source / MANIFEST
+    if not path.is_file():
+        return None
+    manifest = json.loads(path.read_bytes())
+    frames = [movie.get("frames") for movie in manifest.get("movies") or []]
+    if any(f != LOOP_FRAMES for f in frames):
+        raise FixtureError(f"{path}: movie frames {frames} are not the loop period {LOOP_FRAMES}")
+    if "loop" in manifest:
+        raise FixtureError(f"{path} already carries a loop key")
+    return manifest
+
+
 def plan_shas(export_root: Path) -> dict[str, str]:
     """Both flag states' runtime-plan shas, whether or not the allowlist admits them yet."""
     slides = load_slides(export_root)
@@ -227,6 +245,7 @@ def build(
         raise FixtureError(f"destination {dest} overlaps the read-only source {source}")
     if dest.exists() and not force:
         raise FixtureError(f"{dest} exists; pass --force to rebuild it")
+    manifest = read_manifest(source)
     before = source_shas(source)
     partial = dest.with_name(dest.name + ".partial")
     if partial.exists():
@@ -254,6 +273,10 @@ def build(
             "planSha256": shas[TREES[0]],
         }
         (partial / RECORD).write_text(json.dumps(record, indent=2) + "\n")
+        if manifest is not None:
+            manifest["replaced"] = [r for r in manifest.get("replaced") or [] if Path(r["path"]).parts[0] in TREES]
+            manifest["loop"] = {"objectIds": list(object_ids), "planSha256": shas[TREES[0]]}
+            (partial / MANIFEST).write_text(json.dumps(manifest, indent=1))
         if dest.exists():
             shutil.rmtree(dest)
         partial.rename(dest)
