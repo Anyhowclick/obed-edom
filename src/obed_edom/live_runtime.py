@@ -1,4 +1,4 @@
-"""Observation hook and Magic Move opacity patch for one explicitly supported Keynote HTML player."""
+"""Observation hook and Magic Move rendering fidelity patch for one explicitly supported Keynote HTML player."""
 
 from __future__ import annotations
 
@@ -17,6 +17,27 @@ _MM_OPACITY_NODE = (
     b'return"number"==typeof o&&isFinite(o)?o:null}catch(E){return null}}'
     b"__obedChainOpacity(X,A){if(null===X)return null;var B=this.__obedNodeOpacity(A);"
     b"return null===B?null:(void 0===X?1:X)*B}"
+)
+_MM_HANDBACK_METHOD = (
+    b"__obedHandbackTextures(A,B){try{var s=UC.script,c=UC.textureManager.slideCache,k=null;"
+    b"for(var n in c)if(c[n]&&c[n].textureAssets===this.textureAssets){k=+n;break}if(null===k)return;"
+    b"var d=k+1<s.slideList.length?k+1:s.loopSlideshow?0:-1,D=d<0?null:c[d],S=d<0?null:s.slides[s.slideList[d]];"
+    b"if(!D||!D.textureAssets||!S||!S.events||!S.events.length)return;var L=[];"
+    b"(function W(l,x,y){var t=l.initialState,a=t.anchorPoint,"
+    b"X=x+Math.round(1e6*(t.position.pointX-a.pointX*t.width))/1e6,Y=y+Math.round(1e6*(t.position.pointY-a.pointY*t.height))/1e6;"
+    b"l.texture&&!t.hidden&&L.push({t:l.texture,x:X,y:Y,w:t.width,h:t.height});for(var i=0;i<(l.layers||[]).length;i++)W(l.layers[i],X,Y)})"
+    b"(S.events[0].baseLayer,0,0);"
+    b"for(var g=0;g<B.length;g++){var e=B[g],J=e.animations&&e.animations[0]&&e.animations[0].animations;"
+    b"if(e.toTextureId||!J||1!==e.initialState.scale)continue;var sx=1,sy=1,tx=0,ty=0,ok=!0;"
+    b"for(var j=0;j<J.length;j++){var p=J[j],P=p.property;"
+    b"\"transform.scale.x\"===P?sx=p.to.scalar:\"transform.scale.y\"===P?sy=p.to.scalar:"
+    b"\"transform.translation\"===P?(tx=p.to.pointX,ty=p.to.pointY):\"opacity\"===P&&p.from.scalar===p.to.scalar||(ok=!1)}"
+    b"1===sx&&1===sy&&(ok=!1);"
+    b"var W=e.initialState.anchorPoint,ax=W.pointX*e.width,ay=W.pointY*e.height,"
+    b"qx=e.offset.pointX+tx+ax-sx*ax,qy=e.offset.pointY+ty+ay-sy*ay,qw=sx*e.width,qh=sy*e.height,"
+    b"m=L.filter(function(r){return Math.abs(r.x-qx)<=.01&&Math.abs(r.y-qy)<=.01&&Math.abs(r.w-qw)<=.01&&Math.abs(r.h-qh)<=.01});"
+    b"ok&&1===m.length&&m[0].t!==e.textureId&&D.textureAssets[m[0].t]&&"
+    b"(e.toTexture=R.createTexture(this.gl,D.textureAssets[m[0].t]),e.obedMix=!0)}}catch(E){}}"
 )
 _MM_OPACITY_REPLACEMENTS = (
     (
@@ -42,6 +63,22 @@ _MM_OPACITY_REPLACEMENTS = (
     (
         b"Q&&setTimeout(this.handleAnimateEffectDidBegin.bind(this,Q),0)",
         b"Q&&this.handleAnimateEffectDidBegin(Q)",
+    ),
+    (
+        b"B[g].toTexture=R.createTexture(this.gl,i)}}return B}",
+        b"B[g].toTexture=R.createTexture(this.gl,i)}}"
+        b'return"apple:magic-move-implied-motion-path"===A.name&&this.__obedHandbackTextures(A,B),B}'
+        + _MM_HANDBACK_METHOD,
+    ),
+    (
+        b'case"contents":C=e.toTexture}}var T=',
+        b'case"contents":C=e.toTexture}}e.obedMix&&(C=e.toTexture);var T=',
+    ),
+    (
+        b"this.textureManager.loadScene(B)}unloadTextures(){",
+        b"this.textureManager.loadScene(B);var M=A.events[B],N=M&&M.effects&&M.effects[0];"
+        b'N&&"apple:magic-move-implied-motion-path"===N.name&&B+1<A.numScenes&&this.textureManager.loadScene(B+1)}'
+        b"unloadTextures(){",
     ),
 )
 
@@ -129,8 +166,9 @@ class LiveRuntimeUnsupported(ValueError):
 
 
 def patch_player(player: bytes, *, mm_opacity: bool = True) -> bytes:
-    """Instrument a known player; with `mm_opacity`, draw Magic Move leaves at their authored chain opacity
-    and hide each swapped DOM node in the same task that queues its first GL draw."""
+    """Instrument a known player; with `mm_opacity`, draw Magic Move leaves at their authored chain opacity,
+    hide each swapped DOM node in the same task that queues its first GL draw, and crossfade each scaled leaf
+    without a `contents` animation to its matched next-slide texture so the settled frame lands on the DOM."""
     if hashlib.sha256(player).hexdigest() != PLAYER_SHA256:
         raise LiveRuntimeUnsupported("This Keynote HTML player version is not supported for live output.")
     if player.count(_ANCHOR) != 1:
@@ -143,7 +181,7 @@ def patch_player(player: bytes, *, mm_opacity: bool = True) -> bytes:
 
 
 def patch_rendering(player: bytes) -> bytes:
-    """Apply only the Magic Move opacity rendering patch of `patch_player`, without the observation hook."""
+    """Apply only the Magic Move rendering fidelity patch of `patch_player`, without the observation hook."""
     if hashlib.sha256(player).hexdigest() != PLAYER_SHA256:
         raise LiveRuntimeUnsupported("This Keynote HTML player version is not supported for the preview opacity patch.")
     return _apply_mm_opacity(player)

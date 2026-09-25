@@ -253,11 +253,13 @@ def test_mm_opacity_anchors_are_unique_on_the_real_player():
     assert live_runtime.patch_player(player, mm_opacity=False) == _hook_only(player)
 
 
-# sha256 of patch_player(real, mm_opacity=...) recorded on 3eb3b0fe, before patch_rendering was split out.
+# sha256 of patch_player(real, mm_opacity=...). False: recorded on 3eb3b0fe (hook only, unchanged since).
+# True: with the hand-back replacements R6-R8 (keynote_live_handback_geometry.plan.md); was 21476f78... with R1-R5.
 REAL_PATCHED_SHA256 = {
-    True: "21476f78a584d978796c8580cb302749a568536394fc01b616344c7d98655afe",
+    True: "574274e88485745a6f55a8563d43ddfb91299db6e4d749fd34719436ade751bf",
     False: "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
 }
+REAL_RENDERING_SHA256 = "fd81193887728094df6d017fff5dfac99a5058fab02b3c9a1b92bd93ac88fe23"
 
 
 @pytest.mark.parametrize("flag", [True, False])
@@ -271,6 +273,70 @@ def test_patch_rendering_is_the_live_output_minus_the_hook_on_the_real_player():
     rendering = live_runtime.patch_rendering(player)
     assert _hook_only(rendering) == live_runtime.patch_player(player)
     assert b"__obedLive" not in rendering
+    assert hashlib.sha256(rendering).hexdigest() == REAL_RENDERING_SHA256
+
+
+# Hand-back geometry (keynote_live_handback_geometry.plan.md §3.2): R6-R8 are the last three replacements, at these
+# byte offsets of the stock player.
+HANDBACK_OFFSETS = {
+    b"B[g].toTexture=R.createTexture(this.gl,i)}}return B}": 2263321,
+    b'case"contents":C=e.toTexture}}var T=': 2190367,
+    b"this.textureManager.loadScene(B)}unloadTextures(){": 2347821,
+}
+
+
+def test_handback_replacements_are_the_last_three():
+    assert [before for before, _ in live_runtime._MM_OPACITY_REPLACEMENTS[-3:]] == list(HANDBACK_OFFSETS)
+    # No replacement's text contains any anchor, so none can be re-matched or reverted into another.
+    for _, after in live_runtime._MM_OPACITY_REPLACEMENTS:
+        for before, _ in live_runtime._MM_OPACITY_REPLACEMENTS:
+            assert before not in after
+
+
+def test_handback_anchors_are_unique_on_the_synthetic_player(monkeypatch):
+    player = _synthetic_player()
+    _pin(monkeypatch, player)
+    patched = live_runtime.patch_player(player)
+    for before, after in live_runtime._MM_OPACITY_REPLACEMENTS[-3:]:
+        assert player.count(before) == 1 and player.count(after) == 0
+        assert patched.count(before) == 0 and patched.count(after) == 1
+
+
+def test_handback_anchors_are_unique_on_the_real_player():
+    player = _real_player()
+    assert player.count(b"obedMix") == 0 and player.count(b"__obedHandbackTextures") == 0
+    for before, offset in HANDBACK_OFFSETS.items():
+        assert player.count(before) == 1
+        assert player.find(before) == offset
+    patched = live_runtime.patch_player(player)
+    for before, after in live_runtime._MM_OPACITY_REPLACEMENTS[-3:]:
+        assert patched.count(before) == 0 and patched.count(after) == 1
+    # Decision 5b: the rule requires a scale change; translation only enters through the destination-rect match.
+    assert patched.count(b"1===sx&&1===sy&&(ok=!1);") == 1
+    assert b"0===tx" not in patched
+    off = live_runtime.patch_player(player, mm_opacity=False)
+    assert b"obedMix" not in off and b"__obedHandbackTextures" not in off
+
+
+def _apply_in_order(player: bytes, replacements) -> bytes:
+    for before, after in replacements:
+        assert player.count(before) == 1
+        player = player.replace(before, after)
+        assert player.count(after) == 1
+    return player
+
+
+@pytest.mark.parametrize("real", [False, True], ids=["synthetic", "real"])
+def test_opacity_and_handback_replacements_compose_in_either_order(monkeypatch, real):
+    if real:
+        player = _real_player()
+    else:
+        player = _synthetic_player()
+        _pin(monkeypatch, player)
+    replacements = live_runtime._MM_OPACITY_REPLACEMENTS
+    opacity_first = _apply_in_order(player, replacements)
+    handback_first = _apply_in_order(player, replacements[-3:] + replacements[:-3])
+    assert opacity_first == handback_first == live_runtime.patch_rendering(player)
 
 
 SWAP_HIDE_DEFERRED = b"setTimeout(this.handleAnimateEffectDidBegin"
@@ -278,7 +344,7 @@ SWAP_HIDE_DEFERRED = b"setTimeout(this.handleAnimateEffectDidBegin"
 
 def test_mm_opacity_hides_the_swapped_node_synchronously_on_the_real_player():
     player = _real_player()
-    before, after = live_runtime._MM_OPACITY_REPLACEMENTS[-1]
+    before, after = live_runtime._MM_OPACITY_REPLACEMENTS[4]
     assert before == b"Q&&setTimeout(this.handleAnimateEffectDidBegin.bind(this,Q),0)"
     assert player.count(before) == 1 and player.count(after) == 0
     assert player.count(SWAP_HIDE_DEFERRED) == 1

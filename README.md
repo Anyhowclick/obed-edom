@@ -149,9 +149,25 @@ or carries several or nested animations keeps the player's own look. It is on by
 independent of continuity and GL replay. `OBED_LIVE_MM_OPACITY=off` serves the
 unpatched player; `auto` keeps it on; any other value refuses to start.
 `output.mmOpacity` reports `mode` (`on`/`off`) and the served player's `sha256`.
-The dashboard preview still shows the unpatched player. Qualify it with
+Build Preview serves the same drawing patch, without the live observation hook. Qualify it with
 `scripts/mm_opacity_probe.py`, `scripts/p2_recovery_html_adversarial.py --mm-opacity auto|off`
 and, under Keyer output, `scripts/managed_obs_qualify.py --arm mmo|mmo-cef`.
+
+**Magic Move hand-back geometry**: when a Magic Move object changes size and
+Keynote exported no picture crossfade for it, the exported player ends the move
+2–3 px smaller and off-centre. The slide then draws the object at its authored
+place, so it snaps at the next click. The same patch (and the same switch:
+`OBED_LIVE_MM_OPACITY=off` serves the stock player bytes) crossfades such an object
+to the next slide's picture during the move, so the move ends exactly where the
+slide draws it. Build Preview gets it too. The middle of the move shows a blend of
+the two pictures. The fix only engages when the next slide has already rendered
+at the start of the move. A queued double click is one case where it has not;
+that move looks as it does without the fix. With the patch on, GL replay on the
+P2 fixture reports `opacityUnproven` `[{4, "size"}]` (patch off: `[]`). Its
+`frameLen` depends on frame timing, so the probes only report it; the OBS
+harness's expected value is first measured in the owner's OBS session. Qualify
+it with `scripts/mm_handback_probe.py` plus the Magic Move opacity harnesses
+above.
 
 ### Codec report
 
@@ -232,9 +248,10 @@ backup Mac and move the UltraStudio's Thunderbolt cable to it.
   slide (GL replay); its midtones may shift slightly in brightness when GL replay
   takes over and at that slide's first build. To fall back to a frozen poster,
   start the dashboard with `OBED_LIVE_GL_REPLAY=off`.
-- A translucent object stays translucent through a Magic Move, as in Keynote.
-  To fall back to the exported player's look (opaque during the move), start
-  the dashboard with `OBED_LIVE_MM_OPACITY=off`.
+- A translucent object stays translucent through a Magic Move, as in Keynote,
+  and an object that grows or shrinks in a Magic Move does not snap at the next
+  click. To fall back to the exported player's look (opaque during the move, and
+  the snap), start the dashboard with `OBED_LIVE_MM_OPACITY=off`.
 
 **Qualification** (developer, launches OBS on this Mac; no other OBS may be running):
 `uv run python scripts/managed_obs_qualify.py --arm both --rate 25 --takes 2 --out DIR`, and for GL replay

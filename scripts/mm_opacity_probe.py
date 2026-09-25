@@ -18,7 +18,9 @@ Arms, per GL-replay mode (`off`, `auto`):
           and replays the settled frame at rest opacity)
   fsdoff  GL auto only: the same seed with the patch off (the stand-down KB)
 
-Gates (each counts only if its CvC reads 0 and its KB FAILs, else INCONCLUSIVE; an integrity problem is INCONCLUSIVE):
+Gates (each counts only if its CvC reads 0 and its KB FAILs, else INCONCLUSIVE; an integrity problem is INCONCLUSIVE, and so
+is a run whose hand-back fix engagement disagrees with its patch mode: patch on also blends 1->2 ordinals 2 and 4
+(`mixFactor` in effect), patch off only Keynote's own ordinal 0; plan `keynote_live_handback_geometry` §3.4):
   MO-1  every slot-4 draw of the 1->2 move (>= 20) and every G2 LIVE draw of its program reads Opacity == alpha (float32);
         every other ordinal of 1->2 and every ordinal of 3->4 matches the patch-off twin (a constant exactly; a fade by
         direction, settle value and time-interpolated values within `FADE_TOL_FACTOR` x the off vs off2 fade
@@ -27,8 +29,11 @@ Gates (each counts only if its CvC reads 0 and its KB FAILs, else INCONCLUSIVE; 
         either twin. The settle ROI is the from/to intersection of slot 4 eroded by 4 px of geometry plus ceil(settled scale)
         px: the texture's anti-aliased edge texel is magnified by the settled scale (~1.99), and Q0b measured alpha 218 one
         px inside a 4-px erosion. The scorer also refuses (INCONCLUSIVE) unless every twin S pixel in the ROI is opaque.
-  MO-4  (GL auto) patch on: unproven == [{4, rest-opacity}], rest slot 4 == alpha, occludedBands 0; patch off: unproven
-        == [], rest [1,0,1,1,1], occludedBands 20 (gates-r2 / OD-2); LIVE screenshot ROI_top identical on vs off.
+  MO-4  (GL auto) patch on: unproven == [{4, size}], rest slot 4 == alpha, occludedBands 0; patch off: unproven == [],
+        rest [1,0,1,1,1], occludedBands 20 (gates-r2 / OD-2; hand-back plan §3.3); LIVE screenshot ROI_top identical on
+        vs off. G2 `frameLen` (96 on / 88 off when settled on the move's last frame) is reported, not gated: headless runs
+        have read 85/86 on stock bytes. ROI_top starts at x 797, past the stock GL edge ramp (col 793 is inside
+        it), so the hand-back fix's DOM-matching edge cannot move it.
   MO-4 stand-down  (GL auto) arm fsd: every slot-4 draw of G2's stand-down replay reads Opacity == alpha; KB fsdoff (1);
         CvC = MO-4's off vs off2.
   MO-5  settle-frame hash of 3->4 identical on vs off; of 1->2 different. The 1->2 hash masks the carried movie (the plan's
@@ -76,9 +81,11 @@ SLOT_TO_RECT = (788.725538103768, 672.9158876261134, 353.0, 313.0)
 SETTLED_SCALE = max(SLOT_TO_RECT[2] / SLOT_TEX[0], SLOT_TO_RECT[3] / SLOT_TEX[1])
 GEOMETRY_EROSION_PX = 4
 MASK_PAD_PX = 2
-ROI_TOP = (793, 727, 16, 58)
+ROI_TOP = (797, 727, 12, 58)
 REST_OFF = [1, 0, 1, 1, 1]
-UNPROVEN_ON = [{"slot": SLOT, "reason": "rest-opacity"}]
+UNPROVEN_ON = [{"slot": SLOT, "reason": "size"}]
+STOCK_BLENDED = [0]
+BLENDED_ON = [0, 2, SLOT]
 OCCLUDED_BANDS = {"on": 0, "off": 20}
 FADE_TOL_FACTOR = 2.0
 FSD_REASON = "frameLengthChanged"
@@ -115,7 +122,7 @@ LOGGER_JS = r"""
   }
   var ids = new WeakMap(), nextId = {ctx: 0, prog: 0};
   function idOf(x, kind){ if (!x) return null; if (!ids.has(x)) ids.set(x, nextId[kind]++); return ids.get(x); }
-  var locs = new WeakMap(), opacity = new WeakMap(), ctxState = new WeakMap();
+  var locs = new WeakMap(), opacity = new WeakMap(), mixLocs = new WeakMap(), mix = new WeakMap(), ctxState = new WeakMap();
   var M = window.__OBED_MMO__ = {label: 'init', cfg: {}, frames: [], settle: {}, labelStart: {}, errors: [],
     setLabel: function(label, cfg){ M.label = label; M.cfg = cfg || {}; return true; }};
   function stateOf(g){
@@ -154,7 +161,10 @@ LOGGER_JS = r"""
   }
   wrap('getUniformLocation', function(orig, args){
     var loc = orig.apply(this, args);
-    try { if (loc && String(args[1]) === 'Opacity') locs.set(loc, args[0]); } catch (e) { M.errors.push(String(e)); }
+    try {
+      if (loc && String(args[1]) === 'Opacity') locs.set(loc, args[0]);
+      if (loc && String(args[1]) === 'mixFactor') mixLocs.set(loc, args[0]);
+    } catch (e) { M.errors.push(String(e)); }
     return loc;
   });
   wrap('useProgram', function(orig, args){
@@ -162,7 +172,11 @@ LOGGER_JS = r"""
     return orig.apply(this, args);
   });
   wrap('uniform1f', function(orig, args){
-    try { var p = args[0] ? locs.get(args[0]) : null; if (p) opacity.set(p, args[1]); } catch (e) { M.errors.push(String(e)); }
+    try {
+      var p = args[0] ? locs.get(args[0]) : null, q = args[0] ? mixLocs.get(args[0]) : null;
+      if (p) opacity.set(p, args[1]);
+      if (q) mix.set(q, args[1]);
+    } catch (e) { M.errors.push(String(e)); }
     return orig.apply(this, args);
   });
   wrap('clear', function(orig, args){
@@ -171,7 +185,7 @@ LOGGER_JS = r"""
       if (s.frame && isPlayer(s.frame)) s.lastPlayerDraws = s.frame.draws.length;
       if (M.labelStart[M.label] == null) M.labelStart[M.label] = t;
       s.frame = {label: M.label, ctx: idOf(this, 'ctx'), i: M.frames.length, el: t - M.labelStart[M.label], g2: g2(),
-                 draws: [], B: null};
+                 draws: [], mix: [], B: null};
       M.frames.push(s.frame);
     } catch (e) { M.errors.push(String(e)); }
     return orig.apply(this, args);
@@ -183,6 +197,7 @@ LOGGER_JS = r"""
       if (f){
         ord = f.draws.length;
         f.draws.push([idOf(s.prog, 'prog'), s.prog && opacity.has(s.prog) ? opacity.get(s.prog) : null]);
+        if (s.prog && mix.has(s.prog)) f.mix.push([ord, mix.get(s.prog)]);
         tail = cfg.settleFromMs != null && isPlayer(f) && f.el >= cfg.settleFromMs &&
                nat(this, 'getParameter').call(this, this.FRAMEBUFFER_BINDING) === null;
         if (tail && cfg.roi && ord === cfg.roiOrdinal) f.B = readRoi(this, cfg.roi);
@@ -352,6 +367,18 @@ def g2_void(run: dict[str, Any]) -> str | None:
     return None
 
 
+def blended_ordinals(run: dict[str, Any], label: str = "mm12") -> list[int]:
+    return sorted({o for f in player_frames(run, label) for o, _ in f.get("mix") or []})
+
+
+def engagement_problems(run: dict[str, Any]) -> list[str]:
+    """Hand-back premise: with the patch the fix also blends ordinals 2 and 4 of 1->2, without it only stock's do.
+    Engagement is timing-dependent (hand-back plan §3.4), so a run that disagrees is INCONCLUSIVE, never a stock twin."""
+    want = BLENDED_ON if run.get("mmOpacityKwarg") == "auto" else STOCK_BLENDED
+    got = blended_ordinals(run)
+    return [] if got == want else [f"hand-back fix: blended 1->2 ordinals {got}, expected {want}"]
+
+
 def run_problems(run: dict[str, Any]) -> list[str]:
     problems = []
     if run.get("error"):
@@ -361,6 +388,7 @@ def run_problems(run: dict[str, Any]) -> list[str]:
         return problems + ["no logger output"]
     if log.get("errors"):
         problems.append(f"logger errors: {log['errors'][:3]}")
+    problems += engagement_problems(run)
     for step in run.get("steps") or []:
         expected = step.get("expectHash")
         if expected and [step.get("hashBefore"), step.get("hashAfter")] != list(expected):
@@ -492,6 +520,7 @@ def score_mo4(cand: dict[str, Any], twin: dict[str, Any], alpha: float = ALPHA) 
             problems.append(f"{name}no LIVE screenshot ROI")
         if run.get("stage") != {"x": 0, "y": 0, "width": VIEWPORT[0], "height": VIEWPORT[1]}:
             problems.append(f"{name}stage is not the full {VIEWPORT} viewport: {run.get('stage')}")
+        problems += [f"{name}{p}" for p in engagement_problems(run)]
     void = g2_void(cand) or g2_void(twin)
     on, off = _g2_stats(cand), _g2_stats(twin)
     rest = on.get("restOpacity") or []
@@ -505,7 +534,8 @@ def score_mo4(cand: dict[str, Any], twin: dict[str, Any], alpha: float = ALPHA) 
         "occludedBandsOff": off.get("occludedBands") == OCCLUDED_BANDS["off"],
         "liveGreenEqual": bool(cand.get("liveGreen")) and cand.get("liveGreen") == twin.get("liveGreen"),
     }
-    detail = {"rest": rest, "unproven": on.get("opacityUnproven"), "restTwin": off.get("restOpacity"),
+    detail = {"frameLen": on.get("frameLen"), "frameLenTwin": off.get("frameLen"),
+              "rest": rest, "unproven": on.get("opacityUnproven"), "restTwin": off.get("restOpacity"),
               "unprovenTwin": off.get("opacityUnproven"), "occludedBands": on.get("occludedBands"),
               "occludedBandsTwin": off.get("occludedBands"), "greenMean": _mean(cand.get("liveGreen")),
               "greenMeanTwin": _mean(twin.get("liveGreen"))}

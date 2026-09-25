@@ -1,6 +1,7 @@
 # Dashboard preview: draw Magic Move leaves at Keynote's opacity
 
-**IMPLEMENTED — merged #235 (`2a2ce095`, 2026-09-25).** **APPROVED (owner, 2026-09-25): decisions 1–3 as recommended.** Base note: the parent branch gained a fifth
+**IMPLEMENTED — merged #235 (`2a2ce095`, 2026-09-25).** **Follow-up:** the hand-back geometry fix (R6–R8, `keynote_live_handback_geometry.plan.md`, decision 4a)
+is appended to the same tuple, so the preview gets it through `patch_rendering` with no preview change. **APPROVED (owner, 2026-09-25): decisions 1–3 as recommended.** Base note: the parent branch gained a fifth
 replacement (`0f6d0380`, synchronous DOM hide at the GL handover); the split must carry every `_MM_OPACITY_REPLACEMENTS` entry.
 
 **DRAFT rev 1**, 2026-09-25, Opus planner. Plan only: no product code, no commits, no browser, no Keynote.
