@@ -3920,3 +3920,129 @@ def _freeze_control_blocks_success(verdict: str | None, bridge34_disabled: bool)
     if verdict == "skipped":
         return not bridge34_disabled
     return True
+
+
+STRAY_IOU_MIN = 0.75
+_STRAY_ROW_KEYS = ("visible", "hiddenBy", "rect", "suppressed34", "inDocument")
+
+
+def slide_of_hash(scene_index_by_player: dict, scene_hash: object) -> int | None:
+    """The player index whose first scene is the latest one at or before `scene_hash`."""
+    hn = _strict_hash_num(scene_hash)
+    if hn is None:
+        return None
+    starts = sorted((int(scene), int(player)) for player, scene in scene_index_by_player.items())
+    before = [player for scene, player in starts if scene <= hn]
+    return before[-1] if before else None
+
+
+def _stray_row(row: dict) -> dict:
+    return {k: row.get(k) for k in ("decoderId", "src", "rect", "visible", "hiddenBy", "suppressed34")}
+
+
+def _stray_slide(player: int, scene_hash: object, rows: list[dict], expected: list[dict]) -> dict:
+    painting = [r for r in rows if r["visible"] is True and r["suppressed34"] is False]
+    claims: dict[str, list[dict]] = {e["label"]: [] for e in expected}
+    unexpected: list[dict] = []
+    for row in painting:
+        best_iou, best_label = max(
+            ((_iou(row["rect"], e["rect"]) or 0.0, e["label"]) for e in expected), default=(0.0, None)
+        )
+        if best_iou >= STRAY_IOU_MIN:
+            claims[best_label].append(_stray_row(row))
+        else:
+            unexpected.append({**_stray_row(row), "bestIou": round(best_iou, 4), "bestLabel": best_label})
+    composited = [
+        e["label"] for e in expected
+        if not claims[e["label"]] and any(
+            r["visible"] is False and r["suppressed34"] is False and r["hiddenBy"] == "hidden"
+            and (_iou(r["rect"], e["rect"]) or 0.0) >= STRAY_IOU_MIN
+            for r in rows
+        )
+    ]
+    duplicates = [label for label, found in claims.items() if len(found) > 1]
+    missing = [label for label, found in claims.items() if not found and label not in composited]
+    return {
+        "playerIndex": player,
+        "hash": scene_hash,
+        "ok": not unexpected and not duplicates and not missing,
+        "expected": expected,
+        "claims": claims,
+        "unexpected": unexpected,
+        "duplicates": duplicates,
+        "missing": missing,
+        "composited": composited,
+        "rows": [_stray_row(r) for r in rows],
+    }
+
+
+def noStrayVideo(snapshots: object, slide_instances: object, scene_index_by_player: object) -> dict:
+    """On every settled slide, the painting `<video>`s (`visible && !suppressed34`, re-derived
+    from the raw readings) match the authored instances one-to-one by rect (IoU >= 0.75). An
+    instance nothing paints is accounted for only by a connected, unsuppressed `<video>` at its
+    rect held at opacity 0 (`hiddenBy == 'hidden'`, the player's WebGL composite); otherwise it
+    is missing. Any malformed or disagreeing reading is INCONCLUSIVE, never a verdict."""
+    result: dict = {"ok": False, "verdict": "inconclusive", "reason": None, "iouMin": STRAY_IOU_MIN,
+                    "failingSlides": [], "slides": []}
+
+    def inconclusive(reason: str) -> dict:
+        return {**result, "reason": reason}
+
+    if not (isinstance(slide_instances, dict) and slide_instances
+            and isinstance(scene_index_by_player, dict) and scene_index_by_player):
+        return inconclusive("no slide_instances / scene index ground truth")
+    instances = {int(k): v for k, v in slide_instances.items()}
+    if not isinstance(snapshots, list) or not snapshots:
+        return inconclusive("no settled-slide snapshots")
+    scored: list[tuple[int, object, list[dict], list[dict]]] = []
+    for i, snap in enumerate(snapshots):
+        if not (isinstance(snap, dict) and isinstance(snap.get("stageMap"), dict)
+                and isinstance(snap.get("videos"), list)):
+            return inconclusive(f"snapshot {i} has no stage map or video list")
+        player = slide_of_hash(scene_index_by_player, snap.get("hash"))
+        by_asset = instances.get(player) if player is not None else None
+        if not isinstance(by_asset, dict):
+            return inconclusive(f"snapshot {i} hash {snap.get('hash')!r} maps to no authored slide")
+        expected = []
+        for asset in sorted(by_asset):
+            for n, rect in enumerate(by_asset[asset], start=1):
+                if _rect_or_none(rect) is None:
+                    return inconclusive(f"authored rect {asset}#{n} on player index {player} is malformed")
+                expected.append({"label": f"{asset}#{n}", "rect": _rect_or_none(rect)})
+        rows = [v for v in snap["videos"] if not (isinstance(v, dict) and v.get("fromPreservePool"))]
+        for row in rows:
+            if not (isinstance(row, dict) and all(k in row for k in _STRAY_ROW_KEYS)):
+                return inconclusive(f"snapshot {i} carries a video row without {list(_STRAY_ROW_KEYS)}")
+            if row.get("documentHidden") is True:
+                return inconclusive(f"snapshot {i} was taken with the page hidden")
+            if not (isinstance(row["visible"], bool) and isinstance(row["suppressed34"], bool)):
+                return inconclusive(f"snapshot {i} carries a non-boolean paint classification")
+            if not _paint_agrees(row, set()):
+                return inconclusive(f"snapshot {i}: decoder {row.get('decoderId')!r}'s paint reading does not re-derive")
+            if row["visible"] and _rect_or_none(row["rect"]) is None:
+                return inconclusive(f"snapshot {i}: painting decoder {row.get('decoderId')!r} has no authored rect")
+        scored.append((player, snap.get("hash"), rows, expected))
+    unsampled = sorted(set(instances) - {player for player, *_ in scored})
+    if unsampled:
+        return inconclusive(f"player index(es) {unsampled} never sampled settled")
+    slides = [_stray_slide(*entry) for entry in scored]
+    failing = [s for s in slides if not s["ok"]]
+    reasons = [
+        f"player index {s['playerIndex']} ({s['hash']}): "
+        + "; ".join(
+            part for part in (
+                f"{len(s['unexpected'])} painting video(s) match no authored instance" if s["unexpected"] else "",
+                f"{s['duplicates']} painted more than once" if s["duplicates"] else "",
+                f"{s['missing']} missing" if s["missing"] else "",
+            ) if part
+        )
+        for s in failing
+    ]
+    return {
+        **result,
+        "ok": not failing,
+        "verdict": "fail" if failing else "pass",
+        "reason": " | ".join(reasons) or None,
+        "failingSlides": [s["playerIndex"] for s in failing],
+        "slides": slides,
+    }

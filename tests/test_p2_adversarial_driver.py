@@ -575,16 +575,17 @@ def test_burst_offsets_come_from_the_probe():
 
 def test_findings_inventory_names_both_1to2_slots_and_is_otherwise_unchanged():
     """Slot 5 has two literals: `refusedCarry1to2` (off) and `glReplayCarry1to2`
-    (auto, swapped in by id). Every other finding appears exactly once."""
+    (auto, swapped in by id). Every other finding appears exactly once; 15 per run
+    (`noStrayVideo` added by the continuity generalisation plan, S1)."""
     import re
 
     ids = re.findall(
         r'"id": "(\w+)"',
         (REPO / "scripts" / "p2_recovery_html_adversarial.py").read_text(encoding="utf-8"),
     )
-    assert len(ids) == 15
-    assert len(set(ids)) == 15
-    assert {"refusedCarry1to2", "glReplayCarry1to2", "freezeControlCaughtByCounter"} <= set(ids)
+    assert len(ids) == 16
+    assert len(set(ids)) == 16
+    assert {"refusedCarry1to2", "glReplayCarry1to2", "freezeControlCaughtByCounter", "noStrayVideo"} <= set(ids)
     assert "continueThroughMagicMove1to2" not in ids
 
 

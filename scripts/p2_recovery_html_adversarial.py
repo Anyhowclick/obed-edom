@@ -80,6 +80,7 @@ from obed_edom.html_alpha_probe import (  # noqa: E402
     write_patched_export,
 )
 from obed_edom.html_preview import export_html  # noqa: E402
+from obed_edom.live_continuity import ContinuityPlan, Unsupported, derive_plan  # noqa: E402
 from obed_edom.live_gl_replay_js import GL_REPLAY_VERSION, gl_replay_script, validate_gl_replay_entry  # noqa: E402
 from obed_edom.live_gl_replay_js import js_sha256 as gl_replay_js_sha256  # noqa: E402
 from obed_edom.live_runtime import (  # noqa: E402
@@ -126,6 +127,7 @@ from obed_edom.p2_verdict import (  # noqa: E402
     liveContinuity1to2,
     movingContinuity3to4,
     neverPooledEvidence,
+    noStrayVideo,
     refusedCarry1to2,
     _advance_c_ok,
     _advance_gate,
@@ -521,6 +523,26 @@ def _unmodified_export(root: Path, *, reuse: bool, gl_auto: bool) -> Path:
         shutil.rmtree(copy)
     shutil.copytree(OUT / "html-unmodified", copy)
     return copy
+
+
+def _export_file(root: Path, relative: str) -> Path:
+    path = (root / relative).resolve()
+    if root.resolve() not in path.parents or not path.is_file():
+        raise FileNotFoundError(relative)
+    return path
+
+
+def _p2_ground_truth(export_root: Path) -> ContinuityPlan:
+    """The derived plan whose `slide_instances` `noStrayVideo` scores against."""
+    header = json.loads((export_root / "assets" / "header.json").read_text(encoding="utf-8"))
+    slides = [
+        {"originalOrdinal": i + 1, "playerIndex": i, "exportedUuid": uuid_, "skipped": False}
+        for i, uuid_ in enumerate(header["slideList"])
+    ]
+    plan = derive_plan(export_root, slides, resolver=_export_file)
+    if isinstance(plan, Unsupported):
+        raise SystemExit(f"the P2 export does not derive a continuity plan: {plan.reason}")
+    return plan
 
 
 def _gl_info_js(canvas: dict) -> str:
@@ -3314,6 +3336,7 @@ async def _run(player: Path) -> dict:
     else:
         source_dir = unmodified
 
+    ground_truth = _p2_ground_truth(unmodified)
     strip_info = strip_export_pdf_bg_fills(source_dir)
     write_json(root / "pdf-strip.json", strip_info)
     print("stripped", [r["pdf"] for r in (strip_info.get("rewritten") or [])])
@@ -3850,6 +3873,7 @@ async def _run(player: Path) -> dict:
         # pressing there presses during residual motion.
         capture_id_c = uuid.uuid4().hex
         settle_c = await _settle_at_advance_hash(chrome)
+        media_settled_s3 = await _media_snapshot(chrome)
         bound_owner_id_c = await _bind_footprint_owner(chrome, MOVIE1_KEY, SLIDE3_MOVIE_RECT)
         owner_settle_c = await _settle_bound_owner_rect(chrome, bound_owner_id_c)
         click_wall_c = time.monotonic()
@@ -3900,6 +3924,7 @@ async def _run(player: Path) -> dict:
             slide4_burst.append(np.asarray(shot)[:, :, :3])
             Image.fromarray(shot).save(run_dir / f"slide4-live-t{off_ms:04d}.png")
         footprint_live = footprintFullyLive(slide4_burst, capture_id=capture_id_c)
+        media_settled_s4 = await _media_snapshot(chrome)
         # ================= end Transition C =================
     finally:
         await chrome.close()
@@ -3952,6 +3977,10 @@ async def _run(player: Path) -> dict:
     # With movie1 never pooled, the reuse-skip/retire pair at the 2->3 boundary
     # cannot fire; "nothing was ever pooled" is the stronger substitute.
     never_pooled = neverPooledEvidence(preserve_events, carry_census, pool_census_s2)
+    settled_snapshots = [media_pre, media_mid, media_settled_s3, media_settled_s4]
+    no_stray = noStrayVideo(
+        settled_snapshots, ground_truth.slide_instances, ground_truth.scene_index_by_player
+    )
 
     findings = [
         {"id": "sourceUnchanged", "pass": after.as_dict() == before.as_dict()},
@@ -4263,6 +4292,27 @@ async def _run(player: Path) -> dict:
                     "RESTARTS (fresh decoder) and fails crossingIdentity -> RED, so this is "
                     "an honest gate, never a false pass. A player-build-error fails it as "
                     "failed-by-player."
+                ),
+            },
+        },
+        {
+            "id": "noStrayVideo",
+            "pass": no_stray["ok"],
+            "verdict": no_stray["verdict"],
+            "detail": {
+                "noStrayVideo": no_stray,
+                "slideInstances": {str(k): v for k, v in ground_truth.slide_instances.items()},
+                "sceneIndexByPlayer": {str(k): v for k, v in ground_truth.scene_index_by_player.items()},
+                "settledSnapshots": settled_snapshots,
+                "note": (
+                    "One settled snapshot per slide (boot, settled slide 2, slide 3 at the "
+                    "pre-move hash, slide 4 after the burst). Every painting <video> "
+                    "(visible && !suppressed34, re-derived off-page) must claim exactly one "
+                    "authored instance of `ContinuityPlan.slide_instances` for that slide "
+                    f"(IoU >= {no_stray['iouMin']}), no instance painted twice, and every "
+                    "instance painted or held connected at its rect under the player's own "
+                    "opacity-0 WebGL composite. Malformed or non-re-derivable rows, an "
+                    "unsampled slide or a hash off the authored slides are INCONCLUSIVE."
                 ),
             },
         },
