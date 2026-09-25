@@ -153,6 +153,7 @@ def phase_stats(greys: list[int | None], c: float, fps: float, loop_frames: int 
         "advancePerS": round(sum(deltas) / seconds, 2) if seconds else None,
         "distinctPerS": round(sum(1 for d in deltas if d) / seconds, 2) if seconds else None,
         "gapsGE3": sum(1 for d in deltas if d >= 3),
+        "maxForwardStep": max((d for d in deltas if d <= MOD // 2), default=None),
         "backwardSteps": len(backward) - wraps,
         "wrapSteps": wraps,
         "maxRun": max((len(list(run)) for _, run in itertools.groupby(counter)), default=0),

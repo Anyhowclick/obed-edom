@@ -106,6 +106,7 @@ SOAK_WINDOW_MINUTES = (2, 8)
 PRECHECK_S = 105.0
 RAF_JS = ("(()=>{if(!window.__obedRafN){window.__obedRafN=1;(function t(){window.__obedRafN++;requestAnimationFrame(t);})();}"
           "return [performance.now(), window.__obedRafN];})()")
+HANDBACK_LEAD_S = 0.5
 MARKER_RECT = {"x": 0, "y": 0, "w": 24, "h": 24}
 REGION_PAD = 2
 T_ERODE_PX = 6
@@ -475,8 +476,11 @@ def g2_script(kb: str | None, armed: dict[str, Any]) -> Callable[[Session], None
         hold(started, 3.8)
         s.read("reshownEnd")
         started = s.phase("slide2-handback")
+        hold(started, HANDBACK_LEAD_S)
+        s.read("preHandback")
         s.out["build1AfterMarkerS"] = round(time.monotonic() - started, 3)
         s.execute("advance")
+        s.out["postHandbackVideos"] = s.ev(VIDEOS_JS)
         hold(started, 4)
         started = s.phase("slide2-after")
         s.read("after")
@@ -812,6 +816,8 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     check(m2, "one painting movie <video> at P3", len(painting), len(painting) == 1, "== 1")
     handback = p_g2.get("slide2-handback") or {}
     check(m2, "report: handback repeat/gaps", [handback.get("repeatFrac"), handback.get("gapsGE3")], True, enforced=False)
+    check(m2, "report: max forward step live/handback/native", [live.get("maxForwardStep"), handback.get("maxForwardStep"),
+          native.get("maxForwardStep")], True, enforced=False)
     check(m2, "report: handoff completedMs", [h.get("completedMs") for h in handoffs], True, enforced=False)
     check(m2, "report: g2 handback ringDiag", (d_g2.get("ringDiag") or {}).get("slide2-handback"), True, enforced=False)
     check(m2, "report: build-1 advance after handback marker (s)", g2.get("build1AfterMarkerS"), True, enforced=False)
