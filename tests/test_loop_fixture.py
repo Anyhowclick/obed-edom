@@ -3,7 +3,7 @@
 The builder splices Keynote's Repeat -> Loop key into a copy of the P2 export. Keynote's
 JSON does not round-trip through `json.dumps` (it escapes `/` as `\\/`), so the splice is
 textual; these tests pin that every other byte is unchanged, that the read-only source is
-never touched, and that the spliced copy derives the two annexed plan shas the plan pins
+never touched, and that the spliced copy derives the two looping plan shas the plan pins
 (F5). Synthetic sources are built in `tmp_path` from the committed P2 fixture rewritten in
 Keynote's compact form, so no real export is needed; one REAL-gated test runs the real
 export's slide JSON through the same build.
@@ -127,7 +127,7 @@ class TestSpliceText:
 
 
 class TestBuild:
-    def test_committed_fixture_builds_and_derives_the_pinned_annexed_shas(self, tmp_path: Path) -> None:
+    def test_committed_fixture_builds_and_derives_the_pinned_looping_shas(self, tmp_path: Path) -> None:
         source = _committed_source(tmp_path / "src")
         before = _tree_bytes(source)
         dest = tmp_path / "p2-loop"
