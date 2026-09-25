@@ -214,3 +214,11 @@ the new telemetry line shows any blips it absorbs.
   - fixed code, 9 min: 5 absences, all with marker True; 0 false "gone"; 1 downgrade logged; 0 `obsExited`; clean
     quit with `cleanExit` true;
   - `lsof`: the CDP listener is the OBS main pid.
+- Live L1 exit control (fixed code): an out-of-band `terminate()` gave `obsExited` 0.339 s after the process left the kernel.
+- Live L2 `--arm both --rate 25 --takes 2` (load 14–15), 15/16 gates passed:
+  - all engine and lifecycle gates passed on all 4 takes;
+  - positive take 2 `slide1-native.repeat` 0.153 missed its ≥ 0.18 floor.
+- Interleaved positive-arm reruns (load 15–23), all PASS:
+  - fixed code: 0.246, 0.281, 0.221;
+  - origin/main: 0.265, 0.251.
+- Verdict: the 0.153 did not reproduce. The change does not touch cadence.
