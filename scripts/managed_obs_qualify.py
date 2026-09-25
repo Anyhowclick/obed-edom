@@ -1393,8 +1393,6 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"--fixture for --arm {args.arm} must be {FIXTURE} or a binary_counter_movie.py copy of it.")
     else:
         args.fixture = FIXTURE
-    if args.arm in ("failsafe", "soak") and args.rate != 25:
-        parser.error(f"--arm {args.arm} runs at --rate 25 only (GL replay defaults on at 25).")
     if (args.precheck or args.build_fixture) and args.arm != "soak":
         parser.error("--precheck and --build-fixture apply to --arm soak only.")
     if args.build_fixture:
