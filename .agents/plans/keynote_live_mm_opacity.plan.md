@@ -228,6 +228,9 @@ Why (iii) is safe:
   mask (`occluded_screen_cells`, `live_continuity_probe.py:2405`) and follow automatically.
 - **M3** (`managed_obs_qualify.py:880–905`): with the patch on, `g2-off-S` is translucent, so "edge: G2-S == round(g2-off-S ×
   0.2947)" would square and "KB: g2-off-S T alpha fails the slot check" would pass. Both move to the `mm-off` twin (§8).
+- **Superseded by the hand-back geometry fix** (`keynote_live_handback_geometry.plan.md` §3.3–3.4, decision 6a): with R6–R8
+  the patch-on baseline is `frameLen` 96 and `opacityUnproven = [{4, "size"}]` (same fail-closed meaning); M3's edge band is
+  enforced against G2-P3 (DOM), no longer against the `mm-off` twin, whose settle keeps the stock geometry.
 
 ## 8. Harness parity
 

@@ -737,12 +737,27 @@ for the parked `iwa-surgical-write-generator` feature.
   observation-only player. Precedence = ctor `mm_opacity` (`auto`|`off` exact, else `LiveHostError`) → env
   `OBED_LIVE_MM_OPACITY` (trimmed, any case; `off`|`auto`, else refuse) → `auto`, on every output (HDMI, managed OBS,
   external attach), independent of continuity and GL replay. Report: `output.mmOpacity = {mode: on|off, sha256}` (served
-  `main.js`); start log `mmOpacityPreference`. `RUNTIME_VERSION` stays 2. G2 is unchanged: with the patch on, the P2
-  fixture reports exactly `opacityUnproven = [{4, "rest-opacity"}]` (expected: the player already draws 0.2947, LIVE
-  replays it) and `occludedBands` 0/128 (patch off: `[]`, 20/128). Preview (`html_preview.py`) and paint oracle
-  (`html_alpha_probe.py`) serve the stock player. Harnesses: `scripts/mm_opacity_probe.py` (headless MO-1/4/5 + forced
-  stand-down), `managed_obs_qualify.py --arm mmo` (MO-2; `--score` rescores) / `--arm mmo-cef` (MO-3),
-  `p2_recovery_html_adversarial.py --mm-opacity auto|off` (non-GL arms run `--disable-gpu`, so only the GL arm exercises it).
+  `main.js`); start log `mmOpacityPreference`. `RUNTIME_VERSION` stays 2. G2 bytes are unchanged; with the patch on the
+  P2 fixture reports exactly `frameLen` 96, `opacityUnproven = [{4, "size"}]` (no override: LIVE replays the player's own
+  0.2947) and `occludedBands` 0/128 (patch off: 88, `[]`, 20/128). Preview (`html_preview.py`) serves `patch_rendering`
+  (the same replacements, no observation hook); the paint oracle (`html_alpha_probe.py`) serves the stock player.
+  Harnesses: `scripts/mm_opacity_probe.py` (headless MO-1/4/5 + forced stand-down), `managed_obs_qualify.py --arm mmo`
+  (MO-2; `--score` rescores) / `--arm mmo-cef` (MO-3), `p2_recovery_html_adversarial.py --mm-opacity auto|off` (non-GL
+  arms run `--disable-gpu`, so only the GL arm exercises it).
+* **Magic Move hand-back geometry** (`keynote_live_handback_geometry.plan.md`): Keynote encodes a scaled MM leaf as its
+  slide-1 texture plus a padded-texture scale ratio, so the GL settle lands 2–3 px smaller and off-centre from the slide-2
+  DOM (the authored geometry) and snaps at build 1. R6–R8, appended to the same replacement tuple (same switch; `off` =
+  stock bytes): R6 matches each MM leaf that scales without `contents` to exactly one visible next-slide leaf (end quad
+  within 0.01 px, different texture) and sets `toTexture`/`obedMix`; R7 blends it through the player's own `contents` path;
+  R8 preloads one scene ahead so the destination exists at MM setup. Resolved at setup only: a destination not rendered
+  yet (e.g. a queued advance) keeps today's move. Engagement is timing-dependent, so twin-compared harnesses assert it:
+  `mm_opacity_probe` requires 1->2 ordinals with `mixFactor` = [0, 2, 4] patch on / [0] off (0 is Keynote's own
+  crossfade), else INCONCLUSIVE; `managed_obs_qualify` marks a patch-on G2 take whose unproven set is still the pre-fix
+  `rest-opacity` INVALID (`frameLen` is timing-dependent: headless has read 85/86 on stock bytes, so it is no engagement
+  signal). M3's edge band is enforced against G2-P3 (DOM), with the mm-off twin's stock geometry as its KB; MO-4's
+  `ROI_TOP` starts at x 797, past the stock GL edge ramp. Gate: `scripts/mm_handback_probe.py`; under OBS, `--arm mmo`
+  (and `--score`) reports HB-OBS per session (W2's scorer on the build-1 GL/DOM frame pair of the tv-range Y plane,
+  report-only, 0.25 px with the fix; stock recordings read 2.75–2.77 px, nulls 0).
 * **Qualification harness:** `uv run python scripts/managed_obs_qualify.py --arm both --rate 25 --takes 2 --out DIR`
   (scratch home, lossless recording; refuses to start while any OBS runs; `caffeinate`; a Sleep/Wake in the take
   marks it INVALID). Limits at rate 25 (report-only at 30): decodable ≥ 0.9 in both arms; 2× arm native repeat ≤ 0.15;
