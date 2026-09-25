@@ -141,7 +141,10 @@ PRESERVE_CORE_JS = r"""
             delete v.dataset.obedPreserved;
             v.__obedRemountEpoch = -1;
             v.__obedGen = -1;
-            if (v.parentNode) v.parentNode.removeChild(v);
+            if (v.parentNode) {
+              beginMove(v);
+              v.parentNode.removeChild(v);
+            }
           } catch (e) {}
         });
         note('pool-cleared', {
@@ -748,19 +751,28 @@ PRESERVE_CORE_JS = r"""
   }
   /**
    * The hash reads `atScene - 1` both while the player idles at the end of the
-   * source slide (it shows the NEXT scene when idle) and while it plays the
-   * transition scene; only its teardown of the source slide's <video>s (the
-   * held decoder's facade or suppressed stub included) marks the transition.
+   * source slide (it shows the NEXT scene when idle) and while it plays that
+   * transition scene. The player tears no <video> down at rest, so any teardown
+   * of its own at that hash marks the transition. The mark is per scene, not per
+   * instance: a decoder the runtime placed itself may never be torn down. It
+   * lapses as soon as the hash moves. A retire whose transition this is hands
+   * its held decoder back right there, so the raw player draws the fade-out.
    */
-  const departed = {};
+  let departure = null;
   function noteDeparture(v) {
     if (v.__obedRemounting) return;
-    const inst = instanceOf(v);
-    const n = nextEntry(inst);
-    if (n && currentHashNum() === n.atScene - 1) departed[inst] = preserveGeneration;
+    const hn = currentHashNum();
+    if (hn == null) return;
+    departure = {scene: hn, gen: preserveGeneration};
+    ENTRIES.forEach(function(b) {
+      if (b.action === 'retire' && b.atScene - 1 === hn) retireVictims(b, zoneVictims(b, []), true);
+    });
   }
   function hasDeparted(inst) {
-    return inst != null && departed[inst] === preserveGeneration;
+    const n = nextEntry(inst);
+    const hn = currentHashNum();
+    return !!n && !!departure && departure.gen === preserveGeneration
+      && departure.scene === hn && hn === n.atScene - 1;
   }
   function isPlannedDecoder(v) {
     const inst = instanceOf(v);
@@ -804,6 +816,7 @@ PRESERVE_CORE_JS = r"""
     // A facade stub is never a decoder: pooled when the dom-swap took it out, it
     // was remounted beside the carried decoder, two painters for one instance.
     if (v.__obedFacadeFor) return;
+    if (v.__obedGen === -1) return;
     if ((v.__obedGen == null ? 0 : v.__obedGen) < preserveGeneration) {
       note('stash-stale-gen', {
         elId: v.__obedElId, why: why,
@@ -1775,6 +1788,7 @@ PRESERVE_CORE_JS = r"""
   // Refresh layout while videos are still attached (detach often zeroes the box).
   setInterval(function(){
     if (disabled) return;
+    if (departure && currentHashNum() !== departure.scene) departure = null;
     sweepRetireZone();
     document.querySelectorAll('video').forEach(function(v){ captureLayout(v); });
     pool.forEach(function(q){
@@ -1998,7 +2012,6 @@ PRESERVE_CORE_JS = r"""
     el.setAttribute = function(attr, value) {
       if (disabled || String(attr).toLowerCase() !== 'src') return origSA(attr, value);
       reidentify(el, value);
-      if (instanceOf(el) != null) delete departed[instanceOf(el)];
       const mode = zoneMode(el);
       if (mode === 'armed') noteHold(el, value, 'reuse');
       if (mode !== 'allow') return origSA(attr, value);
