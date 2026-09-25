@@ -14,7 +14,9 @@ main checkout `output/mmo-gates/`. Gate worktree `mmo-gate-p2`, detached at the 
 | MO-6 host probe ×3 viewports | `01a9ff55` | default | PASS | A/B/C/attach as baseline; V and Voff all slides True |
 | MO-6 P2 fast / slow | `01a9ff55` | default | PASS 14/14 | patch exercised in the GL arm only (non-GL arms run `--disable-gpu`: no WebGL; Opus r1 F3) |
 | MO-6 P2 bridge-off | `01a9ff55` | default | expected red | only `continueThroughMovingMagicMove3to4` False (the negative arm) |
-| MO-6 suites | `102d4ca4` | | PASS | pytest 7744 passed / 88 skipped / 1 xfailed; test:ui 305/305; test:maps 542 + 2 |
+| MO-6 suites | `f7ecda5d` | | PASS | pytest 7761 passed / 88 skipped / 1 xfailed; test:ui 305/305; test:maps 542 + 2 |
+| MO-6 host probe ×3 + P2 ×3, after R5 | `7c20dde4` | default | PASS / as baseline | host V/Voff all True at 3 viewports; P2 fast/slow 14/14; bridge-off red only on its negative check |
+| MO-1/4/5 + stand-down, after R5 | `0f6d0380` | off, auto | PASS | output `output/mmo-gates/probe-0f6d0380/` |
 
 Q0b (scratch, `f6a87ee8`-era bytes) is recorded in the plan §9.
 
@@ -31,9 +33,18 @@ Instrument amendments found live: R2 = neutral-background blend consistency (the
 empty patch is not empty during the move); τ_key read slide 1's covered patch (113 → 1.15); R4's KB is enforced on the G2-less
 twin only (G2's LIVE override makes the g2 patch-off settle key translucent — timing luck, 5/10 takes). Headless overlap probe
 for R5 was INCONCLUSIVE (its positive control read 0) and is not evidence; R5 rests on the Node task-order test + MO-2 ×10.
-MO-7: final-commit take (`67c7d12e`) 25 + 30 PASS; recordings kept at `qualify-home/recordings/mmo-20260925-143530/` (25) and `mmo-20260925-144012/` (30) — `g2off-on` (fix, no G2) vs `g2off-mmoff` (stock) side by side; owner eyeball pending.
+MO-7: final-commit take (`67c7d12e`) 25 + 30 PASS; recordings kept at `qualify-home/recordings/mmo-20260925-143530/` (25) and `mmo-20260925-144012/` (30) — `g2off-on` (fix, no G2) vs `g2off-mmoff` (stock) side by side; owner eyeball done (found the pre-existing build-1 geometry jump below).
+
+## Findings outside this PR
+
+- Managed OBS lifecycle: 1 of 13 launches today ended `stateAfterQuit: stuck` (take `141513`, rate 30); MO-2 content PASS, take FAIL
+  on lifecycle. Page content is the only thing this PR changes; not root-caused here.
+- Build-1 GL→DOM geometry jump (owner eyeball MO-7): the settled GL frame is ~1.7 % smaller than the DOM layout (square bbox
+  (793,677)–(1137,982) → (790,675)–(1140,985)); identical patch on/off × GL replay on/off ⇒ pre-existing. Follow-up session spawned.
 
 ## Review
 
+Opus r2 `opus-r2.md`: R5 sound (no blank-frame path); F1 R2 floor 8.0, F3 `--score` keeps validity/lifecycle, F4 colour
+premise, F6 test, F7 natspec folded (`f7ecda5d`); F2 re-runs recorded above.
 Opus r1 `opus-r1.md`: F1–F11 folded (`60009ce3`, `5178be70`, `102d4ca4`); F5/F11 plan corrections; F8 min/max refuted (rAF
 timing), time-interpolated match instead.
