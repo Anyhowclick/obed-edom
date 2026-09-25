@@ -743,6 +743,22 @@ PRESERVE_CORE_JS = r"""
     const n = nextEntry(instanceOf(v));
     return !!n && (CARRY_ACTIONS.indexOf(n.action) >= 0 || (n.action === 'restart' && held.indexOf(v) >= 0));
   }
+  /**
+   * The hash reads `atScene - 1` both while the player idles at the end of the
+   * source slide (it shows the NEXT scene when idle) and while it plays the
+   * transition scene; only its teardown of the source slide's <video>s (the
+   * held decoder's facade or suppressed stub included) marks the transition.
+   */
+  const departed = {};
+  function noteDeparture(v) {
+    if (v.__obedRemounting) return;
+    const inst = instanceOf(v);
+    const n = nextEntry(inst);
+    if (n && currentHashNum() === n.atScene - 1) departed[inst] = preserveGeneration;
+  }
+  function hasDeparted(inst) {
+    return inst != null && departed[inst] === preserveGeneration;
+  }
   function isPlannedDecoder(v) {
     const inst = instanceOf(v);
     return held.indexOf(v) >= 0 || isPooled(v)
@@ -1099,9 +1115,10 @@ PRESERVE_CORE_JS = r"""
         retireSlot(real);
         real.__obedSlotPinning = false; return;
       }
-      // A held overlay is never detached, so the next bridge's move starts here.
+      // A held overlay is never detached, so the next bridge's move starts here,
+      // once the player has left the slide (not while it idles on it).
       const next = nextEntry(instanceOf(real));
-      if (next && next.action === 'bridge' && hn === next.atScene - 1) {
+      if (next && next.action === 'bridge' && hn === next.atScene - 1 && hasDeparted(instanceOf(real))) {
         real.__obedSlotPinning = false;
         keepThroughBridge(real);
         return;
@@ -1802,9 +1819,14 @@ PRESERVE_CORE_JS = r"""
   new MutationObserver(function(muts){
     muts.forEach(function(m){
       m.removedNodes.forEach(function(node){
-        if (node instanceof HTMLVideoElement) stash(node, 'preserve-on-detach');
-        else if (node && node.querySelectorAll) {
-          node.querySelectorAll('video').forEach(function(v){ stash(v, 'preserve-on-detach-subtree'); });
+        if (node instanceof HTMLVideoElement) {
+          noteDeparture(node);
+          stash(node, 'preserve-on-detach');
+        } else if (node && node.querySelectorAll) {
+          node.querySelectorAll('video').forEach(function(v){
+            noteDeparture(v);
+            stash(v, 'preserve-on-detach-subtree');
+          });
         }
       });
     });
@@ -1932,6 +1954,7 @@ PRESERVE_CORE_JS = r"""
     el.setAttribute = function(attr, value) {
       if (disabled || String(attr).toLowerCase() !== 'src') return origSA(attr, value);
       reidentify(el, value);
+      if (instanceOf(el) != null) delete departed[instanceOf(el)];
       const mode = zoneMode(el);
       if (mode === 'armed') noteHold(el, value, 'reuse');
       if (mode !== 'allow') return origSA(attr, value);
