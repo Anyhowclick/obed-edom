@@ -3806,3 +3806,17 @@ def test_movie_table_names_only_assets_with_an_entry_and_footprints_their_first_
     runtime = _plan().to_runtime()
     assert isinstance(runtime, dict)
     assert runtime["movies"] == {"movie1": {"assetKeys": ["untitled.mov"], "footprint": P2_MOVIE1_FOOTPRINT}}
+
+
+def test_a_mid_deck_none_transition_is_a_cut_like_a_dissolve():
+    """Keynote exports "no transition" as the name `none` (S0: every last slide). Mid-deck it is a
+    cut: the continuing movie restarts, and the Magic Move after it still carries."""
+    plan = _plan(_mutate_slide(SLIDE2, lambda data: _set_transition_name(data, "none")))
+    assert isinstance(plan, ContinuityPlan)
+    assert [m.action for m in plan.boundaries[1].movies] == ["restart"]
+    assert plan.to_runtime() == EXPECTED_RUNTIME_PLAN
+
+
+def test_an_unknown_transition_name_still_refuses_the_deck():
+    plan = _plan(_mutate_slide(SLIDE2, lambda data: _set_transition_name(data, "apple:cube")))
+    assert plan == Unsupported("unsupported transition 'apple:cube' at player index 1 -> 2")

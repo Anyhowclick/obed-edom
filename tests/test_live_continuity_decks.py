@@ -426,3 +426,18 @@ def test_s0_deck_fixture_is_the_exports_bytes(deck):
 def test_d2_across_derives_exactly_as_d2():
     """The HTML export does not encode play-across-slides (plan section 5, S0 investigation)."""
     assert _qual_plan("D2-across", root=QUAL_REAL_ROOT).as_dict() == _qual_plan("D2").as_dict()
+
+
+def test_d2_with_its_dissolve_exported_as_none_signs_the_same_plan(tmp_path):
+    """A mid-deck `none` cut derives exactly as the Dissolve it replaces, so D2's allowlisted sha
+    is unchanged (no S0 deck has a mid-deck `none`)."""
+    root = tmp_path / "D2"
+    shutil.copytree(QUAL_ROOT / "D2", root)
+    slide2 = _slide_list(root)[1]
+    path = root / "assets" / slide2 / f"{slide2}.json"
+    raw = path.read_text()
+    assert raw.count('"apple:dissolve"') == 1
+    path.write_text(raw.replace('"apple:dissolve"', '"none"'))
+    runtime = derive_plan(root, _slides(_slide_list(root)), resolver=_resolver).to_runtime()
+    assert isinstance(runtime, dict)
+    assert live_continuity.plan_signature(runtime) == QUAL_PLAN_SHA256["D2"]
