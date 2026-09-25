@@ -65,9 +65,9 @@ changes core runtime bytes (`js`), so the P2 / G2 / managed-OBS / loop re-qualif
     `retire-boundary`, `preserve-refused`, `dom-swap`, `facade-block-clear`, `remount-*`, `pool-cleared`, `glreplay-*`
     (`p2_verdict.py:130-175`), each with today's `detail` fields (`key` = movieKey, `elId`/`newElId`/`elIds`);
   - element properties `__obedSuppressed34` (P2 sampler `p2_recovery_html_dissolve_live.py:266` → `suppressed34`
-    painter classification), `dataset.obedPreserved`, `__obedElId`, `__obedGen`, `__obedFacadeFor`;
+    painter classification), `dataset.obedPreserved`, `dataset.obedRemounted` (S1 retire hand-back reads it), `__obedElId`, `__obedGen`, `__obedFacadeFor`;
   - `footprintOwnerDecoderId` (`js:256-320`), which reads `movies[k].footprint` through `footprintKeyForRect` (`js:1217`).
-- **F6 (new).** `scripts/managed_obs_qualify.py` (OD-2) imports 13 probe symbols (`GL_REPLAY_READ_JS`,
+- **F6 (new).** `scripts/managed_obs_qualify.py` (OD-2) imports 14 probe symbols (Opus r3 recount; all still exist) (`GL_REPLAY_READ_JS`,
   `PAINTING_VIDEOS_JS`, `_carried_el_id`, `_movie_entries`, `_notes`, `armed_evidence`, `forced_fail_seed`,
   `ground_truth_facts`, `ground_truth_plan`, `load_slides`, `matches_asset_keys`, `score_armed`,
   `wait_for_destination_hash`) and reads `ground_truth_facts(plan, armed=True)["armed"]["instanceRect"]`.
@@ -317,7 +317,7 @@ Dissolve). D2-across → none. D4 → the near copy is unpaired, so no finding.
 - **Timing:** V touches no continuity bytes, so it may run before OD-2/loopMode merge (**OQ-16**).
 
 ## 4. Instrument rules (every gate has a red control)
-- **Stray-movie check in both gates.** Host `unexpectedVideos` (exists) and P2 `noStrayVideo` (S1). Red: `--core-variant stash-any` on the P2 fixture (WA0125 on slide 4).
+- **Stray-movie check in both gates.** Host `unexpectedVideos` (exists) and P2 `noStrayVideo` (S1). `noStrayVideo` claims **only** that no painting `<video>` fails to claim an authored instance and no instance is claimed twice. It does **not** score presence (Codex R1-9, closed by narrowing): Magic-Move-settled slides legitimately paint through WebGL, so presence stays with `refusedCarry1to2`/`glReplayCarry1to2`, `deliberateRestart2to3` and `continueThroughMovingMagicMove3to4`. Red: `--core-variant stash-any` on the P2 fixture (WA0125 on slide 4).
 - **Per-boundary verdicts from the plan.** Never from slide positions. The rescore control (G-S1a) proves the new scorer equals the old on stored artifacts before it replaces it.
 - **A red arm per action type.** `--strip ACTION@atScene` must turn exactly its pre-registered set red, and every other verdict must match the unstripped run.
 - **Identity red.** `--core-variant wrong-instance` on D4 must fail the carry verdict: the carried clock is A-near's, ~3 s ahead of A-far's (the probe dwells ≥ 3 s on S1 before click 1).
