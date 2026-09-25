@@ -14,16 +14,21 @@ Gates (integrity, premise, engagement, controls, KB and CvC failures read INCONC
   HB-1  (blocking, GL off, per viewport) max |DOM - GL| over the green and sentinel edges <= `HB_MAX` screen px in `on`
         and `on2`; KB: `off` and `off2` >= `KB_MIN`; CvC per edge (on vs on2, off vs off2; GL and DOM shots) <= `CVC_TOL`.
         Controls per run: GL, DOM and slide-1 pairs and the static movie outline <= `NULL_TOL`; the 1 / 0.5 px shift of
-        the GL shot within `SHIFT_TOL`. Premise: the fixture's texture rects; on-arms blend exactly the two
+        the GL shot within `SHIFT_TOL`. At both mm12 shots the page must show `MM12_CANVAS` and hide every DOM node
+        the player swaps for it (read in page, judged here), so a settled GL frame is never confused with an early
+        DOM. Premise: the fixture's texture rects; each run served the current `patch_player` bytes for its mode
+        (sha256, so a reused `--out` from an older build cannot merge in); on-arms blend exactly the two
         `BLENDED_TEXTURES`, off-arms none; the settle frame's blended draws are Keynote's own `contents` leaves
         (`KEYNOTE_CONTENTS`: the background at 1->2, background and footprint at 3->4) plus 2 on the on-arms' 1->2.
   HB-2  (blocking, GL auto, 1920) the same metric on the G2 LIVE screenshot; `on` G2 stats LIVE, no stand-down,
-        `glErrors` 0, `frameLen` 96, unproven [{4, size}]; `off` (KB, >= `KB_MIN`) must read LIVE, no stand-down,
-        `glErrors` 0, unproven [] or INCONCLUSIVE. Its `frameLen` is reported only: on today's (pre-MMO) bytes it varies
-        between headless runs (85, 86).
+        `glErrors` 0, unproven [{4, size}]; `off` (KB, >= `KB_MIN`) must read LIVE, no stand-down, `glErrors` 0,
+        unproven [] or INCONCLUSIVE. `frameLen` is reported on both arms, never checked: the player's `setGLFloat`
+        queues a uniform write only when the value changed, so the settle frame's call count depends on timing
+        (headless off-arm 85 and 86).
   HB-3  (report, 1920 GL off) width(on) - width(off) against move progress and its per-frame step divided by the
         progress step; CvC off2 vs off.
   HB-4  (report, GL off) 3->4 footprint edges, in-page GL alpha vs the DOM screenshot, authored px.
+The overall verdict is INCONCLUSIVE unless HB-1 at every viewport in `VIEWPORTS` and HB-2 are all present.
 
 usage: uv run python scripts/mm_handback_probe.py --out DIR [--viewports 1920x1080,...] [--arms on,on2,off,off2] [--gl off,auto]
        uv run python scripts/mm_handback_probe.py --score DIR
@@ -33,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import io
 import json
 import math
@@ -66,7 +72,8 @@ SHIFT_TOL = 0.02
 STAGE_TOL_PX = 0.5
 KEYNOTE_CONTENTS = {"mm12": 1, "mm34": 2}
 BLENDED_12 = {"auto": KEYNOTE_CONTENTS["mm12"] + 2, "off": KEYNOTE_CONTENTS["mm12"]}
-G2_EXPECTED = {"auto": {"frameLen": 96, "opacityUnproven": [{"slot": mmo.SLOT, "reason": "size"}]},
+MM12_CANVAS = "0-canvas"
+G2_EXPECTED = {"auto": {"opacityUnproven": [{"slot": mmo.SLOT, "reason": "size"}]},
                "off": {"opacityUnproven": []}}
 BAND_ROWS = (740, 760)
 SHOTS = ("s1-a", "s1-b", "mm12-a", "mm12-b", "b1-a", "b1-b", "mm34-a", "mm34-b")
@@ -113,6 +120,13 @@ LOGGER_JS = r"""
       Object.defineProperty(this, 'obedMix', {value: v, writable: true, configurable: true, enumerable: true});
       try { H.mix.push({label: H.label, textureId: this.textureId == null ? null : String(this.textureId), value: !!v}); }
       catch (e) { H.errors.push(String(e)); }
+    }});
+  var swaps = H.swaps = [];
+  Object.defineProperty(Object.prototype, 'nodeToSwapId', {configurable: true, enumerable: false,
+    get: function(){ return undefined; },
+    set: function(v){
+      Object.defineProperty(this, 'nodeToSwapId', {value: v, writable: true, configurable: true, enumerable: true});
+      swaps.push(this);
     }});
   function stateOf(g){
     var s = ctxState.get(g);
@@ -180,6 +194,24 @@ LOGGER_JS = r"""
 })();
 """
 
+SWAP_READ_JS = r"""
+(function(){
+  function facts(el){
+    if (!el) return null;
+    var cs = getComputedStyle(el), r = el.getBoundingClientRect(), chain = 1;
+    for (var n = el; n && n.nodeType === 1; n = n.parentElement) chain *= parseFloat(getComputedStyle(n).opacity);
+    return {id: el.id, connected: el.isConnected, opacity: chain, visibility: cs.visibility, display: cs.display,
+            w: r.width, h: r.height};
+  }
+  var H = window.__OBED_HB__;
+  return {canvases: Array.from(document.querySelectorAll('canvas[id$="-canvas"]')).map(facts),
+          swaps: (H ? H.swaps : []).map(function(o){
+            return {canvasId: o.canvasId == null ? null : String(o.canvasId), id: String(o.nodeToSwapId),
+                    node: facts(document.getElementById(o.nodeToSwapId))};
+          })};
+})()
+"""
+
 LOG_READ_JS = (
     "(function(){var H=window.__OBED_HB__;if(!H)return null;var cap={};"
     "Object.keys(H.capture).forEach(function(k){var c=H.capture[k];cap[k]={frame:c.frame,el:c.el,n:c.n,w:c.w,h:c.h};});"
@@ -235,7 +267,37 @@ def engagement_problems(record: dict[str, Any], eng: dict[str, Any]) -> list[str
     return problems
 
 
-def run_problems(record: dict[str, Any], images: dict[str, np.ndarray]) -> list[str]:
+def player_shas(fixture: Path) -> dict[str, str]:
+    """The sha256 `LiveOutputHost` reports for the player it serves, per `mm_opacity` mode, from today's `patch_player`."""
+    from obed_edom.live_runtime import patch_player
+
+    player = (fixture / "html-player" / "assets" / "player" / "main.js").read_bytes()
+    return {mode: hashlib.sha256(patch_player(player, mm_opacity=mode == "auto")).hexdigest() for mode in ("auto", "off")}
+
+
+def _shown(facts: dict[str, Any] | None) -> bool:
+    return bool(facts) and bool(facts.get("connected")) and (facts.get("opacity") or 0) > 0 and \
+        facts.get("visibility") != "hidden" and facts.get("display") != "none" and \
+        (facts.get("w") or 0) > 0 and (facts.get("h") or 0) > 0
+
+
+def swap_problems(record: dict[str, Any]) -> list[str]:
+    reads = record.get("mm12Dom") or []
+    if len(reads) != 2:
+        return [f"mm12: {len(reads)} in-page canvas/DOM reads, expected 2"]
+    problems = []
+    for n, read in enumerate(reads):
+        canvases = [c for c in (read or {}).get("canvases") or [] if (c or {}).get("id") == MM12_CANVAS]
+        if len(canvases) != 1 or not _shown(canvases[0]):
+            problems.append(f"mm12 read {n}: {MM12_CANVAS} is not shown: {canvases}")
+        swaps = [w for w in (read or {}).get("swaps") or [] if w.get("canvasId") == MM12_CANVAS]
+        if not swaps:
+            problems.append(f"mm12 read {n}: no DOM node swapped for {MM12_CANVAS}")
+        problems += [f"mm12 read {n}: swapped DOM node {w.get('id')} is shown" for w in swaps if _shown(w.get("node"))]
+    return problems
+
+
+def run_problems(record: dict[str, Any], images: dict[str, np.ndarray], shas: dict[str, str]) -> list[str]:
     problems = []
     if record.get("error"):
         problems.append(f"run error: {str(record['error']).strip().splitlines()[-1]}")
@@ -253,6 +315,10 @@ def run_problems(record: dict[str, Any], images: dict[str, np.ndarray]) -> list[
     want_mode = "on" if record.get("mmOpacity") == "auto" else "off"
     if ((record.get("output") or {}).get("mmOpacity") or {}).get("mode") != want_mode:
         problems.append(f"served player mm_opacity mode is not {want_mode!r}: {record.get('output')}")
+    served = ((record.get("output") or {}).get("mmOpacity") or {}).get("sha256")
+    if served is None or served != shas.get(record.get("mmOpacity")):
+        problems.append(f"served player sha {served} is not today's patch_player output for {record.get('mmOpacity')!r}")
+    problems += swap_problems(record)
     viewport = tuple(record.get("viewport") or ())
     stage, want = stage_of(record), expected_stage(viewport) if len(viewport) == 2 else None
     if stage is None or want is None or abs(stage.s - want.s) > 1e-3 or abs(stage.ox - want.ox) > STAGE_TOL_PX or \
@@ -272,9 +338,9 @@ def _pos(readings: dict[str, hb.Reading]) -> dict[str, float]:
     return {n: r.pos for n, r in readings.items()}
 
 
-def measure_run(record: dict[str, Any], images: dict[str, np.ndarray]) -> dict[str, Any]:
+def measure_run(record: dict[str, Any], images: dict[str, np.ndarray], shas: dict[str, str]) -> dict[str, Any]:
     """Every per-run reading HB-1/HB-2 need, re-derived from the saved frames; `problems` holds integrity failures."""
-    problems = run_problems(record, images)
+    problems = run_problems(record, images, shas)
     eng = engagement(record)
     problems += engagement_problems(record, eng)
     out: dict[str, Any] = {"arm": record.get("arm"), "engagement": eng}
@@ -366,9 +432,10 @@ def score_hb2(records: dict[str, dict[str, Any]], measured: dict[str, dict[str, 
         problems.append(f"KB off max {off.get('max')} < {KB_MIN} (must fail)")
     on_g2 = g2_stats_problems(records["on"], G2_EXPECTED["auto"])
     checks = {"liveVsDom": on.get("max", math.nan) <= HB_MAX, "g2Stats": not on_g2}
+    stats = {arm: (((records[arm].get("g2") or {}).get("api")) or {}).get("stats") or {} for arm in AUTO_ARMS}
     return {"verdict": _verdict(problems, checks), "problems": problems, "checks": checks,
             "detail": {"max": {"on": on.get("max"), "off": off.get("max")}, "g2On": on_g2,
-                       "g2Stats": {arm: (((records[arm].get("g2") or {}).get("api")) or {}).get("stats") for arm in AUTO_ARMS}}}
+                       "frameLen": {arm: stats[arm].get("frameLen") for arm in AUTO_ARMS}, "g2Stats": stats}}
 
 
 def band_series(record: dict[str, Any]) -> np.ndarray:
@@ -401,9 +468,9 @@ def report_hb4(record: dict[str, Any], images: dict[str, np.ndarray]) -> dict[st
             "domMinusGlAuthored": {e.name: stage.to_authored(d[e.name].pos, e.axis) - g[e.name].pos for e in hb.EDGES_34}}
 
 
-def score_all(runs: dict[str, tuple[dict[str, Any], dict[str, np.ndarray]]]) -> dict[str, Any]:
-    """`runs` maps `tag_of(gl, viewport, arm)` to (record, images)."""
-    measured = {tag: measure_run(rec, imgs) for tag, (rec, imgs) in runs.items()}
+def score_all(runs: dict[str, tuple[dict[str, Any], dict[str, np.ndarray]]], shas: dict[str, str]) -> dict[str, Any]:
+    """`runs` maps `tag_of(gl, viewport, arm)` to (record, images); `shas` is `player_shas` of the fixture."""
+    measured = {tag: measure_run(rec, imgs, shas) for tag, (rec, imgs) in runs.items()}
     gates: dict[str, Any] = {}
     for vp in VIEWPORTS:
         arms = {arm: measured[t] for arm in ARMS if (t := tag_of("off", vp, arm)) in measured}
@@ -417,9 +484,11 @@ def score_all(runs: dict[str, tuple[dict[str, Any], dict[str, np.ndarray]]]) -> 
         gates["HB-3"] = report_hb3(off1920)
     gates["HB-4"] = {"verdict": "REPORT", "runs": {tag: report_hb4(rec, imgs) for tag, (rec, imgs) in runs.items()
                                                    if rec.get("gl") == "off" and rec.get("arm") in ("on", "off")}}
-    blocking = [g["verdict"] for name, g in gates.items() if name.startswith(("HB-1", "HB-2"))]
-    overall = next((v for v in ("FAIL", "INCONCLUSIVE", "PASS") if v in blocking), "INCONCLUSIVE")
-    return {"overall": overall, "gates": gates}
+    required = [f"HB-1 {w}x{h}" for w, h in VIEWPORTS] + ["HB-2"]
+    missing = [name for name in required if name not in gates]
+    blocking = [gates[name]["verdict"] for name in required if name in gates]
+    overall = "INCONCLUSIVE" if missing else next(v for v in ("FAIL", "INCONCLUSIVE", "PASS") if v in blocking)
+    return {"overall": overall, "missing": missing, "gates": gates}
 
 
 def run_arm(fixture: Path, viewport: tuple[int, int], gl: str, arm: str, out_dir: Path) -> dict[str, Any]:
@@ -456,6 +525,8 @@ def run_arm(fixture: Path, viewport: tuple[int, int], gl: str, arm: str, out_dir
                 data = transport.call("Page.captureScreenshot", format="png")["data"]
                 (out_dir / f"{name}-{suffix}.png").write_bytes(base64.b64decode(data))
                 record["shots"][f"{name}-{suffix}"] = {"file": f"{name}-{suffix}.png", "t": time.monotonic()}
+                if name == "mm12":
+                    record.setdefault("mm12Dom", []).append(evaluate(SWAP_READ_JS))
 
         record["loggerInstalled"] = evaluate("!!window.__OBED_HB__")
         host.execute("show")
@@ -577,7 +648,7 @@ def main(argv: list[str] | None = None) -> int:
             tag = tag_of(gl, vp, arm)
             record = run_arm(args.fixture, vp, gl, arm, out / "runs" / tag)
             print(f"{tag}: {'error' if record.get('error') else 'ok'}", flush=True)
-    verdict = score_all(load_runs(out))
+    verdict = score_all(load_runs(out), player_shas(args.fixture))
     (out / "verdict.json").write_text(json.dumps(verdict, indent=1, default=str))
     for name, gate in verdict["gates"].items():
         if name == "HB-4":
@@ -591,8 +662,10 @@ def main(argv: list[str] | None = None) -> int:
             continue
         detail = gate.get("detail") or {}
         print(f"{name}: {gate['verdict']} max={_fmt(detail.get('max'))} cvc={_fmt(detail.get('cvc'))} "
+              f"{'frameLen=' + _fmt(detail['frameLen']) + ' ' if 'frameLen' in detail else ''}"
               f"{gate.get('problems') or ''}")
-    print(f"overall: {verdict['overall']}")
+    missing = f" (missing {', '.join(verdict['missing'])})" if verdict["missing"] else ""
+    print(f"overall: {verdict['overall']}{missing}")
     return 0 if verdict["overall"] == "PASS" else 1
 
 

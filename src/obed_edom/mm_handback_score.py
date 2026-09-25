@@ -198,16 +198,23 @@ def score_handback_pair(gl: Any, dom: Any, stage: Stage = IDENTITY, white: float
     }
 
 
-def layer_rects(layer: dict[str, Any], *, visible_only: bool = False) -> dict[str, tuple[float, float, float, float]]:
-    """Texture id -> (x, y, w, h) of every leaf, the player's own `bounds.offset` sum (rounded to 1e-6 per level)."""
-    out: dict[str, tuple[float, float, float, float]] = {}
+def js_round6(value: float) -> float:
+    """The player's `Math.round(1e6 * v) / 1e6` (half rounds up, unlike Python's `round`)."""
+    return math.floor(1e6 * value + 0.5) / 1e6
+
+
+def layer_rects(layer: dict[str, Any], *, visible_only: bool = False) -> dict[str, tuple[float, float, float, float] | None]:
+    """Texture id -> (x, y, w, h) of every leaf, the player's own `bounds.offset` sum (rounded to 1e-6 per level). A
+    texture id used by more than one leaf maps to None."""
+    out: dict[str, tuple[float, float, float, float] | None] = {}
 
     def walk(node: dict[str, Any], x: float, y: float) -> None:
         t, a = node["initialState"], node["initialState"]["anchorPoint"]
-        x += round(1e6 * (t["position"]["pointX"] - a["pointX"] * t["width"])) / 1e6
-        y += round(1e6 * (t["position"]["pointY"] - a["pointY"] * t["height"])) / 1e6
+        x += js_round6(t["position"]["pointX"] - a["pointX"] * t["width"])
+        y += js_round6(t["position"]["pointY"] - a["pointY"] * t["height"])
         if node.get("texture") and not (visible_only and t.get("hidden")):
-            out[node["texture"]] = (x, y, float(t["width"]), float(t["height"]))
+            tid = node["texture"]
+            out[tid] = None if tid in out else (x, y, float(t["width"]), float(t["height"]))
         for child in node.get("layers") or []:
             walk(child, x, y)
 
@@ -223,8 +230,8 @@ def export_texture_rects(export_root: Path) -> dict[str, dict[str, list[float]]]
     moves = [e for ev in s1["events"] for e in ev["effects"] if e["name"] == MM_EFFECT]
     if len(moves) != 1:
         return {"slide1": {}, "slide2": {}}
-    return {"slide1": {k: list(v) for k, v in layer_rects(moves[0]["baseLayer"]).items()},
-            "slide2": {k: list(v) for k, v in layer_rects(s2["events"][0]["baseLayer"], visible_only=True).items()}}
+    return {"slide1": {k: v and list(v) for k, v in layer_rects(moves[0]["baseLayer"]).items()},
+            "slide2": {k: v and list(v) for k, v in layer_rects(s2["events"][0]["baseLayer"], visible_only=True).items()}}
 
 
 def premise_problems(rects: dict[str, dict[str, Sequence[float]]] | None) -> list[str]:

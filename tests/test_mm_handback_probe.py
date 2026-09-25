@@ -215,6 +215,23 @@ def test_layer_rects_mirror_the_player_offsets_and_skip_hidden_destinations() ->
     assert "C" not in hb.layer_rects(root, visible_only=True)
 
 
+def test_layer_rects_round_half_up_like_the_player_and_flag_duplicate_textures() -> None:
+    def leaf(texture: str, x: float) -> dict[str, Any]:
+        return {"texture": texture, "initialState": {"position": {"pointX": x, "pointY": 0.0},
+                                                     "anchorPoint": {"pointX": 0.0, "pointY": 0.0}, "width": 1, "height": 1}}
+
+    assert round(2.5) == 2 and hb.js_round6(2.5e-6) == pytest.approx(3e-6)
+    root = {"initialState": {"position": {"pointX": 0.0, "pointY": 0.0}, "anchorPoint": {"pointX": 0.0, "pointY": 0.0},
+                             "width": 1920, "height": 1080},
+            "layers": [leaf("A", 2.5e-6), leaf("B", 1.0), leaf("B", 2.0)]}
+    rects = hb.layer_rects(root)
+    assert rects["A"][0] == pytest.approx(3e-6, abs=1e-12)
+    assert rects["B"] is None
+    premise = {"slide1": {**{k: list(v) for k, v in hb.SLIDE1_RECTS.items()}, "935F60DCEA8D1C1684E8FF95B677B4DD": None},
+               "slide2": {k: list(v) for k, v in hb.SLIDE2_RECTS.items()}}
+    assert len(hb.premise_problems(premise)) == 1
+
+
 REAL_EXPORT = Path("/Users/anyhowclick/Desktop/work/obed-edom/output/p2-binary/html-player")
 
 
@@ -225,6 +242,19 @@ def test_real_fixture_premise_holds() -> None:
 
 # ---------------------------------------------------------------------------------------------------------------------
 # HB-1 / HB-2 gate logic
+
+
+SHAS = {"auto": "a" * 64, "off": "b" * 64}
+SWAP_NODE = "layer-slide1"
+
+
+def canvas_read(*, canvas_opacity: float = 1.0, swap_opacity: float = 0.0, swapped: bool = True) -> dict[str, Any]:
+    canvas = {"id": probe.MM12_CANVAS, "connected": True, "opacity": canvas_opacity, "visibility": "visible",
+              "display": "inline", "w": 1920, "h": 1080}
+    node = {"id": SWAP_NODE, "connected": True, "opacity": swap_opacity, "visibility": "visible", "display": "block",
+            "w": 1920, "h": 1080}
+    swaps = [{"canvasId": probe.MM12_CANVAS, "id": SWAP_NODE, "node": node}] if swapped else []
+    return {"canvases": [canvas], "swaps": swaps + [{"canvasId": "2-canvas", "id": "layer-slide3", "node": {**node, "opacity": 1}}]}
 
 
 def make_record(arm: str, viewport: tuple[int, int] = (1920, 1080), gl: str = "off", *, engaged: bool | None = None,
@@ -238,7 +268,8 @@ def make_record(arm: str, viewport: tuple[int, int] = (1920, 1080), gl: str = "o
                for n in range(80)]
     return {
         "viewport": list(viewport), "gl": gl, "arm": arm, "mmOpacity": mode, "loggerInstalled": True,
-        "output": {"mmOpacity": {"mode": "on" if mode == "auto" else "off"}},
+        "output": {"mmOpacity": {"mode": "on" if mode == "auto" else "off", "sha256": SHAS[mode]}},
+        "mm12Dom": [canvas_read(), canvas_read()],
         "stage": {"s": stage.s, "sy": stage.s, "ox": stage.ox, "oy": stage.oy, "offsetWidth": 1920, "offsetHeight": 1080},
         "premise": {"slide1": {k: list(v) for k, v in hb.SLIDE1_RECTS.items()},
                     "slide2": {k: list(v) for k, v in hb.SLIDE2_RECTS.items()}},
@@ -274,7 +305,7 @@ def hb1_runs(viewport: tuple[int, int] = (1920, 1080), *, on_scene: dict[str, fl
 
 
 def score_hb1(runs: dict[str, tuple[dict[str, Any], dict[str, np.ndarray]]]) -> dict[str, Any]:
-    return probe.score_hb1({arm: probe.measure_run(rec, imgs) for arm, (rec, imgs) in runs.items()})
+    return probe.score_hb1({arm: probe.measure_run(rec, imgs, SHAS) for arm, (rec, imgs) in runs.items()})
 
 
 @pytest.mark.parametrize("viewport", [(1920, 1080), (1600, 1000)])
@@ -411,7 +442,7 @@ def hb2_inputs(on_api: dict[str, Any] = G2_ON, off_api: dict[str, Any] = G2_OFF,
     records = {"on": {**make_record("on", gl="auto"), "g2": {"api": copy.deepcopy(on_api)}},
                "off": {**make_record("off", gl="auto"), "g2": {"api": copy.deepcopy(off_api)}}}
     images = {"on": make_images(on_scene), "off": make_images(KNOWN_BAD)}
-    return records, {arm: probe.measure_run(records[arm], images[arm]) for arm in records}
+    return records, {arm: probe.measure_run(records[arm], images[arm], SHAS) for arm in records}
 
 
 def test_hb2_passes_on_live_matching_the_dom_with_the_new_g2_baseline() -> None:
@@ -420,7 +451,6 @@ def test_hb2_passes_on_live_matching_the_dom_with_the_new_g2_baseline() -> None:
 
 
 @pytest.mark.parametrize("mutate", [
-    lambda a: a["stats"].update(frameLen=88),
     lambda a: a["stats"].update(opacityUnproven=[{"slot": 4, "reason": "rest-opacity"}]),
     lambda a: a["stats"].update(glErrors=1),
     lambda a: a.update(standDowns=["frameLengthChanged"]),
@@ -451,13 +481,15 @@ def test_hb2_inconclusive_when_the_off_twin_is_off_baseline(mutate: Any) -> None
     assert probe.score_hb2(*hb2_inputs(off_api=api))["verdict"] == "INCONCLUSIVE"
 
 
-def test_hb2_does_not_pin_the_off_twins_frame_length() -> None:
-    """Measured headless on today's bytes: 85 and 86 in two runs."""
-    api = copy.deepcopy(G2_OFF)
-    api["stats"]["frameLen"] = 85
-    result = probe.score_hb2(*hb2_inputs(off_api=api))
-    assert result["verdict"] == "PASS"
-    assert result["detail"]["g2Stats"]["off"]["frameLen"] == 85
+@pytest.mark.parametrize(("on_len", "off_len"), [(96, 85), (88, 86), (97, 88)])
+def test_hb2_reports_frame_length_on_both_arms_without_checking_it(on_len: int, off_len: int) -> None:
+    """`setGLFloat` writes a uniform only when its value changed, so the settle frame's call count is timing-dependent
+    (headless off-arm 85 and 86). An on-arm 88 or 97 used to FAIL HB-2."""
+    on_api, off_api = copy.deepcopy(G2_ON), copy.deepcopy(G2_OFF)
+    on_api["stats"]["frameLen"], off_api["stats"]["frameLen"] = on_len, off_len
+    result = probe.score_hb2(*hb2_inputs(on_api=on_api, off_api=off_api))
+    assert result["verdict"] == "PASS", result["problems"]
+    assert result["detail"]["frameLen"] == {"on": on_len, "off": off_len}
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -545,9 +577,70 @@ def test_report_hb4_in_page_alpha_vs_dom_in_authored_px() -> None:
 # End to end: saved evidence re-scored from disk
 
 
+def full_runs(on_scene: dict[str, float] = DOM) -> dict[str, tuple[dict[str, Any], dict[str, np.ndarray]]]:
+    """Every run the overall verdict needs: HB-1 at the three viewports and HB-2, keyed by `tag_of`."""
+    runs = {probe.tag_of("off", vp, arm): run for vp in probe.VIEWPORTS
+            for arm, run in hb1_runs(vp, on_scene=on_scene).items()}
+    for arm, api, scene in (("on", G2_ON, on_scene), ("off", G2_OFF, KNOWN_BAD)):
+        runs[probe.tag_of("auto", probe.VIEWPORTS[0], arm)] = (
+            {**make_record(arm, gl="auto"), "g2": {"api": copy.deepcopy(api)}}, make_images(scene))
+    return runs
+
+
+def test_overall_needs_every_hb1_viewport_and_hb2() -> None:
+    """A partial set (one viewport, or no HB-2) used to read PASS."""
+    runs = full_runs()
+    assert probe.score_all(runs, SHAS)["overall"] == "PASS"
+    for drop in (probe.tag_of("off", (1600, 1000), "on2"), probe.tag_of("auto", (1920, 1080), "on")):
+        partial = {t: r for t, r in runs.items() if t != drop}
+        assert probe.score_all(partial, SHAS)["overall"] == "INCONCLUSIVE"
+    only_1920 = {t: r for t, r in runs.items() if "1920x1080" in t}
+    verdict = probe.score_all(only_1920, SHAS)
+    assert verdict["overall"] == "INCONCLUSIVE"
+    assert verdict["missing"] == ["HB-1 2560x1440", "HB-1 1600x1000"]
+    assert verdict["gates"]["HB-1 1920x1080"]["verdict"] == "PASS"
+
+
+def test_overall_inconclusive_when_a_run_served_another_build() -> None:
+    """A record left in a reused `--out` by an older build used to merge in unnoticed."""
+    runs = full_runs()
+    runs[probe.tag_of("off", (2560, 1440), "on")][0]["output"]["mmOpacity"]["sha256"] = "c" * 64
+    verdict = probe.score_all(runs, SHAS)
+    assert verdict["overall"] == "INCONCLUSIVE"
+    assert any("served player sha" in p for p in verdict["gates"]["HB-1 2560x1440"]["problems"])
+    runs = full_runs()
+    del runs[probe.tag_of("auto", (1920, 1080), "off")][0]["output"]["mmOpacity"]["sha256"]
+    assert probe.score_all(runs, SHAS)["gates"]["HB-2"]["verdict"] == "INCONCLUSIVE"
+
+
+@pytest.mark.parametrize(("reads", "needle"), [
+    ([canvas_read(canvas_opacity=0.0), canvas_read()], "0-canvas is not shown"),
+    ([canvas_read(), canvas_read(swap_opacity=1.0)], "is shown"),
+    ([canvas_read(swapped=False), canvas_read()], "no DOM node swapped"),
+    ([canvas_read()], "1 in-page canvas/DOM reads"),
+])
+def test_hb1_inconclusive_unless_the_mm12_shot_is_the_gl_canvas(reads: list[dict[str, Any]], needle: str) -> None:
+    """An early slide-2 DOM (canvas gone, or the swapped node back) reads 0 against the DOM exactly like a fixed GL
+    settle, and used to PASS."""
+    runs = hb1_runs()
+    runs["on"][0]["mm12Dom"] = reads
+    result = score_hb1(runs)
+    assert result["verdict"] == "INCONCLUSIVE"
+    assert any(needle in p for p in result["problems"]), result["problems"]
+
+
+def test_swap_read_judges_node_visibility_in_python() -> None:
+    hidden = [{**canvas_read(), "swaps": [{"canvasId": "0-canvas", "id": "n", "node": node}]}
+              for node in (None, {"connected": False, "opacity": 1, "w": 5, "h": 5},
+                           {"connected": True, "opacity": 1, "visibility": "hidden", "w": 5, "h": 5},
+                           {"connected": True, "opacity": 1, "display": "none", "w": 5, "h": 5})]
+    for read in hidden:
+        assert probe.swap_problems({"mm12Dom": [read, read]}) == []
+
+
 def write_runs(root: Path, runs: dict[str, tuple[dict[str, Any], dict[str, np.ndarray]]]) -> None:
-    for arm, (record, images) in runs.items():
-        run_dir = root / "runs" / probe.tag_of(record["gl"], tuple(record["viewport"]), arm)
+    for (record, images) in runs.values():
+        run_dir = root / "runs" / probe.tag_of(record["gl"], tuple(record["viewport"]), record["arm"])
         run_dir.mkdir(parents=True)
         record = copy.deepcopy(record)
         record["shots"] = {}
@@ -557,8 +650,10 @@ def write_runs(root: Path, runs: dict[str, tuple[dict[str, Any], dict[str, np.nd
         (run_dir / "record.json").write_text(json.dumps(record))
 
 
-def test_score_mode_rederives_the_verdict_from_saved_frames(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    write_runs(tmp_path, hb1_runs())
+def test_score_mode_rederives_the_verdict_from_saved_frames(tmp_path: Path, capsys: pytest.CaptureFixture[str],
+                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(probe, "player_shas", lambda fixture: SHAS)
+    write_runs(tmp_path, full_runs())
     assert probe.main(["--score", str(tmp_path)]) == 0
     verdict = json.loads((tmp_path / "verdict.json").read_text())
     assert verdict["overall"] == "PASS"
@@ -566,8 +661,9 @@ def test_score_mode_rederives_the_verdict_from_saved_frames(tmp_path: Path, caps
     assert "overall: PASS" in capsys.readouterr().out
 
 
-def test_score_mode_never_passes_on_a_page_computed_verdict(tmp_path: Path) -> None:
-    runs = hb1_runs(on_scene=KNOWN_BAD)
+def test_score_mode_never_passes_on_a_page_computed_verdict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(probe, "player_shas", lambda fixture: SHAS)
+    runs = full_runs(on_scene=KNOWN_BAD)
     for record, _ in runs.values():
         record["verdict"] = "PASS"
         record["max"] = 0.0
