@@ -184,7 +184,10 @@ RED_ARM_EXPECTATIONS: dict[tuple[str, str, str], tuple[str, ...] | str] = {
     (P2_OFF_PLAN_SHA256, "strip:glReplay@2", "auto"): (
         "b0to1:untitled.mov#1->untitled.mov#1:armed", "stray:slide2:untitled.mov",
     ),
-    (P2_OFF_PLAN_SHA256, "strip:restart@6", "off"): RECORD,
+    # Post-hoc from discovery round r2 (8ac39a42), not pre-registered: with the restart entry
+    # stripped, the un-retired pre-restart decoder breaks the 3->4 carry while the export's own
+    # 2->3 restart still scores green.
+    (P2_OFF_PLAN_SHA256, "strip:restart@6", "off"): ("b2to3:untitled.mov#1->untitled.mov#1:carry",),
 }
 GROUND_TRUTH_KEYS = (
     "asset", "onset1to2", "boundaryPlayerIndex", "restartScene", "bridgeScene",

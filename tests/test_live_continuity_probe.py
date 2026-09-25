@@ -6740,7 +6740,7 @@ class TestRedArmRegistration:
         assert expected["strip:bridge@8"] == (P2_CARRY34,)
         assert expected["strip:retire@2"] == (P2_CARRY12, P2_RETIRE12, "stray:slide2:untitled.mov")
         assert expected["strip:glReplay@2"] == (P2_ARMED12, "stray:slide2:untitled.mov")
-        assert expected["strip:restart@6"] == probe.RECORD
+        assert expected["strip:restart@6"] == (P2_CARRY34,)  # post-hoc from discovery r2 (8ac39a42)
 
     @pytest.mark.parametrize(("core", "strip", "label"), [
         ("stash-any", None, "core:stash-any"), (None, ("bridge", 8), "strip:bridge@8"),
