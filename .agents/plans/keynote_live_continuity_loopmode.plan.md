@@ -1,6 +1,6 @@
 # Live continuity — accept looping movies (`movie.loopMode`)
 
-Status: **rev 2, APPROVED by the owner 2026-09-24 — OQ-1..4 all (a)** ("church decks mostly don't loop videos, but this will help expand the scope"). Rev 1 by the Opus planner; rev 2 is the adversarial critique pass
+Status: **LANDED #231 (`aa4af7a2`, 2026-09-25).** **rev 2, APPROVED by the owner 2026-09-24 — OQ-1..4 all (a)** ("church decks mostly don't loop videos, but this will help expand the scope"). Rev 1 by the Opus planner; rev 2 is the adversarial critique pass
 (§9 lists what changed). Read-only against `bd9ae9f4` (origin/main, #227). Parents:
 `keynote_live_continuity.plan.md` (derivation + allowlist), `keynote_live_gl_replay_arming.plan.md` §2/§11 (glReplay rules
 1–5), OD-2 plan `keynote_live_gl_replay_managed_obs.plan.md` (unpushed branch `claude/od-2-gl-replay-managed-obs-5bd03f`,

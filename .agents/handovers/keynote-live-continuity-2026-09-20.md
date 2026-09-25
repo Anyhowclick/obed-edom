@@ -1,6 +1,6 @@
 # Handover — Alpha Keynote live continuity, state at 2026-09-20 17:30
 
-> **Where-things-are table SUPERSEDED** by the 2026-09-20 night handover (PR #182, since pruned); current state: `keynote-live-continuity-2026-09-23-c.md`. Paid-for facts, commands and gotchas below still hold.
+> **Where-things-are table SUPERSEDED** by the 2026-09-20 night handover (PR #182, since pruned); current state: GitHub and `.agents/plans/`. Paid-for facts, commands and gotchas below still hold.
 
 Owner rules (AGENTS.md wins): accuracy and code quality over speed · plan first for anything complex · never
 weaken a gate · minimal natspec, no inline comments in src · no merge / auto-merge without an explicit owner

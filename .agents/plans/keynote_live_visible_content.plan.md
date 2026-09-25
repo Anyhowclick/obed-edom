@@ -1,6 +1,6 @@
 # Live continuity — visible-content gate, slide-2 invisibility diagnosis, and the minimal retire fix
 
-Drafted 2026-09-19 by Opus (read-only) from evidence measured the same day; owner said "go as far as you can" —
+Status: **LANDED via #175 → #158 (2026-09-20).** Drafted 2026-09-19 by Opus (read-only) from evidence measured the same day; owner said "go as far as you can" —
 proceeding on the recommended options D1a · D2a · D3 (per diagnosis) · D4 (b1+b2) · D5, all revisitable.
 Evidence: with continuity ON the fixture's slide 2 shows the static POSTER in the big movie's rect and only a stray
 663×186 copy of the second `Untitled.mov` instance at its top-left, while every gate was green.

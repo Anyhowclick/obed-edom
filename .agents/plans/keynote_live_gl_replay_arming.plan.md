@@ -1,6 +1,6 @@
 # GL-replay arming v1 — turn the refused 1→2 carry into a VISIBLE live movie
 
-DRAFT for owner review — written 2026-09-20 by Opus (read-only); nothing implemented.
+**LANDED in stages: G1/G2 #206/#208, G3/G4 #214, G5/G6 #217, option (c) #218; Keyer default-on #229 (D5 superseded, §8).** Written 2026-09-20 by Opus.
 Parents: [`keynote_live_baseline.plan.md`](keynote_live_baseline.plan.md) (the `retire` this replaces at ONE
 boundary), [`keynote_live_paint_oracle.plan.md`](keynote_live_paint_oracle.plan.md) (§4.2–4.4 in-page GL oracle —
 owner answered D-b land now / D-c inconclusive-and-fail / D-d attach first / D-e full re-qualification), and the

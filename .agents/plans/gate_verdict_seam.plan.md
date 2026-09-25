@@ -390,3 +390,52 @@ python .agents/plans/gate_verdict_seam.manifest_closure.py origin/main \
 
 Re-check the driver boundary against the landed code first: list every `async` def and every
 `ChromeCdp` user reachable from the seed, and add any new one to `--stop`.
+
+## Backlog (from the 2026-09-21 seams handover, deleted; `git show 6fc85b78:.agents/handovers/codebase-architecture-seams-2026-09-21.md`)
+
+### `replay_round` has no test (Codex r1, open)
+
+- **Symptom.** Nothing exercises `scripts/replay_live_verify.py::replay_round`, so a call-site drift
+  there can pass the whole suite — which is exactly how the drift fixed in `245403ab` survived.
+- **Evidence.** Codex r1 finding 6. `live_verify` and `live_verify_routing` are now unit-tested; the
+  script's own wiring is not.
+
+### Deferred from #191, not bugs
+
+- Codex Standards 2: verbose, history-laden docstrings in `src/obed_edom/p2_verdict.py` (e.g.
+  `_derive_movie_texids`). Hygiene only — deferred by the owner, "correctness first".
+- Stage 3: the same seam for `live_continuity_probe.py`, `write_gate_ab.py`, `offline_write_ab.py` and
+  their by-path test loaders. Not scoped.
+
+### Architecture review — the candidates NOT taken
+
+A full scan produced ten deepening candidates; the #184 round took the top two and the second round
+took **candidate 1** (below — done, #191). The HTML report was written to a temp dir and is gone, so the
+rest are recorded here. Each was evidenced against real code at the time; re-verify before acting —
+candidate 1's own figures were understated by roughly a third when re-measured.
+
+1. **TAKEN — DONE, #191.** **Gate verdicts live in `scripts/`** — ~2,700 lines of pure, fail-closed verdict logic in one-off
+   scripts while the pixel scorers they call sit in `src/`; ~4,000 lines of tests load them by file
+   path. Already cost one real bug: the P2 gate filters empty crops before a scorer whose interface
+   calls them hard rejects, so that fail-closed branch is unreachable from its only caller.
+2. **The maps deck rules exist twice**, once per runtime, with no interface between them — 13 rule
+   pairs, 12 self-declared "Mirrors …" comments, zero cross-runtime assertions, and two evidenced
+   divergences (`slide_hidden_layers` vs `parseHiddenLayers`; `coerce_link_kinds` vs
+   `suggestedHopKind`).
+3. **The maps document model and its transactional store live inside the HTTP router** —
+   ~1,400 of `web/maps.py`'s 2,059 lines are not HTTP; `_COMMIT_HOOK` is a test hook in production
+   code; `app ↔ maps` is a cycle broken by a lazy import.
+4. **The continuity plan is hand-transcribed into the P2 gate** — the gate does not call
+   `to_runtime()`, and the tie-breaking test regex-scrapes a literal out of another test file's source
+   and `eval()`s it. The injected plan carries `transparentBackground`, which `to_runtime()` never
+   emits, so it cannot match the qualified-plan allowlist.
+5. **`export_slide_clips` re-implements `LiveBatch`'s lifecycle** — 21 private imports from
+   `dsk_live`, plus nine `public = _private` aliases maintained so other callers need not.
+6. **The spec's `w`/`h`-presence rule is re-derived at ~45 sites**, and the two fallback expressions in
+   `framing.py` and `map_remap.py` still differ in the `line` arm. The SKILL already names this rule as
+   a past crash.
+7. **Eight offline post-passes** sequenced by statement order inside a 180-line `try` in
+   `dsk_assemble`, nine deck decodes, two dead `warnings` params, and a "reorder must be last" rule
+   held only by luck.
+8. Duplicated overlap/scene-hash predicates between product and gate; `onExport` as a 507-line runner
+   inside a React component; a `remap_keynote` Keynote port (111 monkeypatches stand in for one seam).
