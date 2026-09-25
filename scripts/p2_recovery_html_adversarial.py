@@ -346,6 +346,7 @@ def _preserve_events_js(gl_auto: bool) -> str:
 
 
 GL_REPLAY_MODES = ("off", "auto")
+MM_OPACITY_MODES = ("auto", "off")
 GL_REPLAY_DIR = "gl-replay"
 PLAYER_MAIN_JS = "assets/player/main.js"
 GL_SERVED_ORDER = ["plan", "core", "info", "gl", "main"]
@@ -508,6 +509,13 @@ def _gl_replay_mode() -> str:
     return mode
 
 
+def _mm_opacity_mode() -> str:
+    mode = _arg_value("--mm-opacity", "auto")
+    if mode not in MM_OPACITY_MODES:
+        raise SystemExit(f"--mm-opacity must be one of {MM_OPACITY_MODES}, got {mode!r}")
+    return mode
+
+
 def _out_root(gl_auto: bool) -> Path:
     return OUT / GL_REPLAY_DIR if gl_auto else OUT
 
@@ -579,16 +587,28 @@ def _inject_player(player_dir: Path, plan: dict, *, gl_auto: bool, canvas: dict)
     return preserve, plan_inject, gl_record
 
 
-def _patched_main_js(player_dir: Path) -> tuple[bytes, dict]:
+def _patched_main_js(player_dir: Path, *, mm_opacity: bool) -> tuple[bytes, dict]:
     raw = (player_dir / PLAYER_MAIN_JS).read_bytes()
     try:
-        patched = patch_player(raw)
+        patched = patch_player(raw, mm_opacity=mm_opacity)
     except LiveRuntimeUnsupported as exc:
-        raise SystemExit(f"--gl-replay auto: {exc} (main.js sha {hashlib.sha256(raw).hexdigest()})") from exc
+        raise SystemExit(f"patched main.js: {exc} (main.js sha {hashlib.sha256(raw).hexdigest()})") from exc
     return patched, {
         "mainJsSha256": hashlib.sha256(raw).hexdigest(),
         "playerSha256": PLAYER_SHA256,
         "patchedMainJsSha256": hashlib.sha256(patched).hexdigest(),
+        "mmOpacity": mm_opacity,
+    }
+
+
+def _served_main_js(player_dir: Path, *, gl_auto: bool, mm_opacity: bool) -> tuple[bytes | None, dict]:
+    """`main.js` bytes to serve (None = stock from disk) and their provenance (plan MM opacity §8)."""
+    if gl_auto or mm_opacity:
+        return _patched_main_js(player_dir, mm_opacity=mm_opacity)
+    return None, {
+        "mainJsSha256": hashlib.sha256((player_dir / PLAYER_MAIN_JS).read_bytes()).hexdigest(),
+        "patchedMainJsSha256": None,
+        "mmOpacity": False,
     }
 
 
@@ -3128,7 +3148,7 @@ async def _capture_3to4_snapshot(
 
 async def _run_freeze_bracket(
     player_dir: Path, runs_dir: Path, wait_profile: dict, wait_profile_name: str,
-    *, main_js: bytes | None = None,
+    *, main_js: bytes | None = None, gl_auto: bool = False,
 ) -> dict:
     """A-B-A composited-freeze bracket on the 3->4 moving Magic Move boundary:
     positive -> freeze-control -> positive, one re-navigated Chrome (same
@@ -3184,7 +3204,7 @@ async def _run_freeze_bracket(
         for label, inject in (("a1", False), ("b", True), ("a2", False)):
             rd = bdir / label
             rd.mkdir()
-            chrome = _chrome(bdir / f"chrome-profile-{label}", gl_auto=main_js is not None)
+            chrome = _chrome(bdir / f"chrome-profile-{label}", gl_auto=gl_auto)
             try:
                 await chrome.start()
                 await _boot(chrome, base)
@@ -3252,6 +3272,7 @@ async def _run(player: Path) -> dict:
     if reuse and not (OUT / "html-unmodified" / "index.html").is_file():
         raise SystemExit(f"missing reusable export at {OUT / 'html-unmodified' / 'index.html'}")
     gl_auto = _gl_replay_mode() == "auto"
+    mm_opacity = _mm_opacity_mode() == "auto"
     root = _out_root(gl_auto)
     disposable_mode = "--disposable" in sys.argv
     # The 3->4 magic-move bridge is ON by default (the repair). --disable-bridge34
@@ -3328,9 +3349,8 @@ async def _run(player: Path) -> dict:
     )
     write_json(root / "preserve-inject.json", preserve)
     write_json(root / "continuity-plan-inject.json", {**plan_inject, "plan": continuity_plan})
-    main_js = None
+    main_js, main_meta = _served_main_js(player_dir, gl_auto=gl_auto, mm_opacity=mm_opacity)
     if gl_auto:
-        main_js, main_meta = _patched_main_js(player_dir)
         gl_inject = {
             **gl_inject,
             **main_meta,
@@ -4328,7 +4348,7 @@ async def _run(player: Path) -> dict:
     # never perturbs the main pass above. SKIPPED under --disable-bridge34 (no
     # carry to freeze in that arm).
     freeze_control = await _run_freeze_bracket(
-        player_dir, runs, wait_profile, wait_profile_name, main_js=main_js
+        player_dir, runs, wait_profile, wait_profile_name, main_js=main_js, gl_auto=gl_auto
     )
     freeze_blocks_success = _freeze_control_blocks_success(freeze_control.get("verdict"), not bridge34)
     findings.append(
@@ -4404,6 +4424,7 @@ async def _run(player: Path) -> dict:
         "movingContinuity3to4": moving_continuity,
         "movingIndexRun3to4": moving_index_run,
         "bridge34Enabled": bridge34,
+        "mainJs": main_meta,
         "preserveEvents": preserve_events,
         "findings": findings,
         "freezeControl": freeze_control,

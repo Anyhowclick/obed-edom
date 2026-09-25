@@ -33,6 +33,7 @@ from PIL import Image
 
 from obed_edom import p2_verdict as v
 from obed_edom.live_gl_replay_js import GL_REPLAY_JS
+from obed_edom import live_runtime
 from obed_edom.live_runtime import PLAYER_SHA256
 
 REPO = Path(__file__).resolve().parent.parent
@@ -725,23 +726,149 @@ def test_the_handler_serves_patched_main_js_from_memory_and_leaves_disk_untouche
         httpd.shutdown()
 
 
-def test_patched_main_js_refuses_an_unsupported_player(tmp_path):
+@pytest.mark.parametrize("mm_opacity", [True, False])
+def test_patched_main_js_refuses_an_unsupported_player(tmp_path, mm_opacity):
     player = _fake_player(tmp_path, "unsupported")
     (player / drv.PLAYER_MAIN_JS).write_bytes(b"not the pinned player")
     with pytest.raises(SystemExit, match="not supported"):
-        drv._patched_main_js(player)
+        drv._patched_main_js(player, mm_opacity=mm_opacity)
 
 
 def test_patched_main_js_uses_live_runtime_on_the_pinned_player(tmp_path, monkeypatch):
     player = _fake_player(tmp_path, "pinned")
     raw = b"...UC=new Eg,UC.displayManager.showWaitingIndicator()..."
     (player / drv.PLAYER_MAIN_JS).write_bytes(raw)
-    monkeypatch.setattr(drv, "patch_player", lambda b: b + b"/*patched*/")
-    patched, meta = drv._patched_main_js(player)
+    seen = []
+    monkeypatch.setattr(drv, "patch_player", lambda b, *, mm_opacity: seen.append(mm_opacity) or b + b"/*patched*/")
+    patched, meta = drv._patched_main_js(player, mm_opacity=False)
+    assert seen == [False]
     assert patched == raw + b"/*patched*/"
     assert meta["mainJsSha256"] == hashlib.sha256(raw).hexdigest()
     assert meta["playerSha256"] == PLAYER_SHA256
+    assert meta["mmOpacity"] is False
     assert (player / drv.PLAYER_MAIN_JS).read_bytes() == raw
+
+
+# --------------------------------------------------------------------------- #
+# `--mm-opacity auto|off` (plan `keynote_live_mm_opacity.plan.md` rev 4 §8, W5).
+# `auto` (default) serves `patch_player(raw, mm_opacity=True)` in every arm; `off`
+# keeps the pre-W5 bytes per arm: stock from disk for the non-GL arms (fast, slow,
+# bridge-off), `patch_player(raw, mm_opacity=False)` under `--gl-replay auto`. The
+# wait profile and `--disable-bridge34` never reach `_served_main_js`, so the three
+# non-GL arms share the `gl_auto=False` rows below.
+# --------------------------------------------------------------------------- #
+def _synthetic_pinned_player(tmp_path: Path, monkeypatch, name: str) -> tuple[Path, bytes]:
+    raw = (
+        b"before;" + live_runtime._ANCHOR + b";"
+        + b";".join(before for before, _ in live_runtime._MM_OPACITY_REPLACEMENTS)
+        + b";after"
+    )
+    monkeypatch.setattr(live_runtime, "PLAYER_SHA256", hashlib.sha256(raw).hexdigest())
+    player = _fake_player(tmp_path, name)
+    (player / drv.PLAYER_MAIN_JS).write_bytes(raw)
+    return player, raw
+
+
+def _hook_only(raw: bytes) -> bytes:
+    """The pre-W5 GL-arm bytes, built independently of `patch_player`."""
+    return raw.replace(
+        live_runtime._ANCHOR,
+        b"UC=new Eg," + live_runtime._INSTALL + b",UC.displayManager.showWaitingIndicator()",
+    )
+
+
+def test_mm_opacity_mode_defaults_auto_and_rejects_unknown(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["p2"])
+    assert drv._mm_opacity_mode() == "auto"
+    monkeypatch.setattr(sys, "argv", ["p2", "--mm-opacity", "off"])
+    assert drv._mm_opacity_mode() == "off"
+    monkeypatch.setattr(sys, "argv", ["p2", "--mm-opacity=auto"])
+    assert drv._mm_opacity_mode() == "auto"
+    monkeypatch.setattr(sys, "argv", ["p2", "--mm-opacity", "on"])
+    with pytest.raises(SystemExit, match="--mm-opacity"):
+        drv._mm_opacity_mode()
+
+
+def test_run_refuses_an_unknown_mm_opacity_mode_before_any_destructive_work(tmp_path, monkeypatch):
+    import asyncio
+
+    marker = tmp_path / "runs" / "marker.txt"
+    marker.parent.mkdir()
+    marker.write_text("prior")
+    monkeypatch.setattr(drv, "OUT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["p2", "--mm-opacity", "bogus"])
+    calls = []
+    monkeypatch.setattr(shutil, "rmtree", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(drv, "file_identity", lambda *a, **k: calls.append(a))
+    with pytest.raises(SystemExit, match="--mm-opacity"):
+        asyncio.run(drv._run(tmp_path / "html-player"))
+    assert calls == []
+    assert marker.read_text() == "prior"
+
+
+def test_off_non_gl_arms_serve_the_stock_main_js_from_disk(tmp_path, monkeypatch):
+    player, raw = _synthetic_pinned_player(tmp_path, monkeypatch, "off-stock")
+    main_js, meta = drv._served_main_js(player, gl_auto=False, mm_opacity=False)
+    assert main_js is None
+    assert meta == {"mainJsSha256": hashlib.sha256(raw).hexdigest(), "patchedMainJsSha256": None, "mmOpacity": False}
+    httpd, base = _serve(drv._player_handler(player, main_js))
+    try:
+        assert _get(base + drv.PLAYER_MAIN_JS) == raw
+    finally:
+        httpd.shutdown()
+
+
+def test_off_gl_arm_serves_the_hook_only_bytes(tmp_path, monkeypatch):
+    player, raw = _synthetic_pinned_player(tmp_path, monkeypatch, "off-gl")
+    main_js, meta = drv._served_main_js(player, gl_auto=True, mm_opacity=False)
+    assert main_js == _hook_only(raw)
+    assert meta["mmOpacity"] is False
+    assert meta["patchedMainJsSha256"] == hashlib.sha256(main_js).hexdigest()
+    for _, after in live_runtime._MM_OPACITY_REPLACEMENTS:
+        assert after not in main_js
+
+
+@pytest.mark.parametrize("gl_auto", [False, True], ids=["fast-slow-bridge-off", "gl-replay"])
+def test_auto_serves_the_mm_opacity_patch_in_every_arm(tmp_path, monkeypatch, gl_auto):
+    player, raw = _synthetic_pinned_player(tmp_path, monkeypatch, f"auto-{gl_auto}")
+    main_js, meta = drv._served_main_js(player, gl_auto=gl_auto, mm_opacity=True)
+    assert main_js == live_runtime.patch_player(raw, mm_opacity=True)
+    assert b"window, '__obedLive'" in main_js
+    for before, after in live_runtime._MM_OPACITY_REPLACEMENTS:
+        assert main_js.count(after) == 1
+    assert meta == {
+        "mainJsSha256": hashlib.sha256(raw).hexdigest(),
+        "playerSha256": PLAYER_SHA256,
+        "patchedMainJsSha256": hashlib.sha256(main_js).hexdigest(),
+        "mmOpacity": True,
+    }
+    httpd, base = _serve(drv._player_handler(player, main_js))
+    try:
+        assert _get(base + drv.PLAYER_MAIN_JS) == main_js
+    finally:
+        httpd.shutdown()
+    assert (player / drv.PLAYER_MAIN_JS).read_bytes() == raw
+
+
+def test_run_reports_the_served_main_js_and_the_gl_inject_carries_it():
+    """`report.mainJs` records `mmOpacity` beside `patchedMainJsSha256` in every arm;
+    under `--gl-replay auto` the same meta also lands in `gl-replay-inject.json`."""
+    import inspect
+
+    src = inspect.getsource(drv._run)
+    assert "_served_main_js(player_dir, gl_auto=gl_auto, mm_opacity=mm_opacity)" in src
+    assert '"mainJs": main_meta,' in src
+    assert "**main_meta," in src[src.index("if gl_auto:\n        gl_inject") :]
+
+
+def test_freeze_bracket_chrome_follows_the_gl_flag_not_the_served_bytes():
+    """Under `--mm-opacity auto` the non-GL arms also serve patched bytes, so the bracket
+    must not infer `--gl-replay auto` (Chrome without `--disable-gpu`) from `main_js`."""
+    import inspect
+
+    src = inspect.getsource(drv._run_freeze_bracket)
+    assert "gl_auto=gl_auto)" in src and "main_js is not None)" not in src
+    assert "main_js=main_js, gl_auto=gl_auto" in inspect.getsource(drv._run)
 
 
 def _boot_check(**over):
