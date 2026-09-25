@@ -36,7 +36,7 @@ def test_js_sha256_matches_pinned_bytes():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "6b0db51eb31b7b02a105924eb650703ef1355bb3a654df0ee5f78a77e87c1fde"
+PINNED_CORE_SHA256 = "d806a6336305fe3fc2a005d0abffd2c49ba531ddcb7fbd6ff382ae29e91205b7"
 
 
 def test_js_sha256_matches_the_pinned_literal():
@@ -239,6 +239,7 @@ const boundary = {{
 }};
 const nextEntry = (inst) => inst === 'A3' ? boundary : null;
 const instanceOf = (v) => v.__obedInstance;
+const hasDeparted = () => true;
 const currentHashNum = () => 7;
 const beginMove = () => {{}};
 const note = () => {{}};
@@ -358,6 +359,7 @@ const boundary = {{
 }};
 const nextEntry = () => null;
 const instanceOf = (v) => v.__obedInstance;
+const hasDeparted = () => true;
 const currentHashNum = () => 9;
 const beginMove = () => {{}};
 const note = () => {{}};
@@ -447,6 +449,7 @@ const boundary = {{
 }};
 const nextEntry = () => null;
 const instanceOf = (v) => v.__obedInstance;
+const hasDeparted = () => true;
 const currentHashNum = () => hash;
 const beginMove = () => {{ moves += 1; }};
 const note = (kind, detail) => notes.push({{kind: kind, detail: detail}});
@@ -3787,6 +3790,39 @@ console.log(JSON.stringify({
     assert result["id"] == dst["objectId"] + "-video"
     assert result["swaps"] == 0
     assert result["aId"] in result["landed"]
+
+
+def test_a_pinned_decoder_waits_for_the_transition_before_the_next_bridge_moves_it():
+    """RT-A for pinned decoders (live D2 slide 4, D3 slide 3): a pinned decoder's
+    pending remount retries run while the player idles on its slide with the hash
+    already at the next bridge's `atScene - 1`; the move must wait for the
+    player's teardown of the slide."""
+    plan = {
+        "schema": 2, "movies": _MOVIE_PLAN["movies"],
+        "boundaries": [
+            _MOVIE_PLAN["boundaries"][0],
+            {"atScene": 4, "action": "bridge", "movieKey": "movie1", "durationSeconds": 1.5, "loop": False,
+             "src": _inst("A2", _FOOTPRINT), "dst": _inst("A3", _RECT_S3)},
+        ],
+    }
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing('A1');
+goToScene(1);
+detach(a);
+goToScene(2);
+const b = fresh('A2');
+insert(b);
+location.hash = '#3';
+P.remountAll();
+pump();
+const idle = {moves: notesOf('bridge-motion-start').length, inBody: a.parentNode === bodyEl};
+a.parentNode = bodyEl;
+detach(a);
+console.log(JSON.stringify({idle, moves: notesOf('bridge-motion-start').map(n => n.rect)}));
+""")
+    assert result["idle"]["moves"] == 0
+    assert result["moves"] == [_RECT_S3]
 
 
 def test_a_suppressed_bridge_destination_really_clears_when_its_slide_ends():
