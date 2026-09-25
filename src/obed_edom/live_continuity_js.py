@@ -752,22 +752,40 @@ PRESERVE_CORE_JS = r"""
   /**
    * The hash reads `atScene - 1` both while the player idles at the end of the
    * source slide (it shows the NEXT scene when idle) and while it plays that
-   * transition scene. The player tears no <video> down at rest, so any teardown
-   * of its own at that hash marks the transition. The mark is per scene, not per
-   * instance: a decoder the runtime placed itself may never be torn down. It
-   * lapses as soon as the hash moves. A retire whose transition this is hands
-   * its held decoder back right there, so the raw player draws the fade-out.
+   * transition scene. Two signals mark the transition itself: the player tears
+   * no <video> down at rest, so any teardown of its own at that hash; and it
+   * writes the hash (`history.replaceState`) once on entering idle and again
+   * when it sets that scene up, so a second write of the same index — the only
+   * signal when the slide has no <video> of the player's left (a decoder the
+   * runtime placed itself). The mark is per scene and lapses when the hash
+   * moves. A retire whose transition this is hands its held decoder back right
+   * there, so the raw player draws the ending movie's own fade-out.
    */
   let departure = null;
-  function noteDeparture(v) {
-    if (v.__obedRemounting) return;
-    const hn = currentHashNum();
+  function markTransition(hn) {
     if (hn == null) return;
     departure = {scene: hn, gen: preserveGeneration};
     ENTRIES.forEach(function(b) {
       if (b.action === 'retire' && b.atScene - 1 === hn) retireVictims(b, zoneVictims(b, []), true);
     });
   }
+  function noteDeparture(v) {
+    if (!v.__obedRemounting) markTransition(currentHashNum());
+  }
+  let lastHashWrite = null;
+  try {
+    const hist = window.history;
+    const origReplace = hist && hist.replaceState;
+    if (typeof origReplace === 'function') {
+      hist.replaceState = function() {
+        const out = origReplace.apply(this, arguments);
+        const hn = currentHashNum();
+        if (!disabled && hn != null && hn === lastHashWrite) markTransition(hn);
+        lastHashWrite = hn;
+        return out;
+      };
+    }
+  } catch (e) {}
   function hasDeparted(inst) {
     const n = nextEntry(inst);
     const hn = currentHashNum();

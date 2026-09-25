@@ -36,7 +36,7 @@ def test_js_sha256_matches_pinned_bytes():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "cc4444a0caeccf42b2979b0f2ffa2641e8bcd183bbf7a7b68469c65dd186c1cd"
+PINNED_CORE_SHA256 = "5122be49841db1e069070055213e05d76a80871e7f9ac358c5fabe6da5ff0f48"
 
 
 def test_js_sha256_matches_the_pinned_literal():
@@ -783,6 +783,11 @@ function getComputedStyle(el) {
 const hashListeners = [];
 const window = {
   __OBED_CONTINUITY__: __PLAN__,
+  // The player's `updateWindowHistory`: it writes the scene index into the hash.
+  history: {replaceState(state, title, url) {
+    const i = String(url).indexOf('#');
+    if (i >= 0) location.hash = String(url).slice(i);
+  }},
   addEventListener(type, fn) { if (type === 'hashchange') hashListeners.push(fn); },
   removeEventListener(){},
 };
@@ -1414,6 +1419,28 @@ console.log(JSON.stringify({idle, gen: v.__obedGen,
     assert result["idle"] == {"gen": 0, "paused": False, "retire": 0, "refusals": 0}
     assert result["gen"] == -1
     assert result["retire"] == ["#3"]
+
+
+def test_a_retire_hands_back_when_the_player_sets_up_the_transition_with_no_video_to_tear_down():
+    """Live D6 (retire@8): the pinned decoder sat where the runtime placed it and
+    the slide had no <video> of the player's, so no teardown marked the
+    transition and the decoder stayed drawn through it (retired at #8). The
+    player writes the hash on entering idle and again when it sets up the
+    transition scene; that second write retires the decoder right there."""
+    script = _CARRY_A1_INTO_A2 + r"""
+window.history.replaceState(null, 'Keynote', 'index.html#3');
+tick();
+P.remountAll();
+const idle = {gen: v.__obedGen, retire: P.events.filter(e => e.kind === 'retire-boundary').length};
+window.history.replaceState(null, 'Keynote', 'index.html#3');
+console.log(JSON.stringify({idle, gen: v.__obedGen, paused: v.paused,
+  retire: P.events.filter(e => e.kind === 'retire-boundary').map(e => [e.detail.instance, e.detail.sceneHash])}));
+"""
+    result = _run_retire(script, plan=_HELD_RETIRE_PLAN)
+    assert result["idle"] == {"gen": 0, "retire": 0}
+    assert result["gen"] == -1
+    assert result["paused"] is True
+    assert result["retire"] == [["A2", "#3"]]
 
 
 def test_interval_sweep_is_silent_before_the_zone():
