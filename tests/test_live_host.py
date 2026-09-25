@@ -75,14 +75,15 @@ class FakeCdp:
 
 
 class FakeServer:
-    def __init__(self, *_, alpha=False, continuity_script=""):
-        self.stopped = False; self.alpha = alpha; self.continuity_script = continuity_script
+    def __init__(self, _root=None, patched_player=b"", *_, alpha=False, continuity_script=""):
+        self.stopped = False; self.alpha = alpha; self.continuity_script = continuity_script; self.patched_player = patched_player
     def start(self): return "http://program.test/program.html"
     def stop(self): self.stopped = True
 
 
 def player_bytes() -> bytes:
-    return b"before;" + live_runtime._ANCHOR + b";after"
+    mm_anchors = b";".join(before for before, _after in live_runtime._MM_OPACITY_REPLACEMENTS)
+    return b"before;" + live_runtime._ANCHOR + b";" + mm_anchors + b";after"
 
 
 def resolver(root: Path, relative: str) -> Path:
@@ -91,13 +92,14 @@ def resolver(root: Path, relative: str) -> Path:
     raise AssertionError(relative)
 
 
-def host(tmp_path, monkeypatch) -> live_host.LiveOutputHost:
+def host(tmp_path, monkeypatch, **kwargs: Any) -> live_host.LiveOutputHost:
     (tmp_path / "main.js").write_bytes(player_bytes())
     (tmp_path / "header.json").write_text('{"slideWidth":1920,"slideHeight":1080,"showMode":0}')
     monkeypatch.setattr(live_runtime, "PLAYER_SHA256", hashlib.sha256(player_bytes()).hexdigest())
     monkeypatch.setattr(live_host, "choose_display", lambda *_args, **_kwargs: live_host.OutputDisplay(9, 10, 20, 2560, 1440))
+    monkeypatch.delenv(live_host.MM_OPACITY_ENV, raising=False)
     FakeCdp.instances.clear()
-    return live_host.LiveOutputHost(tmp_path, [{"originalOrdinal": 1, "playerIndex": 0, "skipped": False}, {"originalOrdinal": 2, "playerIndex": 1, "skipped": False}, {"originalOrdinal": 3, "skipped": True}], headless=True, transport_factory=FakeCdp, server_factory=FakeServer, resolver=resolver)
+    return live_host.LiveOutputHost(tmp_path, [{"originalOrdinal": 1, "playerIndex": 0, "skipped": False}, {"originalOrdinal": 2, "playerIndex": 1, "skipped": False}, {"originalOrdinal": 3, "skipped": True}], headless=True, transport_factory=FakeCdp, server_factory=FakeServer, resolver=resolver, **kwargs)
 
 
 def test_output_geometry_is_detected_before_lazy_start(tmp_path, monkeypatch):
@@ -987,6 +989,7 @@ def host_with_continuity(
     from obed_edom import live_continuity
     monkeypatch.setattr(live_continuity, "plan_signature", lambda _runtime: next(iter(live_continuity.QUALIFIED_PLAN_SHA256)))
     monkeypatch.delenv("OBED_LIVE_GL_REPLAY", raising=False)
+    monkeypatch.delenv(live_host.MM_OPACITY_ENV, raising=False)
     FakeCdp.instances.clear()
     kwargs: dict[str, Any] = {"attach_endpoint": "http://127.0.0.1:9222"} if attach else {}
     if gl_replay is not None:
@@ -2495,6 +2498,112 @@ def test_gl_replay_env_name_is_the_documented_one():
     assert live_host.GL_REPLAY_ENV == "OBED_LIVE_GL_REPLAY"
 
 
+def hook_only_player() -> bytes:
+    """Today's served bytes: the observation hook alone, nothing else rewritten."""
+    return player_bytes().replace(
+        live_runtime._ANCHOR,
+        b"UC=new Eg," + live_runtime._INSTALL + b",UC.displayManager.showWaitingIndicator()",
+    )
+
+
+def mm_opacity_host(kind, tmp_path, monkeypatch, **kwargs):
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+    if kind == "hdmi":
+        return host(tmp_path, monkeypatch, **kwargs)
+    if kind == "attach":
+        return attach_host(tmp_path, monkeypatch, **kwargs)
+    return managed_host(tmp_path, monkeypatch, **kwargs)
+
+
+def test_mm_opacity_env_name_is_the_documented_one():
+    assert live_host.MM_OPACITY_ENV == "OBED_LIVE_MM_OPACITY"
+
+
+@pytest.mark.parametrize("kind", ["hdmi", "attach", "managed"])
+@pytest.mark.parametrize("ctor,env,expected", [
+    (None, None, "auto"),
+    (None, "", "auto"),
+    (None, "off", "off"),
+    (None, "  OFF ", "off"),
+    (None, " Auto\t", "auto"),
+    ("off", None, "off"),
+    ("off", "auto", "off"),
+    ("auto", "off", "auto"),
+    ("auto", "bogus", "auto"),
+])
+def test_mm_opacity_preference_precedence_on_every_output(tmp_path, monkeypatch, kind, ctor, env, expected):
+    """Default `auto` on HDMI, external attach and managed OBS alike; the constructor wins over the env,
+    and the env is trimmed and case-insensitive."""
+    output = mm_opacity_host(kind, tmp_path, monkeypatch, **({} if ctor is None else {"mm_opacity": ctor}))
+    if env is not None:
+        monkeypatch.setenv(live_host.MM_OPACITY_ENV, env)
+    output.start()
+    served = output._server.patched_player
+    mode = "on" if expected == "auto" else "off"
+    assert output.output["mmOpacity"] == {"mode": mode, "sha256": hashlib.sha256(served).hexdigest()}
+    assert next(r for r in read_log(output) if r["kind"] == "start")["mmOpacityPreference"] == expected
+
+
+@pytest.mark.parametrize("kind", ["hdmi", "attach", "managed"])
+@pytest.mark.parametrize("value", ["on", "1", "false", "auto-ish"])
+def test_invalid_mm_opacity_env_refuses_before_starting_resources(tmp_path, monkeypatch, kind, value):
+    output = mm_opacity_host(kind, tmp_path, monkeypatch)
+    monkeypatch.setenv(live_host.MM_OPACITY_ENV, value)
+    with pytest.raises(live_host.LiveHostError, match="OBED_LIVE_MM_OPACITY must be off or auto."):
+        output.start()
+    assert not FakeCdp.instances
+    assert output._server is None
+    assert output._log_path is None
+    assert "mmOpacity" not in output.output
+
+
+@pytest.mark.parametrize("kind", ["hdmi", "attach", "managed"])
+@pytest.mark.parametrize("value", ["on", "", " off ", "AUTO", "true", None, True])
+def test_mm_opacity_constructor_rejects_anything_but_auto_or_off(tmp_path, monkeypatch, kind, value):
+    with pytest.raises(live_host.LiveHostError, match="Magic Move opacity must be auto or off."):
+        mm_opacity_host(kind, tmp_path, monkeypatch, mm_opacity=value)
+    assert not FakeCdp.instances
+
+
+def test_mm_opacity_off_serves_todays_hook_only_bytes(tmp_path, monkeypatch):
+    output = mm_opacity_host("hdmi", tmp_path, monkeypatch, mm_opacity="off")
+    output.start()
+    assert output._server.patched_player == hook_only_player()
+    assert output._server.patched_player == live_runtime.patch_player(player_bytes(), mm_opacity=False)
+    assert output.output["mmOpacity"] == {"mode": "off", "sha256": hashlib.sha256(hook_only_player()).hexdigest()}
+
+
+def test_mm_opacity_auto_serves_the_patched_player(tmp_path, monkeypatch):
+    output = mm_opacity_host("hdmi", tmp_path, monkeypatch)
+    output.start()
+    served = output._server.patched_player
+    assert served == live_runtime.patch_player(player_bytes(), mm_opacity=True)
+    assert served != hook_only_player()
+    for before, after in live_runtime._MM_OPACITY_REPLACEMENTS:
+        assert served.count(after) == 1
+        assert before not in served
+    assert output.output["mmOpacity"] == {"mode": "on", "sha256": hashlib.sha256(served).hexdigest()}
+
+
+def test_mm_opacity_is_reported_only_once_the_player_is_patched(tmp_path, monkeypatch):
+    output = mm_opacity_host("hdmi", tmp_path, monkeypatch)
+    assert "mmOpacity" not in output.output
+    output.start()
+    assert output.output["mmOpacity"]["mode"] == "on"
+    assert output.observe().output["mmOpacity"] == output.output["mmOpacity"]
+
+
+def test_mm_opacity_anchor_missing_refuses_the_session(tmp_path, monkeypatch):
+    output = mm_opacity_host("hdmi", tmp_path, monkeypatch)
+    broken = b"before;" + live_runtime._ANCHOR + b";after"
+    (tmp_path / "main.js").write_bytes(broken)
+    monkeypatch.setattr(live_runtime, "PLAYER_SHA256", hashlib.sha256(broken).hexdigest())
+    with pytest.raises(live_host.LiveHostError, match="Magic Move opacity anchor"):
+        output.start()
+    assert not FakeCdp.instances
+    assert output._server is None
+
+
 def test_gl_replay_output_shape_before_and_after_start(tmp_path, monkeypatch):
     monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
     monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
@@ -2518,6 +2627,8 @@ def attach_host(tmp_path, monkeypatch, **kwargs):
     (tmp_path / "main.js").write_bytes(player_bytes())
     (tmp_path / "header.json").write_text('{"slideWidth":1920,"slideHeight":1080,"showMode":0}')
     monkeypatch.setattr(live_runtime, "PLAYER_SHA256", hashlib.sha256(player_bytes()).hexdigest())
+    monkeypatch.delenv(live_host.MM_OPACITY_ENV, raising=False)
+    FakeCdp.instances.clear()
     return live_host.LiveOutputHost(
         tmp_path, [], attach_endpoint="http://127.0.0.1:9222", transport_factory=FakeCdp, server_factory=FakeServer, resolver=resolver, **kwargs,
     )

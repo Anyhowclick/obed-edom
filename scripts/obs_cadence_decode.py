@@ -11,7 +11,8 @@ native movie sits a few px off). Steps bridge undecodable frames (`maxStepPerFra
 `backwardSteps` excludes loop wraps (`wrapSteps`, given `--loop-frames`);
 `ringMaxDelta` is the max |RGB delta| in the 2..8 px ring around each `--ring` rect vs the phase's
 first frame (`ringDiag`: worst frame, pixels over the slide2-live ring and over 20, optional crops);
-`staticMaxDelta` is the same inside each `--static` rect eroded 4 px. Only the lossless codec (4:2:0) pairs in
+`staticMaxDelta` is the same inside each `--static` rect eroded 4 px. `pixel_series` / `mean_series` (masks, API only)
+return per marked frame the masked RGB pixels / their mean under `series`. Only the lossless codec (4:2:0) pairs in
 `LOSSLESS_FORMATS` are decoded.
 
 usage: uv run python scripts/obs_cadence_decode.py <recording> [--json out.json] [--ring X,Y,W,H] [--loop-frames N] [--counter auto]
@@ -44,6 +45,7 @@ PHASES: dict[str, tuple[int, int, int]] = {
     "slide2-reshown": (0, 255, 255),
     "slide2-handback": (255, 128, 0),
     "slide2-after": (128, 0, 255),
+    "mm-move": (0, 128, 255),
 }
 NOT_DECODED = frozenset({"slide2-hidden"})
 LOSSLESS_FORMATS = frozenset({("utvideo", "yuv420p")})
@@ -360,11 +362,17 @@ def choose_counter(counter: str, binary_windows: dict[str, list[np.ndarray]], ge
 
 def decode_recording(recording: Path, *, rings: Sequence[Rect] | None = None, statics: Sequence[Rect] | None = None,
                      ring_exclude: Sequence[Rect] = (), loop_frames: int | None = None, crops_dir: Path | None = None,
-                     counter: str = "auto", geometry: Geometry = MOVIE_GEOMETRY) -> dict[str, Any]:
+                     counter: str = "auto", geometry: Geometry = MOVIE_GEOMETRY, pixel_series: dict[str, np.ndarray] | None = None,
+                     mean_series: dict[str, np.ndarray] | None = None) -> dict[str, Any]:
     if counter not in (*COUNTERS, "auto"):
         raise ValueError(f"counter {counter!r} not in {COUNTERS} or auto")
     meta, frames = read_frames(recording)
     check_lossless(meta)
+    pixel_series, mean_series = pixel_series or {}, mean_series or {}
+    for name, mask in {**pixel_series, **mean_series}.items():
+        if mask.shape != (meta["size"][1], meta["size"][0]) or not mask.any():
+            raise ValueError(f"series mask {name!r} {mask.shape} is empty or not the frame shape {meta['size']}")
+    series: dict[str, Any] = {"index": [], "phase": [], "pixels": {n: [] for n in pixel_series}, "means": {n: [] for n in mean_series}}
     fps = float(meta["fps"])
     windows: dict[str, list[np.ndarray]] = {name: [] for name in PHASES}
     strips: dict[str, list[np.ndarray]] = {name: [] for name in PHASES}
@@ -387,6 +395,13 @@ def decode_recording(recording: Path, *, rings: Sequence[Rect] | None = None, st
             unmarked += 1
             continue
         indices[name].append(index)
+        if pixel_series or mean_series:
+            series["index"].append(index)
+            series["phase"].append(name)
+            for key, mask in pixel_series.items():
+                series["pixels"][key].append(frame[mask])
+            for key, mask in mean_series.items():
+                series["means"][key].append(frame[mask].reshape(-1, 3).mean(axis=0))
         if name in NOT_DECODED:
             continue
         if counter != "binary":
@@ -449,7 +464,7 @@ def decode_recording(recording: Path, *, rings: Sequence[Rect] | None = None, st
                 diag["crops"] = save_crops(crops_dir, name, {"reference": ring_refs[name], "worst": frame,
                                                              "last": ring_last[name][1]}, rings)
             ring_diag[name] = diag
-    return {
+    result = {
         "file": str(recording),
         "codec": meta.get("codec"),
         "pixFmt": meta.get("pix_fmt"),
@@ -477,6 +492,12 @@ def decode_recording(recording: Path, *, rings: Sequence[Rect] | None = None, st
         "endpoints": {name: endpoints(counters(trimmed(seq), c, counter), trimmed(indices[name])) for name, seq in values.items()},
         "handbackCounters": counters(values.get("slide2-handback") or [], c, counter),
     }
+    if pixel_series or mean_series:
+        result["series"] = {"index": np.array(series["index"], int), "phase": np.array(series["phase"], str),
+                            **{f"pixels.{k}": np.array(v, np.uint8).reshape(len(v), int(pixel_series[k].sum()), 3)
+                               for k, v in series["pixels"].items()},
+                            **{f"means.{k}": np.array(v, float).reshape(len(v), 3) for k, v in series["means"].items()}}
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -14,8 +14,8 @@ below.
   vs `bd9ae9f4`. `output/p2-loop` built by `scripts/loop_fixture.py` from `output/p2-recovery/html-adversarial`
   (source shas asserted unchanged): `loopMode: "looping"` on objectIDs `6BB39942`, `CBACAF27`, `F9AFED1B`, `98D59E27`,
   `E4728E7D` in 16 files; plan shas off `3dc67558…`, on `2ba6fbed…` (allowlisted in `21944ddb`).
-- Evidence (git-ignored): main checkout `output/loop-gates/` — `l4-{pr,main,final}.txt`, `l1/`, `l2/` (r1), `l2r2/`,
-  `diag/`, `codex/`; driver `output/loop-gates/l2.sh`.
+- Evidence (git-ignored): main checkout `output/evidence/loop-gates/` — `l4-{pr,main,final}.txt`, `l1/`, `l2/` (r1), `l2r2/`,
+  `diag/`, `codex/`; driver `output/evidence/loop-gates/l2.sh`.
 
 ## Results
 

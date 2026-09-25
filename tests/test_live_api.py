@@ -312,9 +312,11 @@ class FakeAttachServer:
 def test_live_api_attach_mode_starts_without_consulting_displays(tmp_path, monkeypatch):
     monkeypatch.setenv('OBED_EDOM_OUTPUT_ROOT', str(tmp_path / 'out'))
     monkeypatch.setenv('OBED_LIVE_ATTACH', 'http://127.0.0.1:9222')
+    monkeypatch.delenv('OBED_LIVE_MM_OPACITY', raising=False)
     root = tmp_path / 'out' / '.html-preview' / 'export'
     (root / 'assets' / 'player').mkdir(parents=True)
-    player_bytes = b'before;' + live_runtime._ANCHOR + b';after'
+    mm_anchors = b';'.join(before for before, _after in live_runtime._MM_OPACITY_REPLACEMENTS)
+    player_bytes = b'before;' + live_runtime._ANCHOR + b';' + mm_anchors + b';after'
     (root / 'assets' / 'player' / 'main.js').write_bytes(player_bytes)
     (root / 'assets' / 'header.json').write_text('{"slideWidth":1920,"slideHeight":1080,"showMode":0}')
     monkeypatch.setattr(live_runtime, 'PLAYER_SHA256', hashlib.sha256(player_bytes).hexdigest())
@@ -346,6 +348,8 @@ def test_live_api_attach_mode_starts_without_consulting_displays(tmp_path, monke
     assert state['output']['transport'] == 'fill-key', state
     assert state['output']['alpha'] is True
     assert 'displayId' not in state['output']
+    served = live_runtime.patch_player(player_bytes, mm_opacity=True)
+    assert state['output']['mmOpacity'] == {'mode': 'on', 'sha256': hashlib.sha256(served).hexdigest()}
 
 
 def test_live_start_forwards_per_session_continuity_opt_out(tmp_path, monkeypatch):
@@ -492,7 +496,8 @@ def test_keyer_start_requires_a_ready_engine(tmp_path, monkeypatch):
 
 
 def test_keyer_start_attaches_to_the_engine_target_and_ignores_display(tmp_path, monkeypatch):
-    """The exact kwargs (no `gl_replay`) are the Keyer contract that `OBED_LIVE_GL_REPLAY=off` wins over the managed host's `auto` default."""
+    """The exact kwargs (no `gl_replay`, no `mm_opacity`) are the Keyer contract that `OBED_LIVE_GL_REPLAY` and
+    `OBED_LIVE_MM_OPACITY` win over the host's defaults."""
     client, engine, adapters, _ = engine_client(tmp_path, monkeypatch, akOutputMode='keyer', akOutputRate=30)
     engine.status = 'ready'
     response = client.post('/api/live', json={'previewJobId': 'prepared', 'displayId': '42'})

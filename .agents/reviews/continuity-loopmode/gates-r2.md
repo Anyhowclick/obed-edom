@@ -16,7 +16,7 @@ Supersedes the verdict of `gates-r1.md` (kept for the r1 history and the harness
   - `output/p2-loop-grey` from `output/p2-recovery/html-adversarial` (grey counter) — L1. The binary movie's static
     grey regions fail Vgl's all-bands-move in-page oracle (125/128 bands); the non-looping `p2-binary` fails
     identically and the grey loop build passes 128/128, so the headless visible pass needs the grey movie.
-- Evidence (git-ignored): main checkout `output/loop-gates/` — `l4-r2-{pr,main}.txt`, `l1r2/`, `l1r3-grey/`, `l2r3/`,
+- Evidence (git-ignored): main checkout `output/evidence/loop-gates/` — `l4-r2-{pr,main}.txt`, `l1r2/`, `l1r3-grey/`, `l2r3/`,
   `diag2/`, `l5/`; drivers `l1.sh`, `l1-grey.sh`, `l2.sh`.
 
 ## Results

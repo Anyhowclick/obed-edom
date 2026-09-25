@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import subprocess
 from pathlib import Path
@@ -254,3 +255,128 @@ def test_html_preview_patch_cannot_serve_another_jobs_player(tmp_path, monkeypat
     assert cleaned.status_code == 200
     assert hp.unresolved_cache_folder(digest_b).joinpath("html", "index.html").is_file()
     assert client.get(f"/api/html-preview/{job_b['id']}/player/index.html").status_code == 200
+
+
+def _ready_job(tmp_path, monkeypatch, label: str, player: bytes | None = None):
+    """A ready preview job whose on-disk main.js is `player` (the stock fake player when None)."""
+    hp = _patch_preview(monkeypatch, digest=_digest(label))
+
+    def _export(_deck, dest, **_k):
+        write_fake_export(Path(dest), ["aaa", "ccc"])
+        if player is not None:
+            (Path(dest) / hp.PLAYER_JS).write_bytes(player)
+
+    monkeypatch.setattr(hp, "export_html", _export)
+    deck = tmp_path / "GW.key"
+    deck.write_text("placeholder")
+    client = TestClient(app)
+    proposed = _wait(client, client.post("/api/html-preview", data={"path": str(deck)}).json()["id"])
+    client.post(f"/api/html-preview/{proposed['id']}/apply")
+    ready = _wait(client, proposed["id"])
+    assert ready["status"] == "done", ready.get("error")
+    return client, deck, ready
+
+
+def _pinned_player(monkeypatch) -> bytes:
+    from obed_edom import live_runtime
+    from tests.test_live_runtime import _synthetic_player
+
+    player = _synthetic_player()
+    monkeypatch.setattr(live_runtime, "PLAYER_SHA256", hashlib.sha256(player).hexdigest())
+    return player
+
+
+def test_html_preview_serves_the_mm_opacity_rendering_patch_without_touching_the_cache(tmp_path, monkeypatch):
+    from obed_edom import live_runtime
+    from obed_edom.html_preview import PLAYER_JS, file_sha256
+
+    monkeypatch.delenv(live_runtime.MM_OPACITY_ENV, raising=False)
+    stock = _pinned_player(monkeypatch)
+    client, deck, ready = _ready_job(tmp_path, monkeypatch, "mm-opacity-on", stock)
+    job_id = ready["id"]
+    served = client.get(f"/api/html-preview/{job_id}/player/assets/player/main.js")
+    assert served.status_code == 200
+    assert served.content == live_runtime.patch_rendering(stock)
+    assert served.headers["x-obed-mm-opacity"] == "on"
+    assert served.headers["cache-control"] == "no-cache"
+    assert served.headers["content-type"].startswith("text/javascript")
+    page = client.get(f"/api/html-preview/{job_id}/player/index.html")
+    assert b"var note = null;" in page.content
+
+    # The cache stays stock: live start, live_host and the paint oracle all read these disk bytes.
+    root = Path(ready["result"]["exportRoot"])
+    assert (root / PLAYER_JS).read_bytes() == stock
+    assert file_sha256(root / PLAYER_JS) == ready["result"]["manifest"]["playerDigest"]
+    again = _wait(client, client.post("/api/html-preview", data={"path": str(deck)}).json()["id"])
+    assert again["status"] == "done", again.get("error")
+    assert again["result"]["reused"] is True
+
+
+def test_html_preview_off_switch_serves_the_stock_player(tmp_path, monkeypatch):
+    from obed_edom import live_runtime
+
+    stock = _pinned_player(monkeypatch)
+    client, _deck, ready = _ready_job(tmp_path, monkeypatch, "mm-opacity-off", stock)
+    monkeypatch.setenv(live_runtime.MM_OPACITY_ENV, "off")
+    served = client.get(f"/api/html-preview/{ready['id']}/player/assets/player/main.js")
+    assert served.content == stock
+    assert served.headers["x-obed-mm-opacity"] == "off"
+    assert b"var note = null;" in client.get(f"/api/html-preview/{ready['id']}/player/index.html").content
+    # Read per request: switching back needs no re-export.
+    monkeypatch.setenv(live_runtime.MM_OPACITY_ENV, "auto")
+    served = client.get(f"/api/html-preview/{ready['id']}/player/assets/player/main.js")
+    assert served.content == live_runtime.patch_rendering(stock)
+
+
+@pytest.mark.parametrize("env,mode", [(None, "unsupported"), ("bogus", "invalid")])
+def test_html_preview_unsupported_or_invalid_serves_stock_with_one_player_note(tmp_path, monkeypatch, env, mode):
+    from obed_edom import live_runtime
+    from obed_edom.html_preview import PREVIEW_MM_OPACITY_NOTES
+
+    # Unsupported: the fake export's stock `/* keynote player */` sha. Invalid: a pinned player, bad env value.
+    player = None if env is None else _pinned_player(monkeypatch)
+    client, _deck, ready = _ready_job(tmp_path, monkeypatch, f"mm-opacity-{mode}", player)
+    if env is None:
+        monkeypatch.delenv(live_runtime.MM_OPACITY_ENV, raising=False)
+    else:
+        monkeypatch.setenv(live_runtime.MM_OPACITY_ENV, env)
+    root = Path(ready["result"]["exportRoot"])
+    served = client.get(f"/api/html-preview/{ready['id']}/player/assets/player/main.js")
+    assert served.status_code == 200
+    assert served.content == (root / "assets" / "player" / "main.js").read_bytes()
+    assert served.headers["x-obed-mm-opacity"] == mode
+    page = client.get(f"/api/html-preview/{ready['id']}/player/index.html")
+    assert page.content.count(PREVIEW_MM_OPACITY_NOTES[mode].encode()) == 1
+
+
+def test_html_preview_patches_a_case_variant_player_path(tmp_path, monkeypatch):
+    from obed_edom import live_runtime
+
+    monkeypatch.delenv(live_runtime.MM_OPACITY_ENV, raising=False)
+    stock = _pinned_player(monkeypatch)
+    client, _deck, ready = _ready_job(tmp_path, monkeypatch, "mm-opacity-case", stock)
+    root = Path(ready["result"]["exportRoot"])
+    if not (root / "assets" / "Player" / "MAIN.JS").is_file():
+        pytest.skip("case-sensitive filesystem")
+    # A case-insensitive volume serves the same file; it must not bypass the patch or the no-cache header.
+    served = client.get(f"/api/html-preview/{ready['id']}/player/assets/Player/MAIN.JS")
+    assert served.status_code == 200
+    assert served.content == live_runtime.patch_rendering(stock)
+    assert served.headers["x-obed-mm-opacity"] == "on"
+    assert served.headers["cache-control"] == "no-cache"
+
+
+def test_html_preview_index_survives_an_unreadable_player(tmp_path, monkeypatch):
+    from obed_edom import live_runtime
+
+    monkeypatch.delenv(live_runtime.MM_OPACITY_ENV, raising=False)
+    client, _deck, ready = _ready_job(tmp_path, monkeypatch, "mm-opacity-unreadable")
+    player = Path(ready["result"]["exportRoot"]) / "assets" / "player" / "main.js"
+    player.chmod(0)
+    try:
+        # The preview never refuses over the opacity patch: index.html still loads, with no note.
+        page = client.get(f"/api/html-preview/{ready['id']}/player/index.html")
+    finally:
+        player.chmod(0o644)
+    assert page.status_code == 200
+    assert b"var note = null;" in page.content

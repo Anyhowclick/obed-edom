@@ -4,7 +4,7 @@
 folded by the coordinator. Nothing is implemented.
 Parents: `decklink-field-test-runbook.md` (§0 OBS setup, §3 cadence note), `keynote-live-continuity-2026-09-23-c.md` ("OBS rate +
 output cadence"), [`keynote_live_gl_replay_arming.plan.md`](keynote_live_gl_replay_arming.plan.md) (G2 attach qualification OD-2
-is out of scope). Spike: main checkout `output/obs-managed-spike/scripts/{seed.py,ws.py}`, `output/obs-rate/{rate.py,decode2.py}`.
+is out of scope). Spike: main checkout `output/evidence/obs-managed-spike/scripts/{seed.py,ws.py}`, `output/evidence/obs-rate/{rate.py,decode2.py}`.
 Tags: **[M]** measured in the 2026-09-24 spike or read from OBS source · **[C]** read in this repo · **[I]** assumption, each settled
 by a Q-item (§8).
 
@@ -206,7 +206,7 @@ permissions are not relied on (OBS may rewrite it); a fresh password per launch 
 OBS's version in the Hello message and reaches obs-websocket's parser while AK runs. The alternative, websocket off, loses the
 version check and W11 (the only confirmation that the key is actually running). CDP binds loopback [I] with no auth, as today.
 
-## 8. Qualification before product code (Q0; scratch under `output/obs-managed-spike/`)
+## 8. Qualification before product code (Q0; scratch under `output/evidence/obs-managed-spike/`)
 
 - **Q-A** A user OBS (default tree) and AK's OBS (`--multi`) run together: no dialog, trees isolated, both CEF instances and ports up.
 - **Q-B** `terminate()` by pid quits only AK's instance (user OBS running), no new `run_*`, next launch prompt-free.
@@ -217,7 +217,7 @@ version check and W11 (the only confirmation that the key is actually running). 
 Resolved from source (critique): the 60-fps cap (was Q-C); no websocket bind address (was Q-D). Deferred with W6: the page-rate probe
 (Q-F) and sleep/wake recovery (Q-G).
 
-### Q0 results (2026-09-24, OBS 32.2.2, this Mac; evidence main checkout `output/obs-managed-spike/`)
+### Q0 results (2026-09-24, OBS 32.2.2, this Mac; evidence main checkout `output/evidence/obs-managed-spike/`)
 
 - **Q-I PASS.** `NSWorkspace.openApplicationAtURL…` with `arguments`, `environment` (`CFFIXED_USER_HOME`, `HOME`),
   `createsNewApplicationInstance`, `hides` returns the `NSRunningApplication` (pid == `pgrep`), args intact, tree isolated (user

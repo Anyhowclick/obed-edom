@@ -1,12 +1,49 @@
-"""Read-only observation of one explicitly supported Keynote HTML player."""
+"""Observation hook and Magic Move opacity patch for one explicitly supported Keynote HTML player."""
 
 from __future__ import annotations
 
 import hashlib
 
 RUNTIME_VERSION = 2
+MM_OPACITY_ENV = "OBED_LIVE_MM_OPACITY"
 PLAYER_SHA256 = "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354"
 _ANCHOR = b"UC=new Eg,UC.displayManager.showWaitingIndicator()"
+
+_MM_OPACITY_NODE = (
+    b'__obedNodeOpacity(A){try{var B=A.initialState,g=null,C=0,Q=A.animations||[];for(var e=0;e<Q.length;e++)'
+    b'for(var t=Q[e].property?[Q[e]]:Q[e].animations||[],i=0;i<t.length;i++)"opacity"===t[i].property?(g=t[i],C++)'
+    b':("hidden"===t[i].property||t[i].animations)&&(C=2);var o=B.hidden||C>1?null:g?'
+    b'g.from.scalar===g.to.scalar&&"both"===g.fillMode?g.to.scalar:null:B.opacity;'
+    b'return"number"==typeof o&&isFinite(o)?o:null}catch(E){return null}}'
+    b"__obedChainOpacity(X,A){if(null===X)return null;var B=this.__obedNodeOpacity(A);"
+    b"return null===B?null:(void 0===X?1:X)*B}"
+)
+_MM_OPACITY_REPLACEMENTS = (
+    (
+        b"textureInfoFromEffect(A,B,g,C,Q){var e={};if(e.offset={pointX:g.pointX+A.bounds.offset.pointX,"
+        b"pointY:g.pointY+A.bounds.offset.pointY},e.parentOpacity=C,A.textureId){",
+        _MM_OPACITY_NODE
+        + b"textureInfoFromEffect(A,B,g,C,Q,X){var e={};if(e.offset={pointX:g.pointX+A.bounds.offset.pointX,"
+        b"pointY:g.pointY+A.bounds.offset.pointY},e.parentOpacity=C,"
+        b"e.obedOpacity=void 0===X?null:this.__obedChainOpacity(X,A),A.textureId){",
+    ),
+    (
+        b"this.textureInfoFromEffect(A.layers[E],B,e.offset,e.parentOpacity,Q)",
+        b"this.textureInfoFromEffect(A.layers[E],B,e.offset,e.parentOpacity,Q,this.__obedChainOpacity(X,A))",
+    ),
+    (
+        b'd!==U&&(T=d+(U-d)*K),A.setGLFloat(T,"Opacity")',
+        b'd!==U&&(T=d+(U-d)*K),null!=e.obedOpacity&&(T=e.obedOpacity),A.setGLFloat(T,"Opacity")',
+    ),
+    (
+        b"var w=e.initialState.hidden?0:this.parentOpacity*e.initialState.opacity;",
+        b"var w=e.initialState.hidden?0:null!=e.obedOpacity?e.obedOpacity:this.parentOpacity*e.initialState.opacity;",
+    ),
+    (
+        b"Q&&setTimeout(this.handleAnimateEffectDidBegin.bind(this,Q),0)",
+        b"Q&&this.handleAnimateEffectDidBegin(Q)",
+    ),
+)
 
 _INSTALL = r"""
 (function(controller) {
@@ -91,13 +128,32 @@ class LiveRuntimeUnsupported(ValueError):
     pass
 
 
-def patch_player(player: bytes) -> bytes:
-    """Instrument a known player without changing navigation or rendering."""
+def patch_player(player: bytes, *, mm_opacity: bool = True) -> bytes:
+    """Instrument a known player; with `mm_opacity`, draw Magic Move leaves at their authored chain opacity
+    and hide each swapped DOM node in the same task that queues its first GL draw."""
     if hashlib.sha256(player).hexdigest() != PLAYER_SHA256:
         raise LiveRuntimeUnsupported("This Keynote HTML player version is not supported for live output.")
     if player.count(_ANCHOR) != 1:
         raise LiveRuntimeUnsupported("The supported player observation hook is missing or ambiguous.")
-    return player.replace(
+    patched = player.replace(
         _ANCHOR,
         b"UC=new Eg," + _INSTALL + b",UC.displayManager.showWaitingIndicator()",
     )
+    return _apply_mm_opacity(patched) if mm_opacity else patched
+
+
+def patch_rendering(player: bytes) -> bytes:
+    """Apply only the Magic Move opacity rendering patch of `patch_player`, without the observation hook."""
+    if hashlib.sha256(player).hexdigest() != PLAYER_SHA256:
+        raise LiveRuntimeUnsupported("This Keynote HTML player version is not supported for the preview opacity patch.")
+    return _apply_mm_opacity(player)
+
+
+def _apply_mm_opacity(player: bytes) -> bytes:
+    for before, after in _MM_OPACITY_REPLACEMENTS:
+        if player.count(before) != 1:
+            raise LiveRuntimeUnsupported("The supported player Magic Move opacity anchor is missing or ambiguous.")
+        player = player.replace(before, after)
+        if player.count(after) != 1:
+            raise LiveRuntimeUnsupported("The supported player Magic Move opacity patch is ambiguous.")
+    return player
