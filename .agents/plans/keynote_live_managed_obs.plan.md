@@ -27,7 +27,7 @@ in the engine's own folder (§6). Warnings W1–W5, W8, W9, W11–W13 (§4).
 ("attach output not qualified") — GL replay stays off under managed OBS until OD-2, so managed OBS ships with native `<video>`
 cadence (8–12 % repeated frames at 2× [M]), not GL replay's 0.5 %. HEVC stays unsupported under attach (`_codec_supported` [C]).
 External attach (`OBED_LIVE_ATTACH`, `bridge: "obs-cdp"`) stays exactly as today as the developer fallback, with no UI; removal is a
-later cleanup.
+later cleanup. (OD-2 lifted for managed OBS by `keynote_live_gl_replay_managed_obs.plan.md`, 2026-09-25)
 
 **Non-goals.** Modifying OBS; embedding libobs (GPL; the repo is public); any state-changing obs-websocket request in product code
 (only `GetVersion`, `GetOutputStatus`; the harness alone may record); clearing `.sentinel/run_*`; automatic force-kill; fractional
@@ -296,7 +296,7 @@ gate untouched? (8) can any engine action run while a session is loaded?
 3. Isolation rests on CoreFoundation's `CFFIXED_USER_HOME`, an undocumented override a macOS update could break; readiness catches it,
    and the harness checks the user tree's mtime is unchanged.
 4. No sleep/wake detection in v1: after a sleep the page ran at 30 until relaunch [M]; the runbook requires the show Mac to stay awake.
-5. Native `<video>` cadence (8–12 %) stays on air until OD-2 lifts the GL-replay attach gate.
+5. Native `<video>` cadence (8–12 %) stays on air until OD-2 lifts the GL-replay attach gate. (OD-2 lifted for managed OBS by `keynote_live_gl_replay_managed_obs.plan.md`, 2026-09-25)
 6. The DeckLink path has had zero hardware contact; §6 is entirely on-the-day.
 7. The one-time setup shows OBS to an operator (OD-M3).
 8. If the dashboard dies mid-show, OBS keeps keying the last slide on air until the dashboard is relaunched (it quits the old engine).

@@ -83,7 +83,12 @@ field tool without `OBED_LIVE_ATTACH`, `--display <id>`, must print `transport=h
 - [ ] Managed engine (§0a): OBS 32.2.2 in `/Applications`; Take output → Ready → a fixture session → Release
       output, with the owner's own OBS open alongside (it must stay untouched). Qualification harness, Mac awake,
       no other OBS running: `uv run python scripts/managed_obs_qualify.py --arm both --rate 25 --takes 2 --out DIR`
-      → `SUMMARY PASS` (also `--rate 30`, cadence report-only there).
+      → `SUMMARY PASS` (also `--rate 30`; on this default grey P2 fixture cadence is report-only at 30, with `--fixture $F`
+      below it is gated at both rates). GL replay under the managed engine, binary counter fixture
+      (`F=<main checkout>/output/p2-binary`, always passed explicitly): `--arm g2 --rate 25 --takes 2 --fixture $F`,
+      `--arm failsafe --fixture $F` and, before a show, `--arm soak --soak-minutes 20 --fixture $F` → `SUMMARY PASS`.
+      The P2 movie does not loop, so that soak proves engine health, the context-loss stand-down and P3/P4 parity with
+      the off twin; its per-minute LIVE checks and wrap windows are report-only (gated only on a looping fixture).
 
 ## 0. Hardware + OBS setup (owner)
 - Blackmagic **Desktop Video** installed; device on a **native Thunderbolt port** (the Anker hub capped
@@ -91,8 +96,10 @@ field tool without `OBED_LIVE_ATTACH`, `--display <id>`, must print `transport=h
   Desktop Video Setup: UltraStudio HD Mini visible, output **video standard = 1080p25**. DeckLink outputs do not
   auto-detect.
 - Cabling is already in place: **SDI OUT A = FILL → Pulse In3, SDI OUT B = KEY → Pulse In4.** Do not re-cable.
-- **The show Mac must not sleep** for the whole test (a sleep leaves the page at the wrong rate until restart,
-  with no warning; it also invalidates harness runs).
+- **The show Mac must not sleep** for the whole test (a sleep invalidates harness runs). Separately, measured
+  2026-09-24/25: under the managed engine the page's frame rate can drop from 2× (50) to 30 and stay there until the
+  engine restarts — Chromium throttles the page to the movie's 30 fps once a movie plays and nothing else changes
+  per frame (keep-alive fix parked). Cadence stays clean at 25 in that state (binary counter); at 30 some takes show 1–3 % repeats.
 
 ### 0a. Managed engine (primary; needs a build with managed OBS, `feat/ak-managed-obs` or later)
 - OBS **exactly 32.2.2** in `/Applications`. Do not launch it yourself: Alpha Keynote runs its own hidden
@@ -172,7 +179,7 @@ freezes by the on-screen counter, never by the flicker feel.
 **Browser-source rate (measured 2026-09-24, OBS 32.2.2, canvas 25, lossless recordings of this fixture's counter, 2 takes at 50):**
 share of output frames that REPEAT the previous movie frame (ideal 0) —
 source FPS 25 (matched): native movie 25–27 % · default 30 Hz: 14–23 % · **50: 8–12 %**, and a GL-replayed movie
-(not in the build under test yet) 0.5–1 %. Matching the canvas is the worst setting; render the page at 2× the canvas.
+(on by default under Keyer output at 25 and 30 fps since OD-2, `claude/od-2-gl-replay-managed-obs-5bd03f`) 0.5–2 %. Matching the canvas is the worst setting; render the page at 2× the canvas.
 Harness and runs: main checkout `output/obs-rate/` (`rate.py rec` + `decode2.py`; only LOSSLESS recordings read the counter reliably).
 **Known before going in (2026-09-20, `keynote-live-continuity-2026-09-20.md`):** a movie continuing through a
 Magic Move is unreliable on screen. On `62e1ab7`, slide 2 shows a **static poster with a stray copy on top** — the
@@ -246,7 +253,9 @@ EOF
 Venue is **1080p25** and the fixture movies are ~30 fps (cadence hiccup, §3) · a movie carried through a
 geometry-static Magic Move is not visible (§3) · OBS's Chromium (127) ≠ the pinned Chrome (153): P2 results do not transfer automatically · HEVC likely
 will not decode in OBS · continuity: fixture deck only (allowlist) and only at a 1920×1080 viewport
-(scaled-stage mapping pending) · 3→4 motion is linear, Keynote's easing is not · audio off · presenter
+(scaled-stage mapping pending) · GL replay (Keyer): real footage may step slightly in midtone brightness
+where GL replay takes over and at slide 2's first build (Chromium tone curve on native video only); soft slot edges sharpen at that build
+(player texture vs DOM); decks with a Keynote **Loop** movie get no continuity at all (follow-up) · 3→4 motion is linear, Keynote's easing is not · audio off · presenter
 notes unavailable · no native DeckLink sender yet (OBS is the bridge) · 6 maps Python + 6 maps UI tests
 are red on pristine `main` (unrelated).
 
@@ -261,6 +270,9 @@ are red on pristine `main` (unrelated).
       managed Browser source is reseeded to `about:blank#obed-ak` at every launch) — owner to decide how on the day.
 - [ ] Rate 25 → 30 → 25 (each change restarts the engine; the Pulse widget follows).
 - [ ] Keyer off (untick **Keyer on**) ⇒ fill only.
+- [ ] GL replay: on slide 2 the movie keeps playing under the translucent green square, and In4 keys that
+      square like the DOM does after build 1 (≈ 29 % opaque, not solid). Note any brightness step at takeover / build 1.
+      Fallback: restart the dashboard with `OBED_LIVE_GL_REPLAY=off`.
 - [ ] Does the device hash survive a replug / another Thunderbolt port?
 - [ ] **ProPresenter handover:** with ProPresenter driving the HD Mini, press Take output with (a) its SDI screen
       present ⇒ "cannot open the UltraStudio" expected, (b) its SDI screen deleted, (c) ProPresenter quit — record
