@@ -23,7 +23,7 @@ Supersedes the verdict of `gates-r1.md` (kept for the r1 history and the harness
 
 | Gate | Verdict | Numbers |
 |---|---|---|
-| L0 unit | PASS | Full suite at `cfc61c13` (final): 7767 passed / 88 skipped / 1 xfailed; `test:ui` 305/305; `test:maps` 542 + 2 |
+| L0 unit | PASS | Full suite at `cfc61c13`: 7767 passed / 88 skipped / 1 xfailed; after rebasing onto `07b1ad5d` (#230, managed-OBS false exit): 7777 / 88 / 1; `test:ui` 305/305; `test:maps` 542 + 2 |
 | L4 P2 regression | PASS | `run_gates.sh` at `3ee7b345` line-for-line identical to `8fe3b551` (host ×3, P2 fast/slow 14/14, `--disable-bridge34` red only on the 3→4 bridge) |
 | L1 host on `p2-loop-grey` | PASS | 3 viewports + take 2 pass, V/Voff 4/4; `--gl-replay auto` Vgl 4/4. KB: `8fe3b551` exits 1 |
 | L2 on `p2-loop` (`3ee7b345`) | PASS | 3→4 6/6 carried; 1→2 4/6 carried, 2 INVALID (wrap +115/+211 ms late); KBs FAIL ("no wrap was recorded"); rescore CvC vs `8fe3b551` host artifacts identical |
