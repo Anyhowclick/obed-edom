@@ -1,5 +1,8 @@
 # Dashboard preview: draw Magic Move leaves at Keynote's opacity
 
+**APPROVED (owner, 2026-09-25): decisions 1–3 as recommended.** Base note: the parent branch gained a fifth
+replacement (`0f6d0380`, synchronous DOM hide at the GL handover); the split must carry every `_MM_OPACITY_REPLACEMENTS` entry.
+
 **DRAFT rev 1**, 2026-09-25, Opus planner. Plan only: no product code, no commits, no browser, no Keynote.
 Branch `claude/preview-mm-opacity`, stacked on `claude/mm-translucent-opacity` @ `66567617` (parent PR, not yet merged).
 Line numbers are read on `66567617`.
