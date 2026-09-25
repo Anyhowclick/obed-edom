@@ -1,6 +1,6 @@
 # Magic Move translucent opacity: draw the authored opacity from the first frame of the move
 
-DRAFT for owner review, **rev 4**, 2026-09-25. Rev 1: Opus planner. Rev 2: Opus critic. Rev 3: Opus planner, rewritten for
+**APPROVED (owner, 2026-09-25)**, **rev 4**, 2026-09-25. Rev 1: Opus planner. Rev 2: Opus critic. Rev 3: Opus planner, rewritten for
 **route (B)**, the owner's choice: a sha-pinned, in-memory player patch. Rev 4: Opus critic (§14 Critique log). Plan only: no product code, no
 commits, no OBS, no Keynote.
 **Builds on OD-2**: MERGED as #229 (`8fe3b551`); this branch (`claude/mm-translucent-opacity`) is rebased on it. It holds the
@@ -305,6 +305,8 @@ per-frame `readPixels` pair (a sync stall on every frame, inside G2's recording 
   5. Does every threshold trace to a measurement or an in-run CvC?
 
 ## 12. Owner decisions (each with a recommendation)
+
+**APPROVED 2026-09-25:** route B; decisions 2–6 as recommended. Dashboard preview upgrade = follow-up (§13).
 
 0. **Route: ANSWERED (B)**, 2026-09-25.
 1. **Scope: MOOT.** B is inherent to every `eB` effect on every output, and the census shows only slot 4 changes on disk.
