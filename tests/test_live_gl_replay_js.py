@@ -78,7 +78,13 @@ GL_REPLAY_ENTRY: dict = {
     "movieSlot": 3,
 }
 
+# Schema 2 (continuity generalisation §2.1): the entry gains `loop`/`src`/`dst`, which G2 ignores.
+_SLIDE1 = {"objectId": "6BB39942-6C61-4763-839D-777C09E7E594", "rect": {"x": 109, "y": 795, "w": 952, "h": 268}}
+_SLIDE2 = {"objectId": "F9AFED1B-E2D7-47D4-942E-14992C808383", "rect": {"x": 109, "y": 795, "w": 952, "h": 268}}
+_SLIDE3 = {"objectId": "98D59E27-7807-477D-BEFB-27EB1CF1D185", "rect": {"x": 198, "y": 797, "w": 952, "h": 268}}
+
 RUNTIME_PLAN: dict = {
+    "schema": 2,
     "movies": {
         "movie1": {
             "assetKeys": ["untitled.mov"],
@@ -86,8 +92,8 @@ RUNTIME_PLAN: dict = {
         }
     },
     "boundaries": [
-        copy.deepcopy(GL_REPLAY_ENTRY),
-        {"atScene": 6, "action": "restart"},
+        {**copy.deepcopy(GL_REPLAY_ENTRY), "loop": False, "src": _SLIDE1, "dst": _SLIDE2},
+        {"atScene": 6, "action": "restart", "movieKey": "movie1", "src": _SLIDE2, "dst": _SLIDE3},
     ],
 }
 
