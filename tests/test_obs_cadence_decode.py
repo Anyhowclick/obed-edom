@@ -16,6 +16,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
+import managed_obs_qualify  # noqa: E402
 import obs_cadence_decode as decode  # noqa: E402
 
 SOAK_LOOP_FRAMES = 1381
@@ -367,3 +368,9 @@ def test_binary_backward_step_and_loop_wrap():
     assert (wrap["wrapSteps"], wrap["backwardSteps"]) == (1, 0)
     mid = binary_stats(list(range(500, 540)) + list(range(0, 20)), SOAK_LOOP_FRAMES)
     assert (mid["wrapSteps"], mid["backwardSteps"]) == (0, 1)
+
+
+@pytest.mark.parametrize("minutes,lose_at,windows", [(3, 3, (1, 2)), (5, 3, (1, 2)), (20, 11, (1, 10))])
+def test_soak_schedule_records_two_wrap_windows_before_context_loss_at_any_length(minutes, lose_at, windows):
+    assert managed_obs_qualify.soak_schedule(minutes) == (lose_at, windows)
+    assert all(w < lose_at <= minutes for w in windows)

@@ -14,9 +14,9 @@ Arms:
                 unrecorded hidden-arm (the g2 session's gl_replay). g2/g2-off: slide 1 as above -> advance -> LIVE (<= 5 s) -> slide2-live 10 s
                 (screenshot S) -> hide, slide2-hidden 3 s (screenshot H) -> show, slide2-reshown 4 s ->
                 slide2-handback (advance = build 1) 4 s -> slide2-after 3 s (screenshot P3). Gates M0-M4.
-  failsafe      one launch: fail-module, fail-zone, fail-bogus (forced-fail seeds), goto2, off, off-2. Gate M5. Rate 25 only.
+  failsafe      one launch: fail-module, fail-zone, fail-bogus (forced-fail seeds), goto2, off, off-2. Gate M5.
   soak          g2 held on slide 2 for --soak-minutes with per-minute reads, 20 s recordings around a loop wrap at
-                minutes 2 and 8, loseContext at the midpoint, build 1, P3/P4; an off twin. Gate M6. Rate 25 only.
+                minute 1 and just before loseContext (after the first half), build 1, P3/P4; an off twin. Gate M6.
                 --precheck: the loop pre-check. --build-fixture KEY: export the owner's looping copy (needs
                 --i-have-owner-go; drives Keynote).
 --fixture: the soak fixture (default output/p2-soak-loop), or for the other arms the P2 fixture (default) or its binary-counter
@@ -106,7 +106,6 @@ MOVIE_FPS = 30
 SOAK_LOOP_FRAMES = 1381
 SOAK_WINDOW_S = 20.0
 SOAK_WINDOW_LEAD_S = 10.0
-SOAK_WINDOW_MINUTES = (2, 8)
 PRECHECK_S = 105.0
 RAF_JS = ("(()=>{if(!window.__obedRafN){window.__obedRafN=1;(function t(){window.__obedRafN++;requestAnimationFrame(t);})();}"
           "return [performance.now(), window.__obedRafN];})()")
@@ -539,8 +538,14 @@ def failsafe_script(goto: bool) -> Callable[[Session], None]:
     return script
 
 
+def soak_schedule(minutes: int) -> tuple[int, tuple[int, ...]]:
+    """Context loss after the first half, and two wrap windows before it, whatever the soak length."""
+    lose_at = max(3, minutes // 2 + 1)
+    return lose_at, tuple(sorted({1, lose_at - 1}))
+
+
 def soak_script(minutes: int, armed: dict[str, Any], looping: bool) -> Callable[[Session], None]:
-    lose_at = max(2, minutes // 2)
+    lose_at, windows = soak_schedule(minutes)
 
     def minute_read(s: Session, minute: int) -> None:
         read = s.read(f"minute{minute}")
@@ -578,7 +583,7 @@ def soak_script(minutes: int, armed: dict[str, Any], looping: bool) -> Callable[
         for minute in range(1, minutes + 1):
             hold(t0, 60 * minute)
             minute_read(s, minute)
-            if minute in SOAK_WINDOW_MINUTES and minute < lose_at:
+            if minute in windows:
                 window(s, minute)
             if minute == lose_at:
                 s.out["loseContext"] = s.ev(LOSE_CONTEXT_JS)
@@ -1044,7 +1049,7 @@ def soak_gates(run: dict[str, Any], armed: dict[str, Any], looping: bool) -> dic
     soak, off = sessions.get("soak") or {}, sessions.get("soak-off") or {}
     reads = soak.get("reads") or {}
     minutes = sorted(int(k[6:]) for k in reads if re.fullmatch(r"minute\d+", k))
-    lose_at = max(2, run["soakMinutes"] // 2)
+    lose_at, expected_windows = soak_schedule(run["soakMinutes"])
     checks: list[dict[str, Any]] = []
     engines = [(reads[f"minute{m}"].get("engine") or {}) for m in minutes]
     bad = [e for e in engines if e.get("state") != "ready" or any(w.get("id") in PAGE_LOST_WARNINGS for w in e.get("warnings") or [])]
@@ -1062,6 +1067,8 @@ def soak_gates(run: dict[str, Any], armed: dict[str, Any], looping: bool) -> dic
             check(checks, f"minute {b}: LIVE, standDowns [], uploads/s", [api.get("state"), api.get("standDowns"), rate],
                   api.get("state") == "LIVE" and api.get("standDowns") == [] and rate is not None and rate >= LIMITS["uploadsMin"],
                   f"LIVE, [], >= {LIMITS['uploadsMin']}", enforced=looping)
+    recorded = [w["minute"] for w in soak.get("windows") or []]
+    check(checks, "wrap windows recorded", recorded, recorded == list(expected_windows), f"== {list(expected_windows)}", enforced=looping)
     for window in soak.get("windows") or []:
         stats = (((window.get("decode") or {}).get("phases") or {}).get("slide2-live")) or {}
         check(checks, f"window minute {window['minute']}: only wrap-signature backward steps",
@@ -1377,7 +1384,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fixture", type=Path, help=f"soak fixture root (default {SOAK_FIXTURE}); other arms: {FIXTURE} (default) or "
                         f"its binary-counter copy ({binary_counter_movie.BINARY_FIXTURE})")
     parser.add_argument("--precheck", action="store_true", help="soak: the loop pre-check instead of the soak")
-    parser.add_argument("--soak-minutes", type=int, default=5, help="20 before a show or on a looping fixture")
+    parser.add_argument("--soak-minutes", type=int, default=5, help=">= 3; 20 before a show")
     parser.add_argument("--build-fixture", type=Path, metavar="KEY", help="soak: export the owner's looping .key copy into --fixture")
     parser.add_argument("--i-have-owner-go", action="store_true", help="required by --build-fixture (it drives Keynote)")
     parser.add_argument("--out", type=Path, help="writes <out>/runs/<arm>-<ts>.json, <out>/shots/ and a summary")
@@ -1393,6 +1400,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"--fixture for --arm {args.arm} must be {FIXTURE} or a binary_counter_movie.py copy of it.")
     else:
         args.fixture = FIXTURE
+    if args.arm == "soak" and args.soak_minutes < 3:
+        parser.error("--soak-minutes must be >= 3 (two wrap windows, then context loss, then the tail).")
     if (args.precheck or args.build_fixture) and args.arm != "soak":
         parser.error("--precheck and --build-fixture apply to --arm soak only.")
     if args.build_fixture:
