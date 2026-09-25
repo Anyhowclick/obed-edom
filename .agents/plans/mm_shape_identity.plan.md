@@ -164,10 +164,12 @@ contests were measured).
 
 1. **`mmKeys` = the gate key** (hard compatibility), replacing `_mm_shape_key`:
    - `bezierPathSource`: element types plus points normalised to the path's own bbox.
-   - `scalarPathSource`: type only.
+   - `scalarPathSource`: type, plus scalar except the rounded rect's radius (unmeasured for other
+     presets).
    - `editableBezierPathSource`: nodes normalised to their bbox.
    - Lines: that key plus the resolved stroke (colour, width, pattern) and line ends.
-   - Text shapes stay keyed by text; groups follow through `_mm_group_leaves`.
+   - Text shapes stay keyed by text; groups follow through `_mm_group_leaves`, whose line leaves
+     use the line key.
    - Style lookups go through one small resolver next to `_path_source` that walks the style
      `parent` chain.
 2. **`mmPrefs`** on the same slides: `{kind: {ki: [tier1, tier2, tier3]}}` for shapes and lines.

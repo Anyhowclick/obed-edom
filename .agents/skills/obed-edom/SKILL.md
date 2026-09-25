@@ -267,13 +267,16 @@ GROUP whose names live only in its child text, so the rule is evaluated from
 An object wholly off the wall is normally hidden. It is kept instead when it is a Magic
 Move partner: its slide and a neighbour are joined by an MM transition (text delivery
 by object) and the neighbour keeps a content-identical object on the wall. Identity is
-content, not archive id: text, image/movie data digest, aspect-normalised shape path,
-or a group's leaf list (`attach_magic_move` → `magicMoveOut`/`mmKeys`, plus `mmOrder`,
+content, not archive id: text, image/movie data digest, shape path normalised to its
+own bounds plus its text (a rounded rect by type only; lines also by stroke and line
+ends), or a group's leaf list (`attach_magic_move` → `magicMoveOut`/`mmKeys`, plus `mmOrder`,
 the `[kind, kindIndex]` addresses back→front, which only the validation rule
-`mm.zorder_flip` reads; it pairs unique text and groups by content, and repeated media,
-shapes and lines preferring matching stroke/opacity, then stored path, then style
-(`mmPrefs`), then least total centre distance; ties and repeated text/groups skipped; a
-flip is flagged only if the boxes overlap at some moment of the straight-line morph).
+`mm.zorder_flip` reads; it pairs unique text and groups by content. Repeated shapes and
+lines prefer matching stroke/opacity, then stored path, then style (`mmPrefs`), then least
+total centre distance; repeated media pair by least total centre distance only. Ties and
+repeated text/groups are skipped. A flip is flagged only if the boxes overlap at some
+moment of the straight-line morph; boxes are rotation-aware bounding boxes, and
+transparent image areas count as overlap).
 
 * Both slides of the pair must be planned: inside `--slides` and not skipped. An
   out-of-range or skipped neighbour keeps today's hide.
@@ -284,7 +287,8 @@ flip is flagged only if the boxes overlap at some moment of the straight-line mo
 * The kept object takes its own slide's affine. If that lands on the CG canvas or
   within 24pt of it, it is pushed just past the CG edge it was beyond on the wall.
 * A repeated identity class is kept whole and reported `ambiguous`: a wrong hide breaks
-  the move, a wrong keep only parks an unseen object off-canvas.
+  the move, a wrong keep only parks an unseen object off-canvas. `ambiguous` counts
+  same-key objects before build exclusion.
 * The run prints one `Magic Move: kept N …` line and returns `mmPartners`.
 * The dashboard framing preview plans one slide at a time, so it shows kept partners
   as not in the output (`willBeInOutput: false`). They are off-canvas either way.

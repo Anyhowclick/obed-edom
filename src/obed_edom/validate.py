@@ -909,9 +909,13 @@ def _mm_prefs(slide: dict) -> dict[_Address, tuple]:
 
 
 def _mm_box(item: dict | None) -> tuple[float, float, float, float] | None:
+    """Drawn axis-aligned box: x/y is already the rotated AABB top-left, w/h the unrotated size."""
     if not item or any(item.get(f) is None for f in ("x", "y", "w", "h")):
         return None
-    return float(item["x"]), float(item["y"]), float(item["w"]), float(item["h"])
+    w, h = float(item["w"]), float(item["h"])
+    theta = math.radians(float(item.get("rotation") or 0))
+    cos, sin = abs(math.cos(theta)), abs(math.sin(theta))
+    return float(item["x"]), float(item["y"]), w * cos + h * sin, w * sin + h * cos
 
 
 def _mm_centre(item: dict | None) -> tuple[float, float] | None:

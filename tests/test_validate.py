@@ -427,7 +427,8 @@ _NAMES = {_SMALL: "IMG-WA0125.mp4", _BIG: "untitled.mov", _CLIP: "clip.mov", _SQ
 
 def _mm_slide(number, objects, *, out=False, skipped=False):
     """``objects`` back→front: a key, (key, (x, y, side)) for a square on the slide
-    ((x, y, w, h) for any box), or
+    ((x, y, w, h) for any box, (x, y, w, h, rotation) for a rotated one: x/y is the drawn
+    box's top-left and w/h the unrotated size, as in the payload), or
     (key, (x, y, side), [tier1, tier2, tier3]) to add mmPrefs.
     kindIndex follows stacking order within each kind."""
     by_kind: dict[str, dict[int, str]] = {}
@@ -444,8 +445,10 @@ def _mm_slide(number, objects, *, out=False, skipped=False):
         if kind == "text":
             item["text"] = key.split(":", 1)[1]
         if rect:
-            x, y, w, h = rect if len(rect) == 4 else (*rect, rect[2])
+            x, y, w, h, *rotation = rect if len(rect) >= 4 else (*rect, rect[2])
             item.update(x=x, y=y, w=w, h=h)
+            if rotation:
+                item["rotation"] = rotation[0]
         items.append(item)
         order.append([kind, ki])
     slide = {"number": number, "index": number - 1, "items": items, "mmKeys": by_kind, "mmOrder": order}
@@ -661,6 +664,17 @@ def test_mm_repeated_horizontal_lines_pair_by_distance():
     after = [(_LINE, (1050, 200, 400, 0)), (_LINE, (150, 200, 400, 0))]
     assert _matches(before, after) == [(("line", 0), ("line", 1)), (("line", 1), ("line", 0))]
     assert _matches([(_LINE, (100, 200, 0, 0)), before[1]], after) == []
+
+
+def test_mm_repeated_rotated_lines_pair_by_true_centres():
+    # Line 0 is vertical (rotation 90, x=500, y 0..1000, true centre (500, 500)); read
+    # unrotated its centre would be (1000, 0). Line 1 is a rotation-180 horizontal line
+    # centred (500, 0). On slide 2, line 0 is a short horizontal line centred (500, 500)
+    # and line 1 one centred (1000, 0). True centres pair 0->0 and 1->1 (500pt total);
+    # unrotated centres would cross them (500pt vs 1207pt the other way).
+    before = [(_LINE, (500, 0, 1000, 0, 90)), (_LINE, (450, 0, 100, 0, 180))]
+    after = [(_LINE, (450, 500, 100, 0, 0)), (_LINE, (950, 0, 100, 0, 0))]
+    assert _matches(before, after) == [(("line", 0), ("line", 0)), (("line", 1), ("line", 1))]
 
 
 def test_mm_shape_tier1_beats_distance():
@@ -989,7 +1003,8 @@ def test_mm_zorder_flip_labels_stay_distinct_when_a_raw_name_matches_a_disambigu
 
 # Overlap filter: a flipped pair is flagged only if the two boxes overlap (strictly,
 # on both axes) at some moment of the morph. Each box moves linearly in (x, y, w, h)
-# from its slide-1 item to its slide-2 partner; rotation is ignored.
+# from its slide-1 item to its slide-2 partner. Boxes are the drawn (rotation-aware)
+# axis-aligned bounds.
 def _flip(small, small_after, big, big_after, *, small_key=_SMALL):
     """_SMALL/_BIG back→front on slide 1, front→back on slide 2 (always a flip)."""
     return _zorder(_mm_payload(
@@ -1031,6 +1046,17 @@ def test_mm_zorder_flip_zero_height_line_through_a_box_counts():
     assert _pairs(through) == ["'line #0' and 'untitled.mov'"]
     edge = _flip((0, 500, 1000, 0), (0, 500, 1000, 0), (400, 500, 100), (400, 500, 100), small_key=_LINE)
     assert edge == []
+
+
+def test_mm_zorder_flip_vertical_line_stored_rotated_crosses_a_box():
+    # The payload stores a vertical line as rotation=90 with w=length, h=0 and x/y at the
+    # drawn top-left: this one runs x=450, y=100..500 through the box at x 400..500,
+    # y 250..350. Read unrotated it would be a horizontal line at y=100, clear of the box.
+    vertical = (450, 100, 400, 0, 90)
+    flagged = _flip(vertical, vertical, (400, 250, 100), (400, 250, 100), small_key=_LINE)
+    assert _pairs(flagged) == ["'line #0' and 'untitled.mov'"]
+    unrotated = (450, 100, 400, 0, 0)
+    assert _flip(unrotated, unrotated, (400, 250, 100), (400, 250, 100), small_key=_LINE) == []
 
 
 @pytest.mark.parametrize(

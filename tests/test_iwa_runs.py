@@ -1957,6 +1957,30 @@ def test_attach_magic_move_group_key_is_dfs_leaves_by_digest_and_normalised_shap
     assert 3 not in groups
 
 
+def test_attach_magic_move_group_line_leaf_uses_the_line_key(tmp_path):
+    # A line inside a group is keyed like a top-level line (path gate + stroke + line
+    # ends), so g0 (white line) and g1 (the same line in yellow) differ, while g2 (g0's
+    # line at another length) matches g0. The top-level l0 is g0's line on its own: its
+    # key is exactly g0's line leaf.
+    extra = {
+        "sRoot": _shape_style(stroke=_stroke(width=2.0), opacity=1.0, headLineEnd={}, tailLineEnd={}),
+        "sWhite": _shape_style(parent="sRoot", stroke=_stroke()),
+        "sYellow": _shape_style(parent="sRoot", stroke=_stroke(color=_YELLOW)),
+        "g0": _mm_group(["g0t", "g0l"]), "g0t": _text_box("g0s"), "g0s": _storage("UPG"),
+        "g0l": _line(100.0, "sWhite"),
+        "g1": _mm_group(["g1t", "g1l"]), "g1t": _text_box("g1s"), "g1s": _storage("UPG"),
+        "g1l": _line(100.0, "sYellow"),
+        "g2": _mm_group(["g2t", "g2l"]), "g2t": _text_box("g2s"), "g2s": _storage("UPG"),
+        "g2l": _line(250.0, "sWhite", natural=250.0),
+        "l0": _line(100.0, "sWhite"),
+    }
+    keys = _mm_slide0(tmp_path, extra, ["g0", "g1", "g2", "l0"])["mmKeys"]
+    groups = keys["group"]
+    assert groups[0] != groups[1]
+    assert groups[0] == groups[2]
+    assert groups[0] == f"group:text:UPG\n{keys['line'][0]}"
+
+
 def test_attach_magic_move_keys_survive_a_json_round_trip(tmp_path):
     import json  # noqa: PLC0415
 

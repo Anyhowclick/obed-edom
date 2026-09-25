@@ -16,6 +16,7 @@ from typing import Any
 
 from obed_edom.inspect import is_duplicate_item
 from obed_edom.iwa_geometry import _path_source
+from obed_edom.iwa_kindindex import _is_line
 
 # Keynote inline-object placeholder; strip in _normalize_text (JXA vs IWA differ).
 _OBJECT_REPLACEMENT = "￼"
@@ -704,11 +705,21 @@ def _mm_prefs(obj: dict, objects: dict[str, dict]) -> list[str]:
     ]
 
 
+def _mm_line_key(obj: dict, objects: dict[str, dict]) -> str | None:
+    """Magic Move line gate: the shape gate plus the resolved stroke and line ends."""
+    gate = _mm_shape_key(obj)
+    if gate is None:
+        return None
+    style = _mm_shape_style(obj, objects)
+    ends = {k: style[k] for k in ("stroke", "headLineEnd", "tailLineEnd")}
+    return f"line:{gate}:{_digest(_canonical(ends))}"
+
+
 def _mm_group_leaves(
     group_id: str, objects: dict[str, dict], digests: dict[str, str], seen: set[str], out: list[str]
 ) -> bool:
-    """``_collect_group_content``'s DFS with media by digest and shapes by ``_mm_shape_key``.
-    False if any leaf is unresolvable."""
+    """``_collect_group_content``'s DFS with media by digest, lines by ``_mm_line_key`` and
+    shapes by ``_mm_shape_key``. False if any leaf is unresolvable."""
     if group_id in seen:
         return True
     seen.add(group_id)
@@ -734,6 +745,12 @@ def _mm_group_leaves(
             continue
         if ptype != "TSWP.ShapeInfoArchive":
             return False
+        if _is_line(child):
+            line = _mm_line_key(child, objects)
+            if line is None:
+                return False
+            out.append(line)
+            continue
         stor_id = (child.get("ownedStorage") or {}).get("identifier")
         storage = objects.get(str(stor_id)) if stor_id is not None else None
         text = "".join(storage.get("text") or []) if storage and storage.get("_pbtype") == "TSWP.StorageArchive" else ""
@@ -773,12 +790,7 @@ def _mm_identity(rec: dict, objects: dict[str, dict], digests: dict[str, str]) -
             return None
         return "group:" + _SIG_JOIN.join(leaves)
     if kind == "line":
-        gate = _mm_shape_key(obj)
-        if gate is None:
-            return None
-        style = _mm_shape_style(obj, objects)
-        ends = {k: style[k] for k in ("stroke", "headLineEnd", "tailLineEnd")}
-        return f"line:{gate}:{_digest(_canonical(ends))}"
+        return _mm_line_key(obj, objects)
     return None
 
 
