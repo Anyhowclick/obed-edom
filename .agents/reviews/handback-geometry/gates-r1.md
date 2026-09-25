@@ -88,3 +88,28 @@ run ended 18:19:44.
 - Full suites.
 - Managed OBS (owner-authorised session only).
 - `managed_obs_qualify.py`: another agent's file, neither touched nor run.
+
+## r2 (decision 3b) — `0bb21fcc`, served sha `574274e8…`
+
+R8 now preloads only when the event about to play is a Magic Move. `src/` is clean at `0bb21fcc`. Evidence is in
+`output/evidence/handback-geometry/w4/r2/`, with `batches.txt` (time, `uptime`, Chrome and P2 process counts).
+
+### Non-P2 items (done)
+
+| Gate | Verdict | Key numbers |
+|---|---|---|
+| Fast-advance bracket, fix vs stock (`r2/fastadv/`, `output/p2-binary`, GL off, 1920) | PASS | See below |
+| Host probe 1920, fix on (`r2/host/`, item 4, host part) | PASS | Arm A and attach `continue3to4` True; B/C False, as baseline. A/B/C/attach verdict sets == r1 and history. V and Voff slides 1–4 True |
+
+- **Engagement (dwell 0.5 s).** The fix blends exactly {`1FDCDA05…`, `8F325ED2…`} at 1→2, with max blended draws 3; stock
+  shows none and reads 1. The fix engages again after goTo 1 → advance.
+- **Dwell 0.** With an immediate advance the fix does not engage (blended 1), as in r1.
+- **Everything else identical to stock:**
+  - hashes `#2 #4 #5 #9 | #1 #2 | #7 #2`;
+  - preserve-event kinds, 11 kinds with the same counts;
+  - 0 page exceptions, console errors or warnings, player build errors and logger errors in all 3 runs.
+- **Served shas.** `on` 574274e8…, `off` 7cf00b56….
+
+### P2 items (pending the P2 slot hand-off)
+
+Pending: bridge-off (fix ×6 interleaved with stock ×3), fast/slow, GL fast (2 fix + 2 stock), and the 3→4 freeze bracket.

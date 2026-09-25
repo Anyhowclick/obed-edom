@@ -75,3 +75,63 @@ UNVERIFIED (gates-r1 or OBS):
 **Ready after fixes.** No blocker or major finding. The product bytes (R6–R8) are correct and fail closed. Fix 1–3 before
 merge, because they are instrument soundness. 4 is cheap and recommended. 5–11 are optional. The merge is still gated on
 gates-r1 and the owner's eyeball (decision 8).
+
+## r2 (2026-09-25)
+
+Scope: `git diff 685e046f..HEAD` (`d0c43e71`, `0bb21fcc`) and the r1 folds `572d1fbf` (W3) and `7b260aa6` (W2).
+Read-only; no Chrome started. The affected suites (runtime, handback, probe, qualify, mm_opacity_probe) pass: 422 passed.
+
+### r1 findings
+
+| r1 # | Status | Evidence |
+|---|---|---|
+| 1 frameLen pinned in HB-2 | closed | `G2_EXPECTED` no longer pins `frameLen`. It is reported on both arms, and the docstring gives the `setGLFloat` cause. |
+| 2 engagement only on `g2-on` | closed | MO-2 is INVALID on `g2-on` or `g2-on-2` unengaged. `g2-off`/`g2off-on` are documented as unchecked in the docstring and SKILL. |
+| 3 partial set / stale runs PASS | closed | `score_all` returns INCONCLUSIVE with `missing` unless HB-1 × 3 and HB-2 are present. Each record's served sha must equal today's `patch_player` output for its mode. |
+| 4 GL vs early DOM | closed, UNVERIFIED live | Both mm12 shots read `0-canvas` shown and every swapped node hidden. The `nodeToSwapId` trap works because the player *assigns* it (`C.nodeToSwapId=E`, byte 2312953; `B.nodeToSwapId=I`, 2314304). `MM12_CANVAS = "0-canvas"` is not yet confirmed in Chrome; a wrong id reads INCONCLUSIVE, never PASS. |
+| 5 walk ignores ancestor hidden / transforms | open (nit, optional) | Unchanged. |
+| 6 texture per setup | closed-class, no action | — |
+| 7 `W` reuse | open (nit, optional) | Unchanged. |
+| 8 plan anchor and shas | partly closed | The R7 anchor is recorded. The plan's shas (`e17264c0…`/`5797b302…`) and its §3.2 R8 row are stale again after `0bb21fcc` (see r2-2). |
+| 9 README baselines | closed | The README now says `frameLen` is timing-dependent. |
+| 10 rounding mirrors | closed | `layer_rects` uses player rounding. |
+| 11 comment style | closed | The `#:` lines are gone and the `noqa` is bare. |
+
+### New R8 (decision 3b), checked on the real bytes
+
+- **Which event is read.** `preloadTextures` resolves `B` as the current scene in `IdleAtInitialState` and the next scene
+  in `IdleAtFinalState` (`tg` = "IdleAtFinalState", byte 2336406). In both cases that is the scene whose event the next
+  advance plays: `playCurrentScene` renders `script.events[sceneIndex]` (≈2355081). So `A.events[B]` is the event about to
+  play.
+- **Loop wrap.**
+  - In `IdleAtFinalState` at the last scene, `B` wraps to 0, and R8 loads scene 1's slide only if `events[0]` is an MM. It
+    is harmless.
+  - The last→first MM itself (`IdleAtInitialState` at the last scene) is never preloaded, because `B+1<numScenes` is
+    false. It stays stock, which is fail-closed and as §3.4 describes.
+- **Names.** `var M,N` are function-scoped locals of `preloadTextures`. The rest of the method references neither, so
+  shadowing a module-level `M`/`N` has no effect.
+- **Odd data.** A missing event, empty `effects`, a non-MM first effect or a negative `B` all fall through to the stock
+  load only. The one exception is a missing `A.events`, which would throw inside `doIdleProcessing` and drop the queued
+  action. The player's own code iterates `script.events` unguarded, so this is unreachable on a real script.
+- **Node tests.** They exercise the real method: `_cut(player, "preloadTextures(){", "unloadTextures(){")` is taken from
+  the hooked, patched and rendering bytes. They cover the full P2 state × scene grid (only
+  `(FINAL,0)`/`(INITIAL,1)`/`(FINAL,6)`/`(INITIAL,7)` gain a load), stock equivalence with `mm_opacity=False`, the last
+  scene, the loop wrap and `B=-1`. `tg` is stubbed with the player's literal value.
+
+### r2 findings
+
+| # | Sev | Class | Where | Finding | Fix |
+|---|---|---|---|---|---|
+| r2-1 | nit | edge-case | `src/obed_edom/live_runtime.py` R8 | `A.events[B]` throws if `script.events` is missing, inside `doIdleProcessing`, before the queued action runs. That is unreachable with real scripts. | Optional: `var M=A.events&&A.events[B]`. |
+| r2-2 | minor | doc | plan §0/§3.2 (R8 row, line 170), §3.4 "R8 widens preloading for every slide", served shas (line 206); SKILL line 755 "R8 preloads one scene ahead" | These still describe the 3a bytes and the old shas. The tests now pin `574274e8…`/`fd811938…`. | Update the R8 row, the §3.4 risk bullet, the shas, and SKILL to "preloads the next slide only when the event about to play is a Magic Move". |
+| r2-3 | note | edge-case | R8 | An automatic-play MM that is chained without an idle stop is never preloaded, so it stays stock (fail-closed). That was equally true under 3a. | Mention it with the queued-advance case in the README and SKILL. |
+
+UNVERIFIED (W4):
+- the `0-canvas` id and the swap read in live Chrome;
+- P2 bridge-off green again under 3b. Slide 4 still renders while idle on slide 3, before 3→4, and overlaps slide 3's
+  playing movie.
+
+### r2 verdict
+
+**Ready after r2-2 (docs).** No correctness finding in the new R8. r1 findings 1–4 are closed. Merge stays gated on W4's
+gates (P2 bridge-off, HB-1/HB-2 with the swap premise) and the owner's eyeball.

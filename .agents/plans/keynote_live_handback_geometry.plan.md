@@ -167,7 +167,7 @@ Anything else keeps today's bytes and behaviour.
 |---|---|---|---|
 | R6 | `fB.setupTexture` tail (2263321) | `B[g].toTexture=R.createTexture(this.gl,i)}}return B}` | same + `return"apple:magic-move-implied-motion-path"===A.name&&this.__obedHandbackTextures(A,B),B}` + method below |
 | R7 | `QB` contents case (2190367) | `case"contents":C=e.toTexture}}var T=` (as shipped: extended by `var T=` so the anchor is not contained in its replacement) | `case"contents":C=e.toTexture}}e.obedMix&&(C=e.toTexture);var T=` |
-| R8 | `preloadTextures` tail (2347821) | `this.textureManager.loadScene(B)}unloadTextures(){` | `this.textureManager.loadScene(B),B+1<A.numScenes&&this.textureManager.loadScene(B+1)}unloadTextures(){` |
+| R8 | `preloadTextures` tail (2347821) | `this.textureManager.loadScene(B)}unloadTextures(){` | as shipped (3b): `this.textureManager.loadScene(B);var M=A.events[B],N=M&&M.effects&&M.effects[0];N&&"apple:magic-move-implied-motion-path"===N.name&&B+1<A.numScenes&&this.textureManager.loadScene(B+1)}unloadTextures(){` (rev 2 always preloaded: `…loadScene(B),B+1<A.numScenes&&this.textureManager.loadScene(B+1)}…`) |
 
 The R6 method, verbatim as it would sit in `live_runtime.py` (also `evidence/candidate_replacements_hbfix4.py`):
 
@@ -203,7 +203,7 @@ _MM_HANDBACK_METHOD = (
     and neither pair's bytes contain the other.
   - Applying MMO then R6–R8, or R6–R8 then MMO, gives identical bytes. All 8 after-counts are 1.
   - `patch_rendering` (no hook) takes them unchanged.
-  - Served sha (as shipped, rule 5b): `e17264c0…` (`patch_player`), `5797b302…` (`patch_rendering`); rev 2 prototype (any-geometry rule) was `ba709b7a…` / `1c779a82…`.
+  - Served sha (as shipped, 5b + 3b): `574274e8…` (`patch_player`), `fd811938…` (`patch_rendering`); 5b with always-on R8 was `e17264c0…` / `5797b302…`; rev 2 prototype (any-geometry rule) was `ba709b7a…` / `1c779a82…`.
   - R3's `var T=` (2190397) sits 30 bytes after R7's site, untouched.
 - **Where.** Append R6–R8 to `_MM_OPACITY_REPLACEMENTS` (decision 2), so the existing loop, count checks, switch, preview
   split and synthetic-player tests (`test_live_runtime.py:171–245`, `test_live_host.py:85`, `test_live_api.py:318`,
@@ -251,7 +251,7 @@ _MM_HANDBACK_METHOD = (
   the same tick, so the MM is set up before the render finishes). Latency on large decks: UNVERIFIED.
 - **Engagement is timing-dependent**, so any twin-compared harness must assert it (on-arm `frameLen` 96 / both leaves
   blended), else mark the run INCONCLUSIVE; never let a non-engaged run read as a stock twin.
-- **R8 widens preloading for every slide**, by one scene of lookahead. `unloadTextures` keeps slides g−1..g+1 and R8 loads
+- **R8 widens preloading before a Magic Move** (as shipped, 3b; rev 2 widened it for every slide, which made P2 bridge-off red — gates-r1), by one scene of lookahead. An automatic-play MM with no idle stop before it is never preloaded and stays stock. `unloadTextures` keeps slides g−1..g+1 and R8 loads
   at most slide g+1, so the **retention window is unchanged**; slide g+1 is filled earlier. `loadScene` without a callback
   does not touch `sceneDidLoadCallbackHandler`; go-to (`jumpToScene` → `isScenePreloaded`) only gets more cache hits. No
   product code reads `slideCache`/`loadScene` (grep). What moves: slide g+1's main-thread pdf.js render now runs in the idle

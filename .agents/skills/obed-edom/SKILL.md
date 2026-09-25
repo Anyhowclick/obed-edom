@@ -752,7 +752,7 @@ for the parked `iwa-surgical-write-generator` feature.
   DOM (the authored geometry) and snaps at build 1. R6–R8, appended to the same replacement tuple (same switch; `off` =
   stock bytes): R6 matches each MM leaf that scales without `contents` to exactly one visible next-slide leaf (end quad
   within 0.01 px, different texture) and sets `toTexture`/`obedMix`; R7 blends it through the player's own `contents` path;
-  R8 preloads one scene ahead so the destination exists at MM setup. Resolved at setup only: a destination not rendered
+  R8 preloads the destination slide only when the event about to play is a Magic Move (owner 3b), so the destination exists at MM setup; an automatic-play MM with no idle stop before it is never preloaded and stays stock. Resolved at setup only: a destination not rendered
   yet (e.g. a queued advance) keeps today's move. Engagement is timing-dependent, so twin-compared harnesses assert it:
   `mm_opacity_probe` requires 1->2 ordinals with `mixFactor` = [0, 2, 4] patch on / [0] off (0 is Keynote's own
   crossfade), else INCONCLUSIVE; `managed_obs_qualify` marks a take INVALID when any patch-on G2 session (g2, g2-on, the CvC
