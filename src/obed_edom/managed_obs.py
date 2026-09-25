@@ -1004,12 +1004,13 @@ class ManagedObs:
             pid, launch_date, target_id, ready_at, reason = self._pid, self._launch_date, self._target_id, self._ready_at, self._reason
             launched_rate = self._launched[0] if self._launched else None
         identity = self._identity(pid, launch_date)
+        ids: set[str] | None = None
         if identity == "gone" and target_id is not None:
             try:
-                listed = target_id in {str(item.get("id")) for item in _cdp_targets(self._cdp_port)}
+                ids = {str(item.get("id")) for item in _cdp_targets(self._cdp_port)}
             except Exception:
-                listed = False
-            if listed:
+                ids = None
+            if ids is not None and target_id in ids:
                 log.info("OBS pid %s reads gone but CDP still lists target %s; identity unknown", pid, target_id)
                 identity = "unknown"
         if identity == "gone":
@@ -1019,10 +1020,10 @@ class ManagedObs:
             return
         self._unknown_ticks = self._unknown_ticks + 1 if identity == "unknown" else 0
         try:
-            ids: set[str] | None = {str(item.get("id")) for item in _cdp_targets(self._cdp_port)}
+            if ids is None:
+                ids = {str(item.get("id")) for item in _cdp_targets(self._cdp_port)}
             self._cdp_failures = 0
         except Exception:
-            ids = None
             self._cdp_failures += 1
         device = self.device() or {}
         device_due = (bool(device.get("deviceHash")) and str(launched_rate) in (device.get("modeIds") or {})
