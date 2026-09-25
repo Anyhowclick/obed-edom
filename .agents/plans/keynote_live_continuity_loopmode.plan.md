@@ -258,7 +258,7 @@ the Magic Move effect), `p2-loop` would not show it — F1 found no such change 
 11. **§2.5** says how the pre-gate test asserts the new shas and when it flips. **OQs** trimmed to four real owner calls;
     the three with a repo convention are stated as decided.
 
-## 10. WS-C detail (read from OD-2 at `0620603e` + its uncommitted tree, 2026-09-25)
+## 10. WS-C detail (read from OD-2 at `0620603e` + its uncommitted tree, re-read at pushed `56b5904b`, 2026-09-25)
 
 OD-2 is adding a **binary counter** (`scripts/binary_counter_movie.py`, fixture `output/p2-binary` with `fixture.json`
 `{"counter": "binary", "base": "p2-recovery/html-adversarial", …}`): Chromium's native `<video>` applies a midtone curve
@@ -281,7 +281,10 @@ hand-back would decode wrong. The binary decoder is wrap-aware (`is_wrap(..., mo
 5. **Pre-check (a) enforced:** `video.loop` true on every slide-1 `untitled.mov` (`slide1Videos`), and on the carried element
    after hand-back (read `.loop` on the handed-back element, not G2 `stats.loopMode` — F6). `loop_representation`: the
    differing JSONs equal the `loop-splice.json` file list and every loop key is `loopMode="looping"` — enforced.
-6. **Soak.** With a real looping fixture, `soak_gates`' `enforced=looping` checks and `kb_verdict`'s `fixtureLooping`
+6. **Soak.** Re-read at OD-2 `56b5904b`: `--soak-minutes` defaults to 5 ("20 before a show or on a looping fixture");
+   windows fire only `if minute in SOAK_WINDOW_MINUTES (2, 8) and minute < lose_at` with `lose_at = max(2, minutes // 2)`,
+   so a 5-minute soak records **no** wrap window. L5 therefore runs `--soak-minutes 20` (windows at 2 and 8), unless OD-2
+   makes the schedule scale with the length. With a real looping fixture, `soak_gates`' `enforced=looping` checks and `kb_verdict`'s `fixtureLooping`
    become live (Opus r1 #8 on OD-2 stops being vacuous). Wrap windows decoded with `counter="binary"` + `loop_frames=1381`.
 7. **L1/L2 re-run on the rebuilt fixture** (headless, ≈ 25 min; clock-based, expected unchanged) so every gate reads one
    fixture; record in `gates-r2.md`.
