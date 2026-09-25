@@ -29,9 +29,9 @@ Arms:
   soak          g2 held on slide 2 for --soak-minutes (>= 4) with per-minute reads, 20 s recordings around a loop wrap at
                 minute 1 and just before loseContext (after the first half), build 1, P3/P4; an off twin. Gate M6.
                 --precheck: the loop pre-check.
---fixture: the soak fixture (default output/p2-loop, `loop_fixture.py`; its fixture.json `loop` key marks it looping, and it
+--fixture: the soak fixture (default output/fixtures/p2-loop, `loop_fixture.py`; its fixture.json `loop` key marks it looping, and it
 must qualify on product code), or for the other arms the P2 fixture (default) or its binary-counter
-copy (`binary_counter_movie.py --build-fixture`, output/p2-binary): its fixture.json selects the decoder's binary counter (its
+copy (`binary_counter_movie.py --build-fixture`, output/fixtures/p2-binary): its fixture.json selects the decoder's binary counter (its
 movie sha256s are checked at startup and recorded per run), and M2 then enforces the hand-back max step per elapsed frame and
 an undecodable-free hand-back.
 --kb frozen|oldbytes swaps the G2 module text in this process (asserted sha, read back from the host's own report);
@@ -75,6 +75,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
+from obed_edom.fixture_paths import fixture  # noqa: E402
 from obed_edom import live_gl_replay_js, managed_obs, mm_handback_score, obs_websocket  # noqa: E402
 from obed_edom.html_preview import cache_dir  # noqa: E402
 from obed_edom.live_continuity import Unsupported  # noqa: E402
@@ -103,8 +104,8 @@ from live_continuity_probe import (  # noqa: E402
 )
 from live_host_probe import wait_for_settlement  # noqa: E402
 
-FIXTURE = REPO / "output/p2-recovery/html-adversarial"
-SOAK_FIXTURE = REPO / "output/p2-loop"
+FIXTURE = fixture("p2-recovery") / "html-adversarial"
+SOAK_FIXTURE = fixture("p2-loop")
 DEFAULT_HOME = Path.home() / "Library/Application Support/Obed-Edom/qualify-home"
 USER_OBS_TREE = Path.home() / "Library/Application Support/obs-studio"
 WS_CONFIG = "plugin_config/obs-websocket/config.json"

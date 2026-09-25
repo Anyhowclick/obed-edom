@@ -4,7 +4,8 @@
 # registration unless --allow-record (discovery runs only) is passed.
 G=$1; O=$2; ALLOW_RECORD=0; [[ "$3" == "--allow-record" ]] && ALLOW_RECORD=1
 PY=/Users/anyhowclick/Desktop/work/obed-edom/.venv/bin/python; mkdir -p $O; cd $G || exit 1
-export PYTHONPATH=$G/src; F=$G/output/p2-recovery/html-adversarial
+export PYTHONPATH=$G/src; F=$($PY -c 'from obed_edom.fixture_paths import fixture; print(fixture("p2-recovery"))')/html-adversarial
+[[ -d $F ]] || { echo "no P2 fixture at $F"; exit 1; }
 if (( ALLOW_RECORD )); then
   echo "################################################################################"
   echo "## --allow-record: DISCOVERY RUN. RECORD arms are not gated; this is NOT a pass. ##"

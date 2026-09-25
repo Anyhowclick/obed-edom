@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from obed_edom import html_preview, live_gl_replay_js, live_host, live_runtime
+from obed_edom.fixture_paths import fixture
 
 
 class FakeCdp:
@@ -2877,7 +2878,7 @@ def test_codec_report_probes_fps_only_when_an_output_rate_is_set(tmp_path, monke
     assert seen and seen[0]["with_fps"] is with_fps
 
 
-REAL_PLAYER_ROOT = Path(__file__).resolve().parents[1] / "output" / "p2-recovery" / "html-adversarial" / "html-player"
+REAL_PLAYER_ROOT = fixture("p2-recovery") / "html-adversarial" / "html-player"
 REAL_SLIDES = [
     {"playerIndex": index, "originalOrdinal": index + 1, "exportedUuid": uuid, "skipped": False}
     for index, uuid in enumerate([

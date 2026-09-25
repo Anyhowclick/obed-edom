@@ -49,6 +49,7 @@ from p2_recovery_html_dissolve_live import (  # noqa: E402
     _wait_hash_clean,
     inject_preserve,
 )
+from obed_edom.fixture_paths import fixture  # noqa: E402
 from obed_edom.p2_verdict import (  # noqa: E402
     EXPECTED_MOVIE_KEYS,
     MOVIE_ROI,
@@ -68,8 +69,8 @@ from obed_edom.html_alpha_probe import (  # noqa: E402
 )
 
 SOURCE = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Minimal Alpha_DSK.key")
-ADV_UNMOD = REPO / "output" / "p2-recovery" / "html-adversarial" / "html-unmodified"
-OUT = REPO / "output" / "p2-recovery" / "html-decode-probe"
+ADV_UNMOD = fixture("p2-recovery") / "html-adversarial" / "html-unmodified"
+OUT = fixture("p2-recovery") / "html-decode-probe"
 
 
 async def _sample_decoder_frames(chrome: ChromeCdp, run_dir: Path, n: int = 6, gap_s: float = 0.25) -> list[dict]:

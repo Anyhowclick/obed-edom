@@ -73,6 +73,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
+from obed_edom.fixture_paths import fixture  # noqa: E402
 from obed_edom import live_host as live_host_module  # noqa: E402
 from obed_edom import live_continuity as live_continuity_module  # noqa: E402
 from obed_edom.html_preview import cache_dir, safe_export_file  # noqa: E402
@@ -103,8 +104,8 @@ except ImportError:  # pragma: no cover - stream B is landing this constant conc
 import live_host_probe  # noqa: E402 - reuse the headless window-size compensation
 from continuity_core_variants import VARIANTS, parse_strip, strip_entries, variant_core, variant_sha  # noqa: E402
 
-FIXTURE = REPO / "output/p2-recovery/html-adversarial/html-player"
-ORIGINAL_INDEX = REPO / "output/p2-recovery/html-adversarial/html-unmodified/index.html"
+FIXTURE = fixture("p2-recovery") / "html-adversarial/html-player"
+ORIGINAL_INDEX = fixture("p2-recovery") / "html-adversarial/html-unmodified/index.html"
 ARTIFACT = Path("output/live-probes/live-continuity-probe.json")
 PROBE_DIGEST = "b" * 64
 CHROME = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")

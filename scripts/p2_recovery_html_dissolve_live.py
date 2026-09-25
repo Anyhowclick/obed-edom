@@ -35,6 +35,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 from p2_alpha_spike import CHROME, ChromeCdp, _wait_ready  # noqa: E402
 from obed_edom.dsk_live import keynote_running  # noqa: E402
+from obed_edom.fixture_paths import fixture  # noqa: E402
 from obed_edom.live_continuity_js import PRESERVE_CORE_JS  # noqa: E402
 from obed_edom.html_alpha_probe import (  # noqa: E402
     analyze_rgba,
@@ -50,7 +51,7 @@ from obed_edom.html_preview import export_html  # noqa: E402
 from obed_edom.p2_verdict import MOVIE1_TOKEN, MOVIE2_TOKEN, _movie_key, _norm_hash  # noqa: E402
 
 SOURCE = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Minimal Alpha_DSK.key")
-OUT = REPO / "output" / "p2-recovery" / "html-dissolve-live"
+OUT = fixture("p2-recovery") / "html-dissolve-live"
 CLICK_DELAYS_S = (0.5, 1.5, 3.0, 5.0)
 DISSOLVE_S = 1.5
 DENSE_FPS = 20
@@ -847,18 +848,18 @@ def main() -> int:
     strip_pdf = "--strip-pdf" in sys.argv
     global OUT
     if preserve and strip_pdf:
-        OUT = REPO / "output" / "p2-recovery" / "html-dissolve-preserve-alpha"
+        OUT = fixture("p2-recovery") / "html-dissolve-preserve-alpha"
     elif preserve:
-        OUT = REPO / "output" / "p2-recovery" / "html-dissolve-preserve"
+        OUT = fixture("p2-recovery") / "html-dissolve-preserve"
     elif handoff:
-        OUT = REPO / "output" / "p2-recovery" / "html-dissolve-handoff"
+        OUT = fixture("p2-recovery") / "html-dissolve-handoff"
     started = time.monotonic()
     before = file_identity(SOURCE)
     unmodified = OUT / "html-unmodified"
     player = OUT / "html-player"
 
-    baseline_unmodified = REPO / "output" / "p2-recovery" / "html-dissolve-live" / "html-unmodified"
-    preserve_unmodified = REPO / "output" / "p2-recovery" / "html-dissolve-preserve" / "html-unmodified"
+    baseline_unmodified = fixture("p2-recovery") / "html-dissolve-live" / "html-unmodified"
+    preserve_unmodified = fixture("p2-recovery") / "html-dissolve-preserve" / "html-unmodified"
     if reuse and unmodified.is_dir() and (unmodified / "index.html").is_file() and not (
         preserve and strip_pdf and not (OUT / "pdf-strip.json").is_file()
     ):

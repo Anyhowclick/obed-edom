@@ -29,11 +29,12 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
 import p2_recovery_mixed_transparent as base  # noqa: E402
+from obed_edom.fixture_paths import fixture  # noqa: E402
 from obed_edom.html_alpha_probe import load_rgba, write_json  # noqa: E402
 from obed_edom.maps_movie import ffmpeg_exe  # noqa: E402
 
-PROBE = REPO / "output" / "p2-recovery" / "mixed-11-13-transparent"
-OUT = REPO / "output" / "p2-recovery" / "mixed-dense-windows"
+PROBE = fixture("p2-recovery") / "mixed-11-13-transparent"
+OUT = fixture("p2-recovery") / "mixed-dense-windows"
 MOVIE = PROBE / "movies" / "mixed-11-13-ui-transparent-prores4444.mov"
 FPS = 30
 # ± half-window around each event (seconds)

@@ -13,7 +13,7 @@ Hand-back geometry (plan keynote_live_handback_geometry §3.4, W3): the patch-on
 geometry at slot opacity; a patch-on G2 session whose fix did not engage (the pre-fix unproven rest-opacity) makes the
 take INVALID, never a pass or a fail of the fix.
 
-Looping soak fixture (loopMode plan §10 WS-C): `output/p2-loop`, built by `scripts/loop_fixture.py`, must qualify on
+Looping soak fixture (loopMode plan §10 WS-C): `output/fixtures/p2-loop`, built by `scripts/loop_fixture.py`, must qualify on
 product code: the harness no longer splices the continuity allowlist in-process. A fixture is looping iff its
 `fixture.json` carries the `loop` record the builder adds; the P2 family is the P2 base without that key. Pre-check (a)
 is enforced: every slide-1 `untitled.mov` and the handed-back carried element report `video.loop`, and the export
@@ -42,6 +42,7 @@ import binary_counter_movie  # noqa: E402
 import live_continuity_probe as lcp  # noqa: E402
 import loop_fixture  # noqa: E402
 import managed_obs_qualify as q  # noqa: E402
+from obed_edom.fixture_paths import fixture  # noqa: E402
 
 from test_loop_fixture import _binary_manifest, _committed_source  # noqa: E402
 
@@ -1090,7 +1091,7 @@ class TestFixtureFamily:
         assert q.fixture_loops(looped) is True and q.p2_family(looped) is False
 
     def test_soak_default_is_p2_loop(self) -> None:
-        assert q.SOAK_FIXTURE == q.REPO / "output/p2-loop"
+        assert q.SOAK_FIXTURE == fixture("p2-loop")
 
 
 class TestSpliceGone:

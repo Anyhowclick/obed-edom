@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from obed_edom.fixture_paths import fixture
 from obed_edom.live_codec import codec_family, movie_codec, movie_fps
 
 # --- synthetic ISO-BMFF/QuickTime box builders --------------------------------------------
@@ -228,7 +229,7 @@ def test_stsd_too_short_to_hold_an_entry_returns_none(tmp_path):
 # --- movie_fps --------------------------------------------------------------------------------
 
 REAL_UNTITLED_MOV = (
-    Path(__file__).resolve().parents[1] / "output" / "p2-recovery" / "html-adversarial" / "html-player"
+    fixture("p2-recovery") / "html-adversarial" / "html-player"
     / "assets" / "08C861A1-CB39-4832-B189-6DF95B7F3396" / "assets" / "Untitled.mov-0.0000-46.0333.mov"
 )
 
