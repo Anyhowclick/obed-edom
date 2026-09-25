@@ -114,7 +114,16 @@ Plan (source of truth): `.agents/plans/keynote_live_continuity_generalisation.pl
   4. Step 3: a full `run_gates.sh` without `--allow-record` on the rebased head.
   5. Step 4, review. The list below is otherwise unchanged.
 - The scratch runners used tonight (a P2-only slice of `run_gates.sh`, the deck loop and the A/B) were one-offs in the
-  session scratchpad. Nothing in the repo changed apart from `4a2ea70f` and this handover.
+  session scratchpad and are gone; rebuild the A/B from the description above (alternate the two worktrees, count empty
+  `querySelectorAll('video')` samples flanked by non-empty ones per arm).
+- **Cleanup after the runs (2026-09-25 night, owner-directed; all to the macOS Trash):**
+  - Every `attach-chrome-profile/` and `chrome-profile*/` dir under `output/evidence/` (incl. `s2-dev/*`) and
+    `output/fixtures/p2-recovery/html-adversarial/{runs,gl-replay/runs}` — the probes recreate them each run. All
+    `*.json`, `*.log` and `report.json` evidence cited above is kept.
+  - The aborted `decks-4a2ea70f/ABORTED-D1-1600x1000.*`.
+  - On this branch: the superseded brief `keynote_live_continuity_generalisation.md` is deleted and its citations
+    repointed; the plan's status lines say S1 landed / S2 in progress. On main (#240): landed handovers and raw rounds
+    pruned, the 09-19/09-20 handovers folded into the DeckLink runbook's "Background — paid-for facts".
 
 ## State at the stop (2026-09-25 evening)
 - **Head:** `claude/continuity-generalisation-s2`, core v6, sha `9c4fc61f…` since `089a0393`. The branch is pushed; there
@@ -224,7 +233,10 @@ the full suite was deferred because another session was running a load-sensitive
    owner.**
 7. **Housekeeping:**
    - Delete the `output/<name>` compatibility symlinks once no session uses the old paths.
-   - Remove the gate worktree `s2-gate-089a0393` once its commit lands.
+   - Keep the gate worktree `s2-gate-089a0393` (pre-rebase core, the A/B control) until the detach is resolved; remove it
+     once S2 lands.
+   - The compatibility symlinks are still required: main has no `fixture()` until S2 merges, so its scripts and
+     `tests/test_managed_obs_qualify.py` (`output/mmo-gates/...`) read the old paths.
    - Fix the P2-output-in-fixture hazard (see Findings).
 
 ## Agents
