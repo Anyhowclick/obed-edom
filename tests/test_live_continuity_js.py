@@ -36,7 +36,7 @@ def test_js_sha256_matches_pinned_bytes():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "1ea684bfea610b0ff3ea828fd063723c9f876203a38b6daa542eeb9ce27180f9"
+PINNED_CORE_SHA256 = "d982cc7df39e6afb3a3ff349cab75df5e5686a3e09f7dc11b59d7bcf42c7949d"
 
 
 def test_js_sha256_matches_the_pinned_literal():
@@ -3582,6 +3582,7 @@ const b = fresh(ID[1]);
 const afterFirst = {instance: a.__obedInstance, bridged: !!a.__obedBridged34, suppressed: !!b.__obedSuppressed34,
   inBody: a.parentNode === bodyEl};
 goToScene(3);
+detach(b);
 pump();
 const secondMove = notesOf('bridge-motion-start').slice(-1)[0];
 goToScene(4);
@@ -3672,6 +3673,33 @@ console.log(JSON.stringify({owner: P.footprintOwnerDecoderId({x: 160, y: 700, w:
         assert result["owner"] == {"elId": result["aId"], "key": "movie1", "via": "footprint-video", "contextType": None}
     else:
         assert result["owner"] == {"elId": None, "key": None, "via": "ambiguous", "contextType": None}
+
+
+def test_a_held_overlay_waits_for_the_transition_not_the_idle_hash_before_the_next_bridge():
+    """RT-A (live D1 arm A): idle at the end of slide 2 the player already shows
+    `#3` (the next scene) — the second bridge's `atScene - 1`. The held overlay
+    must stay at its slot until the player actually starts the 2->3 transition,
+    i.e. tears down slide 2's suppressed stub, and only then start the move."""
+    plan = _CONTRACT["d1"]
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing(ID[0]);
+goToScene(1);
+detach(a);
+goToScene(2);
+const b = fresh(ID[1]);
+b.parentNode = bodyEl;
+pump();
+location.hash = '#3';
+for (let i = 0; i < 5; i += 1) pump();
+const idle = {moves: notesOf('bridge-motion-start').length, left: a.style.left, width: a.style.width};
+detach(b);
+pump();
+console.log(JSON.stringify({idle, moves: notesOf('bridge-motion-start').map(n => n.rect)}));
+""", src="https://host/counter-a.mov")
+    dst1, dst2 = plan["boundaries"][0]["dst"]["rect"], plan["boundaries"][1]["dst"]["rect"]
+    assert result["idle"] == {"moves": 1, "left": f"{dst1['x']}px", "width": f"{dst1['w']}px"}
+    assert result["moves"] == [dst1, dst2]
 
 
 def test_a_suppressed_bridge_destination_really_clears_when_its_slide_ends():
