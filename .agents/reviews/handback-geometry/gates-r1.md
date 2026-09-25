@@ -147,4 +147,4 @@ Recordings: `qualify-home/recordings/mmo-20260925-193948/` (25) and `mmo-2026092
 — `…LEFT-thisPR_RIGHT-mainMMOonly…` pairs this PR's `g2off-on` (19-40-35) with main's MMO-only `g2off-on` from the MO-7 take
 (`mmo-20260925-143530/14-36-16.avi`; same frame timing, jump at 435), at speed, mm-move stepped 8×, build 1 stepped 8×. The
 `…LEFT-fix_RIGHT-stock…` pairs compare against patch off (opaque square), so they mix the opacity fix with this one.
-Owner eyeball: PENDING.
+Owner eyeball (decision 8a): PASS (owner, 2026-09-25) — no visible blending/ghosting vs main MMO-only; build-1 snap gone.
