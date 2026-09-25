@@ -28,9 +28,9 @@ facts identical to P2, no allowlist splice). Every frame of the movie decodes to
 | M3 key/alpha | PASS: plateau α 75, G2 vs DOM 0; edge = native × 0.2947 ± 1 (KB 180); M0 poke vs g2-off-S caught; τ_O CvC 0 | all |
 | M4 hide/show | PASS: reshow repeat 0 % at 25 (2.7 % at 30 take 1, native-relative PASS); drift 1; hidden-arm LIVE 0 s. KB latelost caught | `Q-*`, `Qkb-latelost` |
 | M5 fail-closed smoke | PASS (module, zone, goto2; bogus KB caught on the zone-reason check) | `Q-failsafe` |
-| M6 soak (binary P2, non-looping) | see below | `Q-soak.log` |
+| M6 soak (binary P2, non-looping) | 5 min (new default) PASS: engine ready, wrap windows [1, 2] recorded, loseContext → contextLost stand-down, retired failure/contextLost, P3/P4 == off. The earlier 20-min run failed only "engine ready": the managed engine raised a FALSE `obsExited` in minute 1 (OBS alive to 10:32, page answered CDP throughout) under load — managed-OBS (#226) liveness bug, separate follow-up; all G2 clauses passed | `Q-soak5.log`, `Q-soak.log` |
 | M7 owner eyeball | TODO | |
-| M8 regression | full pytest 7410/88/1 at `812fd9d5`'s code; dashboard build OK, `test:ui` 305, `test:maps` 542 + 2; TODO `live_continuity_probe.py --gl-replay auto --viewport 1920x1080` (external attach → `unavailable`) | |
+| M8 regression | full pytest 7410/88/1 at `812fd9d5`'s code; dashboard build OK, `test:ui` 305, `test:maps` 542 + 2; `live_continuity_probe.py --gl-replay auto --viewport 1920x1080 --attach` PASS (external attach → `unavailable` "attach output not qualified") | |
 
 Native baseline (`--arm both`, binary): 2× source native 0 % repeats; positive control (source = canvas 25) 12.7 % / 6.3 % ⇒ the #226
 2× setting is real and needed; binary limits: 2× ≤ 1 %, positive ≥ 5 %.
@@ -49,7 +49,8 @@ Native baseline (`--arm both`, binary): 2× source native 0 % repeats; positive 
    Keep-alive fix parked (owner).
 3. **Loop.** Keynote Loop exports `movie.loopMode: "looping"`; continuity refuses such decks (no carry, no G2). Follow-up session
    in progress.
-4. Load matters (another session's renderers, full-suite runs); `uptime` recorded per batch in the logs.
+4. **Managed-engine false exit.** One sample of the engine's process check read "gone" while OBS ran; `_on_exit` forgets the process for good and raises the BLOCK `obsExited`. Intermittent (1 in ~40 launches, under load). Show risk (operator told to restart a healthy output) ⇒ follow-up session.
+5. Load matters (another session's renderers, full-suite runs); `uptime` recorded per batch in the logs.
 
 ## Review
 
