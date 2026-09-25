@@ -211,6 +211,8 @@ worktree pinned to a commit, with at most 3 headless Chromes; OBS only on the ow
 
 ### S2: derivation v2 + core v6 (the only runtime-byte stage; after OD-2 and loopMode merge)
 
+**S2 IN PROGRESS (paused 2026-09-25 for the owner's vacation).** S2.0 and all four streams are done. The dev loop is green on P2 and D1–D6 at 1920×1080 (core `9c4fc61f`). State and next steps: `.agents/handovers/keynote-live-continuity-2026-09-25-s2.md`.
+
 | WS | Files (exclusive) | Work |
 |---|---|---|
 | D | `lc`, `src/obed_edom/validate.py` (helper extraction only, if byte-safe per §2.2), `tests/test_live_continuity.py`, `tests/test_live_continuity_decks.py`, `tests/test_validate*.py` (the helper's callers), `tests/fixtures/live_continuity/**` | §2.1 schema, §2.2 pairing, §2.3 R1–R8, §2.4 loop narrowing + annex removal, chain invariant, `retire ends`, one `Unsupported`/refusal test per R-code. Owns `tests/fixtures/live_continuity/runtime_v2_examples.json`, the frozen schema examples WS-R tests read. Adds each S0 deck's plan shas to the allowlist as the deck derives (S2 branch only). |
