@@ -3627,16 +3627,21 @@ class TestArmedFact:
             probe.armed_fact(synthetic_plan(), runtime, BOUNDARY_KEYS)
 
 
-def _gl_plan() -> Any:
+def _gl_plan(gl: bool = False) -> Any:
+    """The refused 1->2 pin (G2-armed when `gl`) and the 3->4 bridge, each instance authored on
+    its slides, so the plan agrees with RETIRED_RUNTIME (off) / GL_RUNTIME (on)."""
     rect = probe.live_continuity_module.Rect
     movie = probe.live_continuity_module.MovieContinuity
     boundary = probe.live_continuity_module.SlideBoundary
-    pin = movie(BIG_ASSET, "pin", rect(**BIG_INSTANCE), rect(**BIG_INSTANCE))
-    bridge = movie(BIG_ASSET, "bridge", rect(198, 797, 952, 268), rect(327, 709, 1266, 356))
+    pin = movie(
+        BIG_ASSET, "pin", rect(**BIG_INSTANCE), rect(**BIG_INSTANCE), refusal="overlap", gl_replay={"x": 1} if gl else None,
+    )
+    src, dst = {"x": 198.0, "y": 797.0, "w": 952.0, "h": 268.0}, {"x": 327.0, "y": 709.0, "w": 1266.0, "h": 356.0}
+    bridge = movie(BIG_ASSET, "bridge", rect(**src), rect(**dst))
     return probe.ContinuityPlan(
         canvas={"width": 1920, "height": 1080}, scene_index_by_player=dict(SCENE_INDEX_BY_PLAYER),
         slide_rects={}, boundaries=(boundary(0, 1, (pin,)), boundary(2, 3, (bridge,))),
-        slide_instances=dict(SLIDE_INSTANCES),
+        slide_instances={0: {BIG_ASSET: [BIG_INSTANCE]}, 1: {BIG_ASSET: [BIG_INSTANCE]}, 2: {BIG_ASSET: [src]}, 3: {BIG_ASSET: [dst]}},
     )
 
 
@@ -3649,8 +3654,8 @@ class TestFactsPerArm:
 
     def test_the_on_fact_set_adds_armed_and_no_retire(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(probe, "runtime_of", lambda plan: GL_RUNTIME)
-        facts = probe.ground_truth_facts(_gl_plan(), armed=True)
-        assert facts["armed"] == probe.armed_fact(_gl_plan(), GL_RUNTIME, BOUNDARY_KEYS)
+        facts = probe.ground_truth_facts(_gl_plan(gl=True), armed=True)
+        assert facts["armed"] == probe.armed_fact(_gl_plan(gl=True), GL_RUNTIME, BOUNDARY_KEYS)
         assert facts["armedBoundaries"] == ["continue1to2"]
         assert facts["retire"] is None and facts["refusedBoundaries"] == []
 
@@ -6001,16 +6006,18 @@ class TestWrapOwnerExcuseFailsClosed:
 
 
 # --------------------------------------------------------------------------
-# S1 (plan `keynote_live_continuity_generalisation.plan.md` §3 S1 WS-G, §4): verdicts
-# GENERATED from `ContinuityPlan.boundaries[].movies[]`, P2's legacy names kept as aliases,
-# the red arms (`--strip`, `--core-variant`) with pre-registered red sets, and the G-S1a
-# rescore control. Equality is proven against the probe at the S1 base commit, loaded from
-# git history, on the committed P2 fixture and the committed minimized forced-wrap samples.
+# S1 (plan `keynote_live_continuity_generalisation.plan.md` §3 S1 WS-G, §4; Codex r1 #3-#8,
+# #10, #11): verdicts GENERATED from `ContinuityPlan.boundaries[].movies[]`, one per
+# (boundary, movie instance, kind), P2's legacy names kept as aliases; False only for a fully
+# observed contrary behaviour, INCONCLUSIVE for every integrity gap; the red arms (`--strip`,
+# `--core-variant`) with pre-registered red multisets; and the G-S1a rescore control.
 # --------------------------------------------------------------------------
 
 S1_BASE_REV = "90911466"
 P2_ROOT = REPO / "tests" / "fixtures" / "live_continuity"
-P2_BOUNDARY_KEYS = {2: "continue1to2", 6: "restart2to3", 8: "continue3to4"}
+P2_ID = "untitled.mov#1->untitled.mov#1"
+P2_CARRY12, P2_RETIRE12, P2_ARMED12 = (f"b0to1:{P2_ID}:{kind}" for kind in ("carry", "retire", "armed"))
+P2_RESTART23, P2_CARRY34 = f"b1to2:{P2_ID}:restart", f"b2to3:{P2_ID}:carry"
 
 
 def _load_probe_at(rev: str) -> Any:
@@ -6029,10 +6036,21 @@ def _load_probe_at(rev: str) -> Any:
 
 S1_BASE = _load_probe_at(S1_BASE_REV)
 needs_base = pytest.mark.skipif(S1_BASE is None, reason=f"git history for {S1_BASE_REV} is unavailable")
+_RECT = probe.live_continuity_module.Rect
+_MOVIE = probe.live_continuity_module.MovieContinuity
+_BOUNDARY = probe.live_continuity_module.SlideBoundary
 
 
 def _p2_plan(gl: bool = False) -> Any:
     return probe.derive_plan(P2_ROOT, probe.load_slides(P2_ROOT), resolver=lambda r, rel: r / rel, gl_replay=gl)
+
+
+def _p2_facts(gl: bool = False) -> dict[str, Any]:
+    return probe.ground_truth_facts(_p2_plan(gl), armed=gl)
+
+
+def _spec(facts: dict[str, Any], spec_id: str) -> dict[str, Any]:
+    return next(spec for spec in facts["verdicts"] if spec["id"] == spec_id)
 
 
 def _plain(value: Any) -> Any:
@@ -6043,66 +6061,93 @@ def _real_samples() -> list[dict[str, Any]]:
     return json.loads((FORCED_WRAP_FIXTURES / "3to4_750.min.json").read_text())["samples"]
 
 
-def _p2_sample_sets() -> dict[str, list[dict[str, Any]]]:
-    facts = probe.ground_truth_facts(_p2_plan())
-    pin = rows_around_boundary(boundary_scene=2.0, src_rect=facts["pinRect"], dst_rect=facts["pinRect"])
-    bridge = rows_around_boundary(boundary_scene=8.0, src_rect=facts["bridgeSrcRect"], dst_rect=facts["destRect"])
-    restart = [
-        sample(t, scene, video(id=1 if scene < 6 else 2, el_id=1, t=t, scene=scene, current_time=(5 + t / 1000) if scene < 6 else (t - 1000) / 1000))
-        for t, scene in ((i * 50.0, 5 if i < 20 else 6) for i in range(40))
-    ]
-    return {"real3to4_750": _real_samples(), "pin": pin, "bridge": bridge, "restart": restart, "moving": moving_boundary_samples()}
+def _plan(boundaries: tuple[Any, ...], scenes: dict[int, int], instances: dict[int, Any]) -> Any:
+    return probe.ContinuityPlan(
+        canvas={"width": 1920, "height": 1080}, scene_index_by_player=scenes, slide_rects={},
+        boundaries=boundaries, slide_instances=instances,
+    )
+
+
+def _p2_run_samples() -> list[dict[str, Any]]:
+    """A whole P2 run on the real rects, 50 ms apart: decoder 1 on the pin (scenes 1, 2, 5; long
+    enough that the 1->2 window never reaches slide 3),
+    a fresh decoder 2 from 0 s on slide 3 (scene 6), moving on scene 7 and landed on 8."""
+    facts = _p2_facts()
+    pin, src, dst = facts["pinRect"], facts["bridgeSrcRect"], facts["destRect"]
+    rows: list[dict[str, Any]] = []
+    phases = (
+        [(1, 1, pin, "IdleAtFinalState", False)] * 20 + [(2, 1, pin, "IdleAtFinalState", False)] * 20
+        + [(5, 1, pin, "IdleAtFinalState", False)] * 60 + [(6, 2, src, "IdleAtFinalState", False)] * 40
+        + [(7, 2, None, "Playing", True)] * 31 + [(7, 2, dst, "IdleAtFinalState", False)] * 5
+        + [(8, 2, dst, "IdleAtInitialState", False)] * 20
+    )
+    moving = 0
+    fresh_start = None
+    for index, (scene, vid, rect, state, busy) in enumerate(phases):
+        t = index * 50.0
+        if rect is None:
+            rect = {key: src[key] + (moving / 30) * (dst[key] - src[key]) for key in src}
+            moving += 1
+        if vid == 2 and fresh_start is None:
+            fresh_start = t
+        current = 5 + t / 1000 if vid == 1 else (t - fresh_start) / 1000
+        row = sample(t, scene, video(id=vid, el_id=vid, t=t, scene=scene, current_time=current, rect=dict(rect)))
+        row.update(playerState=state, busy=busy)
+        rows.append(row)
+    return rows
 
 
 class TestVerdictSpecsFromThePlan:
-    def test_p2_off_generates_one_verdict_per_boundary_movie_and_kind(self) -> None:
-        specs = probe.verdict_specs(_p2_plan())
-        assert [(s["id"], s["alias"], s["expect"], s["atScene"]) for s in specs] == [
-            ("b0to1:untitled.mov:carry", "continue1to2", False, 2),
-            ("b0to1:untitled.mov:retire", "refused1to2", True, 2),
-            ("b1to2:untitled.mov:restart", "restart2to3", True, 6),
-            ("b2to3:untitled.mov:carry", "continue3to4", True, 8),
+    def test_p2_off_generates_one_verdict_per_boundary_instance_and_kind(self) -> None:
+        facts = _p2_facts()
+        assert [(s["id"], s["alias"], s["expect"], s["atScene"]) for s in facts["verdicts"]] == [
+            (P2_CARRY12, "continue1to2", False, 2), (P2_RETIRE12, "refused1to2", True, 2),
+            (P2_RESTART23, "restart2to3", True, 6), (P2_CARRY34, "continue3to4", True, 8),
         ]
-        carry = specs[3]
-        assert carry["transitionScene"] == 7 and carry["action"] == "bridge"
-        assert specs[0]["transitionScene"] is None and specs[0]["srcRect"] == specs[0]["dstRect"]
-        assert specs[1]["assetKeys"] == ["untitled.mov"] and specs[1]["originalOrdinal"] == 2
+        assert _spec(facts, P2_CARRY34)["transitionScene"] == 7 and _spec(facts, P2_CARRY34)["action"] == "bridge"
+        assert _spec(facts, P2_CARRY12)["transitionScene"] is None
+        assert _spec(facts, P2_RESTART23)["settleUntilScene"] == 7
+        assert _spec(facts, P2_RETIRE12)["movieKey"] == "movie1" and _spec(facts, P2_RETIRE12)["originalOrdinal"] == 2
 
     def test_p2_on_arms_the_refused_pin_and_leaves_its_carry_ungated(self) -> None:
-        specs = probe.verdict_specs(_p2_plan(gl=True))
-        assert [(s["id"], s["alias"], s["expect"]) for s in specs] == [
-            ("b0to1:untitled.mov:carry", "continue1to2", None),
-            ("b0to1:untitled.mov:armed", "armed1to2", True),
-            ("b1to2:untitled.mov:restart", "restart2to3", True),
-            ("b2to3:untitled.mov:carry", "continue3to4", True),
+        facts = _p2_facts(gl=True)
+        assert [(s["id"], s["alias"], s["expect"]) for s in facts["verdicts"]] == [
+            (P2_CARRY12, "continue1to2", None), (P2_ARMED12, "armed1to2", True),
+            (P2_RESTART23, "restart2to3", True), (P2_CARRY34, "continue3to4", True),
         ]
+        assert facts["armed"]["verdictKey"] == "armed1to2" and facts["retire"] is None
 
-    def test_a_boundary_with_two_movies_gets_ids_but_no_legacy_alias(self) -> None:
-        rect = probe.live_continuity_module.Rect
-        movie = probe.live_continuity_module.MovieContinuity
-        boundary = probe.live_continuity_module.SlideBoundary
-        plan = probe.ContinuityPlan(
-            canvas={"width": 1920, "height": 1080}, scene_index_by_player={0: 0, 1: 2}, slide_rects={},
-            boundaries=(boundary(0, 1, (
-                movie("a.mov", "pin", rect(**BIG_INSTANCE), rect(**BIG_INSTANCE)),
-                movie("b.mov", "restart", rect(**OTHER_INSTANCE), rect(**OTHER_INSTANCE)),
-            )),),
+    def test_two_instances_of_one_asset_across_one_boundary_are_two_verdicts(self) -> None:
+        """Codex r1 #5: (boundary, asset, kind) collided; the instance pair does not."""
+        near, far = dict(BIG_INSTANCE), dict(OTHER_INSTANCE)
+        plan = _plan(
+            (_BOUNDARY(0, 1, (_MOVIE("a.mov", "pin", _RECT(**near), _RECT(**near)), _MOVIE("a.mov", "pin", _RECT(**far), _RECT(**far)))),),
+            {0: 0, 1: 2}, {0: {"a.mov": [near, far]}, 1: {"a.mov": [near, far]}},
         )
         assert [(s["id"], s["alias"]) for s in probe.verdict_specs(plan)] == [
-            ("b0to1:a.mov:carry", None), ("b0to1:b.mov:restart", None),
+            ("b0to1:a.mov#1->a.mov#1:carry", None), ("b0to1:a.mov#2->a.mov#2:carry", None),
         ]
 
-    def test_a_duplicate_verdict_id_fails_closed(self) -> None:
-        rect = probe.live_continuity_module.Rect
-        movie = probe.live_continuity_module.MovieContinuity
-        boundary = probe.live_continuity_module.SlideBoundary
-        pin = movie("a.mov", "pin", rect(**BIG_INSTANCE), rect(**BIG_INSTANCE))
-        plan = probe.ContinuityPlan(
-            canvas={"width": 1920, "height": 1080}, scene_index_by_player={0: 0, 1: 2}, slide_rects={},
-            boundaries=(boundary(0, 1, (pin, pin)),),
-        )
+    def test_the_same_movie_twice_fails_closed(self) -> None:
+        pin = _MOVIE("a.mov", "pin", _RECT(**BIG_INSTANCE), _RECT(**BIG_INSTANCE))
+        plan = _plan((_BOUNDARY(0, 1, (pin, pin)),), {0: 0, 1: 2}, {0: {"a.mov": [BIG_INSTANCE]}, 1: {"a.mov": [BIG_INSTANCE]}})
         with pytest.raises(SystemExit, match="not unique"):
             probe.verdict_specs(plan)
+
+    @pytest.mark.parametrize("instances", [{}, {0: {"a.mov": [OTHER_INSTANCE]}, 1: {"a.mov": [BIG_INSTANCE]}}])
+    def test_a_movie_bound_to_no_authored_instance_fails_closed(self, instances: dict[int, Any]) -> None:
+        pin = _MOVIE("a.mov", "pin", _RECT(**BIG_INSTANCE), _RECT(**BIG_INSTANCE))
+        with pytest.raises(SystemExit, match="authored instances"):
+            probe.verdict_specs(_plan((_BOUNDARY(0, 1, (pin,)),), {0: 0, 1: 2}, instances))
+
+    def test_an_unhandled_action_is_kept_and_always_inconclusive(self) -> None:
+        odd = _MOVIE("a.mov", "morph", _RECT(**BIG_INSTANCE), _RECT(**BIG_INSTANCE))
+        plan = _plan((_BOUNDARY(0, 1, (odd,)),), {0: 0, 1: 2}, {0: {"a.mov": [BIG_INSTANCE]}, 1: {"a.mov": [BIG_INSTANCE]}})
+        specs = probe.verdict_specs(plan)
+        assert [(s["kind"], s["expect"], s["alias"]) for s in specs] == [("unhandled", True, None)]
+        scored = probe.score_verdicts([], {}, {"verdicts": specs}, True, None)
+        assert scored[specs[0]["id"]]["verdict"] is None
+        assert probe.unmet_verdicts(scored, specs) == ([], [specs[0]["id"]])
 
     def test_the_trailing_boundary_has_no_verdict(self) -> None:
         assert all(spec["toPlayer"] is not None for spec in probe.verdict_specs(_p2_plan()))
@@ -6110,7 +6155,7 @@ class TestVerdictSpecsFromThePlan:
     @pytest.mark.parametrize(("key", "prefix", "expected"), [
         ("continue1to2", "refused", "refused1to2"), ("restart2to3", "refused", "refused2to3"),
         ("continue1to2", "armed", "armed1to2"), ("continue5to6", "refused", "refused5to6"),
-        ("b0to1:a.mov:carry", "refused", "b0to1:a.mov:retire"), ("b0to1:a.mov:carry", "armed", "b0to1:a.mov:armed"),
+        (f"b0to1:{P2_ID}:carry", "refused", f"b0to1:{P2_ID}:retire"), (f"b0to1:{P2_ID}:carry", "armed", f"b0to1:{P2_ID}:armed"),
     ])
     def test_positive_keys_follow_the_carry_key(self, key: str, prefix: str, expected: str) -> None:
         assert probe.positive_key(key, prefix) == expected
@@ -6119,157 +6164,332 @@ class TestVerdictSpecsFromThePlan:
 class TestGroundTruthFactsIsGeneral:
     @needs_base
     @pytest.mark.parametrize("gl", [False, True])
-    def test_p2_facts_equal_the_s1_base_facts_plus_the_verdicts(self, gl: bool) -> None:
+    def test_p2_facts_equal_the_s1_base_facts_plus_the_verdicts_and_sha(self, gl: bool) -> None:
         plan = _p2_plan(gl)
         base = _plain(S1_BASE.ground_truth_facts(plan, armed=gl))
         current = _plain(probe.ground_truth_facts(plan, armed=gl))
-        assert current.pop("verdicts") == _plain(probe.verdict_specs(plan))
+        assert current.pop("verdicts")[0]["id"] == P2_CARRY12
+        assert current.pop("planSha256") in probe.P2_PLAN_SHA256
         assert current == base
 
+    def test_legacy_slot_facts_only_for_a_pinned_p2_plan(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Codex r1 #4: a pin + bridge + >= 4 slides is not P2 unless its runtime plan IS P2's."""
+        movies = {"movie1": dict(RUNTIME_MOVIES["movie1"], footprint={"x": 110, "y": 795, "w": 952, "h": 268})}
+        monkeypatch.setattr(probe, "runtime_of", lambda plan: dict(RETIRED_RUNTIME, movies=movies))
+        facts = probe.ground_truth_facts(_gl_plan())
+        assert "bridgeScene" not in facts and facts["planSha256"] not in probe.P2_PLAN_SHA256
+        monkeypatch.undo()
+        assert "bridgeScene" in _p2_facts()
+
+    def test_the_pinned_shas_are_the_committed_fixtures_off_and_on(self) -> None:
+        assert {_p2_facts()["planSha256"], _p2_facts(gl=True)["planSha256"]} <= probe.P2_PLAN_SHA256
+        assert probe.plan_signature(_p2_plan().to_runtime()) == probe.P2_OFF_PLAN_SHA256
+
     def test_a_deck_without_p2_shape_derives_facts_and_keeps_the_armed_contract(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Two slides, one GL-armed pin: no bridge, so no P2 slot facts, and still `["armed"]`."""
-        rect = probe.live_continuity_module.Rect
-        movie = probe.live_continuity_module.MovieContinuity
-        boundary = probe.live_continuity_module.SlideBoundary
-        pin = movie(BIG_ASSET, "pin", rect(**BIG_INSTANCE), rect(**BIG_INSTANCE), refusal="overlap", gl_replay={"x": 1})
-        plan = probe.ContinuityPlan(
-            canvas={"width": 1920, "height": 1080}, scene_index_by_player={0: 0, 1: 2}, slide_rects={},
-            boundaries=(boundary(0, 1, (pin,)),), slide_instances={0: {BIG_ASSET: [BIG_INSTANCE]}, 1: {BIG_ASSET: [BIG_INSTANCE]}},
-        )
+        pin = _MOVIE(BIG_ASSET, "pin", _RECT(**BIG_INSTANCE), _RECT(**BIG_INSTANCE), refusal="overlap", gl_replay={"x": 1})
+        plan = _plan((_BOUNDARY(0, 1, (pin,)),), {0: 0, 1: 2}, {0: {BIG_ASSET: [BIG_INSTANCE]}, 1: {BIG_ASSET: [BIG_INSTANCE]}})
         monkeypatch.setattr(probe, "runtime_of", lambda plan: {"movies": RUNTIME_MOVIES, "boundaries": [GL_BOUNDARY]})
         facts = probe.ground_truth_facts(plan, armed=True)
         assert "bridgeScene" not in facts and "asset" not in facts
         assert facts["armed"]["instanceRect"] == BIG_INSTANCE and facts["armed"]["verdictKey"] == "armed1to2"
-        assert [s["id"] for s in facts["verdicts"]] == [f"b0to1:{BIG_ASSET}:carry", f"b0to1:{BIG_ASSET}:armed"]
+        assert [s["kind"] for s in facts["verdicts"]] == ["carry", "armed"]
+
+    def test_a_runtime_retire_the_plan_does_not_refuse_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        pin = _MOVIE(BIG_ASSET, "pin", _RECT(**BIG_INSTANCE), _RECT(**BIG_INSTANCE))
+        plan = _plan((_BOUNDARY(0, 1, (pin,)),), {0: 0, 1: 2}, {0: {BIG_ASSET: [BIG_INSTANCE]}, 1: {BIG_ASSET: [BIG_INSTANCE]}})
+        monkeypatch.setattr(probe, "runtime_of", lambda plan: {"movies": RUNTIME_MOVIES, "boundaries": [RETIRE_BOUNDARY]})
+        with pytest.raises(SystemExit, match="matches 0 plan verdicts"):
+            probe.ground_truth_facts(plan)
 
     def test_retire_and_armed_facts_key_off_generated_ids_without_an_alias(self) -> None:
-        keys = {2: "b0to1:untitled.mov:carry"}
-        runtime = {"movies": RUNTIME_MOVIES, "boundaries": [RETIRE_BOUNDARY]}
-        assert probe.retire_fact(synthetic_plan(), runtime, keys)["verdictKey"] == "b0to1:untitled.mov:retire"
-        gl_runtime = {"movies": RUNTIME_MOVIES, "boundaries": [GL_BOUNDARY]}
-        assert probe.armed_fact(synthetic_plan(), gl_runtime, keys)["verdictKey"] == "b0to1:untitled.mov:armed"
+        keys = {2: f"b0to1:{P2_ID}:carry"}
+        assert probe.retire_fact(synthetic_plan(), RETIRED_RUNTIME, keys)["verdictKey"] == P2_RETIRE12
+        assert probe.armed_fact(synthetic_plan(), GL_RUNTIME, keys)["verdictKey"] == P2_ARMED12
         with pytest.raises(SystemExit):
-            probe.armed_fact(synthetic_plan(), gl_runtime, {2: "b0to1:untitled.mov:restart"})
+            probe.armed_fact(synthetic_plan(), GL_RUNTIME, {2: f"b0to1:{P2_ID}:restart"})
 
 
-def _refusal_evidence(over: bool) -> dict[str, Any]:
-    facts = probe.ground_truth_facts(_p2_plan())
-    painting = [painting_video(facts["pinRect"])] if over else []
-    return {"stageMap": dict(IDENTITY_STAGE_MAP), "painting": painting, "poolSnapshot": []}
-
-
-class TestGeneratedScorerEqualsLegacy:
-    """The aliases are the S1 base scorer's verdicts byte-for-byte (G-S1a, offline half)."""
+class TestCarryVerdict:
+    """Codex r1 #3: the alias is the legacy carry verdict whenever it was fully observed; an
+    integrity gap is INCONCLUSIVE, never the red a red arm expects."""
 
     @needs_base
-    @pytest.mark.parametrize("name", sorted(_p2_sample_sets()))
     @pytest.mark.parametrize("installed", [True, False])
-    @pytest.mark.parametrize("over", [True, False])
-    def test_off_facts(self, name: str, installed: bool, over: bool) -> None:
-        facts = probe.ground_truth_facts(_p2_plan())
-        samples = _p2_sample_sets()[name]
-        evidence = {"refused1to2": _refusal_evidence(over)}
-        legacy = {
-            **S1_BASE.score_boundaries(samples, facts, installed),
-            **S1_BASE.score_positive_halves(evidence, facts, installed, {"mode": "qualified"}, samples),
+    def test_a_fully_observed_run_equals_the_s1_base_scorer(self, installed: bool) -> None:
+        facts, samples = _p2_facts(), _p2_run_samples()
+        legacy = S1_BASE.score_boundaries(samples, facts, installed)
+        scored = probe.with_aliases(probe.score_verdicts(samples, {}, facts, installed, {"mode": "qualified"}), facts["verdicts"])
+        assert {key: value["verdict"] for key, value in legacy.items()} == {
+            "continue1to2": True, "restart2to3": True, "continue3to4": True,
         }
-        scored = probe.with_aliases(
-            probe.score_verdicts(samples, evidence, facts, installed, {"mode": "qualified"}), facts["verdicts"],
-        )
-        assert set(legacy) == {"continue1to2", "restart2to3", "continue3to4", "refused1to2"}
-        assert _plain({key: scored[key] for key in legacy}) == _plain(legacy)
-        assert all(scored[spec["id"]] is scored[spec["alias"]] for spec in facts["verdicts"])
+        for key in ("continue1to2", "continue3to4"):
+            assert _plain(scored[key]) == _plain(legacy[key])
+        assert scored["restart2to3"]["verdict"] is True
 
     @needs_base
-    @pytest.mark.parametrize("name", sorted(_p2_sample_sets()))
-    def test_on_facts(self, name: str) -> None:
-        facts = probe.ground_truth_facts(_p2_plan(gl=True), armed=True)
-        samples = _p2_sample_sets()[name]
-        evidence = {"armed1to2": _armed_reads()}
-        legacy = {
-            **S1_BASE.score_boundaries(samples, facts, True),
-            **S1_BASE.score_positive_halves(evidence, facts, True, GL_CONTINUITY, samples),
-        }
-        scored = probe.with_aliases(probe.score_verdicts(samples, evidence, facts, True, GL_CONTINUITY), facts["verdicts"])
-        assert set(legacy) == {"continue1to2", "restart2to3", "continue3to4", "armed1to2"}
-        assert _plain({key: scored[key] for key in legacy}) == _plain(legacy)
+    def test_the_committed_real_samples_carry_the_bridge_exactly_as_before(self) -> None:
+        facts = _p2_facts()
+        legacy = S1_BASE.score_continuity(
+            _real_samples(), "untitled.mov", 8, facts["bridgeSrcRect"], facts["destRect"], True, transition_scene=7,
+            loop_period_s=FW_PERIOD,
+        )
+        scored = probe.score_verdicts(_real_samples(), {}, facts, True, {"mode": "qualified"}, loop_period_s=FW_PERIOD)
+        assert scored[P2_CARRY34]["verdict"] is True and _plain(scored[P2_CARRY34]) == _plain(legacy)
 
-    def test_the_committed_real_samples_carry_the_bridge(self) -> None:
-        """A positive control on the real minimized samples: the generated 3->4 carry is green."""
-        facts = probe.ground_truth_facts(_p2_plan())
-        scored = probe.score_verdicts(_real_samples(), {}, facts, True, {"mode": "qualified"}, loop_period_s=46.0333)
-        assert scored["b2to3:untitled.mov:carry"]["verdict"] is True, scored["b2to3:untitled.mov:carry"]
+    def test_a_missing_crossing_is_inconclusive_not_red(self) -> None:
+        """The Codex scenario: sampling stops before slide 4."""
+        facts = _p2_facts()
+        samples = [row for row in _p2_run_samples() if row["scene"] < 8]
+        scored = probe.score_verdicts(samples, {}, facts, True, {"mode": "qualified"})
+        assert scored[P2_CARRY34]["verdict"] is None
+        assert probe.score_continuity(samples, "untitled.mov", 8, facts["bridgeSrcRect"], facts["destRect"], True, transition_scene=7)["verdict"] is False
 
-    def test_an_armed_spec_without_its_armed_fact_is_false(self) -> None:
+    def test_a_fully_observed_restart_across_a_carry_is_red(self) -> None:
+        facts = _p2_facts()
+        samples = _p2_run_samples()
+        for row in samples:
+            if row["scene"] == 8:
+                row["videos"][0]["id"] = 9
+        assert probe.score_verdicts(samples, {}, facts, True, {"mode": "qualified"})[P2_CARRY34]["verdict"] is False
+
+    def test_a_sampler_gap_over_the_move_is_inconclusive(self) -> None:
+        facts = _p2_facts()
+        samples = [row for row in _p2_run_samples() if row.get("playerState") != "Playing"]
+        scored = probe.score_verdicts(samples, {}, facts, True, {"mode": "qualified"})[P2_CARRY34]
+        assert scored["verdict"] is None and "moving-transition" in scored["integrity"]
+
+    def test_an_untrustworthy_stage_map_is_inconclusive(self) -> None:
+        facts = _p2_facts()
+        samples = _p2_run_samples()
+        for row in samples:
+            if row["scene"] == 8:
+                row["videos"][0]["stageMapValid"] = False
+        assert probe.score_verdicts(samples, {}, facts, True, {"mode": "qualified"})[P2_CARRY34]["verdict"] is None
+
+    @pytest.mark.parametrize("breakage", ["notList", "t", "scene", "videos", "id", "src", "currentTime", "rect", "isConnected"])
+    def test_a_malformed_sample_is_inconclusive_before_any_tracking(self, breakage: str) -> None:
+        facts = _p2_facts()
+        samples: Any = _p2_run_samples()
+        row, vid = samples[70], samples[70]["videos"][0]
+        if breakage == "notList":
+            samples = {"samples": samples}
+        elif breakage in ("t", "scene"):
+            row[breakage] = "x"
+        elif breakage == "videos":
+            row["videos"] = None
+        elif breakage == "currentTime":
+            vid["currentTime"] = float("nan")
+        elif breakage == "rect":
+            vid["rect"] = {"x": 1}
+        elif breakage == "id":
+            vid["id"] = True
+        else:
+            del vid[breakage]
+        scored = probe.score_verdicts(samples, {}, facts, True, {"mode": "qualified"})
+        for spec_id in (P2_CARRY12, P2_RESTART23, P2_CARRY34):
+            assert scored[spec_id]["verdict"] is None and scored[spec_id]["schemaErrors"], spec_id
+
+    def test_the_real_samples_have_a_valid_schema(self) -> None:
+        assert probe.sample_schema_errors(_real_samples()) == []
+
+
+class TestRestartVerdict:
+    """Codex r1 #7: a fresh decoder near 0 s AT the destination instance, and every source
+    decoder gone after the boundary."""
+
+    def _score(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
+        facts = _p2_facts()
+        return probe.score_restart_strict(samples, _spec(facts, P2_RESTART23))
+
+    def test_a_clean_restart_is_green(self) -> None:
+        scored = self._score(_p2_run_samples())
+        assert scored["verdict"] is True and scored["elementId"] == 2 and scored["sourceIds"] == [1]
+
+    def test_known_bad_the_source_decoder_leaks_across_the_cut(self) -> None:
+        samples = _p2_run_samples()
+        pin = _p2_facts()["pinRect"]
+        for row in samples:
+            if row["scene"] == 6:
+                row["videos"].append(video(id=1, el_id=1, t=row["t"], scene=6, current_time=9.0, rect=dict(pin)))
+        scored = self._score(samples)
+        assert scored["verdict"] is False and scored["leaked"] and "still connected" in scored["reason"]
+
+    def test_a_disconnected_source_row_is_not_a_leak(self) -> None:
+        samples = _p2_run_samples()
+        pin = _p2_facts()["pinRect"]
+        for row in samples:
+            if row["scene"] == 6:
+                row["videos"].append(video(id=1, el_id=1, t=row["t"], scene=6, current_time=9.0, rect=dict(pin), is_connected=False))
+        assert self._score(samples)["verdict"] is True
+
+    def test_known_bad_the_fresh_decoder_is_not_at_the_destination_instance(self) -> None:
+        samples = _p2_run_samples()
+        for row in samples:
+            if row["scene"] == 6:
+                row["videos"][0]["rect"]["x"] += 40
+        scored = self._score(samples)
+        assert scored["verdict"] is False and scored["reason"] == "no fresh decoder at the destination instance"
+
+    def test_known_bad_the_fresh_decoder_starts_late(self) -> None:
+        samples = _p2_run_samples()
+        for row in samples:
+            if row["videos"][0]["id"] == 2:
+                row["videos"][0]["currentTime"] += 3.0
+        scored = self._score(samples)
+        assert scored["verdict"] is False and "starts at" in scored["reason"]
+
+    def test_a_missing_crossing_or_destination_is_inconclusive(self) -> None:
+        assert self._score([r for r in _p2_run_samples() if r["scene"] < 6])["verdict"] is None
+        assert self._score([r for r in _p2_run_samples() if r["scene"] != 6])["verdict"] is None
+
+    def test_no_source_before_the_boundary_is_inconclusive(self) -> None:
+        samples = _p2_run_samples()
+        for row in samples:
+            if row["scene"] < 6:
+                row["videos"][0]["rect"]["y"] -= 300
+        assert self._score(samples)["verdict"] is None
+
+
+def _retire_read(events: Any = (), *, painting: Any = (), pool: Any = ()) -> dict[str, Any]:
+    return {
+        "stageMap": dict(IDENTITY_STAGE_MAP), "painting": list(painting), "poolSnapshot": list(pool) if isinstance(pool, tuple) else pool,
+        "coreEvents": list(events) if isinstance(events, tuple) else events,
+    }
+
+
+RETIRE_NOTE = _ev("retire-boundary", key="movie1", elIds=[3], atScene=2, sceneHash="#2")
+
+
+class TestRetireVerdict:
+    """Codex r1 #8: the F5 `retire-boundary` note, no carry note in the zone, and the settled checks."""
+
+    def _score(self, read: Any, installed: bool = True) -> dict[str, Any]:
+        return probe.score_retire(read, _spec(_p2_facts(), P2_RETIRE12), installed)
+
+    def test_one_note_and_nothing_carried_is_green(self) -> None:
+        scored = self._score(_retire_read((RETIRE_NOTE, _ev("preserve-refused", key="movie1", scene=1, via="stash"))))
+        assert scored["verdict"] is True and scored["retireNotes"] == [RETIRE_NOTE["detail"]]
+
+    @pytest.mark.parametrize("notes", [(), (RETIRE_NOTE, RETIRE_NOTE), (_ev("retire-boundary", key="movie1", elIds=[3], atScene=6),),
+                                       (_ev("retire-boundary", key="movie2", elIds=[3], atScene=2),), (_ev("retire-boundary", key="movie1", atScene=2),)])
+    def test_known_bad_anything_but_exactly_one_matching_note_is_red(self, notes: tuple[Any, ...]) -> None:
+        scored = self._score(_retire_read(notes))
+        assert scored["verdict"] is False and "retire-boundary note(s)" in scored["reason"]
+
+    @pytest.mark.parametrize("carry", [
+        _ev("remount-done", elId=5, key="untitled.mov", sceneHash="#1"),
+        _ev("remount-scheduled", elId=3, why="detach", epoch=1, sceneHash="#2"),
+        _ev("reuse-decoder", key="untitled.mov", newElId=7, oldElId=3, sceneHash="#2"),
+    ])
+    def test_known_bad_a_carry_note_in_the_zone_is_red_even_if_cleared_later(self, carry: dict[str, Any]) -> None:
+        scored = self._score(_retire_read((carry, RETIRE_NOTE)))
+        assert scored["verdict"] is False and scored["carryNotes"] == [carry]
+
+    def test_a_carry_note_before_the_zone_or_for_another_movie_is_not(self) -> None:
+        events = (_ev("remount-done", elId=5, key="untitled.mov", sceneHash="#0"), _ev("remount-done", elId=8, key="other.mov", sceneHash="#2"), RETIRE_NOTE)
+        assert self._score(_retire_read(events))["verdict"] is True
+
+    def test_known_bad_the_settled_checks_still_hold(self) -> None:
+        pin = _p2_facts()["pinRect"]
+        assert self._score(_retire_read((RETIRE_NOTE,), painting=[painting_video(pin)]))["verdict"] is False
+        assert self._score(_retire_read((RETIRE_NOTE,), pool=[{"key": "untitled.mov"}]))["verdict"] is False
+
+    @pytest.mark.parametrize("read", [
+        None, {"reason": "x"}, dict(_retire_read((RETIRE_NOTE,)), stageMap=None), dict(_retire_read((RETIRE_NOTE,)), painting={"error": "x"}),
+        dict(_retire_read((RETIRE_NOTE,)), poolSnapshot={"error": "x"}), _retire_read(None), _retire_read({"error": "x"}),
+    ])
+    def test_unreadable_evidence_is_inconclusive(self, read: Any) -> None:
+        assert self._score(read)["verdict"] is None
+
+    def test_without_the_runtime_the_notes_are_not_required(self) -> None:
+        assert self._score(_retire_read(None), installed=False)["verdict"] is True
+
+    def test_the_observer_retains_the_core_events(self) -> None:
+        retire = probe.retire_fact(synthetic_plan(), RETIRED_RUNTIME, BOUNDARY_KEYS)
+        out: dict[str, Any] = {}
+        host = ArmedHost([])
+        probe.boundary_observer(host, {"retire": retire}, out)(2)
+        assert "coreEvents" in out["refused1to2"] and probe.CORE_EVENTS_JS in host.transport.evaluations
+
+
+class TestArmedVerdict:
+    @pytest.mark.parametrize("reads", [None, {"reason": "hash never settled"}, [_armed_read(1000.0, 10, 5.0)], [None, None]])
+    def test_missing_reads_are_inconclusive(self, reads: Any) -> None:
+        assert probe.score_armed_strict(reads, ARMED, GL_CONTINUITY, [])["verdict"] is None
+
+    def test_readable_reads_are_score_armed(self) -> None:
+        reads = _armed_reads()
+        assert probe.score_armed_strict(reads, ARMED, GL_CONTINUITY, []) == probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[])
+
+    def test_an_armed_spec_without_its_armed_fact_is_inconclusive(self) -> None:
         facts = probe.ground_truth_facts(_p2_plan(gl=True))
-        scored = probe.score_verdicts([], {}, facts, True, GL_CONTINUITY)
-        assert scored["b0to1:untitled.mov:armed"]["verdict"] is False
+        assert probe.score_verdicts([], {}, facts, True, GL_CONTINUITY)[P2_ARMED12]["verdict"] is None
 
     def test_unmet_verdicts_skips_ungated_and_separates_unknowns(self) -> None:
-        specs = probe.verdict_specs(_p2_plan(gl=True))
-        entry = {
-            "b0to1:untitled.mov:carry": {"verdict": False}, "b0to1:untitled.mov:armed": {"verdict": True},
-            "b1to2:untitled.mov:restart": {"verdict": None}, "b2to3:untitled.mov:carry": {"verdict": False},
-        }
-        assert probe.unmet_verdicts(entry, specs) == (["b2to3:untitled.mov:carry"], ["b1to2:untitled.mov:restart"])
+        specs = _p2_facts(gl=True)["verdicts"]
+        entry = {P2_CARRY12: {"verdict": False}, P2_ARMED12: {"verdict": True}, P2_RESTART23: {"verdict": None}, P2_CARRY34: {"verdict": False}}
+        assert probe.unmet_verdicts(entry, specs) == ([P2_CARRY34], [P2_RESTART23])
 
 
-def _legacy_artifact(evidence: bool) -> dict[str, Any]:
-    """A host artifact as the S1 base probe stored it: legacy verdicts, no `evidence` unless asked."""
-    facts = probe.ground_truth_facts(_p2_plan())
-    samples = _p2_sample_sets()["bridge"] + _p2_sample_sets()["pin"]
-    samples.sort(key=lambda row: row["t"])
-    arms: dict[str, Any] = {}
-    for name, mode in (("A", "qualified"), ("B", "off"), ("C", "qualified")):
+def _stored_artifact(*, evidence: bool = False, arms: tuple[str, ...] = ("A", "B", "C")) -> dict[str, Any]:
+    """A host artifact as the S1 base probe stored it (legacy scorers, no raw evidence unless asked)."""
+    facts = _p2_facts()
+    samples = _p2_run_samples()
+    stored: dict[str, Any] = {}
+    for name in arms:
+        mode = "off" if name == "B" else "qualified"
         installed = mode == "qualified"
-        stored_evidence = {"refused1to2": _refusal_evidence(False)}
+        read = _retire_read((RETIRE_NOTE,))
         arm: dict[str, Any] = {"continuity": {"mode": mode}, "samples": samples}
         arm.update(_plain(probe.score_boundaries(samples, facts, installed)))
-        arm.update(_plain(probe.score_positive_halves(stored_evidence, facts, installed, {"mode": mode}, samples)))
+        arm["refused1to2"] = _plain(probe.score_retire(read, _spec(facts, P2_RETIRE12), installed))
         if evidence:
-            arm["evidence"] = stored_evidence
-        arms[name] = arm
-    ground = {key: facts[key] for key in probe.GROUND_TRUTH_KEYS if key in facts and key != "verdicts"}
-    return {"kind": "live-continuity-probe", "groundTruth": _plain(ground), "arms": arms, "attach": dict(arms["A"])}
+            arm["evidence"] = {"refused1to2": read}
+        stored[name] = arm
+    ground = {key: facts[key] for key in probe.GROUND_TRUTH_KEYS if key in facts and key not in ("verdicts", "planSha256")}
+    return {"kind": "live-continuity-probe", "groundTruth": _plain(ground), "arms": stored, "attach": dict(stored.get("A") or {})}
 
 
 class TestRescoreGenerated:
-    def test_a_legacy_artifact_reproduces_and_evidence_less_positive_halves_are_reported(self) -> None:
-        report = probe.rescore_generated(_legacy_artifact(evidence=False), probe.ground_truth_facts(_p2_plan()), None)
-        assert report["ok"] is True
+    """Codex r1 #11: re-derivable verdicts reproduced; the rest INCONCLUSIVE and counted, never "reproduced"."""
+
+    def test_a_legacy_artifact_reproduces_its_rederivable_verdicts_and_counts_the_rest(self) -> None:
+        report = probe.rescore_generated(_stored_artifact(), _p2_facts(), None)
+        assert report["ok"] is True and report["inventoryComplete"] is True
+        assert report["counts"] == {"reproduced": 12, "differ": 0, "notRederivable": 4}
+        assert report["claim"] == "re-derivable verdicts reproduced: 12/12; 4 not re-derivable (INCONCLUSIVE)"
         arm = report["arms"]["arm A"]
         assert arm["equalsLegacyScorer"] is True and arm["legacyWithoutGenerated"] == []
-        assert {key: row["match"] for key, row in arm["verdicts"].items()} == {
-            "continue1to2": True, "refused1to2": None, "restart2to3": True, "continue3to4": True,
-        }
+        assert arm["verdicts"]["refused1to2"]["match"] is None and arm["verdicts"]["refused1to2"]["reason"].startswith("inconclusive")
 
-    def test_stored_evidence_is_re_scored_too(self) -> None:
-        report = probe.rescore_generated(_legacy_artifact(evidence=True), probe.ground_truth_facts(_p2_plan()), None)
-        assert report["ok"] is True
+    def test_retained_evidence_with_core_events_is_re_scored_too(self) -> None:
+        report = probe.rescore_generated(_stored_artifact(evidence=True), _p2_facts(), None)
+        assert report["ok"] is True and report["counts"]["notRederivable"] == 0
         assert report["arms"]["arm B"]["verdicts"]["refused1to2"]["match"] is True
 
     @pytest.mark.parametrize("key", ["continue3to4", "restart2to3"])
     def test_known_bad_a_stored_verdict_the_generated_scorer_does_not_reproduce_fails(self, key: str) -> None:
-        artifact = _legacy_artifact(evidence=False)
+        artifact = _stored_artifact()
         artifact["arms"]["A"][key]["verdict"] = not artifact["arms"]["A"][key]["verdict"]
-        report = probe.rescore_generated(artifact, probe.ground_truth_facts(_p2_plan()), None)
+        report = probe.rescore_generated(artifact, _p2_facts(), None)
         assert report["ok"] is False and report["arms"]["arm A"]["verdicts"][key]["match"] is False
 
+    @pytest.mark.parametrize("arms", [("A", "B"), ("A", "C"), ()])
+    def test_known_bad_an_incomplete_arm_inventory_is_not_ok(self, arms: tuple[str, ...]) -> None:
+        report = probe.rescore_generated(_stored_artifact(arms=arms), _p2_facts(), None)
+        assert report["ok"] is False and report["inventoryComplete"] is False
+
     def test_known_bad_a_stored_legacy_verdict_with_no_generated_counterpart_fails(self) -> None:
-        artifact = _legacy_artifact(evidence=False)
+        artifact = _stored_artifact()
         artifact["arms"]["A"]["armed1to2"] = {"verdict": True}
-        report = probe.rescore_generated(artifact, probe.ground_truth_facts(_p2_plan()), None)
+        report = probe.rescore_generated(artifact, _p2_facts(), None)
         assert report["ok"] is False and report["arms"]["arm A"]["legacyWithoutGenerated"] == ["armed1to2"]
 
-    def test_an_artifact_without_samples_is_not_ok(self) -> None:
-        assert probe.rescore_generated({"arms": {}}, probe.ground_truth_facts(_p2_plan()), None)["ok"] is False
-
     def test_an_arm_that_scored_on_facts_is_rescored_with_them(self) -> None:
-        facts, facts_on = probe.ground_truth_facts(_p2_plan()), probe.ground_truth_facts(_p2_plan(gl=True), armed=True)
-        artifact = _legacy_artifact(evidence=False)
+        artifact = _stored_artifact()
         artifact["arms"]["A"]["factsSet"] = "on"
         del artifact["arms"]["A"]["refused1to2"]
-        report = probe.rescore_generated(artifact, facts, facts_on)
+        report = probe.rescore_generated(artifact, _p2_facts(), _p2_facts(gl=True))
         assert report["arms"]["arm A"]["verdicts"]["armed1to2"]["match"] is None
         assert "refused1to2" not in report["arms"]["arm A"]["verdicts"]
 
@@ -6279,14 +6499,11 @@ class TestGotoMatrixFromThePlan:
         assert probe.goto_matrix(probe.verdict_specs(_p2_plan()), 4) == probe.GOTO_MATRIX
 
     def test_a_chain_adds_goto_mid_chain_then_advance_across_the_next_carry(self) -> None:
-        rect = probe.live_continuity_module.Rect
-        movie = probe.live_continuity_module.MovieContinuity
-        boundary = probe.live_continuity_module.SlideBoundary
-        pin = movie(BIG_ASSET, "pin", rect(**BIG_INSTANCE), rect(**BIG_INSTANCE))
-        bridge = movie(BIG_ASSET, "bridge", rect(**BIG_INSTANCE), rect(**OTHER_INSTANCE))
-        plan = probe.ContinuityPlan(
-            canvas={"width": 1920, "height": 1080}, scene_index_by_player={0: 0, 1: 2, 2: 4}, slide_rects={},
-            boundaries=(boundary(0, 1, (pin,)), boundary(1, 2, (bridge,), 1.5)),
+        pin = _MOVIE(BIG_ASSET, "pin", _RECT(**BIG_INSTANCE), _RECT(**BIG_INSTANCE))
+        bridge = _MOVIE(BIG_ASSET, "bridge", _RECT(**BIG_INSTANCE), _RECT(**OTHER_INSTANCE))
+        plan = _plan(
+            (_BOUNDARY(0, 1, (pin,)), _BOUNDARY(1, 2, (bridge,), 1.5)), {0: 0, 1: 2, 2: 4},
+            {0: {BIG_ASSET: [BIG_INSTANCE]}, 1: {BIG_ASSET: [BIG_INSTANCE]}, 2: {BIG_ASSET: [OTHER_INSTANCE]}},
         )
         assert probe.goto_matrix(probe.verdict_specs(plan), 3) == ((1, 2), (1, 3), (3, 1), (1, 2, 3))
 
@@ -6324,15 +6541,12 @@ class TestRedArmInjection:
 
     def _injected(self) -> dict[str, Any]:
         script = probe.live_host_module._continuity_scripts(self.PLAN, {"width": 1920, "height": 1080})
-        payload = script.split("var plan=", 1)[1].split(";var w=", 1)[0]
-        return json.loads(payload)
+        return json.loads(script.split("var plan=", 1)[1].split(";var w=", 1)[0])
 
     @pytest.mark.parametrize(("action", "scene", "left"), [
         ("bridge", None, [2, 6]), ("bridge", 8, [2, 6]), ("retire", 2, [6, 8]), ("restart", 6, [2, 8]),
     ])
-    def test_strip_removes_only_the_matching_entry_from_the_injected_plan(
-        self, action: str, scene: int | None, left: list[int],
-    ) -> None:
+    def test_strip_removes_only_the_matching_entry_from_the_injected_plan(self, action: str, scene: int | None, left: list[int]) -> None:
         with probe.stripped_runtime(action, scene):
             assert [b["atScene"] for b in self._injected()["boundaries"]] == left
         assert [b["atScene"] for b in self._injected()["boundaries"]] == [2, 6, 8]
@@ -6349,7 +6563,6 @@ class TestRedArmInjection:
 
     def test_strip_never_touches_the_derivation(self) -> None:
         with probe.stripped_runtime("retire", 2):
-            assert probe.ContinuityPlan.to_runtime is probe.live_continuity_module.ContinuityPlan.to_runtime
             assert _p2_plan().to_runtime()["boundaries"][0]["action"] == "retire"
 
     @pytest.mark.parametrize("name", ["stash-any", "wrong-instance", "fifo-reuse"])
@@ -6385,9 +6598,6 @@ class TestRedArmArgs:
 
 
 class TestRedArmRegistration:
-    def test_the_registered_plan_sha_is_the_committed_p2_fixture(self) -> None:
-        assert probe.plan_signature(_p2_plan().to_runtime()) == probe.P2_OFF_PLAN_SHA256
-
     def test_every_registered_id_is_a_p2_verdict_or_a_stray_on_a_p2_slide(self) -> None:
         ids = {spec["id"] for gl in (False, True) for spec in probe.verdict_specs(_p2_plan(gl))}
         assets = {asset.lower() for per in _p2_plan().slide_instances.values() for asset in per}
@@ -6404,9 +6614,9 @@ class TestRedArmRegistration:
         """Plan §3 G-S1c/G-S1d: stash-any reds only the slide-4 WA0125 stray; each strip only its boundary."""
         expected = {label: value for (_, label, _), value in probe.RED_ARM_EXPECTATIONS.items()}
         assert expected["core:stash-any"] == ("stray:slide4:vid-20250608-wa0125.mp4",)
-        assert expected["strip:bridge@8"] == ("b2to3:untitled.mov:carry",)
-        assert all(red.startswith(("b0to1:", "stray:slide2:")) for red in expected["strip:retire@2"])
-        assert expected["strip:glReplay@2"] == ("b0to1:untitled.mov:armed",)
+        assert expected["strip:bridge@8"] == (P2_CARRY34,)
+        assert expected["strip:retire@2"] == (P2_CARRY12, P2_RETIRE12, "stray:slide2:untitled.mov")
+        assert expected["strip:glReplay@2"] == (P2_ARMED12,)
         assert expected["strip:restart@6"] == probe.RECORD
 
     @pytest.mark.parametrize(("core", "strip", "label"), [
@@ -6418,7 +6628,7 @@ class TestRedArmRegistration:
         assert probe.red_arm_label(core, strip, runtime) == label
 
 
-def _red_result(red: list[str], expected: Any = ("b2to3:untitled.mov:carry",), **arm: Any) -> dict[str, Any]:
+def _red_result(red: list[str], expected: Any = (P2_CARRY34,), **arm: Any) -> dict[str, Any]:
     sha = probe.js_sha256()
     entry = {"continuity": {"mode": "qualified", "sha256": sha}, "stageFit": {"verdict": True}, "unplannedWraps": [], **arm}
     return {
@@ -6429,22 +6639,29 @@ def _red_result(red: list[str], expected: Any = ("b2to3:untitled.mov:carry",), *
 
 class TestRedArmStatus:
     def test_exactly_the_pre_registered_set_passes(self) -> None:
-        assert probe.red_arm_status(_red_result(["b2to3:untitled.mov:carry"])) == ("pass", [])
+        assert probe.red_arm_status(_red_result([P2_CARRY34])) == ("pass", [])
 
     def test_known_bad_an_extra_red_fails(self) -> None:
-        status, reasons = probe.red_arm_status(_red_result(["b2to3:untitled.mov:carry", "stray:slide4:x.mov"]))
+        status, reasons = probe.red_arm_status(_red_result([P2_CARRY34, "stray:slide4:x.mov"]))
         assert status == "fail" and reasons == ["unexpectedly red: stray:slide4:x.mov"]
 
     def test_known_bad_a_red_that_stayed_green_fails(self) -> None:
         status, reasons = probe.red_arm_status(_red_result([]))
-        assert status == "fail" and reasons == ["expected red but green: b2to3:untitled.mov:carry"]
+        assert status == "fail" and reasons == [f"expected red but green: {P2_CARRY34}"]
+
+    def test_known_bad_a_second_occurrence_of_an_expected_stray_fails(self) -> None:
+        """Codex r1 #10: exact multisets, never `set()`."""
+        stray = "stray:slide4:vid-20250608-wa0125.mp4"
+        status, reasons = probe.red_arm_status(_red_result([stray, stray], expected=(stray,)))
+        assert status == "fail" and reasons == [f"unexpectedly red: {stray}"]
 
     def test_record_and_unregistered_never_pass(self) -> None:
         assert probe.red_arm_status(_red_result([], expected=probe.RECORD))[0] == "recorded"
         assert probe.red_arm_status(_red_result([], expected=None))[0] == "unregistered"
 
     def test_a_variant_arm_must_report_the_variants_sha(self) -> None:
-        result = _red_result(["stray:slide4:vid-20250608-wa0125.mp4"], expected=("stray:slide4:vid-20250608-wa0125.mp4",))
+        stray = "stray:slide4:vid-20250608-wa0125.mp4"
+        result = _red_result([stray], expected=(stray,))
         result["expectedCoreSha256"] = probe.variant_sha("stash-any")
         status, reasons = probe.red_arm_status(result)
         assert status == "error" and "expected" in reasons[0]
@@ -6456,13 +6673,14 @@ class TestRedArmStatus:
         ({"unplannedWraps": [{"t": 1}]}, "invalid"),
     ])
     def test_the_wrong_mechanism_is_never_a_verdict(self, change: dict[str, Any], status: str) -> None:
-        result = _red_result(["b2to3:untitled.mov:carry"])
+        result = _red_result([P2_CARRY34])
         result["arm"].update(change)
         assert probe.red_arm_status(result)[0] == status
 
-    def test_an_unreadable_verdict_is_inconclusive(self) -> None:
-        result = _red_result(["b2to3:untitled.mov:carry"])
-        result["unknown"] = ["b1to2:untitled.mov:restart"]
+    def test_an_expected_red_that_came_back_inconclusive_is_never_a_match(self) -> None:
+        """Codex r1 #3: the bridge verdict None (sampling stopped) with the census clean."""
+        result = _red_result([])
+        result["unknown"] = [P2_CARRY34]
         assert probe.red_arm_status(result)[0] == "inconclusive"
 
 
@@ -6473,30 +6691,48 @@ class TestStrayCensus:
     def _read(self, *rects: tuple[dict[str, float], str]) -> dict[str, Any]:
         return {"stageMap": dict(IDENTITY_STAGE_MAP), "painting": [painting_video(r, src=src) for r, src in rects]}
 
+    def _clean(self) -> dict[str, Any]:
+        return {"1": self._read((BIG_INSTANCE, "untitled.mov")), "2": self._read((BIG_INSTANCE, "untitled.mov"))}
+
     def test_an_unplanned_video_is_a_stray_named_by_slide_and_asset(self) -> None:
-        raw = {"1": self._read((BIG_INSTANCE, "Untitled.mov"), (OTHER_INSTANCE, "wa0125.mov")), "2": self._read((BIG_INSTANCE, "untitled.mov"))}
+        raw = dict(self._clean(), **{"1": self._read((BIG_INSTANCE, "Untitled.mov"), (OTHER_INSTANCE, "wa0125.mov"))})
         records, red, unknown = probe.score_census(raw, self.PLAN_INSTANCES, {}, self.PLAYERS)
         assert red == ["stray:slide1:wa0125.mov"] and unknown == []
         assert len(records["1"]["unexpectedVideos"]) == 1 and records["2"]["verdict"] is True
 
+    def test_every_occurrence_is_counted(self) -> None:
+        raw = dict(self._clean(), **{"1": self._read((BIG_INSTANCE, "untitled.mov"), (OTHER_INSTANCE, "wa0125.mov"), (OTHER_INSTANCE, "wa0125.mov"))})
+        assert probe.score_census(raw, self.PLAN_INSTANCES, {}, self.PLAYERS)[1] == ["stray:slide1:wa0125.mov"] * 2
+
     def test_a_dead_expected_rect_painted_is_a_stray(self) -> None:
-        raw = {"2": self._read((BIG_INSTANCE, "untitled.mov"))}
-        _, red, _ = probe.score_census(raw, self.PLAN_INSTANCES, {1: {BIG_ASSET: "dead"}}, self.PLAYERS)
+        _, red, _ = probe.score_census(self._clean(), self.PLAN_INSTANCES, {1: {BIG_ASSET: "dead"}}, self.PLAYERS)
         assert red == ["stray:slide2:untitled.mov"]
 
     def test_two_videos_on_one_instance_are_a_duplicate(self) -> None:
-        raw = {"1": self._read((BIG_INSTANCE, "untitled.mov"), (BIG_INSTANCE, "untitled.mov"))}
-        _, red, _ = probe.score_census(raw, self.PLAN_INSTANCES, {}, self.PLAYERS)
-        assert red == [f"duplicate:slide1:{BIG_ASSET}#1"]
+        raw = dict(self._clean(), **{"1": self._read((BIG_INSTANCE, "untitled.mov"), (BIG_INSTANCE, "untitled.mov"))})
+        assert probe.score_census(raw, self.PLAN_INSTANCES, {}, self.PLAYERS)[1] == [f"duplicate:slide1:{BIG_ASSET}#1"]
 
     def test_an_unknown_source_is_named_unknown(self) -> None:
-        raw = {"1": self._read((BIG_INSTANCE, "untitled.mov"), (OTHER_INSTANCE, "zzz.mp4"))}
+        raw = dict(self._clean(), **{"1": self._read((BIG_INSTANCE, "untitled.mov"), (OTHER_INSTANCE, "zzz.mp4"))})
         assert probe.score_census(raw, self.PLAN_INSTANCES, {}, self.PLAYERS)[1] == ["stray:slide1:unknown"]
 
-    @pytest.mark.parametrize("read", [{"stageMap": None, "painting": []}, {"stageMap": dict(IDENTITY_STAGE_MAP), "painting": {"error": "x"}}])
-    def test_an_unreadable_slide_is_unknown_never_clean(self, read: dict[str, Any]) -> None:
-        records, red, unknown = probe.score_census({"2": read}, self.PLAN_INSTANCES, {}, self.PLAYERS)
+    @pytest.mark.parametrize("read", [None, {"stageMap": None, "painting": []}, {"stageMap": dict(IDENTITY_STAGE_MAP), "painting": {"error": "x"}}])
+    def test_an_unreadable_or_missing_slide_is_unknown_never_clean(self, read: Any) -> None:
+        raw = self._clean()
+        if read is None:
+            del raw["2"]
+        else:
+            raw["2"] = read
+        records, red, unknown = probe.score_census(raw, self.PLAN_INSTANCES, {}, self.PLAYERS)
         assert red == [] and unknown == ["census:slide2"] and records["2"]["verdict"] is None
+
+    @pytest.mark.parametrize("raw", [None, [], {}])
+    def test_no_census_at_all_is_unknown_for_every_slide(self, raw: Any) -> None:
+        assert probe.score_census(raw, self.PLAN_INSTANCES, {}, self.PLAYERS)[2] == ["census:slide1", "census:slide2"]
+
+    def test_an_extra_read_is_unknown(self) -> None:
+        raw = dict(self._clean(), **{"3": self._read()})
+        assert probe.score_census(raw, self.PLAN_INSTANCES, {}, self.PLAYERS)[2] == ["census:slide3"]
 
     def test_the_census_observer_reads_every_slide_after_the_inner_observer(self) -> None:
         host = ArmedHost([])
@@ -6510,23 +6746,26 @@ class TestStrayCensus:
 
 
 def _generated_result() -> dict[str, Any]:
-    """A non-P2 deck (two slides, one carried pin, one bridge) whose arms all meet the plan."""
+    """A non-P2 deck (a carried pin, then a bridge) whose arms all meet the plan."""
     specs = [
-        {"id": "b0to1:a.mov:carry", "alias": "continue1to2", "kind": "carry", "expect": True, "action": "pin"},
-        {"id": "b1to2:a.mov:carry", "alias": "continue2to3", "kind": "carry", "expect": True, "action": "bridge"},
+        {"id": "b0to1:a.mov#1->a.mov#1:carry", "alias": "continue1to2", "kind": "carry", "expect": True, "action": "pin"},
+        {"id": "b1to2:a.mov#1->a.mov#1:carry", "alias": "continue2to3", "kind": "carry", "expect": True, "action": "bridge"},
     ]
+    pin, bridge = specs[0]["id"], specs[1]["id"]
     green = {"verdict": True}
-    arm = {"continuity": {"mode": "qualified"}, "stageFit": {"verdict": True}, "b0to1:a.mov:carry": green, "b1to2:a.mov:carry": green}
-    off = dict(arm, continuity={"mode": "off"}, **{"b1to2:a.mov:carry": {"verdict": False}})
-    stripped = dict(arm, **{"b1to2:a.mov:carry": {"verdict": False}})
+    arm = {"continuity": {"mode": "qualified"}, "stageFit": {"verdict": True}, pin: green, bridge: green}
+    off = dict(arm, continuity={"mode": "off"}, **{bridge: {"verdict": False}})
+    stripped = dict(arm, **{bridge: {"verdict": False}})
     visible = {name: {"verdict": True} for name in ("V", "Voff")}
     return {
-        "groundTruth": {"verdicts": specs}, "arms": {"A": arm, "B": off, "C": stripped},
+        "groundTruth": {"verdicts": specs, "planSha256": "0" * 64}, "arms": {"A": arm, "B": off, "C": stripped},
         "attach": dict(arm, transparentBackground={"computedBackground": "rgba(0, 0, 0, 0)"}), "visible": visible,
     }
 
 
 class TestGeneratedStatus:
+    PIN, BRIDGE = "b0to1:a.mov#1->a.mov#1:carry", "b1to2:a.mov#1->a.mov#1:carry"
+
     @pytest.fixture(autouse=True)
     def _visible_ok(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(probe, "visible_reasons", lambda result: [])
@@ -6534,19 +6773,20 @@ class TestGeneratedStatus:
     def test_a_deck_meeting_its_plan_passes(self) -> None:
         assert probe.overall_status(_generated_result()) == ("pass", [])
 
-    @pytest.mark.parametrize(("arm", "spec_id", "value"), [
-        ("A", "b0to1:a.mov:carry", False), ("B", "b1to2:a.mov:carry", True), ("C", "b1to2:a.mov:carry", True),
-        ("C", "b0to1:a.mov:carry", False),
-    ])
-    def test_known_bad_a_verdict_off_its_expectation_fails_by_id(self, arm: str, spec_id: str, value: bool) -> None:
+    @pytest.mark.parametrize(("arm", "which", "value"), [("A", 0, False), ("B", 1, True), ("C", 1, True), ("C", 0, False)])
+    def test_known_bad_a_verdict_off_its_expectation_fails_by_id(self, arm: str, which: int, value: bool) -> None:
+        spec_id = (self.PIN, self.BRIDGE)[which]
         result = _generated_result()
         result["arms"][arm][spec_id] = {"verdict": value}
         status, reasons = probe.overall_status(result)
         assert status == "fail" and reasons == [f"arm {arm} {spec_id}={value!r}, expected {not value!r}"]
 
-    def test_an_unreadable_gated_verdict_is_inconclusive(self) -> None:
+    def test_an_unreadable_or_missing_gated_verdict_is_inconclusive(self) -> None:
         result = _generated_result()
-        result["attach"]["b0to1:a.mov:carry"] = {"verdict": None}
+        result["attach"][self.PIN] = {"verdict": None}
+        assert probe.overall_status(result)[0] == "inconclusive"
+        result = _generated_result()
+        del result["arms"]["A"][self.BRIDGE]
         assert probe.overall_status(result)[0] == "inconclusive"
 
     def test_the_wrong_mechanism_fails(self) -> None:
@@ -6555,8 +6795,42 @@ class TestGeneratedStatus:
         status, reasons = probe.overall_status(result)
         assert status == "fail" and "arm B continuity.mode='qualified', expected 'off'" in reasons
 
-    def test_a_p2_shaped_ground_truth_keeps_the_legacy_status(self) -> None:
+    @pytest.mark.parametrize("change", ["noC", "extraArm", "noAttach", "noB"])
+    def test_known_bad_a_missing_or_extra_arm_is_an_error(self, change: str) -> None:
+        """Codex r1 #6: A, B, attach -- and C exactly when the plan has a bridge."""
+        result = _generated_result()
+        if change == "noC":
+            del result["arms"]["C"]
+        elif change == "extraArm":
+            result["arms"]["D"] = dict(result["arms"]["A"])
+        elif change == "noAttach":
+            del result["attach"]
+        else:
+            del result["arms"]["B"]
+        assert probe.overall_status(result)[0] == "error"
+
+    def test_c_is_not_required_without_a_bridge(self) -> None:
+        result = _generated_result()
+        result["groundTruth"]["verdicts"] = result["groundTruth"]["verdicts"][:1]
+        del result["arms"]["C"]
+        assert probe.overall_status(result) == ("pass", [])
+
+    @pytest.mark.parametrize("specs", [[], [{"id": 3}], [{"id": "x", "kind": "carry", "expect": "yes", "action": "pin"}], "x"])
+    def test_known_bad_an_empty_or_malformed_verdict_set_is_an_error(self, specs: Any) -> None:
+        result = _generated_result()
+        result["groundTruth"]["verdicts"] = specs
+        assert probe.overall_status(result)[0] == "error"
+
+    def test_duplicate_ids_are_an_error(self) -> None:
+        result = _generated_result()
+        result["groundTruth"]["verdicts"] = [result["groundTruth"]["verdicts"][0]] * 2
+        assert probe.overall_status(result)[0] == "error"
+
+    @pytest.mark.parametrize("sha", sorted(probe.P2_PLAN_SHA256))
+    def test_only_a_pinned_p2_plan_keeps_the_legacy_status(self, sha: str) -> None:
         result = TestOverallStatusTruthTable()._base_result()
         result["groundTruth"]["verdicts"] = []
-        result["groundTruth"]["bridgeScene"] = 8
+        result["groundTruth"]["planSha256"] = sha
         assert probe.overall_status(result) == probe.overall_status(TestOverallStatusTruthTable()._base_result())
+        result["groundTruth"]["planSha256"] = "0" * 64
+        assert probe.overall_status(result)[0] == "error"
