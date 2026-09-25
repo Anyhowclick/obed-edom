@@ -850,25 +850,68 @@ def test_auto_serves_the_mm_opacity_patch_in_every_arm(tmp_path, monkeypatch, gl
     assert (player / drv.PLAYER_MAIN_JS).read_bytes() == raw
 
 
-def test_run_reports_the_served_main_js_and_the_gl_inject_carries_it():
-    """`report.mainJs` records `mmOpacity` beside `patchedMainJsSha256` in every arm;
-    under `--gl-replay auto` the same meta also lands in `gl-replay-inject.json`."""
-    import inspect
+@pytest.mark.parametrize(
+    "webgl, canvas, mm_opacity, painted, exercised",
+    [
+        (True, {"present": True, "inStage": True}, True, True, True),
+        (True, {"present": True, "inStage": True}, False, True, False),
+        (False, {"present": False, "inStage": False}, True, False, False),
+        (True, {"present": False, "inStage": False}, True, False, False),
+        (False, {"present": True, "inStage": True}, True, False, False),
+        (True, None, True, False, False),
+    ],
+    ids=["gl-patched", "gl-stock-mm", "no-webgl-css-path", "webgl-but-no-mm-canvas", "canvas-without-webgl", "probe-failed"],
+)
+def test_main_js_report_says_whether_the_arm_exercised_the_mm_patch(webgl, canvas, mm_opacity, painted, exercised):
+    """Review F3: the non-GL arms launch Chrome with `--disable-gpu`, so serving the MM patch
+    there proves nothing unless the arm had WebGL AND the 1->2 move painted through `#0-canvas`."""
+    meta = {"mainJsSha256": "a", "patchedMainJsSha256": "b", "mmOpacity": mm_opacity}
+    report = drv._main_js_report(meta, webgl=webgl, mm_canvas=canvas)
+    assert report == {
+        **meta,
+        "webglAvailable": webgl,
+        "mmCanvas1to2": canvas,
+        "mmPaintedViaWebgl": painted,
+        "mmPatchExercised": exercised,
+    }
 
-    src = inspect.getsource(drv._run)
-    assert "_served_main_js(player_dir, gl_auto=gl_auto, mm_opacity=mm_opacity)" in src
-    assert '"mainJs": main_meta,' in src
-    assert "**main_meta," in src[src.index("if gl_auto:\n        gl_inject") :]
+
+def test_mm_canvas_probe_reads_the_stage_canvas_without_making_a_context():
+    """A `getContext` call on `#0-canvas` would create a context on a CSS-path page; the probe must only look."""
+    assert "getElementById('0-canvas')" in drv.MM_CANVAS_JS
+    assert "closest('#stage')" in drv.MM_CANVAS_JS
+    assert "getContext" not in drv.MM_CANVAS_JS
 
 
-def test_freeze_bracket_chrome_follows_the_gl_flag_not_the_served_bytes():
+class _ChromeLaunched(Exception):
+    pass
+
+
+@pytest.mark.parametrize("gl_auto", [False, True], ids=["fast-slow-bridge-off", "gl-replay"])
+def test_freeze_bracket_chrome_follows_the_gl_flag_not_the_served_bytes(tmp_path, monkeypatch, gl_auto):
     """Under `--mm-opacity auto` the non-GL arms also serve patched bytes, so the bracket
     must not infer `--gl-replay auto` (Chrome without `--disable-gpu`) from `main_js`."""
-    import inspect
+    import asyncio
 
-    src = inspect.getsource(drv._run_freeze_bracket)
-    assert "gl_auto=gl_auto)" in src and "main_js is not None)" not in src
-    assert "main_js=main_js, gl_auto=gl_auto" in inspect.getsource(drv._run)
+    seen = []
+
+    def fake_chrome(profile, *, gl_auto):
+        seen.append(gl_auto)
+        raise _ChromeLaunched
+
+    monkeypatch.setattr(drv, "_chrome", fake_chrome)
+    monkeypatch.setattr(sys, "argv", ["p2"])
+    player = tmp_path / "player"
+    player.mkdir()
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    with pytest.raises(_ChromeLaunched):
+        asyncio.run(
+            drv._run_freeze_bracket(
+                player, runs, drv.WAIT_PROFILES["fast"], "fast", main_js=b"x", gl_auto=gl_auto
+            )
+        )
+    assert seen == [gl_auto]
 
 
 def _boot_check(**over):

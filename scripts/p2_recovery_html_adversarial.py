@@ -669,6 +669,19 @@ def _chrome(profile: Path, *, gl_auto: bool) -> ChromeCdp:
 
 # Read on about:blank only: a context made in the player page would arm G2 on it.
 WEBGL_AVAILABLE_JS = "(() => { try { return !!document.createElement('canvas').getContext('webgl'); } catch (e) { return false; } })()"
+MM_CANVAS_JS = "(() => { const c = document.getElementById('0-canvas'); return {present: !!c, inStage: !!(c && c.closest('#stage'))}; })()"
+
+
+def _main_js_report(main_meta: dict, *, webgl: object, mm_canvas: object) -> dict:
+    """`report.mainJs`: the served bytes plus whether this arm's 1->2 Magic Move ran the patched WebGL path (review F3)."""
+    painted = webgl is True and isinstance(mm_canvas, dict) and mm_canvas.get("inStage") is True
+    return {
+        **main_meta,
+        "webglAvailable": webgl,
+        "mmCanvas1to2": mm_canvas,
+        "mmPaintedViaWebgl": painted,
+        "mmPatchExercised": main_meta.get("mmOpacity") is True and painted,
+    }
 
 
 def _gl_boot_ok(check: object) -> bool:
@@ -3374,7 +3387,7 @@ async def _run(player: Path) -> dict:
     chrome = _chrome(run_dir / "chrome-profile", gl_auto=gl_auto)
     await chrome.start()
     try:
-        webgl = await chrome.evaluate(WEBGL_AVAILABLE_JS) is True if gl_auto else None
+        webgl = await chrome.evaluate(WEBGL_AVAILABLE_JS) is True
         boot = await _boot(chrome, base)
         if gl_auto:
             boot["glReplayCheck"] = {**(await chrome.evaluate(GL_BOOT_CHECK_JS) or {}), "webgl": webgl}
@@ -3453,6 +3466,7 @@ async def _run(player: Path) -> dict:
         method_a = f"arrow-nonblocking:{hash1}->{hash2}"
         mid = await chrome.screenshot()
         Image.fromarray(mid).save(run_dir / "after-1to2.png")
+        mm_canvas = await chrome.evaluate(MM_CANVAS_JS)
         # Sample the movie1 decoder's OWN frame (not the composite) as close to the
         # mid screenshot as possible, to prove the green square composites IN FRONT
         # of it rather than just "this ROI looks greenish" (which the movie's own
@@ -4424,7 +4438,7 @@ async def _run(player: Path) -> dict:
         "movingContinuity3to4": moving_continuity,
         "movingIndexRun3to4": moving_index_run,
         "bridge34Enabled": bridge34,
-        "mainJs": main_meta,
+        "mainJs": _main_js_report(main_meta, webgl=webgl, mm_canvas=mm_canvas),
         "preserveEvents": preserve_events,
         "findings": findings,
         "freezeControl": freeze_control,
