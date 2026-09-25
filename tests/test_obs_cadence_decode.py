@@ -56,11 +56,22 @@ def test_loop_wrap_counts_as_wrap_not_backward():
     assert result["backwardSteps"] == 0
 
 
-def test_loop_wrap_tolerates_two_frames_either_side():
+def test_loop_wrap_allows_a_normal_step_plus_the_browser_loop_seek_skip():
+    """L5 soak 2026-09-25, window 1: 1380 -> 3 (4 frames across the loop point) is a wrap: a 2-frame capture step plus
+    the 0-2 frames Chrome's own `video.loop` seek skips (measured on the element's clock, 40 headless wraps)."""
     end = (SOAK_LOOP_FRAMES - 1) % decode.MOD
-    counter = list(range(end - 20, end - 1)) + list(range(2, 20))
-    result = stats(counter, SOAK_LOOP_FRAMES)
-    assert (result["wrapSteps"], result["backwardSteps"]) == (1, 0)
+    for pre_end, post_start, advanced in ((end, 3, 4), (end - 1, 2, 4), (end - 2, 1, 4), (end, 0, 1)):
+        counter = list(range(end - 20, pre_end + 1)) + list(range(post_start, 20))
+        result = stats(counter, SOAK_LOOP_FRAMES)
+        assert (result["wrapSteps"], result["backwardSteps"], result["maxWrapStep"]) == (1, 0, advanced), (pre_end, post_start)
+
+
+def test_known_bad_a_wrap_skipping_more_than_the_measured_seek_is_backward():
+    end = (SOAK_LOOP_FRAMES - 1) % decode.MOD
+    for pre_end, post_start in ((end, 4), (end - 2, 2), (end - 3, 0)):
+        counter = list(range(end - 20, pre_end + 1)) + list(range(post_start, 20))
+        result = stats(counter, SOAK_LOOP_FRAMES)
+        assert (result["wrapSteps"], result["backwardSteps"], result["maxWrapStep"]) == (0, 1, None), (pre_end, post_start)
 
 
 def test_mid_run_backward_step_is_not_a_wrap():
@@ -366,6 +377,10 @@ def test_binary_backward_step_and_loop_wrap():
     assert binary_stats(list(range(50, 80)) + list(range(60, 90)))["backwardSteps"] == 1
     wrap = binary_stats(list(range(SOAK_LOOP_FRAMES - 20, SOAK_LOOP_FRAMES)) + list(range(0, 20)), SOAK_LOOP_FRAMES)
     assert (wrap["wrapSteps"], wrap["backwardSteps"]) == (1, 0)
+    soak = binary_stats(list(range(SOAK_LOOP_FRAMES - 20, SOAK_LOOP_FRAMES)) + list(range(3, 20)), SOAK_LOOP_FRAMES)
+    assert (soak["wrapSteps"], soak["backwardSteps"], soak["maxWrapStep"]) == (1, 0, 4)
+    over = binary_stats(list(range(SOAK_LOOP_FRAMES - 20, SOAK_LOOP_FRAMES)) + list(range(4, 20)), SOAK_LOOP_FRAMES)
+    assert (over["wrapSteps"], over["backwardSteps"]) == (0, 1)
     mid = binary_stats(list(range(500, 540)) + list(range(0, 20)), SOAK_LOOP_FRAMES)
     assert (mid["wrapSteps"], mid["backwardSteps"]) == (0, 1)
 

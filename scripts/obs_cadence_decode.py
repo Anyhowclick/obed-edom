@@ -52,6 +52,7 @@ STATIC_ERODE_PX = 4
 EDGE_BAND_PX = 4
 CROP_PAD = 24
 WRAP_TOL = 2
+LOOP_SEEK_SKIP = 2
 MARK_BOX = (4, 20)
 MARK_MAX_DIST = 40.0
 STEP = 255 / 219
@@ -208,11 +209,22 @@ def is_backward(delta: int, mod: int | None = MOD) -> bool:
     return delta < 0 if mod is None else delta > mod // 2
 
 
-def is_wrap(a: int, b: int, loop_frames: int | None, mod: int | None = MOD) -> bool:
+def wrap_step(a: int, b: int, loop_frames: int | None, mod: int | None = MOD) -> int | None:
+    """Frames advanced from `a` through the loop point to `b`, or None when `a` is not within `WRAP_TOL` of the last frame."""
     if loop_frames is None:
-        return False
+        return None
     last = loop_frames - 1 if mod is None else (loop_frames - 1) % mod
-    return _circular(a, last, mod) <= WRAP_TOL and _circular(b, 0, mod) <= WRAP_TOL
+    pre = step(a, last, mod)
+    if pre > WRAP_TOL:
+        return None
+    return pre + 1 + step(0, b, mod)
+
+
+def is_wrap(a: int, b: int, loop_frames: int | None, mod: int | None = MOD) -> bool:
+    """A loop wrap advances at most a normal step (`WRAP_TOL`) plus the browser's own loop-seek skip (`LOOP_SEEK_SKIP`,
+    0-2 frames on the element's clock in 40 headless wraps, `.agents/reviews/continuity-loopmode/gates-r1.md`)."""
+    advanced = wrap_step(a, b, loop_frames, mod)
+    return advanced is not None and advanced <= WRAP_TOL + LOOP_SEEK_SKIP
 
 
 def trimmed(seq: list[Any]) -> list[Any]:
@@ -238,7 +250,8 @@ def phase_stats(greys: list[int | None], c: float, fps: float, loop_frames: int 
     links = [(i, j, a, b, step(a, b, mod)) for (i, a), (j, b) in zip(decoded, decoded[1:])]
     deltas = [d for i, j, _, _, d in links if j - i == 1]
     backward = [(a, b) for _, _, a, b, d in links if is_backward(d, mod)]
-    wraps = sum(1 for a, b in backward if is_wrap(a, b, loop_frames, mod))
+    wrap_steps = [wrap_step(a, b, loop_frames, mod) for a, b in backward if is_wrap(a, b, loop_frames, mod)]
+    wraps = len(wrap_steps)
     forward = [(d / (j - i), d, i, j) for i, j, _, _, d in links if not is_backward(d, mod)]
     worst = max(forward, default=None)
     near = sum(1 for v in values[max(0, worst[2] - NEAR_MAX_STEP):worst[3] + NEAR_MAX_STEP + 1] if v is None) if worst else None
@@ -261,6 +274,7 @@ def phase_stats(greys: list[int | None], c: float, fps: float, loop_frames: int 
         "undecodableNearMaxStep": near,
         "backwardSteps": len(backward) - wraps,
         "wrapSteps": wraps,
+        "maxWrapStep": max(wrap_steps, default=None),
         "maxRun": max((len(list(run)) for _, run in itertools.groupby(values)), default=0),
     }
 
