@@ -322,4 +322,5 @@ contests were measured).
   - The overlap math was fuzz-checked exactly: 0 misses.
   - FRC flags stay at 11 and the golden plan is unchanged.
   - Full suites: pytest 7362 passed, `test:ui` 305, `test:maps` 542 + 2 perf, 0 failures.
-- Open: the owner still has to review FRC 130→131 ("Suntec New 2.png" vs the "CHC" group).
+- 2026-09-25 owner reviewed FRC 130→131 (the Suntec photo and the round CHC badge rising in parallel; the boxes overlap
+  by 5 px only at t ≥ 0.96): a false positive from box overlap, accepted like 16→17.
