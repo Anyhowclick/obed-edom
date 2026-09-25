@@ -17,12 +17,14 @@ Arms:
                 slide2-handback (advance = build 1) 4 s -> slide2-after 3 s (screenshot P3). Gates M0-M4.
   failsafe      one launch: fail-module, fail-zone, fail-bogus (forced-fail seeds), goto2, off, off-2. Gate M5.
   mmo           MO-2 (Magic Move opacity plan §10): one launch per rate (25, 30; --rate ignored), sessions g2 / g2-off x patch
-                on / off (g2-on, g2-mmoff, g2off-on, g2off-mmoff) plus a CvC g2-on-2 at 25, all recorded: slide1-native 6 s (key
+                on / off (g2-on, g2-mmoff, g2off-on, g2off-mmoff) plus a CvC g2-on-2 at each rate, all recorded: slide1-native 6 s (key
                 shot D) -> mm-move -> advance (key shot M at settle) -> [LIVE] -> slide2-live 4 s -> slide2-handback (build 1)
                 -> slide2-after. ROI_top series and an empty-canvas patch are decoded per frame; gates MO-2 (R1-R4, KB =
-                the patch-off twins, tau from slide-1 DOM frames) and MO-4 (G2 facts per patch mode). Binary fixture only.
-  mmo-cef       MO-3: the MO-1 logger and scorer of mm_opacity_probe inside the OBS CEF, unrecorded; GL replay off and
-                auto x arms on, off, off2, sq (8 sessions, one launch). Binary fixture only.
+                the patch-off twins, tau and tau_key per take from its own slide-1 DOM frames, gated by that take's CvC) and
+                MO-4 (G2 facts per patch mode). Binary fixture only.
+  mmo-cef       MO-3: the MO-1 logger, step loop (`mm_opacity_probe.drive`) and scorer of mm_opacity_probe inside the OBS
+                CEF, unrecorded; GL replay off x arms on, off, off2, sq and auto x those plus the forced stand-down pair fsd,
+                fsdoff (10 sessions, one launch). Binary fixture only.
   soak          g2 held on slide 2 for --soak-minutes (>= 4) with per-minute reads, 20 s recordings around a loop wrap at
                 minute 1 and just before loseContext (after the first half), build 1, P3/P4; an off twin. Gate M6.
                 --precheck: the loop pre-check. --build-fixture KEY: export the owner's looping copy (needs
@@ -80,7 +82,6 @@ import mm_opacity_probe  # noqa: E402
 import obs_cadence_decode  # noqa: E402
 from live_continuity_probe import (  # noqa: E402
     GL_REPLAY_READ_JS,
-    HASH_JS,
     PAINTING_VIDEOS_JS,
     _carried_el_id,
     _movie_entries,
@@ -92,7 +93,6 @@ from live_continuity_probe import (  # noqa: E402
     load_slides,
     matches_asset_keys,
     score_armed,
-    wait_for_decode,
     wait_for_destination_hash,
 )
 from live_host_probe import wait_for_settlement  # noqa: E402
@@ -118,6 +118,14 @@ LIMITS = {"nativeRepeatMax2x": 0.15, "decodableMin": 0.9, "nullRepeatMin": 0.95,
 G2_STATS = {"frameLen": 88, "bandCount": 128, "innerRect": {"x": 4, "y": 4, "w": 952, "h": 268}}
 EXPECTED_STATS = {"on": {**G2_STATS, "occludedBands": 0, "opacityUnproven": [{"slot": 4, "reason": "rest-opacity"}]},
                   "off": {**G2_STATS, "occludedBands": 20, "opacityUnproven": []}}
+EXPECTED_STATS_SOURCE = {
+    "on": {**{k: "CEF, OD-2" for k in G2_STATS},
+           "occludedBands": "headless Q0b only, first CEF measurement is this value; a mismatch is a finding to root-cause, "
+                            "not a threshold to retune",
+           "opacityUnproven": "headless Q0b only, first CEF measurement is this value; a mismatch is a finding to root-cause, "
+                              "not a threshold to retune"},
+    "off": {**{k: "CEF, OD-2" for k in G2_STATS}, "occludedBands": "CEF, OD-2", "opacityUnproven": "CEF, OD-2"},
+}
 MM_MODES = {"auto": "on", "off": "off"}
 MOVIE_FPS = 30
 SOAK_LOOP_FRAMES = 1381
@@ -591,37 +599,21 @@ def mmo_script(gl_live: bool) -> Callable[[Session], None]:
     return script
 
 
-def mo3_script(gl: str, arm: str) -> Callable[[Session], None]:
-    """MO-3: `mm_opacity_probe.run_arm`'s drive loop on the engine page; the record is scored by `mm_opacity_probe`."""
+def mo3_script(gl: str, arm: str, armed: dict[str, Any]) -> Callable[[Session], None]:
+    """MO-3: `mm_opacity_probe.drive` on the engine page (settle ROI and movie masks from the armed facts); the record is
+    scored by `mm_opacity_probe`."""
     def script(s: Session) -> None:
-        rec: dict[str, Any] = {"gl": gl, "arm": arm, "mmOpacityKwarg": mm_opacity_probe.ARMS[arm], "steps": [], "liveGreenSource": "obs"}
+        masks = mm_opacity_probe.boundary_masks(armed)
+        rec: dict[str, Any] = {"gl": gl, "arm": arm, "mmOpacityKwarg": mm_opacity_probe.ALL_ARMS[arm], "steps": [],
+                               "liveGreenSource": "obs", "roi": mm_opacity_probe.settle_roi(), "masks": masks}
         s.out["mo1"] = rec
         rec["output"] = {k: s.host.output.get(k) for k in ("mmOpacity", "continuity")}
-        rec["loggerInstalled"] = s.ev("!!window.__OBED_MMO__")
-        s.execute("show")
-        rec["decoded"] = wait_for_decode(s.host)
-        rec["stage"] = s.ev("(function(){var r=document.getElementById('stage').getBoundingClientRect();"
-                            "return {x:r.x,y:r.y,width:r.width,height:r.height};})()")
-        time.sleep(2.0)
-        for label, expect, cfg in mm_opacity_probe.PLAN:
-            s.ev(f"window.__OBED_MMO__.setLabel({json.dumps(label)}, {json.dumps(cfg)})")
-            step: dict[str, Any] = {"label": label, "expectHash": expect, "hashBefore": s.ev(HASH_JS)}
-            s.host.execute("advance")
-            _, step["settleS"] = wait_for_settlement(s.host, timeout_s=30)
-            if label == "mm12" and gl == "auto":
-                started = time.monotonic()
-                while time.monotonic() - started < mm_opacity_probe.LIVE_WAIT_S and g2_state(s) not in ("LIVE", "STANDDOWN", "RETIRED"):
-                    time.sleep(0.1)
-                time.sleep(mm_opacity_probe.LIVE_HOLD_S)
-                rec["g2"] = s.ev(GL_REPLAY_READ_JS)
-                x, y, w, h = mm_opacity_probe.ROI_TOP
-                rec["liveGreen"] = obs_screenshot(*s.creds)[y:y + h, x:x + w].reshape(-1).tolist()
-            else:
-                time.sleep(mm_opacity_probe.LIVE_HOLD_S if label.startswith("mm") else 1.5)
-            step["hashAfter"] = s.ev(HASH_JS)
-            rec["steps"].append(step)
-        rec["log"] = s.host._require_transport().evaluate(mm_opacity_probe.LOG_READ_JS, deadline_s=60)
+        mm_opacity_probe.drive(s.host, rec, mm_opacity_probe.step_extra(masks), lambda: obs_screenshot(*s.creds))
     return script
+
+
+def mo3_arms(gl: str) -> dict[str, str]:
+    return mm_opacity_probe.ALL_ARMS if gl == "auto" else mm_opacity_probe.ARMS
 
 
 def hidden_arm_script(s: Session) -> None:
@@ -869,7 +861,8 @@ def g2_stats_checks(checks: list[dict[str, Any]], stats: dict[str, Any], mode: s
     expected = EXPECTED_STATS.get(mode or "")
     check(checks, f"{prefix}G2 stats expectation for the patch mode", mode, expected is not None, "on | off")
     for key, want in (expected or {}).items():
-        check(checks, f"{prefix}{key}", stats.get(key), stats.get(key) == want, f"== {want} (headless r2 / Q0b, patch {mode})")
+        check(checks, f"{prefix}{key}", stats.get(key), stats.get(key) == want,
+              f"== {want} (patch {mode}; expected from {EXPECTED_STATS_SOURCE[mode][key]})")
 
 
 def raf_rates(session: dict[str, Any]) -> dict[str, float | None]:
@@ -1028,8 +1021,11 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     opaque_alpha = alpha_range(s_opaque, reg["T"])
     check(m3, "KB: mm-off-S T alpha fails the slot check", opaque_alpha,
           opaque_alpha is not None and not (want - tol <= opaque_alpha[0] and opaque_alpha[1] <= want + tol), f"not {want} +- {tol}")
-    check(m3, "report: g2-off-S T alpha (patch on, GL replay off)", alpha_range(s_off, reg["T"]), True, f"{want} +- {tol} expected",
-          enforced=False)
+    check(m3, "prerequisite: mm-off-S T alpha is opaque (the KB reference)", opaque_alpha, opaque_alpha is not None and opaque_alpha[0] >= LIMITS["movieAlphaMin"],
+          f">= {LIMITS['movieAlphaMin']}")
+    off_alpha = alpha_range(s_off, reg["T"])
+    check(m3, "T alpha (g2-off-S, patch on, GL replay off)", off_alpha,
+          off_alpha is not None and want - tol <= off_alpha[0] and off_alpha[1] <= want + tol, f"{want} +- {tol}")
     gates["M3"] = gate(m3, gates["M0"]["invalid"])
 
     m4: list[dict[str, Any]] = []
@@ -1204,12 +1200,10 @@ def mmo_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     tau, tau_key = cal["tau"], key["tauKey"]
     check(checks, "report: tau (RGB), tau_key (alpha)", {"tau": cal, "tauKey": {k: v for k, v in key.items() if k != "R4"}}, True,
           enforced=False)
-    cvc = None
-    if run["rate"] == 25:
-        cvc = mmo_cvc(series.get(MMO_CVC[0]), series.get(MMO_CVC[1]), shots.get(MMO_CVC[0]) or {}, shots.get(MMO_CVC[1]) or {},
-                      masks["top"])
-        check(checks, f"CvC {MMO_CVC[0]} vs {MMO_CVC[1]} before tau", cvc, cvc["max"] is not None and cvc["max"] <= MMO_CVC_MAX,
-              f"<= {MMO_CVC_MAX}")
+    cvc = mmo_cvc(series.get(MMO_CVC[0]), series.get(MMO_CVC[1]), shots.get(MMO_CVC[0]) or {}, shots.get(MMO_CVC[1]) or {},
+                  masks["top"])
+    check(checks, f"CvC {MMO_CVC[0]} vs {MMO_CVC[1]} before tau", cvc, cvc["max"] is not None and cvc["max"] <= MMO_CVC_MAX,
+          f"<= {MMO_CVC_MAX}")
     dom_ref = phase_median(series.get(MMO_REFERENCE), MMO_SLIDE1)
     premise = None if dom_ref is None or s_off is None else round(float(np.abs(s_off.mean(axis=0) - dom_ref.mean(axis=0)).max()), 2)
     check(checks, "premise: S_off differs from the slide-1 DOM square by > tau", [premise, tau],
@@ -1248,19 +1242,21 @@ def mmo_cef_gates(run: dict[str, Any]) -> dict[str, Any]:
     sessions = {s["session"]: s for s in run["sessions"]}
     records: dict[str, dict[str, dict[str, Any]]] = {}
     for gl in MMO_CEF_GL:
-        for arm in mm_opacity_probe.ARMS:
+        for arm in mo3_arms(gl):
             sess = sessions.get(f"mo3-{gl}-{arm}")
             if sess is None:
                 continue
             record = dict(sess.get("mo1") or {"gl": gl, "arm": arm})
             if sess.get("fatal"):
                 record["error"] = sess["fatal"]
+            if "seedSplice" in sess:
+                record["seedSplice"] = sess["seedSplice"]
             records.setdefault(gl, {})[arm] = record
     verdict = mm_opacity_probe.score_all(records)
     checks: list[dict[str, Any]] = []
     for gl in MMO_CEF_GL:
-        check(checks, f"{gl}: every arm ran", sorted((records.get(gl) or {})), set(records.get(gl) or {}) == set(mm_opacity_probe.ARMS),
-              ",".join(mm_opacity_probe.ARMS))
+        check(checks, f"{gl}: every arm ran", sorted((records.get(gl) or {})), set(records.get(gl) or {}) == set(mo3_arms(gl)),
+              ",".join(mo3_arms(gl)))
     for gl, gates in verdict["modes"].items():
         for name, result in gates.items():
             check(checks, f"{gl} {name}", [result["verdict"], result.get("reasons")], result["verdict"] == "PASS", "PASS")
@@ -1268,16 +1264,18 @@ def mmo_cef_gates(run: dict[str, Any]) -> dict[str, Any]:
 
 
 def mmo_summary(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """MO-2 across the per-rate takes: both rates ran and the rate-25 CvC (which sets tau for both) read <= 2."""
+    """MO-2 across the per-rate takes: both rates ran, and each rate's own CvC read <= 2 (it gates that take; tau and tau_key
+    are per take)."""
     checks: list[dict[str, Any]] = []
     mmo = [r for r in runs if r["arm"] == "mmo"]
     if not mmo:
         return checks
     check(checks, "MO-2: a valid take per rate", sorted(r["rate"] for r in mmo if r["valid"]),
           sorted(r["rate"] for r in mmo if r["valid"]) == list(MMO_RATES), f"== {list(MMO_RATES)}")
-    cvc = [((r.get("gates") or {}).get("mmoCalibration") or {}).get("cvc") for r in mmo if r["rate"] == 25]
-    value = cvc[0].get("max") if cvc and cvc[0] else None
-    check(checks, "MO-2 CvC (rate 25) gates every rate", value, value is not None and value <= MMO_CVC_MAX, f"<= {MMO_CVC_MAX}")
+    for rate in MMO_RATES:
+        cvc = [((r.get("gates") or {}).get("mmoCalibration") or {}).get("cvc") for r in mmo if r["rate"] == rate]
+        value = cvc[0].get("max") if cvc and cvc[0] else None
+        check(checks, f"MO-2 CvC (rate {rate}) gates that rate", value, value is not None and value <= MMO_CVC_MAX, f"<= {MMO_CVC_MAX}")
     return checks
 
 
@@ -1503,12 +1501,13 @@ def sessions_for(arm: str, ctx: dict[str, Any], args: argparse.Namespace, armed:
                 run_session("hidden-arm", hidden_arm_script, ctx),
                 run_session("mm-off", g2_script(None, armed), ctx, gl_replay="off", mm_opacity="off")]
     if arm == "mmo":
-        names = [*MMO_SESSIONS, MMO_CVC[1]] if ctx["rate"] == 25 else list(MMO_SESSIONS)
+        names = [*MMO_SESSIONS, MMO_CVC[1]]
         return [run_session(name, mmo_script(MMO_SESSIONS[mmo_base(name)][0] is None), ctx, gl_replay=MMO_SESSIONS[mmo_base(name)][0],
                             mm_opacity=MMO_SESSIONS[mmo_base(name)][1], record=True) for name in names]
     if arm == "mmo-cef":
-        return [run_session(f"mo3-{gl}-{name}", mo3_script(gl, name), ctx, gl_replay=gl, mm_opacity=kwarg, logger=True, square=name == "sq")
-                for gl in MMO_CEF_GL for name, kwarg in mm_opacity_probe.ARMS.items()]
+        return [run_session(f"mo3-{gl}-{name}", mo3_script(gl, name, armed), ctx, gl_replay=gl, mm_opacity=kwarg, logger=True,
+                            square=name == "sq", seed=mm_opacity_probe.FSD_REASON if name in mm_opacity_probe.FSD_ARMS else None)
+                for gl in MMO_CEF_GL for name, kwarg in mo3_arms(gl).items()]
     if arm == "failsafe":
         return [run_session("fail-module", failsafe_script(False), ctx, seed="planUnreadable"),
                 run_session("fail-zone", failsafe_script(False), ctx, seed="posterAmbiguous"),

@@ -10,25 +10,32 @@ first frame and on slot 1's fade steps, so the settle frame carries no `uniform1
 not hold on the real player).
 
 Arms, per GL-replay mode (`off`, `auto`):
-  on    mm_opacity="auto" (the patch)
-  off   mm_opacity="off" (today's player bytes: the KB and the twin)
-  off2  mm_opacity="off" again (control vs control)
-  sq    the patch with `__obedNodeOpacity` spliced to multiply the model value in (alpha squared: the KB)
+  on      mm_opacity="auto" (the patch)
+  off     mm_opacity="off" (today's player bytes: the KB and the twin)
+  off2    mm_opacity="off" again (control vs control)
+  sq      the patch with `__obedNodeOpacity` spliced to multiply the model value in (alpha squared: the KB)
+  fsd     GL auto only: the patch with a `debugForceFail` seed of `frameLengthChanged` (G2 stands down at its first LIVE tick
+          and replays the settled frame at rest opacity)
+  fsdoff  GL auto only: the same seed with the patch off (the stand-down KB)
 
 Gates (each counts only if its CvC reads 0 and its KB FAILs, else INCONCLUSIVE; an integrity problem is INCONCLUSIVE):
   MO-1  every slot-4 draw of the 1->2 move (>= 20) and every G2 LIVE draw of its program reads Opacity == alpha (float32);
-        every other ordinal of 1->2 and every ordinal of 3->4 matches the patch-off twin; settle max |P - E| <= 1 with
+        every other ordinal of 1->2 and every ordinal of 3->4 matches the patch-off twin (a constant exactly; a fade by
+        direction, settle value and time-interpolated values within `FADE_TOL_FACTOR` x the off vs off2 fade
+        deviation; a move frame with fewer draws than the widest is INCONCLUSIVE); settle max |P - E| <= 1 with
         E = alpha*S + (1 - alpha*S_a)*B (premultiplied, S = the twin's settle P). A GL-on gate is VOID if G2 stands down in
         either twin. The settle ROI is the from/to intersection of slot 4 eroded by 4 px of geometry plus ceil(settled scale)
         px: the texture's anti-aliased edge texel is magnified by the settled scale (~1.99), and Q0b measured alpha 218 one
         px inside a 4-px erosion. The scorer also refuses (INCONCLUSIVE) unless every twin S pixel in the ROI is opaque.
-  MO-4  (GL auto) patch on: unproven == [{4, rest-opacity}], rest slot 4 == alpha; patch off: unproven == [], rest
-        [1,0,1,1,1]; LIVE screenshot ROI_top identical on vs off.
+  MO-4  (GL auto) patch on: unproven == [{4, rest-opacity}], rest slot 4 == alpha, occludedBands 0; patch off: unproven
+        == [], rest [1,0,1,1,1], occludedBands 20 (gates-r2 / OD-2); LIVE screenshot ROI_top identical on vs off.
+  MO-4 stand-down  (GL auto) arm fsd: every slot-4 draw of G2's stand-down replay reads Opacity == alpha; KB fsdoff (1);
+        CvC = MO-4's off vs off2.
   MO-5  settle-frame hash of 3->4 identical on vs off; of 1->2 different. The 1->2 hash masks the carried movie (the plan's
         movie slot rect and instance rect, padded 2 px): with GL replay on, its texture holds whichever video frame was
         current at the advance.
 
-usage: uv run python scripts/mm_opacity_probe.py --out DIR [--gl off,auto] [--arms on,off,off2,sq]
+usage: uv run python scripts/mm_opacity_probe.py --out DIR [--gl off,auto] [--arms on,off,off2,sq,fsd,fsdoff]
        uv run python scripts/mm_opacity_probe.py --score DIR
 """
 
@@ -44,7 +51,7 @@ import subprocess
 import sys
 import time
 import traceback
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -72,12 +79,17 @@ MASK_PAD_PX = 2
 ROI_TOP = (793, 727, 16, 58)
 REST_OFF = [1, 0, 1, 1, 1]
 UNPROVEN_ON = [{"slot": SLOT, "reason": "rest-opacity"}]
+OCCLUDED_BANDS = {"on": 0, "off": 20}
+FADE_TOL_FACTOR = 2.0
+FSD_REASON = "frameLengthChanged"
 G2_FRAMES = ("ARM-POST", "LIVE")
 LIVE_WAIT_S = 15.0
 LIVE_HOLD_S = 2.5
 HASH_WAIT_S = 2.0
 MAX_HEADLESS = 3
 ARMS = {"on": "auto", "off": "off", "off2": "off", "sq": "auto"}
+FSD_ARMS = {"fsd": "auto", "fsdoff": "off"}
+ALL_ARMS = {**ARMS, **FSD_ARMS}
 PLAN = (
     ("mm12", ("#1", "#2"), {"settleFromMs": MOVE_MS - SETTLE_WINDOW_MS, "roiOrdinal": SLOT}),
     ("b1", None, {}),
@@ -87,6 +99,8 @@ PLAN = (
     ("mm34", ("#7", "#8"), {"settleFromMs": MOVE_MS - SETTLE_WINDOW_MS}),
 )
 SQUARE_SPLICE = (b"?g.to.scalar:null:B.opacity", b"?g.to.scalar*B.opacity:null:B.opacity")
+STAGE_JS = ("(function(){var r=document.getElementById('stage').getBoundingClientRect();"
+            "return {x:r.x,y:r.y,width:r.width,height:r.height};})()")
 
 LOGGER_JS = r"""
 (function(){
@@ -220,12 +234,22 @@ def gl_mask(rect: Any, pad: float = MASK_PAD_PX) -> list[int]:
     return [x0, VIEWPORT[1] - y1, x1 - x0, y1 - y0]
 
 
+def boundary_masks(entry: dict[str, Any]) -> list[list[int]]:
+    """A G2 boundary's (or armed fact's) movie slot rect and instance rect as padded GL rects."""
+    return [gl_mask(entry["slotRects"][entry["movieSlot"]]), gl_mask(entry["instanceRect"])]
+
+
 def movie_masks(runtime: dict[str, Any], at_scene: int = 2) -> list[list[int]]:
     """The carried movie's slot rect and instance rect of the G2 boundary entering `at_scene`, from the continuity plan."""
     for entry in runtime.get("boundaries") or []:
         if entry.get("atScene") == at_scene and entry.get("slotRects") and entry.get("movieSlot") is not None:
-            return [gl_mask(entry["slotRects"][entry["movieSlot"]]), gl_mask(entry["instanceRect"])]
+            return boundary_masks(entry)
     return []
+
+
+def step_extra(masks: list[list[int]]) -> dict[str, dict[str, Any]]:
+    """Per-label logger config added to `PLAN`: the 1->2 settle ROI and its movie masks."""
+    return {"mm12": {"roi": settle_roi(), "masks": masks}}
 
 
 def square_splice(player: bytes) -> bytes:
@@ -246,9 +270,14 @@ def live_frames(run: dict[str, Any], label: str) -> list[dict[str, Any]]:
     return [f for f in log.get("frames") or [] if f.get("label") == label and f.get("g2") == "LIVE"]
 
 
-def ordinal_sequences(frames: list[dict[str, Any]]) -> dict[int, list[float | None]]:
+Series = list[tuple[float, float | None]]
+
+
+def ordinal_sequences(frames: list[dict[str, Any]]) -> tuple[dict[int, Series], int]:
+    """Per ordinal the (elapsed ms, float32 value) of every widest frame, and how many frames drew fewer."""
     width = max((len(f["draws"]) for f in frames), default=0)
-    return {o: [f32(f["draws"][o][1]) for f in frames if len(f["draws"]) == width] for o in range(width)}
+    wide = [f for f in frames if len(f["draws"]) == width]
+    return {o: [(float(f["el"]), f32(f["draws"][o][1])) for f in wide] for o in range(width)}, len(frames) - len(wide)
 
 
 def _collapse(values: list[float | None]) -> list[float | None]:
@@ -266,15 +295,40 @@ def _direction(values: list[float | None]) -> int | None:
     return steps.pop() if len(steps) == 1 else None
 
 
-def sequences_match(a: list[float | None], b: list[float | None]) -> bool:
-    """Constant sequences must be equal; an eased lerp (timed by rAF) must share its settle value and direction."""
-    ca, cb = _collapse(a), _collapse(b)
+def fade_deviation(a: Series, b: Series) -> float | None:
+    """Max |value difference| at each frame inside the other series' elapsed span, the other linearly interpolated."""
+    if not a or not b or any(v is None for _, v in [*a, *b]):
+        return None
+    ta, va = np.array([t for t, _ in a]), np.array([v for _, v in a], dtype=float)
+    tb, vb = np.array([t for t, _ in b]), np.array([v for _, v in b], dtype=float)
+    devs = []
+    for tx, vx, ty, vy in ((ta, va, tb, vb), (tb, vb, ta, va)):
+        inside = (tx >= ty[0]) & (tx <= ty[-1])
+        if inside.any():
+            devs.append(float(np.abs(vx[inside] - np.interp(tx[inside], ty, vy)).max()))
+    return max(devs) if devs else None
+
+
+def sequences_match(a: Series, b: Series, tol: float | None) -> bool:
+    """Constant sequences must be equal. An eased lerp (timed by rAF) must share its direction and settle value, and its
+    time-interpolated values must agree within `tol`."""
+    ca, cb = _collapse([v for _, v in a]), _collapse([v for _, v in b])
     if not ca or not cb or None in ca or None in cb:
         return False
     if len(ca) == 1 or len(cb) == 1:
         return ca == cb
     direction = _direction(ca)
-    return direction is not None and direction == _direction(cb) and ca[-1] == cb[-1]
+    if direction is None or direction != _direction(cb) or ca[-1] != cb[-1] or tol is None:
+        return False
+    deviation = fade_deviation(a, b)
+    return deviation is not None and deviation <= tol
+
+
+def fade_tolerance(cvc: dict[str, Any] | None) -> float | None:
+    """`FADE_TOL_FACTOR` x the off vs off2 fade deviation: both pairs are two runs with independent rAF timing (Q0b: on-off
+    0.0039 vs off-off 0.0045 on the slot-1 fade)."""
+    deviation = ((cvc or {}).get("detail") or {}).get("fadeDeviation")
+    return None if deviation is None else FADE_TOL_FACTOR * deviation
 
 
 def slot_program(frames: list[dict[str, Any]], slot: int = SLOT) -> tuple[Any, list[str]]:
@@ -354,7 +408,11 @@ def _verdict(problems: list[str], checks: dict[str, bool], void: str | None = No
     return "PASS" if all(checks.values()) else "FAIL"
 
 
-def score_mo1(cand: dict[str, Any], twin: dict[str, Any], alpha: float = ALPHA) -> dict[str, Any]:
+def _narrow_problems(label: str, narrow: dict[str, int]) -> list[str]:
+    return [f"{who}{label}: {n} move frame(s) drew fewer draws than the widest" for who, n in narrow.items() if n]
+
+
+def score_mo1(cand: dict[str, Any], twin: dict[str, Any], alpha: float = ALPHA, fade_tol: float | None = None) -> dict[str, Any]:
     problems = run_problems(cand) + [f"twin: {p}" for p in run_problems(twin)]
     void = g2_void(cand) or g2_void(twin)
     checks: dict[str, bool] = {}
@@ -374,13 +432,16 @@ def score_mo1(cand: dict[str, Any], twin: dict[str, Any], alpha: float = ALPHA) 
         if not live and not void:
             problems.append("no G2 LIVE draw of the slot program")
         checks["liveAlpha"] = bool(live) and all(v == f32(alpha) for v in live)
-    seq, twin_seq = ordinal_sequences(frames), ordinal_sequences(twin_frames)
+    detail["fadeTol"] = fade_tol
+    (seq, narrow), (twin_seq, twin_narrow) = ordinal_sequences(frames), ordinal_sequences(twin_frames)
+    problems += _narrow_problems("mm12", {"": narrow, "twin: ": twin_narrow})
     if len(seq) != len(twin_seq):
         problems.append(f"1->2 draw count {len(seq)} vs twin {len(twin_seq)}")
-    detail["othersMismatch"] = [o for o in seq if o != SLOT and not sequences_match(seq[o], twin_seq.get(o, []))]
+    detail["othersMismatch"] = [o for o in seq if o != SLOT and not sequences_match(seq[o], twin_seq.get(o, []), fade_tol)]
     checks["othersMatchTwin"] = not detail["othersMismatch"] and len(seq) == len(twin_seq)
-    seq34, twin34 = ordinal_sequences(player_frames(cand, "mm34")), ordinal_sequences(player_frames(twin, "mm34"))
-    detail["move34Mismatch"] = [o for o in seq34 if not sequences_match(seq34[o], twin34.get(o, []))]
+    (seq34, narrow34), (twin34, twin_narrow34) = (ordinal_sequences(player_frames(r, "mm34")) for r in (cand, twin))
+    problems += _narrow_problems("mm34", {"": narrow34, "twin: ": twin_narrow34})
+    detail["move34Mismatch"] = [o for o in seq34 if not sequences_match(seq34[o], twin34.get(o, []), fade_tol)]
     checks["move34MatchesTwin"] = bool(seq34) and not detail["move34Mismatch"] and len(seq34) == len(twin34)
     residual, residual_problems = settle_residual(cand, twin, alpha)
     problems += residual_problems
@@ -390,15 +451,28 @@ def score_mo1(cand: dict[str, Any], twin: dict[str, Any], alpha: float = ALPHA) 
 
 
 def score_cvc_mo1(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
+    """Patch off vs patch off: structure identical (a fade's values are only measured here: their deviation sets MO-1's
+    fade tolerance), settle P identical."""
     problems = run_problems(a) + run_problems(b)
     checks = {}
+    deviations: list[float] = []
     for label in ("mm12", "mm34"):
-        sa, sb = ordinal_sequences(player_frames(a, label)), ordinal_sequences(player_frames(b, label))
-        checks[f"{label}Uniforms"] = bool(sa) and len(sa) == len(sb) and all(sequences_match(sa[o], sb[o]) for o in sa)
+        (sa, na), (sb, nb) = ordinal_sequences(player_frames(a, label)), ordinal_sequences(player_frames(b, label))
+        problems += _narrow_problems(label, {"": na, "control 2: ": nb})
+        checks[f"{label}Uniforms"] = bool(sa) and len(sa) == len(sb) and all(sequences_match(sa[o], sb[o], math.inf) for o in sa)
+        for o in sa:
+            if len(_collapse([v for _, v in sa[o]])) > 1 and o in sb:
+                deviation = fade_deviation(sa[o], sb[o])
+                if deviation is None:
+                    problems.append(f"{label} ordinal {o}: fade spans do not overlap")
+                else:
+                    deviations.append(deviation)
     pa = ((a.get("log") or {}).get("settle") or {}).get("mm12") or {}
     pb = ((b.get("log") or {}).get("settle") or {}).get("mm12") or {}
     checks["settleP"] = bool(pa.get("P")) and pa.get("P") == pb.get("P")
-    return {"verdict": _verdict(problems, checks, g2_void(a) or g2_void(b)), "checks": checks, "problems": problems}
+    detail = {"fadeDeviation": max(deviations) if deviations else None}
+    return {"verdict": _verdict(problems, checks, g2_void(a) or g2_void(b)), "checks": checks, "problems": problems,
+            "detail": detail}
 
 
 def _g2_stats(run: dict[str, Any]) -> dict[str, Any]:
@@ -425,8 +499,10 @@ def score_mo4(cand: dict[str, Any], twin: dict[str, Any], alpha: float = ALPHA) 
         "unprovenOn": on.get("opacityUnproven") == UNPROVEN_ON,
         "restSlotAlpha": len(rest) > SLOT and f32(rest[SLOT]) == f32(alpha),
         "restOthersOff": rest[:SLOT] == REST_OFF[:SLOT],
+        "occludedBandsOn": on.get("occludedBands") == OCCLUDED_BANDS["on"],
         "unprovenOff": off.get("opacityUnproven") == [],
         "restOff": off.get("restOpacity") == REST_OFF,
+        "occludedBandsOff": off.get("occludedBands") == OCCLUDED_BANDS["off"],
         "liveGreenEqual": bool(cand.get("liveGreen")) and cand.get("liveGreen") == twin.get("liveGreen"),
     }
     detail = {"rest": rest, "unproven": on.get("opacityUnproven"), "restTwin": off.get("restOpacity"),
@@ -443,8 +519,39 @@ def score_cvc_mo4(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
         "liveGreen": bool(a.get("liveGreen")) and a.get("liveGreen") == b.get("liveGreen"),
         "rest": sa.get("restOpacity") == sb.get("restOpacity"),
         "unproven": sa.get("opacityUnproven") == sb.get("opacityUnproven"),
+        "occludedBands": sa.get("occludedBands") is not None and sa.get("occludedBands") == sb.get("occludedBands"),
     }
     return {"verdict": _verdict(problems, checks, g2_void(a) or g2_void(b)), "checks": checks, "problems": problems}
+
+
+def standdown_frames(run: dict[str, Any], label: str = "mm12") -> list[dict[str, Any]]:
+    log = run.get("log") or {}
+    return [f for f in log.get("frames") or [] if f.get("label") == label and f.get("g2") == "STANDDOWN"]
+
+
+def score_standdown(run: dict[str, Any], alpha: float = ALPHA) -> dict[str, Any]:
+    """A forced `FSD_REASON` stand-down: every slot-4 draw of G2's stand-down replay reads Opacity == alpha."""
+    problems = []
+    if run.get("gl") != "auto":
+        problems.append("not a GL-replay run")
+    if run.get("error"):
+        problems.append(f"run error: {str(run['error']).strip().splitlines()[-1]}")
+    log = run.get("log")
+    if not log:
+        problems.append("no logger output")
+    elif log.get("errors"):
+        problems.append(f"logger errors: {log['errors'][:3]}")
+    if (run.get("seedSplice") or {}).get("splices") != 1:
+        problems.append(f"force-fail seed did not land exactly once: {run.get('seedSplice')}")
+    api = (run.get("g2") or {}).get("api") or {}
+    if api.get("standDowns") != [FSD_REASON]:
+        problems.append(f"stand-downs {api.get('standDowns')!r}, expected [{FSD_REASON!r}]")
+    values = [f32(f["draws"][SLOT][1]) for f in standdown_frames(run) if len(f["draws"]) > SLOT]
+    if not values:
+        problems.append(f"no slot-{SLOT} draw in a stand-down replay frame")
+    checks = {"standdownAlpha": bool(values) and all(v == f32(alpha) for v in values)}
+    detail = {"standdownSlotValues": sorted({v for v in values if v is not None}), "standDowns": api.get("standDowns")}
+    return {"verdict": _verdict(problems, checks), "checks": checks, "problems": problems, "detail": detail}
 
 
 def _mean(pixels: Any) -> list[float] | None:
@@ -500,20 +607,25 @@ def gate(primary: dict[str, Any], cvc: dict[str, Any] | None, kbs: dict[str, dic
 
 
 def score_mode(gl: str, runs: dict[str, dict[str, Any]], alpha: float = ALPHA) -> dict[str, dict[str, Any]]:
-    on, off, off2, sq = (runs.get(k) for k in ("on", "off", "off2", "sq"))
+    on, off, off2, sq, fsd, fsdoff = (runs.get(k) for k in ALL_ARMS)
     if on is None or off is None:
-        names = ("MO-1", "MO-4", "MO-5") if gl == "auto" else ("MO-1", "MO-5")
+        names = ("MO-1", "MO-4", "MO-4 stand-down", "MO-5") if gl == "auto" else ("MO-1", "MO-5")
         return {n: {"verdict": "INCONCLUSIVE", "reasons": ["patch-on or patch-off run missing"]} for n in names}
+    cvc1 = score_cvc_mo1(off, off2) if off2 else None
+    tol = fade_tolerance(cvc1)
     out = {
-        "MO-1": gate(score_mo1(on, off, alpha), score_cvc_mo1(off, off2) if off2 else None, {
-            "patch-off": score_mo1(off2, off, alpha) if off2 else None,
-            "alpha-squared": score_mo1(sq, off, alpha) if sq else None,
+        "MO-1": gate(score_mo1(on, off, alpha, tol), cvc1, {
+            "patch-off": score_mo1(off2, off, alpha, tol) if off2 else None,
+            "alpha-squared": score_mo1(sq, off, alpha, tol) if sq else None,
         }),
         "MO-5": gate(score_mo5(on, off), score_cvc_mo5(off, off2) if off2 else None, {}),
     }
     if gl == "auto":
-        out["MO-4"] = gate(score_mo4(on, off, alpha), score_cvc_mo4(off, off2) if off2 else None, {
-            "alpha-squared": score_mo4(sq, off, alpha) if sq else None,
+        cvc4 = score_cvc_mo4(off, off2) if off2 else None
+        out["MO-4"] = gate(score_mo4(on, off, alpha), cvc4, {"alpha-squared": score_mo4(sq, off, alpha) if sq else None})
+        missing = {"verdict": "INCONCLUSIVE", "checks": {}, "problems": ["forced stand-down run missing"]}
+        out["MO-4 stand-down"] = gate(score_standdown(fsd, alpha) if fsd else missing, cvc4, {
+            "patch-off": score_standdown(fsdoff, alpha) if fsdoff else None,
         })
     return out
 
@@ -565,9 +677,43 @@ def wait_for_hash(evaluate: Any, expression: str, expected: str | None, timeout_
         time.sleep(0.02)
 
 
-def run_arm(fixture: Path, gl: str, arm: str) -> dict[str, Any]:
+def drive(host: Any, record: dict[str, Any], extra: dict[str, dict[str, Any]], screenshot: Callable[[], np.ndarray]) -> None:
+    """The per-arm step loop shared by this probe and managed MO-3: show, then each `PLAN` step with its logger config plus
+    `extra` (`step_extra`), the settle-hash wait and, at 1->2 under GL replay, the G2 read and the ROI_top screenshot."""
     import live_continuity_probe as probe
     import live_host_probe
+
+    evaluate = host._require_transport().evaluate
+    record["loggerInstalled"] = evaluate("!!window.__OBED_MMO__")
+    host.execute("show")
+    record["decoded"] = probe.wait_for_decode(host)
+    record["stage"] = evaluate(STAGE_JS)
+    time.sleep(2.0)
+    for label, expect, cfg in PLAN:
+        evaluate(f"window.__OBED_MMO__.setLabel({json.dumps(label)}, {json.dumps({**cfg, **extra.get(label, {})})})")
+        step: dict[str, Any] = {"label": label, "expectHash": expect, "hashBefore": evaluate(probe.HASH_JS)}
+        host.execute("advance")
+        _, step["settleS"] = live_host_probe.wait_for_settlement(host, timeout_s=30)
+        step["hashAfter"] = wait_for_hash(evaluate, probe.HASH_JS, expect[1] if expect else None)
+        if label == "mm12" and record["gl"] == "auto":
+            started = time.monotonic()
+            while time.monotonic() - started < LIVE_WAIT_S:
+                state = ((evaluate(probe.GL_REPLAY_READ_JS) or {}).get("api") or {}).get("state")
+                if state in ("LIVE", "STANDDOWN", "RETIRED"):
+                    break
+                time.sleep(0.1)
+            time.sleep(LIVE_HOLD_S)
+            record["g2"] = evaluate(probe.GL_REPLAY_READ_JS)
+            x, y, w, h = ROI_TOP
+            record["liveGreen"] = np.asarray(screenshot())[y:y + h, x:x + w, :3].reshape(-1).tolist()
+        else:
+            time.sleep(LIVE_HOLD_S if label.startswith("mm") else 1.5)
+        record["steps"].append(step)
+    record["log"] = evaluate(LOG_READ_JS, deadline_s=60)
+
+
+def run_arm(fixture: Path, gl: str, arm: str) -> dict[str, Any]:
+    import live_continuity_probe as probe
 
     from obed_edom.live_host import ChromeCdp, LiveOutputHost
 
@@ -576,50 +722,24 @@ def run_arm(fixture: Path, gl: str, arm: str) -> dict[str, Any]:
             super().start()
             self.call("Page.addScriptToEvaluateOnNewDocument", source=LOGGER_JS)
 
-    record: dict[str, Any] = {"gl": gl, "arm": arm, "mmOpacityKwarg": ARMS[arm], "steps": []}
+    record: dict[str, Any] = {"gl": gl, "arm": arm, "mmOpacityKwarg": ALL_ARMS[arm], "steps": []}
     probe.force_viewport(*VIEWPORT)
     dest = probe.prepare_export(fixture / "html-player", fixture / "html-unmodified" / "index.html", f"mmo-{gl}-{arm}")
     slides = probe.load_slides(dest)
     record["masks"] = movie_masks(probe.runtime_of(probe.ground_truth_plan(dest, slides, gl_replay=True)))
     record["roi"] = settle_roi()
-    extra = {"mm12": {"roi": record["roi"], "masks": record["masks"]}}
-    host = LiveOutputHost(dest, slides, headless=True, gl_replay=gl, mm_opacity=ARMS[arm],
+    host = LiveOutputHost(dest, slides, headless=True, gl_replay=gl, mm_opacity=ALL_ARMS[arm],
                           transport_factory=LoggedCdp)
     try:
-        with square_player(arm == "sq"):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(square_player(arm == "sq"))
+            if arm in FSD_ARMS:
+                record["seedSplice"] = stack.enter_context(probe.forced_fail_seed(FSD_REASON))
             host.start()
         record["output"] = {k: host.output.get(k) for k in ("mmOpacity", "continuity")}
         transport = host._require_transport()
-        evaluate = transport.evaluate
-        record["loggerInstalled"] = evaluate("!!window.__OBED_MMO__")
-        host.execute("show")
-        record["decoded"] = probe.wait_for_decode(host)
-        record["stage"] = evaluate(
-            "(function(){var r=document.getElementById('stage').getBoundingClientRect();"
-            "return {x:r.x,y:r.y,width:r.width,height:r.height};})()")
-        time.sleep(2.0)
-        for label, expect, cfg in PLAN:
-            evaluate(f"window.__OBED_MMO__.setLabel({json.dumps(label)}, {json.dumps({**cfg, **extra.get(label, {})})})")
-            step: dict[str, Any] = {"label": label, "expectHash": expect, "hashBefore": evaluate(probe.HASH_JS)}
-            host.execute("advance")
-            _, step["settleS"] = live_host_probe.wait_for_settlement(host, timeout_s=30)
-            step["hashAfter"] = wait_for_hash(evaluate, probe.HASH_JS, expect[1] if expect else None)
-            if label == "mm12" and gl == "auto":
-                started = time.monotonic()
-                while time.monotonic() - started < LIVE_WAIT_S:
-                    state = ((evaluate(probe.GL_REPLAY_READ_JS) or {}).get("api") or {}).get("state")
-                    if state in ("LIVE", "STANDDOWN", "RETIRED"):
-                        break
-                    time.sleep(0.1)
-                time.sleep(LIVE_HOLD_S)
-                record["g2"] = evaluate(probe.GL_REPLAY_READ_JS)
-                frame = probe.decode_png(transport.call("Page.captureScreenshot", format="png")["data"])
-                x, y, w, h = ROI_TOP
-                record["liveGreen"] = frame[y:y + h, x:x + w].reshape(-1).tolist()
-            else:
-                time.sleep(LIVE_HOLD_S if label.startswith("mm") else 1.5)
-            record["steps"].append(step)
-        record["log"] = evaluate(LOG_READ_JS, deadline_s=60)
+        drive(host, record, step_extra(record["masks"]),
+              lambda: probe.decode_png(transport.call("Page.captureScreenshot", format="png")["data"]))
     except Exception:  # noqa: BLE001
         record["error"] = traceback.format_exc()
     finally:
@@ -645,14 +765,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--score", type=Path, help="re-score the runs saved under DIR/runs without a browser")
     parser.add_argument("--fixture", type=Path, default=FIXTURE)
     parser.add_argument("--gl", default="off,auto")
-    parser.add_argument("--arms", default=",".join(ARMS))
+    parser.add_argument("--arms", default=",".join(ALL_ARMS), help="fsd and fsdoff run under --gl auto only")
     args = parser.parse_args(argv)
     if (args.out is None) == (args.score is None):
         parser.error("give exactly one of --out or --score")
     args.gl = [g for g in args.gl.split(",") if g]
     args.arms = [a for a in args.arms.split(",") if a]
-    if not set(args.gl) <= {"off", "auto"} or not set(args.arms) <= set(ARMS):
-        parser.error("--gl takes off,auto; --arms takes " + ",".join(ARMS))
+    if not set(args.gl) <= {"off", "auto"} or not set(args.arms) <= set(ALL_ARMS):
+        parser.error("--gl takes off,auto; --arms takes " + ",".join(ALL_ARMS))
     return args
 
 
@@ -663,6 +783,8 @@ def main(argv: list[str] | None = None) -> int:
         (out / "runs").mkdir(parents=True, exist_ok=True)
         for gl in args.gl:
             for arm in args.arms:
+                if arm in FSD_ARMS and gl != "auto":
+                    continue
                 running = headless_chromes()
                 if running >= MAX_HEADLESS:
                     raise SystemExit(f"{running} headless Chromes already running (limit {MAX_HEADLESS}); refusing to start another")

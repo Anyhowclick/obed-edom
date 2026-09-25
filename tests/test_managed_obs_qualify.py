@@ -1,13 +1,16 @@
 """Synthetic tests for `scripts/managed_obs_qualify.py` Magic Move opacity paths (plan keynote_live_mm_opacity §7, §8, §10); no OBS.
 
 Covered: the OBED_LIVE_MM_OPACITY refusal, `EXPECTED_STATS` keyed by patch mode, M3's opaque reference moved to the
-`mm-off` twin (and its KB still FAILing), the MO-2 scorers (tau, R1-R4, CvC, KB = patch-off twins), the MO-4 G2 facts in
-the MO-2 takes, the MO-3 mapping onto `mm_opacity_probe`'s scorer, and the session wiring (mm_opacity passed explicitly,
-logger transport, alpha-squared splice).
+`mm-off` twin (and its KB still FAILing), the M3 g2-off T-alpha check (patch on, GL replay off), the MO-2 scorers (tau, R1-R4,
+a CvC per rate, KB = patch-off twins), the MO-4 G2 facts in the MO-2 takes and their provenance, the MO-3 mapping onto
+`mm_opacity_probe`'s scorer and its shared driver (the logger payload), and the session wiring (mm_opacity passed explicitly,
+logger transport, alpha-squared splice, forced stand-down seed).
 """
 from __future__ import annotations
 
+import json
 import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +22,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
+import live_continuity_probe as lcp  # noqa: E402
 import managed_obs_qualify as q  # noqa: E402
 
 SHAPE = (1080, 1920)
@@ -83,6 +87,23 @@ def test_g2_stats_checks_pass_their_own_mode_and_fail_the_other(mode):
     assert {c["check"] for c in bad if not c["ok"]} == {"occludedBands", "opacityUnproven"}
 
 
+def test_g2_stats_checks_record_the_measured_value_and_state_the_expectation_source():
+    # Review r1 F6: the patch-on occludedBands / unproven set come from headless Q0b; the check still enforces them in CEF,
+    # records the CEF value it read, and says a mismatch is a finding, not a threshold to retune.
+    checks: list[dict[str, Any]] = []
+    q.g2_stats_checks(checks, {**q.EXPECTED_STATS["on"], "occludedBands": 3}, "on")
+    by = {c["check"]: c for c in checks}
+    assert by["occludedBands"]["value"] == 3 and not by["occludedBands"]["ok"] and by["occludedBands"]["enforced"]
+    for key in ("occludedBands", "opacityUnproven"):
+        assert "headless Q0b only" in by[key]["limit"] and "root-cause, not a threshold to retune" in by[key]["limit"]
+    assert "CEF, OD-2" in by["frameLen"]["limit"]
+    off: list[dict[str, Any]] = []
+    q.g2_stats_checks(off, dict(q.EXPECTED_STATS["off"]), "off")
+    assert all("CEF, OD-2" in c["limit"] for c in off[1:])
+    assert set(q.EXPECTED_STATS_SOURCE["on"]) == set(q.EXPECTED_STATS["on"])
+    assert set(q.EXPECTED_STATS_SOURCE["off"]) == set(q.EXPECTED_STATS["off"])
+
+
 def test_g2_stats_checks_fail_closed_without_a_reported_mode():
     checks: list[dict[str, Any]] = []
     q.g2_stats_checks(checks, dict(q.EXPECTED_STATS["on"]), None)
@@ -116,7 +137,16 @@ def test_m3_edge_and_kb_read_against_the_opaque_mm_off_twin(tmp_path):
     assert m3["edge: G2-S alpha == round(mm-off-S alpha x 0.2947)"]["ok"]
     assert m3["KB: edge vs unscaled mm-off-S alpha fails"]["ok"]
     assert m3["KB: mm-off-S T alpha fails the slot check"]["ok"]
-    assert m3["report: g2-off-S T alpha (patch on, GL replay off)"]["value"] == [75, 75]
+    assert m3["prerequisite: mm-off-S T alpha is opaque (the KB reference)"]["ok"]
+    t_off = m3["T alpha (g2-off-S, patch on, GL replay off)"]
+    assert t_off["ok"] and t_off["enforced"] and t_off["value"] == [75, 75]
+
+
+@pytest.mark.parametrize("g2_off_alpha", [255, 60, 90])
+def test_m3_fails_a_g2_off_square_that_is_not_the_patchs_alpha(tmp_path, g2_off_alpha):
+    # Review r1 F11: the one direct CEF read of the fix with G2 absent is enforced, not report-only.
+    m3 = q.g2_gates(m3_run(tmp_path, mm_off_alpha=255, g2_off_alpha=g2_off_alpha), ARMED)["M3"]
+    assert "T alpha (g2-off-S, patch on, GL replay off)" in m3["failing"]
 
 
 def test_m3_with_a_translucent_reference_fails_the_edge_check_and_the_kb(tmp_path):
@@ -124,6 +154,7 @@ def test_m3_with_a_translucent_reference_fails_the_edge_check_and_the_kb(tmp_pat
     m3 = checks_of(q.g2_gates(m3_run(tmp_path, mm_off_alpha=75), ARMED)["M3"])
     assert not m3["edge: G2-S alpha == round(mm-off-S alpha x 0.2947)"]["ok"]
     assert not m3["KB: mm-off-S T alpha fails the slot check"]["ok"]
+    assert not m3["prerequisite: mm-off-S T alpha is opaque (the KB reference)"]["ok"]
 
 
 def test_m3_refuses_an_mm_off_twin_that_ran_with_the_patch(tmp_path):
@@ -301,7 +332,7 @@ def test_cvc_reads_zero_on_identical_sessions_and_the_worst_delta_otherwise():
 
 def mmo_run(tmp_path: Path, rate: int = 25, **over: Any) -> dict[str, Any]:
     kinds = {"g2-on": "on", "g2-mmoff": "off-live", "g2off-on": "on", "g2off-mmoff": "off", "g2-on-2": "on"}
-    names = list(kinds) if rate == 25 else list(kinds)[:4]
+    names = list(kinds)
     sessions = []
     for name in names:
         ser = over.get(f"series:{name}") or series(kinds[name])
@@ -352,11 +383,20 @@ def test_mmo_gates_fail_a_cvc_over_two(tmp_path):
     assert gates["MO-2"]["failing"] == ["CvC g2-on vs g2-on-2 before tau"]
 
 
-def test_mmo_gates_at_rate_30_have_no_cvc_of_their_own(tmp_path):
+def test_mmo_gates_at_rate_30_run_their_own_cvc(tmp_path):
+    # Review r1 F7: tau is per take, so each rate's take carries its own control-vs-control.
     gates = q.mmo_gates(mmo_run(tmp_path, rate=30), ARMED)
     assert gates["MO-2"]["verdict"] == "PASS"
-    assert not any(c.startswith("CvC") for c in checks_of(gates["MO-2"]))
-    assert gates["mmoCalibration"]["cvc"] is None
+    assert checks_of(gates["MO-2"])["CvC g2-on vs g2-on-2 before tau"]["ok"]
+    assert gates["mmoCalibration"]["cvc"]["max"] == 0.0
+    failing = q.mmo_gates(mmo_run(tmp_path, rate=30, **{"series:g2-on-2": series("on", offset=3)}), ARMED)["MO-2"]["failing"]
+    assert failing == ["CvC g2-on vs g2-on-2 before tau"]
+
+
+def test_mmo_gates_without_the_cvc_session_fail(tmp_path):
+    run = mmo_run(tmp_path, rate=30)
+    run["sessions"] = [s for s in run["sessions"] if s["session"] != q.MMO_CVC[1]]
+    assert "CvC g2-on vs g2-on-2 before tau" in q.mmo_gates(run, ARMED)["MO-2"]["failing"]
 
 
 def test_mmo_gates_refuse_a_session_that_ran_in_the_wrong_patch_mode(tmp_path):
@@ -377,14 +417,16 @@ def test_mmo_mo4_reads_g2_facts_per_patch_mode(tmp_path):
     assert set(gates["MO-4"]["failing"]) == {"g2-on: occludedBands", "g2-on: opacityUnproven"}
 
 
-def test_mmo_summary_needs_both_rates_and_the_rate_25_cvc():
+def test_mmo_summary_needs_both_rates_and_each_rates_cvc():
     def run(rate: int, cvc: float | None, valid: bool = True) -> dict[str, Any]:
         return {"arm": "mmo", "rate": rate, "valid": valid, "gates": {"mmoCalibration": {"cvc": None if cvc is None else {"max": cvc}}}}
 
     assert q.mmo_summary([]) == []
-    assert all(c["ok"] for c in q.mmo_summary([run(25, 1.0), run(30, None)]))
-    failing = {c["check"] for c in q.mmo_summary([run(25, 3.0), run(30, None, valid=False)]) if not c["ok"]}
-    assert failing == {"MO-2: a valid take per rate", "MO-2 CvC (rate 25) gates every rate"}
+    assert all(c["ok"] for c in q.mmo_summary([run(25, 1.0), run(30, 2.0)]))
+    failing = {c["check"] for c in q.mmo_summary([run(25, 3.0), run(30, 1.0, valid=False)]) if not c["ok"]}
+    assert failing == {"MO-2: a valid take per rate", "MO-2 CvC (rate 25) gates that rate"}
+    failing = {c["check"] for c in q.mmo_summary([run(25, 1.0), run(30, None)]) if not c["ok"]}
+    assert failing == {"MO-2 CvC (rate 30) gates that rate"}
 
 
 # --- MO-3 --------------------------------------------------------------------------------------------------------------------
@@ -398,25 +440,30 @@ def test_mmo_cef_gates_hand_records_to_the_probe_scorer(monkeypatch):
 
     monkeypatch.setattr(q.mm_opacity_probe, "score_all", score_all)
     sessions = [{"session": f"mo3-{gl}-{arm}", "mo1": {"gl": gl, "arm": arm, "log": {}}} for gl in q.MMO_CEF_GL
-                for arm in q.mm_opacity_probe.ARMS]
+                for arm in q.mo3_arms(gl)]
     sessions[0]["fatal"] = "Traceback: boom"
+    sessions[-1]["seedSplice"] = {"reason": q.mm_opacity_probe.FSD_REASON, "splices": 1}
     gates = q.mmo_cef_gates({"sessions": sessions})
     assert gates["MO-3"]["verdict"] == "PASS"
     assert seen["off"]["on"]["error"] == "Traceback: boom"
-    assert set(seen["auto"]) == set(q.mm_opacity_probe.ARMS)
+    assert set(seen["off"]) == set(q.mm_opacity_probe.ARMS)
+    assert set(seen["auto"]) == set(q.mm_opacity_probe.ALL_ARMS)
+    assert seen["auto"]["fsdoff"]["seedSplice"]["splices"] == 1
 
 
 def test_mmo_cef_gates_fail_a_missing_arm_or_a_non_pass_gate(monkeypatch):
     monkeypatch.setattr(q.mm_opacity_probe, "score_all", lambda records: {
         "overall": "INCONCLUSIVE", "modes": {"auto": {"MO-1": {"verdict": "INCONCLUSIVE", "reasons": ["CvC FAIL"]}}}})
-    sessions = [{"session": f"mo3-auto-{arm}", "mo1": {"gl": "auto", "arm": arm}} for arm in q.mm_opacity_probe.ARMS]
+    sessions = [{"session": f"mo3-auto-{arm}", "mo1": {"gl": "auto", "arm": arm}} for arm in q.mm_opacity_probe.ALL_ARMS]
     failing = q.mmo_cef_gates({"sessions": sessions})["MO-3"]["failing"]
     assert failing == ["off: every arm ran", "auto MO-1"]
+    sessions = [s for s in sessions if s["session"] != "mo3-auto-fsd"]
+    assert "auto: every arm ran" in q.mmo_cef_gates({"sessions": sessions})["MO-3"]["failing"]
 
 
 def test_mmo_cef_gates_score_real_probe_records_without_error():
     """Unmocked: empty records read INCONCLUSIVE, never PASS."""
-    sessions = [{"session": f"mo3-{gl}-{arm}", "mo1": {"gl": gl, "arm": arm}} for gl in q.MMO_CEF_GL for arm in q.mm_opacity_probe.ARMS]
+    sessions = [{"session": f"mo3-{gl}-{arm}", "mo1": {"gl": gl, "arm": arm}} for gl in q.MMO_CEF_GL for arm in q.mo3_arms(gl)]
     gates = q.mmo_cef_gates({"sessions": sessions})
     assert gates["MO-3"]["verdict"] == "FAIL"
     assert gates["probeVerdict"]["overall"] != "PASS"
@@ -445,11 +492,10 @@ def test_g2_arm_adds_an_unrecorded_patch_off_gl_off_twin(monkeypatch):
     assert all(calls[n].get("mm_opacity", "auto") == "auto" for n in ("g2", "g2-off", "hidden-arm"))
 
 
-@pytest.mark.parametrize("rate, names", [(25, ["g2-on", "g2-mmoff", "g2off-on", "g2off-mmoff", "g2-on-2"]),
-                                         (30, ["g2-on", "g2-mmoff", "g2off-on", "g2off-mmoff"])])
-def test_mmo_arm_records_gl_by_patch_sessions_and_the_cvc_pair_at_25_only(monkeypatch, rate, names):
+@pytest.mark.parametrize("rate", [25, 30])
+def test_mmo_arm_records_gl_by_patch_sessions_and_the_cvc_pair_at_every_rate(monkeypatch, rate):
     calls = captured_sessions(monkeypatch, "mmo", rate)
-    assert [c["name"] for c in calls] == names
+    assert [c["name"] for c in calls] == ["g2-on", "g2-mmoff", "g2off-on", "g2off-mmoff", "g2-on-2"]
     for c in calls:
         gl, mm = q.MMO_SESSIONS[q.mmo_base(c["name"])]
         assert c["gl_replay"] == gl and c["mm_opacity"] == mm and c["record"] is True
@@ -457,11 +503,65 @@ def test_mmo_arm_records_gl_by_patch_sessions_and_the_cvc_pair_at_25_only(monkey
 
 def test_mmo_cef_arm_runs_every_probe_arm_per_gl_mode_with_the_logger(monkeypatch):
     calls = captured_sessions(monkeypatch, "mmo-cef")
-    assert [c["name"] for c in calls] == [f"mo3-{gl}-{a}" for gl in q.MMO_CEF_GL for a in q.mm_opacity_probe.ARMS]
+    assert [c["name"] for c in calls] == ([f"mo3-off-{a}" for a in ("on", "off", "off2", "sq")]
+                                          + [f"mo3-auto-{a}" for a in ("on", "off", "off2", "sq", "fsd", "fsdoff")])
     for c in calls:
         arm = c["name"].split("-", 2)[2]
-        assert c["logger"] is True and c["mm_opacity"] == q.mm_opacity_probe.ARMS[arm] and c["square"] == (arm == "sq")
+        assert c["logger"] is True and c["mm_opacity"] == q.mm_opacity_probe.ALL_ARMS[arm] and c["square"] == (arm == "sq")
+        assert c["seed"] == ("frameLengthChanged" if arm in ("fsd", "fsdoff") else None)
         assert not c.get("record")
+
+
+class FakeTransport:
+    HASHES = ["#1", "#2", "#3", "#4", "#5", "#7", "#8"]
+
+    def __init__(self, host: "DriveHost") -> None:
+        self.host, self.labels = host, {}
+
+    def evaluate(self, expression: str, deadline_s: float | None = None) -> Any:
+        prefix = "window.__OBED_MMO__.setLabel("
+        if expression.startswith(prefix):
+            label, cfg = json.loads("[" + expression[len(prefix):-1] + "]")
+            self.labels[label] = cfg
+            return True
+        if expression == lcp.HASH_JS:
+            return self.HASHES[self.host.advances]
+        if expression == q.GL_REPLAY_READ_JS:
+            return {"api": {"state": "LIVE"}}
+        return {}
+
+
+class DriveHost:
+    def __init__(self) -> None:
+        self.advances = 0
+        self.output = {"mmOpacity": {"mode": "on"}, "continuity": {}}
+        self.transport = FakeTransport(self)
+
+    def _require_transport(self) -> FakeTransport:
+        return self.transport
+
+    def execute(self, operation: str, slide: int | None = None) -> None:
+        self.advances += operation == "advance"
+
+
+def test_mo3_script_drives_the_logger_with_the_settle_roi_and_armed_movie_masks(monkeypatch):
+    # Review r1 F1: MO-3's own copy of the loop sent the bare PLAN config (no ROI, no masks), so it could never PASS.
+    import live_host_probe
+
+    monkeypatch.setattr(lcp, "wait_for_decode", lambda host: {"ok": True})
+    monkeypatch.setattr(live_host_probe, "wait_for_settlement", lambda host, timeout_s: ({}, 0.1))
+    monkeypatch.setattr(q.mm_opacity_probe.time, "sleep", lambda s: None)
+    monkeypatch.setattr(q, "obs_screenshot", lambda port, password: np.zeros((1080, 1920, 4), np.uint8))
+    host = DriveHost()
+    session = types.SimpleNamespace(host=host, creds=(1, "p"), out={})
+    q.mo3_script("auto", "on", ARMED)(session)
+    mm12 = host.transport.labels["mm12"]
+    assert mm12["roi"] == q.mm_opacity_probe.settle_roi()
+    assert mm12["masks"] == q.mm_opacity_probe.boundary_masks(ARMED) == [[103, 11, 965, 281], [107, 15, 956, 272]]
+    rec = session.out["mo1"]
+    assert rec["masks"] == mm12["masks"] and rec["roi"] == mm12["roi"] and rec["mmOpacityKwarg"] == "auto"
+    assert [rec["steps"][0]["hashBefore"], rec["steps"][0]["hashAfter"]] == ["#1", "#2"]
+    assert len(rec["liveGreen"]) == 16 * 58 * 3
 
 
 class FakeHost:
