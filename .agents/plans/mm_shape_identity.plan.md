@@ -313,3 +313,13 @@ contests were measured).
   session get `com.apple.quarantine` with no owning app, which Keynote refuses to open ("Operation not
   permitted"), so every run copy is written by Keynote itself.
 
+- 2026-09-25 Opus peer review (standing in for Codex; quota low): no blockers.
+  - 1 major, fixed: the overlap filter and centres ignored rotation, and lines are stored horizontal
+    plus a rotation. `_mm_box` now uses the drawn AABB.
+  - 2 doc drifts, fixed.
+  - Nits: group line leaves now use the line key; the plan's scalar-preset wording now matches the
+    code; `ambiguous` counting before build exclusion is documented.
+  - The overlap math was fuzz-checked exactly: 0 misses.
+  - FRC flags stay at 11 and the golden plan is unchanged.
+  - Full suites: pytest 7362 passed, `test:ui` 305, `test:maps` 542 + 2 perf, 0 failures.
+- Open: the owner still has to review FRC 130→131 ("Suntec New 2.png" vs the "CHC" group).
