@@ -131,3 +131,25 @@ def test_boot_check_without_the_module_requires_it_absent():
     assert drv._gl_boot_ok(missing_key, expect_module=False) is False
     for over in ({"webgl": False}, {"obedLive": False}, {"info": None}, {"order": ["plan", "core", "main"]}):
         assert drv._gl_boot_ok(_boot_check(glVersion=None, glState=None, **over), expect_module=False) is False
+
+
+@pytest.mark.parametrize("argv, bridged", [
+    ((), True),
+    (("--strip", "bridge@8"), False),
+    (("--strip", "restart@6"), True),
+    (("--core-variant", "stash-any"), True),
+])
+def test_bridge_presence_is_read_from_the_injected_plan(monkeypatch, argv, bridged):
+    """`--strip bridge@8` must skip the freeze bracket exactly as `--disable-bridge34` does."""
+    injected, _, _ = _arm(monkeypatch, *argv)
+    assert drv._bridge_injected(injected) is bridged
+    assert drv._bridge_injected(v.build_continuity_plan(False)) is False
+
+
+def test_freeze_bracket_skips_on_the_injected_bridge_not_the_flag(monkeypatch, tmp_path):
+    import asyncio
+
+    monkeypatch.setattr(sys, "argv", ["p2_recovery_html_adversarial.py", "--strip", "bridge@8"])
+    skipped = asyncio.run(drv._run_freeze_bracket(tmp_path, tmp_path, {}, "fast", bridge34=False))
+    assert skipped["verdict"] == "skipped" and skipped["reason"] == "bridge disabled"
+    assert drv._freeze_control_blocks_success(skipped["verdict"], True) is False

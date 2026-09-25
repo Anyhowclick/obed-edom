@@ -575,6 +575,10 @@ def _served_script_order(html: str) -> list[str]:
     return [name for _, name in sorted(found)]
 
 
+def _bridge_injected(plan: dict) -> bool:
+    return any(b.get("action") == "bridge" for b in plan.get("boundaries") or [] if isinstance(b, dict))
+
+
 def _injection_arm(reference_plan: dict) -> tuple[dict, str, dict]:
     """`--core-variant NAME` / `--strip ACTION[@atScene]`: the plan and core to inject in
     place of `reference_plan` and `PRESERVE_CORE_JS`, and the record the report header shows."""
@@ -3192,7 +3196,7 @@ async def _capture_3to4_snapshot(
 
 async def _run_freeze_bracket(
     player_dir: Path, runs_dir: Path, wait_profile: dict, wait_profile_name: str,
-    *, main_js: bytes | None = None,
+    *, bridge34: bool, main_js: bytes | None = None,
 ) -> dict:
     """A-B-A composited-freeze bracket on the 3->4 moving Magic Move boundary:
     positive -> freeze-control -> positive, one re-navigated Chrome (same
@@ -3201,12 +3205,8 @@ async def _run_freeze_bracket(
 
     Re-bracketed off the 1->2 boundary (retired -- the derived plan REFUSES that
     carry, so there is no carried movie to freeze there; 3->4 still carries). SKIPPED
-    (no boot, no bracket) when `--disable-bridge34` disables the 3->4 carry -- nothing
-    to freeze in that arm."""
-    if "--disable-bridge34" not in sys.argv:
-        bridge34 = True
-    else:
-        bridge34 = False
+    (no boot, no bracket) when the INJECTED plan has no 3->4 bridge (`--disable-bridge34`,
+    `--strip bridge@8`) -- nothing to freeze in that arm."""
     if not bridge34:
         return {
             "skipped": True,
@@ -3389,6 +3389,7 @@ async def _run(player: Path) -> dict:
     # the 3->4 bridge keeps the movie1 decoder playing across the moving cut.
     continuity_plan = build_continuity_plan(bridge34)
     injected_plan, core, arm = _injection_arm(continuity_plan)
+    bridge_injected = _bridge_injected(injected_plan)
     preserve, plan_inject, gl_inject = _inject_player(
         player_dir, injected_plan, gl_auto=gl_auto, canvas=inv["canvas"], core=core, gl_plan=continuity_plan
     )
@@ -4307,7 +4308,7 @@ async def _run(player: Path) -> dict:
                 "slide4MinHash": SLIDE4_MIN_HASH,
                 "slide3MovieRect": list(SLIDE3_MOVIE_RECT),
                 "slide4MovieRect": list(SLIDE4_MOVIE_RECT),
-                "bridgeEnabled": bridge34,
+                "bridgeEnabled": bridge_injected,
                 "bridgeEvents": bridge_events,
                 "ownerVias": [s.get("via") for s in owner_samples_c][:40],
                 "slide4IndexSequence": slide4_index_seq,
@@ -4422,12 +4423,12 @@ async def _run(player: Path) -> dict:
     # ("freeze run at cut") in B while the bridged decoder + rVFC stay live, and
     # every other sub-verdict is identical across the two bracketing positives.
     # Runs on fresh boots (its own server + re-navigated Chrome per arm), so it
-    # never perturbs the main pass above. SKIPPED under --disable-bridge34 (no
-    # carry to freeze in that arm).
+    # never perturbs the main pass above. SKIPPED when the injected plan has no 3->4
+    # bridge (--disable-bridge34, --strip bridge@8: no carry to freeze in that arm).
     freeze_control = await _run_freeze_bracket(
-        player_dir, runs, wait_profile, wait_profile_name, main_js=main_js
+        player_dir, runs, wait_profile, wait_profile_name, bridge34=bridge_injected, main_js=main_js
     )
-    freeze_blocks_success = _freeze_control_blocks_success(freeze_control.get("verdict"), not bridge34)
+    freeze_blocks_success = _freeze_control_blocks_success(freeze_control.get("verdict"), not bridge_injected)
     findings.append(
         {
             "id": "freezeControlCaughtByCounter",
@@ -4501,7 +4502,7 @@ async def _run(player: Path) -> dict:
         "hashes": {"h1": hash1, "h2": hash2, "h3": hash3, "h4": hash4},
         "movingContinuity3to4": moving_continuity,
         "movingIndexRun3to4": moving_index_run,
-        "bridge34Enabled": bridge34,
+        "bridge34Enabled": bridge_injected,
         "preserveEvents": preserve_events,
         "findings": findings,
         "freezeControl": freeze_control,
