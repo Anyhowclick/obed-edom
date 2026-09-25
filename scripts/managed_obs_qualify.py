@@ -11,10 +11,18 @@ Arms:
                 paused: the null control), slide1-resumed 4 s, then a report-only smoke walk (slide 2, build 1).
                 Source = 2 x canvas (product) or = canvas (positive control). Cadence gated at both rates on the binary counter, at 25 only on grey.
   g2            sessions g2 (product default: no gl_replay kwarg), g2-off (gl_replay="off"), both recorded, and an
-                unrecorded hidden-arm (the g2 session's gl_replay). g2/g2-off: slide 1 as above -> advance -> LIVE (<= 5 s) -> slide2-live 10 s
-                (screenshot S) -> hide, slide2-hidden 3 s (screenshot H) -> show, slide2-reshown 4 s ->
+                unrecorded hidden-arm (the g2 session's gl_replay) and an unrecorded mm-off twin (gl_replay="off",
+                mm_opacity="off": M3's opaque reference). g2/g2-off: slide 1 as above -> advance -> LIVE (<= 5 s) ->
+                slide2-live 10 s (screenshot S) -> hide, slide2-hidden 3 s (screenshot H) -> show, slide2-reshown 4 s ->
                 slide2-handback (advance = build 1) 4 s -> slide2-after 3 s (screenshot P3). Gates M0-M4.
   failsafe      one launch: fail-module, fail-zone, fail-bogus (forced-fail seeds), goto2, off, off-2. Gate M5.
+  mmo           MO-2 (Magic Move opacity plan §10): one launch per rate (25, 30; --rate ignored), sessions g2 / g2-off x patch
+                on / off (g2-on, g2-mmoff, g2off-on, g2off-mmoff) plus a CvC g2-on-2 at 25, all recorded: slide1-native 6 s (key
+                shot D) -> mm-move -> advance (key shot M at settle) -> [LIVE] -> slide2-live 4 s -> slide2-handback (build 1)
+                -> slide2-after. ROI_top series and an empty-canvas patch are decoded per frame; gates MO-2 (R1-R4, KB =
+                the patch-off twins, tau from slide-1 DOM frames) and MO-4 (G2 facts per patch mode). Binary fixture only.
+  mmo-cef       MO-3: the MO-1 logger and scorer of mm_opacity_probe inside the OBS CEF, unrecorded; GL replay off and
+                auto x arms on, off, off2, sq (8 sessions, one launch). Binary fixture only.
   soak          g2 held on slide 2 for --soak-minutes (>= 4) with per-minute reads, 20 s recordings around a loop wrap at
                 minute 1 and just before loseContext (after the first half), build 1, P3/P4; an off twin. Gate M6.
                 --precheck: the loop pre-check. --build-fixture KEY: export the owner's looping copy (needs
@@ -24,8 +32,9 @@ copy (`binary_counter_movie.py --build-fixture`, output/p2-binary): its fixture.
 movie sha256s are checked at startup and recorded per run), and M2 then enforces the hand-back max step per elapsed frame and
 an undecodable-free hand-back.
 --kb frozen|oldbytes swaps the G2 module text in this process (asserted sha, read back from the host's own report);
---kb latelost forces contextLost while hidden. Refuses to start while any OBS runs or OBED_LIVE_GL_REPLAY is set;
-keeps the Mac awake; a Sleep/Wake, a non-lossless recording or a g2 movie past 44 s of media marks a take INVALID.
+--kb latelost forces contextLost while hidden. Refuses to start while any OBS runs or OBED_LIVE_GL_REPLAY or
+OBED_LIVE_MM_OPACITY is set (every session passes mm_opacity explicitly); keeps the Mac awake; a Sleep/Wake, a non-lossless
+recording or a g2 movie past 44 s of media marks a take INVALID.
 
 usage: uv run python scripts/managed_obs_qualify.py --arm g2 --rate 25 --takes 2 --out DIR
 """
@@ -62,14 +71,16 @@ sys.path.insert(0, str(REPO / "scripts"))
 from obed_edom import live_continuity, live_gl_replay_js, managed_obs, obs_websocket  # noqa: E402
 from obed_edom.html_preview import cache_dir  # noqa: E402
 from obed_edom.live_continuity import Unsupported, derive_plan  # noqa: E402
-from obed_edom.live_host import GL_REPLAY_ENV, LiveOutputHost  # noqa: E402
+from obed_edom.live_host import GL_REPLAY_ENV, MM_OPACITY_ENV, ChromeCdp, LiveOutputHost  # noqa: E402
 from obed_edom.managed_obs import ManagedObs  # noqa: E402
 from obed_edom.obs_websocket import ObsWebsocket  # noqa: E402
 
 import binary_counter_movie  # noqa: E402
+import mm_opacity_probe  # noqa: E402
 import obs_cadence_decode  # noqa: E402
 from live_continuity_probe import (  # noqa: E402
     GL_REPLAY_READ_JS,
+    HASH_JS,
     PAINTING_VIDEOS_JS,
     _carried_el_id,
     _movie_entries,
@@ -81,6 +92,7 @@ from live_continuity_probe import (  # noqa: E402
     load_slides,
     matches_asset_keys,
     score_armed,
+    wait_for_decode,
     wait_for_destination_hash,
 )
 from live_host_probe import wait_for_settlement  # noqa: E402
@@ -103,7 +115,10 @@ LIMITS = {"nativeRepeatMax2x": 0.15, "decodableMin": 0.9, "nullRepeatMin": 0.95,
           "counterTol": 2, "movieAlphaMin": 250, "slotAlpha": 75, "slotAlphaTol": 3, "domTol": 3, "liveWaitS": 5.0,
           "mediaEndS": 44.0, "binaryRepeatMax": 0.01, "binaryReshownMax": 0.02, "binaryNativeTol": 0.01, "binaryPositiveMin": 0.05, "binaryDistinctFrac": 0.96, "liveRingMax": 20, "handbackRingPx": 200, "handbackMaxStepPerFrame": 3,
           "build1AfterMarkerMinS": 0.3}
-EXPECTED_STATS = {"frameLen": 88, "occludedBands": 20, "bandCount": 128, "innerRect": {"x": 4, "y": 4, "w": 952, "h": 268}}
+G2_STATS = {"frameLen": 88, "bandCount": 128, "innerRect": {"x": 4, "y": 4, "w": 952, "h": 268}}
+EXPECTED_STATS = {"on": {**G2_STATS, "occludedBands": 0, "opacityUnproven": [{"slot": 4, "reason": "rest-opacity"}]},
+                  "off": {**G2_STATS, "occludedBands": 20, "opacityUnproven": []}}
+MM_MODES = {"auto": "on", "off": "off"}
 MOVIE_FPS = 30
 SOAK_LOOP_FRAMES = 1381
 SOAK_WINDOW_S = 20.0
@@ -117,6 +132,21 @@ MARKER_RECT = {"x": 0, "y": 0, "w": 24, "h": 24}
 REGION_PAD = 2
 T_ERODE_PX = 6
 SLOT_OPACITY = 0.2947
+MM_ALPHA = 0.29468628764152527
+MMO_RATES = (25, 30)
+MMO_SESSIONS = {"g2-on": (None, "auto"), "g2-mmoff": (None, "off"), "g2off-on": ("off", "auto"), "g2off-mmoff": ("off", "off")}
+MMO_CVC = ("g2-on", "g2-on-2")
+MMO_PAIRS = (("g2-on", "g2-mmoff"), ("g2off-on", "g2off-mmoff"))
+MMO_REFERENCE = "g2off-mmoff"
+MMO_WINDOW = ("mm-move", "slide2-live", "slide2-handback")
+MMO_SLIDE1 = ("slide1-native",)
+MMO_FROM_RECT = {"x": 635.86, "y": 722.97, "w": 178.0, "h": 157.0}
+MMO_EMPTY_RECT = {"x": 1150, "y": 690, "w": 50, "h": 90}
+MMO_ERODE_PX = 6
+MMO_CVC_MAX = 2
+MMO_SLIDE1_S = 6.0
+MMO_LIVE_S = 4.0
+MMO_CEF_GL = ("off", "auto")
 
 G2_SHA = "10a5b36a1f6008a3213bd90729915f6c15284448406f2a62dbc74ae884fe5288"
 KB_SHAS = {"frozen": "413a00ba4e36dd5edf9c07425ab3c92589eb23d51c60914448621b7a456b8b67",
@@ -381,15 +411,27 @@ def start_log(host: LiveOutputHost) -> dict[str, Any] | None:
     return None
 
 
+class LoggedCdp(ChromeCdp):
+    """Installs the MO-1 logger innermost (before any page script) on the attached engine page."""
+
+    def start(self) -> None:
+        super().start()
+        self.call("Page.addScriptToEvaluateOnNewDocument", source=mm_opacity_probe.LOGGER_JS)
+
+
 def run_session(name: str, script: Callable[[Session], None], ctx: dict[str, Any], *, gl_replay: str | None = None,
-                seed: str | None = None, record: bool = False, allow: dict[str, Any] | None = None) -> dict[str, Any]:
+                mm_opacity: str = "auto", seed: str | None = None, record: bool = False, allow: dict[str, Any] | None = None,
+                logger: bool = False, square: bool = False) -> dict[str, Any]:
     fixture = ctx["fixture"]
     dest, slides = make_export(f"{ctx['tag']}-{name}", fixture)
-    kwargs = {} if gl_replay is None else {"gl_replay": gl_replay}
+    kwargs: dict[str, Any] = {"mm_opacity": mm_opacity} if gl_replay is None else {"gl_replay": gl_replay, "mm_opacity": mm_opacity}
+    if logger:
+        kwargs["transport_factory"] = LoggedCdp
     session: Session | None = None
-    out: dict[str, Any] = {"session": name, "glReplayArg": gl_replay, "seed": seed}
+    out: dict[str, Any] = {"session": name, "glReplayArg": gl_replay, "mmOpacityArg": mm_opacity, "seed": seed, "square": square}
     try:
         with contextlib.ExitStack() as stack:
+            stack.enter_context(mm_opacity_probe.square_player(square))
             if allow is not None:
                 stack.enter_context(allow_soak_plan(dest, slides, allow))
                 out["allowlistSplice"] = allow
@@ -509,6 +551,76 @@ def g2_script(kb: str | None, armed: dict[str, Any]) -> Callable[[Session], None
         hold(started, 3)
         s.shot("P3")
         s.ev(MARK_JS % UNMEASURED_MARK)
+    return script
+
+
+def g2_state(s: Session) -> Any:
+    return ((s.ev(GL_REPLAY_READ_JS) or {}).get("api") or {}).get("state")
+
+
+def mmo_script(gl_live: bool) -> Callable[[Session], None]:
+    """MO-2: slide-1 DOM (key shot D) -> mm-move marker -> advance (key shot M at settle) -> slide 2 -> build 1."""
+    def script(s: Session) -> None:
+        s.execute("show")
+        time.sleep(1.2)
+        started = s.phase("slide1-native")
+        hold(started, 1.0)
+        s.shot("D")
+        hold(started, MMO_SLIDE1_S)
+        s.phase("mm-move")
+        s.execute("advance")
+        before = g2_state(s)
+        s.shot("M")
+        s.out["shotM"] = {"g2Before": before, "g2After": g2_state(s)}
+        if gl_live:
+            s.wait_live()
+        else:
+            time.sleep(1.0)
+        started = s.phase("slide2-live")
+        s.read("liveStart")
+        hold(started, MMO_LIVE_S)
+        s.read("liveEnd")
+        started = s.phase("slide2-handback")
+        hold(started, HANDBACK_LEAD_S)
+        s.execute("advance")
+        hold(started, 3)
+        started = s.phase("slide2-after")
+        s.read("after")
+        hold(started, 2)
+        s.ev(MARK_JS % UNMEASURED_MARK)
+    return script
+
+
+def mo3_script(gl: str, arm: str) -> Callable[[Session], None]:
+    """MO-3: `mm_opacity_probe.run_arm`'s drive loop on the engine page; the record is scored by `mm_opacity_probe`."""
+    def script(s: Session) -> None:
+        rec: dict[str, Any] = {"gl": gl, "arm": arm, "mmOpacityKwarg": mm_opacity_probe.ARMS[arm], "steps": [], "liveGreenSource": "obs"}
+        s.out["mo1"] = rec
+        rec["output"] = {k: s.host.output.get(k) for k in ("mmOpacity", "continuity")}
+        rec["loggerInstalled"] = s.ev("!!window.__OBED_MMO__")
+        s.execute("show")
+        rec["decoded"] = wait_for_decode(s.host)
+        rec["stage"] = s.ev("(function(){var r=document.getElementById('stage').getBoundingClientRect();"
+                            "return {x:r.x,y:r.y,width:r.width,height:r.height};})()")
+        time.sleep(2.0)
+        for label, expect, cfg in mm_opacity_probe.PLAN:
+            s.ev(f"window.__OBED_MMO__.setLabel({json.dumps(label)}, {json.dumps(cfg)})")
+            step: dict[str, Any] = {"label": label, "expectHash": expect, "hashBefore": s.ev(HASH_JS)}
+            s.host.execute("advance")
+            _, step["settleS"] = wait_for_settlement(s.host, timeout_s=30)
+            if label == "mm12" and gl == "auto":
+                started = time.monotonic()
+                while time.monotonic() - started < mm_opacity_probe.LIVE_WAIT_S and g2_state(s) not in ("LIVE", "STANDDOWN", "RETIRED"):
+                    time.sleep(0.1)
+                time.sleep(mm_opacity_probe.LIVE_HOLD_S)
+                rec["g2"] = s.ev(GL_REPLAY_READ_JS)
+                x, y, w, h = mm_opacity_probe.ROI_TOP
+                rec["liveGreen"] = obs_screenshot(*s.creds)[y:y + h, x:x + w].reshape(-1).tolist()
+            else:
+                time.sleep(mm_opacity_probe.LIVE_HOLD_S if label.startswith("mm") else 1.5)
+            step["hashAfter"] = s.ev(HASH_JS)
+            rec["steps"].append(step)
+        rec["log"] = s.host._require_transport().evaluate(mm_opacity_probe.LOG_READ_JS, deadline_s=60)
     return script
 
 
@@ -749,6 +861,17 @@ def continuity_of(session: dict[str, Any]) -> dict[str, Any]:
     return (session.get("outputAtStop") or session.get("output") or {}).get("continuity") or {}
 
 
+def mm_mode(session: dict[str, Any]) -> str | None:
+    return ((session.get("outputAtStop") or session.get("output") or {}).get("mmOpacity") or {}).get("mode")
+
+
+def g2_stats_checks(checks: list[dict[str, Any]], stats: dict[str, Any], mode: str | None, prefix: str = "") -> None:
+    expected = EXPECTED_STATS.get(mode or "")
+    check(checks, f"{prefix}G2 stats expectation for the patch mode", mode, expected is not None, "on | off")
+    for key, want in (expected or {}).items():
+        check(checks, f"{prefix}{key}", stats.get(key), stats.get(key) == want, f"== {want} (headless r2 / Q0b, patch {mode})")
+
+
 def raf_rates(session: dict[str, Any]) -> dict[str, float | None]:
     marks = [(p["name"], p.get("raf")) for p in session.get("phases") or []]
     rates: dict[str, float | None] = {}
@@ -761,6 +884,7 @@ def raf_rates(session: dict[str, Any]) -> dict[str, float | None]:
 def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     sessions = {s["session"]: s for s in run["sessions"]}
     g2, off, hidden_arm = sessions.get("g2") or {}, sessions.get("g2-off") or {}, sessions.get("hidden-arm") or {}
+    mm_off = sessions.get("mm-off") or {}
     rate, kb = run["rate"], run.get("kb")
     d_g2, d_off = g2.get("decode") or {}, off.get("decode") or {}
     p_g2, p_off = d_g2.get("phases") or {}, d_off.get("phases") or {}
@@ -768,11 +892,12 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     reads = g2.get("reads") or {}
     gates: dict[str, Any] = {}
 
-    shots = {(name, tag): load_shot(sess, tag) for name, sess in (("g2", g2), ("off", off)) for tag in ("S", "H", "P3")}
+    shots = {(name, tag): load_shot(sess, tag) for name, sess in (("g2", g2), ("off", off), ("mm-off", mm_off)) for tag in ("S", "H", "P3")}
     shape = next((img.shape for img in shots.values() if img is not None), (1080, 1920, 4))
     reg = regions(armed, shape)
     s_g2, h_g2, p3_g2 = shots[("g2", "S")], shots[("g2", "H")], shots[("g2", "P3")]
     s_off, h_off, p3_off = shots[("off", "S")], shots[("off", "H")], shots[("off", "P3")]
+    s_opaque = shots[("mm-off", "S")]
 
     m0: list[dict[str, Any]] = []
     outside_marker = ~reg["marker"]
@@ -798,6 +923,7 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     info, expected_sha = continuity_of(g2).get("glReplay") or {}, KB_SHAS.get(kb or "", G2_SHA)
     pref = (g2.get("startLog") or {}).get("glReplayPreference")
     check(m1, "glReplayPreference (product default)", pref, pref == "auto", "== auto")
+    check(m1, "mmOpacity mode (g2 / g2-off)", [mm_mode(g2), mm_mode(off)], mm_mode(g2) == mm_mode(off) == "on", "on, on")
     check(m1, "glReplay mode/version/sha", info, info.get("mode") == "injected" and info.get("version") == 1 and info.get("sha256") == expected_sha,
           f"injected v1 {expected_sha[:8]}")
     scale = continuity_of(g2).get("scale")
@@ -825,8 +951,7 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     check(m1, "uploads/s over slide2-live", rate_live, rate_live is not None and rate_live >= LIMITS["uploadsMin"], f">= {LIMITS['uploadsMin']}")
     stats = api_of(reads.get("liveEnd")).get("stats") or {}
     check(m1, "glErrors", stats.get("glErrors"), stats.get("glErrors") == 0, "== 0")
-    for key, want in EXPECTED_STATS.items():
-        check(m1, key, stats.get(key), stats.get(key) == want, f"== {want} (headless r2)")
+    g2_stats_checks(m1, stats, mm_mode(g2))
     null = (p_g2.get(NULL_PHASE) or {}).get("repeatFrac")
     check(m1, "null: slide1-paused repeat", null, null is not None and null >= LIMITS["nullRepeatMin"], f">= {LIMITS['nullRepeatMin']}")
     static_off = (d_off.get("staticMaxDelta") or {}).get("slide2-live")
@@ -891,17 +1016,20 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     check(m3, "prerequisite: G2-P3 T == g2-off-P3 T", t_pre, t_pre == 0, "== 0")
     band = reg["edge"]
     check(m3, "edge band non-empty", int(band.sum()), bool(band.any()), "> 0")
-    fidelity = scaled_alpha_delta(s_g2, s_off, band, SLOT_OPACITY)
-    check(m3, "edge: G2-S alpha == round(g2-off-S alpha x 0.2947)", fidelity, fidelity is not None and fidelity <= tol, f"<= {tol}")
-    unscaled = scaled_alpha_delta(s_g2, s_off, band, 1.0)
-    check(m3, "KB: edge vs unscaled g2-off-S alpha fails", unscaled, unscaled is not None and unscaled > tol, f"> {tol}")
+    check(m3, "prerequisite: mm-off twin is patch off (opaque reference)", mm_mode(mm_off), mm_mode(mm_off) == "off", "== off")
+    fidelity = scaled_alpha_delta(s_g2, s_opaque, band, SLOT_OPACITY)
+    check(m3, "edge: G2-S alpha == round(mm-off-S alpha x 0.2947)", fidelity, fidelity is not None and fidelity <= tol, f"<= {tol}")
+    unscaled = scaled_alpha_delta(s_g2, s_opaque, band, 1.0)
+    check(m3, "KB: edge vs unscaled mm-off-S alpha fails", unscaled, unscaled is not None and unscaled > tol, f"> {tol}")
     edge_dom = max_delta(s_g2, p3_g2, band)
     edge_count = int((band & (np.abs(s_g2.astype(np.int16) - p3_g2.astype(np.int16)).max(axis=2) > LIMITS["domTol"])).sum()) \
         if s_g2 is not None and p3_g2 is not None else None
     check(m3, "report: edge G2-S vs G2-P3 (player vs DOM softness) max, px > 3", [edge_dom, edge_count], True, enforced=False)
-    off_alpha = alpha_range(s_off, reg["T"])
-    check(m3, "KB: g2-off-S T alpha fails the slot check", off_alpha,
-          off_alpha is not None and not (want - tol <= off_alpha[0] and off_alpha[1] <= want + tol), f"not {want} +- {tol}")
+    opaque_alpha = alpha_range(s_opaque, reg["T"])
+    check(m3, "KB: mm-off-S T alpha fails the slot check", opaque_alpha,
+          opaque_alpha is not None and not (want - tol <= opaque_alpha[0] and opaque_alpha[1] <= want + tol), f"not {want} +- {tol}")
+    check(m3, "report: g2-off-S T alpha (patch on, GL replay off)", alpha_range(s_off, reg["T"]), True, f"{want} +- {tol} expected",
+          enforced=False)
     gates["M3"] = gate(m3, gates["M0"]["invalid"])
 
     m4: list[dict[str, Any]] = []
@@ -938,6 +1066,219 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
           off_h is not None and off_h[1] == 0 and not any(off_api), "0, 0")
     gates["M4"] = gate(m4)
     return gates
+
+
+def mmo_base(name: str) -> str:
+    return MMO_CVC[0] if name == MMO_CVC[1] else name
+
+
+def mmo_masks(armed: dict[str, Any], shape: tuple[int, ...]) -> dict[str, np.ndarray]:
+    """top = ROI_top: the slide-1 square (`MMO_FROM_RECT`: effect_1_to_2 slot 4 wrapper position +- leaf size / 2) intersected
+    with its slide-2 rect (the override slot), minus the movie rect padded 2, eroded `MMO_ERODE_PX` (past the square's
+    ~2x AA edge). empty = a same-frame canvas patch outside every slot but the full-stage background."""
+    if len(armed["overrideSlots"]) != 1:
+        raise RuntimeError(f"expected one opacity-override slot, got {armed['overrideSlots']}")
+    to = armed["slotRects"][armed["overrideSlots"][0]]
+    top = rect_mask(shape, MMO_FROM_RECT) & rect_mask(shape, to) & ~rect_mask(shape, armed["instanceRect"], REGION_PAD)
+    top = erode(top, MMO_ERODE_PX)
+    empty = rect_mask(shape, MMO_EMPTY_RECT)
+    slots = [r for r in armed["slotRects"] if not (r["w"] >= shape[1] and r["h"] >= shape[0])]
+    if not top.any() or any((empty & rect_mask(shape, r, REGION_PAD)).any() for r in slots):
+        raise RuntimeError(f"MO-2 masks: ROI_top {int(top.sum())} px, or the empty patch overlaps a slot")
+    return {"top": top, "empty": empty}
+
+
+def load_series(session: dict[str, Any]) -> dict[str, np.ndarray] | None:
+    path = (session.get("decode") or {}).get("seriesPath")
+    if not path or not Path(path).exists():
+        return None
+    with np.load(path) as data:
+        return {key: data[key] for key in data.files}
+
+
+def phase_rows(series: dict[str, np.ndarray], phases: tuple[str, ...]) -> np.ndarray:
+    return np.isin(series["phase"], phases)
+
+
+def phase_median(series: dict[str, np.ndarray] | None, phases: tuple[str, ...]) -> np.ndarray | None:
+    if series is None or not phase_rows(series, phases).any():
+        return None
+    return np.median(series["pixels.top"][phase_rows(series, phases)].astype(float), axis=0)
+
+
+def median_delta(a: np.ndarray | None, b: np.ndarray | None) -> float | None:
+    return None if a is None or b is None else round(float(np.abs(a - b).max()), 2)
+
+
+def expected_top(series: dict[str, np.ndarray], s_off: np.ndarray, alpha: float = MM_ALPHA) -> np.ndarray:
+    """Per frame E = alpha * S_off + (1 - alpha) * B_frame (B_frame = that frame's empty-patch mean)."""
+    return alpha * s_off[None] + (1.0 - alpha) * series["means.empty"][:, None, :]
+
+
+def slide1_instrument(series: dict[str, np.ndarray] | None, s_off: np.ndarray | None, alpha: float = MM_ALPHA) -> float | None:
+    """max |DOM - E| over slide-1 frames: how well E predicts the (Keynote-correct) DOM square."""
+    if series is None or s_off is None or not phase_rows(series, MMO_SLIDE1).any():
+        return None
+    rows = phase_rows(series, MMO_SLIDE1)
+    return round(float(np.abs(series["pixels.top"][rows].astype(float) - expected_top(series, s_off, alpha)[rows]).max()), 2)
+
+
+def mmo_tau(series: dict[str, dict[str, np.ndarray] | None], s_off: np.ndarray | None, alpha: float = MM_ALPHA) -> dict[str, Any]:
+    """tau = max(patch on vs off slide-1 DOM medians per GL mode, instrument |DOM - E| per session) + 1."""
+    dom = {f"{on}/{off}": median_delta(phase_median(series.get(on), MMO_SLIDE1), phase_median(series.get(off), MMO_SLIDE1))
+           for on, off in MMO_PAIRS}
+    instrument = {name: slide1_instrument(ser, s_off, alpha) for name, ser in series.items()}
+    values = [*dom.values(), *instrument.values()]
+    tau = round(max(values) + 1, 2) if values and None not in values else None
+    return {"tau": tau, "domOnOff": dom, "instrument": instrument}
+
+
+def mmo_series_checks(series: dict[str, np.ndarray] | None, s_off: np.ndarray | None, tau: float | None,
+                      alpha: float = MM_ALPHA) -> dict[str, Any]:
+    """Over the frames from mm-move to past build 1 (`MMO_WINDOW`): R1 frames whose ROI_top mean is within tau of S_off's,
+    R2 max |ROI_top - E|, R3 max |ROI_top| step between consecutive frames (covers DOM -> GL and GL -> DOM)."""
+    if series is None or s_off is None or tau is None or not phase_rows(series, MMO_WINDOW).any():
+        return {"frames": 0, "R1": None, "R2": None, "R3": None}
+    rows = phase_rows(series, MMO_WINDOW)
+    top = series["pixels.top"][rows].astype(float)
+    near = np.abs(top.mean(axis=1) - s_off.mean(axis=0)).max(axis=1) <= tau
+    r2 = np.abs(top - expected_top(series, s_off, alpha)[rows]).max(axis=(1, 2))
+    steps = np.abs(np.diff(top, axis=0)).max(axis=(1, 2)) if len(top) > 1 else np.zeros(1)
+    worst = int(steps.argmax())
+    index, phase = series["index"][rows], series["phase"][rows]
+    return {"frames": int(rows.sum()), "R1": int(near.sum()), "R1First": int(index[near][0]) if near.any() else None,
+            "R2": round(float(r2.max()), 2), "R2Frame": int(index[int(r2.argmax())]), "R3": round(float(steps.max()), 2),
+            "R3At": [int(index[worst]), str(phase[worst]), str(phase[min(worst + 1, len(phase) - 1)])]}
+
+
+def shot_alpha(img: np.ndarray | None, mask: np.ndarray) -> np.ndarray | None:
+    return None if img is None else img[..., 3][mask].astype(float)
+
+
+def mmo_key(shots: dict[str, dict[str, np.ndarray | None]], masks: dict[str, np.ndarray], alpha: float = MM_ALPHA) -> dict[str, Any]:
+    """R4 on the key: per session max |M - D| alpha on ROI_top (M at settle, D on slide 1); tau_key = max(D patch on vs off per GL
+    mode, |D - E_key| per session) + 1, E_key = alpha * the reference's M alpha + (1 - alpha) * that D's empty-patch alpha."""
+    top, empty = masks["top"], masks["empty"]
+    ref = shot_alpha((shots.get(MMO_REFERENCE) or {}).get("M"), top)
+    dom: dict[str, float | None] = {}
+    for on, off in MMO_PAIRS:
+        a, b = (shot_alpha((shots.get(n) or {}).get("D"), top) for n in (on, off))
+        dom[f"{on}/{off}"] = None if a is None or b is None else float(np.abs(a - b).max())
+    instrument: dict[str, float | None] = {}
+    r4: dict[str, float | None] = {}
+    for name, pair in shots.items():
+        d, m = shot_alpha(pair.get("D"), top), shot_alpha(pair.get("M"), top)
+        if d is None or ref is None:
+            instrument[name] = None
+        else:
+            instrument[name] = float(np.abs(d - (alpha * ref + (1.0 - alpha) * pair["D"][..., 3][empty].mean())).max())
+        r4[name] = None if d is None or m is None else float(np.abs(m - d).max())
+    values = [*dom.values(), *instrument.values()]
+    tau_key = round(max(values) + 1, 2) if values and None not in values else None
+    return {"tauKey": tau_key, "domOnOff": dom, "instrument": instrument, "R4": r4}
+
+
+def mmo_cvc(a: dict[str, np.ndarray] | None, b: dict[str, np.ndarray] | None, shots_a: dict[str, Any], shots_b: dict[str, Any],
+            top: np.ndarray) -> dict[str, Any]:
+    values = {phase: median_delta(phase_median(a, (phase,)), phase_median(b, (phase,)))
+              for phase in (*MMO_SLIDE1, "slide2-live", "slide2-after")}
+    for tag in ("D", "M"):
+        x, y = shot_alpha(shots_a.get(tag), top), shot_alpha(shots_b.get(tag), top)
+        values[f"key {tag}"] = None if x is None or y is None else float(np.abs(x - y).max())
+    return {"values": values, "max": None if None in values.values() else max(values.values())}
+
+
+def mmo_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
+    sessions = {s["session"]: s for s in run["sessions"]}
+    masks = mmo_masks(armed, (1080, 1920, 4))
+    series = {name: load_series(sess) for name, sess in sessions.items()}
+    shots = {name: {tag: load_shot(sess, tag) for tag in ("D", "M")} for name, sess in sessions.items()}
+    checks: list[dict[str, Any]] = []
+    for name, sess in sessions.items():
+        want = MM_MODES[MMO_SESSIONS[mmo_base(name)][1]]
+        check(checks, f"{name}: mmOpacity mode", mm_mode(sess), mm_mode(sess) == want, f"== {want}")
+    s_off = phase_median(series.get(MMO_REFERENCE), ("slide2-live",))
+    check(checks, f"S_off: {MMO_REFERENCE} slide2-live ROI_top", None if s_off is None else np.round(s_off.mean(axis=0), 1).tolist(),
+          s_off is not None, "present")
+    cal, key = mmo_tau(series, s_off), mmo_key(shots, masks)
+    tau, tau_key = cal["tau"], key["tauKey"]
+    check(checks, "report: tau (RGB), tau_key (alpha)", {"tau": cal, "tauKey": {k: v for k, v in key.items() if k != "R4"}}, True,
+          enforced=False)
+    cvc = None
+    if run["rate"] == 25:
+        cvc = mmo_cvc(series.get(MMO_CVC[0]), series.get(MMO_CVC[1]), shots.get(MMO_CVC[0]) or {}, shots.get(MMO_CVC[1]) or {},
+                      masks["top"])
+        check(checks, f"CvC {MMO_CVC[0]} vs {MMO_CVC[1]} before tau", cvc, cvc["max"] is not None and cvc["max"] <= MMO_CVC_MAX,
+              f"<= {MMO_CVC_MAX}")
+    dom_ref = phase_median(series.get(MMO_REFERENCE), MMO_SLIDE1)
+    premise = None if dom_ref is None or s_off is None else round(float(np.abs(s_off.mean(axis=0) - dom_ref.mean(axis=0)).max()), 2)
+    check(checks, "premise: S_off differs from the slide-1 DOM square by > tau", [premise, tau],
+          None not in (premise, tau) and premise > tau, "> tau")
+    per: dict[str, Any] = {}
+    for on, off in MMO_PAIRS:
+        r_on, r_off = (mmo_series_checks(series.get(n), s_off, tau) for n in (on, off))
+        per[on], per[off] = r_on, r_off
+        check(checks, f"{on} frames in window", r_on["frames"], r_on["frames"] > 0, "> 0")
+        check(checks, f"{on} R1: frames within tau of S_off", r_on["R1"], r_on["R1"] == 0, "== 0")
+        check(checks, f"KB: {off} R1", r_off["R1"], r_off["R1"] is not None and r_off["R1"] > 0, "> 0")
+        for name, value, limit in (("R2: max |ROI_top - E|", "R2", tau), ("R3: max frame-to-frame step", "R3", tau),
+                                   ("R4: key alpha |M - D|", None, tau_key)):
+            v_on = r_on[value] if value else key["R4"].get(on)
+            v_off = r_off[value] if value else key["R4"].get(off)
+            label = "tau_key" if value is None else "tau"
+            check(checks, f"{on} {name}", v_on, None not in (v_on, limit) and v_on <= limit, f"<= {label} {limit}")
+            check(checks, f"KB: {off} {name}", v_off, None not in (v_off, limit) and v_off > limit, f"> {label} {limit}")
+        cadence = {n: {ph: {k: ((((sessions.get(n) or {}).get("decode") or {}).get("phases") or {}).get(ph) or {}).get(k)
+                            for k in ("repeatFrac", "distinctPerS")} for ph in ("mm-move", "slide2-live")} for n in (on, off)}
+        check(checks, f"report: cadence {on} vs {off}", cadence, True, enforced=False)
+    check(checks, "report: shot M G2 state before/after", {n: sess.get("shotM") for n, sess in sessions.items()}, True, enforced=False)
+
+    m4: list[dict[str, Any]] = []
+    for name in ("g2-on", "g2-mmoff"):
+        sess = sessions.get(name) or {}
+        wait = sess.get("liveWait") or {}
+        check(m4, f"{name}: G2 LIVE", wait, wait.get("live") is True, "LIVE (a stand-down voids the pair)")
+        g2_stats_checks(m4, api_of((sess.get("reads") or {}).get("liveEnd")).get("stats") or {}, mm_mode(sess), f"{name}: ")
+    live = median_delta(phase_median(series.get("g2-on"), ("slide2-live",)), phase_median(series.get("g2-mmoff"), ("slide2-live",)))
+    check(m4, "report: g2-on vs g2-mmoff slide2-live ROI_top (LIVE equal)", live, True, "~0 (headless MO-4 enforces 0)", enforced=False)
+    return {"MO-2": gate(checks), "MO-4": gate(m4), "mmoCalibration": {"tau": tau, "tauKey": tau_key, "cvc": cvc, "perSession": per}}
+
+
+def mmo_cef_gates(run: dict[str, Any]) -> dict[str, Any]:
+    sessions = {s["session"]: s for s in run["sessions"]}
+    records: dict[str, dict[str, dict[str, Any]]] = {}
+    for gl in MMO_CEF_GL:
+        for arm in mm_opacity_probe.ARMS:
+            sess = sessions.get(f"mo3-{gl}-{arm}")
+            if sess is None:
+                continue
+            record = dict(sess.get("mo1") or {"gl": gl, "arm": arm})
+            if sess.get("fatal"):
+                record["error"] = sess["fatal"]
+            records.setdefault(gl, {})[arm] = record
+    verdict = mm_opacity_probe.score_all(records)
+    checks: list[dict[str, Any]] = []
+    for gl in MMO_CEF_GL:
+        check(checks, f"{gl}: every arm ran", sorted((records.get(gl) or {})), set(records.get(gl) or {}) == set(mm_opacity_probe.ARMS),
+              ",".join(mm_opacity_probe.ARMS))
+    for gl, gates in verdict["modes"].items():
+        for name, result in gates.items():
+            check(checks, f"{gl} {name}", [result["verdict"], result.get("reasons")], result["verdict"] == "PASS", "PASS")
+    return {"MO-3": gate(checks), "probeVerdict": verdict}
+
+
+def mmo_summary(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """MO-2 across the per-rate takes: both rates ran and the rate-25 CvC (which sets tau for both) read <= 2."""
+    checks: list[dict[str, Any]] = []
+    mmo = [r for r in runs if r["arm"] == "mmo"]
+    if not mmo:
+        return checks
+    check(checks, "MO-2: a valid take per rate", sorted(r["rate"] for r in mmo if r["valid"]),
+          sorted(r["rate"] for r in mmo if r["valid"]) == list(MMO_RATES), f"== {list(MMO_RATES)}")
+    cvc = [((r.get("gates") or {}).get("mmoCalibration") or {}).get("cvc") for r in mmo if r["rate"] == 25]
+    value = cvc[0].get("max") if cvc and cvc[0] else None
+    check(checks, "MO-2 CvC (rate 25) gates every rate", value, value is not None and value <= MMO_CVC_MAX, f"<= {MMO_CVC_MAX}")
+    return checks
 
 
 KB_EXPECT = {
@@ -1159,7 +1500,15 @@ def sessions_for(arm: str, ctx: dict[str, Any], args: argparse.Namespace, armed:
     if arm == "g2":
         return [run_session("g2", g2_script(args.kb, armed), ctx, record=True),
                 run_session("g2-off", g2_script(None, armed), ctx, gl_replay="off", record=True),
-                run_session("hidden-arm", hidden_arm_script, ctx)]
+                run_session("hidden-arm", hidden_arm_script, ctx),
+                run_session("mm-off", g2_script(None, armed), ctx, gl_replay="off", mm_opacity="off")]
+    if arm == "mmo":
+        names = [*MMO_SESSIONS, MMO_CVC[1]] if ctx["rate"] == 25 else list(MMO_SESSIONS)
+        return [run_session(name, mmo_script(MMO_SESSIONS[mmo_base(name)][0] is None), ctx, gl_replay=MMO_SESSIONS[mmo_base(name)][0],
+                            mm_opacity=MMO_SESSIONS[mmo_base(name)][1], record=True) for name in names]
+    if arm == "mmo-cef":
+        return [run_session(f"mo3-{gl}-{name}", mo3_script(gl, name), ctx, gl_replay=gl, mm_opacity=kwarg, logger=True, square=name == "sq")
+                for gl in MMO_CEF_GL for name, kwarg in mm_opacity_probe.ARMS.items()]
     if arm == "failsafe":
         return [run_session("fail-module", failsafe_script(False), ctx, seed="planUnreadable"),
                 run_session("fail-zone", failsafe_script(False), ctx, seed="posterAmbiguous"),
@@ -1183,14 +1532,23 @@ def ring_exclusions(armed: dict[str, Any]) -> list[tuple[float, float, float, fl
 
 def decode_session(session: dict[str, Any], recording: str | None, *, rings: list[Any] | None, loop_frames: int | None,
                    keep: bool, crops_dir: Path | None = None, ring_exclude: list[Any] = (), counter: str = "grey",
-                   geometry: tuple[float, float, float] = obs_cadence_decode.MOVIE_GEOMETRY) -> dict[str, Any] | None:
+                   geometry: tuple[float, float, float] = obs_cadence_decode.MOVIE_GEOMETRY, masks: dict[str, np.ndarray] | None = None,
+                   series_path: Path | None = None) -> dict[str, Any] | None:
+    """With `masks` (MO-2) the per-frame ROI_top pixels and empty-patch means go to `series_path` (npz), not the run JSON."""
     path = Path(recording) if recording else None
     if path is None or not path.exists():
         return None
     print(f"  decoding {session['session']} {path}", flush=True)
     try:
-        return obs_cadence_decode.decode_recording(path, rings=rings, statics=rings, ring_exclude=ring_exclude, loop_frames=loop_frames,
-                                                   crops_dir=crops_dir if keep and rings else None, counter=counter, geometry=geometry)
+        result = obs_cadence_decode.decode_recording(
+            path, rings=rings, statics=rings, ring_exclude=ring_exclude, loop_frames=loop_frames,
+            crops_dir=crops_dir if keep and rings else None, counter=counter, geometry=geometry,
+            pixel_series={"top": masks["top"]} if masks else None, mean_series={"empty": masks["empty"]} if masks else None)
+        series = result.pop("series", None)
+        if series is not None and series_path is not None:
+            np.savez_compressed(series_path, **series)
+            result["seriesPath"] = str(series_path)
+        return result
     except obs_cadence_decode.NotLossless as exc:
         return {"notLossless": str(exc)}
     finally:
@@ -1254,11 +1612,13 @@ def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, args: ar
     rings = [rect_tuple(armed["instanceRect"])] if arm == "g2" else None
     ring_exclude = ring_exclusions(armed) if arm == "g2" else []
     counter, geometry = run["counter"], movie_geometry(armed)
+    masks = mmo_masks(armed, (1080, 1920)) if arm == "mmo" else None
     for session in run["sessions"]:
         if session.get("recording"):
             session["decode"] = decode_session(session, session["recording"], rings=rings, loop_frames=None, keep=args.keep_recordings,
                                                crops_dir=shots / f"{session['session']}-crops", ring_exclude=ring_exclude,
-                                               counter=counter, geometry=geometry)
+                                               counter=counter, geometry=geometry, masks=masks,
+                                               series_path=shots / f"{session['session']}-series.npz")
         for window in session.get("windows") or []:
             window["decode"] = decode_session(session, window["recording"], rings=None, loop_frames=SOAK_LOOP_FRAMES if looping else None,
                                               keep=args.keep_recordings, counter=counter, geometry=geometry)
@@ -1312,6 +1672,10 @@ def arm_gates(arm: str, run: dict[str, Any], args: argparse.Namespace, armed: di
         return g2_gates(run, armed)
     if arm == "failsafe":
         return failsafe_gates(run, armed)
+    if arm == "mmo":
+        return mmo_gates(run, armed)
+    if arm == "mmo-cef":
+        return mmo_cef_gates(run)
     if args.precheck:
         return precheck_gates(run, args.fixture)
     return soak_gates(run, armed, not p2_family(args.fixture))
@@ -1385,9 +1749,9 @@ def build_fixture(key: Path, dest: Path) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Live qualification of the managed OBS (launches OBS; one OBS at a time).")
-    parser.add_argument("--arm", choices=("2x", "positive", "both", "g2", "failsafe", "soak"), default="both")
-    parser.add_argument("--rate", type=int, choices=sorted(managed_obs.RATES), default=25)
-    parser.add_argument("--takes", type=int, default=2, help="ignored (1) for failsafe and soak")
+    parser.add_argument("--arm", choices=("2x", "positive", "both", "g2", "failsafe", "soak", "mmo", "mmo-cef"), default="both")
+    parser.add_argument("--rate", type=int, choices=sorted(managed_obs.RATES), default=25, help=f"ignored for mmo ({MMO_RATES})")
+    parser.add_argument("--takes", type=int, default=2, help="ignored (1) for failsafe, soak, mmo and mmo-cef")
     parser.add_argument("--launch", choices=("hidden", "shown", "projector"), default="hidden", help="shown = hidden launch, then Show OBS once ready; projector = hidden launch + a windowed program projector (eyeball)")
     parser.add_argument("--kb", choices=sorted(KB_SHAS), help="known-bad control: frozen|oldbytes (module splice), latelost (g2)")
     parser.add_argument("--fixture", type=Path, help=f"soak fixture root (default {SOAK_FIXTURE}); other arms: {FIXTURE} (default) or "
@@ -1409,6 +1773,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"--fixture for --arm {args.arm} must be {FIXTURE} or a binary_counter_movie.py copy of it.")
     else:
         args.fixture = FIXTURE
+    if args.arm in ("mmo", "mmo-cef") and fixture_counter(args.fixture) != "binary":
+        parser.error(f"--arm {args.arm} needs the binary-counter fixture ({binary_counter_movie.BINARY_FIXTURE}).")
     if args.arm == "soak" and args.soak_minutes < SOAK_MIN_MINUTES:
         parser.error(f"--soak-minutes must be >= {SOAK_MIN_MINUTES} (two wrap windows, then context loss, then at least a minute after it).")
     if (args.precheck or args.build_fixture) and args.arm != "soak":
@@ -1426,6 +1792,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--out is required.")
     if GL_REPLAY_ENV in os.environ:
         parser.error(f"{GL_REPLAY_ENV} is set; unset it so the g2 session exercises the product default.")
+    if MM_OPACITY_ENV in os.environ:
+        parser.error(f"{MM_OPACITY_ENV} is set; unset it (every session passes mm_opacity explicitly).")
     if args.kb and args.arm not in KB_ARMS[args.kb]:
         parser.error(f"--kb {args.kb} applies to --arm {' / '.join(KB_ARMS[args.kb])} only.")
     home = args.home.expanduser().resolve()
@@ -1445,23 +1813,28 @@ def main(argv: list[str] | None = None) -> int:
         allow: dict[str, Any] | None = None if p2_family(args.fixture) else {}
         armed = fixture_facts(args.fixture, allow)
         print("ARMED", json.dumps({k: armed[k] for k in ("instanceRect", "movieSlot", "overrideSlots", "assetKeys")}), flush=True)
+        if args.arm == "mmo":
+            top = mmo_masks(armed, (1080, 1920))["top"]
+            ys, xs = np.nonzero(top)
+            print("MO-2 ROI_top", [int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())], int(top.sum()), "px", flush=True)
         if allow is not None:
             print("ALLOWLIST SPLICE (harness-only)", json.dumps(allow), flush=True)
     (args.out / "runs").mkdir(parents=True, exist_ok=True)
     arms = ("2x", "positive") if args.arm == "both" else (args.arm,)
-    takes = 1 if args.arm in ("failsafe", "soak") else args.takes
+    takes = 1 if args.arm in ("failsafe", "soak", "mmo", "mmo-cef") else args.takes
+    rates = MMO_RATES if args.arm == "mmo" else (args.rate,)
     awake = subprocess.Popen(["caffeinate", "-dimsu", "-w", str(os.getpid())])
     runs: list[dict[str, Any]] = []
     try:
         for take in range(1, takes + 1):
-            for arm in arms:
+            for arm, rate in itertools.product(arms, rates):
                 if obs_running():
                     print("An OBS is still running after the previous take; stopping.", flush=True)
                     break
-                runs.append(run_take(arm, args.rate, take, home, args.out, args, armed))
+                runs.append(run_take(arm, rate, take, home, args.out, args, armed))
     finally:
         awake.terminate()
-    summary: dict[str, Any] = {"rate": args.rate, "arms": list(arms), "takes": takes, "launch": args.launch, "kb": args.kb,
+    summary: dict[str, Any] = {"rate": list(rates) if len(rates) > 1 else args.rate, "arms": list(arms), "takes": takes, "launch": args.launch, "kb": args.kb,
                                "kbSplice": args.kb_splice, "limits": LIMITS,
                                "runs": [{"arm": r["arm"], "take": r["take"], "ts": r["ts"], "valid": r["valid"], "invalid": r["invalid"],
                                          "passed": r["passed"], "nativeRepeat": native_repeat(r),
@@ -1476,7 +1849,7 @@ def main(argv: list[str] | None = None) -> int:
         binary = fixture_counter(args.fixture) == "binary"
         checks.append({"check": "every positive slide1-native repeat above every 2x one", "value": [low_pos, top_2x], "ok": ok,
                        "enforced": binary or args.rate == 25})
-    checks += cross_take(runs, armed)
+    checks += cross_take(runs, armed) + mmo_summary(runs)
     summary["checks"] = checks
     summary["passed"] = all(r["passed"] for r in runs) and all(c["ok"] for c in checks if c["enforced"])
     dest = args.out / "runs" / f"summary-{stamp()}.json"

@@ -407,3 +407,46 @@ def test_soak_schedule_refuses_a_soak_without_a_minute_after_the_context_loss():
 def test_soak_schedule_records_two_wrap_windows_before_context_loss_at_any_length(minutes, lose_at, windows):
     assert managed_obs_qualify.soak_schedule(minutes) == (lose_at, windows)
     assert all(w < lose_at < minutes for w in windows)
+
+
+def test_mm_move_is_a_decoded_phase_distinct_from_unmeasured_grey():
+    assert "mm-move" in decode.PHASES and "mm-move" not in decode.NOT_DECODED
+    frame = synthetic_frame("mm-move", 5)
+    assert decode.phase_of(frame)[0] == "mm-move"
+
+
+def series_masks() -> tuple[np.ndarray, np.ndarray]:
+    top, empty = np.zeros((1080, 1920), bool), np.zeros((1080, 1920), bool)
+    top[727:730, 793:795] = True
+    empty[690:692, 1150:1152] = True
+    return top, empty
+
+
+def test_decode_recording_returns_per_frame_roi_pixels_and_means_for_marked_frames_only(monkeypatch):
+    top, empty = series_masks()
+    frames = []
+    for i, phase in enumerate(["slide1-native", "mm-move", None, "slide2-hidden", "slide2-live"]):
+        frame = synthetic_frame(phase, i) if phase else np.full((1080, 1920, 3), 128, np.uint8)
+        frame[727:730, 793:795] = (i, 10 * i, 0)
+        frame[690:692, 1150:1152] = (0, 0, i)
+        frames.append(frame)
+    monkeypatch.setattr(decode, "read_frames", lambda _path: (dict(META), iter(frames)))
+    result = decode.decode_recording(Path("x.avi"), counter="grey", pixel_series={"top": top}, mean_series={"empty": empty})
+    series = result["series"]
+    assert series["index"].tolist() == [0, 1, 3, 4]
+    assert series["phase"].tolist() == ["slide1-native", "mm-move", "slide2-hidden", "slide2-live"]
+    assert series["pixels.top"].shape == (4, 6, 3) and series["pixels.top"].dtype == np.uint8
+    assert series["pixels.top"][:, 0].tolist() == [[0, 0, 0], [1, 10, 0], [3, 30, 0], [4, 40, 0]]
+    assert series["means.empty"].tolist() == [[0, 0, 0], [0, 0, 1], [0, 0, 3], [0, 0, 4]]
+
+
+def test_decode_recording_has_no_series_unless_asked(monkeypatch):
+    monkeypatch.setattr(decode, "read_frames", lambda _path: (dict(META), iter([synthetic_frame("slide2-live", 1)] * 6)))
+    assert "series" not in decode.decode_recording(Path("x.avi"), counter="grey")
+
+
+@pytest.mark.parametrize("mask", [np.zeros((1080, 1920), bool), np.ones((720, 1280), bool)])
+def test_decode_recording_refuses_an_empty_or_misshaped_series_mask(monkeypatch, mask):
+    monkeypatch.setattr(decode, "read_frames", lambda _path: (dict(META), iter([])))
+    with pytest.raises(ValueError, match="series mask"):
+        decode.decode_recording(Path("x.avi"), pixel_series={"top": mask})
