@@ -86,9 +86,9 @@ field tool without `OBED_LIVE_ATTACH`, `--display <id>`, must print `transport=h
       → `SUMMARY PASS` (also `--rate 30`; on this default grey P2 fixture cadence is report-only at 30, with `--fixture $F`
       below it is gated at both rates). GL replay under the managed engine, binary counter fixture
       (`F=<main checkout>/output/p2-binary`, always passed explicitly): `--arm g2 --rate 25 --takes 2 --fixture $F`,
-      `--arm failsafe --fixture $F` and, before a show, `--arm soak --soak-minutes 20 --fixture $F` → `SUMMARY PASS`.
-      The P2 movie does not loop, so that soak proves engine health, the context-loss stand-down and P3/P4 parity with
-      the off twin; its per-minute LIVE checks and wrap windows are report-only (gated only on a looping fixture).
+      `--arm failsafe --fixture $F` and, before a show, `--arm soak --precheck` then `--arm soak --soak-minutes 20`
+      → `SUMMARY PASS`. The soak's default fixture is the looping copy `<main checkout>/output/p2-loop`
+      (`scripts/loop_fixture.py --source $F`), so it also gates LIVE every minute and two loop-wrap windows.
 
 ## 0. Hardware + OBS setup (owner)
 - Blackmagic **Desktop Video** installed; device on a **native Thunderbolt port** (the Anker hub capped

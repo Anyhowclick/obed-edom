@@ -6,7 +6,7 @@ Status: **rev 2, APPROVED by the owner 2026-09-24 — OQ-1..4 all (a)** ("church
 1–5), OD-2 plan `keynote_live_gl_replay_managed_obs.plan.md` (unpushed branch `claude/od-2-gl-replay-managed-obs-5bd03f`,
 6 commits over main; §4 "Soak fixture", OQ-3a splice). Style: `~/.AGENTS.md`.
 
-**Progress (2026-09-24):** WS-A/WS-B implemented (`1fb55c59`); gate commit `21944ddb` allowlists the p2-loop shas; Codex r1 folded (`229e409b`); L2 harness fixes (`96eb6d68`: armed 1→2 recorder window grounded in the take; wrap-row owner excuse for the loop seek's readyState 1). Gates: L4 == `bd9ae9f4`; L1 PASS; L2 3to4 6/6 carried, 1to2 every offset carried in ≥1 valid take, 6/16 1to2 takes INVALID (≈200 ms decoder gap ~300 ms after the press when the loop is about to wrap; below `MAX_STALL_S`) = OQ-4(a) residual. Codex r2 folded (`cc270631`), r3 clean on spec. Full suites at `cc270631`: pytest 7543 passed / 88 skipped / 1 xfailed, `test:ui` 305/305, `test:maps` pass. Gate record `.agents/reviews/continuity-loopmode/gates-r1.md`. Open: WS-C + L5 after OD-2 merges, HALL entry, PR.
+**Progress (2026-09-24):** WS-A/WS-B implemented (`1fb55c59`); gate commit `21944ddb` allowlists the p2-loop shas; Codex r1 folded (`229e409b`); L2 harness fixes (`96eb6d68`: armed 1→2 recorder window grounded in the take; wrap-row owner excuse for the loop seek's readyState 1). Gates: L4 == `bd9ae9f4`; L1 PASS; L2 3to4 6/6 carried, 1to2 every offset carried in ≥1 valid take, 6/16 1to2 takes INVALID (≈200 ms decoder gap ~300 ms after the press when the loop is about to wrap; below `MAX_STALL_S`) = OQ-4(a) residual. Codex r2 folded (`cc270631`), r3 clean on spec. Full suites at `cc270631`: pytest 7543 passed / 88 skipped / 1 xfailed, `test:ui` 305/305, `test:maps` pass. Gate record `.agents/reviews/continuity-loopmode/gates-r1.md`. WS-C + L5 done 2026-09-25 (rebased on main `8fe3b551`), gate record `gates-r2.md`; Codex r4 folding; then PR.
 
 ## 0. Verified facts (offline; each re-verified in rev 2)
 
@@ -266,8 +266,10 @@ that G2's `texImage2D` path does not, so the grey counter reads frames apart bet
 hand-back would decode wrong. The binary decoder is wrap-aware (`is_wrap(..., mod=None)`, 12 bits > 1381 frames). Owner
 2026-09-25: the looping soak fixture gets the binary counter. Re-verify every name below on the merged OD-2.
 
-1. **Fixture.** `output/p2-loop` is rebuilt with `scripts/loop_fixture.py --force --source <main>/output/p2-binary` (one
-   fixture for L1, L2 and L5; the grey-counter build is superseded). The builder also copies `fixture.json`, adding
+1. **Fixture.** `output/p2-loop` is rebuilt with `scripts/loop_fixture.py --force --source <main>/output/p2-binary` (L2, L5).
+   **Amended 2026-09-25 (gates-r2):** L1 uses a grey-counter build of the same splice, `output/p2-loop-grey` — the
+   binary movie's static grey regions fail Vgl's all-bands-move in-page oracle (125/128; the non-looping `p2-binary`
+   fails identically, the grey build passes 128/128). The builder also copies `fixture.json`, adding
    `"loop": {"objectIds": […], "planSha256": {off, on}}` (the `loop-splice.json` record). The JSON splice is unchanged, so the
    plan shas stay `3dc67558…` / `2ba6fbed…` (the builder's self-check proves it); only the movies differ.
 2. **Harness `p2_family()`.** Today any manifest with `base == FIXTURE_BASE` counts as "qualified as is and not looping".
@@ -281,12 +283,13 @@ hand-back would decode wrong. The binary decoder is wrap-aware (`is_wrap(..., mo
 5. **Pre-check (a) enforced:** `video.loop` true on every slide-1 `untitled.mov` (`slide1Videos`), and on the carried element
    after hand-back (read `.loop` on the handed-back element, not G2 `stats.loopMode` — F6). `loop_representation`: the
    differing JSONs equal the `loop-splice.json` file list and every loop key is `loopMode="looping"` — enforced.
-6. **Soak.** OD-2 `af76ed97` places the wrap windows relative to the length (`soak_schedule`: windows at minute 1 and
+6. **Soak.** Wrap rule amended 2026-09-25 (owner option 1, `gates-r2.md`): a wrap may advance ≤ `WRAP_TOL` +
+   `LOOP_SEEK_SKIP` = 4 frames through the loop point (Chrome's `video.loop` seek skips 0–2 frames). OD-2 `af76ed97` places the wrap windows relative to the length (`soak_schedule`: windows at minute 1 and
    just before the context loss; 5 min ⇒ windows 1, 2, loss 3) and gates "wrap windows recorded == expected" on a looping
    fixture; soaks < 3 min are refused. L5 runs the 5-minute default per PR and 20 minutes before a show. With a real looping fixture, `soak_gates`' `enforced=looping` checks and `kb_verdict`'s `fixtureLooping`
    become live (Opus r1 #8 on OD-2 stops being vacuous). Wrap windows decoded with `counter="binary"` + `loop_frames=1381`.
-7. **L1/L2 re-run on the rebuilt fixture** (headless, ≈ 25 min; clock-based, expected unchanged) so every gate reads one
-   fixture; record in `gates-r2.md`.
+7. **L1/L2 re-run** (headless, ≈ 25 min): L2 on `p2-loop` (clock-based), L1 on `p2-loop-grey` (item 1 amendment);
+   recorded in `gates-r2.md`.
 8. **Tests:** `tests/test_managed_obs_qualify.py` — splice gone (no `mock.patch` of `QUALIFIED_PLAN_SHA256`), `p2_family`
    false for a manifest with `loop`, pre-check (a) KBs (a slide-1 element with `loop` false ⇒ FAIL; an extra differing JSON ⇒
    FAIL). `tests/test_loop_fixture.py` — manifest copied with `loop`, binary source accepted.
