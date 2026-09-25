@@ -472,6 +472,15 @@ def _derive_movie_texids(
     }
 
 
+def _instance(object_id: str, rect: tuple[int, int, int, int]) -> dict:
+    return {"objectId": object_id, "rect": dict(zip(("x", "y", "w", "h"), rect))}
+
+
+SLIDE1_MOVIE1 = _instance("6BB39942-6C61-4763-839D-777C09E7E594", MOVIE_ROI)
+SLIDE2_MOVIE1 = _instance("F9AFED1B-E2D7-47D4-942E-14992C808383", MOVIE_ROI)
+SLIDE3_MOVIE1 = _instance("98D59E27-7807-477D-BEFB-27EB1CF1D185", (198, 797, 952, 268))
+SLIDE4_MOVIE1 = _instance("E4728E7D-2032-4D7F-83D6-8BE0EFB7B7BC", SLIDE4_MOVIE_RECT)
+
 GL_REPLAY_BOUNDARY_1TO2 = {
     "atScene": SLIDE2_MIN_HASH, "action": "glReplay", "movieKey": MOVIE1_KEY, "fallback": "retire",
     "slotSizes": [[1920, 1080], [671, 195], [266, 236], [960, 276], [178, 157]],
@@ -489,11 +498,14 @@ GL_REPLAY_BOUNDARY_1TO2 = {
         "w": 951.54296875, "h": 267.6214599609375,
     },
     "movieSlot": 3,
+    "loop": False,
+    "src": SLIDE1_MOVIE1,
+    "dst": SLIDE2_MOVIE1,
 }
 
 
 def build_continuity_plan(bridge34: bool) -> dict:
-    """The runtime plan injected into the player — equal to
+    """The schema-2 runtime plan injected into the player — equal to
     `derive_plan(..., gl_replay=True).to_runtime()` for this fixture, plus the
     transparent background the P2 export needs. P2 loads no GL module, so the
     `glReplay` 1->2 boundary takes its `retire` fallback in the page.
@@ -503,10 +515,11 @@ def build_continuity_plan(bridge34: bool) -> dict:
     and remounts it at the fallback footprint (the stray 62e1ab7 fixed for the
     product by not naming it). `MOVIE2_ROI` stays a probe-side constant.
 
-    `bridge34=False` removes the 3->4 bridge ONLY; the 1->2 glReplay and the 2->3
-    restart stay, so `--disable-bridge34` turns exactly one finding red.
+    `bridge34=False` removes the 3->4 bridge entry ONLY; the 1->2 glReplay and the
+    2->3 restart stay, so `--disable-bridge34` turns exactly one finding red.
     """
     plan: dict = {
+        "schema": 2,
         "movies": {
             "movie1": {
                 "assetKeys": [MOVIE1_TOKEN.lower()],
@@ -515,18 +528,18 @@ def build_continuity_plan(bridge34: bool) -> dict:
         },
         "boundaries": [
             copy.deepcopy(GL_REPLAY_BOUNDARY_1TO2),
-            {"atScene": SLIDE3_MIN_HASH, "action": "restart"},
+            {
+                "atScene": SLIDE3_MIN_HASH, "action": "restart", "movieKey": MOVIE1_KEY,
+                "src": copy.deepcopy(SLIDE2_MOVIE1), "dst": copy.deepcopy(SLIDE3_MOVIE1),
+            },
         ],
         "transparentBackground": True,
     }
     if bridge34:
         plan["boundaries"].append({
-            "atScene": SLIDE4_MIN_HASH,
-            "action": "bridge",
-            "movieKey": MOVIE1_KEY,
-            "srcRect": {"x": 198, "y": 797, "w": 952, "h": 268},
-            "durationSeconds": TRANS_S,
-            "rect": dict(zip(("x", "y", "w", "h"), SLIDE4_MOVIE_RECT)),
+            "atScene": SLIDE4_MIN_HASH, "action": "bridge", "movieKey": MOVIE1_KEY,
+            "durationSeconds": TRANS_S, "loop": False,
+            "src": copy.deepcopy(SLIDE3_MOVIE1), "dst": copy.deepcopy(SLIDE4_MOVIE1),
         })
     return plan
 

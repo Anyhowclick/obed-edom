@@ -48,7 +48,8 @@ CARRIED, SIBLING = 1, 2
 OFF_FETCH_JS_SHA256 = "238e48e6bce74408edaf131b34ac576e0478b90d3e9ec88d92898147a1e5d1f9"
 OFF_CARRY_CENSUS_JS_SHA256 = "9de5ef2845830499e63a6db515f8eb7134b4f7c1e2e8c778de3545bb4190ed6e"
 OFF_POOL_CENSUS_JS_SHA256 = "ac6e41307d836be111f6af8267b0c0e35653e7118dc841502633c4c6398d7812"
-OFF_PLAN_SHA256 = "3f5b1e8e4b77e5af276bf9ce58d3ca8530a419082d54935c1bdafd71bc28435f"
+# Re-pinned in S2 for the schema-2 injection (continuity generalisation plan §2.5).
+OFF_PLAN_SHA256 = "756fb1dd6127b52049d2be4054495258af3f9eb389eab45e53f7a5993cf57ac1"
 
 
 # --------------------------------------------------------------------------- #

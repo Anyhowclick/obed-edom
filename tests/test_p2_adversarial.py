@@ -17,7 +17,6 @@ import base64
 import concurrent.futures
 import contextlib
 import copy
-import importlib.util
 import io
 import json
 import os
@@ -3387,22 +3386,21 @@ def test_the_p2_fetch_filter_substitutes_the_keep_kinds_instead_of_a_literal_lis
 
 
 def _expected_gl_replay_runtime_plan() -> dict:
-    """`EXPECTED_GL_REPLAY_RUNTIME_PLAN` from tests/test_live_continuity.py. Loaded as a
-    module, not `eval`ed: the literal names `REAL_SLOT4_OPACITY`."""
-    spec = importlib.util.spec_from_file_location(
-        "test_live_continuity_for_p2", REPO / "tests" / "test_live_continuity.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return copy.deepcopy(module.EXPECTED_GL_REPLAY_RUNTIME_PLAN)
+    """The frozen schema-2 contract's P2 flag-on plan ("p2_gl"), which
+    tests/test_live_continuity.py pins `derive_plan(..., gl_replay=True).to_runtime()` to."""
+    path = REPO / "tests" / "fixtures" / "live_continuity" / "runtime_v2_examples.json"
+    return json.loads(path.read_text(encoding="utf-8"))["p2_gl"]
 
 
 def test_injected_plan_gl_replays_movie1_before_the_restart_and_bridges_3to4():
     plan = p2.build_continuity_plan(True)
     boundaries = plan["boundaries"]
+    assert plan["schema"] == 2
     assert [b["action"] for b in boundaries] == ["glReplay", "restart", "bridge"]
     assert boundaries[0] == _expected_gl_replay_runtime_plan()["boundaries"][0]
+    assert all(b["movieKey"] == p2.MOVIE1_KEY for b in boundaries)
+    assert boundaries[0]["dst"] == boundaries[1]["src"]
+    assert boundaries[1]["dst"] == boundaries[2]["src"]
     assert boundaries[0]["atScene"] == p2.SLIDE2_MIN_HASH
     assert boundaries[0]["movieKey"] == p2.MOVIE1_KEY
     assert boundaries[0]["fallback"] == "retire"
@@ -3429,8 +3427,8 @@ def test_disable_bridge34_removes_only_the_bridge():
 
 def test_injected_plan_matches_the_derived_flag_on_runtime_plan():
     """The P2 injection must stay equal to `derive_plan(..., gl_replay=True).to_runtime()`
-    for the fixture (tests/test_live_continuity.py pins the other direction), and so
-    carry a qualified plan signature."""
+    for the fixture: both equal the frozen contract's "p2_gl" (tests/test_live_continuity.py
+    pins the derived side), and so carry a qualified plan signature."""
     from obed_edom import live_continuity
 
     derived = _expected_gl_replay_runtime_plan()
