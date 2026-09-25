@@ -133,3 +133,18 @@ With 3b, the fix sits inside the stock and R8-dropped band, so the r1 shift is g
 **r2 verdict:** every headless gate passes at `0bb21fcc`. The only P2 finding is `continueThroughMovingMagicMove3to4`,
 the expected red of the negative bridge-off arm. The preload now fires at slide-3 idle, before the 3→4 Magic Move, and
 leaves the freeze control, the 3→4 carry and slide-3 playback unchanged. The last W4 P2 run ended **19:12:37**.
+
+## OBS r1 (owner go 2026-09-25, managed OBS, PR head `ad13d8a3`, binary fixture `output/p2-binary`, quiet machine: load ≈4.5, no headless Chrome)
+
+| Gate | Verdict | Key numbers |
+|---|---|---|
+| `--arm mmo` 25 + 30 (MO-2, MO-4, HB-OBS report) | PASS both rates | HB-OBS max \|DOM − GL\|: patch on (g2-on, g2off-on, CvC g2-on-2) 0.029 px at both rates; patch off (g2-mmoff, g2off-mmoff) 2.765 / 2.751 px; GL/DOM nulls 0.000. MO-2 CvC 0.0 at both rates; R1 0 frames within τ (KB 50 / 223); R2 4.31 (KB 124.31); R4 0.0 (KB 180). MO-4: CEF `frameLen` 96 on / 88 off, unproven `[{4,size}]` / `[]`, occludedBands 0 / 20, G2 LIVE, no stand-downs |
+| `--arm mmo-cef` (MO-3) | PASS | all sessions in CEF |
+| `--arm g2 --rate 25` (M0–M4) | PASS | M3 edge re-cast: G2-S vs G2-P3 (DOM) 0 (KB stock geometry 73, unscaled KB 180); `frameLen` 96 |
+
+Recordings: `qualify-home/recordings/mmo-20260925-193948/` (25) and `mmo-20260925-194247/` (30). Runs: worktree
+`output/evidence/handback-geometry/obs-hb{1,2-cef,3-g2}/`. Eyeball copies (H.264, decision 8a): `output/evidence/handback-geometry/eyeball/`
+— `…LEFT-thisPR_RIGHT-mainMMOonly…` pairs this PR's `g2off-on` (19-40-35) with main's MMO-only `g2off-on` from the MO-7 take
+(`mmo-20260925-143530/14-36-16.avi`; same frame timing, jump at 435), at speed, mm-move stepped 8×, build 1 stepped 8×. The
+`…LEFT-fix_RIGHT-stock…` pairs compare against patch off (opaque square), so they mix the opacity fix with this one.
+Owner eyeball: PENDING.
