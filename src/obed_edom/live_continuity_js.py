@@ -959,7 +959,9 @@ PRESERVE_CORE_JS = r"""
   function keepAtFootprint(v, tx, ty) {
     if (v.__obedPinning) return;
     v.__obedPinning = true;
+    const token = v.__obedPinToken = (v.__obedPinToken || 0) + 1;
     function frame() {
+      if (v.__obedPinToken !== token) return;
       if (v.__obedRemountEpoch === -1 || v.ended || !document.contains(v)) {
         v.__obedPinning = false; return;
       }
@@ -1015,6 +1017,12 @@ PRESERVE_CORE_JS = r"""
     // remount of a held or pinned decoder must not start the move before the
     // player tears the slide down.
     if (!hasDeparted(instanceOf(v))) return false;
+    // The move owns the decoder now: end any footprint hold, or it drags the
+    // landed decoder back to the source slot once the hash settles (live D2).
+    if (v.__obedPinning) {
+      v.__obedPinning = false;
+      v.__obedPinToken = (v.__obedPinToken || 0) + 1;
+    }
     const generation = preserveGeneration;
     if (!v.__obedMotion || v.__obedMotion.generation !== generation
         || v.__obedMotion.boundary !== boundary) {
