@@ -13,6 +13,9 @@ Plan (source of truth): `.agents/plans/keynote_live_continuity_generalisation.pl
     `test_fixture_paths` fails.
   - #238 touches only the player patch (`live_runtime.py` R6–R8). The continuity core is unchanged (`9c4fc61f`). One
     functional interaction: R8 preloads scene B+1 before a Magic Move, near where the core detects teardown.
+- **Rebased again onto main `6fc85b78` (#239, docs-only) after the runs.** `4a2ea70f` is now `a31ef7e5`; its `src/`,
+  `scripts/`, `tests/` and `dashboard/` are byte-identical (`git diff --quiet`). Every result and evidence directory
+  below named `4a2ea70f` stands for `a31ef7e5`.
 - **Suites green at `4a2ea70f`:** pytest 8698 passed, 89 skipped, 1 xfailed, 0 failed; `test:ui` 305/305; `test:maps`
   542 + 2, 0 failed.
 - **P2 harness arms at `4a2ea70f`** (`run_gates.sh` P2 section only; evidence in main checkout
