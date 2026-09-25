@@ -3820,3 +3820,23 @@ def test_a_mid_deck_none_transition_is_a_cut_like_a_dissolve():
 def test_an_unknown_transition_name_still_refuses_the_deck():
     plan = _plan(_mutate_slide(SLIDE2, lambda data: _set_transition_name(data, "apple:cube")))
     assert plan == Unsupported("unsupported transition 'apple:cube' at player index 1 -> 2")
+
+
+def test_r2_an_unattributed_build_says_it_cannot_be_ruled_out():
+    """Only the carried pair's own slides count, and the reason says plainly why it refuses, so a
+    real-deck dry run surfaces it."""
+    plan = _plan(_mutate_slide(SLIDE4, _add_build("buildIn", "apple:dissolve", None)))
+    assert isinstance(plan, ContinuityPlan)
+    assert plan.refusals[1]["reason"] == (
+        f"a build-in ('apple:dissolve') on slide {SLIDE4} at player index 2 -> 3 names no object, and the "
+        "export gives no other way to tell whether it builds 'untitled.mov', so the carry is refused "
+        "rather than guessed"
+    )
+
+
+def test_r2_an_unattributed_build_on_a_slide_no_carry_touches_does_not_refuse():
+    """Slide 2 -> 3 is a Dissolve, so a nameless build-out on slide 2 affects no carry; the 1 -> 2
+    move only reads slide 2's build-ins."""
+    plan = _plan(_mutate_slide(SLIDE2, _add_build("buildOut", "apple:dissolve", None)))
+    assert isinstance(plan, ContinuityPlan)
+    assert _refusal_codes(plan) == [(1, "overlap")]
