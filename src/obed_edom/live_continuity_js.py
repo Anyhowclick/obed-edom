@@ -998,6 +998,10 @@ PRESERVE_CORE_JS = r"""
     const hn = currentHashNum();
     if (!boundary || boundary.action !== 'bridge' || hn !== boundary.atScene - 1
         || !dstRect(boundary) || !boundary.src.rect || !(boundary.durationSeconds > 0)) return false;
+    // Idle on the source slide the hash already reads `atScene - 1`; a pending
+    // remount of a held or pinned decoder must not start the move before the
+    // player tears the slide down.
+    if (!hasDeparted(instanceOf(v))) return false;
     const generation = preserveGeneration;
     if (!v.__obedMotion || v.__obedMotion.generation !== generation
         || v.__obedMotion.boundary !== boundary) {
