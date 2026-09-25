@@ -83,9 +83,12 @@ field tool without `OBED_LIVE_ATTACH`, `--display <id>`, must print `transport=h
 - [ ] Managed engine (§0a): OBS 32.2.2 in `/Applications`; Take output → Ready → a fixture session → Release
       output, with the owner's own OBS open alongside (it must stay untouched). Qualification harness, Mac awake,
       no other OBS running: `uv run python scripts/managed_obs_qualify.py --arm both --rate 25 --takes 2 --out DIR`
-      → `SUMMARY PASS` (also `--rate 30`, cadence report-only there). GL replay under the managed engine, binary counter fixture
-      (`F=<main checkout>/output/p2-binary`): `--arm g2 --rate 25 --takes 2 --fixture $F`, `--arm failsafe --fixture $F`
-      and, before a show, `--arm soak --soak-minutes 20 --fixture $F` → `SUMMARY PASS`.
+      → `SUMMARY PASS` (also `--rate 30`; on this default grey P2 fixture cadence is report-only at 30, with `--fixture $F`
+      below it is gated at both rates). GL replay under the managed engine, binary counter fixture
+      (`F=<main checkout>/output/p2-binary`, always passed explicitly): `--arm g2 --rate 25 --takes 2 --fixture $F`,
+      `--arm failsafe --fixture $F` and, before a show, `--arm soak --soak-minutes 20 --fixture $F` → `SUMMARY PASS`.
+      The P2 movie does not loop, so that soak proves engine health, the context-loss stand-down and P3/P4 parity with
+      the off twin; its per-minute LIVE checks and wrap windows are report-only (gated only on a looping fixture).
 
 ## 0. Hardware + OBS setup (owner)
 - Blackmagic **Desktop Video** installed; device on a **native Thunderbolt port** (the Anker hub capped
@@ -176,7 +179,7 @@ freezes by the on-screen counter, never by the flicker feel.
 **Browser-source rate (measured 2026-09-24, OBS 32.2.2, canvas 25, lossless recordings of this fixture's counter, 2 takes at 50):**
 share of output frames that REPEAT the previous movie frame (ideal 0) —
 source FPS 25 (matched): native movie 25–27 % · default 30 Hz: 14–23 % · **50: 8–12 %**, and a GL-replayed movie
-(on by default under Keyer output at 25 fps since OD-2, `claude/od-2-gl-replay-managed-obs-5bd03f`) 0.5–2 %. Matching the canvas is the worst setting; render the page at 2× the canvas.
+(on by default under Keyer output at 25 and 30 fps since OD-2, `claude/od-2-gl-replay-managed-obs-5bd03f`) 0.5–2 %. Matching the canvas is the worst setting; render the page at 2× the canvas.
 Harness and runs: main checkout `output/obs-rate/` (`rate.py rec` + `decode2.py`; only LOSSLESS recordings read the counter reliably).
 **Known before going in (2026-09-20, `keynote-live-continuity-2026-09-20.md`):** a movie continuing through a
 Magic Move is unreliable on screen. On `62e1ab7`, slide 2 shows a **static poster with a stray copy on top** — the

@@ -730,7 +730,13 @@ for the parked `iwa-surgical-write-generator` feature.
   (scratch home, lossless recording; refuses to start while any OBS runs; `caffeinate`; a Sleep/Wake in the take
   marks it INVALID). Limits at rate 25 (report-only at 30): decodable ≥ 0.9 in both arms; 2× arm native repeat ≤ 0.15;
   null (paused) repeat ≥ 0.95; positive control (source = canvas) repeat ≥ 0.18 and every positive run above every 2×
-  run. Lifecycle always enforced: clean quit, `cleanExit` true, user OBS tree and `.sentinel` unchanged.
+  run. Lifecycle always enforced: clean quit, `cleanExit` true, user OBS tree and `.sentinel` unchanged. GL replay
+  arms `g2` / `failsafe` / `soak` take the binary counter fixture explicitly (`--fixture <main>/output/p2-binary`; its
+  `fixture.json` movie sha256s are verified at startup and recorded per run). Binary limits: G2 repeat ≤ 1 % and ≤
+  native + 1 %; reshow ≤ 2 % and ≤ native + 2 %; distinct ≥ 0.96 × rate; hand-back max step ≤ 3 per elapsed output
+  frame with every hand-back frame decodable; 2× native ≤ 1 %; positive ≥ 5 %. Absolute repeat bounds at 25 only;
+  distinct (relative to rate), native-relative bounds and 2× vs positive enforced at both rates. `--soak-minutes` ≥ 4;
+  a non-looping soak fixture gates engine health, the context-loss stand-down and P3/P4 parity only.
 
 ---
 

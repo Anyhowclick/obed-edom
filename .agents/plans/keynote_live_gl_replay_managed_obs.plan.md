@@ -1,6 +1,6 @@
 # Plan: GL replay under managed OBS (lifting OD-2)
 
-Status: **rev 2 APPROVED by the owner** (OQ-3a + OQ-4 as proposed), 2026-09-24; **implemented** — see §10 for the 2026-09-25 decisions (rev 1 critiqued against the code; changes in §9). Planned read-only against `d12a5e14` (origin/main, #226 merged). Nothing is implemented.
+Status: **rev 2 APPROVED by the owner** (OQ-3a + OQ-4 as proposed), 2026-09-24; **implemented** — see §10 for the 2026-09-25 decisions (rev 1 critiqued against the code; changes in §9). Planned read-only against `d12a5e14` (origin/main, #226 merged).
 Parents: `keynote_live_gl_replay_arming.plan.md` (OD-1..3, gates; D5 superseded for Keyer — §6), `keynote_live_managed_obs.plan.md` (§1 "Unchanged", §10 Codex item 7, §11 risk 5), handover `keynote-live-continuity-2026-09-23-c.md` (Next 1), gate record `.agents/reviews/gl-replay-c/gates-r2.md` (gate numbering). Style: `~/.AGENTS.md` (minimal natspec, no inline comments, match local style, keep it simple).
 
 **Owner decisions (final, 2026-09-24):** (1) lifted for the managed OBS only (`bridge="obs-managed"`); external attach (`obs-cdp`) stays refused with "attach output not qualified". (2) GL replay defaults ON in Keyer mode, `OBED_LIVE_GL_REPLAY=off` opts out; HDMI stays opt-in. (3, answers to rev 2 OQs) OQ-1: ship default-on regardless; no usable screenshot alpha moves M3 to hardware day, not a blocker. OQ-2 **confirmed**: rate 30 is judged relative to native. OQ-3: the soak uses a separate looping-movie fixture (§4 "Soak fixture").
@@ -163,6 +163,11 @@ Order: P ∥ H on one branch (disjoint files; the coordinator commits) → unit 
 - **Managed default = `auto` at every output rate** (`812fd9d5`). The §1.6 rate-30 contingency was applied on 2026-09-24
   (`b255c6b6`) on grey-counter evidence and reverted once the binary counter showed 30 clean; OQ-2's rule (30 judged relative to
   native, absolute bound report-only) stands.
-- Binary limits: G2 repeat ≤ 1 % and ≤ native + 1 %; reshow ≤ 2 % and ≤ native + 2 %; distinct ≥ 0.96 × rate; hand-back max
-  forward step ≤ 3; 2× native ≤ 1 %; positive control ≥ 5 %. Absolute bounds enforced at 25 only.
-- Soak default 5 min (20 before a show or on a looping fixture). rAF keep-alive fix parked. Reviewer: Opus (Codex limit).
+- Binary limits: G2 repeat ≤ 1 % and ≤ native + 1 %; reshow ≤ 2 % and ≤ native + 2 %; distinct ≥ 0.96 × rate (relative to
+  rate, enforced at both rates); hand-back max step ≤ 3 per elapsed output frame (steps bridge undecodable frames) with every
+  hand-back frame decodable and build 1 ≥ 0.3 s after the hand-back marker; 2× native ≤ 1 %; positive control ≥ 5 % and
+  every positive run above every 2× run. Absolute repeat bounds enforced at 25 only; the rest at both rates.
+- The binary fixture is always passed explicitly (`--fixture`); its `fixture.json` movie sha256s are verified at startup.
+- Soak default 5 min, minimum 4 (a minute follows the context loss); 20 before a show or on a looping fixture. On the
+  non-looping P2 fixture the soak gates engine health, the contextLost stand-down and P3/P4 parity; per-minute LIVE and
+  wrap-window checks are report-only. rAF keep-alive fix parked. Reviewer: Opus (Codex limit).

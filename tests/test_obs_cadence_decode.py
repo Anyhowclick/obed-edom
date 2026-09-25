@@ -370,7 +370,40 @@ def test_binary_backward_step_and_loop_wrap():
     assert (mid["wrapSteps"], mid["backwardSteps"]) == (0, 1)
 
 
-@pytest.mark.parametrize("minutes,lose_at,windows", [(3, 3, (1, 2)), (5, 3, (1, 2)), (20, 11, (1, 10))])
+def test_binary_jump_across_an_undecodable_frame_is_not_hidden():
+    result = binary_stats([60, 61, 62, None, 73, 74, 75])
+    assert result["maxForwardStep"] == 11 and result["maxStepPerFrame"] == 5.5
+    assert result["maxStepWindow"] == [2, 4] and result["undecodableNearMaxStep"] == 1
+    assert result["deltaHist"] == {"1": 4} and result["decodable"] == 6
+
+
+def test_binary_steady_run_across_an_undecodable_frame_is_one_per_frame():
+    result = binary_stats([60, 61, 62, None, 64, 65, 66])
+    assert result["maxForwardStep"] == 2 and result["maxStepPerFrame"] == 1.0 and result["backwardSteps"] == 0
+
+
+def test_binary_backward_step_across_an_undecodable_frame_is_counted():
+    result = binary_stats([60, 61, 62, None, 50, 51, 52])
+    assert result["backwardSteps"] == 1 and result["maxStepPerFrame"] == 1.0
+
+
+def test_binary_advance_excludes_backward_and_wrap_steps():
+    assert binary_stats(list(range(50, 80)) + list(range(60, 90)))["advancePerS"] == round(58 / (60 / 25.0), 2)
+
+
+def test_grey_jump_across_an_undecodable_frame_is_not_hidden():
+    padded = [60, 60, 60, 61, 62] + [None] + [73, 74, 75, 75, 75]
+    greys = [None if n is None else int(round(n * decode.STEP + 0.52)) for n in padded]
+    result = decode.phase_stats(greys, 0.52, 25.0)
+    assert result["maxForwardStep"] == 11 and result["maxStepPerFrame"] == 5.5 and result["undecodableNearMaxStep"] == 1
+
+
+def test_soak_schedule_refuses_a_soak_without_a_minute_after_the_context_loss():
+    with pytest.raises(ValueError):
+        managed_obs_qualify.soak_schedule(3)
+
+
+@pytest.mark.parametrize("minutes,lose_at,windows", [(4, 3, (1, 2)), (5, 3, (1, 2)), (20, 11, (1, 10))])
 def test_soak_schedule_records_two_wrap_windows_before_context_loss_at_any_length(minutes, lose_at, windows):
     assert managed_obs_qualify.soak_schedule(minutes) == (lose_at, windows)
-    assert all(w < lose_at <= minutes for w in windows)
+    assert all(w < lose_at < minutes for w in windows)

@@ -121,3 +121,35 @@ def test_build_fixture_refuses_to_write_under_p2_recovery(tmp_path):
 
 def test_read_manifest_is_empty_for_the_grey_p2_fixture(tmp_path):
     assert movie.read_manifest(tmp_path) == {}
+
+
+def test_build_fixture_refuses_a_non_empty_dest_it_did_not_generate(tmp_path):
+    source, dest = tmp_path / "p2", tmp_path / "elsewhere"
+    fake_p2_tree(source)
+    dest.mkdir()
+    (dest / "keep.txt").write_text("owner data")
+    with pytest.raises(SystemExit):
+        movie.build_fixture(dest, source)
+    assert (dest / "keep.txt").read_text() == "owner data"
+
+
+def test_build_fixture_rebuilds_its_own_fixture_and_an_empty_dest(tmp_path):
+    source, dest = tmp_path / "p2", tmp_path / "p2-binary"
+    fake_p2_tree(source)
+    dest.mkdir()
+    movie.build_fixture(dest, source)
+    (dest / "stale.txt").write_text("x")
+    movie.build_fixture(dest, source)
+    assert not (dest / "stale.txt").exists() and movie.read_manifest(dest)["generator"] == movie.GENERATOR
+
+
+def test_verify_fixture_records_shas_and_refuses_a_swapped_movie(tmp_path):
+    source, dest = tmp_path / "p2", tmp_path / "p2-binary"
+    fake_p2_tree(source)
+    manifest = movie.build_fixture(dest, source)
+    identity = movie.verify_fixture(dest)
+    assert identity == {"manifestSha256": movie.sha256_file(dest / movie.MANIFEST), "movieSha256": [manifest["movies"][0]["sha256"]]}
+    assert movie.verify_fixture(source) is None
+    (dest / "html-disposable/assets/A/assets/Untitled.mov-0.0000-1.0000.mov").write_bytes(b"swapped")
+    with pytest.raises(SystemExit):
+        movie.verify_fixture(dest)

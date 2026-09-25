@@ -7,7 +7,8 @@ fitted over every decoded frame and `rawRepeatFrac` (raw grey unchanged) is repo
 (output origin x, y and scale of the movie), thresholded at the midpoint of its white/black markers; the frame index
 itself (no wrap), None on bad markers, an ambiguous block or bad parity (`roiOffsets[phase].fails`). `counter="auto"`
 picks binary when the strip decodes on most sampled frames. The patch / strip offset is searched per phase (slide 1's
-native movie sits a few px off). `backwardSteps` excludes loop wraps (`wrapSteps`, given `--loop-frames`);
+native movie sits a few px off). Steps bridge undecodable frames (`maxStepPerFrame` = forward step / frames elapsed).
+`backwardSteps` excludes loop wraps (`wrapSteps`, given `--loop-frames`);
 `ringMaxDelta` is the max |RGB delta| in the 2..8 px ring around each `--ring` rect vs the phase's
 first frame (`ringDiag`: worst frame, pixels over the slide2-live ring and over 20, optional crops);
 `staticMaxDelta` is the same inside each `--static` rect eroded 4 px. Only the lossless codec (4:2:0) pairs in
@@ -56,6 +57,7 @@ MARK_MAX_DIST = 40.0
 STEP = 255 / 219
 MOD = 220
 EDGE_TRIM = 2
+NEAR_MAX_STEP = 3
 SEARCH_PX = 4
 SEARCH_SAMPLES = 40
 BINARY_SEARCH_PX = 8
@@ -224,14 +226,22 @@ def counters(greys: list[int | None], c: float, counter: str = "grey") -> list[i
 
 
 def phase_stats(greys: list[int | None], c: float, fps: float, loop_frames: int | None = None, counter: str = "grey") -> dict[str, Any]:
-    """`greys` are raw patch greys (grey) or frame indices (binary)."""
+    """`greys` are raw patch greys (grey) or frame indices (binary). Histogram, repeat, distinct and gap stats use
+    adjacent decoded pairs; backward/wrap steps, `maxForwardStep` and `maxStepPerFrame` (forward step / output frames
+    elapsed) pair each decoded frame with the previous decoded one, so an undecodable frame cannot hide a jump.
+    `maxStepWindow` is that worst pair's positions in the trimmed phase, `undecodableNearMaxStep` the undecodable frames
+    within `NEAR_MAX_STEP` of it."""
     mod = modulus(counter)
     seq = trimmed(greys)
     values = counters(seq, c, counter)
-    pairs = [(a, b) for a, b in zip(values, values[1:]) if a is not None and b is not None]
-    deltas = [step(a, b, mod) for a, b in pairs]
-    backward = [(a, b) for a, b in pairs if is_backward(step(a, b, mod), mod)]
+    decoded = [(i, v) for i, v in enumerate(values) if v is not None]
+    links = [(i, j, a, b, step(a, b, mod)) for (i, a), (j, b) in zip(decoded, decoded[1:])]
+    deltas = [d for i, j, _, _, d in links if j - i == 1]
+    backward = [(a, b) for _, _, a, b, d in links if is_backward(d, mod)]
     wraps = sum(1 for a, b in backward if is_wrap(a, b, loop_frames, mod))
+    forward = [(d / (j - i), d, i, j) for i, j, _, _, d in links if not is_backward(d, mod)]
+    worst = max(forward, default=None)
+    near = sum(1 for v in values[max(0, worst[2] - NEAR_MAX_STEP):worst[3] + NEAR_MAX_STEP + 1] if v is None) if worst else None
     raw_repeats = sum(1 for a, b in zip(seq, seq[1:]) if a is not None and b is not None and a == b)
     hist = Counter(deltas)
     seconds = len(seq) / fps if fps else 0.0
@@ -242,10 +252,13 @@ def phase_stats(greys: list[int | None], c: float, fps: float, loop_frames: int 
         "deltaHist": {str(k): v for k, v in sorted(hist.items())},
         "repeatFrac": round(hist.get(0, 0) / len(deltas), 3) if deltas else None,
         "rawRepeatFrac": round(raw_repeats / len(deltas), 3) if deltas else None,
-        "advancePerS": round(sum(deltas) / seconds, 2) if seconds else None,
+        "advancePerS": round(sum(d for d in deltas if not is_backward(d, mod)) / seconds, 2) if seconds else None,
         "distinctPerS": round(sum(1 for d in deltas if d) / seconds, 2) if seconds else None,
         "gapsGE3": sum(1 for d in deltas if d >= 3),
-        "maxForwardStep": max((d for d in deltas if not is_backward(d, mod)), default=None),
+        "maxForwardStep": max((d for _, d, _, _ in forward), default=None),
+        "maxStepPerFrame": round(worst[0], 3) if worst else None,
+        "maxStepWindow": [worst[2], worst[3]] if worst else None,
+        "undecodableNearMaxStep": near,
         "backwardSteps": len(backward) - wraps,
         "wrapSteps": wraps,
         "maxRun": max((len(list(run)) for _, run in itertools.groupby(values)), default=0),

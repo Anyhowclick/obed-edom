@@ -36,6 +36,7 @@ P2_FIXTURE = REPO / "output/p2-recovery/html-adversarial"
 BINARY_FIXTURE = P2_FIXTURE.resolve().parents[1] / "p2-binary"
 FIXTURE_BASE = "p2-recovery/html-adversarial"
 MANIFEST = "fixture.json"
+GENERATOR = "scripts/binary_counter_movie.py"
 MOVIE_GLOB = "Untitled.mov-*.mov"
 REPLACED_TREES = ("html-player", "html-disposable")
 SKIPPED_TOP = frozenset({"runs"})
@@ -136,10 +137,27 @@ def read_manifest(fixture: Path) -> dict[str, Any]:
     return json.loads(path.read_text()) if path.is_file() else {}
 
 
+def verify_fixture(fixture: Path) -> dict[str, Any] | None:
+    """None for a fixture without a manifest; else the manifest and movie sha256s, after checking every replaced movie
+    on disk against its manifest sha256 (SystemExit on a mismatch)."""
+    path = fixture / MANIFEST
+    if not path.is_file():
+        return None
+    manifest = json.loads(path.read_text())
+    bad = [r["path"] for r in manifest.get("replaced") or [] if not (fixture / r["path"]).is_file()
+           or sha256_file(fixture / r["path"]) != r["sha256"]]
+    if bad or not manifest.get("replaced"):
+        raise SystemExit(f"fixture {fixture} does not match its {MANIFEST}: {bad[:5] or 'no replaced movies'}")
+    return {"manifestSha256": sha256_file(path), "movieSha256": sorted({r["sha256"] for r in manifest["replaced"]})}
+
+
 def build_fixture(dest: Path = BINARY_FIXTURE, source: Path = P2_FIXTURE) -> dict[str, Any]:
     source, dest = source.resolve(), dest.expanduser().resolve()
     if "p2-recovery" in dest.parts or dest == source:
         raise SystemExit(f"refusing to write {dest}: never under output/p2-recovery/")
+    if dest.exists() and any(dest.iterdir()):
+        if read_manifest(dest).get("generator") != GENERATOR:
+            raise SystemExit(f"refusing to replace {dest}: not empty and its {MANIFEST} does not name {GENERATOR}")
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True)
@@ -160,7 +178,7 @@ def build_fixture(dest: Path = BINARY_FIXTURE, source: Path = P2_FIXTURE) -> dic
         Path(info["path"]).unlink()
     if not replaced:
         raise SystemExit(f"no {MOVIE_GLOB} under {REPLACED_TREES} in {source}")
-    manifest = {"counter": "binary", "base": FIXTURE_BASE, "source": str(source), "generator": "scripts/binary_counter_movie.py",
+    manifest = {"counter": "binary", "base": FIXTURE_BASE, "source": str(source), "generator": GENERATOR,
                 "generatorVersion": GENERATOR_VERSION, "encode": {"codec": "libx264", "profile": "baseline", "pixFmt": "yuv420p",
                                                                  "crf": CRF, "keyint": KEYINT},
                 "movies": [{k: v for k, v in info.items() if k != "path"} for info in movies.values()], "replaced": replaced,

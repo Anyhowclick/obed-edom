@@ -15,13 +15,14 @@ Arms:
                 (screenshot S) -> hide, slide2-hidden 3 s (screenshot H) -> show, slide2-reshown 4 s ->
                 slide2-handback (advance = build 1) 4 s -> slide2-after 3 s (screenshot P3). Gates M0-M4.
   failsafe      one launch: fail-module, fail-zone, fail-bogus (forced-fail seeds), goto2, off, off-2. Gate M5.
-  soak          g2 held on slide 2 for --soak-minutes with per-minute reads, 20 s recordings around a loop wrap at
+  soak          g2 held on slide 2 for --soak-minutes (>= 4) with per-minute reads, 20 s recordings around a loop wrap at
                 minute 1 and just before loseContext (after the first half), build 1, P3/P4; an off twin. Gate M6.
                 --precheck: the loop pre-check. --build-fixture KEY: export the owner's looping copy (needs
                 --i-have-owner-go; drives Keynote).
 --fixture: the soak fixture (default output/p2-soak-loop), or for the other arms the P2 fixture (default) or its binary-counter
-copy (`binary_counter_movie.py --build-fixture`, output/p2-binary): its fixture.json selects the decoder's binary counter, and M2
-then enforces the hand-back max forward step.
+copy (`binary_counter_movie.py --build-fixture`, output/p2-binary): its fixture.json selects the decoder's binary counter (its
+movie sha256s are checked at startup and recorded per run), and M2 then enforces the hand-back max step per elapsed frame and
+an undecodable-free hand-back.
 --kb frozen|oldbytes swaps the G2 module text in this process (asserted sha, read back from the host's own report);
 --kb latelost forces contextLost while hidden. Refuses to start while any OBS runs or OBED_LIVE_GL_REPLAY is set;
 keeps the Mac awake; a Sleep/Wake, a non-lossless recording or a g2 movie past 44 s of media marks a take INVALID.
@@ -100,11 +101,13 @@ UNMEASURED_MARK = "#808080"
 LIMITS = {"nativeRepeatMax2x": 0.15, "decodableMin": 0.9, "nullRepeatMin": 0.95, "nativeRepeatMinPositive": 0.18,
           "g2RepeatMax25": 0.03, "g2RepeatMax30": 0.05, "distinctMin25": 24.0, "uploadsMin": 27.0, "reshownRepeatMax": 0.03, "staticMax": 4,
           "counterTol": 2, "movieAlphaMin": 250, "slotAlpha": 75, "slotAlphaTol": 3, "domTol": 3, "liveWaitS": 5.0,
-          "mediaEndS": 44.0, "binaryRepeatMax": 0.01, "binaryReshownMax": 0.02, "binaryNativeTol": 0.01, "binaryPositiveMin": 0.05, "binaryDistinctFrac": 0.96, "liveRingMax": 20, "handbackRingPx": 200, "handbackMaxForwardStep": 3}
+          "mediaEndS": 44.0, "binaryRepeatMax": 0.01, "binaryReshownMax": 0.02, "binaryNativeTol": 0.01, "binaryPositiveMin": 0.05, "binaryDistinctFrac": 0.96, "liveRingMax": 20, "handbackRingPx": 200, "handbackMaxStepPerFrame": 3,
+          "build1AfterMarkerMinS": 0.3}
 EXPECTED_STATS = {"frameLen": 88, "occludedBands": 20, "bandCount": 128, "innerRect": {"x": 4, "y": 4, "w": 952, "h": 268}}
 MOVIE_FPS = 30
 SOAK_LOOP_FRAMES = 1381
 SOAK_WINDOW_S = 20.0
+SOAK_MIN_MINUTES = 4
 SOAK_WINDOW_LEAD_S = 10.0
 PRECHECK_S = 105.0
 RAF_JS = ("(()=>{if(!window.__obedRafN){window.__obedRafN=1;(function t(){window.__obedRafN++;requestAnimationFrame(t);})();}"
@@ -539,7 +542,9 @@ def failsafe_script(goto: bool) -> Callable[[Session], None]:
 
 
 def soak_schedule(minutes: int) -> tuple[int, tuple[int, ...]]:
-    """Context loss after the first half, and two wrap windows before it, whatever the soak length."""
+    """Context loss after the first half, two wrap windows before it and at least one minute after it."""
+    if minutes < SOAK_MIN_MINUTES:
+        raise ValueError(f"soak of {minutes} min < {SOAK_MIN_MINUTES}: no minute after the context loss")
     lose_at = max(3, minutes // 2 + 1)
     return lose_at, tuple(sorted({1, lose_at - 1}))
 
@@ -779,13 +784,14 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     hs = max_delta(h_g2[..., 3:] if h_g2 is not None else None, s_g2[..., 3:] if s_g2 is not None else None, np.ones(shape[:2], bool))
     check(m0, "KB: H vs S alpha planes differ", hs, hs is not None and hs > 0, "> 0")
     constant = [tag for tag, img in (("S", s_g2), ("H", h_g2)) if img is not None and int(img[..., 3].min()) == 255]
-    poked = None
-    if s_g2 is not None and s_off is not None and reg["O"].any():
+    poked, unpoked = None, max_delta(s_g2, s_off, reg["O"])
+    if unpoked is not None:
         ys, xs = np.nonzero(reg["O"])
         copy = s_g2.copy()
         copy[ys[len(ys) // 2], xs[len(xs) // 2]] ^= np.array([255, 255, 255, 255], np.uint8)
         poked = max_delta(copy, s_off, reg["O"])
-    check(m0, "KB: 1-px poked G2-S fails M3 O vs g2-off-S", poked, poked is not None and poked > 0, "> tau_O (0)")
+    check(m0, "KB: 1-px poked G2-S fails M3 O vs g2-off-S", [poked, unpoked], None not in (poked, unpoked) and poked > unpoked,
+          "poked > unpoked O delta")
     gates["M0"] = gate(m0, "constant alpha 255 in " + ",".join(constant) + " -> M3 to hardware day" if constant else None)
 
     m1: list[dict[str, Any]] = []
@@ -842,11 +848,19 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     over20 = [(((d.get("ringDiag") or {}).get("slide2-handback") or {}).get("over20") or {}).get("count") for d in (d_g2, d_off)]
     check(m2, "handback ring px over 20", over20[0], over20[0] is not None and over20[0] <= LIMITS["handbackRingPx"], f"<= {LIMITS['handbackRingPx']}")
     handback = p_g2.get("slide2-handback") or {}
-    backward, forward = handback.get("backwardSteps"), handback.get("maxForwardStep")
+    backward, forward, per_frame = handback.get("backwardSteps"), handback.get("maxForwardStep"), handback.get("maxStepPerFrame")
     check(m2, "slide2-handback backwardSteps", backward, backward == 0, "== 0")
     binary = d_g2.get("counter") == "binary"
-    check(m2, "slide2-handback maxForwardStep", forward, forward is not None and forward <= LIMITS["handbackMaxForwardStep"],
-          f"<= {LIMITS['handbackMaxForwardStep']} (binary counter; report-only on grey)", enforced=binary)
+    check(m2, "slide2-handback maxStepPerFrame", per_frame, per_frame is not None and per_frame <= LIMITS["handbackMaxStepPerFrame"],
+          f"<= {LIMITS['handbackMaxStepPerFrame']} per elapsed frame (binary counter; report-only on grey)", enforced=binary)
+    frames, decoded = handback.get("frames"), handback.get("decodable")
+    check(m2, "slide2-handback every frame decodable", [decoded, frames], bool(frames) and decoded == frames,
+          "== frames (binary counter; report-only on grey)", enforced=binary)
+    check(m2, "report: handback max-step window, undecodable within 3 frames", [handback.get("maxStepWindow"),
+          handback.get("undecodableNearMaxStep")], True, enforced=False)
+    lead = g2.get("build1AfterMarkerS")
+    check(m2, "build-1 advance after handback marker (s)", lead, lead is not None and lead >= LIMITS["build1AfterMarkerMinS"],
+          f">= {LIMITS['build1AfterMarkerMinS']}")
     after = reads.get("after") or {}
     handoffs = _notes(after.get("gl") or {}, "glreplay-handoff", "api")
     check(m2, "glreplay-handoff note", len(handoffs), len(handoffs) >= 1, ">= 1")
@@ -857,7 +871,6 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
           forward, native.get("maxForwardStep")], True, enforced=False)
     check(m2, "report: handoff completedMs", [h.get("completedMs") for h in handoffs], True, enforced=False)
     check(m2, "report: g2 handback ringDiag", (d_g2.get("ringDiag") or {}).get("slide2-handback"), True, enforced=False)
-    check(m2, "report: build-1 advance after handback marker (s)", g2.get("build1AfterMarkerS"), True, enforced=False)
     check(m2, "report: g2-off handback ringMaxDelta (DOM null)", (d_off.get("ringMaxDelta") or {}).get("slide2-handback"), True, enforced=False)
     check(m2, "report: handback ring px over 20, g2 vs g2-off", over20, True, enforced=False)
     check(m2, "report: g2-off handback ringDiag", (d_off.get("ringDiag") or {}).get("slide2-handback"), True, enforced=False)
@@ -1016,16 +1029,8 @@ def failsafe_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]
         check(checks, "0 remount-* after the stand-down", remounts, not remounts, "[]")
         return gate(checks)
 
-    def released(read: Any) -> bool:
-        return bool(_notes(((read or {}).get("gl")) or {}, "glreplay-release"))
-
     def zone_expect(reason: str) -> Callable[[Any], dict[str, Any] | None]:
-        def want(read: Any) -> dict[str, Any] | None:
-            z = retired_with(read, "failure", reason)
-            if z is None and not released(read):
-                z = retired_with(read, "moduleRetired") or retired_with(read, "unengaged")
-            return z
-        return want
+        return lambda read: retired_with(read, "failure", reason)
 
     def goto_expect(read: Any) -> dict[str, Any] | None:
         retired = [z for z in zone_notes(read) if z.get("to") == "retired"]
@@ -1204,7 +1209,7 @@ def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, args: ar
     shots.mkdir(parents=True, exist_ok=True)
     run: dict[str, Any] = {"arm": arm, "rate": rate, "take": take, "ts": ts, "canvas": canvas_label, "source": source,
                            "launch": args.launch, "kb": args.kb, "kbSplice": args.kb_splice, "fixture": str(args.fixture),
-                           "counter": fixture_counter(args.fixture),
+                           "counter": fixture_counter(args.fixture), "fixtureIdentity": args.fixture_identity,
                            "soakMinutes": args.soak_minutes, "precheck": args.precheck,
                            "head": subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True).stdout.strip(),
                            "home": str(home), "recordDir": str(record_dir), "checks": [], "sessions": []}
@@ -1388,7 +1393,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fixture", type=Path, help=f"soak fixture root (default {SOAK_FIXTURE}); other arms: {FIXTURE} (default) or "
                         f"its binary-counter copy ({binary_counter_movie.BINARY_FIXTURE})")
     parser.add_argument("--precheck", action="store_true", help="soak: the loop pre-check instead of the soak")
-    parser.add_argument("--soak-minutes", type=int, default=5, help=">= 3; 20 before a show")
+    parser.add_argument("--soak-minutes", type=int, default=5, help=f">= {SOAK_MIN_MINUTES}; 20 before a show")
     parser.add_argument("--build-fixture", type=Path, metavar="KEY", help="soak: export the owner's looping .key copy into --fixture")
     parser.add_argument("--i-have-owner-go", action="store_true", help="required by --build-fixture (it drives Keynote)")
     parser.add_argument("--out", type=Path, help="writes <out>/runs/<arm>-<ts>.json, <out>/shots/ and a summary")
@@ -1404,8 +1409,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"--fixture for --arm {args.arm} must be {FIXTURE} or a binary_counter_movie.py copy of it.")
     else:
         args.fixture = FIXTURE
-    if args.arm == "soak" and args.soak_minutes < 3:
-        parser.error("--soak-minutes must be >= 3 (two wrap windows, then context loss, then the tail).")
+    if args.arm == "soak" and args.soak_minutes < SOAK_MIN_MINUTES:
+        parser.error(f"--soak-minutes must be >= {SOAK_MIN_MINUTES} (two wrap windows, then context loss, then at least a minute after it).")
     if (args.precheck or args.build_fixture) and args.arm != "soak":
         parser.error("--precheck and --build-fixture apply to --arm soak only.")
     if args.build_fixture:
@@ -1432,6 +1437,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("An OBS is already running; quit it first (one OBS at a time).")
     if not (args.fixture / "html-player").is_dir() or not (args.fixture / "html-unmodified/index.html").is_file():
         parser.error(f"fixture missing: {args.fixture}")
+    args.fixture_identity = binary_counter_movie.verify_fixture(args.fixture)
     if args.kb:
         args.kb_splice = apply_kb(args.kb)
     armed = None
@@ -1467,8 +1473,9 @@ def main(argv: list[str] | None = None) -> int:
         top_2x = max((v for v in by_arm["2x"] if v is not None), default=None)
         low_pos = min((v for v in by_arm["positive"] if v is not None), default=None)
         ok = top_2x is not None and low_pos is not None and low_pos > top_2x
+        binary = fixture_counter(args.fixture) == "binary"
         checks.append({"check": "every positive slide1-native repeat above every 2x one", "value": [low_pos, top_2x], "ok": ok,
-                       "enforced": args.rate == 25})
+                       "enforced": binary or args.rate == 25})
     checks += cross_take(runs, armed)
     summary["checks"] = checks
     summary["passed"] = all(r["passed"] for r in runs) and all(c["ok"] for c in checks if c["enforced"])
