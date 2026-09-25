@@ -411,7 +411,7 @@ def mmo_run(tmp_path: Path, rate: int = 25, **over: Any) -> dict[str, Any]:
         ser = over.get(f"series:{name}") or series(kinds[name])
         path = tmp_path / f"{rate}-{name}-series.npz"
         np.savez_compressed(path, **ser)
-        opaque_m = kinds[name] != "on"
+        opaque_m = kinds[name] != "on" and not over.get(f"translucentM:{name}")
         shots = {}
         for tag, alpha in (("D", 75), ("M", 255 if opaque_m else 75)):
             shot = tmp_path / f"{rate}-{name}-{tag}.png"
@@ -435,6 +435,20 @@ def test_mmo_gates_pass_the_patched_player_with_every_kb_failing(tmp_path):
             assert checks[f"KB: {off} {r}"]["ok"]
     assert checks["CvC g2-on vs g2-on-2 before tau"]["value"]["max"] == 0.0
     assert gates["mmoCalibration"]["cvc"]["max"] == 0.0
+
+
+def test_mmo_r4_kb_is_enforced_only_on_the_twin_without_g2(tmp_path):
+    """Live 2026-09-25: with G2 on and the patch off, G2's LIVE override makes the settle key translucent whenever shot M
+    lands after LIVE, so the g2-mmoff R4 KB is timing luck and only reported; the G2-less twin must still fail R4."""
+    gates = q.mmo_gates(mmo_run(tmp_path, **{"translucentM:g2-mmoff": True}), ARMED)
+    checks = checks_of(gates["MO-2"])
+    assert gates["MO-2"]["verdict"] == "PASS", gates["MO-2"]["failing"]
+    assert not checks["KB: g2-mmoff R4: key alpha |M - D|"]["ok"]
+    assert not checks["KB: g2-mmoff R4: key alpha |M - D|"]["enforced"]
+    assert checks["KB: g2off-mmoff R4: key alpha |M - D|"]["enforced"]
+    (tmp_path / "b").mkdir()
+    failed = q.mmo_gates(mmo_run(tmp_path / "b", **{"translucentM:g2off-mmoff": True}), ARMED)
+    assert "KB: g2off-mmoff R4: key alpha |M - D|" in failed["MO-2"]["failing"]
 
 
 def test_mmo_gates_fail_a_one_frame_opaque_pop_in_the_patched_session(tmp_path):

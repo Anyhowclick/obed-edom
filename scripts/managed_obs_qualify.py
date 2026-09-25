@@ -1182,7 +1182,8 @@ def shot_alpha(img: np.ndarray | None, mask: np.ndarray) -> np.ndarray | None:
 def mmo_key(shots: dict[str, dict[str, np.ndarray | None]], masks: dict[str, np.ndarray], alpha: float = MM_ALPHA) -> dict[str, Any]:
     """R4 on the key: per session max |M - D| alpha on ROI_top (M at settle, D on slide 1); tau_key = max(D patch on vs off per GL
     mode, |D - E_key| per session) + 1, E_key = alpha * the reference's M alpha + (1 - alpha) * that session's M empty-patch
-    alpha. The patch is empty on slide 2 only (`mmo_masks`); on slide 1 other content covers it, so D cannot supply it."""
+    alpha. The patch is empty on slide 2 only (`mmo_masks`); on slide 1 other content covers it, so D cannot supply it. R4's KB is
+    enforced on the G2-less twin only: once G2 is LIVE its own override makes the patch-off settle key translucent."""
     top, empty = masks["top"], masks["empty"]
     ref = shot_alpha((shots.get(MMO_REFERENCE) or {}).get("M"), top)
     dom: dict[str, float | None] = {}
@@ -1255,7 +1256,8 @@ def mmo_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
         check(checks, f"report: {on} R3 handover frames", r_on.get("handovers"), True, enforced=False)
         v_on, v_off = key["R4"].get(on), key["R4"].get(off)
         check(checks, f"{on} R4: key alpha |M - D|", v_on, None not in (v_on, tau_key) and v_on <= tau_key, f"<= tau_key {tau_key}")
-        check(checks, f"KB: {off} R4: key alpha |M - D|", v_off, None not in (v_off, tau_key) and v_off > tau_key, f"> tau_key {tau_key}")
+        check(checks, f"KB: {off} R4: key alpha |M - D|", v_off, None not in (v_off, tau_key) and v_off > tau_key, f"> tau_key {tau_key}",
+              enforced=off == MMO_REFERENCE)
         cadence = {n: {ph: {k: ((((sessions.get(n) or {}).get("decode") or {}).get("phases") or {}).get(ph) or {}).get(k)
                             for k in ("repeatFrac", "distinctPerS")} for ph in ("mm-move", "slide2-live")} for n in (on, off)}
         check(checks, f"report: cadence {on} vs {off}", cadence, True, enforced=False)
