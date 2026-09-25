@@ -36,7 +36,7 @@ def test_js_sha256_matches_pinned_bytes():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "bd4088e6c83382787f7e119219d812f4366c23371b41dbc6dfe56f02177f33a0"
+PINNED_CORE_SHA256 = "e189c1d2329daa5bdab1a7e85d34a45c4f904aa63045fc5ae748ab679c41f8d4"
 
 
 def test_js_sha256_matches_the_pinned_literal():
@@ -1309,23 +1309,23 @@ console.log(JSON.stringify({
 
 def test_retire_zone_blocks_remount_of_a_decoder_held_before_the_boundary():
     """`remountAll()` on a decoder the runtime holds for `A2` must do nothing
-    once the scene enters `A2`'s retire zone. The hash is moved WITHOUT running
-    the interval, so this isolates `tryRemount`'s own guard from the sweep."""
+    once the scene is in `A2`'s retire zone — here past `atScene`, where no
+    teardown was seen (a decoder the runtime placed itself). The hash is moved
+    WITHOUT running the interval, so this isolates `tryRemount`'s own guard."""
     script = _CARRY_A1_INTO_A2 + r"""
-location.hash = '#3';
-detach(stub);
+location.hash = '#4';
 const before = JSON.stringify(v.style);
 P.remountAll();
 console.log(JSON.stringify({
   styleUntouched: JSON.stringify(v.style) === before,
-  remountedInZone: P.events.filter(e => e.kind.indexOf('remount-') === 0 && e.detail.sceneHash === '#3').length,
+  remountedInZone: P.events.filter(e => e.kind.indexOf('remount-') === 0 && e.detail.sceneHash === '#4').length,
   refusals: P.events.filter(e => e.kind === 'preserve-refused').map(e => e.detail),
 }));
 """
     result = _run_retire(script, plan=_HELD_RETIRE_PLAN)
     assert result["styleUntouched"] is True
     assert result["remountedInZone"] == 0
-    assert result["refusals"] == [_refused(3, "remount", inst="A2")]
+    assert result["refusals"] == [_refused(4, "remount", inst="A2")]
 
 
 def test_retire_zone_create_element_does_not_facade_or_reuse():
@@ -1349,15 +1349,17 @@ console.log(JSON.stringify({
     assert "retire-on-start-movie" not in result["kinds"]
 
 
-def test_interval_sweep_retires_a_decoder_held_before_the_zone():
-    """A decoder carried into `A2` must be retired once the hash reaches `A2`'s
-    zone — driven by the keep-warm interval, since the player never fires
-    `hashchange`. Pause, out of the DOM, dead for reuse, and said out loud
-    with `retire-boundary` naming the instance."""
+@pytest.mark.parametrize("how", ["teardown", "sweep"])
+def test_a_held_decoder_is_retired_at_the_transition_teardown_or_by_the_sweep(how):
+    """Retire hands back from `atScene - 1` (plan contract): the player's
+    teardown on the transition scene retires the held decoder right there, so
+    the raw player draws the fade-out (live D3 A, D6: it stayed drawn through
+    the move). Past `atScene` with no teardown seen, the keep-warm sweep does
+    it. Pause, out of the DOM, dead for reuse, and said out loud once with
+    `retire-boundary` naming the instance."""
     script = _CARRY_A1_INTO_A2 + r"""
 const held = P.snapshot().filter(x => x.fromDom).length;
-location.hash = '#3';
-detach(stub);
+__LEAVE__
 const sweptBeforeTick = P.events.filter(e => e.kind === 'retire-boundary').length;
 tick();
 tick();
@@ -1373,9 +1375,11 @@ console.log(JSON.stringify({
   retire: P.events.filter(e => e.kind === 'retire-boundary').map(e => e.detail),
 }));
 """
-    result = _run_retire(script, plan=_HELD_RETIRE_PLAN)
+    leave = "location.hash = '#3';\ndetach(stub);" if how == "teardown" else "location.hash = '#4';"
+    result = _run_retire(script.replace("__LEAVE__", leave), plan=_HELD_RETIRE_PLAN)
+    scene = "#3" if how == "teardown" else "#4"
     assert result["held"] == 1
-    assert result["sweptBeforeTick"] == 0
+    assert result["sweptBeforeTick"] == (1 if how == "teardown" else 0)
     assert result["snapshot"] == 0
     assert result["paused"] is True
     assert result["inDocument"] is False
@@ -1383,9 +1387,9 @@ console.log(JSON.stringify({
     assert result["remounted"] is None
     assert result["gen"] == -1
     assert result["epoch"] == -1
-    # Swept once: the second tick finds nothing and must not re-note.
+    # Retired once: a later tick finds nothing and must not re-note.
     assert result["retire"] == [
-        {"key": "movie1", "elIds": [result["elId"]], "atScene": 4, "instance": "A2", "sceneHash": "#3"}
+        {"key": "movie1", "elIds": [result["elId"]], "atScene": 4, "instance": "A2", "sceneHash": scene}
     ]
 
 
@@ -1554,8 +1558,7 @@ console.log(JSON.stringify({
 #: Carry `A1` into `A2`, enter `A2`'s zone, then REALLY clear the held decoder's
 #: src (the in-zone hooks no longer swallow it). `__CLEAR__` is the call under test.
 _CLEARED_IN_ZONE = _CARRY_A1_INTO_A2 + r"""
-location.hash = '#3';
-detach(stub);
+location.hash = '#4';
 __CLEAR__
 const srcAfterClear = v.src || '';
 """
@@ -1589,7 +1592,7 @@ console.log(JSON.stringify({
     assert result["preserved"] is None
     assert result["gen"] == -1
     assert result["retire"] == [
-        {"key": "movie1", "elIds": [result["elId"]], "atScene": 4, "instance": "A2", "sceneHash": "#3"}
+        {"key": "movie1", "elIds": [result["elId"]], "atScene": 4, "instance": "A2", "sceneHash": "#4"}
     ]
 
 
@@ -1605,7 +1608,7 @@ P.remountAll();
 console.log(JSON.stringify({
   srcAfterClear,
   styleUntouched: JSON.stringify(v.style) === styleBefore,
-  remountedInZone: P.events.filter(e => e.kind.indexOf('remount-') === 0 && e.detail.sceneHash === '#3').length,
+  remountedInZone: P.events.filter(e => e.kind.indexOf('remount-') === 0 && e.detail.sceneHash === '#4').length,
   refusals: P.events.filter(e => e.kind === 'preserve-refused').map(e => e.detail),
 }));
 """
@@ -1613,7 +1616,7 @@ console.log(JSON.stringify({
     assert result["srcAfterClear"] == ""
     assert result["styleUntouched"] is True
     assert result["remountedInZone"] == 0
-    assert _refused(3, "remount", inst="A2") in result["refusals"]
+    assert _refused(4, "remount", inst="A2") in result["refusals"]
 
 
 # Codex r2 MAJOR 1: identity must also go STALE correctly. An element given a
@@ -1750,8 +1753,7 @@ const pooled = P.snapshot().filter(x => !x.fromDom);
 goToScene(2);
 const stub = video('A2');
 stub.setAttribute('src', 'https://host/untitled.mov');
-location.hash = '#3';
-detach(stub);
+location.hash = '#4';
 v.src = '';
 const dom = P.snapshot().filter(x => x.fromDom);
 console.log(JSON.stringify({
@@ -3887,6 +3889,45 @@ console.log(JSON.stringify({
     assert result["swaps"] == (2 if second else 1)
 
 
+def test_a_retire_hands_back_at_the_transition_even_for_a_decoder_the_player_never_tears_down():
+    """Live D3 (retire@4 of movie1 A): A's decoder sat where the runtime put it,
+    so the player's 2->3 teardown never removed it, and it stayed drawn through
+    the whole move until the sweep at #4. Any teardown of the player's own at
+    the transition scene marks it: A is retired right there (`retire-boundary`
+    at #3), and nothing remounts it inside the zone."""
+    plan = _CONTRACT["d3"]
+    result = _run_chain(plan, r"""
+const B = window.__OBED_CONTINUITY__.boundaries;
+goToScene(0);
+const m1 = playing(B[0].src.objectId, 'https://host/counter-a.mov');
+const m2 = playing(B[1].src.objectId, 'https://host/counter-b.mov');
+goToScene(1);
+detach(m1);
+detach(m2);
+goToScene(2);
+const d1 = fresh(B[0].dst.objectId, 'https://host/counter-a.mov');
+const d2 = fresh(B[1].dst.objectId, 'https://host/counter-b.mov');
+d2.parentNode = bodyEl;
+location.hash = '#3';
+tick();
+P.remountAll();
+const idle = {gen: m1.__obedGen, retire: notesOf('retire-boundary').length};
+const before = P.events.length;
+detach(d2);
+const retire = notesOf('retire-boundary').map(n => [n.instance, n.elIds, n.sceneHash]);
+P.remountAll();
+tick();
+console.log(JSON.stringify({idle, retire, m1: {gen: m1.__obedGen, paused: m1.paused, inDocument: document.contains(m1)},
+  m1Id: m1.__obedElId, a: B[2].src.objectId,
+  after: P.events.slice(before).filter(e => /^(remount-|reuse-decoder|dom-swap)/.test(e.kind)
+    && (e.detail.elId === m1.__obedElId || e.detail.oldElId === m1.__obedElId)).map(e => e.kind)}));
+""")
+    assert result["idle"] == {"gen": 0, "retire": 0}
+    assert result["retire"] == [[result["a"], [result["m1Id"]], "#3"]]
+    assert result["m1"] == {"gen": -1, "paused": True, "inDocument": False}
+    assert result["after"] == []
+
+
 def test_a_suppressed_bridge_destination_really_clears_when_its_slide_ends():
     """The fresh `dst` element a bridge suppresses decodes hidden; the player's
     clear at the end of its slide must really run (and a detach must not pool it),
@@ -4232,6 +4273,7 @@ const s4 = fresh('A4');
 props.suppressed = s4.__obedSuppressed34 === true;
 goToScene(7);
 detach(s4);
+s4.src = '';
 P.remountAll();
 tick();
 P.clear();
