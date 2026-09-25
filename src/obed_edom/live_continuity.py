@@ -1356,11 +1356,11 @@ def _boundary_transition_off_last_event(events: list[Any], transition: dict[str,
     return not isinstance(effects, list) or not any(effect is transition for effect in effects)
 
 
-def _build_targets(events: list[Any], build_type: str) -> tuple[set[str], bool]:
+def _build_targets(events: list[Any], build_type: str) -> tuple[set[str], list[str]]:
     """Object ids that build in/out on a slide, ignoring movie-start builds (they do not stop
-    Magic Move pairing, F3), plus whether any such build names no object."""
+    Magic Move pairing, F3), plus the names of any such builds that name no object."""
     targets: set[str] = set()
-    unattributed = False
+    unattributed: list[str] = []
     for event in events:
         for effect in (event.get("effects") if isinstance(event, dict) else None) or []:
             if not isinstance(effect, dict) or effect.get("type") != build_type:
@@ -1371,7 +1371,7 @@ def _build_targets(events: list[Any], build_type: str) -> tuple[set[str], bool]:
             if isinstance(object_id, str) and object_id:
                 targets.add(object_id)
             else:
-                unattributed = True
+                unattributed.append(str(effect.get("name")))
     return targets, unattributed
 
 
@@ -1530,8 +1530,15 @@ def _carry_refusal(
     built_in, in_unattributed = _build_targets(destination.events, "buildIn")
     if src.object_id in built_out or dst.object_id in built_in:
         return "R2", f"'{asset}' builds in or out at {desc}, so Magic Move does not pair it"
-    if out_unattributed or in_unattributed:
-        return "R2", f"a build at {desc} names no object, so it may build '{asset}' in or out"
+    for slide, build_type, names in (
+        (source, "build-out", out_unattributed), (destination, "build-in", in_unattributed),
+    ):
+        if names:
+            return "R2", (
+                f"a {build_type} ({names[0]!r}) on slide {slide.uuid} at {desc} names no object, and the "
+                f"export gives no other way to tell whether it builds '{asset}', so the carry is refused "
+                "rather than guessed"
+            )
     if src.loop != dst.loop:
         return "R4", f"'{asset}' loops on one side of {desc} only; a carried decoder keeps its source's loop setting"
     overlap = _overlap_refusal(destination.events, dst, asset, destination.player_index, destination.uuid)
