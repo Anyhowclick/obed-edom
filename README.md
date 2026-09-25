@@ -163,9 +163,11 @@ slide draws it. Build Preview gets it too. The middle of the move shows a blend 
 the two pictures. The fix only engages when the next slide has already rendered
 at the start of the move. A queued double click is one case where it has not;
 that move looks as it does without the fix. With the patch on, GL replay on the
-P2 fixture reports `frameLen` 96 and `opacityUnproven` `[{4, "size"}]` (patch
-off: 88 and `[]`). Qualify it with `scripts/mm_handback_probe.py` plus the
-Magic Move opacity harnesses above.
+P2 fixture reports `opacityUnproven` `[{4, "size"}]` (patch off: `[]`). Its
+`frameLen` depends on frame timing, so the probes only report it; the OBS
+harness's expected value is first measured in the owner's OBS session. Qualify
+it with `scripts/mm_handback_probe.py` plus the Magic Move opacity harnesses
+above.
 
 ### Codec report
 

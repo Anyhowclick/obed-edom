@@ -84,8 +84,6 @@ MASK_PAD_PX = 2
 ROI_TOP = (797, 727, 12, 58)
 REST_OFF = [1, 0, 1, 1, 1]
 UNPROVEN_ON = [{"slot": SLOT, "reason": "size"}]
-#: 1->2 draw ordinals with a `mixFactor` in effect: 0 is Keynote's own `contents` crossfade (stock too); the hand-back fix
-#: adds the sentinel (2) and the square (SLOT).
 STOCK_BLENDED = [0]
 BLENDED_ON = [0, 2, SLOT]
 OCCLUDED_BANDS = {"on": 0, "off": 20}

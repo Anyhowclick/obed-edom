@@ -705,10 +705,28 @@ def test_mmo_mo4_fails_an_unproven_set_that_is_neither_baseline(tmp_path):
 
 def test_mmo_take_with_an_unengaged_fix_is_invalid(tmp_path):
     run = mmo_run(tmp_path, **{"stats:g2-on": {**q.EXPECTED_STATS["on"], "frameLen": 88, **q.UNENGAGED_STATS}})
-    assert q.mmo_gates(run, ARMED)["MO-4"]["verdict"] == "INVALID"
+    gates = q.mmo_gates(run, ARMED)
+    assert gates["MO-4"]["verdict"] == "INVALID" and gates["MO-2"]["verdict"] == "INVALID"
     invalid: list[str] = []
     q.arm_gates("mmo", run, types.SimpleNamespace(), ARMED, invalid)
-    assert invalid == ["g2-on: hand-back fix not engaged (G2 frameLen 88, unproven rest-opacity)"]
+    assert invalid == ["MO-2 INCONCLUSIVE: g2-on: hand-back fix not engaged (G2 frameLen 88, unproven rest-opacity)"]
+
+
+def test_mmo_take_is_invalid_when_the_cvc_session_g2_on_2_did_not_engage(tmp_path):
+    # Review r1 F2: g2-on-2 feeds the enforced MO-2 CvC; a non-engaged CvC twin must not read as a control.
+    run = mmo_run(tmp_path, **{"stats:g2-on-2": {**q.EXPECTED_STATS["on"], "frameLen": 88, **q.UNENGAGED_STATS}})
+    gates = q.mmo_gates(run, ARMED)
+    assert gates["MO-2"]["verdict"] == "INVALID" and "g2-on-2: hand-back fix not engaged" in gates["MO-2"]["invalid"]
+    assert gates["MO-4"]["verdict"] == "PASS"
+    invalid: list[str] = []
+    q.arm_gates("mmo", run, types.SimpleNamespace(), ARMED, invalid)
+    assert len(invalid) == 1 and "g2-on-2: hand-back fix not engaged" in invalid[0]
+
+
+def test_mmo_g2off_on_has_no_engagement_signal_and_is_not_invalidated(tmp_path):
+    run = mmo_run(tmp_path, **{"stats:g2off-on": {**q.EXPECTED_STATS["on"], **q.UNENGAGED_STATS}})
+    gates = q.mmo_gates(run, ARMED)
+    assert gates["MO-2"]["invalid"] is None and gates["MO-4"]["invalid"] is None
 
 
 # --- HB-OBS hand-back geometry (report-only, decision 7a) ---------------------------------------------------------------

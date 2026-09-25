@@ -166,7 +166,7 @@ Anything else keeps today's bytes and behaviour.
 | # | Site (byte) | Before | After |
 |---|---|---|---|
 | R6 | `fB.setupTexture` tail (2263321) | `B[g].toTexture=R.createTexture(this.gl,i)}}return B}` | same + `return"apple:magic-move-implied-motion-path"===A.name&&this.__obedHandbackTextures(A,B),B}` + method below |
-| R7 | `QB` contents case (2190367) | `case"contents":C=e.toTexture}}` | `case"contents":C=e.toTexture}}e.obedMix&&(C=e.toTexture);` |
+| R7 | `QB` contents case (2190367) | `case"contents":C=e.toTexture}}var T=` (as shipped: extended by `var T=` so the anchor is not contained in its replacement) | `case"contents":C=e.toTexture}}e.obedMix&&(C=e.toTexture);var T=` |
 | R8 | `preloadTextures` tail (2347821) | `this.textureManager.loadScene(B)}unloadTextures(){` | `this.textureManager.loadScene(B),B+1<A.numScenes&&this.textureManager.loadScene(B+1)}unloadTextures(){` |
 
 The R6 method, verbatim as it would sit in `live_runtime.py` (also `evidence/candidate_replacements_hbfix4.py`):
@@ -186,7 +186,7 @@ _MM_HANDBACK_METHOD = (
     b"for(var j=0;j<J.length;j++){var p=J[j],P=p.property;"
     b"\"transform.scale.x\"===P?sx=p.to.scalar:\"transform.scale.y\"===P?sy=p.to.scalar:"
     b"\"transform.translation\"===P?(tx=p.to.pointX,ty=p.to.pointY):\"opacity\"===P&&p.from.scalar===p.to.scalar||(ok=!1)}"
-    b"1===sx&&1===sy&&0===tx&&0===ty&&(ok=!1);"
+    b"1===sx&&1===sy&&(ok=!1);"
     b"var W=e.initialState.anchorPoint,ax=W.pointX*e.width,ay=W.pointY*e.height,"
     b"qx=e.offset.pointX+tx+ax-sx*ax,qy=e.offset.pointY+ty+ay-sy*ay,qw=sx*e.width,qh=sy*e.height,"
     b"m=L.filter(function(r){return Math.abs(r.x-qx)<=.01&&Math.abs(r.y-qy)<=.01&&Math.abs(r.w-qw)<=.01&&Math.abs(r.h-qh)<=.01});"
@@ -203,7 +203,7 @@ _MM_HANDBACK_METHOD = (
     and neither pair's bytes contain the other.
   - Applying MMO then R6–R8, or R6–R8 then MMO, gives identical bytes. All 8 after-counts are 1.
   - `patch_rendering` (no hook) takes them unchanged.
-  - Served sha: `ba709b7a…` (`patch_player`), `1c779a82…` (`patch_rendering`).
+  - Served sha (as shipped, rule 5b): `e17264c0…` (`patch_player`), `5797b302…` (`patch_rendering`); rev 2 prototype (any-geometry rule) was `ba709b7a…` / `1c779a82…`.
   - R3's `var T=` (2190397) sits 30 bytes after R7's site, untouched.
 - **Where.** Append R6–R8 to `_MM_OPACITY_REPLACEMENTS` (decision 2), so the existing loop, count checks, switch, preview
   split and synthetic-player tests (`test_live_runtime.py:171–245`, `test_live_host.py:85`, `test_live_api.py:318`,

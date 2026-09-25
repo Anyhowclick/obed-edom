@@ -37,8 +37,9 @@ an undecodable-free hand-back.
 --kb frozen|oldbytes swaps the G2 module text in this process (asserted sha, read back from the host's own report);
 --kb latelost forces contextLost while hidden. Refuses to start while any OBS runs or OBED_LIVE_GL_REPLAY or
 OBED_LIVE_MM_OPACITY is set (every session passes mm_opacity explicitly); keeps the Mac awake; a Sleep/Wake, a non-lossless
-recording, a g2 movie past 44 s of media, or a patch-on G2 session with the pre-fix unproven set (rest-opacity: the
-hand-back fix did not engage, `UNENGAGED_STATS`) marks a take INVALID.
+recording, a g2 movie past 44 s of media, or a patch-on G2 session (g2, g2-on, g2-on-2) with the pre-fix unproven set
+(rest-opacity: the hand-back fix did not engage, `UNENGAGED_STATS`) marks a take INVALID; the patch-on sessions without
+G2 (g2-off, g2off-on) carry no engagement signal and are unchecked.
 
 usage: uv run python scripts/managed_obs_qualify.py --arm g2 --rate 25 --takes 2 --out DIR
        uv run python scripts/managed_obs_qualify.py --score DIR
@@ -122,8 +123,6 @@ LIMITS = {"nativeRepeatMax2x": 0.15, "decodableMin": 0.9, "nullRepeatMin": 0.95,
 G2_STATS = {"bandCount": 128, "innerRect": {"x": 4, "y": 4, "w": 952, "h": 268}}
 EXPECTED_STATS = {"on": {**G2_STATS, "frameLen": 96, "occludedBands": 0, "opacityUnproven": [{"slot": 4, "reason": "size"}]},
                   "off": {**G2_STATS, "frameLen": 88, "occludedBands": 20, "opacityUnproven": []}}
-#: Patch on, hand-back fix not engaged (timing-dependent, hand-back plan §3.4): the pre-fix on-mode unproven set (Texture still
-#: holds the 178x157 source, so `size` passes and `rest-opacity` fails). Not `frameLen`: it can vary with timing.
 UNENGAGED_STATS = {"opacityUnproven": [{"slot": 4, "reason": "rest-opacity"}]}
 _FIRST_CEF = "first CEF measurement is this value; a mismatch is a finding to root-cause, not a threshold to retune"
 EXPECTED_STATS_SOURCE = {
@@ -173,7 +172,6 @@ MMO_ALPHA_FLOOR_MAX = 0.1
 MMO_SLIDE1_S = 6.0
 MMO_LIVE_S = 4.0
 MMO_CEF_GL = ("off", "auto")
-#: HB-OBS (hand-back plan §4, decision 7a: report-only): max |DOM - GL| edge move at build 1 on the recording's tv-range Y plane.
 HB_OBS_MAX_PX = 0.25
 HB_OBS_WHITE = 235
 HB_OBS_SIZE = (1920, 1080)
@@ -882,8 +880,11 @@ def g2_stats_checks(checks: list[dict[str, Any]], stats: dict[str, Any], mode: s
 
 
 def handback_unengaged(session: dict[str, Any]) -> str | None:
-    """A patch-on G2 session whose hand-back fix did not engage replays today's geometry: its take is INVALID, never a stock
-    twin read as a pass or a failure of the fix."""
+    """A patch-on G2 session whose hand-back fix did not engage (hand-back plan §3.4: timing-dependent) replays today's
+    geometry: its take is INVALID, never a stock twin read as a pass or a failure of the fix. The signal is G2's unproven
+    set still holding the pre-fix `rest-opacity` (`UNENGAGED_STATS`: Texture is still the 178x157 source, so `size` passes);
+    `frameLen` is no signal, the player's uniform cache makes it timing-dependent. A patch-on session without G2
+    (`g2-off`, `g2off-on`) has no signal: its engagement is unchecked under OBS."""
     stats = api_of((session.get("reads") or {}).get("liveEnd")).get("stats") or {}
     if mm_mode(session) != "on" or any(stats.get(k) != v for k, v in UNENGAGED_STATS.items()):
         return None
@@ -1367,7 +1368,9 @@ def mmo_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
         g2_stats_checks(m4, api_of((sess.get("reads") or {}).get("liveEnd")).get("stats") or {}, mm_mode(sess), f"{name}: ")
     live = median_delta(phase_median(series.get("g2-on"), ("slide2-live",)), phase_median(series.get("g2-mmoff"), ("slide2-live",)))
     check(m4, "report: g2-on vs g2-mmoff slide2-live ROI_top (LIVE equal)", live, True, "~0 (headless MO-4 enforces 0)", enforced=False)
-    reasons = [*([] if premise_ok else [f"slide-1 badness {calibration} > {MMO_CALIB_MAX} (premise: neutral backgrounds)"]),
+    unengaged = [r for r in (handback_unengaged(sessions.get(n) or {}) for n in ("g2-on", MMO_CVC[1])) if r]
+    reasons = [*unengaged,
+               *([] if premise_ok else [f"slide-1 badness {calibration} > {MMO_CALIB_MAX} (premise: neutral backgrounds)"]),
                *([] if chroma_ok else [f"alphaFloor {alpha_floor} > {MMO_ALPHA_FLOOR_MAX} (premise: a coloured square)"])]
     invalid = f"MO-2 INCONCLUSIVE: {'; '.join(reasons)}" if reasons else None
     return {"MO-2": gate(checks, invalid), "MO-4": gate(m4, handback_unengaged(sessions.get("g2-on") or {})),
@@ -1735,7 +1738,7 @@ def decode_session(session: dict[str, Any], recording: str | None, *, rings: lis
 def handback_geometry_safe(recording: Path, series: dict[str, np.ndarray], size: Any) -> dict[str, Any]:
     try:
         return handback_geometry(recording, series, size)
-    except Exception as exc:  # noqa: BLE001  report-only: never fails a take
+    except Exception as exc:  # noqa: BLE001
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
@@ -1871,7 +1874,8 @@ def arm_gates(arm: str, run: dict[str, Any], args: argparse.Namespace, armed: di
         return failsafe_gates(run, armed)
     if arm == "mmo":
         gates = mmo_gates(run, armed)
-        invalid += [gates[g]["invalid"] for g in ("MO-2", "MO-4") if gates[g]["invalid"]]
+        if gates["MO-2"]["invalid"]:
+            invalid.append(gates["MO-2"]["invalid"])
         return gates
     if arm == "mmo-cef":
         return mmo_cef_gates(run)
