@@ -37,6 +37,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
+from continuity_core_variants import VARIANTS, parse_strip, strip_entries, variant_core  # noqa: E402
 from p2_alpha_spike import CHROME, ChromeCdp, _free_port, _wait_ready  # noqa: E402
 from p2_recovery_html_dissolve_live import (  # noqa: E402
     MEDIA_PROBE_JS,
@@ -81,6 +82,7 @@ from obed_edom.html_alpha_probe import (  # noqa: E402
 )
 from obed_edom.html_preview import export_html  # noqa: E402
 from obed_edom.live_continuity import ContinuityPlan, Unsupported, derive_plan  # noqa: E402
+from obed_edom.live_continuity_js import PRESERVE_CORE_JS  # noqa: E402
 from obed_edom.live_gl_replay_js import GL_REPLAY_VERSION, gl_replay_script, validate_gl_replay_entry  # noqa: E402
 from obed_edom.live_gl_replay_js import js_sha256 as gl_replay_js_sha256  # noqa: E402
 from obed_edom.live_runtime import (  # noqa: E402
@@ -573,14 +575,40 @@ def _served_script_order(html: str) -> list[str]:
     return [name for _, name in sorted(found)]
 
 
-def _inject_player(player_dir: Path, plan: dict, *, gl_auto: bool, canvas: dict) -> tuple[dict, dict, dict | None]:
-    """Inject the P2 scripts; auto adds GL then INFO so the served order is plan < core < INFO < GL < main.js (plan §4.1)."""
+def _injection_arm(reference_plan: dict) -> tuple[dict, str, dict]:
+    """`--core-variant NAME` / `--strip ACTION[@atScene]`: the plan and core to inject in
+    place of `reference_plan` and `PRESERVE_CORE_JS`, and the record the report header shows."""
+    variant = _arg_value("--core-variant", "") or None
+    strip = _arg_value("--strip", "") or None
+    try:
+        core = PRESERVE_CORE_JS if variant is None else variant_core(variant)
+        injected = reference_plan if strip is None else strip_entries(reference_plan, *parse_strip(strip))
+    except ValueError as exc:
+        raise SystemExit(f"{exc} (variants: {', '.join(VARIANTS)})") from exc
+    return injected, core, {
+        "coreVariant": variant,
+        "coreSha256": hashlib.sha256(core.encode()).hexdigest(),
+        "strip": strip,
+        "injectedPlanSha256": hashlib.sha256(json.dumps(injected).encode()).hexdigest(),
+        "referencePlanSha256": hashlib.sha256(json.dumps(reference_plan).encode()).hexdigest(),
+        "injectedPlan": injected,
+    }
+
+
+def _inject_player(
+    player_dir: Path, plan: dict, *, gl_auto: bool, canvas: dict,
+    core: str = PRESERVE_CORE_JS, gl_plan: dict | None = None,
+) -> tuple[dict, dict, dict | None]:
+    """Inject the P2 scripts; auto adds GL then INFO so the served order is plan < core < INFO < GL < main.js (plan §4.1).
+
+    `gl_plan` (default `plan`) only gates the plan-independent GL module body, so a stripped
+    `plan` still ships the module and the page decides what an absent entry means."""
     gl_record = None
     if gl_auto:
         gl = _inject_script(
             player_dir,
             marker_attr='data-obed-p2-gl-replay="1"',
-            script=_gl_replay_body(plan),
+            script=_gl_replay_body(plan if gl_plan is None else gl_plan),
             already="data-obed-p2-gl-replay=",
         )
         info = _inject_script(
@@ -590,7 +618,15 @@ def _inject_player(player_dir: Path, plan: dict, *, gl_auto: bool, canvas: dict)
             already="data-obed-p2-gl-info=",
         )
         gl_record = {"gl": gl, "info": info}
-    preserve = inject_preserve(player_dir)
+    if core == PRESERVE_CORE_JS:
+        preserve = inject_preserve(player_dir)
+    else:
+        preserve = _inject_script(
+            player_dir,
+            marker_attr='data-obed-p2-preserve="1"',
+            script=core,
+            already="data-obed-p2-preserve=",
+        )
     plan_inject = inject_continuity_plan(player_dir, plan)
     if gl_record is not None:
         html = (player_dir / "index.html").read_text(encoding="utf-8")
@@ -673,17 +709,23 @@ def _chrome(profile: Path, *, gl_auto: bool) -> ChromeCdp:
 WEBGL_AVAILABLE_JS = "(() => { try { return !!document.createElement('canvas').getContext('webgl'); } catch (e) { return false; } })()"
 
 
-def _gl_boot_ok(check: object) -> bool:
+def _gl_boot_ok(check: object, *, expect_module: bool = True) -> bool:
+    """`expect_module=False` (a plan stripped of its glReplay entry): the module must have
+    declined to install -- no `__OBED_GL_REPLAY__` at all -- with everything else as usual."""
     if not isinstance(check, dict):
         return False
     info = check.get("info") if isinstance(check.get("info"), dict) else {}
+    module_ok = (
+        check.get("glVersion") == GL_REPLAY_VERSION and check.get("glState") not in (None, "RETIRED")
+        if expect_module
+        else "glVersion" in check and check.get("glVersion") is None and check.get("glState") is None
+    )
     return bool(
         check.get("order") == GL_SERVED_ORDER
         and check.get("webgl") is True
         and check.get("obedLive") is True
         and check.get("runtimeVersion") == RUNTIME_VERSION
-        and check.get("glVersion") == GL_REPLAY_VERSION
-        and check.get("glState") not in (None, "RETIRED")
+        and module_ok
         and info.get("installed") is True
     )
 
@@ -3346,11 +3388,12 @@ async def _run(player: Path) -> dict:
     # The 1->2 retire hands movie1 back to the player at slide 2 (refused carry);
     # the 3->4 bridge keeps the movie1 decoder playing across the moving cut.
     continuity_plan = build_continuity_plan(bridge34)
+    injected_plan, core, arm = _injection_arm(continuity_plan)
     preserve, plan_inject, gl_inject = _inject_player(
-        player_dir, continuity_plan, gl_auto=gl_auto, canvas=inv["canvas"]
+        player_dir, injected_plan, gl_auto=gl_auto, canvas=inv["canvas"], core=core, gl_plan=continuity_plan
     )
-    write_json(root / "preserve-inject.json", preserve)
-    write_json(root / "continuity-plan-inject.json", {**plan_inject, "plan": continuity_plan})
+    write_json(root / "preserve-inject.json", {**preserve, "coreVariant": arm["coreVariant"], "coreSha256": arm["coreSha256"]})
+    write_json(root / "continuity-plan-inject.json", {**plan_inject, "plan": injected_plan, "strip": arm["strip"]})
     main_js = None
     if gl_auto:
         main_js, main_meta = _patched_main_js(player_dir)
@@ -3381,7 +3424,8 @@ async def _run(player: Path) -> dict:
         boot = await _boot(chrome, base)
         if gl_auto:
             boot["glReplayCheck"] = {**(await chrome.evaluate(GL_BOOT_CHECK_JS) or {}), "webgl": webgl}
-            if not _gl_boot_ok(boot["glReplayCheck"]):
+            expect_module = any(b.get("action") == "glReplay" for b in injected_plan["boundaries"])
+            if not _gl_boot_ok(boot["glReplayCheck"], expect_module=expect_module):
                 raise SystemExit(f"--gl-replay auto boot check failed: {boot['glReplayCheck']!r}")
         # The continuity plan (restart boundary, and the 3->4 bridge boundary iff
         # bridge34) is already baked into index.html by inject_continuity_plan
@@ -3995,7 +4039,7 @@ async def _run(player: Path) -> dict:
                 "refusedCarry1to2": refused_carry,
                 "lingeringOnSlide2": lingering_on_slide2,
                 "poolCensusOnSlide2": pool_census_s2,
-                "injectedBoundaries": continuity_plan["boundaries"],
+                "injectedBoundaries": injected_plan["boundaries"],
                 "diagnosticsNonGating": [
                     "continues", "noJump", "remountRestart", "pre", "firstAfter", "post",
                     "visibleMovieMotion", "indexRun", "indexSequence", "movieTexids",
@@ -4349,7 +4393,7 @@ async def _run(player: Path) -> dict:
                 "glCarryCensus": gl_carry_census,
                 "glSlide2Reads": gl_slide2_reads,
                 "lingeringOnSlide2": lingering_on_slide2,
-                "injectedBoundaries": continuity_plan["boundaries"],
+                "injectedBoundaries": injected_plan["boundaries"],
                 "diagnosticsNonGating": ["refusedCarry1to2", "liveContinuity1to2", "motionAcrossFlip"],
                 "refusedCarry1to2": refused_carry,
                 "liveContinuity1to2": live_continuity,
@@ -4440,6 +4484,7 @@ async def _run(player: Path) -> dict:
         "preScores": pre_scores,
         "midScores": mid_scores,
         "continuityPlan": continuity_plan,
+        "injection": arm,
         "refusedCarry1to2": refused_carry,
         "footprintFullyLive": footprint_live,
         "continue1to2": cont,
@@ -4496,6 +4541,8 @@ async def _run(player: Path) -> dict:
         "",
         f"Generated: {report['generated']}",
         f"Source unchanged: **{report['sourceUnchanged']}**",
+        f"Core variant: {arm['coreVariant'] or 'none'} · injected core sha256: {arm['coreSha256']}",
+        f"Strip: {arm['strip'] or 'none'} · injected plan sha256: {arm['injectedPlanSha256']}",
         f"success: **{success}**",
         "",
         "## Findings",
