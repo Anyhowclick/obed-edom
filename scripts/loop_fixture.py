@@ -205,7 +205,7 @@ def read_manifest(source: Path) -> dict[str, Any] | None:
         return None
     manifest = json.loads(path.read_bytes())
     frames = [movie.get("frames") for movie in manifest.get("movies") or []]
-    if any(f != LOOP_FRAMES for f in frames):
+    if not frames or any(f != LOOP_FRAMES for f in frames):
         raise FixtureError(f"{path}: movie frames {frames} are not the loop period {LOOP_FRAMES}")
     if "loop" in manifest:
         raise FixtureError(f"{path} already carries a loop key")

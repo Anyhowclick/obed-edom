@@ -20,6 +20,7 @@ import managed_obs_qualify  # noqa: E402
 import obs_cadence_decode as decode  # noqa: E402
 
 SOAK_LOOP_FRAMES = 1381
+GREY_LOOP_FRAMES = 100
 
 
 def greys_for(counter: list[int], c: float = 0.52) -> list[int | None]:
@@ -49,29 +50,43 @@ def test_backward_step_is_counted():
 
 
 def test_loop_wrap_counts_as_wrap_not_backward():
-    end = (SOAK_LOOP_FRAMES - 1) % decode.MOD
+    end = GREY_LOOP_FRAMES - 1
     counter = list(range(end - 20, end + 1)) + list(range(0, 20))
-    result = stats(counter, SOAK_LOOP_FRAMES)
+    result = stats(counter, GREY_LOOP_FRAMES)
     assert result["wrapSteps"] == 1
     assert result["backwardSteps"] == 0
 
 
 def test_loop_wrap_allows_a_normal_step_plus_the_browser_loop_seek_skip():
     """L5 soak 2026-09-25, window 1: 1380 -> 3 (4 frames across the loop point) is a wrap: a 2-frame capture step plus
-    the 0-2 frames Chrome's own `video.loop` seek skips (measured on the element's clock, 40 headless wraps)."""
-    end = (SOAK_LOOP_FRAMES - 1) % decode.MOD
+    the 0-2 frames Chrome's own `video.loop` seek skips (measured on the element's clock, 40 headless wraps). Grey
+    scores wraps only for a loop no longer than its modulus (Codex r4 #2), so this runs on a 100-frame grey loop (its wrap reads as a backward step under mod 220)."""
+    end = GREY_LOOP_FRAMES - 1
     for pre_end, post_start, advanced in ((end, 3, 4), (end - 1, 2, 4), (end - 2, 1, 4), (end, 0, 1)):
         counter = list(range(end - 20, pre_end + 1)) + list(range(post_start, 20))
-        result = stats(counter, SOAK_LOOP_FRAMES)
+        result = stats(counter, GREY_LOOP_FRAMES)
         assert (result["wrapSteps"], result["backwardSteps"], result["maxWrapStep"]) == (1, 0, advanced), (pre_end, post_start)
 
 
 def test_known_bad_a_wrap_skipping_more_than_the_measured_seek_is_backward():
-    end = (SOAK_LOOP_FRAMES - 1) % decode.MOD
+    end = GREY_LOOP_FRAMES - 1
     for pre_end, post_start in ((end, 4), (end - 2, 2), (end - 3, 0)):
         counter = list(range(end - 20, pre_end + 1)) + list(range(post_start, 20))
-        result = stats(counter, SOAK_LOOP_FRAMES)
+        result = stats(counter, GREY_LOOP_FRAMES)
         assert (result["wrapSteps"], result["backwardSteps"], result["maxWrapStep"]) == (0, 1, None), (pre_end, post_start)
+
+
+def test_known_bad_grey_cannot_score_a_loop_longer_than_its_modulus():
+    """Codex r4 #2: with a 1381-frame loop the grey counter (mod 220) reads the last frame as 60, so a mid-period jump
+    from absolute frame 280 (decodes 60) to 0 is indistinguishable from the real wrap; both must count as backward."""
+    end = (SOAK_LOOP_FRAMES - 1) % decode.MOD
+    assert end == 60 and 280 % decode.MOD == 60
+    counter = list(range(end - 20, end + 1)) + list(range(0, 20))
+    result = stats(counter, SOAK_LOOP_FRAMES)
+    assert (result["wrapSteps"], result["backwardSteps"], result["maxWrapStep"]) == (0, 1, None)
+    assert decode.wrap_step(end, 0, SOAK_LOOP_FRAMES, decode.MOD) is None
+    assert decode.wrap_step(GREY_LOOP_FRAMES - 1, 0, GREY_LOOP_FRAMES, decode.MOD) == 1, "control: a loop within the modulus"
+    assert decode.wrap_step(decode.MOD - 1, 0, decode.MOD, decode.MOD) == 1, "control: a loop exactly the modulus"
 
 
 def test_mid_run_backward_step_is_not_a_wrap():
@@ -383,6 +398,30 @@ def test_binary_backward_step_and_loop_wrap():
     assert (over["wrapSteps"], over["backwardSteps"]) == (0, 1)
     mid = binary_stats(list(range(500, 540)) + list(range(0, 20)), SOAK_LOOP_FRAMES)
     assert (mid["wrapSteps"], mid["backwardSteps"]) == (0, 1)
+
+
+def test_known_bad_binary_over_last_frame_is_not_a_wrap():
+    """Codex r4 #1: 1382 -> 0 (a frame past the loop's last index) once read as pre=-2, advanced=-1 and hid a backward
+    jump as a wrap. Indices outside [0, loop_frames) are never a wrap."""
+    for a, b in ((SOAK_LOOP_FRAMES + 1, 0), (SOAK_LOOP_FRAMES, 0), (SOAK_LOOP_FRAMES + 1, 1), (SOAK_LOOP_FRAMES - 1, SOAK_LOOP_FRAMES)):
+        assert decode.wrap_step(a, b, SOAK_LOOP_FRAMES, None) is None, (a, b)
+        assert decode.is_wrap(a, b, SOAK_LOOP_FRAMES, None) is False, (a, b)
+    over = binary_stats(list(range(SOAK_LOOP_FRAMES - 18, SOAK_LOOP_FRAMES + 2)) + list(range(0, 20)), SOAK_LOOP_FRAMES)
+    assert (over["wrapSteps"], over["backwardSteps"], over["maxWrapStep"]) == (0, 1, None)
+
+
+def test_known_bad_negative_inputs_are_not_a_wrap():
+    for a, b in ((-1, 0), (SOAK_LOOP_FRAMES - 1, -1), (-2, -1)):
+        assert decode.wrap_step(a, b, SOAK_LOOP_FRAMES, None) is None, (a, b)
+    for a, b in ((-1, 0), (GREY_LOOP_FRAMES - 1, -1), (decode.MOD, 0)):
+        assert decode.wrap_step(a, b, GREY_LOOP_FRAMES, decode.MOD) is None, (a, b)
+
+
+def test_wrap_step_control_values():
+    assert decode.wrap_step(SOAK_LOOP_FRAMES - 1, 0, SOAK_LOOP_FRAMES, None) == 1
+    assert decode.wrap_step(SOAK_LOOP_FRAMES - 3, 1, SOAK_LOOP_FRAMES, None) == 4
+    assert decode.wrap_step(SOAK_LOOP_FRAMES - 4, 0, SOAK_LOOP_FRAMES, None) is None, "pre 3 > WRAP_TOL"
+    assert decode.wrap_step(SOAK_LOOP_FRAMES - 1, 4, SOAK_LOOP_FRAMES, None) is None, "advanced 5 > WRAP_TOL + LOOP_SEEK_SKIP"
 
 
 def test_binary_jump_across_an_undecodable_frame_is_not_hidden():

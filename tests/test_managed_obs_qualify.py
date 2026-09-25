@@ -124,6 +124,26 @@ class TestLoopFrames:
         with pytest.raises(SystemExit, match="not the soak loop period 1381"):
             q.check_loop_frames(_manifest(tmp_path / "f", _binary_manifest(1380)))
 
+    @pytest.mark.parametrize("movies", [[], None, [{"frames": 1381}, {"frames": 1380}]])
+    def test_a_looping_manifest_without_exactly_1381_frames_exits(self, tmp_path: Path, movies: Any) -> None:
+        """Codex r4 #6: a looping fixture must state its period; an empty movie list is not a pass."""
+        manifest = {**_binary_manifest(), "movies": movies, "loop": {}}
+        with pytest.raises(SystemExit, match="not the soak loop period 1381"):
+            q.check_loop_frames(_manifest(tmp_path / "f", manifest))
+
+    def test_the_built_loop_fixture_passes(self, looped: Path) -> None:
+        q.check_loop_frames(looped)
+
+
+def _post_handback(state: str = "RETIRED", mode: str = "handoff", el_id: Any = 7, handoffs: int = 1) -> dict[str, Any]:
+    """A post-build-1 `GL_REPLAY_READ_JS` read: G2 retired by one canvas-removed hand-off, the runtime released `el_id`."""
+    return {
+        "api": {"state": state, "standDowns": ["canvasRemoved"] if state == "RETIRED" else [],
+                "events": [{"kind": "glreplay-handoff", "detail": {"reason": "canvasRemoved"}}] * handoffs},
+        "coreEvents": [{"kind": "glreplay-carried", "detail": {"elId": el_id}},
+                       {"kind": "glreplay-release", "detail": {"ok": True, "mode": mode, "elId": el_id, "reason": None}}],
+    }
+
 
 def _session(**over: Any) -> dict[str, Any]:
     """A pre-check session that passes every check: two wraps, LIVE throughout, uploads rising."""
@@ -135,7 +155,8 @@ def _session(**over: Any) -> dict[str, Any]:
             {"src": "Untitled.mov-0.0000-46.0333.mov", "loop": True},
             {"src": "WA0125.mp4", "loop": False},
         ],
-        "handedBack": {"elId": 7, "loop": True, "isConnected": True, "paused": False, "t": 12.0},
+        "handedBack": [{"elId": 7, "loop": True, "isConnected": True, "facade": False, "paused": False, "t": 12.0}],
+        "reads": {"postHandback": {"gl": _post_handback()}},
         "outputAtStop": {"continuity": {"mode": "qualified", "glReplay": {"mode": "injected"}}},
         "samples": [{"t": 2.0 * i, "state": "LIVE", "standDowns": [], "videoEnded": False, "uploads": 100 * (i + 1),
                      "carriedT": t} for i, t in enumerate(times)],
@@ -171,8 +192,11 @@ class TestPrecheckA:
         result = _precheck(_session(slide1Videos=[{"src": "WA0125.mp4", "loop": False}]), looped)
         assert result["failing"] == ["(a) video.loop on every slide-1 untitled.mov"]
 
-    @pytest.mark.parametrize("handed", [None, {"elId": None, "missing": True}, {"elId": 7, "missing": True},
-                                        {"elId": 7, "loop": False}])
+    @pytest.mark.parametrize("handed", [
+        None, [], {"elId": 7, "loop": True},
+        [{"elId": None, "loop": True, "isConnected": True, "facade": False}],
+        [{"elId": 7, "loop": False, "isConnected": True, "facade": False}],
+    ], ids=["no-read", "no-element", "old-shape", "no-id", "loop-false"])
     def test_a_missing_or_non_looping_handed_back_element_fails(self, looped: Path, handed: Any) -> None:
         session = _session()
         if handed is None:
@@ -181,6 +205,29 @@ class TestPrecheckA:
             session["handedBack"] = handed
         result = _precheck(session, looped)
         assert result["failing"] == ["(a) video.loop on the handed-back carried element"]
+
+    def test_a_facade_fails(self, looped: Path) -> None:
+        """Codex r4 #5: a facade `<video>` stamped with the carried id is not the handed-back decoder."""
+        session = _session(handedBack=[{"elId": 7, "loop": True, "isConnected": True, "facade": True}])
+        assert _precheck(session, looped)["failing"] == ["(a) video.loop on the handed-back carried element"]
+
+    def test_a_facade_beside_the_real_element_fails(self, looped: Path) -> None:
+        real = {"elId": 7, "loop": True, "isConnected": True, "facade": False}
+        session = _session(handedBack=[real, {**real, "facade": True}])
+        assert _precheck(session, looped)["failing"] == ["(a) video.loop on the handed-back carried element"]
+
+    def test_a_disconnected_element_fails(self, looped: Path) -> None:
+        session = _session(handedBack=[{"elId": 7, "loop": True, "isConnected": False, "facade": False}])
+        assert _precheck(session, looped)["failing"] == ["(a) video.loop on the handed-back carried element"]
+
+    @pytest.mark.parametrize("post", [
+        _post_handback(state="LIVE"), _post_handback(mode="retire"), _post_handback(el_id=8), _post_handback(handoffs=0),
+        None,
+    ], ids=["g2-still-live", "retired-not-handed-off", "other-element-released", "no-module-handoff", "no-post-read"])
+    def test_without_a_matching_handoff_fails(self, looped: Path, post: Any) -> None:
+        """Codex r4 #5: `.loop` on a DOM element proves nothing unless G2 retired by handing off that same element."""
+        session = _session(reads={"postHandback": {"gl": post}})
+        assert _precheck(session, looped)["failing"] == ["(a) video.loop on the handed-back carried element"]
 
     def test_an_extra_differing_json_fails(self, looped: Path) -> None:
         header = looped / "html-unmodified/assets/header.json"
@@ -204,6 +251,25 @@ class TestPrecheckA:
         result = _precheck(_session(), looped)
         assert result["failing"] == ["(a) loop representation"]
         assert any(f"loopMode={value}" in k for k in _check(result, "(a) loop representation")["value"]["addedLoopKeys"])
+
+    def test_a_deleted_unspliced_base_jsonp_fails(self, looped: Path) -> None:
+        """Codex r4 #4: a file missing from the fixture (not only an extra or changed one) is a difference."""
+        rel = "assets/UNSPLICED/UNSPLICED.jsonp"
+        for tree in (q.FIXTURE, looped):
+            path = tree / "html-unmodified" / rel
+            path.parent.mkdir(parents=True)
+            path.write_text('local_slide( {"name":"UNSPLICED","json":{}} )')
+        assert _precheck(_session(), looped)["verdict"] == "PASS", "control: the unspliced file identical on both sides"
+        (looped / "html-unmodified" / rel).unlink()
+        result = _precheck(_session(), looped)
+        assert result["failing"] == ["(a) loop representation"]
+        assert rel in _check(result, "(a) loop representation")["value"]["differing"]
+
+    def test_an_extra_fixture_json_fails(self, looped: Path) -> None:
+        (looped / "html-unmodified/assets/extra.json").write_text("{}")
+        result = _precheck(_session(), looped)
+        assert result["failing"] == ["(a) loop representation"]
+        assert "assets/extra.json" in _check(result, "(a) loop representation")["value"]["differing"]
 
     def test_a_fixture_without_the_splice_record_fails(self, looped: Path) -> None:
         (looped / "loop-splice.json").unlink()

@@ -72,6 +72,7 @@ from live_continuity_probe import (  # noqa: E402
     GL_REPLAY_READ_JS,
     PAINTING_VIDEOS_JS,
     _carried_el_id,
+    _handed_off,
     _movie_entries,
     _notes,
     armed_evidence,
@@ -131,8 +132,9 @@ MARK_JS = ("(function(c){var m=document.getElementById('obs-mark'); if(!m){m=doc
            " document.documentElement.appendChild(m);} m.style.background=c; return performance.now();})('%s')")
 VIDEOS_JS = ("Array.prototype.map.call(document.querySelectorAll('video'), function(v){"
              "return {src:String(v.currentSrc).split('/').pop(), paused:v.paused, rs:v.readyState, t:v.currentTime, loop:v.loop};})")
-HANDED_BACK_JS = ("(function(id){var v=Array.prototype.find.call(document.querySelectorAll('video'), function(v){return v.__obedElId===id;});"
-                  " return v ? {elId:id, loop:v.loop, isConnected:v.isConnected, paused:v.paused, t:v.currentTime} : {elId:id, missing:true};})(%s)")
+HANDED_BACK_JS = ("(function(id){return Array.prototype.filter.call(document.querySelectorAll('video'), function(v){return v.__obedElId===id;})"
+                  ".map(function(v){return {elId:id, loop:v.loop, isConnected:v.isConnected, facade:!!v.__obedFacadeFor, paused:v.paused,"
+                  " t:v.currentTime};});})(%s)")
 PAUSE_JS = ("(function(){var vs=Array.prototype.filter.call(document.querySelectorAll('video'), function(v){return !v.paused;});"
             " vs.forEach(function(v){v.pause();}); window.__OBS_QUALIFY_PAUSED__=vs; return vs.length;})()")
 RESUME_JS = ("(function(){var vs=window.__OBS_QUALIFY_PAUSED__||[]; vs.forEach(function(v){v.play();});"
@@ -261,8 +263,9 @@ def fixture_loops(fixture: Path) -> bool:
 
 
 def check_loop_frames(fixture: Path) -> None:
-    frames = {m.get("frames") for m in binary_counter_movie.read_manifest(fixture).get("movies") or []}
-    if frames and frames != {SOAK_LOOP_FRAMES}:
+    manifest = binary_counter_movie.read_manifest(fixture)
+    frames = {m.get("frames") for m in manifest.get("movies") or []}
+    if (frames or "loop" in manifest) and frames != {SOAK_LOOP_FRAMES}:
         raise SystemExit(f"{fixture}: movie frames {sorted(frames, key=str)} are not the soak loop period {SOAK_LOOP_FRAMES}")
 
 
@@ -277,11 +280,12 @@ def fixture_facts(fixture: Path) -> dict[str, Any]:
     """The flag-on armed boundary (slot table, instance rect, asset keys), derived offline from the fixture."""
     dest, slides = make_export("facts", fixture)
     try:
-        for gl in (False, True):
-            runtime = ground_truth_plan(dest, slides, gl_replay=gl).to_runtime()
+        plans = {gl: ground_truth_plan(dest, slides, gl_replay=gl) for gl in (False, True)}
+        for gl, plan in plans.items():
+            runtime = plan.to_runtime()
             if isinstance(runtime, Unsupported):
                 raise SystemExit(f"fixture does not qualify on product code (gl_replay={gl}): {runtime.reason}")
-        return ground_truth_facts(ground_truth_plan(dest, slides, gl_replay=True), armed=True)["armed"]
+        return ground_truth_facts(plans[True], armed=True)["armed"]
     finally:
         shutil.rmtree(dest.parent, ignore_errors=True)
 
@@ -622,6 +626,7 @@ def precheck_script(armed: dict[str, Any]) -> Callable[[Session], None]:
         s.execute("advance")
         time.sleep(1.5)
         s.out["handedBack"] = s.ev(HANDED_BACK_JS % json.dumps(carried))
+        s.read("postHandback")
     return script
 
 
@@ -1091,8 +1096,9 @@ def precheck_gates(run: dict[str, Any], fixture: Path) -> dict[str, Any]:
     check(checks, "(a) video.loop on every slide-1 untitled.mov", [v.get("loop") for v in slide1],
           bool(slide1) and all(v.get("loop") is True for v in slide1), "all true")
     handed = session.get("handedBack")
-    check(checks, "(a) video.loop on the handed-back carried element", handed,
-          isinstance(handed, dict) and handed.get("elId") is not None and handed.get("loop") is True, "true")
+    post = ((session.get("reads") or {}).get("postHandback") or {}).get("gl")
+    check(checks, "(a) video.loop on the handed-back carried element", {"elements": handed, "handback": handback_of(post)},
+          handed_back_loops(handed, post), "one connected non-facade element, loop true, G2 RETIRED by a hand-off of that id")
     continuity = continuity_of(session)
     check(checks, "(b) continuity qualified, glReplay injected", [continuity.get("mode"), (continuity.get("glReplay") or {}).get("mode")],
           continuity.get("mode") == "qualified" and (continuity.get("glReplay") or {}).get("mode") == "injected")
@@ -1108,6 +1114,27 @@ def precheck_gates(run: dict[str, Any], fixture: Path) -> dict[str, Any]:
     return {"precheck": gate(checks)}
 
 
+def handback_of(read: Any) -> dict[str, Any]:
+    api = (read or {}).get("api") if isinstance(read, dict) else None
+    releases = _notes(read, "glreplay-release") if isinstance(read, dict) else []
+    return {"state": (api or {}).get("state"), "releases": [{"mode": r.get("mode"), "elId": r.get("elId")} for r in releases]}
+
+
+def handed_back_loops(handed: Any, post: Any) -> bool:
+    if not (isinstance(handed, list) and len(handed) == 1 and isinstance(handed[0], dict)):
+        return False
+    element = handed[0]
+    if element.get("elId") is None or element.get("loop") is not True or element.get("isConnected") is not True or element.get("facade") is not False:
+        return False
+    handback = handback_of(post)
+    return (handback["state"] == "RETIRED" and _handed_off(post)
+            and handback["releases"] == [{"mode": "handoff", "elId": element["elId"]}])
+
+
+def json_paths(tree: Path) -> set[str]:
+    return {str(p.relative_to(tree)) for p in tree.rglob("*.json*") if p.is_file() and p.suffix in (".json", ".jsonp")}
+
+
 def loop_keys(tree: Path) -> set[str]:
     keys = set()
     for path in sorted(tree.rglob("*.json*")):
@@ -1121,13 +1148,8 @@ def loop_keys(tree: Path) -> set[str]:
 def loop_representation(fixture: Path) -> dict[str, Any]:
     """The fixture's `html-unmodified` against the P2 base: only the spliced files differ, and every loop key they add is `loopMode="looping"`."""
     ours, p2 = fixture / "html-unmodified", FIXTURE / "html-unmodified"
-    differing = []
-    for path in sorted(ours.rglob("*.json*")):
-        if path.suffix not in (".json", ".jsonp"):
-            continue
-        other = p2 / path.relative_to(ours)
-        if not other.exists() or other.read_bytes() != path.read_bytes():
-            differing.append(str(path.relative_to(ours)))
+    differing = [rel for rel in sorted(json_paths(ours) | json_paths(p2))
+                 if not ((ours / rel).is_file() and (p2 / rel).is_file() and (ours / rel).read_bytes() == (p2 / rel).read_bytes())]
     record = fixture / "loop-splice.json"
     spliced = sorted(str(Path(f["path"]).relative_to("html-unmodified")) for f in json.loads(record.read_text())["files"]
                      if Path(f["path"]).parts[0] == "html-unmodified") if record.is_file() else None

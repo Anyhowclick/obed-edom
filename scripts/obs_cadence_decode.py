@@ -210,21 +210,22 @@ def is_backward(delta: int, mod: int | None = MOD) -> bool:
 
 
 def wrap_step(a: int, b: int, loop_frames: int | None, mod: int | None = MOD) -> int | None:
-    """Frames advanced from `a` through the loop point to `b`, or None when `a` is not within `WRAP_TOL` of the last frame."""
-    if loop_frames is None:
+    """Frames advanced from `a` through the loop point to `b` when the pair is a loop wrap, else None. A wrap advances at
+    most a normal step (`WRAP_TOL`) plus the browser's own loop-seek skip (`LOOP_SEEK_SKIP`, 0-2 frames on the element's
+    clock in 40 headless wraps, `.agents/reviews/continuity-loopmode/gates-r1.md`). A grey counter cannot place a loop
+    point longer than its modulus, so it never scores a wrap there."""
+    if loop_frames is None or (mod is not None and loop_frames > mod):
         return None
-    last = loop_frames - 1 if mod is None else (loop_frames - 1) % mod
-    pre = step(a, last, mod)
-    if pre > WRAP_TOL:
+    bound = loop_frames if mod is None else mod
+    if not (0 <= a < bound and 0 <= b < bound):
         return None
-    return pre + 1 + step(0, b, mod)
+    pre = step(a, loop_frames - 1, mod)
+    advanced = pre + 1 + step(0, b, mod)
+    return advanced if 0 <= pre <= WRAP_TOL and 1 <= advanced <= WRAP_TOL + LOOP_SEEK_SKIP else None
 
 
 def is_wrap(a: int, b: int, loop_frames: int | None, mod: int | None = MOD) -> bool:
-    """A loop wrap advances at most a normal step (`WRAP_TOL`) plus the browser's own loop-seek skip (`LOOP_SEEK_SKIP`,
-    0-2 frames on the element's clock in 40 headless wraps, `.agents/reviews/continuity-loopmode/gates-r1.md`)."""
-    advanced = wrap_step(a, b, loop_frames, mod)
-    return advanced is not None and advanced <= WRAP_TOL + LOOP_SEEK_SKIP
+    return wrap_step(a, b, loop_frames, mod) is not None
 
 
 def trimmed(seq: list[Any]) -> list[Any]:
@@ -250,7 +251,7 @@ def phase_stats(greys: list[int | None], c: float, fps: float, loop_frames: int 
     links = [(i, j, a, b, step(a, b, mod)) for (i, a), (j, b) in zip(decoded, decoded[1:])]
     deltas = [d for i, j, _, _, d in links if j - i == 1]
     backward = [(a, b) for _, _, a, b, d in links if is_backward(d, mod)]
-    wrap_steps = [wrap_step(a, b, loop_frames, mod) for a, b in backward if is_wrap(a, b, loop_frames, mod)]
+    wrap_steps = [w for w in (wrap_step(a, b, loop_frames, mod) for a, b in backward) if w is not None]
     wraps = len(wrap_steps)
     forward = [(d / (j - i), d, i, j) for i, j, _, _, d in links if not is_backward(d, mod)]
     worst = max(forward, default=None)

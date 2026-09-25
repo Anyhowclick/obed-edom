@@ -280,6 +280,15 @@ class TestBinarySource:
             loop_fixture.build(source, tmp_path / "p2-loop")
         assert not (tmp_path / "p2-loop").exists() and not (tmp_path / "p2-loop.partial").exists()
 
+    @pytest.mark.parametrize("movies", [[], None])
+    def test_a_manifest_without_movies_is_refused(self, tmp_path: Path, movies: Any) -> None:
+        """Codex r4 #6: an empty movie list would otherwise pass the frame check vacuously."""
+        manifest = {**_binary_manifest(), "movies": movies}
+        source = self._source(tmp_path / "src", manifest)
+        with pytest.raises(loop_fixture.FixtureError, match="not the loop period 1381"):
+            loop_fixture.build(source, tmp_path / "p2-loop")
+        assert not (tmp_path / "p2-loop").exists()
+
     def test_a_manifest_that_already_loops_is_refused(self, tmp_path: Path) -> None:
         source = self._source(tmp_path / "src", {**_binary_manifest(), "loop": {}})
         with pytest.raises(loop_fixture.FixtureError, match="already carries a loop key"):
