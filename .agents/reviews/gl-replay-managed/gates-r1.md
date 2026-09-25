@@ -54,7 +54,7 @@ Native baseline (`--arm both`, binary): 2× source native 0 % repeats; positive 
 
 ## Review
 
-Opus r1 (`opus-r1.md`): items 1 (hand-back jump — resolved as a grey artefact, now gated by `maxForwardStep ≤ 3` on the binary
+Opus r1 (raw round deleted after #229; `git show 8fe3b551:.agents/reviews/gl-replay-managed/opus-r1.md`): items 1 (hand-back jump — resolved as a grey artefact, now gated by `maxForwardStep ≤ 3` on the binary
 counter), 2 (hand-back 0.5 s after its marker), 3, 7, 8, 9, 10 folded; 4 (oldbytes re-run on HEAD: caught; no hand-back-only KB —
 the binary forward-step gate has only the synthetic decoder KB), 5 (reshow bound now absolute 2 % at 25 + native-relative),
 6 (frozen KB targets the static check), 11 (cross-take controls via `--takes 2`), 12 (nits) noted.

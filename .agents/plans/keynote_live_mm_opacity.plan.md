@@ -1,6 +1,6 @@
 # Magic Move translucent opacity: draw the authored opacity from the first frame of the move
 
-**IMPLEMENTED (2026-09-25, pending PR)** on `claude/mm-translucent-opacity`. **APPROVED (owner, 2026-09-25)**, **rev 4**, 2026-09-25. Rev 1: Opus planner. Rev 2: Opus critic. Rev 3: Opus planner, rewritten for
+**IMPLEMENTED — merged #233 (`aea02049`, 2026-09-25).** **APPROVED (owner, 2026-09-25)**, **rev 4**, 2026-09-25. Rev 1: Opus planner. Rev 2: Opus critic. Rev 3: Opus planner, rewritten for
 **route (B)**, the owner's choice: a sha-pinned, in-memory player patch. Rev 4: Opus critic (§14 Critique log). Plan only: no product code, no
 commits, no OBS, no Keynote.
 **Builds on OD-2**: MERGED as #229 (`8fe3b551`); this branch (`claude/mm-translucent-opacity`) is rebased on it. It holds the
@@ -426,3 +426,10 @@ Coordinator (post rev 2): OD-2 merged (#229), base updated, old D6 (timing) drop
 | 33 | gate | MO-1 re-cast as uniform-in-effect at every slot-4 draw + one settle pixel blend (B leaves the shader untouched); drops the per-frame `readPixels` stall inside G2's recording window. GL-on runs void on any G2 stand-down. |
 | 34 | gate | MO-5 per-frame hashes are not comparable across runs (the move is paced by wall-clock rAF); replaced by settle-frame hashes, CvC in Q0b. |
 
+
+## 15. Review log (raw rounds deleted at merge; `git show aea02049:.agents/reviews/mm-opacity/opus-rN.md`)
+
+- Opus r1 (code): 11 findings. F1 (MO-3 driver never passed ROI/masks) was the only bug. F2–F11 were coverage/edge/gate
+  items; all folded, F8 min/max refuted (rAF timing).
+- Opus r2 (R5 + MO-2 instrument): R5 sound (no blank-frame path). F1 R2 floor 8.0, F3 `--score` keeps take validity and
+  lifecycle, F4 colour premise, F6 test, F7 natspec folded; F2 re-runs recorded in `gates-r1.md`.
