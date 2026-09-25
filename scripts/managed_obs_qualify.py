@@ -9,7 +9,7 @@ Phases are 24 px corner markers (`obs_cadence_decode.PHASES`); neutral grey is u
 Arms:
   2x, positive  one `rec` session with gl_replay="off": slide1-native 8 s, slide1-paused 3 s (every playing <video>
                 paused: the null control), slide1-resumed 4 s, then a report-only smoke walk (slide 2, build 1).
-                Source = 2 x canvas (product) or = canvas (positive control). Cadence gated at rate 25 only.
+                Source = 2 x canvas (product) or = canvas (positive control). Cadence gated at both rates on the binary counter, at 25 only on grey.
   g2            sessions g2 (product default: no gl_replay kwarg), g2-off (gl_replay="off"), both recorded, and an
                 unrecorded hidden-arm (the g2 session's gl_replay). g2/g2-off: slide 1 as above -> advance -> LIVE (<= 5 s) -> slide2-live 10 s
                 (screenshot S) -> hide, slide2-hidden 3 s (screenshot H) -> show, slide2-reshown 4 s ->
