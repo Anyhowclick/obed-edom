@@ -36,7 +36,7 @@ def test_js_sha256_matches_pinned_bytes():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "bc1d6b58c230acd39588e4bc423e851ab2d99efd8d92e4a46819d02970fb75f7"
+PINNED_CORE_SHA256 = "a1a962d521356f7c9b04517bf7f1a451189a6416954c5a0ad7e950b731a738f4"
 
 
 def test_js_sha256_matches_the_pinned_literal():
@@ -3132,7 +3132,7 @@ playerDetach(stub);
 const r = S.carried('movie1');
 console.log(JSON.stringify({reason: r.reason, bound: !!r.video, stubArmedPooled: !!stub.__obedGlPooled}));
 """, plan=plan)
-    assert result == {"reason": "notPooled", "bound": False, "stubArmedPooled": True}
+    assert result == {"reason": "notPooled", "bound": False, "stubArmedPooled": False}
 
 
 def test_armed_zone_retires_when_the_hash_reaches_the_next_flow():
@@ -3613,6 +3613,39 @@ console.log(JSON.stringify({
     assert result["final"] == {"instance": ids[3], "bridged": False, "epochLive": True, "facade": True,
                                "id": ids[3] + "-video"}
     assert result["refusals"] == []
+
+
+def test_the_facade_stub_is_never_pooled_or_remounted_after_its_swap():
+    """RT-D (live D5, 6000 ms): the dom-swap takes the facade stub out of the DOM,
+    and the detach observer saw it as a planned decoder (it proxies the carried
+    clock and had its own src loaded), pooled it and remounted it beside the
+    carried decoder: two painters at one rect, which also made the footprint
+    owner ambiguous. The stub must stay out: never pooled, never remounted."""
+    plan = _CONTRACT["d5"]
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing(ID[0]);
+goToScene(1);
+detach(a);
+goToScene(2);
+const b = fresh(ID[1]);
+srcStore.set(b, SRC);
+insert(b);
+moCallbacks.slice().forEach((cb) => cb([{addedNodes: [], removedNodes: [b]}]));
+a.readyState = 4; a.videoWidth = 1920; a._rect = {left: 160, top: 700, width: 640, height: 180};
+console.log(JSON.stringify({
+  swapped: notesOf('dom-swap').length, stubConnected: document.contains(b),
+  stubPooled: P.snapshot().some(x => x.elId === b.__obedElId),
+  stubRemounts: P.events.filter(e => e.kind.indexOf('remount-') === 0 && e.detail.elId === b.__obedElId).length,
+  owner: P.footprintOwnerDecoderId({x: 160, y: 700, w: 640, h: 180}), aId: a.__obedElId,
+}));
+""", src="https://host/counter-a.mov")
+    assert result["swapped"] == 1
+    assert result["stubConnected"] is False
+    assert result["stubPooled"] is False
+    assert result["stubRemounts"] == 0
+    assert result["owner"]["elId"] == result["aId"]
+    assert result["owner"]["via"] == "footprint-video"
 
 
 def test_a_suppressed_bridge_destination_really_clears_when_its_slide_ends():
