@@ -708,13 +708,18 @@ class ManagedObs:
         return warning is None
 
     def _identify(self, pid: int, launch_date: float | None) -> tuple[str, ObsProcess | None]:
-        """("ours", process) · ("gone", None): no such OBS, pid reused or not our home · ("unknown", None)."""
+        """("ours", process) · ("gone", None): no such OBS, pid reused or not our home · ("unknown", None).
+        Absence from LaunchServices is "gone" only when `ps -E` agrees the pid is not ours."""
         try:
             process = next((item for item in self._launcher.processes() if item.pid == pid), None)
         except Exception:
             return "unknown", None
         if process is None:
-            return "gone", None
+            marker = self._launcher.env_marker(pid, self.home)
+            if marker is False:
+                return "gone", None
+            log.info("LaunchServices does not list OBS pid %s but ps -E marker is %s; identity unknown", pid, marker)
+            return "unknown", None
         if launch_date is not None:
             if process.launch_date is None:
                 return "unknown", None
@@ -999,6 +1004,14 @@ class ManagedObs:
             pid, launch_date, target_id, ready_at, reason = self._pid, self._launch_date, self._target_id, self._ready_at, self._reason
             launched_rate = self._launched[0] if self._launched else None
         identity = self._identity(pid, launch_date)
+        if identity == "gone" and target_id is not None:
+            try:
+                listed = target_id in {str(item.get("id")) for item in _cdp_targets(self._cdp_port)}
+            except Exception:
+                listed = False
+            if listed:
+                log.info("OBS pid %s reads gone but CDP still lists target %s; identity unknown", pid, target_id)
+                identity = "unknown"
         if identity == "gone":
             self._on_exit()
             return
