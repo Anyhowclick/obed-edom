@@ -422,13 +422,16 @@ PRESERVE_CORE_JS = r"""
   // The zone OPENS on the transition scene (`atScene - 1`, the same convention
   // keepThroughBridge uses for the move scene): the player detaches the movie
   // while the hash is still the transition's, so a zone starting at atScene
-  // would pool and remount the refused movie for the whole Magic Move. A retire
-  // names only its `src` instance, so it needs no end; a glReplay zone ends at
-  // the next entry naming its `dst`.
+  // would pool and remount the refused movie for the whole Magic Move. Idle at
+  // the end of the source slide the hash already reads `atScene - 1`, so a
+  // retire opens there only once the player has torn the instance down
+  // (`hasDeparted`). A retire names only its `src` instance, so it needs no end;
+  // a glReplay zone ends at the next entry naming its `dst`.
   function inRetireZone(b) {
     const hn = currentHashNum();
     if (hn == null) return false;
-    return hn >= b.atScene - 1 && (b !== GL || hn < glZoneEnd());
+    if (b === GL) return hn >= b.atScene - 1 && hn < glZoneEnd();
+    return hn >= b.atScene || (hn === b.atScene - 1 && hasDeparted(b.src.objectId));
   }
   // Identity must survive a real src clear: inside the zone the hooks let the
   // player's clear through, so `movieAssetKey(src)` goes null on a decoder we
