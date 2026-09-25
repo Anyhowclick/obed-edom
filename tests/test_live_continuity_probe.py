@@ -6865,6 +6865,12 @@ def _deck_plan(name: str) -> Any:
 
 
 REGISTERED_DECKS = ("P2", "D1", "D2", "D3", "D4", "D5", "D6")
+# Registered post hoc from discovery g1h-089a0393 (2026-09-25): observed, not derived.
+POST_HOC_G1H = {
+    ("P2", "core:stash-any"), ("D1", "strip:pin@6"), ("D2", "strip:restart@4"), ("D2", "strip:pin@6"),
+    ("D3", "strip:pin@4"), ("D4", "core:wrong-instance"), ("D4", "core:fifo-reuse"), ("D4", "strip:pin@5"),
+    ("D5", "core:stash-any"), ("D5", "core:fifo-reuse"), ("D5", "strip:pin@2"),
+}
 
 
 class TestRedArmRegistration:
@@ -6886,10 +6892,12 @@ class TestRedArmRegistration:
             expected = probe.RED_ARM_EXPECTATIONS.get(key)
             registered = [*(() if expected in (None, probe.RECORD) else expected), *probe.RED_ARM_REQUIRED.get(key, ())]
             assert gl in ("off", "auto") and (gl == "off" or deck == "P2"), key
+            labels = {f"{asset}#{i}" for per in plan.slide_instances.values() for asset, rects in per.items() for i in range(1, len(rects) + 1)}
             for red_id in registered:
-                if red_id.startswith("stray:"):
-                    _, slide, asset = red_id.split(":")
-                    assert asset in assets and 1 <= int(slide.removeprefix("slide")) <= len(plan.scene_index_by_player), key
+                if red_id.startswith(("stray:", "duplicate:")):
+                    kind, slide, what = red_id.split(":")
+                    assert (what in assets if kind == "stray" else what in labels), key
+                    assert 1 <= int(slide.removeprefix("slide")) <= len(plan.scene_index_by_player), key
                 else:
                     assert red_id in ids, (key, red_id)
             if label.startswith("strip:"):
@@ -6900,11 +6908,11 @@ class TestRedArmRegistration:
     def test_every_red_is_on_the_stripped_boundary_or_a_stray(self) -> None:
         """Plan §4: a strip arm turns red only its own boundary (plus the strays its held decoder
         leaves); every carry/retire/armed id in a strip set sits at the stripped scene."""
-        plans = {probe.plan_signature(_deck_plan(name).to_runtime()): _deck_plan(name) for name in REGISTERED_DECKS}
+        plans = {probe.plan_signature(_deck_plan(name).to_runtime()): (name, _deck_plan(name)) for name in REGISTERED_DECKS}
         for (sha, label, gl), expected in probe.RED_ARM_EXPECTATIONS.items():
-            if not label.startswith("strip:") or expected == probe.RECORD:
+            if not label.startswith("strip:") or expected == probe.RECORD or (plans[sha][0], label) in POST_HOC_G1H:
                 continue
-            plan = plans[sha]
+            plan = plans[sha][1]
             scene = probe.parse_strip(label.removeprefix("strip:"))[1]
             player = next(p for p, s in plan.scene_index_by_player.items() if s == scene)
             for red_id in expected:
@@ -6914,7 +6922,6 @@ class TestRedArmRegistration:
     def test_the_p2_sets_are_the_plans(self) -> None:
         """Plan §3.4 Q2/Q3: stash-any must red the slide-4 WA0125 stray; each strip only its boundary."""
         p2 = {label: value for (sha, label, _), value in probe.RED_ARM_EXPECTATIONS.items() if sha == probe.P2_OFF_PLAN_SHA256}
-        assert p2["core:stash-any"] == probe.RECORD
         assert probe.RED_ARM_REQUIRED[(probe.P2_OFF_PLAN_SHA256, "core:stash-any", "off")] == (
             "stray:slide4:vid-20250608-wa0125.mp4",
         )
@@ -6929,7 +6936,22 @@ class TestRedArmRegistration:
         (carry,) = probe.RED_ARM_REQUIRED[key]
         spec = next(s for s in probe.verdict_specs(_deck_plan("D4")) if s["id"] == carry)
         assert spec["kind"] == "carry" and spec["action"] == "bridge" and spec["srcInstance"] == "counter-a.mov#2"
-        assert probe.RED_ARM_EXPECTATIONS[key] == probe.RECORD
+
+    def test_every_registered_set_contains_its_required_reds(self) -> None:
+        for key, required in probe.RED_ARM_REQUIRED.items():
+            expected = probe.RED_ARM_EXPECTATIONS[key]
+            assert expected != probe.RECORD and set(required) <= set(expected), key
+
+    def test_the_post_hoc_sets_are_g1hs_observed_sets(self) -> None:
+        """Discovery g1h-089a0393: every RECORD arm registered with exactly its observed multiset."""
+        shas = {name: probe.plan_signature(_deck_plan(name).to_runtime()) for name in REGISTERED_DECKS}
+        registered = {(name, label) for name, label in POST_HOC_G1H if (shas[name], label, "off") in probe.RED_ARM_EXPECTATIONS}
+        assert registered == POST_HOC_G1H
+        assert not [key for key, value in probe.RED_ARM_EXPECTATIONS.items() if value == probe.RECORD]
+        assert probe.RED_ARM_EXPECTATIONS[(shas["D4"], "core:wrong-instance", "off")] == (
+            "b0to1:counter-a.mov#2->counter-a.mov#1:carry", "b1to2:counter-a.mov#1->counter-a.mov#1:carry",
+            "duplicate:slide2:counter-a.mov#1", "duplicate:slide3:counter-a.mov#1",
+        )
 
     def test_every_action_type_has_a_pre_registered_strip_arm(self) -> None:
         """Plan §3.4 Q3: one --strip arm per action type (pin, bridge, restart, retire, glReplay)."""

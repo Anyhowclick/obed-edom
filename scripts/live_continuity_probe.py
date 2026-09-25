@@ -205,7 +205,11 @@ _D1, _D2, _D3, _D4, _D5, _D6 = (DECK_PLAN_SHA256[f"D{n}"] for n in range(1, 7))
 # a bridge overlay no entry names is held at its rect indefinitely (a stray on later slides); a
 # retire/restart of a raw (never carried) src is inert apart from `retire`'s preserve-refused notes.
 RED_ARM_EXPECTATIONS: dict[tuple[str, str, str], tuple[str, ...] | str] = {
-    (P2_OFF_PLAN_SHA256, "core:stash-any", "off"): RECORD,
+    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
+    (P2_OFF_PLAN_SHA256, "core:stash-any", "off"): (
+        f"b0to1:{_P2}:retire", "stray:slide2:untitled.mov", "stray:slide3:untitled.mov", "stray:slide4:untitled.mov",
+        "stray:slide4:vid-20250608-wa0125.mp4",
+    ),
     (P2_OFF_PLAN_SHA256, "strip:bridge@8", "off"): (f"b2to3:{_P2}:carry",),
     # Nothing names slide 1's raw decoder, so nothing is pooled or noted: the carry reads False
     # as the plan expects, and only the retire's note clause goes red.
@@ -215,29 +219,48 @@ RED_ARM_EXPECTATIONS: dict[tuple[str, str, str], tuple[str, ...] | str] = {
     (P2_OFF_PLAN_SHA256, "strip:restart@6", "off"): (),
     (_D1, "strip:bridge@2", "off"): (f"b0to1:{_A}:carry",),
     (_D1, "strip:bridge@4", "off"): (f"b1to2:{_A}:carry", "stray:slide3:counter-a.mov", "stray:slide4:counter-a.mov"),
-    (_D1, "strip:pin@6", "off"): RECORD,
+    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
+    (_D1, "strip:pin@6", "off"): ("duplicate:slide4:counter-a.mov#1",),
     (_D2, "strip:bridge@2", "off"): (f"b0to1:{_A}:carry",),
-    (_D2, "strip:restart@4", "off"): RECORD,
-    (_D2, "strip:pin@6", "off"): RECORD,
+    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
+    (_D2, "strip:restart@4", "off"): (
+        f"b1to2:{_A}:restart", f"b2to3:{_A}:carry", f"b3to4:{_A}:carry",
+        "duplicate:slide3:counter-a.mov#1", "duplicate:slide4:counter-a.mov#1", "stray:slide5:counter-a.mov",
+    ),
+    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
+    (_D2, "strip:pin@6", "off"): (f"b2to3:{_A}:carry",),
     (_D2, "strip:bridge@8", "off"): (f"b3to4:{_A}:carry",),
     (_D3, "strip:pin@2", "off"): (f"b0to1:{_A}:carry",),
     (_D3, "strip:bridge@2", "off"): (f"b0to1:{_B}:carry",),
     (_D3, "strip:retire@4", "off"): ("b1to2:counter-a.mov#1->end:retire",),
-    (_D3, "strip:pin@4", "off"): RECORD,
+    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
+    (_D3, "strip:pin@4", "off"): (
+        f"b1to2:{_B}:carry", f"b2to3:{_B}:carry", "duplicate:slide3:counter-b.mov#1", "stray:slide4:counter-b.mov",
+    ),
     (_D3, "strip:bridge@6", "off"): (f"b2to3:{_B}:carry",),
-    (_D4, "core:wrong-instance", "off"): RECORD,
-    (_D4, "core:fifo-reuse", "off"): RECORD,
+    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
+    (_D4, "core:wrong-instance", "off"): (
+        f"b0to1:{_A_FAR}:carry", f"b1to2:{_A}:carry", "duplicate:slide2:counter-a.mov#1", "duplicate:slide3:counter-a.mov#1",
+    ),
+    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
+    (_D4, "core:fifo-reuse", "off"): (
+        f"b0to1:{_A_FAR}:carry", f"b1to2:{_A}:carry", "duplicate:slide2:counter-a.mov#1", "duplicate:slide3:counter-a.mov#1",
+    ),
     (_D4, "strip:bridge@3", "off"): (f"b0to1:{_A_FAR}:carry",),
-    (_D4, "strip:pin@5", "off"): RECORD,
-    (_D5, "core:stash-any", "off"): RECORD,
-    (_D5, "core:fifo-reuse", "off"): RECORD,
-    (_D5, "strip:pin@2", "off"): RECORD,
+    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
+    (_D4, "strip:pin@5", "off"): ("duplicate:slide3:counter-a.mov#1",),
+    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
+    (_D5, "core:stash-any", "off"): ("stray:slide3:counter-a.mov", "stray:slide3:counter-b.mov"),
+    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
+    (_D5, "core:fifo-reuse", "off"): ("stray:slide3:counter-a.mov",),
+    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
+    (_D5, "strip:pin@2", "off"): (f"b0to1:{_A}:carry",),
     (_D5, "strip:pin@4", "off"): (f"b1to2:{_A}:carry",),
     (_D6, "strip:bridge@2", "off"): (f"b0to1:{_A_FAR}:carry",),
     (_D6, "strip:retire@8", "off"): (f"b3to4:{_A}:retire",),
 }
-# Ids a RECORD arm must still turn red (plan §3.4 Q2/Q3, §4): the stray red and the identity red.
-# Its exact set is not derivable offline, but an arm missing one of these fails.
+# Ids an arm must turn red whatever else it registers (plan §3.4 Q2/Q3, §4): the stray red and the
+# identity red. A RECORD arm missing one of these fails; a registered set must contain them.
 RED_ARM_REQUIRED: dict[tuple[str, str, str], tuple[str, ...]] = {
     (P2_OFF_PLAN_SHA256, "core:stash-any", "off"): ("stray:slide4:vid-20250608-wa0125.mp4",),
     (_D4, "core:wrong-instance", "off"): (f"b0to1:{_A_FAR}:carry",),
