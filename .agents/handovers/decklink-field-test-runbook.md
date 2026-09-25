@@ -19,9 +19,9 @@ Paths used below:
 day** — on 2026-09-20 `pr158-handover-findings-4366b9` was found re-used for a DSK branch, so it is no longer this
 build; `decklink-field-test-2ad808` has this branch checked out instead · `PY=/Users/anyhowclick/Desktop/work/obed-edom/.venv/bin/python`
 (always with `PYTHONPATH=$W/src`; the venv is an editable install of the MAIN checkout) ·
-`FX=<worktree>/output/p2-recovery/html-adversarial` (the H.264 fixture export; git-ignored, so it exists only where
-it was copied. As of 2026-09-22 the durable copy is the MAIN checkout's `output/p2-recovery/html-adversarial`
-(those three worktrees are gone; `html-unmodified` there was verified byte-identical before removal). The §2 command uses `$FX`, which need not be under `$W`.
+`FX=<main checkout>/output/fixtures/p2-recovery/html-adversarial` (the H.264 fixture export; git-ignored, and kept
+only in the MAIN checkout. Fixtures resolve from the main checkout via `obed_edom.fixture_paths.fixture()`; nothing to
+symlink into `$W`). The §2 command uses `$FX`, which need not be under `$W`.
 **Do not run the P2 gate or any other headless Chrome during the test**: the gate rewrites `html-player`, and a
 concurrent browser broke an arm's stage fit on 2026-09-19).
 
@@ -85,9 +85,9 @@ field tool without `OBED_LIVE_ATTACH`, `--display <id>`, must print `transport=h
       no other OBS running: `uv run python scripts/managed_obs_qualify.py --arm both --rate 25 --takes 2 --out DIR`
       → `SUMMARY PASS` (also `--rate 30`; on this default grey P2 fixture cadence is report-only at 30, with `--fixture $F`
       below it is gated at both rates). GL replay under the managed engine, binary counter fixture
-      (`F=<main checkout>/output/p2-binary`, always passed explicitly): `--arm g2 --rate 25 --takes 2 --fixture $F`,
+      (`F=<main checkout>/output/fixtures/p2-binary`, always passed explicitly): `--arm g2 --rate 25 --takes 2 --fixture $F`,
       `--arm failsafe --fixture $F` and, before a show, `--arm soak --precheck` then `--arm soak --soak-minutes 20`
-      → `SUMMARY PASS`. The soak's default fixture is the looping copy `<main checkout>/output/p2-loop`
+      → `SUMMARY PASS`. The soak's default fixture is the looping copy `<main checkout>/output/fixtures/p2-loop`
       (`scripts/loop_fixture.py --source $F`), so it also gates LIVE every minute and two loop-wrap windows.
 
 ## 0. Hardware + OBS setup (owner)

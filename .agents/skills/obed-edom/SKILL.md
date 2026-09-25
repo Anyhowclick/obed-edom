@@ -767,9 +767,11 @@ for the parked `iwa-surgical-write-generator` feature.
   marks it INVALID). Limits at rate 25 (report-only at 30): decodable ≥ 0.9 in both arms; 2× arm native repeat ≤ 0.15;
   null (paused) repeat ≥ 0.95; positive control (source = canvas) repeat ≥ 0.18 and every positive run above every 2×
   run. Lifecycle always enforced: clean quit, `cleanExit` true, user OBS tree and `.sentinel` unchanged. GL replay
-  arms `g2` / `failsafe` take the binary counter fixture explicitly (`--fixture <main>/output/p2-binary`; its
+  arms `g2` / `failsafe` take the binary counter fixture explicitly (`--fixture <main>/output/fixtures/p2-binary`; its
   `fixture.json` movie sha256s are verified at startup and recorded per run); `soak` and `--precheck` take its looping
-  copy `output/p2-loop` (the default; `scripts/loop_fixture.py --source <main>/output/p2-binary`, `fixture.json` `loop`). Binary limits: G2 repeat ≤ 1 % and ≤
+  copy `output/fixtures/p2-loop` (the default; `scripts/loop_fixture.py --source <main>/output/fixtures/p2-binary`, `fixture.json` `loop`).
+  Gate fixtures (`FIXTURE_NAMES`) live only in the main checkout's `output/fixtures/<name>` and resolve from any worktree
+  via `obed_edom.fixture_paths.fixture()`; nothing to symlink. Binary limits: G2 repeat ≤ 1 % and ≤
   native + 1 %; reshow ≤ 2 % and ≤ native + 2 %; distinct ≥ 0.96 × rate; hand-back max step ≤ 3 per elapsed output
   frame with every hand-back frame decodable; 2× native ≤ 1 %; positive ≥ 5 %. Absolute repeat bounds at 25 only;
   distinct (relative to rate), native-relative bounds and 2× vs positive enforced at both rates. `--soak-minutes` ≥ 4;

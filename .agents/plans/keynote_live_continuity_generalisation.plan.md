@@ -184,7 +184,7 @@ limited, as for OD-2). Every code PR runs the **full local suites**: `uv run pyt
 worktree pinned to a commit, with at most 3 headless Chromes; OBS only on the owner's word.
 
 ### S0: owner decks and offline verification (no product code; may start now: OQ-3)
-- **Owner** authors D1–D6 (§5). `counter-a.mov` / `counter-b.mov` are already in main-checkout `output/qual-movies/`.
+- **Owner** authors D1–D6 (§5). `counter-a.mov` / `counter-b.mov` are already in main-checkout `output/fixtures/qual-movies/`.
 - **Coordinator** exports-to-fixture layout, and a trimmed `tests/fixtures/live_continuity/<deck>/` per deck.
 - **Checks:**
   - V1: F1 on every deck. Headless, on P2 and D1–D5: every `setAttribute('src')` on a player-created `<video>` sees `el.id === objectID + '-video'` of an instance on the current slide. Not "every `<video>` in the DOM": carried bridge decoders legitimately keep an old id.
@@ -330,7 +330,7 @@ Dissolve). D2-across → none. D4 → the near copy is unpaired, so no finding.
 
 **Common to every deck:**
 - **Canvas:** 1920×1080, the same theme/background as `Minimal Alpha_DSK` (black).
-- **Movies:** `counter-a.mov` (60 s) and `counter-b.mov` (55 s). They are made by `scripts/binary_counter_movie.py` (1920×540 = **32:9**, 30 fps, H.264, binary frame counter; no marker option), sit in main-checkout `output/qual-movies/`, and are distinct files so Keynote keeps two assets. "A" = counter-a, "B" = counter-b. Keep "Constrain proportions" on: every rect below is exactly 32:9.
+- **Movies:** `counter-a.mov` (60 s) and `counter-b.mov` (55 s). They are made by `scripts/binary_counter_movie.py` (1920×540 = **32:9**, 30 fps, H.264, binary frame counter; no marker option), sit in main-checkout `output/fixtures/qual-movies/`, and are distinct files so Keynote keeps two assets. "A" = counter-a, "B" = counter-b. Keep "Constrain proportions" on: every rect below is exactly 32:9.
 - **Labels:** one text label per slide ("D1 S1"…) at x 40, y 40, ≤ 300×60. Nothing else on any slide, and **nothing overlapping a movie rect on any slide** (overlap = a refusal).
 - **Making the "same movie" continue:** duplicate the previous slide (⌘D), then move or resize the movie.
 - **Transitions:** Magic Move 1.5 s, and Dissolve 1.0 s where stated. Each transition sits on the **outgoing** slide. Magic Move match option, Start Movie and "play across slides": **copy exactly what the P2 deck (`Minimal Alpha_DSK`) uses**, and tell the coordinator the wording you saw. This plan does not guess Keynote's menu names.
@@ -339,8 +339,8 @@ Dissolve). D2-across → none. D4 → the near copy is unpaired, so no finding.
 
 **Export (each deck):**
 1. Save as `~/Desktop/Convert wall to 16x9 CGs/qual/Dn.key`.
-2. File ▸ Export To ▸ HTML, same options as the 2026-09-22 `output/gl-decks/` exports, into `~/Desktop/Convert wall to 16x9 CGs/qual/Dn-html/`.
-3. Tell the coordinator. The coordinator copies the export into `output/qual-decks/Dn/` and prepares the `html-player`/`html-unmodified` pair.
+2. File ▸ Export To ▸ HTML, same options as the 2026-09-22 `output/fixtures/gl-decks/` exports, into `~/Desktop/Convert wall to 16x9 CGs/qual/Dn-html/`.
+3. Tell the coordinator. The coordinator copies the export into `output/fixtures/qual-decks/Dn/` and prepares the `html-player`/`html-unmodified` pair.
 
 Rects: coordinator's provisional 32:9 set (2026-09-25), re-checked here: all inside 1920×1080, no movie overlaps a
 label or another movie on its slide, at most one geometry-changing movie per Magic Move. One change, D6's A-extra (§8).
@@ -363,8 +363,8 @@ box at 1763,21, not 40,40). Start = After Transition was patched offline with `i
 D4's A-far, which stays On Click. The decks were exported with `html_preview.export_html`. The owner's `Continuity.key` and
 `Continuity/D1.key` are unchanged (sha verified).
 - **Decks:** `~/Desktop/Convert wall to 16x9 CGs/Continuity/built/Dn.key` + `Dn-html/`.
-- **Exports:** main checkout `output/qual-decks/Dn/html-unmodified/`.
-- **Generator:** `output/qual-decks/author/gen.py` + `decks.json`.
+- **Exports:** main checkout `output/fixtures/qual-decks/Dn/html-unmodified/`.
+- **Generator:** `output/fixtures/qual-decks/author/gen.py` + `decks.json`.
 - **Offline read-back:** every movie rect, repeat, transition and start setting matches the table.
 
 Offline S0 findings:
@@ -434,7 +434,7 @@ form.
 10. **OQ-10 R2.** **OWNER 2026-09-25: rec.** Refuse a boundary whose continuing instance builds in/out. **Rec yes** (unmeasured for movies).
 11. **OQ-11 P2 verdict count.** **OWNER 2026-09-25: rec.** P2 gains `noStrayVideo` (15 findings); `run_gates.sh` updates in S1. **Rec yes.**
 12. **OQ-12 review model.** **OWNER 2026-09-25: rec.** Codex `gpt-5.6-sol` per roster, with Opus as fallback if Codex is limited. **Rec yes.**
-13. **OQ-13 Keynote wording in §5. MOOT (2026-09-25):** the coordinator authored D1–D6 by AppleScript, with start settings patched offline from `Positive Control.key`, so no menu wording is needed. The generator is `output/qual-decks/author/gen.py`.
+13. **OQ-13 Keynote wording in §5. MOOT (2026-09-25):** the coordinator authored D1–D6 by AppleScript, with start settings patched offline from `Positive Control.key`, so no menu wording is needed. The generator is `output/fixtures/qual-decks/author/gen.py`.
 
 15. **OQ-15 read `playsAcrossSlides` from the `.key`.** **OWNER 2026-09-25: rec: scope as recommended; `.key` reading enters continuity only in the follow-up plan.**
     - **Owner 2026-09-25:** AK will import and read the `.key` anyway, so a mismatch between the export and the `.key` is

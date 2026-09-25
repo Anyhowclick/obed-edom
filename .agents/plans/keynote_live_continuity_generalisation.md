@@ -87,8 +87,9 @@ no merge / force-push without the owner · plan first for anything with more tha
 - Host injection + modes (`qualified | unsupported | off`, reasons, `OBED_LIVE_CONTINUITY`,
   viewport gate, `ready` read-back): `src/obed_edom/live_host.py`; tests `tests/test_live_host.py`.
 - Host gate: `scripts/live_continuity_probe.py` (+ `tests/test_live_continuity_probe.py`, pure scorers).
-- Fixture export (H.264 movies): `output/p2-recovery/html-adversarial/{html-player,html-unmodified}` in the
-  presenter worktree (ignored; the old `keynote-parser-module-error-*` worktree copy no longer exists).
+- Fixture export (H.264 movies): `output/fixtures/p2-recovery/html-adversarial/{html-player,html-unmodified}` in the
+  main checkout (ignored). Fixtures resolve from the main checkout via `obed_edom.fixture_paths.fixture()`; nothing to
+  symlink.
 - Commands, gotchas (macOS `nativeVirtualKeyCode` stall, atomic add+commit, headless height quirk):
   the handover linked at the top.
 

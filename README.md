@@ -255,8 +255,10 @@ backup Mac and move the UltraStudio's Thunderbolt cable to it.
 
 **Qualification** (developer, launches OBS on this Mac; no other OBS may be running):
 `uv run python scripts/managed_obs_qualify.py --arm both --rate 25 --takes 2 --out DIR`, and for GL replay
-`--arm g2 --rate 25 --takes 2 --fixture output/p2-binary --out DIR` (the binary-counter copy of the P2 fixture,
-built by `scripts/binary_counter_movie.py --build-fixture`).
+`--arm g2 --rate 25 --takes 2 --fixture output/fixtures/p2-binary --out DIR` (the binary-counter copy of the P2 fixture,
+built by `scripts/binary_counter_movie.py --build-fixture`). Gate fixtures live in the main checkout's
+`output/fixtures/<name>`; scripts resolve them from any worktree via `obed_edom.fixture_paths.fixture()`, so there is
+nothing to symlink.
 
 ### DeckLink fill/key via OBS (developer fallback, UNQUALIFIED)
 
