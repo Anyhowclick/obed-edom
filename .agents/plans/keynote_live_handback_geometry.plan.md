@@ -1,6 +1,6 @@
 # Magic Move hand-back geometry: the settled GL frame must land on the DOM layout
 
-**DRAFT rev 2 — awaiting owner review.** 2026-09-25, Opus investigator; rev 2 = Opus HIGH critique (log in §9). Plan only: no product code, no commits, no OBS
+**APPROVED rev 2 — owner 2026-09-25: decisions 1–8 as recommended (1a, 2a, 3a, 4a, 5b, 6a, 7a, 8a).** 2026-09-25, Opus investigator; rev 2 = Opus HIGH critique (log in §9). Plan only: no product code, no commits, no OBS
 launch, no Keynote. Base: `main` @ `0df5ea10` (MM opacity #233/#234 and preview #235/#236 merged). Player `main.js` sha
 `e9b2fad4…` (= `live_runtime.PLAYER_SHA256`); every offset below is a **byte** offset (`grep -bo` convention, as the MMO plan's
 §3). Evidence: worktree `output/evidence/handback-geometry/` (gitignored; JSON tables, crops, scratch probe/scorer/candidate).
