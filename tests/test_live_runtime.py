@@ -181,7 +181,7 @@ def test_mm_opacity_off_is_byte_identical_to_the_hook_only_output(monkeypatch):
     assert hashlib.sha256(off).hexdigest() == hashlib.sha256(_hook_only(player)).hexdigest()
     on = live_runtime.patch_player(player)
     assert on != off
-    # Undoing exactly the four replacements on the default (on) output gives the off output back.
+    # Undoing exactly the replacements on the default (on) output gives the off output back.
     reverted = on
     for before, after in live_runtime._MM_OPACITY_REPLACEMENTS:
         assert on.count(after) == 1
@@ -231,6 +231,56 @@ def test_mm_opacity_anchors_are_unique_on_the_real_player():
         assert patched.count(before) == 0
         assert patched.count(after) == 1
     assert live_runtime.patch_player(player, mm_opacity=False) == _hook_only(player)
+
+
+SWAP_HIDE_DEFERRED = b"setTimeout(this.handleAnimateEffectDidBegin"
+
+
+def test_mm_opacity_hides_the_swapped_node_synchronously_on_the_real_player():
+    player = _real_player()
+    before, after = live_runtime._MM_OPACITY_REPLACEMENTS[-1]
+    assert before == b"Q&&setTimeout(this.handleAnimateEffectDidBegin.bind(this,Q),0)"
+    assert player.count(before) == 1 and player.count(after) == 0
+    assert player.count(SWAP_HIDE_DEFERRED) == 1
+    patched = live_runtime.patch_player(player)
+    assert patched.count(after) == 1
+    assert patched.count(SWAP_HIDE_DEFERRED) == 0
+    # Off keeps the stock deferred hide.
+    off = live_runtime.patch_player(player, mm_opacity=False)
+    assert off.count(SWAP_HIDE_DEFERRED) == 1 and off.count(after) == 0
+
+
+def _run_animate_effect_will_begin(node: str, player: str) -> dict:
+    """Run the real `animateEffectWillBegin` + `handleAnimateEffectDidBegin` cut out of `player` with a stub
+    renderer whose animation loop is already running (as it is for a slide transition), and record the swapped
+    node's opacity at the moment the method returns and after the event loop drains."""
+    methods = _cut(player, "animateEffectWillBegin(A){", "handleEffectDidComplete(A){")
+    script = """
+const node={style:{opacity:''}};
+const document={getElementById:(id)=>id==='swap'?node:null};
+const drawn=[];
+class P{constructor(){this.glRenderer={c:{animationStarted:true,draw:(e)=>drawn.push(e),animate(){throw new Error('loop already running')}}}}%s}
+new P().animateEffectWillBegin({canvasId:'c',effect:'mm',nodeToSwapId:'swap'});
+const sync={drawn:drawn.length,opacity:node.style.opacity};
+new P().animateEffectWillBegin({canvasId:'c',effect:'mm',nodeToSwapId:'absent'});
+setTimeout(()=>console.log(JSON.stringify({sync,drained:{drawn:drawn.length,opacity:node.style.opacity}})),5);
+""" % methods
+    result = subprocess.run([node, "-e", script], check=True, text=True, capture_output=True)
+    return json.loads(result.stdout)
+
+
+def test_mm_opacity_swapped_node_is_hidden_in_the_same_task_as_the_first_draw():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required to run the extracted player methods")
+    player = _real_player()
+    stock = _run_animate_effect_will_begin(node, _hook_only(player).decode())
+    patched = _run_animate_effect_will_begin(node, live_runtime.patch_player(player).decode())
+    # Stock: the draw is queued but the outgoing node is still visible when the task ends, so a rAF that
+    # lands before the setTimeout(0) paints both the GL frame and the DOM copy.
+    assert stock == {"sync": {"drawn": 1, "opacity": ""}, "drained": {"drawn": 2, "opacity": 0}}
+    # Patched: hidden before the task ends; a missing node is still a no-op.
+    assert patched == {"sync": {"drawn": 1, "opacity": 0}, "drained": {"drawn": 2, "opacity": 0}}
 
 
 def test_mm_opacity_patched_real_player_parses(tmp_path):

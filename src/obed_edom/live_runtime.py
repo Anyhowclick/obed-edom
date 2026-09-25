@@ -38,6 +38,10 @@ _MM_OPACITY_REPLACEMENTS = (
         b"var w=e.initialState.hidden?0:this.parentOpacity*e.initialState.opacity;",
         b"var w=e.initialState.hidden?0:null!=e.obedOpacity?e.obedOpacity:this.parentOpacity*e.initialState.opacity;",
     ),
+    (
+        b"Q&&setTimeout(this.handleAnimateEffectDidBegin.bind(this,Q),0)",
+        b"Q&&this.handleAnimateEffectDidBegin(Q)",
+    ),
 )
 
 _INSTALL = r"""
@@ -124,7 +128,8 @@ class LiveRuntimeUnsupported(ValueError):
 
 
 def patch_player(player: bytes, *, mm_opacity: bool = True) -> bytes:
-    """Instrument a known player; with `mm_opacity`, draw Magic Move leaves at their authored chain opacity."""
+    """Instrument a known player; with `mm_opacity`, draw Magic Move leaves at their authored chain opacity
+    and hide each swapped DOM node in the same task that queues its first GL draw."""
     if hashlib.sha256(player).hexdigest() != PLAYER_SHA256:
         raise LiveRuntimeUnsupported("This Keynote HTML player version is not supported for live output.")
     if player.count(_ANCHOR) != 1:
