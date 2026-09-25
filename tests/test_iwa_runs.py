@@ -1597,28 +1597,49 @@ def test_attach_magic_move_media_keys_by_digest_not_file_name(tmp_path):
     assert keys["movie"] == {0: "movie:MOV="}
 
 
-def test_attach_magic_move_shape_key_is_size_invariant_but_radius_sensitive(tmp_path):
+def test_attach_magic_move_shape_key_is_size_invariant_and_ignores_the_rounded_rect_radius(tmp_path):
     # Shape 0/1: the same triangle at 1x and 2.5x -> one key (a resized copy on the
-    # neighbouring slide still pairs). Shape 2/3: rounded rects of different size but
-    # one 10pt radius -> one key. Shape 4: same rect, 20pt radius -> a different key.
-    # Shape 5: no path source -> no key.
+    # neighbouring slide still pairs). Shape 2/3/4: rounded rects of different size and
+    # radius 10 vs 60 -> one key (live 2026-09-24: Keynote morphs radius 10 -> 60; the
+    # preset compares by type only). Shape 5: no path source -> no key.
     extra = {
         "p0": _triangle(1.0),
         "p1": _triangle(2.5),
         "r0": _rounded_rect(100.0, 40.0, 10.0),
         "r1": _rounded_rect(300.0, 60.0, 10.0),
-        "r2": _rounded_rect(100.0, 40.0, 20.0),
+        "r2": _rounded_rect(100.0, 40.0, 60.0),
         "bare": {"_pbtype": "TSWP.ShapeInfoArchive"},
     }
     deck = _mm_deck([(_transition(_MM_EFFECT), ["p0", "p1", "r0", "r1", "r2", "bare"]), (None, [])], extra)
     shapes = _attach(tmp_path, deck, range(2))[0]["mmKeys"]["shape"]
     assert shapes[0] == shapes[1]
     assert shapes[0].startswith("shape:bezierPathSource::")
-    assert shapes[2] == shapes[3]
+    assert shapes[2] == shapes[3] == shapes[4]
     assert shapes[2].startswith("shape:scalarPathSource:0:")
-    assert shapes[4] != shapes[2]
     assert shapes[0] != shapes[2]
     assert 5 not in shapes
+
+
+def test_attach_magic_move_shape_key_keeps_the_scalar_of_other_presets(tmp_path):
+    # Only the rounded rect's scalar (its radius) is ignored. Other scalarPathSource
+    # presets are unmeasured and their scalar changes the outline (polygon sides, star
+    # points), so it stays in the key. Named and numeric enum spellings both count as
+    # the rounded rect.
+    extra = {
+        "poly5": {"_pbtype": "TSWP.ShapeInfoArchive", "super": {"pathsource": {"scalarPathSource": {
+            "type": "kTSDRegularPolygon", "scalar": 5.0, "naturalSize": {"width": 100.0, "height": 100.0}}}}},
+        "poly6": {"_pbtype": "TSWP.ShapeInfoArchive", "super": {"pathsource": {"scalarPathSource": {
+            "type": "kTSDRegularPolygon", "scalar": 6.0, "naturalSize": {"width": 100.0, "height": 100.0}}}}},
+        "rrNamed": {"_pbtype": "TSWP.ShapeInfoArchive", "super": {"pathsource": {"scalarPathSource": {
+            "type": "kTSDRoundedRectangle", "scalar": 10.0, "naturalSize": {"width": 100.0, "height": 100.0}}}}},
+        "rrNamed60": {"_pbtype": "TSWP.ShapeInfoArchive", "super": {"pathsource": {"scalarPathSource": {
+            "type": "kTSDRoundedRectangle", "scalar": 60.0, "naturalSize": {"width": 300.0, "height": 90.0}}}}},
+    }
+    deck = _mm_deck([(_transition(_MM_EFFECT), ["poly5", "poly6", "rrNamed", "rrNamed60"]), (None, [])], extra)
+    shapes = _attach(tmp_path, deck, range(2))[0]["mmKeys"]["shape"]
+    assert shapes[0] != shapes[1]
+    assert shapes[0].startswith("shape:scalarPathSource:kTSDRegularPolygon:")
+    assert shapes[2] == shapes[3]
 
 
 def _path_shape(points, width, height):
@@ -1633,15 +1654,15 @@ def _path_shape(points, width, height):
 
 
 def test_attach_magic_move_shape_key_resolution_tolerates_save_noise_but_splits_distinct_paths(tmp_path):
-    # The key rounds naturalSize-normalised coordinates to 1e-3. Measured on FRC
+    # The key rounds bbox-normalised coordinates to 1e-3. Measured on FRC
     # (2026-09-24): every collision at that resolution is Keynote save noise between
     # identical shapes (at most 2.2e-7 normalised); 1e-6 already splits the 17x17 pin-dot
     # class (1.1e-7 apart), and exact ratios split two more. A split re-creates the broken
     # move, a collision only keeps one more object parked off the canvas, so the
     # resolution stays coarse.
     # s0/s1: one 1000pt path, s1 carrying 2e-7 relative noise -> one key.
-    # s2: the same path with its apex 5pt (5e-3 normalised) over on a 1000pt natural
-    # size -> a different key (near-but-distinct null control).
+    # s2: the same path with its apex 5pt (5e-3 normalised) over on a 1000pt wide
+    # path -> a different key (near-but-distinct null control).
     base = [(0.0, 0.0), (1000.0, 0.0), (500.0, 800.0)]
     noisy = [(x * (1 + 2e-7), y * (1 + 2e-7)) for x, y in base]
     moved = [(0.0, 0.0), (1000.0, 0.0), (505.0, 800.0)]
@@ -1659,7 +1680,8 @@ def test_attach_magic_move_shape_key_resolution_tolerates_save_noise_but_splits_
 def test_attach_magic_move_empty_text_gets_no_key_and_dual_shape_is_skipped(tmp_path):
     # t0: whitespace/object-replacement-only text -> no key. t1: a custom-path text box
     # (dual: text 1 AND shape 0) -> keyed once, on its text record; the dual shape record
-    # carries no key. l0: an open two-point path is a line -> the loose `line` key.
+    # carries no key. l0: an open two-point path is a line -> a `line:` key (path gate +
+    # stroke/line-end digest; the style-less line has no stroke).
     extra = {
         "t0": _text_box("s0"),
         "s0": _storage(" \n￼\xa0"),
@@ -1680,7 +1702,219 @@ def test_attach_magic_move_empty_text_gets_no_key_and_dual_shape_is_skipped(tmp_
     keys = _attach(tmp_path, deck, range(2))[0]["mmKeys"]
     assert keys["text"] == {1: "text:Pill caption"}
     assert "shape" not in keys
-    assert keys["line"] == {0: "line"}
+    assert keys["line"][0].startswith("line:bezierPathSource::")
+
+
+_WHITE = {"model": "rgb", "r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0, "rgbspace": "srgb"}
+_YELLOW = {"model": "rgb", "r": 1.0, "g": 0.9, "b": 0.0, "a": 1.0, "rgbspace": "srgb"}
+_RED = {"model": "rgb", "r": 0.93, "g": 0.13, "b": 0.05, "a": 1.0, "rgbspace": "srgb"}
+_ARROW = {"identifier": "simple arrow", "isFilled": True, "endPoint": {"x": 3.0, "y": 0.0}}
+
+
+def _stroke(color=_WHITE, width=4.0, pattern="TSDSolidPattern"):
+    return {"color": color, "width": width, "cap": "ButtCap", "join": "MiterJoin", "miterLimit": 4.0,
+            "pattern": {"type": pattern, "phase": 0.0, "count": 0, "pattern": [0.0] * 6}}
+
+
+def _shape_style(parent=None, **props):
+    """A TSWP.ShapeStyleArchive as keynote_parser decodes it: TSD shape properties at
+    ``super.shapeProperties``, the parent at ``super.super.parent``; the outer
+    ``shapeProperties`` holds TSWP-only fields (padding etc.)."""
+    inner = {"stylesheet": {"identifier": "sheet"}}
+    if parent is not None:
+        inner["parent"] = {"identifier": parent}
+    return {"_pbtype": "TSWP.ShapeStyleArchive",
+            "super": {"super": inner, "shapeProperties": dict(props)},
+            "shapeProperties": {"padding": {"left": 4.0}}}
+
+
+def _rect(points_w, points_h, natural=None, style=None, source="bezierPathSource"):
+    """A bezier rect whose points span points_w x points_h; ``natural`` defaults to the
+    same size (a UI resize only rewrites naturalSize, leaving the points as drawn)."""
+    nw, nh = natural or (points_w, points_h)
+    corners = [(0.0, -2.2737368e-13), (points_w, -2.2737368e-13), (points_w, points_h), (0.0, points_h)]
+    elements = [{"type": "moveTo", "points": [{"x": corners[0][0], "y": corners[0][1]}]}]
+    elements += [{"type": "lineTo", "points": [{"x": x, "y": y}]} for x, y in corners[1:]]
+    elements.append({"type": "closeSubpath"})
+    obj = {"_pbtype": "TSWP.ShapeInfoArchive", "super": {"pathsource": {source: {
+        "naturalSize": {"width": nw, "height": nh}, "path": {"elements": elements},
+    }}}}
+    if style is not None:
+        obj["super"]["style"] = {"identifier": style}
+    return obj
+
+
+def _editable_rect(size):
+    nodes = [{"nodePoint": {"x": x, "y": y}, "inControlPoint": {"x": x, "y": y}, "outControlPoint": {"x": x, "y": y},
+              "type": "sharp"} for x, y in [(0.0, 0.0), (size, 0.0), (size, size), (0.0, size)]]
+    return {"_pbtype": "TSWP.ShapeInfoArchive", "super": {"pathsource": {"editableBezierPathSource": {
+        "subpaths": [{"nodes": nodes, "closed": True}], "naturalSize": {"width": size, "height": size},
+    }}}}
+
+
+def _oval_ish(size):
+    k = size * 0.5523
+    h = size / 2
+    elements = [
+        {"type": "moveTo", "points": [{"x": h, "y": 0.0}]},
+        {"type": "curveTo", "points": [{"x": h + k, "y": 0.0}, {"x": size, "y": h - k}, {"x": size, "y": h}]},
+        {"type": "curveTo", "points": [{"x": size, "y": h + k}, {"x": h + k, "y": size}, {"x": h, "y": size}]},
+        {"type": "curveTo", "points": [{"x": h - k, "y": size}, {"x": 0.0, "y": h + k}, {"x": 0.0, "y": h}]},
+        {"type": "curveTo", "points": [{"x": 0.0, "y": h - k}, {"x": h - k, "y": 0.0}, {"x": h, "y": 0.0}]},
+        {"type": "closeSubpath"},
+    ]
+    return {"_pbtype": "TSWP.ShapeInfoArchive", "super": {"pathsource": {"bezierPathSource": {
+        "naturalSize": {"width": size, "height": size}, "path": {"elements": elements},
+    }}}}
+
+
+def _line(length, style, natural=300.0):
+    return {"_pbtype": "TSWP.ShapeInfoArchive", "super": {"style": {"identifier": style}, "pathsource": {
+        "bezierPathSource": {"naturalSize": {"width": natural, "height": 0.0}, "path": {"elements": [
+            {"type": "moveTo", "points": [{"x": 0.0, "y": 0.0}]},
+            {"type": "lineTo", "points": [{"x": length, "y": 0.0}]},
+        ]}},
+    }}}
+
+
+def _mm_slide0(tmp_path, extra, ids):
+    deck = _mm_deck([(_transition(_MM_EFFECT), ids), (None, [])], extra)
+    return _attach(tmp_path, deck, range(2))[0]
+
+
+def test_attach_magic_move_shape_gate_ignores_natural_size_and_drawn_size(tmp_path):
+    # Live 2026-09-24: Keynote keeps bezier points at the coordinates they were drawn at
+    # and a UI resize only rewrites naturalSize. FX's squares store points 174x154 with a
+    # naturalSize of 351x310; the unresized copy stores 174x154 / 174x154. Both pair, and
+    # the naturalSize-normalised key split them. A rect drawn at 100 vs one drawn at 200
+    # (R2 in G_raw) also pairs: equal gate key, but the raw stored path (tier2) differs,
+    # which is what Keynote prefers among compatible candidates.
+    extra = {
+        "fx": _rect(174.0, 154.0, natural=(351.0, 310.0)),
+        "fx0": _rect(174.0, 154.0),
+        "r100": _rect(100.0, 100.0, natural=(200.0, 200.0)),
+        "r200": _rect(200.0, 200.0),
+    }
+    slide = _mm_slide0(tmp_path, extra, ["fx", "fx0", "r100", "r200"])
+    shapes, prefs = slide["mmKeys"]["shape"], slide["mmPrefs"]["shape"]
+    assert shapes[0] == shapes[1]
+    assert shapes[2] == shapes[3]
+    assert shapes[0] == shapes[2]  # aspect is free too: every axis-aligned rect normalises alike
+    assert prefs[0][1] == prefs[1][1]  # tier2 excludes naturalSize
+    assert prefs[2][1] != prefs[3][1]
+    assert prefs[2][0] == prefs[3][0]
+
+
+def test_attach_magic_move_shape_gate_splits_path_classes_and_outlines(tmp_path):
+    # Live never-pairs: rect -> oval, rect -> triangle, bezier rect -> editable path,
+    # bezier rect -> preset rounded rect. All at one size, so only class/outline differs.
+    extra = {
+        "rect": _rect(200.0, 200.0),
+        "oval": _oval_ish(200.0),
+        "tri": _path_shape([(0.0, 200.0), (100.0, 0.0), (200.0, 200.0)], 200.0, 200.0),
+        "ed": _editable_rect(200.0),
+        "rr": _rounded_rect(200.0, 200.0, 10.0),
+    }
+    shapes = _mm_slide0(tmp_path, extra, ["rect", "oval", "tri", "ed", "rr"])["mmKeys"]["shape"]
+    assert len(set(shapes.values())) == 5
+    assert shapes[3].startswith("shape:editableBezierPathSource::")
+
+
+def test_attach_magic_move_shape_gate_ignores_style_and_tier1_is_stroke_and_opacity(tmp_path):
+    # Live: fill, stroke on/off/colour/width, opacity and a different style object never
+    # block a pair; stroke and opacity outrank the raw path, fill/style object only the
+    # distance. So every shape here shares one gate key; tier1 moves with stroke/opacity
+    # only, tier3 is the shape's own style id.
+    # base: red fill, empty-pattern stroke (= no stroke), opacity unset (= 1.0).
+    # fill: a child style overriding only the fill -> tier1 equal, tier3 differs.
+    # op1: an explicit opacity 1.0 -> tier1 equal to base.
+    # op: opacity 0.5 via a child style (resolved through the parent chain).
+    # stroked / wide: a solid stroke, then one 4 -> 12 wide.
+    extra = {
+        "sBase": _shape_style(fill={"color": _RED}, stroke=_stroke(pattern="TSDEmptyPattern")),
+        "sFill": _shape_style(parent="sBase", fill={"color": _YELLOW}),
+        "sOp1": _shape_style(parent="sBase", opacity=1.0),
+        "sOp": _shape_style(parent="sBase", opacity=0.5),
+        "sStroke": _shape_style(parent="sBase", stroke=_stroke()),
+        "sWide": _shape_style(parent="sStroke", stroke=_stroke(width=12.0)),
+        "base": _rect(200.0, 200.0, style="sBase"),
+        "fill": _rect(200.0, 200.0, style="sFill"),
+        "op1": _rect(200.0, 200.0, style="sOp1"),
+        "op": _rect(200.0, 200.0, style="sOp"),
+        "stroked": _rect(200.0, 200.0, style="sStroke"),
+        "wide": _rect(200.0, 200.0, style="sWide"),
+        "nostyle": _rect(200.0, 200.0),
+    }
+    slide = _mm_slide0(tmp_path, extra, ["base", "fill", "op1", "op", "stroked", "wide", "nostyle"])
+    shapes, prefs = slide["mmKeys"]["shape"], slide["mmPrefs"]["shape"]
+    assert len(set(shapes.values())) == 1
+    tier1 = [prefs[i][0] for i in range(7)]
+    assert tier1[0] == tier1[1] == tier1[2] == tier1[6]  # no stroke + opacity 1.0 either way
+    assert len({tier1[0], tier1[3], tier1[4], tier1[5]}) == 4
+    assert len({prefs[i][1] for i in range(7)}) == 1
+    assert [prefs[i][2] for i in range(7)] == ["sBase", "sFill", "sOp1", "sOp", "sStroke", "sWide", ""]
+
+
+def test_attach_magic_move_line_key_is_length_free_but_stroke_and_ends_sensitive(tmp_path):
+    # Live: a line morphs across length (the drawn points and the naturalSize both
+    # differ here), but never across arrowhead, width 4 -> 12 or colour white -> yellow.
+    # The ancestor mirrors Keynote's line style: empty `{}` line ends mean none.
+    extra = {
+        "sRoot": _shape_style(stroke=_stroke(width=2.0), opacity=1.0, headLineEnd={}, tailLineEnd={}),
+        "sLine": _shape_style(parent="sRoot", stroke=_stroke()),
+        "sLine2": _shape_style(parent="sRoot", stroke=_stroke()),
+        "sArrow": _shape_style(parent="sRoot", stroke=_stroke(), headLineEnd=_ARROW),
+        "sWide": _shape_style(parent="sRoot", stroke=_stroke(width=12.0)),
+        "sYellow": _shape_style(parent="sRoot", stroke=_stroke(color=_YELLOW)),
+        "l0": _line(141.42136, "sLine"),
+        "long": _line(400.0, "sLine2", natural=400.0),
+        "arrow": _line(141.42136, "sArrow"),
+        "wide": _line(141.42136, "sWide"),
+        "yellow": _line(141.42136, "sYellow"),
+    }
+    slide = _mm_slide0(tmp_path, extra, ["l0", "long", "arrow", "wide", "yellow"])
+    lines = slide["mmKeys"]["line"]
+    assert "shape" not in slide["mmKeys"]
+    assert lines[0] == lines[1]
+    assert lines[0].startswith("line:bezierPathSource::")
+    assert len({lines[0], lines[2], lines[3], lines[4]}) == 4
+    assert slide["mmPrefs"]["line"][0][2] == "sLine"
+    assert slide["mmPrefs"]["line"][0][1] != slide["mmPrefs"]["line"][1][1]
+
+
+def test_attach_magic_move_prefs_cover_keyed_shapes_and_lines_only(tmp_path):
+    # mmPrefs lists exactly the shape/line addresses that got an mmKeys entry: not text,
+    # media, groups, a dual text-shape's duplicate record, or an unkeyed bare shape. A
+    # slide with no keyed shape or line carries no mmPrefs. Every tier is a string.
+    extra = {
+        "t0": _text_box("s0"), "s0": _storage("Caption"),
+        "dual": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "s1"},
+            "super": {"pathsource": {"editableBezierPathSource": {"naturalSize": {"width": 5.0, "height": 5.0}}}},
+        },
+        "s1": _storage("Pill"),
+        "bare": {"_pbtype": "TSWP.ShapeInfoArchive"},
+        "p0": _triangle(1.0),
+        "i0": {"_pbtype": "TSD.ImageArchive", "data": {"identifier": "di"}},
+        "g0": _mm_group(["gp"]), "gp": _triangle(2.0),
+        "sL": _shape_style(stroke=_stroke()),
+        "l0": _line(100.0, "sL"),
+    }
+    deck = _mm_deck(
+        [(_transition(_MM_EFFECT), ["t0", "dual", "bare", "p0", "i0", "g0", "l0"]), (None, ["t0", "i0"])],
+        extra,
+        [{"identifier": "di", "digest": "IMG="}],
+    )
+    slides = _attach(tmp_path, deck, range(2))
+    keys, prefs = slides[0]["mmKeys"], slides[0]["mmPrefs"]
+    assert set(prefs) == {"shape", "line"}
+    assert set(prefs["shape"]) == set(keys["shape"]) == {2}
+    assert set(prefs["line"]) == set(keys["line"]) == {0}
+    for tiers in (prefs["shape"][2], prefs["line"][0]):
+        assert len(tiers) == 3 and all(isinstance(t, str) for t in tiers)
+        assert len(tiers[0]) == len(tiers[1]) == 12
+    assert prefs["shape"][2][2] == "" and prefs["line"][0][2] == "sL"
+    assert "mmKeys" in slides[1] and "mmPrefs" not in slides[1]
 
 
 def _mm_group(child_ids):
@@ -1723,17 +1957,46 @@ def test_attach_magic_move_group_key_is_dfs_leaves_by_digest_and_normalised_shap
     assert 3 not in groups
 
 
+def test_attach_magic_move_group_line_leaf_uses_the_line_key(tmp_path):
+    # A line inside a group is keyed like a top-level line (path gate + stroke + line
+    # ends), so g0 (white line) and g1 (the same line in yellow) differ, while g2 (g0's
+    # line at another length) matches g0. The top-level l0 is g0's line on its own: its
+    # key is exactly g0's line leaf.
+    extra = {
+        "sRoot": _shape_style(stroke=_stroke(width=2.0), opacity=1.0, headLineEnd={}, tailLineEnd={}),
+        "sWhite": _shape_style(parent="sRoot", stroke=_stroke()),
+        "sYellow": _shape_style(parent="sRoot", stroke=_stroke(color=_YELLOW)),
+        "g0": _mm_group(["g0t", "g0l"]), "g0t": _text_box("g0s"), "g0s": _storage("UPG"),
+        "g0l": _line(100.0, "sWhite"),
+        "g1": _mm_group(["g1t", "g1l"]), "g1t": _text_box("g1s"), "g1s": _storage("UPG"),
+        "g1l": _line(100.0, "sYellow"),
+        "g2": _mm_group(["g2t", "g2l"]), "g2t": _text_box("g2s"), "g2s": _storage("UPG"),
+        "g2l": _line(250.0, "sWhite", natural=250.0),
+        "l0": _line(100.0, "sWhite"),
+    }
+    keys = _mm_slide0(tmp_path, extra, ["g0", "g1", "g2", "l0"])["mmKeys"]
+    groups = keys["group"]
+    assert groups[0] != groups[1]
+    assert groups[0] == groups[2]
+    assert groups[0] == f"group:text:UPG\n{keys['line'][0]}"
+
+
 def test_attach_magic_move_keys_survive_a_json_round_trip(tmp_path):
     import json  # noqa: PLC0415
 
-    extra = {"t0": _text_box("s0"), "s0": _storage("A"), "p0": _triangle(1.0)}
-    deck = _mm_deck([(_transition(_MM_EFFECT), ["t0", "p0"]), (None, ["t0"])], extra)
+    extra = {"t0": _text_box("s0"), "s0": _storage("A"), "p0": _triangle(1.0), "sL": _shape_style(stroke=_stroke()),
+             "l0": _line(100.0, "sL")}
+    deck = _mm_deck([(_transition(_MM_EFFECT), ["t0", "p0", "l0"]), (None, ["t0"])], extra)
     slides = _attach(tmp_path, deck, range(2))
     loaded = json.loads(json.dumps(slides))
+    assert "mmPrefs" in slides[0] and "mmPrefs" not in slides[1]
     for before, after in zip(slides, loaded):
         assert after.get("magicMoveOut") == before.get("magicMoveOut")
         restored = {kind: {int(ki): key for ki, key in by_index.items()} for kind, by_index in after["mmKeys"].items()}
         assert restored == before["mmKeys"]
+        prefs = {kind: {int(ki): tiers for ki, tiers in by_index.items()}
+                 for kind, by_index in (after.get("mmPrefs") or {}).items()}
+        assert prefs == before.get("mmPrefs", {})
         assert after["mmOrder"] == before["mmOrder"]
         assert all(isinstance(kind, str) and isinstance(ki, int) for kind, ki in after["mmOrder"])
         assert all(isinstance(ki, int) for by_index in before["mmKeys"].values() for ki in by_index)
@@ -1745,9 +2008,11 @@ def test_attach_magic_move_replaces_stale_fields_from_a_prior_annotation(tmp_pat
     extra = {f"t{i}": _text_box(f"s{i}") for i in range(3)} | {f"s{i}": _storage(f"T{i}") for i in range(3)}
     deck = _mm_deck([(_transition(_MM_EFFECT), ["t0"]), (None, ["t1"]), (None, ["t2"])], extra)
     payload = {"slides": [
-        {"index": 0, "items": [], "mmKeys": {"text": {0: "text:stale"}}, "mmOrder": [["text", 5]]},
+        {"index": 0, "items": [], "mmKeys": {"text": {0: "text:stale"}}, "mmOrder": [["text", 5]],
+         "mmPrefs": {"shape": {3: ["a", "b", "c"]}}},
         {"index": 1, "items": [], "magicMoveOut": True},
-        {"index": 2, "items": [], "magicMoveOut": True, "mmKeys": {"text": {0: "text:T2"}}, "mmOrder": [["text", 0]]},
+        {"index": 2, "items": [], "magicMoveOut": True, "mmKeys": {"text": {0: "text:T2"}}, "mmOrder": [["text", 0]],
+         "mmPrefs": {"line": {0: ["a", "b", ""]}}},
     ]}
     iwa.attach_magic_move(_empty_key(tmp_path), payload, deck=deck)
     assert payload["slides"] == [
@@ -1755,6 +2020,98 @@ def test_attach_magic_move_replaces_stale_fields_from_a_prior_annotation(tmp_pat
         {"index": 1, "items": [], "mmKeys": {"text": {0: "text:T1"}}, "mmOrder": [["text", 0]]},
         {"index": 2, "items": []},
     ]
+
+
+def _add_builds(deck, slide_index, builds):
+    """``builds``: [(drawable id, animationType, effect)] added to ``slide{slide_index}``."""
+    objects = deck[0]
+    refs = objects[f"slide{slide_index}"].setdefault("builds", [])
+    for drawable, animation_type, effect in builds:
+        bid = f"b{slide_index}_{len(refs)}"
+        objects[bid] = {
+            "_pbtype": "KN.BuildArchive",
+            "drawable": {"identifier": drawable},
+            "attributes": {"animationAttributes": {"animationType": animation_type, "effect": effect}},
+        }
+        refs.append({"identifier": bid})
+
+
+def _build_deck():
+    # Pair 0→1 and pair 1→2: slide 1 is the destination of one and the source of the next.
+    # Slide 1: text t1 builds in, movie m0 only has movie-start, image i0 has an action and
+    # builds out, the bare (unkeyed) shape 0 and triangle p0 (shape 1) build in.
+    extra = {
+        "t0": _text_box("s0"), "s0": _storage("A"),
+        "t1": _text_box("s1"), "s1": _storage("B"),
+        "m0": {"_pbtype": "TSD.MovieArchive", "movieData": {"identifier": "dm"}},
+        "i0": {"_pbtype": "TSD.ImageArchive", "data": {"identifier": "di"}},
+        "p0": _triangle(1.0),
+        "bare": {"_pbtype": "TSWP.ShapeInfoArchive"},
+    }
+    datas = [{"identifier": "dm", "digest": "MOV="}, {"identifier": "di", "digest": "IMG="}]
+    deck = _mm_deck(
+        [
+            (_transition(_MM_EFFECT), ["t0"]),
+            (_transition(_MM_EFFECT), ["t1", "m0", "i0", "bare", "p0"]),
+            (None, ["t0"]),
+            (None, ["t0"]),
+        ],
+        extra,
+        datas,
+    )
+    _add_builds(deck, 0, [("t0", "In", "apple:dissolve")])
+    _add_builds(deck, 1, [
+        ("t1", "In", "apple:dissolve"),
+        ("m0", "In", "apple:movie-start"),
+        ("i0", "Action", "apple:action-pop"),
+        ("i0", "Out", "apple:dissolve"),
+        ("p0", "In", "apple:zoom"),
+        ("bare", "In", "apple:dissolve"),
+    ])
+    _add_builds(deck, 3, [("t0", "Out", "apple:dissolve")])
+    return deck
+
+
+def test_attach_magic_move_lists_build_in_and_build_out_addresses(tmp_path):
+    # Appearance builds only: movie-start (plays the movie) and actions do not exclude.
+    # Slide 0's build-in and slide 3's build-out are written as well (slide 0 is in a
+    # pair); slide 3 is outside every pair, so nothing. Unkeyed drawables are not listed.
+    slides = _attach(tmp_path, _build_deck(), range(4))
+    assert slides[0]["mmBuildIn"] == [["text", 0]] and "mmBuildOut" not in slides[0]
+    assert slides[1]["mmBuildIn"] == [["text", 0], ["shape", 1]]
+    assert slides[1]["mmBuildOut"] == [["image", 0]]
+    assert slides[1]["mmKeys"]["movie"] == {0: "movie:MOV="}
+    assert "mmBuildIn" not in slides[2] and "mmBuildOut" not in slides[2]
+    assert "mmBuildOut" not in slides[3] and "mmKeys" not in slides[3]
+
+
+def test_attach_magic_move_build_addresses_are_cleared_and_round_trip(tmp_path):
+    import json  # noqa: PLC0415
+
+    payload = {"slides": [{"index": i, "items": []} for i in range(4)]}
+    payload["slides"][2]["mmBuildIn"] = [["text", 0]]
+    payload["slides"][3]["mmBuildOut"] = [["text", 0]]
+    iwa.attach_magic_move(_empty_key(tmp_path), payload, deck=_build_deck())
+    assert "mmBuildIn" not in payload["slides"][2] and "mmBuildOut" not in payload["slides"][3]
+    loaded = json.loads(json.dumps(payload))
+    assert [s.get("mmBuildIn") for s in loaded["slides"]] == [s.get("mmBuildIn") for s in payload["slides"]]
+    assert [s.get("mmBuildOut") for s in loaded["slides"]] == [s.get("mmBuildOut") for s in payload["slides"]]
+
+
+def test_attach_magic_move_build_addresses_follow_a_dual_text_shape(tmp_path):
+    # A custom-path text box is one drawable with two records; the build addresses its
+    # first membership (text). mmBuildIn lists the keyed address, the same one mmKeys uses.
+    extra = {
+        "t1": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "s1"},
+            "super": {"pathsource": {"editableBezierPathSource": {"naturalSize": {"width": 5.0, "height": 5.0}}}},
+        },
+        "s1": _storage("Pill"),
+    }
+    deck = _mm_deck([(_transition(_MM_EFFECT), []), (None, ["t1"])], extra)
+    _add_builds(deck, 1, [("t1", "In", "apple:dissolve")])
+    slide = _attach(tmp_path, deck, range(2))[1]
+    assert slide["mmBuildIn"] == [["text", 0]]
 
 
 def test_attach_magic_move_order_is_back_to_front_across_kinds(tmp_path):
@@ -1836,6 +2193,7 @@ def test_attach_magic_move_failure_after_a_keyed_pair_leaves_no_annotation(tmp_p
     monkeypatch.setattr(iwa, "_mm_identity", failing_identity)
     payload = {"slides": [{"index": i, "items": []} for i in range(4)]}
     payload["slides"][3]["mmKeys"] = {"text": {0: "text:stale"}}
+    payload["slides"][3]["mmPrefs"] = {"shape": {0: ["a", "b", "c"]}}
     with pytest.raises(RuntimeError, match="unreadable archive"):
         iwa.attach_magic_move(_empty_key(tmp_path), payload, deck=deck)
     assert keyed == ["text:T0", "text:T1"]

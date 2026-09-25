@@ -16,6 +16,7 @@ from typing import Any
 
 from obed_edom.inspect import is_duplicate_item
 from obed_edom.iwa_geometry import _path_source
+from obed_edom.iwa_kindindex import _is_line
 
 # Keynote inline-object placeholder; strip in _normalize_text (JXA vs IWA differ).
 _OBJECT_REPLACEMENT = "￼"
@@ -598,41 +599,127 @@ def _mm_media_key(obj: dict, digests: dict[str, str]) -> str | None:
     return digests.get(data_id) or f"id:{data_id}"
 
 
-def _unit_path(node: Any, width: float, height: float) -> Any:
+_ROUNDED_RECT = ("kTSDRoundedRectangle", 0)
+_BBOX_SOURCES = ("bezierPathSource", "editableBezierPathSource")
+_MM_STYLE_PROPS = ("stroke", "opacity", "headLineEnd", "tailLineEnd")
+
+
+def _coords(node: Any, axis: str, out: list[float]) -> list[float]:
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "naturalSize":
+                continue
+            if key == axis and isinstance(value, (int, float)):
+                out.append(value)
+            else:
+                _coords(value, axis, out)
+    elif isinstance(node, list):
+        for value in node:
+            _coords(value, axis, out)
+    return out
+
+
+def _canonical(node: Any, origin: tuple[float, float] = (0.0, 0.0), extent: tuple[float, float] = (1.0, 1.0)) -> Any:
+    """``node`` without ``naturalSize``, x/y mapped through origin/extent, floats rounded to 1e-3."""
     if isinstance(node, dict):
         out: dict[str, Any] = {}
         for key, value in node.items():
             if key == "naturalSize":
                 continue
-            if key == "x" and width and isinstance(value, (int, float)):
-                out[key] = round(value / width, 3)
-            elif key == "y" and height and isinstance(value, (int, float)):
-                out[key] = round(value / height, 3)
-            else:
-                out[key] = _unit_path(value, width, height)
+            axis = ("x", "y").index(key) if key in ("x", "y") and isinstance(value, (int, float)) else None
+            if axis is not None:
+                value = (value - origin[axis]) / extent[axis]
+            out[key] = _canonical(value, origin, extent)
         return out
     if isinstance(node, list):
-        return [_unit_path(value, width, height) for value in node]
+        return [_canonical(value, origin, extent) for value in node]
+    if isinstance(node, float):
+        return round(node, 3) + 0.0
     return node
 
 
+def _digest(value: Any) -> str:
+    return hashlib.sha1(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()[:12]
+
+
 def _mm_shape_key(obj: dict) -> str | None:
-    """Path-source key + preset type + sha1 of the path in naturalSize units (size-invariant)."""
+    """Magic Move shape gate: path-source key + preset type + digest of the path normalised to its own
+    bbox (a scalar preset by its scalar, except the rounded rect's radius)."""
     found = _path_source(obj)
     if not found:
         return None
     key, sub = found
-    ns = sub.get("naturalSize") or {}
-    unit = _unit_path(sub, ns.get("width") or 0, ns.get("height") or 0)
-    digest = hashlib.sha1(json.dumps(unit, sort_keys=True, default=str).encode()).hexdigest()[:12]
-    return f"{key}:{sub.get('type', '')}:{digest}"
+    if key == "scalarPathSource":
+        shape = {} if sub.get("type") in _ROUNDED_RECT else _canonical({"scalar": sub.get("scalar")})
+    elif key in _BBOX_SOURCES:
+        xs, ys = _coords(sub, "x", []), _coords(sub, "y", [])
+        origin = (min(xs, default=0.0), min(ys, default=0.0))
+        extent = ((max(xs, default=0.0) - origin[0]) or 1.0, (max(ys, default=0.0) - origin[1]) or 1.0)
+        shape = _canonical(sub, origin, extent)
+    else:
+        shape = _canonical(sub)
+    return f"{key}:{sub.get('type', '')}:{_digest(shape)}"
+
+
+def _style_id(obj: dict) -> str | None:
+    ref = (obj.get("super") or {}).get("style")
+    ident = ref.get("identifier") if isinstance(ref, dict) else None
+    return str(ident) if ident is not None else None
+
+
+def _mm_shape_style(obj: dict, objects: dict[str, dict]) -> dict:
+    """Stroke (None when empty), opacity and line ends, first value up the ShapeStyleArchive parent chain."""
+    found: dict[str, Any] = {}
+    cur = _style_id(obj)
+    seen: set[str] = set()
+    for _ in range(8):
+        if cur is None or cur in seen or not objects.get(cur):
+            break
+        seen.add(cur)
+        sup = objects[cur].get("super") or {}
+        props = sup.get("shapeProperties") or {}
+        for name in _MM_STYLE_PROPS:
+            if name not in found and name in props:
+                found[name] = props[name]
+        parent = ((sup.get("super") or {}).get("parent") or {}).get("identifier")
+        cur = str(parent) if parent is not None else None
+    stroke = found.get("stroke") or {}
+    empty = (stroke.get("pattern") or {}).get("type") in (None, "TSDEmptyPattern")
+    opacity = found.get("opacity")
+    return {
+        "stroke": None if empty else {k: stroke.get(k) for k in ("color", "width", "pattern")},
+        "opacity": 1.0 if opacity is None else float(opacity),
+        "headLineEnd": found.get("headLineEnd") or None,
+        "tailLineEnd": found.get("tailLineEnd") or None,
+    }
+
+
+def _mm_prefs(obj: dict, objects: dict[str, dict]) -> list[str]:
+    """[resolved stroke + opacity, raw path source, style id] -- Magic Move's preference tiers."""
+    style = _mm_shape_style(obj, objects)
+    found = _path_source(obj)
+    return [
+        _digest(_canonical({"stroke": style["stroke"], "opacity": style["opacity"]})),
+        _digest(_canonical(found[1] if found else None)),
+        _style_id(obj) or "",
+    ]
+
+
+def _mm_line_key(obj: dict, objects: dict[str, dict]) -> str | None:
+    """Magic Move line gate: the shape gate plus the resolved stroke and line ends."""
+    gate = _mm_shape_key(obj)
+    if gate is None:
+        return None
+    style = _mm_shape_style(obj, objects)
+    ends = {k: style[k] for k in ("stroke", "headLineEnd", "tailLineEnd")}
+    return f"line:{gate}:{_digest(_canonical(ends))}"
 
 
 def _mm_group_leaves(
     group_id: str, objects: dict[str, dict], digests: dict[str, str], seen: set[str], out: list[str]
 ) -> bool:
-    """``_collect_group_content``'s DFS with media by digest and shapes by ``_mm_shape_key``.
-    False if any leaf is unresolvable."""
+    """``_collect_group_content``'s DFS with media by digest, lines by ``_mm_line_key`` and
+    shapes by ``_mm_shape_key``. False if any leaf is unresolvable."""
     if group_id in seen:
         return True
     seen.add(group_id)
@@ -658,6 +745,12 @@ def _mm_group_leaves(
             continue
         if ptype != "TSWP.ShapeInfoArchive":
             return False
+        if _is_line(child):
+            line = _mm_line_key(child, objects)
+            if line is None:
+                return False
+            out.append(line)
+            continue
         stor_id = (child.get("ownedStorage") or {}).get("identifier")
         storage = objects.get(str(stor_id)) if stor_id is not None else None
         text = "".join(storage.get("text") or []) if storage and storage.get("_pbtype") == "TSWP.StorageArchive" else ""
@@ -687,28 +780,37 @@ def _mm_identity(rec: dict, objects: dict[str, dict], digests: dict[str, str]) -
         if rec.get("duplicateOf"):
             return None
         shape = _mm_shape_key(obj)
-        return f"shape:{shape}" if shape else None
+        if shape is None:
+            return None
+        norm = _normalize_text(rec.get("text"))
+        return f"shape:{shape}" + (f"{_SIG_JOIN}text:{norm}" if norm else "")
     if kind == "group":
         leaves: list[str] = []
         if not _mm_group_leaves(str(rec["id"]), objects, digests, set(), leaves) or not leaves:
             return None
         return "group:" + _SIG_JOIN.join(leaves)
     if kind == "line":
-        return "line"
+        return _mm_line_key(obj, objects)
     return None
 
 
 def attach_magic_move(key_path: str | Path, payload: dict, *, deck: Any = None) -> None:
     """Attach slide['magicMoveOut'] = True when the slide's transition out is a by-object
     Magic Move, and slide['mmKeys'] = {kind: {kindIndex: key}} plus slide['mmOrder'] ([kind, kindIndex]
-    addresses back→front, one per keyable drawable) on both slides of each such pair. All-or-nothing: prior
-    fields are cleared first and written only after every slide is keyed. Read-only;
-    transitions come from iwa_builds.deck_builds."""
+    addresses back→front, one per keyable drawable) on both slides of each such pair. Keyed shapes and lines
+    also get slide['mmPrefs'] = {kind: {kindIndex: [stroke+opacity, raw path, style id]}} (``_mm_prefs``).
+    Keyed addresses whose drawable builds in / out (``_appearance_builds``) are listed in slide['mmBuildIn'] /
+    slide['mmBuildOut']; Magic Move pairs neither as a destination / source. All-or-nothing: prior fields are
+    cleared first and written only after every slide is keyed. Read-only; transitions and builds come from
+    iwa_builds.deck_builds."""
     slides = payload.get("slides") or []
     for slide in slides:
         slide.pop("magicMoveOut", None)
         slide.pop("mmKeys", None)
         slide.pop("mmOrder", None)
+        slide.pop("mmPrefs", None)
+        slide.pop("mmBuildIn", None)
+        slide.pop("mmBuildOut", None)
     from obed_edom.iwa_builds import deck_builds  # noqa: PLC0415
     from obed_edom.iwa_kindindex import derive_kind_index  # noqa: PLC0415
 
@@ -719,31 +821,59 @@ def attach_magic_move(key_path: str | Path, payload: dict, *, deck: Any = None) 
     paired = mm_out | {idx + 1 for idx in mm_out}
     order = slide_order(objects)
     digests = _data_digests(objects)
-    staged: list[tuple[dict, bool, dict[str, dict[int, str]], list[list]]] = []
+    staged: list[tuple[dict, bool, dict[str, dict[int, str]], list[list], dict[str, dict[int, list[str]]], dict]] = []
     for slide in slides:
         idx = slide.get("index")
         if idx is None:
             continue
         keys: dict[str, dict[int, str]] = {}
         stacked: dict[int, list] = {}
+        prefs: dict[str, dict[int, list[str]]] = {}
+        built: dict[str, list[list]] = {}
         slide_archive = objects.get(order[idx][0]) if idx in paired and 0 <= idx < len(order) else None
         if slide_archive is not None:
             z_pos = {
                 str(ref.get("identifier")): pos
                 for pos, ref in enumerate(slide_archive.get("drawablesZOrder") or [])
             }
-            for rec in derive_kind_index(slide_archive, objects):
+            records = derive_kind_index(slide_archive, objects)
+            build_ids = _appearance_builds((by_number.get(idx + 1) or {}).get("builds") or [], records)
+            for rec in records:
                 key = _mm_identity(rec, objects, digests)
                 if key is not None:
                     keys.setdefault(rec["kind"], {})[int(rec["kindIndex"])] = key
                     stacked.setdefault(z_pos[rec["id"]], [rec["kind"], int(rec["kindIndex"])])
-        staged.append((slide, idx in mm_out, keys, [stacked[pos] for pos in sorted(stacked)]))
-    for slide, out, keys, mm_order in staged:
+                    if rec["kind"] in ("shape", "line"):
+                        prefs.setdefault(rec["kind"], {})[int(rec["kindIndex"])] = _mm_prefs(
+                            objects[str(rec["id"])], objects
+                        )
+                    for field, ids in build_ids.items():
+                        if rec["id"] in ids:
+                            built.setdefault(field, []).append([rec["kind"], int(rec["kindIndex"])])
+        staged.append((slide, idx in mm_out, keys, [stacked[pos] for pos in sorted(stacked)], prefs, built))
+    for slide, out, keys, mm_order, prefs, built in staged:
         if out:
             slide["magicMoveOut"] = True
         if keys:
             slide["mmKeys"] = keys
             slide["mmOrder"] = mm_order
+        if prefs:
+            slide["mmPrefs"] = prefs
+        slide.update(built)
+
+
+def _appearance_builds(builds: list[dict], records: list[dict]) -> dict[str, set[str]]:
+    """Drawable ids with a build-in / build-out, as {"mmBuildIn": ids, "mmBuildOut": ids}. A movie's
+    ``apple:movie-start`` only plays it and actions only animate it, so neither counts."""
+    ids = {(rec["kind"], int(rec["kindIndex"])): rec["id"] for rec in records}
+    out: dict[str, set[str]] = {"mmBuildIn": set(), "mmBuildOut": set()}
+    for build in builds:
+        field = {"In": "mmBuildIn", "Out": "mmBuildOut"}.get(build.get("animationType"))
+        drawable = ids.get((build.get("kind"), int(build.get("kindIndex"))))
+        if field is None or drawable is None or build.get("effect") == "apple:movie-start":
+            continue
+        out[field].add(drawable)
+    return out
 
 
 def attach_magic_move_if_available(key_path: str | Path, payload: dict) -> None:

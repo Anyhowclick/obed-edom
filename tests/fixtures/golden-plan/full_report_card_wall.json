@@ -18,7 +18,7 @@
  },
  "goldenVersion": 1,
  "inspectVersion": 5,
- "planSha256": "35002feee2c97bdf03dd97564ebe8112992906c84bbb15993399a03057c39cfb",
+ "planSha256": "e621efe88d5ef42e121e2c81724a017525f56e000c67edba98522feac35f9e6d",
  "plannerEnv": {
   "faces": {
    "Amplitude-Bold|True|False": "Amplitude-Bold|Amplitude",
@@ -234,16 +234,16 @@
    "statJobs": 0
   },
   {
-   "asGeomLines": 463,
-   "asGeomSha": "7ce1eeb1dae0",
+   "asGeomLines": 610,
+   "asGeomSha": "326fa96b4582",
    "badgeRaises": 7,
    "groupRemoves": 0,
    "n": 36,
    "roles": {
-    "hide": 14,
+    "hide": 7,
     "line": 1,
     "map": 6,
-    "other": 15
+    "other": 22
    },
    "slide": 16,
    "statJobs": 0
