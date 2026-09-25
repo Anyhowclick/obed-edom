@@ -36,6 +36,8 @@ _GL_REPLAY_TRANSITIONS: frozenset[str] = frozenset({"apple:magic-move-implied-mo
 _TRIM_SUFFIX_RE = re.compile(r"^(?P<name>.+)(?P<trim>-\d+\.\d+-\d+\.\d+)(?P<ext>\.[A-Za-z0-9]+)$")
 _IMAGE_MOVIE_RE = re.compile(r"\.(png|gif|heic\w*)$", re.IGNORECASE)
 _MOVIE_START_BUILD = "apple:movie-start"
+_CUT_TRANSITIONS: frozenset[str | None] = frozenset({None, "none", "apple:dissolve"})
+"""No transition (absent, or exported as `none`) and Dissolve: the player restarts each movie."""
 _PAIRING_MARGIN_PX = 16.0
 _MAX_ASSIGNMENTS = 5040
 """The pairing search cap, the same as `validate.MM_MAX_ASSIGNMENTS`."""
@@ -1691,7 +1693,7 @@ def derive_plan(
                 movies_list = _magic_move_movies(
                     source, destination, held, desc, transition, transition_name, gl_replay, gl_replay_used
                 )
-            elif transition_name in (None, "apple:dissolve"):
+            elif transition_name in _CUT_TRANSITIONS:
                 movies_list = _cut_movies(source, destination, held)
             else:
                 return Unsupported(f"unsupported transition '{transition_name}' at {desc}")
