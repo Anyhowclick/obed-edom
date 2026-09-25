@@ -900,8 +900,9 @@ class LiveOutputHost:
         return "injected", None, derived, script
 
     def _not_carried(self, plan: ContinuityPlan) -> list[dict[str, Any]]:
-        """Boundaries continuity declines to carry, in operator terms: original slide
-        ordinals rather than the plan's player indices."""
+        """One entry per (boundary, movie instance) continuity declines to carry, in operator
+        terms: original slide ordinals rather than the plan's player indices, with the
+        refusal code and the source instance's objectID."""
         ordinals = {
             slide.get("playerIndex"): slide.get("originalOrdinal")
             for slide in self.slides
@@ -912,6 +913,8 @@ class LiveOutputHost:
                 "fromSlide": ordinals.get(refusal["fromPlayer"]),
                 "toSlide": ordinals.get(refusal["toPlayer"]),
                 "asset": refusal["asset"],
+                "objectId": refusal["objectId"],
+                "code": refusal["code"],
                 "reason": refusal["reason"],
             }
             for refusal in plan.refusals

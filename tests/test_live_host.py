@@ -7,6 +7,7 @@ import re
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -903,27 +904,29 @@ def write_one_movie_export(
     movie_state: dict[str, Any] = {"position": {"pointX": 200.0, "pointY": 200.0}, "width": 100.0, "height": 100.0}
     if masked:
         movie_state["masksToBounds"] = True
-    movie_node = {
-        "objectID": "movie-object",
-        "movie": {"asset": "movie-asset"},
-        "baseLayer": {
-            "initialState": movie_state,
-            "layers": [
-                {
-                    "isVideoLayer": True,
-                    "initialState": {"position": {"pointX": 50.0, "pointY": 50.0}, "width": 100.0, "height": 100.0},
-                }
-            ],
-        },
-    }
-    movie_slot = _draw_slot("movie-object", 200.0, 200.0, 100.0, 100.0)
+    # Keynote gives every movie instance its own objectID, per slide and across slides
+    # (continuity refuses a deck that repeats one: R5).
+    def movie_node(object_id: str) -> dict[str, Any]:
+        return {
+            "objectID": object_id,
+            "movie": {"asset": "movie-asset", "isStreaming": False},
+            "baseLayer": {
+                "initialState": movie_state,
+                "layers": [
+                    {
+                        "isVideoLayer": True,
+                        "initialState": {"position": {"pointX": 50.0, "pointY": 50.0}, "width": 100.0, "height": 100.0},
+                    }
+                ],
+            },
+        }
     extra_movie_node = None
     extra_slot = None
     if extra_movie_bytes is not None:
         assets["extra-movie-asset"] = {"url": {"web": "assets/extra-movie.mov"}}
         extra_movie_node = {
             "objectID": "extra-movie-object",
-            "movie": {"asset": "extra-movie-asset"},
+            "movie": {"asset": "extra-movie-asset", "isStreaming": False},
             "baseLayer": {
                 "initialState": {"position": {"pointX": 600.0, "pointY": 600.0}, "width": 50.0, "height": 50.0},
                 "layers": [
@@ -948,16 +951,16 @@ def write_one_movie_export(
     if extra_movie_node is not None:
         (assets_dir / "s2" / "assets" / "extra-movie.mov").write_bytes(extra_movie_bytes)
     background = _draw_slot(None, 960.0, 540.0, 1920.0, 1080.0)
-    slots_s2 = [background] + ([extra_slot] if extra_slot is not None else []) + [movie_slot]
+    slots_s2 = [background] + ([extra_slot] if extra_slot is not None else []) + [_draw_slot("movie-object-s2", 200.0, 200.0, 100.0, 100.0)]
     if artwork_above_on_s2:
         slots_s2.append(_draw_slot(None, 200.0, 200.0, 80.0, 80.0))
     events_s1 = [{
-        "baseLayer": {"layers": [background, movie_slot]},
-        "effects": [movie_node, {"type": "transition", "name": "apple:magic-move"}],
+        "baseLayer": {"layers": [background, _draw_slot("movie-object", 200.0, 200.0, 100.0, 100.0)]},
+        "effects": [movie_node("movie-object"), {"type": "transition", "name": "apple:magic-move"}],
     }]
     events_s2 = [{
         "baseLayer": {"layers": slots_s2},
-        "effects": [movie_node] + ([extra_movie_node] if extra_movie_node is not None else []),
+        "effects": [movie_node("movie-object-s2")] + ([extra_movie_node] if extra_movie_node is not None else []),
     }]
     (assets_dir / "s1" / "s1.json").write_text(json.dumps({"events": events_s1, "assets": assets}))
     (assets_dir / "s2" / "s2.json").write_text(json.dumps({"events": events_s2, "assets": assets}))
@@ -1052,7 +1055,25 @@ def test_artwork_above_the_movie_retires_that_boundary_without_losing_continuity
     assert entry["fromSlide"] == 1
     assert entry["toSlide"] == 2
     assert entry["asset"] == "movie.mov"
+    assert entry["objectId"] == "movie-object"
+    assert entry["code"] == "overlap"
     assert "later-authored artwork overlaps" in entry["reason"]
+
+
+def test_not_carried_lists_each_refused_instance_of_one_boundary(tmp_path, monkeypatch):
+    """Schema 2 refuses per (boundary, instance): two instances of one movie declined at the
+    same cut are two entries, each naming its own objectID and refusal code."""
+    output = host_with_continuity(tmp_path, monkeypatch)
+    refusals = tuple(
+        {"fromPlayer": 0, "toPlayer": 1, "atScene": 2, "asset": "movie.mov", "movieKey": "movie1",
+         "objectId": object_id, "code": code, "reason": reason}
+        for object_id, code, reason in (("near", "R1", "R1: ambiguous pairing"), ("far", "R1b", "R1b: opacity differs"))
+    )
+    entries = output._not_carried(SimpleNamespace(refusals=refusals))
+    assert entries == [
+        {"fromSlide": 1, "toSlide": 2, "asset": "movie.mov", "objectId": "near", "code": "R1", "reason": "R1: ambiguous pairing"},
+        {"fromSlide": 1, "toSlide": 2, "asset": "movie.mov", "objectId": "far", "code": "R1b", "reason": "R1b: opacity differs"},
+    ]
 
 
 def test_continuity_without_refusals_reports_no_not_carried(tmp_path, monkeypatch):
@@ -1363,7 +1384,7 @@ def test_continuity_output_shape(tmp_path, monkeypatch):
     continuity = output.output["continuity"]
     assert set(continuity) <= {"mode", "reason", "version", "sha256", "scale", "glReplay"}
     assert continuity["mode"] == "unsupported"
-    assert continuity["version"] == live_host.CONTINUITY_VERSION
+    assert continuity["version"] == live_host.CONTINUITY_VERSION == 6
     assert isinstance(continuity["sha256"], str) and len(continuity["sha256"]) == 64
 
 
