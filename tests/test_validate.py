@@ -412,12 +412,13 @@ def test_punctuation_inside_bold_word_run_is_not_flagged():
 # mm.zorder_flip — Magic Move tweens geometry, not stacking, so a matched pair
 # whose back/front order inverts across the cut snaps at the transition.
 # Pairing follows what live Keynote was observed to do
-# (output/mm-dup-pairing/, 2026-09-24): unique content pairs directly; repeated
-# identical media pair by the least total centre distance (optimal, not greedy);
-# shapes and lines are not checked because our shape identity disagrees with
-# Keynote's (it paired green↔green and black↔black on Minimal Alpha_DSK 1→2).
+# (output/mm-dup-pairing/ and output/mm-shape-id/, 2026-09-24): a key (Keynote's
+# hard gate) unique on both sides pairs directly; a repeated key pairs by the
+# assignment preferring equal tier1 (stroke+opacity), then equal tier2 (raw stored
+# path), then equal tier3 (style), then the least total centre distance (optimal,
+# not greedy). Tiers come from mmPrefs (shapes and lines only).
 # --------------------------------------------------------------------------
-_BLACK, _GREEN = "shape:scalarPathSource:0:black", "shape:scalarPathSource:0:green"
+_SHAPE, _LINE = "shape:bezier:rect", "line:bezier:white:4:none"
 _SMALL, _BIG, _CLIP = "movie:WA0125=", "movie:UNTITLED=", "movie:SAME="
 _SQ = "image:SQ="
 _TITLE, _VERSE = "text:Welcome", "text:John 3:16"
@@ -425,24 +426,34 @@ _NAMES = {_SMALL: "IMG-WA0125.mp4", _BIG: "untitled.mov", _CLIP: "clip.mov", _SQ
 
 
 def _mm_slide(number, objects, *, out=False, skipped=False):
-    """``objects`` back→front: a key, or (key, (x, y, side)) for a square on the slide.
+    """``objects`` back→front: a key, (key, (x, y, side)) for a square on the slide
+    ((x, y, w, h) for any box, (x, y, w, h, rotation) for a rotated one: x/y is the drawn
+    box's top-left and w/h the unrotated size, as in the payload), or
+    (key, (x, y, side), [tier1, tier2, tier3]) to add mmPrefs.
     kindIndex follows stacking order within each kind."""
     by_kind: dict[str, dict[int, str]] = {}
+    prefs: dict[str, dict[int, list]] = {}
     items, order = [], []
     for entry in objects:
-        key, rect = entry if isinstance(entry, tuple) else (entry, None)
+        key, rect, tiers = (*entry, None)[:3] if isinstance(entry, tuple) else (entry, None, None)
         kind = key.split(":", 1)[0]
         ki = len(by_kind.setdefault(kind, {}))
         by_kind[kind][ki] = key
+        if tiers is not None:
+            prefs.setdefault(kind, {})[ki] = list(tiers)
         item = {"kind": kind, "kindIndex": ki, "text": "", "fileName": _NAMES.get(key, "")}
         if kind == "text":
             item["text"] = key.split(":", 1)[1]
         if rect:
-            x, y, side = rect
-            item.update(x=x, y=y, w=side, h=side)
+            x, y, w, h, *rotation = rect if len(rect) >= 4 else (*rect, rect[2])
+            item.update(x=x, y=y, w=w, h=h)
+            if rotation:
+                item["rotation"] = rotation[0]
         items.append(item)
         order.append([kind, ki])
     slide = {"number": number, "index": number - 1, "items": items, "mmKeys": by_kind, "mmOrder": order}
+    if prefs:
+        slide["mmPrefs"] = prefs
     if out:
         slide["magicMoveOut"] = True
     if skipped:
@@ -565,15 +576,29 @@ def test_mm_zorder_flip_no_mm_data_is_silent():
     assert _zorder(payload) == []
 
 
-def test_mm_zorder_flip_never_checks_shapes_or_lines():
-    # Fixture-like Minimal Alpha_DSK 1→2: the black and green squares swap stacking
-    # against each other and against the movie. The old shape key paired same-size
-    # squares of different fill, so it would have flagged; shapes are not checked now.
+def test_mm_zorder_flip_checks_unique_lines_and_shapes():
+    # A unique compatible pair (one each side) always pairs: the line and the shape each
+    # swap stacking against the movie.
     payload = _mm_payload(
-        _mm_slide(1, [_BLACK, _SMALL, _GREEN, "line"], out=True),
-        _mm_slide(2, ["line", _GREEN, _SMALL, _BLACK]),
+        _mm_slide(1, [_SHAPE, _SMALL, _LINE], out=True),
+        _mm_slide(2, [_LINE, _SMALL, _SHAPE]),
     )
-    assert _zorder(payload) == []
+    assert _pairs(_zorder(payload)) == [
+        "'shape #0' and 'IMG-WA0125.mp4'",
+        "'shape #0' and 'line #0'",
+        "'IMG-WA0125.mp4' and 'line #0'",
+    ]
+
+
+def test_mm_lines_pair_only_by_equal_key():
+    # Lines no longer share the bare key "line": a different stroke or end is a
+    # different gate key, so it never pairs.
+    other = "line:bezier:yellow:4:none"
+    assert _matches([_LINE, _TITLE], [_TITLE, _LINE]) == [
+        (("line", 0), ("line", 0)),
+        (("text", 0), ("text", 0)),
+    ]
+    assert _matches([_LINE, _TITLE], [_TITLE, other]) == [(("text", 0), ("text", 0))]
 
 
 @pytest.mark.parametrize(
@@ -585,13 +610,251 @@ def test_mm_zorder_flip_never_checks_shapes_or_lines():
         pytest.param("group:text:UPG\nimage:PDF1=", id="whitespace-text-shape-dropped-from-key"),
     ],
 )
-def test_mm_zorder_flip_never_checks_groups(group):
+def test_mm_zorder_flip_checks_groups(group):
     payload = _mm_payload(
         _mm_slide(1, [group, _SMALL], out=True),
         _mm_slide(2, [_SMALL, group]),
     )
-    assert _zorder(payload) == []
-    assert _matches([group, _TITLE], [_TITLE, group]) == [(("text", 0), ("text", 0))]
+    assert _pairs(_zorder(payload)) == ["'group #0' and 'IMG-WA0125.mp4'"]
+    assert _matches([group, _TITLE], [_TITLE, group]) == [
+        (("group", 0), ("group", 0)),
+        (("text", 0), ("text", 0)),
+    ]
+
+
+def test_mm_repeated_text_and_groups_are_skipped():
+    # Keynote's pairing of repeated text and groups was never measured, so a repeated
+    # text or group key pairs nothing even with geometry; unique keys still pair.
+    group = "group:text:UPG\nshape:scalarPathSource:0:abc"
+    for key in (_TITLE, group):
+        assert _matches(
+            [(key, (0, 0, 100)), (key, (900, 0, 100)), _SMALL],
+            [_SMALL, (key, (10, 0, 100)), (key, (910, 0, 100))],
+        ) == [(("movie", 0), ("movie", 0))]
+
+
+_LEFT, _RIGHT = (100, 400, 200), (1500, 400, 200)
+_PLAIN = ("stroke:none|op:1", "path:174x154", "style:red")
+
+
+def test_mm_identical_shapes_pair_by_least_total_distance():
+    # Two overlapping shapes of one gate key and equal prefs: position decides. Slide 2
+    # stacks the right-hand copy behind the left-hand one, so the pairs flip only when
+    # each shape stays on its side (centres move 50pt; crossing would cost 800pt).
+    before = [(_SHAPE, (100, 300, 500), _PLAIN), (_SHAPE, (500, 300, 500), _PLAIN)]
+    stays_after = [(_SHAPE, (550, 300, 500), _PLAIN), (_SHAPE, (150, 300, 500), _PLAIN)]
+    stays = _mm_payload(_mm_slide(1, before, out=True), _mm_slide(2, stays_after))
+    assert _matches(before, stays_after) == [
+        (("shape", 0), ("shape", 1)),
+        (("shape", 1), ("shape", 0)),
+    ]
+    assert _pairs(_zorder(stays)) == ["'shape #0' and 'shape #1'"]
+    crosses = _mm_payload(
+        _mm_slide(1, before, out=True),
+        _mm_slide(2, [(_SHAPE, (150, 300, 500), _PLAIN), (_SHAPE, (550, 300, 500), _PLAIN)]),
+    )
+    assert _zorder(crosses) == []
+
+
+def test_mm_repeated_horizontal_lines_pair_by_distance():
+    # Zero-height lines have a centre, so a repeated line key pairs like media: each
+    # line moves 50pt to its own side rather than 900pt across. A zero-by-zero box
+    # has no usable geometry and the class is skipped.
+    before = [(_LINE, (100, 200, 400, 0)), (_LINE, (1000, 200, 400, 0))]
+    after = [(_LINE, (1050, 200, 400, 0)), (_LINE, (150, 200, 400, 0))]
+    assert _matches(before, after) == [(("line", 0), ("line", 1)), (("line", 1), ("line", 0))]
+    assert _matches([(_LINE, (100, 200, 0, 0)), before[1]], after) == []
+
+
+def test_mm_repeated_rotated_lines_pair_by_true_centres():
+    # Line 0 is vertical (rotation 90, x=500, y 0..1000, true centre (500, 500)); read
+    # unrotated its centre would be (1000, 0). Line 1 is a rotation-180 horizontal line
+    # centred (500, 0). On slide 2, line 0 is a short horizontal line centred (500, 500)
+    # and line 1 one centred (1000, 0). True centres pair 0->0 and 1->1 (500pt total);
+    # unrotated centres would cross them (500pt vs 1207pt the other way).
+    before = [(_LINE, (500, 0, 1000, 0, 90)), (_LINE, (450, 0, 100, 0, 180))]
+    after = [(_LINE, (450, 500, 100, 0, 0)), (_LINE, (950, 0, 100, 0, 0))]
+    assert _matches(before, after) == [(("line", 0), ("line", 0)), (("line", 1), ("line", 1))]
+
+
+def test_mm_shape_tier1_beats_distance():
+    # S0 (no stroke) sits left, S1 (white stroke) right. Slide 2 puts the stroked copy
+    # left and the plain copy right. Distance alone would keep each on its side (no
+    # flip); Keynote sends each to its matching stroke, so both cross and the
+    # back/front order inverts.
+    stroked = ("stroke:white4|op:1", *_PLAIN[1:])
+    before = [(_SHAPE, _LEFT, _PLAIN), (_SHAPE, _RIGHT, stroked)]
+    after = [(_SHAPE, _LEFT, stroked), (_SHAPE, _RIGHT, _PLAIN)]
+    assert _matches(before, after) == [(("shape", 0), ("shape", 1)), (("shape", 1), ("shape", 0))]
+    assert _pairs(_zorder(_mm_payload(_mm_slide(1, before, out=True), _mm_slide(2, after)))) == [
+        "'shape #0' and 'shape #1'",
+    ]
+    plain_only = [(_SHAPE, _LEFT, _PLAIN), (_SHAPE, _RIGHT, _PLAIN)]
+    assert _zorder(_mm_payload(_mm_slide(1, plain_only, out=True), _mm_slide(2, plain_only))) == []
+
+
+_NEAR, _FAR = (200, 400, 200), (1500, 400, 200)
+
+
+@pytest.mark.parametrize(
+    ("near", "far"),
+    [
+        pytest.param(
+            ("stroke:none|op:1", "path:348x308", "style:red"),
+            ("stroke:none|op:1", "path:174x154", "style:blue"),
+            id="raw-path-beats-style",
+        ),
+        pytest.param(
+            ("stroke:none|op:0.29", "path:174x154", "style:red"),
+            ("stroke:none|op:1", "path:348x308", "style:red"),
+            id="tier1-beats-raw-path",
+        ),
+        pytest.param(
+            ("stroke:none|op:1", "path:174x154", "style:blue"),
+            ("stroke:none|op:1", "path:174x154", "style:red"),
+            id="style-beats-distance",
+        ),
+    ],
+)
+def test_mm_shape_tier_order_picks_the_farther_candidate(near, far):
+    # One source; the nearer target differs in a higher tier than the farther one.
+    got = _matches([(_SHAPE, (100, 400, 200), _PLAIN)], [(_SHAPE, _NEAR, near), (_SHAPE, _FAR, far)])
+    assert got == [(("shape", 0), ("shape", 1))]
+
+
+def test_mm_shape_full_tie_is_skipped():
+    # Equal prefs and the target exactly between the two sources: ambiguous, skipped
+    # (the unique title still pairs). A tier difference breaks the same geometric tie.
+    between = [_TITLE, (_SHAPE, (100, 0, 100), _PLAIN)]
+    assert _matches(
+        [(_SHAPE, (0, 0, 100), _PLAIN), (_SHAPE, (200, 0, 100), _PLAIN), _TITLE], between,
+    ) == [(("text", 0), ("text", 0))]
+    assert _matches(
+        [(_SHAPE, (0, 0, 100), _PLAIN), (_SHAPE, (200, 0, 100), ("stroke:red|op:1", *_PLAIN[1:])), _TITLE],
+        between,
+    ) == [(("shape", 0), ("shape", 0)), (("text", 0), ("text", 0))]
+
+
+def test_mm_shapes_without_prefs_pair_by_distance_like_media():
+    assert _matches(
+        [(_SHAPE, (100, 400, 150)), (_SHAPE, (600, 400, 150))],
+        [(_SHAPE, (550, 400, 150)), (_SHAPE, (1150, 400, 150))],
+    ) == [(("shape", 0), ("shape", 0)), (("shape", 1), ("shape", 1))]
+
+
+def test_mm_minimal_alpha_fixture_like_pairs_black_and_green_by_tier1():
+    # Minimal Alpha_DSK 1→2 as the IWA reads it: all six squares share one gate key
+    # and one raw path. Slide 1: black (white stroke) back, green (op 0.29) front.
+    # Slide 2: black at ki 0, theme yellow/red/pink at ki 1–3, green at ki 4. Tier 1
+    # alone sends black→ki 0 and green→ki 4, whatever the distances.
+    black = ("stroke:white4|op:1", "path:174x154", "style:15336742")
+    green = ("stroke:none|op:0.29", "path:174x154", "style:15336941")
+    theme = [("stroke:none|op:1", "path:174x154", f"style:{s}") for s in (8520, 8519, 8521)]
+    before = [(_SHAPE, (900, 100, 174), black), (_SHAPE, (100, 100, 174), green)]
+    after = [
+        (_SHAPE, (100, 600, 174), black),
+        *[(_SHAPE, (x, 100, 351), t) for x, t in zip((150, 500, 900), theme)],
+        (_SHAPE, (1500, 600, 351), green),
+    ]
+    assert _matches(before, after) == [(("shape", 0), ("shape", 0)), (("shape", 1), ("shape", 4))]
+
+
+def _built(slide, field, addresses):
+    slide[field] = [list(a) for a in addresses]
+    return slide
+
+
+def test_mm_destination_that_builds_in_is_not_paired():
+    # Live FRC 102→103 (owner, 2026-09-24): an object that builds in on slide N+1 is
+    # off screen at the cut, so Magic Move never pairs it; the source fades out.
+    before = _mm_slide(1, [_TITLE, _SMALL], out=True)
+    after = _built(_mm_slide(2, [_SMALL, _TITLE]), "mmBuildIn", [("text", 0)])
+    from obed_edom.validate import _mm_matches
+
+    assert _mm_matches(before, after) == [(("movie", 0), ("movie", 0))]
+    assert _zorder(_mm_payload(before, after)) == []
+
+
+def test_mm_source_that_builds_out_is_not_paired():
+    # Owner-approved by the same logic: an object that builds out on slide N has left
+    # before the cut and does not pair either.
+    before = _built(_mm_slide(1, [_TITLE, _SMALL], out=True), "mmBuildOut", [("movie", 0)])
+    after = _mm_slide(2, [_SMALL, _TITLE])
+    from obed_edom.validate import _mm_matches
+
+    assert _mm_matches(before, after) == [(("text", 0), ("text", 0))]
+    assert _zorder(_mm_payload(before, after)) == []
+
+
+def test_mm_build_exclusion_is_per_side_of_the_pair():
+    # mmBuildIn on the SOURCE slide and mmBuildOut on the DESTINATION slide belong to
+    # the neighbouring pairs, not this one: both objects still pair and flip.
+    before = _built(_mm_slide(1, [_TITLE, _SMALL], out=True), "mmBuildIn", [("text", 0), ("movie", 0)])
+    after = _built(_mm_slide(2, [_SMALL, _TITLE]), "mmBuildOut", [("text", 0), ("movie", 0)])
+    assert len(_zorder(_mm_payload(before, after))) == 1
+
+
+def test_mm_build_in_removes_a_competitor_and_changes_the_pairing():
+    # Two identical shapes on slide 2: the near one (ki 0) would win on distance, but
+    # it builds in, so the far one (ki 1) is the only candidate left and pairs.
+    from obed_edom.validate import _mm_matches
+
+    before = _mm_slide(1, [(_SHAPE, (100, 400, 150))], out=True)
+    after = _mm_slide(2, [(_SHAPE, (150, 400, 150)), (_SHAPE, (1500, 400, 150))])
+    assert _mm_matches(before, after) == [(("shape", 0), ("shape", 0))]
+    assert _mm_matches(before, _built(after, "mmBuildIn", [("shape", 0)])) == [(("shape", 0), ("shape", 1))]
+
+
+def test_mm_build_addresses_survive_a_json_round_trip():
+    import json
+
+    from obed_edom.validate import _mm_matches
+
+    payload = json.loads(json.dumps(_mm_payload(
+        _mm_slide(1, [(_SHAPE, (100, 400, 150))], out=True),
+        _built(_mm_slide(2, [(_SHAPE, (150, 400, 150)), (_SHAPE, (1500, 400, 150))]), "mmBuildIn", [("shape", 0)]),
+    )))
+    assert _mm_matches(*payload["slides"]) == [(("shape", 0), ("shape", 1))]
+
+
+def test_mm_prefs_survive_a_json_round_trip():
+    # mmKeys/mmPrefs kindIndex become strings after JSON; the tier1 case still resolves.
+    import json
+
+    from obed_edom.validate import _mm_matches
+
+    stroked = ("stroke:white4|op:1", *_PLAIN[1:])
+    payload = json.loads(json.dumps(_mm_payload(
+        _mm_slide(1, [(_SHAPE, _LEFT, _PLAIN), (_SHAPE, _RIGHT, stroked)], out=True),
+        _mm_slide(2, [(_SHAPE, _LEFT, stroked), (_SHAPE, _RIGHT, _PLAIN)]),
+    )))
+    assert set(payload["slides"][0]["mmPrefs"]["shape"]) == {"0", "1"}
+    assert sorted(_mm_matches(*payload["slides"])) == [
+        (("shape", 0), ("shape", 1)),
+        (("shape", 1), ("shape", 0)),
+    ]
+    assert _pairs(_zorder(payload)) == ["'shape #0' and 'shape #1'"]
+
+
+_MINIMAL_ALPHA = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Minimal Alpha_DSK.key")
+
+
+@pytest.mark.skipif(not _MINIMAL_ALPHA.exists(), reason="Minimal Alpha_DSK.key not on this machine")
+def test_mm_real_minimal_alpha_pairs_black_and_green_like_keynote():
+    # Live Keynote (FX, 2026-09-24): black 1:0 ↔ 2:0, green 1:1 ↔ 2:4 (the big green).
+    from obed_edom.iwa_runs import attach_magic_move
+    from obed_edom.offline_inspect import offline_wall_payload
+    from obed_edom.validate import _mm_matches
+
+    payload = offline_wall_payload(_MINIMAL_ALPHA)
+    attach_magic_move(_MINIMAL_ALPHA, payload)
+    slides = {int(s["number"]): s for s in payload["slides"]}
+    matches = _mm_matches(slides[1], slides[2])
+    assert (("shape", 0), ("shape", 0)) in matches
+    assert (("shape", 1), ("shape", 4)) in matches
+    # The theme yellow/red/pink squares (slide 2 ki 1–3) build in: never paired.
+    assert slides[2]["mmBuildIn"] == [["shape", 1], ["shape", 2], ["shape", 3]]
+    assert not {after for _, after in matches} & {("shape", 1), ("shape", 2), ("shape", 3)}
 
 
 # The live Keynote experiment geometries (gen.py `V`): squares (x, y, side) of one
@@ -624,18 +887,18 @@ def test_mm_duplicate_media_pair_like_keynote(before, after, expected):
 
 
 def test_mm_zorder_flip_fires_on_a_flip_among_duplicated_movies():
-    # M2 geometry with movies: A (back) pairs with the (100, 500) copy, B (front) with
-    # the (1300, 100) copy — which slide 2 stacks behind A's partner. Both are clip.mov,
-    # so the labels carry their kind/kindIndex.
-    before = [(_CLIP, _A), (_CLIP, _B)]
+    # Two overlapping copies: A (back) stays put, B (front) nudges right. Slide 2
+    # stacks B's partner behind A's, so the pair flips while the boxes overlap. Both
+    # are clip.mov, so the labels carry their kind/kindIndex.
+    before = [(_CLIP, (100, 100, 500)), (_CLIP, (400, 300, 500))]
     payload = _mm_payload(
         _mm_slide(1, before, out=True),
-        _mm_slide(2, [(_CLIP, (1300, 100, 300)), (_CLIP, (100, 500, 300))]),
+        _mm_slide(2, [(_CLIP, (450, 300, 500)), (_CLIP, (100, 100, 500))]),
     )
     assert _pairs(_zorder(payload)) == ["'clip.mov (movie #0)' and 'clip.mov (movie #1)'"]
     same = _mm_payload(
         _mm_slide(1, before, out=True),
-        _mm_slide(2, [(_CLIP, (100, 500, 300)), (_CLIP, (1300, 100, 300))]),
+        _mm_slide(2, [(_CLIP, (100, 100, 500)), (_CLIP, (450, 300, 500))]),
     )
     assert _zorder(same) == []
 
@@ -735,4 +998,77 @@ def test_mm_zorder_flip_labels_stay_distinct_when_a_raw_name_matches_a_disambigu
         "'clip.mov (movie #1)' and 'Welcome'",
         "'clip.mov (movie #0) (movie #2)' and 'Welcome'",
         "'clip.mov (movie #0) (movie #0) (movie #3)' and 'Welcome'",
+    ]
+
+
+# Overlap filter: a flipped pair is flagged only if the two boxes overlap (strictly,
+# on both axes) at some moment of the morph. Each box moves linearly in (x, y, w, h)
+# from its slide-1 item to its slide-2 partner. Boxes are the drawn (rotation-aware)
+# axis-aligned bounds.
+def _flip(small, small_after, big, big_after, *, small_key=_SMALL):
+    """_SMALL/_BIG back→front on slide 1, front→back on slide 2 (always a flip)."""
+    return _zorder(_mm_payload(
+        _mm_slide(1, [(small_key, small) if small else small_key, (_BIG, big)], out=True),
+        _mm_slide(2, [(_BIG, big_after), (small_key, small_after) if small_after else small_key]),
+    ))
+
+
+def test_mm_zorder_flip_skips_a_flip_that_never_overlaps():
+    assert _flip((0, 0, 100), (0, 300, 100), (500, 0, 100), (500, 300, 100)) == []
+
+
+def test_mm_zorder_flip_edge_contact_is_not_overlap():
+    # The boxes share an edge for the whole morph: strict overlap only.
+    assert _flip((0, 0, 100), (0, 0, 100), (100, 0, 100), (100, 0, 100)) == []
+
+
+@pytest.mark.parametrize(
+    ("small", "small_after", "big", "big_after"),
+    [
+        pytest.param((0, 0, 100), (0, 800, 100), (50, 50, 100), (900, 50, 100), id="only-at-start"),
+        pytest.param((0, 800, 100), (0, 0, 100), (900, 50, 100), (50, 50, 100), id="only-at-end"),
+        # Paths cross: at t=0 and t=1 the boxes are 900pt apart; they pass through each
+        # other at t=0.5.
+        pytest.param((0, 0, 100), (1000, 0, 100), (1000, 0, 100), (0, 0, 100), id="only-mid-path"),
+        # Diagonal crossing whose overlap window is t in (0.51, 0.52): between the
+        # samples a 21-step check would take, so the closed form must catch it.
+        pytest.param((0, 0, 10), (1000, 1000, 10), (1030, 3, 10), (30, 1003, 10), id="brief-mid-path"),
+    ],
+)
+def test_mm_zorder_flip_flags_a_flip_that_overlaps_at_some_moment(small, small_after, big, big_after):
+    assert _pairs(_flip(small, small_after, big, big_after)) == ["'IMG-WA0125.mp4' and 'untitled.mov'"]
+
+
+def test_mm_zorder_flip_zero_height_line_through_a_box_counts():
+    # A horizontal line (h=0) strictly inside the box's y range crosses it; one on the
+    # box's top edge only touches it.
+    through = _flip((0, 550, 1000, 0), (0, 550, 1000, 0), (400, 500, 100), (400, 500, 100), small_key=_LINE)
+    assert _pairs(through) == ["'line #0' and 'untitled.mov'"]
+    edge = _flip((0, 500, 1000, 0), (0, 500, 1000, 0), (400, 500, 100), (400, 500, 100), small_key=_LINE)
+    assert edge == []
+
+
+def test_mm_zorder_flip_vertical_line_stored_rotated_crosses_a_box():
+    # The payload stores a vertical line as rotation=90 with w=length, h=0 and x/y at the
+    # drawn top-left: this one runs x=450, y=100..500 through the box at x 400..500,
+    # y 250..350. Read unrotated it would be a horizontal line at y=100, clear of the box.
+    vertical = (450, 100, 400, 0, 90)
+    flagged = _flip(vertical, vertical, (400, 250, 100), (400, 250, 100), small_key=_LINE)
+    assert _pairs(flagged) == ["'line #0' and 'untitled.mov'"]
+    unrotated = (450, 100, 400, 0, 0)
+    assert _flip(unrotated, unrotated, (400, 250, 100), (400, 250, 100), small_key=_LINE) == []
+
+
+@pytest.mark.parametrize(
+    ("small", "small_after"),
+    [
+        pytest.param(None, None, id="no-geometry"),
+        pytest.param((0, 0, 100), None, id="slide-2-only-missing"),
+        pytest.param(None, (0, 0, 100), id="slide-1-only-missing"),
+    ],
+)
+def test_mm_zorder_flip_keeps_the_flag_when_geometry_is_missing(small, small_after):
+    # Cannot prove the pair never overlaps, so the flag stays.
+    assert _pairs(_flip(small, small_after, (900, 900, 100), (900, 900, 100))) == [
+        "'IMG-WA0125.mp4' and 'untitled.mov'",
     ]

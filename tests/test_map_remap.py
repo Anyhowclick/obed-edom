@@ -5686,6 +5686,78 @@ def test_mm_direction_pairs_the_slide_with_the_next_one_only():
 
 
 @pytest.mark.parametrize(
+    ("first", "second", "hidden_slide"),
+    [
+        pytest.param({}, {"mmBuildIn": [["text", 0]]}, 1, id="forward-partner-builds-in"),
+        pytest.param({"mmBuildOut": [["text", 0]]}, {}, 1, id="forward-hidden-builds-out-on-source"),
+        pytest.param({}, {"mmBuildIn": [["text", 0]]}, 2, id="backward-hidden-builds-in-on-destination"),
+        pytest.param({"mmBuildOut": [["text", 0]]}, {}, 2, id="backward-partner-builds-out"),
+    ],
+)
+def test_mm_partner_that_builds_is_not_a_partner(first, second, hidden_slide):
+    """Live FRC 102→103 (owner, 2026-09-24): an object that builds in on slide n+1 is
+    off screen at the cut, so Magic Move never pairs it; by the same logic one that
+    builds out on slide n has left before it. Then the off-wall copy has no partner and
+    stays hidden. The build that matters sits on the hidden copy or on its partner,
+    depending on which side of the pair each one is."""
+    y = {hidden_slide: -200, 3 - hidden_slide: 500}
+    wall = _mm_wall(
+        _mm_slide(1, [_harbour(y[1])], _HARBOUR_KEYS, mm_out=True, **first),
+        _mm_slide(2, [_harbour(y[2])], _HARBOUR_KEYS, **second),
+    )
+    plan = plan_payload(wall, _mm_recipe())
+    assert _spec(plan, hidden_slide, "text", 0).role == "hide"
+    assert plan.mm_partners == []
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "hidden_slide"),
+    [
+        pytest.param({"mmBuildIn": [["text", 0]]}, {}, 1, id="source-build-in-belongs-to-the-previous-pair"),
+        pytest.param({}, {"mmBuildOut": [["text", 0]]}, 1, id="destination-build-out-belongs-to-the-next-pair"),
+        pytest.param({}, {"mmBuildIn": [["text", 1]]}, 1, id="another-object-builds-in"),
+    ],
+)
+def test_mm_partner_kept_when_the_build_is_not_on_this_pair(first, second, hidden_slide):
+    """Builds on the other side of a slide belong to its other pair, and a build on an
+    unrelated address changes nothing: the off-wall copy is still kept."""
+    wall = _mm_wall(
+        _mm_slide(1, [_harbour(-200)], _HARBOUR_KEYS, mm_out=True, **first),
+        _mm_slide(2, [_harbour(500)], _HARBOUR_KEYS, **second),
+    )
+    plan = plan_payload(wall, _mm_recipe())
+    assert _spec(plan, hidden_slide, "text", 0).role == "other"
+    assert plan.mm_partners[0]["partners"] == [{"slide": 2, "kindIndex": 0}]
+
+
+def test_mm_partner_movie_with_only_movie_start_is_kept():
+    """A movie's `apple:movie-start` build only plays it: it is on screen at the cut and
+    pairs. `iwa_runs._appearance_builds` leaves it out of mmBuildIn (a real build-in on
+    the same movie would not be), so the off-wall movie copy is kept for its partner."""
+    from obed_edom.iwa_runs import _appearance_builds
+
+    records = [{"id": "m0", "kind": "movie", "kindIndex": 0}]
+    start = {"kind": "movie", "kindIndex": 0, "animationType": "In", "effect": "apple:movie-start"}
+    zoom = {**start, "effect": "apple:zoom"}
+    keys = {"movie": {0: "movie:CLIP="}}
+
+    def movie(y):
+        return _item(kind="movie", kindIndex=0, fileName="clip.mov", x=3000, y=y, w=200, h=100)
+
+    def plan_with(builds):
+        built = sorted(_appearance_builds(builds, records)["mmBuildIn"])
+        extra = {"mmBuildIn": [["movie", 0]]} if built else {}
+        wall = _mm_wall(
+            _mm_slide(1, [movie(-200)], keys, mm_out=True),
+            _mm_slide(2, [movie(500)], keys, **extra),
+        )
+        return plan_payload(wall, _mm_recipe())
+
+    assert _spec(plan_with([start]), 1, "movie", 0).role == "other"
+    assert _spec(plan_with([start, zoom]), 1, "movie", 0).role == "hide"
+
+
+@pytest.mark.parametrize(
     ("src", "rect", "edge", "expected"),
     [
         (Rect(3000, -100, 100, 50), Rect(500, 400, 100, 50), "top", Rect(500, -74, 100, 50)),
