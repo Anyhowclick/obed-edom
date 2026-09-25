@@ -162,14 +162,97 @@ def test_ambiguous_same_asset_instance_resolves_by_unique_geometry_match():
     assert len(boundary["movies"]) == 1
 
 
-def test_ambiguous_ownership_is_refused_when_the_stray_instance_also_matches():
-    """Mutate slide 2 so its lone Untitled.mov instance geometry equals slide 1's SECOND
-    (non-continuing) instance as well as its first: now two geometry-equal pairs exist and
-    ownership is genuinely ambiguous, which must fail closed."""
-    tmp = _mutate_slide(SLIDE2, _clone_second_instance_onto_slide2)
+def test_r5_an_object_id_repeated_across_slides_refuses_the_deck():
+    """Slide 2 gains a copy of slide 1's small instance, objectID and all: the runtime keys every
+    carry on `objectID`, so a repeated id cannot be expressed (plan R5)."""
+    tmp = _mutate_slide(
+        SLIDE2, lambda data: _with_object_id(P2_OBJECT_IDS["slide1_small"], _clone_second_instance_onto_slide2(data))
+    )
     plan = derive_plan(tmp, SLIDES, resolver=_resolver)
-    assert isinstance(plan, Unsupported)
-    assert "ambiguous" in plan.reason
+    assert plan == Unsupported(
+        f"R5: movie object {P2_OBJECT_IDS['slide1_small']} appears on player index 0 and 1"
+    )
+
+
+def _with_object_id(object_id: str, data):
+    """Name the clone and give it a draw slot, behind everything, on slide 2's first event."""
+    data["events"][-1]["effects"][0]["effects"][-1]["objectID"] = object_id
+    _draw_slots(data, 0).insert(0, _authored_slot(*SLIDE1_SMALL, object_id=object_id))
+    return data
+
+
+def test_a_second_destination_instance_pairs_by_centre_distance():
+    """With a fresh objectID the same clone is not ambiguous: each slide-1 instance pairs with its
+    geometry-equal twin by minimum total centre distance (plan section 2.2)."""
+    tmp = _mutate_slide(SLIDE2, lambda data: _with_object_id("CLONE", _clone_second_instance_onto_slide2(data)))
+    plan = derive_plan(tmp, SLIDES, resolver=_resolver)
+    assert isinstance(plan, ContinuityPlan)
+    pairs = {(m.src_object_id, m.dst_object_id, m.action) for m in plan.boundaries[0].movies}
+    assert pairs == {
+        (P2_OBJECT_IDS["slide1"], P2_OBJECT_IDS["slide2"], "pin"),
+        (P2_OBJECT_IDS["slide1_small"], "CLONE", "pin"),
+    }
+
+
+def _move_slide2_movie_centre(x: float, y: float):
+    def move(node):
+        node["baseLayer"]["initialState"]["position"] = {"pointX": x, "pointY": y}
+
+    return lambda data: _map_movie_nodes(data, move)
+
+
+def _slide1_centres() -> tuple[tuple[float, float], tuple[float, float]]:
+    return (
+        (SLIDE1_BIG[0] + SLIDE1_BIG[2] / 2, SLIDE1_BIG[1] + SLIDE1_BIG[3] / 2),
+        (SLIDE1_SMALL[0] + SLIDE1_SMALL[2] / 2, SLIDE1_SMALL[1] + SLIDE1_SMALL[3] / 2),
+    )
+
+
+@pytest.mark.parametrize("offset, refused", [(0.0, True), (7.9, True), (8.1, False)])
+def test_r1_a_runner_up_pairing_within_16_px_refuses_the_boundary(offset, refused):
+    """Slide 2's one instance sits `offset` px from the midpoint of slide 1's two centres, along
+    the line between them, so the two assignments differ by 2 x offset."""
+    (bx, by), (sx, sy) = _slide1_centres()
+    length = math.dist((bx, by), (sx, sy))
+    ux, uy = (sx - bx) / length, (sy - by) / length
+    cx, cy = (bx + sx) / 2 - ux * offset, (by + sy) / 2 - uy * offset
+    plan = _plan(_mutate_slide(SLIDE2, _move_slide2_movie_centre(cx, cy)))
+    assert isinstance(plan, ContinuityPlan)
+    movies = plan.boundaries[0].movies
+    if refused:
+        assert [(m.action, m.code, m.src_object_id, m.dst_object_id) for m in movies] == [
+            ("retire", "R1", P2_OBJECT_IDS["slide1"], None),
+            ("retire", "R1", P2_OBJECT_IDS["slide1_small"], None),
+        ]
+        assert "(margin 16 px)" in movies[0].refusal
+        assert [r["code"] for r in plan.refusals] == ["R1", "R1"]
+    else:
+        assert [(m.action, m.src_object_id) for m in movies] == [("bridge", P2_OBJECT_IDS["slide1"])]
+
+
+def _set_slide1_small_opacity(value: float):
+    def apply(node):
+        if node.get("objectID") == P2_OBJECT_IDS["slide1_small"]:
+            node["baseLayer"]["initialState"]["opacity"] = value
+
+    return lambda data: _map_movie_nodes(data, apply)
+
+
+def test_r1b_candidates_that_differ_in_opacity_refuse_the_boundary():
+    """Keynote pairs by opacity before distance (F3), so a distance-only pairing is unsafe."""
+    plan = _plan(_mutate_slide(SLIDE1, _set_slide1_small_opacity(0.5)))
+    assert isinstance(plan, ContinuityPlan)
+    movies = plan.boundaries[0].movies
+    assert [(m.action, m.code) for m in movies] == [("retire", "R1b"), ("retire", "R1b")]
+    assert "differ in opacity" in movies[0].refusal
+
+
+def test_r1b_does_not_apply_when_there_is_no_choice():
+    """One instance on each side: no pairing preference can change the outcome."""
+    plan = _plan(_mutate_slide(SLIDE2, _set_slide1_small_opacity(0.5)))
+    assert isinstance(plan, ContinuityPlan)
+    plan_opaque = _plan()
+    assert plan.boundaries[1].movies == plan_opaque.boundaries[1].movies
 
 
 def test_refuses_unreadable_header():
@@ -370,21 +453,19 @@ P2_SLIDE4_MOVIE_RECT = {"x": 327, "y": 709, "w": 1266, "h": 356}
 # movie), so the runtime is told to hand the movie back to the player at that scene.
 P2_SLIDE2_MIN_HASH = 2
 
-# `derive_plan` on the fixture must produce exactly this runtime plan (plan section 1's "After").
-EXPECTED_RUNTIME_PLAN = {
-    "movies": {"movie1": {"assetKeys": ["untitled.mov"], "footprint": {"x": 109, "y": 795, "w": 952, "h": 268}}},
-    "boundaries": [
-        {"atScene": 2, "action": "retire", "movieKey": "movie1"},
-        {"atScene": 6, "action": "restart"},
-        {
-            "atScene": 8, "action": "bridge", "movieKey": "movie1",
-            "srcRect": {"x": 198, "y": 797, "w": 952, "h": 268},
-            "durationSeconds": 1.5,
-            "rect": {"x": 327, "y": 709, "w": 1266, "h": 356},
-        },
-    ],
+# `derive_plan` on the fixture must produce exactly the schema-2 contract example (generalisation
+# plan section 2.1), which the core and P2-injection streams test against too.
+RUNTIME_V2_EXAMPLES = json.loads((FIXTURE_ROOT / "runtime_v2_examples.json").read_text())
+EXPECTED_RUNTIME_PLAN = RUNTIME_V2_EXAMPLES["p2_off"]
+EXPECTED_PLAN_SHA256 = "283f5eecd18c3412172e28a40bc716c69173a7c72bcd37379dcd3d7d6a96dd4e"
+P2_OBJECT_IDS = {
+    "slide1": "6BB39942-6C61-4763-839D-777C09E7E594",
+    "slide1_small": "CBACAF27-B918-47C2-AB45-3ED71B6B394B",
+    "slide2": "F9AFED1B-E2D7-47D4-942E-14992C808383",
+    "slide3": "98D59E27-7807-477D-BEFB-27EB1CF1D185",
+    "slide3_wa0125": "2FE5195A-F8CF-459A-8E20-B6DF91C0047A",
+    "slide4": "E4728E7D-2032-4D7F-83D6-8BE0EFB7B7BC",
 }
-EXPECTED_PLAN_SHA256 = "bafe26cad55cf3a390154bce2c0fdcc771b9b1821293b6aec76119d25180e81e"
 
 # The green square is slide 2's draw slot 6; the movie is slot 5.
 SLIDE2_GREEN_SLOT = 6
@@ -400,27 +481,31 @@ def test_to_runtime_matches_p2_injected_plan():
     assert isinstance(plan, ContinuityPlan)
     runtime = plan.to_runtime()
     assert isinstance(runtime, dict)
+    assert runtime["schema"] == 2
 
-    # The fixture's WA0125 instance is only single (unambiguous) on player index 2,
-    # not the first slide, so it does not enter the movie table -- it never
-    # continues across a boundary, so the runtime does not need to classify it.
-    assert "movie1" in runtime["movies"]
+    # WA0125 and slide 1's small instance never continue, so no entry names them and the
+    # movie table has one movie; its footprint is its first planned instance's rect.
+    assert set(runtime["movies"]) == {"movie1"}
     movie1 = runtime["movies"]["movie1"]
     assert movie1["assetKeys"] == ["untitled.mov"]
     assert _rect_close(movie1["footprint"], P2_MOVIE1_FOOTPRINT)
 
     boundaries = {b["atScene"]: b for b in runtime["boundaries"]}
     assert set(boundaries) == {P2_SLIDE2_MIN_HASH, P2_SLIDE3_MIN_HASH, P2_SLIDE4_MIN_HASH}
-    assert boundaries[P2_SLIDE2_MIN_HASH] == {
-        "atScene": P2_SLIDE2_MIN_HASH, "action": "retire", "movieKey": "movie1",
-    }
-    assert boundaries[P2_SLIDE3_MIN_HASH]["action"] == "restart"
+    assert all(b["movieKey"] == "movie1" for b in runtime["boundaries"])
+    retire = boundaries[P2_SLIDE2_MIN_HASH]
+    assert (retire["action"], retire["reason"]) == ("retire", "refused")
+    assert retire["src"]["objectId"] == P2_OBJECT_IDS["slide1"]
+    restart = boundaries[P2_SLIDE3_MIN_HASH]
+    assert restart["action"] == "restart"
+    assert (restart["src"]["objectId"], restart["dst"]["objectId"]) == (P2_OBJECT_IDS["slide2"], P2_OBJECT_IDS["slide3"])
     bridge = boundaries[P2_SLIDE4_MIN_HASH]
     assert bridge["action"] == "bridge"
-    assert bridge["movieKey"] == "movie1"
-    assert bridge["srcRect"] == P2_SLIDE3_MOVIE_RECT
+    assert bridge["src"] == {"objectId": P2_OBJECT_IDS["slide3"], "rect": P2_SLIDE3_MOVIE_RECT}
+    assert bridge["dst"]["objectId"] == P2_OBJECT_IDS["slide4"]
     assert bridge["durationSeconds"] == 1.5
-    assert _rect_close(bridge["rect"], P2_SLIDE4_MOVIE_RECT)
+    assert bridge["loop"] is False
+    assert _rect_close(bridge["dst"]["rect"], P2_SLIDE4_MOVIE_RECT)
 
 
 def test_to_runtime_refuses_when_no_boundaries():
@@ -429,15 +514,28 @@ def test_to_runtime_refuses_when_no_boundaries():
     assert isinstance(result, Unsupported)
 
 
-def test_to_runtime_refuses_bridge_without_source_rect():
+@pytest.mark.parametrize("field", ["src_rect", "src_object_id"])
+def test_to_runtime_refuses_bridge_without_a_source_instance(field):
     plan = _plan()
     bridge = replace(
         plan.boundaries[2],
-        movies=tuple(replace(movie, src_rect=None) for movie in plan.boundaries[2].movies),
+        movies=tuple(replace(movie, **{field: None}) for movie in plan.boundaries[2].movies),
     )
     result = replace(plan, boundaries=(*plan.boundaries[:2], bridge, plan.boundaries[3])).to_runtime()
     assert isinstance(result, Unsupported)
-    assert "no source rect" in result.reason
+    assert "does not name its source instance" in result.reason
+
+
+@pytest.mark.parametrize("field", ["dst_rect", "dst_object_id"])
+def test_to_runtime_refuses_bridge_without_a_destination_instance(field):
+    plan = _plan()
+    bridge = replace(
+        plan.boundaries[2],
+        movies=tuple(replace(movie, **{field: None}) for movie in plan.boundaries[2].movies),
+    )
+    result = replace(plan, boundaries=(*plan.boundaries[:2], bridge, plan.boundaries[3])).to_runtime()
+    assert isinstance(result, Unsupported)
+    assert "does not name its destination instance" in result.reason
 
 
 @pytest.mark.parametrize("duration", [None, 0, -1, True, "1.5", float("nan"), float("inf")])
@@ -467,38 +565,22 @@ def test_to_runtime_refuses_unqualified_export_duration():
     assert "not yet qualified" in result.reason
 
 
-@pytest.mark.parametrize("action", ["bridge", "restart", "pin"])
-def test_to_runtime_refuses_actionable_boundaries_after_bridge(action):
-    plan = _plan()
-    bridge = plan.boundaries[2]
-    following = replace(
-        bridge,
-        from_player_index=3,
-        to_player_index=4,
-        movies=tuple(replace(movie, action=action) for movie in bridge.movies),
-    )
-    result = replace(
-        plan,
-        scene_index_by_player={**plan.scene_index_by_player, 4: 10},
-        boundaries=(*plan.boundaries[:3], following),
-    ).to_runtime()
-    assert isinstance(result, Unsupported)
-    expected = "more than one bridge" if action == "bridge" else "actionable boundary follows a bridge"
-    assert expected in result.reason
+def _signed(monkeypatch, plan: ContinuityPlan) -> dict:
+    """The runtime `to_runtime()` signed, whether or not the allowlist then withholds it."""
+    from obed_edom import live_continuity
+
+    signed: list[dict] = []
+    real = live_continuity.plan_signature
+    monkeypatch.setattr(live_continuity, "plan_signature", lambda runtime: (signed.append(runtime), real(runtime))[1])
+    plan.to_runtime()
+    monkeypatch.setattr(live_continuity, "plan_signature", real)
+    assert len(signed) == 1
+    return signed[0]
 
 
-@pytest.mark.parametrize("include_later_restart", [False, True])
-def test_to_runtime_refuses_bridge_before_restart(include_later_restart):
-    plan = _plan()
-    boundaries = (plan.boundaries[0], plan.boundaries[2])
-    if include_later_restart:
-        boundaries += (plan.boundaries[1],)
-    result = replace(plan, boundaries=boundaries).to_runtime()
-    assert isinstance(result, Unsupported)
-    assert "precedes the first restart" in result.reason
-
-
-def test_to_runtime_allows_empty_boundary_after_bridge():
+def test_r6_an_empty_boundary_after_a_bridge_breaks_the_chain():
+    """R6: the bridged slide-4 instance is carried, so the boundary out of slide 4 must continue or
+    end it; a deck that goes on to a slide with no entry for it cannot be expressed."""
     plan = _plan()
     empty = replace(plan.boundaries[3], to_player_index=4, movies=())
     result = replace(
@@ -506,8 +588,43 @@ def test_to_runtime_allows_empty_boundary_after_bridge():
         scene_index_by_player={**plan.scene_index_by_player, 4: 10},
         boundaries=(*plan.boundaries[:3], empty),
     ).to_runtime()
-    assert isinstance(result, dict)
-    assert result == plan.to_runtime()
+    assert result == Unsupported(
+        f"R6: the bridge at scene 8 carries {P2_OBJECT_IDS['slide4']}, which no entry at scene 10 continues or ends"
+    )
+
+
+def test_r6_the_last_slide_needs_no_entry_for_what_it_carries():
+    plan = _plan()
+    assert plan.boundaries[3].to_player_index is None
+    assert plan.to_runtime() == EXPECTED_RUNTIME_PLAN
+
+
+def test_r6_an_instance_that_is_the_source_of_two_entries_is_refused():
+    plan = _plan()
+    bridge = plan.boundaries[2]
+    doubled = replace(bridge, movies=(*bridge.movies, replace(bridge.movies[0], action="restart")))
+    result = replace(plan, boundaries=(*plan.boundaries[:2], doubled, plan.boundaries[3])).to_runtime()
+    assert result == Unsupported(f"R6: instance {P2_OBJECT_IDS['slide3']} is the source of more than one entry")
+
+
+def test_a_chain_of_carries_after_a_restart_and_a_bridge_is_expressible(monkeypatch):
+    """Today's one-bridge / nothing-after-a-bridge limits are gone: the P2 bridge followed by a
+    pin onto a fifth slide signs as a chain."""
+    plan = _plan()
+    pin = MovieContinuity(
+        "untitled.mov", "pin", plan.boundaries[2].movies[0].dst_rect, plan.boundaries[2].movies[0].dst_rect,
+        src_object_id=P2_OBJECT_IDS["slide4"], dst_object_id="SLIDE5-MOVIE",
+    )
+    extended = replace(
+        plan,
+        scene_index_by_player={**plan.scene_index_by_player, 4: 10},
+        boundaries=(*plan.boundaries[:3], replace(plan.boundaries[3], to_player_index=4, movies=(pin,))),
+    )
+    runtime = _signed(monkeypatch, extended)
+    assert [(b["atScene"], b["action"]) for b in runtime["boundaries"]] == [
+        (2, "retire"), (6, "restart"), (8, "bridge"), (10, "pin"),
+    ]
+    assert runtime["boundaries"][-1]["src"]["objectId"] == runtime["boundaries"][-2]["dst"]["objectId"]
 
 
 # --- fixture mutation helpers -------------------------------------------------------------
@@ -663,13 +780,12 @@ def test_only_p2_measured_plans_are_qualified():
     assert "not yet qualified" in unmeasured.reason
 
 
-def test_mixed_bridge_and_pin_cannot_bypass_qualified_plan():
+def test_an_entry_that_names_no_instance_cannot_be_expressed():
     plan = _plan()
     extra = MovieContinuity('second.mov', 'pin', Rect(0, 0, 100, 100), Rect(0, 0, 100, 100))
     bridge = replace(plan.boundaries[2], movies=(*plan.boundaries[2].movies, extra))
     result = replace(plan, boundaries=(*plan.boundaries[:2], bridge, plan.boundaries[3])).to_runtime()
-    assert isinstance(result, Unsupported)
-    assert 'pin action follows' in result.reason
+    assert result == Unsupported("pin of 'second.mov' at scene 8 does not name its source instance")
 
 
 # --- per-boundary refusal: overlapping artwork on the destination slide -------------------
@@ -699,6 +815,8 @@ def test_fixture_refuses_only_the_1_to_2_boundary_and_names_the_green_squares_sl
                 "later-authored artwork overlaps the carried 'untitled.mov' on the destination "
                 f"slide (player index 1, draw slot {SLIDE2_GREEN_SLOT})"
             ),
+            "code": "overlap",
+            "objectId": P2_OBJECT_IDS["slide1"],
         },
     )
     # the refusal lives on the boundary's own MovieContinuity too, and `action` still says pin.
@@ -720,7 +838,7 @@ def test_refusals_are_not_part_of_the_runtime_plan():
     assert isinstance(plan, ContinuityPlan)
     runtime = plan.to_runtime()
     assert isinstance(runtime, dict)
-    assert set(runtime) == {"movies", "boundaries"}
+    assert set(runtime) == {"schema", "movies", "boundaries"}
     assert "refusal" not in json.dumps(runtime)
     assert plan.as_dict()["refusals"] == [dict(r) for r in plan.refusals]
     assert json.loads(plan.to_json())["refusals"] == plan.as_dict()["refusals"]
@@ -779,7 +897,7 @@ def test_no_retire_is_emitted_when_nothing_is_refused(monkeypatch):
     )
     runtime = plan.to_runtime()
     assert isinstance(runtime, dict)
-    assert [b["action"] for b in runtime["boundaries"]] == ["restart", "bridge"]
+    assert [b["action"] for b in runtime["boundaries"]] == ["pin", "restart", "bridge"]
 
 
 def test_overlap_in_a_later_event_only_still_refuses():
@@ -1269,67 +1387,64 @@ def _refused_pin(plan: ContinuityPlan, boundary_index: int, **changes):
     )
 
 
-def test_a_refused_bridge_is_a_whole_deck_refusal():
-    """`retire` is the only refusal the runtime can express, and only before the first cut. A
-    bridge the destination slide covers is untested generality, so the whole deck falls back."""
+def test_a_refused_bridge_retires_only_its_own_boundary(monkeypatch):
+    """Refusals are per boundary (plan section 2.3): a refused bridge becomes a `retire` of its
+    source instance and the rest of the deck is still planned."""
     plan = _plan()
     assert isinstance(plan, ContinuityPlan)
     refused_bridge = _refused_pin(plan, 2)
-    result = replace(plan, boundaries=(*plan.boundaries[:2], refused_bridge, plan.boundaries[3])).to_runtime()
-    assert isinstance(result, Unsupported)
-    assert "cannot retire" in result.reason
-    assert "synthetic refusal" in result.reason
+    runtime = _signed(monkeypatch, replace(plan, boundaries=(*plan.boundaries[:2], refused_bridge, plan.boundaries[3])))
+    assert runtime["boundaries"][2] == {
+        "atScene": 8, "action": "retire", "movieKey": "movie1", "reason": "refused",
+        "src": EXPECTED_RUNTIME_PLAN["boundaries"][2]["src"],
+    }
+    assert runtime["boundaries"][:2] == EXPECTED_RUNTIME_PLAN["boundaries"][:2]
 
 
-def test_a_refused_bridge_derived_from_the_export_is_a_whole_deck_refusal():
+def test_a_refused_bridge_derived_from_the_export_retires_its_boundary(monkeypatch):
     """The same thing end to end: put an object over the movie on slide 4, the 3->4 bridge's
-    destination, and the deck stops qualifying altogether."""
+    destination, and that boundary alone is refused."""
 
     def cover_the_movie(data):
         movie_id = _slot_object(data, 0, 1)["objectID"]
-        assert movie_id == "E4728E7D-2032-4D7F-83D6-8BE0EFB7B7BC"
+        assert movie_id == P2_OBJECT_IDS["slide4"]
         _draw_slots(data, 0).append(_authored_slot(*SLIDE4_UNTITLED, object_id="COVER"))
         return data
 
     plan = _plan(_mutate_slide(SLIDE4, cover_the_movie))
     assert isinstance(plan, ContinuityPlan)
-    assert [r["toPlayer"] for r in plan.refusals] == [1, 3]
-    result = plan.to_runtime()
-    assert isinstance(result, Unsupported)
-    assert "cannot retire" in result.reason
+    assert [(r["toPlayer"], r["code"], r["objectId"]) for r in plan.refusals] == [
+        (1, "overlap", P2_OBJECT_IDS["slide1"]), (3, "overlap", P2_OBJECT_IDS["slide3"]),
+    ]
+    runtime = _signed(monkeypatch, plan)
+    assert [(b["atScene"], b["action"], b.get("reason")) for b in runtime["boundaries"]] == [
+        (2, "retire", "refused"), (6, "restart", None), (8, "retire", "refused"),
+    ]
 
 
-def test_a_refusal_on_a_restart_boundary_is_a_whole_deck_refusal():
+def test_a_refusal_on_a_restart_boundary_becomes_a_retire(monkeypatch):
     plan = _plan()
     assert isinstance(plan, ContinuityPlan)
     refused_restart = _refused_pin(plan, 1)
-    result = replace(plan, boundaries=(plan.boundaries[0], refused_restart, *plan.boundaries[2:])).to_runtime()
-    assert isinstance(result, Unsupported)
-    assert "cannot retire" in result.reason
+    runtime = _signed(monkeypatch, replace(plan, boundaries=(plan.boundaries[0], refused_restart, *plan.boundaries[2:])))
+    assert [(b["atScene"], b["action"], b.get("reason")) for b in runtime["boundaries"]] == [
+        (2, "retire", "refused"), (6, "retire", "refused"), (8, "bridge", None),
+    ]
+    assert "dst" not in runtime["boundaries"][1]
 
 
-def test_two_refused_pin_boundaries_are_a_whole_deck_refusal():
-    """The runtime honours one retire zone; a second is a shape it has never been measured on."""
+def test_an_unrefused_retire_ends_a_carried_instance():
     plan = _plan()
-    assert isinstance(plan, ContinuityPlan)
-    second = _refused_pin(plan, 0, from_player_index=1, to_player_index=2)
-    result = replace(plan, boundaries=(plan.boundaries[0], second, *plan.boundaries[2:])).to_runtime()
-    assert isinstance(result, Unsupported)
-    assert "more than one retire boundary" in result.reason
-
-
-def test_a_retire_after_a_restart_is_a_whole_deck_refusal():
-    """The retire zone starts at the implicit pin zone, so it cannot open after a cut has
-    already handed the movie back."""
-    plan = _plan()
-    assert isinstance(plan, ContinuityPlan)
-    carried = replace(
-        plan.boundaries[0], movies=tuple(replace(m, refusal=None) for m in plan.boundaries[0].movies)
+    ends = MovieContinuity(
+        "untitled.mov", "retire", Rect(1, 2, 3, 4), None, src_object_id="HELD", loop=True,
     )
-    late = _refused_pin(plan, 0, from_player_index=2, to_player_index=3)
-    result = replace(plan, boundaries=(carried, plan.boundaries[1], late)).to_runtime()
-    assert isinstance(result, Unsupported)
-    assert "follows a restart" in result.reason
+    boundary = replace(plan.boundaries[1], movies=(ends,))
+    from obed_edom.live_continuity import _runtime_entry
+
+    assert _runtime_entry(plan, boundary, ends, 6, "movie1") == {
+        "atScene": 6, "action": "retire", "reason": "ends", "movieKey": "movie1",
+        "src": {"objectId": "HELD", "rect": {"x": 1, "y": 2, "w": 3, "h": 4}},
+    }
 
 
 def test_the_retire_precedes_the_restart_and_the_bridge_in_the_emitted_order():
@@ -1614,7 +1729,7 @@ def test_slide_instances_does_not_move_the_runtime_plan_or_its_signature():
     assert plan.slide_instances
     runtime = plan.to_runtime()
     assert isinstance(runtime, dict)
-    assert set(runtime) == {"movies", "boundaries"}
+    assert set(runtime) == {"schema", "movies", "boundaries"}
     assert "slideInstances" not in json.dumps(runtime)
     assert "slide_instances" not in json.dumps(runtime)
     assert live_continuity.plan_signature(runtime) == EXPECTED_PLAN_SHA256
@@ -2661,39 +2776,10 @@ def test_real_export_matches_fixture_and_classifies_other_effects_by_shape():
 
 # --- G1: glReplay derivation (arming plan section 11) ---------------------------------------
 
-GL_REPLAY_RUNTIME_PLAN_SHA256 = "6a0596da54532493aee74d22fe91b7cbf3628795aca586dd3cf7dc61a37cc635"
+GL_REPLAY_RUNTIME_PLAN_SHA256 = "2fbf977277a5eef1cde701c12bb157905e40ac2b0a5ed85e30bf1056a3e65c18"
 
-# `derive_plan(..., gl_replay=True)` on the fixture must produce exactly this runtime plan.
-EXPECTED_GL_REPLAY_RUNTIME_PLAN = {
-    "movies": {"movie1": {"assetKeys": ["untitled.mov"], "footprint": {"x": 109, "y": 795, "w": 952, "h": 268}}},
-    "boundaries": [
-        {
-            "atScene": 2, "action": "glReplay", "movieKey": "movie1", "fallback": "retire",
-            "slotSizes": [[1920, 1080], [671, 195], [266, 236], [960, 276], [178, 157]],
-            "slotRects": [
-                [0.0, 0.0, 1920.0, 1080.0],
-                [1071.6833801269531, 871.9523239135742, 671.0, 195.0],
-                [541.858301475681, 721.0772309801108, 181.0, 161.0],
-                [105.1231918334961, 790.846923828125, 960.0, 276.0],
-                [788.725538103768, 672.9158876261134, 353.0, 313.0],
-            ],
-            "opacityOverrides": [{"slot": 4, "opacity": REAL_SLOT4_OPACITY, "texW": 178, "texH": 157}],
-            "instanceId": "untitled.mov#1",
-            "instanceRect": {
-                "x": 109.3517074584961, "y": 795.0361938476562,
-                "w": 951.54296875, "h": 267.6214599609375,
-            },
-            "movieSlot": 3,
-        },
-        {"atScene": 6, "action": "restart"},
-        {
-            "atScene": 8, "action": "bridge", "movieKey": "movie1",
-            "srcRect": {"x": 198, "y": 797, "w": 952, "h": 268},
-            "durationSeconds": 1.5,
-            "rect": {"x": 327, "y": 709, "w": 1266, "h": 356},
-        },
-    ],
-}
+# `derive_plan(..., gl_replay=True)` on the fixture must produce exactly the schema-2 contract.
+EXPECTED_GL_REPLAY_RUNTIME_PLAN = RUNTIME_V2_EXAMPLES["p2_gl"]
 
 
 def test_gl_replay_defaults_to_off_and_is_byte_identical_to_today():
@@ -2791,10 +2877,10 @@ def _add_second_continuing_movie(tmp: Path) -> None:
         events = copy.deepcopy(data["events"])
         source = _find_movie_nodes(events)[0]
         clone = copy.deepcopy(source)
-        clone["objectID"] = "CLONE-SECOND-MOVIE"
+        clone["objectID"] = "CLONE-SECOND-MOVIE-2"
         clone["movie"] = {**clone["movie"], "asset": "Second.mov-0.0000-1.0"}
         events[0]["clonedMovies"] = [clone]
-        events[0]["baseLayer"]["layers"].insert(0, {"layers": [{"objectID": "CLONE-SECOND-MOVIE"}]})
+        events[0]["baseLayer"]["layers"].insert(0, {"layers": [{"objectID": "CLONE-SECOND-MOVIE-2"}]})
         data = {**data, "events": events}
         data = {
             **data,
@@ -2820,11 +2906,11 @@ def test_gl_replay_rule2_rejects_more_than_one_continuing_movie():
     assert refusal["glReplay"] is False
     assert "movies are carried across the boundary, expected exactly 1" in refusal["glReplayReason"]
     assert refusal["glReplayReason"].startswith("2 movies")
-    # the clone is itself refused too (it is drawn under the other authored artwork), and
-    # `to_runtime` cannot retire two movies at one boundary -- a separate, expected guard.
-    result = plan.to_runtime()
-    assert isinstance(result, Unsupported)
-    assert "more than one" in result.reason or "cannot retire" in result.reason
+    # the clone is itself refused too (it is drawn under the other authored artwork), so the
+    # boundary retires both instances, each on its own entry.
+    assert sorted((r["asset"], r["code"]) for r in plan.refusals if r["atScene"] == 2) == [
+        ("second.mov", "overlap"), ("untitled.mov", "overlap"),
+    ]
 
 
 @pytest.mark.parametrize("automatic_play", [True, "popped", 1])
@@ -3047,8 +3133,7 @@ def test_to_runtime_refuses_a_non_finite_instance_rect():
     result = replace(
         plan, boundaries=(bad_boundary, *plan.boundaries[1:]), slide_instances=instances
     ).to_runtime()
-    assert isinstance(result, Unsupported)
-    assert "not in slide_instances" in result.reason
+    assert result == Unsupported("pin of 'untitled.mov' at scene 2 does not name its destination instance")
 
 
 def test_to_runtime_refuses_when_the_destination_instance_is_not_in_slide_instances():
@@ -3093,9 +3178,13 @@ def test_flag_off_as_dict_and_json_have_no_gl_replay_keys():
     assert plan.to_json() == json.dumps(as_dict)
     for boundary in as_dict["boundaries"]:
         for movie in boundary["movies"]:
-            assert set(movie) == {"asset", "action", "srcRect", "dstRect"}
+            assert set(movie) - {"code"} == {
+                "asset", "action", "srcRect", "dstRect", "srcObjectId", "dstObjectId", "loop",
+            }
     for refusal in as_dict["refusals"]:
-        assert set(refusal) == {"fromPlayer", "toPlayer", "atScene", "asset", "movieKey", "reason"}
+        assert set(refusal) == {
+            "fromPlayer", "toPlayer", "atScene", "asset", "movieKey", "reason", "code", "objectId",
+        }
 
 
 def _set_transition_name(data, value):
@@ -3138,11 +3227,11 @@ def test_gl_replay_rejects_unreadable_transition_name_instead_of_raising(bad_nam
 # keeps the SOURCE element's `loop`. So:
 #   - "looping" is the only qualified value; anything else is unmeasured vocabulary and
 #     refuses the whole deck (section 2.1);
-#   - a Magic Move boundary whose continuing asset does not loop on EVERY instance on both
-#     sides is refused on its own, like an overlap -- the core pools same-asset decoders FIFO,
-#     so the carried one may be any instance (section 2.2);
-#   - looping instances sign the runtime via a `loops` annex, so a looping deck can never
-#     reuse its non-looping twin's allowlisted sha (section 2.4).
+#   - a Magic Move boundary whose carried pair disagrees on loop is refused on its own (R4),
+#     like an overlap; with exact instance identity only the carried pair matters
+#     (generalisation plan section 2.4);
+#   - every carry entry names its `loop`, so a looping deck can never reuse its non-looping
+#     twin's allowlisted sha.
 #
 # `P2-loop` is the committed P2 fixture with the key spliced onto the same objectIDs
 # `scripts/loop_fixture.py` splices (plan section 4): every `untitled.mov` instance, never
@@ -3157,22 +3246,11 @@ P2_LOOP_OBJECT_IDS = (
 )
 P2_WA0125_OBJECT_ID = "2FE5195A-F8CF-459A-8E20-B6DF91C0047A"
 
-# The P2-loop runtime's annex: one entry per looping instance, scene = the slide's first scene,
-# rect = `_rect_ints` of the authored rect, sorted by (scene, asset, x, y, w, h).
-P2_LOOP_LOOPS = [
-    {"scene": 0, "asset": "untitled.mov", "rect": {"x": 109, "y": 795, "w": 952, "h": 268}},
-    {"scene": 0, "asset": "untitled.mov", "rect": {"x": 1076, "y": 876, "w": 663, "h": 186}},
-    {"scene": 2, "asset": "untitled.mov", "rect": {"x": 109, "y": 795, "w": 952, "h": 268}},
-    {"scene": 6, "asset": "untitled.mov", "rect": {"x": 198, "y": 797, "w": 952, "h": 268}},
-    {"scene": 8, "asset": "untitled.mov", "rect": {"x": 327, "y": 709, "w": 1266, "h": 356}},
-]
+# Qualified by gates L1/L2/L4/L5 on `output/fixtures/p2-loop`; re-pinned for the schema-2 runtime.
+P2_LOOP_PLAN_SHA256 = "866de785864ad19b11ecd8cdfb4ad1729798ccf9f1764aa59718de03034ba7a5"
+P2_LOOP_GL_REPLAY_PLAN_SHA256 = "d860a09f4f6a8e24a81e2ad0c3b37bc8a3f2b4ce3947836ca315671031870131"
 
-# Qualified by gates L1/L2/L4/L5 on `output/fixtures/p2-loop` (plan section 2.5). They match the plan's
-# F5 values, computed independently by the planner.
-P2_LOOP_PLAN_SHA256 = "3dc6755853692a178696a35495c1929662005a8173f932607855876bfc299c5d"
-P2_LOOP_GL_REPLAY_PLAN_SHA256 = "2ba6fbed8fc959c804e53d2f21712945230eac6dcbf90d522fe3a6a688bef924"
-
-NOT_YET_QUALIFIED = "deck shape is not yet qualified for continuity (only P2-measured plans are)"
+NOT_YET_QUALIFIED = "deck shape is not yet qualified for continuity (only gate-measured plans are)"
 
 
 def _set_loop_mode(object_ids, value):
@@ -3217,39 +3295,46 @@ def test_loop_mode_is_in_the_measured_movie_vocabulary():
     assert "loopMode" in live_continuity._MOVIE_SUBTREE_KEYS["movie"]
 
 
-def test_non_looping_p2_fixture_is_byte_identical_and_has_no_loop_annex():
+def _looping(runtime: dict) -> dict:
+    """`runtime` with every carry entry's `loop` set, as the looping twin derives it."""
+    looped = copy.deepcopy(runtime)
+    for entry in looped["boundaries"]:
+        if "loop" in entry:
+            entry["loop"] = True
+    return looped
+
+
+def test_non_looping_p2_fixture_is_unchanged_and_loops_nowhere():
     """L0-d CvC: accepting the key leaves every non-looping output where it was."""
     from obed_edom import live_continuity
 
     for flag, expected, sha in (
         (False, EXPECTED_RUNTIME_PLAN, EXPECTED_PLAN_SHA256),
-        (True, None, GL_REPLAY_RUNTIME_PLAN_SHA256),
+        (True, EXPECTED_GL_REPLAY_RUNTIME_PLAN, GL_REPLAY_RUNTIME_PLAN_SHA256),
     ):
         plan = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=flag)
         assert isinstance(plan, ContinuityPlan)
         assert plan.loop_instances == {}
         runtime = plan.to_runtime()
-        assert isinstance(runtime, dict)
+        assert runtime == expected
         assert "loops" not in runtime
-        if expected is not None:
-            assert runtime == expected
         assert live_continuity.plan_signature(runtime) == sha
-        assert "loop" not in plan.to_json().lower()
+        assert all(not movie.loop for boundary in plan.boundaries for movie in boundary.movies)
 
 
-def test_p2_loop_derives_the_p2_plan_plus_the_loop_annex():
-    """L0-d: every `untitled.mov` instance loops, so every Magic Move agrees -- the plan, its
-    refusals and `as_dict()` are P2's exactly; only the runtime grows `loops`, which signs it
-    as its own allowlist entry, distinct from P2's."""
+def test_p2_loop_derives_the_p2_plan_with_every_carry_looping():
+    """L0-d: every `untitled.mov` instance loops, so every carried pair agrees -- the plan and its
+    refusals are P2's apart from `loop`, and the runtime signs as its own allowlist entry."""
     from obed_edom import live_continuity
 
-    tree = _loop_tree()
-    plan = derive_plan(tree, SLIDES, resolver=_resolver)
+    plan = derive_plan(_loop_tree(), SLIDES, resolver=_resolver)
     baseline = _plan()
     assert isinstance(plan, ContinuityPlan)
     assert isinstance(baseline, ContinuityPlan)
-    assert plan.as_dict() == baseline.as_dict()
-    assert plan.to_json() == baseline.to_json()
+    assert plan.boundaries[:3] == tuple(
+        replace(b, movies=tuple(replace(m, loop=True) for m in b.movies)) for b in baseline.boundaries[:3]
+    )
+    assert plan.boundaries[3] == baseline.boundaries[3]
     assert plan.refusals == baseline.refusals
     assert plan.loop_instances == {
         0: {"untitled.mov": [_rect(*SLIDE1_BIG), _rect(*SLIDE1_SMALL)]},
@@ -3257,37 +3342,28 @@ def test_p2_loop_derives_the_p2_plan_plus_the_loop_annex():
         2: {"untitled.mov": [_rect(197.98, 797.10, 951.54, 267.62)]},
         3: {"untitled.mov": [_rect(*SLIDE4_UNTITLED)]},
     }
-    # the annex mirrors slide_instances: same rects, same order, looping ones only.
     for player_index, assets in plan.loop_instances.items():
         assert assets["untitled.mov"] == plan.slide_instances[player_index]["untitled.mov"]
     assert "vid-20250608-wa0125.mp4" in plan.slide_instances[2]
     assert set(plan.loop_instances[2]) == {"untitled.mov"}
 
     runtime = plan.to_runtime()
-    assert runtime == {**EXPECTED_RUNTIME_PLAN, "loops": P2_LOOP_LOOPS}
-    assert list(runtime) == ["movies", "boundaries", "loops"]
+    assert runtime == _looping(EXPECTED_RUNTIME_PLAN)
     assert live_continuity.plan_signature(runtime) == P2_LOOP_PLAN_SHA256
     assert P2_LOOP_PLAN_SHA256 in live_continuity.QUALIFIED_PLAN_SHA256
     assert P2_LOOP_PLAN_SHA256 != EXPECTED_PLAN_SHA256
 
 
 def test_p2_loop_flag_on_arms_gl_replay_and_signs_its_own_sha():
-    """Arming rules 1-5 are unchanged (plan section 2.3): a looping pair that agrees arms
-    like any other, and the annex keeps its sha apart from P2's `6a0596da...`."""
+    """Arming rules 1-5 are unchanged: a looping pair that agrees arms like any other, and its
+    per-entry `loop` keeps its sha apart from P2's."""
     from obed_edom import live_continuity
 
     plan = derive_plan(_loop_tree(), SLIDES, resolver=_resolver, gl_replay=True)
-    baseline = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=True)
     assert isinstance(plan, ContinuityPlan)
-    assert isinstance(baseline, ContinuityPlan)
-    assert plan.as_dict() == baseline.as_dict()
-    assert plan.refusals == baseline.refusals
     assert plan.refusals[0]["glReplay"] is True
-
     runtime = plan.to_runtime()
-    baseline_runtime = baseline.to_runtime()
-    assert isinstance(baseline_runtime, dict)
-    assert runtime == {**baseline_runtime, "loops": P2_LOOP_LOOPS}
+    assert runtime == _looping(EXPECTED_GL_REPLAY_RUNTIME_PLAN)
     assert live_continuity.plan_signature(runtime) == P2_LOOP_GL_REPLAY_PLAN_SHA256
     assert P2_LOOP_GL_REPLAY_PLAN_SHA256 in live_continuity.QUALIFIED_PLAN_SHA256
     assert P2_LOOP_GL_REPLAY_PLAN_SHA256 != GL_REPLAY_RUNTIME_PLAN_SHA256
@@ -3367,79 +3443,54 @@ def test_an_unmeasured_loop_mode_on_a_movie_no_boundary_carries_still_refuses():
     assert "unmeasured loopMode 'loopBackAndForth'" in plan.reason
 
 
-def test_a_looping_movie_no_boundary_carries_is_still_in_the_annex(monkeypatch):
-    """WA0125 looping changes nothing the runtime carries, but it is part of the deck's
-    looping shape, so it must still move the signature."""
+def test_a_looping_movie_no_entry_names_leaves_the_runtime_alone():
+    """WA0125 never continues, so no entry names it and its loop cannot reach the runtime."""
     plan = derive_plan(_loop_tree(P2_LOOP_OBJECT_IDS + (P2_WA0125_OBJECT_ID,)), SLIDES, resolver=_resolver)
     assert isinstance(plan, ContinuityPlan)
     assert plan.refusals == _plan().refusals
-    result, runtime = _recorded_runtime(monkeypatch, plan)
-    assert result == Unsupported(NOT_YET_QUALIFIED)
-    wa0125 = [entry for entry in runtime["loops"] if entry["asset"] != "untitled.mov"]
-    assert wa0125 == [
-        {"scene": 6, "asset": "vid-20250608-wa0125.mp4", "rect": wa0125[0]["rect"]},
-    ]
-    assert runtime["loops"] == sorted(
-        runtime["loops"], key=lambda e: (e["scene"], e["asset"], *e["rect"].values())
-    )
+    assert plan.to_runtime() == _looping(EXPECTED_RUNTIME_PLAN)
+    assert set(plan.loop_instances[2]) == {"untitled.mov", "vid-20250608-wa0125.mp4"}
 
 
 def _loop_reason(from_index: int, to_index: int) -> str:
     return (
-        f"'untitled.mov' does not loop on every instance at player index {from_index} -> {to_index}; "
+        f"'untitled.mov' loops on one side of player index {from_index} -> {to_index} only; "
         "a carried decoder keeps its source's loop setting"
     )
 
 
 @pytest.mark.parametrize("gl_replay", [False, True])
-def test_a_loop_difference_on_the_bridge_is_a_whole_deck_refusal(gl_replay):
-    """L0-b: slide 3 loops, slide 4 does not. The 3->4 bridge is refused on its own; a refused
-    bridge is a refusal the runtime cannot retire, so `to_runtime` refuses the deck -- exactly
-    as an overlap on the bridge does. 2->3 is a dissolve (fresh element each side), so the
-    slide 2 / slide 3 difference there is not checked."""
-    tree = _loop_tree(("98D59E27-7807-477D-BEFB-27EB1CF1D185",))
+def test_r4_a_loop_difference_on_the_bridge_retires_that_boundary(gl_replay, monkeypatch):
+    """L0-b / R4: slide 3 loops, slide 4 does not. The 3->4 bridge is refused on its own and
+    becomes a `retire`. 2->3 is a dissolve (fresh element each side), so it is not checked."""
+    tree = _loop_tree((P2_OBJECT_IDS["slide3"],))
     plan = derive_plan(tree, SLIDES, resolver=_resolver, gl_replay=gl_replay)
     assert isinstance(plan, ContinuityPlan)
     bridge = plan.boundaries[2].movies[0]
-    assert bridge.action == "bridge"
-    assert bridge.refusal == _loop_reason(2, 3)
-    assert [r["toPlayer"] for r in plan.refusals] == [1, 3]
+    assert (bridge.action, bridge.refusal, bridge.code) == ("bridge", _loop_reason(2, 3), "R4")
+    assert [(r["toPlayer"], r["code"]) for r in plan.refusals] == [(1, "overlap"), (3, "R4")]
     assert all(m.refusal is None for m in plan.boundaries[1].movies)
-    result = plan.to_runtime()
-    assert result == Unsupported(f"a refusal the runtime cannot retire: {_loop_reason(2, 3)}")
-
-
-def test_a_loop_difference_on_a_non_carried_instance_refuses_the_boundary(monkeypatch):
-    """L0-b, the all-instances rule (plan section 2.2 / rev-2 item 2): only slide 1's SMALL
-    instance loops. The resolved 1->2 pair (the big instance -> slide 2) agrees, but the core
-    reuses a pooled decoder FIFO by asset, so the carried decoder may be the looping one.
-    The loop refusal outranks the green square's overlap refusal and retires the movie."""
-    tree = _loop_tree(("CBACAF27-B918-47C2-AB45-3ED71B6B394B",))
-    plan = derive_plan(tree, SLIDES, resolver=_resolver)
-    assert isinstance(plan, ContinuityPlan)
-    assert plan.refusals == (
-        {
-            "fromPlayer": 0,
-            "toPlayer": 1,
-            "atScene": P2_SLIDE2_MIN_HASH,
-            "asset": "untitled.mov",
-            "movieKey": "movie1",
-            "reason": _loop_reason(0, 1),
-        },
-    )
-    result, runtime = _recorded_runtime(monkeypatch, plan)
-    assert result == Unsupported(NOT_YET_QUALIFIED)
-    assert runtime == {
-        **EXPECTED_RUNTIME_PLAN,
-        "loops": [{"scene": 0, "asset": "untitled.mov", "rect": {"x": 1076, "y": 876, "w": 663, "h": 186}}],
+    runtime = _signed(monkeypatch, plan)
+    assert runtime["boundaries"][-1] == {
+        "atScene": 8, "action": "retire", "reason": "refused", "movieKey": "movie1",
+        "src": {"objectId": P2_OBJECT_IDS["slide3"], "rect": P2_SLIDE3_MOVIE_RECT},
     }
 
 
+def test_a_loop_difference_on_an_uncarried_instance_is_not_a_refusal():
+    """The narrowed rule (plan section 2.4): only slide 1's SMALL instance loops, and it pairs with
+    nothing, so the carried pair agrees and only the green square's overlap refuses 1->2."""
+    tree = _loop_tree((P2_OBJECT_IDS["slide1_small"],))
+    plan = derive_plan(tree, SLIDES, resolver=_resolver)
+    assert isinstance(plan, ContinuityPlan)
+    assert plan.refusals == _plan().refusals
+    assert plan.to_runtime() == EXPECTED_RUNTIME_PLAN
+
+
 def test_a_loop_difference_skips_gl_replay_and_says_why():
-    """Flag on: a loop-refused boundary never reaches arming rules 1-5 (it would otherwise arm
-    here -- see test_p2_loop_flag_on_arms_gl_replay_and_signs_its_own_sha), and the record
-    names the loop reason instead."""
-    tree = _loop_tree(("CBACAF27-B918-47C2-AB45-3ED71B6B394B",))
+    """Flag on: a loop-refused boundary never reaches arming rules 1-5, and the record names the
+    loop reason instead."""
+    tree = _loop_tree((P2_OBJECT_IDS["slide2"],))
     plan = derive_plan(tree, SLIDES, resolver=_resolver, gl_replay=True)
     assert isinstance(plan, ContinuityPlan)
     movie = plan.boundaries[0].movies[0]
@@ -3447,32 +3498,34 @@ def test_a_loop_difference_skips_gl_replay_and_says_why():
     assert movie.gl_replay is None
     assert movie.gl_replay_reason == _loop_reason(0, 1)
     assert movie.gl_replay_slot is None
-    [record] = plan.refusals
-    assert record["glReplay"] is False
-    assert record["glReplayReason"] == _loop_reason(0, 1)
+    record = plan.refusals[0]
+    assert (record["code"], record["glReplay"], record["glReplayReason"]) == ("R4", False, _loop_reason(0, 1))
     assert record["opacityExcluded"] == []
 
 
 @pytest.mark.parametrize(
-    "looping",
+    "looping, refused",
     [
-        ("6BB39942-6C61-4763-839D-777C09E7E594",),
-        ("6BB39942-6C61-4763-839D-777C09E7E594", "CBACAF27-B918-47C2-AB45-3ED71B6B394B"),
-        ("F9AFED1B-E2D7-47D4-942E-14992C808383",),
-        ("6BB39942-6C61-4763-839D-777C09E7E594", "F9AFED1B-E2D7-47D4-942E-14992C808383"),
+        ((P2_OBJECT_IDS["slide1"],), True),
+        ((P2_OBJECT_IDS["slide1"], P2_OBJECT_IDS["slide1_small"]), True),
+        ((P2_OBJECT_IDS["slide2"],), True),
+        ((P2_OBJECT_IDS["slide1"], P2_OBJECT_IDS["slide2"]), False),
+        ((P2_OBJECT_IDS["slide1_small"], P2_OBJECT_IDS["slide2"]), True),
     ],
-    ids=["source-carried-only", "source-both", "destination-only", "all-but-the-small-one"],
+    ids=["source-carried-only", "source-both", "destination-only", "carried-pair", "small-and-destination"],
 )
-def test_every_mixed_subset_across_the_pin_refuses_it(looping):
+def test_only_the_carried_pair_decides_the_loop_refusal(looping, refused):
     plan = derive_plan(_loop_tree(looping), SLIDES, resolver=_resolver)
     assert isinstance(plan, ContinuityPlan)
-    assert plan.boundaries[0].movies[0].refusal == _loop_reason(0, 1)
+    movie = plan.boundaries[0].movies[0]
+    assert (movie.code == "R4") is refused
+    assert movie.refusal == (_loop_reason(0, 1) if refused else _plan().boundaries[0].movies[0].refusal)
 
 
 def test_a_loop_difference_without_an_overlap_is_still_refused():
     """The loop rule does not ride on the overlap refusal: with the green square moved below
     the movie, 1->2 carries in P2 -- and a loop difference refuses it on its own."""
-    tree = _loop_tree(("F9AFED1B-E2D7-47D4-942E-14992C808383",))
+    tree = _loop_tree((P2_OBJECT_IDS["slide2"],))
     _rewrite_slide_json(tree, SLIDE2, _move_green_square_below_the_movie)
     plan = derive_plan(tree, SLIDES, resolver=_resolver, gl_replay=True)
     assert isinstance(plan, ContinuityPlan)
@@ -3487,7 +3540,7 @@ def test_a_loop_difference_without_an_overlap_is_still_refused():
     assert carried.boundaries[0].movies[0].gl_replay_reason is None
 
 
-def test_loop_annex_is_not_in_as_dict_and_defaults_to_empty():
+def test_loop_instances_are_not_in_as_dict_and_default_to_empty():
     plan = derive_plan(_loop_tree(), SLIDES, resolver=_resolver)
     assert isinstance(plan, ContinuityPlan)
     assert set(plan.as_dict()) == {
@@ -3496,17 +3549,12 @@ def test_loop_annex_is_not_in_as_dict_and_defaults_to_empty():
     assert ContinuityPlan({"width": 1, "height": 1}, {0: 0}, {}, ()).loop_instances == {}
 
 
-def test_an_emptied_loop_annex_restores_the_p2_runtime():
+def test_emptied_loop_instances_do_not_change_the_runtime():
+    """`loop_instances` is the probe's force-wrap ground truth only; the runtime reads `loop`
+    from each entry."""
     plan = derive_plan(_loop_tree(), SLIDES, resolver=_resolver)
     assert isinstance(plan, ContinuityPlan)
-    assert replace(plan, loop_instances={}).to_runtime() == EXPECTED_RUNTIME_PLAN
-
-
-def test_a_loop_annex_without_a_scene_index_is_refused():
-    plan = derive_plan(_loop_tree(), SLIDES, resolver=_resolver)
-    assert isinstance(plan, ContinuityPlan)
-    orphan = replace(plan, loop_instances={**plan.loop_instances, 9: plan.loop_instances[0]})
-    assert orphan.to_runtime() == Unsupported("a looping movie instance has no scene index")
+    assert replace(plan, loop_instances={}).to_runtime() == plan.to_runtime()
 
 
 def _add_audio_only_movie(loop_mode, keep_video_layer: bool = False):
@@ -3564,3 +3612,197 @@ def test_the_synthetic_audio_node_derives_when_its_video_sub_layer_is_kept():
     plan = derive_plan(tree, SLIDES, resolver=_resolver)
     assert isinstance(plan, ContinuityPlan)
     assert plan.loop_instances == {0: {"audio.m4a": [_rect(*SLIDE1_BIG)]}}
+
+
+# --- schema 2: per-boundary refusal codes and cut rules (generalisation plan section 2.3) ----
+
+
+def _refusal_codes(plan: ContinuityPlan) -> list[tuple[int, str]]:
+    return [(record["toPlayer"], record["code"]) for record in plan.refusals]
+
+
+def _add_build(build_type: str, name: str, object_id: str | None):
+    def apply(data):
+        effect = {"name": name, "type": build_type, "beginTime": 0, "effects": []}
+        if object_id is not None:
+            effect["objectID"] = object_id
+        data["events"][0]["effects"].append(effect)
+        return data
+
+    return apply
+
+
+@pytest.mark.parametrize(
+    "uuid, build_type, object_id, to_player",
+    [
+        (SLIDE4, "buildIn", P2_OBJECT_IDS["slide4"], 3),
+        (SLIDE3, "buildOut", P2_OBJECT_IDS["slide3"], 3),
+        (SLIDE4, "buildIn", None, 3),
+    ],
+    ids=["dst-builds-in", "src-builds-out", "unattributed-build"],
+)
+def test_r2_a_carried_instance_that_builds_refuses_the_boundary(uuid, build_type, object_id, to_player):
+    """Magic Move never pairs an object that builds in on the destination or out on the source
+    (F3); a build naming no object might be one, so it refuses too."""
+    plan = _plan(_mutate_slide(uuid, _add_build(build_type, "apple:dissolve", object_id)))
+    assert isinstance(plan, ContinuityPlan)
+    assert _refusal_codes(plan) == [(1, "overlap"), (to_player, "R2")]
+
+
+def test_r2_a_movie_start_build_does_not_refuse():
+    plan = _plan(_mutate_slide(SLIDE4, _add_build("buildIn", "apple:movie-start", P2_OBJECT_IDS["slide4"])))
+    assert isinstance(plan, ContinuityPlan)
+    assert _refusal_codes(plan) == [(1, "overlap")]
+
+
+def test_r2_a_build_on_another_object_does_not_refuse():
+    plan = _plan(_mutate_slide(SLIDE4, _add_build("buildIn", "apple:dissolve", "SOME-TEXT-BOX")))
+    assert isinstance(plan, ContinuityPlan)
+    assert _refusal_codes(plan) == [(1, "overlap")]
+
+
+def test_r3_a_transition_off_the_last_event_refuses_the_deck():
+    def move_transition_to_the_first_event(data):
+        transition = data["events"][-1]["effects"].pop(0)
+        assert transition["type"] == "transition"
+        data["events"][0]["effects"].append(transition)
+        return data
+
+    plan = _plan(_mutate_slide(SLIDE1, move_transition_to_the_first_event))
+    assert isinstance(plan, Unsupported)
+    assert plan.reason.startswith(f"R3: slide {SLIDE1}'s transition is not on its last event")
+
+
+def _set_movie_field(object_id: str, key: str, value):
+    def apply(node):
+        if node.get("objectID") == object_id:
+            node["movie"][key] = value
+
+    return lambda data: _map_movie_nodes(data, apply)
+
+
+def _set_asset_url(url: str):
+    def apply(data):
+        for entry in data["assets"].values():
+            if entry.get("url", {}).get("web", "").startswith("assets/Untitled.mov"):
+                entry["url"] = {"web": url, "native": url}
+        return data
+
+    return apply
+
+
+@pytest.mark.parametrize(
+    "transform, kind",
+    [
+        (_set_movie_field(P2_OBJECT_IDS["slide4"], "isStreaming", True), "web"),
+        (_set_asset_url("assets/Untitled.mov-0.0000-46.0333.png"), "image"),
+        (_set_asset_url("https://example.invalid/Untitled.mov-0.0000-46.0333.mov"), "web"),
+    ],
+    ids=["streaming", "image", "remote-url"],
+)
+def test_r7_a_movie_the_player_draws_without_a_video_refuses_the_boundary(transform, kind):
+    plan = _plan(_mutate_slide(SLIDE4, transform))
+    assert isinstance(plan, ContinuityPlan)
+    assert _refusal_codes(plan) == [(1, "overlap"), (3, "R7")]
+    assert f"is a {kind} movie" in plan.refusals[1]["reason"]
+
+
+@pytest.mark.parametrize(
+    "transform",
+    [
+        _set_movie_field(P2_OBJECT_IDS["slide4"], "endTime", 40.0),
+        _set_movie_field(P2_OBJECT_IDS["slide4"], "startTime", 1.0),
+        _set_asset_url("assets/Untitled.mov-0.0000-40.0000.mov"),
+    ],
+    ids=["end-time", "start-time", "url-trim-suffix"],
+)
+def test_r8_a_trim_mismatch_refuses_the_boundary(transform):
+    """`_TRIM_SUFFIX_RE` folds differently trimmed clips of one file into one asset key, so the
+    trim itself must match for the pair to be one continuous movie."""
+    plan = _plan(_mutate_slide(SLIDE4, transform))
+    assert isinstance(plan, ContinuityPlan)
+    assert plan.boundaries[2].movies[0].asset == "untitled.mov"
+    assert _refusal_codes(plan) == [(1, "overlap"), (3, "R8")]
+
+
+def _parsed_slide(player_index: int, uuid: str, root: Path = FIXTURE_ROOT):
+    from obed_edom.live_continuity import _Slide, _slide_movie_instances
+
+    data = json.loads((root / "assets" / uuid / f"{uuid}.json").read_text())
+    return _Slide(player_index, uuid, data["events"], _slide_movie_instances(data["events"], data["assets"], uuid))
+
+
+def test_a_later_gl_replay_eligible_boundary_retires_instead():
+    """OQ-4: G2 arms exactly one boundary; a later eligible one keeps its refusal (retire)."""
+    from obed_edom.live_continuity import _boundary_transition, _magic_move_movies
+
+    source, destination = _parsed_slide(0, SLIDE1), _parsed_slide(1, SLIDE2)
+    transition = _boundary_transition(source.events, SLIDE1)
+    args = (source, destination, set(), "1 -> 2", transition, transition["name"], True)
+    [first] = _magic_move_movies(*args, False)
+    [later] = _magic_move_movies(*args, True)
+    assert first.gl_replay is not None
+    assert (later.gl_replay, later.code) == (None, "overlap")
+    assert later.gl_replay_reason == "a glReplay boundary is already planned (one per plan)"
+
+
+def test_to_runtime_refuses_two_gl_replay_entries():
+    plan = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, ContinuityPlan)
+    armed = plan.boundaries[0].movies[0]
+    bridge = plan.boundaries[2].movies[0]
+    second = replace(
+        armed, src_rect=bridge.src_rect, dst_rect=bridge.dst_rect,
+        src_object_id=P2_OBJECT_IDS["slide3"], dst_object_id=P2_OBJECT_IDS["slide4"],
+    )
+    doubled = replace(
+        plan, boundaries=(*plan.boundaries[:2], replace(plan.boundaries[2], movies=(second,)), plan.boundaries[3])
+    )
+    assert doubled.to_runtime() == Unsupported("more than one glReplay boundary (G2 arms exactly one)")
+
+
+def test_a_cut_restarts_every_video_instance_whose_asset_continues():
+    """Slide 1's two instances cross a (hypothetical) dissolve onto slide 2: each gets its own
+    `restart`, naming slide 2's only instance as its informational destination."""
+    from obed_edom.live_continuity import _cut_movies
+
+    movies = _cut_movies(_parsed_slide(0, SLIDE1), _parsed_slide(1, SLIDE2), set())
+    assert [(m.action, m.src_object_id, m.dst_object_id) for m in movies] == [
+        ("restart", P2_OBJECT_IDS["slide1"], P2_OBJECT_IDS["slide2"]),
+        ("restart", P2_OBJECT_IDS["slide1_small"], P2_OBJECT_IDS["slide2"]),
+    ]
+
+
+def test_a_cut_ends_a_carried_instance_whose_asset_does_not_continue():
+    """WA0125, if it were carried onto slide 3, would have nothing on slide 4 to become: `retire`
+    (reason `ends`); an uncarried instance with no successor gets no entry at all."""
+    from obed_edom.live_continuity import _cut_movies
+
+    source, destination = _parsed_slide(2, SLIDE3), _parsed_slide(3, SLIDE4)
+    held = _cut_movies(source, destination, {P2_OBJECT_IDS["slide3_wa0125"]})
+    assert [(m.action, m.src_object_id, m.refusal) for m in held] == [
+        ("restart", P2_OBJECT_IDS["slide3"], None),
+        ("retire", P2_OBJECT_IDS["slide3_wa0125"], None),
+    ]
+    assert [m.action for m in _cut_movies(source, destination, set())] == ["restart"]
+
+
+def test_a_magic_move_ends_a_carried_instance_that_pairs_with_nothing():
+    """At a Magic Move an unpaired outgoing instance gets `retire ends` only when it is carried."""
+    from obed_edom.live_continuity import _boundary_transition, _magic_move_movies
+
+    source, destination = _parsed_slide(2, SLIDE3), _parsed_slide(3, SLIDE4)
+    transition = _boundary_transition(source.events, SLIDE3)
+    args = (source, destination)
+    tail = ("3 -> 4", transition, transition["name"], False, False)
+    carried = _magic_move_movies(*args, {P2_OBJECT_IDS["slide3_wa0125"]}, *tail)
+    assert [(m.action, m.asset) for m in carried] == [("bridge", "untitled.mov"), ("retire", "vid-20250608-wa0125.mp4")]
+    assert [m.action for m in _magic_move_movies(*args, set(), *tail)] == ["bridge"]
+
+
+def test_movie_table_names_only_assets_with_an_entry_and_footprints_their_first_instance():
+    """WA0125 has no entry, so it is not in `movies` and the runtime cannot pool it (the stray
+    62e1ab7 fixed); movie1's footprint is P2's instrument constant."""
+    runtime = _plan().to_runtime()
+    assert isinstance(runtime, dict)
+    assert runtime["movies"] == {"movie1": {"assetKeys": ["untitled.mov"], "footprint": P2_MOVIE1_FOOTPRINT}}
