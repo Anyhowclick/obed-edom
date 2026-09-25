@@ -1,0 +1,94 @@
+{
+  "p2_off": {
+    "schema": 2,
+    "movies": {"movie1": {"assetKeys": ["untitled.mov"], "footprint": {"x": 109, "y": 795, "w": 952, "h": 268}}},
+    "boundaries": [
+      {"atScene": 2, "action": "retire", "movieKey": "movie1", "reason": "refused",
+       "src": {"objectId": "6BB39942-6C61-4763-839D-777C09E7E594", "rect": {"x": 109, "y": 795, "w": 952, "h": 268}}},
+      {"atScene": 6, "action": "restart", "movieKey": "movie1",
+       "src": {"objectId": "F9AFED1B-E2D7-47D4-942E-14992C808383", "rect": {"x": 109, "y": 795, "w": 952, "h": 268}},
+       "dst": {"objectId": "98D59E27-7807-477D-BEFB-27EB1CF1D185", "rect": {"x": 198, "y": 797, "w": 952, "h": 268}}},
+      {"atScene": 8, "action": "bridge", "movieKey": "movie1", "durationSeconds": 1.5, "loop": false,
+       "src": {"objectId": "98D59E27-7807-477D-BEFB-27EB1CF1D185", "rect": {"x": 198, "y": 797, "w": 952, "h": 268}},
+       "dst": {"objectId": "E4728E7D-2032-4D7F-83D6-8BE0EFB7B7BC", "rect": {"x": 327, "y": 709, "w": 1266, "h": 356}}}
+    ]
+  },
+  "p2_gl": {
+    "schema": 2,
+    "movies": {"movie1": {"assetKeys": ["untitled.mov"], "footprint": {"x": 109, "y": 795, "w": 952, "h": 268}}},
+    "boundaries": [
+      {"atScene": 2, "action": "glReplay", "movieKey": "movie1", "fallback": "retire",
+       "slotSizes": [[1920, 1080], [671, 195], [266, 236], [960, 276], [178, 157]],
+       "slotRects": [
+         [0.0, 0.0, 1920.0, 1080.0],
+         [1071.6833801269531, 871.9523239135742, 671.0, 195.0],
+         [541.858301475681, 721.0772309801108, 181.0, 161.0],
+         [105.1231918334961, 790.846923828125, 960.0, 276.0],
+         [788.725538103768, 672.9158876261134, 353.0, 313.0]
+       ],
+       "opacityOverrides": [{"slot": 4, "opacity": 0.29468628764152527, "texW": 178, "texH": 157}],
+       "instanceId": "untitled.mov#1",
+       "instanceRect": {"x": 109.3517074584961, "y": 795.0361938476562, "w": 951.54296875, "h": 267.6214599609375},
+       "movieSlot": 3,
+       "loop": false,
+       "src": {"objectId": "6BB39942-6C61-4763-839D-777C09E7E594", "rect": {"x": 109, "y": 795, "w": 952, "h": 268}},
+       "dst": {"objectId": "F9AFED1B-E2D7-47D4-942E-14992C808383", "rect": {"x": 109, "y": 795, "w": 952, "h": 268}}},
+      {"atScene": 6, "action": "restart", "movieKey": "movie1",
+       "src": {"objectId": "F9AFED1B-E2D7-47D4-942E-14992C808383", "rect": {"x": 109, "y": 795, "w": 952, "h": 268}},
+       "dst": {"objectId": "98D59E27-7807-477D-BEFB-27EB1CF1D185", "rect": {"x": 198, "y": 797, "w": 952, "h": 268}}},
+      {"atScene": 8, "action": "bridge", "movieKey": "movie1", "durationSeconds": 1.5, "loop": false,
+       "src": {"objectId": "98D59E27-7807-477D-BEFB-27EB1CF1D185", "rect": {"x": 198, "y": 797, "w": 952, "h": 268}},
+       "dst": {"objectId": "E4728E7D-2032-4D7F-83D6-8BE0EFB7B7BC", "rect": {"x": 327, "y": 709, "w": 1266, "h": 356}}}
+    ]
+  },
+  "d1": {
+    "schema": 2,
+    "movies": {"movie1": {"assetKeys": ["counter-a.mov"], "footprint": {"x": 160, "y": 700, "w": 640, "h": 180}}},
+    "boundaries": [
+      {"atScene": 2, "action": "bridge", "movieKey": "movie1", "durationSeconds": 1.5, "loop": false,
+       "src": {"objectId": "7469D7A4-74C4-4A7D-AEE5-C54F4E607658", "rect": {"x": 160, "y": 700, "w": 640, "h": 180}},
+       "dst": {"objectId": "565D0539-E258-4A66-850A-F83C2276C2E8", "rect": {"x": 960, "y": 400, "w": 800, "h": 225}}},
+      {"atScene": 4, "action": "bridge", "movieKey": "movie1", "durationSeconds": 1.5, "loop": false,
+       "src": {"objectId": "565D0539-E258-4A66-850A-F83C2276C2E8", "rect": {"x": 960, "y": 400, "w": 800, "h": 225}},
+       "dst": {"objectId": "BA476025-AC35-40EA-B8A4-CB64293588AF", "rect": {"x": 400, "y": 380, "w": 1120, "h": 315}}},
+      {"atScene": 6, "action": "pin", "movieKey": "movie1", "loop": false,
+       "src": {"objectId": "BA476025-AC35-40EA-B8A4-CB64293588AF", "rect": {"x": 400, "y": 380, "w": 1120, "h": 315}},
+       "dst": {"objectId": "3BC76561-DF87-44E4-A063-3796380149D3", "rect": {"x": 400, "y": 380, "w": 1120, "h": 315}}}
+    ]
+  },
+  "d3": {
+    "schema": 2,
+    "movies": {
+      "movie1": {"assetKeys": ["counter-a.mov"], "footprint": {"x": 100, "y": 400, "w": 800, "h": 225}},
+      "movie2": {"assetKeys": ["counter-b.mov"], "footprint": {"x": 1020, "y": 400, "w": 800, "h": 225}}
+    },
+    "boundaries": [
+      {"atScene": 2, "action": "pin", "movieKey": "movie1", "loop": false,
+       "src": {"objectId": "85E62542-449B-4030-BC00-F9616EBFA716", "rect": {"x": 100, "y": 400, "w": 800, "h": 225}},
+       "dst": {"objectId": "0588DA1E-7042-4124-AA51-585D38987F28", "rect": {"x": 100, "y": 400, "w": 800, "h": 225}}},
+      {"atScene": 2, "action": "bridge", "movieKey": "movie2", "durationSeconds": 1.5, "loop": false,
+       "src": {"objectId": "F6AC9F80-5B09-4FF8-9080-7DAADFEFC387", "rect": {"x": 1020, "y": 400, "w": 800, "h": 225}},
+       "dst": {"objectId": "9528CD4B-9141-4D8F-81E4-A8404EB4DA32", "rect": {"x": 1100, "y": 700, "w": 640, "h": 180}}},
+      {"atScene": 4, "action": "retire", "movieKey": "movie1", "reason": "ends",
+       "src": {"objectId": "0588DA1E-7042-4124-AA51-585D38987F28", "rect": {"x": 100, "y": 400, "w": 800, "h": 225}}},
+      {"atScene": 4, "action": "pin", "movieKey": "movie2", "loop": false,
+       "src": {"objectId": "9528CD4B-9141-4D8F-81E4-A8404EB4DA32", "rect": {"x": 1100, "y": 700, "w": 640, "h": 180}},
+       "dst": {"objectId": "1441C86A-33A3-4C14-9C20-CBD069B12487", "rect": {"x": 1100, "y": 700, "w": 640, "h": 180}}},
+      {"atScene": 6, "action": "bridge", "movieKey": "movie2", "durationSeconds": 1.5, "loop": false,
+       "src": {"objectId": "1441C86A-33A3-4C14-9C20-CBD069B12487", "rect": {"x": 1100, "y": 700, "w": 640, "h": 180}},
+       "dst": {"objectId": "76310715-1E82-4415-AD19-75EA9418B8FC", "rect": {"x": 400, "y": 380, "w": 1120, "h": 315}}}
+    ]
+  },
+  "d5": {
+    "schema": 2,
+    "movies": {"movie1": {"assetKeys": ["counter-a.mov"], "footprint": {"x": 160, "y": 700, "w": 640, "h": 180}}},
+    "boundaries": [
+      {"atScene": 2, "action": "pin", "movieKey": "movie1", "loop": false,
+       "src": {"objectId": "18E2E01B-E879-4180-A660-925B0744D32F", "rect": {"x": 160, "y": 700, "w": 640, "h": 180}},
+       "dst": {"objectId": "80D7DC98-85A8-4B60-AAB5-C0D09AE9FCC3", "rect": {"x": 160, "y": 700, "w": 640, "h": 180}}},
+      {"atScene": 4, "action": "pin", "movieKey": "movie1", "loop": false,
+       "src": {"objectId": "80D7DC98-85A8-4B60-AAB5-C0D09AE9FCC3", "rect": {"x": 160, "y": 700, "w": 640, "h": 180}},
+       "dst": {"objectId": "8FC58FEF-EACA-4554-91D0-CF86DA5047BC", "rect": {"x": 160, "y": 700, "w": 640, "h": 180}}}
+    ]
+  }
+}
