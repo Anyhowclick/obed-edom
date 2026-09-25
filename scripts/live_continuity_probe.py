@@ -334,6 +334,17 @@ PRESERVE_SNAPSHOT_JS = r"""
 })()
 """
 
+def handback_js(dom_id: str) -> str:
+    """The player-created element of one destination instance (F1: `objectID + "-video"`)."""
+    return (
+        "(function(){var v=document.getElementById(" + json.dumps(dom_id) + ");"
+        "if(!v)return {present:false};"
+        "return {present:true,tag:String(v.tagName||'').toLowerCase(),connected:v.isConnected===true,"
+        "preserved:!!(v.dataset&&v.dataset.obedPreserved),remounted:!!(v.dataset&&v.dataset.obedRemounted),"
+        "facade:!!v.__obedFacadeFor,suppressed:!!v.__obedSuppressed34};})()"
+    )
+
+
 # The core's own notes a retire verdict needs (F5 `retire-boundary` plus every carry/refusal
 # kind), read once with the refusal evidence; `null` when no core is installed.
 CORE_EVENTS_JS = r"""
@@ -965,7 +976,7 @@ def verdict_specs(plan: ContinuityPlan) -> list[dict[str, Any]]:
                     add("armed", "armed", True)
                 elif movie.refusal is not None:
                     add(
-                        "retire", "refused", True, originalOrdinal=destination + 1,
+                        "retire", "refused", True, originalOrdinal=destination + 1, dstRect=movie.dst_rect.as_dict(),
                         rects=[
                             _authored_rect(rect)
                             for asset, instances in (plan.slide_instances.get(destination) or {}).items()
@@ -976,7 +987,7 @@ def verdict_specs(plan: ContinuityPlan) -> list[dict[str, Any]]:
             elif movie.action == "restart":
                 add(
                     "restart", "restart", True, srcRect=movie.src_rect.as_dict(), dstRect=movie.dst_rect.as_dict(),
-                    settleUntilScene=later[0] - 1 if later else None,
+                    settleUntilScene=later[0] if later else None,
                 )
             else:
                 add("unhandled", None, True)
@@ -1036,20 +1047,33 @@ def p2_shape_facts(plan: ContinuityPlan) -> dict[str, Any] | None:
 
 
 def bind_positive_fact(fact: dict[str, Any] | None, specs: list[dict[str, Any]], kind: str) -> None:
-    """Key a runtime-derived retire/armed fact by the one plan verdict it proves, and give that
-    verdict the runtime movie key its core notes carry; fails closed unless exactly one matches."""
+    """Key a runtime-derived retire/armed fact by the full id of the one plan verdict it proves
+    (boundary + src/dst instance; an armed fact by its `instanceId`), and give that verdict the
+    runtime movie key its core notes carry; fails closed unless exactly one verdict matches."""
     if fact is None:
         return
     matches = [
         spec for spec in specs
         if spec["kind"] == kind and spec["atScene"] == fact["atScene"] and matches_asset_keys(spec["asset"], fact["assetKeys"])
+        and (kind != "armed" or str(spec["dstInstance"]).lower() == str(fact.get("instanceId")).lower())
     ]
     if len(matches) != 1:
         raise SystemExit(f"the runtime's {kind} at scene {fact['atScene']} matches {len(matches)} plan verdicts")
     spec = matches[0]
     carry = next(s for s in specs if s["kind"] == "carry" and s["id"].rsplit(":", 1)[0] == spec["id"].rsplit(":", 1)[0])
     spec["movieKey"] = fact["movieKey"]
-    fact.update(verdictKey=spec_key(spec), boundaryKey=spec_key(carry))
+    fact.update(verdictId=spec["id"], verdictKey=spec_key(spec), boundaryKey=spec_key(carry))
+
+
+def bind_dom_ids(facts: dict[str, Any], nodes: list[dict[str, Any]]) -> None:
+    """Give every retire verdict (and the retire fact it proves) the DOM id the player gives its
+    destination instance (F1: `objectID + "-video"`), from the export's movie nodes."""
+    for spec in facts.get("verdicts") or []:
+        if spec["kind"] == "retire":
+            spec["dstDomId"] = source_instance(nodes, spec["toPlayer"], spec["asset"], spec["dstRect"])["domId"]
+            retire = facts.get("retire")
+            if isinstance(retire, dict) and retire.get("verdictId") == spec["id"]:
+                retire["dstDomId"] = spec["dstDomId"]
 
 
 def ground_truth_facts(plan: ContinuityPlan, *, armed: bool = False) -> dict[str, Any]:
@@ -1814,7 +1838,10 @@ def refusal_observer(
             return
         wait_until_settled(player)
         transport = player._require_transport()
-        out[retire["verdictKey"]] = {**refusal_evidence(transport), "coreEvents": transport.evaluate(CORE_EVENTS_JS)}
+        read = {**refusal_evidence(transport), "coreEvents": transport.evaluate(CORE_EVENTS_JS)}
+        if retire.get("dstDomId"):
+            read["handback"] = {"domId": retire["dstDomId"], "element": transport.evaluate(handback_js(retire["dstDomId"]))}
+        out[retire["verdictKey"]] = read
 
     return observe
 
@@ -2101,6 +2128,15 @@ def _sample_problem(row: Any) -> str | None:
         return "t is not a finite number"
     if row.get("scene") is not None and _finite_number(row.get("scene")) is None:
         return "scene is neither null nor a finite number"
+    if "playerState" not in row or not (row["playerState"] is None or isinstance(row["playerState"], str)):
+        return "playerState is missing or not a string"
+    if "busy" not in row or not (row["busy"] is None or isinstance(row["busy"], bool)):
+        return "busy is missing or not a boolean"
+    if "stageMapValid" in row:
+        if not isinstance(row["stageMapValid"], bool):
+            return "stageMapValid is not a boolean"
+    elif "stageMap" not in row or not (row["stageMap"] is None or isinstance(row["stageMap"], dict)):
+        return "stageMap is missing or not an object"
     if not isinstance(row.get("videos"), list):
         return "videos is not a list"
     for video in row["videos"]:
@@ -2118,6 +2154,12 @@ def _sample_problem(row: Any) -> str | None:
             return "a video rect is unusable"
         if not isinstance(video.get("isConnected"), bool):
             return "a video isConnected is not a boolean"
+        if _finite_number(video.get("readyState")) is None:
+            return "a video readyState is not a finite number"
+        if "footprintOwner" not in video or not (video["footprintOwner"] is None or isinstance(video["footprintOwner"], dict)):
+            return "a video footprintOwner is missing or not an object"
+        if "stageMapValid" in video and not isinstance(video["stageMapValid"], bool):
+            return "a video stageMapValid is not a boolean"
     return None
 
 
@@ -2145,6 +2187,9 @@ def _carry_integrity_gap(samples: list[dict[str, Any]], scored: dict[str, Any], 
         return "boundary crossing not observed in samples"
     if scored.get("stageMapInvalid"):
         return f"{len(scored['stageMapInvalid'])} tracked row(s) have no trustworthy stage map"
+    unowned = [m for m in scored.get("ownerMismatches") or [] if not isinstance(m.get("footprintOwner"), dict)]
+    if unowned:
+        return f"{len(unowned)} row(s) have no readable footprint owner"
     transition, window = spec["transitionScene"], scored.get("window") or {}
     errors = (scored.get("motion") or {}).get("errors") or []
     in_window = [r for r in samples if window.get("start", -math.inf) <= r["t"] <= window.get("end", math.inf)]
@@ -2198,7 +2243,13 @@ def score_restart_strict(
         return [r for r in rows if window["start"] <= r["t"] <= window["end"] and r.get("scene") is not None]
 
     def settled(row: dict[str, Any]) -> bool:
-        return row["scene"] >= scene and (until is None or row["scene"] < until)
+        """On the destination slide (`until` = the next slide's first scene, exclusive), never a
+        moving row, and never the slide's own outgoing transition scene when it has one."""
+        if row["scene"] < scene or (until is not None and row["scene"] >= until):
+            return False
+        if until is not None and until - 1 > scene and row["scene"] == until - 1:
+            return False
+        return not (row.get("playerState") == "Playing" and row.get("busy") is True)
 
     if not any(settled(r) for r in windowed(samples)):
         return _inconclusive("no sample on the settled destination scene", window=window)
@@ -2258,8 +2309,21 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool) -> 
         painting_videos(sample.get("painting"), sample["stageMap"])
     except VisiblePassError as exc:
         return _inconclusive(str(exc))
+    handback = sample.get("handback")
+    element = handback.get("element") if isinstance(handback, dict) else None
+    if not spec.get("dstDomId") or not isinstance(handback, dict) or handback.get("domId") != spec["dstDomId"]:
+        return _inconclusive("no raw-player hand-back read for the destination instance")
+    if not isinstance(element, dict) or not isinstance(element.get("present"), bool):
+        return _inconclusive(f"the hand-back read is unreadable: {element!r}")
+    handed_back = element["present"] and element.get("tag") == "video" and element.get("connected") is True and not any(
+        element.get(flag) is not False for flag in ("preserved", "remounted", "facade")
+    )
+    if not handed_back:
+        refused = score_refusal(sample, spec, runtime_installed)
+        return {**refused, "verdict": False, "handback": element,
+                "reason": f"no connected raw player <video id={spec['dstDomId']}> on the destination: {element}"}
     if not runtime_installed:
-        return score_refusal(sample, spec, runtime_installed)
+        return {**score_refusal(sample, spec, runtime_installed), "handback": element}
     events = sample.get("coreEvents")
     if not isinstance(sample.get("poolSnapshot"), list):
         return _inconclusive(f"preserve snapshot is unreadable: {sample.get('poolSnapshot')!r}")
@@ -2297,17 +2361,54 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool) -> 
         reasons.append(f"{len(carries)} carry note(s) for {movie_key} in the retire zone")
     return {
         **scored, "verdict": not reasons, "reason": "; ".join(reasons) or None,
-        "retireNotes": notes, "carryNotes": carries,
+        "retireNotes": notes, "carryNotes": carries, "handback": element,
     }
 
 
-def score_armed_strict(reads: Any, armed: dict[str, Any], continuity: Any, samples: Any) -> dict[str, Any]:
-    """`score_armed` on two readable reads; missing or malformed reads are INCONCLUSIVE."""
-    if not (
-        isinstance(reads, list) and len(reads) == 2
-        and all(isinstance(read, dict) and isinstance(read.get("glReplay"), dict) for read in reads)
+def armed_read_problem(read: Any) -> str | None:
+    """Why one armed read lacks a raw field `score_armed` consumes, or None. `api: null` is a
+    readable observation (no G2 module published), not a malformed read."""
+    if not isinstance(read, dict):
+        return "read is not an object"
+    if "stageMap" not in read or not (read["stageMap"] is None or isinstance(read["stageMap"], dict)):
+        return "stageMap is missing or not an object"
+    if not isinstance(read.get("painting"), (list, dict)):
+        return "painting is missing"
+    gl = read.get("glReplay")
+    if not isinstance(gl, dict):
+        return "glReplay is not an object"
+    if _finite_number(gl.get("t")) is None or not isinstance(gl.get("hash"), str):
+        return "glReplay t/hash is unusable"
+    if not isinstance(gl.get("coreEvents"), list) or not all(isinstance(e, dict) for e in gl["coreEvents"]):
+        return "glReplay coreEvents is not a list of objects"
+    if not isinstance(gl.get("pool"), list):
+        return "glReplay pool is not a list"
+    if "api" not in gl:
+        return "glReplay api is missing"
+    api = gl["api"]
+    if api is None:
+        return None
+    if not (isinstance(api, dict) and isinstance(api.get("state"), str) and isinstance(api.get("standDowns"), list)):
+        return "glReplay api state/standDowns is unusable"
+    stats = api.get("stats")
+    if stats is not None and not (
+        isinstance(stats, dict) and all(_finite_number(stats.get(k)) is not None for k in ("iter", "uploads", "glErrors"))
     ):
-        return _inconclusive("the armed slide was not read twice", evidence=reads if isinstance(reads, dict) else None)
+        return "glReplay api stats is unusable"
+    return None
+
+
+def armed_reads_problem(reads: Any) -> str | None:
+    if not isinstance(reads, list) or len(reads) != 2:
+        return "the armed slide was not read twice"
+    return next((f"read {i}: {problem}" for i, read in enumerate(reads) if (problem := armed_read_problem(read))), None)
+
+
+def score_armed_strict(reads: Any, armed: dict[str, Any], continuity: Any, samples: Any) -> dict[str, Any]:
+    """`score_armed` on two schema-valid reads; missing or malformed reads are INCONCLUSIVE."""
+    problem = armed_reads_problem(reads)
+    if problem:
+        return _inconclusive(problem, evidence=reads if isinstance(reads, dict) else None)
     return score_armed(reads, armed, continuity, owner_ids=pre_flip_owner_ids(samples if isinstance(samples, list) else [], armed))
 
 
@@ -2328,13 +2429,29 @@ def score_verdicts(
             scored[spec["id"]] = score_retire(evidence.get(spec_key(spec)), spec, runtime_installed)
         elif kind == "armed":
             armed = facts.get("armed")
-            if not isinstance(armed, dict) or armed.get("atScene") != scene:
-                scored[spec["id"]] = _inconclusive(f"no armed fact for the glReplay boundary at scene {scene}")
+            if not isinstance(armed, dict) or armed.get("verdictId") != spec["id"]:
+                scored[spec["id"]] = _inconclusive(f"no armed fact for {spec['id']}")
             else:
                 scored[spec["id"]] = score_armed_strict(evidence.get(armed["verdictKey"]), armed, continuity, samples)
         else:
             scored[spec["id"]] = _inconclusive(f"no scorer for plan action {spec['action']!r}")
+    enforce_distinct_carriers(scored, facts.get("verdicts") or [])
     return scored
+
+
+def enforce_distinct_carriers(scored: dict[str, Any], specs: Sequence[dict[str, Any]]) -> None:
+    """One decoder cannot satisfy two carry verdicts at one boundary: every green carry sharing
+    its decoder with another green carry of the same boundary turns red, naming the other."""
+    by_boundary: dict[tuple[Any, Any, Any], list[str]] = {}
+    for spec in specs:
+        value = scored.get(spec["id"])
+        if spec["kind"] == "carry" and isinstance(value, dict) and value.get("verdict") is True:
+            by_boundary.setdefault((spec["fromPlayer"], spec["toPlayer"], value.get("elementId")), []).append(spec["id"])
+    for ids in by_boundary.values():
+        if len(ids) > 1:
+            for spec_id in ids:
+                others = [other for other in ids if other != spec_id]
+                scored[spec_id] = {**scored[spec_id], "verdict": False, "reason": f"its decoder also satisfies {others}"}
 
 
 def with_aliases(scored: dict[str, Any], specs: Sequence[dict[str, Any]]) -> dict[str, Any]:
@@ -2395,7 +2512,9 @@ def census_observer(
             inner(ordinal)
         wait_until_settled(player)
         transport = player._require_transport()
-        out[str(ordinal)] = {"stageMap": transport.evaluate(STAGE_MAP_JS), "painting": transport.evaluate(PAINTING_VIDEOS_JS)}
+        out.setdefault(str(ordinal), []).append(
+            {"stageMap": transport.evaluate(STAGE_MAP_JS), "painting": transport.evaluate(PAINTING_VIDEOS_JS)}
+        )
 
     return observe
 
@@ -2410,7 +2529,7 @@ def score_census(
 ) -> tuple[dict[str, Any], list[str], list[str]]:
     """Pure: each settled slide's painting `<video>`s matched one-to-one against its authored
     instances (`match_painting_videos`, the visible passes' `unexpectedVideos`). Every slide in
-    `player_by_ordinal` needs exactly one readable read. Returns the per-slide records, the red
+    `player_by_ordinal` needs a list of exactly one readable read. Returns the per-slide records, the red
     ids as a multiset -- one `stray:slide{n}:{asset}` per unexpected painting video (its `elId`
     kept in the record), one `duplicate:slide{n}:{label}` per doubly-painted instance -- and
     the `census:slide{n}` reads that were missing, extra or unreadable."""
@@ -2422,8 +2541,11 @@ def score_census(
     unknown.extend(f"census:slide{key}" for key in sorted(map(str, reads)) if key not in {str(o) for o in player_by_ordinal})
     for ordinal in sorted(player_by_ordinal):
         key = str(ordinal)
-        read = reads.get(key)
+        slide_reads = reads.get(key)
+        read = slide_reads[0] if isinstance(slide_reads, list) and len(slide_reads) == 1 else None
         try:
+            if isinstance(slide_reads, list) and len(slide_reads) > 1:
+                raise VisiblePassError(f"slide {ordinal} was read {len(slide_reads)} times (extra read)")
             if not isinstance(read, dict):
                 raise VisiblePassError(f"slide {ordinal} has no census read")
             stage_map = read.get("stageMap")
@@ -4794,6 +4916,7 @@ def run_red_arm(args: argparse.Namespace) -> dict[str, Any]:
     plan_slides = load_slides(export_plan)
     plan = ground_truth_plan(export_plan, plan_slides)
     facts = ground_truth_facts(plan)
+    bind_dom_ids(facts, movie_nodes(export_plan, plan_slides))
     plan_on, facts_on = gl_ground_truth(export_plan, plan_slides, facts)[:2] if auto else (None, None)
     runtime = runtime_of(plan_on if plan_on is not None else plan)
     if args.strip is not None:
@@ -5452,11 +5575,14 @@ def _rederivable(spec: dict[str, Any], evidence: Any) -> str | None:
     """Why a stored verdict cannot be re-derived from what the artifact retained, else None."""
     if spec["kind"] in ("carry", "restart"):
         return None
+    read = evidence.get(spec_key(spec)) if isinstance(evidence, dict) else None
     if spec["kind"] == "retire":
-        read = evidence.get(spec_key(spec)) if isinstance(evidence, dict) else None
-        return None if isinstance(read, dict) and "coreEvents" in read else "no retained refusal evidence with core events"
+        return None if isinstance(read, dict) and "coreEvents" in read and "handback" in read else (
+            "no retained refusal evidence with core events and the hand-back read"
+        )
     if spec["kind"] == "armed":
-        return None if isinstance(evidence, dict) else "no retained armed reads"
+        problem = armed_reads_problem(read)
+        return None if problem is None else f"no retained schema-valid armed reads ({problem})"
     return f"no scorer for plan action {spec['action']!r}"
 
 
@@ -5532,6 +5658,7 @@ def run_rescore_cli(args: argparse.Namespace) -> None:
     export = prepare_export(args.fixture, args.original_index, "rescore")
     slides = load_slides(export)
     facts = ground_truth_facts(ground_truth_plan(export, slides))
+    bind_dom_ids(facts, movie_nodes(export, slides))
     stored = json.loads(args.rescore.read_text())
     auto = (stored.get("glReplay") or {}).get("requested") == "auto"
     facts_on = gl_ground_truth(export, slides, facts)[1] if auto else None
@@ -5585,6 +5712,7 @@ def main() -> None:
         slides_a = load_slides(export_a)
         plan = ground_truth_plan(export_a, slides_a)
         facts = ground_truth_facts(plan)
+        bind_dom_ids(facts, movie_nodes(export_a, slides_a))
         result["groundTruth"] = {key: facts[key] for key in GROUND_TRUTH_KEYS if key in facts}
         expected_stage = expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
         attach_expected_stage = expected_stage_fit(facts["canvas"], {"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT})
@@ -5714,6 +5842,8 @@ def main() -> None:
         summary["handback"] = (result.get("handback") or {}).get("verdict")
         summary["liveRing"] = (result.get("liveRing") or {}).get("verdict")
     print(json.dumps(summary, indent=2))
+    if result.get("status") != "pass":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
