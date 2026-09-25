@@ -50,7 +50,7 @@ changes core runtime bytes (`js`), so the P2 / G2 / managed-OBS / loop re-qualif
 - **F2.** Every movie instance in the committed fixtures has a distinct `objectID`, per slide and across slides (6 slides of `tests/fixtures/live_continuity/minimal_alpha_dsk`).
 - **F3 (corrected).** Keynote pairs a repeated class by **preference tiers first** ({stroke, opacity} > raw stored path
   > fill/style), **then** minimum total centre distance (`validate._mm_nearest`, `validate.py:946-988`; memory
-  `mm-shape-identity`). This was live-measured on **images and shapes** (main checkout `output/mm-dup-pairing/gen.py`
+  `mm-shape-identity`). This was live-measured on **images and shapes** (main checkout `output/evidence/mm-dup-pairing/gen.py`
   inserts `sq.png`), **not on movies**. Objects that build in on the destination or out on the source never pair;
   movie-start builds do not exclude them (owner-observed). The KPF export has `opacity` in `initialState` but no raw path
   or style tiers.
@@ -202,7 +202,7 @@ worktree pinned to a commit, with at most 3 headless Chromes; OBS only on the ow
 | H | `scripts/p2_recovery_html_adversarial.py`, `scripts/p2_recovery_html_dissolve_live.py` (sampler rows only if needed), `src/obed_edom/p2_verdict.py` (verdict layer only), `tests/test_p2_adversarial*.py`, `scripts/run_gates.sh` | P2 verdict **`noStrayVideo`**: on each settled slide, the connected `<video>`s the P2 sampler already classifies as painting (`visible && !suppressed34`, `p2_recovery_html_dissolve_live.py:245-290`; no new page JS) match `ContinuityPlan.slide_instances` for that slide one-to-one by rect (every authored instance, planned or not). The finding count goes 14 → 15. `--core-variant` imported from WS-G's module. `run_gates.sh` gains the stray red arm and the `--strip` arms, and prints each arm's **pre-registered expected red set** so a human diff is not the check. |
 
 **S1 gates (on main's runtime; no re-qualification):**
-- **G-S1a, rescore control.** The plan-generated scorer on stored P2-host artifacts (main-checkout `output/gates-glc/`, `output/loop-gates/l4-final/host-*.json`) reproduces the legacy verdicts exactly.
+- **G-S1a, rescore control.** The plan-generated scorer on stored P2-host artifacts (main-checkout `output/evidence/gates-glc/`, `output/evidence/loop-gates/l4-final/host-*.json`) reproduces the legacy verdicts exactly.
 - **G-S1b.** The P2 fixture is fully green: 15/15 off, plus `glReplayCarry1to2` under `--gl-replay auto`.
 - **G-S1c, stray red.** `--core-variant stash-any` on P2: host `unexpectedVideos` non-empty on slide 4 (WA0125), and P2 `noStrayVideo` red **only** there.
 - **G-S1d.** `--strip bridge@8` red only on 3→4. `--strip retire@2`, and `--strip glReplay@2` under `--gl-replay auto`, red only on the **1→2** verdicts. On main's runtime a stripped refusal falls back to the implicit pin, so `refused*` goes red as well as `armed1to2`. `--strip restart@6` is recorded as the current behaviour. Each arm's expected set is written into `run_gates.sh` before the run.
@@ -240,6 +240,40 @@ shas of P2 off/on, p2-loop off/on, and the decks that passed Q3+Q7. The others a
 - **Tests:** a negative corpus, one synthetic export per refusal code, derives the named reason.
 - **WS-P:** README states plainly what is and is not carried.
 - **Gates:** full suites, plus the probe on P2 + D1–D6, whose **runtime plans are byte-identical** to S2's, and whose verdicts must equal the S2 gate's. One **real owner sermon deck** dry-run, headless: it must derive `qualified` with a green probe, or `unsupported`/declined with named reasons.
+
+### 3.7 F: `output/fixtures/` consolidation (owner decision relayed by the loop session, 2026-09-25; lands in S2's PR)
+
+**Why.** Fixture paths are hard-coded all over. Counts on origin/main per the loop session:
+
+| Fixture | Mentions |
+|---|---|
+| `p2-recovery` | ≈39 in 19 src/scripts/tests files, plus handovers, the runbook, and every worktree's symlink of `output/p2-recovery/html-adversarial` |
+| `p2-binary` | 14 in 8 files |
+| `p2-loop` / `p2-loop-grey` | 34 in 5 files |
+| `p2-soak-loop` | 2 test files, absolute path |
+| `gl-decks` | `tests/test_live_continuity_decks.py`, absolute path |
+
+S2 re-runs every gate anyway, so moving the fixtures there breaks no worktree mid-flight. Gate evidence is a separate
+docs PR by the loop session (`output/evidence/<name>`); this plan cites those paths.
+
+**Scope.**
+- **Move** (main checkout, `mv`, never copy+delete) to `output/fixtures/<name>`: p2-recovery, p2-binary, p2-loop,
+  p2-loop-grey, p2-soak-loop, gl-decks, qual-decks, qual-movies.
+- **Left alone:** `bank`, which is a cache.
+- **One resolver:** new `src/obed_edom/fixture_paths.py` with `main_checkout()` (adopt `loop_fixture.main_checkout()`'s
+  logic and make that script import it) and `fixture(name) -> Path`, resolving `<main checkout>/output/fixtures/<name>`,
+  so a worktree needs no symlink. `binary_counter_movie.py`'s derivation from `P2_FIXTURE`'s parent goes through it too.
+- **Every literal** in src/scripts/tests goes through `fixture(...)`. A test asserts that no `output/p2-`/`gl-decks`/
+  `qual-` literal remains outside `fixture_paths.py` (grep-style, excluding docs).
+- **Docs:** SKILL, `decklink-field-test-runbook.md`, the live handovers the plans still cite, and memory citations
+  (coordinator). The worktree convention becomes "nothing to symlink". If some script still needs a relative
+  `output/` path, one symlink of `output/fixtures`.
+
+**Order inside S2.** Step **S2.0**: one Opus MEDIUM implementer, sequential, BEFORE the parallel work streams. It touches
+files every stream owns, so it cannot run beside them. Its own check is the full suites, plus a resolver smoke (every
+`fixture(name)` exists in the main checkout). The S2 re-qualification (§3.4) then exercises every moved path. The
+coordinator does the `mv` in the main checkout only after S2.0's code is ready, and records the before/after listing in
+the gate record.
 
 ### 3.6 V: validation rule `mm.movie_restart_midmove` (owner 2026-09-25; independent of S1–S3)
 
@@ -435,7 +469,7 @@ tone step at G2 hand-off, the linear-bridge poster sliver at the leading edge, a
 | 3 | design error | `restart` retires at the fresh element's src set (hash ≥ `atScene`) and keeps `reuse-skip-boundary`/`retire-on-start-movie` | P2's restart guard requires those notes on the auto route (`p2_recovery_html_adversarial.py:4150-4177`); retiring at `atScene-1` blanks the Dissolve |
 | 4 | wrong fact / design error | F5 added; rev 1's deletion of `__obedBridged34`/`__obedSuppressed34` naming withdrawn | `__obedSuppressed34` is read by the P2 sampler (`p2_recovery_html_dissolve_live.py:266`); `bridge-3to4` by `p2_verdict.py:123` |
 | 5 | design error | Suppressed `dst` element's clear really runs after its slide | Today's swallow would leak one hidden decoder per bridge in a chain |
-| 6 | wrong fact | F3 corrected: tiers before distance; measured on images, not movies; R1b opacity refusal | `validate.py:954-955`, `output/mm-dup-pairing/gen.py`; rev 1 stated distance only |
+| 6 | wrong fact | F3 corrected: tiers before distance; measured on images, not movies; R1b opacity refusal | `validate.py:954-955`, `output/evidence/mm-dup-pairing/gen.py`; rev 1 stated distance only |
 | 7 | wrong fact | F1 corrected: id is `movieId` = `objectID+"-video"`; per-slide cache reset; iframe/image movies; R7 added | `main.js` `xB.initVideo`, `resetMediaCache` |
 | 8 | wrong fact | §2.5 `managed_obs_qualify` row + F6 | It imports 13 probe symbols incl. `ground_truth_facts`, which WS-G rewrites |
 | 9 | wrong fact | Branch heads `af76ed97` / `67643332`; `lc`/`js` prefixes; line fixes (`lc:767-770`, `:825-826,864-867`, `g2:1347`, `tests/test_live_continuity_js.py:25,38`, P2 pixel-stray cite) | Rev 1 mixed files under bare line numbers and cited stale heads |
