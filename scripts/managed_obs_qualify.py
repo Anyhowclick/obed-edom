@@ -1137,6 +1137,10 @@ def launch_engine(engine: ManagedObs, rate: int, source: int, launch: str, run: 
         time.sleep(2)
         run["shownState"] = engine.state()["state"]
     port, password = websocket_credentials(engine)
+    if launch == "projector":
+        with ObsWebsocket(port, password) as ws:
+            ws.request("OpenVideoMixProjector", {"videoMixType": "OBS_WEBSOCKET_VIDEO_MIX_TYPE_PROGRAM"})
+        time.sleep(1)
     with ObsWebsocket(port, password) as ws:
         run["obsVersion"] = ws.request("GetVersion").get("obsVersion")
         run["videoSettings"] = ws.request("GetVideoSettings")
@@ -1379,7 +1383,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--arm", choices=("2x", "positive", "both", "g2", "failsafe", "soak"), default="both")
     parser.add_argument("--rate", type=int, choices=sorted(managed_obs.RATES), default=25)
     parser.add_argument("--takes", type=int, default=2, help="ignored (1) for failsafe and soak")
-    parser.add_argument("--launch", choices=("hidden", "shown"), default="hidden", help="shown = hidden launch, then Show OBS once ready")
+    parser.add_argument("--launch", choices=("hidden", "shown", "projector"), default="hidden", help="shown = hidden launch, then Show OBS once ready; projector = hidden launch + a windowed program projector (eyeball)")
     parser.add_argument("--kb", choices=sorted(KB_SHAS), help="known-bad control: frozen|oldbytes (module splice), latelost (g2)")
     parser.add_argument("--fixture", type=Path, help=f"soak fixture root (default {SOAK_FIXTURE}); other arms: {FIXTURE} (default) or "
                         f"its binary-counter copy ({binary_counter_movie.BINARY_FIXTURE})")
