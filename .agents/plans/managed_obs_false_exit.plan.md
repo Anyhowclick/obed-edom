@@ -6,7 +6,7 @@ On 2026-09-25 the OD-2 soak (10:12–10:32, branch `claude/od-2-gl-replay-manage
 - The engine logged "managed OBS exited without AK asking" in minute 1.
 - It then stayed in `blocked/exited` with W5 `obsExited` for 19 minutes.
 - OBS was running the whole time: its log runs to 10:32 and CDP answered throughout.
-- Evidence: `output/gl-replay-managed/{Q-soak.log,runs/soak-20260925-101220.json}` in worktree `autoprompts-toggle-cfdda0`.
+- Evidence: `output/gl-replay-managed/{Q-soak.log,runs/soak-20260925-101220.json}` in worktree `autoprompts-toggle-cfdda0` — **not retained** (worktree removed 2026-09-25 with the owner's OK; no copy under `output/evidence/`).
 
 On show day, the operator would follow W5 and restart a healthy output. This must be fixed before the 2026-10-10 field test.
 

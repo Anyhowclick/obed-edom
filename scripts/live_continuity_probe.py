@@ -14,10 +14,10 @@ asserts nothing.
   B. OBED_LIVE_CONTINUITY=off -> raw player; continue3to4 expected FALSE (the
      Keynote HTML-export bug the continuity runtime repairs); 1->2 is reported as
      measured, not assumed.
-  C. continuity on, but the bridge boundary is stripped by a PROBE-ONLY monkeypatch
-     of `ContinuityPlan.to_runtime` (no product switch) -> continue3to4 FALSE while
-     the 1->2 boundary keeps arm A's expectation (isolates the repair to the 3->4
-     boundary).
+  C. continuity on, but the bridge boundary is stripped from the injected runtime plan
+     by a PROBE-ONLY monkeypatch (`--strip bridge`; no product switch) -> continue3to4
+     FALSE while the 1->2 boundary keeps arm A's expectation (isolates the repair to
+     the 3->4 boundary).
 Then one ATTACH-mode run (arm A only): the host attaches over CDP to a headless
 Chrome this script launches itself, confirms `qualified`, all three verdicts, and a
 transparent page background, then kills that Chrome by pid.
@@ -37,6 +37,13 @@ the runtime's own `footprintOwnerDecoderId`), never a screenshot MAE and never a
 sleep as proof. If the tracked movie never decodes, the verdict is INCONCLUSIVE, not
 a false pass/fail.
 
+Every boundary verdict is generated from `ContinuityPlan.boundaries[].movies[]`
+(`verdict_specs`), one per (boundary, movie, kind), id `b{from}to{to}:{asset}:{kind}`;
+P2's names (`continue1to2`, `restart2to3`, `continue3to4`, `refused*`, `armed1to2`) are
+emitted alongside as aliases. `--strip ACTION[@atScene]` and `--core-variant NAME` run one
+red arm on its own and compare its red set with the arm's pre-registered one
+(`RED_ARM_EXPECTATIONS`); `--rescore` re-scores a stored artifact with both scorers.
+
 Does not qualify HDMI, alpha compositing, or audio. Offline/local Chrome only.
 """
 from __future__ import annotations
@@ -54,9 +61,10 @@ import subprocess
 import sys
 import time
 import urllib.request
+from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator, Sequence
+from typing import Any, Callable, Collection, Iterator, Sequence
 
 import cv2
 import numpy as np
@@ -68,7 +76,8 @@ sys.path.insert(0, str(REPO / "scripts"))
 from obed_edom import live_host as live_host_module  # noqa: E402
 from obed_edom import live_continuity as live_continuity_module  # noqa: E402
 from obed_edom.html_preview import cache_dir, safe_export_file  # noqa: E402
-from obed_edom.live_continuity import ContinuityPlan, Unsupported, derive_plan  # noqa: E402
+from obed_edom.live_continuity import ContinuityPlan, Unsupported, derive_plan, plan_signature  # noqa: E402
+from obed_edom.live_continuity_js import js_sha256  # noqa: E402
 from obed_edom.html_alpha_probe import (  # noqa: E402
     INPAGE_BAND_COUNT,
     INPAGE_MIN_SAMPLES,
@@ -84,7 +93,7 @@ from obed_edom.html_alpha_probe import (  # noqa: E402
 )
 from obed_edom.live_gl_replay_js import GL_REPLAY_VERSION, js_sha256 as gl_replay_js_sha256  # noqa: E402
 from obed_edom.live_host import ADVANCE_ENV, ATTACH_ENV, CONTINUITY_ENV, LiveOutputHost, OutputDisplay, PlayerCommandRejected  # noqa: E402
-from obed_edom.p2_verdict import BURST_OFFSETS_MS, CONTROL_INSET_PX, CONTROL_PATCH_PX  # noqa: E402
+from obed_edom.p2_verdict import BURST_OFFSETS_MS, CARRY_EVENT_KINDS, CONTROL_INSET_PX, CONTROL_PATCH_PX  # noqa: E402
 
 try:
     from obed_edom.live_host import GOTO_AUTOPLAY_ENV  # noqa: E402
@@ -92,6 +101,7 @@ except ImportError:  # pragma: no cover - stream B is landing this constant conc
     GOTO_AUTOPLAY_ENV = "OBED_LIVE_GOTO_AUTOPLAY"
 
 import live_host_probe  # noqa: E402 - reuse the headless window-size compensation
+from continuity_core_variants import VARIANTS, parse_strip, strip_entries, variant_core, variant_sha  # noqa: E402
 
 FIXTURE = REPO / "output/p2-recovery/html-adversarial/html-player"
 ORIGINAL_INDEX = REPO / "output/p2-recovery/html-adversarial/html-unmodified/index.html"
@@ -150,6 +160,40 @@ REFUSAL_VERDICT_KEY = {
     "restart2to3": "refused2to3",
     "continue3to4": "refused3to4",
 }
+# Red arms (plan §4): each arm's PRE-REGISTERED red set, keyed by (flag-off runtime plan sha,
+# arm label, --gl-replay). An id is a plan-generated verdict whose gated value differs from the
+# plan's expectation, or `stray:slide{ordinal}:{asset}` for a painting `<video>` the settled
+# slide's instances do not claim. RECORD = report the current behaviour, never pass/fail.
+RECORD = "record"
+P2_OFF_PLAN_SHA256 = "bafe26cad55cf3a390154bce2c0fdcc771b9b1821293b6aec76119d25180e81e"
+# The pinned P2 runtime plans (off, gl-replay on; p2-loop off, on): the only decks whose status
+# is P2's legacy slot table. Every other deck is scored by `generated_status`.
+P2_PLAN_SHA256 = frozenset({
+    P2_OFF_PLAN_SHA256,
+    "6a0596da54532493aee74d22fe91b7cbf3628795aca586dd3cf7dc61a37cc635",
+    "3dc6755853692a178696a35495c1929662005a8173f932607855876bfc299c5d",
+    "2ba6fbed8fc959c804e53d2f21712945230eac6dcbf90d522fe3a6a688bef924",
+})
+RED_ARM_EXPECTATIONS: dict[tuple[str, str, str], tuple[str, ...] | str] = {
+    (P2_OFF_PLAN_SHA256, "core:stash-any", "off"): ("stray:slide4:vid-20250608-wa0125.mp4",),
+    (P2_OFF_PLAN_SHA256, "strip:bridge@8", "off"): ("b2to3:untitled.mov#1->untitled.mov#1:carry",),
+    (P2_OFF_PLAN_SHA256, "strip:retire@2", "off"): (
+        "b0to1:untitled.mov#1->untitled.mov#1:carry", "b0to1:untitled.mov#1->untitled.mov#1:retire",
+        "stray:slide2:untitled.mov",
+    ),
+    (P2_OFF_PLAN_SHA256, "strip:glReplay@2", "auto"): (
+        "b0to1:untitled.mov#1->untitled.mov#1:armed", "stray:slide2:untitled.mov",
+    ),
+    # Post-hoc from discovery round r2 (8ac39a42), not pre-registered: with the restart entry
+    # stripped, the un-retired pre-restart decoder breaks the 3->4 carry while the export's own
+    # 2->3 restart still scores green.
+    (P2_OFF_PLAN_SHA256, "strip:restart@6", "off"): ("b2to3:untitled.mov#1->untitled.mov#1:carry",),
+}
+GROUND_TRUTH_KEYS = (
+    "asset", "onset1to2", "boundaryPlayerIndex", "restartScene", "bridgeScene",
+    "pinRect", "bridgeSrcRect", "destRect", "canvas",
+    "retire", "refusedBoundaries", "refusals", "rectExpectations", "verdicts", "planSha256",
+)
 # A painting `<video>` overlaps a retired movie's rect when it does so by more
 # than this in authored px -- edge-touching and AA seams are not an overlap.
 REFUSAL_OVERLAP_MIN_PX = 1.0
@@ -161,6 +205,7 @@ ARMED_CLOCK_RATE = (0.75, 1.25)
 HANDBACK_TIMEOUT_S = 5.0
 HANDBACK_DILATE_PX = 2
 HANDBACK_RECT_TOLERANCE_PX = 0.5
+INSTANCE_MATCH_TOLERANCE_PX = 0.5
 GL_FORCE_FAIL_REASONS = ("planUnreadable", "rvfcUnavailable", "posterAmbiguous", "occlusionTooHigh")
 FORCE_FAIL_SEED_ID = "probe-force-fail"
 EXPECTED_GL_MODES = (
@@ -294,6 +339,20 @@ PRESERVE_SNAPSHOT_JS = r"""
 })()
 """
 
+# The core's own notes a retire verdict needs (F5 `retire-boundary` plus every carry/refusal
+# kind), read once with the refusal evidence; `null` when no core is installed.
+CORE_EVENTS_JS = r"""
+(function(){
+  var core = window.__OBED_P2_PRESERVE__;
+  if (!core) return null;
+  try {
+    return JSON.parse(JSON.stringify((core.events || []).filter(function(e){
+      return e && /^(remount-|reuse-|dom-swap|facade-|preserve-refused|retire)/.test(String(e.kind));
+    })));
+  } catch (e) { return {error: String(e)}; }
+})()
+"""
+
 SAMPLER_JS = r"""
 (function(){
   if (window.__obedContinuityProbe__) return true;
@@ -359,6 +418,10 @@ SAMPLER_JS = r"""
         readyState: v.readyState,
         videoWidth: v.videoWidth,
         isConnected: document.contains(v),
+        domId: v.id || null,
+        preserved: !!(v.dataset && v.dataset.obedPreserved),
+        remounted: !!(v.dataset && v.dataset.obedRemounted),
+        facade: !!v.__obedFacadeFor,
         rect: rect,
         footprintOwner: ownerOf(rect, v.currentSrc || v.src || '', map)
       });
@@ -550,6 +613,13 @@ def parse_viewport_arg(value: str) -> tuple[int, int]:
     return width, height
 
 
+def parse_strip_arg(value: str) -> tuple[str, int | None]:
+    try:
+        return parse_strip(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture", type=Path, default=FIXTURE)
@@ -592,7 +662,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="L2 control: re-score a standard host artifact's arms strict and wrap-aware (period from --fixture), "
         "or re-score a --force-wrap artifact offline; exits 1 unless ok / pass",
     )
+    parser.add_argument(
+        "--strip", type=parse_strip_arg, default=None, metavar="ACTION[@atScene]",
+        help="Red arm: one continuity-on arm with the matching runtime-plan entries stripped at injection "
+        "(e.g. bridge@8, retire@2, glReplay@2 with --gl-replay auto), scored against its pre-registered red set",
+    )
+    parser.add_argument(
+        "--core-variant", choices=VARIANTS, default=None,
+        help="Red arm: one continuity-on arm with this core variant injected in place of the core "
+        "(scripts/continuity_core_variants.py), scored against its pre-registered red set",
+    )
     args = parser.parse_args(argv)
+    red_arm = args.strip is not None or args.core_variant is not None
+    if red_arm and (
+        (args.strip is not None and args.core_variant is not None) or args.gl_force_fail is not None
+        or args.only_pass is not None or args.force_wrap is not None or args.rescore is not None
+    ):
+        parser.error("--strip / --core-variant run one red arm on its own (one of them; no --pass, "
+                     "--gl-force-fail, --force-wrap or --rescore)")
     if args.gl_force_fail is not None and (args.gl_replay != "auto" or args.only_pass is not None):
         parser.error("--gl-force-fail requires --gl-replay auto and the full run")
     if args.force_wrap is not None and (args.gl_force_fail is not None or args.only_pass is not None or args.rescore):
@@ -697,7 +784,7 @@ def retire_fact(
         "movieKey": movie_key,
         "atScene": scene,
         "boundaryKey": boundary_key,
-        "verdictKey": REFUSAL_VERDICT_KEY[boundary_key],
+        "verdictKey": positive_key(boundary_key, "refused"),
         "playerIndex": player_index,
         "originalOrdinal": player_index + 1,
         "assetKeys": asset_keys,
@@ -718,7 +805,7 @@ def armed_fact(
     entry = entries[0]
     scene, movie_key = entry.get("atScene"), entry.get("movieKey")
     boundary_key = boundary_keys.get(scene)
-    if boundary_key not in ARMED_VERDICT_KEY:
+    if not is_carry_key(boundary_key):
         raise SystemExit(f"glReplay boundary at scene {scene!r} is not an armable boundary under test")
     asset_keys = runtime_asset_keys(runtime, movie_key)
     if not asset_keys:
@@ -758,7 +845,7 @@ def armed_fact(
         "movieKey": movie_key,
         "atScene": scene,
         "boundaryKey": boundary_key,
-        "verdictKey": ARMED_VERDICT_KEY[boundary_key],
+        "verdictKey": positive_key(boundary_key, "armed"),
         "playerIndex": player_index,
         "originalOrdinal": player_index + 1,
         "assetKeys": asset_keys,
@@ -820,56 +907,198 @@ def visible_expectations(plan: ContinuityPlan, runtime: dict[str, Any]) -> dict[
     }
 
 
-def ground_truth_facts(plan: ContinuityPlan, *, armed: bool = False) -> dict[str, Any]:
-    """Independent, offline ground truth (never injected into the host): the
-    bridging asset, the scene onset of each of the three boundaries under test, and
-    the authored rects the tracked decoder must be on-screen at either side of each
-    boundary (reviewer finding #1: "same id existed sometime before/after" is not
-    enough -- it must be at the RIGHT rect, not merely present somewhere)."""
-    bridge = None
-    pin = None
+def instance_label(plan: ContinuityPlan, player: int, asset: str, rect: Any) -> str:
+    """`asset#index`: the 1-based `slide_instances` index of the one authored instance at
+    `rect` (the convention `instanceId` already uses); anything else fails closed."""
+    rects = (plan.slide_instances.get(player) or {}).get(asset) or []
+    wanted = _authored_rect(rect)
+    hits = [
+        index for index, candidate in enumerate(rects, start=1)
+        if rect_matches(_authored_rect(candidate), wanted, INSTANCE_MATCH_TOLERANCE_PX)
+    ]
+    if len(hits) != 1:
+        raise SystemExit(f"{asset!r} at {wanted} matches {len(hits)} authored instances on player index {player}")
+    return f"{asset}#{hits[0]}"
+
+
+def verdict_specs(plan: ContinuityPlan) -> list[dict[str, Any]]:
+    """One verdict per (boundary, movie instance, kind), generated from
+    `plan.boundaries[].movies[]` alone, so the scorer never depends on the runtime plan's
+    schema. Kinds: `carry` (pin or bridge; True when carried, False when refused, ungated `None`
+    when G2 arms it), `restart`, `retire` (the positive half of a refused carry) and `armed` (a
+    G2-armed refusal); any other action is kept as an `unhandled` verdict that always scores
+    INCONCLUSIVE. The id is `b{from}to{to}:{asset}#{srcIndex}->{asset}#{dstIndex}:{kind}`
+    (player indices; `slide_instances` 1-based indices). A boundary with one movie also gets
+    P2's legacy name (`continue1to2`, `restart2to3`, `refused1to2`, `armed1to2`) as an alias."""
+    specs: list[dict[str, Any]] = []
+    ordered = sorted(plan.scene_index_by_player)
+    for boundary in plan.boundaries:
+        source, destination = boundary.from_player_index, boundary.to_player_index
+        if destination is None:
+            continue
+        scene = plan.scene_index_by_player.get(destination)
+        if scene is None:
+            raise SystemExit(f"boundary {source}->{destination} has no scene index")
+        later = [plan.scene_index_by_player[player] for player in ordered if player > destination]
+        suffix = f"{source + 1}to{destination + 1}" if len(boundary.movies) == 1 else None
+        for movie in boundary.movies:
+            if movie.src_rect is None or movie.dst_rect is None:
+                raise SystemExit(f"{movie.action} of {movie.asset!r} at scene {scene} is missing a rect")
+            src = instance_label(plan, source, movie.asset, movie.src_rect)
+            dst = instance_label(plan, destination, movie.asset, movie.dst_rect)
+            asset_keys = [movie.asset.lower()]
+
+            def add(kind: str, legacy: str | None, expect: bool | None, **detail: Any) -> None:
+                spec_id = f"b{source}to{destination}:{src}->{dst}:{kind}"
+                if any(spec["id"] == spec_id for spec in specs):
+                    raise SystemExit(f"verdict {spec_id} is not unique in the plan")
+                specs.append({
+                    "id": spec_id, "alias": f"{legacy}{suffix}" if suffix and legacy else None, "kind": kind,
+                    "expect": expect, "action": movie.action, "asset": movie.asset, "assetKeys": asset_keys,
+                    "srcInstance": src, "dstInstance": dst,
+                    "fromPlayer": source, "toPlayer": destination, "atScene": scene, **detail,
+                })
+
+            if movie.action in ("pin", "bridge"):
+                if movie.action == "pin":
+                    rect = movie.dst_rect
+                    src_rect, dst_rect, transition = rect, rect, None
+                else:
+                    src_rect, dst_rect, transition = movie.src_rect, movie.dst_rect, scene - 1
+                armed = movie.refusal is not None and movie.gl_replay is not None
+                add(
+                    "carry", "continue", None if armed else movie.refusal is None,
+                    srcRect=src_rect.as_dict(), dstRect=dst_rect.as_dict(), transitionScene=transition,
+                )
+                if armed:
+                    add("armed", "armed", True)
+                elif movie.refusal is not None:
+                    add(
+                        "retire", "refused", True, originalOrdinal=destination + 1, dstRect=movie.dst_rect.as_dict(),
+                        zoneUntilScene=later[0] if later else None,
+                        rects=[
+                            _authored_rect(rect)
+                            for asset, instances in (plan.slide_instances.get(destination) or {}).items()
+                            if matches_asset_keys(asset, asset_keys)
+                            for rect in instances
+                        ],
+                    )
+            elif movie.action == "restart":
+                add(
+                    "restart", "restart", True, srcRect=movie.src_rect.as_dict(), dstRect=movie.dst_rect.as_dict(),
+                    sourceScene=plan.scene_index_by_player.get(source),
+                    settleUntilScene=later[0] if later else None,
+                )
+            else:
+                add("unhandled", None, True)
+    covered = {(spec["fromPlayer"], spec["srcInstance"]) for spec in specs}
+    expected = {
+        (boundary.from_player_index, instance_label(plan, boundary.from_player_index, movie.asset, movie.src_rect))
+        for boundary in plan.boundaries if boundary.to_player_index is not None for movie in boundary.movies
+    }
+    if covered != expected:
+        raise SystemExit(f"verdicts do not cover every plan movie: missing {sorted(expected - covered)}")
+    return specs
+
+
+def spec_key(spec: dict[str, Any]) -> str:
+    return spec["alias"] or spec["id"]
+
+
+def is_carry_key(key: Any) -> bool:
+    return isinstance(key, str) and (key.startswith("continue") or key.endswith(":carry"))
+
+
+def positive_key(boundary_key: str, prefix: str) -> str:
+    """The positive verdict named after a carry key: `continue1to2` -> `refused1to2` /
+    `armed1to2`; `b0to1:a.mov:carry` -> `b0to1:a.mov:retire` / `...:armed`."""
+    if prefix == "refused" and boundary_key in REFUSAL_VERDICT_KEY:
+        return REFUSAL_VERDICT_KEY[boundary_key]
+    if boundary_key.endswith(":carry"):
+        return boundary_key[: -len("carry")] + ("retire" if prefix == "refused" else prefix)
+    return prefix + re.sub(r"^(continue|restart)", "", boundary_key)
+
+
+def p2_shape_facts(plan: ContinuityPlan) -> dict[str, Any] | None:
+    """P2's legacy slot facts (one pin, one bridge, >= 4 slides), or None for any other deck."""
+    bridge = pin = None
     for boundary in plan.boundaries:
         for movie in boundary.movies:
             if movie.action == "bridge":
-                bridge = (boundary, movie)
+                bridge = movie
             elif movie.action == "pin" and pin is None:
-                pin = (boundary, movie)
-    if bridge is None:
-        raise SystemExit("fixture has no bridge boundary (expected the 3->4 moving Magic Move)")
-    if pin is None:
-        raise SystemExit("fixture has no pin boundary (expected the 1->2 static Magic Move)")
-    _, bridge_movie = bridge
-    _, pin_movie = pin
+                pin = movie
     ordered_players = sorted(plan.scene_index_by_player)
-    if len(ordered_players) < 4:
-        raise SystemExit("fixture must have at least 4 slides")
-    pin_rect = (pin_movie.dst_rect or pin_movie.src_rect)
-    if pin_rect is None or bridge_movie.src_rect is None or bridge_movie.dst_rect is None:
+    if bridge is None or pin is None or len(ordered_players) < 4:
+        return None
+    pin_rect = pin.dst_rect or pin.src_rect
+    if pin_rect is None or bridge.src_rect is None or bridge.dst_rect is None:
         raise SystemExit("fixture's continuity plan is missing a required rect")
-    facts = {
-        "asset": bridge_movie.asset,
+    return {
+        "asset": bridge.asset,
         "onset1to2": plan.scene_index_by_player[ordered_players[1]],
         "boundaryPlayerIndex": ordered_players[1],
         "restartScene": plan.scene_index_by_player[ordered_players[2]],
         "bridgeScene": plan.scene_index_by_player[ordered_players[3]],
         "pinRect": pin_rect.as_dict(),
-        "bridgeSrcRect": bridge_movie.src_rect.as_dict(),
-        "destRect": bridge_movie.dst_rect.as_dict(),
-        "canvas": dict(plan.canvas),
+        "bridgeSrcRect": bridge.src_rect.as_dict(),
+        "destRect": bridge.dst_rect.as_dict(),
     }
+
+
+def bind_positive_fact(fact: dict[str, Any] | None, specs: list[dict[str, Any]], kind: str) -> None:
+    """Key a runtime-derived retire/armed fact by the full id of the one plan verdict it proves
+    (boundary + src/dst instance; an armed fact by its `instanceId`), and give that verdict the
+    runtime movie key its core notes carry; fails closed unless exactly one verdict matches."""
+    if fact is None:
+        return
+    matches = [
+        spec for spec in specs
+        if spec["kind"] == kind and spec["atScene"] == fact["atScene"] and matches_asset_keys(spec["asset"], fact["assetKeys"])
+        and (kind != "armed" or str(spec["dstInstance"]).lower() == str(fact.get("instanceId")).lower())
+    ]
+    if len(matches) != 1:
+        raise SystemExit(f"the runtime's {kind} at scene {fact['atScene']} matches {len(matches)} plan verdicts")
+    spec = matches[0]
+    carry = next(s for s in specs if s["kind"] == "carry" and s["id"].rsplit(":", 1)[0] == spec["id"].rsplit(":", 1)[0])
+    spec["movieKey"] = fact["movieKey"]
+    fact.update(verdictId=spec["id"], verdictKey=spec_key(spec), boundaryKey=spec_key(carry))
+
+
+def bind_dom_ids(facts: dict[str, Any], nodes: list[dict[str, Any]]) -> None:
+    """Give every retire verdict (and the retire fact it proves) the DOM id the player gives its
+    destination instance (F1: `objectID + "-video"`), from the export's movie nodes."""
+    for spec in facts.get("verdicts") or []:
+        if spec["kind"] == "retire":
+            spec["dstDomId"] = source_instance(nodes, spec["toPlayer"], spec["asset"], spec["dstRect"])["domId"]
+            retire = facts.get("retire")
+            if isinstance(retire, dict) and retire.get("verdictId") == spec["id"]:
+                retire["dstDomId"] = spec["dstDomId"]
+
+
+def ground_truth_facts(plan: ContinuityPlan, *, armed: bool = False) -> dict[str, Any]:
+    """Independent, offline ground truth (never injected into the host): the plan-generated
+    `verdicts` (see `verdict_specs`), the retire and armed facts their positive halves need,
+    the runtime plan's signature, and -- for a pinned P2 plan only (`P2_PLAN_SHA256`) -- P2's
+    legacy slot facts. The `["armed"]` contract is unchanged."""
+    specs = verdict_specs(plan)
     runtime = runtime_of(plan)
+    sha = plan_signature(runtime)
+    legacy = p2_shape_facts(plan) if sha in P2_PLAN_SHA256 else None
+    facts: dict[str, Any] = {**(legacy or {}), "canvas": dict(plan.canvas), "verdicts": specs, "planSha256": sha}
     boundary_keys = {
-        facts["onset1to2"]: "continue1to2",
-        facts["restartScene"]: "restart2to3",
-        facts["bridgeScene"]: "continue3to4",
+        spec["atScene"]: spec_key(spec)
+        for kind in ("restart", "carry") for spec in specs if spec["kind"] == kind
     }
     retire = retire_fact(plan, runtime, boundary_keys)
+    bind_positive_fact(retire, specs, "retire")
     facts["retire"] = retire
     facts["refusedBoundaries"] = [retire["boundaryKey"]] if retire else []
     facts["refusals"] = [dict(item) for item in getattr(plan, "refusals", ()) if isinstance(item, dict)]
     facts["rectExpectations"] = visible_expectations(plan, runtime)
     if armed:
         facts["armed"] = armed_fact(plan, runtime, boundary_keys)
+        bind_positive_fact(facts["armed"], specs, "armed")
         facts["armedBoundaries"] = [facts["armed"]["boundaryKey"]]
     return facts
 
@@ -908,27 +1137,44 @@ def check_vgl_expectations(
 
 
 @contextmanager
-def bridge_disabled() -> Iterator[None]:
-    """Arm C only: strip the bridge boundary from every derived runtime plan inside
-    this probe PROCESS -- a monkeypatch of `ContinuityPlan.to_runtime`, never a
-    product code path. The pin (1->2) and restart (2->3) behaviour are untouched;
-    with no bridge boundary the runtime's own `slide4MinHash()` is null, so the
-    3->4 magic move falls through to the export's native (broken) restart."""
-    original = live_continuity_module.ContinuityPlan.to_runtime
+def stripped_runtime(action: str, at_scene: int | None = None) -> Iterator[None]:
+    """Red arm `--strip ACTION[@atScene]`: drop the matching entries (`strip_entries`) from the
+    runtime plan the host injects, inside this probe PROCESS only -- a monkeypatch of
+    `live_host._continuity_plan_script`, the one seam every derivation path reaches (a
+    `to_runtime` patch cannot strip `glReplay`: the host would re-derive the flag-off plan and
+    inject its `retire`), never a product code path."""
+    original = live_host_module._continuity_plan_script
 
-    def patched(self: ContinuityPlan) -> dict[str, Any] | Unsupported:
-        runtime = original(self)
-        if isinstance(runtime, Unsupported):
-            return runtime
-        runtime = dict(runtime)
-        runtime["boundaries"] = [b for b in runtime.get("boundaries", []) if b.get("action") != "bridge"]
-        return runtime
+    def patched(plan: dict[str, Any], canvas: dict[str, int]) -> str:
+        return original(strip_entries(plan, action, at_scene), canvas)
 
-    live_continuity_module.ContinuityPlan.to_runtime = patched
+    live_host_module._continuity_plan_script = patched
     try:
         yield
     finally:
-        live_continuity_module.ContinuityPlan.to_runtime = original
+        live_host_module._continuity_plan_script = original
+
+
+def bridge_disabled() -> Any:
+    """Arm C: `--strip bridge`. With no bridge entry the runtime's own `slide4MinHash()` is
+    null, so the 3->4 magic move falls through to the export's native (broken) restart; the
+    pin (1->2) and restart (2->3) behaviour are untouched."""
+    return stripped_runtime("bridge")
+
+
+@contextmanager
+def injected_core_variant(name: str) -> Iterator[str]:
+    """Red arm `--core-variant NAME`: the host injects `variant_core(name)` in place of the core
+    and reports that variant's sha (probe process only; yields the sha)."""
+    core = variant_core(name)
+    sha = hashlib.sha256(core.encode()).hexdigest()
+    original_core, original_sha = live_host_module.PRESERVE_CORE_JS, live_host_module.js_sha256
+    live_host_module.PRESERVE_CORE_JS = core
+    live_host_module.js_sha256 = lambda: sha
+    try:
+        yield sha
+    finally:
+        live_host_module.PRESERVE_CORE_JS, live_host_module.js_sha256 = original_core, original_sha
 
 
 def wait_for_decode(player: LiveOutputHost, timeout_s: float = VIDEO_DECODE_TIMEOUT_S) -> bool:
@@ -971,19 +1217,36 @@ def advance_until_original_slide(
         raise RuntimeError(f"did not reach slide {target}; stopped at {observed.original_slide}")
 
 
+def carry_destination_players(facts: dict[str, Any]) -> frozenset[int]:
+    """Player indices whose arrival crosses a carry boundary of the plan."""
+    return frozenset(spec["toPlayer"] for spec in facts.get("verdicts") or [] if spec["kind"] == "carry")
+
+
 def drive_and_sample(
-    player: LiveOutputHost, *, observer: Callable[[int], None] | None = None
+    player: LiveOutputHost, *, observer: Callable[[int], None] | None = None,
+    carry_into: Collection[int] = (),
 ) -> list[dict[str, Any]]:
-    """Slide 2 is the 1->2 magic move, 3 the dissolve (which may straddle slide-2
-    builds), 4 the 3->4 magic move. `observer` is called once on each settled slide
-    -- the only hook the refusal evidence needs, and never a screenshot."""
+    """Advance through every original slide in order (on P2: 2 is the 1->2 magic move, 3 the
+    dissolve, which may straddle slide-2 builds, 4 the 3->4 magic move). `observer` is called
+    once on each slide, slide 1 included -- the only hook the refusal evidence needs, and never
+    a screenshot. Before the press into a `carry_into` player index (other than the second
+    slide, which follows slide 1's own `CLICK_DELAY_S`), the source slide is let settle and
+    held `CLICK_DELAY_S` (1.5 s, P2's fast-profile `clickDelayS` before its 3->4 press), so
+    the carry's settled-source phase is always sampled."""
     transport = player._require_transport()
     transport.evaluate(SAMPLER_JS)
     transport.evaluate(ENSURE_PLAYING_JS)
     wait_for_decode(player)
     time.sleep(CLICK_DELAY_S)
-    for ordinal in (2, 3, 4):
-        advance_until_original_slide(player, ordinal)
+    shown = sorted((s for s in player.slides if not s.get("skipped")), key=lambda s: s["originalOrdinal"])
+    ordinals = [slide["originalOrdinal"] for slide in shown]
+    for index, slide in enumerate(shown):
+        ordinal = slide["originalOrdinal"]
+        if index >= 2 and slide.get("playerIndex") in carry_into:
+            wait_until_settled(player)
+            time.sleep(CLICK_DELAY_S)
+        if ordinal != ordinals[0]:
+            advance_until_original_slide(player, ordinal)
         if observer is not None:
             observer(ordinal)
     time.sleep(POST_ADVANCE_SETTLE_S)
@@ -1588,7 +1851,8 @@ def refusal_observer(
         if ordinal != retire["originalOrdinal"]:
             return
         wait_until_settled(player)
-        out[retire["verdictKey"]] = refusal_evidence(player._require_transport())
+        transport = player._require_transport()
+        out[retire["verdictKey"]] = {**refusal_evidence(transport), "coreEvents": transport.evaluate(CORE_EVENTS_JS)}
 
     return observe
 
@@ -1868,6 +2132,426 @@ def score_positive_halves(
     return scored
 
 
+def _sample_problem(row: Any) -> str | None:
+    if not isinstance(row, dict):
+        return "not an object"
+    if _finite_number(row.get("t")) is None:
+        return "t is not a finite number"
+    if row.get("scene") is not None and _finite_number(row.get("scene")) is None:
+        return "scene is neither null nor a finite number"
+    if "playerState" not in row or not (row["playerState"] is None or isinstance(row["playerState"], str)):
+        return "playerState is missing or not a string"
+    if "busy" not in row or not (row["busy"] is None or isinstance(row["busy"], bool)):
+        return "busy is missing or not a boolean"
+    if "stageMapValid" in row:
+        if not isinstance(row["stageMapValid"], bool):
+            return "stageMapValid is not a boolean"
+    elif "stageMap" not in row or not (row["stageMap"] is None or isinstance(row["stageMap"], dict)):
+        return "stageMap is missing or not an object"
+    if not isinstance(row.get("videos"), list):
+        return "videos is not a list"
+    for video in row["videos"]:
+        if not isinstance(video, dict):
+            return "a video row is not an object"
+        video_id = video.get("id")
+        if video_id is None or isinstance(video_id, bool) or not isinstance(video_id, (int, str)):
+            return "a video id is unusable"
+        if not isinstance(video.get("src"), str):
+            return "a video src is not a string"
+        if _finite_number(video.get("currentTime")) is None:
+            return "a video currentTime is not a finite number"
+        rect = video.get("rect")
+        if rect is not None and not (isinstance(rect, dict) and all(_finite_number(rect.get(k)) is not None for k in ("x", "y", "w", "h"))):
+            return "a video rect is unusable"
+        if not isinstance(video.get("isConnected"), bool):
+            return "a video isConnected is not a boolean"
+        if _finite_number(video.get("readyState")) is None:
+            return "a video readyState is not a finite number"
+        if "footprintOwner" not in video or not (video["footprintOwner"] is None or isinstance(video["footprintOwner"], dict)):
+            return "a video footprintOwner is missing or not an object"
+        if "stageMapValid" in video and not isinstance(video["stageMapValid"], bool):
+            return "a video stageMapValid is not a boolean"
+    return None
+
+
+def sample_schema_errors(samples: Any, limit: int = 5) -> list[str]:
+    """The retained sampler rows' schema, checked before any tracking or windowing."""
+    if not isinstance(samples, list):
+        return ["samples is not a list"]
+    errors: list[str] = []
+    for index, row in enumerate(samples):
+        problem = _sample_problem(row)
+        if problem:
+            errors.append(f"sample {index}: {problem}")
+            if len(errors) >= limit:
+                break
+    return errors
+
+
+def _inconclusive(reason: str, **detail: Any) -> dict[str, Any]:
+    return {"verdict": None, "reason": f"inconclusive: {reason}", **detail}
+
+
+def _carry_integrity_gap(samples: list[dict[str, Any]], scored: dict[str, Any], spec: dict[str, Any]) -> str | None:
+    """Why a False carry is not a fully observed contrary behaviour, or None when it is."""
+    if scored.get("reason") == "boundary crossing not observed in samples":
+        return "boundary crossing not observed in samples"
+    if scored.get("stageMapInvalid"):
+        return f"{len(scored['stageMapInvalid'])} tracked row(s) have no trustworthy stage map"
+    unowned = [m for m in scored.get("ownerMismatches") or [] if not isinstance(m.get("footprintOwner"), dict)]
+    if unowned:
+        return f"{len(unowned)} row(s) have no readable footprint owner"
+    transition, window = spec["transitionScene"], scored.get("window") or {}
+    errors = (scored.get("motion") or {}).get("errors") or []
+    in_window = [r for r in samples if window.get("start", -math.inf) <= r["t"] <= window.get("end", math.inf)]
+    if "moving transition not observed" in errors and not any(is_move_sample(r, transition) for r in in_window):
+        return "the sampler recorded no moving-transition sample"
+    if "settled source not observed" in errors and not any(
+        r.get("scene") is not None and r["scene"] < spec["atScene"] and r.get("busy") is False
+        and not is_move_complete(r, transition) for r in in_window
+    ):
+        return "the sampler recorded no settled source sample"
+    return None
+
+
+def score_carry(
+    samples: Any, spec: dict[str, Any], runtime_installed: bool, *, loop_period_s: float | None = None,
+) -> dict[str, Any]:
+    """`score_continuity` on schema-checked samples; a False that rests on missing evidence
+    (no crossing, no stage map, a sampler gap) is INCONCLUSIVE, never a red."""
+    errors = sample_schema_errors(samples)
+    if errors:
+        return _inconclusive("sample schema is invalid", schemaErrors=errors)
+    scored = score_continuity(
+        samples, spec["asset"].lower(), spec["atScene"], spec["srcRect"], spec["dstRect"], runtime_installed,
+        transition_scene=spec["transitionScene"], loop_period_s=loop_period_s,
+    )
+    if scored.get("verdict") is not False:
+        return scored
+    gap = _carry_integrity_gap(samples, scored, spec)
+    return {**scored, "verdict": None, "integrity": gap} if gap else scored
+
+
+def score_restart_strict(
+    samples: Any, spec: dict[str, Any], *, max_start_s: float = RESTART_MAX_START_S,
+    rect_tolerance: float = RECT_TOLERANCE_PX, pad_s: float = WINDOW_PAD_S,
+) -> dict[str, Any]:
+    """A restart inside a validated boundary window: a decoder never seen before the boundary
+    starts near zero at the destination instance's rect, and every decoder seen at the source
+    instance's rect anywhere on the source slide (`sourceScene` .. the boundary; not bounded by
+    the pad window, which a transition scene longer than `WINDOW_PAD_S` with no `<video>` would
+    swallow) is absent or disconnected inside the window after it."""
+    errors = sample_schema_errors(samples)
+    if errors:
+        return _inconclusive("sample schema is invalid", schemaErrors=errors)
+    scene, until = spec["atScene"], spec.get("settleUntilScene")
+    tracks = track_by_id(samples, spec["asset"].lower())
+    if not decoded_anywhere(tracks):
+        return _inconclusive("movie never decoded")
+    window = find_boundary_window(samples, scene, pad_s=pad_s)
+    if window is None:
+        return _inconclusive("boundary crossing not observed in samples")
+
+    def windowed(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [r for r in rows if window["start"] <= r["t"] <= window["end"] and r.get("scene") is not None]
+
+    def settled(row: dict[str, Any]) -> bool:
+        """On the destination slide (`until` = the next slide's first scene, exclusive), never a
+        moving row, and never the slide's own outgoing transition scene when it has one."""
+        if row["scene"] < scene or (until is not None and row["scene"] >= until):
+            return False
+        if until is not None and until - 1 > scene and row["scene"] == until - 1:
+            return False
+        return not (row.get("playerState") == "Playing" and row.get("busy") is True)
+
+    if not any(settled(r) for r in windowed(samples)):
+        return _inconclusive("no sample on the settled destination scene", window=window)
+    first = spec.get("sourceScene")
+    source_ids = sorted(
+        i for i, rows in tracks.items()
+        if any(
+            r.get("scene") is not None and (first is None or r["scene"] >= first) and r["scene"] < scene
+            and rect_matches(r.get("rect"), spec["srcRect"], rect_tolerance)
+            for r in rows
+        )
+    )
+    if not source_ids:
+        return _inconclusive("no decoder at the source instance before the boundary", window=window)
+    leaked = [
+        {"id": i, "t": r["t"], "scene": r["scene"]}
+        for i in source_ids for r in windowed(tracks[i]) if r["scene"] >= scene and r.get("isConnected")
+    ]
+    fresh = {
+        i: sorted((r for r in windowed(rows) if settled(r) and r.get("isConnected")), key=lambda r: r["t"])
+        for i, rows in tracks.items()
+        if not any(r.get("scene") is not None and r["scene"] < scene for r in rows)
+    }
+    bound = {i: rows for i, rows in fresh.items() if rows and all(rect_matches(r.get("rect"), spec["dstRect"], rect_tolerance) for r in rows)}
+    if not bound:
+        return {
+            "verdict": False, "reason": "no fresh decoder at the destination instance", "freshIds": sorted(fresh),
+            "sourceIds": source_ids, "leaked": leaked, "window": window,
+        }
+    element_id = min(bound, key=lambda i: bound[i][0]["t"])
+    start_time = bound[element_id][0]["currentTime"]
+    reasons = []
+    if start_time >= max_start_s:
+        reasons.append(f"fresh decoder starts at {start_time:.3f}s")
+    if leaked:
+        reasons.append(f"{len(leaked)} source-decoder row(s) still connected after the boundary")
+    return {
+        "verdict": not reasons, "reason": "; ".join(reasons) or None, "elementId": element_id,
+        "startTimeS": start_time, "freshIds": sorted(fresh), "sourceIds": source_ids, "leaked": leaked, "window": window,
+    }
+
+
+def _event_scene_of(event: dict[str, Any]) -> int | None:
+    detail = event.get("detail") if isinstance(event.get("detail"), dict) else {}
+    for key in ("scene", "atScene", "hashNum"):
+        value = _finite_number(detail.get(key))
+        if value is not None:
+            return int(value)
+    return hash_number(detail.get("sceneHash"))
+
+
+def score_raw_handback(samples: Any, spec: dict[str, Any]) -> dict[str, Any]:
+    """Raw-player hand-back from the retained sampler rows: in the retire zone `[atScene,
+    zoneUntilScene)` the player's own element for the destination instance (`dstDomId`, F1)
+    is connected at `dstRect` on a settled row, was never seen before `atScene`, and is never
+    preserved, remounted or facaded. Never DOM-present in the zone (a WebGL poster, or rows
+    from a sampler without `domId`) is INCONCLUSIVE, never False."""
+    dom_id, lo, hi = spec.get("dstDomId"), spec["atScene"], spec.get("zoneUntilScene")
+    if not dom_id:
+        return _inconclusive("the retire verdict names no destination DOM id")
+    errors = sample_schema_errors(samples)
+    if errors:
+        return _inconclusive("sample schema is invalid", schemaErrors=errors)
+    if not any("domId" in v for row in samples for v in row["videos"]):
+        return _inconclusive("the samples carry no DOM ids")
+    rows = [(row, v) for row in samples for v in row["videos"] if v.get("domId") == dom_id]
+    if any(any(not isinstance(v.get(flag), bool) for flag in ("preserved", "remounted", "facade")) for _, v in rows):
+        return _inconclusive(f"{dom_id} rows carry unreadable preserve/remount/facade flags")
+    before = [row["t"] for row, _ in rows if row.get("scene") is not None and row["scene"] < lo]
+    zone = [
+        (row, v) for row, v in rows
+        if row.get("scene") is not None and row["scene"] >= lo and (hi is None or row["scene"] < hi)
+    ]
+    flagged = [row["t"] for row, v in zone if v["preserved"] or v["remounted"] or v["facade"]]
+    settled = [
+        (row, v) for row, v in zone
+        if row.get("busy") is False and row.get("playerState") != "Playing"
+    ]
+    handed = [row["t"] for row, v in settled if v["isConnected"] and rect_matches(v.get("rect"), spec["dstRect"])]
+    detail = {"domId": dom_id, "rowsInZone": len(zone), "settledAtRect": len(handed), "seenBefore": before[:5], "flagged": flagged[:5]}
+    if before or flagged:
+        return {"verdict": False, "reason": f"{dom_id} was carried (seen before the boundary or preserved/remounted/facaded)", **detail}
+    if handed:
+        return {"verdict": True, "reason": None, **detail}
+    if not settled:
+        return _inconclusive(f"{dom_id} is never DOM-present on a settled row of the retire zone", **detail)
+    return {"verdict": False, "reason": f"{dom_id} is present but never connected at its authored rect", **detail}
+
+
+def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, samples: Any = None) -> dict[str, Any]:
+    """The positive half of a refused carry: the raw player's own element for the destination
+    instance (`score_raw_handback`, from the retained samples), `score_refusal`'s settled DOM/pool
+    checks, and -- when the runtime is installed -- the core's contract (module docstring,
+    "retire"): at least one refusal note for the movie in the zone `[atScene - 1, the next
+    slide's transition scene)`, `preserve-refused` (key, via, scene) from a declining hook or
+    `retire-boundary` (key, elIds, atScene) from the keep-warm sweep of decoders pooled before
+    the zone, and no carry note (`CARRY_EVENT_KINDS`) for its key or elements in that zone.
+    Unreadable evidence is INCONCLUSIVE."""
+    if not isinstance(sample, dict):
+        return _inconclusive("no refusal evidence was sampled on the destination slide")
+    if not stage_map_valid(sample.get("stageMap")):
+        return _inconclusive("stage map is missing or untrustworthy at the refusal sample")
+    try:
+        painting_videos(sample.get("painting"), sample["stageMap"])
+    except VisiblePassError as exc:
+        return _inconclusive(str(exc))
+    handback = score_raw_handback(samples, spec)
+    if handback["verdict"] is False:
+        return {**score_refusal(sample, spec, runtime_installed), "verdict": False, "handback": handback,
+                "reason": handback["reason"]}
+    if handback["verdict"] is None:
+        return _inconclusive(f"hand-back: {handback['reason']}", handback=handback)
+    if not runtime_installed:
+        return {**score_refusal(sample, spec, runtime_installed), "handback": handback}
+    events = sample.get("coreEvents")
+    if not isinstance(sample.get("poolSnapshot"), list):
+        return _inconclusive(f"preserve snapshot is unreadable: {sample.get('poolSnapshot')!r}")
+    if not isinstance(events, list) or not all(isinstance(e, dict) for e in events):
+        return _inconclusive("core events are unreadable")
+    movie_key, scene = spec.get("movieKey"), spec["atScene"]
+    if movie_key is None:
+        return _inconclusive("the retire verdict is bound to no runtime movie key")
+    zone_end = spec["zoneUntilScene"] - 1 if spec.get("zoneUntilScene") is not None else math.inf
+
+    def in_zone(value: Any) -> bool:
+        return value is not None and scene - 1 <= value < zone_end
+
+    def keyed(detail: dict[str, Any]) -> bool:
+        key = detail.get("key")
+        return key == movie_key or (isinstance(key, str) and matches_asset_keys(key, spec["assetKeys"]))
+
+    details = [(e, e.get("detail") if isinstance(e.get("detail"), dict) else {}) for e in events]
+    el_ids = {
+        value for _, d in details if keyed(d)
+        for value in [d.get("elId"), d.get("newElId"), *(d.get("elIds") or [])] if value is not None
+    }
+    notes = [
+        {"kind": e.get("kind"), **d} for e, d in details
+        if d.get("key") == movie_key and (
+            (e.get("kind") == "retire-boundary" and d.get("atScene") == scene and isinstance(d.get("elIds"), list))
+            or (
+                e.get("kind") == "preserve-refused" and isinstance(d.get("via"), str) and d["via"]
+                and in_zone(_finite_number(d.get("scene")))
+            )
+        )
+    ]
+    carries = [
+        e for e, d in details
+        if e.get("kind") in CARRY_EVENT_KINDS
+        and (keyed(d) or any(d.get(f) in el_ids for f in ("elId", "newElId") if d.get(f) is not None))
+        and (_event_scene_of(e) is None or in_zone(_event_scene_of(e)))
+    ]
+    scored = score_refusal(sample, spec, runtime_installed)
+    reasons = [scored["reason"]] if scored.get("reason") else []
+    if not notes:
+        reasons.append(f"no preserve-refused/retire-boundary note for {movie_key} in scenes [{scene - 1}, {zone_end})")
+    if carries:
+        reasons.append(f"{len(carries)} carry note(s) for {movie_key} in the retire zone")
+    return {
+        **scored, "verdict": not reasons, "reason": "; ".join(reasons) or None,
+        "retireNotes": notes, "carryNotes": carries, "handback": handback,
+    }
+
+
+def armed_read_problem(read: Any) -> str | None:
+    """Why one armed read lacks a raw field `score_armed` consumes, or None. `api: null` is a
+    readable observation (no G2 module published), not a malformed read."""
+    if not isinstance(read, dict):
+        return "read is not an object"
+    if "stageMap" not in read or not (read["stageMap"] is None or isinstance(read["stageMap"], dict)):
+        return "stageMap is missing or not an object"
+    if not isinstance(read.get("painting"), (list, dict)):
+        return "painting is missing"
+    gl = read.get("glReplay")
+    if not isinstance(gl, dict):
+        return "glReplay is not an object"
+    if _finite_number(gl.get("t")) is None or not isinstance(gl.get("hash"), str):
+        return "glReplay t/hash is unusable"
+    if not isinstance(gl.get("coreEvents"), list) or not all(isinstance(e, dict) for e in gl["coreEvents"]):
+        return "glReplay coreEvents is not a list of objects"
+    if not isinstance(gl.get("pool"), list):
+        return "glReplay pool is not a list"
+    if "api" not in gl:
+        return "glReplay api is missing"
+    api = gl["api"]
+    if api is None:
+        return None
+    if not (isinstance(api, dict) and isinstance(api.get("state"), str) and isinstance(api.get("standDowns"), list)):
+        return "glReplay api state/standDowns is unusable"
+    stats = api.get("stats")
+    if stats is not None and not (
+        isinstance(stats, dict) and all(_finite_number(stats.get(k)) is not None for k in ("iter", "uploads", "glErrors"))
+    ):
+        return "glReplay api stats is unusable"
+    return None
+
+
+def armed_reads_problem(reads: Any) -> str | None:
+    if not isinstance(reads, list) or len(reads) != 2:
+        return "the armed slide was not read twice"
+    return next((f"read {i}: {problem}" for i, read in enumerate(reads) if (problem := armed_read_problem(read))), None)
+
+
+def score_armed_strict(reads: Any, armed: dict[str, Any], continuity: Any, samples: Any) -> dict[str, Any]:
+    """`score_armed` on two schema-valid reads; missing or malformed reads are INCONCLUSIVE."""
+    problem = armed_reads_problem(reads)
+    if problem:
+        return _inconclusive(problem, evidence=reads if isinstance(reads, dict) else None)
+    if not isinstance(continuity, dict):
+        return _inconclusive(f"the host continuity read is unreadable: {continuity!r}")
+    owners = pre_flip_owner_ids(samples if isinstance(samples, list) else [], armed)
+    if not any(owner is not None for owner in owners):
+        return _inconclusive("no pre-flip sample at the armed instance rect resolved an owner")
+    return score_armed(reads, armed, continuity, owner_ids=owners)
+
+
+def score_verdicts(
+    samples: list[dict[str, Any]], evidence: dict[str, Any], facts: dict[str, Any], runtime_installed: bool,
+    continuity: Any, *, loop_period_s: float | None = None,
+) -> dict[str, Any]:
+    """Pure: every plan-generated verdict (`facts["verdicts"]`), keyed by id. False only for a
+    fully observed contrary behaviour; every integrity or missing-evidence path is None."""
+    scored: dict[str, Any] = {}
+    for spec in facts.get("verdicts") or []:
+        kind, scene = spec["kind"], spec["atScene"]
+        if kind == "carry":
+            scored[spec["id"]] = score_carry(samples, spec, runtime_installed, loop_period_s=loop_period_s)
+        elif kind == "restart":
+            scored[spec["id"]] = score_restart_strict(samples, spec)
+        elif kind == "retire":
+            scored[spec["id"]] = score_retire(evidence.get(spec_key(spec)), spec, runtime_installed, samples)
+        elif kind == "armed":
+            armed = facts.get("armed")
+            if not isinstance(armed, dict) or armed.get("verdictId") != spec["id"]:
+                scored[spec["id"]] = _inconclusive(f"no armed fact for {spec['id']}")
+            else:
+                scored[spec["id"]] = score_armed_strict(evidence.get(armed["verdictKey"]), armed, continuity, samples)
+        else:
+            scored[spec["id"]] = _inconclusive(f"no scorer for plan action {spec['action']!r}")
+    enforce_distinct_carriers(scored, facts.get("verdicts") or [])
+    return scored
+
+
+def enforce_distinct_carriers(scored: dict[str, Any], specs: Sequence[dict[str, Any]]) -> None:
+    """One decoder cannot satisfy two carry verdicts at one boundary: every green carry sharing
+    its decoder with another green carry of the same boundary turns red, naming the other."""
+    by_boundary: dict[tuple[Any, Any, Any], list[str]] = {}
+    for spec in specs:
+        value = scored.get(spec["id"])
+        if spec["kind"] == "carry" and isinstance(value, dict) and value.get("verdict") is True:
+            by_boundary.setdefault((spec["fromPlayer"], spec["toPlayer"], value.get("elementId")), []).append(spec["id"])
+    for ids in by_boundary.values():
+        if len(ids) > 1:
+            for spec_id in ids:
+                others = [other for other in ids if other != spec_id]
+                scored[spec_id] = {**scored[spec_id], "verdict": False, "reason": f"its decoder also satisfies {others}"}
+
+
+def with_aliases(scored: dict[str, Any], specs: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """`scored` plus each aliased verdict again under its P2 legacy name."""
+    out = dict(scored)
+    for spec in specs:
+        if spec["alias"] and spec["id"] in scored:
+            out[spec["alias"]] = scored[spec["id"]]
+    return out
+
+
+def verdict_table(entry: Any, specs: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Per verdict id: its alias, the plan's expectation (None = ungated) and what the arm read."""
+    return {
+        spec["id"]: {"alias": spec["alias"], "expect": spec["expect"], "verdict": boundary_verdict(entry, spec["id"])}
+        for spec in specs
+    } if isinstance(entry, dict) else {}
+
+
+def unmet_verdicts(entry: Any, specs: Sequence[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    """(ids whose gated verdict differs from the plan's expectation, ids whose gated verdict is None)."""
+    red: list[str] = []
+    unknown: list[str] = []
+    for spec_id, row in verdict_table(entry, specs).items():
+        if row["expect"] is None:
+            continue
+        if row["verdict"] is None:
+            unknown.append(spec_id)
+        elif row["verdict"] is not row["expect"]:
+            red.append(spec_id)
+    return red, unknown
+
+
 @contextmanager
 def env_override(overrides: dict[str, str | None]) -> Iterator[None]:
     previous = {key: os.environ.get(key) for key in overrides}
@@ -1886,10 +2570,70 @@ def env_override(overrides: dict[str, str | None]) -> Iterator[None]:
                 os.environ[key] = value
 
 
+def census_observer(
+    player: Any, inner: Callable[[int], None] | None, out: dict[str, Any]
+) -> Callable[[int], None]:
+    """`inner`, then one settled DOM read of the painting `<video>`s on every slide (red arms only)."""
+    def observe(ordinal: int) -> None:
+        if inner is not None:
+            inner(ordinal)
+        wait_until_settled(player)
+        transport = player._require_transport()
+        out.setdefault(str(ordinal), []).append(
+            {"stageMap": transport.evaluate(STAGE_MAP_JS), "painting": transport.evaluate(PAINTING_VIDEOS_JS)}
+        )
+
+    return observe
+
+
+def asset_of(src: Any, assets: Sequence[str]) -> str:
+    return next((asset.lower() for asset in sorted(assets) if matches_asset_keys(src, [asset])), "unknown")
+
+
+def score_census(
+    raw: Any, instances: dict[int, dict[str, list[Any]]], expectations: dict[int, dict[str, str]],
+    player_by_ordinal: dict[int, int],
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    """Pure: each settled slide's painting `<video>`s matched one-to-one against its authored
+    instances (`match_painting_videos`, the visible passes' `unexpectedVideos`). Every slide in
+    `player_by_ordinal` needs a list of exactly one readable read. Returns the per-slide records, the red
+    ids as a multiset -- one `stray:slide{n}:{asset}` per unexpected painting video (its `elId`
+    kept in the record), one `duplicate:slide{n}:{label}` per doubly-painted instance -- and
+    the `census:slide{n}` reads that were missing, extra or unreadable."""
+    records: dict[str, Any] = {}
+    red: list[str] = []
+    unknown: list[str] = []
+    assets = sorted({asset for per in instances.values() for asset in per})
+    reads = raw if isinstance(raw, dict) else {}
+    unknown.extend(f"census:slide{key}" for key in sorted(map(str, reads)) if key not in {str(o) for o in player_by_ordinal})
+    for ordinal in sorted(player_by_ordinal):
+        key = str(ordinal)
+        slide_reads = reads.get(key)
+        read = slide_reads[0] if isinstance(slide_reads, list) and len(slide_reads) == 1 else None
+        try:
+            if isinstance(slide_reads, list) and len(slide_reads) > 1:
+                raise VisiblePassError(f"slide {ordinal} was read {len(slide_reads)} times (extra read)")
+            if not isinstance(read, dict):
+                raise VisiblePassError(f"slide {ordinal} has no census read")
+            stage_map = read.get("stageMap")
+            if not stage_map_valid(stage_map):
+                raise VisiblePassError("stage map is missing or untrustworthy at the census read")
+            expected = expected_screen_rects(instances, player_by_ordinal[ordinal], stage_map, expectations)
+            check = match_painting_videos(painting_videos(read.get("painting"), stage_map), expected)
+        except VisiblePassError as exc:
+            records[key] = {"verdict": None, "reason": str(exc)}
+            unknown.append(f"census:slide{ordinal}")
+            continue
+        records[key] = check
+        red.extend(f"stray:slide{ordinal}:{asset_of(video.get('src'), assets)}" for video in check["unexpectedVideos"])
+        red.extend(f"duplicate:slide{ordinal}:{dup['label']}" for dup in check["duplicateVideos"])
+    return records, sorted(red), unknown
+
+
 def run_arm(
     name: str, export_root: Path, slides: list[dict[str, Any]], facts: dict[str, Any],
     viewport: tuple[int, int], expected_stage: dict[str, float], *,
-    gl_replay: str = "off", facts_on: dict[str, Any] | None = None,
+    gl_replay: str = "off", facts_on: dict[str, Any] | None = None, census: bool = False,
 ) -> dict[str, Any]:
     force_viewport(*viewport)
     player = LiveOutputHost(export_root, slides, headless=True, gl_replay=gl_replay)
@@ -1901,7 +2645,11 @@ def run_arm(
         if facts_on is not None:
             result["factsSet"] = "on" if arm_facts is facts_on else "off"
         evidence: dict[str, Any] = {}
-        raw_samples = drive_and_sample(player, observer=boundary_observer(player, arm_facts, evidence))
+        observer = boundary_observer(player, arm_facts, evidence)
+        if census:
+            result["censusRaw"] = {}
+            observer = census_observer(player, observer, result["censusRaw"])
+        raw_samples = drive_and_sample(player, observer=observer, carry_into=carry_destination_players(arm_facts))
         samples, invalid_count = convert_samples_to_authored(raw_samples)
         result["samples"] = samples
         result["sampleCount"] = len(samples)
@@ -1910,8 +2658,12 @@ def run_arm(
         result["stageMap"] = stage_map_summary(samples)
         result["stageFit"] = score_stage_fit(samples, expected_stage)
         runtime_installed = result["continuity"].get("mode") == "qualified"
-        result.update(score_boundaries(samples, arm_facts, runtime_installed))
-        result.update(score_positive_halves(evidence, arm_facts, runtime_installed, result["continuity"], samples))
+        result["evidence"] = evidence
+        result.update(with_aliases(
+            score_verdicts(samples, evidence, arm_facts, runtime_installed, result["continuity"]),
+            arm_facts.get("verdicts") or [],
+        ))
+        result["verdicts"] = verdict_table(result, arm_facts.get("verdicts") or [])
     finally:
         try:
             player.stop()
@@ -2004,7 +2756,10 @@ def run_attach_arm(
                 computed_background = transport.evaluate("getComputedStyle(document.documentElement).backgroundColor")
                 result["transparentBackground"] = {"plan": bool(plan_transparent), "computedBackground": computed_background}
                 evidence: dict[str, Any] = {}
-                raw_samples = drive_and_sample(player, observer=boundary_observer(player, attach_facts, evidence))
+                raw_samples = drive_and_sample(
+                    player, observer=boundary_observer(player, attach_facts, evidence),
+                    carry_into=carry_destination_players(attach_facts),
+                )
                 samples, invalid_count = convert_samples_to_authored(raw_samples)
                 result["samples"] = samples
                 result["sampleCount"] = len(samples)
@@ -2013,8 +2768,12 @@ def run_attach_arm(
                 result["stageMap"] = stage_map_summary(samples)
                 result["stageFit"] = score_stage_fit(samples, expected_stage)
                 runtime_installed = result["continuity"].get("mode") == "qualified"
-                result.update(score_boundaries(samples, attach_facts, runtime_installed))
-                result.update(score_positive_halves(evidence, attach_facts, runtime_installed, result["continuity"], samples))
+                result["evidence"] = evidence
+                result.update(with_aliases(
+                    score_verdicts(samples, evidence, attach_facts, runtime_installed, result["continuity"]),
+                    attach_facts.get("verdicts") or [],
+                ))
+                result["verdicts"] = verdict_table(result, attach_facts.get("verdicts") or [])
             finally:
                 try:
                     player.stop()
@@ -3332,15 +4091,29 @@ def resolve_no_consumption(
     return score_no_build_consumed(player, expected_scene_id, character_rect, stage_map, execute_record=execute_record)
 
 
+def goto_matrix(specs: Sequence[dict[str, Any]], slide_count: int) -> tuple[tuple[int, ...], ...]:
+    """Pass G's cases, derived from the plan: today's P2 cases (`GOTO_MATRIX`) that fit the deck,
+    then, for every carried boundary whose source slide is itself a carry's destination (a
+    mid-chain slide), `(1, source, destination)`: goTo the mid-chain slide, then advance across
+    the next carry. P2 has no mid-chain slide, so its matrix is `GOTO_MATRIX` unchanged."""
+    base = tuple(case for case in GOTO_MATRIX if max(case) <= slide_count)
+    carried = [spec for spec in specs if spec["kind"] == "carry" and spec["expect"] is True]
+    arrivals = {spec["toPlayer"] for spec in carried}
+    mid = [(1, spec["fromPlayer"] + 1, spec["toPlayer"] + 1) for spec in carried if spec["fromPlayer"] in arrivals]
+    return base + tuple(dict.fromkeys(mid))
+
+
 def run_goto_destination(
     player: LiveOutputHost, from_ordinal: int, to_ordinal: int, slides: list[dict[str, Any]],
     instances: dict[int, dict[str, list[Any]]], viewport: tuple[int, int], *,
     expectations: dict[int, dict[str, str]], evidence: Callable[..., dict[str, str]] | None,
     expected_scene_id: str | None, character_rect: dict[str, float] | None,
-    armed: bool, require_no_consumption: bool,
+    armed: bool, require_no_consumption: bool, advance_to: int | None = None,
 ) -> dict[str, Any]:
     """One goTo, driven for real through `LiveOutputHost.execute`, scored with the same
-    `visible_slide_record` the V/Voff passes use -- never a re-derived scorer."""
+    `visible_slide_record` the V/Voff passes use -- never a re-derived scorer. With
+    `advance_to`, the destination is then advanced across its carry and that slide is scored
+    the same way."""
     reasons: list[str] = []
     player.execute("goTo", from_ordinal)
     # `execute("goTo")`'s own returned observation is not settled when the autoplay repair is
@@ -3400,17 +4173,31 @@ def run_goto_destination(
         if no_consumption.get("verdict") is not True:
             reasons.append(f"no-consumption check for destination {to_ordinal}: {no_consumption}")
 
+    advanced = None
+    if advance_to is not None:
+        advance_until_original_slide(player, advance_to)
+        advanced = visible_slide_record(
+            player, next(s for s in slides if s["originalOrdinal"] == advance_to), instances, viewport,
+            scorer=_scorers()[1], evidence=evidence, expectations=expectations, offsets_ms=G_BURST_OFFSETS_MS,
+        )
+        if advanced.get("verdict") is not True:
+            reasons.append(f"advance {to_ordinal}->{advance_to} rects do not meet expectations (status={advanced.get('status')!r})")
+
     verdict = combine_verdicts(
         record.get("verdict"), video_ok, spaced, capture_fresh, source_reached, destination_reached,
         static_control.get("verdict"), telemetry_ok,
         no_consumption.get("verdict") if require_no_consumption else True,
+        advanced.get("verdict") if advanced is not None else True,
     )
-    return {
+    result = {
         "fromOrdinal": from_ordinal, "toOrdinal": to_ordinal, "record": record, "videoElementCount": video_count,
         "sourceReached": source_reached, "destinationReached": destination_reached,
         "staticControl": static_control, "autoPlay": telemetry, "noConsumption": no_consumption,
         "verdict": verdict, "reasons": reasons,
     }
+    if advanced is not None:
+        result.update(advanceTo=advance_to, advanced=advanced)
+    return result
 
 
 def destinations_of(entry: Any) -> list[dict[str, Any]]:
@@ -3426,7 +4213,8 @@ def overall_status_g(result: dict[str, Any]) -> tuple[str, list[str]]:
     plan requires to fail this pass) and a visible output; else fail, or inconclusive on any None."""
     armed_entry, off_entry = result.get("armed") or {}, result.get("nullControl") or {}
     armed, off = destinations_of(armed_entry), destinations_of(off_entry)
-    if len(armed) != len(GOTO_MATRIX) or len(off) != len(GOTO_MATRIX):
+    matrix = result.get("matrix") if isinstance(result.get("matrix"), list) else GOTO_MATRIX
+    if len(armed) != len(matrix) or len(off) != len(matrix):
         return "error", ["pass G did not score every goTo destination in both arms"]
     reasons: list[str] = []
     for label, entry, group in (("armed", armed_entry, armed), ("null control", off_entry, off)):
@@ -3459,8 +4247,10 @@ def _run_goto_arm(
     export_root: Path, slides: list[dict[str, Any]], *, env: dict[str, str | None], tag: str, armed: bool,
     instances: dict[int, dict[str, list[Any]]], expectations: dict[int, dict[str, str]], viewport: tuple[int, int],
     evidence_dir: Path, character_rect: dict[str, float] | None, onset_scene_id: str, gl_replay: str = "off",
+    matrix: Sequence[Sequence[int]] = GOTO_MATRIX,
 ) -> dict[str, Any]:
-    """One armed or null-control goTo session: start, warm up, drive the whole `GOTO_MATRIX`, stop."""
+    """One armed or null-control goTo session: start, warm up, drive every `matrix` case (the
+    advance leg of a mid-chain case only when armed), stop."""
     result: dict[str, Any] = {}
     evidence = visible_evidence_writer(evidence_dir, tag)
     with env_override(env):
@@ -3477,8 +4267,9 @@ def _run_goto_arm(
                     expected_scene_id=onset_scene_id if to_ordinal == GOTO_CONSUMPTION_CHECK_TO else None,
                     character_rect=character_rect, armed=armed,
                     require_no_consumption=armed and to_ordinal == GOTO_CONSUMPTION_CHECK_TO,
+                    advance_to=advance[0] if armed and advance else None,
                 )
-                for from_ordinal, to_ordinal in GOTO_MATRIX
+                for from_ordinal, to_ordinal, *advance in matrix
             ]
         finally:
             try:
@@ -3510,9 +4301,13 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
 
     viewport = (VIEWPORT_WIDTH, VIEWPORT_HEIGHT) if args.attach else args.viewport
     evidence_dir = args.artifact.parent / "visible"
-    onset_scene_id = str(facts["onset1to2"])
+    onset_scene_id = str(plan.scene_index_by_player[consumption_index])
+    matrix = goto_matrix(facts["verdicts"], len(plan_slides))
 
-    result: dict[str, Any] = {"pass": "G", "attach": bool(args.attach), "viewport": {"width": viewport[0], "height": viewport[1]}}
+    result: dict[str, Any] = {
+        "pass": "G", "attach": bool(args.attach), "viewport": {"width": viewport[0], "height": viewport[1]},
+        "matrix": [list(case) for case in matrix],
+    }
     chrome_proc: subprocess.Popen | None = None
     try:
         env: dict[str, str | None] = {}
@@ -3533,7 +4328,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
             export_armed, load_slides(export_armed), env=env, tag="G", armed=True,
             instances=instances_g, expectations=goto_rect_expectations(expectations_g, armed=True),
             viewport=viewport, evidence_dir=evidence_dir, character_rect=character_rect, onset_scene_id=onset_scene_id,
-            gl_replay=args.gl_replay,
+            gl_replay=args.gl_replay, matrix=matrix,
         )
 
         export_off = prepare_export(args.fixture, args.original_index, "pass-g-off")
@@ -3541,7 +4336,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
             export_off, load_slides(export_off), env={**env, GOTO_AUTOPLAY_ENV: "off"}, tag="Goff", armed=False,
             instances=instances_g, expectations=goto_rect_expectations(expectations_g, armed=False),
             viewport=viewport, evidence_dir=evidence_dir, character_rect=character_rect, onset_scene_id=onset_scene_id,
-            gl_replay=args.gl_replay,
+            gl_replay=args.gl_replay, matrix=matrix,
         )
     finally:
         if chrome_proc is not None:
@@ -3881,6 +4676,9 @@ def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     ]
     if wrapped:
         return "invalid", wrapped
+    ground = result.get("groundTruth")
+    if isinstance(ground, dict) and "verdicts" in ground and ground.get("planSha256") not in P2_PLAN_SHA256:
+        return generated_status(result)
     a, b, c = arms.get("A", {}), arms.get("B", {}), arms.get("C", {})
     a_armed, c_armed = gl_replay_mode(a) == "injected", gl_replay_mode(c) == "injected"
     all_gated = [
@@ -3965,6 +4763,98 @@ def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     return ("pass" if ok else "fail"), reasons
 
 
+def specs_for(entry: Any, result: dict[str, Any]) -> list[dict[str, Any]]:
+    """The verdict specs an arm was scored against: the flag-on set when it scored on-facts."""
+    on = (result.get("groundTruthGl") or {}).get("verdicts")
+    if isinstance(entry, dict) and entry.get("factsSet") == "on" and isinstance(on, list):
+        return on
+    off = (result.get("groundTruth") or {}).get("verdicts")
+    return off if isinstance(off, list) else []
+
+
+def bridge_carry_ids(specs: Sequence[dict[str, Any]]) -> set[str]:
+    return {spec["id"] for spec in specs if spec["kind"] == "carry" and spec["action"] == "bridge"}
+
+
+SPEC_KINDS = ("carry", "restart", "retire", "armed", "unhandled")
+
+
+def spec_set_errors(specs: Any) -> list[str]:
+    """Why a verdict set cannot be scored: not a non-empty list of well-formed, unique specs."""
+    if not isinstance(specs, list) or not specs:
+        return ["verdict set is missing or empty"]
+    errors: list[str] = []
+    for index, spec in enumerate(specs):
+        if not (
+            isinstance(spec, dict) and isinstance(spec.get("id"), str) and spec.get("kind") in SPEC_KINDS
+            and spec.get("expect") in (True, False, None) and isinstance(spec.get("action"), str)
+            and (spec.get("alias") is None or isinstance(spec.get("alias"), str))
+        ):
+            errors.append(f"verdict {index} is malformed: {spec!r}")
+    ids = [spec.get("id") for spec in specs if isinstance(spec, dict)]
+    if len(set(ids)) != len(ids):
+        errors.append("verdict ids are not unique")
+    return errors
+
+
+def generated_status(result: dict[str, Any]) -> tuple[str, list[str]]:
+    """`overall_status` for a deck that is not P2-shaped, from the plan-generated verdicts:
+    A and attach meet every gated expectation; B (continuity off) reads every bridge carry
+    False (the export's moving-Magic-Move defect); C (bridges stripped, run only when the plan
+    has a bridge) reads its bridge carries False and meets every other expectation. A malformed
+    or empty verdict set, or a missing or extra arm, is an error, never a pass."""
+    ground = result.get("groundTruth") if isinstance(result.get("groundTruth"), dict) else {}
+    errors = spec_set_errors(ground.get("verdicts"))
+    gl_specs = (result.get("groundTruthGl") or {}).get("verdicts") if isinstance(result.get("groundTruthGl"), dict) else None
+    if gl_specs is not None:
+        errors += [f"flag-on {error}" for error in spec_set_errors(gl_specs)]
+    if errors:
+        return "error", errors
+    arms = result.get("arms") if isinstance(result.get("arms"), dict) else {}
+    required = {"A", "B", *(["C"] if bridge_carry_ids(ground["verdicts"]) else [])}
+    if set(arms) != required or not isinstance(result.get("attach"), dict):
+        return "error", [f"arms {sorted(arms)} + attach={isinstance(result.get('attach'), dict)}, expected {sorted(required)} + attach"]
+    entries = [*((f"arm {name}", name, arms[name]) for name in sorted(required)), ("attach", "attach", result["attach"])]
+    reasons: list[str] = []
+    unknown: list[str] = []
+    for label, name, entry in entries:
+        if not isinstance(entry, dict):
+            return "error", [f"{label} is not a result record"]
+        specs = specs_for(entry, result)
+        bridges = bridge_carry_ids(specs)
+        expected_mode = "off" if name == "B" else "qualified"
+        if continuity_mode(entry) != expected_mode:
+            reasons.append(f"{label} continuity.mode={continuity_mode(entry)!r}, expected {expected_mode!r}")
+        reason = stage_fit_reason(entry, label)
+        if reason:
+            reasons.append(reason)
+        if name == "B":
+            gated = [dict(spec, expect=False) for spec in specs if spec["id"] in bridges]
+        elif name == "C":
+            gated = [dict(spec, expect=False) if spec["id"] in bridges else spec for spec in specs]
+        else:
+            gated = specs
+        red, missing = unmet_verdicts(entry, gated)
+        unknown.extend(f"{label} {spec_id} is inconclusive" for spec_id in missing)
+        table = verdict_table(entry, gated)
+        reasons.extend(
+            f"{label} {spec_id}={table[spec_id]['verdict']!r}, expected {table[spec_id]['expect']!r}" for spec_id in red
+        )
+    alpha = background_alpha(((result.get("attach") or {}).get("transparentBackground") or {}).get("computedBackground"))
+    if alpha != 0:
+        reasons.append(f"attach background alpha={alpha}, expected 0")
+    reasons.extend(visible_reasons(result))
+    gl_fails, gl_unknown = gl_replay_reasons(result) if gl_requested(result) else ([], [])
+    reasons.extend(gl_fails)
+    if unknown:
+        return "inconclusive", unknown + reasons
+    if reasons:
+        return "fail", reasons
+    if gl_unknown:
+        return "inconclusive", gl_unknown
+    return "pass", []
+
+
 def write_handback_shot(evidence_dir: Path, name: str, sink: dict[str, Any]) -> None:
     live, record = sink.get("live"), sink.get("record")
     if isinstance(live, dict) and live.get("frame") is not None:
@@ -4046,6 +4936,123 @@ def run_forced_fail(args: argparse.Namespace) -> dict[str, Any]:
     result["status"] = result["forced"]["status"]
     result["leftoverChrome"] = check_no_leftover_chrome()
     return result
+
+
+def red_arm_label(core_variant: str | None, strip: tuple[str, int | None] | None, runtime: dict[str, Any]) -> str:
+    """`core:NAME`, or `strip:ACTION@SCENE` (the scene filled in when an unscened strip matches one entry)."""
+    if core_variant is not None:
+        return f"core:{core_variant}"
+    assert strip is not None
+    action, scene = strip
+    if scene is None:
+        scenes = {b.get("atScene") for b in runtime.get("boundaries") or [] if isinstance(b, dict) and b.get("action") == action}
+        scene = next(iter(scenes)) if len(scenes) == 1 else None
+    return f"strip:{action}" + ("" if scene is None else f"@{scene}")
+
+
+def red_arm_status(result: dict[str, Any]) -> tuple[str, list[str]]:
+    """Pure: an arm that did not run the intended mechanism is an error; an unreadable verdict is
+    inconclusive, never a match; otherwise the observed red multiset must equal the
+    pre-registered one exactly."""
+    arm = result.get("arm") if isinstance(result.get("arm"), dict) else {}
+    continuity = arm.get("continuity") if isinstance(arm.get("continuity"), dict) else {}
+    if continuity.get("mode") != "qualified":
+        return "error", [f"red arm continuity.mode={continuity.get('mode')!r}, expected 'qualified'"]
+    if continuity.get("sha256") != result.get("expectedCoreSha256"):
+        return "error", [f"red arm reports core sha {continuity.get('sha256')!r}, expected {result.get('expectedCoreSha256')!r}"]
+    if not stage_fit_ok(arm):
+        return "error", [stage_fit_reason(arm, "red arm") or "red arm stage fit failed"]
+    if arm.get("unplannedWraps"):
+        return "invalid", [f"red arm sampled {len(arm['unplannedWraps'])} unplanned loop wrap(s); retake"]
+    if result.get("unknown"):
+        return "inconclusive", [f"unreadable: {', '.join(result['unknown'])}"]
+    expected = result.get("expectedRedSet")
+    if expected is None:
+        return "unregistered", [f"no pre-registered red set for {result.get('redArm')!r} on this deck; red={result.get('redSet')}"]
+    if expected == RECORD:
+        return "recorded", [f"red={result.get('redSet')}"]
+    observed, wanted = Counter(result.get("redSet") or []), Counter(expected)
+    reasons = [f"unexpectedly red: {red_id}" for red_id in sorted((observed - wanted).elements())]
+    reasons += [f"expected red but green: {red_id}" for red_id in sorted((wanted - observed).elements())]
+    return ("fail" if reasons else "pass"), reasons
+
+
+def run_red_arm(args: argparse.Namespace) -> dict[str, Any]:
+    """One continuity-on arm under `--strip` or `--core-variant`, scored against the plan's own
+    verdicts plus a per-slide stray census, and compared with the arm's pre-registered red set."""
+    auto = args.gl_replay == "auto"
+    viewport = args.viewport
+    export_plan = prepare_export(args.fixture, args.original_index, "red-plan")
+    plan_slides = load_slides(export_plan)
+    plan = ground_truth_plan(export_plan, plan_slides)
+    facts = ground_truth_facts(plan)
+    bind_dom_ids(facts, movie_nodes(export_plan, plan_slides))
+    plan_on, facts_on = gl_ground_truth(export_plan, plan_slides, facts)[:2] if auto else (None, None)
+    runtime = runtime_of(plan_on if plan_on is not None else plan)
+    if args.strip is not None:
+        try:
+            strip_entries(runtime, *args.strip)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
+    sha = plan_signature(runtime_of(plan))
+    label = red_arm_label(args.core_variant, args.strip, runtime)
+    expected = RED_ARM_EXPECTATIONS.get((sha, label, args.gl_replay))
+    result: dict[str, Any] = {
+        "redArm": label, "planSha256": sha,
+        "expectedRedSet": list(expected) if isinstance(expected, tuple) else expected,
+        "expectedCoreSha256": variant_sha(args.core_variant) if args.core_variant else js_sha256(),
+        "groundTruth": {key: facts[key] for key in GROUND_TRUTH_KEYS if key in facts},
+    }
+    if facts_on is not None:
+        result["groundTruthGl"] = {"armed": facts_on["armed"], "verdicts": facts_on["verdicts"]}
+    expected_stage = expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
+    export_r = prepare_export(args.fixture, args.original_index, "red-arm")
+    slides_r = load_slides(export_r)
+    patch = injected_core_variant(args.core_variant) if args.core_variant else stripped_runtime(*args.strip)
+    with patch:
+        arm = run_arm(
+            "R", export_r, slides_r, facts, viewport, expected_stage,
+            gl_replay=args.gl_replay, facts_on=facts_on, census=True,
+        )
+    arm_facts = facts_on if facts_on is not None and arm.get("factsSet") == "on" else facts
+    arm["census"], strays, census_unknown = score_census(
+        arm.pop("censusRaw", {}), slide_instances_of(plan), arm_facts["rectExpectations"]["V"],
+        {int(s["originalOrdinal"]): int(s["playerIndex"]) for s in slides_r if not s.get("skipped")},
+    )
+    red, unknown = unmet_verdicts(arm, arm_facts["verdicts"])
+    result.update(arm=arm, redSet=sorted(red + strays), unknown=unknown + census_unknown)
+    result["status"], result["statusReasons"] = red_arm_status(result)
+    return result
+
+
+def run_red_arm_cli(args: argparse.Namespace) -> None:
+    artifact = args.artifact
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    result: dict[str, Any] = {
+        "kind": "live-continuity-probe-red-arm", "status": "running",
+        "fixture": str(args.fixture), "originalIndex": str(args.original_index),
+        "strip": list(args.strip) if args.strip else None, "coreVariant": args.core_variant,
+        "glReplay": {"requested": args.gl_replay}, "viewport": {"width": args.viewport[0], "height": args.viewport[1]},
+    }
+
+    def save() -> None:
+        artifact.write_text(json.dumps(result, indent=2, default=str) + "\n")
+
+    save()
+    try:
+        result.update(run_red_arm(args))
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - always leave a readable artifact behind
+        result["status"] = "error"
+        result["error"] = str(exc)
+    finally:
+        result["leftoverChrome"] = check_no_leftover_chrome()
+        save()
+    print(json.dumps({
+        key: result.get(key)
+        for key in ("status", "statusReasons", "redArm", "expectedRedSet", "redSet", "unknown", "error")
+    }, indent=2, default=str))
+    if result.get("status") not in ("pass", "recorded"):
+        raise SystemExit(1)
 
 
 def check_fixture(args: argparse.Namespace) -> None:
@@ -4626,6 +5633,94 @@ def rescore_artifact(path: Path, period_s: float) -> dict[str, Any]:
             )}
 
 
+LEGACY_SAMPLE_VERDICTS = ("continue1to2", "restart2to3", "continue3to4")
+LEGACY_EVIDENCE_VERDICTS = ("refused1to2", "refused2to3", "refused3to4", "armed1to2")
+
+
+def _plain(value: Any) -> Any:
+    return json.loads(json.dumps(value, default=str))
+
+
+def _rederivable(spec: dict[str, Any], evidence: Any, samples: Any = None) -> str | None:
+    """Why a stored verdict cannot be re-derived from what the artifact retained, else None."""
+    if spec["kind"] in ("carry", "restart"):
+        return None
+    read = evidence.get(spec_key(spec)) if isinstance(evidence, dict) else None
+    if spec["kind"] == "retire":
+        has_dom_ids = isinstance(samples, list) and any(
+            isinstance(row, dict) and any(isinstance(v, dict) and "domId" in v for v in row.get("videos") or []) for row in samples
+        )
+        return None if isinstance(read, dict) and "coreEvents" in read and has_dom_ids else (
+            "no retained refusal evidence with core events, or samples without DOM ids (hand-back)"
+        )
+    if spec["kind"] == "armed":
+        problem = armed_reads_problem(read)
+        return None if problem is None else f"no retained schema-valid armed reads ({problem})"
+    return f"no scorer for plan action {spec['action']!r}"
+
+
+def rescore_generated(result: dict[str, Any], facts: dict[str, Any], facts_on: dict[str, Any] | None) -> dict[str, Any]:
+    """G-S1a: re-score a stored host artifact's arms with the plan-generated scorer (`facts`
+    from the fixture, `facts_on` for an arm that scored flag-on facts) and compare VERDICTS
+    with the stored ones. A verdict the artifact did not retain the raw evidence for is
+    reported INCONCLUSIVE (`match: None`), never as reproduced, and the `claim` says how many.
+    `ok` needs the complete arm inventory (A, B, attach, and C when the plan has a bridge),
+    every re-derivable verdict reproduced (at least one), every stored legacy verdict to have
+    a generated counterpart, and -- when the artifact carries P2's legacy ground truth -- the
+    generated sample verdicts to equal today's `score_boundaries` verdicts."""
+    ground = result.get("groundTruth") if isinstance(result.get("groundTruth"), dict) else {}
+    arms = result.get("arms") if isinstance(result.get("arms"), dict) else {}
+    required = {"A", "B", *(["C"] if bridge_carry_ids(facts["verdicts"]) else [])}
+    entries = [*((f"arm {name}", arms.get(name)) for name in sorted(required | set(arms))), ("attach", result.get("attach"))]
+    out: dict[str, Any] = {}
+    counts = {"reproduced": 0, "differ": 0, "notRederivable": 0}
+    for label, entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("samples"), list):
+            out[label] = {"reason": "missing, or no samples"}
+            continue
+        arm_facts = facts_on if facts_on is not None and entry.get("factsSet") == "on" else facts
+        installed = continuity_mode(entry) == "qualified"
+        evidence = entry.get("evidence")
+        scored = score_verdicts(
+            entry["samples"], evidence if isinstance(evidence, dict) else {}, arm_facts, installed, entry.get("continuity"),
+        )
+        rows: dict[str, Any] = {}
+        for spec in arm_facts["verdicts"]:
+            key = spec_key(spec)
+            stored = entry.get(key)
+            stored_verdict = stored.get("verdict") if isinstance(stored, dict) else None
+            why = _rederivable(spec, evidence, entry["samples"])
+            if why is not None:
+                rows[key] = {"id": spec["id"], "match": None, "storedVerdict": stored_verdict, "reason": f"inconclusive: {why}"}
+                counts["notRederivable"] += 1
+                continue
+            verdict = scored[spec["id"]].get("verdict")
+            rows[key] = {"id": spec["id"], "match": isinstance(stored, dict) and verdict == stored_verdict,
+                         "verdict": verdict, "storedVerdict": stored_verdict}
+            counts["reproduced" if rows[key]["match"] else "differ"] += 1
+        legacy_scorer = None
+        if all(key in ground for key in ("asset", "onset1to2", "restartScene", "bridgeScene")):
+            by_key = {spec_key(spec): scored[spec["id"]].get("verdict") for spec in arm_facts["verdicts"]}
+            legacy = score_boundaries(entry["samples"], ground, installed)
+            legacy_scorer = all(by_key.get(key) == value.get("verdict") for key, value in legacy.items())
+        out[label] = {
+            "verdicts": rows,
+            "legacyWithoutGenerated": sorted(
+                key for key in (*LEGACY_SAMPLE_VERDICTS, *LEGACY_EVIDENCE_VERDICTS) if key in entry and key not in rows
+            ),
+            "equalsLegacyScorer": legacy_scorer,
+        }
+    complete = all("verdicts" in item for item in out.values())
+    ok = complete and counts["reproduced"] > 0 and counts["differ"] == 0 and all(
+        not item["legacyWithoutGenerated"] and item["equalsLegacyScorer"] is not False for item in out.values()
+    )
+    claim = (
+        f"re-derivable verdicts reproduced: {counts['reproduced']}/{counts['reproduced'] + counts['differ']}; "
+        f"{counts['notRederivable']} not re-derivable (INCONCLUSIVE)"
+    )
+    return {"arms": out, "counts": counts, "claim": claim, "inventoryComplete": complete, "ok": ok}
+
+
 def run_rescore_cli(args: argparse.Namespace) -> None:
     if json.loads(args.rescore.read_text()).get("kind") == "live-continuity-probe-force-wrap":
         report = rescore_force_wrap(args.rescore)
@@ -4636,7 +5731,13 @@ def run_rescore_cli(args: argparse.Namespace) -> None:
     export = prepare_export(args.fixture, args.original_index, "rescore")
     slides = load_slides(export)
     facts = ground_truth_facts(ground_truth_plan(export, slides))
+    bind_dom_ids(facts, movie_nodes(export, slides))
+    stored = json.loads(args.rescore.read_text())
+    auto = (stored.get("glReplay") or {}).get("requested") == "auto"
+    facts_on = gl_ground_truth(export, slides, facts)[1] if auto else None
     report = rescore_artifact(args.rescore, loop_period_of(movie_nodes(export, slides), facts["asset"]))
+    report["generated"] = rescore_generated(stored, facts, facts_on)
+    report["ok"] = report["ok"] and report["generated"]["ok"]
     print(json.dumps(report, indent=2, default=str))
     if not report["ok"]:
         raise SystemExit(1)
@@ -4653,6 +5754,9 @@ def main() -> None:
         return
     if args.force_wrap is not None:
         run_force_wrap_cli(args)
+        return
+    if args.strip is not None or args.core_variant is not None:
+        run_red_arm_cli(args)
         return
     if args.only_pass == "G":
         run_pass_g_cli(args)
@@ -4681,14 +5785,8 @@ def main() -> None:
         slides_a = load_slides(export_a)
         plan = ground_truth_plan(export_a, slides_a)
         facts = ground_truth_facts(plan)
-        result["groundTruth"] = {
-            key: facts[key]
-            for key in (
-                "asset", "onset1to2", "boundaryPlayerIndex", "restartScene", "bridgeScene",
-                "pinRect", "bridgeSrcRect", "destRect", "canvas",
-                "retire", "refusedBoundaries", "refusals", "rectExpectations",
-            )
-        }
+        bind_dom_ids(facts, movie_nodes(export_a, slides_a))
+        result["groundTruth"] = {key: facts[key] for key in GROUND_TRUTH_KEYS if key in facts}
         expected_stage = expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
         attach_expected_stage = expected_stage_fit(facts["canvas"], {"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT})
         result["expectedStage"] = expected_stage
@@ -4698,7 +5796,7 @@ def main() -> None:
             plan_on, facts_on, vgl_expectations = gl_ground_truth(export_a, slides_a, facts)
             result["groundTruthGl"] = {
                 "armed": facts_on["armed"], "armedBoundaries": facts_on["armedBoundaries"],
-                "rectExpectations": {"Vgl": vgl_expectations},
+                "rectExpectations": {"Vgl": vgl_expectations}, "verdicts": facts_on.get("verdicts"),
             }
         save()
 
@@ -4715,13 +5813,14 @@ def main() -> None:
             )
         save()
 
-        export_c = prepare_export(args.fixture, args.original_index, "arm-c")
-        with bridge_disabled():
-            result["arms"]["C"] = run_arm(
-                "C", export_c, load_slides(export_c), facts, viewport, expected_stage,
-                gl_replay=args.gl_replay, facts_on=facts_on,
-            )
-        save()
+        if "bridgeScene" in facts or bridge_carry_ids(facts.get("verdicts") or []):
+            export_c = prepare_export(args.fixture, args.original_index, "arm-c")
+            with bridge_disabled():
+                result["arms"]["C"] = run_arm(
+                    "C", export_c, load_slides(export_c), facts, viewport, expected_stage,
+                    gl_replay=args.gl_replay, facts_on=facts_on,
+                )
+            save()
 
         result["leftoverChromeAfterArms"] = check_no_leftover_chrome()
         save()
@@ -4790,9 +5889,12 @@ def main() -> None:
     finally:
         save()
 
-    verdict_keys = ("continue1to2", "restart2to3", "continue3to4") + tuple(
-        REFUSAL_VERDICT_KEY[key] for key in refused_boundaries(result)
-    ) + (tuple(ARMED_VERDICT_KEY.values()) if auto else ())
+    specs = [*((result.get("groundTruth") or {}).get("verdicts") or []), *((result.get("groundTruthGl") or {}).get("verdicts") or [])]
+    verdict_keys = tuple(dict.fromkeys(spec_key(spec) for spec in specs)) or (
+        ("continue1to2", "restart2to3", "continue3to4") + tuple(
+            REFUSAL_VERDICT_KEY[key] for key in refused_boundaries(result)
+        ) + (tuple(ARMED_VERDICT_KEY.values()) if auto else ())
+    )
     summary = {
         "status": result.get("status"),
         "statusReasons": result.get("statusReasons"),
@@ -4813,6 +5915,8 @@ def main() -> None:
         summary["handback"] = (result.get("handback") or {}).get("verdict")
         summary["liveRing"] = (result.get("liveRing") or {}).get("verdict")
     print(json.dumps(summary, indent=2))
+    if result.get("status") != "pass":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

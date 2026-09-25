@@ -908,7 +908,7 @@ def test_freeze_bracket_chrome_follows_the_gl_flag_not_the_served_bytes(tmp_path
     with pytest.raises(_ChromeLaunched):
         asyncio.run(
             drv._run_freeze_bracket(
-                player, runs, drv.WAIT_PROFILES["fast"], "fast", main_js=b"x", gl_auto=gl_auto
+                player, runs, drv.WAIT_PROFILES["fast"], "fast", bridge34=True, main_js=b"x", gl_auto=gl_auto
             )
         )
     assert seen == [gl_auto]

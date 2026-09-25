@@ -37,6 +37,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
+from continuity_core_variants import VARIANTS, parse_strip, strip_entries, variant_core  # noqa: E402
 from p2_alpha_spike import CHROME, ChromeCdp, _free_port, _wait_ready  # noqa: E402
 from p2_recovery_html_dissolve_live import (  # noqa: E402
     MEDIA_PROBE_JS,
@@ -80,6 +81,8 @@ from obed_edom.html_alpha_probe import (  # noqa: E402
     write_patched_export,
 )
 from obed_edom.html_preview import export_html  # noqa: E402
+from obed_edom.live_continuity import ContinuityPlan, Unsupported, derive_plan  # noqa: E402
+from obed_edom.live_continuity_js import PRESERVE_CORE_JS  # noqa: E402
 from obed_edom.live_gl_replay_js import GL_REPLAY_VERSION, gl_replay_script, validate_gl_replay_entry  # noqa: E402
 from obed_edom.live_gl_replay_js import js_sha256 as gl_replay_js_sha256  # noqa: E402
 from obed_edom.live_runtime import (  # noqa: E402
@@ -126,6 +129,7 @@ from obed_edom.p2_verdict import (  # noqa: E402
     liveContinuity1to2,
     movingContinuity3to4,
     neverPooledEvidence,
+    noStrayVideo,
     refusedCarry1to2,
     _advance_c_ok,
     _advance_gate,
@@ -531,6 +535,26 @@ def _unmodified_export(root: Path, *, reuse: bool, gl_auto: bool) -> Path:
     return copy
 
 
+def _export_file(root: Path, relative: str) -> Path:
+    path = (root / relative).resolve()
+    if root.resolve() not in path.parents or not path.is_file():
+        raise FileNotFoundError(relative)
+    return path
+
+
+def _p2_ground_truth(export_root: Path) -> ContinuityPlan:
+    """The derived plan whose `slide_instances` `noStrayVideo` scores against."""
+    header = json.loads((export_root / "assets" / "header.json").read_text(encoding="utf-8"))
+    slides = [
+        {"originalOrdinal": i + 1, "playerIndex": i, "exportedUuid": uuid_, "skipped": False}
+        for i, uuid_ in enumerate(header["slideList"])
+    ]
+    plan = derive_plan(export_root, slides, resolver=_export_file)
+    if isinstance(plan, Unsupported):
+        raise SystemExit(f"the P2 export does not derive a continuity plan: {plan.reason}")
+    return plan
+
+
 def _gl_info_js(canvas: dict) -> str:
     width, height = int(canvas["width"]), int(canvas["height"])
     return (
@@ -559,14 +583,44 @@ def _served_script_order(html: str) -> list[str]:
     return [name for _, name in sorted(found)]
 
 
-def _inject_player(player_dir: Path, plan: dict, *, gl_auto: bool, canvas: dict) -> tuple[dict, dict, dict | None]:
-    """Inject the P2 scripts; auto adds GL then INFO so the served order is plan < core < INFO < GL < main.js (plan §4.1)."""
+def _bridge_injected(plan: dict) -> bool:
+    return any(b.get("action") == "bridge" for b in plan.get("boundaries") or [] if isinstance(b, dict))
+
+
+def _injection_arm(reference_plan: dict) -> tuple[dict, str, dict]:
+    """`--core-variant NAME` / `--strip ACTION[@atScene]`: the plan and core to inject in
+    place of `reference_plan` and `PRESERVE_CORE_JS`, and the record the report header shows."""
+    variant = _arg_value("--core-variant", "") or None
+    strip = _arg_value("--strip", "") or None
+    try:
+        core = PRESERVE_CORE_JS if variant is None else variant_core(variant)
+        injected = reference_plan if strip is None else strip_entries(reference_plan, *parse_strip(strip))
+    except ValueError as exc:
+        raise SystemExit(f"{exc} (variants: {', '.join(VARIANTS)})") from exc
+    return injected, core, {
+        "coreVariant": variant,
+        "coreSha256": hashlib.sha256(core.encode()).hexdigest(),
+        "strip": strip,
+        "injectedPlanSha256": hashlib.sha256(json.dumps(injected).encode()).hexdigest(),
+        "referencePlanSha256": hashlib.sha256(json.dumps(reference_plan).encode()).hexdigest(),
+        "injectedPlan": injected,
+    }
+
+
+def _inject_player(
+    player_dir: Path, plan: dict, *, gl_auto: bool, canvas: dict,
+    core: str = PRESERVE_CORE_JS, gl_plan: dict | None = None,
+) -> tuple[dict, dict, dict | None]:
+    """Inject the P2 scripts; auto adds GL then INFO so the served order is plan < core < INFO < GL < main.js (plan §4.1).
+
+    `gl_plan` (default `plan`) only gates the plan-independent GL module body, so a stripped
+    `plan` still ships the module and the page decides what an absent entry means."""
     gl_record = None
     if gl_auto:
         gl = _inject_script(
             player_dir,
             marker_attr='data-obed-p2-gl-replay="1"',
-            script=_gl_replay_body(plan),
+            script=_gl_replay_body(plan if gl_plan is None else gl_plan),
             already="data-obed-p2-gl-replay=",
         )
         info = _inject_script(
@@ -576,7 +630,15 @@ def _inject_player(player_dir: Path, plan: dict, *, gl_auto: bool, canvas: dict)
             already="data-obed-p2-gl-info=",
         )
         gl_record = {"gl": gl, "info": info}
-    preserve = inject_preserve(player_dir)
+    if core == PRESERVE_CORE_JS:
+        preserve = inject_preserve(player_dir)
+    else:
+        preserve = _inject_script(
+            player_dir,
+            marker_attr='data-obed-p2-preserve="1"',
+            script=core,
+            already="data-obed-p2-preserve=",
+        )
     plan_inject = inject_continuity_plan(player_dir, plan)
     if gl_record is not None:
         html = (player_dir / "index.html").read_text(encoding="utf-8")
@@ -684,17 +746,23 @@ def _main_js_report(main_meta: dict, *, webgl: object, mm_canvas: object) -> dic
     }
 
 
-def _gl_boot_ok(check: object) -> bool:
+def _gl_boot_ok(check: object, *, expect_module: bool = True) -> bool:
+    """`expect_module=False` (a plan stripped of its glReplay entry): the module must have
+    declined to install -- no `__OBED_GL_REPLAY__` at all -- with everything else as usual."""
     if not isinstance(check, dict):
         return False
     info = check.get("info") if isinstance(check.get("info"), dict) else {}
+    module_ok = (
+        check.get("glVersion") == GL_REPLAY_VERSION and check.get("glState") not in (None, "RETIRED")
+        if expect_module
+        else "glVersion" in check and check.get("glVersion") is None and check.get("glState") is None
+    )
     return bool(
         check.get("order") == GL_SERVED_ORDER
         and check.get("webgl") is True
         and check.get("obedLive") is True
         and check.get("runtimeVersion") == RUNTIME_VERSION
-        and check.get("glVersion") == GL_REPLAY_VERSION
-        and check.get("glState") not in (None, "RETIRED")
+        and module_ok
         and info.get("installed") is True
     )
 
@@ -3161,7 +3229,7 @@ async def _capture_3to4_snapshot(
 
 async def _run_freeze_bracket(
     player_dir: Path, runs_dir: Path, wait_profile: dict, wait_profile_name: str,
-    *, main_js: bytes | None = None, gl_auto: bool = False,
+    *, bridge34: bool, main_js: bytes | None = None, gl_auto: bool = False,
 ) -> dict:
     """A-B-A composited-freeze bracket on the 3->4 moving Magic Move boundary:
     positive -> freeze-control -> positive, one re-navigated Chrome (same
@@ -3170,12 +3238,8 @@ async def _run_freeze_bracket(
 
     Re-bracketed off the 1->2 boundary (retired -- the derived plan REFUSES that
     carry, so there is no carried movie to freeze there; 3->4 still carries). SKIPPED
-    (no boot, no bracket) when `--disable-bridge34` disables the 3->4 carry -- nothing
-    to freeze in that arm."""
-    if "--disable-bridge34" not in sys.argv:
-        bridge34 = True
-    else:
-        bridge34 = False
+    (no boot, no bracket) when the INJECTED plan has no 3->4 bridge (`--disable-bridge34`,
+    `--strip bridge@8`) -- nothing to freeze in that arm."""
     if not bridge34:
         return {
             "skipped": True,
@@ -3348,6 +3412,7 @@ async def _run(player: Path) -> dict:
     else:
         source_dir = unmodified
 
+    ground_truth = _p2_ground_truth(unmodified)
     strip_info = strip_export_pdf_bg_fills(source_dir)
     write_json(root / "pdf-strip.json", strip_info)
     print("stripped", [r["pdf"] for r in (strip_info.get("rewritten") or [])])
@@ -3357,11 +3422,13 @@ async def _run(player: Path) -> dict:
     # The 1->2 retire hands movie1 back to the player at slide 2 (refused carry);
     # the 3->4 bridge keeps the movie1 decoder playing across the moving cut.
     continuity_plan = build_continuity_plan(bridge34)
+    injected_plan, core, arm = _injection_arm(continuity_plan)
+    bridge_injected = _bridge_injected(injected_plan)
     preserve, plan_inject, gl_inject = _inject_player(
-        player_dir, continuity_plan, gl_auto=gl_auto, canvas=inv["canvas"]
+        player_dir, injected_plan, gl_auto=gl_auto, canvas=inv["canvas"], core=core, gl_plan=continuity_plan
     )
-    write_json(root / "preserve-inject.json", preserve)
-    write_json(root / "continuity-plan-inject.json", {**plan_inject, "plan": continuity_plan})
+    write_json(root / "preserve-inject.json", {**preserve, "coreVariant": arm["coreVariant"], "coreSha256": arm["coreSha256"]})
+    write_json(root / "continuity-plan-inject.json", {**plan_inject, "plan": injected_plan, "strip": arm["strip"]})
     main_js, main_meta = _served_main_js(player_dir, gl_auto=gl_auto, mm_opacity=mm_opacity)
     if gl_auto:
         gl_inject = {
@@ -3391,7 +3458,8 @@ async def _run(player: Path) -> dict:
         boot = await _boot(chrome, base)
         if gl_auto:
             boot["glReplayCheck"] = {**(await chrome.evaluate(GL_BOOT_CHECK_JS) or {}), "webgl": webgl}
-            if not _gl_boot_ok(boot["glReplayCheck"]):
+            expect_module = any(b.get("action") == "glReplay" for b in injected_plan["boundaries"])
+            if not _gl_boot_ok(boot["glReplayCheck"], expect_module=expect_module):
                 raise SystemExit(f"--gl-replay auto boot check failed: {boot['glReplayCheck']!r}")
         # The continuity plan (restart boundary, and the 3->4 bridge boundary iff
         # bridge34) is already baked into index.html by inject_continuity_plan
@@ -3884,6 +3952,7 @@ async def _run(player: Path) -> dict:
         # pressing there presses during residual motion.
         capture_id_c = uuid.uuid4().hex
         settle_c = await _settle_at_advance_hash(chrome)
+        media_settled_s3 = await _media_snapshot(chrome)
         bound_owner_id_c = await _bind_footprint_owner(chrome, MOVIE1_KEY, SLIDE3_MOVIE_RECT)
         owner_settle_c = await _settle_bound_owner_rect(chrome, bound_owner_id_c)
         click_wall_c = time.monotonic()
@@ -3934,6 +4003,7 @@ async def _run(player: Path) -> dict:
             slide4_burst.append(np.asarray(shot)[:, :, :3])
             Image.fromarray(shot).save(run_dir / f"slide4-live-t{off_ms:04d}.png")
         footprint_live = footprintFullyLive(slide4_burst, capture_id=capture_id_c)
+        media_settled_s4 = await _media_snapshot(chrome)
         # ================= end Transition C =================
     finally:
         await chrome.close()
@@ -3986,6 +4056,10 @@ async def _run(player: Path) -> dict:
     # With movie1 never pooled, the reuse-skip/retire pair at the 2->3 boundary
     # cannot fire; "nothing was ever pooled" is the stronger substitute.
     never_pooled = neverPooledEvidence(preserve_events, carry_census, pool_census_s2)
+    settled_snapshots = [media_pre, media_mid, media_settled_s3, media_settled_s4]
+    no_stray = noStrayVideo(
+        settled_snapshots, ground_truth.slide_instances, ground_truth.scene_index_by_player
+    )
 
     findings = [
         {"id": "sourceUnchanged", "pass": after.as_dict() == before.as_dict()},
@@ -4000,7 +4074,7 @@ async def _run(player: Path) -> dict:
                 "refusedCarry1to2": refused_carry,
                 "lingeringOnSlide2": lingering_on_slide2,
                 "poolCensusOnSlide2": pool_census_s2,
-                "injectedBoundaries": continuity_plan["boundaries"],
+                "injectedBoundaries": injected_plan["boundaries"],
                 "diagnosticsNonGating": [
                     "continues", "noJump", "remountRestart", "pre", "firstAfter", "post",
                     "visibleMovieMotion", "indexRun", "indexSequence", "movieTexids",
@@ -4268,7 +4342,7 @@ async def _run(player: Path) -> dict:
                 "slide4MinHash": SLIDE4_MIN_HASH,
                 "slide3MovieRect": list(SLIDE3_MOVIE_RECT),
                 "slide4MovieRect": list(SLIDE4_MOVIE_RECT),
-                "bridgeEnabled": bridge34,
+                "bridgeEnabled": bridge_injected,
                 "bridgeEvents": bridge_events,
                 "ownerVias": [s.get("via") for s in owner_samples_c][:40],
                 "slide4IndexSequence": slide4_index_seq,
@@ -4297,6 +4371,30 @@ async def _run(player: Path) -> dict:
                     "RESTARTS (fresh decoder) and fails crossingIdentity -> RED, so this is "
                     "an honest gate, never a false pass. A player-build-error fails it as "
                     "failed-by-player."
+                ),
+            },
+        },
+        {
+            "id": "noStrayVideo",
+            "pass": no_stray["ok"],
+            "verdict": no_stray["verdict"],
+            "detail": {
+                "noStrayVideo": no_stray,
+                "slideInstances": {str(k): v for k, v in ground_truth.slide_instances.items()},
+                "sceneIndexByPlayer": {str(k): v for k, v in ground_truth.scene_index_by_player.items()},
+                "settledSnapshots": settled_snapshots,
+                "note": (
+                    "One settled snapshot per slide (boot, settled slide 2, slide 3 at the "
+                    "pre-move hash, slide 4 after the burst). Every painting <video> "
+                    "(visible && !suppressed34, re-derived off-page) must claim an authored "
+                    "instance of `ContinuityPlan.slide_instances` for that slide "
+                    f"(IoU >= {no_stray['iouMin']}) and no instance may be painted twice. "
+                    "This finding does NOT score presence: Magic-Move-settled slides legitimately "
+                    "paint through the player's WebGL canvas. movie1's presence is scored by "
+                    "refusedCarry1to2/glReplayCarry1to2 (slide 2), deliberateRestart2to3 (slide 3) "
+                    "and continueThroughMovingMagicMove3to4 (slide 4). Malformed or "
+                    "non-re-derivable rows, an unsampled slide or a hash off the authored "
+                    "slides are INCONCLUSIVE."
                 ),
             },
         },
@@ -4333,7 +4431,7 @@ async def _run(player: Path) -> dict:
                 "glCarryCensus": gl_carry_census,
                 "glSlide2Reads": gl_slide2_reads,
                 "lingeringOnSlide2": lingering_on_slide2,
-                "injectedBoundaries": continuity_plan["boundaries"],
+                "injectedBoundaries": injected_plan["boundaries"],
                 "diagnosticsNonGating": ["refusedCarry1to2", "liveContinuity1to2", "motionAcrossFlip"],
                 "refusedCarry1to2": refused_carry,
                 "liveContinuity1to2": live_continuity,
@@ -4359,12 +4457,12 @@ async def _run(player: Path) -> dict:
     # ("freeze run at cut") in B while the bridged decoder + rVFC stay live, and
     # every other sub-verdict is identical across the two bracketing positives.
     # Runs on fresh boots (its own server + re-navigated Chrome per arm), so it
-    # never perturbs the main pass above. SKIPPED under --disable-bridge34 (no
-    # carry to freeze in that arm).
+    # never perturbs the main pass above. SKIPPED when the injected plan has no 3->4
+    # bridge (--disable-bridge34, --strip bridge@8: no carry to freeze in that arm).
     freeze_control = await _run_freeze_bracket(
-        player_dir, runs, wait_profile, wait_profile_name, main_js=main_js, gl_auto=gl_auto
+        player_dir, runs, wait_profile, wait_profile_name, bridge34=bridge_injected, main_js=main_js, gl_auto=gl_auto
     )
-    freeze_blocks_success = _freeze_control_blocks_success(freeze_control.get("verdict"), not bridge34)
+    freeze_blocks_success = _freeze_control_blocks_success(freeze_control.get("verdict"), not bridge_injected)
     findings.append(
         {
             "id": "freezeControlCaughtByCounter",
@@ -4424,6 +4522,7 @@ async def _run(player: Path) -> dict:
         "preScores": pre_scores,
         "midScores": mid_scores,
         "continuityPlan": continuity_plan,
+        "injection": arm,
         "refusedCarry1to2": refused_carry,
         "footprintFullyLive": footprint_live,
         "continue1to2": cont,
@@ -4437,7 +4536,7 @@ async def _run(player: Path) -> dict:
         "hashes": {"h1": hash1, "h2": hash2, "h3": hash3, "h4": hash4},
         "movingContinuity3to4": moving_continuity,
         "movingIndexRun3to4": moving_index_run,
-        "bridge34Enabled": bridge34,
+        "bridge34Enabled": bridge_injected,
         "mainJs": _main_js_report(main_meta, webgl=webgl, mm_canvas=mm_canvas),
         "preserveEvents": preserve_events,
         "findings": findings,
@@ -4481,6 +4580,8 @@ async def _run(player: Path) -> dict:
         "",
         f"Generated: {report['generated']}",
         f"Source unchanged: **{report['sourceUnchanged']}**",
+        f"Core variant: {arm['coreVariant'] or 'none'} · injected core sha256: {arm['coreSha256']}",
+        f"Strip: {arm['strip'] or 'none'} · injected plan sha256: {arm['injectedPlanSha256']}",
         f"success: **{success}**",
         "",
         "## Findings",
