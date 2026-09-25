@@ -671,6 +671,34 @@ for the parked `iwa-surgical-write-generator` feature.
 
 ---
 
+## Live continuity contract
+
+`src/obed_edom/live_continuity.py` derives the plan; `live_continuity_js.py` is the core runtime. Plan:
+`.agents/plans/keynote_live_continuity_generalisation.plan.md` (§2). Operator guide: README "Movie continuity".
+
+* **Runtime plan, schema 2** (`CONTINUITY_VERSION` 6). `{schema: 2, movies, boundaries, transparentBackground}`, one
+  flat `boundaries` entry per (boundary, planned instance): `pin`, `bridge`, `restart`, `retire` (`reason`
+  `refused`|`ends`) or `glReplay` (at most one per plan; G2's fields unchanged, plus `src`/`dst`/`loop`). Every entry
+  keeps `movieKey`; `src`/`dst` = `{objectId, rect}`. The core installs nothing unless `schema === 2`.
+* **Chain invariant.** Every `dst` of a pin/bridge/glReplay is the `src` of exactly one entry at the next boundary
+  unless the deck ends; each `src` appears at most once. `to_runtime` enforces it (R6).
+* **Identity.** Runtime: objectID only. The player sets `id = objectID + "-video"` before `src`; a carried decoder
+  is re-stamped to `dst.objectId`. Offline: `to_runtime` checks each objectId and rect name the same export instance;
+  the gates score landing rects. glReplay keeps its ≤ 1 px `instanceRect` check.
+* **Refusals.** Per (boundary, instance) → `retire refused` + one `ContinuityPlan.refusals` record (`code`,
+  `objectId` of `src`), reported on `output.continuity.notCarried`: `overlap` artwork above on the destination, R1
+  ambiguous pairing (runner-up within 16 authored px), R1b opacity differs, R2 builds in/out, R4 loop mismatch, R7
+  web/image movie, R8 trim differs. Deck-wide → `Unsupported("Rn: …")`: R3 transition not on the outgoing slide's last
+  event, R5 objectID repeats across slides, R6 chain invariant. `retire ends` is not a refusal. Never relax one to
+  qualify a deck.
+* **Allowlist.** `QUALIFIED_PLAN_SHA256` stays in force until S3; a deck joins only after its gates pass.
+* **F5 names are frozen instrument API.** Scorers read note kinds (`bridge-3to4`, `reuse-decoder`,
+  `reuse-skip-boundary`, `retire-on-start-movie`, `retire-boundary`, `preserve-refused`, `dom-swap`,
+  `facade-block-clear`, `remount-*`, `pool-cleared`, `glreplay-*`) with their `detail` fields, element properties
+  (`__obedSuppressed34`, `dataset.obedPreserved`, `dataset.obedRemounted`, `__obedElId`, `__obedGen`,
+  `__obedFacadeFor`) and `footprintOwnerDecoderId` by name. Dropping or renaming one is a finding even if the suites
+  pass.
+
 ## Alpha Keynote managed OBS (Keyer output)
 
 `src/obed_edom/managed_obs.py` (`ManagedObs`, one per dashboard process, owned by `web/live.py`'s
