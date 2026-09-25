@@ -1024,7 +1024,7 @@ class LiveOutputHost:
             env_gl_replay = os.environ.get(GL_REPLAY_ENV, "").strip().lower()
             if env_gl_replay not in ("", "off", "auto"):
                 raise LiveHostError("OBED_LIVE_GL_REPLAY must be off or auto.")
-            self._gl_replay_preference = env_gl_replay or ("auto" if self._managed_obs and self._output_rate == 25 else "off")
+            self._gl_replay_preference = env_gl_replay or ("auto" if self._managed_obs else "off")
         self._goto_autoplay_mode = "off" if os.environ.get(GOTO_AUTOPLAY_ENV, "").strip().lower() == "off" else "on"
         self._log_path = _new_log_path()
         self._logger = _SessionLogger(self._log_path)

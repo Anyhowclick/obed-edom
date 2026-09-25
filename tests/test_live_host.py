@@ -2633,31 +2633,18 @@ def test_gl_replay_defaults_to_auto_under_the_managed_bridge(tmp_path, monkeypat
     assert next(r for r in read_log(output) if r["kind"] == "start")["glReplayPreference"] == "auto"
 
 
-@pytest.mark.parametrize("rate", [30, None])
-def test_gl_replay_managed_default_is_off_outside_the_qualified_rate(tmp_path, monkeypatch, rate):
-    """OQ-2 contingency (2026-09-24): under managed OBS, page rAF latches to 30 once a movie plays, so at
-    output 30 G2 read worse than native in some takes. Only output 25 defaults on; env `auto` still opts in."""
+@pytest.mark.parametrize("rate", [25, 30, None])
+def test_gl_replay_managed_default_is_auto_at_every_output_rate(tmp_path, monkeypatch, rate):
+    """Owner 2026-09-25: the binary-counter re-measurement showed 30 as clean as 25, so the managed default
+    does not depend on the output rate."""
     monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
     output = managed_host(tmp_path, monkeypatch, output_rate=rate)
-    forbid_gl_module(monkeypatch)
-    calls = fake_plan_pair(monkeypatch)
-    ready(monkeypatch)
-    output.start()
-
-    assert all("gl_replay" not in call for call in calls)
-    assert output.output["continuity"]["glReplay"]["mode"] == "off"
-    assert next(r for r in read_log(output) if r["kind"] == "start")["glReplayPreference"] == "off"
-
-
-def test_gl_replay_env_auto_opts_in_at_managed_rate_30(tmp_path, monkeypatch):
-    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
-    output = managed_host(tmp_path, monkeypatch, output_rate=30)
-    monkeypatch.setenv(live_host.GL_REPLAY_ENV, "auto")
     fake_plan_pair(monkeypatch)
     ready(monkeypatch)
     output.start()
 
     assert output.output["continuity"]["glReplay"] == _injected_info()
+    assert next(r for r in read_log(output) if r["kind"] == "start")["glReplayPreference"] == "auto"
 
 
 @pytest.mark.parametrize("host", ["managed-default", "hdmi-auto"])

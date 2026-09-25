@@ -10,7 +10,7 @@ Arms:
   2x, positive  one `rec` session with gl_replay="off": slide1-native 8 s, slide1-paused 3 s (every playing <video>
                 paused: the null control), slide1-resumed 4 s, then a report-only smoke walk (slide 2, build 1).
                 Source = 2 x canvas (product) or = canvas (positive control). Cadence gated at rate 25 only.
-  g2            sessions g2 (product default at 25: no gl_replay kwarg; explicit auto at 30), g2-off (gl_replay="off"), both recorded, and an
+  g2            sessions g2 (product default: no gl_replay kwarg), g2-off (gl_replay="off"), both recorded, and an
                 unrecorded hidden-arm (the g2 session's gl_replay). g2/g2-off: slide 1 as above -> advance -> LIVE (<= 5 s) -> slide2-live 10 s
                 (screenshot S) -> hide, slide2-hidden 3 s (screenshot H) -> show, slide2-reshown 4 s ->
                 slide2-handback (advance = build 1) 4 s -> slide2-after 3 s (screenshot P3). Gates M0-M4.
@@ -100,7 +100,7 @@ UNMEASURED_MARK = "#808080"
 LIMITS = {"nativeRepeatMax2x": 0.15, "decodableMin": 0.9, "nullRepeatMin": 0.95, "nativeRepeatMinPositive": 0.18,
           "g2RepeatMax25": 0.03, "g2RepeatMax30": 0.05, "distinctMin25": 24.0, "uploadsMin": 27.0, "reshownRepeatMax": 0.03, "staticMax": 4,
           "counterTol": 2, "movieAlphaMin": 250, "slotAlpha": 75, "slotAlphaTol": 3, "domTol": 3, "liveWaitS": 5.0,
-          "mediaEndS": 44.0, "liveRingMax": 20, "handbackRingPx": 200, "handbackMaxForwardStep": 3}
+          "mediaEndS": 44.0, "binaryRepeatMax": 0.01, "binaryReshownMax": 0.02, "binaryNativeTol": 0.01, "binaryPositiveMin": 0.05, "binaryDistinctFrac": 0.96, "liveRingMax": 20, "handbackRingPx": 200, "handbackMaxForwardStep": 3}
 EXPECTED_STATS = {"frameLen": 88, "occludedBands": 20, "bandCount": 128, "innerRect": {"x": 4, "y": 4, "w": 952, "h": 268}}
 MOVIE_FPS = 30
 SOAK_LOOP_FRAMES = 1381
@@ -638,15 +638,18 @@ def gate(checks: list[dict[str, Any]], invalid: str | None = None) -> dict[str, 
 
 def cadence_checks(arm: str, decode: dict[str, Any]) -> list[dict[str, Any]]:
     phases = decode.get("phases") or {}
+    binary = decode.get("counter") == "binary"
+    max_2x = LIMITS["binaryRepeatMax"] if binary else LIMITS["nativeRepeatMax2x"]
+    min_positive = LIMITS["binaryPositiveMin"] if binary else LIMITS["nativeRepeatMinPositive"]
     checks: list[dict[str, Any]] = []
     for name in NATIVE_PHASES:
         stats = phases.get(name) or {}
         repeat, decodable = stats.get("repeatFrac"), stats.get("decodableFrac")
         check(checks, f"{name}.decodable", decodable, decodable is not None and decodable >= LIMITS["decodableMin"], f">= {LIMITS['decodableMin']}")
         if arm == "2x":
-            check(checks, f"{name}.repeat", repeat, repeat is not None and repeat <= LIMITS["nativeRepeatMax2x"], f"<= {LIMITS['nativeRepeatMax2x']}")
+            check(checks, f"{name}.repeat", repeat, repeat is not None and repeat <= max_2x, f"<= {max_2x}")
         else:
-            check(checks, f"{name}.repeat", repeat, repeat is not None and repeat >= LIMITS["nativeRepeatMinPositive"], f">= {LIMITS['nativeRepeatMinPositive']}")
+            check(checks, f"{name}.repeat", repeat, repeat is not None and repeat >= min_positive, f">= {min_positive}")
     null = (phases.get(NULL_PHASE) or {}).get("repeatFrac")
     check(checks, f"{NULL_PHASE}.repeat (null)", null, null is not None and null >= LIMITS["nullRepeatMin"], f">= {LIMITS['nullRepeatMin']}")
     return checks
@@ -783,18 +786,24 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     m1: list[dict[str, Any]] = []
     info, expected_sha = continuity_of(g2).get("glReplay") or {}, KB_SHAS.get(kb or "", G2_SHA)
     pref = (g2.get("startLog") or {}).get("glReplayPreference")
-    check(m1, "glReplayPreference (product default at 25; explicit auto at 30)", pref, pref == "auto", "== auto")
+    check(m1, "glReplayPreference (product default)", pref, pref == "auto", "== auto")
     check(m1, "glReplay mode/version/sha", info, info.get("mode") == "injected" and info.get("version") == 1 and info.get("sha256") == expected_sha,
           f"injected v1 {expected_sha[:8]}")
     scale = continuity_of(g2).get("scale")
     check(m1, "continuity.scale", scale, scale == 1, "== 1")
     lr, nr = live.get("repeatFrac"), native.get("repeatFrac")
-    check(m1, "slide2-live repeat < slide1-native repeat", [lr, nr], lr is not None and nr is not None and lr < nr, "same take")
-    bound = LIMITS["g2RepeatMax25"] if rate == 25 else LIMITS["g2RepeatMax30"]
-    check(m1, "slide2-live repeat", lr, lr is not None and lr <= bound, f"<= {bound}", enforced=rate == 25)
     distinct = live.get("distinctPerS")
-    check(m1, "slide2-live distinct/s", distinct, distinct is not None and distinct >= LIMITS["distinctMin25"], f">= {LIMITS['distinctMin25']}",
-          enforced=rate == 25)
+    if d_g2.get("counter") == "binary":
+        tol, bound, min_distinct = LIMITS["binaryNativeTol"], LIMITS["binaryRepeatMax"], LIMITS["binaryDistinctFrac"] * rate
+        check(m1, "slide2-live repeat <= slide1-native repeat + tol", [lr, nr], None not in (lr, nr) and lr <= nr + tol, f"same take, tol {tol}")
+        check(m1, "slide2-live repeat", lr, lr is not None and lr <= bound, f"<= {bound}")
+        check(m1, "slide2-live distinct/s", distinct, distinct is not None and distinct >= min_distinct, f">= {min_distinct:.1f}")
+    else:
+        check(m1, "slide2-live repeat < slide1-native repeat", [lr, nr], lr is not None and nr is not None and lr < nr, "same take")
+        bound = LIMITS["g2RepeatMax25"] if rate == 25 else LIMITS["g2RepeatMax30"]
+        check(m1, "slide2-live repeat", lr, lr is not None and lr <= bound, f"<= {bound}", enforced=rate == 25)
+        check(m1, "slide2-live distinct/s", distinct, distinct is not None and distinct >= LIMITS["distinctMin25"], f">= {LIMITS['distinctMin25']}",
+              enforced=rate == 25)
     decodable = live.get("decodableFrac")
     check(m1, "slide2-live decodable", decodable, decodable is not None and decodable >= LIMITS["decodableMin"], f">= {LIMITS['decodableMin']}")
     scored = score_armed(g2.get("armed"), armed, continuity_of(g2))
@@ -886,8 +895,13 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     check(m4, "uploads/s over hidden window", hidden_rate, hidden_rate is not None and hidden_rate >= LIMITS["uploadsMin"], f">= {LIMITS['uploadsMin']}")
     reshown = (p_g2.get("slide2-reshown") or {}).get("repeatFrac")
     native_repeat_frac = native.get("repeatFrac")
-    check(m4, "slide2-reshown repeat < slide1-native repeat", [reshown, native_repeat_frac],
-          None not in (reshown, native_repeat_frac) and reshown < native_repeat_frac, "relative to native (owner 2026-09-24)")
+    if d_g2.get("counter") == "binary":
+        bound = LIMITS["binaryReshownMax"]
+        check(m4, "slide2-reshown repeat", [reshown, native_repeat_frac], None not in (reshown, native_repeat_frac)
+              and reshown <= bound and reshown <= native_repeat_frac + bound, f"<= {bound} and <= native + {bound}")
+    else:
+        check(m4, "slide2-reshown repeat < slide1-native repeat", [reshown, native_repeat_frac],
+              None not in (reshown, native_repeat_frac) and reshown < native_repeat_frac, "relative to native (owner 2026-09-24)")
     check(m4, "report: slide2-reshown repeat", reshown, True, f"<= {LIMITS['reshownRepeatMax']}", enforced=False)
     ends = d_g2.get("endpoints") or {}
     last, first = (ends.get("slide2-live") or {}).get("last"), (ends.get("slide2-reshown") or {}).get("first")
@@ -1126,10 +1140,9 @@ def sessions_for(arm: str, ctx: dict[str, Any], args: argparse.Namespace, armed:
     if arm in ("2x", "positive"):
         return [run_session("rec", rec_script, ctx, gl_replay="off", record=True)]
     if arm == "g2":
-        g2_replay = None if args.rate == 25 else "auto"
-        return [run_session("g2", g2_script(args.kb, armed), ctx, gl_replay=g2_replay, record=True),
+        return [run_session("g2", g2_script(args.kb, armed), ctx, record=True),
                 run_session("g2-off", g2_script(None, armed), ctx, gl_replay="off", record=True),
-                run_session("hidden-arm", hidden_arm_script, ctx, gl_replay=g2_replay)]
+                run_session("hidden-arm", hidden_arm_script, ctx)]
     if arm == "failsafe":
         return [run_session("fail-module", failsafe_script(False), ctx, seed="planUnreadable"),
                 run_session("fail-zone", failsafe_script(False), ctx, seed="posterAmbiguous"),
@@ -1269,7 +1282,8 @@ def arm_gates(arm: str, run: dict[str, Any], args: argparse.Namespace, armed: di
         run["checks"].append({"check": "slide 2 smoke walk", "value": [s["step"] for s in smoke if s["ok"]],
                               "limit": "2 steps ok", "ok": len(smoke) == 2 and all(s["ok"] for s in smoke), "enforced": False})
         if run["decode"] and "phases" in run["decode"]:
-            run["checks"] += [{**c, "enforced": c["enforced"] and run["rate"] == 25} for c in cadence_checks(arm, run["decode"])]
+            binary = run["decode"].get("counter") == "binary"
+            run["checks"] += [{**c, "enforced": c["enforced"] and (binary or run["rate"] == 25)} for c in cadence_checks(arm, run["decode"])]
         return {}
     if arm == "g2":
         g2 = next((s for s in run["sessions"] if s["session"] == "g2"), {})
