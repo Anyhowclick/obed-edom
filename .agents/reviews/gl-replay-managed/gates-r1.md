@@ -3,7 +3,7 @@
 Plan: `.agents/plans/keynote_live_gl_replay_managed_obs.plan.md` rev 2 (+ owner decisions below). Branch
 `claude/od-2-gl-replay-managed-obs-5bd03f`. Harness `scripts/managed_obs_qualify.py`, decoder `scripts/obs_cadence_decode.py`,
 fixture generator `scripts/binary_counter_movie.py`. OBS 32.2.2 (CEF 127), M1 Pro. G2 `10a5b36a…` v1 and core JS unchanged vs
-origin/main. Recordings `utvideo/yuv420p` (lossless codec, 4:2:0). Evidence (git-ignored): worktree `output/gl-replay-managed/`
+origin/main. Recordings `utvideo/yuv420p` (lossless codec, 4:2:0). Evidence (git-ignored): worktree `output/gl-replay-managed/` — **not retained** (worktree `autoprompts-toggle-cfdda0` removed 2026-09-25 with the owner's OK)
 (`runs/`, `shots/`, `Q-*.log`, `Qkb-*.log`).
 
 **Fixture of record: binary counter** — main checkout `output/p2-binary/` (P2 fixture copy, `Untitled.mov` replaced by a black/white
