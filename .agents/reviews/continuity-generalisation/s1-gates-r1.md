@@ -4,7 +4,7 @@ Plan: `.agents/plans/keynote_live_continuity_generalisation.plan.md` §3 S1, §4
 Every final gate ran at merge commit **`421b4f39`** (S1 + origin/main through #235), from a detached worktree with the
 P2 fixture symlinked. Product runtime files (`live_continuity_js.py`, `live_gl_replay_js.py`, `live_continuity.py`,
 `live_host.py`, `live_runtime.py`) are byte-identical to origin/main, and the core sha is unchanged
-(`e9338aff…01fa4`). Evidence (git-ignored, main checkout): `output/evidence/s1-gates/{r1-331f944d,r2-8ac39a42,r3-421b4f39}/`.
+(`e9338aff…01fa4`). Evidence (git-ignored, main checkout): `output/evidence/s1-gates/r3-421b4f39/` (r1, r2 and the Chrome profiles not retained).
 
 ## Result: PASS (`run_gates.sh` → `DONE failed=0 pending=0`, load 14 → 8)
 

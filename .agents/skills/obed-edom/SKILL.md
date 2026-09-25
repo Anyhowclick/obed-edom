@@ -778,6 +778,19 @@ for the parked `iwa-surgical-write-generator` feature.
 
 ---
 
+## Alpha Keynote live go-to (#203/#205)
+
+* **Auto-play repair.** After a go-to settles, the host (`live_host.py`) gives a leading `automaticPlay` run of 1 or more
+  one ordinary advance, after an R1 re-read. A failure before dispatch notes "Movies idle until next advance"; nothing
+  raises after the go-to ack. `OBED_LIVE_GOTO_AUTOPLAY=off` is the null control.
+* **Click mode** waits (bounded) for the slide-number overlay to close before any click (`_await_click_target`);
+  `#slideNumberControl` is hidden on output.
+* **Gate G:** `scripts/live_continuity_probe.py --pass G [--viewport WxH | --attach]`; fails closed on missing evidence.
+* **Residuals:** a physical input between the R1 re-read and the host's advance can race it (the in-page
+  `jumpToSlide(n,true)` answer is deferred); visible auto animations on arrival are not gated. **Unverified lead:** the
+  player's `handleClickEvent` ignores clicks whose target is a `<video>`, so a playing movie over the stage centre may
+  swallow `click_stage()` advances in attach mode. Reproduce before acting.
+
 ## LW deck facts
 
 * Wall verses may be duplicated across centre panels; collapse identical

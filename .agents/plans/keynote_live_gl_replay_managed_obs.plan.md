@@ -1,7 +1,7 @@
 # Plan: GL replay under managed OBS (lifting OD-2)
 
-Status: **rev 2 APPROVED by the owner** (OQ-3a + OQ-4 as proposed), 2026-09-24; **implemented** — see §10 for the 2026-09-25 decisions (rev 1 critiqued against the code; changes in §9). Planned read-only against `d12a5e14` (origin/main, #226 merged).
-Parents: `keynote_live_gl_replay_arming.plan.md` (OD-1..3, gates; D5 superseded for Keyer — §6), `keynote_live_managed_obs.plan.md` (§1 "Unchanged", §10 Codex item 7, §11 risk 5), handover `keynote-live-continuity-2026-09-23-c.md` (Next 1), gate record `.agents/reviews/gl-replay-c/gates-r2.md` (gate numbering). Style: `~/.AGENTS.md` (minimal natspec, no inline comments, match local style, keep it simple).
+Status: **rev 2 APPROVED by the owner** (OQ-3a + OQ-4 as proposed), 2026-09-24; **LANDED #229 (`8fe3b551`, 2026-09-25)** — see §10 for the 2026-09-25 decisions (rev 1 critiqued against the code; changes in §9). Planned read-only against `d12a5e14` (origin/main, #226 merged).
+Parents: `keynote_live_gl_replay_arming.plan.md` (OD-1..3, gates; D5 superseded for Keyer — §6), `keynote_live_managed_obs.plan.md` (§1 "Unchanged", §10 Codex item 7, §11 risk 5), handover `git show 6fc85b78:.agents/handovers/keynote-live-continuity-2026-09-23-c.md` (Next 1), gate record `.agents/reviews/gl-replay-c/gates-r2.md` (gate numbering). Style: `~/.AGENTS.md` (minimal natspec, no inline comments, match local style, keep it simple).
 
 **Owner decisions (final, 2026-09-24):** (1) lifted for the managed OBS only (`bridge="obs-managed"`); external attach (`obs-cdp`) stays refused with "attach output not qualified". (2) GL replay defaults ON in Keyer mode, `OBED_LIVE_GL_REPLAY=off` opts out; HDMI stays opt-in. (3, answers to rev 2 OQs) OQ-1: ship default-on regardless; no usable screenshot alpha moves M3 to hardware day, not a blocker. OQ-2 **confirmed**: rate 30 is judged relative to native. OQ-3: the soak uses a separate looping-movie fixture (§4 "Soak fixture").
 
@@ -122,7 +122,6 @@ Budget: g2 takes 25 hidden ×2 + 25 shown ×2 + 30 hidden ×2 + 2 KB takes (each
 - **`keynote_live_gl_replay_arming.plan.md` §8 (D5, line 219):** the 2026-09-24 owner decision supersedes D5 for Keyer (default on); HDMI stays `off`; continuity's plan allowlist still bounds which decks can arm.
 - **`decklink-field-test-runbook.md`:** §0a G2 on by default under Keyer + opt-out; §3 line 175 drop "(not in the build under test yet)" for managed; §3 1→2 checkbox — under managed, the slide-2 movie plays; Known limits — the "not visible" item stays only for external attach; triage row — frozen slide-2 movie under Keyer → check the log's `continuity.glReplay` mode/reason, `OBED_LIVE_GL_REPLAY=off` fallback; do not refresh the browser source mid-show; "Before 2026-10-10" — add the `--arm g2` run; hardware day — the M7 In4 key check.
 - **"Browser source custom frame rate = 2× canvas":** moot for managed (seeded); already present for manual OBS (§0b line 119) — no new item.
-- **Handover `keynote-live-continuity-2026-09-23-c.md` Next 1:** point to this plan + gate record, with status.
 
 ## 7. Work split, order, review
 

@@ -10,8 +10,8 @@ the code is the source of truth.** One sub-doc kept: [`../research/kpf_renderer_
 1. **P1 — on-demand build preview** in the dashboard deck-review flow (Apple's exported-HTML player).
    **Shipped.** (`dashboard` `BuildPreview` component.)
 2. **P2 — alpha-capture / Magic-Move feasibility probe.** A gate, not an assumption: an offline
-   adversarial probe with real output + an honest RED stop-line. **DONE — all findings green, shipping
-   in PR #158** (`feat/keynote-alpha-p2-html-mm`). Details below.
+   adversarial probe with real output + an honest RED stop-line. **DONE — all findings green, merged
+   #158** (`946a7648`, 2026-09-20) (`feat/keynote-alpha-p2-html-mm`). Details below.
 3. **P3 — transparent animation export** in DSK→Exporter. **NOT STARTED — restart from scratch** (owner,
    2026-09-23: earlier P3 work was never committed or pushed; start again from scratch). Gated behind P2 + an
    owner asset-timing contract before it is wired. Focus is still P2.

@@ -1,6 +1,6 @@
 # Handover → Codex: Alpha Keynote live continuity, deferred items (2026-09-19 night)
 
-> **SUPERSEDED for branch/PR state** by later handovers (current: `keynote-live-continuity-2026-09-23-c.md`). Kept because the DeckLink field-test runbook uses its real-OBS findings as background and logs venue results here.
+> **SUPERSEDED for branch/PR state** by later handovers (current state: GitHub and `.agents/plans/`). Kept because the DeckLink field-test runbook uses its real-OBS findings as background and logs venue results here.
 
 Owner field-tests DeckLink fill/key through OBS **tomorrow morning**. You have ~2 h. Work the list
 top-down; stop at a green, committed state. Owner rules (AGENTS.md wins): accuracy and code quality over
