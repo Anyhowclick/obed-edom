@@ -31,8 +31,10 @@ tally(){ case $1 in 0) ;; 3) PENDING=$((PENDING+1)); echo "    PENDING REGISTRAT
 # Pre-registered expectation per P2 arm: the EXACT complete red set (space-separated ids, "" = none). MATCH iff
 # observed red == that set, all 15 findings reported, source unchanged, `success` True exactly when the set is empty,
 # the process exit agrees (0 when the set is empty, 1 otherwise), and the injected core sha equals the arm's (variant
-# sha for --core-variant, else today's). "RECORD" registers no set: it prints the observed set and returns 3 only when
-# those integrity checks hold (exit 0 or 1).
+# sha for --core-variant, else today's). A finding rendered `**False** (inconclusive)` is never red: any inconclusive
+# finding fails the arm's integrity. Under --gl-replay auto `glReplayCarry1to2` must be present and `refusedCarry1to2`
+# absent (the reverse otherwise), so the GL path cannot be skipped silently. "RECORD" registers no set: it prints the
+# observed set and returns 3 only when those integrity checks hold (exit 0 or 1).
 expect(){ $PY - "$@" <<'PYEOF'
 import re,sys
 sys.path.insert(0,"scripts")
@@ -41,19 +43,23 @@ from obed_edom.live_continuity_js import js_sha256
 log,rc,spec,args=sys.argv[1],int(sys.argv[2]),sys.argv[3],sys.argv[4:]
 try: text=open(log,encoding="utf-8",errors="replace").read()
 except OSError as e: print(f"    no log ({e}) -> MISMATCH"); sys.exit(1)
-found=re.findall(r"^- ([A-Za-z0-9]+): \*\*(True|False)\*\*",text,re.M)
-red={n for n,v in found if v=="False"}
+found=re.findall(r"^- ([A-Za-z0-9]+): \*\*(True|False)\*\*(?: \(([^)]*)\))?",text,re.M)
+inconclusive=sorted(n for n,_,verdict in found if verdict=="inconclusive")
+red={n for n,v,verdict in found if v=="False" and verdict!="inconclusive"}
+ids={n for n,_,_ in found}
+auto="--gl-replay" in args and args[args.index("--gl-replay")+1:][:1]==["auto"] or "--gl-replay=auto" in args
+slot_ok=("glReplayCarry1to2" in ids and "refusedCarry1to2" not in ids) if auto else ("refusedCarry1to2" in ids and "glReplayCarry1to2" not in ids)
 core=re.search(r"injected core sha256: ([0-9a-f]{64})",text)
 success=re.search(r"^success: \*\*(True|False)\*\*",text,re.M)
 unchanged=re.search(r"^Source unchanged: \*\*True\*\*",text,re.M)
 variant=next((a.split("=",1)[1] for a in args if a.startswith("--core-variant=")),None) or next((args[i+1] for i,a in enumerate(args[:-1]) if a=="--core-variant"),None)
 want_sha=variant_sha(variant) if variant else js_sha256()
 sha_ok=bool(core) and core.group(1)==want_sha
-count_ok=len(found)==15 and len({n for n,_ in found})==15
+count_ok=len(found)==15 and len(ids)==15
 exit_ok=(rc==0)==(success is not None and success.group(1)=="True") and rc in (0,1)
 print(f"    core sha {core.group(1) if core else None} expected {want_sha} {'MATCH' if sha_ok else 'MISMATCH'}")
-print(f"    exit {rc}; findings {len(found)}/15; source unchanged {bool(unchanged)}; success {success.group(1) if success else None}; observed red: {sorted(red) or '{}'}")
-integrity=sha_ok and count_ok and bool(unchanged) and bool(success) and exit_ok
+print(f"    exit {rc}; findings {len(found)}/15; source unchanged {bool(unchanged)}; success {success.group(1) if success else None}; 1->2 slot {'glReplayCarry1to2' if auto else 'refusedCarry1to2'} {'OK' if slot_ok else 'WRONG'}; inconclusive: {inconclusive or '{}'}; observed red: {sorted(red) or '{}'}")
+integrity=sha_ok and count_ok and bool(unchanged) and bool(success) and exit_ok and slot_ok and not inconclusive
 if spec=="RECORD":
     print(f"    expected red: (none registered) -> {'RECORDED' if integrity else 'MISMATCH'}")
     sys.exit(3 if integrity else 1)
