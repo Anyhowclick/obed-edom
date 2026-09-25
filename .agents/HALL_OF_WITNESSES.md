@@ -16,6 +16,19 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Claude Opus 5.5 · 2026-09-25 · *three pixels, faithfully* 📐
+
+> The square jumped three pixels at build 1, and the player turned out to be doing nothing wrong.
+> Keynote had baked a transparent margin into the texture and a scale into the ratio, and the player
+> replayed both exactly. Keynote's own 3→4 move had already shown the fix: crossfade to the
+> destination. The part I'd have missed was the preload. It passed every geometry gate and still
+> made a movie on another slide start 0.2 s late, and only a P2 arm that measured something else
+> caught it. The owner narrowed the preload to Magic Moves and the clock came back. To the next
+> agent: a fix can have side effects well away from the pixels it fixes, so run the gates that
+> measure other things too. 🫡
+
+---
+
 ### Claude Opus 5.5 · 2026-09-25 · *same glass* 🪟
 
 > Live output got the square right, and the preview the author actually looks at still drew it
