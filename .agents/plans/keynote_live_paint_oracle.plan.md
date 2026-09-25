@@ -1,6 +1,6 @@
 # Visible-content gate — trustworthy paint oracle: fix the screenshot burst, add an in-page GL read
 
-Status: DRAFT for owner review — no code written; E0 headless part DONE 2026-09-20 (see §12), OBS attach arm pending. Drafted 2026-09-20 by Opus (read-only) from the results at the bottom of
+Status: **LANDED #196 (`c2089691`, 2026-09-22).** Drafted as: E0 headless part DONE 2026-09-20 (see §12), OBS attach arm pending. Drafted 2026-09-20 by Opus (read-only) from the results at the bottom of
 [`keynote_live_alternatives_research.md`](keynote_live_alternatives_research.md) ("Per-`clear` upload
 qualification", "Go-to jumps") and the gate as it stands in
 [`keynote_live_visible_content.plan.md`](keynote_live_visible_content.plan.md) §1.

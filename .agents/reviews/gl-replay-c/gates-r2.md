@@ -72,6 +72,7 @@ the 23:25 cut-off and was finished on 2026-09-24. Phase 2 ran on `bef57a23` (Cod
   events, census, reads, lingering, index sequence plus flipIndex, pre-flip owners from the carry detail) and scores it.
 - The A7/A7′ scoring is inline in `output/evidence/gates-glc/r2/p2/a7.txt` (it calls `p2_verdict.glProbeSampleFramePairing`, and for A7
   `frameIndex` vs `screenIndexNonGating`, modulo 256).
+- The raw r1 run (`g3/`, `g3-diag/`, `shas-*.txt`) was not retained.
 - Everything else is as listed in r1: the `-oldbytes` arm, the 3 s uploads/s window, the N1/N2 rows and the integrity checks.
 
 ## Evidence (main checkout `output/evidence/gates-glc/r2/`)

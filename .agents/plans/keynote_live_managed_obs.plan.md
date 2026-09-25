@@ -1,8 +1,8 @@
 # Managed OBS v1 — Alpha Keynote runs its own hidden OBS for fill + key
 
-**Rev 2, DRAFT for owner review** (2026-09-24; owner answers in §14, all resolved). Rev 1 by Opus EXTRA HIGH; critique by Opus HIGH (3 blockers, 9 others; §13),
-folded by the coordinator. Nothing is implemented.
-Parents: `decklink-field-test-runbook.md` (§0 OBS setup, §3 cadence note), `keynote-live-continuity-2026-09-23-c.md` ("OBS rate +
+**LANDED #226 (`d12a5e14`, 2026-09-24).** Rev 2 (2026-09-24; owner answers in §14, all resolved). Rev 1 by Opus EXTRA HIGH; critique by Opus HIGH (3 blockers, 9 others; §13),
+folded by the coordinator.
+Parents: `decklink-field-test-runbook.md` (§0 OBS setup, §3 cadence note), `git show 6fc85b78:.agents/handovers/keynote-live-continuity-2026-09-23-c.md` ("OBS rate +
 output cadence"), [`keynote_live_gl_replay_arming.plan.md`](keynote_live_gl_replay_arming.plan.md) (G2 attach qualification OD-2
 is out of scope). Spike: main checkout `output/evidence/obs-managed-spike/scripts/{seed.py,ws.py}`, `output/evidence/obs-rate/{rate.py,decode2.py}`.
 Tags: **[M]** measured in the 2026-09-24 spike or read from OBS source · **[C]** read in this repo · **[I]** assumption, each settled

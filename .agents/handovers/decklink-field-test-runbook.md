@@ -11,7 +11,7 @@ candidate replacement is `claude/keynote-live-baseline` (runtime v4: 1→2 refus
 gates green, **never run against real OBS** — do that at home first, see "Before 2026-10-10"). Fallback build:
 `9dab02c` (proven vs OBS; known 3→4 in-move artifact + stray clip on slide 4). Everything here is **UNQUALIFIED
 until seen at the mixer**. Goal order: **(1) alpha verdict in 10 min → (2) presenter through OBS →
-(3) movie through Magic Moves.** Background: `keynote-live-continuity-2026-09-19.md` (same folder),
+(3) movie through Magic Moves.** Background: "Background — paid-for facts" at the end of this runbook,
 plans in `.agents/plans/keynote_live_continuity*.md`, README "Alpha Keynote".
 
 Paths used below:
@@ -37,8 +37,8 @@ concurrent browser broke an arm's stage fit on 2026-09-19).
 - Sanity check on arrival (≈1 min, no browser):
   `cd $W && git status --short && git log --oneline -1 && PYTHONPATH=$W/src $PY -m pytest tests/test_live_host.py tests/test_live_continuity.py tests/test_live_continuity_js.py -q`
   → clean tree, tip at or after `62e1ab7` (`git diff --stat 62e1ab7 -- src scripts dashboard` must be empty), all green.
-- Keep a running note of every observation with the time; at the end append a dated section to
-  `keynote-live-continuity-2026-09-19.md` (results, settings that won, log file names) and commit it.
+- Keep a running note of every observation with the time; at the end append a dated "Field test results" section to
+  this runbook (results, settings that won, log file names) and commit it.
 
 ## Hardware — identified from the owner's photos (2026-09-20)
 - **Output device: Blackmagic UltraStudio HD Mini** — Thunderbolt 3, bus-powered, 2× 3G-SDI out + 1× SDI in, HDMI
@@ -181,7 +181,7 @@ share of output frames that REPEAT the previous movie frame (ideal 0) —
 source FPS 25 (matched): native movie 25–27 % · default 30 Hz: 14–23 % · **50: 8–12 %**, and a GL-replayed movie
 (on by default under Keyer output at 25 and 30 fps since OD-2, `claude/od-2-gl-replay-managed-obs-5bd03f`) 0.5–2 %. Matching the canvas is the worst setting; render the page at 2× the canvas.
 Harness and runs: main checkout `output/evidence/obs-rate/` (`rate.py rec` + `decode2.py`; only LOSSLESS recordings read the counter reliably).
-**Known before going in (2026-09-20, `keynote-live-continuity-2026-09-20.md`):** a movie continuing through a
+**Known before going in (2026-09-20, see "Background — paid-for facts"):** a movie continuing through a
 Magic Move is unreliable on screen. On `62e1ab7`, slide 2 shows a **static poster with a stray copy on top** — the
 carried `<video>` decodes but cannot paint (a Magic-Move-settled slide is one stage-wide WebGL canvas, DOM layers at
 opacity 0). Seeing exactly that = known, not a DeckLink/OBS fault; record and move on. On the baseline build 1→2 is
@@ -280,3 +280,39 @@ are red on pristine `main` (unrelated).
       present ⇒ "cannot open the UltraStudio" expected, (b) its SDI screen deleted, (c) ProPresenter quit — record
       which frees the device. Then Release output ⇒ ProPresenter reclaims it (re-add the screen / relaunch) with
       fill + key on In3/In4.
+
+## Background — paid-for facts (folded from the 2026-09-19 and 2026-09-20 handovers, deleted 2026-09-25)
+Originals: `git show 6fc85b78:.agents/handovers/keynote-live-continuity-2026-09-19.md` and `…-2026-09-20.md`.
+
+**Attach mode against REAL OBS 32.2.2 (CEF = Chrome/127.0.6533.120), 2026-09-19 at `d16119c`:**
+Read-only run by Claude at `d16119c`, fixture (H.264) deck, `OBED_LIVE_ATTACH=http://127.0.0.1:9222`,
+`OBED_LIVE_ATTACH_MATCH=about:blank#program`: exactly-one-target match OK · page viewport exactly
+1920×1080, dpr 1, html/body background `rgba(0,0,0,0)` · continuity **qualified** · **CDP Space/digits/Enter
+DO reach the CEF page** (5 advances settle 1.3–2.3 s; goTo 1 in 0.34 s) ⇒ **P0-b click fallback is now
+LOW priority** · both H.264 movies decode (readyState 4, 0–3 dropped of ~60 frames) · hide ⇒ not visible
+and both movie clocks keep advancing (+1.5 s in 1.5 s) · CDP screenshot of slide 3 has real alpha (81 %
+alpha 0, 18.9 % opaque) · stop ⇒ page at `about:blank`, OBS still running, log written. Not yet seen:
+DeckLink output itself, HEVC originals in CEF, the 3→4 in-move artifact through OBS (expected, same bytes).
+
+**Gotchas:**
+- Never send `nativeVirtualKeyCode` in CDP key events on macOS (browser UI thread stalls 6–35 s).
+- Headless `--window-size=W,H` gives innerHeight = H−32; probes compensate (`HEADLESS_CHROME_HEIGHT_PAD`)
+  or use `Emulation.setDeviceMetricsOverride`.
+
+**Measured on the real player (do not re-derive):**
+- A Magic-Move-settled slide is painted by ONE stage-wide WebGL canvas (`#0-canvas`); the DOM layer tree is at opacity 0,
+  so an in-layer `<video>` decodes but cannot paint. After a dissolve the DOM tree paints normally. The WebGL canvas
+  draws only during the move (≈250 `drawElements`/s) and never at rest; it is gone on the next dissolve slide.
+- The player NEVER fires `hashchange`. During a transition the hash equals `atScene − 1` for the whole move and the
+  slide's videos are detached THERE; the hash reaches `atScene` only ~2 s later.
+- `elementsFromPoint` never returns the video (pointer-events none) — useless as a paint oracle. Use
+  `checkVisibility({checkOpacity,checkVisibilityCSS})` + the ancestor-opacity product.
+- A detached `<video>` reports literal viewport (0,0), not the stage origin. 2560×1440 has stage origin (0,0) and cannot
+  reveal offset bugs — always include the letterboxed 1600×1000 arm.
+- `websockets` caps a message at 1 MiB: 2560×1440 PNG screenshots crossed it ⇒ "Program browser CDP connection failed"
+  ~1 session in 4 (fixed: 64 MiB). The fixture movie flips state every frame ⇒ an n-shot liveness burst reads a healthy
+  movie dead with p = 2·0.5ⁿ (5 shots 6 %, measured; now 12).
+- The export's draw order is exact: each event's `baseLayer.layers` is back-to-front, one wrapper per object; the movie's
+  `objectID` equals its slot child's. A Keynote HTML export stores one copy of each movie per slide folder.
+- P2's harness injected a plan naming the slide-3-only clip; that alone made the runtime pool and remount it on slide 4.
+  The injected plan must equal `derive_plan(...).to_runtime()` in full.

@@ -635,7 +635,7 @@ overlapping edits to those boundary files without coordination.
     capped 45pt text still exceeds the slot REFUSES rather than shrinking below the slot lead;
     `SplitPart` gained per-part `scale`+`slot_capped` so the `--text-fit shrink` refit uses the
     part's own scale and preserves the 50pt cap. Claude high-effort was not used; Claude planned,
-    Sonnet implemented, GPT-5.6 Sol r1/r2 under `.agents/reviews/dsk-split-cap/`. (a) MAJOR latent
+    Sonnet implemented, GPT-5.6 Sol r1/r2 (raw rounds deleted; `git show 6fc85b78:.agents/reviews/dsk-split-cap/`; both r2 findings verified fixed 2026-09-25: the one-part rect is clamped `min(h, band.height)` and the GW38 one-part test asserts the capped wrapped height). (a) MAJOR latent
     emphasis-cap/scale gap + (b) MINOR one-part height both closed; offline only, full suite green.
 13. **C5: split is never re-run after a refit** — a part's geometry is corrected, never
     re-windowed live; enforced explicitly in `_build_refit_round`.
@@ -745,6 +745,10 @@ overlapping edits to those boundary files without coordination.
     single-line-only). Moves the DSK golden fits; never rewrites verse text to force reflow.
     Option B alone (per-paragraph size, no line spacing: 304.5 pt, +0.99 lines) was rejected: it
     clears the 1.0-line gate by 0.01 while still mis-modelling the line height.
+32. **Full live text acceptance — never done end to end (open, after items 8 and 27).** Accept the
+    generated text geometry and sizes against the gold `~/Desktop/Diff-Checker/Sermon_PK (DSK)_with mistakes.key`.
+    The only live text run so far (text-r1, §5 step 14) was a subset and stopped at the pill pass (item 8);
+    item 27 moves the acceptance decks, so accept after both land.
 
 ## 5. Live-run recipe
 
@@ -784,6 +788,13 @@ overlapping edits to those boundary files without coordination.
     referent True, delay 0), others With Build 1 (True, False, 0), `playsAcrossSlides` False. Live
     r17 (2026-09-17, PR #151) PASSED on `DSK_Gen_Export_Input.key` 11–13; evidence
     `~/Desktop/dsk-d4-work/evidence-r17/` (trashed 2026-09-22).
+14. Text generate (text-r1, 2026-09-17, first live text run, PARTIAL): dashboard `POST /api/dsk` with
+    `content_only=false` + `slides=<spec>` → `/api/dsk/<id>/apply`; layout slots import automatically. text-r1 ran on a
+    fresh GW copy, slides `5,13,44,46,50-53,57`: assembly + refit + style ran live (all 9 anchored; D1b point layout
+    verified on 44/46/50 per item 11; Keynote peak 2.5 GB, quit clean), then REFUSED at the pill pass (item 8); the
+    fail-safe kept the `.refused.key` and the source GW deck was byte-untouched. The propose log's "skipped (text slide;
+    content-only)" line is PREVIEW-only and its string is stale — with `content_only=false` the decisions are
+    `include=True`.
 
 ## 6. Test gates
 

@@ -1,6 +1,6 @@
 # Baseline: per-boundary refusal + visible carry (owner decision 2026-09-20)
 
-DRAFT for owner review — written overnight 2026-09-20 by Opus (read-only); nothing here is implemented.
+**LANDED 2026-09-20 via #175 → #158 (`946a7648`), runtime v4.** Written overnight 2026-09-20 by Opus.
 Parent: [`keynote_live_visible_content.plan.md`](keynote_live_visible_content.plan.md) §5–§7 (diagnosis, decision, spike:
 option (b) is dead at Q2). Note: since this was drafted, `live_continuity_js.py` gained `slotLive`/`retireSlot`
 (commit `6bee983`) — cite functions by name.

@@ -1,7 +1,7 @@
 ---
 name: Off-canvas Magic Move partners — keep them, placed off the CG canvas
 overview: >-
-  2026-09-24, first-pass plan (Opus, high), from `pass1_hides_offline.plan.md` todo
+  LANDED #224 (`c89d8296`, 2026-09-24). 2026-09-24, first-pass plan (Opus, high), from `pass1_hides_offline.plan.md` todo
   `followup-mm-leftovers`. The planner's off-slide-leftover rule (`map_remap.py:2498-2501`) hides every
   object wholly off the 7680×1080 wall. Some of those objects are Magic Move (MM) partners of on-wall objects on
   the neighbouring slide, so deleting them breaks the MM transition in the CG deck (owner: FRC 16→17). Fix:

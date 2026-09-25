@@ -1,4 +1,4 @@
-# Managed OBS: false `obsExited` from a LaunchServices blip (plan rev 2, approved 2026-09-25)
+# Managed OBS: false `obsExited` from a LaunchServices blip (rev 2, LANDED #230 `07b1ad5d`, 2026-09-25)
 
 ## The bug
 

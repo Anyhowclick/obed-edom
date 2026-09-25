@@ -390,7 +390,8 @@ controls (8px for text; 2–8px for crops) and a second, independent arm-A null 
 phase-correlation bar independently caps text translation at 8px; horizontal and vertical
 alignment determine both A and projected-B footprints. Composed crop geometry stays under
 2px, and wholly off-canvas objects compare at whole-slide scope. The A/B/null PNG manifests,
-both deck digests, and oracle-code digest bind the report to the recorded run.
+both deck digests, and oracle-code digest bind the report to the recorded run (the preview PNGs themselves were not retained after
+2026-09-25; the report and run records are kept).
 Only exact `(slide, drawable id)` rows from a passing report may delegate autosize archive x
 or masked raw-size checks; type, flips, mask angle, crop frame, and identity still gate.
 Generate the report with `scripts/text_mask_visual_oracle.py --previews-null-a ...`, then pass it to
@@ -777,6 +778,19 @@ for the parked `iwa-surgical-write-generator` feature.
   `video.loop` seek skip of 0–2 frames).
 
 ---
+
+## Alpha Keynote live go-to (#203/#205)
+
+* **Auto-play repair.** After a go-to settles, the host (`live_host.py`) gives a leading `automaticPlay` run of 1 or more
+  one ordinary advance, after an R1 re-read. A failure before dispatch notes "Movies idle until next advance"; nothing
+  raises after the go-to ack. `OBED_LIVE_GOTO_AUTOPLAY=off` is the null control.
+* **Click mode** waits (bounded) for the slide-number overlay to close before any click (`_await_click_target`);
+  `#slideNumberControl` is hidden on output.
+* **Gate G:** `scripts/live_continuity_probe.py --pass G [--viewport WxH | --attach]`; fails closed on missing evidence.
+* **Residuals:** a physical input between the R1 re-read and the host's advance can race it (the in-page
+  `jumpToSlide(n,true)` answer is deferred); visible auto animations on arrival are not gated. **Unverified lead:** the
+  player's `handleClickEvent` ignores clicks whose target is a `<video>`, so a playing movie over the stage centre may
+  swallow `click_stage()` advances in attach mode. Reproduce before acting.
 
 ## LW deck facts
 
