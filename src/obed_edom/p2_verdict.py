@@ -3968,7 +3968,10 @@ def _stray_slide(player: int, scene_hash: object, rows: list[dict], expected: li
 def noStrayVideo(snapshots: object, slide_instances: object, scene_index_by_player: object) -> dict:
     """On every settled slide, each painting `<video>` (`visible && !suppressed34`, re-derived
     from the raw readings) claims an authored instance by rect (IoU >= 0.75) and no instance is
-    claimed twice. Presence is not scored here: a non-painting video satisfies and reds nothing.
+    claimed twice. It does NOT score presence -- a Magic-Move-settled slide legitimately paints
+    through the player's WebGL canvas, and a non-painting video satisfies and reds nothing;
+    movie1's presence is scored by `refusedCarry1to2`/`glReplayCarry1to2` (slide 2),
+    `deliberateRestart2to3` (slide 3) and `continueThroughMovingMagicMove3to4` (slide 4).
     Any malformed or disagreeing reading is INCONCLUSIVE, never a verdict."""
     result: dict = {"ok": False, "verdict": "inconclusive", "reason": None, "iouMin": STRAY_IOU_MIN,
                     "failingSlides": [], "slides": []}

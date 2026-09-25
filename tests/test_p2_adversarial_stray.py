@@ -129,10 +129,12 @@ def test_an_extra_painting_video_on_an_authored_rect_is_a_duplicate():
     assert "painted more than once" in verdict["reason"]
 
 
-def test_presence_is_not_scored_an_unpainted_instance_does_not_red():
-    """Codex r1 #9 (coordinator decision): `noStrayVideo` claims no presence. An
-    authored instance nothing paints -- slide 2's WebGL composite, or a movie gone
-    entirely -- is left to the other P2 findings."""
+def test_non_claim_noStrayVideo_does_not_score_presence():
+    """Documents the NON-claim (Codex r1 #9 / r2 R1-9, closed by narrowing): an authored
+    instance nothing paints -- slide 2's WebGL composite, or a movie gone entirely --
+    does not red this finding. Presence belongs to the liveness/continuity findings
+    (refusedCarry1to2 / glReplayCarry1to2, deliberateRestart2to3,
+    continueThroughMovingMagicMove3to4)."""
     snaps = _green_snapshots()
     snaps[1]["videos"] = []
     snaps[2]["videos"] = [r for r in snaps[2]["videos"] if r["decoderId"] != 5]

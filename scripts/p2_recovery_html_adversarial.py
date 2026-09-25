@@ -4354,8 +4354,10 @@ async def _run(player: Path) -> dict:
                     "(visible && !suppressed34, re-derived off-page) must claim an authored "
                     "instance of `ContinuityPlan.slide_instances` for that slide "
                     f"(IoU >= {no_stray['iouMin']}) and no instance may be painted twice. "
-                    "Presence is NOT scored here (slide 2 is drawn by the player's WebGL "
-                    "composite; the other P2 findings cover its composition). Malformed or "
+                    "This finding does NOT score presence: Magic-Move-settled slides legitimately "
+                    "paint through the player's WebGL canvas. movie1's presence is scored by "
+                    "refusedCarry1to2/glReplayCarry1to2 (slide 2), deliberateRestart2to3 (slide 3) "
+                    "and continueThroughMovingMagicMove3to4 (slide 4). Malformed or "
                     "non-re-derivable rows, an unsampled slide or a hash off the authored "
                     "slides are INCONCLUSIVE."
                 ),
