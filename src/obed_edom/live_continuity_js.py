@@ -324,12 +324,16 @@ PRESERVE_CORE_JS = r"""
       // more than ONE distinct decoder, ownership is AMBIGUOUS -> null (fail closed).
       const eps = Math.max(1e-9, bestIou * 1e-9);
       const near = cands.filter(function(x) { return x.iou >= bestIou - tol - eps; });
-      const distinct = [];
+      let distinct = [];
       near.forEach(function(x) { if (distinct.indexOf(x.v) < 0) distinct.push(x.v); });
-      if (distinct.length > 1) {
+      // An unplanned same-asset copy (no entry names its instance) never makes
+      // the planned instance's footprint ambiguous; a tie among planned ones does.
+      if (distinct.length > 1) distinct = distinct.filter(isPlannedDecoder);
+      if (distinct.length !== 1) {
         return {elId: null, key: null, via: 'ambiguous', contextType: null};
       }
-      const owner = near.reduce(function(a, b) { return b.iou > a.iou ? b : a; });
+      const owner = near.filter(function(x) { return x.v === distinct[0]; })
+        .reduce(function(a, b) { return b.iou > a.iou ? b : a; });
       return {elId: owner.v.__obedElId, key: owner.key, via: 'footprint-video', contextType: null};
     }
   };
@@ -738,6 +742,11 @@ PRESERVE_CORE_JS = r"""
   function poolable(v) {
     const n = nextEntry(instanceOf(v));
     return !!n && (CARRY_ACTIONS.indexOf(n.action) >= 0 || (n.action === 'restart' && held.indexOf(v) >= 0));
+  }
+  function isPlannedDecoder(v) {
+    const inst = instanceOf(v);
+    return held.indexOf(v) >= 0 || isPooled(v)
+      || (inst != null && ENTRIES.some(function(b) { return namesInstance(b, inst); }));
   }
   function isPooled(v) {
     let found = false;
