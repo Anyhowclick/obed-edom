@@ -257,3 +257,37 @@ the Magic Move effect), `p2-loop` would not show it — F1 found no such change 
     core has no media-event listeners.
 11. **§2.5** says how the pre-gate test asserts the new shas and when it flips. **OQs** trimmed to four real owner calls;
     the three with a repo convention are stated as decided.
+
+## 10. WS-C detail (read from OD-2 at `0620603e` + its uncommitted tree, 2026-09-25)
+
+OD-2 is adding a **binary counter** (`scripts/binary_counter_movie.py`, fixture `output/p2-binary` with `fixture.json`
+`{"counter": "binary", "base": "p2-recovery/html-adversarial", …}`): Chromium's native `<video>` applies a midtone curve
+that G2's `texImage2D` path does not, so the grey counter reads frames apart between native and G2 — a wrap at the
+hand-back would decode wrong. The binary decoder is wrap-aware (`is_wrap(..., mod=None)`, 12 bits > 1381 frames). Owner
+2026-09-25: the looping soak fixture gets the binary counter. Re-verify every name below on the merged OD-2.
+
+1. **Fixture.** `output/p2-loop` is rebuilt with `scripts/loop_fixture.py --force --source <main>/output/p2-binary` (one
+   fixture for L1, L2 and L5; the grey-counter build is superseded). The builder also copies `fixture.json`, adding
+   `"loop": {"objectIds": […], "planSha256": {off, on}}` (the `loop-splice.json` record). The JSON splice is unchanged, so the
+   plan shas stay `3dc67558…` / `2ba6fbed…` (the builder's self-check proves it); only the movies differ.
+2. **Harness `p2_family()`.** Today any manifest with `base == FIXTURE_BASE` counts as "qualified as is and not looping".
+   Change: P2 family = that base **and** no `loop` key. Looping = `loop` present; drop the `ctx["fixture"] != FIXTURE`
+   inference in `sessions_for`.
+3. **Drop the splice.** Delete `allow_soak_plan` and the `allow` plumbing (`make_export`/`fixture_facts`/`run_session`/
+   `sessions_for`): the product allowlist (`21944ddb`) qualifies `p2-loop`; a fixture that does not qualify is a clear
+   `SystemExit`, never an in-process patch. Delete `build_fixture`/`--build-fixture` (OQ-1(a)).
+4. **`SOAK_FIXTURE = output/p2-loop`**; `SOAK_LOOP_FRAMES` 1381 unchanged (asserted against the binary movie's
+   `fixture.json` `frames`).
+5. **Pre-check (a) enforced:** `video.loop` true on every slide-1 `untitled.mov` (`slide1Videos`), and on the carried element
+   after hand-back (read `.loop` on the handed-back element, not G2 `stats.loopMode` — F6). `loop_representation`: the
+   differing JSONs equal the `loop-splice.json` file list and every loop key is `loopMode="looping"` — enforced.
+6. **Soak.** With a real looping fixture, `soak_gates`' `enforced=looping` checks and `kb_verdict`'s `fixtureLooping`
+   become live (Opus r1 #8 on OD-2 stops being vacuous). Wrap windows decoded with `counter="binary"` + `loop_frames=1381`.
+7. **L1/L2 re-run on the rebuilt fixture** (headless, ≈ 25 min; clock-based, expected unchanged) so every gate reads one
+   fixture; record in `gates-r2.md`.
+8. **Tests:** `tests/test_managed_obs_qualify.py` — splice gone (no `mock.patch` of `QUALIFIED_PLAN_SHA256`), `p2_family`
+   false for a manifest with `loop`, pre-check (a) KBs (a slide-1 element with `loop` false ⇒ FAIL; an extra differing JSON ⇒
+   FAIL). `tests/test_loop_fixture.py` — manifest copied with `loop`, binary source accepted.
+
+Owner-gated: L5 launches managed OBS (per-session OK). Files: `scripts/managed_obs_qualify.py`, its tests,
+`scripts/loop_fixture.py`, `tests/test_loop_fixture.py` — one implementer.
