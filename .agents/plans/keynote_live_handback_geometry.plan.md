@@ -93,7 +93,7 @@ GL end quad = offset + to + anchor − scale·anchor gives (789.000, 673.000, 35
 
 ### 1.4 Instrument and controls (OBS recordings, UtVideo lossless, Y plane, tv-range)
 
-- **Recordings.** `qualify-home/recordings/mmo-20260925-143530/` (25 fps) and `…-144012/` (30 fps). `14-37-02.avi` is
+- **Recordings.** `qualify-home/recordings/mmo-20260925-143530/` (25 fps) and `…-144012/` (30 fps) (recording not retained: trashed 2026-09-25; H.264 copies in main checkout `output/evidence/mmo-gates/obs-mo7/eyeball/`); measured edges kept in main checkout `output/evidence/handback-geometry/obs-recordings-edges.json`. `14-37-02.avi` is
   `g2-on-2`, the MO-7 control twin of `g2-on` (`obs-mo7/run.log`: "decoding g2-on-2"). The hand-back frames are found
   automatically (first green-right jump): 25 fps 409/408/407/435/436, 30 fps 493/492/491/525/520.
 - **Metrics.**
