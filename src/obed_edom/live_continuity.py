@@ -37,7 +37,7 @@ _MOVIE_SUBTREE_KEYS: dict[str, frozenset[str]] = {
     "<movie node>": frozenset(
         {"attributes", "baseLayer", "beginTime", "duration", "effects", "movie", "name", "objectID", "type"}
     ),
-    "movie": frozenset({"asset", "endTime", "isAudioOnly", "isStreaming", "startTime", "volume"}),
+    "movie": frozenset({"asset", "endTime", "isAudioOnly", "isStreaming", "loopMode", "startTime", "volume"}),
     "attributes": frozenset({"direction"}),
     "baseLayer": frozenset({"animations", "initialState", "layers", "objectID"}),
     "layers": frozenset(
@@ -628,6 +628,8 @@ QUALIFIED_PLAN_SHA256: frozenset[str] = frozenset(
     {
         "bafe26cad55cf3a390154bce2c0fdcc771b9b1821293b6aec76119d25180e81e",
         "6a0596da54532493aee74d22fe91b7cbf3628795aca586dd3cf7dc61a37cc635",
+        "3dc6755853692a178696a35495c1929662005a8173f932607855876bfc299c5d",
+        "2ba6fbed8fc959c804e53d2f21712945230eac6dcbf90d522fe3a6a688bef924",
     }
 )
 
@@ -720,6 +722,9 @@ class ContinuityPlan:
     refusals: tuple[dict[str, Any], ...] = ()
     """One entry per boundary a movie structurally continues across but must not be carried
     over. Additive and not part of `to_runtime()`, like `slide_instances`."""
+    loop_instances: dict[int, dict[str, list[dict[str, float]]]] = field(default_factory=dict)
+    """The looping subset of `slide_instances`, same shape and order. Not in `as_dict()`;
+    `to_runtime()` emits it as `loops` only when non-empty."""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -746,7 +751,8 @@ class ContinuityPlan:
         or any actionable boundary after a bridge. A boundary carrying a `refusal` becomes a
         `retire` -- at most one, and only before the first restart and any bridge -- unless the
         movie qualified for `glReplay` derivation, in which case it becomes a `glReplay` boundary
-        under the same guards.
+        under the same guards. Looping movie instances are listed under `loops`, so a looping
+        deck signs differently from its non-looping twin.
         """
         if not self.boundaries:
             return Unsupported("no boundaries to translate")
@@ -871,6 +877,21 @@ class ContinuityPlan:
                 continue
 
         runtime = {"movies": movies, "boundaries": runtime_boundaries}
+        if any(player_index not in self.scene_index_by_player for player_index in self.loop_instances):
+            return Unsupported("a looping movie instance has no scene index")
+        loops = sorted(
+            (
+                {"scene": self.scene_index_by_player[player_index], "asset": asset, "rect": _rect_ints(rect)}
+                for player_index, instances in self.loop_instances.items()
+                for asset, rects in instances.items()
+                for rect in rects
+            ),
+            key=lambda entry: (
+                entry["scene"], entry["asset"], *(entry["rect"][k] for k in ("x", "y", "w", "h"))
+            ),
+        )
+        if loops:
+            runtime["loops"] = loops
         if plan_signature(runtime) not in QUALIFIED_PLAN_SHA256:
             return Unsupported("deck shape is not yet qualified for continuity (only P2-measured plans are)")
         return runtime
@@ -1219,6 +1240,18 @@ def _normalize_asset_key(assets_table: dict[str, Any], asset_id: str) -> str:
 class _MovieInstance:
     rect: Rect
     object_id: str | None
+    loop: bool = False
+
+
+def _loops(movie: dict[str, Any], slide_name: str) -> bool:
+    if "loopMode" not in movie:
+        return False
+    value = movie["loopMode"]
+    if value == "looping":
+        return True
+    raise _Refuse(
+        f"movie on slide {slide_name} has an unmeasured loopMode {value!r} (only 'looping' is qualified)"
+    )
 
 
 def _slide_movie_instances(
@@ -1233,9 +1266,27 @@ def _slide_movie_instances(
         rect = _movie_rect(node, slide_name)
         key = _normalize_asset_key(assets_table, asset_id)
         instances.setdefault(key, []).append(
-            _MovieInstance(rect, object_id if isinstance(object_id, str) and object_id else None)
+            _MovieInstance(
+                rect,
+                object_id if isinstance(object_id, str) and object_id else None,
+                _loops(node["movie"], slide_name),
+            )
         )
     return instances
+
+
+def _sorted_rects(
+    instances: dict[str, list[_MovieInstance]], *, loop_only: bool = False
+) -> dict[str, list[dict[str, float]]]:
+    projected = {
+        asset: [
+            instance.rect.as_dict()
+            for instance in sorted(found, key=lambda i: (i.rect.x, i.rect.y, i.rect.w, i.rect.h))
+            if instance.loop or not loop_only
+        ]
+        for asset, found in sorted(instances.items())
+    }
+    return {asset: rects for asset, rects in projected.items() if rects}
 
 
 def _boundary_transition(events: list[Any], slide_name: str) -> dict[str, Any] | None:
@@ -1421,14 +1472,12 @@ def derive_plan(
     }
 
     slide_instances = {
-        player_index: {
-            asset: [
-                instance.rect.as_dict()
-                for instance in sorted(found, key=lambda i: (i.rect.x, i.rect.y, i.rect.w, i.rect.h))
-            ]
-            for asset, found in sorted(instances.items())
-        }
+        player_index: _sorted_rects(instances) for player_index, instances in instances_by_player.items()
+    }
+    loop_instances = {
+        player_index: _sorted_rects(instances, loop_only=True)
         for player_index, instances in instances_by_player.items()
+        if any(instance.loop for found in instances.values() for instance in found)
     }
 
     boundaries: list[SlideBoundary] = []
@@ -1489,9 +1538,18 @@ def derive_plan(
                 )
             except _Refuse as exc:
                 return Unsupported(str(exc))
+            loop_refusal = None
+            if len({instance.loop for instance in out_found + in_found}) > 1:
+                loop_refusal = (
+                    f"'{asset}' does not loop on every instance at {boundary_desc}; "
+                    "a carried decoder keeps its source's loop setting"
+                )
+                refusal = loop_refusal
+                if gl_replay:
+                    continuity = replace(continuity, gl_replay_reason=loop_refusal)
             if refusal is not None:
                 continuity = replace(continuity, refusal=refusal)
-                if gl_replay:
+                if gl_replay and loop_refusal is None:
                     continuity = _gl_replay_attempt(
                         continuity, transition, transition_name, len(continuing),
                         events_by_player[player_index], src_instance, uuid,
@@ -1510,6 +1568,7 @@ def derive_plan(
         slide_rects=slide_rects,
         boundaries=tuple(boundaries),
         slide_instances=slide_instances,
+        loop_instances=loop_instances,
     )
     table = _movie_table(plan)
     movie_keys = {} if isinstance(table, Unsupported) else table[0]

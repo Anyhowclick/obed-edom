@@ -3286,3 +3286,49 @@ console.log(JSON.stringify({
     assert result["module"] == {
         "version": live_gl_replay_js.GL_REPLAY_VERSION, "state": "IDLE", "standDowns": [],
     }, result["module"]
+
+
+def test_the_real_core_and_module_install_with_the_p2_loop_runtime():
+    """Loopmode plan L0-d: the looping deck's runtime carries a top-level `loops` annex that
+    neither JS module reads. Installed as-is on the real core and the real module, the core
+    must still come up ready and arm the zone, and the module must not stand down on
+    `planUnreadable`; the Python validator must accept its glReplay entry too."""
+    from test_live_continuity import P2_LOOP_GL_REPLAY_PLAN_SHA256, SLIDES, _loop_tree, _resolver
+    from test_live_continuity_js import _IDENTITY_STAGE, _run_full_core_in_node
+
+    from obed_edom.live_continuity import derive_plan, plan_signature
+
+    plan = derive_plan(_loop_tree(), SLIDES, resolver=_resolver, gl_replay=True)
+    runtime = plan.to_runtime()
+    assert isinstance(runtime, dict)
+    assert plan_signature(runtime) == P2_LOOP_GL_REPLAY_PLAN_SHA256
+    assert len(runtime["loops"]) == 5
+
+    entry = live_gl_replay_js.validate_gl_replay_entry(runtime)
+    assert entry is not None
+    assert entry == runtime["boundaries"][0]
+    assert live_gl_replay_js.gl_replay_script(runtime) != ""
+
+    result = _run_full_core_in_node(
+        plan=runtime, stage=_IDENTITY_STAGE,
+        after_core=_REAL_MODULE_AFTER_CORE.replace(
+            "__MODULE_SOURCE__", json.dumps(live_gl_replay_js.GL_REPLAY_JS)),
+        script=r"""
+const m = window.__OBED_GL_REPLAY__;
+const module = m ? {version: m.version, state: m.state, standDowns: m.standDowns.slice()} : null;
+const ready = P.ready;
+P.glReplay.carried('movie1');
+console.log(JSON.stringify({
+  ready: ready,
+  loops: window.__OBED_CONTINUITY__.loops.length,
+  module: module,
+  zones: P.events.filter((e) => e.kind === 'glreplay-zone')
+    .map((e) => [e.detail.from, e.detail.to, e.detail.reason]),
+}));
+""")
+    assert result["ready"] is True, result
+    assert result["loops"] == 5, result
+    assert result["zones"] == [["pending", "armed", "moduleReady"]], result["zones"]
+    assert result["module"] == {
+        "version": live_gl_replay_js.GL_REPLAY_VERSION, "state": "IDLE", "standDowns": [],
+    }, result["module"]

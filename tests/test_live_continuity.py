@@ -1235,6 +1235,11 @@ def test_the_measured_vocabulary_is_the_real_exports_and_nothing_more():
     from obed_edom import live_continuity
 
     measured = _measured_subtree_vocabulary(REAL_PLAYER_ROOT)
+    # `movie.loopMode` is the one key measured elsewhere: the owner's Repeat -> Loop export
+    # (`output/p2-soak-loop`, parity-tested in test_live_continuity_decks.py). P2's export
+    # carries no looping movie, so the key must be absent there and is added by hand.
+    assert "loopMode" not in measured["movie"]
+    measured["movie"].add("loopMode")
     assert set(measured) == set(live_continuity._MOVIE_SUBTREE_KEYS)
     for kind, keys in measured.items():
         assert keys == set(live_continuity._MOVIE_SUBTREE_KEYS[kind]), kind
@@ -3122,3 +3127,439 @@ def test_gl_replay_rejects_unreadable_transition_name_instead_of_raising(bad_nam
     plan_off = derive_plan(tmp, SLIDES, resolver=_resolver, gl_replay=False)
     assert isinstance(plan_off, Unsupported)
     assert "unreadable transition name" in plan_off.reason
+
+
+# --- looping movies: `movie.loopMode` (keynote_live_continuity_loopmode plan section 2) -----
+#
+# Keynote's Repeat -> Loop writes exactly one key, `movie.loopMode: "looping"`, on the
+# `renderMovie` node (plan F1). The player turns it into `HTMLVideoElement.loop = true` on its
+# own fresh element per slide; our runtime instead carries a decoder across a Magic Move and
+# keeps the SOURCE element's `loop`. So:
+#   - "looping" is the only qualified value; anything else is unmeasured vocabulary and
+#     refuses the whole deck (section 2.1);
+#   - a Magic Move boundary whose continuing asset does not loop on EVERY instance on both
+#     sides is refused on its own, like an overlap -- the core pools same-asset decoders FIFO,
+#     so the carried one may be any instance (section 2.2);
+#   - looping instances sign the runtime via a `loops` annex, so a looping deck can never
+#     reuse its non-looping twin's allowlisted sha (section 2.4).
+#
+# `P2-loop` is the committed P2 fixture with the key spliced onto the same objectIDs
+# `scripts/loop_fixture.py` splices (plan section 4): every `untitled.mov` instance, never
+# WA0125 (`2FE5195A`).
+
+P2_LOOP_OBJECT_IDS = (
+    "6BB39942-6C61-4763-839D-777C09E7E594",  # slide 1, carried across 1->2
+    "CBACAF27-B918-47C2-AB45-3ED71B6B394B",  # slide 1, the small second instance
+    "F9AFED1B-E2D7-47D4-942E-14992C808383",  # slide 2
+    "98D59E27-7807-477D-BEFB-27EB1CF1D185",  # slide 3, bridged 3->4
+    "E4728E7D-2032-4D7F-83D6-8BE0EFB7B7BC",  # slide 4
+)
+P2_WA0125_OBJECT_ID = "2FE5195A-F8CF-459A-8E20-B6DF91C0047A"
+
+# The P2-loop runtime's annex: one entry per looping instance, scene = the slide's first scene,
+# rect = `_rect_ints` of the authored rect, sorted by (scene, asset, x, y, w, h).
+P2_LOOP_LOOPS = [
+    {"scene": 0, "asset": "untitled.mov", "rect": {"x": 109, "y": 795, "w": 952, "h": 268}},
+    {"scene": 0, "asset": "untitled.mov", "rect": {"x": 1076, "y": 876, "w": 663, "h": 186}},
+    {"scene": 2, "asset": "untitled.mov", "rect": {"x": 109, "y": 795, "w": 952, "h": 268}},
+    {"scene": 6, "asset": "untitled.mov", "rect": {"x": 198, "y": 797, "w": 952, "h": 268}},
+    {"scene": 8, "asset": "untitled.mov", "rect": {"x": 327, "y": 709, "w": 1266, "h": 356}},
+]
+
+# Qualified by gates L1/L2/L4/L5 on `output/p2-loop` (plan section 2.5). They match the plan's
+# F5 values, computed independently by the planner.
+P2_LOOP_PLAN_SHA256 = "3dc6755853692a178696a35495c1929662005a8173f932607855876bfc299c5d"
+P2_LOOP_GL_REPLAY_PLAN_SHA256 = "2ba6fbed8fc959c804e53d2f21712945230eac6dcbf90d522fe3a6a688bef924"
+
+NOT_YET_QUALIFIED = "deck shape is not yet qualified for continuity (only P2-measured plans are)"
+
+
+def _set_loop_mode(object_ids, value):
+    """A slide transform setting `movie.loopMode` on every movie node whose objectID is listed."""
+
+    def apply(node):
+        if node.get("objectID") in object_ids:
+            node["movie"]["loopMode"] = value
+
+    return lambda data: _map_movie_nodes(data, apply)
+
+
+def _loop_tree(object_ids=P2_LOOP_OBJECT_IDS, value="looping", root: Path | None = None) -> Path:
+    tmp = _copy_fixture_tree() if root is None else root
+    for uuid in (SLIDE1, SLIDE2, SLIDE3, SLIDE4):
+        _rewrite_slide_json(tmp, uuid, _set_loop_mode(object_ids, value))
+    return tmp
+
+
+def _recorded_runtime(monkeypatch, plan: ContinuityPlan):
+    """`to_runtime()` plus the runtime dict it signed, recorded by wrapping `plan_signature`
+    -- the only way to see an unqualified runtime, which `to_runtime()` itself withholds."""
+    from obed_edom import live_continuity
+
+    signed: list[dict] = []
+    real_signature = live_continuity.plan_signature
+
+    def recording(runtime):
+        signed.append(copy.deepcopy(runtime))
+        return real_signature(runtime)
+
+    monkeypatch.setattr(live_continuity, "plan_signature", recording)
+    result = plan.to_runtime()
+    monkeypatch.setattr(live_continuity, "plan_signature", real_signature)
+    assert len(signed) == 1, signed
+    return result, signed[0]
+
+
+def test_loop_mode_is_in_the_measured_movie_vocabulary():
+    from obed_edom import live_continuity
+
+    assert "loopMode" in live_continuity._MOVIE_SUBTREE_KEYS["movie"]
+
+
+def test_non_looping_p2_fixture_is_byte_identical_and_has_no_loop_annex():
+    """L0-d CvC: accepting the key leaves every non-looping output where it was."""
+    from obed_edom import live_continuity
+
+    for flag, expected, sha in (
+        (False, EXPECTED_RUNTIME_PLAN, EXPECTED_PLAN_SHA256),
+        (True, None, GL_REPLAY_RUNTIME_PLAN_SHA256),
+    ):
+        plan = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=flag)
+        assert isinstance(plan, ContinuityPlan)
+        assert plan.loop_instances == {}
+        runtime = plan.to_runtime()
+        assert isinstance(runtime, dict)
+        assert "loops" not in runtime
+        if expected is not None:
+            assert runtime == expected
+        assert live_continuity.plan_signature(runtime) == sha
+        assert "loop" not in plan.to_json().lower()
+
+
+def test_p2_loop_derives_the_p2_plan_plus_the_loop_annex():
+    """L0-d: every `untitled.mov` instance loops, so every Magic Move agrees -- the plan, its
+    refusals and `as_dict()` are P2's exactly; only the runtime grows `loops`, which signs it
+    as its own allowlist entry, distinct from P2's."""
+    from obed_edom import live_continuity
+
+    tree = _loop_tree()
+    plan = derive_plan(tree, SLIDES, resolver=_resolver)
+    baseline = _plan()
+    assert isinstance(plan, ContinuityPlan)
+    assert isinstance(baseline, ContinuityPlan)
+    assert plan.as_dict() == baseline.as_dict()
+    assert plan.to_json() == baseline.to_json()
+    assert plan.refusals == baseline.refusals
+    assert plan.loop_instances == {
+        0: {"untitled.mov": [_rect(*SLIDE1_BIG), _rect(*SLIDE1_SMALL)]},
+        1: {"untitled.mov": [_rect(*SLIDE1_BIG)]},
+        2: {"untitled.mov": [_rect(197.98, 797.10, 951.54, 267.62)]},
+        3: {"untitled.mov": [_rect(*SLIDE4_UNTITLED)]},
+    }
+    # the annex mirrors slide_instances: same rects, same order, looping ones only.
+    for player_index, assets in plan.loop_instances.items():
+        assert assets["untitled.mov"] == plan.slide_instances[player_index]["untitled.mov"]
+    assert "vid-20250608-wa0125.mp4" in plan.slide_instances[2]
+    assert set(plan.loop_instances[2]) == {"untitled.mov"}
+
+    runtime = plan.to_runtime()
+    assert runtime == {**EXPECTED_RUNTIME_PLAN, "loops": P2_LOOP_LOOPS}
+    assert list(runtime) == ["movies", "boundaries", "loops"]
+    assert live_continuity.plan_signature(runtime) == P2_LOOP_PLAN_SHA256
+    assert P2_LOOP_PLAN_SHA256 in live_continuity.QUALIFIED_PLAN_SHA256
+    assert P2_LOOP_PLAN_SHA256 != EXPECTED_PLAN_SHA256
+
+
+def test_p2_loop_flag_on_arms_gl_replay_and_signs_its_own_sha():
+    """Arming rules 1-5 are unchanged (plan section 2.3): a looping pair that agrees arms
+    like any other, and the annex keeps its sha apart from P2's `6a0596da...`."""
+    from obed_edom import live_continuity
+
+    plan = derive_plan(_loop_tree(), SLIDES, resolver=_resolver, gl_replay=True)
+    baseline = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, ContinuityPlan)
+    assert isinstance(baseline, ContinuityPlan)
+    assert plan.as_dict() == baseline.as_dict()
+    assert plan.refusals == baseline.refusals
+    assert plan.refusals[0]["glReplay"] is True
+
+    runtime = plan.to_runtime()
+    baseline_runtime = baseline.to_runtime()
+    assert isinstance(baseline_runtime, dict)
+    assert runtime == {**baseline_runtime, "loops": P2_LOOP_LOOPS}
+    assert live_continuity.plan_signature(runtime) == P2_LOOP_GL_REPLAY_PLAN_SHA256
+    assert P2_LOOP_GL_REPLAY_PLAN_SHA256 in live_continuity.QUALIFIED_PLAN_SHA256
+    assert P2_LOOP_GL_REPLAY_PLAN_SHA256 != GL_REPLAY_RUNTIME_PLAN_SHA256
+
+
+def test_p2_loop_splice_leaves_wa0125_and_every_other_key_alone():
+    """The splice is exactly F1's shape: one added key per listed node, nothing else."""
+    tree = _loop_tree()
+    for uuid in (SLIDE1, SLIDE2, SLIDE3, SLIDE4):
+        before = json.loads((FIXTURE_ROOT / "assets" / uuid / f"{uuid}.json").read_text())
+        after = json.loads((tree / "assets" / uuid / f"{uuid}.json").read_text())
+        for node in _find_movie_nodes(after["events"]):
+            loop_mode = node["movie"].pop("loopMode", None)
+            if node["objectID"] in P2_LOOP_OBJECT_IDS:
+                assert loop_mode == "looping"
+            else:
+                assert node["objectID"] == P2_WA0125_OBJECT_ID
+                assert loop_mode is None
+        assert after == before
+
+
+@pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")
+def test_real_p2_export_spliced_the_same_way_signs_the_same_two_shas(tmp_path):
+    """The trimmed fixture spliced must stand for the real export spliced (what
+    `scripts/loop_fixture.py` builds `output/p2-loop` from): same runtime, same shas."""
+    import shutil
+
+    from obed_edom import live_continuity
+
+    (tmp_path / "assets").mkdir()
+    shutil.copy(REAL_PLAYER_ROOT / "assets" / "header.json", tmp_path / "assets")
+    for uuid in (SLIDE1, SLIDE2, SLIDE3, SLIDE4):
+        (tmp_path / "assets" / uuid).mkdir()
+        shutil.copy(REAL_PLAYER_ROOT / "assets" / uuid / f"{uuid}.json", tmp_path / "assets" / uuid)
+    _loop_tree(root=tmp_path)
+    for flag, sha in ((False, P2_LOOP_PLAN_SHA256), (True, P2_LOOP_GL_REPLAY_PLAN_SHA256)):
+        real = derive_plan(tmp_path, SLIDES, resolver=_resolver, gl_replay=flag)
+        fixture = derive_plan(_loop_tree(), SLIDES, resolver=_resolver, gl_replay=flag)
+        assert isinstance(real, ContinuityPlan)
+        assert isinstance(fixture, ContinuityPlan)
+        real_runtime = real.to_runtime()
+        assert isinstance(real_runtime, dict)
+        assert real_runtime == fixture.to_runtime()
+        assert live_continuity.plan_signature(real_runtime) == sha
+        assert real.refusals == fixture.refusals
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["bogus", True, None, "loopBackAndForth", "", "Looping", 1, 0, False, []],
+    ids=repr,
+)
+def test_an_unmeasured_loop_mode_value_refuses_the_whole_deck(value):
+    """L0-c (plan section 2.1): only "looping" was ever measured. The player also honours
+    "loopBackAndForth" (as a plain loop), but no export has shown it, so it refuses like every
+    other unmeasured vocabulary."""
+    plan = derive_plan(_loop_tree(P2_LOOP_OBJECT_IDS[:1], value), SLIDES, resolver=_resolver)
+    assert isinstance(plan, Unsupported)
+    assert plan.reason == (
+        f"movie on slide {SLIDE1} has an unmeasured loopMode {value!r} (only 'looping' is qualified)"
+    )
+
+
+def test_an_object_valued_loop_mode_is_refused_as_a_possible_mask():
+    """An object under `loopMode` never reaches the value check: the generic walk refuses it as
+    unmeasured structure first."""
+    plan = derive_plan(_loop_tree(P2_LOOP_OBJECT_IDS[:1], {"mode": "looping"}), SLIDES, resolver=_resolver)
+    assert isinstance(plan, Unsupported)
+    assert "possible mask" in plan.reason
+    assert "movie.loopMode" in plan.reason
+
+
+def test_an_unmeasured_loop_mode_on_a_movie_no_boundary_carries_still_refuses():
+    """WA0125 never continues across a boundary; its vocabulary is checked all the same."""
+    plan = derive_plan(_loop_tree((P2_WA0125_OBJECT_ID,), "loopBackAndForth"), SLIDES, resolver=_resolver)
+    assert isinstance(plan, Unsupported)
+    assert "unmeasured loopMode 'loopBackAndForth'" in plan.reason
+
+
+def test_a_looping_movie_no_boundary_carries_is_still_in_the_annex(monkeypatch):
+    """WA0125 looping changes nothing the runtime carries, but it is part of the deck's
+    looping shape, so it must still move the signature."""
+    plan = derive_plan(_loop_tree(P2_LOOP_OBJECT_IDS + (P2_WA0125_OBJECT_ID,)), SLIDES, resolver=_resolver)
+    assert isinstance(plan, ContinuityPlan)
+    assert plan.refusals == _plan().refusals
+    result, runtime = _recorded_runtime(monkeypatch, plan)
+    assert result == Unsupported(NOT_YET_QUALIFIED)
+    wa0125 = [entry for entry in runtime["loops"] if entry["asset"] != "untitled.mov"]
+    assert wa0125 == [
+        {"scene": 6, "asset": "vid-20250608-wa0125.mp4", "rect": wa0125[0]["rect"]},
+    ]
+    assert runtime["loops"] == sorted(
+        runtime["loops"], key=lambda e: (e["scene"], e["asset"], *e["rect"].values())
+    )
+
+
+def _loop_reason(from_index: int, to_index: int) -> str:
+    return (
+        f"'untitled.mov' does not loop on every instance at player index {from_index} -> {to_index}; "
+        "a carried decoder keeps its source's loop setting"
+    )
+
+
+@pytest.mark.parametrize("gl_replay", [False, True])
+def test_a_loop_difference_on_the_bridge_is_a_whole_deck_refusal(gl_replay):
+    """L0-b: slide 3 loops, slide 4 does not. The 3->4 bridge is refused on its own; a refused
+    bridge is a refusal the runtime cannot retire, so `to_runtime` refuses the deck -- exactly
+    as an overlap on the bridge does. 2->3 is a dissolve (fresh element each side), so the
+    slide 2 / slide 3 difference there is not checked."""
+    tree = _loop_tree(("98D59E27-7807-477D-BEFB-27EB1CF1D185",))
+    plan = derive_plan(tree, SLIDES, resolver=_resolver, gl_replay=gl_replay)
+    assert isinstance(plan, ContinuityPlan)
+    bridge = plan.boundaries[2].movies[0]
+    assert bridge.action == "bridge"
+    assert bridge.refusal == _loop_reason(2, 3)
+    assert [r["toPlayer"] for r in plan.refusals] == [1, 3]
+    assert all(m.refusal is None for m in plan.boundaries[1].movies)
+    result = plan.to_runtime()
+    assert result == Unsupported(f"a refusal the runtime cannot retire: {_loop_reason(2, 3)}")
+
+
+def test_a_loop_difference_on_a_non_carried_instance_refuses_the_boundary(monkeypatch):
+    """L0-b, the all-instances rule (plan section 2.2 / rev-2 item 2): only slide 1's SMALL
+    instance loops. The resolved 1->2 pair (the big instance -> slide 2) agrees, but the core
+    reuses a pooled decoder FIFO by asset, so the carried decoder may be the looping one.
+    The loop refusal outranks the green square's overlap refusal and retires the movie."""
+    tree = _loop_tree(("CBACAF27-B918-47C2-AB45-3ED71B6B394B",))
+    plan = derive_plan(tree, SLIDES, resolver=_resolver)
+    assert isinstance(plan, ContinuityPlan)
+    assert plan.refusals == (
+        {
+            "fromPlayer": 0,
+            "toPlayer": 1,
+            "atScene": P2_SLIDE2_MIN_HASH,
+            "asset": "untitled.mov",
+            "movieKey": "movie1",
+            "reason": _loop_reason(0, 1),
+        },
+    )
+    result, runtime = _recorded_runtime(monkeypatch, plan)
+    assert result == Unsupported(NOT_YET_QUALIFIED)
+    assert runtime == {
+        **EXPECTED_RUNTIME_PLAN,
+        "loops": [{"scene": 0, "asset": "untitled.mov", "rect": {"x": 1076, "y": 876, "w": 663, "h": 186}}],
+    }
+
+
+def test_a_loop_difference_skips_gl_replay_and_says_why():
+    """Flag on: a loop-refused boundary never reaches arming rules 1-5 (it would otherwise arm
+    here -- see test_p2_loop_flag_on_arms_gl_replay_and_signs_its_own_sha), and the record
+    names the loop reason instead."""
+    tree = _loop_tree(("CBACAF27-B918-47C2-AB45-3ED71B6B394B",))
+    plan = derive_plan(tree, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, ContinuityPlan)
+    movie = plan.boundaries[0].movies[0]
+    assert movie.refusal == _loop_reason(0, 1)
+    assert movie.gl_replay is None
+    assert movie.gl_replay_reason == _loop_reason(0, 1)
+    assert movie.gl_replay_slot is None
+    [record] = plan.refusals
+    assert record["glReplay"] is False
+    assert record["glReplayReason"] == _loop_reason(0, 1)
+    assert record["opacityExcluded"] == []
+
+
+@pytest.mark.parametrize(
+    "looping",
+    [
+        ("6BB39942-6C61-4763-839D-777C09E7E594",),
+        ("6BB39942-6C61-4763-839D-777C09E7E594", "CBACAF27-B918-47C2-AB45-3ED71B6B394B"),
+        ("F9AFED1B-E2D7-47D4-942E-14992C808383",),
+        ("6BB39942-6C61-4763-839D-777C09E7E594", "F9AFED1B-E2D7-47D4-942E-14992C808383"),
+    ],
+    ids=["source-carried-only", "source-both", "destination-only", "all-but-the-small-one"],
+)
+def test_every_mixed_subset_across_the_pin_refuses_it(looping):
+    plan = derive_plan(_loop_tree(looping), SLIDES, resolver=_resolver)
+    assert isinstance(plan, ContinuityPlan)
+    assert plan.boundaries[0].movies[0].refusal == _loop_reason(0, 1)
+
+
+def test_a_loop_difference_without_an_overlap_is_still_refused():
+    """The loop rule does not ride on the overlap refusal: with the green square moved below
+    the movie, 1->2 carries in P2 -- and a loop difference refuses it on its own."""
+    tree = _loop_tree(("F9AFED1B-E2D7-47D4-942E-14992C808383",))
+    _rewrite_slide_json(tree, SLIDE2, _move_green_square_below_the_movie)
+    plan = derive_plan(tree, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, ContinuityPlan)
+    assert plan.boundaries[0].movies[0].refusal == _loop_reason(0, 1)
+    assert plan.boundaries[0].movies[0].gl_replay_reason == _loop_reason(0, 1)
+
+    agreeing = _loop_tree()
+    _rewrite_slide_json(agreeing, SLIDE2, _move_green_square_below_the_movie)
+    carried = derive_plan(agreeing, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(carried, ContinuityPlan)
+    assert carried.boundaries[0].movies[0].refusal is None
+    assert carried.boundaries[0].movies[0].gl_replay_reason is None
+
+
+def test_loop_annex_is_not_in_as_dict_and_defaults_to_empty():
+    plan = derive_plan(_loop_tree(), SLIDES, resolver=_resolver)
+    assert isinstance(plan, ContinuityPlan)
+    assert set(plan.as_dict()) == {
+        "canvas", "sceneIndexByPlayer", "slideRects", "boundaries", "slideInstances", "refusals",
+    }
+    assert ContinuityPlan({"width": 1, "height": 1}, {0: 0}, {}, ()).loop_instances == {}
+
+
+def test_an_emptied_loop_annex_restores_the_p2_runtime():
+    plan = derive_plan(_loop_tree(), SLIDES, resolver=_resolver)
+    assert isinstance(plan, ContinuityPlan)
+    assert replace(plan, loop_instances={}).to_runtime() == EXPECTED_RUNTIME_PLAN
+
+
+def test_a_loop_annex_without_a_scene_index_is_refused():
+    plan = derive_plan(_loop_tree(), SLIDES, resolver=_resolver)
+    assert isinstance(plan, ContinuityPlan)
+    orphan = replace(plan, loop_instances={**plan.loop_instances, 9: plan.loop_instances[0]})
+    assert orphan.to_runtime() == Unsupported("a looping movie instance has no scene index")
+
+
+def _add_audio_only_movie(loop_mode, keep_video_layer: bool = False):
+    """Slide 1 gains a synthetic audio-only movie node: `isAudioOnly` true and no video
+    sub-layer (the player's `renderAudioOnlyEffect` path, which also sets `loop` from the same
+    two literals). `_ABSENT_LOOP_MODE` leaves the key out; `keep_video_layer` is the positive
+    control."""
+
+    def transform(data):
+        events = copy.deepcopy(data["events"])
+        clone = copy.deepcopy(_find_movie_nodes(events)[0])
+        clone["objectID"] = "SYNTHETIC-AUDIO-ONLY"
+        clone["movie"] = {**clone["movie"], "asset": "Audio.m4a-0.0000-10.0000", "isAudioOnly": True}
+        if loop_mode is not _ABSENT_LOOP_MODE:
+            clone["movie"]["loopMode"] = loop_mode
+        if not keep_video_layer:
+            clone["baseLayer"]["layers"] = []
+        events[0]["clonedMovies"] = [clone]
+        assets = {
+            **data["assets"],
+            "Audio.m4a-0.0000-10.0000": {"type": "audio", "url": {"web": "assets/Audio.m4a-0.0000-10.0000.m4a"}},
+        }
+        return {**data, "events": events, "assets": assets}
+
+    return transform
+
+
+_ABSENT_LOOP_MODE = object()
+
+
+@pytest.mark.parametrize("gl_replay", [False, True])
+@pytest.mark.parametrize(
+    "loop_mode",
+    [_ABSENT_LOOP_MODE, "looping", "loopBackAndForth", "bogus", None, True, {"mode": "looping"}],
+    ids=["absent", "looping", "loopBackAndForth", "bogus", "None", "True", "object"],
+)
+def test_an_audio_only_movie_is_refused_upstream_whatever_its_loop_mode(loop_mode, gl_replay):
+    """Codex r1 F7: audio-only movies stay unmeasured (plan section 8 risk 3). They are refused
+    before any loop rule runs -- `_movie_rect` needs exactly one video sub-layer -- so no loop
+    value on one, qualified or not, can reach a runtime. The object value trips the vocabulary
+    walk even earlier, which is also a whole-deck refusal."""
+    tree = _mutate_slide(SLIDE1, _add_audio_only_movie(loop_mode))
+    plan = derive_plan(tree, SLIDES, resolver=_resolver, gl_replay=gl_replay)
+    assert isinstance(plan, Unsupported)
+    if isinstance(loop_mode, dict):
+        assert plan.reason.endswith("(possible mask): <movie node>.movie.loopMode")
+    else:
+        assert plan.reason == f"movie node on slide {SLIDE1} has 0 video sub-layers, expected 1"
+
+
+def test_the_synthetic_audio_node_derives_when_its_video_sub_layer_is_kept():
+    """Positive control for the test above: the same clone with its video sub-layer kept
+    derives, so the refusal there is the missing sub-layer and nothing else in the synthetic."""
+    tree = _mutate_slide(SLIDE1, _add_audio_only_movie("looping", keep_video_layer=True))
+    plan = derive_plan(tree, SLIDES, resolver=_resolver)
+    assert isinstance(plan, ContinuityPlan)
+    assert plan.loop_instances == {0: {"audio.m4a": [_rect(*SLIDE1_BIG)]}}
