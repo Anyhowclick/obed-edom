@@ -32,8 +32,8 @@ FILES = ("asset-replace.json",)
 LOOP_OBJECT_IDS = ("6BB39942", "CBACAF27", "F9AFED1B", "98D59E27", "E4728E7D")
 LOOP_KEY = ',"loopMode":"looping"'
 EXPECTED_PLAN_SHA256 = {
-    "off": "3dc6755853692a178696a35495c1929662005a8173f932607855876bfc299c5d",
-    "on": "2ba6fbed8fc959c804e53d2f21712945230eac6dcbf90d522fe3a6a688bef924",
+    "off": "866de785864ad19b11ecd8cdfb4ad1729798ccf9f1764aa59718de03034ba7a5",
+    "on": "d860a09f4f6a8e24a81e2ad0c3b37bc8a3f2b4ce3947836ca315671031870131",
 }
 RECORD = "loop-splice.json"
 MANIFEST = "fixture.json"
