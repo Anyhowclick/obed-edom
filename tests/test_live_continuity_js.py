@@ -36,7 +36,7 @@ def test_js_sha256_matches_pinned_bytes():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "d982cc7df39e6afb3a3ff349cab75df5e5686a3e09f7dc11b59d7bcf42c7949d"
+PINNED_CORE_SHA256 = "ce240d84f369f72feeb1e0064adb7a1fb216d92e7fb7827d5d7415b6a283cc52"
 
 
 def test_js_sha256_matches_the_pinned_literal():
@@ -1266,17 +1266,20 @@ v.readyState = 4; v.currentTime = 1;
 v.parentNode = bodyEl;
 v.src = 'https://host/untitled.mov';
 goToScene(__SCENE__);
+__LEAVE__
 v.src = '';
 console.log(JSON.stringify({
   src: v.src,
   pooled: P.snapshot().filter(x => !x.fromDom).length,
   refusals: P.events.filter(e => e.kind === 'preserve-refused').map(e => e.detail),
 }));
-""".replace("__SCENE__", str(scene))
+""".replace("__SCENE__", str(scene)).replace("__LEAVE__", "detach(v);" if scene == 1 else "")
     result = _run_retire(script)
     assert result["src"] == ""
     assert result["pooled"] == 0
-    assert result["refusals"] == [_refused(scene, "src-clear")]
+    # On the transition scene the zone opens with the player's teardown (RT-B).
+    left = [_refused(scene, "stash")] if scene == 1 else []
+    assert result["refusals"] == left + [_refused(scene, "src-clear")]
 
 
 def test_retire_zone_remove_attribute_really_removes():
@@ -1286,6 +1289,7 @@ v.readyState = 4; v.currentTime = 1;
 v.parentNode = bodyEl;
 v.src = 'https://host/untitled.mov';
 goToScene(1);
+detach(v);
 v.removeAttribute('src');
 v.removeAttribute('src');
 console.log(JSON.stringify({
@@ -1297,7 +1301,7 @@ console.log(JSON.stringify({
     result = _run_retire(script)
     assert result["removedAttrs"] == ["src", "src"]
     assert result["pooled"] == 0
-    assert result["refusals"] == [_refused(1, "removeAttribute")]
+    assert result["refusals"] == [_refused(1, "stash"), _refused(1, "removeAttribute")]
 
 
 def test_retire_zone_blocks_remount_of_a_decoder_held_before_the_boundary():
@@ -1306,6 +1310,7 @@ def test_retire_zone_blocks_remount_of_a_decoder_held_before_the_boundary():
     the interval, so this isolates `tryRemount`'s own guard from the sweep."""
     script = _CARRY_A1_INTO_A2 + r"""
 location.hash = '#3';
+detach(stub);
 const before = JSON.stringify(v.style);
 P.remountAll();
 console.log(JSON.stringify({
@@ -1349,6 +1354,7 @@ def test_interval_sweep_retires_a_decoder_held_before_the_zone():
     script = _CARRY_A1_INTO_A2 + r"""
 const held = P.snapshot().filter(x => x.fromDom).length;
 location.hash = '#3';
+detach(stub);
 const sweptBeforeTick = P.events.filter(e => e.kind === 'retire-boundary').length;
 tick();
 tick();
@@ -1378,6 +1384,28 @@ console.log(JSON.stringify({
     assert result["retire"] == [
         {"key": "movie1", "elIds": [result["elId"]], "atScene": 4, "instance": "A2", "sceneHash": "#3"}
     ]
+
+
+def test_a_held_decoder_is_not_retired_while_the_player_idles_on_its_slide():
+    """RT-B (live D6: retired 234 ms after scene 6 settled; D3: at scene 2). Idle
+    at the end of the retired instance's slide the hash already reads
+    `atScene - 1`; the held decoder must keep playing (no sweep, no refusal)
+    until the player tears the slide down, and retire then, at `atScene - 1`."""
+    script = _CARRY_A1_INTO_A2 + r"""
+location.hash = '#3';
+tick();
+P.remountAll();
+const idle = {gen: v.__obedGen, paused: v.paused, retire: P.events.filter(e => e.kind === 'retire-boundary').length,
+  refusals: P.events.filter(e => e.kind === 'preserve-refused').length};
+detach(stub);
+tick();
+console.log(JSON.stringify({idle, gen: v.__obedGen,
+  retire: P.events.filter(e => e.kind === 'retire-boundary').map(e => e.detail.sceneHash)}));
+"""
+    result = _run_retire(script, plan=_HELD_RETIRE_PLAN)
+    assert result["idle"] == {"gen": 0, "paused": False, "retire": 0, "refusals": 0}
+    assert result["gen"] == -1
+    assert result["retire"] == ["#3"]
 
 
 def test_interval_sweep_is_silent_before_the_zone():
@@ -1524,6 +1552,7 @@ console.log(JSON.stringify({
 #: src (the in-zone hooks no longer swallow it). `__CLEAR__` is the call under test.
 _CLEARED_IN_ZONE = _CARRY_A1_INTO_A2 + r"""
 location.hash = '#3';
+detach(stub);
 __CLEAR__
 const srcAfterClear = v.src || '';
 """
@@ -1716,8 +1745,10 @@ goToScene(1);
 detach(v);
 const pooled = P.snapshot().filter(x => !x.fromDom);
 goToScene(2);
-video('A2').setAttribute('src', 'https://host/untitled.mov');
+const stub = video('A2');
+stub.setAttribute('src', 'https://host/untitled.mov');
 location.hash = '#3';
+detach(stub);
 v.src = '';
 const dom = P.snapshot().filter(x => x.fromDom);
 console.log(JSON.stringify({
@@ -4046,6 +4077,7 @@ goToScene(6);
 const s4 = fresh('A4');
 props.suppressed = s4.__obedSuppressed34 === true;
 goToScene(7);
+detach(s4);
 P.remountAll();
 tick();
 P.clear();
