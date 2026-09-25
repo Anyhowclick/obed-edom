@@ -36,7 +36,7 @@ def test_js_sha256_matches_pinned_bytes():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "d806a6336305fe3fc2a005d0abffd2c49ba531ddcb7fbd6ff382ae29e91205b7"
+PINNED_CORE_SHA256 = "bd4088e6c83382787f7e119219d812f4366c23371b41dbc6dfe56f02177f33a0"
 
 
 def test_js_sha256_matches_the_pinned_literal():
@@ -3823,6 +3823,68 @@ console.log(JSON.stringify({idle, moves: notesOf('bridge-motion-start').map(n =>
 """)
     assert result["idle"]["moves"] == 0
     assert result["moves"] == [_RECT_S3]
+
+
+@pytest.mark.parametrize("second", [False, True], ids=["first-pin", "second-pin"])
+def test_a_swapped_pin_decoder_is_re_homed_above_the_destination_poster(second):
+    """Live D5 V slide 3 (second pin of a chain): the dom-swap left the carried
+    decoder in the stub's slot, under the destination's WebGL poster (the stub
+    never starts, so the player never reveals it): clock advancing, pixels
+    frozen. After the swap the decoder must sit right after its poster canvas,
+    at `dst.rect`, in the destination layer."""
+    plan = _CONTRACT["d5"]
+    result = _run_chain(plan, r"""
+function slideLayer(rect, id) {
+  const layer = {
+    id: id, __screenOrigin: {x: 0, y: 0}, __scale: 1, kids: [],
+    insertBefore(node, ref) {
+      const j = this.kids.indexOf(node);
+      if (j >= 0) this.kids.splice(j, 1);
+      node.parentNode = this; node.__inStage = true;
+      const i = ref ? this.kids.indexOf(ref) : -1; if (i >= 0) this.kids.splice(i, 0, node); else this.kids.push(node); },
+    appendChild(node) { this.insertBefore(node, null); },
+    removeChild(node) { node.parentNode = null; node.__inStage = false; this.kids.splice(this.kids.indexOf(node), 1); },
+  };
+  const poster = {id: id + '-canvas', parentNode: layer, get nextSibling() { return layer.kids[layer.kids.indexOf(poster) + 1] || null; },
+    parentElement: layer, getBoundingClientRect: () => ({left: rect.x, top: rect.y, width: rect.w, height: rect.h})};
+  layer.kids.push(poster);
+  canvases.push(poster);
+  return {layer, poster};
+}
+const B = window.__OBED_CONTINUITY__.boundaries;
+goToScene(0);
+const a = playing(ID[0]);
+goToScene(1);
+detach(a);
+goToScene(2);
+let dst = slideLayer(B[0].dst.rect, 'layer-s2');
+let stub = fresh(ID[1]);
+dst.layer.kids.unshift(stub);
+stub.parentNode = dst.layer;
+stub.nextSibling = dst.poster;
+moCallbacks.slice().forEach((cb) => cb([{addedNodes: [stub], removedNodes: []}]));
+if (__SECOND__) {
+  canvases.length = 0;
+  goToScene(3);
+  dst.layer.removeChild(a);
+  detach(a);
+  goToScene(4);
+  dst = slideLayer(B[1].dst.rect, 'layer-s3');
+  stub = fresh(ID[2]);
+  dst.layer.kids.unshift(stub);
+  stub.parentNode = dst.layer;
+  stub.nextSibling = dst.poster;
+  moCallbacks.slice().forEach((cb) => cb([{addedNodes: [stub], removedNodes: []}]));
+}
+const kids = dst.layer.kids;
+console.log(JSON.stringify({
+  order: kids.map(k => k === a ? 'decoder' : k === dst.poster ? 'poster' : k === stub ? 'stub' : '?'),
+  rendered: a.getBoundingClientRect(), swaps: notesOf('dom-swap').length,
+}));
+""".replace("__SECOND__", "true" if second else "false"), src="https://host/counter-a.mov")
+    assert result["order"] == ["poster", "decoder"]
+    assert result["rendered"] == pytest.approx({"left": 160, "top": 700, "width": 640, "height": 180})
+    assert result["swaps"] == (2 if second else 1)
 
 
 def test_a_suppressed_bridge_destination_really_clears_when_its_slide_ends():
