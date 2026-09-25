@@ -768,6 +768,12 @@ PRESERVE_CORE_JS = r"""
     ENTRIES.forEach(function(b) {
       if (b.action === 'retire' && b.atScene - 1 === hn) retireVictims(b, zoneVictims(b, []), true);
     });
+    // A held decoder the player never tears down (a re-homed pin, an overlay)
+    // starts its next bridge's move here, at the transition start.
+    held.slice().forEach(function(v) {
+      const n = nextEntry(instanceOf(v));
+      if (n && n.action === 'bridge' && n.atScene - 1 === hn && isLive(v)) keepThroughBridge(v);
+    });
   }
   function noteDeparture(v) {
     if (!v.__obedRemounting) markTransition(currentHashNum());

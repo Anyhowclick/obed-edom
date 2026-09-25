@@ -36,7 +36,7 @@ def test_js_sha256_matches_pinned_bytes():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "5122be49841db1e069070055213e05d76a80871e7f9ac358c5fabe6da5ff0f48"
+PINNED_CORE_SHA256 = "9c4fc61fcce22e8acf3b1dab9a6eb66722e7e0ae9dcf943bda69e3bcbd87ea01"
 
 
 def test_js_sha256_matches_the_pinned_literal():
@@ -4001,6 +4001,43 @@ console.log(JSON.stringify({holding, moved, settled: {left: a.style.left, top: a
     assert result["pinning"] is False
     assert result["moved"] == {"left": f"{_RECT_S3['x']}px", "top": f"{_RECT_S3['y']}px"}
     assert result["settled"] == result["moved"]
+
+
+def test_a_re_homed_pin_starts_the_next_bridge_at_the_transition_start():
+    """Live D3 b2to3: movie2 bridges 1->2, pins 2->3 (re-homed out of the
+    overlay) and bridges 3->4. The re-homed decoder is the runtime's own, so the
+    player never tears it down; it stayed frozen at the pin's rect through the
+    whole transition and jumped at the cut. The transition start (the player's
+    second hash write) must start its move."""
+    plan = _CONTRACT["d3"]
+    result = _run_chain(plan, r"""
+const B = window.__OBED_CONTINUITY__.boundaries;
+const SRCB = 'https://host/counter-b.mov';
+goToScene(0);
+const m2 = playing(B[1].src.objectId, SRCB);
+goToScene(1);
+detach(m2);
+goToScene(2);
+const s2 = fresh(B[1].dst.objectId, SRCB);
+s2.parentNode = bodyEl;
+goToScene(3);
+detach(s2);
+pump();
+goToScene(4);
+const s3 = fresh(B[3].dst.objectId, SRCB);
+window.history.replaceState(null, 'Keynote', 'index.html#5');
+pump();
+const idle = notesOf('bridge-motion-start').length;
+window.history.replaceState(null, 'Keynote', 'index.html#5');
+console.log(JSON.stringify({idle, moves: notesOf('bridge-motion-start').map(n => [n.srcRect, n.rect]),
+  instance: m2.__obedInstance, inBody: m2.parentNode === bodyEl}));
+""")
+    b = plan["boundaries"]
+    assert result["idle"] == 1
+    assert result["moves"][-1] == [b[4]["src"]["rect"], b[4]["dst"]["rect"]]
+    assert len(result["moves"]) == 2
+    assert result["instance"] == b[3]["dst"]["objectId"]
+    assert result["inBody"] is True
 
 
 def test_a_suppressed_bridge_destination_really_clears_when_its_slide_ends():
