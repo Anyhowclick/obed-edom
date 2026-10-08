@@ -521,22 +521,30 @@ def _mm_opacity_mode() -> str:
 
 
 def _explicit_out_dir() -> Path | None:
-    """`--out-dir DIR`: this run's outputs go to DIR, which must not overlap the shared fixture tree
-    (still read for `--reuse-export`). None when the option is absent."""
-    if not any(a == "--out-dir" or a.startswith("--out-dir=") for a in sys.argv[1:]):
+    """`--out-dir DIR`: this run's outputs go to DIR (the shared fixture tree is still read for
+    `--reuse-export`). None when the option is absent; a missing, option-like or repeated value is refused."""
+    argv = sys.argv[1:]
+    values = [a.split("=", 1)[1] for a in argv if a.startswith("--out-dir=")]
+    values += [argv[i + 1] if i + 1 < len(argv) else "" for i, a in enumerate(argv) if a == "--out-dir"]
+    if not values:
         return None
-    value = _arg_value("--out-dir", "")
-    if not value:
-        raise SystemExit("--out-dir needs a directory")
-    base, shared = Path(value).resolve(), OUT.resolve()
-    if base == shared or shared in base.parents or base in shared.parents:
-        raise SystemExit(f"--out-dir {base} overlaps the shared fixture tree {shared}")
-    return base
+    if len(values) > 1 or not values[0] or values[0].startswith("-"):
+        raise SystemExit("--out-dir needs exactly one directory")
+    return Path(values[0])
 
 
 def _out_root(gl_auto: bool) -> Path:
-    base = _explicit_out_dir() or OUT
-    return base / GL_REPLAY_DIR if gl_auto else base
+    """The run's root; an explicit one is resolved after the GL subfolder is added and must not
+    overlap the shared fixture tree in either direction."""
+    base = _explicit_out_dir()
+    if base is None:
+        return OUT / GL_REPLAY_DIR if gl_auto else OUT
+    root = (base / GL_REPLAY_DIR if gl_auto else base).resolve()
+    shared = OUT.resolve()
+    for path in (base.resolve(), root):
+        if path == shared or shared in path.parents or path in shared.parents:
+            raise SystemExit(f"--out-dir {path} overlaps the shared fixture tree {shared}")
+    return root
 
 
 def _unmodified_export(root: Path, *, reuse: bool) -> Path:

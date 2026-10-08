@@ -1021,10 +1021,20 @@ def test_out_dir_refuses_an_empty_value_or_any_overlap_with_the_shared_tree(tmp_
     monkeypatch.setattr(drv, "OUT", tmp_path / "alias")
     monkeypatch.setattr(sys, "argv", ["p2"])
     assert drv._out_root(False) == tmp_path / "alias"
-    for argv in (["--out-dir"], ["--out-dir="]):
+    run = tmp_path / "run"
+    for argv in (["--out-dir"], ["--out-dir="], ["--out-dir", "--reuse-export"],
+                 ["--out-dir", str(run), f"--out-dir={run}"]):
         monkeypatch.setattr(sys, "argv", ["p2", *argv])
-        with pytest.raises(SystemExit, match="needs a directory"):
+        with pytest.raises(SystemExit, match="needs exactly one directory"):
             drv._out_root(False)
+    escape = tmp_path / "escape"
+    escape.mkdir()
+    (escape / "gl-replay").symlink_to(shared / "runs", target_is_directory=True)
+    (shared / "runs").mkdir()
+    monkeypatch.setattr(sys, "argv", ["p2", "--out-dir", str(escape)])
+    assert drv._out_root(False) == escape.resolve()
+    with pytest.raises(SystemExit, match="overlaps the shared fixture tree"):
+        drv._out_root(True)
     for bad in (shared, alias, shared / "runs", tmp_path / "fixtures", alias / "x"):
         monkeypatch.setattr(sys, "argv", ["p2", "--out-dir", str(bad)])
         with pytest.raises(SystemExit, match="overlaps the shared fixture tree"):
