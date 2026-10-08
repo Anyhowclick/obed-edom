@@ -17,20 +17,18 @@ def test_generated_names_are_two_words_and_unique():
         taken.add(name)
 
 
-def test_name_generation_falls_back_to_suffix_when_exhausted(monkeypatch):
+@pytest.mark.parametrize(
+    "taken,expected",
+    [
+        ({"quiet-jordan"}, "quiet-jordan-2"),
+        ({"quiet-jordan", "quiet-jordan-2", "quiet-jordan-3"}, "quiet-jordan-4"),
+    ],
+    ids=["first_suffix", "increments_past_existing"],
+)
+def test_name_generation_falls_back_to_suffix_when_exhausted(monkeypatch, taken, expected):
     monkeypatch.setattr(job_names, "ADJECTIVES", ("quiet",))
     monkeypatch.setattr(job_names, "PLACES", ("jordan",))
-    taken = {"quiet-jordan"}
-    name = generate_job_name(taken)
-    assert name == "quiet-jordan-2"
-
-
-def test_name_generation_suffix_increments_past_existing(monkeypatch):
-    monkeypatch.setattr(job_names, "ADJECTIVES", ("quiet",))
-    monkeypatch.setattr(job_names, "PLACES", ("jordan",))
-    taken = {"quiet-jordan", "quiet-jordan-2", "quiet-jordan-3"}
-    name = generate_job_name(taken)
-    assert name == "quiet-jordan-4"
+    assert generate_job_name(taken) == expected
 
 
 @pytest.mark.parametrize("raw", ["../evil", ".", "..", "", "   ", "/etc/passwd"])

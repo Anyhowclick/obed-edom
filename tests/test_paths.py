@@ -174,19 +174,11 @@ def test_export_destination_job_override_wins(tmp_path: Path):
     assert export_destination(FakeJob()) == override
 
 
-def test_export_destination_job_override_removed_raises(tmp_path: Path):
-    override = tmp_path / "override"  # never created — removed between submit and run
-
-    class FakeJob:
-        result = {"exportDir": str(override)}
-
-    with pytest.raises(ValueError, match="no longer exists"):
-        export_destination(FakeJob())
-
-
-def test_export_destination_job_override_now_a_file_raises(tmp_path: Path):
+@pytest.mark.parametrize("now_a_file", [False, True], ids=["removed", "now_a_file"])
+def test_export_destination_job_override_gone_raises(tmp_path: Path, now_a_file: bool):
     override = tmp_path / "override"
-    override.write_text("now a file")
+    if now_a_file:
+        override.write_text("now a file")
 
     class FakeJob:
         result = {"exportDir": str(override)}

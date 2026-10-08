@@ -918,7 +918,16 @@ def test_reveal_accepted_on_landmark_rejected_elsewhere():
     assert rejected.status_code == 400
 
 
-def test_reveal_duration_out_of_range_rejected():
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"reveal": {"kind": "brush", "duration": 10}},
+        {"scaleWithMap": True},
+        {"scaleWithMap": True, "sizeZoom": 23},
+    ],
+    ids=["reveal_duration_out_of_range", "scale_with_map_without_size_zoom", "size_zoom_out_of_range"],
+)
+def test_landmark_church_field_rejected(extra):
     job = _seed()
     uploaded = client.post(
         f"/api/maps/{job['id']}/assets",
@@ -929,7 +938,7 @@ def test_reveal_duration_out_of_range_rejected():
     doc["slides"][0]["churches"] = [
         {
             "id": "p1", "name": "Church", "lat": 3, "lon": 101, "kind": "landmark", "color": "#c44a42",
-            "assetId": asset["id"], "size": 180, "reveal": {"kind": "brush", "duration": 10},
+            "assetId": asset["id"], "size": 180, **extra,
         }
     ]
     rejected = _save(job, doc)
@@ -957,24 +966,6 @@ def test_scale_with_map_round_trips_on_landmark():
     assert church["sizeZoom"] == 6.5
 
 
-def test_scale_with_map_rejected_without_size_zoom():
-    job = _seed()
-    uploaded = client.post(
-        f"/api/maps/{job['id']}/assets",
-        files={"file": ("church.png", _landmark_png(), "image/png")},
-    ).json()
-    asset = uploaded["asset"]
-    doc = _doc(job)
-    doc["slides"][0]["churches"] = [
-        {
-            "id": "p1", "name": "Church", "lat": 3, "lon": 101, "kind": "landmark", "color": "#c44a42",
-            "assetId": asset["id"], "size": 180, "scaleWithMap": True,
-        }
-    ]
-    rejected = _save(job, doc)
-    assert rejected.status_code == 400
-
-
 def test_scale_with_map_allowed_on_dot():
     job = _seed()
     doc = _doc(job)
@@ -986,24 +977,6 @@ def test_scale_with_map_allowed_on_dot():
     church = saved.json()["result"]["slides"][0]["churches"][0]
     assert church["scaleWithMap"] is True
     assert church["sizeZoom"] == 6
-
-
-def test_size_zoom_out_of_range_rejected():
-    job = _seed()
-    uploaded = client.post(
-        f"/api/maps/{job['id']}/assets",
-        files={"file": ("church.png", _landmark_png(), "image/png")},
-    ).json()
-    asset = uploaded["asset"]
-    doc = _doc(job)
-    doc["slides"][0]["churches"] = [
-        {
-            "id": "p1", "name": "Church", "lat": 3, "lon": 101, "kind": "landmark", "color": "#c44a42",
-            "assetId": asset["id"], "size": 180, "scaleWithMap": True, "sizeZoom": 23,
-        }
-    ]
-    rejected = _save(job, doc)
-    assert rejected.status_code == 400
 
 
 def test_church_size_allows_up_to_4000_and_rejects_above():
@@ -1036,19 +1009,11 @@ def test_state_rejects_legacy_external_photo_path_and_unknown_asset():
     assert response.status_code == 400
 
 
-def test_state_rejects_slide_id_ending_in_landing_suffix():
+@pytest.mark.parametrize("suffix", ["__landing", "__takeoff"])
+def test_state_rejects_slide_id_ending_in_a_reserved_suffix(suffix):
     job = _seed()
     doc = _doc(job)
-    doc["slides"][0]["id"] = "s2__landing"
-    doc["links"] = []
-    response = _save(job, doc)
-    assert response.status_code == 400
-
-
-def test_state_rejects_slide_id_ending_in_takeoff_suffix():
-    job = _seed()
-    doc = _doc(job)
-    doc["slides"][0]["id"] = "s2__takeoff"
+    doc["slides"][0]["id"] = f"s2{suffix}"
     doc["links"] = []
     response = _save(job, doc)
     assert response.status_code == 400
@@ -1184,31 +1149,20 @@ def test_png_rejects_oversized_dimensions(monkeypatch):
     assert response.status_code == 400
 
 
-def test_frame_rejects_non_image_bytes():
+@pytest.mark.parametrize(
+    "query, content",
+    [
+        ("index=0&count=1", lambda: b"not a real frame"),
+        ("index=0&count=20001", _tiny_jpeg),
+        ("index=3&count=3", _tiny_jpeg),
+    ],
+    ids=["non_image_bytes", "count_out_of_range", "index_not_less_than_count"],
+)
+def test_frame_rejects_bad_request(query, content):
     job = _seed()
     response = client.post(
-        f"/api/maps/{job['id']}/frame?slideId=s1&index=0&count=1&fps=30",
-        content=b"not a real frame",
-        headers={"content-type": "image/jpeg"},
-    )
-    assert response.status_code == 400
-
-
-def test_frame_rejects_count_out_of_range():
-    job = _seed()
-    response = client.post(
-        f"/api/maps/{job['id']}/frame?slideId=s1&index=0&count=20001&fps=30",
-        content=_tiny_jpeg(),
-        headers={"content-type": "image/jpeg"},
-    )
-    assert response.status_code == 400
-
-
-def test_frame_rejects_index_not_less_than_count():
-    job = _seed()
-    response = client.post(
-        f"/api/maps/{job['id']}/frame?slideId=s1&index=3&count=3&fps=30",
-        content=_tiny_jpeg(),
+        f"/api/maps/{job['id']}/frame?slideId=s1&{query}&fps=30",
+        content=content(),
         headers={"content-type": "image/jpeg"},
     )
     assert response.status_code == 400
@@ -1474,33 +1428,24 @@ def test_isolate_rejects_unknown_mode():
     assert response.status_code == 400
 
 
-def test_isolate_round_trips_on_save():
+@pytest.mark.parametrize(
+    "isolate, expected",
+    [
+        ({"mode": "darken", "strength": 0.35}, {"mode": "darken", "strength": 0.35}),
+        ({"mode": "erase", "strength": 0.35}, {"mode": "darken", "strength": 0.35}),
+        ({"mode": "darken"}, {"mode": "darken", "strength": 0.65}),
+    ],
+    ids=["round_trips", "erase_migrates_to_darken", "default_strength_is_065"],
+)
+def test_isolate_normalises_on_save(isolate, expected):
     job = _seed()
     doc = _doc(job)
-    doc["slides"][0]["isolate"] = {"mode": "darken", "strength": 0.35}
+    doc["slides"][0]["isolate"] = isolate
     saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
-    assert saved.json()["result"]["slides"][0]["isolate"] == {"mode": "darken", "strength": 0.35}
+    assert saved.json()["result"]["slides"][0]["isolate"] == expected
     fetched = client.get(f"/api/jobs/{job['id']}")
-    assert fetched.json()["result"]["slides"][0]["isolate"] == {"mode": "darken", "strength": 0.35}
-
-
-def test_isolate_erase_mode_migrates_to_darken():
-    job = _seed()
-    doc = _doc(job)
-    doc["slides"][0]["isolate"] = {"mode": "erase", "strength": 0.35}
-    saved = _save(job, doc)
-    assert saved.status_code == 200, saved.text
-    assert saved.json()["result"]["slides"][0]["isolate"] == {"mode": "darken", "strength": 0.35}
-
-
-def test_isolate_default_strength_is_065():
-    job = _seed()
-    doc = _doc(job)
-    doc["slides"][0]["isolate"] = {"mode": "darken"}
-    saved = _save(job, doc)
-    assert saved.status_code == 200, saved.text
-    assert saved.json()["result"]["slides"][0]["isolate"] == {"mode": "darken", "strength": 0.65}
+    assert fetched.json()["result"]["slides"][0]["isolate"] == expected
 
 
 def test_legacy_session_isolate_060_bumps_once():
@@ -2610,28 +2555,21 @@ def test_bootstrap_csv_header_form_place_column_is_full_query_override(monkeypat
     assert seen_queries == ["Paris, France"]
 
 
-def test_bootstrap_csv_header_form_bad_zoom_reports_error_not_crash():
+@pytest.mark.parametrize(
+    "csv_text, needle",
+    [("name,zoom\nParis,notazoom\n", "bad zoom"), ("name,kind\nParis,spaceport\n", "unknown kind")],
+    ids=["bad_zoom", "unknown_kind"],
+)
+def test_bootstrap_csv_header_form_bad_row_reports_error_not_crash(csv_text, needle):
     job = _seed()
     started = client.post(
         f"/api/maps/{job['id']}/bootstrap-csv",
-        data={"csv_text": "name,zoom\nParis,notazoom\n", "replace": "false"},
+        data={"csv_text": csv_text, "replace": "false"},
     )
     assert started.status_code == 400
     detail = started.json()["detail"]
     assert "Line 2" in detail[0]
-    assert "bad zoom" in detail[0]
-
-
-def test_bootstrap_csv_header_form_unknown_kind_reports_error_not_crash():
-    job = _seed()
-    started = client.post(
-        f"/api/maps/{job['id']}/bootstrap-csv",
-        data={"csv_text": "name,kind\nParis,spaceport\n", "replace": "false"},
-    )
-    assert started.status_code == 400
-    detail = started.json()["detail"]
-    assert "Line 2" in detail[0]
-    assert "unknown kind" in detail[0]
+    assert needle in detail[0]
 
 
 def test_bootstrap_csv_place_only_header_with_extra_comma_is_joined_not_a_500(monkeypatch):
@@ -2707,8 +2645,6 @@ def test_asset_upload_rolls_back_on_save_failure(monkeypatch):
 
 
 def test_session_import_restores_assets_and_previews_when_commit_fails(monkeypatch):
-    from obed_edom.web import maps
-
     map_job = _seed()
     slide_id = map_job["result"]["slides"][0]["id"]
     thumb = client.post(f"/api/maps/{map_job['id']}/png?slideId={slide_id}&kind=thumb", content=_landmark_png())
@@ -3437,21 +3373,12 @@ def test_rename_maps_job_writes_name_and_result_in_a_single_save(monkeypatch):
     assert Path(stored_raw["result"]["outputDir"]).name == target
 
 
-def test_rename_maps_job_refused_while_running():
+@pytest.mark.parametrize("status", ["running", "queued"])
+def test_rename_maps_job_refused_while_active(status):
     job = _seed()
     stored = RUNNER.get(job["id"])
     assert stored is not None
-    stored.status = "running"
-    res = client.patch(f"/api/jobs/{job['id']}/name", json={"name": f"quiet-jordan-{job['id']}"})
-    assert res.status_code == 409
-    stored.status = "done"
-
-
-def test_rename_maps_job_refused_while_queued():
-    job = _seed()
-    stored = RUNNER.get(job["id"])
-    assert stored is not None
-    stored.status = "queued"
+    stored.status = status
     res = client.patch(f"/api/jobs/{job['id']}/name", json={"name": f"quiet-jordan-{job['id']}"})
     assert res.status_code == 409
     stored.status = "done"
@@ -3886,30 +3813,23 @@ def test_bootstrap_rows_explicit_zoom_wins_over_the_ladder(monkeypatch):
     assert new_slide["camera"]["zoom"] == pytest.approx(6.8)
 
 
-def test_bootstrap_rows_row_error_returns_400_with_row_detail():
+@pytest.mark.parametrize(
+    "rows, detail",
+    [
+        ([{"name": "A"}, {"lat": 1, "lon": 2}], ["Row 2: no name"]),
+        (
+            [{"name": "A", "kind": "star"}, {"name": "B"}, {"name": "C", "lat": 1}],
+            ["Row 1: unknown kind 'star'", "Row 3: lat without lon"],
+        ),
+        ([], ["No places found"]),
+    ],
+    ids=["row_error_with_row_detail", "reports_every_bad_row", "empty_rows"],
+)
+def test_bootstrap_rows_bad_rows_return_400_with_detail(rows, detail):
     job = _seed()
-    started = client.post(f"/api/maps/{job['id']}/bootstrap-rows", json={"rows": [{"name": "A"}, {"lat": 1, "lon": 2}]})
+    started = client.post(f"/api/maps/{job['id']}/bootstrap-rows", json={"rows": rows})
     assert started.status_code == 400
-    detail = started.json()["detail"]
-    assert isinstance(detail, list)
-    assert detail == ["Row 2: no name"]
-
-
-def test_bootstrap_rows_reports_every_bad_row():
-    job = _seed()
-    started = client.post(
-        f"/api/maps/{job['id']}/bootstrap-rows",
-        json={"rows": [{"name": "A", "kind": "star"}, {"name": "B"}, {"name": "C", "lat": 1}]},
-    )
-    assert started.status_code == 400
-    assert started.json()["detail"] == ["Row 1: unknown kind 'star'", "Row 3: lat without lon"]
-
-
-def test_bootstrap_rows_empty_rows_returns_400():
-    job = _seed()
-    started = client.post(f"/api/maps/{job['id']}/bootstrap-rows", json={"rows": []})
-    assert started.status_code == 400
-    assert started.json()["detail"] == ["No places found"]
+    assert started.json()["detail"] == detail
 
 
 def test_bootstrap_rows_rejects_unknown_body_field():
@@ -4061,54 +3981,23 @@ def test_a_bootstrapped_pin_writes_showLabel_false_explicitly():
     assert [church["showLabel"] for church in slide["churches"]] == [False]
 
 
-def test_document_attribution_defaults_to_credits():
+@pytest.mark.parametrize(
+    "value, expected",
+    [(None, "credits"), ("credits", "credits"), ("stamp", "stamp"), ("banner", "credits")],
+    ids=["missing_defaults_to_credits", "credits", "stamp", "unknown_reads_as_credits"],
+)
+def test_document_attribution_round_trips(value, expected):
     job = _seed()
     doc = _doc(job)
+    if value is None:
+        doc.pop("attribution", None)
+    else:
+        doc["attribution"] = value
     saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
-    assert saved.json()["result"]["attribution"] == "credits"
+    assert saved.json()["result"]["attribution"] == expected
     latest = client.get(f"/api/jobs/{job['id']}")
-    assert latest.json()["result"]["attribution"] == "credits"
-
-
-def test_document_attribution_round_trips_credits():
-    job = _seed()
-    doc = _doc(job)
-    doc["attribution"] = "credits"
-    saved = _save(job, doc)
-    assert saved.status_code == 200, saved.text
-    assert saved.json()["result"]["attribution"] == "credits"
-    latest = client.get(f"/api/jobs/{job['id']}")
-    assert latest.json()["result"]["attribution"] == "credits"
-
-
-def test_document_attribution_round_trips_stamp():
-    job = _seed()
-    doc = _doc(job)
-    doc["attribution"] = "stamp"
-    saved = _save(job, doc)
-    assert saved.status_code == 200, saved.text
-    assert saved.json()["result"]["attribution"] == "stamp"
-    latest = client.get(f"/api/jobs/{job['id']}")
-    assert latest.json()["result"]["attribution"] == "stamp"
-
-
-def test_document_attribution_rejects_unknown_value_as_credits():
-    job = _seed()
-    doc = _doc(job)
-    doc["attribution"] = "banner"
-    saved = _save(job, doc)
-    assert saved.status_code == 200, saved.text
-    assert saved.json()["result"]["attribution"] == "credits"
-
-
-def test_document_attribution_missing_key_reads_as_credits():
-    job = _seed()
-    doc = _doc(job)
-    doc.pop("attribution", None)
-    saved = _save(job, doc)
-    assert saved.status_code == 200, saved.text
-    assert saved.json()["result"]["attribution"] == "credits"
+    assert latest.json()["result"]["attribution"] == expected
 
 
 def test_export_forwards_credits_to_job(monkeypatch):
@@ -4217,24 +4106,19 @@ def test_maps_slide_accepts_admin1_highlight():
     assert saved.json()["result"]["slides"][0]["highlights"] == ["MYS", "A1:MYS-1186"]
 
 
-def test_maps_slide_accepts_highlight_colours():
+@pytest.mark.parametrize(
+    "colours, expected",
+    [({"mys": "#00AAFF"}, {"MYS": "#00aaff"}), ({"MYS": "NONE"}, {"MYS": "none"})],
+    ids=["colour", "no_fill"],
+)
+def test_maps_slide_accepts_highlight_colours(colours, expected):
     job = _seed()
     doc = _doc(job)
     doc["slides"][0]["highlights"] = ["MYS"]
-    doc["slides"][0]["highlightColours"] = {"mys": "#00AAFF"}
+    doc["slides"][0]["highlightColours"] = colours
     saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
-    assert saved.json()["result"]["slides"][0]["highlightColours"] == {"MYS": "#00aaff"}
-
-
-def test_maps_slide_accepts_highlight_no_fill():
-    job = _seed()
-    doc = _doc(job)
-    doc["slides"][0]["highlights"] = ["MYS"]
-    doc["slides"][0]["highlightColours"] = {"MYS": "NONE"}
-    saved = _save(job, doc)
-    assert saved.status_code == 200, saved.text
-    assert saved.json()["result"]["slides"][0]["highlightColours"] == {"MYS": "none"}
+    assert saved.json()["result"]["slides"][0]["highlightColours"] == expected
 
 
 def test_maps_slide_rejects_bad_highlight_colours():

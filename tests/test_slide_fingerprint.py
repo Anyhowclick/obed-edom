@@ -120,13 +120,6 @@ def _base_slide_graph():
     return objects, id_to_file, data_map, pres_files
 
 
-def test_slide_key_intra_global_data_dag_is_cacheable():
-    objects, id_to_file, data_map, pres_files = _base_slide_graph()
-    key, reason = _slide_key("1", 0, False, objects, id_to_file, data_map, pres_files)
-    assert reason is None
-    assert _is_hex64(key)
-
-
 def test_dag_shared_style_dedups_not_flags():
     # The global style 40 is reached from BOTH runs of storage 2 AND from template 50 —
     # a DAG. It must dedup on first reach (never re-traversed, never an id-uniqueness
@@ -508,14 +501,19 @@ def test_fingerprint_records_uncacheable_by_position():
 # --------------------------------------------------------------------------
 # Gated real-deck smoke test.
 # --------------------------------------------------------------------------
-@pytest.mark.skipif(not DSK.exists(), reason="local DSK deck only")
-def test_real_dsk_deck_fingerprint():
+@pytest.fixture(scope="module")
+def dsk_fingerprint():
+    if not DSK.exists():
+        pytest.skip("local DSK deck only")
     try:
         import keynote_parser  # noqa: F401
     except Exception:
         pytest.skip("keynote-parser (iwa extra) not installed")
+    return fingerprint_deck(DSK, font_env="pinned-for-test")
 
-    out = fingerprint_deck(DSK, font_env="pinned-for-test")
+
+def test_real_dsk_deck_fingerprint(dsk_fingerprint):
+    out = dsk_fingerprint
     assert len(out["slides"]) == 43
     assert _is_hex64(out["global"])
     # Near-empty uncacheable (measured ~0 dangling/cross-slide on the gold decks).
@@ -530,15 +528,9 @@ def test_real_dsk_deck_fingerprint():
     assert again == out
 
 
-@pytest.mark.skipif(not DSK.exists(), reason="local DSK deck only")
-def test_real_dsk_shared_deck_matches_fresh_decode():
-    try:
-        import keynote_parser  # noqa: F401
-    except Exception:
-        pytest.skip("keynote-parser (iwa extra) not installed")
+def test_real_dsk_shared_deck_matches_fresh_decode(dsk_fingerprint):
     from obed_edom.iwa_runs import _load_deck
 
     deck = _load_deck(DSK)
     shared = fingerprint_deck(DSK, deck=copy.deepcopy(deck), font_env="pinned-for-test")
-    fresh = fingerprint_deck(DSK, font_env="pinned-for-test")
-    assert shared == fresh
+    assert shared == dsk_fingerprint

@@ -11,7 +11,6 @@ centres the badge text inside its wide slot instead of sitting flush over the pi
 """
 from __future__ import annotations
 
-import copy
 import io
 import zipfile
 from pathlib import Path
@@ -19,8 +18,6 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("keynote_parser")
-
-from keynote_parser.codec import IWAFile  # noqa: E402
 
 from obed_edom.iwa_runs import _load_deck, resolve_style  # noqa: E402
 from test_iwa_write import _arch, _member  # noqa: E402
@@ -30,13 +27,11 @@ from obed_edom.dsk_style import (  # noqa: E402
     GOLD_YELLOW,
     OfflineWriteRefused,
     StyleSpec,
-    WHITE,
     write_styles,
 )
 from obed_edom.iwa_runs import resolve_para_style  # noqa: E402
 
 _CYAN_COLOR = {"model": "rgb", "r": CYAN[0], "g": CYAN[1], "b": CYAN[2], "a": 1.0, "rgbspace": "srgb"}
-_WHITE_COLOR = {"model": "rgb", "r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0, "rgbspace": "srgb"}
 
 
 def _para(ident, *, font_size, capitalization="kAllCaps", font_name="AzoSans-Bold",
@@ -117,14 +112,20 @@ def test_point_column_badge_keeps_cyan_only_caps_cleared(deck, tmp_path):
     assert resolve_para_style("12", objects, {})["alignment"] == "TATvalue0"
 
 
-def test_refuses_candidate_without_paraProperties(tmp_path):
-    archives = [
-        _para("10", font_size=40.0, color=_CYAN_COLOR, has_para_properties=False),
-    ]
-    deck = _build_stylesheet(tmp_path / "noparaprops.key", archives=archives)
+@pytest.mark.parametrize(
+    "archive,needle",
+    [
+        (_para("10", font_size=40.0, color=_CYAN_COLOR, has_para_properties=False), "paraProperties"),
+        (_para("10", font_size=40.0, color=_CYAN_COLOR, tsd_fill=False), "tsdFill"),
+        (_charstyle_arch("14", name="SuperScript", color=_CYAN_COLOR), "zero verse-badge styles"),
+    ],
+    ids=["candidate_without_paraProperties", "candidate_without_tsdFill", "zero_badge_styles_match"],
+)
+def test_refuses_and_leaves_the_deck_untouched(tmp_path, archive, needle):
+    deck = _build_stylesheet(tmp_path / "refused.key", archives=[archive])
     before = deck.read_bytes()
     out = tmp_path / "out.key"
-    with pytest.raises(OfflineWriteRefused, match="paraProperties"):
+    with pytest.raises(OfflineWriteRefused, match=needle):
         write_styles(deck, out_path=out)
     assert deck.read_bytes() == before
     assert not out.exists()
@@ -175,30 +176,6 @@ def test_member_isolation(deck, tmp_path):
                 assert zin.read(name) != zout.read(name)
             else:
                 assert zin.read(name) == zout.read(name)
-
-
-def test_refuses_when_zero_badge_styles_match(tmp_path):
-    archives = [_charstyle_arch("14", name="SuperScript", color=_CYAN_COLOR)]
-    deck = _build_stylesheet(tmp_path / "nomatch.key", archives=archives)
-    before = deck.read_bytes()
-    out = tmp_path / "out.key"
-    with pytest.raises(OfflineWriteRefused, match="zero verse-badge styles"):
-        write_styles(deck, out_path=out)
-    assert deck.read_bytes() == before
-    assert not out.exists()
-
-
-def test_refuses_candidate_without_tsdFill(tmp_path):
-    archives = [
-        _para("10", font_size=40.0, color=_CYAN_COLOR, tsd_fill=False),
-    ]
-    deck = _build_stylesheet(tmp_path / "notsd.key", archives=archives)
-    before = deck.read_bytes()
-    out = tmp_path / "out.key"
-    with pytest.raises(OfflineWriteRefused, match="tsdFill"):
-        write_styles(deck, out_path=out)
-    assert deck.read_bytes() == before
-    assert not out.exists()
 
 
 def test_refuses_undecodable_stylesheet_member(tmp_path):

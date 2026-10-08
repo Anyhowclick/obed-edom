@@ -15,6 +15,8 @@ States are explicit, not packed into pairing leftIndex/rightIndexes:
 
 from pathlib import Path
 
+import pytest
+
 from obed_edom.framing import (
     AUTO,
     DEFERRED,
@@ -154,37 +156,21 @@ def test_template_framing_digest_is_stable_under_sub_bucket_jitter():
     assert steady == jittered
 
 
-def test_template_framing_digest_is_insensitive_to_item_order():
+@pytest.mark.parametrize(
+    "items",
+    [
+        [_image("a.png", 0, 0, 50, 50), _image("b.png", 200, 0, 60, 60)],
+        [_text("Left caption", 0, 0, 50, 50), _text("Right caption", 200, 0, 60, 60)],
+    ],
+    ids=["images", "texts"],
+)
+def test_template_framing_digest_is_insensitive_to_item_order(items: list[dict]):
     """Keynote can reorder items within a kind on save with nothing else changed
     (see iwa_zorder.py); the same slide with its items listed in a different order
-    must produce the same digest."""
-    slide = {
-        "number": 1,
-        "items": [
-            {"kind": "image", "fileName": "a.png", "x": 0, "y": 0, "w": 50, "h": 50},
-            {"kind": "image", "fileName": "b.png", "x": 200, "y": 0, "w": 60, "h": 60},
-        ],
-    }
-    reordered = {
-        "number": 1,
-        "items": list(reversed(slide["items"])),
-    }
-    assert template_framing_digests({"slides": [slide]}) == template_framing_digests(
-        {"slides": [reordered]}
-    )
-
-
-def test_template_framing_digest_is_insensitive_to_text_item_order():
-    """Two unchanged top-level text items listed in reversed order must not change
-    the digest -- text comes from the item itself, not a payload-ordered traversal."""
-    slide = {
-        "number": 1,
-        "items": [
-            _text("Left caption", 0, 0, 50, 50),
-            _text("Right caption", 200, 0, 60, 60),
-        ],
-    }
-    reordered = {"number": 1, "items": list(reversed(slide["items"]))}
+    must produce the same digest. Text comes from the item itself, not a
+    payload-ordered traversal."""
+    slide = {"number": 1, "items": items}
+    reordered = {"number": 1, "items": list(reversed(items))}
     assert template_framing_digests({"slides": [slide]}) == template_framing_digests(
         {"slides": [reordered]}
     )
@@ -293,29 +279,23 @@ def test_pinned_template_slide_follows_an_insertion(tmp_path: Path):
     assert reuse.decisions[0].template_slide == 3
 
 
-def test_pinned_template_slide_dropped_when_deleted(tmp_path: Path):
+@pytest.mark.parametrize(
+    "current_slides",
+    [
+        [_img_slide(1, 0, 0, 100, 100)],
+        [_img_slide(1, 0, 0, 100, 100), _img_slide(2, 250, 0, 100, 100)],
+    ],
+    ids=["deleted", "content_changed"],
+)
+def test_pinned_template_slide_dropped_when_deleted_or_changed(tmp_path: Path, current_slides: list[dict]):
     saved = _tmpl_digests(_img_slide(1, 0, 0, 100, 100), _img_slide(2, 200, 0, 100, 100))
     save_framings(
         WALL, TEMPLATE, ["a"], "t1", [Decision(0, PINNED, 2)],
         template_digests=saved, root=tmp_path,
     )
     record = load_framings(WALL, TEMPLATE, root=tmp_path)
-    current = _tmpl_digests(_img_slide(1, 0, 0, 100, 100))
-    reuse = reuse_framings(record, ["a"], "t2", current)
+    reuse = reuse_framings(record, ["a"], "t2", _tmpl_digests(*current_slides))
     assert reuse.template_changed is True
-    assert reuse.dropped == 1
-    assert reuse.decisions == {}
-
-
-def test_pinned_template_slide_dropped_when_its_content_changed(tmp_path: Path):
-    saved = _tmpl_digests(_img_slide(1, 0, 0, 100, 100), _img_slide(2, 200, 0, 100, 100))
-    save_framings(
-        WALL, TEMPLATE, ["a"], "t1", [Decision(0, PINNED, 2)],
-        template_digests=saved, root=tmp_path,
-    )
-    record = load_framings(WALL, TEMPLATE, root=tmp_path)
-    current = _tmpl_digests(_img_slide(1, 0, 0, 100, 100), _img_slide(2, 250, 0, 100, 100))
-    reuse = reuse_framings(record, ["a"], "t2", current)
     assert reuse.dropped == 1
     assert reuse.decisions == {}
 

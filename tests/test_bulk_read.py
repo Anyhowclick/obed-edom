@@ -65,22 +65,17 @@ def _capture_plan(monkeypatch):
     return captured
 
 
-def test_plan_carries_bulk_read_on(tmp_path, monkeypatch):
-    monkeypatch.delenv("OBED_BULK_READ", raising=False)
+@pytest.mark.parametrize("env,expected", [(None, True), ("0", False)], ids=["default_on", "forced_off"])
+def test_plan_carries_bulk_read(tmp_path, monkeypatch, env, expected):
+    if env is None:
+        monkeypatch.delenv("OBED_BULK_READ", raising=False)
+    else:
+        monkeypatch.setenv("OBED_BULK_READ", env)
     captured = _capture_plan(monkeypatch)
     key = tmp_path / "deck.key"
     key.write_text("stub")
     inspect_keynote(key, use_cache=False)
-    assert captured["plan"]["bulkRead"] is True
-
-
-def test_plan_carries_bulk_read_off(tmp_path, monkeypatch):
-    monkeypatch.setenv("OBED_BULK_READ", "0")
-    captured = _capture_plan(monkeypatch)
-    key = tmp_path / "deck.key"
-    key.write_text("stub")
-    inspect_keynote(key, use_cache=False)
-    assert captured["plan"]["bulkRead"] is False
+    assert captured["plan"]["bulkRead"] is expected
 
 
 def test_use_cache_false_exports_into_export_dir_not_the_digest_cache(tmp_path, monkeypatch):
@@ -102,15 +97,6 @@ def test_use_cache_false_exports_into_export_dir_not_the_digest_cache(tmp_path, 
     export_dir = tmp_path / "job_previews"
     inspect_keynote(key, export_dir=export_dir, use_cache=False)
     assert export_calls == [export_dir]
-    assert "exportDir" not in captured["plan"]
-
-
-def test_legacy_jxa_plan_never_carries_export_dir(tmp_path, monkeypatch):
-    captured = _capture_plan(monkeypatch)
-    monkeypatch.setattr(inspect_mod, "export_slide_images", lambda *a, **k: None)
-    key = tmp_path / "deck.key"
-    key.write_text("stub")
-    inspect_keynote(key, export_dir=tmp_path / "previews", use_cache=False)
     assert "exportDir" not in captured["plan"]
 
 
@@ -399,7 +385,8 @@ def test_bulk_geometry_resets_last_kept_open_every_call(tmp_path, monkeypatch):
     assert inspect_mod.LAST_BULK_KEPT_OPEN is None
 
 
-def test_bulk_geometry_keep_open_closes_by_name_on_invalid_json(tmp_path, monkeypatch):
+@pytest.mark.parametrize("keep_open", [True, False], ids=["keep_open_closes_by_name", "default_no_close"])
+def test_bulk_geometry_on_invalid_json(tmp_path, monkeypatch, keep_open):
     key = tmp_path / "deck.key"
     key.write_text("stub")
     closed: list[Path] = []
@@ -410,26 +397,10 @@ def test_bulk_geometry_keep_open_closes_by_name_on_invalid_json(tmp_path, monkey
     )
 
     with pytest.raises(RuntimeError, match="invalid JSON"):
-        inspect_mod.bulk_geometry(key, keep_open=True)
+        inspect_mod.bulk_geometry(key, keep_open=keep_open)
 
-    assert closed == [key.resolve()]
+    assert closed == ([key.resolve()] if keep_open else [])
     assert inspect_mod.LAST_BULK_KEPT_OPEN is None
-
-
-def test_bulk_geometry_default_no_close_by_name_on_invalid_json(tmp_path, monkeypatch):
-    key = tmp_path / "deck.key"
-    key.write_text("stub")
-    closed: list[Path] = []
-
-    _fake_osascript(monkeypatch, stdout="not json")
-    monkeypatch.setattr(
-        inspect_mod, "_close_document_by_name", lambda p: closed.append(Path(p))
-    )
-
-    with pytest.raises(RuntimeError, match="invalid JSON"):
-        inspect_mod.bulk_geometry(key)
-
-    assert closed == []
 
 
 def test_bulk_geometry_keep_open_closes_by_name_on_runner_timeout(tmp_path, monkeypatch):
