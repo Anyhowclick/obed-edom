@@ -520,10 +520,22 @@ def _mm_opacity_mode() -> str:
     return mode
 
 
+def _explicit_out_dir() -> Path | None:
+    """`--out-dir DIR`: this run's outputs go to DIR, which must not overlap the shared fixture tree
+    (still read for `--reuse-export`). None when the option is absent."""
+    if not any(a == "--out-dir" or a.startswith("--out-dir=") for a in sys.argv[1:]):
+        return None
+    value = _arg_value("--out-dir", "")
+    if not value:
+        raise SystemExit("--out-dir needs a directory")
+    base, shared = Path(value).resolve(), OUT.resolve()
+    if base == shared or shared in base.parents or base in shared.parents:
+        raise SystemExit(f"--out-dir {base} overlaps the shared fixture tree {shared}")
+    return base
+
+
 def _out_root(gl_auto: bool) -> Path:
-    """`--out-dir DIR` keeps this run's outputs out of the shared fixture tree (still read for `--reuse-export`)."""
-    out_dir = _arg_value("--out-dir", "")
-    base = Path(out_dir).resolve() if out_dir else OUT
+    base = _explicit_out_dir() or OUT
     return base / GL_REPLAY_DIR if gl_auto else base
 
 
@@ -3347,7 +3359,7 @@ async def _boot(chrome: ChromeCdp, base: str) -> dict:
     return {"ready": ready, "liveHash": live_hash, "media": media, "attempts": 3, "bootDegraded": True}
 
 
-async def _run(player: Path) -> dict:
+async def _run() -> dict:
     reuse = "--reuse-export" in sys.argv
     if reuse and not (OUT / "html-unmodified" / "index.html").is_file():
         raise SystemExit(f"missing reusable export at {OUT / 'html-unmodified' / 'index.html'}")
@@ -3362,7 +3374,10 @@ async def _run(player: Path) -> dict:
     bridge34 = "--disable-bridge34" not in sys.argv
     wait_profile_name = _arg_value("--wait-profile", "fast")
     wait_profile = WAIT_PROFILES[wait_profile_name]
-    if root.exists() and not reuse:
+    if _explicit_out_dir() is not None:
+        if root.exists() and any(root.iterdir()):
+            raise SystemExit(f"--out-dir {root} is not empty; pass a new directory")
+    elif root.exists() and not reuse:
         shutil.rmtree(root)
     root.mkdir(parents=True, exist_ok=True)
     runs = root / "runs"
@@ -4609,7 +4624,7 @@ def main() -> int:
             "Keynote is already running — refuse to force-quit an owner session. "
             "Quit Keynote and re-run, or pass --reuse-export."
         )
-    report = asyncio.run(_run(OUT / "html-player"))
+    report = asyncio.run(_run())
     return 0 if report.get("sourceUnchanged") and report.get("success") else (2 if not report.get("sourceUnchanged") else 1)
 
 

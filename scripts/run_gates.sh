@@ -2,7 +2,7 @@
 # usage: run_gates.sh <gate-worktree> <outdir> [--allow-record]   (runs host gate x3, host red arms, then P2 arms,
 # serially, from a clean pinned worktree). Exits nonzero when any gate FAILED, or when a RECORD arm is PENDING
 # registration unless --allow-record (discovery runs only) is passed.
-G=$1; O=$2; ALLOW_RECORD=0; [[ "$3" == "--allow-record" ]] && ALLOW_RECORD=1
+G=${1:A}; O=${2:A}; ALLOW_RECORD=0; [[ "$3" == "--allow-record" ]] && ALLOW_RECORD=1
 PY=/Users/anyhowclick/Desktop/work/obed-edom/.venv/bin/python; mkdir -p $O; cd $G || exit 1
 export PYTHONPATH=$G/src; F=$G/output/p2-recovery/html-adversarial
 if (( ALLOW_RECORD )); then

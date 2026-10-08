@@ -802,7 +802,7 @@ def test_run_refuses_an_unknown_mode_before_any_destructive_work(tmp_path, monke
     monkeypatch.setattr(shutil, "rmtree", lambda *a, **k: calls.append(a))
     monkeypatch.setattr(drv, "file_identity", lambda *a, **k: calls.append(a))
     with pytest.raises(SystemExit, match=flag):
-        asyncio.run(drv._run(tmp_path / "html-player"))
+        asyncio.run(drv._run())
     assert calls == []
     assert marker.read_text() == "prior"
 
@@ -996,9 +996,9 @@ def test_off_and_fresh_exports_use_the_root_export(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("gl_auto", [False, True], ids=["off", "auto"])
-def test_out_dir_keeps_every_output_out_of_the_shared_tree(tmp_path, monkeypatch, gl_auto):
-    """A per-run `--out-dir` writes nothing under OUT: a reused export is a private copy
-    of the shared one, so parallel or red-arm runs never touch the fixture other tools read."""
+def test_out_dir_roots_outside_the_shared_tree_and_reuses_a_private_export_copy(tmp_path, monkeypatch, gl_auto):
+    """With `--out-dir` the run's root is that directory and a reused export is a private copy,
+    so parallel or red-arm runs never rewrite the shared fixture other tools read."""
     shared_root = tmp_path / "shared"
     monkeypatch.setattr(drv, "OUT", shared_root)
     shared = _fake_export(shared_root)
@@ -1011,6 +1011,41 @@ def test_out_dir_keeps_every_output_out_of_the_shared_tree(tmp_path, monkeypatch
     (got / "index.html").write_text("stripped", encoding="utf-8")
     assert (shared / "index.html").read_text(encoding="utf-8") == "shared"
     assert sorted(p.name for p in shared_root.iterdir()) == ["html-unmodified"]
+
+
+def test_out_dir_refuses_an_empty_value_or_any_overlap_with_the_shared_tree(tmp_path, monkeypatch):
+    shared = tmp_path / "fixtures" / "html-adversarial"
+    shared.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(shared)
+    monkeypatch.setattr(drv, "OUT", tmp_path / "alias")
+    monkeypatch.setattr(sys, "argv", ["p2"])
+    assert drv._out_root(False) == tmp_path / "alias"
+    for argv in (["--out-dir"], ["--out-dir="]):
+        monkeypatch.setattr(sys, "argv", ["p2", *argv])
+        with pytest.raises(SystemExit, match="needs a directory"):
+            drv._out_root(False)
+    for bad in (shared, alias, shared / "runs", tmp_path / "fixtures", alias / "x"):
+        monkeypatch.setattr(sys, "argv", ["p2", "--out-dir", str(bad)])
+        with pytest.raises(SystemExit, match="overlaps the shared fixture tree"):
+            drv._out_root(True)
+    monkeypatch.setattr(sys, "argv", ["p2", f"--out-dir={tmp_path / 'run'}"])
+    assert drv._out_root(False) == (tmp_path / "run").resolve()
+
+
+def test_out_dir_run_refuses_a_non_empty_directory_before_writing(tmp_path, monkeypatch):
+    """An explicit `--out-dir` is never cleared: `_run` must stop before deleting or writing anything."""
+    import asyncio
+
+    monkeypatch.setattr(drv, "OUT", tmp_path / "shared")
+    keep = tmp_path / "mine"
+    keep.mkdir()
+    (keep / "precious.txt").write_text("keep")
+    monkeypatch.setattr(sys, "argv", ["p2", "--disposable", "--out-dir", str(keep)])
+    with pytest.raises(SystemExit, match="is not empty"):
+        asyncio.run(drv._run())
+    assert sorted(p.name for p in keep.iterdir()) == ["precious.txt"]
+    assert not (tmp_path / "shared").exists()
 
 
 def test_sample_frame_roi_is_index_patch_roi_scaled_to_the_frame():
