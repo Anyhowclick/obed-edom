@@ -92,71 +92,66 @@ def test_reports_the_first_video_sample_entry_fourcc(tmp_path, fourcc):
     assert movie_codec(path) == fourcc.decode()
 
 
-def test_audio_only_track_has_no_codec(tmp_path):
-    path = tmp_path / "audio.mov"
-    path.write_bytes(movie_audio_only())
+def _without_tail(data: bytes, count: int) -> bytes:
+    return data[: len(data) - count]
+
+
+GARBAGE = b"\xffnot a real movie file at all, just garbage\x00\x01\x02" * 20
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        movie_audio_only(),
+        _without_tail(ftyp() + box(b"moov", trak(b"vide", b"avc1")), 20),
+        GARBAGE,
+        ftyp() + (0xFFFFFFF).to_bytes(4, "big") + b"moov" + b"\x00" * 16,
+        b"",
+        ftyp() + box(b"free", b"\x00" * 16),
+        # A size==0 box is only valid as the file's last box; anything encoded after it
+        # is unreachable, so the following moov (if any) must not be found.
+        ftyp() + box_size0(b"free") + box(b"moov", trak(b"vide", b"avc1")),
+    ],
+    ids=[
+        "audio-only-track",
+        "truncated-file",
+        "garbage-bytes",
+        "box-declaring-a-size-larger-than-the-file",
+        "empty-file",
+        "no-moov-box",
+        "zero-size-box-that-is-not-last-extends-to-eof",
+    ],
+)
+def test_unreadable_movie_has_no_codec(tmp_path, data):
+    path = tmp_path / "movie.mov"
+    path.write_bytes(data)
     assert movie_codec(path) is None
 
 
-def test_second_trak_is_used_when_first_is_audio(tmp_path):
-    path = tmp_path / "movie.mov"
-    audio_trak = trak(b"soun", None)
-    path.write_bytes(ftyp() + box(b"moov", audio_trak + trak(b"vide", b"avc1")))
-    assert movie_codec(path) == "avc1"
-
-
-def test_moov_after_mdat_is_found_by_seeking_past_the_payload(tmp_path):
-    mdat_payload = b"\x00" * 10_000
-    mdat = box(b"mdat", mdat_payload)
-    moov = box(b"moov", trak(b"vide", b"hvc1"))
-    path = tmp_path / "movie.mov"
-    path.write_bytes(ftyp() + mdat + moov)
-    assert movie_codec(path) == "hvc1"
-
-
-def test_64_bit_box_size_is_handled(tmp_path):
-    moov_payload = trak(b"vide", b"avc1")
-    moov = box64(b"moov", moov_payload)
-    path = tmp_path / "movie.mov"
-    path.write_bytes(ftyp() + moov)
-    assert movie_codec(path) == "avc1"
-
-
-def test_size_zero_box_extends_to_end_of_file(tmp_path):
-    moov = box_size0(b"moov", trak(b"vide", b"avc1"))
-    path = tmp_path / "movie.mov"
-    path.write_bytes(ftyp() + moov)
-    assert movie_codec(path) == "avc1"
-
-
-def test_truncated_file_returns_none(tmp_path):
-    data = ftyp() + box(b"moov", trak(b"vide", b"avc1"))
-    path = tmp_path / "movie.mov"
-    path.write_bytes(data[: len(data) - 20])
-    assert movie_codec(path) is None
-
-
-def test_garbage_bytes_return_none(tmp_path):
-    path = tmp_path / "movie.mov"
-    path.write_bytes(b"\xffnot a real movie file at all, just garbage\x00\x01\x02" * 20)
-    assert movie_codec(path) is None
-
-
-def test_box_declaring_a_size_larger_than_the_file_returns_none(tmp_path):
-    bogus = (0xFFFFFFF).to_bytes(4, "big") + b"moov" + b"\x00" * 16
-    path = tmp_path / "movie.mov"
-    path.write_bytes(ftyp() + bogus)
-    assert movie_codec(path) is None
-
-
-def test_missing_file_returns_none(tmp_path):
+def test_missing_file_has_no_codec_or_fps(tmp_path):
     assert movie_codec(tmp_path / "does-not-exist.mov") is None
+    assert movie_fps(tmp_path / "does-not-exist.mov") is None
 
 
-def test_empty_file_returns_none(tmp_path):
+@pytest.mark.parametrize(
+    ("data", "fourcc"),
+    [
+        (ftyp() + box(b"moov", trak(b"soun", None) + trak(b"vide", b"avc1")), "avc1"),
+        (ftyp() + box(b"mdat", b"\x00" * 10_000) + box(b"moov", trak(b"vide", b"hvc1")), "hvc1"),
+        (ftyp() + box64(b"moov", trak(b"vide", b"avc1")), "avc1"),
+        (ftyp() + box_size0(b"moov", trak(b"vide", b"avc1")), "avc1"),
+    ],
+    ids=[
+        "second-trak-is-used-when-first-is-audio",
+        "moov-after-mdat-is-found-by-seeking-past-the-payload",
+        "64-bit-box-size",
+        "size-zero-box-extends-to-end-of-file",
+    ],
+)
+def test_codec_is_found_through_the_box_layout(tmp_path, data, fourcc):
     path = tmp_path / "movie.mov"
-    path.write_bytes(b"")
-    assert movie_codec(path) is None
+    path.write_bytes(data)
+    assert movie_codec(path) == fourcc
 
 
 def test_box_walk_is_bounded_and_terminates_quickly(tmp_path):
@@ -173,55 +168,31 @@ def test_box_walk_is_bounded_and_terminates_quickly(tmp_path):
     assert result is None
 
 
-def test_no_moov_box_returns_none(tmp_path):
-    path = tmp_path / "movie.mov"
-    path.write_bytes(ftyp() + box(b"free", b"\x00" * 16))
-    assert movie_codec(path) is None
-
-
-def test_zero_size_box_that_is_not_last_is_treated_as_extending_to_eof(tmp_path):
-    # A size==0 box is only valid as the file's last box; anything encoded after it
-    # is unreachable, so the following moov (if any) must not be found.
-    trailing_moov = box(b"moov", trak(b"vide", b"avc1"))
-    path = tmp_path / "movie.mov"
-    path.write_bytes(ftyp() + box_size0(b"free") + trailing_moov)
-    assert movie_codec(path) is None
-
-
 # --- malformed stsd -------------------------------------------------------------------------
 
 
-def test_stsd_declaring_zero_entries_returns_none(tmp_path):
-    # The trailing bytes still spell a well-formed `avc1` sample entry: a zero entry count
-    # must not let them be read as the track's codec.
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # The trailing bytes still spell a well-formed `avc1` sample entry: a zero entry count
+        # must not let them be read as the track's codec.
+        stsd_payload(sample_entry(b"avc1"), entry_count=0),
+        stsd_payload((400).to_bytes(4, "big") + b"avc1" + b"\x00" * 78),
+        stsd_payload((4).to_bytes(4, "big") + b"avc1" + b"\x00" * 78),
+        stsd_payload(sample_entry(b"\x00\x01\x02\xff")),
+        b"\x00" * 4 + (1).to_bytes(4, "big"),
+    ],
+    ids=[
+        "stsd-declaring-zero-entries",
+        "sample-entry-larger-than-the-stsd-box",
+        "sample-entry-smaller-than-a-box-header",
+        "sample-entry-with-a-non-printable-fourcc",
+        "stsd-too-short-to-hold-an-entry",
+    ],
+)
+def test_malformed_stsd_has_no_codec(tmp_path, payload):
     path = tmp_path / "movie.mov"
-    path.write_bytes(movie_with_stsd_payload(stsd_payload(sample_entry(b"avc1"), entry_count=0)))
-    assert movie_codec(path) is None
-
-
-def test_sample_entry_larger_than_the_stsd_box_returns_none(tmp_path):
-    oversized = (400).to_bytes(4, "big") + b"avc1" + b"\x00" * 78
-    path = tmp_path / "movie.mov"
-    path.write_bytes(movie_with_stsd_payload(stsd_payload(oversized)))
-    assert movie_codec(path) is None
-
-
-def test_sample_entry_smaller_than_a_box_header_returns_none(tmp_path):
-    undersized = (4).to_bytes(4, "big") + b"avc1" + b"\x00" * 78
-    path = tmp_path / "movie.mov"
-    path.write_bytes(movie_with_stsd_payload(stsd_payload(undersized)))
-    assert movie_codec(path) is None
-
-
-def test_sample_entry_with_a_non_printable_fourcc_returns_none(tmp_path):
-    path = tmp_path / "movie.mov"
-    path.write_bytes(movie_with_stsd_payload(stsd_payload(sample_entry(b"\x00\x01\x02\xff"))))
-    assert movie_codec(path) is None
-
-
-def test_stsd_too_short_to_hold_an_entry_returns_none(tmp_path):
-    path = tmp_path / "movie.mov"
-    path.write_bytes(movie_with_stsd_payload(b"\x00" * 4 + (1).to_bytes(4, "big")))
+    path.write_bytes(movie_with_stsd_payload(payload))
     assert movie_codec(path) is None
 
 
@@ -300,9 +271,30 @@ def test_missing_stts_returns_none(tmp_path):
     assert movie_codec(path) == "avc1"
 
 
-def test_missing_mdhd_returns_none(tmp_path):
+@pytest.mark.parametrize(
+    "data",
+    [
+        timed_movie(timed_trak(b"vide", timescale=None, entries=[(250, 1)])),
+        timed_movie(timed_trak(b"vide", timescale=25, entries=None, raw_stts=box(
+            b"stts", b"\x00" * 4 + (5).to_bytes(4, "big") + (250).to_bytes(4, "big") + (1).to_bytes(4, "big")
+        ))),
+        timed_movie(timed_trak(b"vide", timescale=25, entries=None, raw_stts=box(b"stts", b"\x00" * 4))),
+        _without_tail(timed_movie(timed_trak(b"vide", timescale=25, entries=[(250, 1)])), 6),
+        timed_movie(timed_trak(b"soun", timescale=48000, entries=[(100, 1024)], fourcc=b"mp4a")),
+        GARBAGE,
+    ],
+    ids=[
+        "missing-mdhd",
+        "stts-declaring-more-entries-than-it-holds",
+        "stts-too-short-for-its-entry-count",
+        "truncated-file",
+        "audio-only-movie",
+        "garbage-bytes",
+    ],
+)
+def test_unreadable_timing_has_no_fps(tmp_path, data):
     path = tmp_path / "movie.mov"
-    path.write_bytes(timed_movie(timed_trak(b"vide", timescale=None, entries=[(250, 1)])))
+    path.write_bytes(data)
     assert movie_fps(path) is None
 
 
@@ -316,26 +308,6 @@ def test_zero_timescale_samples_or_duration_returns_none(tmp_path, timescale, en
     assert movie_fps(path) is None
 
 
-def test_stts_declaring_more_entries_than_it_holds_returns_none(tmp_path):
-    lying = box(b"stts", b"\x00" * 4 + (5).to_bytes(4, "big") + (250).to_bytes(4, "big") + (1).to_bytes(4, "big"))
-    path = tmp_path / "movie.mov"
-    path.write_bytes(timed_movie(timed_trak(b"vide", timescale=25, entries=None, raw_stts=lying)))
-    assert movie_fps(path) is None
-
-
-def test_stts_too_short_for_its_entry_count_returns_none(tmp_path):
-    path = tmp_path / "movie.mov"
-    path.write_bytes(timed_movie(timed_trak(b"vide", timescale=25, entries=None, raw_stts=box(b"stts", b"\x00" * 4))))
-    assert movie_fps(path) is None
-
-
-def test_truncated_file_returns_none_for_fps(tmp_path):
-    data = timed_movie(timed_trak(b"vide", timescale=25, entries=[(250, 1)]))
-    path = tmp_path / "movie.mov"
-    path.write_bytes(data[: len(data) - 6])
-    assert movie_fps(path) is None
-
-
 def test_non_video_trak_timing_is_ignored(tmp_path):
     # The audio trak comes first with a 48 kHz timescale and 1024-sample packets; its
     # 46.875 "fps" must never be reported as the video's rate.
@@ -344,12 +316,6 @@ def test_non_video_trak_timing_is_ignored(tmp_path):
     path = tmp_path / "movie.mov"
     path.write_bytes(timed_movie(audio, video))
     assert movie_fps(path) == 25.0
-
-
-def test_audio_only_movie_has_no_fps(tmp_path):
-    path = tmp_path / "audio.mov"
-    path.write_bytes(timed_movie(timed_trak(b"soun", timescale=48000, entries=[(100, 1024)], fourcc=b"mp4a")))
-    assert movie_fps(path) is None
 
 
 def test_fps_comes_from_the_same_trak_movie_codec_reads(tmp_path):
@@ -361,16 +327,6 @@ def test_fps_comes_from_the_same_trak_movie_codec_reads(tmp_path):
     path.write_bytes(timed_movie(unreadable, readable))
     assert movie_codec(path) == "hvc1"
     assert movie_fps(path) == 25.0
-
-
-def test_missing_file_has_no_fps(tmp_path):
-    assert movie_fps(tmp_path / "does-not-exist.mov") is None
-
-
-def test_garbage_bytes_have_no_fps(tmp_path):
-    path = tmp_path / "movie.mov"
-    path.write_bytes(b"\xffnot a real movie file at all, just garbage\x00\x01\x02" * 20)
-    assert movie_fps(path) is None
 
 
 @pytest.mark.skipif(not REAL_UNTITLED_MOV.is_file(), reason="P2 fixture movie not available")

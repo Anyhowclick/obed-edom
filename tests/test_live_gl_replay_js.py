@@ -1999,20 +1999,19 @@ def test_override_applied_before_mapped_draw():
     assert final["opacityAfter"][:4] == [p["restOpacity"] for p in SETTLE_FRAME["programs"][:4]]
 
 
-def test_rest_opacity_not_one_is_unproven():
+@pytest.mark.parametrize(
+    ("name", "reason"),
+    [("Opacity", "rest-opacity"), ("mixFactor", "mixfactor")],
+    ids=["rest-opacity-not-one", "mixfactor-between-zero-and-one"],
+)
+def test_partial_opacity_or_mix_factor_is_unproven(name, reason):
     """Opacity-plan §2: an override slot whose recorded rest `Opacity` is not 1.0
-    cannot be patched multiplicatively; the slot is dropped with `rest-opacity`."""
-    out = _run_sandbox(scenario="happy", frame=_mutate_frame(name="Opacity", value=0.5))
-    final = _assert_clean(out)
-    assert _unproven(final).get(4) == "rest-opacity", _unproven(final)
-
-
-def test_mixfactor_between_zero_and_one_is_unproven():
-    """Opacity-plan §1.2 (F-9): a `mixFactor` strictly between 0 and 1 leaves the
+    cannot be patched multiplicatively; the slot is dropped with `rest-opacity`.
+    Opacity-plan §1.2 (F-9): a `mixFactor` strictly between 0 and 1 leaves the
     sampler-visible texture undetermined, so that slot is unproven."""
-    out = _run_sandbox(scenario="happy", frame=_mutate_frame(name="mixFactor", value=0.5))
+    out = _run_sandbox(scenario="happy", frame=_mutate_frame(name=name, value=0.5))
     final = _assert_clean(out)
-    assert _unproven(final).get(4) == "mixfactor", _unproven(final)
+    assert _unproven(final).get(4) == reason, _unproven(final)
 
 
 def test_mvp_decode_must_match_settled_rect():
@@ -2453,7 +2452,12 @@ def test_recorded_draw_that_throws_without_a_gl_error_stands_down():
     assert len([c for c in final["seamCalls"] if c["fn"] == "release"]) == 1
 
 
-def test_read_pixels_throwing_during_arm_post_stands_down():
+@pytest.mark.parametrize(
+    "cfg",
+    [{"readPixelsThrowsAtArmPost": True}, {"debugForceFail": "glError"}],
+    ids=["read-pixels-throwing-during-arm-post", "forced-gl-error-seeded-at-install"],
+)
+def test_gl_error_during_arm_stands_down(cfg):
     """codex r1 spec 1, the other half: `sampleOnce` swallows a read failure into
     `bands = null`, `markerSwap` then reads `dark.length`, and that TypeError
     escapes `armPost` into the rAF callback — leaving the module stranded in
@@ -2462,8 +2466,13 @@ def test_read_pixels_throwing_during_arm_post_stands_down():
     The injection is scoped to reads of the DRAWING BUFFER. A throw on every read
     would be hit first by the poster snapshot, which reads through a bound
     framebuffer and has its own, more specific reason — `posterUnreadable`, covered
-    by the `fboStatus` case — and would never reach the path this guards."""
-    out = _run_sandbox(scenario="arm_only", readPixelsThrowsAtArmPost=True)
+    by the `fboStatus` case — and would never reach the path this guards.
+
+    S3 r4 N4. Folding the `glError` emission into a single `requireGlClean`
+    helper left it reachable only with `ok=false`, i.e. only after a REAL failure —
+    so `debugForceFail='glError'` armed cleanly and ran forever, and the gate-6
+    fail-closed arm silently lost a reason. Every §2.7 reason must be forceable."""
+    out = _run_sandbox(scenario="arm_only", **cfg)
     final = _assert_clean(out)
     assert final["standDowns"] == ["glError"], final["standDowns"]
     assert final["state"] == "RETIRED", final["state"]
@@ -2552,19 +2561,6 @@ def test_unwritable_prototype_method_refuses_installation():
 
 
 # --- S3 r4 N4: the glError force path -----------------------------------------------------
-
-
-def test_forced_gl_error_seeded_at_install_stands_down():
-    """S3 r4 N4. Folding the `glError` emission into a single `requireGlClean`
-    helper left it reachable only with `ok=false`, i.e. only after a REAL failure —
-    so `debugForceFail='glError'` armed cleanly and ran forever, and the gate-6
-    fail-closed arm silently lost a reason. Every §2.7 reason must be forceable."""
-    out = _run_sandbox(scenario="arm_only", debugForceFail="glError")
-    final = _assert_clean(out)
-    assert final["standDowns"] == ["glError"], final["standDowns"]
-    assert final["state"] == "RETIRED", final["state"]
-    assert final["handlePresent"] is False
-    assert len([c for c in final["seamCalls"] if c["fn"] == "release"]) == 1
 
 
 def test_forced_gl_error_set_mid_live_stands_down_on_the_next_tick():

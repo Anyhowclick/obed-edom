@@ -204,19 +204,16 @@ def test_live_api_refuses_unqualified_export_and_cross_origin(tmp_path, monkeypa
     assert not claims
 
 
-def test_live_api_rejects_non_integer_go_to(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "command",
+    [{'operation': 'goTo', 'slide': True}, {'operation': 'bogus'}],
+    ids=['non-integer-go-to', 'unknown-operation'],
+)
+def test_live_api_rejects_malformed_command(tmp_path, monkeypatch, command):
     client, _, _, _, _adapters, _service = client_for(tmp_path, monkeypatch)
     state = client.post('/api/live', json={'previewJobId': 'prepared'}).json()
     session = state['sessionId']
-    response = client.post(f'/api/live/{session}/commands', json={'requestId': 'x', 'operation': 'goTo', 'slide': True})
-    assert response.status_code == 422
-
-
-def test_live_api_rejects_unknown_operation(tmp_path, monkeypatch):
-    client, _, _, _, _adapters, _service = client_for(tmp_path, monkeypatch)
-    state = client.post('/api/live', json={'previewJobId': 'prepared'}).json()
-    session = state['sessionId']
-    response = client.post(f'/api/live/{session}/commands', json={'requestId': 'x', 'operation': 'bogus'})
+    response = client.post(f'/api/live/{session}/commands', json={'requestId': 'x', **command})
     assert response.status_code == 422
 
 
