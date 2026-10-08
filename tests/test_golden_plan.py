@@ -3,6 +3,7 @@ the same `remap_keynote()` apply plan, byte-for-byte, without opening Keynote.
 See `scripts/golden_plan.py` for the capture mechanism and canonicalisation."""
 from __future__ import annotations
 
+import functools
 import json
 import math
 import re
@@ -38,6 +39,8 @@ from obed_edom import iwa_builds  # noqa: E402
 from obed_edom import remap_keynote  # noqa: E402
 from obed_edom.map_remap import MM_EDGE_MARGIN  # noqa: E402
 from obed_edom.offline_inspect import offline_wall_payload  # noqa: E402
+
+pytestmark = pytest.mark.usefixtures("shared_iwa_decode")
 
 DECKS = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs")
 TEMPLATE = DECKS / "Base_CG_Assets.key"
@@ -273,6 +276,26 @@ def test_gate_fails_on_malformed_live_planner_env(monkeypatch: pytest.MonkeyPatc
         _gate(deck_name, monkeypatch, tmp_path)
 
 
+def _no_thumbs(deck: Path, payload: dict, *, log=None) -> dict[int, str]:
+    return {}
+
+
+@functools.cache
+def _gold_proposal() -> dict:
+    """Gold's thumbnail-free framing proposal, computed once for the pinned-candidate
+    tests, which only read it. Call after `_skip_ladder`."""
+    deck = DECKS / "Gold_Wall_Input.key"
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(framing, "build_preview_thumbs", _no_thumbs)
+        return framing.propose_framings(
+            deck,
+            TEMPLATE,
+            wall_payload=offline_wall_payload(deck),
+            template_payload=offline_wall_payload(TEMPLATE),
+            log=lambda _m: None,
+        )
+
+
 def test_propose_auto_rects_match_apply_transforms(monkeypatch: pytest.MonkeyPatch) -> None:
     deck_name = "Full_Report_Card_Wall.key"
     golden = _skip_ladder(deck_name)
@@ -284,9 +307,6 @@ def test_propose_auto_rects_match_apply_transforms(monkeypatch: pytest.MonkeyPat
     if problems:
         pytest.fail("live planner env malformed: " + "; ".join(problems))
     _check_planner_env(golden, planner_env)
-
-    def _no_thumbs(deck: Path, payload: dict, *, log=None) -> dict[int, str]:
-        return {}
 
     monkeypatch.setattr(framing, "build_preview_thumbs", _no_thumbs)
     fresh_wall = offline_wall_payload(deck)
@@ -367,9 +387,7 @@ def test_propose_auto_rects_match_apply_transforms(monkeypatch: pytest.MonkeyPat
         (14, 5, "pinOverridden"),
     ],
 )
-def test_propose_pinned_candidate_matches_a_pinned_apply(
-    monkeypatch: pytest.MonkeyPatch, slide_no: int, pinned_to: int, arm: str
-) -> None:
+def test_propose_pinned_candidate_matches_a_pinned_apply(slide_no: int, pinned_to: int, arm: str) -> None:
     """A candidate is what the run does when the operator pins only that page to it."""
     from obed_edom.map_remap import learn_recipe, plan_payload
 
@@ -377,17 +395,7 @@ def test_propose_pinned_candidate_matches_a_pinned_apply(
     _skip_ladder(deck_name)
     deck = DECKS / deck_name
 
-    def _no_thumbs(deck: Path, payload: dict, *, log=None) -> dict[int, str]:
-        return {}
-
-    monkeypatch.setattr(framing, "build_preview_thumbs", _no_thumbs)
-    proposal = framing.propose_framings(
-        deck,
-        TEMPLATE,
-        wall_payload=offline_wall_payload(deck),
-        template_payload=offline_wall_payload(TEMPLATE),
-        log=lambda _m: None,
-    )
+    proposal = _gold_proposal()
     page = next(p for p in proposal["pages"] if p["slide"] == slide_no)
     candidate = next(c for c in page["candidates"] if c["templateSlide"] == pinned_to)
 
@@ -420,9 +428,7 @@ def test_propose_pinned_candidate_matches_a_pinned_apply(
     assert candidate_rows == apply_rows
 
 
-def test_pinning_the_previous_page_changes_how_the_next_pinned_page_frames(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_pinning_the_previous_page_changes_how_the_next_pinned_page_frames() -> None:
     """Candidates model 'pin only this page'. Pinning Gold 13 AND 14 to template 5 together
     lets 14 reuse 13's affine, so the pin the lone-14 candidate flags as overridden IS used
     when 13 is pinned too -- the reason the review says previews assume the other pages stay
@@ -433,17 +439,7 @@ def test_pinning_the_previous_page_changes_how_the_next_pinned_page_frames(
     _skip_ladder(deck_name)
     deck = DECKS / deck_name
 
-    def _no_thumbs(deck: Path, payload: dict, *, log=None) -> dict[int, str]:
-        return {}
-
-    monkeypatch.setattr(framing, "build_preview_thumbs", _no_thumbs)
-    proposal = framing.propose_framings(
-        deck,
-        TEMPLATE,
-        wall_payload=offline_wall_payload(deck),
-        template_payload=offline_wall_payload(TEMPLATE),
-        log=lambda _m: None,
-    )
+    proposal = _gold_proposal()
     page_14 = next(p for p in proposal["pages"] if p["slide"] == 14)
     lone_candidate = next(c for c in page_14["candidates"] if c["templateSlide"] == 5)
     assert lone_candidate["pinOverridden"] is True

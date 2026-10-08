@@ -47,6 +47,8 @@ from obed_edom.offline_inspect import (
 )
 import obed_edom.offline_inspect as offline_inspect
 
+pytestmark = pytest.mark.usefixtures("shared_iwa_decode")
+
 MAP_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Map_Extracted_Wall_1st.key")
 FULL_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Full_Report_Card_Wall.key")
 def test_deck_slide_digests_ignore_image_rotation():

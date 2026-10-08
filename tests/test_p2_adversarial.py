@@ -17,14 +17,18 @@ import base64
 import concurrent.futures
 import contextlib
 import copy
+import hashlib
 import importlib.util
 import io
 import json
 import os
+import sys
+import tempfile
 import zlib
 from pathlib import Path
 
 import numpy as np
+import PIL
 import pytest
 from PIL import Image
 
@@ -5873,6 +5877,87 @@ _SWEEP_PARTIAL_ALLOW: dict[tuple[str, tuple], str] = {
 }
 _MAIN_SWEEP_PARTIAL_ALLOW: dict[tuple[str, tuple], str] = {}
 
+_SWEEP_FIXTURE_DIRS = ("tests/fixtures/p2_freeze_3to4",)
+
+
+def _sweep_cache_enabled() -> bool:
+    """`OBED_TEST_SWEEP_CACHE=off` recomputes every sweep and neither reads nor
+    writes the on-disk cache."""
+    raw = os.environ.get("OBED_TEST_SWEEP_CACHE")
+    if raw is None:
+        return True
+    if raw != "off":
+        raise pytest.UsageError(
+            f"OBED_TEST_SWEEP_CACHE must be unset or 'off', got {raw!r}"
+        )
+    return False
+
+
+def _sweep_cache_key(name: str, root: Path = REPO) -> str:
+    """sha256 over everything a sweep's result can depend on: every module of
+    the package, this file, conftest, the fixtures the snapshots load, and the
+    interpreter/numpy/Pillow versions."""
+    files = sorted((root / "src" / "obed_edom").rglob("*.py"))
+    files += [root / "tests" / "test_p2_adversarial.py", root / "tests" / "conftest.py"]
+    for rel in _SWEEP_FIXTURE_DIRS:
+        files += sorted(p for p in (root / rel).rglob("*") if p.is_file())
+    h = hashlib.sha256()
+    for part in (name, sys.version, np.__version__, PIL.__version__):
+        h.update(part.encode() + b"\0")
+    for path in files:
+        data = path.read_bytes()
+        h.update(path.relative_to(root).as_posix().encode() + b"\0")
+        h.update(len(data).to_bytes(8, "big") + data)
+    return h.hexdigest()
+
+
+def _load_sweep(path: Path, key: str) -> dict | None:
+    """The cached sweep, or None unless the file is readable, well-formed, and
+    stamped with exactly `key`."""
+    try:
+        doc = json.loads(path.read_text())
+        if doc["key"] != key or not doc["sweep"]:
+            return None
+        out = {}
+        for cls, steps, closed in doc["sweep"]:
+            if not (
+                isinstance(cls, str) and isinstance(closed, bool) and steps
+                and all(type(s) in (str, int) for s in steps)
+            ):
+                return None
+            out[(cls, tuple(steps))] = closed
+        return out
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _store_sweep(path: Path, key: str, swept: dict) -> None:
+    doc = {"key": key, "sweep": [[cls, list(p), closed] for (cls, p), closed in swept.items()]}
+    with contextlib.suppress(OSError):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(doc, f)
+            os.replace(tmp, path)
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+
+def _cached_sweep(name: str, compute, root: Path = REPO) -> dict:
+    """`compute()`, memoised on disk under `.cache/test-sweeps/` against
+    `_sweep_cache_key`. Anything short of an exact key match recomputes."""
+    if not _sweep_cache_enabled():
+        return compute()
+    path = root / ".cache" / "test-sweeps" / f"{name}.json"
+    key = _sweep_cache_key(name, root)
+    swept = _load_sweep(path, key)
+    if swept is None:
+        swept = compute()
+        _store_sweep(path, key, swept)
+    return swept
+
+
 _BRACKET_SWEEP_CACHE: dict = {}
 
 _BRACKET_SWEEP_ARMS = (("a1", "positive"), ("b", "b"), ("a2", "positiveA2"))
@@ -5933,50 +6018,57 @@ def _bracket_sweep() -> dict:
 
     The deletions are independent pure-scorer calls, so they are fanned out over
     a `ProcessPoolExecutor`; every path is still visited exactly once and scored
-    exactly as `_walk` would score it."""
+    exactly as `_walk` would score it. A whole sweep is memoised on disk by
+    `_cached_sweep`."""
     if not _BRACKET_SWEEP_CACHE:
-        n_workers = _bracket_sweep_worker_count()
-
-        snaps = _bracket_snapshots()
-        if n_workers <= 1:
-            for arm, cls in _BRACKET_SWEEP_ARMS:
-                walked = _walk(snaps[arm], lambda: _bracket_closed(snaps))
-                for path, closed in walked.items():
-                    _BRACKET_SWEEP_CACHE[(cls, path)] = closed
-            return _BRACKET_SWEEP_CACHE
-
-        expected = {
-            cls: len([p for p in _leaf_paths(snaps[arm]) if p])
-            for arm, cls in _BRACKET_SWEEP_ARMS
-        }
-
-        seen: dict = {}
-        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as ex:
-            futures = {
-                ex.submit(_bracket_sweep_worker, arm, shard, n_workers): cls
-                for arm, cls in _BRACKET_SWEEP_ARMS
-                for shard in range(n_workers)
-            }
-            for fut in concurrent.futures.as_completed(futures):
-                cls = futures[fut]
-                # .result() re-raises any worker exception loudly -- a failed
-                # shard must fail the sweep, never silently shrink the cache.
-                for path, closed in fut.result():
-                    key = (cls, path)
-                    if key in seen:
-                        raise AssertionError(f"bracket sweep path scored twice: {key}")
-                    seen[key] = closed
-
-        for cls, count in expected.items():
-            actual = sum(1 for (c, _p) in seen if c == cls)
-            assert actual == count, (
-                f"bracket sweep for {cls!r}: expected {count} paths, "
-                f"covered {actual} -- shards left a gap"
-            )
-        # Published only once whole: a failed shard must not leave a partial
-        # cache for the next caller to mistake for a finished sweep.
-        _BRACKET_SWEEP_CACHE.update(seen)
+        _BRACKET_SWEEP_CACHE.update(_cached_sweep("bracket", _compute_bracket_sweep))
     return _BRACKET_SWEEP_CACHE
+
+
+def _compute_bracket_sweep() -> dict:
+    n_workers = _bracket_sweep_worker_count()
+
+    snaps = _bracket_snapshots()
+    if n_workers <= 1:
+        serial: dict = {}
+        for arm, cls in _BRACKET_SWEEP_ARMS:
+            walked = _walk(snaps[arm], lambda: _bracket_closed(snaps))
+            for path, closed in walked.items():
+                serial[(cls, path)] = closed
+        return serial
+
+    expected = {
+        cls: len([p for p in _leaf_paths(snaps[arm]) if p])
+        for arm, cls in _BRACKET_SWEEP_ARMS
+    }
+
+    seen: dict = {}
+    with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as ex:
+        futures = {
+            ex.submit(_bracket_sweep_worker, arm, shard, n_workers): cls
+            for arm, cls in _BRACKET_SWEEP_ARMS
+            for shard in range(n_workers)
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            cls = futures[fut]
+            # .result() re-raises any worker exception loudly -- a failed
+            # shard must fail the sweep, never silently shrink the cache.
+            for path, closed in fut.result():
+                key = (cls, path)
+                if key in seen:
+                    raise AssertionError(f"bracket sweep path scored twice: {key}")
+                seen[key] = closed
+
+    for cls, count in expected.items():
+        actual = sum(1 for (c, _p) in seen if c == cls)
+        assert actual == count, (
+            f"bracket sweep for {cls!r}: expected {count} paths, "
+            f"covered {actual} -- shards left a gap"
+        )
+    # Returned (and so published or written to disk) only once whole: a failed
+    # shard must not leave a partial cache for the next caller to mistake for a
+    # finished sweep.
+    return seen
 
 
 def _collapse(swept: dict) -> tuple[dict, dict]:
@@ -6066,6 +6158,144 @@ def test_sweep_worker_count_is_capped_and_survives_an_unknown_core_count(monkeyp
     assert _bracket_sweep_worker_count() == 1
 
 
+# A miniature repo for the on-disk sweep cache: hashing the real tree is what
+# the cache is for, so these tests never do it.
+_FAKE_SWEEP = {
+    ("b", ("mediaSamples", 3, "videos", 0, "presentedMediaTime")): True,
+    ("b", ("0", "1")): False,
+    ("main", ("indexSamples",)): True,
+}
+
+
+def _fake_sweep_root(tmp_path: Path) -> Path:
+    for rel, text in [
+        ("src/obed_edom/p2_verdict.py", "X = 1\n"),
+        ("src/obed_edom/sub/helper.py", "Y = 2\n"),
+        ("tests/test_p2_adversarial.py", "# test\n"),
+        ("tests/conftest.py", "# conftest\n"),
+        ("tests/fixtures/p2_freeze_3to4/clean_bracket.json", "{}\n"),
+    ]:
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text)
+    return tmp_path
+
+
+def _counting(result: dict):
+    calls = []
+
+    def compute() -> dict:
+        calls.append(1)
+        return dict(result)
+
+    return compute, calls
+
+
+def _sweep_file(root: Path, name: str = "t") -> Path:
+    return root / ".cache" / "test-sweeps" / f"{name}.json"
+
+
+@pytest.mark.parametrize("rel", [
+    "src/obed_edom/p2_verdict.py",
+    "src/obed_edom/sub/helper.py",
+    "src/obed_edom/new_module.py",
+    "tests/test_p2_adversarial.py",
+    "tests/conftest.py",
+    "tests/fixtures/p2_freeze_3to4/clean_bracket.json",
+    "tests/fixtures/p2_freeze_3to4/another_fixture.bin",
+])
+def test_sweep_cache_key_changes_when_any_hashed_input_changes(tmp_path, rel):
+    root = _fake_sweep_root(tmp_path)
+    before = _sweep_cache_key("t", root)
+    assert _sweep_cache_key("t", root) == before
+    with (root / rel).open("a") as f:
+        f.write("# edited\n")
+    assert _sweep_cache_key("t", root) != before
+
+
+def test_sweep_cache_key_ignores_non_python_package_files_and_names_the_sweep(tmp_path):
+    root = _fake_sweep_root(tmp_path)
+    before = _sweep_cache_key("t", root)
+    (root / "src" / "obed_edom" / "notes.txt").write_text("unrelated\n")
+    assert _sweep_cache_key("t", root) == before
+    assert _sweep_cache_key("other", root) != before
+
+
+def test_sweep_cache_round_trips_paths_with_their_str_and_int_types(tmp_path, monkeypatch):
+    monkeypatch.delenv("OBED_TEST_SWEEP_CACHE", raising=False)
+    root = _fake_sweep_root(tmp_path)
+    compute, calls = _counting(_FAKE_SWEEP)
+    assert _cached_sweep("t", compute, root) == _FAKE_SWEEP
+    assert _sweep_file(root).is_file()
+    assert list(_sweep_file(root).parent.glob("*.tmp")) == []
+    loaded = _cached_sweep("t", compute, root)
+    assert calls == [1], "a warm cache recomputed"
+    assert loaded == _FAKE_SWEEP
+    assert sorted(map(repr, loaded.items())) == sorted(map(repr, _FAKE_SWEEP.items()))
+    assert ("b", ("0", "1")) in loaded and ("b", (0, 1)) not in loaded
+
+
+@pytest.mark.parametrize("payload", [
+    b"",
+    b"{\"key\": ",
+    b"\xff\xfe not json",
+    b"[]",
+    b"{\"sweep\": []}",
+    b"{\"key\": \"KEY\", \"sweep\": []}",
+    b"{\"key\": \"KEY\", \"sweep\": [[\"b\", [\"x\"]]]}",
+    b"{\"key\": \"KEY\", \"sweep\": [[\"b\", [\"x\", 1.5], true]]}",
+    b"{\"key\": \"KEY\", \"sweep\": [[\"b\", [\"x\", true], true]]}",
+    b"{\"key\": \"KEY\", \"sweep\": [[\"b\", [], true]]}",
+    b"{\"key\": \"KEY\", \"sweep\": [[\"b\", [\"x\"], 1]]}",
+    b"{\"key\": \"KEY\", \"sweep\": [[2, [\"x\"], true]]}",
+])
+def test_a_corrupt_sweep_cache_is_recomputed_not_trusted(tmp_path, monkeypatch, payload):
+    monkeypatch.delenv("OBED_TEST_SWEEP_CACHE", raising=False)
+    root = _fake_sweep_root(tmp_path)
+    key = _sweep_cache_key("t", root)
+    _sweep_file(root).parent.mkdir(parents=True)
+    _sweep_file(root).write_bytes(payload.replace(b"KEY", key.encode()))
+    compute, calls = _counting(_FAKE_SWEEP)
+    assert _cached_sweep("t", compute, root) == _FAKE_SWEEP
+    assert calls == [1]
+    assert _load_sweep(_sweep_file(root), key) == _FAKE_SWEEP, "the recompute was not written back"
+
+
+def test_a_sweep_cache_with_another_key_is_recomputed(tmp_path, monkeypatch):
+    monkeypatch.delenv("OBED_TEST_SWEEP_CACHE", raising=False)
+    root = _fake_sweep_root(tmp_path)
+    stale = {("b", ("x",)): False}
+    _store_sweep(_sweep_file(root), "0" * 64, stale)
+    compute, calls = _counting(_FAKE_SWEEP)
+    assert _cached_sweep("t", compute, root) == _FAKE_SWEEP
+    assert calls == [1]
+    (root / "src" / "obed_edom" / "p2_verdict.py").write_text("X = 2\n")
+    compute, calls = _counting(stale)
+    assert _cached_sweep("t", compute, root) == stale
+    assert calls == [1], "an edited source still hit the old cache"
+
+
+def test_sweep_cache_off_neither_reads_nor_writes(tmp_path, monkeypatch):
+    root = _fake_sweep_root(tmp_path)
+    monkeypatch.delenv("OBED_TEST_SWEEP_CACHE", raising=False)
+    _cached_sweep("t", _counting({("b", ("x",)): False})[0], root)
+    before = _sweep_file(root).read_bytes()
+    monkeypatch.setenv("OBED_TEST_SWEEP_CACHE", "off")
+    compute, calls = _counting(_FAKE_SWEEP)
+    assert _cached_sweep("t", compute, root) == _FAKE_SWEEP
+    assert _cached_sweep("t", compute, root) == _FAKE_SWEEP
+    assert calls == [1, 1]
+    assert _sweep_file(root).read_bytes() == before
+    assert _cached_sweep("u", compute, root) == _FAKE_SWEEP
+    assert not _sweep_file(root, "u").exists()
+
+
+@pytest.mark.parametrize("raw", ["", "on", "OFF", "0", "false"])
+def test_sweep_cache_override_refuses_an_unknown_value(monkeypatch, raw):
+    monkeypatch.setenv("OBED_TEST_SWEEP_CACHE", raw)
+    with pytest.raises(pytest.UsageError, match="OBED_TEST_SWEEP_CACHE"):
+        _sweep_cache_enabled()
+
+
 def test_bracket_sweep_allowlist_has_no_dead_entries():
     """A stale excuse is worse than none: every allowlist entry must still be
     survivable, or a reader trusts a reason for a field that is now gated."""
@@ -6089,18 +6319,20 @@ def _main_sweep() -> dict:
     captured snapshot, exactly as MAIN passes them, so the one snapshot walk
     covers every leaf of both (review r11 MAJOR 4, r12 MINOR 3)."""
     if not _MAIN_SWEEP_CACHE:
-        snap, _, settle, owner = _main_inputs()
-        assert owner is snap["ownerSettle"] and settle is snap["advanceSettle"]
-
-        def score() -> bool:
-            return p2._advance_c_ok(
-                snap, snap.get("indexSamples") or [], settle, owner
-            ) is False
-
-        _MAIN_SWEEP_CACHE.update(
-            {("main", path): closed for path, closed in _walk(snap, score).items()}
-        )
+        _MAIN_SWEEP_CACHE.update(_cached_sweep("main", _compute_main_sweep))
     return _MAIN_SWEEP_CACHE
+
+
+def _compute_main_sweep() -> dict:
+    snap, _, settle, owner = _main_inputs()
+    assert owner is snap["ownerSettle"] and settle is snap["advanceSettle"]
+
+    def score() -> bool:
+        return p2._advance_c_ok(
+            snap, snap.get("indexSamples") or [], settle, owner
+        ) is False
+
+    return {("main", path): closed for path, closed in _walk(snap, score).items()}
 
 
 def test_main_absence_sweep_is_exhaustive():

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import pickle
 import shutil
 import tempfile
+from pathlib import Path
 from typing import Callable
 
 import pytest
@@ -49,6 +51,33 @@ def _fake_osascript(
 
     monkeypatch.setattr(osascript_runner, "_execute", fake_execute)
     monkeypatch.setattr(osascript_runner, "_launch_keynote", lambda: None)
+
+
+@pytest.fixture(scope="module")
+def shared_iwa_decode():
+    """Decode each real deck once per test module instead of once per ``_load_deck``
+    call (the remap path alone decodes the source and template twice each). The
+    decode is pure, so it is kept pickled, keyed on the file's identity and stat,
+    and every caller still gets its own fresh object. A ``skipped`` collector
+    bypasses the cache."""
+    from obed_edom import iwa_runs
+
+    load = iwa_runs._load_deck
+    pickled: dict[tuple, bytes] = {}
+
+    def shared_load(path, *, skipped=None):
+        if skipped is not None:
+            return load(path, skipped=skipped)
+        resolved = Path(path).resolve()
+        st = resolved.stat()
+        key = (resolved, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        if key not in pickled:
+            pickled[key] = pickle.dumps(load(path), protocol=pickle.HIGHEST_PROTOCOL)
+        return pickle.loads(pickled[key])
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(iwa_runs, "_load_deck", shared_load)
+        yield
 
 
 @pytest.fixture

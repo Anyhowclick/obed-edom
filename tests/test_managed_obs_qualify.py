@@ -22,6 +22,7 @@ P2 slide JSON with the real builder, so the representation check reads Keynote-s
 """
 from __future__ import annotations
 
+import functools
 import json
 import re
 import shutil
@@ -438,11 +439,14 @@ def test_series_checks_read_none_without_a_reference_or_tau():
 
 # --- MO-2 key (R4) and CvC -----------------------------------------------------------------------------------------------
 
+@functools.cache
 def key_shot(alpha: int, empty: int = 0) -> np.ndarray:
+    """Cached and read-only: a scorer that wrote into a shared shot would raise instead of leaking into later tests."""
     img = np.zeros((*SHAPE, 4), np.uint8)
     masks = q.mmo_masks(ARMED, SHAPE)
     img[masks["top"]] = (0, 175, 0, alpha)
     img[masks["empty"]] = (255, 255, 255, empty)
+    img.setflags(write=False)
     return img
 
 

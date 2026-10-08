@@ -5,7 +5,9 @@ subprocess.run/Popen is reached without an explicit monkeypatch.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import math
+import pickle
 import re
 import subprocess
 import zipfile
@@ -2734,6 +2736,28 @@ def _require_gw_deck():
         pytest.skip("keynote-parser (iwa extra) not installed")
 
 
+@functools.cache
+def _gw_deck_pickle() -> bytes:
+    return pickle.dumps(dsa._load_deck(GW_DECK))
+
+
+@functools.cache
+def _gw_inputs_pickle() -> bytes:
+    return pickle.dumps(load_assembly_inputs(GW_DECK))
+
+
+def _gw_deck():
+    """``dsa._load_deck(GW_DECK)``, decoded once per process; every call returns a fresh,
+    unshared copy so a test may mutate it. Call ``_require_gw_deck()`` first."""
+    return pickle.loads(_gw_deck_pickle())
+
+
+def _gw_inputs():
+    """``load_assembly_inputs(GW_DECK)``, built once per process; every call returns a
+    fresh, unshared copy so a test may mutate it. Call ``_require_gw_deck()`` first."""
+    return pickle.loads(_gw_inputs_pickle())
+
+
 GOLD_DECK = Path("/Users/anyhowclick/Desktop/Diff-Checker/Sermon_PK (DSK)_with mistakes.key")
 
 
@@ -2892,7 +2916,7 @@ def test_gw13_gw17_stack_budget_and_fit_t_under_default_band():
     # edit, unlike the old test which asserted a bare-band t no shipped path produces.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    payload, classes, runs = _gw_inputs()
     decisions = {13: SlideDecision(13, "in_deck"), 17: SlideDecision(17, "in_deck")}
     plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, runs=runs)
 
@@ -2915,8 +2939,8 @@ def test_gw_every_kept_non_movie_slide_plans_under_default_flags(tmp_path):
     _require_gw_deck()
     _require_font("AzoSans-Regular")
     _require_font("ArgentCF-Bold")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     checked = 0
     # 44/50: D1 group-text-child classification (Design A) now correctly makes these
@@ -2946,7 +2970,7 @@ def test_gw_text_slides_stay_within_band_top():
     _require_gw_deck()
     _require_font("AzoSans-Regular")
     _require_font("ArgentCF-Bold")
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     band_top = BAND.bottom - BAND.height
     checked = 0
@@ -2985,7 +3009,7 @@ def test_gw44_badge_x_clears_title_right_edge():
     # entirely, so the badge still clears it, just via the two-column mechanism.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {44: SlideDecision(44, "in_deck")}
     plan = plan_assembly(
@@ -3007,7 +3031,7 @@ def test_gw44_50_group_child_badge_caption_gets_text_size_write():
     # caption at whatever size the group's own (now-arbitrary) resize left it.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     for number in (44, 50):
         decisions = {number: SlideDecision(number, "in_deck")}
@@ -3034,7 +3058,7 @@ def test_gw_group_text_slides_short_fit_stays_within_band_x():
     # and would pass even if only the verse -- not the badge -- were in band).
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     checked_ids: set[tuple[int, ItemId]] = set()
     for number in (5, 44, 50, 51, 53, 54):
@@ -3066,7 +3090,7 @@ def test_gw50_badge_x_clamped_to_band_right_edge():
     # whose heading is genuinely not a repeat.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {50: SlideDecision(50, "in_deck")}
     plan = plan_assembly(
@@ -3166,7 +3190,7 @@ def test_gw17_28_forced_split_at_floor_66_refuses_gw28_single_box():
     # also can't clear the floor and a lone box can't split -- refuses.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {n: SlideDecision(n, "in_deck") for n in (17, 28)}
     with pytest.raises(AssemblyRefusal, match="does not fit the band even alone"):
@@ -3183,7 +3207,7 @@ def test_gw13_forced_floor_66_refuses_its_badge_gapped_single_box():
     # rather than assembling unsplit.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {13: SlideDecision(13, "in_deck")}
     with pytest.raises(AssemblyRefusal, match="does not fit the band even alone"):
@@ -3197,7 +3221,7 @@ def test_gw13_stacked_text_does_not_overlap_badge():
     # GW 13's chapter badge and its long verse box must not overlap once the
     # verse is stacked -- the owner's reference slide for this bug.
     _require_gw_deck()
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    payload, classes, runs = _gw_inputs()
     decisions = {13: SlideDecision(13, "in_deck")}
     plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, runs=runs)
     fit13 = plan.fits[13]
@@ -3296,7 +3320,7 @@ def test_heading_cluster_gw_deck_measured_slides():
     # Probe (§6): the plan doc's measured D1b set is GW {44, 46, 50, 51, 52, 53}; this
     # fixes that measurement independently of the plan doc's own table.
     _require_gw_deck()
-    payload, classes, _runs = load_assembly_inputs(GW_DECK)
+    payload, classes, _runs = _gw_inputs()
     slides_by_number = {s["number"]: s for s in payload["slides"]}
     fires = set()
     for cls in classes:
@@ -7214,7 +7238,7 @@ def test_gw49_plans_under_shrink_and_refuses_under_warn():
     # Read-only probe: GW 49's real run-size coverage gap with t < 1.0.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     if 49 not in by_number:
         pytest.skip("GW deck has no slide 49")
@@ -7239,7 +7263,7 @@ def test_gw49_single_box_split_refuses_under_warn_naming_box_and_run():
     # the box (and the first unresolved run) rather than write blind.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     if 49 not in by_number:
         pytest.skip("GW deck has no slide 49")
@@ -7256,7 +7280,7 @@ def test_gw49_single_box_split_flattens_to_45pt_lead_under_shrink():
     # never the old 25.0pt (100 * 45/180) that only ever saw the one resolved run.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     if 49 not in by_number:
         pytest.skip("GW deck has no slide 49")
@@ -8053,8 +8077,8 @@ def test_gw5_54_group_child_verse_splits_at_the_standard_slot():
     # the current pack (S2's height-budget pack over the run-aware spans).
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
     expected = {5: [2, 2, 1], 54: [3, 2]}
@@ -8113,8 +8137,8 @@ def test_gw44_50_51_53_group_child_verse_unaffected_by_s5():
     # the two group split refusals -- they never reach the branches S5 touched.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {n: SlideDecision(n, "in_deck") for n in (44, 50, 51, 53)}
     plan = plan_assembly(
@@ -9987,7 +10011,7 @@ def test_repeat_heading_gw51_planned_alone_matches_batch():
     # 51/52/53 full-width).
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     numbers = (44, 46, 50, 51, 52, 53)
     decisions = {n: SlideDecision(n, "in_deck") for n in numbers}
@@ -10442,8 +10466,8 @@ def test_gw44_cluster_heading_and_numeral_are_autosize():
     # the heading rendered off-canvas.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {44: SlideDecision(44, "in_deck")}
     plan = plan_assembly(
@@ -10472,11 +10496,11 @@ def test_gw44_cluster_heading_and_numeral_are_autosize():
 
 
 def _gw_raw_autosize_text_ids(number):
-    deck = dsa._load_deck(GW_DECK)
+    deck = _gw_deck()
     objects_graph = deck[0]
     id_slide_archive = dsa._slide_archive_for_number(objects_graph, number)
     id_by_item = dsa._item_object_ids(id_slide_archive, objects_graph)
-    payload, classes, _runs = load_assembly_inputs(GW_DECK)
+    payload, classes, _runs = _gw_inputs()
     slides_by_number = {s["number"]: s for s in payload["slides"]}
     text_ids = [
         ("text", item["kindIndex"]) for item in slides_by_number[number]["items"] if item["kind"] == "text"
@@ -10503,8 +10527,8 @@ def test_gw13_stacked_long_box_is_raw_autosize_position_last():
     # with no `set height`.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {13: SlideDecision(13, "in_deck")}
     plan = plan_assembly(
@@ -10535,8 +10559,8 @@ def test_gw17_stacked_long_boxes_are_raw_autosize_position_last():
     # stacked boxes actually present in plan.fits.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {17: SlideDecision(17, "in_deck")}
     plan = plan_assembly(
@@ -10794,8 +10818,8 @@ def test_build_assembly_script_preserve_emits_no_layout_cleanup():
 def test_gw13_resolves_verse_standard_and_slot_rects(tmp_path):
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {13: SlideDecision(13, "in_deck")}
     plan = plan_assembly(
@@ -10884,8 +10908,8 @@ def test_build_refit_round_keeps_slot_rect_as_refit_authority(tmp_path):
     # `_build_refit_round` itself.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {13: SlideDecision(13, "in_deck")}
     plan = plan_assembly(
@@ -10915,8 +10939,8 @@ def test_gw38_verse_over_three_lines_splits_at_the_standard_slot():
     # part fitted against the Standard verse/badge slots, never `DEFAULT_BAND`.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     cls38 = by_number[38]
     verse_id = cls38.long_text_ids[0]
@@ -10960,8 +10984,8 @@ def test_gw38_split_part_emits_character_deletes_outside_its_window():
     # the same characters whose sizes were just set.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     cls38 = by_number[38]
     decisions = {38: SlideDecision(38, "in_deck")}
@@ -10986,7 +11010,7 @@ def test_gw38_split_part_run_sizes_capped_at_50pt():
     # the source ratio (pin GW 38's own runs, real deck).
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {38: SlideDecision(38, "in_deck")}
     plan = plan_assembly(
@@ -11006,8 +11030,8 @@ def test_gw38_split_refuses_a_character_level_build_on_the_split_box():
     # before any split geometry/deletes are emitted.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     cls38 = by_number[38]
     verse_id = cls38.long_text_ids[0]
@@ -11165,8 +11189,8 @@ def test_gw38_split_part_rects_pinned_to_the_standard_slot():
     # never the reduced pre-split band. Windows are pinned literals from the review.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {38: SlideDecision(38, "in_deck")}
     plan = plan_assembly(
@@ -11201,8 +11225,8 @@ def test_gw38_split_literal_band_badge_keys_deletes_and_zero_build_multiplicity(
 
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {38: SlideDecision(38, "in_deck")}
     plan = plan_assembly(
@@ -11309,8 +11333,8 @@ GW_S2_SPLIT_CANDIDATES: dict[int, list[int]] = {
 def test_gw_s2_split_candidates_part_counts_and_line_counts_pinned():
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
     for number, expected_lines in GW_S2_SPLIT_CANDIDATES.items():
@@ -11338,8 +11362,8 @@ def test_gw_s2_split_candidates_part_counts_and_line_counts_pinned():
 def test_gw28_30_36_52_never_produce_a_one_part_split():
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     for number in (28, 30, 36, 52):
         decisions = {number: SlideDecision(number, "in_deck")}
@@ -11353,7 +11377,7 @@ def test_gw28_30_36_52_never_produce_a_one_part_split():
 
 def test_gw21_image_slide_resolves_blank_black():
     _require_gw_deck()
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {21: SlideDecision(21, "in_deck")}
     plan = plan_assembly(
@@ -11366,8 +11390,8 @@ def test_gw21_image_slide_resolves_blank_black():
 def test_gw44_50_two_column_resolves_point_3_lines_geometry_unchanged():
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {44: SlideDecision(44, "in_deck"), 50: SlideDecision(50, "in_deck")}
     plan = plan_assembly(
@@ -11445,8 +11469,8 @@ def test_gw51_group_child_verse_resolves_verse_standard_and_slot_rects():
     # not silently fall back to Blank Black (the round-B bug).
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {51: SlideDecision(51, "in_deck")}
     plan = plan_assembly(
@@ -11486,9 +11510,9 @@ def test_staged_group_child_rect_reads_back_gw51_verse_and_badge(monkeypatch):
 
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
+    deck = _gw_deck()
     objects, _id_to_file, _file_ids = deck
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {51: SlideDecision(51, "in_deck")}
     plan = plan_assembly(
@@ -11515,8 +11539,8 @@ def test_gw17_two_top_level_boxes_stack_inside_the_verse_slot():
     # Black for having more than one long text box.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {17: SlideDecision(17, "in_deck")}
     plan = plan_assembly(
@@ -11548,8 +11572,8 @@ def test_gw17_forced_split_routes_the_generic_multi_box_branch_through_the_slot(
     # badge-unchecked placement review 4 flagged.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {17: SlideDecision(17, "in_deck")}
     plan = plan_assembly(
@@ -11589,8 +11613,8 @@ def test_gw17_forced_multi_box_split_emits_45pt_lead_and_caps_emphasis():
     # `_run_size_ranges(..., cap=_EMPHASIS_CAP_PT)`.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {17: SlideDecision(17, "in_deck")}
     plan = plan_assembly(
@@ -11631,8 +11655,8 @@ def test_gw38_one_part_fallback_places_the_slot_capped_rect_inside_the_slot():
     # measures and emits the SAME 50pt-capped runs, so the rect fits inside the slot.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     cls38 = by_number[38]
     verse_id = cls38.long_text_ids[0]
@@ -11682,8 +11706,8 @@ def test_gw52_repeat_heading_dropped_resolves_verse_standard():
     # about-to-be-deleted heading/number/circle as ambiguous extra texts).
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {52: SlideDecision(52, "in_deck")}
     plan = plan_assembly(
@@ -11719,8 +11743,8 @@ def test_gw52_split_parts_each_get_the_dropped_heading_cluster_deletes():
     # highest-index-first order, and identically across parts.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {52: SlideDecision(52, "in_deck")}
     plan = plan_assembly(
@@ -11750,8 +11774,8 @@ def test_gw51_repeat_heading_non_split_deletes_unchanged():
     # non-split path at all.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {51: SlideDecision(51, "in_deck")}
     plan = plan_assembly(
@@ -11775,8 +11799,8 @@ def test_gw44_50_unchanged_by_finding_1_role_resolver():
     # slide.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {44: SlideDecision(44, "in_deck"), 50: SlideDecision(50, "in_deck")}
     plan = plan_assembly(
@@ -12126,8 +12150,8 @@ def test_verify_staged_layouts_gw17_joint_stack_union_past_bottom_refuses(monkey
 def test_verify_staged_layouts_gw17_real_deck_pins_stacked_rects():
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     by_number = {c.number: c for c in classes}
     decisions = {17: SlideDecision(17, "in_deck")}
     plan = plan_assembly(
@@ -12172,8 +12196,8 @@ def test_verify_staged_layouts_gw17_real_refused_deck_now_passes():
     }
     if not all(p.is_file() for p in clips.values()):
         pytest.skip(f"movie clips not present (local operator files): {R13_CLIPS_DIR}")
-    deck = dsa._load_deck(GW_DECK)
-    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    deck = _gw_deck()
+    payload, classes, runs = _gw_inputs()
     builds_by_number = iwa_builds.deck_builds(GW_DECK, deck=deck)
     decisions = {n: SlideDecision(n, "in_deck") for n in R13_SLIDES}
     plan = plan_assembly(

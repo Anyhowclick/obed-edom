@@ -1681,10 +1681,13 @@ def _node() -> str:
 
 
 _DEFAULT_PLAN = object()
+_SANDBOX_RESULTS: dict[str, str] = {}
 
 
 def _run_sandbox(*, scenario: str = "happy", plan: object = _DEFAULT_PLAN,
                  frame: dict | None = None, **cfg) -> dict:
+    """The sandbox is deterministic (fake clock, no randomness), so each distinct harness runs in Node once per
+    session; every call still parses a fresh result."""
     node = _node()
     config = {"scenario": scenario,
               "plan": RUNTIME_PLAN if plan is _DEFAULT_PLAN else plan}
@@ -1694,10 +1697,16 @@ def _run_sandbox(*, scenario: str = "happy", plan: object = _DEFAULT_PLAN,
         .replace("__CFG__", json.dumps(config))
         .replace("__MODULE_SOURCE__", json.dumps(live_gl_replay_js.GL_REPLAY_JS))
     )
+    if harness not in _SANDBOX_RESULTS:
+        _SANDBOX_RESULTS[harness] = _node_result(node, harness)
+    return json.loads(_SANDBOX_RESULTS[harness])
+
+
+def _node_result(node: str, harness: str) -> str:
     result = subprocess.run([node, "-e", harness], text=True, capture_output=True)
     for line in result.stdout.splitlines():
         if line.startswith("__RESULT__"):
-            return json.loads(line[len("__RESULT__") :])
+            return line[len("__RESULT__") :]
     raise AssertionError(
         f"sandbox produced no result\nexit={result.returncode}\n"
         f"stdout={result.stdout[-4000:]}\nstderr={result.stderr[-4000:]}"
