@@ -3,6 +3,7 @@ from io import BytesIO
 from pathlib import Path
 from PIL import Image
 import numpy as np
+import pytest
 from obed_edom import watercolour
 from obed_edom.watercolour import WatercolourOptions, convert, render
 
@@ -29,7 +30,7 @@ def test_transparent_mask_preserves_alpha_without_black_fringe():
     assert result.getpixel((16,12))[0] > 40
 
 def test_studio_batch_request_persists_success_and_per_item_error():
-    from obed_edom.web.app import app, RUNNER
+    from obed_edom.web.app import app
     from fastapi.testclient import TestClient
     client=TestClient(app)
     response=client.post('/api/watercolour', files=[('files',('good.png',png((90,140,210,255)),'image/png')),('files',('bad.png',b'not-image','image/png'))])
@@ -283,36 +284,6 @@ def test_preview_remove_mask_clears_pixels():
     assert image.getpixel((cx, cy))[3] == 0
 
 
-def test_preview_rejects_malformed_mask_png():
-    from obed_edom.web.app import app
-    from fastapi.testclient import TestClient
-    client = TestClient(app)
-    response = client.post(
-        '/api/watercolour/preview',
-        files={'file': ('landmark.png', _landmark_png(), 'image/png')},
-        data={'mask': json.dumps({
-            'transparent': True,
-            'rect': [110, 66, 178, 166],
-            'keepMask': 'not-base64!!',
-        })},
-    )
-    assert response.status_code == 400
-    assert 'invalid' in response.text.lower()
-
-
-def test_preview_rejects_transparent_without_a_rect():
-    from obed_edom.web.app import app
-    from fastapi.testclient import TestClient
-    client=TestClient(app)
-    response=client.post(
-        '/api/watercolour/preview',
-        files={'file':('landmark.png',_landmark_png(),'image/png')},
-        data={'mask':json.dumps({'transparent':True})},
-    )
-    assert response.status_code == 400
-    assert 'foreground rectangle' in response.text.lower()
-
-
 def _landmark_with_intruder_png():
     rng=np.random.default_rng(5); width,height=400,300
     pixels=np.clip(np.array([60,90,160],np.float32)+rng.normal(0,12,(height,width,3)),0,255).astype(np.uint8)
@@ -362,24 +333,15 @@ def test_painted_remove_mask_beats_keep_on_overlap():
     assert alpha[130,200] == 0
 
 
-def test_all_black_keep_mask_with_rect_matches_keep_mask_none():
+@pytest.mark.parametrize('fill', [0, 127], ids=['all_black', 'max_value_127'])
+def test_unpainted_keep_mask_with_rect_matches_keep_mask_none(fill):
     from obed_edom import watercolour
     image=Image.open(BytesIO(_landmark_png())).convert('RGBA')
     rect=(110.0,66.0,178.0,166.0)
-    black_keep=Image.new('L',image.size,0)
-    with_black=watercolour.grabcut_mask(image,rect,keep_mask=black_keep)
+    keep=Image.new('L',image.size,fill)
+    with_keep=watercolour.grabcut_mask(image,rect,keep_mask=keep)
     without=watercolour.grabcut_mask(image,rect,keep_mask=None)
-    assert with_black.tobytes() == without.tobytes()
-
-
-def test_max_value_127_keep_mask_matches_keep_mask_none():
-    from obed_edom import watercolour
-    image=Image.open(BytesIO(_landmark_png())).convert('RGBA')
-    rect=(110.0,66.0,178.0,166.0)
-    grey_keep=Image.new('L',image.size,127)
-    with_grey=watercolour.grabcut_mask(image,rect,keep_mask=grey_keep)
-    without=watercolour.grabcut_mask(image,rect,keep_mask=None)
-    assert with_grey.tobytes() == without.tobytes()
+    assert with_keep.tobytes() == without.tobytes()
 
 
 def test_unpainted_keep_mask_matches_none_on_a_textured_adversarial_image():
@@ -466,79 +428,6 @@ def test_mask_for_honours_painted_keep_mask_on_rgba_with_transparency_and_no_rec
     assert alpha[0,0] == 0
 
 
-def test_grabcut_mask_rejects_non_positive_rect_on_painted_path():
-    from obed_edom import watercolour
-    image=Image.open(BytesIO(_landmark_png())).convert('RGBA')
-    keep=_painted_keep_mask()
-    import pytest
-    with pytest.raises(watercolour.WatercolourError):
-        watercolour.grabcut_mask(image,(110.0,66.0,0.0,166.0),keep_mask=keep)
-
-
-def test_grabcut_mask_rejects_out_of_bounds_point_on_painted_path():
-    from obed_edom import watercolour
-    image=Image.open(BytesIO(_landmark_png())).convert('RGBA')
-    keep=_painted_keep_mask()
-    import pytest
-    with pytest.raises(watercolour.WatercolourError):
-        watercolour.grabcut_mask(image,None,foreground=[(1000.0,1000.0)],keep_mask=keep)
-
-
-def test_grabcut_mask_rejects_too_many_points_on_painted_path():
-    from obed_edom import watercolour
-    image=Image.open(BytesIO(_landmark_png())).convert('RGBA')
-    keep=_painted_keep_mask()
-    import pytest
-    with pytest.raises(watercolour.WatercolourError):
-        watercolour.grabcut_mask(image,None,foreground=[(1.0,1.0)]*501,keep_mask=keep)
-
-
-def test_preview_rejects_non_positive_rect_dimensions():
-    from obed_edom.web.app import app
-    from fastapi.testclient import TestClient
-    client=TestClient(app)
-    response=client.post(
-        '/api/watercolour/preview',
-        files={'file':('landmark.png',_landmark_png(),'image/png')},
-        data={'mask':json.dumps({'transparent':True,'rect':[110,66,0,166]})},
-    )
-    assert response.status_code == 400
-
-
-def test_preview_rejects_out_of_bounds_foreground_point_on_painted_path():
-    from obed_edom.web.app import app
-    from fastapi.testclient import TestClient
-    client=TestClient(app)
-    response=client.post(
-        '/api/watercolour/preview',
-        files={'file':('landmark.png',_landmark_png(),'image/png')},
-        data={'mask':json.dumps({
-            'transparent':True,
-            'keepMask':base64_of(_painted_keep_mask()),
-            'maskSize':[400,300],
-            'foreground':[[10000,10000]],
-        })},
-    )
-    assert response.status_code == 400
-
-
-def test_preview_rejects_too_many_points_on_painted_path():
-    from obed_edom.web.app import app
-    from fastapi.testclient import TestClient
-    client=TestClient(app)
-    response=client.post(
-        '/api/watercolour/preview',
-        files={'file':('landmark.png',_landmark_png(),'image/png')},
-        data={'mask':json.dumps({
-            'transparent':True,
-            'keepMask':base64_of(_painted_keep_mask()),
-            'maskSize':[400,300],
-            'foreground':[[1,1]]*501,
-        })},
-    )
-    assert response.status_code == 400
-
-
 def test_preview_post_with_keep_mask_and_no_rect_succeeds():
     from obed_edom.web.app import app
     from fastapi.testclient import TestClient
@@ -555,6 +444,61 @@ def test_preview_post_with_keep_mask_and_no_rect_succeeds():
 
 def base64_of(mask):
     out=BytesIO(); mask.save(out,'PNG'); import base64; return base64.b64encode(out.getvalue()).decode('ascii')
+
+
+@pytest.mark.parametrize(
+    'rect,kwargs',
+    [
+        ((110.0,66.0,0.0,166.0), {}),
+        (None, {'foreground':[(1000.0,1000.0)]}),
+        (None, {'foreground':[(1.0,1.0)]*501}),
+    ],
+    ids=['non_positive_rect', 'out_of_bounds_point', 'too_many_points'],
+)
+def test_grabcut_mask_rejects_bad_input_on_painted_path(rect, kwargs):
+    image=Image.open(BytesIO(_landmark_png())).convert('RGBA')
+    with pytest.raises(watercolour.WatercolourError):
+        watercolour.grabcut_mask(image,rect,keep_mask=_painted_keep_mask(),**kwargs)
+
+
+def _painted_spec(**extra):
+    return json.dumps({'transparent':True,'keepMask':base64_of(_painted_keep_mask()),'maskSize':[400,300],**extra})
+
+
+@pytest.mark.parametrize(
+    'mask,needle',
+    [
+        (lambda: json.dumps({'transparent':True,'rect':[110,66,178,166],'keepMask':'not-base64!!'}), 'invalid'),
+        (lambda: json.dumps({'transparent':True}), 'foreground rectangle'),
+        (lambda: json.dumps({'transparent':True,'rect':[110,66,0,166]}), None),
+        (lambda: _painted_spec(foreground=[[10000,10000]]), None),
+        (lambda: _painted_spec(foreground=[[1,1]]*501), None),
+        (lambda: json.dumps([1,2,3]), None),
+        (lambda: json.dumps({'transparent':True,'rect':[10,10,20]}), 'invalid'),
+        (lambda: '{"transparent": true, "rect": [380, 280, NaN, Infinity]}', None),
+        (lambda: json.dumps({'transparent':True,'rect':[380,280,100,100]}), None),
+        (lambda: json.dumps({'transparent':True,'rect':[110,66,178,166],'foreground':[[1,2,3]]}), None),
+        (lambda: json.dumps({'transparent':True,'rect':[110,66,178,166],'foreground':[['a','b']]}), None),
+    ],
+    ids=[
+        'malformed_mask_png', 'transparent_without_a_rect', 'non_positive_rect_dimensions',
+        'out_of_bounds_foreground_point_on_painted_path', 'too_many_points_on_painted_path',
+        'non_dict_masks_at_top_level', 'rect_with_wrong_length', 'non_finite_rect', 'rect_outside_image',
+        'foreground_point_wrong_length', 'foreground_point_non_numeric',
+    ],
+)
+def test_preview_rejects_malformed_mask(mask, needle):
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    response=client.post(
+        '/api/watercolour/preview',
+        files={'file':('landmark.png',_landmark_png(),'image/png')},
+        data={'mask':mask()},
+    )
+    assert response.status_code == 400
+    if needle is not None:
+        assert needle in response.text.lower()
 
 
 def test_slider_gains_are_exactly_neutral_at_the_defaults():
@@ -612,73 +556,6 @@ def _rect_mask_spec(rect=(10,10,20,20)):
     return {'transparent': True, 'rect': list(rect)}
 
 
-def test_preview_rejects_non_dict_masks_at_top_level():
-    from obed_edom.web.app import app
-    from fastapi.testclient import TestClient
-    client=TestClient(app)
-    response=client.post(
-        '/api/watercolour/preview',
-        files={'file':('landmark.png',_landmark_png(),'image/png')},
-        data={'mask':json.dumps([1,2,3])},
-    )
-    assert response.status_code == 400
-
-
-def test_preview_rejects_rect_with_wrong_length():
-    from obed_edom.web.app import app
-    from fastapi.testclient import TestClient
-    client=TestClient(app)
-    response=client.post(
-        '/api/watercolour/preview',
-        files={'file':('landmark.png',_landmark_png(),'image/png')},
-        data={'mask':json.dumps({'transparent':True,'rect':[10,10,20]})},
-    )
-    assert response.status_code == 400
-    assert 'invalid' in response.text.lower()
-
-
-def test_preview_rejects_non_finite_rect():
-    from obed_edom.web.app import app
-    from fastapi.testclient import TestClient
-    client=TestClient(app)
-    response=client.post(
-        '/api/watercolour/preview',
-        files={'file':('landmark.png',_landmark_png(),'image/png')},
-        data={'mask':'{"transparent": true, "rect": [380, 280, NaN, Infinity]}'},
-    )
-    assert response.status_code == 400
-
-
-def test_preview_rejects_rect_outside_image():
-    from obed_edom.web.app import app
-    from fastapi.testclient import TestClient
-    client=TestClient(app)
-    response=client.post(
-        '/api/watercolour/preview',
-        files={'file':('landmark.png',_landmark_png(),'image/png')},
-        data={'mask':json.dumps({'transparent':True,'rect':[380,280,100,100]})},
-    )
-    assert response.status_code == 400
-
-
-def test_preview_rejects_malformed_foreground_points():
-    from obed_edom.web.app import app
-    from fastapi.testclient import TestClient
-    client=TestClient(app)
-    response=client.post(
-        '/api/watercolour/preview',
-        files={'file':('landmark.png',_landmark_png(),'image/png')},
-        data={'mask':json.dumps({'transparent':True,'rect':[110,66,178,166],'foreground':[[1,2,3]]})},
-    )
-    assert response.status_code == 400
-    response=client.post(
-        '/api/watercolour/preview',
-        files={'file':('landmark.png',_landmark_png(),'image/png')},
-        data={'mask':json.dumps({'transparent':True,'rect':[110,66,178,166],'foreground':[['a','b']]})},
-    )
-    assert response.status_code == 400
-
-
 def test_start_watercolour_rejects_malformed_masks_field():
     from obed_edom.web.app import app
     from fastapi.testclient import TestClient
@@ -689,14 +566,19 @@ def test_start_watercolour_rejects_malformed_masks_field():
     assert response.status_code == 400
 
 
-def test_batch_out_of_bounds_mask_rejected_at_submit_not_500():
+def test_batch_out_of_bounds_mask_rejected_at_submit_not_500_and_leaves_no_staged_upload_dir():
+    from obed_edom.paths import output_root
     from obed_edom.web.app import app
     from fastapi.testclient import TestClient
     client=TestClient(app)
+    uploads_dir = output_root() / '.watercolour' / '.uploads'
+    before = set(uploads_dir.glob('*')) if uploads_dir.is_dir() else set()
     masks=json.dumps({'0': _rect_mask_spec((380,280,100,100))})
     response=client.post('/api/watercolour', files=[('files',('good.png',_landmark_png(),'image/png'))], data={'masks':masks})
     assert response.status_code == 400, response.text
     assert 'good.png' in response.json()['detail']
+    after = set(uploads_dir.glob('*')) if uploads_dir.is_dir() else set()
+    assert after == before
 
 
 def test_batch_duplicate_filenames_processed_independently():
@@ -726,7 +608,6 @@ def test_batch_duplicate_filenames_processed_independently():
 
 
 def test_submit_failure_cleans_up_staged_uploads():
-    from pathlib import Path
     from obed_edom.paths import output_root
     from obed_edom.web import app as app_module
     from obed_edom.web import watercolour as watercolour_web
@@ -814,7 +695,6 @@ def test_result_file_rejects_paths_outside_job_root():
         'originalDir': '/etc',
         'items': [{'id': 'item-1', 'result': 'passwd', 'original': 'passwd'}],
     }
-    import pytest
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as excinfo:
         _result_file(job.id, 'item-1', 'result')
@@ -920,7 +800,6 @@ def test_default_landmark_size_boundaries():
 
 def test_grabcut_mask_cancels_between_iterations():
     import time
-    import pytest
     image=Image.open(BytesIO(_landmark_png())).convert('RGBA')
     calls={'n':0}
     def cancel():
@@ -934,7 +813,6 @@ def test_grabcut_mask_cancels_between_iterations():
 
 
 def test_render_stops_at_a_stage_boundary():
-    import pytest
     image=Image.open(BytesIO(_landmark_png())).convert('RGBA')
     calls={'n':0}
     def cancel():
@@ -952,21 +830,6 @@ def test_non_index_mask_key_rejected_at_submit():
     masks=json.dumps({'landmark.png':_rect_mask_spec()})
     response=client.post('/api/watercolour', files=[('files',('landmark.png',_landmark_png(),'image/png'))], data={'masks':masks})
     assert response.status_code == 400, response.text
-
-
-def test_out_of_bounds_mask_leaves_no_staged_upload_dir():
-    from pathlib import Path
-    from obed_edom.paths import output_root
-    from obed_edom.web.app import app
-    from fastapi.testclient import TestClient
-    client=TestClient(app)
-    uploads_dir = output_root() / '.watercolour' / '.uploads'
-    before = set(uploads_dir.glob('*')) if uploads_dir.is_dir() else set()
-    masks=json.dumps({'0':_rect_mask_spec((380,280,100,100))})
-    response=client.post('/api/watercolour', files=[('files',('good.png',_landmark_png(),'image/png'))], data={'masks':masks})
-    assert response.status_code == 400
-    after = set(uploads_dir.glob('*')) if uploads_dir.is_dir() else set()
-    assert after == before
 
 
 def test_cancel_mid_batch_keeps_finished_discards_inflight_and_marks_remaining_cancelled():

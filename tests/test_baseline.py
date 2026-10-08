@@ -33,7 +33,6 @@ from obed_edom.baseline import (
     index_map,
     insert_unpaired,
     load_pairing,
-    remap_slots,
     reuse_slots,
     save_pairing,
     slot_dict,

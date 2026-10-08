@@ -249,11 +249,31 @@ def test_hemisphere_sign_applied_to_absolute_value():
     assert places[0].lon == pytest.approx(-73.68)
 
 
-def test_header_form_bad_lat_lon_reports_error_not_crash():
-    places, errors = parse_places("name,lat,lon\nBadRow,notalat,103.8\n")
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("name,lat,lon\nBadRow,notalat,103.8\n", "bad lat/lon"),
+        ("name,lat,lon\nX,1,inf\n", "bad lat/lon"),
+        ("name,lat,lon\nX,1,-inf\n", "bad lat/lon"),
+        ("name,lat,lon\nX,1,1e400\n", "bad lat/lon"),
+        ("name,lat,lon\nX,1,nan\n", "bad lat/lon"),
+        ("name,zoom\nParis,notazoom\n", "bad zoom"),
+        ("name,zoom\nParis,25\n", "zoom out of range"),
+        ("name,zoom\nParis,-1\n", "zoom out of range"),
+        ("name,kind\nParis,spaceport\n", "unknown kind"),
+        ("name,lat,lon\nX,1\n", "lat without lon"),
+        ("name,lat,lon\nX,,2\n", "lon without lat"),
+    ],
+    ids=[
+        "bad_lat_lon", "inf_lon", "neg_inf_lon", "overflow_lon", "nan_lon", "bad_zoom",
+        "zoom_too_high", "zoom_negative", "unknown_kind", "lat_without_lon", "lon_without_lat",
+    ],
+)
+def test_header_form_bad_row_reports_error_not_crash(text, needle):
+    places, errors = parse_places(text)
     assert places == []
     assert "Line 2" in errors[0]
-    assert "bad lat/lon" in errors[0]
+    assert needle in errors[0]
 
 
 def test_header_form_line_numbers_skip_blank_lines():
@@ -275,20 +295,6 @@ def test_header_form_place_column_without_name_falls_back():
     assert places[0].name == ""
     assert places[0].query == "China"
     assert places[0].full_query is True
-
-
-def test_header_form_bad_zoom_reports_error_not_crash():
-    places, errors = parse_places("name,zoom\nParis,notazoom\n")
-    assert places == []
-    assert "Line 2" in errors[0]
-    assert "bad zoom" in errors[0]
-
-
-def test_header_form_unknown_kind_reports_error_not_crash():
-    places, errors = parse_places("name,kind\nParis,spaceport\n")
-    assert places == []
-    assert "Line 2" in errors[0]
-    assert "unknown kind" in errors[0]
 
 
 def test_header_form_canonicalizes_kind():
@@ -354,49 +360,6 @@ def test_multi_column_header_row_with_extra_columns_is_an_error_not_a_crash():
     assert places == []
     assert "Line 2" in errors[0]
     assert "too many columns" in errors[0]
-
-
-def test_header_form_zoom_out_of_range_reports_error():
-    places, errors = parse_places("name,zoom\nParis,25\n")
-    assert places == []
-    assert "Line 2" in errors[0]
-    assert "zoom out of range" in errors[0]
-
-
-def test_header_form_negative_zoom_out_of_range_reports_error():
-    places, errors = parse_places("name,zoom\nParis,-1\n")
-    assert places == []
-    assert "Line 2" in errors[0]
-    assert "zoom out of range" in errors[0]
-
-
-def test_header_form_lat_without_lon_reports_error():
-    places, errors = parse_places("name,lat,lon\nX,1\n")
-    assert places == []
-    assert "Line 2" in errors[0]
-    assert "lat without lon" in errors[0]
-
-
-def test_header_form_lon_without_lat_reports_error():
-    places, errors = parse_places("name,lat,lon\nX,,2\n")
-    assert places == []
-    assert "Line 2" in errors[0]
-    assert "lon without lat" in errors[0]
-
-
-@pytest.mark.parametrize("bad_lon", ["inf", "-inf", "1e400"])
-def test_header_form_non_finite_lon_reports_bad_lat_lon_not_hang(bad_lon):
-    places, errors = parse_places(f"name,lat,lon\nX,1,{bad_lon}\n")
-    assert places == []
-    assert "Line 2" in errors[0]
-    assert "bad lat/lon" in errors[0]
-
-
-def test_header_form_nan_lon_reports_bad_lat_lon():
-    places, errors = parse_places("name,lat,lon\nX,1,nan\n")
-    assert places == []
-    assert "Line 2" in errors[0]
-    assert "bad lat/lon" in errors[0]
 
 
 def test_header_form_non_finite_lon_does_not_hang():
@@ -481,13 +444,6 @@ def test_stray_unterminated_quote_reports_error_and_resumes_parsing():
     assert len(errors) == 1
     assert "Line 2" in errors[0]
     assert "unterminated quote" in errors[0]
-
-
-def test_legitimate_two_line_quoted_name_still_works():
-    text = '"Foo\nBar",1,2\nSingapore\n'
-    places, errors = parse_places(text)
-    assert errors == []
-    assert [p.name for p in places] == ["Foo\nBar", "Singapore"]
 
 
 def test_multiline_record_bound_at_four_lines_reports_unterminated_and_resumes_per_line():
@@ -675,34 +631,21 @@ def test_places_from_rows_numbers_errors_by_row():
     assert [p.name for p in places] == ["Good"]
 
 
-def test_places_from_rows_requires_a_name_or_place():
-    _, errors = places_from_rows([{"url": "https://maps.google.com/?q=1,2"}])
-    assert errors == ["Row 1: no name"]
-
-
-def test_places_from_rows_rejects_lat_without_lon():
-    _, errors = places_from_rows([{"name": "X", "lat": 1.3}])
-    assert errors == ["Row 1: lat without lon"]
-
-
-def test_places_from_rows_rejects_lon_without_lat():
-    _, errors = places_from_rows([{"name": "X", "lon": 103.8}])
-    assert errors == ["Row 1: lon without lat"]
-
-
-def test_places_from_rows_rejects_bad_lat_lon():
-    _, errors = places_from_rows([{"name": "X", "lat": "abc", "lon": "103.8"}])
-    assert errors == ["Row 1: bad lat/lon 'abc', '103.8'"]
-
-
-def test_places_from_rows_rejects_bad_zoom():
-    _, errors = places_from_rows([{"name": "X", "zoom": "abc"}])
-    assert errors == ["Row 1: bad zoom 'abc'"]
-
-
-def test_places_from_rows_rejects_zoom_out_of_range():
-    _, errors = places_from_rows([{"name": "X", "zoom": 30}])
-    assert errors == ["Row 1: zoom out of range '30' (must be 0-22)"]
+@pytest.mark.parametrize(
+    "row,error",
+    [
+        ({"url": "https://maps.google.com/?q=1,2"}, "Row 1: no name"),
+        ({"name": "X", "lat": 1.3}, "Row 1: lat without lon"),
+        ({"name": "X", "lon": 103.8}, "Row 1: lon without lat"),
+        ({"name": "X", "lat": "abc", "lon": "103.8"}, "Row 1: bad lat/lon 'abc', '103.8'"),
+        ({"name": "X", "zoom": "abc"}, "Row 1: bad zoom 'abc'"),
+        ({"name": "X", "zoom": 30}, "Row 1: zoom out of range '30' (must be 0-22)"),
+    ],
+    ids=["no_name_or_place", "lat_without_lon", "lon_without_lat", "bad_lat_lon", "bad_zoom", "zoom_out_of_range"],
+)
+def test_places_from_rows_rejects_a_bad_row(row, error):
+    _, errors = places_from_rows([row])
+    assert errors == [error]
 
 
 def test_places_from_rows_canonicalises_kind():

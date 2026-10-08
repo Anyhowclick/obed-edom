@@ -78,31 +78,20 @@ def test_two_slides_patched_in_one_rewrite(tmp_path):
     assert read_slide_zorder(deck, 2)[0] == ["401", "400"]
 
 
-def test_two_slides_sharing_a_member_both_refuse_byte_identical(tmp_path):
+@pytest.mark.parametrize(("slide2_order", "slide2_reason"), [
+    (["401", "400"], "member shared with slide"),
+    (["400", "400"], "mismatch"),
+], ids=["both-valid", "one-valid-one-multiset-mismatch"])
+def test_two_slides_sharing_a_member_both_refuse_byte_identical(tmp_path, slide2_order, slide2_reason):
     deck = _build_deck(tmp_path / "shared.key", [
         (100, [300, 301], "Index/Slide-shared.iwa"),
         (110, [400, 401], "Index/Slide-shared.iwa"),
     ])
     before = hashlib.sha256(deck.read_bytes()).hexdigest()
 
-    results = patch_deck_zorder(deck, {1: ["301", "300"], 2: ["401", "400"]})
+    results = patch_deck_zorder(deck, {1: ["301", "300"], 2: slide2_order})
     assert results[1].refused and "member shared with slide" in (results[1].reason or "")
-    assert results[2].refused and "member shared with slide" in (results[2].reason or "")
-    assert read_slide_zorder(deck, 1)[0] == ["300", "301"]  # untouched, original order
-    assert read_slide_zorder(deck, 2)[0] == ["400", "401"]  # untouched, original order
-    assert hashlib.sha256(deck.read_bytes()).hexdigest() == before  # shared member byte-identical
-
-
-def test_shared_member_one_valid_one_multiset_mismatch_both_refuse_byte_identical(tmp_path):
-    deck = _build_deck(tmp_path / "shared-mixed.key", [
-        (100, [300, 301], "Index/Slide-shared.iwa"),
-        (110, [400, 401], "Index/Slide-shared.iwa"),
-    ])
-    before = hashlib.sha256(deck.read_bytes()).hexdigest()
-
-    results = patch_deck_zorder(deck, {1: ["301", "300"], 2: ["400", "400"]})
-    assert results[1].refused and "member shared with slide" in (results[1].reason or "")
-    assert results[2].refused and "mismatch" in (results[2].reason or "")
+    assert results[2].refused and slide2_reason in (results[2].reason or "")
     assert read_slide_zorder(deck, 1)[0] == ["300", "301"]  # untouched, original order
     assert read_slide_zorder(deck, 2)[0] == ["400", "401"]  # untouched, original order
     assert hashlib.sha256(deck.read_bytes()).hexdigest() == before  # shared member byte-identical

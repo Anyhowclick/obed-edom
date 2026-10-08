@@ -50,11 +50,11 @@ def test_encode_fly_movie(tmp_path):
     assert dest.name.endswith(".mov")
 
 
-def test_encode_pending_sets_movie_fields(tmp_path):
+def test_encode_pending_sets_movie_fields_with_duration_from_frame_count(tmp_path):
     if ffmpeg_exe() is None:
         pytest.skip("ffmpeg not available")
     frames = _make_frames(tmp_path, "s1")
-    (frames / "meta.json").write_text(json.dumps({"fps": 6, "count": 6, "duration": 1.0}))
+    (frames / "meta.json").write_text(json.dumps({"fps": 6, "count": 6, "duration": 99.0}))
     slides = [{"id": "s1"}, {"id": "s2"}]
     updated = encode_pending(tmp_path, slides)
     s1 = next(s for s in updated if s["id"] == "s1")
@@ -100,15 +100,6 @@ def test_require_contiguous_frames_rejects_gap(tmp_path):
     (folder / "00002.png").unlink()
     with pytest.raises(ValueError, match="Frame gap"):
         require_contiguous_frames(folder)
-
-
-def test_encode_pending_duration_uses_frame_count_not_meta(tmp_path):
-    if ffmpeg_exe() is None:
-        pytest.skip("ffmpeg not available")
-    frames = _make_frames(tmp_path, "s1", count=6)
-    (frames / "meta.json").write_text(json.dumps({"fps": 6, "count": 6, "duration": 99.0}))
-    updated = encode_pending(tmp_path, [{"id": "s1"}])
-    assert updated[0]["movieDuration"] == 1.0
 
 
 def test_encode_pending_raises_on_gap(tmp_path):

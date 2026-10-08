@@ -40,7 +40,6 @@ from obed_edom.map_remap import (
     is_map_item,
     is_pin_item,
     item_center,
-    item_rect,
     learn_recipe,
     map_dst_for_cg,
     map_point,
@@ -2900,22 +2899,8 @@ def test_roster_run_drops_later_slides_whose_roster_is_a_group():
     assert drop == {3, 4}
 
 
-def test_drop_roster_hides_a_group_carrier_even_with_keep_side_panels():
-    sig = "\n".join(f"CHC Place{i}" for i in range(20))
-    carrier = _group_carrier(49)
-    items = [carrier]
-    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": items}]}
-    recipe = learn_recipe(wall, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
-    slide = {"number": 1, "items": items, "groupChildText": {49: sig}}
-
-    out = plan_slide_transforms(
-        slide, recipe, keep_side_panels=True, drop_roster=True, wall_size=(7680, 1080)
-    )
-    by_kind_index = {t.kind_index: t for t in out}
-    assert by_kind_index[49].role == "hide"
-
-
-def test_drop_roster_hides_a_group_carrier_after_a_json_round_trip():
+@pytest.mark.parametrize("json_round_trip", [False, True], ids=["int-keys", "json-round-trip"])
+def test_drop_roster_hides_a_group_carrier_even_with_keep_side_panels(json_round_trip):
     import json
 
     sig = "\n".join(f"CHC Place{i}" for i in range(20))
@@ -2923,7 +2908,9 @@ def test_drop_roster_hides_a_group_carrier_after_a_json_round_trip():
     items = [carrier]
     wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": items}]}
     recipe = learn_recipe(wall, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
-    slide = json.loads(json.dumps({"number": 1, "items": items, "groupChildText": {49: sig}}))
+    slide = {"number": 1, "items": items, "groupChildText": {49: sig}}
+    if json_round_trip:
+        slide = json.loads(json.dumps(slide))
 
     out = plan_slide_transforms(
         slide, recipe, keep_side_panels=True, drop_roster=True, wall_size=(7680, 1080)
@@ -3086,30 +3073,22 @@ def test_drop_roster_keeps_a_mixed_carrier_group_and_reports_it():
     assert by_kind_index_side_panel[49].role == "hide"
 
 
-def test_roster_second_slide_group_with_new_child_text_drops_the_roster():
+@pytest.mark.parametrize(
+    ("names", "heading"),
+    [(20, "NEW STAT"), (8, "183 CHC Churches")],
+    ids=["new-child-text", "church-stat-heading"],
+)
+def test_roster_second_slide_group_with_new_child_text_drops_the_roster(names, heading):
     """A group carrier's non-roster child text (e.g. a new heading nested in the
     same group) must still count as new content on the second slide, even though
-    the group itself is excluded from the roster names."""
+    the group itself is excluded from the roster names. A stat heading that itself
+    contains a CHURCH_LIST_RE match (e.g. "183 CHC Churches") but does not start
+    with the church prefix is new content too, not a roster name."""
     from obed_edom.map_remap import roster_slides
 
-    sig = "\n".join(f"CHC Place{i}" for i in range(20))
+    sig = "\n".join(f"CHC Place{i}" for i in range(names))
     slide1 = {"number": 1, "items": [_group_carrier(49)], "groupChildText": {49: sig}}
-    slide2 = {"number": 2, "items": [_group_carrier(49)], "groupChildText": {49: sig + "\nNEW STAT"}}
-
-    keep, drop = roster_slides([slide1, slide2])
-    assert keep == {1}
-    assert drop == {2}
-
-
-def test_roster_second_slide_group_with_a_church_stat_heading_drops_the_roster():
-    """A stat heading that itself contains a CHURCH_LIST_RE match (e.g. "183 CHC
-    Churches") but does not start with the church prefix is new content, not a
-    roster name; it must still drop the second slide."""
-    from obed_edom.map_remap import roster_slides
-
-    sig = "\n".join(f"CHC Place{i}" for i in range(8))
-    slide1 = {"number": 1, "items": [_group_carrier(49)], "groupChildText": {49: sig}}
-    slide2 = {"number": 2, "items": [_group_carrier(49)], "groupChildText": {49: sig + "\n183 CHC Churches"}}
+    slide2 = {"number": 2, "items": [_group_carrier(49)], "groupChildText": {49: sig + "\n" + heading}}
 
     keep, drop = roster_slides([slide1, slide2])
     assert keep == {1}
@@ -4532,6 +4511,19 @@ def _card_template_slide(number, samples):
     return {"number": number, "items": items, "groupCaption": caps}
 
 
+def _card_recipe():
+    """An identity map with one 120x100 "CHC Villamonte" template card sample at 10pt."""
+    return {
+        "destWidth": 1920.0, "destHeight": 1080.0,
+        "mapSrc": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        "mapDst": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        "cardSamples": [
+            {"rect": {"x": 0.0, "y": 0.0, "w": 120.0, "h": 100.0}, "aspect": 1.2,
+             "caption": {"font": "Amplitude-Bold", "size": 10.0, "color": None, "text": "CHC Villamonte"}},
+        ],
+    }
+
+
 # --------------------------------------------------------------------------
 # Batch 2 — card template size + caption step-down + grid reflow.
 # --------------------------------------------------------------------------
@@ -4559,13 +4551,18 @@ def test_template_card_sample_is_the_unique_aspect_match():
     assert (round(match["rect"].w, 1), round(match["rect"].h, 1)) == (120.0, 100.0)
 
 
-def test_template_card_sample_refuses_when_two_groups_match():
+@pytest.mark.parametrize(
+    "second",
+    [
+        (1, 553.0, 667.0, 414.0, 342.3, {"text": "269 Total Churches"}),
+        (1, 553.0, 667.0, 122.0, 101.0, {"text": "CHC Other Sample"}),
+    ],
+    ids=["two-groups-match-the-aspect", "two-card-sizes"],
+)
+def test_template_card_sample_refuses_when_two_groups_match(second):
     # A second, differently-sized group also lands within 2% of the same wall aspect
     # (~1.21) — genuine ambiguity, refuse rather than guess.
-    slide = _card_template_slide(1, [
-        (0, 1251.0, 191.0, 120.0, 100.0, {"text": "CHC Villamonte"}),
-        (1, 553.0, 667.0, 414.0, 342.3, {"text": "269 Total Churches"}),
-    ])
+    slide = _card_template_slide(1, [(0, 1251.0, 191.0, 120.0, 100.0, {"text": "CHC Villamonte"}), second])
     samples = template_card_samples([slide])
     src = Rect(0, 0, 131.8, 109.5)
     assert _card_sample_for(src, "CHC Arao", samples) is None
@@ -4629,15 +4626,7 @@ def test_card_group_takes_the_template_card_rect_not_the_affine():
 def test_two_leaf_group_is_not_a_card():
     # "269 / Total Churches" — aspect matches (1.21) but its groupChildText has TWO
     # parts (joined by \n); the single-caption gate keeps it on the affine.
-    recipe = {
-        "destWidth": 1920.0, "destHeight": 1080.0,
-        "mapSrc": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
-        "mapDst": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
-        "cardSamples": [
-            {"rect": {"x": 0.0, "y": 0.0, "w": 120.0, "h": 100.0}, "aspect": 1.2,
-             "caption": {"font": "Amplitude-Bold", "size": 10.0, "color": None, "text": "CHC Villamonte"}},
-        ],
-    }
+    recipe = _card_recipe()
     slide = {
         "number": 4,
         "items": [
@@ -4651,15 +4640,7 @@ def test_two_leaf_group_is_not_a_card():
 
 
 def test_roster_group_is_not_a_card():
-    recipe = {
-        "destWidth": 1920.0, "destHeight": 1080.0,
-        "mapSrc": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
-        "mapDst": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
-        "cardSamples": [
-            {"rect": {"x": 0.0, "y": 0.0, "w": 120.0, "h": 100.0}, "aspect": 1.2,
-             "caption": {"font": "Amplitude-Bold", "size": 10.0, "color": None, "text": "CHC Villamonte"}},
-        ],
-    }
+    recipe = _card_recipe()
     roster_sig = "\n".join(f"CHC Name{i}" for i in range(113))
     slide = {
         "number": 4,
@@ -4701,15 +4682,7 @@ def test_caption_font_missing_keeps_swatch_and_reports():
 
 @needs_appkit
 def test_caption_size_present_on_child_resize_report_row():
-    recipe = {
-        "destWidth": 1920.0, "destHeight": 1080.0,
-        "mapSrc": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
-        "mapDst": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
-        "cardSamples": [
-            {"rect": {"x": 0.0, "y": 0.0, "w": 120.0, "h": 100.0}, "aspect": 1.2,
-             "caption": {"font": "Amplitude-Bold", "size": 10.0, "color": None, "text": "CHC Villamonte"}},
-        ],
-    }
+    recipe = _card_recipe()
     slide = {
         "number": 4,
         "items": [_item(kindIndex=0, kind="group", x=3300.0, y=300.0, w=131.8, h=109.5)],
@@ -4721,52 +4694,28 @@ def test_caption_size_present_on_child_resize_report_row():
     assert report[0]["captionPt"] == 10.0
 
 
-def test_card_without_groupcaption_writes_swatch_and_refuses_loudly():
+@pytest.mark.parametrize(
+    "group_caption",
+    [None, {0: {"text": "CHC Arao", "font": "Amplitude-Bold", "size": 10.0}}],
+    ids=["no-groupcaption", "groupcaption-missing-groupw-and-boxw"],
+)
+def test_card_without_a_complete_groupcaption_writes_swatch_and_refuses_loudly(group_caption):
     # A card matched via groupChildText (single-leaf sig) but with NO groupCaption record
-    # (the two offline sources can disagree — see iwa_runs._single_text_leaf's U+FFFC fix)
-    # must never fall through to leafPt=0 (silent _c1*s ~9.09pt): it must write the
-    # template swatch and set captionRefusal so remap_keynote's WARNING path fires.
-    recipe = {
-        "destWidth": 1920.0, "destHeight": 1080.0,
-        "mapSrc": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
-        "mapDst": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
-        "cardSamples": [
-            {"rect": {"x": 0.0, "y": 0.0, "w": 120.0, "h": 100.0}, "aspect": 1.2,
-             "caption": {"font": "Amplitude-Bold", "size": 10.0, "color": None, "text": "CHC Villamonte"}},
-        ],
-    }
+    # (the two offline sources can disagree — see iwa_runs._single_text_leaf's U+FFFC fix),
+    # or with a partial/corrupt one missing groupW, must never fall through to leafPt=0
+    # (silent _c1*s ~9.09pt): it must write the template swatch and set captionRefusal so
+    # remap_keynote's WARNING path fires.
+    recipe = _card_recipe()
     slide = {
         "number": 4,
         "items": [_item(kindIndex=0, kind="group", x=3300.0, y=300.0, w=131.8, h=109.5)],
         "groupChildText": {0: "CHC Arao"},
-        # no "groupCaption" key at all on this slide
     }
+    if group_caption is not None:
+        slide["groupCaption"] = group_caption
     report: list[dict] = []
     plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
     assert report[0]["captionPt"] == 10.0  # the template swatch, not 0.0 / not _c1*s
-    assert report[0]["captionRefusal"] == "caption-unread"
-
-
-def test_card_with_incomplete_groupcaption_also_refuses_loudly():
-    # groupCaption present but missing groupW (e.g. a partial/corrupt record) — same guard.
-    recipe = {
-        "destWidth": 1920.0, "destHeight": 1080.0,
-        "mapSrc": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
-        "mapDst": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
-        "cardSamples": [
-            {"rect": {"x": 0.0, "y": 0.0, "w": 120.0, "h": 100.0}, "aspect": 1.2,
-             "caption": {"font": "Amplitude-Bold", "size": 10.0, "color": None, "text": "CHC Villamonte"}},
-        ],
-    }
-    slide = {
-        "number": 4,
-        "items": [_item(kindIndex=0, kind="group", x=3300.0, y=300.0, w=131.8, h=109.5)],
-        "groupChildText": {0: "CHC Arao"},
-        "groupCaption": {0: {"text": "CHC Arao", "font": "Amplitude-Bold", "size": 10.0}},  # no groupW/boxW
-    }
-    report: list[dict] = []
-    plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
-    assert report[0]["captionPt"] == 10.0
     assert report[0]["captionRefusal"] == "caption-unread"
 
 
@@ -4910,15 +4859,7 @@ def test_grid_overlap_names_fall_back_to_kind_index_without_captions():
 
 
 def test_non_card_other_groups_are_not_reflowed():
-    recipe = {
-        "destWidth": 1920.0, "destHeight": 1080.0,
-        "mapSrc": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
-        "mapDst": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
-        "cardSamples": [
-            {"rect": {"x": 0.0, "y": 0.0, "w": 120.0, "h": 100.0}, "aspect": 1.2,
-             "caption": {"font": "Amplitude-Bold", "size": 10.0, "color": None, "text": "CHC Villamonte"}},
-        ],
-    }
+    recipe = _card_recipe()
     slide = {
         "number": 4,
         "items": [
@@ -4949,16 +4890,6 @@ def test_template_card_pitch_from_adjacent_samples():
     single_samples = template_card_samples([single])
     single_pitch = _card_pitch(single_samples, 120.3727, 100.0)
     assert single_pitch["gutterX"] is None and single_pitch["gutterY"] is None
-
-
-def test_template_card_samples_refuse_two_sizes():
-    slide = _card_template_slide(12, [
-        (0, 1251.0, 191.0, 120.0, 100.0, {"text": "CHC Villamonte"}),
-        (1, 553.0, 667.0, 122.0, 101.0, {"text": "CHC Other Sample"}),  # a different card size
-    ])
-    samples = template_card_samples([slide])
-    src = Rect(0, 0, 131.8, 109.5)
-    assert _card_sample_for(src, "CHC Arao", samples) is None
 
 
 def test_offframe_report_is_empty_after_reflow():
@@ -5143,26 +5074,30 @@ def test_non_uniform_group_target_refuses_child_writes():
     assert "children" not in tf.as_dict()
 
 
-def test_badge_group_reaches_the_child_write_path():
-    """Modelled on test_caption_bearing_pin_sized_group_reaches_the_font_pass: groupChildren
-    threads through plan_slide_transforms the same way groupChildText/child_resize_report
-    do, so geometry and font scale by the same number."""
+def _plan_badge_group(s, *, tx=0.0, ty=0.0, **slide_fields):
+    """Plans the Gold slide 2 "Ps George" badge group under a single group affine of scale `s`; returns the group's
+    transform and the child resize report."""
     recipe = {
         "destWidth": 1920.0,
         "destHeight": 1080.0,
-        "groups": [
-            {"s": 0.25, "tx": 0.0, "ty": 0.0, "src": {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}},
-        ],
+        "groups": [{"s": s, "tx": tx, "ty": ty, "src": {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}}],
     }
     slide = {
         "number": 2,
         "items": [_item(kindIndex=0, kind="group", x=4164.3, y=39.4, w=278.0, h=87.6)],
         "groupChildText": {0: "Ps George"},
-        "groupChildren": {0: _badge_child_src()},
+        **slide_fields,
     }
     report: list[dict] = []
     out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
-    group_tf = next(t for t in out if t.kind == "group")
+    return next(t for t in out if t.kind == "group"), report
+
+
+def test_badge_group_reaches_the_child_write_path():
+    """Modelled on test_caption_bearing_pin_sized_group_reaches_the_font_pass: groupChildren
+    threads through plan_slide_transforms the same way groupChildText/child_resize_report
+    do, so geometry and font scale by the same number."""
+    group_tf, report = _plan_badge_group(0.25, groupChildren={0: _badge_child_src()})
     d = group_tf.as_dict()
     assert len(d["children"]) == 2
     assert d["children"][0]["w"] / 278.0 == pytest.approx(report[0]["s"])
@@ -5175,23 +5110,9 @@ def test_autosize_marked_group_refuses_the_collapsing_write_without_groupchildre
     fix, plan_slide_transforms leaves child_src=None and ItemTransform.as_dict()
     writes the bare group w/h, which Keynote's aspect-locked resize then collapses.
     This must FAIL on pre-fix code (children absent, w/h present) and PASS after."""
-    recipe = {
-        "destWidth": 1920.0,
-        "destHeight": 1080.0,
-        "groups": [
-            {"s": 1.0, "tx": -2464.3, "ty": 0.6, "src": {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}},
-        ],
-    }
-    slide = {
-        "number": 2,
-        "items": [_item(kindIndex=0, kind="group", x=4164.3, y=39.4, w=278.0, h=87.6)],
-        "groupChildText": {0: "Ps George"},
-        "groupAutosize": {0: True},
-        "groupChildrenUnavailable": True,
-    }
-    report: list[dict] = []
-    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
-    group_tf = next(t for t in out if t.kind == "group")
+    group_tf, report = _plan_badge_group(
+        1.0, tx=-2464.3, ty=0.6, groupAutosize={0: True}, groupChildrenUnavailable=True
+    )
     d = group_tf.as_dict()
     assert "w" not in d and "h" not in d
     assert "children" not in d
@@ -5201,23 +5122,7 @@ def test_autosize_marked_group_refuses_the_collapsing_write_without_groupchildre
 
 
 def test_autosize_marked_group_with_groupchildren_is_unaffected():
-    recipe = {
-        "destWidth": 1920.0,
-        "destHeight": 1080.0,
-        "groups": [
-            {"s": 0.25, "tx": 0.0, "ty": 0.0, "src": {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}},
-        ],
-    }
-    slide = {
-        "number": 2,
-        "items": [_item(kindIndex=0, kind="group", x=4164.3, y=39.4, w=278.0, h=87.6)],
-        "groupChildText": {0: "Ps George"},
-        "groupAutosize": {0: True},
-        "groupChildren": {0: _badge_child_src()},
-    }
-    report: list[dict] = []
-    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
-    group_tf = next(t for t in out if t.kind == "group")
+    group_tf, report = _plan_badge_group(0.25, groupAutosize={0: True}, groupChildren={0: _badge_child_src()})
     d = group_tf.as_dict()
     assert "sizeRefused" not in d
     assert len(d["children"]) == 2
@@ -5265,23 +5170,7 @@ def test_group_collapse_guard_fires_on_an_exact_one_third_shrink():
     with groupCollapseRefused: the guard is boundary-inclusive (Codex r1),
     alongside the primary missing-groupChildren refusal that covers the
     size write itself."""
-    recipe = {
-        "destWidth": 1920.0,
-        "destHeight": 1080.0,
-        "groups": [
-            {"s": 1.0 / 3.0, "tx": 0.0, "ty": 0.0, "src": {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}},
-        ],
-    }
-    slide = {
-        "number": 2,
-        "items": [_item(kindIndex=0, kind="group", x=4164.3, y=39.4, w=278.0, h=87.6)],
-        "groupChildText": {0: "Ps George"},
-        "groupAutosize": {0: True},
-        "groupChildrenUnavailable": True,
-    }
-    report: list[dict] = []
-    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
-    group_tf = next(t for t in out if t.kind == "group")
+    group_tf, report = _plan_badge_group(1.0 / 3.0, groupAutosize={0: True}, groupChildrenUnavailable=True)
     assert group_tf.w * 3.0 == 278.0
     d = group_tf.as_dict()
     assert "w" not in d and "h" not in d
@@ -5296,23 +5185,7 @@ def test_group_collapse_guard_does_not_fire_below_the_shrink_threshold():
     """A shrink milder than 3x on both axes must not tag the transform dict with
     groupCollapseRefused, even though the primary missing-groupChildren
     refusal still applies to the size write itself."""
-    recipe = {
-        "destWidth": 1920.0,
-        "destHeight": 1080.0,
-        "groups": [
-            {"s": 0.5, "tx": 0.0, "ty": 0.0, "src": {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}},
-        ],
-    }
-    slide = {
-        "number": 2,
-        "items": [_item(kindIndex=0, kind="group", x=4164.3, y=39.4, w=278.0, h=87.6)],
-        "groupChildText": {0: "Ps George"},
-        "groupAutosize": {0: True},
-        "groupChildrenUnavailable": True,
-    }
-    report: list[dict] = []
-    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
-    group_tf = next(t for t in out if t.kind == "group")
+    group_tf, report = _plan_badge_group(0.5, groupAutosize={0: True}, groupChildrenUnavailable=True)
     assert group_tf.w * 3.0 > 278.0
     d = group_tf.as_dict()
     assert "w" not in d and "h" not in d
@@ -5325,15 +5198,7 @@ def test_card_group_never_takes_the_child_write_path():
     # The test_roster_group_is_not_a_card cardSamples recipe, but with an aspect-matching
     # group AND a groupChildren entry present: a card's caption is a fixed-frame shape
     # (never an autosize box), so it must stay on the template-card path untouched.
-    recipe = {
-        "destWidth": 1920.0, "destHeight": 1080.0,
-        "mapSrc": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
-        "mapDst": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
-        "cardSamples": [
-            {"rect": {"x": 0.0, "y": 0.0, "w": 120.0, "h": 100.0}, "aspect": 1.2,
-             "caption": {"font": "Amplitude-Bold", "size": 10.0, "color": None, "text": "CHC Villamonte"}},
-        ],
-    }
+    recipe = _card_recipe()
     slide = {
         "number": 4,
         "items": [_item(kindIndex=0, kind="group", x=3300.0, y=300.0, w=131.8, h=109.5)],
@@ -5425,15 +5290,7 @@ def test_aspect_snap_covers_image_and_movie():
 
 
 def test_card_sample_override_beats_the_aspect_snap():
-    recipe = {
-        "destWidth": 1920.0, "destHeight": 1080.0,
-        "mapSrc": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
-        "mapDst": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
-        "cardSamples": [
-            {"rect": {"x": 0.0, "y": 0.0, "w": 120.0, "h": 100.0}, "aspect": 1.2,
-             "caption": {"font": "Amplitude-Bold", "size": 10.0, "color": None, "text": "CHC Villamonte"}},
-        ],
-    }
+    recipe = _card_recipe()
     slide = {
         "number": 4,
         "items": [

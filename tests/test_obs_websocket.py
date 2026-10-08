@@ -125,16 +125,11 @@ def test_no_auth_server_needs_no_password(fake_obs):
     assert "authentication" not in server.identifies[0]["d"]
 
 
-def test_wrong_password_raises_auth_error(fake_obs):
+@pytest.mark.parametrize("password", ["wrong", None], ids=["wrong", "missing"])
+def test_bad_password_raises_auth_error(fake_obs, password):
     server = fake_obs("right")
     with pytest.raises(ObsAuthError):
-        ObsWebsocket(server.port, "wrong").connect()
-
-
-def test_missing_password_raises_auth_error(fake_obs):
-    server = fake_obs("right")
-    with pytest.raises(ObsAuthError):
-        ObsWebsocket(server.port, None).connect()
+        ObsWebsocket(server.port, password).connect()
 
 
 def test_failed_request_status_raises_typed_error(fake_obs):

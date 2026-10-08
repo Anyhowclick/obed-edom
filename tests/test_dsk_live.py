@@ -25,14 +25,10 @@ def no_keynote(monkeypatch):
 # --- guard_out_dir -------------------------------------------------------------
 
 
-def test_guard_out_dir_rejects_tmp(tmp_path):
+@pytest.mark.parametrize("out_dir", ["/tmp/clips", "/private/tmp/clips"])
+def test_guard_out_dir_rejects_tmp(tmp_path, out_dir):
     with pytest.raises(ValueError, match="Keynote cannot reliably open"):
-        dl.guard_out_dir(Path("/tmp/clips"), tmp_path / "Sermon.key")
-
-
-def test_guard_out_dir_rejects_private_tmp(tmp_path):
-    with pytest.raises(ValueError, match="Keynote cannot reliably open"):
-        dl.guard_out_dir(Path("/private/tmp/clips"), tmp_path / "Sermon.key")
+        dl.guard_out_dir(Path(out_dir), tmp_path / "Sermon.key")
 
 
 def test_guard_out_dir_rejects_inside_source_package(tmp_path):
@@ -56,10 +52,6 @@ def test_ordinal_map_ranks_kept_slides():
     assert dl.ordinal_map({17, 32, 33}) == {17: 1, 32: 2, 33: 3}
 
 
-def test_ordinal_map_unaffected_by_deck_size():
-    assert dl.ordinal_map({17, 32, 33}) == {17: 1, 32: 2, 33: 3}
-
-
 # --- lock contention ---------------------------------------------------------
 
 
@@ -77,15 +69,6 @@ def test_lock_second_acquire_contends_on_open_flock(tmp_path, monkeypatch):
     fd1 = dl._acquire_lock()
     with pytest.raises(RuntimeError, match="lock held"):
         dl._acquire_lock()
-    dl._release_lock(fd1)
-    fd2 = dl._acquire_lock()
-    dl._release_lock(fd2)
-
-
-def test_lock_release_allows_reacquire(tmp_path, monkeypatch):
-    lock_path = tmp_path / "keynote.lock"
-    monkeypatch.setattr(dl, "LOCK_PATH", lock_path)
-    fd1 = dl._acquire_lock()
     dl._release_lock(fd1)
     fd2 = dl._acquire_lock()
     dl._release_lock(fd2)
@@ -134,12 +117,17 @@ def _stub_batch(monkeypatch, *, keynote_running=False, fingerprints=None):
     return calls, state
 
 
-def test_live_batch_happy_path_order(monkeypatch, tmp_path):
-    calls, state = _stub_batch(monkeypatch)
+def _deck(tmp_path):
     out_dir = tmp_path / "clips"
     out_dir.mkdir()
     fw = tmp_path / "Sermon.key"
     fw.write_bytes(b"source")
+    return fw, out_dir
+
+
+def test_live_batch_happy_path_order(monkeypatch, tmp_path):
+    calls, state = _stub_batch(monkeypatch)
+    fw, out_dir = _deck(tmp_path)
 
     with dl.LiveBatch(fw, out_dir) as batch:
         assert batch.scratch is not None and batch.scratch.exists()
@@ -167,10 +155,7 @@ def test_live_batch_happy_path_order(monkeypatch, tmp_path):
 
 def test_live_batch_refuses_when_keynote_already_running(monkeypatch, tmp_path):
     _stub_batch(monkeypatch, keynote_running=True)
-    out_dir = tmp_path / "clips"
-    out_dir.mkdir()
-    fw = tmp_path / "Sermon.key"
-    fw.write_bytes(b"source")
+    fw, out_dir = _deck(tmp_path)
 
     with pytest.raises(RuntimeError, match="already running"):
         with dl.LiveBatch(fw, out_dir):
@@ -179,10 +164,7 @@ def test_live_batch_refuses_when_keynote_already_running(monkeypatch, tmp_path):
 
 def test_live_batch_quits_keynote_on_exit_when_still_running(monkeypatch, tmp_path):
     calls, state = _stub_batch(monkeypatch)
-    out_dir = tmp_path / "clips"
-    out_dir.mkdir()
-    fw = tmp_path / "Sermon.key"
-    fw.write_bytes(b"source")
+    fw, out_dir = _deck(tmp_path)
 
     with dl.LiveBatch(fw, out_dir) as batch:
         script_path = batch.work / "script.applescript"
@@ -202,10 +184,7 @@ def test_live_batch_enter_cleans_up_on_fingerprint_failure(monkeypatch, tmp_path
         raise OSError("cannot stat")
 
     monkeypatch.setattr(dl, "_fingerprint_source", _boom)
-    out_dir = tmp_path / "clips"
-    out_dir.mkdir()
-    fw = tmp_path / "Sermon.key"
-    fw.write_bytes(b"source")
+    fw, out_dir = _deck(tmp_path)
 
     with pytest.raises(OSError, match="cannot stat"):
         with dl.LiveBatch(fw, out_dir):
@@ -224,10 +203,7 @@ def test_live_batch_enter_cleans_up_on_copy_keynote_failure(monkeypatch, tmp_pat
         raise RuntimeError("copy failed")
 
     monkeypatch.setattr(dl, "copy_keynote", _boom)
-    out_dir = tmp_path / "clips"
-    out_dir.mkdir()
-    fw = tmp_path / "Sermon.key"
-    fw.write_bytes(b"source")
+    fw, out_dir = _deck(tmp_path)
 
     with pytest.raises(RuntimeError, match="copy failed"):
         with dl.LiveBatch(fw, out_dir):
@@ -241,10 +217,7 @@ def test_live_batch_enter_cleans_up_on_copy_keynote_failure(monkeypatch, tmp_pat
 
 def test_live_batch_source_changed_raises_when_no_primary_exception(monkeypatch, tmp_path):
     _stub_batch(monkeypatch, fingerprints=[("before",), ("after",)])
-    out_dir = tmp_path / "clips"
-    out_dir.mkdir()
-    fw = tmp_path / "Sermon.key"
-    fw.write_bytes(b"source")
+    fw, out_dir = _deck(tmp_path)
 
     with pytest.raises(RuntimeError, match="Source deck changed"):
         with dl.LiveBatch(fw, out_dir) as batch:
@@ -255,10 +228,7 @@ def test_live_batch_source_changed_raises_when_no_primary_exception(monkeypatch,
 
 def test_live_batch_1712_retry_recopies_scratch(monkeypatch, tmp_path):
     calls, state = _stub_batch(monkeypatch)
-    out_dir = tmp_path / "clips"
-    out_dir.mkdir()
-    fw = tmp_path / "Sermon.key"
-    fw.write_bytes(b"source")
+    fw, out_dir = _deck(tmp_path)
 
     monkeypatch.setattr(dl, "_quit_and_wait_for_exit", lambda *a: calls.append("quit_and_wait"))
 
@@ -288,10 +258,7 @@ def test_live_batch_logs_peak_rss_on_exit(monkeypatch, tmp_path):
     monkeypatch.setattr(dl._RssWatchdog, "start", lambda self: None)
     monkeypatch.setattr(dl._RssWatchdog, "stop", lambda self: None)
     monkeypatch.setattr(dl, "_sample_rss_bytes", lambda pid: 123_456)
-    out_dir = tmp_path / "clips"
-    out_dir.mkdir()
-    fw = tmp_path / "Sermon.key"
-    fw.write_bytes(b"source")
+    fw, out_dir = _deck(tmp_path)
     logged: list[str] = []
 
     with dl.LiveBatch(fw, out_dir, rss_limit_bytes=999_999, log=logged.append) as batch:
@@ -305,10 +272,7 @@ def test_live_batch_logs_peak_rss_on_exit(monkeypatch, tmp_path):
 
 def test_live_batch_run_no_retry_flag(monkeypatch, tmp_path):
     calls, state = _stub_batch(monkeypatch)
-    out_dir = tmp_path / "clips"
-    out_dir.mkdir()
-    fw = tmp_path / "Sermon.key"
-    fw.write_bytes(b"source")
+    fw, out_dir = _deck(tmp_path)
 
     monkeypatch.setattr(dl, "_quit_and_wait_for_exit", lambda *a: calls.append("quit_and_wait"))
 
@@ -391,36 +355,32 @@ def test_layout_import_lines_error_handler_deletes_pending_donor_before_closing_
     assert script.count("set pendingDonor to missing value") == 3  # 1 init + 2 clears
 
 
-def test_progress_re_matches_whole_slide_marker():
-    match = dl._PROGRESS_RE.match("OBED\t17\t2026-09-10 00:00:00")
+@pytest.mark.parametrize(
+    "line, groups",
+    [
+        ("OBED\t17\t2026-09-10 00:00:00", ("17", None)),
+        ("OBED\t12\t1\t2026-09-10 00:00:00", ("12", "1")),
+    ],
+    ids=["whole-slide", "per-movie"],
+)
+def test_progress_re_matches_marker(line, groups):
+    match = dl._PROGRESS_RE.match(line)
     assert match is not None
-    assert match.group(1) == "17"
-    assert match.group(2) is None
+    assert match.group(1, 2) == groups
 
 
-def test_progress_re_matches_per_movie_marker():
-    match = dl._PROGRESS_RE.match("OBED\t12\t1\t2026-09-10 00:00:00")
+@pytest.mark.parametrize(
+    "line, groups",
+    [
+        ("ERR\t17\t-1728\tCan't get slide 1.", ("17", None, "-1728", "Can't get slide 1.")),
+        ("ERR\t12\t1\t-1728\tCan't get slide 1.", ("12", "1", "-1728", "Can't get slide 1.")),
+    ],
+    ids=["whole-slide", "per-movie"],
+)
+def test_error_re_matches_marker(line, groups):
+    match = dl._ERROR_RE.match(line)
     assert match is not None
-    assert match.group(1) == "12"
-    assert match.group(2) == "1"
-
-
-def test_error_re_matches_whole_slide_marker():
-    match = dl._ERROR_RE.match("ERR\t17\t-1728\tCan't get slide 1.")
-    assert match is not None
-    assert match.group(1) == "17"
-    assert match.group(2) is None
-    assert match.group(3) == "-1728"
-    assert match.group(4) == "Can't get slide 1."
-
-
-def test_error_re_matches_per_movie_marker():
-    match = dl._ERROR_RE.match("ERR\t12\t1\t-1728\tCan't get slide 1.")
-    assert match is not None
-    assert match.group(1) == "12"
-    assert match.group(2) == "1"
-    assert match.group(3) == "-1728"
-    assert match.group(4) == "Can't get slide 1."
+    assert match.group(1, 2, 3, 4) == groups
 
 
 def test_run_osascript_fires_on_progress_per_movie(monkeypatch, tmp_path):

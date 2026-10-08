@@ -164,7 +164,8 @@ def shift_control(image: Any, edges: Sequence[Edge] = EDGES_12, stage: Stage = I
                   shifts: Sequence[float] = (1.0, 0.5)) -> dict[str, float]:
     """Per shift size, the max |measured - expected| edge move over x and y shifts. Each edge is read on the frame moved
     toward its larger window margin (a thin outline's ramp must stay inside its window); off-axis edges must not move."""
-    base = measure_edges(image, edges, stage, white)
+    frame = luminance(image)
+    base = measure_edges(frame, edges, stage, white)
     sign = {}
     for e in edges:
         a, b, _, _ = screen_window(e, stage)
@@ -173,7 +174,7 @@ def shift_control(image: Any, edges: Sequence[Edge] = EDGES_12, stage: Stage = I
     for dx in shifts:
         errors = []
         for axis in ("x", "y"):
-            moved = {d: measure_edges(shift_image(image, axis, d * dx), edges, stage, white) for d in (1.0, -1.0)}
+            moved = {d: measure_edges(shift_image(frame, axis, d * dx), edges, stage, white) for d in (1.0, -1.0)}
             for e in edges:
                 d = sign[e.name] if e.axis == axis else 1.0
                 expected = d * dx if e.axis == axis else 0.0

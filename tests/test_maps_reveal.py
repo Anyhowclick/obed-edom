@@ -276,7 +276,8 @@ def test_encoder_cancellation_terminates_child_process():
         _run_ffmpeg_stdin(script_cmd, frames(), is_cancelled)
 
 
-def test_slide_reveal_movie_composites_landmark_at_frame(tmp_path: Path, monkeypatch):
+@pytest.fixture
+def last_encoded_frame(monkeypatch) -> dict:
     captured: dict = {}
 
     def fake_encode(frames, dest, *, fps, log=None, is_cancelled=None):
@@ -286,6 +287,10 @@ def test_slide_reveal_movie_composites_landmark_at_frame(tmp_path: Path, monkeyp
         return dest
 
     monkeypatch.setattr("obed_edom.maps_reveal.encode_fly_movie", fake_encode)
+    return captured
+
+
+def test_slide_reveal_movie_composites_landmark_at_frame(tmp_path: Path, last_encoded_frame: dict):
     base = tmp_path / "base.png"
     Image.new("RGBA", (200, 100), (10, 20, 30, 255)).save(base)
     asset = tmp_path / "lm.png"
@@ -297,21 +302,12 @@ def test_slide_reveal_movie_composites_landmark_at_frame(tmp_path: Path, monkeyp
         base, None, landmarks, dest, output_dir=tmp_path / "out", slide_id="s1", size=(200, 100), fps=10
     )
 
-    last = np.array(Image.open(captured["last"]).convert("RGB"))
+    last = np.array(Image.open(last_encoded_frame["last"]).convert("RGB"))
     assert tuple(int(v) for v in last[35, 55]) == (200, 50, 50)
     assert tuple(int(v) for v in last[10, 10]) == (10, 20, 30)
 
 
-def test_slide_reveal_movie_composites_multiple_pieces(tmp_path: Path, monkeypatch):
-    captured: dict = {}
-
-    def fake_encode(frames, dest, *, fps, log=None, is_cancelled=None):
-        captured["last"] = sorted(frames.glob("*.png"))[-1]
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"mov")
-        return dest
-
-    monkeypatch.setattr("obed_edom.maps_reveal.encode_fly_movie", fake_encode)
+def test_slide_reveal_movie_composites_multiple_pieces(tmp_path: Path, last_encoded_frame: dict):
     base = tmp_path / "base.png"
     Image.new("RGBA", (200, 100), (10, 20, 30, 255)).save(base)
     piece_a = tmp_path / "a.png"
@@ -325,22 +321,13 @@ def test_slide_reveal_movie_composites_multiple_pieces(tmp_path: Path, monkeypat
         output_dir=tmp_path / "out", slide_id="s1", size=(200, 100), fps=10,
     )
 
-    last = np.array(Image.open(captured["last"]).convert("RGB"))
+    last = np.array(Image.open(last_encoded_frame["last"]).convert("RGB"))
     assert tuple(int(v) for v in last[5, 5]) == (200, 50, 50)
     assert tuple(int(v) for v in last[55, 105]) == (50, 200, 50)
     assert tuple(int(v) for v in last[80, 180]) == (10, 20, 30)
 
 
-def test_slide_reveal_movie_resizes_piece_bitmap_to_scaled_extent(tmp_path: Path, monkeypatch):
-    captured: dict = {}
-
-    def fake_encode(frames, dest, *, fps, log=None, is_cancelled=None):
-        captured["last"] = sorted(frames.glob("*.png"))[-1]
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"mov")
-        return dest
-
-    monkeypatch.setattr("obed_edom.maps_reveal.encode_fly_movie", fake_encode)
+def test_slide_reveal_movie_resizes_piece_bitmap_to_scaled_extent(tmp_path: Path, last_encoded_frame: dict):
     base = tmp_path / "base.png"
     Image.new("RGBA", (200, 100), (10, 20, 30, 255)).save(base)
     piece = tmp_path / "a.png"
@@ -352,7 +339,7 @@ def test_slide_reveal_movie_resizes_piece_bitmap_to_scaled_extent(tmp_path: Path
         output_dir=tmp_path / "out", slide_id="s1", size=(200, 100), fps=10,
     )
 
-    last = np.array(Image.open(captured["last"]).convert("RGB"))
+    last = np.array(Image.open(last_encoded_frame["last"]).convert("RGB"))
     assert tuple(int(v) for v in last[15, 15]) == (200, 50, 50)
     assert tuple(int(v) for v in last[25, 25]) == (10, 20, 30)
 
@@ -381,18 +368,12 @@ def _row_band_count(frame: np.ndarray, threshold: float = 40.0) -> int:
     return bands
 
 
-def test_fewer_strokes_yields_fewer_broad_bands():
-    rgba = _rgba(w=200, h=200)
-    frames = list(reveal_frames(rgba, count=45, seed=reveal_seed("church-1"), strokes=3))
-    frame = frames[round(0.35 * (len(frames) - 1))]
-    assert _row_band_count(frame) <= 3
-
-
-def test_more_strokes_yields_more_bands_than_fewer():
+def test_fewer_strokes_yield_fewer_broad_bands_than_more():
     rgba = _rgba(w=200, h=200)
     seed = reveal_seed("church-1")
     frame_few = list(reveal_frames(rgba, count=45, seed=seed, strokes=3))[round(0.35 * 44)]
     frame_many = list(reveal_frames(rgba, count=45, seed=seed, strokes=12))[round(0.35 * 44)]
+    assert _row_band_count(frame_few) <= 3
     assert _row_band_count(frame_many) >= _row_band_count(frame_few)
 
 

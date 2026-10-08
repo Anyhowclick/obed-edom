@@ -62,11 +62,6 @@ def test_ordinal_map_ranks_kept_slides():
     assert dme.ordinal_map({17, 32, 33}) == {17: 1, 32: 2, 33: 3}
 
 
-def test_ordinal_map_unaffected_by_deck_size():
-    # slides {17, 32, 33} of a 63-slide deck map to ordinals {1, 2, 3}
-    assert dme.ordinal_map({17, 32, 33}) == {17: 1, 32: 2, 33: 3}
-
-
 # --- clip_name / require_m4v --------------------------------------------------
 
 
@@ -79,67 +74,33 @@ def test_require_m4v_accepts_m4v():
     assert dme.require_m4v(p) == p
 
 
-def test_require_m4v_rejects_mov():
+@pytest.mark.parametrize("name", ["x.mov", "x"], ids=["mov", "no-suffix"])
+def test_require_m4v_rejects(name):
     with pytest.raises(ValueError):
-        dme.require_m4v(Path("/tmp/x.mov"))
-
-
-def test_require_m4v_rejects_no_suffix():
-    with pytest.raises(ValueError):
-        dme.require_m4v(Path("/tmp/x"))
+        dme.require_m4v(Path("/tmp") / name)
 
 
 # --- crop_filter ---------------------------------------------------------
 
 
-def test_crop_filter_basic():
-    rect = Rect(100, 50, 800, 400)
-    assert dme.crop_filter(rect, 1920, 1080) == "crop=800:400:100:50"
+@pytest.mark.parametrize(
+    ("rect", "expected"),
+    [
+        (Rect(100, 50, 800, 400), "crop=800:400:100:50"),
+        (Rect(0, 0, 1920, 1080), None),
+        (Rect(-10, -5, 100, 50), "crop=90:45:0:0"),
+        (Rect(1900, 1070, 100, 100), "crop=20:10:1900:1070"),
+    ],
+    ids=["basic", "full-frame-is-none", "clamps-negative-origin", "clamps-overflow"],
+)
+def test_crop_filter(rect, expected):
+    assert dme.crop_filter(rect, 1920, 1080) == expected
 
 
-def test_crop_filter_full_frame_is_none():
-    rect = Rect(0, 0, 1920, 1080)
-    assert dme.crop_filter(rect, 1920, 1080) is None
-
-
-def test_crop_filter_clamps_negative_origin():
-    rect = Rect(-10, -5, 100, 50)
-    assert dme.crop_filter(rect, 1920, 1080) == "crop=90:45:0:0"
-
-
-def test_crop_filter_clamps_overflow():
-    rect = Rect(1900, 1070, 100, 100)
-    assert dme.crop_filter(rect, 1920, 1080) == "crop=20:10:1900:1070"
-
-
-def test_crop_filter_degenerate_raises():
-    rect = Rect(0, 0, 0, 500)
+@pytest.mark.parametrize("rect", [Rect(0, 0, 0, 500), Rect(5000, 5000, 100, 100)], ids=["zero-width", "off-frame"])
+def test_crop_filter_degenerate_raises(rect):
     with pytest.raises(ValueError, match="Degenerate"):
         dme.crop_filter(rect, 1920, 1080)
-
-
-def test_crop_filter_explicit_degenerate_off_frame_raises():
-    rect = Rect(5000, 5000, 100, 100)
-    with pytest.raises(ValueError, match="Degenerate"):
-        dme.crop_filter(rect, 1920, 1080)
-
-
-def test_ffmpeg_process_centre_panel_crop_reaches_shipped_command(monkeypatch, tmp_path):
-    monkeypatch.setattr(dme, "ffmpeg_exe", lambda: "/usr/bin/ffmpeg")
-    monkeypatch.setattr(dme, "_ffprobe", lambda path: (7680, 1080, 30.0, 8.0))
-    captured = {}
-
-    def fake_stage(cmd):
-        captured["cmd"] = cmd
-
-    monkeypatch.setattr(dme, "_run_ffmpeg_stage", fake_stage)
-    raw = tmp_path / "raw.m4v"
-    dest = tmp_path / "out.mov"
-    w, h = dme._ffmpeg_process(
-        raw, dest, crop_rect=dme.CENTRE_PANEL_RECT, wall_w=7680, wall_h=1080, codec="AppleProRes422LT"
-    )
-    assert (w, h) == (3840, 1080)
-    assert "crop=3840:1080:1920:0" in captured["cmd"]
 
 
 # --- fps_enum_name / CODECS --------------------------------------------------
@@ -207,34 +168,6 @@ def _sample_script():
     )
 
 
-def test_script_uses_application_id_not_literal_name():
-    script = _sample_script()
-    assert 'application id "' in script
-    assert '"Keynote"' not in script
-    assert "tell application \"Keynote\"" not in script
-
-
-def test_script_has_export_clause_for_each_slide():
-    script = _sample_script()
-    for job in _jobs():
-        assert str(job.tmp) in script
-
-
-def test_script_export_clause_has_m4v_destination_and_properties():
-    script = _sample_script()
-    assert "as QuickTime movie with properties" in script
-    assert "movie format:native size" in script
-    assert "movie codec:AppleProRes422LT" in script
-    assert "movie framerate:FPS30" in script
-    assert "skipped slides:false" in script
-    assert ".m4v\"" in script
-
-
-def test_script_closes_without_saving():
-    script = _sample_script()
-    assert "close theDoc saving no" in script
-
-
 def test_script_has_timeout_clause():
     script = _sample_script()
     assert "with timeout of 3600 seconds" in script
@@ -245,12 +178,6 @@ def test_script_has_error_clause_for_exports():
     script = _sample_script()
     assert "on error errMsg number errNum" in script
     assert 'log ("ERR" & tab &' in script
-
-
-def test_script_deletes_by_keep_list_membership():
-    script = _sample_script()
-    assert "set keepList to {17, 32, 44}" in script
-    assert "if keepList does not contain i then delete slide i of theDoc" in script
 
 
 def test_script_sets_base_layout_on_kept_slides():
@@ -344,25 +271,21 @@ def test_script_black_layout_uses_explicit_approved_name_list():
     assert "begins with" not in script
 
 
-def test_resolve_black_layout_name_accepts_blank_black_alias(monkeypatch, tmp_path):
-    """"Blank Black" is a 2025-template-family alias for the alpha-safe black layout;
-    an FW deck owning it exactly must resolve without any template donor/import."""
+@pytest.mark.parametrize(
+    ("layout", "expected"),
+    [("Blank Black", "Blank Black"), ("BLACK copy", None)],
+    ids=["accepts-blank-black-alias", "rejects-non-alias-black-copy"],
+)
+def test_resolve_black_layout_name(monkeypatch, tmp_path, layout, expected):
+    """"Blank Black" is a 2025-template-family alias for the alpha-safe black layout; an FW deck owning it exactly must
+    resolve without any template donor/import. "BLACK copy" is not one of the approved aliases; owning it alone must
+    not resolve."""
     fw = tmp_path / "Sermon.key"
     fw.write_bytes(b"source")
-    fw_objects = _layout_objects_multi(entries=[("Blank Black", [])])
+    fw_objects = _layout_objects_multi(entries=[(layout, [])])
     monkeypatch.setattr(dme.dsk_live, "_load_deck", lambda _path: (fw_objects, {}, {}))
 
-    assert _REAL_RESOLVE_BLACK_LAYOUT_NAME(fw, dme.DEFAULT_BLACK_LAYOUT_NAMES) == "Blank Black"
-
-
-def test_resolve_black_layout_name_rejects_non_alias_black_copy(monkeypatch, tmp_path):
-    """"BLACK copy" is not one of the approved aliases; owning it alone must not resolve."""
-    fw = tmp_path / "Sermon.key"
-    fw.write_bytes(b"source")
-    fw_objects = _layout_objects_multi(entries=[("BLACK copy", [])])
-    monkeypatch.setattr(dme.dsk_live, "_load_deck", lambda _path: (fw_objects, {}, {}))
-
-    assert _REAL_RESOLVE_BLACK_LAYOUT_NAME(fw, dme.DEFAULT_BLACK_LAYOUT_NAMES) is None
+    assert _REAL_RESOLVE_BLACK_LAYOUT_NAME(fw, dme.DEFAULT_BLACK_LAYOUT_NAMES) == expected
 
 
 def test_script_black_layout_approved_list_refuses_substring_match():
@@ -398,32 +321,29 @@ def _dsk_sample_script():
     )
 
 
-def test_dsk_script_uses_application_id_not_literal_name():
-    script = _dsk_sample_script()
+@pytest.mark.parametrize(
+    ("build", "tmps", "keep_list"),
+    [
+        (_sample_script, lambda: [job.tmp for job in _jobs()], "{17, 32, 44}"),
+        (_dsk_sample_script, lambda: [tmp for _slide, _ordinal, tmp in _dsk_per_slide()], "{2, 5}"),
+    ],
+    ids=["export", "dsk"],
+)
+def test_export_scripts_share_the_keynote_export_contract(build, tmps, keep_list):
+    script = build()
     assert 'application id "' in script
     assert '"Keynote"' not in script
     assert 'tell application "Keynote"' not in script
-
-
-def test_dsk_script_has_export_clause_for_each_slide():
-    script = _dsk_sample_script()
-    for _slide, _ordinal, tmp in _dsk_per_slide():
+    for tmp in tmps():
         assert str(tmp) in script
-
-
-def test_dsk_script_export_clause_has_m4v_destination_and_properties():
-    script = _dsk_sample_script()
     assert "as QuickTime movie with properties" in script
     assert "movie format:native size" in script
     assert "movie codec:AppleProRes422LT" in script
     assert "movie framerate:FPS30" in script
     assert "skipped slides:false" in script
     assert ".m4v\"" in script
-
-
-def test_dsk_script_deletes_by_keep_list_membership():
-    script = _dsk_sample_script()
-    assert "set keepList to {2, 5}" in script
+    assert "close theDoc saving no" in script
+    assert f"set keepList to {keep_list}" in script
     assert "if keepList does not contain i then delete slide i of theDoc" in script
 
 
@@ -433,11 +353,6 @@ def test_dsk_script_toggles_skipped_per_ordinal():
     assert "set skipped of slide 1 of theDoc to true" in script
     assert "set skipped of slide 2 of theDoc to false" in script
     assert "set skipped of slide 2 of theDoc to true" in script
-
-
-def test_dsk_script_closes_without_saving():
-    script = _dsk_sample_script()
-    assert "close theDoc saving no" in script
 
 
 def test_dsk_script_no_base_layout_set():
@@ -496,16 +411,11 @@ def test_lock_release_allows_reacquire(tmp_path, monkeypatch):
 # --- _keynote_pid shares _keynote_running's fallback --------------------------
 
 
-def test_keynote_pid_uses_same_fallback_as_keynote_running(monkeypatch):
-    _set(monkeypatch, "_keynote_pids", lambda: [4242])
-    assert dme._keynote_running() is True
-    assert dme._keynote_pid() == 4242
-
-
-def test_keynote_pid_none_when_not_running(monkeypatch):
-    _set(monkeypatch, "_keynote_pids", lambda: [])
-    assert dme._keynote_running() is False
-    assert dme._keynote_pid() is None
+@pytest.mark.parametrize(("pids", "running", "pid"), [([4242], True, 4242), ([], False, None)], ids=["running", "not-running"])
+def test_keynote_pid_uses_same_fallback_as_keynote_running(monkeypatch, pids, running, pid):
+    _set(monkeypatch, "_keynote_pids", lambda: pids)
+    assert dme._keynote_running() is running
+    assert dme._keynote_pid() == pid
 
 
 # --- _keynote_pids resolution (bundle-executable, not display name) -----------
@@ -824,6 +734,18 @@ def test_export_slide_clips_refuses_unsafe_same_named_fw_layout_with_safe_donor(
         )
 
 
+def _capture_layout_imports(monkeypatch) -> list[list[str]]:
+    imported: list[list[str]] = []
+    real = dme.dsk_live.layout_import_lines
+
+    def _capture(doc_var, layout_names, template_path):
+        imported.append(list(layout_names) if not isinstance(layout_names, str) else [layout_names])
+        return real(doc_var, layout_names, template_path)
+
+    monkeypatch.setattr(dme.dsk_live, "layout_import_lines", _capture)
+    return imported
+
+
 def test_export_slide_clips_uses_fw_owned_alias_absent_from_template(monkeypatch, tmp_path):
     """`black_layout_names` is a list of ALTERNATIVE aliases (any one acceptable), not
     all required: an alpha-safe FW-owned "BLACK BLANK" must proceed even though the
@@ -850,14 +772,7 @@ def test_export_slide_clips_uses_fw_owned_alias_absent_from_template(monkeypatch
 
     monkeypatch.setattr(dme.dsk_live, "check_layout_import_preconditions", _precondition_forbidden)
 
-    imported: list[list[str]] = []
-    _real_layout_import_lines = dme.dsk_live.layout_import_lines
-
-    def _capture_layout_import_lines(doc_var, layout_names, template_path):
-        imported.append(list(layout_names) if not isinstance(layout_names, str) else [layout_names])
-        return _real_layout_import_lines(doc_var, layout_names, template_path)
-
-    monkeypatch.setattr(dme.dsk_live, "layout_import_lines", _capture_layout_import_lines)
+    imported = _capture_layout_imports(monkeypatch)
 
     calls = _stub_live(monkeypatch, tmp_path)
     _patch_build_export_script_capture(monkeypatch)
@@ -897,16 +812,9 @@ def test_export_slide_clips_imports_single_template_donor_when_no_fw_alias(monke
     monkeypatch.setattr(dme, "_resolve_black_layout_donor", _REAL_RESOLVE_BLACK_LAYOUT_DONOR)
     monkeypatch.setattr(dme.dsk_live, "check_layout_import_preconditions", _REAL_CHECK_LAYOUT_IMPORT_PRECONDITIONS)
 
-    imported: list[list[str]] = []
-    _real_layout_import_lines = dme.dsk_live.layout_import_lines
+    imported = _capture_layout_imports(monkeypatch)
 
-    def _capture_layout_import_lines(doc_var, layout_names, template_path):
-        imported.append(list(layout_names) if not isinstance(layout_names, str) else [layout_names])
-        return _real_layout_import_lines(doc_var, layout_names, template_path)
-
-    monkeypatch.setattr(dme.dsk_live, "layout_import_lines", _capture_layout_import_lines)
-
-    calls = _stub_live(monkeypatch, tmp_path)
+    _stub_live(monkeypatch, tmp_path)
     _patch_build_export_script_capture(monkeypatch)
 
     results = dme.export_slide_clips(
@@ -917,19 +825,39 @@ def test_export_slide_clips_imports_single_template_donor_when_no_fw_alias(monke
     assert imported == [["Black"]]
 
 
-def test_export_slide_clips_refuses_when_neither_fw_nor_template_owns_an_alias(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("fw_entries", "template_entries", "names"),
+    [
+        ([], [], dme.DEFAULT_BLACK_LAYOUT_NAMES),
+        ([("Black", [(-10.0, 0.0, 8000.0, 1080.0)])], None, ("Black",)),
+        ([], None, dme.DEFAULT_BLACK_LAYOUT_NAMES),
+    ],
+    ids=[
+        "neither-fw-nor-template-owns-an-alias",
+        "unsafe-fw-alias-with-nonexistent-template",
+        "no-fw-alias-with-nonexistent-template",
+    ],
+)
+def test_export_slide_clips_refuses_offline_without_an_alpha_safe_layout(
+    monkeypatch, tmp_path, fw_entries, template_entries, names
+):
+    """An unsafe or absent FW-owned alias with no usable template donor (`template_entries` None: the template path
+    does not exist) must refuse offline, not fall through to passing the raw alias list to the live script."""
     out_dir = tmp_path / "clips"
     out_dir.mkdir()
     fw = tmp_path / "Sermon.key"
     fw.write_bytes(b"source")
     template = tmp_path / "Donor.key"
-    template.write_bytes(b"template")
+    if template_entries is not None:
+        template.write_bytes(b"template")
 
-    fw_objects = _layout_objects_multi(entries=[])
-    template_objects = _layout_objects_multi(entries=[])
+    fw_objects = _layout_objects_multi(entries=fw_entries)
+    template_objects = _layout_objects_multi(entries=template_entries or [])
 
     def _dispatched_load_deck(path):
-        return (template_objects, {}, {}) if Path(path) == template else (fw_objects, {}, {})
+        if template_entries is not None and Path(path) == template:
+            return template_objects, {}, {}
+        return fw_objects, {}, {}
 
     _stub_offline_payload(monkeypatch)
     monkeypatch.setattr(dme.dsk_live, "_load_deck", _dispatched_load_deck)
@@ -945,9 +873,7 @@ def test_export_slide_clips_refuses_when_neither_fw_nor_template_owns_an_alias(m
     _set(monkeypatch, "_release_lock", lambda fd: None)
 
     with pytest.raises(dme.dsk_live.LayoutImportRefusal, match="no alpha-safe layout"):
-        dme.export_slide_clips(
-            fw, [17], out_dir, layout_template=template, black_layout_names=dme.DEFAULT_BLACK_LAYOUT_NAMES,
-        )
+        dme.export_slide_clips(fw, [17], out_dir, layout_template=template, black_layout_names=names)
 
 
 def test_export_slide_clips_uses_fw_owned_alias_with_nonexistent_template(monkeypatch, tmp_path):
@@ -975,16 +901,9 @@ def test_export_slide_clips_uses_fw_owned_alias_with_nonexistent_template(monkey
 
     monkeypatch.setattr(dme.dsk_live, "check_layout_import_preconditions", _precondition_forbidden)
 
-    imported: list[list[str]] = []
-    _real_layout_import_lines = dme.dsk_live.layout_import_lines
+    imported = _capture_layout_imports(monkeypatch)
 
-    def _capture_layout_import_lines(doc_var, layout_names, template_path):
-        imported.append(list(layout_names) if not isinstance(layout_names, str) else [layout_names])
-        return _real_layout_import_lines(doc_var, layout_names, template_path)
-
-    monkeypatch.setattr(dme.dsk_live, "layout_import_lines", _capture_layout_import_lines)
-
-    calls = _stub_live(monkeypatch, tmp_path)
+    _stub_live(monkeypatch, tmp_path)
     _patch_build_export_script_capture(monkeypatch)
 
     results = dme.export_slide_clips(
@@ -993,71 +912,6 @@ def test_export_slide_clips_uses_fw_owned_alias_with_nonexistent_template(monkey
 
     assert {r.slide for r in results} == {17}
     assert imported == []
-
-
-def test_export_slide_clips_refuses_unsafe_fw_alias_with_nonexistent_template(monkeypatch, tmp_path):
-    """An unsafe FW-owned alias with no usable template must refuse offline, not fall
-    through to passing the raw alias list to the live script."""
-    out_dir = tmp_path / "clips"
-    out_dir.mkdir()
-    fw = tmp_path / "Sermon.key"
-    fw.write_bytes(b"source")
-    missing_template = tmp_path / "NoSuchDonor.key"
-
-    fw_objects = _layout_objects_multi(entries=[("Black", [(-10.0, 0.0, 8000.0, 1080.0)])])
-
-    def _dispatched_load_deck(path):
-        return fw_objects, {}, {}
-
-    _stub_offline_payload(monkeypatch)
-    monkeypatch.setattr(dme.dsk_live, "_load_deck", _dispatched_load_deck)
-    monkeypatch.setattr(dme, "_resolve_black_layout_name", _REAL_RESOLVE_BLACK_LAYOUT_NAME)
-    monkeypatch.setattr(dme, "_resolve_black_layout_donor", _REAL_RESOLVE_BLACK_LAYOUT_DONOR)
-
-    def _copy_keynote_forbidden(src, dest):
-        raise AssertionError("Keynote must not launch once the precondition refuses")
-
-    monkeypatch.setattr(dme, "copy_keynote", _copy_keynote_forbidden)
-    _set(monkeypatch, "_keynote_running", lambda: False)
-    _set(monkeypatch, "_acquire_lock", lambda: None)
-    _set(monkeypatch, "_release_lock", lambda fd: None)
-
-    with pytest.raises(dme.dsk_live.LayoutImportRefusal, match="no alpha-safe layout"):
-        dme.export_slide_clips(
-            fw, [17], out_dir, layout_template=missing_template, black_layout_names=("Black",),
-        )
-
-
-def test_export_slide_clips_refuses_no_fw_alias_with_nonexistent_template(monkeypatch, tmp_path):
-    """No FW-owned alias at all, and no usable template: must refuse offline."""
-    out_dir = tmp_path / "clips"
-    out_dir.mkdir()
-    fw = tmp_path / "Sermon.key"
-    fw.write_bytes(b"source")
-    missing_template = tmp_path / "NoSuchDonor.key"
-
-    fw_objects = _layout_objects_multi(entries=[])
-
-    def _dispatched_load_deck(path):
-        return fw_objects, {}, {}
-
-    _stub_offline_payload(monkeypatch)
-    monkeypatch.setattr(dme.dsk_live, "_load_deck", _dispatched_load_deck)
-    monkeypatch.setattr(dme, "_resolve_black_layout_name", _REAL_RESOLVE_BLACK_LAYOUT_NAME)
-    monkeypatch.setattr(dme, "_resolve_black_layout_donor", _REAL_RESOLVE_BLACK_LAYOUT_DONOR)
-
-    def _copy_keynote_forbidden(src, dest):
-        raise AssertionError("Keynote must not launch once the precondition refuses")
-
-    monkeypatch.setattr(dme, "copy_keynote", _copy_keynote_forbidden)
-    _set(monkeypatch, "_keynote_running", lambda: False)
-    _set(monkeypatch, "_acquire_lock", lambda: None)
-    _set(monkeypatch, "_release_lock", lambda fd: None)
-
-    with pytest.raises(dme.dsk_live.LayoutImportRefusal, match="no alpha-safe layout"):
-        dme.export_slide_clips(
-            fw, [17], out_dir, layout_template=missing_template, black_layout_names=dme.DEFAULT_BLACK_LAYOUT_NAMES,
-        )
 
 
 def test_export_slide_clips_happy_path(monkeypatch, tmp_path):
@@ -1088,7 +942,7 @@ def test_export_slide_clips_runs_content_assert_for_real(monkeypatch, tmp_path):
     fw = tmp_path / "Sermon.key"
     fw.write_bytes(b"source")
 
-    calls = _stub_live(monkeypatch, tmp_path, stub_content_assert=False)
+    _stub_live(monkeypatch, tmp_path, stub_content_assert=False)
     _patch_build_export_script_capture(monkeypatch)
     seen_paths = []
 
@@ -1143,18 +997,12 @@ def test_export_slide_clips_refuses_out_dir_inside_source_package(monkeypatch, t
         dme.export_slide_clips(fw, [17], fw / "out")
 
 
-def test_export_slide_clips_rejects_unknown_codec(monkeypatch, tmp_path):
+@pytest.mark.parametrize(("kwargs", "match"), [({"codec": "mpeg1"}, "codec"), ({"fps": 48}, None)], ids=["codec", "fps"])
+def test_export_slide_clips_rejects_unknown_codec_or_fps(tmp_path, kwargs, match):
     fw = tmp_path / "Sermon.key"
     fw.write_bytes(b"source")
-    with pytest.raises(ValueError, match="codec"):
-        dme.export_slide_clips(fw, [17], tmp_path / "out", codec="mpeg1")
-
-
-def test_export_slide_clips_rejects_unknown_fps(monkeypatch, tmp_path):
-    fw = tmp_path / "Sermon.key"
-    fw.write_bytes(b"source")
-    with pytest.raises(ValueError):
-        dme.export_slide_clips(fw, [17], tmp_path / "out", fps=48)
+    with pytest.raises(ValueError, match=match):
+        dme.export_slide_clips(fw, [17], tmp_path / "out", **kwargs)
 
 
 def test_export_slide_clips_cleanup_on_exception(monkeypatch, tmp_path):
@@ -1216,7 +1064,15 @@ def test_export_slide_clips_cleanup_on_exception(monkeypatch, tmp_path):
     assert quit_calls["n"] == 1
 
 
-def test_export_slide_clips_appplescript_error_reraised_with_number(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("returncode", "stderr", "match"),
+    [
+        (1, "ERR\t17\t-1728\tCan't get slide 1.", "-1728"),
+        (0, "DELETEFAIL\t17\timage 2 of slide 1\t-1728\tCan't delete.", "delete failed"),
+    ],
+    ids=["applescript-error-reraised-with-number", "deletefail-raises"],
+)
+def test_export_slide_clips_surfaces_export_script_failures(monkeypatch, tmp_path, returncode, stderr, match):
     out_dir = tmp_path / "clips"
     out_dir.mkdir()
     fw = tmp_path / "Sermon.key"
@@ -1228,12 +1084,12 @@ def test_export_slide_clips_appplescript_error_reraised_with_number(monkeypatch,
         text = script_path.read_text()
         calls["osascript"] += 1
         if "export theDoc" in text:
-            return _FakeCompleted(returncode=1, stderr="ERR\t17\t-1728\tCan't get slide 1.")
+            return _FakeCompleted(returncode=returncode, stderr=stderr)
         return _FakeCompleted(returncode=0)
 
     _set(monkeypatch, "_run_osascript", fake_run_osascript)
 
-    with pytest.raises(RuntimeError, match="-1728"):
+    with pytest.raises(RuntimeError, match=match):
         dme.export_slide_clips(fw, [17], out_dir)
 
 
@@ -1260,7 +1116,7 @@ def test_export_slide_clips_retries_1712_once(monkeypatch, tmp_path):
         for job in _current_jobs[0]:
             job.tmp.parent.mkdir(parents=True, exist_ok=True)
             job.tmp.write_bytes(b"movie-bytes")
-        return _FakeCompleted(returncode=0, stderr=f"OBED\t17\tstamp")
+        return _FakeCompleted(returncode=0, stderr="OBED\t17\tstamp")
 
     _set(monkeypatch, "_run_osascript", fake_run_osascript)
 
@@ -1478,30 +1334,6 @@ def test_export_slide_clips_unknown_slide_raises(monkeypatch, tmp_path):
         dme.export_slide_clips(fw, [17], out_dir)
 
 
-def test_export_slide_clips_deletefail_raises(monkeypatch, tmp_path):
-    out_dir = tmp_path / "clips"
-    out_dir.mkdir()
-    fw = tmp_path / "Sermon.key"
-    fw.write_bytes(b"source")
-
-    calls = _stub_live(monkeypatch, tmp_path)
-
-    def fake_run_osascript(script_path, *, timeout=3600, register_proc=None, on_progress=None):
-        text = script_path.read_text()
-        calls["osascript"] += 1
-        if "export theDoc" in text:
-            return _FakeCompleted(
-                returncode=0,
-                stderr="DELETEFAIL\t17\timage 2 of slide 1\t-1728\tCan't delete.",
-            )
-        return _FakeCompleted(returncode=0)
-
-    _set(monkeypatch, "_run_osascript", fake_run_osascript)
-
-    with pytest.raises(RuntimeError, match="delete failed"):
-        dme.export_slide_clips(fw, [17], out_dir)
-
-
 # --- quit-and-wait before a -1712 retry --------------------------------------
 
 
@@ -1663,60 +1495,45 @@ def test_export_slide_clips_failing_ffprobe_leaves_no_destination(monkeypatch, t
     assert not dest.exists()
 
 
-def test_ffmpeg_process_passthrough_remuxes_with_copy(monkeypatch, tmp_path):
+def _ffmpeg_cmd(monkeypatch, tmp_path, *, raw_w, crop_rect, wall_w, codec="AppleProRes422LT"):
     monkeypatch.setattr(dme, "ffmpeg_exe", lambda: "/usr/bin/ffmpeg")
-    monkeypatch.setattr(dme, "_ffprobe", lambda path: (3840, 1080, 30.0, 8.0))
+    monkeypatch.setattr(dme, "_ffprobe", lambda path: (raw_w, 1080, 30.0, 8.0))
     captured = {}
-
-    def fake_stage(cmd):
-        captured["cmd"] = cmd
-
-    monkeypatch.setattr(dme, "_run_ffmpeg_stage", fake_stage)
-    raw = tmp_path / "raw.m4v"
+    monkeypatch.setattr(dme, "_run_ffmpeg_stage", lambda cmd: captured.setdefault("cmd", cmd))
     dest = tmp_path / "out.mov"
-    w, h = dme._ffmpeg_process(raw, dest, crop_rect=None, wall_w=3840, wall_h=1080, codec="AppleProRes422LT")
-    assert (w, h) == (3840, 1080)
-    assert "-c" in captured["cmd"] and "copy" in captured["cmd"]
-    assert str(dest) in captured["cmd"]
+    size = dme._ffmpeg_process(tmp_path / "raw.m4v", dest, crop_rect=crop_rect, wall_w=wall_w, wall_h=1080, codec=codec)
+    return size, captured["cmd"], dest
+
+
+def test_ffmpeg_process_centre_panel_crop_reaches_shipped_command(monkeypatch, tmp_path):
+    size, cmd, _dest = _ffmpeg_cmd(monkeypatch, tmp_path, raw_w=7680, crop_rect=dme.CENTRE_PANEL_RECT, wall_w=7680)
+    assert size == (3840, 1080)
+    assert "crop=3840:1080:1920:0" in cmd
+
+
+def test_ffmpeg_process_passthrough_remuxes_with_copy(monkeypatch, tmp_path):
+    size, cmd, dest = _ffmpeg_cmd(monkeypatch, tmp_path, raw_w=3840, crop_rect=None, wall_w=3840)
+    assert size == (3840, 1080)
+    assert "-c" in cmd and "copy" in cmd
+    assert str(dest) in cmd
 
 
 def test_ffmpeg_process_crop_uses_prores_ks_for_prores_codec(monkeypatch, tmp_path):
-    monkeypatch.setattr(dme, "ffmpeg_exe", lambda: "/usr/bin/ffmpeg")
-    monkeypatch.setattr(dme, "_ffprobe", lambda path: (3840, 1080, 30.0, 8.0))
-    captured = {}
-
-    def fake_stage(cmd):
-        captured["cmd"] = cmd
-
-    monkeypatch.setattr(dme, "_run_ffmpeg_stage", fake_stage)
-    raw = tmp_path / "raw.m4v"
-    dest = tmp_path / "out.mov"
-    rect = Rect(0, 0, 100, 100)
-    w, h = dme._ffmpeg_process(raw, dest, crop_rect=rect, wall_w=3840, wall_h=1080, codec="AppleProRes422LT")
-    assert (w, h) == (100, 100)
-    assert "prores_ks" in captured["cmd"]
-    assert "-profile:v" in captured["cmd"]
-    cmd = captured["cmd"]
+    size, cmd, _dest = _ffmpeg_cmd(monkeypatch, tmp_path, raw_w=3840, crop_rect=Rect(0, 0, 100, 100), wall_w=3840)
+    assert size == (100, 100)
+    assert "prores_ks" in cmd
+    assert "-profile:v" in cmd
     assert "-an" not in cmd
     assert "-c:a" in cmd and "copy" in cmd
     assert "-map" in cmd and "0:v:0" in cmd and "0:a?" in cmd
 
 
 def test_ffmpeg_process_crop_uses_libx264_for_h264_codec(monkeypatch, tmp_path):
-    monkeypatch.setattr(dme, "ffmpeg_exe", lambda: "/usr/bin/ffmpeg")
-    monkeypatch.setattr(dme, "_ffprobe", lambda path: (3840, 1080, 30.0, 8.0))
-    captured = {}
-
-    def fake_stage(cmd):
-        captured["cmd"] = cmd
-
-    monkeypatch.setattr(dme, "_run_ffmpeg_stage", fake_stage)
-    raw = tmp_path / "raw.m4v"
-    dest = tmp_path / "out.mov"
-    rect = Rect(0, 0, 100, 100)
-    dme._ffmpeg_process(raw, dest, crop_rect=rect, wall_w=3840, wall_h=1080, codec="h264")
-    assert "libx264" in captured["cmd"]
-    assert "prores_ks" not in captured["cmd"]
+    _size, cmd, _dest = _ffmpeg_cmd(
+        monkeypatch, tmp_path, raw_w=3840, crop_rect=Rect(0, 0, 100, 100), wall_w=3840, codec="h264"
+    )
+    assert "libx264" in cmd
+    assert "prores_ks" not in cmd
 
 
 def test_ffmpeg_process_rejects_raw_dims_mismatching_native_wall_size(monkeypatch, tmp_path):
@@ -1734,28 +1551,18 @@ def test_ffmpeg_process_rejects_raw_dims_mismatching_native_wall_size(monkeypatc
 
 
 def test_ffmpeg_process_normalises_odd_crop_to_even(monkeypatch, tmp_path):
-    monkeypatch.setattr(dme, "ffmpeg_exe", lambda: "/usr/bin/ffmpeg")
-    monkeypatch.setattr(dme, "_ffprobe", lambda path: (3840, 1080, 30.0, 8.0))
-    captured = {}
-
-    def fake_stage(cmd):
-        captured["cmd"] = cmd
-
-    monkeypatch.setattr(dme, "_run_ffmpeg_stage", fake_stage)
-    raw = tmp_path / "raw.m4v"
-    dest = tmp_path / "out.mov"
-    rect = Rect(1, 1, 99, 45)
-    w, h = dme._ffmpeg_process(raw, dest, crop_rect=rect, wall_w=3840, wall_h=1080, codec="AppleProRes422LT")
-    assert (w, h) == (100, 46)
-    assert "crop=100:46:0:0" in captured["cmd"]
+    size, cmd, _dest = _ffmpeg_cmd(monkeypatch, tmp_path, raw_w=3840, crop_rect=Rect(1, 1, 99, 45), wall_w=3840)
+    assert size == (100, 46)
+    assert "crop=100:46:0:0" in cmd
 
 
-def test_normalize_even_crop_floors_origin_and_expands_size():
-    assert dme._normalize_even_crop(1, 1, 99, 45, 3840, 1080) == (0, 0, 100, 46)
-
-
-def test_normalize_even_crop_re_clamps_to_frame():
-    assert dme._normalize_even_crop(3839, 1, 1, 1, 3840, 1080) == (3838, 0, 2, 2)
+@pytest.mark.parametrize(
+    ("crop", "expected"),
+    [((1, 1, 99, 45), (0, 0, 100, 46)), ((3839, 1, 1, 1), (3838, 0, 2, 2))],
+    ids=["floors-origin-and-expands-size", "re-clamps-to-frame"],
+)
+def test_normalize_even_crop(crop, expected):
+    assert dme._normalize_even_crop(*crop, 3840, 1080) == expected
 
 
 def test_normalize_even_crop_degenerate_raises():
@@ -2214,25 +2021,10 @@ def test_clip_result_bare_marks_only_the_upper_clip_of_a_stacked_slide(monkeypat
     assert {r.movie_id: r.bare for r in results} == {("movie", 0): False, ("movie", 1): True}
 
 
-def test_clip_result_bare_is_false_for_a_side_by_side_slide(monkeypatch, tmp_path):
-    """Null control: nothing on an unstacked row is bared, so no clip is ever eligible for
-    a build-in write."""
-    out_dir = tmp_path / "clips"
-    out_dir.mkdir()
-    fw = tmp_path / "Sermon.key"
-    fw.write_bytes(b"source")
-
-    _stub_live(monkeypatch, tmp_path, payload_slides=[_mixed_slide_two_movies()])
-    _patch_build_export_script_capture(monkeypatch)
-
-    results = dme.export_slide_clips(fw, [12], out_dir, per_movie=True, log=lambda *_: None)
-
-    assert [r.bare for r in results] == [False, False]
-
-
 def test_export_slide_clips_per_movie_does_not_bare_a_side_by_side_slide(monkeypatch, tmp_path):
-    """Null control: an ordinary row of movies keeps today's export untouched, so a movie
-    with builds the barer would refuse cannot newly fail the whole export."""
+    """Null control: nothing on an unstacked row is bared, so no clip is ever eligible for a build-in write, and an
+    ordinary row of movies keeps today's export untouched, so a movie with builds the barer would refuse cannot newly
+    fail the whole export."""
     out_dir = tmp_path / "clips"
     out_dir.mkdir()
     fw = tmp_path / "Sermon.key"
@@ -2241,8 +2033,9 @@ def test_export_slide_clips_per_movie_does_not_bare_a_side_by_side_slide(monkeyp
     calls = _stub_live(monkeypatch, tmp_path, payload_slides=[_mixed_slide_two_movies()])
     _patch_build_export_script_capture(monkeypatch)
 
-    dme.export_slide_clips(fw, [12], out_dir, per_movie=True, log=lambda *_: None)
+    results = dme.export_slide_clips(fw, [12], out_dir, per_movie=True, log=lambda *_: None)
 
+    assert [r.bare for r in results] == [False, False]
     assert calls["bared"] == []
 
 
@@ -2686,25 +2479,21 @@ def test_derive_pure_video_delete_ids_orders_fw12_group_last_within_its_class():
 # --------------------------------------------------------------------------
 # movie_order -- visual for side-by-side rows, SOURCE BUILD ORDER when stacked
 # --------------------------------------------------------------------------
-def test_movies_stacked_false_for_side_by_side_panels():
-    # Two centre/right panels that merely abut share an edge but no area: they stay
-    # "unstacked" and keep the plain left-to-right visual order.
-    rects = {("movie", 0): Rect(0, 0, 3840, 1080), ("movie", 1): Rect(3840, 0, 3840, 1080)}
-    assert not dme.movies_stacked(rects)
-    assert dme.movie_order(rects) == [("movie", 0), ("movie", 1)]
-
-
-def test_movies_stacked_false_for_hairline_clip():
-    # A sliver of overlap (1% of the smaller rect's area) is a layout hairline, not a stack.
-    rects = {("movie", 0): Rect(0, 0, 1000, 1000), ("movie", 1): Rect(990, 0, 1000, 1000)}
-    assert not dme.movies_stacked(rects)
-    assert dme.movie_order(rects) == [("movie", 0), ("movie", 1)]
-
-
-def test_movies_stacked_false_for_a_pair_covering_four_fifths_of_the_smaller():
-    # Owner 2026-09-20: the threshold is 0.9, so a heavy clip -- 1600x1080 of the smaller
-    # 2000x1080, i.e. 0.8 -- is still a row, not a layered pair.
-    rects = {("movie", 0): Rect(1920, 0, 2000, 1080), ("movie", 1): Rect(2320, 0, 2000, 1080)}
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (Rect(0, 0, 3840, 1080), Rect(3840, 0, 3840, 1080)),
+        (Rect(0, 0, 1000, 1000), Rect(990, 0, 1000, 1000)),
+        (Rect(1920, 0, 2000, 1080), Rect(2320, 0, 2000, 1080)),
+    ],
+    ids=[
+        "side-by-side-panels-share-only-an-edge",
+        "hairline-clip-of-1pct",
+        "owner-2026-09-20-four-fifths-of-the-smaller-is-below-the-0.9-threshold",
+    ],
+)
+def test_movies_stacked_false_keeps_the_left_to_right_order(first, second):
+    rects = {("movie", 0): first, ("movie", 1): second}
     assert not dme.movies_stacked(rects)
     assert dme.movie_order(rects) == [("movie", 0), ("movie", 1)]
 
@@ -2759,31 +2548,22 @@ def test_movie_order_stacked_movie_without_build_sorts_first_by_z():
     assert order == [("movie", 2), ("movie", 0), ("movie", 1)]
 
 
-def test_movie_order_stacked_refuses_without_build_order():
+@pytest.mark.parametrize(
+    ("build_order", "match"),
+    [
+        (None, "stacked"),
+        ({("movie", 0): 1, ("movie", 1): 1}, "tie at build order"),
+        ({("movie", 0): 0}, "no build and no z-order"),
+    ],
+    ids=["without-build-order", "build-order-tie", "unbuilt-movie-without-z-order"],
+)
+def test_movie_order_stacked_refuses(build_order, match):
     rects = {
         ("movie", 0): Rect(1920, 0, 3840, 1080),
         ("movie", 1): Rect(1920, 0, 3840, 1080),
     }
-    with pytest.raises(ValueError, match="stacked"):
-        dme.movie_order(rects)
-
-
-def test_movie_order_stacked_refuses_on_build_order_tie():
-    rects = {
-        ("movie", 0): Rect(1920, 0, 3840, 1080),
-        ("movie", 1): Rect(1920, 0, 3840, 1080),
-    }
-    with pytest.raises(ValueError, match="tie at build order"):
-        dme.movie_order(rects, {("movie", 0): 1, ("movie", 1): 1})
-
-
-def test_movie_order_stacked_refuses_unbuilt_movie_without_z_order():
-    rects = {
-        ("movie", 0): Rect(1920, 0, 3840, 1080),
-        ("movie", 1): Rect(1920, 0, 3840, 1080),
-    }
-    with pytest.raises(ValueError, match="no build and no z-order"):
-        dme.movie_order(rects, {("movie", 0): 0})
+    with pytest.raises(ValueError, match=match):
+        dme.movie_order(rects, build_order)
 
 
 def test_stack_mode_refuses_a_partial_stack():

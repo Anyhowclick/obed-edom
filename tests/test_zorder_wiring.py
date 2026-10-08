@@ -10,7 +10,20 @@ import pytest
 from obed_edom import remap_keynote as rk
 from obed_edom.keynote import _build_stat_finalize_script
 from obed_edom.map_remap import Plan
-from test_remap_keynote import _payloads, _touch_paths
+
+
+def _touch_paths(tmp_path: Path):
+    source = tmp_path / "wall.key"
+    template = tmp_path / "tpl.key"
+    source.touch()
+    template.touch()
+    return source, template, tmp_path / "out.key"
+
+
+def _payloads():
+    wall_payload = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+    template_payload = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+    return wall_payload, template_payload
 
 
 def _plan(**overrides) -> Plan:
@@ -211,30 +224,22 @@ def test_zorder_eligible_slides_shared_nontwin_sig_now_eligible_via_bijection_ar
     assert counts["zorderUnresolved"] == 0
 
 
-def test_zorder_eligible_slides_unresolved_group_index(zorder_deck):
+@pytest.mark.parametrize(
+    ("group_index", "child_sig", "said_fragment"),
+    [(9, "a", "zorderUnresolved"), (1, "z", "mismatch")],
+    ids=["unresolved-group-index", "childsig-mismatch-is-unresolved"],
+)
+def test_zorder_eligible_slides_unresolved_group_index(zorder_deck, group_index, child_sig, said_fragment):
     from obed_edom import offline_write
 
     said = []
-    stat_jobs = [{"slide": 1, "groupIndex": 9, "childSig": "a"}]
+    stat_jobs = [{"slide": 1, "groupIndex": group_index, "childSig": child_sig}]
     result, counts = offline_write.zorder_eligible_slides(
         zorder_deck, "on", {1}, set(), stat_jobs, [], [], said.append,
     )
     assert result == {}
     assert counts["zorderGui"] == [1]
-    assert any("zorderUnresolved" in s for s in said)
-
-
-def test_zorder_eligible_slides_childsig_mismatch_is_unresolved(zorder_deck):
-    from obed_edom import offline_write
-
-    said = []
-    stat_jobs = [{"slide": 1, "groupIndex": 1, "childSig": "z"}]
-    result, counts = offline_write.zorder_eligible_slides(
-        zorder_deck, "on", {1}, set(), stat_jobs, [], [], said.append,
-    )
-    assert result == {}
-    assert counts["zorderGui"] == [1]
-    assert any("mismatch" in s for s in said)
+    assert any(said_fragment in s for s in said)
 
 
 def test_zorder_eligible_slides_no_targets_skipped(zorder_deck):
@@ -295,37 +300,39 @@ def test_run_offline_zorder_off_mode_is_noop(zorder_deck):
     assert result is None
 
 
-def test_run_offline_zorder_patch_readback_mismatch_reports_failure_without_raising(zorder_deck, monkeypatch):
-    from obed_edom import iwa_zorder, offline_write
+def _bogus_zorders(deck, ns):
+    return {n: (["bogus"], ["bogus"]) for n in ns}
 
-    monkeypatch.setattr(iwa_zorder, "read_deck_zorders", lambda deck, ns: {n: (["bogus"], ["bogus"]) for n in ns})
+
+def _raising_read(deck, ns):
+    raise ValueError("slide index out of range")
+
+
+@pytest.mark.parametrize(
+    ("module", "mode", "read", "reason_fragment"),
+    [
+        ("iwa_zorder", "on", _bogus_zorders, "read-back"),
+        ("iwa_write", "verify", _bogus_zorders, "verify mismatch"),
+        ("iwa_write", "verify", _raising_read, "verify read failed"),
+    ],
+    ids=["patch-readback-mismatch", "verify-mismatch", "verify-read-raises"],
+)
+def test_run_offline_zorder_reports_failure_without_raising(zorder_deck, monkeypatch, module, mode, read, reason_fragment):
+    import importlib
+
+    from obed_edom import offline_write
+
+    monkeypatch.setattr(importlib.import_module(f"obed_edom.{module}"), "read_deck_zorders", read)
     said = []
     targets = {1: {"stat": ["300"], "badge": []}}
-    result = offline_write.run_offline_zorder(zorder_deck, "on", targets, said.append)
+    result = offline_write.run_offline_zorder(zorder_deck, mode, targets, said.append)
     assert result["zorderSlides"] == 0
     assert result["zorderRefused"] == 1
     assert len(result["failures"]) == 1
     n, reason = result["failures"][0]
     assert n == 1
-    assert "read-back" in reason
+    assert reason_fragment in reason
     assert any("zorderRefused(s=1" in s for s in said)
-
-
-def test_run_offline_zorder_verify_mismatch_reports_failure_without_raising(zorder_deck, monkeypatch):
-    from obed_edom import iwa_write, offline_write
-
-    monkeypatch.setattr(iwa_write, "read_deck_zorders", lambda deck, ns: {n: (["bogus"], ["bogus"]) for n in ns})
-    said = []
-    targets = {1: {"stat": ["300"], "badge": []}}
-    result = offline_write.run_offline_zorder(zorder_deck, "verify", targets, said.append)
-    assert result["zorderSlides"] == 0
-    assert result["zorderRefused"] == 1
-    assert len(result["failures"]) == 1
-    n, reason = result["failures"][0]
-    assert n == 1
-    assert "verify mismatch" in reason
-    assert any("zorderRefused(s=1" in s for s in said)
-
 
 
 def test_run_offline_zorder_verify_loads_deck_once_per_read_back(zorder_deck, monkeypatch):
@@ -371,25 +378,6 @@ def test_run_offline_zorder_verify_batch_read_failure_fails_only_the_bad_slide(z
     assert result["failures"] == [(2, "deck already written; zorder verify read failed: slide 2 out of range")]
     assert "zorderRefused(s=2,reason=verify read failed: slide 2 out of range)" in said
     assert not any("zorderRefused(s=1" in s for s in said)
-
-def test_run_offline_zorder_verify_read_raises_reports_failure_without_raising(zorder_deck, monkeypatch):
-    from obed_edom import iwa_write, offline_write
-
-    def raising_read(deck, ns):
-        raise ValueError("slide index out of range")
-
-    monkeypatch.setattr(iwa_write, "read_deck_zorders", raising_read)
-    said = []
-    targets = {1: {"stat": ["300"], "badge": []}}
-    result = offline_write.run_offline_zorder(zorder_deck, "verify", targets, said.append)
-    assert result["zorderSlides"] == 0
-    assert result["zorderRefused"] == 1
-    assert len(result["failures"]) == 1
-    n, reason = result["failures"][0]
-    assert n == 1
-    assert "verify read failed" in reason
-    assert any("zorderRefused(s=1" in s for s in said)
-
 
 def _wire_zorder_remap(
     monkeypatch, rk, *, child_resize, badge_raises, stat_finalize_ok=True, stat_finalize_closed=True,
@@ -475,10 +463,15 @@ def test_orchestration_patched_slide_set(monkeypatch, tmp_path):
     assert stat_finalize_calls[0]["export_dir"] is None
 
 
-def test_orchestration_export_dir_threaded_iff_knob_on(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("knob", "threaded"),
+    [("off", True), ("on", False)],
+    ids=["threaded-when-knob-off", "folded-to-none-when-knob-on"],
+)
+def test_orchestration_export_dir_threaded_iff_knob_off(monkeypatch, tmp_path, knob, threaded):
     import obed_edom.remap_keynote as rk
 
-    monkeypatch.setenv("OBED_ZORDER_WRITE", "off")
+    monkeypatch.setenv("OBED_ZORDER_WRITE", knob)
     child_resize = [{"slide": 1, "groupIndex": 1, "childSig": "a"}]
     stat_finalize_calls = _wire_zorder_remap(monkeypatch, rk, child_resize=child_resize, badge_raises=[])
     source, template, dest = _touch_paths(tmp_path)
@@ -490,25 +483,8 @@ def test_orchestration_export_dir_threaded_iff_knob_on(monkeypatch, tmp_path):
         export_dir=tmp_path / "previews", log=lambda m: None,
     )
 
-    assert stat_finalize_calls[0]["export_dir"] == (tmp_path / "previews").expanduser().resolve()
-
-
-def test_orchestration_export_dir_folded_to_none_when_knob_on(monkeypatch, tmp_path):
-    import obed_edom.remap_keynote as rk
-
-    monkeypatch.setenv("OBED_ZORDER_WRITE", "on")
-    child_resize = [{"slide": 1, "groupIndex": 1, "childSig": "a"}]
-    stat_finalize_calls = _wire_zorder_remap(monkeypatch, rk, child_resize=child_resize, badge_raises=[])
-    source, template, dest = _touch_paths(tmp_path)
-    wall_payload, template_payload = _payloads()
-
-    rk.remap_keynote(
-        source, dest, template=template,
-        wall_payload=wall_payload, template_payload=template_payload,
-        export_dir=tmp_path / "previews", log=lambda m: None,
-    )
-
-    assert stat_finalize_calls[0]["export_dir"] is None
+    expected = (tmp_path / "previews").expanduser().resolve() if threaded else None
+    assert stat_finalize_calls[0]["export_dir"] == expected
 
 
 def test_orchestration_badge_only_skips_pass2_and_patches_via_fallback(monkeypatch, tmp_path):
@@ -695,39 +671,17 @@ def test_orchestration_two_lost_ids_emits_detail_then_raises(monkeypatch, tmp_pa
     assert "zorderLost=2" in detail_lines[0]
 
 
-def test_orchestration_pass2_failure_skips_patch(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "finalize",
+    [{"stat_finalize_ok": False}, {"stat_finalize_ok": True, "stat_finalize_closed": False}],
+    ids=["pass2-failure", "ok-but-not-closed"],
+)
+def test_orchestration_pass2_failure_skips_patch_and_raises(monkeypatch, tmp_path, finalize):
     import obed_edom.remap_keynote as rk
 
     monkeypatch.setenv("OBED_ZORDER_WRITE", "on")
     child_resize = [{"slide": 1, "groupIndex": 1, "childSig": "a"}]
-    _wire_zorder_remap(
-        monkeypatch, rk, child_resize=child_resize, badge_raises=[], stat_finalize_ok=False,
-    )
-    patch_calls = []
-    monkeypatch.setattr(
-        rk.offline_write, "run_offline_zorder",
-        lambda *a, **k: patch_calls.append(a) or None,
-    )
-    source, template, dest = _touch_paths(tmp_path)
-    wall_payload, template_payload = _payloads()
-
-    with pytest.raises(RuntimeError, match="pass 2"):
-        rk.remap_keynote(
-            source, dest, template=template,
-            wall_payload=wall_payload, template_payload=template_payload, log=lambda m: None,
-        )
-    assert patch_calls == []
-
-
-def test_orchestration_ok_but_not_closed_skips_patch_and_raises(monkeypatch, tmp_path):
-    import obed_edom.remap_keynote as rk
-
-    monkeypatch.setenv("OBED_ZORDER_WRITE", "on")
-    child_resize = [{"slide": 1, "groupIndex": 1, "childSig": "a"}]
-    _wire_zorder_remap(
-        monkeypatch, rk, child_resize=child_resize, badge_raises=[],
-        stat_finalize_ok=True, stat_finalize_closed=False,
-    )
+    _wire_zorder_remap(monkeypatch, rk, child_resize=child_resize, badge_raises=[], **finalize)
     patch_calls = []
     monkeypatch.setattr(
         rk.offline_write, "run_offline_zorder",

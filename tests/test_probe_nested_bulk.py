@@ -447,60 +447,25 @@ def test_evaluate_criteria_scalar_primary_value_is_unknown_not_a_crash():
     assert "not nested per slide" in criteria["6"]["detail"]["reason"]
 
 
-def test_recommend_implement_nested_on_whole_event_raise():
+@pytest.mark.parametrize(("core_pass", "fast_pass", "mode", "expected"), [
+    (True, True, "whole_event_raise", "implement nested (whole_event_raise)"),
+    (True, True, "substituted_value", "implement nested (substituted_value)"),
+    (True, True, "silent_partial", "r-bulk-counts-plan"),
+    (True, True, "unknown", "r-bulk-counts-plan"),
+    (False, True, "whole_event_raise", "r-bulk-counts-plan"),
+    (True, False, "whole_event_raise", "r-bulk-counts-plan"),
+    (True, False, "substituted_value", "r-bulk-counts-plan"),
+], ids=[
+    "implement-nested-on-whole-event-raise", "implement-nested-on-substituted-value", "silent-partial-falls-back",
+    "unknown-falls-back", "core-fail-falls-back", "slow-nested-falls-back-even-on-whole-event-raise",
+    "slow-nested-falls-back-even-on-substituted-value",
+])
+def test_recommend(core_pass, fast_pass, mode, expected):
     criteria = {
-        "1": {"pass": True}, "2": {"pass": True}, "3": {"pass": True}, "4": {"pass": True},
-        "5": {"pass": True}, "6": {"mode": "whole_event_raise"},
+        "1": {"pass": core_pass}, "2": {"pass": True}, "3": {"pass": True}, "4": {"pass": True},
+        "5": {"pass": fast_pass}, "6": {"mode": mode},
     }
-    assert recommend(criteria) == "implement nested (whole_event_raise)"
-
-
-def test_recommend_implement_nested_on_substituted_value():
-    criteria = {
-        "1": {"pass": True}, "2": {"pass": True}, "3": {"pass": True}, "4": {"pass": True},
-        "5": {"pass": True}, "6": {"mode": "substituted_value"},
-    }
-    assert recommend(criteria) == "implement nested (substituted_value)"
-
-
-def test_recommend_silent_partial_falls_back():
-    criteria = {
-        "1": {"pass": True}, "2": {"pass": True}, "3": {"pass": True}, "4": {"pass": True},
-        "5": {"pass": True}, "6": {"mode": "silent_partial"},
-    }
-    assert recommend(criteria) == "r-bulk-counts-plan"
-
-
-def test_recommend_unknown_falls_back():
-    criteria = {
-        "1": {"pass": True}, "2": {"pass": True}, "3": {"pass": True}, "4": {"pass": True},
-        "5": {"pass": True}, "6": {"mode": "unknown"},
-    }
-    assert recommend(criteria) == "r-bulk-counts-plan"
-
-
-def test_recommend_core_fail_falls_back():
-    criteria = {
-        "1": {"pass": False}, "2": {"pass": True}, "3": {"pass": True}, "4": {"pass": True},
-        "5": {"pass": True}, "6": {"mode": "whole_event_raise"},
-    }
-    assert recommend(criteria) == "r-bulk-counts-plan"
-
-
-def test_recommend_slow_nested_falls_back_even_on_whole_event_raise():
-    criteria = {
-        "1": {"pass": True}, "2": {"pass": True}, "3": {"pass": True}, "4": {"pass": True},
-        "5": {"pass": False}, "6": {"mode": "whole_event_raise"},
-    }
-    assert recommend(criteria) == "r-bulk-counts-plan"
-
-
-def test_recommend_slow_nested_falls_back_even_on_substituted_value():
-    criteria = {
-        "1": {"pass": True}, "2": {"pass": True}, "3": {"pass": True}, "4": {"pass": True},
-        "5": {"pass": False}, "6": {"mode": "substituted_value"},
-    }
-    assert recommend(criteria) == "r-bulk-counts-plan"
+    assert recommend(criteria) == expected
 
 
 # ==========================================================================
@@ -668,15 +633,10 @@ def test_deck_allowed_for_live_external_refused_unless_override(tmp_path):
 # ==========================================================================
 # main — argparse-level refusal, no Keynote touched
 # ==========================================================================
-def test_main_rejects_empty_text_slide_one(tmp_path, capsys):
+@pytest.mark.parametrize("flag", ["--empty-text-slide", "--lock-text-slide"])
+def test_main_rejects_text_slide_one(tmp_path, capsys, flag):
     with pytest.raises(SystemExit):
-        m.main(["--deck", str(tmp_path / "x.key"), "--empty-text-slide", "1"])
-    assert "must not be 1" in capsys.readouterr().err
-
-
-def test_main_rejects_lock_text_slide_one(tmp_path, capsys):
-    with pytest.raises(SystemExit):
-        m.main(["--deck", str(tmp_path / "x.key"), "--lock-text-slide", "1"])
+        m.main(["--deck", str(tmp_path / "x.key"), flag, "1"])
     assert "must not be 1" in capsys.readouterr().err
 
 

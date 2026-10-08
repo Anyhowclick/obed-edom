@@ -157,60 +157,35 @@ def test_zorder_write_reasons_green_when_sets_match():
     ) == []
 
 
-def test_zorder_write_reasons_red_when_eligible_left_on_gui():
-    # B never patched; suffixes can still match if the GUI raise ran.
-    # expected_gui is empty (both slides are compared/eligible), so the RED is slides.
+_NOT_A_LIST = [("not a slide list", "slides="), ("not a slide list", "zorderGui=")]
+
+
+@pytest.mark.parametrize(
+    ("slides", "gui", "raise_slides", "compared", "needles"),
+    [
+        pytest.param([], [], {40, 55}, [40, 55],
+                     [("slides=[] != eligible raise slides [40, 55]",)],
+                     id="eligible-left-on-gui-by-an-unpatched-b"),
+        pytest.param([40, 55], [], {40, 55, 123}, [40, 55],
+                     [("zorderGui=[] != ineligible raise slides [123]",)],
+                     id="gui-omits-reuse"),
+        pytest.param([], [40, 55], {40, 55}, [40, 55],
+                     [("slides=[] != eligible raise slides [40, 55]",),
+                      ("zorderGui=[40, 55] != ineligible raise slides []",)],
+                     id="eligible-listed-as-gui"),
+        pytest.param(2, 0, {40, 55}, [40, 55], _NOT_A_LIST, id="count-not-list"),
+        pytest.param((40, 55), (), {40, 55}, [40, 55], _NOT_A_LIST, id="tuple"),
+        pytest.param({40, 55}, set(), {40, 55}, [40, 55], _NOT_A_LIST, id="set"),
+        pytest.param(frozenset({40}), frozenset(), {40, 55}, [40, 55], _NOT_A_LIST, id="frozenset"),
+        pytest.param("", "", set(), [], _NOT_A_LIST, id="empty-string"),
+    ],
+)
+def test_zorder_write_reasons_red(slides, gui, raise_slides, compared, needles):
     reasons = zorder_write_reasons(
-        _zorder_write(slides=[], zorderGui=[]),
-        {40, 55},
-        compared_slides=[40, 55],
+        _zorder_write(slides=slides, zorderGui=gui), raise_slides, compared_slides=compared,
     )
-    assert any("slides=[] != eligible raise slides [40, 55]" in r for r in reasons)
-
-
-def test_zorder_write_reasons_red_when_gui_omits_reuse():
-    reasons = zorder_write_reasons(
-        _zorder_write(slides=[40, 55], zorderGui=[]),
-        {40, 55, 123},
-        compared_slides=[40, 55],
-    )
-    assert any("zorderGui=[] != ineligible raise slides [123]" in r for r in reasons)
-
-
-def test_zorder_write_reasons_red_when_eligible_listed_as_gui():
-    reasons = zorder_write_reasons(
-        _zorder_write(slides=[], zorderGui=[40, 55]),
-        {40, 55},
-        compared_slides=[40, 55],
-    )
-    assert any("slides=[] != eligible raise slides [40, 55]" in r for r in reasons)
-    assert any("zorderGui=[40, 55] != ineligible raise slides []" in r for r in reasons)
-
-
-def test_zorder_write_reasons_red_on_count_not_list():
-    reasons = zorder_write_reasons(
-        _zorder_write(slides=2, zorderGui=0),
-        {40, 55},
-        compared_slides=[40, 55],
-    )
-    assert any("not a slide list" in r and "slides=" in r for r in reasons)
-    assert any("not a slide list" in r and "zorderGui=" in r for r in reasons)
-
-
-def test_zorder_write_reasons_red_on_tuple_set_or_empty_string():
-    for slides, gui in (
-        ((40, 55), ()),
-        ({40, 55}, set()),
-        (frozenset({40}), frozenset()),
-        ("", ""),
-    ):
-        reasons = zorder_write_reasons(
-            _zorder_write(slides=slides, zorderGui=gui),
-            {40, 55} if slides != "" else set(),
-            compared_slides=[40, 55] if slides != "" else [],
-        )
-        assert any("not a slide list" in r and "slides=" in r for r in reasons)
-        assert any("not a slide list" in r and "zorderGui=" in r for r in reasons)
+    for parts in needles:
+        assert any(all(part in r for part in parts) for r in reasons), parts
 
 
 def test_claimed_patched_slides_count_is_empty_not_crash():

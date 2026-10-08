@@ -54,9 +54,7 @@ from obed_edom.iwa_write import (  # noqa: E402
     _is_axis_aligned_crop,
     _is_identity_mask,
     _masked_media_fields,
-    _natural_unwritable,
     _natural_writable,
-    _patch_member,
     _rewrite_members,
     _shape_fields,
     _slide_edits,
@@ -1722,26 +1720,14 @@ def test_line_no_pathsource_hard_misses(monkeypatch):
     assert edits == {}
 
 
-def test_text_editable_bezier_autosize_width_only_hard_misses():
+@pytest.mark.parametrize(("stored_h", "nw", "spec"), [
+    (0, 165.52277, {"w": 113.0}),
+    (23.0, 0.0, {"h": 40.0}),
+], ids=["autosize-width-only", "fixed-height-only"])
+def test_text_editable_bezier_one_axis_hard_misses(stored_h, nw, spec):
     # An editableBezier text box's naturalSize can only be rescaled with BOTH axes (the
     # nodes need both ratios): a width-only autosize write (stored h == 0.0 sentinel, so
     # `wants_h` is False) is unwritable even with a well-formed naturalSize.
-    objects = {
-        "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
-        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
-              "super": _shape_super(700, 374, 0, 0, nw=165.52277, nh=23.0, kind="editable")},
-    }
-    order = [("100", False)]
-    id_to_file = {"1": "M"}
-    specs = [{"kind": "text", "kindIndex": 0, "w": 113.0, "role": "other"}]
-    _target_member, edits, _soft, missed_specs, _miss_reasons, refuse_reason = _slide_edits(
-        1, specs, objects, id_to_file, order)
-    assert refuse_reason is None
-    assert missed_specs == specs
-    assert edits == {}
-
-
-def test_text_editable_bezier_fixed_height_only_hard_misses():
     # h-only spec on a FIXED-height (stored h != 0, not the autosize sentinel) editableBezier
     # text box: the old guard only keyed on spec["w"], so this slipped through and would have
     # written size_h with naturalSize left stale (`_write_natural_size` bails when natural_w
@@ -1750,11 +1736,11 @@ def test_text_editable_bezier_fixed_height_only_hard_misses():
     objects = {
         "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
         "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
-              "super": _shape_super(700, 374, 0, 23.0, nw=0.0, nh=23.0, kind="editable")},
+              "super": _shape_super(700, 374, 0, stored_h, nw=nw, nh=23.0, kind="editable")},
     }
     order = [("100", False)]
     id_to_file = {"1": "M"}
-    specs = [{"kind": "text", "kindIndex": 0, "h": 40.0, "role": "other"}]
+    specs = [{"kind": "text", "kindIndex": 0, **spec, "role": "other"}]
     _target_member, edits, _soft, missed_specs, _miss_reasons, refuse_reason = _slide_edits(
         1, specs, objects, id_to_file, order)
     assert refuse_reason is None
@@ -1762,18 +1748,25 @@ def test_text_editable_bezier_fixed_height_only_hard_misses():
     assert edits == {}
 
 
-def test_autosize_height_text_hard_misses_to_the_fallback():
+@pytest.mark.parametrize(("stored_h", "nh", "spec"), [
+    (0.0, 83.0, {"w": 113.4, "x": 107.15}),
+    (34.0, 34.0, {"h": 34.0, "y": 391.0}),
+], ids=["autosize-height", "autosize-width"])
+def test_autosize_text_hard_misses_to_the_fallback(stored_h, nh, spec):
     # Stored height == 0.0 (the autosize sentinel): naturalSize.height is Keynote's
     # render cache and only a live write refreshes it, so this is a hard miss
     # regardless of what the spec asks for (here: x + w only, no h at all).
+    # Symmetric with the height sentinel: stored width == 0.0 is Keynote's own render
+    # cache too (naturalSize.width), and only a live write refreshes it -- a real stored
+    # height alongside it must not let this slip through as a silent partial write.
     objects = {
         "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
         "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
-              "super": _shape_super(700, 374, 0.0, 0.0, nw=300.3, nh=83.0)},
+              "super": _shape_super(700, 374, 0.0, stored_h, nw=300.3, nh=nh)},
     }
     order = [("100", False)]
     id_to_file = {"1": "M"}
-    specs = [{"kind": "text", "kindIndex": 0, "w": 113.4, "x": 107.15, "role": "other"}]
+    specs = [{"kind": "text", "kindIndex": 0, **spec, "role": "other"}]
     _target_member, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
         1, specs, objects, id_to_file, order)
     assert refuse_reason is None
@@ -1861,12 +1854,15 @@ def test_autosize_text_reposition_centre_anchored_x_is_a_delta():
     assert edits == {"1": {"pos_x": pytest.approx(700.0 + (107.15 - 850.15))}}
 
 
-def test_autosize_text_reposition_unlaidout_now_repositions():
+@pytest.mark.parametrize(("valign", "nw"), [(1, 0.0), (0, 174.0)], ids=["unlaidout", "zero-natural-height"])
+def test_autosize_text_reposition_unlaidout_now_repositions(valign, nw):
     # Un-laid-out box (naturalSize 0 on both axes): pass 1 zeroes naturalSize on EVERY autosize
     # box, so there is no laid-out gate -- with a good live seed the box repositions off the
     # seed (live-validated 2026-09-18: 136/136 un-laid-out converted at ≤0.98px). pos_x delta =
     # 700 + (107.15 - 700) = 107.15; pos_y = 374 + (404 - 344) = 434.
-    objects = _autosize_text_objects(valign=1, nw=0.0, nh=0.0)  # middle, un-laid-out
+    # naturalSize (width>0, height==0) is the same benign post-pass-1 state; no laid-out gate,
+    # so it repositions too (with a good seed).
+    objects = _autosize_text_objects(valign=valign, nw=nw, nh=0.0)
     specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}]
     reported = {("text", 0): [700.0, 344.0, 174.0, 77.0]}  # live read HAS a frame
     _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
@@ -1941,18 +1937,6 @@ def test_grow_both_text_ignores_spec_width():
     _tm, edits, _soft, missed_specs, miss_reasons, _rr = _slide_edits(
         1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
     assert not missed_specs and miss_reasons == [] and "1" in edits
-
-
-def test_autosize_text_reposition_zero_natural_height_now_repositions():
-    # naturalSize (width>0, height==0) is the same benign post-pass-1 state; no laid-out gate,
-    # so it repositions too (with a good seed).
-    objects = _autosize_text_objects(valign=0, nw=174.0, nh=0.0)
-    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}]
-    reported = {("text", 0): [700.0, 344.0, 174.0, 77.0]}
-    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
-        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
-    assert refuse_reason is None and not missed_specs and miss_reasons == []
-    assert edits == {"1": {"pos_x": pytest.approx(107.15), "pos_y": pytest.approx(434.0)}}
 
 
 def test_autosize_text_reposition_on_missing_seed_hard_misses():
@@ -2062,26 +2046,6 @@ def test_unrotated_fixed_frame_text_still_writes_offline():
         1, specs, _fixed_text_objects(0.0), {"1": "M"}, [("100", False)], reported=reported)
     assert refuse_reason is None and not missed_specs
     assert edits["1"]["pos_x"] == pytest.approx(1990.0)
-
-
-def test_autosize_width_text_hard_misses_to_the_fallback():
-    # Symmetric with the height sentinel: stored width == 0.0 is Keynote's own render
-    # cache too (naturalSize.width), and only a live write refreshes it -- a real stored
-    # height alongside it must not let this slip through as a silent partial write.
-    objects = {
-        "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
-        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
-              "super": _shape_super(700, 374, 0.0, 34.0, nw=300.3, nh=34.0)},
-    }
-    order = [("100", False)]
-    id_to_file = {"1": "M"}
-    specs = [{"kind": "text", "kindIndex": 0, "h": 34.0, "y": 391.0, "role": "other"}]
-    _target_member, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
-        1, specs, objects, id_to_file, order)
-    assert refuse_reason is None
-    assert missed_specs == specs
-    assert miss_reasons == ["text-autosize"]
-    assert edits == {}
 
 
 def test_fixed_height_text_is_still_patched_offline():
@@ -2329,7 +2293,6 @@ def test_rewrite_preserves_nbsp_member_names_on_real_deck(tmp_path):
     # Sanity run on the real banked deck (4 known NBSP Data/* members): patch slide 9
     # like the write-gate smoke does, then confirm those 4 members' raw CD bytes
     # (name + flag bit 11) are untouched by the rewrite of an unrelated Slide-*.iwa member.
-    import json
     import subprocess
 
     from scripts.write_gate_ab import load_specs_sidecar
@@ -2443,28 +2406,17 @@ def test_patch_slide_builds_refuses_an_unknown_build_id(tmp_path):
     assert deck.read_bytes() == before
 
 
-def test_patch_slide_builds_refuses_a_build_id_of_the_wrong_type(tmp_path):
-    deck = _build_builds_deck(tmp_path / "builds.key")
-    before = deck.read_bytes()
+@pytest.mark.parametrize(("builds", "chunks"), [
+    (["220"], ["911"]),
+    (["903"], ["911"]),
+    (["901"], ["230"]),
+], ids=["build-id-wrong-type", "build-id-from-another-member", "buildchunk-id-wrong-type"])
+def test_patch_slide_builds_refuses_a_misplaced_id(tmp_path, builds, chunks):
     # "220" is a real object in the SAME member, but a TSWP.ShapeInfoArchive, not a build.
-    result = patch_slide_builds(deck, {"100": {"builds": ["220"], "buildChunks": ["911"], "transition": None}})
-    assert result["refused"]
-    assert deck.read_bytes() == before
-
-
-def test_patch_slide_builds_refuses_a_build_id_from_another_member(tmp_path):
-    deck = _build_builds_deck(tmp_path / "builds.key")
-    before = deck.read_bytes()
     # "903" is a real KN.BuildArchive, but lives in slide 101's member, not 100's.
-    result = patch_slide_builds(deck, {"100": {"builds": ["903"], "buildChunks": ["911"], "transition": None}})
-    assert result["refused"]
-    assert deck.read_bytes() == before
-
-
-def test_patch_slide_builds_refuses_a_buildchunk_id_of_the_wrong_type(tmp_path):
     deck = _build_builds_deck(tmp_path / "builds.key")
     before = deck.read_bytes()
-    result = patch_slide_builds(deck, {"100": {"builds": ["901"], "buildChunks": ["230"], "transition": None}})
+    result = patch_slide_builds(deck, {"100": {"builds": builds, "buildChunks": chunks, "transition": None}})
     assert result["refused"]
     assert deck.read_bytes() == before
 
@@ -3036,19 +2988,11 @@ def test_reorder_drawables_mirrors_permutation_into_owned_drawables_when_same_id
     assert [ref["identifier"] for ref in objects["100"]["ownedDrawables"]] == ["250", "220", "230"]
 
 
-def test_reorder_drawables_refuses_when_owned_drawables_id_set_differs(tmp_path):
-    deck = _build_owned_drawables_deck(tmp_path / "owned.key", owned_ids=[220, 230, 999])
-    before = deck.read_bytes()
-    result = reorder_drawables(deck, "100", {"250": 0})
-    assert result["refused"]
-    assert "ownedDrawables" in result["reason"]
-    assert deck.read_bytes() == before
-
-
-def test_reorder_drawables_refuses_when_owned_drawables_has_a_duplicate_id(tmp_path):
+@pytest.mark.parametrize("owned_ids", [[220, 230, 999], [220, 230, 230]], ids=["id-set-differs", "duplicate-id"])
+def test_reorder_drawables_refuses_when_owned_drawables_differs(tmp_path, owned_ids):
     """``owned_ids = [220, 230, 230]`` is the same *set* as ``order`` but a different
     length -- the set comparison alone would wrongly pass this."""
-    deck = _build_owned_drawables_deck(tmp_path / "owned.key", owned_ids=[220, 230, 230])
+    deck = _build_owned_drawables_deck(tmp_path / "owned.key", owned_ids=owned_ids)
     before = deck.read_bytes()
     result = reorder_drawables(deck, "100", {"250": 0})
     assert result["refused"]
@@ -3056,73 +3000,39 @@ def test_reorder_drawables_refuses_when_owned_drawables_has_a_duplicate_id(tmp_p
     assert deck.read_bytes() == before
 
 
-def test_reorder_drawables_refuses_when_owned_drawables_has_an_identifierless_ref(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("field", "extra"), [
+    ("ownedDrawables", {}),
+    ("drawablesZOrder", {}),
+    ("drawablesZOrder", {"identifier": 220}),
+], ids=["owned-identifierless-ref", "zorder-identifierless-ref-round2-finding6", "zorder-duplicate-id"])
+def test_reorder_drawables_refuses_a_malformed_ref_list(tmp_path, monkeypatch, field, extra):
     """A ref with no ``identifier`` is skipped when building ``owned_ids``, so the id
-    *set* still matches ``order`` -- the raw list length must be checked too."""
+    *set* still matches ``order`` -- the raw list length must be checked too. A ref with
+    no ``identifier`` in ``drawablesZOrder`` itself must refuse, not just silently filter
+    it out of ``order`` (round-2 finding 6). A duplicate id in ``drawablesZOrder`` makes
+    ``order.remove()`` ambiguous during a move -- must refuse instead of silently moving
+    the wrong occurrence."""
     deck = _build_owned_drawables_deck(tmp_path / "owned.key", owned_ids=[220, 230, 250])
     objects, id_to_file, file_ids = _load_deck(deck)
-    objects["100"]["ownedDrawables"].append({})
+    objects["100"][field].append(extra)
     monkeypatch.setattr(
         "obed_edom.iwa_write._load_deck", lambda _deck: (objects, id_to_file, file_ids)
     )
     before = deck.read_bytes()
     result = reorder_drawables(deck, "100", {"250": 0})
     assert result["refused"]
-    assert "ownedDrawables" in result["reason"]
+    assert field in result["reason"]
     assert deck.read_bytes() == before
 
 
-def test_reorder_drawables_refuses_when_zorder_has_an_identifierless_ref(tmp_path, monkeypatch):
-    """A ref with no ``identifier`` in ``drawablesZOrder`` itself must refuse, not just
-    silently filter it out of ``order`` (round-2 finding 6)."""
-    deck = _build_owned_drawables_deck(tmp_path / "owned.key", owned_ids=[220, 230, 250])
-    objects, id_to_file, file_ids = _load_deck(deck)
-    objects["100"]["drawablesZOrder"].append({})
-    monkeypatch.setattr(
-        "obed_edom.iwa_write._load_deck", lambda _deck: (objects, id_to_file, file_ids)
-    )
-    before = deck.read_bytes()
-    result = reorder_drawables(deck, "100", {"250": 0})
-    assert result["refused"]
-    assert "drawablesZOrder" in result["reason"]
-    assert deck.read_bytes() == before
-
-
-def test_reorder_drawables_refuses_when_zorder_has_a_duplicate_id(tmp_path, monkeypatch):
-    """A duplicate id in ``drawablesZOrder`` makes ``order.remove()`` ambiguous during a
-    move -- must refuse instead of silently moving the wrong occurrence."""
-    deck = _build_owned_drawables_deck(tmp_path / "owned.key", owned_ids=[220, 230, 250])
-    objects, id_to_file, file_ids = _load_deck(deck)
-    objects["100"]["drawablesZOrder"].append({"identifier": 220})
-    monkeypatch.setattr(
-        "obed_edom.iwa_write._load_deck", lambda _deck: (objects, id_to_file, file_ids)
-    )
-    before = deck.read_bytes()
-    result = reorder_drawables(deck, "100", {"250": 0})
-    assert result["refused"]
-    assert "drawablesZOrder" in result["reason"]
-    assert deck.read_bytes() == before
-
-
-def test_reorder_drawables_refuses_an_id_not_in_zorder(tmp_path):
+@pytest.mark.parametrize(("slide_id", "moves"), [
+    ("100", {"999": 0}),
+    ("100", {"230": 5}),
+    ("230", {"230": 0}),
+], ids=["id-not-in-zorder", "out-of-range-index", "non-slide-archive"])
+def test_reorder_drawables_refuses_a_bad_request(tmp_path, slide_id, moves):
     deck = _build_builds_deck(tmp_path / "builds.key")
     before = deck.read_bytes()
-    result = reorder_drawables(deck, "100", {"999": 0})
-    assert result["refused"]
-    assert deck.read_bytes() == before
-
-
-def test_reorder_drawables_refuses_an_out_of_range_index(tmp_path):
-    deck = _build_builds_deck(tmp_path / "builds.key")
-    before = deck.read_bytes()
-    result = reorder_drawables(deck, "100", {"230": 5})
-    assert result["refused"]
-    assert deck.read_bytes() == before
-
-
-def test_reorder_drawables_refuses_a_non_slide_archive(tmp_path):
-    deck = _build_builds_deck(tmp_path / "builds.key")
-    before = deck.read_bytes()
-    result = reorder_drawables(deck, "230", {"230": 0})
+    result = reorder_drawables(deck, slide_id, moves)
     assert result["refused"]
     assert deck.read_bytes() == before

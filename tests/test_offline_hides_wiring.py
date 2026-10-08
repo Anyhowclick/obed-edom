@@ -16,10 +16,17 @@ import pytest
 from obed_edom import offline_write
 from obed_edom import remap_keynote as rk
 from obed_edom.map_remap import ItemTransform, Plan
-from test_remap_keynote import _touch_paths
 
 
 # --- helpers ------------------------------------------------------------------------
+
+
+def _touch_paths(tmp_path: Path):
+    source = tmp_path / "wall.key"
+    template = tmp_path / "tpl.key"
+    source.touch()
+    template.touch()
+    return source, template, tmp_path / "out.key"
 
 
 class _SlideHides:
@@ -747,14 +754,6 @@ def _run(tmp_path, said=None, **kw):
 JXA_OK = {"applied": 1, "missed": 0, "saved": True, "closed": True}
 
 
-def test_unset_env_defaults_to_on_through_remap(monkeypatch, tmp_path):
-    plan, hides_calls = _wire(monkeypatch, hides_env=None, jxa={**JXA_OK, "hidesDeferred": 2},
-                              hides_info={"deleted": 2})
-    _run(tmp_path)
-    assert plan["offlineHideSlides"] == [1]
-    assert hides_calls == [{"mode": "on", "slides": {1}}]
-
-
 def test_plan_field_absent_when_off(monkeypatch, tmp_path):
     plan, hides_calls = _wire(monkeypatch, hides_env="off", jxa=JXA_OK)
     _run(tmp_path)
@@ -762,8 +761,9 @@ def test_plan_field_absent_when_off(monkeypatch, tmp_path):
     assert hides_calls == [{"mode": "off", "slides": set()}]
 
 
-def test_plan_field_present_when_on(monkeypatch, tmp_path):
-    plan, hides_calls = _wire(monkeypatch, hides_env="on", jxa={**JXA_OK, "hidesDeferred": 2},
+@pytest.mark.parametrize("hides_env", [pytest.param(None, id="unset-defaults-to-on"), "on"])
+def test_plan_field_present_when_on(monkeypatch, tmp_path, hides_env):
+    plan, hides_calls = _wire(monkeypatch, hides_env=hides_env, jxa={**JXA_OK, "hidesDeferred": 2},
                               hides_info={"deleted": 2})
     _run(tmp_path)
     assert plan["offlineHideSlides"] == [1]

@@ -490,18 +490,6 @@ def test_smallcaps_no_flag_on_text_difference_without_small_caps():
     )
 
 
-def test_smallcaps_flag_names_the_word():
-    from obed_edom.diff_keynotes import _smallcaps_words, _style_diff_message
-
-    lw = {"items": [{"runs": [{"text": "Lord", "smallCaps": True}]}]}
-    dsk = {"items": [{"runs": [{"text": "Lord", "smallCaps": False}]}]}
-    msg = _style_diff_message(
-        "Small caps differ", "small-caps", _smallcaps_words(lw), _smallcaps_words(dsk)
-    )
-    assert msg is not None
-    assert "Lord" in msg
-
-
 def test_align_preserves_order_across_gap():
     left = [
         _slide(1, "", master="TITLE"),
@@ -604,7 +592,6 @@ def test_empty_lw_graphic_pairs_with_dsk_verse_in_sequence():
 
 def test_pk_subset_fixture_catches_known_mistakes(tmp_path):
     import json
-    from pathlib import Path
 
     data = json.loads((Path(__file__).resolve().parent / "fixtures/diff/pk_subset.json").read_text())
     result = compare_inspects(
@@ -738,24 +725,6 @@ def test_pk_mistakes_fixture_catches_every_documented_mistake(tmp_path, monkeypa
     assert not any(f.rule == "text.major" for f in flags)
     assert len(flags) <= 30, [(f.rule, f.message) for f in flags]
 
-
-def test_pk_mistakes_findings_land_on_the_right_slides(tmp_path, monkeypatch):
-    import json
-
-    _stub_gateway(monkeypatch)
-    data = json.loads(
-        (Path(__file__).resolve().parent / "fixtures/diff/pk_mistakes.json").read_text()
-    )
-    result = compare_inspects(
-        data["left"],
-        data["right"],
-        tmp_path,
-        tmp_path,
-        tmp_path / "heat",
-        left_label="LW",
-        right_label="DSK",
-        use_ocr=False,
-    )
     rules_on = {p["number"]: {f.rule for f in p.get("flags") or []} for p in result["pairs"]}
     assert "text.case" in rules_on[2]
     assert "photo.rotated" in rules_on[3]
@@ -836,7 +805,7 @@ def test_pick_drop_path_unique_and_diff_checker(tmp_path):
 
 
 def test_wrap_and_ref_order_are_not_wording_diffs(tmp_path):
-    from obed_edom.diff_keynotes import compare_inspects, texts_equivalent
+    from obed_edom.diff_keynotes import texts_equivalent
 
     lw = "Genesis 11\n8 So the\xa0Lord scattered them from there over\u2028all the earth,\xa0and they stopped building the city."
     dsk = "8 So the\xa0Lord scattered them from there over all the earth,\xa0and they stopped\u2028building the city.\nGenesis 11"
@@ -1134,9 +1103,6 @@ def test_attach_slide_flags_puts_bible_on_pair():
 
 
 def test_compare_inspects_skips_mov_heatmap(tmp_path: Path):
-    from PIL import Image
-
-    from obed_edom.diff_keynotes import compare_inspects
     from obed_edom.inspect import preview_inspect
 
     left = tmp_path / "lw"

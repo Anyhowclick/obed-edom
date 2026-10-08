@@ -101,32 +101,23 @@ def test_mask_law_rejects_a_displaced_mask() -> None:
 
 
 @needs_gold
-def test_refuses_width_at_or_below_zero(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "ordinal,spec,match",
+    [
+        (3, P.PillSpec(0.0, "standard"), "width"),
+        (3, P.PillSpec(P._MAX_WIDTH + 0.01, "standard"), "width"),
+        (1, P.PillSpec(300.0, "standard"), "no Media slot"),
+        (3, P.PillSpec(300.0, "one_line"), "frame y"),
+    ],
+    ids=[
+        "width_at_or_below_zero", "width_above_layout_default", "layout_has_no_media_slot",
+        "declared_layout_does_not_match_the_resolved_one",
+    ],
+)
+def test_refuses_a_bad_spec(tmp_path: Path, ordinal: int, spec: P.PillSpec, match: str) -> None:
     deck = _copy_deck(GOLD, tmp_path, "gold.key")
-    with pytest.raises(P.OfflineWriteRefused, match="width"):
-        P.write_pills(deck, slides={3: P.PillSpec(0.0, "standard")}, out_path=tmp_path / "out.key")
-
-
-@needs_gold
-def test_refuses_width_above_layout_default(tmp_path: Path) -> None:
-    deck = _copy_deck(GOLD, tmp_path, "gold.key")
-    with pytest.raises(P.OfflineWriteRefused, match="width"):
-        P.write_pills(deck, slides={3: P.PillSpec(P._MAX_WIDTH + 0.01, "standard")},
-                     out_path=tmp_path / "out.key")
-
-
-@needs_gold
-def test_refuses_a_slide_whose_layout_has_no_media_slot(tmp_path: Path) -> None:
-    deck = _copy_deck(GOLD, tmp_path, "gold.key")
-    with pytest.raises(P.OfflineWriteRefused, match="no Media slot"):
-        P.write_pills(deck, slides={1: P.PillSpec(300.0, "standard")}, out_path=tmp_path / "out.key")
-
-
-@needs_gold
-def test_refuses_a_declared_layout_that_does_not_match_the_resolved_one(tmp_path: Path) -> None:
-    deck = _copy_deck(GOLD, tmp_path, "gold.key")
-    with pytest.raises(P.OfflineWriteRefused, match="frame y"):
-        P.write_pills(deck, slides={3: P.PillSpec(300.0, "one_line")}, out_path=tmp_path / "out.key")
+    with pytest.raises(P.OfflineWriteRefused, match=match):
+        P.write_pills(deck, slides={ordinal: spec}, out_path=tmp_path / "out.key")
 
 
 def test_refuses_empty_slides(tmp_path: Path) -> None:
@@ -313,31 +304,25 @@ def test_reuse_accepts_a_tagged_candidate_only_when_its_data_id_matches(tmp_path
     assert result.reused == 0
 
 
+def _drop_mask_scalar(mask_obj: dict) -> None:
+    mask_obj["pathsource"]["scalarPathSource"]["scalar"] = 1.0
+
+
+def _drop_mask_angle(mask_obj: dict) -> None:
+    mask_obj["super"]["geometry"]["angle"] = 0.0
+
+
 @needs_gold
-def test_verify_catches_a_dropped_mask_scalar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("corrupt", [_drop_mask_scalar, _drop_mask_angle], ids=["scalar", "angle"])
+def test_verify_catches_a_dropped_mask_field(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, corrupt) -> None:
     """`_verify` re-reads and validates the FULL mask law, not just position/size: a
-    corrupted `_apply_mask_fields` that stops writing the rounded-rect `scalar` is caught
-    (not just the composed geometry, which is unaffected by a dropped scalar)."""
+    corrupted `_apply_mask_fields` that drops the rounded-rect `scalar` (15.0) or the
+    180 deg angle after the real write is caught (the composed geometry is unaffected)."""
     real_apply = P._apply_mask_fields
 
     def broken_apply(mask_obj: dict, width: float) -> None:
         real_apply(mask_obj, width)
-        mask_obj["pathsource"]["scalarPathSource"]["scalar"] = 1.0  # drop the 15.0 law
-
-    monkeypatch.setattr(P, "_apply_mask_fields", broken_apply)
-    deck = _copy_deck(GOLD, tmp_path, "gold.key")
-    with pytest.raises(P.OfflineWriteRefused, match="mask"):
-        P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")
-
-
-@needs_gold
-def test_verify_catches_a_dropped_mask_angle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Same as above for the mask's 180 deg angle, dropped after the real write."""
-    real_apply = P._apply_mask_fields
-
-    def broken_apply(mask_obj: dict, width: float) -> None:
-        real_apply(mask_obj, width)
-        mask_obj["super"]["geometry"]["angle"] = 0.0
+        corrupt(mask_obj)
 
     monkeypatch.setattr(P, "_apply_mask_fields", broken_apply)
     deck = _copy_deck(GOLD, tmp_path, "gold.key")

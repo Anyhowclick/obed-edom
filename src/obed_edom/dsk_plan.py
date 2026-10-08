@@ -12,6 +12,7 @@ import tempfile
 import zipfile
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -1026,16 +1027,45 @@ def _wrap_lines(text: str, font: Any, max_width: float) -> list[str]:
     return lines
 
 
-def line_count(text: str, font_name: str, size: float, width: float) -> int | None:
-    """Wrapped line count of ``text`` at ``size`` wrapped to ``width`` (F9), same wrap
-    pass as ``wrapped_height``. ``None`` when the font cannot be resolved."""
+@lru_cache(maxsize=128)
+def _font_at(font_path: str, file_id: tuple[int, ...], px: int) -> Any:
+    from PIL import ImageFont  # noqa: PLC0415
+
+    return ImageFont.truetype(font_path, px)
+
+
+@lru_cache(maxsize=4096)
+def _wrapped_lines(text: str, font_path: str, file_id: tuple[int, ...], px: int, max_width: float) -> tuple[str, ...]:
+    return tuple(_wrap_lines(text, _font_at(font_path, file_id, px), max_width))
+
+
+def _wrap_single(text: str, font_name: str, size: float, width: float) -> tuple[tuple[str, ...], Any] | None:
+    """Memoised ``_wrap_lines`` pass shared by the single-font measures, keyed on the font file's
+    stat (device, inode, size, mtime, ctime) so a replaced file is re-read. ``None`` when the
+    font cannot be resolved or ``size`` is not positive."""
     path = resolve_font_path(font_name)
     if path is None or size <= 0:
         return None
-    from PIL import ImageFont  # noqa: PLC0415
+    px = int(round(size * _WRAP_OVERSAMPLE))
+    max_width = width * (1.0 - _WRAP_MARGIN) * _WRAP_OVERSAMPLE
+    try:
+        st = path.stat()
+    except OSError:
+        from PIL import ImageFont  # noqa: PLC0415
 
-    font = ImageFont.truetype(str(path), int(round(size * _WRAP_OVERSAMPLE)))
-    lines = _wrap_lines(text, font, width * (1.0 - _WRAP_MARGIN) * _WRAP_OVERSAMPLE)
+        font = ImageFont.truetype(str(path), px)
+        return tuple(_wrap_lines(text, font, max_width)), font
+    font_key = (str(path), (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns), px)
+    return _wrapped_lines(text, *font_key, max_width), _font_at(*font_key)
+
+
+def line_count(text: str, font_name: str, size: float, width: float) -> int | None:
+    """Wrapped line count of ``text`` at ``size`` wrapped to ``width`` (F9), same wrap
+    pass as ``wrapped_height``. ``None`` when the font cannot be resolved."""
+    wrapped = _wrap_single(text, font_name, size, width)
+    if wrapped is None:
+        return None
+    lines, _ = wrapped
     return len(lines)
 
 
@@ -1045,13 +1075,10 @@ def wrap_line_spans(text: str, font_name: str, size: float, width: float) -> lis
     span excludes the wrap-point separator trailing its line, so a caller splitting
     ``text`` at line boundaries can join consecutive spans back into one contiguous
     slice. ``None`` when the font cannot be resolved."""
-    path = resolve_font_path(font_name)
-    if path is None or size <= 0:
+    wrapped = _wrap_single(text, font_name, size, width)
+    if wrapped is None:
         return None
-    from PIL import ImageFont  # noqa: PLC0415
-
-    font = ImageFont.truetype(str(path), int(round(size * _WRAP_OVERSAMPLE)))
-    lines = _wrap_lines(text, font, width * (1.0 - _WRAP_MARGIN) * _WRAP_OVERSAMPLE)
+    lines, _ = wrapped
     spans: list[tuple[int, int]] = []
     cursor = 0
     for line in lines:
@@ -1067,26 +1094,20 @@ def wrap_line_spans(text: str, font_name: str, size: float, width: float) -> lis
 def wrapped_height(text: str, font_name: str, size: float, width: float) -> float | None:
     """Estimated laid-out height (pt) of ``text`` at ``size`` wrapped to ``width`` (F9).
     ``None`` when the font cannot be resolved -- callers must warn and fall back."""
-    path = resolve_font_path(font_name)
-    if path is None or size <= 0:
+    wrapped = _wrap_single(text, font_name, size, width)
+    if wrapped is None:
         return None
-    from PIL import ImageFont  # noqa: PLC0415
-
-    font = ImageFont.truetype(str(path), int(round(size * _WRAP_OVERSAMPLE)))
-    lines = _wrap_lines(text, font, width * (1.0 - _WRAP_MARGIN) * _WRAP_OVERSAMPLE)
+    lines, _ = wrapped
     return len(lines) * _LINE_HEIGHT_FACTOR * size + _BOX_PADDING_PT
 
 
 def longest_line_width(text: str, font_name: str, size: float, width: float) -> float | None:
     """Rendered width (pt) of the longest line of ``text`` at ``size`` after wrapping to ``width``
     (F9), mirroring ``wrapped_height``'s wrap pass. ``None`` when the font cannot be resolved."""
-    path = resolve_font_path(font_name)
-    if path is None or size <= 0:
+    wrapped = _wrap_single(text, font_name, size, width)
+    if wrapped is None:
         return None
-    from PIL import ImageFont  # noqa: PLC0415
-
-    font = ImageFont.truetype(str(path), int(round(size * _WRAP_OVERSAMPLE)))
-    lines = _wrap_lines(text, font, width * (1.0 - _WRAP_MARGIN) * _WRAP_OVERSAMPLE)
+    lines, font = wrapped
     if not lines:
         return 0.0
     return max(font.getlength(line) for line in lines) / _WRAP_OVERSAMPLE

@@ -2003,7 +2003,7 @@ def test_dsk_export_requires_slides_selected(tmp_path, monkeypatch):
         f"/api/dsk/export/{job_id}/decisions",
         json={"decisions": [{"slide": 1, "include": False}]},
     )
-    applied = client.post(f"/api/dsk/export/{job_id}/apply")
+    client.post(f"/api/dsk/export/{job_id}/apply")
     job = _wait(client, job_id)
     assert job["status"] == "error"
     assert "no slides selected" in (job.get("error") or "").lower()

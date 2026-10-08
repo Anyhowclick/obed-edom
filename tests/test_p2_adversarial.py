@@ -17,10 +17,15 @@ import base64
 import concurrent.futures
 import contextlib
 import copy
+import fcntl
+import hashlib
+import importlib.metadata
 import importlib.util
 import io
 import json
 import os
+import sys
+import tempfile
 import zlib
 from pathlib import Path
 
@@ -899,7 +904,6 @@ FREEZE_FLIP_INDEX_34 = next(
 FIRST_IN_HOLD_34 = 1
 ADVANCE_KEY_AT_34 = _FIXTURE_34["b"]["advanceKeyPerfMs"]
 HOLD_STARTED_AT_34 = _FIXTURE_34["b"]["nullControl"]["holdStartedAt"]
-COVER_PAINTED_AT_34 = _FIXTURE_34["b"]["nullControl"]["coverPaintedAt"]
 REHANDOFF_SEQ0_34 = _FIXTURE_34["b"]["badge"]["stats"]["rehandoffSeqs"][0]
 
 
@@ -3755,21 +3759,6 @@ def test_freeze_control_clean_bracket_still_passes_with_the_new_gates():
 # capture contract. Codex's four pure-scorer probes each reached PASS before
 # this; every one of them must now come back INCONCLUSIVE.
 # --------------------------------------------------------------------------- #
-def _reencode_raster(arr, **over) -> dict:
-    """An `evidence` block for `arr`, contract-shaped except where overridden."""
-    ev = {
-        "captureId": _FIXTURE_34["b"]["captureId"],
-        "n": p2.FOOTPRINT_BURST_FRAMES,
-        "rects": p2._footprint_rects(),
-        "controlRect": dict(p2.SLIDE4_CONTROL_RECT),
-        "params": dict(p2.FOOTPRINT_SCORE_PARAMS),
-        "frameSha256": ["0" * 64] * p2.FOOTPRINT_BURST_FRAMES,
-        **p2._encode_delta_raster(arr),
-    }
-    ev.update(over)
-    return ev
-
-
 def _b_with_evidence(**over) -> dict:
     snap = _freeze_b_snap_34()
     live = copy.deepcopy(snap["footprintFullyLive"])
@@ -5873,6 +5862,125 @@ _SWEEP_PARTIAL_ALLOW: dict[tuple[str, tuple], str] = {
 }
 _MAIN_SWEEP_PARTIAL_ALLOW: dict[tuple[str, tuple], str] = {}
 
+_SWEEP_FIXTURE_DIRS = ("tests/fixtures/p2_freeze_3to4",)
+
+
+def _sweep_cache_enabled() -> bool:
+    """`OBED_TEST_SWEEP_CACHE=off` recomputes every sweep and neither reads nor
+    writes the on-disk cache."""
+    raw = os.environ.get("OBED_TEST_SWEEP_CACHE")
+    if raw is None:
+        return True
+    if raw != "off":
+        raise pytest.UsageError(
+            f"OBED_TEST_SWEEP_CACHE must be unset or 'off', got {raw!r}"
+        )
+    return False
+
+
+def _coverage_active() -> bool:
+    try:
+        import coverage
+    except ImportError:
+        return False
+    return coverage.Coverage.current() is not None
+
+
+def _installed_distributions() -> list[str]:
+    return sorted({
+        f"{str(dist.metadata['Name']).lower()}=={dist.version}"
+        for dist in importlib.metadata.distributions()
+    })
+
+
+def _sweep_cache_key(name: str, root: Path = REPO) -> str:
+    """sha256 over everything a sweep's result can depend on: every module of
+    the package, this file, conftest, the fixtures the snapshots load, the
+    interpreter, and every installed distribution's version."""
+    files = sorted((root / "src" / "obed_edom").rglob("*.py"))
+    files += [root / "tests" / "test_p2_adversarial.py", root / "tests" / "conftest.py"]
+    for rel in _SWEEP_FIXTURE_DIRS:
+        files += sorted(p for p in (root / rel).rglob("*") if p.is_file())
+    h = hashlib.sha256()
+    for part in (name, sys.version, *_installed_distributions()):
+        h.update(part.encode() + b"\0")
+    for path in files:
+        data = path.read_bytes()
+        h.update(path.relative_to(root).as_posix().encode() + b"\0")
+        h.update(len(data).to_bytes(8, "big") + data)
+    return h.hexdigest()
+
+
+def _load_sweep(path: Path, key: str, expected: set) -> dict | None:
+    """The cached sweep, or None unless the file is readable, well-formed,
+    stamped with exactly `key`, and covers exactly the `expected` (cls, path)
+    keys once each."""
+    try:
+        doc = json.loads(path.read_text())
+        if doc["key"] != key:
+            return None
+        out = {}
+        for cls, steps, closed in doc["sweep"]:
+            if not (
+                isinstance(cls, str) and isinstance(closed, bool) and steps
+                and all(type(s) in (str, int) for s in steps)
+            ):
+                return None
+            entry = (cls, tuple(steps))
+            if entry in out:
+                return None
+            out[entry] = closed
+        return out if set(out) == expected else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _store_sweep(path: Path, key: str, swept: dict) -> None:
+    doc = {"key": key, "sweep": [[cls, list(p), closed] for (cls, p), closed in swept.items()]}
+    with contextlib.suppress(OSError):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(doc, f)
+            os.replace(tmp, path)
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+
+def _cached_sweep(name: str, compute, expected_keys, root: Path = REPO) -> dict:
+    """`compute()`, memoised on disk under `.cache/test-sweeps/` against
+    `_sweep_cache_key` and the `expected_keys()` it must cover. Anything short
+    of an exact match recomputes; misses are serialised per sweep by a file
+    lock so concurrent processes fill the cache once. Bypassed under coverage,
+    whose measurement needs the sweep to actually run."""
+    if not _sweep_cache_enabled() or _coverage_active():
+        return compute()
+    cache_dir = root / ".cache" / "test-sweeps"
+    path = cache_dir / f"{name}.json"
+    key = _sweep_cache_key(name, root)
+    expected = expected_keys()
+    swept = _load_sweep(path, key, expected)
+    if swept is not None:
+        return swept
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        lock = open(cache_dir / f"{name}.lock", "a")
+    except OSError:
+        return compute()
+    with lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        except OSError:
+            return compute()
+        swept = _load_sweep(path, key, expected)
+        if swept is None:
+            swept = compute()
+            if set(swept) == expected:
+                _store_sweep(path, key, swept)
+    return swept
+
+
 _BRACKET_SWEEP_CACHE: dict = {}
 
 _BRACKET_SWEEP_ARMS = (("a1", "positive"), ("b", "b"), ("a2", "positiveA2"))
@@ -5933,50 +6041,67 @@ def _bracket_sweep() -> dict:
 
     The deletions are independent pure-scorer calls, so they are fanned out over
     a `ProcessPoolExecutor`; every path is still visited exactly once and scored
-    exactly as `_walk` would score it."""
+    exactly as `_walk` would score it. A whole sweep is memoised on disk by
+    `_cached_sweep`."""
     if not _BRACKET_SWEEP_CACHE:
-        n_workers = _bracket_sweep_worker_count()
-
-        snaps = _bracket_snapshots()
-        if n_workers <= 1:
-            for arm, cls in _BRACKET_SWEEP_ARMS:
-                walked = _walk(snaps[arm], lambda: _bracket_closed(snaps))
-                for path, closed in walked.items():
-                    _BRACKET_SWEEP_CACHE[(cls, path)] = closed
-            return _BRACKET_SWEEP_CACHE
-
-        expected = {
-            cls: len([p for p in _leaf_paths(snaps[arm]) if p])
-            for arm, cls in _BRACKET_SWEEP_ARMS
-        }
-
-        seen: dict = {}
-        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as ex:
-            futures = {
-                ex.submit(_bracket_sweep_worker, arm, shard, n_workers): cls
-                for arm, cls in _BRACKET_SWEEP_ARMS
-                for shard in range(n_workers)
-            }
-            for fut in concurrent.futures.as_completed(futures):
-                cls = futures[fut]
-                # .result() re-raises any worker exception loudly -- a failed
-                # shard must fail the sweep, never silently shrink the cache.
-                for path, closed in fut.result():
-                    key = (cls, path)
-                    if key in seen:
-                        raise AssertionError(f"bracket sweep path scored twice: {key}")
-                    seen[key] = closed
-
-        for cls, count in expected.items():
-            actual = sum(1 for (c, _p) in seen if c == cls)
-            assert actual == count, (
-                f"bracket sweep for {cls!r}: expected {count} paths, "
-                f"covered {actual} -- shards left a gap"
-            )
-        # Published only once whole: a failed shard must not leave a partial
-        # cache for the next caller to mistake for a finished sweep.
-        _BRACKET_SWEEP_CACHE.update(seen)
+        _BRACKET_SWEEP_CACHE.update(
+            _cached_sweep("bracket", _compute_bracket_sweep, _bracket_sweep_keys)
+        )
     return _BRACKET_SWEEP_CACHE
+
+
+def _bracket_sweep_keys() -> set:
+    snaps = _bracket_snapshots()
+    return {
+        (cls, p) for arm, cls in _BRACKET_SWEEP_ARMS
+        for p in _leaf_paths(snaps[arm]) if p
+    }
+
+
+def _compute_bracket_sweep() -> dict:
+    n_workers = _bracket_sweep_worker_count()
+
+    snaps = _bracket_snapshots()
+    if n_workers <= 1:
+        serial: dict = {}
+        for arm, cls in _BRACKET_SWEEP_ARMS:
+            walked = _walk(snaps[arm], lambda: _bracket_closed(snaps))
+            for path, closed in walked.items():
+                serial[(cls, path)] = closed
+        return serial
+
+    expected = {
+        cls: len([p for p in _leaf_paths(snaps[arm]) if p])
+        for arm, cls in _BRACKET_SWEEP_ARMS
+    }
+
+    seen: dict = {}
+    with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as ex:
+        futures = {
+            ex.submit(_bracket_sweep_worker, arm, shard, n_workers): cls
+            for arm, cls in _BRACKET_SWEEP_ARMS
+            for shard in range(n_workers)
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            cls = futures[fut]
+            # .result() re-raises any worker exception loudly -- a failed
+            # shard must fail the sweep, never silently shrink the cache.
+            for path, closed in fut.result():
+                key = (cls, path)
+                if key in seen:
+                    raise AssertionError(f"bracket sweep path scored twice: {key}")
+                seen[key] = closed
+
+    for cls, count in expected.items():
+        actual = sum(1 for (c, _p) in seen if c == cls)
+        assert actual == count, (
+            f"bracket sweep for {cls!r}: expected {count} paths, "
+            f"covered {actual} -- shards left a gap"
+        )
+    # Returned (and so published or written to disk) only once whole: a failed
+    # shard must not leave a partial cache for the next caller to mistake for a
+    # finished sweep.
+    return seen
 
 
 def _collapse(swept: dict) -> tuple[dict, dict]:
@@ -6066,6 +6191,295 @@ def test_sweep_worker_count_is_capped_and_survives_an_unknown_core_count(monkeyp
     assert _bracket_sweep_worker_count() == 1
 
 
+# A miniature repo for the on-disk sweep cache: hashing the real tree is what
+# the cache is for, so these tests never do it.
+_FAKE_SWEEP = {
+    ("b", ("mediaSamples", 3, "videos", 0, "presentedMediaTime")): True,
+    ("b", ("0", "1")): False,
+    ("main", ("indexSamples",)): True,
+}
+
+
+def _fake_keys() -> set:
+    return set(_FAKE_SWEEP)
+
+
+class _FakeDist:
+    def __init__(self, name: str, version: str):
+        self.metadata = {"Name": name}
+        self.version = version
+
+
+class _FakeCoverage:
+    def __init__(self, current):
+        self.Coverage = type("Coverage", (), {"current": staticmethod(lambda: current)})
+
+
+@pytest.fixture
+def sweep_cache_on(monkeypatch):
+    """The cache as a plain run sees it: no override, no coverage tracer, and
+    a fixed distribution list so the key never reads the real environment."""
+    monkeypatch.delenv("OBED_TEST_SWEEP_CACHE", raising=False)
+    monkeypatch.setitem(sys.modules, "coverage", _FakeCoverage(None))
+    monkeypatch.setattr(
+        importlib.metadata, "distributions", lambda: [_FakeDist("numpy", "1.0")]
+    )
+
+
+def _fake_sweep_root(tmp_path: Path) -> Path:
+    for rel, text in [
+        ("src/obed_edom/p2_verdict.py", "X = 1\n"),
+        ("src/obed_edom/sub/helper.py", "Y = 2\n"),
+        ("tests/test_p2_adversarial.py", "# test\n"),
+        ("tests/conftest.py", "# conftest\n"),
+        ("tests/fixtures/p2_freeze_3to4/clean_bracket.json", "{}\n"),
+    ]:
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text)
+    return tmp_path
+
+
+def _counting(result: dict):
+    calls = []
+
+    def compute() -> dict:
+        calls.append(1)
+        return dict(result)
+
+    return compute, calls
+
+
+def _sweep_file(root: Path, name: str = "t") -> Path:
+    return root / ".cache" / "test-sweeps" / f"{name}.json"
+
+
+def _cache_dir_state(root: Path) -> dict:
+    cache_dir = root / ".cache" / "test-sweeps"
+    if not cache_dir.exists():
+        return {}
+    return {p.name: p.read_bytes() for p in sorted(cache_dir.iterdir())}
+
+
+@pytest.mark.parametrize("rel", [
+    "src/obed_edom/p2_verdict.py",
+    "src/obed_edom/sub/helper.py",
+    "src/obed_edom/new_module.py",
+    "tests/test_p2_adversarial.py",
+    "tests/conftest.py",
+    "tests/fixtures/p2_freeze_3to4/clean_bracket.json",
+    "tests/fixtures/p2_freeze_3to4/another_fixture.bin",
+])
+def test_sweep_cache_key_changes_when_any_hashed_input_changes(sweep_cache_on, tmp_path, rel):
+    root = _fake_sweep_root(tmp_path)
+    before = _sweep_cache_key("t", root)
+    assert _sweep_cache_key("t", root) == before
+    with (root / rel).open("a") as f:
+        f.write("# edited\n")
+    assert _sweep_cache_key("t", root) != before
+
+
+def test_sweep_cache_key_ignores_non_python_package_files_and_names_the_sweep(
+    sweep_cache_on, tmp_path
+):
+    root = _fake_sweep_root(tmp_path)
+    before = _sweep_cache_key("t", root)
+    (root / "src" / "obed_edom" / "notes.txt").write_text("unrelated\n")
+    assert _sweep_cache_key("t", root) == before
+    assert _sweep_cache_key("other", root) != before
+
+
+def test_sweep_cache_key_tracks_every_installed_distribution_version(
+    sweep_cache_on, tmp_path, monkeypatch
+):
+    """cv2 is reached only through `html_alpha_probe`, so a hand-picked list of
+    versions would miss it: every distribution counts, by normalised name."""
+    root = _fake_sweep_root(tmp_path)
+
+    def key_with(*dists) -> str:
+        monkeypatch.setattr(importlib.metadata, "distributions", lambda: list(dists))
+        return _sweep_cache_key("t", root)
+
+    base = key_with(_FakeDist("numpy", "1.0"), _FakeDist("opencv-python", "4.9"))
+    assert key_with(_FakeDist("opencv-python", "4.9"), _FakeDist("numpy", "1.0")) == base
+    assert key_with(
+        _FakeDist("NumPy", "1.0"), _FakeDist("numpy", "1.0"), _FakeDist("opencv-python", "4.9")
+    ) == base
+    assert key_with(_FakeDist("numpy", "1.0"), _FakeDist("opencv-python", "4.10")) != base
+    assert key_with(_FakeDist("numpy", "1.0")) != base
+    assert key_with(
+        _FakeDist("numpy", "1.0"), _FakeDist("opencv-python", "4.9"), _FakeDist("new", "0.1")
+    ) != base
+
+
+def test_sweep_cache_round_trips_paths_with_their_str_and_int_types(sweep_cache_on, tmp_path):
+    root = _fake_sweep_root(tmp_path)
+    compute, calls = _counting(_FAKE_SWEEP)
+    assert _cached_sweep("t", compute, _fake_keys, root) == _FAKE_SWEEP
+    assert _sweep_file(root).is_file()
+    assert list(_sweep_file(root).parent.glob("*.tmp")) == []
+    loaded = _cached_sweep("t", compute, _fake_keys, root)
+    assert calls == [1], "a warm cache recomputed"
+    assert loaded == _FAKE_SWEEP
+    assert sorted(map(repr, loaded.items())) == sorted(map(repr, _FAKE_SWEEP.items()))
+    assert ("b", ("0", "1")) in loaded and ("b", (0, 1)) not in loaded
+
+
+@pytest.mark.parametrize("payload", [
+    b"",
+    b"{\"key\": ",
+    b"\xff\xfe not json",
+    b"[]",
+    b"{\"sweep\": []}",
+    b"{\"key\": \"KEY\", \"sweep\": []}",
+    b"{\"key\": \"KEY\", \"sweep\": [[\"b\", [\"x\"]]]}",
+    b"{\"key\": \"KEY\", \"sweep\": [[\"b\", [\"x\", 1.5], true]]}",
+    b"{\"key\": \"KEY\", \"sweep\": [[\"b\", [\"x\", true], true]]}",
+    b"{\"key\": \"KEY\", \"sweep\": [[\"b\", [], true]]}",
+    b"{\"key\": \"KEY\", \"sweep\": [[\"b\", [\"x\"], 1]]}",
+    b"{\"key\": \"KEY\", \"sweep\": [[2, [\"x\"], true]]}",
+])
+def test_a_corrupt_sweep_cache_is_recomputed_not_trusted(sweep_cache_on, tmp_path, payload):
+    root = _fake_sweep_root(tmp_path)
+    key = _sweep_cache_key("t", root)
+    _sweep_file(root).parent.mkdir(parents=True)
+    _sweep_file(root).write_bytes(payload.replace(b"KEY", key.encode()))
+    compute, calls = _counting(_FAKE_SWEEP)
+    assert _cached_sweep("t", compute, _fake_keys, root) == _FAKE_SWEEP
+    assert calls == [1]
+    assert _load_sweep(_sweep_file(root), key, _fake_keys()) == _FAKE_SWEEP, (
+        "the recompute was not written back"
+    )
+
+
+@pytest.mark.parametrize("entries", [
+    pytest.param(list(_FAKE_SWEEP.items())[1:], id="missing"),
+    pytest.param(list(_FAKE_SWEEP.items()) + [(("b", ("extra", 0)), True)], id="extra"),
+    pytest.param(list(_FAKE_SWEEP.items()) + list(_FAKE_SWEEP.items())[:1], id="duplicate"),
+    pytest.param(
+        list(_FAKE_SWEEP.items())[:1]
+        + [(("b", ("0", "1")), True), (("b", ("0", "1")), False)]
+        + list(_FAKE_SWEEP.items())[2:],
+        id="conflicting-duplicate",
+    ),
+])
+def test_a_sweep_cache_not_covering_exactly_the_expected_paths_is_recomputed(
+    sweep_cache_on, tmp_path, entries
+):
+    """A correctly keyed file must still name every expected (cls, path) once
+    and nothing else -- a missing path would silently drop a deletion from the
+    sweep, an extra one would invent a survivor, a duplicate is ambiguous."""
+    root = _fake_sweep_root(tmp_path)
+    key = _sweep_cache_key("t", root)
+    _sweep_file(root).parent.mkdir(parents=True)
+    _sweep_file(root).write_text(json.dumps(
+        {"key": key, "sweep": [[cls, list(p), closed] for (cls, p), closed in entries]}
+    ))
+    compute, calls = _counting(_FAKE_SWEEP)
+    assert _cached_sweep("t", compute, _fake_keys, root) == _FAKE_SWEEP
+    assert calls == [1]
+    assert _load_sweep(_sweep_file(root), key, _fake_keys()) == _FAKE_SWEEP
+
+
+def test_an_incomplete_computed_sweep_is_returned_but_never_stored(sweep_cache_on, tmp_path):
+    root = _fake_sweep_root(tmp_path)
+    partial = dict(list(_FAKE_SWEEP.items())[1:])
+    compute, calls = _counting(partial)
+    assert _cached_sweep("t", compute, _fake_keys, root) == partial
+    assert calls == [1]
+    assert not _sweep_file(root).exists()
+
+
+def test_a_sweep_cache_with_another_key_is_recomputed(sweep_cache_on, tmp_path):
+    root = _fake_sweep_root(tmp_path)
+    flipped = {k: not v for k, v in _FAKE_SWEEP.items()}
+    _store_sweep(_sweep_file(root), "0" * 64, flipped)
+    compute, calls = _counting(_FAKE_SWEEP)
+    assert _cached_sweep("t", compute, _fake_keys, root) == _FAKE_SWEEP
+    assert calls == [1]
+    (root / "src" / "obed_edom" / "p2_verdict.py").write_text("X = 2\n")
+    compute, calls = _counting(flipped)
+    assert _cached_sweep("t", compute, _fake_keys, root) == flipped
+    assert calls == [1], "an edited source still hit the old cache"
+
+
+def test_a_miss_filled_by_another_process_under_the_lock_is_not_recomputed(
+    sweep_cache_on, tmp_path, monkeypatch
+):
+    """Two cold processes both miss before the lock; the second must re-read
+    once it holds the lock and find the first one's sweep rather than run its
+    own. Simulated in one process: the pre-lock read is forced to miss while a
+    valid sweep is already on disk."""
+    root = _fake_sweep_root(tmp_path)
+    _store_sweep(_sweep_file(root), _sweep_cache_key("t", root), _FAKE_SWEEP)
+    real_load = _load_sweep
+    reads = []
+
+    def miss_first(*args):
+        reads.append(1)
+        return None if len(reads) == 1 else real_load(*args)
+
+    monkeypatch.setitem(globals(), "_load_sweep", miss_first)
+    compute, calls = _counting({k: not v for k, v in _FAKE_SWEEP.items()})
+    assert _cached_sweep("t", compute, _fake_keys, root) == _FAKE_SWEEP
+    assert reads == [1, 1]
+    assert calls == [], "the second process recomputed a sweep the first had stored"
+    assert (root / ".cache" / "test-sweeps" / "t.lock").exists()
+
+
+def test_a_sweep_cache_lock_failure_computes_without_caching(
+    sweep_cache_on, tmp_path, monkeypatch
+):
+    root = _fake_sweep_root(tmp_path)
+
+    def refuse(*_args):
+        raise OSError("no locks here")
+
+    monkeypatch.setattr(fcntl, "flock", refuse)
+    compute, calls = _counting(_FAKE_SWEEP)
+    assert _cached_sweep("t", compute, _fake_keys, root) == _FAKE_SWEEP
+    assert calls == [1]
+    assert not _sweep_file(root).exists()
+
+
+def test_sweep_cache_off_neither_reads_nor_writes(sweep_cache_on, tmp_path, monkeypatch):
+    root = _fake_sweep_root(tmp_path)
+    _cached_sweep("t", _counting({k: not v for k, v in _FAKE_SWEEP.items()})[0], _fake_keys, root)
+    before = _cache_dir_state(root)
+    monkeypatch.setenv("OBED_TEST_SWEEP_CACHE", "off")
+    compute, calls = _counting(_FAKE_SWEEP)
+    assert _cached_sweep("t", compute, _fake_keys, root) == _FAKE_SWEEP
+    assert _cached_sweep("t", compute, _fake_keys, root) == _FAKE_SWEEP
+    assert _cached_sweep("u", compute, _fake_keys, root) == _FAKE_SWEEP
+    assert calls == [1, 1, 1]
+    assert _cache_dir_state(root) == before
+
+
+def test_sweep_cache_is_bypassed_while_coverage_is_measuring(sweep_cache_on, tmp_path, monkeypatch):
+    """Coverage needs the sweep to actually execute the scorer: a cache hit
+    would report the scorer's branches as unexercised."""
+    root = _fake_sweep_root(tmp_path)
+    _cached_sweep("t", _counting({k: not v for k, v in _FAKE_SWEEP.items()})[0], _fake_keys, root)
+    before = _cache_dir_state(root)
+    monkeypatch.setitem(sys.modules, "coverage", _FakeCoverage(object()))
+    compute, calls = _counting(_FAKE_SWEEP)
+    assert _cached_sweep("t", compute, _fake_keys, root) == _FAKE_SWEEP
+    assert _cached_sweep("u", compute, _fake_keys, root) == _FAKE_SWEEP
+    assert calls == [1, 1]
+    assert _cache_dir_state(root) == before
+
+
+def test_coverage_is_inactive_when_it_is_not_installed(monkeypatch):
+    monkeypatch.setitem(sys.modules, "coverage", None)
+    assert _coverage_active() is False
+
+
+@pytest.mark.parametrize("raw", ["", "on", "OFF", "0", "false"])
+def test_sweep_cache_override_refuses_an_unknown_value(monkeypatch, raw):
+    monkeypatch.setenv("OBED_TEST_SWEEP_CACHE", raw)
+    with pytest.raises(pytest.UsageError, match="OBED_TEST_SWEEP_CACHE"):
+        _sweep_cache_enabled()
+
+
 def test_bracket_sweep_allowlist_has_no_dead_entries():
     """A stale excuse is worse than none: every allowlist entry must still be
     survivable, or a reader trusts a reason for a field that is now gated."""
@@ -6089,18 +6503,26 @@ def _main_sweep() -> dict:
     captured snapshot, exactly as MAIN passes them, so the one snapshot walk
     covers every leaf of both (review r11 MAJOR 4, r12 MINOR 3)."""
     if not _MAIN_SWEEP_CACHE:
-        snap, _, settle, owner = _main_inputs()
-        assert owner is snap["ownerSettle"] and settle is snap["advanceSettle"]
-
-        def score() -> bool:
-            return p2._advance_c_ok(
-                snap, snap.get("indexSamples") or [], settle, owner
-            ) is False
-
         _MAIN_SWEEP_CACHE.update(
-            {("main", path): closed for path, closed in _walk(snap, score).items()}
+            _cached_sweep("main", _compute_main_sweep, _main_sweep_keys)
         )
     return _MAIN_SWEEP_CACHE
+
+
+def _main_sweep_keys() -> set:
+    return {("main", p) for p in _leaf_paths(_main_inputs()[0]) if p}
+
+
+def _compute_main_sweep() -> dict:
+    snap, _, settle, owner = _main_inputs()
+    assert owner is snap["ownerSettle"] and settle is snap["advanceSettle"]
+
+    def score() -> bool:
+        return p2._advance_c_ok(
+            snap, snap.get("indexSamples") or [], settle, owner
+        ) is False
+
+    return {("main", path): closed for path, closed in _walk(snap, score).items()}
 
 
 def test_main_absence_sweep_is_exhaustive():

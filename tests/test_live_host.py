@@ -1010,26 +1010,31 @@ def test_continuity_off_env_installs_nothing(tmp_path, monkeypatch):
     assert not FakeCdp.instances[0].keys
 
 
-def test_continuity_unsupported_from_derive(tmp_path, monkeypatch):
+class _UnsupportedRuntimePlan:
+    def to_runtime(self):
+        return live_host.Unsupported("cannot translate")
+
+
+class _RaisingRuntimePlan:
+    def to_runtime(self):
+        raise ValueError("cannot translate")
+
+
+@pytest.mark.parametrize(
+    ("plan", "reason"),
+    [
+        (live_host.Unsupported("bad export"), "bad export"),
+        (_UnsupportedRuntimePlan(), "cannot translate"),
+        (_RaisingRuntimePlan(), "cannot translate"),
+    ],
+    ids=["from-derive", "from-to-runtime", "to-runtime-raises-is-not-a-crash"],
+)
+def test_continuity_unsupported_installs_nothing(tmp_path, monkeypatch, plan, reason):
     output = host_with_continuity(tmp_path, monkeypatch)
-    monkeypatch.setattr(live_host, "derive_plan", lambda *a, **k: live_host.Unsupported("bad export"))
+    monkeypatch.setattr(live_host, "derive_plan", lambda *a, **k: plan)
     output.observe()
     assert output._continuity_mode == "unsupported"
-    assert output.output["continuity"]["reason"] == "bad export"
-    assert output._server.continuity_script == ""
-
-
-def test_continuity_unsupported_from_to_runtime(tmp_path, monkeypatch):
-    output = host_with_continuity(tmp_path, monkeypatch)
-
-    class FakePlan:
-        def to_runtime(self):
-            return live_host.Unsupported("cannot translate")
-
-    monkeypatch.setattr(live_host, "derive_plan", lambda *a, **k: FakePlan())
-    output.observe()
-    assert output._continuity_mode == "unsupported"
-    assert output.output["continuity"]["reason"] == "cannot translate"
+    assert output.output["continuity"]["reason"] == reason
     assert output._server.continuity_script == ""
 
 
@@ -1102,20 +1107,17 @@ def test_continuity_qualified_at_1to1(tmp_path, monkeypatch):
     assert output._server.continuity_script != ""
 
 
-def test_continuity_qualified_at_scaled_stage(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("geometry", "scale"),
+    [(stage_geometry(1920, 1080, 0, 0, 2560, 1440), 1.3333), (stage_geometry(1920, 1080, 0, 50, 1600, 900), 1600 / 1920)],
+    ids=["scaled-stage", "letterboxed"],
+)
+def test_continuity_qualified_at_a_uniformly_scaled_stage(tmp_path, monkeypatch, geometry, scale):
     output = host_with_continuity(tmp_path, monkeypatch)
-    monkeypatch.setattr(FakeCdp, "evaluate", continuity_ready_evaluate(FakeCdp.evaluate, [stage_geometry(1920, 1080, 0, 0, 2560, 1440)]))
+    monkeypatch.setattr(FakeCdp, "evaluate", continuity_ready_evaluate(FakeCdp.evaluate, [geometry]))
     output.observe()
     assert output._continuity_mode == "qualified"
-    assert output.output["continuity"]["scale"] == pytest.approx(1.3333, abs=1e-4)
-
-
-def test_continuity_qualified_letterboxed(tmp_path, monkeypatch):
-    output = host_with_continuity(tmp_path, monkeypatch)
-    monkeypatch.setattr(FakeCdp, "evaluate", continuity_ready_evaluate(FakeCdp.evaluate, [stage_geometry(1920, 1080, 0, 50, 1600, 900)]))
-    output.observe()
-    assert output._continuity_mode == "qualified"
-    assert output.output["continuity"]["scale"] == pytest.approx(1600 / 1920, abs=1e-4)
+    assert output.output["continuity"]["scale"] == pytest.approx(scale, abs=1e-4)
 
 
 def test_continuity_stage_settles_after_a_few_polls(tmp_path, monkeypatch):
@@ -1129,9 +1131,18 @@ def test_continuity_stage_settles_after_a_few_polls(tmp_path, monkeypatch):
     assert output._continuity_mode == "qualified"
 
 
-def test_continuity_stage_offset_size_mismatch_disables_runtime(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("timeout_s", "stage", "reason"),
+    [
+        (.05, stage_geometry(1024, 768, 0, 0, 1024, 768), "stage is not the authored size"),
+        (.05, stage_geometry(1920, 1080, 0, 0, 2560, 1000), "stage scale is non-uniform"),
+        (.12, None, "stage is not the authored size"),
+    ],
+    ids=["stage-offset-size-mismatch", "non-uniform-scale", "stage-gate-deadline-expiry"],
+)
+def test_continuity_stage_gate_failure_disables_runtime(tmp_path, monkeypatch, timeout_s, stage, reason):
     output = host_with_continuity(tmp_path, monkeypatch)
-    output.timeout_s = .05
+    output.timeout_s = timeout_s
     real_evaluate = FakeCdp.evaluate
     disable_calls = []
 
@@ -1140,68 +1151,34 @@ def test_continuity_stage_offset_size_mismatch_disables_runtime(tmp_path, monkey
             disable_calls.append(expression)
             return True
         if "__OBED_CONTINUITY_INFO__" in expression:
-            return {"ready": True, "info": {"installed": True}, "stage": stage_geometry(1024, 768, 0, 0, 1024, 768)}
+            return {"ready": True, "info": {"installed": True}, "stage": stage}
         return real_evaluate(self, expression)
 
     monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
     output.observe()
     assert output._continuity_mode == "unsupported"
-    assert output.output["continuity"]["reason"] == "stage is not the authored size"
+    assert output.output["continuity"]["reason"] == reason
     assert disable_calls
 
 
-def test_continuity_non_uniform_scale_disables_runtime(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("timeout_s", "ready", "present"),
+    [(.05, True, None), (5.0, False, True)],
+    ids=["stage-gate-failure", "partial-install"],
+)
+def test_continuity_disable_not_confirmed_raises(tmp_path, monkeypatch, timeout_s, ready, present):
     output = host_with_continuity(tmp_path, monkeypatch)
-    output.timeout_s = .05
+    output.timeout_s = timeout_s
     real_evaluate = FakeCdp.evaluate
-    disable_calls = []
-
-    def evaluate(self, expression):
-        if "disable" in expression:
-            disable_calls.append(expression)
-            return True
-        if "__OBED_CONTINUITY_INFO__" in expression:
-            return {"ready": True, "info": {"installed": True}, "stage": stage_geometry(1920, 1080, 0, 0, 2560, 1000)}
-        return real_evaluate(self, expression)
-
-    monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
-    output.observe()
-    assert output._continuity_mode == "unsupported"
-    assert output.output["continuity"]["reason"] == "stage scale is non-uniform"
-    assert disable_calls
-
-
-def test_continuity_stage_gate_deadline_expiry_disables_runtime(tmp_path, monkeypatch):
-    output = host_with_continuity(tmp_path, monkeypatch)
-    output.timeout_s = .12
-    real_evaluate = FakeCdp.evaluate
-    disable_calls = []
-
-    def evaluate(self, expression):
-        if "disable" in expression:
-            disable_calls.append(expression)
-            return True
-        if "__OBED_CONTINUITY_INFO__" in expression:
-            return {"ready": True, "info": {"installed": True}, "stage": None}
-        return real_evaluate(self, expression)
-
-    monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
-    output.observe()
-    assert output._continuity_mode == "unsupported"
-    assert output.output["continuity"]["reason"] == "stage is not the authored size"
-    assert disable_calls
-
-
-def test_continuity_disable_not_confirmed_raises(tmp_path, monkeypatch):
-    output = host_with_continuity(tmp_path, monkeypatch)
-    output.timeout_s = .05
-    real_evaluate = FakeCdp.evaluate
+    info = {"ready": ready, "info": {"installed": True}, "stage": None}
+    if present is not None:
+        info["present"] = present
 
     def evaluate(self, expression):
         if "disable" in expression:
             return False
         if "__OBED_CONTINUITY_INFO__" in expression:
-            return {"ready": True, "info": {"installed": True}, "stage": None}
+            return info
         return real_evaluate(self, expression)
 
     monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
@@ -1209,7 +1186,12 @@ def test_continuity_disable_not_confirmed_raises(tmp_path, monkeypatch):
         output.observe()
 
 
-def test_continuity_runtime_never_present_is_immediate_no_polling_no_disable(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("present", "disables"),
+    [(False, 0), (True, 1)],
+    ids=["runtime-never-present-is-not-disabled", "partial-install-is-disabled"],
+)
+def test_continuity_runtime_not_ready_is_immediate_without_polling(tmp_path, monkeypatch, present, disables):
     output = host_with_continuity(tmp_path, monkeypatch)
     output.timeout_s = 5.0  # would hang for seconds if the gate incorrectly polled this case
     real_evaluate = FakeCdp.evaluate
@@ -1221,7 +1203,7 @@ def test_continuity_runtime_never_present_is_immediate_no_polling_no_disable(tmp
             return True
         if "__OBED_CONTINUITY_INFO__" in expression:
             calls.append(expression)
-            return {"ready": False, "present": False, "info": {"installed": True}, "stage": None}
+            return {"ready": False, "present": present, "info": {"installed": True}, "stage": None}
         return real_evaluate(self, expression)
 
     monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
@@ -1231,51 +1213,8 @@ def test_continuity_runtime_never_present_is_immediate_no_polling_no_disable(tmp
     assert output._continuity_mode == "unsupported"
     assert output.output["continuity"]["reason"] == "runtime failed to install"
     assert len(calls) == 1
-    assert disable_calls == []
+    assert len(disable_calls) == disables
     assert elapsed < 1.0
-
-
-def test_continuity_partial_install_never_ready_disables_runtime(tmp_path, monkeypatch):
-    output = host_with_continuity(tmp_path, monkeypatch)
-    output.timeout_s = 5.0  # would hang for seconds if the gate incorrectly polled this case
-    real_evaluate = FakeCdp.evaluate
-    calls, disable_calls = [], []
-
-    def evaluate(self, expression):
-        if "disable" in expression:
-            disable_calls.append(expression)
-            return True
-        if "__OBED_CONTINUITY_INFO__" in expression:
-            calls.append(expression)
-            return {"ready": False, "present": True, "info": {"installed": True}, "stage": None}
-        return real_evaluate(self, expression)
-
-    monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
-    start = time.monotonic()
-    output.observe()
-    elapsed = time.monotonic() - start
-    assert output._continuity_mode == "unsupported"
-    assert output.output["continuity"]["reason"] == "runtime failed to install"
-    assert len(calls) == 1
-    assert len(disable_calls) == 1
-    assert elapsed < 1.0
-
-
-def test_continuity_partial_install_disable_unconfirmed_raises(tmp_path, monkeypatch):
-    output = host_with_continuity(tmp_path, monkeypatch)
-    output.timeout_s = 5.0
-    real_evaluate = FakeCdp.evaluate
-
-    def evaluate(self, expression):
-        if "disable" in expression:
-            return False
-        if "__OBED_CONTINUITY_INFO__" in expression:
-            return {"ready": False, "present": True, "info": {"installed": True}, "stage": None}
-        return real_evaluate(self, expression)
-
-    monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
-    with pytest.raises(live_host.LiveHostError, match="could not be confirmed disabled"):
-        output.observe()
 
 
 def test_continuity_go_to_clears_runtime_only_when_qualified(tmp_path, monkeypatch):
@@ -1544,17 +1483,17 @@ def test_failed_attach_discovery_can_be_stopped_without_an_unowned_target(tmp_pa
     assert transport._blanked
 
 
-def test_continuity_session_opt_out_installs_nothing(tmp_path, monkeypatch):
-    monkeypatch.delenv(live_host.CONTINUITY_ENV, raising=False)
-    output = host_with_continuity(tmp_path, monkeypatch, continuity="off")
-    output.observe()
-    assert output.output["continuity"]["mode"] == "off"
-    assert output._server.continuity_script == ""
-
-
-def test_continuity_auto_cannot_override_environment_opt_out(tmp_path, monkeypatch):
-    monkeypatch.setenv(live_host.CONTINUITY_ENV, "off")
-    output = host_with_continuity(tmp_path, monkeypatch, continuity="auto")
+@pytest.mark.parametrize(
+    ("env", "continuity"),
+    [(None, "off"), ("off", "auto")],
+    ids=["session-opt-out-installs-nothing", "auto-cannot-override-environment-opt-out"],
+)
+def test_continuity_opt_out_installs_nothing(tmp_path, monkeypatch, env, continuity):
+    if env is None:
+        monkeypatch.delenv(live_host.CONTINUITY_ENV, raising=False)
+    else:
+        monkeypatch.setenv(live_host.CONTINUITY_ENV, env)
+    output = host_with_continuity(tmp_path, monkeypatch, continuity=continuity)
     output.observe()
     assert output.output["continuity"]["mode"] == "off"
     assert output._server.continuity_script == ""
@@ -1706,28 +1645,21 @@ def test_goto_semantics_armed_by_default(tmp_path, monkeypatch):
     assert output.capabilities()["goTo"]["semantics"] == "restart-at-initial-state+autoplay"
 
 
-def test_goto_fires_zero_advance_when_run_length_is_zero(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("run_length", "run_kinds", "keys", "fired"),
+    [(0, [], ["2", "Enter"], False), (1, ["apple:movie-start"], ["2", "Enter", " "], True)],
+    ids=["zero-advances-when-run-length-is-zero", "one-advance-via-key-when-run-length-positive"],
+)
+def test_goto_fires_the_auto_play_run(tmp_path, monkeypatch, run_length, run_kinds, keys, fired):
     output = host(tmp_path, monkeypatch)
     output.observe()
     fake = FakeCdp.instances[0]
-    fake.auto_play_run_length, fake.auto_play_run_kinds = 0, []
+    fake.auto_play_run_length, fake.auto_play_run_kinds = run_length, run_kinds
     observed = output.execute("goTo", 2)
-    assert fake.keys == ["2", "Enter"]
+    assert fake.keys == keys
     assert observed.auto_play_deferred is None
     record = last_execute_record(read_log(output))
-    assert (record["autoPlayRunLength"], record["autoPlayRunKinds"], record["autoPlayFired"], record["autoPlayDeferredReason"]) == (0, [], False, None)
-
-
-def test_goto_fires_one_advance_via_key_when_run_length_positive(tmp_path, monkeypatch):
-    output = host(tmp_path, monkeypatch)
-    output.observe()
-    fake = FakeCdp.instances[0]
-    fake.auto_play_run_length, fake.auto_play_run_kinds = 1, ["apple:movie-start"]
-    observed = output.execute("goTo", 2)
-    assert fake.keys == ["2", "Enter", " "]
-    assert observed.auto_play_deferred is None
-    record = last_execute_record(read_log(output))
-    assert (record["autoPlayRunLength"], record["autoPlayRunKinds"], record["autoPlayFired"], record["autoPlayDeferredReason"]) == (1, ["apple:movie-start"], True, None)
+    assert (record["autoPlayRunLength"], record["autoPlayRunKinds"], record["autoPlayFired"], record["autoPlayDeferredReason"]) == (run_length, run_kinds, fired, None)
 
 
 def test_goto_fires_one_advance_via_click_in_click_mode(tmp_path, monkeypatch):
@@ -2410,20 +2342,6 @@ def test_gl_replay_auto_falls_back_to_off_when_the_flag_on_to_runtime_raises(tmp
     assert 'id="obed-gl-replay"' not in output._server.continuity_script
     assert output.output["continuity"]["glReplay"]["mode"] == "unavailable"
     assert output.output["continuity"]["glReplay"]["reason"] == "glReplay translation blew up"
-
-
-def test_continuity_is_unsupported_not_a_crash_when_to_runtime_raises(tmp_path, monkeypatch):
-    output = host_with_continuity(tmp_path, monkeypatch)
-
-    class RaisingPlan:
-        def to_runtime(self):
-            raise ValueError("cannot translate")
-
-    monkeypatch.setattr(live_host, "derive_plan", lambda *a, **k: RaisingPlan())
-    output.observe()
-    assert output._continuity_mode == "unsupported"
-    assert output.output["continuity"]["reason"] == "cannot translate"
-    assert output._server.continuity_script == ""
 
 
 @pytest.mark.parametrize("managed,ctor,env,expected", [

@@ -30,12 +30,11 @@ def no_keynote(monkeypatch):
 # --- stage_name --------------------------------------------------------------
 
 
-def test_stage_name_padding():
-    assert dse.stage_name("Deck", 3, 1) == "Deck.003.01.png"
-
-
-def test_stage_name_slide_over_99():
-    assert dse.stage_name("Deck", 142, 5) == "Deck.142.05.png"
+@pytest.mark.parametrize(
+    "slide, stage, name", [(3, 1, "Deck.003.01.png"), (142, 5, "Deck.142.05.png")], ids=["padding", "slide-over-99"]
+)
+def test_stage_name(slide, stage, name):
+    assert dse.stage_name("Deck", slide, stage) == name
 
 
 # --- reconstruct ---------------------------------------------------------------
@@ -55,30 +54,29 @@ def test_reconstruct_multi_slide_uneven_counts(tmp_path):
     assert [p.name for _s, _i, p in result] == [f.name for f in files]
 
 
-def test_reconstruct_refuses_on_duplicate_indices(tmp_path):
-    files = [_numbered(tmp_path, i) for i in (1, 2, 3)]
-    files.append(tmp_path / "Scratch.0001.png")
-    files[-1].write_bytes(b"x")
+@pytest.mark.parametrize(
+    "names",
+    [
+        ["Scratch.001.png", "Scratch.002.png", "Scratch.003.png", "Scratch.0001.png"],
+        ["Scratch.001.png", "Scratch.002.png", "Scratch.004.png", "Scratch.005.png"],
+    ],
+    ids=["duplicate-indices", "gap-in-indices"],
+)
+def test_reconstruct_refuses_on_duplicates_or_gaps(tmp_path, names):
+    files = [tmp_path / name for name in names]
+    for f in files:
+        f.write_bytes(b"x")
     with pytest.raises(dse.StageCountMismatch, match="duplicates or gaps"):
         dse.reconstruct(files, [5], {5: 4})
 
 
-def test_reconstruct_refuses_on_gap_in_indices(tmp_path):
-    files = [_numbered(tmp_path, i) for i in (1, 2, 4, 5)]
-    with pytest.raises(dse.StageCountMismatch, match="duplicates or gaps"):
-        dse.reconstruct(files, [5], {5: 4})
-
-
-def test_reconstruct_refuses_on_count_mismatch_plus_one(tmp_path):
-    files = [_numbered(tmp_path, i) for i in range(1, 6)]
+@pytest.mark.parametrize(
+    "n_files, expected", [(5, {5: 2, 9: 4}), (3, {5: 2, 9: 2})], ids=["plus-one", "minus-one"]
+)
+def test_reconstruct_refuses_on_count_mismatch(tmp_path, n_files, expected):
+    files = [_numbered(tmp_path, i) for i in range(1, n_files + 1)]
     with pytest.raises(dse.StageCountMismatch):
-        dse.reconstruct(files, [5, 9], {5: 2, 9: 4})
-
-
-def test_reconstruct_refuses_on_count_mismatch_minus_one(tmp_path):
-    files = [_numbered(tmp_path, i) for i in range(1, 4)]
-    with pytest.raises(dse.StageCountMismatch):
-        dse.reconstruct(files, [5, 9], {5: 2, 9: 2})
+        dse.reconstruct(files, [5, 9], expected)
 
 
 # --- stage_counts ----------------------------------------------------------------
@@ -119,20 +117,24 @@ def _objects_for_slides(slides_chunks: dict[int, list[dict]]) -> dict:
     return objects
 
 
-def test_stage_counts_agree(monkeypatch):
-    objects = _objects_for_slides({1: [{"referent": True}], 2: []})
+@pytest.mark.parametrize(
+    "chunks, kwargs, expected",
+    [
+        ({1: [{"referent": True}], 2: []}, {}, {1: 2, 2: 1}),
+        ({29: [{"referent": True, "build_id": "b1"}, {"referent": False, "build_id": "b1"}]}, {}, {29: 2}),
+        ({9: [{"referent": True, "automatic": True}]}, {"allow_automatic": True}, {9: 2}),
+        ({9: [{"referent": True, "automatic": False}]}, {}, {9: 2}),
+        ({9: [{"referent": False, "automatic": True}]}, {}, {9: 1}),
+    ],
+    ids=[
+        "agree", "chained-build-shares-a-click", "allow-automatic-opts-in", "nonautomatic-chunk",
+        "automatic-nonreferent-chunk",
+    ],
+)
+def test_stage_counts(monkeypatch, chunks, kwargs, expected):
+    objects = _objects_for_slides(chunks)
     monkeypatch.setattr(dse, "_load_deck", lambda d: (objects, {}, {}))
-    out = dse.stage_counts(Path("d.key"), [1, 2])
-    assert out == {1: 2, 2: 1}
-
-
-def test_stage_counts_chained_build_shares_a_click(monkeypatch):
-    objects = _objects_for_slides(
-        {29: [{"referent": True, "build_id": "b1"}, {"referent": False, "build_id": "b1"}]}
-    )
-    monkeypatch.setattr(dse, "_load_deck", lambda d: (objects, {}, {}))
-    out = dse.stage_counts(Path("d.key"), [29])
-    assert out == {29: 2}
+    assert dse.stage_counts(Path("d.key"), list(chunks), **kwargs) == expected
 
 
 def test_stage_counts_missing_referent_raises_ambiguous_naming_slide(monkeypatch):
@@ -169,27 +171,6 @@ def test_stage_counts_raises_on_automatic_referent_chunk(monkeypatch):
         dse.stage_counts(Path("d.key"), [9])
 
 
-def test_stage_counts_allow_automatic_opts_in(monkeypatch):
-    objects = _objects_for_slides({9: [{"referent": True, "automatic": True}]})
-    monkeypatch.setattr(dse, "_load_deck", lambda d: (objects, {}, {}))
-    out = dse.stage_counts(Path("d.key"), [9], allow_automatic=True)
-    assert out == {9: 2}
-
-
-def test_stage_counts_nonautomatic_chunk_passes(monkeypatch):
-    objects = _objects_for_slides({9: [{"referent": True, "automatic": False}]})
-    monkeypatch.setattr(dse, "_load_deck", lambda d: (objects, {}, {}))
-    out = dse.stage_counts(Path("d.key"), [9])
-    assert out == {9: 2}
-
-
-def test_stage_counts_automatic_nonreferent_chunk_passes(monkeypatch):
-    objects = _objects_for_slides({9: [{"referent": False, "automatic": True}]})
-    monkeypatch.setattr(dse, "_load_deck", lambda d: (objects, {}, {}))
-    out = dse.stage_counts(Path("d.key"), [9])
-    assert out == {9: 1}
-
-
 REAL_DECK = Path("/Users/anyhowclick/Desktop/Diff-Checker/Sermon_PK (DSK)_with mistakes.key")
 
 
@@ -217,19 +198,55 @@ def _write_png(tmp_path: Path, mode: str, size: tuple[int, int], make_arr) -> Pa
     return path
 
 
-def test_validate_alpha_clean_bg_is_ok(tmp_path):
-    def make(size):
-        w, h = size
-        arr = np.zeros((h, w, 4), dtype=np.uint8)
-        arr[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4] = [255, 0, 0, 255]
-        return arr
+def _clean_bg(size):
+    w, h = size
+    arr = np.zeros((h, w, 4), dtype=np.uint8)
+    arr[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4] = [255, 0, 0, 255]
+    return arr
 
+
+def _content_touching_corner(size):
+    w, h = size
+    arr = np.zeros((h, w, 4), dtype=np.uint8)
+    arr[0 : h // 2, 0 : w // 2] = [255, 0, 0, 255]
+    arr[0, :] = [0, 0, 0, 0]
+    arr[-1, :] = [0, 0, 0, 0]
+    arr[:, 0] = [0, 0, 0, 0]
+    arr[:, -1] = [0, 0, 0, 0]
+    return arr
+
+
+def _opaque_bottom_band(size):
+    w, h = size
+    arr = np.zeros((h, w, 4), dtype=np.uint8)
+    arr[h - 10 :, :] = [0, 0, 0, 255]
+    return arr
+
+
+def _all_edges_touched_transparent_centre(size):
+    w, h = size
+    arr = np.full((h, w, 4), 255, dtype=np.uint8)
+    arr[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4] = [0, 0, 0, 0]
+    return arr
+
+
+@pytest.mark.parametrize(
+    "make, expected_bg_alpha_max",
+    [
+        (_clean_bg, 0),
+        (_content_touching_corner, 0),
+        (_opaque_bottom_band, 0),
+        (_all_edges_touched_transparent_centre, 255),
+    ],
+    ids=["clean-bg", "content-touching-corner", "opaque-bottom-band-clean-top-edge", "all-edges-touched"],
+)
+def test_validate_alpha_is_ok(tmp_path, make, expected_bg_alpha_max):
     path = _write_png(tmp_path, "RGBA", (200, 100), make)
     alpha_ok, bg_alpha_max, content_alpha_frac, transparent_frac = dse.validate_alpha(
         path, expected_size=(200, 100)
     )
     assert alpha_ok is True
-    assert bg_alpha_max == 0
+    assert bg_alpha_max == expected_bg_alpha_max
     assert content_alpha_frac > 0
     assert transparent_frac >= 0.05
 
@@ -244,60 +261,6 @@ def test_validate_alpha_full_bleed_opaque_not_ok_no_raise(tmp_path):
     assert alpha_ok is False
     assert bg_alpha_max == 255
     assert transparent_frac == 0.0
-
-
-def test_validate_alpha_content_touching_corner_is_ok(tmp_path):
-    def make(size):
-        w, h = size
-        arr = np.zeros((h, w, 4), dtype=np.uint8)
-        arr[0 : h // 2, 0 : w // 2] = [255, 0, 0, 255]
-        arr[0, :] = [0, 0, 0, 0]
-        arr[-1, :] = [0, 0, 0, 0]
-        arr[:, 0] = [0, 0, 0, 0]
-        arr[:, -1] = [0, 0, 0, 0]
-        return arr
-
-    path = _write_png(tmp_path, "RGBA", (200, 100), make)
-    alpha_ok, bg_alpha_max, content_alpha_frac, transparent_frac = dse.validate_alpha(
-        path, expected_size=(200, 100)
-    )
-    assert alpha_ok is True
-    assert bg_alpha_max == 0
-    assert content_alpha_frac > 0
-    assert transparent_frac >= 0.05
-
-
-def test_validate_alpha_opaque_bottom_band_ok_via_clean_top_edge(tmp_path):
-    def make(size):
-        w, h = size
-        arr = np.zeros((h, w, 4), dtype=np.uint8)
-        arr[h - 10 :, :] = [0, 0, 0, 255]
-        return arr
-
-    path = _write_png(tmp_path, "RGBA", (200, 100), make)
-    alpha_ok, bg_alpha_max, content_alpha_frac, transparent_frac = dse.validate_alpha(
-        path, expected_size=(200, 100)
-    )
-    assert alpha_ok is True
-    assert bg_alpha_max == 0
-    assert content_alpha_frac > 0
-    assert transparent_frac >= 0.05
-
-
-def test_validate_alpha_all_edges_touched_with_transparent_centre_is_ok(tmp_path):
-    def make(size):
-        w, h = size
-        arr = np.full((h, w, 4), 255, dtype=np.uint8)
-        arr[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4] = [0, 0, 0, 0]
-        return arr
-
-    path = _write_png(tmp_path, "RGBA", (200, 100), make)
-    alpha_ok, bg_alpha_max, content_alpha_frac, transparent_frac = dse.validate_alpha(
-        path, expected_size=(200, 100)
-    )
-    assert bg_alpha_max == 255
-    assert transparent_frac >= 0.05
-    assert alpha_ok is True
 
 
 def test_validate_alpha_uniform_alpha_one_not_ok(tmp_path):
@@ -337,18 +300,21 @@ def test_validate_alpha_wrong_size_raises(tmp_path):
 # --- write_manifest --------------------------------------------------------------
 
 
+def _asset(tmp_path, slide, stage_index=1, **fields):
+    values = dict(
+        width=1920, height=1080, alpha_ok=True, bg_alpha_max=0, content_alpha_frac=0.1,
+        transparent_frac=0.5, source_name=f"Scratch.{stage_index:03d}.png",
+    )
+    values.update(fields)
+    return dse.StageAsset(
+        slide=slide, stage_index=stage_index, path=tmp_path / dse.stage_name("Deck", slide, stage_index), **values
+    )
+
+
 def test_manifest_shape_and_clip_linkage(tmp_path):
     assets = [
-        dse.StageAsset(
-            slide=5, stage_index=1, path=tmp_path / "Deck.005.01.png",
-            width=1920, height=1080, alpha_ok=True, bg_alpha_max=0,
-            content_alpha_frac=0.1, transparent_frac=0.5, source_name="Scratch.001.png",
-        ),
-        dse.StageAsset(
-            slide=5, stage_index=2, path=tmp_path / "Deck.005.02.png",
-            width=1920, height=1080, alpha_ok=False, bg_alpha_max=200,
-            content_alpha_frac=0.9, transparent_frac=0.02, source_name="Scratch.002.png",
-        ),
+        _asset(tmp_path, 5),
+        _asset(tmp_path, 5, 2, alpha_ok=False, bg_alpha_max=200, content_alpha_frac=0.9, transparent_frac=0.02),
     ]
     clip_path = tmp_path / "Deck.005.mov"
     path = dse.write_manifest(
@@ -372,11 +338,7 @@ def test_manifest_shape_and_clip_linkage(tmp_path):
 
 def test_manifest_omits_clip_when_none(tmp_path):
     assets = [
-        dse.StageAsset(
-            slide=2, stage_index=1, path=tmp_path / "Deck.002.01.png",
-            width=1920, height=1080, alpha_ok=True, bg_alpha_max=0,
-            content_alpha_frac=0.1, transparent_frac=0.5, source_name="Scratch.001.png",
-        ),
+        _asset(tmp_path, 2),
     ]
     path = dse.write_manifest(tmp_path, Path("Deck.key"), assets, categories={})
     manifest = json.loads(path.read_text())
@@ -385,11 +347,7 @@ def test_manifest_omits_clip_when_none(tmp_path):
 
 def test_manifest_generated_omitted_by_default_and_injectable(tmp_path):
     assets = [
-        dse.StageAsset(
-            slide=2, stage_index=1, path=tmp_path / "Deck.002.01.png",
-            width=1920, height=1080, alpha_ok=True, bg_alpha_max=0,
-            content_alpha_frac=0.1, transparent_frac=0.5, source_name="Scratch.001.png",
-        ),
+        _asset(tmp_path, 2),
     ]
     path = dse.write_manifest(tmp_path, Path("Deck.key"), assets, categories={})
     assert "generated" not in json.loads(path.read_text())
@@ -402,11 +360,7 @@ def test_manifest_generated_omitted_by_default_and_injectable(tmp_path):
 
 def test_manifest_is_deterministic_sort_keys(tmp_path):
     assets = [
-        dse.StageAsset(
-            slide=2, stage_index=1, path=tmp_path / "Deck.002.01.png",
-            width=1920, height=1080, alpha_ok=True, bg_alpha_max=0,
-            content_alpha_frac=0.1, transparent_frac=0.5, source_name="Scratch.001.png",
-        ),
+        _asset(tmp_path, 2),
     ]
     path1 = dse.write_manifest(tmp_path, Path("Deck.key"), assets, categories={2: "built"})
     text1 = path1.read_text()
@@ -419,17 +373,12 @@ def test_manifest_is_deterministic_sort_keys(tmp_path):
 # --- read_manifest ------------------------------------------------------------------
 
 
-def test_read_manifest_absent(tmp_path):
-    assert dse.read_manifest(tmp_path) is None
-
-
-def test_read_manifest_invalid_json(tmp_path):
-    (tmp_path / "manifest.json").write_text("{not json")
-    assert dse.read_manifest(tmp_path) is None
-
-
-def test_read_manifest_non_dict(tmp_path):
-    (tmp_path / "manifest.json").write_text(json.dumps([1, 2, 3]))
+@pytest.mark.parametrize(
+    "text", [None, "{not json", json.dumps([1, 2, 3])], ids=["absent", "invalid-json", "non-dict"]
+)
+def test_read_manifest_unreadable_is_none(tmp_path, text):
+    if text is not None:
+        (tmp_path / "manifest.json").write_text(text)
     assert dse.read_manifest(tmp_path) is None
 
 
@@ -438,26 +387,17 @@ def test_read_manifest_valid(tmp_path):
     assert dse.read_manifest(tmp_path) == {"deck": "Deck.key", "slides": {}}
 
 
-def test_read_manifest_deck_mismatch_ignored(tmp_path):
-    deck_a = tmp_path / "DeckA.key"
-    deck_b = tmp_path / "DeckB.key"
-    (tmp_path / "manifest.json").write_text(
-        json.dumps({"deck": str(deck_a), "slides": {"1": {"clip": "DeckA.001.mov"}}})
-    )
-    assert dse.read_manifest(tmp_path, deck=deck_b) is None
-
-
-def test_read_manifest_deck_match_returned(tmp_path):
-    deck_a = tmp_path / "DeckA.key"
-    (tmp_path / "manifest.json").write_text(
-        json.dumps({"deck": str(deck_a), "slides": {"1": {"clip": "DeckA.001.mov"}}})
-    )
-    assert dse.read_manifest(tmp_path, deck=deck_a) is not None
-
-
-def test_read_manifest_no_deck_field_ignored_when_deck_requested(tmp_path):
-    (tmp_path / "manifest.json").write_text(json.dumps({"slides": {}}))
-    assert dse.read_manifest(tmp_path, deck=tmp_path / "Deck.key") is None
+@pytest.mark.parametrize(
+    "recorded, requested, found",
+    [("DeckA.key", "DeckB.key", False), ("DeckA.key", "DeckA.key", True), (None, "Deck.key", False)],
+    ids=["deck-mismatch-ignored", "deck-match-returned", "no-deck-field-ignored"],
+)
+def test_read_manifest_filters_by_deck(tmp_path, recorded, requested, found):
+    manifest = {"slides": {"1": {"clip": "DeckA.001.mov"}}}
+    if recorded:
+        manifest["deck"] = str(tmp_path / recorded)
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    assert dse.read_manifest(tmp_path, deck=tmp_path / requested) == (manifest if found else None)
 
 
 # --- write_manifest existing/source_slides merge ------------------------------------
@@ -491,16 +431,8 @@ def test_manifest_existing_stages_replaced_for_updated_slide(tmp_path):
         },
     }
     assets = [
-        dse.StageAsset(
-            slide=3, stage_index=1, path=tmp_path / "Deck.003.01.png",
-            width=1920, height=1080, alpha_ok=True, bg_alpha_max=0,
-            content_alpha_frac=0.1, transparent_frac=0.5, source_name="Scratch.001.png",
-        ),
-        dse.StageAsset(
-            slide=3, stage_index=2, path=tmp_path / "Deck.003.02.png",
-            width=1920, height=1080, alpha_ok=True, bg_alpha_max=0,
-            content_alpha_frac=0.2, transparent_frac=0.4, source_name="Scratch.002.png",
-        ),
+        _asset(tmp_path, 3),
+        _asset(tmp_path, 3, 2, content_alpha_frac=0.2, transparent_frac=0.4),
     ]
     path = dse.write_manifest(
         tmp_path, Path("Deck.key"), assets, categories={3: "built"}, existing=existing,
@@ -534,11 +466,7 @@ def test_manifest_drops_stale_clip_when_slide_becomes_stages(tmp_path):
         },
     }
     assets = [
-        dse.StageAsset(
-            slide=3, stage_index=1, path=tmp_path / "Deck.003.01.png",
-            width=1920, height=1080, alpha_ok=True, bg_alpha_max=0,
-            content_alpha_frac=0.1, transparent_frac=0.5, source_name="Scratch.001.png",
-        ),
+        _asset(tmp_path, 3),
     ]
     path = dse.write_manifest(
         tmp_path, Path("Deck.key"), assets, categories={3: "built"}, existing=existing,
@@ -560,11 +488,7 @@ def test_manifest_untouched_slide_keeps_both_clip_and_stages(tmp_path):
         },
     }
     assets = [
-        dse.StageAsset(
-            slide=2, stage_index=1, path=tmp_path / "Deck.002.01.png",
-            width=1920, height=1080, alpha_ok=True, bg_alpha_max=0,
-            content_alpha_frac=0.1, transparent_frac=0.5, source_name="Scratch.001.png",
-        ),
+        _asset(tmp_path, 2),
     ]
     path = dse.write_manifest(
         tmp_path, Path("Deck.key"), assets, categories={2: "mixed"}, existing=existing,
@@ -808,37 +732,36 @@ def _script():
     )
 
 
-def test_script_uses_application_id_not_app_display_name():
+@pytest.mark.parametrize(
+    "present, absent",
+    [
+        (["application id"], ["Keynote Creator Studio", 'tell application "Keynote"']),
+        (["as slide images", "all stages:true", "image format:PNG", "skipped slides:false"], []),
+        (
+            ['POSIX file "/work/stages/stage_003"', 'POSIX file "/work/stages/stage_007"'],
+            ["/work/stages/stage_003.png"],
+        ),
+        (["(j is not 1)", "(j is not 2)"], []),
+        (["close theDoc saving no"], []),
+        (['"Blank Black"'], []),
+        (["on error errMsg number errNum", 'log ("ERR"'], []),
+    ],
+    ids=[
+        "application-id-not-display-name", "export-clause-shape", "one-folder-per-slide",
+        "toggles-skipped-per-slide-ordinal", "closes-without-saving", "transparent-layout-names",
+        "error-clause",
+    ],
+)
+def test_script_clauses(present, absent):
     script = _script()
-    assert "application id" in script
-    assert "Keynote Creator Studio" not in script
-    assert 'tell application "Keynote"' not in script
-
-
-def test_script_export_clause_shape():
-    script = _script()
-    assert "as slide images" in script
-    assert "all stages:true" in script
-    assert "image format:PNG" in script
-    assert "skipped slides:false" in script
-
-
-def test_script_destination_is_one_folder_per_slide():
-    script = _script()
-    assert 'POSIX file "/work/stages/stage_003"' in script
-    assert 'POSIX file "/work/stages/stage_007"' in script
-    assert "/work/stages/stage_003.png" not in script
+    for text in present:
+        assert text in script
+    for text in absent:
+        assert text not in script
 
 
 def test_script_has_n_export_clauses():
-    script = _script()
-    assert script.count("as slide images") == 2
-
-
-def test_script_toggles_skipped_per_slide_ordinal():
-    script = _script()
-    assert "(j is not 1)" in script
-    assert "(j is not 2)" in script
+    assert _script().count("as slide images") == 2
 
 
 def test_script_wipes_each_stage_folder_before_its_export():
@@ -850,21 +773,11 @@ def test_script_wipes_each_stage_folder_before_its_export():
         assert wipe_idx < export_idx
 
 
-def test_script_closes_without_saving():
-    script = _script()
-    assert "close theDoc saving no" in script
-
-
 def test_script_deletes_non_targets_descending():
     script = _script()
     lines = script.splitlines()
     delete_idx = next(i for i, l in enumerate(lines) if "repeat with i from 10 to 1 by -1" in l)
     assert "delete slide i of theDoc" in lines[delete_idx + 1]
-
-
-def test_script_has_transparent_layout_block_with_names():
-    script = _script()
-    assert '"Blank Black"' in script
 
 
 def test_script_with_layout_template_emits_literal_layout_names_not_the_var_name():
@@ -893,7 +806,7 @@ def test_script_default_args_touch_no_layouts():
     assert "set skipped of s to false" not in script
 
 
-def test_script_captures_and_restores_original_skipped(monkeypatch):
+def test_script_captures_and_restores_original_skipped():
     script = dse.build_stage_script(
         Path("/work/Scratch.key"), [3, 7], 10, Path("/work/stages"), unskip_all=True
     )
@@ -909,12 +822,6 @@ def test_script_captures_and_restores_original_skipped(monkeypatch):
     end_try_idx = script.index("end try", reraise_idx)
     success_restore_idx = script.index(restore_line, end_try_idx)
     assert on_error_idx < error_restore_idx < reraise_idx < end_try_idx < success_restore_idx
-
-
-def test_script_has_error_clause():
-    script = _script()
-    assert "on error errMsg number errNum" in script
-    assert 'log ("ERR"' in script
 
 
 # --- export_stage_pngs end-to-end with a fake LiveBatch --------------------------
@@ -970,14 +877,18 @@ def _payload(width=1920, height=1080, skipped_numbers=()):
     }
 
 
+def _patch_export(monkeypatch, batch, payload=None):
+    monkeypatch.setattr(dse, "LiveBatch", batch)
+    monkeypatch.setattr(dse, "offline_wall_payload", lambda d: payload or _payload())
+    monkeypatch.setattr(dse, "deck_builds", lambda d: {1: {}, 2: {}})
+
+
 def test_export_stage_pngs_end_to_end(tmp_path, monkeypatch):
     deck = tmp_path / "Deck.key"
     deck.touch()
     out_dir = tmp_path / "out"
 
-    monkeypatch.setattr(dse, "LiveBatch", _make_fake_batch({2: 3}))
-    monkeypatch.setattr(dse, "offline_wall_payload", lambda d: _payload())
-    monkeypatch.setattr(dse, "deck_builds", lambda d: {1: {}, 2: {}})
+    _patch_export(monkeypatch, _make_fake_batch({2: 3}))
 
     assets = dse.export_stage_pngs(
         deck, [2], out_dir,
@@ -1003,9 +914,7 @@ def test_export_stage_pngs_write_manifest_false_skips_write(tmp_path, monkeypatc
     out_dir = tmp_path / "out"
     out_dir.mkdir()
 
-    monkeypatch.setattr(dse, "LiveBatch", _make_fake_batch({2: 3}))
-    monkeypatch.setattr(dse, "offline_wall_payload", lambda d: _payload())
-    monkeypatch.setattr(dse, "deck_builds", lambda d: {1: {}, 2: {}})
+    _patch_export(monkeypatch, _make_fake_batch({2: 3}))
 
     assets = dse.export_stage_pngs(
         deck, [2], out_dir,
@@ -1037,9 +946,7 @@ def test_export_stage_pngs_failure_leaves_previous_manifest_untouched(tmp_path, 
         def __exit__(self, *exc):
             return False
 
-    monkeypatch.setattr(dse, "LiveBatch", _FailingBatch)
-    monkeypatch.setattr(dse, "offline_wall_payload", lambda d: _payload())
-    monkeypatch.setattr(dse, "deck_builds", lambda d: {1: {}, 2: {}})
+    _patch_export(monkeypatch, _FailingBatch)
 
     with pytest.raises(RuntimeError, match="Keynote stage export failed"):
         dse.export_stage_pngs(
@@ -1076,9 +983,7 @@ def test_export_stage_pngs_err_line_surfaces_errnum_and_message(tmp_path, monkey
         def __exit__(self, *exc):
             return False
 
-    monkeypatch.setattr(dse, "LiveBatch", _ErrBatch)
-    monkeypatch.setattr(dse, "offline_wall_payload", lambda d: _payload())
-    monkeypatch.setattr(dse, "deck_builds", lambda d: {1: {}, 2: {}})
+    _patch_export(monkeypatch, _ErrBatch)
 
     with pytest.raises(RuntimeError, match=r"errNum -1712.*msg"):
         dse.export_stage_pngs(
@@ -1093,9 +998,7 @@ def test_export_stage_pngs_multi_slide_each_own_folder(tmp_path, monkeypatch):
     deck.touch()
     out_dir = tmp_path / "out"
 
-    monkeypatch.setattr(dse, "LiveBatch", _make_fake_batch({1: 2, 2: 3}))
-    monkeypatch.setattr(dse, "offline_wall_payload", lambda d: _payload())
-    monkeypatch.setattr(dse, "deck_builds", lambda d: {1: {}, 2: {}})
+    _patch_export(monkeypatch, _make_fake_batch({1: 2, 2: 3}))
 
     assets = dse.export_stage_pngs(
         deck, [1, 2], out_dir, expected_stage_counts={1: 2, 2: 3},
@@ -1109,9 +1012,7 @@ def test_export_stage_pngs_refuses_wrong_geometry(tmp_path, monkeypatch):
     deck = tmp_path / "Deck.key"
     deck.touch()
 
-    monkeypatch.setattr(dse, "LiveBatch", _make_fake_batch({2: 3}))
-    monkeypatch.setattr(dse, "offline_wall_payload", lambda d: _payload(width=200, height=100))
-    monkeypatch.setattr(dse, "deck_builds", lambda d: {1: {}, 2: {}})
+    _patch_export(monkeypatch, _make_fake_batch({2: 3}), _payload(width=200, height=100))
 
     with pytest.raises(ValueError, match="geometry"):
         dse.export_stage_pngs(deck, [2], tmp_path / "out", expected_stage_counts={2: 3})
@@ -1121,9 +1022,7 @@ def test_export_stage_pngs_refuses_skipped_slide_by_default(tmp_path, monkeypatc
     deck = tmp_path / "Deck.key"
     deck.touch()
 
-    monkeypatch.setattr(dse, "LiveBatch", _make_fake_batch({2: 3}))
-    monkeypatch.setattr(dse, "offline_wall_payload", lambda d: _payload(skipped_numbers=(2,)))
-    monkeypatch.setattr(dse, "deck_builds", lambda d: {1: {}, 2: {}})
+    _patch_export(monkeypatch, _make_fake_batch({2: 3}), _payload(skipped_numbers=(2,)))
 
     with pytest.raises(ValueError, match="skipped"):
         dse.export_stage_pngs(
@@ -1136,9 +1035,7 @@ def test_export_stage_pngs_allows_skipped_slide_when_opted_in(tmp_path, monkeypa
     deck = tmp_path / "Deck.key"
     deck.touch()
 
-    monkeypatch.setattr(dse, "LiveBatch", _make_fake_batch({2: 3}))
-    monkeypatch.setattr(dse, "offline_wall_payload", lambda d: _payload(skipped_numbers=(2,)))
-    monkeypatch.setattr(dse, "deck_builds", lambda d: {1: {}, 2: {}})
+    _patch_export(monkeypatch, _make_fake_batch({2: 3}), _payload(skipped_numbers=(2,)))
 
     assets = dse.export_stage_pngs(
         deck, [2], tmp_path / "out",
@@ -1166,9 +1063,7 @@ def test_export_stage_pngs_runs_offline_layout_precondition_before_batch(tmp_pat
         calls.append((fw_deck, layout_template, tuple(layout_names)))
         raise dse.dsk_live.LayoutImportRefusal("unsafe donor")
 
-    monkeypatch.setattr(dse, "LiveBatch", _batch_forbidden)
-    monkeypatch.setattr(dse, "offline_wall_payload", lambda d: _payload())
-    monkeypatch.setattr(dse, "deck_builds", lambda d: {1: {}, 2: {}})
+    _patch_export(monkeypatch, _batch_forbidden)
     monkeypatch.setattr(dse.dsk_live, "check_layout_import_preconditions", _fake_check)
 
     with pytest.raises(dse.dsk_live.LayoutImportRefusal, match="unsafe donor"):
@@ -1222,9 +1117,7 @@ def test_export_stage_pngs_real_checker_proceeds_with_default_names_and_safe_don
         return (donor_objects, {}, {}) if Path(path) == template else (fw_objects, {}, {})
 
     monkeypatch.setattr(dse.dsk_live, "_load_deck", _dispatched_load_deck)
-    monkeypatch.setattr(dse, "LiveBatch", _make_fake_batch({2: 3}))
-    monkeypatch.setattr(dse, "offline_wall_payload", lambda d: _payload())
-    monkeypatch.setattr(dse, "deck_builds", lambda d: {1: {}, 2: {}})
+    _patch_export(monkeypatch, _make_fake_batch({2: 3}))
 
     assets = dse.export_stage_pngs(
         deck, [2], tmp_path / "out",
@@ -1239,9 +1132,7 @@ def test_export_stage_pngs_skips_precondition_when_layouts_untouched(tmp_path, m
     deck = tmp_path / "Deck.key"
     deck.touch()
 
-    monkeypatch.setattr(dse, "LiveBatch", _make_fake_batch({2: 3}))
-    monkeypatch.setattr(dse, "offline_wall_payload", lambda d: _payload())
-    monkeypatch.setattr(dse, "deck_builds", lambda d: {1: {}, 2: {}})
+    _patch_export(monkeypatch, _make_fake_batch({2: 3}))
 
     def _forbidden(*_a, **_k):
         raise AssertionError("precondition must not run when layouts are left untouched")
@@ -1291,9 +1182,7 @@ def test_export_stage_pngs_export_folder_fresh_per_attempt(tmp_path, monkeypatch
         def __exit__(self, *exc):
             return False
 
-    monkeypatch.setattr(dse, "LiveBatch", _RetryBatch)
-    monkeypatch.setattr(dse, "offline_wall_payload", lambda d: _payload())
-    monkeypatch.setattr(dse, "deck_builds", lambda d: {1: {}, 2: {}})
+    _patch_export(monkeypatch, _RetryBatch)
 
     with pytest.raises(dse.StageCountMismatch):
         dse.export_stage_pngs(deck, [2], tmp_path / "out1", expected_stage_counts={2: 3})

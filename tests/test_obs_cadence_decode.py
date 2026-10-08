@@ -140,21 +140,23 @@ def test_unmeasured_grey_marker_reads_as_no_phase():
     assert decode.phase_of(frame)[0] is None
 
 
-def test_lossless_guard_rejects_a_non_allowlisted_codec():
-    with pytest.raises(decode.NotLossless):
-        decode.check_lossless({"codec": "h264", "pix_fmt": "yuv420p"})
-    with pytest.raises(decode.NotLossless):
-        decode.check_lossless({})
+@pytest.mark.parametrize(
+    "meta, match",
+    [
+        ({"codec": "h264", "pix_fmt": "yuv420p"}, None),
+        ({}, None),
+        ({"codec": "utvideo", "pix_fmt": "gbrp"}, r"lossless codec \(4:2:0\)"),
+    ],
+    ids=["non-allowlisted-codec", "no-stream-info", "utvideo-outside-pix-fmt-allowlist"],
+)
+def test_lossless_guard_rejects(meta, match):
+    with pytest.raises(decode.NotLossless, match=match):
+        decode.check_lossless(meta)
 
 
 def test_lossless_guard_accepts_the_allowlisted_pair_with_ffmpeg_colour_suffix():
     decode.check_lossless({"codec": "utvideo", "pix_fmt": "yuv420p(bt709/unknown/unknown)"})
     decode.check_lossless({"codec": "utvideo", "pix_fmt": "yuv420p"})
-
-
-def test_lossless_guard_rejects_utvideo_in_a_pix_fmt_outside_the_allowlist():
-    with pytest.raises(decode.NotLossless, match=r"lossless codec \(4:2:0\)"):
-        decode.check_lossless({"codec": "utvideo", "pix_fmt": "gbrp"})
 
 
 def test_decode_recording_refuses_before_reading_frames(monkeypatch):
@@ -272,7 +274,6 @@ import binary_counter_movie as movie  # noqa: E402
 from PIL import Image, ImageFont  # noqa: E402
 
 FONT = ImageFont.load_default(size=movie.DIGITS_SIZE)
-SCALE = 952 / 1920
 
 
 def movie_rgb(index: int) -> np.ndarray:

@@ -9,7 +9,6 @@ import copy
 import io
 import re
 import zipfile
-from pathlib import Path
 
 import pytest
 

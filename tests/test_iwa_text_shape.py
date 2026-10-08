@@ -166,13 +166,18 @@ def test_flags0_centre_anchor():
 # Font-missing guard — the top accuracy risk.
 # --------------------------------------------------------------------------
 @needs_appkit
-def test_font_missing_marks_unvouched():
+@pytest.mark.parametrize(("font", "reason"), [
+    ("NoSuchFontFamily-XYZ", "font-missing"),
+    ("Helvetica", "uncalibrated-font"),
+], ids=["font-missing", "gate-b1-installed-uncalibrated"])
+def test_unvouched_font_gates(font, reason):
+    # Substitute-font metrics are not trusted; Helvetica is installed (so NOT
+    # font-missing) but absent from HEIGHT_MODEL. Both still emit best-effort geometry.
     objects: dict = {}
-    rec = _textbox(objects, "tm", flags=1, x=0.0, y=0.0, nw=300.0,
-                   font="NoSuchFontFamily-XYZ", text=_WRAP)
+    rec = _textbox(objects, "tm", flags=1, x=0.0, y=0.0, nw=300.0, font=font, text=_WRAP)
     tg = compose_text_geometry(rec, objects, {})
-    assert tg.reason == "font-missing"  # substitute-font metrics -> not trusted
-    assert tg.w == 300.0 and tg.h > 0.0  # still emits best-effort geometry
+    assert tg.reason == reason
+    assert tg.w == 300.0 and tg.h > 0.0
 
 
 @needs_appkit
@@ -182,20 +187,6 @@ def test_calibrated_installed_font_is_vouched():
     rec = _textbox(objects, "ok", flags=1, x=0.0, y=0.0, nw=300.0,
                    font="AzoSans-Regular", text=_WRAP)
     assert compose_text_geometry(rec, objects, {}).reason is None
-
-
-# --------------------------------------------------------------------------
-# Gate B1 — an installed-but-UNCALIBRATED font (no HEIGHT_MODEL entry) gates.
-# --------------------------------------------------------------------------
-@needs_appkit
-def test_installed_uncalibrated_font_gates():
-    # Helvetica is installed (so NOT font-missing) but absent from HEIGHT_MODEL.
-    objects: dict = {}
-    rec = _textbox(objects, "unc", flags=1, x=0.0, y=0.0, nw=300.0,
-                   font="Helvetica", text=_WRAP)
-    tg = compose_text_geometry(rec, objects, {})
-    assert tg.reason == "uncalibrated-font"
-    assert tg.w == 300.0 and tg.h > 0.0  # still emits best-effort geometry
 
 
 # --------------------------------------------------------------------------

@@ -507,16 +507,13 @@ def test_export_maps_job_appends_credits_slide_when_attribution_credits(monkeypa
         assert script_with.count("make new slide") - script_without.count("make new slide") == 1
 
 
-def test_export_maps_job_omits_credits_slide_when_attribution_stamp(monkeypatch, tmp_path: Path):
-    scripts = _export_scripts(monkeypatch, tmp_path, attribution="stamp", credits=["© OpenStreetMap contributors"])
+@pytest.mark.parametrize(
+    "attribution, present", [("stamp", False), (None, True)], ids=["stamp_omits", "missing_appends"]
+)
+def test_export_maps_job_credits_slide_follows_attribution(monkeypatch, tmp_path: Path, attribution, present):
+    scripts = _export_scripts(monkeypatch, tmp_path, attribution=attribution, credits=["© OpenStreetMap contributors"])
     for script in scripts:
-        assert "© OpenStreetMap" not in script
-
-
-def test_export_maps_job_appends_credits_slide_when_attribution_missing(monkeypatch, tmp_path: Path):
-    scripts = _export_scripts(monkeypatch, tmp_path, attribution=None, credits=["© OpenStreetMap contributors"])
-    for script in scripts:
-        assert "© OpenStreetMap" in script
+        assert ("© OpenStreetMap" in script) is present
 
 
 def test_credits_slide_not_rescaled_in_dsk_script(monkeypatch, tmp_path: Path):
@@ -748,28 +745,26 @@ def _landmark_church(**extra) -> dict:
     return row
 
 
-def test_landmark_scale_with_map_zoom_in_doubles_width(tmp_path: Path):
+@pytest.mark.parametrize(
+    "zoom, extra, width",
+    [
+        (6, {"scaleWithMap": True, "sizeZoom": 5}, 200),
+        (4, {"scaleWithMap": True, "sizeZoom": 5}, 50),
+        (6, {"sizeZoom": 5}, 100),
+        (40, {"scaleWithMap": True, "sizeZoom": 5, "size": 100}, 20000),
+    ],
+    ids=["zoom_in_doubles", "zoom_out_halves", "off_is_unchanged", "clamps_at_effective_size_max"],
+)
+def test_landmark_scale_with_map_width(tmp_path: Path, zoom, extra, width):
     asset_root = tmp_path / "assets"
     _dummy_png(asset_root / "asset1.png")
-    camera = _camera(3.0, 101.0, 6)
-    slide = _slide("s1", camera, churches=[_landmark_church(scaleWithMap=True, sizeZoom=5)])
+    camera = _camera(3.0, 101.0, zoom)
+    slide = _slide("s1", camera, churches=[_landmark_church(**extra)])
     still = _dummy_png(tmp_path / "s1.png")
     items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
         pin_root=tmp_path / "pins")
     landmark = next(item for item in items if item.get("landmark"))
-    assert landmark["w"] == 200
-
-
-def test_landmark_scale_with_map_zoom_out_halves_width(tmp_path: Path):
-    asset_root = tmp_path / "assets"
-    _dummy_png(asset_root / "asset1.png")
-    camera = _camera(3.0, 101.0, 4)
-    slide = _slide("s1", camera, churches=[_landmark_church(scaleWithMap=True, sizeZoom=5)])
-    still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
-        pin_root=tmp_path / "pins")
-    landmark = next(item for item in items if item.get("landmark"))
-    assert landmark["w"] == 50
+    assert landmark["w"] == width
 
 
 def test_landmark_scale_with_map_zoom_in_doubles_width_on_morph_plate(tmp_path: Path):
@@ -787,30 +782,6 @@ def test_landmark_scale_with_map_zoom_in_doubles_width_on_morph_plate(tmp_path: 
     assert landmark["w"] == 200
 
 
-def test_landmark_scale_with_map_off_is_unchanged(tmp_path: Path):
-    asset_root = tmp_path / "assets"
-    _dummy_png(asset_root / "asset1.png")
-    camera = _camera(3.0, 101.0, 6)
-    slide = _slide("s1", camera, churches=[_landmark_church(sizeZoom=5)])
-    still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
-        pin_root=tmp_path / "pins")
-    landmark = next(item for item in items if item.get("landmark"))
-    assert landmark["w"] == 100
-
-
-def test_landmark_scale_with_map_clamps_at_effective_size_max(tmp_path: Path):
-    asset_root = tmp_path / "assets"
-    _dummy_png(asset_root / "asset1.png")
-    camera = _camera(3.0, 101.0, 40)
-    slide = _slide("s1", camera, churches=[_landmark_church(scaleWithMap=True, sizeZoom=5, size=100)])
-    still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
-        pin_root=tmp_path / "pins")
-    landmark = next(item for item in items if item.get("landmark"))
-    assert landmark["w"] == 20000
-
-
 def _dot_church(**extra) -> dict:
     row = {"id": "dot", "name": "Dot", "lat": 3.0, "lon": 101.0, "kind": "dot", "color": "#c44a42", "size": 100}
     row.update(extra)
@@ -823,70 +794,24 @@ def _drop_pin_church(**extra) -> dict:
     return row
 
 
-def test_dot_scale_with_map_zoom_in_doubles_width(tmp_path: Path):
-    camera = _camera(3.0, 101.0, 6)
-    slide = _slide("s1", camera, churches=[_dot_church(scaleWithMap=True, sizeZoom=5)])
+@pytest.mark.parametrize("make_church", [_dot_church, _drop_pin_church], ids=["dot", "drop_pin"])
+@pytest.mark.parametrize(
+    "zoom, extra, width",
+    [
+        (6, {"scaleWithMap": True, "sizeZoom": 5}, 200),
+        (4, {"scaleWithMap": True, "sizeZoom": 5}, 50),
+        (6, {"sizeZoom": 5}, 100),
+    ],
+    ids=["zoom_in_doubles", "zoom_out_halves", "off_is_unchanged"],
+)
+def test_pin_scale_with_map_width(tmp_path: Path, make_church, zoom, extra, width):
+    camera = _camera(3.0, 101.0, zoom)
+    slide = _slide("s1", camera, churches=[make_church(**extra)])
     still = _dummy_png(tmp_path / "s1.png")
     items = build_slide_items(
         slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
     )
-    oval = _pin_items(items)[0]
-    assert oval["w"] == 200
-
-
-def test_dot_scale_with_map_zoom_out_halves_width(tmp_path: Path):
-    camera = _camera(3.0, 101.0, 4)
-    slide = _slide("s1", camera, churches=[_dot_church(scaleWithMap=True, sizeZoom=5)])
-    still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(
-        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
-    )
-    oval = _pin_items(items)[0]
-    assert oval["w"] == 50
-
-
-def test_dot_scale_with_map_off_is_unchanged(tmp_path: Path):
-    camera = _camera(3.0, 101.0, 6)
-    slide = _slide("s1", camera, churches=[_dot_church(sizeZoom=5)])
-    still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(
-        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
-    )
-    oval = _pin_items(items)[0]
-    assert oval["w"] == 100
-
-
-def test_drop_pin_scale_with_map_zoom_in_doubles_width(tmp_path: Path):
-    camera = _camera(3.0, 101.0, 6)
-    slide = _slide("s1", camera, churches=[_drop_pin_church(scaleWithMap=True, sizeZoom=5)])
-    still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(
-        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
-    )
-    head = _pin_items(items)[0]
-    assert head["w"] == 200
-
-
-def test_drop_pin_scale_with_map_zoom_out_halves_width(tmp_path: Path):
-    camera = _camera(3.0, 101.0, 4)
-    slide = _slide("s1", camera, churches=[_drop_pin_church(scaleWithMap=True, sizeZoom=5)])
-    still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(
-        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
-    )
-    head = _pin_items(items)[0]
-    assert head["w"] == 50
-
-
-def test_drop_pin_scale_with_map_off_is_unchanged(tmp_path: Path):
-    camera = _camera(3.0, 101.0, 6)
-    slide = _slide("s1", camera, churches=[_drop_pin_church(sizeZoom=5)])
-    still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(
-        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
-    )
-    head = _pin_items(items)[0]
-    assert head["w"] == 100
+    assert _pin_items(items)[0]["w"] == width
 
 
 def test_landmark_sub_one_px_is_dropped_but_others_remain(tmp_path: Path):
@@ -1518,51 +1443,37 @@ def test_coerce_cg_layer_override_can_demote_while_lw_stays_morph():
     assert coerce_link_kinds([a, b], links)[0]["kind"] == "morph"
 
 
-def test_export_plan_stills_and_plates_carry_hidden_layers():
+@pytest.mark.parametrize(
+    "field, extra, expected",
+    [
+        ("hiddenLayers", {"hiddenLayers": ["pois"]}, ["pois"]),
+        ("hiddenLayers", {}, list(DEFAULT_HIDDEN_LAYERS)),
+        ("hillshade", {"hillshade": True}, True),
+    ],
+    ids=["hidden_layers", "hidden_layers_default_when_unset", "hillshade"],
+)
+def test_export_plan_stills_and_plates_carry_appearance(field, extra, expected):
     cam_a, cam_b = _pan_camera(8, 400)
-    a = _slide("s1", cam_a, hiddenLayers=["pois"])
-    b = _slide("s2", cam_b, hiddenLayers=["pois"])
+    a = _slide("s1", cam_a, **extra)
+    b = _slide("s2", cam_b, **extra)
     plan = maps_export_plan([a, b], [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2}])
     assert plan["stills"] == []
-    assert plan["plates"][0]["hiddenLayers"] == ["pois"]
+    assert plan["plates"][0][field] == expected
     plan_cut = maps_export_plan([a, b], [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.2}])
-    assert {row["slideId"]: row["hiddenLayers"] for row in plan_cut["stills"]} == {"s1": ["pois"], "s2": ["pois"]}
+    assert {row["slideId"]: row[field] for row in plan_cut["stills"]} == {"s1": expected, "s2": expected}
 
 
-def test_export_plan_plate_rows_carry_slide_ids_full_wall():
-    """FW slides (includeSidePanels) capture at WALL_WIDTH; the dashboard picks export scale 4
-    (exportScale(7680) === 4, dashboard/src/maps/types.ts) from the plate's slideIds."""
+@pytest.mark.parametrize("side_panels", [True, False], ids=["full_wall", "centre_only"])
+def test_export_plan_plate_rows_carry_slide_ids(side_panels):
+    """FW slides (includeSidePanels) capture at WALL_WIDTH and centre-only slides at CENTRE_WIDTH;
+    the dashboard picks export scale 4 or 2 (exportScale, dashboard/src/maps/types.ts) from the
+    plate's slideIds."""
     cam_a, cam_b = _pan_camera(8, 400)
-    a = _slide("s1", cam_a, includeSidePanels=True)
-    b = _slide("s2", cam_b, includeSidePanels=True)
+    a = _slide("s1", cam_a, includeSidePanels=side_panels)
+    b = _slide("s2", cam_b, includeSidePanels=side_panels)
     plan = maps_export_plan([a, b], [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2}])
     assert len(plan["plates"]) == 1
     assert plan["plates"][0]["slideIds"] == ["s1", "s2"]
-
-
-def test_export_plan_plate_rows_carry_slide_ids_centre_only():
-    """Centre-only slides capture at CENTRE_WIDTH; the dashboard picks export scale 2
-    (exportScale(3840) === 2) from the same slideIds field."""
-    cam_a, cam_b = _pan_camera(8, 400)
-    a = _slide("s1", cam_a, includeSidePanels=False)
-    b = _slide("s2", cam_b, includeSidePanels=False)
-    plan = maps_export_plan([a, b], [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2}])
-    assert len(plan["plates"]) == 1
-    assert plan["plates"][0]["slideIds"] == ["s1", "s2"]
-
-
-def test_export_plan_hidden_layers_default_when_unset():
-    cam_a, cam_b = _pan_camera(8, 400)
-    a = _slide("s1", cam_a)
-    b = _slide("s2", cam_b)
-    plan = maps_export_plan([a, b], [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2}])
-    assert plan["stills"] == []
-    assert plan["plates"][0]["hiddenLayers"] == list(DEFAULT_HIDDEN_LAYERS)
-    plan_cut = maps_export_plan([a, b], [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.2}])
-    assert {row["slideId"]: row["hiddenLayers"] for row in plan_cut["stills"]} == {
-        "s1": list(DEFAULT_HIDDEN_LAYERS),
-        "s2": list(DEFAULT_HIDDEN_LAYERS),
-    }
 
 
 def test_coerce_cg_hillshade_override_demotes_morph():
@@ -1577,27 +1488,15 @@ def test_coerce_cg_hillshade_override_demotes_morph():
     assert coerce_link_kinds([a, b], links)[0]["kind"] == "morph"
 
 
-def test_export_plan_stills_and_plates_carry_hillshade():
-    cam_a, cam_b = _pan_camera(8, 400)
-    a = _slide("s1", cam_a, hillshade=True)
-    b = _slide("s2", cam_b, hillshade=True)
-    plan = maps_export_plan([a, b], [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2}])
-    assert plan["stills"] == []
-    assert plan["plates"][0]["hillshade"] is True
-    plan_cut = maps_export_plan([a, b], [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.2}])
-    assert {row["slideId"]: row["hillshade"] for row in plan_cut["stills"]} == {"s1": True, "s2": True}
-
-
-def test_export_plan_still_defaults_hidden_layers_when_missing():
-    a = _slide("s1", _camera(3.0, 101.0, 8))
+@pytest.mark.parametrize(
+    "extra, expected",
+    [({}, list(DEFAULT_HIDDEN_LAYERS)), ({"hiddenLayers": []}, [])],
+    ids=["defaults_when_missing", "preserves_explicit_empty"],
+)
+def test_export_plan_still_hidden_layers(extra, expected):
+    a = _slide("s1", _camera(3.0, 101.0, 8), **extra)
     plan = maps_export_plan([a], [])
-    assert plan["stills"][0]["hiddenLayers"] == list(DEFAULT_HIDDEN_LAYERS)
-
-
-def test_export_plan_still_preserves_explicit_empty_hidden_layers():
-    a = _slide("s1", _camera(3.0, 101.0, 8), hiddenLayers=[])
-    plan = maps_export_plan([a], [])
-    assert plan["stills"][0]["hiddenLayers"] == []
+    assert plan["stills"][0]["hiddenLayers"] == expected
 
 
 def test_split_cg_plan_uses_direct_1920_still_capture():
@@ -2433,7 +2332,6 @@ def test_idn_baked_plate_matches_maplibre_dest_at_plus_four_degrees(tmp_path: Pa
     plate_w, plate_h = int(plate["plateW"]), int(plate["plateH"])
     plate_cam = plate["captureCamera"]
     idn_rings, region_rings = _idn_highlight_rings()
-    surface = max(slide_capture_size(s1)[0], slide_capture_size(s2)[0])
     baked = _paint_maplibre_highlights(plate_cam, plate_w, plate_h, idn_rings=idn_rings, region_rings=region_rings)
     plate_dir = tmp_path / "plates"
     plate_path = plate_dir / plate_filename(plate["plateId"])
@@ -4055,8 +3953,6 @@ def test_a_size_less_landmark_labels_at_1x(tmp_path: Path):
 def test_emitted_script_sets_an_integer_font_size_for_a_scaled_label(tmp_path: Path):
     """Keynote's `size` property takes a whole number and the setter runs inside a bare
     `try`, so a fractional scale must be rounded before it reaches the script."""
-    import obed_edom.maps_keynote as mod
-
     churches = [dict(_label_churches()[1], size=round(DROP_SIZE * 2.7))]
     items = _place_labels(tmp_path, churches)
     font = next(item for item in items if item.get("kind") == "text")["fontSize"]
@@ -4201,28 +4097,18 @@ def test_export_plan_movie_destination_has_no_landing_row():
     assert not any(row["slideId"].endswith("__landing") for row in plan["stills"])
 
 
-def test_plate_plans_no_cutout_when_highlighted():
-    a = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"])
-    b = _slide("s2", _camera(3.05, 101.05), highlights=["MYS"])
+@pytest.mark.parametrize("highlights", [["MYS"], []], ids=["highlighted", "without_highlights"])
+def test_plate_plans_no_cutout(highlights):
+    a = _slide("s1", _camera(3.0, 101.0), highlights=highlights)
+    b = _slide("s2", _camera(3.05, 101.05), highlights=highlights)
     links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": False}]
 
     plan = maps_export_plan([a, b], links)
     plates = plan["plates"]
 
     assert plates, "expected a morph plate"
-    assert plates[0]["highlights"] == ["MYS"]
+    assert plates[0]["highlights"] == highlights
     assert "platePngRegions" not in plates[0]
-
-
-def test_plate_plans_no_cutout_without_highlights():
-    a = _slide("s1", _camera(3.0, 101.0))
-    b = _slide("s2", _camera(3.05, 101.05))
-    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": False}]
-
-    plan = maps_export_plan([a, b], links)
-
-    assert plan["plates"]
-    assert "platePngRegions" not in plan["plates"][0]
 
 
 def test_build_slide_items_stacks_the_cutout_without_isolate(tmp_path: Path):
@@ -4431,108 +4317,65 @@ def test_render_reveals_composites_region_pieces_in_order(tmp_path: Path, monkey
     assert (pieces[1][3], pieces[1][4]) == (4, 4)
 
 
-def test_read_region_manifest_returns_none_for_shape_missing_dimensions(tmp_path: Path):
-    missing_dims = tmp_path / "s1-regions.json"
-    missing_dims.write_text(json.dumps({"pieces": []}))
-    assert _read_region_manifest(missing_dims) is None
-
-    not_a_dict = tmp_path / "s2-regions.json"
-    not_a_dict.write_text(json.dumps([1, 2, 3]))
-    assert _read_region_manifest(not_a_dict) is None
-
-    valid = tmp_path / "s3-regions.json"
-    valid.write_text(json.dumps({"width": 10, "height": 10, "pieces": []}))
-    assert _read_region_manifest(valid) == {"width": 10, "height": 10, "pieces": []}
-
-
-def test_read_region_manifest_skips_malformed_pieces(tmp_path: Path):
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        {"pieces": []},
+        [1, 2, 3],
+        {"width": True, "height": 10, "pieces": []},
+        {"width": 10.5, "height": 10, "pieces": []},
+        {"width": -1, "height": 10, "pieces": []},
+    ],
+    ids=["missing_dimensions", "not_a_dict", "bool_dimension", "float_dimension", "negative_dimension"],
+)
+def test_read_region_manifest_returns_none_for_a_bad_shape(tmp_path: Path, manifest):
     path = tmp_path / "s1-regions.json"
-    path.write_text(
-        json.dumps(
-            {
-                "width": 10,
-                "height": 10,
-                "pieces": [
-                    {"id": "MYS", "x": 0, "y": 0, "w": 1, "h": 1},
-                    {"id": "SGP", "x": 0, "y": 0},
-                    "not-a-dict",
-                ],
-            }
-        )
-    )
-    manifest = _read_region_manifest(path)
-    assert manifest["pieces"] == [{"id": "MYS", "x": 0, "y": 0, "w": 1, "h": 1, "index": 0}]
+    path.write_text(json.dumps(manifest))
+    assert _read_region_manifest(path) is None
 
 
-def test_read_region_manifest_rejects_bool_and_non_int_dimensions(tmp_path: Path):
-    bool_dims = tmp_path / "s1-regions.json"
-    bool_dims.write_text(json.dumps({"width": True, "height": 10, "pieces": []}))
-    assert _read_region_manifest(bool_dims) is None
-
-    float_dims = tmp_path / "s2-regions.json"
-    float_dims.write_text(json.dumps({"width": 10.5, "height": 10, "pieces": []}))
-    assert _read_region_manifest(float_dims) is None
-
-    negative_dims = tmp_path / "s3-regions.json"
-    negative_dims.write_text(json.dumps({"width": -1, "height": 10, "pieces": []}))
-    assert _read_region_manifest(negative_dims) is None
+_MYS_PIECE = {"id": "MYS", "x": 0, "y": 0, "w": 1, "h": 1}
 
 
-def test_read_region_manifest_skips_pieces_with_invalid_value_types(tmp_path: Path):
+@pytest.mark.parametrize(
+    "pieces, expected",
+    [
+        ([], []),
+        ([_MYS_PIECE, {"id": "SGP", "x": 0, "y": 0}, "not-a-dict"], [{**_MYS_PIECE, "index": 0}]),
+        (
+            [
+                _MYS_PIECE,
+                {"id": "STR", "x": "0", "y": 0, "w": 1, "h": 1},
+                {"id": "BOOL", "x": True, "y": 0, "w": 1, "h": 1},
+                {"id": "NEG", "x": -1, "y": 0, "w": 1, "h": 1},
+                {"id": "ZERO_W", "x": 0, "y": 0, "w": 0, "h": 1},
+                {"id": "OOB", "x": 9, "y": 9, "w": 5, "h": 5},
+            ],
+            [{**_MYS_PIECE, "index": 0}],
+        ),
+        ({"id": "MYS"}, []),
+        ([{"id": f"p{i}", "x": 0, "y": 0, "w": 1, "h": 1} for i in range(513)], []),
+        (
+            [
+                {"id": "valid-0", "x": 0, "y": 0, "w": 1, "h": 1},
+                {"id": "invalid-1", "x": 0, "y": 0},
+                {"id": "valid-2", "x": 2, "y": 2, "w": 1, "h": 1},
+            ],
+            [
+                {"id": "valid-0", "x": 0, "y": 0, "w": 1, "h": 1, "index": 0},
+                {"id": "valid-2", "x": 2, "y": 2, "w": 1, "h": 1, "index": 2},
+            ],
+        ),
+    ],
+    ids=[
+        "valid_empty", "skips_malformed_pieces", "skips_invalid_value_types", "non_list_pieces_as_empty",
+        "oversized_pieces_list_as_empty", "preserves_original_index_across_dropped_pieces",
+    ],
+)
+def test_read_region_manifest_keeps_only_valid_pieces(tmp_path: Path, pieces, expected):
     path = tmp_path / "s1-regions.json"
-    path.write_text(
-        json.dumps(
-            {
-                "width": 10,
-                "height": 10,
-                "pieces": [
-                    {"id": "MYS", "x": 0, "y": 0, "w": 1, "h": 1},
-                    {"id": "STR", "x": "0", "y": 0, "w": 1, "h": 1},
-                    {"id": "BOOL", "x": True, "y": 0, "w": 1, "h": 1},
-                    {"id": "NEG", "x": -1, "y": 0, "w": 1, "h": 1},
-                    {"id": "ZERO_W", "x": 0, "y": 0, "w": 0, "h": 1},
-                    {"id": "OOB", "x": 9, "y": 9, "w": 5, "h": 5},
-                ],
-            }
-        )
-    )
-    manifest = _read_region_manifest(path)
-    assert manifest["pieces"] == [{"id": "MYS", "x": 0, "y": 0, "w": 1, "h": 1, "index": 0}]
-
-
-def test_read_region_manifest_treats_non_list_pieces_as_empty(tmp_path: Path):
-    path = tmp_path / "s1-regions.json"
-    path.write_text(json.dumps({"width": 10, "height": 10, "pieces": {"id": "MYS"}}))
-    assert _read_region_manifest(path) == {"width": 10, "height": 10, "pieces": []}
-
-
-def test_read_region_manifest_treats_oversized_pieces_list_as_empty(tmp_path: Path):
-    path = tmp_path / "s1-regions.json"
-    pieces = [{"id": f"p{i}", "x": 0, "y": 0, "w": 1, "h": 1} for i in range(513)]
     path.write_text(json.dumps({"width": 10, "height": 10, "pieces": pieces}))
-    assert _read_region_manifest(path) == {"width": 10, "height": 10, "pieces": []}
-
-
-def test_read_region_manifest_preserves_original_index_across_dropped_pieces(tmp_path: Path):
-    path = tmp_path / "s1-regions.json"
-    path.write_text(
-        json.dumps(
-            {
-                "width": 10,
-                "height": 10,
-                "pieces": [
-                    {"id": "valid-0", "x": 0, "y": 0, "w": 1, "h": 1},
-                    {"id": "invalid-1", "x": 0, "y": 0},
-                    {"id": "valid-2", "x": 2, "y": 2, "w": 1, "h": 1},
-                ],
-            }
-        )
-    )
-    manifest = _read_region_manifest(path)
-    assert manifest["pieces"] == [
-        {"id": "valid-0", "x": 0, "y": 0, "w": 1, "h": 1, "index": 0},
-        {"id": "valid-2", "x": 2, "y": 2, "w": 1, "h": 1, "index": 2},
-    ]
+    assert _read_region_manifest(path) == {"width": 10, "height": 10, "pieces": expected}
 
 
 def test_build_slide_items_and_render_reveals_use_original_manifest_index(tmp_path: Path, monkeypatch):

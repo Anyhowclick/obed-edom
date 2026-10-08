@@ -1013,13 +1013,13 @@ def _flip(small, small_after, big, big_after, *, small_key=_SMALL):
     ))
 
 
-def test_mm_zorder_flip_skips_a_flip_that_never_overlaps():
-    assert _flip((0, 0, 100), (0, 300, 100), (500, 0, 100), (500, 300, 100)) == []
-
-
-def test_mm_zorder_flip_edge_contact_is_not_overlap():
+@pytest.mark.parametrize(("small", "small_after", "big", "big_after"), [
+    ((0, 0, 100), (0, 300, 100), (500, 0, 100), (500, 300, 100)),
     # The boxes share an edge for the whole morph: strict overlap only.
-    assert _flip((0, 0, 100), (0, 0, 100), (100, 0, 100), (100, 0, 100)) == []
+    ((0, 0, 100), (0, 0, 100), (100, 0, 100), (100, 0, 100)),
+], ids=["never-overlaps", "edge-contact-is-not-overlap"])
+def test_mm_zorder_flip_skips_a_flip_that_never_overlaps(small, small_after, big, big_after):
+    assert _flip(small, small_after, big, big_after) == []
 
 
 @pytest.mark.parametrize(

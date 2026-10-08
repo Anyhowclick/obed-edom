@@ -149,27 +149,29 @@ def test_header_accepts_live_major_version_fields():
     assert header_export_contract({"major": 1, "minor": 2}) == {"major": 1, "minor": 2}
 
 
-def test_export_identity_reads_event_accessibility_and_drops_media():
-    payload = {
-        "assets": {},
-        "events": [
-            {
-                "accessibility": [
-                    {"text": "pasted-image.tiff"},
-                    {"text": "Matthew 18"},
-                    {
-                        "text": "19 Again, truly I tell you that if two of you on earth agree "
-                        "about anything they\\u2028ask for, it will be done for them\xa0by My Father in heaven. "
-                    },
-                    {"text": "Untitled.mov"},
-                ]
-            }
-        ],
-    }
-    assert export_payload_identity(payload) == (
-        "19 Again, truly I tell you that if two of you on earth agree about anything they ask for, it will be done for them by My Father in heaven.",
-        "Matthew 18",
-    )
+@pytest.mark.parametrize(
+    "texts, expected",
+    [
+        (
+            [
+                "pasted-image.tiff",
+                "Matthew 18",
+                "19 Again, truly I tell you that if two of you on earth agree "
+                "about anything they\\u2028ask for, it will be done for them\xa0by My Father in heaven. ",
+                "Untitled.mov",
+            ],
+            (
+                "19 Again, truly I tell you that if two of you on earth agree about anything they ask for, it will be done for them by My Father in heaven.",
+                "Matthew 18",
+            ),
+        ),
+        (["CHC Kuching", "pasted-image.pdf"], ("CHC Kuching",)),
+    ],
+    ids=["normalised-text-drops-image-and-movie", "drops-pdf"],
+)
+def test_export_identity_reads_event_accessibility_and_drops_media(texts, expected):
+    payload = {"assets": {}, "events": [{"accessibility": [{"text": text} for text in texts]}]}
+    assert export_payload_identity(payload) == expected
 
 
 def test_slide_identity_fixture_names_accessibility_field():
@@ -187,12 +189,19 @@ def test_parse_jsonish_accepts_json_and_local_header_jsonp():
     assert parse_jsonish('local_slide={"ok": true}') == {"ok": True}
 
 
-def test_mapping_keeps_original_numbers_across_skipped_slides(tmp_path):
+def _build_manifest(tmp_path, uuids, *, source=None, **export_kwargs):
     export = tmp_path / "html"
-    write_fake_export(export, ["aaa", "ccc"])
+    write_fake_export(export, uuids, **export_kwargs)
     header, header_path = load_header(export)
-    exported = discover_export_assets(export, ["aaa", "ccc"])
-    manifest = build_manifest(header=header, exported=exported, **_manifest_kwargs(export, header_path))
+    exported = discover_export_assets(export, uuids)
+    kwargs = _manifest_kwargs(export, header_path)
+    if source is not None:
+        kwargs["source"] = source
+    return build_manifest(header=header, exported=exported, **kwargs)
+
+
+def test_mapping_keeps_original_numbers_across_skipped_slides(tmp_path):
+    manifest = _build_manifest(tmp_path, ["aaa", "ccc"])
     verify_manifest(manifest, _source(), DIGEST)
     by_ord = {row["originalOrdinal"]: row for row in manifest["slides"]}
     assert by_ord[1]["playerIndex"] == 0
@@ -217,101 +226,50 @@ def test_jsonp_header_and_remote_media_are_recorded(tmp_path):
     assert exported[0]["identity"] == ("alpha",)
 
 
-def test_refuse_when_export_count_does_not_match_live_source(tmp_path):
-    export = tmp_path / "html"
-    write_fake_export(export, ["aaa"])
-    header, header_path = load_header(export)
-    exported = discover_export_assets(export, ["aaa"])
-    with pytest.raises(PreviewMappingError, match="non-skipped"):
-        build_manifest(header=header, exported=exported, **_manifest_kwargs(export, header_path))
+@pytest.mark.parametrize(
+    "uuids, identities, source, match",
+    [
+        (["aaa"], None, None, "non-skipped"),
+        (["ccc", "aaa"], [("gamma",), ("alpha",)], None, "do not match the source|not in source order"),
+        (
+            ["aaa", "ccc"], [("same",), ("same",)],
+            [SourceSlide(1, "10", False, ("same",)), SourceSlide(2, "11", False, ("same",))],
+            "ambiguous",
+        ),
+        (
+            ["aaa", "ccc"], [(), ("gamma",)],
+            [SourceSlide(1, "10", False, ()), SourceSlide(2, "12", False, ())],
+            "do not match the source",
+        ),
+    ],
+    ids=["export-count-mismatch", "same-length-reordered", "ambiguous-identical-identities", "empty-source-vs-export-text"],
+)
+def test_build_manifest_refuses_an_unmappable_export(tmp_path, uuids, identities, source, match):
+    with pytest.raises(PreviewMappingError, match=match):
+        _build_manifest(tmp_path, uuids, source=source, identities=identities)
 
 
-def test_refuse_same_length_reordered_export(tmp_path):
-    export = tmp_path / "html"
-    write_fake_export(export, ["ccc", "aaa"], identities=[("gamma",), ("alpha",)])
-    header, header_path = load_header(export)
-    exported = discover_export_assets(export, ["ccc", "aaa"])
-    with pytest.raises(PreviewMappingError, match="do not match the source|not in source order"):
-        build_manifest(header=header, exported=exported, **_manifest_kwargs(export, header_path))
-
-
-def test_refuse_ambiguous_identical_identities(tmp_path):
-    export = tmp_path / "html"
-    write_fake_export(export, ["aaa", "ccc"], identities=[("same",), ("same",)])
-    header, header_path = load_header(export)
-    exported = discover_export_assets(export, ["aaa", "ccc"])
-    source = [
-        SourceSlide(1, "10", False, ("same",)),
-        SourceSlide(2, "11", False, ("same",)),
-    ]
-    kwargs = _manifest_kwargs(export, header_path)
-    kwargs["source"] = source
-    with pytest.raises(PreviewMappingError, match="ambiguous"):
-        build_manifest(header=header, exported=exported, **kwargs)
-
-
-def test_empty_identities_may_align_at_matching_positions(tmp_path):
-    export = tmp_path / "html"
-    write_fake_export(export, ["aaa", "bbb", "ccc"], identities=[("alpha",), (), ()])
-    header, header_path = load_header(export)
-    exported = discover_export_assets(export, ["aaa", "bbb", "ccc"])
-    source = [
-        SourceSlide(1, "10", False, ("alpha",)),
-        SourceSlide(2, "11", False, ()),
-        SourceSlide(3, "12", False, ()),
-    ]
-    kwargs = _manifest_kwargs(export, header_path)
-    kwargs["source"] = source
-    manifest = build_manifest(header=header, exported=exported, **kwargs)
+@pytest.mark.parametrize(
+    "uuids, identities, source",
+    [
+        (
+            ["aaa", "bbb", "ccc"], [("alpha",), (), ()],
+            [SourceSlide(1, "10", False, ("alpha",)), SourceSlide(2, "11", False, ()), SourceSlide(3, "12", False, ())],
+        ),
+        (
+            ["aaa", "ccc"], [("Guo Rong", "Ps Aizhen"), ()],
+            [
+                SourceSlide(1, "10", False, ("Guo Rong", "Ps Aizhen", "Replace Guo Rong & Ps Aizhen")),
+                SourceSlide(2, "12", False, ("Make the second video faster.",)),
+            ],
+        ),
+    ],
+    ids=["empty-identities-align-at-matching-positions", "source-notes-outnumber-export-tokens"],
+)
+def test_build_manifest_aligns_by_position(tmp_path, uuids, identities, source):
+    manifest = _build_manifest(tmp_path, uuids, source=source, identities=identities)
     by_ord = {row["originalOrdinal"]: row for row in manifest["slides"]}
-    assert by_ord[1]["playerHash"] == "#0"
-    assert by_ord[2]["playerHash"] == "#1"
-    assert by_ord[3]["playerHash"] == "#2"
-
-
-def test_source_notes_may_outnumber_export_tokens(tmp_path):
-    export = tmp_path / "html"
-    write_fake_export(
-        export,
-        ["aaa", "ccc"],
-        identities=[("Guo Rong", "Ps Aizhen"), ()],
-    )
-    header, header_path = load_header(export)
-    exported = discover_export_assets(export, ["aaa", "ccc"])
-    source = [
-        SourceSlide(1, "10", False, ("Guo Rong", "Ps Aizhen", "Replace Guo Rong & Ps Aizhen")),
-        SourceSlide(2, "12", False, ("Make the second video faster.",)),
-    ]
-    kwargs = _manifest_kwargs(export, header_path)
-    kwargs["source"] = source
-    manifest = build_manifest(header=header, exported=exported, **kwargs)
-    by_ord = {row["originalOrdinal"]: row for row in manifest["slides"]}
-    assert by_ord[1]["playerHash"] == "#0"
-    assert by_ord[2]["playerHash"] == "#1"
-
-
-def test_export_identity_drops_pdf_media_names():
-    payload = {
-        "events": [
-            {"accessibility": [{"text": "CHC Kuching"}, {"text": "pasted-image.pdf"}]}
-        ]
-    }
-    assert export_payload_identity(payload) == ("CHC Kuching",)
-
-
-def test_refuse_empty_identity_when_export_has_text(tmp_path):
-    export = tmp_path / "html"
-    write_fake_export(export, ["aaa", "ccc"], identities=[(), ("gamma",)])
-    header, header_path = load_header(export)
-    exported = discover_export_assets(export, ["aaa", "ccc"])
-    source = [
-        SourceSlide(1, "10", False, ()),
-        SourceSlide(2, "12", False, ()),
-    ]
-    kwargs = _manifest_kwargs(export, header_path)
-    kwargs["source"] = source
-    with pytest.raises(PreviewMappingError, match="do not match the source"):
-        build_manifest(header=header, exported=exported, **kwargs)
+    assert [by_ord[n]["playerHash"] for n in sorted(by_ord)] == [f"#{i}" for i in range(len(source))]
 
 
 def test_refuse_missing_slide_assets(tmp_path):
@@ -355,13 +313,23 @@ def test_export_script_uses_bundle_id_and_html_format():
     assert "with properties" not in script
 
 
-def test_propose_does_not_export(tmp_path, monkeypatch):
+def _fake_export(_deck, dest, **_k):
+    write_fake_export(Path(dest), ["aaa", "ccc"])
+
+
+def _stub_deck(tmp_path, monkeypatch, digest=DIGEST):
     from obed_edom import html_preview as hp
 
+    monkeypatch.setattr(hp, "output_root", lambda: tmp_path)
+    monkeypatch.setattr(hp, "deck_digest", lambda _p: digest)
+    monkeypatch.setattr(hp, "source_slides", lambda _p: (_source(), (1920.0, 1080.0)))
     deck = tmp_path / "Deck.key"
     deck.write_text("deck")
-    monkeypatch.setattr(hp, "deck_digest", lambda _p: DIGEST)
-    monkeypatch.setattr(hp, "source_slides", lambda _p: (_source(), (1920.0, 1080.0)))
+    return hp, deck
+
+
+def test_propose_does_not_export(tmp_path, monkeypatch):
+    hp, deck = _stub_deck(tmp_path, monkeypatch)
 
     def _boom(*_a, **_k):
         raise AssertionError("export must not run during propose")
@@ -376,45 +344,26 @@ def test_propose_does_not_export(tmp_path, monkeypatch):
 
 
 def test_stale_expected_digest_is_refused(tmp_path, monkeypatch):
-    from obed_edom import html_preview as hp
-
-    deck = tmp_path / "Deck.key"
-    deck.write_text("deck")
-    monkeypatch.setattr(hp, "deck_digest", lambda _p: DIGEST)
-    monkeypatch.setattr(hp, "source_slides", lambda _p: (_source(), (1920.0, 1080.0)))
+    _hp, deck = _stub_deck(tmp_path, monkeypatch)
     with pytest.raises(PreviewStale, match="changed since this review"):
         propose_preview(deck, expected_digest="then", job_id="job-a")
 
 
 def test_apply_refuses_when_source_digest_changes(tmp_path, monkeypatch):
-    from obed_edom import html_preview as hp
-
-    deck = tmp_path / "Deck.key"
-    deck.write_text("one")
+    hp, deck = _stub_deck(tmp_path, monkeypatch)
     digests = iter([_digest("aaa"), _digest("bbb")])
     monkeypatch.setattr(hp, "deck_digest", lambda _p: next(digests))
-    monkeypatch.setattr(hp, "source_slides", lambda _p: (_source(), (1920.0, 1080.0)))
     proposal = propose_preview(deck, job_id="job-a")
     with pytest.raises(PreviewStale, match="between proposal and apply"):
         apply_preview(proposal, job_id="job-a", export_html_fn=lambda *_a, **_k: None)
 
 
 def test_cached_preview_invalidates_after_keynote_upgrade(tmp_path, monkeypatch):
-    from obed_edom import html_preview as hp
-
-    monkeypatch.setattr(hp, "output_root", lambda: tmp_path)
-    monkeypatch.setattr(hp, "deck_digest", lambda _p: DIGEST)
-    monkeypatch.setattr(hp, "source_slides", lambda _p: (_source(), (1920.0, 1080.0)))
+    hp, deck = _stub_deck(tmp_path, monkeypatch)
     monkeypatch.setattr(hp.keynote_app, "app_version", lambda _identifier=None: "15.3.1")
     monkeypatch.setattr(hp.keynote_app, "bundle_id", lambda: "com.apple.Keynote")
-    deck = tmp_path / "Deck.key"
-    deck.write_text("deck")
-
-    def _export(_deck, dest, **_k):
-        write_fake_export(Path(dest), ["aaa", "ccc"])
-
     ready = apply_preview(
-        propose_preview(deck, job_id="job-a"), job_id="job-a", export_html_fn=_export
+        propose_preview(deck, job_id="job-a"), job_id="job-a", export_html_fn=_fake_export
     )
     assert ready["reused"] is False
     monkeypatch.setattr(hp.keynote_app, "app_version", lambda _identifier=None: "15.4")
@@ -424,18 +373,8 @@ def test_cached_preview_invalidates_after_keynote_upgrade(tmp_path, monkeypatch)
 
 
 def test_cached_preview_invalidates_after_renderer_contract_change(tmp_path, monkeypatch):
-    from obed_edom import html_preview as hp
-
-    monkeypatch.setattr(hp, "output_root", lambda: tmp_path)
-    monkeypatch.setattr(hp, "deck_digest", lambda _p: DIGEST)
-    monkeypatch.setattr(hp, "source_slides", lambda _p: (_source(), (1920.0, 1080.0)))
-    deck = tmp_path / "Deck.key"
-    deck.write_text("deck")
-
-    def _export(_deck, dest, **_k):
-        write_fake_export(Path(dest), ["aaa", "ccc"])
-
-    apply_preview(propose_preview(deck, job_id="job-a"), job_id="job-a", export_html_fn=_export)
+    hp, deck = _stub_deck(tmp_path, monkeypatch)
+    apply_preview(propose_preview(deck, job_id="job-a"), job_id="job-a", export_html_fn=_fake_export)
     manifest_path = hp.cache_dir(DIGEST) / "manifest.json"
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
     data["rendererContractVersion"] = RENDERER_CONTRACT_VERSION + 1
@@ -446,22 +385,12 @@ def test_cached_preview_invalidates_after_renderer_contract_change(tmp_path, mon
 
 
 def test_cleanup_does_not_delete_another_jobs_cache(tmp_path, monkeypatch):
-    from obed_edom import html_preview as hp
-
-    monkeypatch.setattr(hp, "output_root", lambda: tmp_path)
-    monkeypatch.setattr(hp, "deck_digest", lambda _p: DIGEST)
-    monkeypatch.setattr(hp, "source_slides", lambda _p: (_source(), (1920.0, 1080.0)))
-    deck = tmp_path / "Deck.key"
-    deck.write_text("deck")
-
-    def _export(_deck, dest, **_k):
-        write_fake_export(Path(dest), ["aaa", "ccc"])
-
+    hp, deck = _stub_deck(tmp_path, monkeypatch)
     first = apply_preview(
-        propose_preview(deck, job_id="job-a"), job_id="job-a", export_html_fn=_export
+        propose_preview(deck, job_id="job-a"), job_id="job-a", export_html_fn=_fake_export
     )
     second = apply_preview(
-        propose_preview(deck, job_id="job-b"), job_id="job-b", export_html_fn=_export
+        propose_preview(deck, job_id="job-b"), job_id="job-b", export_html_fn=_fake_export
     )
     html = Path(first["exportRoot"])
     assert html.is_dir()
@@ -475,19 +404,9 @@ def test_cleanup_does_not_delete_another_jobs_cache(tmp_path, monkeypatch):
 
 
 def test_cleanup_ignores_absolute_digest_and_empty_export_root(tmp_path, monkeypatch):
-    from obed_edom import html_preview as hp
-
-    monkeypatch.setattr(hp, "output_root", lambda: tmp_path)
-    monkeypatch.setattr(hp, "deck_digest", lambda _p: DIGEST)
-    monkeypatch.setattr(hp, "source_slides", lambda _p: (_source(), (1920.0, 1080.0)))
-    deck = tmp_path / "Deck.key"
-    deck.write_text("deck")
-
-    def _export(_deck, dest, **_k):
-        write_fake_export(Path(dest), ["aaa", "ccc"])
-
+    hp, deck = _stub_deck(tmp_path, monkeypatch)
     ready = apply_preview(
-        propose_preview(deck, job_id="job-a"), job_id="job-a", export_html_fn=_export
+        propose_preview(deck, job_id="job-a"), job_id="job-a", export_html_fn=_fake_export
     )
     victim = tmp_path / "escaped-p2-r1"
     victim.mkdir()
@@ -587,25 +506,16 @@ def test_preview_player_serves_stock_bytes_when_off_unsupported_or_invalid(monke
 
 
 def test_symlink_cache_cannot_delete_or_serve_another_cache(tmp_path, monkeypatch):
-    from obed_edom import html_preview as hp
-
-    monkeypatch.setattr(hp, "output_root", lambda: tmp_path)
-    monkeypatch.setattr(hp, "source_slides", lambda _p: (_source(), (1920.0, 1080.0)))
+    hp, deck = _stub_deck(tmp_path, monkeypatch)
     digest_a = _digest("cache-a")
     digest_b = _digest("cache-b")
-    deck = tmp_path / "Deck.key"
-    deck.write_text("deck")
-
-    def _export(_deck, dest, **_k):
-        write_fake_export(Path(dest), ["aaa", "ccc"])
-
     monkeypatch.setattr(hp, "deck_digest", lambda _p: digest_b)
     ready_b = apply_preview(
-        propose_preview(deck, job_id="job-b"), job_id="job-b", export_html_fn=_export
+        propose_preview(deck, job_id="job-b"), job_id="job-b", export_html_fn=_fake_export
     )
     monkeypatch.setattr(hp, "deck_digest", lambda _p: digest_a)
     ready_a = apply_preview(
-        propose_preview(deck, job_id="job-a"), job_id="job-a", export_html_fn=_export
+        propose_preview(deck, job_id="job-a"), job_id="job-a", export_html_fn=_fake_export
     )
     folder_a = unresolved_cache_folder(digest_a)
     folder_b = unresolved_cache_folder(digest_b)
@@ -632,24 +542,15 @@ def test_symlink_cache_cannot_delete_or_serve_another_cache(tmp_path, monkeypatc
 
 
 def test_registered_export_root_requires_owning_job(tmp_path, monkeypatch):
-    from obed_edom import html_preview as hp
-
-    monkeypatch.setattr(hp, "output_root", lambda: tmp_path)
-    monkeypatch.setattr(hp, "source_slides", lambda _p: (_source(), (1920.0, 1080.0)))
+    hp, deck = _stub_deck(tmp_path, monkeypatch)
     digest_a = _digest("owner-a")
     digest_b = _digest("owner-b")
-    deck = tmp_path / "Deck.key"
-    deck.write_text("deck")
-
-    def _export(_deck, dest, **_k):
-        write_fake_export(Path(dest), ["aaa", "ccc"])
-
     monkeypatch.setattr(hp, "deck_digest", lambda _p: digest_b)
     ready_b = apply_preview(
-        propose_preview(deck, job_id="job-b"), job_id="job-b", export_html_fn=_export
+        propose_preview(deck, job_id="job-b"), job_id="job-b", export_html_fn=_fake_export
     )
     monkeypatch.setattr(hp, "deck_digest", lambda _p: digest_a)
-    apply_preview(propose_preview(deck, job_id="job-a"), job_id="job-a", export_html_fn=_export)
+    apply_preview(propose_preview(deck, job_id="job-a"), job_id="job-a", export_html_fn=_fake_export)
 
     with pytest.raises(PreviewError, match="does not own this cache"):
         registered_export_root(ready_b, "job-a")
