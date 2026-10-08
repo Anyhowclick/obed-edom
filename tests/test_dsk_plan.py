@@ -1308,6 +1308,43 @@ def test_wrapped_height_missing_font_warns():
     assert wrapped_height("hello world", "NotARealFontXYZ", 40.0, 1849.0) is None
 
 
+def test_memoised_wrap_keys_on_every_input_and_font_file_identity(monkeypatch, tmp_path):
+    # The single-font measures share an lru-cached wrap pass. Every cached answer must equal a
+    # fresh, uncached `_wrap_lines` over a newly loaded font: varying width, size or text must
+    # miss the cache, and rewriting the font file on disk (new mtime/size) must miss it too.
+    from PIL import ImageFont
+
+    _require_font("Helvetica")
+    _require_font("Menlo")
+    sources = {name: resolve_font_path(name) for name in ("Helvetica", "Menlo")}
+    font_file = tmp_path / "swap.ttc"
+    monkeypatch.setattr(dsk_plan, "resolve_font_path", lambda _name: font_file)
+
+    def fresh(text, size, width):
+        font = ImageFont.truetype(str(font_file), int(round(size * dsk_plan._WRAP_OVERSAMPLE)))
+        scaled = width * (1.0 - dsk_plan._WRAP_MARGIN) * dsk_plan._WRAP_OVERSAMPLE
+        return tuple(dsk_plan._wrap_lines(text, font, scaled))
+
+    text = "Grace upon grace iiii WWWW mmmm"
+    cases = [(text, 40.0, 400.0), (text, 40.0, 250.0), (text, 28.0, 250.0), (text + " amen", 40.0, 250.0)]
+    by_font = {}
+    for name, source in sources.items():
+        font_file.write_bytes(source.read_bytes())
+        got = [dsk_plan._wrap_single(t, "Swap", s, w)[0] for t, s, w in cases]
+        assert got == [fresh(t, s, w) for t, s, w in cases]
+        by_font[name] = got
+    assert len(set(by_font["Helvetica"])) == len(cases)
+    assert by_font["Helvetica"] != by_font["Menlo"]
+
+    lines = dsk_plan._wrap_single(text, "Swap", 40.0, 250.0)[0]
+    with pytest.raises(TypeError):
+        lines[0] = "poisoned"
+    spans = dsk_plan.wrap_line_spans(text, "Swap", 40.0, 250.0)
+    expected = list(spans)
+    spans.clear()
+    assert dsk_plan.wrap_line_spans(text, "Swap", 40.0, 250.0) == expected
+
+
 @pytest.mark.parametrize(("text", "expected"), [
     ("Praise and Worship", 60.0),
     ("Faith", 80.0),
