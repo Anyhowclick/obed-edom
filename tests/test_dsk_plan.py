@@ -7,6 +7,7 @@ the ``keynote_parser`` optional extra are absent (mirrors test_iwa_runs.py).
 """
 
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -1343,6 +1344,42 @@ def test_memoised_wrap_keys_on_every_input_and_font_file_identity(monkeypatch, t
     expected = list(spans)
     spans.clear()
     assert dsk_plan.wrap_line_spans(text, "Swap", 40.0, 250.0) == expected
+
+
+def test_memoised_wrap_rereads_a_same_size_replacement_and_keeps_pillows_missing_file_error(monkeypatch, tmp_path):
+    # Codex review: (path, size, mtime) is not a file identity. A replacement padded to the same
+    # size with the old mtime restored must still miss the cache (new inode/ctime), and a font
+    # deleted after resolution must raise Pillow's own OSError exactly as the uncached code did.
+    from PIL import ImageFont
+
+    _require_font("Helvetica")
+    _require_font("Menlo")
+    blobs = [resolve_font_path(name).read_bytes() for name in ("Helvetica", "Menlo")]
+    size = max(len(b) for b in blobs)
+    font_file = tmp_path / "swap.ttc"
+    monkeypatch.setattr(dsk_plan, "resolve_font_path", lambda _name: font_file)
+    text = "Grace upon grace iiii WWWW mmmm"
+
+    got = []
+    for i, blob in enumerate(blobs):
+        staged = tmp_path / f"staged{i}.ttc"
+        staged.write_bytes(blob.ljust(size, b"\0"))
+        os.replace(staged, font_file)
+        if i:
+            os.utime(font_file, ns=(mtime_ns, mtime_ns))
+        mtime_ns = font_file.stat().st_mtime_ns
+        assert font_file.stat().st_size == size
+        got.append(dsk_plan._wrap_single(text, "Swap", 40.0, 250.0)[0])
+        fresh = ImageFont.truetype(str(font_file), int(round(40.0 * dsk_plan._WRAP_OVERSAMPLE)))
+        scaled = 250.0 * (1.0 - dsk_plan._WRAP_MARGIN) * dsk_plan._WRAP_OVERSAMPLE
+        assert got[-1] == tuple(dsk_plan._wrap_lines(text, fresh, scaled))
+    assert got[0] != got[1]
+
+    font_file.unlink()
+    with pytest.raises(OSError) as raised:
+        ImageFont.truetype(str(font_file), 320)
+    with pytest.raises(OSError, match=re.escape(str(raised.value))):
+        dsk_plan._wrap_single(text, "Swap", 40.0, 250.0)
 
 
 @pytest.mark.parametrize(("text", "expected"), [

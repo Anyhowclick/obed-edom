@@ -1028,29 +1028,34 @@ def _wrap_lines(text: str, font: Any, max_width: float) -> list[str]:
 
 
 @lru_cache(maxsize=128)
-def _font_at(font_path: str, mtime_ns: int, file_size: int, px: int) -> Any:
+def _font_at(font_path: str, file_id: tuple[int, ...], px: int) -> Any:
     from PIL import ImageFont  # noqa: PLC0415
 
     return ImageFont.truetype(font_path, px)
 
 
 @lru_cache(maxsize=4096)
-def _wrapped_lines(
-    text: str, font_path: str, mtime_ns: int, file_size: int, px: int, max_width: float
-) -> tuple[str, ...]:
-    return tuple(_wrap_lines(text, _font_at(font_path, mtime_ns, file_size, px), max_width))
+def _wrapped_lines(text: str, font_path: str, file_id: tuple[int, ...], px: int, max_width: float) -> tuple[str, ...]:
+    return tuple(_wrap_lines(text, _font_at(font_path, file_id, px), max_width))
 
 
 def _wrap_single(text: str, font_name: str, size: float, width: float) -> tuple[tuple[str, ...], Any] | None:
     """Memoised ``_wrap_lines`` pass shared by the single-font measures, keyed on the font file's
-    identity (path, mtime, size) so an on-disk change is never served stale. ``None`` when the
+    stat (device, inode, size, mtime, ctime) so a replaced file is re-read. ``None`` when the
     font cannot be resolved or ``size`` is not positive."""
     path = resolve_font_path(font_name)
     if path is None or size <= 0:
         return None
-    stat = path.stat()
-    font_key = (str(path), stat.st_mtime_ns, stat.st_size, int(round(size * _WRAP_OVERSAMPLE)))
+    px = int(round(size * _WRAP_OVERSAMPLE))
     max_width = width * (1.0 - _WRAP_MARGIN) * _WRAP_OVERSAMPLE
+    try:
+        st = path.stat()
+    except OSError:
+        from PIL import ImageFont  # noqa: PLC0415
+
+        font = ImageFont.truetype(str(path), px)
+        return tuple(_wrap_lines(text, font, max_width)), font
+    font_key = (str(path), (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns), px)
     return _wrapped_lines(text, *font_key, max_width), _font_at(*font_key)
 
 
