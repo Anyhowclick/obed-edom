@@ -308,7 +308,7 @@ def test_decode_cache_is_keyed_on_content_and_never_serves_the_input_for_the_out
     first["chunks"].clear()
     cached = _load_deck_full(out_path)
     assert cached[0]
-    monkeypatch.undo()
+    monkeypatch.setattr("keynote_parser.codec.IWAFile", IWAFile)
     assert cached == _load_deck_full(out_path)
 
 

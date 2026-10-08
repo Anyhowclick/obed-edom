@@ -4442,7 +4442,7 @@ def test_gold_on_canvas_fraction_out_param_does_not_change_anything(monkeypatch)
 
     from obed_edom import map_remap
 
-    with_counts = plan_payload(wall, recipe, template=template, framing_overrides={6: 4, 7: 4})
+    with_counts = plan_payload(wall, recipe, template=template, framing_overrides={13: 5, 14: 5})
 
     real_fraction = map_remap.on_canvas_fraction
 
@@ -4450,7 +4450,7 @@ def test_gold_on_canvas_fraction_out_param_does_not_change_anything(monkeypatch)
         return real_fraction(slide, recipe, wall_w, wall_h)
 
     monkeypatch.setattr(map_remap, "on_canvas_fraction", without_out_param)
-    bare = plan_payload(wall, recipe, template=template, framing_overrides={6: 4, 7: 4})
+    bare = plan_payload(wall, recipe, template=template, framing_overrides={13: 5, 14: 5})
     monkeypatch.undo()
 
     counts = {"excluded", "excludedOffCanvas"}
