@@ -369,6 +369,9 @@ def _cached_exact_payload(deck: Path):
         from obed_edom.baseline import deck_digest, inspect_cache_path
     except Exception:  # pragma: no cover
         return None
+    probe = inspect_cache_path("*")
+    if next(probe.parent.glob(probe.name), None) is None:
+        return None
     try:
         path = inspect_cache_path(deck_digest(deck))
     except Exception:  # pragma: no cover

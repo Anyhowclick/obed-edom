@@ -564,11 +564,49 @@ def _cached_payload(deck: Path):
         from obed_edom.baseline import deck_digest, inspect_cache_path
     except Exception:  # pragma: no cover
         return None
+    probe = inspect_cache_path("*")
+    if next(probe.parent.glob(probe.name), None) is None:
+        return None
     try:
         path = inspect_cache_path(deck_digest(deck))
     except Exception:  # pragma: no cover
         return None
     return json.loads(path.read_text()) if path.is_file() else None
+
+
+def test_cached_payload_hashes_only_when_a_payload_for_this_keynote_exists(tmp_path, monkeypatch):
+    """The early return must not hash when the inspect cache holds no payload for the
+    current Keynote build (empty, or only another build's), and must not hide one that
+    is there."""
+    from obed_edom import baseline, keynote_app
+
+    monkeypatch.setenv(baseline.CACHE_DIR_ENV, str(tmp_path / "cache"))
+    monkeypatch.setattr(keynote_app, "app_version", lambda identifier=None: "15.4")
+    real_hash = baseline._hash_regular_file
+    hashed = []
+
+    def _counting_hash(path, initial_stat):
+        hashed.append(path)
+        return real_hash(path, initial_stat)
+
+    monkeypatch.setattr(baseline, "_hash_regular_file", _counting_hash)
+    deck = tmp_path / "tiny.key"
+    deck.write_bytes(b"tiny deck")
+
+    assert _cached_payload(deck) is None
+    assert hashed == []
+
+    other_build = baseline.inspect_cache_path("0" * 64, app_version="15.3.1")
+    other_build.parent.mkdir(parents=True)
+    other_build.write_text("{}")
+    assert _cached_payload(deck) is None
+    assert hashed == []
+
+    payload = {"reader": "jxa", "slides": []}
+    baseline.inspect_cache_path(baseline.deck_digest(deck)).write_text(json.dumps(payload))
+    assert _cached_payload(deck) == payload
+    assert len(hashed) == 1
+    assert _cached_payload(tmp_path / "missing.key") is None
 
 
 @pytest.mark.skipif(not MAP_DECK.exists(), reason="local gold deck only")
