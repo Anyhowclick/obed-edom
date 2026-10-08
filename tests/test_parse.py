@@ -26,12 +26,13 @@ from outline_fixtures import (
 ROOT = Path(__file__).resolve().parents[1]
 OUTLINES = ROOT / "Sermon Outlines"
 _NEED = ["Sermon BC.docx", "Offering JX.docx", "Offering JX_EXPECTED_RESULT.docx"]
-pytestmark = pytest.mark.skipif(
+needs_outlines = pytest.mark.skipif(
     not all((OUTLINES / name).is_file() for name in _NEED),
     reason="Sermon Outlines/ fixtures are local operator files (gitignored)",
 )
 
 
+@needs_outlines
 def test_sermon_cues():
     outline = parse_outline(OUTLINES / "Sermon BC.docx")
     assert outline.context == "sermon"
@@ -55,6 +56,7 @@ def test_sermon_cues():
     assert not any(s.verse_follows for s in outline.blocks)
 
 
+@needs_outlines
 def test_verse_after_point_links_to_its_point(tmp_path):
     variant = verse_after_point_variant(OUTLINES / "Sermon BC.docx", tmp_path / "BC_VAP.docx")
     outline = parse_outline(variant)
@@ -75,6 +77,7 @@ def test_verse_after_point_spelling(tmp_path, cue):
     assert [b.cue_tag for b in parse_outline(path).blocks] == ["NUM-POINT", "VERSE-AFTER-POINT"]
 
 
+@needs_outlines
 def test_offering_cues():
     outline = parse_outline(OUTLINES / "Offering JX.docx")
     assert outline.context == "offering"
@@ -90,6 +93,7 @@ def test_offering_cues():
     assert "31" in verse.body and "33" in verse.body
 
 
+@needs_outlines
 def test_mapping_masters():
     sermon = parse_outline(OUTLINES / "Sermon BC.docx")
     lw, dsk, _ = map_slides(sermon)
@@ -175,6 +179,7 @@ def test_mapping_masters():
     assert all("(MSG)" not in s.body for s in dsk_verses)
 
 
+@needs_outlines
 def test_verse_after_point_masters(tmp_path):
     """[VERSE-AFTER-POINT] is what builds the point-plus-verse slide."""
     variant = verse_after_point_variant(OUTLINES / "Sermon BC.docx", tmp_path / "BC_VAP.docx")
@@ -249,6 +254,7 @@ def test_orphan_verse_after_point_is_flagged(tmp_path):
     assert not any(s.role == "post" for s in lw)
 
 
+@needs_outlines
 @pytest.mark.parametrize(
     "name", ["Sermon BC.docx", "Offering JX.docx"]
 )
@@ -260,6 +266,7 @@ def test_every_slide_has_exactly_one_cue(tmp_path, name):
     assert operator_cue_counts(cued) == (len(lw), len(dsk))
 
 
+@needs_outlines
 def test_every_slide_has_exactly_one_cue_with_verse_after_point(tmp_path):
     variant = verse_after_point_variant(OUTLINES / "Sermon BC.docx", tmp_path / "BC_VAP.docx")
     outline = parse_outline(variant)
@@ -311,6 +318,7 @@ def test_ref_tail_never_eats_a_verse_number():
     assert dropped("31 “If God gives such attention") is None
 
 
+@needs_outlines
 def test_list_number_resolver():
     from docx import Document
     from obed_edom.parse_outline import ListNumberResolver
@@ -437,6 +445,7 @@ def test_prepare_styled_runs():
     assert prepared[0]["style"] == "verse_number"
 
 
+@needs_outlines
 def test_point_applescript_replaces_placeholder(tmp_path):
     """Point titles must replace the whole text box, not seed into Bold/Normal."""
     from pathlib import Path
@@ -523,6 +532,7 @@ def test_point_applescript_replaces_placeholder(tmp_path):
     assert any("AzoSans-Bold" in ln for ln in matt_script.splitlines())
 
 
+@needs_outlines
 def test_later_verse_numbers_get_the_template_character_style():
     """Pass 2 must stay GUI-driven and must carry the template's character style.
 
@@ -597,6 +607,7 @@ def test_later_verse_numbers_get_the_template_character_style():
     assert unfixed["allSuperscript"] is False
 
 
+@needs_outlines
 def test_repeated_verse_box_is_styled_on_every_slide(tmp_path):
     """Find cycles through matches, so each anchor is applied once per occurrence.
 
@@ -629,6 +640,7 @@ def test_repeated_verse_box_is_styled_on_every_slide(tmp_path):
     assert script.count('click menu item "Paste Style"') == len(plan)
 
 
+@needs_outlines
 def test_pass_one_hands_the_open_deck_to_pass_two():
     """Pass 1 leaves the deck open and defers its export when pass 2 follows.
 
@@ -667,6 +679,7 @@ def test_pass_one_hands_the_open_deck_to_pass_two():
     assert 'set exported to "deferred"' not in standalone
 
 
+@needs_outlines
 def test_review_pdf_and_slide_kinds():
     from obed_edom.pipeline import generate
     from obed_edom.report import slide_kind
@@ -694,6 +707,7 @@ def test_review_pdf_and_slide_kinds():
     assert not list(result.output_dir.glob("*.json"))
 
 
+@needs_outlines
 def test_generate_honours_output_dir(tmp_path):
     from obed_edom.pipeline import generate
 
@@ -718,6 +732,7 @@ def test_passage_header():
     assert _passage_header("", "NIV", "Series Title") == "Series Title"
 
 
+@needs_outlines
 def test_annotate_offering_splits(tmp_path):
     outline = parse_outline(OUTLINES / "Offering JX.docx")
     lw, dsk, _ = map_slides(outline)
@@ -747,6 +762,7 @@ def test_annotate_offering_splits(tmp_path):
     assert "DSK-PP-GIVING OPTIONS" in expected
 
 
+@needs_outlines
 def test_annotate_sermon_point_and_title(tmp_path):
     outline = parse_outline(OUTLINES / "Sermon BC.docx")
     lw, dsk, _ = map_slides(outline)
@@ -801,6 +817,7 @@ def test_annotate_sermon_point_and_title(tmp_path):
     assert dsk_highlights == {"yellow"}
 
 
+@needs_outlines
 def test_annotate_verse_cues_at_chunk_starts(tmp_path):
     """If 26–27 fit on slide 1 and 28 starts slide 2, cues sit before 26 and before 28."""
     outline = parse_outline(OUTLINES / "Sermon BC.docx")
@@ -889,6 +906,7 @@ def test_bible_gateway_parse_and_fetch():
     assert "new heart" in official.lower()
 
 
+@needs_outlines
 def test_wrong_gospel_citation_is_flagged():
     from obed_edom.report import _action_items, _bible_notes
 
@@ -920,6 +938,7 @@ def test_wrong_gospel_citation_is_flagged():
     assert any("Matthew" in a for a in actions)
 
 
+@needs_outlines
 def test_verse_continued_cue_and_full_verse_on_second_slide():
     from obed_edom.parse_outline import normalize_cue
     from obed_edom.models import SlideSpec
