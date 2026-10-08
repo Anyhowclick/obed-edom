@@ -1346,7 +1346,7 @@ def test_memoised_wrap_keys_on_every_input_and_font_file_identity(monkeypatch, t
 
 
 @pytest.mark.parametrize(("text", "expected"), [
-    ("Praise and Worship", 60.0),
+    ("Praise and Worship", 60.0),
     ("Faith", 80.0),
 ], ids=["gold-29-39-41-two-lines-caps-at-block", "gold-30-34-one-line-caps-at-max-pt"])
 def test_fit_heading_pt_caps(text, expected):
