@@ -981,7 +981,7 @@ def test_auto_reuse_strips_a_private_copy_never_the_shared_export(tmp_path, monk
     stale = root / "html-unmodified"
     stale.mkdir(parents=True)
     (stale / "old.txt").write_text("stale")
-    got = drv._unmodified_export(root, reuse=True, gl_auto=True)
+    got = drv._unmodified_export(root, reuse=True)
     assert got == root / "html-unmodified"
     assert not (got / "old.txt").exists()
     (got / "index.html").write_text("stripped", encoding="utf-8")
@@ -990,9 +990,27 @@ def test_auto_reuse_strips_a_private_copy_never_the_shared_export(tmp_path, monk
 
 def test_off_and_fresh_exports_use_the_root_export(tmp_path, monkeypatch):
     monkeypatch.setattr(drv, "OUT", tmp_path)
-    assert drv._unmodified_export(tmp_path, reuse=True, gl_auto=False) == tmp_path / "html-unmodified"
-    assert drv._unmodified_export(tmp_path / "gl-replay", reuse=False, gl_auto=True) == tmp_path / "gl-replay" / "html-unmodified"
+    assert drv._unmodified_export(tmp_path, reuse=True) == tmp_path / "html-unmodified"
+    assert drv._unmodified_export(tmp_path / "gl-replay", reuse=False) == tmp_path / "gl-replay" / "html-unmodified"
     assert not (tmp_path / "gl-replay").exists()
+
+
+@pytest.mark.parametrize("gl_auto", [False, True], ids=["off", "auto"])
+def test_out_dir_keeps_every_output_out_of_the_shared_tree(tmp_path, monkeypatch, gl_auto):
+    """A per-run `--out-dir` writes nothing under OUT: a reused export is a private copy
+    of the shared one, so parallel or red-arm runs never touch the fixture other tools read."""
+    shared_root = tmp_path / "shared"
+    monkeypatch.setattr(drv, "OUT", shared_root)
+    shared = _fake_export(shared_root)
+    run = tmp_path / "run"
+    monkeypatch.setattr(sys, "argv", ["p2", "--out-dir", str(run)])
+    root = drv._out_root(gl_auto)
+    assert root == (run / "gl-replay" if gl_auto else run).resolve()
+    got = drv._unmodified_export(root, reuse=True)
+    assert got == root / "html-unmodified"
+    (got / "index.html").write_text("stripped", encoding="utf-8")
+    assert (shared / "index.html").read_text(encoding="utf-8") == "shared"
+    assert sorted(p.name for p in shared_root.iterdir()) == ["html-unmodified"]
 
 
 def test_sample_frame_roi_is_index_patch_roi_scaled_to_the_frame():

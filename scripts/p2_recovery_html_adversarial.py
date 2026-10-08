@@ -521,12 +521,15 @@ def _mm_opacity_mode() -> str:
 
 
 def _out_root(gl_auto: bool) -> Path:
-    return OUT / GL_REPLAY_DIR if gl_auto else OUT
+    """`--out-dir DIR` keeps this run's outputs out of the shared fixture tree (still read for `--reuse-export`)."""
+    out_dir = _arg_value("--out-dir", "")
+    base = Path(out_dir).resolve() if out_dir else OUT
+    return base / GL_REPLAY_DIR if gl_auto else base
 
 
-def _unmodified_export(root: Path, *, reuse: bool, gl_auto: bool) -> Path:
-    """The export the strip/patch steps run on; auto + reuse uses a private copy (plan §4.1)."""
-    if not (reuse and gl_auto):
+def _unmodified_export(root: Path, *, reuse: bool) -> Path:
+    """The export the strip/patch steps run on; a reused export outside the shared tree is a private copy (plan §4.1)."""
+    if not reuse or root == OUT:
         return root / "html-unmodified"
     copy = root / "html-unmodified"
     if copy.exists():
@@ -3389,7 +3392,7 @@ async def _run(player: Path) -> dict:
         },
     )
 
-    unmodified = _unmodified_export(root, reuse=reuse, gl_auto=gl_auto)
+    unmodified = _unmodified_export(root, reuse=reuse)
     disposable_dir = root / "html-disposable"
     player_dir = root / "html-player"
     if reuse:
