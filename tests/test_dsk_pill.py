@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import pickle
 import secrets
 import shutil
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -41,9 +44,42 @@ needs_gold = pytest.mark.skipif(not GOLD.exists(), reason="local gold deck only"
 needs_r12b = pytest.mark.skipif(not R12B.exists(), reason="local r12b output deck only")
 
 
+_DECODED: dict[tuple[str, str], bytes] = {}
+
+
+def _member_key(name: str, data: bytes) -> tuple[str, str]:
+    return name, hashlib.sha256(data).hexdigest()
+
+
+class _ContentCachedIWAFile:
+    """Stand-in for the `IWAFile` that `iwa_runs._load_deck_full` imports lazily: each
+    distinct (member name, member bytes) is really decoded once, failures are never
+    cached, and every `to_dict` hands back an independent copy."""
+
+    def __init__(self, pickled: bytes) -> None:
+        self._pickled = pickled
+
+    @classmethod
+    def from_buffer(cls, data: bytes, filename: str | None = None) -> _ContentCachedIWAFile:
+        key = _member_key(filename, data)
+        if key not in _DECODED:
+            _DECODED[key] = pickle.dumps(IWAFile.from_buffer(data, filename).to_dict(), pickle.HIGHEST_PROTOCOL)
+        return cls(_DECODED[key])
+
+    def to_dict(self) -> dict:
+        return pickle.loads(self._pickled)
+
+
+@pytest.fixture(autouse=True)
+def _content_cached_deck_decode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("keynote_parser.codec.IWAFile", _ContentCachedIWAFile)
+
+
 def _copy_deck(src: Path, tmp_path: Path, name: str) -> Path:
+    """Private APFS clone (copy-on-write) when possible, else a full copy."""
     dst = tmp_path / name
-    shutil.copy2(src, dst)
+    if subprocess.run(["cp", "-c", str(src), str(dst)], capture_output=True).returncode != 0:
+        shutil.copy2(src, dst)
     return dst
 
 
@@ -230,6 +266,50 @@ def _strip_own_pill(deck: Path, slide_member: str, slide_id: str, pill_id: str) 
     obj["drawablesZOrder"] = [r for r in obj["drawablesZOrder"] if str(r["identifier"]) != pill_id]
     new_bytes = IWAFile.from_dict(copy.deepcopy(decoded)).to_buffer()
     _rewrite_members(deck, {slide_member: new_bytes})
+
+
+def _member_keys(path: Path) -> dict[str, tuple[str, str]]:
+    with zipfile.ZipFile(path) as zf:
+        return {n: _member_key(n, zf.read(n)) for n in zf.namelist() if n.endswith(".iwa")}
+
+
+@needs_gold
+def test_decode_cache_is_keyed_on_content_and_never_serves_the_input_for_the_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guards this module's decode cache and deck clones: an in-place mutation of a cloned
+    deck changes that member's key and leaves gold untouched; every member write_pills
+    rewrites gets a new key that its own decode populated; the cached deck decode equals
+    an uncached one; and every hit is an independent copy."""
+    member = "Index/Slide-15156371.iwa"
+    gold_keys = _member_keys(GOLD)
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    assert _member_keys(deck) == gold_keys
+    _strip_own_pill(deck, member, "15156371", "15156374")
+    stripped_keys = _member_keys(deck)
+    assert stripped_keys[member] != gold_keys[member]
+    assert {n: k for n, k in stripped_keys.items() if n != member} == {
+        n: k for n, k in gold_keys.items() if n != member
+    }
+    assert _member_keys(GOLD) == gold_keys
+
+    out_path = tmp_path / "out.key"
+    result = P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=out_path)
+    assert result.minted == 1
+    out_keys = _member_keys(out_path)
+    assert member in result.members
+    for name in result.members:
+        assert out_keys[name] != stripped_keys[name]
+        assert out_keys[name] in _DECODED
+    assert set(out_keys.values()) <= set(_DECODED)
+
+    with zipfile.ZipFile(out_path) as zf:
+        first = _ContentCachedIWAFile.from_buffer(zf.read(member), member).to_dict()
+    first["chunks"].clear()
+    cached = _load_deck_full(out_path)
+    assert cached[0]
+    monkeypatch.undo()
+    assert cached == _load_deck_full(out_path)
 
 
 @needs_gold
