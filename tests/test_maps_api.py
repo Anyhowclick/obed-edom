@@ -22,8 +22,9 @@ from obed_edom.web.app import RUNNER, app
 client = TestClient(app)
 
 
-def _wait(job_id, tries=120):
-    for _ in range(tries):
+def _wait(job_id, timeout=30.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         job = client.get(f"/api/jobs/{job_id}").json()
         if job["status"] in {"done", "error"}:
             return job
