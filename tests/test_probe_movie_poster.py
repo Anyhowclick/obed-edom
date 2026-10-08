@@ -56,12 +56,15 @@ def test_resolve_poster_last_refuses_without_explicit_positive_end_time():
         _resolve_poster(_archive(startTime=0.0, endTime=0.0), "last")
 
 
-def test_resolve_poster_last_accepts_explicit_positive_end_time():
-    assert _resolve_poster(_archive(startTime=0.0, endTime=2.5), "last") == 2.5
-
-
-def test_resolve_poster_seconds_bypasses_last_frame_logic():
-    assert _resolve_poster(_archive(startTime=0.0, endTime=0.0), "1.25") == 1.25
+@pytest.mark.parametrize(
+    ("end_time", "poster", "expected"),
+    [
+        pytest.param(2.5, "last", 2.5, id="last-accepts-explicit-positive-end-time"),
+        pytest.param(0.0, "1.25", 1.25, id="seconds-bypass-last-frame-logic"),
+    ],
+)
+def test_resolve_poster(end_time, poster, expected):
+    assert _resolve_poster(_archive(startTime=0.0, endTime=end_time), poster) == expected
 
 
 def test_reopen_applescript_compares_exact_posix_path_not_prefix(tmp_path: Path):

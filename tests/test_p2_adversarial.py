@@ -904,7 +904,6 @@ FREEZE_FLIP_INDEX_34 = next(
 FIRST_IN_HOLD_34 = 1
 ADVANCE_KEY_AT_34 = _FIXTURE_34["b"]["advanceKeyPerfMs"]
 HOLD_STARTED_AT_34 = _FIXTURE_34["b"]["nullControl"]["holdStartedAt"]
-COVER_PAINTED_AT_34 = _FIXTURE_34["b"]["nullControl"]["coverPaintedAt"]
 REHANDOFF_SEQ0_34 = _FIXTURE_34["b"]["badge"]["stats"]["rehandoffSeqs"][0]
 
 
@@ -3760,21 +3759,6 @@ def test_freeze_control_clean_bracket_still_passes_with_the_new_gates():
 # capture contract. Codex's four pure-scorer probes each reached PASS before
 # this; every one of them must now come back INCONCLUSIVE.
 # --------------------------------------------------------------------------- #
-def _reencode_raster(arr, **over) -> dict:
-    """An `evidence` block for `arr`, contract-shaped except where overridden."""
-    ev = {
-        "captureId": _FIXTURE_34["b"]["captureId"],
-        "n": p2.FOOTPRINT_BURST_FRAMES,
-        "rects": p2._footprint_rects(),
-        "controlRect": dict(p2.SLIDE4_CONTROL_RECT),
-        "params": dict(p2.FOOTPRINT_SCORE_PARAMS),
-        "frameSha256": ["0" * 64] * p2.FOOTPRINT_BURST_FRAMES,
-        **p2._encode_delta_raster(arr),
-    }
-    ev.update(over)
-    return ev
-
-
 def _b_with_evidence(**over) -> dict:
     snap = _freeze_b_snap_34()
     live = copy.deepcopy(snap["footprintFullyLive"])

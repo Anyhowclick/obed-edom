@@ -72,6 +72,7 @@ from scripts.offline_write_ab import (
     run_record,
     source_aspects,
     spec_id_map,
+    summary_gate_reasons,
     tol_for_bucket,
     unit_bucket,
     write_run_record,
@@ -2480,103 +2481,52 @@ def test_remap_and_inspect_reds_gate_when_coverage_reports_uncovered(monkeypatch
     assert info["offlineWrite"]["liveVerifyPass"] is False
 
 
-def test_summary_gate_reasons_green_on_clean_run():
-    from scripts.offline_write_ab import summary_gate_reasons
-
-    ow = {"refused": [], "missedSpecs": 0, "softFallbacks": 0, "valueClean": True,
-          "offlineVerifyPass": True, "liveVerifyPass": True}
-    assert summary_gate_reasons(ow, applied_a=5, applied_b=5) == []
+_GATE_BASE = {"refused": [], "missedSpecs": 0, "softFallbacks": 0, "valueClean": True}
+_VERIFIED = {"offlineVerifyPass": True, "liveVerifyPass": True}
 
 
-def test_summary_gate_reasons_flags_offline_verify_fail():
-    from scripts.offline_write_ab import summary_gate_reasons
-
-    ow = {"refused": [], "missedSpecs": 0, "softFallbacks": 0, "valueClean": True,
-          "offlineVerifyPass": False, "liveVerifyPass": True}
-    reasons = summary_gate_reasons(ow, applied_a=5, applied_b=5)
-    assert any("offline-write verify" in r for r in reasons)
-
-
-def test_summary_gate_reasons_flags_live_verify_fail():
-    from scripts.offline_write_ab import summary_gate_reasons
-
-    ow = {"refused": [], "missedSpecs": 0, "softFallbacks": 0, "valueClean": True,
-          "offlineVerifyPass": True, "liveVerifyPass": False}
-    reasons = summary_gate_reasons(ow, applied_a=5, applied_b=5)
-    assert any("live verify" in r for r in reasons)
-
-
-def test_summary_gate_reasons_missing_verify_keys_do_not_spuriously_fail():
-    # A run whose mode wasn't "verify" carries neither key -- absence must not read as FAIL.
-    from scripts.offline_write_ab import summary_gate_reasons
-
-    ow = {"refused": [], "missedSpecs": 0, "softFallbacks": 0, "valueClean": True}
-    assert summary_gate_reasons(ow, applied_a=5, applied_b=5) == []
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param(_VERIFIED, id="clean-run"),
+        pytest.param({}, id="verify-keys-absent-when-mode-was-not-verify"),
+        pytest.param(
+            {"missedSpecs": 3, "fallbackSpecs": {"5": 3}, "fallbackUnwritable": 0},
+            id="fully-covered-missed-specs-downgraded",
+        ),
+    ],
+)
+def test_summary_gate_reasons_green(extra):
+    """Absent verify/set-pass/coverage keys mean "not measured", never red: a non-verify
+    run carries no verify keys, and a reused v3 record (GATE_VERSION 3->4, W2
+    zorder-bridge Piece 2) has no ``liveVerifySetPass``/``liveVerifyCoverage``."""
+    assert summary_gate_reasons({**_GATE_BASE, **extra}, applied_a=5, applied_b=5) == []
 
 
-def test_summary_gate_reasons_flags_live_verify_set_fail():
-    from scripts.offline_write_ab import summary_gate_reasons
-
-    ow = {"refused": [], "missedSpecs": 0, "softFallbacks": 0, "valueClean": True,
-          "offlineVerifyPass": True, "liveVerifyPass": True, "liveVerifySetPass": False}
-    reasons = summary_gate_reasons(ow, applied_a=5, applied_b=5)
-    assert any("live verify (set)" in r for r in reasons)
-
-
-def test_summary_gate_reasons_flags_uncovered_pairs():
-    from scripts.offline_write_ab import summary_gate_reasons
-
-    ow = {"refused": [], "missedSpecs": 0, "softFallbacks": 0, "valueClean": True,
-          "offlineVerifyPass": True, "liveVerifyPass": True, "liveVerifySetPass": True,
-          "liveVerifyCoverage": {"uncovered": [[3, "group"]]}}
-    reasons = summary_gate_reasons(ow, applied_a=5, applied_b=5)
-    assert any("uncovered" in r for r in reasons)
-
-
-def test_summary_gate_reasons_v3_record_missing_set_pass_and_coverage_is_not_a_fail():
-    # GATE_VERSION 3->4 (W2 zorder-bridge Piece 2): a reused v3 record has neither
-    # `liveVerifySetPass` nor `liveVerifyCoverage` -- absence must read as "not
-    # measured", never as a red, exactly like the older liveVerifyPass/offlineVerifyPass
-    # absence case above.
-    from scripts.offline_write_ab import summary_gate_reasons
-
-    ow = {"refused": [], "missedSpecs": 0, "softFallbacks": 0, "valueClean": True,
-          "offlineVerifyPass": True, "liveVerifyPass": True}
-    assert summary_gate_reasons(ow, applied_a=5, applied_b=5) == []
-
-
-def test_summary_gate_reasons_downgrades_fully_covered_missed_specs_to_non_gating():
-    from scripts.offline_write_ab import summary_gate_reasons
-
-    ow = {"refused": [], "missedSpecs": 3, "softFallbacks": 0, "valueClean": True,
-          "fallbackSpecs": {"5": 3}, "fallbackUnwritable": 0}
-    assert summary_gate_reasons(ow, applied_a=5, applied_b=5) == []
-
-
-def test_summary_gate_reasons_reds_missed_specs_not_fully_covered():
-    from scripts.offline_write_ab import summary_gate_reasons
-
-    ow = {"refused": [], "missedSpecs": 3, "softFallbacks": 0, "valueClean": True,
-          "fallbackSpecs": {"5": 1}, "fallbackUnwritable": 0}
-    reasons = summary_gate_reasons(ow, applied_a=5, applied_b=5)
-    assert any("did not fully cover" in r and "fallback_specs=1" in r for r in reasons)
-
-
-def test_summary_gate_reasons_reds_on_fallback_unwritable():
-    from scripts.offline_write_ab import summary_gate_reasons
-
-    ow = {"refused": [], "missedSpecs": 3, "softFallbacks": 0, "valueClean": True,
-          "fallbackSpecs": {"5": 3}, "fallbackUnwritable": 1}
-    reasons = summary_gate_reasons(ow, applied_a=5, applied_b=5)
-    assert any("unwritable=1" in r for r in reasons)
-
-
-def test_summary_gate_reasons_missed_specs_absent_fallback_keys_still_red():
-    from scripts.offline_write_ab import summary_gate_reasons
-
-    ow = {"refused": [], "missedSpecs": 3, "softFallbacks": 0, "valueClean": True}
-    reasons = summary_gate_reasons(ow, applied_a=5, applied_b=5)
-    assert any("missed the offline patch" in r for r in reasons)
+@pytest.mark.parametrize(
+    ("extra", "needles"),
+    [
+        pytest.param({"offlineVerifyPass": False, "liveVerifyPass": True},
+                     ("offline-write verify",), id="offline-verify-fail"),
+        pytest.param({"offlineVerifyPass": True, "liveVerifyPass": False},
+                     ("live verify",), id="live-verify-fail"),
+        pytest.param({**_VERIFIED, "liveVerifySetPass": False},
+                     ("live verify (set)",), id="live-verify-set-fail"),
+        pytest.param({**_VERIFIED, "liveVerifySetPass": True,
+                      "liveVerifyCoverage": {"uncovered": [[3, "group"]]}},
+                     ("uncovered",), id="uncovered-pairs"),
+        pytest.param({"missedSpecs": 3, "fallbackSpecs": {"5": 1}, "fallbackUnwritable": 0},
+                     ("did not fully cover", "fallback_specs=1"),
+                     id="missed-specs-not-fully-covered"),
+        pytest.param({"missedSpecs": 3, "fallbackSpecs": {"5": 3}, "fallbackUnwritable": 1},
+                     ("unwritable=1",), id="fallback-unwritable"),
+        pytest.param({"missedSpecs": 3}, ("missed the offline patch",),
+                     id="missed-specs-without-fallback-keys"),
+    ],
+)
+def test_summary_gate_reasons_red(extra, needles):
+    reasons = summary_gate_reasons({**_GATE_BASE, **extra}, applied_a=5, applied_b=5)
+    assert any(all(needle in r for needle in needles) for r in reasons)
 
 
 # --- keynote_open_documents / stray-document guard (Full-deck-gate memory blowup) --
@@ -2731,33 +2681,22 @@ def test_quit_keynote_and_wait_polls_until_count_reports_zero(monkeypatch):
     assert len(slept) == 2  # slept between poll 1->2 and 2->3, not after the final zero
 
 
-def test_quit_keynote_and_wait_warns_not_raises_when_still_running_at_timeout(monkeypatch):
+@pytest.mark.parametrize(
+    "count_result",
+    [
+        pytest.param(SimpleNamespace(returncode=0, stdout="1\n", stderr=""), id="still-running"),
+        pytest.param(SimpleNamespace(returncode=1, stdout="", stderr="System Events got an error"),
+                     id="nonzero-returncode-never-counts-as-gone"),
+    ],
+)
+def test_quit_keynote_and_wait_warns_not_raises_at_timeout(monkeypatch, count_result):
+    """A failed count call (nonzero rc, empty stdout) is NOT proof Keynote quit: it keeps
+    polling until the timeout, which warns rather than raises."""
     from scripts import offline_write_ab as owab
 
     def fake_run(cmd, **k):
         if _is_count_script(cmd):
-            return SimpleNamespace(returncode=0, stdout="1\n", stderr="")  # always "running"
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    # Fake a clock so the 90s timeout elapses without a real sleep.
-    fake_now = [0.0]
-    monkeypatch.setattr(owab.subprocess, "run", fake_run)
-    monkeypatch.setattr(owab.time, "sleep", lambda s: fake_now.__setitem__(0, fake_now[0] + s))
-    monkeypatch.setattr(owab.time, "monotonic", lambda: fake_now[0])
-
-    ok, elapsed = owab.quit_keynote_and_wait(timeout=5.0)
-    assert ok is False
-    assert elapsed >= 5.0
-
-
-def test_quit_keynote_and_wait_nonzero_returncode_never_counts_as_gone(monkeypatch):
-    # A nonzero osascript rc (or empty/garbled stdout) is NOT proof Keynote quit --
-    # even if stdout happened to be empty or "0"-looking, a failed call must keep polling.
-    from scripts import offline_write_ab as owab
-
-    def fake_run(cmd, **k):
-        if _is_count_script(cmd):
-            return SimpleNamespace(returncode=1, stdout="", stderr="System Events got an error")
+            return count_result
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     fake_now = [0.0]
@@ -2976,9 +2915,16 @@ def test_plan_parity_suppress_geometry_never_an_equality_check():
 # --- card_border_damage_reasons / card_border_refs (item 4) ---------------------------
 
 
-def test_card_border_damage_reasons_clean_arm():
-    # Arm B, banked (2026-09-07 Full bank): output refs == source refs.
-    assert card_border_damage_reasons("B", 83, 83, None) == []
+@pytest.mark.parametrize(
+    ("arm", "out_refs", "src_refs"),
+    [
+        pytest.param("B", 83, 83, id="clean-arm-2026-09-07-full-bank"),
+        pytest.param("A", 43, None, id="not-applicable-without-source-card-style"),
+        pytest.param("B", 120, 83, id="surplus-is-a-dedup-shortfall-not-this-hard-fail"),
+    ],
+)
+def test_card_border_damage_reasons_no_damage(arm, out_refs, src_refs):
+    assert card_border_damage_reasons(arm, out_refs, src_refs, None) == []
 
 
 def test_card_border_damage_reasons_hard_fails_on_card_loss():
@@ -3018,11 +2964,6 @@ def test_card_border_damage_reasons_tolerates_borderline_shortfall():
     assert card_border_damage_reasons("A", 70, 83, None) == []
 
 
-def test_card_border_damage_reasons_not_applicable_without_card_style():
-    # No unambiguous card-border style in the SOURCE — the check cannot apply.
-    assert card_border_damage_reasons("A", 43, None, None) == []
-
-
 def test_card_border_damage_reasons_output_lost_its_card_style():
     # N2: an ambiguous OUTPUT style is not a measured shortfall -- no fabricated ratio,
     # and the remedy must not blame the machine (a surplus of stranded donor copies
@@ -3037,11 +2978,6 @@ def test_card_border_damage_reasons_output_lost_its_card_style():
     assert "re-run this arm on an untouched machine" not in r
     assert "inspect the deck's media styles" in r
     assert "stolen" not in r.lower()
-
-
-def test_card_border_damage_reasons_surplus_is_not_hard():
-    # A surplus (stranded donor copies) is a dedup shortfall, not this hard fail.
-    assert card_border_damage_reasons("B", 120, 83, None) == []
 
 
 def test_card_border_refs_single_style(monkeypatch):
@@ -3077,14 +3013,22 @@ def test_card_border_refs_none_when_ambiguous(monkeypatch):
 # --- damage_check_line (N1) -----------------------------------------------------------
 
 
-def test_damage_check_line_ok_reports_both_counts():
-    line = damage_check_line("A", src_ok=True, refs_ok=True, src_refs=83, out_refs=83, damage=[])
-    assert line == "A damage check: OK (83 vs source 83 card-border refs)."
-
-
-def test_damage_check_line_not_applicable_when_source_ambiguous():
-    line = damage_check_line("A", src_ok=True, refs_ok=True, src_refs=None, out_refs=43, damage=[])
-    assert line == "A damage check: NOT APPLICABLE (source has no unambiguous card-border style)."
+@pytest.mark.parametrize(
+    ("src_refs", "out_refs", "damage", "expected"),
+    [
+        pytest.param(83, 83, [], "A damage check: OK (83 vs source 83 card-border refs).",
+                     id="ok-reports-both-counts"),
+        pytest.param(None, 43, [],
+                     "A damage check: NOT APPLICABLE (source has no unambiguous card-border style).",
+                     id="not-applicable-when-source-ambiguous"),
+        pytest.param(83, 43, ["A: card-border refs 43 vs source 83 ..."], "",
+                     id="empty-when-the-red-reason-already-says-it"),
+    ],
+)
+def test_damage_check_line(src_refs, out_refs, damage, expected):
+    line = damage_check_line("A", src_ok=True, refs_ok=True, src_refs=src_refs, out_refs=out_refs,
+                             damage=damage)
+    assert line == expected
 
 
 def test_damage_check_line_skipped_on_read_failure():
@@ -3093,53 +3037,40 @@ def test_damage_check_line_skipped_on_read_failure():
     assert "read failed" in line
 
 
-def test_damage_check_line_empty_when_damage_present():
-    # The RED reason line(s) already say it -- no redundant status line on top.
-    line = damage_check_line("A", src_ok=True, refs_ok=True, src_refs=83, out_refs=43,
-                             damage=["A: card-border refs 43 vs source 83 ..."])
-    assert line == ""
-
-
 # --- unit_bucket / tol_for_bucket (D7/D8) ---------------------------------------------
 
 
-def test_unit_bucket_top_level_keeps_kind():
-    assert unit_bucket({"addr": ("top", "shape", 0), "kind": "shape"}) == "shape"
+@pytest.mark.parametrize(
+    ("unit", "bucket"),
+    [
+        pytest.param({"addr": ("top", "shape", 0), "kind": "shape"}, "shape", id="top-level-keeps-kind"),
+        pytest.param({"addr": (("top", "group", 0), "child", 0), "kind": "image"}, "child:image",
+                     id="child-gets-prefix"),
+    ],
+)
+def test_unit_bucket(unit, bucket):
+    assert unit_bucket(unit) == bucket
 
 
-def test_unit_bucket_child_gets_prefix():
-    addr = (("top", "group", 0), "child", 0)
-    assert unit_bucket({"addr": addr, "kind": "image"}) == "child:image"
-
-
-def test_tol_for_bucket_masked_uses_mask_tol():
-    tols = Tolerances(hard=0.5, soft=1.0, mask=2.0, text=3.0)
-    assert tol_for_bucket("image", "masked", tols) == 2.0
-
-
-def test_tol_for_bucket_autosize_uses_text_tol():
-    tols = Tolerances(hard=0.5, soft=1.0, mask=2.0, text=3.0)
-    assert tol_for_bucket("text", "autosize", tols) == 3.0
-
-
-def test_tol_for_bucket_hard_kinds_doubled_for_identity():
-    # Two INDEPENDENT runs each within tols.hard of the plan can be 2x that apart.
-    tols = Tolerances(hard=0.5, soft=1.0, mask=2.0, text=3.0)
-    assert tol_for_bucket("shape", "frame", tols) == 1.0
-    assert tol_for_bucket("line", "line", tols) == 1.0
-
-
-def test_tol_for_bucket_soft_doubled_for_unmasked_top_level():
+@pytest.mark.parametrize(
+    ("bucket", "sig_type", "tol"),
+    [
+        pytest.param("image", "masked", 2.0, id="masked-uses-mask-tol"),
+        pytest.param("text", "autosize", 3.0, id="autosize-uses-text-tol"),
+        pytest.param("shape", "frame", 1.0, id="hard-shape-doubled-for-identity"),
+        pytest.param("line", "line", 1.0, id="hard-line-doubled-for-identity"),
+        pytest.param("image", "frame", 2.0, id="soft-image-doubled-for-unmasked-top-level"),
+        pytest.param("group", "group", 2.0, id="soft-group-doubled-for-unmasked-top-level"),
+        pytest.param("child:image", "frame", 4.0, id="child-image-uses-child-tol"),
+        pytest.param("child:group", "group", 4.0, id="child-group-uses-child-tol"),
+        pytest.param("child:child", "frame", 4.0, id="child-child-uses-child-tol"),
+    ],
+)
+def test_tol_for_bucket(bucket, sig_type, tol):
+    """Identity compares two INDEPENDENT runs, each within the plan tolerance, so the
+    hard and soft top-level tolerances double; mask/text/child tolerances do not."""
     tols = Tolerances(hard=0.5, soft=1.0, mask=2.0, text=3.0, child=4.0)
-    assert tol_for_bucket("image", "frame", tols) == 2.0
-    assert tol_for_bucket("group", "group", tols) == 2.0
-
-
-def test_tol_for_bucket_child_star_uses_child_tol_regardless_of_kind():
-    tols = Tolerances(hard=0.5, soft=1.0, mask=2.0, text=3.0, child=4.0)
-    assert tol_for_bucket("child:image", "frame", tols) == 4.0
-    assert tol_for_bucket("child:group", "group", tols) == 4.0
-    assert tol_for_bucket("child:child", "frame", tols) == 4.0
+    assert tol_for_bucket(bucket, sig_type, tols) == tol
 
 
 # --- compare_units_identity (D1) ------------------------------------------------------
@@ -3370,17 +3301,25 @@ def test_plan_oracle_slide_skips_hide_role():
                        "compared": 0, "approx": []}
 
 
-def test_plan_oracle_slide_skips_text_spec():
-    # Autosize text geometry is not offline-recoverable — the identity compare covers it.
-    specs = [{"slide": 1, "kind": "text", "kindIndex": 0, "x": 999.0, "y": 999.0}]
-    id_by_addr = {("text", 0): "t1"}
-    recs_by_id = {"t1": {"id": "t1", "kind": "text", "kindIndex": 0,
-                        "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "geom_source": "autosize"}}
+@pytest.mark.parametrize(
+    ("kind", "geom_source"),
+    [
+        pytest.param("text", "autosize", id="autosize-text"),
+        pytest.param("image", "mask", id="masked-image"),
+    ],
+)
+def test_plan_oracle_slide_skips_geometry_not_offline_recoverable(kind, geom_source):
+    """Autosize text and masked images are not offline-recoverable; the identity compare
+    covers them, so the slide's oracle is vacuous."""
+    specs = [{"slide": 1, "kind": kind, "kindIndex": 0, "x": 999.0, "y": 999.0}]
+    id_by_addr = {(kind, 0): "u1"}
+    recs_by_id = {"u1": {"id": "u1", "kind": kind, "kindIndex": 0,
+                         "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "geom_source": geom_source}}
     report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances())
     assert report["per_kind"] == {}
     assert report["pass"] is True
     assert report["skipped"] == 1
-    assert report["compared"] == 0  # vacuous — every spec on this slide was skipped
+    assert report["compared"] == 0
 
 
 def test_plan_oracle_slide_compares_group_union_at_soft_tol():
@@ -3536,18 +3475,6 @@ def test_plan_oracle_slide_approx_is_not_counted_as_compared():
     assert report["skipped"] == 1
 
 
-def test_plan_oracle_slide_skips_masked_image():
-    specs = [{"slide": 1, "kind": "image", "kindIndex": 0, "x": 999.0, "y": 999.0}]
-    id_by_addr = {("image", 0): "img1"}
-    recs_by_id = {"img1": {"id": "img1", "kind": "image", "kindIndex": 0,
-                           "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "geom_source": "mask"}}
-    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances())
-    assert report["per_kind"] == {}
-    assert report["pass"] is True
-    assert report["skipped"] == 1
-    assert report["compared"] == 0
-
-
 def test_plan_oracle_slide_unmasked_image_is_compared():
     specs = [{"slide": 1, "kind": "image", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0}]
     id_by_addr = {("image", 0): "img1"}
@@ -3647,22 +3574,18 @@ def test_plan_oracle_aspect_bar_is_quarter_pixel():
     assert report["pass"] is True
 
 
-def test_plan_oracle_aspect_accepts_stretched_integer_width():
-    ar = 3.7433
-    specs = [{"slide": 1, "kind": "image", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 374.33, "h": 100.0}]
+@pytest.mark.parametrize(
+    ("ar", "spec_w", "rec_w", "h"),
+    [
+        pytest.param(3.7433, 374.33, 374.0, 100.0, id="stretched-integer-width"),
+        pytest.param(1.339245, 1268.26, 947.0 * 1.339245, 947.0, id="float-lock-width"),
+    ],
+)
+def test_plan_oracle_aspect_accepts_image_width(ar, spec_w, rec_w, h):
+    specs = [{"slide": 1, "kind": "image", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": spec_w, "h": h}]
     id_by_addr = {("image", 0): "i1"}
     recs_by_id = {"i1": {"id": "i1", "kind": "image", "kindIndex": 0,
-                        "x": 0.0, "y": 0.0, "w": 374.0, "h": 100.0, "geom_source": "iwa"}}
-    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(), aspects={"i1": ar})
-    assert report["pass"] is True
-
-
-def test_plan_oracle_aspect_still_accepts_float_lock_width():
-    ar = 1.339245
-    specs = [{"slide": 1, "kind": "image", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 1268.26, "h": 947.0}]
-    id_by_addr = {("image", 0): "i1"}
-    recs_by_id = {"i1": {"id": "i1", "kind": "image", "kindIndex": 0,
-                        "x": 0.0, "y": 0.0, "w": 947.0 * ar, "h": 947.0, "geom_source": "iwa"}}
+                        "x": 0.0, "y": 0.0, "w": rec_w, "h": h, "geom_source": "iwa"}}
     report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(), aspects={"i1": ar})
     assert report["pass"] is True
 
@@ -3678,34 +3601,21 @@ def test_plan_oracle_aspect_rejects_width_matching_neither():
     assert report["per_kind"]["image"]["worst"] == pytest.approx(0.4)
 
 
-def test_plan_oracle_stretched_integer_width_ignored_for_shape():
-    specs = [{"slide": 1, "kind": "shape", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 374.33, "h": 100.0}]
+@pytest.mark.parametrize(
+    ("ar", "spec_w", "rec_w", "h", "passed", "worst"),
+    [
+        pytest.param(3.7433, 374.33, 374.0, 100.0, True, 0.33, id="stretched-integer-width-within-hard"),
+        pytest.param(1.0, 10.0, 10.6, 10.0, False, 0.6, id="aspect-match-does-not-rescue-a-shape"),
+    ],
+)
+def test_plan_oracle_aspect_ignored_for_shape(ar, spec_w, rec_w, h, passed, worst):
+    specs = [{"slide": 1, "kind": "shape", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": spec_w, "h": h}]
     id_by_addr = {("shape", 0): "s1"}
     recs_by_id = {"s1": {"id": "s1", "kind": "shape", "kindIndex": 0,
-                        "x": 0.0, "y": 0.0, "w": 374.0, "h": 100.0, "geom_source": "iwa"}}
-    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(hard=0.5), aspects={"s1": 3.7433})
-    assert report["pass"] is True
-    assert report["per_kind"]["shape"]["worst"] == pytest.approx(0.33)
-
-
-def test_plan_oracle_without_aspects_is_unchanged():
-    specs = [{"slide": 1, "kind": "group", "kindIndex": 0, "x": 5.0, "y": 0.0, "w": 10.0, "h": 10.0}]
-    id_by_addr = {("group", 0): "g1"}
-    recs_by_id = {"g1": {"id": "g1", "kind": "group", "kindIndex": 0,
-                        "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "geom_source": "group-union"}}
-    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(soft=1.0))
-    assert report["per_kind"]["group"]["worst"] == 5.0
-    assert report["pass"] is False
-
-
-def test_plan_oracle_aspect_ignored_for_shape():
-    specs = [{"slide": 1, "kind": "shape", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0}]
-    id_by_addr = {("shape", 0): "s1"}
-    recs_by_id = {"s1": {"id": "s1", "kind": "shape", "kindIndex": 0,
-                        "x": 0.0, "y": 0.0, "w": 10.6, "h": 10.0, "geom_source": "iwa"}}
-    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(hard=0.5), aspects={"s1": 1.0})
-    assert report["pass"] is False
-    assert report["per_kind"]["shape"]["worst"] == pytest.approx(0.6)
+                        "x": 0.0, "y": 0.0, "w": rec_w, "h": h, "geom_source": "iwa"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(hard=0.5), aspects={"s1": ar})
+    assert report["pass"] is passed
+    assert report["per_kind"]["shape"]["worst"] == pytest.approx(worst)
 
 
 def test_plan_oracle_missing_aspect_falls_back_to_soft():
@@ -3850,42 +3760,27 @@ def test_write_run_record_round_trips(tmp_path):
     assert json.loads(path.read_text()) == record
 
 
-def test_load_run_record_refuses_gate_version_mismatch(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        pytest.param({"gateVersion": 999}, "gateVersion", id="future-gate-version"),
+        pytest.param({"gateVersion": 2}, "gateVersion", id="v2-dropped-when-gate-version-bumped-3-to-4"),
+        pytest.param({"gateVersion": 1}, "gateVersion", id="unknown-old-gate-version"),
+        pytest.param({"deckDigest": "something-else"}, "deck digest", id="deck-digest"),
+        pytest.param({"sourceDigest": "something-else"}, "source digest", id="source-digest"),
+    ],
+)
+def test_load_run_record_refuses_a_stale_record(tmp_path, monkeypatch, overrides, match):
+    """``deck_digest`` is monkeypatched to one constant for every path, so the record
+    matches on everything except ``overrides``: each case proves its own check fires."""
     deck = tmp_path / "d.key"
     deck.write_bytes(b"x")
     source = tmp_path / "s.key"
     monkeypatch.setattr("obed_edom.baseline.deck_digest", lambda p: "digestX")
-    record = run_record(**_record(deck_digest="digestX"))
-    record["gateVersion"] = 999
+    record = {**run_record(**_record(deck_digest="digestX", source_digest="digestX")), **overrides}
     path = tmp_path / "d.run.json"
     path.write_text(json.dumps(record))
-    with pytest.raises(ValueError, match="gateVersion"):
-        load_run_record(path, deck=deck, source=source)
-
-
-def test_load_run_record_refuses_deck_digest_mismatch(tmp_path, monkeypatch):
-    deck = tmp_path / "d.key"
-    deck.write_bytes(b"x")
-    source = tmp_path / "s.key"
-    monkeypatch.setattr("obed_edom.baseline.deck_digest", lambda p: "digestX")
-    record = run_record(**_record(deck_digest="something-else"))
-    path = tmp_path / "d.run.json"
-    path.write_text(json.dumps(record))
-    with pytest.raises(ValueError, match="deck digest"):
-        load_run_record(path, deck=deck, source=source)
-
-
-def test_load_run_record_refuses_source_digest_mismatch(tmp_path, monkeypatch):
-    deck = tmp_path / "d.key"
-    deck.write_bytes(b"x")
-    source = tmp_path / "s.key"
-    # deck_digest is monkeypatched to a single constant regardless of path -- keep the
-    # deck digest MATCHING so this test proves the SOURCE check specifically fires.
-    monkeypatch.setattr("obed_edom.baseline.deck_digest", lambda p: "digestX")
-    record = run_record(**_record(deck_digest="digestX", source_digest="something-else"))
-    path = tmp_path / "d.run.json"
-    path.write_text(json.dumps(record))
-    with pytest.raises(ValueError, match="source digest"):
+    with pytest.raises(ValueError, match=match):
         load_run_record(path, deck=deck, source=source)
 
 
@@ -3920,33 +3815,6 @@ def test_load_run_record_accepts_compatible_v3_record(tmp_path, monkeypatch):
     path.write_text(json.dumps(record))
     loaded = load_run_record(path, deck=deck, source=source)
     assert loaded == record
-
-
-def test_load_run_record_refuses_v2_record_now_incompatible(tmp_path, monkeypatch):
-    # v2 was dropped from COMPATIBLE_GATE_VERSIONS when GATE_VERSION bumped 3->4.
-    deck = tmp_path / "d.key"
-    deck.write_bytes(b"x")
-    source = tmp_path / "s.key"
-    monkeypatch.setattr("obed_edom.baseline.deck_digest", lambda p: "digestX")
-    record = run_record(**_record(deck_digest="digestX", source_digest="digestX"))
-    record["gateVersion"] = 2
-    path = tmp_path / "d.run.json"
-    path.write_text(json.dumps(record))
-    with pytest.raises(ValueError, match="gateVersion"):
-        load_run_record(path, deck=deck, source=source)
-
-
-def test_load_run_record_refuses_unknown_gate_version(tmp_path, monkeypatch):
-    deck = tmp_path / "d.key"
-    deck.write_bytes(b"x")
-    source = tmp_path / "s.key"
-    monkeypatch.setattr("obed_edom.baseline.deck_digest", lambda p: "digestX")
-    record = run_record(**_record(deck_digest="digestX"))
-    record["gateVersion"] = 1
-    path = tmp_path / "d.run.json"
-    path.write_text(json.dumps(record))
-    with pytest.raises(ValueError, match="gateVersion"):
-        load_run_record(path, deck=deck, source=source)
 
 
 def test_load_run_record_accepts_matching_record(tmp_path, monkeypatch):
@@ -4166,6 +4034,7 @@ _FAILS_JSON = find_repo_root() / "tests/fixtures/as-geometry-rounding/fails.json
 @pytest.mark.skipif(
     not (_FULL_DECK.exists() and _BASE_TEMPLATE.exists()), reason="local gold deck only"
 )
+@pytest.mark.usefixtures("shared_iwa_decode")
 def test_full_deck_plan_is_aspect_consistent():
     """71/675/645 (and the derived 1391/1453) are measured pins on
     ``Full_Report_Card_Wall.key`` — a change in any of them is a re-measurement

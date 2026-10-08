@@ -21,7 +21,7 @@ import pytest
 
 from conftest import _fake_osascript
 from obed_edom import inspect as inspect_mod
-from obed_edom.baseline import CACHE_DIR_ENV, deck_digest, inspect_cache_path
+from obed_edom.baseline import CACHE_DIR_ENV
 
 
 # --------------------------------------------------------------------------

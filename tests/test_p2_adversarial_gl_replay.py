@@ -789,18 +789,19 @@ def test_mm_opacity_mode_defaults_auto_and_rejects_unknown(monkeypatch):
         drv._mm_opacity_mode()
 
 
-def test_run_refuses_an_unknown_mm_opacity_mode_before_any_destructive_work(tmp_path, monkeypatch):
+@pytest.mark.parametrize("flag", ["--mm-opacity", "--gl-replay"])
+def test_run_refuses_an_unknown_mode_before_any_destructive_work(tmp_path, monkeypatch, flag):
     import asyncio
 
     marker = tmp_path / "runs" / "marker.txt"
     marker.parent.mkdir()
     marker.write_text("prior")
     monkeypatch.setattr(drv, "OUT", tmp_path)
-    monkeypatch.setattr(sys, "argv", ["p2", "--mm-opacity", "bogus"])
+    monkeypatch.setattr(sys, "argv", ["p2", flag, "bogus"])
     calls = []
     monkeypatch.setattr(shutil, "rmtree", lambda *a, **k: calls.append(a))
     monkeypatch.setattr(drv, "file_identity", lambda *a, **k: calls.append(a))
-    with pytest.raises(SystemExit, match="--mm-opacity"):
+    with pytest.raises(SystemExit, match=flag):
         asyncio.run(drv._run(tmp_path / "html-player"))
     assert calls == []
     assert marker.read_text() == "prior"
@@ -1001,23 +1002,6 @@ def test_sample_frame_roi_is_index_patch_roi_scaled_to_the_frame():
     assert (x + drv.MOVIE_ROI[0], y + drv.MOVIE_ROI[1], w, h) == drv.INDEX_PATCH_ROI
     x, y, w, h = drv._sample_frame_index_roi(320, 90)
     assert x + w <= 320 * 120 / 1920 and y + h <= 90 * 48 / 540
-
-
-def test_run_refuses_an_unknown_gl_replay_mode_before_any_destructive_work(tmp_path, monkeypatch):
-    import asyncio
-
-    marker = tmp_path / "runs" / "marker.txt"
-    marker.parent.mkdir()
-    marker.write_text("prior")
-    monkeypatch.setattr(drv, "OUT", tmp_path)
-    monkeypatch.setattr(sys, "argv", ["p2", "--gl-replay", "bogus"])
-    calls = []
-    monkeypatch.setattr(shutil, "rmtree", lambda *a, **k: calls.append(a))
-    monkeypatch.setattr(drv, "file_identity", lambda *a, **k: calls.append(a))
-    with pytest.raises(SystemExit, match="--gl-replay"):
-        asyncio.run(drv._run(tmp_path / "html-player"))
-    assert calls == []
-    assert marker.read_text() == "prior"
 
 
 # --------------------------------------------------------------------------- #

@@ -10,7 +10,6 @@ The tool is 15.x only, so there is deliberately no fallback to another build.
 """
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from conftest import _fake_osascript
@@ -234,10 +233,17 @@ def test_executable_name_none_when_app_not_found(monkeypatch):
     assert keynote_app.executable_name("com.apple.Keynote") is None
 
 
-def test_executable_name_raises_on_missing_cfbundleexecutable(monkeypatch, tmp_path: Path):
+@pytest.mark.parametrize(
+    "info",
+    [
+        pytest.param({"CFBundleIdentifier": "com.apple.Keynote"}, id="missing"),
+        pytest.param({"CFBundleExecutable": 12345}, id="wrong-type"),
+    ],
+)
+def test_executable_name_raises_on_bad_cfbundleexecutable(monkeypatch, tmp_path: Path, info):
     app = tmp_path / "Keynote.app"
     monkeypatch.setattr(keynote_app, "app_path", lambda identifier: app)
-    monkeypatch.setattr(keynote_app, "_bundle_info", lambda app_path: {"CFBundleIdentifier": "com.apple.Keynote"})
+    monkeypatch.setattr(keynote_app, "_bundle_info", lambda app_path: info)
     with pytest.raises(RuntimeError, match="CFBundleExecutable"):
         keynote_app.executable_name("com.apple.Keynote")
 
@@ -247,14 +253,6 @@ def test_executable_name_raises_on_malformed_non_dict_root(monkeypatch, tmp_path
     monkeypatch.setattr(keynote_app, "app_path", lambda identifier: app)
     monkeypatch.setattr(keynote_app, "_bundle_info", lambda app_path: ["not", "a", "dict"])
     with pytest.raises(RuntimeError, match="Unreadable or malformed"):
-        keynote_app.executable_name("com.apple.Keynote")
-
-
-def test_executable_name_raises_on_wrong_type_value(monkeypatch, tmp_path: Path):
-    app = tmp_path / "Keynote.app"
-    monkeypatch.setattr(keynote_app, "app_path", lambda identifier: app)
-    monkeypatch.setattr(keynote_app, "_bundle_info", lambda app_path: {"CFBundleExecutable": 12345})
-    with pytest.raises(RuntimeError, match="CFBundleExecutable"):
         keynote_app.executable_name("com.apple.Keynote")
 
 

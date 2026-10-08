@@ -311,7 +311,7 @@ def test_geometry_is_rounded_to_integers_like_jxa():
     # Keynote returns whole-point geometry to JXA; the offline item must match so
     # the learned affine does not drift a sub-pixel that the cover scale amplifies.
     objects: dict = {}
-    line = _line(objects, "L", x=0.4, y=0.4, w=99.6, angle=0.0)
+    _line(objects, "L", x=0.4, y=0.4, w=99.6, angle=0.0)
     item, _flag = _item_from_record(
         _record("L", "line", 0, x=10.4, y=-2.6, w=99.6, h=0.0), objects, {}, {})
     assert all(isinstance(item[k], int) for k in ("x", "y", "w", "h"))
@@ -345,16 +345,9 @@ def test_aspect_is_none_for_masked_geometry():
 
 
 @pytest.mark.skipif(not FULL_DECK.exists(), reason="local gold deck only")
-def test_offline_wall_payload_emits_aspect_on_every_item():
-    off = offline_wall_payload(FULL_DECK)
-    for slide in off["slides"]:
-        for item in slide["items"]:
-            assert "aspect" in item
-
-
-@pytest.mark.skipif(not FULL_DECK.exists(), reason="local gold deck only")
 def test_two_tier_bulk_splice_leaves_aspect_untouched():
     template = offline_wall_payload(FULL_DECK)
+    assert all("aspect" in it for s in template["slides"] for it in s["items"])
     aspects_before = {
         (s["index"], it["kind"], it["kindIndex"]): it["aspect"]
         for s in template["slides"] for it in s["items"]

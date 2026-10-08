@@ -3,7 +3,8 @@
 The heavy Keynote passes are mocked; these lock only the orchestration:
   - validate=False folds the export into the stat-finalize session, so
     remap_and_inspect must NOT also call export_slide_images;
-  - a run with no stat-group jobs (nothing folded) still exports via the fallback;
+  - a run with nothing folded (no stat-group jobs, or OBED_ZORDER_WRITE=on/verify
+    passing export_dir=None to pass 2) still exports via the fallback;
   - validate=False threads export_dir into remap_keynote, validate=True does not
     (its read-back path exports through inspect_keynote and stays unchanged).
 """
@@ -112,43 +113,3 @@ def test_validate_true_does_not_thread_export_dir(monkeypatch, tmp_path, export_
     # digest preview cache, where the dashboard would never find it) and skips the
     # pointless GB hash + never-reused cache write.
     assert inspect_calls["use_cache"] is False
-
-
-def test_zorder_write_on_forces_fallback_export(monkeypatch, tmp_path, export_dir):
-    # W2: OBED_ZORDER_WRITE=on/verify passes export_dir=None to pass 2, so
-    # remap_keynote reports exported=False and remap_and_inspect's existing
-    # export-fold fallback (not new code) is what exports — after the patch.
-    _capture_remap(monkeypatch, exported=False)
-    export_calls = []
-    monkeypatch.setattr(
-        rk, "export_slide_images", lambda *a, **k: export_calls.append(a) or None
-    )
-
-    rk.remap_and_inspect(
-        tmp_path / "wall.key",
-        tmp_path / "out.key",
-        template=tmp_path / "tpl.key",
-        export_dir=export_dir,
-        validate=False,
-    )
-
-    assert len(export_calls) == 1
-
-
-def test_zorder_write_off_keeps_fold(monkeypatch, tmp_path, export_dir):
-    # Knob off: remap_keynote exports in pass 2 as before, no fallback export.
-    _capture_remap(monkeypatch, exported=True)
-    export_calls = []
-    monkeypatch.setattr(
-        rk, "export_slide_images", lambda *a, **k: export_calls.append(a) or None
-    )
-
-    rk.remap_and_inspect(
-        tmp_path / "wall.key",
-        tmp_path / "out.key",
-        template=tmp_path / "tpl.key",
-        export_dir=export_dir,
-        validate=False,
-    )
-
-    assert export_calls == []
