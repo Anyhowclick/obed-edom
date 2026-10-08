@@ -16,37 +16,21 @@ def test_settings_defaults_and_clamp(tmp_path: Path):
     assert again["reuseThreshold"] == 1.0
 
 
-def test_highlight_colour_default(tmp_path: Path):
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("#0A84FF", "#0a84ff"),
+        ("#0AF", "#00aaff"),
+        ("#abc\n", "#aabbcc"),
+        ("nope", "#e8772a"),
+        ("#0a\x0084ff", "#e8772a"),
+    ],
+    ids=["lowercased", "3-digit-expanded", "trailing-newline-stripped", "invalid", "embedded-control-char"],
+)
+def test_highlight_colour_normalised_and_round_trips(tmp_path: Path, value, expected):
     assert load_settings(tmp_path)["highlightColour"] == "#e8772a"
-
-
-def test_highlight_colour_round_trips_lowercased(tmp_path: Path):
-    written = save_settings({"highlightColour": "#0A84FF"}, tmp_path)
-    assert written["highlightColour"] == "#0a84ff"
-    again = load_settings(tmp_path)
-    assert again["highlightColour"] == "#0a84ff"
-
-
-def test_highlight_colour_rejects_invalid_value(tmp_path: Path):
-    written = save_settings({"highlightColour": "nope"}, tmp_path)
-    assert written["highlightColour"] == "#e8772a"
-
-
-def test_highlight_colour_expands_3_digit_hex(tmp_path: Path):
-    written = save_settings({"highlightColour": "#0AF"}, tmp_path)
-    assert written["highlightColour"] == "#00aaff"
-    again = load_settings(tmp_path)
-    assert again["highlightColour"] == "#00aaff"
-
-
-def test_highlight_colour_strips_trailing_newline(tmp_path: Path):
-    written = save_settings({"highlightColour": "#abc\n"}, tmp_path)
-    assert written["highlightColour"] == "#aabbcc"
-
-
-def test_highlight_colour_rejects_embedded_control_char(tmp_path: Path):
-    written = save_settings({"highlightColour": "#0a\x0084ff"}, tmp_path)
-    assert written["highlightColour"] == "#e8772a"
+    assert save_settings({"highlightColour": value}, tmp_path)["highlightColour"] == expected
+    assert load_settings(tmp_path)["highlightColour"] == expected
 
 
 def test_default_export_dir_round_trips(tmp_path: Path):
@@ -68,22 +52,16 @@ def test_default_export_dir_rejects_bad_path(tmp_path: Path):
         save_settings({"defaultExportDir": "relative/path"}, tmp_path)
 
 
-def test_load_settings_succeeds_with_deleted_export_dir(tmp_path: Path):
+@pytest.mark.parametrize("now_a_file", [False, True], ids=["deleted", "replaced-by-a-file"])
+def test_load_settings_succeeds_when_stored_export_dir_is_gone(tmp_path: Path, now_a_file):
     export_dir = tmp_path / "exports"
     save_settings({"defaultExportDir": str(export_dir)}, tmp_path)
     export_dir.rmdir()
+    if now_a_file:
+        export_dir.write_text("now a file")
     again = load_settings(tmp_path)
     assert again["defaultExportDir"] == str(export_dir.resolve())
-    assert not export_dir.exists()
-
-
-def test_load_settings_succeeds_with_stored_path_now_a_file(tmp_path: Path):
-    export_dir = tmp_path / "exports"
-    save_settings({"defaultExportDir": str(export_dir)}, tmp_path)
-    export_dir.rmdir()
-    export_dir.write_text("now a file")
-    again = load_settings(tmp_path)
-    assert again["defaultExportDir"] == str(export_dir.resolve())
+    assert export_dir.exists() is now_a_file
 
 
 def test_templates_round_trip(tmp_path: Path):

@@ -22,10 +22,9 @@ from obed_edom.remap_keynote import (
 def _touch_paths(tmp_path: Path):
     source = tmp_path / "wall.key"
     template = tmp_path / "tpl.key"
-    dest = tmp_path / "out.key"
     source.touch()
     template.touch()
-    return source, template, dest
+    return source, template
 
 
 def _payloads():
@@ -38,14 +37,10 @@ def test_require_pass1_saved_closed_accepts_true_true():
     _require_pass1_saved_closed({"saved": True, "closed": True})
 
 
-def test_require_pass1_saved_closed_rejects_string_false():
+@pytest.mark.parametrize("saved", ["false", 1], ids=["string-false", "truthy-non-bool"])
+def test_require_pass1_saved_closed_rejects_non_true_saved(saved):
     with pytest.raises(RuntimeError):
-        _require_pass1_saved_closed({"saved": "false", "closed": True})
-
-
-def test_require_pass1_saved_closed_rejects_truthy_non_bool():
-    with pytest.raises(RuntimeError):
-        _require_pass1_saved_closed({"saved": 1, "closed": True})
+        _require_pass1_saved_closed({"saved": saved, "closed": True})
 
 
 def test_say_pass1_stages_prints_in_order_with_residuals():
@@ -80,16 +75,33 @@ def test_say_pass1_stages_prints_in_order_with_residuals():
     ]
 
 
-def test_say_pass1_stages_tolerates_bare_jxa_dict():
+@pytest.mark.parametrize(
+    "py, jxa, expected",
+    [
+        (
+            {"copyDeck": 2.0, "runJxa": 3.0}, {"applied": 1, "missed": 0},
+            ["Pass 1 stage copyDeck: 2.0 s", "Pass 1 stage runJxa: 3.0 s"],
+        ),
+        ({}, {"stages": {"save": 1500}}, ["Pass 1 stage save: 1.5 s (retried: no)"]),
+        (
+            {"runJxa": 5.0}, {"stages": {"open": 1000, "save": 2000}},
+            ["Pass 1 stage runJxa: 5.0 s", "Pass 1 stage open: 1.0 s", "Pass 1 stage save: 2.0 s (retried: no)"],
+        ),
+        (
+            {}, {"stages": {"open": 1000, "total": 1500}},
+            [
+                "Pass 1 stage open: 1.0 s",
+                "Pass 1 stage total: 1.5 s",
+                "Pass 1 unattributed: js 0.5 s, osascript/launch n/a",
+            ],
+        ),
+    ],
+    ids=["bare-jxa-dict", "save-without-retry-flag", "no-total-no-residual", "no-runjxa-na-launch"],
+)
+def test_say_pass1_stages_partial_inputs(py, jxa, expected):
     lines: list[str] = []
-    _say_pass1_stages({"copyDeck": 2.0, "runJxa": 3.0}, {"applied": 1, "missed": 0}, lines.append)
-    assert lines == ["Pass 1 stage copyDeck: 2.0 s", "Pass 1 stage runJxa: 3.0 s"]
-
-
-def test_say_pass1_stages_save_without_retry_flag_reads_no():
-    lines: list[str] = []
-    _say_pass1_stages({}, {"stages": {"save": 1500}}, lines.append)
-    assert lines == ["Pass 1 stage save: 1.5 s (retried: no)"]
+    _say_pass1_stages(py, jxa, lines.append)
+    assert lines == expected
 
 
 def test_pass1_census_counts_paths_and_classes():
@@ -113,22 +125,6 @@ def test_pass1_census_counts_paths_and_classes():
         "Pass 1 census: slides attrs=2 as=1 jxa=2; specs 4 "
         "(hides 3, no-attr 1, locked 2, group-children 1)"
     ]
-
-
-def test_say_pass1_stages_without_total_prints_no_residual():
-    lines: list[str] = []
-    _say_pass1_stages({"runJxa": 5.0}, {"stages": {"open": 1000, "save": 2000}}, lines.append)
-    assert lines == [
-        "Pass 1 stage runJxa: 5.0 s",
-        "Pass 1 stage open: 1.0 s",
-        "Pass 1 stage save: 2.0 s (retried: no)",
-    ]
-
-
-def test_say_pass1_stages_without_runjxa_prints_na_launch():
-    lines: list[str] = []
-    _say_pass1_stages({}, {"stages": {"open": 1000, "total": 1500}}, lines.append)
-    assert lines[-1] == "Pass 1 unattributed: js 0.5 s, osascript/launch n/a"
 
 
 def test_pass1_census_no_attr_matches_apply_geom_truthiness():
@@ -180,7 +176,7 @@ def test_prepare_wall_payload_attaches_magic_move_after_builds(monkeypatch, tmp_
         payload["slides"][0]["magicMoveOut"] = True
 
     monkeypatch.setattr(iwa_runs, "attach_magic_move", fake_attach_magic_move, raising=False)
-    source, template, _dest = _touch_paths(tmp_path)
+    source, template = _touch_paths(tmp_path)
     wall, template_data = _payloads()
     wall["reader"] = "offline"
     lines: list[str] = []
@@ -201,7 +197,7 @@ def test_prepare_wall_payload_survives_magic_move_failure(monkeypatch, tmp_path)
         raise ValueError("no transitions")
 
     monkeypatch.setattr(iwa_runs, "attach_magic_move", boom, raising=False)
-    source, template, _dest = _touch_paths(tmp_path)
+    source, template = _touch_paths(tmp_path)
     wall, template_data = _payloads()
     wall["reader"] = "offline"
     lines: list[str] = []

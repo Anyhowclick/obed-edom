@@ -1132,51 +1132,20 @@ def test_job_from_dict_tolerates_absent_details_progress_started_at():
     assert job.started_at is None
 
 
-def test_progress_cleared_when_job_finishes_done(tmp_path: Path):
+@pytest.mark.parametrize("status", ["done", "error"])
+def test_progress_cleared_when_job_finishes(tmp_path: Path, status):
     runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path / "output")
 
     def work(job: Job):
         job.set_progress(1, 2, "Doing work")
+        if status == "error":
+            raise RuntimeError("boom")
         return {"ok": True}
 
     job = runner.submit("dsk", work, feature="dsk")
     done = _wait(runner, job.id)
-    assert done.status == "done"
+    assert done.status == status
     assert done.progress is None
-
-
-def test_progress_cleared_when_job_finishes_error(tmp_path: Path):
-    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path / "output")
-
-    def work(job: Job):
-        job.set_progress(1, 2, "Doing work")
-        raise RuntimeError("boom")
-
-    job = runner.submit("dsk", work, feature="dsk")
-    done = _wait(runner, job.id)
-    assert done.status == "error"
-    assert done.progress is None
-
-
-def test_started_at_set_when_a_run_begins(tmp_path: Path):
-    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path / "output")
-    job = runner.submit("dsk", lambda _j: {"ok": True}, feature="dsk")
-    done = _wait(runner, job.id)
-    assert done.started_at is not None
-    assert done.started_at >= done.created_at
-
-
-def test_started_at_updates_on_rerun(tmp_path: Path):
-    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path / "output")
-    job = runner.submit("dsk", lambda _j: {"ok": True}, feature="dsk")
-    done = _wait(runner, job.id)
-    first_started = done.started_at
-
-    time.sleep(0.01)
-    rerun_job = runner.rerun(job.id, lambda _j: {"ok": True, "again": True})
-    done2 = _wait(runner, rerun_job.id)
-    assert done2.started_at is not None
-    assert done2.started_at > first_started
 
 
 def test_rerun_clears_started_at_while_queued_behind_a_busy_worker(tmp_path: Path):
@@ -1189,6 +1158,7 @@ def test_rerun_clears_started_at_while_queued_behind_a_busy_worker(tmp_path: Pat
     job = runner.submit("dsk", lambda _j: {"ok": True}, feature="dsk")
     done = _wait(runner, job.id)
     assert done.started_at is not None
+    assert done.started_at >= done.created_at
     first_started = done.started_at
 
     blocker_started = threading.Event()

@@ -33,7 +33,7 @@ from obed_edom.dsk_assemble import (
     plan_assembly,
 )
 import obed_edom.dsk_plan as dsk_plan
-from obed_edom.dsk_plan import Band, CropRefusal, classify_slide, line_count, resolve_font_path
+from obed_edom.dsk_plan import Band, classify_slide, line_count, resolve_font_path
 from obed_edom.iwa_builds import deck_builds
 from obed_edom.map_remap import Rect
 
@@ -308,42 +308,22 @@ def test_mirror_warnings_reach_plan_warnings():
     assert any("slide 9: " in w and "single vote" in w for w in plan.warnings)
 
 
-def test_export_clip_action_excluded():
-    slide = _slide(1, [_movie_item(0, x=1920, y=-763, w=3840, h=2160)])
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {1: SlideDecision(1, "export_clip")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.kept == ()
-
-
-def test_both_action_included():
-    slide = _slide(1, [_movie_item(0, x=1920, y=-763, w=3840, h=2160)])
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {1: SlideDecision(1, "both")}
+@pytest.mark.parametrize(
+    "items, action, clips, kept",
+    [
+        ([_movie_item(0, x=1920, y=-763, w=3840, h=2160)], "export_clip", {}, ()),
+        ([_movie_item(0, x=1920, y=-763, w=3840, h=2160)], "both", {1: Path("/clip.mov")}, (1,)),
+        ([], "in_deck", {}, ()),
+        ([_image_item(0, x=1920, y=0, w=3840, h=1080)], "skip", {}, ()),
+    ],
+    ids=["export-clip-excluded", "both-included", "empty-slide-always-dropped", "skip-excluded"],
+)
+def test_action_decides_whether_a_slide_is_kept(items, action, clips, kept):
+    slide = _slide(1, items)
     plan = plan_assembly(
-        payload, classes, decisions=decisions, band=BAND, clips={1: Path("/clip.mov")}
+        _payload([slide]), [_classify(slide)], decisions={1: SlideDecision(1, action)}, band=BAND, clips=clips
     )
-    assert plan.kept == (1,)
-
-
-def test_empty_slide_always_dropped():
-    slide = _slide(1, [])
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {1: SlideDecision(1, "in_deck")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.kept == ()
-
-
-def test_skip_action_excluded():
-    slide = _slide(1, [_image_item(0, x=1920, y=0, w=3840, h=1080)])
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {1: SlideDecision(1, "skip")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.kept == ()
+    assert plan.kept == kept
 
 
 # --------------------------------------------------------------------------
@@ -607,51 +587,30 @@ def test_text_uniform_run_size_scaled():
     assert plan.warnings == ()
 
 
-def test_run_size_ranges_full_coverage_multi_size():
-    item = {"text": "ab", "runs": [{"text": "a", "size": 10.0}, {"text": "b", "size": 20.0}]}
-    ranges, unresolved = dsa._run_size_ranges(item, 1.0)
-    assert ranges == ((1, 1, 10.0), (2, 2, 20.0))
-    assert unresolved is False
+@pytest.mark.parametrize(
+    "sizes, scale, ranges",
+    [
+        ([10.0, 20.0], 1.0, ((1, 1, 10.0), (2, 2, 20.0))),
+        ([10.0, 10.0], 0.5, 5.0),
+        ([], 1.0, None),
+    ],
+    ids=["full-coverage-multi-size", "uniform-size-returns-scaled-run-size", "no-runs-is-safe-to-flatten"],
+)
+def test_run_size_ranges_resolved(sizes, scale, ranges):
+    item = {"text": "ab", "runs": [{"text": t, "size": size} for t, size in zip("ab", sizes)]}
+    assert dsa._run_size_ranges(item, scale) == (ranges, False)
 
 
-def test_run_size_ranges_uniform_size_returns_scaled_run_size():
-    item = {"text": "ab", "runs": [{"text": "a", "size": 10.0}, {"text": "b", "size": 10.0}]}
-    ranges, unresolved = dsa._run_size_ranges(item, 0.5)
-    assert ranges == 5.0
-    assert unresolved is False
-
-
-def test_run_size_ranges_no_runs_is_safe_to_flatten():
-    item = {"text": "ab", "runs": []}
-    ranges, unresolved = dsa._run_size_ranges(item, 1.0)
-    assert ranges is None
-    assert unresolved is False
-
-
-def test_run_size_ranges_all_none_sizes_is_unresolved():
-    item = {"text": "ab", "runs": [{"text": "a", "size": None}, {"text": "b", "size": None}]}
+@pytest.mark.parametrize("sizes", [[None, None], [10.0, None]], ids=["all-none-sizes", "known-size-then-unresolved-run"])
+def test_run_size_ranges_gap_is_unresolved(sizes):
+    """A size=None run leaves a coverage gap: never silently flattened to a whole-object
+    write; the caller only offers it to opt-in shrink."""
+    item = {"text": "ab", "runs": [{"text": t, "size": size} for t, size in zip("ab", sizes)]}
     warnings: list[str] = []
     ranges, unresolved = dsa._run_size_ranges(item, 1.0, item_id=("text", 0), slide_number=1, warnings=warnings)
     assert ranges is None
     assert unresolved is True
     assert warnings == ["slide 1 text 0: run ranges leave a gap"]
-
-
-def test_run_size_ranges_known_size_then_unresolved_run_is_unresolved():
-    # A known-size run followed by a size=None run leaves a coverage gap -- must not be
-    # silently flattened to a whole-object write; caller only offers it to opt-in shrink.
-    item = {"text": "ab", "runs": [{"text": "a", "size": 10.0}, {"text": "b", "size": None}]}
-    warnings: list[str] = []
-    ranges, unresolved = dsa._run_size_ranges(item, 1.0, item_id=("text", 0), slide_number=1, warnings=warnings)
-    assert ranges is None
-    assert unresolved is True
-    assert warnings == ["slide 1 text 0: run ranges leave a gap"]
-
-
-def test_emitted_run_sizes_full_coverage_multi_size():
-    item = {"text": "ab", "runs": [{"text": "a", "size": 10.0}, {"text": "b", "size": 20.0}]}
-    table = dsa._emitted_run_sizes(item, 1.0, 45.0)
-    assert table == ((1, 1, 10.0), (2, 2, 20.0))
 
 
 def test_emitted_run_sizes_caps_at_50pt_gw13_emphasis_run():
@@ -730,31 +689,28 @@ def test_pack_split_lines_one_part_result_signals_no_split_needed():
     assert len(chunks) == 1
 
 
-def test_emitted_run_sizes_uncapped_below_50pt_is_unaffected():
-    item = {"text": "ab", "runs": [{"text": "a", "size": 10.0}, {"text": "b", "size": 10.0}]}
-    table = dsa._emitted_run_sizes(item, 0.5, 45.0)
-    assert table == ((1, 1, 5.0), (2, 2, 5.0))
-
-
-def test_emitted_run_sizes_any_unresolved_run_makes_the_whole_table_unresolved():
-    # Owner-adopted policy (S1/§2.1 step 2): unlike `_run_size_ranges`'s partial-gap
-    # tuple, ANY run with no size makes the table wholly "unresolved" -- GW 49 has one
-    # resolved run among five; the caller must not silently keep that one range.
-    item = {
-        "text": "abc",
-        "runs": [{"text": "a", "size": 10.0}, {"text": "b", "size": None}, {"text": "c", "size": 10.0}],
-    }
-    assert dsa._emitted_run_sizes(item, 1.0, 45.0) == "unresolved"
-
-
-def test_emitted_run_sizes_no_runs_falls_back_to_lead_pt_over_full_text():
-    item = {"text": "abcd", "runs": []}
-    assert dsa._emitted_run_sizes(item, 1.0, 45.0) == ((1, 4, 45.0),)
-
-
-def test_emitted_run_sizes_no_runs_no_text_is_empty():
-    item = {"text": "", "runs": []}
-    assert dsa._emitted_run_sizes(item, 1.0, 45.0) == ()
+@pytest.mark.parametrize(
+    "item, scale, table",
+    [
+        ({"text": "ab", "runs": [{"text": "a", "size": 10.0}, {"text": "b", "size": 20.0}]}, 1.0, ((1, 1, 10.0), (2, 2, 20.0))),
+        ({"text": "ab", "runs": [{"text": "a", "size": 10.0}, {"text": "b", "size": 10.0}]}, 0.5, ((1, 1, 5.0), (2, 2, 5.0))),
+        (
+            {"text": "abc", "runs": [{"text": "a", "size": 10.0}, {"text": "b", "size": None}, {"text": "c", "size": 10.0}]},
+            1.0, "unresolved",
+        ),
+        ({"text": "abcd", "runs": []}, 1.0, ((1, 4, 45.0),)),
+        ({"text": "", "runs": []}, 1.0, ()),
+    ],
+    ids=[
+        "full-coverage-multi-size", "uncapped-below-50pt", "any-unresolved-run-unresolves-the-whole-table",
+        "no-runs-falls-back-to-lead-pt-over-full-text", "no-runs-no-text-is-empty",
+    ],
+)
+def test_emitted_run_sizes(item, scale, table):
+    """Owner-adopted policy (S1/§2.1 step 2): unlike `_run_size_ranges`'s partial gap, ANY
+    run with no size makes the table wholly "unresolved" -- GW 49 has one resolved run
+    among five; the caller must not silently keep that one range."""
+    assert dsa._emitted_run_sizes(item, scale, 45.0) == table
 
 
 def test_windowed_run_ranges_restricts_and_collapses_uniform_size():
@@ -783,32 +739,23 @@ def test_text_mixed_run_sizes_warns_and_omits():
     assert plan.warnings == ("slide 1 text 0 mixed run sizes",)
 
 
-def test_script_overflow_readback_emitted_for_mixed_run_text():
-    item = _text_item(0, x=1920, y=0, w=200, h=80, runs=[{"size": 20.0}, {"size": 30.0}])
+@pytest.mark.parametrize(
+    "item, emitted",
+    [
+        (_text_item(0, x=1920, y=0, w=200, h=80, runs=[{"size": 20.0}, {"size": 30.0}]), True),
+        (_text_item(0, x=1920, y=0, w=3698, h=494.4, runs=[{"size": 40.0}, {"size": 40.0}]), False),
+    ],
+    ids=["mixed-run-text", "uniform-run-text"],
+)
+def test_script_overflow_readback_only_for_mixed_run_text(item, emitted):
     slide = _slide(1, [item])
-    payload = _payload([slide])
-    cls = _classify(slide)
-    decisions = {1: SlideDecision(1, "in_deck")}
-    plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+    plan = plan_assembly(
+        _payload([slide]), [_classify(slide)], decisions={1: SlideDecision(1, "in_deck")}, band=BAND, clips={}
+    )
     script = build_assembly_script(
         plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key")
     )
-    assert 'OVERFLOW" & tab & "text:0"' in script
-
-
-def test_script_overflow_readback_omitted_for_uniform_run_text():
-    item = _text_item(
-        0, x=1920, y=0, w=3698, h=494.4, runs=[{"size": 40.0}, {"size": 40.0}]
-    )
-    slide = _slide(1, [item])
-    payload = _payload([slide])
-    cls = _classify(slide)
-    decisions = {1: SlideDecision(1, "in_deck")}
-    plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
-    script = build_assembly_script(
-        plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key")
-    )
-    assert 'OVERFLOW" & tab & "text:0"' not in script
+    assert ('OVERFLOW" & tab & "text:0"' in script) is emitted
 
 
 def test_refit_script_reopens_and_saves():
@@ -2289,31 +2236,48 @@ def _clip_plan():
     )
 
 
-def test_script_deletes_come_first_and_descending():
-    plan = _clip_plan()
-    script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
-    keep_idx = script.index("set keepList to")
-    body_idx = script.index('tell theDoc')
-    assert body_idx < keep_idx
-    delete_idx = script.index("if keepList does not contain i then delete slide i of theDoc")
-    assert delete_idx > keep_idx
-
-
-def test_script_canvas_block_always_present():
+def test_clip_plan_default_script_resizes_the_canvas_then_imports_every_dsk_layout():
     plan = _clip_plan()
     script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
     assert "set width of theDoc to 1920" in script
     assert "set height of theDoc to 1080" in script
+    resize_idx = script.index(f"set width of theDoc to {plan.canvas[0]}")
+    assert resize_idx < script.index("set tmplDoc to open POSIX file")
+    assert resize_idx < script.index("set base layout of slide")
+    for name in dsa.DEFAULT_DSK_LAYOUT_NAMES:
+        assert f'set wantLayoutName to "{name}"' in script
+    assert script.count("set madeSlide to (make new slide") == len(dsa.DEFAULT_DSK_LAYOUT_NAMES)
+    assert script.count("delete donorSlide") == len(dsa.DEFAULT_DSK_LAYOUT_NAMES)
+    assert "ignoring case" in script
+    assert "end ignoring" in script
+    assert "(name of lay as text) is in blackNames" in script[script.index("set blackNames to"):]
 
 
-def test_script_canvas_resize_precedes_layout_import_and_base_layout_set():
+def test_clip_plan_default_script_slide_body():
     plan = _clip_plan()
     script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
-    resize_idx = script.index(f"set width of theDoc to {plan.canvas[0]}")
-    import_idx = script.index("set tmplDoc to open POSIX file")
-    base_layout_idx = script.index("set base layout of slide")
-    assert resize_idx < import_idx
-    assert resize_idx < base_layout_idx
+    movie_ordinal = plan.ordinals[32]
+    keep_idx = script.index("set keepList to")
+    assert script.index("tell theDoc") < keep_idx
+    assert script.index("if keepList does not contain i then delete slide i of theDoc") > keep_idx
+    assert "set width of group" not in script
+    assert "set locked of theObj to false" in script
+    assert "set locked of theObj to true" in script
+    assert '"repetitionMethod"' in script
+    assert '"movieVolume"' in script
+    assert f"tell slide {movie_ordinal}" in script
+    assert "make new image with properties" in script
+    assert "count of movies of slide" in script
+    assert "set repetition method of newMov to repMethod" in script
+    assert "set movie volume of newMov to movVol" in script
+    assert f"set transition properties of slide {movie_ordinal} to " in script
+    assert "{transition effect:dissolve, transition duration:0.5}" in script
+    assert f"set transition properties of slide {plan.ordinals[8]} to " not in script
+    assert script.index(f"set theObj to movie 1 of slide {movie_ordinal}") < script.index("delete theObj")
+    assert '"Keynote"' not in script
+    assert 'tell application "Keynote"' not in script
+    assert '"OBED"' in script
+    assert '"ERR"' in script
 
 
 def test_script_canvas_resize_precedes_base_layout_set_without_slide_layout_names():
@@ -2338,26 +2302,6 @@ def test_script_layout_preserve_touches_nothing():
     )
     assert "wantLayoutName" not in script
     assert "set base layout of slide" not in script
-
-
-def test_script_layout_import_is_default_and_imports_every_dsk_layout_name():
-    plan = _clip_plan()
-    script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
-    assert "set base layout of slide" in script
-    assert "set tmplDoc to open POSIX file" in script
-    for name in dsa.DEFAULT_DSK_LAYOUT_NAMES:
-        assert f'set wantLayoutName to "{name}"' in script
-    assert script.count("set madeSlide to (make new slide") == len(dsa.DEFAULT_DSK_LAYOUT_NAMES)
-    assert script.count("delete donorSlide") == len(dsa.DEFAULT_DSK_LAYOUT_NAMES)
-
-
-def test_script_target_layout_lookup_is_case_insensitive():
-    plan = _clip_plan()
-    script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
-    assert "ignoring case" in script
-    assert "end ignoring" in script
-    idx = script.index('set blackNames to')
-    assert "(name of lay as text) is in blackNames" in script[idx:]
 
 
 def test_script_three_name_import_has_three_donor_pairs_and_no_blank():
@@ -2412,49 +2356,45 @@ def _image_drawable_slide(rects):
     return {"drawablesZOrder": drawables}, objects
 
 
-def test_layout_alpha_safe_full_canvas_drawable_is_unsafe():
-    slide, objects = _image_drawable_slide([(-10.0, 0.0, 2000.0, 1080.0)])
-    assert dsa.layout_alpha_safe(slide, objects, (1920.0, 1080.0)) is False
+_GROUP_UNION_FULL_CANVAS = {
+    "g1": {
+        "_pbtype": "TSD.GroupArchive",
+        "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 1920.0, "height": 1080.0}, "angle": 0.0},
+        "children": [{"identifier": "img1"}],
+    },
+    "img1": {
+        "_pbtype": "TSD.ImageArchive",
+        "geometry": {"position": {"x": -10.0, "y": 0.0}, "size": {"width": 2000.0, "height": 1080.0}, "angle": 0.0},
+    },
+}
+_MASKED_TO_BAND = {
+    "img1": {
+        "_pbtype": "TSD.ImageArchive",
+        "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 1920.0, "height": 1080.0}, "angle": 0.0},
+        "mask": {"identifier": "mask1"},
+    },
+    "mask1": {
+        "geometry": {"position": {"x": 100.0, "y": 900.0}, "size": {"width": 500.0, "height": 100.0}, "angle": 0.0},
+    },
+}
 
 
-def test_layout_alpha_safe_band_only_drawable_is_safe():
-    slide, objects = _image_drawable_slide([(100.0, 900.0, 500.0, 100.0)])
-    assert dsa.layout_alpha_safe(slide, objects, (1920.0, 1080.0)) is True
-
-
-def test_layout_alpha_safe_zero_drawables_is_safe():
-    assert dsa.layout_alpha_safe({"drawablesZOrder": []}, {}, (1920.0, 1080.0)) is True
-
-
-def test_layout_alpha_safe_full_canvas_via_group_union_is_unsafe():
-    objects = {
-        "g1": {
-            "_pbtype": "TSD.GroupArchive",
-            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 1920.0, "height": 1080.0}, "angle": 0.0},
-            "children": [{"identifier": "img1"}],
-        },
-        "img1": {
-            "_pbtype": "TSD.ImageArchive",
-            "geometry": {"position": {"x": -10.0, "y": 0.0}, "size": {"width": 2000.0, "height": 1080.0}, "angle": 0.0},
-        },
-    }
-    slide = {"drawablesZOrder": [{"identifier": "g1"}]}
-    assert dsa.layout_alpha_safe(slide, objects, (1920.0, 1080.0)) is False
-
-
-def test_layout_alpha_safe_masked_image_composes_the_mask_not_the_raw_frame():
-    objects = {
-        "img1": {
-            "_pbtype": "TSD.ImageArchive",
-            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 1920.0, "height": 1080.0}, "angle": 0.0},
-            "mask": {"identifier": "mask1"},
-        },
-        "mask1": {
-            "geometry": {"position": {"x": 100.0, "y": 900.0}, "size": {"width": 500.0, "height": 100.0}, "angle": 0.0},
-        },
-    }
-    slide = {"drawablesZOrder": [{"identifier": "img1"}]}
-    assert dsa.layout_alpha_safe(slide, objects, (1920.0, 1080.0)) is True
+@pytest.mark.parametrize(
+    "slide, objects, safe",
+    [
+        (*_image_drawable_slide([(-10.0, 0.0, 2000.0, 1080.0)]), False),
+        (*_image_drawable_slide([(100.0, 900.0, 500.0, 100.0)]), True),
+        ({"drawablesZOrder": []}, {}, True),
+        ({"drawablesZOrder": [{"identifier": "g1"}]}, _GROUP_UNION_FULL_CANVAS, False),
+        ({"drawablesZOrder": [{"identifier": "img1"}]}, _MASKED_TO_BAND, True),
+    ],
+    ids=[
+        "full-canvas-drawable-unsafe", "band-only-drawable-safe", "zero-drawables-safe",
+        "full-canvas-via-group-union-unsafe", "masked-image-composes-the-mask-not-the-raw-frame",
+    ],
+)
+def test_layout_alpha_safe(slide, objects, safe):
+    assert dsa.layout_alpha_safe(slide, objects, (1920.0, 1080.0)) is safe
 
 
 def test_template_layout_alpha_safe_resolves_by_name(monkeypatch):
@@ -2483,52 +2423,48 @@ def _dispatched_load_deck(template_objects, fw_objects):
     return _load
 
 
-def test_check_layout_import_preconditions_ok_when_fw_lacks_layout(monkeypatch):
-    template_objects = _layout_objects(("n1", "s1", "Blank Black", {"lower": "1", "upper": "1"}, []))
-    template_objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": 1920.0, "height": 1080.0}}
-    fw_objects = _layout_objects()
-    fw_objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": 7680.0, "height": 1080.0}}
+def _show(objects, width):
+    objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": width, "height": 1080.0}}
+    return objects
+
+
+@pytest.mark.parametrize(
+    "template_layouts, fw_layouts, names, refusal",
+    [
+        ([("n1", "s1", "Blank Black", {"lower": "1", "upper": "1"}, [])], [], ("Blank Black",), None),
+        (
+            [("n1", "s1", "Blank Black", {"lower": "1", "upper": "1"}, [])],
+            [("n2", "s2", "Blank Black", {"lower": "9", "upper": "9"}, [])],
+            ("Blank Black",), None,
+        ),
+        (
+            [("n1", "s1", "Blank Black", {"lower": "1", "upper": "1"}, [(-10.0, 0.0, 2000.0, 1080.0)])],
+            [], ("Blank Black",), "not alpha-safe",
+        ),
+        (
+            [("n1", "s1", "Blank Black", {"lower": "1", "upper": "1"}, [])],
+            [("n2", "s2", "Blank Black", {"lower": "9", "upper": "9"}, [(-10.0, 0.0, 8000.0, 1080.0)])],
+            ("Blank Black",), "dedupe",
+        ),
+        (
+            [
+                ("n1", "s1", "Point 3 Lines", {"lower": "1", "upper": "1"}, []),
+                ("n2", "s2", "Point 3 Lines", {"lower": "2", "upper": "2"}, []),
+            ],
+            [], ("Point 3 Lines",), "duplicate-name donor",
+        ),
+    ],
+    ids=["ok-when-fw-lacks-layout", "dedupe-ok-when-fw-layout-safe", "unsafe-donor", "dedupe-trap", "duplicate-named-donor"],
+)
+def test_check_layout_import_preconditions(monkeypatch, template_layouts, fw_layouts, names, refusal):
+    template_objects = _show(_layout_objects(*template_layouts), 1920.0)
+    fw_objects = _show(_layout_objects(*fw_layouts), 7680.0)
     monkeypatch.setattr(dsk_live, "_load_deck", _dispatched_load_deck(template_objects, fw_objects))
-    dsa.check_layout_import_preconditions(
-        Path("fw"), layout_template=Path("template"), layout_names=("Blank Black",)
-    )
-
-
-def test_check_layout_import_preconditions_refuses_unsafe_donor(monkeypatch):
-    template_objects = _layout_objects(
-        ("n1", "s1", "Blank Black", {"lower": "1", "upper": "1"}, [(-10.0, 0.0, 2000.0, 1080.0)])
-    )
-    template_objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": 1920.0, "height": 1080.0}}
-    monkeypatch.setattr(dsk_live, "_load_deck", lambda path: (template_objects, {}, {}))
-    with pytest.raises(AssemblyRefusal, match="not alpha-safe"):
-        dsa.check_layout_import_preconditions(
-            Path("fw"), layout_template=Path("template"), layout_names=("Blank Black",)
-        )
-
-
-def test_check_layout_import_preconditions_dedupe_trap_refuses(monkeypatch):
-    template_objects = _layout_objects(("n1", "s1", "Blank Black", {"lower": "1", "upper": "1"}, []))
-    template_objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": 1920.0, "height": 1080.0}}
-    fw_objects = _layout_objects(
-        ("n2", "s2", "Blank Black", {"lower": "9", "upper": "9"}, [(-10.0, 0.0, 8000.0, 1080.0)])
-    )
-    fw_objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": 7680.0, "height": 1080.0}}
-    monkeypatch.setattr(dsk_live, "_load_deck", _dispatched_load_deck(template_objects, fw_objects))
-    with pytest.raises(AssemblyRefusal, match="dedupe"):
-        dsa.check_layout_import_preconditions(
-            Path("fw"), layout_template=Path("template"), layout_names=("Blank Black",)
-        )
-
-
-def test_check_layout_import_preconditions_dedupe_ok_when_fw_layout_safe(monkeypatch):
-    template_objects = _layout_objects(("n1", "s1", "Blank Black", {"lower": "1", "upper": "1"}, []))
-    template_objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": 1920.0, "height": 1080.0}}
-    fw_objects = _layout_objects(("n2", "s2", "Blank Black", {"lower": "9", "upper": "9"}, []))
-    fw_objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": 7680.0, "height": 1080.0}}
-    monkeypatch.setattr(dsk_live, "_load_deck", _dispatched_load_deck(template_objects, fw_objects))
-    dsa.check_layout_import_preconditions(
-        Path("fw"), layout_template=Path("template"), layout_names=("Blank Black",)
-    )
+    if refusal is None:
+        dsa.check_layout_import_preconditions(Path("fw"), layout_template=Path("template"), layout_names=names)
+    else:
+        with pytest.raises(AssemblyRefusal, match=refusal):
+            dsa.check_layout_import_preconditions(Path("fw"), layout_template=Path("template"), layout_names=names)
 
 
 def _staged_objects(rects):
@@ -2552,38 +2488,18 @@ def test_check_layout_import_preconditions_refuses_blank():
         )
 
 
-def test_check_layout_import_preconditions_refuses_duplicate_named_donor(monkeypatch):
-    template_objects = _layout_objects(
-        ("n1", "s1", "Point 3 Lines", {"lower": "1", "upper": "1"}, []),
-        ("n2", "s2", "Point 3 Lines", {"lower": "2", "upper": "2"}, []),
-    )
-    template_objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": 1920.0, "height": 1080.0}}
-    fw_objects = _layout_objects()
-    fw_objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": 7680.0, "height": 1080.0}}
-    monkeypatch.setattr(dsk_live, "_load_deck", _dispatched_load_deck(template_objects, fw_objects))
-    with pytest.raises(AssemblyRefusal, match="duplicate-name donor"):
-        dsa.check_layout_import_preconditions(
-            Path("fw"), layout_template=Path("template"), layout_names=("Point 3 Lines",)
-        )
-
-
-def test_verify_staged_layouts_alpha_safe_refuses_unsafe_layout(monkeypatch):
-    objects = _staged_objects([(-10.0, 0.0, 2000.0, 1080.0)])
+@pytest.mark.parametrize("rects, refused", [([(-10.0, 0.0, 2000.0, 1080.0)], True), ([], False)], ids=["unsafe", "safe"])
+def test_verify_staged_layouts_alpha_safe(monkeypatch, rects, refused):
+    objects = _staged_objects(rects)
     monkeypatch.setattr(dsa, "_load_deck", lambda path: (objects, {}, {}))
     plan = AssemblyPlan(
         kept=(13,), ordinals={13: 1}, fits={}, deletes={}, clips={}, text_sizes={}, autosize={}, warnings=()
     )
-    with pytest.raises(AssemblyRefusal, match="not alpha-safe"):
+    if refused:
+        with pytest.raises(AssemblyRefusal, match="not alpha-safe"):
+            dsa.verify_staged_layouts_alpha_safe(Path("/tmp/staged.key"), plan)
+    else:
         dsa.verify_staged_layouts_alpha_safe(Path("/tmp/staged.key"), plan)
-
-
-def test_verify_staged_layouts_alpha_safe_passes_when_safe(monkeypatch):
-    objects = _staged_objects([])
-    monkeypatch.setattr(dsa, "_load_deck", lambda path: (objects, {}, {}))
-    plan = AssemblyPlan(
-        kept=(13,), ordinals={13: 1}, fits={}, deletes={}, clips={}, text_sizes={}, autosize={}, warnings=()
-    )
-    dsa.verify_staged_layouts_alpha_safe(Path("/tmp/staged.key"), plan)
 
 
 LOWER_THIRDS_TEMPLATE = Path.home() / "Desktop" / "Default Templates" / "2026_Lower-Thirds (ENG).key"
@@ -2598,56 +2514,6 @@ def test_real_lower_thirds_template_blank_black_safe_blank_unsafe():
         pytest.skip("keynote-parser (iwa extra) not installed")
     assert dsa.template_layout_alpha_safe(LOWER_THIRDS_TEMPLATE, "Blank Black") is True
     assert dsa.template_layout_alpha_safe(LOWER_THIRDS_TEMPLATE, "Blank") is False
-
-
-def test_script_never_sets_group_width():
-    plan = _clip_plan()
-    script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
-    assert "set width of group" not in script
-
-
-def test_script_unlock_relock_present():
-    plan = _clip_plan()
-    script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
-    assert "set locked of theObj to false" in script
-    assert "set locked of theObj to true" in script
-
-
-def test_script_logs_movie_props_for_clip_slides():
-    plan = _clip_plan()
-    script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
-    assert '"repetitionMethod"' in script
-    assert '"movieVolume"' in script
-
-
-def test_script_clip_insert_and_mov_extension():
-    plan = _clip_plan()
-    script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
-    ordinal = plan.ordinals[32]
-    assert f"tell slide {ordinal}" in script
-    assert "make new image with properties" in script
-    assert "count of movies of slide" in script
-    assert "set repetition method of newMov to repMethod" in script
-    assert "set movie volume of newMov to movVol" in script
-
-
-def test_script_transition_dissolve_only_on_clip_slides():
-    plan = _clip_plan()
-    script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
-    movie_ordinal = plan.ordinals[32]
-    static_ordinal = plan.ordinals[8]
-    assert f"set transition properties of slide {movie_ordinal} to " in script
-    assert "{transition effect:dissolve, transition duration:0.5}" in script
-    assert f"set transition properties of slide {static_ordinal} to " not in script
-
-
-def test_script_deletes_after_geometry_per_slide():
-    plan = _clip_plan()
-    script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
-    ordinal = plan.ordinals[32]
-    geometry_idx = script.index(f'set theObj to movie 1 of slide {ordinal}')
-    delete_idx = script.index("delete theObj")
-    assert geometry_idx < delete_idx
 
 
 def test_delete_or_hide_placeholder_lines_branches_on_title_and_body():
@@ -2710,15 +2576,6 @@ def test_script_shape_text_dual_dedupes_to_one_delete_address():
     addrs = [f"shape 2 of slide {ordinal}", f"text item 6 of slide {ordinal}", f"text item 4 of slide {ordinal}"]
     positions = [script.index(f"set theObj to {addr}") for addr in addrs]
     assert positions == sorted(positions)
-
-
-def test_script_no_literal_keynote_and_has_obed_err_markers():
-    plan = _clip_plan()
-    script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
-    assert '"Keynote"' not in script
-    assert 'tell application "Keynote"' not in script
-    assert '"OBED"' in script
-    assert '"ERR"' in script
 
 
 # --------------------------------------------------------------------------
@@ -2802,83 +2659,49 @@ def test_base_layout_slide_for_ordinal_matches_legacy_template_slide_id_map():
     """Cross-checks `_base_layout_slide_for_ordinal` (which resolves via the direct
     `templateSlide` object reference) against the legacy `templateSlideId` UUID mapping
     -- an independent resolution path over the same gold deck."""
+    import json
+
     _require_gold_deck()
     objects, _id_to_file, _file_ids = dsa._load_deck(GOLD_DECK)
     by_tsid = {}
     for name, node, _slide in dsa._theme_layout_slides(objects):
-        import json as _json
-
-        by_tsid[_json.dumps(node.get("templateSlideId"), sort_keys=True)] = name
+        by_tsid[json.dumps(node.get("templateSlideId"), sort_keys=True)] = name
     nodes = dsa._slide_nodes(objects)
     for ordinal, node in enumerate(nodes, 1):
-        import json as _json
-
-        key = _json.dumps(node.get("templateSlideId"), sort_keys=True)
+        key = json.dumps(node.get("templateSlideId"), sort_keys=True)
         expected_name = by_tsid[key]
         layout = dsa._base_layout_slide_for_ordinal(objects, ordinal)
         assert layout is not None
         assert layout.get("name") == expected_name
 
 
-def test_base_layout_slide_for_ordinal_none_when_template_slide_missing():
-    objects = {
-        "show": {
-            "_pbtype": "KN.ShowArchive",
-            "slideTree": {"slides": [{"identifier": "node1"}]},
-        },
-        "node1": {"slide": {"identifier": "slide1"}},
-        "slide1": {"_pbtype": "KN.SlideArchive", "name": None},
-    }
-    assert dsa._base_layout_slide_for_ordinal(objects, 1) is None
-
-
-def test_base_layout_slide_for_ordinal_none_when_template_slide_dangling():
-    objects = {
-        "show": {
-            "_pbtype": "KN.ShowArchive",
-            "slideTree": {"slides": [{"identifier": "node1"}]},
-        },
-        "node1": {"slide": {"identifier": "slide1"}},
-        "slide1": {
-            "_pbtype": "KN.SlideArchive",
-            "name": None,
-            "templateSlide": {"identifier": "nonexistent-layout-slide"},
-        },
-    }
-    assert dsa._base_layout_slide_for_ordinal(objects, 1) is None
-
-
-def test_verify_staged_layouts_alpha_safe_refuses_missing_template_slide(tmp_path, monkeypatch):
-    objects = {
+def _one_slide_objects(**slide_fields):
+    return {
         "show": {
             "_pbtype": "KN.ShowArchive",
             "size": {"width": 1920.0, "height": 1080.0},
             "slideTree": {"slides": [{"identifier": "node1"}]},
         },
         "node1": {"slide": {"identifier": "slide1"}},
-        "slide1": {"_pbtype": "KN.SlideArchive", "name": None, "drawablesZOrder": []},
+        "slide1": {"_pbtype": "KN.SlideArchive", "name": None, "drawablesZOrder": [], **slide_fields},
     }
-    monkeypatch.setattr(dsa, "_load_deck", lambda path: (objects, {}, {}))
-    plan = AssemblyPlan(kept=(1,), ordinals={1: 1}, fits={}, deletes={}, clips={}, text_sizes={}, autosize={}, warnings=())
-    with pytest.raises(AssemblyRefusal, match="base layout not resolvable"):
-        dsa.verify_staged_layouts_alpha_safe(Path("/tmp/staged.key"), plan)
 
 
-def test_verify_staged_layouts_alpha_safe_refuses_dangling_template_slide(tmp_path, monkeypatch):
-    objects = {
-        "show": {
-            "_pbtype": "KN.ShowArchive",
-            "size": {"width": 1920.0, "height": 1080.0},
-            "slideTree": {"slides": [{"identifier": "node1"}]},
-        },
-        "node1": {"slide": {"identifier": "slide1"}},
-        "slide1": {
-            "_pbtype": "KN.SlideArchive",
-            "name": None,
-            "drawablesZOrder": [],
-            "templateSlide": {"identifier": "nonexistent-layout-slide"},
-        },
-    }
+_UNRESOLVABLE_TEMPLATE_SLIDE = pytest.mark.parametrize(
+    "slide_fields",
+    [{}, {"templateSlide": {"identifier": "nonexistent-layout-slide"}}],
+    ids=["template-slide-missing", "template-slide-dangling"],
+)
+
+
+@_UNRESOLVABLE_TEMPLATE_SLIDE
+def test_base_layout_slide_for_ordinal_none_when_template_slide_unresolvable(slide_fields):
+    assert dsa._base_layout_slide_for_ordinal(_one_slide_objects(**slide_fields), 1) is None
+
+
+@_UNRESOLVABLE_TEMPLATE_SLIDE
+def test_verify_staged_layouts_alpha_safe_refuses_unresolvable_template_slide(monkeypatch, slide_fields):
+    objects = _one_slide_objects(**slide_fields)
     monkeypatch.setattr(dsa, "_load_deck", lambda path: (objects, {}, {}))
     plan = AssemblyPlan(kept=(1,), ordinals={1: 1}, fits={}, deletes={}, clips={}, text_sizes={}, autosize={}, warnings=())
     with pytest.raises(AssemblyRefusal, match="base layout not resolvable"):
@@ -3259,61 +3082,72 @@ def _verse_item(kind_index, w=1492, h=358):
     }
 
 
-def test_heading_cluster_detected():
+def _cluster_text(kind_index, text, x=100, y=44, w=645, h=92):
+    return {"kind": "text", "kindIndex": kind_index, "x": x, "y": y, "w": w, "h": h, "text": text, "font": "AzoSans-Bold"}
+
+
+def _cluster_shape(kind_index, text, x=100, y=44, w=645, h=92):
+    return {"kind": "shape", "kindIndex": kind_index, "x": x, "y": y, "w": w, "h": h, "text": text}
+
+
+_FAITH = _heading_item(0, "Faith")
+_CLUSTER = dsa.HeadingCluster(("text", 0), ("text", 1), ("shape", 0))
+
+
+@pytest.mark.parametrize(
+    "items, long_ids, expected",
+    [
+        ([_FAITH, _number_item(1), _circle_item(0), _verse_item(2)], [2], _CLUSTER),
+        (
+            [_heading_item(0, "Prayer"), _number_item(1), _circle_item(0), _verse_item(2),
+             _cluster_text(3, "James 5 (AMP)"), _cluster_shape(1, "James 5 (AMP)")],
+            [2], _CLUSTER,
+        ),
+        ([_FAITH, _number_item(1), _circle_item(0)], [], None),
+        ([_FAITH, _heading_item(3, "Hope"), _number_item(1), _circle_item(0), _verse_item(2)], [2], None),
+        ([_FAITH, _number_item(1), _circle_item(0), _verse_item(2), _verse_item(3)], [2, 3], None),
+        ([_FAITH, _number_item(1), _circle_item(0), _verse_item(2), _number_item(3, text="Amen")], [2], None),
+        ([_FAITH, _number_item(1), {**_circle_item(0), "text": "3"}, _verse_item(2)], [2], None),
+        ([_FAITH, _number_item(1), _verse_item(2)], [2], None),
+        ([_FAITH, {**_number_item(1), "x": 500, "y": 500}, _circle_item(0), _verse_item(2)], [2], None),
+        ([_FAITH, _number_item(1), _number_item(3, text="4"), _circle_item(0), _verse_item(2)], [2], None),
+        ([_FAITH, _number_item(1), _circle_item(0), _verse_item(2), _cluster_text(3, "James 5 (AMP)"), _cluster_shape(1, "")], [2], None),
+        (
+            [_FAITH, _number_item(1), _circle_item(0), _verse_item(2),
+             _cluster_text(3, "James 5 (AMP)"), _cluster_shape(1, "James 5 (AMP)"),
+             _cluster_text(4, "Extra badge", y=200, w=200, h=40), _cluster_shape(2, "Extra badge", y=200, w=200, h=40)],
+            [2], None,
+        ),
+        (
+            [_FAITH, _number_item(1), _circle_item(0), _verse_item(2), _cluster_text(3, "James 5 (AMP)"), _cluster_shape(1, "Different")],
+            [2], None,
+        ),
+        (
+            [_FAITH, _number_item(1), _circle_item(0), _verse_item(2),
+             _cluster_text(3, "4", x=300, y=300, w=35, h=35), _cluster_shape(1, "4", x=300, y=300, w=35, h=35)],
+            [2], None,
+        ),
+        ([_FAITH, _cluster_text(1, "3", x=-1, y=-1, w=2, h=2), _circle_item(0), _verse_item(2)], [2], None),
+        ([_FAITH, _cluster_text(1, "3", x=40.5 - 0.5, y=(40.5 + 41.6) - 0.5, w=1, h=1), _circle_item(0), _verse_item(2)], [2], None),
+    ],
+    ids=[
+        "detected", "accepts-verse-badge-pair", "none-without-long-text", "two-headings", "two-long-boxes",
+        "unrelated-short-text", "text-bearing-circle", "digit-without-circle", "numeral-not-overlapping-circle",
+        "two-point-numbers", "stray-text-over-textless-shape", "two-badge-like-pairs", "badge-text-mismatch",
+        "second-numeral-matching-a-shape", "numeral-centre-at-circle-corner-57pt-out",
+        "numeral-just-outside-the-41.5pt-radius-tolerance",
+    ],
+)
+def test_heading_cluster(items, long_ids, expected):
     from obed_edom.dsk_plan import SlideClass
 
-    heading = _heading_item(0, "Faith")
-    number = _number_item(1)
-    circle = _circle_item(0)
-    verse = _verse_item(2)
-    items_by_id = {
-        ("text", 0): heading, ("text", 1): number, ("shape", 0): circle, ("text", 2): verse,
-    }
+    long_text_ids = tuple(("text", i) for i in long_ids)
     cls = SlideClass(
         number=5, category="static", build_count=0, movie_count=0,
-        kept=(("text", 0), ("text", 1), ("shape", 0), ("text", 2)),
-        dropped_side=(), dropped_backdrop=(), transition=None,
-        is_text=True, long_text_ids=(("text", 2),),
+        kept=tuple((i["kind"], i["kindIndex"]) for i in items), dropped_side=(), dropped_backdrop=(), transition=None,
+        is_text=bool(long_text_ids), long_text_ids=long_text_ids,
     )
-    cluster = dsa._heading_cluster(cls, items_by_id)
-    assert cluster == dsa.HeadingCluster(("text", 0), ("text", 1), ("shape", 0))
-
-
-def test_heading_cluster_rejects_two_headings():
-    from obed_edom.dsk_plan import SlideClass
-
-    heading0 = _heading_item(0, "Faith")
-    heading1 = _heading_item(3, "Hope")
-    number = _number_item(1)
-    circle = _circle_item(0)
-    verse = _verse_item(2)
-    items_by_id = {
-        ("text", 0): heading0, ("text", 3): heading1, ("text", 1): number,
-        ("shape", 0): circle, ("text", 2): verse,
-    }
-    cls = SlideClass(
-        number=5, category="static", build_count=0, movie_count=0,
-        kept=(("text", 0), ("text", 3), ("text", 1), ("shape", 0), ("text", 2)),
-        dropped_side=(), dropped_backdrop=(), transition=None,
-        is_text=True, long_text_ids=(("text", 2),),
-    )
-    assert dsa._heading_cluster(cls, items_by_id) is None
-
-
-def test_heading_cluster_none_without_long_text():
-    from obed_edom.dsk_plan import SlideClass
-
-    heading = _heading_item(0, "Faith")
-    number = _number_item(1)
-    circle = _circle_item(0)
-    items_by_id = {("text", 0): heading, ("text", 1): number, ("shape", 0): circle}
-    cls = SlideClass(
-        number=5, category="static", build_count=0, movie_count=0,
-        kept=(("text", 0), ("text", 1), ("shape", 0)),
-        dropped_side=(), dropped_backdrop=(), transition=None,
-        is_text=False, long_text_ids=(),
-    )
-    assert dsa._heading_cluster(cls, items_by_id) is None
+    assert dsa._heading_cluster(cls, {(i["kind"], i["kindIndex"]): i for i in items}) == expected
 
 
 def test_heading_cluster_gw_deck_measured_slides():
@@ -3334,242 +3168,6 @@ def test_heading_cluster_gw_deck_measured_slides():
     for expect_no in (5, 54, 57):
         assert expect_no not in fires, f"slide {expect_no} should not fire a heading cluster"
     assert fires == {44, 46, 50, 51, 52, 53}
-
-
-def _cls_for(kept, long_text_ids):
-    from obed_edom.dsk_plan import SlideClass
-
-    return SlideClass(
-        number=5, category="static", build_count=0, movie_count=0,
-        kept=kept, dropped_side=(), dropped_backdrop=(), transition=None,
-        is_text=True, long_text_ids=long_text_ids,
-    )
-
-
-def test_heading_cluster_rejects_two_long_boxes():
-    heading = _heading_item(0, "Faith")
-    number = _number_item(1)
-    circle = _circle_item(0)
-    verse0 = _verse_item(2)
-    verse1 = _verse_item(3)
-    items_by_id = {
-        ("text", 0): heading, ("text", 1): number, ("shape", 0): circle,
-        ("text", 2): verse0, ("text", 3): verse1,
-    }
-    cls = _cls_for(
-        (("text", 0), ("text", 1), ("shape", 0), ("text", 2), ("text", 3)),
-        (("text", 2), ("text", 3)),
-    )
-    assert dsa._heading_cluster(cls, items_by_id) is None
-
-
-def test_heading_cluster_rejects_unrelated_short_text():
-    heading = _heading_item(0, "Faith")
-    number = _number_item(1)
-    circle = _circle_item(0)
-    verse = _verse_item(2)
-    stray = _number_item(3, text="Amen")
-    stray["font"] = "AzoSans-Bold"
-    items_by_id = {
-        ("text", 0): heading, ("text", 1): number, ("shape", 0): circle,
-        ("text", 2): verse, ("text", 3): stray,
-    }
-    cls = _cls_for(
-        (("text", 0), ("text", 1), ("shape", 0), ("text", 2), ("text", 3)),
-        (("text", 2),),
-    )
-    assert dsa._heading_cluster(cls, items_by_id) is None
-
-
-def test_heading_cluster_accepts_verse_badge_pair():
-    heading = _heading_item(0, "Prayer")
-    number = _number_item(1)
-    circle = _circle_item(0)
-    verse = _verse_item(2)
-    badge_text = {
-        "kind": "text", "kindIndex": 3, "x": 100, "y": 44, "w": 645, "h": 92,
-        "text": "James 5 (AMP)", "font": "AzoSans-Bold",
-    }
-    badge_shape = {
-        "kind": "shape", "kindIndex": 1, "x": 100, "y": 44, "w": 645, "h": 92,
-        "text": "James 5 (AMP)",
-    }
-    items_by_id = {
-        ("text", 0): heading, ("text", 1): number, ("shape", 0): circle,
-        ("text", 2): verse, ("text", 3): badge_text, ("shape", 1): badge_shape,
-    }
-    cls = _cls_for(
-        (("text", 0), ("text", 1), ("shape", 0), ("text", 2), ("text", 3), ("shape", 1)),
-        (("text", 2),),
-    )
-    cluster = dsa._heading_cluster(cls, items_by_id)
-    assert cluster == dsa.HeadingCluster(("text", 0), ("text", 1), ("shape", 0))
-
-
-def test_heading_cluster_rejects_text_bearing_circle():
-    heading = _heading_item(0, "Faith")
-    number = _number_item(1)
-    circle = _circle_item(0)
-    circle["text"] = "3"
-    verse = _verse_item(2)
-    items_by_id = {("text", 0): heading, ("text", 1): number, ("shape", 0): circle, ("text", 2): verse}
-    cls = _cls_for((("text", 0), ("text", 1), ("shape", 0), ("text", 2)), (("text", 2),))
-    assert dsa._heading_cluster(cls, items_by_id) is None
-
-
-def test_heading_cluster_rejects_digit_without_circle():
-    heading = _heading_item(0, "Faith")
-    number = _number_item(1)
-    verse = _verse_item(2)
-    items_by_id = {("text", 0): heading, ("text", 1): number, ("text", 2): verse}
-    cls = _cls_for((("text", 0), ("text", 1), ("text", 2)), (("text", 2),))
-    assert dsa._heading_cluster(cls, items_by_id) is None
-
-
-def test_heading_cluster_rejects_numeral_not_overlapping_circle():
-    heading = _heading_item(0, "Faith")
-    number = _number_item(1)
-    number["x"] = 500
-    number["y"] = 500
-    circle = _circle_item(0)
-    verse = _verse_item(2)
-    items_by_id = {("text", 0): heading, ("text", 1): number, ("shape", 0): circle, ("text", 2): verse}
-    cls = _cls_for((("text", 0), ("text", 1), ("shape", 0), ("text", 2)), (("text", 2),))
-    assert dsa._heading_cluster(cls, items_by_id) is None
-
-
-def test_heading_cluster_rejects_two_point_numbers():
-    heading = _heading_item(0, "Faith")
-    number0 = _number_item(1)
-    number1 = _number_item(3, text="4")
-    circle = _circle_item(0)
-    verse = _verse_item(2)
-    items_by_id = {
-        ("text", 0): heading, ("text", 1): number0, ("text", 3): number1,
-        ("shape", 0): circle, ("text", 2): verse,
-    }
-    cls = _cls_for(
-        (("text", 0), ("text", 1), ("text", 3), ("shape", 0), ("text", 2)),
-        (("text", 2),),
-    )
-    assert dsa._heading_cluster(cls, items_by_id) is None
-
-
-def test_heading_cluster_rejects_stray_text_over_textless_shape():
-    heading = _heading_item(0, "Faith")
-    number = _number_item(1)
-    circle = _circle_item(0)
-    verse = _verse_item(2)
-    stray = {
-        "kind": "text", "kindIndex": 3, "x": 100, "y": 44, "w": 645, "h": 92,
-        "text": "James 5 (AMP)", "font": "AzoSans-Bold",
-    }
-    decorative_shape = {"kind": "shape", "kindIndex": 1, "x": 100, "y": 44, "w": 645, "h": 92, "text": ""}
-    items_by_id = {
-        ("text", 0): heading, ("text", 1): number, ("shape", 0): circle,
-        ("text", 2): verse, ("text", 3): stray, ("shape", 1): decorative_shape,
-    }
-    cls = _cls_for(
-        (("text", 0), ("text", 1), ("shape", 0), ("text", 2), ("text", 3), ("shape", 1)),
-        (("text", 2),),
-    )
-    assert dsa._heading_cluster(cls, items_by_id) is None
-
-
-def test_heading_cluster_rejects_two_badge_like_pairs():
-    heading = _heading_item(0, "Faith")
-    number = _number_item(1)
-    circle = _circle_item(0)
-    verse = _verse_item(2)
-    badge_text0 = {
-        "kind": "text", "kindIndex": 3, "x": 100, "y": 44, "w": 645, "h": 92,
-        "text": "James 5 (AMP)", "font": "AzoSans-Bold",
-    }
-    badge_shape0 = {"kind": "shape", "kindIndex": 1, "x": 100, "y": 44, "w": 645, "h": 92, "text": "James 5 (AMP)"}
-    badge_text1 = {
-        "kind": "text", "kindIndex": 4, "x": 100, "y": 200, "w": 200, "h": 40,
-        "text": "Extra badge", "font": "AzoSans-Bold",
-    }
-    badge_shape1 = {"kind": "shape", "kindIndex": 2, "x": 100, "y": 200, "w": 200, "h": 40, "text": "Extra badge"}
-    items_by_id = {
-        ("text", 0): heading, ("text", 1): number, ("shape", 0): circle, ("text", 2): verse,
-        ("text", 3): badge_text0, ("shape", 1): badge_shape0,
-        ("text", 4): badge_text1, ("shape", 2): badge_shape1,
-    }
-    cls = _cls_for(
-        (
-            ("text", 0), ("text", 1), ("shape", 0), ("text", 2),
-            ("text", 3), ("shape", 1), ("text", 4), ("shape", 2),
-        ),
-        (("text", 2),),
-    )
-    assert dsa._heading_cluster(cls, items_by_id) is None
-
-
-def test_heading_cluster_rejects_badge_text_mismatch():
-    heading = _heading_item(0, "Faith")
-    number = _number_item(1)
-    circle = _circle_item(0)
-    verse = _verse_item(2)
-    badge_text = {
-        "kind": "text", "kindIndex": 3, "x": 100, "y": 44, "w": 645, "h": 92,
-        "text": "James 5 (AMP)", "font": "AzoSans-Bold",
-    }
-    badge_shape = {"kind": "shape", "kindIndex": 1, "x": 100, "y": 44, "w": 645, "h": 92, "text": "Different"}
-    items_by_id = {
-        ("text", 0): heading, ("text", 1): number, ("shape", 0): circle,
-        ("text", 2): verse, ("text", 3): badge_text, ("shape", 1): badge_shape,
-    }
-    cls = _cls_for(
-        (("text", 0), ("text", 1), ("shape", 0), ("text", 2), ("text", 3), ("shape", 1)),
-        (("text", 2),),
-    )
-    assert dsa._heading_cluster(cls, items_by_id) is None
-
-
-def test_heading_cluster_rejects_second_numeral_matching_a_shape():
-    heading = _heading_item(0, "Faith")
-    number0 = _number_item(1)
-    circle = _circle_item(0)
-    verse = _verse_item(2)
-    number1 = {"kind": "text", "kindIndex": 3, "x": 300, "y": 300, "w": 35, "h": 35, "text": "4", "font": "AzoSans-Bold"}
-    matching_shape = {"kind": "shape", "kindIndex": 1, "x": 300, "y": 300, "w": 35, "h": 35, "text": "4"}
-    items_by_id = {
-        ("text", 0): heading, ("text", 1): number0, ("shape", 0): circle, ("text", 2): verse,
-        ("text", 3): number1, ("shape", 1): matching_shape,
-    }
-    cls = _cls_for(
-        (("text", 0), ("text", 1), ("shape", 0), ("text", 2), ("text", 3), ("shape", 1)),
-        (("text", 2),),
-    )
-    assert dsa._heading_cluster(cls, items_by_id) is None
-
-
-def test_heading_cluster_rejects_numeral_centre_at_circle_corner():
-    heading = _heading_item(0, "Faith")
-    circle = _circle_item(0)
-    verse = _verse_item(2)
-    # Circle centre (40.5, 40.5), radius 40.5+1.0 tol; place numeral centre at
-    # the corner (0, 0) -- distance ~57.3pt, well outside the radial tolerance.
-    number = {"kind": "text", "kindIndex": 1, "x": -1, "y": -1, "w": 2, "h": 2, "text": "3", "font": "AzoSans-Bold"}
-    items_by_id = {("text", 0): heading, ("text", 1): number, ("shape", 0): circle, ("text", 2): verse}
-    cls = _cls_for((("text", 0), ("text", 1), ("shape", 0), ("text", 2)), (("text", 2),))
-    assert dsa._heading_cluster(cls, items_by_id) is None
-
-
-def test_heading_cluster_rejects_numeral_just_outside_radius():
-    heading = _heading_item(0, "Faith")
-    circle = _circle_item(0)
-    verse = _verse_item(2)
-    # Circle centre (40.5, 40.5); place numeral centre 41.6pt away (radius + 1.1pt),
-    # just past the 41.5pt (radius 40.5 + 1.0pt tolerance) boundary.
-    number = {
-        "kind": "text", "kindIndex": 1, "x": 40.5 - 0.5, "y": (40.5 + 41.6) - 0.5, "w": 1, "h": 1,
-        "text": "3", "font": "AzoSans-Bold",
-    }
-    items_by_id = {("text", 0): heading, ("text", 1): number, ("shape", 0): circle, ("text", 2): verse}
-    cls = _cls_for((("text", 0), ("text", 1), ("shape", 0), ("text", 2)), (("text", 2),))
-    assert dsa._heading_cluster(cls, items_by_id) is None
 
 
 def _badge_and_stack_plan():
@@ -6164,203 +5762,74 @@ def test_cropped_image_keeps_source_file_name_for_stroke():
 # apple:movie-start build to an inserted clip; tolerate it only on that clip's own
 # slide and only for that clip's own filename.
 # --------------------------------------------------------------------------
-def test_verify_builds_tolerates_clip_auto_attached_movie_start(monkeypatch):
+def _movie_start_row(identity, count):
+    return {"slide": 32, "effect": "apple:movie-start", "animationType": "In", "identity": ("movie", identity), "count": count}
+
+
+def _verify_movie_start_surplus(monkeypatch, *, src_count, surplus, missing_count):
+    """Slide 32's movie 0 is replaced by clip.mov; the source carries `src_count`
+    apple:movie-start builds, and the verify report carries `surplus` plus `missing_count`
+    missing source movie-starts."""
     from obed_edom import iwa_builds
 
     plan = AssemblyPlan(
         kept=(32,), ordinals={32: 1}, fits={32: {}}, deletes={32: (("movie", 0),)},
         clips={32: {("movie", 0): Path("/tmp/clip.mov")}}, text_sizes={}, autosize={}, warnings=(),
     )
+    source_build = {
+        "buildId": "b", "chunkIds": [], "chunkOrder": [], "chunkReferent": [],
+        "kind": "movie", "kindIndex": 0, "effect": "apple:movie-start",
+        "animationType": "In", "identity": ("movie", "source.mov"),
+    }
     monkeypatch.setattr(
         iwa_builds, "deck_builds",
-        lambda path, *, deck=None: {32: {"slideId": "s", "builds": [{
-            "buildId": "b", "chunkIds": [], "chunkOrder": [], "chunkReferent": [],
-            "kind": "movie", "kindIndex": 0, "effect": "apple:movie-start",
-            "animationType": "In", "identity": ("movie", "source.mov"),
-        }], "transition": None}}
+        lambda path, *, deck=None: {32: {"slideId": "s", "builds": [source_build] * src_count, "transition": None}}
         if "fw" in str(path) else {1: {"slideId": "o", "builds": [], "transition": _dissolve_transition(0.5)}},
     )
+    missing = [_movie_start_row("source.mov", missing_count)] if missing_count else []
     monkeypatch.setattr(
         iwa_builds, "verify_builds",
         lambda src_by_number, out_by_number, slides=None: {
-            "surplus": [{
-                "slide": 32, "effect": "apple:movie-start", "animationType": "In",
-                "identity": ("movie", "clip.mov"), "count": 1,
-            }],
-            "missing": [{
-                "slide": 32, "effect": "apple:movie-start", "animationType": "In",
-                "identity": ("movie", "source.mov"), "count": 1,
-            }],
-            "transitions": [], "order": [],
+            "surplus": [surplus], "missing": missing, "transitions": [], "order": [],
         },
     )
-    warnings: list[str] = []
-    builds = dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
-    assert builds["tolerated_surplus"] == [{
-        "slide": 32, "effect": "apple:movie-start", "animationType": "In",
-        "identity": ("movie", "clip.mov"), "count": 1,
-    }]
-    assert builds["tolerated_missing"] == [{
-        "slide": 32, "effect": "apple:movie-start", "animationType": "In",
-        "identity": ("movie", "source.mov"), "count": 1,
-    }]
+    return dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, []), missing
 
 
-def test_verify_builds_tolerates_single_movie_start_surplus_without_a_paired_source_build(monkeypatch):
-    """One auto-added apple:movie-start per inserted clip identity is tolerated
-    regardless of whether a source build went missing (finding 4 fix)."""
-    from obed_edom import iwa_builds
-
-    plan = AssemblyPlan(
-        kept=(32,), ordinals={32: 1}, fits={32: {}}, deletes={32: (("movie", 0),)},
-        clips={32: {("movie", 0): Path("/tmp/clip.mov")}}, text_sizes={}, autosize={}, warnings=(),
+@pytest.mark.parametrize(
+    "src_count, missing_count",
+    [(1, 1), (0, 0), (2, 1)],
+    ids=["paired-with-a-missing-source-build", "no-paired-source-build", "within-the-missing-budget"],
+)
+def test_verify_builds_tolerates_one_auto_attached_movie_start_per_clip(monkeypatch, src_count, missing_count):
+    """Keynote auto-attaches an apple:movie-start to an inserted clip: one per inserted
+    clip identity is tolerated whether or not a source build went missing (finding 4)."""
+    surplus = _movie_start_row("clip.mov", 1)
+    builds, missing = _verify_movie_start_surplus(
+        monkeypatch, src_count=src_count, surplus=surplus, missing_count=missing_count
     )
-    monkeypatch.setattr(
-        iwa_builds, "deck_builds",
-        lambda path, *, deck=None: {32: {"slideId": "s", "builds": [], "transition": None}}
-        if "fw" in str(path) else {1: {"slideId": "o", "builds": [], "transition": _dissolve_transition(0.5)}},
-    )
-    monkeypatch.setattr(
-        iwa_builds, "verify_builds",
-        lambda src_by_number, out_by_number, slides=None: {
-            "surplus": [{
-                "slide": 32, "effect": "apple:movie-start", "animationType": "In",
-                "identity": ("movie", "clip.mov"), "count": 1,
-            }],
-            "missing": [], "transitions": [], "order": [],
-        },
-    )
-    warnings: list[str] = []
-    builds = dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
-    assert builds["tolerated_surplus"] == [{
-        "slide": 32, "effect": "apple:movie-start", "animationType": "In",
-        "identity": ("movie", "clip.mov"), "count": 1,
-    }]
+    assert builds["tolerated_surplus"] == [surplus]
+    assert builds["tolerated_missing"] == missing
 
 
-def test_verify_builds_refuses_surplus_movie_start_count_exceeding_source(monkeypatch):
-    from obed_edom import iwa_builds
-
-    plan = AssemblyPlan(
-        kept=(32,), ordinals={32: 1}, fits={32: {}}, deletes={32: (("movie", 0),)},
-        clips={32: {("movie", 0): Path("/tmp/clip.mov")}}, text_sizes={}, autosize={}, warnings=(),
-    )
-    monkeypatch.setattr(
-        iwa_builds, "deck_builds",
-        lambda path, *, deck=None: {32: {"slideId": "s", "builds": [{
-            "buildId": "b", "chunkIds": [], "chunkOrder": [], "chunkReferent": [],
-            "kind": "movie", "kindIndex": 0, "effect": "apple:movie-start",
-            "animationType": "In", "identity": ("movie", "source.mov"),
-        }], "transition": None}}
-        if "fw" in str(path) else {1: {"slideId": "o", "builds": [], "transition": _dissolve_transition(0.5)}},
-    )
-    monkeypatch.setattr(
-        iwa_builds, "verify_builds",
-        lambda src_by_number, out_by_number, slides=None: {
-            "surplus": [{
-                "slide": 32, "effect": "apple:movie-start", "animationType": "In",
-                "identity": ("movie", "clip.mov"), "count": 2,
-            }],
-            "missing": [{
-                "slide": 32, "effect": "apple:movie-start", "animationType": "In",
-                "identity": ("movie", "source.mov"), "count": 1,
-            }],
-            "transitions": [], "order": [],
-        },
-    )
-    warnings: list[str] = []
+@pytest.mark.parametrize(
+    "src_count, surplus, missing_count",
+    [
+        (1, _movie_start_row("clip.mov", 2), 1),
+        (2, _movie_start_row("clip.mov", 2), 1),
+        (2, _movie_start_row("clip.mov", 2), 2),
+        (0, _movie_start_row("other.mov", 1), 0),
+    ],
+    ids=[
+        "count-exceeding-the-source", "exceeding-the-missing-budget",
+        "beyond-one-per-clip-even-at-the-full-source-count", "not-matching-the-clip-filename",
+    ],
+)
+def test_verify_builds_refuses_a_movie_start_surplus(monkeypatch, src_count, surplus, missing_count):
+    """Tolerance is capped at ONE auto-added movie-start per inserted clip identity and by
+    the missing budget `min(source, missing)`; any other surplus is real (finding 4)."""
     with pytest.raises(AssemblyRefusal, match="builds verify surplus"):
-        dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
-
-
-def _movie_start_plan_and_src(monkeypatch, *, missing_count, surplus_count):
-    from obed_edom import iwa_builds
-
-    plan = AssemblyPlan(
-        kept=(32,), ordinals={32: 1}, fits={32: {}}, deletes={32: (("movie", 0),)},
-        clips={32: {("movie", 0): Path("/tmp/clip.mov")}}, text_sizes={}, autosize={}, warnings=(),
-    )
-    monkeypatch.setattr(
-        iwa_builds, "deck_builds",
-        lambda path, *, deck=None: {32: {"slideId": "s", "builds": [{
-            "buildId": "b", "chunkIds": [], "chunkOrder": [], "chunkReferent": [],
-            "kind": "movie", "kindIndex": 0, "effect": "apple:movie-start",
-            "animationType": "In", "identity": ("movie", "source.mov"),
-        }] * 2, "transition": None}}
-        if "fw" in str(path) else {1: {"slideId": "o", "builds": [], "transition": _dissolve_transition(0.5)}},
-    )
-    monkeypatch.setattr(
-        iwa_builds, "verify_builds",
-        lambda src_by_number, out_by_number, slides=None: {
-            "surplus": [{
-                "slide": 32, "effect": "apple:movie-start", "animationType": "In",
-                "identity": ("movie", "clip.mov"), "count": surplus_count,
-            }],
-            "missing": [{
-                "slide": 32, "effect": "apple:movie-start", "animationType": "In",
-                "identity": ("movie", "source.mov"), "count": missing_count,
-            }],
-            "transitions": [], "order": [],
-        },
-    )
-    return plan
-
-
-def test_verify_builds_refuses_movie_start_surplus_exceeding_the_missing_budget(monkeypatch):
-    """Two source movie-start builds are available, but only 1 is reported missing -- the
-    tolerated budget is `min(2, 1) == 1`, so a surplus of 2 must NOT be fully tolerated
-    even though it fits under the source count alone."""
-    plan = _movie_start_plan_and_src(monkeypatch, missing_count=1, surplus_count=2)
-    warnings: list[str] = []
-    with pytest.raises(AssemblyRefusal, match="builds verify surplus"):
-        dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
-
-
-def test_verify_builds_tolerates_movie_start_surplus_within_the_missing_budget(monkeypatch):
-    plan = _movie_start_plan_and_src(monkeypatch, missing_count=1, surplus_count=1)
-    warnings: list[str] = []
-    builds = dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
-    assert builds["tolerated_surplus"] == [{
-        "slide": 32, "effect": "apple:movie-start", "animationType": "In",
-        "identity": ("movie", "clip.mov"), "count": 1,
-    }]
-
-
-def test_verify_builds_refuses_movie_start_surplus_beyond_one_per_clip_even_at_the_full_source_count(monkeypatch):
-    """Tolerance is capped at ONE auto-added movie-start per inserted clip identity,
-    independent of how many source movie-starts were deleted (finding 4 fix) -- a
-    surplus of 2 is refused even though 2 source builds went missing."""
-    plan = _movie_start_plan_and_src(monkeypatch, missing_count=2, surplus_count=2)
-    warnings: list[str] = []
-    with pytest.raises(AssemblyRefusal, match="builds verify surplus"):
-        dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
-
-
-def test_verify_builds_refuses_surplus_not_matching_the_clip_filename(monkeypatch):
-    from obed_edom import iwa_builds
-
-    plan = AssemblyPlan(
-        kept=(32,), ordinals={32: 1}, fits={32: {}}, deletes={32: (("movie", 0),)},
-        clips={32: {("movie", 0): Path("/tmp/clip.mov")}}, text_sizes={}, autosize={}, warnings=(),
-    )
-    monkeypatch.setattr(
-        iwa_builds, "deck_builds",
-        lambda path, *, deck=None: {32: {"slideId": "s", "builds": [], "transition": None}}
-        if "fw" in str(path) else {1: {"slideId": "o", "builds": [], "transition": _dissolve_transition(0.5)}},
-    )
-    monkeypatch.setattr(
-        iwa_builds, "verify_builds",
-        lambda src_by_number, out_by_number, slides=None: {
-            "surplus": [{
-                "slide": 32, "effect": "apple:movie-start", "animationType": "In",
-                "identity": ("movie", "other.mov"), "count": 1,
-            }],
-            "missing": [], "transitions": [], "order": [],
-        },
-    )
-    warnings: list[str] = []
-    with pytest.raises(AssemblyRefusal, match="builds verify surplus"):
-        dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+        _verify_movie_start_surplus(monkeypatch, src_count=src_count, surplus=surplus, missing_count=missing_count)
 
 
 # --------------------------------------------------------------------------
@@ -6368,7 +5837,11 @@ def test_verify_builds_refuses_surplus_not_matching_the_clip_filename(monkeypatc
 # 28), so the surplus `_verify_builds` sees on that clip carries the planned
 # effect, not `apple:movie-start` (Codex r2 BLOCKER: FRC 50 would always refuse).
 # --------------------------------------------------------------------------
-def _stacked_build_in_plan(monkeypatch, *, surplus_effect, surplus_count=1):
+def _stacked_row(clip, effect, count=1):
+    return {"slide": 50, "effect": effect, "animationType": "In", "identity": ("movie", clip), "count": count}
+
+
+def _stacked_build_in_plan(monkeypatch, surplus):
     from obed_edom import iwa_builds
 
     plan = AssemblyPlan(
@@ -6388,17 +5861,7 @@ def _stacked_build_in_plan(monkeypatch, *, surplus_effect, surplus_count=1):
     monkeypatch.setattr(
         iwa_builds, "verify_builds",
         lambda src_by_number, out_by_number, slides=None: {
-            "surplus": [
-                {
-                    "slide": 50, "effect": "apple:movie-start", "animationType": "In",
-                    "identity": ("movie", "d.050.01.mov"), "count": 1,
-                },
-                {
-                    "slide": 50, "effect": surplus_effect, "animationType": "In",
-                    "identity": ("movie", "d.050.02.mov"), "count": surplus_count,
-                },
-            ],
-            "missing": [], "transitions": [], "order": [],
+            "surplus": surplus, "missing": [], "transitions": [], "order": [],
         },
     )
     return plan
@@ -6407,56 +5870,27 @@ def _stacked_build_in_plan(monkeypatch, *, surplus_effect, surplus_count=1):
 def test_verify_builds_tolerates_the_planned_build_in_on_a_stacked_upper_clip(monkeypatch):
     """FRC 50: the lower clip keeps its auto movie-start, the upper clip's build was
     rewritten to the planned `apple:dissolve` -- both are one-per-clip surpluses."""
-    plan = _stacked_build_in_plan(monkeypatch, surplus_effect="apple:dissolve")
-    warnings: list[str] = []
-    builds = dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
-    assert builds["tolerated_surplus"] == [
-        {
-            "slide": 50, "effect": "apple:movie-start", "animationType": "In",
-            "identity": ("movie", "d.050.01.mov"), "count": 1,
-        },
-        {
-            "slide": 50, "effect": "apple:dissolve", "animationType": "In",
-            "identity": ("movie", "d.050.02.mov"), "count": 1,
-        },
-    ]
+    surplus = [_stacked_row("d.050.01.mov", "apple:movie-start"), _stacked_row("d.050.02.mov", "apple:dissolve")]
+    plan = _stacked_build_in_plan(monkeypatch, surplus)
+    builds = dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, [])
+    assert builds["tolerated_surplus"] == surplus
 
 
-def test_verify_builds_refuses_a_second_build_in_surplus_on_the_same_stacked_clip(monkeypatch):
-    plan = _stacked_build_in_plan(monkeypatch, surplus_effect="apple:dissolve", surplus_count=2)
-    warnings: list[str] = []
+@pytest.mark.parametrize(
+    "surplus",
+    [
+        [_stacked_row("d.050.01.mov", "apple:movie-start"), _stacked_row("d.050.02.mov", "apple:dissolve", 2)],
+        [_stacked_row("d.050.01.mov", "apple:movie-start"), _stacked_row("d.050.02.mov", "apple:move-in")],
+        [_stacked_row("d.050.01.mov", "apple:dissolve")],
+    ],
+    ids=["second-build-in-on-the-same-clip", "effect-the-clip-was-not-planned", "build-in-on-the-lower-clip-planned-none"],
+)
+def test_verify_builds_refuses_an_unplanned_stacked_clip_surplus(monkeypatch, surplus):
+    """Tolerance is per clip and per PLANNED effect: the upper clip was planned one
+    `apple:dissolve`, the lower clip none, even though its stack-mate carries one."""
+    plan = _stacked_build_in_plan(monkeypatch, surplus)
     with pytest.raises(AssemblyRefusal, match="builds verify surplus"):
-        dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
-
-
-def test_verify_builds_refuses_an_effect_the_clip_was_not_planned_to_carry(monkeypatch):
-    """Tolerance is per clip and per PLANNED effect: the upper clip was planned an
-    `apple:dissolve`, so an `apple:move-in` surplus on it is still a real surplus."""
-    plan = _stacked_build_in_plan(monkeypatch, surplus_effect="apple:move-in")
-    warnings: list[str] = []
-    with pytest.raises(AssemblyRefusal, match="builds verify surplus"):
-        dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
-
-
-def test_verify_builds_refuses_a_build_in_effect_on_a_clip_with_no_planned_build_in(monkeypatch):
-    """The LOWER clip was planned no build-in, so a dissolve surplus on it is refused
-    even though its stack-mate legitimately carries one."""
-    from obed_edom import iwa_builds
-
-    plan = _stacked_build_in_plan(monkeypatch, surplus_effect="apple:dissolve")
-    monkeypatch.setattr(
-        iwa_builds, "verify_builds",
-        lambda src_by_number, out_by_number, slides=None: {
-            "surplus": [{
-                "slide": 50, "effect": "apple:dissolve", "animationType": "In",
-                "identity": ("movie", "d.050.01.mov"), "count": 1,
-            }],
-            "missing": [], "transitions": [], "order": [],
-        },
-    )
-    warnings: list[str] = []
-    with pytest.raises(AssemblyRefusal, match="builds verify surplus"):
-        dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+        dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, [])
 
 
 def test_verify_builds_refuses_clip_slide_whose_transition_write_silently_failed(monkeypatch):
@@ -6637,137 +6071,7 @@ def test_group_known_child_lines_locks_and_relocks_each_nested_level():
 
 
 # --------------------------------------------------------------------------
-# CLI -- decision construction from argv.
-# --------------------------------------------------------------------------
-def test_cli_dsk_assemble_builds_decisions(tmp_path, monkeypatch):
-    from obed_edom import cli
-
-    source = tmp_path / "src.key"
-    source.mkdir()
-    monkeypatch.setattr(
-        "obed_edom.offline_inspect.offline_wall_payload",
-        lambda path, deck=None: {"slideWidth": 7680.0, "slideHeight": 1080.0, "slideCount": 100, "slides": []},
-    )
-    captured: dict = {}
-
-    monkeypatch.setattr("obed_edom.dsk_movie_export._ffprobe", lambda _path: (1920, 1080, 24.0, 2.0))
-
-    def fake_assemble_dsk_deck(
-        src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, import_layout_names, stroke_min_refs,
-        text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
-        no_image_crop=False, no_auto_anchor=False, no_dedupe=False, no_drop_panel_backdrop=False,
-        split_overrides=None, rss_limit_bytes=None, no_pills=False, no_style=False, content_only=False,
-        **_kwargs,
-    ):
-        captured["decisions"] = decisions
-        captured["clips"] = clips
-        captured["reference_deck"] = reference_deck
-        captured["layout_policy"] = layout_policy
-        captured["black_layout_names"] = black_layout_names
-        captured["stroke_min_refs"] = stroke_min_refs
-        captured["clip_sizes"] = _kwargs.get("clip_sizes")
-        return AssembleResult(
-            path=out,
-            slides_kept=(13, 32),
-            ordinals={13: 1, 32: 2},
-            fits={},
-            clips_inserted={},
-            stroke={},
-            zorder={},
-            builds={},
-            size_bytes=1,
-            source_size_bytes=1,
-            wall_s=0.1,
-            warnings=(),
-            movie_props={},
-        )
-
-    monkeypatch.setattr("obed_edom.dsk_assemble.assemble_dsk_deck", fake_assemble_dsk_deck)
-
-    clip_path = tmp_path / "clip.mov"
-    clip_path.write_bytes(b"fake-mov")
-
-    rc = cli.main(
-        [
-            "dsk-assemble",
-            str(source),
-            "--out",
-            str(tmp_path / "out.key"),
-            "--slides",
-            "13,32",
-            "--include-side",
-            "13",
-            "--anchor",
-            "32=left",
-            "--clip",
-            f"32={clip_path}",
-            "--layout",
-            "import",
-            "--stroke-min-refs",
-            "2",
-        ]
-    )
-
-    assert rc == 0
-    decisions = captured["decisions"]
-    assert decisions[13].action == "in_deck"
-    assert decisions[13].keep_side is True
-    assert decisions[13].anchor == "auto"
-    assert decisions[32].action == "both"
-    assert decisions[32].keep_side is False
-    assert decisions[32].anchor == "left"
-    assert captured["clips"] == {32: clip_path}
-    assert captured["layout_policy"] == "import"
-    assert captured["black_layout_names"] == dsa.DEFAULT_TRANSPARENT_LAYOUT_NAMES
-    assert captured["stroke_min_refs"] == 2
-    assert captured["reference_deck"] is None
-    assert captured["clip_sizes"] == {str(clip_path): (1920, 1080)}
-
-
-def test_default_transparent_layout_names_aliases_dsk_live():
-    from obed_edom import dsk_stage_export as dse
-
-    assert dsa.DEFAULT_TRANSPARENT_LAYOUT_NAMES is dsk_live.DEFAULT_TRANSPARENT_LAYOUT_NAMES
-    assert dse.DEFAULT_TRANSPARENT_LAYOUT_NAMES is dsk_live.DEFAULT_TRANSPARENT_LAYOUT_NAMES
-
-
-def test_cli_dsk_assemble_layout_name_override(tmp_path, monkeypatch):
-    from obed_edom import cli
-
-    source = tmp_path / "src.key"
-    source.mkdir()
-    monkeypatch.setattr(
-        "obed_edom.offline_inspect.offline_wall_payload",
-        lambda path, deck=None: {"slideWidth": 7680.0, "slideHeight": 1080.0, "slideCount": 100, "slides": []},
-    )
-    captured: dict = {}
-
-    def fake_assemble_dsk_deck(
-        src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, import_layout_names, stroke_min_refs,
-        text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
-        no_image_crop=False, no_auto_anchor=False, no_dedupe=False, no_drop_panel_backdrop=False,
-        split_overrides=None, rss_limit_bytes=None, no_pills=False, no_style=False, content_only=False,
-        **_kwargs,
-    ):
-        captured["black_layout_names"] = black_layout_names
-        return AssembleResult(
-            path=out, slides_kept=(13,), ordinals={13: 1}, fits={}, clips_inserted={}, stroke={}, zorder={}, builds={},
-            size_bytes=1, source_size_bytes=1, wall_s=0.1, warnings=(), movie_props={},
-        )
-
-    monkeypatch.setattr("obed_edom.dsk_assemble.assemble_dsk_deck", fake_assemble_dsk_deck)
-    rc = cli.main(
-        [
-            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"),
-            "--slides", "13", "--layout-name", "Custom Blank",
-        ]
-    )
-    assert rc == 0
-    assert captured["black_layout_names"] == ("Custom Blank",)
-
-
-# --------------------------------------------------------------------------
-# CLI -- validation of canvas size and malformed --anchor/--clip values.
+# CLI -- decision construction from argv, and validation of canvas size and flag values.
 # --------------------------------------------------------------------------
 def _cli_source(tmp_path, monkeypatch, *, wall=(7680.0, 1080.0)):
     from obed_edom import cli
@@ -6787,117 +6091,111 @@ def _cli_source(tmp_path, monkeypatch, *, wall=(7680.0, 1080.0)):
     return cli, source
 
 
+def _capture_cli_assemble(monkeypatch, captured: dict) -> None:
+    """The keyword-only parameters without a default are the ones the CLI must always pass."""
+
+    def fake_assemble_dsk_deck(
+        src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, import_layout_names,
+        stroke_min_refs, text_fit, **kwargs,
+    ):
+        captured.update(
+            decisions=decisions, reference_deck=reference_deck, clips=clips, layout_policy=layout_policy,
+            black_layout_names=black_layout_names, stroke_min_refs=stroke_min_refs, **kwargs,
+        )
+        return AssembleResult(
+            path=out, slides_kept=tuple(decisions), ordinals={n: i for i, n in enumerate(decisions, 1)}, fits={},
+            clips_inserted={}, stroke={}, zorder={}, builds={}, size_bytes=1, source_size_bytes=1, wall_s=0.1,
+            warnings=(), movie_props={},
+        )
+
+    monkeypatch.setattr("obed_edom.dsk_assemble.assemble_dsk_deck", fake_assemble_dsk_deck)
+
+
+def test_cli_dsk_assemble_builds_decisions(tmp_path, monkeypatch):
+    cli, source = _cli_source(tmp_path, monkeypatch)
+    captured: dict = {}
+    _capture_cli_assemble(monkeypatch, captured)
+    monkeypatch.setattr("obed_edom.dsk_movie_export._ffprobe", lambda _path: (1920, 1080, 24.0, 2.0))
+    clip_path = tmp_path / "clip.mov"
+    clip_path.write_bytes(b"fake-mov")
+
+    rc = cli.main(
+        [
+            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), "--slides", "13,32",
+            "--include-side", "13", "--anchor", "32=left", "--clip", f"32={clip_path}", "--layout", "import",
+            "--stroke-min-refs", "2",
+        ]
+    )
+
+    assert rc == 0
+    decisions = captured["decisions"]
+    assert decisions[13].action == "in_deck"
+    assert decisions[13].keep_side is True
+    assert decisions[13].anchor == "auto"
+    assert decisions[32].action == "both"
+    assert decisions[32].keep_side is False
+    assert decisions[32].anchor == "left"
+    assert captured["clips"] == {32: clip_path}
+    assert captured["layout_policy"] == "import"
+    assert captured["black_layout_names"] == dsa.DEFAULT_TRANSPARENT_LAYOUT_NAMES
+    assert captured["stroke_min_refs"] == 2
+    assert captured["reference_deck"] is None
+    assert captured["clip_sizes"] == {str(clip_path): (1920, 1080)}
+
+
+@pytest.mark.parametrize(
+    "extra, key, value",
+    [(["--layout-name", "Custom Blank"], "black_layout_names", ("Custom Blank",)), (["--no-style"], "no_style", True)],
+    ids=["layout-name-override", "no-style"],
+)
+def test_cli_dsk_assemble_threads_a_flag(tmp_path, monkeypatch, extra, key, value):
+    cli, source = _cli_source(tmp_path, monkeypatch)
+    captured: dict = {}
+    _capture_cli_assemble(monkeypatch, captured)
+    assert cli.main(["dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), "--slides", "13", *extra]) == 0
+    assert captured[key] == value
+
+
+def test_default_transparent_layout_names_aliases_dsk_live():
+    from obed_edom import dsk_stage_export as dse
+
+    assert dsa.DEFAULT_TRANSPARENT_LAYOUT_NAMES is dsk_live.DEFAULT_TRANSPARENT_LAYOUT_NAMES
+    assert dse.DEFAULT_TRANSPARENT_LAYOUT_NAMES is dsk_live.DEFAULT_TRANSPARENT_LAYOUT_NAMES
+
+
+@pytest.mark.parametrize(
+    "args, message",
+    [
+        (["--slides", "13", "--anchor", "13"], "expected SLIDE=anchor"),
+        (["--slides", "13", "--anchor", "13=top"], "anchor must be one of"),
+        (["--slides", "13", "--anchor", "32=left"], "not in --slides"),
+        (["--slides", "32", "--clip", "32={tmp}/clip.mp4"], "must end with .mov"),
+        (["--slides", "32", "--clip", "32={tmp}/missing.mov"], "does not exist"),
+        (["--slides", "13", "--clip", "32={tmp}/clip.mov"], "not in --slides"),
+        (["--slides", "999"], "out of range"),
+        (["--slides", "13", "--include-side", "32"], "not in --slides"),
+        (["--slides", "13", "--reference-deck", "{tmp}/missing-ref.key"], "Reference deck not found"),
+    ],
+    ids=[
+        "anchor-without-equals", "bad-anchor-value", "anchor-slide-not-in-slides", "clip-path-not-mov",
+        "missing-clip-path", "clip-slide-not-in-slides", "slide-out-of-deck-bounds",
+        "include-side-not-subset-of-slides", "missing-reference-deck",
+    ],
+)
+def test_cli_dsk_assemble_rejects_bad_input(tmp_path, monkeypatch, capsys, args, message):
+    cli, source = _cli_source(tmp_path, monkeypatch)
+    (tmp_path / "clip.mp4").write_bytes(b"x")
+    (tmp_path / "clip.mov").write_bytes(b"x")
+    argv = [arg.format(tmp=tmp_path) for arg in args]
+    assert cli.main(["dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), *argv]) == 1
+    assert message in capsys.readouterr().err
+
+
 def test_cli_dsk_assemble_rejects_non_wall_canvas(tmp_path, monkeypatch, capsys):
     cli, source = _cli_source(tmp_path, monkeypatch, wall=(3840.0, 1080.0))
     rc = cli.main(["dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), "--slides", "13"])
     assert rc == 1
     assert "7680x1080" in capsys.readouterr().err
-
-
-def test_cli_dsk_assemble_rejects_anchor_without_equals(tmp_path, monkeypatch, capsys):
-    cli, source = _cli_source(tmp_path, monkeypatch)
-    rc = cli.main(
-        ["dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), "--slides", "13", "--anchor", "13"]
-    )
-    assert rc == 1
-    assert "expected SLIDE=anchor" in capsys.readouterr().err
-
-
-def test_cli_dsk_assemble_rejects_bad_anchor_value(tmp_path, monkeypatch, capsys):
-    cli, source = _cli_source(tmp_path, monkeypatch)
-    rc = cli.main(
-        [
-            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"),
-            "--slides", "13", "--anchor", "13=top",
-        ]
-    )
-    assert rc == 1
-    assert "anchor must be one of" in capsys.readouterr().err
-
-
-def test_cli_dsk_assemble_rejects_anchor_slide_not_in_slides(tmp_path, monkeypatch, capsys):
-    cli, source = _cli_source(tmp_path, monkeypatch)
-    rc = cli.main(
-        [
-            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"),
-            "--slides", "13", "--anchor", "32=left",
-        ]
-    )
-    assert rc == 1
-    assert "not in --slides" in capsys.readouterr().err
-
-
-def test_cli_dsk_assemble_rejects_clip_path_not_mov(tmp_path, monkeypatch, capsys):
-    cli, source = _cli_source(tmp_path, monkeypatch)
-    not_mov = tmp_path / "clip.mp4"
-    not_mov.write_bytes(b"x")
-    rc = cli.main(
-        [
-            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"),
-            "--slides", "32", "--clip", f"32={not_mov}",
-        ]
-    )
-    assert rc == 1
-    assert "must end with .mov" in capsys.readouterr().err
-
-
-def test_cli_dsk_assemble_rejects_missing_clip_path(tmp_path, monkeypatch, capsys):
-    cli, source = _cli_source(tmp_path, monkeypatch)
-    rc = cli.main(
-        [
-            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"),
-            "--slides", "32", "--clip", f"32={tmp_path / 'missing.mov'}",
-        ]
-    )
-    assert rc == 1
-    assert "does not exist" in capsys.readouterr().err
-
-
-def test_cli_dsk_assemble_rejects_clip_slide_not_in_slides(tmp_path, monkeypatch, capsys):
-    cli, source = _cli_source(tmp_path, monkeypatch)
-    clip_path = tmp_path / "clip.mov"
-    clip_path.write_bytes(b"x")
-    rc = cli.main(
-        [
-            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"),
-            "--slides", "13", "--clip", f"32={clip_path}",
-        ]
-    )
-    assert rc == 1
-    assert "not in --slides" in capsys.readouterr().err
-
-
-def test_cli_dsk_assemble_rejects_slide_out_of_deck_bounds(tmp_path, monkeypatch, capsys):
-    cli, source = _cli_source(tmp_path, monkeypatch)
-    rc = cli.main(
-        ["dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), "--slides", "999"]
-    )
-    assert rc == 1
-    assert "out of range" in capsys.readouterr().err
-
-
-def test_cli_dsk_assemble_rejects_include_side_not_subset_of_slides(tmp_path, monkeypatch, capsys):
-    cli, source = _cli_source(tmp_path, monkeypatch)
-    rc = cli.main(
-        [
-            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"),
-            "--slides", "13", "--include-side", "32",
-        ]
-    )
-    assert rc == 1
-    assert "not in --slides" in capsys.readouterr().err
-
-
-def test_cli_dsk_assemble_rejects_missing_reference_deck(tmp_path, monkeypatch, capsys):
-    cli, source = _cli_source(tmp_path, monkeypatch)
-    rc = cli.main(
-        [
-            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"),
-            "--slides", "13", "--reference-deck", str(tmp_path / "missing-ref.key"),
-        ]
-    )
-    assert rc == 1
-    assert "Reference deck not found" in capsys.readouterr().err
 
 
 def test_cli_dsk_assemble_rejects_missing_layout_template(tmp_path, monkeypatch, capsys):
@@ -7343,24 +6641,12 @@ def test_john17_after_dedupe_does_not_overlap():
     rect2 = plan.fits[17][("text", 2)]
     assert dsa._intersect(rect1, rect2) is None
     assert plan.parts.get(17, 1) == 1
+    assert 17 not in plan.splits
 
 
 # --------------------------------------------------------------------------
 # Split (step 6).
 # --------------------------------------------------------------------------
-def test_no_split_when_fit_found():
-    _require_font("AzoSans-Regular")
-    box1 = _long_text_item(1, _VERSE_1, y=100)
-    box2 = _long_text_item(2, _VERSE_2, y=500)
-    slide = _slide(17, [box1, box2])
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {17: SlideDecision(17, "in_deck")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.parts.get(17, 1) == 1
-    assert 17 not in plan.splits
-
-
 def test_split_ordinals_shift_following_slides():
     _require_font("AzoSans-Regular")
     s13 = _slide(13, [_long_text_item(1, _VERSE_1, y=100)])
@@ -7481,7 +6767,7 @@ def test_split_script_duplicates_two_split_slides_in_descending_order():
 
 def test_split_refused_when_single_box_cannot_fit():
     _require_font("AzoSans-Regular")
-    huge = " ".join(["lorem"] * 400)
+    huge = " ".join(["loremipsumdolor"] * 130)
     box1 = _long_text_item(1, huge, y=100)
     box2 = _long_text_item(2, _VERSE_2, y=500)
     slide = _slide(17, [box1, box2])
@@ -7779,43 +7065,17 @@ def _char_window_split_part(part_no: int, kind_index: int, deletes: tuple, char_
     )
 
 
-def test_verify_builds_char_window_split_clean_with_exactly_len_parts_copies(monkeypatch):
+_CHAR_WINDOW_SRC_DISSOLVE = {
+    "buildId": "b0", "chunkIds": [], "chunkOrder": [], "chunkReferent": [],
+    "kind": "text", "kindIndex": 1, "effect": "apple:dissolve", "animationType": "In",
+    "identity": ("text", "whole box text here"),
+}
+
+
+def _run_char_window_verify(out_builds_per_ordinal: list[list[dict]], monkeypatch):
     from obed_edom import iwa_builds
 
-    src_dissolve = {
-        "buildId": "b0", "chunkIds": [], "chunkOrder": [], "chunkReferent": [],
-        "kind": "text", "kindIndex": 1, "effect": "apple:dissolve", "animationType": "In",
-        "identity": ("text", "whole box text here"),
-    }
-    src_builds = {17: {"slideId": "s", "builds": [src_dissolve], "transition": None}}
-    part_texts = ["whole box", "box text", "text here"]
-    out_builds = {
-        2 + i: {
-            "slideId": f"o{i}",
-            "builds": [dict(src_dissolve, kindIndex=0, identity=("text", t))],
-            "transition": None,
-        }
-        for i, t in enumerate(part_texts)
-    }
-    monkeypatch.setattr(
-        iwa_builds, "deck_builds",
-        lambda path, *, deck=None: src_builds if "fw" in str(path) else out_builds,
-    )
-    plan = AssemblyPlan(
-        kept=(17,), ordinals={17: 2}, fits={17: {}}, deletes={17: ()}, clips={}, text_sizes={},
-        autosize={}, warnings=(), parts={17: 3}, ordinal_to_number={2: 17, 3: 17, 4: 17},
-        splits={17: tuple(_char_window_split_part(i, 1, (), (1, 10)) for i in range(3))},
-    )
-    warnings: list[str] = []
-    builds = dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
-    assert len(builds["out_rekeyed"][17]["builds"]) == 3
-    assert any("cloned build on split part" in w for w in warnings)
-
-
-def _run_char_window_verify(out_builds_per_ordinal: list[list[dict]], monkeypatch, src_dissolve: dict):
-    from obed_edom import iwa_builds
-
-    src_builds = {17: {"slideId": "s", "builds": [src_dissolve], "transition": None}}
+    src_builds = {17: {"slideId": "s", "builds": [_CHAR_WINDOW_SRC_DISSOLVE], "transition": None}}
     out_builds = {
         2 + i: {"slideId": f"o{i}", "builds": builds_here, "transition": None}
         for i, builds_here in enumerate(out_builds_per_ordinal)
@@ -7830,64 +7090,36 @@ def _run_char_window_verify(out_builds_per_ordinal: list[list[dict]], monkeypatc
         splits={17: tuple(_char_window_split_part(i, 1, (), (1, 10)) for i in range(3))},
     )
     warnings: list[str] = []
-    return dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+    return dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings), warnings
 
 
-def test_verify_builds_char_window_split_mismatches_with_two_copies(monkeypatch):
-    src_dissolve = {
-        "buildId": "b0", "chunkIds": [], "chunkOrder": [], "chunkReferent": [],
-        "kind": "text", "kindIndex": 1, "effect": "apple:dissolve", "animationType": "In",
-        "identity": ("text", "whole box text here"),
-    }
-    part_texts = ["whole box", "box text"]
-    per_ordinal = [[dict(src_dissolve, kindIndex=0, identity=("text", t))] for t in part_texts] + [[]]
-    with pytest.raises(AssemblyRefusal, match="surplus"):
-        _run_char_window_verify(per_ordinal, monkeypatch, src_dissolve)
+def _char_window_part_builds(*texts):
+    return [[dict(_CHAR_WINDOW_SRC_DISSOLVE, kindIndex=0, identity=("text", t))] for t in texts]
 
 
-def test_verify_builds_char_window_split_mismatches_with_four_copies(monkeypatch):
-    src_dissolve = {
-        "buildId": "b0", "chunkIds": [], "chunkOrder": [], "chunkReferent": [],
-        "kind": "text", "kindIndex": 1, "effect": "apple:dissolve", "animationType": "In",
-        "identity": ("text", "whole box text here"),
-    }
-    part_texts = ["whole box", "box text", "text here"]
-    per_ordinal = [[dict(src_dissolve, kindIndex=0, identity=("text", t))] for t in part_texts]
-    per_ordinal[0] = per_ordinal[0] * 2
-    with pytest.raises(AssemblyRefusal, match="surplus"):
-        _run_char_window_verify(per_ordinal, monkeypatch, src_dissolve)
-
-
-def test_verify_builds_char_window_split_unrelated_identity_is_genuine_mismatch(monkeypatch):
-    from obed_edom import iwa_builds
-
-    src_dissolve = {
-        "buildId": "b0", "chunkIds": [], "chunkOrder": [], "chunkReferent": [],
-        "kind": "text", "kindIndex": 1, "effect": "apple:dissolve", "animationType": "In",
-        "identity": ("text", "whole box text here"),
-    }
-    src_builds = {17: {"slideId": "s", "builds": [src_dissolve], "transition": None}}
-    part_texts = ["whole box", "box text", "completely unrelated"]
-    out_builds = {
-        2 + i: {
-            "slideId": f"o{i}",
-            "builds": [dict(src_dissolve, kindIndex=0, identity=("text", t))],
-            "transition": None,
-        }
-        for i, t in enumerate(part_texts)
-    }
-    monkeypatch.setattr(
-        iwa_builds, "deck_builds",
-        lambda path, *, deck=None: src_builds if "fw" in str(path) else out_builds,
+def test_verify_builds_char_window_split_clean_with_exactly_len_parts_copies(monkeypatch):
+    builds, warnings = _run_char_window_verify(
+        _char_window_part_builds("whole box", "box text", "text here"), monkeypatch
     )
-    plan = AssemblyPlan(
-        kept=(17,), ordinals={17: 2}, fits={17: {}}, deletes={17: ()}, clips={}, text_sizes={},
-        autosize={}, warnings=(), parts={17: 3}, ordinal_to_number={2: 17, 3: 17, 4: 17},
-        splits={17: tuple(_char_window_split_part(i, 1, (), (1, 10)) for i in range(3))},
-    )
-    warnings: list[str] = []
-    with pytest.raises(AssemblyRefusal):
-        dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+    assert len(builds["out_rekeyed"][17]["builds"]) == 3
+    assert any("cloned build on split part" in w for w in warnings)
+
+
+@pytest.mark.parametrize(
+    "per_ordinal, match",
+    [
+        (_char_window_part_builds("whole box", "box text") + [[]], "surplus"),
+        (
+            [_char_window_part_builds("whole box")[0] * 2] + _char_window_part_builds("box text", "text here"),
+            "surplus",
+        ),
+        (_char_window_part_builds("whole box", "box text", "completely unrelated"), None),
+    ],
+    ids=["two-copies", "four-copies", "unrelated-identity-is-a-genuine-mismatch"],
+)
+def test_verify_builds_char_window_split_mismatches(monkeypatch, per_ordinal, match):
+    with pytest.raises(AssemblyRefusal, match=match):
+        _run_char_window_verify(per_ordinal, monkeypatch)
 
 
 # --------------------------------------------------------------------------
@@ -8169,6 +7401,98 @@ def test_identity_is_narrowed_slice_accepts_contiguous_slice_rejects_unrelated()
 # count: a union w/h >= 2.5 (LW-dimension) centres the slide; otherwise 1-2
 # squarish items go right, 3+ centre. Text and side panels never count.
 # --------------------------------------------------------------------------
+def _auto_anchor_plan(items, *, keep_side=False, clip=False, slide_fields=None, **plan_kwargs):
+    slide = _slide(1, [dict(item) for item in items])
+    slide.update(slide_fields or {})
+    classes = [_classify(slide, include_side=keep_side)]
+    decisions = {1: SlideDecision(1, "in_deck", anchor="auto", keep_side=keep_side)}
+    clips = {1: Path("/tmp/clip.mov")} if clip else {}
+    return plan_assembly(_payload([slide]), classes, decisions=decisions, band=BAND, clips=clips, **plan_kwargs)
+
+
+def _rotated(item, rotation):
+    item["rotation"] = rotation
+    return item
+
+
+_SQUARISH = _image_item(2, x=1954, y=27, w=1381, h=921)
+_PHOTO_CAPTION_GROUP = {
+    "groupChildSignature": {0: "image:photo.jpg\ntext:caption"},
+    "groupChildren": {0: [{"kind": "image", "kindIndex": 0, "x": 4702.0, "y": 15.0, "w": 645.0, "h": 92.0}]},
+}
+
+
+@pytest.mark.parametrize(
+    "items, options, anchor",
+    [
+        ([_image_item(0, x=1943, y=-14, w=504, h=1080), _image_item(1, x=3200, y=-14, w=504, h=1080)], {}, "right"),
+        ([_image_item(i, x=1500 + 500 * i, y=0, w=500, h=500) for i in range(3)], {}, "centre"),
+        ([_image_item(0, x=1500, y=0, w=500, h=500), _movie_item(1, x=1920, y=0, w=3840, h=1080)], {"clip": True}, "centre"),
+        ([_image_item(0, x=2960, y=0, w=2000, h=800)], {}, "centre"),
+        ([_image_item(0, x=2960, y=0, w=1990, h=800)], {}, "right"),
+        (
+            [_image_item(0, x=1500, y=0, w=500, h=500), _image_item(1, x=2000, y=0, w=500, h=500),
+             _movie_item(2, x=1920, y=0, w=3840, h=1080)],
+            {"clip": True}, "centre",
+        ),
+        (
+            [_group_item(0, x=1920, y=0, w=2600, h=1000)],
+            {"slide_fields": {
+                "groupChildSignature": {0: "image:photo.jpg\ntext:a wide caption strip"},
+                "groupChildren": {0: [{"kind": "image", "kindIndex": 0, "x": 1920.0, "y": 0.0, "w": 1000.0, "h": 1000.0}]},
+            }},
+            "centre",
+        ),
+        (
+            [_image_item(0, x=1954, y=27, w=1381, h=921), _image_item(1, x=0, y=0, w=1920, h=1080),
+             _image_item(2, x=5760, y=0, w=1920, h=1080)],
+            {"keep_side": True}, "right",
+        ),
+        ([_image_item(0, x=1920, y=0, w=1912, h=1080), _image_item(1, x=3832, y=0, w=1912, h=1080)], {}, "centre"),
+        ([_SQUARISH, _text_item(0, x=2000, y=900, w=400, h=100)], {}, "right"),
+        (
+            [_image_item(0, x=1954, y=27, w=1381, h=921), _group_item(0, x=4702, y=15, w=645, h=92)],
+            {"slide_fields": {"groupChildSignature": {0: "text:Matthew 18 19 Again, truly I tell you"}}},
+            "right",
+        ),
+        (
+            [_image_item(0, x=1954, y=27, w=1381, h=921), _group_item(0, x=4702, y=15, w=645, h=92)],
+            {"slide_fields": _PHOTO_CAPTION_GROUP}, "centre",
+        ),
+        (
+            [_group_item(0, x=4702, y=15, w=645, h=92)],
+            {"slide_fields": {"groupChildSignature": {
+                0: "shape:scalarPathSource:kTSDRoundedRectangle:525.9x98.4\ntext:Elohim (plural)"
+            }}},
+            "centre",
+        ),
+        ([_image_item(0, x=1000, y=0, w=3000, h=1000)], {"keep_side": True}, "right"),
+        ([_rotated(_image_item(0, x=1920, y=300, w=400, h=1000), 90)], {}, "centre"),
+        ([_group_item(0, x=4702, y=15, w=645, h=92)], {"slide_fields": {"groupChildSignature": {}}}, "centre"),
+        ([_SQUARISH], {"no_auto_anchor": True}, "centre"),
+        ([_image_item(0, x=1954, y=27, w=0, h=921)], {}, "centre"),
+        (
+            [_image_item(0, x=1954, y=27, w=1381, h=921), _image_item(1, x=4702, y=15, w=0, h=92),
+             _image_item(2, x=4702, y=200, w=645, h=0)],
+            {}, "right",
+        ),
+    ],
+    ids=[
+        "two-squarish-right", "three-squarish-centre", "lw-item-among-squarish-centre", "lw-aspect-2.5-centres",
+        "lw-aspect-2.49-does-not-centre", "three-items-one-lw-centre", "group-bbox-widened-by-caption-centres",
+        "gw8-side-panels-kept-do-not-count", "gw16-diptych-union-centres", "text-items-do-not-count",
+        "gw5-text-only-group-does-not-count", "group-with-media-child-counts", "gw7-shape-plus-text-badge-is-zero-content",
+        "keep-side-anchor-clips-to-centre-panel", "rotated-image-uses-transformed-aabb", "lone-unresolved-group-centre",
+        "no-auto-anchor-forces-centre", "lone-zero-area-item-centre", "degenerate-media-count-by-positive-area-only",
+    ],
+)
+def test_auto_anchor_from_kept_content_shape(items, options, anchor):
+    """Codex placement reviews 1-4: the union (not count) of positive-area content rects,
+    clipped to the centre panel even with keep_side, measured by transformed AABB; text,
+    text-only/shape badge groups, side panels and unresolved groups never count."""
+    assert _auto_anchor_plan(items, **options).anchors[1] == anchor
+
+
 def test_single_content_item_right_aligned():
     slide = _slide(48, [_image_item(2, x=1954, y=27, w=1381, h=921)])
     payload = _payload([slide])
@@ -8180,15 +7504,6 @@ def test_single_content_item_right_aligned():
     assert plan.anchors[48] == "right"
 
 
-def test_two_squarish_items_right_aligned():
-    slide = _slide(24, [_image_item(0, x=1943, y=-14, w=504, h=1080), _image_item(1, x=3200, y=-14, w=504, h=1080)])
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {24: SlideDecision(24, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.anchors[24] == "right"
-
-
 def test_lw_dimension_item_centred():
     slide = _slide(32, [_movie_item(0, x=1920, y=0, w=3840, h=1080)])
     payload = _payload([slide])
@@ -8198,108 +7513,6 @@ def test_lw_dimension_item_centred():
     assert plan.anchors[32] == "centre"
     rect = plan.fits[32][("movie", 0)]
     assert rect.x + rect.w / 2.0 == pytest.approx((BAND.x_min + BAND.x_max) / 2.0)
-
-
-def test_three_squarish_items_centred():
-    slide = _slide(3, [
-        _image_item(0, x=1500, y=0, w=500, h=500),
-        _image_item(1, x=2000, y=0, w=500, h=500),
-        _image_item(2, x=2500, y=0, w=500, h=500),
-    ])
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {3: SlideDecision(3, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.anchors[3] == "centre"
-
-
-def test_lw_item_among_squarish_centres():
-    slide = _slide(4, [
-        _image_item(0, x=1500, y=0, w=500, h=500),
-        _movie_item(1, x=1920, y=0, w=3840, h=1080),
-    ])
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {4: SlideDecision(4, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={4: Path("/tmp/clip.mov")})
-    assert plan.anchors[4] == "centre"
-
-
-def test_lw_aspect_boundary_2_5_centres():
-    slide = _slide(40, [_image_item(0, x=2960, y=0, w=2000, h=800)])
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {40: SlideDecision(40, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.anchors[40] == "centre"
-
-
-def test_lw_aspect_boundary_2_49_does_not_centre():
-    slide = _slide(41, [_image_item(0, x=2960, y=0, w=1990, h=800)])
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {41: SlideDecision(41, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.anchors[41] == "right"
-
-
-def test_three_items_with_one_lw_still_centred():
-    slide = _slide(42, [
-        _image_item(0, x=1500, y=0, w=500, h=500),
-        _image_item(1, x=2000, y=0, w=500, h=500),
-        _movie_item(2, x=1920, y=0, w=3840, h=1080),
-    ])
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {42: SlideDecision(42, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={42: Path("/tmp/clip.mov")})
-    assert plan.anchors[42] == "centre"
-
-
-def test_mixed_group_bbox_with_caption_centres():
-    # A squarish photo (aspect 1.0) whose group bbox is widened by a caption strip to
-    # an LW-dimension rect (w/h >= 2.5) centres on the strength of the group bbox, not
-    # the media leaf alone (D3: "its measured rect is the group bbox, caption included").
-    group = _group_item(0, x=1920, y=0, w=2600, h=1000)
-    slide = _slide(43, [group])
-    slide["groupChildSignature"] = {0: "image:photo.jpg\ntext:a wide caption strip"}
-    slide["groupChildren"] = {
-        0: [{"kind": "image", "kindIndex": 0, "x": 1920.0, "y": 0.0, "w": 1000.0, "h": 1000.0}]
-    }
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {43: SlideDecision(43, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.anchors[43] == "centre"
-
-
-def test_side_panel_item_excluded_from_placement_with_include_side():
-    # GW 8 shaped: one centre item plus two kept side-panel images -- with
-    # --include-side, the side pair must not push the anchor to centre or otherwise
-    # change it purely because they were kept rather than dropped.
-    centre = _image_item(0, x=1954, y=27, w=1381, h=921)
-    side_l = _image_item(1, x=0, y=0, w=1920, h=1080)
-    side_r = _image_item(2, x=5760, y=0, w=1920, h=1080)
-    slide = _slide(44, [centre, side_l, side_r])
-    payload = _payload([slide])
-    classes = [_classify(slide, include_side=True)]
-    decisions = {44: SlideDecision(44, "in_deck", anchor="auto", keep_side=True)}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.anchors[44] == "right"
-
-
-def test_union_of_two_halves_diptych_centres():
-    # GW 16 shape: two 1912x1080 halves side by side, each clipped aspect ~1.77 (below
-    # 2.5), but their union is 3824x1080 (aspect ~3.55, LW-dimension) -- the union fix
-    # (opus review 1, finding 1) centres this instead of right-flushing a two-up.
-    left = _image_item(0, x=1920, y=0, w=1912, h=1080)
-    right = _image_item(1, x=3832, y=0, w=1912, h=1080)
-    slide = _slide(45, [left, right])
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {45: SlideDecision(45, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.anchors[45] == "centre"
 
 
 def test_text_and_picture_slide_stacks_full_band_width():
@@ -8395,86 +7608,6 @@ def test_magic_move_chain_anchor_survives_excluded_middle_slide():
     assert plan.anchors[11] == "right"
     assert plan.chain_head[13] == 11
     assert plan.anchors[13] == "right"
-
-
-def test_text_items_do_not_count_towards_placement():
-    slide = _slide(48, [_image_item(2, x=1954, y=27, w=1381, h=921), _text_item(0, x=2000, y=900, w=400, h=100)])
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {48: SlideDecision(48, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.anchors[48] == "right"
-
-
-def test_text_only_group_does_not_count_towards_placement():
-    # GW 5 shaped: image0 + a text-only badge group0 -- one content item, so "right".
-    image = _image_item(0, x=1954, y=27, w=1381, h=921)
-    badge = _group_item(0, x=4702, y=15, w=645, h=92)
-    slide = _slide(5, [image, badge])
-    slide["groupChildSignature"] = {0: "text:Matthew 18 19 Again, truly I tell you"}
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {5: SlideDecision(5, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.anchors[5] == "right"
-
-
-def test_group_with_media_child_counts_towards_placement():
-    image = _image_item(0, x=1954, y=27, w=1381, h=921)
-    group = _group_item(0, x=4702, y=15, w=645, h=92)
-    slide = _slide(6, [image, group])
-    slide["groupChildSignature"] = {0: "image:photo.jpg\ntext:caption"}
-    slide["groupChildren"] = {
-        0: [{"kind": "image", "kindIndex": 0, "x": 4702.0, "y": 15.0, "w": 645.0, "h": 92.0}]
-    }
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {6: SlideDecision(6, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.anchors[6] == "centre"
-
-
-def test_group_shape_plus_text_badge_does_not_count_towards_placement():
-    # GW 7/37 shaped: a rounded-rect badge behind text, no image leaf anywhere on the
-    # slide -- zero content, so centre (not right, which the shape: leaf used to force).
-    badge = _group_item(0, x=4702, y=15, w=645, h=92)
-    slide = _slide(7, [badge])
-    slide["groupChildSignature"] = {0: "shape:scalarPathSource:kTSDRoundedRectangle:525.9x98.4\ntext:Elohim (plural)"}
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {7: SlideDecision(7, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.anchors[7] == "centre"
-
-
-def test_keep_side_content_anchor_clips_to_centre_panel():
-    # A 3000x1000 item at x=1000 straddles the LW centre-panel boundary (panel is
-    # [1920, 5760]). Even with keep_side=True, the anchor must clip against the
-    # centre panel (2080x1000, aspect < 2.5), not the full wall (aspect 3.0) --
-    # codex review 1, finding 1.
-    item = _image_item(0, x=1000, y=0, w=3000, h=1000)
-    slide = _slide(49, [item])
-    payload = _payload([slide])
-    classes = [_classify(slide, include_side=True)]
-    decisions = {49: SlideDecision(49, "in_deck", anchor="auto", keep_side=True)}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.anchors[49] == "right"
-
-
-def test_rotated_image_anchor_uses_transformed_aabb():
-    # Production payload semantics (codex placement review 4): x/y is already the rotated
-    # frame's AABB top-left, w/h is its UNROTATED size. A raw 400x1000 frame at (2220,0)
-    # rotated 90 degrees has exact AABB (1920,300,1000,400) -- payload carries that AABB
-    # top-left with the original 400x1000 size. Aspect 1000/400=2.5 is LW-dimension; the
-    # old (unrotated-origin) reading would re-rotate the AABB point and miss the panel.
-    item = _image_item(0, x=1920, y=300, w=400, h=1000)
-    item["rotation"] = 90
-    slide = _slide(50, [item])
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {50: SlideDecision(50, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.anchors[50] == "centre"
 
 
 def test_content_item_aabb_rotated_group_extent_is_still_correct():
@@ -8668,54 +7801,6 @@ def test_group_has_media_missing_none_empty_signature():
     # codex review 1, finding 2: missing mapping entry, None, and "" are not content.
     assert dsa._group_has_media(None) is False
     assert dsa._group_has_media("") is False
-
-
-def test_lone_unresolved_group_defaults_to_centre():
-    # A single group with no signature entry at all (mapping miss) has zero proven
-    # content, so the zero-content default of "centre" applies, not "right".
-    group = _group_item(0, x=4702, y=15, w=645, h=92)
-    slide = _slide(50, [group])
-    slide["groupChildSignature"] = {}
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {50: SlideDecision(50, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.anchors[50] == "centre"
-
-
-def test_no_auto_anchor_flag_forces_centre():
-    slide = _slide(48, [_image_item(2, x=1954, y=27, w=1381, h=921)])
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {48: SlideDecision(48, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, no_auto_anchor=True)
-    assert plan.anchors[48] == "centre"
-
-
-def test_lone_zero_area_item_defaults_to_centre():
-    # codex review 2, finding 1: a single zero-width item is proven content_ids-wise
-    # but has no positive-area rect, so the zero-content default of "centre" applies.
-    item = _image_item(0, x=1954, y=27, w=0, h=921)
-    slide = _slide(51, [item])
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {51: SlideDecision(51, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.anchors[51] == "centre"
-
-
-def test_valid_item_plus_degenerate_media_counts_by_positive_area_only():
-    # codex review 2, finding 1: two zero-area media items must not push the count
-    # to 3+; only the one squarish positive-area rect counts, so anchor is "right".
-    valid = _image_item(0, x=1954, y=27, w=1381, h=921)
-    degenerate_a = _image_item(1, x=4702, y=15, w=0, h=92)
-    degenerate_b = _image_item(2, x=4702, y=200, w=645, h=0)
-    slide = _slide(52, [valid, degenerate_a, degenerate_b])
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {52: SlideDecision(52, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.anchors[52] == "right"
 
 
 # --------------------------------------------------------------------------
@@ -12337,16 +11422,19 @@ def test_assemble_dsk_deck_calls_style_pass_after_pill_pass(tmp_path, monkeypatc
     assert result.path == out_path
 
 
-def test_assemble_dsk_deck_no_style_skips_pass(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "flag, post_pass", [("no_style", "_write_style_pass"), ("no_pills", "_write_pill_pass")], ids=["no-style", "no-pills"]
+)
+def test_assemble_dsk_deck_opt_out_skips_its_post_pass(tmp_path, monkeypatch, flag, post_pass):
     fw_deck, out_path, payload, classes, decisions, clips = _assemble_fixture(tmp_path)
     _patch_common(monkeypatch, payload, classes, "OBED\t13\tdone\nOBED\t32\tdone")
 
-    def fake_write_style_pass(*_args, **_kwargs):
-        raise AssertionError("must not be called with no_style=True")
+    def fake_post_pass(*_args, **_kwargs):
+        raise AssertionError(f"must not be called with {flag}=True")
 
-    monkeypatch.setattr(dsa, "_write_style_pass", fake_write_style_pass)
+    monkeypatch.setattr(dsa, post_pass, fake_post_pass)
     result = assemble_dsk_deck(
-        fw_deck, out_path, decisions=decisions, clips=clips, layout_policy="preserve", no_style=True,
+        fw_deck, out_path, decisions=decisions, clips=clips, layout_policy="preserve", **{flag: True},
     )
     assert result.path == out_path
 
@@ -12365,40 +11453,6 @@ def test_style_write_refusal_becomes_assembly_refusal(tmp_path, monkeypatch):
     monkeypatch.setattr(dsa, "write_styles", fake_write_styles)
     with pytest.raises(AssemblyRefusal, match="style write refused"):
         assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips=clips, layout_policy="preserve")
-
-
-def test_cli_dsk_assemble_no_style_flag(tmp_path, monkeypatch):
-    from obed_edom import cli
-
-    source = tmp_path / "src.key"
-    source.mkdir()
-    monkeypatch.setattr(
-        "obed_edom.offline_inspect.offline_wall_payload",
-        lambda path, deck=None: {"slideWidth": 7680.0, "slideHeight": 1080.0, "slideCount": 100, "slides": []},
-    )
-    captured: dict = {}
-
-    def fake_assemble_dsk_deck(
-        src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, import_layout_names, stroke_min_refs,
-        text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
-        no_image_crop=False, no_auto_anchor=False, no_dedupe=False, no_drop_panel_backdrop=False,
-        split_overrides=None, rss_limit_bytes=None, no_pills=False, no_style=False, content_only=False,
-        **_kwargs,
-    ):
-        captured["no_style"] = no_style
-        return AssembleResult(
-            path=out, slides_kept=(13,), ordinals={13: 1}, fits={}, clips_inserted={}, stroke={}, zorder={},
-            builds={}, size_bytes=1, source_size_bytes=1, wall_s=0.1, warnings=(), movie_props={},
-        )
-
-    monkeypatch.setattr("obed_edom.dsk_assemble.assemble_dsk_deck", fake_assemble_dsk_deck)
-
-    rc = cli.main(
-        ["dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), "--slides", "13", "--no-style"]
-    )
-
-    assert rc == 0
-    assert captured["no_style"] is True
 
 
 # --------------------------------------------------------------------------- L4 pill wiring
@@ -12538,20 +11592,6 @@ def test_assemble_dsk_deck_calls_pill_pass(tmp_path, monkeypatch):
     monkeypatch.setattr(dsa, "_write_pill_pass", fake_write_pill_pass)
     result = assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips=clips, layout_policy="preserve")
     assert captured["plan"] is not None
-    assert result.path == out_path
-
-
-def test_assemble_dsk_deck_no_pills_skips_pass(tmp_path, monkeypatch):
-    fw_deck, out_path, payload, classes, decisions, clips = _assemble_fixture(tmp_path)
-    _patch_common(monkeypatch, payload, classes, "OBED\t13\tdone\nOBED\t32\tdone")
-
-    def fake_write_pill_pass(*_args, **_kwargs):
-        raise AssertionError("must not be called with no_pills=True")
-
-    monkeypatch.setattr(dsa, "_write_pill_pass", fake_write_pill_pass)
-    result = assemble_dsk_deck(
-        fw_deck, out_path, decisions=decisions, clips=clips, layout_policy="preserve", no_pills=True,
-    )
     assert result.path == out_path
 
 

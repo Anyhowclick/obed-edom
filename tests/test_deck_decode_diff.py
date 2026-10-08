@@ -239,27 +239,6 @@ def test_null_consistent_identifier_renumbering(base, tmp_path):
     assert report["diffs"] == []
 
 
-def test_null_random_seed_and_save_token_changes(base, tmp_path):
-    def edit(spec):
-        build = _obj(spec, "Index/Slide-101.iwa", 500)
-        build["attributes"]["animationAttributes"]["randomNumberSeed"] = 424242
-        _metadata(spec)["saveToken"] = "99"
-        _metadata(spec)["lastObjectIdentifier"] = "2000"
-
-    report = ddd.run(base, _variant(tmp_path, "reseeded", edit))
-    assert report["diffs"] == []
-
-
-def test_null_uuid_values_ignored(base, tmp_path):
-    def edit(spec):
-        for comp in _metadata(spec)["components"]:
-            for entry in comp["objectUuidMapEntries"]:
-                entry["uuid"] = {"lower": "123", "upper": "456"}
-
-    report = ddd.run(base, _variant(tmp_path, "uuids", edit))
-    assert report["diffs"] == []
-
-
 # --------------------------------------------------------------------------
 # Positive controls.
 # --------------------------------------------------------------------------
@@ -357,14 +336,6 @@ def test_removed_drawable_reports_only_its_slide_lists_header_and_archive(base, 
     assert len(removed["a"]) == 1 and removed["b"] == []
 
 
-def test_slide_archive_change_does_not_cascade_to_parent_refs(base, tmp_path):
-    def edit(spec):
-        _obj(spec, "Index/Slide-102.iwa", 102)["name"] = "renamed"
-
-    report = ddd.run(base, _variant(tmp_path, "renamed", edit))
-    assert _keys(report) == ["slide:2:KN.SlideArchive.name"]
-
-
 def test_parent_ref_to_another_slide_reported(base, tmp_path):
     def edit(spec):
         _obj(spec, "Index/Slide-102.iwa", 400)["super"]["super"]["parent"] = {"identifier": 101}
@@ -454,14 +425,6 @@ def test_metadata_data_reference_removal_reported(base, tmp_path):
     assert count == 1
 
 
-def test_metadata_data_reference_retargeted_reported(base, tmp_path):
-    def edit(spec):
-        _component(spec, "Slide-101")["dataReferences"][0]["objectReferenceList"][0]["objectIdentifier"] = 300
-
-    report = ddd.run(base, _variant(tmp_path, "retarget", edit))
-    assert _keys(report) == ["metadata:Slide-101:dataReferences"]
-
-
 def test_metadata_external_reference_change_reported(base, tmp_path):
     def edit(spec):
         _component(spec, "Slide-101")["externalReferences"][0]["isWeak"] = True
@@ -480,16 +443,6 @@ def test_metadata_external_reference_to_missing_object_is_dangling(base, tmp_pat
     report = ddd.run(base, _variant(tmp_path, "extdangling", edit))
     [entry] = report["diffs"]
     assert entry["b"][0][1] == ddd.DANGLING
-
-
-def test_metadata_uuid_entry_and_feature_info_changes_reported(base, tmp_path):
-    def edit(spec):
-        comp = _component(spec, "Slide-102")
-        comp["objectUuidMapEntries"] = comp["objectUuidMapEntries"][:-1]
-        comp["featureInfos"] = [{"identifier": "TSDMovieInfoPlaysAcrossSlides"}]
-
-    report = ddd.run(base, _variant(tmp_path, "uuidcount", edit))
-    assert _keys(report) == ["metadata:Slide-102:featureInfos", "metadata:Slide-102:objectUuidMapEntries"]
 
 
 def test_changed_data_digest_reaches_the_referencing_slide(base, tmp_path):
@@ -520,14 +473,6 @@ def test_dropped_data_silenced_by_allow(base, tmp_path):
     assert len(report["diffs"]) == 2
     assert report["unallowed"] == 0
     assert all(d["allowed"] for d in report["diffs"])
-
-
-def test_non_iwa_member_content_change_reported(base, tmp_path):
-    def edit(spec):
-        spec["files"]["preview.jpg"] = b"\xff\xd8other"
-
-    report = ddd.run(base, _variant(tmp_path, "preview", edit))
-    assert _keys(report) == ["zip:preview.jpg"]
 
 
 def test_non_slide_member_change_reported_by_member(base, tmp_path):
@@ -677,29 +622,11 @@ def test_dangling_versioned_ref_reported(tmp_path, setter, key):
     assert ddd.DANGLING not in repr(entry["a"])
 
 
-def test_versioned_component_presence_reported(base, tmp_path):
-    report = ddd.run(base, _variant(tmp_path, "v", lambda spec: _metadata(spec).update(
-        versionedComponents=[_versioned_component(401)])))
-    assert _keys(report) == ["metadata:versioned:Slide-102-v1"]
-
-
 # --------------------------------------------------------------------------
 # Non-projected PackageMetadata fields, with METADATA_CHURN removed.
 # --------------------------------------------------------------------------
 def test_metadata_churn_constant():
     assert ddd.METADATA_CHURN == {"saveToken", "revision", "lastObjectIdentifier"}
-
-
-def test_null_metadata_churn_only(base, tmp_path):
-    def edit(spec):
-        meta = _metadata(spec)
-        meta["saveToken"] = "77"
-        meta["revision"] = {"sequence32": 9, "identifier": "rev-b"}
-        meta["lastObjectIdentifier"] = "5000"
-        for comp in meta["components"]:
-            comp["saveToken"] = "3"
-
-    assert ddd.run(base, _variant(tmp_path, "churn", edit))["diffs"] == []
 
 
 def test_data_metadata_map_retarget_reported(base, tmp_path):
@@ -711,45 +638,6 @@ def test_data_metadata_map_retarget_reported(base, tmp_path):
     assert entry["key"] == "metadata:package.dataMetadataMap"
     assert entry["a"].startswith("TSP.DataMetadataMap#")
     assert entry["b"] == ddd.DANGLING
-
-
-def test_data_metadata_map_dropped_reported(base, tmp_path):
-    def edit(spec):
-        del _metadata(spec)["dataMetadataMap"]
-
-    report = ddd.run(base, _variant(tmp_path, "nodmm", edit))
-    assert _keys(report) == ["metadata:package.dataMetadataMap"]
-
-
-def test_package_scalar_field_change_reported(base, tmp_path):
-    def edit(spec):
-        _metadata(spec)["fileFormatVersion"] = [14, 5, 0]
-
-    report = ddd.run(base, _variant(tmp_path, "ffv", edit))
-    assert _keys(report) == ["metadata:package.fileFormatVersion"]
-
-
-def test_component_non_projected_field_change_reported(base, tmp_path):
-    def edit(spec):
-        _component(spec, "Slide-102")["canBeDropped"] = True
-
-    report = ddd.run(base, _variant(tmp_path, "drop", edit))
-    assert _keys(report) == ["metadata:Slide-102:fields"]
-
-
-def test_datas_non_projected_field_change_reported(base, tmp_path):
-    def edit(spec):
-        _metadata(spec)["datas"][1]["canDownload"] = True
-
-    report = ddd.run(base, _variant(tmp_path, "dl", edit))
-    assert _keys(report) == ["datas:orphan.png"]
-
-
-def test_datas_file_name_id_suffix_ignored(base, tmp_path):
-    def edit(spec):
-        _metadata(spec)["datas"][1]["fileName"] = "orphan-8888.png"
-
-    assert ddd.run(base, _variant(tmp_path, "fn", edit))["diffs"] == []
 
 
 # --------------------------------------------------------------------------
@@ -885,14 +773,6 @@ def test_duplicate_template_names_fall_back_to_member(tmp_path):
     assert deck.labels["7200"] == "KN.SlideArchive@Index/TemplateSlide-7200.iwa"
 
 
-def test_null_builds_list_order(base, tmp_path):
-    def edit(spec):
-        slide = _obj(spec, "Index/Slide-101.iwa", 101)
-        slide["builds"] = list(reversed(slide["builds"]))
-
-    assert ddd.run(base, _variant(tmp_path, "reordered", edit))["diffs"] == []
-
-
 def test_changed_build_set_reported(base, tmp_path):
     def edit(spec):
         _obj(spec, "Index/Slide-101.iwa", 101)["builds"] = [{"identifier": 500}, {"identifier": 500}]
@@ -947,8 +827,112 @@ def test_changed_thumbnail_content_reported(tmp_path):
     assert _keys(ddd.run(one, two)) == ["datas:st-<uuid>.jpg", "zip:Data/st-<uuid>.jpg"]
 
 
-def test_non_thumbnail_names_still_compared_by_name(base, tmp_path):
-    def edit(spec):
-        _metadata(spec)["datas"][1]["preferredFileName"] = "renamed.png"
+# --------------------------------------------------------------------------
+# One edit against the base deck: per-run noise compares green, every other
+# edit reports exactly its own keys.
+# --------------------------------------------------------------------------
+def _reseed_and_new_save_token(spec):
+    build = _obj(spec, "Index/Slide-101.iwa", 500)
+    build["attributes"]["animationAttributes"]["randomNumberSeed"] = 424242
+    _metadata(spec)["saveToken"] = "99"
+    _metadata(spec)["lastObjectIdentifier"] = "2000"
 
-    assert _keys(ddd.run(base, _variant(tmp_path, "renamed", edit))) == ["datas:orphan.png", "datas:renamed.png"]
+
+def _new_uuid_values(spec):
+    for comp in _metadata(spec)["components"]:
+        for entry in comp["objectUuidMapEntries"]:
+            entry["uuid"] = {"lower": "123", "upper": "456"}
+
+
+def _metadata_churn(spec):
+    meta = _metadata(spec)
+    meta["saveToken"] = "77"
+    meta["revision"] = {"sequence32": 9, "identifier": "rev-b"}
+    meta["lastObjectIdentifier"] = "5000"
+    for comp in meta["components"]:
+        comp["saveToken"] = "3"
+
+
+def _datas_file_name_id_suffix(spec):
+    _metadata(spec)["datas"][1]["fileName"] = "orphan-8888.png"
+
+
+def _reversed_builds(spec):
+    slide = _obj(spec, "Index/Slide-101.iwa", 101)
+    slide["builds"] = list(reversed(slide["builds"]))
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [_reseed_and_new_save_token, _new_uuid_values, _metadata_churn, _datas_file_name_id_suffix, _reversed_builds],
+    ids=["random-seed-and-save-token", "uuid-values", "metadata-churn-only", "datas-file-name-id-suffix", "builds-list-order"],
+)
+def test_null_edit_compares_green(base, tmp_path, edit):
+    assert ddd.run(base, _variant(tmp_path, "edited", edit))["diffs"] == []
+
+
+def _rename_slide_archive(spec):
+    _obj(spec, "Index/Slide-102.iwa", 102)["name"] = "renamed"
+
+
+def _retarget_metadata_data_reference(spec):
+    _component(spec, "Slide-101")["dataReferences"][0]["objectReferenceList"][0]["objectIdentifier"] = 300
+
+
+def _drop_uuid_entry_add_feature_info(spec):
+    comp = _component(spec, "Slide-102")
+    comp["objectUuidMapEntries"] = comp["objectUuidMapEntries"][:-1]
+    comp["featureInfos"] = [{"identifier": "TSDMovieInfoPlaysAcrossSlides"}]
+
+
+def _change_preview_jpg(spec):
+    spec["files"]["preview.jpg"] = b"\xff\xd8other"
+
+
+def _add_versioned_component(spec):
+    _metadata(spec)["versionedComponents"] = [_versioned_component(401)]
+
+
+def _drop_data_metadata_map(spec):
+    del _metadata(spec)["dataMetadataMap"]
+
+
+def _change_file_format_version(spec):
+    _metadata(spec)["fileFormatVersion"] = [14, 5, 0]
+
+
+def _change_component_can_be_dropped(spec):
+    _component(spec, "Slide-102")["canBeDropped"] = True
+
+
+def _change_datas_can_download(spec):
+    _metadata(spec)["datas"][1]["canDownload"] = True
+
+
+def _rename_datas_preferred_file_name(spec):
+    _metadata(spec)["datas"][1]["preferredFileName"] = "renamed.png"
+
+
+@pytest.mark.parametrize(
+    "edit, keys",
+    [
+        (_rename_slide_archive, ["slide:2:KN.SlideArchive.name"]),
+        (_retarget_metadata_data_reference, ["metadata:Slide-101:dataReferences"]),
+        (_drop_uuid_entry_add_feature_info, ["metadata:Slide-102:featureInfos", "metadata:Slide-102:objectUuidMapEntries"]),
+        (_change_preview_jpg, ["zip:preview.jpg"]),
+        (_add_versioned_component, ["metadata:versioned:Slide-102-v1"]),
+        (_drop_data_metadata_map, ["metadata:package.dataMetadataMap"]),
+        (_change_file_format_version, ["metadata:package.fileFormatVersion"]),
+        (_change_component_can_be_dropped, ["metadata:Slide-102:fields"]),
+        (_change_datas_can_download, ["datas:orphan.png"]),
+        (_rename_datas_preferred_file_name, ["datas:orphan.png", "datas:renamed.png"]),
+    ],
+    ids=[
+        "slide-archive-change-does-not-cascade-to-parent-refs", "metadata-data-reference-retargeted",
+        "metadata-uuid-entry-and-feature-info", "non-iwa-member-content", "versioned-component-presence",
+        "data-metadata-map-dropped", "package-scalar-field", "component-non-projected-field",
+        "datas-non-projected-field", "non-thumbnail-names-compared-by-name",
+    ],
+)
+def test_edit_reports_exactly_its_keys(base, tmp_path, edit, keys):
+    assert _keys(ddd.run(base, _variant(tmp_path, "edited", edit))) == keys

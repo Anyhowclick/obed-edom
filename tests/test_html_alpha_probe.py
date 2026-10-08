@@ -1470,54 +1470,26 @@ def test_index_progression_accepts_real_slide3_counter():
     assert scored["nDecodable"] == 21 and scored["nDistinct"] == 21
 
 
-def test_index_progression_rejects_frozen_counter():
-    """A stuck poster (counter frozen) has a long stall run => fail closed."""
+@pytest.mark.parametrize(
+    "indices, reasons",
+    [
+        ([5, 5, 5, 5, 5, 5, 5, 5], ("stall run too long", "too few distinct indices")),
+        ([1, None, None, 4, None, None], ("insufficient decodable samples",)),
+        ([2, 6, 10, 200, 14, 18, 22, 26], ("implausible index jump (reset/occlusion)",)),
+        ([2, 6, 10, 14, 18, 22] + [None] * 16, ("sparse decodable coverage",)),
+        ([200, 14, 18, 22, 26, 30, 34, 38], ("implausible index jump (reset/occlusion)",)),
+    ],
+    ids=["frozen-counter", "insufficient-decodable", "backward-jump", "sparse-tail", "large-raw-drop-as-forward"],
+)
+def test_index_progression_fails_closed(indices, reasons):
+    """A frozen poster, a wrong/occluded ROI, a reset, a short good prefix then a lost
+    ROI (Codex flake-review F1), or a raw 200->14 read that is modular +70 but not a
+    plausible 1-4 capture step (F3) never pass."""
     from obed_edom.html_alpha_probe import score_index_progression
 
-    scored = score_index_progression([5, 5, 5, 5, 5, 5, 5, 5])
+    scored = score_index_progression(indices)
     assert scored["ok"] is False
-    assert scored["reason"] in ("stall run too long", "too few distinct indices")
-
-
-def test_index_progression_rejects_insufficient_decodable():
-    """A wrong/occluded ROI decodes few flat patches => fail closed, never a
-    false pass from absence of data."""
-    from obed_edom.html_alpha_probe import score_index_progression
-
-    scored = score_index_progression([1, None, None, 4, None, None])
-    assert scored["ok"] is False
-    assert scored["reason"] == "insufficient decodable samples"
-
-
-def test_index_progression_rejects_backward_jump():
-    """A drop beyond half the modulo (restart/glitch) within the window fails."""
-    from obed_edom.html_alpha_probe import score_index_progression
-
-    scored = score_index_progression([2, 6, 10, 200, 14, 18, 22, 26])
-    assert scored["ok"] is False
-    assert scored["reason"] == "implausible index jump (reset/occlusion)"
-
-
-def test_index_progression_rejects_sparse_tail():
-    """Advances briefly then loses the ROI for the rest of the window => fail
-    closed on coverage; None-drop must not let a short good prefix carry it
-    (Codex flake-review F1)."""
-    from obed_edom.html_alpha_probe import score_index_progression
-
-    scored = score_index_progression([2, 6, 10, 14, 18, 22] + [None] * 16)
-    assert scored["ok"] is False
-    assert scored["reason"] == "sparse decodable coverage"
-
-
-def test_index_progression_rejects_large_raw_drop_as_forward():
-    """A raw 200->14 read (modular +70) is not a plausible single-capture step
-    and must be rejected, not counted as forward progress (Codex flake-review F3);
-    real per-capture steps are 1-4."""
-    from obed_edom.html_alpha_probe import score_index_progression
-
-    scored = score_index_progression([200, 14, 18, 22, 26, 30, 34, 38])
-    assert scored["ok"] is False
-    assert scored["reason"] == "implausible index jump (reset/occlusion)"
+    assert scored["reason"] in reasons
 
 
 def test_index_progression_accepts_modulo_wraparound():
@@ -2431,6 +2403,12 @@ def _inpage_samples(
 NO_OCCLUSION_128 = [0] * 128
 
 
+def _with_sample(index, **fields):
+    samples = _inpage_samples()
+    samples[index].update(fields)
+    return samples
+
+
 class TestInPageLivenessScorer:
     def test_all_bands_moving_reads_live(self):
         from obed_edom.html_alpha_probe import score_inpage_liveness
@@ -2440,14 +2418,6 @@ class TestInPageLivenessScorer:
         assert scored["status"] == "live"
         assert scored["occludedBands"] == 0
         assert scored["judgedBands"] == 128
-
-    def test_one_non_occluded_static_band_reads_dead(self):
-        from obed_edom.html_alpha_probe import score_inpage_liveness
-
-        scored = score_inpage_liveness(_inpage_samples(static_bands=(5,)), occluder_mask=NO_OCCLUSION_128)
-        assert scored["verdict"] is False
-        assert scored["status"] == "dead"
-        assert scored["reason"] == "a judged band did not move"
 
     def test_that_same_band_marked_occluded_reads_live(self):
         from obed_edom.html_alpha_probe import score_inpage_liveness
@@ -2459,44 +2429,60 @@ class TestInPageLivenessScorer:
         assert scored["occludedBands"] == 1
         assert scored["judgedBands"] == 127
 
-    def test_a_moving_control_patch_is_inconclusive(self):
+    @pytest.mark.parametrize(
+        "samples, mask, verdict, status, reason",
+        [
+            (lambda: _inpage_samples(static_bands=(5,)), NO_OCCLUSION_128, False, "dead", "a judged band did not move"),
+            (lambda: _inpage_samples(green_amp=5.0), NO_OCCLUSION_128, False, "dead", "green patch moved"),
+            (
+                lambda: _inpage_samples(green_rgb=(100.0, 100.0, 100.0)), NO_OCCLUSION_128,
+                False, "dead", "green patch is not green",
+            ),
+            (lambda: _inpage_samples(gl_err=1), NO_OCCLUSION_128, False, "dead", "gl error"),
+            (lambda: _inpage_samples(control_amp=5.0), NO_OCCLUSION_128, None, "inconclusive", "control patch moved"),
+            (lambda: _inpage_samples(n=23), NO_OCCLUSION_128, None, "inconclusive", "too few samples"),
+            (
+                _inpage_samples, [1] * 65 + [0] * 63,
+                None, "inconclusive", "more than half the bands are occluded",
+            ),
+            (_inpage_samples, None, None, "inconclusive", "missing or malformed occluder mask"),
+            (_inpage_samples, [0] * 4, None, "inconclusive", "missing or malformed occluder mask"),
+            (_inpage_samples, [0] * 127 + [2], None, "inconclusive", "missing or malformed occluder mask"),
+            (
+                lambda: _with_sample(0, bands=[float("nan")] + [100.0] * 127), NO_OCCLUSION_128,
+                None, "inconclusive", "malformed samples",
+            ),
+            (lambda: _with_sample(3, control="not-a-number"), NO_OCCLUSION_128, None, "inconclusive", "malformed samples"),
+            (lambda: _with_sample(0, greenRGB=[10.0, 200.0]), NO_OCCLUSION_128, None, "inconclusive", "malformed samples"),
+            (
+                lambda: _with_sample(0, control="1" + "0" * 400), NO_OCCLUSION_128,
+                None, "inconclusive", "malformed samples",
+            ),
+            (lambda: {"not": "a list"}, NO_OCCLUSION_128, None, "inconclusive", "malformed samples"),
+            (
+                lambda: [dict(_inpage_samples(n=1)[0]) for _ in range(24)], NO_OCCLUSION_128,
+                None, "inconclusive", "duplicate or non-monotonic sample callbacks",
+            ),
+            (
+                lambda: _with_sample(-1, t=0), NO_OCCLUSION_128,
+                None, "inconclusive", "duplicate or non-monotonic sample callbacks",
+            ),
+        ],
+        ids=[
+            "one-non-occluded-static-band", "moving-green-patch", "green-patch-not-green", "non-zero-gl-error",
+            "moving-control-patch", "twenty-three-samples", "more-than-half-occluded", "missing-mask",
+            "mask-wrong-length", "mask-non-zero-one-value", "non-finite-band", "non-numeric-control",
+            "two-element-green-rgb", "overflowing-numeric-string", "non-sequence-samples",
+            "frozen-sample-repeated-24-times", "regressing-timestamp",
+        ],
+    )
+    def test_a_window_that_cannot_read_live(self, samples, mask, verdict, status, reason):
+        """Codex r1 Spec 4 (mask required), r2 Spec 5 (24 entries are not 24 distinct callbacks),
+        r2 Standards 1 (a non-sequence or overflowing value never raises)."""
         from obed_edom.html_alpha_probe import score_inpage_liveness
 
-        scored = score_inpage_liveness(_inpage_samples(control_amp=5.0), occluder_mask=NO_OCCLUSION_128)
-        assert scored["verdict"] is None
-        assert scored["status"] == "inconclusive"
-        assert scored["reason"] == "control patch moved"
-
-    def test_a_moving_green_patch_reads_dead(self):
-        from obed_edom.html_alpha_probe import score_inpage_liveness
-
-        scored = score_inpage_liveness(_inpage_samples(green_amp=5.0), occluder_mask=NO_OCCLUSION_128)
-        assert scored["verdict"] is False
-        assert scored["reason"] == "green patch moved"
-
-    def test_a_green_patch_that_is_not_green_reads_dead(self):
-        from obed_edom.html_alpha_probe import score_inpage_liveness
-
-        scored = score_inpage_liveness(
-            _inpage_samples(green_rgb=(100.0, 100.0, 100.0)), occluder_mask=NO_OCCLUSION_128
-        )
-        assert scored["verdict"] is False
-        assert scored["reason"] == "green patch is not green"
-
-    def test_twenty_three_samples_is_inconclusive(self):
-        from obed_edom.html_alpha_probe import score_inpage_liveness
-
-        scored = score_inpage_liveness(_inpage_samples(n=23), occluder_mask=NO_OCCLUSION_128)
-        assert scored["verdict"] is None
-        assert scored["status"] == "inconclusive"
-        assert scored["reason"] == "too few samples"
-
-    def test_a_non_zero_gl_error_reads_dead(self):
-        from obed_edom.html_alpha_probe import score_inpage_liveness
-
-        scored = score_inpage_liveness(_inpage_samples(gl_err=1), occluder_mask=NO_OCCLUSION_128)
-        assert scored["verdict"] is False
-        assert scored["reason"] == "gl error"
+        scored = score_inpage_liveness(samples(), occluder_mask=mask)
+        assert (scored["verdict"], scored["status"], scored["reason"]) == (verdict, status, reason)
 
     def test_a_missing_gl_error_field_is_inconclusive(self):
         """Codex r5: `glErr` is part of the contract; a sample without it (or with
@@ -2529,15 +2515,6 @@ class TestInPageLivenessScorer:
             assert result["verdict"] is None, n
             assert result["reason"] == "malformed samples"
 
-    def test_more_than_half_the_bands_occluded_is_inconclusive(self):
-        from obed_edom.html_alpha_probe import score_inpage_liveness
-
-        mask = [1] * 65 + [0] * 63
-        scored = score_inpage_liveness(_inpage_samples(), occluder_mask=mask)
-        assert scored["verdict"] is None
-        assert scored["status"] == "inconclusive"
-        assert scored["reason"] == "more than half the bands are occluded"
-
     def test_empty_samples_is_inconclusive(self):
         from obed_edom.html_alpha_probe import score_inpage_liveness
 
@@ -2555,63 +2532,6 @@ class TestInPageLivenessScorer:
         assert scored["vtSpan"] > 0
         assert scored["mediaTimeSpan"] > 0
         assert scored["verdict"] is False
-
-    def test_missing_occluder_mask_is_inconclusive(self):
-        """`occluder_mask` is required (Codex r1 Spec 4): a caller with no measured
-        mask must say so, never fall back to "nothing is occluded"."""
-        from obed_edom.html_alpha_probe import score_inpage_liveness
-
-        scored = score_inpage_liveness(_inpage_samples(), occluder_mask=None)
-        assert scored["verdict"] is None
-        assert scored["status"] == "inconclusive"
-        assert scored["reason"] == "missing or malformed occluder mask"
-
-    def test_a_mask_of_the_wrong_length_is_inconclusive(self):
-        from obed_edom.html_alpha_probe import score_inpage_liveness
-
-        scored = score_inpage_liveness(_inpage_samples(), occluder_mask=[0] * 4)
-        assert scored["verdict"] is None
-        assert scored["status"] == "inconclusive"
-        assert scored["reason"] == "missing or malformed occluder mask"
-
-    def test_a_mask_with_a_non_zero_one_value_is_inconclusive(self):
-        from obed_edom.html_alpha_probe import score_inpage_liveness
-
-        mask = [0] * 127 + [2]
-        scored = score_inpage_liveness(_inpage_samples(), occluder_mask=mask)
-        assert scored["verdict"] is None
-        assert scored["status"] == "inconclusive"
-        assert scored["reason"] == "missing or malformed occluder mask"
-
-    def test_a_non_finite_band_value_is_inconclusive_not_a_raise(self):
-        from obed_edom.html_alpha_probe import score_inpage_liveness
-
-        samples = _inpage_samples()
-        samples[0]["bands"][0] = float("nan")
-        scored = score_inpage_liveness(samples, occluder_mask=NO_OCCLUSION_128)
-        assert scored["verdict"] is None
-        assert scored["status"] == "inconclusive"
-        assert scored["reason"] == "malformed samples"
-
-    def test_a_non_numeric_control_value_is_inconclusive_not_a_raise(self):
-        from obed_edom.html_alpha_probe import score_inpage_liveness
-
-        samples = _inpage_samples()
-        samples[3]["control"] = "not-a-number"
-        scored = score_inpage_liveness(samples, occluder_mask=NO_OCCLUSION_128)
-        assert scored["verdict"] is None
-        assert scored["status"] == "inconclusive"
-        assert scored["reason"] == "malformed samples"
-
-    def test_a_two_element_green_rgb_is_inconclusive_not_a_raise(self):
-        from obed_edom.html_alpha_probe import score_inpage_liveness
-
-        samples = _inpage_samples()
-        samples[0]["greenRGB"] = [10.0, 200.0]
-        scored = score_inpage_liveness(samples, occluder_mask=NO_OCCLUSION_128)
-        assert scored["verdict"] is None
-        assert scored["status"] == "inconclusive"
-        assert scored["reason"] == "malformed samples"
 
     def test_occluder_mask_from_markers_flags_bands_that_do_not_move(self):
         from obed_edom.html_alpha_probe import occluder_mask_from_markers
@@ -2654,19 +2574,6 @@ class TestInPageLivenessScorer:
         assert result["mask"] is None
         assert result["reason"] == "non-finite marker delta"
 
-    def test_a_frozen_sample_repeated_twenty_four_times_is_inconclusive(self):
-        """Codex r2 Spec 5: the scorer requires 24 array entries, not 24
-        DISTINCT callbacks -- repeating one frozen sample must not "prove" a
-        window by inflating its length."""
-        from obed_edom.html_alpha_probe import score_inpage_liveness
-
-        frozen = _inpage_samples(n=1)[0]
-        samples = [dict(frozen) for _ in range(24)]
-        scored = score_inpage_liveness(samples, occluder_mask=NO_OCCLUSION_128)
-        assert scored["verdict"] is None
-        assert scored["status"] == "inconclusive"
-        assert scored["reason"] == "duplicate or non-monotonic sample callbacks"
-
     def test_constant_sampling_cost_still_reads_live(self):
         """Codex r3 Spec 2: `ms` is sampling COST, not a callback clock -- a
         realistic constant `ms=4.0` across every sample must not be treated
@@ -2684,34 +2591,6 @@ class TestInPageLivenessScorer:
             _inpage_samples(ms=lambda t: 3.0 + (t % 3)), occluder_mask=NO_OCCLUSION_128
         )
         assert scored["verdict"] is True
-
-    def test_a_regressing_timestamp_is_inconclusive(self):
-        from obed_edom.html_alpha_probe import score_inpage_liveness
-
-        samples = _inpage_samples()
-        samples[-1]["t"] = samples[0]["t"]
-        scored = score_inpage_liveness(samples, occluder_mask=NO_OCCLUSION_128)
-        assert scored["verdict"] is None
-        assert scored["reason"] == "duplicate or non-monotonic sample callbacks"
-
-    def test_a_non_sequence_samples_argument_is_inconclusive_not_a_raise(self):
-        """Codex r2 Standards 1: a truthy non-sequence `samples` (a dict here)
-        must not raise when indexed."""
-        from obed_edom.html_alpha_probe import score_inpage_liveness
-
-        scored = score_inpage_liveness({"not": "a list"}, occluder_mask=NO_OCCLUSION_128)
-        assert scored["verdict"] is None
-        assert scored["status"] == "inconclusive"
-
-    def test_an_overflowing_numeric_value_is_inconclusive_not_a_raise(self):
-        from obed_edom.html_alpha_probe import score_inpage_liveness
-
-        samples = _inpage_samples()
-        samples[0]["control"] = "1" + "0" * 400  # int() succeeds; float() overflows
-        scored = score_inpage_liveness(samples, occluder_mask=NO_OCCLUSION_128)
-        assert scored["verdict"] is None
-        assert scored["status"] == "inconclusive"
-        assert scored["reason"] == "malformed samples"
 
     def test_non_numeric_vt_does_not_raise_and_is_excluded_from_the_span(self):
         from obed_edom.html_alpha_probe import score_inpage_liveness
