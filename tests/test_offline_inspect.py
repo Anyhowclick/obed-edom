@@ -571,7 +571,10 @@ def _cached_payload(deck: Path):
         path = inspect_cache_path(deck_digest(deck))
     except Exception:  # pragma: no cover
         return None
-    return json.loads(path.read_text()) if path.is_file() else None
+    if not path.is_file():
+        return None
+    payload = json.loads(path.read_text())
+    return payload if payload.get("reader") == "jxa" else None
 
 
 def test_cached_payload_hashes_only_when_a_payload_for_this_keynote_exists(tmp_path, monkeypatch):
@@ -602,8 +605,11 @@ def test_cached_payload_hashes_only_when_a_payload_for_this_keynote_exists(tmp_p
     assert _cached_payload(deck) is None
     assert hashed == []
 
+    cached = baseline.inspect_cache_path(baseline.deck_digest(deck))
+    cached.write_text(json.dumps({"reader": "offline", "slides": []}))
+    assert _cached_payload(deck) is None
     payload = {"reader": "jxa", "slides": []}
-    baseline.inspect_cache_path(baseline.deck_digest(deck)).write_text(json.dumps(payload))
+    cached.write_text(json.dumps(payload))
     assert _cached_payload(deck) == payload
     assert len(hashed) == 1
     assert _cached_payload(tmp_path / "missing.key") is None
@@ -1232,9 +1238,9 @@ def test_data_member_names_decode_cleanly_on_the_full_deck():
                 assert "�" not in file_name
 
     banked_path = inspect_cache_path(BANKED_FULL_WALL_JXA_DIGEST)
-    if not banked_path.is_file():
+    jxa = json.loads(banked_path.read_text()) if banked_path.is_file() else {}
+    if jxa.get("reader") != "jxa":
         pytest.skip("no banked JXA payload for the Full wall in this cache")
-    jxa = json.loads(banked_path.read_text())
     assert deck_slide_digests(off) == deck_slide_digests(jxa)
 
 
