@@ -47,8 +47,16 @@ Dashboard tests (from `dashboard/`, with the bundled Node on `PATH`):
 files share one `tsc` build owned by `tests/helpers/compiled.cjs`, cached in
 `dashboard/node_modules/.cache/maps-tests/` and rebuilt whenever a `src/**/*.ts(x)`
 file or the helper changes. There is no CI: run
-these and the full `uv run pytest tests/ -n auto --dist loadfile` locally for every PR
-that changes code (drop `-n auto --dist loadfile` to debug a single test).
+these and the full `env -u PYTHONDONTWRITEBYTECODE uv run pytest tests/ -n auto --dist worksteal`
+locally for every PR that changes code (drop `-n auto --dist worksteal` to debug a single test).
+`env -u` matters when an agent harness sets `PYTHONDONTWRITEBYTECODE`: without the
+bytecode cache every xdist worker re-rewrites the asserts of all test modules (~14 s each).
+The exhaustive P2 absence sweeps in `test_p2_adversarial.py` cache their result in
+`.cache/test-sweeps/`, keyed on `src/obed_edom`, the test file, `conftest.py`, the freeze
+fixture, the interpreter and every installed distribution; a cold run costs ~80 s,
+coverage runs bypass it, and `OBED_TEST_SWEEP_CACHE=off` forces a recompute. In a fresh
+worktree, symlink the main checkout's `Sermon Outlines/*.docx` and `output/fixtures`
+(plus its compat links) or ~70 fixture-backed tests skip.
 
 Staff-only parse:
 
