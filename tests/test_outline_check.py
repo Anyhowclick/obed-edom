@@ -225,16 +225,14 @@ def test_an_unfinalised_wall_is_the_one_questioned():
     assert flags[0].deck == "lw"
 
 
-def test_decks_agreeing_against_a_finalised_wall_means_a_stale_script():
-    flags = corroborate(SCRIPT, CHANGED, CHANGED, lw_final=True)
-    assert [f.rule for f in flags] == ["outline.stale"]
-    assert flags[0].severity == "info"
-
-
-def test_decks_agreeing_before_sign_off_still_questions_them():
-    flags = corroborate(SCRIPT, CHANGED, CHANGED, lw_final=False)
-    assert [f.rule for f in flags] == ["outline.both_deviate"]
-    assert flags[0].severity == "warning"
+@pytest.mark.parametrize(("lw_final", "rule", "severity"), [
+    (True, "outline.stale", "info"),
+    (False, "outline.both_deviate", "warning"),
+], ids=["finalised-wall-means-a-stale-script", "before-sign-off-still-questions-them"])
+def test_decks_agreeing(lw_final, rule, severity):
+    flags = corroborate(SCRIPT, CHANGED, CHANGED, lw_final=lw_final)
+    assert [f.rule for f in flags] == [rule]
+    assert flags[0].severity == severity
 
 
 def test_three_way_disagreement_asks_for_a_human():

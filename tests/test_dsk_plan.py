@@ -1308,24 +1308,19 @@ def test_wrapped_height_missing_font_warns():
     assert wrapped_height("hello world", "NotARealFontXYZ", 40.0, 1849.0) is None
 
 
-def test_fit_heading_pt_two_lines_caps_at_block():
-    # Gold 29/39/41 (D1b): 61pt would push the two-line block to 141.2 > 140.
+@pytest.mark.parametrize(("text", "expected"), [
+    ("Praise and Worship", 60.0),
+    ("Faith", 80.0),
+], ids=["gold-29-39-41-two-lines-caps-at-block", "gold-30-34-one-line-caps-at-max-pt"])
+def test_fit_heading_pt_caps(text, expected):
+    # D1b: 61pt would push the two-line block to 141.2 > 140; for one line the block cap
+    # would allow 121pt, so MAX_HEADING_PT binds first.
     _require_font("ArgentCF-Bold")
     size = fit_heading_pt(
-        "Praise and Worship", "ArgentCF-Bold", 450.0, 300.0,
+        text, "ArgentCF-Bold", 450.0, 300.0,
         max_pt=80.0, max_block_pt=140.0, min_pt=24.0,
     )
-    assert size == pytest.approx(60.0)
-
-
-def test_fit_heading_pt_one_line_caps_at_max_pt():
-    # Gold 30/34 (D1b): the block cap would allow 121pt; MAX_HEADING_PT binds first.
-    _require_font("ArgentCF-Bold")
-    size = fit_heading_pt(
-        "Faith", "ArgentCF-Bold", 450.0, 300.0,
-        max_pt=80.0, max_block_pt=140.0, min_pt=24.0,
-    )
-    assert size == pytest.approx(80.0)
+    assert size == pytest.approx(expected)
 
 
 def test_fit_heading_pt_width_bound():
@@ -1434,24 +1429,17 @@ def test_fit_text_stack_all_runs_below_floor_refuses_to_shrink_further():
     assert result is None
 
 
-def test_wrapped_height_runs_charges_every_consecutive_separator():
+@pytest.mark.parametrize("text", [
+    "alpha  beta   gamma delta",
+    "alpha\u2009beta\u2009gamma\u2009delta",
+], ids=["finding5-consecutive-separators", "finding6-thin-space"])
+def test_wrapped_height_runs_matches_single_run_separators(text):
     # Opus D2b review 1 finding 5: pending_sep must not be overwritten by a later
     # separator in a run of consecutive break chars -- each one is charged, matching
     # wrapped_height's per-separator join.
+    # Finding 6: _wrap_lines must charge the actual break character (a thin space is
+    # far wider than ASCII) so both estimators agree.
     _require_font("AzoSans-Regular")
-    text = "alpha  beta   gamma delta"
-    single = wrapped_height(text, "AzoSans-Regular", 40.0, 200.0)
-    runs = (Run(text, "AzoSans-Regular", 40.0),)
-    via_runs = wrapped_height_runs(runs, 200.0)
-    assert single is not None and via_runs is not None
-    assert via_runs == pytest.approx(single)
-
-
-def test_wrapped_height_thin_space_separator_matches_runs():
-    # Opus D2b review 1 finding 6: _wrap_lines must charge the actual break character
-    # (a thin space is far wider than ASCII) so both estimators agree.
-    _require_font("AzoSans-Regular")
-    text = "alpha beta gamma delta"
     single = wrapped_height(text, "AzoSans-Regular", 40.0, 200.0)
     runs = (Run(text, "AzoSans-Regular", 40.0),)
     via_runs = wrapped_height_runs(runs, 200.0)
@@ -1497,19 +1485,12 @@ def test_wrapped_height_runs_equivalence_fuzz():
                 assert via_runs == pytest.approx(single, abs=1e-6)
 
 
-def test_wrap_line_spans_runs_uniform_size_matches_flat_wrap():
+@pytest.mark.parametrize("run_font", ["Helvetica", None], ids=["uniform-size", "font-name-none-inherits-lead-font"])
+def test_wrap_line_spans_runs_single_run_matches_flat_wrap(run_font):
     _require_font("Helvetica")
     text = "The quick brown fox jumps over the lazy dog and then keeps running far away"
     flat = wrap_line_spans(text, "Helvetica", 20.0, 300.0)
-    runs = (Run(text, "Helvetica", 20.0),)
-    assert wrap_line_spans_runs(text, runs, "Helvetica", 20.0, 300.0) == flat
-
-
-def test_wrap_line_spans_runs_font_name_none_inherits_lead_font():
-    _require_font("Helvetica")
-    text = "The quick brown fox jumps over the lazy dog and then keeps running far away"
-    flat = wrap_line_spans(text, "Helvetica", 20.0, 300.0)
-    runs = (Run(text, None, 20.0),)
+    runs = (Run(text, run_font, 20.0),)
     assert wrap_line_spans_runs(text, runs, "Helvetica", 20.0, 300.0) == flat
 
 
@@ -1726,7 +1707,9 @@ def test_crop_silent_on_zero_natural_size_when_no_crop_needed():
     assert crop_geometry(obj, objects, CENTRE_PANEL_RECT) is None
 
 
-def test_crop_falls_back_on_exif_orientation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mask", [(0, 808, 3840, 1472), (0, 2058.6, 3840, 50)],
+                         ids=["exif-orientation", "exif-before-min-window-refusal"])
+def test_crop_falls_back_on_exif_orientation(tmp_path, monkeypatch, mask):
     from PIL import Image
     import zipfile as _zipfile
 
@@ -1740,7 +1723,7 @@ def test_crop_falls_back_on_exif_orientation(tmp_path, monkeypatch):
     with _zipfile.ZipFile(key_path, "w") as zf:
         zf.write(buf_path, "Data/photo-1.jpg")
 
-    obj, extra = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(6000, 4000))
+    obj, extra = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=mask, natural=(6000, 4000))
     obj["data"] = {"identifier": "1"}
     objects = {"img": obj, **extra}
     monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
@@ -1752,59 +1735,8 @@ def test_crop_falls_back_on_exif_orientation(tmp_path, monkeypatch):
     assert any("EXIF" in w for w in warnings)
 
 
-def test_crop_falls_back_on_exif_before_min_window_refusal(tmp_path, monkeypatch):
-    from PIL import Image
-    import zipfile as _zipfile
-
-    img = Image.new("RGB", (6000, 4000), "red")
-    exif = Image.Exif()
-    exif[274] = 6
-    buf_path = tmp_path / "photo.jpg"
-    img.save(buf_path, exif=exif, quality=95)
-
-    key_path = tmp_path / "deck.key"
-    with _zipfile.ZipFile(key_path, "w") as zf:
-        zf.write(buf_path, "Data/photo-1.jpg")
-
-    obj, extra = _image_obj(
-        x=1920, y=-981.6, w=3840, h=2560, mask=(0, 2058.6, 3840, 50), natural=(6000, 4000)
-    )
-    obj["data"] = {"identifier": "1"}
-    objects = {"img": obj, **extra}
-    monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
-    item = {"kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "photo.jpg"}
-    crops, warnings, pending = plan_crops(
-        key_path, {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3,
-    )
-    assert crops == {}
-    assert any("EXIF" in w for w in warnings)
-
-
-def test_plan_crops_falls_back_on_rotated_item(tmp_path, monkeypatch):
-    from PIL import Image
-    import zipfile as _zipfile
-
-    img = Image.new("RGB", (6000, 4000), "red")
-    buf_path = tmp_path / "photo.jpg"
-    img.save(buf_path, quality=95)
-
-    key_path = tmp_path / "deck.key"
-    with _zipfile.ZipFile(key_path, "w") as zf:
-        zf.write(buf_path, "Data/photo.jpg")
-
-    obj, extra = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(6000, 4000))
-    obj["data"] = {"identifier": "1"}
-    objects = {"img": obj, **extra}
-    monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
-    item = {"kind": "image", "kindIndex": 0, "rotation": 5.0, "fileName": "photo.jpg"}
-    crops, warnings, pending = plan_crops(
-        key_path, {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3,
-    )
-    assert crops == {}
-    assert any("rotated" in w for w in warnings)
-
-
-def test_plan_crops_falls_back_on_rotated_frame(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("rotation", "angle"), [(5.0, 0.0), (0, 5.0)], ids=["rotated-item", "rotated-frame"])
+def test_plan_crops_falls_back_on_rotation(tmp_path, monkeypatch, rotation, angle):
     from PIL import Image
     import zipfile as _zipfile
 
@@ -1817,12 +1749,12 @@ def test_plan_crops_falls_back_on_rotated_frame(tmp_path, monkeypatch):
         zf.write(buf_path, "Data/photo.jpg")
 
     obj, extra = _image_obj(
-        x=1920, y=-981.6, w=3840, h=2560, angle=5.0, mask=(0, 808, 3840, 1472), natural=(6000, 4000)
+        x=1920, y=-981.6, w=3840, h=2560, angle=angle, mask=(0, 808, 3840, 1472), natural=(6000, 4000)
     )
     obj["data"] = {"identifier": "1"}
     objects = {"img": obj, **extra}
     monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
-    item = {"kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "photo.jpg"}
+    item = {"kind": "image", "kindIndex": 0, "rotation": rotation, "fileName": "photo.jpg"}
     crops, warnings, pending = plan_crops(
         key_path, {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3,
     )

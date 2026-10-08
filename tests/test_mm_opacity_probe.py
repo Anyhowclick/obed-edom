@@ -284,18 +284,11 @@ def test_mo1_passes_the_patched_run(gl):
     assert result["detail"]["slotDraws"] == MOVE_FRAMES
 
 
+@pytest.mark.parametrize("kb", ["off2", "sq"], ids=["kb-patch-off", "kb-alpha-squared"])
 @pytest.mark.parametrize("gl", ["off", "auto"])
-def test_mo1_kb_patch_off_fails(gl):
+def test_mo1_known_bad_fails(gl, kb):
     a = arms(gl)
-    result = probe.score_mo1(a["off2"], a["off"], ALPHA, tol_of(a))
-    assert result["verdict"] == "FAIL"
-    assert not result["checks"]["slotAlpha"] and not result["checks"]["settleBlend"]
-
-
-@pytest.mark.parametrize("gl", ["off", "auto"])
-def test_mo1_kb_alpha_squared_fails(gl):
-    a = arms(gl)
-    result = probe.score_mo1(a["sq"], a["off"], ALPHA, tol_of(a))
+    result = probe.score_mo1(a[kb], a["off"], ALPHA, tol_of(a))
     assert result["verdict"] == "FAIL"
     assert not result["checks"]["slotAlpha"] and not result["checks"]["settleBlend"]
 
@@ -429,18 +422,15 @@ def test_mo4_passes_the_patched_g2_facts():
     assert result["verdict"] == "PASS", result
 
 
-def test_mo4_kb_alpha_squared_fails_on_rest_and_live_green():
+@pytest.mark.parametrize(("kb", "checks"), [
+    ("sq", ("restSlotAlpha", "liveGreenEqual")),
+    ("off2", ("unprovenOn", "restSlotAlpha")),
+], ids=["kb-alpha-squared-fails-on-rest-and-live-green", "patch-off-run-fails-the-patched-expectations"])
+def test_mo4_known_bad_fails(kb, checks):
     a = arms("auto")
-    result = probe.score_mo4(a["sq"], a["off"])
+    result = probe.score_mo4(a[kb], a["off"])
     assert result["verdict"] == "FAIL"
-    assert not result["checks"]["restSlotAlpha"] and not result["checks"]["liveGreenEqual"]
-
-
-def test_mo4_patch_off_run_fails_the_patched_expectations():
-    a = arms("auto")
-    result = probe.score_mo4(a["off2"], a["off"])
-    assert result["verdict"] == "FAIL"
-    assert not result["checks"]["unprovenOn"] and not result["checks"]["restSlotAlpha"]
+    assert not any(result["checks"][c] for c in checks)
 
 
 @pytest.mark.parametrize("mutate, check", [

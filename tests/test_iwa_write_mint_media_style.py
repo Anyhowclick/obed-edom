@@ -45,19 +45,15 @@ def test_refuses_unknown_source_style(deck):
     assert deck.read_bytes() == before
 
 
-def test_refuses_wrong_archive_type(deck):
+@pytest.mark.parametrize(("source", "drawable", "needle"), [
+    ("300", "300", "TSD.MediaStyleArchive"),
+    ("900", "302", "does not point at style 900"),
+], ids=["wrong-archive-type", "drawable-not-pointing-at-source"])
+def test_refuses_bad_source_or_drawable(deck, source, drawable, needle):
     before = deck.read_bytes()
-    result = mint_media_style(deck, "300", ["300"], _WHITE_SPEC)
+    result = mint_media_style(deck, source, [drawable], _WHITE_SPEC)
     assert result["refused"]
-    assert "TSD.MediaStyleArchive" in result["reason"]
-    assert deck.read_bytes() == before
-
-
-def test_refuses_drawable_not_pointing_at_source(deck):
-    before = deck.read_bytes()
-    result = mint_media_style(deck, "900", ["302"], _WHITE_SPEC)
-    assert result["refused"]
-    assert "does not point at style 900" in result["reason"]
+    assert needle in result["reason"]
     assert deck.read_bytes() == before
 
 
@@ -396,51 +392,19 @@ def test_mint_survives_reload(deck):
     assert styles["900"]["width"] == pytest.approx(0.25)
 
 
-def test_refuses_synthesized_spec_missing_color_instead_of_raising(deck):
+@pytest.mark.parametrize(("spec", "needle"), [
+    ({"width": 5.0}, "color"),
+    ({"width": 0.0, "color": (1.0, 1.0, 1.0, 1.0)}, "width"),
+    ({"width": float("nan"), "color": (1.0, 1.0, 1.0, 1.0)}, "width"),
+    ({"width": float("inf"), "color": (1.0, 1.0, 1.0, 1.0)}, "width"),
+    ({"width": True, "color": (1.0, 1.0, 1.0, 1.0)}, "width"),
+    ({"width": 5.0, "color": (1.0, 1.0, 1.0, True)}, "color"),
+], ids=["missing-color", "non-positive-width", "nan-width", "infinite-width", "bool-width", "bool-color-component"])
+def test_refuses_bad_synthesized_spec_instead_of_raising(deck, spec, needle):
     before = deck.read_bytes()
-    result = mint_media_style(deck, "900", ["300"], {"width": 5.0})
+    result = mint_media_style(deck, "900", ["300"], spec)
     assert result["refused"]
-    assert "color" in result["reason"]
-    assert deck.read_bytes() == before
-
-
-def test_refuses_synthesized_spec_with_non_positive_width_instead_of_raising(deck):
-    before = deck.read_bytes()
-    result = mint_media_style(deck, "900", ["300"], {"width": 0.0, "color": (1.0, 1.0, 1.0, 1.0)})
-    assert result["refused"]
-    assert "width" in result["reason"]
-    assert deck.read_bytes() == before
-
-
-def test_refuses_nan_width(deck):
-    before = deck.read_bytes()
-    result = mint_media_style(deck, "900", ["300"], {"width": float("nan"), "color": (1.0, 1.0, 1.0, 1.0)})
-    assert result["refused"]
-    assert "width" in result["reason"]
-    assert deck.read_bytes() == before
-
-
-def test_refuses_infinite_width(deck):
-    before = deck.read_bytes()
-    result = mint_media_style(deck, "900", ["300"], {"width": float("inf"), "color": (1.0, 1.0, 1.0, 1.0)})
-    assert result["refused"]
-    assert "width" in result["reason"]
-    assert deck.read_bytes() == before
-
-
-def test_refuses_bool_width(deck):
-    before = deck.read_bytes()
-    result = mint_media_style(deck, "900", ["300"], {"width": True, "color": (1.0, 1.0, 1.0, 1.0)})
-    assert result["refused"]
-    assert "width" in result["reason"]
-    assert deck.read_bytes() == before
-
-
-def test_refuses_bool_color_component(deck):
-    before = deck.read_bytes()
-    result = mint_media_style(deck, "900", ["300"], {"width": 5.0, "color": (1.0, 1.0, 1.0, True)})
-    assert result["refused"]
-    assert "color" in result["reason"]
+    assert needle in result["reason"]
     assert deck.read_bytes() == before
 
 

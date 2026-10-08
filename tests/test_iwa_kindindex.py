@@ -137,25 +137,15 @@ def _bez(obj):
     return {"_pbtype": "TSWP.ShapeInfoArchive", "super": {"pathsource": {"bezierPathSource": obj}}}
 
 
-def test_is_line_naturalsize_zero_branch():
-    # Zero-dimension naturalSize alone marks a line (elements not [moveTo,lineTo]).
-    obj = _bez({"naturalSize": {"width": 200.0, "height": 0.0},
-                "path": {"elements": [{"type": "moveTo"}, {"type": "curveTo"}]}})
-    assert _is_line(obj) is True
-
-
-def test_is_line_two_element_branch():
-    # A single open [moveTo, lineTo] marks a line even with a non-zero naturalSize.
-    obj = _bez({"naturalSize": {"width": 200.0, "height": 5.0},
-                "path": {"elements": [{"type": "moveTo"}, {"type": "lineTo"}]}})
-    assert _is_line(obj) is True
-
-
-def test_is_line_rejects_closed_rectangle():
-    obj = _bez({"naturalSize": {"width": 200.0, "height": 50.0},
-                "path": {"elements": [{"type": "moveTo"}, {"type": "lineTo"}, {"type": "lineTo"},
-                                      {"type": "lineTo"}, {"type": "closeSubpath"}, {"type": "moveTo"}]}})
-    assert _is_line(obj) is False
+@pytest.mark.parametrize(("natural_height", "elements", "expected"), [
+    (0.0, ["moveTo", "curveTo"], True),
+    (5.0, ["moveTo", "lineTo"], True),
+    (50.0, ["moveTo", "lineTo", "lineTo", "lineTo", "closeSubpath", "moveTo"], False),
+], ids=["naturalsize-zero-branch", "two-element-branch", "rejects-closed-rectangle"])
+def test_is_line(natural_height, elements, expected):
+    obj = _bez({"naturalSize": {"width": 200.0, "height": natural_height},
+                "path": {"elements": [{"type": t} for t in elements]}})
+    assert _is_line(obj) is expected
 
 
 def test_zero_natural_dimension_text_box_is_text_not_line():

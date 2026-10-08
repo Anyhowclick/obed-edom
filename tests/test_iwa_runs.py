@@ -52,9 +52,15 @@ def _run(marker):
     return [{"text": marker, "color": None}]
 
 
-def test_match_attaches_by_normalized_text():
-    text_objects = [{"text": "Hello world", "runs": _run("A")}]
-    items = [{"kind": "text", "text": "Hello world"}]
+@pytest.mark.parametrize(("iwa_text", "item_text"), [
+    ("Hello world", "Hello world"),
+    ("Line one\u2028Line two\xa0end", "Line one\nLine two end"),
+], ids=["normalized-text", "newline-normalization-drift"])
+def test_match_attaches_by_normalized_text(iwa_text, item_text):
+    # IWA carries a real \n and \u2028; JXA objectText carries \n and \xa0. Both
+    # must normalize to the same string and still match.
+    text_objects = [{"text": iwa_text, "runs": _run("A")}]
+    items = [{"kind": "text", "text": item_text}]
     _match_runs_to_items(text_objects, items)
     assert items[0]["runs"] == _run("A")
 
@@ -73,15 +79,6 @@ def test_match_identical_twins_assign_in_iwa_order():
     _match_runs_to_items(text_objects, items)
     assert items[0]["runs"] == _run("first")
     assert items[1]["runs"] == _run("second")
-
-
-def test_match_survives_newline_normalization_drift():
-    # IWA carries a real \n and  ; JXA objectText carries \n and \xa0. Both
-    # must normalize to the same string and still match.
-    text_objects = [{"text": "Line one Line two\xa0end", "runs": _run("A")}]
-    items = [{"kind": "text", "text": "Line one\nLine two end"}]
-    _match_runs_to_items(text_objects, items)
-    assert items[0]["runs"] == _run("A")
 
 
 def test_match_no_candidate_leaves_runs_empty():
@@ -539,16 +536,10 @@ def test_group_content_signature_none_for_unrepresentable_child():
     assert sig is None
 
 
-def test_group_content_signature_none_for_missing_child_identifier():
+@pytest.mark.parametrize("identifier", [None, "999"], ids=["missing-child-identifier", "missing-child-object"])
+def test_group_content_signature_none_for_missing_child(identifier):
     objects, id_to_file, file_ids = _grouped_deck()
-    objects["500"]["children"].append({"identifier": None})
-    sig = iwa._group_content_signature("500", objects, {}, {})
-    assert sig is None
-
-
-def test_group_content_signature_none_for_missing_child_object():
-    objects, id_to_file, file_ids = _grouped_deck()
-    objects["500"]["children"].append({"identifier": "999"})  # no such object
+    objects["500"]["children"].append({"identifier": identifier})
     sig = iwa._group_content_signature("500", objects, {}, {})
     assert sig is None
 
@@ -937,11 +928,20 @@ def test_group_child_records_maps_autosize_centre_and_natural_size():
     assert text["h"] == pytest.approx(70.0)
 
 
-def test_group_child_records_refuses_zero_natural_height():
+@pytest.mark.parametrize(("frame_w", "natural_w", "natural_h"), [
+    (100.0, 100.0, 0.0),
+    (0.0, 0.0, 30.0),
+    (50.0, 100.0, 30.0),
+], ids=["zero-natural-height", "zero-natural-width", "frame-width-natural-size-mismatch"])
+def test_group_child_records_refuses_bad_natural_size(frame_w, natural_w, natural_h):
     # naturalSize.height, not just .width, must be positive: an untested gate (review
     # finding 4) — h == 0 both disqualifies the "real" height AND is exactly the value
     # the AS/JS writers' _ch <= 0 fallback triggers on, so the two failure modes would
     # otherwise coincide and land the box half a box low.
+    # iwa_geometry._autosize_rect documents naturalSize as stale; the fix must not
+    # trust it blindly when it disagrees with the child's own frame width (also read
+    # from the pristine source deck) by more than 1% (review finding 3) — refuse
+    # rather than write the wrong width and re-wrap the very box this fix un-wraps.
     objects = {
         "970": {
             "_pbtype": "TSD.GroupArchive",
@@ -955,60 +955,12 @@ def test_group_child_records_refuses_zero_natural_height():
         "972": {
             "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "972-st"},
             "super": {
-                "geometry": {"position": {"x": 100.0, "y": 0.0}, "size": {"width": 100.0, "height": 0.0}, "angle": 0.0},
-                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 100.0, "height": 0.0}}},
+                "geometry": {"position": {"x": 100.0, "y": 0.0}, "size": {"width": frame_w, "height": 0.0}, "angle": 0.0},
+                "pathsource": {"bezierPathSource": {"naturalSize": {"width": natural_w, "height": natural_h}}},
             },
         },
     }
     assert _group_child_records(objects["970"], objects) is None
-
-
-def test_group_child_records_refuses_zero_natural_width():
-    objects = {
-        "975": {
-            "_pbtype": "TSD.GroupArchive",
-            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 200.0, "height": 40.0}, "angle": 0.0},
-            "children": [{"identifier": "976"}, {"identifier": "977"}],
-        },
-        "976": {
-            "_pbtype": "TSWP.ShapeInfoArchive",
-            "super": {"geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 100.0, "height": 40.0}, "angle": 0.0}},
-        },
-        "977": {
-            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "977-st"},
-            "super": {
-                "geometry": {"position": {"x": 100.0, "y": 0.0}, "size": {"width": 0.0, "height": 0.0}, "angle": 0.0},
-                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 0.0, "height": 30.0}}},
-            },
-        },
-    }
-    assert _group_child_records(objects["975"], objects) is None
-
-
-def test_group_child_records_refuses_frame_width_natural_size_mismatch():
-    # iwa_geometry._autosize_rect documents naturalSize as stale; the fix must not
-    # trust it blindly when it disagrees with the child's own frame width (also read
-    # from the pristine source deck) by more than 1% (review finding 3) — refuse
-    # rather than write the wrong width and re-wrap the very box this fix un-wraps.
-    objects = {
-        "980": {
-            "_pbtype": "TSD.GroupArchive",
-            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 200.0, "height": 40.0}, "angle": 0.0},
-            "children": [{"identifier": "981"}, {"identifier": "982"}],
-        },
-        "981": {
-            "_pbtype": "TSWP.ShapeInfoArchive",
-            "super": {"geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 100.0, "height": 40.0}, "angle": 0.0}},
-        },
-        "982": {
-            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "982-st"},
-            "super": {
-                "geometry": {"position": {"x": 100.0, "y": 0.0}, "size": {"width": 50.0, "height": 0.0}, "angle": 0.0},
-                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 100.0, "height": 30.0}}},
-            },
-        },
-    }
-    assert _group_child_records(objects["980"], objects) is None
 
 
 def test_group_child_records_refuses_unresolved_mask():
