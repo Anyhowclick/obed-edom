@@ -2409,6 +2409,13 @@ def _with_sample(index, **fields):
     return samples
 
 
+def _score_inpage(samples, mask):
+    from obed_edom.html_alpha_probe import score_inpage_liveness
+
+    scored = score_inpage_liveness(samples, occluder_mask=mask)
+    return scored["verdict"], scored["status"], scored["reason"]
+
+
 class TestInPageLivenessScorer:
     def test_all_bands_moving_reads_live(self):
         from obed_edom.html_alpha_probe import score_inpage_liveness
@@ -2430,59 +2437,72 @@ class TestInPageLivenessScorer:
         assert scored["judgedBands"] == 127
 
     @pytest.mark.parametrize(
-        "samples, mask, verdict, status, reason",
+        "samples, mask, reason",
         [
-            (lambda: _inpage_samples(static_bands=(5,)), NO_OCCLUSION_128, False, "dead", "a judged band did not move"),
-            (lambda: _inpage_samples(green_amp=5.0), NO_OCCLUSION_128, False, "dead", "green patch moved"),
-            (
-                lambda: _inpage_samples(green_rgb=(100.0, 100.0, 100.0)), NO_OCCLUSION_128,
-                False, "dead", "green patch is not green",
+            pytest.param(
+                lambda: _inpage_samples(static_bands=(5,)), NO_OCCLUSION_128, "a judged band did not move",
+                id="one-non-occluded-static-band",
             ),
-            (lambda: _inpage_samples(gl_err=1), NO_OCCLUSION_128, False, "dead", "gl error"),
-            (lambda: _inpage_samples(control_amp=5.0), NO_OCCLUSION_128, None, "inconclusive", "control patch moved"),
-            (lambda: _inpage_samples(n=23), NO_OCCLUSION_128, None, "inconclusive", "too few samples"),
-            (
-                _inpage_samples, [1] * 65 + [0] * 63,
-                None, "inconclusive", "more than half the bands are occluded",
+            pytest.param(lambda: _inpage_samples(green_amp=5.0), NO_OCCLUSION_128, "green patch moved", id="moving-green-patch"),
+            pytest.param(
+                lambda: _inpage_samples(green_rgb=(100.0, 100.0, 100.0)), NO_OCCLUSION_128, "green patch is not green",
+                id="green-patch-not-green",
             ),
-            (_inpage_samples, None, None, "inconclusive", "missing or malformed occluder mask"),
-            (_inpage_samples, [0] * 4, None, "inconclusive", "missing or malformed occluder mask"),
-            (_inpage_samples, [0] * 127 + [2], None, "inconclusive", "missing or malformed occluder mask"),
-            (
-                lambda: _with_sample(0, bands=[float("nan")] + [100.0] * 127), NO_OCCLUSION_128,
-                None, "inconclusive", "malformed samples",
-            ),
-            (lambda: _with_sample(3, control="not-a-number"), NO_OCCLUSION_128, None, "inconclusive", "malformed samples"),
-            (lambda: _with_sample(0, greenRGB=[10.0, 200.0]), NO_OCCLUSION_128, None, "inconclusive", "malformed samples"),
-            (
-                lambda: _with_sample(0, control="1" + "0" * 400), NO_OCCLUSION_128,
-                None, "inconclusive", "malformed samples",
-            ),
-            (lambda: {"not": "a list"}, NO_OCCLUSION_128, None, "inconclusive", "malformed samples"),
-            (
-                lambda: [dict(_inpage_samples(n=1)[0]) for _ in range(24)], NO_OCCLUSION_128,
-                None, "inconclusive", "duplicate or non-monotonic sample callbacks",
-            ),
-            (
-                lambda: _with_sample(-1, t=0), NO_OCCLUSION_128,
-                None, "inconclusive", "duplicate or non-monotonic sample callbacks",
-            ),
-        ],
-        ids=[
-            "one-non-occluded-static-band", "moving-green-patch", "green-patch-not-green", "non-zero-gl-error",
-            "moving-control-patch", "twenty-three-samples", "more-than-half-occluded", "missing-mask",
-            "mask-wrong-length", "mask-non-zero-one-value", "non-finite-band", "non-numeric-control",
-            "two-element-green-rgb", "overflowing-numeric-string", "non-sequence-samples",
-            "frozen-sample-repeated-24-times", "regressing-timestamp",
+            pytest.param(lambda: _inpage_samples(gl_err=1), NO_OCCLUSION_128, "gl error", id="non-zero-gl-error"),
         ],
     )
-    def test_a_window_that_cannot_read_live(self, samples, mask, verdict, status, reason):
+    def test_a_window_that_cannot_read_live_is_dead(self, samples, mask, reason):
+        assert _score_inpage(samples(), mask) == (False, "dead", reason)
+
+    @pytest.mark.parametrize(
+        "samples, mask, reason",
+        [
+            pytest.param(
+                lambda: _inpage_samples(control_amp=5.0), NO_OCCLUSION_128, "control patch moved",
+                id="moving-control-patch",
+            ),
+            pytest.param(lambda: _inpage_samples(n=23), NO_OCCLUSION_128, "too few samples", id="twenty-three-samples"),
+            pytest.param(
+                _inpage_samples, [1] * 65 + [0] * 63, "more than half the bands are occluded",
+                id="more-than-half-occluded",
+            ),
+            pytest.param(_inpage_samples, None, "missing or malformed occluder mask", id="missing-mask"),
+            pytest.param(_inpage_samples, [0] * 4, "missing or malformed occluder mask", id="mask-wrong-length"),
+            pytest.param(
+                _inpage_samples, [0] * 127 + [2], "missing or malformed occluder mask", id="mask-non-zero-one-value",
+            ),
+            pytest.param(
+                lambda: _with_sample(0, bands=[float("nan")] + [100.0] * 127), NO_OCCLUSION_128, "malformed samples",
+                id="non-finite-band",
+            ),
+            pytest.param(
+                lambda: _with_sample(3, control="not-a-number"), NO_OCCLUSION_128, "malformed samples",
+                id="non-numeric-control",
+            ),
+            pytest.param(
+                lambda: _with_sample(0, greenRGB=[10.0, 200.0]), NO_OCCLUSION_128, "malformed samples",
+                id="two-element-green-rgb",
+            ),
+            pytest.param(
+                lambda: _with_sample(0, control="1" + "0" * 400), NO_OCCLUSION_128, "malformed samples",
+                id="overflowing-numeric-string",
+            ),
+            pytest.param(lambda: {"not": "a list"}, NO_OCCLUSION_128, "malformed samples", id="non-sequence-samples"),
+            pytest.param(
+                lambda: [dict(_inpage_samples(n=1)[0]) for _ in range(24)], NO_OCCLUSION_128,
+                "duplicate or non-monotonic sample callbacks",
+                id="frozen-sample-repeated-24-times",
+            ),
+            pytest.param(
+                lambda: _with_sample(-1, t=0), NO_OCCLUSION_128, "duplicate or non-monotonic sample callbacks",
+                id="regressing-timestamp",
+            ),
+        ],
+    )
+    def test_a_window_that_cannot_read_live_is_inconclusive(self, samples, mask, reason):
         """Codex r1 Spec 4 (mask required), r2 Spec 5 (24 entries are not 24 distinct callbacks),
         r2 Standards 1 (a non-sequence or overflowing value never raises)."""
-        from obed_edom.html_alpha_probe import score_inpage_liveness
-
-        scored = score_inpage_liveness(samples(), occluder_mask=mask)
-        assert (scored["verdict"], scored["status"], scored["reason"]) == (verdict, status, reason)
+        assert _score_inpage(samples(), mask) == (None, "inconclusive", reason)
 
     def test_a_missing_gl_error_field_is_inconclusive(self):
         """Codex r5: `glErr` is part of the contract; a sample without it (or with

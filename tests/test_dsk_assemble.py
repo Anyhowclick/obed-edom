@@ -3094,51 +3094,7 @@ _FAITH = _heading_item(0, "Faith")
 _CLUSTER = dsa.HeadingCluster(("text", 0), ("text", 1), ("shape", 0))
 
 
-@pytest.mark.parametrize(
-    "items, long_ids, expected",
-    [
-        ([_FAITH, _number_item(1), _circle_item(0), _verse_item(2)], [2], _CLUSTER),
-        (
-            [_heading_item(0, "Prayer"), _number_item(1), _circle_item(0), _verse_item(2),
-             _cluster_text(3, "James 5 (AMP)"), _cluster_shape(1, "James 5 (AMP)")],
-            [2], _CLUSTER,
-        ),
-        ([_FAITH, _number_item(1), _circle_item(0)], [], None),
-        ([_FAITH, _heading_item(3, "Hope"), _number_item(1), _circle_item(0), _verse_item(2)], [2], None),
-        ([_FAITH, _number_item(1), _circle_item(0), _verse_item(2), _verse_item(3)], [2, 3], None),
-        ([_FAITH, _number_item(1), _circle_item(0), _verse_item(2), _number_item(3, text="Amen")], [2], None),
-        ([_FAITH, _number_item(1), {**_circle_item(0), "text": "3"}, _verse_item(2)], [2], None),
-        ([_FAITH, _number_item(1), _verse_item(2)], [2], None),
-        ([_FAITH, {**_number_item(1), "x": 500, "y": 500}, _circle_item(0), _verse_item(2)], [2], None),
-        ([_FAITH, _number_item(1), _number_item(3, text="4"), _circle_item(0), _verse_item(2)], [2], None),
-        ([_FAITH, _number_item(1), _circle_item(0), _verse_item(2), _cluster_text(3, "James 5 (AMP)"), _cluster_shape(1, "")], [2], None),
-        (
-            [_FAITH, _number_item(1), _circle_item(0), _verse_item(2),
-             _cluster_text(3, "James 5 (AMP)"), _cluster_shape(1, "James 5 (AMP)"),
-             _cluster_text(4, "Extra badge", y=200, w=200, h=40), _cluster_shape(2, "Extra badge", y=200, w=200, h=40)],
-            [2], None,
-        ),
-        (
-            [_FAITH, _number_item(1), _circle_item(0), _verse_item(2), _cluster_text(3, "James 5 (AMP)"), _cluster_shape(1, "Different")],
-            [2], None,
-        ),
-        (
-            [_FAITH, _number_item(1), _circle_item(0), _verse_item(2),
-             _cluster_text(3, "4", x=300, y=300, w=35, h=35), _cluster_shape(1, "4", x=300, y=300, w=35, h=35)],
-            [2], None,
-        ),
-        ([_FAITH, _cluster_text(1, "3", x=-1, y=-1, w=2, h=2), _circle_item(0), _verse_item(2)], [2], None),
-        ([_FAITH, _cluster_text(1, "3", x=40.5 - 0.5, y=(40.5 + 41.6) - 0.5, w=1, h=1), _circle_item(0), _verse_item(2)], [2], None),
-    ],
-    ids=[
-        "detected", "accepts-verse-badge-pair", "none-without-long-text", "two-headings", "two-long-boxes",
-        "unrelated-short-text", "text-bearing-circle", "digit-without-circle", "numeral-not-overlapping-circle",
-        "two-point-numbers", "stray-text-over-textless-shape", "two-badge-like-pairs", "badge-text-mismatch",
-        "second-numeral-matching-a-shape", "numeral-centre-at-circle-corner-57pt-out",
-        "numeral-just-outside-the-41.5pt-radius-tolerance",
-    ],
-)
-def test_heading_cluster(items, long_ids, expected):
+def _heading_cluster_of(items, long_ids):
     from obed_edom.dsk_plan import SlideClass
 
     long_text_ids = tuple(("text", i) for i in long_ids)
@@ -3147,7 +3103,87 @@ def test_heading_cluster(items, long_ids, expected):
         kept=tuple((i["kind"], i["kindIndex"]) for i in items), dropped_side=(), dropped_backdrop=(), transition=None,
         is_text=bool(long_text_ids), long_text_ids=long_text_ids,
     )
-    assert dsa._heading_cluster(cls, {(i["kind"], i["kindIndex"]): i for i in items}) == expected
+    return dsa._heading_cluster(cls, {(i["kind"], i["kindIndex"]): i for i in items})
+
+
+@pytest.mark.parametrize(
+    "items, long_ids",
+    [
+        pytest.param([_FAITH, _number_item(1), _circle_item(0), _verse_item(2)], [2], id="detected"),
+        pytest.param(
+            [_heading_item(0, "Prayer"), _number_item(1), _circle_item(0), _verse_item(2),
+             _cluster_text(3, "James 5 (AMP)"), _cluster_shape(1, "James 5 (AMP)")],
+            [2],
+            id="accepts-verse-badge-pair",
+        ),
+    ],
+)
+def test_heading_cluster_accepted(items, long_ids):
+    assert _heading_cluster_of(items, long_ids) == _CLUSTER
+
+
+@pytest.mark.parametrize(
+    "items, long_ids",
+    [
+        pytest.param([_FAITH, _number_item(1), _circle_item(0)], [], id="none-without-long-text"),
+        pytest.param(
+            [_FAITH, _heading_item(3, "Hope"), _number_item(1), _circle_item(0), _verse_item(2)], [2], id="two-headings",
+        ),
+        pytest.param(
+            [_FAITH, _number_item(1), _circle_item(0), _verse_item(2), _verse_item(3)], [2, 3], id="two-long-boxes",
+        ),
+        pytest.param(
+            [_FAITH, _number_item(1), _circle_item(0), _verse_item(2), _number_item(3, text="Amen")], [2],
+            id="unrelated-short-text",
+        ),
+        pytest.param(
+            [_FAITH, _number_item(1), {**_circle_item(0), "text": "3"}, _verse_item(2)], [2], id="text-bearing-circle",
+        ),
+        pytest.param([_FAITH, _number_item(1), _verse_item(2)], [2], id="digit-without-circle"),
+        pytest.param(
+            [_FAITH, {**_number_item(1), "x": 500, "y": 500}, _circle_item(0), _verse_item(2)], [2],
+            id="numeral-not-overlapping-circle",
+        ),
+        pytest.param(
+            [_FAITH, _number_item(1), _number_item(3, text="4"), _circle_item(0), _verse_item(2)], [2],
+            id="two-point-numbers",
+        ),
+        pytest.param(
+            [_FAITH, _number_item(1), _circle_item(0), _verse_item(2), _cluster_text(3, "James 5 (AMP)"), _cluster_shape(1, "")],
+            [2],
+            id="stray-text-over-textless-shape",
+        ),
+        pytest.param(
+            [_FAITH, _number_item(1), _circle_item(0), _verse_item(2),
+             _cluster_text(3, "James 5 (AMP)"), _cluster_shape(1, "James 5 (AMP)"),
+             _cluster_text(4, "Extra badge", y=200, w=200, h=40), _cluster_shape(2, "Extra badge", y=200, w=200, h=40)],
+            [2],
+            id="two-badge-like-pairs",
+        ),
+        pytest.param(
+            [_FAITH, _number_item(1), _circle_item(0), _verse_item(2), _cluster_text(3, "James 5 (AMP)"), _cluster_shape(1, "Different")],
+            [2],
+            id="badge-text-mismatch",
+        ),
+        pytest.param(
+            [_FAITH, _number_item(1), _circle_item(0), _verse_item(2),
+             _cluster_text(3, "4", x=300, y=300, w=35, h=35), _cluster_shape(1, "4", x=300, y=300, w=35, h=35)],
+            [2],
+            id="second-numeral-matching-a-shape",
+        ),
+        pytest.param(
+            [_FAITH, _cluster_text(1, "3", x=-1, y=-1, w=2, h=2), _circle_item(0), _verse_item(2)], [2],
+            id="numeral-centre-at-circle-corner-57pt-out",
+        ),
+        pytest.param(
+            [_FAITH, _cluster_text(1, "3", x=40.5 - 0.5, y=(40.5 + 41.6) - 0.5, w=1, h=1), _circle_item(0), _verse_item(2)],
+            [2],
+            id="numeral-just-outside-the-41.5pt-radius-tolerance",
+        ),
+    ],
+)
+def test_heading_cluster_refused(items, long_ids):
+    assert _heading_cluster_of(items, long_ids) is None
 
 
 def test_heading_cluster_gw_deck_measured_slides():
@@ -7425,71 +7461,111 @@ _PHOTO_CAPTION_GROUP = {
 @pytest.mark.parametrize(
     "items, options, anchor",
     [
-        ([_image_item(0, x=1943, y=-14, w=504, h=1080), _image_item(1, x=3200, y=-14, w=504, h=1080)], {}, "right"),
-        ([_image_item(i, x=1500 + 500 * i, y=0, w=500, h=500) for i in range(3)], {}, "centre"),
-        ([_image_item(0, x=1500, y=0, w=500, h=500), _movie_item(1, x=1920, y=0, w=3840, h=1080)], {"clip": True}, "centre"),
-        ([_image_item(0, x=2960, y=0, w=2000, h=800)], {}, "centre"),
-        ([_image_item(0, x=2960, y=0, w=1990, h=800)], {}, "right"),
-        (
+        pytest.param(
+            [_image_item(0, x=1943, y=-14, w=504, h=1080), _image_item(1, x=3200, y=-14, w=504, h=1080)], {}, "right",
+            id="two-squarish-right",
+        ),
+        pytest.param(
+            [_image_item(i, x=1500 + 500 * i, y=0, w=500, h=500) for i in range(3)], {}, "centre",
+            id="three-squarish-centre",
+        ),
+        pytest.param(
+            [_image_item(0, x=1500, y=0, w=500, h=500), _movie_item(1, x=1920, y=0, w=3840, h=1080)], {"clip": True},
+            "centre",
+            id="lw-item-among-squarish-centre",
+        ),
+        pytest.param([_image_item(0, x=2960, y=0, w=2000, h=800)], {}, "centre", id="lw-aspect-2.5-centres"),
+        pytest.param([_image_item(0, x=2960, y=0, w=1990, h=800)], {}, "right", id="lw-aspect-2.49-does-not-centre"),
+        pytest.param(
             [_image_item(0, x=1500, y=0, w=500, h=500), _image_item(1, x=2000, y=0, w=500, h=500),
              _movie_item(2, x=1920, y=0, w=3840, h=1080)],
             {"clip": True}, "centre",
+            id="three-items-one-lw-centre",
         ),
-        (
+        pytest.param(
             [_group_item(0, x=1920, y=0, w=2600, h=1000)],
             {"slide_fields": {
                 "groupChildSignature": {0: "image:photo.jpg\ntext:a wide caption strip"},
                 "groupChildren": {0: [{"kind": "image", "kindIndex": 0, "x": 1920.0, "y": 0.0, "w": 1000.0, "h": 1000.0}]},
             }},
             "centre",
+            id="group-bbox-widened-by-caption-centres",
         ),
-        (
+        pytest.param(
+            [_image_item(0, x=1920, y=0, w=1912, h=1080), _image_item(1, x=3832, y=0, w=1912, h=1080)], {}, "centre",
+            id="gw16-diptych-union-centres",
+        ),
+        pytest.param([_SQUARISH], {"no_auto_anchor": True}, "centre", id="no-auto-anchor-forces-centre"),
+    ],
+)
+def test_auto_anchor_from_kept_content_shape_count_and_aspect(items, options, anchor):
+    """Codex placement reviews 1-4: the union (not count) of content rects sets the anchor."""
+    assert _auto_anchor_plan(items, **options).anchors[1] == anchor
+
+
+@pytest.mark.parametrize(
+    "items, options, anchor",
+    [
+        pytest.param(
             [_image_item(0, x=1954, y=27, w=1381, h=921), _image_item(1, x=0, y=0, w=1920, h=1080),
              _image_item(2, x=5760, y=0, w=1920, h=1080)],
             {"keep_side": True}, "right",
+            id="gw8-side-panels-kept-do-not-count",
         ),
-        ([_image_item(0, x=1920, y=0, w=1912, h=1080), _image_item(1, x=3832, y=0, w=1912, h=1080)], {}, "centre"),
-        ([_SQUARISH, _text_item(0, x=2000, y=900, w=400, h=100)], {}, "right"),
-        (
+        pytest.param([_SQUARISH, _text_item(0, x=2000, y=900, w=400, h=100)], {}, "right", id="text-items-do-not-count"),
+        pytest.param(
             [_image_item(0, x=1954, y=27, w=1381, h=921), _group_item(0, x=4702, y=15, w=645, h=92)],
             {"slide_fields": {"groupChildSignature": {0: "text:Matthew 18 19 Again, truly I tell you"}}},
             "right",
+            id="gw5-text-only-group-does-not-count",
         ),
-        (
+        pytest.param(
             [_image_item(0, x=1954, y=27, w=1381, h=921), _group_item(0, x=4702, y=15, w=645, h=92)],
             {"slide_fields": _PHOTO_CAPTION_GROUP}, "centre",
+            id="group-with-media-child-counts",
         ),
-        (
+        pytest.param(
             [_group_item(0, x=4702, y=15, w=645, h=92)],
             {"slide_fields": {"groupChildSignature": {
                 0: "shape:scalarPathSource:kTSDRoundedRectangle:525.9x98.4\ntext:Elohim (plural)"
             }}},
             "centre",
+            id="gw7-shape-plus-text-badge-is-zero-content",
         ),
-        ([_image_item(0, x=1000, y=0, w=3000, h=1000)], {"keep_side": True}, "right"),
-        ([_rotated(_image_item(0, x=1920, y=300, w=400, h=1000), 90)], {}, "centre"),
-        ([_group_item(0, x=4702, y=15, w=645, h=92)], {"slide_fields": {"groupChildSignature": {}}}, "centre"),
-        ([_SQUARISH], {"no_auto_anchor": True}, "centre"),
-        ([_image_item(0, x=1954, y=27, w=0, h=921)], {}, "centre"),
-        (
+        pytest.param(
+            [_image_item(0, x=1000, y=0, w=3000, h=1000)], {"keep_side": True}, "right",
+            id="keep-side-anchor-clips-to-centre-panel",
+        ),
+        pytest.param(
+            [_group_item(0, x=4702, y=15, w=645, h=92)], {"slide_fields": {"groupChildSignature": {}}}, "centre",
+            id="lone-unresolved-group-centre",
+        ),
+    ],
+)
+def test_auto_anchor_from_kept_content_shape_filters_groups_and_side_panels(items, options, anchor):
+    """Codex placement reviews 1-4: clipped to the centre panel even with keep_side; text,
+    text-only/shape badge groups, side panels and unresolved groups never count."""
+    assert _auto_anchor_plan(items, **options).anchors[1] == anchor
+
+
+@pytest.mark.parametrize(
+    "items, options, anchor",
+    [
+        pytest.param(
+            [_rotated(_image_item(0, x=1920, y=300, w=400, h=1000), 90)], {}, "centre",
+            id="rotated-image-uses-transformed-aabb",
+        ),
+        pytest.param([_image_item(0, x=1954, y=27, w=0, h=921)], {}, "centre", id="lone-zero-area-item-centre"),
+        pytest.param(
             [_image_item(0, x=1954, y=27, w=1381, h=921), _image_item(1, x=4702, y=15, w=0, h=92),
              _image_item(2, x=4702, y=200, w=645, h=0)],
             {}, "right",
+            id="degenerate-media-count-by-positive-area-only",
         ),
     ],
-    ids=[
-        "two-squarish-right", "three-squarish-centre", "lw-item-among-squarish-centre", "lw-aspect-2.5-centres",
-        "lw-aspect-2.49-does-not-centre", "three-items-one-lw-centre", "group-bbox-widened-by-caption-centres",
-        "gw8-side-panels-kept-do-not-count", "gw16-diptych-union-centres", "text-items-do-not-count",
-        "gw5-text-only-group-does-not-count", "group-with-media-child-counts", "gw7-shape-plus-text-badge-is-zero-content",
-        "keep-side-anchor-clips-to-centre-panel", "rotated-image-uses-transformed-aabb", "lone-unresolved-group-centre",
-        "no-auto-anchor-forces-centre", "lone-zero-area-item-centre", "degenerate-media-count-by-positive-area-only",
-    ],
 )
-def test_auto_anchor_from_kept_content_shape(items, options, anchor):
-    """Codex placement reviews 1-4: the union (not count) of positive-area content rects,
-    clipped to the centre panel even with keep_side, measured by transformed AABB; text,
-    text-only/shape badge groups, side panels and unresolved groups never count."""
+def test_auto_anchor_from_kept_content_shape_rotated_and_degenerate_geometry(items, options, anchor):
+    """Codex placement reviews 1-4: only positive-area rects count, measured by transformed AABB."""
     assert _auto_anchor_plan(items, **options).anchors[1] == anchor
 
 
