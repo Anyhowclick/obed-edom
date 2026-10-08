@@ -137,6 +137,7 @@ class TestBuild:
         assert record["objectIds"] == list(loop_fixture.LOOP_OBJECT_IDS)
         assert len(record["files"]) == 16, "4 slides x (.json, .jsonp) x 2 trees"
         assert json.loads((dest / "loop-splice.json").read_text()) == record
+        assert not (dest / loop_fixture.MANIFEST).exists(), "a source without a manifest writes none"
         assert not (dest.parent / "p2-loop.partial").exists()
 
         after = _tree_bytes(dest)
@@ -223,12 +224,6 @@ class TestBuild:
         jsonp.write_bytes(jsonp.read_bytes().replace(b'"endTime":46.03', b'"endTime":46.02', 1))
         with pytest.raises(loop_fixture.FixtureError, match="payload differs"):
             loop_fixture.build(source, tmp_path / "p2-loop")
-
-    def test_a_source_without_a_manifest_writes_none(self, tmp_path: Path) -> None:
-        dest = tmp_path / "p2-loop"
-        loop_fixture.build(_committed_source(tmp_path / "src"), dest)
-        assert not (dest / loop_fixture.MANIFEST).exists()
-
 
 def _binary_manifest(frames: int = 1381) -> dict[str, Any]:
     """The shape `binary_counter_movie.py --build-fixture` writes (fields the builder reads, plus a few it must keep)."""

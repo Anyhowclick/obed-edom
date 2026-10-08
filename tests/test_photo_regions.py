@@ -101,17 +101,15 @@ def _paste_chat(dest: Image.Image, box: tuple[int, int, int, int], src: Image.Im
     dest.paste(src.resize((w, h), Image.Resampling.LANCZOS), (x, y))
 
 
-def test_group_only_dsk_pairs_and_flags_blur(tmp_path: Path):
+def _group_pair_result(tmp_path: Path, dsk_src: Image.Image) -> dict:
     left_dir = tmp_path / "left"
     right_dir = tmp_path / "right"
     left_dir.mkdir()
     right_dir.mkdir()
-    src = _chat_bitmap((980, 900), yellow_right=True)
-    dirty = _chat_bitmap((980, 900), yellow_right=True, blur=True)
     lw = Image.new("RGB", (3840, 1080), (8, 8, 8))
     dsk = Image.new("RGB", (1920, 1080), (8, 8, 8))
-    _paste_chat(lw, (200, 40, 980, 900), src)
-    _paste_chat(dsk, (200, 200, 560, 500), dirty)
+    _paste_chat(lw, (200, 40, 980, 900), _chat_bitmap((980, 900), yellow_right=True))
+    _paste_chat(dsk, (200, 200, 560, 500), dsk_src)
     lw.save(left_dir / "slide-001.png")
     dsk.save(right_dir / "slide-001.png")
     left = {
@@ -126,7 +124,7 @@ def test_group_only_dsk_pairs_and_flags_blur(tmp_path: Path):
         "slideHeight": 1080,
         "slides": [{"number": 1, "items": [_dsk_group()]}],
     }
-    result = compare_inspects(
+    return compare_inspects(
         left,
         right,
         left_dir,
@@ -136,6 +134,10 @@ def test_group_only_dsk_pairs_and_flags_blur(tmp_path: Path):
         right_label="DSK",
         use_ocr=False,
     )
+
+
+def test_group_only_dsk_pairs_and_flags_blur(tmp_path: Path):
+    result = _group_pair_result(tmp_path, _chat_bitmap((980, 900), yellow_right=True, blur=True))
     pair = result["pairs"][0]
     assert pair.get("leftNumber") == 1
     assert pair.get("rightNumber") == 1
@@ -146,39 +148,7 @@ def test_group_only_dsk_pairs_and_flags_blur(tmp_path: Path):
 
 
 def test_identical_group_pair_is_silent(tmp_path: Path):
-    left_dir = tmp_path / "left"
-    right_dir = tmp_path / "right"
-    left_dir.mkdir()
-    right_dir.mkdir()
-    src = _chat_bitmap((980, 900), yellow_right=True)
-    lw = Image.new("RGB", (3840, 1080), (8, 8, 8))
-    dsk = Image.new("RGB", (1920, 1080), (8, 8, 8))
-    _paste_chat(lw, (200, 40, 980, 900), src)
-    _paste_chat(dsk, (200, 200, 560, 500), src)
-    lw.save(left_dir / "slide-001.png")
-    dsk.save(right_dir / "slide-001.png")
-    left = {
-        "path": str(tmp_path / "Sermon_LW.key"),
-        "slideWidth": 3840,
-        "slideHeight": 1080,
-        "slides": [{"number": 1, "items": _lw_items()}],
-    }
-    right = {
-        "path": str(tmp_path / "Sermon_DSK.key"),
-        "slideWidth": 1920,
-        "slideHeight": 1080,
-        "slides": [{"number": 1, "items": [_dsk_group()]}],
-    }
-    result = compare_inspects(
-        left,
-        right,
-        left_dir,
-        right_dir,
-        tmp_path / "heat",
-        left_label="LW",
-        right_label="DSK",
-        use_ocr=False,
-    )
+    result = _group_pair_result(tmp_path, _chat_bitmap((980, 900), yellow_right=True))
     rules = [f.rule for f in result["flags"] if f.category == "diff"]
     assert "photo.region" not in rules
     assert "photo.marker" not in rules

@@ -16,6 +16,8 @@ Delete highest-index first.
 import re
 from pathlib import Path
 
+import pytest
+
 from obed_edom.keynote import (
     _build_stat_finalize_script,
     _parse_detail_tokens,
@@ -184,7 +186,9 @@ def test_no_report_when_not_requested():
 
 def test_badge_raise_report_orders_plate_globe_then_title_last():
     """badge_raise_report reuses badge_slot_keys (largest-first: plate 767x173
-    before globe 124x124) and forces the title last, regardless of item order."""
+    before globe 124x124) and forces the title last, regardless of item order. It has
+    no dependency on child_resize_report (the old obedBadgeRaise only ran on stat-job
+    slides), so it is collected here with zero stat groups."""
     report: list[dict] = []
     plan_slide_transforms(
         _slide_with_badge(),
@@ -199,20 +203,6 @@ def test_badge_raise_report_orders_plate_globe_then_title_last():
     ]
     for job in report:
         assert job["slide"] == 5
-
-
-def test_badge_raise_report_runs_on_every_slide_not_just_stat_slides():
-    """The old obedBadgeRaise only ran on stat-job slides. badge_raise_report has
-    no dependency on child_resize_report and is collected even with zero stat groups."""
-    report: list[dict] = []
-    plan_slide_transforms(
-        _slide_with_badge(),
-        _badge_recipe(),
-        wall_size=(7680, 1080),
-        badge_raise_report=report,
-        # No child_resize_report passed: no stat jobs collected at all.
-    )
-    assert len(report) == 3
 
 
 def test_badge_raise_report_carries_the_planned_frame_for_every_row():
@@ -505,8 +495,13 @@ def test_finalize_normalizer_parity_with_normalize_text():
         assert _as_norm_sig_simulate(s) == _normalize_text(s), repr(s)
 
 
-def test_finalize_script_empty_when_no_jobs():
-    assert _build_stat_finalize_script(Path("/tmp/x.key"), [], {"269": 200.0}) == ""
+@pytest.mark.parametrize("size_map", [{"269": 200.0}, {}], ids=["no-jobs", "badge-alone-zero-stat-jobs"])
+def test_finalize_script_empty_when_no_jobs(size_map):
+    """A deck can have a badge and no stat groups at all (slides 1-2 in the diagnosis);
+    badge rows no longer feed the stat-finalize script, so with no font/dedup work the
+    empty-script guard fires and no session opens (the offline z-order patch owns the
+    badge instead)."""
+    assert _build_stat_finalize_script(Path("/tmp/x.key"), [], size_map) == ""
 
 
 def test_finalize_empty_group_removes_emits_no_dedup_call_lines():
@@ -514,15 +509,6 @@ def test_finalize_empty_group_removes_emits_no_dedup_call_lines():
     script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {}, None, group_removes=[])
     assert "my obedDedupPick(" not in script
     assert "my obedApplyDeletes(" not in script
-
-
-def test_finalize_script_empty_for_badge_alone_with_zero_stat_jobs():
-    """A deck can have a badge and no stat groups at all (slides 1-2 in the diagnosis);
-    badge rows no longer feed the stat-finalize script, so with no font/dedup work the
-    empty-script guard fires and no session opens (the offline z-order patch owns the
-    badge instead)."""
-    script = _build_stat_finalize_script(Path("/tmp/x.key"), [], {})
-    assert script == ""
 
 
 def test_stat_finalize_script_compiles_at_scale():
@@ -536,8 +522,6 @@ def test_stat_finalize_script_compiles_at_scale():
     import shutil
     import subprocess
     import tempfile
-
-    import pytest
 
     if shutil.which("osacompile") is None:
         pytest.skip("osacompile unavailable (non-macOS)")
@@ -657,15 +641,7 @@ def _hide(slide: int, kind_index: int, kind: str = "group") -> ItemTransform:
 
 def test_adjust_shifts_job_down_by_lower_group_hides():
     # Two group hides below the stat group (kind_index 0 and 3); the job addresses
-    # group 5 (kind_index 4), so it drops by 2 to group 3.
-    transforms = [_hide(5, 0), _hide(5, 3)]
-    child_resize = [{"slide": 5, "groupIndex": 5}]
-    adjustments = adjust_child_resize_indexes(child_resize, transforms)
-    assert child_resize[0]["groupIndex"] == 3
-    assert adjustments == [{"slide": 5, "from": 5, "to": 3}]
-
-
-def test_adjust_leaves_group_index_and_only_shifts_hides():
+    # group 5 (kind_index 4), so it drops by 2 to group 3. Slide 6 has no hides.
     transforms = [_hide(5, 0), _hide(5, 3)]
     child_resize = [{"slide": 5, "groupIndex": 5}, {"slide": 6, "groupIndex": 3}]
     adjustments = adjust_child_resize_indexes(child_resize, transforms)
@@ -837,15 +813,8 @@ def test_leaf_font_writes_prefer_stat_size_then_caption_then_scale():
     leaf = lines.index("else if leafPt > 0 then")
     scale = lines.index("set size of characters 1 thru -1 of object text of _leaf to (_c1 * s)")
     assert tgt < leaf < scale
-
-
-def test_leaf_font_write_needs_a_positive_scale():
     # s<=0 (e.g. an unresolved group) must not write a bogus/negative font size.
-    from obed_edom.keynote import _stat_leaf_font_writes
-
-    lines = "\n".join(_stat_leaf_font_writes("g"))
     assert "else if s > 0 then" in lines
-    assert "set size of characters 1 thru -1 of object text of _leaf to (_c1 * s)" in lines
 
 
 def test_finalize_honours_an_explicit_zero_scale_instead_of_coercing_to_one():

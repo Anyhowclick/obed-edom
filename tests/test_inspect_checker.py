@@ -71,11 +71,18 @@ def test_non_offline_cached_payload_is_rejected_and_rebuilt(deck, monkeypatch, r
     assert out["reader"] == "offline"
 
 
-def test_offline_cached_payload_is_served_without_rebuild(deck, monkeypatch):
-    # The positive control: an offline-reader payload IS served (builder untouched).
-    _seed_cache(deck, {"reader": "offline", "slideCount": 1,
-                       "slides": [{"index": 0, "number": 1,
-                                   "items": [{"kind": "text", "text": "Covered", "runs": []}]}],
+@pytest.mark.parametrize(
+    "slides",
+    [
+        [{"index": 0, "number": 1, "items": [{"kind": "text", "text": "Covered", "runs": []}]}],
+        [{"index": 0, "number": 1, "items": []}],
+    ],
+    ids=["runs-on-every-text-item", "no-text-items-vacuous-coverage"],
+)
+def test_offline_cached_payload_is_served_without_rebuild(deck, monkeypatch, slides):
+    # The positive control: an offline-reader payload IS served (builder untouched),
+    # including one with no eligible text items at all.
+    _seed_cache(deck, {"reader": "offline", "slideCount": len(slides), "slides": slides,
                        "sentinel": "CACHED"})
 
     def boom(*a, **k):  # pragma: no cover - must not run
@@ -87,13 +94,24 @@ def test_offline_cached_payload_is_served_without_rebuild(deck, monkeypatch):
     assert out["_cached"] is True
 
 
-def test_offline_cache_entry_without_runs_is_not_served_to_the_checker(deck, monkeypatch):
+@pytest.mark.parametrize(
+    "slides",
+    [
+        [{"index": 0, "number": 1, "items": [{"kind": "text", "text": "Hello"}]}],
+        [
+            {"index": 0, "number": 1, "items": [{"kind": "text", "text": "Covered", "runs": []}]},
+            {"index": 1, "number": 2, "items": [{"kind": "text", "text": "Uncovered"}]},
+        ],
+    ],
+    ids=["runs-less", "runs-on-only-some-slides"],
+)
+def test_offline_cache_entry_without_full_runs_coverage_is_rebuilt(deck, monkeypatch, slides):
     # A runs-less offline entry (e.g. from acquire_wall_payload's two-tier cache write,
-    # which never attaches runs) is not checker-shaped -- it is not served; the cache
-    # falls through to a real rebuild instead.
-    _seed_cache(deck, {"reader": "offline", "slideCount": 1,
-                       "slides": [{"index": 0, "number": 1,
-                                   "items": [{"kind": "text", "text": "Hello"}]}],
+    # which never attaches runs) is not checker-shaped. Neither is a two-tier partial
+    # legacy fallback where slide 1's items carry runs (remap_keynote's legacy path) and
+    # slide 2's text item does not: coverage is checked across every slide, not just any
+    # item. Both fall through to a real rebuild instead of being served.
+    _seed_cache(deck, {"reader": "offline", "slideCount": len(slides), "slides": slides,
                        "sentinel": "CACHED"})
 
     calls: dict = {"n": 0}
@@ -101,63 +119,15 @@ def test_offline_cache_entry_without_runs_is_not_served_to_the_checker(deck, mon
     def spy_build(key_path, bulk_geometry_fn, *, slide_range=None, keep_open=False, log=None):
         calls["n"] += 1
         return {"slideCount": 1,
-                 "slides": [{"index": 0, "number": 1,
-                             "items": [{"kind": "text", "text": "Hello", "runs": []}]}],
+                "slides": [{"index": 0, "number": 1,
+                            "items": [{"kind": "text", "text": "Hello", "runs": []}]}],
                 "sentinel": "REBUILT"}
 
     monkeypatch.setattr(inspect_mod, "_build_checker_offline", spy_build)
     out = inspect_mod.inspect_keynote_checker(deck, use_cache=True)
-    assert calls["n"] == 1, "a runs-less offline cache entry must fall through to a rebuild"
+    assert calls["n"] == 1, "an offline cache entry without full runs coverage must fall through to a rebuild"
     assert out["sentinel"] == "REBUILT"
     assert out["reader"] == "offline"
-
-
-def test_mixed_cache_entry_with_runs_on_only_some_slides_is_rejected(deck, monkeypatch):
-    # Two-tier partial legacy fallback: slide 1's items carry runs (replaced via
-    # remap_keynote's legacy path), slide 2's text item does not (offline, never
-    # attach_runs'd). Coverage must be checked across every slide, not just any item.
-    _seed_cache(deck, {"reader": "offline", "slideCount": 2,
-                       "slides": [
-                           {"index": 0, "number": 1,
-                            "items": [{"kind": "text", "text": "Covered", "runs": []}]},
-                           {"index": 1, "number": 2,
-                            "items": [{"kind": "text", "text": "Uncovered"}]},
-                       ],
-                       "sentinel": "CACHED"})
-
-    calls: dict = {"n": 0}
-
-    def spy_build(key_path, bulk_geometry_fn, *, slide_range=None, keep_open=False, log=None):
-        calls["n"] += 1
-        return {"slideCount": 2,
-                 "slides": [
-                     {"index": 0, "number": 1,
-                      "items": [{"kind": "text", "text": "Covered", "runs": []}]},
-                     {"index": 1, "number": 2,
-                      "items": [{"kind": "text", "text": "Uncovered", "runs": []}]},
-                 ],
-                "sentinel": "REBUILT"}
-
-    monkeypatch.setattr(inspect_mod, "_build_checker_offline", spy_build)
-    out = inspect_mod.inspect_keynote_checker(deck, use_cache=True)
-    assert calls["n"] == 1, "a mixed-coverage offline cache entry must fall through to a rebuild"
-    assert out["sentinel"] == "REBUILT"
-    assert out["reader"] == "offline"
-
-
-def test_offline_cache_entry_with_no_text_items_is_served(deck, monkeypatch):
-    # No eligible text items at all (vacuous coverage) must still count as served.
-    _seed_cache(deck, {"reader": "offline", "slideCount": 1,
-                       "slides": [{"index": 0, "number": 1, "items": []}],
-                       "sentinel": "CACHED"})
-
-    def boom(*a, **k):  # pragma: no cover - must not run
-        raise AssertionError("builder must not run when nothing is eligible for runs")
-
-    monkeypatch.setattr(inspect_mod, "_build_checker_offline", boom)
-    out = inspect_mod.inspect_keynote_checker(deck, use_cache=True)
-    assert out["sentinel"] == "CACHED"
-    assert out["_cached"] is True
 
 
 def test_rejected_cache_entry_never_reaches_the_legacy_reader_with_cache_on(deck, monkeypatch):
@@ -233,18 +203,34 @@ def test_cache_hit_export_only_skips_the_rebuild(deck, monkeypatch, tmp_path):
     assert "export" in out["_timing"]
 
 
-def test_complete_preview_set_with_a_skipped_slide_is_a_hit(deck, monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "slides, pngs",
+    [
+        (
+            [{"index": 0, "number": 1, "items": [{"runs": []}]},
+             {"index": 1, "number": 2, "items": [], "skipped": True},
+             {"index": 2, "number": 3, "items": []}],
+            (1, 3),
+        ),
+        (
+            [{"index": 0, "number": 1, "items": [{"runs": []}], "skipped": True},
+             {"index": 1, "number": 2, "items": [], "skipped": True}],
+            (),
+        ),
+    ],
+    ids=["skipped-slide-has-no-png", "all-skipped-empty-set"],
+)
+def test_complete_preview_set_with_skipped_slides_is_a_hit(deck, monkeypatch, tmp_path, slides, pngs):
     # A skipped slide gets NO preview (export uses skipped slides:false), so a COMPLETE
     # set is one PNG per non-skipped slide (2 of 3 here) — this must be served as a warm
-    # hit, not re-exported every run. Guards the off-by-skipped-count fix.
-    _seed_cache(deck, {"reader": "offline", "slideCount": 3,
-                       "slides": [{"index": 0, "number": 1, "items": [{"runs": []}]},
-                                  {"index": 1, "number": 2, "items": [], "skipped": True},
-                                  {"index": 2, "number": 3, "items": []}],
+    # hit, not re-exported every run. Guards the off-by-skipped-count fix. Degenerate
+    # case: every slide skipped => expected_pngs == 0, so an empty preview dir IS a
+    # complete set.
+    _seed_cache(deck, {"reader": "offline", "slideCount": len(slides), "slides": slides,
                        "sentinel": "CACHED", "exportError": "old export failed"})
     png_dir = preview_cache_dir(deck_digest(deck))
     png_dir.mkdir(parents=True, exist_ok=True)
-    for n in (1, 3):  # only the 2 non-skipped slides have a PNG
+    for n in pngs:
         (png_dir / f"slide-{n}.png").write_bytes(b"\x89PNG")
 
     def boom(*a, **k):  # pragma: no cover - neither may run on a complete-set hit
@@ -262,18 +248,27 @@ def test_complete_preview_set_with_a_skipped_slide_is_a_hit(deck, monkeypatch, t
     assert "export" not in out["_timing"], "no re-export on a complete-set hit"
 
 
-def test_partial_set_on_a_skipped_deck_still_re_exports(deck, monkeypatch, tmp_path):
-    # Intersection of the two behaviours: a deck WITH a skipped slide but an INCOMPLETE
-    # preview set (1 PNG when 2 non-skipped slides are expected) must NOT be served — the
-    # skipped-count fix must narrow the hit, not over-serve a genuinely partial set.
-    _seed_cache(deck, {"reader": "offline", "slideCount": 3,
-                       "slides": [{"index": 0, "number": 1, "items": [{"runs": []}]},
-                                  {"index": 1, "number": 2, "items": [], "skipped": True},
-                                  {"index": 2, "number": 3, "items": []}],
+@pytest.mark.parametrize(
+    "slides, missing",
+    [
+        ([{"index": 0, "number": 1, "items": [{"runs": []}]},
+          {"index": 1, "number": 2, "items": []}], "slide-2.png"),
+        ([{"index": 0, "number": 1, "items": [{"runs": []}]},
+          {"index": 1, "number": 2, "items": [], "skipped": True},
+          {"index": 2, "number": 3, "items": []}], "slide-3.png"),
+    ],
+    ids=["partial-set", "partial-set-on-a-skipped-deck"],
+)
+def test_partial_preview_set_is_not_served_as_a_hit(deck, monkeypatch, tmp_path, slides, missing):
+    # Hardened hit: a partial preview set (< expected) must NOT be served as a hit; the
+    # export-only path re-runs the export instead of returning the partial dir. With a
+    # skipped slide, the skipped-count fix must narrow the hit, not over-serve a
+    # genuinely partial set (1 PNG when 2 non-skipped slides are expected).
+    _seed_cache(deck, {"reader": "offline", "slideCount": len(slides), "slides": slides,
                        "sentinel": "CACHED"})
     png_dir = preview_cache_dir(deck_digest(deck))
     png_dir.mkdir(parents=True, exist_ok=True)
-    (png_dir / "slide-1.png").write_bytes(b"\x89PNG")  # only 1 of the 2 expected
+    (png_dir / "slide-1.png").write_bytes(b"\x89PNG")
 
     def boom(*a, **k):  # pragma: no cover
         raise AssertionError("rebuild must not run")
@@ -284,58 +279,7 @@ def test_partial_set_on_a_skipped_deck_still_re_exports(deck, monkeypatch, tmp_p
 
     def fake_export(key_path, export_dir, **kwargs):
         filled["calls"] += 1
-        (Path(export_dir) / "slide-3.png").write_bytes(b"\x89PNG")
-        return None
-
-    monkeypatch.setattr(inspect_mod, "export_slide_images", fake_export)
-
-    out = inspect_mod.inspect_keynote_checker(deck, export_dir=tmp_path / "job", use_cache=True)
-    assert filled["calls"] == 1, "a partial set on a skipped deck must still re-export"
-    assert out["exported"] is True
-
-
-def test_all_slides_skipped_empty_set_is_a_hit(deck, monkeypatch, tmp_path):
-    # Degenerate case: every slide skipped => expected_pngs == 0, so an empty preview dir
-    # IS a complete set and must be served as a hit with no export.
-    _seed_cache(deck, {"reader": "offline", "slideCount": 2,
-                       "slides": [{"index": 0, "number": 1, "items": [{"runs": []}], "skipped": True},
-                                  {"index": 1, "number": 2, "items": [], "skipped": True}],
-                       "sentinel": "CACHED"})
-    preview_cache_dir(deck_digest(deck)).mkdir(parents=True, exist_ok=True)  # empty
-
-    def boom(*a, **k):  # pragma: no cover - neither may run
-        raise AssertionError("all-skipped empty set must be a warm hit")
-
-    monkeypatch.setattr(inspect_mod, "_build_checker_offline", boom)
-    monkeypatch.setattr(inspect_mod, "export_slide_images", boom)
-
-    out = inspect_mod.inspect_keynote_checker(deck, export_dir=tmp_path / "job", use_cache=True)
-    assert out["_cached"] is True
-    assert out["sentinel"] == "CACHED"
-    assert "export" not in out["_timing"]
-
-
-def test_partial_preview_set_is_not_served_as_a_hit(deck, monkeypatch, tmp_path):
-    # Hardened hit: a partial preview set (< slideCount) must NOT be served as a hit;
-    # the export-only path re-runs the export instead of returning the partial dir.
-    _seed_cache(deck, {"reader": "offline", "slideCount": 2,
-                       "slides": [{"index": 0, "number": 1, "items": [{"runs": []}]},
-                                  {"index": 1, "number": 2, "items": []}],
-                       "sentinel": "CACHED"})
-    png_dir = preview_cache_dir(deck_digest(deck))
-    png_dir.mkdir(parents=True, exist_ok=True)
-    (png_dir / "slide-1.png").write_bytes(b"\x89PNG")  # only 1 of 2
-
-    def boom(*a, **k):  # pragma: no cover
-        raise AssertionError("rebuild must not run")
-
-    monkeypatch.setattr(inspect_mod, "_build_checker_offline", boom)
-
-    filled: dict = {"calls": 0}
-
-    def fake_export(key_path, export_dir, **kwargs):
-        filled["calls"] += 1
-        (Path(export_dir) / "slide-2.png").write_bytes(b"\x89PNG")
+        (Path(export_dir) / missing).write_bytes(b"\x89PNG")
         return None
 
     monkeypatch.setattr(inspect_mod, "export_slide_images", fake_export)
