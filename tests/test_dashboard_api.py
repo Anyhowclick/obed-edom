@@ -662,10 +662,11 @@ def test_outline_endpoint_rejects_private_root_export_dir(tmp_path):
     assert res.status_code == 400
 
 
-def _wait(client, job_id, tries=120):
+def _wait(client, job_id, timeout=30.0):
     import time
 
-    for _ in range(tries):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         job = client.get(f"/api/jobs/{job_id}").json()
         if job["status"] in {"done", "error"}:
             return job
