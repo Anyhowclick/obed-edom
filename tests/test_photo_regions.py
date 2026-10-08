@@ -82,11 +82,14 @@ def test_rescaled_identical_crop_is_silent():
 
 
 def test_blur_patch_is_a_region_finding():
+    """The blur covers the right chat's lower half from a third of the way in, i.e. the
+    image's right third. Only its text bars change visibly, and they sit just below the
+    midline (grid rows 6-8 of 12), so the location is the right side, not the bottom."""
     clean = _chat_bitmap((500, 900))
     blurred = _chat_bitmap((500, 900), blur=True)
     delta = region_delta(clean, blurred)
     assert delta.differing
-    assert "bottom" in (delta.location or "bottom") or "right" in (delta.location or "")
+    assert delta.location == "right"
 
 
 def test_yellow_box_is_a_marker_finding():

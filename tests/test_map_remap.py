@@ -4427,23 +4427,38 @@ def test_gold_slide_7_reports_excluded_overlays():
     assert row["excludedOffCanvas"] == 11
 
 
-def test_gold_on_canvas_fraction_out_param_does_not_change_anything():
+def test_gold_on_canvas_fraction_out_param_does_not_change_anything(monkeypatch):
     """Item 2a must be report-only: adding the `excluded_report` out-param changes
-    no fraction, and running `plan_payload` with or without a
-    `framing_report` to fill must not change which slides get fitted."""
+    no fraction, and planning with or without the framing report's excluded counts
+    filled must not change any fraction, fitted slide or transform.
+
+    `plan_payload` always builds its framing report, so the "without" run withholds
+    the out-param from `on_canvas_fraction`."""
     data = _gold_pin_continuity_plan()
     if data is None:
         pytest.skip("Gold wall/template deck not available; refuse to open Keynote")
     wall, template = data["wall"], data["template"]
     recipe = learn_recipe(wall, template)
 
-    fitted_with_report = plan_payload(
-        wall, recipe, template=template, framing_overrides={6: 4, 7: 4},
-    ).fitted_slides
-    fitted_without_report = plan_payload(
-        wall, recipe, template=template, framing_overrides={6: 4, 7: 4},
-    ).fitted_slides
-    assert fitted_with_report == fitted_without_report
+    from obed_edom import map_remap
+
+    with_counts = plan_payload(wall, recipe, template=template, framing_overrides={13: 5, 14: 5})
+
+    real_fraction = map_remap.on_canvas_fraction
+
+    def without_out_param(slide, recipe, wall_w, wall_h, excluded_report=None):
+        return real_fraction(slide, recipe, wall_w, wall_h)
+
+    monkeypatch.setattr(map_remap, "on_canvas_fraction", without_out_param)
+    bare = plan_payload(wall, recipe, template=template, framing_overrides={13: 5, 14: 5})
+    monkeypatch.undo()
+
+    counts = {"excluded", "excludedOffCanvas"}
+    assert with_counts.framing and all(counts <= row.keys() for row in with_counts.framing)
+    assert not any(counts & row.keys() for row in bare.framing)
+    assert [{k: v for k, v in row.items() if k not in counts} for row in with_counts.framing] == bare.framing
+    assert with_counts.fitted_slides == bare.fitted_slides
+    assert with_counts.transforms == bare.transforms
 
     wall_w, wall_h = wall["slideWidth"], wall["slideHeight"]
     for slide in wall["slides"]:
