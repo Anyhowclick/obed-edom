@@ -16,7 +16,6 @@ import json
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import numpy as np
@@ -47,6 +46,9 @@ def _load_adversarial_module():
 
 p2 = _load_adversarial_module()
 
+from fake_chrome import FakeChromeProcess, FakeTime  # noqa: E402
+from obed_edom import devtools_port  # noqa: E402
+from obed_edom.devtools_port import DevToolsEndpoint  # noqa: E402
 from test_p2_adversarial import _badge_sample  # noqa: E402
 
 
@@ -640,15 +642,79 @@ def test_chrome_spawn_lets_chrome_pick_its_port_and_drops_a_stale_port_file(tmp_
     assert c.port is None
 
 
+def _spike_time(monkeypatch, spike) -> FakeTime:
+    """`_attach` and `wait_devtools_active_port` on simulated time (`asyncio.sleep` included)."""
+    clock = FakeTime().install(monkeypatch, spike, devtools_port)
+    monkeypatch.setattr(spike.asyncio, "sleep", clock.async_sleep)
+    return clock
+
+
+_ENDPOINT = DevToolsEndpoint(51234, "/devtools/browser/fresh")
+_VERSION = "http://127.0.0.1:51234/json/version"
+_LIST = "http://127.0.0.1:51234/json/list"
+
+
+class _Answer:
+    def __init__(self, body):
+        self.body = json.dumps(body).encode()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def read(self):
+        return self.body
+
+
+def _cdp_server(monkeypatch, browser="/devtools/browser/fresh", on_request=None):
+    """A CDP HTTP server on 51234 whose `/json/version` names `browser` and which has one page."""
+    import urllib.request
+
+    urls = []
+
+    def urlopen(url, timeout):
+        urls.append(url)
+        if on_request is not None:
+            on_request(url)
+        if url == _VERSION:
+            return _Answer({"webSocketDebuggerUrl": f"ws://127.0.0.1:51234{browser}"})
+        assert url == _LIST
+        return _Answer([{"type": "page", "url": "about:blank", "webSocketDebuggerUrl": "ws://127.0.0.1:51234/devtools/page/P"}])
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    return urls
+
+
+class _AsyncWs:
+    def __init__(self):
+        self.closed = 0
+
+    async def close(self):
+        self.closed += 1
+
+
+def _attaching_chrome(monkeypatch, spike, tmp_path, proc):
+    c = spike.ChromeCdp(Path("chrome"), tmp_path / "profile")
+    c.proc = proc
+    monkeypatch.setattr(c, "_sample_rss", lambda: None)
+    monkeypatch.setattr(spike, "wait_devtools_active_port", lambda profile, proc, timeout: _ENDPOINT)
+    return c
+
+
 def test_chrome_attach_uses_the_port_chrome_wrote(tmp_path, monkeypatch):
+    """Positive control: a live Chrome that never answers is retried every 100 ms on the port it
+    wrote until the simulated `START_TIMEOUT_S`."""
     import urllib.request
 
     spike = _spike()
+    clock = _spike_time(monkeypatch, spike)
     waited, urls = [], []
 
     def port_of(profile, proc, timeout):
         waited.append((profile, proc, timeout))
-        return 43210
+        return DevToolsEndpoint(43210, "/devtools/browser/b")
 
     def urlopen(url, timeout):
         urls.append(url)
@@ -656,36 +722,17 @@ def test_chrome_attach_uses_the_port_chrome_wrote(tmp_path, monkeypatch):
 
     monkeypatch.setattr(spike, "wait_devtools_active_port", port_of)
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
-    monkeypatch.setattr(spike.ChromeCdp, "START_TIMEOUT_S", 0.2)
     c = spike.ChromeCdp(Path("chrome"), tmp_path / "profile")
-    c.proc = proc = _ChromeExitsAfterPolls(alive_polls=10**6)
+    c.proc = proc = FakeChromeProcess()
     monkeypatch.setattr(c, "_sample_rss", lambda: None)
-    started = time.monotonic()
     with pytest.raises(RuntimeError, match="did not come up"):
         asyncio.run(c._attach())
-    assert waited == [(tmp_path / "profile", proc, 0.2)]
+    passes = round(spike.ChromeCdp.START_TIMEOUT_S / 0.1)
+    assert waited == [(tmp_path / "profile", proc, spike.ChromeCdp.START_TIMEOUT_S)]
     assert c.port == 43210
-    assert len(urls) > 1 and all(u.startswith("http://127.0.0.1:43210/") for u in urls), (
-        "positive control: a live Chrome that never answers is retried until the deadline"
-    )
-    assert time.monotonic() - started >= 0.2
-
-
-class _ChromeExitsAfterPolls:
-    """Alive for its first `alive_polls` polls, then exited with `code` (or exited as soon as
-    `die()` is called)."""
-
-    pid = 4321
-
-    def __init__(self, alive_polls: int, code: int = 9):
-        self.alive_polls, self.code, self.polls, self.dead = alive_polls, code, 0, False
-
-    def die(self):
-        self.dead = True
-
-    def poll(self):
-        self.polls += 1
-        return self.code if self.dead or self.polls > self.alive_polls else None
+    assert urls == ["http://127.0.0.1:43210/json/version"] * passes
+    assert clock.sleeps == [0.1] * passes
+    assert clock.elapsed == pytest.approx(spike.ChromeCdp.START_TIMEOUT_S)
 
 
 def test_chrome_dying_after_writing_its_port_file_never_drives_that_port(tmp_path, monkeypatch):
@@ -697,21 +744,20 @@ def test_chrome_dying_after_writing_its_port_file_never_drives_that_port(tmp_pat
     import websockets
 
     spike = _spike()
+    clock = _spike_time(monkeypatch, spike)
     urls = []
     monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout: urls.append(url))
     monkeypatch.setattr(websockets, "connect", lambda *a, **k: pytest.fail("connected to a dead Chrome's port"))
-    monkeypatch.setattr(spike.ChromeCdp, "START_TIMEOUT_S", 30.0)
     profile = tmp_path / "profile"
     profile.mkdir()
     (profile / "DevToolsActivePort").write_text("51234\n/devtools/browser/fresh\n")
     c = spike.ChromeCdp(Path("chrome"), profile)
-    c.proc = _ChromeExitsAfterPolls(alive_polls=1, code=9)
+    c.proc = FakeChromeProcess(alive_polls=1, code=9)
     monkeypatch.setattr(c, "_sample_rss", lambda: None)
 
-    started = time.monotonic()
     with pytest.raises(RuntimeError, match=r"Chrome exited \(9\) before its CDP page target was ready"):
         asyncio.run(c._attach())
-    assert time.monotonic() - started < 1.0
+    assert clock.sleeps == []
     assert c.port == 51234
     assert urls == []
 
@@ -720,46 +766,106 @@ def test_chrome_dying_after_writing_its_port_file_never_drives_that_port(tmp_pat
 def test_chrome_dying_mid_readiness_fails_fast_not_at_the_deadline(tmp_path, monkeypatch, dies_on):
     """Chrome dies while `_attach` waits on either readiness endpoint: the next pass sees the exit
     instead of retrying until `START_TIMEOUT_S`."""
-    import urllib.request
-
     import websockets
 
     spike = _spike()
-    c = spike.ChromeCdp(Path("chrome"), tmp_path / "profile")
-    c.proc = chrome = _ChromeExitsAfterPolls(alive_polls=10**6, code=0)
-    urls = []
+    clock = _spike_time(monkeypatch, spike)
+    chrome = FakeChromeProcess(code=0)
+    c = _attaching_chrome(monkeypatch, spike, tmp_path, chrome)
 
-    class Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
-        def read(self):
-            return b"{}" if dies_on == "/json/list" else b"[]"
-
-    def urlopen(url, timeout):
-        urls.append(url)
+    def die_on(url):
         if url.endswith(dies_on):
             chrome.die()
             raise ConnectionError("connection refused")
-        return Response()
 
-    monkeypatch.setattr(spike, "wait_devtools_active_port", lambda profile, proc, timeout: 51234)
-    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    urls = _cdp_server(monkeypatch, on_request=die_on)
     monkeypatch.setattr(websockets, "connect", lambda *a, **k: pytest.fail("connected to a dead Chrome's port"))
-    monkeypatch.setattr(spike.ChromeCdp, "START_TIMEOUT_S", 30.0)
-    monkeypatch.setattr(c, "_sample_rss", lambda: None)
 
-    started = time.monotonic()
     with pytest.raises(RuntimeError, match=r"Chrome exited \(0\) before its CDP page target was ready"):
         asyncio.run(c._attach())
-    assert time.monotonic() - started < 1.0
-    expected = ["http://127.0.0.1:51234/json/version"]
-    if dies_on == "/json/list":
-        expected.append("http://127.0.0.1:51234/json/list")
-    assert urls == expected
+    assert urls == ([_VERSION] if dies_on == "/json/version" else [_VERSION, _LIST])
+    assert clock.sleeps == [0.1]
+
+
+def test_a_foreign_devtools_endpoint_on_the_port_is_refused_without_connecting(tmp_path, monkeypatch):
+    """Codex round 3: the owned Chrome is alive at the poll, then exits and another CDP server
+    rebinds its port before the request. Its `/json/version` names another browser id, so `_attach`
+    fails at once: no target listing, no WebSocket, no retry until the deadline."""
+    import websockets
+
+    spike = _spike()
+    clock = _spike_time(monkeypatch, spike)
+    c = _attaching_chrome(monkeypatch, spike, tmp_path, FakeChromeProcess())
+    urls = _cdp_server(monkeypatch, browser="/devtools/browser/another-run")
+    monkeypatch.setattr(websockets, "connect", lambda *a, **k: pytest.fail("connected to a foreign endpoint"))
+
+    with pytest.raises(
+        spike.ForeignDevToolsEndpoint,
+        match=r"^127\.0\.0\.1:51234 is another DevTools endpoint: its browser target is "
+        r"'ws://127\.0\.0\.1:51234/devtools/browser/another-run', not /devtools/browser/fresh$",
+    ):
+        asyncio.run(c._attach())
+    assert urls == [_VERSION]
+    assert clock.sleeps == []
+
+
+def test_positive_control_the_browser_chrome_wrote_is_accepted_and_driven(tmp_path, monkeypatch):
+    import websockets
+
+    spike = _spike()
+    clock = _spike_time(monkeypatch, spike)
+    c = _attaching_chrome(monkeypatch, spike, tmp_path, FakeChromeProcess())
+    urls = _cdp_server(monkeypatch)
+    ws, calls = _AsyncWs(), []
+
+    async def connect(url, max_size=None):
+        calls.append(("connect", url))
+        return ws
+
+    async def call(method, **params):
+        calls.append(("call", method))
+        return {}
+
+    monkeypatch.setattr(websockets, "connect", connect)
+    monkeypatch.setattr(c, "call", call)
+
+    asyncio.run(c._attach())
+    assert urls == [_VERSION, _LIST]
+    assert calls[0] == ("connect", "ws://127.0.0.1:51234/devtools/page/P")
+    assert [name for kind, name in calls[1:]] == [
+        "Runtime.enable", "Page.enable", "Log.enable",
+        "Emulation.setDeviceMetricsOverride", "Emulation.setDefaultBackgroundColorOverride",
+    ]
+    assert c._ws is ws and ws.closed == 0
+    assert clock.sleeps == []
+
+
+def test_chrome_exiting_once_its_page_socket_connects_is_refused(tmp_path, monkeypatch):
+    """Codex round 3: the owned process is polled again after the WebSocket connects. Alive then,
+    the port was Chrome's for the whole handshake; dead, the socket may be another server's, so it
+    is closed and `_attach` fails before a single CDP command."""
+    import websockets
+
+    spike = _spike()
+    _spike_time(monkeypatch, spike)
+    chrome = FakeChromeProcess(code=9)
+    c = _attaching_chrome(monkeypatch, spike, tmp_path, chrome)
+    _cdp_server(monkeypatch)
+    ws = _AsyncWs()
+
+    async def connect(url, max_size=None):
+        chrome.die()
+        return ws
+
+    async def call(method, **params):
+        pytest.fail(f"sent {method} after Chrome exited")
+
+    monkeypatch.setattr(websockets, "connect", connect)
+    monkeypatch.setattr(c, "call", call)
+
+    with pytest.raises(RuntimeError, match=r"Chrome exited \(9\) before its CDP page target was ready"):
+        asyncio.run(c._attach())
+    assert ws.closed == 1
 
 
 def test_dissolve_serve_binds_port_zero_directly(tmp_path):

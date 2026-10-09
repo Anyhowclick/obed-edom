@@ -93,7 +93,9 @@ from obed_edom.html_alpha_probe import (  # noqa: E402
     score_inpage_liveness,
     score_live_coverage,
 )
-from obed_edom.devtools_port import wait_devtools_active_port  # noqa: E402
+from obed_edom.devtools_port import (  # noqa: E402
+    DevToolsEndpoint, ForeignDevToolsEndpoint, verify_devtools_owner, wait_devtools_active_port,
+)
 from obed_edom.live_gl_replay_js import GL_REPLAY_VERSION, js_sha256 as gl_replay_js_sha256  # noqa: E402
 from obed_edom.live_host import ADVANCE_ENV, ATTACH_ENV, CONTINUITY_ENV, LiveOutputHost, OutputDisplay, PlayerCommandRejected  # noqa: E402
 from obed_edom.p2_verdict import BURST_OFFSETS_MS, CARRY_EVENT_KINDS, CONTROL_INSET_PX, CONTROL_PATCH_PX  # noqa: E402
@@ -2745,30 +2747,36 @@ def launch_attach_chrome(profile: Path) -> subprocess.Popen:
     return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def wait_for_cdp(port: int, proc: subprocess.Popen, timeout_s: float = 15.0) -> None:
-    """Polls `proc` each pass: once the Chrome that owns `port` has exited, the port is no longer its."""
+def wait_for_cdp(endpoint: DevToolsEndpoint, proc: subprocess.Popen, timeout_s: float = 15.0) -> None:
+    """Polls `proc` each pass: once the Chrome that owns the port has exited, the port is no longer its.
+    A port answering as another browser fails at once."""
+    port = endpoint.port
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         exit_code = proc.poll()
         if exit_code is not None:
             raise SystemExit(f"attach Chrome exited ({exit_code}) before opening a CDP target on port {port}")
         try:
+            verify_devtools_owner(endpoint, 0.5)
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=0.5) as response:
                 if json.loads(response.read()):
                     return
+        except ForeignDevToolsEndpoint as exc:
+            raise SystemExit(f"attach Chrome's CDP port is not its own: {exc}") from exc
         except Exception:
             pass
         time.sleep(0.1)
     raise SystemExit(f"attach Chrome did not open a CDP target on port {port}")
 
 
-def force_exact_viewport(port: int, width: int, height: int) -> Any:
+def force_exact_viewport(port: int, width: int, height: int, proc: subprocess.Popen) -> Any:
     """`--window-size` on a bare headless Chrome (no `--app=` window) does not
     yield an exact `innerWidth`/`innerHeight` (window chrome eats a variable
     amount depending on flags/version); pin the renderer's device metrics
     directly instead of guessing another padding constant. The override lasts
     only while this CDP session is open (Chrome 154 drops it on detach), so the
-    caller holds the returned connection until its Chrome is torn down."""
+    caller holds the returned connection until its Chrome is torn down. `proc` still alive once the
+    session is open means the port was its own throughout."""
     from websockets.sync.client import connect
 
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=5) as response:
@@ -2776,6 +2784,9 @@ def force_exact_viewport(port: int, width: int, height: int) -> Any:
     page = next(item for item in targets if item.get("type") == "page" and item.get("webSocketDebuggerUrl"))
     ws = connect(page["webSocketDebuggerUrl"], open_timeout=5)
     try:
+        exit_code = proc.poll()
+        if exit_code is not None:
+            raise SystemExit(f"attach Chrome exited ({exit_code}) while its viewport session connected on port {port}")
         ws.send(json.dumps({
             "id": 1, "method": "Emulation.setDeviceMetricsOverride",
             "params": {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False},
@@ -2799,10 +2810,10 @@ def attach_chrome(profile: Path, record: dict[str, Any]) -> Iterator[int]:
     try:
         viewport_hold = None
         try:
-            port = wait_devtools_active_port(profile, chrome_proc)
-            wait_for_cdp(port, chrome_proc)
-            viewport_hold = force_exact_viewport(port, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
-            yield port
+            endpoint = wait_devtools_active_port(profile, chrome_proc)
+            wait_for_cdp(endpoint, chrome_proc)
+            viewport_hold = force_exact_viewport(endpoint.port, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, chrome_proc)
+            yield endpoint.port
         finally:
             if viewport_hold is not None:
                 viewport_hold.close()

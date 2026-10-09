@@ -33,7 +33,9 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
 from obed_edom.dsk_live import keynote_running  # noqa: E402
-from obed_edom.devtools_port import DEVTOOLS_ACTIVE_PORT, wait_devtools_active_port  # noqa: E402
+from obed_edom.devtools_port import (  # noqa: E402
+    DEVTOOLS_ACTIVE_PORT, ForeignDevToolsEndpoint, verify_devtools_owner, wait_devtools_active_port,
+)
 from obed_edom.html_alpha_probe import (  # noqa: E402
     CLOCK_MIN_RAF,
     CLOCK_WINDOW_S,
@@ -159,19 +161,21 @@ class ChromeCdp:
         import urllib.request
         import websockets
 
-        port = self.port = await asyncio.to_thread(
+        endpoint = await asyncio.to_thread(
             wait_devtools_active_port, self.profile, self.proc, self.START_TIMEOUT_S
         )
+        port = self.port = endpoint.port
         ready = False
         deadline = time.monotonic() + self.START_TIMEOUT_S
         while time.monotonic() < deadline:
             self._raise_if_exited()
             self._sample_rss()
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=0.5) as resp:
-                    json.loads(resp.read().decode())
-                    ready = True
-                    break
+                verify_devtools_owner(endpoint, 0.5)
+                ready = True
+                break
+            except ForeignDevToolsEndpoint:
+                raise
             except Exception:
                 await asyncio.sleep(0.1)
         if not ready:
@@ -194,6 +198,11 @@ class ChromeCdp:
         if not ws_url:
             raise RuntimeError("Chrome has no page CDP target")
         self._ws = await websockets.connect(ws_url, max_size=None)
+        try:
+            self._raise_if_exited()
+        except RuntimeError:
+            await self.close()
+            raise
         await self.call("Runtime.enable")
         await self.call("Page.enable")
         await self.call("Log.enable")

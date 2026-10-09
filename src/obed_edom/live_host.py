@@ -26,11 +26,11 @@ from urllib.parse import unquote, urlsplit
 from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NoReturn
 
 from websockets.sync.client import connect
 
-from .devtools_port import DEVTOOLS_ACTIVE_PORT, wait_devtools_active_port
+from .devtools_port import DEVTOOLS_ACTIVE_PORT, ForeignDevToolsEndpoint, verify_devtools_owner, wait_devtools_active_port
 from .html_preview import preview_root, safe_export_file
 from .live_continuity import ContinuityPlan, Unsupported, codec_report, derive_plan
 from .live_continuity_js import CONTINUITY_VERSION, PRESERVE_CORE_JS, js_sha256
@@ -517,29 +517,24 @@ class ChromeCdp:
             try: stderr = self._stderr_file = self.log_path.with_suffix(".chrome.log").open("wb")
             except Exception: stderr = subprocess.DEVNULL
         self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=stderr)
-        try: self.port = wait_devtools_active_port(self.profile, self.proc, _CHROME_START_TIMEOUT_S)
-        except RuntimeError as exc:
-            try: self.stop()
-            except Exception: pass
-            raise LiveHostError(f"Chrome CDP did not start: {exc}") from exc
+        try: endpoint = wait_devtools_active_port(self.profile, self.proc, _CHROME_START_TIMEOUT_S)
+        except RuntimeError as exc: self._abort_start(f"Chrome CDP did not start: {exc}", exc)
+        self.port = endpoint.port
         deadline = time.monotonic() + _CHROME_START_TIMEOUT_S
         while time.monotonic() < deadline:
-            exit_code = self.proc.poll()
-            if exit_code is not None:
-                try: self.stop()
-                except Exception: pass
-                raise LiveHostError(f"Chrome CDP did not start: Chrome exited ({exit_code}) before its page target was ready")
+            self._abort_start_if_exited()
             try:
+                verify_devtools_owner(endpoint, .3)
                 with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/json/list", timeout=.3) as response: targets = json.loads(response.read())
                 target = next((item for item in targets if item.get("type") == "page" and item.get("webSocketDebuggerUrl")), None)
                 if target:
                     self.ws = connect(target["webSocketDebuggerUrl"], open_timeout=2, max_size=_CDP_MAX_MESSAGE_BYTES)
                     break
-            except Exception: time.sleep(.05)
-        if not self.ws:
-            try: self.stop()
+            except ForeignDevToolsEndpoint as exc: self._abort_start(f"Chrome CDP did not start: {exc}", exc)
             except Exception: pass
-            raise LiveHostError("Chrome CDP did not start.")
+            time.sleep(.05)
+        if not self.ws: self._abort_start("Chrome CDP did not start.")
+        self._abort_start_if_exited()
         self.call("Runtime.enable")
         self.call("Page.enable")
         try: self.call("Log.enable")
@@ -547,6 +542,16 @@ class ChromeCdp:
         if not self.headless:
             window = self.call("Browser.getWindowForTarget")
             self.call("Browser.setWindowBounds", windowId=window["windowId"], bounds={"windowState": "fullscreen"})
+
+    def _abort_start(self, message: str, cause: Exception | None = None) -> NoReturn:
+        try: self.stop()
+        except Exception: pass
+        raise LiveHostError(message) from cause
+
+    def _abort_start_if_exited(self) -> None:
+        exit_code = self.proc.poll()
+        if exit_code is not None:
+            self._abort_start(f"Chrome CDP did not start: Chrome exited ({exit_code}) before its page target was ready")
 
     def _list_targets(self) -> list[dict[str, Any]]:
         url = self.attach_endpoint.rstrip("/") + "/json/list"

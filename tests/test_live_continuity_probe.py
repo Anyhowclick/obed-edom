@@ -21,7 +21,6 @@ import math
 import shutil
 import subprocess
 import sys
-import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -29,6 +28,7 @@ from typing import Any, Iterator
 import cv2
 import numpy as np
 import pytest
+from fake_chrome import FakeChromeProcess, FakeTime
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -48,6 +48,8 @@ def _load_probe_module():
 
 
 probe = _load_probe_module()
+from obed_edom import devtools_port  # noqa: E402
+from obed_edom.devtools_port import DevToolsEndpoint  # noqa: E402
 
 ASSET = "untitled.mov"
 SRC_RECT = {"x": 100.0, "y": 100.0, "w": 200.0, "h": 100.0}
@@ -4332,8 +4334,8 @@ class TestGlReplayCli:
                 return 0
 
         monkeypatch.setattr(probe, "launch_attach_chrome", lambda profile: Proc())
-        monkeypatch.setattr(probe, "wait_devtools_active_port", lambda profile, proc: 1)
-        monkeypatch.setattr(probe, "wait_for_cdp", lambda port, proc: None)
+        monkeypatch.setattr(probe, "wait_devtools_active_port", lambda profile, proc: DevToolsEndpoint(1, "/devtools/browser/b"))
+        monkeypatch.setattr(probe, "wait_for_cdp", lambda endpoint, proc: None)
         monkeypatch.setattr(probe, "force_exact_viewport", lambda *a: None)
         kwargs = {} if gl is None else {"gl_replay": gl}
         with pytest.raises(RuntimeError):
@@ -4383,8 +4385,8 @@ def test_attach_arm_holds_the_viewport_override_session_until_its_chrome_is_torn
             pass
 
     monkeypatch.setattr(probe, "launch_attach_chrome", lambda profile: Proc())
-    monkeypatch.setattr(probe, "wait_devtools_active_port", lambda profile, proc: 1)
-    monkeypatch.setattr(probe, "wait_for_cdp", lambda port, proc: None)
+    monkeypatch.setattr(probe, "wait_devtools_active_port", lambda profile, proc: DevToolsEndpoint(1, "/devtools/browser/b"))
+    monkeypatch.setattr(probe, "wait_for_cdp", lambda endpoint, proc: None)
     monkeypatch.setattr(probe, "force_exact_viewport", lambda *a: hold)
     monkeypatch.setattr(probe, "LiveOutputHost", Host)
     with pytest.raises(RuntimeError):
@@ -4441,24 +4443,26 @@ class TestAttachChrome:
             state["proc"] = self.Proc(events, ignores_terminate=state["ignores_terminate"])
             return state["proc"]
 
-        def devtools_port(profile: Path, proc: Any) -> int:
+        def devtools_port(profile: Path, proc: Any) -> DevToolsEndpoint:
             assert proc is state["proc"]
             if state["port_error"] is not None:
                 raise state["port_error"]
             events.append("port read")
-            return 9555
+            return DevToolsEndpoint(9555, "/devtools/browser/b")
 
-        def wait_for_cdp(port: int, proc: Any) -> None:
+        def wait_for_cdp(endpoint: DevToolsEndpoint, proc: Any) -> None:
             assert proc is state["proc"]
-            events.append(f"cdp {port}")
+            events.append(f"cdp {endpoint.port} {endpoint.browser_path}")
+
+        def force_exact_viewport(port: int, w: int, h: int, proc: Any) -> Any:
+            assert proc is state["proc"]
+            events.append(f"viewport {port} {w}x{h}")
+            return self.Hold(events, close_error=state["close_error"])
 
         monkeypatch.setattr(probe, "launch_attach_chrome", launch)
         monkeypatch.setattr(probe, "wait_devtools_active_port", devtools_port)
         monkeypatch.setattr(probe, "wait_for_cdp", wait_for_cdp)
-        monkeypatch.setattr(
-            probe, "force_exact_viewport",
-            lambda port, w, h: events.append(f"viewport {port} {w}x{h}") or self.Hold(events, close_error=state["close_error"]),
-        )
+        monkeypatch.setattr(probe, "force_exact_viewport", force_exact_viewport)
         state["profile"] = tmp_path / "attach-chrome-profile"
         return state
 
@@ -4468,7 +4472,7 @@ class TestAttachChrome:
             fake["events"].append(f"body on {port}")
         w, h = probe.VIEWPORT_WIDTH, probe.VIEWPORT_HEIGHT
         assert fake["events"] == [
-            "launch attach-chrome-profile stale=False", "port read", "cdp 9555", f"viewport 9555 {w}x{h}",
+            "launch attach-chrome-profile stale=False", "port read", "cdp 9555 /devtools/browser/b", f"viewport 9555 {w}x{h}",
             "body on 9555", "hold closed", "chrome terminated",
         ]
         assert record == {"chromePid": 4321, "chromeExitCode": 0}
@@ -4539,42 +4543,57 @@ class TestAttachChrome:
         assert calls[0][1]["arm"] == "attach", "the pid/exit code land in the arm's own result"
 
 
-class _ChromeExitsAfterPolls:
-    """Alive for its first `alive_polls` polls, then exited with `code` (or exited as soon as
-    `die()` is called)."""
+_ENDPOINT = DevToolsEndpoint(51234, "/devtools/browser/fresh")
+_VERSION = "http://127.0.0.1:51234/json/version"
+_LIST = "http://127.0.0.1:51234/json/list"
 
-    pid = 4321
 
-    def __init__(self, alive_polls: int, code: int = 9) -> None:
-        self.alive_polls, self.code, self.polls, self.dead = alive_polls, code, 0, False
+class _Answer:
+    def __init__(self, body: Any) -> None:
+        self.body = json.dumps(body).encode()
 
-    def die(self) -> None:
-        self.dead = True
+    def __enter__(self) -> "_Answer":
+        return self
 
-    def poll(self) -> int | None:
-        self.polls += 1
-        return self.code if self.dead or self.polls > self.alive_polls else None
+    def __exit__(self, *_exc: Any) -> bool:
+        return False
 
-    def terminate(self) -> None:
-        self.dead = True
+    def read(self) -> bytes:
+        return self.body
 
-    def wait(self, timeout: float) -> int:
-        return self.code
+
+def _cdp_server(browser: str = "/devtools/browser/fresh") -> tuple[list[str], Any]:
+    """A CDP HTTP server on 51234 whose `/json/version` names `browser` and which has one page."""
+    asked: list[str] = []
+
+    def urlopen(url: str, timeout: float | None = None) -> _Answer:
+        asked.append(url)
+        if url == _VERSION:
+            return _Answer({"webSocketDebuggerUrl": f"ws://127.0.0.1:51234{browser}"})
+        assert url == _LIST
+        return _Answer([{"type": "page", "webSocketDebuggerUrl": "ws://127.0.0.1:51234/devtools/page/P"}])
+
+    return asked, urlopen
 
 
 class TestWaitForCdpPollsTheOwnedChrome:
     """`wait_for_cdp` polls the attach Chrome it owns on every pass: once that Chrome has exited, the
     port it wrote may already belong to another run's CDP process, so it never asks that port again
-    and fails at once with the exit code instead of retrying until its timeout."""
+    and fails at once with the exit code instead of retrying until its timeout. A port that answers
+    as another browser (another CDP server rebound it) fails at once too. All on simulated time."""
+
+    @pytest.fixture
+    def clock(self, monkeypatch: pytest.MonkeyPatch) -> FakeTime:
+        return FakeTime().install(monkeypatch, probe, devtools_port)
 
     def test_chrome_dying_after_writing_its_port_file_never_drives_that_port(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock: FakeTime,
     ) -> None:
         """Real `wait_devtools_active_port` + real `wait_for_cdp` through `attach_chrome`: Chrome
         writes a complete port file, is alive for the port read, then dies before readiness."""
-        chrome = _ChromeExitsAfterPolls(alive_polls=1, code=9)
+        chrome = FakeChromeProcess(alive_polls=1, code=9)
 
-        def launch(profile: Path) -> _ChromeExitsAfterPolls:
+        def launch(profile: Path) -> FakeChromeProcess:
             profile.mkdir(parents=True, exist_ok=True)
             (profile / "DevToolsActivePort").write_text("51234\n/devtools/browser/fresh\n")
             return chrome
@@ -4585,16 +4604,15 @@ class TestWaitForCdpPollsTheOwnedChrome:
         monkeypatch.setattr(probe, "force_exact_viewport", lambda *a: pytest.fail("connected to a dead Chrome's port"))
         record: dict[str, Any] = {}
 
-        started = time.monotonic()
         with pytest.raises(SystemExit, match=r"attach Chrome exited \(9\) before opening a CDP target on port 51234"):
             with probe.attach_chrome(tmp_path / "attach-chrome-profile", record):
                 pytest.fail("the block must not run")
-        assert time.monotonic() - started < 1.0
+        assert clock.sleeps == []
         assert asked == []
         assert record == {"chromePid": 4321, "chromeExitCode": 9}
 
-    def test_chrome_dying_mid_loop_fails_fast_not_at_the_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        chrome = _ChromeExitsAfterPolls(alive_polls=10**6, code=0)
+    def test_chrome_dying_mid_loop_fails_fast_not_at_the_timeout(self, monkeypatch: pytest.MonkeyPatch, clock: FakeTime) -> None:
+        chrome = FakeChromeProcess(code=0)
         asked: list[str] = []
 
         def urlopen(url: str, timeout: float | None = None) -> None:
@@ -4603,18 +4621,17 @@ class TestWaitForCdpPollsTheOwnedChrome:
             raise ConnectionError("connection refused")
 
         monkeypatch.setattr(probe.urllib.request, "urlopen", urlopen)
-        started = time.monotonic()
         with pytest.raises(SystemExit, match=r"attach Chrome exited \(0\) before opening a CDP target on port 51234"):
-            probe.wait_for_cdp(51234, chrome, timeout_s=30.0)
-        assert time.monotonic() - started < 1.0
-        assert asked == ["http://127.0.0.1:51234/json/list"]
+            probe.wait_for_cdp(_ENDPOINT, chrome, timeout_s=30.0)
+        assert clock.sleeps == [0.1]
+        assert asked == [_VERSION]
 
     def test_positive_control_a_live_chrome_that_never_answers_still_waits_for_the_timeout(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self, monkeypatch: pytest.MonkeyPatch, clock: FakeTime,
     ) -> None:
-        """The same refusing endpoint with a Chrome that stays alive is retried until the timeout,
-        so the fast failures above are the exit check and nothing else."""
-        chrome = _ChromeExitsAfterPolls(alive_polls=10**6)
+        """The same refusing endpoint with a Chrome that stays alive is retried every 100 ms until the
+        simulated timeout, so the fast failures above are the exit check and nothing else."""
+        chrome = FakeChromeProcess()
         asked: list[str] = []
 
         def urlopen(url: str, timeout: float | None = None) -> None:
@@ -4622,11 +4639,79 @@ class TestWaitForCdpPollsTheOwnedChrome:
             raise ConnectionError("connection refused")
 
         monkeypatch.setattr(probe.urllib.request, "urlopen", urlopen)
-        started = time.monotonic()
         with pytest.raises(SystemExit, match=r"^attach Chrome did not open a CDP target on port 51234$"):
-            probe.wait_for_cdp(51234, chrome, timeout_s=0.3)
-        assert time.monotonic() - started >= 0.3
-        assert len(asked) > 1
+            probe.wait_for_cdp(_ENDPOINT, chrome, timeout_s=15.0)
+        assert clock.elapsed == pytest.approx(15.0)
+        assert clock.sleeps == [0.1] * 150
+        assert asked == [_VERSION] * 150
+        assert chrome.polls == 150
+
+    def test_a_foreign_devtools_endpoint_on_the_port_is_refused_at_once(
+        self, monkeypatch: pytest.MonkeyPatch, clock: FakeTime,
+    ) -> None:
+        """Codex round 3: the owned Chrome is alive at the poll, then exits and another CDP server
+        rebinds its port before the request. That server's `/json/version` names another browser id,
+        so the wait fails at once without listing its targets."""
+        asked, urlopen = _cdp_server(browser="/devtools/browser/another-run")
+        monkeypatch.setattr(probe.urllib.request, "urlopen", urlopen)
+        with pytest.raises(
+            SystemExit,
+            match=r"^attach Chrome's CDP port is not its own: 127\.0\.0\.1:51234 is another DevTools endpoint: "
+            r"its browser target is 'ws://127\.0\.0\.1:51234/devtools/browser/another-run', not /devtools/browser/fresh$",
+        ):
+            probe.wait_for_cdp(_ENDPOINT, FakeChromeProcess(), timeout_s=15.0)
+        assert asked == [_VERSION]
+        assert clock.sleeps == []
+
+    def test_positive_control_the_browser_chrome_wrote_is_accepted(
+        self, monkeypatch: pytest.MonkeyPatch, clock: FakeTime,
+    ) -> None:
+        asked, urlopen = _cdp_server()
+        monkeypatch.setattr(probe.urllib.request, "urlopen", urlopen)
+        probe.wait_for_cdp(_ENDPOINT, FakeChromeProcess(), timeout_s=15.0)
+        assert asked == [_VERSION, _LIST]
+        assert clock.sleeps == []
+
+
+class TestForceExactViewportPollsTheOwnedChrome:
+    """Codex round 3: the viewport session re-polls the owned Chrome once its WebSocket is open.
+    Alive then, the port was Chrome's for the whole handshake; dead, the socket may be another
+    server's, so it is closed before the override is sent."""
+
+    class Ws:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+            self.closed = 0
+
+        def send(self, data: str) -> None:
+            self.sent.append(data)
+
+        def recv(self, timeout: float | None = None) -> str:
+            return '{"id": 1, "result": {}}'
+
+        def close(self) -> None:
+            self.closed += 1
+
+    @pytest.fixture
+    def ws(self, monkeypatch: pytest.MonkeyPatch) -> "TestForceExactViewportPollsTheOwnedChrome.Ws":
+        import websockets.sync.client
+
+        socket = self.Ws()
+        _asked, urlopen = _cdp_server()
+        monkeypatch.setattr(probe.urllib.request, "urlopen", urlopen)
+        monkeypatch.setattr(websockets.sync.client, "connect", lambda url, open_timeout=None: socket)
+        return socket
+
+    def test_chrome_exited_once_connected_closes_the_socket_without_sending(self, ws: Any) -> None:
+        chrome = FakeChromeProcess(alive_polls=0, code=9)
+        with pytest.raises(SystemExit, match=r"attach Chrome exited \(9\) while its viewport session connected on port 51234"):
+            probe.force_exact_viewport(51234, 1920, 1080, chrome)
+        assert ws.sent == [] and ws.closed == 1
+
+    def test_positive_control_a_live_chrome_gets_the_override_and_the_session_is_held(self, ws: Any) -> None:
+        assert probe.force_exact_viewport(51234, 1920, 1080, FakeChromeProcess()) is ws
+        assert [json.loads(m)["method"] for m in ws.sent] == ["Emulation.setDeviceMetricsOverride"]
+        assert ws.closed == 0
 
 
 class TestConcurrentRunIsolation:
