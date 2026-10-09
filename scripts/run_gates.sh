@@ -1,7 +1,9 @@
 #!/bin/zsh
 # usage: run_gates.sh <gate-worktree> <outdir> [--allow-record]   (runs host gate x3, host red arms and P2 arms through
-# one queue, GATE_JOBS at a time (default 3; 1 = serial), from a clean pinned worktree). Exits nonzero when any gate
+# one queue, GATE_JOBS at a time (1..5, default 3; 1 = serial), from a clean pinned worktree). Exits nonzero when any gate
 # FAILED, or when a RECORD arm is PENDING registration unless --allow-record (discovery runs only) is passed.
+GATE_JOBS=${GATE_JOBS:-3}
+[[ $GATE_JOBS == [1-5] ]] || { echo "GATE_JOBS must be an integer in 1..5, got '$GATE_JOBS'" >&2; exit 2; }
 G=${1:A}; O=${2:A}; ALLOW_RECORD=0; [[ "$3" == "--allow-record" ]] && ALLOW_RECORD=1
 PY=/Users/anyhowclick/Desktop/work/obed-edom/.venv/bin/python; mkdir -p $O; cd $G || exit 1
 export PYTHONPATH=$G/src; F=$G/output/p2-recovery/html-adversarial
@@ -80,25 +82,47 @@ print(f"    expected red: {sorted(want) or '{}'}; expected inconclusive: {sorted
 sys.exit(0 if ok else 1)
 PYEOF
 }
-# Every run (host gates, host red arms, P2 arms) goes through one queue, GATE_JOBS at a time (default 3, the three-Chrome
-# cap; GATE_JOBS=1 runs them serially), launched in the listed order. Each writes <name>.log and <name>.rc; the checks
-# run and print in the listed order once every run has finished.
-GATE_JOBS=${GATE_JOBS:-3}; PIDS=()
+# Every run (host gates, host red arms, P2 arms) goes through one queue, GATE_JOBS at a time (1..5, default 3;
+# GATE_JOBS=1 runs them serially), launched in the listed order. Each run first loses its previous <name>.log,
+# <name>.rc and artifacts, then runs in its own process group and atomically writes <name>.rc as "<round nonce> <exit>";
+# a missing .rc or one from another round fails its check. The checks run and print in the listed order once every run
+# has finished. Exit, HUP, INT or TERM stops the running groups (TERM, then KILL after 5 s).
+NONCE="$$-$(date +%s)-$RANDOM"; PIDS=(); echo "round nonce $NONCE"
+zmodload zsh/parameter
+stop_jobs(){ local s g n live=(); for s in $jobstates; do [[ $s == running:* ]] && live+=(${${(s.:.)${s#*:*:}}%%=*}); done; (( ${#live} )) || return 0
+  for g in $live; do kill -TERM -$g $g 2>/dev/null; done
+  for n in {1..20}; do for g in $live; do kill -0 -$g 2>/dev/null && break; done || break; sleep 0.25; done
+  for g in $live; do kill -KILL -$g $g 2>/dev/null; done; }
+trap stop_jobs EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+JOB='out=$1 nonce=$2; shift 2; "$@" > "$out.log" 2>&1; rc=$?; print -r -- "$nonce $rc" > "$out.rc.tmp" && mv -f "$out.rc.tmp" "$out.rc"'
 queue(){ local out=$1; shift
   while (( ${#PIDS} >= GATE_JOBS )); do wait $PIDS[1] 2>/dev/null; shift PIDS; done
-  { "$@" > "$out.log" 2>&1; echo $? > "$out.rc"; } &
+  rm -f -- "$out.log" "$out.rc" "$out.rc.tmp" "$out.json" "$out.report.json" "$out/report.json" "$out/gl-replay/report.json"
+  $PY -c 'import os,sys; os.setpgrp(); os.execv(sys.argv[1], sys.argv[1:])' /bin/zsh -fc "$JOB" job "$out" "$NONCE" "$@" &
   PIDS+=($!); }
+status_of(){ local s; s=$(<"$1.rc") 2>/dev/null || { echo missing; return; }; [[ $s == "$NONCE "<-> ]] && echo ${s#"$NONCE "} || echo "stale($s)"; }
+# Fill the disposable H.264 pattern cache before any timed run, so no P2 arm's ffmpeg encode overlaps a capture.
+$PY - "$F/html-unmodified" <<'PYEOF' || { echo "H.264 pattern prewarm FAILED; no run launched"; exit 1; }
+import sys
+sys.path.insert(0,"scripts")
+from p2_recovery_html_dissolve_live import prewarm_h264_patterns
+records=prewarm_h264_patterns(__import__("pathlib").Path(sys.argv[1]))
+if not records: sys.exit(f"no Untitled.mov-*.mov under {sys.argv[1]}")
+for r in records: print(f"h264 pattern prewarm {r['seconds']}s: {'cache hit' if r['source']=='cache' else r['source']} key={r.get('cacheKey')}")
+PYEOF
 HOST_VIEWPORTS=(2560x1440 1600x1000 1920x1080)
 for V in $HOST_VIEWPORTS; do
   queue $O/host-$V $PY -u scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport $V --artifact $O/host-$V.json
 done
-check_host(){ rc=$(<$O/host-$1.rc); [[ $rc == 0 ]] || fail "HOST $1 exit $rc"; summ $O/host-$1.json "HOST $1" || fail "HOST $1 status"; }
+check_host(){ rc=$(status_of $O/host-$1); [[ $rc == 0 ]] || fail "HOST $1 exit $rc"; summ $O/host-$1.json "HOST $1" || fail "HOST $1 status"; }
 # Host red arms (probe-owned pre-registered sets, keyed in the probe by the P2 off-plan sha). The artifact contract is
 # checked in full: every key present and typed, redArm equal to the label the CLI arguments imply, expectedCoreSha256
 # the arm's sha, `unknown` an empty list, the census stray/duplicate multiset reconciled with redSet, and the red and
 # expected multisets equal (Counter). A "record" arm returns 3 only when all of that holds with status recorded.
 run_host_red(){ n=$(echo "$*" | tr -d ' '); queue $O/host-red$n $PY -u scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport 1920x1080 --artifact $O/host-red$n.json "$@"; }
-check_host_red(){ n=$(echo "$*" | tr -d ' '); rc=$(<$O/host-red$n.rc); $PY - "$O/host-red$n.json" "$rc" "$@" <<'PYEOF'
+check_host_red(){ n=$(echo "$*" | tr -d ' '); rc=$(status_of $O/host-red$n)
+  [[ $rc == <-> ]] || { echo "[HOST $*] no fresh status ($rc) -> MISMATCH"; return 1; }
+  $PY - "$O/host-red$n.json" "$rc" "$@" <<'PYEOF'
 import json,sys
 from collections import Counter
 sys.path.insert(0,"scripts")
@@ -158,7 +182,7 @@ for A in $HOST_RED_ARMS; do run_host_red ${=A}; done
 P2_ARMS=()
 run_p2(){ P2_ARMS+=("${(j: :)${(@q)@}}"); shift 2; n=$(echo "$*" | tr -d ' ')
   queue "$O/p2$n" $PY scripts/p2_recovery_html_adversarial.py --reuse-export --disposable --out-dir "$O/p2$n" "$@"; }
-check_p2(){ spec=$1; inc=$2; shift 2; n=$(echo "$*" | tr -d ' '); rc=$(<"$O/p2$n.rc"); echo "[P2 $*] exit=$rc $(grep -m1 '^success' "$O/p2$n.log") True=$(grep -cE '^- [A-Za-z0-9]+: \*\*True\*\*' "$O/p2$n.log") False: $(grep -oE '^- [A-Za-z0-9]+: \*\*False\*\*' "$O/p2$n.log" | tr '\n' ' ')"; r=$O/p2$n/report.json; [[ "$*" == *"--gl-replay auto"* ]] && r=$O/p2$n/gl-replay/report.json; cp $r "$O/p2$n.report.json" 2>/dev/null; expect "$O/p2$n.log" "$rc" "$spec" "$inc" "$@"; tally $? "P2 $*"; }
+check_p2(){ spec=$1; inc=$2; shift 2; n=$(echo "$*" | tr -d ' '); rc=$(status_of "$O/p2$n"); echo "[P2 $*] exit=$rc $(grep -m1 '^success' "$O/p2$n.log") True=$(grep -cE '^- [A-Za-z0-9]+: \*\*True\*\*' "$O/p2$n.log") False: $(grep -oE '^- [A-Za-z0-9]+: \*\*False\*\*' "$O/p2$n.log" | tr '\n' ' ')"; r=$O/p2$n/report.json; [[ "$*" == *"--gl-replay auto"* ]] && r=$O/p2$n/gl-replay/report.json; cp $r "$O/p2$n.report.json" 2>/dev/null; if [[ $rc == <-> ]]; then expect "$O/p2$n.log" "$rc" "$spec" "$inc" "$@"; else echo "    no fresh status ($rc) -> MISMATCH"; false; fi; tally $? "P2 $*"; }
 # run_p2 "<expected red>" "<expected inconclusive>" <args>
 run_p2 "" "" --wait-profile fast; run_p2 "continueThroughMovingMagicMove3to4" "" --wait-profile fast --disable-bridge34; run_p2 "" "" --wait-profile slow
 # Registered post hoc from discovery r2 (8ac39a42), seen in r1 too: the stray WA0125 overlay paints at authored
