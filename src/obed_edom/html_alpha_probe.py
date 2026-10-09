@@ -116,7 +116,6 @@ def assign_starting_scenes(slides: list[dict[str, Any]]) -> list[dict[str, Any]]
     return slides
 
 
-
 _INDEX_MAIN_JS = re.compile(
     r'<script\s+src="assets/player/main\.js"\s*>\s*</script>',
     re.IGNORECASE,
@@ -858,7 +857,6 @@ def decoded_alpha_report(src_frames: Sequence[np.ndarray], decoded: Sequence[Pat
     }
 
 
-
 def page_websocket_url(targets: Sequence[dict[str, Any]]) -> str | None:
     """Pick a page-target debugger URL. The browser target from /json/version has no Runtime/Page."""
     pages = [
@@ -874,40 +872,6 @@ def page_websocket_url(targets: Sequence[dict[str, Any]]) -> str | None:
         if url.startswith("http://") or url.startswith("https://") or url == "about:blank":
             return str(item["webSocketDebuggerUrl"])
     return str(pages[0]["webSocketDebuggerUrl"])
-
-
-DEVTOOLS_ACTIVE_PORT = "DevToolsActivePort"
-
-
-def parse_devtools_active_port(text: str) -> int | None:
-    """The port on the first line of Chrome's `DevToolsActivePort` file (port line, then the browser
-    target path); None until both lines are there."""
-    lines = text.splitlines()
-    if len(lines) < 2 or not lines[0].isascii() or not lines[0].isdigit() or not lines[1].strip():
-        return None
-    port = int(lines[0])
-    return port if 0 < port < 65536 else None
-
-
-def wait_devtools_active_port(
-    profile: Path, proc: subprocess.Popen, timeout_s: float = 15.0, poll_s: float = 0.05
-) -> int:
-    """The port Chrome launched with `--remote-debugging-port=0` bound for itself, read from
-    `<profile>/DevToolsActivePort` (the caller removes a stale one before launch)."""
-    path = profile / DEVTOOLS_ACTIVE_PORT
-    deadline = time.monotonic() + timeout_s
-    while True:
-        try:
-            port = parse_devtools_active_port(path.read_text())
-        except (OSError, UnicodeDecodeError):
-            port = None
-        if port is not None:
-            return port
-        if proc.poll() is not None:
-            raise RuntimeError(f"Chrome exited ({proc.returncode}) before writing {path}")
-        if time.monotonic() >= deadline:
-            raise RuntimeError(f"Chrome wrote no {path} within {timeout_s} s")
-        time.sleep(poll_s)
 
 
 def progress_metric(arr: np.ndarray) -> float:

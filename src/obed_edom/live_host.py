@@ -30,6 +30,7 @@ from typing import Any, Callable
 
 from websockets.sync.client import connect
 
+from .devtools_port import DEVTOOLS_ACTIVE_PORT, wait_devtools_active_port
 from .html_preview import preview_root, safe_export_file
 from .live_continuity import ContinuityPlan, Unsupported, codec_report, derive_plan
 from .live_continuity_js import CONTINUITY_VERSION, PRESERVE_CORE_JS, js_sha256
@@ -47,6 +48,7 @@ GOTO_AUTOPLAY_ENV = "OBED_LIVE_GOTO_AUTOPLAY"
 GOTO_AUTOPLAY_DEFERRED_NOTE = "Movies idle until next advance"
 _UNSET = object()
 _CDP_MAX_MESSAGE_BYTES = 64 * 1024 * 1024
+_CHROME_START_TIMEOUT_S = 15.0
 _CONTINUITY_STAGE_GATE_EXPR = (
     "(()=>{var s=document.getElementById('stage');var r=s?s.getBoundingClientRect():null;"
     "return {ready:!!(window.__OBED_P2_PRESERVE__&&window.__OBED_P2_PRESERVE__.ready===true),"
@@ -497,11 +499,10 @@ class ChromeCdp:
             except Exception: pass
             return
         self.profile.mkdir(parents=True, exist_ok=True)
-        with socket.socket() as sock:
-            sock.bind(("127.0.0.1", 0))
-            self.port = int(sock.getsockname()[1])
+        (self.profile / DEVTOOLS_ACTIVE_PORT).unlink(missing_ok=True)
+        self.port = None
         args = [
-            str(self.chrome), f"--remote-debugging-port={self.port}",
+            str(self.chrome), "--remote-debugging-port=0",
             "--remote-debugging-address=127.0.0.1", f"--user-data-dir={self.profile}",
             f"--window-size={self.display.width},{self.display.height}",
             f"--window-position={self.display.x},{self.display.y}", "--force-device-scale-factor=1",
@@ -516,7 +517,12 @@ class ChromeCdp:
             try: stderr = self._stderr_file = self.log_path.with_suffix(".chrome.log").open("wb")
             except Exception: stderr = subprocess.DEVNULL
         self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=stderr)
-        deadline = time.monotonic() + 15
+        try: self.port = wait_devtools_active_port(self.profile, self.proc, _CHROME_START_TIMEOUT_S)
+        except RuntimeError as exc:
+            try: self.stop()
+            except Exception: pass
+            raise LiveHostError(f"Chrome CDP did not start: {exc}") from exc
+        deadline = time.monotonic() + _CHROME_START_TIMEOUT_S
         while time.monotonic() < deadline:
             try:
                 with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/json/list", timeout=.3) as response: targets = json.loads(response.read())

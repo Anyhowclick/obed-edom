@@ -33,10 +33,10 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
 from obed_edom.dsk_live import keynote_running  # noqa: E402
+from obed_edom.devtools_port import DEVTOOLS_ACTIVE_PORT, wait_devtools_active_port  # noqa: E402
 from obed_edom.html_alpha_probe import (  # noqa: E402
     CLOCK_MIN_RAF,
     CLOCK_WINDOW_S,
-    DEVTOOLS_ACTIVE_PORT,
     FPS,
     HEARTBEAT_MIN_EXECUTED,
     IDENTITY_NEAR_DUP_MAE_MAX,
@@ -65,7 +65,6 @@ from obed_edom.html_alpha_probe import (  # noqa: E402
     render_pdf_page_rgba,
     save_png,
     timing_repeatability,
-    wait_devtools_active_port,
     write_composites,
     write_json,
     write_patched_export,

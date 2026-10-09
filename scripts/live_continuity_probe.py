@@ -92,8 +92,8 @@ from obed_edom.html_alpha_probe import (  # noqa: E402
     occluder_mask_from_markers,
     score_inpage_liveness,
     score_live_coverage,
-    wait_devtools_active_port,
 )
+from obed_edom.devtools_port import wait_devtools_active_port  # noqa: E402
 from obed_edom.live_gl_replay_js import GL_REPLAY_VERSION, js_sha256 as gl_replay_js_sha256  # noqa: E402
 from obed_edom.live_host import ADVANCE_ENV, ATTACH_ENV, CONTINUITY_ENV, LiveOutputHost, OutputDisplay, PlayerCommandRejected  # noqa: E402
 from obed_edom.p2_verdict import BURST_OFFSETS_MS, CARRY_EVENT_KINDS, CONTROL_INSET_PX, CONTROL_PATCH_PX  # noqa: E402
