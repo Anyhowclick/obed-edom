@@ -16,6 +16,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -657,13 +658,108 @@ def test_chrome_attach_uses_the_port_chrome_wrote(tmp_path, monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
     monkeypatch.setattr(spike.ChromeCdp, "START_TIMEOUT_S", 0.2)
     c = spike.ChromeCdp(Path("chrome"), tmp_path / "profile")
-    c.proc = proc = object()
+    c.proc = proc = _ChromeExitsAfterPolls(alive_polls=10**6)
     monkeypatch.setattr(c, "_sample_rss", lambda: None)
+    started = time.monotonic()
     with pytest.raises(RuntimeError, match="did not come up"):
         asyncio.run(c._attach())
     assert waited == [(tmp_path / "profile", proc, 0.2)]
     assert c.port == 43210
-    assert urls and all(u.startswith("http://127.0.0.1:43210/") for u in urls)
+    assert len(urls) > 1 and all(u.startswith("http://127.0.0.1:43210/") for u in urls), (
+        "positive control: a live Chrome that never answers is retried until the deadline"
+    )
+    assert time.monotonic() - started >= 0.2
+
+
+class _ChromeExitsAfterPolls:
+    """Alive for its first `alive_polls` polls, then exited with `code` (or exited as soon as
+    `die()` is called)."""
+
+    pid = 4321
+
+    def __init__(self, alive_polls: int, code: int = 9):
+        self.alive_polls, self.code, self.polls, self.dead = alive_polls, code, 0, False
+
+    def die(self):
+        self.dead = True
+
+    def poll(self):
+        self.polls += 1
+        return self.code if self.dead or self.polls > self.alive_polls else None
+
+
+def test_chrome_dying_after_writing_its_port_file_never_drives_that_port(tmp_path, monkeypatch):
+    """Real `wait_devtools_active_port`: Chrome writes a complete port file, is alive for the port
+    read, then dies. Its port may already belong to another run's CDP process, so `_attach` polls
+    the owned process first and fails fast without a single request to that port."""
+    import urllib.request
+
+    import websockets
+
+    spike = _spike()
+    urls = []
+    monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout: urls.append(url))
+    monkeypatch.setattr(websockets, "connect", lambda *a, **k: pytest.fail("connected to a dead Chrome's port"))
+    monkeypatch.setattr(spike.ChromeCdp, "START_TIMEOUT_S", 30.0)
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "DevToolsActivePort").write_text("51234\n/devtools/browser/fresh\n")
+    c = spike.ChromeCdp(Path("chrome"), profile)
+    c.proc = _ChromeExitsAfterPolls(alive_polls=1, code=9)
+    monkeypatch.setattr(c, "_sample_rss", lambda: None)
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match=r"Chrome exited \(9\) before its CDP page target was ready"):
+        asyncio.run(c._attach())
+    assert time.monotonic() - started < 1.0
+    assert c.port == 51234
+    assert urls == []
+
+
+@pytest.mark.parametrize("dies_on", ["/json/version", "/json/list"])
+def test_chrome_dying_mid_readiness_fails_fast_not_at_the_deadline(tmp_path, monkeypatch, dies_on):
+    """Chrome dies while `_attach` waits on either readiness endpoint: the next pass sees the exit
+    instead of retrying until `START_TIMEOUT_S`."""
+    import urllib.request
+
+    import websockets
+
+    spike = _spike()
+    c = spike.ChromeCdp(Path("chrome"), tmp_path / "profile")
+    c.proc = chrome = _ChromeExitsAfterPolls(alive_polls=10**6, code=0)
+    urls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self):
+            return b"{}" if dies_on == "/json/list" else b"[]"
+
+    def urlopen(url, timeout):
+        urls.append(url)
+        if url.endswith(dies_on):
+            chrome.die()
+            raise ConnectionError("connection refused")
+        return Response()
+
+    monkeypatch.setattr(spike, "wait_devtools_active_port", lambda profile, proc, timeout: 51234)
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(websockets, "connect", lambda *a, **k: pytest.fail("connected to a dead Chrome's port"))
+    monkeypatch.setattr(spike.ChromeCdp, "START_TIMEOUT_S", 30.0)
+    monkeypatch.setattr(c, "_sample_rss", lambda: None)
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match=r"Chrome exited \(0\) before its CDP page target was ready"):
+        asyncio.run(c._attach())
+    assert time.monotonic() - started < 1.0
+    expected = ["http://127.0.0.1:51234/json/version"]
+    if dies_on == "/json/list":
+        expected.append("http://127.0.0.1:51234/json/list")
+    assert urls == expected
 
 
 def test_dissolve_serve_binds_port_zero_directly(tmp_path):

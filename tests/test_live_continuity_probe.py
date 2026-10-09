@@ -21,6 +21,7 @@ import math
 import shutil
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -4332,7 +4333,7 @@ class TestGlReplayCli:
 
         monkeypatch.setattr(probe, "launch_attach_chrome", lambda profile: Proc())
         monkeypatch.setattr(probe, "wait_devtools_active_port", lambda profile, proc: 1)
-        monkeypatch.setattr(probe, "wait_for_cdp", lambda port: None)
+        monkeypatch.setattr(probe, "wait_for_cdp", lambda port, proc: None)
         monkeypatch.setattr(probe, "force_exact_viewport", lambda *a: None)
         kwargs = {} if gl is None else {"gl_replay": gl}
         with pytest.raises(RuntimeError):
@@ -4383,7 +4384,7 @@ def test_attach_arm_holds_the_viewport_override_session_until_its_chrome_is_torn
 
     monkeypatch.setattr(probe, "launch_attach_chrome", lambda profile: Proc())
     monkeypatch.setattr(probe, "wait_devtools_active_port", lambda profile, proc: 1)
-    monkeypatch.setattr(probe, "wait_for_cdp", lambda port: None)
+    monkeypatch.setattr(probe, "wait_for_cdp", lambda port, proc: None)
     monkeypatch.setattr(probe, "force_exact_viewport", lambda *a: hold)
     monkeypatch.setattr(probe, "LiveOutputHost", Host)
     with pytest.raises(RuntimeError):
@@ -4447,9 +4448,13 @@ class TestAttachChrome:
             events.append("port read")
             return 9555
 
+        def wait_for_cdp(port: int, proc: Any) -> None:
+            assert proc is state["proc"]
+            events.append(f"cdp {port}")
+
         monkeypatch.setattr(probe, "launch_attach_chrome", launch)
         monkeypatch.setattr(probe, "wait_devtools_active_port", devtools_port)
-        monkeypatch.setattr(probe, "wait_for_cdp", lambda port: events.append(f"cdp {port}"))
+        monkeypatch.setattr(probe, "wait_for_cdp", wait_for_cdp)
         monkeypatch.setattr(
             probe, "force_exact_viewport",
             lambda port, w, h: events.append(f"viewport {port} {w}x{h}") or self.Hold(events, close_error=state["close_error"]),
@@ -4532,6 +4537,96 @@ class TestAttachChrome:
             probe.run_attach_arm(Path("x"), [], {}, tmp_path, {})
         assert [c[0] for c in calls] == [tmp_path / "attach-chrome-profile"]
         assert calls[0][1]["arm"] == "attach", "the pid/exit code land in the arm's own result"
+
+
+class _ChromeExitsAfterPolls:
+    """Alive for its first `alive_polls` polls, then exited with `code` (or exited as soon as
+    `die()` is called)."""
+
+    pid = 4321
+
+    def __init__(self, alive_polls: int, code: int = 9) -> None:
+        self.alive_polls, self.code, self.polls, self.dead = alive_polls, code, 0, False
+
+    def die(self) -> None:
+        self.dead = True
+
+    def poll(self) -> int | None:
+        self.polls += 1
+        return self.code if self.dead or self.polls > self.alive_polls else None
+
+    def terminate(self) -> None:
+        self.dead = True
+
+    def wait(self, timeout: float) -> int:
+        return self.code
+
+
+class TestWaitForCdpPollsTheOwnedChrome:
+    """`wait_for_cdp` polls the attach Chrome it owns on every pass: once that Chrome has exited, the
+    port it wrote may already belong to another run's CDP process, so it never asks that port again
+    and fails at once with the exit code instead of retrying until its timeout."""
+
+    def test_chrome_dying_after_writing_its_port_file_never_drives_that_port(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        """Real `wait_devtools_active_port` + real `wait_for_cdp` through `attach_chrome`: Chrome
+        writes a complete port file, is alive for the port read, then dies before readiness."""
+        chrome = _ChromeExitsAfterPolls(alive_polls=1, code=9)
+
+        def launch(profile: Path) -> _ChromeExitsAfterPolls:
+            profile.mkdir(parents=True, exist_ok=True)
+            (profile / "DevToolsActivePort").write_text("51234\n/devtools/browser/fresh\n")
+            return chrome
+
+        asked: list[str] = []
+        monkeypatch.setattr(probe, "launch_attach_chrome", launch)
+        monkeypatch.setattr(probe.urllib.request, "urlopen", lambda url, timeout=None: asked.append(url))
+        monkeypatch.setattr(probe, "force_exact_viewport", lambda *a: pytest.fail("connected to a dead Chrome's port"))
+        record: dict[str, Any] = {}
+
+        started = time.monotonic()
+        with pytest.raises(SystemExit, match=r"attach Chrome exited \(9\) before opening a CDP target on port 51234"):
+            with probe.attach_chrome(tmp_path / "attach-chrome-profile", record):
+                pytest.fail("the block must not run")
+        assert time.monotonic() - started < 1.0
+        assert asked == []
+        assert record == {"chromePid": 4321, "chromeExitCode": 9}
+
+    def test_chrome_dying_mid_loop_fails_fast_not_at_the_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        chrome = _ChromeExitsAfterPolls(alive_polls=10**6, code=0)
+        asked: list[str] = []
+
+        def urlopen(url: str, timeout: float | None = None) -> None:
+            asked.append(url)
+            chrome.die()
+            raise ConnectionError("connection refused")
+
+        monkeypatch.setattr(probe.urllib.request, "urlopen", urlopen)
+        started = time.monotonic()
+        with pytest.raises(SystemExit, match=r"attach Chrome exited \(0\) before opening a CDP target on port 51234"):
+            probe.wait_for_cdp(51234, chrome, timeout_s=30.0)
+        assert time.monotonic() - started < 1.0
+        assert asked == ["http://127.0.0.1:51234/json/list"]
+
+    def test_positive_control_a_live_chrome_that_never_answers_still_waits_for_the_timeout(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The same refusing endpoint with a Chrome that stays alive is retried until the timeout,
+        so the fast failures above are the exit check and nothing else."""
+        chrome = _ChromeExitsAfterPolls(alive_polls=10**6)
+        asked: list[str] = []
+
+        def urlopen(url: str, timeout: float | None = None) -> None:
+            asked.append(url)
+            raise ConnectionError("connection refused")
+
+        monkeypatch.setattr(probe.urllib.request, "urlopen", urlopen)
+        started = time.monotonic()
+        with pytest.raises(SystemExit, match=r"^attach Chrome did not open a CDP target on port 51234$"):
+            probe.wait_for_cdp(51234, chrome, timeout_s=0.3)
+        assert time.monotonic() - started >= 0.3
+        assert len(asked) > 1
 
 
 class TestConcurrentRunIsolation:

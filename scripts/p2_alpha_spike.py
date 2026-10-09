@@ -165,6 +165,7 @@ class ChromeCdp:
         ready = False
         deadline = time.monotonic() + self.START_TIMEOUT_S
         while time.monotonic() < deadline:
+            self._raise_if_exited()
             self._sample_rss()
             try:
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=0.5) as resp:
@@ -180,6 +181,7 @@ class ChromeCdp:
         ws_url = None
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
+            self._raise_if_exited()
             try:
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=0.5) as resp:
                     targets = json.loads(resp.read().decode())
@@ -206,6 +208,12 @@ class ChromeCdp:
             "Emulation.setDefaultBackgroundColorOverride",
             color={"r": 0, "g": 0, "b": 0, "a": 0},
         )
+
+    def _raise_if_exited(self) -> None:
+        """Once the owned Chrome has exited, the port it wrote is no longer its: never drive it."""
+        exit_code = self.proc.poll()
+        if exit_code is not None:
+            raise RuntimeError(f"Chrome exited ({exit_code}) before its CDP page target was ready")
 
     def _sample_rss(self) -> None:
         if self.proc is None or self.proc.poll() is not None:

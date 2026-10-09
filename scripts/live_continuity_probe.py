@@ -2745,15 +2745,20 @@ def launch_attach_chrome(profile: Path) -> subprocess.Popen:
     return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def wait_for_cdp(port: int, timeout_s: float = 15.0) -> None:
+def wait_for_cdp(port: int, proc: subprocess.Popen, timeout_s: float = 15.0) -> None:
+    """Polls `proc` each pass: once the Chrome that owns `port` has exited, the port is no longer its."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
+        exit_code = proc.poll()
+        if exit_code is not None:
+            raise SystemExit(f"attach Chrome exited ({exit_code}) before opening a CDP target on port {port}")
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=0.5) as response:
                 if json.loads(response.read()):
                     return
         except Exception:
-            time.sleep(0.1)
+            pass
+        time.sleep(0.1)
     raise SystemExit(f"attach Chrome did not open a CDP target on port {port}")
 
 
@@ -2795,7 +2800,7 @@ def attach_chrome(profile: Path, record: dict[str, Any]) -> Iterator[int]:
         viewport_hold = None
         try:
             port = wait_devtools_active_port(profile, chrome_proc)
-            wait_for_cdp(port)
+            wait_for_cdp(port, chrome_proc)
             viewport_hold = force_exact_viewport(port, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
             yield port
         finally:
