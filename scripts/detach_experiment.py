@@ -49,6 +49,7 @@ import live_continuity_probe as probe  # noqa: E402
 from obed_edom import live_runtime  # noqa: E402
 from obed_edom.live_runtime import MM_OPACITY_ENV  # noqa: E402
 
+MM_EFFECT = "apple:magic-move-implied-motion-path"
 R8_ANCHOR = b"this.textureManager.loadScene(B)}unloadTextures(){"
 SERVED_SHA256 = "574274e88485745a6f55a8563d43ddfb91299db6e4d749fd34719436ade751bf"
 CORE_SHA256 = "e9338aff1cbe0aee74e8e1ac94412a0ffb19f787962961d9ff8ed550ebd01fa4"
@@ -62,7 +63,6 @@ OFF_BY_CONSTRUCTION = "gl-replay off: retire@2, the raw player owns the movie an
 CANNOT_ARM = "cannot arm: no reuse-decoder note (the core carried nothing)"
 
 AUTO_IDLE_MAX_MS = 400.0
-MM_MIN_MS = 800.0
 JUMP_PAD_MS = 200.0
 CARRY_WINDOW_MS = 500.0
 CONTROL_FALLBACK_MS = 100
@@ -332,9 +332,25 @@ def _run_ms(samples: Sequence[dict[str, Any]], runs: list[dict[str, Any]], n: in
     return float(end - samples[runs[n]["i"]]["t"])
 
 
-def post_mm_jumps(samples: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Every automatic jump straight after a Magic Move: Playing (MM, >= MM_MIN_MS) -> IdleAtFinalState
-    (< AUTO_IDLE_MAX_MS) -> [WaitingToJump] -> SettingUpScene -> Playing. `waited` is plan §1 I5."""
+def magic_move_scenes(export_root: Path) -> list[int]:
+    """Scene indices whose first effect is a Magic Move, R8's own test (`events[B].effects[0].name`)."""
+    header = json.loads((export_root / "assets" / "header.json").read_text())
+    scenes, index = [], 0
+    for slide in header["slideList"]:
+        events = json.loads((export_root / "assets" / slide / f"{slide}.json").read_text()).get("events") or []
+        for event in events:
+            effects = event.get("effects") or []
+            if effects and effects[0].get("name") == MM_EFFECT:
+                scenes.append(index)
+            index += 1
+    return scenes
+
+
+def post_mm_jumps(samples: Sequence[dict[str, Any]], mm_scenes: Sequence[int]) -> list[dict[str, Any]]:
+    """Every jump straight after a Magic Move scene: Playing (`mm_scenes`) -> IdleAtFinalState -> [WaitingToJump]
+    -> SettingUpScene -> Playing. `waited` is plan §1 I5; `autoJump` is an idle under AUTO_IDLE_MAX_MS (P2's 1->2
+    MM is followed by a click build, its 3->4 MM by an automatic movie start)."""
+    mm_scenes = frozenset(mm_scenes)
     runs = state_runs(samples)
     jumps = []
     for n, run in enumerate(runs):
@@ -348,11 +364,9 @@ def post_mm_jumps(samples: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         idle_ms = _run_ms(samples, runs, k)
         m = k - 1
-        if idle_ms >= AUTO_IDLE_MAX_MS or runs[m]["state"] != "Playing" or runs[m - 1]["state"] != "SettingUpScene":
+        if runs[m]["state"] != "Playing" or runs[m - 1]["state"] != "SettingUpScene" or runs[m]["scene"] not in mm_scenes:
             continue
         mm_ms = _run_ms(samples, runs, m)
-        if mm_ms < MM_MIN_MS:
-            continue
         before = m - 2
         mm_waited = before >= 0 and runs[before]["state"] == "WaitingToJump"
         if mm_waited:
@@ -362,8 +376,8 @@ def post_mm_jumps(samples: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
         )
         jumps.append({
             "scene": run["scene"], "mmScene": runs[m]["scene"], "waited": waited, "mmWaited": mm_waited,
-            "mmClick": mm_click, "idleMs": round(idle_ms, 1), "mmMs": round(mm_ms, 1),
-            "setupIndex": runs[n - 1]["i"], "playIndex": run["i"],
+            "mmClick": mm_click, "autoJump": idle_ms < AUTO_IDLE_MAX_MS, "idleMs": round(idle_ms, 1),
+            "mmMs": round(mm_ms, 1), "setupIndex": runs[n - 1]["i"], "playIndex": run["i"],
             "tSetup": samples[runs[n - 1]["i"]]["t"], "tPlay": samples[run["i"]]["t"],
         })
     return jumps
@@ -445,37 +459,55 @@ def _timed(events: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     return [e for e in events if isinstance(e, dict) and isinstance(e.get("t"), (int, float))]
 
 
-def handback_of(core_events: Sequence[dict[str, Any]], tracked: set[Any], w1: float) -> dict[str, Any] | None:
-    """The GL replay hand-back (`glreplay-release`, one-shot per deck) of a tracked decoder by `w1`, if any."""
+def handback_in(core_events: Sequence[dict[str, Any]], w0: float, w1: float) -> dict[str, Any] | None:
+    """The GL replay hand-back (`glreplay-release` mode `handoff`, one-shot per deck) inside [w0, w1], if any."""
     for e in _timed(core_events):
         d = _detail(e)
-        if e.get("kind") == "glreplay-release" and e["t"] <= w1 and d.get("elId") in tracked:
-            return {"t": e["t"], "mode": d.get("mode"), "reason": d.get("reason"), "elId": d.get("elId")}
+        if e.get("kind") == "glreplay-release" and w0 <= e["t"] <= w1 and d.get("mode") == "handoff" and d.get("ok"):
+            return {"t": e["t"], "mode": d.get("mode"), "elId": d.get("elId")}
     return None
+
+
+def paint_at_pin(prepaint: Sequence[dict[str, Any]], t0: float, t1: float) -> list[dict[str, Any]]:
+    """What paints at the first pin centre per pre-paint callback in [t0, t1]: the top element and the decoders
+    whose box covers it."""
+    out = []
+    for row in prepaint:
+        pins = row.get("pins") or []
+        if t0 <= row["t"] <= t1 and pins:
+            out.append({"t": row["t"], "top": (pins[0].get("top") or [None])[0], "videoAt": pins[0].get("videoAt")})
+    return out
 
 
 def classify_jump(
     jump: dict[str, Any], samples: Sequence[dict[str, Any]], lifecycle: Sequence[dict[str, Any]],
     prepaint: Sequence[dict[str, Any]], core_events: Sequence[dict[str, Any]], frame_ms: float,
 ) -> dict[str, Any]:
-    """One post-MM jump: eligibility (a pool-remounted decoder before it, carried across it), the blink by
-    flanked-empty sample and by pre-paint, the teardown's frame phase, the re-home, and INVALID.
+    """One post-MM jump: eligibility (a pool-remounted decoder carried across it), the blink by flanked-empty
+    sample and by pre-paint, the teardown's frame phase, the re-home, and INVALID.
 
-    Main's v5 core has no per-decoder instance id, so the carry is the core's own `reuse-decoder` note of a
-    tracked decoder (`oldElId`), after the last sample before the first destination `Playing` and within
-    CARRY_WINDOW_MS of it: the S2 driver's "instance changed after that sample"."""
+    Two carry paths. `handback` (GL replay auto): the decoder is out of the DOM for the whole MM (the module
+    paints it) and the core's GL hand-back (`glreplay-release` mode `handoff`, inside the jump window) remounts
+    it into the destination layer, so the hand-back is both the remount and the carry. `remount` (S2's): a
+    decoder remounted in the last sample before the first destination `Playing`, carried by the core's own
+    `reuse-decoder` note of it (`oldElId`; main's v5 core has no per-decoder instance id) after that sample and
+    within CARRY_WINDOW_MS of it, the S2 driver's "instance changed after that sample"."""
     w0, w1 = jump["tSetup"] - JUMP_PAD_MS, jump["tPlay"] + JUMP_PAD_MS
     first = jump["playIndex"]
     pre_row = samples[first - 1] if first > 0 else None
-    pre = pre_row["videos"] if pre_row else []
-    tracked = {v["elId"] for v in pre if v.get("remounted") and v.get("elId") is not None}
-    t_pre = pre_row["t"] if pre_row else float("-inf")
-    carry = next((
-        {"t": e["t"], "kind": e["kind"], "oldElId": _detail(e).get("oldElId"), "newElId": _detail(e).get("newElId")}
-        for e in _timed(core_events)
-        if e.get("kind") in CARRY_KINDS and _detail(e).get("oldElId") in tracked
-        and t_pre < e["t"] <= jump["tPlay"] + CARRY_WINDOW_MS
-    ), None)
+    handback = handback_in(core_events, w0, w1)
+    if handback is not None:
+        tracked = {handback["elId"]}
+        carry = {"t": handback["t"], "kind": "glreplay-handoff", "oldElId": handback["elId"], "newElId": None}
+    else:
+        tracked = {v["elId"] for v in (pre_row["videos"] if pre_row else []) if v.get("remounted") and v.get("elId") is not None}
+        t_pre = pre_row["t"] if pre_row else float("-inf")
+        carry = next((
+            {"t": e["t"], "kind": e["kind"], "oldElId": _detail(e).get("oldElId"), "newElId": _detail(e).get("newElId")}
+            for e in _timed(core_events)
+            if e.get("kind") in CARRY_KINDS and _detail(e).get("oldElId") in tracked
+            and t_pre < e["t"] <= jump["tPlay"] + CARRY_WINDOW_MS
+        ), None)
     carried = carry is not None
     at_play = samples[first]["videos"]
     first_playing = "empty" if not at_play else "carried" if carried and carry["t"] <= samples[first]["t"] and any(
@@ -518,9 +550,9 @@ def classify_jump(
     ]
     max_dt = window_max_dt(samples, w0, w1)
     blink_samples, blink_prepaint = bool(sample_empty), bool(paint_empty)
-    handback = handback_of(core_events, tracked, w1)
     return {
-        **{key: jump[key] for key in ("scene", "mmScene", "waited", "mmWaited", "mmClick", "idleMs", "mmMs", "tSetup", "tPlay")},
+        **{key: jump[key] for key in ("scene", "mmScene", "waited", "mmWaited", "mmClick", "autoJump", "idleMs", "mmMs",
+                                      "tSetup", "tPlay")},
         "r8Engaged": not jump["waited"],
         "eligible": bool(tracked) and carried, "tracked": sorted(tracked), "carried": carried, "carry": carry,
         "firstPlaying": first_playing,
@@ -529,7 +561,7 @@ def classify_jump(
         "sampleDecoderAbsentRuns": sample_decoder, "prepaintDecoderAbsentRuns": paint_decoder,
         "blinkSamples": blink_samples, "blinkPrepaint": blink_prepaint, "blink": blink_samples and blink_prepaint,
         "blinkDecoder": bool(sample_decoder) and bool(paint_decoder),
-        "severity": severity,
+        "severity": severity, "paintAtPin": paint_at_pin(prepaint, jump["tSetup"], jump["tPlay"] + 3 * frame_ms),
         "teardown": _phase(teardown, frame_ms), "trackedRemoval": _phase(tracked_removal, frame_ms),
         "rehome": None if rehome is None else {
             "t": rehome["t"], "sameDelivery": rehome["t"] == tracked_removal["t"],
@@ -548,7 +580,8 @@ def _rows(value: Any) -> list[dict[str, Any]]:
 def score_control(raw: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:
     """Plan §1 Controls. null: 0 flags; positive: the decoder absent in exactly the 2-3 sampler ticks and the 2-3
     pre-paint callbacks between removal and re-insert; timeout0: recorded, with whether both instruments agree with
-    those counts; r8flag: `waited` false (R8 engaged) at every post-MM jump after a click MM. A control that never
+    those counts; r8flag: `waited` false (R8 engaged) at every jump out of a click-started Magic Move scene (R8
+    preloads B+1 only for a Magic Move, so a dissolve's jump is never checked). A control that never
     saw a `reuse-decoder` note is `cannot-arm`, never a pass."""
     config = raw.get("config") or {}
     mode = config.get("control")
@@ -622,9 +655,12 @@ def build_record(raw: dict[str, Any]) -> dict[str, Any]:
     core_events = _rows(raw.get("coreEvents"))
     stats = raf_stats(samples)
     frame_ms = stats["medianMs"] or NOMINAL_FRAME_MS
+    mm_scenes = raw.get("mmScenes")
+    if mm_scenes is None:
+        mm_scenes = magic_move_scenes(probe.FIXTURE)
     events = [
         classify_jump(jump, samples, _rows(instrument.get("lifecycle")), _rows(instrument.get("prepaint")), core_events, frame_ms)
-        for jump in post_mm_jumps(samples)
+        for jump in post_mm_jumps(samples, mm_scenes)
     ] if samples else []
     output = raw.get("output") or {}
     served = (output.get("mmOpacity") or {}).get("sha256")
@@ -640,7 +676,7 @@ def build_record(raw: dict[str, Any]) -> dict[str, Any]:
         "coreSha256": continuity.get("sha256"), "coreShaOk": continuity.get("sha256") == CORE_SHA256,
         "continuityMode": continuity.get("mode"), "glReplayMode": gl_mode, "glReplaySha256": gl.get("sha256"),
         "stageFitOk": bool(stage_fit.get("verdict")) if isinstance(stage_fit, dict) else None,
-        "rafStats": stats, "instrumentErrors": instrument.get("errors"),
+        "rafStats": stats, "instrumentErrors": instrument.get("errors"), "mmScenes": list(mm_scenes),
         "events": events,
     }
     reasons = []
@@ -812,6 +848,7 @@ def execute_run(
             plan = probe.ground_truth_plan(export, slides)
             facts = probe.ground_truth_facts(plan)
             probe.bind_dom_ids(facts, probe.movie_nodes(export, slides))
+            raw["mmScenes"] = magic_move_scenes(export)
             facts_on = probe.gl_ground_truth(export, slides, facts)[1] if gl_replay == "auto" else None
             expected_stage = probe.expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
             with ExitStack() as stack:

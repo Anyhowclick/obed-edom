@@ -26,6 +26,7 @@ from obed_edom import live_runtime  # noqa: E402
 from obed_edom.live_continuity_js import js_sha256  # noqa: E402
 
 FRAME = 1000.0 / 60.0
+MM_SCENES = [1]
 
 
 def video(el_id: int, remounted: bool = True) -> dict[str, Any]:
@@ -43,18 +44,18 @@ def timeline(segments: list[tuple[Any, str, float, list[dict[str, Any]]]], start
 
 
 def post_mm(*, waited: bool = False, idle_ms: float = 100.0, mm_ms: float = 1600.0, pre=None, dst=None):
-    """P2's 1->2: scene 1 idle, the click MM (scene 2 setup + Playing), idle, then scene 3's automatic movie start."""
+    """P2's 1->2: scene 0 idle, the click MM (scene 1 setup + Playing), idle, then scene 2's setup and `Playing`."""
     pre = [video(7)] if pre is None else pre
     dst = [video(7)] if dst is None else dst
     segments = [
-        (1, "IdleAtFinalState", 1500.0, pre),
-        (2, "SettingUpScene", 100.0, pre),
-        (2, "Playing", mm_ms, pre),
-        (2, "IdleAtFinalState", idle_ms, pre),
+        (0, "IdleAtFinalState", 1500.0, pre),
+        (1, "SettingUpScene", 100.0, pre),
+        (1, "Playing", mm_ms, pre),
+        (1, "IdleAtFinalState", idle_ms, pre),
     ]
     if waited:
-        segments.append((2, "WaitingToJump", 83.0, pre))
-    segments += [(3, "SettingUpScene", 100.0, pre), (3, "Playing", 600.0, dst)]
+        segments.append((1, "WaitingToJump", 83.0, pre))
+    segments += [(2, "SettingUpScene", 100.0, pre), (2, "Playing", 600.0, dst)]
     return timeline(segments)
 
 
@@ -64,8 +65,8 @@ def first_index(samples: list[dict[str, Any]], scene: int, state: str) -> int:
 
 def carry_note(samples: list[dict[str, Any]], *, old: int = 7, new: int = 12, offset: float = 2.0) -> dict[str, Any]:
     """The core's `reuse-decoder` note just after the last pre-`Playing` sample."""
-    t = samples[first_index(samples, 3, "Playing") - 1]["t"] + offset
-    return {"t": t, "kind": "reuse-decoder", "detail": {"key": "untitled.mov", "oldElId": old, "newElId": new, "sceneHash": "#3"}}
+    t = samples[first_index(samples, 2, "Playing") - 1]["t"] + offset
+    return {"t": t, "kind": "reuse-decoder", "detail": {"key": "untitled.mov", "oldElId": old, "newElId": new, "sceneHash": "#2"}}
 
 
 def prepaint_of(samples: list[dict[str, Any]], blank: frozenset[int] = frozenset()) -> list[dict[str, Any]]:
@@ -78,7 +79,7 @@ def prepaint_of(samples: list[dict[str, Any]], blank: frozenset[int] = frozenset
 
 
 def classify(samples, lifecycle=(), prepaint=None, core_events=None):
-    jumps = dx.post_mm_jumps(samples)
+    jumps = dx.post_mm_jumps(samples, MM_SCENES)
     prepaint = prepaint_of(samples) if prepaint is None else prepaint
     core_events = [carry_note(samples)] if core_events is None else core_events
     return [dx.classify_jump(j, samples, list(lifecycle), prepaint, list(core_events), FRAME) for j in jumps]
@@ -98,6 +99,7 @@ def raw_run(samples, prepaint=None, lifecycle=(), *, served=dx.SERVED_SHA256, mo
         "instrument": {"lifecycle": list(lifecycle), "prepaint": prepaint_of(samples) if prepaint is None else prepaint,
                        "control": instrument_control, "errors": []},
         "coreEvents": [carry_note(samples)] if core_events is None else core_events,
+        "mmScenes": MM_SCENES,
     }
 
 
@@ -182,7 +184,7 @@ def test_the_default_probe_sampler_is_untouched_outside_the_instrument() -> None
 
 def test_a_direct_post_mm_jump_with_an_empty_first_playing_frame_is_a_blink() -> None:
     samples = post_mm()
-    first = first_index(samples, 3, "Playing")
+    first = first_index(samples, 2, "Playing")
     samples[first]["videos"] = []
     (event,) = classify(samples, prepaint=prepaint_of(samples, frozenset({first})))
     assert event["eligible"] and event["carried"] and event["tracked"] == [7]
@@ -210,14 +212,14 @@ def test_a_carry_after_the_first_playing_sample_reads_old() -> None:
 def test_an_empty_sample_that_still_paints_is_not_a_blink() -> None:
     samples = post_mm()
     prepaint = prepaint_of(samples)
-    samples[first_index(samples, 3, "Playing")]["videos"] = []
+    samples[first_index(samples, 2, "Playing")]["videos"] = []
     (event,) = classify(samples, prepaint=prepaint)
     assert event["blinkSamples"] and not event["blinkPrepaint"] and not event["blink"]
 
 
 def test_a_pre_paint_hole_alone_is_reported_but_not_a_blink() -> None:
     samples = post_mm()
-    (event,) = classify(samples, prepaint=prepaint_of(samples, frozenset({first_index(samples, 3, "Playing")})))
+    (event,) = classify(samples, prepaint=prepaint_of(samples, frozenset({first_index(samples, 2, "Playing")})))
     assert event["blinkPrepaint"] and not event["blinkSamples"] and not event["blink"]
 
 
@@ -229,45 +231,86 @@ def test_only_flanked_empty_runs_count() -> None:
 
 def test_an_empty_run_that_starts_before_the_jump_window_is_not_a_blink() -> None:
     samples = post_mm()
-    mm = first_index(samples, 2, "Playing")
-    first = first_index(samples, 3, "Playing")
+    mm = first_index(samples, 1, "Playing")
+    first = first_index(samples, 2, "Playing")
     for row in samples[mm + 1:first - 3]:
         row["videos"] = []
     (event,) = classify(samples, prepaint=prepaint_of(samples, frozenset(range(mm + 1, first - 3))))
     assert not event["blinkSamples"] and not event["blinkPrepaint"]
 
 
-def test_the_handback_path_counts_when_the_decoder_is_mounted_before_the_first_playing_sample() -> None:
-    """GL replay auto: no `<video>` for the whole MM (the module paints it), the hand-back mounts the decoder
-    into the destination layer during the jump's setup, then the core carries it. The MM's own empty run
-    started before the window, so it is not a blink."""
-    samples = post_mm()
-    mm = first_index(samples, 2, "Playing")
-    setup = first_index(samples, 3, "SettingUpScene")
-    for row in samples[mm:setup + 2]:
+def gl_auto_post_mm(*, handback_frames_before_play: int = 0) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Main's P2 under GL replay auto, as the live dumps show it: no `<video>` from the MM's first frame (the
+    module paints the movie) until the hand-back, which lands after the last setup sample and before the first
+    destination `Playing` sample (`handback_frames_before_play` = 0), then the remounted decoder is present.
+    No `reuse-decoder` at this jump: the core binds the destination's own element only at a later build."""
+    samples = post_mm(idle_ms=650.0)
+    mm = first_index(samples, 1, "Playing")
+    first = first_index(samples, 2, "Playing")
+    mounted = first - handback_frames_before_play
+    for row in samples[mm:mounted]:
         row["videos"] = []
-    handback = {"t": samples[setup + 1]["t"] + 3.0, "kind": "glreplay-release",
+    prepaint = prepaint_of(samples)
+    t = samples[mounted - 1]["t"] + 8.0
+    handback = {"t": t, "kind": "glreplay-release",
                 "detail": {"ok": True, "mode": "handoff", "reason": None, "elId": 7, "retired": []}}
-    (event,) = classify(samples, prepaint=prepaint_of(samples, frozenset(range(mm, setup + 2))),
-                        core_events=[handback, carry_note(samples)])
-    assert event["eligible"] and event["path"] == "handback" and event["handback"]["mode"] == "handoff"
+    return samples, prepaint, handback
+
+
+def test_the_glreplay_handback_is_the_carry_of_its_jump() -> None:
+    samples, prepaint, handback = gl_auto_post_mm()
+    (event,) = classify(samples, prepaint=prepaint, core_events=[handback])
+    assert event["scene"] == 2 and event["mmScene"] == 1 and event["autoJump"] is False and event["mmClick"]
+    assert event["eligible"] and event["carried"] and event["tracked"] == [7] and event["path"] == "handback"
+    assert event["carry"] == {"t": handback["t"], "kind": "glreplay-handoff", "oldElId": 7, "newElId": None}
+    assert event["handback"] == {"t": handback["t"], "mode": "handoff", "elId": 7}
+    assert event["firstPlaying"] == "carried"
     assert not event["blink"] and not event["sampleEmptyRuns"] and not event["prepaintEmptyRuns"]
 
 
-def test_a_handback_inside_the_first_playing_frame_is_not_eligible() -> None:
-    samples = post_mm()
-    mm = first_index(samples, 2, "Playing")
-    first = first_index(samples, 3, "Playing")
-    for row in samples[mm:first]:
-        row["videos"] = []
-    (event,) = classify(samples, core_events=[carry_note(samples)])
-    assert not event["eligible"] and event["tracked"] == [] and event["path"] is None
+def test_a_handback_a_frame_before_play_is_still_eligible_and_scored_unchanged() -> None:
+    samples, prepaint, handback = gl_auto_post_mm(handback_frames_before_play=2)
+    first = first_index(samples, 2, "Playing")
+    samples[first]["videos"] = []
+    prepaint[first] = {**prepaint[first], "n": 0, "ids": []}
+    (event,) = classify(samples, prepaint=prepaint, core_events=[handback])
+    assert event["eligible"] and event["blink"] and event["blinkDecoder"]
+    assert [run["frames"] for run in event["sampleEmptyRuns"]] == [1]
 
 
-def test_a_long_idle_or_a_short_playing_is_not_a_post_mm_jump() -> None:
-    assert dx.post_mm_jumps(post_mm(idle_ms=dx.AUTO_IDLE_MAX_MS + 50)) == []
-    assert dx.post_mm_jumps(post_mm(mm_ms=dx.MM_MIN_MS - 100)) == []
-    assert len(dx.post_mm_jumps(post_mm())) == 1
+def test_a_failed_or_retiring_release_is_not_a_handback() -> None:
+    samples, prepaint, handback = gl_auto_post_mm()
+    retire = {**handback, "detail": {**handback["detail"], "mode": "retire", "reason": "badRect"}}
+    (event,) = classify(samples, prepaint=prepaint, core_events=[retire])
+    assert not event["eligible"] and event["path"] is None and event["handback"] is None
+
+
+def test_a_handback_outside_the_jump_window_is_not_this_jumps_carry() -> None:
+    samples, prepaint, handback = gl_auto_post_mm()
+    early = {**handback, "t": samples[first_index(samples, 1, "Playing")]["t"]}
+    (event,) = classify(samples, prepaint=prepaint, core_events=[early])
+    assert not event["eligible"] and event["handback"] is None
+
+
+def test_paint_at_pin_lists_the_top_element_per_pre_paint() -> None:
+    rows = [{"t": 1.0, "pins": [{"top": ["canvas#gl", "div"], "videoAt": []}]},
+            {"t": 2.0, "pins": [{"top": ["video:7"], "videoAt": [7]}]}, {"t": 3.0, "pins": []}, {"t": 9.0, "pins": [{}]}]
+    assert dx.paint_at_pin(rows, 0.0, 5.0) == [{"t": 1.0, "top": "canvas#gl", "videoAt": []},
+                                               {"t": 2.0, "top": "video:7", "videoAt": [7]}]
+
+
+def test_only_jumps_out_of_a_magic_move_scene_count_and_click_jumps_are_kept() -> None:
+    assert dx.post_mm_jumps(post_mm(), []) == []
+    assert dx.post_mm_jumps(post_mm(), [0]) == []
+    (click,) = dx.post_mm_jumps(post_mm(idle_ms=dx.AUTO_IDLE_MAX_MS + 250), MM_SCENES)
+    assert click["autoJump"] is False and click["idleMs"] >= dx.AUTO_IDLE_MAX_MS
+    (auto,) = dx.post_mm_jumps(post_mm(), MM_SCENES)
+    assert auto["autoJump"] is True and auto["scene"] == 2
+
+
+@pytest.mark.skipif(not (probe.FIXTURE / "assets/header.json").is_file(), reason="P2 fixture is not in this checkout")
+def test_p2s_magic_moves_are_scenes_1_and_7() -> None:
+    assert dx.magic_move_scenes(probe.FIXTURE) == [1, 7]
 
 
 def test_eligibility_needs_a_remounted_decoder_that_the_core_carries() -> None:
@@ -288,7 +331,7 @@ def test_eligibility_needs_a_remounted_decoder_that_the_core_carries() -> None:
 
 def test_a_long_frame_inside_the_jump_window_is_invalid() -> None:
     samples = post_mm()
-    first = first_index(samples, 3, "Playing")
+    first = first_index(samples, 2, "Playing")
     for row in samples[first:]:
         row["rafTs"] += 60.0
         row["t"] += 60.0
@@ -309,7 +352,7 @@ def test_a_long_frame_outside_the_jump_window_is_valid() -> None:
 
 def test_teardown_phase_and_same_delivery_rehome() -> None:
     samples = post_mm()
-    setup = samples[first_index(samples, 3, "SettingUpScene")]
+    setup = samples[first_index(samples, 2, "SettingUpScene")]
     t = setup["rafTs"] + 12.0
     lifecycle = [
         {"t": t, "rafTs": setup["rafTs"], "op": "remove", "elId": 7, "isConnected": True, "remounting": False},
@@ -326,7 +369,7 @@ def test_phase_buckets() -> None:
 
 def test_core_notes_in_the_window_are_kept_with_their_decoder() -> None:
     samples = post_mm()
-    t = samples[first_index(samples, 3, "Playing")]["t"]
+    t = samples[first_index(samples, 2, "Playing")]["t"]
     notes = [{"t": t, "kind": "dom-swap", "detail": {"elId": 7}}, {"t": t, "kind": "reuse-decoder", "detail": {"oldElId": 7}},
              {"t": t, "kind": "glreplay-release", "detail": {"elId": 7, "mode": "handoff"}},
              {"t": t, "kind": "facade-error", "detail": "x"}, {"t": 0.0, "kind": "dom-swap", "detail": {"elId": 7}}]
@@ -428,6 +471,17 @@ def test_timeout0_is_recorded_with_agreement() -> None:
 def test_r8_flag_control(waited: bool, status: str) -> None:
     record = dx.build_record(raw_run(post_mm(waited=waited), control="r8flag"))
     assert record["controlVerdict"]["status"] == status
+
+
+def test_r8_flag_ignores_a_waited_jump_out_of_a_dissolve() -> None:
+    """P2's scene 6 follows the 2->3 dissolve (scene 5): stock timing there is expected, R8 only preloads for an MM."""
+    samples = post_mm()
+    t = samples[-1]["rafTs"] + FRAME
+    samples += timeline([(5, "SettingUpScene", 100.0, []), (5, "Playing", 1600.0, []), (5, "IdleAtFinalState", 83.0, []),
+                         (5, "WaitingToJump", 183.0, []), (6, "SettingUpScene", 83.0, []), (6, "Playing", 300.0, [])], start=t)
+    record = dx.build_record(raw_run(samples, control="r8flag"))
+    assert [e["scene"] for e in record["events"]] == [2]
+    assert record["controlVerdict"]["status"] == "pass" and record["controlVerdict"]["jumps"] == 1
 
 
 # --- batch, resume, summary ----------------------------------------------------------------------------------
