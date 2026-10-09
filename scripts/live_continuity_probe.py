@@ -50,19 +50,19 @@ from __future__ import annotations
 
 import argparse
 import base64
+import fcntl
 import hashlib
 import json
 import math
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import time
 import urllib.request
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Callable, Collection, Iterator, Sequence
 
@@ -90,6 +90,7 @@ from obed_edom.html_alpha_probe import (  # noqa: E402
     occluder_mask_from_markers,
     score_inpage_liveness,
     score_live_coverage,
+    wait_devtools_active_port,
 )
 from obed_edom.live_gl_replay_js import GL_REPLAY_VERSION, js_sha256 as gl_replay_js_sha256  # noqa: E402
 from obed_edom.live_host import ADVANCE_ENV, ATTACH_ENV, CONTINUITY_ENV, LiveOutputHost, OutputDisplay, PlayerCommandRejected  # noqa: E402
@@ -699,11 +700,22 @@ def run_root(artifact: Path) -> Path:
 
 @contextmanager
 def run_scope(artifact: Path) -> Iterator[Path]:
+    """Own `run_root(artifact)` for one invocation: an exclusive lock beside it refuses a second
+    invocation on the same artifact (which would share and delete this one's folder), and the
+    folder is removed on exit."""
     root = run_root(artifact)
-    try:
-        yield root
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    with open(root.parent / f"{root.name}.lock", "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SystemExit(
+                f"another live_continuity_probe run is using {artifact.resolve()}; wait for it or pass another --artifact"
+            ) from None
+        try:
+            yield root
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 def evidence_dir_of(artifact: Path) -> Path:
@@ -2693,16 +2705,11 @@ def run_arm(
     return result
 
 
-def free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def launch_attach_chrome(port: int, profile: Path) -> subprocess.Popen:
+def launch_attach_chrome(profile: Path) -> subprocess.Popen:
+    """Chrome picks its own debugging port (`--remote-debugging-port=0`); `wait_devtools_active_port` reads it."""
     profile.mkdir(parents=True, exist_ok=True)
     args = [
-        str(CHROME), "--headless=new", f"--remote-debugging-port={port}",
+        str(CHROME), "--headless=new", "--remote-debugging-port=0",
         "--remote-debugging-address=127.0.0.1", f"--user-data-dir={profile}",
         f"--window-size={VIEWPORT_WIDTH},{VIEWPORT_HEIGHT + _HEIGHT_PAD}",
         "--force-device-scale-factor=1", "--autoplay-policy=no-user-gesture-required",
@@ -2748,22 +2755,44 @@ def force_exact_viewport(port: int, width: int, height: int) -> Any:
     return ws
 
 
+@contextmanager
+def attach_chrome(profile: Path, record: dict[str, Any]) -> Iterator[int]:
+    """A fresh attach Chrome in `profile`, pinned to the exact attach viewport; yields its CDP port.
+    On exit the viewport session closes first (Chrome 154 drops the override when it detaches, so it
+    stays open for the whole block), then Chrome is terminated even if that close raised, and its
+    pid and exit code land in `record`."""
+    if profile.exists():
+        shutil.rmtree(profile)
+    chrome_proc = launch_attach_chrome(profile)
+    try:
+        viewport_hold = None
+        try:
+            port = wait_devtools_active_port(profile, chrome_proc)
+            wait_for_cdp(port)
+            viewport_hold = force_exact_viewport(port, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
+            yield port
+        finally:
+            if viewport_hold is not None:
+                viewport_hold.close()
+    finally:
+        chrome_proc.terminate()
+        try:
+            chrome_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            chrome_proc.kill()
+            chrome_proc.wait(timeout=5)
+        record["chromePid"] = chrome_proc.pid
+        record["chromeExitCode"] = chrome_proc.poll()
+
+
 def run_attach_arm(
     export_root: Path, slides: list[dict[str, Any]], facts: dict[str, Any], scratch: Path,
     expected_stage: dict[str, float], *, gl_replay: str = "off", facts_on: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     # The live host forces attach mode to 1920x1080 by contract regardless of
     # `--viewport`; the attach arm stays pinned to that, never the CLI value.
-    port = free_port()
-    profile = scratch / "attach-chrome-profile"
-    if profile.exists():
-        shutil.rmtree(profile)
-    chrome_proc = launch_attach_chrome(port, profile)
     result: dict[str, Any] = {"arm": "attach", "attachViewport": {"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT}}
-    viewport_hold = None
-    try:
-        wait_for_cdp(port)
-        viewport_hold = force_exact_viewport(port, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
+    with attach_chrome(scratch / "attach-chrome-profile", result) as port:
         with env_override({ATTACH_ENV: f"http://127.0.0.1:{port}"}):
             player = LiveOutputHost(export_root, slides, headless=True, gl_replay=gl_replay)
             try:
@@ -2804,17 +2833,6 @@ def run_attach_arm(
                     player.stop()
                 except Exception as exc:  # noqa: BLE001
                     result["stopError"] = str(exc)
-    finally:
-        if viewport_hold is not None:
-            viewport_hold.close()
-        chrome_proc.terminate()
-        try:
-            chrome_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            chrome_proc.kill()
-            chrome_proc.wait(timeout=5)
-        result["chromePid"] = chrome_proc.pid
-        result["chromeExitCode"] = chrome_proc.poll()
     return result
 
 
@@ -4336,18 +4354,10 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
         "pass": "G", "attach": bool(args.attach), "viewport": {"width": viewport[0], "height": viewport[1]},
         "matrix": [list(case) for case in matrix],
     }
-    chrome_proc: subprocess.Popen | None = None
-    viewport_hold = None
-    try:
+    with ExitStack() as stack:
         env: dict[str, str | None] = {}
         if args.attach:
-            port = free_port()
-            profile = root / "attach-chrome-profile-g"
-            if profile.exists():
-                shutil.rmtree(profile)
-            chrome_proc = launch_attach_chrome(port, profile)
-            wait_for_cdp(port)
-            viewport_hold = force_exact_viewport(port, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
+            port = stack.enter_context(attach_chrome(root / "attach-chrome-profile-g", result))
             env = {ATTACH_ENV: f"http://127.0.0.1:{port}", ADVANCE_ENV: "click"}
         else:
             force_viewport(*viewport)
@@ -4367,18 +4377,6 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
             viewport=viewport, evidence_dir=evidence_dir, character_rect=character_rect, onset_scene_id=onset_scene_id,
             gl_replay=args.gl_replay, matrix=matrix,
         )
-    finally:
-        if viewport_hold is not None:
-            viewport_hold.close()
-        if chrome_proc is not None:
-            chrome_proc.terminate()
-            try:
-                chrome_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                chrome_proc.kill()
-                chrome_proc.wait(timeout=5)
-            result["chromePid"] = chrome_proc.pid
-            result["chromeExitCode"] = chrome_proc.poll()
 
     result["status"], result["reasons"] = overall_status_g(result)
     return result
