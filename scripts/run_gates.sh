@@ -1,7 +1,7 @@
 #!/bin/zsh
-# usage: run_gates.sh <gate-worktree> <outdir> [--allow-record]   (runs host gate x3 and host red arms serially, then
-# P2 arms P2_JOBS at a time (default 3), from a clean pinned worktree). Exits nonzero when any gate FAILED, or when a
-# RECORD arm is PENDING registration unless --allow-record (discovery runs only) is passed.
+# usage: run_gates.sh <gate-worktree> <outdir> [--allow-record]   (runs host gate x3, host red arms and P2 arms through
+# one queue, GATE_JOBS at a time (default 3; 1 = serial), from a clean pinned worktree). Exits nonzero when any gate
+# FAILED, or when a RECORD arm is PENDING registration unless --allow-record (discovery runs only) is passed.
 G=${1:A}; O=${2:A}; ALLOW_RECORD=0; [[ "$3" == "--allow-record" ]] && ALLOW_RECORD=1
 PY=/Users/anyhowclick/Desktop/work/obed-edom/.venv/bin/python; mkdir -p $O; cd $G || exit 1
 export PYTHONPATH=$G/src; F=$G/output/p2-recovery/html-adversarial
@@ -80,14 +80,25 @@ print(f"    expected red: {sorted(want) or '{}'}; expected inconclusive: {sorted
 sys.exit(0 if ok else 1)
 PYEOF
 }
-for V in 2560x1440 1600x1000 1920x1080; do
-  $PY -u scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport $V --artifact $O/host-$V.json > $O/host-$V.log 2>&1 || fail "HOST $V exit $?"; summ $O/host-$V.json "HOST $V" || fail "HOST $V status"
+# Every run (host gates, host red arms, P2 arms) goes through one queue, GATE_JOBS at a time (default 3, the three-Chrome
+# cap; GATE_JOBS=1 runs them serially), launched in the listed order. Each writes <name>.log and <name>.rc; the checks
+# run and print in the listed order once every run has finished.
+GATE_JOBS=${GATE_JOBS:-3}; PIDS=()
+queue(){ local out=$1; shift
+  while (( ${#PIDS} >= GATE_JOBS )); do wait $PIDS[1] 2>/dev/null; shift PIDS; done
+  { "$@" > "$out.log" 2>&1; echo $? > "$out.rc"; } &
+  PIDS+=($!); }
+HOST_VIEWPORTS=(2560x1440 1600x1000 1920x1080)
+for V in $HOST_VIEWPORTS; do
+  queue $O/host-$V $PY -u scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport $V --artifact $O/host-$V.json
 done
+check_host(){ rc=$(<$O/host-$1.rc); [[ $rc == 0 ]] || fail "HOST $1 exit $rc"; summ $O/host-$1.json "HOST $1" || fail "HOST $1 status"; }
 # Host red arms (probe-owned pre-registered sets, keyed in the probe by the P2 off-plan sha). The artifact contract is
 # checked in full: every key present and typed, redArm equal to the label the CLI arguments imply, expectedCoreSha256
 # the arm's sha, `unknown` an empty list, the census stray/duplicate multiset reconciled with redSet, and the red and
 # expected multisets equal (Counter). A "record" arm returns 3 only when all of that holds with status recorded.
-host_red(){ n=$(echo "$*" | tr -d ' '); $PY -u scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport 1920x1080 --artifact $O/host-red$n.json "$@" > $O/host-red$n.log 2>&1; rc=$?; $PY - "$O/host-red$n.json" "$rc" "$@" <<'PYEOF'
+run_host_red(){ n=$(echo "$*" | tr -d ' '); queue $O/host-red$n $PY -u scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport 1920x1080 --artifact $O/host-red$n.json "$@"; }
+check_host_red(){ n=$(echo "$*" | tr -d ' '); rc=$(<$O/host-red$n.rc); $PY - "$O/host-red$n.json" "$rc" "$@" <<'PYEOF'
 import json,sys
 from collections import Counter
 sys.path.insert(0,"scripts")
@@ -141,16 +152,12 @@ for o,c in sorted((census or {}).items()):
 sys.exit((3 if exp=="record" else 0) if ok else 1)
 PYEOF
 }
-for A in "--core-variant stash-any" "--strip bridge@8" "--strip retire@2" "--strip restart@6" "--strip glReplay@2 --gl-replay auto"; do
-  host_red ${=A}; tally $? "HOST red $A"
-done
-# P2 arms run P2_JOBS at a time (default 3, the three-Chrome cap; P2_JOBS=1 runs them serially), each in its own
-# --out-dir. They are checked and tallied in the listed order once every arm has finished.
-P2_JOBS=${P2_JOBS:-3}; P2_ARMS=(); P2_PIDS=()
+HOST_RED_ARMS=("--core-variant stash-any" "--strip bridge@8" "--strip retire@2" "--strip restart@6" "--strip glReplay@2 --gl-replay auto")
+for A in $HOST_RED_ARMS; do run_host_red ${=A}; done
+# Each P2 arm runs in its own --out-dir.
+P2_ARMS=()
 run_p2(){ P2_ARMS+=("${(j: :)${(@q)@}}"); shift 2; n=$(echo "$*" | tr -d ' ')
-  while (( ${#P2_PIDS} >= P2_JOBS )); do wait $P2_PIDS[1] 2>/dev/null; shift P2_PIDS; done
-  { $PY scripts/p2_recovery_html_adversarial.py --reuse-export --disposable --out-dir "$O/p2$n" "$@" > "$O/p2$n.log" 2>&1; echo $? > "$O/p2$n.rc"; } &
-  P2_PIDS+=($!); }
+  queue "$O/p2$n" $PY scripts/p2_recovery_html_adversarial.py --reuse-export --disposable --out-dir "$O/p2$n" "$@"; }
 check_p2(){ spec=$1; inc=$2; shift 2; n=$(echo "$*" | tr -d ' '); rc=$(<"$O/p2$n.rc"); echo "[P2 $*] exit=$rc $(grep -m1 '^success' "$O/p2$n.log") True=$(grep -cE '^- [A-Za-z0-9]+: \*\*True\*\*' "$O/p2$n.log") False: $(grep -oE '^- [A-Za-z0-9]+: \*\*False\*\*' "$O/p2$n.log" | tr '\n' ' ')"; r=$O/p2$n/report.json; [[ "$*" == *"--gl-replay auto"* ]] && r=$O/p2$n/gl-replay/report.json; cp $r "$O/p2$n.report.json" 2>/dev/null; expect "$O/p2$n.log" "$rc" "$spec" "$inc" "$@"; tally $? "P2 $*"; }
 # run_p2 "<expected red>" "<expected inconclusive>" <args>
 run_p2 "" "" --wait-profile fast; run_p2 "continueThroughMovingMagicMove3to4" "" --wait-profile fast --disable-bridge34; run_p2 "" "" --wait-profile slow
@@ -169,6 +176,8 @@ run_p2 "" "" --wait-profile fast --gl-replay auto
 # Registered post hoc from r2.
 run_p2 "glReplayCarry1to2 noStrayVideo" "" --wait-profile fast --gl-replay auto --strip glReplay@2
 wait
+for V in $HOST_VIEWPORTS; do check_host $V; done
+for A in $HOST_RED_ARMS; do check_host_red ${=A}; tally $? "HOST red $A"; done
 for A in "${P2_ARMS[@]}"; do check_p2 "${(@Q)${(z)A}}"; done
 $PY -c "from obed_edom.live_continuity_js import js_sha256; print('runtime sha at end', js_sha256())"
 pgrep -fl obed-live-chrome | cut -c1-80 | head -2; echo "DONE failed=$FAIL pending=$PENDING"
