@@ -76,12 +76,15 @@ The findings, grouped:
   check of painted pixels at the 3→4 cut plus its own non-vacuity control, so it runs once per paint path:
   `--wait-profile fast` (DOM) and `--gl-replay auto` (WebGL). `--wait-profile slow` and every red arm
   (`--core-variant`, `--strip`, `--disable-bridge34`) pass `--skip-freeze-bracket`, which P2 refuses on any other
-  arm; a flag skip is non-blocking, renders `**True** (skipped by --skip-freeze-bracket)`, and the report names it
+  arm (a non-red `--gl-replay auto` arm whatever its wait profile); a flag skip is non-blocking, renders `**True** (skipped by --skip-freeze-bracket)`, and the report names it
   (`Freeze bracket:` header line, `skipFreezeBracket` in report.json).
 - **At-cut counter gates every arm (owner decision 8a, promoted 2026-10-09):** `movingIndexRunAtCut` (the
   counter run across the 3→4 cut itself, in the main run) is part of `continueThroughMovingMagicMove3to4`'s pass
-  (`_moving_mm34_pass`), no longer report-only. It agreed with the bracket in 63/63 positive runs and was never a
-  false red; re-scored on the two 2026-10-09 rounds (18 P2 reports, every arm) it changes no finding.
+  (`_moving_mm34_verdict`), no longer report-only. It agreed with the bracket in 63/63 positive runs and was never a
+  false red; re-scored on the two 2026-10-09 rounds (18 P2 reports, every arm) it changes no finding. Three states:
+  any other clause red -> red; otherwise a run that was not measured (no valid at-cut boundary, undecodable flip
+  window, inadmissible null reads, or the scorer's own decoding-integrity reasons) renders `**False** (inconclusive)`
+  and blocks success; only a measured counter failure is red.
 
 ## Accepted residuals (fixture-scoped / deferred — not blocking)
 - Footprint ownership is geometric (IoU), not paint-order/opacity-aware — backstopped by the composite

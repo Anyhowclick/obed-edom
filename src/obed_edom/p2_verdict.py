@@ -3924,7 +3924,7 @@ def _freeze_control_blocks_success(
     control, so it runs once per paint path — `--wait-profile fast` (DOM) and
     `--gl-replay auto` (WebGL) — and the driver refuses the flag there. Every
     other arm skips it by flag; the at-cut counter now gates every arm
-    (`_moving_mm34_pass`)."""
+    (`_moving_mm34_verdict`)."""
     if verdict == "pass":
         return False
     if verdict == "skipped":
@@ -3932,26 +3932,38 @@ def _freeze_control_blocks_success(
     return True
 
 
-def _moving_mm34_pass(
+# `score_composited_index_run`'s own decoding-integrity reasons: the run was not
+# measured, so they say nothing about the counter.
+AT_CUT_UNMEASURED_REASONS = frozenset({"insufficient decodable samples", "undecodable in flip window"})
+
+
+def _moving_mm34_verdict(
     moving_continuity: dict,
     moving_index_run: dict,
     moving_index_run_at_cut: dict,
+    flip_window_decodable: bool,
     footprint_live: dict,
     advance_ok: bool,
     player_build_errors: list,
-) -> bool:
-    """`continueThroughMovingMagicMove3to4`'s pass. Owner decision 8a, promoted
-    2026-10-09 with 8b: the at-cut counter run (`movingIndexRunAtCut`) gates —
-    it agreed with the freeze bracket in 63/63 positive runs and was never a
-    false red."""
-    return bool(
+) -> str:
+    """`continueThroughMovingMagicMove3to4`'s verdict: "pass", "fail" or
+    "inconclusive". Owner decision 8a, promoted 2026-10-09 with 8b: the at-cut
+    counter run (`movingIndexRunAtCut`) gates — it agreed with the freeze bracket
+    in 63/63 positive runs and was never a false red. A run that was not measured
+    (`flip_window_decodable` False, or a decoding-integrity reason) is
+    "inconclusive" when every other clause holds; any other clause failing is
+    "fail"."""
+    if not (
         moving_continuity.get("ok", False)
         and moving_index_run.get("ok", False)
-        and moving_index_run_at_cut.get("ok", False)
         and footprint_live.get("ok", False)
         and advance_ok
         and not player_build_errors
-    )
+    ):
+        return "fail"
+    if not flip_window_decodable or moving_index_run_at_cut.get("reason") in AT_CUT_UNMEASURED_REASONS:
+        return "inconclusive"
+    return "pass" if moving_index_run_at_cut.get("ok", False) else "fail"
 
 
 STRAY_IOU_MIN = 0.75
