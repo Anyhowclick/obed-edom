@@ -18,6 +18,7 @@ def _cached_wall(reader: str = "jxa") -> dict:
     }
     if reader == "offline":
         wall["offlineFallbackTagged"] = True
+        wall["spliceAspectRefreshed"] = True
     return wall
 
 
@@ -141,6 +142,8 @@ def test_fresh_two_tier_read_is_full_deck_and_stamped_offline(monkeypatch, tmp_p
     assert "slide_range" not in seen
     assert [slide["number"] for slide in out["slides"]] == [1, 2, 3]
     assert out["reader"] == "offline"
+    assert out["offlineFallbackTagged"] is True
+    assert out["spliceAspectRefreshed"] is True
 
 
 def test_rejected_cache_bypasses_cache_on_partial_two_tier_fallback(monkeypatch, tmp_path):
@@ -218,14 +221,16 @@ def test_fresh_partial_fallback_tags_only_the_fallback_slides(monkeypatch, tmp_p
 
 def test_fallback_tagging_survives_the_cache_round_trip(monkeypatch, tmp_path):
     """store_inspect_payload only strips `_`-prefixed top-level keys, so the per-slide
-    groupChildrenUnavailable flag (nested, not top-level) and offlineFallbackTagged
-    (top-level, no underscore) both survive a write-then-read cache round trip."""
+    groupChildrenUnavailable flag (nested, not top-level) and offlineFallbackTagged /
+    spliceAspectRefreshed (top-level, no underscore) all survive a write-then-read
+    cache round trip."""
     monkeypatch.setenv(CACHE_DIR_ENV, str(tmp_path / "cache"))
     source = tmp_path / "wall.key"
     source.touch()
     payload = {
         "reader": "offline",
         "offlineFallbackTagged": True,
+        "spliceAspectRefreshed": True,
         "slideCount": 2,
         "slides": [
             {"number": 1, "index": 0, "items": [], "groupChildrenUnavailable": True},
@@ -238,6 +243,7 @@ def test_fallback_tagging_survives_the_cache_round_trip(monkeypatch, tmp_path):
     restored = cached_payload(source)
 
     assert restored["offlineFallbackTagged"] is True
+    assert restored["spliceAspectRefreshed"] is True
     assert restored["slides"][0]["groupChildrenUnavailable"] is True
     assert "groupChildrenUnavailable" not in restored["slides"][1]
 
@@ -264,6 +270,119 @@ def test_stale_mixed_offline_cache_is_rejected_and_reread_in_mode_on(monkeypatch
 
     assert out is offline_payload
     assert any("mixed-slide-tagged" in line for line in logs)
+
+
+def test_stale_aspect_offline_cache_is_rejected_and_reread_in_mode_on(monkeypatch, tmp_path):
+    """An offline cache written before the bulk splice refreshed a stale frame's aspect
+    (no spliceAspectRefreshed) may carry the pre-splice offline aspect, which sizes the
+    planner's aspect snap from the wrong frame (Full wall slide 127 group 2: 406 pt
+    planned vs ~108 pt). It is complete, tagged and carries aspect, yet must be
+    re-read offline rather than served."""
+    source = tmp_path / "wall.key"
+    source.touch()
+    cached = _cached_wall("offline")
+    del cached["spliceAspectRefreshed"]
+    cached["slides"][0]["items"] = [_image_item(aspect=3.76, iwa_id="301")]
+    logs: list[str] = []
+    offline_payload = {"slideCount": 3, "slides": _cached_wall("offline")["slides"],
+                        "_offline": {"bulk_ok": True}}
+    monkeypatch.setattr(rk, "cached_payload", lambda _source: cached)
+    import obed_edom.inspect as inspect_mod
+    import obed_edom.offline_inspect as offline_mod
+
+    monkeypatch.setattr(inspect_mod, "bulk_geometry", _no_bulk_geometry)
+    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", lambda *a, **k: offline_payload)
+
+    out = rk.acquire_wall_payload(source, slide_range=None, mode="on", say=logs.append)
+
+    assert out is offline_payload
+    assert out["spliceAspectRefreshed"] is True
+    assert any("splice aspect refresh" in line for line in logs)
+    assert not any("mixed-slide-tagged" in line for line in logs)
+
+
+def test_stale_aspect_cache_serves_the_cached_payload_when_offline_read_genuinely_unavailable(
+    monkeypatch, tmp_path,
+):
+    """When tier 1 raises while the cache predates the splice aspect refresh, the cached
+    payload is served conservatively — every aspect nulled, so no item is aspect-snapped
+    from a possibly stale frame (a None aspect already means "no snap", like a masked
+    item or an aspect-less JXA read) — rather than paying for a full Keynote re-read.
+    The fallback tagging is trusted, so group sizes stay allowed."""
+    source = tmp_path / "wall.key"
+    source.touch()
+    cached = _cached_wall("offline")
+    del cached["spliceAspectRefreshed"]
+    cached["slides"][0]["items"] = [
+        _image_item(aspect=1.5, iwa_id="301"),
+        {"kind": "group", "kindIndex": 0, "aspect": 3.76, "iwaId": "302"},
+        {"kind": "image", "kindIndex": 1, "aspect": None, "iwaId": "303"},
+        {"kind": "text", "kindIndex": 0, "iwaId": "304"},
+    ]
+    logs: list[str] = []
+    monkeypatch.setattr(rk, "cached_payload", lambda _source: cached)
+    monkeypatch.setattr(rk, "inspect_keynote", _fail_inspect)
+
+    def boom_two_tier(key_path, bulk_geometry_fn=None, slide_range=None, *, deck=None, log=None):
+        raise RuntimeError("bad IWA")
+
+    import obed_edom.offline_inspect as offline_mod
+
+    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", boom_two_tier)
+
+    out = rk.acquire_wall_payload(source, slide_range=None, mode="on", say=logs.append)
+
+    assert out is cached
+    items = out["slides"][0]["items"]
+    assert [item.get("aspect", "absent") for item in items] == [None, None, None, "absent"]
+    assert not any("groupChildrenUnavailable" in slide for slide in out["slides"])
+    assert any("aspect snaps refused" in line for line in logs)
+    assert not any("group sizes" in line for line in logs)
+
+
+def test_stale_mixed_and_stale_aspect_cache_refuses_both_when_offline_read_unavailable(
+    monkeypatch, tmp_path,
+):
+    """A cache predating both markers (every offline cache written before fallback tagging) degrades on
+    both axes at once: group sizes and aspect snaps are refused."""
+    source = tmp_path / "wall.key"
+    source.touch()
+    cached = _cached_wall("offline")
+    del cached["offlineFallbackTagged"]
+    del cached["spliceAspectRefreshed"]
+    cached["slides"][0]["items"] = [_image_item(aspect=1.5, iwa_id="301")]
+    logs: list[str] = []
+    monkeypatch.setattr(rk, "cached_payload", lambda _source: cached)
+    monkeypatch.setattr(rk, "inspect_keynote", _fail_inspect)
+
+    def boom_two_tier(key_path, bulk_geometry_fn=None, slide_range=None, *, deck=None, log=None):
+        raise RuntimeError("bad IWA")
+
+    import obed_edom.offline_inspect as offline_mod
+
+    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", boom_two_tier)
+
+    out = rk.acquire_wall_payload(source, slide_range=None, mode="on", say=logs.append)
+
+    assert out is cached
+    assert out["slides"][0]["items"][0]["aspect"] is None
+    assert all(slide["groupChildrenUnavailable"] is True for slide in out["slides"])
+    assert any("group sizes and aspect snaps refused" in line for line in logs)
+
+
+def test_stale_aspect_marker_is_ignored_when_mode_off(monkeypatch, tmp_path):
+    """Mode "off" never serves an offline cache at all, so the marker plays no part:
+    a JXA cache (which never carries the marker) is served as before."""
+    source = tmp_path / "wall.key"
+    source.touch()
+    cached = _cached_wall("jxa")
+    monkeypatch.setattr(rk, "cached_payload", lambda _source: cached)
+    monkeypatch.setattr(rk, "inspect_keynote", _fail_inspect)
+
+    out = rk.acquire_wall_payload(source, slide_range=None, mode="off", say=lambda _m: None)
+
+    assert out is cached
+    assert "spliceAspectRefreshed" not in out
 
 
 def _image_item(*, aspect: object = "missing", iwa_id: object = None) -> dict:

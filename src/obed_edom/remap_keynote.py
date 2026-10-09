@@ -382,7 +382,16 @@ def acquire_wall_payload(
         and cached.get("reader") == "offline"
         and not cached.get("offlineFallbackTagged")
     )
-    if usable and carries and not stale_jxa and not stale_mixed:
+    # An offline cache written before the splice refreshed a stale frame's aspect may
+    # carry the pre-splice aspect, which mis-sizes the planner's aspect snap; re-read.
+    stale_aspect = (
+        mode == "on"
+        and usable
+        and carries
+        and cached.get("reader") == "offline"
+        and not cached.get("spliceAspectRefreshed")
+    )
+    if usable and carries and not stale_jxa and not stale_mixed and not stale_aspect:
         bulk_errors = cached.get("bulkErrors") or []
         if bulk_errors:
             say(f"WARN: cached {cached['reader']} read for {source.name} carries "
@@ -398,6 +407,10 @@ def acquire_wall_payload(
     if stale_mixed:
         say(f"Cached offline read of {source.name} is not from a mixed-slide-tagged "
             "two-tier read; re-reading offline.")
+
+    if stale_aspect:
+        say(f"Cached offline read of {source.name} predates the splice aspect refresh; "
+            "re-reading offline.")
 
     if rejected_cache and mode == "on" and usable and not carries_aspect:
         say(f"Cached {cached['reader']} read of {source.name} predates per-item aspect; "
@@ -427,13 +440,23 @@ def acquire_wall_payload(
             say(f"Offline source read unavailable ({type(exc).__name__}: {exc}); "
                 f"serving cached jxa payload for {source.name}.")
             return cached
-        if stale_mixed:
-            # Untagged: we cannot tell a fallback slide from a genuinely offline one, so
-            # refuse every autosize group's size rather than re-read Keynote in full.
-            for slide in cached.get("slides") or []:
-                slide["groupChildrenUnavailable"] = True
+        if stale_mixed or stale_aspect:
+            # Untagged: we cannot tell a fallback slide from a genuinely offline one, nor
+            # a stale aspect from a fresh one, so refuse what is untrusted rather than
+            # re-read Keynote in full.
+            refused = []
+            if stale_mixed:
+                for slide in cached.get("slides") or []:
+                    slide["groupChildrenUnavailable"] = True
+                refused.append("group sizes")
+            if stale_aspect:
+                for slide in cached.get("slides") or []:
+                    for item in slide.get("items") or []:
+                        if item.get("aspect") is not None:
+                            item["aspect"] = None
+                refused.append("aspect snaps")
             say(f"Offline source read unavailable ({type(exc).__name__}: {exc}); serving "
-                f"cached offline payload for {source.name} with group sizes refused.")
+                f"cached offline payload for {source.name} with {' and '.join(refused)} refused.")
             return cached
         say(f"Offline source read unavailable ({type(exc).__name__}: {exc}); "
             f"using Keynote inspect of {source.name}.")
@@ -469,6 +492,7 @@ def acquire_wall_payload(
         f"skipped the full Keynote source inspect.")
     offline["reader"] = "offline"
     offline["offlineFallbackTagged"] = True
+    offline["spliceAspectRefreshed"] = True
     if _truthy_cache(None, None):
         try:
             store_inspect_payload(source, offline)

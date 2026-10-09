@@ -365,6 +365,69 @@ def test_two_tier_bulk_splice_leaves_aspect_untouched():
             assert item["aspect"] == aspects_before[key]
 
 
+@pytest.mark.skipif(not FULL_DECK.exists(), reason="local gold deck only")
+def test_two_tier_bulk_splice_refreshes_every_stale_aspect_including_hidden_items_full_deck():
+    """Against Keynote's real rows (the banked Full-wall JXA payload as the bulk double),
+    EVERY item whose offline frame is stale (> 1 pt in w or h) leaves the splice with
+    the row's ratio, and every consistent item keeps its precise offline aspect.
+
+    This reaches items the Full-deck plan gate cannot see: the gate compares the
+    PLANS, and five of the 40 stale group-union groups are planned role "hide"
+    (slides 19/20's full-bleed groups, slide 124 groups 5 and 7); without the product
+    fix the gate fails on the other 35 only, so those five would keep their stale
+    aspect silently."""
+    pytest.importorskip("keynote_parser")
+    jxa = _cached_payload(FULL_DECK)
+    if jxa is None:
+        pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
+    tmpl_deck = FULL_DECK.parent / "Base_CG_Assets.key"
+    if not tmpl_deck.exists():
+        pytest.skip("no CG template deck available to name the hidden items")
+
+    from obed_edom.map_remap import plan_payload
+    from obed_edom.remap_keynote import recipe_for
+
+    before = {
+        (s["index"], it["kind"], it["kindIndex"]): it
+        for s in offline_wall_payload(FULL_DECK)["slides"] for it in s["items"]
+    }
+    rows = {
+        (s["index"], it["kind"], it["kindIndex"]): (float(it["w"]), float(it["h"]))
+        for s in jxa["slides"] for it in s["items"] if it["kind"] in BULK_KINDS
+    }
+    off = two_tier_wall_payload(FULL_DECK, bulk_geometry_fn=_bulk_double_from_jxa(jxa))
+
+    stale_groups: set[tuple[int, int]] = set()
+    refreshed = kept = 0
+    for slide in off["slides"]:
+        for item in slide["items"]:
+            key = (slide["index"], item["kind"], item["kindIndex"])
+            if key not in rows or key not in before:
+                continue
+            pre = before[key]
+            row_w, row_h = rows[key]
+            stale = abs(row_w - pre["w"]) > 1 or abs(row_h - pre["h"]) > 1
+            if pre["aspect"] is None:
+                assert item["aspect"] is None, key
+            elif stale:
+                assert item["aspect"] == row_w / row_h, key
+                refreshed += 1
+            else:
+                assert item["aspect"] == pre["aspect"], key
+                kept += 1
+            if stale and item["kind"] == "group":
+                stale_groups.add((slide["number"], item["kindIndex"]))
+    assert len(stale_groups) == 40
+    assert refreshed > 0 and kept > 0
+
+    template = offline_wall_payload(tmpl_deck)
+    transforms = plan_payload(off, recipe_for(off, template), template=template).transforms
+    hidden = {
+        (t.slide_number, t.kind_index) for t in transforms if t.kind == "group" and t.role == "hide"
+    }
+    assert stale_groups & hidden == {(19, 0), (19, 1), (20, 0), (124, 5), (124, 7)}
+
+
 # --------------------------------------------------------------------------
 # locked passthrough up the super chain.
 # --------------------------------------------------------------------------
@@ -887,6 +950,53 @@ def test_splice_refreshes_a_stale_aspect_and_keeps_a_consistent_one():
     assert g1["aspect"] is None  # stale frame with a zero dimension -> no aspect
 
 
+_PRECISE_ASPECT = 50.37 / 20.12  # an offline unrounded composed aspect for a 50 x 20 frame
+
+
+@pytest.mark.parametrize(
+    ("offline", "row", "expected_aspect"),
+    [
+        # The load-bearing boundary: Keynote rows are whole points, so a difference of
+        # EXACTLY 1.0 pt is still rounding-compatible and keeps the precise aspect...
+        pytest.param((0, 0, 50, 20, _PRECISE_ASPECT), (0, 0, 51.0, 20.0), _PRECISE_ASPECT,
+                     id="w-exactly-1pt-kept"),
+        pytest.param((0, 0, 50, 20, _PRECISE_ASPECT), (0, 0, 50.0, 19.0), _PRECISE_ASPECT,
+                     id="h-exactly-1pt-kept"),
+        # ...and anything over 1 pt is a stale frame whose aspect follows the row.
+        pytest.param((0, 0, 50, 20, _PRECISE_ASPECT), (0, 0, 51.01, 20.0), 51.01 / 20.0,
+                     id="w-just-over-1pt-refreshed"),
+        pytest.param((0, 0, 50, 20, _PRECISE_ASPECT), (0, 0, 50.0, 18.99), 50.0 / 18.99,
+                     id="h-just-over-1pt-refreshed"),
+        # One axis alone is enough; the other axis agreeing does not veto it.
+        pytest.param((0, 0, 50, 20, _PRECISE_ASPECT), (0, 0, 50.0, 30.0), 50.0 / 30.0,
+                     id="h-only-stale-refreshed"),
+        pytest.param((0, 0, 50, 20, _PRECISE_ASPECT), (0, 0, 80.0, 20.0), 80.0 / 20.0,
+                     id="w-only-stale-refreshed"),
+        # A pure move never makes the frame stale: position does not enter the ratio.
+        pytest.param((0, 0, 50, 20, _PRECISE_ASPECT), (4687.0, 97.0, 50.0, 20.0), _PRECISE_ASPECT,
+                     id="xy-only-move-kept"),
+        # Offline-zero frame (the reader gives it a None aspect) with a valid bulk row:
+        # stale by size, but the splice never invents an aspect lock.
+        pytest.param((0, 0, 0, 0, None), (10.0, 10.0, 110.0, 244.0), None,
+                     id="offline-zero-frame-stays-none"),
+        # Masked media (None aspect) stays None whether or not its frame moved.
+        pytest.param((0, 0, 50, 20, None), (0, 0, 50.0, 20.0), None, id="masked-consistent-stays-none"),
+        pytest.param((0, 0, 50, 20, None), (0, 0, 120.0, 60.0), None, id="masked-stale-stays-none"),
+    ],
+)
+def test_splice_aspect_refresh_boundaries(offline, row, expected_aspect):
+    x, y, w, h, aspect = offline
+    payload = _aspect_slide({"kind": "image", "kindIndex": 0, "x": x, "y": y, "w": w, "h": h, "aspect": aspect})
+    spliced, _ = _splice_bulk_geometry(payload, {0: {"image": [list(row)]}})
+    assert spliced == {(1, "image", 0)}
+    item = payload["slides"][0]["items"][0]
+    assert (item["x"], item["y"], item["w"], item["h"]) == tuple(round(v) for v in row)
+    if expected_aspect is None:
+        assert item["aspect"] is None
+    else:
+        assert item["aspect"] == pytest.approx(expected_aspect, abs=1e-12)
+
+
 def test_planned_group_width_follows_the_spliced_frame():
     """End-to-end-ish: splice a stale group, then plan it. The snapped width is
     round(h) * the SPLICED frame's aspect, not the stale offline one."""
@@ -1285,7 +1395,16 @@ def _jxa_with_consistent_aspects(jxa: dict, offline: dict) -> dict:
     trustworthy. A stale offline frame (> 1 pt off; on the Full wall the 40
     group-union frames, all >= 12.34 pt off) gets no aspect and keeps the raw JXA
     affine, so a product splice that keeps a stale aspect still fails this gate.
-    Masked/None aspects are not borrowed. Tolerance unchanged (2 pt)."""
+    Masked/None aspects are not borrowed. Tolerance unchanged (2 pt).
+
+    Circularity (Codex r1 finding 2): where the frames agree, the expected aspect IS
+    the production offline reader's own, so an upstream error that computes or assigns
+    a wrong aspect while leaving w/h within 1 pt lands in both plans and this gate
+    stays green. The gate therefore ASSUMES consistent-frame aspects are validated
+    separately — the reader's unrounded composed ratio by
+    ``test_aspect_is_the_unrounded_composed_ratio_not_the_rounded_wh`` and the splice
+    keep/refresh rule by ``test_splice_aspect_refresh_boundaries`` — and proves only
+    that stale frames are caught."""
     offline_items = {
         (s["index"], it["kind"], it["kindIndex"]): it
         for s in offline["slides"] for it in s["items"]
