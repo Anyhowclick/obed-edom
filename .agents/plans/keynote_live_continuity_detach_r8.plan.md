@@ -356,3 +356,32 @@ Pick the variant from §4.
 4. **Fix verification.** Run the candidate as a probe-only core variant: V8+fix vs V8, ≥ 30 events each, interleaved.
    - Pass: 0 blinks with fix, no new reds, the positive control still detected, and the P2 restart clock unchanged.
    - Then land it in the core, re-pin, and run the §3 gate list. If (c) was chosen, run #238's gate list too.
+
+## 5. Results (2026-10-09/10 night, branch `claude/s2-detach-experiment`)
+
+Evidence (main checkout, git-ignored): `output/evidence/s2-dev/detach-{controls,s1,ab,1920,l2-smoke,l2,fix-ctl,fix}/`,
+`detach-main-p2/` (main port: branch `claude/detach-main-p2` 97332ef6). Chrome 154.0.8037.59, 2560x1440 unless noted.
+
+- **Controls (valid session):** null 0/0, positive 2/2 (samples/pre-paint), `setTimeout(0)` 1/1 — one task of deferral
+  blanks one frame; R8 flag correct under off/V5/V7/V8 (and with Level 2 preload logging).
+- **A/B (§2.3), early-stop after 18 blocks, 0 invalid:** V8 6/19 blinks (all direct path, all late phase); V7 0/18;
+  V5 0/18 (all waited). Fisher one-sided V8 vs V7 = V8 vs V5 = 0.012. **R8 is the exposer** (dropping R8 alone removes it).
+- **1920 block:** V8 3/10 (direct, late) — the predicted lower rate at 1080 does NOT hold.
+- **Level 2 (15 V8 runs):** every blink (4/4) is **H3 → H1 from the core trace**: the decoder is re-homed into the
+  outgoing poster layer, the player removes that layer ~1 ms later, and `stash` returns on `__obedRemounting` still set
+  by the re-home's own move; the decoder returns only at the carry's dom-swap. The same gap exists in every eligible
+  event in every arm (waited ≈3.6 ms median, direct ≈7.8 ms); R8's direct path only widens it past a paint.
+- **Fix A/B (23 blocks, 69/69 ok; 23 events per arm, not 30):** V8 8/23; **V8+a1 0/23 (Fisher 0.0019)**;
+  V8+a2 4/23 (0.16, no effect, as predicted — it never runs in this signature). Positive control on plain V8 in the same
+  session: pass. Gap length: V8 7.8 ms (6.8–9.9), a2 7.9 ms, **a1 0.7 ms (0.5–1.3)**; decoderAtPin on the first
+  destination frame: a1 23/23, V8 15/23.
+- **a1 shrinks the gap ~10x but does not close it** (the decoder is re-stashed and re-homed a task later, ~0.7 ms out of
+  the DOM). Expected residual blink rate if paints land uniformly ≈ 4% per event — 0/23 is consistent with that.
+  **Next:** a same-delivery re-home (no task boundary: re-home synchronously in the detach observer when the removed
+  decoder's `__obedRemounting` re-home target was itself removed) to make the gap 0, verified by gapMs = 0 / sameDelivery,
+  then land it in the core (sha re-pin, variant shas re-derive) and run the owed gates.
+- **Main (P2, GL replay auto, 10 runs, rescored):** the 1→2 hand-back is eligible 10/10, 0 blinks. Main's decoder is
+  out of the DOM during the MM (GL paints it) and is inserted after the teardown, so S2's race is not reached; slide 2's
+  click-build re-homes happen in the same delivery (no gap). Main's continuity qualifies only the P2 plan. **No main
+  escalation.** GL off: retire@2, no carry, 0 eligible events by construction.
+- Instrument note: `elementsFromPoint`-based "top at pin" never sees the decoder (`pointer-events:none`); use `videoAt`.
