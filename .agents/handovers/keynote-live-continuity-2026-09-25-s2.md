@@ -5,6 +5,21 @@ Plan (source of truth): `.agents/plans/keynote_live_continuity_generalisation.pl
 - **S2** is on branch **`claude/continuity-generalisation-s2`**, pushed as a backup with **no PR** (owner, 2026-09-25).
   Do not merge; nothing in it is qualified.
 
+## Rebase r2 (2026-10-09): onto main `0f0a70aa` (#247, live gate round speed-up)
+- Local branch `claude/continuity-generalisation-s2-rebase` (not pushed; the S2 branch moves only on the owner's
+  force-push go). Nothing below was run live; only targeted unit tests.
+- `run_gates.sh` keeps #247's queue, tiers, load guard and prewarm. The 22 S0 deck red arms (`DECK_ARMS`) go through the
+  same queue as host red runs (`HOST_DECK`), after the P2 host red arms and before the P2 arms, full tier only; their
+  checks run after the wait in the same order. `F`/`Q` resolve through `fixture()`.
+- The owner-approved P2 re-registrations (stash-any, `--strip glReplay@2` off and auto, `--strip restart@6`) are in
+  #247's arm list with their reasons; `freezeControlCaughtByCounter` is out of every set (#247 skips the bracket on red
+  arms). #247 dropped the P2 `--strip bridge@8` arm.
+- Plan §4 strip locality is the owner's option (a); the locality test checks every strip arm against `STRIP_CASCADE`
+  instead of skipping the post-hoc chain arms. This resolves both "Open decisions" below.
+- The detach plan (`keynote_live_continuity_detach_r8.plan.md`) is on this branch.
+- Owed: a full `run_gates.sh` round without `--allow-record` on this head (registrations and post-hoc deck sets are
+  unconfirmed under #247's flags), then the steps under "Next, in order".
+
 ## Resume r1 (2026-09-25 night, 20:15–22:00): READ THIS FIRST
 - **Rebased onto main `45290c5f` (#238, hand-back geometry).** The branch **`claude/continuity-generalisation-s2`** was
   synced to the rebased head (owner, 2026-09-25) and is still the one S2 branch, with no PR. The pre-rebase head was
