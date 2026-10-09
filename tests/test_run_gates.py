@@ -651,8 +651,33 @@ def test_the_full_round_p2_arm_list(gates) -> None:
 def test_the_registered_sets_no_longer_carry_the_skipped_freeze_finding() -> None:
     text = SCRIPT.read_text()
     assert "freezeControlCaughtByCounter" not in text
-    assert 'p2 full "noStrayVideo continueThroughMovingMagicMove3to4" "" --wait-profile fast --core-variant stash-any' in text
-    assert 'p2 full "continueThroughMovingMagicMove3to4" "" --wait-profile fast --strip restart@6' in text
+    assert 'p2 full "refusedCarry1to2 overlayRemovedOnLeave preserveDidNotBlockRestart continueThroughMovingMagicMove3to4 noStrayVideo" "" --wait-profile fast --core-variant stash-any' in text
+    assert 'p2 full "" "" --wait-profile fast --strip restart@6' in text
+
+
+def test_the_p2_red_arms_carry_the_owner_approved_v6_registrations() -> None:
+    """S2 (owner-approved 2026-10-09): the four P2 red arms whose sets the v6 core changed, each with
+    its reason and the pre-rebase control evidence path written beside it."""
+    lines = SCRIPT.read_text().splitlines()
+    registered = {
+        ("--core-variant", "stash-any", ""): (
+            "refusedCarry1to2 overlayRemovedOnLeave preserveDidNotBlockRestart continueThroughMovingMagicMove3to4 noStrayVideo"
+        ),
+        ("--strip", "glReplay@2", ""): "refusedCarry1to2 preserveDidNotBlockRestart",
+        ("--strip", "restart@6", ""): "",
+        ("--strip", "glReplay@2", "--gl-replay auto "): "glReplayCarry1to2 preserveDidNotBlockRestart",
+    }
+    for (flag, value, gl), red in registered.items():
+        line = f'p2 full "{red}" "" --wait-profile fast {gl}{flag} {value} --skip-freeze-bracket'
+        assert lines.count(line) == 1, line
+        comment = []
+        for above in reversed(lines[:lines.index(line)]):
+            if not above.startswith("#"):
+                break
+            comment.insert(0, above)
+        text = " ".join(comment)
+        assert "owner-approved 2026-10-09" in text and "output/evidence/s2-dev/p2-4a2ea70f/" in text, line
+        assert "p2ctrl-089a0393" in text, line
 
 
 @pytest.mark.parametrize(

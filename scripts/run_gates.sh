@@ -66,18 +66,31 @@ p2(){ [[ $TIER == full || $1 == dev ]] && P2_ARMS+=("${(j: :)${(@q)@[2,-1]}}"); 
 p2 dev "" "" --wait-profile fast
 p2 dev "continueThroughMovingMagicMove3to4" "" --wait-profile fast --disable-bridge34 --skip-freeze-bracket
 p2 full "" "" --wait-profile slow --skip-freeze-bracket
-# Registered post hoc from discovery r2 (8ac39a42), seen in r1 too: the stray WA0125 overlay paints at authored
-# (109,795,485x273) on slide 4, overlapping the bridged movie's slide-4 rect (327,709,1266x356), so the variant itself
-# corrupts the 3->4 measurement.
-p2 full "noStrayVideo continueThroughMovingMagicMove3to4" "" --wait-profile fast --core-variant stash-any --skip-freeze-bracket
-# Registered post hoc from discovery r2 (8ac39a42); r1 and r2 agree.
-p2 full "noStrayVideo refusedCarry1to2" "" --wait-profile fast --strip glReplay@2 --skip-freeze-bracket
-# Registered post hoc from r2: the bridge stays in the plan, and the un-retired decoder breaks the 3->4 carry (the host
-# arm agrees: red only on the b2to3 carry).
-p2 full "continueThroughMovingMagicMove3to4" "" --wait-profile fast --strip restart@6 --skip-freeze-bracket
+# Re-registered on core v6 (owner-approved 2026-10-09; S1 set "noStrayVideo continueThroughMovingMagicMove3to4"). The
+# stashed slide-1 untitled.mov remounts across the refused 1->2 boundary (15 carry events in the retire zone) and
+# lingers, as in the v6 host set (slide-1 retire plus strays on slides 2-4); the WA0125 overlay still paints on slide 4
+# over the bridged movie's rect and corrupts the 3->4 measurement. Evidence (main checkout): rebased head
+# output/evidence/s2-dev/p2-4a2ea70f/, identical on the pre-rebase control output/evidence/s2-dev/p2ctrl-089a0393/ (a
+# v6-core change, not #238). That run's inconclusive freeze-bracket finding is gone: this arm skips the bracket.
+p2 full "refusedCarry1to2 overlayRemovedOnLeave preserveDidNotBlockRestart continueThroughMovingMagicMove3to4 noStrayVideo" "" --wait-profile fast --core-variant stash-any --skip-freeze-bracket
+# Re-registered on core v6 (owner-approved 2026-10-09: re-register, not an instrument change; S1 set "noStrayVideo
+# refusedCarry1to2"). preserveDidNotBlockRestart is an INSTRUMENT FALSE RED: every negative clause is clean (empty pool
+# census, zero carries in the zone, no reuse after the boundary); only the positive "never pooled" route fails, because
+# with the entry stripped v6 never names slide 1's decoder, so no preserve-refused note fires (refusalEventsN 0, baseline
+# 2). noStrayVideo is green: v6 no longer FIFO-pools an unnamed decoder. Evidence (main checkout):
+# output/evidence/s2-dev/p2-4a2ea70f/, identical on the pre-rebase control output/evidence/s2-dev/p2ctrl-089a0393/.
+p2 full "refusedCarry1to2 preserveDidNotBlockRestart" "" --wait-profile fast --strip glReplay@2 --skip-freeze-bracket
+# Re-registered on core v6 (owner-approved 2026-10-09; S1 set "continueThroughMovingMagicMove3to4"): all green. Slide 2's
+# source is retired at 2 and never carried, so the restart@6 entry is inert under v6, as the host arm's v6 set () says.
+# This arm therefore no longer shows that P2 depends on the restart entry. Evidence (main checkout):
+# output/evidence/s2-dev/p2-4a2ea70f/, identical on the pre-rebase control output/evidence/s2-dev/p2ctrl-089a0393/.
+p2 full "" "" --wait-profile fast --strip restart@6 --skip-freeze-bracket
 p2 dev "" "" --wait-profile fast --gl-replay auto
-# Registered post hoc from r2.
-p2 full "glReplayCarry1to2 noStrayVideo" "" --wait-profile fast --gl-replay auto --strip glReplay@2 --skip-freeze-bracket
+# Re-registered on core v6 (owner-approved 2026-10-09; S1 set "glReplayCarry1to2 noStrayVideo"): the same mechanism as
+# the GL-off --strip glReplay@2 arm (preserveDidNotBlockRestart an instrument false red; noStrayVideo green). Evidence
+# (main checkout): output/evidence/s2-dev/p2-4a2ea70f/; not re-run on the pre-rebase control
+# output/evidence/s2-dev/p2ctrl-089a0393/ (same mechanism as the GL-off arm, which was).
+p2 full "glReplayCarry1to2 preserveDidNotBlockRestart" "" --wait-profile fast --gl-replay auto --strip glReplay@2 --skip-freeze-bracket
 for p2_declaration in "${P2_ARMS[@]}"; do
   p2_words=("${(@Q)${(z)p2_declaration}}"); p2_args=("${(@)p2_words[3,-1]}")
   (( ${p2_args[(Ie)--skip-freeze-bracket]} )) || continue
