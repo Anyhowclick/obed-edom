@@ -8,6 +8,7 @@ ResizeObserver callback (`t`, `n`, `ids`), and an I2 row per `<video>` add/remov
 from __future__ import annotations
 
 import hashlib
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -470,3 +471,415 @@ def test_summary_counts_one_done_record_per_slot_and_ignores_other_records() -> 
     assert summary["perVariant"]["V8"]["runs"] == 1 and summary["perVariant"]["V8"]["blinks"] == 1
     assert summary["statuses"] == {"invalid": 1, "ok": 2}
     assert summary["decision"] == "n/a"
+
+
+# --- Level 2: served bytes, core trace and fix variants (plan §1 Level 2, §3 (a1)/(a2)) --------------------------
+
+
+def test_level2_install_exposes_the_controller_inside_the_hook_only() -> None:
+    patched = dx.level2_install_bytes()
+    assert patched.count(b"Object.defineProperty(window, '__obedDebugController', {value: controller});") == 1
+    assert patched.replace(dx.L2_INSTALL_REPLACEMENT, dx.L2_INSTALL_ANCHOR) == live_runtime._INSTALL
+    with pytest.raises(ValueError, match="install hook anchor"):
+        dx.level2_install_bytes(live_runtime._INSTALL.replace(dx.L2_INSTALL_ANCHOR, b"(function(c) {\n"))
+
+
+def test_level2_install_patches_only_inside_the_context_and_restores() -> None:
+    original = live_runtime._INSTALL
+    with dx.level2_install():
+        assert live_runtime._INSTALL == dx.level2_install_bytes(original)
+    assert live_runtime._INSTALL is original
+
+
+def test_level2_served_sha_differs_from_level1_by_exactly_the_install(monkeypatch) -> None:
+    player = _synthetic_player()
+    monkeypatch.setattr(live_runtime, "PLAYER_SHA256", hashlib.sha256(player).hexdigest())
+    with dx.serving("V8"), dx.level2_install():
+        served = live_runtime.patch_player(player)
+    assert b"__obedDebugController" in served
+    assert dx.served_sha256(player, "V8", level2=True) == hashlib.sha256(served).hexdigest()
+    assert dx.served_sha256(player, "V8", level2=True) != dx.served_sha256(player, "V8")
+
+
+def test_level2_served_shas_are_distinct_and_never_a_level1_sha() -> None:
+    assert set(dx.L2_SERVED_SHA256) == set(dx.SERVINGS)
+    assert len(set(dx.L2_SERVED_SHA256.values())) == len(dx.SERVINGS)
+    assert not set(dx.L2_SERVED_SHA256.values()) & set(dx.SERVED_SHA256.values())
+    assert dx.expected_served_sha256("V8") == dx.SERVED_SHA256["V8"]
+    assert dx.expected_served_sha256("V8", level2=True) == dx.L2_SERVED_SHA256["V8"]
+
+
+@pytest.mark.skipif(not _PLAYER.is_file(), reason="qual-decks fixture is not in this checkout")
+@pytest.mark.parametrize("variant", dx.SERVINGS)
+def test_planned_level2_served_shas_match_the_pinned_player(variant: str) -> None:
+    assert dx.served_sha256(_PLAYER.read_bytes(), variant, level2=True) == dx.L2_SERVED_SHA256[variant]
+
+
+CORE_ANCHORS = [("trace", anchor) for anchor, _ in dx._CORE_TRACE_TRANSFORMS] + [
+    (fix, anchor) for fix in dx.CORE_FIXES for anchor, _ in dx._CORE_FIX_TRANSFORMS[fix]
+]
+
+
+@pytest.mark.parametrize(("label", "anchor"), CORE_ANCHORS)
+def test_each_core_anchor_occurs_exactly_once_in_todays_core(label: str, anchor: str) -> None:
+    from obed_edom.live_continuity_js import PRESERVE_CORE_JS
+    assert PRESERVE_CORE_JS.count(anchor) == 1
+
+
+@pytest.mark.parametrize(("label", "anchor"), CORE_ANCHORS)
+def test_a_core_without_an_anchor_raises_naming_it(label: str, anchor: str) -> None:
+    from obed_edom.live_continuity_js import PRESERVE_CORE_JS
+    fix = label if label in dx.CORE_FIXES else None
+    with pytest.raises(ValueError) as caught:
+        dx.experiment_core(fix, label == "trace", PRESERVE_CORE_JS.replace(anchor, ""))
+    assert f"core {label}" in str(caught.value)
+
+
+def test_the_plain_core_is_the_shipped_core_and_every_combination_has_its_own_sha() -> None:
+    from obed_edom.live_continuity_js import PRESERVE_CORE_JS
+    assert dx.experiment_core() == PRESERVE_CORE_JS and dx.experiment_core_sha() == dx.CORE_SHA256
+    shas = {(fix, trace): dx.experiment_core_sha(fix, trace) for fix in (None, *dx.CORE_FIXES) for trace in (False, True)}
+    assert len(set(shas.values())) == len(shas)
+    with pytest.raises(ValueError, match="unknown core fix"):
+        dx.experiment_core("a3")
+
+
+def _undo(core: str, transforms) -> str:
+    for anchor, replacement in reversed(transforms):
+        assert core.count(replacement) == 1
+        core = core.replace(replacement, anchor)
+    return core
+
+
+@pytest.mark.parametrize("fix", [None, *dx.CORE_FIXES])
+def test_the_trace_is_the_same_pure_insertion_on_every_arm(fix) -> None:
+    """Undoing the trace's replacements gives back the arm's untraced core byte for byte, so the trace adds only
+    its wrappers and helpers (identical text in every arm) and changes no branch."""
+    traced = dx.experiment_core(fix, trace=True)
+    assert _undo(traced, dx._CORE_TRACE_TRANSFORMS) == dx.experiment_core(fix)
+    for snippet in (dx._TRACE_HELPERS, dx._SCHEDULE_TRACE, dx._TRY_REMOUNT_TRACE):
+        assert traced.count(snippet) == 1
+
+
+@pytest.mark.parametrize("fix", dx.CORE_FIXES)
+def test_each_fix_is_exactly_its_own_replacements(fix: str) -> None:
+    from obed_edom.live_continuity_js import PRESERVE_CORE_JS
+    assert _undo(dx.experiment_core(fix), dx._CORE_FIX_TRANSFORMS[fix]) == PRESERVE_CORE_JS
+
+
+def test_a1_stashes_a_decoder_disconnected_at_delivery_past_the_self_move_guard() -> None:
+    core = dx.experiment_core("a1")
+    assert "function stash(v, why, detached) {" in core
+    assert "if (v.__obedRemounting && !detached) return;" in core and "if (v.__obedRemounting) return;" not in core
+    assert "stash(node, 'preserve-on-detach', !node.isConnected);" in core
+    assert "stash(v, 'preserve-on-detach-subtree', !v.isConnected);" in core
+    # Only the detach observer passes `detached`; every other stash caller keeps the guard, and the departure mark is
+    # untouched.
+    calls = re.findall(r"(?<!function )\bstash\(([^()]*)\)", core)
+    assert [args for args in calls if args.count(",") == 2] == [
+        "node, 'preserve-on-detach', !node.isConnected", "v, 'preserve-on-detach-subtree', !v.isConnected"]
+    assert len(calls) > 2
+    assert "if (!v.__obedRemounting) markTransition(currentHashNum());" in core
+
+
+def test_a2_falls_back_to_the_stage_overlay_only_for_a_live_pooled_or_held_decoder() -> None:
+    core = dx.experiment_core("a2")
+    wrapper = core[core.index("  function tryRemount(v, epoch) {\n"):core.index("  function __obedRemountStageOverlay(v) {")]
+    assert wrapper.index("__obedPlaceRemount(v, epoch);") < wrapper.index("__obedRemountStageOverlay(v);")
+    for gate in ("v.isConnected) return;", "v.__obedGen === -1", "v.__obedFacadeFor) return;",
+                 "epoch !== remountEpoch) return;", "held.indexOf(v) < 0 && !isPooled(v)) return;",
+                 "zoneMode(v) !== 'allow') return;"):
+        assert gate in wrapper
+    assert "function __obedPlaceRemount(v, epoch) {\n    if (disabled) return;" in core
+    assert "note('remount-fallback-stage'" in core
+
+
+def test_injected_core_serves_the_variant_and_restores_the_host() -> None:
+    host = probe.live_host_module
+    original_core, original_sha = host.PRESERVE_CORE_JS, host.js_sha256
+    with dx.injected_core("a1", True) as sha:
+        assert host.PRESERVE_CORE_JS == dx.experiment_core("a1", True) and host.js_sha256() == sha
+        assert sha == dx.experiment_core_sha("a1", True)
+    assert host.PRESERVE_CORE_JS is original_core and host.js_sha256 is original_sha
+
+
+@pytest.mark.parametrize(("label", "parsed"), [
+    ("V8", ("V8", None)), ("V8+a1", ("V8", "a1")), ("V8+a2", ("V8", "a2")), ("V5+8", ("V5+8", None)),
+    ("V5+8+a1", ("V5+8", "a1")),
+])
+def test_arm_labels_round_trip(label: str, parsed) -> None:
+    assert dx.parse_arm(label) == parsed and dx.arm_label(*parsed) == label
+
+
+@pytest.mark.parametrize("label", ["V6", "V8+a3", "off+a1", "+a1"])
+def test_unknown_arms_are_refused(label: str) -> None:
+    with pytest.raises(ValueError):
+        dx.parse_arm(label)
+
+
+def test_level2_sampler_adds_the_page_wraps_and_sequences_i2() -> None:
+    js = dx.instrumented_sampler_js(None, level2=True)
+    assert '{"control": null, "level2": true}' in js and js.count(dx.LEVEL2_JS) == 1
+    assert js.index("window.__obedDetachInstr__ = instr") < js.index("window.__obedDetachL2__ = l2")
+    level1 = dx.instrumented_sampler_js(None)
+    assert '{"control": null}' in level1 and "__obedDetachL2__ = l2" not in level1
+    for name in ("'loadScene'", "'isScenePreloaded'", "'processTextureDidLoadCallback'", "'jumpToScene_partFour'",
+                 "'renderEvent'", "'animateEffects'", "'removeChild'"):
+        assert name in dx.LEVEL2_JS
+
+
+# --- Level 2 classification (plan §4 step 3) ---------------------------------------------------------------------
+
+
+def lc(t: float, op: str, connected: bool, *, remounting: bool = False, layer: str = "layer1", seq=None, el: int = 7):
+    row = {"t": t, "rafTs": 990.0, "op": op, "elId": el, "isConnected": connected, "remounting": remounting,
+           "parentId": layer, "layerId": layer}
+    if seq is not None:
+        row["seq"] = seq
+    return row
+
+
+def note(t: float, kind: str, **detail):
+    return {"t": t, "kind": kind, "detail": {"elId": 7, **detail}}
+
+
+def blink_event(t0: float = 1006.0) -> dict[str, Any]:
+    return {"tracked": [7], "tSetup": 900.0, "tPlay": 1004.0, "blink": True, "blinkDecoder": True,
+            "prepaintEmptyRuns": [{"t0": t0, "t1": t0, "frames": 1}], "prepaintDecoderAbsentRuns": [{"t0": t0, "t1": t0, "frames": 1}]}
+
+
+def gap_raw(lifecycle, notes=(), trace=(), l2rows=None, prepaint=None) -> dict[str, Any]:
+    raw = {"instrument": {"lifecycle": list(lifecycle), "prepaint": prepaint or [{"t": 1006.0, "n": 0, "ids": []}]},
+           "coreEvents": list(notes), "coreTrace": list(trace)}
+    if l2rows is not None:
+        raw["level2"] = {"rows": l2rows}
+    return raw
+
+
+# The live signature (Session 2, every eligible event): the teardown detaches the decoder, the core re-homes it in
+# the same delivery into the outgoing slide's poster layer, the next delivery removes that layer, and the stash
+# returns on `__obedRemounting` (set by the re-home's own move); the carry's dom-swap brings it back.
+H3_LIFECYCLE = [lc(1000.0, "remove", True, remounting=True, layer="layer87"), lc(1000.0, "add", True, remounting=True, layer="layer107"),
+                lc(1001.0, "remove", False, remounting=True, layer="layer105"), lc(1008.0, "add", True, remounting=True, layer="layer113")]
+H3_NOTES = [note(999.5, "preserve-on-detach-subtree"), note(999.5, "remount-scheduled", why="preserve-on-detach-subtree"),
+            note(1000.0, "remount-into-authored-layer", inDocument=True), note(1007.0, "reuse-decoder", oldElId=7),
+            note(1007.5, "dom-swap")]
+
+
+def test_the_live_signature_is_h3_then_h1_from_level1_alone() -> None:
+    verdict = dx.classify_event(blink_event(), gap_raw(H3_LIFECYCLE, H3_NOTES))
+    assert (verdict["hypothesis"], verdict["then"], verdict["basis"]) == ("H3", "H1", "inferred")
+    (gap,) = verdict["gaps"]
+    assert gap["t0"] == 1001.0 and gap["t1"] == 1008.0 and gap["gapMs"] == 7.0 and gap["paintsInGap"] == 1
+    assert gap["prior"]["sameFrame"] and gap["prior"]["layerId"] == "layer87"
+    assert gap["readd"]["layerId"] == "layer113"
+
+
+def test_without_an_earlier_rehome_the_swallowed_detach_is_h1() -> None:
+    lifecycle = [lc(1001.0, "remove", False, remounting=True), lc(1008.0, "add", True)]
+    verdict = dx.classify_event(blink_event(), gap_raw(lifecycle))
+    assert (verdict["hypothesis"], verdict["then"]) == ("H1", None)
+
+
+def test_the_trace_names_the_guard_and_overrides_the_inference() -> None:
+    lifecycle = [lc(1001.0, "remove", False, remounting=False), lc(1008.0, "add", True)]
+    stash = {"t": 1001.0, "kind": "stash", "elId": 7, "why": "preserve-on-detach-subtree", "noted": [],
+             "pre": {"remounting": True, "detached": None, "assetKey": True, "planAsset": True, "poolable": True,
+                     "readyState": 4, "gen": 0, "generation": 0}}
+    verdict = dx.classify_event(blink_event(), gap_raw(lifecycle, trace=[stash]))
+    assert (verdict["hypothesis"], verdict["basis"]) == ("H1", "trace")
+
+
+H2_LIFECYCLE = [lc(1001.0, "remove", False), lc(1008.0, "add", True)]
+H2_NOTES = [note(1001.0, "preserve-on-detach-subtree"), note(1001.0, "remount-scheduled", why="preserve-on-detach-subtree"),
+            note(1001.0, "remount-footprint-rect")]
+
+
+def test_pooled_and_scheduled_but_still_disconnected_is_h2() -> None:
+    verdict = dx.classify_event(blink_event(), gap_raw(H2_LIFECYCLE, H2_NOTES))
+    assert (verdict["hypothesis"], verdict["basis"]) == ("H2", "notes")
+    assert verdict["gaps"][0]["scheduled"] == 1
+    stash = {"t": 1001.0, "kind": "stash", "elId": 7, "why": "preserve-on-detach-subtree",
+             "noted": ["preserve-on-detach-subtree", "remount-scheduled"], "pre": {}}
+    bail = {"t": 1001.0, "kind": "tryRemount", "elId": 7, "after": False, "state": {"stageMap": False}}
+    verdict = dx.classify_event(blink_event(), gap_raw(H2_LIFECYCLE, H2_NOTES, trace=[stash, bail]))
+    assert (verdict["hypothesis"], verdict["basis"]) == ("H2", "trace")
+    assert verdict["gaps"][0]["tryRemount"] == [{"t": 1001.0, "kind": "tryRemount", "after": False, "state": {"stageMap": False}}]
+
+
+def test_with_the_trace_on_a_missing_stash_row_is_not_inferred() -> None:
+    bail = {"t": 1001.0, "kind": "tryRemount", "elId": 7, "after": False}
+    verdict = dx.classify_event(blink_event(), gap_raw(H2_LIFECYCLE, H2_NOTES, trace=[bail]))
+    assert verdict["hypothesis"] == "unknown" and verdict["reason"] == "stash unseen (trace)"
+
+
+def test_a_carry_rehome_schedule_is_not_a_detach_remount() -> None:
+    lifecycle = [lc(1001.0, "remove", False), lc(1008.0, "add", True)]
+    notes = [note(1001.0, "preserve-on-detach-subtree"), note(1007.5, "remount-scheduled", why="pin-rehome")]
+    verdict = dx.classify_event(blink_event(), gap_raw(lifecycle, notes))
+    assert verdict["hypothesis"] == "unknown" and verdict["reason"] == "pooled, no detach remount scheduled"
+
+
+def test_a_core_retire_in_the_removals_delivery_is_h4_even_after_a_rehome() -> None:
+    notes = [*H3_NOTES, {"t": 1001.0, "kind": "retire-boundary", "detail": {"elIds": [7], "atScene": 5}}]
+    assert dx.classify_event(blink_event(), gap_raw(H3_LIFECYCLE, notes))["hypothesis"] == "H4"
+    l2 = [{"t": 1000.9, "kind": "dom-removeChild", "elIds": [7], "by": ["retireDecoder (index.html:1:2)", "sweepRetireZone"]}]
+    verdict = dx.classify_event(blink_event(), gap_raw(H3_LIFECYCLE, H3_NOTES, l2rows=l2))
+    assert verdict["hypothesis"] == "H4" and verdict["reason"] == "remover retireDecoder"
+
+
+def test_a_player_remover_stack_is_recorded_but_does_not_change_the_branch() -> None:
+    l2 = [{"t": 1000.9, "kind": "dom-removeChild", "elIds": [7], "by": ["removeEvent (main.js:1:2291990)"]},
+          {"t": 999.0, "kind": "renderEvent-start", "scene": 5}, {"t": 1002.0, "kind": "renderEvent-end", "scene": 5}]
+    verdict = dx.classify_event(blink_event(), gap_raw(H3_LIFECYCLE, H3_NOTES, l2rows=l2))
+    assert (verdict["hypothesis"], verdict["then"]) == ("H3", "H1")
+    gap = verdict["gaps"][0]
+    assert gap["remover"]["by"] == ["removeEvent (main.js:1:2291990)"]
+    assert [row["kind"] for row in gap["player"]] == ["renderEvent-start", "renderEvent-end"]
+
+
+def test_an_unexplained_removal_is_unknown_with_its_reason() -> None:
+    lifecycle = [lc(1001.0, "remove", False), lc(1008.0, "add", True)]
+    verdict = dx.classify_event(blink_event(), gap_raw(lifecycle))
+    assert verdict["hypothesis"] == "unknown" and verdict["reason"] == "stash unseen (inferred)"
+
+
+def test_a_blink_outside_every_gap_is_unknown() -> None:
+    verdict = dx.classify_event(blink_event(t0=1020.0), gap_raw(H3_LIFECYCLE, H3_NOTES))
+    assert verdict["hypothesis"] == "unknown" and "covers" in verdict["reason"]
+    assert len(verdict["gaps"]) == 1
+
+
+def test_a_non_blink_reports_its_gaps_without_a_hypothesis() -> None:
+    event = {**blink_event(), "blink": False, "blinkDecoder": False}
+    verdict = dx.classify_event(event, gap_raw(H3_LIFECYCLE, H3_NOTES, prepaint=[{"t": 1010.0, "n": 1, "ids": [7]}]))
+    assert verdict["hypothesis"] is None and verdict["gaps"][0]["hypothesis"] == "H3"
+    assert verdict["gaps"][0]["paintsInGap"] == 0
+
+
+def test_the_shared_sequence_orders_rows_whose_times_tie() -> None:
+    """With coarse timers the core's stash row can read the same `t` as the previous I2 row; the sequence still puts
+    it inside the removal's delivery."""
+    lifecycle = [lc(1000.0, "add", True, seq=10), lc(1000.0, "remove", False, seq=13), lc(1008.0, "add", True, seq=20)]
+    stash = {"t": 1000.0, "seq": 12, "kind": "stash", "elId": 7, "why": "preserve-on-detach", "noted": ["preserve-on-detach"],
+             "pre": {}}
+    notes = [note(1000.0, "remount-scheduled", why="preserve-on-detach")]
+    verdict = dx.classify_event(blink_event(), gap_raw(lifecycle, notes, trace=[stash]))
+    assert verdict["gaps"][0]["stash"] == "pooled"
+    late = {**stash, "seq": 14}
+    assert dx.classify_event(blink_event(), gap_raw(lifecycle, notes, trace=[late]))["gaps"][0]["stash"] == "unseen"
+
+
+@pytest.mark.parametrize(("pre", "noted", "reason"), [
+    ({"remounting": True, "detached": None}, [], "remounting"),
+    ({"remounting": True, "detached": False}, [], "remounting"),
+    ({"remounting": True, "detached": True, "assetKey": True, "planAsset": True, "poolable": True, "readyState": 4},
+     ["preserve-on-detach"], "pooled"),
+    ({"facade": True, "assetKey": True}, [], "facade"),
+    ({"gen": -1, "generation": 0}, [], "retired"),
+    ({"gen": 0, "generation": 1, "assetKey": True}, [], "stale-gen"),
+    ({"assetKey": True, "planAsset": False}, [], "not-plan-asset"),
+    ({"assetKey": True, "planAsset": True, "poolable": True}, ["preserve-refused"], "zone-refused"),
+    ({"assetKey": True, "planAsset": True, "poolable": False}, [], "not-poolable"),
+    ({"assetKey": True, "planAsset": True, "poolable": True, "readyState": 1, "currentTime": 0.0}, [], "not-ready"),
+    ({"assetKey": True, "planAsset": True, "poolable": True, "readyState": 4}, [], "unknown"),
+    (None, [], "not-video"),
+])
+def test_stash_reason_mirrors_the_guard_order(pre, noted, reason: str) -> None:
+    assert dx.stash_reason({"why": "preserve-on-detach", "pre": pre, "noted": noted}) == reason
+
+
+def test_a_record_carries_the_blinks_hypothesis() -> None:
+    samples = post_mm()
+    first = first_index(samples, 5, "Playing")
+    samples[first]["videos"] = []
+    prepaint = prepaint_of(samples, frozenset({first}))
+    t_hole = prepaint[first]["t"]
+    lifecycle = [lc(t_hole - 5.0, "remove", False, remounting=True), lc(t_hole + 5.0, "add", True)]
+    record = dx.build_record(raw_run(samples, prepaint, lifecycle))
+    (event,) = record["events"]
+    assert event["blink"] and event["hypothesis"] == {"hypothesis": "H1", "then": None,
+                                                       "reason": "stash returned on __obedRemounting (inferred)",
+                                                       "basis": "inferred"}
+    rows = dx.classification_rows(record, raw_run(samples, prepaint, lifecycle))
+    assert len(rows) == 1 and rows[0]["hypothesis"] == "H1"
+    assert dx.tally_classification(rows)["V8"]["hypotheses"] == {"H1": 1}
+
+
+def test_a_level2_record_without_level2_data_is_an_error() -> None:
+    raw = raw_run(post_mm())
+    raw["config"].update(level2=True, expectedServedSha256=dx.SERVED_SHA256["V8"])
+    record = dx.build_record(raw)
+    assert record["status"] == "error" and any("level 2" in r for r in record["reasons"])
+    raw["level2"] = {"rows": [], "errors": [], "wrapped": ["loadScene"]}
+    raw["coreTrace"] = [{"t": 1.0, "kind": "stash"}]
+    assert dx.build_record(raw)["status"] == "ok"
+
+
+def test_records_check_the_configured_core_and_served_shas() -> None:
+    raw = raw_run(post_mm(), served=dx.L2_SERVED_SHA256["V8"], core=dx.experiment_core_sha("a1", True))
+    raw["config"].update(serving="V8", variant="V8+a1", coreFix="a1",
+                         expectedServedSha256=dx.L2_SERVED_SHA256["V8"], expectedCoreSha256=dx.experiment_core_sha("a1", True))
+    raw.update(level2={"rows": [], "errors": [], "wrapped": []}, coreTrace=[{"t": 1.0}])
+    raw["config"]["level2"] = True
+    record = dx.build_record(raw)
+    assert record["servedShaOk"] and record["coreShaOk"] and record["status"] == "ok"
+    raw["output"]["continuity"]["sha256"] = dx.CORE_SHA256
+    assert dx.build_record(raw)["status"] == "error"
+
+
+def test_level2_r8_flag_needs_the_preload_log_to_agree() -> None:
+    samples = post_mm(waited=False)
+    (jump,) = dx.post_mm_jumps(samples)
+    assert jump["tMmIdle"] < jump["tMmSetup"] < jump["tSetup"]
+    preload = {"t": jump["tMmIdle"] + 10.0, "kind": "loadScene", "scene": jump["scene"], "viaPreload": True, "prevIsMM": True}
+    raw = raw_run(samples, variant="V8", control="r8flag")
+    raw["level2"] = {"installedAt": 0.0, "rows": [preload]}
+    assert dx.build_record(raw)["controlVerdict"]["status"] == "pass"
+    raw["level2"] = {"installedAt": 0.0, "rows": []}
+    verdict = dx.build_record(raw)["controlVerdict"]
+    assert verdict["status"] == "fail" and verdict["l2Preload"] == [False]
+    raw["level2"] = {"installedAt": jump["tMmIdle"] + 1.0, "rows": [preload]}
+    assert dx.build_record(raw)["controlVerdict"]["l2Preload"] == [None]
+    stock = raw_run(post_mm(waited=True), variant="V7", control="r8flag")
+    stock["level2"] = {"installedAt": 0.0, "rows": []}
+    assert dx.build_record(stock)["controlVerdict"]["status"] == "pass"
+
+
+def test_fix_blocks_compare_every_arm_to_v8_and_decide_on_the_target_only() -> None:
+    arms = ("V8", "V8+a1", "V8+a2")
+    records = [_block_record(b, v, int(v == "V8" and b < 3), 2) for b in range(15) for v in arms]
+    summary = dx.summarize(records, 1)
+    assert summary["completeBlocks"] == 15 and summary["decision"] == "target-met"
+    assert set(summary["fisherOneSided"]) == {"V8vsV8+a1", "V8vsV8+a2"}
+    assert summary["fisherOneSided"]["V8vsV8+a1"] == pytest.approx(dx.fisher_one_sided(3, 30, 0, 30))
+    assert dx.summarize(records[:-6], 1)["decision"] == "continue"
+
+
+def test_summary_tallies_blink_hypotheses() -> None:
+    record = _block_record(0, "V8", 2, 2)
+    record["events"][0]["hypothesis"] = {"hypothesis": "H3", "then": "H1"}
+    record["events"][1]["hypothesis"] = {"hypothesis": "H2", "then": None}
+    assert dx.summarize([record], 1)["perVariant"]["V8"]["byHypothesis"] == {"H3>H1": 1, "H2": 1}
+
+
+def test_blocks_accept_fix_arms_and_level2(tmp_path: Path) -> None:
+    args = dx.parse_args(["blocks", "--out-dir", str(tmp_path), "--blocks", "2", "--variants", "V8,V8+a1", "--level2"])
+    assert args.variants == ["V8", "V8+a1"] and args.level2
+    with pytest.raises(SystemExit):
+        dx.parse_args(["blocks", "--out-dir", str(tmp_path), "--blocks", "2", "--variants", "V8,V8+a9"])
+    run = dx.parse_args(["run", "--out-dir", str(tmp_path), "--variant", "V8", "--deck", "D4", "--core-fix", "a2"])
+    assert run.core_fix == "a2" and not run.level2
+
+
+def test_the_first_destination_paint_at_the_pin_is_reported() -> None:
+    samples = post_mm()
+    prepaint = prepaint_of(samples)
+    first = first_index(samples, 5, "Playing")
+    prepaint[first]["pins"] = [{"atScene": 4, "top": ["canvas#x"], "videoAt": []},
+                               {"atScene": 5, "top": ["video:7", "canvas#y"], "videoAt": [7]}]
+    (event,) = classify(samples, prepaint=prepaint)
+    assert event["pinPaint"] == {"t": prepaint[first]["t"], "top": ["video:7", "canvas#y"], "videoAt": [7], "decoderAtPin": True}
+    prepaint[first]["pins"][1]["videoAt"] = [9]
+    (event,) = classify(samples, prepaint=prepaint)
+    assert event["pinPaint"]["decoderAtPin"] is False

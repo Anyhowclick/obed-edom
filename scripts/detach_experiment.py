@@ -9,9 +9,18 @@ V5+8 = R1-R5 + R8; `off` = OBED_LIVE_MM_OPACITY=off). One run = one deck through
   run      one arm (`--variant`, `--deck`, `--arm C` = bridges stripped) -> one record
   control  §1 Controls: `--mode null|positive|timeout0` (page injection at the first pin carry, arm A)
            or `--mode r8flag --variant off|V5|V7|V8`
-  blocks   §2.4 interleaved blocks of {V8, V7, V5}, seeded order, deck rotated per block, resumable
-  summary  §2.3 counts, Fisher one-sided V8 vs V7 / V5, early stop / futility
+  blocks   §2.4 interleaved blocks of {V8, V7, V5} (or fix arms `V8,V8+a1,V8+a2`), seeded order, deck rotated
+           per block, resumable
+  summary  §2.3 counts, Fisher one-sided V8 vs every other arm, early stop / futility
   rescore  rebuild every record from its raw dump
+  classify §4 step 3: name the branch (H1-H4) of every blink from its raw dump
+
+`--level2` (run, control, blocks) adds plan §1 Level 2: the player controller exposed through a patched
+`live_runtime._INSTALL`, page wraps of the player's preload / jump / render methods and of DOM removals that take a
+preserved decoder out, and a trace-only core variant (wraps of `stash`, `scheduleRemount`, `tryRemount`, `beginMove`,
+`retireDecoder`; no branch changes). `--core-fix a1|a2` serves a probe-only core fix candidate (plan §3 (a1)/(a2)).
+Both are string transforms of the in-process bytes with count-checked anchors; served and core shas are recorded and
+checked per run.
 
 Every run appends one record to `<out-dir>/runs.jsonl` and keeps its raw dump in `<out-dir>/raw/<runId>.json.gz`.
 """
@@ -44,6 +53,7 @@ for _sub in ("src", "scripts"):
 import live_continuity_probe as probe  # noqa: E402
 from obed_edom import live_runtime  # noqa: E402
 from obed_edom.fixture_paths import fixture  # noqa: E402
+from obed_edom.live_continuity_js import PRESERVE_CORE_JS  # noqa: E402
 from obed_edom.live_runtime import MM_OPACITY_ENV  # noqa: E402
 
 R8_ANCHOR = b"this.textureManager.loadScene(B)}unloadTextures(){"
@@ -63,6 +73,17 @@ SERVED_SHA256 = {
     "V5+8": "ac8dcda082fa2cb2e3261fe9e5fc48d08c50cc4e59b459ffa1903e0778bc37a8",
 }
 CORE_SHA256 = "9c4fc61fcce22e8acf3b1dab9a6eb66722e7e0ae9dcf943bda69e3bcbd87ea01"
+CORE_FIXES = ("a1", "a2")
+FIX_ARM_RE = re.compile(r"^(?P<serving>.+?)\+(?P<fix>a1|a2)$")
+L2_INSTALL_ANCHOR = b"(function(controller) {\n"
+L2_INSTALL_REPLACEMENT = L2_INSTALL_ANCHOR + b"  Object.defineProperty(window, '__obedDebugController', {value: controller});\n"
+L2_SERVED_SHA256 = {
+    "off": "b7ad87163010c542130edbad5bdb891e8f258c232b29d4924bee6dfae0c9c800",
+    "V5": "c4852e2314ce5956a1e03337c4e66c8be2e1b96d8147ef2392d6afe32052fa11",
+    "V7": "b64e9e70cac243f54c9c22250f6100ff9a831409cfd60eac7621abfe9e8f6f6f",
+    "V8": "50833d1dee43087263864265ebfd10fd4d383b55a7a76101f5cc9095540d80c6",
+    "V5+8": "660fd7fc473a365b4e02dca587e3428792b02e41eae430b183286c807ec99712",
+}
 
 BLOCK_VARIANTS = ("V8", "V7", "V5")
 BLOCK_DECKS = ("D4", "D1", "D6")
@@ -85,6 +106,12 @@ FUTILITY_V8_BLINKS = 3
 TARGET_EVENTS = 30
 DONE_STATUSES = frozenset({"ok", "no-events"})
 CORE_NOTE_RE = re.compile(r"^(preserve-on-detach|remount-|reuse-|dom-swap|createElement-video|bridge-3to4|retire)")
+DETACH_WHY_RE = re.compile(r"^preserve-on-detach")
+RETIRE_NOTES = ("retire-boundary", "retire-on-start-movie")
+CORE_REMOVERS = ("retireDecoder", "retireVictims", "bindFacade")
+PLAYER_CONTEXT_MS = 50.0
+PLAYER_CONTEXT_KINDS = frozenset({"jumpToScene", "partFour-start", "partFour-end", "renderEvent-start", "renderEvent-end",
+                                  "animateEffects-start", "animateEffects-end", "state"})
 SAMPLE_VIDEO_KEYS = ("id", "elId", "instance", "src", "currentTime", "paused", "readyState", "preserved",
                      "remounted", "facade", "rect")
 
@@ -124,7 +151,7 @@ INSTRUMENT_JS = r"""
           Array.prototype.forEach.call(pair[1], function(node){
             videosIn(node).forEach(function(v){
               if (s === undefined) s = snap();
-              instr.lifecycle.push({
+              var row = {
                 t: t, rafTs: instr.lastRafTs, op: pair[0], direct: node === v,
                 probeId: nn(v.__obedProbeId), elId: nn(v.__obedElId),
                 instance: v.__obedInstance != null ? String(v.__obedInstance) : null,
@@ -133,7 +160,9 @@ INSTRUMENT_JS = r"""
                 hold: !!v.__obedHold, holdAction: v.__obedHold ? nn(v.__obedHold.action) : null,
                 epoch: nn(v.__obedRemountEpoch), parentId: (m.target && m.target.id) || null,
                 layerId: layerOf(m.target), snapshot: s
-              });
+              };
+              if (cfg.level2) row.seq = window.__obedSeq__ = (window.__obedSeq__ || 0) + 1;
+              instr.lifecycle.push(row);
               cap(instr.lifecycle);
             });
           });
@@ -241,6 +270,118 @@ INSTRUMENT_JS = r"""
 })(__CFG__);
 """
 
+LEVEL2_JS = r"""
+(function(){
+  if (window.__obedDetachL2__) return;
+  var MAX_ROWS = 50000;
+  var l2 = {rows: [], errors: [], wrapped: [], textureCalls: {}, installedAt: performance.now()};
+  window.__obedDetachL2__ = l2;
+  function fail(where, e){ if (l2.errors.length < 50) l2.errors.push(where + ': ' + String(e && e.message || e)); }
+  function log(kind, extra){
+    var i = window.__obedDetachInstr__;
+    var row = {seq: window.__obedSeq__ = (window.__obedSeq__ || 0) + 1, t: performance.now(),
+               rafTs: i ? i.lastRafTs : null, kind: kind};
+    for (var k in extra) row[k] = extra[k];
+    l2.rows.push(row);
+    if (l2.rows.length > MAX_ROWS) l2.rows.shift();
+  }
+  function stack(){
+    try {
+      return String(new Error().stack || '').split('\n').slice(3, 11).map(function(l){
+        return l.trim().replace(/^at /, '').replace(/(?:https?|file):\/\/[^\s)]*\/([^\/\s)]+)/g, '$1');
+      });
+    } catch (e) { return null; }
+  }
+  function layerOf(n){ while (n) { if (n.id && n.id.indexOf('layer') === 0) return n.id; n = n.parentElement; } return null; }
+  function videos(){ return document.querySelectorAll('video').length; }
+  var C = window.__obedDebugController;
+  if (!C) { fail('controller', 'window.__obedDebugController is missing'); return; }
+  function isMM(i){
+    try { var ev = C.script.events[i], f = ev && ev.effects && ev.effects[0]; return !!f && f.name === 'apple:magic-move-implied-motion-path'; }
+    catch (e) { return null; }
+  }
+  function wrap(obj, name, label, before, after){
+    if (!obj || typeof obj[name] !== 'function') { fail('wrap', label + ' is missing'); return; }
+    var orig = obj[name];
+    obj[name] = function(){
+      var ctx = null;
+      try { ctx = before ? before.apply(this, arguments) : null; } catch (e) { fail(label, e); }
+      var out = orig.apply(this, arguments);
+      try { if (after) after.call(this, ctx, out, arguments); } catch (e) { fail(label, e); }
+      return out;
+    };
+    l2.wrapped.push(label);
+  }
+  var inPreload = 0;
+  if (typeof C.preloadTextures === 'function') {
+    var preload = C.preloadTextures;
+    C.preloadTextures = function(){ inPreload += 1; try { return preload.apply(this, arguments); } finally { inPreload -= 1; } };
+    l2.wrapped.push('preloadTextures');
+  } else fail('wrap', 'preloadTextures is missing');
+  var tm = C.textureManager, pc = C.playbackController;
+  function slideOf(scene){ try { return C.script.slideIndexFromSceneIndexLookup[scene]; } catch (e) { return null; } }
+  function slideReady(slide){ try { return !!tm.isSlidePreloaded(slide); } catch (e) { return null; } }
+  wrap(tm, 'loadScene', 'loadScene', function(A, B){
+    log('loadScene', {scene: A, slide: slideOf(A), withCallback: !!B, viaPreload: inPreload > 0,
+                      prevIsMM: isMM(A - 1), isMM: isMM(A), readyBefore: slideReady(slideOf(A)), state: C.state});
+  });
+  wrap(tm, 'isScenePreloaded', 'isScenePreloaded', null, function(_, out, args){
+    log('isScenePreloaded', {scene: args[0], result: out, state: C.state});
+  });
+  wrap(tm, 'processTextureDidLoadCallback', 'processTextureDidLoadCallback', function(A, B){
+    l2.textureCalls[B] = (l2.textureCalls[B] || 0) + 1;
+    return slideReady(B);
+  }, function(was, _, args){
+    if (!was && slideReady(args[1])) log('slide-ready', {slide: args[1], calls: l2.textureCalls[args[1]]});
+  });
+  wrap(C, 'jumpToScene', 'jumpToScene', function(A, B){ log('jumpToScene', {scene: A, automatic: !!B, state: C.state}); });
+  wrap(C, 'jumpToScene_partFour', 'jumpToScene_partFour', function(A){
+    log('partFour-start', {scene: A, videos: videos()}); return A;
+  }, function(A){ log('partFour-end', {scene: A, videos: videos()}); });
+  wrap(C, 'changeState', 'changeState', function(){ return C.state; }, function(from){
+    log('state', {from: from, to: C.state, scene: C.currentSceneIndex});
+  });
+  wrap(pc, 'renderEvent', 'renderEvent', function(A){
+    var scene = A && A.sceneIndex != null ? A.sceneIndex : null;
+    log('renderEvent-start', {scene: scene, videos: videos()}); return scene;
+  }, function(scene){ log('renderEvent-end', {scene: scene, videos: videos()}); });
+  wrap(pc, 'animateEffects', 'animateEffects', function(){
+    log('animateEffects-start', {scene: C.currentSceneIndex, videos: videos()});
+  }, function(){ log('animateEffects-end', {scene: C.currentSceneIndex, videos: videos()}); });
+
+  function preservedIn(node){
+    if (!node || node.nodeType !== 1) return null;
+    var list = node.tagName === 'VIDEO' ? [node] : node.getElementsByTagName('video'), ids = null;
+    for (var i = 0; i < list.length; i++) {
+      var v = list[i];
+      if (v.dataset && (v.dataset.obedPreserved || v.dataset.obedRemounted)) (ids = ids || []).push(v.__obedElId == null ? null : v.__obedElId);
+    }
+    return ids;
+  }
+  function hook(proto, name, argIndex){
+    var orig = proto[name];
+    proto[name] = function(){
+      var node = argIndex < 0 ? this : arguments[argIndex], ids = null;
+      try { if (node && node.isConnected) ids = preservedIn(node); } catch (e) { fail(name, e); }
+      if (ids) {
+        try {
+          var from = node.parentNode;
+          log('dom-' + name, {elIds: ids, parentId: (from && from.id) || null, layerId: layerOf(from),
+                              targetId: (this && this.id) || null, by: stack()});
+        } catch (e) { fail(name, e); }
+      }
+      return orig.apply(this, arguments);
+    };
+    l2.wrapped.push('dom-' + name);
+  }
+  hook(Node.prototype, 'removeChild', 0);
+  hook(Node.prototype, 'insertBefore', 0);
+  hook(Node.prototype, 'appendChild', 0);
+  hook(Node.prototype, 'replaceChild', 1);
+  hook(Element.prototype, 'remove', -1);
+})();
+"""
+
 INSTRUMENT_READ_JS = r"""
 (function(){
   var out = {coreEvents: null, instrument: null};
@@ -250,9 +391,177 @@ INSTRUMENT_READ_JS = r"""
   } catch (e) { out.coreEvents = {error: String(e)}; }
   var i = window.__obedDetachInstr__;
   if (i) out.instrument = JSON.parse(JSON.stringify({lifecycle: i.lifecycle, prepaint: i.prepaint, control: i.control, errors: i.errors}));
+  if (window.__obedDetachL2__) out.level2 = JSON.parse(JSON.stringify(window.__obedDetachL2__));
+  if (window.__OBED_DETACH_TRACE__) out.coreTrace = JSON.parse(JSON.stringify(window.__OBED_DETACH_TRACE__));
   return out;
 })()
 """
+
+_TRACE_HELPERS = r"""  const __obedTraceRows = [];
+  window.__OBED_DETACH_TRACE__ = __obedTraceRows;
+  function __obedTrace(kind, v, extra) {
+    try {
+      const i = window.__obedDetachInstr__;
+      const row = {
+        seq: window.__obedSeq__ = (window.__obedSeq__ || 0) + 1, t: performance.now(), rafTs: i ? i.lastRafTs : null,
+        kind: kind, elId: v && v.__obedElId != null ? v.__obedElId : null,
+        isConnected: !!(v && v.isConnected), remounting: !!(v && v.__obedRemounting)
+      };
+      for (const k in (extra || {})) row[k] = extra[k];
+      __obedTraceRows.push(row);
+      if (__obedTraceRows.length > 20000) __obedTraceRows.shift();
+    } catch (e) {}
+  }
+  function __obedCaller() {
+    try {
+      return String(new Error().stack || '').split('\n').slice(2, 9).map(function(l) {
+        return l.trim().replace(/^at /, '').replace(/(?:https?|file):\/\/[^\s)]*\/([^\/\s)]+)/g, '$1');
+      });
+    } catch (e) { return null; }
+  }
+  function __obedNotedSince(n0) {
+    return window.__OBED_P2_PRESERVE__.events.slice(n0).map(function(e) { return e.kind; });
+  }
+"""
+
+_STASH_TRACE = r"""  function stash(v, why, detached) {
+    const n0 = window.__OBED_P2_PRESERVE__.events.length;
+    let pre = null;
+    try {
+      if (v instanceof HTMLVideoElement) {
+        const src = v.currentSrc || v.src || '';
+        pre = {
+          isConnected: v.isConnected, remounting: !!v.__obedRemounting,
+          detached: detached === undefined ? null : !!detached, disabled: disabled,
+          bridged34: !!v.__obedBridged34, suppressed34: !!v.__obedSuppressed34, facade: !!v.__obedFacadeFor,
+          gen: v.__obedGen == null ? null : v.__obedGen, generation: preserveGeneration,
+          assetKey: !!assetKey(src), planAsset: !!movieAssetKey(src), poolable: poolable(v),
+          readyState: v.readyState, currentTime: v.currentTime
+        };
+      }
+    } catch (e) {}
+    __obedStashInner(v, why, detached);
+    __obedTrace('stash', v, {why: String(why), pre: pre, noted: __obedNotedSince(n0)});
+  }
+  function __obedStashInner(v, why"""
+
+_SCHEDULE_TRACE = r"""  function scheduleRemount(v, why) {
+    const before = !!(v && v.isConnected);
+    const n0 = window.__OBED_P2_PRESERVE__.events.length;
+    __obedScheduleRemountInner(v, why);
+    __obedTrace('scheduleRemount', v, {why: String(why), before: before, noted: __obedNotedSince(n0)});
+  }
+  function __obedScheduleRemountInner(v, why) {
+"""
+
+_TRY_REMOUNT_TRACE = r"""  function tryRemount(v, epoch) {
+    const before = !!(v && v.isConnected);
+    const n0 = window.__OBED_P2_PRESERVE__.events.length;
+    __obedTryRemountInner(v, epoch);
+    const after = !!(v && v.isConnected);
+    const parent = v ? v.parentNode : null;
+    const extra = {
+      epoch: epoch == null ? null : epoch, before: before, after: after, noted: __obedNotedSince(n0),
+      parentId: parent ? (parent.id || null) : null, layerId: parent ? ((nearestLayer(parent) || {}).id || null) : null
+    };
+    if (!after && v) {
+      extra.state = {
+        disabled: disabled, suppress: suppressRemount, staleEpoch: epoch != null && epoch !== remountEpoch,
+        dead: v.__obedRemountEpoch === -1 || !!v.ended, stageMap: !!stageMap(),
+        authoredParent: !!(v.__obedParent && document.contains(v.__obedParent))
+      };
+    }
+    __obedTrace('tryRemount', v, extra);
+  }
+  function __obedTryRemountInner(v, epoch) {
+"""
+
+_BEGIN_MOVE = "  function beginMove(v) {\n    v.__obedRemounting = true;\n    setTimeout(function(){ v.__obedRemounting = false; }, 0);\n  }\n"
+
+_CORE_TRACE_TRANSFORMS: tuple[tuple[str, str], ...] = (
+    ("  let disabled = false;\n  let everPreserved = false;\n",
+     _TRACE_HELPERS + "  let disabled = false;\n  let everPreserved = false;\n"),
+    ("  function stash(v, why", _STASH_TRACE),
+    ("  function scheduleRemount(v, why) {\n", _SCHEDULE_TRACE),
+    ("  function tryRemount(v, epoch) {\n", _TRY_REMOUNT_TRACE),
+    (_BEGIN_MOVE,
+     "  function beginMove(v) {\n    v.__obedRemounting = true;\n    __obedTrace('beginMove', v, {by: __obedCaller()});\n"
+     "    setTimeout(function(){ v.__obedRemounting = false; __obedTrace('remounting-clear', v); }, 0);\n  }\n"),
+    ("  function retireDecoder(v) {\n",
+     "  function retireDecoder(v) {\n    __obedTrace('retireDecoder', v, {by: __obedCaller()});\n"),
+)
+
+_A2_FALLBACK = r"""  function tryRemount(v, epoch) {
+    __obedPlaceRemount(v, epoch);
+    if (!v || disabled || suppressRemount || v.isConnected) return;
+    if (v.__obedRemountEpoch === -1 || v.ended || v.__obedGen === -1 || v.__obedFacadeFor) return;
+    if (epoch != null && epoch !== remountEpoch) return;
+    if (held.indexOf(v) < 0 && !isPooled(v)) return;
+    if (zoneMode(v) !== 'allow') return;
+    __obedRemountStageOverlay(v);
+  }
+  function __obedRemountStageOverlay(v) {
+    const map = stageMap();
+    const rest = restingRect(v);
+    const last = v.__obedRect && v.__obedRect.w > 1 && v.__obedRect.h > 1 ? v.__obedRect : null;
+    const box = rest && map ? toScreen(rest, map) : last;
+    if (!box) {
+      note('remount-fallback-none', {elId: v.__obedElId});
+      return;
+    }
+    const stage = document.getElementById('body') || document.querySelector('[class*="stage"]') || document.body;
+    if (!stage) {
+      note('remount-no-stage', {elId: v.__obedElId});
+      return;
+    }
+    try {
+      v.__obedRect = box;
+      v.style.position = 'absolute';
+      v.style.left = box.x + 'px';
+      v.style.top = box.y + 'px';
+      v.style.width = box.w + 'px';
+      v.style.height = box.h + 'px';
+      v.style.visibility = 'visible';
+      v.style.display = 'block';
+      v.style.opacity = '1';
+      if (/^-?\d+$/.test(String(v.__obedZ))) {
+        v.style.zIndex = String(v.__obedZ);
+      } else {
+        v.style.removeProperty('z-index');
+      }
+      v.style.pointerEvents = 'none';
+      if (v.__obedId && !document.getElementById(v.__obedId)) v.id = v.__obedId;
+      beginMove(v);
+      stage.appendChild(v);
+      if (v.paused && !v.ended) {
+        const p = v.play();
+        if (p && p.catch) p.catch(function(){});
+      }
+      v.dataset.obedRemounted = '1';
+      note('remount-fallback-stage', {
+        elId: v.__obedElId, rect: box, fromRest: !!(rest && map), inDocument: document.contains(v)
+      });
+    } catch (e) {
+      note('remount-error', {elId: v.__obedElId, message: String(e && e.message || e)});
+    }
+  }
+  function __obedPlaceRemount(v, epoch) {
+"""
+
+_CORE_FIX_TRANSFORMS: dict[str, tuple[tuple[str, str], ...]] = {
+    # The detach observer treats a removed decoder as a self-move only while it is still connected at delivery; a
+    # disconnected one is always stashed, past the `__obedRemounting` time-window guard (kept for every other caller).
+    "a1": (
+        ("  function stash(v, why) {\n", "  function stash(v, why, detached) {\n"),
+        ("    if (v.__obedRemounting) return;\n", "    if (v.__obedRemounting && !detached) return;\n"),
+        ("          stash(node, 'preserve-on-detach');\n", "          stash(node, 'preserve-on-detach', !node.isConnected);\n"),
+        ("            stash(v, 'preserve-on-detach-subtree');\n",
+         "            stash(v, 'preserve-on-detach-subtree', !v.isConnected);\n"),
+    ),
+    # tryRemount never returns with a pooled or held decoder disconnected: when placement leaves it out of the
+    # document, fall back to the stage overlay at its resting rect (or its last screen rect without a stage map).
+    "a2": (("  function tryRemount(v, epoch) {\n", _A2_FALLBACK),),
+}
 
 
 def variant_replacements(variant: str, table: Sequence[tuple[bytes, bytes]] | None = None) -> tuple[tuple[bytes, bytes], ...]:
@@ -280,20 +589,98 @@ def serving(variant: str) -> Iterator[None]:
         live_runtime._MM_OPACITY_REPLACEMENTS = original
 
 
-def served_sha256(player: bytes, variant: str) -> str:
-    with serving(variant):
+def level2_install_bytes(install: bytes | None = None) -> bytes:
+    """The player observation hook with the controller exposed as `window.__obedDebugController` (plan §1 L2a)."""
+    install = live_runtime._INSTALL if install is None else install
+    if install.count(L2_INSTALL_ANCHOR) != 1:
+        raise ValueError("the live_runtime install hook anchor is missing or ambiguous")
+    return install.replace(L2_INSTALL_ANCHOR, L2_INSTALL_REPLACEMENT)
+
+
+@contextmanager
+def level2_install() -> Iterator[None]:
+    original = live_runtime._INSTALL
+    live_runtime._INSTALL = level2_install_bytes(original)
+    try:
+        yield
+    finally:
+        live_runtime._INSTALL = original
+
+
+def served_sha256(player: bytes, variant: str, level2: bool = False) -> str:
+    with ExitStack() as stack:
+        stack.enter_context(serving(variant))
+        if level2:
+            stack.enter_context(level2_install())
         return hashlib.sha256(live_runtime.patch_player(player, mm_opacity=variant != "off")).hexdigest()
 
 
-def instrumented_sampler_js(control: dict[str, Any] | None = None, sampler: str | None = None) -> str:
+def expected_served_sha256(variant: str, level2: bool = False) -> str | None:
+    return (L2_SERVED_SHA256 if level2 else SERVED_SHA256).get(variant)
+
+
+def transform_core(core: str, label: str, transforms: Sequence[tuple[str, str]]) -> str:
+    """`core` with each anchor replaced; `ValueError` unless every anchor occurs exactly once."""
+    for anchor, replacement in transforms:
+        count = core.count(anchor)
+        if count != 1:
+            raise ValueError(f"core {label}: anchor {anchor.strip()[:80]!r} occurs {count} times, expected exactly once")
+        core = core.replace(anchor, replacement)
+    return core
+
+
+def experiment_core(fix: str | None = None, trace: bool = False, core: str = PRESERVE_CORE_JS) -> str:
+    """The core this run serves: the fix candidate's transforms first, then the trace wraps (identical in every arm)."""
+    if fix is not None:
+        if fix not in CORE_FIXES:
+            raise ValueError(f"unknown core fix {fix!r}; expected one of {CORE_FIXES}")
+        core = transform_core(core, fix, _CORE_FIX_TRANSFORMS[fix])
+    if trace:
+        core = transform_core(core, "trace", _CORE_TRACE_TRANSFORMS)
+    return core
+
+
+def experiment_core_sha(fix: str | None = None, trace: bool = False) -> str:
+    return hashlib.sha256(experiment_core(fix, trace).encode()).hexdigest()
+
+
+@contextmanager
+def injected_core(fix: str | None, trace: bool) -> Iterator[str]:
+    """Serve `experiment_core(fix, trace)` from this process's host (as the probe's `injected_core_variant`); yields its sha."""
+    host = probe.live_host_module
+    core = experiment_core(fix, trace)
+    sha = hashlib.sha256(core.encode()).hexdigest()
+    original_core, original_sha = host.PRESERVE_CORE_JS, host.js_sha256
+    host.PRESERVE_CORE_JS, host.js_sha256 = core, (lambda: sha)
+    try:
+        yield sha
+    finally:
+        host.PRESERVE_CORE_JS, host.js_sha256 = original_core, original_sha
+
+
+def parse_arm(label: str) -> tuple[str, str | None]:
+    """`"V8+a1"` -> `("V8", "a1")`; `"V5+8"` -> `("V5+8", None)`."""
+    match = FIX_ARM_RE.match(label)
+    serving_name, fix = (match["serving"], match["fix"]) if match else (label, None)
+    if serving_name not in VARIANT_INDICES:
+        raise ValueError(f"unknown arm {label!r}: serving {serving_name!r} is not one of {tuple(VARIANT_INDICES)}")
+    return serving_name, fix
+
+
+def arm_label(variant: str, fix: str | None) -> str:
+    return f"{variant}+{fix}" if fix else variant
+
+
+def instrumented_sampler_js(control: dict[str, Any] | None = None, sampler: str | None = None, level2: bool = False) -> str:
     """The probe's sampler with the frame time recorded per tick and the sentinel toggled, preceded by the
-    Level 1 instrument (and an optional control injection)."""
+    Level 1 instrument (and an optional control injection), and with `level2`, the Level 2 page wraps."""
     sampler = probe.SAMPLER_JS if sampler is None else sampler
     for anchor in (_TICK_ANCHOR, _PUSH_ANCHOR):
         if sampler.count(anchor) != 1:
             raise ValueError(f"sampler anchor missing or ambiguous: {anchor!r}")
     sampler = sampler.replace(_TICK_ANCHOR, _TICK_REPLACEMENT).replace(_PUSH_ANCHOR, _PUSH_REPLACEMENT)
-    return INSTRUMENT_JS.replace("__CFG__", json.dumps({"control": control})) + sampler
+    cfg = {"control": control, "level2": True} if level2 else {"control": control}
+    return INSTRUMENT_JS.replace("__CFG__", json.dumps(cfg)) + (LEVEL2_JS if level2 else "") + sampler
 
 
 def trim_samples(samples: Any) -> list[dict[str, Any]]:
@@ -309,7 +696,7 @@ def trim_samples(samples: Any) -> list[dict[str, Any]]:
 
 
 @contextmanager
-def instrumented(sink: dict[str, Any], control: dict[str, Any] | None = None) -> Iterator[None]:
+def instrumented(sink: dict[str, Any], control: dict[str, Any] | None = None, level2: bool = False) -> Iterator[None]:
     """Install the instrument through the probe's own sampler seam and read it back before the host stops."""
     original_js, original_drive = probe.SAMPLER_JS, probe.drive_and_sample
 
@@ -320,7 +707,7 @@ def instrumented(sink: dict[str, Any], control: dict[str, Any] | None = None) ->
         sink.update(player._require_transport().evaluate(INSTRUMENT_READ_JS) or {})
         return samples
 
-    probe.SAMPLER_JS = instrumented_sampler_js(control, original_js)
+    probe.SAMPLER_JS = instrumented_sampler_js(control, original_js, level2)
     probe.drive_and_sample = drive
     try:
         yield
@@ -377,6 +764,7 @@ def post_mm_jumps(samples: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
             "mmClick": mm_click, "idleMs": round(idle_ms, 1), "mmMs": round(mm_ms, 1),
             "setupIndex": runs[n - 1]["i"], "playIndex": run["i"],
             "tSetup": samples[runs[n - 1]["i"]]["t"], "tPlay": samples[run["i"]]["t"],
+            "tMmSetup": samples[runs[m - 1]["i"]]["t"], "tMmIdle": samples[runs[before]["i"]]["t"] if mm_click else None,
         })
     return jumps
 
@@ -508,8 +896,11 @@ def classify_jump(
     ]
     max_dt = window_max_dt(samples, w0, w1)
     blink_samples, blink_prepaint = bool(sample_empty), bool(paint_empty)
+    first_paint = next((row for row in prepaint if row["t"] >= jump["tPlay"]), None)
+    pin_paint = next((pin for pin in (first_paint or {}).get("pins") or [] if pin.get("atScene") == jump["scene"]), None)
     return {
-        **{key: jump[key] for key in ("scene", "mmScene", "waited", "mmWaited", "mmClick", "idleMs", "mmMs", "tSetup", "tPlay")},
+        **{key: jump.get(key) for key in ("scene", "mmScene", "waited", "mmWaited", "mmClick", "idleMs", "mmMs", "tSetup", "tPlay",
+                                          "tMmSetup", "tMmIdle")},
         "r8Engaged": not jump["waited"],
         "eligible": bool(tracked) and carried, "tracked": sorted(tracked), "carried": carried,
         "firstPlaying": first_playing,
@@ -518,6 +909,10 @@ def classify_jump(
         "blinkSamples": blink_samples, "blinkPrepaint": blink_prepaint, "blink": blink_samples and blink_prepaint,
         "blinkDecoder": bool(sample_decoder) and bool(paint_decoder),
         "severity": severity,
+        "pinPaint": None if pin_paint is None else {
+            "t": first_paint["t"], "top": pin_paint.get("top"), "videoAt": pin_paint.get("videoAt"),
+            "decoderAtPin": bool(tracked.intersection(pin_paint.get("videoAt") or [])),
+        },
         "teardown": _phase(teardown, frame_ms), "trackedRemoval": _phase(tracked_removal, frame_ms),
         "rehome": None if rehome is None else {
             "t": rehome["t"], "sameDelivery": rehome["t"] == tracked_removal["t"],
@@ -533,6 +928,217 @@ def _rows(value: Any) -> list[dict[str, Any]]:
     return [row for row in value if isinstance(row, dict)] if isinstance(value, list) else []
 
 
+def _num(value: Any) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _between(row: dict[str, Any], lo: dict[str, Any] | None, hi: dict[str, Any]) -> bool:
+    """`row` lies after `lo` (exclusive; None = open) and before the I2 row `hi`: by the shared Level 2 sequence when
+    all carry one (the core's observer is delivered before I2's, so its rows precede `hi`), else by time, (lo.t, hi.t]."""
+    seqs = [_num(r.get("seq")) for r in (row, hi) + ((lo,) if lo is not None else ())]
+    if all(s is not None for s in seqs):
+        return (lo is None or seqs[0] > seqs[2]) and seqs[0] < seqs[1]
+    t = _num(row.get("t"))
+    return t is not None and (lo is None or t > lo["t"]) and t <= hi["t"]
+
+
+def _after(row: dict[str, Any], lo: dict[str, Any] | None, hi: dict[str, Any] | None) -> bool:
+    """`row` lies after `lo` (exclusive) and no later than `hi` (None = open), by sequence when both ends have one."""
+    t, s = _num(row.get("t")), _num(row.get("seq"))
+    if t is None:
+        return False
+    if lo is not None:
+        ls = _num(lo.get("seq"))
+        if (s <= ls) if (s is not None and ls is not None) else (t <= lo["t"]):
+            return False
+    if hi is not None:
+        hs = _num(hi.get("seq"))
+        if (s >= hs) if (s is not None and hs is not None) else (t > hi["t"]):
+            return False
+    return True
+
+
+def note_el_ids(note: dict[str, Any]) -> set[Any]:
+    detail = note.get("detail")
+    if not isinstance(detail, dict):
+        return set()
+    ids = {detail.get("elId"), detail.get("oldElId")} | set(detail.get("elIds") or [])
+    return {i for i in ids if i is not None}
+
+
+def stash_reason(row: dict[str, Any]) -> str:
+    """Why a traced `stash` call pooled (`pooled`) or returned silently, mirroring the core's guard order."""
+    if row.get("why") in (row.get("noted") or []):
+        return "pooled"
+    pre = row.get("pre")
+    if not isinstance(pre, dict):
+        return "not-video"
+    gen, generation = pre.get("gen"), pre.get("generation")
+    checks = (
+        ("disabled", pre.get("disabled")),
+        ("remounting", pre.get("remounting") and pre.get("detached") is not True),
+        ("bridged34", pre.get("bridged34")),
+        ("suppressed34", pre.get("suppressed34")),
+        ("facade", pre.get("facade")),
+        ("retired", gen == -1),
+        ("stale-gen", isinstance(generation, int) and (gen or 0) < generation),
+        ("no-key", not pre.get("assetKey")),
+        ("not-plan-asset", not pre.get("planAsset")),
+        ("zone-refused", "preserve-refused" in (row.get("noted") or [])),
+        ("not-poolable", not pre.get("poolable")),
+        ("not-ready", not ((pre.get("readyState") or 0) >= 2 or (pre.get("currentTime") or 0) > 0.05)),
+    )
+    return next((name for name, hit in checks if hit), "unknown")
+
+
+def _gap_stash(el: Any, prev: dict[str, Any] | None, removal: dict[str, Any], trace: list[dict[str, Any]],
+               notes: list[dict[str, Any]]) -> tuple[str, str]:
+    """(outcome, basis) of the core's `stash` for the removal: the trace row when there is one, else the core notes
+    (a `preserve-on-detach*` note = pooled), else inferred from the I2 row's `__obedRemounting`."""
+    rows = [r for r in trace if r.get("kind") == "stash" and r.get("elId") == el and DETACH_WHY_RE.match(str(r.get("why")))
+            and _between(r, prev, removal)]
+    if rows:
+        return stash_reason(rows[-1]), "trace"
+    if trace:
+        return "unseen", "trace"
+    if any(DETACH_WHY_RE.match(str(n.get("kind"))) and el in note_el_ids(n) and _between(n, prev, removal) for n in notes):
+        return "pooled", "notes"
+    return ("remounting" if removal.get("remounting") else "unseen"), "inferred"
+
+
+def _compact(row: dict[str, Any], keys: Sequence[str]) -> dict[str, Any]:
+    return {key: row[key] for key in ("seq", "t", "rafTs", "kind", *keys) if key in row}
+
+
+def classify_gap(
+    lifecycle: list[dict[str, Any]], index: int, *, prepaint: list[dict[str, Any]], notes: list[dict[str, Any]],
+    trace: list[dict[str, Any]], l2rows: list[dict[str, Any]], w0: float,
+) -> dict[str, Any]:
+    """Plan §4 step 3 for one I2 removal that left a tracked decoder disconnected at delivery (a detach gap).
+
+    Rule, in order:
+      H4  the removal is a core remover's: a retire note / traced `retireDecoder` naming the decoder in the removal's
+          delivery, a `dom-swap` note there (the stub swap took it out), or a Level 2 remover stack through
+          retireDecoder / retireVictims / bindFacade.
+      H1  the core's detach `stash` returned on the `__obedRemounting` self-move guard (trace; or, without the trace,
+          no `preserve-on-detach*` note for the decoder in that delivery and the I2 row reads `remounting`).
+      H2  the stash pooled it and scheduled a detach remount, yet it stayed disconnected (tryRemount bailed).
+      H3  any of H1/H2/unknown above, after an earlier removal of the same decoder inside the jump window that was
+          re-homed (connected at its delivery, or a connected add before this removal): re-homed, then removed again.
+          `then` names the second removal's branch.
+      unknown  anything else (another stash guard, pooled but never scheduled, no evidence), with the reason.
+    """
+    removal = lifecycle[index]
+    el = removal.get("elId")
+    prev = next((row for row in reversed(lifecycle[:index]) if row.get("elId") == el), None)
+    readd = next((row for row in lifecycle[index + 1:]
+                  if row.get("elId") == el and row.get("op") == "add" and row.get("isConnected")), None)
+    retire = [n for n in notes if n.get("kind") in RETIRE_NOTES and el in note_el_ids(n) and _between(n, prev, removal)]
+    retire += [r for r in trace if r.get("kind") == "retireDecoder" and r.get("elId") == el and _between(r, prev, removal)]
+    swap = [n for n in notes if n.get("kind") == "dom-swap" and el in note_el_ids(n) and _between(n, prev, removal)]
+    removers = [r for r in l2rows if str(r.get("kind")).startswith("dom-") and el in (r.get("elIds") or [])
+                and _between(r, prev, removal)]
+    remover = removers[-1] if removers else None
+    core_remover = next((name for name in CORE_REMOVERS for frame in (remover or {}).get("by") or []
+                         if name in str(frame)), None)
+    stash, basis = _gap_stash(el, prev, removal, trace, notes)
+    scheduled = [n for n in notes if n.get("kind") == "remount-scheduled" and el in note_el_ids(n)
+                 and DETACH_WHY_RE.match(str((n.get("detail") or {}).get("why"))) and _after(n, prev, readd)]
+    tries = [r for r in trace if r.get("kind") == "tryRemount" and r.get("elId") == el and _after(r, prev, readd)]
+    if retire or swap or core_remover:
+        base = "H4"
+        reason = "retire" if retire else "dom-swap" if swap else f"remover {core_remover}"
+    elif stash == "remounting":
+        base, reason = "H1", f"stash returned on __obedRemounting ({basis})"
+    elif stash == "pooled" and scheduled:
+        base, reason = "H2", "pooled and scheduled, still disconnected"
+    elif stash == "pooled":
+        base, reason = "unknown", "pooled, no detach remount scheduled"
+    else:
+        base, reason = "unknown", f"stash {stash} ({basis})"
+    earlier = [
+        (i, row) for i, row in enumerate(lifecycle[:index])
+        if row.get("elId") == el and row.get("op") == "remove" and _num(row.get("t")) is not None and row["t"] >= w0
+    ]
+    prior = next((
+        row for i, row in earlier
+        if row.get("isConnected") or any(r.get("elId") == el and r.get("op") == "add" and r.get("isConnected")
+                                         for r in lifecycle[i + 1:index])
+    ), None)
+    hypothesis = "H3" if prior is not None and base != "H4" else base
+    t1 = readd["t"] if readd is not None else None
+    paints = [p for p in prepaint if p["t"] > removal["t"] and (t1 is None or p["t"] < t1)]
+    span_end = (t1 if t1 is not None else removal["t"]) + 5.0
+    return {
+        "hypothesis": hypothesis, "then": base if hypothesis == "H3" else None, "reason": reason, "basis": basis,
+        "elId": el, "t0": removal["t"], "t1": t1, "gapMs": None if t1 is None else round(t1 - removal["t"], 3),
+        "rafTs": removal.get("rafTs"), "paintsInGap": len(paints),
+        "removal": _compact(removal, ("op", "direct", "isConnected", "remounting", "parentId", "layerId")),
+        "readd": None if readd is None else _compact(readd, ("op", "parentId", "layerId")),
+        "prior": None if prior is None else {
+            **_compact(prior, ("isConnected", "parentId", "layerId")),
+            "sameFrame": prior.get("rafTs") == removal.get("rafTs"), "beforeMs": round(removal["t"] - prior["t"], 3),
+        },
+        "stash": stash, "remover": None if remover is None else _compact(remover, ("kind", "parentId", "layerId", "by")),
+        "scheduled": len(scheduled),
+        "tryRemount": [_compact(r, ("after", "state", "noted", "parentId", "layerId")) for r in tries],
+        "player": [_compact(r, ("scene", "videos", "from", "to")) for r in l2rows
+                   if r.get("kind") in PLAYER_CONTEXT_KINDS and removal["t"] - PLAYER_CONTEXT_MS <= r["t"] <= span_end],
+    }
+
+
+def classify_event(event: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
+    """Every detach gap of the event's tracked decoders inside its jump window, and for a blink (document or
+    decoder), the hypothesis of the gap that covers the first pre-paint hole."""
+    instrument = raw.get("instrument") or {}
+    lifecycle = _rows(instrument.get("lifecycle"))
+    prepaint = _rows(instrument.get("prepaint"))
+    notes = _rows(raw.get("coreEvents"))
+    trace = _rows(raw.get("coreTrace"))
+    l2rows = _rows((raw.get("level2") or {}).get("rows"))
+    tracked = set(event.get("tracked") or [])
+    w0, w1 = event["tSetup"] - JUMP_PAD_MS, event["tPlay"] + CARRY_WINDOW_MS
+    gaps = [
+        classify_gap(lifecycle, i, prepaint=prepaint, notes=notes, trace=trace, l2rows=l2rows, w0=w0)
+        for i, row in enumerate(lifecycle)
+        if row.get("op") == "remove" and row.get("elId") in tracked and not row.get("isConnected")
+        and _num(row.get("t")) is not None and w0 <= row["t"] <= w1
+    ]
+    holes = event.get("prepaintEmptyRuns") if event.get("blink") else (
+        event.get("prepaintDecoderAbsentRuns") if event.get("blinkDecoder") else None)
+    out: dict[str, Any] = {"blink": bool(event.get("blink")), "blinkDecoder": bool(event.get("blinkDecoder")),
+                           "gaps": gaps, "hypothesis": None, "then": None, "reason": None, "basis": None}
+    if not holes:
+        return out
+    start = holes[0]["t0"]
+    covering = next((g for g in gaps if g["t0"] < start and (g["t1"] is None or g["t1"] > start)), None)
+    if covering is None:
+        out.update(hypothesis="unknown", reason="no detach gap of a tracked decoder covers the first pre-paint hole")
+    else:
+        out.update({key: covering[key] for key in ("hypothesis", "then", "reason", "basis")})
+    return out
+
+
+def serving_of(config: dict[str, Any]) -> Any:
+    return config.get("serving") or config.get("variant")
+
+
+def r8_preload_seen(level2: dict[str, Any], jumps: Sequence[dict[str, Any]]) -> list[bool | None]:
+    """Per post-MM jump: did the player issue R8's preload of the jump's scene (`loadScene` from `preloadTextures`,
+    the scene before it a Magic Move) before the MM's setup? None when the page wraps installed after the MM's idle began."""
+    rows = [r for r in _rows(level2.get("rows")) if r.get("kind") == "loadScene"]
+    installed = _num(level2.get("installedAt"))
+    out: list[bool | None] = []
+    for jump in jumps:
+        idle, setup = _num(jump.get("tMmIdle")), _num(jump.get("tMmSetup"))
+        if installed is None or idle is None or setup is None or installed > idle:
+            out.append(None)
+            continue
+        out.append(any(r.get("scene") == jump["scene"] and r.get("viaPreload") and r.get("prevIsMM")
+                       and _num(r.get("t")) is not None and r["t"] < setup for r in rows))
+    return out
+
+
 def score_control(raw: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:
     """Plan §1 Controls. null: 0 flags; positive: the decoder absent in exactly the 2-3 sampler ticks and the 2-3
     pre-paint callbacks between removal and re-insert; timeout0: recorded, with whether both instruments agree with
@@ -543,14 +1149,23 @@ def score_control(raw: dict[str, Any], events: list[dict[str, Any]]) -> dict[str
     instrument = raw.get("instrument") or {}
     prepaint = _rows(instrument.get("prepaint"))
     if mode == "r8flag":
-        expect_waited = config.get("variant") not in R8_SERVINGS
+        expect_waited = serving_of(config) not in R8_SERVINGS
         checked = [e for e in events if e["mmClick"]]
         wrong = [e["scene"] for e in checked if e["waited"] != expect_waited]
-        status = "pass" if checked and not wrong else "fail"
         reasons = [] if checked else ["no post-MM jump after a click MM"]
         reasons += [f"scene {scene}: waited != {expect_waited}" for scene in wrong]
-        return {"mode": mode, "status": status, "reasons": reasons, "expectWaited": expect_waited,
-                "jumps": len(checked), "waited": [e["waited"] for e in checked]}
+        out = {"mode": mode, "expectWaited": expect_waited, "jumps": len(checked), "waited": [e["waited"] for e in checked]}
+        if isinstance(raw.get("level2"), dict):
+            seen = r8_preload_seen(raw["level2"], checked)
+            judged = [(e["scene"], s) for e, s in zip(checked, seen) if s is not None]
+            if not judged:
+                reasons.append("level 2: no post-MM jump whose pre-MM idle followed the page wraps")
+            reasons += [f"scene {scene}: level 2 R8 preload logged = {s}, expected {not expect_waited}"
+                        for scene, s in judged if s != (not expect_waited)]
+            out["l2Preload"] = seen
+        out["status"] = "pass" if checked and not reasons else "fail"
+        out["reasons"] = reasons
+        return out
     ctl = instrument.get("control") or {}
     if not ctl.get("fired") or ctl.get("skipped") or not isinstance(ctl.get("tRemove"), (int, float)):
         return {"mode": mode, "status": "fail", "reasons": [f"control did not act: {ctl}"], "control": ctl}
@@ -614,19 +1229,30 @@ def build_record(raw: dict[str, Any]) -> dict[str, Any]:
     output = raw.get("output") or {}
     served = (output.get("mmOpacity") or {}).get("sha256")
     continuity = output.get("continuity") or {}
-    expected = SERVED_SHA256.get(config.get("variant"))
+    expected = config.get("expectedServedSha256") or SERVED_SHA256.get(serving_of(config))
+    expected_core = config.get("expectedCoreSha256") or CORE_SHA256
     arm = raw.get("arm") or {}
     stage_fit = arm.get("stageFit")
     record = {
         **{key: raw.get(key) for key in ("runId", "startedAt", "wallS", "meta", "error")},
         **config,
         "servedSha256": served, "expectedServedSha256": expected, "servedShaOk": served is not None and served == expected,
-        "coreSha256": continuity.get("sha256"), "coreShaOk": continuity.get("sha256") == CORE_SHA256,
+        "coreSha256": continuity.get("sha256"), "coreShaOk": continuity.get("sha256") == expected_core,
         "continuityMode": continuity.get("mode"),
         "stageFitOk": bool(stage_fit.get("verdict")) if isinstance(stage_fit, dict) else None,
         "rafStats": stats, "instrumentErrors": instrument.get("errors"),
         "events": events,
     }
+    level2 = raw.get("level2")
+    if isinstance(level2, dict) or config.get("level2"):
+        level2 = level2 if isinstance(level2, dict) else {}
+        record["level2Errors"] = level2.get("errors")
+        record["level2Wrapped"] = level2.get("wrapped")
+        record["coreTraceRows"] = len(_rows(raw.get("coreTrace")))
+    for event in events:
+        if event["eligible"] and (event["blink"] or event["blinkDecoder"]):
+            verdict = classify_event(event, raw)
+            event["hypothesis"] = {key: verdict[key] for key in ("hypothesis", "then", "reason", "basis")}
     reasons = []
     if raw.get("error"):
         reasons.append(f"run error: {raw['error']}")
@@ -636,6 +1262,9 @@ def build_record(raw: dict[str, Any]) -> dict[str, Any]:
         reasons.append(f"continuity {record['continuityMode']} core {record['coreSha256']}")
     if record["stageFitOk"] is False:
         reasons.append("stage fit failed")
+    if config.get("level2") and (record.get("level2Errors") or record.get("level2Wrapped") is None or not record["coreTraceRows"]):
+        reasons.append(f"level 2 instrument incomplete: errors {record.get('level2Errors')}, "
+                       f"trace rows {record['coreTraceRows']}")
     eligible = [e for e in events if e["eligible"]]
     if reasons:
         status = "error"
@@ -726,7 +1355,7 @@ def summarize(records: Sequence[dict[str, Any]], seed: int | None = None) -> dic
         blocks.setdefault((run_seed, block), set()).add(variant)
         row = per.setdefault(variant, {
             "runs": 0, "events": 0, "blinks": 0, "blinkSamplesOnly": 0, "blinkPrepaintOnly": 0, "blinkDecoder": 0,
-            "byPath": {}, "byPhase": {}, "byLoad": {}, "byDeck": {},
+            "byPath": {}, "byPhase": {}, "byLoad": {}, "byDeck": {}, "byHypothesis": {},
         })
         row["runs"] += 1
         for e in r.get("events") or []:
@@ -741,16 +1370,25 @@ def summarize(records: Sequence[dict[str, Any]], seed: int | None = None) -> dic
             _bump(row["byPhase"], (e.get("teardown") or {}).get("phase"), e["blink"])
             _bump(row["byLoad"], load_stratum(r.get("meta")), e["blink"])
             _bump(row["byDeck"], r.get("deck"), e["blink"])
+            if e["blink"]:
+                h = e.get("hypothesis") or {}
+                name = f"{h.get('hypothesis')}>{h['then']}" if h.get("then") else h.get("hypothesis")
+                row["byHypothesis"][str(name)] = row["byHypothesis"].get(str(name), 0) + 1
     tests = {
         f"V8vs{other}": fisher_one_sided(per["V8"]["blinks"], per["V8"]["events"], per[other]["blinks"], per[other]["events"])
-        for other in ("V7", "V5") if "V8" in per and other in per
+        for other in sorted(per) if "V8" in per and other != "V8"
     }
-    complete = sum(1 for variants in blocks.values() if set(BLOCK_VARIANTS) <= variants)
+    arms = set(BLOCK_VARIANTS) if set(BLOCK_VARIANTS) <= set(per) else set(per)
+    complete = sum(1 for variants in blocks.values() if arms <= variants)
     return {"statuses": statuses, "completeBlocks": complete, "perVariant": per, "fisherOneSided": tests,
             "decision": decide(per, complete)}
 
 
 def decide(per: dict[str, dict[str, Any]], complete_blocks: int) -> str:
+    """§2.3 on the R8 A/B; on a fix A/B (V8 against V8+fix arms) only whether every arm reached the target."""
+    fix_arms = [arm for arm in per if FIX_ARM_RE.match(arm)]
+    if "V8" in per and fix_arms and not set(BLOCK_VARIANTS) <= set(per):
+        return "target-met" if all(per[arm]["events"] >= TARGET_EVENTS for arm in ("V8", *fix_arms)) else "continue"
     if not set(BLOCK_VARIANTS) <= set(per):
         return "n/a"
     v8, v7, v5 = (per[v] for v in BLOCK_VARIANTS)
@@ -826,13 +1464,16 @@ def deck_paths(deck: str) -> tuple[Path, Path]:
 
 def execute_run(
     out_dir: Path, run_id: str, *, deck: str, variant: str, arm: str, viewport: tuple[int, int],
-    control: dict[str, Any] | None = None, extra: dict[str, Any] | None = None,
+    control: dict[str, Any] | None = None, extra: dict[str, Any] | None = None, core_fix: str | None = None,
+    level2: bool = False,
 ) -> dict[str, Any]:
-    """One live arm under the given serving and instrument; writes the raw dump and appends the record."""
+    """One live arm under the given serving, core and instrument; writes the raw dump and appends the record."""
     fixture_dir, original_index = deck_paths(deck)
-    config = {"deck": deck, "variant": variant, "arm": arm, "viewport": list(viewport),
+    config = {"deck": deck, "variant": arm_label(variant, core_fix), "serving": variant, "coreFix": core_fix,
+              "level2": level2, "arm": arm, "viewport": list(viewport),
               "control": control["mode"] if control else None, "controlAtScene": control and control.get("atScene"),
-              **(extra or {})}
+              "expectedServedSha256": expected_served_sha256(variant, level2),
+              "expectedCoreSha256": experiment_core_sha(core_fix, level2), **(extra or {})}
     raw: dict[str, Any] = {"runId": run_id, "config": config, "meta": collect_metadata(),
                            "startedAt": datetime.now().isoformat(timespec="seconds"), "error": None}
     started = time.monotonic()
@@ -846,8 +1487,12 @@ def execute_run(
         expected_stage = probe.expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
         with ExitStack() as stack:
             stack.enter_context(serving(variant))
+            if level2:
+                stack.enter_context(level2_install())
+            if core_fix or level2:
+                stack.enter_context(injected_core(core_fix, level2))
             stack.enter_context(probe.env_override({probe.CONTINUITY_ENV: None}))
-            stack.enter_context(instrumented(sink, control))
+            stack.enter_context(instrumented(sink, control, level2))
             if arm == "C":
                 stack.enter_context(probe.bridge_disabled())
             result = probe.run_arm(arm, export, slides, facts, viewport, expected_stage)
@@ -877,7 +1522,7 @@ def _brief(record: dict[str, Any]) -> dict[str, Any]:
     brief = {key: record.get(key) for key in keys if key in record}
     brief["events"] = [
         {key: e.get(key) for key in ("scene", "eligible", "waited", "blink", "blinkSamples", "blinkPrepaint", "firstPlaying",
-                                     "invalid", "maxDtMs")} | {"phase": (e.get("teardown") or {}).get("phase")}
+                                     "invalid", "maxDtMs", "hypothesis")} | {"phase": (e.get("teardown") or {}).get("phase")}
         for e in record.get("events") or []
     ]
     if isinstance(brief.get("controlVerdict"), dict):
@@ -885,18 +1530,23 @@ def _brief(record: dict[str, Any]) -> dict[str, Any]:
     return brief
 
 
+def _run_tag(args: argparse.Namespace) -> str:
+    return _safe(arm_label(args.variant, args.core_fix)) + ("-L2" if args.level2 else "")
+
+
 def cmd_run(args: argparse.Namespace) -> int:
-    run_id = f"{datetime.now():%Y%m%dT%H%M%S}-{_safe(args.variant)}-{args.deck}-{args.arm}"
-    record = execute_run(args.out_dir, run_id, deck=args.deck, variant=args.variant, arm=args.arm, viewport=args.viewport)
+    run_id = f"{datetime.now():%Y%m%dT%H%M%S}-{_run_tag(args)}-{args.deck}-{args.arm}"
+    record = execute_run(args.out_dir, run_id, deck=args.deck, variant=args.variant, arm=args.arm, viewport=args.viewport,
+                         core_fix=args.core_fix, level2=args.level2)
     print(json.dumps(_brief(record), indent=2, default=str))
     return 0 if record["status"] in DONE_STATUSES else 1
 
 
 def cmd_control(args: argparse.Namespace) -> int:
     control = None if args.mode == "r8flag" else {"mode": args.mode, "atScene": args.at_scene}
-    run_id = f"{datetime.now():%Y%m%dT%H%M%S}-ctl-{args.mode}-{_safe(args.variant)}-{args.deck}-{args.arm}"
+    run_id = f"{datetime.now():%Y%m%dT%H%M%S}-ctl-{args.mode}-{_run_tag(args)}-{args.deck}-{args.arm}"
     record = execute_run(args.out_dir, run_id, deck=args.deck, variant=args.variant, arm=args.arm, viewport=args.viewport,
-                         control=control, extra={"control": args.mode})
+                         control=control, extra={"control": args.mode}, core_fix=args.core_fix, level2=args.level2)
     print(json.dumps(_brief(record), indent=2, default=str))
     verdict = record.get("controlVerdict") or {}
     return 0 if verdict.get("status") in ("pass", "recorded") else 1
@@ -905,12 +1555,13 @@ def cmd_control(args: argparse.Namespace) -> int:
 def _manifest(args: argparse.Namespace) -> dict[str, Any]:
     path = args.out_dir / "blocks.json"
     wanted = {"blocks": args.blocks, "variants": args.variants, "decks": args.decks, "arm": args.arm,
-              "viewport": list(args.viewport)}
+              "viewport": list(args.viewport), "level2": args.level2}
     if path.exists():
         manifest = json.loads(path.read_text())
         if args.seed is not None and args.seed != manifest["seed"]:
             raise SystemExit(f"{path} has seed {manifest['seed']}, not {args.seed}")
-        clash = {k: (manifest.get(k), v) for k, v in wanted.items() if k != "blocks" and manifest.get(k) != v}
+        clash = {k: (manifest.get(k, False if k == "level2" else None), v) for k, v in wanted.items()
+                 if k != "blocks" and manifest.get(k, False if k == "level2" else None) != v}
         if clash:
             raise SystemExit(f"{path} was started with different settings: {clash}")
         manifest["blocks"] = max(manifest["blocks"], args.blocks)
@@ -937,11 +1588,14 @@ def cmd_blocks(args: argparse.Namespace) -> int:
             print(f"stopping: {decision}")
             break
         run = todo[0]
-        run_id = f"s{seed}-b{run['block']:02d}-{_safe(run['variant'])}-{run['deck']}-a{run['attempt']}"
+        level2 = bool(manifest.get("level2"))
+        serving_name, fix = parse_arm(run["variant"])
+        run_id = f"s{seed}-b{run['block']:02d}-{_safe(run['variant'])}{'-L2' if level2 else ''}-{run['deck']}-a{run['attempt']}"
         record = execute_run(
-            args.out_dir, run_id, deck=run["deck"], variant=run["variant"], arm=manifest["arm"],
+            args.out_dir, run_id, deck=run["deck"], variant=serving_name, arm=manifest["arm"],
             viewport=tuple(manifest["viewport"]), extra={"seed": seed, "block": run["block"], "attempt": run["attempt"],
                                                          "order": run["order"]},
+            core_fix=fix, level2=level2,
         )
         print(json.dumps(_brief(record), default=str), flush=True)
         if (record["servedSha256"] is not None and not record["servedShaOk"]) or (
@@ -960,6 +1614,60 @@ def cmd_blocks(args: argparse.Namespace) -> int:
 def cmd_summary(args: argparse.Namespace) -> int:
     records = read_jsonl(args.out_dir / "runs.jsonl")
     print(json.dumps(summarize(records, args.seed), indent=2, default=str))
+    return 0
+
+
+def classification_rows(record: dict[str, Any], raw: dict[str, Any]) -> list[dict[str, Any]]:
+    """One row per eligible event of the run: its blink flags, hypothesis (blinks only) and every detach gap."""
+    rows = []
+    for event in record.get("events") or []:
+        if not event.get("eligible"):
+            continue
+        verdict = classify_event(event, raw)
+        rows.append({
+            **{key: record.get(key) for key in ("runId", "variant", "serving", "coreFix", "level2", "deck", "block")},
+            **{key: event.get(key) for key in ("scene", "waited", "blink", "blinkDecoder", "invalid")},
+            "phase": (event.get("teardown") or {}).get("phase"), **verdict,
+        })
+    return rows
+
+
+def tally_classification(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for row in rows:
+        cell = out.setdefault(str(row.get("variant")), {"events": 0, "blinks": 0, "hypotheses": {}, "gapsAll": {}})
+        cell["events"] += 1
+        cell["blinks"] += int(bool(row.get("blink")))
+        if row.get("blink"):
+            name = f"{row['hypothesis']}>{row['then']}" if row.get("then") else str(row.get("hypothesis"))
+            cell["hypotheses"][name] = cell["hypotheses"].get(name, 0) + 1
+        for gap in row.get("gaps") or []:
+            name = f"{gap['hypothesis']}>{gap['then']}" if gap.get("then") else str(gap.get("hypothesis"))
+            key = f"{name}|{'painted' if gap.get('paintsInGap') else 'unpainted'}"
+            cell["gapsAll"][key] = cell["gapsAll"].get(key, 0) + 1
+    return out
+
+
+def cmd_classify(args: argparse.Namespace) -> int:
+    out_path = args.output or args.out_dir / "classify.jsonl"
+    out_path.unlink(missing_ok=True)
+    rows: list[dict[str, Any]] = []
+    for record in read_jsonl(args.out_dir / "runs.jsonl"):
+        if record.get("status") != "ok" or (args.seed is not None and record.get("seed") != args.seed):
+            continue
+        raw_path = args.out_dir / "raw" / f"{record['runId']}.json.gz"
+        if not raw_path.exists():
+            continue
+        with gzip.open(raw_path, "rt") as handle:
+            raw = json.load(handle)
+        for row in classification_rows(build_record(raw), raw):
+            append_jsonl(out_path, row)
+            rows.append(row)
+    for row in rows:
+        if row.get("blink"):
+            print(json.dumps({key: row.get(key) for key in ("runId", "variant", "deck", "scene", "waited", "phase",
+                                                             "hypothesis", "then", "reason", "basis")}, default=str))
+    print(json.dumps(tally_classification(rows), indent=2, default=str))
     return 0
 
 
@@ -982,22 +1690,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         p.add_argument("--arm", choices=("A", "C"), default=arm, help="A = continuity on; C = bridges stripped")
         p.add_argument("--viewport", type=probe.parse_viewport_arg, default=DEFAULT_VIEWPORT)
 
+    def bytes_options(p: argparse.ArgumentParser, fix: bool = True) -> None:
+        p.add_argument("--level2", action="store_true", help="plan §1 Level 2: controller wraps and the core trace")
+        if fix:
+            p.add_argument("--core-fix", choices=CORE_FIXES, default=None, help="probe-only core fix candidate (plan §3)")
+
     run = sub.add_parser("run", help="one instrumented arm")
     live(run, "C")
+    bytes_options(run)
     run.add_argument("--variant", choices=SERVINGS, required=True)
     run.add_argument("--deck", choices=DECKS, required=True)
     run.set_defaults(func=cmd_run)
 
     control = sub.add_parser("control", help="one §1 control run")
     live(control, "A")
+    bytes_options(control)
     control.add_argument("--mode", choices=CONTROL_MODES, required=True)
     control.add_argument("--variant", choices=SERVINGS, default="V8")
     control.add_argument("--deck", choices=DECKS, default="D4")
     control.add_argument("--at-scene", type=int, default=None, help="fire at this pin boundary (default: the first)")
     control.set_defaults(func=cmd_control)
 
-    blocks = sub.add_parser("blocks", help="the interleaved A/B, resumable")
+    blocks = sub.add_parser("blocks", help="the interleaved A/B, resumable (arms: V8, V7, V5, V5+8, or V8+a1 / V8+a2)")
     live(blocks, "C")
+    bytes_options(blocks, fix=False)
     blocks.add_argument("--blocks", type=int, required=True)
     blocks.add_argument("--seed", type=int, default=None)
     blocks.add_argument("--variants", type=lambda s: s.split(","), default=list(BLOCK_VARIANTS))
@@ -1006,15 +1722,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     blocks.add_argument("--no-stop-rules", dest="stop_rules", action="store_false")
     blocks.set_defaults(func=cmd_blocks)
 
-    for name, func in (("summary", cmd_summary), ("rescore", cmd_rescore)):
+    for name, func in (("summary", cmd_summary), ("rescore", cmd_rescore), ("classify", cmd_classify)):
         p = sub.add_parser(name)
         p.add_argument("--out-dir", type=Path, required=True)
         p.add_argument("--seed", type=int, default=None)
+        if name == "classify":
+            p.add_argument("--output", type=Path, default=None, help="default: <out-dir>/classify.jsonl")
         p.set_defaults(func=func)
 
     args = parser.parse_args(argv)
     if args.command == "blocks":
-        bad = [v for v in args.variants if v not in VARIANT_INDICES] + [d for d in args.decks if d not in DECKS]
+        bad = [d for d in args.decks if d not in DECKS]
+        for label in args.variants:
+            try:
+                parse_arm(label)
+            except ValueError:
+                bad.append(label)
         if bad:
             parser.error(f"unknown variants/decks: {bad}")
     return args
