@@ -34,9 +34,15 @@ Verify every branch/PR on GitHub before acting; nothing below was merged except 
 3. **S2 force-push** to `dcbb6363` (or a later head).
 
 ## Next steps, in order
-1. Read Codex's review of the resizer + Gold stack: `…/scratchpad/codex-splice-r2/review.md` (session scratchpad,
-   2026-10-09 session 4c27cb02; re-run the review if the scratchpad is gone). Fold, then push both branches and open the
-   resizer PR with the Gold PR stacked on it (owner merges).
+1. Fold Codex r2 on the resizer + Gold stack (`.agents/reviews/splice-aspect/codex-r2.md`, r1 alongside):
+   **MAJOR** — a media count mismatch sends the slide through `_merge_legacy_slides`, which restores pre-splice
+   image/movie aspects by an untrusted `kindIndex` and still stamps `spliceAspectRefreshed=True` (remap_keynote.py ~318,
+   ~495) -> null those aspects (or restore only where correspondence is proven) + a count-mismatch regression. MINORs:
+   fallback slides need an explicit `aspect=None` so fresh caches are not rejected (inspect.py ~825); Gold oracle helper
+   must accept only `reader == "jxa"` (test_iwa_geometry.py ~599); vacuous fallback-geometry loop
+   (test_offline_inspect.py ~1614); duplicated `boom_two_tier` stub. Codex confirmed the aspect-nulling fallback is
+   conservative and the Gold assertions are not weaker than Map's. Then push both branches and open the resizer PR with
+   the Gold PR stacked on it (owner merges).
 2. Owner decision 1 -> implement the detach fix as a core variant, measure (≥ 30 events, interleaved, gap = 0), land it
    in the core (core sha re-pin; red-arm variant shas re-derive), on top of the S2 rebase.
 3. The owed S2 gates on the rebased head: full `run_gates.sh` (now 38 runs incl. 22 deck red arms — GATE_JOBS=3 was
