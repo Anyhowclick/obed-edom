@@ -3,10 +3,16 @@
 # and P2 arms through one queue, GATE_JOBS at a time (1..5, default 3; 1 = serial), from a clean pinned worktree, into a
 # missing or empty <outdir>). --tier full (default) runs everything; --tier dev runs the 1920x1080 and 1600x1000 host
 # gates and the P2 fast, --disable-bridge34 and --gl-replay auto arms, and is never a qualification pass.
+# GATE_JOBS above 3 is allowed but loudly unqualified. A round refuses to start when the 1-minute load average exceeds
+# GATE_MAX_START_LOAD (default 4), when OBED_H264_PATTERN_CACHE is set, or when the H.264 pattern cache cannot be
+# prewarmed and re-read as a sha-verified hit for every duration. Nothing is ever retried.
 # Exit: 0 full pass; 10 dev pass; 1 when any gate FAILED, or a RECORD arm is PENDING registration unless --allow-record
 # (discovery runs only); 2 when refused before anything runs.
 GATE_JOBS=${GATE_JOBS:-3}
 [[ $GATE_JOBS == [1-5] ]] || { echo "GATE_JOBS must be an integer in 1..5, got '$GATE_JOBS'" >&2; exit 2; }
+GATE_MAX_START_LOAD=${GATE_MAX_START_LOAD:-4}
+[[ $GATE_MAX_START_LOAD == <->(|.<->) ]] || {
+  echo "GATE_MAX_START_LOAD must be a non-negative number, got '$GATE_MAX_START_LOAD'" >&2; exit 2; }
 (( $# >= 2 )) || { echo "usage: run_gates.sh <gate-worktree> <outdir> [--allow-record] [--tier dev|full]" >&2; exit 2; }
 G=${1:A}; O=${2:A}; ALLOW_RECORD=0; TIER=full; shift 2
 while (( $# )); do
@@ -26,9 +32,13 @@ fi
 ARM_NAMES=(A B C V Voff attach)
 typeset -A HOST_SKIP=(2560x1440 attach,B,Voff 1600x1000 attach,B,Voff 1920x1080 C)
 if [[ $TIER == dev ]]; then HOST_VIEWPORTS=(1920x1080 1600x1000); else HOST_VIEWPORTS=(2560x1440 1600x1000 1920x1080); fi
-for A in $ARM_NAMES; do
-  n=0; for V in $HOST_VIEWPORTS; do (( ${${(s:,:)HOST_SKIP[$V]}[(Ie)$A]} )) || n=$((n+1)); done
-  (( n )) || { echo "host arm $A runs in no $TIER-tier host gate; every arm (null controls included) must run once a round" >&2; exit 2; }
+for host_arm in $ARM_NAMES; do
+  gates_running_arm=0
+  for viewport in $HOST_VIEWPORTS; do
+    (( ${${(s:,:)HOST_SKIP[$viewport]}[(Ie)$host_arm]} )) || gates_running_arm=$((gates_running_arm+1))
+  done
+  (( gates_running_arm )) || {
+    echo "host arm $host_arm runs in no $TIER-tier host gate; every arm (null controls included) must run once a round" >&2; exit 2; }
 done
 if [[ $TIER == full ]]; then
   HOST_RED_ARMS=("--core-variant stash-any" "--strip bridge@8" "--strip retire@2" "--strip restart@6" "--strip glReplay@2 --gl-replay auto")
@@ -36,7 +46,9 @@ else
   HOST_RED_ARMS=()
 fi
 # P2 arms: p2 <tier> "<expected red>" "<expected inconclusive>" <args>; tier dev runs in both tiers, full only in full.
-# --skip-freeze-bracket goes on every arm but the two positive bracket arms, which must run it.
+# --skip-freeze-bracket goes on every arm but the two positive bracket arms, which must run it. As in P2 itself, the flag
+# is refused on any arm that is not a red arm (--core-variant, --strip, --disable-bridge34) unless it is a DOM
+# --wait-profile slow arm: a positive --gl-replay auto arm runs the bracket whatever its wait profile.
 P2_ARMS=()
 p2(){ [[ $TIER == full || $1 == dev ]] && P2_ARMS+=("${(j: :)${(@q)@[2,-1]}}"); }
 p2 dev "" "" --wait-profile fast
@@ -54,13 +66,27 @@ p2 full "continueThroughMovingMagicMove3to4" "" --wait-profile fast --strip rest
 p2 dev "" "" --wait-profile fast --gl-replay auto
 # Registered post hoc from r2.
 p2 full "glReplayCarry1to2 noStrayVideo" "" --wait-profile fast --gl-replay auto --strip glReplay@2 --skip-freeze-bracket
-BRACKET_ARMS=("--wait-profile fast" "--wait-profile fast --gl-replay auto")
-for A in "${P2_ARMS[@]}"; do
-  a=("${(@Q)${(z)A}}"); rest=("${(@)a[3,-1]}"); kept="${(j: :)${(@)rest:#--skip-freeze-bracket}}"
-  if (( ${rest[(Ie)--skip-freeze-bracket]} && ${BRACKET_ARMS[(Ie)$kept]} )); then
-    echo "P2 ${rest[*]}: --skip-freeze-bracket on a positive freeze-bracket arm is refused" >&2; exit 2
+for p2_declaration in "${P2_ARMS[@]}"; do
+  p2_words=("${(@Q)${(z)p2_declaration}}"); p2_args=("${(@)p2_words[3,-1]}")
+  (( ${p2_args[(Ie)--skip-freeze-bracket]} )) || continue
+  (( ${p2_args[(Ie)--core-variant]} || ${p2_args[(Ie)--strip]} || ${p2_args[(Ie)--disable-bridge34]} )) && continue
+  gl_flag_at=${p2_args[(Ie)--gl-replay]}; wait_flag_at=${p2_args[(Ie)--wait-profile]}
+  gl_auto=0; (( gl_flag_at )) && [[ ${p2_args[gl_flag_at+1]} == auto ]] && gl_auto=1
+  wait_slow=0; (( wait_flag_at )) && [[ ${p2_args[wait_flag_at+1]} == slow ]] && wait_slow=1
+  if (( gl_auto || ! wait_slow )); then
+    echo "P2 ${p2_args[*]}: --skip-freeze-bracket on a positive freeze-bracket arm is refused" >&2; exit 2
   fi
 done
+if (( ${+OBED_H264_PATTERN_CACHE} )); then
+  echo "OBED_H264_PATTERN_CACHE is set ('$OBED_H264_PATTERN_CACHE'); a round needs the shared H.264 pattern cache so no" \
+    "P2 arm encodes during a timed capture -- unset it. No run launched." >&2; exit 2
+fi
+load1(){ local avg; avg=(${=$(sysctl -n vm.loadavg 2>/dev/null)}); [[ ${avg[2]} == <->(|.<->) ]] && print -r -- ${avg[2]}; }
+START_LOAD=$(load1) || { echo "cannot read the 1-minute load average (sysctl -n vm.loadavg); no run launched" >&2; exit 2; }
+if (( START_LOAD > GATE_MAX_START_LOAD )); then
+  echo "1-minute load average $START_LOAD exceeds GATE_MAX_START_LOAD=$GATE_MAX_START_LOAD; a loaded host reddens timed" \
+    "runs. Let it settle and start again (or set GATE_MAX_START_LOAD). No run launched." >&2; exit 2
+fi
 PY=/Users/anyhowclick/Desktop/work/obed-edom/.venv/bin/python; cd $G || exit 1; mkdir -p $O
 export PYTHONPATH=$G/src; F=$G/output/p2-recovery/html-adversarial
 if (( ALLOW_RECORD )); then
@@ -73,6 +99,12 @@ if [[ $TIER == dev ]]; then
   echo "## DEV TIER -- NOT A QUALIFICATION PASS (a passing dev round exits 10, never 0) ##"
   echo "################################################################################"
 fi
+if (( GATE_JOBS > 3 )); then
+  echo "################################################################################"
+  echo "## WARNING: GATE_JOBS=$GATE_JOBS. GATE_JOBS>3 is NOT qualified on this machine (2026-10-09: 5-wide pushed the P2 slide-3 restart observation to 0.479 s vs the 0.35 s limit and reddened 3->4)"
+  echo "################################################################################"
+fi
+echo "load average (1 min) at start $START_LOAD (GATE_MAX_START_LOAD $GATE_MAX_START_LOAD)"
 echo "commit $(git rev-parse --short HEAD) dirty=$(git status --porcelain | grep -v '^??' | wc -l | tr -d ' ')"
 $PY -c "from obed_edom.live_continuity_js import js_sha256; print('runtime sha', js_sha256())"
 # A host gate passes only with status pass, skippedArms exactly the arms run_gates skipped, every other arm present and
@@ -177,14 +209,26 @@ queue(){ local out=$1; shift
   $PY -c 'import os,sys; os.setpgrp(); os.execv(sys.argv[1], sys.argv[1:])' /bin/zsh -fc "$JOB" job "$out" "$NONCE" "$@" &
   PIDS+=($!); }
 status_of(){ local s; s=$(<"$1.rc") 2>/dev/null || { echo missing; return; }; [[ $s == "$NONCE "<-> ]] && echo ${s#"$NONCE "} || echo "stale($s)"; }
-# Fill the disposable H.264 pattern cache before any timed run, so no P2 arm's ffmpeg encode overlaps a capture.
-$PY - "$F/html-unmodified" <<'PYEOF' || { echo "H.264 pattern prewarm FAILED; no run launched"; exit 1; }
+# Fill the disposable H.264 pattern cache before any timed run, so no P2 arm's ffmpeg encode overlaps a capture: every
+# duration needs a cache key, and a second lookup must be a sha-verified hit of the same entry, else no run launches.
+$PY - "$F/html-unmodified" <<'PYEOF' || { echo "H.264 pattern prewarm FAILED; no run launched"; exit 2; }
 import sys
+from pathlib import Path
 sys.path.insert(0,"scripts")
 from p2_recovery_html_dissolve_live import prewarm_h264_patterns
-records=prewarm_h264_patterns(__import__("pathlib").Path(sys.argv[1]))
-if not records: sys.exit(f"no Untitled.mov-*.mov under {sys.argv[1]}")
-for r in records: print(f"h264 pattern prewarm {r['seconds']}s: {'cache hit' if r['source']=='cache' else r['source']} key={r.get('cacheKey')}")
+root=Path(sys.argv[1])
+first=prewarm_h264_patterns(root)
+if not first: sys.exit(f"no Untitled.mov-*.mov under {root}")
+for r in first: print(f"h264 pattern prewarm {r['seconds']}s: {'cache hit' if r['source']=='cache' else r['source']} key={r.get('cacheKey')}")
+def usable(r): return r.get("source") in ("cache","encoded") and all(isinstance(r.get(k),str) and r[k] for k in ("cacheKey","sha256"))
+unusable=[r.get("seconds") for r in first if not usable(r)]
+if unusable: sys.exit(f"no usable pattern cache key for {unusable} s; later P2 arms would encode during timed captures")
+second={r.get("seconds"):r for r in prewarm_h264_patterns(root)}
+for r in first:
+    again=second.get(r["seconds"]) or {}
+    if not (again.get("source")=="cache" and again.get("cacheKey")==r["cacheKey"] and again.get("sha256")==r["sha256"]):
+        sys.exit(f"pattern cache re-lookup for {r['seconds']} s is not a sha-verified hit of the prewarmed entry: {again or None}")
+    print(f"h264 pattern cache verified {r['seconds']}s: hit key={again['cacheKey']} sha256={again['sha256']}")
 PYEOF
 for V in $HOST_VIEWPORTS; do
   queue $O/host-$V $PY -u scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport $V --artifact $O/host-$V.json ${HOST_SKIP[$V]:+--skip-arms} ${HOST_SKIP[$V]}
@@ -262,7 +306,9 @@ for V in $HOST_VIEWPORTS; do check_host $V; done
 for A in $HOST_RED_ARMS; do check_host_red ${=A}; tally $? "HOST red $A"; done
 for A in "${P2_ARMS[@]}"; do check_p2 "${(@Q)${(z)A}}"; done
 $PY -c "from obed_edom.live_continuity_js import js_sha256; print('runtime sha at end', js_sha256())"
-pgrep -fl obed-live-chrome | cut -c1-80 | head -2; echo "DONE tier=$TIER failed=$FAIL pending=$PENDING"
+pgrep -fl obed-live-chrome | cut -c1-80 | head -2
+echo "load average (1 min) at start $START_LOAD, at end $(load1 || echo unreadable); wall ${SECONDS}s"
+echo "DONE tier=$TIER failed=$FAIL pending=$PENDING"
 if (( ALLOW_RECORD && PENDING )); then echo "## --allow-record: $PENDING RECORD arm(s) left ungated -- DISCOVERY RUN, NOT A PASS ##"; fi
 (( FAIL == 0 && (PENDING == 0 || ALLOW_RECORD) )); rc=$?
 if [[ $TIER == dev ]]; then echo "## DEV TIER -- NOT A QUALIFICATION PASS (exit $(( rc ? 1 : 10 ))) ##"; exit $(( rc ? 1 : 10 )); fi

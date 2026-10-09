@@ -209,7 +209,8 @@ mechanism, the only live-carry cut left) and gate on `movingIndexRun` going red 
 **Owner decision 8b (2026-10-09, "option 2"):** the 3→4 bracket is the round's only gating check of painted pixels at
 the cut plus its own non-vacuity control, so it runs once per paint path — `--wait-profile fast` (DOM) and
 `--gl-replay auto` (WebGL); `--wait-profile slow` and every red arm pass `--skip-freeze-bracket` (P2 refuses it on any
-other arm; a flag skip is non-blocking and named in the report header). **Owner decision 8a promoted the same day:** the
+other arm, including a slow `--gl-replay auto` arm that is not a red arm; a flag skip is non-blocking and named in the
+report header). **Owner decision 8a promoted the same day:** the
 at-cut counter run (`movingIndexRunAtCut`) gates `continueThroughMovingMagicMove3to4` in every arm (agreed with the
 bracket in 63/63 positive runs, never a false red). It is never dropped from the two positive arms.
 
@@ -286,7 +287,7 @@ dead-expectation inversion; `overall_status` unit tests for the new arm table. I
 `continueThroughMovingMagicMove3to4`. Whole baseline: host gate at 1920×1080, 2560×1440, 1600×1000 (each with
 V/Voff), full unit suite, one real-OBS attach pass, new `CONTINUITY_VERSION`/sha recorded in the handover.
 
-**Owner decision 2026-10-09 (gate round arms):** the attach arm is pinned to 1920×1080, so it runs once, in the 1920×1080 host gate; the B and Voff null controls run at 1920×1080 only; C runs at 2560×1440 and 1600×1000, and at 1920×1080 the host red arm `--strip bridge@8` (same removal, stricter checks) covers it. `run_gates.sh` refuses a round in which any host arm runs nowhere.
+**Owner decision 2026-10-09 (gate round arms):** the attach arm is pinned to 1920×1080, so it runs once, in the 1920×1080 host gate; the B and Voff null controls run at 1920×1080 only; C runs at 2560×1440 and 1600×1000, and at 1920×1080 the host red arm `--strip bridge@8` (same removal, stricter checks) covers it. `run_gates.sh` refuses a round in which any host arm runs nowhere. It also refuses to start (exit 2, nothing launched, never retried) when the 1-minute load average exceeds `GATE_MAX_START_LOAD` (default 4; a round started a minute after a full `pytest -n auto` reddened a host gate), when `OBED_H264_PATTERN_CACHE` is set, or when the H.264 pattern prewarm leaves any duration without a cache key or a second lookup is not a sha-verified hit; `GATE_JOBS` above 3 runs with a loud not-qualified warning (5-wide reddened 3→4 on 2026-10-09). The summary prints the load at start and end and the round's wall time.
 
 **Risks.** (1) `BLACK_BEHIND_ROI` now reads the frozen poster (§4) — verify, never loosen. (2) The retire may
 race the 1→2 detach; the sweep + the `tryRemount` guard cover both orders, but the P2 finding must accept either

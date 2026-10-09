@@ -27,8 +27,13 @@ What is pinned here:
 - `--tier dev` runs the 1920x1080 + 1600x1000 host gates and three P2 arms, says DEV loudly and
   exits 10 on a pass (never 0);
 - killing the queue owner (TERM/INT/HUP) leaves none of the queued runs or their children behind;
-- `GATE_JOBS` outside 1..5 is refused before anything is launched;
-- the H.264 pattern cache is prewarmed (and logged) before the first timed run.
+- `GATE_JOBS` outside 1..5 is refused before anything is launched, and above 3 warns loudly;
+- the H.264 pattern cache is prewarmed (and logged) before the first timed run, and a round refuses to start (exit 2)
+  when `OBED_H264_PATTERN_CACHE` is set, a duration has no usable cache key, or a second lookup is not a sha-verified
+  hit of the prewarmed entry (Codex round 2);
+- the load guard: a round refuses to start (exit 2) when the 1-minute load average (`sysctl -n vm.loadavg`, stubbed
+  on PATH here so the real host's load never decides a test) exceeds `GATE_MAX_START_LOAD` (default 4), and the
+  summary prints the load at start and end and the round's wall time.
 """
 
 from __future__ import annotations
@@ -127,19 +132,47 @@ for i in ids:
 sys.exit(1 if red else 0)
 '''
 
+# Modes: `hit` (both lookups hit), `encoded` (first encodes, second hits), `fail`, `empty`, and the vacuous prewarms
+# Codex round 2 named: `nokey` (cache I/O failed: encoded, no key), `off` (no cache at all), `miss-again` (the second
+# lookup encodes again), `sha-drift` / `key-drift` (the second lookup hits a different entry), `partial` (one of two
+# durations has no key).
 PREWARM_STUB = r'''
 import os
 
+CALLS = [0]
+
 def prewarm_h264_patterns(root):
+    CALLS[0] += 1
     with open(os.environ["STUB_EVENTS"], "a") as f:
         f.write(f"prewarm {root.name}\n")
     mode = os.environ.get("STUB_PREWARM", "hit")
+    second = CALLS[0] > 1
+    record = {"seconds": 46.0333, "source": "cache" if mode == "hit" or second else "encoded",
+              "cacheKey": "k" * 64, "sha256": "s" * 64}
     if mode == "fail":
         raise RuntimeError("ffmpeg encode failed")
     if mode == "empty":
         return []
-    return [{"seconds": 46.0333, "source": "cache" if mode == "hit" else "encoded", "cacheKey": "k" * 64, "sha256": "s" * 64}]
+    if mode == "nokey":
+        record["cacheKey"] = None
+    if mode == "off":
+        record = {"seconds": 46.0333, "source": "off", "cacheKey": None}
+    if mode == "miss-again" and second:
+        record["source"] = "encoded"
+    if mode == "sha-drift" and second:
+        record["sha256"] = "t" * 64
+    if mode == "key-drift" and second:
+        record["cacheKey"] = "j" * 64
+    if mode == "partial":
+        return [record, {**record, "seconds": 12.5, "cacheKey": None}]
+    return [record]
 '''
+
+SYSCTL_STUB = """#!/bin/sh
+[ "$*" = "-n vm.loadavg" ] || exit 64
+[ "$STUB_LOAD" = fail ] && exit 1
+echo "{ ${STUB_LOAD:-0.50} 9.99 9.99 }"
+"""
 
 
 @pytest.fixture
@@ -156,10 +189,18 @@ def gates(tmp_path: Path):
     marker = tmp_path / "marker"
     marker.mkdir()
     events = tmp_path / "events.txt"
+    stub_bin = tmp_path / "bin"
+    stub_bin.mkdir()
+    (stub_bin / "sysctl").write_text(SYSCTL_STUB)
+    (stub_bin / "sysctl").chmod(0o755)
 
     def env(**extra: str) -> dict[str, str]:
-        drop = ("GATE_JOBS", "STUB_MODES", "STUB_DEFAULT", "STUB_PREWARM", "STUB_P2_RED", "STUB_P2_FREEZE")
+        drop = (
+            "GATE_JOBS", "GATE_MAX_START_LOAD", "OBED_H264_PATTERN_CACHE", "STUB_MODES", "STUB_DEFAULT", "STUB_PREWARM",
+            "STUB_P2_RED", "STUB_P2_FREEZE", "STUB_LOAD",
+        )
         base = {k: v for k, v in os.environ.items() if k not in drop}
+        base["PATH"] = f"{stub_bin}{os.pathsep}{base.get('PATH', '')}"
         return {**base, "STUB_EVENTS": str(events), "STUB_MARKER": str(marker), **extra}
 
     def run(
@@ -300,22 +341,110 @@ def test_gate_jobs_outside_one_to_five_is_refused_before_anything_runs(gates, jo
     assert not gates["out"].exists()
 
 
-def test_the_pattern_cache_is_prewarmed_before_the_first_timed_run(gates) -> None:
+def test_the_pattern_cache_is_prewarmed_and_verified_before_the_first_timed_run(gates) -> None:
     done = gates["run"](STUB_PREWARM="encoded")
     events = gates["events"]()
-    assert events[0] == "prewarm html-unmodified"
-    assert all(not e.startswith("prewarm") for e in events[1:])
+    assert events[:2] == ["prewarm html-unmodified", "prewarm html-unmodified"], "the fill, then the verifying lookup"
+    assert all(not e.startswith("prewarm") for e in events[2:])
     assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + 8
     assert f"h264 pattern prewarm 46.0333s: encoded key={'k' * 64}" in done.stdout
+    assert f"h264 pattern cache verified 46.0333s: hit key={'k' * 64} sha256={'s' * 64}" in done.stdout
     assert "cache hit" in gates["run"](outdir=gates["tmp"] / "out2").stdout
 
 
 @pytest.mark.parametrize("mode", ["fail", "empty"])
 def test_a_failed_prewarm_launches_nothing(gates, mode: str) -> None:
     done = gates["run"](STUB_PREWARM=mode)
-    assert done.returncode == 1
+    assert done.returncode == 2
     assert "H.264 pattern prewarm FAILED; no run launched" in done.stdout
     assert gates["events"]() == ["prewarm html-unmodified"]
+
+
+@pytest.mark.parametrize(("mode", "why"), [
+    ("nokey", "no usable pattern cache key for [46.0333] s"),
+    ("off", "no usable pattern cache key for [46.0333] s"),
+    ("partial", "no usable pattern cache key for [12.5] s"),
+])
+def test_known_bad_a_prewarm_with_no_usable_cache_key_launches_nothing(gates, mode: str, why: str) -> None:
+    """Codex round-2 MAJOR: a prewarm that "succeeds" without a cache key (cache I/O failed, or no
+    cache) leaves every later P2 arm to encode during the concurrent timed captures."""
+    done = gates["run"](STUB_PREWARM=mode)
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert why in done.stderr, done.stderr
+    assert "H.264 pattern prewarm FAILED; no run launched" in done.stdout
+    assert gates["events"]() == ["prewarm html-unmodified"]
+
+
+@pytest.mark.parametrize("mode", ["miss-again", "sha-drift", "key-drift"])
+def test_known_bad_a_second_lookup_that_is_not_a_verified_hit_launches_nothing(gates, mode: str) -> None:
+    done = gates["run"](STUB_PREWARM=mode)
+    assert done.returncode == 2
+    assert "pattern cache re-lookup for 46.0333 s is not a sha-verified hit of the prewarmed entry" in done.stderr
+    assert gates["events"]() == ["prewarm html-unmodified", "prewarm html-unmodified"]
+
+
+@pytest.mark.parametrize("value", ["off", "", "on"])
+def test_known_bad_a_round_with_the_pattern_cache_env_set_is_refused_before_anything_runs(gates, value: str) -> None:
+    """`OBED_H264_PATTERN_CACHE=off` makes every P2 arm encode; any other value is invalid in P2 too."""
+    done = gates["run"](timeout=20, OBED_H264_PATTERN_CACHE=value)
+    assert done.returncode == 2
+    assert f"OBED_H264_PATTERN_CACHE is set ('{value}')" in done.stderr
+    assert gates["events"]() == [] and not gates["out"].exists()
+
+
+# --------------------------------------------------------------------------
+# Load guard (coordinator, 2026-10-09): a round started 1 min after a full `pytest -n auto` (5-min load 33)
+# produced a load-induced host red mismatch. No automatic retries.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("load", "limit"), [("4.01", None), ("33.70", None), ("2.50", "2"), ("0.51", "0.5")])
+def test_known_bad_a_loaded_host_is_refused_before_anything_runs(gates, load: str, limit: str | None) -> None:
+    extra = {"STUB_LOAD": load} | ({"GATE_MAX_START_LOAD": limit} if limit else {})
+    done = gates["run"](timeout=20, **extra)
+    assert done.returncode == 2
+    assert f"1-minute load average {load} exceeds GATE_MAX_START_LOAD={limit or 4}" in done.stderr, done.stderr
+    assert gates["events"]() == [] and not gates["out"].exists(), "not even the prewarm runs"
+
+
+@pytest.mark.parametrize(("load", "limit"), [("4.00", None), ("3.99", None), ("0.00", None), ("7.5", "8")])
+def test_positive_control_a_host_at_or_under_the_limit_starts(gates, load: str, limit: str | None) -> None:
+    extra = {"STUB_LOAD": load} | ({"GATE_MAX_START_LOAD": limit} if limit else {})
+    done = gates["run"](**extra)
+    assert f"load average (1 min) at start {load} (GATE_MAX_START_LOAD {limit or 4})" in done.stdout, done.stderr
+    assert gates["events"]()[0] == "prewarm html-unmodified"
+    assert re.search(rf"^load average \(1 min\) at start {re.escape(load)}, at end {re.escape(load)}; wall \d+s$",
+                     done.stdout, re.M), done.stdout
+
+
+def test_known_bad_an_unreadable_load_average_is_refused(gates) -> None:
+    done = gates["run"](timeout=20, STUB_LOAD="fail")
+    assert done.returncode == 2
+    assert "cannot read the 1-minute load average (sysctl -n vm.loadavg)" in done.stderr
+    assert gates["events"]() == [] and not gates["out"].exists()
+
+
+@pytest.mark.parametrize("limit", ["four", "-1", "1e3", "4.", ".5", " 4"])
+def test_known_bad_a_malformed_load_limit_is_refused(gates, limit: str) -> None:
+    done = gates["run"](timeout=20, GATE_MAX_START_LOAD=limit)
+    assert done.returncode == 2
+    assert "GATE_MAX_START_LOAD must be a non-negative number" in done.stderr
+    assert gates["events"]() == [] and not gates["out"].exists()
+
+
+GATE_JOBS_WARNING = (
+    "GATE_JOBS>3 is NOT qualified on this machine (2026-10-09: 5-wide pushed the P2 slide-3 restart observation to "
+    "0.479 s vs the 0.35 s limit and reddened 3->4)"
+)
+
+
+@pytest.mark.parametrize(("jobs", "warned"), [("4", True), ("5", True), ("3", False), ("1", False), (None, False)])
+def test_gate_jobs_above_three_warns_loudly_but_still_runs(gates, jobs: str | None, warned: bool) -> None:
+    done = gates["run"](**({"GATE_JOBS": jobs} if jobs else {}))
+    assert (GATE_JOBS_WARNING in done.stdout) is warned
+    if warned:
+        assert f"## WARNING: GATE_JOBS={jobs}. {GATE_JOBS_WARNING}" in done.stdout
+    assert gates["events"]()[0] == "prewarm html-unmodified", "a warning, never a refusal"
 
 
 # --------------------------------------------------------------------------
@@ -447,6 +576,19 @@ def test_the_registered_sets_no_longer_carry_the_skipped_freeze_finding() -> Non
 )
 def test_known_bad_skip_freeze_bracket_on_a_positive_bracket_arm_is_refused(gates, line: str) -> None:
     script = gates["patched"](line, line.replace("\n", " --skip-freeze-bracket\n"))
+    done = gates["run"](script=script, timeout=20)
+    assert done.returncode == 2
+    assert "--skip-freeze-bracket on a positive freeze-bracket arm is refused" in done.stderr
+    assert gates["events"]() == [] and not gates["out"].exists()
+
+
+def test_known_bad_skip_freeze_bracket_on_a_slow_gl_auto_arm_is_refused(gates) -> None:
+    """Codex round 2: `slow` alone no longer authorises the skip -- a positive gl-auto arm runs the
+    WebGL bracket whatever its wait profile, the same rule P2 itself enforces. The unpatched slow DOM
+    arm (`--wait-profile slow --skip-freeze-bracket`) is the positive control: every default round
+    above runs it."""
+    line = "p2 full \"\" \"\" --wait-profile slow --skip-freeze-bracket\n"
+    script = gates["patched"](line, line.replace("slow", "slow --gl-replay auto"))
     done = gates["run"](script=script, timeout=20)
     assert done.returncode == 2
     assert "--skip-freeze-bracket on a positive freeze-bracket arm is refused" in done.stderr
