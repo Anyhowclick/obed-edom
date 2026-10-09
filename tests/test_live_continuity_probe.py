@@ -4339,6 +4339,57 @@ class TestGlReplayCli:
         assert recording[-1]["gl_replay"] == (gl or "off")
 
 
+def test_attach_arm_holds_the_viewport_override_session_until_its_chrome_is_torn_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chrome 154 drops `Emulation.setDeviceMetricsOverride` when the session that set it
+    detaches: closing it before the host attached left the attach page at 1920x1025
+    (window chrome), so every host gate failed `attach stageFit` at scale 0.9491. The
+    override session must stay open while the host runs and close with the arm."""
+    events: list[str] = []
+
+    class Hold:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+            events.append("hold closed")
+
+    class Proc:
+        pid = 1
+
+        def terminate(self) -> None:
+            events.append("chrome terminated")
+
+        def wait(self, timeout: float) -> int:
+            return 0
+
+        def poll(self) -> int:
+            return 0
+
+    hold = Hold()
+
+    class Host:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            events.append(f"host started, hold closed={hold.closed}")
+            raise RuntimeError("stop after start")
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(probe, "free_port", lambda: 1)
+    monkeypatch.setattr(probe, "launch_attach_chrome", lambda port, profile: Proc())
+    monkeypatch.setattr(probe, "wait_for_cdp", lambda port: None)
+    monkeypatch.setattr(probe, "force_exact_viewport", lambda *a: hold)
+    monkeypatch.setattr(probe, "LiveOutputHost", Host)
+    with pytest.raises(RuntimeError):
+        probe.run_attach_arm(Path("x"), [], {}, tmp_path, {})
+    assert events == ["host started, hold closed=False", "hold closed", "chrome terminated"]
+
+
 class TestForcedFailSplice:
     def test_the_seed_lands_once_ahead_of_exactly_one_module_and_is_restored(self) -> None:
         original = probe.live_host_module.gl_replay_script

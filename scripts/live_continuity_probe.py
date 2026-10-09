@@ -2702,12 +2702,13 @@ def wait_for_cdp(port: int, timeout_s: float = 15.0) -> None:
     raise SystemExit(f"attach Chrome did not open a CDP target on port {port}")
 
 
-def force_exact_viewport(port: int, width: int, height: int) -> None:
+def force_exact_viewport(port: int, width: int, height: int) -> Any:
     """`--window-size` on a bare headless Chrome (no `--app=` window) does not
     yield an exact `innerWidth`/`innerHeight` (window chrome eats a variable
     amount depending on flags/version); pin the renderer's device metrics
-    directly instead of guessing another padding constant. The override is
-    target-scoped and survives the host's later, separate CDP attach."""
+    directly instead of guessing another padding constant. The override lasts
+    only while this CDP session is open (Chrome 154 drops it on detach), so the
+    caller holds the returned connection until its Chrome is torn down."""
     from websockets.sync.client import connect
 
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=5) as response:
@@ -2720,8 +2721,10 @@ def force_exact_viewport(port: int, width: int, height: int) -> None:
             "params": {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False},
         }))
         ws.recv(timeout=5)
-    finally:
+    except BaseException:
         ws.close()
+        raise
+    return ws
 
 
 def run_attach_arm(
@@ -2736,9 +2739,10 @@ def run_attach_arm(
         shutil.rmtree(profile)
     chrome_proc = launch_attach_chrome(port, profile)
     result: dict[str, Any] = {"arm": "attach", "attachViewport": {"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT}}
+    viewport_hold = None
     try:
         wait_for_cdp(port)
-        force_exact_viewport(port, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
+        viewport_hold = force_exact_viewport(port, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
         with env_override({ATTACH_ENV: f"http://127.0.0.1:{port}"}):
             player = LiveOutputHost(export_root, slides, headless=True, gl_replay=gl_replay)
             try:
@@ -2780,6 +2784,8 @@ def run_attach_arm(
                 except Exception as exc:  # noqa: BLE001
                     result["stopError"] = str(exc)
     finally:
+        if viewport_hold is not None:
+            viewport_hold.close()
         chrome_proc.terminate()
         try:
             chrome_proc.wait(timeout=5)
@@ -4309,6 +4315,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
         "matrix": [list(case) for case in matrix],
     }
     chrome_proc: subprocess.Popen | None = None
+    viewport_hold = None
     try:
         env: dict[str, str | None] = {}
         if args.attach:
@@ -4318,7 +4325,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
                 shutil.rmtree(profile)
             chrome_proc = launch_attach_chrome(port, profile)
             wait_for_cdp(port)
-            force_exact_viewport(port, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
+            viewport_hold = force_exact_viewport(port, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
             env = {ATTACH_ENV: f"http://127.0.0.1:{port}", ADVANCE_ENV: "click"}
         else:
             force_viewport(*viewport)
@@ -4339,6 +4346,8 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
             gl_replay=args.gl_replay, matrix=matrix,
         )
     finally:
+        if viewport_hold is not None:
+            viewport_hold.close()
         if chrome_proc is not None:
             chrome_proc.terminate()
             try:
