@@ -7111,6 +7111,30 @@ POST_HOC_G1H = {
     ("D3", "strip:pin@4"), ("D4", "core:wrong-instance"), ("D4", "core:fifo-reuse"), ("D4", "strip:pin@5"),
     ("D5", "core:stash-any"), ("D5", "core:fifo-reuse"), ("D5", "strip:pin@2"),
 }
+# Plan §4 strip locality (owner, 2026-10-09, option (a)): a strip arm is red on its own boundary, plus the documented
+# cascade of that chain. Every registered red outside the stripped boundary's own `b{from}to{to}:` verdicts, per arm and
+# in registration order. Observed sets: main checkout `output/evidence/s2-dev/g1h-089a0393/host-red<deck><arm>.json`.
+STRIP_CASCADE = {
+    # Derived (WS-R, v6): the bridge overlay no entry names is held at its rect on every later slide.
+    ("D1", "strip:bridge@4"): ("stray:slide3:counter-a.mov", "stray:slide4:counter-a.mov"),
+    # Post hoc (g1h): the pin carry itself stays green; two painters claim counter-a.mov#1 on slide 4, the stripped
+    # pin's own destination.
+    ("D1", "strip:pin@6"): ("duplicate:slide4:counter-a.mov#1",),
+    # Post hoc (g1h): the chain downstream of the stripped restart. Both later carries of the same movie go red, two
+    # painters claim counter-a.mov#1 on slides 3 and 4, and an unclaimed counter-a.mov paints on slide 5.
+    ("D2", "strip:restart@4"): (
+        "b2to3:counter-a.mov#1->counter-a.mov#1:carry", "b3to4:counter-a.mov#1->counter-a.mov#1:carry",
+        "duplicate:slide3:counter-a.mov#1", "duplicate:slide4:counter-a.mov#1", "stray:slide5:counter-a.mov",
+    ),
+    # Post hoc (g1h): the chain downstream of the stripped pin. B's next carry goes red too, two painters claim
+    # counter-b.mov#1 on slide 3, and an unclaimed counter-b.mov paints on slide 4.
+    ("D3", "strip:pin@4"): (
+        "b2to3:counter-b.mov#1->counter-b.mov#1:carry", "duplicate:slide3:counter-b.mov#1", "stray:slide4:counter-b.mov",
+    ),
+    # Post hoc (g1h): the pin carry itself stays green; two painters claim counter-a.mov#1 on slide 3, the stripped
+    # pin's own destination.
+    ("D4", "strip:pin@5"): ("duplicate:slide3:counter-a.mov#1",),
+}
 
 
 class TestRedArmRegistration:
@@ -7145,19 +7169,42 @@ class TestRedArmRegistration:
                 runtime = probe.runtime_of(plan) if gl == "off" else _p2_plan(True).to_runtime()
                 probe.strip_entries(runtime, action, scene, strip_key)
 
-    def test_every_red_is_on_the_stripped_boundary_or_a_stray(self) -> None:
-        """Plan §4: a strip arm turns red only its own boundary (plus the strays its held decoder
-        leaves); every carry/retire/armed id in a strip set sits at the stripped scene."""
+    @staticmethod
+    def _reds_beyond_own_boundary(expectations: dict[Any, Any]) -> dict[tuple[str, str], tuple[str, ...]]:
+        """Per strip arm with any, the registered reds that are not its stripped boundary's own verdicts."""
         plans = {probe.plan_signature(_deck_plan(name).to_runtime()): (name, _deck_plan(name)) for name in REGISTERED_DECKS}
-        for (sha, label, gl), expected in probe.RED_ARM_EXPECTATIONS.items():
-            if not label.startswith("strip:") or expected == probe.RECORD or (plans[sha][0], label) in POST_HOC_G1H:
+        beyond = {}
+        for (sha, label, _), expected in expectations.items():
+            if not label.startswith("strip:") or expected == probe.RECORD:
                 continue
-            plan = plans[sha][1]
+            name, plan = plans[sha]
             scene = probe.parse_strip(label.removeprefix("strip:"))[1]
             player = next(p for p, s in plan.scene_index_by_player.items() if s == scene)
-            for red_id in expected:
-                if not red_id.startswith("stray:"):
-                    assert red_id.startswith(f"b{player - 1}to{player}:"), (label, red_id)
+            outside = tuple(red_id for red_id in expected if not red_id.startswith(f"b{player - 1}to{player}:"))
+            if outside:
+                beyond[(name, label)] = outside
+        return beyond
+
+    def test_every_red_is_on_the_stripped_boundary_or_in_its_documented_cascade(self) -> None:
+        """Plan §4 (owner option (a), 2026-10-09): a strip arm is red on its own boundary, plus the
+        documented cascade of that chain (`STRIP_CASCADE`, exact per arm). The post-hoc chain arms are
+        checked like every other strip arm, not skipped."""
+        assert self._reds_beyond_own_boundary(probe.RED_ARM_EXPECTATIONS) == STRIP_CASCADE
+
+    @pytest.mark.parametrize("extra", [
+        "b0to1:counter-a.mov#1->counter-a.mov#1:carry", "duplicate:slide2:counter-a.mov#1", "stray:slide2:counter-a.mov",
+    ])
+    def test_known_bad_an_undocumented_red_beyond_the_boundary_fails(self, extra: str) -> None:
+        """D2 `strip:bridge@8` reds only b3to4; any other boundary, duplicate or stray must be documented."""
+        key = (probe.DECK_PLAN_SHA256["D2"], "strip:bridge@8", "off")
+        assert self._reds_beyond_own_boundary(probe.RED_ARM_EXPECTATIONS).get(("D2", "strip:bridge@8")) is None
+        widened = {**probe.RED_ARM_EXPECTATIONS, key: (*probe.RED_ARM_EXPECTATIONS[key], extra)}
+        assert self._reds_beyond_own_boundary(widened) != STRIP_CASCADE
+
+    def test_known_bad_a_documented_cascade_that_no_longer_reds_fails(self) -> None:
+        key = (probe.DECK_PLAN_SHA256["D3"], "strip:pin@4", "off")
+        narrowed = {**probe.RED_ARM_EXPECTATIONS, key: probe.RED_ARM_EXPECTATIONS[key][:1]}
+        assert self._reds_beyond_own_boundary(narrowed) != STRIP_CASCADE
 
     def test_the_p2_sets_are_the_plans(self) -> None:
         """Plan §3.4 Q2/Q3: stash-any must red the slide-4 WA0125 stray; each strip only its boundary."""
