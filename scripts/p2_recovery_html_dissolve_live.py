@@ -16,9 +16,13 @@ P3 stays off. Never writes owner source decks. Magic Move extension is later.
 from __future__ import annotations
 
 import asyncio
+import fcntl
+import hashlib
 import json
+import os
 import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -34,6 +38,7 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
 from p2_alpha_spike import CHROME, ChromeCdp, _wait_ready  # noqa: E402
+from obed_edom.baseline import cache_root  # noqa: E402
 from obed_edom.dsk_live import keynote_running  # noqa: E402
 from obed_edom.live_continuity_js import PRESERVE_CORE_JS  # noqa: E402
 from obed_edom.html_alpha_probe import (  # noqa: E402
@@ -447,6 +452,9 @@ def inject_continuity_plan(player: Path, plan: dict) -> dict:
     )
 
 
+H264_PATTERN_CACHE_ENV = "OBED_H264_PATTERN_CACHE"
+
+
 def _ffmpeg() -> str:
     try:
         import imageio_ffmpeg
@@ -490,11 +498,40 @@ def _write_h264_pattern(dest: Path, *, seconds: float = 46.0333, fps: int = 30) 
 
     Duration matches Keynote export filenames/metadata so the player timeline
     stays coherent.
+
+    The encode is deterministic for a given ffmpeg binary and argv, so it is cached under
+    `.cache/h264-pattern/`, keyed by sha256 over the ffmpeg binary's bytes, the argv and the
+    parameters. A hit is trusted only when the delivered copy's sha256 equals the one
+    recorded at encode time; anything else re-encodes. `OBED_H264_PATTERN_CACHE=off` always
+    encodes and neither reads nor writes the cache.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(".tmp.mp4")
-    cmd = [
-        _ffmpeg(),
+    ffmpeg = _ffmpeg()
+    args = _h264_pattern_args(seconds=seconds, fps=fps)
+    cache_dir = _h264_pattern_cache_dir()
+    key = None if cache_dir is None else _h264_pattern_key(ffmpeg, args, seconds=seconds, fps=fps)
+    sha = None
+    hit = False
+    if cache_dir is not None:
+        try:
+            sha, hit = _cached_h264_pattern(dest, ffmpeg, args, cache_dir, key)
+        except OSError:
+            key = None
+    if sha is None:
+        sha = _encode_h264_pattern(dest, ffmpeg, args)
+    return {
+        "path": str(dest),
+        "bytes": dest.stat().st_size,
+        "seconds": seconds,
+        "fps": fps,
+        "sha256": sha,
+        "source": "cache" if hit else "encoded",
+        "cacheKey": key,
+    }
+
+
+def _h264_pattern_args(*, seconds: float, fps: int) -> list[str]:
+    return [
         "-y",
         "-f",
         "lavfi",
@@ -511,21 +548,95 @@ def _write_h264_pattern(dest: Path, *, seconds: float = 46.0333, fps: int = 30) 
         "-an",
         "-movflags",
         "+faststart",
-        str(tmp),
     ]
-    import subprocess
 
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0 or not tmp.is_file():
-        raise RuntimeError(f"ffmpeg encode failed: {proc.stderr[-800:]}")
-    dest.write_bytes(tmp.read_bytes())
-    tmp.unlink(missing_ok=True)
-    return {"path": str(dest), "bytes": dest.stat().st_size, "seconds": seconds, "fps": fps}
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _h264_pattern_cache_dir() -> Path | None:
+    raw = os.environ.get(H264_PATTERN_CACHE_ENV)
+    if raw is None:
+        return cache_root() / "h264-pattern"
+    if raw != "off":
+        raise SystemExit(f"{H264_PATTERN_CACHE_ENV} must be unset or 'off', got {raw!r}")
+    return None
+
+
+def _h264_pattern_key(ffmpeg: str, args: list[str], *, seconds: float, fps: int) -> str:
+    h = hashlib.sha256()
+    for part in (_sha256_file(Path(ffmpeg)), *args, repr(seconds), repr(fps)):
+        h.update(part.encode() + b"\0")
+    return h.hexdigest()
+
+
+def _encode_h264_pattern(dest: Path, ffmpeg: str, args: list[str]) -> str:
+    """Encode to a sibling temp file, then atomically replace `dest`; returns its sha256."""
+    tmp = dest.with_name(f"{dest.name}.{os.getpid()}.tmp.mp4")
+    try:
+        proc = subprocess.run([ffmpeg, *args, str(tmp)], capture_output=True, text=True)
+        if proc.returncode != 0 or not tmp.is_file():
+            raise RuntimeError(f"ffmpeg encode failed: {proc.stderr[-800:]}")
+        sha = _sha256_file(tmp)
+        os.replace(tmp, dest)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return sha
+
+
+def _clone_verified(src: Path, dest: Path, sha256: str) -> bool:
+    """APFS-clone (else copy) `src` over `dest` only if the copy hashes to `sha256`."""
+    tmp = dest.with_name(f"{dest.name}.{os.getpid()}.tmp")
+    try:
+        if subprocess.run(["cp", "-c", str(src), str(tmp)], capture_output=True).returncode != 0:
+            shutil.copyfile(src, tmp)
+        if _sha256_file(tmp) != sha256:
+            return False
+        os.replace(tmp, dest)
+        return True
+    except OSError:
+        return False
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _cached_h264_pattern(
+    dest: Path, ffmpeg: str, args: list[str], cache_dir: Path, key: str
+) -> tuple[str, bool]:
+    """(sha256, hit). Fills are serialised per key by a file lock, so concurrent
+    arms encode once and never see a half-written entry."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    movie, meta = cache_dir / f"{key}.mp4", cache_dir / f"{key}.json"
+    with open(cache_dir / f"{key}.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            doc = json.loads(meta.read_text())
+            recorded = doc["sha256"] if doc["key"] == key else None
+        except (OSError, ValueError, KeyError, TypeError):
+            recorded = None
+        if isinstance(recorded, str) and _clone_verified(movie, dest, recorded):
+            return recorded, True
+        sha = _encode_h264_pattern(movie, ffmpeg, args)
+        doc = {"key": key, "sha256": sha, "bytes": movie.stat().st_size, "argv": [ffmpeg, *args]}
+        meta_tmp = meta.with_name(f"{meta.name}.{os.getpid()}.tmp")
+        meta_tmp.write_text(json.dumps(doc, indent=1))
+        os.replace(meta_tmp, meta)
+        if not _clone_verified(movie, dest, sha):
+            raise RuntimeError(f"fresh H.264 pattern {movie} did not copy to {dest} intact")
+        return sha, False
 
 
 def _replace_hevc_movies(root: Path) -> dict:
-    """Replace Untitled.mov* HEVC assets with H.264 test patterns (same filenames)."""
+    """Replace Untitled.mov* HEVC assets with H.264 test patterns (same filenames).
+
+    Slots with the same duration get one encode, cloned (sha-verified) to the rest."""
     replaced = []
+    made: dict[float, dict] = {}
     for mov in sorted(root.rglob("Untitled.mov-*.mov")):
         # Parse duration from Keynote export name: …-0.0000-46.0333.mov
         seconds = 46.0333
@@ -534,7 +645,17 @@ def _replace_hevc_movies(root: Path) -> dict:
             seconds = float(tail.replace(".mov", ""))
         except ValueError:
             pass
-        info = _write_h264_pattern(mov, seconds=seconds)
+        first = made.get(seconds)
+        if first is not None and _clone_verified(Path(first["path"]), mov, first["sha256"]):
+            info = {
+                **first,
+                "path": str(mov),
+                "bytes": mov.stat().st_size,
+                "source": "clone",
+                "clonedFrom": first["replaced"],
+            }
+        else:
+            info = made[seconds] = _write_h264_pattern(mov, seconds=seconds)
         info["replaced"] = str(mov.relative_to(root))
         replaced.append(info)
     return {"replacedN": len(replaced), "files": replaced}
