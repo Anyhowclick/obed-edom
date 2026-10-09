@@ -614,6 +614,72 @@ def test_chrome_start_kills_its_process_when_the_attach_fails(tmp_path, monkeypa
     assert isinstance(c.proc, subprocess.Popen)
 
 
+def _spike():
+    if str(REPO / "scripts") not in sys.path:
+        sys.path.insert(0, str(REPO / "scripts"))
+    import p2_alpha_spike as spike
+
+    return spike
+
+
+@pytest.mark.parametrize("gl_auto", [False, True])
+def test_chrome_spawn_lets_chrome_pick_its_port_and_drops_a_stale_port_file(tmp_path, monkeypatch, gl_auto):
+    """Picking a free port and handing it to Chrome leaves a window in which a concurrent run can
+    take it (then this run's CDP calls reach the other run's Chrome). Chrome binds port 0 itself;
+    a stale DevToolsActivePort in a reused profile would name a dead Chrome's port, so it goes first."""
+    seen = []
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **k: seen.append(argv) or object())
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "DevToolsActivePort").write_text("9222\n/devtools/browser/old\n")
+    c = p2._chrome(profile, gl_auto=gl_auto)
+    c._spawn()
+    assert [a for a in seen[0] if a.startswith("--remote-debugging-port")] == ["--remote-debugging-port=0"]
+    assert not (profile / "DevToolsActivePort").exists()
+    assert c.port is None
+
+
+def test_chrome_attach_uses_the_port_chrome_wrote(tmp_path, monkeypatch):
+    import urllib.request
+
+    spike = _spike()
+    waited, urls = [], []
+
+    def port_of(profile, proc, timeout):
+        waited.append((profile, proc, timeout))
+        return 43210
+
+    def urlopen(url, timeout):
+        urls.append(url)
+        raise OSError("refused")
+
+    monkeypatch.setattr(spike, "wait_devtools_active_port", port_of)
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(spike.ChromeCdp, "START_TIMEOUT_S", 0.2)
+    c = spike.ChromeCdp(Path("chrome"), tmp_path / "profile")
+    c.proc = proc = object()
+    monkeypatch.setattr(c, "_sample_rss", lambda: None)
+    with pytest.raises(RuntimeError, match="did not come up"):
+        asyncio.run(c._attach())
+    assert waited == [(tmp_path / "profile", proc, 0.2)]
+    assert c.port == 43210
+    assert urls and all(u.startswith("http://127.0.0.1:43210/") for u in urls)
+
+
+def test_dissolve_serve_binds_port_zero_directly(tmp_path):
+    import urllib.request
+
+    (tmp_path / "index.html").write_text("hello")
+    httpd, port = dissolve_live._serve(tmp_path)
+    try:
+        assert port == httpd.server_address[1] and port > 0
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/index.html", timeout=5) as response:
+            assert response.read() == b"hello"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 # --- P2 input / lifecycle (2026-09-23) -------------------------------------- #
 def test_key_events_omit_native_key_code(tmp_path):
     """A Windows VK sent as `nativeVirtualKeyCode` makes macOS Chrome route the

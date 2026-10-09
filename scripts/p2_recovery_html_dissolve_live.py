@@ -21,7 +21,6 @@ import hashlib
 import json
 import os
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -163,27 +162,20 @@ def _classify_media_series(samples: list[dict], click_i: int) -> dict:
     }
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
 class _Handler(SimpleHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003
         pass
 
 
 def _serve(root: Path) -> tuple[ThreadingHTTPServer, int]:
-    port = _free_port()
     directory = str(root.resolve())
 
     def factory(*args, **kwargs):
         return _Handler(*args, directory=directory, **kwargs)
 
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), factory)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), factory)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    return httpd, port
+    return httpd, httpd.server_address[1]
 
 
 MEDIA_PROBE_JS = r"""

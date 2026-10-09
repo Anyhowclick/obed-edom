@@ -18,7 +18,6 @@ import io
 import json
 import os
 import resource
-import socket
 import subprocess
 import sys
 import threading
@@ -37,6 +36,7 @@ from obed_edom.dsk_live import keynote_running  # noqa: E402
 from obed_edom.html_alpha_probe import (  # noqa: E402
     CLOCK_MIN_RAF,
     CLOCK_WINDOW_S,
+    DEVTOOLS_ACTIVE_PORT,
     FPS,
     HEARTBEAT_MIN_EXECUTED,
     IDENTITY_NEAR_DUP_MAE_MAX,
@@ -65,6 +65,7 @@ from obed_edom.html_alpha_probe import (  # noqa: E402
     render_pdf_page_rgba,
     save_png,
     timing_repeatability,
+    wait_devtools_active_port,
     write_composites,
     write_json,
     write_patched_export,
@@ -93,12 +94,6 @@ def _serve(root: Path) -> tuple[ThreadingHTTPServer, str]:
     thread.start()
     host, port = server.server_address[:2]
     return server, f"http://{host}:{port}/index.html"
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 def _png_to_rgba(data: bytes) -> np.ndarray:
@@ -136,36 +131,38 @@ class ChromeCdp:
             self._kill_proc()
             raise
 
+    def _args(self) -> list[str]:
+        return [
+            str(self.chrome),
+            "--headless=new",
+            "--disable-gpu",
+            "--remote-debugging-port=0",
+            "--remote-debugging-address=127.0.0.1",
+            f"--user-data-dir={self.profile}",
+            f"--window-size={self.width},{self.height}",
+            "--force-device-scale-factor=1",
+            "--disable-background-timer-throttling",
+            "--disable-renderer-backgrounding",
+            "--disable-backgrounding-occluded-windows",
+            "--autoplay-policy=no-user-gesture-required",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "about:blank",
+        ]
+
     def _spawn(self) -> None:
-        port = _free_port()
-        self.port = port
-        self.proc = subprocess.Popen(
-            [
-                str(self.chrome),
-                "--headless=new",
-                "--disable-gpu",
-                f"--remote-debugging-port={port}",
-                "--remote-debugging-address=127.0.0.1",
-                f"--user-data-dir={self.profile}",
-                f"--window-size={self.width},{self.height}",
-                "--force-device-scale-factor=1",
-                "--disable-background-timer-throttling",
-                "--disable-renderer-backgrounding",
-                "--disable-backgrounding-occluded-windows",
-                "--autoplay-policy=no-user-gesture-required",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "about:blank",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        """Chrome binds its own debugging port; `_attach` reads it from the profile's DevToolsActivePort."""
+        self.port = None
+        (self.profile / DEVTOOLS_ACTIVE_PORT).unlink(missing_ok=True)
+        self.proc = subprocess.Popen(self._args(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     async def _attach(self) -> None:
         import urllib.request
         import websockets
 
-        port = self.port
+        port = self.port = await asyncio.to_thread(
+            wait_devtools_active_port, self.profile, self.proc, self.START_TIMEOUT_S
+        )
         ready = False
         deadline = time.monotonic() + self.START_TIMEOUT_S
         while time.monotonic() < deadline:

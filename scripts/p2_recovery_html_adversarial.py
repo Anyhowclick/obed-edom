@@ -20,7 +20,6 @@ import hashlib
 import io
 import json
 import shutil
-import socket
 import subprocess
 import sys
 import threading
@@ -38,7 +37,7 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
 from continuity_core_variants import VARIANTS, parse_strip, strip_entries, variant_core  # noqa: E402
-from p2_alpha_spike import CHROME, ChromeCdp, _free_port, _wait_ready  # noqa: E402
+from p2_alpha_spike import CHROME, ChromeCdp, _wait_ready  # noqa: E402
 from p2_recovery_html_dissolve_live import (  # noqa: E402
     MEDIA_PROBE_JS,
     _ensure_videos_playing,
@@ -723,29 +722,8 @@ def _player_handler(player_dir: Path, main_js: bytes | None = None) -> type:
 class GlReplayChromeCdp(ChromeCdp):
     """`ChromeCdp` without `--disable-gpu` (WebGL for the GL module), `--gl-replay auto` only (plan §4.1)."""
 
-    def _spawn(self) -> None:
-        port = _free_port()
-        self.port = port
-        self.proc = subprocess.Popen(
-            [
-                str(self.chrome),
-                "--headless=new",
-                f"--remote-debugging-port={port}",
-                "--remote-debugging-address=127.0.0.1",
-                f"--user-data-dir={self.profile}",
-                f"--window-size={self.width},{self.height}",
-                "--force-device-scale-factor=1",
-                "--disable-background-timer-throttling",
-                "--disable-renderer-backgrounding",
-                "--disable-backgrounding-occluded-windows",
-                "--autoplay-policy=no-user-gesture-required",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "about:blank",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+    def _args(self) -> list[str]:
+        return [arg for arg in super()._args() if arg != "--disable-gpu"]
 
 
 def _chrome(profile: Path, *, gl_auto: bool) -> ChromeCdp:
@@ -3273,11 +3251,8 @@ async def _run_freeze_bracket(
         }
 
     Handler = _player_handler(player_dir, main_js)
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = httpd.server_address[1]
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{port}/index.html"
 
@@ -3467,11 +3442,8 @@ async def _run() -> dict:
         write_json(root / "gl-replay-inject.json", gl_inject)
 
     Handler = _player_handler(player_dir, main_js)
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = httpd.server_address[1]
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{port}/index.html"
 
