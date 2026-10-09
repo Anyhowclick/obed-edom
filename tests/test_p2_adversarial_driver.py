@@ -514,7 +514,7 @@ def test_run_refuses_before_any_destructive_or_expensive_work_when_the_export_is
     monkeypatch.setattr(p2, "export_html", lambda *a, **k: export_calls.append((a, k)))
 
     with pytest.raises(SystemExit, match="missing reusable export"):
-        asyncio.run(p2._run(tmp_path / "html-player"))
+        asyncio.run(p2._run())
 
     assert rmtree_calls == [], "nothing destructive may run before the refusal"
     assert identity_calls == [], "the deck must not be hashed before the refusal"

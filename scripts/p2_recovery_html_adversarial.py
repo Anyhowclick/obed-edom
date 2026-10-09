@@ -520,13 +520,36 @@ def _mm_opacity_mode() -> str:
     return mode
 
 
+def _explicit_out_dir() -> Path | None:
+    """`--out-dir DIR`: this run's outputs go to DIR (the shared fixture tree is still read for
+    `--reuse-export`). None when the option is absent; a missing, option-like or repeated value is refused."""
+    argv = sys.argv[1:]
+    values = [a.split("=", 1)[1] for a in argv if a.startswith("--out-dir=")]
+    values += [argv[i + 1] if i + 1 < len(argv) else "" for i, a in enumerate(argv) if a == "--out-dir"]
+    if not values:
+        return None
+    if len(values) > 1 or not values[0] or values[0].startswith("-"):
+        raise SystemExit("--out-dir needs exactly one directory")
+    return Path(values[0])
+
+
 def _out_root(gl_auto: bool) -> Path:
-    return OUT / GL_REPLAY_DIR if gl_auto else OUT
+    """The run's root; an explicit one is resolved after the GL subfolder is added and must not
+    overlap the shared fixture tree in either direction."""
+    base = _explicit_out_dir()
+    if base is None:
+        return OUT / GL_REPLAY_DIR if gl_auto else OUT
+    root = (base / GL_REPLAY_DIR if gl_auto else base).resolve()
+    shared = OUT.resolve()
+    for path in (base.resolve(), root):
+        if path == shared or shared in path.parents or path in shared.parents:
+            raise SystemExit(f"--out-dir {path} overlaps the shared fixture tree {shared}")
+    return root
 
 
-def _unmodified_export(root: Path, *, reuse: bool, gl_auto: bool) -> Path:
-    """The export the strip/patch steps run on; auto + reuse uses a private copy (plan §4.1)."""
-    if not (reuse and gl_auto):
+def _unmodified_export(root: Path, *, reuse: bool) -> Path:
+    """The export the strip/patch steps run on; a reused export outside the shared tree is a private copy (plan §4.1)."""
+    if not reuse or root == OUT:
         return root / "html-unmodified"
     copy = root / "html-unmodified"
     if copy.exists():
@@ -3344,7 +3367,7 @@ async def _boot(chrome: ChromeCdp, base: str) -> dict:
     return {"ready": ready, "liveHash": live_hash, "media": media, "attempts": 3, "bootDegraded": True}
 
 
-async def _run(player: Path) -> dict:
+async def _run() -> dict:
     reuse = "--reuse-export" in sys.argv
     if reuse and not (OUT / "html-unmodified" / "index.html").is_file():
         raise SystemExit(f"missing reusable export at {OUT / 'html-unmodified' / 'index.html'}")
@@ -3359,7 +3382,10 @@ async def _run(player: Path) -> dict:
     bridge34 = "--disable-bridge34" not in sys.argv
     wait_profile_name = _arg_value("--wait-profile", "fast")
     wait_profile = WAIT_PROFILES[wait_profile_name]
-    if root.exists() and not reuse:
+    if _explicit_out_dir() is not None:
+        if root.exists() and any(root.iterdir()):
+            raise SystemExit(f"--out-dir {root} is not empty; pass a new directory")
+    elif root.exists() and not reuse:
         shutil.rmtree(root)
     root.mkdir(parents=True, exist_ok=True)
     runs = root / "runs"
@@ -3389,7 +3415,7 @@ async def _run(player: Path) -> dict:
         },
     )
 
-    unmodified = _unmodified_export(root, reuse=reuse, gl_auto=gl_auto)
+    unmodified = _unmodified_export(root, reuse=reuse)
     disposable_dir = root / "html-disposable"
     player_dir = root / "html-player"
     if reuse:
@@ -4606,7 +4632,7 @@ def main() -> int:
             "Keynote is already running — refuse to force-quit an owner session. "
             "Quit Keynote and re-run, or pass --reuse-export."
         )
-    report = asyncio.run(_run(OUT / "html-player"))
+    report = asyncio.run(_run())
     return 0 if report.get("sourceUnchanged") and report.get("success") else (2 if not report.get("sourceUnchanged") else 1)
 
 
