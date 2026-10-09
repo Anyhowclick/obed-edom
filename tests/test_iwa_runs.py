@@ -42,7 +42,7 @@ from obed_edom.iwa_runs import (
 
 REAL_DECK = Path("/Users/anyhowclick/Desktop/Diff-Checker/Sermon_PK (DSK)_with mistakes.key")
 GW_DECK = Path("/Users/anyhowclick/Desktop/Diff-Checker/Sermon_PK (GW).key")
-MAP_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Map_Extracted_Wall_1st.key")
+GOLD_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Gold_Wall_Input.key")
 
 
 # --------------------------------------------------------------------------
@@ -673,10 +673,10 @@ def test_real_deck_gw_populates_superscript_verse_numbers():
     assert any(r.get("fontName") for r in all_runs)
 
 
-def test_real_deck_map_grouped_stat_labels_reach_scoring_text():
-    # WIN 2: the Map deck's grouped stat-block labels must land in the SCORING text.
-    if not MAP_DECK.is_file():
-        pytest.skip("real Map deck not present (local operator file)")
+def test_real_deck_gold_grouped_stat_labels_reach_scoring_text():
+    # WIN 2: the Gold wall's grouped stat-block labels must land in the SCORING text.
+    if not GOLD_DECK.is_file():
+        pytest.skip("real Gold wall not present (local operator file)")
     try:
         import keynote_parser  # noqa: F401
     except Exception:
@@ -687,10 +687,10 @@ def test_real_deck_map_grouped_stat_labels_reach_scoring_text():
     # Re-inspect the CURRENT deck via the IWA graph (the .cache is stale). Build a
     # payload with the group items JXA would report as childCount 0, attach, then
     # assert the labels appear ONLY in the grouped scoring text, not the default.
-    objects, id_to_file, file_ids = iwa._load_deck(MAP_DECK)
+    objects, id_to_file, file_ids = iwa._load_deck(GOLD_DECK)
     order = iwa.slide_order(objects)
     payload = {"slides": [{"index": i, "items": []} for i in range(len(order))]}
-    attach_runs(MAP_DECK, payload)
+    attach_runs(GOLD_DECK, payload)
 
     scoring = "\n".join(
         slide_plain_text(s, include_grouped=True) for s in payload["slides"]
