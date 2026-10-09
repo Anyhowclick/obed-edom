@@ -463,11 +463,15 @@ def _splice_bulk_geometry(
             row = rows[ki]
             if row is None or len(row) < 4:
                 continue
-            x, y, w, h = row[0], row[1], row[2], row[3]
-            item["x"] = _round_pt(float(x))
-            item["y"] = _round_pt(float(y))
-            item["w"] = _round_pt(float(w))
-            item["h"] = _round_pt(float(h))
+            x, y, w, h = float(row[0]), float(row[1]), float(row[2]), float(row[3])
+            # Bulk rows are whole points: refresh aspect only when the offline frame was stale.
+            stale = abs(w - float(item.get("w") or 0)) > 1 or abs(h - float(item.get("h") or 0)) > 1
+            item["x"] = _round_pt(x)
+            item["y"] = _round_pt(y)
+            item["w"] = _round_pt(w)
+            item["h"] = _round_pt(h)
+            if stale and item.get("aspect") is not None:
+                item["aspect"] = (w / h) if (w and h) else None
             spliced.add((number, kind, ki))
     return spliced, count_mismatch
 
