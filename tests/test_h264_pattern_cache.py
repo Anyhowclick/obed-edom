@@ -374,3 +374,42 @@ def test_replacement_record_carries_cache_hit_and_sha(ffmpeg: FakeFfmpeg, tmp_pa
     assert key and all(f["cacheKey"] == key for r in records for f in r["files"])
     assert len({f["sha256"] for r in records for f in r["files"]}) == 1
     assert len(ffmpeg.calls()) == 1
+
+
+def test_prewarm_fills_the_cache_so_later_arms_only_clone(ffmpeg: FakeFfmpeg, tmp_path: Path) -> None:
+    """`run_gates.sh` prewarms once before any timed run, so no P2 arm's ffmpeg encode overlaps a
+    capture: every duration the arms will need is encoded up front, and the arms then hit."""
+    other = "Untitled.mov-0.0000-10.0000.mov"
+    source = _export(tmp_path / "html-unmodified", [MOVIE] * 4 + [other])
+    before = {p: p.read_bytes() for p in source.rglob("*") if p.is_file()}
+
+    cold = dissolve_live.prewarm_h264_patterns(source)
+    assert [(r["seconds"], r["source"]) for r in cold] == [(10.0, "encoded"), (DURATION, "encoded")]
+    assert all(len(r["cacheKey"]) == 64 and len(r["sha256"]) == 64 for r in cold)
+    assert len(ffmpeg.calls()) == 2
+    assert {p: p.read_bytes() for p in source.rglob("*") if p.is_file()} == before, "the source export is untouched"
+
+    warm = dissolve_live.prewarm_h264_patterns(source)
+    assert [r["source"] for r in warm] == ["cache", "cache"]
+    assert [(r["cacheKey"], r["sha256"]) for r in warm] == [(r["cacheKey"], r["sha256"]) for r in cold]
+
+    arm = _export(tmp_path / "arm", [MOVIE] * 4 + [other])
+    record = dissolve_live._replace_hevc_movies(arm)
+    assert sorted(f["source"] for f in record["files"]) == ["cache", "cache", "clone", "clone", "clone"]
+    assert len(ffmpeg.calls()) == 2, "no encode after the prewarm"
+
+
+def test_prewarm_with_the_cache_off_encodes_nothing(
+    ffmpeg: FakeFfmpeg, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OBED_H264_PATTERN_CACHE", "off")
+    source = _export(tmp_path / "html-unmodified", [MOVIE] * 2)
+    assert dissolve_live.prewarm_h264_patterns(source) == [{"seconds": DURATION, "source": "off", "cacheKey": None}]
+    assert ffmpeg.calls() == []
+    assert not _cache_dir(tmp_path).exists()
+
+
+def test_prewarm_of_an_export_without_movies_is_empty(ffmpeg: FakeFfmpeg, tmp_path: Path) -> None:
+    (tmp_path / "empty").mkdir()
+    assert dissolve_live.prewarm_h264_patterns(tmp_path / "empty") == []
+    assert ffmpeg.calls() == []

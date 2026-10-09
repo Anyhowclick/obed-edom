@@ -24,6 +24,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime
@@ -631,6 +632,25 @@ def _cached_h264_pattern(
         return sha, False
 
 
+def _pattern_seconds(mov: Path) -> float:
+    """Duration from the Keynote export name (…-0.0000-46.0333.mov); 46.0333 when it does not parse."""
+    try:
+        return float(mov.name.rsplit("-", 1)[-1].replace(".mov", ""))
+    except ValueError:
+        return 46.0333
+
+
+def prewarm_h264_patterns(root: Path) -> list[dict]:
+    """Fill the pattern cache for every duration `_replace_hevc_movies(root)` would encode, so later
+    concurrent arms only clone. One record per duration; `source` is `cache` (hit), `encoded` or `off`."""
+    durations = sorted({_pattern_seconds(mov) for mov in root.rglob("Untitled.mov-*.mov")})
+    if _h264_pattern_cache_dir() is None:
+        return [{"seconds": seconds, "source": "off", "cacheKey": None} for seconds in durations]
+    with tempfile.TemporaryDirectory() as tmp:
+        records = [_write_h264_pattern(Path(tmp) / f"{i}.mp4", seconds=seconds) for i, seconds in enumerate(durations)]
+    return [{key: record[key] for key in ("seconds", "source", "cacheKey", "sha256")} for record in records]
+
+
 def _replace_hevc_movies(root: Path) -> dict:
     """Replace Untitled.mov* HEVC assets with H.264 test patterns (same filenames).
 
@@ -638,13 +658,7 @@ def _replace_hevc_movies(root: Path) -> dict:
     replaced = []
     made: dict[float, dict] = {}
     for mov in sorted(root.rglob("Untitled.mov-*.mov")):
-        # Parse duration from Keynote export name: …-0.0000-46.0333.mov
-        seconds = 46.0333
-        try:
-            tail = mov.name.rsplit("-", 1)[-1]
-            seconds = float(tail.replace(".mov", ""))
-        except ValueError:
-            pass
+        seconds = _pattern_seconds(mov)
         first = made.get(seconds)
         if first is not None and _clone_verified(Path(first["path"]), mov, first["sha256"]):
             info = {
