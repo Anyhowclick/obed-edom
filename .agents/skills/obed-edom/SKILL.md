@@ -502,7 +502,10 @@ per-slide live JXA (`_merge_legacy_slides`) is also stamped `groupChildrenUnavai
 skipped by `attach_group_children`; a fresh two-tier read stamps a top-level
 `offlineFallbackTagged` cache marker, and `OBED_OFFLINE_READ=on` re-reads offline once
 (`stale_mixed`) if a cached `reader: offline` payload lacks it — no `INSPECT_VERSION` bump,
-so banked JXA/kind-count fixtures need no re-stamp. A spec with no `w`/`h` means position-only:
+so banked JXA/kind-count fixtures need no re-stamp. Same pattern for the bulk splice's
+aspect refresh (a row moving w or h by > 1 pt replaces the stale offline `aspect`): a fresh
+two-tier read stamps `spliceAspectRefreshed`, and an offline cache without it is re-read
+(served with every aspect nulled only when the offline read is unavailable). A spec with no `w`/`h` means position-only:
 every consumer must key off presence (`"w" in spec`), never infer it from role or
 kind — that crashed `framing.planned_rects` once already.
 
