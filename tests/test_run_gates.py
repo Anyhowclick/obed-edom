@@ -428,6 +428,16 @@ def test_known_bad_load_that_does_not_settle_after_the_prewarm_launches_no_timed
     assert all(e.startswith("prewarm") for e in gates["events"]()), gates["events"]()
 
 
+def test_the_settle_wait_never_sleeps_past_its_deadline(gates) -> None:
+    """Codex r4: a fixed 5 s sleep overshot a GATE_SETTLE_S that is not a multiple of 5."""
+    start = time.monotonic()
+    done = gates["run"](timeout=30, STUB_LOAD="1.00", STUB_LOAD_AFTER_PREWARM="9.50", GATE_SETTLE_S="2")
+    elapsed = time.monotonic() - start
+    assert done.returncode == 2
+    assert "still exceeds GATE_MAX_START_LOAD=4 2s after the prewarm" in done.stderr, done.stderr
+    assert elapsed < 4.5, f"settle wait overshot its 2 s deadline: round took {elapsed:.1f} s"
+
+
 def test_positive_control_load_that_stays_low_after_the_prewarm_launches(gates) -> None:
     done = gates["run"](STUB_LOAD="1.00", STUB_LOAD_AFTER_PREWARM="2.00", GATE_SETTLE_S="0")
     assert "load average (1 min) at launch 2.00" in done.stdout, done.stderr

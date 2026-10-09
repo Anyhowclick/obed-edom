@@ -238,7 +238,7 @@ while LAUNCH_LOAD=$(load1) && (( LAUNCH_LOAD > GATE_MAX_START_LOAD )); do
   (( SECONDS >= settle_deadline )) && {
     echo "1-minute load average $LAUNCH_LOAD still exceeds GATE_MAX_START_LOAD=$GATE_MAX_START_LOAD ${GATE_SETTLE_S}s after" \
       "the prewarm; no timed run launched." >&2; exit 2; }
-  sleep 5
+  sleep $(( settle_deadline - SECONDS < 5 ? settle_deadline - SECONDS : 5 ))
 done
 [[ -n $LAUNCH_LOAD ]] || { echo "cannot read the 1-minute load average (sysctl -n vm.loadavg); no run launched" >&2; exit 2; }
 echo "load average (1 min) at launch $LAUNCH_LOAD"
