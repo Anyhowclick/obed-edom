@@ -1,7 +1,7 @@
 #!/bin/zsh
-# usage: run_gates.sh <gate-worktree> <outdir> [--allow-record]   (runs host gate x3, host red arms, then P2 arms,
-# serially, from a clean pinned worktree). Exits nonzero when any gate FAILED, or when a RECORD arm is PENDING
-# registration unless --allow-record (discovery runs only) is passed.
+# usage: run_gates.sh <gate-worktree> <outdir> [--allow-record]   (runs host gate x3 and host red arms serially, then
+# P2 arms P2_JOBS at a time (default 3), from a clean pinned worktree). Exits nonzero when any gate FAILED, or when a
+# RECORD arm is PENDING registration unless --allow-record (discovery runs only) is passed.
 G=${1:A}; O=${2:A}; ALLOW_RECORD=0; [[ "$3" == "--allow-record" ]] && ALLOW_RECORD=1
 PY=/Users/anyhowclick/Desktop/work/obed-edom/.venv/bin/python; mkdir -p $O; cd $G || exit 1
 export PYTHONPATH=$G/src; F=$G/output/p2-recovery/html-adversarial
@@ -144,7 +144,14 @@ PYEOF
 for A in "--core-variant stash-any" "--strip bridge@8" "--strip retire@2" "--strip restart@6" "--strip glReplay@2 --gl-replay auto"; do
   host_red ${=A}; tally $? "HOST red $A"
 done
-run_p2(){ spec=$1; inc=$2; shift 2; n=$(echo "$*" | tr -d ' '); $PY scripts/p2_recovery_html_adversarial.py --reuse-export --disposable --out-dir "$O/p2$n" "$@" > "$O/p2$n.log" 2>&1; rc=$?; echo "[P2 $*] exit=$rc $(grep -m1 '^success' "$O/p2$n.log") True=$(grep -cE '^- [A-Za-z0-9]+: \*\*True\*\*' "$O/p2$n.log") False: $(grep -oE '^- [A-Za-z0-9]+: \*\*False\*\*' "$O/p2$n.log" | tr '\n' ' ')"; r=$O/p2$n/report.json; [[ "$*" == *"--gl-replay auto"* ]] && r=$O/p2$n/gl-replay/report.json; cp $r "$O/p2$n.report.json" 2>/dev/null; expect "$O/p2$n.log" "$rc" "$spec" "$inc" "$@"; tally $? "P2 $*"; }
+# P2 arms run P2_JOBS at a time (default 3, the three-Chrome cap; P2_JOBS=1 runs them serially), each in its own
+# --out-dir. They are checked and tallied in the listed order once every arm has finished.
+P2_JOBS=${P2_JOBS:-3}; P2_ARMS=(); P2_PIDS=()
+run_p2(){ P2_ARMS+=("${(j: :)${(@q)@}}"); shift 2; n=$(echo "$*" | tr -d ' ')
+  while (( ${#P2_PIDS} >= P2_JOBS )); do wait $P2_PIDS[1] 2>/dev/null; shift P2_PIDS; done
+  { $PY scripts/p2_recovery_html_adversarial.py --reuse-export --disposable --out-dir "$O/p2$n" "$@" > "$O/p2$n.log" 2>&1; echo $? > "$O/p2$n.rc"; } &
+  P2_PIDS+=($!); }
+check_p2(){ spec=$1; inc=$2; shift 2; n=$(echo "$*" | tr -d ' '); rc=$(<"$O/p2$n.rc"); echo "[P2 $*] exit=$rc $(grep -m1 '^success' "$O/p2$n.log") True=$(grep -cE '^- [A-Za-z0-9]+: \*\*True\*\*' "$O/p2$n.log") False: $(grep -oE '^- [A-Za-z0-9]+: \*\*False\*\*' "$O/p2$n.log" | tr '\n' ' ')"; r=$O/p2$n/report.json; [[ "$*" == *"--gl-replay auto"* ]] && r=$O/p2$n/gl-replay/report.json; cp $r "$O/p2$n.report.json" 2>/dev/null; expect "$O/p2$n.log" "$rc" "$spec" "$inc" "$@"; tally $? "P2 $*"; }
 # run_p2 "<expected red>" "<expected inconclusive>" <args>
 run_p2 "" "" --wait-profile fast; run_p2 "continueThroughMovingMagicMove3to4" "" --wait-profile fast --disable-bridge34; run_p2 "" "" --wait-profile slow
 # Registered post hoc from discovery r2 (8ac39a42), seen in r1 too: the stray WA0125 overlay paints at authored
@@ -161,6 +168,8 @@ run_p2 "continueThroughMovingMagicMove3to4" "freezeControlCaughtByCounter" --wai
 run_p2 "" "" --wait-profile fast --gl-replay auto
 # Registered post hoc from r2.
 run_p2 "glReplayCarry1to2 noStrayVideo" "" --wait-profile fast --gl-replay auto --strip glReplay@2
+wait
+for A in "${P2_ARMS[@]}"; do check_p2 "${(@Q)${(z)A}}"; done
 $PY -c "from obed_edom.live_continuity_js import js_sha256; print('runtime sha at end', js_sha256())"
 pgrep -fl obed-live-chrome | cut -c1-80 | head -2; echo "DONE failed=$FAIL pending=$PENDING"
 if (( ALLOW_RECORD && PENDING )); then echo "## --allow-record: $PENDING RECORD arm(s) left ungated -- DISCOVERY RUN, NOT A PASS ##"; fi
