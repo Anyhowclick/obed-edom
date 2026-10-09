@@ -1,26 +1,135 @@
 #!/bin/zsh
-# usage: run_gates.sh <gate-worktree> <outdir> [--allow-record]   (runs host gate x3, host red arms, then P2 arms,
-# serially, from a clean pinned worktree). Exits nonzero when any gate FAILED, or when a RECORD arm is PENDING
-# registration unless --allow-record (discovery runs only) is passed.
-G=${1:A}; O=${2:A}; ALLOW_RECORD=0; [[ "$3" == "--allow-record" ]] && ALLOW_RECORD=1
-PY=/Users/anyhowclick/Desktop/work/obed-edom/.venv/bin/python; mkdir -p $O; cd $G || exit 1
+# usage: run_gates.sh <gate-worktree> <outdir> [--allow-record] [--tier dev|full]   (runs the host gates, host red arms
+# and P2 arms through one queue, GATE_JOBS at a time (1..5, default 3; 1 = serial), from a clean pinned worktree, into a
+# missing or empty <outdir>). --tier full (default) runs everything; --tier dev runs the 1920x1080 and 1600x1000 host
+# gates and the P2 fast, --disable-bridge34 and --gl-replay auto arms, and is never a qualification pass.
+# GATE_JOBS above 3 is allowed but loudly unqualified. A round refuses to start when the 1-minute load average exceeds
+# GATE_MAX_START_LOAD (default 4), when OBED_H264_PATTERN_CACHE is set, or when the H.264 pattern cache cannot be
+# prewarmed and re-read as a sha-verified hit for every duration, or when the load has not settled under the limit
+# GATE_SETTLE_S (default 300) after the prewarm. Nothing is ever retried.
+# Exit: 0 full pass; 10 dev pass; 1 when any gate FAILED, or a RECORD arm is PENDING registration unless --allow-record
+# (discovery runs only); 2 when refused before anything runs.
+GATE_JOBS=${GATE_JOBS:-3}
+[[ $GATE_JOBS == [1-5] ]] || { echo "GATE_JOBS must be an integer in 1..5, got '$GATE_JOBS'" >&2; exit 2; }
+GATE_MAX_START_LOAD=${GATE_MAX_START_LOAD:-4}
+[[ $GATE_MAX_START_LOAD == <->(|.<->) ]] || {
+  echo "GATE_MAX_START_LOAD must be a non-negative number, got '$GATE_MAX_START_LOAD'" >&2; exit 2; }
+(( $# >= 2 )) || { echo "usage: run_gates.sh <gate-worktree> <outdir> [--allow-record] [--tier dev|full]" >&2; exit 2; }
+G=${1:A}; O=${2:A}; ALLOW_RECORD=0; TIER=full; shift 2
+while (( $# )); do
+  case $1 in
+    --allow-record) ALLOW_RECORD=1;;
+    --tier) TIER=$2; shift;;
+    *) echo "unknown argument '$1'" >&2; exit 2;;
+  esac; shift
+done
+[[ $TIER == (dev|full) ]] || { echo "--tier must be dev or full, got '$TIER'" >&2; exit 2; }
+if [[ -e $O && ( ! -d $O || -n "$(ls -A -- $O)" ) ]]; then
+  echo "outdir $O exists and is not an empty directory; pass a fresh one (nothing under it is ever removed)" >&2; exit 2
+fi
+# Host gate arms per viewport (owner decision 2026-10-09): the attach arm is pinned to 1920x1080 whatever --viewport
+# says, so it runs once, in the 1920x1080 gate, with the B and Voff controls; C runs at 2560x1440 and 1600x1000 (the
+# host red arm --strip bridge@8 is the same removal at 1920x1080, checked stricter).
+ARM_NAMES=(A B C V Voff attach)
+typeset -A HOST_SKIP=(2560x1440 attach,B,Voff 1600x1000 attach,B,Voff 1920x1080 C)
+if [[ $TIER == dev ]]; then HOST_VIEWPORTS=(1920x1080 1600x1000); else HOST_VIEWPORTS=(2560x1440 1600x1000 1920x1080); fi
+for host_arm in $ARM_NAMES; do
+  gates_running_arm=0
+  for viewport in $HOST_VIEWPORTS; do
+    (( ${${(s:,:)HOST_SKIP[$viewport]}[(Ie)$host_arm]} )) || gates_running_arm=$((gates_running_arm+1))
+  done
+  (( gates_running_arm )) || {
+    echo "host arm $host_arm runs in no $TIER-tier host gate; every arm (null controls included) must run once a round" >&2; exit 2; }
+done
+if [[ $TIER == full ]]; then
+  HOST_RED_ARMS=("--core-variant stash-any" "--strip bridge@8" "--strip retire@2" "--strip restart@6" "--strip glReplay@2 --gl-replay auto")
+else
+  HOST_RED_ARMS=()
+fi
+# P2 arms: p2 <tier> "<expected red>" "<expected inconclusive>" <args>; tier dev runs in both tiers, full only in full.
+# --skip-freeze-bracket goes on every arm but the two positive bracket arms, which must run it. As in P2 itself, the flag
+# is refused on any arm that is not a red arm (--core-variant, --strip, --disable-bridge34) unless it is a DOM
+# --wait-profile slow arm: a positive --gl-replay auto arm runs the bracket whatever its wait profile.
+P2_ARMS=()
+p2(){ [[ $TIER == full || $1 == dev ]] && P2_ARMS+=("${(j: :)${(@q)@[2,-1]}}"); }
+p2 dev "" "" --wait-profile fast
+p2 dev "continueThroughMovingMagicMove3to4" "" --wait-profile fast --disable-bridge34 --skip-freeze-bracket
+p2 full "" "" --wait-profile slow --skip-freeze-bracket
+# Registered post hoc from discovery r2 (8ac39a42), seen in r1 too: the stray WA0125 overlay paints at authored
+# (109,795,485x273) on slide 4, overlapping the bridged movie's slide-4 rect (327,709,1266x356), so the variant itself
+# corrupts the 3->4 measurement.
+p2 full "noStrayVideo continueThroughMovingMagicMove3to4" "" --wait-profile fast --core-variant stash-any --skip-freeze-bracket
+# Registered post hoc from discovery r2 (8ac39a42); r1 and r2 agree.
+p2 full "noStrayVideo refusedCarry1to2" "" --wait-profile fast --strip glReplay@2 --skip-freeze-bracket
+# Registered post hoc from r2: the bridge stays in the plan, and the un-retired decoder breaks the 3->4 carry (the host
+# arm agrees: red only on the b2to3 carry).
+p2 full "continueThroughMovingMagicMove3to4" "" --wait-profile fast --strip restart@6 --skip-freeze-bracket
+p2 dev "" "" --wait-profile fast --gl-replay auto
+# Registered post hoc from r2.
+p2 full "glReplayCarry1to2 noStrayVideo" "" --wait-profile fast --gl-replay auto --strip glReplay@2 --skip-freeze-bracket
+for p2_declaration in "${P2_ARMS[@]}"; do
+  p2_words=("${(@Q)${(z)p2_declaration}}"); p2_args=("${(@)p2_words[3,-1]}")
+  (( ${p2_args[(Ie)--skip-freeze-bracket]} )) || continue
+  (( ${p2_args[(Ie)--core-variant]} || ${p2_args[(Ie)--strip]} || ${p2_args[(Ie)--disable-bridge34]} )) && continue
+  gl_flag_at=${p2_args[(Ie)--gl-replay]}; wait_flag_at=${p2_args[(Ie)--wait-profile]}
+  gl_auto=0; (( gl_flag_at )) && [[ ${p2_args[gl_flag_at+1]} == auto ]] && gl_auto=1
+  wait_slow=0; (( wait_flag_at )) && [[ ${p2_args[wait_flag_at+1]} == slow ]] && wait_slow=1
+  if (( gl_auto || ! wait_slow )); then
+    echo "P2 ${p2_args[*]}: --skip-freeze-bracket on a positive freeze-bracket arm is refused" >&2; exit 2
+  fi
+done
+if (( ${+OBED_H264_PATTERN_CACHE} )); then
+  echo "OBED_H264_PATTERN_CACHE is set ('$OBED_H264_PATTERN_CACHE'); a round needs the shared H.264 pattern cache so no" \
+    "P2 arm encodes during a timed capture -- unset it. No run launched." >&2; exit 2
+fi
+load1(){ local avg; avg=(${=$(sysctl -n vm.loadavg 2>/dev/null)}); [[ ${avg[2]} == <->(|.<->) ]] && print -r -- ${avg[2]}; }
+START_LOAD=$(load1) || { echo "cannot read the 1-minute load average (sysctl -n vm.loadavg); no run launched" >&2; exit 2; }
+if (( START_LOAD > GATE_MAX_START_LOAD )); then
+  echo "1-minute load average $START_LOAD exceeds GATE_MAX_START_LOAD=$GATE_MAX_START_LOAD; a loaded host reddens timed" \
+    "runs. Let it settle and start again (or set GATE_MAX_START_LOAD). No run launched." >&2; exit 2
+fi
+PY=/Users/anyhowclick/Desktop/work/obed-edom/.venv/bin/python; cd $G || exit 1; mkdir -p $O
 export PYTHONPATH=$G/src; F=$G/output/p2-recovery/html-adversarial
 if (( ALLOW_RECORD )); then
   echo "################################################################################"
   echo "## --allow-record: DISCOVERY RUN. RECORD arms are not gated; this is NOT a pass. ##"
   echo "################################################################################"
 fi
+if [[ $TIER == dev ]]; then
+  echo "################################################################################"
+  echo "## DEV TIER -- NOT A QUALIFICATION PASS (a passing dev round exits 10, never 0) ##"
+  echo "################################################################################"
+fi
+if (( GATE_JOBS > 3 )); then
+  echo "################################################################################"
+  echo "## WARNING: GATE_JOBS=$GATE_JOBS. GATE_JOBS>3 is NOT qualified on this machine (2026-10-09: 5-wide pushed the P2 slide-3 restart observation to 0.479 s vs the 0.35 s limit and reddened 3->4)"
+  echo "################################################################################"
+fi
+echo "load average (1 min) at start $START_LOAD (GATE_MAX_START_LOAD $GATE_MAX_START_LOAD)"
 echo "commit $(git rev-parse --short HEAD) dirty=$(git status --porcelain | grep -v '^??' | wc -l | tr -d ' ')"
 $PY -c "from obed_edom.live_continuity_js import js_sha256; print('runtime sha', js_sha256())"
-summ(){ python3 - "$1" "$2" <<'PYEOF'
+# A host gate passes only with status pass, skippedArms exactly the arms run_gates skipped, every other arm present and
+# every skipped arm absent; a skipped arm prints "skipped by flag" and never counts as a pass.
+summ(){ python3 - "$1" "$2" "$3" <<'PYEOF'
 import json,sys
+names=("A","B","C","V","Voff","attach")
+want_skip=[n for n in names if n in sys.argv[3].split(",")]
 try: d=json.load(open(sys.argv[1]))
 except Exception as e: print(f"{sys.argv[2]}: no artifact ({e})"); sys.exit(1)
 print(sys.argv[2]+":",d.get("status"),d.get("error"),d.get("statusReasons"))
-arms=dict(d.get("arms") or {}); arms["attach"]=d.get("attach") or {}
+arms=dict(d.get("arms") or {})
+if isinstance(d.get("attach"),dict): arms["attach"]=d["attach"]
 for k,a in arms.items(): print("  ",k,(a.get("continuity") or {}).get("mode"),(a.get("continuity") or {}).get("scale"),{n:(a.get(n) or {}).get("verdict") for n in ("continue1to2","restart2to3","continue3to4","stageFit")})
 for p,v in (d.get("visible") or {}).items(): print("  ",p,(v.get("continuity") or {}).get("mode"),[(s.get("originalOrdinal"),s.get("verdict")) for s in v.get("slides") or []])
-sys.exit(0 if d.get("status")=="pass" else 1)
+def present(n):
+    holder=d if n=="attach" else d.get("visible") if n in ("V","Voff") else d.get("arms")
+    return isinstance((holder if isinstance(holder,dict) else {}).get(n),dict)
+problems=[] if d.get("skippedArms")==want_skip else [f"skippedArms {d.get('skippedArms')!r} != {want_skip}"]
+for n in names:
+    if n in want_skip: print("  ",n,"skipped by flag")
+    if present(n)==(n in want_skip): problems.append(f"{n} {'present though skipped' if present(n) else 'missing'}")
+for p in problems: print("    inventory:",p)
+sys.exit(0 if d.get("status")=="pass" and not problems else 1)
 PYEOF
 }
 # Every check prints its evidence and returns 0 (MATCH), 3 (RECORDED: integrity held, no set registered) or anything
@@ -35,7 +144,9 @@ tally(){ case $1 in 0) ;; 3) PENDING=$((PENDING+1)); echo "    PENDING REGISTRAT
 # today's). A finding rendered `**False** (inconclusive)` is never red. Under --gl-replay auto `glReplayCarry1to2` must be present and `refusedCarry1to2`
 # absent (the reverse otherwise), so the GL path cannot be skipped silently. The report's `Core variant:` / `Strip:` header
 # lines must name the arm's own arguments ("none" when not passed), and a strip arm's injected plan sha must differ from
-# the unstripped plan's (`build_continuity_plan`). "RECORD" registers no set: it prints the observed sets and returns 3
+# the unstripped plan's (`build_continuity_plan`). The `Freeze bracket:` header line must read "skipped
+# (--skip-freeze-bracket)" exactly when the arm passes that flag, else "skipped (bridge disabled)" under
+# --disable-bridge34, else "run". "RECORD" registers no set: it prints the observed sets and returns 3
 # only when those integrity checks hold with no inconclusive finding (exit 0 or 1).
 expect(){ $PY - "$@" <<'PYEOF'
 import hashlib,json,re,sys
@@ -60,14 +171,16 @@ variant,strip=arg("--core-variant"),arg("--strip")
 head_core=re.search(r"^Core variant: (\S+) · injected core sha256: ",text,re.M)
 head_strip=re.search(r"^Strip: (\S+) · injected plan sha256: ([0-9a-f]{64})$",text,re.M)
 unstripped=hashlib.sha256(json.dumps(build_continuity_plan("--disable-bridge34" not in args)).encode()).hexdigest()
+head_freeze=re.search(r"^Freeze bracket: (.+)$",text,re.M)
+want_freeze="skipped (--skip-freeze-bracket)" if "--skip-freeze-bracket" in args else "skipped (bridge disabled)" if "--disable-bridge34" in args else "run"
 header_ok=(bool(head_core) and head_core.group(1)==(variant or "none") and bool(head_strip) and head_strip.group(1)==(strip or "none")
-           and (strip is None or head_strip.group(2)!=unstripped))
+           and (strip is None or head_strip.group(2)!=unstripped) and bool(head_freeze) and head_freeze.group(1)==want_freeze)
 want_sha=variant_sha(variant) if variant else js_sha256()
 sha_ok=bool(core) and core.group(1)==want_sha
 count_ok=len(found)==15 and len(ids)==15
 exit_ok=(rc==0)==(success is not None and success.group(1)=="True") and rc in (0,1)
 print(f"    core sha {core.group(1) if core else None} expected {want_sha} {'MATCH' if sha_ok else 'MISMATCH'}")
-print(f"    header core {head_core.group(1) if head_core else None} strip {head_strip.group(1) if head_strip else None} plan sha {head_strip.group(2) if head_strip else None} (unstripped {unstripped}) {'OK' if header_ok else 'WRONG'}")
+print(f"    header core {head_core.group(1) if head_core else None} strip {head_strip.group(1) if head_strip else None} plan sha {head_strip.group(2) if head_strip else None} (unstripped {unstripped}) freeze bracket {head_freeze.group(1) if head_freeze else None!r} (want {want_freeze!r}) {'OK' if header_ok else 'WRONG'}")
 print(f"    exit {rc}; findings {len(found)}/15; source unchanged {bool(unchanged)}; success {success.group(1) if success else None}; 1->2 slot {'glReplayCarry1to2' if auto else 'refusedCarry1to2'} {'OK' if slot_ok else 'WRONG'}; inconclusive: {inconclusive or '{}'}; observed red: {sorted(red) or '{}'}")
 integrity=sha_ok and count_ok and bool(unchanged) and bool(success) and exit_ok and slot_ok and header_ok
 if spec=="RECORD":
@@ -80,14 +193,67 @@ print(f"    expected red: {sorted(want) or '{}'}; expected inconclusive: {sorted
 sys.exit(0 if ok else 1)
 PYEOF
 }
-for V in 2560x1440 1600x1000 1920x1080; do
-  $PY -u scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport $V --artifact $O/host-$V.json > $O/host-$V.log 2>&1 || fail "HOST $V exit $?"; summ $O/host-$V.json "HOST $V" || fail "HOST $V status"
+# Every run (host gates, host red arms, P2 arms) goes through one queue, GATE_JOBS at a time (1..5, default 3;
+# GATE_JOBS=1 runs them serially), launched in the listed order. <outdir> starts empty; each run runs in its own process
+# group and atomically writes <name>.rc as "<round nonce> <exit>"; a missing .rc or one from another round fails its
+# check. The checks run and print in the listed order once every run has finished. Exit, HUP, INT or TERM stops the running groups (TERM, then KILL after 5 s).
+NONCE="$$-$(date +%s)-$RANDOM"; PIDS=(); echo "round nonce $NONCE"
+zmodload zsh/parameter
+stop_jobs(){ local s g n live=(); for s in $jobstates; do [[ $s == running:* ]] && live+=(${${(s.:.)${s#*:*:}}%%=*}); done; (( ${#live} )) || return 0
+  for g in $live; do kill -TERM -$g $g 2>/dev/null; done
+  for n in {1..20}; do for g in $live; do kill -0 -$g 2>/dev/null && break; done || break; sleep 0.25; done
+  for g in $live; do kill -KILL -$g $g 2>/dev/null; done; }
+trap stop_jobs EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+JOB='out=$1 nonce=$2; shift 2; "$@" > "$out.log" 2>&1; rc=$?; print -r -- "$nonce $rc" > "$out.rc.tmp" && mv -f "$out.rc.tmp" "$out.rc"'
+queue(){ local out=$1; shift
+  while (( ${#PIDS} >= GATE_JOBS )); do wait $PIDS[1] 2>/dev/null; shift PIDS; done
+  $PY -c 'import os,sys; os.setpgrp(); os.execv(sys.argv[1], sys.argv[1:])' /bin/zsh -fc "$JOB" job "$out" "$NONCE" "$@" &
+  PIDS+=($!); }
+status_of(){ local s; s=$(<"$1.rc") 2>/dev/null || { echo missing; return; }; [[ $s == "$NONCE "<-> ]] && echo ${s#"$NONCE "} || echo "stale($s)"; }
+# Fill the disposable H.264 pattern cache before any timed run, so no P2 arm's ffmpeg encode overlaps a capture: every
+# duration needs a cache key, and a second lookup must be a sha-verified hit of the same entry, else no run launches.
+$PY - "$F/html-unmodified" <<'PYEOF' || { echo "H.264 pattern prewarm FAILED; no run launched"; exit 2; }
+import sys
+from pathlib import Path
+sys.path.insert(0,"scripts")
+from p2_recovery_html_dissolve_live import prewarm_h264_patterns
+root=Path(sys.argv[1])
+first=prewarm_h264_patterns(root)
+if not first: sys.exit(f"no Untitled.mov-*.mov under {root}")
+for r in first: print(f"h264 pattern prewarm {r['seconds']}s: {'cache hit' if r['source']=='cache' else r['source']} key={r.get('cacheKey')}")
+def usable(r): return r.get("source") in ("cache","encoded") and all(isinstance(r.get(k),str) and r[k] for k in ("cacheKey","sha256"))
+unusable=[r.get("seconds") for r in first if not usable(r)]
+if unusable: sys.exit(f"no usable pattern cache key for {unusable} s; later P2 arms would encode during timed captures")
+second={r.get("seconds"):r for r in prewarm_h264_patterns(root)}
+for r in first:
+    again=second.get(r["seconds"]) or {}
+    if not (again.get("source")=="cache" and again.get("cacheKey")==r["cacheKey"] and again.get("sha256")==r["sha256"]):
+        sys.exit(f"pattern cache re-lookup for {r['seconds']} s is not a sha-verified hit of the prewarmed entry: {again or None}")
+    print(f"h264 pattern cache verified {r['seconds']}s: hit key={again['cacheKey']} sha256={again['sha256']}")
+PYEOF
+GATE_SETTLE_S=${GATE_SETTLE_S:-300}
+[[ $GATE_SETTLE_S == <-> ]] || { echo "GATE_SETTLE_S must be a whole number of seconds, got '$GATE_SETTLE_S'" >&2; exit 2; }
+settle_deadline=$((SECONDS + GATE_SETTLE_S))
+while LAUNCH_LOAD=$(load1) && (( LAUNCH_LOAD > GATE_MAX_START_LOAD )); do
+  (( SECONDS >= settle_deadline )) && {
+    echo "1-minute load average $LAUNCH_LOAD still exceeds GATE_MAX_START_LOAD=$GATE_MAX_START_LOAD ${GATE_SETTLE_S}s after" \
+      "the prewarm; no timed run launched." >&2; exit 2; }
+  sleep $(( settle_deadline - SECONDS < 5 ? settle_deadline - SECONDS : 5 ))
 done
+[[ -n $LAUNCH_LOAD ]] || { echo "cannot read the 1-minute load average (sysctl -n vm.loadavg); no run launched" >&2; exit 2; }
+echo "load average (1 min) at launch $LAUNCH_LOAD"
+for V in $HOST_VIEWPORTS; do
+  queue $O/host-$V $PY -u scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport $V --artifact $O/host-$V.json ${HOST_SKIP[$V]:+--skip-arms} ${HOST_SKIP[$V]}
+done
+check_host(){ rc=$(status_of $O/host-$1); [[ $rc == 0 ]] || fail "HOST $1 exit $rc"; summ $O/host-$1.json "HOST $1" "${HOST_SKIP[$1]}" || fail "HOST $1 status"; }
 # Host red arms (probe-owned pre-registered sets, keyed in the probe by the P2 off-plan sha). The artifact contract is
 # checked in full: every key present and typed, redArm equal to the label the CLI arguments imply, expectedCoreSha256
 # the arm's sha, `unknown` an empty list, the census stray/duplicate multiset reconciled with redSet, and the red and
 # expected multisets equal (Counter). A "record" arm returns 3 only when all of that holds with status recorded.
-host_red(){ n=$(echo "$*" | tr -d ' '); $PY -u scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport 1920x1080 --artifact $O/host-red$n.json "$@" > $O/host-red$n.log 2>&1; rc=$?; $PY - "$O/host-red$n.json" "$rc" "$@" <<'PYEOF'
+run_host_red(){ n=$(echo "$*" | tr -d ' '); queue $O/host-red$n $PY -u scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport 1920x1080 --artifact $O/host-red$n.json "$@"; }
+check_host_red(){ n=$(echo "$*" | tr -d ' '); rc=$(status_of $O/host-red$n)
+  [[ $rc == <-> ]] || { echo "[HOST $*] no fresh status ($rc) -> MISMATCH"; return 1; }
+  $PY - "$O/host-red$n.json" "$rc" "$@" <<'PYEOF'
 import json,sys
 from collections import Counter
 sys.path.insert(0,"scripts")
@@ -141,27 +307,21 @@ for o,c in sorted((census or {}).items()):
 sys.exit((3 if exp=="record" else 0) if ok else 1)
 PYEOF
 }
-for A in "--core-variant stash-any" "--strip bridge@8" "--strip retire@2" "--strip restart@6" "--strip glReplay@2 --gl-replay auto"; do
-  host_red ${=A}; tally $? "HOST red $A"
-done
-run_p2(){ spec=$1; inc=$2; shift 2; n=$(echo "$*" | tr -d ' '); $PY scripts/p2_recovery_html_adversarial.py --reuse-export --disposable --out-dir "$O/p2$n" "$@" > "$O/p2$n.log" 2>&1; rc=$?; echo "[P2 $*] exit=$rc $(grep -m1 '^success' "$O/p2$n.log") True=$(grep -cE '^- [A-Za-z0-9]+: \*\*True\*\*' "$O/p2$n.log") False: $(grep -oE '^- [A-Za-z0-9]+: \*\*False\*\*' "$O/p2$n.log" | tr '\n' ' ')"; r=$O/p2$n/report.json; [[ "$*" == *"--gl-replay auto"* ]] && r=$O/p2$n/gl-replay/report.json; cp $r "$O/p2$n.report.json" 2>/dev/null; expect "$O/p2$n.log" "$rc" "$spec" "$inc" "$@"; tally $? "P2 $*"; }
-# run_p2 "<expected red>" "<expected inconclusive>" <args>
-run_p2 "" "" --wait-profile fast; run_p2 "continueThroughMovingMagicMove3to4" "" --wait-profile fast --disable-bridge34; run_p2 "" "" --wait-profile slow
-# Registered post hoc from discovery r2 (8ac39a42), seen in r1 too: the stray WA0125 overlay paints at authored
-# (109,795,485x273) on slide 4, overlapping the bridged movie's slide-4 rect (327,709,1266x356), so the variant itself
-# corrupts the 3->4 measurement.
-run_p2 "noStrayVideo continueThroughMovingMagicMove3to4" "freezeControlCaughtByCounter" --wait-profile fast --core-variant stash-any
-# Registered post hoc from r2: with the bridge stripped from the injected plan the freeze bracket is skipped (True).
-run_p2 "continueThroughMovingMagicMove3to4" "" --wait-profile fast --strip bridge@8
-# Registered post hoc from discovery r2 (8ac39a42); r1 and r2 agree.
-run_p2 "noStrayVideo refusedCarry1to2" "" --wait-profile fast --strip glReplay@2
-# Registered post hoc from r2: the bridge stays in the plan, and the un-retired decoder breaks the 3->4 carry (the host
-# arm agrees: red only on the b2to3 carry).
-run_p2 "continueThroughMovingMagicMove3to4" "freezeControlCaughtByCounter" --wait-profile fast --strip restart@6
-run_p2 "" "" --wait-profile fast --gl-replay auto
-# Registered post hoc from r2.
-run_p2 "glReplayCarry1to2 noStrayVideo" "" --wait-profile fast --gl-replay auto --strip glReplay@2
+for A in $HOST_RED_ARMS; do run_host_red ${=A}; done
+# Each P2 arm runs in its own --out-dir.
+run_p2(){ shift 2; n=$(echo "$*" | tr -d ' ')
+  queue "$O/p2$n" $PY scripts/p2_recovery_html_adversarial.py --reuse-export --disposable --out-dir "$O/p2$n" "$@"; }
+check_p2(){ spec=$1; inc=$2; shift 2; n=$(echo "$*" | tr -d ' '); rc=$(status_of "$O/p2$n"); echo "[P2 $*] exit=$rc $(grep -m1 '^success' "$O/p2$n.log") True=$(grep -cE '^- [A-Za-z0-9]+: \*\*True\*\*' "$O/p2$n.log") False: $(grep -oE '^- [A-Za-z0-9]+: \*\*False\*\*' "$O/p2$n.log" | tr '\n' ' ')"; r=$O/p2$n/report.json; [[ "$*" == *"--gl-replay auto"* ]] && r=$O/p2$n/gl-replay/report.json; cp $r "$O/p2$n.report.json" 2>/dev/null; if [[ $rc == <-> ]]; then expect "$O/p2$n.log" "$rc" "$spec" "$inc" "$@"; else echo "    no fresh status ($rc) -> MISMATCH"; false; fi; tally $? "P2 $*"; }
+for A in "${P2_ARMS[@]}"; do run_p2 "${(@Q)${(z)A}}"; done
+wait
+for V in $HOST_VIEWPORTS; do check_host $V; done
+for A in $HOST_RED_ARMS; do check_host_red ${=A}; tally $? "HOST red $A"; done
+for A in "${P2_ARMS[@]}"; do check_p2 "${(@Q)${(z)A}}"; done
 $PY -c "from obed_edom.live_continuity_js import js_sha256; print('runtime sha at end', js_sha256())"
-pgrep -fl obed-live-chrome | cut -c1-80 | head -2; echo "DONE failed=$FAIL pending=$PENDING"
+pgrep -fl obed-live-chrome | cut -c1-80 | head -2
+echo "load average (1 min) at start $START_LOAD, at launch $LAUNCH_LOAD, at end $(load1 || echo unreadable); wall ${SECONDS}s"
+echo "DONE tier=$TIER failed=$FAIL pending=$PENDING"
 if (( ALLOW_RECORD && PENDING )); then echo "## --allow-record: $PENDING RECORD arm(s) left ungated -- DISCOVERY RUN, NOT A PASS ##"; fi
-(( FAIL == 0 && (PENDING == 0 || ALLOW_RECORD) ))
+(( FAIL == 0 && (PENDING == 0 || ALLOW_RECORD) )); rc=$?
+if [[ $TIER == dev ]]; then echo "## DEV TIER -- NOT A QUALIFICATION PASS (exit $(( rc ? 1 : 10 ))) ##"; exit $(( rc ? 1 : 10 )); fi
+exit $rc

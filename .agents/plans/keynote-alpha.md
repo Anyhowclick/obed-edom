@@ -72,10 +72,24 @@ The findings, grouped:
   proving the gate is not vacuous. Two-tier scorer: hold-INTEGRITY failures → `inconclusive`;
   gate/isolation/positives → `pass`/`fail` only once integrity holds. Fresh Chrome per bracket run (the
   player's SPA hash only establishes on a first navigation).
+- **Where the bracket runs (owner decision 8b, 2026-10-09, "option 2"):** the bracket is the round's only gating
+  check of painted pixels at the 3→4 cut plus its own non-vacuity control, so it runs once per paint path:
+  `--wait-profile fast` (DOM) and `--gl-replay auto` (WebGL). `--wait-profile slow` and every red arm
+  (`--core-variant`, `--strip`, `--disable-bridge34`) pass `--skip-freeze-bracket`, which P2 refuses on any other
+  arm (a non-red `--gl-replay auto` arm whatever its wait profile); a flag skip is non-blocking, renders `**True** (skipped by --skip-freeze-bracket)`, and the report names it
+  (`Freeze bracket:` header line, `skipFreezeBracket` in report.json).
+- **At-cut counter gates every arm (owner decision 8a, promoted 2026-10-09):** `movingIndexRunAtCut` (the
+  counter run across the 3→4 cut itself, in the main run) is part of `continueThroughMovingMagicMove3to4`'s pass
+  (`_moving_mm34_verdict`), no longer report-only. It agreed with the bracket in 63/63 positive runs and was never a
+  false red; re-scored on the two 2026-10-09 rounds (18 P2 reports, every arm) it changes no finding. Three states:
+  any other clause red -> red; otherwise a run that was not measured (no valid at-cut boundary, undecodable flip
+  window, inadmissible null reads, or the scorer's own decoding-integrity reasons) renders `**False** (inconclusive)`
+  and blocks success; only a measured counter failure is red.
 
 ## Accepted residuals (fixture-scoped / deferred — not blocking)
 - Footprint ownership is geometric (IoU), not paint-order/opacity-aware — backstopped by the composite
-  counter, same-movie instances, and fail-closed ties.
+  counter (the at-cut run gates in every arm; the freeze bracket proves it non-vacuous in fast and gl-auto),
+  same-movie instances, and fail-closed ties.
 - Strict boundary parsing is bypassed by `_norm_hash` prefix-normalisation — unreachable in production
   (player emits clean `#N`); closing needs raw-hash pipeline re-plumbing.
 - ~~Freeze control uses state-based (not per-screenshot) cover attestation~~ — CLOSED by the 3→4

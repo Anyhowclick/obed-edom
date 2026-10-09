@@ -21,12 +21,14 @@ import math
 import shutil
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import cv2
 import numpy as np
 import pytest
+from fake_chrome import FakeChromeProcess, FakeTime
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -46,6 +48,8 @@ def _load_probe_module():
 
 
 probe = _load_probe_module()
+from obed_edom import devtools_port  # noqa: E402
+from obed_edom.devtools_port import DevToolsEndpoint  # noqa: E402
 
 ASSET = "untitled.mov"
 SRC_RECT = {"x": 100.0, "y": 100.0, "w": 200.0, "h": 100.0}
@@ -4329,14 +4333,674 @@ class TestGlReplayCli:
             def poll(self) -> int:
                 return 0
 
-        monkeypatch.setattr(probe, "free_port", lambda: 1)
-        monkeypatch.setattr(probe, "launch_attach_chrome", lambda port, profile: Proc())
-        monkeypatch.setattr(probe, "wait_for_cdp", lambda port: None)
+        monkeypatch.setattr(probe, "launch_attach_chrome", lambda profile: Proc())
+        monkeypatch.setattr(probe, "wait_devtools_active_port", lambda profile, proc: DevToolsEndpoint(1, "/devtools/browser/b"))
+        monkeypatch.setattr(probe, "wait_for_cdp", lambda endpoint, proc: None)
         monkeypatch.setattr(probe, "force_exact_viewport", lambda *a: None)
         kwargs = {} if gl is None else {"gl_replay": gl}
         with pytest.raises(RuntimeError):
             probe.run_attach_arm(Path("x"), [], {}, tmp_path, {}, **kwargs)
         assert recording[-1]["gl_replay"] == (gl or "off")
+
+
+def test_attach_arm_holds_the_viewport_override_session_until_its_chrome_is_torn_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chrome 154 drops `Emulation.setDeviceMetricsOverride` when the session that set it
+    detaches: closing it before the host attached left the attach page at 1920x1025
+    (window chrome), so every host gate failed `attach stageFit` at scale 0.9491. The
+    override session must stay open while the host runs and close with the arm."""
+    events: list[str] = []
+
+    class Hold:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+            events.append("hold closed")
+
+    class Proc:
+        pid = 1
+
+        def terminate(self) -> None:
+            events.append("chrome terminated")
+
+        def wait(self, timeout: float) -> int:
+            return 0
+
+        def poll(self) -> int:
+            return 0
+
+    hold = Hold()
+
+    class Host:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            events.append(f"host started, hold closed={hold.closed}")
+            raise RuntimeError("stop after start")
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(probe, "launch_attach_chrome", lambda profile: Proc())
+    monkeypatch.setattr(probe, "wait_devtools_active_port", lambda profile, proc: DevToolsEndpoint(1, "/devtools/browser/b"))
+    monkeypatch.setattr(probe, "wait_for_cdp", lambda endpoint, proc: None)
+    monkeypatch.setattr(probe, "force_exact_viewport", lambda *a: hold)
+    monkeypatch.setattr(probe, "LiveOutputHost", Host)
+    with pytest.raises(RuntimeError):
+        probe.run_attach_arm(Path("x"), [], {}, tmp_path, {})
+    assert events == ["host started, hold closed=False", "hold closed", "chrome terminated"]
+
+
+class TestAttachChrome:
+    """`attach_chrome` is the one owner of the attach Chrome and its viewport-override session for
+    both `run_attach_arm` and attach-mode `run_pass_g`. Order on exit: the override session closes
+    (it must stay open for the whole block: Chrome 154 drops the override on detach), then Chrome is
+    terminated -- in an outer `finally`, so a failing close can never leave Chrome running."""
+
+    class Proc:
+        pid = 4321
+
+        def __init__(self, events: list[str], *, ignores_terminate: bool = False) -> None:
+            self.events = events
+            self.ignores_terminate = ignores_terminate
+            self.killed = False
+
+        def terminate(self) -> None:
+            self.events.append("chrome terminated")
+
+        def kill(self) -> None:
+            self.killed = True
+            self.events.append("chrome killed")
+
+        def wait(self, timeout: float) -> int:
+            if self.ignores_terminate and not self.killed:
+                raise subprocess.TimeoutExpired("chrome", timeout)
+            return 0
+
+        def poll(self) -> int:
+            return -9 if self.killed else 0
+
+    class Hold:
+        def __init__(self, events: list[str], *, close_error: Exception | None = None) -> None:
+            self.events = events
+            self.close_error = close_error
+
+        def close(self) -> None:
+            self.events.append("hold closed")
+            if self.close_error is not None:
+                raise self.close_error
+
+    @pytest.fixture
+    def fake(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
+        events: list[str] = []
+        state: dict[str, Any] = {"events": events, "close_error": None, "port_error": None, "ignores_terminate": False}
+
+        def launch(profile: Path) -> Any:
+            events.append(f"launch {profile.name} stale={(profile / 'DevToolsActivePort').exists()}")
+            state["proc"] = self.Proc(events, ignores_terminate=state["ignores_terminate"])
+            return state["proc"]
+
+        def devtools_port(profile: Path, proc: Any) -> DevToolsEndpoint:
+            assert proc is state["proc"]
+            if state["port_error"] is not None:
+                raise state["port_error"]
+            events.append("port read")
+            return DevToolsEndpoint(9555, "/devtools/browser/b")
+
+        def wait_for_cdp(endpoint: DevToolsEndpoint, proc: Any) -> None:
+            assert proc is state["proc"]
+            events.append(f"cdp {endpoint.port} {endpoint.browser_path}")
+
+        def force_exact_viewport(port: int, w: int, h: int, proc: Any) -> Any:
+            assert proc is state["proc"]
+            events.append(f"viewport {port} {w}x{h}")
+            return self.Hold(events, close_error=state["close_error"])
+
+        monkeypatch.setattr(probe, "launch_attach_chrome", launch)
+        monkeypatch.setattr(probe, "wait_devtools_active_port", devtools_port)
+        monkeypatch.setattr(probe, "wait_for_cdp", wait_for_cdp)
+        monkeypatch.setattr(probe, "force_exact_viewport", force_exact_viewport)
+        state["profile"] = tmp_path / "attach-chrome-profile"
+        return state
+
+    def test_the_block_runs_on_the_chrome_chosen_port_and_cleanup_is_close_then_terminate(self, fake: dict[str, Any]) -> None:
+        record: dict[str, Any] = {}
+        with probe.attach_chrome(fake["profile"], record) as port:
+            fake["events"].append(f"body on {port}")
+        w, h = probe.VIEWPORT_WIDTH, probe.VIEWPORT_HEIGHT
+        assert fake["events"] == [
+            "launch attach-chrome-profile stale=False", "port read", "cdp 9555 /devtools/browser/b", f"viewport 9555 {w}x{h}",
+            "body on 9555", "hold closed", "chrome terminated",
+        ]
+        assert record == {"chromePid": 4321, "chromeExitCode": 0}
+
+    def test_a_failing_override_close_still_terminates_chrome(self, fake: dict[str, Any]) -> None:
+        fake["close_error"] = RuntimeError("close failed")
+        record: dict[str, Any] = {}
+        with pytest.raises(RuntimeError, match="close failed"):
+            with probe.attach_chrome(fake["profile"], record):
+                fake["events"].append("body")
+        assert fake["events"][-3:] == ["body", "hold closed", "chrome terminated"]
+        assert record["chromePid"] == 4321
+
+    def test_a_failing_body_closes_then_terminates_and_propagates(self, fake: dict[str, Any]) -> None:
+        record: dict[str, Any] = {}
+        with pytest.raises(KeyError):
+            with probe.attach_chrome(fake["profile"], record):
+                raise KeyError("body")
+        assert fake["events"][-2:] == ["hold closed", "chrome terminated"]
+        assert "chromeExitCode" in record
+
+    def test_a_failure_before_the_override_terminates_chrome_without_a_close(self, fake: dict[str, Any]) -> None:
+        fake["port_error"] = RuntimeError("Chrome wrote no DevToolsActivePort")
+        record: dict[str, Any] = {}
+        with pytest.raises(RuntimeError, match="DevToolsActivePort"):
+            with probe.attach_chrome(fake["profile"], record):
+                pytest.fail("the block must not run")
+        assert fake["events"] == ["launch attach-chrome-profile stale=False", "chrome terminated"]
+        assert record["chromePid"] == 4321
+
+    def test_a_chrome_that_ignores_terminate_is_killed(self, fake: dict[str, Any]) -> None:
+        fake["ignores_terminate"] = True
+        record: dict[str, Any] = {}
+        with probe.attach_chrome(fake["profile"], record):
+            pass
+        assert fake["events"][-3:] == ["hold closed", "chrome terminated", "chrome killed"]
+        assert record["chromeExitCode"] == -9
+
+    def test_a_stale_profile_and_its_devtools_port_file_are_removed_before_launch(self, fake: dict[str, Any]) -> None:
+        """A leftover `DevToolsActivePort` would name a dead (or another run's) Chrome's port."""
+        fake["profile"].mkdir()
+        (fake["profile"] / "DevToolsActivePort").write_text("9222\n/devtools/browser/old\n")
+        with probe.attach_chrome(fake["profile"], {}):
+            pass
+        assert fake["events"][0] == "launch attach-chrome-profile stale=False"
+
+    def test_the_attach_chrome_argv_lets_chrome_pick_its_port(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        seen: list[list[str]] = []
+        monkeypatch.setattr(probe.subprocess, "Popen", lambda argv, **k: seen.append(argv) or object())
+        probe.launch_attach_chrome(tmp_path / "profile")
+        ports = [a for a in seen[0] if a.startswith("--remote-debugging-port")]
+        assert ports == ["--remote-debugging-port=0"]
+        assert f"--user-data-dir={tmp_path / 'profile'}" in seen[0]
+
+    def test_run_attach_arm_goes_through_attach_chrome(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        calls: list[tuple[Path, dict[str, Any]]] = []
+
+        @contextmanager
+        def owner(profile: Path, record: dict[str, Any]) -> Iterator[int]:
+            calls.append((profile, record))
+            raise RuntimeError("stop at the owner")
+            yield 0
+
+        monkeypatch.setattr(probe, "attach_chrome", owner)
+        with pytest.raises(RuntimeError, match="stop at the owner"):
+            probe.run_attach_arm(Path("x"), [], {}, tmp_path, {})
+        assert [c[0] for c in calls] == [tmp_path / "attach-chrome-profile"]
+        assert calls[0][1]["arm"] == "attach", "the pid/exit code land in the arm's own result"
+
+
+_ENDPOINT = DevToolsEndpoint(51234, "/devtools/browser/fresh")
+_VERSION = "http://127.0.0.1:51234/json/version"
+_LIST = "http://127.0.0.1:51234/json/list"
+
+
+class _Answer:
+    def __init__(self, body: Any) -> None:
+        self.body = json.dumps(body).encode()
+
+    def __enter__(self) -> "_Answer":
+        return self
+
+    def __exit__(self, *_exc: Any) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self.body
+
+
+def _cdp_server(browser: str = "/devtools/browser/fresh") -> tuple[list[str], Any]:
+    """A CDP HTTP server on 51234 whose `/json/version` names `browser` and which has one page."""
+    asked: list[str] = []
+
+    def urlopen(url: str, timeout: float | None = None) -> _Answer:
+        asked.append(url)
+        if url == _VERSION:
+            return _Answer({"webSocketDebuggerUrl": f"ws://127.0.0.1:51234{browser}"})
+        assert url == _LIST
+        return _Answer([{"type": "page", "webSocketDebuggerUrl": "ws://127.0.0.1:51234/devtools/page/P"}])
+
+    return asked, urlopen
+
+
+class TestWaitForCdpPollsTheOwnedChrome:
+    """`wait_for_cdp` polls the attach Chrome it owns on every pass: once that Chrome has exited, the
+    port it wrote may already belong to another run's CDP process, so it never asks that port again
+    and fails at once with the exit code instead of retrying until its timeout. A port that answers
+    as another browser (another CDP server rebound it) fails at once too. All on simulated time."""
+
+    @pytest.fixture
+    def clock(self, monkeypatch: pytest.MonkeyPatch) -> FakeTime:
+        return FakeTime().install(monkeypatch, probe, devtools_port)
+
+    def test_chrome_dying_after_writing_its_port_file_never_drives_that_port(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock: FakeTime,
+    ) -> None:
+        """Real `wait_devtools_active_port` + real `wait_for_cdp` through `attach_chrome`: Chrome
+        writes a complete port file, is alive for the port read, then dies before readiness."""
+        chrome = FakeChromeProcess(alive_polls=1, code=9)
+
+        def launch(profile: Path) -> FakeChromeProcess:
+            profile.mkdir(parents=True, exist_ok=True)
+            (profile / "DevToolsActivePort").write_text("51234\n/devtools/browser/fresh\n")
+            return chrome
+
+        asked: list[str] = []
+        monkeypatch.setattr(probe, "launch_attach_chrome", launch)
+        monkeypatch.setattr(probe.urllib.request, "urlopen", lambda url, timeout=None: asked.append(url))
+        monkeypatch.setattr(probe, "force_exact_viewport", lambda *a: pytest.fail("connected to a dead Chrome's port"))
+        record: dict[str, Any] = {}
+
+        with pytest.raises(SystemExit, match=r"attach Chrome exited \(9\) before opening a CDP target on port 51234"):
+            with probe.attach_chrome(tmp_path / "attach-chrome-profile", record):
+                pytest.fail("the block must not run")
+        assert clock.sleeps == []
+        assert asked == []
+        assert record == {"chromePid": 4321, "chromeExitCode": 9}
+
+    def test_chrome_dying_mid_loop_fails_fast_not_at_the_timeout(self, monkeypatch: pytest.MonkeyPatch, clock: FakeTime) -> None:
+        chrome = FakeChromeProcess(code=0)
+        asked: list[str] = []
+
+        def urlopen(url: str, timeout: float | None = None) -> None:
+            asked.append(url)
+            chrome.die()
+            raise ConnectionError("connection refused")
+
+        monkeypatch.setattr(probe.urllib.request, "urlopen", urlopen)
+        with pytest.raises(SystemExit, match=r"attach Chrome exited \(0\) before opening a CDP target on port 51234"):
+            probe.wait_for_cdp(_ENDPOINT, chrome, timeout_s=30.0)
+        assert clock.sleeps == [0.1]
+        assert asked == [_VERSION]
+
+    def test_positive_control_a_live_chrome_that_never_answers_still_waits_for_the_timeout(
+        self, monkeypatch: pytest.MonkeyPatch, clock: FakeTime,
+    ) -> None:
+        """The same refusing endpoint with a Chrome that stays alive is retried every 100 ms until the
+        simulated timeout, so the fast failures above are the exit check and nothing else."""
+        chrome = FakeChromeProcess()
+        asked: list[str] = []
+
+        def urlopen(url: str, timeout: float | None = None) -> None:
+            asked.append(url)
+            raise ConnectionError("connection refused")
+
+        monkeypatch.setattr(probe.urllib.request, "urlopen", urlopen)
+        with pytest.raises(SystemExit, match=r"^attach Chrome did not open a CDP target on port 51234$"):
+            probe.wait_for_cdp(_ENDPOINT, chrome, timeout_s=15.0)
+        assert clock.elapsed == pytest.approx(15.0)
+        assert clock.sleeps == [0.1] * 150
+        assert asked == [_VERSION] * 150
+        assert chrome.polls == 150
+
+    def test_a_foreign_devtools_endpoint_on_the_port_is_refused_at_once(
+        self, monkeypatch: pytest.MonkeyPatch, clock: FakeTime,
+    ) -> None:
+        """Codex round 3: the owned Chrome is alive at the poll, then exits and another CDP server
+        rebinds its port before the request. That server's `/json/version` names another browser id,
+        so the wait fails at once without listing its targets."""
+        asked, urlopen = _cdp_server(browser="/devtools/browser/another-run")
+        monkeypatch.setattr(probe.urllib.request, "urlopen", urlopen)
+        with pytest.raises(
+            SystemExit,
+            match=r"^attach Chrome's CDP port is not its own: 127\.0\.0\.1:51234 is another DevTools endpoint: "
+            r"its browser target is 'ws://127\.0\.0\.1:51234/devtools/browser/another-run', not /devtools/browser/fresh$",
+        ):
+            probe.wait_for_cdp(_ENDPOINT, FakeChromeProcess(), timeout_s=15.0)
+        assert asked == [_VERSION]
+        assert clock.sleeps == []
+
+    def test_positive_control_the_browser_chrome_wrote_is_accepted(
+        self, monkeypatch: pytest.MonkeyPatch, clock: FakeTime,
+    ) -> None:
+        asked, urlopen = _cdp_server()
+        monkeypatch.setattr(probe.urllib.request, "urlopen", urlopen)
+        probe.wait_for_cdp(_ENDPOINT, FakeChromeProcess(), timeout_s=15.0)
+        assert asked == [_VERSION, _LIST]
+        assert clock.sleeps == []
+
+
+class TestForceExactViewportPollsTheOwnedChrome:
+    """Codex round 3: the viewport session re-polls the owned Chrome once its WebSocket is open.
+    Alive then, the port was Chrome's for the whole handshake; dead, the socket may be another
+    server's, so it is closed before the override is sent."""
+
+    class Ws:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+            self.closed = 0
+
+        def send(self, data: str) -> None:
+            self.sent.append(data)
+
+        def recv(self, timeout: float | None = None) -> str:
+            return '{"id": 1, "result": {}}'
+
+        def close(self) -> None:
+            self.closed += 1
+
+    @pytest.fixture
+    def ws(self, monkeypatch: pytest.MonkeyPatch) -> "TestForceExactViewportPollsTheOwnedChrome.Ws":
+        import websockets.sync.client
+
+        socket = self.Ws()
+        _asked, urlopen = _cdp_server()
+        monkeypatch.setattr(probe.urllib.request, "urlopen", urlopen)
+        monkeypatch.setattr(websockets.sync.client, "connect", lambda url, open_timeout=None: socket)
+        return socket
+
+    def test_chrome_exited_once_connected_closes_the_socket_without_sending(self, ws: Any) -> None:
+        chrome = FakeChromeProcess(alive_polls=0, code=9)
+        with pytest.raises(SystemExit, match=r"attach Chrome exited \(9\) while its viewport session connected on port 51234"):
+            probe.force_exact_viewport(51234, 1920, 1080, chrome)
+        assert ws.sent == [] and ws.closed == 1
+
+    def test_positive_control_a_live_chrome_gets_the_override_and_the_session_is_held(self, ws: Any) -> None:
+        assert probe.force_exact_viewport(51234, 1920, 1080, FakeChromeProcess()) is ws
+        assert [json.loads(m)["method"] for m in ws.sent] == ["Emulation.setDeviceMetricsOverride"]
+        assert ws.closed == 0
+
+
+class TestConcurrentRunIsolation:
+    """`run_gates.sh` runs several probes at once, often into one out dir. Each run must own
+    its export copies (inside the preview cache, which is the only place the host serves
+    from), its attach Chrome profiles and its visible evidence, must remove its own cache
+    folder when it finishes, and must report only its own leftover Chromes."""
+
+    class _Stop(Exception):
+        pass
+
+    @pytest.fixture
+    def driven(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
+        """Drive the ordinary run through `main` with the real `prepare_export` and the real
+        `run_attach_arm`; the attach Chrome launch records its profile and stops the arm."""
+        monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "output"))
+        seen: dict[str, Any] = {"exports": [], "evidence": [], "profiles": []}
+        real_prepare = probe.prepare_export
+        fixture = tmp_path / "fixture"
+        fixture.mkdir()
+        (fixture / "player.js").write_text("player")
+        index = tmp_path / "index.html"
+        index.write_text("unmodified")
+
+        def prepare(*args: Any) -> Path:
+            export = real_prepare(*args)
+            assert (export / "player.js").read_text() == "player"
+            assert (export / "index.html").read_text() == "unmodified"
+            assert probe.safe_export_file(export, "index.html") == (export / "index.html").resolve()
+            assert not (export / "stale.txt").exists(), "a stale folder from a crashed run is replaced"
+            seen["exports"].append(export)
+            return export
+
+        def visible_pass(name: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            seen["evidence"].append(args[5])
+            return {"pass": name}
+
+        def launch(profile: Path) -> Any:
+            seen["profiles"].append(profile)
+            raise self._Stop("attach chrome launch reached")
+
+        facts = {key: None for key in ("asset", "canvas")}
+        facts.update(refusedBoundaries=[], rectExpectations={"V": {}, "Voff": {}})
+        monkeypatch.setattr(probe, "prepare_export", prepare)
+        monkeypatch.setattr(probe, "load_slides", lambda *a: [])
+        monkeypatch.setattr(probe, "ground_truth_plan", lambda *a, **k: None)
+        monkeypatch.setattr(probe, "ground_truth_facts", lambda *a, **k: facts)
+        monkeypatch.setattr(probe, "movie_nodes", lambda *a: [])
+        monkeypatch.setattr(probe, "bind_dom_ids", lambda *a: None)
+        monkeypatch.setattr(probe, "expected_stage_fit", lambda *a: {})
+        monkeypatch.setattr(probe, "run_arm", lambda *a, **k: {})
+        monkeypatch.setattr(probe, "run_visible_pass", visible_pass)
+        monkeypatch.setattr(probe, "launch_attach_chrome", launch)
+        monkeypatch.setattr(probe, "check_no_leftover_chrome", lambda: "")
+        seen.update(fixture=fixture, index=index, tmp=tmp_path)
+        return seen
+
+    def _main(self, seen: dict[str, Any], monkeypatch: pytest.MonkeyPatch, artifact: Path) -> dict[str, Any]:
+        argv = ["x", "--fixture", str(seen["fixture"]), "--original-index", str(seen["index"]), "--artifact", str(artifact)]
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit) as exc:
+            probe.main()
+        assert exc.value.code == 1
+        result = json.loads(artifact.read_text())
+        assert "attach chrome launch reached" in result["error"], "the run must have reached the attach arm"
+        return result
+
+    def test_two_runs_in_one_out_dir_get_distinct_export_roots_inside_the_probe_cache(
+        self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        out = driven["tmp"] / "out"
+        self._main(driven, monkeypatch, out / "host-1920x1080.json")
+        first = list(driven["exports"])
+        driven["exports"].clear()
+        self._main(driven, monkeypatch, out / "host-1600x1000.json")
+        second = list(driven["exports"])
+        cache = probe.cache_dir(probe.PROBE_DIGEST).resolve()
+        tags = ["html-arm-a", "html-arm-b", "html-visible-v", "html-visible-voff", "html-attach"]
+        assert [p.name for p in first] == [p.name for p in second] == tags
+        assert all(p.resolve().is_relative_to(cache) for p in first + second)
+        assert not set(first) & set(second), "same tags in two runs must land in different folders"
+        assert {p.parent for p in first} == {probe.run_root(out / "host-1920x1080.json")}
+        assert {p.parent for p in second} == {probe.run_root(out / "host-1600x1000.json")}
+
+    def test_the_same_artifact_name_in_two_out_dirs_does_not_collide(self, driven: dict[str, Any]) -> None:
+        a = probe.run_root(driven["tmp"] / "o1" / "host-red.json")
+        b = probe.run_root(driven["tmp"] / "o2" / "host-red.json")
+        assert a != b and a.parent == b.parent == probe.cache_dir(probe.PROBE_DIGEST) / "runs"
+
+    def test_the_same_artifact_maps_to_the_same_root(self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+        artifact = driven["tmp"] / "out" / "host.json"
+        assert probe.run_root(artifact) == probe.run_root(driven["tmp"] / "out" / ".." / "out" / "host.json")
+        self._main(driven, monkeypatch, artifact)
+        first = list(driven["exports"])
+        driven["exports"].clear()
+        self._main(driven, monkeypatch, artifact)
+        assert driven["exports"] == first
+
+    def test_a_stale_folder_from_a_crashed_run_is_replaced(self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+        artifact = driven["tmp"] / "out" / "host.json"
+        stale = probe.run_root(artifact) / "html-arm-a"
+        stale.mkdir(parents=True)
+        (stale / "stale.txt").write_text("crashed run")
+        self._main(driven, monkeypatch, artifact)
+        assert driven["exports"][0] == stale
+
+    def test_the_run_folder_is_removed_when_the_run_ends_and_nothing_else_is(
+        self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        artifact = driven["tmp"] / "out" / "host.json"
+        other = probe.run_root(driven["tmp"] / "out" / "other.json") / "html-arm-a"
+        other.mkdir(parents=True)
+        legacy = probe.cache_dir(probe.PROBE_DIGEST) / "html-arm-a"
+        legacy.mkdir(parents=True)
+        self._main(driven, monkeypatch, artifact)
+        assert driven["exports"] and all(not p.exists() for p in driven["exports"])
+        assert not probe.run_root(artifact).exists()
+        assert other.is_dir() and legacy.is_dir(), "only the run's own folder is removed"
+
+    def test_the_run_folder_is_removed_when_the_run_raises(self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+        artifact = driven["tmp"] / "out" / "host.json"
+
+        def boom(*a: Any, **k: Any) -> Any:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(probe, "run_arm", boom)
+        monkeypatch.setattr(sys, "argv", [
+            "x", "--fixture", str(driven["fixture"]), "--original-index", str(driven["index"]), "--artifact", str(artifact),
+        ])
+        with pytest.raises(KeyboardInterrupt):
+            probe.main()
+        assert driven["exports"] == [probe.run_root(artifact) / "html-arm-a"]
+        assert not probe.run_root(artifact).exists()
+
+    def test_the_attach_profile_and_visible_evidence_are_per_run(self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+        out = driven["tmp"] / "out"
+        a, b = out / "host-a.json", out / "host-b.json"
+        self._main(driven, monkeypatch, a)
+        self._main(driven, monkeypatch, b)
+        assert driven["profiles"] == [probe.run_root(a) / "attach-chrome-profile", probe.run_root(b) / "attach-chrome-profile"]
+        assert driven["evidence"] == [out / "visible" / "host-a"] * 2 + [out / "visible" / "host-b"] * 2
+
+    def test_the_pass_g_attach_profile_and_evidence_are_per_run(self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+        plan = argparse.Namespace(scene_index_by_player={0: 1, 1: 2})
+        monkeypatch.setattr(probe, "load_slides", lambda *a: [{"originalOrdinal": 1, "playerIndex": 0}, {"originalOrdinal": 2, "playerIndex": 1}])
+        monkeypatch.setattr(probe, "ground_truth_plan", lambda *a, **k: plan)
+        monkeypatch.setattr(probe, "ground_truth_facts", lambda *a, **k: {"rectExpectations": {"V": {}}, "verdicts": []})
+        monkeypatch.setattr(probe, "slide_instances_of", lambda *a: {})
+        monkeypatch.setattr(probe, "character_region_rect", lambda *a: None)
+        monkeypatch.setattr(probe, "goto_matrix", lambda *a: ())
+        out = driven["tmp"] / "out"
+        for name in ("g-a", "g-b"):
+            args = probe.parse_args([
+                "--pass", "G", "--attach", "--fixture", str(driven["fixture"]), "--original-index", str(driven["index"]),
+                "--artifact", str(out / f"{name}.json"),
+            ])
+            with pytest.raises(self._Stop):
+                probe.run_pass_g(args)
+        assert driven["profiles"] == [probe.run_root(out / f"{n}.json") / "attach-chrome-profile-g" for n in ("g-a", "g-b")]
+
+
+    def test_the_pass_g_attach_goes_through_attach_chrome(self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[tuple[Path, dict[str, Any]]] = []
+
+        @contextmanager
+        def owner(profile: Path, record: dict[str, Any]) -> Iterator[int]:
+            calls.append((profile, record))
+            raise self._Stop("owner reached")
+            yield 0
+
+        plan = argparse.Namespace(scene_index_by_player={0: 1, 1: 2})
+        monkeypatch.setattr(probe, "attach_chrome", owner)
+        monkeypatch.setattr(probe, "load_slides", lambda *a: [{"originalOrdinal": 1, "playerIndex": 0}, {"originalOrdinal": 2, "playerIndex": 1}])
+        monkeypatch.setattr(probe, "ground_truth_plan", lambda *a, **k: plan)
+        monkeypatch.setattr(probe, "ground_truth_facts", lambda *a, **k: {"rectExpectations": {"V": {}}, "verdicts": []})
+        monkeypatch.setattr(probe, "slide_instances_of", lambda *a: {})
+        monkeypatch.setattr(probe, "character_region_rect", lambda *a: None)
+        monkeypatch.setattr(probe, "goto_matrix", lambda *a: ())
+        artifact = driven["tmp"] / "out" / "g.json"
+        args = probe.parse_args([
+            "--pass", "G", "--attach", "--fixture", str(driven["fixture"]), "--original-index", str(driven["index"]),
+            "--artifact", str(artifact),
+        ])
+        with pytest.raises(self._Stop):
+            probe.run_pass_g(args)
+        assert [c[0] for c in calls] == [probe.run_root(artifact) / "attach-chrome-profile-g"]
+        assert calls[0][1]["pass"] == "G"
+
+
+class TestInvocationLock:
+    """Two invocations on one artifact share `run_root(artifact)`; either would delete the other's
+    live folder on exit. `run_scope` holds an exclusive lock beside the folder for the whole run,
+    and a second invocation fails fast instead of sharing it."""
+
+    @pytest.fixture(autouse=True)
+    def _output(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "output"))
+
+    def test_a_second_scope_on_the_same_artifact_fails_fast_and_leaves_the_first_folder(self, tmp_path: Path) -> None:
+        artifact = tmp_path / "out" / "host.json"
+        with probe.run_scope(artifact) as root:
+            (root / "html-arm-a").mkdir(parents=True)
+            with pytest.raises(SystemExit, match="another live_continuity_probe run is using"):
+                with probe.run_scope(tmp_path / "out" / ".." / "out" / "host.json"):
+                    pytest.fail("the second invocation must not run")
+            assert (root / "html-arm-a").is_dir(), "the refused invocation must not remove the live folder"
+        assert not root.exists()
+
+    def test_another_artifact_is_not_blocked(self, tmp_path: Path) -> None:
+        with probe.run_scope(tmp_path / "out" / "a.json") as a, probe.run_scope(tmp_path / "out" / "b.json") as b:
+            assert a != b
+
+    @pytest.mark.parametrize("ending", ["return", "raise"])
+    def test_the_lock_is_released_when_the_scope_ends(self, tmp_path: Path, ending: str) -> None:
+        artifact = tmp_path / "out" / "host.json"
+        if ending == "raise":
+            with pytest.raises(KeyboardInterrupt):
+                with probe.run_scope(artifact):
+                    raise KeyboardInterrupt
+        else:
+            with probe.run_scope(artifact):
+                pass
+        with probe.run_scope(artifact) as root:
+            assert root == probe.run_root(artifact)
+
+    def test_a_lock_held_by_another_process_refuses_this_one(self, tmp_path: Path) -> None:
+        artifact = tmp_path / "out" / "host.json"
+        root = probe.run_root(artifact)
+        root.parent.mkdir(parents=True, exist_ok=True)
+        holder = subprocess.Popen(
+            [sys.executable, "-c", (
+                "import fcntl, sys; f = open(sys.argv[1], 'a'); fcntl.flock(f, fcntl.LOCK_EX); "
+                "print('locked', flush=True); sys.stdin.read()"
+            ), str(root.parent / f"{root.name}.lock")],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        )
+        try:
+            assert holder.stdout is not None and holder.stdout.readline().strip() == "locked"
+            with pytest.raises(SystemExit, match=str(artifact.resolve())):
+                with probe.run_scope(artifact):
+                    pytest.fail("must not run while another process holds the lock")
+        finally:
+            holder.communicate("", timeout=10)
+        with probe.run_scope(artifact):
+            pass
+
+    def test_main_refuses_before_touching_the_artifact(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        artifact = tmp_path / "out" / "host.json"
+        monkeypatch.setattr(sys, "argv", ["x", "--fixture", str(tmp_path), "--original-index", str(tmp_path / "i.html"), "--artifact", str(artifact)])
+        monkeypatch.setattr(probe, "run_cli", lambda args: pytest.fail("run_cli must not start"))
+        with probe.run_scope(artifact):
+            with pytest.raises(SystemExit, match="another live_continuity_probe run"):
+                probe.main()
+        assert not artifact.exists()
+
+
+def test_the_leftover_chrome_check_reports_only_this_process_descendants(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under `run_gates.sh` concurrency a machine-wide `pgrep obed-live-chrome` lists the other runs'
+    live Chromes as this run's leftovers. Only descendants of this probe (at any depth) count."""
+    me = 4242
+    ps = "\n".join([
+        f"  {me}     1 python live_continuity_probe.py",
+        f"  5001  {me} /Applications/Google Chrome --user-data-dir=/tmp/obed-live-chrome-mine",
+        "  5002  5001 Google Chrome Helper (Renderer) --user-data-dir=/tmp/obed-live-chrome-mine",
+        f"  5003  {me} /usr/bin/some-tool obed-unrelated",
+        "  6001  6000 /Applications/Google Chrome --user-data-dir=/tmp/obed-live-chrome-theirs",
+        "  6002  6001 Google Chrome Helper (Renderer) --user-data-dir=/tmp/obed-live-chrome-theirs",
+    ])
+    calls: list[Any] = []
+
+    def run(cmd: Any, **kwargs: Any) -> Any:
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout=ps + "\n", stderr="")
+
+    monkeypatch.setattr(probe.os, "getpid", lambda: me)
+    monkeypatch.setattr(probe.subprocess, "run", run)
+    report = probe.check_no_leftover_chrome()
+    assert "theirs" not in report
+    assert report.splitlines() == [
+        "5001 /Applications/Google Chrome --user-data-dir=/tmp/obed-live-chrome-mine",
+        "5002 Google Chrome Helper (Renderer) --user-data-dir=/tmp/obed-live-chrome-mine",
+    ]
+
+
+def test_the_leftover_chrome_check_is_empty_with_no_own_chrome(monkeypatch: pytest.MonkeyPatch) -> None:
+    ps = "  6001  6000 /Applications/Google Chrome --user-data-dir=/tmp/obed-live-chrome-theirs\n"
+    monkeypatch.setattr(probe.os, "getpid", lambda: 4242)
+    monkeypatch.setattr(probe.subprocess, "run", lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, stdout=ps, stderr=""))
+    assert probe.check_no_leftover_chrome() == ""
 
 
 class TestForcedFailSplice:
@@ -5946,7 +6610,7 @@ class TestRescoreForceWrapCli:
 
         monkeypatch.setattr(probe, "force_wrap_ground_truth", gt)
         report = probe.rescore_force_wrap(path)
-        assert seen == [(Path("f"), Path("i"), "1to2", "auto")]
+        assert seen == [(Path("f"), Path("i"), "1to2", "auto", probe.run_root(path))]
         assert (report["statusBefore"], report["status"], report["outcome"]) == ("fail", "pass", "carried")
         assert report["recorderWindow"]["rule"].startswith("armed")
 
@@ -7151,3 +7815,202 @@ class TestOpusR3:
         index = calls.index(("advance", 4))
         assert calls[index - 2:index] == ["settle", ("sleep", probe.CLICK_DELAY_S)] and probe.CLICK_DELAY_S == 1.5
         assert calls.count("settle") == 1
+
+
+# --------------------------------------------------------------------------
+# `--skip-arms` (owner decision 2026-10-09): run_gates runs attach, B and Voff only in the
+# 1920x1080 host gate and C only at 2560x1440 / 1600x1000. A skipped arm is recorded in the
+# artifact as `skippedArms`, is never scored, and is never counted as a pass of that arm; a
+# run that skips every positive arm (A, V, attach) cannot pass at all.
+# --------------------------------------------------------------------------
+
+# The two host-gate shapes run_gates.sh uses.
+GATE_SKIPS = (("attach", "B", "Voff"), ("C",))
+
+
+def _skip(result: dict[str, Any], names: tuple[str, ...]) -> dict[str, Any]:
+    """Drop the named arms from a full result exactly as a `--skip-arms` run leaves them out."""
+    for name in names:
+        if name == "attach":
+            del result["attach"]
+        elif name in ("V", "Voff"):
+            del result["visible"][name]
+        else:
+            del result["arms"][name]
+    result["skippedArms"] = [name for name in probe.SKIPPABLE_ARMS if name in names]
+    return result
+
+
+class TestSkipArmsParsing:
+    def test_default_skips_nothing(self) -> None:
+        assert probe.parse_args([]).skip_arms == ()
+
+    def test_names_are_validated_and_put_in_canonical_order(self) -> None:
+        assert probe.parse_args(["--skip-arms", "attach,B,C,Voff"]).skip_arms == ("B", "C", "Voff", "attach")
+        assert probe.parse_args(["--skip-arms", "C"]).skip_arms == ("C",)
+        assert probe.SKIPPABLE_ARMS == ("A", "B", "C", "V", "Voff", "attach")
+
+    @pytest.mark.parametrize("value", ["", "D", "b", "B,B", "B,", "attach, B", "Vgl"])
+    def test_known_bad_unknown_empty_or_repeated_names_are_refused(self, value: str) -> None:
+        with pytest.raises(SystemExit):
+            probe.parse_args(["--skip-arms", value])
+
+    @pytest.mark.parametrize(
+        "extra",
+        [["--strip", "bridge@8"], ["--core-variant", "stash-any"], ["--pass", "G"], ["--force-wrap", "1to2:0"],
+         ["--rescore", "x.json"], ["--gl-replay", "auto", "--gl-force-fail", "posterAmbiguous"]],
+    )
+    def test_skip_arms_belongs_to_the_full_run_only(self, extra: list[str]) -> None:
+        with pytest.raises(SystemExit):
+            probe.parse_args(["--skip-arms", "B", *extra])
+
+    def test_v_cannot_be_skipped_under_gl_replay_auto(self) -> None:
+        """The hand-back is scored from V and Vgl together."""
+        with pytest.raises(SystemExit):
+            probe.parse_args(["--skip-arms", "V", "--gl-replay", "auto"])
+        assert probe.parse_args(["--skip-arms", "B,Voff", "--gl-replay", "auto"]).skip_arms == ("B", "Voff")
+
+
+class TestSkipArmsStatus:
+    def _base(self) -> dict[str, Any]:
+        return TestOverallStatusTruthTable()._base_result()
+
+    @pytest.mark.parametrize("names", GATE_SKIPS)
+    def test_the_run_gates_shapes_pass_when_every_arm_that_ran_passes(self, names: tuple[str, ...]) -> None:
+        assert probe.overall_status(_skip(self._base(), names)) == ("pass", [])
+
+    def test_positive_control_the_unskipped_full_result_passes(self) -> None:
+        result = self._base()
+        assert "skippedArms" not in result
+        assert probe.overall_status(result) == ("pass", [])
+        result["skippedArms"] = []
+        assert probe.overall_status(result) == ("pass", [])
+
+    @pytest.mark.parametrize("names", GATE_SKIPS)
+    def test_a_skip_never_hides_a_failure_of_an_arm_that_ran(self, names: tuple[str, ...]) -> None:
+        result = _skip(self._base(), names)
+        result["arms"]["A"]["continuity"]["mode"] = "off"
+        status, reasons = probe.overall_status(result)
+        assert status == "fail" and "arm A continuity.mode='off', expected 'qualified'" in reasons
+
+    @pytest.mark.parametrize("name", ["B", "C", "attach", "V", "Voff"])
+    def test_known_bad_an_arm_missing_without_being_skipped_is_never_a_pass(self, name: str) -> None:
+        result = _skip(self._base(), (name,))
+        del result["skippedArms"]
+        assert probe.overall_status(result)[0] != "pass"
+
+    @pytest.mark.parametrize("name", ["B", "C", "attach", "V", "Voff"])
+    def test_known_bad_a_skipped_arm_that_has_a_result_fails(self, name: str) -> None:
+        """Skipped means not run: a record claiming both is not trusted."""
+        result = self._base()
+        result["skippedArms"] = [name]
+        status, reasons = probe.overall_status(result)
+        assert status == "fail" and reasons == [f"{name} is skipped by flag but has a result"]
+
+    def test_known_bad_every_arm_skipped_fails(self) -> None:
+        result = _skip(self._base(), probe.SKIPPABLE_ARMS)
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert reasons == ["every positive arm (A, V, attach) is skipped by flag, so nothing qualifies"]
+
+    def test_known_bad_only_null_controls_left_fails(self) -> None:
+        """B, C and Voff are the instrument's controls; on their own they prove nothing."""
+        result = _skip(self._base(), probe.POSITIVE_ARMS)
+        status, reasons = probe.overall_status(result)
+        assert status == "fail" and "nothing qualifies" in reasons[0]
+
+    @pytest.mark.parametrize("names", [("A",), ("V",), ("attach",), ("A", "attach"), ("A", "V")])
+    def test_one_positive_arm_left_is_enough_to_score(self, names: tuple[str, ...]) -> None:
+        assert probe.overall_status(_skip(self._base(), names)) == ("pass", [])
+
+    @pytest.mark.parametrize("value", ["B", ["D"], ["B", "B"], [1], None])
+    def test_known_bad_a_malformed_skipped_arms_record_fails(self, value: Any) -> None:
+        result = self._base()
+        result["skippedArms"] = value
+        status, reasons = probe.overall_status(result)
+        assert status == "fail" and "skippedArms" in reasons[0]
+
+    def test_a_skipped_arm_is_not_scored_for_its_gl_mode(self) -> None:
+        result = _skip(self._base(), ("attach", "B", "Voff"))
+        assert not any("arm B" in r or "Voff" in r or "attach" in r for r in probe.gl_mode_reasons(result))
+        assert any("arm A" in r for r in probe.gl_mode_reasons(result)), "arms that ran are still checked"
+
+    def test_generated_status_requires_exactly_the_arms_that_were_not_skipped(self) -> None:
+        result = _skip(_generated_result(), ("C", "attach"))
+        result["visible"] = {}
+        result["skippedArms"] = ["C", "attach"]
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(probe, "visible_reasons", lambda result: [])
+            assert probe.overall_status(result) == ("pass", [])
+            result["arms"]["C"] = dict(result["arms"]["A"])
+            assert probe.overall_status(result) == ("fail", ["C is skipped by flag but has a result"])
+            del result["arms"]["C"]
+            result["skippedArms"] = ["attach"]
+            assert probe.overall_status(result)[0] == "error", "C is required again once it is not skipped"
+            result["skippedArms"] = ["C"]
+            assert probe.overall_status(result)[0] == "error", "attach is required again once it is not skipped"
+
+
+class TestSkipArmsRun:
+    """The full run leaves the skipped arms out and records them; nothing launches for them."""
+
+    @pytest.fixture
+    def driven(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
+        monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "output"))
+        ran: list[str] = []
+        fixture = tmp_path / "fixture"
+        fixture.mkdir()
+        index = tmp_path / "index.html"
+        index.write_text("unmodified")
+        facts = {key: None for key in ("asset", "canvas")}
+        facts.update(refusedBoundaries=[], rectExpectations={"V": {}, "Voff": {}}, bridgeScene=8)
+        monkeypatch.setattr(probe, "prepare_export", lambda fixture, index, root, tag: root / tag)
+        monkeypatch.setattr(probe, "load_slides", lambda *a: [])
+        monkeypatch.setattr(probe, "ground_truth_plan", lambda *a, **k: None)
+        monkeypatch.setattr(probe, "ground_truth_facts", lambda *a, **k: facts)
+        monkeypatch.setattr(probe, "movie_nodes", lambda *a: [])
+        monkeypatch.setattr(probe, "bind_dom_ids", lambda *a: None)
+        monkeypatch.setattr(probe, "expected_stage_fit", lambda *a: {})
+        monkeypatch.setattr(probe, "bridge_disabled", lambda: __import__("contextlib").nullcontext())
+        monkeypatch.setattr(probe, "run_arm", lambda name, *a, **k: ran.append(name) or {"arm": name})
+        monkeypatch.setattr(probe, "run_visible_pass", lambda name, *a, **k: ran.append(name) or {"pass": name})
+        monkeypatch.setattr(probe, "run_attach_arm", lambda *a, **k: ran.append("attach") or {"arm": "attach"})
+        monkeypatch.setattr(probe, "check_no_leftover_chrome", lambda: "")
+        return {"ran": ran, "fixture": fixture, "index": index, "tmp": tmp_path}
+
+    def _main(self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch, *extra: str) -> dict[str, Any]:
+        artifact = driven["tmp"] / "out" / "host.json"
+        monkeypatch.setattr(sys, "argv", [
+            "x", "--fixture", str(driven["fixture"]), "--original-index", str(driven["index"]),
+            "--artifact", str(artifact), *extra,
+        ])
+        with pytest.raises(SystemExit):
+            probe.main()
+        return json.loads(artifact.read_text())
+
+    def test_positive_control_with_no_skip_every_arm_runs(self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+        result = self._main(driven, monkeypatch)
+        assert driven["ran"] == ["A", "B", "C", "V", "Voff", "attach"]
+        assert result["skippedArms"] == []
+
+    @pytest.mark.parametrize(
+        ("flag", "ran"),
+        [("attach,B,Voff", ["A", "C", "V"]), ("C", ["A", "B", "V", "Voff", "attach"])],
+    )
+    def test_skipped_arms_do_not_run_and_are_recorded(
+        self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch, flag: str, ran: list[str],
+    ) -> None:
+        result = self._main(driven, monkeypatch, "--skip-arms", flag)
+        assert driven["ran"] == ran
+        skipped = [name for name in probe.SKIPPABLE_ARMS if name not in ran]
+        assert result["skippedArms"] == skipped
+        assert "attach" not in result if "attach" in skipped else "attach" in result
+        assert sorted(result["arms"]) == [n for n in ("A", "B", "C") if n in ran]
+        assert sorted(result["visible"]) == [n for n in ("V", "Voff") if n in ran]
+        assert not any(f"{name} is skipped by flag" in r for r in result.get("statusReasons") or [] for name in skipped)
+
+    def test_every_arm_skipped_runs_nothing_and_fails(self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+        result = self._main(driven, monkeypatch, "--skip-arms", ",".join(probe.SKIPPABLE_ARMS))
+        assert driven["ran"] == []
+        assert result["status"] == "fail"
+        assert result["statusReasons"] == ["every positive arm (A, V, attach) is skipped by flag, so nothing qualifies"]

@@ -2887,6 +2887,124 @@ def test_freeze_blocks_success_inconclusive_and_fail_always_block():
     assert p2._freeze_control_blocks_success("fail", bridge34_disabled=False) is True
     assert p2._freeze_control_blocks_success("fail", bridge34_disabled=True) is True
 
+
+def test_freeze_blocks_success_skipped_by_flag_is_non_blocking_with_the_bridge():
+    """Owner decision 8b amended 2026-10-09: `--skip-freeze-bracket` makes "skipped"
+    non-blocking on an arm whose bridge is present; nothing else is relaxed."""
+    assert p2._freeze_control_blocks_success("skipped", bridge34_disabled=False, skipped_by_flag=True) is False
+    assert p2._freeze_control_blocks_success("skipped", bridge34_disabled=True, skipped_by_flag=True) is False
+    assert p2._freeze_control_blocks_success("inconclusive", bridge34_disabled=False, skipped_by_flag=True) is True
+    assert p2._freeze_control_blocks_success("fail", bridge34_disabled=False, skipped_by_flag=True) is True
+
+
+# `_moving_mm34_verdict` — `continueThroughMovingMagicMove3to4`'s verdict. Owner
+# decision 8a (at-cut counter run report-only) promoted 2026-10-09: the at-cut
+# run now gates. Three states (Codex round 2): any pre-promotion clause red ->
+# "fail"; otherwise an UNMEASURED at-cut run -> "inconclusive" (blocks success,
+# never red); a measured at-cut failure -> "fail". Fixture shapes are the
+# main-run report's own sub-verdicts.
+def _mm34_green() -> dict:
+    return {
+        "moving_continuity": {"ok": True},
+        "moving_index_run": {"ok": True},
+        "moving_index_run_at_cut": {"ok": True, "reason": None, "freezeRunAtCut": 0},
+        "flip_window_decodable": True,
+        "footprint_live": {"ok": True},
+        "advance_ok": True,
+        "player_build_errors": [],
+    }
+
+
+def _head_rule(args: dict) -> bool:
+    """HEAD b9a750df's inline rule: no at-cut clause at all."""
+    return bool(
+        args["moving_continuity"].get("ok", False)
+        and args["moving_index_run"].get("ok", False)
+        and args["footprint_live"].get("ok", False)
+        and args["advance_ok"]
+        and not args["player_build_errors"]
+    )
+
+
+def test_mm34_verdict_pass_when_every_clause_holds():
+    assert p2._moving_mm34_verdict(**_mm34_green()) == "pass"
+
+
+@pytest.mark.parametrize("at_cut", [
+    {"ok": False, "reason": "freeze run at cut", "freezeRunAtCut": 9},
+    {"ok": False, "reason": "negative delta anomaly"},
+    {"ok": False, "reason": "no forward progress before flip"},
+    {"ok": False, "reason": "no forward progress after flip"},
+])
+def test_mm34_verdict_red_when_the_measured_at_cut_run_fails(at_cut):
+    """The promotion itself: every other clause green, the at-cut run decodable
+    and scored red -> the finding is red. `_head_rule` on the same input is
+    GREEN (positive control), so the red is the promotion and nothing else."""
+    args = _mm34_green()
+    args["moving_index_run_at_cut"] = at_cut
+    assert _head_rule(args) is True
+    assert p2._moving_mm34_verdict(**args) == "fail"
+
+
+# Every way `_moving_index_run_at_cut` returns `flipWindowDecodable=False`, plus
+# the scorer's own decoding-integrity reasons on a decodable window.
+_UNMEASURED_AT_CUT = [
+    ({"ok": False, "reason": "no valid at-cut boundary", "flipIndex": None}, False),
+    ({"ok": False, "reason": "no sample reached slide 4", "flipIndex": None}, False),
+    ({"ok": False, "reason": "flip window not decodable", "flipIndex": None}, False),
+    ({"ok": False, "reason": "inadmissible null reads at cut", "flipIndex": None}, False),
+    ({"ok": False, "reason": "insufficient decodable samples"}, True),
+    ({"ok": False, "reason": "undecodable in flip window"}, True),
+    ({}, False),
+]
+
+
+@pytest.mark.parametrize("at_cut, decodable", _UNMEASURED_AT_CUT)
+def test_mm34_verdict_inconclusive_when_the_at_cut_run_was_not_measured(at_cut, decodable):
+    """Codex round-2 MAJOR: an at-cut run that was never measured is no verdict
+    about the counter, so with every other clause green it is INCONCLUSIVE —
+    rendered `**False** (inconclusive)`, blocking success but never matching a
+    registered red set."""
+    args = _mm34_green()
+    args["moving_index_run_at_cut"] = at_cut
+    args["flip_window_decodable"] = decodable
+    assert p2._moving_mm34_verdict(**args) == "inconclusive"
+
+
+def test_mm34_verdict_undecodable_flag_wins_over_a_stale_ok():
+    """`flip_window_decodable` False is inconclusive even if the dict claims ok:
+    the flag is the integrity source, never the cached result."""
+    args = _mm34_green()
+    args["flip_window_decodable"] = False
+    assert p2._moving_mm34_verdict(**args) == "inconclusive"
+
+
+@pytest.mark.parametrize("key, bad", [
+    ("moving_continuity", {"ok": False}),
+    ("moving_continuity", {}),
+    ("moving_index_run", {"ok": False}),
+    ("footprint_live", {"ok": False}),
+    ("footprint_live", {"ok": None}),
+    ("advance_ok", False),
+    ("player_build_errors", [{"kind": "player-build-error"}]),
+])
+@pytest.mark.parametrize("at_cut, decodable", [
+    ({"ok": True, "reason": None}, True),
+    ({"ok": False, "reason": "freeze run at cut"}, True),
+    *_UNMEASURED_AT_CUT,
+])
+def test_mm34_verdict_red_whenever_a_pre_promotion_clause_fails(key, bad, at_cut, decodable):
+    """The old rule False stays red whatever the at-cut run did — measured,
+    failed or unmeasured — so the registered red arms (whose old rule is False)
+    cannot drift to inconclusive."""
+    args = _mm34_green()
+    args[key] = bad
+    args["moving_index_run_at_cut"] = at_cut
+    args["flip_window_decodable"] = decodable
+    assert _head_rule(args) is False
+    assert p2._moving_mm34_verdict(**args) == "fail"
+
+
 # --------------------------------------------------------------------------- #
 # I4 — the 1->2 carry is REFUSED: gates under the baseline plan.
 # --------------------------------------------------------------------------- #

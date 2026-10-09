@@ -18,7 +18,6 @@ import io
 import json
 import os
 import resource
-import socket
 import subprocess
 import sys
 import threading
@@ -34,6 +33,9 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
 from obed_edom.dsk_live import keynote_running  # noqa: E402
+from obed_edom.devtools_port import (  # noqa: E402
+    DEVTOOLS_ACTIVE_PORT, ForeignDevToolsEndpoint, verify_devtools_owner, wait_devtools_active_port,
+)
 from obed_edom.html_alpha_probe import (  # noqa: E402
     CLOCK_MIN_RAF,
     CLOCK_WINDOW_S,
@@ -95,12 +97,6 @@ def _serve(root: Path) -> tuple[ThreadingHTTPServer, str]:
     return server, f"http://{host}:{port}/index.html"
 
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
 def _png_to_rgba(data: bytes) -> np.ndarray:
     with Image.open(io.BytesIO(data)) as img:
         rgba = img.convert("RGBA")
@@ -136,45 +132,50 @@ class ChromeCdp:
             self._kill_proc()
             raise
 
+    def _args(self) -> list[str]:
+        return [
+            str(self.chrome),
+            "--headless=new",
+            "--disable-gpu",
+            "--remote-debugging-port=0",
+            "--remote-debugging-address=127.0.0.1",
+            f"--user-data-dir={self.profile}",
+            f"--window-size={self.width},{self.height}",
+            "--force-device-scale-factor=1",
+            "--disable-background-timer-throttling",
+            "--disable-renderer-backgrounding",
+            "--disable-backgrounding-occluded-windows",
+            "--autoplay-policy=no-user-gesture-required",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "about:blank",
+        ]
+
     def _spawn(self) -> None:
-        port = _free_port()
-        self.port = port
-        self.proc = subprocess.Popen(
-            [
-                str(self.chrome),
-                "--headless=new",
-                "--disable-gpu",
-                f"--remote-debugging-port={port}",
-                "--remote-debugging-address=127.0.0.1",
-                f"--user-data-dir={self.profile}",
-                f"--window-size={self.width},{self.height}",
-                "--force-device-scale-factor=1",
-                "--disable-background-timer-throttling",
-                "--disable-renderer-backgrounding",
-                "--disable-backgrounding-occluded-windows",
-                "--autoplay-policy=no-user-gesture-required",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "about:blank",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        """Chrome binds its own debugging port; `_attach` reads it from the profile's DevToolsActivePort."""
+        self.port = None
+        (self.profile / DEVTOOLS_ACTIVE_PORT).unlink(missing_ok=True)
+        self.proc = subprocess.Popen(self._args(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     async def _attach(self) -> None:
         import urllib.request
         import websockets
 
-        port = self.port
+        endpoint = await asyncio.to_thread(
+            wait_devtools_active_port, self.profile, self.proc, self.START_TIMEOUT_S
+        )
+        port = self.port = endpoint.port
         ready = False
         deadline = time.monotonic() + self.START_TIMEOUT_S
         while time.monotonic() < deadline:
+            self._raise_if_exited()
             self._sample_rss()
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=0.5) as resp:
-                    json.loads(resp.read().decode())
-                    ready = True
-                    break
+                verify_devtools_owner(endpoint, 0.5)
+                ready = True
+                break
+            except ForeignDevToolsEndpoint:
+                raise
             except Exception:
                 await asyncio.sleep(0.1)
         if not ready:
@@ -184,6 +185,7 @@ class ChromeCdp:
         ws_url = None
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
+            self._raise_if_exited()
             try:
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=0.5) as resp:
                     targets = json.loads(resp.read().decode())
@@ -196,6 +198,11 @@ class ChromeCdp:
         if not ws_url:
             raise RuntimeError("Chrome has no page CDP target")
         self._ws = await websockets.connect(ws_url, max_size=None)
+        try:
+            self._raise_if_exited()
+        except RuntimeError:
+            await self.close()
+            raise
         await self.call("Runtime.enable")
         await self.call("Page.enable")
         await self.call("Log.enable")
@@ -210,6 +217,12 @@ class ChromeCdp:
             "Emulation.setDefaultBackgroundColorOverride",
             color={"r": 0, "g": 0, "b": 0, "a": 0},
         )
+
+    def _raise_if_exited(self) -> None:
+        """Once the owned Chrome has exited, the port it wrote is no longer its: never drive it."""
+        exit_code = self.proc.poll()
+        if exit_code is not None:
+            raise RuntimeError(f"Chrome exited ({exit_code}) before its CDP page target was ready")
 
     def _sample_rss(self) -> None:
         if self.proc is None or self.proc.poll() is not None:

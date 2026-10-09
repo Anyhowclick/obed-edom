@@ -11,7 +11,8 @@ from typing import Any
 
 import pytest
 
-from obed_edom import html_preview, live_gl_replay_js, live_host, live_runtime
+from fake_chrome import FakeChromeProcess, FakeTime
+from obed_edom import devtools_port, html_preview, live_gl_replay_js, live_host, live_runtime
 
 
 class FakeCdp:
@@ -403,6 +404,276 @@ def test_chrome_cdp_start_failure_preserves_original_error_when_stop_also_fails(
     monkeypatch.setattr(transport, "stop", lambda: (_ for _ in ()).throw(RuntimeError("stop boom")))
     with pytest.raises(live_host.LiveHostError, match="did not start"):
         transport.start()
+
+
+# --------------------------------------------------------------------------- #
+# Chrome-chosen debugging port. A port picked by bind-and-close can be taken by a concurrent
+# run before Chrome binds it (and then this host drives the other run's Chrome), so Chrome is
+# launched with `--remote-debugging-port=0` and the port it bound is read back from
+# `<profile>/DevToolsActivePort`. Attach mode never launches Chrome and is untouched.
+# --------------------------------------------------------------------------- #
+class _LaunchedChrome:
+    """Records the launch and, like Chrome, writes DevToolsActivePort once it has bound a port. Its
+    process is alive for `alive_polls` polls, then exited with `code`."""
+
+    def __init__(self, profile: Path, *, port: int | None = 51234, alive_polls: int = 10**9, code: int = 0):
+        self.profile, self.port, self.alive_polls, self.code = profile, port, alive_polls, code
+        self.argv: list[str] | None = None
+        self.stale_file_present_at_launch: bool | None = None
+        self.proc: FakeChromeProcess | None = None
+
+    def popen(self, argv, **_kwargs):
+        self.argv = list(argv)
+        port_file = self.profile / "DevToolsActivePort"
+        self.stale_file_present_at_launch = port_file.exists()
+        if self.port is not None:
+            port_file.write_text(f"{self.port}\n/devtools/browser/fresh\n")
+        self.proc = FakeChromeProcess(self.alive_polls, self.code)
+        return self.proc
+
+
+def _fake_cdp_endpoint(monkeypatch, transport, *, browser="/devtools/browser/fresh"):
+    """A browser (`/json/version` naming `browser`) with one page target behind whatever port the
+    transport asks for; returns the URLs it was asked for, the sockets connected and the CDP calls."""
+    asked: list[str] = []
+    connected: list[str] = []
+
+    class Response:
+        def __init__(self, url):
+            port, path = re.match(r"http://127\.0\.0\.1:(\d+)(/json/version|/json/list)$", url).groups()
+            if path == "/json/version":
+                body: Any = {"Browser": "Chrome/154", "webSocketDebuggerUrl": f"ws://127.0.0.1:{port}{browser}"}
+            else:
+                body = [{"type": "page", "url": "about:blank", "webSocketDebuggerUrl": f"ws://127.0.0.1:{port}/devtools/page/P"}]
+            self.body = json.dumps(body).encode()
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        def read(self): return self.body
+
+    def urlopen(url, timeout=None):
+        asked.append(url)
+        return Response(url)
+
+    def connect(url, **_kwargs):
+        connected.append(url)
+        return FakeWs()
+
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def call(method, deadline_s=None, **params):
+        calls.append((method, params))
+        return {"windowId": 7} if method == "Browser.getWindowForTarget" else {}
+
+    monkeypatch.setattr(live_host.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(live_host, "connect", connect)
+    monkeypatch.setattr(transport, "call", call)
+    return asked, connected, calls
+
+
+class FakeWs:
+    def __init__(self): self.close_calls = 0
+    def close(self): self.close_calls += 1
+
+
+def _fake_time(monkeypatch) -> FakeTime:
+    """Readiness loops in both the host and `wait_devtools_active_port` run on simulated time."""
+    return FakeTime().install(monkeypatch, live_host, devtools_port)
+
+
+_VERSION = "http://127.0.0.1:51234/json/version"
+_LIST = "http://127.0.0.1:51234/json/list"
+
+
+@pytest.mark.parametrize("headless", [True, False])
+def test_chrome_launch_lets_chrome_bind_its_own_port_and_drives_the_port_it_wrote(tmp_path, monkeypatch, headless):
+    """Headless and headed launches both pass `--remote-debugging-port=0` (never a pre-picked port),
+    a stale DevToolsActivePort from an earlier Chrome is gone before launch, and every CDP request goes
+    to the port the launched Chrome wrote, not the stale one. Headed still goes fullscreen on the
+    chosen display's position. Positive control for the ownership check: `/json/version` naming the
+    browser target Chrome wrote is accepted."""
+    display = live_host.OutputDisplay(2, 1512, 0, 1920, 1080)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, headless=headless)
+    (tmp_path / "DevToolsActivePort").write_text("9999\n/devtools/browser/stale\n")
+    chrome = _LaunchedChrome(tmp_path, port=51234)
+    monkeypatch.setattr(live_host.subprocess, "Popen", chrome.popen)
+    asked, connected, calls = _fake_cdp_endpoint(monkeypatch, transport)
+    clock = _fake_time(monkeypatch)
+
+    transport.start()
+
+    debugging_ports = [arg for arg in chrome.argv if arg.startswith("--remote-debugging-port")]
+    assert debugging_ports == ["--remote-debugging-port=0"]
+    assert "--remote-debugging-address=127.0.0.1" in chrome.argv
+    assert f"--user-data-dir={tmp_path}" in chrome.argv
+    assert "--window-position=1512,0" in chrome.argv
+    assert ("--headless=new" in chrome.argv) is headless
+    assert chrome.stale_file_present_at_launch is False
+    assert transport.port == 51234
+    assert asked == [_VERSION, _LIST]
+    assert connected == ["ws://127.0.0.1:51234/devtools/page/P"]
+    assert clock.sleeps == []
+    fullscreen = [params for method, params in calls if method == "Browser.setWindowBounds"]
+    assert fullscreen == ([] if headless else [{"windowId": 7, "bounds": {"windowState": "fullscreen"}}])
+
+
+def test_chrome_exiting_before_writing_its_port_fails_fast_with_the_exit_code(tmp_path, monkeypatch):
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, headless=True)
+    chrome = _LaunchedChrome(tmp_path, port=None, alive_polls=0, code=21)
+    monkeypatch.setattr(live_host.subprocess, "Popen", chrome.popen)
+    asked, _connected, _calls = _fake_cdp_endpoint(monkeypatch, transport)
+    clock = _fake_time(monkeypatch)
+
+    with pytest.raises(live_host.LiveHostError, match=r"Chrome CDP did not start: Chrome exited \(21\) before its DevTools port could be used \(.*DevToolsActivePort\)"):
+        transport.start()
+    assert clock.sleeps == [] and chrome.proc.polls >= 1
+    assert asked == []
+    assert transport.proc is None and transport.port is None
+
+
+def test_chrome_exiting_after_writing_its_port_never_drives_that_port(tmp_path, monkeypatch):
+    """Codex round 2: Chrome wrote a complete port file and then died before readiness. Its port may
+    already belong to another CDP process, so the readiness loop polls the owned process first and
+    fails fast without a single request to that port (and never connects)."""
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, headless=True)
+    chrome = _LaunchedChrome(tmp_path, port=51234, alive_polls=1, code=9)
+    monkeypatch.setattr(live_host.subprocess, "Popen", chrome.popen)
+    asked, connected, _calls = _fake_cdp_endpoint(monkeypatch, transport)
+    clock = _fake_time(monkeypatch)
+
+    with pytest.raises(live_host.LiveHostError, match=r"Chrome CDP did not start: Chrome exited \(9\) before its page target was ready"):
+        transport.start()
+    assert clock.sleeps == []
+    assert asked == [] and connected == []
+    assert transport.proc is None and transport.ws is None
+
+
+def test_a_foreign_devtools_endpoint_on_the_port_is_refused_without_connecting(tmp_path, monkeypatch):
+    """Codex round 3: Chrome wrote its port and browser target, then exited between a poll and the
+    request, and another CDP server rebound the port. That server answers `/json/version` with a
+    different browser id: the host fails at once, never lists its targets or connects to them."""
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, headless=True)
+    chrome = _LaunchedChrome(tmp_path, port=51234)
+    monkeypatch.setattr(live_host.subprocess, "Popen", chrome.popen)
+    asked, connected, _calls = _fake_cdp_endpoint(monkeypatch, transport, browser="/devtools/browser/another-run")
+    clock = _fake_time(monkeypatch)
+
+    with pytest.raises(live_host.LiveHostError, match=r"Chrome CDP did not start: 127\.0\.0\.1:51234 is another DevTools endpoint: its browser target is 'ws://127\.0\.0\.1:51234/devtools/browser/another-run', not /devtools/browser/fresh"):
+        transport.start()
+    assert asked == [_VERSION]
+    assert connected == []
+    assert clock.sleeps == []
+    assert chrome.proc.calls == ["terminate", "wait"]
+    assert transport.proc is None and transport.ws is None
+
+
+def test_chrome_exiting_once_its_page_socket_connects_is_refused(tmp_path, monkeypatch):
+    """Codex round 3: the owned process is polled again after the WebSocket connects. Chrome alive
+    then means the port was its own for the whole handshake; dead means the socket may be another
+    server's, so it is closed and the start fails before a single CDP command is sent."""
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, headless=True)
+    chrome = _LaunchedChrome(tmp_path, port=51234, code=9)
+    monkeypatch.setattr(live_host.subprocess, "Popen", chrome.popen)
+    _asked, _connected, calls = _fake_cdp_endpoint(monkeypatch, transport)
+    sockets: list[FakeWs] = []
+
+    def connect(url, **_kwargs):
+        chrome.proc.die()
+        sockets.append(FakeWs())
+        return sockets[-1]
+
+    monkeypatch.setattr(live_host, "connect", connect)
+    _fake_time(monkeypatch)
+
+    with pytest.raises(live_host.LiveHostError, match=r"Chrome CDP did not start: Chrome exited \(9\) before its page target was ready"):
+        transport.start()
+    assert [ws.close_calls for ws in sockets] == [1]
+    assert calls == []
+    assert transport.proc is None and transport.ws is None
+
+
+def test_chrome_exiting_during_readiness_fails_fast_not_at_the_deadline(tmp_path, monkeypatch):
+    """Chrome answers nothing and then dies mid-loop: the loop sees the exit on its next pass instead
+    of retrying until `_CHROME_START_TIMEOUT_S`."""
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, headless=True)
+    chrome = _LaunchedChrome(tmp_path, port=51234)
+    monkeypatch.setattr(live_host.subprocess, "Popen", chrome.popen)
+    asked: list[str] = []
+
+    def urlopen(url, timeout=None):
+        asked.append(url)
+        chrome.proc.die()
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(live_host.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(live_host, "connect", lambda *_a, **_k: pytest.fail("connected to a dead Chrome's port"))
+    clock = _fake_time(monkeypatch)
+
+    with pytest.raises(live_host.LiveHostError, match=r"Chrome exited \(0\) before its page target was ready"):
+        transport.start()
+    assert asked == [_VERSION]
+    assert clock.sleeps == [0.05]
+    assert transport.proc is None
+
+
+def test_positive_control_a_live_chrome_that_never_answers_still_waits_for_the_deadline(tmp_path, monkeypatch):
+    """The same refusing endpoint with a Chrome that stays alive is retried every 50 ms until the
+    simulated `_CHROME_START_TIMEOUT_S`, so the fast failure above is the exit check and nothing else."""
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, headless=True)
+    chrome = _LaunchedChrome(tmp_path, port=51234)
+    monkeypatch.setattr(live_host.subprocess, "Popen", chrome.popen)
+    asked: list[str] = []
+    monkeypatch.setattr(live_host.urllib.request, "urlopen",
+                        lambda url, timeout=None: asked.append(url) or (_ for _ in ()).throw(ConnectionError("refused")))
+    clock = _fake_time(monkeypatch)
+
+    with pytest.raises(live_host.LiveHostError, match=r"^Chrome CDP did not start\.$"):
+        transport.start()
+    passes = round(live_host._CHROME_START_TIMEOUT_S / 0.05)
+    assert clock.elapsed == pytest.approx(live_host._CHROME_START_TIMEOUT_S)
+    assert clock.sleeps == [0.05] * passes
+    assert asked == [_VERSION] * passes
+    assert chrome.proc.calls.count("terminate") == 1
+
+
+def test_chrome_that_never_writes_its_port_is_stopped_at_the_deadline(tmp_path, monkeypatch):
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, headless=True)
+    chrome = _LaunchedChrome(tmp_path, port=None)
+    monkeypatch.setattr(live_host.subprocess, "Popen", chrome.popen)
+    asked, _connected, _calls = _fake_cdp_endpoint(monkeypatch, transport)
+    clock = _fake_time(monkeypatch)
+
+    with pytest.raises(live_host.LiveHostError, match=r"Chrome CDP did not start: Chrome wrote no .*DevToolsActivePort within 15\.0 s"):
+        transport.start()
+    assert clock.elapsed == pytest.approx(live_host._CHROME_START_TIMEOUT_S)
+    assert clock.sleeps == [0.05] * round(live_host._CHROME_START_TIMEOUT_S / 0.05)
+    assert asked == []
+    assert chrome.proc.calls.count("terminate") == 1
+    assert transport.proc is None and transport.port is None
+
+
+def test_attach_mode_launches_nothing_and_leaves_the_profile_port_file_alone(tmp_path, monkeypatch):
+    """Attach drives an existing endpoint (managed OBS's CEF): no Chrome, no port file, no port."""
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, attach_endpoint="http://127.0.0.1:9222")
+    (tmp_path / "DevToolsActivePort").write_text("9999\n/devtools/browser/other\n")
+    monkeypatch.setattr(live_host.subprocess, "Popen", lambda *a, **k: pytest.fail("attach mode launched Chrome"))
+    monkeypatch.setattr(transport, "_list_targets", lambda: [{"type": "page", "url": "http://127.0.0.1:1/program.html", "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/A"}])
+    connected: list[str] = []
+    monkeypatch.setattr(live_host, "connect", lambda url, **_k: connected.append(url) or object())
+    monkeypatch.setattr(transport, "call", lambda method, deadline_s=None, **params: {})
+
+    transport.start()
+
+    assert connected == ["ws://127.0.0.1:9222/devtools/page/A"]
+    assert transport.proc is None and transport.port is None
+    assert (tmp_path / "DevToolsActivePort").read_text() == "9999\n/devtools/browser/other\n"
 
 
 def test_choose_display_prefers_external_and_validates_requested_id():

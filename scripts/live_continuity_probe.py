@@ -43,6 +43,8 @@ P2's names (`continue1to2`, `restart2to3`, `continue3to4`, `refused*`, `armed1to
 emitted alongside as aliases. `--strip ACTION[@atScene]` and `--core-variant NAME` run one
 red arm on its own and compare its red set with the arm's pre-registered one
 (`RED_ARM_EXPECTATIONS`); `--rescore` re-scores a stored artifact with both scorers.
+`--skip-arms` leaves named arms out of the full run (recorded as `skippedArms`, never a pass of
+that arm); a run that skips every positive arm (A, V, attach) fails.
 
 Does not qualify HDMI, alpha compositing, or audio. Offline/local Chrome only.
 """
@@ -50,19 +52,19 @@ from __future__ import annotations
 
 import argparse
 import base64
+import fcntl
 import hashlib
 import json
 import math
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import time
 import urllib.request
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Callable, Collection, Iterator, Sequence
 
@@ -90,6 +92,9 @@ from obed_edom.html_alpha_probe import (  # noqa: E402
     occluder_mask_from_markers,
     score_inpage_liveness,
     score_live_coverage,
+)
+from obed_edom.devtools_port import (  # noqa: E402
+    DevToolsEndpoint, ForeignDevToolsEndpoint, verify_devtools_owner, wait_devtools_active_port,
 )
 from obed_edom.live_gl_replay_js import GL_REPLAY_VERSION, js_sha256 as gl_replay_js_sha256  # noqa: E402
 from obed_edom.live_host import ADVANCE_ENV, ATTACH_ENV, CONTINUITY_ENV, LiveOutputHost, OutputDisplay, PlayerCommandRejected  # noqa: E402
@@ -213,6 +218,8 @@ EXPECTED_GL_MODES = (
     ("visible pass V", ("visible", "V"), "off"), ("visible pass Voff", ("visible", "Voff"), "off"),
     ("visible pass Vgl", ("visible", "Vgl"), "injected"), ("attach", ("attach",), "unavailable"),
 )
+SKIPPABLE_ARMS = ("A", "B", "C", "V", "Voff", "attach")
+POSITIVE_ARMS = ("A", "V", "attach")
 
 # Pass G (goTo autoplay repair): (fromOriginalOrdinal, toOriginalOrdinal) pairs.
 GOTO_MATRIX: tuple[tuple[int, int], ...] = ((1, 2), (1, 3), (1, 4), (3, 1), (4, 3))
@@ -620,6 +627,16 @@ def parse_strip_arg(value: str) -> tuple[str, int | None]:
         raise argparse.ArgumentTypeError(str(exc)) from None
 
 
+def parse_skip_arms(value: str) -> tuple[str, ...]:
+    names = value.split(",")
+    unknown = [name for name in names if name not in SKIPPABLE_ARMS]
+    if unknown or len(set(names)) != len(names):
+        raise argparse.ArgumentTypeError(
+            f"invalid --skip-arms {value!r}: expected distinct comma-separated names from {', '.join(SKIPPABLE_ARMS)}"
+        )
+    return tuple(name for name in SKIPPABLE_ARMS if name in names)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture", type=Path, default=FIXTURE)
@@ -672,8 +689,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Red arm: one continuity-on arm with this core variant injected in place of the core "
         "(scripts/continuity_core_variants.py), scored against its pre-registered red set",
     )
+    parser.add_argument(
+        "--skip-arms", type=parse_skip_arms, default=(), metavar="NAME[,NAME...]",
+        help=f"Full run only: leave these arms out ({', '.join(SKIPPABLE_ARMS)}); recorded as skippedArms, "
+        "never scored as a pass",
+    )
     args = parser.parse_args(argv)
     red_arm = args.strip is not None or args.core_variant is not None
+    if args.skip_arms and (
+        red_arm or args.only_pass is not None or args.gl_force_fail is not None
+        or args.force_wrap is not None or args.rescore is not None
+    ):
+        parser.error("--skip-arms applies to the full run only (no --strip, --core-variant, --pass, "
+                     "--gl-force-fail, --force-wrap or --rescore)")
+    if "V" in args.skip_arms and args.gl_replay == "auto":
+        parser.error("--gl-replay auto scores the hand-back from V and Vgl, so V cannot be skipped")
     if red_arm and (
         (args.strip is not None and args.core_variant is not None) or args.gl_force_fail is not None
         or args.only_pass is not None or args.force_wrap is not None or args.rescore is not None
@@ -689,12 +719,44 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def prepare_export(fixture: Path, original_index: Path, tag: str) -> Path:
+def run_root(artifact: Path) -> Path:
+    """This run's private folder inside the preview cache (the host serves only exports under it),
+    keyed by the artifact so concurrent runs never share one."""
+    resolved = artifact.resolve()
+    key = hashlib.sha256(str(resolved).encode()).hexdigest()[:12]
+    return cache_dir(PROBE_DIGEST) / "runs" / f"{resolved.stem}-{key}"
+
+
+@contextmanager
+def run_scope(artifact: Path) -> Iterator[Path]:
+    """Own `run_root(artifact)` for one invocation: an exclusive lock beside it refuses a second
+    invocation on the same artifact (which would share and delete this one's folder), and the
+    folder is removed on exit."""
+    root = run_root(artifact)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    with open(root.parent / f"{root.name}.lock", "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SystemExit(
+                f"another live_continuity_probe run is using {artifact.resolve()}; wait for it or pass another --artifact"
+            ) from None
+        try:
+            yield root
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+def evidence_dir_of(artifact: Path) -> Path:
+    return artifact.parent / "visible" / artifact.stem
+
+
+def prepare_export(fixture: Path, original_index: Path, root: Path, tag: str) -> Path:
     """Mirror `live_host_probe.main`'s fixture prep: clone the already-built player
     export, then overwrite index.html with the UNMODIFIED one so the host's own
     `_program_html` injects everything fresh (the fixture's index.html already has
     P2's own script tags baked in, which would collide)."""
-    destination = cache_dir(PROBE_DIGEST) / f"html-{tag}"
+    destination = root / f"html-{tag}"
     if destination.exists():
         shutil.rmtree(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -2672,16 +2734,11 @@ def run_arm(
     return result
 
 
-def free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def launch_attach_chrome(port: int, profile: Path) -> subprocess.Popen:
+def launch_attach_chrome(profile: Path) -> subprocess.Popen:
+    """Chrome picks its own debugging port (`--remote-debugging-port=0`); `wait_devtools_active_port` reads it."""
     profile.mkdir(parents=True, exist_ok=True)
     args = [
-        str(CHROME), "--headless=new", f"--remote-debugging-port={port}",
+        str(CHROME), "--headless=new", "--remote-debugging-port=0",
         "--remote-debugging-address=127.0.0.1", f"--user-data-dir={profile}",
         f"--window-size={VIEWPORT_WIDTH},{VIEWPORT_HEIGHT + _HEIGHT_PAD}",
         "--force-device-scale-factor=1", "--autoplay-policy=no-user-gesture-required",
@@ -2690,24 +2747,36 @@ def launch_attach_chrome(port: int, profile: Path) -> subprocess.Popen:
     return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def wait_for_cdp(port: int, timeout_s: float = 15.0) -> None:
+def wait_for_cdp(endpoint: DevToolsEndpoint, proc: subprocess.Popen, timeout_s: float = 15.0) -> None:
+    """Polls `proc` each pass: once the Chrome that owns the port has exited, the port is no longer its.
+    A port answering as another browser fails at once."""
+    port = endpoint.port
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
+        exit_code = proc.poll()
+        if exit_code is not None:
+            raise SystemExit(f"attach Chrome exited ({exit_code}) before opening a CDP target on port {port}")
         try:
+            verify_devtools_owner(endpoint, 0.5)
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=0.5) as response:
                 if json.loads(response.read()):
                     return
+        except ForeignDevToolsEndpoint as exc:
+            raise SystemExit(f"attach Chrome's CDP port is not its own: {exc}") from exc
         except Exception:
-            time.sleep(0.1)
+            pass
+        time.sleep(0.1)
     raise SystemExit(f"attach Chrome did not open a CDP target on port {port}")
 
 
-def force_exact_viewport(port: int, width: int, height: int) -> None:
+def force_exact_viewport(port: int, width: int, height: int, proc: subprocess.Popen) -> Any:
     """`--window-size` on a bare headless Chrome (no `--app=` window) does not
     yield an exact `innerWidth`/`innerHeight` (window chrome eats a variable
     amount depending on flags/version); pin the renderer's device metrics
-    directly instead of guessing another padding constant. The override is
-    target-scoped and survives the host's later, separate CDP attach."""
+    directly instead of guessing another padding constant. The override lasts
+    only while this CDP session is open (Chrome 154 drops it on detach), so the
+    caller holds the returned connection until its Chrome is torn down. `proc` still alive once the
+    session is open means the port was its own throughout."""
     from websockets.sync.client import connect
 
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=5) as response:
@@ -2715,13 +2784,48 @@ def force_exact_viewport(port: int, width: int, height: int) -> None:
     page = next(item for item in targets if item.get("type") == "page" and item.get("webSocketDebuggerUrl"))
     ws = connect(page["webSocketDebuggerUrl"], open_timeout=5)
     try:
+        exit_code = proc.poll()
+        if exit_code is not None:
+            raise SystemExit(f"attach Chrome exited ({exit_code}) while its viewport session connected on port {port}")
         ws.send(json.dumps({
             "id": 1, "method": "Emulation.setDeviceMetricsOverride",
             "params": {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False},
         }))
         ws.recv(timeout=5)
-    finally:
+    except BaseException:
         ws.close()
+        raise
+    return ws
+
+
+@contextmanager
+def attach_chrome(profile: Path, record: dict[str, Any]) -> Iterator[int]:
+    """A fresh attach Chrome in `profile`, pinned to the exact attach viewport; yields its CDP port.
+    On exit the viewport session closes first (Chrome 154 drops the override when it detaches, so it
+    stays open for the whole block), then Chrome is terminated even if that close raised, and its
+    pid and exit code land in `record`."""
+    if profile.exists():
+        shutil.rmtree(profile)
+    chrome_proc = launch_attach_chrome(profile)
+    try:
+        viewport_hold = None
+        try:
+            endpoint = wait_devtools_active_port(profile, chrome_proc)
+            wait_for_cdp(endpoint, chrome_proc)
+            viewport_hold = force_exact_viewport(endpoint.port, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, chrome_proc)
+            yield endpoint.port
+        finally:
+            if viewport_hold is not None:
+                viewport_hold.close()
+    finally:
+        chrome_proc.terminate()
+        try:
+            chrome_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            chrome_proc.kill()
+            chrome_proc.wait(timeout=5)
+        record["chromePid"] = chrome_proc.pid
+        record["chromeExitCode"] = chrome_proc.poll()
 
 
 def run_attach_arm(
@@ -2730,15 +2834,8 @@ def run_attach_arm(
 ) -> dict[str, Any]:
     # The live host forces attach mode to 1920x1080 by contract regardless of
     # `--viewport`; the attach arm stays pinned to that, never the CLI value.
-    port = free_port()
-    profile = scratch / "attach-chrome-profile"
-    if profile.exists():
-        shutil.rmtree(profile)
-    chrome_proc = launch_attach_chrome(port, profile)
     result: dict[str, Any] = {"arm": "attach", "attachViewport": {"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT}}
-    try:
-        wait_for_cdp(port)
-        force_exact_viewport(port, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
+    with attach_chrome(scratch / "attach-chrome-profile", result) as port:
         with env_override({ATTACH_ENV: f"http://127.0.0.1:{port}"}):
             player = LiveOutputHost(export_root, slides, headless=True, gl_replay=gl_replay)
             try:
@@ -2779,15 +2876,6 @@ def run_attach_arm(
                     player.stop()
                 except Exception as exc:  # noqa: BLE001
                     result["stopError"] = str(exc)
-    finally:
-        chrome_proc.terminate()
-        try:
-            chrome_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            chrome_proc.kill()
-            chrome_proc.wait(timeout=5)
-        result["chromePid"] = chrome_proc.pid
-        result["chromeExitCode"] = chrome_proc.poll()
     return result
 
 
@@ -4282,7 +4370,8 @@ def _run_goto_arm(
 def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
     """Drive every `GOTO_MATRIX` entry through the real goTo, once armed and once with
     `GOTO_AUTOPLAY_ENV=off` (the null control), via `_run_goto_arm`."""
-    plan_export = prepare_export(args.fixture, args.original_index, "pass-g-plan")
+    root = run_root(args.artifact)
+    plan_export = prepare_export(args.fixture, args.original_index, root, "pass-g-plan")
     plan_slides = load_slides(plan_export)
     plan = ground_truth_plan(plan_export, plan_slides)
     facts = ground_truth_facts(plan)
@@ -4300,7 +4389,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
         expectations_g.setdefault(consumption_index, {})[CHARACTERS_ASSET_KEY] = DEAD
 
     viewport = (VIEWPORT_WIDTH, VIEWPORT_HEIGHT) if args.attach else args.viewport
-    evidence_dir = args.artifact.parent / "visible"
+    evidence_dir = evidence_dir_of(args.artifact)
     onset_scene_id = str(plan.scene_index_by_player[consumption_index])
     matrix = goto_matrix(facts["verdicts"], len(plan_slides))
 
@@ -4308,22 +4397,15 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
         "pass": "G", "attach": bool(args.attach), "viewport": {"width": viewport[0], "height": viewport[1]},
         "matrix": [list(case) for case in matrix],
     }
-    chrome_proc: subprocess.Popen | None = None
-    try:
+    with ExitStack() as stack:
         env: dict[str, str | None] = {}
         if args.attach:
-            port = free_port()
-            profile = args.artifact.parent / "attach-chrome-profile-g"
-            if profile.exists():
-                shutil.rmtree(profile)
-            chrome_proc = launch_attach_chrome(port, profile)
-            wait_for_cdp(port)
-            force_exact_viewport(port, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
+            port = stack.enter_context(attach_chrome(root / "attach-chrome-profile-g", result))
             env = {ATTACH_ENV: f"http://127.0.0.1:{port}", ADVANCE_ENV: "click"}
         else:
             force_viewport(*viewport)
 
-        export_armed = prepare_export(args.fixture, args.original_index, "pass-g-armed")
+        export_armed = prepare_export(args.fixture, args.original_index, root, "pass-g-armed")
         result["armed"] = _run_goto_arm(
             export_armed, load_slides(export_armed), env=env, tag="G", armed=True,
             instances=instances_g, expectations=goto_rect_expectations(expectations_g, armed=True),
@@ -4331,23 +4413,13 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
             gl_replay=args.gl_replay, matrix=matrix,
         )
 
-        export_off = prepare_export(args.fixture, args.original_index, "pass-g-off")
+        export_off = prepare_export(args.fixture, args.original_index, root, "pass-g-off")
         result["nullControl"] = _run_goto_arm(
             export_off, load_slides(export_off), env={**env, GOTO_AUTOPLAY_ENV: "off"}, tag="Goff", armed=False,
             instances=instances_g, expectations=goto_rect_expectations(expectations_g, armed=False),
             viewport=viewport, evidence_dir=evidence_dir, character_rect=character_rect, onset_scene_id=onset_scene_id,
             gl_replay=args.gl_replay, matrix=matrix,
         )
-    finally:
-        if chrome_proc is not None:
-            chrome_proc.terminate()
-            try:
-                chrome_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                chrome_proc.kill()
-                chrome_proc.wait(timeout=5)
-            result["chromePid"] = chrome_proc.pid
-            result["chromeExitCode"] = chrome_proc.poll()
 
     result["status"], result["reasons"] = overall_status_g(result)
     return result
@@ -4373,11 +4445,22 @@ def run_pass_g_cli(args: argparse.Namespace) -> None:
 
 
 def check_no_leftover_chrome() -> str:
+    """`obed-live-chrome` processes descended from this probe only; concurrent runs own theirs."""
     try:
-        completed = subprocess.run(["pgrep", "-fl", "obed-live-chrome"], capture_output=True, text=True)
-        return completed.stdout.strip()
+        completed = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,command="], capture_output=True, text=True)
     except Exception as exc:  # noqa: BLE001
-        return f"pgrep failed: {exc}"
+        return f"ps failed: {exc}"
+    children: dict[int, list[tuple[int, str]]] = {}
+    for line in completed.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            children.setdefault(int(parts[1]), []).append((int(parts[0]), parts[2]))
+    found, pending = [], [os.getpid()]
+    while pending:
+        for pid, command in children.get(pending.pop(), []):
+            found.append((pid, command))
+            pending.append(pid)
+    return "\n".join(f"{pid} {command}" for pid, command in sorted(found) if "obed-live-chrome" in command)
 
 
 def boundary_verdict(entry: dict[str, Any], key: str) -> bool | None:
@@ -4543,6 +4626,28 @@ def visible_control_reasons(entry: Any, result: dict[str, Any]) -> list[str]:
     return reasons
 
 
+def arm_entry(result: dict[str, Any], name: str) -> Any:
+    if name == "attach":
+        return result.get("attach")
+    holder = result.get("visible" if name in ("V", "Voff") else "arms")
+    return holder.get(name) if isinstance(holder, dict) else None
+
+
+def skipped_arms(result: dict[str, Any]) -> tuple[set[str], list[str]]:
+    """The arms `--skip-arms` left out, and why that record cannot be trusted: unknown or
+    repeated names, a skipped arm that has a result anyway, or no positive arm left to run."""
+    value = result.get("skippedArms", [])
+    if not isinstance(value, list) or not all(isinstance(name, str) and name in SKIPPABLE_ARMS for name in value) \
+            or len(set(value)) != len(value):
+        return set(), [f"skippedArms {value!r} is not a list of distinct names from {list(SKIPPABLE_ARMS)}"]
+    skipped = set(value)
+    problems = [f"{name} is skipped by flag but has a result" for name in SKIPPABLE_ARMS
+                if name in skipped and arm_entry(result, name) is not None]
+    if skipped >= set(POSITIVE_ARMS):
+        problems.append(f"every positive arm ({', '.join(POSITIVE_ARMS)}) is skipped by flag, so nothing qualifies")
+    return skipped, problems
+
+
 def visible_reasons(result: dict[str, Any]) -> list[str]:
     """Both passes are scored against the plan's per-rect expectations when they
     state any; a pass whose records carry none at all falls back to the rules that
@@ -4550,9 +4655,10 @@ def visible_reasons(result: dict[str, Any]) -> list[str]:
     visible = result.get("visible")
     visible = visible if isinstance(visible, dict) else {}
     on, off = visible.get("V"), visible.get("Voff")
+    skipped = skipped_arms(result)[0]
 
-    reasons = visible_pass_reasons(on, "V", "qualified")
-    if not reasons:
+    reasons = [] if "V" in skipped else visible_pass_reasons(on, "V", "qualified")
+    if not reasons and "V" not in skipped:
         counts = visible_rect_expectation_counts(on)
         reasons = (
             visible_expectation_reasons(on, "V", requires_dead=plan_states_dead(result, "V"))
@@ -4560,6 +4666,8 @@ def visible_reasons(result: dict[str, Any]) -> list[str]:
             else visible_live_everywhere_reasons(on)
         )
 
+    if "Voff" in skipped:
+        return reasons
     off_reasons = visible_pass_reasons(off, "Voff", "off")
     if not off_reasons:
         counts = visible_rect_expectation_counts(off)
@@ -4619,7 +4727,10 @@ def gl_requested(result: dict[str, Any]) -> bool:
 
 def gl_mode_reasons(result: dict[str, Any]) -> list[str]:
     reasons = []
+    skipped = skipped_arms(result)[0]
     for label, path, expected in EXPECTED_GL_MODES:
+        if path[-1] in skipped:
+            continue
         entry: Any = result
         for key in path:
             entry = entry.get(key) if isinstance(entry, dict) else None
@@ -4666,7 +4777,10 @@ def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     must actually have it off, and the attach arm's page must actually be
     transparent, or the verdict is not trustworthy even if the boundary math
     passed. A standard arm that sampled a loop wrap is INVALID: its strict clock cannot
-    score that take."""
+    score that take. An arm skipped by `--skip-arms` is neither scored nor a pass."""
+    skipped, skip_problems = skipped_arms(result)
+    if skip_problems:
+        return "fail", skip_problems
     arms = result.get("arms", {})
     attach = result.get("attach", {})
     wrapped = [
@@ -4682,72 +4796,87 @@ def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     a, b, c = arms.get("A", {}), arms.get("B", {}), arms.get("C", {})
     a_armed, c_armed = gl_replay_mode(a) == "injected", gl_replay_mode(c) == "injected"
     all_gated = [
-        *([] if a_armed else [boundary_verdict(a, "continue1to2")]),
-        boundary_verdict(a, "restart2to3"), boundary_verdict(a, "continue3to4"),
-        boundary_verdict(b, "continue3to4"),
-        *([] if c_armed else [boundary_verdict(c, "continue1to2")]), boundary_verdict(c, "continue3to4"),
-        boundary_verdict(attach, "continue1to2"), boundary_verdict(attach, "restart2to3"), boundary_verdict(attach, "continue3to4"),
+        *([] if "A" in skipped else [
+            *([] if a_armed else [boundary_verdict(a, "continue1to2")]),
+            boundary_verdict(a, "restart2to3"), boundary_verdict(a, "continue3to4"),
+        ]),
+        *([] if "B" in skipped else [boundary_verdict(b, "continue3to4")]),
+        *([] if "C" in skipped else [
+            *([] if c_armed else [boundary_verdict(c, "continue1to2")]), boundary_verdict(c, "continue3to4"),
+        ]),
+        *([] if "attach" in skipped else [
+            boundary_verdict(attach, "continue1to2"), boundary_verdict(attach, "restart2to3"),
+            boundary_verdict(attach, "continue3to4"),
+        ]),
     ]
     if any(v is None for v in all_gated):
         return "inconclusive", ["at least one gated boundary verdict is inconclusive (movie never decoded)"]
 
     reasons: list[str] = []
     refused = refused_boundaries(result)
+    a_ok = b_ok = c_ok = attach_ok = True
 
-    a_mode, b_mode, c_mode, attach_mode = continuity_mode(a), continuity_mode(b), continuity_mode(c), continuity_mode(attach)
-    a_boundary_reasons = (
-        armed_reasons(a, "arm A") if a_armed else boundary_expectation_reasons(a, "arm A", "continue1to2", refused)
-    )
-    reasons.extend(a_boundary_reasons)
-    a_ok = not a_boundary_reasons and bool(boundary_verdict(a, "restart2to3")) and bool(boundary_verdict(a, "continue3to4"))
-    if a_mode != "qualified":
-        a_ok = False
-        reasons.append(f"arm A continuity.mode={a_mode!r}, expected 'qualified'")
-    reason = stage_fit_reason(a, "arm A")
-    if reason:
-        a_ok = False
-        reasons.append(reason)
+    if "A" not in skipped:
+        a_boundary_reasons = (
+            armed_reasons(a, "arm A") if a_armed else boundary_expectation_reasons(a, "arm A", "continue1to2", refused)
+        )
+        reasons.extend(a_boundary_reasons)
+        a_ok = not a_boundary_reasons and bool(boundary_verdict(a, "restart2to3")) and bool(boundary_verdict(a, "continue3to4"))
+        a_mode = continuity_mode(a)
+        if a_mode != "qualified":
+            a_ok = False
+            reasons.append(f"arm A continuity.mode={a_mode!r}, expected 'qualified'")
+        reason = stage_fit_reason(a, "arm A")
+        if reason:
+            a_ok = False
+            reasons.append(reason)
 
-    b_ok = boundary_verdict(b, "continue3to4") is False
-    if b_mode != "off":
-        b_ok = False
-        reasons.append(f"arm B continuity.mode={b_mode!r}, expected 'off'")
-    reason = stage_fit_reason(b, "arm B")
-    if reason:
-        b_ok = False
-        reasons.append(reason)
+    if "B" not in skipped:
+        b_ok = boundary_verdict(b, "continue3to4") is False
+        b_mode = continuity_mode(b)
+        if b_mode != "off":
+            b_ok = False
+            reasons.append(f"arm B continuity.mode={b_mode!r}, expected 'off'")
+        reason = stage_fit_reason(b, "arm B")
+        if reason:
+            b_ok = False
+            reasons.append(reason)
 
-    c_boundary_reasons = (
-        armed_reasons(c, "arm C") if c_armed else boundary_expectation_reasons(c, "arm C", "continue1to2", refused)
-    )
-    reasons.extend(c_boundary_reasons)
-    c_ok = boundary_verdict(c, "continue3to4") is False and not c_boundary_reasons
-    if c_mode != "qualified":
-        c_ok = False
-        reasons.append(f"arm C continuity.mode={c_mode!r}, expected 'qualified'")
-    reason = stage_fit_reason(c, "arm C")
-    if reason:
-        c_ok = False
-        reasons.append(reason)
+    if "C" not in skipped:
+        c_boundary_reasons = (
+            armed_reasons(c, "arm C") if c_armed else boundary_expectation_reasons(c, "arm C", "continue1to2", refused)
+        )
+        reasons.extend(c_boundary_reasons)
+        c_ok = boundary_verdict(c, "continue3to4") is False and not c_boundary_reasons
+        c_mode = continuity_mode(c)
+        if c_mode != "qualified":
+            c_ok = False
+            reasons.append(f"arm C continuity.mode={c_mode!r}, expected 'qualified'")
+        reason = stage_fit_reason(c, "arm C")
+        if reason:
+            c_ok = False
+            reasons.append(reason)
 
-    attach_boundary_reasons = boundary_expectation_reasons(attach, "attach", "continue1to2", refused)
-    reasons.extend(attach_boundary_reasons)
-    attach_ok = (
-        not attach_boundary_reasons
-        and bool(boundary_verdict(attach, "restart2to3"))
-        and bool(boundary_verdict(attach, "continue3to4"))
-    )
-    if attach_mode != "qualified":
-        attach_ok = False
-        reasons.append(f"attach continuity.mode={attach_mode!r}, expected 'qualified'")
-    alpha = background_alpha((attach.get("transparentBackground") or {}).get("computedBackground"))
-    if alpha != 0:
-        attach_ok = False
-        reasons.append(f"attach background alpha={alpha}, expected 0")
-    reason = stage_fit_reason(attach, "attach")
-    if reason:
-        attach_ok = False
-        reasons.append(reason)
+    if "attach" not in skipped:
+        attach_boundary_reasons = boundary_expectation_reasons(attach, "attach", "continue1to2", refused)
+        reasons.extend(attach_boundary_reasons)
+        attach_ok = (
+            not attach_boundary_reasons
+            and bool(boundary_verdict(attach, "restart2to3"))
+            and bool(boundary_verdict(attach, "continue3to4"))
+        )
+        attach_mode = continuity_mode(attach)
+        if attach_mode != "qualified":
+            attach_ok = False
+            reasons.append(f"attach continuity.mode={attach_mode!r}, expected 'qualified'")
+        alpha = background_alpha((attach.get("transparentBackground") or {}).get("computedBackground"))
+        if alpha != 0:
+            attach_ok = False
+            reasons.append(f"attach background alpha={alpha}, expected 0")
+        reason = stage_fit_reason(attach, "attach")
+        if reason:
+            attach_ok = False
+            reasons.append(reason)
 
     visible = visible_reasons(result)
     reasons.extend(visible)
@@ -4802,7 +4931,8 @@ def generated_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     A and attach meet every gated expectation; B (continuity off) reads every bridge carry
     False (the export's moving-Magic-Move defect); C (bridges stripped, run only when the plan
     has a bridge) reads its bridge carries False and meets every other expectation. A malformed
-    or empty verdict set, or a missing or extra arm, is an error, never a pass."""
+    or empty verdict set, or a missing or extra arm, is an error, never a pass. An arm skipped
+    by `--skip-arms` is not required, and must be absent (`overall_status` checks that)."""
     ground = result.get("groundTruth") if isinstance(result.get("groundTruth"), dict) else {}
     errors = spec_set_errors(ground.get("verdicts"))
     gl_specs = (result.get("groundTruthGl") or {}).get("verdicts") if isinstance(result.get("groundTruthGl"), dict) else None
@@ -4811,10 +4941,18 @@ def generated_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     if errors:
         return "error", errors
     arms = result.get("arms") if isinstance(result.get("arms"), dict) else {}
-    required = {"A", "B", *(["C"] if bridge_carry_ids(ground["verdicts"]) else [])}
-    if set(arms) != required or not isinstance(result.get("attach"), dict):
-        return "error", [f"arms {sorted(arms)} + attach={isinstance(result.get('attach'), dict)}, expected {sorted(required)} + attach"]
-    entries = [*((f"arm {name}", name, arms[name]) for name in sorted(required)), ("attach", "attach", result["attach"])]
+    skipped = skipped_arms(result)[0]
+    required = {"A", "B", *(["C"] if bridge_carry_ids(ground["verdicts"]) else [])} - skipped
+    want_attach = "attach" not in skipped
+    if set(arms) != required or isinstance(result.get("attach"), dict) != want_attach:
+        return "error", [
+            f"arms {sorted(arms)} + attach={isinstance(result.get('attach'), dict)}, "
+            f"expected {sorted(required)} + attach={want_attach}"
+        ]
+    entries = [
+        *((f"arm {name}", name, arms[name]) for name in sorted(required)),
+        *([("attach", "attach", result["attach"])] if want_attach else []),
+    ]
     reasons: list[str] = []
     unknown: list[str] = []
     for label, name, entry in entries:
@@ -4841,7 +4979,7 @@ def generated_status(result: dict[str, Any]) -> tuple[str, list[str]]:
             f"{label} {spec_id}={table[spec_id]['verdict']!r}, expected {table[spec_id]['expect']!r}" for spec_id in red
         )
     alpha = background_alpha(((result.get("attach") or {}).get("transparentBackground") or {}).get("computedBackground"))
-    if alpha != 0:
+    if want_attach and alpha != 0:
         reasons.append(f"attach background alpha={alpha}, expected 0")
     reasons.extend(visible_reasons(result))
     gl_fails, gl_unknown = gl_replay_reasons(result) if gl_requested(result) else ([], [])
@@ -4891,8 +5029,9 @@ def run_forced_fail(args: argparse.Namespace) -> dict[str, Any]:
     """`--gl-force-fail`: V and a forced Vgl, scored with the flag-off facts."""
     reason = args.gl_force_fail
     viewport = args.viewport
-    evidence_dir = args.artifact.parent / "visible"
-    export_plan = prepare_export(args.fixture, args.original_index, "forced-plan")
+    evidence_dir = evidence_dir_of(args.artifact)
+    root = run_root(args.artifact)
+    export_plan = prepare_export(args.fixture, args.original_index, root, "forced-plan")
     plan_slides = load_slides(export_plan)
     plan = ground_truth_plan(export_plan, plan_slides)
     facts = ground_truth_facts(plan)
@@ -4904,7 +5043,7 @@ def run_forced_fail(args: argparse.Namespace) -> dict[str, Any]:
     result: dict[str, Any] = {"groundTruth": {"retire": retire, "armed": armed}, "visible": {}}
 
     v_sink: dict[str, Any] = {}
-    export_v = prepare_export(args.fixture, args.original_index, "forced-v")
+    export_v = prepare_export(args.fixture, args.original_index, root, "forced-v")
     result["visible"]["V"] = run_visible_pass(
         "V", export_v, load_slides(export_v), plan, viewport, expected_stage, evidence_dir,
         facts["rectExpectations"]["V"], burst_poke=args.burst_poke, gl_replay="off",
@@ -4914,7 +5053,7 @@ def run_forced_fail(args: argparse.Namespace) -> dict[str, Any]:
     result["visible"]["V"]["handback"] = v_sink.get("record")
 
     g_sink: dict[str, Any] = {}
-    export_g = prepare_export(args.fixture, args.original_index, "forced-vgl")
+    export_g = prepare_export(args.fixture, args.original_index, root, "forced-vgl")
     with forced_fail_seed(reason) as splice:
         result["visible"]["VglForced"] = run_visible_pass(
             "VglForced", export_g, load_slides(export_g), plan, viewport, expected_stage, evidence_dir,
@@ -4982,7 +5121,8 @@ def run_red_arm(args: argparse.Namespace) -> dict[str, Any]:
     verdicts plus a per-slide stray census, and compared with the arm's pre-registered red set."""
     auto = args.gl_replay == "auto"
     viewport = args.viewport
-    export_plan = prepare_export(args.fixture, args.original_index, "red-plan")
+    root = run_root(args.artifact)
+    export_plan = prepare_export(args.fixture, args.original_index, root, "red-plan")
     plan_slides = load_slides(export_plan)
     plan = ground_truth_plan(export_plan, plan_slides)
     facts = ground_truth_facts(plan)
@@ -5006,7 +5146,7 @@ def run_red_arm(args: argparse.Namespace) -> dict[str, Any]:
     if facts_on is not None:
         result["groundTruthGl"] = {"armed": facts_on["armed"], "verdicts": facts_on["verdicts"]}
     expected_stage = expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
-    export_r = prepare_export(args.fixture, args.original_index, "red-arm")
+    export_r = prepare_export(args.fixture, args.original_index, root, "red-arm")
     slides_r = load_slides(export_r)
     patch = injected_core_variant(args.core_variant) if args.core_variant else stripped_runtime(*args.strip)
     with patch:
@@ -5449,10 +5589,10 @@ def force_wrap_take(
     return take
 
 
-def force_wrap_ground_truth(fixture: Path, original_index: Path, boundary: str, gl_replay: str) -> dict[str, Any]:
+def force_wrap_ground_truth(fixture: Path, original_index: Path, boundary: str, gl_replay: str, root: Path) -> dict[str, Any]:
     """The boundary's scene, rects and seeked source instance, derived offline from the fixture."""
     src_ordinal = FORCE_WRAP_BOUNDARIES[boundary][0]
-    export = prepare_export(fixture, original_index, "force-wrap")
+    export = prepare_export(fixture, original_index, root, "force-wrap")
     slides = load_slides(export)
     plan = ground_truth_plan(export, slides)
     facts = ground_truth_facts(plan)
@@ -5517,7 +5657,7 @@ def run_force_wrap(args: argparse.Namespace) -> dict[str, Any]:
     """L2: one take of a wrap forced `offset_ms` from the advance press at one boundary."""
     boundary, offset_ms = args.force_wrap["boundary"], args.force_wrap["offsetMs"]
     src_ordinal, dst_ordinal = FORCE_WRAP_BOUNDARIES[boundary]
-    gt = force_wrap_ground_truth(args.fixture, args.original_index, boundary, args.gl_replay)
+    gt = force_wrap_ground_truth(args.fixture, args.original_index, boundary, args.gl_replay, run_root(args.artifact))
     source, scene = gt["source"], gt["scene"]
     result: dict[str, Any] = {"source": source, "boundaryScene": scene}
     force_viewport(*args.viewport)
@@ -5561,6 +5701,7 @@ def rescore_force_wrap(path: Path) -> dict[str, Any]:
     boundary, offset_ms = result["forceWrap"]["boundary"], result["forceWrap"]["offsetMs"]
     gt = force_wrap_ground_truth(
         Path(result["fixture"]), Path(result["originalIndex"]), boundary, (result.get("glReplay") or {}).get("requested", "off"),
+        run_root(path),
     )
     before = result.get("status")
     score_force_wrap_run(result, gt, boundary, offset_ms)
@@ -5728,7 +5869,7 @@ def run_rescore_cli(args: argparse.Namespace) -> None:
         if report["status"] != "pass":
             raise SystemExit(1)
         return
-    export = prepare_export(args.fixture, args.original_index, "rescore")
+    export = prepare_export(args.fixture, args.original_index, run_root(args.rescore), "rescore")
     slides = load_slides(export)
     facts = ground_truth_facts(ground_truth_plan(export, slides))
     bind_dom_ids(facts, movie_nodes(export, slides))
@@ -5745,6 +5886,11 @@ def run_rescore_cli(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
+    with run_scope(args.rescore if args.rescore is not None else args.artifact):
+        run_cli(args)
+
+
+def run_cli(args: argparse.Namespace) -> None:
     if args.gl_force_fail is not None:
         run_forced_fail_cli(args)
         return
@@ -5762,6 +5908,7 @@ def main() -> None:
         run_pass_g_cli(args)
         return
     auto = args.gl_replay == "auto"
+    skip = set(args.skip_arms)
     artifact = args.artifact
     artifact.parent.mkdir(parents=True, exist_ok=True)
     viewport = args.viewport
@@ -5772,6 +5919,7 @@ def main() -> None:
         "status": "running",
         "viewport": {"width": viewport[0], "height": viewport[1]},
         "attachViewport": {"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT},
+        "skippedArms": list(args.skip_arms),
     }
     if auto:
         result["glReplay"] = {"requested": "auto"}
@@ -5780,8 +5928,9 @@ def main() -> None:
         artifact.write_text(json.dumps(result, indent=2, default=str) + "\n")
 
     save()
+    root = run_root(artifact)
     try:
-        export_a = prepare_export(args.fixture, args.original_index, "arm-a")
+        export_a = prepare_export(args.fixture, args.original_index, root, "arm-a")
         slides_a = load_slides(export_a)
         plan = ground_truth_plan(export_a, slides_a)
         facts = ground_truth_facts(plan)
@@ -5801,20 +5950,22 @@ def main() -> None:
         save()
 
         result["arms"] = {}
-        result["arms"]["A"] = run_arm(
-            "A", export_a, slides_a, facts, viewport, expected_stage, gl_replay=args.gl_replay, facts_on=facts_on,
-        )
-        save()
-
-        export_b = prepare_export(args.fixture, args.original_index, "arm-b")
-        with env_override({CONTINUITY_ENV: "off"}):
-            result["arms"]["B"] = run_arm(
-                "B", export_b, load_slides(export_b), facts, viewport, expected_stage, gl_replay="off",
+        if "A" not in skip:
+            result["arms"]["A"] = run_arm(
+                "A", export_a, slides_a, facts, viewport, expected_stage, gl_replay=args.gl_replay, facts_on=facts_on,
             )
-        save()
+            save()
 
-        if "bridgeScene" in facts or bridge_carry_ids(facts.get("verdicts") or []):
-            export_c = prepare_export(args.fixture, args.original_index, "arm-c")
+        if "B" not in skip:
+            export_b = prepare_export(args.fixture, args.original_index, root, "arm-b")
+            with env_override({CONTINUITY_ENV: "off"}):
+                result["arms"]["B"] = run_arm(
+                    "B", export_b, load_slides(export_b), facts, viewport, expected_stage, gl_replay="off",
+                )
+            save()
+
+        if "C" not in skip and ("bridgeScene" in facts or bridge_carry_ids(facts.get("verdicts") or [])):
+            export_c = prepare_export(args.fixture, args.original_index, root, "arm-c")
             with bridge_disabled():
                 result["arms"]["C"] = run_arm(
                     "C", export_c, load_slides(export_c), facts, viewport, expected_stage,
@@ -5825,35 +5976,37 @@ def main() -> None:
         result["leftoverChromeAfterArms"] = check_no_leftover_chrome()
         save()
 
-        evidence_dir = artifact.parent / "visible"
-        export_v = prepare_export(args.fixture, args.original_index, "visible-v")
+        evidence_dir = evidence_dir_of(artifact)
         result["visible"] = {}
         v_sink: dict[str, Any] = {}
-        result["visible"]["V"] = run_visible_pass(
-            "V", export_v, load_slides(export_v), plan, viewport, expected_stage, evidence_dir,
-            facts["rectExpectations"]["V"], burst_poke=args.burst_poke, gl_replay="off",
-            after_slide=handback_hook(facts_on["armed"], v_sink, expect_handoff=False, capture_live=True) if facts_on else None,
-        )
-        if auto:
-            write_handback_shot(evidence_dir, "V", v_sink)
-            result["visible"]["V"]["handback"] = v_sink.get("record")
-            result["visible"]["V"]["live"] = _live_summary(v_sink)
-        result["leftoverChromeAfterVisibleV"] = check_no_leftover_chrome()
-        save()
-
-        export_voff = prepare_export(args.fixture, args.original_index, "visible-voff")
-        with env_override({CONTINUITY_ENV: "off"}):
-            result["visible"]["Voff"] = run_visible_pass(
-                "Voff", export_voff, load_slides(export_voff), plan, viewport, expected_stage, evidence_dir,
-                facts["rectExpectations"]["Voff"], burst_poke=args.burst_poke, gl_replay="off",
+        if "V" not in skip:
+            export_v = prepare_export(args.fixture, args.original_index, root, "visible-v")
+            result["visible"]["V"] = run_visible_pass(
+                "V", export_v, load_slides(export_v), plan, viewport, expected_stage, evidence_dir,
+                facts["rectExpectations"]["V"], burst_poke=args.burst_poke, gl_replay="off",
+                after_slide=handback_hook(facts_on["armed"], v_sink, expect_handoff=False, capture_live=True) if facts_on else None,
             )
-        result["leftoverChromeAfterVisible"] = check_no_leftover_chrome()
-        save()
+            if auto:
+                write_handback_shot(evidence_dir, "V", v_sink)
+                result["visible"]["V"]["handback"] = v_sink.get("record")
+                result["visible"]["V"]["live"] = _live_summary(v_sink)
+            result["leftoverChromeAfterVisibleV"] = check_no_leftover_chrome()
+            save()
+
+        if "Voff" not in skip:
+            export_voff = prepare_export(args.fixture, args.original_index, root, "visible-voff")
+            with env_override({CONTINUITY_ENV: "off"}):
+                result["visible"]["Voff"] = run_visible_pass(
+                    "Voff", export_voff, load_slides(export_voff), plan, viewport, expected_stage, evidence_dir,
+                    facts["rectExpectations"]["Voff"], burst_poke=args.burst_poke, gl_replay="off",
+                )
+            result["leftoverChromeAfterVisible"] = check_no_leftover_chrome()
+            save()
 
         if facts_on is not None:
             armed = facts_on["armed"]
             g_sink: dict[str, Any] = {}
-            export_vgl = prepare_export(args.fixture, args.original_index, "visible-vgl")
+            export_vgl = prepare_export(args.fixture, args.original_index, root, "visible-vgl")
             vgl = run_visible_pass(
                 "Vgl", export_vgl, load_slides(export_vgl), plan_on, viewport, expected_stage, evidence_dir,
                 vgl_expectations, burst_poke=args.burst_poke, gl_replay="auto",
@@ -5874,13 +6027,14 @@ def main() -> None:
             result["leftoverChromeAfterVisibleGl"] = check_no_leftover_chrome()
             save()
 
-        export_attach = prepare_export(args.fixture, args.original_index, "attach")
-        result["attach"] = run_attach_arm(
-            export_attach, load_slides(export_attach), facts, artifact.parent, attach_expected_stage,
-            gl_replay=args.gl_replay, facts_on=facts_on,
-        )
-        result["leftoverChromeAfterAttach"] = check_no_leftover_chrome()
-        save()
+        if "attach" not in skip:
+            export_attach = prepare_export(args.fixture, args.original_index, root, "attach")
+            result["attach"] = run_attach_arm(
+                export_attach, load_slides(export_attach), facts, root, attach_expected_stage,
+                gl_replay=args.gl_replay, facts_on=facts_on,
+            )
+            result["leftoverChromeAfterAttach"] = check_no_leftover_chrome()
+            save()
 
         result["status"], result["statusReasons"] = overall_status(result)
     except Exception as exc:  # noqa: BLE001 - always leave a readable artifact behind
@@ -5898,11 +6052,14 @@ def main() -> None:
     summary = {
         "status": result.get("status"),
         "statusReasons": result.get("statusReasons"),
+        "skippedArms": result.get("skippedArms"),
         "arms": {
             name: {key: boundary_verdict(entry, key) for key in verdict_keys}
             for name, entry in result.get("arms", {}).items()
         },
-        "attach": {key: boundary_verdict(result.get("attach", {}), key) for key in verdict_keys},
+        "attach": None if "attach" in skip else {
+            key: boundary_verdict(result.get("attach", {}), key) for key in verdict_keys
+        },
         "visible": {
             name: {
                 "verdict": entry.get("verdict"),

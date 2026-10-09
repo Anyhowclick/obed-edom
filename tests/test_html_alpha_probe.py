@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import time
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -2808,3 +2811,9 @@ class TestOccludedCells:
     def test_an_out_of_grid_cell_fails_loudly(self, cell):
         with pytest.raises(ValueError):
             self._score(self._live_except([]), occluded_cells=[cell])
+
+
+# --------------------------------------------------------------------------- #
+# DevToolsActivePort: Chrome launched with `--remote-debugging-port=0` binds a free port
+# itself and writes it here, so no other run can take the port between picking and binding.
+# --------------------------------------------------------------------------- #

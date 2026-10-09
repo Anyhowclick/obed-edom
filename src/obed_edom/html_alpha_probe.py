@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -113,7 +114,6 @@ def assign_starting_scenes(slides: list[dict[str, Any]]) -> list[dict[str, Any]]
         slide["currentSlide"] = int(slide["playerIndex"]) + 1
         scene += max(n_events, 1)
     return slides
-
 
 
 _INDEX_MAIN_JS = re.compile(
@@ -855,7 +855,6 @@ def decoded_alpha_report(src_frames: Sequence[np.ndarray], decoded: Sequence[Pat
         "declaredMaeMax": DECODED_ALPHA_MAE_MAX,
         "frames": frame_reports,
     }
-
 
 
 def page_websocket_url(targets: Sequence[dict[str, Any]]) -> str | None:

@@ -19,7 +19,6 @@ import base64
 import io
 import json
 import shutil
-import socket
 import sys
 import threading
 import time
@@ -245,11 +244,8 @@ async def _run() -> dict:
         def log_message(self, fmt, *args):  # noqa: A003
             return
 
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = httpd.server_address[1]
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{port}/index.html"
 
