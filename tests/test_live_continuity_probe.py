@@ -4390,6 +4390,201 @@ def test_attach_arm_holds_the_viewport_override_session_until_its_chrome_is_torn
     assert events == ["host started, hold closed=False", "hold closed", "chrome terminated"]
 
 
+class TestConcurrentRunIsolation:
+    """`run_gates.sh` runs several probes at once, often into one out dir. Each run must own
+    its export copies (inside the preview cache, which is the only place the host serves
+    from), its attach Chrome profiles and its visible evidence, must remove its own cache
+    folder when it finishes, and must report only its own leftover Chromes."""
+
+    class _Stop(Exception):
+        pass
+
+    @pytest.fixture
+    def driven(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
+        """Drive the ordinary run through `main` with the real `prepare_export` and the real
+        `run_attach_arm`; the attach Chrome launch records its profile and stops the arm."""
+        monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "output"))
+        seen: dict[str, Any] = {"exports": [], "evidence": [], "profiles": []}
+        real_prepare = probe.prepare_export
+        fixture = tmp_path / "fixture"
+        fixture.mkdir()
+        (fixture / "player.js").write_text("player")
+        index = tmp_path / "index.html"
+        index.write_text("unmodified")
+
+        def prepare(*args: Any) -> Path:
+            export = real_prepare(*args)
+            assert (export / "player.js").read_text() == "player"
+            assert (export / "index.html").read_text() == "unmodified"
+            assert probe.safe_export_file(export, "index.html") == (export / "index.html").resolve()
+            assert not (export / "stale.txt").exists(), "a stale folder from a crashed run is replaced"
+            seen["exports"].append(export)
+            return export
+
+        def visible_pass(name: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            seen["evidence"].append(args[5])
+            return {"pass": name}
+
+        def launch(port: int, profile: Path) -> Any:
+            seen["profiles"].append(profile)
+            raise self._Stop("attach chrome launch reached")
+
+        facts = {key: None for key in ("asset", "canvas")}
+        facts.update(refusedBoundaries=[], rectExpectations={"V": {}, "Voff": {}})
+        monkeypatch.setattr(probe, "prepare_export", prepare)
+        monkeypatch.setattr(probe, "load_slides", lambda *a: [])
+        monkeypatch.setattr(probe, "ground_truth_plan", lambda *a, **k: None)
+        monkeypatch.setattr(probe, "ground_truth_facts", lambda *a, **k: facts)
+        monkeypatch.setattr(probe, "movie_nodes", lambda *a: [])
+        monkeypatch.setattr(probe, "bind_dom_ids", lambda *a: None)
+        monkeypatch.setattr(probe, "expected_stage_fit", lambda *a: {})
+        monkeypatch.setattr(probe, "run_arm", lambda *a, **k: {})
+        monkeypatch.setattr(probe, "run_visible_pass", visible_pass)
+        monkeypatch.setattr(probe, "free_port", lambda: 1)
+        monkeypatch.setattr(probe, "launch_attach_chrome", launch)
+        monkeypatch.setattr(probe, "check_no_leftover_chrome", lambda: "")
+        seen.update(fixture=fixture, index=index, tmp=tmp_path)
+        return seen
+
+    def _main(self, seen: dict[str, Any], monkeypatch: pytest.MonkeyPatch, artifact: Path) -> dict[str, Any]:
+        argv = ["x", "--fixture", str(seen["fixture"]), "--original-index", str(seen["index"]), "--artifact", str(artifact)]
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit) as exc:
+            probe.main()
+        assert exc.value.code == 1
+        result = json.loads(artifact.read_text())
+        assert "attach chrome launch reached" in result["error"], "the run must have reached the attach arm"
+        return result
+
+    def test_two_runs_in_one_out_dir_get_distinct_export_roots_inside_the_probe_cache(
+        self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        out = driven["tmp"] / "out"
+        self._main(driven, monkeypatch, out / "host-1920x1080.json")
+        first = list(driven["exports"])
+        driven["exports"].clear()
+        self._main(driven, monkeypatch, out / "host-1600x1000.json")
+        second = list(driven["exports"])
+        cache = probe.cache_dir(probe.PROBE_DIGEST).resolve()
+        tags = ["html-arm-a", "html-arm-b", "html-visible-v", "html-visible-voff", "html-attach"]
+        assert [p.name for p in first] == [p.name for p in second] == tags
+        assert all(p.resolve().is_relative_to(cache) for p in first + second)
+        assert not set(first) & set(second), "same tags in two runs must land in different folders"
+        assert {p.parent for p in first} == {probe.run_root(out / "host-1920x1080.json")}
+        assert {p.parent for p in second} == {probe.run_root(out / "host-1600x1000.json")}
+
+    def test_the_same_artifact_name_in_two_out_dirs_does_not_collide(self, driven: dict[str, Any]) -> None:
+        a = probe.run_root(driven["tmp"] / "o1" / "host-red.json")
+        b = probe.run_root(driven["tmp"] / "o2" / "host-red.json")
+        assert a != b and a.parent == b.parent == probe.cache_dir(probe.PROBE_DIGEST) / "runs"
+
+    def test_the_same_artifact_maps_to_the_same_root(self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+        artifact = driven["tmp"] / "out" / "host.json"
+        assert probe.run_root(artifact) == probe.run_root(driven["tmp"] / "out" / ".." / "out" / "host.json")
+        self._main(driven, monkeypatch, artifact)
+        first = list(driven["exports"])
+        driven["exports"].clear()
+        self._main(driven, monkeypatch, artifact)
+        assert driven["exports"] == first
+
+    def test_a_stale_folder_from_a_crashed_run_is_replaced(self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+        artifact = driven["tmp"] / "out" / "host.json"
+        stale = probe.run_root(artifact) / "html-arm-a"
+        stale.mkdir(parents=True)
+        (stale / "stale.txt").write_text("crashed run")
+        self._main(driven, monkeypatch, artifact)
+        assert driven["exports"][0] == stale
+
+    def test_the_run_folder_is_removed_when_the_run_ends_and_nothing_else_is(
+        self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        artifact = driven["tmp"] / "out" / "host.json"
+        other = probe.run_root(driven["tmp"] / "out" / "other.json") / "html-arm-a"
+        other.mkdir(parents=True)
+        legacy = probe.cache_dir(probe.PROBE_DIGEST) / "html-arm-a"
+        legacy.mkdir(parents=True)
+        self._main(driven, monkeypatch, artifact)
+        assert driven["exports"] and all(not p.exists() for p in driven["exports"])
+        assert not probe.run_root(artifact).exists()
+        assert other.is_dir() and legacy.is_dir(), "only the run's own folder is removed"
+
+    def test_the_run_folder_is_removed_when_the_run_raises(self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+        artifact = driven["tmp"] / "out" / "host.json"
+
+        def boom(*a: Any, **k: Any) -> Any:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(probe, "run_arm", boom)
+        monkeypatch.setattr(sys, "argv", [
+            "x", "--fixture", str(driven["fixture"]), "--original-index", str(driven["index"]), "--artifact", str(artifact),
+        ])
+        with pytest.raises(KeyboardInterrupt):
+            probe.main()
+        assert driven["exports"] == [probe.run_root(artifact) / "html-arm-a"]
+        assert not probe.run_root(artifact).exists()
+
+    def test_the_attach_profile_and_visible_evidence_are_per_run(self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+        out = driven["tmp"] / "out"
+        a, b = out / "host-a.json", out / "host-b.json"
+        self._main(driven, monkeypatch, a)
+        self._main(driven, monkeypatch, b)
+        assert driven["profiles"] == [probe.run_root(a) / "attach-chrome-profile", probe.run_root(b) / "attach-chrome-profile"]
+        assert driven["evidence"] == [out / "visible" / "host-a"] * 2 + [out / "visible" / "host-b"] * 2
+
+    def test_the_pass_g_attach_profile_and_evidence_are_per_run(self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+        plan = argparse.Namespace(scene_index_by_player={0: 1, 1: 2})
+        monkeypatch.setattr(probe, "load_slides", lambda *a: [{"originalOrdinal": 1, "playerIndex": 0}, {"originalOrdinal": 2, "playerIndex": 1}])
+        monkeypatch.setattr(probe, "ground_truth_plan", lambda *a, **k: plan)
+        monkeypatch.setattr(probe, "ground_truth_facts", lambda *a, **k: {"rectExpectations": {"V": {}}, "verdicts": []})
+        monkeypatch.setattr(probe, "slide_instances_of", lambda *a: {})
+        monkeypatch.setattr(probe, "character_region_rect", lambda *a: None)
+        monkeypatch.setattr(probe, "goto_matrix", lambda *a: ())
+        out = driven["tmp"] / "out"
+        for name in ("g-a", "g-b"):
+            args = probe.parse_args([
+                "--pass", "G", "--attach", "--fixture", str(driven["fixture"]), "--original-index", str(driven["index"]),
+                "--artifact", str(out / f"{name}.json"),
+            ])
+            with pytest.raises(self._Stop):
+                probe.run_pass_g(args)
+        assert driven["profiles"] == [probe.run_root(out / f"{n}.json") / "attach-chrome-profile-g" for n in ("g-a", "g-b")]
+
+
+def test_the_leftover_chrome_check_reports_only_this_process_descendants(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under `run_gates.sh` concurrency a machine-wide `pgrep obed-live-chrome` lists the other runs'
+    live Chromes as this run's leftovers. Only descendants of this probe (at any depth) count."""
+    me = 4242
+    ps = "\n".join([
+        f"  {me}     1 python live_continuity_probe.py",
+        f"  5001  {me} /Applications/Google Chrome --user-data-dir=/tmp/obed-live-chrome-mine",
+        "  5002  5001 Google Chrome Helper (Renderer) --user-data-dir=/tmp/obed-live-chrome-mine",
+        f"  5003  {me} /usr/bin/some-tool obed-unrelated",
+        "  6001  6000 /Applications/Google Chrome --user-data-dir=/tmp/obed-live-chrome-theirs",
+        "  6002  6001 Google Chrome Helper (Renderer) --user-data-dir=/tmp/obed-live-chrome-theirs",
+    ])
+    calls: list[Any] = []
+
+    def run(cmd: Any, **kwargs: Any) -> Any:
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout=ps + "\n", stderr="")
+
+    monkeypatch.setattr(probe.os, "getpid", lambda: me)
+    monkeypatch.setattr(probe.subprocess, "run", run)
+    report = probe.check_no_leftover_chrome()
+    assert "theirs" not in report
+    assert report.splitlines() == [
+        "5001 /Applications/Google Chrome --user-data-dir=/tmp/obed-live-chrome-mine",
+        "5002 Google Chrome Helper (Renderer) --user-data-dir=/tmp/obed-live-chrome-mine",
+    ]
+
+
+def test_the_leftover_chrome_check_is_empty_with_no_own_chrome(monkeypatch: pytest.MonkeyPatch) -> None:
+    ps = "  6001  6000 /Applications/Google Chrome --user-data-dir=/tmp/obed-live-chrome-theirs\n"
+    monkeypatch.setattr(probe.os, "getpid", lambda: 4242)
+    monkeypatch.setattr(probe.subprocess, "run", lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, stdout=ps, stderr=""))
+    assert probe.check_no_leftover_chrome() == ""
+
+
 class TestForcedFailSplice:
     def test_the_seed_lands_once_ahead_of_exactly_one_module_and_is_restored(self) -> None:
         original = probe.live_host_module.gl_replay_script
@@ -5997,7 +6192,7 @@ class TestRescoreForceWrapCli:
 
         monkeypatch.setattr(probe, "force_wrap_ground_truth", gt)
         report = probe.rescore_force_wrap(path)
-        assert seen == [(Path("f"), Path("i"), "1to2", "auto")]
+        assert seen == [(Path("f"), Path("i"), "1to2", "auto", probe.run_root(path))]
         assert (report["statusBefore"], report["status"], report["outcome"]) == ("fail", "pass", "carried")
         assert report["recorderWindow"]["rule"].startswith("armed")
 

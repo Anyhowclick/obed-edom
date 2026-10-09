@@ -689,12 +689,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def prepare_export(fixture: Path, original_index: Path, tag: str) -> Path:
+def run_root(artifact: Path) -> Path:
+    """This run's private folder inside the preview cache (the host serves only exports under it),
+    keyed by the artifact so concurrent runs never share one."""
+    resolved = artifact.resolve()
+    key = hashlib.sha256(str(resolved).encode()).hexdigest()[:12]
+    return cache_dir(PROBE_DIGEST) / "runs" / f"{resolved.stem}-{key}"
+
+
+@contextmanager
+def run_scope(artifact: Path) -> Iterator[Path]:
+    root = run_root(artifact)
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def evidence_dir_of(artifact: Path) -> Path:
+    return artifact.parent / "visible" / artifact.stem
+
+
+def prepare_export(fixture: Path, original_index: Path, root: Path, tag: str) -> Path:
     """Mirror `live_host_probe.main`'s fixture prep: clone the already-built player
     export, then overwrite index.html with the UNMODIFIED one so the host's own
     `_program_html` injects everything fresh (the fixture's index.html already has
     P2's own script tags baked in, which would collide)."""
-    destination = cache_dir(PROBE_DIGEST) / f"html-{tag}"
+    destination = root / f"html-{tag}"
     if destination.exists():
         shutil.rmtree(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -4288,7 +4309,8 @@ def _run_goto_arm(
 def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
     """Drive every `GOTO_MATRIX` entry through the real goTo, once armed and once with
     `GOTO_AUTOPLAY_ENV=off` (the null control), via `_run_goto_arm`."""
-    plan_export = prepare_export(args.fixture, args.original_index, "pass-g-plan")
+    root = run_root(args.artifact)
+    plan_export = prepare_export(args.fixture, args.original_index, root, "pass-g-plan")
     plan_slides = load_slides(plan_export)
     plan = ground_truth_plan(plan_export, plan_slides)
     facts = ground_truth_facts(plan)
@@ -4306,7 +4328,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
         expectations_g.setdefault(consumption_index, {})[CHARACTERS_ASSET_KEY] = DEAD
 
     viewport = (VIEWPORT_WIDTH, VIEWPORT_HEIGHT) if args.attach else args.viewport
-    evidence_dir = args.artifact.parent / "visible"
+    evidence_dir = evidence_dir_of(args.artifact)
     onset_scene_id = str(plan.scene_index_by_player[consumption_index])
     matrix = goto_matrix(facts["verdicts"], len(plan_slides))
 
@@ -4320,7 +4342,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
         env: dict[str, str | None] = {}
         if args.attach:
             port = free_port()
-            profile = args.artifact.parent / "attach-chrome-profile-g"
+            profile = root / "attach-chrome-profile-g"
             if profile.exists():
                 shutil.rmtree(profile)
             chrome_proc = launch_attach_chrome(port, profile)
@@ -4330,7 +4352,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
         else:
             force_viewport(*viewport)
 
-        export_armed = prepare_export(args.fixture, args.original_index, "pass-g-armed")
+        export_armed = prepare_export(args.fixture, args.original_index, root, "pass-g-armed")
         result["armed"] = _run_goto_arm(
             export_armed, load_slides(export_armed), env=env, tag="G", armed=True,
             instances=instances_g, expectations=goto_rect_expectations(expectations_g, armed=True),
@@ -4338,7 +4360,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
             gl_replay=args.gl_replay, matrix=matrix,
         )
 
-        export_off = prepare_export(args.fixture, args.original_index, "pass-g-off")
+        export_off = prepare_export(args.fixture, args.original_index, root, "pass-g-off")
         result["nullControl"] = _run_goto_arm(
             export_off, load_slides(export_off), env={**env, GOTO_AUTOPLAY_ENV: "off"}, tag="Goff", armed=False,
             instances=instances_g, expectations=goto_rect_expectations(expectations_g, armed=False),
@@ -4382,11 +4404,22 @@ def run_pass_g_cli(args: argparse.Namespace) -> None:
 
 
 def check_no_leftover_chrome() -> str:
+    """`obed-live-chrome` processes descended from this probe only; concurrent runs own theirs."""
     try:
-        completed = subprocess.run(["pgrep", "-fl", "obed-live-chrome"], capture_output=True, text=True)
-        return completed.stdout.strip()
+        completed = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,command="], capture_output=True, text=True)
     except Exception as exc:  # noqa: BLE001
-        return f"pgrep failed: {exc}"
+        return f"ps failed: {exc}"
+    children: dict[int, list[tuple[int, str]]] = {}
+    for line in completed.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            children.setdefault(int(parts[1]), []).append((int(parts[0]), parts[2]))
+    found, pending = [], [os.getpid()]
+    while pending:
+        for pid, command in children.get(pending.pop(), []):
+            found.append((pid, command))
+            pending.append(pid)
+    return "\n".join(f"{pid} {command}" for pid, command in sorted(found) if "obed-live-chrome" in command)
 
 
 def boundary_verdict(entry: dict[str, Any], key: str) -> bool | None:
@@ -4900,8 +4933,9 @@ def run_forced_fail(args: argparse.Namespace) -> dict[str, Any]:
     """`--gl-force-fail`: V and a forced Vgl, scored with the flag-off facts."""
     reason = args.gl_force_fail
     viewport = args.viewport
-    evidence_dir = args.artifact.parent / "visible"
-    export_plan = prepare_export(args.fixture, args.original_index, "forced-plan")
+    evidence_dir = evidence_dir_of(args.artifact)
+    root = run_root(args.artifact)
+    export_plan = prepare_export(args.fixture, args.original_index, root, "forced-plan")
     plan_slides = load_slides(export_plan)
     plan = ground_truth_plan(export_plan, plan_slides)
     facts = ground_truth_facts(plan)
@@ -4913,7 +4947,7 @@ def run_forced_fail(args: argparse.Namespace) -> dict[str, Any]:
     result: dict[str, Any] = {"groundTruth": {"retire": retire, "armed": armed}, "visible": {}}
 
     v_sink: dict[str, Any] = {}
-    export_v = prepare_export(args.fixture, args.original_index, "forced-v")
+    export_v = prepare_export(args.fixture, args.original_index, root, "forced-v")
     result["visible"]["V"] = run_visible_pass(
         "V", export_v, load_slides(export_v), plan, viewport, expected_stage, evidence_dir,
         facts["rectExpectations"]["V"], burst_poke=args.burst_poke, gl_replay="off",
@@ -4923,7 +4957,7 @@ def run_forced_fail(args: argparse.Namespace) -> dict[str, Any]:
     result["visible"]["V"]["handback"] = v_sink.get("record")
 
     g_sink: dict[str, Any] = {}
-    export_g = prepare_export(args.fixture, args.original_index, "forced-vgl")
+    export_g = prepare_export(args.fixture, args.original_index, root, "forced-vgl")
     with forced_fail_seed(reason) as splice:
         result["visible"]["VglForced"] = run_visible_pass(
             "VglForced", export_g, load_slides(export_g), plan, viewport, expected_stage, evidence_dir,
@@ -4991,7 +5025,8 @@ def run_red_arm(args: argparse.Namespace) -> dict[str, Any]:
     verdicts plus a per-slide stray census, and compared with the arm's pre-registered red set."""
     auto = args.gl_replay == "auto"
     viewport = args.viewport
-    export_plan = prepare_export(args.fixture, args.original_index, "red-plan")
+    root = run_root(args.artifact)
+    export_plan = prepare_export(args.fixture, args.original_index, root, "red-plan")
     plan_slides = load_slides(export_plan)
     plan = ground_truth_plan(export_plan, plan_slides)
     facts = ground_truth_facts(plan)
@@ -5015,7 +5050,7 @@ def run_red_arm(args: argparse.Namespace) -> dict[str, Any]:
     if facts_on is not None:
         result["groundTruthGl"] = {"armed": facts_on["armed"], "verdicts": facts_on["verdicts"]}
     expected_stage = expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
-    export_r = prepare_export(args.fixture, args.original_index, "red-arm")
+    export_r = prepare_export(args.fixture, args.original_index, root, "red-arm")
     slides_r = load_slides(export_r)
     patch = injected_core_variant(args.core_variant) if args.core_variant else stripped_runtime(*args.strip)
     with patch:
@@ -5458,10 +5493,10 @@ def force_wrap_take(
     return take
 
 
-def force_wrap_ground_truth(fixture: Path, original_index: Path, boundary: str, gl_replay: str) -> dict[str, Any]:
+def force_wrap_ground_truth(fixture: Path, original_index: Path, boundary: str, gl_replay: str, root: Path) -> dict[str, Any]:
     """The boundary's scene, rects and seeked source instance, derived offline from the fixture."""
     src_ordinal = FORCE_WRAP_BOUNDARIES[boundary][0]
-    export = prepare_export(fixture, original_index, "force-wrap")
+    export = prepare_export(fixture, original_index, root, "force-wrap")
     slides = load_slides(export)
     plan = ground_truth_plan(export, slides)
     facts = ground_truth_facts(plan)
@@ -5526,7 +5561,7 @@ def run_force_wrap(args: argparse.Namespace) -> dict[str, Any]:
     """L2: one take of a wrap forced `offset_ms` from the advance press at one boundary."""
     boundary, offset_ms = args.force_wrap["boundary"], args.force_wrap["offsetMs"]
     src_ordinal, dst_ordinal = FORCE_WRAP_BOUNDARIES[boundary]
-    gt = force_wrap_ground_truth(args.fixture, args.original_index, boundary, args.gl_replay)
+    gt = force_wrap_ground_truth(args.fixture, args.original_index, boundary, args.gl_replay, run_root(args.artifact))
     source, scene = gt["source"], gt["scene"]
     result: dict[str, Any] = {"source": source, "boundaryScene": scene}
     force_viewport(*args.viewport)
@@ -5570,6 +5605,7 @@ def rescore_force_wrap(path: Path) -> dict[str, Any]:
     boundary, offset_ms = result["forceWrap"]["boundary"], result["forceWrap"]["offsetMs"]
     gt = force_wrap_ground_truth(
         Path(result["fixture"]), Path(result["originalIndex"]), boundary, (result.get("glReplay") or {}).get("requested", "off"),
+        run_root(path),
     )
     before = result.get("status")
     score_force_wrap_run(result, gt, boundary, offset_ms)
@@ -5737,7 +5773,7 @@ def run_rescore_cli(args: argparse.Namespace) -> None:
         if report["status"] != "pass":
             raise SystemExit(1)
         return
-    export = prepare_export(args.fixture, args.original_index, "rescore")
+    export = prepare_export(args.fixture, args.original_index, run_root(args.rescore), "rescore")
     slides = load_slides(export)
     facts = ground_truth_facts(ground_truth_plan(export, slides))
     bind_dom_ids(facts, movie_nodes(export, slides))
@@ -5754,6 +5790,11 @@ def run_rescore_cli(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
+    with run_scope(args.rescore if args.rescore is not None else args.artifact):
+        run_cli(args)
+
+
+def run_cli(args: argparse.Namespace) -> None:
     if args.gl_force_fail is not None:
         run_forced_fail_cli(args)
         return
@@ -5789,8 +5830,9 @@ def main() -> None:
         artifact.write_text(json.dumps(result, indent=2, default=str) + "\n")
 
     save()
+    root = run_root(artifact)
     try:
-        export_a = prepare_export(args.fixture, args.original_index, "arm-a")
+        export_a = prepare_export(args.fixture, args.original_index, root, "arm-a")
         slides_a = load_slides(export_a)
         plan = ground_truth_plan(export_a, slides_a)
         facts = ground_truth_facts(plan)
@@ -5815,7 +5857,7 @@ def main() -> None:
         )
         save()
 
-        export_b = prepare_export(args.fixture, args.original_index, "arm-b")
+        export_b = prepare_export(args.fixture, args.original_index, root, "arm-b")
         with env_override({CONTINUITY_ENV: "off"}):
             result["arms"]["B"] = run_arm(
                 "B", export_b, load_slides(export_b), facts, viewport, expected_stage, gl_replay="off",
@@ -5823,7 +5865,7 @@ def main() -> None:
         save()
 
         if "bridgeScene" in facts or bridge_carry_ids(facts.get("verdicts") or []):
-            export_c = prepare_export(args.fixture, args.original_index, "arm-c")
+            export_c = prepare_export(args.fixture, args.original_index, root, "arm-c")
             with bridge_disabled():
                 result["arms"]["C"] = run_arm(
                     "C", export_c, load_slides(export_c), facts, viewport, expected_stage,
@@ -5834,8 +5876,8 @@ def main() -> None:
         result["leftoverChromeAfterArms"] = check_no_leftover_chrome()
         save()
 
-        evidence_dir = artifact.parent / "visible"
-        export_v = prepare_export(args.fixture, args.original_index, "visible-v")
+        evidence_dir = evidence_dir_of(artifact)
+        export_v = prepare_export(args.fixture, args.original_index, root, "visible-v")
         result["visible"] = {}
         v_sink: dict[str, Any] = {}
         result["visible"]["V"] = run_visible_pass(
@@ -5850,7 +5892,7 @@ def main() -> None:
         result["leftoverChromeAfterVisibleV"] = check_no_leftover_chrome()
         save()
 
-        export_voff = prepare_export(args.fixture, args.original_index, "visible-voff")
+        export_voff = prepare_export(args.fixture, args.original_index, root, "visible-voff")
         with env_override({CONTINUITY_ENV: "off"}):
             result["visible"]["Voff"] = run_visible_pass(
                 "Voff", export_voff, load_slides(export_voff), plan, viewport, expected_stage, evidence_dir,
@@ -5862,7 +5904,7 @@ def main() -> None:
         if facts_on is not None:
             armed = facts_on["armed"]
             g_sink: dict[str, Any] = {}
-            export_vgl = prepare_export(args.fixture, args.original_index, "visible-vgl")
+            export_vgl = prepare_export(args.fixture, args.original_index, root, "visible-vgl")
             vgl = run_visible_pass(
                 "Vgl", export_vgl, load_slides(export_vgl), plan_on, viewport, expected_stage, evidence_dir,
                 vgl_expectations, burst_poke=args.burst_poke, gl_replay="auto",
@@ -5883,9 +5925,9 @@ def main() -> None:
             result["leftoverChromeAfterVisibleGl"] = check_no_leftover_chrome()
             save()
 
-        export_attach = prepare_export(args.fixture, args.original_index, "attach")
+        export_attach = prepare_export(args.fixture, args.original_index, root, "attach")
         result["attach"] = run_attach_arm(
-            export_attach, load_slides(export_attach), facts, artifact.parent, attach_expected_stage,
+            export_attach, load_slides(export_attach), facts, root, attach_expected_stage,
             gl_replay=args.gl_replay, facts_on=facts_on,
         )
         result["leftoverChromeAfterAttach"] = check_no_leftover_chrome()
