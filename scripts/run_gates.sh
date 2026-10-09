@@ -5,7 +5,8 @@
 # gates and the P2 fast, --disable-bridge34 and --gl-replay auto arms, and is never a qualification pass.
 # GATE_JOBS above 3 is allowed but loudly unqualified. A round refuses to start when the 1-minute load average exceeds
 # GATE_MAX_START_LOAD (default 4), when OBED_H264_PATTERN_CACHE is set, or when the H.264 pattern cache cannot be
-# prewarmed and re-read as a sha-verified hit for every duration. Nothing is ever retried.
+# prewarmed and re-read as a sha-verified hit for every duration, or when the load has not settled under the limit
+# GATE_SETTLE_S (default 300) after the prewarm. Nothing is ever retried.
 # Exit: 0 full pass; 10 dev pass; 1 when any gate FAILED, or a RECORD arm is PENDING registration unless --allow-record
 # (discovery runs only); 2 when refused before anything runs.
 GATE_JOBS=${GATE_JOBS:-3}
@@ -230,6 +231,17 @@ for r in first:
         sys.exit(f"pattern cache re-lookup for {r['seconds']} s is not a sha-verified hit of the prewarmed entry: {again or None}")
     print(f"h264 pattern cache verified {r['seconds']}s: hit key={again['cacheKey']} sha256={again['sha256']}")
 PYEOF
+GATE_SETTLE_S=${GATE_SETTLE_S:-300}
+[[ $GATE_SETTLE_S == <-> ]] || { echo "GATE_SETTLE_S must be a whole number of seconds, got '$GATE_SETTLE_S'" >&2; exit 2; }
+settle_deadline=$((SECONDS + GATE_SETTLE_S))
+while LAUNCH_LOAD=$(load1) && (( LAUNCH_LOAD > GATE_MAX_START_LOAD )); do
+  (( SECONDS >= settle_deadline )) && {
+    echo "1-minute load average $LAUNCH_LOAD still exceeds GATE_MAX_START_LOAD=$GATE_MAX_START_LOAD ${GATE_SETTLE_S}s after" \
+      "the prewarm; no timed run launched." >&2; exit 2; }
+  sleep 5
+done
+[[ -n $LAUNCH_LOAD ]] || { echo "cannot read the 1-minute load average (sysctl -n vm.loadavg); no run launched" >&2; exit 2; }
+echo "load average (1 min) at launch $LAUNCH_LOAD"
 for V in $HOST_VIEWPORTS; do
   queue $O/host-$V $PY -u scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport $V --artifact $O/host-$V.json ${HOST_SKIP[$V]:+--skip-arms} ${HOST_SKIP[$V]}
 done
@@ -307,7 +319,7 @@ for A in $HOST_RED_ARMS; do check_host_red ${=A}; tally $? "HOST red $A"; done
 for A in "${P2_ARMS[@]}"; do check_p2 "${(@Q)${(z)A}}"; done
 $PY -c "from obed_edom.live_continuity_js import js_sha256; print('runtime sha at end', js_sha256())"
 pgrep -fl obed-live-chrome | cut -c1-80 | head -2
-echo "load average (1 min) at start $START_LOAD, at end $(load1 || echo unreadable); wall ${SECONDS}s"
+echo "load average (1 min) at start $START_LOAD, at launch $LAUNCH_LOAD, at end $(load1 || echo unreadable); wall ${SECONDS}s"
 echo "DONE tier=$TIER failed=$FAIL pending=$PENDING"
 if (( ALLOW_RECORD && PENDING )); then echo "## --allow-record: $PENDING RECORD arm(s) left ungated -- DISCOVERY RUN, NOT A PASS ##"; fi
 (( FAIL == 0 && (PENDING == 0 || ALLOW_RECORD) )); rc=$?

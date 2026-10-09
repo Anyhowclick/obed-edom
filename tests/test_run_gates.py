@@ -171,7 +171,9 @@ def prewarm_h264_patterns(root):
 SYSCTL_STUB = """#!/bin/sh
 [ "$*" = "-n vm.loadavg" ] || exit 64
 [ "$STUB_LOAD" = fail ] && exit 1
-echo "{ ${STUB_LOAD:-0.50} 9.99 9.99 }"
+load=${STUB_LOAD:-0.50}
+if [ -n "$STUB_LOAD_AFTER_PREWARM" ] && grep -q '^prewarm' "$STUB_EVENTS" 2>/dev/null; then load=$STUB_LOAD_AFTER_PREWARM; fi
+echo "{ $load 9.99 9.99 }"
 """
 
 
@@ -197,7 +199,7 @@ def gates(tmp_path: Path):
     def env(**extra: str) -> dict[str, str]:
         drop = (
             "GATE_JOBS", "GATE_MAX_START_LOAD", "OBED_H264_PATTERN_CACHE", "STUB_MODES", "STUB_DEFAULT", "STUB_PREWARM",
-            "STUB_P2_RED", "STUB_P2_FREEZE", "STUB_LOAD",
+            "STUB_P2_RED", "STUB_P2_FREEZE", "STUB_LOAD", "STUB_LOAD_AFTER_PREWARM", "GATE_SETTLE_S",
         )
         base = {k: v for k, v in os.environ.items() if k not in drop}
         base["PATH"] = f"{stub_bin}{os.pathsep}{base.get('PATH', '')}"
@@ -413,8 +415,23 @@ def test_positive_control_a_host_at_or_under_the_limit_starts(gates, load: str, 
     done = gates["run"](**extra)
     assert f"load average (1 min) at start {load} (GATE_MAX_START_LOAD {limit or 4})" in done.stdout, done.stderr
     assert gates["events"]()[0] == "prewarm html-unmodified"
-    assert re.search(rf"^load average \(1 min\) at start {re.escape(load)}, at end {re.escape(load)}; wall \d+s$",
+    assert re.search(rf"^load average \(1 min\) at start {re.escape(load)}, at launch {re.escape(load)}, at end {re.escape(load)}; wall \d+s$",
                      done.stdout, re.M), done.stdout
+
+
+def test_known_bad_load_that_does_not_settle_after_the_prewarm_launches_no_timed_run(gates) -> None:
+    """Codex r3 MAJOR: a cold prewarm's ffmpeg encode can push the load over the limit after the start check passed,
+    so the load is re-checked (with a bounded settle wait) right before the first queued run."""
+    done = gates["run"](timeout=30, STUB_LOAD="1.00", STUB_LOAD_AFTER_PREWARM="9.50", GATE_SETTLE_S="0")
+    assert done.returncode == 2
+    assert "1-minute load average 9.50 still exceeds GATE_MAX_START_LOAD=4 0s after the prewarm" in done.stderr, done.stderr
+    assert all(e.startswith("prewarm") for e in gates["events"]()), gates["events"]()
+
+
+def test_positive_control_load_that_stays_low_after_the_prewarm_launches(gates) -> None:
+    done = gates["run"](STUB_LOAD="1.00", STUB_LOAD_AFTER_PREWARM="2.00", GATE_SETTLE_S="0")
+    assert "load average (1 min) at launch 2.00" in done.stdout, done.stderr
+    assert any(not e.startswith("prewarm") for e in gates["events"]())
 
 
 def test_known_bad_an_unreadable_load_average_is_refused(gates) -> None:
