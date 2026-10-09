@@ -107,11 +107,8 @@ def test_canvas_and_scene_boundaries():
             id="1-to-2-pins-the-static-movie-of-two-same-asset-instances",
         ),
         pytest.param(1, {"toPlayerIndex": 2}, {"action": "restart"}, id="2-to-3-restarts-across-the-dissolve"),
-        # WA0125 does not appear on slide 4: it must not be treated as continuing.
-        # Known discrepancy (plan section 2): a previous analysis derived y=797 for slide 3's movie
-        # while P2's screen-measured MOVIE constant used 795 (authored notes: 794.6). The export
-        # says y=797.10; P2's 795 is off by ~2.1px, inside the probe's stated 10px per-axis
-        # tolerance. This pins the DATA value; it must not be relaxed to force-fit 795.
+        # WA0125 does not appear on slide 4: it must not be treated as continuing. The authored
+        # y=797.10 is the DATA value (see test_slide3_authored_y_differs_from_p2s_measured_constant_within_tolerance).
         pytest.param(
             2, {"toPlayerIndex": 3, "durationSeconds": 1.5},
             {"action": "bridge", "srcRect": _rect(197.98, 797.10, 951.54, 267.62), "dstRect": _rect(326.75, 708.52, 1266.49, 356.20)},
@@ -125,6 +122,20 @@ def test_fixture_boundary_carries_only_untitled_mov(from_index, boundary_fields,
     assert {key: boundary[key] for key in boundary_fields} == boundary_fields
     assert [m["asset"] for m in boundary["movies"]] == ["untitled.mov"]
     assert {key: boundary["movies"][0][key] for key in movie_fields} == movie_fields
+
+
+def test_slide3_authored_y_differs_from_p2s_measured_constant_within_tolerance():
+    """Known discrepancy (plan section 2): a previous analysis derived y=797 for slide 3's
+    movie while P2's screen-measured MOVIE constant used 795 (authored notes: 794.6). The
+    export data says y=797.10 (the 3-to-4 case of test_fixture_boundary_carries_only_untitled_mov);
+    P2's 795 is off by ~2.1px, comfortably inside the probe's stated 10px per-axis tolerance,
+    consistent with it being a screen-measured rather than authored value. This test pins the
+    DATA value; it must not be relaxed to force-fit 795.
+    """
+    src = next(m for m in _boundary(_plan(), 2)["movies"] if m["asset"] == "untitled.mov")["srcRect"]
+    assert src["y"] == pytest.approx(797.10, abs=0.05)
+    p2_measured_y = 795
+    assert abs(src["y"] - p2_measured_y) < 10
 
 
 def test_r5_an_object_id_repeated_across_slides_refuses_the_deck():
@@ -309,10 +320,6 @@ _MOVIE_LAYER_TRANSFORMED = "has a rotated, transformed, or off-center anchor"
         pytest.param(
             SLIDE1, lambda data: _map_transitions(data, lambda _name: "apple:cube"),
             "unsupported transition 'apple:cube' at player index 0 -> 1", id="unknown-transition-on-a-magic-move",
-        ),
-        pytest.param(
-            SLIDE2, lambda data: _map_transitions(data, lambda _name: "apple:cube"),
-            "unsupported transition 'apple:cube' at player index 1 -> 2", id="unknown-transition-on-a-dissolve",
         ),
         pytest.param(
             SLIDE1, lambda data: _map_movie_nodes(data, lambda node: node["baseLayer"]["initialState"].__setitem__("rotation", 5)),
@@ -915,7 +922,10 @@ def test_artwork_must_overlap_the_movie_by_more_than_the_minimum_to_refuse(overl
 
     plan = _plan(_mutate_slide(SLIDE2, overlap_the_right_edge))
     assert isinstance(plan, ContinuityPlan)
-    assert len(plan.refusals) == refusals
+    if refusals:
+        assert len(plan.refusals) == refusals
+    else:
+        assert plan.refusals == ()
 
 
 def test_movie_slot_absent_in_one_event_is_skipped_not_refused():

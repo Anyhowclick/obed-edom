@@ -63,7 +63,10 @@ def test_minimal_pins_unqualified(slice_, actions, refusals):
     start, end = slice_
     plan = _plan(MINIMAL_ROOT, MINIMAL_UUIDS[start:end])
     assert isinstance(plan, ContinuityPlan)
-    assert len(plan.refusals) == refusals
+    if refusals:
+        assert len(plan.refusals) == refusals
+    else:
+        assert plan.refusals == ()
     movies = plan.boundaries[0].as_dict()["movies"]
     assert [m["action"] for m in movies] == actions
     assert plan.to_runtime() == Unsupported(NOT_YET_QUALIFIED)

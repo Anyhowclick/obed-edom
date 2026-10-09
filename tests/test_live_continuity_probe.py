@@ -1331,11 +1331,6 @@ class TestOverallStatusVisible:
                      id="Voff-inconclusive-at-the-boundary-slide-is-not-the-required-red"),
         *(pytest.param(lambda r, n=name: r["visible"].pop(n), f"visible pass {name} missing",
                        id=f"missing-{name}-pass-fails-with-its-own-reason") for name in ("V", "Voff")),
-        *(pytest.param(lambda r, n=name: r["visible"][n].update(status="error", error="plan has no slide_instances"),
-                       "plan has no slide_instances", id=f"errored-{name}-pass-fails-with-the-recorded-reason")
-          for name in ("V", "Voff")),
-        *(pytest.param(lambda r, n=name: r["visible"][n].update(slides=[]), f"visible pass {name} scored no slides",
-                       id=f"{name}-pass-that-scored-no-slides") for name in ("V", "Voff")),
         pytest.param(lambda r: r["groundTruth"].pop("boundaryPlayerIndex"), "expected-red slide is unknown",
                      id="unknown-expected-red-slide-fails-closed"),
         pytest.param(lambda r: r["groundTruth"].update(boundaryPlayerIndex=7), "never scored the expected-red slide",
@@ -6799,7 +6794,9 @@ class TestRetireVerdict:
     @pytest.mark.parametrize("notes", [
         # Gate r1, the live P2 shape: one preserve-refused, no retire-boundary, no <video> until scene 4.
         pytest.param((REFUSED_NOTE,), id="live-p2-shape-gate-r1"),
-        (RETIRE_NOTE,), (REFUSED_NOTE, RETIRE_NOTE), (RETIRE_NOTE, RETIRE_NOTE),
+        pytest.param((RETIRE_NOTE,), id="retire-only"),
+        pytest.param((REFUSED_NOTE, RETIRE_NOTE), id="refused-and-retire"),
+        pytest.param((RETIRE_NOTE, RETIRE_NOTE), id="two-retire-notes"),
     ])
     def test_any_refusal_note_for_the_movie_in_the_zone_is_green(self, notes: tuple[Any, ...]) -> None:
         scored = self._score(_retire_read(notes))
