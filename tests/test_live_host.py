@@ -503,11 +503,95 @@ def test_chrome_exiting_before_writing_its_port_fails_fast_with_the_exit_code(tm
     asked, _connected, _calls = _fake_cdp_endpoint(monkeypatch, transport)
 
     started = time.monotonic()
-    with pytest.raises(live_host.LiveHostError, match=r"Chrome CDP did not start: Chrome exited \(21\) before writing .*DevToolsActivePort"):
+    with pytest.raises(live_host.LiveHostError, match=r"Chrome CDP did not start: Chrome exited \(21\) before its DevTools port could be used \(.*DevToolsActivePort\)"):
         transport.start()
     assert time.monotonic() - started < 1.0
     assert asked == []
     assert transport.proc is None and transport.port is None
+
+
+class _ExitsAfterPolls(FakeProc):
+    """Alive for its first `alive_polls` polls, then exited with `code` (Chrome dying after it wrote
+    its port file)."""
+
+    def __init__(self, alive_polls: int, code: int = 9):
+        super().__init__()
+        self.alive_polls, self.code, self.polls = alive_polls, code, 0
+
+    def poll(self):
+        self.polls += 1
+        if self._terminated or self.polls > self.alive_polls:
+            return self.code
+        return None
+
+
+def test_chrome_exiting_after_writing_its_port_never_drives_that_port(tmp_path, monkeypatch):
+    """Codex round 2: Chrome wrote a complete port file and then died before readiness. Its port may
+    already belong to another CDP process, so the readiness loop polls the owned process first and
+    fails fast without a single request to that port (and never connects)."""
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, headless=True)
+    proc = _ExitsAfterPolls(alive_polls=1, code=9)
+
+    def popen(_argv, **_kwargs):
+        (tmp_path / "DevToolsActivePort").write_text("51234\n/devtools/browser/fresh\n")
+        return proc
+
+    monkeypatch.setattr(live_host.subprocess, "Popen", popen)
+    asked, connected, _calls = _fake_cdp_endpoint(monkeypatch, transport)
+
+    started = time.monotonic()
+    with pytest.raises(live_host.LiveHostError, match=r"Chrome CDP did not start: Chrome exited \(9\) before its page target was ready"):
+        transport.start()
+    assert time.monotonic() - started < 1.0
+    assert asked == [] and connected == []
+    assert transport.proc is None and transport.ws is None
+
+
+def test_chrome_exiting_during_readiness_fails_fast_not_at_the_deadline(tmp_path, monkeypatch):
+    """Chrome answers nothing on /json/list and then dies mid-loop: the loop sees the exit on its
+    next pass instead of retrying until `_CHROME_START_TIMEOUT_S`."""
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, headless=True)
+    chrome = _LaunchedChrome(tmp_path, port=51234)
+    monkeypatch.setattr(live_host.subprocess, "Popen", chrome.popen)
+    monkeypatch.setattr(live_host, "_CHROME_START_TIMEOUT_S", 30.0)
+    asked: list[str] = []
+
+    def urlopen(url, timeout=None):
+        asked.append(url)
+        chrome.proc._terminated = True
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(live_host.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(live_host, "connect", lambda *_a, **_k: pytest.fail("connected to a dead Chrome's port"))
+
+    started = time.monotonic()
+    with pytest.raises(live_host.LiveHostError, match=r"Chrome exited \(0\) before its page target was ready"):
+        transport.start()
+    assert time.monotonic() - started < 1.0
+    assert asked == ["http://127.0.0.1:51234/json/list"]
+    assert transport.proc is None
+
+
+def test_positive_control_a_live_chrome_that_never_answers_still_waits_for_the_deadline(tmp_path, monkeypatch):
+    """The same refusing endpoint with a Chrome that stays alive is retried until the deadline, so
+    the fast failure above is the exit check and nothing else."""
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, headless=True)
+    chrome = _LaunchedChrome(tmp_path, port=51234)
+    monkeypatch.setattr(live_host.subprocess, "Popen", chrome.popen)
+    monkeypatch.setattr(live_host, "_CHROME_START_TIMEOUT_S", 0.3)
+    asked: list[str] = []
+    monkeypatch.setattr(live_host.urllib.request, "urlopen",
+                        lambda url, timeout=None: asked.append(url) or (_ for _ in ()).throw(ConnectionError("refused")))
+
+    started = time.monotonic()
+    with pytest.raises(live_host.LiveHostError, match=r"^Chrome CDP did not start\.$"):
+        transport.start()
+    assert time.monotonic() - started >= 0.3
+    assert len(asked) > 1
+    assert chrome.proc.terminate_calls == 1
 
 
 def test_chrome_that_never_writes_its_port_is_stopped_at_the_deadline(tmp_path, monkeypatch):

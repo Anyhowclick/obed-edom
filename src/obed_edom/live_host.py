@@ -524,6 +524,11 @@ class ChromeCdp:
             raise LiveHostError(f"Chrome CDP did not start: {exc}") from exc
         deadline = time.monotonic() + _CHROME_START_TIMEOUT_S
         while time.monotonic() < deadline:
+            exit_code = self.proc.poll()
+            if exit_code is not None:
+                try: self.stop()
+                except Exception: pass
+                raise LiveHostError(f"Chrome CDP did not start: Chrome exited ({exit_code}) before its page target was ready")
             try:
                 with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/json/list", timeout=.3) as response: targets = json.loads(response.read())
                 target = next((item for item in targets if item.get("type") == "page" and item.get("webSocketDebuggerUrl")), None)

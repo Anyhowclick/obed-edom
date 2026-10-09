@@ -23,18 +23,19 @@ def wait_devtools_active_port(
     profile: Path, proc: subprocess.Popen, timeout_s: float = 15.0, poll_s: float = 0.05
 ) -> int:
     """The port Chrome launched with `--remote-debugging-port=0` bound for itself, read from
-    `<profile>/DevToolsActivePort` (the caller removes a stale one before launch)."""
+    `<profile>/DevToolsActivePort` (the caller removes a stale one before launch). An exited Chrome
+    fails even when its file is complete: the port it names is no longer Chrome's."""
     path = profile / DEVTOOLS_ACTIVE_PORT
     deadline = time.monotonic() + timeout_s
     while True:
+        if proc.poll() is not None:
+            raise RuntimeError(f"Chrome exited ({proc.returncode}) before its DevTools port could be used ({path})")
         try:
             port = parse_devtools_active_port(path.read_text())
         except (OSError, UnicodeDecodeError):
             port = None
         if port is not None:
             return port
-        if proc.poll() is not None:
-            raise RuntimeError(f"Chrome exited ({proc.returncode}) before writing {path}")
         if time.monotonic() >= deadline:
             raise RuntimeError(f"Chrome wrote no {path} within {timeout_s} s")
         time.sleep(poll_s)

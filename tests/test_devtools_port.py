@@ -58,7 +58,7 @@ def test_wait_devtools_active_port_returns_once_the_file_is_complete(tmp_path):
 
 def test_wait_devtools_active_port_fails_fast_when_chrome_exits(tmp_path):
     start = time.monotonic()
-    with pytest.raises(RuntimeError, match=r"Chrome exited \(1\) before writing"):
+    with pytest.raises(RuntimeError, match=r"Chrome exited \(1\) before its DevTools port could be used"):
         wait_devtools_active_port(tmp_path, _Proc(returncode=1), timeout_s=30.0)
     assert time.monotonic() - start < 1.0
 
@@ -69,8 +69,15 @@ def test_wait_devtools_active_port_times_out_on_a_never_complete_file(tmp_path):
         wait_devtools_active_port(tmp_path, _Proc(), timeout_s=0.2, poll_s=0.01)
 
 
-def test_wait_devtools_active_port_reads_a_file_left_by_a_chrome_that_then_exited(tmp_path):
-    """The port file is read before the exit check, so a complete file is never discarded; the caller
-    removes any stale file before launch (`attach_chrome`, `ChromeCdp._spawn`)."""
+def test_wait_devtools_active_port_refuses_a_complete_file_left_by_a_chrome_that_then_exited(tmp_path):
+    """Codex round 2: the exit check comes BEFORE the file is accepted. A Chrome that wrote its
+    port and then died no longer owns that port -- another process may already have bound it -- so a
+    complete file from an exited Chrome is an error, never a port to drive."""
     (tmp_path / "DevToolsActivePort").write_text("9333\n/devtools/browser/x\n")
-    assert wait_devtools_active_port(Path(tmp_path), _Proc(returncode=0), timeout_s=0.1) == 9333
+    with pytest.raises(RuntimeError, match=r"Chrome exited \(0\) before its DevTools port could be used"):
+        wait_devtools_active_port(Path(tmp_path), _Proc(returncode=0), timeout_s=0.1)
+
+
+def test_positive_control_the_same_complete_file_from_a_live_chrome_is_accepted(tmp_path):
+    (tmp_path / "DevToolsActivePort").write_text("9333\n/devtools/browser/x\n")
+    assert wait_devtools_active_port(Path(tmp_path), _Proc(), timeout_s=0.1) == 9333
