@@ -81,6 +81,8 @@ Throwaway headless session, continuity ON, advance to slide 2, then, in order:
 
 **Order.** S2+S1 in parallel with S4 → **capture the RED artifact on today's build (V pass RED at slide 2, Voff RED at 1→2)** → S3 → S5 → full re-qualification: P2 `--reuse-export --disposable` `--wait-profile fast` and `slow` (14/14) and `--disable-bridge34` (RED only on `continueThroughMovingMagicMove3to4`); host gate at 1920×1080, 2560×1440, 1600×1000 (each with V/Voff); unit suite; real-OBS attach pass (`generalisation.md:72-73`). New `CONTINUITY_VERSION`/sha recorded.
 
+**Owner decision 2026-10-09 (gate round arms):** the attach arm is pinned to 1920×1080, so it runs once, in the 1920×1080 host gate; V runs at every viewport, the B and Voff null controls at 1920×1080 only; C runs at 2560×1440 and 1600×1000, and at 1920×1080 the host red arm `--strip bridge@8` (same removal, stricter checks) covers it. `run_gates.sh` refuses a round in which any host arm runs nowhere.
+
 **Owner decisions (recommendation first).** D1 liveness method: **(a) temporal diff + bands** vs (b) OFF-arm reference. D2 P2 wiring: **(a) gate inside Finding 1 now, accept 13/14 until the fix** vs (b) probe-only. D3 visibility fix: **defer to §2; pre-approve option (a2) if the poster is in front**. D4 retire scope: **(b1)+(b2), plan shape unchanged** vs full per-instance plan actions now. D5: **the V pass gates `overall_status` immediately** (the RED is the deliverable).
 
 ### Critical Files for Implementation

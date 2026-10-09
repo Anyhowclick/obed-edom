@@ -2887,6 +2887,81 @@ def test_freeze_blocks_success_inconclusive_and_fail_always_block():
     assert p2._freeze_control_blocks_success("fail", bridge34_disabled=False) is True
     assert p2._freeze_control_blocks_success("fail", bridge34_disabled=True) is True
 
+
+def test_freeze_blocks_success_skipped_by_flag_is_non_blocking_with_the_bridge():
+    """Owner decision 8b amended 2026-10-09: `--skip-freeze-bracket` makes "skipped"
+    non-blocking on an arm whose bridge is present; nothing else is relaxed."""
+    assert p2._freeze_control_blocks_success("skipped", bridge34_disabled=False, skipped_by_flag=True) is False
+    assert p2._freeze_control_blocks_success("skipped", bridge34_disabled=True, skipped_by_flag=True) is False
+    assert p2._freeze_control_blocks_success("inconclusive", bridge34_disabled=False, skipped_by_flag=True) is True
+    assert p2._freeze_control_blocks_success("fail", bridge34_disabled=False, skipped_by_flag=True) is True
+
+
+# `_moving_mm34_pass` — `continueThroughMovingMagicMove3to4`'s pass. Owner
+# decision 8a (at-cut counter run report-only) promoted 2026-10-09: the at-cut
+# run now gates. Fixture shapes are the main-run report's own sub-verdicts.
+def _mm34_green() -> dict:
+    return {
+        "moving_continuity": {"ok": True},
+        "moving_index_run": {"ok": True},
+        "moving_index_run_at_cut": {"ok": True, "reason": None, "freezeRunAtCut": 0},
+        "footprint_live": {"ok": True},
+        "advance_ok": True,
+        "player_build_errors": [],
+    }
+
+
+def test_mm34_pass_green_when_every_clause_holds():
+    assert p2._moving_mm34_pass(**_mm34_green()) is True
+
+
+@pytest.mark.parametrize("at_cut", [
+    {"ok": False, "reason": "freeze run at cut", "freezeRunAtCut": 9},
+    {"ok": False, "reason": "flip window not decodable"},
+    {"ok": False, "reason": "inadmissible null reads at cut"},
+    {"ok": False, "reason": "no valid at-cut boundary"},
+    {},
+])
+def test_mm34_pass_red_when_only_the_at_cut_run_fails(at_cut):
+    """The promotion itself: every other clause green, the at-cut run red -> the
+    finding is red. Under the pre-promotion rule (8a report-only) this input
+    passed; `test_mm34_pass_pre_promotion_rule_would_have_passed` pins that."""
+    args = _mm34_green()
+    args["moving_index_run_at_cut"] = at_cut
+    assert p2._moving_mm34_pass(**args) is False
+
+
+def test_mm34_pass_pre_promotion_rule_would_have_passed():
+    """Positive control for the test above: HEAD b9a750df's inline rule (no at-cut
+    clause) on the same red-at-cut input is GREEN, so the red above is the promotion
+    and nothing else."""
+    args = _mm34_green()
+    args["moving_index_run_at_cut"] = {"ok": False, "reason": "freeze run at cut", "freezeRunAtCut": 9}
+    head_rule = bool(
+        args["moving_continuity"].get("ok", False)
+        and args["moving_index_run"].get("ok", False)
+        and args["footprint_live"].get("ok", False)
+        and args["advance_ok"]
+        and not args["player_build_errors"]
+    )
+    assert head_rule is True
+    assert p2._moving_mm34_pass(**args) is False
+
+
+@pytest.mark.parametrize("key, bad", [
+    ("moving_continuity", {"ok": False}),
+    ("moving_continuity", {}),
+    ("moving_index_run", {"ok": False}),
+    ("footprint_live", {"ok": False}),
+    ("footprint_live", {"ok": None}),
+    ("advance_ok", False),
+    ("player_build_errors", [{"kind": "player-build-error"}]),
+])
+def test_mm34_pass_keeps_every_pre_promotion_clause(key, bad):
+    args = _mm34_green()
+    args[key] = bad
+    assert p2._moving_mm34_pass(**args) is False
+
 # --------------------------------------------------------------------------- #
 # I4 — the 1->2 carry is REFUSED: gates under the baseline plan.
 # --------------------------------------------------------------------------- #

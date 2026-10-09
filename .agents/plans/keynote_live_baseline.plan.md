@@ -206,6 +206,13 @@ mechanism, the only live-carry cut left) and gate on `movingIndexRun` going red 
 `movingContinuity3to4` stays green. If that proves too costly this round, the honest alternative is to mark it
 `inconclusive` (which already blocks `success`, `:3397-3401`) until it is moved — **never** to drop it.
 
+**Owner decision 8b (2026-10-09, "option 2"):** the 3→4 bracket is the round's only gating check of painted pixels at
+the cut plus its own non-vacuity control, so it runs once per paint path — `--wait-profile fast` (DOM) and
+`--gl-replay auto` (WebGL); `--wait-profile slow` and every red arm pass `--skip-freeze-bracket` (P2 refuses it on any
+other arm; a flag skip is non-blocking and named in the report header). **Owner decision 8a promoted the same day:** the
+at-cut counter run (`movingIndexRunAtCut`) gates `continueThroughMovingMagicMove3to4` in every arm (agreed with the
+bracket in 63/63 positive runs, never a false red). It is never dropped from the two positive arms.
+
 ### Host probe arms and the expectation model
 
 Arm expectations are today hard-wired (`overall_status:1528`, `continue1to2` must be True in A/C/attach). Derive
@@ -279,10 +286,13 @@ dead-expectation inversion; `overall_status` unit tests for the new arm table. I
 `continueThroughMovingMagicMove3to4`. Whole baseline: host gate at 1920×1080, 2560×1440, 1600×1000 (each with
 V/Voff), full unit suite, one real-OBS attach pass, new `CONTINUITY_VERSION`/sha recorded in the handover.
 
+**Owner decision 2026-10-09 (gate round arms):** the attach arm is pinned to 1920×1080, so it runs once, in the 1920×1080 host gate; the B and Voff null controls run at 1920×1080 only; C runs at 2560×1440 and 1600×1000, and at 1920×1080 the host red arm `--strip bridge@8` (same removal, stricter checks) covers it. `run_gates.sh` refuses a round in which any host arm runs nowhere.
+
 **Risks.** (1) `BLACK_BEHIND_ROI` now reads the frozen poster (§4) — verify, never loosen. (2) The retire may
 race the 1→2 detach; the sweep + the `tryRemount` guard cover both orders, but the P2 finding must accept either
 event, which is why both notes exist. (3) `freezeControlCaughtByCounter` loses its boundary — moving it is real
-work; if it slips, it must go `inconclusive`, which already blocks `success`. (4) The mask key-allowlist will
+work; if it slips, it must go `inconclusive`, which already blocks `success`. (2026-10-09: runs only in the fast and gl-auto
+positive arms per 8b; the at-cut counter, 8a promoted, covers the cut in every arm.) (4) The mask key-allowlist will
 refuse decks using any unmeasured feature; visible and intended, revisit at generalisation (d). (5) S5b lands
 unproven on pixels if the owner overrides §3's split — then say so explicitly in the capability report.
 

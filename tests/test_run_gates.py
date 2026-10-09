@@ -5,15 +5,27 @@ the P2 driver and the H.264 prewarm entry point (`src/` and `continuity_core_var
 real ones, symlinked, because the checks import them). Each stub logs what it was asked to do to
 an events file and behaves per `STUB_MODES` (artifact/out-dir stem -> mode):
 
-- `pass`    write a passing artifact and exit 0 (P2: exit 1 with an empty log);
+- `pass`    write a passing artifact and exit 0 (P2: exit 1 with an empty log); the probe's artifact
+            records `--skip-arms` as `skippedArms` and leaves those arms out, as the real probe does;
+- `report`  (P2) print a well-formed 15-finding report whose red set is `STUB_P2_RED[<out-dir name>]`
+            and whose `Freeze bracket:` header names the arm's own flags (or `STUB_P2_FREEZE`);
+- `ignore-skip` / `lose-A` (probe) run every arm and record no skip / record the skip but drop arm A;
 - `die`     kill its parent -- the per-run wrapper -- before the wrapper can write the status, as
             when a wrapper is killed or crashes mid-run;
 - `foreign` publish a status carrying another round's nonce, then kill the wrapper;
 - `hang`    start a child process and sleep, as a live probe holding Chrome does.
 
 What is pinned here:
-- a run's previous `.rc`/`.log`/artifact (and the P2 out-dir report) never count: a run that does
-  not write a fresh status (this round's nonce) fails its check;
+- a non-empty (or non-directory) `<outdir>` is refused before anything runs, so nothing from an
+  earlier round can be read and nothing under output/ is ever removed; a run that does not write a
+  fresh status (this round's nonce) still fails its check;
+- the host arm matrix (owner decision 2026-10-09): 2560x1440 and 1600x1000 skip attach, B and Voff,
+  1920x1080 skips C; every host arm runs at least once a round or the round is refused; a host gate
+  passes only when its artifact records exactly that skip and holds exactly the other arms;
+- the P2 arm list: no `--strip bridge@8` arm, `--skip-freeze-bracket` on every arm but the two
+  positive freeze-bracket arms (and refused on those), and the `Freeze bracket:` header checked;
+- `--tier dev` runs the 1920x1080 + 1600x1000 host gates and three P2 arms, says DEV loudly and
+  exits 10 on a pass (never 0);
 - killing the queue owner (TERM/INT/HUP) leaves none of the queued runs or their children behind;
 - `GATE_JOBS` outside 1..5 is refused before anything is launched;
 - the H.264 pattern cache is prewarmed (and logged) before the first timed run.
@@ -71,18 +83,48 @@ def act(mode, out_stem_path):
 PROBE_STUB = _STUB_COMMON + r'''
 artifact = Path(arg("--artifact"))
 stem = artifact.stem
-event(f"probe {stem} start")
+event(f"probe {stem} viewport={arg('--viewport')} skip={arg('--skip-arms')} start")
 mode = mode_of(stem)
 act(mode, artifact.with_suffix(""))
-artifact.write_text(json.dumps({"status": "pass", "arms": {}, "visible": {}}))
+given = (arg("--skip-arms") or "").split(",")
+skip = [] if mode == "ignore-skip" else [n for n in ("A", "B", "C", "V", "Voff", "attach") if n in given]
+d = {
+    "status": "pass", "skippedArms": skip,
+    "arms": {n: {} for n in ("A", "B", "C") if n not in skip and not (mode == "lose-A" and n == "A")},
+    "visible": {n: {} for n in ("V", "Voff") if n not in skip},
+}
+if "attach" not in skip:
+    d["attach"] = {}
+artifact.write_text(json.dumps(d))
 sys.exit(0)
 '''
 
 P2_STUB = _STUB_COMMON + r'''
 out = Path(arg("--out-dir"))
 event(f"p2 {out.name} start")
-act(mode_of(out.name), out)
-sys.exit(1)
+event("p2argv " + json.dumps(sys.argv[1:]))
+mode = mode_of(out.name)
+act(mode, out)
+if mode != "report":
+    sys.exit(1)
+sys.path.insert(0, "scripts")
+from obed_edom.live_continuity_js import js_sha256
+red = set(json.loads(os.environ.get("STUB_P2_RED") or "{}").get(out.name, []))
+auto = "--gl-replay" in sys.argv and sys.argv[sys.argv.index("--gl-replay") + 1] == "auto"
+ids = ["glReplayCarry1to2" if auto else "refusedCarry1to2", *red - {"glReplayCarry1to2", "refusedCarry1to2"}]
+ids += [f"filler{i}" for i in range(15 - len(ids))]
+freeze = os.environ.get("STUB_P2_FREEZE") or (
+    "skipped (--skip-freeze-bracket)" if "--skip-freeze-bracket" in sys.argv
+    else "skipped (bridge disabled)" if "--disable-bridge34" in sys.argv else "run"
+)
+print(f"Core variant: none · injected core sha256: {js_sha256()}")
+print(f"Strip: none · injected plan sha256: {'0' * 64}")
+print(f"Freeze bracket: {freeze}")
+print(f"success: **{not red}**")
+print("Source unchanged: **True**")
+for i in ids:
+    print(f"- {i}: **{i not in red}**")
+sys.exit(1 if red else 0)
 '''
 
 PREWARM_STUB = r'''
@@ -116,12 +158,16 @@ def gates(tmp_path: Path):
     events = tmp_path / "events.txt"
 
     def env(**extra: str) -> dict[str, str]:
-        base = {k: v for k, v in os.environ.items() if k not in ("GATE_JOBS", "STUB_MODES", "STUB_DEFAULT", "STUB_PREWARM")}
+        drop = ("GATE_JOBS", "STUB_MODES", "STUB_DEFAULT", "STUB_PREWARM", "STUB_P2_RED", "STUB_P2_FREEZE")
+        base = {k: v for k, v in os.environ.items() if k not in drop}
         return {**base, "STUB_EVENTS": str(events), "STUB_MARKER": str(marker), **extra}
 
-    def run(timeout: float = 120, **extra: str) -> subprocess.CompletedProcess[str]:
+    def run(
+        *args: str, timeout: float = 120, script: Path = SCRIPT, outdir: Path = out, **extra: str,
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["/bin/zsh", str(SCRIPT), str(g), str(out)], env=env(**extra), capture_output=True, text=True, timeout=timeout,
+            ["/bin/zsh", str(script), str(g), str(outdir), *args], env=env(**extra), capture_output=True, text=True,
+            timeout=timeout,
         )
 
     def start(**extra: str) -> subprocess.Popen[str]:
@@ -138,7 +184,18 @@ def gates(tmp_path: Path):
         found = subprocess.run(["pgrep", "-fl", str(tmp_path)], capture_output=True, text=True).stdout
         return [line for line in found.splitlines() if line.strip()]
 
-    yield {"g": g, "out": out, "marker": marker, "run": run, "start": start, "events": events_list, "survivors": survivors}
+    def patched(old: str, new: str) -> Path:
+        """A copy of run_gates.sh with one exact line changed (the copy runs from the fake worktree)."""
+        text = SCRIPT.read_text()
+        assert text.count(old) == 1, old
+        copy = tmp_path / "run_gates_patched.sh"
+        copy.write_text(text.replace(old, new))
+        return copy
+
+    yield {
+        "g": g, "out": out, "marker": marker, "run": run, "start": start, "events": events_list, "survivors": survivors,
+        "patched": patched, "tmp": tmp_path,
+    }
     subprocess.run(["pkill", "-KILL", "-f", str(tmp_path)], capture_output=True)
 
 
@@ -156,37 +213,50 @@ def test_a_fresh_round_publishes_this_round_nonce_and_the_host_checks_read_it(ga
         assert f"HOST {v}: pass" in done.stdout, done.stdout
         assert f"GATE FAILED: HOST {v}" not in done.stdout
         assert (gates["out"] / f"host-{v}.rc").read_text().strip() == f"{nonce} 0"
-    assert (gates["out"] / "p2--wait-profileslow.rc").read_text().strip() == f"{nonce} 1"
-    assert "[P2 --wait-profile slow] exit=1 " in done.stdout
+    assert (gates["out"] / "p2--wait-profileslow--skip-freeze-bracket.rc").read_text().strip() == f"{nonce} 1"
+    assert "[P2 --wait-profile slow --skip-freeze-bracket] exit=1 " in done.stdout
     assert not list(gates["out"].glob("*.rc.tmp")), "the status is published by rename"
     assert done.returncode != 0, "the stub red arms and P2 arms cannot match their registered sets"
 
 
-def test_a_stale_status_and_artifact_from_an_earlier_round_fail_closed(gates) -> None:
-    """The earlier round's `host-2560x1440.rc` says 0 and its artifact says pass; this round's run
-    dies before writing a status. Nothing from the earlier round may count."""
+@pytest.mark.parametrize("leftover", ["host-2560x1440.rc", "host-2560x1440.json", ".hidden", "p2--wait-profileslow/report.json"])
+def test_a_non_empty_outdir_is_refused_before_anything_runs(gates, leftover: str) -> None:
+    """Owner rule: nothing under output/ is ever removed, so an earlier round's files are never
+    cleared -- the round refuses to start instead, and leaves every file as it was."""
     out = gates["out"]
-    out.mkdir()
-    (out / "host-2560x1440.rc").write_text("0\n")
-    (out / "host-2560x1440.json").write_text(json.dumps({"status": "pass"}))
-    (out / "host-2560x1440.log").write_text("stale log\n")
-    p2 = out / "p2--wait-profileslow"
-    (p2 / "gl-replay").mkdir(parents=True)
-    (p2 / "report.json").write_text("{}")
-    (p2 / "gl-replay" / "report.json").write_text("{}")
-    (out / "p2--wait-profileslow.rc").write_text("0\n")
-    (out / "p2--wait-profileslow.report.json").write_text("{}")
-    done = gates["run"](STUB_MODES=json.dumps({"host-2560x1440": "die", "p2--wait-profileslow": "die"}))
+    stale = out / leftover
+    stale.parent.mkdir(parents=True)
+    stale.write_text("0\n")
+    done = gates["run"](timeout=20)
+    assert done.returncode == 2
+    assert f"outdir {out} exists and is not an empty directory" in done.stderr
+    assert gates["events"]() == [], "not even the prewarm runs"
+    assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file()) == [leftover]
+    assert stale.read_text() == "0\n"
+
+
+def test_an_outdir_that_is_a_file_is_refused(gates) -> None:
+    gates["out"].write_text("not a directory")
+    done = gates["run"](timeout=20)
+    assert done.returncode == 2 and "is not an empty directory" in done.stderr
+    assert gates["events"]() == []
+
+
+def test_positive_control_an_existing_empty_outdir_is_accepted(gates) -> None:
+    gates["out"].mkdir()
+    done = gates["run"]()
+    assert "round nonce " in done.stdout and "HOST 1920x1080: pass" in done.stdout, done.stdout + done.stderr
+
+
+def test_a_run_that_writes_no_status_fails_closed_even_with_a_passing_artifact(gates) -> None:
+    """The nonce check stays as defence in depth: a wrapper that dies before publishing its
+    status fails its check, whatever the artifact says."""
+    done = gates["run"](STUB_MODES=json.dumps({"host-2560x1440": "die", "p2--wait-profileslow--skip-freeze-bracket": "die"}))
     assert "GATE FAILED: HOST 2560x1440 exit missing" in done.stdout, done.stdout
-    assert "HOST 2560x1440: pass" not in done.stdout
-    assert "HOST 2560x1440: no artifact" in done.stdout
-    assert "stale log" not in (out / "host-2560x1440.log").read_text()
-    assert "[P2 --wait-profile slow] exit=missing" in done.stdout
-    assert "GATE FAILED: P2 --wait-profile slow" in done.stdout
-    assert not (p2 / "report.json").exists() and not (p2 / "gl-replay" / "report.json").exists()
-    assert not (out / "p2--wait-profileslow.report.json").exists()
+    assert "[P2 --wait-profile slow --skip-freeze-bracket] exit=missing" in done.stdout
+    assert "GATE FAILED: P2 --wait-profile slow --skip-freeze-bracket" in done.stdout
     assert "HOST 1600x1000: pass" in done.stdout, "the other runs are unaffected"
-    assert done.returncode != 0
+    assert done.returncode == 1
 
 
 def test_a_status_from_another_round_fails_closed(gates) -> None:
@@ -235,9 +305,9 @@ def test_the_pattern_cache_is_prewarmed_before_the_first_timed_run(gates) -> Non
     events = gates["events"]()
     assert events[0] == "prewarm html-unmodified"
     assert all(not e.startswith("prewarm") for e in events[1:])
-    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + 9
+    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + 8
     assert f"h264 pattern prewarm 46.0333s: encoded key={'k' * 64}" in done.stdout
-    assert "cache hit" in gates["run"]().stdout
+    assert "cache hit" in gates["run"](outdir=gates["tmp"] / "out2").stdout
 
 
 @pytest.mark.parametrize("mode", ["fail", "empty"])
@@ -246,3 +316,185 @@ def test_a_failed_prewarm_launches_nothing(gates, mode: str) -> None:
     assert done.returncode == 1
     assert "H.264 pattern prewarm FAILED; no run launched" in done.stdout
     assert gates["events"]() == ["prewarm html-unmodified"]
+
+
+# --------------------------------------------------------------------------
+# Owner decision 2026-10-09: the arm matrix, the P2 arm list and the tiers.
+# --------------------------------------------------------------------------
+
+FULL_HOST_SKIPS = {"2560x1440": "attach,B,Voff", "1600x1000": "attach,B,Voff", "1920x1080": "C"}
+HOST_RED_STEMS = {
+    "host-red--core-variantstash-any", "host-red--stripbridge@8", "host-red--stripretire@2", "host-red--striprestart@6",
+    "host-red--stripglReplay@2--gl-replayauto",
+}
+FULL_P2_ARMS = [
+    ["--wait-profile", "fast"],
+    ["--wait-profile", "fast", "--disable-bridge34", "--skip-freeze-bracket"],
+    ["--wait-profile", "slow", "--skip-freeze-bracket"],
+    ["--wait-profile", "fast", "--core-variant", "stash-any", "--skip-freeze-bracket"],
+    ["--wait-profile", "fast", "--strip", "glReplay@2", "--skip-freeze-bracket"],
+    ["--wait-profile", "fast", "--strip", "restart@6", "--skip-freeze-bracket"],
+    ["--wait-profile", "fast", "--gl-replay", "auto"],
+    ["--wait-profile", "fast", "--gl-replay", "auto", "--strip", "glReplay@2", "--skip-freeze-bracket"],
+]
+DEV_P2_ARMS = [FULL_P2_ARMS[0], FULL_P2_ARMS[1], FULL_P2_ARMS[6]]
+ARMS = ("A", "B", "C", "V", "Voff", "attach")
+
+
+def _probe_runs(events: list[str]) -> dict[str, tuple[str, str]]:
+    runs = {}
+    for e in events:
+        m = re.fullmatch(r"probe (\S+) viewport=(\S+) skip=(\S+) start", e)
+        if m:
+            runs[m.group(1)] = (m.group(2), m.group(3))
+    return runs
+
+
+def _p2_argvs(events: list[str]) -> list[list[str]]:
+    out = []
+    for e in events:
+        if e.startswith("p2argv "):
+            argv = json.loads(e[len("p2argv "):])
+            assert argv[:3] == ["--reuse-export", "--disposable", "--out-dir"]
+            out.append(argv[4:])
+    return out
+
+
+def _p2_name(argv: list[str]) -> str:
+    return "p2" + "".join(argv)
+
+
+def test_the_full_round_host_arm_matrix(gates) -> None:
+    done = gates["run"](GATE_JOBS="1")
+    runs = _probe_runs(gates["events"]())
+    assert {k: v for k, v in runs.items() if k.startswith("host-") and not k.startswith("host-red")} == {
+        f"host-{v}": (v, skip) for v, skip in FULL_HOST_SKIPS.items()
+    }
+    assert {k: v for k, v in runs.items() if k.startswith("host-red")} == {s: ("1920x1080", "None") for s in HOST_RED_STEMS}
+    ran = {name: [v for v, skip in FULL_HOST_SKIPS.items() if name not in skip.split(",")] for name in ARMS}
+    assert ran == {
+        "A": list(FULL_HOST_SKIPS), "V": list(FULL_HOST_SKIPS), "C": ["2560x1440", "1600x1000"],
+        "B": ["1920x1080"], "Voff": ["1920x1080"], "attach": ["1920x1080"],
+    }, "attach once; B and Voff at 1920 only; C at 2560 and 1600 (host red bridge@8 covers 1920)"
+    for v in FULL_HOST_SKIPS:
+        assert f"HOST {v}: pass" in done.stdout and f"GATE FAILED: HOST {v}" not in done.stdout, done.stdout
+    assert done.stdout.count("attach skipped by flag") == 2 and done.stdout.count("C skipped by flag") == 1
+
+
+@pytest.mark.parametrize(
+    ("mode", "problem"),
+    [("ignore-skip", "inventory: skippedArms [] != ['C']"), ("lose-A", "inventory: A missing")],
+)
+def test_known_bad_a_host_artifact_whose_inventory_disagrees_with_the_skip_fails(gates, mode: str, problem: str) -> None:
+    """A skipped arm is never a pass of that arm, and an arm that should have run must be there."""
+    done = gates["run"](STUB_MODES=json.dumps({"host-1920x1080": mode}))
+    assert "HOST 1920x1080: pass" in done.stdout, "the artifact's own status says pass"
+    assert problem in done.stdout, done.stdout
+    assert "GATE FAILED: HOST 1920x1080 status" in done.stdout
+    assert "GATE FAILED: HOST 2560x1440" not in done.stdout
+
+
+@pytest.mark.parametrize(
+    ("matrix", "arm"),
+    [
+        ("2560x1440 attach,B,Voff 1600x1000 attach,B,Voff 1920x1080 C,B", "B"),
+        ("2560x1440 attach,B,Voff 1600x1000 attach,B,Voff 1920x1080 C,Voff", "Voff"),
+        ("2560x1440 attach,B,Voff,C 1600x1000 attach,B,Voff,C 1920x1080 C", "C"),
+        ("2560x1440 attach,B,Voff 1600x1000 attach,B,Voff 1920x1080 C,attach", "attach"),
+    ],
+)
+def test_known_bad_a_matrix_that_drops_a_host_arm_from_the_round_is_refused(gates, matrix: str, arm: str) -> None:
+    script = gates["patched"](
+        "typeset -A HOST_SKIP=(2560x1440 attach,B,Voff 1600x1000 attach,B,Voff 1920x1080 C)",
+        f"typeset -A HOST_SKIP=({matrix})",
+    )
+    done = gates["run"](script=script, timeout=20)
+    assert done.returncode == 2
+    assert f"host arm {arm} runs in no full-tier host gate" in done.stderr
+    assert gates["events"]() == [] and not gates["out"].exists()
+
+
+def test_known_bad_the_dev_tier_is_held_to_the_same_coverage(gates) -> None:
+    """In dev only 1920x1080 and 1600x1000 run, so C must run at 1600x1000."""
+    script = gates["patched"](
+        "typeset -A HOST_SKIP=(2560x1440 attach,B,Voff 1600x1000 attach,B,Voff 1920x1080 C)",
+        "typeset -A HOST_SKIP=(2560x1440 attach,B,Voff 1600x1000 attach,B,Voff,C 1920x1080 C)",
+    )
+    assert gates["run"](script=script, timeout=20).returncode != 2, "full still runs C at 2560x1440"
+    done = gates["run"]("--tier", "dev", script=script, timeout=20, outdir=gates["tmp"] / "dev-out")
+    assert done.returncode == 2 and "host arm C runs in no dev-tier host gate" in done.stderr
+
+
+def test_the_full_round_p2_arm_list(gates) -> None:
+    gates["run"](GATE_JOBS="1")
+    argvs = _p2_argvs(gates["events"]())
+    assert argvs == FULL_P2_ARMS
+    assert not any("bridge@8" in a for argv in argvs for a in argv), "P2 --strip bridge@8 == --disable-bridge34, dropped"
+    bracket = [argv for argv in argvs if "--skip-freeze-bracket" not in argv]
+    assert bracket == [["--wait-profile", "fast"], ["--wait-profile", "fast", "--gl-replay", "auto"]]
+
+
+def test_the_registered_sets_no_longer_carry_the_skipped_freeze_finding() -> None:
+    text = SCRIPT.read_text()
+    assert "freezeControlCaughtByCounter" not in text
+    assert 'p2 full "noStrayVideo continueThroughMovingMagicMove3to4" "" --wait-profile fast --core-variant stash-any' in text
+    assert 'p2 full "continueThroughMovingMagicMove3to4" "" --wait-profile fast --strip restart@6' in text
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["p2 dev \"\" \"\" --wait-profile fast\n", "p2 dev \"\" \"\" --wait-profile fast --gl-replay auto\n"],
+)
+def test_known_bad_skip_freeze_bracket_on_a_positive_bracket_arm_is_refused(gates, line: str) -> None:
+    script = gates["patched"](line, line.replace("\n", " --skip-freeze-bracket\n"))
+    done = gates["run"](script=script, timeout=20)
+    assert done.returncode == 2
+    assert "--skip-freeze-bracket on a positive freeze-bracket arm is refused" in done.stderr
+    assert gates["events"]() == [] and not gates["out"].exists()
+
+
+def _dev_red() -> str:
+    return json.dumps({_p2_name(DEV_P2_ARMS[1]): ["continueThroughMovingMagicMove3to4"]})
+
+
+def test_the_dev_tier_runs_its_subset_and_a_pass_exits_10(gates) -> None:
+    done = gates["run"]("--tier", "dev", GATE_JOBS="1", STUB_MODES=json.dumps({_p2_name(a): "report" for a in DEV_P2_ARMS}),
+                        STUB_P2_RED=_dev_red())
+    events = gates["events"]()
+    assert _probe_runs(events) == {"host-1920x1080": ("1920x1080", "C"), "host-1600x1000": ("1600x1000", "attach,B,Voff")}
+    assert _p2_argvs(events) == DEV_P2_ARMS
+    assert done.stdout.count("DEV TIER -- NOT A QUALIFICATION PASS") == 2, done.stdout
+    assert done.stdout.rstrip().splitlines()[-1] == "## DEV TIER -- NOT A QUALIFICATION PASS (exit 10) ##"
+    assert "DONE tier=dev failed=0 pending=0" in done.stdout
+    assert done.stdout.count("-> MATCH") == 3, done.stdout
+    assert done.returncode == 10, done.stdout
+
+
+def test_known_bad_a_dev_round_with_a_failure_exits_1_and_still_says_dev(gates) -> None:
+    done = gates["run"]("--tier", "dev", STUB_MODES=json.dumps({_p2_name(DEV_P2_ARMS[0]): "report"}))
+    assert done.returncode == 1
+    assert done.stdout.rstrip().splitlines()[-1] == "## DEV TIER -- NOT A QUALIFICATION PASS (exit 1) ##"
+
+
+def test_known_bad_a_freeze_bracket_header_that_disagrees_with_the_flags_fails(gates) -> None:
+    """The positive bracket arms must have run the bracket; a flagged arm must say it skipped it."""
+    done = gates["run"]("--tier", "dev", STUB_MODES=json.dumps({_p2_name(a): "report" for a in DEV_P2_ARMS}),
+                        STUB_P2_RED=_dev_red(), STUB_P2_FREEZE="skipped (--skip-freeze-bracket)")
+    assert "freeze bracket 'skipped (--skip-freeze-bracket)' (want 'run') WRONG" in done.stdout, done.stdout
+    assert "GATE FAILED: P2 --wait-profile fast" in done.stdout
+    assert "GATE FAILED: P2 --wait-profile fast --gl-replay auto" in done.stdout
+    assert "GATE FAILED: P2 --wait-profile fast --disable-bridge34 --skip-freeze-bracket" not in done.stdout
+    assert done.returncode == 1
+
+
+def test_a_full_round_never_says_dev_and_never_exits_10(gates) -> None:
+    done = gates["run"]("--tier", "full")
+    assert "DEV TIER" not in done.stdout and "DONE tier=full " in done.stdout
+    assert done.returncode == 1, "the stub red arms cannot match"
+
+
+@pytest.mark.parametrize("args", [["--tier"], ["--tier", "qa"], ["--tier", "DEV"], ["--bogus"], ["--allow-record", "x"]])
+def test_known_bad_arguments_are_refused_before_anything_runs(gates, args: list[str]) -> None:
+    done = gates["run"](*args, timeout=20)
+    assert done.returncode == 2
+    assert gates["events"]() == [] and not gates["out"].exists()

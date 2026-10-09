@@ -43,6 +43,8 @@ P2's names (`continue1to2`, `restart2to3`, `continue3to4`, `refused*`, `armed1to
 emitted alongside as aliases. `--strip ACTION[@atScene]` and `--core-variant NAME` run one
 red arm on its own and compare its red set with the arm's pre-registered one
 (`RED_ARM_EXPECTATIONS`); `--rescore` re-scores a stored artifact with both scorers.
+`--skip-arms` leaves named arms out of the full run (recorded as `skippedArms`, never a pass of
+that arm); a run that skips every positive arm (A, V, attach) fails.
 
 Does not qualify HDMI, alpha compositing, or audio. Offline/local Chrome only.
 """
@@ -214,6 +216,8 @@ EXPECTED_GL_MODES = (
     ("visible pass V", ("visible", "V"), "off"), ("visible pass Voff", ("visible", "Voff"), "off"),
     ("visible pass Vgl", ("visible", "Vgl"), "injected"), ("attach", ("attach",), "unavailable"),
 )
+SKIPPABLE_ARMS = ("A", "B", "C", "V", "Voff", "attach")
+POSITIVE_ARMS = ("A", "V", "attach")
 
 # Pass G (goTo autoplay repair): (fromOriginalOrdinal, toOriginalOrdinal) pairs.
 GOTO_MATRIX: tuple[tuple[int, int], ...] = ((1, 2), (1, 3), (1, 4), (3, 1), (4, 3))
@@ -621,6 +625,16 @@ def parse_strip_arg(value: str) -> tuple[str, int | None]:
         raise argparse.ArgumentTypeError(str(exc)) from None
 
 
+def parse_skip_arms(value: str) -> tuple[str, ...]:
+    names = value.split(",")
+    unknown = [name for name in names if name not in SKIPPABLE_ARMS]
+    if unknown or len(set(names)) != len(names):
+        raise argparse.ArgumentTypeError(
+            f"invalid --skip-arms {value!r}: expected distinct comma-separated names from {', '.join(SKIPPABLE_ARMS)}"
+        )
+    return tuple(name for name in SKIPPABLE_ARMS if name in names)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture", type=Path, default=FIXTURE)
@@ -673,8 +687,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Red arm: one continuity-on arm with this core variant injected in place of the core "
         "(scripts/continuity_core_variants.py), scored against its pre-registered red set",
     )
+    parser.add_argument(
+        "--skip-arms", type=parse_skip_arms, default=(), metavar="NAME[,NAME...]",
+        help=f"Full run only: leave these arms out ({', '.join(SKIPPABLE_ARMS)}); recorded as skippedArms, "
+        "never scored as a pass",
+    )
     args = parser.parse_args(argv)
     red_arm = args.strip is not None or args.core_variant is not None
+    if args.skip_arms and (
+        red_arm or args.only_pass is not None or args.gl_force_fail is not None
+        or args.force_wrap is not None or args.rescore is not None
+    ):
+        parser.error("--skip-arms applies to the full run only (no --strip, --core-variant, --pass, "
+                     "--gl-force-fail, --force-wrap or --rescore)")
+    if "V" in args.skip_arms and args.gl_replay == "auto":
+        parser.error("--gl-replay auto scores the hand-back from V and Vgl, so V cannot be skipped")
     if red_arm and (
         (args.strip is not None and args.core_variant is not None) or args.gl_force_fail is not None
         or args.only_pass is not None or args.force_wrap is not None or args.rescore is not None
@@ -4583,6 +4610,28 @@ def visible_control_reasons(entry: Any, result: dict[str, Any]) -> list[str]:
     return reasons
 
 
+def arm_entry(result: dict[str, Any], name: str) -> Any:
+    if name == "attach":
+        return result.get("attach")
+    holder = result.get("visible" if name in ("V", "Voff") else "arms")
+    return holder.get(name) if isinstance(holder, dict) else None
+
+
+def skipped_arms(result: dict[str, Any]) -> tuple[set[str], list[str]]:
+    """The arms `--skip-arms` left out, and why that record cannot be trusted: unknown or
+    repeated names, a skipped arm that has a result anyway, or no positive arm left to run."""
+    value = result.get("skippedArms", [])
+    if not isinstance(value, list) or not all(isinstance(name, str) and name in SKIPPABLE_ARMS for name in value) \
+            or len(set(value)) != len(value):
+        return set(), [f"skippedArms {value!r} is not a list of distinct names from {list(SKIPPABLE_ARMS)}"]
+    skipped = set(value)
+    problems = [f"{name} is skipped by flag but has a result" for name in SKIPPABLE_ARMS
+                if name in skipped and arm_entry(result, name) is not None]
+    if skipped >= set(POSITIVE_ARMS):
+        problems.append(f"every positive arm ({', '.join(POSITIVE_ARMS)}) is skipped by flag, so nothing qualifies")
+    return skipped, problems
+
+
 def visible_reasons(result: dict[str, Any]) -> list[str]:
     """Both passes are scored against the plan's per-rect expectations when they
     state any; a pass whose records carry none at all falls back to the rules that
@@ -4590,9 +4639,10 @@ def visible_reasons(result: dict[str, Any]) -> list[str]:
     visible = result.get("visible")
     visible = visible if isinstance(visible, dict) else {}
     on, off = visible.get("V"), visible.get("Voff")
+    skipped = skipped_arms(result)[0]
 
-    reasons = visible_pass_reasons(on, "V", "qualified")
-    if not reasons:
+    reasons = [] if "V" in skipped else visible_pass_reasons(on, "V", "qualified")
+    if not reasons and "V" not in skipped:
         counts = visible_rect_expectation_counts(on)
         reasons = (
             visible_expectation_reasons(on, "V", requires_dead=plan_states_dead(result, "V"))
@@ -4600,6 +4650,8 @@ def visible_reasons(result: dict[str, Any]) -> list[str]:
             else visible_live_everywhere_reasons(on)
         )
 
+    if "Voff" in skipped:
+        return reasons
     off_reasons = visible_pass_reasons(off, "Voff", "off")
     if not off_reasons:
         counts = visible_rect_expectation_counts(off)
@@ -4659,7 +4711,10 @@ def gl_requested(result: dict[str, Any]) -> bool:
 
 def gl_mode_reasons(result: dict[str, Any]) -> list[str]:
     reasons = []
+    skipped = skipped_arms(result)[0]
     for label, path, expected in EXPECTED_GL_MODES:
+        if path[-1] in skipped:
+            continue
         entry: Any = result
         for key in path:
             entry = entry.get(key) if isinstance(entry, dict) else None
@@ -4706,7 +4761,10 @@ def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     must actually have it off, and the attach arm's page must actually be
     transparent, or the verdict is not trustworthy even if the boundary math
     passed. A standard arm that sampled a loop wrap is INVALID: its strict clock cannot
-    score that take."""
+    score that take. An arm skipped by `--skip-arms` is neither scored nor a pass."""
+    skipped, skip_problems = skipped_arms(result)
+    if skip_problems:
+        return "fail", skip_problems
     arms = result.get("arms", {})
     attach = result.get("attach", {})
     wrapped = [
@@ -4722,72 +4780,87 @@ def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     a, b, c = arms.get("A", {}), arms.get("B", {}), arms.get("C", {})
     a_armed, c_armed = gl_replay_mode(a) == "injected", gl_replay_mode(c) == "injected"
     all_gated = [
-        *([] if a_armed else [boundary_verdict(a, "continue1to2")]),
-        boundary_verdict(a, "restart2to3"), boundary_verdict(a, "continue3to4"),
-        boundary_verdict(b, "continue3to4"),
-        *([] if c_armed else [boundary_verdict(c, "continue1to2")]), boundary_verdict(c, "continue3to4"),
-        boundary_verdict(attach, "continue1to2"), boundary_verdict(attach, "restart2to3"), boundary_verdict(attach, "continue3to4"),
+        *([] if "A" in skipped else [
+            *([] if a_armed else [boundary_verdict(a, "continue1to2")]),
+            boundary_verdict(a, "restart2to3"), boundary_verdict(a, "continue3to4"),
+        ]),
+        *([] if "B" in skipped else [boundary_verdict(b, "continue3to4")]),
+        *([] if "C" in skipped else [
+            *([] if c_armed else [boundary_verdict(c, "continue1to2")]), boundary_verdict(c, "continue3to4"),
+        ]),
+        *([] if "attach" in skipped else [
+            boundary_verdict(attach, "continue1to2"), boundary_verdict(attach, "restart2to3"),
+            boundary_verdict(attach, "continue3to4"),
+        ]),
     ]
     if any(v is None for v in all_gated):
         return "inconclusive", ["at least one gated boundary verdict is inconclusive (movie never decoded)"]
 
     reasons: list[str] = []
     refused = refused_boundaries(result)
+    a_ok = b_ok = c_ok = attach_ok = True
 
-    a_mode, b_mode, c_mode, attach_mode = continuity_mode(a), continuity_mode(b), continuity_mode(c), continuity_mode(attach)
-    a_boundary_reasons = (
-        armed_reasons(a, "arm A") if a_armed else boundary_expectation_reasons(a, "arm A", "continue1to2", refused)
-    )
-    reasons.extend(a_boundary_reasons)
-    a_ok = not a_boundary_reasons and bool(boundary_verdict(a, "restart2to3")) and bool(boundary_verdict(a, "continue3to4"))
-    if a_mode != "qualified":
-        a_ok = False
-        reasons.append(f"arm A continuity.mode={a_mode!r}, expected 'qualified'")
-    reason = stage_fit_reason(a, "arm A")
-    if reason:
-        a_ok = False
-        reasons.append(reason)
+    if "A" not in skipped:
+        a_boundary_reasons = (
+            armed_reasons(a, "arm A") if a_armed else boundary_expectation_reasons(a, "arm A", "continue1to2", refused)
+        )
+        reasons.extend(a_boundary_reasons)
+        a_ok = not a_boundary_reasons and bool(boundary_verdict(a, "restart2to3")) and bool(boundary_verdict(a, "continue3to4"))
+        a_mode = continuity_mode(a)
+        if a_mode != "qualified":
+            a_ok = False
+            reasons.append(f"arm A continuity.mode={a_mode!r}, expected 'qualified'")
+        reason = stage_fit_reason(a, "arm A")
+        if reason:
+            a_ok = False
+            reasons.append(reason)
 
-    b_ok = boundary_verdict(b, "continue3to4") is False
-    if b_mode != "off":
-        b_ok = False
-        reasons.append(f"arm B continuity.mode={b_mode!r}, expected 'off'")
-    reason = stage_fit_reason(b, "arm B")
-    if reason:
-        b_ok = False
-        reasons.append(reason)
+    if "B" not in skipped:
+        b_ok = boundary_verdict(b, "continue3to4") is False
+        b_mode = continuity_mode(b)
+        if b_mode != "off":
+            b_ok = False
+            reasons.append(f"arm B continuity.mode={b_mode!r}, expected 'off'")
+        reason = stage_fit_reason(b, "arm B")
+        if reason:
+            b_ok = False
+            reasons.append(reason)
 
-    c_boundary_reasons = (
-        armed_reasons(c, "arm C") if c_armed else boundary_expectation_reasons(c, "arm C", "continue1to2", refused)
-    )
-    reasons.extend(c_boundary_reasons)
-    c_ok = boundary_verdict(c, "continue3to4") is False and not c_boundary_reasons
-    if c_mode != "qualified":
-        c_ok = False
-        reasons.append(f"arm C continuity.mode={c_mode!r}, expected 'qualified'")
-    reason = stage_fit_reason(c, "arm C")
-    if reason:
-        c_ok = False
-        reasons.append(reason)
+    if "C" not in skipped:
+        c_boundary_reasons = (
+            armed_reasons(c, "arm C") if c_armed else boundary_expectation_reasons(c, "arm C", "continue1to2", refused)
+        )
+        reasons.extend(c_boundary_reasons)
+        c_ok = boundary_verdict(c, "continue3to4") is False and not c_boundary_reasons
+        c_mode = continuity_mode(c)
+        if c_mode != "qualified":
+            c_ok = False
+            reasons.append(f"arm C continuity.mode={c_mode!r}, expected 'qualified'")
+        reason = stage_fit_reason(c, "arm C")
+        if reason:
+            c_ok = False
+            reasons.append(reason)
 
-    attach_boundary_reasons = boundary_expectation_reasons(attach, "attach", "continue1to2", refused)
-    reasons.extend(attach_boundary_reasons)
-    attach_ok = (
-        not attach_boundary_reasons
-        and bool(boundary_verdict(attach, "restart2to3"))
-        and bool(boundary_verdict(attach, "continue3to4"))
-    )
-    if attach_mode != "qualified":
-        attach_ok = False
-        reasons.append(f"attach continuity.mode={attach_mode!r}, expected 'qualified'")
-    alpha = background_alpha((attach.get("transparentBackground") or {}).get("computedBackground"))
-    if alpha != 0:
-        attach_ok = False
-        reasons.append(f"attach background alpha={alpha}, expected 0")
-    reason = stage_fit_reason(attach, "attach")
-    if reason:
-        attach_ok = False
-        reasons.append(reason)
+    if "attach" not in skipped:
+        attach_boundary_reasons = boundary_expectation_reasons(attach, "attach", "continue1to2", refused)
+        reasons.extend(attach_boundary_reasons)
+        attach_ok = (
+            not attach_boundary_reasons
+            and bool(boundary_verdict(attach, "restart2to3"))
+            and bool(boundary_verdict(attach, "continue3to4"))
+        )
+        attach_mode = continuity_mode(attach)
+        if attach_mode != "qualified":
+            attach_ok = False
+            reasons.append(f"attach continuity.mode={attach_mode!r}, expected 'qualified'")
+        alpha = background_alpha((attach.get("transparentBackground") or {}).get("computedBackground"))
+        if alpha != 0:
+            attach_ok = False
+            reasons.append(f"attach background alpha={alpha}, expected 0")
+        reason = stage_fit_reason(attach, "attach")
+        if reason:
+            attach_ok = False
+            reasons.append(reason)
 
     visible = visible_reasons(result)
     reasons.extend(visible)
@@ -4842,7 +4915,8 @@ def generated_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     A and attach meet every gated expectation; B (continuity off) reads every bridge carry
     False (the export's moving-Magic-Move defect); C (bridges stripped, run only when the plan
     has a bridge) reads its bridge carries False and meets every other expectation. A malformed
-    or empty verdict set, or a missing or extra arm, is an error, never a pass."""
+    or empty verdict set, or a missing or extra arm, is an error, never a pass. An arm skipped
+    by `--skip-arms` is not required, and must be absent (`overall_status` checks that)."""
     ground = result.get("groundTruth") if isinstance(result.get("groundTruth"), dict) else {}
     errors = spec_set_errors(ground.get("verdicts"))
     gl_specs = (result.get("groundTruthGl") or {}).get("verdicts") if isinstance(result.get("groundTruthGl"), dict) else None
@@ -4851,10 +4925,18 @@ def generated_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     if errors:
         return "error", errors
     arms = result.get("arms") if isinstance(result.get("arms"), dict) else {}
-    required = {"A", "B", *(["C"] if bridge_carry_ids(ground["verdicts"]) else [])}
-    if set(arms) != required or not isinstance(result.get("attach"), dict):
-        return "error", [f"arms {sorted(arms)} + attach={isinstance(result.get('attach'), dict)}, expected {sorted(required)} + attach"]
-    entries = [*((f"arm {name}", name, arms[name]) for name in sorted(required)), ("attach", "attach", result["attach"])]
+    skipped = skipped_arms(result)[0]
+    required = {"A", "B", *(["C"] if bridge_carry_ids(ground["verdicts"]) else [])} - skipped
+    want_attach = "attach" not in skipped
+    if set(arms) != required or isinstance(result.get("attach"), dict) != want_attach:
+        return "error", [
+            f"arms {sorted(arms)} + attach={isinstance(result.get('attach'), dict)}, "
+            f"expected {sorted(required)} + attach={want_attach}"
+        ]
+    entries = [
+        *((f"arm {name}", name, arms[name]) for name in sorted(required)),
+        *([("attach", "attach", result["attach"])] if want_attach else []),
+    ]
     reasons: list[str] = []
     unknown: list[str] = []
     for label, name, entry in entries:
@@ -4881,7 +4963,7 @@ def generated_status(result: dict[str, Any]) -> tuple[str, list[str]]:
             f"{label} {spec_id}={table[spec_id]['verdict']!r}, expected {table[spec_id]['expect']!r}" for spec_id in red
         )
     alpha = background_alpha(((result.get("attach") or {}).get("transparentBackground") or {}).get("computedBackground"))
-    if alpha != 0:
+    if want_attach and alpha != 0:
         reasons.append(f"attach background alpha={alpha}, expected 0")
     reasons.extend(visible_reasons(result))
     gl_fails, gl_unknown = gl_replay_reasons(result) if gl_requested(result) else ([], [])
@@ -5810,6 +5892,7 @@ def run_cli(args: argparse.Namespace) -> None:
         run_pass_g_cli(args)
         return
     auto = args.gl_replay == "auto"
+    skip = set(args.skip_arms)
     artifact = args.artifact
     artifact.parent.mkdir(parents=True, exist_ok=True)
     viewport = args.viewport
@@ -5820,6 +5903,7 @@ def run_cli(args: argparse.Namespace) -> None:
         "status": "running",
         "viewport": {"width": viewport[0], "height": viewport[1]},
         "attachViewport": {"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT},
+        "skippedArms": list(args.skip_arms),
     }
     if auto:
         result["glReplay"] = {"requested": "auto"}
@@ -5850,19 +5934,21 @@ def run_cli(args: argparse.Namespace) -> None:
         save()
 
         result["arms"] = {}
-        result["arms"]["A"] = run_arm(
-            "A", export_a, slides_a, facts, viewport, expected_stage, gl_replay=args.gl_replay, facts_on=facts_on,
-        )
-        save()
-
-        export_b = prepare_export(args.fixture, args.original_index, root, "arm-b")
-        with env_override({CONTINUITY_ENV: "off"}):
-            result["arms"]["B"] = run_arm(
-                "B", export_b, load_slides(export_b), facts, viewport, expected_stage, gl_replay="off",
+        if "A" not in skip:
+            result["arms"]["A"] = run_arm(
+                "A", export_a, slides_a, facts, viewport, expected_stage, gl_replay=args.gl_replay, facts_on=facts_on,
             )
-        save()
+            save()
 
-        if "bridgeScene" in facts or bridge_carry_ids(facts.get("verdicts") or []):
+        if "B" not in skip:
+            export_b = prepare_export(args.fixture, args.original_index, root, "arm-b")
+            with env_override({CONTINUITY_ENV: "off"}):
+                result["arms"]["B"] = run_arm(
+                    "B", export_b, load_slides(export_b), facts, viewport, expected_stage, gl_replay="off",
+                )
+            save()
+
+        if "C" not in skip and ("bridgeScene" in facts or bridge_carry_ids(facts.get("verdicts") or [])):
             export_c = prepare_export(args.fixture, args.original_index, root, "arm-c")
             with bridge_disabled():
                 result["arms"]["C"] = run_arm(
@@ -5875,29 +5961,31 @@ def run_cli(args: argparse.Namespace) -> None:
         save()
 
         evidence_dir = evidence_dir_of(artifact)
-        export_v = prepare_export(args.fixture, args.original_index, root, "visible-v")
         result["visible"] = {}
         v_sink: dict[str, Any] = {}
-        result["visible"]["V"] = run_visible_pass(
-            "V", export_v, load_slides(export_v), plan, viewport, expected_stage, evidence_dir,
-            facts["rectExpectations"]["V"], burst_poke=args.burst_poke, gl_replay="off",
-            after_slide=handback_hook(facts_on["armed"], v_sink, expect_handoff=False, capture_live=True) if facts_on else None,
-        )
-        if auto:
-            write_handback_shot(evidence_dir, "V", v_sink)
-            result["visible"]["V"]["handback"] = v_sink.get("record")
-            result["visible"]["V"]["live"] = _live_summary(v_sink)
-        result["leftoverChromeAfterVisibleV"] = check_no_leftover_chrome()
-        save()
-
-        export_voff = prepare_export(args.fixture, args.original_index, root, "visible-voff")
-        with env_override({CONTINUITY_ENV: "off"}):
-            result["visible"]["Voff"] = run_visible_pass(
-                "Voff", export_voff, load_slides(export_voff), plan, viewport, expected_stage, evidence_dir,
-                facts["rectExpectations"]["Voff"], burst_poke=args.burst_poke, gl_replay="off",
+        if "V" not in skip:
+            export_v = prepare_export(args.fixture, args.original_index, root, "visible-v")
+            result["visible"]["V"] = run_visible_pass(
+                "V", export_v, load_slides(export_v), plan, viewport, expected_stage, evidence_dir,
+                facts["rectExpectations"]["V"], burst_poke=args.burst_poke, gl_replay="off",
+                after_slide=handback_hook(facts_on["armed"], v_sink, expect_handoff=False, capture_live=True) if facts_on else None,
             )
-        result["leftoverChromeAfterVisible"] = check_no_leftover_chrome()
-        save()
+            if auto:
+                write_handback_shot(evidence_dir, "V", v_sink)
+                result["visible"]["V"]["handback"] = v_sink.get("record")
+                result["visible"]["V"]["live"] = _live_summary(v_sink)
+            result["leftoverChromeAfterVisibleV"] = check_no_leftover_chrome()
+            save()
+
+        if "Voff" not in skip:
+            export_voff = prepare_export(args.fixture, args.original_index, root, "visible-voff")
+            with env_override({CONTINUITY_ENV: "off"}):
+                result["visible"]["Voff"] = run_visible_pass(
+                    "Voff", export_voff, load_slides(export_voff), plan, viewport, expected_stage, evidence_dir,
+                    facts["rectExpectations"]["Voff"], burst_poke=args.burst_poke, gl_replay="off",
+                )
+            result["leftoverChromeAfterVisible"] = check_no_leftover_chrome()
+            save()
 
         if facts_on is not None:
             armed = facts_on["armed"]
@@ -5923,13 +6011,14 @@ def run_cli(args: argparse.Namespace) -> None:
             result["leftoverChromeAfterVisibleGl"] = check_no_leftover_chrome()
             save()
 
-        export_attach = prepare_export(args.fixture, args.original_index, root, "attach")
-        result["attach"] = run_attach_arm(
-            export_attach, load_slides(export_attach), facts, root, attach_expected_stage,
-            gl_replay=args.gl_replay, facts_on=facts_on,
-        )
-        result["leftoverChromeAfterAttach"] = check_no_leftover_chrome()
-        save()
+        if "attach" not in skip:
+            export_attach = prepare_export(args.fixture, args.original_index, root, "attach")
+            result["attach"] = run_attach_arm(
+                export_attach, load_slides(export_attach), facts, root, attach_expected_stage,
+                gl_replay=args.gl_replay, facts_on=facts_on,
+            )
+            result["leftoverChromeAfterAttach"] = check_no_leftover_chrome()
+            save()
 
         result["status"], result["statusReasons"] = overall_status(result)
     except Exception as exc:  # noqa: BLE001 - always leave a readable artifact behind
@@ -5947,11 +6036,14 @@ def run_cli(args: argparse.Namespace) -> None:
     summary = {
         "status": result.get("status"),
         "statusReasons": result.get("statusReasons"),
+        "skippedArms": result.get("skippedArms"),
         "arms": {
             name: {key: boundary_verdict(entry, key) for key in verdict_keys}
             for name, entry in result.get("arms", {}).items()
         },
-        "attach": {key: boundary_verdict(result.get("attach", {}), key) for key in verdict_keys},
+        "attach": None if "attach" in skip else {
+            key: boundary_verdict(result.get("attach", {}), key) for key in verdict_keys
+        },
         "visible": {
             name: {
                 "verdict": entry.get("verdict"),

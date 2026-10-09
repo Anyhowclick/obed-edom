@@ -208,6 +208,7 @@ worktree pinned to a commit, with at most 3 headless Chromes; OBS only on the ow
 - **G-S1b.** The P2 fixture is fully green: 15/15 off, plus `glReplayCarry1to2` under `--gl-replay auto`.
 - **G-S1c, stray red.** `--core-variant stash-any` on P2: host `unexpectedVideos` non-empty on slide 4 (WA0125), and P2 `noStrayVideo` red **only** there.
 - **G-S1d.** `--strip bridge@8` red only on 3→4. `--strip retire@2`, and `--strip glReplay@2` under `--gl-replay auto`, red only on the **1→2** verdicts. On main's runtime a stripped refusal falls back to the implicit pin, so `refused*` goes red as well as `armed1to2`. `--strip restart@6` is recorded as the current behaviour. Each arm's expected set is written into `run_gates.sh` before the run.
+  **Owner decision 2026-10-09:** the P2 `--strip bridge@8` arm (WS-H) is dropped from `run_gates.sh`: it injects the same plan as `--disable-bridge34`. The host `--strip bridge@8` arm stays.
 
 ### S2: derivation v2 + core v6 (the only runtime-byte stage; after OD-2 and loopMode merge)
 
@@ -322,6 +323,7 @@ Dissolve). D2-across → none. D4 → the near copy is unpaired, so no finding.
 - **Stray-movie check in both gates.** Host `unexpectedVideos` (exists) and P2 `noStrayVideo` (S1). `noStrayVideo` claims **only** that no painting `<video>` fails to claim an authored instance and no instance is claimed twice. It does **not** score presence (Codex R1-9, closed by narrowing): Magic-Move-settled slides legitimately paint through WebGL, so presence stays with `refusedCarry1to2`/`glReplayCarry1to2`, `deliberateRestart2to3` and `continueThroughMovingMagicMove3to4`. Red: `--core-variant stash-any` on the P2 fixture (WA0125 on slide 4).
 - **Per-boundary verdicts from the plan.** Never from slide positions. The rescore control (G-S1a) proves the new scorer equals the old on stored artifacts before it replaces it.
 - **A red arm per action type.** `--strip ACTION@atScene` must turn exactly its pre-registered set red, and every other verdict must match the unstripped run.
+- **Freeze bracket once per paint path (owner 8b amended, 8a promoted, 2026-10-09).** `freezeControlCaughtByCounter` runs in `--wait-profile fast` (DOM) and `--gl-replay auto` (WebGL) only; every other arm passes `--skip-freeze-bracket` (refused on fast/gl-auto; non-blocking, rendered `**True** (skipped by --skip-freeze-bracket)`, header `Freeze bracket: skipped (--skip-freeze-bracket)`). The at-cut counter `movingIndexRunAtCut` gates `continueThroughMovingMagicMove3to4` in every arm, so "every other verdict must match the unstripped run" excludes the skipped bracket.
 - **Identity red.** `--core-variant wrong-instance` on D4 must fail the carry verdict: the carried clock is A-near's, ~3 s ahead of A-far's (the probe dwells ≥ 3 s on S1 before click 1).
 - **F5 is frozen instrument API.** A core change that drops or renames an F5 name is a finding, even if the suites pass.
 - **P2 stays the oracle for shared bytes.** Any core byte change after Q2 re-opens Q2–Q6. A red under the stricter scorer is a finding, never a threshold change. INCONCLUSIVE on integrity failure (fail closed).

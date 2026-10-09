@@ -7635,3 +7635,202 @@ class TestOpusR3:
         index = calls.index(("advance", 4))
         assert calls[index - 2:index] == ["settle", ("sleep", probe.CLICK_DELAY_S)] and probe.CLICK_DELAY_S == 1.5
         assert calls.count("settle") == 1
+
+
+# --------------------------------------------------------------------------
+# `--skip-arms` (owner decision 2026-10-09): run_gates runs attach, B and Voff only in the
+# 1920x1080 host gate and C only at 2560x1440 / 1600x1000. A skipped arm is recorded in the
+# artifact as `skippedArms`, is never scored, and is never counted as a pass of that arm; a
+# run that skips every positive arm (A, V, attach) cannot pass at all.
+# --------------------------------------------------------------------------
+
+# The two host-gate shapes run_gates.sh uses.
+GATE_SKIPS = (("attach", "B", "Voff"), ("C",))
+
+
+def _skip(result: dict[str, Any], names: tuple[str, ...]) -> dict[str, Any]:
+    """Drop the named arms from a full result exactly as a `--skip-arms` run leaves them out."""
+    for name in names:
+        if name == "attach":
+            del result["attach"]
+        elif name in ("V", "Voff"):
+            del result["visible"][name]
+        else:
+            del result["arms"][name]
+    result["skippedArms"] = [name for name in probe.SKIPPABLE_ARMS if name in names]
+    return result
+
+
+class TestSkipArmsParsing:
+    def test_default_skips_nothing(self) -> None:
+        assert probe.parse_args([]).skip_arms == ()
+
+    def test_names_are_validated_and_put_in_canonical_order(self) -> None:
+        assert probe.parse_args(["--skip-arms", "attach,B,C,Voff"]).skip_arms == ("B", "C", "Voff", "attach")
+        assert probe.parse_args(["--skip-arms", "C"]).skip_arms == ("C",)
+        assert probe.SKIPPABLE_ARMS == ("A", "B", "C", "V", "Voff", "attach")
+
+    @pytest.mark.parametrize("value", ["", "D", "b", "B,B", "B,", "attach, B", "Vgl"])
+    def test_known_bad_unknown_empty_or_repeated_names_are_refused(self, value: str) -> None:
+        with pytest.raises(SystemExit):
+            probe.parse_args(["--skip-arms", value])
+
+    @pytest.mark.parametrize(
+        "extra",
+        [["--strip", "bridge@8"], ["--core-variant", "stash-any"], ["--pass", "G"], ["--force-wrap", "1to2:0"],
+         ["--rescore", "x.json"], ["--gl-replay", "auto", "--gl-force-fail", "posterAmbiguous"]],
+    )
+    def test_skip_arms_belongs_to_the_full_run_only(self, extra: list[str]) -> None:
+        with pytest.raises(SystemExit):
+            probe.parse_args(["--skip-arms", "B", *extra])
+
+    def test_v_cannot_be_skipped_under_gl_replay_auto(self) -> None:
+        """The hand-back is scored from V and Vgl together."""
+        with pytest.raises(SystemExit):
+            probe.parse_args(["--skip-arms", "V", "--gl-replay", "auto"])
+        assert probe.parse_args(["--skip-arms", "B,Voff", "--gl-replay", "auto"]).skip_arms == ("B", "Voff")
+
+
+class TestSkipArmsStatus:
+    def _base(self) -> dict[str, Any]:
+        return TestOverallStatusTruthTable()._base_result()
+
+    @pytest.mark.parametrize("names", GATE_SKIPS)
+    def test_the_run_gates_shapes_pass_when_every_arm_that_ran_passes(self, names: tuple[str, ...]) -> None:
+        assert probe.overall_status(_skip(self._base(), names)) == ("pass", [])
+
+    def test_positive_control_the_unskipped_full_result_passes(self) -> None:
+        result = self._base()
+        assert "skippedArms" not in result
+        assert probe.overall_status(result) == ("pass", [])
+        result["skippedArms"] = []
+        assert probe.overall_status(result) == ("pass", [])
+
+    @pytest.mark.parametrize("names", GATE_SKIPS)
+    def test_a_skip_never_hides_a_failure_of_an_arm_that_ran(self, names: tuple[str, ...]) -> None:
+        result = _skip(self._base(), names)
+        result["arms"]["A"]["continuity"]["mode"] = "off"
+        status, reasons = probe.overall_status(result)
+        assert status == "fail" and "arm A continuity.mode='off', expected 'qualified'" in reasons
+
+    @pytest.mark.parametrize("name", ["B", "C", "attach", "V", "Voff"])
+    def test_known_bad_an_arm_missing_without_being_skipped_is_never_a_pass(self, name: str) -> None:
+        result = _skip(self._base(), (name,))
+        del result["skippedArms"]
+        assert probe.overall_status(result)[0] != "pass"
+
+    @pytest.mark.parametrize("name", ["B", "C", "attach", "V", "Voff"])
+    def test_known_bad_a_skipped_arm_that_has_a_result_fails(self, name: str) -> None:
+        """Skipped means not run: a record claiming both is not trusted."""
+        result = self._base()
+        result["skippedArms"] = [name]
+        status, reasons = probe.overall_status(result)
+        assert status == "fail" and reasons == [f"{name} is skipped by flag but has a result"]
+
+    def test_known_bad_every_arm_skipped_fails(self) -> None:
+        result = _skip(self._base(), probe.SKIPPABLE_ARMS)
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert reasons == ["every positive arm (A, V, attach) is skipped by flag, so nothing qualifies"]
+
+    def test_known_bad_only_null_controls_left_fails(self) -> None:
+        """B, C and Voff are the instrument's controls; on their own they prove nothing."""
+        result = _skip(self._base(), probe.POSITIVE_ARMS)
+        status, reasons = probe.overall_status(result)
+        assert status == "fail" and "nothing qualifies" in reasons[0]
+
+    @pytest.mark.parametrize("names", [("A",), ("V",), ("attach",), ("A", "attach"), ("A", "V")])
+    def test_one_positive_arm_left_is_enough_to_score(self, names: tuple[str, ...]) -> None:
+        assert probe.overall_status(_skip(self._base(), names)) == ("pass", [])
+
+    @pytest.mark.parametrize("value", ["B", ["D"], ["B", "B"], [1], None])
+    def test_known_bad_a_malformed_skipped_arms_record_fails(self, value: Any) -> None:
+        result = self._base()
+        result["skippedArms"] = value
+        status, reasons = probe.overall_status(result)
+        assert status == "fail" and "skippedArms" in reasons[0]
+
+    def test_a_skipped_arm_is_not_scored_for_its_gl_mode(self) -> None:
+        result = _skip(self._base(), ("attach", "B", "Voff"))
+        assert not any("arm B" in r or "Voff" in r or "attach" in r for r in probe.gl_mode_reasons(result))
+        assert any("arm A" in r for r in probe.gl_mode_reasons(result)), "arms that ran are still checked"
+
+    def test_generated_status_requires_exactly_the_arms_that_were_not_skipped(self) -> None:
+        result = _skip(_generated_result(), ("C", "attach"))
+        result["visible"] = {}
+        result["skippedArms"] = ["C", "attach"]
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(probe, "visible_reasons", lambda result: [])
+            assert probe.overall_status(result) == ("pass", [])
+            result["arms"]["C"] = dict(result["arms"]["A"])
+            assert probe.overall_status(result) == ("fail", ["C is skipped by flag but has a result"])
+            del result["arms"]["C"]
+            result["skippedArms"] = ["attach"]
+            assert probe.overall_status(result)[0] == "error", "C is required again once it is not skipped"
+            result["skippedArms"] = ["C"]
+            assert probe.overall_status(result)[0] == "error", "attach is required again once it is not skipped"
+
+
+class TestSkipArmsRun:
+    """The full run leaves the skipped arms out and records them; nothing launches for them."""
+
+    @pytest.fixture
+    def driven(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
+        monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "output"))
+        ran: list[str] = []
+        fixture = tmp_path / "fixture"
+        fixture.mkdir()
+        index = tmp_path / "index.html"
+        index.write_text("unmodified")
+        facts = {key: None for key in ("asset", "canvas")}
+        facts.update(refusedBoundaries=[], rectExpectations={"V": {}, "Voff": {}}, bridgeScene=8)
+        monkeypatch.setattr(probe, "prepare_export", lambda fixture, index, root, tag: root / tag)
+        monkeypatch.setattr(probe, "load_slides", lambda *a: [])
+        monkeypatch.setattr(probe, "ground_truth_plan", lambda *a, **k: None)
+        monkeypatch.setattr(probe, "ground_truth_facts", lambda *a, **k: facts)
+        monkeypatch.setattr(probe, "movie_nodes", lambda *a: [])
+        monkeypatch.setattr(probe, "bind_dom_ids", lambda *a: None)
+        monkeypatch.setattr(probe, "expected_stage_fit", lambda *a: {})
+        monkeypatch.setattr(probe, "bridge_disabled", lambda: __import__("contextlib").nullcontext())
+        monkeypatch.setattr(probe, "run_arm", lambda name, *a, **k: ran.append(name) or {"arm": name})
+        monkeypatch.setattr(probe, "run_visible_pass", lambda name, *a, **k: ran.append(name) or {"pass": name})
+        monkeypatch.setattr(probe, "run_attach_arm", lambda *a, **k: ran.append("attach") or {"arm": "attach"})
+        monkeypatch.setattr(probe, "check_no_leftover_chrome", lambda: "")
+        return {"ran": ran, "fixture": fixture, "index": index, "tmp": tmp_path}
+
+    def _main(self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch, *extra: str) -> dict[str, Any]:
+        artifact = driven["tmp"] / "out" / "host.json"
+        monkeypatch.setattr(sys, "argv", [
+            "x", "--fixture", str(driven["fixture"]), "--original-index", str(driven["index"]),
+            "--artifact", str(artifact), *extra,
+        ])
+        with pytest.raises(SystemExit):
+            probe.main()
+        return json.loads(artifact.read_text())
+
+    def test_positive_control_with_no_skip_every_arm_runs(self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+        result = self._main(driven, monkeypatch)
+        assert driven["ran"] == ["A", "B", "C", "V", "Voff", "attach"]
+        assert result["skippedArms"] == []
+
+    @pytest.mark.parametrize(
+        ("flag", "ran"),
+        [("attach,B,Voff", ["A", "C", "V"]), ("C", ["A", "B", "V", "Voff", "attach"])],
+    )
+    def test_skipped_arms_do_not_run_and_are_recorded(
+        self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch, flag: str, ran: list[str],
+    ) -> None:
+        result = self._main(driven, monkeypatch, "--skip-arms", flag)
+        assert driven["ran"] == ran
+        skipped = [name for name in probe.SKIPPABLE_ARMS if name not in ran]
+        assert result["skippedArms"] == skipped
+        assert "attach" not in result if "attach" in skipped else "attach" in result
+        assert sorted(result["arms"]) == [n for n in ("A", "B", "C") if n in ran]
+        assert sorted(result["visible"]) == [n for n in ("V", "Voff") if n in ran]
+        assert not any(f"{name} is skipped by flag" in r for r in result.get("statusReasons") or [] for name in skipped)
+
+    def test_every_arm_skipped_runs_nothing_and_fails(self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+        result = self._main(driven, monkeypatch, "--skip-arms", ",".join(probe.SKIPPABLE_ARMS))
+        assert driven["ran"] == []
+        assert result["status"] == "fail"
+        assert result["statusReasons"] == ["every positive arm (A, V, attach) is skipped by flag, so nothing qualifies"]

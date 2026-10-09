@@ -3909,17 +3909,49 @@ def _score_freeze_control(
     }
 
 
-def _freeze_control_blocks_success(verdict: str | None, bridge34_disabled: bool) -> bool:
+def _freeze_control_blocks_success(
+    verdict: str | None, bridge34_disabled: bool, *, skipped_by_flag: bool = False
+) -> bool:
     """Owner decision 8b: does this `freeze_control` verdict block overall
-    `success`? "pass" never blocks; "skipped" blocks EXCEPT under
-    `--disable-bridge34` (the only arm with nothing to freeze); every other
-    verdict ("inconclusive", "fail", or anything unrecognised) blocks, same as
-    today — never weaken this to a pass on an unrecognised verdict."""
+    `success`? "pass" never blocks; "skipped" blocks EXCEPT when the injected
+    plan has no 3->4 bridge (nothing to freeze) or the bracket was skipped by
+    `--skip-freeze-bracket`; every other verdict ("inconclusive", "fail", or
+    anything unrecognised) blocks — never weaken this to a pass on an
+    unrecognised verdict.
+
+    Amended 2026-10-09 (owner, "option 2"): the bracket is the round's only
+    gating check of painted pixels at the 3->4 cut plus its own non-vacuity
+    control, so it runs once per paint path — `--wait-profile fast` (DOM) and
+    `--gl-replay auto` (WebGL) — and the driver refuses the flag there. Every
+    other arm skips it by flag; the at-cut counter now gates every arm
+    (`_moving_mm34_pass`)."""
     if verdict == "pass":
         return False
     if verdict == "skipped":
-        return not bridge34_disabled
+        return not (bridge34_disabled or skipped_by_flag)
     return True
+
+
+def _moving_mm34_pass(
+    moving_continuity: dict,
+    moving_index_run: dict,
+    moving_index_run_at_cut: dict,
+    footprint_live: dict,
+    advance_ok: bool,
+    player_build_errors: list,
+) -> bool:
+    """`continueThroughMovingMagicMove3to4`'s pass. Owner decision 8a, promoted
+    2026-10-09 with 8b: the at-cut counter run (`movingIndexRunAtCut`) gates —
+    it agreed with the freeze bracket in 63/63 positive runs and was never a
+    false red."""
+    return bool(
+        moving_continuity.get("ok", False)
+        and moving_index_run.get("ok", False)
+        and moving_index_run_at_cut.get("ok", False)
+        and footprint_live.get("ok", False)
+        and advance_ok
+        and not player_build_errors
+    )
 
 
 STRAY_IOU_MIN = 0.75

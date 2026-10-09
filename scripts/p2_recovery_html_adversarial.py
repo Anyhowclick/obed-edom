@@ -148,6 +148,7 @@ from obed_edom.p2_verdict import (  # noqa: E402
     _mae_rgb,
     _movie_key,
     _moving_index_run_at_cut,
+    _moving_mm34_pass,
     _nearest_sample_times,
     _new_advance_press_state,
     _new_bracket_manifest,
@@ -627,6 +628,24 @@ def _injection_arm(reference_plan: dict) -> tuple[dict, str, dict]:
         "referencePlanSha256": hashlib.sha256(json.dumps(reference_plan).encode()).hexdigest(),
         "injectedPlan": injected,
     }
+
+
+SKIP_FREEZE_FLAG = "--skip-freeze-bracket"
+
+
+def _skip_freeze_bracket() -> bool:
+    """`--skip-freeze-bracket` (owner decision 8b, 2026-10-09): refused unless the arm is a red arm
+    (`--core-variant`, `--strip`, `--disable-bridge34`) or `--wait-profile slow`, so the fast and
+    gl-auto positive arms always run the bracket."""
+    if SKIP_FREEZE_FLAG not in sys.argv:
+        return False
+    red_arm = bool(_arg_value("--core-variant", "") or _arg_value("--strip", "")) or "--disable-bridge34" in sys.argv
+    if not (red_arm or _arg_value("--wait-profile", "fast") == "slow"):
+        raise SystemExit(
+            f"{SKIP_FREEZE_FLAG} needs --core-variant, --strip, --disable-bridge34 or --wait-profile slow; "
+            "the fast and gl-auto positive arms always run the freeze bracket"
+        )
+    return True
 
 
 def _inject_player(
@@ -3230,7 +3249,7 @@ async def _capture_3to4_snapshot(
 
 async def _run_freeze_bracket(
     player_dir: Path, runs_dir: Path, wait_profile: dict, wait_profile_name: str,
-    *, bridge34: bool, main_js: bytes | None = None, gl_auto: bool = False,
+    *, bridge34: bool, main_js: bytes | None = None, gl_auto: bool = False, skip: bool = False,
 ) -> dict:
     """A-B-A composited-freeze bracket on the 3->4 moving Magic Move boundary:
     positive -> freeze-control -> positive, one re-navigated Chrome (same
@@ -3240,11 +3259,12 @@ async def _run_freeze_bracket(
     Re-bracketed off the 1->2 boundary (retired -- the derived plan REFUSES that
     carry, so there is no carried movie to freeze there; 3->4 still carries). SKIPPED
     (no boot, no bracket) when the INJECTED plan has no 3->4 bridge (`--disable-bridge34`,
-    `--strip bridge@8`) -- nothing to freeze in that arm."""
-    if not bridge34:
+    `--strip bridge@8`) -- nothing to freeze in that arm -- or under `--skip-freeze-bracket`
+    (`skip`, which wins when both apply)."""
+    if skip or not bridge34:
         return {
             "skipped": True,
-            "reason": "bridge disabled",
+            "reason": SKIP_FREEZE_FLAG if skip else "bridge disabled",
             "verdict": "skipped",
             "ok": False,
             "waitProfile": wait_profile_name,
@@ -3299,6 +3319,18 @@ async def _run_freeze_bracket(
     verdict["waitProfile"] = wait_profile_name
     verdict["snapshots"] = snaps
     return verdict
+
+
+def _finding_line(f: dict) -> str:
+    extra = f" — {f['note']}" if f.get("note") else ""
+    verdict = f" ({f['verdict']})" if f.get("verdict") and f["verdict"] != ("pass" if f["pass"] else "fail") else ""
+    if f.get("skippedBy"):
+        verdict = f" (skipped by {f['skippedBy']})"
+    return f"- {f['id']}: **{f['pass']}**{verdict}{extra}"
+
+
+def _freeze_bracket_header(freeze_control: dict) -> str:
+    return f"skipped ({freeze_control.get('reason')})" if freeze_control.get("skipped") else "run"
 
 
 async def _boot(chrome: ChromeCdp, base: str) -> dict:
@@ -3357,6 +3389,7 @@ async def _run() -> dict:
     bridge34 = "--disable-bridge34" not in sys.argv
     wait_profile_name = _arg_value("--wait-profile", "fast")
     wait_profile = WAIT_PROFILES[wait_profile_name]
+    skip_freeze = _skip_freeze_bracket()
     if _explicit_out_dir() is not None:
         if root.exists() and any(root.iterdir()):
             raise SystemExit(f"--out-dir {root} is not empty; pass a new directory")
@@ -3972,11 +4005,8 @@ async def _run() -> dict:
             if s.get("footprintSource") == "measured"
         ]
         moving_index_run = score_index_progression(slide4_index_seq)
-        # REPORT-only (owner decision 8a): the freeze-control at-cut run scorer
-        # (`score_composited_index_run`, flip at the first MEASURED sample reaching
-        # slide 4) computed here for `continueThroughMovingMagicMove3to4`'s detail.
-        # Never gates that finding's `pass` -- only one clean fast/slow/bridge-off
-        # round earns it a place in the pass condition.
+        # Owner decision 8a, promoted 2026-10-09: the at-cut counter run gates
+        # `continueThroughMovingMagicMove3to4` (`_moving_mm34_pass`).
         moving_index_run_at_cut, _flip_window_decodable_c = _moving_index_run_at_cut(
             index_samples_c,
             covered_until=_capture_meta_c.get("releaseSplitIndex"),
@@ -4314,12 +4344,9 @@ async def _run() -> dict:
         # Delimited for merge with Peer B's adversarial edits.
         {
             "id": "continueThroughMovingMagicMove3to4",
-            "pass": bool(
-                moving_continuity.get("ok", False)
-                and moving_index_run.get("ok", False)
-                and footprint_live.get("ok", False)
-                and advance_c_ok
-                and not player_build_errors
+            "pass": _moving_mm34_pass(
+                moving_continuity, moving_index_run, moving_index_run_at_cut,
+                footprint_live, advance_c_ok, player_build_errors,
             ),
             "status": "failed-by-player" if player_build_errors else None,
             "detail": {
@@ -4360,7 +4387,9 @@ async def _run() -> dict:
                     "fresh decoder fails; rVFC presentedMediaTime advancing >0.05 and never "
                     "rewinding = the live clock continues, not restarts) AND movingIndexRun "
                     "(the composited counter, decoded at the MOVING index_patch_roi_for ROI, "
-                    "marches forward on slide 4) AND footprintFullyLive (the settled "
+                    "marches forward on slide 4) AND movingIndexRunAtCut (the same counter "
+                    "has no freeze run across the cut itself; owner decision 8a, gating "
+                    "since 2026-10-09) AND footprintFullyLive (the settled "
                     "slide-4 destination rect must PAINT: a 12-shot unevenly spaced burst "
                     "scored by html_alpha_probe.score_visible_slide with imported "
                     "thresholds, control patch inside the first empty corner; anything but "
@@ -4456,16 +4485,21 @@ async def _run() -> dict:
     # every other sub-verdict is identical across the two bracketing positives.
     # Runs on fresh boots (its own server + re-navigated Chrome per arm), so it
     # never perturbs the main pass above. SKIPPED when the injected plan has no 3->4
-    # bridge (--disable-bridge34, --strip bridge@8: no carry to freeze in that arm).
+    # bridge (--disable-bridge34, --strip bridge@8: no carry to freeze in that arm)
+    # or under --skip-freeze-bracket (owner decision 8b, 2026-10-09).
     freeze_control = await _run_freeze_bracket(
-        player_dir, runs, wait_profile, wait_profile_name, bridge34=bridge_injected, main_js=main_js, gl_auto=gl_auto
+        player_dir, runs, wait_profile, wait_profile_name, bridge34=bridge_injected, main_js=main_js,
+        gl_auto=gl_auto, skip=skip_freeze,
     )
-    freeze_blocks_success = _freeze_control_blocks_success(freeze_control.get("verdict"), not bridge_injected)
+    freeze_blocks_success = _freeze_control_blocks_success(
+        freeze_control.get("verdict"), not bridge_injected, skipped_by_flag=skip_freeze
+    )
     findings.append(
         {
             "id": "freezeControlCaughtByCounter",
             "pass": not freeze_blocks_success,
             "verdict": freeze_control.get("verdict"),
+            "skippedBy": SKIP_FREEZE_FLAG if skip_freeze else None,
             "detail": freeze_control,
             "note": (
                 "Negative control (Arm A: bridged decoder LIVE, composite FROZEN), "
@@ -4491,8 +4525,12 @@ async def _run() -> dict:
                 "bracketing positives green; and every invariant sub-verdict equal across "
                 "A1/B/A2. A hold that never fired is INCONCLUSIVE, never PASS/FAIL (an "
                 "unfired hold would masquerade as a passing positive). Bridge-disabled: the "
-                "bracket is SKIPPED (nothing to freeze), which is non-blocking ONLY in that "
-                "arm — a 'skipped' verdict blocks success in every other arm."
+                "bracket is SKIPPED (nothing to freeze). Owner decision 8b (2026-10-09): it "
+                "runs once per paint path (--wait-profile fast: DOM; --gl-replay auto: "
+                "WebGL); every other arm (slow, red arms) skips it with "
+                "--skip-freeze-bracket, which P2 refuses on a fast/gl-auto positive arm. "
+                "Those two skips are non-blocking; a 'skipped' verdict blocks success in "
+                "every other case."
             ),
         }
     )
@@ -4500,7 +4538,7 @@ async def _run() -> dict:
     # Restart inconclusive must not count as overall success. The freeze bracket's
     # own pass/block rule lives in `_freeze_control_blocks_success` (owner decision
     # 8b): "inconclusive"/"fail" always block; "skipped" blocks unless the 3->4
-    # bridge itself was disabled for this run (nothing to freeze there either).
+    # bridge itself was disabled for this run or --skip-freeze-bracket was given.
     success = all(f["pass"] for f in findings) and not restart_inconclusive
     report = {
         "probe": "p2_recovery_html_adversarial",
@@ -4539,6 +4577,7 @@ async def _run() -> dict:
         "preserveEvents": preserve_events,
         "findings": findings,
         "freezeControl": freeze_control,
+        "skipFreezeBracket": skip_freeze,
         "success": success,
         "p3": "still unwired",
         "rois": {
@@ -4580,15 +4619,13 @@ async def _run() -> dict:
         f"Source unchanged: **{report['sourceUnchanged']}**",
         f"Core variant: {arm['coreVariant'] or 'none'} · injected core sha256: {arm['coreSha256']}",
         f"Strip: {arm['strip'] or 'none'} · injected plan sha256: {arm['injectedPlanSha256']}",
+        f"Freeze bracket: {_freeze_bracket_header(freeze_control)}",
         f"success: **{success}**",
         "",
         "## Findings",
         "",
     ]
-    for f in findings:
-        extra = f" — {f['note']}" if f.get("note") else ""
-        verdict = f" ({f['verdict']})" if f.get("verdict") and f["verdict"] != ("pass" if f["pass"] else "fail") else ""
-        lines.append(f"- {f['id']}: **{f['pass']}**{verdict}{extra}")
+    lines += [_finding_line(f) for f in findings]
     lines += ["", f"Samples: `{root}`", "", "P3 still unwired."]
     (root / "REPORT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
