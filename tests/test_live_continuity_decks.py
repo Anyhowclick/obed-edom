@@ -55,12 +55,17 @@ POSITIVE_UUIDS = _slide_list(POSITIVE_ROOT)
 LOOP_UUIDS = _slide_list(LOOP_ROOT)
 
 
-def test_minimal_s4_to_s5_pins_with_no_refusal():
-    plan = _plan(MINIMAL_ROOT, MINIMAL_UUIDS[0:2])
+@pytest.mark.parametrize(
+    "slice_, actions, refusals",
+    [pytest.param((0, 2), ["pin"], 0, id="S4-to-S5-pins-with-no-refusal"), pytest.param((2, 4), ["pin", "pin"], 1, id="S6-to-S7-two-pins-one-refusal")],
+)
+def test_minimal_pins_unqualified(slice_, actions, refusals):
+    start, end = slice_
+    plan = _plan(MINIMAL_ROOT, MINIMAL_UUIDS[start:end])
     assert isinstance(plan, ContinuityPlan)
-    assert plan.refusals == ()
+    assert len(plan.refusals) == refusals
     movies = plan.boundaries[0].as_dict()["movies"]
-    assert [m["action"] for m in movies] == ["pin"]
+    assert [m["action"] for m in movies] == actions
     assert plan.to_runtime() == Unsupported(NOT_YET_QUALIFIED)
 
 
@@ -73,15 +78,6 @@ def test_minimal_s4_to_s5_gl_replay_keyword():
     movie = plan.boundaries[0].as_dict()["movies"][0]
     assert "glReplay" not in movie
     assert "glReplayReason" not in movie
-
-
-def test_minimal_s6_to_s7_two_pins_one_refusal():
-    plan = _plan(MINIMAL_ROOT, MINIMAL_UUIDS[2:4])
-    assert isinstance(plan, ContinuityPlan)
-    movies = plan.boundaries[0].as_dict()["movies"]
-    assert [m["action"] for m in movies] == ["pin", "pin"]
-    assert len(plan.refusals) == 1
-    assert plan.to_runtime() == Unsupported(NOT_YET_QUALIFIED)
 
 
 def test_minimal_s6_to_s7_gl_replay_refuses_two_movies():
@@ -122,9 +118,16 @@ def test_positive_control_actions_and_to_runtime():
 
 
 @pytest.mark.skipif(not GL_DECKS_ROOT.is_dir(), reason="real gl-deck exports not available")
-def test_minimal_fixture_parity_with_real_export():
-    real = _plan(MINIMAL_REAL_ROOT, MINIMAL_UUIDS)
-    fixture = _plan(MINIMAL_ROOT, MINIMAL_UUIDS)
+@pytest.mark.parametrize(
+    "real_root, fixture_root, uuids",
+    [
+        pytest.param(MINIMAL_REAL_ROOT, MINIMAL_ROOT, MINIMAL_UUIDS, id="minimal"),
+        pytest.param(POSITIVE_REAL_ROOT, POSITIVE_ROOT, POSITIVE_UUIDS, id="positive-control"),
+    ],
+)
+def test_fixture_parity_with_real_export(real_root, fixture_root, uuids):
+    real = _plan(real_root, uuids)
+    fixture = _plan(fixture_root, uuids)
     assert isinstance(real, ContinuityPlan)
     assert isinstance(fixture, ContinuityPlan)
     assert real.as_dict() == fixture.as_dict()
@@ -141,15 +144,6 @@ def test_minimal_sub_deck_parity_with_real_export(slice_):
         return plan.reason if isinstance(plan, Unsupported) else plan.as_dict()
 
     assert dump(real) == dump(fixture)
-
-
-@pytest.mark.skipif(not GL_DECKS_ROOT.is_dir(), reason="real gl-deck exports not available")
-def test_positive_control_fixture_parity_with_real_export():
-    real = _plan(POSITIVE_REAL_ROOT, POSITIVE_UUIDS)
-    fixture = _plan(POSITIVE_ROOT, POSITIVE_UUIDS)
-    assert isinstance(real, ContinuityPlan)
-    assert isinstance(fixture, ContinuityPlan)
-    assert real.as_dict() == fixture.as_dict()
 
 
 # --- looping movies (keynote_live_continuity_loopmode plan sections 2 and 4) ---------------

@@ -39,6 +39,10 @@ SLIDES = [
     {"playerIndex": 3, "originalOrdinal": 4, "exportedUuid": SLIDE4, "skipped": False},
 ]
 
+# The green square is slide 2's draw slot 6; the movie is slot 5.
+SLIDE2_GREEN_SLOT = 6
+SLIDE2_MOVIE_SLOT = 5
+
 
 def _resolver(root: Path, relative: str) -> Path:
     """Minimal traversal-safe resolver used by these tests (mirrors safe_export_file's checks
@@ -55,6 +59,10 @@ def _resolver(root: Path, relative: str) -> Path:
     if not candidate.is_file():
         raise FileNotFoundError(relative)
     return candidate
+
+
+def _unchecked_resolver(root: Path, relative: str) -> Path:
+    return root / relative
 
 
 def _plan(root: Path = FIXTURE_ROOT, slides: list[dict] = SLIDES) -> ContinuityPlan | Unsupported:
@@ -85,81 +93,38 @@ def test_canvas_and_scene_boundaries():
     assert plan.scene_index_by_player == {0: 0, 1: 2, 2: 6, 3: 8}
 
 
-def test_boundary_1_to_2_pins_the_static_movie():
-    plan = _plan()
-    boundary = _boundary(plan, 0)
-    assert boundary["toPlayerIndex"] == 1
-    movies = {m["asset"]: m for m in boundary["movies"]}
-    assert set(movies) == {"untitled.mov"}
-    untitled = movies["untitled.mov"]
-    assert untitled["action"] == "pin"
-    assert untitled["srcRect"] == _rect(109.35, 795.04, 951.54, 267.62)
-    assert untitled["dstRect"] == _rect(109.35, 795.04, 951.54, 267.62)
-
-
-def test_boundary_2_to_3_restarts_across_the_dissolve():
-    plan = _plan()
-    boundary = _boundary(plan, 1)
-    assert boundary["toPlayerIndex"] == 2
-    movies = {m["asset"]: m for m in boundary["movies"]}
-    assert set(movies) == {"untitled.mov"}
-    assert movies["untitled.mov"]["action"] == "restart"
-
-
-def test_boundary_3_to_4_bridges_the_moving_scaling_movie():
-    plan = _plan()
-    boundary = _boundary(plan, 2)
-    assert boundary["toPlayerIndex"] == 3
-    assert boundary["durationSeconds"] == 1.5
-    movies = {m["asset"]: m for m in boundary["movies"]}
-    # WA0125 does not appear on slide 4: it must not be treated as continuing.
-    assert set(movies) == {"untitled.mov"}
-    untitled = movies["untitled.mov"]
-    assert untitled["action"] == "bridge"
-    assert untitled["srcRect"] == _rect(197.98, 797.10, 951.54, 267.62)
-    assert untitled["dstRect"] == _rect(326.75, 708.52, 1266.49, 356.20)
-
-
-def test_boundary_4_to_end_restarts_with_no_destination():
-    plan = _plan()
-    boundary = _boundary(plan, 3)
-    assert boundary["toPlayerIndex"] is None
-    movies = {m["asset"]: m for m in boundary["movies"]}
-    assert set(movies) == {"untitled.mov"}
-    untitled = movies["untitled.mov"]
-    assert untitled["action"] == "restart"
-    assert untitled["dstRect"] is None
-
-
-def test_slide3_authored_y_differs_from_p2s_measured_constant_within_tolerance():
-    """Known discrepancy (plan section 2): a previous analysis derived y=797 for slide 3's
-    movie while P2's screen-measured MOVIE constant used 795 (authored notes: 794.6). The
-    export data says y=797.10 (see test_boundary_3_to_4_bridges_the_moving_scaling_movie);
-    P2's 795 is off by ~2.1px, comfortably inside the probe's stated 10px per-axis tolerance,
-    consistent with it being a screen-measured rather than authored value. This test pins the
-    DATA value; it must not be relaxed to force-fit 795.
-    """
-    plan = _plan()
-    boundary = _boundary(plan, 2)
-    src = next(m for m in boundary["movies"] if m["asset"] == "untitled.mov")["srcRect"]
-    assert src["y"] == pytest.approx(797.10, abs=0.05)
-    p2_measured_y = 795
-    assert abs(src["y"] - p2_measured_y) < 10
-
-
-def test_ambiguous_same_asset_instance_resolves_by_unique_geometry_match():
-    """Slide 1 (player index 0) authors TWO Untitled.mov instances (see
-    test_boundary_1_to_2_pins_the_static_movie's srcRect and the second, non-continuing
-    instance at ~(1076, 876), matching the plan's noted 'movie2' drift). Only one of them
-    has an identical-geometry counterpart on slide 2, so ownership is not actually ambiguous:
-    the narrow rule is 'refuse only when more than one instance has a geometry-equal match on
-    the far side', not 'refuse whenever more than one instance of an asset exists'. This is
-    exactly the fixture P2 qualified, so it must still resolve to plan (not Unsupported).
-    """
-    plan = _plan()
-    assert isinstance(plan, ContinuityPlan)
-    boundary = _boundary(plan, 0)
-    assert len(boundary["movies"]) == 1
+@pytest.mark.parametrize(
+    "from_index, boundary_fields, movie_fields",
+    [
+        # Slide 1 authors TWO Untitled.mov instances (the second, non-continuing one at ~(1076, 876),
+        # the plan's noted 'movie2' drift). Only one has an identical-geometry counterpart on slide
+        # 2, so ownership is not ambiguous: the narrow rule is 'refuse only when more than one
+        # instance has a geometry-equal match on the far side', not 'whenever more than one
+        # instance of an asset exists'. This is the fixture P2 qualified, so it must still plan.
+        pytest.param(
+            0, {"toPlayerIndex": 1},
+            {"action": "pin", "srcRect": _rect(109.35, 795.04, 951.54, 267.62), "dstRect": _rect(109.35, 795.04, 951.54, 267.62)},
+            id="1-to-2-pins-the-static-movie-of-two-same-asset-instances",
+        ),
+        pytest.param(1, {"toPlayerIndex": 2}, {"action": "restart"}, id="2-to-3-restarts-across-the-dissolve"),
+        # WA0125 does not appear on slide 4: it must not be treated as continuing.
+        # Known discrepancy (plan section 2): a previous analysis derived y=797 for slide 3's movie
+        # while P2's screen-measured MOVIE constant used 795 (authored notes: 794.6). The export
+        # says y=797.10; P2's 795 is off by ~2.1px, inside the probe's stated 10px per-axis
+        # tolerance. This pins the DATA value; it must not be relaxed to force-fit 795.
+        pytest.param(
+            2, {"toPlayerIndex": 3, "durationSeconds": 1.5},
+            {"action": "bridge", "srcRect": _rect(197.98, 797.10, 951.54, 267.62), "dstRect": _rect(326.75, 708.52, 1266.49, 356.20)},
+            id="3-to-4-bridges-the-moving-scaling-movie-at-authored-y-797.10",
+        ),
+        pytest.param(3, {"toPlayerIndex": None}, {"action": "restart", "dstRect": None}, id="4-to-end-restarts-with-no-destination"),
+    ],
+)
+def test_fixture_boundary_carries_only_untitled_mov(from_index, boundary_fields, movie_fields):
+    boundary = _boundary(_plan(), from_index)
+    assert {key: boundary[key] for key in boundary_fields} == boundary_fields
+    assert [m["asset"] for m in boundary["movies"]] == ["untitled.mov"]
+    assert {key: boundary["movies"][0][key] for key in movie_fields} == movie_fields
 
 
 def test_r5_an_object_id_repeated_across_slides_refuses_the_deck():
@@ -255,63 +220,141 @@ def test_r1b_does_not_apply_when_there_is_no_choice():
     assert plan.boundaries[1].movies == plan_opaque.boundaries[1].movies
 
 
-def test_refuses_unreadable_header():
+@pytest.mark.parametrize(
+    "relative, text, reason",
+    [
+        pytest.param("assets/header.json", "{not json", "unreadable export header: ", id="header"),
+        pytest.param(f"assets/{SLIDE1}/{SLIDE1}.json", "not json at all", "unreadable slide export for player index 0: ", id="slide-json"),
+    ],
+)
+def test_refuses_an_unreadable_export_file(relative, text, reason):
     tmp = _copy_fixture_tree()
-    (tmp / "assets" / "header.json").write_text("{not json")
+    (tmp / relative).write_text(text)
     plan = derive_plan(tmp, SLIDES, resolver=_resolver)
     assert isinstance(plan, Unsupported)
-    assert "header" in plan.reason
+    assert plan.reason.startswith(reason)
 
 
-def test_refuses_slide_with_no_events():
-    tmp = _copy_fixture_tree()
-    _rewrite_slide_json(tmp, SLIDE1, lambda data: {**data, "events": []})
-    plan = derive_plan(tmp, SLIDES, resolver=_resolver)
-    assert isinstance(plan, Unsupported)
-    assert "no events" in plan.reason
+def _add_wa0125_to_slide4(data):
+    """Slide 3 already carries a WA0125 instance; add a matching one on slide 4 so it also
+    "continues" (with different geometry) across the 3->4 magic move alongside Untitled.mov."""
+    events = copy.deepcopy(data["events"])
+    movie_nodes = _find_movie_nodes(events)
+    assert movie_nodes
+    clone = copy.deepcopy(movie_nodes[0])
+    clone["movie"] = {
+        "startTime": 0,
+        "volume": 1,
+        "endTime": 45.1,
+        "isStreaming": False,
+        "isAudioOnly": False,
+        "asset": "VID-20250608-WA0125.mp4-0.0000-45.1381",
+    }
+    state = clone["baseLayer"]["initialState"]
+    state["position"]["pointX"] += 80
+    state["position"]["pointY"] += 80
+    clone_id = "CLONE-WA0125"
+    events[0]["effects"][0]["effects"] = events[0]["effects"][0].get("effects", []) + [
+        {
+            "objectID": clone_id, "movie": clone["movie"],
+            "baseLayer": clone["baseLayer"], "effects": [],
+        }
+    ]
+    data = {**data, "events": events}
+    # the overlap rule reads the destination slide's draw order, so the clone needs a slot
+    # of its own; put it BELOW the existing movie so it adds no overlap of its own.
+    rect = (state["position"]["pointX"] - state["width"] / 2,
+            state["position"]["pointY"] - state["height"] / 2, state["width"], state["height"])
+    _draw_slots(data, 0).insert(1, _authored_slot(*rect, object_id=clone_id))
+    data["assets"] = {
+        **data["assets"],
+        "VID-20250608-WA0125.mp4-0.0000-45.1381": {
+            "type": "video",
+            "url": {"web": "assets/VID-20250608-WA0125.mp4-0.0000-45.1381.mp4"},
+        },
+    }
+    return data
 
 
-def test_refuses_unreadable_slide_json():
-    tmp = _copy_fixture_tree()
-    (tmp / "assets" / SLIDE1 / f"{SLIDE1}.json").write_text("not json at all")
-    plan = derive_plan(tmp, SLIDES, resolver=_resolver)
-    assert isinstance(plan, Unsupported)
-    assert "unreadable slide export" in plan.reason
+def _drop_every_movie_slot(data):
+    data = _move_green_square_below_the_movie(data)
+    movie_id = _slot_object(data, 0, SLIDE2_GREEN_SLOT)["objectID"]
+    for index in _events_drawing(data, movie_id):
+        del _draw_slots(data, index)[SLIDE2_GREEN_SLOT]
+    return data
 
 
-def test_refuses_unknown_transition_kind():
-    tmp = _copy_fixture_tree()
-
-    def rename(data):
-        return _map_transitions(data, lambda name: "apple:cube")
-
-    _rewrite_slide_json(tmp, SLIDE1, rename)
-    plan = derive_plan(tmp, SLIDES, resolver=_resolver)
-    assert isinstance(plan, Unsupported)
-    assert "unsupported transition" in plan.reason
+def _strip_base_layer(data):
+    for event in data["events"]:
+        event.pop("baseLayer")
+    return data
 
 
-def test_refuses_rotated_movie_layer():
-    tmp = _copy_fixture_tree()
+def _tamper_slot_layers(slot_index: int, layers):
+    def tamper(data):
+        slot = _draw_slots(data, 0)[slot_index]
+        slot["layers"] = layers(slot["layers"])
+        return data
 
-    def rotate(data):
-        return _map_movie_nodes(data, lambda node: _set_rotation(node, 5))
-
-    _rewrite_slide_json(tmp, SLIDE1, rotate)
-    plan = derive_plan(tmp, SLIDES, resolver=_resolver)
-    assert isinstance(plan, Unsupported)
-    assert "rotated" in plan.reason or "transformed" in plan.reason
+    return tamper
 
 
-def test_refuses_non_identity_affine_transform():
-    tmp = _copy_fixture_tree()
+_MOVIE_LAYER_TRANSFORMED = "has a rotated, transformed, or off-center anchor"
 
-    def skew(data):
-        return _map_movie_nodes(data, lambda node: _set_affine(node, [1, 0.2, 0, 1, 0, 0]))
 
-    _rewrite_slide_json(tmp, SLIDE1, skew)
-    plan = derive_plan(tmp, SLIDES, resolver=_resolver)
-    assert isinstance(plan, Unsupported)
+@pytest.mark.parametrize(
+    "uuid, transform, reason",
+    [
+        pytest.param(SLIDE1, lambda data: {**data, "events": []}, "slide at player index 0 has no events", id="no-events"),
+        pytest.param(
+            SLIDE1, lambda data: _map_transitions(data, lambda _name: "apple:cube"),
+            "unsupported transition 'apple:cube' at player index 0 -> 1", id="unknown-transition-on-a-magic-move",
+        ),
+        pytest.param(
+            SLIDE2, lambda data: _map_transitions(data, lambda _name: "apple:cube"),
+            "unsupported transition 'apple:cube' at player index 1 -> 2", id="unknown-transition-on-a-dissolve",
+        ),
+        pytest.param(
+            SLIDE1, lambda data: _map_movie_nodes(data, lambda node: node["baseLayer"]["initialState"].__setitem__("rotation", 5)),
+            f"movie layer on slide {SLIDE1} {_MOVIE_LAYER_TRANSFORMED}", id="rotated-movie-layer",
+        ),
+        pytest.param(
+            SLIDE1,
+            lambda data: _map_movie_nodes(
+                data, lambda node: node["baseLayer"]["initialState"].__setitem__("affineTransform", [1, 0.2, 0, 1, 0, 0])
+            ),
+            f"movie layer on slide {SLIDE1} {_MOVIE_LAYER_TRANSFORMED}", id="non-identity-affine-transform",
+        ),
+        pytest.param(
+            SLIDE4, _add_wa0125_to_slide4, "more than one movie changes geometry at player index 2 -> 3",
+            id="two-geometry-changing-movies-on-one-boundary",
+        ),
+        # The draw order (see the overlap section below) must be readable for every movie.
+        pytest.param(
+            SLIDE2, _drop_every_movie_slot, f"movie 'untitled.mov' has no draw slot on slide {SLIDE2}",
+            id="movie-slot-absent-in-every-event",
+        ),
+        pytest.param(
+            SLIDE2, _tamper_slot_layers(SLIDE2_GREEN_SLOT, lambda layers: layers * 2),
+            f"unrecognised slide layer shape on slide {SLIDE2} (draw slot 6)", id="slot-above-the-movie-with-two-children",
+        ),
+        pytest.param(
+            SLIDE2, _tamper_slot_layers(SLIDE2_MOVIE_SLOT, lambda _layers: "not a list"),
+            f"unrecognised slide layer shape on slide {SLIDE2} (draw slot 5)", id="non-list-layers-on-a-draw-slot",
+        ),
+        pytest.param(
+            SLIDE2, _strip_base_layer, f"slide {SLIDE2} declares no readable draw order", id="no-draw-order-at-all",
+        ),
+        # Without an objectID the movie cannot be located in the draw order at all, so its
+        # z-position is unknown and nothing may be carried across the boundary.
+        pytest.param(
+            SLIDE2, lambda data: _map_movie_nodes(data, lambda node: node.pop("objectID")),
+            f"movie on slide {SLIDE2} has no object id", id="movie-node-without-an-object-id",
+        ),
+    ],
+)
+def test_refuses_the_deck(uuid, transform, reason):
+    assert _plan(_mutate_slide(uuid, transform)) == Unsupported(reason)
 
 
 @pytest.mark.parametrize("ancestor_change", [None, "position", "rotation", "animation"])
@@ -343,75 +386,24 @@ def test_refuses_video_below_an_intermediate_layer(ancestor_change):
     assert expected in plan.reason
 
 
-def test_refuses_two_geometry_changing_movies_on_one_boundary():
-    tmp = _copy_fixture_tree()
-
-    # Slide 3 already carries a WA0125 instance; add a matching one on slide 4 so it also
-    # "continues" (with different geometry) across the 3->4 magic move alongside Untitled.mov.
-    def add_wa0125_to_slide4(data):
-        events = copy.deepcopy(data["events"])
-        movie_nodes = _find_movie_nodes(events)
-        assert movie_nodes
-        clone = copy.deepcopy(movie_nodes[0])
-        clone["movie"] = {
-            "startTime": 0,
-            "volume": 1,
-            "endTime": 45.1,
-            "isStreaming": False,
-            "isAudioOnly": False,
-            "asset": "VID-20250608-WA0125.mp4-0.0000-45.1381",
-        }
-        state = clone["baseLayer"]["initialState"]
-        state["position"]["pointX"] += 80
-        state["position"]["pointY"] += 80
-        clone_id = "CLONE-WA0125"
-        events[0]["effects"][0]["effects"] = events[0]["effects"][0].get("effects", []) + [
-            {
-                "objectID": clone_id, "movie": clone["movie"],
-                "baseLayer": clone["baseLayer"], "effects": [],
-            }
-        ]
-        data = {**data, "events": events}
-        # the overlap rule reads the destination slide's draw order, so the clone needs a slot
-        # of its own; put it BELOW the existing movie so it adds no overlap of its own.
-        rect = (state["position"]["pointX"] - state["width"] / 2,
-                state["position"]["pointY"] - state["height"] / 2, state["width"], state["height"])
-        _draw_slots(data, 0).insert(1, _authored_slot(*rect, object_id=clone_id))
-        data["assets"] = {
-            **data["assets"],
-            "VID-20250608-WA0125.mp4-0.0000-45.1381": {
-                "type": "video",
-                "url": {"web": "assets/VID-20250608-WA0125.mp4-0.0000-45.1381.mp4"},
-            },
-        }
-        return data
-
-    _rewrite_slide_json(tmp, SLIDE4, add_wa0125_to_slide4)
-    plan = derive_plan(tmp, SLIDES, resolver=_resolver)
-    assert isinstance(plan, Unsupported)
-    assert "more than one movie" in plan.reason
-
-
-def test_skipped_slide_does_not_shift_scene_indices():
-    slides = copy.deepcopy(SLIDES)
-    slides.append({"playerIndex": 4, "originalOrdinal": 5, "exportedUuid": "does-not-exist", "skipped": True})
-    plan = derive_plan(FIXTURE_ROOT, slides, resolver=_resolver)
+@pytest.mark.parametrize(
+    "extra, refusal",
+    [
+        pytest.param({"playerIndex": 4, "originalOrdinal": 5, "exportedUuid": "does-not-exist", "skipped": True}, None, id="skipped-slide"),
+        pytest.param({"playerIndex": 9, "skipped": True}, None, id="skipped-slide-missing-uuid"),
+        pytest.param(
+            {"playerIndex": 9, "skipped": False}, "a non-skipped slide is missing playerIndex or exportedUuid",
+            id="non-skipped-slide-missing-uuid",
+        ),
+    ],
+)
+def test_a_skipped_slide_is_ignored_and_does_not_shift_scene_indices(extra, refusal):
+    plan = derive_plan(FIXTURE_ROOT, [*SLIDES, extra], resolver=_resolver)
+    if refusal is not None:
+        assert plan == Unsupported(refusal)
+        return
     assert isinstance(plan, ContinuityPlan)
     assert plan.scene_index_by_player == {0: 0, 1: 2, 2: 6, 3: 8}
-
-
-def test_skipped_slide_missing_uuid_is_ignored():
-    slides = copy.deepcopy(SLIDES)
-    slides.append({"playerIndex": 9, "skipped": True})
-    plan = derive_plan(FIXTURE_ROOT, slides, resolver=_resolver)
-    assert isinstance(plan, ContinuityPlan)
-
-
-def test_non_skipped_slide_missing_uuid_is_refused():
-    slides = copy.deepcopy(SLIDES)
-    slides.append({"playerIndex": 9, "skipped": False})
-    plan = derive_plan(FIXTURE_ROOT, slides, resolver=_resolver)
-    assert isinstance(plan, Unsupported)
 
 
 def test_path_traversal_is_impossible():
@@ -422,13 +414,18 @@ def test_path_traversal_is_impossible():
     assert "unreadable slide export" in plan.reason
 
 
-def test_plan_round_trips_through_json():
+def test_plan_and_slide_instances_round_trip_through_json():
     plan = _plan()
     assert isinstance(plan, ContinuityPlan)
     restored = json.loads(plan.to_json())
     assert restored == plan.as_dict()
     assert restored["canvas"] == {"width": 1920, "height": 1080}
     assert restored["sceneIndexByPlayer"]["2"] == 6
+    assert restored["slideInstances"]["0"]["untitled.mov"] == [
+        _rect(*SLIDE1_BIG),
+        _rect(*SLIDE1_SMALL),
+    ]
+    assert list(restored["slideInstances"]) == ["0", "1", "2", "3"]
 
 
 @pytest.mark.skipif(not REAL_EXPORT_ROOT.is_dir(), reason="real P2 export not available")
@@ -466,10 +463,6 @@ P2_OBJECT_IDS = {
     "slide3_wa0125": "2FE5195A-F8CF-459A-8E20-B6DF91C0047A",
     "slide4": "E4728E7D-2032-4D7F-83D6-8BE0EFB7B7BC",
 }
-
-# The green square is slide 2's draw slot 6; the movie is slot 5.
-SLIDE2_GREEN_SLOT = 6
-SLIDE2_MOVIE_SLOT = 5
 
 
 def _rect_close(a: dict, b: dict, tol: float = 3.0) -> bool:
@@ -514,8 +507,11 @@ def test_to_runtime_refuses_when_no_boundaries():
     assert isinstance(result, Unsupported)
 
 
-@pytest.mark.parametrize("field", ["src_rect", "src_object_id"])
-def test_to_runtime_refuses_bridge_without_a_source_instance(field):
+@pytest.mark.parametrize(
+    "field, end",
+    [("src_rect", "source"), ("src_object_id", "source"), ("dst_rect", "destination"), ("dst_object_id", "destination")],
+)
+def test_to_runtime_refuses_bridge_without_an_instance(field, end):
     plan = _plan()
     bridge = replace(
         plan.boundaries[2],
@@ -523,19 +519,7 @@ def test_to_runtime_refuses_bridge_without_a_source_instance(field):
     )
     result = replace(plan, boundaries=(*plan.boundaries[:2], bridge, plan.boundaries[3])).to_runtime()
     assert isinstance(result, Unsupported)
-    assert "does not name its source instance" in result.reason
-
-
-@pytest.mark.parametrize("field", ["dst_rect", "dst_object_id"])
-def test_to_runtime_refuses_bridge_without_a_destination_instance(field):
-    plan = _plan()
-    bridge = replace(
-        plan.boundaries[2],
-        movies=tuple(replace(movie, **{field: None}) for movie in plan.boundaries[2].movies),
-    )
-    result = replace(plan, boundaries=(*plan.boundaries[:2], bridge, plan.boundaries[3])).to_runtime()
-    assert isinstance(result, Unsupported)
-    assert "does not name its destination instance" in result.reason
+    assert f"does not name its {end} instance" in result.reason
 
 
 @pytest.mark.parametrize("duration", [None, 0, -1, True, "1.5", float("nan"), float("inf")])
@@ -688,14 +672,6 @@ def _map_transitions(data, rename):
     return {**data, "events": events}
 
 
-def _set_rotation(node, degrees):
-    node["baseLayer"]["initialState"]["rotation"] = degrees
-
-
-def _set_affine(node, matrix):
-    node["baseLayer"]["initialState"]["affineTransform"] = matrix
-
-
 def _draw_slots(data, event_index: int) -> list:
     """The destination slide's back-to-front draw order for one event: a flat list of wrapper
     slots, each holding exactly one object node (see plan section 0)."""
@@ -827,12 +803,6 @@ def test_fixture_refuses_only_the_1_to_2_boundary_and_names_the_green_squares_sl
     assert all(m.refusal is None for m in plan.boundaries[2].movies)
 
 
-def test_fixture_runtime_plan_is_the_baseline_after_json():
-    plan = _plan()
-    assert isinstance(plan, ContinuityPlan)
-    assert plan.to_runtime() == EXPECTED_RUNTIME_PLAN
-
-
 def test_refusals_are_not_part_of_the_runtime_plan():
     plan = _plan()
     assert isinstance(plan, ContinuityPlan)
@@ -850,8 +820,12 @@ def test_slide_instances_are_unchanged_by_the_refusal():
     plan = _plan()
     assert isinstance(plan, ContinuityPlan)
     assert plan.slide_instances == {
+        # slide 1 authors two Untitled.mov instances: the big continuing one and the second,
+        # non-continuing one at ~(1076, 876) that `slide_rects` drops entirely.
         0: {"untitled.mov": [_rect(*SLIDE1_BIG), _rect(*SLIDE1_SMALL)]},
         1: {"untitled.mov": [_rect(*SLIDE1_BIG)]},
+        # WA0125 never continues across a boundary, so it appears in no MovieContinuity and in
+        # no runtime movie table -- but it is authored on slide 3 and must be visibly live there.
         2: {
             "untitled.mov": [_rect(*SLIDE3_UNTITLED)],
             "vid-20250608-wa0125.mp4": [_rect(*SLIDE3_WA0125)],
@@ -928,33 +902,20 @@ def _rect_of_movie_on_slide2() -> tuple[float, float, float, float]:
     return rect["x"], rect["y"], rect["w"], rect["h"]
 
 
-@pytest.mark.parametrize("gap", [0.0, 0.5, 1.0])
-def test_artwork_touching_the_movies_edge_does_not_refuse(gap):
+@pytest.mark.parametrize("overlap, refusals", [(0.0, 0), (0.5, 0), (1.0, 0), (1.6, 1)])
+def test_artwork_must_overlap_the_movie_by_more_than_the_minimum_to_refuse(overlap, refusals):
     """`_OVERLAP_MIN_PX` is 1.0 authored px and the intersection must be wider AND taller than
     it, so abutting edges and anti-aliasing seams are not a refusal."""
     x, y, w, _h = _rect_of_movie_on_slide2()
 
-    def touch_only(data):
+    def overlap_the_right_edge(data):
         data = _move_green_square_below_the_movie(data)
-        _draw_slots(data, 0).append(_authored_slot(x + w - gap, y, 400.0, 400.0, object_id="TOUCH"))
+        _draw_slots(data, 0).append(_authored_slot(x + w - overlap, y, 400.0, 400.0, object_id="OVER"))
         return data
 
-    plan = _plan(_mutate_slide(SLIDE2, touch_only))
+    plan = _plan(_mutate_slide(SLIDE2, overlap_the_right_edge))
     assert isinstance(plan, ContinuityPlan)
-    assert plan.refusals == ()
-
-
-def test_artwork_overlapping_by_more_than_the_minimum_refuses():
-    x, y, w, _h = _rect_of_movie_on_slide2()
-
-    def overlap_slightly(data):
-        data = _move_green_square_below_the_movie(data)
-        _draw_slots(data, 0).append(_authored_slot(x + w - 1.6, y, 400.0, 400.0, object_id="OVER"))
-        return data
-
-    plan = _plan(_mutate_slide(SLIDE2, overlap_slightly))
-    assert isinstance(plan, ContinuityPlan)
-    assert len(plan.refusals) == 1
+    assert len(plan.refusals) == refusals
 
 
 def test_movie_slot_absent_in_one_event_is_skipped_not_refused():
@@ -974,53 +935,6 @@ def test_movie_slot_absent_in_one_event_is_skipped_not_refused():
     assert plan.refusals == ()
 
 
-def test_movie_slot_absent_in_every_event_is_refused():
-    def drop_every_movie_slot(data):
-        data = _move_green_square_below_the_movie(data)
-        movie_id = _slot_object(data, 0, SLIDE2_GREEN_SLOT)["objectID"]
-        for index in _events_drawing(data, movie_id):
-            del _draw_slots(data, index)[SLIDE2_GREEN_SLOT]
-        return data
-
-    plan = _plan(_mutate_slide(SLIDE2, drop_every_movie_slot))
-    assert isinstance(plan, Unsupported)
-    assert "no draw slot" in plan.reason
-
-
-def test_a_slot_above_the_movie_with_more_than_one_child_is_refused():
-    def double_child(data):
-        slot = _draw_slots(data, 0)[SLIDE2_GREEN_SLOT]
-        slot["layers"] = slot["layers"] * 2
-        return data
-
-    plan = _plan(_mutate_slide(SLIDE2, double_child))
-    assert isinstance(plan, Unsupported)
-    assert "unrecognised slide layer shape" in plan.reason
-
-
-def test_a_slide_with_no_draw_order_at_all_is_refused():
-    def strip_base_layer(data):
-        for event in data["events"]:
-            event.pop("baseLayer")
-        return data
-
-    plan = _plan(_mutate_slide(SLIDE2, strip_base_layer))
-    assert isinstance(plan, Unsupported)
-    assert "no readable draw order" in plan.reason
-
-
-def test_movie_node_without_an_object_id_is_refused():
-    """Without an objectID the movie cannot be located in the draw order at all, so its
-    z-position is unknown and nothing may be carried across the boundary."""
-
-    def drop_object_id(data):
-        return _map_movie_nodes(data, lambda node: node.pop("objectID"))
-
-    plan = _plan(_mutate_slide(SLIDE2, drop_object_id))
-    assert isinstance(plan, Unsupported)
-    assert "no object id" in plan.reason
-
-
 # --- interim mask rule ---------------------------------------------------------------------
 #
 # This export family encodes no mask at all: `masksToBounds` is false, `contentsRect` is the unit
@@ -1037,29 +951,6 @@ def _mask_reason_plan(uuid: str, transform) -> Unsupported:
     return plan
 
 
-def test_masks_to_bounds_is_refused_as_a_possible_mask():
-    def clip(node):
-        node["baseLayer"]["initialState"]["masksToBounds"] = True
-
-    plan = _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, clip))
-    assert plan.reason.endswith("masksToBounds")
-
-
-def test_masks_to_bounds_on_the_video_sub_layer_is_refused_too():
-    def clip(node):
-        node["baseLayer"]["layers"][0]["initialState"]["masksToBounds"] = True
-
-    _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, clip))
-
-
-def test_a_non_unit_contents_rect_is_refused_as_a_possible_crop():
-    def crop(node):
-        node["baseLayer"]["layers"][0]["initialState"]["contentsRect"]["width"] = 0.5
-
-    plan = _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, crop))
-    assert plan.reason.endswith("contentsRect.width")
-
-
 def test_a_contents_rect_within_the_measurement_tolerance_is_not_refused():
     def jitter(node):
         node["baseLayer"]["layers"][0]["initialState"]["contentsRect"]["width"] = 1 - 5e-7
@@ -1068,30 +959,60 @@ def test_a_contents_rect_within_the_measurement_tolerance_is_not_refused():
     assert isinstance(plan, ContinuityPlan)
 
 
-def test_a_shape_path_inside_an_unmeasured_container_is_refused():
-    """`effects` is always an empty list under a movie node, so an object inside one is an
-    encoding this module has never seen -- the mask could hide there without touching a single
-    checked key, which is exactly the hole a shallow key check leaves open."""
-
-    def shape(node):
-        node["effects"] = [{"shapePath": {"elements": []}}]
-
-    plan = _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, shape))
-    assert plan.reason.endswith("<movie node>.effects[0]")
-
-
-def test_a_shape_path_key_in_a_measured_container_is_refused_by_name():
-    def shape(node):
-        node["baseLayer"]["initialState"]["shapePath"] = {"elements": []}
-
-    plan = _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, shape))
-    assert plan.reason.endswith("initialState.shapePath")
-
-
-# Every container the walk can reach, and the shape of the object that must not appear in it.
 @pytest.mark.parametrize(
     "place, expected",
     [
+        pytest.param(
+            lambda node: node["baseLayer"]["layers"][0]["initialState"].__setitem__("masksToBounds", True),
+            "<movie node>.baseLayer.layers[0].initialState.masksToBounds",
+            id="masksToBounds-on-the-video-sub-layer",
+        ),
+        pytest.param(
+            lambda node: node["baseLayer"]["layers"][0]["initialState"]["contentsRect"].__setitem__("width", 0.5),
+            "contentsRect.width",
+            id="non-unit-contentsRect-is-a-possible-crop",
+        ),
+        pytest.param(
+            lambda node: node["baseLayer"]["initialState"].__setitem__("shapePath", {"elements": []}),
+            "initialState.shapePath",
+            id="shapePath-key-in-a-measured-container-by-name",
+        ),
+        # `texturedRectangle` is a leaf object the geometry rules never read, so a shallow check
+        # would let anything through it.
+        pytest.param(
+            lambda node: node["baseLayer"]["layers"][0].__setitem__("texturedRectangle", {"textureType": 0, "cornerRadius": 8}),
+            "texturedRectangle.cornerRadius",
+            id="unknown-key-deep-inside-a-measured-container",
+        ),
+        pytest.param(
+            lambda node: node["baseLayer"]["layers"][0]["initialState"]["position"].__setitem__(
+                "pointX", node["baseLayer"]["layers"][0]["initialState"]["position"]["pointX"] + 200
+            ),
+            "the video sub-layer is not contained in its movie layer",
+            id="video-sub-layer-outside-its-movie-layer",
+        ),
+        # Any key outside the measured vocabulary, at every level.
+        pytest.param(lambda node: node.__setitem__("maskLayer", {}), "<movie node>.maskLayer", id="vocabulary-node"),
+        pytest.param(lambda node: node["baseLayer"].__setitem__("mask", {}), "<movie node>.baseLayer.mask", id="vocabulary-layer"),
+        pytest.param(
+            lambda node: node["baseLayer"]["initialState"].__setitem__("cornerRadius", 8),
+            "<movie node>.baseLayer.initialState.cornerRadius",
+            id="vocabulary-initialState",
+        ),
+        pytest.param(
+            lambda node: node["baseLayer"]["layers"][0].__setitem__("mask", {}),
+            "<movie node>.baseLayer.layers[0].mask",
+            id="vocabulary-video-layer",
+        ),
+        # Every container the walk can reach, and the shape of the object that must not appear in
+        # it. `effects` is always an empty list under a movie node, so an object inside one is an
+        # encoding this module has never seen -- the mask could hide there without touching a
+        # single checked key, which is exactly the hole a shallow key check leaves open.
+        pytest.param(
+            lambda node: node.__setitem__("effects", [{"shapePath": {"elements": []}}]),
+            "<movie node>.effects[0]",
+            id="shapePath-inside-an-unmeasured-container",
+        ),
         pytest.param(
             lambda node: node.__setitem__("effects", [{"maskLayer": {"opacity": 1}}]),
             "<movie node>.effects[0]",
@@ -1114,7 +1035,7 @@ def test_a_shape_path_key_in_a_measured_container_is_refused_by_name():
         ),
     ],
 )
-def test_an_object_where_none_was_measured_is_refused(place, expected):
+def test_an_unmeasured_movie_encoding_is_refused_as_a_possible_mask(place, expected):
     plan = _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, place))
     assert plan.reason.endswith(expected)
 
@@ -1137,17 +1058,6 @@ def test_a_mask_object_on_the_bridge_movie_cannot_qualify(monkeypatch):
     assert "possible mask" in plan.reason
 
 
-def test_an_unknown_key_deep_inside_a_measured_container_is_refused():
-    """`texturedRectangle` is a leaf object the geometry rules never read, so a shallow check
-    would let anything through it."""
-
-    def tamper(node):
-        node["baseLayer"]["layers"][0]["texturedRectangle"] = {"textureType": 0, "cornerRadius": 8}
-
-    plan = _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, tamper))
-    assert plan.reason.endswith("texturedRectangle.cornerRadius")
-
-
 @pytest.mark.parametrize("name", ["maskLayer", "maskPath", "clipRect", "shouldClip", "shapePathRef"])
 def test_a_key_that_reads_like_clipping_is_refused_wherever_it_appears(name):
     """Belt and braces over the vocabulary: even if a future measurement widens a key set, a
@@ -1156,7 +1066,8 @@ def test_a_key_that_reads_like_clipping_is_refused_wherever_it_appears(name):
     def tamper(node):
         node["movie"][name] = 1
 
-    _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, tamper))
+    plan = _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, tamper))
+    assert plan.reason.endswith(f"<movie node>.movie.{name}")
 
 
 def test_the_only_mask_named_keys_exempted_are_ones_the_export_really_carries():
@@ -1284,34 +1195,6 @@ def test_python_json_really_does_accept_nan_so_the_guard_is_not_theoretical():
     assert math.isnan(json.loads('{"width": NaN}')["width"])
 
 
-def test_a_non_list_layers_on_a_draw_slot_is_unsupported_not_an_exception():
-    def tamper(data):
-        _draw_slots(data, 0)[SLIDE2_MOVIE_SLOT]["layers"] = "not a list"
-        return data
-
-    plan = _plan(_mutate_slide(SLIDE2, tamper))
-    assert isinstance(plan, Unsupported)
-    assert "unrecognised slide layer shape" in plan.reason
-
-
-@pytest.mark.parametrize(
-    "place",
-    [
-        pytest.param(lambda node: node.__setitem__("maskLayer", {}), id="node"),
-        pytest.param(lambda node: node["baseLayer"].__setitem__("mask", {}), id="layer"),
-        pytest.param(
-            lambda node: node["baseLayer"]["initialState"].__setitem__("cornerRadius", 8),
-            id="initialState",
-        ),
-        pytest.param(
-            lambda node: node["baseLayer"]["layers"][0].__setitem__("mask", {}), id="video-layer",
-        ),
-    ],
-)
-def test_any_key_outside_the_measured_vocabulary_is_refused(place):
-    _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, place))
-
-
 def _measured_subtree_vocabulary(root: Path) -> dict[str, set[str]]:
     """Every object under every movie node of an export, keyed by the key that holds it."""
     measured: dict[str, set[str]] = {}
@@ -1365,14 +1248,6 @@ def test_the_measured_vocabulary_is_the_real_exports_and_nothing_more():
     # the containers that never hold an object are deliberately absent from the table.
     for never_an_object in ("effects", "animations", "texture", "affineTransform", "sublayerTransform"):
         assert never_an_object not in live_continuity._MOVIE_SUBTREE_KEYS
-
-
-def test_a_video_sub_layer_outside_its_movie_layer_is_refused():
-    def push_out(node):
-        node["baseLayer"]["layers"][0]["initialState"]["position"]["pointX"] += 200
-
-    plan = _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, push_out))
-    assert plan.reason.endswith("the video sub-layer is not contained in its movie layer")
 
 
 # --- `retire` in the runtime plan -----------------------------------------------------------
@@ -1447,35 +1322,17 @@ def test_an_unrefused_retire_ends_a_carried_instance():
     }
 
 
-def test_the_retire_precedes_the_restart_and_the_bridge_in_the_emitted_order():
-    runtime = _plan().to_runtime()
-    assert isinstance(runtime, dict)
-    assert [b["action"] for b in runtime["boundaries"]] == ["retire", "restart", "bridge"]
-
-
 # --- I5 codec report -----------------------------------------------------------------------
 
-def test_codec_report_lists_every_referenced_movie_not_only_planned_ones():
+def test_codec_report_lists_every_referenced_movie_and_fails_closed_without_its_bytes():
+    report = codec_report(FIXTURE_ROOT, SLIDES, resolver=_resolver)
     # The fixture's WA0125 instance never continues across a boundary (only Untitled.mov
-    # does -- see test_boundary_3_to_4_bridges_the_moving_scaling_movie), so it is never
-    # part of a continuity plan; the codec report must still list it.
-    report = codec_report(FIXTURE_ROOT, SLIDES, resolver=_resolver)
-    assets = {entry["asset"] for entry in report}
-    assert assets == {"untitled.mov", "vid-20250608-wa0125.mp4"}
-
-
-def test_codec_report_entries_are_shaped_asset_codec_family_files():
-    report = codec_report(FIXTURE_ROOT, SLIDES, resolver=_resolver)
+    # does), so it is never part of a continuity plan; the codec report must still list it.
+    assert {entry["asset"] for entry in report} == {"untitled.mov", "vid-20250608-wa0125.mp4"}
     for entry in report:
         assert set(entry) == {"asset", "codec", "family", "files"}
-
-
-def test_codec_report_reports_none_for_a_movie_file_the_fixture_does_not_ship():
-    # tests/fixtures/live_continuity ships only the export JSON, not the referenced
-    # .mov bytes, so every entry must fail closed to an unreadable/"other" codec
-    # rather than raising.
-    report = codec_report(FIXTURE_ROOT, SLIDES, resolver=_resolver)
-    for entry in report:
+        # tests/fixtures/live_continuity ships only the export JSON, not the referenced .mov
+        # bytes, so every entry must fail closed to an unreadable/"other" codec, not raise.
         assert entry["codec"] is None
         assert entry["family"] == "other"
 
@@ -1512,34 +1369,22 @@ def _entry(report: list[dict], asset: str) -> dict:
     return next(entry for entry in report if entry["asset"] == asset)
 
 
-def test_codec_report_aggregates_every_slide_folders_copy_of_one_asset():
+@pytest.mark.parametrize(
+    "slide3_codec, expected",
+    [
+        pytest.param("avc1", {"codec": "avc1", "family": "h264"}, id="every-copy-agrees"),
+        # Slide 1's copy is H.264 but slide 3's separate file is HEVC: keeping only the first
+        # would report the key playable while a fresh decoder on slide 3 cannot play it.
+        pytest.param("hvc1", {"codec": None, "family": "other", "mixed": True}, id="one-copy-is-a-different-codec"),
+        # unreadable, not "mixed": the key's codec is simply unknown.
+        pytest.param(None, {"codec": None, "family": "other"}, id="one-copy-is-unreadable"),
+    ],
+)
+def test_codec_report_aggregates_every_slide_folders_copy_of_one_asset(slide3_codec, expected):
     tmp = _tree_with_movie_files()
-    probe = _probe_by_slide(dict.fromkeys((SLIDE1, SLIDE2, SLIDE3, SLIDE4), "avc1"))
+    probe = _probe_by_slide({SLIDE1: "avc1", SLIDE2: "avc1", SLIDE3: slide3_codec, SLIDE4: "avc1"})
     report = codec_report(tmp, SLIDES, resolver=_resolver, probe=probe)
-    assert _entry(report, "untitled.mov") == {
-        "asset": "untitled.mov", "codec": "avc1", "family": "h264", "files": 4,
-    }
-
-
-def test_codec_report_fails_closed_when_one_slide_folders_copy_is_a_different_codec():
-    # Slide 1's copy is H.264 but slide 3's separate file is HEVC: keeping only the first
-    # would report the key playable while a fresh decoder on slide 3 cannot play it.
-    tmp = _tree_with_movie_files()
-    probe = _probe_by_slide({SLIDE1: "avc1", SLIDE2: "avc1", SLIDE3: "hvc1", SLIDE4: "avc1"})
-    report = codec_report(tmp, SLIDES, resolver=_resolver, probe=probe)
-    assert _entry(report, "untitled.mov") == {
-        "asset": "untitled.mov", "codec": None, "family": "other", "files": 4, "mixed": True,
-    }
-
-
-def test_codec_report_key_is_unreadable_when_any_of_its_files_is_unreadable():
-    tmp = _tree_with_movie_files()
-    probe = _probe_by_slide({SLIDE1: "avc1", SLIDE2: "avc1", SLIDE3: None, SLIDE4: "avc1"})
-    report = codec_report(tmp, SLIDES, resolver=_resolver, probe=probe)
-    # unreadable, not "mixed": the key's codec is simply unknown.
-    assert _entry(report, "untitled.mov") == {
-        "asset": "untitled.mov", "codec": None, "family": "other", "files": 4,
-    }
+    assert _entry(report, "untitled.mov") == {"asset": "untitled.mov", **expected, "files": 4}
 
 
 def test_codec_report_keeps_two_different_assets_independent():
@@ -1574,9 +1419,10 @@ def test_codec_report_rounds_fps_agreed_by_every_slide_folders_copy():
     assert _entry(report, "untitled.mov")["fps"] == 29.97
 
 
-def test_codec_report_fps_is_none_when_slide_folders_copies_disagree():
+@pytest.mark.parametrize("slide3_fps", [pytest.param(30.0, id="copies-disagree"), pytest.param(None, id="one-copy-unreadable")])
+def test_codec_report_fps_is_none_unless_every_copy_agrees(slide3_fps):
     tmp = _tree_with_movie_files()
-    rates = {SLIDE1: 25.0, SLIDE2: 25.0, SLIDE3: 30.0, SLIDE4: 25.0}
+    rates = {SLIDE1: 25.0, SLIDE2: 25.0, SLIDE3: slide3_fps, SLIDE4: 25.0}
     report = codec_report(
         tmp, SLIDES, resolver=_resolver, probe=lambda _path: "avc1",
         probe_fps=lambda path: rates.get(path.parent.parent.name), with_fps=True,
@@ -1586,16 +1432,6 @@ def test_codec_report_fps_is_none_when_slide_folders_copies_disagree():
     # an fps disagreement never touches the codec verdict.
     assert entry["codec"] == "avc1"
     assert "mixed" not in entry
-
-
-def test_codec_report_fps_is_none_when_any_copy_has_unreadable_fps():
-    tmp = _tree_with_movie_files()
-    rates = {SLIDE1: 25.0, SLIDE2: 25.0, SLIDE3: None, SLIDE4: 25.0}
-    report = codec_report(
-        tmp, SLIDES, resolver=_resolver, probe=lambda _path: "avc1",
-        probe_fps=lambda path: rates.get(path.parent.parent.name), with_fps=True,
-    )
-    assert _entry(report, "untitled.mov")["fps"] is None
 
 
 def test_codec_report_counts_one_file_for_two_instances_of_the_same_movie_on_a_slide():
@@ -1630,40 +1466,15 @@ SLIDE3_WA0125 = (1152.72, 794.60, 484.66, 272.62)
 SLIDE4_UNTITLED = (326.75, 708.52, 1266.49, 356.20)
 
 
-def test_slide_instances_lists_both_untitled_instances_on_slide_1():
-    """Slide 1 (player index 0) authors two Untitled.mov instances: the big continuing one
-    and the second, non-continuing one at ~(1076, 876) that `slide_rects` drops entirely."""
-    plan = _plan()
-    assert isinstance(plan, ContinuityPlan)
-    assert set(plan.slide_instances[0]) == {"untitled.mov"}
-    assert plan.slide_instances[0]["untitled.mov"] == [_rect(*SLIDE1_BIG), _rect(*SLIDE1_SMALL)]
-    # the same slide contributes nothing to slide_rects, which drops multi-instance assets.
-    assert plan.slide_rects[0] == {}
-
-
 def test_slide_instances_matches_slide_rects_where_an_asset_is_single_instance():
     plan = _plan()
     assert isinstance(plan, ContinuityPlan)
     for player_index, rects in plan.slide_rects.items():
         for asset, rect in rects.items():
             assert plan.slide_instances[player_index][asset] == [rect]
-
-
-def test_slide_instances_lists_the_never_planned_wa0125_movie_on_slide_3():
-    """WA0125 never continues across a boundary, so it appears in no MovieContinuity and in
-    no runtime movie table -- but it is authored on slide 3 and must be visibly live there."""
-    plan = _plan()
-    assert isinstance(plan, ContinuityPlan)
-    assert plan.slide_instances[2] == {
-        "untitled.mov": [_rect(*SLIDE3_UNTITLED)],
-        "vid-20250608-wa0125.mp4": [_rect(*SLIDE3_WA0125)],
-    }
-
-
-def test_slide_instances_lists_only_the_moved_scaled_movie_on_slide_4():
-    plan = _plan()
-    assert isinstance(plan, ContinuityPlan)
-    assert plan.slide_instances[3] == {"untitled.mov": [_rect(*SLIDE4_UNTITLED)]}
+    # slide 1's two Untitled.mov instances (test_slide_instances_are_unchanged_by_the_refusal)
+    # contribute nothing to slide_rects, which drops multi-instance assets.
+    assert plan.slide_rects[0] == {}
 
 
 def test_slide_instances_covers_every_player_index_and_uses_movie_rect_geometry():
@@ -1701,18 +1512,6 @@ def test_slide_instances_ordering_is_deterministic_and_independent_of_authoring_
     )
 
 
-def test_slide_instances_round_trips_through_json():
-    plan = _plan()
-    assert isinstance(plan, ContinuityPlan)
-    restored = json.loads(plan.to_json())
-    assert restored == plan.as_dict()
-    assert restored["slideInstances"]["0"]["untitled.mov"] == [
-        _rect(*SLIDE1_BIG),
-        _rect(*SLIDE1_SMALL),
-    ]
-    assert list(restored["slideInstances"]) == ["0", "1", "2", "3"]
-
-
 def test_slide_instances_defaults_to_empty_so_positional_construction_still_works():
     plan = ContinuityPlan({"width": 1, "height": 1}, {0: 0}, {}, ())
     assert plan.slide_instances == {}
@@ -1740,10 +1539,7 @@ def test_slide_instances_does_not_move_the_runtime_plan_or_its_signature():
 
 @pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")
 def test_real_export_slide_instances_match_the_trimmed_fixture():
-    def resolver(root: Path, relative: str) -> Path:
-        return root / relative
-
-    real = derive_plan(REAL_PLAYER_ROOT, SLIDES, resolver=resolver)
+    real = derive_plan(REAL_PLAYER_ROOT, SLIDES, resolver=_unchecked_resolver)
     fixture = _plan()
     assert isinstance(real, ContinuityPlan)
     assert isinstance(fixture, ContinuityPlan)
@@ -1752,10 +1548,7 @@ def test_real_export_slide_instances_match_the_trimmed_fixture():
 
 @pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")
 def test_real_export_movies_report_h264():
-    def resolver(root: Path, relative: str) -> Path:
-        return root / relative
-
-    report = codec_report(REAL_PLAYER_ROOT, SLIDES, resolver=resolver)
+    report = codec_report(REAL_PLAYER_ROOT, SLIDES, resolver=_unchecked_resolver)
     assert report
     for entry in report:
         assert entry["codec"] == "avc1"
@@ -1767,10 +1560,7 @@ def test_real_export_movies_report_h264():
 
 @pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")
 def test_real_export_untitled_movie_reports_30_fps():
-    def resolver(root: Path, relative: str) -> Path:
-        return root / relative
-
-    report = codec_report(REAL_PLAYER_ROOT, SLIDES, resolver=resolver, with_fps=True)
+    report = codec_report(REAL_PLAYER_ROOT, SLIDES, resolver=_unchecked_resolver, with_fps=True)
     assert _entry(report, "untitled.mov")["fps"] == pytest.approx(30.0, abs=0.01)
 
 
@@ -1778,7 +1568,7 @@ def test_real_export_untitled_movie_reports_30_fps():
 def test_real_export_yields_the_same_runtime_plan_and_refusal():
     """The trimmed fixture gained the draw-slot data the overlap rule reads; this is the check
     that it was copied faithfully, not authored to suit the rule."""
-    real = derive_plan(REAL_PLAYER_ROOT, SLIDES, resolver=lambda root, relative: root / relative)
+    real = derive_plan(REAL_PLAYER_ROOT, SLIDES, resolver=_unchecked_resolver)
     assert isinstance(real, ContinuityPlan)
     assert real.to_runtime() == EXPECTED_RUNTIME_PLAN
     fixture = _plan()
@@ -1830,23 +1620,31 @@ def _leaf_of(node: dict) -> dict:
     return node
 
 
-def _opacity_group(from_value: float, to_value: float, fill_mode: str = "both") -> dict:
+def _scalar_group(from_value, to_value, property_: str = "opacity") -> dict:
     return {
         "additive": False, "timeOffset": 0, "beginTime": 0, "repeatCount": 0,
-        "fillMode": fill_mode, "duration": 0.1, "autoreverses": False,
+        "fillMode": "both", "duration": 0.1, "autoreverses": False,
         "animations": [
             {"repeatCount": 0, "removedOnCompletion": True, "from": {"scalar": from_value},
              "timingFunction": "EaseInEaseOut", "additive": False, "timeOffset": 0,
-             "autoreverses": False, "property": "opacity", "fillMode": fill_mode,
+             "autoreverses": False, "property": property_, "fillMode": "both",
              "duration": 0.1, "beginTime": 0, "to": {"scalar": to_value}}
         ], "removedOnCompletion": False,
     }
 
 
-def _opacity_anim_of(effect: dict, slot: int) -> dict:
+def _leaf_animation(effect: dict, slot: int, property_: str = "opacity") -> dict:
     leaf = _leaf_of(effect["baseLayer"]["layers"][slot])
     group = leaf["animations"][0]
-    return next(a for a in group["animations"] if a.get("property") == "opacity")
+    return next(a for a in group["animations"] if a.get("property") == property_)
+
+
+def _slot_leaf(effect: dict, slot: int) -> dict:
+    return _leaf_of(effect["baseLayer"]["layers"][slot])
+
+
+def _nudge_x(state: dict, dx: float) -> None:
+    state["position"]["pointX"] += dx
 
 
 def _assert_is_the_qualified_1_to_2_result(result) -> None:
@@ -1869,109 +1667,239 @@ def test_effect_fixture_present():
     assert EFFECT_FIXTURE.is_file()
 
 
-def test_effect_tree_vocabulary_is_closed_on_the_qualified_fixture():
-    _check_effect_encoding(_sanitized_effect())  # must not raise
-
-
 def test_gl_replay_opacity_overrides_from_the_qualified_fixture():
+    # `effect_opacity_overrides` runs `_check_effect_encoding` first, so this also proves the
+    # effect-tree vocabulary is closed on the qualified fixture.
     _assert_is_the_qualified_1_to_2_result(effect_opacity_overrides(_sanitized_effect()))
 
 
-# --- Codex round 3 item A: one recursive schema closes every container AND every primitive ----
-# Seven reproduced escapes (attributes=42, contentsRect="junk", shapePath="junk", malformed
-# points, a leaf directly under a layer-node's `animations`, a group nested inside a group, an
-# explicitly present `timingFunction=None`), three semantic escapes (`hidden=True`,
-# `masksToBounds=True`, a cropped `contentsRect`), and an unhashable enum operand.
+# --- mutations of the sanitized 1->2 effect that need more than one statement ------------------
 
 
-def test_attributes_must_be_a_readable_object():
-    def bad_attributes(effect):
-        effect["attributes"] = 42
-
-    with pytest.raises(_Refuse, match="not a readable object"):
-        _check_effect_encoding(_mutate_sanitized_effect(bad_attributes))
-
-
-def test_contents_rect_must_be_a_readable_object():
-    def bad_contents_rect(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][0])
-        leaf["initialState"]["contentsRect"] = "junk"
-
-    with pytest.raises(_Refuse, match="not a readable object"):
-        _check_effect_encoding(_mutate_sanitized_effect(bad_contents_rect))
+def _bare_leaf_under_a_layer_node(effect):
+    """`layers[i].animations` must satisfy the GROUP schema; a bare leaf there has no
+    `animations` key of its own, so `_v_animation_group`'s required-key check refuses it."""
+    effect["baseLayer"]["layers"][0]["animations"] = [
+        {"additive": False, "autoreverses": False, "beginTime": 0, "duration": 0.1,
+         "fillMode": "both", "from": {"scalar": 1}, "property": "opacity",
+         "removedOnCompletion": True, "repeatCount": 0, "timeOffset": 0, "to": {"scalar": 1}}
+    ]
 
 
-def test_shape_path_must_be_a_readable_object():
-    def bad_shape_path(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
-        leaf["texturedRectangle"]["shapePath"] = "junk"
+def _group_nested_inside_a_group(effect):
+    """A group's own `animations` must satisfy the LEAF schema; a nested group has no
+    `property` of its own, so `_v_animation_leaf`'s property check refuses it."""
+    inner = {
+        "additive": False, "animations": [], "autoreverses": False, "beginTime": 0,
+        "duration": 0.1, "fillMode": "both", "removedOnCompletion": False,
+        "repeatCount": 0, "timeOffset": 0,
+    }
+    effect["baseLayer"]["layers"][0]["animations"] = [{**inner, "animations": [inner]}]
 
-    with pytest.raises(_Refuse, match="not a readable object"):
-        _check_effect_encoding(_mutate_sanitized_effect(bad_shape_path))
+
+def _skew_leaf_sublayer_transform(effect):
+    state = _slot_leaf(effect, 4)["initialState"]
+    matrix = list(state["sublayerTransform"])
+    matrix[11] = 0.5
+    state["sublayerTransform"] = matrix
+
+
+def _add_wrapper_translation(effect):
+    """`transform.translation`/`transform.scale.*` are only ever measured on a chain's leaf; one
+    on the wrapper must refuse rather than being silently accepted and ignored."""
+    wrapper = effect["baseLayer"]["layers"][4]
+    wrapper["animations"] = [
+        {"additive": False, "timeOffset": 0, "beginTime": 0, "repeatCount": 0,
+         "fillMode": "both", "duration": 0.1, "autoreverses": False,
+         "animations": [
+             {"repeatCount": 0, "removedOnCompletion": True, "from": {"pointX": 0, "pointY": 0},
+              "timingFunction": "EaseInEaseOut", "additive": False, "timeOffset": 0,
+              "autoreverses": False, "property": "transform.translation", "fillMode": "both",
+              "duration": 0.1, "beginTime": 0, "to": {"pointX": 100, "pointY": 0}}
+         ], "removedOnCompletion": False},
+        *(wrapper.get("animations") or []),
+    ]
+
+
+def _set_slot4_settled_scale(scale, *, centre_the_anchor: bool = False):
+    def apply(effect):
+        leaf = _slot_leaf(effect, 4)
+        if centre_the_anchor:
+            leaf["initialState"]["anchorPoint"] = {"pointX": 0.5, "pointY": 0.5}
+        for anim in leaf["animations"][0]["animations"]:
+            if anim.get("property") in ("transform.scale.x", "transform.scale.y"):
+                anim["to"] = {"scalar": scale(anim)}
+
+    return apply
+
+
+def _negate_slot4_scale_x(effect):
+    for anim in _slot_leaf(effect, 4)["animations"][0]["animations"]:
+        if anim["property"] == "transform.scale.x":
+            anim["to"] = {"scalar": -anim["to"]["scalar"]}
+
+
+def _wrapper_gains_its_leafs_texture(effect):
+    """The inverse of the leaf checks: a non-terminal node (it still has a child) must not ALSO
+    carry `texture`/`texturedRectangle` -- a slot the offline schema cannot tell apart from a
+    single textured draw when the player might render two."""
+    wrapper = effect["baseLayer"]["layers"][4]
+    leaf = _leaf_of(wrapper)
+    wrapper["texture"] = leaf["texture"]
+    wrapper["texturedRectangle"] = copy.deepcopy(leaf["texturedRectangle"])
+
+
+def _negative_wrapper_width(effect):
+    """A negative wrapper width, with the child's `position` adjusted to still satisfy the
+    centred-in-parent residual for that (negative) width, must refuse on the wrapper's own
+    non-positive size -- a flipped/negative wrapper is not something the rect formula (or any
+    measured deck) ever produces."""
+    wrapper = effect["baseLayer"]["layers"][4]
+    wrapper["initialState"]["width"] = -wrapper["initialState"]["width"]
+    _leaf_of(wrapper)["initialState"]["position"]["pointX"] = wrapper["initialState"]["width"] / 2
+
+
+def _add_slot3_hidden_animation(effect):
+    """Slot 3 has no `hidden` animation at all; adding one (with a measured-valid `fillMode`, so
+    the animation itself is not what excludes it) must still exclude the slot -- `hidden`
+    exclusion is presence-based, not conditioned on the animation being the settled one."""
+    leaf = _slot_leaf(effect, 3)
+    leaf["animations"] = [*(leaf.get("animations") or []), _scalar_group(False, False, "hidden")]
+
+
+def _drop_slot1_hidden_animation(effect):
+    """Slot 1 on the fixture carries both a fade and a `hidden` animation; isolate the fade alone
+    to prove the fade path itself excludes rather than refuses, independent of the `hidden` rule."""
+    group = _slot_leaf(effect, 1)["animations"][0]
+    group["animations"] = [a for a in group["animations"] if a.get("property") != "hidden"]
+
+
+def _three_factor_nan_product(effect):
+    """`1e308 * 1e308` overflows to `inf` first; only the THIRD factor (`* 0`) produces the
+    actual `nan` the round-2 regression was about. Slot 0's real chain is already three levels
+    deep (`E.0 -> E.0.0 -> E.0.0.0`), so each level gets one of the three factors, in chain order."""
+    wrapper = effect["baseLayer"]["layers"][0]
+    mid = wrapper["layers"][0]
+    leaf = mid["layers"][0]
+    wrapper["animations"] = [_scalar_group(1e308, 1e308)]
+    mid["animations"] = [_scalar_group(1e308, 1e308)]
+    leaf["animations"] = [_scalar_group(0, 0)]
+    leaf["texturedRectangle"]["singleTextureOpacity"] = 0
+
+
+def _two_factor_overflow_product(effect):
+    effect["baseLayer"]["layers"][0]["animations"] = [_scalar_group(1e308, 1e308)]
+    _slot_leaf(effect, 0)["animations"] = [_scalar_group(1e308, 1e308)]
+
+
+# --- schema refusals: `_check_effect_encoding` raises, so the public entry point is Unsupported --
+
+
+@pytest.mark.parametrize(
+    "mutate, match",
+    [
+        # Codex round 3 item A: one recursive schema closes every container AND every primitive.
+        # Seven reproduced escapes (attributes=42, contentsRect="junk", shapePath="junk", malformed
+        # points, a leaf directly under a layer-node's `animations`, a group nested inside a
+        # group, an explicitly present `timingFunction=None`), three semantic escapes (see
+        # test_rendering_sensitive_neutrals_are_pinned_to_their_measured_value), and unhashable
+        # operands.
+        pytest.param(lambda e: e.__setitem__("attributes", 42), "not a readable object", id="r3A-attributes-not-an-object"),
+        pytest.param(
+            lambda e: _slot_leaf(e, 0)["initialState"].__setitem__("contentsRect", "junk"),
+            "not a readable object", id="r3A-contentsRect-not-an-object",
+        ),
+        pytest.param(
+            lambda e: _slot_leaf(e, 4)["texturedRectangle"].__setitem__("shapePath", "junk"),
+            "not a readable object", id="r3A-shapePath-not-an-object",
+        ),
+        pytest.param(_bare_leaf_under_a_layer_node, "unmeasured keys", id="r3A-leaf-directly-under-a-layer-nodes-animations"),
+        pytest.param(_group_nested_inside_a_group, "property", id="r3A-group-nested-inside-a-group"),
+        # Distinguishes 'absent' (fine, `timingFunction` is optional; see the accepted table) from
+        # 'present but invalid'.
+        pytest.param(
+            lambda e: _leaf_animation(e, 4).__setitem__("timingFunction", None),
+            "timingFunction", id="r3A-explicitly-present-invalid-timingFunction",
+        ),
+        # A list is unhashable; the old `dict.get(property_)`-style lookup would raise a raw
+        # `TypeError` before ever reaching a `_Refuse`. The schema type-checks with `isinstance`.
+        pytest.param(
+            lambda e: _slot_leaf(e, 4)["animations"][0]["animations"][0].__setitem__("property", ["opacity"]),
+            "property", id="r3A-unhashable-property",
+        ),
+        pytest.param(
+            lambda e: _leaf_animation(e, 4).__setitem__("fillMode", ["both"]), "fillMode", id="r3A-unhashable-fillMode",
+        ),
+        pytest.param(
+            lambda e: _slot_leaf(e, 4)["texturedRectangle"]["shapePath"]["elements"][0].__setitem__("type", ["MoveToPoint"]),
+            "type", id="r3A-unhashable-shapePath-element-type",
+        ),
+        # residual coverage from round 1/2, still meaningful under the new schema
+        pytest.param(lambda e: e.__setitem__("movie", {"asset": "x"}), "unmeasured keys", id="r1r2-movie-key-on-the-transition-effect"),
+        pytest.param(
+            lambda e: e["baseLayer"]["layers"][1].__setitem__("isVideoLayer", True),
+            "unmeasured keys", id="r1r2-isVideoLayer-on-an-effect-layer",
+        ),
+        pytest.param(
+            lambda e: _leaf_animation(e, 4).__setitem__("to", {"pointX": 0, "pointY": 0}),
+            "unmeasured keys", id="r1r2-opacity-with-a-point-value-shape",
+        ),
+        pytest.param(
+            lambda e: _leaf_animation(e, 4).__setitem__("to", {"scalar": "not-a-number"}),
+            "finite number", id="r1r2-opacity-with-a-non-numeric-scalar",
+        ),
+        pytest.param(
+            lambda e: _leaf_animation(e, 1, "hidden").__setitem__("to", {"scalar": 1}),
+            "readable boolean", id="r1r2-hidden-scalar-must-be-boolean-not-numeric",
+        ),
+        pytest.param(
+            lambda e: _leaf_animation(e, 0, "contents").__setitem__("to", {"texture": ""}),
+            "non-empty string", id="r1r2-contents-texture-must-be-a-non-empty-string",
+        ),
+        pytest.param(
+            lambda e: _slot_leaf(e, 3).setdefault("animations", []).append(_scalar_group(True, False, "isPlaying")),
+            "property", id="r1r2-unmeasured-animation-property",
+        ),
+        pytest.param(
+            lambda e: e["baseLayer"].__setitem__("animations", [_scalar_group(1, 1)]), "always empty", id="r3-a-root-with-animations",
+        ),
+        pytest.param(lambda e: e.__setitem__("type", "somethingElse"), "type", id="r3-a-type-outside-transition-or-buildIn"),
+        # Round 4 item 3: `math.isfinite` raises `OverflowError` (not `False`) on a Python int too
+        # large to convert to a float; the validator must catch that itself, not rely on the net.
+        pytest.param(
+            lambda e: _slot_leaf(e, 4)["initialState"].__setitem__("width", 10**400),
+            "finite number", id="r4-item3-huge-integer-width-not-overflowerror",
+        ),
+        # Round 4 item 4 (Fable B2): zPosition bound.
+        pytest.param(
+            lambda e: _slot_leaf(e, 4)["animations"][0]["animations"].append(_scalar_group(0, 2, "zPosition")["animations"][0]),
+            "range", id="r4-B2-zPosition-scalar-exceeding-the-measured-bound",
+        ),
+        # Round 4 (Fable S1): removedOnCompletion is pinned, not merely boolean-typed.
+        pytest.param(
+            lambda e: e["baseLayer"]["layers"][4]["animations"][0].__setitem__("removedOnCompletion", True),
+            "removedOnCompletion", id="r4-S1-group-removedOnCompletion-must-be-false",
+        ),
+        pytest.param(
+            lambda e: _leaf_animation(e, 4).__setitem__("removedOnCompletion", False),
+            "removedOnCompletion", id="r4-S1-leaf-removedOnCompletion-must-be-true",
+        ),
+    ],
+)
+def test_the_effect_schema_refuses(mutate, match):
+    effect = _mutate_sanitized_effect(mutate)
+    with pytest.raises(_Refuse, match=match):
+        _check_effect_encoding(effect)
+    assert isinstance(effect_opacity_overrides(effect), Unsupported)
 
 
 @pytest.mark.parametrize("bad_points", ["bad", [1, 2], [[1, 2, 3]], [[1, "x"]], [[1, 2], [3, 4]]])
 def test_shape_path_points_must_be_a_single_finite_pair(bad_points):
     def tamper(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
-        leaf["texturedRectangle"]["shapePath"]["elements"][0]["points"] = bad_points
+        _slot_leaf(effect, 4)["texturedRectangle"]["shapePath"]["elements"][0]["points"] = bad_points
 
     with pytest.raises(_Refuse, match="points"):
         _check_effect_encoding(_mutate_sanitized_effect(tamper))
-
-
-def test_a_leaf_directly_under_a_layer_nodes_animations_is_refused():
-    """`layers[i].animations` must satisfy the GROUP schema; a bare leaf there has no
-    `animations` key of its own, so `_v_animation_group`'s required-key check refuses it."""
-
-    def bare_leaf(effect):
-        wrapper = effect["baseLayer"]["layers"][0]
-        wrapper["animations"] = [
-            {"additive": False, "autoreverses": False, "beginTime": 0, "duration": 0.1,
-             "fillMode": "both", "from": {"scalar": 1}, "property": "opacity",
-             "removedOnCompletion": True, "repeatCount": 0, "timeOffset": 0, "to": {"scalar": 1}}
-        ]
-
-    with pytest.raises(_Refuse, match="unmeasured keys"):
-        _check_effect_encoding(_mutate_sanitized_effect(bare_leaf))
-
-
-def test_a_group_nested_inside_a_group_is_refused():
-    """A group's own `animations` must satisfy the LEAF schema; a nested group has no
-    `property` of its own, so `_v_animation_leaf`'s property check refuses it."""
-
-    def nested_group(effect):
-        wrapper = effect["baseLayer"]["layers"][0]
-        inner = {
-            "additive": False, "animations": [], "autoreverses": False, "beginTime": 0,
-            "duration": 0.1, "fillMode": "both", "removedOnCompletion": False,
-            "repeatCount": 0, "timeOffset": 0,
-        }
-        outer = {**inner, "animations": [inner]}
-        wrapper["animations"] = [outer]
-
-    with pytest.raises(_Refuse, match="property"):
-        _check_effect_encoding(_mutate_sanitized_effect(nested_group))
-
-
-def test_an_explicitly_present_invalid_timing_function_is_refused():
-    """Distinguishes 'absent' (fine, `timingFunction` is optional) from 'present but invalid':
-    slot 4's leaf carries three leaf animations, one of which naturally lacks `timingFunction`
-    (measured on the real export: 15 of 16 leaves have it), so this also proves the optional key
-    is still accepted when genuinely absent elsewhere in the same document."""
-
-    def timing_none(effect):
-        _opacity_anim_of(effect, 4)["timingFunction"] = None
-
-    with pytest.raises(_Refuse, match="timingFunction"):
-        _check_effect_encoding(_mutate_sanitized_effect(timing_none))
-
-
-def test_an_absent_timing_function_is_accepted():
-    def drop_timing(effect):
-        del _opacity_anim_of(effect, 4)["timingFunction"]
-
-    _check_effect_encoding(_mutate_sanitized_effect(drop_timing))
 
 
 @pytest.mark.parametrize(
@@ -1984,397 +1912,193 @@ def test_an_absent_timing_function_is_accepted():
 )
 def test_rendering_sensitive_neutrals_are_pinned_to_their_measured_value(mutate, match):
     def tamper(effect):
-        mutate(_leaf_of(effect["baseLayer"]["layers"][0]))
+        mutate(_slot_leaf(effect, 0))
 
     with pytest.raises(_Refuse, match=match):
         _check_effect_encoding(_mutate_sanitized_effect(tamper))
 
 
-def test_an_unhashable_property_value_refuses_instead_of_raising_typeerror():
-    """A list is unhashable; the old `dict.get(property_)`-style lookup would raise a raw
-    `TypeError` before ever reaching a `_Refuse`. The schema type-checks `property` with
-    `isinstance` before it is ever used as a lookup key."""
-
-    def unhashable_property(effect):
-        group = _leaf_of(effect["baseLayer"]["layers"][4])["animations"][0]
-        group["animations"][0]["property"] = ["opacity"]
-
-    with pytest.raises(_Refuse, match="property"):
-        _check_effect_encoding(_mutate_sanitized_effect(unhashable_property))
+# --- geometry, settlement and fail-closed refusals: `effect_opacity_overrides` is Unsupported ---
 
 
 @pytest.mark.parametrize(
-    "key,bad_value",
-    [("fillMode", ["both"]), ("type", ["MoveToPoint"])],
+    "mutate, reason",
+    [
+        # Codex round 3 item A's last sentence: even a malformed input the specific validators did
+        # not anticipate must come back `Unsupported`, never propagate a raw exception.
+        pytest.param(
+            lambda e: e["baseLayer"].__setitem__("layers", None),
+            "<transition effect>.baseLayer.layers is not a readable list", id="r3A-layers-none-is-unsupported-not-an-exception",
+        ),
+        # Slot 3's leaf has neither an opacity animation nor (after this) a readable
+        # `initialState.opacity`; the old code silently defaulted to 1.0 -- it must now refuse.
+        pytest.param(
+            lambda e: _slot_leaf(e, 3)["initialState"].pop("opacity"), "opacity", id="missing-opacity-without-a-settled-animation",
+        ),
+        # Finding 4 (round 2): the rect formula's geometry invariants are validated, not assumed.
+        pytest.param(
+            lambda e: _slot_leaf(e, 4)["initialState"].__setitem__("anchorPoint", {"pointX": 0.2, "pointY": 0.5}),
+            "accumulated geometry error", id="r2-finding4-off-center-anchor-point",
+        ),
+        pytest.param(
+            lambda e: e["baseLayer"]["layers"][4]["initialState"].__setitem__("rotation", 90), "rotated", id="r2-finding4-rotated-wrapper",
+        ),
+        pytest.param(
+            lambda e: _slot_leaf(e, 4)["initialState"].__setitem__("affineTransform", [1, 0.3, 0, 1, 0, 0]),
+            "affineTransform", id="r2-finding4-non-identity-affine-transform",
+        ),
+        pytest.param(
+            lambda e: e["baseLayer"]["layers"][4]["initialState"].__setitem__("scale", 2), "scale", id="r2-finding4-non-unit-initialState-scale",
+        ),
+        pytest.param(_skew_leaf_sublayer_transform, "sublayerTransform", id="r2-finding4-non-identity-sublayerTransform"),
+        # The formula never reads a leaf's `position` (it derives the leaf centre from the
+        # wrapper's position plus the leaf's own translation animation), so moving it must be
+        # caught by the centred-in-parent invariant, not silently ignored.
+        pytest.param(
+            lambda e: _nudge_x(_slot_leaf(e, 4)["initialState"], 100), "accumulated geometry error", id="r2-finding4-leaf-position-moved-100px",
+        ),
+        pytest.param(_add_wrapper_translation, "on a non-leaf node", id="r2-finding4-wrapper-translation-animation"),
+        # Codex round 3 item B: root position-anchor composition, positive scale, total post-scale
+        # anchor-error bound rather than a per-node pre-scale bound.
+        # The plan section 0 measurement: `root.position - root.anchorPoint * root.size == (0, 0)`
+        # exactly on the qualified boundary. The formula reads every wrapper's `position` as an
+        # absolute canvas coordinate, which is only true when the root sits flush at the origin.
+        pytest.param(
+            lambda e: _nudge_x(e["baseLayer"]["initialState"], 100), "accumulated geometry error", id="r3B-root-position-moved-100px",
+        ),
+        pytest.param(_negate_slot4_scale_x, "non-positive settled leaf scale", id="r3B-negative-settled-scale"),
+        # Slot 4 scales ~1.98x; an anchor deviation of 0.003 at its unscaled width (178px) is a
+        # 0.53px error -- under a PER-NODE pre-scale 1px bound, which is exactly why round 2's
+        # fixed-tolerance check was insufficient. After the ~1.98x settled scale the same deviation
+        # is a ~1.06px error on the FINAL rendered rect edge, over the plan's 1px contract.
+        pytest.param(
+            lambda e: _slot_leaf(e, 4)["initialState"].__setitem__("anchorPoint", {"pointX": 0.503, "pointY": 0.5}),
+            "accumulated geometry error", id="r3B-near-limit-anchor-error-only-exceeds-1px-after-scaling",
+        ),
+        # Codex round 3 item C (SHOULD-FIX); see also test_an_overflowed_rect_component_refuses.
+        pytest.param(
+            _set_slot4_settled_scale(lambda _anim: 1e308, centre_the_anchor=True),
+            "non-finite emitted rect", id="r3C-overflowed-rect-with-zero-anchor-error-refuses-on-finiteness",
+        ),
+        # The fixture has at most one `opacity` animation per node; a second is unmeasured. Which
+        # one the runtime's own "last" rule (list order vs. begin-time order) would pick if they
+        # disagree is exactly the ambiguity the plan's fail-closed rule exists to refuse.
+        pytest.param(
+            lambda e: _slot_leaf(e, 4).__setitem__(
+                "animations", [_scalar_group(0.9, 0.9), _scalar_group(REAL_SLOT4_OPACITY, REAL_SLOT4_OPACITY)]
+            ),
+            "more than one settled opacity animation", id="r3C-more-than-one-settled-opacity-animation-on-one-node",
+        ),
+        # Round 4 item 1: discriminated wrapper/leaf schemas. A top-level slot must be a
+        # non-textured wrapper with at least one child; substituting slot 4's own leaf in its place
+        # used to pass the old schema and emit an override with the WRONG rect.
+        pytest.param(
+            lambda e: e["baseLayer"]["layers"].__setitem__(4, _slot_leaf(e, 4)),
+            "<transition effect>.baseLayer.layers[4] carries unmeasured keys ['texture', 'texturedRectangle']",
+            id="r4-item1-a-wrapper-replaced-by-its-own-leaf",
+        ),
+        pytest.param(
+            lambda e: _slot_leaf(e, 4).pop("texture"),
+            "<transition effect>.baseLayer.layers[4].layers[0] is missing measured keys ['texture']",
+            id="r4-item1-a-leaf-without-texture",
+        ),
+        pytest.param(
+            lambda e: _slot_leaf(e, 4).pop("texturedRectangle"),
+            "<transition effect>.baseLayer.layers[4].layers[0] is missing measured keys ['texturedRectangle']",
+            id="r4-item1-a-leaf-without-texturedRectangle",
+        ),
+        pytest.param(
+            _wrapper_gains_its_leafs_texture,
+            "<transition effect>.baseLayer.layers[4] carries unmeasured keys ['texture', 'texturedRectangle']",
+            id="r4-item1-a-wrapper-carrying-texture-keys",
+        ),
+        # Round 4 item 2: one per-axis <=1px geometry budget, not independent per-check budgets.
+        # 0.75px root-origin residual plus 0.75px child-position residual is 1.5px of real,
+        # ignored displacement even though EACH alone is under the old independent 1px budgets.
+        pytest.param(
+            lambda e: (_nudge_x(e["baseLayer"]["initialState"], 0.75), _nudge_x(_slot_leaf(e, 4)["initialState"], 0.75)),
+            "accumulated geometry error", id="r4-item2-root-and-child-subpixel-residuals-combine",
+        ),
+        pytest.param(_negative_wrapper_width, "non-positive", id="r4-item2-negative-wrapper-size-with-a-consistent-child-position"),
+        # Round 4 item 3: numeric overflow and the fail-closed net.
+        pytest.param(
+            lambda e: e.__setitem__("duration", 10**1000),
+            "<transition effect>.duration is not a readable finite number", id="r4-item3-huge-integer-duration-not-overflowerror",
+        ),
+        # Round 4 item 4 (Fable B2): sublayerTransform off identity.
+        pytest.param(
+            lambda e: e["baseLayer"]["layers"][0]["initialState"]["sublayerTransform"].__setitem__(0, 1.0019),
+            "non-identity sublayerTransform", id="r4-B2-sublayerTransform-index-0-off-identity",
+        ),
+        pytest.param(
+            lambda e: e["baseLayer"]["layers"][4]["initialState"]["sublayerTransform"].__setitem__(3, 0.002),
+            "non-identity sublayerTransform", id="r4-B2-sublayerTransform-index-3-perspective-off-identity",
+        ),
+    ],
 )
-def test_unhashable_enum_values_refuse_instead_of_raising_typeerror(key, bad_value):
-    def tamper(effect):
-        if key == "fillMode":
-            _opacity_anim_of(effect, 4)["fillMode"] = bad_value
-        else:
-            leaf = _leaf_of(effect["baseLayer"]["layers"][4])
-            leaf["texturedRectangle"]["shapePath"]["elements"][0]["type"] = bad_value
-
-    with pytest.raises(_Refuse, match=key):
-        _check_effect_encoding(_mutate_sanitized_effect(tamper))
-
-
-def test_effect_opacity_overrides_converts_unexpected_exceptions_to_unsupported():
-    """The public entry point's fail-closed net (Codex round 3 item A's last sentence): even a
-    malformed input the specific validators did not anticipate must come back `Unsupported`,
-    never propagate a raw exception."""
-
-    def break_it(effect):
-        effect["baseLayer"]["layers"] = None
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(break_it))
+def test_effect_opacity_overrides_refuses(mutate, reason):
+    result = effect_opacity_overrides(_mutate_sanitized_effect(mutate))
     assert isinstance(result, Unsupported)
+    assert reason in result.reason
 
 
-# --- residual coverage from round 1/2, still meaningful under the new schema -------------------
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        # slot 4's leaf carries three leaf animations, one of which naturally lacks
+        # `timingFunction` (measured on the real export: 15 of 16 leaves have it), so the optional
+        # key is accepted when genuinely absent.
+        pytest.param(lambda e: _leaf_animation(e, 4).pop("timingFunction"), id="r3A-an-absent-timingFunction"),
+        pytest.param(lambda e: e.__setitem__("type", "buildIn"), id="r3-buildIn-type"),
+        # Slot 0 (background, 1920px wide, scale exactly 1) tolerates a deviation that would sink
+        # a scaled, narrower slot: 0.0003 * 1920px = 0.576px, under the 1px contract with no scale
+        # involved -- proving the post-scale bound is not simply stricter across the board.
+        pytest.param(
+            lambda e: _slot_leaf(e, 0)["initialState"].__setitem__("anchorPoint", {"pointX": 0.5 + 0.0003, "pointY": 0.5}),
+            id="r3B-a-small-anchor-deviation-on-an-unscaled-slot",
+        ),
+        pytest.param(
+            lambda e: e["baseLayer"]["layers"][0]["initialState"]["sublayerTransform"].__setitem__(11, -0.0004),
+            id="r4-B2-sublayerTransform-index-11-at-the-measured-value",
+        ),
+    ],
+)
+def test_a_measured_variation_is_accepted(mutate):
+    effect = _mutate_sanitized_effect(mutate)
+    _check_effect_encoding(effect)
+    assert isinstance(effect_opacity_overrides(effect), dict)
 
 
-def test_a_movie_key_on_the_transition_effect_is_refused():
-    def add_movie_key(effect):
-        effect["movie"] = {"asset": "x"}
-
-    with pytest.raises(_Refuse, match="unmeasured keys"):
-        _check_effect_encoding(_mutate_sanitized_effect(add_movie_key))
-
-
-def test_is_video_layer_key_on_an_effect_layer_is_refused():
-    def add_flag(effect):
-        effect["baseLayer"]["layers"][1]["isVideoLayer"] = True
-
-    with pytest.raises(_Refuse, match="unmeasured keys"):
-        _check_effect_encoding(_mutate_sanitized_effect(add_flag))
-
-
-def test_opacity_animation_with_a_point_value_shape_is_refused():
-    def tamper(effect):
-        _opacity_anim_of(effect, 4)["to"] = {"pointX": 0, "pointY": 0}
-
-    with pytest.raises(_Refuse, match="unmeasured keys"):
-        _check_effect_encoding(_mutate_sanitized_effect(tamper))
-
-
-def test_opacity_animation_with_a_non_numeric_scalar_is_refused():
-    def tamper(effect):
-        _opacity_anim_of(effect, 4)["to"] = {"scalar": "not-a-number"}
-
-    with pytest.raises(_Refuse, match="finite number"):
-        _check_effect_encoding(_mutate_sanitized_effect(tamper))
-
-
-def test_hidden_scalar_must_be_boolean_not_numeric():
-    def tamper(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][1])
-        group = leaf["animations"][0]
-        hidden_anim = next(a for a in group["animations"] if a.get("property") == "hidden")
-        hidden_anim["to"] = {"scalar": 1}
-
-    with pytest.raises(_Refuse, match="readable boolean"):
-        _check_effect_encoding(_mutate_sanitized_effect(tamper))
-
-
-def test_contents_texture_must_be_a_non_empty_string():
-    def tamper(effect):
-        leaf = effect["baseLayer"]["layers"][0]["layers"][0]["layers"][0]
-        group = leaf["animations"][0]
-        contents_anim = next(a for a in group["animations"] if a.get("property") == "contents")
-        contents_anim["to"] = {"texture": ""}
-
-    with pytest.raises(_Refuse, match="non-empty string"):
-        _check_effect_encoding(_mutate_sanitized_effect(tamper))
-
-
-def test_an_unmeasured_animation_property_is_refused():
-    def tamper(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][3])
-        leaf.setdefault("animations", []).append(
-            {"additive": False, "timeOffset": 0, "beginTime": 0, "repeatCount": 0,
-             "fillMode": "both", "duration": 0.1, "autoreverses": False,
-             "animations": [
-                 {"repeatCount": 0, "removedOnCompletion": True, "from": {"scalar": True},
-                  "timingFunction": "EaseInEaseOut", "additive": False, "timeOffset": 0,
-                  "autoreverses": False, "property": "isPlaying", "fillMode": "both",
-                  "duration": 0.1, "beginTime": 0, "to": {"scalar": False}}
-             ], "removedOnCompletion": False}
-        )
-
-    with pytest.raises(_Refuse, match="property"):
-        _check_effect_encoding(_mutate_sanitized_effect(tamper))
-
-
-def test_fade_uses_exact_inequality_not_a_tolerance():
-    """The old `abs(from - to) > 1e-9` rule let a 1e-12 drift through as 'settled'; the plan's
-    `from != to` is exact, so even a float-noise-sized difference must exclude."""
-
-    def tiny_diff(effect):
-        effect["baseLayer"]["layers"][0]["animations"] = [_opacity_group(1.0, 1.0 + 1e-12)]
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(tiny_diff))
+@pytest.mark.parametrize(
+    "mutate, slot, reason",
+    [
+        # The old `abs(from - to) > 1e-9` rule let a 1e-12 drift through as 'settled'; the plan's
+        # `from != to` is exact, so even a float-noise-sized difference must exclude.
+        pytest.param(
+            lambda e: e["baseLayer"]["layers"][0].__setitem__("animations", [_scalar_group(1.0, 1.0 + 1e-12)]),
+            0, "fade", id="fade-uses-exact-inequality-not-a-tolerance",
+        ),
+        pytest.param(_add_slot3_hidden_animation, 3, "hidden", id="hidden-presence-excludes-regardless-of-settlement"),
+        pytest.param(_drop_slot1_hidden_animation, 1, "fade", id="a-faded-slot-is-excluded-not-refused"),
+        # Codex round 3 item C (SHOULD-FIX).
+        pytest.param(_three_factor_nan_product, 0, "product-mismatch", id="r3C-a-real-three-factor-nan-product"),
+        pytest.param(_two_factor_overflow_product, 0, "product-mismatch", id="r3C-an-overflow-to-infinity-product"),
+        # O1's own candidate rule: the settled product must equal `singleTextureOpacity`.
+        pytest.param(
+            lambda e: _slot_leaf(e, 4)["texturedRectangle"].__setitem__("singleTextureOpacity", 0.5),
+            4, "product-mismatch", id="settled-product-must-equal-singleTextureOpacity",
+        ),
+    ],
+)
+def test_a_slot_is_excluded_not_overridden(mutate, slot, reason):
+    result = effect_opacity_overrides(_mutate_sanitized_effect(mutate))
     assert isinstance(result, dict)
-    assert {"slot": 0, "reason": "fade"} in result["excluded"]
-
-
-def test_hidden_presence_excludes_regardless_of_settlement():
-    """Slot 3 has no `hidden` animation at all; adding one (with a measured-valid `fillMode`, so
-    the animation itself is not what excludes it) must still exclude the slot -- `hidden`
-    exclusion is presence-based, not conditioned on the animation being the settled one for
-    anything."""
-
-    def add_hidden(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][3])
-        leaf["animations"] = [
-            *(leaf.get("animations") or []),
-            {"additive": False, "timeOffset": 0, "beginTime": 0, "repeatCount": 0,
-             "fillMode": "both", "duration": 0.1, "autoreverses": False,
-             "animations": [
-                 {"repeatCount": 0, "removedOnCompletion": True, "from": {"scalar": False},
-                  "timingFunction": "EaseInEaseOut", "additive": False, "timeOffset": 0,
-                  "autoreverses": False, "property": "hidden", "fillMode": "both",
-                  "duration": 0.1, "beginTime": 0, "to": {"scalar": False}}
-             ], "removedOnCompletion": False},
-        ]
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(add_hidden))
-    assert isinstance(result, dict)
-    assert {"slot": 3, "reason": "hidden"} in result["excluded"]
-
-
-def test_faded_slot_is_excluded_not_refused():
-    """Slot 1 on the fixture carries both a fade and a `hidden` animation; isolate the fade
-    alone (drop the `hidden` animation) to prove the fade path itself excludes rather than
-    refuses, independent of the `hidden` rule."""
-
-    def drop_hidden(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][1])
-        group = leaf["animations"][0]
-        group["animations"] = [a for a in group["animations"] if a.get("property") != "hidden"]
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(drop_hidden))
-    assert isinstance(result, dict)
-    assert {"slot": 1, "reason": "fade"} in result["excluded"]
-    assert all(o["slot"] != 1 for o in result["opacityOverrides"])
-
-
-def test_missing_opacity_refuses_when_no_settled_animation_exists():
-    """Slot 3's leaf has neither an opacity animation nor (after this mutation) a readable
-    `initialState.opacity`; the old code silently defaulted to 1.0 -- it must now refuse."""
-
-    def strip_opacity(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][3])
-        leaf["initialState"].pop("opacity")
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(strip_opacity))
-    assert isinstance(result, Unsupported)
-    assert "opacity" in result.reason
-
-
-# --- finding 4 (round 2): the rect formula's geometry invariants are validated, not assumed ---
-
-
-def test_off_center_anchor_point_refuses():
-    def skew_anchor(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
-        leaf["initialState"]["anchorPoint"] = {"pointX": 0.2, "pointY": 0.5}
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(skew_anchor))
-    assert isinstance(result, Unsupported)
-    assert "accumulated geometry error" in result.reason
-
-
-def test_a_rotated_wrapper_refuses():
-    def rotate(effect):
-        effect["baseLayer"]["layers"][4]["initialState"]["rotation"] = 90
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(rotate))
-    assert isinstance(result, Unsupported)
-    assert "rotated" in result.reason
-
-
-def test_non_identity_affine_transform_refuses():
-    def skew(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
-        leaf["initialState"]["affineTransform"] = [1, 0.3, 0, 1, 0, 0]
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(skew))
-    assert isinstance(result, Unsupported)
-    assert "affineTransform" in result.reason
-
-
-def test_non_unit_initial_state_scale_refuses():
-    def rescale(effect):
-        effect["baseLayer"]["layers"][4]["initialState"]["scale"] = 2
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(rescale))
-    assert isinstance(result, Unsupported)
-    assert "scale" in result.reason
-
-
-def test_non_identity_sublayer_transform_refuses():
-    def skew_sublayer(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
-        matrix = list(leaf["initialState"]["sublayerTransform"])
-        matrix[11] = 0.5
-        leaf["initialState"]["sublayerTransform"] = matrix
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(skew_sublayer))
-    assert isinstance(result, Unsupported)
-    assert "sublayerTransform" in result.reason
-
-
-def test_a_root_with_animations_refuses():
-    def animate_root(effect):
-        effect["baseLayer"]["animations"] = [_opacity_group(1, 1)]
-
-    with pytest.raises(_Refuse, match="always empty"):
-        _check_effect_encoding(_mutate_sanitized_effect(animate_root))
-
-
-def test_leaf_position_moved_100px_refuses():
-    """The formula never reads a leaf's `position` (it derives the leaf centre from the
-    wrapper's position plus the leaf's own translation animation), so moving it must be caught
-    by the centred-in-parent invariant, not silently ignored."""
-
-    def move_leaf(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
-        leaf["initialState"]["position"]["pointX"] += 100
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(move_leaf))
-    assert isinstance(result, Unsupported)
-    assert "accumulated geometry error" in result.reason
-
-
-def test_wrapper_translation_animation_refuses():
-    """`transform.translation`/`transform.scale.*` are only ever measured on a chain's leaf; one
-    on the wrapper must refuse rather than being silently accepted and ignored."""
-
-    def add_wrapper_translation(effect):
-        wrapper = effect["baseLayer"]["layers"][4]
-        wrapper["animations"] = [
-            {"additive": False, "timeOffset": 0, "beginTime": 0, "repeatCount": 0,
-             "fillMode": "both", "duration": 0.1, "autoreverses": False,
-             "animations": [
-                 {"repeatCount": 0, "removedOnCompletion": True, "from": {"pointX": 0, "pointY": 0},
-                  "timingFunction": "EaseInEaseOut", "additive": False, "timeOffset": 0,
-                  "autoreverses": False, "property": "transform.translation", "fillMode": "both",
-                  "duration": 0.1, "beginTime": 0, "to": {"pointX": 100, "pointY": 0}}
-             ], "removedOnCompletion": False},
-            *(wrapper.get("animations") or []),
-        ]
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(add_wrapper_translation))
-    assert isinstance(result, Unsupported)
-    assert "on a non-leaf node" in result.reason
-
-
-# --- Codex round 3 item B: root position-anchor composition, positive scale, total post-scale
-# --- anchor-error bound, rather than a per-node pre-scale bound.
-
-
-def test_root_position_moved_100px_refuses():
-    """The plan section 0 measurement: `root.position - root.anchorPoint * root.size == (0, 0)`
-    exactly on the qualified boundary. Moving the root's `position` by 100px, with the anchor
-    and size untouched, breaks that composition -- the formula reads every wrapper's `position`
-    as an absolute canvas coordinate, which is only true when the root itself sits flush at the
-    canvas origin."""
-
-    def move_root(effect):
-        effect["baseLayer"]["initialState"]["position"]["pointX"] += 100
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(move_root))
-    assert isinstance(result, Unsupported)
-    assert "accumulated geometry error" in result.reason
-
-
-def test_negative_settled_scale_refuses():
-    def negate_scale(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
-        group = leaf["animations"][0]
-        for anim in group["animations"]:
-            if anim["property"] == "transform.scale.x":
-                anim["to"] = {"scalar": -anim["to"]["scalar"]}
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(negate_scale))
-    assert isinstance(result, Unsupported)
-    assert "non-positive settled leaf scale" in result.reason
-
-
-def test_near_limit_anchor_error_that_only_exceeds_1px_after_scaling_refuses():
-    """Slot 4 scales ~1.98x; an anchor deviation of 0.003 at its unscaled width (178px) is a
-    0.53px error -- comfortably under a PER-NODE pre-scale 1px bound, which is exactly why round
-    2's fixed-tolerance check was insufficient. Multiplied by the ~1.98x settled scale, the same
-    deviation becomes a ~1.06px error on the FINAL rendered rect edge, over the plan's 1px
-    contract, and must refuse."""
-
-    def near_limit_anchor(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
-        leaf["initialState"]["anchorPoint"] = {"pointX": 0.503, "pointY": 0.5}
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(near_limit_anchor))
-    assert isinstance(result, Unsupported)
-    assert "accumulated geometry error" in result.reason
-
-
-def test_a_small_anchor_deviation_passes_on_an_unscaled_slot():
-    """Slot 0 (background, 1920px wide, scale exactly 1) tolerates a deviation that would sink
-    a scaled, narrower slot: 0.0003 * 1920px = 0.576px, under the 1px contract with no scale
-    involved -- proving the post-scale bound is not simply stricter across the board."""
-
-    def small_anchor_no_scale(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][0])
-        leaf["initialState"]["anchorPoint"] = {"pointX": 0.5 + 0.0003, "pointY": 0.5}
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(small_anchor_no_scale))
-    assert isinstance(result, dict)
-
-
-# --- Codex round 3 item C (SHOULD-FIX) ----------------------------------------------------------
-
-
-def test_a_real_three_factor_nan_product_is_excluded_not_overridden():
-    """`1e308 * 1e308` overflows to `inf` first; only the THIRD factor (`* 0`) produces the
-    actual `nan` the round-2 regression was about. Slot 0's real chain is already three levels
-    deep (`E.0 -> E.0.0 -> E.0.0.0`), so each level gets one of the three factors, applied in
-    chain order."""
-
-    def three_factor_nan(effect):
-        wrapper = effect["baseLayer"]["layers"][0]
-        mid = wrapper["layers"][0]
-        leaf = mid["layers"][0]
-        wrapper["animations"] = [_opacity_group(1e308, 1e308)]
-        mid["animations"] = [_opacity_group(1e308, 1e308)]
-        leaf["animations"] = [_opacity_group(0, 0)]
-        leaf["texturedRectangle"]["singleTextureOpacity"] = 0
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(three_factor_nan))
-    assert isinstance(result, dict)
-    assert {"slot": 0, "reason": "product-mismatch"} in result["excluded"]
-    assert all(o["slot"] != 0 for o in result["opacityOverrides"])
-
-
-def test_an_overflow_to_infinity_product_is_also_excluded():
-    def two_factor_overflow(effect):
-        effect["baseLayer"]["layers"][0]["animations"] = [_opacity_group(1e308, 1e308)]
-        leaf = _leaf_of(effect["baseLayer"]["layers"][0])
-        leaf["animations"] = [_opacity_group(1e308, 1e308)]
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(two_factor_overflow))
-    assert isinstance(result, dict)
-    assert {"slot": 0, "reason": "product-mismatch"} in result["excluded"]
+    assert {"slot": slot, "reason": reason} in result["excluded"]
+    assert all(o["slot"] != slot for o in result["opacityOverrides"])
 
 
 def test_an_overflowed_rect_component_refuses():
-    def overflow_scale(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
-        group = leaf["animations"][0]
-        for anim in group["animations"]:
-            if anim.get("property") in ("transform.scale.x", "transform.scale.y"):
-                anim["to"] = {"scalar": 1e300}
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(overflow_scale))
+    result = effect_opacity_overrides(_mutate_sanitized_effect(_set_slot4_settled_scale(lambda _anim: 1e300)))
     assert isinstance(result, Unsupported)
     # a 1e300 scale first exceeds the accumulated 1px geometry-error contract (an anchor
     # deviation that was negligible unscaled becomes enormous), which is itself the correct
@@ -2382,54 +2106,6 @@ def test_an_overflowed_rect_component_refuses():
     # the remaining case where anchor error is exactly zero and the rect components alone go
     # non-finite.
     assert "accumulated geometry error" in result.reason or "non-finite emitted rect" in result.reason
-
-
-def test_an_overflowed_rect_with_zero_anchor_error_refuses_on_finiteness():
-    def overflow_scale_zero_anchor(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
-        leaf["initialState"]["anchorPoint"] = {"pointX": 0.5, "pointY": 0.5}
-        group = leaf["animations"][0]
-        for anim in group["animations"]:
-            if anim.get("property") in ("transform.scale.x", "transform.scale.y"):
-                anim["to"] = {"scalar": 1e308}
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(overflow_scale_zero_anchor))
-    assert isinstance(result, Unsupported)
-    assert "non-finite emitted rect" in result.reason
-
-
-def test_buildin_type_is_accepted():
-    def to_buildin(effect):
-        effect["type"] = "buildIn"
-
-    _check_effect_encoding(_mutate_sanitized_effect(to_buildin))
-
-
-def test_a_type_outside_transition_or_buildin_refuses():
-    def bad_type(effect):
-        effect["type"] = "somethingElse"
-
-    with pytest.raises(_Refuse, match="type"):
-        _check_effect_encoding(_mutate_sanitized_effect(bad_type))
-
-
-def test_more_than_one_settled_opacity_animation_on_one_node_refuses():
-    """The fixture has at most one `opacity` animation per node; a second is unmeasured. Which
-    one the runtime's own "last" rule (list order vs. animation begin-time order) would pick if
-    they disagree is exactly the kind of ambiguity the plan's fail-closed rule exists to refuse,
-    rather than silently letting Python's list-order 'last' win over a player that might settle
-    by begin time instead."""
-
-    def two_distinct_constants(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
-        leaf["animations"] = [
-            _opacity_group(0.9, 0.9),
-            _opacity_group(REAL_SLOT4_OPACITY, REAL_SLOT4_OPACITY),
-        ]
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(two_distinct_constants))
-    assert isinstance(result, Unsupported)
-    assert "more than one settled opacity animation" in result.reason
 
 
 def test_multi_node_product_uses_a_non_one_initial_state_opacity_fallback():
@@ -2440,7 +2116,7 @@ def test_multi_node_product_uses_a_non_one_initial_state_opacity_fallback():
 
     def non_one_initial_opacities(effect):
         wrapper_state = effect["baseLayer"]["layers"][3]["initialState"]
-        leaf = _leaf_of(effect["baseLayer"]["layers"][3])
+        leaf = _slot_leaf(effect, 3)
         wrapper_state["opacity"] = 0.5
         leaf["initialState"]["opacity"] = 0.6
         leaf["texturedRectangle"]["singleTextureOpacity"] = 0.3
@@ -2450,115 +2126,6 @@ def test_multi_node_product_uses_a_non_one_initial_state_opacity_fallback():
     assert not any(e["slot"] == 3 for e in result["excluded"])
     override = next(o for o in result["opacityOverrides"] if o["slot"] == 3)
     assert override["opacity"] == pytest.approx(0.3, abs=1e-9)
-
-
-# --- round 4, item 1: discriminated wrapper/leaf schemas ---------------------------------------
-
-
-def test_a_wrapper_replaced_by_its_own_leaf_refuses():
-    """A top-level slot must be a non-textured wrapper with at least one child; substituting
-    slot 4's own leaf (which has `texture`/`texturedRectangle` and empty `layers`) in its place
-    used to pass the old schema (both were optional everywhere) and emit an override with the
-    WRONG rect, since the leaf's `initialState.position` was never the value the formula reads
-    for a wrapper."""
-
-    def wrapper_becomes_its_leaf(effect):
-        effect["baseLayer"]["layers"][4] = _leaf_of(effect["baseLayer"]["layers"][4])
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(wrapper_becomes_its_leaf))
-    assert isinstance(result, Unsupported)
-
-
-def test_a_leaf_without_texture_refuses():
-    def drop_texture(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
-        del leaf["texture"]
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(drop_texture))
-    assert isinstance(result, Unsupported)
-
-
-def test_a_leaf_without_textured_rectangle_refuses():
-    def drop_textured_rectangle(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
-        del leaf["texturedRectangle"]
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(drop_textured_rectangle))
-    assert isinstance(result, Unsupported)
-
-
-def test_a_wrapper_carrying_texture_keys_refuses():
-    """The inverse of the leaf checks: a non-terminal node (it still has a child) must not ALSO
-    carry `texture`/`texturedRectangle` -- a slot the offline schema cannot tell apart from a
-    single textured draw when the player might render two."""
-
-    def wrapper_gains_texture(effect):
-        wrapper = effect["baseLayer"]["layers"][4]
-        leaf = _leaf_of(wrapper)
-        wrapper["texture"] = leaf["texture"]
-        wrapper["texturedRectangle"] = copy.deepcopy(leaf["texturedRectangle"])
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(wrapper_gains_texture))
-    assert isinstance(result, Unsupported)
-
-
-# --- round 4, item 2: one per-axis <=1px geometry budget, not independent per-check budgets ----
-
-
-def test_root_and_child_subpixel_residuals_combine_to_refuse():
-    """0.75px root-origin residual plus 0.75px child-position residual is 1.5px of real,
-    ignored displacement even though EACH alone is under the old independent 1px budgets."""
-
-    def combined_subpixel_offsets(effect):
-        effect["baseLayer"]["initialState"]["position"]["pointX"] += 0.75
-        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
-        leaf["initialState"]["position"]["pointX"] += 0.75
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(combined_subpixel_offsets))
-    assert isinstance(result, Unsupported)
-    assert "accumulated geometry error" in result.reason
-
-
-def test_negative_wrapper_size_with_a_consistent_child_position_refuses():
-    """A negative wrapper width, with the child's `position` adjusted to still satisfy the
-    centred-in-parent residual for that (negative) width, must refuse on the wrapper's own
-    non-positive size -- a flipped/negative wrapper is not something the rect formula (or any
-    measured deck) ever produces."""
-
-    def negative_wrapper_width(effect):
-        wrapper = effect["baseLayer"]["layers"][4]
-        wrapper["initialState"]["width"] = -wrapper["initialState"]["width"]
-        leaf = _leaf_of(wrapper)
-        leaf["initialState"]["position"]["pointX"] = wrapper["initialState"]["width"] / 2
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(negative_wrapper_width))
-    assert isinstance(result, Unsupported)
-    assert "non-positive" in result.reason
-
-
-# --- round 4, item 3: numeric overflow and the fail-closed net -------------------------------
-
-
-def test_huge_integer_width_refuses_instead_of_raising_overflowerror():
-    """`math.isfinite` raises `OverflowError` (not `False`) on a Python int too large to convert
-    to a float; the validator must catch that itself, not rely on the outer net."""
-
-    def huge_width(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
-        leaf["initialState"]["width"] = 10**400
-
-    with pytest.raises(_Refuse, match="finite number"):
-        _check_effect_encoding(_mutate_sanitized_effect(huge_width))
-    result = effect_opacity_overrides(_mutate_sanitized_effect(huge_width))
-    assert isinstance(result, Unsupported)
-
-
-def test_huge_integer_duration_refuses_instead_of_raising_overflowerror():
-    def huge_duration(effect):
-        effect["duration"] = 10**1000
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(huge_duration))
-    assert isinstance(result, Unsupported)
 
 
 def _wrapper_shell(width: float, height: float, position: tuple[float, float]) -> dict:
@@ -2576,7 +2143,7 @@ def _wrapper_shell(width: float, height: float, position: tuple[float, float]) -
 
 
 def test_a_very_deep_layers_chain_refuses_via_the_recursion_guard():
-    """600 genuine wrapper levels (no leaf shape at any intermediate level, so the new
+    """Round 4 item 3. 600 genuine wrapper levels (no leaf shape at any intermediate level, so the
     wrapper/leaf schema does not short-circuit this early for an unrelated reason) exceed
     Python's default recursion limit inside the recursive schema validator; the public net's
     broadened `except Exception` catches the resulting `RecursionError`. This is a deliberate
@@ -2616,83 +2183,6 @@ def test_the_fail_closed_net_is_exercised_by_a_monkeypatched_exception(monkeypat
     assert isinstance(result, Unsupported)
     assert result.reason.startswith("unexpected malformed input")
     assert "ZeroDivisionError" in result.reason
-
-
-# --- round 4, item 4 (Fable B2): sublayerTransform[11] range, zPosition bound -------------------
-
-
-def test_sublayer_transform_index_0_off_identity_refuses():
-    def tamper(effect):
-        effect["baseLayer"]["layers"][0]["initialState"]["sublayerTransform"][0] = 1.0019
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(tamper))
-    assert isinstance(result, Unsupported)
-    assert "non-identity sublayerTransform" in result.reason
-
-
-def test_sublayer_transform_index_3_perspective_off_identity_refuses():
-    def tamper(effect):
-        effect["baseLayer"]["layers"][4]["initialState"]["sublayerTransform"][3] = 0.002
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(tamper))
-    assert isinstance(result, Unsupported)
-    assert "non-identity sublayerTransform" in result.reason
-
-
-def test_sublayer_transform_index_11_at_the_measured_value_passes():
-    def tamper(effect):
-        effect["baseLayer"]["layers"][0]["initialState"]["sublayerTransform"][11] = -0.0004
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(tamper))
-    assert isinstance(result, dict)
-
-
-def test_z_position_scalar_exceeding_the_measured_bound_refuses():
-    def tamper(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
-        group = leaf["animations"][0]
-        group["animations"].append(
-            {"additive": False, "timeOffset": 0, "beginTime": 0, "repeatCount": 0,
-             "fillMode": "both", "duration": 0.1, "autoreverses": False, "property": "zPosition",
-             "removedOnCompletion": True, "timingFunction": "EaseInEaseOut",
-             "from": {"scalar": 0}, "to": {"scalar": 2}}
-        )
-
-    with pytest.raises(_Refuse, match="range"):
-        _check_effect_encoding(_mutate_sanitized_effect(tamper))
-
-
-# --- round 4 (Fable S1): removedOnCompletion is pinned, not merely boolean-typed ---------------
-
-
-def test_group_removed_on_completion_must_be_false():
-    def tamper(effect):
-        effect["baseLayer"]["layers"][4]["animations"][0]["removedOnCompletion"] = True
-
-    with pytest.raises(_Refuse, match="removedOnCompletion"):
-        _check_effect_encoding(_mutate_sanitized_effect(tamper))
-
-
-def test_leaf_removed_on_completion_must_be_true():
-    def tamper(effect):
-        _opacity_anim_of(effect, 4)["removedOnCompletion"] = False
-
-    with pytest.raises(_Refuse, match="removedOnCompletion"):
-        _check_effect_encoding(_mutate_sanitized_effect(tamper))
-
-
-# --- O1's own exclusion/candidate rules, unconditional -----------------------------------------
-
-
-def test_settled_product_must_equal_single_texture_opacity():
-    def break_sto(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
-        leaf["texturedRectangle"]["singleTextureOpacity"] = 0.5
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(break_sto))
-    assert isinstance(result, dict)
-    assert {"slot": 4, "reason": "product-mismatch"} in result["excluded"]
-    assert all(o["slot"] != 4 for o in result["opacityOverrides"])
 
 
 def test_duplicate_size_only_blocks_patched_slots():
@@ -2835,19 +2325,6 @@ def test_gl_replay_flag_on_runtime_plan_is_pinned_and_qualified():
     assert GL_REPLAY_RUNTIME_PLAN_SHA256 in live_continuity.QUALIFIED_PLAN_SHA256
 
 
-def test_gl_replay_rule1_rejects_an_unmeasured_transition_name():
-    tmp = _mutate_slide(SLIDE1, lambda data: _map_transitions(data, lambda name: "apple:magic-move-dissolve"))
-    plan = derive_plan(tmp, SLIDES, resolver=_resolver, gl_replay=True)
-    assert isinstance(plan, ContinuityPlan)
-    refusal = next(r for r in plan.refusals if r["atScene"] == 2)
-    assert refusal["glReplay"] is False
-    assert "is not in the measured WebGL list" in refusal["glReplayReason"]
-    boundary_movies = {m["asset"]: m for m in _boundary(plan, 0)["movies"]}
-    assert boundary_movies["untitled.mov"]["glReplayReason"] == refusal["glReplayReason"]
-    # a rule-1 failure falls back to the ordinary (already-qualified) retire boundary.
-    assert plan.to_runtime() == EXPECTED_RUNTIME_PLAN
-
-
 def _add_second_continuing_movie(tmp: Path) -> None:
     """Give the 0->1 boundary a second continuing asset, alongside 'untitled.mov', so
     `len(continuing) != 1` (rule 2). The clone is a deep copy of the qualified movie node with a
@@ -2913,55 +2390,6 @@ def test_gl_replay_rule2_rejects_more_than_one_continuing_movie():
     ]
 
 
-@pytest.mark.parametrize("automatic_play", [True, "popped", 1])
-def test_gl_replay_rule4_rejects_a_non_click_driven_destination(automatic_play):
-    def change_first_event_automatic_play(data):
-        events = copy.deepcopy(data["events"])
-        if automatic_play == "popped":
-            events[0].pop("automaticPlay")
-        else:
-            events[0]["automaticPlay"] = automatic_play
-        return {**data, "events": events}
-
-    tmp = _mutate_slide(SLIDE2, change_first_event_automatic_play)
-    plan = derive_plan(tmp, SLIDES, resolver=_resolver, gl_replay=True)
-    assert isinstance(plan, ContinuityPlan)
-    refusal = next(r for r in plan.refusals if r["atScene"] == 2)
-    assert refusal["glReplay"] is False
-    assert "destination first event is not click-driven" in refusal["glReplayReason"]
-    assert plan.to_runtime() == EXPECTED_RUNTIME_PLAN
-
-
-def test_gl_replay_rule5_rejects_on_a_missing_effect_attributes_key():
-    def drop_attributes(effect):
-        del effect["attributes"]
-
-    tmp = _mutate_slide(SLIDE1, lambda data: _map_transitions_effect(data, drop_attributes))
-    plan = derive_plan(tmp, SLIDES, resolver=_resolver, gl_replay=True)
-    assert isinstance(plan, ContinuityPlan)
-    refusal = next(r for r in plan.refusals if r["atScene"] == 2)
-    assert refusal["glReplay"] is False
-    assert refusal["glReplayReason"].startswith("transition effect: ")
-    assert "missing measured keys" in refusal["glReplayReason"]
-    assert plan.to_runtime() == EXPECTED_RUNTIME_PLAN
-
-
-def test_gl_replay_rule5_rejects_an_unmeasured_animation_property():
-    def rotate_z(effect):
-        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
-        group = leaf["animations"][0]
-        group["animations"][0]["property"] = "transform.rotation.z"
-
-    tmp = _mutate_slide(SLIDE1, lambda data: _map_transitions_effect(data, rotate_z))
-    plan = derive_plan(tmp, SLIDES, resolver=_resolver, gl_replay=True)
-    assert isinstance(plan, ContinuityPlan)
-    refusal = next(r for r in plan.refusals if r["atScene"] == 2)
-    assert refusal["glReplay"] is False
-    assert refusal["glReplayReason"].startswith("transition effect: ")
-    assert "not a measured property" in refusal["glReplayReason"]
-    assert plan.to_runtime() == EXPECTED_RUNTIME_PLAN
-
-
 def _map_transitions_effect(data, transform):
     """Like `_map_transitions`, but hands the whole transition-effect dict (not just its
     `name`) to `transform`, for the rule-5 mutation tests."""
@@ -2981,30 +2409,75 @@ def _map_transitions_effect(data, transform):
     return {**data, "events": events}
 
 
-def test_to_runtime_refuses_unreadable_gl_replay_override_table():
-    plan = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=True)
-    assert isinstance(plan, ContinuityPlan)
-    boundary = plan.boundaries[0]
-    movie = boundary.movies[0]
-    assert movie.gl_replay is not None
-    bad_gl_replay = {**movie.gl_replay, "opacityOverrides": "not-a-list"}
-    bad_movie = replace(movie, gl_replay=bad_gl_replay)
-    bad_boundary = replace(boundary, movies=(bad_movie,))
-    result = replace(plan, boundaries=(bad_boundary, *plan.boundaries[1:])).to_runtime()
-    assert isinstance(result, Unsupported)
-    assert "unreadable override table" in result.reason
+def _set_first_event_automatic_play(automatic_play):
+    def apply(data):
+        events = copy.deepcopy(data["events"])
+        if automatic_play == "popped":
+            events[0].pop("automaticPlay")
+        else:
+            events[0]["automaticPlay"] = automatic_play
+        return {**data, "events": events}
+
+    return apply
 
 
-def test_to_runtime_refuses_gl_replay_mismatched_slot_lists():
+@pytest.mark.parametrize(
+    "uuid, transform, reason",
+    [
+        pytest.param(
+            SLIDE1, lambda data: _map_transitions(data, lambda _name: "apple:magic-move-dissolve"),
+            "transition 'apple:magic-move-dissolve' is not in the measured WebGL list", id="rule1-an-unmeasured-transition-name",
+        ),
+        *[
+            pytest.param(
+                SLIDE2, _set_first_event_automatic_play(value),
+                f"destination first event is not click-driven (automaticPlay={None if value == 'popped' else value!r})",
+                id=f"rule4-a-non-click-driven-destination-{value}",
+            )
+            for value in (True, "popped", 1)
+        ],
+        pytest.param(
+            SLIDE1, lambda data: _map_transitions_effect(data, lambda effect: effect.pop("attributes")),
+            "transition effect: <transition effect> is missing measured keys ['attributes']",
+            id="rule5-a-missing-effect-attributes-key",
+        ),
+        pytest.param(
+            SLIDE1,
+            lambda data: _map_transitions_effect(
+                data,
+                lambda effect: _slot_leaf(effect, 4)["animations"][0]["animations"][0].__setitem__("property", "transform.rotation.z"),
+            ),
+            "transition effect: <transition effect>.baseLayer.layers[4].layers[0].animations[0].animations[0].property "
+            "is not a measured property",
+            id="rule5-an-unmeasured-animation-property",
+        ),
+    ],
+)
+def test_gl_replay_rule_failure_falls_back_to_the_qualified_retire(uuid, transform, reason):
+    plan = derive_plan(_mutate_slide(uuid, transform), SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, ContinuityPlan)
+    refusal = next(r for r in plan.refusals if r["atScene"] == 2)
+    assert refusal["glReplay"] is False
+    assert refusal["glReplayReason"] == reason
+    boundary_movies = {m["asset"]: m for m in _boundary(plan, 0)["movies"]}
+    assert boundary_movies["untitled.mov"]["glReplayReason"] == reason
+    # a failed arming rule falls back to the ordinary (already-qualified) retire boundary.
+    assert plan.to_runtime() == EXPECTED_RUNTIME_PLAN
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        pytest.param(lambda gl_replay: {**gl_replay, "opacityOverrides": "not-a-list"}, id="overrides-not-a-list"),
+        pytest.param(lambda gl_replay: {**gl_replay, "slotRects": gl_replay["slotRects"][:-1]}, id="mismatched-slot-lists"),
+    ],
+)
+def test_to_runtime_refuses_an_unreadable_gl_replay_override_table(corrupt):
     plan = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=True)
     assert isinstance(plan, ContinuityPlan)
-    boundary = plan.boundaries[0]
-    movie = boundary.movies[0]
+    movie = plan.boundaries[0].movies[0]
     assert movie.gl_replay is not None
-    bad_gl_replay = {**movie.gl_replay, "slotRects": movie.gl_replay["slotRects"][:-1]}
-    bad_movie = replace(movie, gl_replay=bad_gl_replay)
-    bad_boundary = replace(boundary, movies=(bad_movie,))
-    result = replace(plan, boundaries=(bad_boundary, *plan.boundaries[1:])).to_runtime()
+    result = _gl_replay_plan_with(gl_replay=corrupt(movie.gl_replay)).to_runtime()
     assert isinstance(result, Unsupported)
     assert "unreadable override table" in result.reason
 
@@ -3148,11 +2621,8 @@ def test_to_runtime_refuses_when_the_destination_instance_is_not_in_slide_instan
 
 @pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")
 def test_real_export_gl_replay_parity_both_flag_states():
-    def resolver(root: Path, relative: str) -> Path:
-        return root / relative
-
     for flag in (False, True):
-        real = derive_plan(REAL_PLAYER_ROOT, SLIDES, resolver=resolver, gl_replay=flag)
+        real = derive_plan(REAL_PLAYER_ROOT, SLIDES, resolver=_unchecked_resolver, gl_replay=flag)
         fixture = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=flag)
         assert isinstance(real, ContinuityPlan)
         assert isinstance(fixture, ContinuityPlan)
@@ -3187,29 +2657,12 @@ def test_flag_off_as_dict_and_json_have_no_gl_replay_keys():
         }
 
 
-def _set_transition_name(data, value):
-    events = copy.deepcopy(data["events"])
-
-    def walk(obj):
-        if isinstance(obj, dict):
-            if obj.get("type") == "transition" and "name" in obj:
-                obj["name"] = value
-            for v in obj.values():
-                walk(v)
-        elif isinstance(obj, list):
-            for item in obj:
-                walk(item)
-
-    walk(events)
-    return {**data, "events": events}
-
-
 @pytest.mark.parametrize("bad_name", [42, [1, 2], {"nested": "object"}])
 def test_gl_replay_rejects_unreadable_transition_name_instead_of_raising(bad_name):
     """Finding 2 (Medium): a JSON-valid non-string transition `name` must not raise at
     `.startswith()` or at the `_GL_REPLAY_TRANSITIONS` membership test (an unhashable `list`/
     `dict` raises `TypeError` there) -- it must fail closed to `Unsupported`."""
-    tmp = _mutate_slide(SLIDE1, lambda data: _set_transition_name(data, bad_name))
+    tmp = _mutate_slide(SLIDE1, lambda data: _map_transitions(data, lambda _name: bad_name))
     plan = derive_plan(tmp, SLIDES, resolver=_resolver, gl_replay=True)
     assert isinstance(plan, Unsupported)
     assert "unreadable transition name" in plan.reason
@@ -3268,25 +2721,6 @@ def _loop_tree(object_ids=P2_LOOP_OBJECT_IDS, value="looping", root: Path | None
     for uuid in (SLIDE1, SLIDE2, SLIDE3, SLIDE4):
         _rewrite_slide_json(tmp, uuid, _set_loop_mode(object_ids, value))
     return tmp
-
-
-def _recorded_runtime(monkeypatch, plan: ContinuityPlan):
-    """`to_runtime()` plus the runtime dict it signed, recorded by wrapping `plan_signature`
-    -- the only way to see an unqualified runtime, which `to_runtime()` itself withholds."""
-    from obed_edom import live_continuity
-
-    signed: list[dict] = []
-    real_signature = live_continuity.plan_signature
-
-    def recording(runtime):
-        signed.append(copy.deepcopy(runtime))
-        return real_signature(runtime)
-
-    monkeypatch.setattr(live_continuity, "plan_signature", recording)
-    result = plan.to_runtime()
-    monkeypatch.setattr(live_continuity, "plan_signature", real_signature)
-    assert len(signed) == 1, signed
-    return result, signed[0]
 
 
 def test_loop_mode_is_in_the_measured_movie_vocabulary():
@@ -3412,18 +2846,24 @@ def test_real_p2_export_spliced_the_same_way_signs_the_same_two_shas(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "value",
-    ["bogus", True, None, "loopBackAndForth", "", "Looping", 1, 0, False, []],
-    ids=repr,
+    "object_ids, uuid, value",
+    [
+        *[
+            pytest.param(P2_LOOP_OBJECT_IDS[:1], SLIDE1, value, id=repr(value))
+            for value in ["bogus", True, None, "loopBackAndForth", "", "Looping", 1, 0, False, []]
+        ],
+        # WA0125 never continues across a boundary; its vocabulary is checked all the same.
+        pytest.param((P2_WA0125_OBJECT_ID,), SLIDE3, "loopBackAndForth", id="wa0125-no-boundary-carries"),
+    ],
 )
-def test_an_unmeasured_loop_mode_value_refuses_the_whole_deck(value):
+def test_an_unmeasured_loop_mode_value_refuses_the_whole_deck(object_ids, uuid, value):
     """L0-c (plan section 2.1): only "looping" was ever measured. The player also honours
     "loopBackAndForth" (as a plain loop), but no export has shown it, so it refuses like every
     other unmeasured vocabulary."""
-    plan = derive_plan(_loop_tree(P2_LOOP_OBJECT_IDS[:1], value), SLIDES, resolver=_resolver)
+    plan = derive_plan(_loop_tree(object_ids, value), SLIDES, resolver=_resolver)
     assert isinstance(plan, Unsupported)
     assert plan.reason == (
-        f"movie on slide {SLIDE1} has an unmeasured loopMode {value!r} (only 'looping' is qualified)"
+        f"movie on slide {uuid} has an unmeasured loopMode {value!r} (only 'looping' is qualified)"
     )
 
 
@@ -3434,13 +2874,6 @@ def test_an_object_valued_loop_mode_is_refused_as_a_possible_mask():
     assert isinstance(plan, Unsupported)
     assert "possible mask" in plan.reason
     assert "movie.loopMode" in plan.reason
-
-
-def test_an_unmeasured_loop_mode_on_a_movie_no_boundary_carries_still_refuses():
-    """WA0125 never continues across a boundary; its vocabulary is checked all the same."""
-    plan = derive_plan(_loop_tree((P2_WA0125_OBJECT_ID,), "loopBackAndForth"), SLIDES, resolver=_resolver)
-    assert isinstance(plan, Unsupported)
-    assert "unmeasured loopMode 'loopBackAndForth'" in plan.reason
 
 
 def test_a_looping_movie_no_entry_names_leaves_the_runtime_alone():
@@ -3633,32 +3066,24 @@ def _add_build(build_type: str, name: str, object_id: str | None):
 
 
 @pytest.mark.parametrize(
-    "uuid, build_type, object_id, to_player",
+    "uuid, build_type, name, object_id, codes",
     [
-        (SLIDE4, "buildIn", P2_OBJECT_IDS["slide4"], 3),
-        (SLIDE3, "buildOut", P2_OBJECT_IDS["slide3"], 3),
-        (SLIDE4, "buildIn", None, 3),
+        # Magic Move never pairs an object that builds in on the destination or out on the source
+        # (F3); a build naming no object might be one, so it refuses too.
+        pytest.param(SLIDE4, "buildIn", "apple:dissolve", P2_OBJECT_IDS["slide4"], [(1, "overlap"), (3, "R2")], id="dst-builds-in"),
+        pytest.param(SLIDE3, "buildOut", "apple:dissolve", P2_OBJECT_IDS["slide3"], [(1, "overlap"), (3, "R2")], id="src-builds-out"),
+        pytest.param(SLIDE4, "buildIn", "apple:dissolve", None, [(1, "overlap"), (3, "R2")], id="unattributed-build"),
+        pytest.param(SLIDE4, "buildIn", "apple:movie-start", P2_OBJECT_IDS["slide4"], [(1, "overlap")], id="movie-start-build-does-not-refuse"),
+        pytest.param(SLIDE4, "buildIn", "apple:dissolve", "SOME-TEXT-BOX", [(1, "overlap")], id="build-on-another-object-does-not-refuse"),
+        # Slide 2 -> 3 is a Dissolve, so a nameless build-out on slide 2 affects no carry; the
+        # 1 -> 2 move only reads slide 2's build-ins.
+        pytest.param(SLIDE2, "buildOut", "apple:dissolve", None, [(1, "overlap")], id="unattributed-build-on-a-slide-no-carry-touches"),
     ],
-    ids=["dst-builds-in", "src-builds-out", "unattributed-build"],
 )
-def test_r2_a_carried_instance_that_builds_refuses_the_boundary(uuid, build_type, object_id, to_player):
-    """Magic Move never pairs an object that builds in on the destination or out on the source
-    (F3); a build naming no object might be one, so it refuses too."""
-    plan = _plan(_mutate_slide(uuid, _add_build(build_type, "apple:dissolve", object_id)))
+def test_r2_a_carried_instance_that_builds_refuses_the_boundary(uuid, build_type, name, object_id, codes):
+    plan = _plan(_mutate_slide(uuid, _add_build(build_type, name, object_id)))
     assert isinstance(plan, ContinuityPlan)
-    assert _refusal_codes(plan) == [(1, "overlap"), (to_player, "R2")]
-
-
-def test_r2_a_movie_start_build_does_not_refuse():
-    plan = _plan(_mutate_slide(SLIDE4, _add_build("buildIn", "apple:movie-start", P2_OBJECT_IDS["slide4"])))
-    assert isinstance(plan, ContinuityPlan)
-    assert _refusal_codes(plan) == [(1, "overlap")]
-
-
-def test_r2_a_build_on_another_object_does_not_refuse():
-    plan = _plan(_mutate_slide(SLIDE4, _add_build("buildIn", "apple:dissolve", "SOME-TEXT-BOX")))
-    assert isinstance(plan, ContinuityPlan)
-    assert _refusal_codes(plan) == [(1, "overlap")]
+    assert _refusal_codes(plan) == codes
 
 
 def test_r3_a_transition_off_the_last_event_refuses_the_deck():
@@ -3811,14 +3236,14 @@ def test_movie_table_names_only_assets_with_an_entry_and_footprints_their_first_
 def test_a_mid_deck_none_transition_is_a_cut_like_a_dissolve():
     """Keynote exports "no transition" as the name `none` (S0: every last slide). Mid-deck it is a
     cut: the continuing movie restarts, and the Magic Move after it still carries."""
-    plan = _plan(_mutate_slide(SLIDE2, lambda data: _set_transition_name(data, "none")))
+    plan = _plan(_mutate_slide(SLIDE2, lambda data: _map_transitions(data, lambda _name: "none")))
     assert isinstance(plan, ContinuityPlan)
     assert [m.action for m in plan.boundaries[1].movies] == ["restart"]
     assert plan.to_runtime() == EXPECTED_RUNTIME_PLAN
 
 
 def test_an_unknown_transition_name_still_refuses_the_deck():
-    plan = _plan(_mutate_slide(SLIDE2, lambda data: _set_transition_name(data, "apple:cube")))
+    plan = _plan(_mutate_slide(SLIDE2, lambda data: _map_transitions(data, lambda _name: "apple:cube")))
     assert plan == Unsupported("unsupported transition 'apple:cube' at player index 1 -> 2")
 
 
@@ -3832,11 +3257,3 @@ def test_r2_an_unattributed_build_says_it_cannot_be_ruled_out():
         "export gives no other way to tell whether it builds 'untitled.mov', so the carry is refused "
         "rather than guessed"
     )
-
-
-def test_r2_an_unattributed_build_on_a_slide_no_carry_touches_does_not_refuse():
-    """Slide 2 -> 3 is a Dissolve, so a nameless build-out on slide 2 affects no carry; the 1 -> 2
-    move only reads slide 2's build-ins."""
-    plan = _plan(_mutate_slide(SLIDE2, _add_build("buildOut", "apple:dissolve", None)))
-    assert isinstance(plan, ContinuityPlan)
-    assert _refusal_codes(plan) == [(1, "overlap")]

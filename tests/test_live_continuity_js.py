@@ -27,27 +27,22 @@ def test_continuity_version_is_pinned_int():
     assert isinstance(live_continuity_js.CONTINUITY_VERSION, int)
 
 
-def test_js_sha256_matches_pinned_bytes():
-    expected = hashlib.sha256(live_continuity_js.PRESERVE_CORE_JS.encode()).hexdigest()
-    assert live_continuity_js.js_sha256() == expected
-    # Stable across repeated calls (no hidden mutable state feeding the hash).
-    assert live_continuity_js.js_sha256() == live_continuity_js.js_sha256()
-
-
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
 PINNED_CORE_SHA256 = "9c4fc61fcce22e8acf3b1dab9a6eb66722e7e0ae9dcf943bda69e3bcbd87ea01"
 
 
-def test_js_sha256_matches_the_pinned_literal():
+def test_js_sha256_hashes_the_core_bytes_and_matches_the_pinned_literal():
+    expected = hashlib.sha256(live_continuity_js.PRESERVE_CORE_JS.encode()).hexdigest()
+    assert live_continuity_js.js_sha256() == expected
+    # Stable across repeated calls (no hidden mutable state feeding the hash).
+    assert live_continuity_js.js_sha256() == live_continuity_js.js_sha256()
     assert live_continuity_js.js_sha256() == PINNED_CORE_SHA256
 
 
 def test_p2_dissolve_live_reexports_the_same_object():
     """`PRESERVE_SCRIPT` must be the shared core, not a second copy of the bytes."""
     import importlib.util
-    import sys
-    from pathlib import Path
 
     repo = Path(__file__).resolve().parent.parent
     for p in (repo / "src", repo / "scripts"):
@@ -63,12 +58,18 @@ def test_p2_dissolve_live_reexports_the_same_object():
     assert mod.PRESERVE_SCRIPT is live_continuity_js.PRESERVE_CORE_JS
 
 
-def _run_core_in_node(*, plan, fail_install=False, call_disable_after=False) -> dict:
-    """Execute PRESERVE_CORE_JS in a minimal DOM-less sandbox and report what
-    it installed. `plan` is JSON-serialisable or None (no plan injected)."""
+def _node_stdout(harness: str) -> str:
     node = shutil.which("node")
     if not node:
         pytest.skip("Node is required to exercise the JS core")
+    result = subprocess.run([node, "-e", harness], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr[-3000:]
+    return result.stdout
+
+
+def _run_core_in_node(*, plan, fail_install=False, call_disable_after=False) -> dict:
+    """Execute PRESERVE_CORE_JS in a minimal DOM-less sandbox and report what
+    it installed. `plan` is JSON-serialisable or None (no plan injected)."""
     plan_js = "undefined" if plan is None else json.dumps(plan)
     harness = f"""
 const events = [];
@@ -120,43 +121,44 @@ console.log(JSON.stringify({{
   disableThrew, disableReturned,
 }}));
 """
-    result = subprocess.run([node, "-e", harness], check=True, text=True, capture_output=True)
-    return json.loads(result.stdout.strip().splitlines()[-1])
+    return json.loads(_node_stdout(harness).strip().splitlines()[-1])
 
 
-def test_no_plan_guard_leaves_page_untouched():
-    """Fail-closed: with no `window.__OBED_CONTINUITY__`, the core must install
-    nothing (never even reach the `__OBED_P2_PRESERVE__` idempotency object)."""
-    out = _run_core_in_node(plan=None)
-    assert out == {
-        "threw": None, "installed": False, "ready": False, "disabled": False,
-        "disableThrew": None, "disableReturned": None,
-    }
+_INSTALLED_NOTHING = {
+    "threw": None, "installed": False, "ready": False, "disabled": False,
+    "disableThrew": None, "disableReturned": None,
+}
+_EMPTY_V2_PLAN = {"schema": 2, "movies": {}, "boundaries": []}
 
 
-def test_with_plan_installs_the_preserve_object():
-    plan = {
-        "schema": 2,
-        "movies": {"movie1": {"assetKeys": ["untitled.mov"], "footprint": {"x": 1, "y": 2, "w": 3, "h": 4}}},
-        "boundaries": [{"atScene": 6, "action": "restart", "movieKey": "movie1",
-                        "src": {"objectId": "A2", "rect": {"x": 1, "y": 2, "w": 3, "h": 4}}}],
-    }
-    out = _run_core_in_node(plan=plan)
-    assert out == {
-        "threw": None, "installed": True, "ready": True, "disabled": False,
-        "disableThrew": None, "disableReturned": None,
-    }
-
-
-@pytest.mark.parametrize("schema", [None, 1, 3, "2"], ids=["absent", "one", "three", "string"])
-def test_a_plan_that_is_not_schema_2_installs_nothing(schema):
-    """Fail closed on the plan's shape: only `schema === 2` installs the core."""
-    plan = {"movies": {}, "boundaries": []}
-    if schema is not None:
-        plan["schema"] = schema
-    out = _run_core_in_node(plan=plan)
-    assert out["installed"] is False
-    assert out["threw"] is None
+@pytest.mark.parametrize(
+    "plan,fail_install,expected",
+    [
+        # Fail-closed: with no `window.__OBED_CONTINUITY__`, the core must install
+        # nothing (never even reach the `__OBED_P2_PRESERVE__` idempotency object).
+        pytest.param(None, False, _INSTALLED_NOTHING, id="no-plan-guard-leaves-page-untouched"),
+        # Fail closed on the plan's shape: only `schema === 2` installs the core.
+        *[
+            pytest.param({k: v for k, v in {**_EMPTY_V2_PLAN, "schema": schema}.items() if v is not None},
+                         False, _INSTALLED_NOTHING, id=f"not-schema-2-{label}")
+            for schema, label in ((None, "absent"), (1, "one"), (3, "three"), ("2", "string"))
+        ],
+        pytest.param(
+            {
+                "schema": 2,
+                "movies": {"movie1": {"assetKeys": ["untitled.mov"], "footprint": {"x": 1, "y": 2, "w": 3, "h": 4}}},
+                "boundaries": [{"atScene": 6, "action": "restart", "movieKey": "movie1",
+                                "src": {"objectId": "A2", "rect": {"x": 1, "y": 2, "w": 3, "h": 4}}}],
+            },
+            False, {**_INSTALLED_NOTHING, "installed": True, "ready": True},
+            id="with-plan-installs-the-preserve-object",
+        ),
+        pytest.param(_EMPTY_V2_PLAN, True, {**_INSTALLED_NOTHING, "threw": "install failed", "installed": True},
+                     id="partial-install-never-sets-ready"),
+    ],
+)
+def test_install_outcome(plan, fail_install, expected):
+    assert _run_core_in_node(plan=plan, fail_install=fail_install) == expected
 
 
 def test_transparent_chrome_gated_by_plan_flag():
@@ -179,22 +181,12 @@ def test_preserve_core_js_source_declares_the_fail_closed_guard():
     assert "if (!OBED_PLAN || OBED_PLAN.schema !== 2) return;" in js
 
 
-def test_partial_install_never_sets_ready():
-    out = _run_core_in_node(plan={"schema": 2, "movies": {}, "boundaries": []}, fail_install=True)
-    assert out == {
-        "threw": "install failed", "installed": True, "ready": False, "disabled": False,
-        "disableThrew": None, "disableReturned": None,
-    }
-
-
 def test_disable_survives_a_partial_install():
     """Codex round 1, 1a: a core that throws midway (before `ready`) must
     still be `disable()`-able without a TDZ ReferenceError — `disabled` (and
     everything else `disable()` touches before its `try`) is hoisted above the
     `window.__OBED_P2_PRESERVE__` assignment."""
-    out = _run_core_in_node(
-        plan={"schema": 2, "movies": {}, "boundaries": []}, fail_install=True, call_disable_after=True,
-    )
+    out = _run_core_in_node(plan=_EMPTY_V2_PLAN, fail_install=True, call_disable_after=True)
     assert out["threw"] == "install failed"
     assert out["disableThrew"] is None
     assert out["disableReturned"] is True
@@ -221,10 +213,24 @@ def _stage_map_fragment() -> str:
     return core[start:end]
 
 
+#: The 3->4 bridge every extracted-fragment harness drives.
+_FRAGMENT_BOUNDARY_JS = """const boundary = {
+  atScene: 8, action: 'bridge', movieKey: 'movie1', durationSeconds: 1.5,
+  src: {objectId: 'A3', rect: {x: 198, y: 797, w: 952, h: 268}},
+  dst: {objectId: 'A4', rect: {x: 327, y: 709, w: 1266, h: 356}},
+};"""
+
+
+def _stage_map_el_js(stage: dict) -> str:
+    """The fake `#stage` element `stageMap()` measures, for an extracted-fragment harness."""
+    ow, oh, s, ox, oy = (json.dumps(stage[k]) for k in ("ow", "oh", "s", "ox", "oy"))
+    return f"""const stageMapEl = {{
+  offsetWidth: {ow}, offsetHeight: {oh},
+  getBoundingClientRect: () => ({{left: {ox}, top: {oy}, width: {ow} * {s}, height: {oh} * {s}}})
+}};"""
+
+
 def _run_bridge_motion_in_node(*, stop_before_retry: bool = False, stage: dict = _IDENTITY_STAGE) -> dict:
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("Node is required to exercise the JS core")
     core = live_continuity_js.PRESERVE_CORE_JS
     start = core.index("  function dstRect(entry) {")
     end = core.index("  function keepAtSlot", start)
@@ -232,11 +238,7 @@ def _run_bridge_motion_in_node(*, stop_before_retry: bool = False, stage: dict =
     harness = f"""
 let now = 0, connected = false, preserveGeneration = 0;
 const frames = [];
-const boundary = {{
-  atScene: 8, action: 'bridge', movieKey: 'movie1', durationSeconds: 1.5,
-  src: {{objectId: 'A3', rect: {{x: 198, y: 797, w: 952, h: 268}}}},
-  dst: {{objectId: 'A4', rect: {{x: 327, y: 709, w: 1266, h: 356}}}},
-}};
+{_FRAGMENT_BOUNDARY_JS}
 const nextEntry = (inst) => inst === 'A3' ? boundary : null;
 const instanceOf = (v) => v.__obedInstance;
 const hasDeparted = () => true;
@@ -244,14 +246,7 @@ const currentHashNum = () => 7;
 const beginMove = () => {{}};
 const note = () => {{}};
 const stage = {{appendChild(v) {{connected = true; v.parentNode = stage;}}}};
-const stageMapEl = {{
-  offsetWidth: {json.dumps(stage["ow"])}, offsetHeight: {json.dumps(stage["oh"])},
-  getBoundingClientRect: () => ({{
-    left: {json.dumps(stage["ox"])}, top: {json.dumps(stage["oy"])},
-    width: {json.dumps(stage["ow"])} * {json.dumps(stage["s"])},
-    height: {json.dumps(stage["oh"])} * {json.dumps(stage["s"])}
-  }})
-}};
+{_stage_map_el_js(stage)}
 const document = {{
   getElementById: (id) => id === 'stage' ? stageMapEl : stage,
   body: stage, contains: () => connected
@@ -285,8 +280,7 @@ console.log(JSON.stringify({{
   pinningAfterClear: video.__obedMotionPinning,
 }}));
 """
-    result = subprocess.run([node, "-e", harness], check=True, text=True, capture_output=True)
-    return json.loads(result.stdout)
+    return json.loads(_node_stdout(harness))
 
 
 @pytest.mark.parametrize("stop_before_retry", [False, True])
@@ -298,47 +292,38 @@ def test_bridge_redetach_reconnects_without_rewinding_motion(stop_before_retry):
         "left": 245.3, "top": 764.7333333333,
         "width": 1067.1333333333, "height": 300.2666666667,
     })
-
-
-def test_bridge_motion_scaled_stage_maps_authored_rect_to_screen():
-    """`keepThroughBridge` interpolates in AUTHORED space then maps once — at
-    s=4/3, origin (0,0) every written screen px is the identity-case value × s."""
-    identity = _run_bridge_motion_in_node(stage=_IDENTITY_STAGE)
-    scaled = _run_bridge_motion_in_node(stage=_SCALED_STAGE)
-    s = _SCALED_STAGE["s"]
-    assert scaled["beforeDetach"] == pytest.approx(identity["beforeDetach"] * s)
-    for key in ("left", "top", "width", "height"):
-        assert scaled["afterRetry"][key] == pytest.approx(identity["afterRetry"][key] * s)
-
-
-def test_bridge_motion_letterboxed_stage_offsets_the_vertical_origin():
-    """A non-zero stage origin (letterboxed 1600x1000) only shifts y/top —
-    2560x1440 alone (origin (0,0)) can't see an offset-mapping bug."""
-    identity = _run_bridge_motion_in_node(stage=_IDENTITY_STAGE)
-    letterboxed = _run_bridge_motion_in_node(stage=_LETTERBOXED_STAGE)
-    s = _LETTERBOXED_STAGE["s"]
-    oy = _LETTERBOXED_STAGE["oy"]
-    assert letterboxed["beforeDetach"] == pytest.approx(identity["beforeDetach"] * s)
-    assert letterboxed["afterRetry"]["left"] == pytest.approx(identity["afterRetry"]["left"] * s)
-    assert letterboxed["afterRetry"]["top"] == pytest.approx(identity["afterRetry"]["top"] * s + oy)
-    assert letterboxed["afterRetry"]["width"] == pytest.approx(identity["afterRetry"]["width"] * s)
-    assert letterboxed["afterRetry"]["height"] == pytest.approx(identity["afterRetry"]["height"] * s)
-
-
-def test_clear_generation_stops_bridge_motion_callbacks():
-    result = _run_bridge_motion_in_node()
+    # A clear (generation bump) stops the motion callbacks.
     assert result["unchangedAfterClear"] is True
     assert result["pendingFramesAfterClear"] == 0
     assert result["pinningAfterClear"] is False
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        # `keepThroughBridge` interpolates in AUTHORED space then maps once — at
+        # s=4/3, origin (0,0) every written screen px is the identity-case value × s.
+        pytest.param(_SCALED_STAGE, id="scaled-maps-authored-rect-to-screen"),
+        # A non-zero stage origin (letterboxed 1600x1000) only shifts y/top —
+        # 2560x1440 alone (origin (0,0)) can't see an offset-mapping bug.
+        pytest.param(_LETTERBOXED_STAGE, id="letterboxed-offsets-the-vertical-origin"),
+    ],
+)
+def test_bridge_motion_maps_the_identity_motion_onto_the_stage(stage):
+    identity = _run_bridge_motion_in_node(stage=_IDENTITY_STAGE)
+    mapped = _run_bridge_motion_in_node(stage=stage)
+    s, ox, oy = stage["s"], stage["ox"], stage["oy"]
+    assert mapped["beforeDetach"] == pytest.approx(identity["beforeDetach"] * s + ox)
+    assert mapped["afterRetry"]["left"] == pytest.approx(identity["afterRetry"]["left"] * s + ox)
+    assert mapped["afterRetry"]["top"] == pytest.approx(identity["afterRetry"]["top"] * s + oy)
+    assert mapped["afterRetry"]["width"] == pytest.approx(identity["afterRetry"]["width"] * s)
+    assert mapped["afterRetry"]["height"] == pytest.approx(identity["afterRetry"]["height"] * s)
 
 
 def _run_slot_and_bridge34_in_node(*, stage: dict) -> dict:
     """`keepAtSlot` and `bridgeTo34` both place a `<video>` on `document.body`
     (screen px) at the AUTHORED `slide4Rect()` — this exercises both against
     the same stage fixture in one Node process."""
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("Node is required to exercise the JS core")
     core = live_continuity_js.PRESERVE_CORE_JS
     motion_start = core.index("  function dstRect(entry) {")
     motion_end = core.index("  function rectOverlapArea(r, rect) {", motion_start)
@@ -352,11 +337,7 @@ def _run_slot_and_bridge34_in_node(*, stage: dict) -> dict:
     harness = f"""
 let connected = false, preserveGeneration = 0, disabled = false;
 const frames = [];
-const boundary = {{
-  atScene: 8, action: 'bridge', movieKey: 'movie1', durationSeconds: 1.5,
-  src: {{objectId: 'A3', rect: {{x: 198, y: 797, w: 952, h: 268}}}},
-  dst: {{objectId: 'A4', rect: {{x: 327, y: 709, w: 1266, h: 356}}}},
-}};
+{_FRAGMENT_BOUNDARY_JS}
 const nextEntry = () => null;
 const instanceOf = (v) => v.__obedInstance;
 const hasDeparted = () => true;
@@ -364,14 +345,7 @@ const currentHashNum = () => 9;
 const beginMove = () => {{}};
 const note = () => {{}};
 const stage = {{appendChild(v) {{connected = true; v.parentNode = stage;}}}};
-const stageMapEl = {{
-  offsetWidth: {json.dumps(stage["ow"])}, offsetHeight: {json.dumps(stage["oh"])},
-  getBoundingClientRect: () => ({{
-    left: {json.dumps(stage["ox"])}, top: {json.dumps(stage["oy"])},
-    width: {json.dumps(stage["ow"])} * {json.dumps(stage["s"])},
-    height: {json.dumps(stage["oh"])} * {json.dumps(stage["s"])}
-  }})
-}};
+{_stage_map_el_js(stage)}
 const document = {{
   getElementById: (id) => id === 'stage' ? stageMapEl : stage,
   body: stage, contains: () => connected
@@ -399,8 +373,7 @@ const bridgeDest = {{left: parseFloat(bridged.style.left), top: parseFloat(bridg
 
 console.log(JSON.stringify({{slotDest, bridgeDest}}));
 """
-    result = subprocess.run([node, "-e", harness], check=True, text=True, capture_output=True)
-    return json.loads(result.stdout)
+    return json.loads(_node_stdout(harness))
 
 
 @pytest.mark.parametrize("stage", [_IDENTITY_STAGE, _SCALED_STAGE, _LETTERBOXED_STAGE], ids=["identity", "scaled", "letterboxed"])
@@ -432,9 +405,6 @@ def _run_slot_detach_in_node(
     rect is derived from its own inline style, so a converged pin is a fixed
     point (a static rect would double every frame).
     """
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("Node is required to exercise the JS core")
     core = live_continuity_js.PRESERVE_CORE_JS
     start = core.index("  function dstRect(entry) {")
     end = core.index("  function rectOverlapArea(r, rect) {", start)
@@ -442,11 +412,7 @@ def _run_slot_detach_in_node(
     harness = f"""
 let connected = true, disabled = false, preserveGeneration = 0, hash = 9, moves = 0;
 const notes = [], frames = [];
-const boundary = {{
-  atScene: 8, action: 'bridge', movieKey: 'movie1', durationSeconds: 1.5,
-  src: {{objectId: 'A3', rect: {{x: 198, y: 797, w: 952, h: 268}}}},
-  dst: {{objectId: 'A4', rect: {{x: 327, y: 709, w: 1266, h: 356}}}},
-}};
+{_FRAGMENT_BOUNDARY_JS}
 const nextEntry = () => null;
 const instanceOf = (v) => v.__obedInstance;
 const hasDeparted = () => true;
@@ -464,14 +430,7 @@ const stage = {{
     connected = false;
   }}
 }};
-const stageMapEl = {{
-  offsetWidth: {json.dumps(stage["ow"])}, offsetHeight: {json.dumps(stage["oh"])},
-  getBoundingClientRect: () => ({{
-    left: {json.dumps(stage["ox"])}, top: {json.dumps(stage["oy"])},
-    width: {json.dumps(stage["ow"])} * {json.dumps(stage["s"])},
-    height: {json.dumps(stage["oh"])} * {json.dumps(stage["s"])}
-  }})
-}};
+{_stage_map_el_js(stage)}
 const document = {{
   getElementById: (id) => id === 'stage' ? stageMapEl : stage,
   querySelector: () => null, body: stage, contains: () => connected
@@ -519,8 +478,7 @@ console.log(JSON.stringify({{
   pendingFrames: frames.length,
 }}));
 """
-    result = subprocess.run([node, "-e", harness], check=True, text=True, capture_output=True)
-    return json.loads(result.stdout)
+    return json.loads(_node_stdout(harness))
 
 
 @pytest.mark.parametrize(
@@ -548,31 +506,28 @@ def test_slot_pin_reattaches_a_detached_bridged_video(stage):
     assert result["moves"] == 1              # beginMove() before the append
 
 
-def test_slot_pin_does_not_reattach_after_clear():
-    """`clear()` / `disable()` bump `preserveGeneration` and stamp
-    `__obedGen = -1`; a detach after that must end the loop, not resurrect a
-    retired decoder."""
-    result = _run_slot_detach_in_node(mutate="preserveGeneration += 1; real.__obedGen = -1;")
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        # `clear()` / `disable()` bump `preserveGeneration` and stamp `__obedGen = -1`;
+        # a detach after that must end the loop, not resurrect a retired decoder.
+        pytest.param("preserveGeneration += 1; real.__obedGen = -1;", id="after-clear"),
+        # `retire-on-start-movie` stamps `__obedGen = -1` WITHOUT bumping the
+        # generation — liveness must be read off the element, not a generation
+        # captured at engage time.
+        pytest.param("real.__obedGen = -1;", id="after-a-per-element-retire"),
+        pytest.param("disabled = true;", id="when-disabled"),
+        # Scene left the bridge zone (hash < s4): the loop ends as it always did,
+        # before the re-attach path is even considered.
+        pytest.param("hash = 7;", id="outside-the-bridge-zone"),
+        pytest.param("real.ended = true;", id="an-ended-decoder"),
+    ],
+)
+def test_slot_pin_does_not_reattach_a_detached_decoder(mutate):
+    result = _run_slot_detach_in_node(mutate=mutate)
     assert result["reattachNotes"] == 0
     assert result["failureNotes"] == []
     assert result["connected"] is False
-    assert result["pinning"] is False
-    assert result["pendingFrames"] == 0
-
-
-def test_slot_pin_does_not_reattach_after_a_per_element_retire():
-    """`retire-on-start-movie` stamps `__obedGen = -1` WITHOUT bumping the
-    generation — liveness must be read off the element, not a generation
-    captured at engage time."""
-    result = _run_slot_detach_in_node(mutate="real.__obedGen = -1;")
-    assert result["reattachNotes"] == 0
-    assert result["pinning"] is False
-    assert result["pendingFrames"] == 0
-
-
-def test_slot_pin_does_not_reattach_when_disabled():
-    result = _run_slot_detach_in_node(mutate="disabled = true;")
-    assert result["reattachNotes"] == 0
     assert result["pinning"] is False
     assert result["pendingFrames"] == 0
 
@@ -617,24 +572,6 @@ def test_slot_pin_keeps_holding_a_connected_live_decoder():
     assert result["reattachNotes"] == 0
     assert result["stillRemounted"] is True
     assert result["moves"] == 0
-
-
-def test_slot_pin_does_not_reattach_outside_the_bridge_zone():
-    """Scene left the bridge zone (hash < s4): the loop ends as it always did,
-    before the re-attach path is even considered."""
-    result = _run_slot_detach_in_node(mutate="hash = 7;")
-    assert result["reattachNotes"] == 0
-    assert result["failureNotes"] == []
-    assert result["connected"] is False
-    assert result["pinning"] is False
-    assert result["pendingFrames"] == 0
-
-
-def test_slot_pin_does_not_reattach_an_ended_decoder():
-    result = _run_slot_detach_in_node(mutate="real.ended = true;")
-    assert result["reattachNotes"] == 0
-    assert result["pinning"] is False
-    assert result["pendingFrames"] == 0
 
 
 @pytest.mark.parametrize(
@@ -837,25 +774,24 @@ __AFTER_CORE__
 _LOADED = "document.readyState = 'complete';"
 
 
-def _run_full_core_in_node(
-    *, plan: dict, stage: dict | None, script: str, after_core: str = _LOADED
-) -> dict:
-    """Run the real `PRESERVE_CORE_JS` IIFE against the fake DOM above, then
+def _full_harness(*, plan: dict, stage: dict | None, script: str, after_core: str = _LOADED) -> str:
+    """The real `PRESERVE_CORE_JS` IIFE against the fake DOM above, then
     `after_core` (the rest of the page's inline scripts, then the load), then
     `script` (which must `console.log(JSON.stringify(...))` its result)."""
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("Node is required to exercise the JS core")
-    harness = (
+    return (
         _FULL_HARNESS_PREAMBLE.replace("__STAGE__", json.dumps(stage))
         .replace("__PLAN__", json.dumps(plan))
         .replace("__AFTER_CORE__", after_core)
         .replace("__CORE__", live_continuity_js.PRESERVE_CORE_JS)
         + script
     )
-    result = subprocess.run([node, "-e", harness], text=True, capture_output=True)
-    assert result.returncode == 0, result.stderr[-3000:]
-    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def _run_full_core_in_node(
+    *, plan: dict, stage: dict | None, script: str, after_core: str = _LOADED
+) -> dict:
+    harness = _full_harness(plan=plan, stage=stage, script=script, after_core=after_core)
+    return json.loads(_node_stdout(harness).strip().splitlines()[-1])
 
 
 def _inst(object_id: str, rect: dict) -> dict:
@@ -886,24 +822,32 @@ def test_stage_map_matches_measured_formula(stage):
     })
 
 
-def test_stage_map_null_when_stage_missing():
-    result = _run_full_core_in_node(plan=_MOVIE_PLAN, stage=None, script="console.log(JSON.stringify(P.stageMap()));")
+@pytest.mark.parametrize(
+    "stage",
+    [
+        pytest.param(None, id="stage-missing"),
+        pytest.param(dict(_IDENTITY_STAGE, ow=0), id="box-is-degenerate"),
+        pytest.param(
+            {**{k: v for k, v in _SCALED_STAGE.items() if k != "s"}, "sx": 4 / 3, "sy": 4 / 3 * 1.01},  # > 0.1% apart
+            id="scale-is-non-uniform",
+        ),
+    ],
+)
+def test_stage_map_null_when(stage):
+    result = _run_full_core_in_node(plan=_MOVIE_PLAN, stage=stage, script="console.log(JSON.stringify(P.stageMap()));")
     assert result is None
 
 
-def test_stage_map_null_when_box_is_degenerate():
-    zero_box = dict(_IDENTITY_STAGE, ow=0)
-    result = _run_full_core_in_node(plan=_MOVIE_PLAN, stage=zero_box, script="console.log(JSON.stringify(P.stageMap()));")
-    assert result is None
-
-
-def test_stage_map_null_when_scale_is_non_uniform():
-    non_uniform = dict(_SCALED_STAGE)
-    non_uniform.pop("s")
-    non_uniform["sx"] = 4 / 3
-    non_uniform["sy"] = 4 / 3 * 1.01  # > 0.1% relative difference
-    result = _run_full_core_in_node(plan=_MOVIE_PLAN, stage=non_uniform, script="console.log(JSON.stringify(P.stageMap()));")
-    assert result is None
+def _stash_a1_captured_at(rect_js: str) -> str:
+    """Pool a ready `A1` whose captured rect is `rect_js` (a src clear stashes it), then `remountAll()`."""
+    return r"""
+const v = video('A1');
+v.readyState = 4; v.currentTime = 1;
+v.src = 'https://host/untitled.mov';
+v._rect = __RECT__;
+v.src = '';
+P.remountAll();
+""".replace("__RECT__", rect_js)
 
 
 @pytest.mark.parametrize("stage", [_IDENTITY_STAGE, _SCALED_STAGE, _LETTERBOXED_STAGE], ids=["identity", "scaled", "letterboxed"])
@@ -911,13 +855,7 @@ def test_remount_footprint_fallback_maps_the_authored_footprint(stage):
     """When a preserved `<video>`'s captured rect is degenerate, `tryRemount`
     falls back to the plan footprint — which is AUTHORED px and must be mapped
     to SCREEN px (`box.w > 1 ? box.w : fp.w` mixes it with an already-screen box)."""
-    script = r"""
-const v = video('A1');
-v.readyState = 4; v.currentTime = 1;
-v.src = 'https://host/untitled.mov';
-v._rect = {left: 0, top: 0, width: 0, height: 0};
-v.src = '';
-P.remountAll();
+    script = _stash_a1_captured_at("{left: 0, top: 0, width: 0, height: 0}") + r"""
 const evt = P.events.find(e => e.kind === 'remount-footprint-rect');
 console.log(JSON.stringify(evt && evt.detail && evt.detail.rect));
 """
@@ -932,19 +870,10 @@ def test_remount_footprint_fallback_triggers_at_literal_zero_or_the_live_stage_o
     (0,0) in viewport space regardless of where the stage sits — the real
     1->2 letterboxed-gate regression) OR the live stage origin (Codex's
     zero-layout-attached-parent case via `captureLayout`'s style fallback)."""
-    script = r"""
-const v = video('A1');
-v.readyState = 4; v.currentTime = 1;
-v.src = 'https://host/untitled.mov';
-v._rect = {left: __OX__, top: __OY__, width: 400, height: 200};
-v.src = '';
-P.remountAll();
-const evt = P.events.find(e => e.kind === 'remount-footprint-rect');
-console.log(JSON.stringify(evt && evt.detail && evt.detail.rect));
-"""
-
     def _run(stage, at_x, at_y):
-        js = script.replace("__OX__", json.dumps(at_x)).replace("__OY__", json.dumps(at_y))
+        js = _stash_a1_captured_at(f"{{left: {json.dumps(at_x)}, top: {json.dumps(at_y)}, width: 400, height: 200}}")
+        js += "const evt = P.events.find(e => e.kind === 'remount-footprint-rect');\n"
+        js += "console.log(JSON.stringify(evt && evt.detail && evt.detail.rect));\n"
         return _run_full_core_in_node(plan=_MOVIE_PLAN, stage=stage, script=js)
 
     for stage, box_origin in (
@@ -962,13 +891,7 @@ console.log(JSON.stringify(evt && evt.detail && evt.detail.rect));
 def test_remount_does_not_treat_a_real_off_origin_rect_as_unpositioned():
     """Companion regression guard: a box that is genuinely away from the
     stage origin must NOT be forced through the footprint fallback."""
-    script = r"""
-const v = video('A1');
-v.readyState = 4; v.currentTime = 1;
-v.src = 'https://host/untitled.mov';
-v._rect = {left: 900, top: 450, width: 400, height: 200};
-v.src = '';
-P.remountAll();
+    script = _stash_a1_captured_at("{left: 900, top: 450, width: 400, height: 200}") + r"""
 console.log(JSON.stringify({
   fellBackToFootprint: P.events.some(e => e.kind === 'remount-footprint-rect'),
 }));
@@ -978,13 +901,7 @@ console.log(JSON.stringify({
 
 
 def test_remount_footprint_fallback_notes_once_when_stage_map_unavailable():
-    script = r"""
-const v = video('A1');
-v.readyState = 4; v.currentTime = 1;
-v.src = 'https://host/untitled.mov';
-v._rect = {left: 0, top: 0, width: 0, height: 0};
-v.src = '';
-P.remountAll();
+    script = _stash_a1_captured_at("{left: 0, top: 0, width: 0, height: 0}") + r"""
 P.remountAll();
 const warn = P.events.filter(e => e.kind === 'stage-map-unavailable' && e.detail.consumer === 'remount-footprint-rect');
 console.log(JSON.stringify({warnCount: warn.length, sawRect: P.events.some(e => e.kind === 'remount-footprint-rect')}));
@@ -1443,19 +1360,28 @@ console.log(JSON.stringify({idle, gen: v.__obedGen, paused: v.paused,
     assert result["retire"] == [["A2", "#3"]]
 
 
-def test_interval_sweep_is_silent_before_the_zone():
-    """No `retire-boundary` before the zone — the note is a positive claim, and
-    the interval runs on every scene of the deck."""
-    script = _CARRY_A1_INTO_A2 + r"""
-tick();
+@pytest.mark.parametrize(
+    "drive",
+    [
+        # No `retire-boundary` before the zone — the note is a positive claim, and
+        # the interval runs on every scene of the deck.
+        pytest.param("tick();", id="interval-sweep-is-silent-before-the-zone"),
+        # No scene index in the hash: nothing places the player in the zone, so
+        # a held decoder is neither swept nor refused.
+        pytest.param("location.hash = '';\ntick();\nP.remountAll();", id="null-hash-is-allowed"),
+    ],
+)
+def test_a_held_decoder_outside_the_zone_is_neither_swept_nor_refused(drive):
+    script = _CARRY_A1_INTO_A2 + drive + r"""
 console.log(JSON.stringify({
   retire: P.events.filter(e => e.kind === 'retire-boundary').length,
   held: P.snapshot().filter(x => x.fromDom).length,
   gen: v.__obedGen,
+  refusals: P.events.filter(e => e.kind === 'preserve-refused').length,
 }));
 """
     result = _run_retire(script, plan=_HELD_RETIRE_PLAN)
-    assert result == {"retire": 0, "held": 1, "gen": 0}
+    assert result == {"retire": 0, "held": 1, "gen": 0, "refusals": 0}
 
 
 @pytest.mark.parametrize("scene", _BEFORE_ZONE, ids=lambda s: f"scene{s}")
@@ -1559,23 +1485,6 @@ def test_the_pinned_control_pools_the_same_instance_at_every_scene(scene):
     assert result["refusals"] == []
     assert "retire-boundary" not in result["kinds"]
     assert "remount-scheduled" in result["kinds"]
-
-
-def test_null_hash_is_allowed():
-    """No scene index in the hash: nothing places the player in the zone, so
-    a held decoder is neither swept nor refused."""
-    script = _CARRY_A1_INTO_A2 + r"""
-location.hash = '';
-tick();
-P.remountAll();
-console.log(JSON.stringify({
-  gen: v.__obedGen,
-  retire: P.events.filter(e => e.kind === 'retire-boundary').length,
-  refusals: P.events.filter(e => e.kind === 'preserve-refused').length,
-}));
-"""
-    result = _run_retire(script, plan=_HELD_RETIRE_PLAN)
-    assert result == {"gen": 0, "retire": 0, "refusals": 0}
 
 
 # Codex r1 MAJOR: inside the zone the hooks let a REAL `src` clear through, so a
@@ -2090,9 +1999,11 @@ console.log(JSON.stringify({whileLoading, afterLoad: zones()}));
                       + _GL_PLAN["boundaries"][1:]}, "entryInvalid"),
         (_G2_ARMING, {**_GL_PLAN, "boundaries": [{k: v for k, v in _GL_ENTRY.items() if k != "instanceRect"}]
                       + _GL_PLAN["boundaries"][1:]}, "entryInvalid"),
+        (_G2_ARMING, {**_GL_PLAN, "boundaries": [{**_GL_ENTRY, "movieKey": "movie9"}] + _GL_PLAN["boundaries"][1:]},
+         "entryInvalid"),
     ],
     ids=["module-absent", "module-version-2", "module-retired", "fallback-not-retire", "zero-width-rect",
-         "no-instance-rect"],
+         "no-instance-rect", "names-an-unplanned-movie"],
 )
 def test_pending_falls_back_to_retire_when_the_module_or_entry_is_unusable(module, plan, reason):
     result = _run_gl(r"""
@@ -2104,12 +2015,6 @@ console.log(JSON.stringify({zones: zones(), big: census(ctx.big), carried: S.car
     assert result["big"]["pooled"] is False
     assert result["carried"] == "notArmed"
     assert "stash" in result["refusals"]
-
-
-def test_entry_naming_an_unplanned_movie_is_invalid():
-    plan = {**_GL_PLAN, "boundaries": [{**_GL_ENTRY, "movieKey": "movie9"}] + _GL_PLAN["boundaries"][1:]}
-    result = _run_gl("tick();\nconsole.log(JSON.stringify(zones()));\n", plan=plan)
-    assert result == [["pending", "retired", "entryInvalid", "#1"]]
 
 
 # --- armed call sites (§1 rows 1-8) ---
@@ -2542,17 +2447,27 @@ console.log(JSON.stringify({
 """
 
 
+def _live_release(
+    *,
+    stand_downs: tuple | list | None = ("canvasRemoved",),
+    rect: str = "SLOT",
+    before_poster: str = "",
+    before_release: str = "",
+) -> str:
+    """Arm, go LIVE, lay the destination poster at `SLOT`, stand the module down
+    with `stand_downs`, then `release` at `rect` and report."""
+    return (
+        "const ctx = arm();\ngoLive();\n" + before_poster + "posterLayer(SLOT);\n"
+        + f"standDown({json.dumps(None if stand_downs is None else list(stand_downs))});\n"
+        + before_release + f"const out = S.release('movie1', {{rect: {rect}}});\n" + _RELEASE_REPORT
+    )
+
+
 @pytest.mark.parametrize("reason", [r for r in _G2_FAILURES if r != "writebackFailed"])
 def test_release_retires_on_every_primary_failure(reason):
     """Row 4 (OD-1 default): any primary stand-down other than `canvasRemoved`
     — the LAST element of the module's real `standDowns` — retires, even LIVE."""
-    result = _run_gl(r"""
-const ctx = arm();
-goLive();
-posterLayer(SLOT);
-standDown(['__REASON__']);
-const out = S.release('movie1', {rect: SLOT});
-""".replace("__REASON__", reason) + _RELEASE_REPORT)
+    result = _run_gl(_live_release(stand_downs=[reason]))
     _assert_retired_like_today(result, "failure", standDown=reason)
 
 
@@ -2567,13 +2482,7 @@ const out = S.release('movie1', {rect: SLOT});
     ids=["writeback-then-contextLost", "writeback-then-canvasRemoved", "empty", "unreadable"],
 )
 def test_release_reads_the_primary_as_the_last_stand_down(stand_downs, expected):
-    result = _run_gl(r"""
-const ctx = arm();
-goLive();
-posterLayer(SLOT);
-standDown(__LIST__);
-const out = S.release('movie1', {rect: SLOT});
-""".replace("__LIST__", json.dumps(stand_downs)) + _RELEASE_REPORT)
+    result = _run_gl(_live_release(stand_downs=stand_downs))
     mode, stand_down = expected
     if mode == "handoff":
         assert result["out"]["mode"] == "handoff"
@@ -2596,17 +2505,24 @@ const out = S.release('movie1', {rect: SLOT});
     _assert_retired_like_today(result, "notLive")
 
 
-def test_release_off_the_destination_retires():
-    """Row 5: a go-to back off the destination during LIVE (`hn < atScene`)."""
-    result = _run_gl(r"""
-const ctx = arm();
-goLive();
-location.hash = '#1';
-posterLayer(SLOT);
-standDown(['canvasRemoved']);
-const out = S.release('movie1', {rect: SLOT});
-""" + _RELEASE_REPORT)
-    _assert_retired_like_today(result, "notOnDestination")
+@pytest.mark.parametrize(
+    "kwargs,reason,extra",
+    [
+        # Row 5: a go-to back off the destination during LIVE (`hn < atScene`).
+        pytest.param({"before_poster": "location.hash = '#1';\n"}, "notOnDestination", {},
+                     id="row5-off-the-destination"),
+        pytest.param({"before_release": "stageEl.offsetWidth = 0;\n"}, "noStageMap", {}, id="without-a-stage-map"),
+        # §1: `release` evaluates `zoneState()` WITHOUT the `moduleRetired`
+        # watchdog (the module only goes RETIRED after `release` returns). Forced
+        # here by a module that already reads RETIRED: the answer must still be the
+        # row-4 decision, attributed to the module's own primary reason.
+        pytest.param({"stand_downs": ["glError"], "before_release": "G2.state = 'RETIRED';\n"},
+                     "failure", {"standDown": "glError"},
+                     id="s1-decides-by-its-own-rows-not-the-module-retired-watchdog"),
+    ],
+)
+def test_release_retires_when_a_row_check_fails(kwargs, reason, extra):
+    _assert_retired_like_today(_run_gl(_live_release(**kwargs)), reason, **extra)
 
 
 def test_release_past_the_zone_end_finds_the_zone_already_retired():
@@ -2675,13 +2591,7 @@ _BAD_RECTS = {
 def test_release_with_a_bad_rect_retires(label):
     rect = _BAD_RECTS[label]
     rect_js = "null" if rect is None else json.dumps(rect)
-    result = _run_gl(r"""
-const ctx = arm();
-goLive();
-posterLayer(SLOT);
-standDown(['canvasRemoved']);
-const out = S.release('movie1', {rect: __RECT__});
-""".replace("__RECT__", rect_js) + _RELEASE_REPORT)
+    result = _run_gl(_live_release(rect=rect_js))
     _assert_retired_like_today(result, "badRect")
 
 
@@ -2703,18 +2613,6 @@ const out = S.release('movie1', {rect: {x: 0.5, y: 0.5, w: 101, h: 51}});
         plan={**_GL_PLAN, "boundaries": [{**_GL_ENTRY, "instanceRect": at_origin}] + _GL_PLAN["boundaries"][1:]},
         instance=at_origin, measured=at_origin)
     _assert_retired_like_today(result, "badRect")
-
-
-def test_release_without_a_stage_map_retires():
-    result = _run_gl(r"""
-const ctx = arm();
-goLive();
-posterLayer(SLOT);
-standDown(['canvasRemoved']);
-stageEl.offsetWidth = 0;
-const out = S.release('movie1', {rect: SLOT});
-""" + _RELEASE_REPORT)
-    _assert_retired_like_today(result, "noStageMap")
 
 
 def test_release_without_the_authored_layer_retires_instead_of_a_top_z_append():
@@ -2772,22 +2670,6 @@ console.log(JSON.stringify({threw, out, zones: zones().map(z => z.slice(0, 3)), 
     assert result["zones"][-1] == ["released", "retired", "releaseError"]
     assert result["lastZone"]["message"] == "layout gone"
     assert (result["big"]["paused"], result["big"]["inDocument"], result["big"]["gen"]) == (True, False, -1)
-
-
-def test_release_decides_by_its_own_rows_not_the_module_retired_watchdog():
-    """§1: `release` evaluates `zoneState()` WITHOUT the `moduleRetired`
-    watchdog (the module only goes RETIRED after `release` returns). Forced
-    here by a module that already reads RETIRED: the answer must still be the
-    row-4 decision, attributed to the module's own primary reason."""
-    result = _run_gl(r"""
-const ctx = arm();
-goLive();
-posterLayer(SLOT);
-standDown(['glError']);
-G2.state = 'RETIRED';
-const out = S.release('movie1', {rect: SLOT});
-""" + _RELEASE_REPORT)
-    _assert_retired_like_today(result, "failure", standDown="glError")
 
 
 def test_release_during_pending_resolves_the_zone_first():
@@ -3086,18 +2968,10 @@ def test_retire_family_holds_on_a_gl_replay_plan_without_a_usable_module(fn, kwa
 tick();
 console.log(JSON.stringify(P.events.filter(e => e.kind === 'glreplay-zone').map(e => e.detail)));
 """
-        node = shutil.which("node")
-        if not node:
-            pytest.skip("Node is required to exercise the JS core")
-        harness = (
-            _FULL_HARNESS_PREAMBLE.replace("__STAGE__", json.dumps(_IDENTITY_STAGE))
-            .replace("__PLAN__", json.dumps(_GL_PLAN))
-            .replace("__AFTER_CORE__", _gl_after_core(seed))
-            .replace("__CORE__", live_continuity_js.PRESERVE_CORE_JS)
-            + script + epilogue
+        harness = _full_harness(
+            plan=_GL_PLAN, stage=_IDENTITY_STAGE, script=script + epilogue, after_core=_gl_after_core(seed)
         )
-        out = subprocess.run([node, "-e", harness], check=True, text=True, capture_output=True)
-        lines = out.stdout.strip().splitlines()
+        lines = _node_stdout(harness).strip().splitlines()
         zone_notes.append(json.loads(lines[-1]))
         return json.loads(lines[-2])
 
@@ -3353,10 +3227,21 @@ console.log(JSON.stringify({threw, out, big: census(ctx.big), sib: census(ctx.si
     assert (result["sib"]["paused"], result["sib"]["gen"], result["sib"]["pooled"]) == (False, 0, False)
 
 
-def _pin_facade(tail: str) -> dict:
+@pytest.mark.parametrize(
+    "tail,expected",
+    [
+        # A13 / K20: a facade whose stub is inserted after its decoder was retired
+        # (here by a go-to `clear()`) must not re-insert and play it.
+        pytest.param("P.clear();", {"swaps": 0, "paused": True, "gen": -1},
+                     id="A13-K20-never-resurrects-a-retired-decoder"),
+        # Control for A13: the liveness gate keeps pin's ordinary facade swap.
+        pytest.param("", {"swaps": 1, "paused": False, "gen": 0}, id="control-still-swaps-a-live-decoder"),
+    ],
+)
+def test_facade_swap_on_stub_insertion(tail, expected):
     """`A1` pooled at the 1->2 transition and facaded by the fresh `A2` stub, which
     the player has not inserted yet; `tail` runs before the insertion."""
-    return _run_full_core_in_node(plan=_NO_RETIRE_PLAN, stage=_IDENTITY_STAGE, script=r"""
+    result = _run_full_core_in_node(plan=_NO_RETIRE_PLAN, stage=_IDENTITY_STAGE, script=r"""
 const real = video('A1');
 real.readyState = 4; real.currentTime = 1; real.parentNode = bodyEl;
 real.src = 'https://host/untitled.mov';
@@ -3372,19 +3257,7 @@ moCallbacks.slice().forEach((cb) => cb([{removedNodes: []}]));
 console.log(JSON.stringify({swaps: P.events.filter(e => e.kind === 'dom-swap').length,
   paused: real.paused, gen: real.__obedGen}));
 """)
-
-
-def test_facade_swap_never_resurrects_a_retired_decoder():
-    """A13 / K20: a facade whose stub is inserted after its decoder was retired
-    (here by a go-to `clear()`) must not re-insert and play it."""
-    result = _pin_facade("P.clear();")
-    assert result == {"swaps": 0, "paused": True, "gen": -1}
-
-
-def test_facade_swap_still_happens_for_a_live_decoder():
-    """Control for A13: the liveness gate keeps pin's ordinary facade swap."""
-    result = _pin_facade("")
-    assert result == {"swaps": 1, "paused": False, "gen": 0}
+    assert result == expected
 
 
 # --- A2 (owner: option (a) + guard G + the stash rule) -------------------
@@ -3822,20 +3695,23 @@ console.log(JSON.stringify({
     assert result["aId"] in result["landed"]
 
 
+#: Pin 1->2 (`A1` -> `A2`), then bridge `A2` -> `A3` at 4.
+_PIN_THEN_BRIDGE_PLAN = {
+    "schema": 2, "movies": _MOVIE_PLAN["movies"],
+    "boundaries": [
+        _MOVIE_PLAN["boundaries"][0],
+        {"atScene": 4, "action": "bridge", "movieKey": "movie1", "durationSeconds": 1.5, "loop": False,
+         "src": _inst("A2", _FOOTPRINT), "dst": _inst("A3", _RECT_S3)},
+    ],
+}
+
+
 def test_a_pinned_decoder_waits_for_the_transition_before_the_next_bridge_moves_it():
     """RT-A for pinned decoders (live D2 slide 4, D3 slide 3): a pinned decoder's
     pending remount retries run while the player idles on its slide with the hash
     already at the next bridge's `atScene - 1`; the move must wait for the
     player's teardown of the slide."""
-    plan = {
-        "schema": 2, "movies": _MOVIE_PLAN["movies"],
-        "boundaries": [
-            _MOVIE_PLAN["boundaries"][0],
-            {"atScene": 4, "action": "bridge", "movieKey": "movie1", "durationSeconds": 1.5, "loop": False,
-             "src": _inst("A2", _FOOTPRINT), "dst": _inst("A3", _RECT_S3)},
-        ],
-    }
-    result = _run_chain(plan, r"""
+    result = _run_chain(_PIN_THEN_BRIDGE_PLAN, r"""
 goToScene(0);
 const a = playing('A1');
 goToScene(1);
@@ -3961,15 +3837,7 @@ def test_the_footprint_hold_of_a_pin_ends_when_the_next_bridge_moves_the_decoder
     next bridge's move and, once the hash settled past the transition, dragged
     the landed decoder back to the source slot at the destination size
     (960,400 at 640x180). The move must end the hold."""
-    plan = {
-        "schema": 2, "movies": _MOVIE_PLAN["movies"],
-        "boundaries": [
-            _MOVIE_PLAN["boundaries"][0],
-            {"atScene": 4, "action": "bridge", "movieKey": "movie1", "durationSeconds": 1.5, "loop": False,
-             "src": _inst("A2", _FOOTPRINT), "dst": _inst("A3", _RECT_S3)},
-        ],
-    }
-    result = _run_chain(plan, r"""
+    result = _run_chain(_PIN_THEN_BRIDGE_PLAN, r"""
 const posterParent = {__screenOrigin: {x: 0, y: 0}, __scale: 1,
   insertBefore(node) { node.parentNode = this; node.__inStage = true; },
   appendChild(node) { node.parentNode = this; node.__inStage = true; },
@@ -4166,6 +4034,7 @@ def test_d3_carries_two_movies_at_one_boundary_by_instance():
     plan = _CONTRACT["d3"]
     b = plan["boundaries"]
     result = _run_chain(plan, r"""
+const B = window.__OBED_CONTINUITY__.boundaries;
 goToScene(0);
 const m2 = playing(B[1].src.objectId, 'https://host/counter-b.mov');
 const m1 = playing(B[0].src.objectId, 'https://host/counter-a.mov');
@@ -4180,7 +4049,7 @@ console.log(JSON.stringify({
   bridge: notesOf('bridge-3to4').map(n => [n.oldElId, n.newElId]),
   ids: [m1.__obedElId, m2.__obedElId, d1.__obedElId, d2.__obedElId],
 }));
-""".replace("B[", "PLAN_B[").replace("const m2", "const PLAN_B = window.__OBED_CONTINUITY__.boundaries;\nconst m2"))
+""")
     m1, m2, d1, d2 = result["ids"]
     assert b[0]["action"] == "pin" and b[1]["action"] == "bridge"
     assert result["pin"] == [[m1, d1]]

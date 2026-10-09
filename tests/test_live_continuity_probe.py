@@ -231,18 +231,13 @@ class TestOwnerMismatchAfterCut:
 
 
 class TestOffRectOrDisconnected:
-    def test_hidden_decoder_fails(self) -> None:
-        samples = rows_around_boundary(disconnected_after=True)
+    @pytest.mark.parametrize("defect", ["disconnected_after", "off_rect_after"], ids=["hidden-decoder", "off-rect-decoder"])
+    def test_a_hidden_or_off_rect_decoder_fails(self, defect: str) -> None:
+        samples = rows_around_boundary(**{defect: True})
         verdict = probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
         assert verdict["verdict"] is False
         assert verdict["rectMismatches"]
         assert all(m["phase"] == "after" for m in verdict["rectMismatches"])
-
-    def test_off_rect_decoder_fails(self) -> None:
-        samples = rows_around_boundary(off_rect_after=True)
-        verdict = probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
-        assert verdict["verdict"] is False
-        assert verdict["rectMismatches"]
 
 
 class TestStallDetection:
@@ -393,114 +388,93 @@ class TestBackgroundAlpha:
         assert probe.background_alpha(css) == expected
 
 
-class TestOverallStatusTruthTable:
-    def _base_result(self) -> dict[str, Any]:
-        def verdict(v: bool) -> dict[str, Any]:
-            return {"verdict": v}
+def _base_result() -> dict[str, Any]:
+    """The all-green host artifact every `overall_status` table below deviates from."""
 
-        def visible_slide(ordinal: int, verdict: bool | None) -> dict[str, Any]:
-            return {
-                "playerIndex": ordinal - 1, "originalOrdinal": ordinal, "verdict": verdict,
-                "status": "pass" if verdict is True else "fail",
-            }
+    def verdict(v: bool) -> dict[str, Any]:
+        return {"verdict": v}
 
+    def visible_slide(ordinal: int, verdict: bool | None) -> dict[str, Any]:
         return {
-            # The 1->2 destination slide, derived by the probe from the plan (never
-            # hardcoded as "slide 2"): the slide the Voff control must be RED on.
-            "groundTruth": {"boundaryPlayerIndex": 1},
-            "visible": {
-                "V": {
-                    "pass": "V", "status": "ok", "continuity": {"mode": "qualified"},
-                    "stageFit": verdict(True),
-                    "slides": [visible_slide(n, True) for n in (1, 2, 3, 4)],
-                    "verdict": True,
-                },
-                "Voff": {
-                    "pass": "Voff", "status": "ok", "continuity": {"mode": "off"},
-                    "stageFit": verdict(True),
-                    "slides": [
-                        visible_slide(1, True), visible_slide(2, False),
-                        visible_slide(3, True), visible_slide(4, True),
-                    ],
-                    "verdict": False,
-                },
+            "playerIndex": ordinal - 1, "originalOrdinal": ordinal, "verdict": verdict,
+            "status": "pass" if verdict is True else "fail",
+        }
+
+    return {
+        # The 1->2 destination slide, derived by the probe from the plan (never
+        # hardcoded as "slide 2"): the slide the Voff control must be RED on.
+        "groundTruth": {"boundaryPlayerIndex": 1},
+        "visible": {
+            "V": {
+                "pass": "V", "status": "ok", "continuity": {"mode": "qualified"},
+                "stageFit": verdict(True),
+                "slides": [visible_slide(n, True) for n in (1, 2, 3, 4)],
+                "verdict": True,
             },
-            "arms": {
-                "A": {
-                    "continuity": {"mode": "qualified"},
-                    "continue1to2": verdict(True), "restart2to3": verdict(True), "continue3to4": verdict(True),
-                    "stageFit": verdict(True),
-                },
-                "B": {
-                    "continuity": {"mode": "off"},
-                    "continue1to2": verdict(True), "restart2to3": verdict(True), "continue3to4": verdict(False),
-                    "stageFit": verdict(True),
-                },
-                "C": {
-                    "continuity": {"mode": "qualified"},
-                    "continue1to2": verdict(True), "restart2to3": verdict(True), "continue3to4": verdict(False),
-                    "stageFit": verdict(True),
-                },
+            "Voff": {
+                "pass": "Voff", "status": "ok", "continuity": {"mode": "off"},
+                "stageFit": verdict(True),
+                "slides": [
+                    visible_slide(1, True), visible_slide(2, False),
+                    visible_slide(3, True), visible_slide(4, True),
+                ],
+                "verdict": False,
             },
-            "attach": {
+        },
+        "arms": {
+            "A": {
                 "continuity": {"mode": "qualified"},
-                "transparentBackground": {"computedBackground": "rgba(0, 0, 0, 0)"},
                 "continue1to2": verdict(True), "restart2to3": verdict(True), "continue3to4": verdict(True),
                 "stageFit": verdict(True),
             },
-        }
+            "B": {
+                "continuity": {"mode": "off"},
+                "continue1to2": verdict(True), "restart2to3": verdict(True), "continue3to4": verdict(False),
+                "stageFit": verdict(True),
+            },
+            "C": {
+                "continuity": {"mode": "qualified"},
+                "continue1to2": verdict(True), "restart2to3": verdict(True), "continue3to4": verdict(False),
+                "stageFit": verdict(True),
+            },
+        },
+        "attach": {
+            "continuity": {"mode": "qualified"},
+            "transparentBackground": {"computedBackground": "rgba(0, 0, 0, 0)"},
+            "continue1to2": verdict(True), "restart2to3": verdict(True), "continue3to4": verdict(True),
+            "stageFit": verdict(True),
+        },
+    }
 
+
+class TestOverallStatusTruthTable:
     def test_all_green_with_correct_modes_passes(self) -> None:
-        status, reasons = probe.overall_status(self._base_result())
+        status, reasons = probe.overall_status(_base_result())
         assert status == "pass"
         assert reasons == []
 
-    def test_arm_a_wrong_mode_fails_even_if_boundaries_are_green(self) -> None:
-        result = self._base_result()
-        result["arms"]["A"]["continuity"]["mode"] = "unsupported"
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("arm A" in r for r in reasons)
-
-    def test_arm_b_wrong_mode_fails_even_if_boundary_is_correctly_red(self) -> None:
-        result = self._base_result()
-        result["arms"]["B"]["continuity"]["mode"] = "qualified"
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("arm B" in r for r in reasons)
-
-    def test_arm_c_wrong_mode_fails(self) -> None:
-        result = self._base_result()
-        result["arms"]["C"]["continuity"]["mode"] = "off"
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("arm C" in r for r in reasons)
-
-    def test_attach_opaque_background_fails(self) -> None:
-        result = self._base_result()
-        result["attach"]["transparentBackground"]["computedBackground"] = "rgb(0, 0, 0)"
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("alpha" in r for r in reasons)
-
-    def test_attach_wrong_mode_fails(self) -> None:
-        result = self._base_result()
-        result["attach"]["continuity"]["mode"] = "unsupported"
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("attach" in r for r in reasons)
-
-    def test_missing_verdict_is_inconclusive(self) -> None:
-        result = self._base_result()
-        result["arms"]["A"]["continue1to2"] = {"verdict": None}
-        status, reasons = probe.overall_status(result)
-        assert status == "inconclusive"
-
-    def test_wrong_boundary_pattern_fails(self) -> None:
-        result = self._base_result()
-        result["arms"]["B"]["continue3to4"] = {"verdict": True}  # should have been False
-        status, _ = probe.overall_status(result)
-        assert status == "fail"
+    @pytest.mark.parametrize(("mutate", "status", "reason"), [
+        pytest.param(lambda r: r["arms"]["A"]["continuity"].update(mode="unsupported"), "fail", "arm A",
+                     id="arm-A-wrong-mode-fails-even-if-boundaries-are-green"),
+        pytest.param(lambda r: r["arms"]["B"]["continuity"].update(mode="qualified"), "fail", "arm B",
+                     id="arm-B-wrong-mode-fails-even-if-boundary-is-correctly-red"),
+        pytest.param(lambda r: r["arms"]["C"]["continuity"].update(mode="off"), "fail", "arm C", id="arm-C-wrong-mode"),
+        pytest.param(lambda r: r["attach"]["transparentBackground"].update(computedBackground="rgb(0, 0, 0)"),
+                     "fail", "alpha", id="attach-opaque-background"),
+        pytest.param(lambda r: r["attach"]["continuity"].update(mode="unsupported"), "fail", "attach", id="attach-wrong-mode"),
+        pytest.param(lambda r: r["arms"]["A"].update(continue1to2={"verdict": None}), "inconclusive", None,
+                     id="missing-verdict-is-inconclusive"),
+        # Arm B's continue3to4 should have been False.
+        pytest.param(lambda r: r["arms"]["B"].update(continue3to4={"verdict": True}), "fail", None,
+                     id="wrong-boundary-pattern"),
+    ])
+    def test_a_deviation_from_the_green_artifact(self, mutate: Any, status: str, reason: str | None) -> None:
+        result = _base_result()
+        mutate(result)
+        got, reasons = probe.overall_status(result)
+        assert got == status
+        if reason is not None:
+            assert any(reason in r for r in reasons)
 
 
 def moving_boundary_samples() -> list[dict[str, Any]]:
@@ -554,30 +528,28 @@ class TestMovingBoundary:
         assert result["verdict"] is False
         assert result["motion"]["errors"]
 
-    @pytest.mark.parametrize("field,value", [("scene", 6), ("playerState", "SettingUpScene"), ("busy", False)])
-    def test_path_allowance_requires_actual_playing_transition(self, field: str, value: Any) -> None:
+    @pytest.mark.parametrize(("selects", "mutate"), [
+        # The path allowance requires an actual Playing transition.
+        pytest.param(lambda row: row["playerState"] == "Playing", lambda row: row.update(scene=6), id="playing-on-the-source-scene"),
+        pytest.param(lambda row: row["playerState"] == "Playing", lambda row: row.update(playerState="SettingUpScene"),
+                     id="setting-up-scene-instead-of-playing"),
+        pytest.param(lambda row: row["playerState"] == "Playing", lambda row: row.update(busy=False), id="playing-but-not-busy"),
+        pytest.param(lambda row: row["scene"] == 6, lambda row: row["videos"][0].update(rect=dict(DST_RECT)),
+                     id="settled-source-must-remain-at-source"),
+        pytest.param(lambda row: row["scene"] == 7 and row["playerState"] == "IdleAtFinalState",
+                     lambda row: row["videos"][0].update(rect=dict(SRC_RECT)),
+                     id="idle-final-transition-scene-must-already-be-at-destination"),
+        # The WaitingToJump relaxation below is phase-specific, not a blanket allowance: a
+        # WaitingToJump sample that is NOT yet at the destination must still fail.
+        pytest.param(lambda row: row["scene"] == 7 and row["playerState"] == "IdleAtFinalState",
+                     lambda row: (row.update(playerState="WaitingToJump"), row["videos"][0].update(rect=dict(SRC_RECT))),
+                     id="waiting-to-jump-at-source-rect-is-still-a-mismatch"),
+    ])
+    def test_a_rect_off_its_phase_expectation_is_a_mismatch(self, selects: Any, mutate: Any) -> None:
         samples = moving_boundary_samples()
         for row in samples:
-            if row["playerState"] == "Playing":
-                row[field] = value
-        result = score_moving_boundary(samples)
-        assert result["verdict"] is False
-        assert result["rectMismatches"]
-
-    def test_settled_source_must_remain_at_source(self) -> None:
-        samples = moving_boundary_samples()
-        for row in samples:
-            if row["scene"] == 6:
-                row["videos"][0]["rect"] = dict(DST_RECT)
-        result = score_moving_boundary(samples)
-        assert result["verdict"] is False
-        assert result["rectMismatches"]
-
-    def test_idle_final_transition_scene_must_already_be_at_destination(self) -> None:
-        samples = moving_boundary_samples()
-        for row in samples:
-            if row["scene"] == 7 and row["playerState"] == "IdleAtFinalState":
-                row["videos"][0]["rect"] = dict(SRC_RECT)
+            if selects(row):
+                mutate(row)
         result = score_moving_boundary(samples)
         assert result["verdict"] is False
         assert result["rectMismatches"]
@@ -705,84 +677,38 @@ class TestMovingBoundary:
         assert result["verdict"] is True
         assert result["rectMismatches"] == []
 
-    def test_waiting_to_jump_at_source_rect_is_still_a_mismatch(self) -> None:
-        """The relaxation above is phase-specific, not a blanket allowance: a
-        WaitingToJump sample that is NOT yet at the destination must still fail."""
-        samples = moving_boundary_samples()
-        for row in samples:
-            if row["scene"] == 7 and row["playerState"] == "IdleAtFinalState":
-                row["playerState"] = "WaitingToJump"
-                row["videos"][0]["rect"] = dict(SRC_RECT)
-        result = score_moving_boundary(samples)
-        assert result["verdict"] is False
-        assert result["rectMismatches"]
 
-
-class TestStageMapIdentityConversion:
-    def test_identity_stage_map_conversion_is_a_noop(self) -> None:
-        """(a) rows at 1:1 with a recorded stage map of s=1 must score exactly
-        as they did before I3 -- the conversion pipeline is a true no-op at
-        identity."""
-        samples = rows_around_boundary()
+class TestStageMapConversion:
+    @pytest.mark.parametrize(("recorded", "placed", "green"), [
+        # (a) rows at 1:1 with a recorded stage map of s=1 must score exactly as they did
+        # before I3 -- the conversion pipeline is a true no-op at identity.
+        pytest.param(IDENTITY_STAGE_MAP, IDENTITY_STAGE_MAP, True, id="a-identity-is-a-noop"),
+        # (b) the same authored trajectory expressed in SCREEN px at a scaled and at a
+        # letterboxed (non-zero origin) stage map, correctly recorded, converts back to the
+        # authored numbers and scores green.
+        pytest.param(SCALED_STAGE_MAP_4_3, SCALED_STAGE_MAP_4_3, True, id="b-scaled-4-3-origin-0-0"),
+        pytest.param(LETTERBOXED_STAGE_MAP_5_6, LETTERBOXED_STAGE_MAP_5_6, True, id="b-letterboxed-5-6-origin-0-50"),
+        # (c) NULL CONTROL: rects genuinely sampled on a 4/3-scaled stage, but the sample
+        # wrongly RECORDS an identity map -- the instrument must see the scale error, not
+        # silently accept the raw screen numbers.
+        pytest.param(IDENTITY_STAGE_MAP, SCALED_STAGE_MAP_4_3, False, id="c-wrongly-assumed-identity-null-control"),
+        # (d) UNMAPPED RUNTIME control: the stage map is correctly recorded as 4/3-scaled, but
+        # the sampled `<video>` rects sit at the raw unscaled authored numbers -- what an old v2
+        # runtime that never applied the scale to its screen writes would produce.
+        pytest.param(SCALED_STAGE_MAP_4_3, IDENTITY_STAGE_MAP, False, id="d-unmapped-runtime-control"),
+        # (e) offset bug control: the stage map is correctly recorded with the letterboxed +50
+        # y-origin, but the sampled rects were actually placed as if the origin were 0.
+        pytest.param(LETTERBOXED_STAGE_MAP_5_6, {**LETTERBOXED_STAGE_MAP_5_6, "oy": 0.0}, False,
+                     id="e-missing-letterbox-origin-control"),
+    ])
+    def test_rects_convert_back_through_the_recorded_stage_map(self, recorded: Any, placed: Any, green: bool) -> None:
+        samples = rows_around_boundary(stage_map=recorded, rect_stage_map=placed)
         converted, invalid_count = probe.convert_samples_to_authored(samples)
         assert invalid_count == 0
         verdict = probe.score_continuity(converted, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
-        assert verdict["verdict"] is True
+        assert verdict["verdict"] is green
         assert verdict["stageMapInvalid"] == []
-
-
-class TestStageMapScaledConversion:
-    @pytest.mark.parametrize(
-        "stage_map",
-        [SCALED_STAGE_MAP_4_3, LETTERBOXED_STAGE_MAP_5_6],
-        ids=["scaled-4-3-origin-0-0", "letterboxed-5-6-origin-0-50"],
-    )
-    def test_correctly_recorded_scaled_stage_passes(self, stage_map: dict[str, Any]) -> None:
-        """(b) the same authored trajectory expressed in SCREEN px at a scaled
-        and at a letterboxed (non-zero origin) stage map, correctly recorded,
-        converts back to the authored numbers and scores green."""
-        samples = rows_around_boundary(stage_map=stage_map, rect_stage_map=stage_map)
-        converted, invalid_count = probe.convert_samples_to_authored(samples)
-        assert invalid_count == 0
-        verdict = probe.score_continuity(converted, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
-        assert verdict["verdict"] is True
-        assert verdict["rectMismatches"] == []
-
-    def test_wrongly_assumed_identity_map_is_a_null_control(self) -> None:
-        """(c) NULL CONTROL: rects genuinely sampled on a 4/3-scaled stage, but
-        the sample wrongly RECORDS an identity map -- the instrument must see
-        the scale error, not silently accept the raw screen numbers."""
-        samples = rows_around_boundary(stage_map=IDENTITY_STAGE_MAP, rect_stage_map=SCALED_STAGE_MAP_4_3)
-        converted, invalid_count = probe.convert_samples_to_authored(samples)
-        assert invalid_count == 0
-        verdict = probe.score_continuity(converted, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
-        assert verdict["verdict"] is False
-        assert verdict["rectMismatches"]
-
-    def test_unmapped_runtime_control(self) -> None:
-        """(d) UNMAPPED RUNTIME control: the stage map is correctly recorded as
-        4/3-scaled, but the sampled `<video>` rects sit at the raw unscaled
-        authored numbers -- what an old v2 runtime that never applied the
-        scale to its screen writes would produce. Must be red."""
-        samples = rows_around_boundary(stage_map=SCALED_STAGE_MAP_4_3, rect_stage_map=IDENTITY_STAGE_MAP)
-        converted, invalid_count = probe.convert_samples_to_authored(samples)
-        assert invalid_count == 0
-        verdict = probe.score_continuity(converted, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
-        assert verdict["verdict"] is False
-        assert verdict["rectMismatches"]
-
-    def test_missing_letterbox_origin_control(self) -> None:
-        """(e) offset bug control: the stage map is correctly recorded with the
-        letterboxed +50 y-origin, but the sampled rects were actually placed
-        as if the origin were 0 (the bug this arm exists to catch). Must be
-        red."""
-        buggy_rect_map = {**LETTERBOXED_STAGE_MAP_5_6, "oy": 0.0}
-        samples = rows_around_boundary(stage_map=LETTERBOXED_STAGE_MAP_5_6, rect_stage_map=buggy_rect_map)
-        converted, invalid_count = probe.convert_samples_to_authored(samples)
-        assert invalid_count == 0
-        verdict = probe.score_continuity(converted, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
-        assert verdict["verdict"] is False
-        assert verdict["rectMismatches"]
+        assert bool(verdict["rectMismatches"]) is not green
 
 
 class TestStageMapInvalid:
@@ -880,58 +806,41 @@ class TestOverallStatusStageFit:
     passing `stageFit` on every arm and on attach, so these tests exercise
     deviations from that baseline rather than an absent field."""
 
-    def _base_result(self) -> dict[str, Any]:
-        return TestOverallStatusTruthTable()._base_result()
-
-    def test_arm_a_stage_fit_failure_fails_even_if_boundaries_are_green(self) -> None:
-        result = self._base_result()
-        result["arms"]["A"]["stageFit"] = {"verdict": False}
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("arm A stageFit failed" in r for r in reasons)
-
-    def test_attach_stage_fit_failure_fails(self) -> None:
-        result = self._base_result()
-        result["attach"]["stageFit"] = {"verdict": False}
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("attach stageFit failed" in r for r in reasons)
-
-    @pytest.mark.parametrize(
-        ("path", "label"),
-        [
-            (("arms", "A"), "arm A"),
-            (("arms", "B"), "arm B"),
-            (("arms", "C"), "arm C"),
-            (("attach",), "attach"),
-        ],
-    )
-    def test_missing_stage_fit_fails_closed(self, path: tuple[str, ...], label: str) -> None:
-        """A `stageFit` key that is simply absent -- an arm that crashed before
-        scoring it, or a caller that never set it -- must fail, not pass, and
-        must be distinguishable (by reason text) from an explicit False
-        verdict."""
-        result = self._base_result()
+    @pytest.mark.parametrize(("path", "label", "missing"), [
+        pytest.param(("arms", "A"), "arm A", False, id="arm-A-failed-even-if-boundaries-are-green"),
+        pytest.param(("attach",), "attach", False, id="attach-failed"),
+        # A `stageFit` key that is simply absent -- an arm that crashed before scoring it, or a
+        # caller that never set it -- must fail, not pass, and must be distinguishable (by
+        # reason text) from an explicit False verdict.
+        pytest.param(("arms", "A"), "arm A", True, id="arm-A-missing"),
+        pytest.param(("arms", "B"), "arm B", True, id="arm-B-missing"),
+        pytest.param(("arms", "C"), "arm C", True, id="arm-C-missing"),
+        pytest.param(("attach",), "attach", True, id="attach-missing"),
+    ])
+    def test_a_failed_or_missing_stage_fit_fails_closed(self, path: tuple[str, ...], label: str, missing: bool) -> None:
+        result = _base_result()
         entry = result
-        for key in path[:-1]:
+        for key in path:
             entry = entry[key]
-        del entry[path[-1]]["stageFit"]
+        if missing:
+            del entry["stageFit"]
+        else:
+            entry["stageFit"] = {"verdict": False}
         status, reasons = probe.overall_status(result)
         assert status == "fail"
-        assert any(f"{label} stageFit missing" in r for r in reasons)
+        assert any(f"{label} stageFit {'missing' if missing else 'failed'}" in r for r in reasons)
 
 
 class TestViewportParsing:
     def test_parses_valid_viewport(self) -> None:
         assert probe.parse_viewport_arg("2560x1440") == (2560, 1440)
 
-    def test_default_viewport_is_1920x1080(self) -> None:
-        args = probe.parse_args([])
-        assert args.viewport == (probe.VIEWPORT_WIDTH, probe.VIEWPORT_HEIGHT)
-
-    def test_viewport_flag_overrides_default(self) -> None:
-        args = probe.parse_args(["--viewport", "1600x1000"])
-        assert args.viewport == (1600, 1000)
+    @pytest.mark.parametrize(("argv", "expected"), [
+        pytest.param([], (probe.VIEWPORT_WIDTH, probe.VIEWPORT_HEIGHT), id="default-is-1920x1080"),
+        pytest.param(["--viewport", "1600x1000"], (1600, 1000), id="flag-overrides-default"),
+    ])
+    def test_viewport_arg(self, argv: list[str], expected: tuple[int, int]) -> None:
+        assert probe.parse_args(argv).viewport == expected
 
     @pytest.mark.parametrize(
         "value", ["", "1920", "1920xabc", "0x1080", "1920x0", "-100x1080", "1920,1080"]
@@ -1184,32 +1093,22 @@ class TestSlideInstancesGroundTruth:
 
 
 class TestControlRegion:
-    def test_letterboxed_stage_uses_the_bar_above_it(self) -> None:
-        stage = {"x": 0.0, "y": 180.0, "width": 1920.0, "height": 720.0}
+    @pytest.mark.parametrize(("stage", "source", "fields"), [
+        pytest.param({"x": 0.0, "y": 180.0, "width": 1920.0, "height": 720.0}, "letterbox-top", {"y": 0, "w": 40, "h": 40},
+                     id="letterboxed-stage-uses-the-bar-above-it"),
+        pytest.param({"x": 240.0, "y": 0.0, "width": 1440.0, "height": 1080.0}, "letterbox-left", {"x": 0, "w": 40, "h": 40},
+                     id="pillarboxed-stage-uses-the-bar-beside-it"),
+        pytest.param({"x": 0.0, "y": 0.0, "width": 1920.0, "height": 1080.0}, "stage-corner",
+                     {"x": probe.CONTROL_INSET_PX, "y": probe.CONTROL_INSET_PX}, id="full-bleed-falls-back-to-the-inset-stage-corner"),
+        # A 20px bar cannot hold a 40x40 patch -- falling back to the stage corner is correct;
+        # sampling off the end of the bar would put half the control inside the stage.
+        pytest.param({"x": 0.0, "y": 20.0, "width": 1920.0, "height": 1040.0}, "stage-corner",
+                     {"y": 20 + probe.CONTROL_INSET_PX}, id="a-bar-thinner-than-the-patch-is-not-the-control"),
+    ])
+    def test_control_region(self, stage: dict[str, float], source: str, fields: dict[str, int]) -> None:
         control = probe.control_region(stage, (1920, 1080))
-        assert control["source"] == "letterbox-top"
-        assert (control["y"], control["w"], control["h"]) == (0, 40, 40)
-
-    def test_pillarboxed_stage_uses_the_bar_beside_it(self) -> None:
-        stage = {"x": 240.0, "y": 0.0, "width": 1440.0, "height": 1080.0}
-        control = probe.control_region(stage, (1920, 1080))
-        assert control["source"] == "letterbox-left"
-        assert (control["x"], control["w"], control["h"]) == (0, 40, 40)
-
-    def test_full_bleed_stage_falls_back_to_the_inset_stage_corner(self) -> None:
-        stage = {"x": 0.0, "y": 0.0, "width": 1920.0, "height": 1080.0}
-        control = probe.control_region(stage, (1920, 1080))
-        assert control["source"] == "stage-corner"
-        assert (control["x"], control["y"]) == (probe.CONTROL_INSET_PX, probe.CONTROL_INSET_PX)
-
-    def test_a_bar_thinner_than_the_patch_is_not_used_as_the_control(self) -> None:
-        """A 20px bar cannot hold a 40x40 patch -- falling back to the stage
-        corner is correct; sampling off the end of the bar would put half the
-        control inside the stage."""
-        stage = {"x": 0.0, "y": 20.0, "width": 1920.0, "height": 1040.0}
-        control = probe.control_region(stage, (1920, 1080))
-        assert control["source"] == "stage-corner"
-        assert control["y"] == 20 + probe.CONTROL_INSET_PX
+        assert control["source"] == source
+        assert {key: control[key] for key in fields} == fields
 
 
 class TestVisibleSlideRecord:
@@ -1238,19 +1137,23 @@ class TestVisibleSlideRecord:
         assert record["attempts"] == 2
         assert record["sceneId"] == "scene-2"
 
-    def test_scene_changing_under_both_attempts_is_inconclusive_never_a_pass_or_a_red(self) -> None:
-        host = FakeHost(scene_ids=["scene-1", "scene-2", "scene-3", "scene-4"])
-        record = self._record(host)
-        assert record["status"] == "inconclusive"
-        assert record["verdict"] is None
-        assert record["attempts"] == 2
-
-    def test_player_going_busy_during_the_burst_is_inconclusive(self) -> None:
+    @pytest.mark.parametrize(("host_kwargs", "expected", "reason"), [
+        pytest.param({"scene_ids": ["scene-1", "scene-2", "scene-3", "scene-4"]}, {"status": "inconclusive", "attempts": 2}, None,
+                     id="scene-changing-under-both-attempts-is-inconclusive-never-a-pass-or-a-red"),
         # observe(): settle check, then the post-burst check of each attempt.
-        host = FakeHost(scene_ids=["s", "s", "s", "s"], busy=[False, True, True])
-        record = self._record(host)
-        assert record["status"] == "inconclusive"
+        pytest.param({"scene_ids": ["s", "s", "s", "s"], "busy": [False, True, True]}, {"status": "inconclusive"}, None,
+                     id="player-going-busy-during-the-burst-is-inconclusive"),
+        pytest.param({"scene_ids": ["s", "s"], "shot": png_b64(VISIBLE_VIEWPORT[0] - 1, VISIBLE_VIEWPORT[1])},
+                     {"status": "error"}, "expected 64x32", id="screenshot-not-the-forced-viewport-fails-closed"),
+        pytest.param({"scene_ids": ["s", "s"], "stage_map": None}, {"status": "error"}, "stage map",
+                     id="untrustworthy-stage-map-fails-closed"),
+    ])
+    def test_an_unscorable_burst_is_never_a_verdict(self, host_kwargs: dict[str, Any], expected: dict[str, Any], reason: str | None) -> None:
+        record = self._record(FakeHost(**host_kwargs))
         assert record["verdict"] is None
+        assert {key: record[key] for key in expected} == expected
+        if reason is not None:
+            assert reason in record["reason"]
 
     def test_busy_that_never_clears_is_a_bounded_wait_then_inconclusive(self) -> None:
         host = FakeHost(scene_ids=["s", "s"], busy=True)
@@ -1259,20 +1162,6 @@ class TestVisibleSlideRecord:
         assert record["verdict"] is None
         assert "never settled" in record["reason"]
         assert host.transport.captures == 0
-
-    def test_screenshot_that_is_not_the_forced_viewport_fails_closed(self) -> None:
-        host = FakeHost(scene_ids=["s", "s"], shot=png_b64(VISIBLE_VIEWPORT[0] - 1, VISIBLE_VIEWPORT[1]))
-        record = self._record(host)
-        assert record["status"] == "error"
-        assert record["verdict"] is None
-        assert "expected 64x32" in record["reason"]
-
-    def test_untrustworthy_stage_map_fails_closed(self) -> None:
-        host = FakeHost(scene_ids=["s", "s"], stage_map=None)
-        record = self._record(host)
-        assert record["status"] == "error"
-        assert record["verdict"] is None
-        assert "stage map" in record["reason"]
 
     def test_a_slide_missing_from_the_ground_truth_fails_closed(self) -> None:
         host = FakeHost(scene_ids=["s", "s"])
@@ -1422,76 +1311,45 @@ class TestVisibleScorerContract:
 
 
 class TestOverallStatusVisible:
-    def _base_result(self) -> dict[str, Any]:
-        return TestOverallStatusTruthTable()._base_result()
-
-    def test_v_all_live_and_voff_red_at_the_boundary_slide_passes(self) -> None:
-        status, reasons = probe.overall_status(self._base_result())
-        assert status == "pass"
-        assert reasons == []
-
-    def test_v_with_one_dead_slide_fails(self) -> None:
-        result = self._base_result()
-        result["visible"]["V"]["slides"][2]["verdict"] = False
+    @pytest.mark.parametrize(("mutate", "reason"), [
+        pytest.param(lambda r: r["visible"]["V"]["slides"][2].update(verdict=False), "visible pass V slide 3",
+                     id="V-with-one-dead-slide"),
+        pytest.param(lambda r: r["visible"]["V"]["slides"][1].update(verdict=None, status="inconclusive"), "inconclusive",
+                     id="V-with-one-inconclusive-slide-is-never-a-pass"),
+        pytest.param(lambda r: r["visible"]["V"]["continuity"].update(mode="unsupported"), "visible pass V continuity.mode",
+                     id="V-in-the-wrong-continuity-mode-even-if-every-slide-is-live"),
+        pytest.param(lambda r: r["visible"]["Voff"]["continuity"].update(mode="qualified"), "visible pass Voff continuity.mode",
+                     id="Voff-in-the-wrong-continuity-mode"),
+        pytest.param(lambda r: r["visible"]["Voff"]["slides"][1].update(verdict=True), "blind",
+                     id="Voff-live-everywhere-the-instrument-is-blind"),
+        # Movies do play before any transition, so slide 1 with continuity OFF must still be
+        # live -- a red there means the instrument reds out on anything, and its boundary red
+        # proves nothing.
+        pytest.param(lambda r: r["visible"]["Voff"]["slides"][0].update(verdict=False), "always-red",
+                     id="Voff-red-on-slide-one-the-instrument-is-always-red"),
+        pytest.param(lambda r: r["visible"]["Voff"]["slides"][1].update(verdict=None, status="inconclusive"), "blind",
+                     id="Voff-inconclusive-at-the-boundary-slide-is-not-the-required-red"),
+        *(pytest.param(lambda r, n=name: r["visible"].pop(n), f"visible pass {name} missing",
+                       id=f"missing-{name}-pass-fails-with-its-own-reason") for name in ("V", "Voff")),
+        *(pytest.param(lambda r, n=name: r["visible"][n].update(status="error", error="plan has no slide_instances"),
+                       "plan has no slide_instances", id=f"errored-{name}-pass-fails-with-the-recorded-reason")
+          for name in ("V", "Voff")),
+        *(pytest.param(lambda r, n=name: r["visible"][n].update(slides=[]), f"visible pass {name} scored no slides",
+                       id=f"{name}-pass-that-scored-no-slides") for name in ("V", "Voff")),
+        pytest.param(lambda r: r["groundTruth"].pop("boundaryPlayerIndex"), "expected-red slide is unknown",
+                     id="unknown-expected-red-slide-fails-closed"),
+        pytest.param(lambda r: r["groundTruth"].update(boundaryPlayerIndex=7), "never scored the expected-red slide",
+                     id="expected-red-slide-never-scored-fails-closed"),
+    ])
+    def test_a_visible_deviation_fails_with_its_reason(self, mutate: Any, reason: str) -> None:
+        result = _base_result()
+        mutate(result)
         status, reasons = probe.overall_status(result)
         assert status == "fail"
-        assert any("visible pass V slide 3" in reason for reason in reasons)
-
-    def test_v_with_one_inconclusive_slide_fails_it_is_never_a_pass(self) -> None:
-        result = self._base_result()
-        result["visible"]["V"]["slides"][1].update(verdict=None, status="inconclusive")
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("inconclusive" in reason for reason in reasons)
-
-    def test_v_in_the_wrong_continuity_mode_fails_even_if_every_slide_is_live(self) -> None:
-        result = self._base_result()
-        result["visible"]["V"]["continuity"]["mode"] = "unsupported"
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("visible pass V continuity.mode" in reason for reason in reasons)
-
-    def test_voff_in_the_wrong_continuity_mode_fails(self) -> None:
-        result = self._base_result()
-        result["visible"]["Voff"]["continuity"]["mode"] = "qualified"
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("visible pass Voff continuity.mode" in reason for reason in reasons)
-
-    def test_voff_live_everywhere_fails_because_the_instrument_is_blind(self) -> None:
-        result = self._base_result()
-        result["visible"]["Voff"]["slides"][1]["verdict"] = True
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("blind" in reason for reason in reasons)
-
-    def test_voff_red_on_slide_one_fails_because_the_instrument_is_always_red(self) -> None:
-        """Movies do play before any transition, so slide 1 with continuity OFF
-        must still be live -- a red there means the instrument reds out on
-        anything, and its boundary red proves nothing."""
-        result = self._base_result()
-        result["visible"]["Voff"]["slides"][0]["verdict"] = False
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("always-red" in reason for reason in reasons)
-
-    def test_voff_inconclusive_at_the_boundary_slide_is_not_the_required_red(self) -> None:
-        result = self._base_result()
-        result["visible"]["Voff"]["slides"][1].update(verdict=None, status="inconclusive")
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("blind" in reason for reason in reasons)
-
-    @pytest.mark.parametrize("name", ["V", "Voff"])
-    def test_a_missing_pass_fails_with_its_own_reason(self, name: str) -> None:
-        result = self._base_result()
-        del result["visible"][name]
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any(f"visible pass {name} missing" in reason for reason in reasons)
+        assert any(reason in r for r in reasons)
 
     def test_a_missing_visible_block_fails_both_passes(self) -> None:
-        result = self._base_result()
+        result = _base_result()
         del result["visible"]
         status, reasons = probe.overall_status(result)
         assert status == "fail"
@@ -1500,7 +1358,7 @@ class TestOverallStatusVisible:
 
     @pytest.mark.parametrize("name", ["V", "Voff"])
     def test_an_errored_pass_fails_with_the_recorded_reason(self, name: str) -> None:
-        result = self._base_result()
+        result = _base_result()
         result["visible"][name].update(status="error", error="plan has no slide_instances")
         status, reasons = probe.overall_status(result)
         assert status == "fail"
@@ -1508,7 +1366,7 @@ class TestOverallStatusVisible:
 
     @pytest.mark.parametrize("name", ["V", "Voff"])
     def test_a_pass_that_scored_no_slides_fails(self, name: str) -> None:
-        result = self._base_result()
+        result = _base_result()
         result["visible"][name]["slides"] = []
         status, reasons = probe.overall_status(result)
         assert status == "fail"
@@ -1518,7 +1376,7 @@ class TestOverallStatusVisible:
         """A deck whose first continuing boundary lands on player index 2 must be
         scored there -- with slide 2 green and slide 3 red, the same artifact
         that fails under a hardcoded "slide 2" must pass."""
-        result = self._base_result()
+        result = _base_result()
         result["groundTruth"]["boundaryPlayerIndex"] = 2
         slides = result["visible"]["Voff"]["slides"]
         slides[1]["verdict"] = True
@@ -1527,22 +1385,8 @@ class TestOverallStatusVisible:
         assert status == "pass"
         assert reasons == []
 
-    def test_an_unknown_expected_red_slide_fails_closed(self) -> None:
-        result = self._base_result()
-        del result["groundTruth"]["boundaryPlayerIndex"]
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("expected-red slide is unknown" in reason for reason in reasons)
-
-    def test_an_expected_red_slide_that_was_never_scored_fails_closed(self) -> None:
-        result = self._base_result()
-        result["groundTruth"]["boundaryPlayerIndex"] = 7
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("never scored the expected-red slide" in reason for reason in reasons)
-
     def test_visible_failures_do_not_mask_arm_failures(self) -> None:
-        result = self._base_result()
+        result = _base_result()
         result["arms"]["A"]["stageFit"] = {"verdict": False}
         result["visible"]["V"]["slides"][0]["verdict"] = False
         status, reasons = probe.overall_status(result)
@@ -1583,25 +1427,22 @@ class TestPaintingVideoPaintTest:
     (and so starts counting videos the player is not painting, or stops counting
     ones it is) fails a named test."""
 
-    def test_the_expression_tests_connectedness_decode_and_size(self) -> None:
-        assert "v.isConnected" in probe.PAINTING_VIDEOS_JS
-        assert "v.readyState >= 2" in probe.PAINTING_VIDEOS_JS
-        assert "v.videoWidth > 0" in probe.PAINTING_VIDEOS_JS
-        assert "r.width > 1 && r.height > 1" in probe.PAINTING_VIDEOS_JS
-
-    def test_the_expression_tests_visibility_and_the_ancestor_opacity_product(self) -> None:
-        """A Magic-Move-settled slide paints through a stage-wide WebGL canvas
-        with the DOM layer tree at opacity 0: those videos must NOT be listed."""
-        assert "checkVisibility({checkOpacity: true, checkVisibilityCSS: true})" in probe.PAINTING_VIDEOS_JS
-        assert "opacityProduct(v) > 0.02" in probe.PAINTING_VIDEOS_JS
-        assert "node.parentElement" in probe.PAINTING_VIDEOS_JS
-
-    def test_the_expression_tests_viewport_intersection(self) -> None:
-        assert "r.left >= window.innerWidth" in probe.PAINTING_VIDEOS_JS
-        assert "r.top >= window.innerHeight" in probe.PAINTING_VIDEOS_JS
-
-    def test_a_browser_without_check_visibility_answers_with_an_error_not_a_short_list(self) -> None:
-        assert "checkVisibility is unavailable" in probe.PAINTING_VIDEOS_JS
+    @pytest.mark.parametrize("term", [
+        pytest.param("v.isConnected", id="connectedness"),
+        pytest.param("v.readyState >= 2", id="decode"),
+        pytest.param("v.videoWidth > 0", id="video-size"),
+        pytest.param("r.width > 1 && r.height > 1", id="box-size"),
+        # A Magic-Move-settled slide paints through a stage-wide WebGL canvas with the DOM
+        # layer tree at opacity 0: those videos must NOT be listed.
+        pytest.param("checkVisibility({checkOpacity: true, checkVisibilityCSS: true})", id="visibility"),
+        pytest.param("opacityProduct(v) > 0.02", id="ancestor-opacity-product"),
+        pytest.param("node.parentElement", id="ancestor-walk"),
+        pytest.param("r.left >= window.innerWidth", id="viewport-intersection-x"),
+        pytest.param("r.top >= window.innerHeight", id="viewport-intersection-y"),
+        pytest.param("checkVisibility is unavailable", id="no-check-visibility-answers-an-error-not-a-short-list"),
+    ])
+    def test_the_expression_keeps_its_term(self, term: str) -> None:
+        assert term in probe.PAINTING_VIDEOS_JS
 
 
 class TestRectIou:
@@ -1812,9 +1653,6 @@ class TestVisiblePassStageFitGate:
     whose stage was shifted or cropped is not evidence -- and its slide verdicts
     must not be consulted at all."""
 
-    def _base_result(self) -> dict[str, Any]:
-        return TestOverallStatusTruthTable()._base_result()
-
     EXPECTED_FIT = {"x": 0.0, "y": 0.0, "width": 64.0, "height": 32.0}
 
     def _slides(self, *stage_maps: Any) -> list[dict[str, Any]]:
@@ -1844,51 +1682,37 @@ class TestVisiblePassStageFitGate:
 
     @pytest.mark.parametrize("name", ["V", "Voff"])
     def test_a_failed_stage_fit_fails_the_pass_and_hides_its_slide_verdicts(self, name: str) -> None:
-        result = self._base_result()
+        """The whole point for Voff: with a shifted stage, the expected rect can fall off the
+        image and come back as an ordinary red that Voff would accept -- a cropped Voff
+        cannot supply the required red (no "blind" verdict is ever consulted)."""
+        result = _base_result()
         result["visible"][name]["stageFit"] = {"verdict": False}
         status, reasons = probe.overall_status(result)
         assert status == "fail"
         assert any(f"visible pass {name} stage fit failed" in reason for reason in reasons)
         assert not any(f"visible pass {name} slide" in reason for reason in reasons)
+        assert not any("blind" in reason for reason in reasons)
 
     @pytest.mark.parametrize("name", ["V", "Voff"])
     def test_a_missing_stage_fit_fails_closed(self, name: str) -> None:
-        result = self._base_result()
+        result = _base_result()
         del result["visible"][name]["stageFit"]
         status, reasons = probe.overall_status(result)
         assert status == "fail"
         assert any(f"visible pass {name} stage fit missing" in reason for reason in reasons)
-
-    def test_a_cropped_voff_cannot_supply_the_required_red(self) -> None:
-        """The whole point: with a shifted stage, the expected rect can fall off
-        the image and come back as an ordinary red that Voff would accept."""
-        result = self._base_result()
-        result["visible"]["Voff"]["stageFit"] = {"verdict": False}
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("visible pass Voff stage fit failed" in reason for reason in reasons)
-        assert not any("blind" in reason for reason in reasons)
 
 
 class TestVisiblePassStopError:
     """Codex R1 (probe MINOR): a `player.stop()` failure can leak Chrome into the
     next pass, so it fails the pass it happened in."""
 
-    def _base_result(self) -> dict[str, Any]:
-        return TestOverallStatusTruthTable()._base_result()
-
     @pytest.mark.parametrize("name", ["V", "Voff"])
     def test_a_stop_failure_fails_the_pass_and_is_reported(self, name: str) -> None:
-        result = self._base_result()
+        result = _base_result()
         result["visible"][name]["stopError"] = "websocket closed"
         status, reasons = probe.overall_status(result)
         assert status == "fail"
         assert any(f"visible pass {name} player.stop() failed: websocket closed" in reason for reason in reasons)
-
-    def test_a_clean_pass_reports_no_stop_reason(self) -> None:
-        status, reasons = probe.overall_status(self._base_result())
-        assert status == "pass"
-        assert reasons == []
 
 
 # --------------------------------------------------------------------------
@@ -2091,19 +1915,14 @@ class TestRetireFacts:
         assert retire["rects"] == [BIG_INSTANCE]
         assert retire["reason"] == "refused" and retire["srcObjectId"] == BIG_OBJECT_IDS[0].lower()
 
-    def test_a_retire_whose_src_no_plan_retire_names_fails_closed(self) -> None:
-        runtime = {**RETIRED_RUNTIME, "boundaries": [dict(RETIRE_BOUNDARY, src=_end(1))]}
-        with pytest.raises(SystemExit, match="matches 0 plan verdicts"):
-            synthetic_retires(runtime)
-
-    def test_a_retire_at_a_scene_no_boundary_under_test_owns_fails_closed(self) -> None:
-        runtime = {**RETIRED_RUNTIME, "boundaries": [dict(RETIRE_BOUNDARY, atScene=4)]}
-        with pytest.raises(SystemExit):
-            synthetic_retires(runtime)
-
-    def test_a_retire_naming_an_undefined_movie_key_fails_closed(self) -> None:
-        runtime = {**RETIRED_RUNTIME, "boundaries": [dict(RETIRE_BOUNDARY, movieKey="movie9")]}
-        with pytest.raises(SystemExit):
+    @pytest.mark.parametrize(("change", "match"), [
+        pytest.param({"src": _end(1)}, "matches 0 plan verdicts", id="src-no-plan-retire-names"),
+        pytest.param({"atScene": 4}, None, id="scene-no-boundary-under-test-owns"),
+        pytest.param({"movieKey": "movie9"}, None, id="undefined-movie-key"),
+    ])
+    def test_an_unbindable_retire_fails_closed(self, change: dict[str, Any], match: str | None) -> None:
+        runtime = {**RETIRED_RUNTIME, "boundaries": [dict(RETIRE_BOUNDARY, **change)]}
+        with pytest.raises(SystemExit, match=match):
             synthetic_retires(runtime)
 
     def test_every_retire_binds_to_its_own_verdict_and_ends_have_no_carry(self) -> None:
@@ -2145,57 +1964,30 @@ class TestRefusalScoring:
         assert scored["paintingOverRect"] == [] and scored["pooled"] == []
         assert scored["reason"] is None
 
-    def test_a_painting_video_over_the_retired_rect_is_red(self) -> None:
-        scored = probe.score_refusal(
-            self._sample(painting=[painting_video(BIG_INSTANCE)]), self.RETIRE, True
-        )
-        assert scored["verdict"] is False
-        assert "overlap the retired movie" in scored["reason"]
-
-    def test_a_painting_video_elsewhere_on_the_slide_does_not_refute_the_refusal(self) -> None:
-        elsewhere = {"x": 1200.0, "y": 100.0, "w": 300.0, "h": 200.0}
-        scored = probe.score_refusal(self._sample(painting=[painting_video(elsewhere)]), self.RETIRE, True)
-        assert scored["verdict"] is True
-
-    def test_an_edge_touching_video_is_not_an_overlap(self) -> None:
-        touching = {"x": BIG_INSTANCE["x"] + BIG_INSTANCE["w"], "y": BIG_INSTANCE["y"], "w": 200.0, "h": 100.0}
-        scored = probe.score_refusal(self._sample(painting=[painting_video(touching)]), self.RETIRE, True)
-        assert scored["verdict"] is True
-
-    def test_a_pooled_decoder_for_the_retired_asset_is_red(self) -> None:
-        scored = probe.score_refusal(
-            self._sample(snapshot=[{"key": "untitled.mov", "elId": 1}]), self.RETIRE, True
-        )
-        assert scored["verdict"] is False
-        assert "pooled/preserved" in scored["reason"]
-
-    def test_another_assets_pooled_decoder_is_irrelevant(self) -> None:
-        scored = probe.score_refusal(self._sample(snapshot=[{"key": "wa0125.mov"}]), self.RETIRE, True)
-        assert scored["verdict"] is True
-
-    def test_the_pool_is_not_consulted_when_no_runtime_is_installed(self) -> None:
-        scored = probe.score_refusal(self._sample(snapshot=None), self.RETIRE, False)
-        assert scored["verdict"] is True
-
-    def test_an_unreadable_pool_census_is_red_never_a_silently_clean_one(self) -> None:
-        scored = probe.score_refusal(self._sample(snapshot={"error": "boom"}), self.RETIRE, True)
-        assert scored["verdict"] is False
-        assert "preserve snapshot is unreadable" in scored["reason"]
-
-    def test_a_missing_sample_is_red_not_a_free_pass(self) -> None:
-        scored = probe.score_refusal(None, self.RETIRE, True)
-        assert scored["verdict"] is False
-        assert "no refusal evidence" in scored["reason"]
-
-    @pytest.mark.parametrize("stage_map", [None, {"s": 0, "sy": 0, "offsetWidth": 0, "offsetHeight": 0}])
-    def test_an_untrustworthy_stage_map_is_red(self, stage_map: Any) -> None:
-        scored = probe.score_refusal(self._sample(stage_map=stage_map), self.RETIRE, True)
-        assert scored["verdict"] is False
-        assert "stage map" in scored["reason"]
-
-    def test_a_malformed_painting_result_is_red(self) -> None:
-        scored = probe.score_refusal(self._sample(painting={"error": "no checkVisibility"}), self.RETIRE, True)
-        assert scored["verdict"] is False
+    @pytest.mark.parametrize(("sample", "installed", "verdict", "reason"), [
+        pytest.param({"painting": [painting_video(BIG_INSTANCE)]}, True, False, "overlap the retired movie",
+                     id="painting-video-over-the-retired-rect-is-red"),
+        pytest.param({"painting": [painting_video({"x": 1200.0, "y": 100.0, "w": 300.0, "h": 200.0})]}, True, True, None,
+                     id="painting-video-elsewhere-does-not-refute-the-refusal"),
+        pytest.param({"painting": [painting_video({"x": BIG_INSTANCE["x"] + BIG_INSTANCE["w"], "y": BIG_INSTANCE["y"], "w": 200.0, "h": 100.0})]},
+                     True, True, None, id="edge-touching-video-is-not-an-overlap"),
+        pytest.param({"snapshot": [{"key": "untitled.mov", "elId": 1}]}, True, False, "pooled/preserved",
+                     id="pooled-decoder-for-the-retired-asset-is-red"),
+        pytest.param({"snapshot": [{"key": "wa0125.mov"}]}, True, True, None, id="another-assets-pooled-decoder-is-irrelevant"),
+        pytest.param({}, False, True, None, id="pool-not-consulted-without-a-runtime"),
+        pytest.param({"snapshot": {"error": "boom"}}, True, False, "preserve snapshot is unreadable",
+                     id="unreadable-pool-census-is-red-never-silently-clean"),
+        pytest.param(None, True, False, "no refusal evidence", id="missing-sample-is-red-not-a-free-pass"),
+        pytest.param({"stage_map": None}, True, False, "stage map", id="no-stage-map-is-red"),
+        pytest.param({"stage_map": {"s": 0, "sy": 0, "offsetWidth": 0, "offsetHeight": 0}}, True, False, "stage map",
+                     id="zero-stage-map-is-red"),
+        pytest.param({"painting": {"error": "no checkVisibility"}}, True, False, None, id="malformed-painting-result-is-red"),
+    ])
+    def test_refusal_evidence(self, sample: dict[str, Any] | None, installed: bool, verdict: bool, reason: str | None) -> None:
+        scored = probe.score_refusal(None if sample is None else self._sample(**sample), self.RETIRE, installed)
+        assert scored["verdict"] is verdict
+        if reason is not None:
+            assert reason in scored["reason"]
 
     def test_score_refusals_is_keyed_by_the_plans_own_boundary(self) -> None:
         retire = synthetic_retire()
@@ -2214,7 +2006,7 @@ class TestRefusedArmTable:
         """The base artifact, re-expressed for a plan that RETIRES the 1->2
         boundary: the carry verdict goes False and the positive verdict carries the
         refusal. Arm B is continuity-off and keeps today's expectations."""
-        result = TestOverallStatusTruthTable()._base_result()
+        result = _base_result()
         result["groundTruth"]["refusedBoundaries"] = ["continue1to2"]
         for entry in (result["arms"]["A"], result["arms"]["C"], result["attach"]):
             entry["continue1to2"] = {"verdict": False}
@@ -2227,35 +2019,24 @@ class TestRefusedArmTable:
         assert reasons == []
 
     @pytest.mark.parametrize("arm", ["A", "C", "attach"])
-    def test_carrying_a_retired_boundary_fails_the_arm(self, arm: str) -> None:
-        """The runtime ignored the refusal: the movie crossed the boundary anyway."""
+    @pytest.mark.parametrize(("mutate", "reason"), [
+        # The runtime ignored the refusal: the movie crossed the boundary anyway.
+        pytest.param(lambda e: e.update(continue1to2={"verdict": True}), "expected False (the plan retires this boundary)",
+                     id="carrying-a-retired-boundary"),
+        # A painting video still over the rect, or a pooled decoder for the key.
+        pytest.param(lambda e: e.update(refused1to2={"verdict": False, "reason": "1 painting video(s) still overlap the retired movie"}),
+                     "still overlap the retired movie", id="false-positive-half"),
+        # "Did not continue" without the positive half is vacuous -- and it must not read as
+        # inconclusive either, which would hide it behind the sampler.
+        pytest.param(lambda e: e.pop("refused1to2"), "has no refused1to2 verdict, so the refusal is unproven",
+                     id="missing-positive-half"),
+    ])
+    def test_a_refused_arm_fails_with_its_reason(self, mutate: Any, reason: str, arm: str) -> None:
         result = self._result()
-        entry = result["attach"] if arm == "attach" else result["arms"][arm]
-        entry["continue1to2"] = {"verdict": True}
+        mutate(result["attach"] if arm == "attach" else result["arms"][arm])
         status, reasons = probe.overall_status(result)
         assert status == "fail"
-        assert any("expected False (the plan retires this boundary)" in reason for reason in reasons)
-
-    @pytest.mark.parametrize("arm", ["A", "C", "attach"])
-    def test_a_false_positive_half_fails_the_arm_with_its_reason(self, arm: str) -> None:
-        """A painting video still over the rect, or a pooled decoder for the key."""
-        result = self._result()
-        entry = result["attach"] if arm == "attach" else result["arms"][arm]
-        entry["refused1to2"] = {"verdict": False, "reason": "1 painting video(s) still overlap the retired movie"}
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("still overlap the retired movie" in reason for reason in reasons)
-
-    @pytest.mark.parametrize("arm", ["A", "C", "attach"])
-    def test_a_missing_positive_half_fails_with_its_own_reason(self, arm: str) -> None:
-        """"Did not continue" without the positive half is vacuous -- and it must
-        not read as inconclusive either, which would hide it behind the sampler."""
-        result = self._result()
-        entry = result["attach"] if arm == "attach" else result["arms"][arm]
-        del entry["refused1to2"]
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("has no refused1to2 verdict, so the refusal is unproven" in reason for reason in reasons)
+        assert any(reason in r for r in reasons)
 
     def test_an_inconclusive_carry_verdict_still_reads_inconclusive(self) -> None:
         result = self._result()
@@ -2270,14 +2051,14 @@ class TestRefusedArmTable:
         assert probe.overall_status(result)[0] == "pass"
 
     def test_without_a_retire_a_carried_boundary_must_still_be_true(self) -> None:
-        result = TestOverallStatusTruthTable()._base_result()
+        result = _base_result()
         result["arms"]["A"]["continue1to2"] = {"verdict": False}
         status, reasons = probe.overall_status(result)
         assert status == "fail"
         assert any("expected True (the plan carries this boundary)" in reason for reason in reasons)
 
     def test_an_unknown_refused_boundary_name_is_ignored_rather_than_trusted(self) -> None:
-        result = TestOverallStatusTruthTable()._base_result()
+        result = _base_result()
         result["groundTruth"]["refusedBoundaries"] = ["continue9to10"]
         assert probe.overall_status(result)[0] == "pass"
 
@@ -2305,7 +2086,7 @@ class TestVisibleExpectationModel:
     def _result(self) -> dict[str, Any]:
         """The baseline artifact: slide 2 is dead-expected in BOTH passes because
         the plan refuses to carry the 1->2 boundary."""
-        result = TestOverallStatusTruthTable()._base_result()
+        result = _base_result()
         result["groundTruth"]["refusedBoundaries"] = ["continue1to2"]
         result["groundTruth"]["rectExpectations"] = probe.visible_expectations(
             synthetic_plan(), RETIRED_RUNTIME
@@ -2327,29 +2108,22 @@ class TestVisibleExpectationModel:
         assert status == "pass"
         assert reasons == []
 
-    def test_v_slide_two_live_where_dead_was_expected_fails(self) -> None:
-        """The carried movie is still painting on the refused destination."""
+    @pytest.mark.parametrize(("name", "ordinal", "rect", "reason"), [
+        # The carried movie is still painting on the refused destination.
+        pytest.param("V", 2, DEAD_RED, "visible pass V slide 2 does not meet its per-rect expectations",
+                     id="V-slide-two-live-where-dead-was-expected"),
+        # The surviving carry must still be visibly live -- a refusal elsewhere is no licence
+        # for a dead bridge destination.
+        pytest.param("V", 4, LIVE_RED, "visible pass V slide 4 does not meet its per-rect expectations",
+                     id="V-slide-four-dead-where-live-was-expected"),
+        pytest.param("Voff", 2, DEAD_RED, "visible pass Voff slide 2", id="Voff-slide-two-live-where-dead-was-expected"),
+    ])
+    def test_a_slide_off_its_expectation_fails(self, name: str, ordinal: int, rect: Any, reason: str) -> None:
         result = self._result()
-        result["visible"]["V"]["slides"][1] = expectation_slide(2, [self.DEAD_RED])
+        result["visible"][name]["slides"][ordinal - 1] = expectation_slide(ordinal, [rect])
         status, reasons = probe.overall_status(result)
         assert status == "fail"
-        assert any("visible pass V slide 2 does not meet its per-rect expectations" in r for r in reasons)
-
-    def test_v_slide_four_dead_where_live_was_expected_fails(self) -> None:
-        """The surviving carry must still be visibly live -- a refusal elsewhere is
-        no licence for a dead bridge destination."""
-        result = self._result()
-        result["visible"]["V"]["slides"][3] = expectation_slide(4, [self.LIVE_RED])
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("visible pass V slide 4 does not meet its per-rect expectations" in r for r in reasons)
-
-    def test_voff_slide_two_live_where_dead_was_expected_fails(self) -> None:
-        result = self._result()
-        result["visible"]["Voff"]["slides"][1] = expectation_slide(2, [self.DEAD_RED])
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("visible pass Voff slide 2" in r for r in reasons)
+        assert any(reason in r for r in reasons)
 
     def test_a_pass_with_no_live_read_rect_is_always_red_and_fails(self) -> None:
         """Every rect dead-expected and dead: the slides all "pass", but the pass
@@ -2381,7 +2155,7 @@ class TestVisibleExpectationModel:
     def test_a_pass_without_stated_expectations_keeps_todays_rules_exactly(self) -> None:
         """A record with no per-rect expectations at all (the pre-refusal shape) is
         still scored by the V-live-everywhere / Voff-red-at-the-boundary rules."""
-        result = TestOverallStatusTruthTable()._base_result()
+        result = _base_result()
         assert probe.overall_status(result) == ("pass", [])
         result["visible"]["Voff"]["slides"][1]["verdict"] = True
         status, reasons = probe.overall_status(result)
@@ -2394,24 +2168,18 @@ class TestVisibleExpectationModel:
 
 
 class TestExpectedRectsCarryTheirExpectation:
-    def test_an_asset_the_plan_calls_dead_is_labelled_dead(self) -> None:
-        expectations = {1: {BIG_ASSET: "dead"}}
-        rects = probe.expected_screen_rects({1: {BIG_ASSET: [BIG_INSTANCE]}}, 1, IDENTITY_STAGE_MAP, expectations)
-        assert [rect["expect"] for rect in rects] == ["dead"]
-
-    def test_an_unmentioned_asset_is_expected_live_which_is_the_stricter_reading(self) -> None:
-        rects = probe.expected_screen_rects({1: {BIG_ASSET: [BIG_INSTANCE]}}, 1, IDENTITY_STAGE_MAP, {1: {}})
-        assert [rect["expect"] for rect in rects] == ["live"]
-
-    def test_without_expectations_every_rect_is_live_exactly_as_before(self) -> None:
-        rects = probe.expected_screen_rects(VISIBLE_INSTANCES, 0, IDENTITY_STAGE_MAP)
-        assert [rect["expect"] for rect in rects] == ["live"]
-
-    def test_every_instance_of_a_dead_asset_is_dead(self) -> None:
-        rects = probe.expected_screen_rects(
-            {2: {BIG_ASSET: [BIG_INSTANCE, SMALL_INSTANCE]}}, 2, IDENTITY_STAGE_MAP, {2: {BIG_ASSET: "dead"}}
-        )
-        assert [rect["expect"] for rect in rects] == ["dead", "dead"]
+    @pytest.mark.parametrize(("instances", "index", "expectations", "expected"), [
+        pytest.param({1: {BIG_ASSET: [BIG_INSTANCE]}}, 1, {1: {BIG_ASSET: "dead"}}, ["dead"], id="asset-the-plan-calls-dead"),
+        pytest.param({1: {BIG_ASSET: [BIG_INSTANCE]}}, 1, {1: {}}, ["live"],
+                     id="unmentioned-asset-is-expected-live-the-stricter-reading"),
+        pytest.param(VISIBLE_INSTANCES, 0, None, ["live"], id="without-expectations-every-rect-is-live-as-before"),
+        pytest.param({2: {BIG_ASSET: [BIG_INSTANCE, SMALL_INSTANCE]}}, 2, {2: {BIG_ASSET: "dead"}}, ["dead", "dead"],
+                     id="every-instance-of-a-dead-asset-is-dead"),
+    ])
+    def test_expected_rects_carry_the_plans_expectation(self, instances: Any, index: int, expectations: Any, expected: list[str]) -> None:
+        args = () if expectations is None else (expectations,)
+        rects = probe.expected_screen_rects(instances, index, IDENTITY_STAGE_MAP, *args)
+        assert [rect["expect"] for rect in rects] == expected
 
 
 class TestPaintingVideoOnADeadRect:
@@ -2645,9 +2413,18 @@ class TestInPageOracleApplicability:
         assert probe.inpage_oracle_result(raw) is None
         assert probe.INPAGE_HANDLE_ABSENT_REASON in probe.INPAGE_LIVENESS_JS
 
-    @pytest.mark.parametrize("reason", NON_ABSENCE_REASONS)
-    def test_every_other_n_a_claim_is_an_applicable_inconclusive(self, reason: object) -> None:
-        raw = {"applicable": False, "status": "n/a", "reason": reason}
+    @pytest.mark.parametrize("raw", [
+        *({"applicable": False, "status": "n/a", "reason": reason} for reason in NON_ABSENCE_REASONS),
+        # Codex r1 Spec 8: only a well-formed, explicit `{applicable:false,status:'n/a'}` may
+        # vanish as n/a -- anything else that merely claims `applicable: False` is
+        # untrustworthy and must stay an APPLICABLE inconclusive result, never disappear into a
+        # screenshot-only pass. A non-dict response is the same.
+        pytest.param({"applicable": False, "reason": "no status field at all"}, id="malformed-n-a-without-status"),
+        pytest.param(None, id="non-dict-None"),
+        pytest.param("oops", id="non-dict-str"),
+        pytest.param(True, id="non-dict-True"),
+    ])
+    def test_every_other_n_a_claim_is_an_applicable_inconclusive(self, raw: Any) -> None:
         result = probe.inpage_oracle_result(raw)
         assert result is not None
         assert result["verdict"] is None and result["status"] == "inconclusive"
@@ -2711,57 +2488,27 @@ class TestInPageOracleApplicability:
         assert "checkVisibility" in probe.INPAGE_LIVENESS_JS
         assert "isContextLost" in probe.INPAGE_LIVENESS_JS
 
-    def test_a_malformed_not_applicable_response_is_an_applicable_inconclusive(self) -> None:
-        """Codex r1 Spec 8: only a well-formed, explicit
-        `{applicable:false,status:'n/a'}` may vanish as n/a -- anything else
-        that merely claims `applicable: False` is untrustworthy and must stay
-        an APPLICABLE inconclusive result, never disappear into a
-        screenshot-only pass."""
-        result = probe.inpage_oracle_result({"applicable": False, "reason": "no status field at all"})
-        assert result is not None
-        assert result["verdict"] is None
-        assert result["status"] == "inconclusive"
-
-    def test_a_non_dict_response_is_an_applicable_inconclusive(self) -> None:
-        assert probe.inpage_oracle_result(None) is not None
-        assert probe.inpage_oracle_result("oops")["verdict"] is None
-        assert probe.inpage_oracle_result(True)["status"] == "inconclusive"
-
-
 class TestTwoOracleRecord:
-    def _base_result(self) -> dict[str, Any]:
-        return TestOverallStatusTruthTable()._base_result()
-
-    def test_dead_expected_rect_both_oracles_physically_dead_passes(self) -> None:
-        """Codex r1 Spec 2: screenshot `verdict=True` on a dead-expected rect
-        means "frozen as expected" (physically DEAD); it must agree with an
-        in-page DEAD read, not be read as an opposite-polarity disagreement."""
+    @pytest.mark.parametrize(("inpage", "verdict"), [
+        # Codex r1 Spec 2: screenshot `verdict=True` on a dead-expected rect means "frozen as
+        # expected" (physically DEAD); it must agree with an in-page DEAD read, not be read as
+        # an opposite-polarity disagreement.
+        pytest.param({"verdict": False, "status": "dead", "reason": None}, True, id="both-oracles-physically-dead-passes"),
+        # The physical readings genuinely disagree (frozen pixels, but the GL canvas underneath
+        # is still drawing) -- a real disagreement, not resolved by either oracle alone.
+        pytest.param({"verdict": True, "status": "live", "reason": None}, None, id="screenshot-dead-inpage-live-is-inconclusive"),
+        # Codex r2 Spec 1 regression: screenshot expectation-met `True` on a DEAD-expected rect
+        # became physical `False`, and the combiner used to preserve physical DEAD when the
+        # in-page result was merely INCONCLUSIVE (a failed paused-decoder control), then
+        # translate it back to expectation-met `True` -- a silent PASS on a failed control. A
+        # failed or otherwise applicable-but-inconclusive control must make the slide
+        # INCONCLUSIVE, never a pass, regardless of `expect`.
+        pytest.param({"verdict": None, "status": "inconclusive", "reason": "paused-decoder control did not read dead"}, None,
+                     id="inconclusive-paused-control-is-inconclusive-codex-r2-spec-1"),
+    ])
+    def test_a_dead_expected_rect_combines_both_oracles(self, inpage: dict[str, Any], verdict: bool | None) -> None:
         entry = {"verdict": True, "expect": probe.DEAD, "reason": None, "liveFrac": 0.01}
-        inpage = {"verdict": False, "status": "dead", "reason": None}
-        combined = probe.combine_rect_oracles(entry, inpage)
-        assert combined["verdict"] is True
-
-    def test_dead_expected_rect_screenshot_dead_inpage_live_is_inconclusive(self) -> None:
-        """The physical readings genuinely disagree (frozen pixels, but the GL
-        canvas underneath is still drawing) -- that is a real disagreement and
-        must be inconclusive, not resolved by either oracle alone."""
-        entry = {"verdict": True, "expect": probe.DEAD, "reason": None, "liveFrac": 0.01}
-        inpage = {"verdict": True, "status": "live", "reason": None}
-        combined = probe.combine_rect_oracles(entry, inpage)
-        assert combined["verdict"] is None
-
-    def test_dead_expected_rect_with_an_inconclusive_paused_control_is_inconclusive(self) -> None:
-        """Codex r2 Spec 1 regression: screenshot expectation-met `True` on a
-        DEAD-expected rect became physical `False`, and the combiner used to
-        preserve physical DEAD when the in-page result was merely INCONCLUSIVE
-        (a failed paused-decoder control), then translate it back to
-        expectation-met `True` -- a silent PASS on a failed control. A failed
-        or otherwise applicable-but-inconclusive control must make the slide
-        INCONCLUSIVE, never a pass, regardless of `expect`."""
-        entry = {"verdict": True, "expect": probe.DEAD, "reason": None, "liveFrac": 0.01}
-        inpage = {"verdict": None, "status": "inconclusive", "reason": "paused-decoder control did not read dead"}
-        combined = probe.combine_rect_oracles(entry, inpage)
-        assert combined["verdict"] is None
+        assert probe.combine_rect_oracles(entry, inpage)["verdict"] is verdict
 
     def test_disagreement_makes_the_slide_inconclusive_and_writes_evidence(self, tmp_path: Path) -> None:
         host = FakeHost(scene_ids=["s", "s"], inpage=[_inpage_raw(live=False)])
@@ -2789,29 +2536,19 @@ class TestTwoOracleRecord:
         reasons = probe.visible_control_reasons(entry, result)
         assert any("is not RED" in reason for reason in reasons)
 
-    def test_an_inconclusive_slide_fails_overall_status(self) -> None:
-        result = self._base_result()
-        result["visible"]["V"]["slides"][1].update(verdict=None, status="inconclusive")
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("inconclusive" in reason for reason in reasons)
-
-    def test_a_failed_paused_decoder_control_makes_the_slide_inconclusive(self) -> None:
+    @pytest.mark.parametrize(("mutate", "reason"), [
+        pytest.param(lambda raw: raw.update(pausedDecoderSamples=raw["samples"]), "paused-decoder control did not read dead",
+                     id="failed-paused-decoder-control"),
+        pytest.param(lambda raw: raw.update(markerDark=[0.0] * probe.INPAGE_BAND_COUNT, markerLight=[0.1] * probe.INPAGE_BAND_COUNT),
+                     "occluder mask unusable", id="unusable-occluder-mask"),
+    ])
+    def test_an_untrusted_inpage_read_is_inconclusive(self, mutate: Any, reason: str) -> None:
         raw = _inpage_raw(live=True)
-        raw["pausedDecoderSamples"] = raw["samples"]
+        mutate(raw)
         result = probe.inpage_oracle_result(raw)
         assert result["verdict"] is None
         assert result["status"] == "inconclusive"
-        assert result["reason"] == "paused-decoder control did not read dead"
-
-    def test_an_unusable_occluder_mask_is_inconclusive(self) -> None:
-        raw = _inpage_raw(live=True)
-        raw["markerDark"] = [0.0] * probe.INPAGE_BAND_COUNT
-        raw["markerLight"] = [0.1] * probe.INPAGE_BAND_COUNT
-        result = probe.inpage_oracle_result(raw)
-        assert result["verdict"] is None
-        assert result["status"] == "inconclusive"
-        assert result["reason"] == "occluder mask unusable"
+        assert result["reason"] == reason
 
 
 class TestHandleIdentityBinding:
@@ -2826,7 +2563,15 @@ class TestHandleIdentityBinding:
     IDENTITY_MISMATCH_REASONS = [
         "the runtime handle was replaced",
         "handle re-recorded during the sample window",
+        # Codex r3 Spec 1: a self-consistent handle re-published for a NEW scene, whose rect
+        # happens to coincide with the previous scene's, must not corroborate the previous
+        # scene's screenshots -- the JS's own `recheck()` binds `handle.sceneId ===
+        # expectedScene === liveSceneId()`, not merely "the current live scene equals whatever
+        # the handle claims".
         "handle scene does not match the scene being scored",
+        # A handle whose `canvas`/`gl`/`video` object identity changed after entry (e.g. the
+        # runtime re-created the canvas mid-read) must not be trusted just because
+        # `handle.rect`/`sceneId` still read the same.
         "handle canvas, gl, or video identity changed",
         "canvas is not a descendant of #stage",
         "canvas disconnected",
@@ -2834,6 +2579,8 @@ class TestHandleIdentityBinding:
         "canvas is not visible",
         "handle rect does not exactly match the scored instance rect",
         "handle instance does not match the scored instance",
+        # Codex r3 Spec 1: only an ABSENT global handle may answer n/a; a PRESENT but malformed
+        # one (missing a required member) must be an applicable INCONCLUSIVE, never silently n/a.
         "handle is present but malformed",
     ]
 
@@ -2845,35 +2592,6 @@ class TestHandleIdentityBinding:
         assert result["verdict"] is None
         assert result["status"] == "inconclusive"
         assert result["reason"] == reason
-
-    def test_a_new_scene_with_the_same_rect_is_an_applicable_inconclusive(self) -> None:
-        """Codex r3 Spec 1: a self-consistent handle re-published for a NEW
-        scene, whose rect happens to coincide with the previous scene's, must
-        not corroborate the previous scene's screenshots -- the JS's own
-        `recheck()` binds `handle.sceneId === expectedScene === liveSceneId()`,
-        not merely "the current live scene equals whatever the handle claims"."""
-        raw = {"applicable": True, "status": "inconclusive", "reason": "handle scene does not match the scene being scored"}
-        result = probe.inpage_oracle_result(raw)
-        assert result["verdict"] is None
-        assert result["status"] == "inconclusive"
-
-    def test_a_swapped_canvas_object_is_an_applicable_inconclusive(self) -> None:
-        """A handle whose `canvas`/`gl`/`video` object identity changed after
-        entry (e.g. the runtime re-created the canvas mid-read) must not be
-        trusted just because `handle.rect`/`sceneId` still read the same."""
-        raw = {"applicable": True, "status": "inconclusive", "reason": "handle canvas, gl, or video identity changed"}
-        result = probe.inpage_oracle_result(raw)
-        assert result["verdict"] is None
-        assert result["status"] == "inconclusive"
-
-    def test_present_but_malformed_handle_is_inconclusive_not_n_a(self) -> None:
-        """Codex r3 Spec 1: only an ABSENT global handle may answer n/a; a
-        PRESENT but malformed one (missing a required member) must be an
-        applicable INCONCLUSIVE, never silently n/a."""
-        raw = {"applicable": True, "status": "inconclusive", "reason": "handle is present but malformed"}
-        result = probe.inpage_oracle_result(raw)
-        assert result is not None
-        assert result["status"] == "inconclusive"
 
     def test_measurement_binds_the_scene_rect_and_instance_before_reading(self) -> None:
         host = FakeHost(scene_ids=["scene-7", "scene-7"], inpage=[{"applicable": False, "status": "n/a", "reason": "no handle"}])
@@ -2912,22 +2630,18 @@ class TestAsyncOracleFailureHandling:
     applicable INCONCLUSIVE for that one rect -- never `status:"error"` for
     the whole pass."""
 
-    def test_a_rejected_promise_is_an_applicable_inconclusive_not_a_raise(self) -> None:
-        host = FakeHost(scene_ids=["s", "s"], inpage=[RuntimeError("promise rejected")])
+    @pytest.mark.parametrize("error", [
+        pytest.param(RuntimeError("promise rejected"), id="rejected-promise"),
+        pytest.param(TimeoutError("cdp deadline"), id="transport-timeout"),
+    ])
+    def test_a_failed_read_is_an_applicable_inconclusive_not_a_raise(self, error: BaseException) -> None:
+        host = FakeHost(scene_ids=["s", "s"], inpage=[error])
         result = probe.measure_inpage_oracle_with_paused_control(
             host.transport, {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}, "s", "Untitled.mov#1"
         )
         assert result["verdict"] is None
         assert result["status"] == "inconclusive"
-        assert "promise rejected" in result["reason"]
-
-    def test_a_transport_timeout_is_an_applicable_inconclusive_not_a_raise(self) -> None:
-        host = FakeHost(scene_ids=["s", "s"], inpage=[TimeoutError("cdp deadline")])
-        result = probe.measure_inpage_oracle_with_paused_control(
-            host.transport, {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}, "s", "Untitled.mov#1"
-        )
-        assert result["verdict"] is None
-        assert result["status"] == "inconclusive"
+        assert str(error) in result["reason"]
 
     def test_a_failure_never_collapses_the_whole_slide_to_status_error(self) -> None:
         host = FakeHost(scene_ids=["s", "s"], inpage=[RuntimeError("boom")])
@@ -3005,17 +2719,15 @@ class TestAsyncOracleFailureHandling:
         assert result.returncode == 0, result.stderr
         return json.loads(result.stdout.strip())
 
-    def test_resume_is_awaited_even_when_pause_rejects(self) -> None:
-        outcome = self._run_inpage_js_against_stub(pause_rejects=True, sample_rejects=False)
+    @pytest.mark.parametrize(("pause_rejects", "sample_rejects", "error"), [
+        pytest.param(True, False, "pause rejected", id="pause-rejects"),
+        pytest.param(False, True, "sample rejected", id="paused-sample-rejects"),
+    ])
+    def test_resume_is_awaited_even_when_a_phase_rejects(self, pause_rejects: bool, sample_rejects: bool, error: str) -> None:
+        outcome = self._run_inpage_js_against_stub(pause_rejects=pause_rejects, sample_rejects=sample_rejects)
         assert outcome["resumeCalls"] == 1
         assert outcome["ok"] is False
-        assert "pause rejected" in outcome["error"]
-
-    def test_resume_is_awaited_even_when_the_paused_sample_rejects(self) -> None:
-        outcome = self._run_inpage_js_against_stub(pause_rejects=False, sample_rejects=True)
-        assert outcome["resumeCalls"] == 1
-        assert outcome["ok"] is False
-        assert "sample rejected" in outcome["error"]
+        assert error in outcome["error"]
 
 
 class TestPokeIsProbabilistic:
@@ -3058,21 +2770,18 @@ class TestPokeIsProbabilistic:
 # --------------------------------------------------------------------------
 
 class TestPassGArgs:
-    def test_pass_flag_defaults_to_full_run(self) -> None:
-        assert probe.parse_args([]).only_pass is None
-
-    def test_pass_g_selectable(self) -> None:
-        assert probe.parse_args(["--pass", "G"]).only_pass == "G"
+    @pytest.mark.parametrize(("argv", "attr", "expected"), [
+        pytest.param([], "only_pass", None, id="pass-defaults-to-full-run"),
+        pytest.param(["--pass", "G"], "only_pass", "G", id="pass-G-selectable"),
+        pytest.param([], "attach", False, id="attach-defaults-false"),
+        pytest.param(["--pass", "G", "--attach"], "attach", True, id="attach-settable"),
+    ])
+    def test_pass_g_flags(self, argv: list[str], attr: str, expected: Any) -> None:
+        assert getattr(probe.parse_args(argv), attr) == expected
 
     def test_pass_rejects_other_values(self) -> None:
         with pytest.raises(SystemExit):
             probe.parse_args(["--pass", "V"])
-
-    def test_attach_flag_defaults_false(self) -> None:
-        assert probe.parse_args([]).attach is False
-
-    def test_attach_flag_settable(self) -> None:
-        assert probe.parse_args(["--pass", "G", "--attach"]).attach is True
 
 
 class TestGBurstSpacing:
@@ -3107,40 +2816,32 @@ class TestGBurstSpacing:
 
 
 class TestCombineVerdicts:
-    def test_all_true_is_true(self) -> None:
-        assert probe.combine_verdicts(True, True, True) is True
-
-    def test_any_false_is_false(self) -> None:
-        assert probe.combine_verdicts(True, False, True) is False
-
-    def test_any_none_is_none_even_with_a_false_present(self) -> None:
-        # A missing/unreadable check must not let another check's False stand
-        # in for it, and must not let a True elsewhere paper over it either.
-        assert probe.combine_verdicts(True, None) is None
-        assert probe.combine_verdicts(False, None) is None
-
-    def test_empty_is_true(self) -> None:
-        assert probe.combine_verdicts() is True
+    @pytest.mark.parametrize(("verdicts", "expected"), [
+        pytest.param((True, True, True), True, id="all-true-is-true"),
+        pytest.param((True, False, True), False, id="any-false-is-false"),
+        # A missing/unreadable check must not let another check's False stand in for it, and
+        # must not let a True elsewhere paper over it either.
+        pytest.param((True, None), None, id="any-none-is-none"),
+        pytest.param((False, None), None, id="any-none-is-none-even-with-a-false-present"),
+        pytest.param((), True, id="empty-is-true"),
+    ])
+    def test_combine_verdicts(self, verdicts: tuple[Any, ...], expected: bool | None) -> None:
+        assert probe.combine_verdicts(*verdicts) is expected
 
 
 class TestCaptureIsFresh:
-    def test_a_single_frame_burst_where_something_is_live_expected_is_stale(self) -> None:
-        assert probe.capture_is_fresh(True, 1) is False
-
-    def test_varied_frames_are_fresh(self) -> None:
-        assert probe.capture_is_fresh(True, 8) is True
-
-    def test_exactly_the_minimum_is_fresh(self) -> None:
-        assert probe.capture_is_fresh(True, 2) is True
-
-    def test_nothing_live_expected_is_never_flagged(self) -> None:
-        assert probe.capture_is_fresh(False, 1) is True
-        assert probe.capture_is_fresh(False, None) is True
-
-    def test_unreadable_count_when_live_expected_is_inconclusive(self) -> None:
-        assert probe.capture_is_fresh(True, None) is None
-        assert probe.capture_is_fresh(True, "n/a") is None
-        assert probe.capture_is_fresh(True, True) is None
+    @pytest.mark.parametrize(("live_expected", "unique", "expected"), [
+        pytest.param(True, 1, False, id="single-frame-burst-where-something-is-live-expected-is-stale"),
+        pytest.param(True, 8, True, id="varied-frames-are-fresh"),
+        pytest.param(True, 2, True, id="exactly-the-minimum-is-fresh"),
+        pytest.param(False, 1, True, id="nothing-live-expected-is-never-flagged"),
+        pytest.param(False, None, True, id="nothing-live-expected-unreadable-count-is-never-flagged"),
+        pytest.param(True, None, None, id="unreadable-count-when-live-expected-is-inconclusive-None"),
+        pytest.param(True, "n/a", None, id="unreadable-count-when-live-expected-is-inconclusive-str"),
+        pytest.param(True, True, None, id="unreadable-count-when-live-expected-is-inconclusive-bool"),
+    ])
+    def test_capture_is_fresh(self, live_expected: bool, unique: Any, expected: bool | None) -> None:
+        assert probe.capture_is_fresh(live_expected, unique) is expected
 
 
 class TestGotoRectExpectations:
@@ -3166,42 +2867,26 @@ class TestGotoRectExpectations:
 
 
 class TestScoreNoConsumption:
-    def test_missing_execute_record_is_inconclusive(self) -> None:
-        verdict = probe.score_no_consumption("2", "2", None)
-        assert verdict["verdict"] is None
-        assert verdict["sceneOk"] is True
-
-    def test_missing_fields_on_the_record_are_inconclusive(self) -> None:
-        # Another stream is landing autoPlayRunLength/autoPlayFired on
-        # live_host.py concurrently -- a record that predates them must not
-        # be read as a false pass.
-        assert probe.score_no_consumption("2", "2", {"outcome": "ok"})["verdict"] is None
-
-    def test_wrong_scene_fails(self) -> None:
-        verdict = probe.score_no_consumption("6", "2", {"autoPlayRunLength": 0, "autoPlayFired": False})
-        assert verdict["verdict"] is False
-        assert verdict["sceneOk"] is False
-
-    def test_nonzero_run_length_fails(self) -> None:
-        verdict = probe.score_no_consumption("2", "2", {"autoPlayRunLength": 1, "autoPlayFired": True})
-        assert verdict["verdict"] is False
-
-    def test_fired_true_fails_even_with_zero_run_length(self) -> None:
-        verdict = probe.score_no_consumption("2", "2", {"autoPlayRunLength": 0, "autoPlayFired": True})
-        assert verdict["verdict"] is False
-
-    def test_clean_no_consumption_passes(self) -> None:
-        verdict = probe.score_no_consumption(
-            "2", "2", {"autoPlayRunLength": 0, "autoPlayFired": False, "autoPlayRunKinds": []}
-        )
-        assert verdict["verdict"] is True
+    @pytest.mark.parametrize(("scene", "record", "verdict", "scene_ok"), [
+        pytest.param("2", None, None, True, id="missing-execute-record-is-inconclusive"),
+        # Another stream is landing autoPlayRunLength/autoPlayFired on live_host.py
+        # concurrently -- a record that predates them must not be read as a false pass.
+        pytest.param("2", {"outcome": "ok"}, None, True, id="missing-fields-on-the-record-are-inconclusive"),
+        pytest.param("6", {"autoPlayRunLength": 0, "autoPlayFired": False}, False, False, id="wrong-scene-fails"),
+        pytest.param("2", {"autoPlayRunLength": 1, "autoPlayFired": True}, False, True, id="nonzero-run-length-fails"),
+        pytest.param("2", {"autoPlayRunLength": 0, "autoPlayFired": True}, False, True, id="fired-true-fails-even-with-zero-run-length"),
+        pytest.param("2", {"autoPlayRunLength": 0, "autoPlayFired": False, "autoPlayRunKinds": []}, True, True,
+                     id="clean-no-consumption-passes"),
+    ])
+    def test_score_no_consumption(self, scene: str, record: Any, verdict: bool | None, scene_ok: bool) -> None:
+        scored = probe.score_no_consumption(scene, "2", record)
+        assert scored["verdict"] is verdict
+        assert scored["sceneOk"] is scene_ok
 
 
 class TestExecuteLog:
-    def test_read_execute_log_missing_file_returns_empty(self, tmp_path: Path) -> None:
+    def test_read_execute_log_without_a_file_or_path_returns_empty(self, tmp_path: Path) -> None:
         assert probe.read_execute_log(tmp_path / "nope.jsonl") == []
-
-    def test_read_execute_log_returns_none_for_no_path(self) -> None:
         assert probe.read_execute_log(None) == []
 
     def test_read_execute_log_skips_malformed_or_non_object_lines(self, tmp_path: Path) -> None:
@@ -3287,15 +2972,13 @@ class TestScoreRegionChanged:
         assert result["verdict"] is False
         assert result["mae"] == 0.0
 
-    def test_an_empty_crop_is_a_hard_fail(self) -> None:
-        before, after = self._frame(100, 100, 10), self._frame(100, 100, 10)
-        result = probe.score_region_changed(before, after, {"x": 500, "y": 500, "w": 10, "h": 10})
-        assert result["verdict"] is False
-        assert result["mae"] is None
-
-    def test_mismatched_crop_shapes_are_a_hard_fail(self) -> None:
-        before, after = self._frame(100, 100, 10), self._frame(50, 50, 10)
-        result = probe.score_region_changed(before, after, {"x": 30, "y": 30, "w": 40, "h": 40})
+    @pytest.mark.parametrize(("after_size", "rect"), [
+        pytest.param(100, {"x": 500, "y": 500, "w": 10, "h": 10}, id="empty-crop"),
+        pytest.param(50, {"x": 30, "y": 30, "w": 40, "h": 40}, id="mismatched-crop-shapes"),
+    ])
+    def test_an_unmeasurable_crop_is_a_hard_fail(self, after_size: int, rect: dict[str, int]) -> None:
+        before, after = self._frame(100, 100, 10), self._frame(after_size, after_size, 10)
+        result = probe.score_region_changed(before, after, rect)
         assert result["verdict"] is False
         assert result["mae"] is None
 
@@ -3311,28 +2994,22 @@ def _character_effect(object_id: str, px: float, py: float, width: float, height
 
 
 class TestWalkCharacterRects:
-    def test_finds_a_character_buildin_rect(self) -> None:
-        rects = probe._walk_character_rects([_character_effect("A", 100, 200, 40, 60)])
-        assert rects == [{"x": 80.0, "y": 170.0, "w": 40.0, "h": 60.0}]
-
-    def test_ignores_non_character_effects(self) -> None:
-        node = [{
+    @pytest.mark.parametrize(("node", "expected"), [
+        pytest.param([_character_effect("A", 100, 200, 40, 60)], [{"x": 80.0, "y": 170.0, "w": 40.0, "h": 60.0}],
+                     id="finds-a-character-buildin-rect"),
+        pytest.param([{
             "type": "buildIn", "name": "apple:dissolve", "objectID": "X",
             "baseLayer": {"initialState": {"position": {"pointX": 0, "pointY": 0}, "width": 10, "height": 10}},
-        }]
-        assert probe._walk_character_rects(node) == []
-
-    def test_defaults_anchor_to_center_when_unspecified(self) -> None:
-        node = [_character_effect("A", 50, 50, 10, 10, anchor=False)]
-        assert probe._walk_character_rects(node) == [{"x": 45.0, "y": 45.0, "w": 10.0, "h": 10.0}]
-
-    def test_recurses_into_nested_effects(self) -> None:
-        node = [{"type": "buildIn", "effects": [_character_effect("A", 100, 200, 40, 60)]}]
-        assert len(probe._walk_character_rects(node)) == 1
-
-    def test_a_node_missing_geometry_is_skipped(self) -> None:
-        node = [{"name": "apple:dissolve character", "baseLayer": {"initialState": {}}}]
-        assert probe._walk_character_rects(node) == []
+        }], [], id="ignores-non-character-effects"),
+        pytest.param([_character_effect("A", 50, 50, 10, 10, anchor=False)], [{"x": 45.0, "y": 45.0, "w": 10.0, "h": 10.0}],
+                     id="defaults-anchor-to-center-when-unspecified"),
+        pytest.param([{"type": "buildIn", "effects": [_character_effect("A", 100, 200, 40, 60)]}],
+                     [{"x": 80.0, "y": 170.0, "w": 40.0, "h": 60.0}], id="recurses-into-nested-effects"),
+        pytest.param([{"name": "apple:dissolve character", "baseLayer": {"initialState": {}}}], [],
+                     id="a-node-missing-geometry-is-skipped"),
+    ])
+    def test_walk_character_rects(self, node: list[dict[str, Any]], expected: list[dict[str, float]]) -> None:
+        assert probe._walk_character_rects(node) == expected
 
 
 class TestUnionRect:
@@ -3360,30 +3037,21 @@ class TestCharacterRegionRect:
         rect = probe.character_region_rect(export_root, {"exportedUuid": uuid})
         assert rect == {"x": 80.0, "y": 80.0, "w": 240.0, "h": 240.0}
 
-    def test_missing_slide_json_is_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize(("content", "slide"), [
+        pytest.param(None, {"exportedUuid": "SLIDE-UUID"}, id="missing-slide-json"),
+        pytest.param("{not valid json", {"exportedUuid": "SLIDE-UUID"}, id="malformed-slide-json"),
+        pytest.param(json.dumps({"events": None, "assets": {}}), {"exportedUuid": "SLIDE-UUID"}, id="events-not-a-list"),
+        pytest.param(None, {}, id="missing-uuid"),
+    ])
+    def test_unreadable_character_geometry_is_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str | None, slide: dict[str, str],
+    ) -> None:
         monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
-        assert probe.character_region_rect(tmp_path, {"exportedUuid": "nope"}) is None
-
-    def test_malformed_slide_json_is_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
-        export_root = tmp_path / "export"
-        uuid = "SLIDE-UUID"
-        slide_dir = export_root / "assets" / uuid
-        slide_dir.mkdir(parents=True)
-        (slide_dir / f"{uuid}.json").write_text("{not valid json")
-        assert probe.character_region_rect(export_root, {"exportedUuid": uuid}) is None
-
-    def test_events_not_a_list_is_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
-        export_root = tmp_path / "export"
-        uuid = "SLIDE-UUID"
-        slide_dir = export_root / "assets" / uuid
-        slide_dir.mkdir(parents=True)
-        (slide_dir / f"{uuid}.json").write_text(json.dumps({"events": None, "assets": {}}))
-        assert probe.character_region_rect(export_root, {"exportedUuid": uuid}) is None
-
-    def test_missing_uuid_is_none(self) -> None:
-        assert probe.character_region_rect(Path("/nonexistent"), {}) is None
+        if content is not None:
+            slide_dir = tmp_path / "assets" / "SLIDE-UUID"
+            slide_dir.mkdir(parents=True)
+            (slide_dir / "SLIDE-UUID.json").write_text(content)
+        assert probe.character_region_rect(tmp_path, slide) is None
 
 
 class TestResolveNoConsumption:
@@ -3391,15 +3059,14 @@ class TestResolveNoConsumption:
     no-consumption check inconclusive, never silently True -- and must never
     touch the player to get there."""
 
-    def test_missing_character_rect_is_inconclusive_without_touching_the_player(self) -> None:
-        result = probe.resolve_no_consumption(None, "2", None, {"s": 1}, execute_record=None)
+    @pytest.mark.parametrize(("character_rect", "stage_map", "reason"), [
+        pytest.param(None, {"s": 1}, "characters region rect is unavailable", id="missing-character-rect"),
+        pytest.param({"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}, None, "stage map", id="invalid-stage-map"),
+    ])
+    def test_unreadable_geometry_is_inconclusive_without_touching_the_player(self, character_rect: Any, stage_map: Any, reason: str) -> None:
+        result = probe.resolve_no_consumption(None, "2", character_rect, stage_map, execute_record=None)
         assert result["verdict"] is None
-        assert "characters region rect is unavailable" in result["reason"]
-
-    def test_invalid_stage_map_is_inconclusive_without_touching_the_player(self) -> None:
-        result = probe.resolve_no_consumption(None, "2", {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}, None, execute_record=None)
-        assert result["verdict"] is None
-        assert "stage map" in result["reason"]
+        assert reason in result["reason"]
 
 
 class TestGotoTelemetry:
@@ -3418,15 +3085,13 @@ class TestGotoTelemetry:
 
 
 class TestTelemetryPresent:
-    def test_all_fields_present_is_true_even_with_null_values(self) -> None:
-        record = {field: None for field in probe.GOTO_TELEMETRY_FIELDS}
-        assert probe.telemetry_present(record) is True
-
-    def test_missing_record_is_inconclusive(self) -> None:
-        assert probe.telemetry_present(None) is None
-
-    def test_partial_record_is_inconclusive(self) -> None:
-        assert probe.telemetry_present({"autoPlayRunLength": 1}) is None
+    @pytest.mark.parametrize(("record", "expected"), [
+        pytest.param({field: None for field in probe.GOTO_TELEMETRY_FIELDS}, True, id="all-fields-present-even-with-null-values"),
+        pytest.param(None, None, id="missing-record-is-inconclusive"),
+        pytest.param({"autoPlayRunLength": 1}, None, id="partial-record-is-inconclusive"),
+    ])
+    def test_telemetry_present(self, record: Any, expected: bool | None) -> None:
+        assert probe.telemetry_present(record) is expected
 
 
 class _ShotTransport:
@@ -3451,51 +3116,31 @@ class TestScoreStaticControl:
     """Codex round 2: a black or wrong-slide capture must fail even though every movie rect is
     correctly DEAD-expected there -- scored on the area OUTSIDE every expected movie rect."""
 
-    def test_all_black_frame_fails_the_non_black_check(self) -> None:
-        shot = png_b64(40, 40, fill=0)
-        transport = _ShotTransport([shot, shot])
-        result = probe.score_static_control(transport, [], gap_s=0.0)
-        assert result["verdict"] is False
-        assert "no rendered content" in result["reason"]
-
-    def test_bright_content_outside_the_excluded_rect_passes(self) -> None:
+    @staticmethod
+    def _patch(region: tuple[slice, slice], value: int) -> str:
         image = np.zeros((40, 40, 3), dtype=np.uint8)
-        image[0:10, 0:10] = 200
-        shot = _png_b64_from_array(image)
-        transport = _ShotTransport([shot, shot])
-        result = probe.score_static_control(transport, [{"x": 10, "y": 10, "w": 30, "h": 30}], gap_s=0.0)
-        assert result["verdict"] is True
+        image[region] = value
+        return _png_b64_from_array(image)
 
-    def test_bright_content_only_inside_the_excluded_rect_still_fails(self) -> None:
-        image = np.zeros((40, 40, 3), dtype=np.uint8)
-        image[10:40, 10:40] = 200
-        shot = _png_b64_from_array(image)
-        transport = _ShotTransport([shot, shot])
-        result = probe.score_static_control(transport, [{"x": 10, "y": 10, "w": 30, "h": 30}], gap_s=0.0)
-        assert result["verdict"] is False
-        assert "no rendered content" in result["reason"]
-
-    def test_unstable_content_outside_the_rect_fails(self) -> None:
-        first = np.zeros((40, 40, 3), dtype=np.uint8)
-        first[0:10, 0:10] = 200
-        second = np.zeros((40, 40, 3), dtype=np.uint8)
-        second[0:10, 0:10] = 50
-        transport = _ShotTransport([_png_b64_from_array(first), _png_b64_from_array(second)])
-        result = probe.score_static_control(transport, [], gap_s=0.0)
-        assert result["verdict"] is False
-        assert "changed unexpectedly" in result["reason"]
-
-    def test_excluding_the_whole_frame_is_inconclusive(self) -> None:
-        shot = png_b64(40, 40, fill=200)
-        transport = _ShotTransport([shot, shot])
-        result = probe.score_static_control(transport, [{"x": 0, "y": 0, "w": 40, "h": 40}], gap_s=0.0)
-        assert result["verdict"] is None
-
-    def test_mismatched_shots_fail(self) -> None:
-        transport = _ShotTransport([png_b64(40, 40, fill=200), png_b64(20, 20, fill=200)])
-        result = probe.score_static_control(transport, [], gap_s=0.0)
-        assert result["verdict"] is False
-        assert "empty or mismatched" in result["reason"]
+    @pytest.mark.parametrize(("shots", "rects", "verdict", "reason"), [
+        pytest.param(lambda: [png_b64(40, 40, fill=0)] * 2, [], False, "no rendered content",
+                     id="all-black-frame-fails-the-non-black-check"),
+        pytest.param(lambda: [TestScoreStaticControl._patch(np.s_[0:10, 0:10], 200)] * 2, [{"x": 10, "y": 10, "w": 30, "h": 30}],
+                     True, None, id="bright-content-outside-the-excluded-rect-passes"),
+        pytest.param(lambda: [TestScoreStaticControl._patch(np.s_[10:40, 10:40], 200)] * 2, [{"x": 10, "y": 10, "w": 30, "h": 30}],
+                     False, "no rendered content", id="bright-content-only-inside-the-excluded-rect-still-fails"),
+        pytest.param(lambda: [TestScoreStaticControl._patch(np.s_[0:10, 0:10], 200), TestScoreStaticControl._patch(np.s_[0:10, 0:10], 50)],
+                     [], False, "changed unexpectedly", id="unstable-content-outside-the-rect-fails"),
+        pytest.param(lambda: [png_b64(40, 40, fill=200)] * 2, [{"x": 0, "y": 0, "w": 40, "h": 40}], None, None,
+                     id="excluding-the-whole-frame-is-inconclusive"),
+        pytest.param(lambda: [png_b64(40, 40, fill=200), png_b64(20, 20, fill=200)], [], False, "empty or mismatched",
+                     id="mismatched-shots-fail"),
+    ])
+    def test_static_control(self, shots: Any, rects: list[dict[str, int]], verdict: bool | None, reason: str | None) -> None:
+        result = probe.score_static_control(_ShotTransport(shots()), rects, gap_s=0.0)
+        assert result["verdict"] is verdict
+        if reason is not None:
+            assert reason in result["reason"]
 
 
 def _g_destination(from_ordinal: int, to_ordinal: int, verdict: bool | None, reasons: Sequence[str] = ()) -> dict[str, Any]:
@@ -3529,51 +3174,34 @@ class TestOverallStatusG:
         result = {"armed": _all_true_g_arm(), "nullControl": _all_true_g_arm()}
         assert probe.overall_status_g(result) == ("pass", [])
 
-    def test_a_false_armed_destination_fails(self) -> None:
+    @staticmethod
+    def _first(verdict: bool | None, reasons: Sequence[str] = ()) -> dict[str, Any]:
         destinations = [_g_destination(f, t, True) for f, t in probe.GOTO_MATRIX]
-        destinations[0] = _g_destination(1, 2, False, ["movie rect stayed dead"])
-        result = {"armed": _g_arm(destinations), "nullControl": _all_true_g_arm()}
-        status, reasons = probe.overall_status_g(result)
-        assert status == "fail"
-        assert any("armed goTo 1->2" in reason for reason in reasons)
+        destinations[0] = _g_destination(1, 2, verdict, reasons)
+        return _g_arm(destinations)
 
-    def test_a_green_null_control_fails_the_pass(self) -> None:
-        """A null-control destination reading LIVE (verdict False, missing its
-        DEAD expectation) is the "green null control" the plan requires to
-        fail the whole pass -- never a silent pass alongside a clean armed
-        arm."""
-        destinations = [_g_destination(f, t, True) for f, t in probe.GOTO_MATRIX]
-        destinations[0] = _g_destination(1, 2, False, ["expected dead, read live"])
-        result = {"armed": _all_true_g_arm(), "nullControl": _g_arm(destinations)}
-        status, reasons = probe.overall_status_g(result)
-        assert status == "fail"
-        assert any("null control goTo 1->2" in reason for reason in reasons)
-
-    def test_any_inconclusive_destination_makes_the_pass_inconclusive(self) -> None:
-        destinations = [_g_destination(f, t, True) for f, t in probe.GOTO_MATRIX]
-        destinations[0] = _g_destination(1, 2, None)
-        result = {"armed": _g_arm(destinations), "nullControl": _all_true_g_arm()}
-        status, _ = probe.overall_status_g(result)
-        assert status == "inconclusive"
-
-    def test_missing_destinations_is_an_error(self) -> None:
-        status, _ = probe.overall_status_g({"armed": _g_arm([]), "nullControl": _all_true_g_arm()})
-        assert status == "error"
-
-    def test_output_not_visible_fails_even_with_all_true_destinations(self) -> None:
-        result = {"armed": _g_arm([_g_destination(f, t, True) for f, t in probe.GOTO_MATRIX], output_visible=False), "nullControl": _all_true_g_arm()}
-        status, reasons = probe.overall_status_g(result)
-        assert status == "fail"
-        assert any("armed output was not visible" in reason for reason in reasons)
-
-    def test_a_stop_error_fails(self) -> None:
-        result = {
-            "armed": _g_arm([_g_destination(f, t, True) for f, t in probe.GOTO_MATRIX], stop_error="boom"),
-            "nullControl": _all_true_g_arm(),
-        }
-        status, reasons = probe.overall_status_g(result)
-        assert status == "fail"
-        assert any("armed player.stop() failed: boom" in reason for reason in reasons)
+    @pytest.mark.parametrize(("arms", "status", "reason"), [
+        pytest.param(lambda: (TestOverallStatusG._first(False, ["movie rect stayed dead"]), _all_true_g_arm()), "fail",
+                     "armed goTo 1->2", id="false-armed-destination-fails"),
+        # A null-control destination reading LIVE (verdict False, missing its DEAD expectation)
+        # is the "green null control" the plan requires to fail the whole pass -- never a
+        # silent pass alongside a clean armed arm.
+        pytest.param(lambda: (_all_true_g_arm(), TestOverallStatusG._first(False, ["expected dead, read live"])), "fail",
+                     "null control goTo 1->2", id="green-null-control-fails-the-pass"),
+        pytest.param(lambda: (TestOverallStatusG._first(None), _all_true_g_arm()), "inconclusive", None,
+                     id="any-inconclusive-destination-makes-the-pass-inconclusive"),
+        pytest.param(lambda: (_g_arm([]), _all_true_g_arm()), "error", None, id="missing-destinations-is-an-error"),
+        pytest.param(lambda: (dict(_all_true_g_arm(), outputVisible=False), _all_true_g_arm()), "fail",
+                     "armed output was not visible", id="output-not-visible-fails-even-with-all-true-destinations"),
+        pytest.param(lambda: (dict(_all_true_g_arm(), stopError="boom"), _all_true_g_arm()), "fail",
+                     "armed player.stop() failed: boom", id="stop-error-fails"),
+    ])
+    def test_overall_status_g(self, arms: Any, status: str, reason: str | None) -> None:
+        armed, null_control = arms()
+        got, reasons = probe.overall_status_g({"armed": armed, "nullControl": null_control})
+        assert got == status
+        if reason is not None:
+            assert any(reason in r for r in reasons)
 
 
 # --------------------------------------------------------------------------
@@ -4117,18 +3745,15 @@ class TestHandbackCapture:
         assert record["status"] == "inconclusive" and frame is None
         assert host.transport.captures == 0
 
-    def test_a_past_hash_poll_is_inconclusive(self) -> None:
-        record, frame, _ = self._capture([_hb_read("#2"), _hb_read("#4")])
+    @pytest.mark.parametrize(("reads", "host_kwargs"), [
+        pytest.param([_hb_read("#2"), _hb_read("#4")], {}, id="past-hash-poll"),
+        pytest.param([_hb_read("#2"), _hb_read("#3"), _hb_read("#4")], {}, id="hash-that-moves-during-the-capture"),
+        pytest.param([_hb_read("#2"), dict(_hb_read("#3"), ready=False)], {}, id="unready-player-is-not-captured"),
+        pytest.param([_hb_read("#2")], {"advance_error": probe.PlayerCommandRejected("busy")}, id="rejected-advance"),
+    ])
+    def test_an_off_build_capture_is_inconclusive(self, reads: list[Any], host_kwargs: dict[str, Any]) -> None:
+        record, frame, _ = self._capture(reads, **host_kwargs)
         assert record["status"] == "inconclusive" and frame is None
-
-    def test_a_hash_that_moves_during_the_capture_is_inconclusive(self) -> None:
-        record, frame, _ = self._capture([_hb_read("#2"), _hb_read("#3"), _hb_read("#4")])
-        assert record["status"] == "inconclusive" and frame is None
-
-    def test_an_unready_player_is_not_captured(self) -> None:
-        unready = dict(_hb_read("#3"), ready=False)
-        record, _, _ = self._capture([_hb_read("#2"), unready])
-        assert record["status"] == "inconclusive"
 
     def test_vgl_waits_for_the_hand_off_and_its_release(self) -> None:
         record, _, _ = self._capture([_hb_read("#2"), _hb_read("#3")], expect_handoff=True)
@@ -4136,9 +3761,6 @@ class TestHandbackCapture:
         record, _, _ = self._capture([_hb_read("#2"), _hb_read("#3", handoff=True), _hb_read("#3", handoff=True)], expect_handoff=True)
         assert record["status"] == "ok"
 
-    def test_a_rejected_advance_is_inconclusive(self) -> None:
-        record, frame, _ = self._capture([_hb_read("#2")], advance_error=probe.PlayerCommandRejected("busy"))
-        assert record["status"] == "inconclusive" and frame is None
 
 
 class TestOccludedScreenCells:
@@ -4238,7 +3860,7 @@ def _vgl_pass() -> dict[str, Any]:
 
 
 def _auto_result() -> dict[str, Any]:
-    result = TestOverallStatusTruthTable()._base_result()
+    result = _base_result()
     result["glReplay"] = {"requested": "auto"}
     result["groundTruth"]["refusedBoundaries"] = ["continue1to2"]
     result["groundTruthGl"] = {"armed": ARMED, "armedBoundaries": ["continue1to2"]}
@@ -4263,18 +3885,16 @@ class TestAutoOverallStatus:
         assert probe.overall_status(_auto_result()) == ("pass", [])
 
     @pytest.mark.parametrize("arm", ["A", "C"])
-    def test_an_armed_arm_needs_armed1to2(self, arm: str) -> None:
+    @pytest.mark.parametrize(("mutate", "reason"), [
+        pytest.param(lambda e: e.update(armed1to2={"verdict": False, "reason": "armed checks failed: ['pool']"}), "armed1to2=False",
+                     id="armed-arm-needs-armed1to2"),
+        pytest.param(lambda e: e.pop("armed1to2"), "has no armed1to2 verdict", id="missing-armed1to2"),
+    ])
+    def test_an_armed_arm_needs_a_true_armed1to2(self, mutate: Any, reason: str, arm: str) -> None:
         result = _auto_result()
-        result["arms"][arm]["armed1to2"] = {"verdict": False, "reason": "armed checks failed: ['pool']"}
+        mutate(result["arms"][arm])
         status, reasons = probe.overall_status(result)
-        assert status == "fail" and any(f"arm {arm} armed1to2=False" in r for r in reasons)
-
-    @pytest.mark.parametrize("arm", ["A", "C"])
-    def test_a_missing_armed1to2_fails(self, arm: str) -> None:
-        result = _auto_result()
-        del result["arms"][arm]["armed1to2"]
-        status, reasons = probe.overall_status(result)
-        assert status == "fail" and any(f"arm {arm} has no armed1to2 verdict" in r for r in reasons)
+        assert status == "fail" and any(f"arm {arm} {reason}" in r for r in reasons)
 
     @pytest.mark.parametrize("value", [None, True, False])
     def test_continue1to2_is_report_only_in_an_armed_arm(self, value: Any) -> None:
@@ -4342,7 +3962,7 @@ class TestAutoOverallStatus:
         assert status == "inconclusive" and "live ring inconclusive: not captured" in reasons
 
     def test_an_off_result_never_consults_gl_modes(self) -> None:
-        result = TestOverallStatusTruthTable()._base_result()
+        result = _base_result()
         result["arms"]["B"]["continuity"]["glReplay"] = {"mode": "whatever"}
         assert probe.overall_status(result) == ("pass", [])
 
@@ -4368,22 +3988,19 @@ class TestGlReplayCli:
         args = probe.parse_args([])
         assert args.gl_replay == "off" and args.gl_force_fail is None
 
-    def test_auto_is_selectable(self) -> None:
+    def test_auto_and_its_forced_fail_are_selectable(self) -> None:
         assert probe.parse_args(["--gl-replay", "auto"]).gl_replay == "auto"
-
-    def test_other_values_are_rejected(self) -> None:
-        with pytest.raises(SystemExit):
-            probe.parse_args(["--gl-replay", "on"])
-
-    def test_forced_fail_requires_auto(self) -> None:
-        with pytest.raises(SystemExit):
-            probe.parse_args(["--gl-force-fail", "posterAmbiguous"])
         args = probe.parse_args(["--gl-replay", "auto", "--gl-force-fail", "posterAmbiguous"])
         assert args.gl_force_fail == "posterAmbiguous"
 
-    def test_forced_fail_is_not_a_pass_g_option(self) -> None:
+    @pytest.mark.parametrize("argv", [
+        pytest.param(["--gl-replay", "on"], id="other-values-are-rejected"),
+        pytest.param(["--gl-force-fail", "posterAmbiguous"], id="forced-fail-requires-auto"),
+        pytest.param(["--pass", "G", "--gl-replay", "auto", "--gl-force-fail", "posterAmbiguous"], id="forced-fail-is-not-a-pass-G-option"),
+    ])
+    def test_invalid_combinations_are_rejected(self, argv: list[str]) -> None:
         with pytest.raises(SystemExit):
-            probe.parse_args(["--pass", "G", "--gl-replay", "auto", "--gl-force-fail", "posterAmbiguous"])
+            probe.parse_args(argv)
 
     @pytest.fixture
     def recording(self, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
@@ -5731,22 +5348,21 @@ def wrap_samples(*, lead_s: float = 0.3, period: float = LOOP_P, n_after: int = 
     return _loop_fields(samples)
 
 
-def _load_legacy_probe():
+def _load_probe_at(rev: str) -> Any:
     try:
         text = subprocess.run(
-            ["git", "show", f"{LEGACY_REV}:scripts/live_continuity_probe.py"],
-            cwd=REPO, capture_output=True, text=True, check=True,
+            ["git", "show", f"{rev}:scripts/live_continuity_probe.py"], cwd=REPO, capture_output=True, text=True, check=True,
         ).stdout
     except (OSError, subprocess.CalledProcessError):
         return None
-    spec = importlib.util.spec_from_loader("legacy_live_continuity_probe", loader=None)
+    spec = importlib.util.spec_from_loader(f"probe_at_{rev}", loader=None)
     module = importlib.util.module_from_spec(spec)
     module.__file__ = str(REPO / "scripts" / "live_continuity_probe.py")
-    exec(compile(text, f"{LEGACY_REV}:live_continuity_probe.py", "exec"), module.__dict__)
+    exec(compile(text, f"{rev}:live_continuity_probe.py", "exec"), module.__dict__)
     return module
 
 
-LEGACY = _load_legacy_probe()
+LEGACY = _load_probe_at(LEGACY_REV)
 
 
 def _continuity_batteries() -> dict[str, tuple[list[dict[str, Any]], dict[str, Any]]]:
@@ -5871,28 +5487,18 @@ class TestUnplannedWraps:
         assert len(found) == 1
         assert found[0]["from"] > 46.0 and found[0]["to"] < 0.1 and found[0]["duration"] == LOOP_P
 
-    def test_a_non_looping_element_never_invalidates(self) -> None:
-        samples = wrap_samples()
-        for row in samples:
-            for v in row["videos"]:
-                v["loop"] = False
-        assert probe.unplanned_wraps(samples) == []
-
-    def test_a_small_drop_is_left_to_the_strict_scorer(self) -> None:
-        assert probe.unplanned_wraps(_loop_fields(rows_around_boundary(clock_drop=0.2))) == []
-
-    def test_a_looping_element_without_a_duration_is_not_guessed(self) -> None:
-        assert probe.unplanned_wraps(_loop_fields(wrap_samples(), period=None)) == []
-
-    def test_legacy_samples_without_the_fields_find_nothing(self) -> None:
-        assert probe.unplanned_wraps(rows_around_boundary(start_time=LOOP_P - 0.3)) == []
-
-    def _green(self) -> dict[str, Any]:
-        return TestOverallStatusTruthTable()._base_result()
+    @pytest.mark.parametrize("samples", [
+        pytest.param(lambda: _loop_fields(wrap_samples(), loop=False), id="non-looping-element-never-invalidates"),
+        pytest.param(lambda: _loop_fields(rows_around_boundary(clock_drop=0.2)), id="small-drop-is-left-to-the-strict-scorer"),
+        pytest.param(lambda: _loop_fields(wrap_samples(), period=None), id="looping-element-without-a-duration-is-not-guessed"),
+        pytest.param(lambda: rows_around_boundary(start_time=LOOP_P - 0.3), id="legacy-samples-without-the-fields-find-nothing"),
+    ])
+    def test_nothing_unplanned_is_found(self, samples: Any) -> None:
+        assert probe.unplanned_wraps(samples()) == []
 
     @pytest.mark.parametrize("where", ["A", "B", "C", "attach"])
     def test_any_standard_arm_with_an_unplanned_wrap_is_invalid(self, where: str) -> None:
-        result = self._green()
+        result = _base_result()
         entry = result["attach"] if where == "attach" else result["arms"][where]
         entry["unplannedWraps"] = probe.unplanned_wraps(wrap_samples())
         status, reasons = probe.overall_status(result)
@@ -5900,7 +5506,7 @@ class TestUnplannedWraps:
         assert len(reasons) == 1 and "retake" in reasons[0]
 
     def test_an_empty_list_changes_nothing(self) -> None:
-        result = self._green()
+        result = _base_result()
         for entry in [*result["arms"].values(), result["attach"]]:
             entry["unplannedWraps"] = []
         assert probe.overall_status(result) == ("pass", [])
@@ -6044,24 +5650,17 @@ class TestForceWrapInvalid:
     def test_no_recorded_wrap_is_not_invalid_it_is_left_to_fail(self) -> None:
         assert self._invalid(recorder=_fw_recorder(wrap=False)) == []
 
-    def test_a_press_too_soon_after_the_seek_is_invalid(self) -> None:
-        press = FW_SEEKED + 1400.0
-        reasons = self._invalid(take=_fw_take(press=press), recorder=_fw_recorder(press=press))
-        assert any("after the seek" in r for r in reasons)
-
-    def test_too_few_frames_between_seek_and_press_is_invalid(self) -> None:
-        recorder = _fw_recorder(dt=250.0)
-        assert any("frame(s) between" in r for r in self._invalid(recorder=recorder))
-
-    def test_a_duration_that_is_not_the_nodes_trim_is_invalid(self) -> None:
-        recorder = _fw_recorder()
-        recorder["duration"] = FW_PERIOD + 0.1
-        assert any("within one frame" in r for r in self._invalid(recorder=recorder))
-
-    def test_a_seek_that_landed_elsewhere_is_invalid(self) -> None:
-        recorder = _fw_recorder()
-        recorder["target"] -= 1.0
-        assert any("seek landed" in r for r in self._invalid(recorder=recorder))
+    @pytest.mark.parametrize(("take", "recorder", "reason"), [
+        pytest.param(lambda: _fw_take(press=FW_SEEKED + 1400.0), lambda: _fw_recorder(press=FW_SEEKED + 1400.0), "after the seek",
+                     id="press-too-soon-after-the-seek"),
+        pytest.param(lambda: None, lambda: _fw_recorder(dt=250.0), "frame(s) between", id="too-few-frames-between-seek-and-press"),
+        pytest.param(lambda: None, lambda: dict(_fw_recorder(), duration=FW_PERIOD + 0.1), "within one frame",
+                     id="duration-that-is-not-the-nodes-trim"),
+        pytest.param(lambda: None, lambda: dict(_fw_recorder(), target=_fw_recorder()["target"] - 1.0), "seek landed",
+                     id="seek-that-landed-elsewhere"),
+    ])
+    def test_a_take_off_its_plan_is_invalid(self, take: Any, recorder: Any, reason: str) -> None:
+        assert any(reason in r for r in self._invalid(take=take(), recorder=recorder()))
 
     @pytest.mark.parametrize("mutate", ["unseeked", "unpressed", "unreached", "rate", "error", "unread"])
     def test_every_other_harness_gap_is_invalid(self, mutate: str) -> None:
@@ -6162,11 +5761,6 @@ class TestScoreForcedWrap:
         assert result["status"] == "fail"
         assert result["carry"]["checks"]["carriesSeeked"] is False
 
-    def test_armed_carry_with_a_frozen_clock_fails(self) -> None:
-        recorder = _fw_recorder(stop_at=FW_SEEKED + 4000.0)
-        result = _fw_score(boundary="1to2", reads=_fw_reads(), armed=ARMED, recorder=recorder)
-        assert result["status"] == "fail"
-
     def test_armed_carry_without_the_arm_note_fails(self) -> None:
         reads = _fw_reads()
         for read in reads:
@@ -6186,17 +5780,20 @@ class TestScoreForcedWrap:
         result = _fw_score(boundary="1to2", reads=reads, armed=ARMED)
         assert (result["status"], result["outcome"]) == ("pass", "notPooled")
 
-    @pytest.mark.parametrize("stand_downs", [["canvasLost"], ["videoNotReady", "glError"]])
-    def test_any_other_stand_down_fails(self, stand_downs: list[str]) -> None:
-        result = _fw_score(boundary="1to2", reads=_fw_reads(stand_downs=stand_downs), armed=ARMED)
-        assert result["status"] == "fail"
-
-    def test_g2_fallbacks_do_not_count_on_the_unarmed_boundary(self) -> None:
-        result = _fw_score(
-            boundary="3to4", reads=_fw_reads(stand_downs=["videoNotReady"]), armed=ARMED,
-            continuity={"verdict": False, "wraps": 1},
-        )
-        assert result["status"] == "fail"
+    @pytest.mark.parametrize("kwargs", [
+        pytest.param(lambda: {"boundary": "1to2", "reads": _fw_reads(), "armed": ARMED, "recorder": _fw_recorder(stop_at=FW_SEEKED + 4000.0)},
+                     id="armed-carry-with-a-frozen-clock"),
+        pytest.param(lambda: {"boundary": "1to2", "reads": _fw_reads(stand_downs=["canvasLost"]), "armed": ARMED},
+                     id="any-other-stand-down-canvasLost"),
+        pytest.param(lambda: {"boundary": "1to2", "reads": _fw_reads(stand_downs=["videoNotReady", "glError"]), "armed": ARMED},
+                     id="any-other-stand-down-alongside-videoNotReady"),
+        pytest.param(lambda: {"boundary": "3to4", "reads": _fw_reads(stand_downs=["videoNotReady"]), "armed": ARMED,
+                              "continuity": {"verdict": False, "wraps": 1}}, id="g2-fallbacks-do-not-count-on-the-unarmed-boundary"),
+        pytest.param(lambda: {"continuity": {"verdict": False, "wraps": 0}, "reads": None, "restart": {"verdict": True}},
+                     id="raw-restart-needs-a-readable-destination"),
+    ])
+    def test_an_unlisted_outcome_fails(self, kwargs: Any) -> None:
+        assert _fw_score(**kwargs())["status"] == "fail"
 
     def test_raw_restart_with_nothing_preserved_painting_is_a_listed_fallback(self) -> None:
         reads = _fw_reads()
@@ -6212,10 +5809,6 @@ class TestScoreForcedWrap:
         result = _fw_score(continuity={"verdict": False, "wraps": 0}, reads=reads, restart={"verdict": True})
         assert result["status"] == "fail"
         assert result["fallback"]["preservedPainting"]
-
-    def test_raw_restart_needs_a_readable_destination(self) -> None:
-        result = _fw_score(continuity={"verdict": False, "wraps": 0}, reads=None, restart={"verdict": True})
-        assert result["status"] == "fail"
 
     def test_a_fallback_without_a_recorded_wrap_fails(self) -> None:
         result = _fw_score(
@@ -6514,14 +6107,14 @@ class TestArmedRecorderWindow:
         assert probe.armed_recorder_window(recorder, reads) is None
         assert probe.score_recorder_clock(recorder, None)["verdict"] is False
 
-    def test_steady_recorder_holds(self) -> None:
-        window = probe.armed_recorder_window(_fw_recorder(), _armed_reads_at(FW_SEEKED + 6000.0))
-        assert probe.score_recorder_clock(_fw_recorder(), window)["verdict"] is True
-
-    def test_known_bad_frozen_recorder_fails(self) -> None:
-        recorder = _fw_recorder(stop_at=FW_SEEKED + 4000.0)
-        window = probe.armed_recorder_window(recorder, _armed_reads_at(FW_SEEKED + 6000.0))
-        assert probe.score_recorder_clock(recorder, window)["verdict"] is False
+    @pytest.mark.parametrize(("recorder", "verdict"), [
+        pytest.param(_fw_recorder, True, id="steady-recorder-holds"),
+        pytest.param(lambda: _fw_recorder(stop_at=FW_SEEKED + 4000.0), False, id="known-bad-frozen-recorder-fails"),
+    ])
+    def test_the_take_window_scores_the_recorder(self, recorder: Any, verdict: bool) -> None:
+        rec = recorder()
+        window = probe.armed_recorder_window(rec, _armed_reads_at(FW_SEEKED + 6000.0))
+        assert probe.score_recorder_clock(rec, window)["verdict"] is verdict
 
     def test_known_bad_mid_period_jump_fails(self) -> None:
         recorder = _fw_recorder()
@@ -6643,9 +6236,14 @@ class TestWrapOwnerExcuse:
         result = self._score(samples)
         assert result["verdict"] is False and result["wrapOwnerExcused"] == []
 
-    def test_known_bad_ready_wrap_row_unowned_fails(self) -> None:
+    @pytest.mark.parametrize("unown", [
+        pytest.param(lambda samples, index: _unown(samples[index], ready=4), id="known-bad-ready-wrap-row-unowned"),
+        pytest.param(lambda samples, index: (_unown(samples[index]), _unown(samples[index - 1], ready=4)),
+                     id="known-bad-unowned-row-before-the-wrap-row"),
+    ])
+    def test_an_unexcusable_unowned_row_fails(self, unown: Any) -> None:
         samples = _excuse_samples()
-        _unown(samples[_wrap_index(samples)], ready=4)
+        unown(samples, _wrap_index(samples))
         assert self._score(samples)["verdict"] is False
 
     def test_known_bad_two_consecutive_unowned_rows_at_a_wrap_fail(self) -> None:
@@ -6656,13 +6254,6 @@ class TestWrapOwnerExcuse:
         result = self._score(samples)
         assert result["verdict"] is False
         assert len(result["ownerMismatches"]) == 2
-
-    def test_known_bad_unowned_row_before_the_wrap_row_fails(self) -> None:
-        samples = _excuse_samples()
-        index = _wrap_index(samples)
-        _unown(samples[index])
-        _unown(samples[index - 1], ready=4)
-        assert self._score(samples)["verdict"] is False
 
     def test_real_3to4_750_passes_with_its_one_loop_seek_excused(self) -> None:
         artifact = json.loads((FORCED_WRAP_FIXTURES / "3to4_750.min.json").read_text())
@@ -6807,20 +6398,6 @@ P2_ROOT = REPO / "tests" / "fixtures" / "live_continuity"
 P2_ID = "untitled.mov#1->untitled.mov#1"
 P2_CARRY12, P2_RETIRE12, P2_ARMED12 = (f"b0to1:{P2_ID}:{kind}" for kind in ("carry", "retire", "armed"))
 P2_RESTART23, P2_CARRY34 = f"b1to2:{P2_ID}:restart", f"b2to3:{P2_ID}:carry"
-
-
-def _load_probe_at(rev: str) -> Any:
-    try:
-        text = subprocess.run(
-            ["git", "show", f"{rev}:scripts/live_continuity_probe.py"], cwd=REPO, capture_output=True, text=True, check=True,
-        ).stdout
-    except (OSError, subprocess.CalledProcessError):
-        return None
-    spec = importlib.util.spec_from_loader(f"probe_at_{rev}", loader=None)
-    module = importlib.util.module_from_spec(spec)
-    module.__file__ = str(REPO / "scripts" / "live_continuity_probe.py")
-    exec(compile(text, f"{rev}:live_continuity_probe.py", "exec"), module.__dict__)
-    return module
 
 
 S1_BASE = _load_probe_at(S1_BASE_REV)
@@ -7219,15 +6796,15 @@ class TestRetireVerdict:
         spec = _spec(_p2_facts(), P2_RETIRE12)
         assert (spec["atScene"], spec["zoneUntilScene"], spec["dstRect"]) == (2, 6, _p2_facts()["pinRect"])
 
-    @pytest.mark.parametrize("notes", [(REFUSED_NOTE,), (RETIRE_NOTE,), (REFUSED_NOTE, RETIRE_NOTE), (RETIRE_NOTE, RETIRE_NOTE)])
+    @pytest.mark.parametrize("notes", [
+        # Gate r1, the live P2 shape: one preserve-refused, no retire-boundary, no <video> until scene 4.
+        pytest.param((REFUSED_NOTE,), id="live-p2-shape-gate-r1"),
+        (RETIRE_NOTE,), (REFUSED_NOTE, RETIRE_NOTE), (RETIRE_NOTE, RETIRE_NOTE),
+    ])
     def test_any_refusal_note_for_the_movie_in_the_zone_is_green(self, notes: tuple[Any, ...]) -> None:
         scored = self._score(_retire_read(notes))
         assert scored["verdict"] is True and len(scored["retireNotes"]) == len(notes)
-
-    def test_the_live_p2_shape_is_green(self) -> None:
-        """Gate r1: one preserve-refused, no retire-boundary, no <video> until scene 4."""
-        scored = self._score(_retire_read((REFUSED_NOTE,)))
-        assert scored["verdict"] is True and scored["handback"]["verdict"] is True
+        assert scored["handback"]["verdict"] is True
 
     @pytest.mark.parametrize("notes", [
         (), (_ev("retire-boundary", key="movie1", elIds=[3], atScene=6),), (_ev("retire-boundary", key="movie2", elIds=[3], atScene=2),),
@@ -7651,6 +7228,9 @@ class TestRedArmRegistration:
         assert probe.red_arm_label(core, strip, runtime) == label
 
 
+STRAY4 = "stray:slide4:vid-20250608-wa0125.mp4"
+
+
 def _red_result(red: list[str], expected: Any = (P2_CARRY34,), **arm: Any) -> dict[str, Any]:
     sha = probe.js_sha256()
     entry = {"continuity": {"mode": "qualified", "sha256": sha}, "stageFit": {"verdict": True}, "unplannedWraps": [], **arm}
@@ -7664,35 +7244,30 @@ class TestRedArmStatus:
     def test_exactly_the_pre_registered_set_passes(self) -> None:
         assert probe.red_arm_status(_red_result([P2_CARRY34])) == ("pass", [])
 
-    def test_known_bad_an_extra_red_fails(self) -> None:
-        status, reasons = probe.red_arm_status(_red_result([P2_CARRY34, "stray:slide4:x.mov"]))
-        assert status == "fail" and reasons == ["unexpectedly red: stray:slide4:x.mov"]
-
-    def test_known_bad_a_red_that_stayed_green_fails(self) -> None:
-        status, reasons = probe.red_arm_status(_red_result([]))
-        assert status == "fail" and reasons == [f"expected red but green: {P2_CARRY34}"]
-
-    def test_known_bad_a_second_occurrence_of_an_expected_stray_fails(self) -> None:
-        """Codex r1 #10: exact multisets, never `set()`."""
-        stray = "stray:slide4:vid-20250608-wa0125.mp4"
-        status, reasons = probe.red_arm_status(_red_result([stray, stray], expected=(stray,)))
-        assert status == "fail" and reasons == [f"unexpectedly red: {stray}"]
+    @pytest.mark.parametrize(("red", "expected", "reason"), [
+        pytest.param([P2_CARRY34, "stray:slide4:x.mov"], (P2_CARRY34,), "unexpectedly red: stray:slide4:x.mov",
+                     id="known-bad-an-extra-red"),
+        pytest.param([], (P2_CARRY34,), f"expected red but green: {P2_CARRY34}", id="known-bad-a-red-that-stayed-green"),
+        # Codex r1 #10: exact multisets, never `set()`.
+        pytest.param([STRAY4, STRAY4], (STRAY4,), f"unexpectedly red: {STRAY4}",
+                     id="known-bad-a-second-occurrence-of-an-expected-stray-codex-r1-10"),
+    ])
+    def test_a_red_set_off_its_registration_fails(self, red: list[str], expected: tuple[str, ...], reason: str) -> None:
+        assert probe.red_arm_status(_red_result(red, expected=expected)) == ("fail", [reason])
 
     def test_record_and_unregistered_never_pass(self) -> None:
         assert probe.red_arm_status(_red_result([], expected=probe.RECORD))[0] == "recorded"
         assert probe.red_arm_status(_red_result([], expected=None))[0] == "unregistered"
 
     def test_a_record_arm_missing_a_required_red_fails(self) -> None:
-        stray = "stray:slide4:vid-20250608-wa0125.mp4"
         result = _red_result([P2_CARRY34], expected=probe.RECORD)
-        result["requiredRed"] = [stray]
-        assert probe.red_arm_status(result) == ("fail", [f"required red but green: {stray}"])
-        result["redSet"] = sorted([P2_CARRY34, stray])
+        result["requiredRed"] = [STRAY4]
+        assert probe.red_arm_status(result) == ("fail", [f"required red but green: {STRAY4}"])
+        result["redSet"] = sorted([P2_CARRY34, STRAY4])
         assert probe.red_arm_status(result)[0] == "recorded"
 
     def test_a_variant_arm_must_report_the_variants_sha(self) -> None:
-        stray = "stray:slide4:vid-20250608-wa0125.mp4"
-        result = _red_result([stray], expected=(stray,))
+        result = _red_result([STRAY4], expected=(STRAY4,))
         result["expectedCoreSha256"] = probe.variant_sha("stash-any")
         status, reasons = probe.red_arm_status(result)
         assert status == "error" and "expected" in reasons[0]
@@ -7731,21 +7306,19 @@ class TestStrayCensus:
         assert red == ["stray:slide1:wa0125.mov"] and unknown == []
         assert len(records["1"]["unexpectedVideos"]) == 1 and records["2"]["verdict"] is True
 
-    def test_every_occurrence_is_counted(self) -> None:
-        raw = dict(self._clean(), **{"1": [self._read((BIG_INSTANCE, "untitled.mov"), (OTHER_INSTANCE, "wa0125.mov"), (OTHER_INSTANCE, "wa0125.mov"))]})
-        assert probe.score_census(raw, self.PLAN_INSTANCES, {}, self.PLAYERS)[1] == ["stray:slide1:wa0125.mov"] * 2
-
-    def test_a_dead_expected_rect_painted_is_a_stray(self) -> None:
-        _, red, _ = probe.score_census(self._clean(), self.PLAN_INSTANCES, {1: {BIG_ASSET: "dead"}}, self.PLAYERS)
-        assert red == ["stray:slide2:untitled.mov"]
-
-    def test_two_videos_on_one_instance_are_a_duplicate(self) -> None:
-        raw = dict(self._clean(), **{"1": [self._read((BIG_INSTANCE, "untitled.mov"), (BIG_INSTANCE, "untitled.mov"))]})
-        assert probe.score_census(raw, self.PLAN_INSTANCES, {}, self.PLAYERS)[1] == [f"duplicate:slide1:{BIG_ASSET}#1"]
-
-    def test_an_unknown_source_is_named_unknown(self) -> None:
-        raw = dict(self._clean(), **{"1": [self._read((BIG_INSTANCE, "untitled.mov"), (OTHER_INSTANCE, "zzz.mp4"))]})
-        assert probe.score_census(raw, self.PLAN_INSTANCES, {}, self.PLAYERS)[1] == ["stray:slide1:unknown"]
+    @pytest.mark.parametrize(("slide1", "expectations", "red"), [
+        pytest.param([(BIG_INSTANCE, "untitled.mov"), (OTHER_INSTANCE, "wa0125.mov"), (OTHER_INSTANCE, "wa0125.mov")], {},
+                     ["stray:slide1:wa0125.mov"] * 2, id="every-occurrence-is-counted"),
+        pytest.param([(BIG_INSTANCE, "untitled.mov")], {1: {BIG_ASSET: "dead"}}, ["stray:slide2:untitled.mov"],
+                     id="dead-expected-rect-painted-is-a-stray"),
+        pytest.param([(BIG_INSTANCE, "untitled.mov"), (BIG_INSTANCE, "untitled.mov")], {}, [f"duplicate:slide1:{BIG_ASSET}#1"],
+                     id="two-videos-on-one-instance-are-a-duplicate"),
+        pytest.param([(BIG_INSTANCE, "untitled.mov"), (OTHER_INSTANCE, "zzz.mp4")], {}, ["stray:slide1:unknown"],
+                     id="unknown-source-is-named-unknown"),
+    ])
+    def test_the_red_census(self, slide1: list[tuple[dict[str, float], str]], expectations: dict[int, Any], red: list[str]) -> None:
+        raw = dict(self._clean(), **{"1": [self._read(*slide1)]})
+        assert probe.score_census(raw, self.PLAN_INSTANCES, expectations, self.PLAYERS)[1] == red
 
     @pytest.mark.parametrize("read", [None, {"stageMap": None, "painting": []}, {"stageMap": dict(IDENTITY_STAGE_MAP), "painting": {"error": "x"}}])
     def test_an_unreadable_or_missing_slide_is_unknown_never_clean(self, read: Any) -> None:
@@ -7867,10 +7440,10 @@ class TestGeneratedStatus:
 
     @pytest.mark.parametrize("sha", sorted(probe.P2_PLAN_SHA256))
     def test_only_a_pinned_p2_plan_keeps_the_legacy_status(self, sha: str) -> None:
-        result = TestOverallStatusTruthTable()._base_result()
+        result = _base_result()
         result["groundTruth"]["verdicts"] = []
         result["groundTruth"]["planSha256"] = sha
-        assert probe.overall_status(result) == probe.overall_status(TestOverallStatusTruthTable()._base_result())
+        assert probe.overall_status(result) == probe.overall_status(_base_result())
         result["groundTruth"]["planSha256"] = "0" * 64
         assert probe.overall_status(result)[0] == "error"
 
@@ -8113,7 +7686,7 @@ class TestSkipArmsParsing:
 
 class TestSkipArmsStatus:
     def _base(self) -> dict[str, Any]:
-        return TestOverallStatusTruthTable()._base_result()
+        return _base_result()
 
     @pytest.mark.parametrize("names", GATE_SKIPS)
     def test_the_run_gates_shapes_pass_when_every_arm_that_ran_passes(self, names: tuple[str, ...]) -> None:
@@ -8340,17 +7913,15 @@ class TestRetireHandback:
 
 
 class TestArrivalStarts:
-    def test_a_click_started_movie_is_not_started_on_arrival(self) -> None:
-        """D4: A-far's movie-start is event 1 (click 1); A-near's is event 0 (automatic)."""
-        root = QUAL_ROOT / "D4"
-        starts = probe.arrival_starts(root, probe.load_slides(root), _deck_plan("D4"))
-        assert starts[0] == {"counter-a.mov#1": True, "counter-a.mov#2": False}
-
-    def test_a_movie_start_grouped_under_another_build_counts(self) -> None:
-        """D3 slide 1: B's movie-start nests in A's (a build "with previous")."""
-        root = QUAL_ROOT / "D3"
-        starts = probe.arrival_starts(root, probe.load_slides(root), _deck_plan("D3"))
-        assert starts[0] == {"counter-a.mov#1": True, "counter-b.mov#1": True}
+    @pytest.mark.parametrize(("deck", "expected"), [
+        # D4: A-far's movie-start is event 1 (click 1); A-near's is event 0 (automatic).
+        pytest.param("D4", {"counter-a.mov#1": True, "counter-a.mov#2": False}, id="click-started-movie-is-not-started-on-arrival"),
+        # D3 slide 1: B's movie-start nests in A's (a build "with previous").
+        pytest.param("D3", {"counter-a.mov#1": True, "counter-b.mov#1": True}, id="movie-start-grouped-under-another-build-counts"),
+    ])
+    def test_slide_one_arrival_starts(self, deck: str, expected: dict[str, bool]) -> None:
+        root = QUAL_ROOT / deck
+        assert probe.arrival_starts(root, probe.load_slides(root), _deck_plan(deck))[0] == expected
 
     def test_p2s_click_started_slide_two_and_its_expectations_are_unchanged(self) -> None:
         plan = _p2_plan()
