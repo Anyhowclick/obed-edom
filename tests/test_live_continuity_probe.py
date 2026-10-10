@@ -8014,3 +8014,583 @@ class TestSkipArmsRun:
         assert driven["ran"] == []
         assert result["status"] == "fail"
         assert result["statusReasons"] == ["every positive arm (A, V, attach) is skipped by flag, so nothing qualifies"]
+
+
+# --------------------------------------------------------------------------
+# Carry-cover gate (`--carry-cover`): the GL poster must not show beyond the bridge overlay while it moves.
+# Synthetic scene: a black 400x300 page, a white poster that moves on Keynote's EaseInEaseOut curve and an opaque
+# white overlay drawn over it on whatever path the test gives (eased = today's fix, linear = the rubber band).
+# --------------------------------------------------------------------------
+
+CC_VIEWPORT = (400, 300)
+CC_SRC = {"x": 60.0, "y": 150.0, "w": 100.0, "h": 50.0}
+CC_DST = {"x": 200.0, "y": 100.0, "w": 140.0, "h": 70.0}
+CC_T0 = 1000.0
+CC_DURATION_S = 1.0
+# P2's shape, faster: the movie mostly grows rightwards, so its right edge peaks near 10 px per 60 Hz tick (one tick
+# of lag is a strip wider than 5 px) while its trailing edges move under the 4 px dilation per tick.
+CC_GROW_DST = {"x": 80.0, "y": 140.0, "w": 260.0, "h": 60.0}
+CC_FAST_S = 0.5
+CC_EL_ID = 7
+CC_FRAME_MS = 1000.0 / 60.0
+# Off the press and the window edges, so no tick sits exactly on a boundary.
+CC_FIRST_TICK_MS = 503.0
+
+
+def _ease_in_out(x: float) -> float:
+    lo, hi = 0.0, 1.0
+    for _ in range(40):
+        t = (lo + hi) / 2
+        bx = 3 * 0.42 * t * (1 - t) ** 2 + 3 * 0.58 * t * t * (1 - t) + t ** 3
+        lo, hi = (t, hi) if bx < x else (lo, t)
+    t = (lo + hi) / 2
+    return 3 * t * t * (1 - t) + t ** 3
+
+
+def _cc_rect_at(
+    ms: float, curve: Any, shift: tuple[float, float] = (0.0, 0.0), duration_s: float = CC_DURATION_S,
+    dst: dict[str, float] = CC_DST,
+) -> dict[str, float]:
+    p = curve(min(1.0, max(0.0, (ms - CC_T0) / (1000.0 * duration_s))))
+    rect = {k: CC_SRC[k] + (dst[k] - CC_SRC[k]) * p for k in ("x", "y", "w", "h")}
+    return {**rect, "x": rect["x"] + shift[0], "y": rect["y"] + shift[1]}
+
+
+def _cc_paint(image: np.ndarray, rect: dict[str, float], value: int = 255) -> None:
+    image[round(rect["y"]):round(rect["y"] + rect["h"]), round(rect["x"]):round(rect["x"] + rect["w"])] = value
+
+
+def _cc_paint_sync(image: np.ndarray, tick: int) -> None:
+    """What the sampler's sync bar renders: per bit a (bit, not bit) pair of white/black cells."""
+    cell = probe.CARRY_COVER_SYNC_CELL_PX
+    for bit in range(probe.CARRY_COVER_SYNC_BITS):
+        on = (tick >> bit) & 1
+        image[:cell, 2 * bit * cell:(2 * bit + 1) * cell] = 255 if on else 0
+        image[:cell, (2 * bit + 1) * cell:(2 * bit + 2) * cell] = 0 if on else 255
+
+
+def _cc_bridge(**extra: Any) -> dict[str, Any]:
+    return {
+        "boundary": "b3to4", "fromOrdinal": 3, "toOrdinal": 4, "srcRect": dict(CC_SRC), "dstRect": dict(CC_DST),
+        "durationSeconds": CC_DURATION_S, "carriedSlot": 1, "masks": [], **extra,
+    }
+
+
+def _cc_scene(
+    *, overlay_curve: Any = _ease_in_out, poster_shift: tuple[float, float] = (0.0, 0.0), opaque: bool = True,
+    extra_object: tuple[dict[str, float], float] | None = None, ready_state: int = 4, marker_only: bool = False,
+    duration_s: float = CC_DURATION_S, dst: dict[str, float] = CC_DST, tick_ms: float = CC_FRAME_MS,
+    overlay_lag_ticks: int = 0,
+    pts_offset_ms: float = 4.0, deliver: Any = None, synced: Any = None, sampled: Any = None, pre_read: Any = None,
+) -> tuple[list[tuple[float, np.ndarray]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """One rAF tick every `tick_ms` from 503 ms to 2300 ms. The screencast delivers a frame of tick k (when
+    `deliver(k, ts)`), stamped `pts_offset_ms` after the tick, showing its sync bar (when `synced(k, ts)`), the
+    poster on Keynote's EaseInEaseOut curve and the overlay on `overlay_curve`, `overlay_lag_ticks` behind it. The
+    sampler keeps a row per tick (when `sampled(k, ts)`) read as the probe reads it: `vids` after tick k's frame (what
+    it shows) and `pre` at tick k's start (tick k-1's frame), or `pre_read(ts)` -- a pre read that disagrees with the
+    frame.
+    `extra_object` is (rect, lit until ms after the press), an unrelated object lit from the press until then.
+    `marker_only` paints the poster dark but for an 8x8 corner marker (D1's grating has one), so a strip of it exposes
+    little area."""
+    def overlay_at(k: int) -> dict[str, float]:
+        ms = CC_FIRST_TICK_MS + (k - overlay_lag_ticks) * tick_ms
+        return _cc_rect_at(ms, overlay_curve, duration_s=duration_s, dst=dst)
+
+    frames, rows = [], []
+    k = 0
+    while CC_FIRST_TICK_MS + k * tick_ms <= 2300.0:
+        ts = CC_FIRST_TICK_MS + k * tick_ms
+        if deliver is None or deliver(k, ts):
+            image = np.zeros((CC_VIEWPORT[1], CC_VIEWPORT[0], 3), dtype=np.uint8)
+            poster = _cc_rect_at(ts, _ease_in_out, poster_shift, duration_s, dst)
+            _cc_paint(image, {**poster, "w": 8.0, "h": 8.0} if marker_only else poster)
+            if extra_object is not None and 0.0 <= ts - CC_T0 <= extra_object[1]:
+                _cc_paint(image, extra_object[0], 200)
+            if opaque:
+                _cc_paint(image, overlay_at(k))
+            if synced is None or synced(k, ts):
+                _cc_paint_sync(image, k % (1 << probe.CARRY_COVER_SYNC_BITS))
+            frames.append((ts + pts_offset_ms, image))
+        if sampled is None or sampled(k, ts):
+            pre = pre_read(ts) if pre_read is not None else overlay_at(max(k - 1, 0))
+            rows.append({"ts": ts, "tick": k % (1 << probe.CARRY_COVER_SYNC_BITS),
+                         "pre": [{"elId": CC_EL_ID, **pre, "readyState": ready_state, "opaque": opaque}],
+                         "vids": [{"elId": CC_EL_ID, **overlay_at(k), "readyState": ready_state, "opaque": opaque}]})
+        k += 1
+    notes = [{"kind": "bridge-motion-start", "t": CC_T0, "detail": {"elId": CC_EL_ID, "durationSeconds": duration_s}}]
+    return frames, rows, notes
+
+
+def _cc_score(frames: Any, rows: Any, notes: Any, bridge: dict[str, Any] | None = None, **kw: Any) -> dict[str, Any]:
+    return probe.score_carry_cover(
+        frames, rows, notes, bridge or _cc_bridge(), kw.pop("stage_map", IDENTITY_STAGE_MAP),
+        viewport=kw.pop("viewport", CC_VIEWPORT),
+    )
+
+
+def _cc_fast(**kw: Any) -> dict[str, Any]:
+    return _cc_score(*_cc_scene(duration_s=CC_FAST_S, dst=CC_GROW_DST, **kw),
+                     bridge=_cc_bridge(durationSeconds=CC_FAST_S, dstRect=dict(CC_GROW_DST)))
+
+
+def _cc_fast_rect(ms: float, curve: Any = _ease_in_out) -> dict[str, float]:
+    return _cc_rect_at(ms, curve, duration_s=CC_FAST_S, dst=CC_GROW_DST)
+
+
+class TestCarryCoverMetric:
+    def test_positive_control_an_overlay_on_the_posters_eased_path_covers_it_and_passes(self) -> None:
+        result = _cc_score(*_cc_scene())
+        assert result["verdict"] == "pass", result["reasons"]
+        assert result["cleanShare"] == 1.0 and result["maxStripPx"] == 0 and result["maxExposedFraction"] == 0.0
+        assert result["alignedFrames"] == result["midFrames"] >= result["minFrames"]
+        assert result["discardedFrames"] == 0 and result["undecidedFrames"] == 0
+
+    def test_known_bad_a_linear_overlay_over_an_eased_poster_is_the_rubber_band_and_fails(self) -> None:
+        """Today's core: the overlay moves linearly, the GL poster EaseInEaseOut, so the poster's leading edges
+        show around the overlay for most of the move."""
+        result = _cc_score(*_cc_scene(overlay_curve=lambda p: p))
+        assert result["verdict"] == "fail"
+        assert result["maxStripPx"] > probe.CARRY_COVER_MAX_STRIP_PX
+        assert result["cleanShare"] < probe.CARRY_COVER_MIN_CLEAN_SHARE
+        assert any("mid-move frames expose more than" in r for r in result["reasons"])
+        assert any("px strip of the poster" in r for r in result["reasons"])
+
+    @pytest.mark.parametrize("shift", [(-4.0, 0.0), (4.0, 0.0), (0.0, -4.0), (0.0, 4.0)])
+    def test_the_posters_4px_outline_is_inside_the_dilation_tolerance(self, shift: tuple[float, float]) -> None:
+        result = _cc_score(*_cc_scene(poster_shift=shift))
+        assert result["verdict"] == "pass", result["reasons"]
+        assert result["maxStripPx"] == 0
+
+    @pytest.mark.parametrize(("shift", "side"), [((-7.0, 0.0), "left"), ((7.0, 0.0), "right"), ((0.0, -7.0), "top"),
+                                                  ((0.0, 7.0), "bottom")])
+    def test_known_bad_a_7px_strip_on_any_side_fails(self, shift: tuple[float, float], side: str) -> None:
+        """Painting rounds the fractional rects, so the measured strip is 7 +/- 1 px, and only that side fails."""
+        result = _cc_score(*_cc_scene(poster_shift=shift))
+        assert result["verdict"] == "fail"
+        assert 6 <= result["maxStripPx"] <= 8
+        assert max(f["strips"][side] for f in result["frames"]) == result["maxStripPx"]
+        assert all(
+            f["strips"][other] <= probe.CARRY_COVER_MAX_STRIP_PX for f in result["frames"] for other in f["strips"] if other != side
+        )
+
+    def test_known_bad_a_7px_strip_of_a_small_marker_fails_on_the_strip_rule_alone(self) -> None:
+        """Measured on D1 with an eased overlay: the poster's corner marker 7 px past the overlay's left edge exposes
+        under 0.05% of the overlay, so only the strip rule catches it."""
+        result = _cc_score(*_cc_scene(poster_shift=(-7.0, 0.0), marker_only=True))
+        assert result["verdict"] == "fail"
+        assert result["cleanShare"] == 1.0
+        assert 6 <= result["maxStripPx"] <= 8
+        assert result["reasons"] == [f"a {result['maxStripPx']} px strip of the poster shows beyond the overlay (max 5)"]
+
+    def test_a_marker_inside_the_dilation_passes(self) -> None:
+        assert _cc_score(*_cc_scene(poster_shift=(-4.0, 0.0), marker_only=True))["verdict"] == "pass"
+
+    def test_known_bad_null_an_overlay_that_does_not_paint_covers_nothing_and_fails(self) -> None:
+        """The NULL control (probe-only `video{opacity:0}`): the sampler reports the carried video not opaque, so
+        nothing covers the poster and the poster itself is the exposure -- the instrument must see it."""
+        result = _cc_score(*_cc_scene(opaque=False))
+        assert result["verdict"] == "fail"
+        assert result["cleanShare"] == 0.0
+        assert all(f["opaque"] is False for f in result["frames"])
+
+    def test_an_object_fading_out_inside_the_region_is_masked_for_its_window_only(self) -> None:
+        box = {"x": 300.0, "y": 200.0, "w": 40.0, "h": 40.0}
+        scene = _cc_scene(extra_object=(box, 400.0))
+        assert _cc_score(*scene, bridge=_cc_bridge(masks=[{"slot": 2, "rect": box, "untilS": 0.5}]))["verdict"] == "pass"
+        unmasked = _cc_score(*scene)
+        assert unmasked["verdict"] == "fail", "without the mask the fading object reads as exposure"
+        expired = _cc_score(*scene, bridge=_cc_bridge(masks=[{"slot": 2, "rect": box, "untilS": 0.2}]))
+        assert expired["verdict"] == "fail", "a mask that ends before the object is gone hides nothing after it"
+
+    def test_a_static_mask_is_active_for_the_whole_capture(self) -> None:
+        box = {"x": 300.0, "y": 200.0, "w": 40.0, "h": 40.0}
+        scene = _cc_scene(extra_object=(box, 10_000.0))
+        assert _cc_score(*scene, bridge=_cc_bridge(masks=[{"slot": 2, "rect": box, "untilS": None}]))["verdict"] == "pass"
+
+    def test_the_sync_bar_inside_the_region_is_masked(self) -> None:
+        """The region here reaches the viewport's top-left, where the probe's own bar flickers every tick."""
+        result = _cc_score(*_cc_scene())
+        assert result["roi"]["x"] == 0 and result["roi"]["y"] == 0
+        assert result["verdict"] == "pass" and result["maxExposedFraction"] == 0.0
+
+    def test_a_path_that_reaches_the_sync_bar_is_inconclusive(self) -> None:
+        """Review r2 (edge case): the bar overwrites 96x4 px at the viewport's top-left and is masked, so exposure
+        there is unobservable; a bridge whose path comes within the strip tolerance of it cannot be judged."""
+        bridge = _cc_bridge(srcRect={"x": 4.0, "y": 2.0, "w": 100.0, "h": 50.0})
+        result = _cc_score(*_cc_scene(), bridge=bridge)
+        assert result["verdict"] == "inconclusive"
+        assert "sync bar" in " ".join(result.get("reasons") or [result.get("reason") or ""])
+
+    def test_the_scaled_stage_maps_authored_rects_to_screen(self) -> None:
+        """Authored rects at half size with a 2x stage map land on the same screen pixels."""
+        half = {k: v / 2 for k, v in CC_SRC.items()}, {k: v / 2 for k, v in CC_DST.items()}
+        bridge = _cc_bridge(srcRect=half[0], dstRect=half[1])
+        stage = {**IDENTITY_STAGE_MAP, "s": 2.0, "sy": 2.0}
+        assert _cc_score(*_cc_scene(), bridge=bridge, stage_map=stage)["verdict"] == "pass"
+
+
+class TestCarryCoverSync:
+    """Review r1 #2: a frame is placed at the tick its sync bar names, never at whichever DOM sample near its
+    timestamp hides the most -- that choice erased a real one-frame lag."""
+
+    def test_positive_control_the_fast_eased_scene_passes(self) -> None:
+        result = _cc_fast()
+        assert result["verdict"] == "pass", result["reasons"]
+        assert result["maxStripPx"] == 0
+
+    def test_known_bad_an_overlay_one_tick_behind_its_poster_fails(self) -> None:
+        """The overlay shows the poster's previous-tick rect. Near mid-move its right edge trails by ~10 px, a strip
+        past the 4 px dilation, while its trailing edges stay inside the dilation of the poster's rect. The DOM sample
+        one tick later is the poster's rect, so the r1 scorer (best of the samples within +/-17 ms) scored it clean;
+        here both reads of the frame's own tick agree it is not."""
+        result = _cc_fast(overlay_lag_ticks=1)
+        assert result["verdict"] == "fail", result
+        assert result["maxStripPx"] > probe.CARRY_COVER_MAX_STRIP_PX
+        assert max(f["strips"]["right"] for f in result["frames"]) == result["maxStripPx"]
+        assert result["undecidedFrames"] == 0
+
+    @pytest.mark.parametrize("offset", [-6.0, 4.0, 11.0, CC_FRAME_MS + 4.0, -CC_FRAME_MS])
+    def test_the_screencast_clock_does_not_place_frames(self, offset: float) -> None:
+        """Whatever the screencast-to-page clock offset (here up to a whole tick either way), each frame is scored at
+        the tick its bar names: the eased overlay still passes and the one-tick-late overlay still fails."""
+        result = _cc_fast(pts_offset_ms=offset)
+        assert result["verdict"] == "pass", result["reasons"]
+        assert all(f["domTs"] == pytest.approx(f["pts"] - offset, abs=0.02) for f in result["frames"])
+        assert _cc_fast(pts_offset_ms=offset, overlay_lag_ticks=1)["verdict"] == "fail"
+
+    def test_frames_without_a_readable_bar_are_never_placed_by_their_timestamp(self) -> None:
+        result = _cc_score(*_cc_scene(synced=lambda k, ts: ts < CC_T0))
+        assert result["verdict"] == "inconclusive"
+        assert result["alignedFrames"] == 0
+        assert all(f["unaligned"] == "no sync bar" for f in result["frames"])
+
+    def test_known_bad_reads_that_disagree_on_the_rule_and_decide_it_are_inconclusive(self) -> None:
+        """The next tick's pre read is stale by one more tick: one tick behind the frame, it fails mid-move frames
+        the post-frame read passes. The pass rests on which read is right, so the run is INCONCLUSIVE -- not the better
+        of the two."""
+        result = _cc_fast(pre_read=lambda ts: _cc_fast_rect(ts - 2 * CC_FRAME_MS))
+        assert result["verdict"] == "inconclusive", result
+        assert result["undecidedFrames"] > 0
+        assert any("reads that disagree on the cover rule, and they decide the verdict" in r for r in result["reasons"])
+        undecided = next(f for f in result["frames"] if f["undecided"])
+        assert {r["read"] for r in undecided["reads"]} == {"post", "pre"}
+
+    def test_undecided_frames_that_cannot_change_a_fail_leave_it_a_fail(self) -> None:
+        linear = lambda p: p  # noqa: E731
+        result = _cc_fast(overlay_curve=linear, pre_read=lambda ts: _cc_fast_rect(ts - 2 * CC_FRAME_MS, linear))
+        assert result["verdict"] == "fail", result["reasons"]
+
+    def test_reads_that_differ_within_the_rule_decide_the_frame(self) -> None:
+        result = _cc_score(*_cc_scene(pre_read=lambda ts: _cc_rect_at(ts - CC_FRAME_MS, _ease_in_out, (2.0, 0.0))))
+        assert result["verdict"] == "pass", result["reasons"]
+        assert result["undecidedFrames"] == 0
+
+    @pytest.mark.parametrize("tick", [0, 1, 0b101010101010, (1 << probe.CARRY_COVER_SYNC_BITS) - 1])
+    def test_the_bar_round_trips_every_tick(self, tick: int) -> None:
+        image = np.full((20, 120, 3), 90, dtype=np.uint8)
+        _cc_paint_sync(image, tick)
+        assert probe.carry_cover_sync_tick(image) == tick
+
+    def test_known_bad_a_bar_with_one_unpaired_cell_or_none_at_all_reads_as_no_tick(self) -> None:
+        image = np.zeros((20, 120, 3), dtype=np.uint8)
+        assert probe.carry_cover_sync_tick(image) is None
+        _cc_paint_sync(image, 5)
+        image[:probe.CARRY_COVER_SYNC_CELL_PX, :probe.CARRY_COVER_SYNC_CELL_PX] = 0
+        assert probe.carry_cover_sync_tick(image) is None
+        assert probe.carry_cover_sync_tick(np.zeros((2, 2, 3), dtype=np.uint8)) is None
+
+    def test_the_sampler_paints_the_bar_the_scorer_reads_and_reads_each_tick_twice(self) -> None:
+        js = probe.CARRY_COVER_SAMPLER_JS
+        assert f"var BITS = {probe.CARRY_COVER_SYNC_BITS}, CELL = {probe.CARRY_COVER_SYNC_CELL_PX};" in js
+        assert "pre: read()" in js and "setTimeout(function(){ row.vids = read();" in js
+        assert probe.CARRY_COVER_SYNC_RECT == {"x": 0.0, "y": 0.0, "w": 96.0, "h": 4.0}
+
+
+class TestCarryCoverCoverage:
+    """Review r1 #3: enough frames in aggregate is not coverage -- every stretch of the mid-move window must be
+    scored, and frames that could not be placed are bounded."""
+
+    MID = (CC_T0 + 100.0, CC_T0 + 900.0)
+
+    def _assert(self, result: dict[str, Any], fragment: str) -> None:
+        assert result["verdict"] == "inconclusive", result
+        assert any(fragment in r for r in result["reasons"]), result["reasons"]
+
+    def test_known_bad_frames_bunched_into_part_of_the_window_are_inconclusive(self) -> None:
+        """21 frames in the window's first 350 ms clear the 16-frame count, but nothing scores the remaining 450 ms --
+        where this overlay turns linear."""
+        lo = self.MID[0]
+        result = _cc_score(*_cc_scene(
+            deliver=lambda k, ts: ts < CC_T0 or lo <= ts <= lo + 350.0,
+            overlay_curve=lambda p: _ease_in_out(p) if p < 0.45 else p,
+        ))
+        self._assert(result, "ms stretch of the mid-move window has no scored frame")
+        assert result["alignedFrames"] >= result["minFrames"]
+        assert result["maxGapMs"] > 400.0
+
+    def test_known_bad_a_100ms_dropout_mid_window_is_inconclusive(self) -> None:
+        result = _cc_score(*_cc_scene(deliver=lambda k, ts: not 1400.0 <= ts <= 1500.0))
+        self._assert(result, "ms stretch of the mid-move window has no scored frame")
+        assert result["maxGapMs"] > result["maxGapAllowedMs"]
+
+    def test_runs_of_two_dropped_ticks_are_covered(self) -> None:
+        """Gaps of 3 ticks (50 ms at 60 Hz) between scored frames are within the bound."""
+        result = _cc_score(*_cc_scene(deliver=lambda k, ts: k % 6 not in (1, 2)))
+        assert result["verdict"] == "pass", result["reasons"]
+        assert result["maxGapMs"] == pytest.approx(3 * CC_FRAME_MS, abs=0.05)
+
+    def test_known_bad_runs_of_three_dropped_ticks_are_not(self) -> None:
+        result = _cc_score(*_cc_scene(deliver=lambda k, ts: k % 6 not in (1, 2, 3)))
+        self._assert(result, "ms stretch of the mid-move window has no scored frame")
+        assert result["maxGapMs"] == pytest.approx(4 * CC_FRAME_MS, abs=0.05)
+
+    def test_known_bad_too_many_unplaceable_frames_are_inconclusive_even_when_spread_out(self) -> None:
+        result = _cc_score(*_cc_scene(synced=lambda k, ts: ts < CC_T0 or k % 5 != 0))
+        self._assert(result, "mid-move frames could not be placed at a sampled tick (max 10%)")
+        assert result["discardedShare"] > probe.CARRY_COVER_MAX_DISCARDED_SHARE
+        assert result["maxGapMs"] <= result["maxGapAllowedMs"]
+
+    def test_a_few_unplaceable_frames_are_tolerated(self) -> None:
+        result = _cc_score(*_cc_scene(synced=lambda k, ts: k % 20 != 0))
+        assert result["verdict"] == "pass", result["reasons"]
+        assert 0 < result["discardedShare"] <= probe.CARRY_COVER_MAX_DISCARDED_SHARE
+
+    def test_known_bad_frames_whose_tick_the_sampler_missed_are_unplaced(self) -> None:
+        result = _cc_score(*_cc_scene(sampled=lambda k, ts: k % 4 != 0))
+        self._assert(result, "could not be placed at a sampled tick")
+        assert any(f.get("unaligned") == "no sampler row for its tick" for f in result["frames"])
+
+    def test_known_bad_a_page_ticking_slower_than_20fps_is_inconclusive(self) -> None:
+        self._assert(_cc_score(*_cc_scene(tick_ms=200.0)), "the page's rAF ticked every 200.0 ms")
+
+
+class TestCarryCoverInconclusive:
+    """Integrity gaps are INCONCLUSIVE, never a pass -- and never a fail either, so a broken capture cannot pose as
+    the red or null control's expected outcome."""
+
+    def _assert(self, result: dict[str, Any], fragment: str) -> None:
+        assert result["verdict"] == "inconclusive", result
+        assert any(fragment in r for r in result["reasons"]), result["reasons"]
+
+    def test_no_bridge_motion_note_means_no_move_window(self) -> None:
+        frames, rows, _ = _cc_scene()
+        self._assert(_cc_score(frames, rows, []), "no move window: 0 bridge-motion-start notes")
+
+    def test_two_bridge_motion_notes_are_ambiguous(self) -> None:
+        frames, rows, notes = _cc_scene()
+        self._assert(_cc_score(frames, rows, notes * 2), "no move window: 2 bridge-motion-start notes")
+
+    def test_no_carried_decoder_in_the_rows(self) -> None:
+        frames, rows, notes = _cc_scene()
+        notes = [{**notes[0], "detail": {"elId": 99}}]
+        self._assert(_cc_score(frames, rows, notes), "no carried decoder sampled during the move")
+
+    def test_a_carried_decoder_that_never_decoded(self) -> None:
+        self._assert(_cc_score(*_cc_scene(ready_state=1)), "never decoded")
+
+    def test_no_frames(self) -> None:
+        _, rows, notes = _cc_scene()
+        self._assert(_cc_score([], rows, notes), "no screencast frames")
+
+    def test_frames_not_at_the_viewport_size(self) -> None:
+        self._assert(_cc_score(*_cc_scene(), viewport=(1920, 1080)), "are not the (1920, 1080) viewport")
+
+    def test_no_pre_press_reference_frame(self) -> None:
+        frames, rows, notes = _cc_scene()
+        self._assert(_cc_score([f for f in frames if f[0] >= CC_T0], rows, notes), "no pre-press reference frame")
+
+    def test_a_non_uniform_background_in_the_region(self) -> None:
+        """Static content the masks do not explain would read as exposure, so the gate refuses to score it."""
+        frames, rows, notes = _cc_scene()
+        for _, image in frames:
+            image[10:150, 0:400] = 255
+        self._assert(_cc_score(frames, rows, notes), "background is not uniform")
+
+    def test_too_few_mid_move_frames(self) -> None:
+        self._assert(_cc_score(*_cc_scene(deliver=lambda k, ts: k % 6 == 0)), "too few aligned mid-move frames")
+
+    def test_an_unreadable_stage_map(self) -> None:
+        self._assert(_cc_score(*_cc_scene(), stage_map=None), "stage map unreadable")
+
+    def test_a_bridge_the_plan_could_not_describe(self) -> None:
+        self._assert(_cc_score(*_cc_scene(), bridge=_cc_bridge(problem="2 transition slots match")), "2 transition slots")
+
+    @pytest.mark.parametrize(("capture", "fragment"), [
+        ({"settled": False, "screencastErrors": [], "arrived": 4}, "slide 3 never settled"),
+        ({"settled": True, "screencastErrors": ["ConnectionClosed()"], "arrived": 4}, "screencast error"),
+        ({"settled": True, "screencastErrors": [], "arrived": 3}, "did not reach slide 4 (at 3)"),
+    ])
+    def test_capture_integrity_problems(self, capture: dict[str, Any], fragment: str) -> None:
+        problems = probe.carry_cover_capture_problems(capture, _cc_bridge())
+        assert len(problems) == 1 and fragment in problems[0]
+
+    def test_positive_control_a_clean_capture_has_no_problems(self) -> None:
+        assert probe.carry_cover_capture_problems({"settled": True, "screencastErrors": [], "arrived": 4}, _cc_bridge()) == []
+
+
+def _cc_slot(cx: float, cy: float, w: float, h: float, anims: list[dict[str, Any]] | None = None,
+             opacity: float = 1.0) -> dict[str, Any]:
+    leaf = {"initialState": {"position": {"pointX": w / 2, "pointY": h / 2}, "width": w, "height": h, "opacity": 1.0},
+            "animations": [{"animations": anims or []}]}
+    return {"initialState": {"position": {"pointX": cx, "pointY": cy}, "width": w, "height": h, "opacity": opacity},
+            "animations": [], "layers": [leaf]}
+
+
+def _cc_anim(prop: str, frm: Any, to: Any, begin: float = 0.0, duration: float = 1.5) -> dict[str, Any]:
+    return {"property": prop, "from": frm, "to": to, "beginTime": begin, "duration": duration}
+
+
+P2_CANVAS = {"width": 1920, "height": 1080}
+P2_SRC = {"x": 197.98, "y": 797.10, "w": 951.54, "h": 267.62}
+
+
+def _p2_like_effect() -> dict[str, Any]:
+    """The shape of P2's 3->4 magic move: canvas background, the carried movie (960x276, the source rect plus the
+    poster's 4 px outline), moving and growing, and WA0125 fading out over 0.49995 s."""
+    return {"type": "transition", "baseLayer": {"layers": [
+        _cc_slot(960, 540, 1920, 1080),
+        _cc_slot(673.75, 930.91, 960, 276, [
+            _cc_anim("transform.scale.x", {"scalar": 1}, {"scalar": 1.327}),
+            _cc_anim("transform.translation", {"pointX": 0, "pointY": 0}, {"pointX": 285.9, "pointY": -44.0}),
+            _cc_anim("zPosition", {"scalar": 0}, {"scalar": 0}),
+        ]),
+        _cc_slot(1395.05, 930.91, 484, 272, [
+            _cc_anim("opacity", {"scalar": 1}, {"scalar": 0}, duration=0.49995),
+            _cc_anim("hidden", {"scalar": False}, {"scalar": False}),
+        ]),
+    ]}}
+
+
+class TestCarryCoverMasks:
+    def test_p2s_fading_second_video_is_masked_until_its_fade_ends_plus_slack(self) -> None:
+        masks = probe.carry_cover_masks(_p2_like_effect(), P2_SRC, P2_CANVAS)
+        assert masks["carriedSlot"] == 1
+        assert len(masks["masks"]) == 1
+        mask = masks["masks"][0]
+        assert mask["slot"] == 2
+        assert mask["untilS"] == pytest.approx(0.49995 + probe.CARRY_COVER_FADE_SLACK_S)
+        assert mask["rect"] == pytest.approx({"x": 1153.05, "y": 794.91, "w": 484.0, "h": 272.0})
+
+    def test_unchanged_animations_do_not_extend_a_window(self) -> None:
+        """`hidden` false->false and `zPosition` 0->0 over the whole transition change nothing that paints."""
+        slot = probe.transition_slot(_p2_like_effect()["baseLayer"]["layers"][2])
+        assert slot["endS"] == pytest.approx(0.49995) and slot["settledVisible"] is False
+
+    def test_a_static_or_still_visible_object_is_masked_for_the_whole_capture(self) -> None:
+        effect = _p2_like_effect()
+        effect["baseLayer"]["layers"].append(_cc_slot(100, 100, 50, 50))
+        effect["baseLayer"]["layers"].append(_cc_slot(1500, 300, 50, 50, [
+            _cc_anim("transform.translation", {"pointX": 0, "pointY": 0}, {"pointX": 100, "pointY": 0}, duration=0.5),
+        ]))
+        masks = {m["slot"]: m for m in probe.carry_cover_masks(effect, P2_SRC, P2_CANVAS)["masks"]}
+        assert masks[3]["untilS"] is None
+        assert masks[4]["untilS"] is None, "it moved, then stays visible"
+        assert masks[4]["rect"] == pytest.approx({"x": 1475, "y": 275, "w": 150, "h": 50}), "start/settled hull"
+
+    def test_the_carried_slot_is_never_masked(self) -> None:
+        masks = probe.carry_cover_masks(_p2_like_effect(), P2_SRC, P2_CANVAS)
+        assert all(m["slot"] != masks["carriedSlot"] for m in masks["masks"])
+
+    def test_known_bad_no_or_two_slots_matching_the_source_rect_is_a_problem(self) -> None:
+        far = {**P2_SRC, "x": 600.0}
+        assert "0 transition slots match" in probe.carry_cover_masks(_p2_like_effect(), far, P2_CANVAS)["problem"]
+        effect = _p2_like_effect()
+        effect["baseLayer"]["layers"].append(effect["baseLayer"]["layers"][1])
+        assert "2 transition slots match" in probe.carry_cover_masks(effect, P2_SRC, P2_CANVAS)["problem"]
+
+    @pytest.mark.parametrize("effect", [None, {}, {"baseLayer": {"layers": []}}, {"baseLayer": {"layers": [{"x": 1}]}}])
+    def test_an_unreadable_effect_is_a_problem(self, effect: Any) -> None:
+        assert "problem" in probe.carry_cover_masks(effect, P2_SRC, P2_CANVAS)
+
+
+class TestCarryCoverStatus:
+    QUALIFIED = {"mode": "qualified"}
+
+    def _bridge(self, verdict: str, reason: str = "r") -> dict[str, Any]:
+        return {"boundary": "b3to4", "result": {"verdict": verdict, "reasons": [reason] if verdict != "pass" else []}}
+
+    def test_pass(self) -> None:
+        assert probe.carry_cover_status(self.QUALIFIED, [self._bridge("pass")]) == ("pass", [])
+
+    def test_fail(self) -> None:
+        assert probe.carry_cover_status(self.QUALIFIED, [self._bridge("fail", "strip")]) == ("fail", ["b3to4: strip"])
+
+    def test_inconclusive_wins_over_fail(self) -> None:
+        status, reasons = probe.carry_cover_status(
+            self.QUALIFIED, [self._bridge("fail"), {**self._bridge("inconclusive", "gap"), "boundary": "b5to6"}],
+        )
+        assert (status, reasons) == ("inconclusive", ["b5to6: gap"])
+
+    @pytest.mark.parametrize("continuity", [None, {"mode": "off"}, {"mode": "unsupported"}])
+    def test_continuity_not_installed_is_inconclusive(self, continuity: Any) -> None:
+        status, reasons = probe.carry_cover_status(continuity, [self._bridge("pass")])
+        assert status == "inconclusive" and "continuity runtime not installed" in reasons[0]
+
+    def test_no_bridge_is_inconclusive_never_a_vacuous_pass(self) -> None:
+        assert probe.carry_cover_status(self.QUALIFIED, []) == ("inconclusive", ["the plan carries no bridge"])
+
+    def test_an_unmeasured_bridge_is_inconclusive(self) -> None:
+        assert probe.carry_cover_status(self.QUALIFIED, [{"boundary": "b3to4"}])[0] == "inconclusive"
+
+
+class TestCarryCoverCli:
+    def test_the_flags_parse(self) -> None:
+        assert probe.parse_args(["--carry-cover"]).carry_cover is True
+        assert probe.parse_args(["--carry-cover", "--carry-cover-null"]).carry_cover_null is True
+        assert probe.parse_args(["--carry-cover", "--core-variant", probe.VARIANTS[0]]).core_variant == probe.VARIANTS[0]
+        assert probe.parse_args(["--carry-cover", "--viewport", "1600x1000"]).viewport == (1600, 1000)
+
+    @pytest.mark.parametrize("extra", [
+        ["--carry-cover-null"], ["--carry-cover", "--carry-cover-null", "--core-variant", "stash-any"],
+        ["--carry-cover", "--strip", "bridge@8"], ["--carry-cover", "--pass", "G"], ["--carry-cover", "--gl-replay", "auto"],
+        ["--carry-cover", "--force-wrap", "3to4:0"], ["--carry-cover", "--skip-arms", "C"], ["--carry-cover", "--attach"],
+    ])
+    def test_known_bad_combinations_are_refused(self, extra: list[str]) -> None:
+        with pytest.raises(SystemExit):
+            probe.parse_args(extra)
+
+    @pytest.mark.parametrize(("extra", "control", "status", "exits"), [
+        ([], "green", "pass", False),
+        (["--carry-cover-null"], "null", "fail", True),
+        (["--core-variant", "stash-any"], "red", "fail", True),
+        ([], "green", "inconclusive", True),
+    ])
+    def test_the_artifact_names_its_control_and_only_pass_exits_0(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra: list[str], control: str, status: str, exits: bool,
+    ) -> None:
+        fixture = tmp_path / "fixture"
+        fixture.mkdir()
+        (fixture / "index.html").write_text("")
+        artifact = tmp_path / "out" / "cc.json"
+        seen = {}
+        monkeypatch.setattr(probe, "run_carry_cover", lambda args: seen.update(args=args) or {"status": status, "reasons": []})
+        monkeypatch.setattr(probe, "check_no_leftover_chrome", lambda: "")
+        monkeypatch.setattr(sys, "argv", ["x", "--fixture", str(fixture), "--original-index", str(fixture / "index.html"),
+                                          "--artifact", str(artifact), "--carry-cover", *extra])
+        if exits:
+            with pytest.raises(SystemExit):
+                probe.main()
+        else:
+            probe.main()
+        result = json.loads(artifact.read_text())
+        assert result["kind"] == "live-continuity-probe-carry-cover"
+        assert (result["control"], result["status"]) == (control, status)
+        assert result["thresholds"]["maxStripPx"] == 5 and result["thresholds"]["dilatePx"] == 4
+
+    def test_an_exception_leaves_an_error_artifact_and_exits_1(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        fixture = tmp_path / "fixture"
+        fixture.mkdir()
+        (fixture / "index.html").write_text("")
+        artifact = tmp_path / "cc.json"
+
+        def boom(args: Any) -> dict[str, Any]:
+            raise RuntimeError("chrome died")
+
+        monkeypatch.setattr(probe, "run_carry_cover", boom)
+        monkeypatch.setattr(probe, "check_no_leftover_chrome", lambda: "")
+        monkeypatch.setattr(sys, "argv", ["x", "--fixture", str(fixture), "--original-index", str(fixture / "index.html"),
+                                          "--artifact", str(artifact), "--carry-cover"])
+        with pytest.raises(SystemExit):
+            probe.main()
+        result = json.loads(artifact.read_text())
+        assert (result["status"], result["error"]) == ("error", "chrome died")

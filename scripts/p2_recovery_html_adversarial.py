@@ -85,7 +85,6 @@ from obed_edom.live_continuity_js import PRESERVE_CORE_JS  # noqa: E402
 from obed_edom.live_gl_replay_js import GL_REPLAY_VERSION, gl_replay_script, validate_gl_replay_entry  # noqa: E402
 from obed_edom.live_gl_replay_js import js_sha256 as gl_replay_js_sha256  # noqa: E402
 from obed_edom.live_runtime import (  # noqa: E402
-    PLAYER_SHA256,
     RUNTIME_VERSION,
     LiveRuntimeUnsupported,
     patch_player,
@@ -93,6 +92,8 @@ from obed_edom.live_runtime import (  # noqa: E402
 from obed_edom.p2_verdict import (  # noqa: E402
     ADVANCE_PRESS_HASH,
     BLACK_RGB_MEAN_MAX,
+    BRIDGE_EASE_IN_EASE_OUT,
+    BRIDGE_LINEAR,
     BURST_OFFSETS_MS,
     CARRY_EVENT_KINDS,
     COVER_TRACK_TOL_PX,
@@ -610,6 +611,21 @@ def _bridge_injected(plan: dict) -> bool:
     return any(b.get("action") == "bridge" for b in plan.get("boundaries") or [] if isinstance(b, dict))
 
 
+def _bridge34_entry(plan: dict) -> dict | None:
+    """The injected plan's 3->4 bridge entry: the geometry the freeze trigger is bounded by."""
+    return next(
+        (
+            b for b in plan.get("boundaries") or []
+            if isinstance(b, dict) and b.get("action") == "bridge" and b.get("atScene") == SLIDE4_MIN_HASH
+        ),
+        None,
+    )
+
+
+def _bridge_curve(core_variant: str | None) -> tuple[float, float, float, float]:
+    return BRIDGE_LINEAR if core_variant == "linear-bridge" else BRIDGE_EASE_IN_EASE_OUT
+
+
 def _injection_arm(reference_plan: dict) -> tuple[dict, str, dict]:
     """`--core-variant NAME` / `--strip ACTION[@atScene]`: the plan and core to inject in
     place of `reference_plan` and `PRESERVE_CORE_JS`, and the record the report header shows."""
@@ -703,9 +719,10 @@ def _patched_main_js(player_dir: Path, *, mm_opacity: bool) -> tuple[bytes, dict
         patched = patch_player(raw, mm_opacity=mm_opacity)
     except LiveRuntimeUnsupported as exc:
         raise SystemExit(f"patched main.js: {exc} (main.js sha {hashlib.sha256(raw).hexdigest()})") from exc
+    digest = hashlib.sha256(raw).hexdigest()
     return patched, {
-        "mainJsSha256": hashlib.sha256(raw).hexdigest(),
-        "playerSha256": PLAYER_SHA256,
+        "mainJsSha256": digest,
+        "playerSha256": digest,
         "patchedMainJsSha256": hashlib.sha256(patched).hexdigest(),
         "mmOpacity": mm_opacity,
     }
@@ -921,6 +938,7 @@ NULL_CONTROL_JS = r"""
   var P = window.__OBED_P2_PRESERVE__;
   var dpr = window.devicePixelRatio || 1;
   var LEFT_FRAC = 0.4;
+  var POLL_TIMES_MAX = 256;
 
   var st = {
     arm: 'A',
@@ -950,6 +968,7 @@ NULL_CONTROL_JS = r"""
     holdStartedAt: null,
     coverPaintedAt: null,
     pollMaxGapMs: 0,
+    pollTimes: [],
     motionStartedAt: null,
     motionStartedFrame: null,
     motionStartedMarker: null,
@@ -1223,6 +1242,7 @@ NULL_CONTROL_JS = r"""
     if (st.advanceKeyAt != null) return;
     st.advanceKeyAt = e.timeStamp;
     st.framesAfterAdvance = 0;
+    st.pollTimes = [];
   }
 
   function stageRectNow() {
@@ -1320,6 +1340,7 @@ NULL_CONTROL_JS = r"""
         if (since != null && (pollAt - since) > st.pollMaxGapMs) st.pollMaxGapMs = pollAt - since;
         lastPollAt = pollAt;
         st.framesAfterAdvance += 1;
+        if (st.pollTimes.length < POLL_TIMES_MAX) st.pollTimes.push(pollAt);
         // The runtime's own move-start marker, only counted when it is FRESH
         // (stamped at or after the advance keydown): keepThroughBridge can carry
         // an older generation's marker. The COMPLETE marker is retained so the
@@ -1375,7 +1396,7 @@ NULL_CONTROL_JS = r"""
         ownerDisconnectedInWindow: st.ownerDisconnectedInWindow,
         firedVia: st.firedVia,
         holdStartedAt: st.holdStartedAt, coverPaintedAt: st.coverPaintedAt,
-        pollMaxGapMs: st.pollMaxGapMs,
+        pollMaxGapMs: st.pollMaxGapMs, pollTimes: st.pollTimes,
         motionStartedAt: st.motionStartedAt, motionStartedFrame: st.motionStartedFrame,
         motionStartedMarker: st.motionStartedMarker,
         releaseAt: st.releaseAt,
@@ -3257,6 +3278,7 @@ async def _capture_3to4_snapshot(
 async def _run_freeze_bracket(
     player_dir: Path, runs_dir: Path, wait_profile: dict, wait_profile_name: str,
     *, bridge34: bool, main_js: bytes | None = None, gl_auto: bool = False, skip: bool = False,
+    bridge: dict | None = None, bridge_curve: tuple[float, float, float, float] = BRIDGE_EASE_IN_EASE_OUT,
 ) -> dict:
     """A-B-A composited-freeze bracket on the 3->4 moving Magic Move boundary:
     positive -> freeze-control -> positive, one re-navigated Chrome (same
@@ -3321,7 +3343,9 @@ async def _run_freeze_bracket(
     finally:
         httpd.shutdown()
 
-    verdict = _score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"], manifest)
+    verdict = _score_freeze_control(
+        snaps["a1"], snaps["b"], snaps["a2"], manifest, bridge=bridge, bridge_curve=bridge_curve,
+    )
     verdict["manifest"] = manifest
     verdict["waitProfile"] = wait_profile_name
     verdict["snapshots"] = snaps
@@ -4571,6 +4595,7 @@ async def _run() -> dict:
     freeze_control = await _run_freeze_bracket(
         player_dir, runs, wait_profile, wait_profile_name, bridge34=bridge_injected, main_js=main_js,
         gl_auto=gl_auto, skip=skip_freeze,
+        bridge=_bridge34_entry(injected_plan), bridge_curve=_bridge_curve(arm["coreVariant"]),
     )
     findings.append(_freeze_bracket_finding(freeze_control, bridge_injected=bridge_injected, skip_freeze=skip_freeze))
 

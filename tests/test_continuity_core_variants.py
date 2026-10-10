@@ -23,7 +23,7 @@ from obed_edom.live_continuity_js import PRESERVE_CORE_JS, js_sha256  # noqa: E4
 
 
 def test_the_variant_names_are_the_shared_contract() -> None:
-    assert variants.VARIANTS == ("stash-any", "wrong-instance", "fifo-reuse")
+    assert variants.VARIANTS == ("stash-any", "wrong-instance", "fifo-reuse", "linear-bridge")
 
 
 @pytest.mark.parametrize("name", variants.VARIANTS)
@@ -32,7 +32,7 @@ def test_each_anchor_occurs_exactly_once_in_todays_core(name: str) -> None:
     assert PRESERVE_CORE_JS.count(anchor) == 1
 
 
-@pytest.mark.parametrize("name", ["stash-any", "wrong-instance"])
+@pytest.mark.parametrize("name", ["stash-any", "wrong-instance", "linear-bridge"])
 def test_a_red_variant_differs_from_the_core(name: str) -> None:
     core = variants.variant_core(name)
     assert core != PRESERVE_CORE_JS
@@ -52,6 +52,31 @@ def test_wrong_instance_takes_the_newest_pooled_decoder() -> None:
     assert "const cand = q.shift();" not in core
     # The restart-zone retire loop keeps its own shift: only the reuse pick changes.
     assert core.count("retireDecoder(q.shift())") == PRESERVE_CORE_JS.count("retireDecoder(q.shift())") == 1
+
+
+def test_linear_bridge_restores_only_the_linear_overlay_progress() -> None:
+    """The bridge overlay's red control: progress back to clamped linear time, while the
+    eased evaluator stays defined (unused) so nothing else in the core moves."""
+    core = variants.variant_core("linear-bridge")
+    linear = "const progress = Math.min(1, Math.max(0, (performance.now() - started) / (1000 * boundary.durationSeconds)));"
+    assert core.count(linear) == 1
+    assert "easeInEaseOut((performance.now()" not in core
+    assert core.count("function easeInEaseOut(p)") == PRESERVE_CORE_JS.count("function easeInEaseOut(p)") == 1
+    assert core.replace(linear, variants._TRANSFORMS["linear-bridge"][0]) == PRESERVE_CORE_JS
+
+
+def test_linear_bridge_moves_the_overlay_linearly_in_the_real_core(monkeypatch) -> None:
+    """The variant is a behavioural red, not just different bytes: injected in place of
+    the core, the bridge overlay lands on the linear rect at .25/.75."""
+    from test_live_continuity_js import _BRIDGE_DEST, _BRIDGE_SRC, _bridge_overlay_rects
+
+    from obed_edom import live_continuity_js
+
+    monkeypatch.setattr(live_continuity_js, "PRESERVE_CORE_JS", variants.variant_core("linear-bridge"))
+    result = _bridge_overlay_rects()
+    for fraction, rect in zip((0, 0.25, 0.5, 0.75, 1), result["rects"]):
+        linear = {k: _BRIDGE_SRC[k] + (_BRIDGE_DEST[k] - _BRIDGE_SRC[k]) * fraction for k in _BRIDGE_SRC}
+        assert rect == pytest.approx(linear), fraction
 
 
 def test_fifo_reuse_is_todays_core_byte_for_byte() -> None:

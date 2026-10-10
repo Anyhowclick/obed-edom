@@ -917,9 +917,19 @@ _MISSING = object()
 # in tests; production code never references it.
 LEGACY_BURST_OFFSETS_MS = (0, 130, 290, 500, 770, 1000, 1190, 1430, 1650, 1910, 2110, 2360)
 
+# The INJECTED 3->4 bridge entry the live probe hands the scorer. The real
+# fixture was captured on the LINEAR core (round 13, before the eased bridge), so
+# it is scored under the linear curve by default -- the curve its trigger bounds
+# were calibrated on. Eased-core snapshots name BRIDGE_EASE_IN_EASE_OUT.
+BRIDGE_34 = next(
+    b for b in p2.build_continuity_plan(True)["boundaries"] if b["action"] == "bridge"
+)
+
 
 def _score_34(
     a1: dict, b: dict, a2: dict, manifest=_MISSING, *,
+    bridge=BRIDGE_34,
+    bridge_curve: tuple = p2.BRIDGE_LINEAR,
     evidence_cadence: tuple = LEGACY_BURST_OFFSETS_MS,
     legacy_unrecorded_cadence: tuple = LEGACY_BURST_OFFSETS_MS,
 ) -> dict:
@@ -935,6 +945,7 @@ def _score_34(
     return p2._score_freeze_control(
         a1, b, a2,
         _FIXTURE_34["manifest"] if manifest is _MISSING else manifest,
+        bridge=bridge, bridge_curve=bridge_curve,
         evidence_cadence=evidence_cadence, legacy_unrecorded_cadence=legacy_unrecorded_cadence,
     )
 
@@ -945,8 +956,28 @@ def _positive_snap_34(**overrides) -> dict:
     return snap
 
 
+def _synth_poll_times(nc: dict) -> list[float]:
+    """Poll callback clocks consistent with `nc`'s own keydown, marker, trigger and
+    frame counts: the frames before the marker frame evenly inside (keydown,
+    started), the marker frame through the trigger evenly inside (started, hold]."""
+    key_at, hold = nc["advanceKeyAt"], nc["holdStartedAt"]
+    started = nc["motionStartedMarker"]["started"]
+    frames, marker = nc["triggerFramesAfterAdvance"], nc["motionStartedFrame"]
+    pre = [key_at + (started - key_at) * i / marker for i in range(1, marker)]
+    post = [started + (hold - started) * j / (frames - marker + 1) for j in range(1, frames - marker + 2)]
+    return (pre + post)[:frames]
+
+
+def _with_poll_times(snap: dict) -> dict:
+    snap["nullControl"] = {**snap["nullControl"], "pollTimes": _synth_poll_times(snap["nullControl"])}
+    return snap
+
+
 def _freeze_b_snap_34(**overrides) -> dict:
-    snap = copy.deepcopy(_FIXTURE_34["b"])
+    """The real B arm. It predates `pollTimes` (the poll's per-callback clocks), so
+    that one field is SYNTHESISED from the arm's own keydown, marker, trigger and
+    frame counts; a test that moves any of those re-synthesises it."""
+    snap = _with_poll_times(copy.deepcopy(_FIXTURE_34["b"]))
     snap.update(overrides)
     return snap
 
@@ -1936,7 +1967,7 @@ def test_freeze_control_at_cut_boundary_zero_still_passes():
         snap["atCutBoundary"] = p2._at_cut_boundary(snap["indexSamples"], first_perf)
         assert snap["atCutBoundary"]["from"] == 0 and snap["atCutBoundary"]["ok"] is True
     b["nullControl"]["advanceKeyAt"] = b["advanceKeyPerfMs"]
-    verdict = _score_34(a1, b, a2)
+    verdict = _score_34(a1, _with_poll_times(b), a2)
     assert verdict["verdict"] == "pass", verdict["failed"]
 
 
@@ -2741,8 +2772,222 @@ def test_freeze_control_trigger_within_the_motion_slack_still_passes():
             **b["nullControl"], "triggerFramesAfterAdvance": frames,
             "motionStartedFrame": marker,
         }
-        verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
+        verdict = _score_34(_positive_snap_34(), _with_poll_times(b), _a2_snap_34())
         assert verdict["verdict"] == "pass", (frames, marker, verdict["failed"])
+
+
+# --- Eased bridge (8204b87a): the trigger bounds follow the bridge's own curve -- #
+# The core's bridge overlay eases (cubic-bezier .42,0,.58,1), so on P2's 3->4
+# bridge a 1 px departure takes ~61 ms instead of the ~4.8 ms the linear-era
+# bounds were calibrated on (triage: output/evidence/main-bridge-easing/
+# triage-r3/freeze-bracket-easing.md). The bounds are DERIVED from the injected
+# plan's bridge geometry and curve, never widened blindly:
+#   * firedAtMoveStart: frame and page-clock stall ceilings shift by the extra
+#     latency (L - 4.8 ms); they move, they never disappear.
+#   * firedAtRuntimeMotionStart: marker -> trigger must lie in
+#     [-2 callbacks, L + one read-lag callback + 2 callbacks] on the page clock
+#     (a callback = the median of the poll's first rAF intervals from the
+#     trigger on, so slow startup callbacks cannot widen it), the frame
+#     lead is shifted like the ceiling, and the overlay's displacement at the
+#     trigger may not exceed the curve's at the band's end.
+# The real fixture is linear-era; these snapshots move only the trigger timing
+# (keydown clock, marker instant, frame counts, departure rect) to real values.
+P2_BRIDGE_SCALE = (
+    _FIXTURE_34["b"]["nullControl"]["movedFromRect"]["w"] / BRIDGE_34["srcRect"]["w"]
+)
+R3_EASED_DEPARTURE = {"x": 0.334839, "y": -0.31604, "w": 1.234375, "h": 0.59375}
+MAIN_LINEAR_DEPARTURE = {"x": 0.600464, "y": -0.50354, "w": 1.890625, "h": 0.78125}
+
+
+def _trigger_timed_b(
+    *, frames: int, marker: int, delay_ms: float, marker_to_trigger_ms: float, departure: dict,
+    poll_max_gap_ms: float | None = None, polls: list | None = None, post_cadence_ms: float | None = None,
+) -> dict:
+    """The real B arm with its trigger re-timed. `holdStartedAt` (and so every
+    scored window) is kept; the keydown clock moves to give `delay_ms`, and the
+    one fresh marker -- the poll's, the trigger's and the badge's copy -- moves
+    to give `marker_to_trigger_ms`. `departure` is the per-axis movedTo - movedFrom.
+    `polls` are explicit callback clocks in ms after the keydown (else synthesised);
+    `post_cadence_ms` re-times the first five hold callbacks after the trigger."""
+    b = _freeze_b_snap_34()
+    nc = b["nullControl"]
+    key_at = HOLD_STARTED_AT_34 - delay_ms
+    started = HOLD_STARTED_AT_34 - marker_to_trigger_ms
+    moved_from = nc["movedFromRect"]
+    b["advanceKeyPerfMs"] = key_at
+    b["badge"] = {**b["badge"], "stats": {**b["badge"]["stats"], "motionStartedAt": started}}
+    b["nullControl"] = {
+        **nc,
+        "advanceKeyAt": key_at,
+        "triggerFramesAfterAdvance": frames,
+        "motionStartedFrame": marker,
+        "motionStartedAt": started,
+        "motionStartedMarker": {**nc["motionStartedMarker"], "started": started},
+        "obedMotionAtTrigger": {**nc["obedMotionAtTrigger"], "started": started},
+        "movedToRect": {k: moved_from[k] + departure[k] for k in ("x", "y", "w", "h")},
+    }
+    if poll_max_gap_ms is not None:
+        b["nullControl"]["pollMaxGapMs"] = poll_max_gap_ms
+    _with_poll_times(b)
+    if polls is not None:
+        b["nullControl"]["pollTimes"] = [key_at + t for t in polls]
+    if post_cadence_ms is not None:
+        log = b["nullControl"]["rafLog"]
+        shift = HOLD_STARTED_AT_34 + 5 * post_cadence_ms - log[4]["t"]
+        b["nullControl"]["rafLog"] = [
+            {**r, "t": HOLD_STARTED_AT_34 + (i + 1) * post_cadence_ms if i < 5 else r["t"] + shift}
+            for i, r in enumerate(log)
+        ]
+    return b
+
+
+def _r3_eased_b(**overrides) -> dict:
+    """r3 `p2--wait-profilefast` (eased core 06789fbd): marker frame 6, trigger
+    frame 10, keydown->trigger 178.6 ms, marker->trigger 71.1 ms, dw 1.234 px."""
+    timing = dict(
+        frames=10, marker=6, delay_ms=178.59999999403954,
+        marker_to_trigger_ms=71.09999999403954, departure=R3_EASED_DEPARTURE,
+    )
+    timing.update(overrides)
+    return _trigger_timed_b(**timing)
+
+
+@pytest.mark.parametrize("curve, latency_ms, bounds", [
+    (p2.BRIDGE_LINEAR, 4.8, (p2.FREEZE_TRIGGER_MAX_RAFS, p2.FREEZE_TRIGGER_MAX_DELAY_MS,
+                             p2.FREEZE_TRIGGER_MOTION_SLACK_FRAMES)),
+    (p2.BRIDGE_EASE_IN_EASE_OUT, 61.0, (p2.FREEZE_TRIGGER_MAX_RAFS + 4, 246.2,
+                                        p2.FREEZE_TRIGGER_MOTION_SLACK_FRAMES + 4)),
+])
+def test_bridge_departure_latency_and_shifted_bounds_on_p2_geometry(curve, latency_ms, bounds):
+    """P2 3->4: src {198,797,952,268} -> dest {327,709,1266,356}, 1.5 s, at the
+    0.99951 scale the poll measured the armed owner at. Width travels furthest
+    (~313.8 px) and crosses 1 px first: 4.8 ms linear (the calibration, bounds
+    unchanged), 61.0 ms eased (every ceiling shifted by L - 4.8 = 56.2 ms, i.e.
+    4 nominal frames). The verdict's eased curve is pinned to the core's
+    EASE_IN_EASE_OUT and its progress line, so a curve change forces recalibration,
+    and its `pollTimes` size bound to the probe's POLL_TIMES_MAX."""
+    import re
+
+    from obed_edom.live_continuity_js import PRESERVE_CORE_JS
+
+    assert P2_BRIDGE_SCALE == pytest.approx(0.99951, abs=1e-5)
+    spans = p2._bridge_axis_spans_px(BRIDGE_34, P2_BRIDGE_SCALE)
+    assert max(spans, key=spans.get) == "w"
+    assert spans["w"] == pytest.approx(314 * P2_BRIDGE_SCALE)
+    latency = p2._bridge_departure_latency_ms(BRIDGE_34, P2_BRIDGE_SCALE, curve)
+    assert latency == pytest.approx(latency_ms, abs=0.5 if latency_ms > 10 else 0.1)
+    # ...width binds: at L its displacement is exactly the threshold, every other
+    # axis is still under it.
+    assert p2._bridge_displacement_px(BRIDGE_34, P2_BRIDGE_SCALE, curve, latency) == pytest.approx(
+        p2.FREEZE_TRIGGER_DEPARTURE_PX, abs=1e-6
+    )
+    progress = p2._bridge_progress(latency / 1500.0, curve)
+    assert all(spans[k] * progress < 1.0 for k in ("x", "y", "h"))
+    shifted = p2._freeze_trigger_bounds(latency)
+    assert shifted["maxTriggerFrames"] == bounds[0]
+    assert shifted["maxTriggerDelayMs"] == pytest.approx(bounds[1], abs=0.5)
+    assert shifted["maxMotionLeadFrames"] == bounds[2]
+    assert [p2._bridge_progress(x, curve) for x in (0.0, 0.5, 1.0)] == pytest.approx([0.0, 0.5, 1.0])
+
+    assert p2.FREEZE_TRIGGER_CALIBRATED_LATENCY_MS == pytest.approx(
+        p2._bridge_departure_latency_ms(BRIDGE_34, P2_BRIDGE_SCALE, p2.BRIDGE_LINEAR), abs=0.1
+    )
+    eased_per_frame = [
+        p2._bridge_displacement_px(BRIDGE_34, P2_BRIDGE_SCALE, p2.BRIDGE_EASE_IN_EASE_OUT, 1000.0 / 60 * k)
+        for k in range(1, 6)
+    ]
+    assert eased_per_frame == pytest.approx([0.07, 0.30, 0.67, 1.20, 1.88], abs=0.01)
+    match = re.search(
+        r"const EASE_IN_EASE_OUT = \{x1: ([\d.]+), y1: ([\d.]+), x2: ([\d.]+), y2: ([\d.]+)\};",
+        PRESERVE_CORE_JS,
+    )
+    assert match, "the core's EASE_IN_EASE_OUT moved: recalibrate the freeze trigger bounds"
+    assert tuple(float(g) for g in match.groups()) == p2.BRIDGE_EASE_IN_EASE_OUT
+    assert PRESERVE_CORE_JS.count(
+        "const progress = easeInEaseOut((performance.now() - started) / (1000 * boundary.durationSeconds));"
+    ) == 1
+    probe = (REPO / "scripts" / "p2_recovery_html_adversarial.py").read_text()
+    assert probe.count(f"var POLL_TIMES_MAX = {p2.FREEZE_POLL_TIMES_MAX};") == 1
+    assert probe.count("if (st.pollTimes.length < POLL_TIMES_MAX) st.pollTimes.push(pollAt);") == 1
+
+
+_EASED, _LINEAR = p2.BRIDGE_EASE_IN_EASE_OUT, p2.BRIDGE_LINEAR
+_MOVE_START = ["firedAtMoveStart"]
+_MOTION_START = ["firedAtRuntimeMotionStart"]
+_BOTH = ["firedAtMoveStart", "firedAtRuntimeMotionStart"]
+_ASTRA_LATE = dict(
+    frames=6, marker=2, delay_ms=215.0, marker_to_trigger_ms=124.0, poll_max_gap_ms=90.0,
+    polls=[90.0, 155.0, 170.0, 185.0, 200.0, 215.0],
+)
+_ASTRA_LOADED = dict(
+    frames=7, marker=4, delay_ms=215.0, marker_to_trigger_ms=120.0, poll_max_gap_ms=30.0,
+    polls=[30.0, 60.0, 90.0, 120.0, 150.0, 180.0, 210.0],
+    departure={"x": 0.6, "y": -0.5, "w": 2.192, "h": 0.9},
+)
+_LINEAR_ERA = dict(
+    frames=7, marker=6, delay_ms=132.30000001192093, marker_to_trigger_ms=24.400000005960464,
+    departure=MAIN_LINEAR_DEPARTURE,
+)
+
+
+@pytest.mark.parametrize("timing, curve, bridge, failed", [
+    pytest.param({}, _EASED, BRIDGE_34, [], id="r3-eased-passes"),
+    pytest.param({}, _LINEAR, BRIDGE_34, _BOTH, id="r3-under-linear-calibration"),
+    pytest.param(_LINEAR_ERA, _LINEAR, BRIDGE_34, [], id="linear-era-linear"),
+    pytest.param(_LINEAR_ERA, _EASED, BRIDGE_34, [], id="linear-era-eased"),
+    pytest.param(dict(frames=13, delay_ms=232.5, marker_to_trigger_ms=125.0,
+                      departure={"x": 1.5, "y": -1.2, "w": 3.5, "h": 1.2}),
+                 _EASED, BRIDGE_34, _MOTION_START, id="three-frames-past-latency"),
+    pytest.param(dict(departure={"x": 4.1, "y": -2.8, "w": 10.0, "h": 2.8}),
+                 _EASED, BRIDGE_34, _MOTION_START, id="10px-deep-into-move"),
+    pytest.param(dict(frames=14, marker=12), _EASED, BRIDGE_34, _MOVE_START, id="frame-ceiling+1"),
+    pytest.param(dict(delay_ms=247.3), _EASED, BRIDGE_34, _MOVE_START, id="delay-ceiling+1"),
+    pytest.param(dict(frames=12, marker=5), _EASED, BRIDGE_34, _MOTION_START, id="frame-lead+1"),
+    pytest.param(dict(frames=10, marker=13), _EASED, BRIDGE_34, _MOTION_START, id="before-marker-3"),
+    pytest.param(_ASTRA_LATE, _EASED, BRIDGE_34, _MOTION_START, id="late-after-slow-startup"),
+    pytest.param({**_ASTRA_LATE, "post_cadence_ms": 25.0}, _EASED, BRIDGE_34, _MOTION_START,
+                 id="late-after-slow-startup-slow-hold"),
+    pytest.param(_ASTRA_LOADED, _EASED, BRIDGE_34, [], id="healthy-loaded"),
+    pytest.param({**_ASTRA_LOADED, "post_cadence_ms": 30.0}, _EASED, BRIDGE_34, [],
+                 id="healthy-loaded-slow-hold"),
+    pytest.param({**_ASTRA_LOADED, "marker_to_trigger_ms": 125.0}, _EASED, BRIDGE_34, [],
+                 id="marker-clock-ties-the-preceding-poll"),
+    pytest.param({**_ASTRA_LOADED, "marker_to_trigger_ms": 125.1}, _EASED, BRIDGE_34, _MOTION_START,
+                 id="marker-before-the-preceding-poll"),
+    pytest.param({}, _EASED, None, _BOTH, id="no-bridge"),
+    pytest.param({}, _EASED, {**BRIDGE_34, "atScene": 6}, _BOTH, id="bridge-of-another-boundary"),
+    pytest.param({}, _EASED, {k: v for k, v in BRIDGE_34.items() if k != "durationSeconds"}, _BOTH,
+                 id="bridge-without-duration"),
+    pytest.param({}, _EASED, {**BRIDGE_34, "srcRect": {**BRIDGE_34["srcRect"], "w": None}}, _BOTH,
+                 id="bridge-src-partial"),
+    pytest.param({}, _EASED, {**BRIDGE_34, "rect": dict(BRIDGE_34["srcRect"])}, _BOTH,
+                 id="bridge-without-travel"),
+])
+def test_freeze_control_trigger_bounds_follow_the_bridge_curve(timing, curve, bridge, failed):
+    """Default timing is r3 `p2--wait-profilefast` (eased core 06789fbd): marker
+    frame 6, trigger frame 10, keydown->trigger 178.6 ms, marker->trigger 71.1 ms,
+    dw 1.234 px -- r3's inconclusive is the eased curve's ~61 ms to move 1 px,
+    and under the linear calibration it reproduces exactly r3's two failures.
+    The main-linear final round (7/6/132.3/24.4) passes under either curve.
+    The deadline is counted on the poll's RECORDED callbacks: the first one at or
+    after marker + L, plus one read-lag callback and 2 of slack; the cap is the
+    curve's displacement at that deadline. So a trigger 125 ms after the marker
+    (3 callbacks past), or one that reads a 10 px move, is not the move start.
+    Each shifted ceiling (13 frames, 246.2 ms, 6 frames of lead) and the -2 frame
+    floor still bite one past. No usable 3->4 bridge geometry means no bounds:
+    both checks fail closed. Astra's cases (astra-fixA-r1/r2): polls 90, 155,
+    170, ... 215 ms with the marker at 91 ms first allow the departure at 155 ms,
+    so frame 6 is one past the deadline (frame 5) whatever the hold cadence after
+    the trigger; a healthy loaded run on 30 ms callbacks (marker->trigger 120 ms,
+    D(90 ms) = 2.192 px) passes whether the hold cadence recovers or not, and
+    still passes when a coarsened clock gives the marker the preceding poll's
+    reading (90 ms, astra-fixA-r3); a marker strictly before that poll was
+    observable by it, so marker frame 4 is then not the first and it fails."""
+    verdict = _score_34(
+        _positive_snap_34(), _r3_eased_b(**timing), _a2_snap_34(), bridge=bridge, bridge_curve=curve
+    )
+    assert verdict["verdict"] == ("inconclusive" if failed else "pass"), verdict["failed"]
+    assert verdict["integrityFailed"] == failed
 
 
 # --- review r3 MAJOR 1: exactly one advance press, in every arm -------------- #
@@ -3968,6 +4213,7 @@ def test_real_bracket_was_captured_under_the_legacy_cadence():
 
     live_verdict = p2._score_freeze_control(
         _positive_snap_34(), _freeze_b_snap_34(), _a2_snap_34(), _FIXTURE_34["manifest"],
+        bridge=BRIDGE_34, bridge_curve=p2.BRIDGE_LINEAR,
     )
     assert live_verdict["verdict"] == "inconclusive"
 
@@ -4898,6 +5144,10 @@ _ABSENCE_CASES = [
     ("firedAtRuntimeMotionStart", "b", ("nullControl", "motionStartedFrame"), True),
     ("firedAtRuntimeMotionStart", "b", ("nullControl", "motionStartedMarker"), True),
     ("firedAtRuntimeMotionStart", "b", ("nullControl", "obedMotionAtTrigger"), True),
+    ("firedAtMoveStart", "b", ("nullControl", "movedFromRect"), True),
+    ("firedAtRuntimeMotionStart", "b", ("nullControl", "movedFromRect"), True),
+    ("firedAtRuntimeMotionStart", "b", ("nullControl", "movedToRect"), True),
+    ("firedAtRuntimeMotionStart", "b", ("nullControl", "pollTimes"), True),
     ("firedAfterAdvance", "b", ("nullControl", "advanceKeyAt"), True),
     ("noPreAdvanceDeparture", "b", ("nullControl",), False),
     ("noControlError", "b", ("nullControl",), False),
@@ -5558,14 +5808,6 @@ _SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('b', ('nullControl', 'holdFrames')): 'report-only: the rAF series itself is what loopLive and maxRafGapOk are measured on',
     ('b', ('nullControl', 'loopHandedOff')): 'report-only: the hand-off is proved by the rafLog itself',
     ('b', ('nullControl', 'motionStartedAt')): 'redundant: motionStartedMarker.started is the gated instant',
-    ('b', ('nullControl', 'movedFromRect', 'h')): 'report-only: firedVia is the gated form of the departure',
-    ('b', ('nullControl', 'movedFromRect', 'w')): 'report-only: firedVia is the gated form of the departure',
-    ('b', ('nullControl', 'movedFromRect', 'x')): 'report-only: firedVia is the gated form of the departure',
-    ('b', ('nullControl', 'movedFromRect', 'y')): 'report-only: firedVia is the gated form of the departure',
-    ('b', ('nullControl', 'movedToRect', 'h')): 'report-only: firedVia is the gated form of the departure',
-    ('b', ('nullControl', 'movedToRect', 'w')): 'report-only: firedVia is the gated form of the departure',
-    ('b', ('nullControl', 'movedToRect', 'x')): 'report-only: firedVia is the gated form of the departure',
-    ('b', ('nullControl', 'movedToRect', 'y')): 'report-only: firedVia is the gated form of the departure',
     ('b', ('nullControl', 'preAdvanceDepartureAt')): 'negative: green IS absence (noPreAdvanceDeparture)',
     ('b', ('nullControl', 'preAdvanceDepartureRect')): 'negative: forensics for noPreAdvanceDeparture',
     ('b', ('nullControl', 'rafLog', 't')): 'one frame with no clock widens the gap it sits in; the bound still applies',

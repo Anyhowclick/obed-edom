@@ -1367,6 +1367,62 @@ def _gl_replay_attempt(
     return replace(movie, gl_replay=result, gl_replay_reason=None, gl_replay_slot=slot)
 
 
+def _bridge_timing_refusal(
+    transition: dict[str, Any] | None,
+    src_events: list[Any],
+    src_instance: "_MovieInstance",
+    src_slide_name: str,
+    asset: str,
+    boundary_desc: str,
+) -> str | None:
+    """The bridge overlay eases the carried movie with EaseInEaseOut from the transition's start
+    over its `duration`, so every motion animation on the movie's transition slot must run exactly
+    that. A missing or non-positive duration is left to `to_runtime`, which refuses it."""
+    duration = transition.get("duration") if transition else None
+    if (
+        isinstance(duration, bool)
+        or not isinstance(duration, (int, float))
+        or not math.isfinite(duration)
+        or duration <= 0
+    ):
+        return None
+    try:
+        _check_effect_encoding(transition)
+        if transition["beginTime"] != 0:
+            raise _Refuse(f"the transition begins at {transition['beginTime']}s")
+        slots = transition["baseLayer"]["layers"]
+        slot = _drawn_slot_index(src_events, src_instance, src_slide_name, len(slots))
+        if slot is None:
+            raise _Refuse("the carried movie has no slot in the transition")
+        groups = [
+            group
+            for node in _effect_chain(slots[slot], slot)
+            for group in node["animations"]
+            if any(leaf["property"] in _EFFECT_LEAF_ONLY_PROPERTIES for leaf in group["animations"])
+        ]
+        if not groups:
+            raise _Refuse(f"transition slot {slot} has no motion animation")
+        for group in groups:
+            if group["beginTime"] != 0 or group["duration"] != duration:
+                raise _Refuse(
+                    f"a motion group runs {group['duration']}s from {group['beginTime']}s, "
+                    f"not {duration}s from 0s"
+                )
+            for leaf in group["animations"]:
+                if leaf["property"] not in _EFFECT_LEAF_ONLY_PROPERTIES:
+                    continue
+                if leaf.get("timingFunction") not in _EFFECT_TIMING_FUNCTIONS:
+                    raise _Refuse(f"{leaf['property']} has timing {leaf.get('timingFunction')!r}")
+                if leaf["beginTime"] != 0 or leaf["duration"] != duration:
+                    raise _Refuse(
+                        f"{leaf['property']} runs {leaf['duration']}s from {leaf['beginTime']}s, "
+                        f"not {duration}s from 0s"
+                    )
+    except _Refuse as exc:
+        return f"'{asset}' does not move with the bridge's eased timing at {boundary_desc}: {exc}"
+    return None
+
+
 def _drawn_slot_index(
     events: list[Any], instance: "_MovieInstance", slide_name: str, slot_count: int
 ) -> int | None:
@@ -1536,6 +1592,10 @@ def derive_plan(
                     to_player_index,
                     ordered[index + 1][1],
                 )
+                if refusal is None and continuity.action == "bridge":
+                    refusal = _bridge_timing_refusal(
+                        transition, events_by_player[player_index], src_instance, uuid, asset, boundary_desc
+                    )
             except _Refuse as exc:
                 return Unsupported(str(exc))
             loop_refusal = None
