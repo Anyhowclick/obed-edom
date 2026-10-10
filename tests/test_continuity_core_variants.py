@@ -8,6 +8,7 @@ variant must fail loudly rather than inject the core's bytes under a variant's n
 from __future__ import annotations
 
 import copy
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,7 @@ from obed_edom.live_continuity_js import PRESERVE_CORE_JS, js_sha256  # noqa: E4
 
 
 def test_the_variant_names_are_the_shared_contract() -> None:
-    assert variants.VARIANTS == ("stash-any", "wrong-instance", "fifo-reuse", "linear-bridge", "no-pin-hold")
+    assert variants.VARIANTS == ("stash-any", "wrong-instance", "fifo-reuse", "linear-bridge", "no-pin-hold", "gl-clock-bridge")
 
 
 ANCHORS = [(name, anchor) for name in variants.VARIANTS for anchor, _ in variants._TRANSFORMS[name]]
@@ -96,6 +97,67 @@ def test_linear_bridge_moves_the_overlay_linearly_in_the_real_core(monkeypatch) 
     for fraction, rect in zip((0, 0.25, 0.5, 0.75, 1), result["rects"]):
         linear = {k: _BRIDGE_SRC[k] + (_BRIDGE_DEST[k] - _BRIDGE_SRC[k]) * fraction for k in _BRIDGE_SRC}
         assert rect == pytest.approx(linear), fraction
+
+
+def test_gl_clock_bridge_times_the_overlay_from_keynotes_first_loop_start_in_the_real_core(monkeypatch) -> None:
+    """The experiment variant parses and runs as the core: the `requestAnimFrame` trap survives main.js's
+    plain assignment after the core installs; the overlay holds the source rect (progress 0) until a loop
+    start outside a wrapped callback during the departure stamps the origin; a pre-departure loop's re-arm
+    inside its own callback does not stamp it; then the overlay follows the eased curve on `Date.now()`
+    from that origin, not from the core's `performance.now()` trigger."""
+    from test_live_continuity_js import (
+        _BRIDGE_DEST, _BRIDGE_FRACTIONS, _BRIDGE_SRC, _IDENTITY_STAGE, _NO_RETIRE_PLAN, _eased_bridge_rect,
+        _run_full_core_in_node,
+    )
+
+    from obed_edom import live_continuity_js
+
+    monkeypatch.setattr(live_continuity_js, "PRESERVE_CORE_JS", variants.variant_core("gl-clock-bridge"))
+    # main.js runs after the core: it reassigns `requestAnimFrame` at load.
+    after_core = """
+const trapBefore = window.requestAnimFrame;
+window.requestAnimFrame = requestAnimationFrame;
+Date.now = () => nowMs;
+document.readyState = 'complete';
+"""
+    script = r"""
+const read = (v) => Object.fromEntries(
+  [['x', 'left'], ['y', 'top'], ['w', 'width'], ['h', 'height']].map(([k, css]) => [k, parseFloat(v.style[css])])
+);
+nowMs = 1000;
+goToScene(7);
+// A loop already running before the departure: its re-arms happen inside its own callback.
+window.requestAnimFrame(function old() { window.requestAnimFrame(old); });
+const v = video('A3');
+v.readyState = 4; v.currentTime = 2; v.parentNode = bodyEl;
+v.src = 'https://host/untitled.mov';
+detach(v);
+const before = [read(v)];
+nowMs = 1004;
+pump();
+before.push(read(v));
+// Keynote's fB.animate() loop start, ~7 ms after the core's trigger.
+const origin = 1007;
+nowMs = origin;
+window.requestAnimFrame(function loop() { window.requestAnimFrame(loop); });
+const rects = [];
+__FRACTIONS__.slice(1).forEach((f) => {
+  nowMs = origin + f * 1500;
+  pump();
+  rects.push(read(v));
+});
+console.log(JSON.stringify({
+  trapBefore: trapBefore === undefined,
+  wrapped: typeof window.requestAnimFrame === 'function' && window.requestAnimFrame !== requestAnimationFrame,
+  before, rects,
+}));
+""".replace("__FRACTIONS__", json.dumps(list(_BRIDGE_FRACTIONS)))
+    result = _run_full_core_in_node(plan=_NO_RETIRE_PLAN, stage=_IDENTITY_STAGE, script=script, after_core=after_core)
+    assert result["trapBefore"] is True and result["wrapped"] is True
+    assert result["before"] == [_BRIDGE_SRC, _BRIDGE_SRC]
+    assert result["rects"][-1] == _BRIDGE_DEST
+    for fraction, rect in zip(_BRIDGE_FRACTIONS[1:], result["rects"]):
+        assert rect == pytest.approx(_eased_bridge_rect(fraction), abs=1e-6), fraction
 
 
 def test_no_pin_hold_only_disables_the_pin_hold() -> None:
