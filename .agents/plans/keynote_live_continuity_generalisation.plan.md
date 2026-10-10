@@ -211,7 +211,7 @@ worktree pinned to a commit, with at most 3 headless Chromes; OBS only on the ow
 
 ### S2: derivation v2 + core v6 (the only runtime-byte stage; after OD-2 and loopMode merge)
 
-**S2 IN PROGRESS** on `claude/s2-detach-fix` (no PR): S2.0 and all four streams, rebased onto #247 with the owner-approved P2 re-registrations (`run_gates.sh`), §4 option (a), detach fix a1 (`keynote_live_continuity_detach_r8.plan.md` §5), review folds, pin hold and bridge timing (R10). State and next steps: the latest `.agents/handovers/keynote-live-continuity-*.md` (now `…-2026-10-10-evening.md`, then `…-2026-10-10-q7-findings.md`).
+**S2 IN PROGRESS** on `claude/s2-detach-fix` (no PR): S2.0 and all four streams, rebased onto #247 with the owner-approved P2 re-registrations (`run_gates.sh`), §4 option (a), detach fix a1 (`keynote_live_continuity_detach_r8.plan.md` §5), review folds, pin hold and bridge timing (R10). State and next steps: the latest `.agents/handovers/keynote-live-continuity-*.md` (now `…-2026-10-10-night.md`).
 
 | WS | Files (exclusive) | Work |
 |---|---|---|

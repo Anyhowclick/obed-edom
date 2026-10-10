@@ -1,0 +1,87 @@
+# Handover: main PR #256 open; S2 instrument integrated, in review (2026-10-10, ~23:00)
+
+Read this first. It supersedes `keynote-live-continuity-2026-10-10-evening.md` and `…-q7-findings.md`; every live item from
+both is carried below. Verify branches and PRs on GitHub before acting. Evidence paths are in the MAIN checkout
+(`/Users/anyhowclick/Desktop/work/obed-edom/output/evidence/`), which is git-ignored.
+
+## Where everything is
+| Thing | State |
+|---|---|
+| `main` | `f4a44ca0` (#254 presenter keys merged today). |
+| **PR [#256](https://github.com/Anyhowclick/obed-edom/pull/256)** `claude/main-bridge-easing` → `main` | Head `5888be29`, pushed. **Owner reviews and merges** (never auto-merge). Contains the eased bridge overlay, player `17c0c938`, the carry-cover gate, bridge-timing qualification, fix A (freeze-trigger bounds follow the bridge curve), the `SUPPORTED_PLAYERS` SKILL fix, the gate record and the six raw Astra rounds. Worktree `main-bridge-easing`. |
+| `claude/main-bridge-easing-2` | Same commit as the PR head (`5888be29`). Agent scratch worktree under this session's scratchpad (`…/scratchpad/main-fix-freeze`); main-fix folds landed here and the coordinator fast-forwarded the PR branch to it (owner: "(a) or (c), no preference"). Trash once #256 merges. |
+| `claude/s2-detach-fix` | Head `e38ded06`, **pushed as backup** (no PR; owner opens/merges). Worktree `obs-mac-camera-swap-fbc63b`. Suite-green (below). Contains the S2 instrument stream (streams A–D), the D1 note-scoping fix, the `gl-clock-bridge` probe variant, Astra folds r1–r8, the schema-2 port of fix A v1. **Lacks** the main fix's later commits — see S2 next steps 1. |
+| `s2-instr-fold3` | Agent worktree `agent-a965c0f9e73bb7734` (locked while running). Folding Astra r9 + auditing the older scorers. Not merged. |
+| `s2-main-final` | Agent worktree `agent-a640e658b546256a8` (the port agent). Merge of the FINAL main fix (`5888be29`) into S2, committed as `513b40b6` (23:03), with the schema-2 re-port folded in. Agent report and suites still pending. Not merged into `claude/s2-detach-fix`. |
+| `gate-main-dcd5b9e4` | Pinned worktree of the PR's final gate round (`dcd5b9e4`). Keep until #256 merges, then trash. |
+| `gate-main-dd61e7c0` | Holds the owner's fresh `Minimal Alpha_DSK` export with player `17c0c938` at `output/.html-preview/e17ff140…-p3-r1/html`. Keep. |
+| `agent-a735f401b8592e55a` (`s2-cc-notes`), `agent-afe9d3090199a8c7a` (`s2-glclock`) | Harness-locked agent worktrees; both branches are merged into S2. The gl-clock one still has the OLD core (`7cb6e0fe`) and served as the D5 "old core" arm. Trash when unlocked. |
+| Stale branches | `s2-instr-{a,b,c,d,fold1,fold2}`, `s2-fixa-port` (merged into S2, no worktrees); `claude/continuity-generalisation-s2` local + origin (old S2 head `dcbb6363`, superseded). Delete after S2 merges; deleting an origin branch is the owner's call. |
+| `confident-elion-b41768`, `resizer-optimizations-7cae67` | Not ours. Leave them. |
+
+## Main PR #256 — what's done, what's left
+- **Done:** final round at `dcd5b9e4`: `run_gates` full tier 3-wide `failed=0 pending=0` (18 runs, 452 s). Carry-cover green pass / linear red fail / null fail. Freeze bracket passes on the eased core (L 61.0 ms, trigger frame 10, deadline 13). Slide-3 restart fast/gl/slow 0.168 / 0.119 / 0.150 s, against the 2026-10-09 range 0.106–0.222. Max rAF gap 34.3 / 33.3 ms. Live `pollTimes` checks 4/4. Host adapter on/off on player `17c0c938` (an r3-era run before the final round, `r3/fresh-adapter-1920-{on,off}.json`): pins match (`330ef72c` on, `4f9fbffd` off), presenter ready, continuity declined (ambiguous `untitled.mov` 7→8).
+- **Suites:** 9156 passed / 0 failed / 11 local skips. 3.10 floor 2734 passed (touched files). test:ui 320; maps 542+2.
+- **Review:** GPT-6 Astra (high). Branch r1 (3 MAJOR) → r2 APPROVE. Fix A r1–r3 folded → **r4 APPROVE**.
+- **Record:** `.agents/reviews/main-bridge-easing/gate-record.md` (on the branch). Evidence: `main-bridge-easing/{r3,r3-rerun,freeze-ab,triage-r3,final-dcd5b9e4}/`.
+- **Left (owner):** real-OBS re-look (no rubber band on 3→4); review and merge. **At merge:** delete the six raw Astra rounds in `.agents/reviews/main-bridge-easing/` (review lifecycle; the gate record stays). Then move `gate-main-dcd5b9e4/output/.html-preview/live-logs/` (37 files cited by `final-dcd5b9e4/` evidence) to `output/evidence/main-bridge-easing/live-logs/gate-main-dcd5b9e4/`, then trash `gate-main-dcd5b9e4` and the `-2` scratch worktree.
+
+## S2 — state
+- **Instrument stream** (plan `.agents/plans/keynote_live_continuity_instrument.plan.md`; owner LGTM, all 14 decisions; minimal tests):
+  - Stream A: `scripts/paint_instrument.py` — painted(pv), pre-paint sampler pieces, scoring, positive control, census, self-check.
+  - Stream B: probe — sampler v2, B0 `show()` in host/red/attach arms, per-frame paint in `score_continuity`, Pass G advance legs, Pass G red arm, paint-control CLI.
+  - Stream C: `run_gates.sh` arms and checks + SKILL. Red registrations D5 host and D1 Pass G `no-pin-hold` are **PENDING owner sign-off**; nothing is registered before V3 measures it.
+  - Stream D: core `6c7a482e` — a declined teardown cancels pending remount retries (the D5 stale-timer revival). `CONTINUITY_VERSION` 6.
+- **Astra rounds on S2** (`s2-dev/instrument-review/astra-r{1..9}.md`): every finding was the class "incomplete or unreadable evidence counted as a verdict". r1–r8 folded (schemas `PV_FIELDS`, `PP_FIELDS`, `CONTROL_*`, `PAINT_SCORE_FIELDS`, `SAMPLE_*`; raw evidence validated before conversion; unknowns never overwritten in any aggregator). **r9 REQUEST CHANGES:** the schema-2 port is correct (L 61.040 / 4.779 ms). 4 MAJORs remain in OLDER scorers that predate S2:
+  1. a null-scene row vanishes from `score_restart_strict` prior presence — **false pass**;
+  2. force-wrap: unavailable `coreEvents` read as "never opened" — **false pass**; other unknowns read as fail;
+  3. armed / hand-back / forced scoring turn error objects into False;
+  4. `score_retire` returns False before its readability checks.
+  Being fixed in `s2-instr-fold3`, with an audit table of all older scorers.
+- **Suites at `e38ded06`:** 10040 passed / 0 failed / 11 local skips. 3.10 floor 4019 passed / 1 skipped. test:ui 320; maps 542+2.
+- **Experiments tonight** (`s2-dev/experiments-2026-10-10-evening.log`):
+  - **gl-clock D1:** `gl-clock-bridge` variant strip 0 px / exposure 0 in 5/5, against the default core's 8 / 53 / 7 / 9 / 7 px. Keynote's GL clock origin removes the ~6.8 ms start-offset lag (`cc-D1-glclock/`). The 53 px default-core outlier (green-2) is unexplained.
+  - **D5 end of show:** old core 268 / 248 ms gap then revival; Stream D core never revives (`pingap-d5end/`). Confirms the stale-timer mechanism and the fix.
+
+## S2 — next steps, in order
+1. **Merge the final main fix into S2.** S2 merged `claude/main-bridge-easing` only up to `104364ee`. It needs everything in `104364ee..5888be29`: `abefdb2d`, `34cc9bf3` (SKILL `SUPPORTED_PLAYERS`), `18bbc221` (`pollTimes`, recorded-callback deadline), `dcd5b9e4`, `f2d90063` and `5888be29` (gate record), re-ported to schema 2 (`src.rect`/`dst.rect`, `_bridge_side_rect`). Committed as `s2-main-final` `513b40b6`; validate it with the touched suites before merging. **Lesson:** after every main merge into S2, run the touched suites before building on it. Main is runtime plan schema 1, S2 schema 2; the last clean-looking merge broke 50 tests.
+2. Merge `s2-instr-fold3` (Astra r9 + older-scorer audit). Run full suites (pytest 3.12 full, 3.10 floor on touched files, test:ui, test:maps). Then Astra r10 on everything since `e38ded06`. Continue until APPROVE.
+3. **Live validation (V0–V6, plan §7).** All live work is coordinator-only, serial, load < 3 at start, ≤3 Chromes.
+   - V0: streams A–D targeted tests green on 3.10 and 3.11.
+   - V1 smoke: the D1 attach arm without, then with, B0 `show()` first (the plan predicts every attach carry reds without it). Then D1 host 1920 `--skip-arms B,C,V,Voff,attach`, then a full P2 host run. Also check whether any P2 harness reading `footprintOwnerDecoderId` (`p2_recovery_html_adversarial.py:893`) runs hidden in alpha mode (plan §8).
+   - V2 positive controls (exact seq sets).
+   - V2b: L2 force-wrap takes with paint on; measure `seeking`/`readyState` at wraps (no excuse until measured — decision 14).
+   - V3 reds, plus the V3b pin pixel spot check (decision 6).
+   - V4 moved sets: strip arms `D1/D2 strip:pin@6`, `D3 strip:pin@2/@4`, `D4 strip:pin@5`, `D5 strip:pin@2/@4`; post-hoc `D4 wrong-instance`/`fifo-reuse`, `D5 fifo-reuse`/`stash-any`. Re-register only with a measured reason, evidence and the owner's sign-off.
+   - V5 null sweep; V6 overhead.
+   - Then register the pending reds with the owner's sign-off.
+4. **Full S2 re-run** on the final head: Phases A (decks × 3 viewports), B/D1 (`run_gates` 3-wide incl. Pass G, carry-cover, paint arms) **plus one `GATE_JOBS=1` round** (identical verdicts and exact seq sets; red counts ±3 frames; restart margins within the 2026-10-09 baseline), D2, D3 (P2 main vs S2 interleaved), D4 (G2 seam), D5 (loop). Then Q6 (managed OBS 25/30, KBs, soak 4 min; owner pre-approved), then Q7 with the owner (Q7a external attach D1/D4; Q7b dashboard Keyer on D1–D5).
+5. Full suites, Astra on the final diff, S2 gate record `.agents/reviews/continuity-generalisation/gates-r1.md`. The gate commit keeps in `QUALIFIED_PLAN_SHA256` only the S2 shas of P2 off/on, p2-loop off/on and the decks that passed Q3+Q7, and removes the others before the PR is offered (plan §3.4). Owner opens and merges. S3 (delete the allowlist) stays the owner's call. After S2 merges, delete the main checkout's `output/<name>` → `output/fixtures/<name>` compat symlinks once no branch reads the old paths (plan §3.7).
+
+## Open items (owner-raised or found; symptom / expected / evidence)
+1. **Q7 #1 pins dark during the move** — Symptom: a pinned movie shows Keynote's frame-0 poster for the whole Magic Move (~1.8 s, 108 frames), then reappears ~1.8 s ahead (D1 `g 3` + advance in OBS; D2/D3/D5 sequential pins too). Expected: the carried decoder paints throughout. FIXED on S2 (pin hold `fbba575e`); the per-frame proof is the instrument's V-runs, still owed. Evidence `s2-dev/pingap/` (`SUMMARY.txt`). `pingap/run.sh` sets `W=` to the trashed `gate-s2-ff21695e`; re-point it before re-running.
+2. **Q7 #2 bridge rubber band** — Symptom: during every bridge a second, frozen copy diverges from the carried movie (OBS and headless). Expected: one copy. Cause: the overlay moved linearly while Keynote draws the GL poster EaseInEaseOut. FIXED on main (#256: easing + carry-cover); **owner real-OBS re-look still owed** (originals: `s2-dev/q7a-goto1/screencast-mainP2/sheet-3to4.png`, `s2-dev/rubber/`). Later hardening, not started: hide the carried movie's GL quad via `patch_player`. S2 D1 still shows a ~6.8 ms GL-clock start offset (5–9 px strips): the overlay starts before Keynote's GL clock origin. `gl-clock-bridge` proves the fix (5/5 clean). **Moving it into the product core is a separate owner go — pending.** Analysis `s2-dev/triage-2026-10-10/carry-cover-D1-lag-fit.md`.
+3. **Q7 #3 new player refused** — FIXED (#256).
+4. **OPEN — P2 2→3 Dissolve on a transparent page** looks wrong in OBS. Symptom: slide 3 is at full strength from the first frame, and slide 2's squares go grey/white then fade to black. Expected: a normal cross-fade. Owner to compare with Keynote itself (`~/Desktop/Convert wall to 16x9 CGs/Minimal Alpha_DSK.key`, do not save). Not investigated. Evidence `s2-dev/q7a-goto1/screencast-diss/sheet-2to3.png`. The P2 fixture's posters are the original clip, so judge hand-overs on the D decks or a real deck.
+5. **End of show (deferred by owner):** D1–D3 hold the carried movie at end of show; D5 ends empty (consistently, after `cf9a9c13`). Resume options: a scene count in the schema-2 plan, or read `__obedLive`.
+6. **Dashboard gating (owner: keep):** a continuity-refused deck can't start, even with continuity off, until the allowlist widens and is removed. The owner's fresh `Minimal Alpha_DSK` is blocked on main (ambiguous ownership 7→8).
+7. **Scope question for the owner:** Astra r9 moved into older (pre-S2) probe scorers. Fold3 is closing them in one audit pass. If the owner prefers, cap S2 at the instrument's scope and track the older-scorer audit separately.
+8. **Watch items:** the carry-cover null control can read inconclusive under round load (r3: one 67 ms hole; 3/3 quiet reruns fail correctly). Carry-cover thresholds and masks are P2-calibrated (`run_gates` runs carry-cover on P2 only). The strip rule rounds left/top up but right/bottom down (a 1 px inconsistency; fix separately, never to pass a deck). The 53 px default-core outlier on D1.
+
+## Owner decisions (still governing)
+- `CONTINUITY_VERSION` stays 6 for every S2 core change. Detach fix a1. R9 = movie not fully opaque (R2 reports first). R10 = bridge timing (S2 narrow reader, bridges only, checked last). A runtime carry refusal lasts until the next go-to.
+- Pass G: no-consumption = settled position + exact auto-run kinds; it runs inside `run_gates` (full tier). Advance legs treat end of show as an exit; any end of show in a leg makes it inconclusive, never red.
+- Pin hold accepted (a pinned movie paints above authored content during its move). Main fix = "fix properly", including the new player on a byte-level argument.
+- Main freeze bracket: option A (bounds from the bridge's curve and geometry; never relax `firedVia=='moved'`, marker identity, the 1 px detector).
+- Instrument plan: all 14 recommendations — opacity ≥ 0.99 (1); D2 restart 1-frame blank report-only (2); red registration = id sets + 60-frame floor (3); CLI `--pass G --core-variant` and `--paint-control` (4); every expected-True carry gets a Pass G leg (5); V3b pin pixel spot check now, a pin carry-cover gate after the D1 lag fix (6); pre-pin-hold red once, outside `run_gates` (7); census incl. `endOfShow` report-only, triaged before the full re-run (8); consolidating the duplicate opacity logic deferred until after the S2 gates (9); Stream D in parallel, landed before V2–V5 (10); D2/D3 `no-pin-hold` arms added to `run_gates` only after V3 (11); B0 `show()` its own commit (12); `outsideStagePx` report-only (13); no loop-wrap `seeking` excuse until V2b (14). **Test additions minimal** (max coverage, fewest tests).
+- Delegation: Opus plans; Opus MEDIUM implements in disjoint streams; GPT-6 Astra (high) reviews while the owner's resets last (`codex exec -m gpt-6-astra -c model_reasoning_effort=high -s read-only …`; revert to `gpt-5.6-sol` after).
+- DeckLink field test postponed to next week. Q6 managed OBS pre-approved; Q7 needs the owner.
+
+## Machine / coordination
+- One heavy job at a time machine-wide. `run_gates` refuses above load 4; timed runs start below 3–4. macOS `mediaanalysisd` and the Claude app keep baseline load near 3–5.
+- **Peer session "Resizer optimizations"** (`resizer-optimizations-7cae67`) yields compute. Protocol: message it before timed windows ("go idle") and when free ("free now"); its suites and census are fine during our non-timed work. Last state: "free now" sent at 21:23.
+- **OBS:** for Q7 the owner launches OBS with `--remote-debugging-port=9222`; never drive it without the owner's go. OBS page tools (`obs_sampler.py`, `obs_screencast.py`) are read-only; quitting `scripts/live_fixture_session.py` (`q`) resets OBS's page and drops the sampler.
+- Run a worktree's suites with `uv run` inside that worktree (`OBED_EDOM_CACHE_DIR=/Users/anyhowclick/Desktop/work/obed-edom/.cache`); the main checkout's `.venv` imports the main checkout's code (use it with `PYTHONPATH=<wt>/src:<wt>/scripts` for the 3.10 floor; it has no pytest-xdist). A fresh worktree needs the `output/*` and Sermon Outlines links (memory `worktree-env-setup`), or ~80 tests skip.
+- **Hook:** this session (and its subagents) cannot Edit/Write files in another session's worktree. Agent isolation worktrees are fine.
+- Agent worktrees start at the main checkout's HEAD (`main`), so briefs must say `git checkout -B <branch> <sha>`. Agents can't use `env …` in commands; use plain assignments.
+- Tools: `s2-dev/tools-2026-10-10/` — `main_final.sh` (final main validation), `s2_experiments.sh` (gl-clock + D5), `main_r3_followups.sh` (host adapter + freeze A/B), `dump_corpus_s2.py` (corpus invariance), OBS samplers. Moved live logs: `s2-dev/live-logs/<wt>/` and `main-bridge-easing/live-logs/<wt>/`. Evidence JSON `logPath` values still name the old worktree paths. Past drivers (`phaseA.sh`, `passG.sh`, `phaseD*.sh`, `main_gates{,2}.sh`, `pingap/run.sh`) hard-code trashed gate worktrees; re-pin `W=`/`GM=` before re-running.
