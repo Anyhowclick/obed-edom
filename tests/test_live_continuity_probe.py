@@ -8788,6 +8788,8 @@ CC_DURATION_S = 1.0
 CC_GROW_DST = {"x": 80.0, "y": 140.0, "w": 260.0, "h": 60.0}
 CC_FAST_S = 0.5
 CC_EL_ID = 7
+# P2's b3to4: the move starts on scene 7 and lands on scene 8.
+CC_AT_SCENE = 8
 CC_FRAME_MS = 1000.0 / 60.0
 # Off the press and the window edges, so no tick sits exactly on a boundary.
 CC_FIRST_TICK_MS = 503.0
@@ -8827,9 +8829,21 @@ def _cc_paint_sync(image: np.ndarray, tick: int) -> None:
 
 def _cc_bridge(**extra: Any) -> dict[str, Any]:
     return {
-        "boundary": "b3to4", "fromOrdinal": 3, "toOrdinal": 4, "srcRect": dict(CC_SRC), "dstRect": dict(CC_DST),
+        "boundary": "b3to4", "fromOrdinal": 3, "toOrdinal": 4, "atScene": CC_AT_SCENE, "srcRect": dict(CC_SRC),
+        "dstRect": dict(CC_DST),
         "durationSeconds": CC_DURATION_S, "carriedSlot": 1, "masks": [], **extra,
     }
+
+
+def _cc_note(
+    t: float = CC_T0, src: dict[str, float] = CC_SRC, dst: dict[str, float] = CC_DST, scene: int = CC_AT_SCENE - 1,
+    duration_s: float = CC_DURATION_S,
+) -> dict[str, Any]:
+    """The core's `bridge-motion-start` note: the authored source/destination rects and the hash it rode from."""
+    return {"kind": "bridge-motion-start", "t": t, "detail": {
+        "elId": CC_EL_ID, "durationSeconds": duration_s, "srcRect": dict(src), "rect": dict(dst),
+        "sceneHash": f"#{scene}",
+    }}
 
 
 def _cc_scene(
@@ -8873,8 +8887,7 @@ def _cc_scene(
                          "pre": [{"elId": CC_EL_ID, **pre, "readyState": ready_state, "opaque": opaque}],
                          "vids": [{"elId": CC_EL_ID, **overlay_at(k), "readyState": ready_state, "opaque": opaque}]})
         k += 1
-    notes = [{"kind": "bridge-motion-start", "t": CC_T0, "detail": {"elId": CC_EL_ID, "durationSeconds": duration_s}}]
-    return frames, rows, notes
+    return frames, rows, [_cc_note(dst=dst, duration_s=duration_s)]
 
 
 def _cc_score(frames: Any, rows: Any, notes: Any, bridge: dict[str, Any] | None = None, **kw: Any) -> dict[str, Any]:
@@ -8972,8 +8985,9 @@ class TestCarryCoverMetric:
     def test_a_path_that_reaches_the_sync_bar_is_inconclusive(self) -> None:
         """Review r2 (edge case): the bar overwrites 96x4 px at the viewport's top-left and is masked, so exposure
         there is unobservable; a bridge whose path comes within the strip tolerance of it cannot be judged."""
-        bridge = _cc_bridge(srcRect={"x": 4.0, "y": 2.0, "w": 100.0, "h": 50.0})
-        result = _cc_score(*_cc_scene(), bridge=bridge)
+        src = {"x": 4.0, "y": 2.0, "w": 100.0, "h": 50.0}
+        frames, rows, _ = _cc_scene()
+        result = _cc_score(frames, rows, [_cc_note(src=src)], bridge=_cc_bridge(srcRect=src))
         assert result["verdict"] == "inconclusive"
         assert "sync bar" in " ".join(result.get("reasons") or [result.get("reason") or ""])
 
@@ -8982,7 +8996,9 @@ class TestCarryCoverMetric:
         half = {k: v / 2 for k, v in CC_SRC.items()}, {k: v / 2 for k, v in CC_DST.items()}
         bridge = _cc_bridge(srcRect=half[0], dstRect=half[1])
         stage = {**IDENTITY_STAGE_MAP, "s": 2.0, "sy": 2.0}
-        assert _cc_score(*_cc_scene(), bridge=bridge, stage_map=stage)["verdict"] == "pass"
+        frames, rows, _ = _cc_scene()
+        notes = [_cc_note(src=half[0], dst=half[1])]
+        assert _cc_score(frames, rows, notes, bridge=bridge, stage_map=stage)["verdict"] == "pass"
 
 
 class TestCarryCoverSync:
@@ -9136,9 +9152,33 @@ class TestCarryCoverInconclusive:
         frames, rows, notes = _cc_scene()
         self._assert(_cc_score(frames, rows, notes * 2), "no move window: 2 bridge-motion-start notes")
 
+    @pytest.mark.parametrize(("notes", "fragment"), [
+        ([_cc_note(t=200.0, src={"x": 900.0, "y": 50.0, "w": 80.0, "h": 40.0}, dst=CC_SRC, scene=CC_AT_SCENE - 3),
+          _cc_note()], None),
+        ([_cc_note(), _cc_note(t=CC_T0 + 300.0)], "no move window: 2 bridge-motion-start notes for this bridge"),
+        ([_cc_note(), _cc_note(t=CC_T0 + 300.0, dst={**CC_DST, "x": 210.0})], "1 other bridge-motion-start notes"),
+        ([_cc_note(), _cc_note(t=CC_T0 + 300.0, scene=CC_AT_SCENE)], "1 other bridge-motion-start notes"),
+        ([{"kind": "bridge-motion-start", "t": CC_T0, "detail": {"elId": CC_EL_ID, "durationSeconds": CC_DURATION_S}}],
+         "no move window: 0 bridge-motion-start notes for this bridge"),
+    ], ids=["earlier-bridge-before-rows", "second-own-note", "foreign-rect-in-window", "foreign-hash-in-window",
+            "no-identity"])
+    def test_only_this_bridges_one_note_opens_the_move_window(
+        self, notes: list[dict[str, Any]], fragment: str | None,
+    ) -> None:
+        """D1 b2to3: the walk to slide 2 rides b1to2 in the same session, so b1to2's legitimate note precedes the rows.
+        Only a note matching this bridge (source scene's hash, source/destination rects) opens the window, exactly one
+        must, and every other note must precede the capture. A note without that identity never matches."""
+        frames, rows, single = _cc_scene()
+        result = _cc_score(frames, rows, notes)
+        if fragment is not None:
+            self._assert(result, fragment)
+            return
+        assert result == _cc_score(frames, rows, single)
+        assert result["verdict"] == "pass" and result["t0"] == CC_T0
+
     def test_no_carried_decoder_in_the_rows(self) -> None:
         frames, rows, notes = _cc_scene()
-        notes = [{**notes[0], "detail": {"elId": 99}}]
+        notes = [{**notes[0], "detail": {**notes[0]["detail"], "elId": 99}}]
         self._assert(_cc_score(frames, rows, notes), "no carried decoder sampled during the move")
 
     def test_a_carried_decoder_that_never_decoded(self) -> None:
@@ -9257,6 +9297,28 @@ class TestCarryCoverMasks:
     @pytest.mark.parametrize("effect", [None, {}, {"baseLayer": {"layers": []}}, {"baseLayer": {"layers": [{"x": 1}]}}])
     def test_an_unreadable_effect_is_a_problem(self, effect: Any) -> None:
         assert "problem" in probe.carry_cover_masks(effect, P2_SRC, P2_CANVAS)
+
+    def test_bridges_carry_their_destination_scene_for_a_d1_shaped_plan(self, tmp_path: Path) -> None:
+        """D1: bridges at 1->2 (lands on scene 2) and 2->3 (scene 4); the scorer matches each core note's hash to
+        `atScene - 1`."""
+        lc = probe.live_continuity_module
+        src, mid, dst = lc.Rect(**P2_SRC), lc.Rect(960.0, 400.0, 800.0, 225.0), lc.Rect(400.0, 380.0, 1120.0, 315.0)
+        boundaries = (
+            lc.SlideBoundary(0, 1, (lc.MovieContinuity("m.mov", "bridge", src, mid),), 1.5),
+            lc.SlideBoundary(1, 2, (lc.MovieContinuity("m.mov", "bridge", lc.Rect(**P2_SRC), dst),), 1.5),
+            lc.SlideBoundary(2, None),
+        )
+        slides = [{"playerIndex": i, "originalOrdinal": i + 1, "exportedUuid": f"U{i}"} for i in range(3)]
+        for slide in slides:
+            uuid = slide["exportedUuid"]
+            (tmp_path / "assets" / uuid).mkdir(parents=True)
+            (tmp_path / "assets" / uuid / f"{uuid}.json").write_text(json.dumps({"events": [
+                {"effects": [_p2_like_effect()]},
+            ]}))
+        bridges = probe.carry_cover_bridges(_plan(boundaries, {0: 0, 1: 2, 2: 4}, {}), slides, tmp_path)
+        assert [(b["boundary"], b["atScene"]) for b in bridges] == [("b1to2", 2), ("b2to3", 4)]
+        assert [b["dstRect"] for b in bridges] == [mid.as_dict(), dst.as_dict()]
+        assert all(b["carriedSlot"] == 1 and "problem" not in b for b in bridges)
 
 
 class TestCarryCoverStatus:

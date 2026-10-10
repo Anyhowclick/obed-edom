@@ -7097,6 +7097,7 @@ CARRY_COVER_FADE_SLACK_S = 0.1
 CARRY_COVER_BG_MIN_UNIFORM = 0.99
 CARRY_COVER_BG_MIN_PX = 1000
 CARRY_COVER_SLOT_MATCH_PX = 6.0
+CARRY_COVER_NOTE_MATCH_PX = 0.5
 CARRY_COVER_PREROLL_S = 0.6
 CARRY_COVER_TAIL_S = 1.0
 CARRY_COVER_HIDE_OVERLAY_JS = (
@@ -7254,7 +7255,8 @@ def carry_cover_masks(effect: Any, src_rect: dict[str, float], canvas: dict[str,
 
 
 def carry_cover_bridges(plan: ContinuityPlan, slides: list[dict[str, Any]], export_root: Path) -> list[dict[str, Any]]:
-    """Every bridge carry the plan states, with its source/destination original ordinals and its masks."""
+    """Every bridge carry the plan states, with its source/destination original ordinals, destination scene and its
+    masks."""
     ordinal = {int(s["playerIndex"]): int(s["originalOrdinal"]) for s in slides}
     uuid_of = {int(s["playerIndex"]): s["exportedUuid"] for s in slides}
     out = []
@@ -7268,7 +7270,8 @@ def carry_cover_bridges(plan: ContinuityPlan, slides: list[dict[str, Any]], expo
             entry = {
                 "boundary": f"b{ordinal[boundary.from_player_index]}to{ordinal[boundary.to_player_index]}",
                 "asset": movie.asset, "fromOrdinal": ordinal[boundary.from_player_index],
-                "toOrdinal": ordinal[boundary.to_player_index], "srcRect": src,
+                "toOrdinal": ordinal[boundary.to_player_index],
+                "atScene": plan.scene_index_by_player[boundary.to_player_index], "srcRect": src,
                 "dstRect": movie.dst_rect.as_dict() if movie.dst_rect else None,
                 "durationSeconds": boundary.transition_duration,
             }
@@ -7399,12 +7402,25 @@ def _cover_reasons(frames: Sequence[dict[str, Any]], fraction_key: str, strip_ke
     return clean, widest, reasons
 
 
+def _is_bridge_note(note: dict[str, Any], bridge: dict[str, Any]) -> bool:
+    detail, scene = note["detail"], bridge.get("atScene")
+    return (
+        isinstance(scene, int) and hash_number(detail.get("sceneHash")) == scene - 1
+        and rect_matches(detail.get("srcRect"), bridge["srcRect"], CARRY_COVER_NOTE_MATCH_PX)
+        and rect_matches(detail.get("rect"), bridge["dstRect"], CARRY_COVER_NOTE_MATCH_PX)
+    )
+
+
 def score_carry_cover(
     frames: Sequence[tuple[float, np.ndarray]], rows: Any, notes: Any, bridge: dict[str, Any], stage_map: Any, *,
     viewport: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
     """`frames`: (page-clock ms, RGB) screencast frames; `rows`: the rAF sampler's rows (`tick`, `pre` read at the
     tick's start, `vids` read after its frame); `notes`: the core's `bridge-motion-start` notes.
+
+    The move window starts at this bridge's one note: the source scene's hash and the bridge's source/destination
+    rects within `CARRY_COVER_NOTE_MATCH_PX`. Any other note (an earlier bridge the walk to the source slide rode)
+    must come before the first sampler row.
 
     Each frame is placed at the tick its sync bar names (its timestamp only picks between counter wraps) and scored
     against both reads of that tick's overlay: its post-frame read and the next tick's pre read. A frame whose reads
@@ -7421,18 +7437,30 @@ def score_carry_cover(
         return inconclusive(bridge["problem"])
     if not stage_map_valid(stage_map):
         return inconclusive("stage map unreadable")
-    motion = [
-        n for n in notes or []
-        if isinstance(n, dict) and n.get("kind") == "bridge-motion-start" and isinstance(n.get("detail"), dict)
-    ]
-    if len(motion) != 1 or not isinstance(motion[0].get("t"), (int, float)):
-        return inconclusive(f"no move window: {len(motion)} bridge-motion-start notes (expected exactly one)")
-    t0, el_id = float(motion[0]["t"]), motion[0]["detail"].get("elId")
-    duration_ms = 1000.0 * float(bridge["durationSeconds"])
     rows = [
         r for r in rows or []
         if isinstance(r, dict) and isinstance(r.get("ts"), (int, float)) and isinstance(r.get("tick"), int)
     ]
+    motion = [
+        n for n in notes or []
+        if isinstance(n, dict) and n.get("kind") == "bridge-motion-start" and isinstance(n.get("detail"), dict)
+    ]
+    own = [n for n in motion if _is_bridge_note(n, bridge)]
+    if len(own) != 1 or not isinstance(own[0].get("t"), (int, float)):
+        return inconclusive(
+            f"no move window: {len(own)} bridge-motion-start notes for this bridge (expected exactly one)"
+        )
+    first_ts = min((r["ts"] for r in rows), default=None)
+    late = [
+        n for n in motion
+        if n is not own[0] and (first_ts is None or not isinstance(n.get("t"), (int, float)) or n["t"] >= first_ts)
+    ]
+    if late:
+        return inconclusive(
+            f"{len(late)} other bridge-motion-start notes during the capture (only this bridge's may be)"
+        )
+    t0, el_id = float(own[0]["t"]), own[0]["detail"].get("elId")
+    duration_ms = 1000.0 * float(bridge["durationSeconds"])
     in_move = [v for r in rows if t0 <= r["ts"] <= t0 + duration_ms for v in [_carried_rect(r, el_id)] if v]
     if not in_move:
         return inconclusive("no carried decoder sampled during the move", elId=el_id)
