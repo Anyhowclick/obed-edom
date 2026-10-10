@@ -188,12 +188,13 @@ function collectionGeom(slide, name) {
   return rows;
 }
 
-function slideGeom(slide, index) {
+function slideGeom(slide, index, kinds) {
   currentSlideIndex = index === undefined ? null : index;
   var out = {};
   for (var c = 0; c < COLLECTIONS.length; c++) {
     var name = COLLECTIONS[c][0];
     var kind = COLLECTIONS[c][1];
+    if (kinds && kinds.indexOf(kind) < 0) continue;
     var rows = collectionGeom(slide, name);
     if (rows !== null) out[kind] = rows;
   }
@@ -246,11 +247,12 @@ function run(argv) {
     for (let i = start; i < end; i++) indices.push(i);
   }
 
+  const kinds = plan.kinds || null;
   const geometry = {};
   try {
     for (let s = 0; s < indices.length; s++) {
       const i = indices[s];
-      geometry[i] = slideGeom(slides[i], i);
+      geometry[i] = slideGeom(slides[i], i, kinds);
     }
   } catch (eGeom) {
     closeDoc();

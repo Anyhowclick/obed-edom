@@ -1878,6 +1878,50 @@ def test_patch_offline_slides_still_falls_back_on_ordinary_exception(monkeypatch
     assert any("falling back" in m for m in said)
 
 
+def test_patch_offline_slides_reads_text_only_seed_and_passes_it_through(monkeypatch):
+    # The first `_patch_offline_slides` test with a text spec, so the soft-seed read runs.
+    # Asserted on the kwargs the fake `patch_deck_geometry` captured: the writer's
+    # `except Exception` would swallow a TypeError from a bad `bulk_geometry` call, so
+    # `out` or the log lines alone would not catch it.
+    import obed_edom.inspect as inspect_mod
+    import obed_edom.iwa_write as iwa_write_mod
+    import obed_edom.offline_write as ow_mod
+
+    bulk_calls = []
+
+    def fake_bulk_geometry(key_path, slides=None, *, kinds=None, keep_open=False, log=None):
+        bulk_calls.append({"key_path": key_path, "slides": slides, "kinds": kinds,
+                           "keep_open": keep_open})
+        return {2: {"text": [[1, 2, 3, 4]]}}
+
+    monkeypatch.setattr(inspect_mod, "bulk_geometry", fake_bulk_geometry)
+    monkeypatch.setattr(inspect_mod, "LAST_BULK_ERRORS", [])
+
+    patch_calls = []
+
+    def fake_patch_deck_geometry(*a, **k):
+        patch_calls.append(k)
+        return {}
+
+    monkeypatch.setattr(iwa_write_mod, "patch_deck_geometry", fake_patch_deck_geometry)
+
+    said = []
+    out = ow_mod._patch_offline_slides(
+        Path("/tmp/x.key"), {3}, {3: [_spec()]}, {}, said.append,
+    )
+
+    assert out == {}
+    assert len(bulk_calls) == 1
+    assert bulk_calls[0]["slides"] == [3]
+    assert bulk_calls[0]["kinds"] == offline_write._OFFLINE_SOFT_SEED_KINDS
+    assert bulk_calls[0]["keep_open"] is False
+    assert len(patch_calls) == 1
+    assert patch_calls[0]["reported_by_slide"] == {3: {("text", 0): [1.0, 2.0, 3.0, 4.0]}}
+    assert "Offline-write: bulk live seed read of 1 slide(s)…" in said
+    assert "Offline-write: bulk seed read done; patching members." in said
+    assert not any("falling back" in m for m in said)
+
+
 # --- compare_units_multiset (scripts/offline_write_ab.py) ------------------------
 
 

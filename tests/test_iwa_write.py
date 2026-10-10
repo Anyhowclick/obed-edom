@@ -1696,6 +1696,60 @@ def test_slide_edits_writes_nothing(deck):
     assert deck.read_bytes() == original  # pure: no I/O happened
 
 
+def _seed_variant_edits(deck, specs, keep):
+    """`_slide_edits` (both live flags on) with a seed built from every composed text/image/
+    group frame shifted off composed (so a used seed row is visible in the output), filtered
+    to the kinds ``keep`` admits."""
+    objects, id_to_file, _fi = _load_deck(deck)
+    order = slide_order(objects)
+    composed = _composed(deck)
+    seed = {
+        key: [rec["x"] + 7.0, rec["y"] + 11.0, rec["w"] + 3.0, rec["h"] + 5.0]
+        for key, rec in composed.items()
+        if key[0] in ("text", "image", "group") and keep(key)
+    }
+    return _slide_edits(1, specs, objects, id_to_file, order, reported=seed,
+                        text_reposition=True, mask_crop=True)
+
+
+_SEED_SPECS = [
+    {"kind": "shape", "kindIndex": 0, "x": 60.0, "y": 70.0, "w": 300.0, "h": 120.0, "role": "other"},
+    {"kind": "text", "kindIndex": 0, "x": 720.0, "y": 380.0, "w": 210.0, "h": 70.0, "role": "other"},
+    {"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 80.0, "role": "other"},
+    {"kind": "group", "kindIndex": 0, "x": 540.0, "y": 560.0, "role": "other"},
+]
+
+
+def test_slide_edits_text_only_seed_equals_full_seed(deck):
+    # h-bulk-seed-read: the offline writer now reads only `_OFFLINE_SOFT_SEED_KINDS` live.
+    # The consumer must produce the SAME six-tuple from that text-filtered seed as from a
+    # full four-kind seed on a deck with shape, fixed text, masked image and group specs.
+    from obed_edom.offline_write import _OFFLINE_SOFT_SEED_KINDS
+
+    full = _seed_variant_edits(deck, _SEED_SPECS, lambda key: True)
+    text_only = _seed_variant_edits(deck, _SEED_SPECS, lambda key: key[0] in _OFFLINE_SOFT_SEED_KINDS)
+    assert full[5] is None and not full[3]
+    assert {"220", "230"} <= set(full[1])
+    assert text_only == full
+
+    # Positive control 1: the text row IS consumed -- dropping it changes the result
+    # (fixed-frame text writes y/w/h deltas off the seed, and falls back to the composed
+    # frame as a counted soft fallback without one).
+    no_text = _seed_variant_edits(deck, _SEED_SPECS, lambda key: key[0] != "text")
+    assert no_text != full
+    assert no_text[2] == full[2] + 1
+
+    # Positive control 2: a masked image spec with x=None reads the seed's x, so only then
+    # do the full and text-filtered seeds diverge (never the case in production: `as_dict`
+    # always emits x/y).
+    specs_no_x = [dict(s, x=None) if s["kind"] == "image" else s for s in _SEED_SPECS]
+    full_no_x = _seed_variant_edits(deck, specs_no_x, lambda key: True)
+    text_only_no_x = _seed_variant_edits(
+        deck, specs_no_x, lambda key: key[0] in _OFFLINE_SOFT_SEED_KINDS)
+    assert full_no_x != text_only_no_x
+    assert full_no_x[1]["230"]["pos_x"] != text_only_no_x[1]["230"]["pos_x"]
+
+
 def test_line_no_pathsource_hard_misses(monkeypatch):
     # `_is_line` classification (iwa_kindindex) only ever fires off a `bezierPathSource` --
     # a "plain" kind that is always natural-writable -- so a genuinely pathsource-less
