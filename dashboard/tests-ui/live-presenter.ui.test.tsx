@@ -646,6 +646,34 @@ describe("Alpha Keynote intake and slide grid", () => {
     await waitFor(() => expect(api.command).toHaveBeenCalledWith("live-1", expect.objectContaining({ operation: "goTo", slide: 1 })));
   });
 
+  it.each([
+    ["Enter", { operation: "advance" }],
+    ["PageDown", { operation: "advance" }],
+    ["PageUp", { operation: "goTo", slide: 1 }],
+  ])("treats %s as a presenter key", async (key, command) => {
+    const api = client({ state: vi.fn(async () => state({ originalSlide: 3 })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    await screen.findByText("Player ready · Output visible");
+    const allowed = fireEvent.keyDown(window, { key });
+    expect(allowed).toBe(false);
+    await waitFor(() => expect(api.command).toHaveBeenCalledWith("live-1", expect.objectContaining(command)));
+    expect(api.command).toHaveBeenCalledTimes(1);
+  });
+
+  it("takes clicker Page Up/Down even with a button focused, but leaves a bare Enter to the button", async () => {
+    const api = client({ state: vi.fn(async () => state({ originalSlide: 3 })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    const advance = await screen.findByRole("button", { name: "Advance" });
+    advance.focus();
+    expect(fireEvent.keyDown(advance, { key: "Enter" })).toBe(true);
+    expect(api.command).not.toHaveBeenCalled();
+    fireEvent.keyDown(advance, { key: "PageUp" });
+    await waitFor(() => expect(api.command).toHaveBeenCalledWith("live-1", expect.objectContaining({ operation: "goTo", slide: 1 })));
+    await waitFor(() => expect(advance).toBeEnabled());
+    fireEvent.keyDown(advance, { key: "PageDown" });
+    await waitFor(() => expect(api.command).toHaveBeenLastCalledWith("live-1", expect.objectContaining({ operation: "advance" })));
+  });
+
   it("keeps chevrons below the only current preview and highlights only observed state", async () => {
     const api = client({ state: vi.fn(async () => state()), command: vi.fn(async (_session, command): Promise<LiveResult> => ({ requestId: command.requestId, outcome: "rejected", reason: "Busy", state: state() })) });
     const { container } = render(<LivePresenter client={api} pollMs={60_000} />);
@@ -668,6 +696,9 @@ describe("Alpha Keynote intake and slide grid", () => {
     fireEvent.keyDown(input, { key: "ArrowLeft" });
     fireEvent.keyDown(window, { key: "ArrowRight", repeat: true });
     fireEvent.keyDown(window, { key: "ArrowLeft", metaKey: true });
+    fireEvent.keyDown(input, { key: "PageDown" });
+    fireEvent.keyDown(window, { key: "PageDown", repeat: true });
+    fireEvent.keyDown(window, { key: "PageUp", altKey: true });
     expect(api.command).not.toHaveBeenCalled();
   });
 });
