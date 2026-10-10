@@ -273,8 +273,11 @@ RED_ARM_EXPECTATIONS: dict[tuple[str, str, str], tuple[str, ...] | str] = {
 # Pass G red arms (`--pass G --core-variant NAME`), keyed by (flag-off runtime plan sha, arm label); ids
 # from `passg_red_ids`. Nothing is registered before V3 measures it on the landed core.
 PASSG_RED_EXPECTATIONS: dict[tuple[str, str], tuple[str, ...]] = {}
-# Optional floor on a red carry's longest unpainted run (frames), carried as `paintFloor` (decision 3).
+# Floor on every red carry's longest unpainted run (frames), carried as `paintFloor` and enforced by the red status
+# functions (decision 3: at least PAINT_FLOOR_MIN_FRAMES). Keyed as the arm's expectations; empty until V3.
+PAINT_FLOOR_MIN_FRAMES = 60
 RED_ARM_PAINT_FLOOR: dict[tuple[str, str, str], int] = {}
+PASSG_RED_PAINT_FLOOR: dict[tuple[str, str], int] = {}
 # Ids an arm must turn red whatever else it registers (plan §3.4 Q2/Q3, §4): the stray red and the
 # identity red. A RECORD arm missing one of these fails; a registered set must contain them.
 RED_ARM_REQUIRED: dict[tuple[str, str, str], tuple[str, ...]] = {
@@ -5385,6 +5388,8 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
             redArm=label, planSha256=sha, expectedCoreSha256=variant_sha(args.core_variant),
             expectedRedSet=list(expected) if expected is not None else None,
         )
+        if (sha, label) in PASSG_RED_PAINT_FLOOR:
+            result["paintFloor"] = PASSG_RED_PAINT_FLOOR[(sha, label)]
     with ExitStack() as stack:
         if args.core_variant is not None:
             stack.enter_context(injected_core_variant(args.core_variant))
@@ -5441,10 +5446,31 @@ def passg_red_ids(result: dict[str, Any]) -> tuple[list[str], list[str]]:
     return sorted(red), sorted(unknown)
 
 
+def paint_floor_reasons(floor: Any, red: Sequence[str], runs: dict[str, Any]) -> list[str]:
+    """Decision 3: with a registered `paintFloor`, every red carry id's longest unpainted run (`runs`) must reach it,
+    and the floor itself must be at least `PAINT_FLOOR_MIN_FRAMES`."""
+    if floor is None:
+        return []
+    if not isinstance(floor, int) or isinstance(floor, bool) or floor < PAINT_FLOOR_MIN_FRAMES:
+        return [f"paintFloor {floor!r} is not a frame count of at least {PAINT_FLOOR_MIN_FRAMES}"]
+    reasons = []
+    for red_id in red:
+        run = runs.get(red_id)
+        if red_id.endswith(":carry") and not (isinstance(run, int) and not isinstance(run, bool) and run >= floor):
+            reasons.append(f"{red_id} longest unpainted run {run!r} below the {floor}-frame floor")
+    return reasons
+
+
+def _longest_run(verdict: Any) -> Any:
+    paint = verdict.get("paint") if isinstance(verdict, dict) else None
+    return paint.get("longestRun") if isinstance(paint, dict) else None
+
+
 def passg_red_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     """Pure, after `red_arm_status`: both sessions must have run the variant (qualified, its core
     sha) with a visible output and every advance leg readable; an unreadable verdict is
-    inconclusive; otherwise the red multiset must equal the pre-registered one exactly."""
+    inconclusive; otherwise the red multiset must equal the pre-registered one exactly and every
+    red leg carry must reach the registered `paintFloor`."""
     for label in ("armed", "nullControl"):
         entry = result.get(label) if isinstance(result.get(label), dict) else {}
         continuity = entry.get("continuity") if isinstance(entry.get("continuity"), dict) else {}
@@ -5465,6 +5491,12 @@ def passg_red_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     observed, wanted = Counter(result.get("redSet") or []), Counter(expected)
     reasons = [f"unexpectedly red: {red_id}" for red_id in sorted((observed - wanted).elements())]
     reasons += [f"expected red but green: {red_id}" for red_id in sorted((wanted - observed).elements())]
+    runs = {
+        f"G{dest.get('fromOrdinal')}-{dest.get('toOrdinal')}-{dest.get('advanceTo')}:{spec_id}": _longest_run(verdict)
+        for dest in destinations_of(result.get("armed")) if isinstance(dest.get("advanceCarry"), dict)
+        for spec_id, verdict in (dest["advanceCarry"].get("verdicts") or {}).items()
+    }
+    reasons += paint_floor_reasons(result.get("paintFloor"), result.get("redSet") or [], runs)
     return ("fail" if reasons else "pass"), reasons
 
 
@@ -6148,7 +6180,7 @@ def red_arm_label(
 def red_arm_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     """Pure: an arm that did not run the intended mechanism is an error; an unreadable verdict is
     inconclusive, never a match; otherwise the observed red multiset must equal the
-    pre-registered one exactly."""
+    pre-registered one exactly and every red carry must reach the registered `paintFloor`."""
     arm = result.get("arm") if isinstance(result.get("arm"), dict) else {}
     continuity = arm.get("continuity") if isinstance(arm.get("continuity"), dict) else {}
     if continuity.get("mode") != "qualified":
@@ -6175,6 +6207,8 @@ def red_arm_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     observed, wanted = Counter(result.get("redSet") or []), Counter(expected)
     reasons = [f"unexpectedly red: {red_id}" for red_id in sorted((observed - wanted).elements())]
     reasons += [f"expected red but green: {red_id}" for red_id in sorted((wanted - observed).elements())]
+    red = result.get("redSet") or []
+    reasons += paint_floor_reasons(result.get("paintFloor"), red, {red_id: _longest_run(arm.get(red_id)) for red_id in red})
     return ("fail" if reasons else "pass"), reasons
 
 

@@ -79,6 +79,11 @@ PASSG_FIXTURES=(P2 D1 D2 D3 D4 D5 D6)
 # and c6-g1-ctl-*.json 0. The pre-pin-hold core red runs once outside this script (decision 7). Full tier only.
 PASSG_RED_ARMS=("D1 --core-variant no-pin-hold")
 [[ $TIER == full ]] || PASSG_RED_ARMS=()
+# Paint floor second guard (decision 3; the probe's red status functions are the first): a host or Pass G red arm of a
+# PAINT_RED_VARIANTS core variant must carry a paintFloor of at least PAINT_FLOOR_FRAMES, and any paintFloor an arm
+# carries must hold for every red carry's longest unpainted run.
+PAINT_RED_VARIANTS=no-pin-hold
+PAINT_FLOOR_FRAMES=60
 # Painted-instrument positive control (S2 instrument plan §3.10/§4/§5): "<deck> <N:VARIANT:PHASE@SCENE[:late]>". The
 # injected N-frame hide must read as exactly the injected seq set on the target carry and nowhere else; N=0 is the
 # injector's null (armed, nothing hidden, every count 0). The late timing makes the pre-paint phase load-bearing.
@@ -309,7 +314,8 @@ check_host(){ rc=$(status_of $O/host-$1); [[ $rc == 0 ]] || fail "HOST $1 exit $
 # Host red arms (probe-owned pre-registered sets, keyed in the probe by the P2 off-plan sha). The artifact contract is
 # checked in full: every key present and typed, redArm equal to the label the CLI arguments imply, expectedCoreSha256
 # the arm's sha, `unknown` an empty list, the census stray/duplicate multiset reconciled with redSet, and the red and
-# expected multisets equal (Counter). A "record" arm returns 3 only when all of that holds with status recorded.
+# expected multisets equal (Counter), and the paint floor second guard. A "record" arm returns 3 only when all of that
+# holds with status recorded.
 # run_host_red runs on P2; `HOST_DECK=Dn run_host_red ...` runs the same arm on an S0 deck (its html-unmodified export is
 # both fixture and original index: the qual decks need no asset replacement). check_host_red takes the same HOST_DECK.
 run_host_red(){ n=${HOST_DECK:-}$(echo "$*" | tr -d ' '); fix=$F/html-player; idx=$F/html-unmodified/index.html
@@ -317,8 +323,8 @@ run_host_red(){ n=${HOST_DECK:-}$(echo "$*" | tr -d ' '); fix=$F/html-player; id
   queue $O/host-red$n $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $idx --viewport 1920x1080 --artifact $O/host-red$n.json "$@"; }
 check_host_red(){ n=${HOST_DECK:-}$(echo "$*" | tr -d ' '); rc=$(status_of $O/host-red$n)
   [[ $rc == <-> ]] || { echo "[HOST ${HOST_DECK:+$HOST_DECK }$*] no fresh status ($rc) -> MISMATCH"; return 1; }
-  $PY - "$O/host-red$n.json" "$rc" "$@" <<'PYEOF'
-import json,sys
+  PAINT_RED_VARIANTS=$PAINT_RED_VARIANTS PAINT_FLOOR_FRAMES=$PAINT_FLOOR_FRAMES $PY - "$O/host-red$n.json" "$rc" "$@" <<'PYEOF'
+import json,os,sys
 from collections import Counter
 sys.path.insert(0,"scripts")
 from continuity_core_variants import parse_strip, strip_label, variant_sha
@@ -362,6 +368,15 @@ elif strs(got):
             else: pool.remove(hit)
     if pool: problems.append(f"redSet strays with no census video: {pool}")
     if Counter(dups)!=Counter(want_dups): problems.append(f"redSet duplicates {sorted(dups)} != census {sorted(want_dups)}")
+def frames(v): return isinstance(v,int) and not isinstance(v,bool)
+floor,want_floor=d.get("paintFloor"),int(os.environ["PAINT_FLOOR_FRAMES"])
+if floor is None and variant in os.environ.get("PAINT_RED_VARIANTS","").split(): problems.append(f"paintFloor missing (a {variant} red arm needs at least {want_floor} frames)")
+elif floor is not None and not (frames(floor) and floor>=want_floor): problems.append(f"paintFloor {floor!r} is not a frame count of at least {want_floor}")
+elif floor is not None:
+    for red in got if strs(got) else []:
+        v=arm.get(red) if isinstance(arm,dict) else None
+        run=v["paint"].get("longestRun") if isinstance(v,dict) and isinstance(v.get("paint"),dict) else None
+        if red.endswith(":carry") and not (frames(run) and run>=floor): problems.append(f"{red} longest unpainted run {run!r} below the {floor}-frame floor")
 if exp=="record":
     ok=not problems and status=="recorded" and rc==0; verdict="RECORDED" if ok else "MISMATCH"
 else:
@@ -432,13 +447,14 @@ PYEOF
 }
 # A Pass G red run matches only with this round's exit 0, a Pass G artifact whose redArm is the variant's label, whose
 # expectedCoreSha256 and both sessions' installed core sha are the variant's, whose registered red set is a list equal
-# (Counter) to the observed one, whose `unknown` is an empty list and whose status is pass; when the artifact carries a
-# paintFloor, every red leg verdict's longest unpainted run must reach it. An unregistered set, inconclusive, error, no
+# (Counter) to the observed one, whose `unknown` is an empty list and whose status is pass, and whose paintFloor holds
+# (the paint floor second guard above). An unregistered set, inconclusive, error, no
 # artifact, a missing or stale status: FAILED, never pending.
 run_passg_red(){ n=$1$(echo "${@[2,-1]}" | tr -d ' '); fix=$Q/$1/html-unmodified
   queue $O/passG-red$n $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $fix/index.html --pass G --artifact $O/passG-red$n.json "${@[2,-1]}"; }
-check_passg_red(){ n=$1$(echo "${@[2,-1]}" | tr -d ' '); $PY - "$O/passG-red$n.json" "$(status_of $O/passG-red$n)" "$@" <<'PYEOF' || fail "PASSG-RED $*"
-import json,sys
+check_passg_red(){ n=$1$(echo "${@[2,-1]}" | tr -d ' ')
+  PAINT_RED_VARIANTS=$PAINT_RED_VARIANTS PAINT_FLOOR_FRAMES=$PAINT_FLOOR_FRAMES $PY - "$O/passG-red$n.json" "$(status_of $O/passG-red$n)" "$@" <<'PYEOF' || fail "PASSG-RED $*"
+import json,os,sys
 from collections import Counter
 sys.path.insert(0,"scripts")
 from continuity_core_variants import variant_sha
@@ -470,19 +486,20 @@ if not strs(unknown): problems.append("unknown not a list of strings")
 elif unknown: problems.append(f"unknown {unknown}")
 if d.get("status")!="pass": problems.append(f"status {d.get('status')!r} != 'pass'")
 if rc!="0": problems.append(f"exit {rc} != 0")
-if floor is not None:
+def frames(v): return isinstance(v,int) and not isinstance(v,bool)
+want_floor=int(os.environ["PAINT_FLOOR_FRAMES"])
+if floor is None and variant in os.environ.get("PAINT_RED_VARIANTS","").split(): problems.append(f"paintFloor missing (a {variant} red arm needs at least {want_floor} frames)")
+elif floor is not None and not (frames(floor) and floor>=want_floor): problems.append(f"paintFloor {floor!r} is not a frame count of at least {want_floor}")
+elif floor is not None:
     runs={}
     for dest in (d.get("armed") or {}).get("destinations") or [] if isinstance(d.get("armed"),dict) else []:
         if not isinstance(dest,dict) or not isinstance(dest.get("advanceCarry"),dict): continue
         case=f"G{dest.get('fromOrdinal')}-{dest.get('toOrdinal')}-{dest.get('advanceTo')}"
         for vid,v in (dest["advanceCarry"].get("verdicts") or {}).items():
             if isinstance(v,dict) and isinstance(v.get("paint"),dict): runs[f"{case}:{vid}"]=v["paint"].get("longestRun")
-    if not isinstance(floor,int) or isinstance(floor,bool): problems.append(f"paintFloor {floor!r} is not a frame count")
-    else:
-        for red in got if strs(got) else []:
-            if red.endswith(":destination"): continue
-            run=runs.get(red)
-            if not (isinstance(run,int) and not isinstance(run,bool) and run>=floor): problems.append(f"{red} longest unpainted run {run!r} below the {floor}-frame floor")
+    for red in got if strs(got) else []:
+        run=runs.get(red)
+        if red.endswith(":carry") and not (frames(run) and run>=floor): problems.append(f"{red} longest unpainted run {run!r} below the {floor}-frame floor")
 for p in problems: print(f"    MISMATCH: {p}")
 sys.exit(1 if problems else 0)
 PYEOF

@@ -8075,6 +8075,32 @@ class TestRedArmStatus:
         result["unknown"] = [P2_CARRY34]
         assert probe.red_arm_status(result)[0] == "inconclusive"
 
+    @pytest.mark.parametrize(("floor", "run", "status"), [
+        pytest.param(60, 60, "pass", id="run-at-the-floor"),
+        pytest.param(60, 59, "fail", id="known-bad-run-below-the-floor"),
+        pytest.param(60, None, "fail", id="known-bad-red-carry-without-a-paint-score"),
+        pytest.param(59, 108, "fail", id="known-bad-floor-under-the-owner-minimum"),
+    ])
+    @pytest.mark.parametrize(("build", "status_of", "verdict_of"), [
+        pytest.param(lambda: _red_result([P2_CARRY34]), probe.red_arm_status,
+                     lambda r: r["arm"].setdefault(P2_CARRY34, {"verdict": False}), id="host-red-arm"),
+        pytest.param(lambda: _passg_red_result(), probe.passg_red_status,
+                     lambda r: r["armed"]["destinations"][-1]["advanceCarry"]["verdicts"][P2_CARRY34], id="pass-g-red-arm"),
+    ])
+    def test_a_registered_paint_floor_holds_every_red_carry(
+        self, build: Any, status_of: Any, verdict_of: Any, floor: int | None, run: int | None, status: str,
+    ) -> None:
+        """Astra r1 #5 / decision 3: matching red ids with a one-frame failure never pass a floored arm. The
+        registrations stay empty until V3; any floor is keyed by a registered arm."""
+        result = build()
+        if run is not None:
+            verdict_of(result)["paint"] = {"status": "fail", "longestRun": run}
+        if floor is not None:
+            result["paintFloor"] = floor
+        assert status_of(result)[0] == status
+        assert set(probe.RED_ARM_PAINT_FLOOR) <= set(probe.RED_ARM_EXPECTATIONS)
+        assert set(probe.PASSG_RED_PAINT_FLOOR) <= set(probe.PASSG_RED_EXPECTATIONS)
+
 
 class TestStrayCensus:
     PLAN_INSTANCES = {0: {BIG_ASSET: [BIG_INSTANCE]}, 1: {BIG_ASSET: [BIG_INSTANCE], OTHER_ASSET: [OTHER_INSTANCE]}}

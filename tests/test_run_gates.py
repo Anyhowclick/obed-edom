@@ -22,11 +22,13 @@ an events file and behaves per `STUB_MODES` (artifact/out-dir stem -> mode):
             `cc-none` write no artifact. Without a mode a carry-cover run writes its arm's expected outcome;
 - a `--pass G --core-variant` run (Pass G red) and a `--paint-control` run write a matching artifact unless the
   mode breaks one thing: `gr-sha` (null-control session on a foreign core), `gr-extra` (an extra red leg),
-  `gr-unknown` (an unreadable leg), `gr-floor` (a paintFloor above the red leg's longest run); `pc-plus` /
+  `gr-unknown` (an unreadable leg), `gr-floor` (a paintFloor above the red leg's longest run), `gr-nofloor` (no
+  paintFloor on a no-pin-hold arm); `pc-plus` /
   `pc-minus` (N+1 / N-1 hidden ticks), `pc-shift` (the target reads the injected set one tick late, the rAF-phase
   shape), `pc-unfired`, `pc-control` (another control's artifact);
-- `red-ok` / `red-noself` (host red run) write a matching red artifact with one `endOfShow` paint census entry /
-  the same with no `sampler.selfCheck`.
+- `red-ok` / `red-noself` (host red run) write a matching red artifact (paintFloor 60) with one `endOfShow` paint
+  census entry / the same with no `sampler.selfCheck`; `red-floor` / `red-nofloor` the same with a paintFloor above the
+  red carry's longest run / with no paintFloor.
 
 What is pinned here:
 - a non-empty (or non-directory) `<outdir>` is refused before anything runs, so nothing from an
@@ -130,8 +132,9 @@ if arg("--pass") == "G" and arg("--core-variant"):
          "unknown": ["G1-2-3:b1to2:carry"] if mode == "gr-unknown" else [],
          "armed": {"continuity": {"sha256": sha}, "destinations": [{"fromOrdinal": 1, "toOrdinal": 3, "advanceTo": 4, **leg}]},
          "nullControl": {"continuity": {"sha256": "0" * 64 if mode == "gr-sha" else sha}, "destinations": []}}
-    if mode == "gr-floor":
-        d["paintFloor"] = 109
+    floor = {"gr-floor": 109, "gr-nofloor": None}.get(mode, 60)
+    if floor is not None:
+        d["paintFloor"] = floor
     artifact.write_text(json.dumps(d))
     sys.exit(0)
 if arg("--paint-control"):
@@ -151,7 +154,7 @@ if arg("--paint-control"):
          "redSet": [target] if n else [], "unknown": [], "expectedCoreSha256": js_sha256()}
     artifact.write_text(json.dumps(d))
     sys.exit(0)
-if mode in ("red-ok", "red-noself"):
+if mode in ("red-ok", "red-noself", "red-floor", "red-nofloor"):
     sys.path.insert(0, "scripts")
     from continuity_core_variants import variant_sha
     red = ["b0to1:A:carry"]
@@ -160,6 +163,9 @@ if mode in ("red-ok", "red-noself"):
          "arm": {"census": {"1": {"unexpectedVideos": [], "duplicateVideos": []}}, "b0to1:A:carry": {"paint": PAINT},
                  "sampler": {"schema": 2} if mode == "red-noself" else SAMPLER,
                  "paintCensus": {"findings": [{"class": "endOfShow", "element": "counter-a.mov#1", "frames": 14}]}}}
+    floor = {"red-floor": 109, "red-nofloor": None}.get(mode, 60)
+    if floor is not None:
+        d["paintFloor"] = floor
     artifact.write_text(json.dumps(d))
     sys.exit(0)
 if arg("--pass") == "G":
@@ -1050,6 +1056,8 @@ _RED = "PASSG-RED D1 --core-variant no-pin-hold"
     (PASSG_RED_STEM, "gr-extra", _RED, "red set ['G1-3-4:b2to3:carry', 'G2-1-2:b0to1:carry'] != registered"),
     (PASSG_RED_STEM, "gr-unknown", _RED, "unknown ['G1-2-3:b1to2:carry']"),
     (PASSG_RED_STEM, "gr-floor", _RED, "G1-3-4:b2to3:carry longest unpainted run 108 below the 109-frame floor"),
+    # Astra r1 #5: a no-pin-hold red arm that emits no floor is never matched on the red ids alone.
+    (PASSG_RED_STEM, "gr-nofloor", _RED, "paintFloor missing (a no-pin-hold red arm needs at least 60 frames)"),
     (PASSG_RED_STEM, "die", _RED, None),
     (PC_STEMS[0], "pc-plus", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}", "hiddenTicks 7 != 6"),
     (PC_STEMS[1], "pc-minus", f"PAINT-CONTROL D5 {PAINT_CONTROLS[1]}", "hiddenTicks 5 != 6"),
@@ -1058,6 +1066,10 @@ _RED = "PASSG-RED D1 --core-variant no-pin-hold"
     (PC_STEMS[0], "pc-control", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}", "control '1:ancestor-half:pin@2' != "),
     ("host-redD5--core-variantno-pin-hold", "red-noself", "HOST red D5 --core-variant no-pin-hold",
      "arm.sampler is not schema 2 with selfCheck.ok"),
+    ("host-redD5--core-variantno-pin-hold", "red-floor", "HOST red D5 --core-variant no-pin-hold",
+     "b0to1:A:carry longest unpainted run 108 below the 109-frame floor"),
+    ("host-redD5--core-variantno-pin-hold", "red-nofloor", "HOST red D5 --core-variant no-pin-hold",
+     "paintFloor missing (a no-pin-hold red arm needs at least 60 frames)"),
 ])
 def test_known_bad_every_broken_instrument_artifact_fails_exactly_its_own_check(
     gates, stem: str, mode: str, failed: str, why: str | None,
