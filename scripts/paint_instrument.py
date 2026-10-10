@@ -69,13 +69,13 @@ PAINT_READ_FN_JS = r"""
       || /transform|perspective|filter/.test(String(cs.willChange || ''));
   }
   function paintSkewed(cs){
-    if (paintSet(cs.rotate)) return true;
+    if (paintSet(cs.rotate) || (paintSet(cs.scale) && /-/.test(String(cs.scale)))) return true;
     var t = String(cs.transform || 'none');
     if (t === 'none') return false;
     var m = /^matrix\(([^)]*)\)$/.exec(t);
     if (!m) return true;
     var p = m[1].split(',').map(parseFloat);
-    return p.length !== 6 || !p.every(isFinite) || p[1] !== 0 || p[2] !== 0;
+    return p.length !== 6 || !p.every(isFinite) || p[1] !== 0 || p[2] !== 0 || p[0] < 0 || p[3] < 0;
   }
   function paintClipBox(n){
     if (typeof n.offsetWidth !== 'number' || typeof n.offsetHeight !== 'number') return null;

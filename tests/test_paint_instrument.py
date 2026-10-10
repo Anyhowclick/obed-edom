@@ -401,6 +401,12 @@ const clip = new El('div', 'clip', {overflowX: 'hidden', overflowY: 'hidden',
                     transform: 'matrix(0.7071, 0.7071, -0.7071, 0.7071, 0, 0)'}, {x: 100, y: 100, w: 200, h: 225});
 keynoteBody.appendChild(clip); clip.appendChild(v);
 """, ("unreadable", "transform"), {"transform": "div#clip"}),
+    # Astra r2 B: a reflection flips which border is on the left; the unsigned mapping read it as fully painted.
+    ("reflected-ancestor-is-unreadable", """
+const clip = new El('div', 'clip', {overflowX: 'hidden', overflowY: 'hidden', transform: 'matrix(-1, 0, 0, 1, 0, 0)'},
+                    {x: 100, y: 100, w: 140, h: 225});
+keynoteBody.appendChild(clip); clip.appendChild(v);
+""", ("unreadable", "transform"), {"transform": "div#clip"}),
     # An absolutely positioned decoder escapes a non-positioned clipping ancestor (its containing block is #body).
     ("absolute-escapes-static-overflow", """
 const clip = new El('div', 'clip', {overflowX: 'hidden', overflowY: 'hidden'}, {x: 100, y: 100, w: 200, h: 225});
