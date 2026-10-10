@@ -161,7 +161,7 @@ OBED_LIVE_ATTACH=http://127.0.0.1:9222 OBED_LIVE_ATTACH_MATCH='about:blank#progr
 PYTHONPATH=$W/src $PY -u scripts/live_fixture_session.py --export $FX/html-player --index $FX/html-unmodified/index.html
 ```
 It prints transport (`fill-key`), viewport (must be 1920×1080), `continuity` (must be `qualified`) and the
-**log path**. Keys: `s` show · `a`/Enter advance · `g N` go to slide N · `h` hide · `o` observe · `q` stop.
+**log path**. Keys (single press): `s` show · →/Space/Enter/`a` advance · `g` then N+Enter go to slide N · `h` hide · `o` observe · `q` stop · `:` types a full command (← is unbound: the host has no back).
 Output starts **hidden** (= pure camera). Tick:
 - [ ] `s` → slide 1 keyed over camera; `h` → pure camera; movies keep running while hidden
 - [ ] `a` ×5 → slides/builds follow, each settles in ~1.3–2.3 s, never stuck `busy=True`

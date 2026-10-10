@@ -10,16 +10,64 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import select
 import shutil
+import sys
+import termios
 import time
+import tty
 from pathlib import Path
+from typing import TextIO
 
 from obed_edom.html_preview import cache_dir
 from obed_edom.live_host import LiveOutputHost
 from obed_edom.live_session import PlayerCommandRejected
 
 SESSION_DIGEST = "5e" * 32
-HELP = "a/space=advance  g N=go to slide N  s=show  h=hide  o=observe  q=stop and quit"
+HELP = "a/→/space/enter=advance  g N=go to slide N  s=show  h=hide  o=observe  q=stop and quit  :=type a command"
+KEYS = {" ": "a", "\r": "a", "\n": "a", "\x1b[C": "a", "\x1bOC": "a", "\x04": "q"}
+LINE_KEYS = {":": ":", "g": "g "}
+
+
+def command_for(key: str) -> str:
+    return KEYS.get(key, key)
+
+
+def _read_key(fd: int) -> str:
+    key = os.read(fd, 1)
+    if key == b"\x1b" and select.select([fd], [], [], 0.05)[0]:
+        key += os.read(fd, 1)
+        if key[-1:] in (b"[", b"O"):
+            while select.select([fd], [], [], 0.05)[0]:
+                key += os.read(fd, 1)
+                if 0x40 <= key[-1] <= 0x7E:
+                    break
+    return key.decode(errors="replace")
+
+
+def read_command(stdin: TextIO) -> str | None:
+    try:
+        if not stdin.isatty():
+            return input("> ").strip()
+        fd = stdin.fileno()
+        saved = termios.tcgetattr(fd)
+        print("> ", end="", flush=True)
+        try:
+            tty.setcbreak(fd, termios.TCSANOW)
+            key = _read_key(fd)
+        finally:
+            termios.tcsetattr(fd, termios.TCSANOW, saved)
+        if not key:
+            return None
+        if key in LINE_KEYS:
+            typed = input(LINE_KEYS[key]).strip()
+            return typed if key == ":" else f"g {typed}"
+        command = command_for(key)
+        print(command if command.isprintable() else "")
+        return command
+    except EOFError:
+        return None
 
 
 def main() -> None:
@@ -53,11 +101,8 @@ def main() -> None:
         print(f"  log: {output.get('logPath')}")
         print(HELP)
         while True:
-            try:
-                line = input("> ").strip()
-            except EOFError:
-                break
-            if line in ("q", "quit"):
+            line = read_command(sys.stdin)
+            if line is None or line in ("q", "quit"):
                 break
             try:
                 if line in ("", "a"):
