@@ -30,4 +30,34 @@ reads only `_OFFLINE_SOFT_SEED_KINDS` (text) through a keyword-only, opt-in `kin
   - P2 tests the consumer on production-shaped specs and records. It does not cover post-pass-1 deck state; O1/O2 in the live gate cover that.
 
 ## Live gate
-PENDING owner go. Protocol: see the plan's "### Live gate" (P0 primes a dedicated cache; interleaved A1, B1, then B2, A2; early stop after pair 1).
+
+The owner gave the go on 2026-10-10 and then moved the run to the next day. The protocol is the plan's "### Live gate", implemented by `driver.sh` in this folder.
+
+**Setup (done 2026-10-10, no Keynote used).**
+- Pinned, detached worktrees, each with its own venv synced (`uv sync --frozen --all-extras --all-groups`):
+  - `.claude/worktrees/seed-ab-A` at `f4a44ca0` (the PR base; `bulk_geometry` has no `kinds`);
+  - `.claude/worktrees/seed-ab-B` at `10aedaa2` (the PR code; has `kinds`).
+- `driver.sh` writes decks and logs to the main checkout's `output/seed-read-ab/`, a visible path, and keeps a dedicated `OBED_EDOM_CACHE_DIR` there.
+  - P0 copies `deck_digest`, `pairings`, `template_stat` and `settings.json` from the main `.cache`, then primes the Keynote 15.4 two-tier wall read and template stat.
+  - The banked JXA payloads in the main `.cache` are never written.
+- Preflight refuses to start if:
+  - A or B is not at its pinned SHA, or a worktree venv is missing;
+  - results already exist, or a stale `out.key` is present;
+  - less than 80 GB is free;
+  - Keynote is running and the owner has not confirmed 0 documents (`KEYNOTE_OK=1`). It never probes Keynote with osascript.
+- A load guard runs before P0 and before each run. It waits up to 10 min for the 1-minute load to drop below 4. At the deadline it aborts if load is ≥ 8 and logs `LOAD WARN` if load is between 4 and 8.
+- **FAKE dry run** (`FAKE=1`, synthetic logs, scratch `OUT`): every path behaved as specified.
+  - Pass: both pairs ran and O1 lines were identical.
+  - Pair-1 saving 50 s: early stop, no pair 2.
+  - B1 failure: stopped, with `out.key` left for inspection.
+  - Existing results: refused.
+  - Bad argument: usage message.
+- Machine state at setup: no `OBED_*`, `PYTHONPATH` or `UV_*` overrides in the environment; 455 GB free; Keynote not running.
+
+**Runbook.**
+1. Ask the active Alpha Keynote session for a ~50 min quiet window (it has compute priority).
+2. Check `pgrep -x Keynote`. If it is running, ask the owner to confirm 0 documents.
+3. Run `zsh .agents/reviews/seed-read-narrow-2026-10-10/driver.sh live`, UNSANDBOXED, as one background call. Watch `output/seed-read-ab/progress.log` with a Monitor (`tail -f`, filtered to stage, ABORT, FAILED, STOP and WARN lines).
+4. Run `driver.sh o1`, which is light.
+5. Run `driver.sh o2`, which is CPU-heavy, so only inside a CPU window.
+6. Record S, Whole and load for each run in this file. Trash the decks with `/usr/bin/trash` once the diffs are recorded.
