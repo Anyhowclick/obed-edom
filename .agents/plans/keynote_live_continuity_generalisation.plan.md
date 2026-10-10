@@ -211,7 +211,7 @@ worktree pinned to a commit, with at most 3 headless Chromes; OBS only on the ow
 
 ### S2: derivation v2 + core v6 (the only runtime-byte stage; after OD-2 and loopMode merge)
 
-**S2 IN PROGRESS (paused 2026-09-25 for the owner's vacation).** S2.0 and all four streams are done. The dev loop is green on P2 and D1–D6 at 1920×1080 (core `9c4fc61f`). State and next steps: `.agents/handovers/keynote-live-continuity-2026-09-25-s2.md`.
+**S2 IN PROGRESS** on `claude/s2-detach-fix` (no PR): S2.0 and all four streams, rebased onto #247 with the owner-approved P2 re-registrations (`run_gates.sh`), §4 option (a), detach fix a1 (`keynote_live_continuity_detach_r8.plan.md` §5), review folds, pin hold and bridge timing (R10). State and next steps: the latest `.agents/handovers/keynote-live-continuity-*.md` (now `…-2026-10-10-evening.md`, then `…-2026-10-10-q7-findings.md`).
 
 | WS | Files (exclusive) | Work |
 |---|---|---|
@@ -276,6 +276,9 @@ docs PR by the loop session (`output/evidence/<name>`); this plan cites those pa
 - **Docs:** SKILL, `decklink-field-test-runbook.md`, the live handovers the plans still cite, and memory citations
   (coordinator). The worktree convention becomes "nothing to symlink". If some script still needs a relative
   `output/` path, one symlink of `output/fixtures`.
+- **Compat symlinks:** the main checkout keeps `output/<name>` → `output/fixtures/<name>` links because main has no
+  `fixture()` until S2 merges (its scripts and tests still read the old paths). Delete them once S2 has merged and no
+  live branch or session reads the old paths.
 
 **Order inside S2.** Step **S2.0**: one Opus MEDIUM implementer, sequential, BEFORE the parallel work streams. It touches
 files every stream owns, so it cannot run beside them. Its own check is the full suites, plus a resolver smoke (every

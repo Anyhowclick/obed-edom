@@ -1,7 +1,7 @@
 # Handover: S2 Phase D halted by Q7 (real OBS) findings; main fix in flight (2026-10-10, evening)
 
-Read this first. Supersedes the "Next steps" of `keynote-live-continuity-2026-10-10-s2-detach.md` (same folder; its
-results section stays valid). Verify every branch/PR on GitHub before acting.
+Read this first. The detach experiment's results are in `.agents/plans/keynote_live_continuity_detach_r8.plan.md` §5.
+Verify every branch/PR on GitHub before acting.
 
 ## Branches and worktrees
 | Branch / worktree | Head | Where | State |
