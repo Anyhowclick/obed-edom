@@ -2874,9 +2874,60 @@ class TestScoreNoConsumption:
                      id="clean-no-consumption-passes"),
     ])
     def test_score_no_consumption(self, scene: str, record: Any, verdict: bool | None, scene_ok: bool) -> None:
-        scored = probe.score_no_consumption(scene, "2", record)
+        # P2 parity: its destination's leading automatic list is empty, so these are today's cases.
+        scored = probe.score_no_consumption(scene, "2", record, auto_kinds=[])
         assert scored["verdict"] is verdict
         assert scored["sceneOk"] is scene_ok
+
+    @pytest.mark.parametrize(("auto_kinds", "record", "verdict"), [
+        # Owner 2026-10-10: the arrival auto-run must be an ORDERED PREFIX of the destination's own
+        # leading automatic events; `autoPlayFired` must agree with the run (fired iff length > 0).
+        pytest.param([], {"autoPlayRunLength": 1, "autoPlayRunKinds": ["apple:movie-start"], "autoPlayFired": True},
+                     False, id="empty-leading-list-any-run-fails"),
+        pytest.param([], {"autoPlayRunLength": 2, "autoPlayRunKinds": ["a", "b"], "autoPlayFired": True},
+                     False, id="empty-leading-list-longer-run-fails"),
+        pytest.param(["apple:movie-start"],
+                     {"autoPlayRunLength": 1, "autoPlayRunKinds": ["apple:movie-start"], "autoPlayFired": True},
+                     True, id="d-style-full-run-passes"),
+        pytest.param(["apple:movie-start"], {"autoPlayRunLength": 0, "autoPlayRunKinds": [], "autoPlayFired": False},
+                     True, id="d-style-empty-run-passes"),
+        pytest.param(["apple:movie-start", "apple:appear"],
+                     {"autoPlayRunLength": 1, "autoPlayRunKinds": ["apple:movie-start"], "autoPlayFired": True},
+                     True, id="shorter-ordered-prefix-passes"),
+        pytest.param(["apple:movie-start"],
+                     {"autoPlayRunLength": 2, "autoPlayRunKinds": ["apple:movie-start", "apple:dissolve character"],
+                      "autoPlayFired": True},
+                     False, id="run-longer-than-leading-list-fails"),
+        pytest.param(["apple:movie-start"],
+                     {"autoPlayRunLength": 1, "autoPlayRunKinds": ["apple:dissolve character"], "autoPlayFired": True},
+                     False, id="wrong-kind-fails"),
+        pytest.param(["apple:movie-start", "apple:appear"],
+                     {"autoPlayRunLength": 2, "autoPlayRunKinds": ["apple:appear", "apple:movie-start"], "autoPlayFired": True},
+                     False, id="out-of-order-fails"),
+        pytest.param(["apple:movie-start"],
+                     {"autoPlayRunLength": 1, "autoPlayRunKinds": ["apple:movie-start"], "autoPlayFired": False},
+                     False, id="nonempty-run-not-fired-fails"),
+        pytest.param(["apple:movie-start"], {"autoPlayRunLength": 0, "autoPlayRunKinds": [], "autoPlayFired": True},
+                     False, id="empty-run-but-fired-fails"),
+        pytest.param(None, {"autoPlayRunLength": 0, "autoPlayRunKinds": [], "autoPlayFired": False},
+                     None, id="unreadable-leading-list-is-inconclusive"),
+        pytest.param(["apple:movie-start"], {"autoPlayRunLength": 1, "autoPlayFired": True},
+                     None, id="run-within-the-list-without-kinds-is-inconclusive"),
+        pytest.param(["apple:movie-start"], {"autoPlayRunLength": 1, "autoPlayRunKinds": [], "autoPlayFired": True},
+                     None, id="kinds-length-disagreeing-with-run-length-is-inconclusive"),
+        pytest.param(["apple:movie-start"], {"autoPlayRunLength": True, "autoPlayRunKinds": [], "autoPlayFired": True},
+                     None, id="non-count-run-length-is-inconclusive"),
+    ])
+    def test_arrival_run_must_be_an_ordered_prefix_of_the_leading_automatic_events(
+        self, auto_kinds: list[str] | None, record: dict[str, Any], verdict: bool | None,
+    ) -> None:
+        scored = probe.score_no_consumption("2", "2", record, auto_kinds=auto_kinds)
+        assert scored["verdict"] is verdict
+        assert scored["leadingAutoKinds"] == auto_kinds
+
+    def test_a_wrong_scene_still_fails_a_valid_prefix(self) -> None:
+        record = {"autoPlayRunLength": 1, "autoPlayRunKinds": ["apple:movie-start"], "autoPlayFired": True}
+        assert probe.score_no_consumption("3", "2", record, auto_kinds=["apple:movie-start"])["verdict"] is False
 
 
 class TestExecuteLog:
@@ -3095,9 +3146,11 @@ class TestResolveNoConsumption:
         # advanced. Characters geometry and the stage map are irrelevant on this path, so both
         # are passed as None here to prove they cannot drag the verdict to inconclusive.
         player = self._ObserveOnlyPlayer(scene)
-        result = probe.resolve_no_consumption(player, "2", None, None, execute_record=record, click_builds=False)
+        result = probe.resolve_no_consumption(
+            player, "2", None, None, execute_record=record, click_builds=False, auto_kinds=[],
+        )
         assert result["verdict"] is verdict
-        assert result["consumption"] == probe.score_no_consumption(scene, "2", record)
+        assert result["consumption"] == probe.score_no_consumption(scene, "2", record, auto_kinds=[])
         assert result["regionChanged"] == {
             "verdict": "n/a", "applicable": False, "reason": "destination has no click-driven builds",
         }
@@ -3114,16 +3167,18 @@ class TestResolveNoConsumption:
         # is scored exactly as before: the full scene + execute-log + pixel check, same arguments.
         calls: list[tuple[Any, ...]] = []
 
-        def full(player: Any, expected: Any, rect: Any, stage_map: Any, *, execute_record: Any) -> dict[str, Any]:
-            calls.append((player, expected, rect, stage_map, execute_record))
+        def full(player: Any, expected: Any, rect: Any, stage_map: Any, *, execute_record: Any, auto_kinds: Any) -> dict[str, Any]:
+            calls.append((player, expected, rect, stage_map, execute_record, auto_kinds))
             return {"verdict": True, "sentinel": "full-path"}
 
         monkeypatch.setattr(probe, "score_no_build_consumed", full)
         player, rect, stage_map, record = object(), {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}, {"s": 1}, {"slide": 2}
         monkeypatch.setattr(probe, "stage_map_valid", lambda value: value is stage_map)
-        result = probe.resolve_no_consumption(player, "2", rect, stage_map, execute_record=record, click_builds=click_builds)
+        result = probe.resolve_no_consumption(
+            player, "2", rect, stage_map, execute_record=record, click_builds=click_builds, auto_kinds=[],
+        )
         assert result == {"verdict": True, "sentinel": "full-path"}
-        assert calls == [(player, "2", rect, stage_map, record)]
+        assert calls == [(player, "2", rect, stage_map, record, [])]
 
     @pytest.mark.parametrize("click_builds", [
         pytest.param(True, id="click-builds-present"),
@@ -3155,9 +3210,10 @@ class TestResolveNoConsumption:
         slide = {"exportedUuid": "SLIDE-UUID"}
         click_builds = probe.has_click_builds(tmp_path, slide)
         assert click_builds is None
+        assert probe.leading_auto_kinds(tmp_path, slide) is None
         result = probe.resolve_no_consumption(
             None, "2", probe.character_region_rect(tmp_path, slide), {"s": 1}, execute_record=None,
-            click_builds=click_builds,
+            click_builds=click_builds, auto_kinds=probe.leading_auto_kinds(tmp_path, slide),
         )
         assert result["verdict"] is None
         assert "characters region rect is unavailable" in result["reason"]
@@ -3229,6 +3285,53 @@ class TestHasClickBuilds:
         assert probe.has_click_builds(tmp_path, slide) is None
 
 
+class TestLeadingAutoKinds:
+    """The first effect `name` of each leading `automaticPlay: true` event -- the same string the
+    runtime pushes into `autoPlayRunKinds` (`effects[0].name`, `live_runtime.py`) -- up to the
+    first click event."""
+
+    @pytest.mark.parametrize(("events", "expected"), [
+        pytest.param([{"automaticPlay": True, "effects": [_movie_start()]},
+                      {"automaticPlay": False, "effects": [_transition()]}],
+                     ["apple:movie-start"], id="d-deck-shape"),
+        pytest.param([{"automaticPlay": False, "effects": [_character_effect("A", 1, 1, 1, 1)]},
+                      {"automaticPlay": True, "effects": [_movie_start()]},
+                      {"automaticPlay": False, "effects": [_transition()]}],
+                     [], id="p2-shape-click-first-stops-the-run"),
+        pytest.param([{"automaticPlay": True, "effects": [_movie_start()]},
+                      {"automaticPlay": True, "effects": [_character_effect("A", 1, 1, 1, 1)]},
+                      {"automaticPlay": False, "effects": [_transition()]}],
+                     ["apple:movie-start", "apple:dissolve character"], id="several-leading-automatic-events-in-order"),
+        pytest.param([], [], id="no-events"),
+        pytest.param([{"automaticPlay": False, "effects": [_transition()]}, "junk-after-the-run-is-not-read"], [],
+                     id="stops-at-the-first-click-event"),
+        pytest.param([{"automaticPlay": True, "effects": []}], None, id="automatic-event-without-effects-is-unknown"),
+        pytest.param([{"automaticPlay": True, "effects": [{"type": "buildIn"}]}], None,
+                     id="automatic-effect-without-a-name-is-unknown"),
+        pytest.param([{"effects": [_movie_start()]}], None, id="missing-automaticPlay-is-unknown"),
+        pytest.param(["junk"], None, id="non-dict-event-is-unknown"),
+    ])
+    def test_shapes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, events: list[Any], expected: list[str] | None) -> None:
+        monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
+        slide_dir = tmp_path / "assets" / "SLIDE-UUID"
+        slide_dir.mkdir(parents=True)
+        (slide_dir / "SLIDE-UUID.json").write_text(json.dumps({"events": events, "assets": {}}))
+        assert probe.leading_auto_kinds(tmp_path, {"exportedUuid": "SLIDE-UUID"}) == expected
+
+    @pytest.mark.parametrize("content", [
+        pytest.param(None, id="missing-slide-json"),
+        pytest.param("{not valid json", id="malformed-slide-json"),
+        pytest.param(json.dumps({"events": None}), id="events-not-a-list"),
+    ])
+    def test_unreadable_slide_is_unknown(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str | None) -> None:
+        monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
+        if content is not None:
+            slide_dir = tmp_path / "assets" / "SLIDE-UUID"
+            slide_dir.mkdir(parents=True)
+            (slide_dir / "SLIDE-UUID.json").write_text(content)
+        assert probe.leading_auto_kinds(tmp_path, {"exportedUuid": "SLIDE-UUID"}) is None
+
+
 _D1_EXPORT = Path(probe.fixture("qual-decks")) / "D1" / "html-unmodified"
 _P2_EXPORT = Path(probe.fixture("p2-recovery")) / "html-adversarial" / "html-unmodified"
 
@@ -3250,6 +3353,8 @@ class TestHasClickBuildsOnRealExports:
         assert [probe.has_click_builds(_D1_EXPORT, slide) for slide in slides] == [False] * len(slides)
         destination = next(s for s in slides if s["originalOrdinal"] == probe.GOTO_CONSUMPTION_CHECK_TO)
         assert probe.character_region_rect(_D1_EXPORT, destination) is None
+        # The stored D1-G evidence logged `autoPlayRunKinds: ['apple:movie-start']` for this goTo.
+        assert probe.leading_auto_kinds(_D1_EXPORT, destination) == ["apple:movie-start"]
 
     @pytest.mark.skipif(not (_P2_EXPORT / "assets" / "header.json").is_file(), reason="p2-recovery fixture is not in this checkout")
     def test_p2_character_build_slide_has_click_builds(self) -> None:
@@ -3257,6 +3362,7 @@ class TestHasClickBuildsOnRealExports:
         destination = next(s for s in slides if s["originalOrdinal"] == probe.GOTO_CONSUMPTION_CHECK_TO)
         assert probe.has_click_builds(_P2_EXPORT, destination) is True
         assert probe.character_region_rect(_P2_EXPORT, destination) is not None
+        assert probe.leading_auto_kinds(_P2_EXPORT, destination) == []
 
 
 class TestGotoTelemetry:

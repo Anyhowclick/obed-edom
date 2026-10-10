@@ -236,7 +236,7 @@ here, so the §3.4 round runs once.
 | Q6 | Managed OBS: `managed_obs_qualify.py` `--arm both`, `g2`, `failsafe`, `soak` at **25 and 30** (both default-on; binary counter gates cadence at both rates; 30 judged relative to same-take native per OD-2 OQ-2; soak on the looping fixture with both wrap windows, `af76ed97`) | OD-2's M1–M6 limits | OD-2's `--kb frozen/oldbytes/latelost` |
 | Q7 | Real OBS (external attach) short pass on D1 + D4; **owner eyeball** in Keyer mode on D1–D5 | no stray, no visible restart where carried | — |
 
-Q3 amendment (owner 2026-10-10): Pass G no-consumption scores only the scene/execute-log half, with the pixel half n/a, on a destination parsed as having no click-driven builds; unreadable slide JSON stays inconclusive.
+Q3 amendment (owner 2026-10-10): Pass G no-consumption accepts the destination's own leading automatic events: the logged arrival auto-run (`autoPlayRunKinds`) must be an ordered prefix of those events' first-effect names (fewer or none is fine; longer or out of order fails; `autoPlayFired` iff the run is non-empty), plus the scene check. On a destination parsed as having no click-driven builds, only that scene/execute-log half is scored and the pixel half is n/a. Unreadable slide JSON stays inconclusive.
 
 Gate record: `.agents/reviews/continuity-generalisation/gates-r1.md`. The gate commit keeps in the allowlist only the S2
 shas of P2 off/on, p2-loop off/on, and the decks that passed Q3+Q7. The others are removed before the PR is offered.

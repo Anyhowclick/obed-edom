@@ -4268,26 +4268,38 @@ def wait_for_execute_record(
 
 def score_no_consumption(
     observed_scene_id: str | None, expected_scene_id: str | None, execute_record: dict[str, Any] | None,
+    *, auto_kinds: Sequence[str] | None,
 ) -> dict[str, Any]:
     """Pure: the settled scene plus the host's own execute-log evidence in, a
     verdict out. `autoPlayRunLength`/`autoPlayRunKinds`/`autoPlayFired` are
     read defensively -- another stream is landing them on `live_host.py`
     concurrently -- so a record that predates them is INCONCLUSIVE, never a
-    false pass."""
+    false pass. The arrival auto-run must be an ordered prefix of the destination's
+    own leading automatic events (`auto_kinds`, `leading_auto_kinds`; owner 2026-10-10):
+    anything longer or out of order consumed a click event. Unknown `auto_kinds` is inconclusive."""
     scene_ok = observed_scene_id is not None and observed_scene_id == expected_scene_id
     if not isinstance(execute_record, dict):
         return {"verdict": None, "sceneOk": scene_ok, "reason": "no execute-log record for this goTo"}
     run_length, fired = execute_record.get("autoPlayRunLength"), execute_record.get("autoPlayFired")
+    run_kinds = execute_record.get("autoPlayRunKinds")
+    fields = {
+        "autoPlayRunLength": run_length, "autoPlayRunKinds": run_kinds, "autoPlayFired": fired,
+        "leadingAutoKinds": None if auto_kinds is None else list(auto_kinds),
+    }
     if run_length is None or fired is None:
-        return {
-            "verdict": None, "sceneOk": scene_ok, "autoPlayRunLength": run_length, "autoPlayFired": fired,
-            "reason": "execute log has no autoPlayRunLength/autoPlayFired yet",
-        }
-    log_ok = run_length == 0 and fired is False
+        return {"verdict": None, "sceneOk": scene_ok, **fields, "reason": "execute log has no autoPlayRunLength/autoPlayFired yet"}
+    if auto_kinds is None:
+        return {"verdict": None, "sceneOk": scene_ok, **fields, "reason": "destination's leading automatic events are unreadable"}
+    if isinstance(run_length, bool) or not isinstance(run_length, int) or run_length < 0:
+        return {"verdict": None, "sceneOk": scene_ok, **fields, "reason": "autoPlayRunLength is not a count"}
+    within = run_length <= len(auto_kinds)
+    observed = [] if run_kinds is None and run_length == 0 else run_kinds
+    if within and (not isinstance(observed, list) or len(observed) != run_length):
+        return {"verdict": None, "sceneOk": scene_ok, **fields, "reason": "autoPlayRunKinds does not match autoPlayRunLength"}
+    log_ok = within and observed == list(auto_kinds[:run_length]) and fired is (run_length > 0)
     ok = scene_ok and log_ok
     return {
-        "verdict": bool(ok), "sceneOk": scene_ok, "logOk": log_ok, "autoPlayRunLength": run_length,
-        "autoPlayRunKinds": execute_record.get("autoPlayRunKinds"), "autoPlayFired": fired,
+        "verdict": bool(ok), "sceneOk": scene_ok, "logOk": log_ok, **fields,
         "reason": None if ok else "scene or execute-log evidence contradicts no-consumption",
     }
 
@@ -4438,6 +4450,26 @@ def character_region_rect(export_root: Path, slide: dict[str, Any]) -> dict[str,
     return _union_rect(rects)
 
 
+def leading_auto_kinds(export_root: Path, slide: dict[str, Any]) -> list[str] | None:
+    """The first effect `name` of each of the slide's leading `automaticPlay: true` events (the
+    kinds `autoPlayRunKinds` reports), up to its first click event; `None` if unreadable/malformed."""
+    events = _slide_events(export_root, slide)
+    if events is None:
+        return None
+    kinds: list[str] = []
+    for event in events:
+        if not isinstance(event, dict) or not isinstance(event.get("automaticPlay"), bool):
+            return None
+        if event["automaticPlay"] is False:
+            break
+        effects = event.get("effects")
+        first = effects[0] if isinstance(effects, list) and effects else None
+        if not isinstance(first, dict) or not isinstance(first.get("name"), str):
+            return None
+        kinds.append(first["name"])
+    return kinds
+
+
 def has_click_builds(export_root: Path, slide: dict[str, Any]) -> bool | None:
     """Whether the slide's per-slide JSON has a click-driven build: an event with
     `automaticPlay` false carrying any effect other than the outgoing `transition`.
@@ -4460,12 +4492,12 @@ def has_click_builds(export_root: Path, slide: dict[str, Any]) -> bool | None:
 
 def score_no_build_consumed(
     player: LiveOutputHost, expected_scene_id: str | None, character_rect: dict[str, float],
-    stage_map: dict[str, Any], *, execute_record: dict[str, Any] | None,
+    stage_map: dict[str, Any], *, execute_record: dict[str, Any] | None, auto_kinds: Sequence[str] | None,
 ) -> dict[str, Any]:
     """Scene + execute-log evidence the click-driven builds are still pending, plus pixel evidence
     the characters' region only changes after one more `advance` -- proving it really was pending."""
     observed = player.observe()
-    consumption = score_no_consumption(observed.scene_id, expected_scene_id, execute_record)
+    consumption = score_no_consumption(observed.scene_id, expected_scene_id, execute_record, auto_kinds=auto_kinds)
     transport = player._require_transport()
     screen_rect = to_screen_rect(character_rect, stage_map)
     before = decode_png(transport.call("Page.captureScreenshot", format="png")["data"])
@@ -4485,13 +4517,16 @@ def score_no_build_consumed(
 def resolve_no_consumption(
     player: LiveOutputHost, expected_scene_id: str | None, character_rect: dict[str, float] | None,
     stage_map: dict[str, Any] | None, *, execute_record: dict[str, Any] | None, click_builds: bool | None = None,
+    auto_kinds: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Fail-closed: missing/unreadable characters geometry or an invalid stage map is inconclusive
     (never silently `True`) and never touches `player`; only then is the real evidence scored. A
     destination parsed as having no click-driven builds (`click_builds is False`, owner 2026-10-10)
     has nothing for the pixel half to prove: only the scene + execute-log half is scored."""
     if click_builds is False:
-        consumption = score_no_consumption(player.observe().scene_id, expected_scene_id, execute_record)
+        consumption = score_no_consumption(
+            player.observe().scene_id, expected_scene_id, execute_record, auto_kinds=auto_kinds,
+        )
         return {
             "consumption": consumption,
             "regionChanged": {"verdict": "n/a", "applicable": False, "reason": NO_CLICK_BUILDS_REASON},
@@ -4501,7 +4536,9 @@ def resolve_no_consumption(
         return {"verdict": None, "reason": "characters region rect is unavailable (missing/unreadable slide geometry)"}
     if not stage_map_valid(stage_map):
         return {"verdict": None, "reason": "stage map invalid at the no-consumption sample"}
-    return score_no_build_consumed(player, expected_scene_id, character_rect, stage_map, execute_record=execute_record)
+    return score_no_build_consumed(
+        player, expected_scene_id, character_rect, stage_map, execute_record=execute_record, auto_kinds=auto_kinds,
+    )
 
 
 def goto_matrix(specs: Sequence[dict[str, Any]], slide_count: int) -> tuple[tuple[int, ...], ...]:
@@ -4522,6 +4559,7 @@ def run_goto_destination(
     expectations: dict[int, dict[str, str]], evidence: Callable[..., dict[str, str]] | None,
     expected_scene_id: str | None, character_rect: dict[str, float] | None,
     armed: bool, require_no_consumption: bool, advance_to: int | None = None, click_builds: bool | None = None,
+    auto_kinds: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """One goTo, driven for real through `LiveOutputHost.execute`, scored with the same
     `visible_slide_record` the V/Voff passes use -- never a re-derived scorer. With
@@ -4582,7 +4620,7 @@ def run_goto_destination(
     if require_no_consumption:
         no_consumption = resolve_no_consumption(
             player, expected_scene_id, character_rect, stage_map, execute_record=execute_record,
-            click_builds=click_builds,
+            click_builds=click_builds, auto_kinds=auto_kinds,
         )
         if no_consumption.get("verdict") is not True:
             reasons.append(f"no-consumption check for destination {to_ordinal}: {no_consumption}")
@@ -4662,6 +4700,7 @@ def _run_goto_arm(
     instances: dict[int, dict[str, list[Any]]], expectations: dict[int, dict[str, str]], viewport: tuple[int, int],
     evidence_dir: Path, character_rect: dict[str, float] | None, onset_scene_id: str, gl_replay: str = "off",
     matrix: Sequence[Sequence[int]] = GOTO_MATRIX, click_builds: bool | None = None,
+    auto_kinds: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """One armed or null-control goTo session: start, warm up, drive every `matrix` case (the
     advance leg of a mid-chain case only when armed), stop."""
@@ -4682,6 +4721,7 @@ def _run_goto_arm(
                     character_rect=character_rect, armed=armed,
                     require_no_consumption=armed and to_ordinal == GOTO_CONSUMPTION_CHECK_TO,
                     advance_to=advance[0] if armed and advance else None, click_builds=click_builds,
+                    auto_kinds=auto_kinds,
                 )
                 for from_ordinal, to_ordinal, *advance in matrix
             ]
@@ -4707,6 +4747,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
     consumption_slide = next(s for s in plan_slides if s["originalOrdinal"] == GOTO_CONSUMPTION_CHECK_TO)
     character_rect = character_region_rect(plan_export, consumption_slide)
     click_builds = has_click_builds(plan_export, consumption_slide)
+    auto_kinds = leading_auto_kinds(plan_export, consumption_slide)
     consumption_index = int(consumption_slide["playerIndex"])
 
     instances_g = {index: dict(assets) for index, assets in instances.items()}
@@ -4737,7 +4778,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
             export_armed, load_slides(export_armed), env=env, tag="G", armed=True,
             instances=instances_g, expectations=goto_rect_expectations(expectations_g, armed=True),
             viewport=viewport, evidence_dir=evidence_dir, character_rect=character_rect, onset_scene_id=onset_scene_id,
-            gl_replay=args.gl_replay, matrix=matrix, click_builds=click_builds,
+            gl_replay=args.gl_replay, matrix=matrix, click_builds=click_builds, auto_kinds=auto_kinds,
         )
 
         export_off = prepare_export(args.fixture, args.original_index, root, "pass-g-off")
@@ -4745,7 +4786,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
             export_off, load_slides(export_off), env={**env, GOTO_AUTOPLAY_ENV: "off"}, tag="Goff", armed=False,
             instances=instances_g, expectations=goto_rect_expectations(expectations_g, armed=False),
             viewport=viewport, evidence_dir=evidence_dir, character_rect=character_rect, onset_scene_id=onset_scene_id,
-            gl_replay=args.gl_replay, matrix=matrix, click_builds=click_builds,
+            gl_replay=args.gl_replay, matrix=matrix, click_builds=click_builds, auto_kinds=auto_kinds,
         )
 
     result["status"], result["reasons"] = overall_status_g(result)
