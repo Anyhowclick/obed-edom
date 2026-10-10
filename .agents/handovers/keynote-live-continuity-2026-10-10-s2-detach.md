@@ -8,12 +8,10 @@ Verify every branch/PR on GitHub before acting; nothing below was merged except 
 ## Branches (all local unless marked)
 | Branch | Head | Where | State |
 |---|---|---|---|
-| `main` | `0f0a70aa` | origin | #247 merged: gate round 35 -> ~7¼ min at GATE_JOBS=3 |
+| `main` | `1379b2df` | origin | #247 (gate round 35 -> ~7¼ min at GATE_JOBS=3), then #248/#249 (resizer splice aspect, Gold oracles). S2 is still on `0f0a70aa`. |
 | `claude/continuity-generalisation-s2` | `dcbb6363` | **origin** | S2 rebased onto `0f0a70aa` (#247) + owner-approved P2 re-registrations + plan §4 option (a) + detach plan (force-pushed; = the former `-s2-rebase`). No PR. |
 | `claude/s2-detach-fix` | this commit | **origin**, worktree `obs-mac-camera-swap-fbc63b` | S2 + detach driver (`scripts/detach_experiment.py`, Level 1+2, a1/a2 core-fix arms, removal-phase readout) + plan results + this handover. |
 | `claude/detach-main-p2` | `97332ef6` | **origin** only (worktree trashed) | Driver ported to main for the P2 relevance check. Evidence only; kept because plan §5 cites it. |
-| `claude/splice-aspect-stale` | `004aef83` | worktree `agent-ad1565c2abe558572` | Resizer stale-aspect fix (owner: stale-only) + Codex r1 fold (cache marker `spliceAspectRefreshed`). |
-| `claude/gold-oracle-tests` | `d4276cb2` | same worktree | Stacked: Map deck retired -> tests on `Gold_Wall_Input.key`; 14 always-skipping tests now run. |
 
 Deleted: `claude/continuity-generalisation-s2-rebase`, `claude/s2-detach-experiment`, `attach-viewport-session`.
 
@@ -27,8 +25,7 @@ Deleted: `claude/continuity-generalisation-s2-rebase`, `claude/s2-detach-experim
   boundary, no residual rate.
   Main P2 (GL auto): 1→2 hand-back eligible 10/10, 0 blinks — race not reached on main; no escalation.
 - **Full suites (tonight, machine quiet):** S2 rebase 9105 passed; with the banked cache 9108 + 1 failure
-  `test_two_tier_splice_makes_write_affecting_gate_green_full_deck` = the resizer bug (fixed on splice-aspect-stale,
-  not yet on main) — expected, not an S2 regression. Resizer+Gold 8972 / 8988 passed. `test:ui` 305 on both.
+  `test_two_tier_splice_makes_write_affecting_gate_green_full_deck` = the resizer bug (fixed by #248, merged) — expected, not an S2 regression. Resizer+Gold 8972 / 8988 passed. `test:ui` 305 on both.
 
 ## Owner decisions (2026-10-10, resolved)
 1. **Detach fix = a1** as measured; `CONTINUITY_VERSION` stays 6.
@@ -36,21 +33,12 @@ Deleted: `claude/continuity-generalisation-s2-rebase`, `claude/s2-detach-experim
 3. **S2 force-pushed** to `dcbb6363`.
 
 ## Next steps, in order
-1. Fold Codex r2 on the resizer + Gold stack (`.agents/reviews/splice-aspect/codex-r2.md`, r1 alongside):
-   **MAJOR** — a media count mismatch sends the slide through `_merge_legacy_slides`, which restores pre-splice
-   image/movie aspects by an untrusted `kindIndex` and still stamps `spliceAspectRefreshed=True` (remap_keynote.py ~318,
-   ~495) -> null those aspects (or restore only where correspondence is proven) + a count-mismatch regression. MINORs:
-   fallback slides need an explicit `aspect=None` so fresh caches are not rejected (inspect.py ~825); Gold oracle helper
-   must accept only `reader == "jxa"` (test_iwa_geometry.py ~599); vacuous fallback-geometry loop
-   (test_offline_inspect.py ~1614); duplicated `boom_two_tier` stub. Codex confirmed the aspect-nulling fallback is
-   conservative and the Gold assertions are not weaker than Map's. Then push both branches and open the resizer PR with
-   the Gold PR stacked on it (owner merges).
-2. Detach fix: a fresh ≥ 30-event interleaved V8 vs V8+a1 session with the new instrument (positive control first),
+1. Detach fix: a fresh ≥ 30-event interleaved V8 vs V8+a1 session with the new instrument (positive control first),
    then land a1 in the core (core sha re-pin; red-arm variant shas re-derive) on S2.
-3. The owed S2 gates on the rebased head: full `run_gates.sh` (now 38 runs incl. 22 deck red arms — GATE_JOBS=3 was
+2. The owed S2 gates on the rebased head: full `run_gates.sh` (now 38 runs incl. 22 deck red arms — GATE_JOBS=3 was
    qualified only for the 16-run mix; deck arms have never run concurrently, re-qualify serial vs 3-wide), decks at
    1600×1000 and 2560×1440, Pass G on D1–D6, then review and the Q2–Q7 re-qualification (plan §3.4).
-4. Housekeeping: trash the agent worktrees once their branches are pushed/merged (check git-ignored `output/` first).
+3. Housekeeping: trash the agent worktrees once their branches are pushed/merged (check git-ignored `output/` first).
 
 ## Open bugs (owner-raised or found)
 - **One-frame detach (S2):** symptom — one rAF with no `<video>` at the destination's movie start after an MM (D-deck
