@@ -1744,9 +1744,11 @@ def stage_map_valid(stage_map: dict[str, Any] | None) -> bool:
     sy| / s` over 0.1%) is invalid, never silently treated as identity."""
     if not isinstance(stage_map, dict):
         return False
-    s, sy = stage_map.get("s"), stage_map.get("sy")
-    ow, oh = stage_map.get("offsetWidth"), stage_map.get("offsetHeight")
-    if not all(isinstance(v, (int, float)) and math.isfinite(v) and v > 0 for v in (s, sy, ow, oh)):
+    s, sy = _finite_number(stage_map.get("s")), _finite_number(stage_map.get("sy"))
+    ow, oh = _finite_number(stage_map.get("offsetWidth")), _finite_number(stage_map.get("offsetHeight"))
+    if not all(v is not None and v > 0 for v in (s, sy, ow, oh)):
+        return False
+    if _finite_number(stage_map.get("ox")) is None or _finite_number(stage_map.get("oy")) is None:
         return False
     return abs(s - sy) / s <= 0.001
 
@@ -1767,7 +1769,9 @@ def convert_samples_to_authored(samples: list[dict[str, Any]]) -> tuple[list[dic
     existing threshold and red control (all authored) applies unchanged. The
     raw screen rect is kept under `rectScreen` for evidence; a missing/invalid
     stage map leaves `rect` as None, a scoring failure (see `stageMapInvalid`
-    in `score_continuity`), never a silent skip."""
+    in `score_continuity`), never a silent skip. Nothing absent or ill-typed is
+    manufactured: a missing field stays missing and a malformed value stays raw,
+    so `sample_schema_errors` sees the raw evidence."""
     converted: list[dict[str, Any]] = []
     invalid_count = 0
     for entry in samples:
@@ -1776,15 +1780,19 @@ def convert_samples_to_authored(samples: list[dict[str, Any]]) -> tuple[list[dic
         if not valid:
             invalid_count += 1
         new_entry = dict(entry)
-        new_videos = []
-        for video_row in entry.get("videos") or []:
-            new_video = dict(video_row)
-            screen_rect = video_row.get("rect")
-            new_video["rectScreen"] = screen_rect
-            new_video["rect"] = to_authored_rect(screen_rect, stage_map) if valid and isinstance(screen_rect, dict) else None
-            new_video["stageMapValid"] = valid
-            new_videos.append(new_video)
-        new_entry["videos"] = new_videos
+        if isinstance(entry.get("videos"), list):
+            new_videos = []
+            for video_row in entry["videos"]:
+                new_video = dict(video_row) if isinstance(video_row, dict) else video_row
+                if isinstance(video_row, dict) and "rect" in video_row:
+                    screen_rect = video_row["rect"]
+                    new_video["rectScreen"] = screen_rect
+                    if _is_rect(screen_rect):
+                        new_video["rect"] = to_authored_rect(screen_rect, stage_map) if valid else None
+                if isinstance(video_row, dict):
+                    new_video["stageMapValid"] = valid
+                new_videos.append(new_video)
+            new_entry["videos"] = new_videos
         new_entry["stageMapValid"] = valid
         if "pp" in entry:
             pp = authored_prepaint(entry["pp"])
@@ -1799,22 +1807,30 @@ def convert_samples_to_authored(samples: list[dict[str, Any]]) -> tuple[list[dic
 
 def authored_prepaint(pp: Any) -> dict[str, Any] | None:
     """A pre-paint read with every `rect`, `visibleRect` and its `stageBox` in authored px by its
-    own `stageMap` (screen values kept as `*Screen`); None when that map is untrustworthy."""
+    own `stageMap` (screen values kept as `*Screen`); None when that map is untrustworthy. Only
+    present, well-formed rects are converted: an absent field stays absent, a null stays null and
+    a malformed value stays raw, so the pre-paint schema still sees it."""
     if not isinstance(pp, dict) or not stage_map_valid(pp.get("stageMap")):
         return None
     stage_map = pp["stageMap"]
 
-    def authored(rect: Any) -> Any:
-        return to_authored_rect(rect, stage_map) if isinstance(rect, dict) else rect
+    def authored(holder: dict[str, Any], key: str) -> dict[str, Any]:
+        if key not in holder:
+            return {}
+        value = holder[key]
+        return {f"{key}Screen": value, key: to_authored_rect(value, stage_map) if _is_rect(value) else value}
 
-    out = {**pp, "stageBoxScreen": pp.get("stageBox"), "stageBox": authored(pp.get("stageBox"))}
-    out["videos"] = [
-        {**pv, "rectScreen": pv.get("rect"), "rect": authored(pv.get("rect")),
-         "visibleRectScreen": pv.get("visibleRect"), "visibleRect": authored(pv.get("visibleRect"))}
-        if isinstance(pv, dict) else pv
-        for pv in pp.get("videos") or []
-    ]
+    out = {**pp, **authored(pp, "stageBox")}
+    if isinstance(pp.get("videos"), list):
+        out["videos"] = [
+            {**pv, **authored(pv, "rect"), **authored(pv, "visibleRect")} if isinstance(pv, dict) else pv
+            for pv in pp["videos"]
+        ]
     return out
+
+
+def _is_rect(value: Any) -> bool:
+    return isinstance(value, dict) and all(_finite_number(value.get(key)) is not None for key in ("x", "y", "w", "h"))
 
 
 def expected_stage_fit(canvas: dict[str, Any], viewport: dict[str, Any]) -> dict[str, float]:
@@ -2769,75 +2785,121 @@ def score_positive_halves(
     return scored
 
 
+def _finite(value: Any) -> bool:
+    return _finite_number(value) is not None
+
+
+def _finite_or_null(value: Any) -> bool:
+    return value is None or _finite(value)
+
+
+def _id_or_null(value: Any) -> bool:
+    return value is None or (not isinstance(value, bool) and isinstance(value, (int, str)))
+
+
+def _owner_ok(value: Any) -> bool:
+    return value is None or paint_instrument.schema_problem(value, SAMPLE_OWNER_FIELDS) is None
+
+
+SAMPLE_ROW_FIELDS: dict[str, Callable[[Any], bool]] = {
+    "t": _finite,
+    "scene": _finite_or_null,
+    "playerState": lambda value: value is None or isinstance(value, str),
+    "busy": lambda value: value is None or isinstance(value, bool),
+    "videos": lambda value: isinstance(value, list),
+}
+SAMPLE_VIDEO_FIELDS: dict[str, Callable[[Any], bool]] = {
+    "id": lambda value: value is not None and _id_or_null(value),
+    "src": lambda value: isinstance(value, str),
+    "currentTime": _finite,
+    "readyState": _finite,
+    "isConnected": lambda value: isinstance(value, bool),
+    "footprintOwner": lambda value: value is None or isinstance(value, dict),
+}
+SAMPLE_V2_VIDEO_FIELDS: dict[str, Callable[[Any], bool]] = {
+    "elId": _id_or_null,
+    "paused": lambda value: isinstance(value, bool),
+    "loop": lambda value: isinstance(value, bool),
+    "duration": _finite_or_null,
+    "videoWidth": _finite,
+    "rect": lambda value: value is None or _is_rect(value),
+    "footprintOwner": lambda value: _owner_ok(value),
+}
+SAMPLE_OWNER_FIELDS: dict[str, Callable[[Any], bool]] = {
+    "elId": _id_or_null,
+    "via": lambda value: isinstance(value, str),
+}
+SAMPLE_V2_FIELDS: dict[str, Callable[[Any], bool]] = {
+    "seq": lambda value: isinstance(value, int) and not isinstance(value, bool),
+    "ts": _finite,
+    "hash": lambda value: isinstance(value, str),
+    "sceneCount": _finite_or_null,
+}
+SAMPLE_V2_MARKERS = ("seq", "ts", "hash", "sceneCount", "pp", "ppUnreadable")
+
+
 def _sample_problem(row: Any) -> str | None:
-    if not isinstance(row, dict):
-        return "not an object"
-    if _finite_number(row.get("t")) is None:
-        return "t is not a finite number"
-    if row.get("scene") is not None and _finite_number(row.get("scene")) is None:
-        return "scene is neither null nor a finite number"
-    if "playerState" not in row or not (row["playerState"] is None or isinstance(row["playerState"], str)):
-        return "playerState is missing or not a string"
-    if "busy" not in row or not (row["busy"] is None or isinstance(row["busy"], bool)):
-        return "busy is missing or not a boolean"
+    """One raw sampler row against `SAMPLE_ROW_FIELDS` and each decoder against `SAMPLE_VIDEO_FIELDS` (the legacy
+    contract, unchanged, so legacy rows rescore byte-identically). A schema-2 row (any `SAMPLE_V2_MARKERS` key)
+    also needs `SAMPLE_V2_FIELDS`, each decoder `SAMPLE_V2_VIDEO_FIELDS` (a null `footprintOwner` is the explicit
+    unowned reading, an owner object needs `SAMPLE_OWNER_FIELDS`; a null `rect` only on an untrustworthy stage
+    map), and the pre-paint schemas."""
+    problem = paint_instrument.schema_problem(row, SAMPLE_ROW_FIELDS)
+    if problem:
+        return problem
     if "stageMapValid" in row:
         if not isinstance(row["stageMapValid"], bool):
-            return "stageMapValid is not a boolean"
+            return "stageMapValid ill-typed"
     elif "stageMap" not in row or not (row["stageMap"] is None or isinstance(row["stageMap"], dict)):
         return "stageMap is missing or not an object"
-    if not isinstance(row.get("videos"), list):
-        return "videos is not a list"
+    v2 = any(key in row for key in SAMPLE_V2_MARKERS)
     for video in row["videos"]:
-        if not isinstance(video, dict):
-            return "a video row is not an object"
-        video_id = video.get("id")
-        if video_id is None or isinstance(video_id, bool) or not isinstance(video_id, (int, str)):
-            return "a video id is unusable"
-        if not isinstance(video.get("src"), str):
-            return "a video src is not a string"
-        if _finite_number(video.get("currentTime")) is None:
-            return "a video currentTime is not a finite number"
-        rect = video.get("rect")
-        if rect is not None and not (isinstance(rect, dict) and all(_finite_number(rect.get(k)) is not None for k in ("x", "y", "w", "h"))):
-            return "a video rect is unusable"
-        if not isinstance(video.get("isConnected"), bool):
-            return "a video isConnected is not a boolean"
-        if _finite_number(video.get("readyState")) is None:
-            return "a video readyState is not a finite number"
-        if "footprintOwner" not in video or not (video["footprintOwner"] is None or isinstance(video["footprintOwner"], dict)):
-            return "a video footprintOwner is missing or not an object"
+        problem = paint_instrument.schema_problem(video, SAMPLE_VIDEO_FIELDS)
+        if problem:
+            return f"a video {problem}"
         if "stageMapValid" in video and not isinstance(video["stageMapValid"], bool):
-            return "a video stageMapValid is not a boolean"
-    return _prepaint_problem(row)
+            return "a video stageMapValid ill-typed"
+        if not v2:
+            if video.get("rect") is not None and not _is_rect(video["rect"]):
+                return "a video rect ill-typed"
+            continue
+        problem = paint_instrument.schema_problem(video, SAMPLE_V2_VIDEO_FIELDS)
+        if problem:
+            return f"a video {problem}"
+        if video["rect"] is None and video.get("stageMapValid") is not False:
+            return "a video rect is null on a trustworthy stage map"
+    return _prepaint_problem(row) if v2 else None
 
 
 def _prepaint_problem(row: dict[str, Any]) -> str | None:
-    """The schema-2 fields (`seq`, `ts`, `pp` and each `pv` against `paint_instrument.PV_FIELDS`), checked when
-    present."""
-    if "seq" in row and (isinstance(row["seq"], bool) or not isinstance(row["seq"], int)):
-        return "seq is not an integer"
-    if "ts" in row and _finite_number(row["ts"]) is None:
-        return "ts is not a finite number"
+    """A schema-2 row: `SAMPLE_V2_FIELDS`, then its `pp` (when read) against `paint_instrument.PP_FIELDS` and each
+    pre-paint decoder against `paint_instrument.PV_FIELDS`."""
+    problem = paint_instrument.schema_problem(row, SAMPLE_V2_FIELDS)
+    if problem:
+        return problem
     if "pp" not in row:
         return None
-    pp = row["pp"]
-    if not isinstance(pp, dict) or not isinstance(pp.get("videos"), list):
-        return "pp is not an object with a videos list"
-    for pv in pp["videos"]:
+    problem = paint_instrument.pp_schema_problem(row["pp"])
+    if problem:
+        return f"pp {problem}"
+    for pv in row["pp"]["videos"]:
         problem = paint_instrument.pv_schema_problem(pv)
         if problem:
             return f"a pp video {problem}"
     return None
 
 
-def sample_schema_errors(samples: Any, limit: int = 5) -> list[str]:
-    """The retained sampler rows' schema, checked before any tracking or windowing."""
+def sample_schema_errors(samples: Any, limit: int = 5, *, schema: Any = None) -> list[str]:
+    """The retained sampler rows' schema, checked before any tracking or windowing. A stream from a
+    schema-2 sampler (`schema`) must be schema 2 throughout, never scored as legacy rows."""
     if not isinstance(samples, list):
         return ["samples is not a list"]
     errors: list[str] = []
-    schemas = {"seq" in row for row in samples if isinstance(row, dict)}
+    schemas = {any(key in row for key in SAMPLE_V2_MARKERS) for row in samples if isinstance(row, dict)}
     if len(schemas) > 1:
-        errors.append("rows mix sampler schemas (some carry seq, some do not)")
+        errors.append("rows mix sampler schemas (some carry schema-2 fields, some do not)")
+    if schema == paint_instrument.SAMPLER_SCHEMA and schemas == {False}:
+        errors.append(f"a schema-{schema} sampler's rows carry no schema-2 fields")
     for index, row in enumerate(samples):
         problem = _sample_problem(row)
         if problem:
@@ -2892,11 +2954,12 @@ def carry_window_clip(samples: list[dict[str, Any]], spec: dict[str, Any]) -> tu
 
 def score_carry(
     samples: Any, spec: dict[str, Any], runtime_installed: bool, *, loop_period_s: float | None = None,
-    paint: bool = True,
+    paint: bool = True, schema: Any = None,
 ) -> dict[str, Any]:
-    """`score_continuity` on schema-checked samples; a False that rests on missing evidence
-    (no crossing, no stage map, a sampler gap) is INCONCLUSIVE, never a red."""
-    errors = sample_schema_errors(samples)
+    """`score_continuity` on schema-checked samples (`schema`: the sampler's, see
+    `sample_schema_errors`); a False that rests on missing evidence (no crossing, no stage map, a
+    sampler gap) is INCONCLUSIVE, never a red."""
+    errors = sample_schema_errors(samples, schema=schema)
     if errors:
         return _inconclusive("sample schema is invalid", schemaErrors=errors)
     scored = score_continuity(
@@ -3262,15 +3325,18 @@ def score_armed_strict(reads: Any, armed: dict[str, Any], continuity: Any, sampl
 
 def score_verdicts(
     samples: list[dict[str, Any]], evidence: dict[str, Any], facts: dict[str, Any], runtime_installed: bool,
-    continuity: Any, *, loop_period_s: float | None = None, paint: bool = True,
+    continuity: Any, *, loop_period_s: float | None = None, paint: bool = True, schema: Any = None,
 ) -> dict[str, Any]:
     """Pure: every plan-generated verdict (`facts["verdicts"]`), keyed by id. False only for a
-    fully observed contrary behaviour; every integrity or missing-evidence path is None."""
+    fully observed contrary behaviour; every integrity or missing-evidence path is None. `schema`
+    is the sampler's (a schema-2 stream never scores as legacy)."""
     scored: dict[str, Any] = {}
     for spec in facts.get("verdicts") or []:
         kind, scene = spec["kind"], spec["atScene"]
         if kind == "carry":
-            scored[spec["id"]] = score_carry(samples, spec, runtime_installed, loop_period_s=loop_period_s, paint=paint)
+            scored[spec["id"]] = score_carry(
+                samples, spec, runtime_installed, loop_period_s=loop_period_s, paint=paint, schema=schema,
+            )
         elif kind == "restart":
             scored[spec["id"]] = score_restart_strict(samples, spec)
         elif kind == "retire":
@@ -3480,7 +3546,9 @@ def run_arm(
         runtime_installed = result["continuity"].get("mode") == "qualified"
         result["evidence"] = evidence
         result.update(with_aliases(
-            score_verdicts(samples, evidence, arm_facts, runtime_installed, result["continuity"]),
+            score_verdicts(
+                samples, evidence, arm_facts, runtime_installed, result["continuity"], schema=result["sampler"].get("schema"),
+            ),
             arm_facts.get("verdicts") or [],
         ))
         result["verdicts"] = verdict_table(result, arm_facts.get("verdicts") or [])
@@ -3628,7 +3696,10 @@ def run_attach_arm(
                 runtime_installed = result["continuity"].get("mode") == "qualified"
                 result["evidence"] = evidence
                 result.update(with_aliases(
-                    score_verdicts(samples, evidence, attach_facts, runtime_installed, result["continuity"]),
+                    score_verdicts(
+                        samples, evidence, attach_facts, runtime_installed, result["continuity"],
+                        schema=result["sampler"].get("schema"),
+                    ),
                     attach_facts.get("verdicts") or [],
                 ))
                 result["verdicts"] = verdict_table(result, attach_facts.get("verdicts") or [])
@@ -4649,6 +4720,12 @@ def score_forced(
     return {"status": "forced-fail" if failing else "forced-ok", "checks": checks, "reason": f"failed {failing}" if failing else None}
 
 
+def slide_reached(observed: Any, ordinal: int) -> bool | None:
+    """Whether an observation is on `ordinal`; None when its `original_slide` is unreadable."""
+    slide = getattr(observed, "original_slide", None)
+    return slide == ordinal if isinstance(slide, int) and not isinstance(slide, bool) else None
+
+
 def goto_rect_expectations(v_expectations: dict[int, dict[str, str]], *, armed: bool) -> dict[int, dict[str, str]]:
     """Pure: armed reuses the plan's own `V` expectations; disarmed marks every asset dead (plan §2)."""
     if armed:
@@ -4760,8 +4837,11 @@ def score_settled_position(
     if not isinstance(snapshot, dict) or not isinstance(snapshot.get("playerState"), str):
         return {"verdict": None, "expected": expected, "observed": snapshot, "reason": "no runtime snapshot at the sample"}
     observed = {key: snapshot.get(key) for key in expected}
-    numbers_ok = all(_is_count(observed[key]) for key in expected if key != "playerState")
-    ok = numbers_ok and observed == expected
+    unreadable = [key for key in expected if key != "playerState" and not _is_count(observed[key])]
+    if unreadable:
+        return {"verdict": None, "expected": expected, "observed": observed,
+                "reason": f"runtime snapshot {', '.join(unreadable)} unreadable"}
+    ok = observed == expected
     return {
         "verdict": ok, "expected": expected, "observed": observed,
         "reason": None if ok else "settled position is not the destination's leading automatic run",
@@ -4795,6 +4875,10 @@ def score_no_consumption(
         return {"verdict": None, **fields, "reason": f"goTo autoplay repair was deferred: {deferred}"}
     if not _is_count(run_length):
         return {"verdict": None, **fields, "reason": "autoPlayRunLength is not a count"}
+    if not isinstance(fired, bool):
+        return {"verdict": None, **fields, "reason": "autoPlayFired is not a boolean"}
+    if not (run_kinds is None or (isinstance(run_kinds, list) and all(isinstance(kind, str) for kind in run_kinds))):
+        return {"verdict": None, **fields, "reason": "autoPlayRunKinds is not a list of strings"}
     leading = list(auto_kinds)
     if run_length == len(leading):
         observed_kinds = [] if run_kinds is None and run_length == 0 else run_kinds
@@ -4846,9 +4930,9 @@ def score_region_changed(
     static, so `liveness_mask` alone cannot see it."""
     crop_before, crop_after = _crop_screen_rect(before, rect), _crop_screen_rect(after, rect)
     if crop_before.size == 0 or crop_after.size == 0:
-        return {"verdict": False, "mae": None, "reason": "characters region crop is empty"}
+        return {"verdict": None, "mae": None, "reason": "characters region crop is empty"}
     if crop_before.shape != crop_after.shape:
-        return {"verdict": False, "mae": None, "reason": "characters region crop shape mismatch"}
+        return {"verdict": None, "mae": None, "reason": "characters region crop shape mismatch"}
     mae = float(np.mean(np.abs(crop_before[:, :, :3].astype(np.float64) - crop_after[:, :, :3].astype(np.float64))))
     ok = mae >= min_mae
     return {"verdict": ok, "mae": mae, "minMae": min_mae, "reason": None if ok else "characters region did not change after the advance"}
@@ -4876,7 +4960,7 @@ def score_static_control(
     time.sleep(gap_s)
     second = decode_png(transport.call("Page.captureScreenshot", format="png")["data"])
     if first.size == 0 or first.shape != second.shape:
-        return {"verdict": False, "max": None, "mae": None, "reason": "static control capture is empty or mismatched"}
+        return {"verdict": None, "max": None, "mae": None, "reason": "static control capture is empty or mismatched"}
     mask = _exclusion_mask(first.shape[:2], exclude_rects)
     if not mask.any():
         return {"verdict": None, "max": None, "mae": None, "reason": "no area outside the expected movie rects to measure"}
@@ -5099,15 +5183,15 @@ def run_goto_destination(
     # disarmed (it is the bare digit/Enter ack); check the requested slide only AFTER settling.
     wait_until_settled(player)
     from_observed = player.observe()
-    source_reached = from_observed.original_slide == from_ordinal
-    if not source_reached:
+    source_reached = slide_reached(from_observed, from_ordinal)
+    if source_reached is not True:
         reasons.append(f"source goTo did not reach slide {from_ordinal} (landed on {from_observed.original_slide!r})")
     slide = next(s for s in slides if s["originalOrdinal"] == to_ordinal)
     player.execute("goTo", to_ordinal)
     wait_until_settled(player)
     to_observed = player.observe()
-    destination_reached = to_observed.original_slide == to_ordinal
-    if not destination_reached:
+    destination_reached = slide_reached(to_observed, to_ordinal)
+    if destination_reached is not True:
         reasons.append(f"destination goTo did not reach slide {to_ordinal} (landed on {to_observed.original_slide!r})")
     # `execute("goTo")` settling is a DOM/runtime fact, not a compositor one; give it the same
     # margin `advance_until_original_slide` gives every advance-driven arrival before a burst.
@@ -5119,14 +5203,14 @@ def run_goto_destination(
     transport = player._require_transport()
     video_count = transport.evaluate("document.querySelectorAll('video').length")
     live_expected = any(item.get("expect") == LIVE for item in record.get("expectedRects") or [])
-    video_ok = (not live_expected) or (isinstance(video_count, int) and not isinstance(video_count, bool) and video_count > 0)
+    video_ok = True if not live_expected else (video_count > 0 if _is_count(video_count) else None)
     spaced = spacing_ok(record.get("shotOffsetsMs") or [])
     unique_shas = (record.get("burstProfile") or {}).get("uniqueShas")
     capture_fresh = capture_is_fresh(live_expected, unique_shas)
     if record.get("verdict") is not True:
         reasons.append(f"destination {to_ordinal} rects do not meet expectations (status={record.get('status')!r})")
-    if not video_ok:
-        reasons.append(f"destination {to_ordinal} has a live-expected movie but no <video> element")
+    if video_ok is not True:
+        reasons.append(f"destination {to_ordinal} has a live-expected movie but {video_count!r} <video> elements")
     if spaced is not True:
         reasons.append(f"destination {to_ordinal} burst spacing is unproven or too fast: {record.get('shotOffsetsMs')}")
     if capture_fresh is not True:
@@ -5206,27 +5290,30 @@ def run_advance_leg(
     raw = drain_samples(transport)
     sampler = sampler_record(transport, raw)
     rows = convert_samples_to_authored(raw)[0]
-    ended = [
-        row["t"] for row in rows
-        if hash_number(row.get("hash")) is not None and _finite_number(row.get("sceneCount")) is not None
-        and hash_number(row["hash"]) >= row["sceneCount"]
+    blind = [
+        row.get("t") for row in rows
+        if hash_number(row.get("hash")) is None or _finite_number(row.get("sceneCount")) is None
     ]
-    reached = player.observe().original_slide == to_ordinal
+    ended = [row["t"] for row in rows if row.get("t") not in blind and hash_number(row["hash"]) >= row["sceneCount"]]
+    reached = slide_reached(player.observe(), to_ordinal)
     scored = score_verdicts(
         rows, {}, {"verdicts": list(specs)}, (continuity or {}).get("mode") == "qualified", continuity,
+        schema=sampler.get("schema") if isinstance(sampler, dict) else None,
     )
     end_of_show = {"rows": len(ended), "firstT": min(ended)} if ended else None
-    if end_of_show is not None:
+    exit_reason = (
+        f"the leg passed the end of show at t={end_of_show['firstT']}" if end_of_show is not None
+        else f"{len(blind)} leg row(s) have no readable hash/sceneCount" if blind else None
+    )
+    if exit_reason is not None:
         for spec in specs:
-            scored[spec["id"]] = dict(
-                scored[spec["id"]], verdict=None, reason=f"inconclusive: the leg passed the end of show at t={end_of_show['firstT']}",
-            )
+            scored[spec["id"]] = dict(scored[spec["id"]], verdict=None, reason=f"inconclusive: {exit_reason}")
     reasons = [f"{spec['id']}={scored[spec['id']].get('verdict')!r}" for spec in specs if scored[spec["id"]].get("verdict") is not True]
     problem = sampler_problem({"sampler": sampler})
     if problem is not None:
         reasons.append(problem)
-    if not reached:
-        reasons.append(f"advance did not reach slide {to_ordinal}")
+    if reached is not True:
+        reasons.append(f"advance did not reach slide {to_ordinal} (reached={reached!r})")
     return {
         "specs": list(specs), "verdicts": scored, "sampler": sampler, "endOfShow": end_of_show,
         "reached": reached, "reasons": reasons,
@@ -6859,7 +6946,8 @@ def score_force_wrap_run(result: dict[str, Any], gt: dict[str, Any], boundary: s
     seeked = _finite_number(recorder.get("seekedT")) if isinstance(recorder, dict) else None
     period = _finite_number(recorder.get("duration")) if isinstance(recorder, dict) else None
     installed = continuity_mode(result) == "qualified"
-    result["continuityVerdict"] = score_continuity(
+    schema_errors = sample_schema_errors(samples, schema=(result.get("sampler") or {}).get("schema"))
+    result["continuityVerdict"] = _inconclusive("sample schema is invalid", schemaErrors=schema_errors) if schema_errors else score_continuity(
         samples, facts["asset"], scene, gt["srcRect"], gt["dstRect"], installed, transition_scene=gt["transition"],
         loop_period_s=period or source["periodS"], min_window_start=(seeked or 0.0) + FORCE_WRAP_WINDOW_AFTER_SEEK_MS,
     )

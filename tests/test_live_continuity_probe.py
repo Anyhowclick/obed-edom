@@ -111,6 +111,8 @@ def video(
         "src": src,
         "currentTime": current_time,
         "paused": paused,
+        "loop": False,
+        "duration": None,
         "readyState": ready_state,
         "videoWidth": 640,
         "isConnected": is_connected,
@@ -2899,7 +2901,10 @@ class TestScoreSettledPosition:
         pytest.param(_snapshot("IdleAtFinalState", 2, 4), 1, False, id="L1-wrong-next-scene-fails"),
         pytest.param(_snapshot("IdleAtFinalState", 2, 3, slide=2), 1, False, id="L1-left-the-destination-slide-fails"),
         pytest.param(_snapshot("Playing", 2, 3), 1, False, id="L1-not-idle-fails"),
-        pytest.param({**D_SETTLED, "sceneId": True}, 1, False, id="non-count-scene-fails"),
+        # Astra r6 #5: an unreadable snapshot field is inconclusive before any comparison, never a destination red.
+        pytest.param({**D_SETTLED, "sceneId": True}, 1, None, id="non-count-scene-is-inconclusive"),
+        *(pytest.param({k: v for k, v in D_SETTLED.items() if k != key}, 1, None, id=f"no-{key}-is-inconclusive")
+          for key in ("sceneId", "nextSceneId", "exportedSlideIndex")),
         pytest.param(None, 1, None, id="no-snapshot-is-inconclusive"),
         pytest.param({"sceneId": 2}, 1, None, id="snapshot-without-a-player-state-is-inconclusive"),
     ])
@@ -2957,6 +2962,8 @@ class TestScoreNoConsumption:
         pytest.param({**D_RUN, "autoPlayDeferredReason": "busy", "autoPlayFired": False}, D_SETTLED, None,
                      id="deferred-not-fired-is-inconclusive"),
         pytest.param({**D_RUN, "autoPlayRunKinds": None}, D_SETTLED, None, id="missing-kinds-is-inconclusive"),
+        pytest.param({**D_RUN, "autoPlayFired": "yes"}, D_SETTLED, None, id="non-boolean-fired-is-inconclusive"),
+        pytest.param({**D_RUN, "autoPlayRunKinds": [1]}, D_SETTLED, None, id="non-string-kinds-are-inconclusive"),
         pytest.param({**D_RUN, "autoPlayRunLength": True}, D_SETTLED, None, id="non-count-run-length-is-inconclusive"),
         pytest.param(D_RUN, None, None, id="missing-snapshot-is-inconclusive"),
     ])
@@ -3067,10 +3074,10 @@ class TestScoreRegionChanged:
         pytest.param(100, {"x": 500, "y": 500, "w": 10, "h": 10}, id="empty-crop"),
         pytest.param(50, {"x": 30, "y": 30, "w": 40, "h": 40}, id="mismatched-crop-shapes"),
     ])
-    def test_an_unmeasurable_crop_is_a_hard_fail(self, after_size: int, rect: dict[str, int]) -> None:
+    def test_an_unmeasurable_crop_is_inconclusive(self, after_size: int, rect: dict[str, int]) -> None:
         before, after = self._frame(100, 100, 10), self._frame(after_size, after_size, 10)
         result = probe.score_region_changed(before, after, rect)
-        assert result["verdict"] is False
+        assert result["verdict"] is None
         assert result["mae"] is None
 
 
@@ -3497,8 +3504,8 @@ class TestScoreStaticControl:
                      [], False, "changed unexpectedly", id="unstable-content-outside-the-rect-fails"),
         pytest.param(lambda: [png_b64(40, 40, fill=200)] * 2, [{"x": 0, "y": 0, "w": 40, "h": 40}], None, None,
                      id="excluding-the-whole-frame-is-inconclusive"),
-        pytest.param(lambda: [png_b64(40, 40, fill=200), png_b64(20, 20, fill=200)], [], False, "empty or mismatched",
-                     id="mismatched-shots-fail"),
+        pytest.param(lambda: [png_b64(40, 40, fill=200), png_b64(20, 20, fill=200)], [], None, "empty or mismatched",
+                     id="mismatched-shots-are-inconclusive"),
     ])
     def test_static_control(self, shots: Any, rects: list[dict[str, int]], verdict: bool | None, reason: str | None) -> None:
         result = probe.score_static_control(_ShotTransport(shots()), rects, gap_s=0.0)
@@ -9521,10 +9528,11 @@ class TestSamplerV2:
         assert converted["pp"]["stageBox"] == pytest.approx(SRC_RECT) and converted["pp"]["stageBoxScreen"] == screen
 
     @pytest.mark.parametrize(("mutate", "error"), [
-        (lambda rows: rows[0].pop("seq"), "mix sampler schemas"),
-        (lambda rows: rows[1].update(seq=True), "seq is not an integer"),
-        (lambda rows: rows[1].update(ts=float("nan")), "ts is not a finite number"),
-        (lambda rows: rows[1].update(pp=[]), "pp is not an object"),
+        (lambda rows: [rows[0].pop(k, None) for k in probe.SAMPLE_V2_MARKERS], "mix sampler schemas"),
+        (lambda rows: rows[0].pop("seq"), "seq missing"),
+        (lambda rows: rows[1].update(seq=True), "seq ill-typed"),
+        (lambda rows: rows[1].update(ts=float("nan")), "ts ill-typed"),
+        (lambda rows: rows[1].update(pp=[]), "pp not an object"),
         (lambda rows: rows[1]["pp"]["videos"].append({"id": None}), "pp video id ill-typed"),
         (lambda rows: None, None),
     ])
@@ -9539,6 +9547,48 @@ class TestSamplerV2:
         if error:
             spec = {"asset": ASSET, "atScene": 2, "srcRect": SRC_RECT, "dstRect": DST_RECT, "transitionScene": None}
             assert probe.score_carry(rows, spec, True)["verdict"] is None
+
+
+def _drop(path: str) -> Any:
+    """Delete one field from row 30 of a raw moving-boundary stream: `row.k`, `video.k`, `owner.k`, `pp.k`, `pv.k`."""
+    where, key = path.split(".")
+
+    def mutate(rows: list[dict[str, Any]]) -> None:
+        row = rows[30]
+        holder = {"row": row, "video": row["videos"][0], "owner": row["videos"][0]["footprintOwner"], "pp": row["pp"],
+                  "pv": row["pp"]["videos"][0], "stageMap": row["stageMap"]}[where]
+        del holder[key]
+    return mutate
+
+
+CARRY_SPEC = {"asset": ASSET, "atScene": 8, "srcRect": SRC_RECT, "dstRect": DST_RECT, "transitionScene": 7}
+RAW_DELETIONS = [
+    "row.scene", "row.seq", "row.hash", "row.sceneCount", "video.rect", "video.elId", "video.paused", "video.loop",
+    "video.duration", "video.videoWidth", "owner.elId", "owner.via", "pp.cover", "pp.seq", "pv.visibleRect",
+    "stageMap.ox",
+]
+
+
+class TestRawEvidence:
+    @pytest.mark.parametrize("break_it", [
+        pytest.param(None, id="complete-record-stays-green"),
+        *(pytest.param(_drop(path), id=f"no-{path}") for path in RAW_DELETIONS),
+        pytest.param(lambda rows: [row.pop(k, None) for row in rows for k in probe.SAMPLE_V2_MARKERS],
+                     id="schema-2-sampler-stream-stripped-to-legacy"),
+    ])
+    def test_a_field_missing_from_raw_evidence_is_inconclusive_through_conversion(self, break_it: Any) -> None:
+        """Astra r6 #3/#4: every verdict-bearing raw field (rAF row, decoder, nested owner, stage map, pre-paint
+        frame and decoder) is validated with conversion preserving its absence, so one missing field anywhere is
+        inconclusive, never a red; a schema-2 sampler's stream never falls back to legacy scoring."""
+        rows = _v2(moving_boundary_samples())
+        for row in rows:
+            row["pp"]["stageMap"] = dict(IDENTITY_STAGE_MAP)
+            row["stageMap"] = dict(IDENTITY_STAGE_MAP)
+        if break_it is not None:
+            break_it(rows)
+        converted = probe.convert_samples_to_authored(rows)[0]
+        scored = probe.score_carry(converted, CARRY_SPEC, True, schema=probe.paint_instrument.SAMPLER_SCHEMA)
+        assert scored["verdict"] is (True if break_it is None else None), scored
 
 
 class TestCarryPaintWiring:
@@ -9814,12 +9864,19 @@ class _LegTransport:
 
 class TestAdvanceLeg:
     # Astra r1 #3 / r2 C: any end of show in the leg is inconclusive, even after a fully covered window.
-    @pytest.mark.parametrize(("end_of_show", "verdict"), [
-        pytest.param(False, True, id="no-end-of-show"),
-        pytest.param(True, None, id="end-of-show-after-the-scored-window-is-inconclusive"),
+    # Astra r6 #5: unreadable exit evidence (hash/sceneCount) or observed slide is inconclusive, never green or red.
+    @pytest.mark.parametrize(("end_of_show", "break_it", "verdict", "reason"), [
+        pytest.param(False, None, True, None, id="no-end-of-show"),
+        pytest.param(True, None, None, "the leg passed the end of show at t=3.0",
+                     id="end-of-show-after-the-scored-window-is-inconclusive"),
+        pytest.param(False, lambda rows: rows[1].update(hash=""), None, "1 leg row(s) have no readable hash/sceneCount",
+                     id="unreadable-hash-is-inconclusive"),
+        pytest.param(False, lambda rows: rows[1].pop("sceneCount"), None, "1 leg row(s) have no readable hash/sceneCount",
+                     id="missing-scene-count-is-inconclusive"),
+        pytest.param(False, "slide", None, None, id="unreadable-observed-slide-is-inconclusive"),
     ])
     def test_a_leg_restarts_the_sampler_on_the_source_then_scores_its_carry_per_frame(
-        self, monkeypatch: pytest.MonkeyPatch, end_of_show: bool, verdict: bool | None,
+        self, monkeypatch: pytest.MonkeyPatch, end_of_show: bool, break_it: Any, verdict: bool | None, reason: str | None,
     ) -> None:
         """Plan §3.8 call order: drain-and-discard, start, click delay, advance, settle, pad, stop,
         drain; every row of the leg is scored against its specs with the session's continuity. Any
@@ -9829,14 +9886,17 @@ class TestAdvanceLeg:
         rows = [{"t": float(i), "hash": "#7", "sceneCount": 9, "videos": [], "stageMap": None} for i in range(3)]
         if end_of_show:
             rows += [{"t": 3.0 + i, "hash": "#9", "sceneCount": 9, "videos": [], "stageMap": None} for i in range(2)]
+        if callable(break_it):
+            break_it(rows)
         transport = _LegTransport(events, rows)
+        slide = None if break_it == "slide" else 4
         player = argparse.Namespace(
-            _require_transport=lambda: transport, observe=lambda: argparse.Namespace(original_slide=4, busy=False),
+            _require_transport=lambda: transport, observe=lambda: argparse.Namespace(original_slide=slide, busy=False),
         )
         seen: dict[str, Any] = {}
 
-        def score_verdicts(samples: Any, evidence: Any, facts: Any, installed: bool, continuity: Any) -> dict[str, Any]:
-            seen.update(times=[row["t"] for row in samples], installed=installed, specs=facts["verdicts"])
+        def score_verdicts(samples: Any, evidence: Any, facts: Any, installed: bool, continuity: Any, *, schema: Any) -> dict[str, Any]:
+            seen.update(times=[row["t"] for row in samples], installed=installed, specs=facts["verdicts"], schema=schema)
             return {P2_CARRY34: {"verdict": True, "window": {"start": 0.0, "end": 2.5}}}
 
         monkeypatch.setattr(probe.time, "sleep", lambda s: events.append(f"sleep {s}"))
@@ -9849,12 +9909,16 @@ class TestAdvanceLeg:
             "drain", "start", f"sleep {probe.CLICK_DELAY_S}", "advance 4", "settled", f"sleep {probe.WINDOW_PAD_S}",
             "stop", "drain", "drain",
         ]
-        assert seen == {"times": [r["t"] for r in rows], "installed": True, "specs": [LEG_SPEC]}
-        assert leg["verdict"] is verdict and leg["verdicts"][P2_CARRY34]["verdict"] is verdict
-        assert leg["reasons"] == ([] if verdict else [f"{P2_CARRY34}=None"])
+        assert seen == {"times": [r["t"] for r in rows], "installed": True, "specs": [LEG_SPEC], "schema": 2}
+        assert leg["verdict"] is verdict
         assert leg["endOfShow"] == ({"rows": 2, "firstT": 3.0} if end_of_show else None)
-        if end_of_show:
-            assert leg["verdicts"][P2_CARRY34]["reason"] == "inconclusive: the leg passed the end of show at t=3.0"
+        if break_it == "slide":
+            assert leg["reached"] is None and leg["reasons"] == ["advance did not reach slide 4 (reached=None)"]
+        else:
+            assert leg["verdicts"][P2_CARRY34]["verdict"] is verdict
+            assert leg["reasons"] == ([] if verdict else [f"{P2_CARRY34}=None"])
+        if reason:
+            assert leg["verdicts"][P2_CARRY34]["reason"] == f"inconclusive: {reason}"
 
     def test_a_leg_without_a_matching_spec_is_an_error_and_drives_nothing(self) -> None:
         leg = probe.run_advance_leg(argparse.Namespace(), 3, 4, [], {"mode": "qualified"})
