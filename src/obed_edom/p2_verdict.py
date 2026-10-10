@@ -215,6 +215,15 @@ FREEZE_TRIGGER_MAX_RAFS = 9        # delivered poll frames, keydown -> rect depa
 FREEZE_TRIGGER_MAX_DELAY_MS = 190.0  # page-clock ceiling: a frame count cannot see a stall
 FREEZE_TRIGGER_MOTION_SLACK_FRAMES = 2  # poll callbacks between the runtime's fresh
                                         # motion marker and the measured departure
+# The three bounds above were calibrated on a LINEAR bridge, whose overlay departs
+# the poll's 1 px `rectDeparted` threshold ~4.8 ms after the marker. A bridge
+# whose curve departs later shifts them by exactly the extra departure latency
+# (`freeze_trigger_bounds`), derived from the injected plan's bridge geometry.
+FREEZE_TRIGGER_DEPARTURE_PX = 1.0
+FREEZE_TRIGGER_CALIBRATED_LATENCY_MS = 4.8
+FREEZE_TRIGGER_NOMINAL_FRAME_MS = 1000.0 / 60.0
+BRIDGE_EASE_IN_EASE_OUT = (0.42, 0.0, 0.58, 1.0)  # the core's EASE_IN_EASE_OUT (x1, y1, x2, y2)
+BRIDGE_LINEAR = (0.0, 0.0, 1.0, 1.0)
 
 # Drain to the freeze-control arm boundary (`_capture_3to4_snapshot`). MEASURED on
 # this fixture 2026-09-21: the drain needs presses from #1..#5 only. `#6` is the
@@ -3369,8 +3378,111 @@ def _manifest_arms_ok(manifest: object, snaps: dict[str, dict]) -> bool:
     )
 
 
+def _bezier_axis(t: float, p1: float, p2: float) -> float:
+    return ((1 + 3 * p1 - 3 * p2) * t + (3 * p2 - 6 * p1)) * t * t + 3 * p1 * t
+
+
+def _bezier_param(value: float, p1: float, p2: float) -> float:
+    lo, hi = 0.0, 1.0
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        if _bezier_axis(mid, p1, p2) < value:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+def _bridge_progress(fraction: float, curve: tuple[float, float, float, float]) -> float:
+    """The bridge's progress at `fraction` of its duration, as the core's `easeInEaseOut`."""
+    if not fraction > 0:
+        return 0.0
+    if fraction >= 1:
+        return 1.0
+    x1, y1, x2, y2 = curve
+    return _bezier_axis(_bezier_param(fraction, x1, x2), y1, y2)
+
+
+def _bridge_axis_spans_px(bridge: object, scale: float) -> dict[str, float] | None:
+    """Screen-px travel of each axis of a bridge's srcRect -> rect at `scale`, or `None`."""
+    if not isinstance(bridge, dict):
+        return None
+    src, dest = _rect_or_none(bridge.get("srcRect")), _rect_or_none(bridge.get("rect"))
+    if src is None or dest is None:
+        return None
+    return {k: abs(dest[k] - src[k]) * scale for k in ("x", "y", "w", "h")}
+
+
+def _bridge_travel(bridge: object, scale: float) -> tuple[float, float] | None:
+    spans = _bridge_axis_spans_px(bridge, scale)
+    duration_s = _finite(bridge.get("durationSeconds")) if spans else None
+    if duration_s is None or not duration_s > 0 or not max(spans.values()) > 0:
+        return None
+    return max(spans.values()), 1000.0 * duration_s
+
+
+def _bridge_departure_latency_ms(
+    bridge: object, scale: float, curve: tuple[float, float, float, float],
+    threshold_px: float = FREEZE_TRIGGER_DEPARTURE_PX,
+) -> float | None:
+    """Page-clock ms from a bridge's motion start until its overlay departs the source
+    rect by more than `threshold_px` on any axis (the poll's `rectDeparted`)."""
+    travel = _bridge_travel(bridge, scale)
+    if travel is None or not travel[0] > threshold_px:
+        return None
+    span_px, duration_ms = travel
+    x1, y1, x2, y2 = curve
+    return duration_ms * _bezier_axis(_bezier_param(threshold_px / span_px, y1, y2), x1, x2)
+
+
+def _bridge_displacement_px(
+    bridge: object, scale: float, curve: tuple[float, float, float, float], elapsed_ms: float,
+) -> float | None:
+    """The largest per-axis displacement of a bridge's overlay `elapsed_ms` after its start."""
+    travel = _bridge_travel(bridge, scale)
+    if travel is None:
+        return None
+    span_px, duration_ms = travel
+    return span_px * _bridge_progress(elapsed_ms / duration_ms, curve)
+
+
+def _freeze_trigger_bounds(departure_latency_ms: float) -> dict[str, float]:
+    """The linear-calibrated `FREEZE_TRIGGER_*` bounds shifted by the extra departure
+    latency: the stall ceilings move with the curve and never disappear."""
+    shift_ms = max(0.0, departure_latency_ms - FREEZE_TRIGGER_CALIBRATED_LATENCY_MS)
+    shift_frames = math.ceil(shift_ms / FREEZE_TRIGGER_NOMINAL_FRAME_MS)
+    return {
+        "maxTriggerFrames": FREEZE_TRIGGER_MAX_RAFS + shift_frames,
+        "maxTriggerDelayMs": FREEZE_TRIGGER_MAX_DELAY_MS + shift_ms,
+        "maxMotionLeadFrames": FREEZE_TRIGGER_MOTION_SLACK_FRAMES + shift_frames,
+    }
+
+
+def _freeze_trigger_expectation(
+    nc: dict, bridge: object, curve: tuple[float, float, float, float],
+) -> dict | None:
+    """What the INJECTED 3->4 bridge implies for the trigger: its departure latency
+    at the scale the poll measured the departure from, and the shifted bounds."""
+    if not (
+        isinstance(bridge, dict) and bridge.get("action") == "bridge"
+        and bridge.get("atScene") == SLIDE4_MIN_HASH
+    ):
+        return None
+    moved_from = _rect_or_none(nc.get("movedFromRect"))
+    src = _rect_or_none(bridge.get("srcRect"))
+    if moved_from is None or src is None or not src["w"] > 0:
+        return None
+    scale = moved_from["w"] / src["w"]
+    latency_ms = _bridge_departure_latency_ms(bridge, scale, curve)
+    if latency_ms is None:
+        return None
+    return {"scale": scale, "departureLatencyMs": latency_ms, **_freeze_trigger_bounds(latency_ms)}
+
+
 def _score_freeze_control(
     a1: dict, b: dict, a2: dict, manifest: object = None, *,
+    bridge: dict | None,
+    bridge_curve: tuple[float, float, float, float],
     evidence_cadence: tuple[int, ...] = BURST_OFFSETS_MS,
     legacy_unrecorded_cadence: tuple[int, ...] | None = None,
 ) -> dict:
@@ -3658,13 +3770,43 @@ def _score_freeze_control(
     # time (review r3 BLOCKER 3), a page-clock ceiling on the keydown->trigger
     # delay, plus agreement with the runtime's OWN fresh motion-start marker to
     # within a couple of callbacks. The frame count stays as secondary evidence.
+    # Every bound is shifted by the injected bridge's own departure latency under
+    # its curve (an eased overlay needs ~61 ms to move 1 px), and the overlay's
+    # displacement at the trigger may not exceed the curve's at the band's end.
     motion_started_frame = nc.get("motionStartedFrame")
+    expected = _freeze_trigger_expectation(nc, bridge, bridge_curve)
+    trigger_frame_ms = (
+        trigger_delay_ms / trigger_frames
+        if isinstance(trigger_frames, int) and trigger_frames >= 1
+        and trigger_delay_ms is not None and trigger_delay_ms >= 0.0
+        else None
+    )
+    marker_started = _finite(motion_marker.get("started"))
+    marker_to_trigger_ms = hold_started - marker_started if marker_started is not None else None
+    motion_band_ms = (
+        expected["departureLatencyMs"] + (1 + FREEZE_TRIGGER_MOTION_SLACK_FRAMES) * trigger_frame_ms
+        if expected is not None and trigger_frame_ms is not None
+        else None
+    )
+    trigger_displacement_cap_px = (
+        _bridge_displacement_px(bridge, expected["scale"], bridge_curve, motion_band_ms)
+        if motion_band_ms is not None
+        else None
+    )
+    moved_from = _rect_or_none(nc.get("movedFromRect"))
+    moved_to = _rect_or_none(nc.get("movedToRect"))
+    trigger_displacement_px = (
+        max(abs(moved_to[k] - moved_from[k]) for k in ("x", "y", "w", "h"))
+        if moved_from is not None and moved_to is not None
+        else None
+    )
     checks["firedAtMoveStart"] = bool(
         nc.get("firedVia") == "moved"
+        and expected is not None
         and isinstance(trigger_frames, int)
-        and 1 <= trigger_frames <= FREEZE_TRIGGER_MAX_RAFS
+        and 1 <= trigger_frames <= expected["maxTriggerFrames"]
         and trigger_delay_ms is not None
-        and trigger_delay_ms <= FREEZE_TRIGGER_MAX_DELAY_MS
+        and trigger_delay_ms <= expected["maxTriggerDelayMs"]
     )
     # Frame proximity alone is not identity (review r4 MAJOR 1): a marker for
     # another boundary, or a replacement generation on the bound video, can also
@@ -3673,7 +3815,16 @@ def _score_freeze_control(
     checks["firedAtRuntimeMotionStart"] = bool(
         isinstance(motion_started_frame, int)
         and isinstance(trigger_frames, int)
-        and abs(trigger_frames - motion_started_frame) <= FREEZE_TRIGGER_MOTION_SLACK_FRAMES
+        and expected is not None
+        and -FREEZE_TRIGGER_MOTION_SLACK_FRAMES
+        <= trigger_frames - motion_started_frame
+        <= expected["maxMotionLeadFrames"]
+        and motion_band_ms is not None
+        and marker_to_trigger_ms is not None
+        and -FREEZE_TRIGGER_MOTION_SLACK_FRAMES * trigger_frame_ms <= marker_to_trigger_ms <= motion_band_ms
+        and trigger_displacement_px is not None
+        and trigger_displacement_cap_px is not None
+        and trigger_displacement_px <= trigger_displacement_cap_px
         and motion_marker.get("atScene") == SLIDE4_MIN_HASH
         and motion_marker.get("started") is not None
         and motion_at_trigger.get("started") == motion_marker.get("started")
@@ -3877,6 +4028,13 @@ def _score_freeze_control(
             "triggerFramesAfterAdvance": trigger_frames,
             "motionStartedFrame": motion_started_frame,
             "motionStartedAt": nc.get("motionStartedAt"),
+            "bridgeCurve": list(bridge_curve),
+            "triggerExpectation": expected,
+            "triggerFrameMs": trigger_frame_ms,
+            "markerToTriggerMs": marker_to_trigger_ms,
+            "motionBandMs": motion_band_ms,
+            "triggerDisplacementPx": trigger_displacement_px,
+            "triggerDisplacementCapPx": trigger_displacement_cap_px,
             "pollMaxGapMs": poll_max_gap_ms,
             "preAdvanceDepartureAt": nc.get("preAdvanceDepartureAt"),
             "loopHandedOff": nc.get("loopHandedOff"),
