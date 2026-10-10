@@ -3094,6 +3094,15 @@ def score_census(
     return records, sorted(red), unknown
 
 
+def show_output(player: LiveOutputHost, result: dict[str, Any]) -> None:
+    """`show()` before any sampling: it lifts the attach host's inline `#body` opacity 0 and the
+    launch host's black cover, both of which the ancestor-aware owner and paint reads would see.
+    An output that still reads hidden stops the arm."""
+    result["outputVisible"] = player.execute("show").output_visible
+    if result["outputVisible"] is not True:
+        raise RuntimeError(f"output was not visible after show() (outputVisible={result['outputVisible']!r})")
+
+
 def run_arm(
     name: str, export_root: Path, slides: list[dict[str, Any]], facts: dict[str, Any],
     viewport: tuple[int, int], expected_stage: dict[str, float], *,
@@ -3105,6 +3114,7 @@ def run_arm(
     try:
         player.start()
         result["continuity"] = player.output["continuity"]
+        show_output(player, result)
         arm_facts = facts_for(result["continuity"], facts, facts_on)
         if facts_on is not None:
             result["factsSet"] = "on" if arm_facts is facts_on else "off"
@@ -3248,6 +3258,7 @@ def run_attach_arm(
                 if facts_on is not None:
                     result["factsSet"] = "on" if attach_facts is facts_on else "off"
                 result["output"] = {key: value for key, value in output.items() if key != "continuity"}
+                show_output(player, result)
                 transport = player._require_transport()
                 plan_transparent = transport.evaluate(
                     "!!(window.__OBED_CONTINUITY__ && window.__OBED_CONTINUITY__.transparentBackground)"

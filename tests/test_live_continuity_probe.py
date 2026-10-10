@@ -4467,6 +4467,67 @@ def test_attach_arm_holds_the_viewport_override_session_until_its_chrome_is_torn
     assert events == ["host started, hold closed=False", "hold closed", "chrome terminated"]
 
 
+@pytest.mark.parametrize("arm", ["launch", "attach"])
+@pytest.mark.parametrize("visible", [True, False])
+def test_arms_show_the_output_before_sampling(
+    arm: str, visible: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan §3.3 (B0): `fbba575e`'s ancestor-walking `isCompositing` sees the attach host's inline
+    `#body{opacity:0}` (and a paint read sees the launch host's black cover) until `show()` runs, so
+    both host arms call `execute("show")` before the sampler is installed, and an output that still
+    reads hidden stops the arm before any sample is taken."""
+    events: list[str] = []
+
+    class Host:
+        output = {"continuity": {"mode": "qualified"}, "logPath": None}
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            events.append("start")
+
+        def execute(self, operation: str, *args: Any) -> Any:
+            events.append(operation)
+            return argparse.Namespace(output_visible=visible)
+
+        def _require_transport(self) -> Any:
+            return argparse.Namespace(evaluate=lambda js: None)
+
+        def stop(self) -> None:
+            events.append("stop")
+
+    def drive(*args: Any, **kwargs: Any) -> Any:
+        events.append("drive")
+        raise RuntimeError("stop after drive")
+
+    class Proc:
+        pid = 1
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self, timeout: float) -> int:
+            return 0
+
+        def poll(self) -> int:
+            return 0
+
+    monkeypatch.setattr(probe, "LiveOutputHost", Host)
+    monkeypatch.setattr(probe, "force_viewport", lambda *a: None)
+    monkeypatch.setattr(probe, "drive_and_sample", drive)
+    monkeypatch.setattr(probe, "launch_attach_chrome", lambda profile: Proc())
+    monkeypatch.setattr(probe, "wait_devtools_active_port", lambda profile, proc: DevToolsEndpoint(1, "/devtools/browser/b"))
+    monkeypatch.setattr(probe, "wait_for_cdp", lambda endpoint, proc: None)
+    monkeypatch.setattr(probe, "force_exact_viewport", lambda *a: None)
+    with pytest.raises(RuntimeError, match="stop after drive" if visible else "not visible after show"):
+        if arm == "launch":
+            probe.run_arm("A", Path("x"), [], {}, (64, 32), {})
+        else:
+            probe.run_attach_arm(Path("x"), [], {}, tmp_path, {})
+    assert events == ["start", "show", *(["drive"] if visible else []), "stop"]
+
+
 class TestAttachChrome:
     """`attach_chrome` is the one owner of the attach Chrome and its viewport-override session for
     both `run_attach_arm` and attach-mode `run_pass_g`. Order on exit: the override session closes
