@@ -26,6 +26,7 @@ import threading
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import ANY
 
 import numpy as np
 import pytest
@@ -34,7 +35,6 @@ from PIL import Image
 from obed_edom import p2_verdict as v
 from obed_edom.live_gl_replay_js import GL_REPLAY_JS
 from obed_edom import live_runtime
-from obed_edom.live_runtime import PLAYER_SHA256
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path[:0] = [p for p in (str(REPO / "tests"), str(REPO / "scripts")) if p not in sys.path]
@@ -744,7 +744,7 @@ def test_patched_main_js_uses_live_runtime_on_the_pinned_player(tmp_path, monkey
     assert seen == [False]
     assert patched == raw + b"/*patched*/"
     assert meta["mainJsSha256"] == hashlib.sha256(raw).hexdigest()
-    assert meta["playerSha256"] == PLAYER_SHA256
+    assert meta["playerSha256"] == hashlib.sha256(raw).hexdigest()
     assert meta["mmOpacity"] is False
     assert (player / drv.PLAYER_MAIN_JS).read_bytes() == raw
 
@@ -763,7 +763,7 @@ def _synthetic_pinned_player(tmp_path: Path, monkeypatch, name: str) -> tuple[Pa
         + b";".join(before for before, _ in live_runtime._MM_OPACITY_REPLACEMENTS)
         + b";after"
     )
-    monkeypatch.setattr(live_runtime, "PLAYER_SHA256", hashlib.sha256(raw).hexdigest())
+    monkeypatch.setitem(live_runtime.SUPPORTED_PLAYERS, hashlib.sha256(raw).hexdigest(), (ANY,) * 3)
     player = _fake_player(tmp_path, name)
     (player / drv.PLAYER_MAIN_JS).write_bytes(raw)
     return player, raw
@@ -839,7 +839,7 @@ def test_auto_serves_the_mm_opacity_patch_in_every_arm(tmp_path, monkeypatch, gl
         assert main_js.count(after) == 1
     assert meta == {
         "mainJsSha256": hashlib.sha256(raw).hexdigest(),
-        "playerSha256": PLAYER_SHA256,
+        "playerSha256": hashlib.sha256(raw).hexdigest(),
         "patchedMainJsSha256": hashlib.sha256(main_js).hexdigest(),
         "mmOpacity": True,
     }

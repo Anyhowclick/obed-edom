@@ -85,7 +85,6 @@ from obed_edom.live_continuity_js import PRESERVE_CORE_JS  # noqa: E402
 from obed_edom.live_gl_replay_js import GL_REPLAY_VERSION, gl_replay_script, validate_gl_replay_entry  # noqa: E402
 from obed_edom.live_gl_replay_js import js_sha256 as gl_replay_js_sha256  # noqa: E402
 from obed_edom.live_runtime import (  # noqa: E402
-    PLAYER_SHA256,
     RUNTIME_VERSION,
     LiveRuntimeUnsupported,
     patch_player,
@@ -703,9 +702,10 @@ def _patched_main_js(player_dir: Path, *, mm_opacity: bool) -> tuple[bytes, dict
         patched = patch_player(raw, mm_opacity=mm_opacity)
     except LiveRuntimeUnsupported as exc:
         raise SystemExit(f"patched main.js: {exc} (main.js sha {hashlib.sha256(raw).hexdigest()})") from exc
+    digest = hashlib.sha256(raw).hexdigest()
     return patched, {
-        "mainJsSha256": hashlib.sha256(raw).hexdigest(),
-        "playerSha256": PLAYER_SHA256,
+        "mainJsSha256": digest,
+        "playerSha256": digest,
         "patchedMainJsSha256": hashlib.sha256(patched).hexdigest(),
         "mmOpacity": mm_opacity,
     }
