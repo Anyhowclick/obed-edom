@@ -105,7 +105,8 @@ cadence, not proven absent.
 ## Suites (final, `dcd5b9e4`)
 - `env -u PYTHONDONTWRITEBYTECODE uv run pytest tests/ -n auto --dist worksteal`: 9156 passed, 11 skipped, 2 xfailed
   (skips are local operator decks)
-- Python 3.10 floor: <<pytest-310.log result>>
+- Python 3.10.10 floor (single process, touched test files: `test_p2_adversarial{,_arms,_gl_replay,_driver}.py`,
+  `test_live_continuity.py`, `test_live_continuity_probe.py`, `test_live_runtime.py`, `test_run_gates.py`): 2734 passed in 404 s
 - `npm run test:ui`: 320 passed. `npm run test:maps`: 542 passed + 2 perf
 
 ## Reviews (GPT-6 Astra, high; findings classified)
