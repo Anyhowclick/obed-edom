@@ -9784,7 +9784,7 @@ LEG_SPEC = {"id": P2_CARRY34, "kind": "carry", "expect": True, "action": "bridge
 
 def _leg(verdict: bool | None = True, **extra: Any) -> dict[str, Any]:
     return {"specs": [LEG_SPEC], "verdicts": {P2_CARRY34: {"verdict": verdict}}, "sampler": _sampler_ok(),
-            "verdict": verdict, **extra}
+            "reached": True, "verdict": verdict, **extra}
 
 
 def _g_leg_result() -> dict[str, Any]:
@@ -9877,6 +9877,23 @@ class TestPassGRedStatus:
         then the red multiset must equal the registration exactly."""
         result = _passg_red_result()
         mutate(result)
+        assert probe.passg_red_status(result)[0] == status
+
+
+    @pytest.mark.parametrize(("mutate", "status"), [
+        pytest.param(lambda leg, dest: None, "pass", id="complete-control"),
+        pytest.param(lambda leg, dest: (leg.update(reached=None, verdict=None), dest.update(verdict=None)),
+                     "inconclusive", id="leg-reached-unknown"),
+        pytest.param(lambda leg, dest: leg.pop("reached"), "inconclusive", id="leg-reached-missing"),
+        pytest.param(lambda leg, dest: dest.update(verdict=None), "inconclusive", id="destination-verdict-unknown"),
+    ])
+    def test_an_unknown_leg_is_inconclusive_never_a_registered_pass(self, mutate: Any, status: str) -> None:
+        """Astra r8 #1: an unknown in the advance leg (reached, leg or destination verdict) is
+        inconclusive before the red-set comparison; the complete record keeps its registered pass."""
+        result = _passg_red_result()
+        dest = result["armed"]["destinations"][-1]
+        mutate(dest["advanceCarry"], dest)
+        result["redSet"], result["unknown"] = probe.passg_red_ids(result)
         assert probe.passg_red_status(result)[0] == status
 
 

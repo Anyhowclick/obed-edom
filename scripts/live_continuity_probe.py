@@ -5529,7 +5529,8 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
 def passg_red_ids(result: dict[str, Any]) -> tuple[list[str], list[str]]:
     """(red ids, unreadable ids) of a Pass G red arm: `G{f}-{to}[-{adv}]:destination` for a
     destination whose non-leg verdict failed (`Goff…` in the null control), and
-    `G{f}-{to}-{adv}:{specId}` for each advance-leg verdict that differs from its expectation."""
+    `G{f}-{to}-{adv}:{specId}` for each advance-leg verdict that differs from its expectation, and
+    `G{f}-{to}-{adv}:reached` for a leg that did not reach its destination."""
     red: list[str] = []
     unknown: list[str] = []
     for label, prefix in (("armed", "G"), ("nullControl", "Goff")):
@@ -5544,6 +5545,9 @@ def passg_red_ids(result: dict[str, Any]) -> tuple[list[str], list[str]]:
             for spec in leg.get("specs") or []:
                 value = (verdicts.get(spec["id"]) or {}).get("verdict")
                 (unknown if value is None else red if value is not spec["expect"] else []).append(f"{case}:{spec['id']}")
+            if leg:
+                reached = leg.get("reached")
+                (unknown if reached is None else red if reached is not True else []).append(f"{case}:reached")
     return sorted(red), sorted(unknown)
 
 
@@ -5584,8 +5588,8 @@ def passg_red_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     status, reasons = overall_status_g(result)
     if status == "error":
         return status, reasons
-    if result.get("unknown"):
-        return "inconclusive", [f"unreadable: {', '.join(result['unknown'])}"]
+    if status == "inconclusive" or result.get("unknown"):
+        return "inconclusive", [f"unreadable: {', '.join(result.get('unknown') or [])}", *reasons]
     expected = result.get("expectedRedSet")
     if expected is None:
         return "unregistered", [f"no pre-registered Pass G red set for {result.get('redArm')!r} on this deck; red={result.get('redSet')}"]
