@@ -831,6 +831,10 @@ for the parked `iwa-surgical-write-generator` feature.
 * **Click mode** waits (bounded) for the slide-number overlay to close before any click (`_await_click_target`);
   `#slideNumberControl` is hidden on output.
 * **Gate G:** `scripts/live_continuity_probe.py --pass G [--viewport WxH | --attach]`; fails closed on missing evidence.
+  `run_gates.sh` (full tier) queues it on P2 and D1–D6; a run passes only on exit 0 with artifact `status` `pass`.
+  No-consumption = the settled position after the go-to (L leading automatic events: L=0 `IdleAtInitialState` at the
+  onset scene, L≥1 `IdleAtFinalState` at onset+L−1, same slide) plus exact host/JSON auto-run kinds; the pixel half is
+  n/a on destinations with no click-driven builds.
 * **Residuals:** a physical input between the R1 re-read and the host's advance can race it (the in-page
   `jumpToSlide(n,true)` answer is deferred); visible auto animations on arrival are not gated. **Unverified lead:** the
   player's `handleClickEvent` ignores clicks whose target is a `<video>`, so a playing movie over the stage centre may
