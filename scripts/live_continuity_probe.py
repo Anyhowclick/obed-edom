@@ -45,6 +45,9 @@ plan's entries are bound to those instances by objectId. `--strip ACTION[@atScen
 `--core-variant NAME` run one red arm on its own and compare its red set with the arm's
 pre-registered one (`RED_ARM_EXPECTATIONS`, plus `RED_ARM_REQUIRED` for a RECORD arm);
 `--rescore` re-scores a stored artifact with both scorers.
+Schema-2 sampler rows also carry a pre-paint read (`paint_instrument`), and every carry is scored per
+frame as well; `--pass G --core-variant NAME` runs Pass G's red arm and `--paint-control` its positive
+control.
 `--skip-arms` leaves named arms out of the full run (recorded as `skippedArms`, never a pass of
 that arm); a run that skips every positive arm (A, V, attach) fails.
 
@@ -115,6 +118,7 @@ except ImportError:  # pragma: no cover - stream B is landing this constant conc
 
 import live_host_probe  # noqa: E402 - reuse the headless window-size compensation
 from continuity_core_variants import VARIANTS, parse_strip, strip_entries, strip_label, variant_core, variant_sha  # noqa: E402
+import paint_instrument  # noqa: E402
 
 FIXTURE = fixture("p2-recovery") / "html-adversarial/html-player"
 ORIGINAL_INDEX = fixture("p2-recovery") / "html-adversarial/html-unmodified/index.html"
@@ -266,6 +270,11 @@ RED_ARM_EXPECTATIONS: dict[tuple[str, str, str], tuple[str, ...] | str] = {
     (_D6, "strip:bridge@2", "off"): (f"b0to1:{_A_FAR}:carry",),
     (_D6, "strip:retire@8", "off"): (f"b3to4:{_A}:retire",),
 }
+# Pass G red arms (`--pass G --core-variant NAME`), keyed by (flag-off runtime plan sha, arm label); ids
+# from `passg_red_ids`. Nothing is registered before V3 measures it on the landed core.
+PASSG_RED_EXPECTATIONS: dict[tuple[str, str], tuple[str, ...]] = {}
+# Optional floor on a red carry's longest unpainted run (frames), carried as `paintFloor` (decision 3).
+RED_ARM_PAINT_FLOOR: dict[tuple[str, str, str], int] = {}
 # Ids an arm must turn red whatever else it registers (plan §3.4 Q2/Q3, §4): the stray red and the
 # identity red. A RECORD arm missing one of these fails; a registered set must contain them.
 RED_ARM_REQUIRED: dict[tuple[str, str, str], tuple[str, ...]] = {
@@ -495,7 +504,9 @@ SAMPLER_JS = r"""
       return window.__OBED_P2_PRESERVE__.footprintOwnerDecoderId(q);
     } catch (e) { return null; }
   }
-""" + STAGE_MAP_FN_JS + r"""
+""" + STAGE_MAP_FN_JS + paint_instrument.PAINT_READ_FN_JS + paint_instrument.PREPAINT_FN_JS + r"""
+  var meta = {schema: 2, rafTicks: 0, overflow: 0, errors: [], lastTs: null, running: false, startedAt: null, stoppedAt: null};
+  var frameSeq = 0, frameTs = null, prepaint = null;
   function tick(){
     var t = performance.now();
     var state = stateOf();
@@ -525,16 +536,75 @@ SAMPLER_JS = r"""
         rect: rect,
         footprintOwner: ownerOf(rect, v.currentSrc || v.src || '', map)
       });
+      prepaint.track(v);
     });
-    samples.push({t: t, scene: state.sceneId, playerState: state.playerState, busy: state.busy, videos: videos, stageMap: map});
-    if (samples.length > MAX_SAMPLES) samples.shift();
-    window.__obedContinuityProbe__.raf = requestAnimationFrame(tick);
+    if (samples.length >= MAX_SAMPLES) { meta.overflow++; return; }
+    samples.push({t: t, scene: state.sceneId, playerState: state.playerState, busy: state.busy, videos: videos, stageMap: map,
+                  seq: frameSeq, ts: frameTs, hash: String(location.hash || ''),
+                  sceneCount: (state.sceneCount != null ? state.sceneCount : null)});
   }
-  window.__obedContinuityProbe__ = {samples: samples};
-  window.__obedContinuityProbe__.raf = requestAnimationFrame(tick);
+  function frame(ts){
+    if (!meta.running) return;
+    probe.raf = requestAnimationFrame(frame);
+    try {
+      frameSeq++;
+      frameTs = ts;
+      meta.rafTicks++;
+      meta.lastTs = ts;
+      var ctl = window.__obedPaintControl__;
+      if (ctl && typeof ctl.tick === 'function') ctl.tick(frameSeq, ts);
+      tick(ts);
+      prepaint.toggle(frameSeq, ts);
+    } catch (e) {
+      if (meta.errors.length < 50) meta.errors.push('frame: ' + String(e && e.message || e));
+    }
+  }
+  function resetMeta(){
+    Object.keys(meta).forEach(function(k){
+      var value = meta[k];
+      if (typeof value === 'number') meta[k] = 0;
+      else if (Array.isArray(value)) value.length = 0;
+      else if (value && typeof value === 'object') Object.keys(value).forEach(function(j){ if (typeof value[j] === 'number') value[j] = 0; });
+    });
+    meta.schema = 2;
+    meta.lastTs = null;
+    meta.stoppedAt = null;
+  }
+  window.__obedContinuityProbe__ = {samples: samples, meta: meta};
+  var probe = window.__obedContinuityProbe__;
+  try { prepaint = installPrepaint(probe); } catch (e) { window.__obedContinuityProbe__ = null; throw e; }
+  probe.start = function(){
+    if (meta.running) return true;
+    resetMeta();
+    meta.running = true;
+    meta.startedAt = performance.now();
+    probe.raf = requestAnimationFrame(frame);
+    return true;
+  };
+  probe.stop = function(){
+    if (probe.raf != null) cancelAnimationFrame(probe.raf);
+    probe.raf = null;
+    if (meta.running) meta.stoppedAt = performance.now();
+    meta.running = false;
+    return true;
+  };
+  probe.drain = function(maxRows){ return samples.splice(0, maxRows); };
+  probe.start();
   return true;
 })();
 """
+SAMPLER_START_JS = "window.__obedContinuityProbe__.start()"
+SAMPLER_STOP_JS = "window.__obedContinuityProbe__.stop()"
+SAMPLER_META_JS = (
+    "(function(){var p=window.__obedContinuityProbe__;"
+    "return p?{meta:JSON.parse(JSON.stringify(p.meta)),now:performance.now()}:null;})()"
+)
+SAMPLER_DRAIN_ROWS = 200
+SAMPLER_DRAIN_JS = f"window.__obedContinuityProbe__.drain({SAMPLER_DRAIN_ROWS})"
+PAINT_CONTROL_READ_JS = (
+    "(function(){var c=window.__obedPaintControl__;"
+    "return c&&c.record?JSON.parse(JSON.stringify(c.record)):null;})()"
+)
 
 ENSURE_PLAYING_JS = (
     "Array.from(document.querySelectorAll('video')).forEach(function(v){"
@@ -730,6 +800,37 @@ def parse_skip_arms(value: str) -> tuple[str, ...]:
     return tuple(name for name in SKIPPABLE_ARMS if name in names)
 
 
+def parse_paint_control(value: str) -> dict[str, Any]:
+    """`N:VARIANT:PHASE@SCENE[:late][:depth=K]` (plan §3.10, §4). `ancestor-display` runs only at
+    `settled`, and `settled` needs depth 2 or more; depth defaults to 2 there and 1 elsewhere."""
+    def bad(why: str) -> argparse.ArgumentTypeError:
+        return argparse.ArgumentTypeError(f"invalid --paint-control {value!r}: {why}")
+
+    parts = value.split(":")
+    if len(parts) < 3 or not parts[0].isdigit():
+        raise bad("expected N:VARIANT:PHASE@SCENE[:late][:depth=K]")
+    phase, _, scene = parts[2].partition("@")
+    if parts[1] not in paint_instrument.PAINT_CONTROL_VARIANTS:
+        raise bad(f"variant must be one of {', '.join(paint_instrument.PAINT_CONTROL_VARIANTS)}")
+    if phase not in paint_instrument.PAINT_CONTROL_PHASES or not scene.isdigit() or int(scene) < 1:
+        raise bad(f"expected PHASE@SCENE with PHASE one of {', '.join(paint_instrument.PAINT_CONTROL_PHASES)}")
+    timing, depth = "early", None
+    for extra in parts[3:]:
+        if extra == "late" and timing == "early":
+            timing = "late"
+        elif extra.startswith("depth=") and depth is None and extra[6:].isdigit() and int(extra[6:]) >= 1:
+            depth = int(extra[6:])
+        else:
+            raise bad(f"unexpected {extra!r}")
+    depth = depth if depth is not None else 2 if phase == "settled" else 1
+    if parts[1] == "ancestor-display" and phase != "settled":
+        raise bad("ancestor-display runs only at settled")
+    if phase == "settled" and parts[1] != "element-visibility" and depth < 2:
+        raise bad("settled needs depth 2 or more")
+    return {"raw": value, "n": int(parts[0]), "variant": parts[1], "phase": phase, "atScene": int(scene),
+            "timing": timing, "depth": depth}
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture", type=Path, default=FIXTURE)
@@ -797,7 +898,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--carry-cover-null", action="store_true", default=False,
         help="--carry-cover null control: a probe-only style hides every <video> before the bridge press",
     )
+    parser.add_argument(
+        "--paint-control", type=parse_paint_control, default=None, metavar="N:VARIANT:PHASE@SCENE[:late][:depth=K]",
+        help="Positive control: one continuity-on arm that hides the target carry for N frames from the sampler's "
+        "rAF (early) or a later rAF (late); passes only on the exact injected seq set",
+    )
     args = parser.parse_args(argv)
+    if args.paint_control is not None and (
+        args.strip is not None or args.core_variant is not None or args.only_pass is not None or args.attach
+        or args.gl_replay != "off" or args.gl_force_fail is not None or args.force_wrap is not None
+        or args.rescore is not None or args.skip_arms or args.carry_cover or args.carry_cover_null or args.burst_poke
+    ):
+        parser.error("--paint-control runs on its own in launch mode (optionally with --viewport, --fixture, "
+                     "--original-index and --artifact)")
     if args.carry_cover_null and not args.carry_cover:
         parser.error("--carry-cover-null requires --carry-cover")
     if args.carry_cover:
@@ -822,10 +935,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--gl-replay auto scores the hand-back from V and Vgl, so V cannot be skipped")
     if red_arm and (
         (args.strip is not None and args.core_variant is not None) or args.gl_force_fail is not None
-        or args.only_pass is not None or args.force_wrap is not None or args.rescore is not None
+        or (args.only_pass is not None and args.strip is not None) or args.force_wrap is not None
+        or args.rescore is not None
     ):
-        parser.error("--strip / --core-variant run one red arm on its own (one of them; no --pass, "
-                     "--gl-force-fail, --force-wrap or --rescore)")
+        parser.error("--strip / --core-variant run one red arm on its own (one of them; --pass G only with "
+                     "--core-variant; no --gl-force-fail, --force-wrap or --rescore)")
     if args.gl_force_fail is not None and (args.gl_replay != "auto" or args.only_pass is not None):
         parser.error("--gl-force-fail requires --gl-replay auto and the full run")
     if args.force_wrap is not None and (args.gl_force_fail is not None or args.only_pass is not None or args.rescore):
@@ -1549,8 +1663,50 @@ def drive_and_sample(
         if observer is not None:
             observer(ordinal)
     time.sleep(POST_ADVANCE_SETTLE_S)
-    samples = transport.evaluate("window.__obedContinuityProbe__.samples")
-    return samples if isinstance(samples, list) else []
+    transport.evaluate(SAMPLER_STOP_JS)
+    return drain_samples(transport)
+
+
+def drain_samples(transport: Any) -> list[dict[str, Any]]:
+    """Every retained sampler row, read `SAMPLER_DRAIN_ROWS` at a time so no CDP payload grows
+    with the run."""
+    rows: list[dict[str, Any]] = []
+    while True:
+        chunk = transport.evaluate(SAMPLER_DRAIN_JS)
+        if not isinstance(chunk, list) or not chunk:
+            return rows
+        rows.extend(chunk)
+
+
+def sampler_record(transport: Any, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """`{schema, meta, selfCheck}` of a stopped sampler, read after its rows were drained; the
+    self-check's read time is the moment the sampler stopped."""
+    read = transport.evaluate(SAMPLER_META_JS)
+    meta = read.get("meta") if isinstance(read, dict) and isinstance(read.get("meta"), dict) else {}
+    read_now = _finite_number(meta.get("stoppedAt"))
+    if read_now is None and isinstance(read, dict):
+        read_now = _finite_number(read.get("now"))
+    return {
+        "schema": meta.get("schema"), "meta": meta,
+        "selfCheck": paint_instrument.sampler_self_check(
+            rows, meta, read_now=math.inf if read_now is None else read_now,
+            max_gap_frames=CARRY_COVER_MAX_GAP_FRAMES,
+        ),
+    }
+
+
+def sampler_problem(entry: Any) -> str | None:
+    """Why an arm's or leg's sampler cannot vouch for its rows (every fresh run needs schema 2
+    with a passing self-check), else None."""
+    sampler = entry.get("sampler") if isinstance(entry, dict) else None
+    if not isinstance(sampler, dict):
+        return "no sampler record"
+    if sampler.get("schema") != paint_instrument.SAMPLER_SCHEMA:
+        return f"sampler schema {sampler.get('schema')!r}, expected {paint_instrument.SAMPLER_SCHEMA}"
+    check = sampler.get("selfCheck")
+    if not (isinstance(check, dict) and check.get("ok") is True):
+        return f"sampler self-check failed: {check!r}"
+    return None
 
 
 def track_by_id(samples: list[dict[str, Any]], asset_substr: str) -> dict[int, list[dict[str, Any]]]:
@@ -1623,8 +1779,35 @@ def convert_samples_to_authored(samples: list[dict[str, Any]]) -> tuple[list[dic
             new_videos.append(new_video)
         new_entry["videos"] = new_videos
         new_entry["stageMapValid"] = valid
+        if "pp" in entry:
+            pp = authored_prepaint(entry["pp"])
+            if pp is None:
+                new_entry.pop("pp")
+                new_entry["ppUnreadable"] = entry["pp"]
+            else:
+                new_entry["pp"] = pp
         converted.append(new_entry)
     return converted, invalid_count
+
+
+def authored_prepaint(pp: Any) -> dict[str, Any] | None:
+    """A pre-paint read with every `rect`, `visibleRect` and its `stageBox` in authored px by its
+    own `stageMap` (screen values kept as `*Screen`); None when that map is untrustworthy."""
+    if not isinstance(pp, dict) or not stage_map_valid(pp.get("stageMap")):
+        return None
+    stage_map = pp["stageMap"]
+
+    def authored(rect: Any) -> Any:
+        return to_authored_rect(rect, stage_map) if isinstance(rect, dict) else rect
+
+    out = {**pp, "stageBoxScreen": pp.get("stageBox"), "stageBox": authored(pp.get("stageBox"))}
+    out["videos"] = [
+        {**pv, "rectScreen": pv.get("rect"), "rect": authored(pv.get("rect")),
+         "visibleRectScreen": pv.get("visibleRect"), "visibleRect": authored(pv.get("visibleRect"))}
+        if isinstance(pv, dict) else pv
+        for pv in pp.get("videos") or []
+    ]
+    return out
 
 
 def expected_stage_fit(canvas: dict[str, Any], viewport: dict[str, Any]) -> dict[str, float]:
@@ -1909,6 +2092,7 @@ def score_continuity(
     loop_fps: float = WRAP_FPS,
     min_window_start: float | None = None,
     chain_clip: tuple[float | None, float | None] = (None, None),
+    paint: bool = True,
 ) -> dict[str, Any]:
     """Pure: samples in, verdict dict out. Scores continuity of ONE tracked decoder
     across `boundary_scene`, evaluated only within the crossing window (reviewer
@@ -1927,6 +2111,8 @@ def score_continuity(
     `min_window_start` clips the window's start (a forced wrap's seek stays outside it);
     `chain_clip` (`carry_window_clip`) narrows it to the boundary's own two slides, noted as
     `chainClipped` only when it does narrow.
+    Schema-2 rows (`seq`) are also scored per frame (`carry_paint`) unless `paint` is False: a
+    failing paint score is False and an inconclusive one turns an otherwise green verdict None.
     """
     tracks = track_by_id(samples, asset_substr)
     if not decoded_anywhere(tracks):
@@ -2064,7 +2250,64 @@ def score_continuity(
     }
     if wraps is not None:
         scored.update(wraps=len(wraps), wrapTimes=wraps, wrapOwnerExcused=wrap_owner_excused)
+    if paint and any("seq" in sample for sample in samples):
+        floor = [value for value in (clip_start, min_window_start) if value is not None]
+        scored["paint"] = carry_paint(
+            samples, element_id, asset_substr, window, boundary_scene, src_rect, dst_rect,
+            transition_scene=transition_scene, rect_tolerance=rect_tolerance, floor=max(floor) if floor else None,
+        )
+        status = scored["paint"].get("status")
+        if status == "fail":
+            scored["verdict"] = False
+        elif status != "ok" and ok:
+            scored["verdict"] = None
+            scored["reason"] = f"inconclusive: paint {'; '.join(map(str, scored['paint'].get('reasons') or [])) or status}"
     return scored
+
+
+def paint_start(
+    samples: list[dict[str, Any]], element_id: Any, boundary_scene: float, window: dict[str, float], floor: float | None,
+) -> float:
+    """The per-frame window's start: back to the first settled row of scene `boundary_scene - 1`
+    on which the carried decoder is decoded (so a pin transition longer than the pad is covered,
+    never initial load), never before `floor` (the chain clip / forced-wrap start)."""
+    decoded = [
+        row["t"] for row in samples
+        if row.get("scene") == boundary_scene - 1 and row.get("busy") is False
+        and any(v.get("id") == element_id and (v.get("readyState") or 0) >= 2 for v in row.get("videos") or [])
+    ]
+    start = min(window["start"], min(decoded)) if decoded else window["start"]
+    return start if floor is None else max(floor, start)
+
+
+def carry_paint(
+    samples: list[dict[str, Any]], element_id: Any, asset_substr: str, window: dict[str, float],
+    boundary_scene: float, src_rect: dict[str, float], dst_rect: dict[str, float], *,
+    transition_scene: float | None, rect_tolerance: float, floor: float | None,
+) -> dict[str, Any]:
+    """`paint_instrument.score_paint` over a carry's window. The slot is the source rect before
+    the move, the destination on move-complete and after rows, and on a bridge's move rows the
+    carried decoder's own pre-paint rect when it lies on the path (else no slot)."""
+
+    def slot_of(row: dict[str, Any]) -> dict[str, float] | None:
+        if is_move_sample(row, transition_scene):
+            pp = row.get("pp") if isinstance(row.get("pp"), dict) else {}
+            rect = next((pv.get("rect") for pv in pp.get("videos") or [] if isinstance(pv, dict) and pv.get("id") == element_id), None)
+            return rect if path_progress(rect, src_rect, dst_rect, rect_tolerance) is not None else None
+        scene = row.get("scene")
+        after = is_move_complete(row, transition_scene) or (scene is not None and scene >= boundary_scene)
+        return dst_rect if after else src_rect
+
+    def stage_box_of(row: dict[str, Any]) -> dict[str, float] | None:
+        pp = row.get("pp")
+        return pp.get("stageBox") if isinstance(pp, dict) and isinstance(pp.get("stageBox"), dict) else None
+
+    return paint_instrument.score_paint(
+        samples, element_id, asset_substr,
+        start=paint_start(samples, element_id, boundary_scene, window, floor), end=window["end"],
+        slot_of=slot_of, stage_box_of=stage_box_of, rect_tolerance=rect_tolerance, iou_min=INSTANCE_IOU_MIN,
+        max_gap_frames=CARRY_COVER_MAX_GAP_FRAMES, min_fps=CARRY_COVER_MIN_FPS,
+    )
 
 
 def score_restart(
@@ -2552,6 +2795,26 @@ def _sample_problem(row: Any) -> str | None:
             return "a video footprintOwner is missing or not an object"
         if "stageMapValid" in video and not isinstance(video["stageMapValid"], bool):
             return "a video stageMapValid is not a boolean"
+    return _prepaint_problem(row)
+
+
+def _prepaint_problem(row: dict[str, Any]) -> str | None:
+    """The schema-2 fields (`seq`, `ts`, `pp` and its `pv`s), checked when present."""
+    if "seq" in row and (isinstance(row["seq"], bool) or not isinstance(row["seq"], int)):
+        return "seq is not an integer"
+    if "ts" in row and _finite_number(row["ts"]) is None:
+        return "ts is not a finite number"
+    if "pp" not in row:
+        return None
+    pp = row["pp"]
+    if not isinstance(pp, dict) or not isinstance(pp.get("videos"), list):
+        return "pp is not an object with a videos list"
+    for pv in pp["videos"]:
+        if not isinstance(pv, dict):
+            return "a pp video is not an object"
+        pv_id = pv.get("id")
+        if pv_id is None or isinstance(pv_id, bool) or not isinstance(pv_id, (int, str)):
+            return "a pp video id is unusable"
     return None
 
 
@@ -2560,6 +2823,9 @@ def sample_schema_errors(samples: Any, limit: int = 5) -> list[str]:
     if not isinstance(samples, list):
         return ["samples is not a list"]
     errors: list[str] = []
+    schemas = {"seq" in row for row in samples if isinstance(row, dict)}
+    if len(schemas) > 1:
+        errors.append("rows mix sampler schemas (some carry seq, some do not)")
     for index, row in enumerate(samples):
         problem = _sample_problem(row)
         if problem:
@@ -2614,6 +2880,7 @@ def carry_window_clip(samples: list[dict[str, Any]], spec: dict[str, Any]) -> tu
 
 def score_carry(
     samples: Any, spec: dict[str, Any], runtime_installed: bool, *, loop_period_s: float | None = None,
+    paint: bool = True,
 ) -> dict[str, Any]:
     """`score_continuity` on schema-checked samples; a False that rests on missing evidence
     (no crossing, no stage map, a sampler gap) is INCONCLUSIVE, never a red."""
@@ -2623,7 +2890,7 @@ def score_carry(
     scored = score_continuity(
         samples, spec["asset"].lower(), spec["atScene"], spec["srcRect"], spec["dstRect"], runtime_installed,
         transition_scene=spec["transitionScene"], loop_period_s=loop_period_s,
-        chain_clip=carry_window_clip(samples, spec),
+        chain_clip=carry_window_clip(samples, spec), paint=paint,
     )
     if scored.get("verdict") is not False:
         return scored
@@ -2703,10 +2970,48 @@ def score_restart_strict(
         reasons.append(f"fresh decoder starts at {start_time:.3f}s")
     if leaked:
         reasons.append(f"{len(leaked)} source-decoder row(s) still connected after the boundary")
-    return {
+    scored = {
         "verdict": not reasons, "reason": "; ".join(reasons) or None, "elementId": element_id,
         "startTimeS": start_time, "freshIds": sorted(fresh), "sourceIds": source_ids, "leaked": leaked, "window": window,
     }
+    if any("seq" in row for row in samples):
+        scored["slotGap"] = restart_slot_gap(samples, spec, element_id, window, targets)
+    return scored
+
+
+def restart_slot_gap(
+    samples: list[dict[str, Any]], spec: dict[str, Any], element_id: Any, window: dict[str, float],
+    targets: list[dict[str, float]],
+) -> dict[str, Any]:
+    """Report only: the pre-paint frames between the last one on which a decoder of the asset
+    paints the source instance and the first on which the fresh decoder paints its destination."""
+    asset = spec["asset"].lower()
+    rows = sorted(
+        (r for r in samples if isinstance(r.get("pp"), dict) and window["start"] <= r["t"] <= window["end"]),
+        key=lambda r: r["t"],
+    )
+
+    def paints(row: dict[str, Any], rects: list[dict[str, float]], only: Any = None) -> bool:
+        return any(
+            isinstance(pv, dict) and (only is None or pv.get("id") == only)
+            and asset in str(pv.get("src") or "").lower() and isinstance(pv.get("rect"), dict)
+            and paint_instrument.painted_state(pv, cover=bool(row["pp"].get("cover")))[0] in ("painted", "partial")
+            and any(rect_iou(pv["rect"], rect) >= INSTANCE_IOU_MIN for rect in rects)
+            for pv in row["pp"].get("videos") or []
+        )
+
+    first = next((i for i, row in enumerate(rows) if paints(row, targets, element_id)), None)
+    if first is None:
+        return {"frames": None, "reason": "the fresh decoder never painted its destination"}
+    last = next((i for i in range(first - 1, -1, -1) if paints(rows[i], [spec["srcRect"]])), None)
+    if last is None:
+        return {"frames": None, "reason": "no frame painted the source instance before it"}
+
+    def ts(row: dict[str, Any]) -> float:
+        return row.get("ts") if _finite_number(row.get("ts")) is not None else row["t"]
+
+    t0, t1 = ts(rows[last + 1]) if first > last + 1 else ts(rows[first]), ts(rows[first])
+    return {"frames": first - last - 1, "ms": t1 - t0, "t0": t0, "t1": t1}
 
 
 def _event_scene_of(event: dict[str, Any]) -> int | None:
@@ -2945,7 +3250,7 @@ def score_armed_strict(reads: Any, armed: dict[str, Any], continuity: Any, sampl
 
 def score_verdicts(
     samples: list[dict[str, Any]], evidence: dict[str, Any], facts: dict[str, Any], runtime_installed: bool,
-    continuity: Any, *, loop_period_s: float | None = None,
+    continuity: Any, *, loop_period_s: float | None = None, paint: bool = True,
 ) -> dict[str, Any]:
     """Pure: every plan-generated verdict (`facts["verdicts"]`), keyed by id. False only for a
     fully observed contrary behaviour; every integrity or missing-evidence path is None."""
@@ -2953,7 +3258,7 @@ def score_verdicts(
     for spec in facts.get("verdicts") or []:
         kind, scene = spec["kind"], spec["atScene"]
         if kind == "carry":
-            scored[spec["id"]] = score_carry(samples, spec, runtime_installed, loop_period_s=loop_period_s)
+            scored[spec["id"]] = score_carry(samples, spec, runtime_installed, loop_period_s=loop_period_s, paint=paint)
         elif kind == "restart":
             scored[spec["id"]] = score_restart_strict(samples, spec)
         elif kind == "retire":
@@ -3094,6 +3399,43 @@ def score_census(
     return records, sorted(red), unknown
 
 
+def record_sampler(result: dict[str, Any], transport: Any, raw_samples: list[dict[str, Any]]) -> None:
+    """The stopped sampler's `{schema, meta, selfCheck}` and, when a paint control ran, its record."""
+    result["sampler"] = sampler_record(transport, raw_samples)
+    control = transport.evaluate(PAINT_CONTROL_READ_JS)
+    if isinstance(control, dict):
+        result["paintControlRecord"] = control
+
+
+def arm_paint_census(samples: list[dict[str, Any]], scored: dict[str, Any], specs: Sequence[dict[str, Any]]) -> Any:
+    """Every painted -> not -> painted run of a carried decoder over the whole arm, each decoder with
+    the windows its carries were scored over (report only)."""
+    carried: dict[Any, list[tuple[float, float]]] = {}
+    asset_by_id: dict[Any, str] = {}
+    for spec in specs:
+        value = scored.get(spec["id"])
+        if spec["kind"] != "carry" or not isinstance(value, dict) or value.get("elementId") is None:
+            continue
+        window = (value.get("paint") or {}).get("window") or value.get("window") or {}
+        windows = carried.setdefault(value["elementId"], [])
+        if _finite_number(window.get("start")) is not None and _finite_number(window.get("end")) is not None:
+            windows.append((window["start"], window["end"]))
+        asset_by_id[value["elementId"]] = spec["asset"].lower()
+    counts = [int(row["sceneCount"]) for row in samples if _finite_number(row.get("sceneCount")) is not None]
+    if not counts:
+        return None
+    return paint_instrument.paint_census(samples, carried, asset_by_id, scene_count=max(counts))
+
+
+def show_output(player: LiveOutputHost, result: dict[str, Any]) -> None:
+    """`show()` before any sampling: it lifts the attach host's inline `#body` opacity 0 and the
+    launch host's black cover, both of which the ancestor-aware owner and paint reads would see.
+    An output that still reads hidden stops the arm."""
+    result["outputVisible"] = player.execute("show").output_visible
+    if result["outputVisible"] is not True:
+        raise RuntimeError(f"output was not visible after show() (outputVisible={result['outputVisible']!r})")
+
+
 def run_arm(
     name: str, export_root: Path, slides: list[dict[str, Any]], facts: dict[str, Any],
     viewport: tuple[int, int], expected_stage: dict[str, float], *,
@@ -3105,6 +3447,7 @@ def run_arm(
     try:
         player.start()
         result["continuity"] = player.output["continuity"]
+        show_output(player, result)
         arm_facts = facts_for(result["continuity"], facts, facts_on)
         if facts_on is not None:
             result["factsSet"] = "on" if arm_facts is facts_on else "off"
@@ -3114,6 +3457,7 @@ def run_arm(
             result["censusRaw"] = {}
             observer = census_observer(player, observer, result["censusRaw"])
         raw_samples = drive_and_sample(player, observer=observer, carry_into=carry_destination_players(arm_facts))
+        record_sampler(result, player._require_transport(), raw_samples)
         samples, invalid_count = convert_samples_to_authored(raw_samples)
         result["samples"] = samples
         result["sampleCount"] = len(samples)
@@ -3128,6 +3472,7 @@ def run_arm(
             arm_facts.get("verdicts") or [],
         ))
         result["verdicts"] = verdict_table(result, arm_facts.get("verdicts") or [])
+        result["paintCensus"] = arm_paint_census(samples, result, arm_facts.get("verdicts") or [])
     finally:
         try:
             player.stop()
@@ -3248,6 +3593,7 @@ def run_attach_arm(
                 if facts_on is not None:
                     result["factsSet"] = "on" if attach_facts is facts_on else "off"
                 result["output"] = {key: value for key, value in output.items() if key != "continuity"}
+                show_output(player, result)
                 transport = player._require_transport()
                 plan_transparent = transport.evaluate(
                     "!!(window.__OBED_CONTINUITY__ && window.__OBED_CONTINUITY__.transparentBackground)"
@@ -3259,6 +3605,7 @@ def run_attach_arm(
                     player, observer=boundary_observer(player, attach_facts, evidence),
                     carry_into=carry_destination_players(attach_facts),
                 )
+                record_sampler(result, transport, raw_samples)
                 samples, invalid_count = convert_samples_to_authored(raw_samples)
                 result["samples"] = samples
                 result["sampleCount"] = len(samples)
@@ -3273,6 +3620,7 @@ def run_attach_arm(
                     attach_facts.get("verdicts") or [],
                 ))
                 result["verdicts"] = verdict_table(result, attach_facts.get("verdicts") or [])
+                result["paintCensus"] = arm_paint_census(samples, result, attach_facts.get("verdicts") or [])
             finally:
                 try:
                     player.stop()
@@ -4710,14 +5058,15 @@ def resolve_no_consumption(
 
 def goto_matrix(specs: Sequence[dict[str, Any]], slide_count: int) -> tuple[tuple[int, ...], ...]:
     """Pass G's cases, derived from the plan: today's P2 cases (`GOTO_MATRIX`) that fit the deck,
-    then, for every carried boundary whose source slide is itself a carry's destination (a
-    mid-chain slide), `(1, source, destination)`: goTo the mid-chain slide, then advance across
-    the next carry. P2 has no mid-chain slide, so its matrix is `GOTO_MATRIX` unchanged."""
+    then, for every expected-True carry, `(f, source, destination)`: goTo `f` (slide 1, or slide
+    2 when the source is slide 1), goTo the source, then advance across the carry, scored per
+    frame (an advance leg)."""
     base = tuple(case for case in GOTO_MATRIX if max(case) <= slide_count)
-    carried = [spec for spec in specs if spec["kind"] == "carry" and spec["expect"] is True]
-    arrivals = {spec["toPlayer"] for spec in carried}
-    mid = [(1, spec["fromPlayer"] + 1, spec["toPlayer"] + 1) for spec in carried if spec["fromPlayer"] in arrivals]
-    return base + tuple(dict.fromkeys(mid))
+    legs = [
+        (1 if spec["fromPlayer"] != 0 else 2, spec["fromPlayer"] + 1, spec["toPlayer"] + 1)
+        for spec in specs if spec["kind"] == "carry" and spec["expect"] is True
+    ]
+    return base + tuple(dict.fromkeys(legs))
 
 
 def run_goto_destination(
@@ -4726,12 +5075,12 @@ def run_goto_destination(
     expectations: dict[int, dict[str, str]], evidence: Callable[..., dict[str, str]] | None,
     expected_scene_id: str | None, character_rect: dict[str, float] | None,
     armed: bool, require_no_consumption: bool, advance_to: int | None = None, click_builds: bool | None = None,
-    auto_kinds: Sequence[str] | None = None,
+    auto_kinds: Sequence[str] | None = None, leg_specs: Sequence[dict[str, Any]] = (), continuity: Any = None,
 ) -> dict[str, Any]:
     """One goTo, driven for real through `LiveOutputHost.execute`, scored with the same
     `visible_slide_record` the V/Voff passes use -- never a re-derived scorer. With
-    `advance_to`, the destination is then advanced across its carry and that slide is scored
-    the same way."""
+    `advance_to`, the destination is then advanced across its carry, scored per frame as an
+    advance leg (`run_advance_leg`, `leg_specs`) and then as a settled slide the same way."""
     reasons: list[str] = []
     player.execute("goTo", from_ordinal)
     # `execute("goTo")`'s own returned observation is not settled when the autoplay repair is
@@ -4792,9 +5141,11 @@ def run_goto_destination(
         if no_consumption.get("verdict") is not True:
             reasons.append(f"no-consumption check for destination {to_ordinal}: {no_consumption}")
 
-    advanced = None
+    advanced = advance_carry = None
     if advance_to is not None:
-        advance_until_original_slide(player, advance_to)
+        advance_carry = run_advance_leg(player, to_ordinal, advance_to, leg_specs, continuity)
+        if advance_carry.get("verdict") is not True:
+            reasons.append(f"advance leg {to_ordinal}->{advance_to}: {advance_carry.get('error') or advance_carry.get('reasons')}")
         advanced = visible_slide_record(
             player, next(s for s in slides if s["originalOrdinal"] == advance_to), instances, viewport,
             scorer=_scorers()[1], evidence=evidence, expectations=expectations, offsets_ms=G_BURST_OFFSETS_MS,
@@ -4802,21 +5153,71 @@ def run_goto_destination(
         if advanced.get("verdict") is not True:
             reasons.append(f"advance {to_ordinal}->{advance_to} rects do not meet expectations (status={advanced.get('status')!r})")
 
-    verdict = combine_verdicts(
+    base_verdict = combine_verdicts(
         record.get("verdict"), video_ok, spaced, capture_fresh, source_reached, destination_reached,
         static_control.get("verdict"), telemetry_ok,
         no_consumption.get("verdict") if require_no_consumption else True,
         advanced.get("verdict") if advanced is not None else True,
     )
+    verdict = combine_verdicts(base_verdict, advance_carry.get("verdict") if advance_carry is not None else True)
     result = {
         "fromOrdinal": from_ordinal, "toOrdinal": to_ordinal, "record": record, "videoElementCount": video_count,
         "sourceReached": source_reached, "destinationReached": destination_reached,
         "staticControl": static_control, "autoPlay": telemetry, "noConsumption": no_consumption,
-        "verdict": verdict, "reasons": reasons,
+        "baseVerdict": base_verdict, "verdict": verdict, "reasons": reasons,
     }
     if advanced is not None:
-        result.update(advanceTo=advance_to, advanced=advanced)
+        result.update(advanceTo=advance_to, advanced=advanced, advanceCarry=advance_carry)
     return result
+
+
+def run_advance_leg(
+    player: LiveOutputHost, from_ordinal: int, to_ordinal: int, specs: Sequence[dict[str, Any]], continuity: Any,
+) -> dict[str, Any]:
+    """Pass G's per-frame advance leg: the session's stopped sampler restarts on the settled
+    source, the advance crosses the carry, and every expected-True carry of that boundary
+    (`specs`) is scored on those rows exactly as a host arm scores it. No matching spec is an
+    error. Rows from the end of show on (`hash >= sceneCount`) are an exit: the leg stops there
+    and reports them, never a red."""
+    if not specs:
+        return {"specs": [], "verdicts": {}, "sampler": None, "verdict": None,
+                "error": f"no expected-True carry matches the advance {from_ordinal}->{to_ordinal}"}
+    transport = player._require_transport()
+    drain_samples(transport)
+    transport.evaluate(SAMPLER_START_JS)
+    time.sleep(CLICK_DELAY_S)
+    advance_until_original_slide(player, to_ordinal)
+    wait_until_settled(player)
+    time.sleep(WINDOW_PAD_S)
+    transport.evaluate(SAMPLER_STOP_JS)
+    raw = drain_samples(transport)
+    sampler = sampler_record(transport, raw)
+    rows = convert_samples_to_authored(raw)[0]
+    ended = [
+        row["t"] for row in rows
+        if hash_number(row.get("hash")) is not None and _finite_number(row.get("sceneCount")) is not None
+        and hash_number(row["hash"]) >= row["sceneCount"]
+    ]
+    end_of_show = {"rows": len(ended), "firstT": min(ended)} if ended else None
+    if ended:
+        rows = [row for row in rows if row["t"] < min(ended)]
+    reached = player.observe().original_slide == to_ordinal
+    scored = score_verdicts(
+        rows, {}, {"verdicts": list(specs)}, (continuity or {}).get("mode") == "qualified", continuity,
+    )
+    reasons = [f"{spec['id']}={scored[spec['id']].get('verdict')!r}" for spec in specs if scored[spec["id"]].get("verdict") is not True]
+    problem = sampler_problem({"sampler": sampler})
+    if problem is not None:
+        reasons.append(problem)
+    if not reached:
+        reasons.append(f"advance did not reach slide {to_ordinal}")
+    return {
+        "specs": list(specs), "verdicts": scored, "sampler": sampler, "endOfShow": end_of_show,
+        "reached": reached, "reasons": reasons,
+        "verdict": combine_verdicts(
+            *(scored[spec["id"]].get("verdict") for spec in specs), reached, None if problem is not None else True,
+        ),
+    }
 
 
 def destinations_of(entry: Any) -> list[dict[str, Any]]:
@@ -4824,6 +5225,16 @@ def destinations_of(entry: Any) -> list[dict[str, Any]]:
         return []
     destinations = entry.get("destinations")
     return [d for d in destinations if isinstance(d, dict)] if isinstance(destinations, list) else []
+
+
+def advance_leg_problem(leg: Any) -> str | None:
+    """Why an advance leg's per-frame score cannot stand (missing, no matching spec, or a sampler
+    that cannot vouch for its rows), else None."""
+    if not isinstance(leg, dict):
+        return "no advance-leg record"
+    if leg.get("error"):
+        return str(leg["error"])
+    return sampler_problem(leg)
 
 
 def overall_status_g(result: dict[str, Any]) -> tuple[str, list[str]]:
@@ -4835,6 +5246,13 @@ def overall_status_g(result: dict[str, Any]) -> tuple[str, list[str]]:
     matrix = result.get("matrix") if isinstance(result.get("matrix"), list) else GOTO_MATRIX
     if len(armed) != len(matrix) or len(off) != len(matrix):
         return "error", ["pass G did not score every goTo destination in both arms"]
+    leg_errors = [
+        f"advance leg {dest.get('toOrdinal')}->{dest.get('advanceTo')}: {problem}"
+        for dest in armed if "advanceTo" in dest
+        for problem in [advance_leg_problem(dest.get("advanceCarry"))] if problem is not None
+    ]
+    if leg_errors:
+        return "error", leg_errors
     reasons: list[str] = []
     for label, entry, group in (("armed", armed_entry, armed), ("null control", off_entry, off)):
         if entry.get("outputVisible") is not True:
@@ -4867,10 +5285,11 @@ def _run_goto_arm(
     instances: dict[int, dict[str, list[Any]]], expectations: dict[int, dict[str, str]], viewport: tuple[int, int],
     evidence_dir: Path, character_rect: dict[str, float] | None, onset_scene_id: str, gl_replay: str = "off",
     matrix: Sequence[Sequence[int]] = GOTO_MATRIX, click_builds: bool | None = None,
-    auto_kinds: Sequence[str] | None = None,
+    auto_kinds: Sequence[str] | None = None, carry_specs: Sequence[dict[str, Any]] = (),
 ) -> dict[str, Any]:
-    """One armed or null-control goTo session: start, warm up, drive every `matrix` case (the
-    advance leg of a mid-chain case only when armed), stop."""
+    """One armed or null-control goTo session: start, warm up, drive every `matrix` case (an
+    advance leg, scored per frame against the matching `carry_specs`, only when armed), stop.
+    The armed session installs the sampler stopped, once, before its first goTo."""
     result: dict[str, Any] = {}
     evidence = visible_evidence_writer(evidence_dir, tag)
     with env_override(env):
@@ -4880,6 +5299,10 @@ def _run_goto_arm(
             shown = warm_up_for_screenshots(player)
             result["continuity"] = player.output["continuity"]
             result["outputVisible"] = shown.output_visible
+            if armed:
+                transport = player._require_transport()
+                transport.evaluate(SAMPLER_JS)
+                transport.evaluate(SAMPLER_STOP_JS)
             result["destinations"] = [
                 run_goto_destination(
                     player, from_ordinal, to_ordinal, slides, instances, viewport,
@@ -4888,7 +5311,11 @@ def _run_goto_arm(
                     character_rect=character_rect, armed=armed,
                     require_no_consumption=armed and to_ordinal == GOTO_CONSUMPTION_CHECK_TO,
                     advance_to=advance[0] if armed and advance else None, click_builds=click_builds,
-                    auto_kinds=auto_kinds,
+                    auto_kinds=auto_kinds, continuity=result["continuity"],
+                    leg_specs=[
+                        spec for spec in carry_specs
+                        if advance and (spec["fromPlayer"] + 1, spec["toPlayer"] + 1) == (to_ordinal, advance[0])
+                    ],
                 )
                 for from_ordinal, to_ordinal, *advance in matrix
             ]
@@ -4932,7 +5359,17 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
         "pass": "G", "attach": bool(args.attach), "viewport": {"width": viewport[0], "height": viewport[1]},
         "matrix": [list(case) for case in matrix],
     }
+    if args.core_variant is not None:
+        sha = plan_signature(runtime_of(plan))
+        label = f"core:{args.core_variant}"
+        expected = PASSG_RED_EXPECTATIONS.get((sha, label))
+        result.update(
+            redArm=label, planSha256=sha, expectedCoreSha256=variant_sha(args.core_variant),
+            expectedRedSet=list(expected) if expected is not None else None,
+        )
     with ExitStack() as stack:
+        if args.core_variant is not None:
+            stack.enter_context(injected_core_variant(args.core_variant))
         env: dict[str, str | None] = {}
         if args.attach:
             port = stack.enter_context(attach_chrome(root / "attach-chrome-profile-g", result))
@@ -4946,6 +5383,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
             instances=instances_g, expectations=goto_rect_expectations(expectations_g, armed=True),
             viewport=viewport, evidence_dir=evidence_dir, character_rect=character_rect, onset_scene_id=onset_scene_id,
             gl_replay=args.gl_replay, matrix=matrix, click_builds=click_builds, auto_kinds=auto_kinds,
+            carry_specs=[spec for spec in facts["verdicts"] if spec["kind"] == "carry" and spec["expect"] is True],
         )
 
         export_off = prepare_export(args.fixture, args.original_index, root, "pass-g-off")
@@ -4956,8 +5394,60 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
             gl_replay=args.gl_replay, matrix=matrix, click_builds=click_builds, auto_kinds=auto_kinds,
         )
 
-    result["status"], result["reasons"] = overall_status_g(result)
+    if args.core_variant is not None:
+        result["redSet"], result["unknown"] = passg_red_ids(result)
+        result["status"], result["reasons"] = passg_red_status(result)
+    else:
+        result["status"], result["reasons"] = overall_status_g(result)
     return result
+
+
+def passg_red_ids(result: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """(red ids, unreadable ids) of a Pass G red arm: `G{f}-{to}[-{adv}]:destination` for a
+    destination whose non-leg verdict failed (`Goff…` in the null control), and
+    `G{f}-{to}-{adv}:{specId}` for each advance-leg verdict that differs from its expectation."""
+    red: list[str] = []
+    unknown: list[str] = []
+    for label, prefix in (("armed", "G"), ("nullControl", "Goff")):
+        for dest in destinations_of(result.get(label)):
+            case = f"{prefix}{dest.get('fromOrdinal')}-{dest.get('toOrdinal')}"
+            if "advanceTo" in dest:
+                case += f"-{dest.get('advanceTo')}"
+            base = dest.get("baseVerdict", dest.get("verdict"))
+            (unknown if base is None else red if base is not True else []).append(f"{case}:destination")
+            leg = dest.get("advanceCarry") if isinstance(dest.get("advanceCarry"), dict) else {}
+            verdicts = leg.get("verdicts") if isinstance(leg.get("verdicts"), dict) else {}
+            for spec in leg.get("specs") or []:
+                value = (verdicts.get(spec["id"]) or {}).get("verdict")
+                (unknown if value is None else red if value is not spec["expect"] else []).append(f"{case}:{spec['id']}")
+    return sorted(red), sorted(unknown)
+
+
+def passg_red_status(result: dict[str, Any]) -> tuple[str, list[str]]:
+    """Pure, after `red_arm_status`: both sessions must have run the variant (qualified, its core
+    sha) with a visible output and every advance leg readable; an unreadable verdict is
+    inconclusive; otherwise the red multiset must equal the pre-registered one exactly."""
+    for label in ("armed", "nullControl"):
+        entry = result.get(label) if isinstance(result.get(label), dict) else {}
+        continuity = entry.get("continuity") if isinstance(entry.get("continuity"), dict) else {}
+        if continuity.get("mode") != "qualified":
+            return "error", [f"{label} continuity.mode={continuity.get('mode')!r}, expected 'qualified'"]
+        if continuity.get("sha256") != result.get("expectedCoreSha256"):
+            return "error", [f"{label} reports core sha {continuity.get('sha256')!r}, expected {result.get('expectedCoreSha256')!r}"]
+        if entry.get("outputVisible") is not True:
+            return "error", [f"{label} output was not visible after show()"]
+    status, reasons = overall_status_g(result)
+    if status == "error":
+        return status, reasons
+    if result.get("unknown"):
+        return "inconclusive", [f"unreadable: {', '.join(result['unknown'])}"]
+    expected = result.get("expectedRedSet")
+    if expected is None:
+        return "unregistered", [f"no pre-registered Pass G red set for {result.get('redArm')!r} on this deck; red={result.get('redSet')}"]
+    observed, wanted = Counter(result.get("redSet") or []), Counter(expected)
+    reasons = [f"unexpectedly red: {red_id}" for red_id in sorted((observed - wanted).elements())]
+    reasons += [f"expected red but green: {red_id}" for red_id in sorted((wanted - observed).elements())]
+    return ("fail" if reasons else "pass"), reasons
 
 
 def run_pass_g_cli(args: argparse.Namespace) -> None:
@@ -4976,7 +5466,10 @@ def run_pass_g_cli(args: argparse.Namespace) -> None:
         result["error"] = str(exc)
     finally:
         save()
-    print(json.dumps({"status": result.get("status"), "reasons": result.get("reasons")}, indent=2))
+    print(json.dumps({key: result.get(key) for key in ("status", "reasons", "redArm", "expectedRedSet", "redSet", "unknown")
+                      if key in result}, indent=2, default=str))
+    if args.core_variant is not None and result.get("status") != "pass":
+        raise SystemExit(1)
 
 
 def check_no_leftover_chrome() -> str:
@@ -5325,6 +5818,13 @@ def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     ]
     if wrapped:
         return "invalid", wrapped
+    unsampled = [
+        f"{label}: {problem}"
+        for label, entry in [*((f"arm {name}", arm) for name, arm in arms.items()), ("attach", attach)]
+        if isinstance(entry, dict) and entry and (problem := sampler_problem(entry)) is not None
+    ]
+    if unsampled:
+        return "error", unsampled
     ground = result.get("groundTruth")
     if isinstance(ground, dict) and "verdicts" in ground and ground.get("planSha256") not in P2_PLAN_SHA256:
         return generated_status(result)
@@ -5639,6 +6139,9 @@ def red_arm_status(result: dict[str, Any]) -> tuple[str, list[str]]:
         return "error", [f"red arm reports core sha {continuity.get('sha256')!r}, expected {result.get('expectedCoreSha256')!r}"]
     if not stage_fit_ok(arm):
         return "error", [stage_fit_reason(arm, "red arm") or "red arm stage fit failed"]
+    problem = sampler_problem(arm)
+    if problem is not None:
+        return "error", [f"red arm: {problem}"]
     if arm.get("unplannedWraps"):
         return "invalid", [f"red arm sampled {len(arm['unplannedWraps'])} unplanned loop wrap(s); retake"]
     if result.get("unknown"):
@@ -5685,6 +6188,8 @@ def run_red_arm(args: argparse.Namespace) -> dict[str, Any]:
         "expectedCoreSha256": variant_sha(args.core_variant) if args.core_variant else js_sha256(),
         "groundTruth": {key: facts[key] for key in GROUND_TRUTH_KEYS if key in facts},
     }
+    if (sha, label, args.gl_replay) in RED_ARM_PAINT_FLOOR:
+        result["paintFloor"] = RED_ARM_PAINT_FLOOR[(sha, label, args.gl_replay)]
     if facts_on is not None:
         result["groundTruthGl"] = {"armed": facts_on["armed"], "verdicts": facts_on["verdicts"]}
     expected_stage = expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
@@ -5734,6 +6239,137 @@ def run_red_arm_cli(args: argparse.Namespace) -> None:
         for key in ("status", "statusReasons", "redArm", "expectedRedSet", "redSet", "unknown", "error")
     }, indent=2, default=str))
     if result.get("status") not in ("pass", "recorded"):
+        raise SystemExit(1)
+
+
+@contextmanager
+def paint_control_sampler(control_js: str) -> Iterator[None]:
+    """The arm's sampler with the positive-control injector evaluated right after it (probe
+    process only)."""
+    global SAMPLER_JS
+    original = SAMPLER_JS
+    SAMPLER_JS = original + control_js
+    try:
+        yield
+    finally:
+        SAMPLER_JS = original
+
+
+def paint_control_target(specs: Sequence[dict[str, Any]], control: dict[str, Any]) -> dict[str, Any]:
+    """The one expected-True carry the control hides: a pin for `pin`, a bridge for `bridge` and
+    `settled`, at `atScene`; anything else is refused."""
+    action = "pin" if control["phase"] == "pin" else "bridge"
+    found = [
+        spec for spec in specs
+        if spec["kind"] == "carry" and spec["expect"] is True and spec["action"] == action
+        and spec["atScene"] == control["atScene"]
+    ]
+    if len(found) != 1:
+        raise SystemExit(
+            f"--paint-control {control['raw']}: {len(found)} expected-True {action} carries at scene "
+            f"{control['atScene']}, expected exactly one"
+        )
+    return found[0]
+
+
+def paint_control_status(result: dict[str, Any]) -> tuple[str, list[str]]:
+    """Pure: an arm that did not run the shipped core with a vouching sampler, or a control that
+    never armed or aborted, is an error; an unreadable verdict is inconclusive; a pass needs the
+    red set to be exactly the target (empty for N=0) and `score_paint_control` to pass."""
+    arm = result.get("arm") if isinstance(result.get("arm"), dict) else {}
+    continuity = arm.get("continuity") if isinstance(arm.get("continuity"), dict) else {}
+    if continuity.get("mode") != "qualified":
+        return "error", [f"control arm continuity.mode={continuity.get('mode')!r}, expected 'qualified'"]
+    if continuity.get("sha256") != result.get("expectedCoreSha256"):
+        return "error", [f"control arm reports core sha {continuity.get('sha256')!r}, expected {result.get('expectedCoreSha256')!r}"]
+    if not stage_fit_ok(arm):
+        return "error", [stage_fit_reason(arm, "control arm") or "control arm stage fit failed"]
+    problem = sampler_problem(arm)
+    if problem is not None:
+        return "error", [f"control arm: {problem}"]
+    record = result.get("controlRecord")
+    if not isinstance(record, dict):
+        return "error", ["no paint-control record was read back"]
+    if record.get("aborted"):
+        return "error", [f"paint control aborted: {record.get('aborted')!r}"]
+    if arm.get("unplannedWraps"):
+        return "invalid", [f"control arm sampled {len(arm['unplannedWraps'])} unplanned loop wrap(s); retake"]
+    if result.get("unknown"):
+        return "inconclusive", [f"unreadable: {', '.join(result['unknown'])}"]
+    wanted = [] if (result.get("controlSpec") or {}).get("n") == 0 else [result.get("targetVerdictId")]
+    reasons = [] if sorted(result.get("redSet") or []) == wanted else [f"red set {result.get('redSet')}, expected {wanted}"]
+    check = result.get("paintControl") if isinstance(result.get("paintControl"), dict) else {}
+    if check.get("status") == "inconclusive" and not reasons:
+        return "inconclusive", [f"paint control check: {check.get('reasons')}"]
+    if check.get("status") != "pass":
+        reasons.append(f"paint control check {check.get('status')!r}: {check.get('reasons')}")
+    return ("fail" if reasons else "pass"), reasons
+
+
+def run_paint_control(args: argparse.Namespace) -> dict[str, Any]:
+    """`--paint-control`: one continuity-on arm (shipped core) with the injector after the
+    sampler, scored like a host arm plus the control's exact-seq-set check."""
+    control = args.paint_control
+    if os.environ.get(ATTACH_ENV):
+        raise SystemExit("--paint-control refuses attach/alpha mode")
+    viewport = args.viewport
+    root = run_root(args.artifact)
+    export_plan = prepare_export(args.fixture, args.original_index, root, "paint-control-plan")
+    plan_slides = load_slides(export_plan)
+    plan = ground_truth_plan(export_plan, plan_slides)
+    facts = ground_truth_facts(plan, arrival=arrival_starts(export_plan, plan_slides, plan))
+    bind_dom_ids(facts, movie_nodes(export_plan, plan_slides))
+    target = paint_control_target(facts["verdicts"], control)
+    control_js = paint_instrument.paint_control_js(
+        control["n"], control["variant"], control["phase"], control["atScene"],
+        timing=control["timing"], depth=control["depth"],
+    )
+    result: dict[str, Any] = {
+        "controlSpec": control, "targetVerdictId": target["id"], "planSha256": plan_signature(runtime_of(plan)),
+        "expectedCoreSha256": js_sha256(),
+        "groundTruth": {key: facts[key] for key in GROUND_TRUTH_KEYS if key in facts},
+    }
+    expected_stage = expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
+    export_c = prepare_export(args.fixture, args.original_index, root, "paint-control")
+    with paint_control_sampler(control_js):
+        arm = run_arm("P", export_c, load_slides(export_c), facts, viewport, expected_stage)
+    red, unknown = unmet_verdicts(arm, facts["verdicts"])
+    record = arm.get("paintControlRecord")
+    result.update(
+        arm=arm, controlRecord=record, redSet=sorted(red), unknown=unknown,
+        paintControl=paint_instrument.score_paint_control(
+            record, arm.get(target["id"]) or {}, control["n"], control["timing"],
+        ) if isinstance(record, dict) else None,
+    )
+    result["status"], result["statusReasons"] = paint_control_status(result)
+    return result
+
+
+def run_paint_control_cli(args: argparse.Namespace) -> None:
+    artifact = args.artifact
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    result: dict[str, Any] = {
+        "kind": "live-continuity-probe-paint-control", "status": "running", "control": args.paint_control["raw"],
+        "fixture": str(args.fixture), "originalIndex": str(args.original_index),
+        "viewport": {"width": args.viewport[0], "height": args.viewport[1]},
+    }
+
+    def save() -> None:
+        artifact.write_text(json.dumps(result, indent=2, default=str) + "\n")
+
+    save()
+    try:
+        result.update(run_paint_control(args))
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - always leave a readable artifact behind
+        result["status"] = "error"
+        result["error"] = str(exc)
+    finally:
+        result["leftoverChrome"] = check_no_leftover_chrome()
+        save()
+    print(json.dumps({
+        key: result.get(key) for key in ("status", "statusReasons", "control", "targetVerdictId", "redSet", "unknown", "error")
+    }, indent=2, default=str))
+    if result.get("status") != "pass":
         raise SystemExit(1)
 
 
@@ -6225,14 +6861,19 @@ def run_force_wrap(args: argparse.Namespace) -> dict[str, Any]:
         time.sleep(POST_ADVANCE_SETTLE_S)
         result["recorder"] = transport.evaluate(FORCE_WRAP_READ_JS)
         result["pageErrorNotes"] = transport.evaluate(PAGE_ERRORS_JS)
-        raw_samples = transport.evaluate("window.__obedContinuityProbe__.samples")
+        transport.evaluate(SAMPLER_STOP_JS)
+        raw_samples = drain_samples(transport)
+        result["sampler"] = sampler_record(transport, raw_samples)
     finally:
         try:
             player.stop()
         except Exception as exc:  # noqa: BLE001 - record, never mask an earlier failure
             result["stopError"] = str(exc)
-    result["samples"] = convert_samples_to_authored(raw_samples if isinstance(raw_samples, list) else [])[0]
+    result["samples"] = convert_samples_to_authored(raw_samples)[0]
     score_force_wrap_run(result, gt, boundary, offset_ms)
+    problem = sampler_problem(result)
+    if problem is not None and result["status"] == "pass":
+        result["status"], result["samplerReason"] = "invalid", problem
     result["leftoverChrome"] = check_no_leftover_chrome()
     return result
 
@@ -6456,6 +7097,7 @@ CARRY_COVER_FADE_SLACK_S = 0.1
 CARRY_COVER_BG_MIN_UNIFORM = 0.99
 CARRY_COVER_BG_MIN_PX = 1000
 CARRY_COVER_SLOT_MATCH_PX = 6.0
+CARRY_COVER_NOTE_MATCH_PX = 0.5
 CARRY_COVER_PREROLL_S = 0.6
 CARRY_COVER_TAIL_S = 1.0
 CARRY_COVER_HIDE_OVERLAY_JS = (
@@ -6613,7 +7255,8 @@ def carry_cover_masks(effect: Any, src_rect: dict[str, float], canvas: dict[str,
 
 
 def carry_cover_bridges(plan: ContinuityPlan, slides: list[dict[str, Any]], export_root: Path) -> list[dict[str, Any]]:
-    """Every bridge carry the plan states, with its source/destination original ordinals and its masks."""
+    """Every bridge carry the plan states, with its source/destination original ordinals, destination scene and its
+    masks."""
     ordinal = {int(s["playerIndex"]): int(s["originalOrdinal"]) for s in slides}
     uuid_of = {int(s["playerIndex"]): s["exportedUuid"] for s in slides}
     out = []
@@ -6627,7 +7270,8 @@ def carry_cover_bridges(plan: ContinuityPlan, slides: list[dict[str, Any]], expo
             entry = {
                 "boundary": f"b{ordinal[boundary.from_player_index]}to{ordinal[boundary.to_player_index]}",
                 "asset": movie.asset, "fromOrdinal": ordinal[boundary.from_player_index],
-                "toOrdinal": ordinal[boundary.to_player_index], "srcRect": src,
+                "toOrdinal": ordinal[boundary.to_player_index],
+                "atScene": plan.scene_index_by_player[boundary.to_player_index], "srcRect": src,
                 "dstRect": movie.dst_rect.as_dict() if movie.dst_rect else None,
                 "durationSeconds": boundary.transition_duration,
             }
@@ -6758,12 +7402,25 @@ def _cover_reasons(frames: Sequence[dict[str, Any]], fraction_key: str, strip_ke
     return clean, widest, reasons
 
 
+def _is_bridge_note(note: dict[str, Any], bridge: dict[str, Any]) -> bool:
+    detail, scene = note["detail"], bridge.get("atScene")
+    return (
+        isinstance(scene, int) and hash_number(detail.get("sceneHash")) == scene - 1
+        and rect_matches(detail.get("srcRect"), bridge["srcRect"], CARRY_COVER_NOTE_MATCH_PX)
+        and rect_matches(detail.get("rect"), bridge["dstRect"], CARRY_COVER_NOTE_MATCH_PX)
+    )
+
+
 def score_carry_cover(
     frames: Sequence[tuple[float, np.ndarray]], rows: Any, notes: Any, bridge: dict[str, Any], stage_map: Any, *,
     viewport: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
     """`frames`: (page-clock ms, RGB) screencast frames; `rows`: the rAF sampler's rows (`tick`, `pre` read at the
     tick's start, `vids` read after its frame); `notes`: the core's `bridge-motion-start` notes.
+
+    The move window starts at this bridge's one note: the source scene's hash and the bridge's source/destination
+    rects within `CARRY_COVER_NOTE_MATCH_PX`. Any other note (an earlier bridge the walk to the source slide rode)
+    must come before the first sampler row.
 
     Each frame is placed at the tick its sync bar names (its timestamp only picks between counter wraps) and scored
     against both reads of that tick's overlay: its post-frame read and the next tick's pre read. A frame whose reads
@@ -6780,18 +7437,30 @@ def score_carry_cover(
         return inconclusive(bridge["problem"])
     if not stage_map_valid(stage_map):
         return inconclusive("stage map unreadable")
-    motion = [
-        n for n in notes or []
-        if isinstance(n, dict) and n.get("kind") == "bridge-motion-start" and isinstance(n.get("detail"), dict)
-    ]
-    if len(motion) != 1 or not isinstance(motion[0].get("t"), (int, float)):
-        return inconclusive(f"no move window: {len(motion)} bridge-motion-start notes (expected exactly one)")
-    t0, el_id = float(motion[0]["t"]), motion[0]["detail"].get("elId")
-    duration_ms = 1000.0 * float(bridge["durationSeconds"])
     rows = [
         r for r in rows or []
         if isinstance(r, dict) and isinstance(r.get("ts"), (int, float)) and isinstance(r.get("tick"), int)
     ]
+    motion = [
+        n for n in notes or []
+        if isinstance(n, dict) and n.get("kind") == "bridge-motion-start" and isinstance(n.get("detail"), dict)
+    ]
+    own = [n for n in motion if _is_bridge_note(n, bridge)]
+    if len(own) != 1 or not isinstance(own[0].get("t"), (int, float)):
+        return inconclusive(
+            f"no move window: {len(own)} bridge-motion-start notes for this bridge (expected exactly one)"
+        )
+    first_ts = min((r["ts"] for r in rows), default=None)
+    late = [
+        n for n in motion
+        if n is not own[0] and (first_ts is None or not isinstance(n.get("t"), (int, float)) or n["t"] >= first_ts)
+    ]
+    if late:
+        return inconclusive(
+            f"{len(late)} other bridge-motion-start notes during the capture (only this bridge's may be)"
+        )
+    t0, el_id = float(own[0]["t"]), own[0]["detail"].get("elId")
+    duration_ms = 1000.0 * float(bridge["durationSeconds"])
     in_move = [v for r in rows if t0 <= r["ts"] <= t0 + duration_ms for v in [_carried_rect(r, el_id)] if v]
     if not in_move:
         return inconclusive("no carried decoder sampled during the move", elId=el_id)
@@ -7107,6 +7776,9 @@ def run_cli(args: argparse.Namespace) -> None:
         run_forced_fail_cli(args)
         return
     check_fixture(args)
+    if args.paint_control is not None:
+        run_paint_control_cli(args)
+        return
     if args.rescore is not None:
         run_rescore_cli(args)
         return
@@ -7116,11 +7788,11 @@ def run_cli(args: argparse.Namespace) -> None:
     if args.carry_cover:
         run_carry_cover_cli(args)
         return
-    if args.strip is not None or args.core_variant is not None:
-        run_red_arm_cli(args)
-        return
     if args.only_pass == "G":
         run_pass_g_cli(args)
+        return
+    if args.strip is not None or args.core_variant is not None:
+        run_red_arm_cli(args)
         return
     auto = args.gl_replay == "auto"
     skip = set(args.skip_arms)
