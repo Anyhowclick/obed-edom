@@ -69,9 +69,10 @@ Starting creates one hidden
 output session; **Show output** makes it visible. The 16:9 picture fits inside
 the display without stretching. HDMI hiding produces black and leaves playback
 running. Click a thumbnail or type an original slide number and press Enter to
-restart that slide at its initial state. The right chevron, right arrow, or Space
-advances the next build or slide. The left chevron or left arrow restarts the
-previous playable slide; reverse-build is unavailable. Skipped slides are disabled.
+restart that slide at its initial state. The right chevron, right arrow, Space,
+Enter, or Page Down advances the next build or slide. The left chevron, left arrow,
+or Page Up restarts the previous playable slide; reverse-build is unavailable.
+Presenter clickers that send Page Up/Down work as-is. Skipped slides are disabled.
 Build Preview and live output
 both draw Magic Move objects at Keynote's opacity; `OBED_LIVE_MM_OPACITY=off`
 turns this off for both.

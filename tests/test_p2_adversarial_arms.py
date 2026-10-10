@@ -134,17 +134,24 @@ def test_boot_check_without_the_module_requires_it_absent():
         assert drv._gl_boot_ok(_boot_check(glVersion=None, glState=None, **over), expect_module=False) is False
 
 
-@pytest.mark.parametrize("argv, bridged", [
-    ((), True),
-    (("--strip", "bridge@8"), False),
-    (("--strip", "restart@6"), True),
-    (("--core-variant", "stash-any"), True),
+@pytest.mark.parametrize("argv, bridged, curve", [
+    ((), True, v.BRIDGE_EASE_IN_EASE_OUT),
+    (("--strip", "bridge@8"), False, v.BRIDGE_EASE_IN_EASE_OUT),
+    (("--strip", "restart@6"), True, v.BRIDGE_EASE_IN_EASE_OUT),
+    (("--core-variant", "stash-any"), True, v.BRIDGE_EASE_IN_EASE_OUT),
+    (("--core-variant", "linear-bridge"), True, v.BRIDGE_LINEAR),
 ])
-def test_bridge_presence_is_read_from_the_injected_plan(monkeypatch, argv, bridged):
-    """`--strip bridge@8` must skip the freeze bracket exactly as `--disable-bridge34` does."""
-    injected, _, _ = _arm(monkeypatch, *argv)
+def test_bridge_presence_is_read_from_the_injected_plan(monkeypatch, argv, bridged, curve):
+    """`--strip bridge@8` must skip the freeze bracket exactly as `--disable-bridge34` does.
+    The freeze trigger is bounded by the INJECTED plan's 3->4 bridge entry and the
+    INJECTED core's curve: only `linear-bridge` replaces the ease."""
+    injected, _, arm = _arm(monkeypatch, *argv)
     assert drv._bridge_injected(injected) is bridged
     assert drv._bridge_injected(v.build_continuity_plan(False)) is False
+    bridge = drv._bridge34_entry(injected)
+    assert (bridge in injected["boundaries"] and bridge["atScene"] == v.SLIDE4_MIN_HASH) if bridged else bridge is None
+    assert drv._bridge34_entry(v.build_continuity_plan(False)) is None
+    assert drv._bridge_curve(arm["coreVariant"]) == curve
 
 
 def test_freeze_bracket_skips_on_the_injected_bridge_not_the_flag(monkeypatch, tmp_path):

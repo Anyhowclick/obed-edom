@@ -93,6 +93,8 @@ from obed_edom.live_runtime import (  # noqa: E402
 from obed_edom.p2_verdict import (  # noqa: E402
     ADVANCE_PRESS_HASH,
     BLACK_RGB_MEAN_MAX,
+    BRIDGE_EASE_IN_EASE_OUT,
+    BRIDGE_LINEAR,
     BURST_OFFSETS_MS,
     CARRY_EVENT_KINDS,
     COVER_TRACK_TOL_PX,
@@ -608,6 +610,21 @@ def _served_script_order(html: str) -> list[str]:
 
 def _bridge_injected(plan: dict) -> bool:
     return any(b.get("action") == "bridge" for b in plan.get("boundaries") or [] if isinstance(b, dict))
+
+
+def _bridge34_entry(plan: dict) -> dict | None:
+    """The injected plan's 3->4 bridge entry: the geometry the freeze trigger is bounded by."""
+    return next(
+        (
+            b for b in plan.get("boundaries") or []
+            if isinstance(b, dict) and b.get("action") == "bridge" and b.get("atScene") == SLIDE4_MIN_HASH
+        ),
+        None,
+    )
+
+
+def _bridge_curve(core_variant: str | None) -> tuple[float, float, float, float]:
+    return BRIDGE_LINEAR if core_variant == "linear-bridge" else BRIDGE_EASE_IN_EASE_OUT
 
 
 def _injection_arm(reference_plan: dict) -> tuple[dict, str, dict]:
@@ -3258,6 +3275,7 @@ async def _capture_3to4_snapshot(
 async def _run_freeze_bracket(
     player_dir: Path, runs_dir: Path, wait_profile: dict, wait_profile_name: str,
     *, bridge34: bool, main_js: bytes | None = None, gl_auto: bool = False, skip: bool = False,
+    bridge: dict | None = None, bridge_curve: tuple[float, float, float, float] = BRIDGE_EASE_IN_EASE_OUT,
 ) -> dict:
     """A-B-A composited-freeze bracket on the 3->4 moving Magic Move boundary:
     positive -> freeze-control -> positive, one re-navigated Chrome (same
@@ -3322,7 +3340,9 @@ async def _run_freeze_bracket(
     finally:
         httpd.shutdown()
 
-    verdict = _score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"], manifest)
+    verdict = _score_freeze_control(
+        snaps["a1"], snaps["b"], snaps["a2"], manifest, bridge=bridge, bridge_curve=bridge_curve,
+    )
     verdict["manifest"] = manifest
     verdict["waitProfile"] = wait_profile_name
     verdict["snapshots"] = snaps
@@ -4572,6 +4592,7 @@ async def _run() -> dict:
     freeze_control = await _run_freeze_bracket(
         player_dir, runs, wait_profile, wait_profile_name, bridge34=bridge_injected, main_js=main_js,
         gl_auto=gl_auto, skip=skip_freeze,
+        bridge=_bridge34_entry(injected_plan), bridge_curve=_bridge_curve(arm["coreVariant"]),
     )
     findings.append(_freeze_bracket_finding(freeze_control, bridge_injected=bridge_injected, skip_freeze=skip_freeze))
 
