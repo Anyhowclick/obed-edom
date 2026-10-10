@@ -31,7 +31,7 @@ def test_continuity_version_is_pinned_int():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "7cb6e0fe87882b2ac48890e3fdeb136d04c9c4bed62210b2465a8152ba9e08e8"
+PINNED_CORE_SHA256 = "6c7a482e810e562230a82c810300c87dd8a8801006ebcc3b2ce1d5c0835b0f07"
 
 
 def test_js_sha256_hashes_the_core_bytes_and_matches_the_pinned_literal():
@@ -792,7 +792,10 @@ const rafQueue = [];
 const requestAnimationFrame = (fn) => { rafQueue.push(fn); return 0; };
 /** Run every animation frame queued so far, once (the loops re-queue themselves). */
 function pump() { rafQueue.splice(0).forEach((fn) => fn()); }
-const setTimeout = () => 0;
+const timeouts = [];
+// Timers never run on their own; `flushTimeouts()` fires every pending one (late, as a slow operator would).
+const setTimeout = (fn) => { timeouts.push(fn); return 0; };
+function flushTimeouts() { while (timeouts.length) timeouts.splice(0).forEach((fn) => fn()); }
 const intervals = [];
 const setInterval = (fn) => { intervals.push(fn); return 0; };
 /** Run the core's keep-warm interval once (it drives the retire sweep). */
@@ -3899,15 +3902,9 @@ console.log(JSON.stringify({idle, moves: notesOf('bridge-motion-start').map(n =>
     assert result["moves"] == [_RECT_S3]
 
 
-@pytest.mark.parametrize("second", [False, True], ids=["first-pin", "second-pin"])
-def test_a_swapped_pin_decoder_is_re_homed_above_the_destination_poster(second):
-    """Live D5 V slide 3 (second pin of a chain): the dom-swap left the carried
-    decoder in the stub's slot, under the destination's WebGL poster (the stub
-    never starts, so the player never reveals it): clock advancing, pixels
-    frozen. After the swap the decoder must sit right after its poster canvas,
-    at `dst.rect`, in the destination layer."""
-    plan = _CONTRACT["d5"]
-    result = _run_chain(plan, r"""
+#: D5 pin chain into slide layers with poster canvases: the decoder `a` ends
+#: re-homed after the poster of `dst.layer` (slide 2, or slide 3 when `__SECOND__`).
+_D5_PIN_CHAIN_JS = r"""
 function slideLayer(rect, id) {
   const layer = {
     id: id, __screenOrigin: {x: 0, y: 0}, __scale: 1, kids: [],
@@ -3950,15 +3947,56 @@ if (__SECOND__) {
   stub.nextSibling = dst.poster;
   moCallbacks.slice().forEach((cb) => cb([{addedNodes: [stub], removedNodes: []}]));
 }
+"""
+
+
+@pytest.mark.parametrize("second", [False, True], ids=["first-pin", "second-pin"])
+def test_a_swapped_pin_decoder_is_re_homed_above_the_destination_poster(second):
+    """Live D5 V slide 3 (second pin of a chain): the dom-swap left the carried
+    decoder in the stub's slot, under the destination's WebGL poster (the stub
+    never starts, so the player never reveals it): clock advancing, pixels
+    frozen. After the swap the decoder must sit right after its poster canvas,
+    at `dst.rect`, in the destination layer."""
+    plan = _CONTRACT["d5"]
+    result = _run_chain(plan, (_D5_PIN_CHAIN_JS + r"""
 const kids = dst.layer.kids;
 console.log(JSON.stringify({
   order: kids.map(k => k === a ? 'decoder' : k === dst.poster ? 'poster' : k === stub ? 'stub' : '?'),
   rendered: a.getBoundingClientRect(), swaps: notesOf('dom-swap').length,
 }));
-""".replace("__SECOND__", "true" if second else "false"), src="https://host/counter-a.mov")
+""").replace("__SECOND__", "true" if second else "false"), src="https://host/counter-a.mov")
     assert result["order"] == ["poster", "decoder"]
     assert result["rendered"] == pytest.approx({"left": 160, "top": 700, "width": 640, "height": 180})
     assert result["swaps"] == (2 if second else 1)
+
+
+def test_a_decoder_the_stash_declines_is_never_revived_by_a_pending_remount_retry():
+    """Live D5 #5->#6 (triage-2026-10-10/d5-end-of-show.md): the player tears
+    down slide 3's layer holding the re-homed decoder; its instance has no next
+    entry, so the stash declines it. The retries of earlier `scheduleRemount`s
+    (the slide-2 teardown, the pin re-home) were still pending and, ~2 s after
+    they were scheduled, re-added the decoder on `#body` at #6. While the decoder
+    is still wanted the same retries keep it in its layer (control)."""
+    plan = _CONTRACT["d5"]
+    result = _run_chain(plan, (_D5_PIN_CHAIN_JS + r"""
+const pending = timeouts.length;
+flushTimeouts();
+const wanted = {inLayer: a.parentNode === dst.layer,
+  order: dst.layer.kids.map(k => k === a ? 'decoder' : k === dst.poster ? 'poster' : '?')};
+goToScene(5);
+const before = P.events.length;
+canvases.length = 0;
+dst.layer.removeChild(a);
+detach(a);
+goToScene(6);
+flushTimeouts();
+console.log(JSON.stringify({pending, wanted, inDocument: document.contains(a),
+  after: P.events.slice(before).map(e => e.kind).filter(k => /^remount-(done|into|authored)/.test(k))}));
+""").replace("__SECOND__", "true"), src="https://host/counter-a.mov")
+    assert result["pending"] > 0
+    assert result["wanted"] == {"inLayer": True, "order": ["poster", "decoder"]}
+    assert result["inDocument"] is False
+    assert result["after"] == []
 
 
 def test_a_retire_hands_back_at_the_transition_even_for_a_decoder_the_player_never_tears_down():
