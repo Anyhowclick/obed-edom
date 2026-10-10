@@ -983,3 +983,37 @@ def test_rescore_and_classify_write_where_told(tmp_path: Path) -> None:
     assert args.output == out
     assert dx.parse_args(["classify", "--out-dir", str(tmp_path), "--output", str(out)]).output == out
     assert dx.parse_args(["rescore", "--out-dir", str(tmp_path)]).output is None
+
+
+def test_a_run_prepares_its_export_inside_its_own_probe_run_scope(monkeypatch, tmp_path) -> None:
+    """The S2 rebase (#247) gave `prepare_export` a per-run `root`; a stale call only surfaces live as a
+    record error, so bind the driver's call against the real signature and check the scope it runs in."""
+    import contextlib
+    import inspect
+
+    real = inspect.signature(probe.prepare_export)
+    scopes: list[Path] = []
+    calls: list[Any] = []
+
+    @contextlib.contextmanager
+    def fake_scope(artifact: Path):
+        scopes.append(artifact)
+        yield tmp_path / "scope"
+
+    def fake_prepare(*args: Any, **kwargs: Any) -> Path:
+        calls.append(real.bind(*args, **kwargs).arguments)
+        raise RuntimeError("stop after prepare")
+
+    monkeypatch.setattr(dx, "deck_paths", lambda deck: (tmp_path / "fixture", tmp_path / "index.html"))
+    monkeypatch.setattr(dx, "collect_metadata", lambda: {})
+    monkeypatch.setattr(probe, "run_scope", fake_scope)
+    monkeypatch.setattr(probe, "prepare_export", fake_prepare)
+    monkeypatch.setattr(probe, "check_no_leftover_chrome", lambda: "")
+
+    out_dir = tmp_path / "out"
+    dx.execute_run(out_dir, "run-1", deck="D4", variant="V8", arm="A", viewport=(2560, 1440))
+
+    assert scopes == [out_dir / "run-1"]
+    assert calls and calls[0]["root"] == tmp_path / "scope"
+    raw = dx.read_jsonl(out_dir / "runs.jsonl")[0]
+    assert "stop after prepare" in " ".join(raw.get("reasons") or [])

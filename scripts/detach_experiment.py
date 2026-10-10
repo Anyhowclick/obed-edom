@@ -1589,13 +1589,14 @@ def execute_run(
     started = time.monotonic()
     sink: dict[str, Any] = {}
     try:
-        export = probe.prepare_export(fixture_dir, original_index, "detach")
-        slides = probe.load_slides(export)
-        plan = probe.ground_truth_plan(export, slides)
-        facts = probe.ground_truth_facts(plan, arrival=probe.arrival_starts(export, slides, plan))
-        probe.bind_dom_ids(facts, probe.movie_nodes(export, slides))
-        expected_stage = probe.expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
         with ExitStack() as stack:
+            root = stack.enter_context(probe.run_scope(out_dir / run_id))
+            export = probe.prepare_export(fixture_dir, original_index, root, "detach")
+            slides = probe.load_slides(export)
+            plan = probe.ground_truth_plan(export, slides)
+            facts = probe.ground_truth_facts(plan, arrival=probe.arrival_starts(export, slides, plan))
+            probe.bind_dom_ids(facts, probe.movie_nodes(export, slides))
+            expected_stage = probe.expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
             stack.enter_context(serving(variant))
             if level2:
                 stack.enter_context(level2_install())
