@@ -42,7 +42,9 @@ the outgoing movie survives the Dissolve); every other `<video>` passes
 through. At the fresh `dst` element of a pin/bridge the one candidate (pooled
 or held) whose instance is the entry's `src` is carried: a pin facades the
 fresh element onto it, a bridge moves it `src.rect -> dst.rect` over the
-transition scene and suppresses the fresh element. Zero or several
+transition scene and suppresses the fresh element. The player hides the source
+slide's layers for that scene, so a pin's decoder is held on the stage there,
+static at `src.rect`, and re-homed at the destination. Zero or several
 candidates, or a `loop` mismatch, refuse that one boundary (`preserve-refused`
 with `reason`) and the fresh element plays raw; for the rest of the preserve
 generation the boundary is then a retire of its `src`, so its candidates are
@@ -779,10 +781,12 @@ PRESERVE_CORE_JS = r"""
       if (b.action === 'retire' && b.atScene - 1 === hn) retireVictims(b, zoneVictims(b, []), true);
     });
     // A held decoder the player never tears down (a re-homed pin, an overlay)
-    // starts its next bridge's move here, at the transition start.
+    // starts riding its next bridge or pin here, at the transition start.
     held.slice().forEach(function(v) {
       const n = nextEntry(instanceOf(v));
-      if (n && n.action === 'bridge' && n.atScene - 1 === hn && isLive(v)) keepThroughBridge(v);
+      if (!n || n.atScene - 1 !== hn || !isLive(v)) return;
+      if (n.action === 'bridge') keepThroughBridge(v);
+      if (n.action === 'pin') keepThroughPin(v);
     });
   }
   function noteDeparture(v) {
@@ -1070,34 +1074,26 @@ PRESERVE_CORE_JS = r"""
     }
     return bezierAxis((lo + hi) / 2, e.y1, e.y2);
   }
-  function keepThroughBridge(v) {
-    const boundary = nextEntry(instanceOf(v));
-    const hn = currentHashNum();
-    if (!boundary || boundary.action !== 'bridge' || hn !== boundary.atScene - 1
-        || !dstRect(boundary) || !boundary.src.rect || !(boundary.durationSeconds > 0)) return false;
-    // Idle on the source slide the hash already reads `atScene - 1`; a pending
-    // remount of a held or pinned decoder must not start the move before the
-    // player tears the slide down.
-    if (!hasDeparted(instanceOf(v))) return false;
-    // The move owns the decoder now: end any footprint hold, or it drags the
+  /**
+   * The player keeps the source slide's layers hidden for its whole transition
+   * scene (the WebGL move draws them), so a carried decoder rides that scene on
+   * the stage, above authored content, at `rectAt()` (authored px). False when
+   * the ride is already running.
+   */
+  function rideTransition(v, boundary, rectAt, caller) {
+    // The ride owns the decoder now: end any footprint hold, or it drags the
     // landed decoder back to the source slot once the hash settles (live D2).
     if (v.__obedPinning) {
       v.__obedPinning = false;
       v.__obedPinToken = (v.__obedPinToken || 0) + 1;
     }
     const generation = preserveGeneration;
-    if (!v.__obedMotion || v.__obedMotion.generation !== generation
-        || v.__obedMotion.boundary !== boundary) {
-      v.__obedMotion = {started: performance.now(), generation: generation, boundary: boundary};
-    }
-    const started = v.__obedMotion.started;
-    const src = boundary.src.rect, dest = boundary.dst.rect;
     const stage = document.getElementById('body') || document.body;
     if (v.parentNode !== stage) {
       beginMove(v);
       stage.appendChild(v);
     }
-    if (v.__obedMotionPinning) return true;
+    if (v.__obedMotionPinning) return false;
     v.__obedMotionPinning = true;
     v.style.position = 'absolute';
     v.style.visibility = 'visible';
@@ -1112,16 +1108,9 @@ PRESERVE_CORE_JS = r"""
         v.__obedMotionPinning = false;
         return;
       }
-      const progress = easeInEaseOut((performance.now() - started) / (1000 * boundary.durationSeconds));
-      const authored = {
-        x: src.x + (dest.x - src.x) * progress,
-        y: src.y + (dest.y - src.y) * progress,
-        w: src.w + (dest.w - src.w) * progress,
-        h: src.h + (dest.h - src.h) * progress
-      };
-      const screenRect = toScreen(authored);
+      const screenRect = toScreen(rectAt());
       if (!screenRect) {
-        noteStageMapUnavailable('keepThroughBridge');
+        noteStageMapUnavailable(caller);
       } else {
         v.style.left = screenRect.x + 'px';
         v.style.top = screenRect.y + 'px';
@@ -1131,8 +1120,53 @@ PRESERVE_CORE_JS = r"""
       requestAnimationFrame(frame);
     }
     frame();
-    note('bridge-motion-start', {elId: v.__obedElId, durationSeconds: boundary.durationSeconds,
-      srcRect: src, rect: dest, geometrySource: 'export-duration-interpolation'});
+    return true;
+  }
+  function keepThroughBridge(v) {
+    const boundary = nextEntry(instanceOf(v));
+    const hn = currentHashNum();
+    if (!boundary || boundary.action !== 'bridge' || hn !== boundary.atScene - 1
+        || !dstRect(boundary) || !boundary.src.rect || !(boundary.durationSeconds > 0)) return false;
+    // Idle on the source slide the hash already reads `atScene - 1`; a pending
+    // remount of a held or pinned decoder must not start the move before the
+    // player tears the slide down.
+    if (!hasDeparted(instanceOf(v))) return false;
+    const generation = preserveGeneration;
+    if (!v.__obedMotion || v.__obedMotion.generation !== generation
+        || v.__obedMotion.boundary !== boundary) {
+      v.__obedMotion = {started: performance.now(), generation: generation, boundary: boundary};
+    }
+    const started = v.__obedMotion.started;
+    const src = boundary.src.rect, dest = boundary.dst.rect;
+    const moving = rideTransition(v, boundary, function() {
+      const progress = easeInEaseOut((performance.now() - started) / (1000 * boundary.durationSeconds));
+      return {
+        x: src.x + (dest.x - src.x) * progress,
+        y: src.y + (dest.y - src.y) * progress,
+        w: src.w + (dest.w - src.w) * progress,
+        h: src.h + (dest.h - src.h) * progress
+      };
+    }, 'keepThroughBridge');
+    if (moving) {
+      note('bridge-motion-start', {elId: v.__obedElId, durationSeconds: boundary.durationSeconds,
+        srcRect: src, rect: dest, geometrySource: 'export-duration-interpolation'});
+    }
+    return true;
+  }
+  /**
+   * A pin's transition has nothing to move, but the player hides its source
+   * layer all the same: hold the decoder on the stage, static at `src.rect`
+   * (= `dst.rect`), until the destination element arrives and re-homes it. A
+   * bridged overlay is already held on the stage by keepAtSlot.
+   */
+  function keepThroughPin(v) {
+    const boundary = nextEntry(instanceOf(v));
+    if (!boundary || boundary.action !== 'pin' || currentHashNum() !== boundary.atScene - 1
+        || !boundary.src.rect || v.__obedBridged34 || !hasDeparted(instanceOf(v))) return false;
+    const rect = boundary.src.rect;
+    if (rideTransition(v, boundary, function() { return rect; }, 'keepThroughPin')) {
+      note('pin-hold-start', {elId: v.__obedElId, atScene: boundary.atScene, srcRect: rect, rect: rect});
+    }
     return true;
   }
   function bridgeStage() {
@@ -1247,17 +1281,21 @@ PRESERVE_CORE_JS = r"""
     return ix * iy;
   }
   // A <video> only contributes to the composite when attached and not hidden by
-  // display/visibility/opacity. Used to exclude a suppressed 3->4 restart sibling
-  // from footprint-owner resolution (it decodes but does not paint).
+  // its own or an ancestor's display/opacity, or by its (inherited) visibility.
+  // Used to exclude a suppressed 3->4 restart sibling, or a decoder inside a
+  // layer the player keeps at opacity 0, from footprint-owner resolution.
   function isCompositing(v) {
     if (!document.contains(v)) return false;
     if (v.__obedSuppressed34) return false;
-    try {
-      const st = getComputedStyle(v);
-      if (st.display === 'none' || st.visibility === 'hidden') return false;
-      if (parseFloat(st.opacity) <= 0.02) return false;
-    } catch (e) {}
-    return true;
+    let opacity = 1;
+    for (let n = v; n && n !== document; n = n.parentNode) {
+      let st;
+      try { st = getComputedStyle(n); } catch (e) { continue; }
+      if (st.display === 'none' || (n === v && st.visibility === 'hidden')) return false;
+      const o = parseFloat(st.opacity);
+      if (o >= 0) opacity *= o;
+    }
+    return opacity > 0.02;
   }
   /**
    * Bridge a preserved live decoder through the 3->4 magic move: keep it as a
@@ -1306,22 +1344,27 @@ PRESERVE_CORE_JS = r"""
    * Keep the export's suppressed 3->4 restart element hidden every frame. A
    * one-shot opacity/visibility override is wiped when the player re-styles the
    * element on slide 4's later build, letting its grating paint over the bridged
-   * decoder's composited counter patch. Re-assert the hide each rAF so only the
-   * continuing decoder composites.
+   * decoder's composited counter patch. Hide it at once (it may not be
+   * inserted yet), then re-assert the hide each rAF so only the continuing
+   * decoder composites.
    */
   function keepSuppressed(el) {
     if (el.__obedSuppressPinning) return;
     el.__obedSuppressPinning = true;
-    function frame() {
-      if (!el.__obedSuppressed34 || !document.contains(el)) {
-        el.__obedSuppressPinning = false; return;
-      }
+    function hide() {
       try {
         el.style.setProperty('opacity', '0', 'important');
         el.style.setProperty('visibility', 'hidden', 'important');
       } catch (e) {}
+    }
+    function frame() {
+      if (!el.__obedSuppressed34 || !document.contains(el)) {
+        el.__obedSuppressPinning = false; return;
+      }
+      hide();
       requestAnimationFrame(frame);
     }
+    hide();
     requestAnimationFrame(frame);
   }
   /**
@@ -1520,7 +1563,7 @@ PRESERVE_CORE_JS = r"""
       return;
     }
     if (v.__obedRemountEpoch === -1 || v.ended) return;
-    if (keepThroughBridge(v)) return;
+    if (keepThroughBridge(v) || keepThroughPin(v)) return;
     if (v.__obedParent && document.contains(v.__obedParent)) {
       try {
         const anchor = (v.__obedNextSibling && v.__obedNextSibling.parentNode === v.__obedParent)

@@ -21,7 +21,7 @@ if str(REPO / "src") not in sys.path:
 
 from obed_edom.live_continuity_js import PRESERVE_CORE_JS  # noqa: E402
 
-VARIANTS: tuple[str, ...] = ("stash-any", "wrong-instance", "fifo-reuse", "linear-bridge")
+VARIANTS: tuple[str, ...] = ("stash-any", "wrong-instance", "fifo-reuse", "linear-bridge", "no-pin-hold")
 
 _POOL_PLANNED_ONLY = "    if (!armedPool && !poolable(v)) return;\n"
 _PICK_SRC_ONLY = "      if (c === el || !isCarrySource(c, entry)) return;\n"
@@ -53,6 +53,9 @@ _TRANSFORMS: dict[str, tuple[tuple[str, str], ...]] = {
             "const progress = Math.min(1, Math.max(0, (performance.now() - started) / (1000 * boundary.durationSeconds)));",
         ),
     ),
+    # Never hold a pin through its transition scene: only bridges ride it on the stage (the pre-pin-hold core), so a
+    # pin's decoder sits in the source layer the player hides for the move.
+    "no-pin-hold": (("  function keepThroughPin(v) {\n", "  function keepThroughPin(v) {\n    return false;\n"),),
 }
 
 

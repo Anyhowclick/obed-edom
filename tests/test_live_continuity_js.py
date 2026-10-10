@@ -31,7 +31,7 @@ def test_continuity_version_is_pinned_int():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "d71d1e76caa1c321cb784d15c29701793ee3e24afdcb1b06e6df7a3d0909af8f"
+PINNED_CORE_SHA256 = "7cb6e0fe87882b2ac48890e3fdeb136d04c9c4bed62210b2465a8152ba9e08e8"
 
 
 def test_js_sha256_hashes_the_core_bytes_and_matches_the_pinned_literal():
@@ -1086,13 +1086,15 @@ console.log(JSON.stringify({
 # re-homed inside the same delivery, the second stays refused by the guard.
 
 #: Pool `A1` at its teardown; the synchronous remount re-homes it into the body
-#: and leaves `__obedRemounting` set (the harness never runs timers).
+#: and leaves `__obedRemounting` set (the harness never runs timers). At `#0`
+#: the remount re-homes it; at `#1`, its pin's transition scene, the pin hold
+#: does (`pin-hold-start` once, then silently on a re-hoist).
 _REHOMED_A1 = r"""
 const v = video('A1');
 v.readyState = 4; v.currentTime = 1;
 v.parentNode = bodyEl;
 v.src = 'https://host/untitled.mov';
-goToScene(1);
+goToScene(__SCENE__);
 detach(v);
 const rehomed = {connected: v.isConnected, remounting: !!v.__obedRemounting};
 const n0 = P.events.length;
@@ -1114,18 +1116,20 @@ console.log(JSON.stringify({
 """
 
 
+@pytest.mark.parametrize("scene", [0, 1], ids=["resting", "pin-transition"])
 @pytest.mark.parametrize("removal", ["direct", "subtree"])
-def test_a_teardown_inside_a_moves_window_is_stashed_and_rehomed_in_the_same_delivery(removal):
-    script = _REHOMED_A1 + _REMOVAL_INSIDE_THE_WINDOW[removal] + _AFTER_REMOVAL
+def test_a_teardown_inside_a_moves_window_is_stashed_and_rehomed_in_the_same_delivery(removal, scene):
+    script = _REHOMED_A1.replace("__SCENE__", str(scene)) + _REMOVAL_INSIDE_THE_WINDOW[removal] + _AFTER_REMOVAL
     result = _run_full_core_in_node(plan=_MOVIE_PLAN, stage=_IDENTITY_STAGE, script=script)
     assert result["rehomed"] == {"connected": True, "remounting": True}
     why = "preserve-on-detach" if removal == "direct" else "preserve-on-detach-subtree"
-    assert result["kinds"] == [why, "remount-scheduled", "remount-done"]
+    assert result["kinds"] == [why, "remount-scheduled", *(["remount-done"] if scene == 0 else [])]
     assert result["connected"] and result["parentIsBody"]
 
 
-def test_a_self_move_still_connected_at_delivery_stays_refused_by_the_guard():
-    script = _REHOMED_A1 + _REMOVAL_INSIDE_THE_WINDOW["self-move"] + _AFTER_REMOVAL
+@pytest.mark.parametrize("scene", [0, 1], ids=["resting", "pin-transition"])
+def test_a_self_move_still_connected_at_delivery_stays_refused_by_the_guard(scene):
+    script = _REHOMED_A1.replace("__SCENE__", str(scene)) + _REMOVAL_INSIDE_THE_WINDOW["self-move"] + _AFTER_REMOVAL
     result = _run_full_core_in_node(plan=_MOVIE_PLAN, stage=_IDENTITY_STAGE, script=script)
     assert result["rehomed"] == {"connected": True, "remounting": True}
     assert result["kinds"] == []
@@ -4000,7 +4004,9 @@ def test_the_footprint_hold_of_a_pin_ends_when_the_next_bridge_moves_the_decoder
     """Live D2 b3to4: the pin's footprint hold (`keepAtFootprint`) outlived the
     next bridge's move and, once the hash settled past the transition, dragged
     the landed decoder back to the source slot at the destination size
-    (960,400 at 640x180). The move must end the hold."""
+    (960,400 at 640x180). The move must end the hold. The pin's own transition
+    is held on the stage, so the footprint hold starts once the dom-swap re-homes
+    the decoder into the destination layer."""
     result = _run_chain(_PIN_THEN_BRIDGE_PLAN, r"""
 const posterParent = {__screenOrigin: {x: 0, y: 0}, __scale: 1,
   insertBefore(node) { node.parentNode = this; node.__inStage = true; },
@@ -4013,9 +4019,12 @@ const a = playing('A1');
 a._rect = {left: 100, top: 200, width: 300, height: 150};
 goToScene(1);
 detach(a);
-const holding = !!a.__obedPinning;
 goToScene(2);
-fresh('A2');
+pump();
+const b = fresh('A2');
+b.parentNode = posterParent;
+moCallbacks.slice().forEach((cb) => cb([{addedNodes: [b], removedNodes: []}]));
+const holding = !!a.__obedPinning && a.parentNode === posterParent;
 goToScene(3);
 posterParent.removeChild(a);
 bodyEl.__screenOrigin = {x: 0, y: 0};
@@ -4070,6 +4079,268 @@ console.log(JSON.stringify({idle, moves: notesOf('bridge-motion-start').map(n =>
     assert len(result["moves"]) == 2
     assert result["instance"] == b[3]["dst"]["objectId"]
     assert result["inBody"] is True
+
+
+# --- Pin hold (owner decision 2026-10-10) ---------------------------------
+#
+# Measured (pingap, 2026-10-10): the player keeps the source slide's layers at
+# opacity 0 for the whole Magic Move of a transition scene (its WebGL move draws
+# them), ~108 frames. A pin's decoder remounted into that layer — pooled at the
+# player's teardown (after a go-to, or the first pin of a chain) or held there
+# by an earlier pin's re-home — was dark for the whole move. The pin hold rides
+# the transition scene on the stage, static at `src.rect` (= `dst.rect`), and
+# the destination's dom-swap re-homes it into the destination layer as before.
+
+_PIN_HOLD_LAYERS = r"""
+bodyEl.__screenOrigin = {x: 0, y: 0};
+/** A slide layer with its movie's poster canvas at `rect`; the player fades it with `style.opacity`. */
+function slideLayer(rect, id) {
+  const layer = {
+    id: id, style: {opacity: '1'}, __screenOrigin: {x: 0, y: 0}, __scale: 1, __inStage: true, kids: [],
+    insertBefore(node, ref) {
+      const j = this.kids.indexOf(node);
+      if (j >= 0) this.kids.splice(j, 1);
+      node.parentNode = this; node.__inStage = true;
+      const i = ref ? this.kids.indexOf(ref) : -1;
+      if (i >= 0) this.kids.splice(i, 0, node); else this.kids.push(node);
+    },
+    appendChild(node) { this.insertBefore(node, null); },
+    removeChild(node) {
+      node.parentNode = null; node.__inStage = false;
+      const i = this.kids.indexOf(node);
+      if (i >= 0) this.kids.splice(i, 1);
+    },
+  };
+  const poster = {id: id + '-canvas', parentNode: layer, parentElement: layer,
+    get nextSibling() { return layer.kids[layer.kids.indexOf(poster) + 1] || null; },
+    getBoundingClientRect: () => ({left: rect.x, top: rect.y, width: rect.w, height: rect.h})};
+  layer.kids.push(poster);
+  canvases.push(poster);
+  return {layer, poster};
+}
+/** The player's own movie element of `inst`, playing in `slide`'s layer at `rect`. */
+function playingIn(slide, inst, rect) {
+  const v = playing(inst);
+  slide.layer.insertBefore(v, null);
+  v.style.left = rect.x + 'px'; v.style.top = rect.y + 'px';
+  v.style.width = rect.w + 'px'; v.style.height = rect.h + 'px';
+  v._rect = {left: rect.x, top: rect.y, width: rect.w, height: rect.h};
+  return v;
+}
+/** The player builds `inst`'s fresh element into `slide`'s layer, before its poster. */
+function buildInto(slide, inst) {
+  const stub = fresh(inst);
+  slide.layer.kids.unshift(stub);
+  stub.parentNode = slide.layer;
+  stub.nextSibling = slide.poster;
+  moCallbacks.slice().forEach((cb) => cb([{addedNodes: [stub], removedNodes: []}]));
+  return stub;
+}
+/** What the viewer sees of `v`: the product of its and its ancestors' opacities. */
+function effectiveOpacity(v) {
+  let o = 1;
+  for (let n = v; n; n = n.parentNode) {
+    const s = n.style || {};
+    if (s.opacity != null && s.opacity !== '') o *= parseFloat(s.opacity);
+  }
+  return o;
+}
+/** Run `n` animation frames 100 ms apart, sampling `v` after each. */
+function frames(v, n) {
+  const out = [];
+  for (let i = 0; i < n; i += 1) {
+    nowMs += 100;
+    pump();
+    const r = v.getBoundingClientRect();
+    out.push({opacity: effectiveOpacity(v), connected: document.contains(v), onBody: v.parentNode === bodyEl,
+      rect: {x: r.left, y: r.top, w: r.width, h: r.height}});
+  }
+  return out;
+}
+function order(slide, v) {
+  return slide.layer.kids.map(k => k === v ? 'decoder' : k === slide.poster ? 'poster' : 'stub');
+}
+"""
+
+
+def _held_frame(rect: dict) -> dict:
+    return {"opacity": 1, "connected": True, "onBody": True, "rect": rect}
+
+
+def _pooled_pin_after_go_to() -> dict:
+    """D1 `g 3` + advance: the 3->4 transition scene's frames, then the slide-4 landing."""
+    return _run_chain(_CONTRACT["d1"], _PIN_HOLD_LAYERS + r"""
+const B = window.__OBED_CONTINUITY__.boundaries;
+goToScene(4);
+P.clear();
+const slide3 = slideLayer(B[2].src.rect, 'layer-s3');
+const s3 = playingIn(slide3, ID[2], B[2].src.rect);
+goToScene(5);
+slide3.layer.style.opacity = '0';
+slide3.layer.removeChild(s3);
+detach(s3);
+const scene = frames(s3, 6);
+goToScene(6);
+const waiting = frames(s3, 1)[0];
+canvases.length = 0;
+const slide4 = slideLayer(B[2].dst.rect, 'layer-s4');
+const stub = buildInto(slide4, ID[3]);
+const r = s3.getBoundingClientRect();
+console.log(JSON.stringify({
+  scene, waiting, facade: stub.__obedFacadeFor === s3, order: order(slide4, s3),
+  landed: {x: r.left, y: r.top, w: r.width, h: r.height}, opacity: effectiveOpacity(s3),
+  holds: notesOf('pin-hold-start'), moves: notesOf('bridge-motion-start').length, s3Id: s3.__obedElId,
+}));
+""", src="https://host/counter-a.mov")
+
+
+def test_a_pooled_pin_after_a_go_to_rides_its_transition_on_the_stage_and_re_homes_at_the_destination():
+    """Live D1 `g 3` + advance (pingap r1/r3/r4/r7: 108 frames dark). After the go-to
+    the slide-3 movie is the player's fresh element; the 3->4 transition tears it
+    down and pools it. Every frame of the transition scene it must paint on the
+    stage at the pin's rect, never inside the source layer the player holds at
+    opacity 0; at the destination the dom-swap re-homes it above the slide-4
+    poster at `dst.rect`. One `pin-hold-start`, no `bridge-motion-start`."""
+    result = _pooled_pin_after_go_to()
+    pin = _CONTRACT["d1"]["boundaries"][2]
+    assert result["scene"] == [_held_frame(pin["src"]["rect"])] * 6
+    assert result["waiting"] == _held_frame(pin["src"]["rect"])
+    assert result["facade"] is True
+    assert result["order"] == ["poster", "decoder"]
+    assert result["landed"] == pytest.approx(pin["dst"]["rect"])
+    assert result["opacity"] == 1
+    assert result["holds"] == [{"elId": result["s3Id"], "atScene": 6, "srcRect": pin["src"]["rect"],
+                                "rect": pin["src"]["rect"], "sceneHash": "#5"}]
+    assert result["moves"] == 0
+
+
+def test_a_held_re_homed_pin_is_hoisted_for_its_next_pins_transition():
+    """Live D5 (pingap r9: dark #1->#2 and #3->#4). Pin 1->2 then pin 2->3: the
+    first transition pools the player's element (as above); the second finds the
+    decoder re-homed in slide 2's layer, which the player never tears down but
+    fades to 0 for the move. The transition start (the player's second hash
+    write; the first is the idle) hoists it onto the stage for the scene, and
+    the slide-3 dom-swap re-homes it above the slide-3 poster."""
+    plan = _CONTRACT["d5"]
+    result = _run_chain(plan, _PIN_HOLD_LAYERS + r"""
+const B = window.__OBED_CONTINUITY__.boundaries;
+goToScene(0);
+const slide1 = slideLayer(B[0].src.rect, 'layer-s1');
+const a = playingIn(slide1, ID[0], B[0].src.rect);
+goToScene(1);
+slide1.layer.style.opacity = '0';
+slide1.layer.removeChild(a);
+detach(a);
+const first = frames(a, 3);
+goToScene(2);
+pump();
+canvases.length = 0;
+const slide2 = slideLayer(B[0].dst.rect, 'layer-s2');
+buildInto(slide2, ID[1]);
+const rehomed = order(slide2, a);
+window.history.replaceState(null, 'Keynote', 'index.html#3');
+pump();
+const idle = {order: order(slide2, a), holds: notesOf('pin-hold-start').length};
+slide2.layer.style.opacity = '0';
+window.history.replaceState(null, 'Keynote', 'index.html#3');
+const second = frames(a, 6);
+goToScene(4);
+pump();
+canvases.length = 0;
+const slide3 = slideLayer(B[1].dst.rect, 'layer-s3');
+const stub = buildInto(slide3, ID[2]);
+const r = a.getBoundingClientRect();
+console.log(JSON.stringify({
+  first, rehomed, idle, second, facade: stub.__obedFacadeFor === a, order: order(slide3, a),
+  landed: {x: r.left, y: r.top, w: r.width, h: r.height}, opacity: effectiveOpacity(a),
+  holds: notesOf('pin-hold-start').map(n => [n.atScene, n.sceneHash]), moves: notesOf('bridge-motion-start').length,
+  swaps: notesOf('dom-swap').length,
+}));
+""", src="https://host/counter-a.mov")
+    rect = plan["boundaries"][1]["src"]["rect"]
+    assert result["first"] == [_held_frame(plan["boundaries"][0]["src"]["rect"])] * 3
+    assert result["rehomed"] == ["poster", "decoder"]
+    assert result["idle"] == {"order": ["poster", "decoder"], "holds": 1}
+    assert result["second"] == [_held_frame(rect)] * 6
+    assert result["facade"] is True
+    assert result["order"] == ["poster", "decoder"]
+    assert result["landed"] == pytest.approx(plan["boundaries"][1]["dst"]["rect"])
+    assert result["opacity"] == 1
+    assert result["holds"] == [[2, "#1"], [4, "#3"]]
+    assert result["moves"] == 0
+    assert result["swaps"] == 2
+
+
+def test_a_bridged_overlay_is_not_pin_held_its_slot_keeps_it_on_the_stage():
+    """D1 3->4 (bridge, bridge, pin): the overlay `keepAtSlot` holds on the stage
+    is never handed to the pin hold at the pin's transition start; it stays at
+    its slot, bridged, and the pin's dom-swap re-homes it as before."""
+    plan = _CONTRACT["d1"]
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing(ID[0]);
+goToScene(1);
+detach(a);
+goToScene(2);
+const b = fresh(ID[1]);
+b.parentNode = bodyEl;
+goToScene(3);
+detach(b);
+pump();
+goToScene(4);
+const c = fresh(ID[2]);
+c.parentNode = bodyEl;
+pump();
+window.history.replaceState(null, 'Keynote', 'index.html#5');
+window.history.replaceState(null, 'Keynote', 'index.html#5');
+pump(); pump();
+console.log(JSON.stringify({holds: notesOf('pin-hold-start').length, bridged: !!a.__obedBridged34,
+  slot: !!a.__obedSlotPinning, inBody: a.parentNode === bodyEl, left: a.style.left, width: a.style.width}));
+""", src="https://host/counter-a.mov")
+    dst = plan["boundaries"][1]["dst"]["rect"]
+    assert result == {"holds": 0, "bridged": True, "slot": True, "inBody": True,
+                      "left": f"{dst['x']}px", "width": f"{dst['w']}px"}
+
+
+_LAYERED_OWNER = r"""
+const outer = {style: {}, parentNode: bodyEl};
+const inner = {style: {}, parentNode: outer};
+const v = video('A1');
+v.readyState = 4; v.currentTime = 2; v.videoWidth = 640; v.videoHeight = 480;
+v.src = 'https://host/untitled.mov';
+v.parentNode = inner;
+v._rect = {left: 100, top: 200, width: 300, height: 150};
+__MUTATE__;
+console.log(JSON.stringify(P.footprintOwnerDecoderId({x: 100, y: 200, w: 300, h: 150}).via));
+"""
+
+
+@pytest.mark.parametrize(
+    ("mutate", "via"),
+    [
+        ("0", "footprint-video"),
+        ("outer.style.opacity = '0'", "none"),
+        ("inner.style.opacity = '0.1'; outer.style.opacity = '0.1'", "none"),
+        ("inner.style.opacity = '0.5'; outer.style.opacity = '0.5'", "footprint-video"),
+        ("outer.style.display = 'none'", "none"),
+        ("v.style.visibility = 'hidden'", "none"),
+        ("v.style.opacity = '0'", "none"),
+        ("inner.style.visibility = 'hidden'", "footprint-video"),
+        ("delete inner.style", "footprint-video"),
+        ("delete inner.style; outer.style.opacity = '0'", "none"),
+        ("v.__obedSuppressed34 = true", "none"),
+    ],
+    ids=["visible", "ancestor-opacity-0", "opacity-product", "half-opacity-product", "ancestor-display-none",
+         "own-visibility", "own-opacity", "ancestor-visibility-is-inherited-not-walked", "unstyled-ancestor-skipped",
+         "past-an-unstyled-ancestor", "suppressed"],
+)
+def test_a_decoder_inside_a_hidden_ancestor_does_not_own_the_footprint(mutate, via):
+    """`isCompositing` walks the ancestor chain: an effective opacity (the product)
+    <= 0.02 or `display: none` anywhere hides the decoder; visibility is the
+    element's own computed value (inherited, and a `visible` child of a hidden
+    parent still paints), so it is read on the element alone."""
+    script = _LAYERED_OWNER.replace("__MUTATE__", mutate)
+    assert _run_full_core_in_node(plan=_MOVIE_PLAN, stage=_IDENTITY_STAGE, script=script) == via
 
 
 def test_a_suppressed_bridge_destination_really_clears_when_its_slide_ends():

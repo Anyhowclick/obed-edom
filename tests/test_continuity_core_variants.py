@@ -24,7 +24,7 @@ from obed_edom.live_continuity_js import PRESERVE_CORE_JS, js_sha256  # noqa: E4
 
 
 def test_the_variant_names_are_the_shared_contract() -> None:
-    assert variants.VARIANTS == ("stash-any", "wrong-instance", "fifo-reuse", "linear-bridge")
+    assert variants.VARIANTS == ("stash-any", "wrong-instance", "fifo-reuse", "linear-bridge", "no-pin-hold")
 
 
 ANCHORS = [(name, anchor) for name in variants.VARIANTS for anchor, _ in variants._TRANSFORMS[name]]
@@ -96,6 +96,30 @@ def test_linear_bridge_moves_the_overlay_linearly_in_the_real_core(monkeypatch) 
     for fraction, rect in zip((0, 0.25, 0.5, 0.75, 1), result["rects"]):
         linear = {k: _BRIDGE_SRC[k] + (_BRIDGE_DEST[k] - _BRIDGE_SRC[k]) * fraction for k in _BRIDGE_SRC}
         assert rect == pytest.approx(linear), fraction
+
+
+def test_no_pin_hold_only_disables_the_pin_hold() -> None:
+    """The pin hold's red control: `keepThroughPin` returns at once, so only bridges ride their
+    transition scene on the stage; every caller and the shared ride are untouched."""
+    core = variants.variant_core("no-pin-hold")
+    assert core.count("  function keepThroughPin(v) {\n    return false;\n") == 1
+    assert core.count("keepThroughPin(v)") == PRESERVE_CORE_JS.count("keepThroughPin(v)") == 3
+    assert core.replace(variants._TRANSFORMS["no-pin-hold"][0][1], variants._TRANSFORMS["no-pin-hold"][0][0]) == PRESERVE_CORE_JS
+
+
+def test_no_pin_hold_leaves_a_pooled_pin_in_the_hidden_source_layer_in_the_real_core(monkeypatch) -> None:
+    """The variant is a behavioural red: injected in place of the core, the pooled pin after a
+    go-to is remounted into the source layer the player holds at opacity 0 for the whole
+    transition scene, and no `pin-hold-start` is noted."""
+    from test_live_continuity_js import _pooled_pin_after_go_to
+
+    from obed_edom import live_continuity_js
+
+    monkeypatch.setattr(live_continuity_js, "PRESERVE_CORE_JS", variants.variant_core("no-pin-hold"))
+    result = _pooled_pin_after_go_to()
+    assert [f["opacity"] for f in result["scene"]] == [0] * 6
+    assert not any(f["onBody"] for f in result["scene"])
+    assert result["holds"] == []
 
 
 @pytest.mark.parametrize(("name", "anchor"), ANCHORS)
