@@ -7248,7 +7248,196 @@ class TestRetireVerdict:
             assert term in probe.SAMPLER_JS
 
 
-PRE_FLIP = [{"scene": 1, "videos": [{"src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 1}}]}]
+class TestAssetKeysAreExactNames:
+    """Codex S2 r1 #3 (probe half): `a.mov` is a substring of `ba.mov`, so a first-substring match
+    classified a `ba.mov` source as `a.mov`. A source is its canonical asset name (the file name
+    without query or Keynote trim suffix, lowercased) and matches only an equal key."""
+
+    @pytest.mark.parametrize(("source", "keys", "expected"), [
+        pytest.param("ba.mov", ["a.mov"], False, id="overlapping-name"),
+        pytest.param("ba.mov-0.0000-10.0000.mov", ["a.mov"], False, id="overlapping-trimmed-export-name"),
+        pytest.param("http://127.0.0.1:9/assets/ba.mov-0.0000-10.0000.mov", ["a.mov"], False, id="overlapping-url"),
+        pytest.param("a.mov", ["ba.mov"], False, id="key-longer-than-source"),
+        pytest.param("a.mov-0.0000-10.0000.mov", ["a.mov"], True, id="trimmed-export-name"),
+        pytest.param("http://127.0.0.1:9/assets/A.MOV-0.0000-10.0000.mov?v=1", ["a.mov"], True, id="url-case-and-query"),
+        pytest.param("counter-a.mov", ["counter-b.mov", "counter-a.mov"], True, id="pool-key-among-several"),
+        pytest.param("", ["a.mov"], False, id="empty-source"),
+        pytest.param(None, ["a.mov"], False, id="no-source"),
+        pytest.param("a.mov", [""], False, id="empty-key"),
+    ])
+    def test_a_source_matches_only_its_own_canonical_asset_name(self, source: Any, keys: list[str], expected: bool) -> None:
+        assert probe.matches_asset_keys(source, keys) is expected
+
+    def test_an_overlapping_name_in_the_pool_is_not_the_retired_asset(self) -> None:
+        retire = {"assetKeys": ["a.mov"], "rects": [BIG_INSTANCE]}
+        read = {"stageMap": dict(IDENTITY_STAGE_MAP), "painting": []}
+        scored = probe.score_refusal(dict(read, poolSnapshot=[{"key": "ba.mov", "elId": 4}]), retire, True)
+        assert scored["verdict"] is True and scored["pooled"] == []
+        assert probe.score_refusal(dict(read, poolSnapshot=[{"key": "a.mov", "elId": 4}]), retire, True)["verdict"] is False
+
+    def test_a_stray_is_named_by_its_own_asset_not_an_overlapping_one(self) -> None:
+        assets = ["a.mov", "ba.mov"]
+        assert probe.asset_of("ba.mov-0.0000-10.0000.mov", assets) == "ba.mov"
+        assert probe.asset_of("a.mov-0.0000-10.0000.mov", assets) == "a.mov"
+        assert probe.asset_of("c.mov-0.0000-10.0000.mov", assets) == "unknown"
+
+    def test_the_sampler_resolves_an_overlapping_name_to_its_own_movie(self) -> None:
+        """Executes the real `SAMPLER_JS` under Node: the key it pins on each footprint-owner query."""
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not available")
+        script = f"""
+        global.window = global;
+        var asked = [];
+        var tick = null;
+        global.requestAnimationFrame = function(cb){{ tick = cb; return 1; }};
+        window.__OBED_CONTINUITY__ = {{movies: {{movie1: {{assetKeys: ['a.mov']}}, movie2: {{assetKeys: ['ba.mov']}}}}}};
+        window.__OBED_P2_PRESERVE__ = {{footprintOwnerDecoderId: function(q){{ asked.push(q.key === undefined ? null : q.key); return null; }}}};
+        function vid(src){{
+          return {{currentSrc: src, src: src, dataset: {{}},
+                   getBoundingClientRect: function(){{ return {{left: 0, top: 0, width: 10, height: 10}}; }}}};
+        }}
+        var stage = {{offsetWidth: 1920, offsetHeight: 1080,
+                      getBoundingClientRect: function(){{ return {{left: 0, top: 0, width: 1920, height: 1080}}; }}}};
+        global.document = {{
+          getElementById: function(id){{ return id === 'stage' ? stage : null; }},
+          querySelectorAll: function(){{
+            return [vid('http://h/x/ba.mov-0.0000-10.0000.mov'), vid('http://h/x/a.mov-0.0000-10.0000.mov'), vid('http://h/x/c.mov')];
+          }},
+          contains: function(){{ return true; }},
+        }};
+        {probe.SAMPLER_JS}
+        tick();
+        console.log(JSON.stringify(asked));
+        """
+        result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout.strip()) == ["movie2", "movie1", None]
+
+
+SIBLING_SRC, SIBLING_DST = "SIBLING-SRC-OBJECT", "SIBLING-DST-OBJECT"
+
+
+class TestRetireIsInstanceBound:
+    """Codex S2 r1 #5: retire qualification was asset-wide. A same-asset sibling instance that
+    legitimately carries at the same boundary must not fail the retire, and the sibling's own
+    refusal note must not stand in for the retired instance's. Snapshots, notes and carry events
+    bind to the retired pair's objectIds (`srcObjectId`/`dstObjectId`) and, for an unstamped note,
+    to the decoder ids the retained samples stamp with them; anything unattributable still counts
+    (fail closed)."""
+
+    SIBLING_EL = 9
+
+    def _spec(self) -> dict[str, Any]:
+        """P2's refused 1->2 pin, on a destination that also holds a second instance of its asset
+        (what `verdict_specs` lists as the retire's `rects`)."""
+        spec = _spec(_p2_facts(), P2_RETIRE12)
+        return dict(spec, rects=[*spec["rects"], dict(OTHER_INSTANCE)])
+
+    def _ids(self) -> tuple[str, str]:
+        spec = self._spec()
+        return spec["srcObjectId"].upper(), spec["dstObjectId"].upper()
+
+    def _samples(self) -> list[dict[str, Any]]:
+        """The P2 hand-back rows plus the sibling's carried decoder, stamped with its own source
+        instance on slide 1 and its destination instance once the pin has landed (`hold`)."""
+        rows = _handback_samples()
+        for row in rows:
+            sibling = video(
+                id=self.SIBLING_EL, el_id=self.SIBLING_EL, t=row["t"], scene=row["scene"], current_time=row["t"] / 1000,
+                rect=dict(OTHER_INSTANCE),
+            )
+            stamp = SIBLING_SRC if row["scene"] < 2 else SIBLING_DST
+            row["videos"].append(_dom(sibling, "SIBLING-video", remounted=row["scene"] >= 2, instance=stamp))
+        return rows
+
+    def _sibling_carry(self) -> tuple[dict[str, Any], ...]:
+        """What the core notes when it carries the sibling: the reuse naming the sibling's pair, then
+        the remount of its preserved decoder (unstamped; keyed by the shared asset)."""
+        return (
+            _ev("reuse-decoder", key="untitled.mov", newElId=7, oldElId=self.SIBLING_EL, atScene=2,
+                src=SIBLING_SRC, dst=SIBLING_DST, sceneHash="#2"),
+            _ev("remount-into-authored-layer", elId=self.SIBLING_EL, key="untitled.mov", sceneHash="#2"),
+        )
+
+    def _sibling_pool(self) -> list[dict[str, Any]]:
+        return [{"key": "untitled.mov", "movieKey": "movie1", "instance": SIBLING_DST, "elId": self.SIBLING_EL, "fromDom": True}]
+
+    def _note(self, instance: str) -> dict[str, Any]:
+        return _ev("retire-boundary", key="movie1", elIds=[3], atScene=2, sceneHash="#2", instance=instance)
+
+    def _score(self, events: tuple[Any, ...], *, pool: Any = None, painting: Any = None) -> dict[str, Any]:
+        read = _retire_read(
+            events, pool=self._sibling_pool() if pool is None else pool,
+            painting=[painting_video(OTHER_INSTANCE, el_id=self.SIBLING_EL)] if painting is None else painting,
+        )
+        return probe.score_retire(read, self._spec(), True, self._samples())
+
+    def test_a_carried_same_asset_sibling_does_not_fail_the_retire(self) -> None:
+        src, _ = self._ids()
+        scored = self._score((self._note(src), *self._sibling_carry()))
+        assert scored["verdict"] is True, scored["reason"]
+        assert scored["carryNotes"] == [] and scored["pooled"] == [] and scored["paintingOverRect"] == []
+        assert len(scored["retireNotes"]) == 1
+
+    @pytest.mark.parametrize("note", [
+        pytest.param(_ev("retire-boundary", key="movie1", elIds=[SIBLING_EL], atScene=2, sceneHash="#2", instance=SIBLING_SRC), id="retire-boundary"),
+        pytest.param(_ev("preserve-refused", key="movie1", scene=1, via="stash", sceneHash="#1", instance=SIBLING_SRC), id="preserve-refused"),
+    ])
+    def test_the_siblings_refusal_note_does_not_stand_in_for_the_retired_instances(self, note: dict[str, Any]) -> None:
+        """Nothing else on the slide: the sibling's note is the only refusal note for the movie."""
+        scored = self._score((note,), pool=[], painting=[])
+        assert scored["verdict"] is False and scored["reason"].startswith("no preserve-refused/retire-boundary note")
+
+    def test_the_retired_instances_own_refusal_notes_qualify(self) -> None:
+        src, dst = self._ids()
+        reuse_refused = _ev("preserve-refused", key="movie1", scene=1, via="reuse", sceneHash="#1", instance=dst, src=src, reason="absent")
+        for note in (self._note(src), _ev("preserve-refused", key="movie1", scene=1, via="stash", sceneHash="#1", instance=src), reuse_refused):
+            assert self._score((note,))["verdict"] is True
+
+    def test_known_bad_the_retired_pair_carried_is_still_red(self) -> None:
+        src, dst = self._ids()
+        reuse = _ev("reuse-decoder", key="untitled.mov", newElId=7, oldElId=3, atScene=2, src=src, dst=dst, sceneHash="#2")
+        scored = self._score((self._note(src), reuse))
+        assert scored["verdict"] is False and scored["carryNotes"] == [reuse]
+
+    @pytest.mark.parametrize("carry", [
+        pytest.param(_ev("remount-into-authored-layer", elId=3, key="untitled.mov", sceneHash="#2"), id="retired-decoder-remounted"),
+        pytest.param(_ev("remount-into-authored-layer", elId=42, key="untitled.mov", sceneHash="#2"), id="unattributable-decoder"),
+        pytest.param(_ev("reuse-decoder", key="untitled.mov", newElId=7, oldElId=42, sceneHash="#2"), id="unstamped-reuse"),
+    ])
+    def test_known_bad_an_unattributable_or_own_carry_note_stays_red(self, carry: dict[str, Any]) -> None:
+        src, _ = self._ids()
+        scored = self._score((self._note(src), carry))
+        assert scored["verdict"] is False and scored["carryNotes"] == [carry]
+
+    @pytest.mark.parametrize("entry", [
+        pytest.param({"instance": "DST"}, id="the-retired-destination-instance"),
+        pytest.param({"instance": "SRC"}, id="the-retired-source-instance"),
+        pytest.param({"instance": None, "elId": 42}, id="unstamped"),
+    ])
+    def test_known_bad_the_retired_pair_or_an_unattributable_decoder_pooled_stays_red(self, entry: dict[str, Any]) -> None:
+        src, dst = self._ids()
+        stamp = {"DST": dst, "SRC": src}.get(entry["instance"])
+        pooled = {"key": "untitled.mov", "movieKey": "movie1", "elId": entry.get("elId", 3), "instance": stamp}
+        scored = self._score((self._note(src),), pool=[*self._sibling_pool(), pooled])
+        assert scored["verdict"] is False and scored["pooled"] == [pooled]
+
+    def test_known_bad_another_decoder_over_the_siblings_rect_stays_red(self) -> None:
+        """Only a decoder the samples stamp with another instance is excused over the asset's rects."""
+        src, _ = self._ids()
+        scored = self._score((self._note(src),), painting=[painting_video(OTHER_INSTANCE, el_id=42)])
+        assert scored["verdict"] is False and [v["elId"] for v in scored["paintingOverRect"]] == [42]
+
+    def test_without_the_samples_nothing_is_excused(self) -> None:
+        """No retained stamps: the sibling's unstamped remount and its painting are unattributable."""
+        src, _ = self._ids()
+        read = _retire_read((self._note(src), *self._sibling_carry()), painting=[painting_video(OTHER_INSTANCE, el_id=self.SIBLING_EL)])
+        scored = probe.score_refusal(read, self._spec(), True)
+        assert scored["verdict"] is False and [v["elId"] for v in scored["paintingOverRect"]] == [self.SIBLING_EL]
+
+
+PRE_FLIP =[{"scene": 1, "videos": [{"src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 1}}]}]
 
 
 class TestArmedVerdict:
