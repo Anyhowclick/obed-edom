@@ -126,6 +126,8 @@ continuity badge. The codes:
 - `R4`: the pair disagrees on Repeat → Loop.
 - `R7`: the movie is a web video or an image movie.
 - `R8`: the pair is trimmed differently.
+- `R9`: the movie is not fully opaque on either side (a carried decoder is drawn
+  at opacity 1, so a fade would turn solid).
 - `overlap`: artwork above the carried movie on the destination slide (GL replay
   may still carry it; see below).
 

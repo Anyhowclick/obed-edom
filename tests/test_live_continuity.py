@@ -3219,6 +3219,18 @@ def test_r9_a_single_translucent_bridge_refuses_the_boundary(where):
     assert _refusal_codes(plan) == [(1, "overlap"), (3, "R9")]
 
 
+def test_a_translucent_instance_that_also_builds_out_reports_r2_first():
+    """A movie faded out by a Dissolve build-out may also record the faded opacity; R2 (Keynote
+    never pairs a built-out object) is the more fundamental reason, so it is reported over R9."""
+    root = _with_opacities((SLIDE3, "slide3", 0.5, "movie layer"))
+    _rewrite_slide_json(root, SLIDE3, _add_build("buildOut", "apple:dissolve", P2_OBJECT_IDS["slide3"]))
+    plan = _plan(root)
+    assert isinstance(plan, ContinuityPlan)
+    [bridge] = plan.boundaries[2].movies
+    assert (bridge.action, bridge.code) == ("bridge", "R2")
+    assert _refusal_codes(plan) == [(1, "overlap"), (3, "R2")]
+
+
 @pytest.mark.parametrize("where", OPACITY_SOURCES)
 @pytest.mark.parametrize("uuid, key, side", [(SLIDE3, "slide3", "source"), (SLIDE4, "slide4", "destination")])
 def test_r9_an_opacity_change_across_the_move_refuses_the_boundary(uuid, key, side, where):

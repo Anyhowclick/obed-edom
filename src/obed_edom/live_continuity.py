@@ -1597,11 +1597,6 @@ def _carry_refusal(
             return "R7", f"'{asset}' at {desc} is a {instance.kind} movie, which the player draws without a <video>"
     if src.trim != dst.trim:
         return "R8", f"'{asset}' is trimmed differently on each side of {desc}"
-    for side, instance in (("source", src), ("destination", dst)):
-        if not instance.opaque:
-            return "R9", (
-                f"'{asset}' is not fully opaque on the {side} slide of {desc}; a carried decoder is drawn at opacity 1"
-            )
     built_out, out_unattributed = _build_targets(source.events, "buildOut")
     built_in, in_unattributed = _build_targets(destination.events, "buildIn")
     if src.object_id in built_out or dst.object_id in built_in:
@@ -1614,6 +1609,11 @@ def _carry_refusal(
                 f"a {build_type} ({names[0]!r}) on slide {slide.uuid} at {desc} names no object, and the "
                 f"export gives no other way to tell whether it builds '{asset}', so the carry is refused "
                 "rather than guessed"
+            )
+    for side, instance in (("source", src), ("destination", dst)):
+        if not instance.opaque:
+            return "R9", (
+                f"'{asset}' is not fully opaque on the {side} slide of {desc}; a carried decoder is drawn at opacity 1"
             )
     if src.loop != dst.loop:
         return "R4", f"'{asset}' loops on one side of {desc} only; a carried decoder keeps its source's loop setting"
