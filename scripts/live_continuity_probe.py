@@ -5179,8 +5179,9 @@ def run_advance_leg(
     """Pass G's per-frame advance leg: the session's stopped sampler restarts on the settled
     source, the advance crosses the carry, and every expected-True carry of that boundary
     (`specs`) is scored on those rows exactly as a host arm scores it. No matching spec is an
-    error. Rows from the end of show on (`hash >= sceneCount`) are an exit: the leg stops there
-    and reports them, never a red."""
+    error. Every row is kept: an end of show (`hash >= sceneCount`) at or before a spec's scored
+    window end makes that verdict inconclusive, never a truncated green or red; one after every
+    window is an exit, reported and never red."""
     if not specs:
         return {"specs": [], "verdicts": {}, "sampler": None, "verdict": None,
                 "error": f"no expected-True carry matches the advance {from_ordinal}->{to_ordinal}"}
@@ -5200,13 +5201,21 @@ def run_advance_leg(
         if hash_number(row.get("hash")) is not None and _finite_number(row.get("sceneCount")) is not None
         and hash_number(row["hash"]) >= row["sceneCount"]
     ]
-    end_of_show = {"rows": len(ended), "firstT": min(ended)} if ended else None
-    if ended:
-        rows = [row for row in rows if row["t"] < min(ended)]
     reached = player.observe().original_slide == to_ordinal
     scored = score_verdicts(
         rows, {}, {"verdicts": list(specs)}, (continuity or {}).get("mode") == "qualified", continuity,
     )
+    end_of_show = None
+    if ended:
+        first = min(ended)
+        ends = {spec["id"]: _scored_window_end(scored[spec["id"]]) for spec in specs}
+        cut = [spec_id for spec_id, end in ends.items() if end is None or end >= first]
+        end_of_show = {"rows": len(ended), "firstT": first, "cutsWindow": cut}
+        for spec_id in cut:
+            scored[spec_id] = dict(
+                scored[spec_id], verdict=None,
+                reason=f"inconclusive: end of show at t={first} before the scored window was covered",
+            )
     reasons = [f"{spec['id']}={scored[spec['id']].get('verdict')!r}" for spec in specs if scored[spec["id"]].get("verdict") is not True]
     problem = sampler_problem({"sampler": sampler})
     if problem is not None:
@@ -5220,6 +5229,13 @@ def run_advance_leg(
             *(scored[spec["id"]].get("verdict") for spec in specs), reached, None if problem is not None else True,
         ),
     }
+
+
+def _scored_window_end(value: Any) -> float | None:
+    if not isinstance(value, dict):
+        return None
+    window = (value.get("paint") or {}).get("window") or value.get("window") or {}
+    return _finite_number(window.get("end"))
 
 
 def destinations_of(entry: Any) -> list[dict[str, Any]]:
