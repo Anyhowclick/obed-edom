@@ -2155,7 +2155,7 @@ def score_continuity(
         return {"verdict": None, "reason": "inconclusive: movie never decoded"}
     window = continuity_window(samples, boundary_scene, pad_s=pad_s, transition_scene=transition_scene)
     if window is None:
-        return {"verdict": False, "reason": "boundary crossing not observed in samples"}
+        return _inconclusive("boundary crossing not observed in samples")
     if min_window_start is not None:
         window["groundedStart"] = window["start"]
         window["start"] = max(window["start"], min_window_start)
@@ -2929,8 +2929,6 @@ def _inconclusive(reason: str, **detail: Any) -> dict[str, Any]:
 
 def _carry_integrity_gap(samples: list[dict[str, Any]], scored: dict[str, Any], spec: dict[str, Any]) -> str | None:
     """Why a False carry is not a fully observed contrary behaviour, or None when it is."""
-    if scored.get("reason") == "boundary crossing not observed in samples":
-        return "boundary crossing not observed in samples"
     if scored.get("stageMapInvalid"):
         return f"{len(scored['stageMapInvalid'])} tracked row(s) have no trustworthy stage map"
     unowned = [m for m in scored.get("ownerMismatches") or [] if not isinstance(m.get("footprintOwner"), dict)]
@@ -6742,7 +6740,7 @@ def score_recorder_clock(
     other drop, no forward jump beyond wall time by more than `2/fps + max_drop_s`, no
     presentation gap or frozen run over `max_stall_s`, and real advance."""
     if not isinstance(recorder, dict) or window is None:
-        return {"verdict": False, "reason": "no recorder or no window"}
+        return _inconclusive("no recorder or no window")
     period = _finite_number(recorder.get("duration"))
     if period is None:
         return {"verdict": False, "reason": "the recorded element has no finite duration"}
@@ -6844,7 +6842,8 @@ def fallback_outcome(
 ) -> tuple[str | None, dict[str, Any]]:
     """Which listed fail-closed fallback the take took, if any (OQ-4). On the armed boundary a
     raw restart counts only once G2 is no longer active and its zone is retired (or never
-    opened), so no carried canvas can still be painting."""
+    opened), so no carried canvas can still be painting. `detail["unreadable"]` names the
+    fallback evidence that could not be read."""
     states = _gl_states(reads)
     last = states[-1] if states else {}
     api = last.get("api") if isinstance(last.get("api"), dict) else {}
@@ -6852,15 +6851,20 @@ def fallback_outcome(
     zones = [(z.get("from"), z.get("to"), z.get("reason")) for z in _notes(last, "glreplay-zone")] if last else []
     painting, over = preserved_painting(reads, rects)
     g2_inactive = api.get("state") not in G2_ACTIVE_STATES and (not zones or zones[-1][1] == "retired")
+    raw_restart_open = restart.get("verdict") is True and (g2_inactive or not armed_boundary)
     detail = {
         "standDowns": stand_downs, "zones": zones, "restart": restart, "preservedPainting": over,
         "g2State": api.get("state"), "g2Inactive": g2_inactive,
+        "unreadable": [
+            *(["stand-downs"] if armed_boundary and stand_downs is None else []),
+            *(["preserved painting"] if raw_restart_open and painting is None else []),
+        ],
     }
     if armed_boundary and stand_downs == ["videoNotReady"]:
         return "videoNotReady", detail
     if armed_boundary and stand_downs == [] and any(to == "retired" and why == "notPooled" for _, to, why in zones):
         return "notPooled", detail
-    if restart.get("verdict") is True and painting is False and (g2_inactive or not armed_boundary):
+    if raw_restart_open and painting is False:
         return "rawRestart", detail
     return None, detail
 
@@ -6930,7 +6934,7 @@ def score_forced_wrap(
     evidence = {"recorder clock": clock.get("verdict"), "restart": restart.get("verdict")}
     if not armed_boundary:
         evidence["continuity"] = continuity.get("verdict")
-    unreadable = [name for name, value in evidence.items() if value is None]
+    unreadable = [name for name, value in evidence.items() if value is None] + detail.get("unreadable", [])
     if samples_problem:
         unreadable.append(f"sampler rows ({samples_problem})")
     if unreadable:
@@ -7031,7 +7035,7 @@ def score_force_wrap_run(result: dict[str, Any], gt: dict[str, Any], boundary: s
     if armed_boundary:
         window = armed_recorder_window(recorder, result.get("reads"))
     else:
-        window = forced_window(samples, scene, gt["transition"], seeked) if seeked is not None else None
+        window = forced_window(samples, scene, gt["transition"], seeked) if seeked is not None and not schema_errors else None
         if window is not None:
             window["rule"] = "sampler: continuity window, start clipped to seekedT + 1 s"
     result["recorderClock"] = score_recorder_clock(recorder, window)
@@ -7089,11 +7093,16 @@ def run_force_wrap(args: argparse.Namespace) -> dict[str, Any]:
             result["stopError"] = str(exc)
     result["samples"] = convert_samples_to_authored(raw_samples)[0]
     score_force_wrap_run(result, gt, boundary, offset_ms)
-    problem = sampler_problem(result)
-    if problem is not None and result["status"] == "pass":
-        result["status"], result["samplerReason"] = "invalid", problem
+    apply_sampler_integrity(result)
     result["leftoverChrome"] = check_no_leftover_chrome()
     return result
+
+
+def apply_sampler_integrity(result: dict[str, Any]) -> None:
+    """A take whose sampler cannot vouch for its rows is invalid, whether it scored a pass or a fail."""
+    problem = sampler_problem(result)
+    if problem is not None and result.get("status") in ("pass", "fail"):
+        result["status"], result["samplerReason"] = "invalid", problem
 
 
 def rescore_force_wrap(path: Path) -> dict[str, Any]:

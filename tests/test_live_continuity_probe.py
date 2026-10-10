@@ -308,14 +308,15 @@ class TestClockReset:
 
 
 class TestNoCrossing:
-    def test_asset_never_crosses_boundary_fails(self) -> None:
+    def test_asset_never_crosses_boundary_is_inconclusive(self) -> None:
+        """Astra r8 #3: an unobserved crossing is no evidence of a broken carry."""
         samples = [
             sample(0.0, 0.0, video(id=1, el_id=1, t=0.0, scene=0.0, current_time=0.0)),
             sample(16.0, 0.0, video(id=1, el_id=1, t=16.0, scene=0.0, current_time=0.016)),
         ]
         verdict = probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
-        assert verdict["verdict"] is False
-        assert verdict["reason"] == "boundary crossing not observed in samples"
+        assert verdict["verdict"] is None
+        assert verdict["reason"] == "inconclusive: boundary crossing not observed in samples"
 
     def test_never_decoded_is_inconclusive_not_pass_or_fail(self) -> None:
         samples = [
@@ -5871,6 +5872,10 @@ class TestWrapAwareScorerDefaultIsLegacy:
         }
         samples = wrap_samples()
         legacy = LEGACY.score_boundaries(samples, facts, True)
+        for key, verdict in legacy.items():
+            # Astra r8 #3: the no-crossing exit is inconclusive now, the only intended difference.
+            if verdict.get("reason") == "boundary crossing not observed in samples":
+                legacy[key] = probe._inconclusive("boundary crossing not observed in samples")
         assert json.dumps(probe.score_boundaries(samples, facts, True), sort_keys=True) == json.dumps(legacy, sort_keys=True)
 
     @pytest.mark.parametrize("name", sorted(_continuity_batteries()))
@@ -6262,8 +6267,6 @@ class TestScoreForcedWrap:
                      id="any-other-stand-down-alongside-videoNotReady"),
         pytest.param(lambda: {"boundary": "3to4", "reads": _fw_reads(stand_downs=["videoNotReady"]), "armed": ARMED,
                               "continuity": {"verdict": False, "wraps": 1}}, id="g2-fallbacks-do-not-count-on-the-unarmed-boundary"),
-        pytest.param(lambda: {"continuity": {"verdict": False, "wraps": 0}, "reads": None, "restart": {"verdict": True}},
-                     id="raw-restart-needs-a-readable-destination"),
     ])
     def test_an_unlisted_outcome_fails(self, kwargs: Any) -> None:
         assert _fw_score(**kwargs())["status"] == "fail"
@@ -6507,6 +6510,59 @@ class TestForcedWrapUnreadable:
     def test_unreadable_evidence_is_an_invalid_take(self, kw: dict[str, Any], status: str) -> None:
         assert _fw_score(**kw)["status"] == status
 
+    @staticmethod
+    def _null_scene_crossing() -> dict[str, Any]:
+        samples = rows_around_boundary()
+        for row in samples:
+            if row["scene"] == 2.0:
+                row["scene"] = None
+                for v in row["videos"]:
+                    v["scene"] = None
+        return probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, True)
+
+    @staticmethod
+    def _schema_rejected_run() -> dict[str, Any]:
+        samples = rows_around_boundary()
+        samples[0]["scene"] = "bad"
+        result = {"continuity": {"mode": "qualified"}, "samples": samples, "recorder": _fw_recorder(), "take": _fw_take(),
+                  "reads": None, "pageErrorNotes": []}
+        gt = {"facts": {"asset": ASSET}, "factsOn": None, "source": {"periodS": FW_PERIOD}, "scene": 2.0,
+              "srcRect": dict(SRC_RECT), "dstRect": dict(DST_RECT), "transition": None}
+        probe.score_force_wrap_run(result, gt, "3to4", 375.0)
+        return result
+
+    @staticmethod
+    def _no_stand_downs() -> list[dict[str, Any]]:
+        reads = _fw_reads()
+        for read in reads:
+            read["glReplay"]["api"].pop("standDowns")
+        return reads
+
+    # Astra r8 #3: each unknown makes an otherwise failing take invalid; the complete records keep their outcome.
+    @pytest.mark.parametrize(("build", "status"), [
+        pytest.param(lambda held=NOT_HELD: _fw_score(continuity=held), "fail", id="control-readable-unheld-carry-fails"),
+        pytest.param(lambda: _fw_score(boundary="1to2", reads=_fw_reads(stand_downs=["videoNotReady"]), armed=ARMED), "pass",
+                     id="control-armed-fallback-passes"),
+        pytest.param(lambda held=NOT_HELD: _fw_score(continuity=held, reads=None, restart={"verdict": True}), "invalid",
+                     id="readable-restart-unreadable-destination-painting"),
+        pytest.param(lambda: _fw_score(boundary="1to2", reads=TestForcedWrapUnreadable._no_stand_downs(), armed=ARMED,
+                                       recorder=_fw_recorder(stop_at=FW_SEEKED + 4000.0)), "invalid",
+                     id="armed-stand-downs-unreadable"),
+        pytest.param(lambda: _fw_score(continuity=TestForcedWrapUnreadable._null_scene_crossing()), "invalid",
+                     id="null-destination-scenes-erase-the-crossing"),
+        pytest.param(lambda: TestForcedWrapUnreadable._schema_rejected_run()["forced"], "invalid",
+                     id="schema-rejected-rows-never-reach-the-window"),
+        pytest.param(lambda held=NOT_HELD: dict(_fw_score(continuity=held), sampler=dict(_sampler_ok(), selfCheck={"ok": False})),
+                     "invalid", id="failed-sampler-integrity-over-a-failure"),
+        pytest.param(lambda held=NOT_HELD: dict(_fw_score(continuity=held), sampler=_sampler_ok()), "fail",
+                     id="control-vouching-sampler-keeps-the-failure"),
+    ])
+    def test_every_unknown_reaches_the_force_wrap_status(self, build: Any, status: str) -> None:
+        result = dict(build())
+        if "sampler" in result:
+            probe.apply_sampler_integrity(result)
+        assert result["status"] == status
+
 
 class TestForcedWrapPageErrors:
     def test_known_bad_a_page_error_fails_a_carried_take(self) -> None:
@@ -6605,7 +6661,7 @@ class TestArmedRecorderWindow:
         else:
             reads = _armed_reads_at(FW_SEEKED + 900.0)
         assert probe.armed_recorder_window(recorder, reads) is None
-        assert probe.score_recorder_clock(recorder, None)["verdict"] is False
+        assert probe.score_recorder_clock(recorder, None)["verdict"] is None
 
     @pytest.mark.parametrize(("recorder", "verdict"), [
         pytest.param(_fw_recorder, True, id="steady-recorder-holds"),
@@ -7138,7 +7194,7 @@ class TestCarryVerdict:
         samples = [row for row in _p2_run_samples() if row["scene"] < 8]
         scored = probe.score_verdicts(samples, {}, facts, True, {"mode": "qualified"})
         assert scored[P2_CARRY34]["verdict"] is None
-        assert probe.score_continuity(samples, "untitled.mov", 8, facts["bridgeSrcRect"], facts["destRect"], True, transition_scene=7)["verdict"] is False
+        assert probe.score_continuity(samples, "untitled.mov", 8, facts["bridgeSrcRect"], facts["destRect"], True, transition_scene=7)["verdict"] is None
 
     def test_a_fully_observed_restart_across_a_carry_is_red(self) -> None:
         facts = _p2_facts()
