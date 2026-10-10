@@ -681,12 +681,14 @@ def score_paint(
     iou_min: float,
     max_gap_frames: int,
     min_fps: float,
+    unreadable_of: Callable[[dict[str, Any]], str | None] | None = None,
 ) -> dict[str, Any]:
     """Plan §2.4 over the rows with `start <= t <= end`. `slot_of`/`stage_box_of` and every `pv.rect`/`visibleRect`
     must share one coordinate space. Readability comes before any classification: a frame is unreadable when the
     carried decoder, or any decoder of the asset whose rect meets the slot (any, without a slot), reads unreadable.
     An unobserved or unreadable frame, failed coverage or no rows is inconclusive whatever else the window shows;
-    on complete evidence any violating frame (no slot included) fails."""
+    on complete evidence any violating frame (no slot included) fails. `unreadable_of(row)` names a frame whose
+    context the caller cannot read (e.g. its phase), which is unreadable before any slot is chosen."""
     window_rows = sorted((r for r in rows if _num(r.get("t")) and start <= r["t"] <= end), key=lambda r: r.get("seq") or 0)
     coverage = frame_coverage(window_rows, max_gap_frames=max_gap_frames, min_fps=min_fps)
     period = coverage.get("periodMs")
@@ -702,6 +704,10 @@ def score_paint(
             unobserved.append({"seq": row.get("seq"), "t": row.get("t"), "problem": problem})
             continue
         frame = {"seq": row["seq"], "t": row["t"], "ts": row["ts"]}
+        context = unreadable_of(row) if unreadable_of is not None else None
+        if context:
+            unreadable.append(dict(frame, reason=context))
+            continue
         slot, stage = _box(slot_of(row)), _box(stage_box_of(row))
         if stage is None:
             unreadable.append(dict(frame, reason="stage box"))

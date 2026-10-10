@@ -2932,12 +2932,12 @@ class TestScoreNoConsumption:
         # concurrently -- a record that predates them must not be read as a false pass.
         pytest.param({"outcome": "ok"}, P2_SETTLED, None, id="missing-fields-on-the-record-are-inconclusive"),
         pytest.param(NO_RUN, _snapshot("IdleAtInitialState", 6, 6), False, id="wrong-scene-fails"),
-        pytest.param({"autoPlayRunLength": 1, "autoPlayFired": True}, P2_SETTLED, False, id="nonzero-run-length-fails"),
+        pytest.param({**D_RUN, "autoPlayRunKinds": ["apple:movie-start"]}, P2_SETTLED, False, id="nonzero-run-length-fails"),
         pytest.param({**D_RUN}, P2_SETTLED, False, id="any-run-against-an-empty-leading-list-fails"),
-        pytest.param({"autoPlayRunLength": 0, "autoPlayFired": True}, P2_SETTLED, False,
-                     id="fired-true-fails-even-with-zero-run-length"),
-        pytest.param({"autoPlayRunLength": 0, "autoPlayFired": False}, P2_SETTLED, True,
-                     id="zero-run-without-kinds-passes"),
+        pytest.param({**NO_RUN, "autoPlayFired": True}, P2_SETTLED, False, id="fired-true-fails-even-with-zero-run-length"),
+        pytest.param({**NO_RUN, "autoPlayRunKinds": None}, P2_SETTLED, True, id="zero-run-with-null-kinds-passes"),
+        pytest.param({"autoPlayRunLength": 0, "autoPlayFired": False}, P2_SETTLED, None,
+                     id="absent-kinds-are-not-null-kinds"),
         pytest.param(NO_RUN, P2_SETTLED, True, id="clean-no-consumption-passes"),
         pytest.param(NO_RUN, _snapshot("IdleAtFinalState", 2, 3), False, id="consumed-first-click-event-fails"),
     ])
@@ -2962,6 +2962,9 @@ class TestScoreNoConsumption:
         pytest.param({**D_RUN, "autoPlayDeferredReason": "busy", "autoPlayFired": False}, D_SETTLED, None,
                      id="deferred-not-fired-is-inconclusive"),
         pytest.param({**D_RUN, "autoPlayRunKinds": None}, D_SETTLED, None, id="missing-kinds-is-inconclusive"),
+        # Astra r7 #2: null kinds on a mismatching length are inconclusive before the length comparison.
+        pytest.param({**D_RUN, "autoPlayRunLength": 2, "autoPlayRunKinds": None}, D_SETTLED, None,
+                     id="null-kinds-on-a-longer-run-are-inconclusive"),
         pytest.param({**D_RUN, "autoPlayFired": "yes"}, D_SETTLED, None, id="non-boolean-fired-is-inconclusive"),
         pytest.param({**D_RUN, "autoPlayRunKinds": [1]}, D_SETTLED, None, id="non-string-kinds-are-inconclusive"),
         pytest.param({**D_RUN, "autoPlayRunLength": True}, D_SETTLED, None, id="non-count-run-length-is-inconclusive"),
@@ -3456,10 +3459,19 @@ class TestGotoTelemetry:
 
 
 class TestTelemetryPresent:
+    # Astra r7 #2: every armed destination validates its telemetry fully before any comparison.
     @pytest.mark.parametrize(("record", "expected"), [
-        pytest.param({field: None for field in probe.GOTO_TELEMETRY_FIELDS}, True, id="all-fields-present-even-with-null-values"),
+        pytest.param(D_RUN, True, id="complete-telemetry"),
+        pytest.param({**NO_RUN, "autoPlayRunKinds": None}, True, id="null-kinds-on-an-empty-run"),
+        pytest.param({field: None for field in probe.GOTO_TELEMETRY_FIELDS}, None, id="null-values-are-inconclusive"),
         pytest.param(None, None, id="missing-record-is-inconclusive"),
-        pytest.param({"autoPlayRunLength": 1}, None, id="partial-record-is-inconclusive"),
+        *(pytest.param({k: v for k, v in D_RUN.items() if k != key}, None, id=f"no-{key}")
+          for key in probe.GOTO_TELEMETRY_FIELDS),
+        pytest.param({**D_RUN, "autoPlayRunLength": "bad"}, None, id="string-run-length"),
+        pytest.param({**D_RUN, "autoPlayRunKinds": [123]}, None, id="non-string-kinds"),
+        pytest.param({**D_RUN, "autoPlayFired": "bad"}, None, id="string-fired"),
+        pytest.param({**D_RUN, "autoPlayDeferredReason": {}}, None, id="object-deferred"),
+        pytest.param({**D_RUN, "autoPlayDeferredReason": "busy"}, None, id="deferred-is-inconclusive"),
     ])
     def test_telemetry_present(self, record: Any, expected: bool | None) -> None:
         assert probe.telemetry_present(record) is expected
@@ -5983,7 +5995,7 @@ def _fw_window() -> dict[str, float]:
 def _fw_score(
     *, boundary: str = "3to4", offset_ms: float = 375.0, recorder: Any = None, take: Any = None,
     continuity: Any = None, clock: Any = None, reads: Any = None, armed: Any = None, restart: Any = None,
-    page_errors: Any = (),
+    page_errors: Any = (), samples_problem: str | None = None,
 ) -> dict[str, Any]:
     recorder = _fw_recorder(offset_ms=offset_ms) if recorder is None else recorder
     return probe.score_forced_wrap(
@@ -5993,6 +6005,7 @@ def _fw_score(
         clock=probe.score_recorder_clock(recorder, _fw_window()) if clock is None else clock,
         reads=reads, armed=armed, restart={"verdict": False} if restart is None else restart,
         rects=[dict(BIG_INSTANCE)], page_errors=list(page_errors) if page_errors is not None else None,
+        samples_problem=samples_problem,
     )
 
 
@@ -6448,6 +6461,25 @@ class TestRunForceWrap:
 PAGE_ERROR = {"kind": "player-build-error", "t": FW_SEEKED + 2500.0, "detail": {"errorType": "error", "message": "boom"}}
 
 
+class TestForcedWrapUnreadable:
+    NOT_HELD = {"verdict": False, "wraps": 1, "elementId": 1}
+
+    # Astra r7 #3: unreadable evidence makes the take invalid, never a failed carry.
+    @pytest.mark.parametrize(("kw", "status"), [
+        pytest.param({}, "pass", id="complete-carried-take-passes"),
+        pytest.param({"continuity": NOT_HELD}, "fail", id="readable-unheld-carry-fails"),
+        pytest.param({"samples_problem": "sample 3: a video loop missing"}, "invalid", id="unreadable-sampler-rows"),
+        pytest.param({"continuity": {"verdict": None, "reason": "inconclusive: paint"}}, "invalid", id="unreadable-continuity"),
+        pytest.param({"continuity": NOT_HELD, "restart": {"verdict": None}}, "invalid", id="unreadable-restart"),
+        pytest.param({"clock": {"verdict": None}}, "invalid", id="unreadable-recorder-clock"),
+        pytest.param({"boundary": "1to2", "reads": _fw_reads(stand_downs=["videoNotReady"]), "armed": ARMED,
+                      "samples_problem": "sample 3: a video loop missing"}, "pass",
+                     id="armed-recorder-fallback-stands-without-the-sampler"),
+    ])
+    def test_unreadable_evidence_is_an_invalid_take(self, kw: dict[str, Any], status: str) -> None:
+        assert _fw_score(**kw)["status"] == status
+
+
 class TestForcedWrapPageErrors:
     def test_known_bad_a_page_error_fails_a_carried_take(self) -> None:
         result = _fw_score(page_errors=[PAGE_ERROR])
@@ -6595,13 +6627,14 @@ class TestArmedRecorderWindow:
         assert result["recorderClock"]["window"]["rule"].startswith("armed")
         assert (result["status"], result["forced"]["outcome"]) == ("pass", "carried")
 
-    def test_the_armed_take_with_a_frozen_recorder_fails(self) -> None:
+    def test_the_armed_take_with_a_frozen_recorder_is_never_a_pass(self) -> None:
+        """No sampler rows: the raw-restart fallback is unreadable, so the unheld take is invalid (r7 #3)."""
         result = {
             "continuity": GL_CONTINUITY, "samples": [], "recorder": _fw_recorder(stop_at=FW_SEEKED + 4000.0),
             "take": _fw_take(), "reads": _armed_reads_at(FW_SEEKED + 6000.0), "pageErrorNotes": [],
         }
         probe.score_force_wrap_run(result, self._gt(), "1to2", 375.0)
-        assert result["status"] == "fail"
+        assert result["status"] == "invalid" and "restart" in result["forced"]["reasons"][0]
 
     def test_real_1to2_0_recorder_holds_under_the_take_window(self) -> None:
         artifact = json.loads((FORCED_WRAP_FIXTURES / "1to2_0.min.json").read_text())
@@ -9575,6 +9608,9 @@ class TestRawEvidence:
         *(pytest.param(_drop(path), id=f"no-{path}") for path in RAW_DELETIONS),
         pytest.param(lambda rows: [row.pop(k, None) for row in rows for k in probe.SAMPLE_V2_MARKERS],
                      id="schema-2-sampler-stream-stripped-to-legacy"),
+        # Astra r7 #1: a null scene or transition state is an unknown phase, never the source phase.
+        *(pytest.param(lambda rows, k=key: rows[30].update({k: None}), id=f"null-row.{key}")
+          for key in ("scene", "playerState", "busy")),
     ])
     def test_a_field_missing_from_raw_evidence_is_inconclusive_through_conversion(self, break_it: Any) -> None:
         """Astra r6 #3/#4: every verdict-bearing raw field (rAF row, decoder, nested owner, stage map, pre-paint
@@ -9843,6 +9879,8 @@ class TestPaintControlStatus:
         pytest.param(_paint_control_result(red=("T", "other")), "fail", id="another-verdict-red"),
         pytest.param(_paint_control_result(check="fail"), "fail", id="seq-set-off-by-one"),
         pytest.param(_paint_control_result(check="inconclusive"), "inconclusive", id="integrity-break"),
+        # Astra r7 #4: an integrity break is never overwritten by a mismatching red set.
+        pytest.param(_paint_control_result(red=(), check="inconclusive"), "inconclusive", id="integrity-break-before-red-set"),
         pytest.param(dict(_paint_control_result(), controlRecord=None), "error", id="no-record"),
         pytest.param(dict(_paint_control_result(), controlRecord={"aborted": "decoder parent changed"}), "error", id="aborted"),
         pytest.param(dict(_paint_control_result(), expectedCoreSha256="0" * 64), "error", id="not-the-shipped-core"),

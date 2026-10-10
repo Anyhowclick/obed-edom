@@ -1923,6 +1923,18 @@ def is_move_sample(row: dict[str, Any], transition_scene: float | None) -> bool:
     )
 
 
+def phase_unreadable(row: dict[str, Any], transition_scene: float | None) -> str | None:
+    """Why a row's carry phase cannot be read: no scene, or on the transition scene no `playerState`/`busy` to tell
+    the move from move-complete. Never defaulted to the source phase."""
+    if _finite_number(row.get("scene")) is None:
+        return "phase: scene unreadable"
+    if transition_scene is not None and row["scene"] == transition_scene and (
+        not isinstance(row.get("playerState"), str) or not isinstance(row.get("busy"), bool)
+    ):
+        return "phase: transition state unreadable"
+    return None
+
+
 def is_move_complete(row: dict[str, Any], transition_scene: float | None) -> bool:
     """The move has finished but the player has not yet cut to the next scene:
     still `transition_scene`, but no longer the `Playing`+busy move sample. Real
@@ -2316,7 +2328,8 @@ def carry_paint(
 ) -> dict[str, Any]:
     """`paint_instrument.score_paint` over a carry's window. The slot is the source rect before
     the move, the destination on move-complete and after rows, and on a bridge's move rows the
-    carried decoder's own pre-paint rect when it lies on the path (else no slot)."""
+    carried decoder's own pre-paint rect when it lies on the path (else no slot). A row whose
+    phase is unreadable (`phase_unreadable`) is an unreadable frame, never the source phase."""
 
     def slot_of(row: dict[str, Any]) -> dict[str, float] | None:
         if is_move_sample(row, transition_scene):
@@ -2336,6 +2349,7 @@ def carry_paint(
         start=paint_start(samples, element_id, boundary_scene, window, floor), end=window["end"],
         slot_of=slot_of, stage_box_of=stage_box_of, rect_tolerance=rect_tolerance, iou_min=INSTANCE_IOU_MIN,
         max_gap_frames=CARRY_COVER_MAX_GAP_FRAMES, min_fps=CARRY_COVER_MIN_FPS,
+        unreadable_of=lambda row: phase_unreadable(row, transition_scene),
     )
 
 
@@ -4867,26 +4881,13 @@ def score_no_consumption(
         "autoPlayRunLength": run_length, "autoPlayRunKinds": run_kinds, "autoPlayFired": fired,
         "autoPlayDeferredReason": deferred, "leadingAutoKinds": None if auto_kinds is None else list(auto_kinds),
     }
-    if run_length is None or fired is None:
-        return {"verdict": None, **fields, "reason": "execute log has no autoPlayRunLength/autoPlayFired yet"}
     if auto_kinds is None:
         return {"verdict": None, **fields, "reason": "destination's leading automatic events are unreadable"}
-    if deferred is not None:
-        return {"verdict": None, **fields, "reason": f"goTo autoplay repair was deferred: {deferred}"}
-    if not _is_count(run_length):
-        return {"verdict": None, **fields, "reason": "autoPlayRunLength is not a count"}
-    if not isinstance(fired, bool):
-        return {"verdict": None, **fields, "reason": "autoPlayFired is not a boolean"}
-    if not (run_kinds is None or (isinstance(run_kinds, list) and all(isinstance(kind, str) for kind in run_kinds))):
-        return {"verdict": None, **fields, "reason": "autoPlayRunKinds is not a list of strings"}
+    problem = telemetry_problem(execute_record)
+    if problem:
+        return {"verdict": None, **fields, "reason": problem}
     leading = list(auto_kinds)
-    if run_length == len(leading):
-        observed_kinds = [] if run_kinds is None and run_length == 0 else run_kinds
-        if not isinstance(observed_kinds, list):
-            return {"verdict": None, **fields, "reason": "execute log has no autoPlayRunKinds"}
-        log_ok = observed_kinds == leading and fired is (run_length > 0)
-    else:
-        log_ok = False
+    log_ok = run_length == len(leading) and (run_kinds or []) == leading and fired is (run_length > 0)
     position = score_settled_position(snapshot, expected_scene_id, slide_index, len(leading))
     verdict = combine_verdicts(position["verdict"], log_ok)
     return {
@@ -4895,7 +4896,26 @@ def score_no_consumption(
     }
 
 
-GOTO_TELEMETRY_FIELDS = ("autoPlayRunLength", "autoPlayRunKinds", "autoPlayFired", "autoPlayDeferredReason")
+GOTO_TELEMETRY_SCHEMA: dict[str, Callable[[Any], bool]] = {
+    "autoPlayRunLength": _is_count,
+    "autoPlayRunKinds": lambda value: value is None or (isinstance(value, list) and all(isinstance(kind, str) for kind in value)),
+    "autoPlayFired": lambda value: isinstance(value, bool),
+    "autoPlayDeferredReason": lambda value: value is None or isinstance(value, str),
+}
+GOTO_TELEMETRY_FIELDS = tuple(GOTO_TELEMETRY_SCHEMA)
+
+
+def telemetry_problem(execute_record: Any) -> str | None:
+    """Why a goTo's autoplay telemetry cannot be compared: a field missing or ill-typed
+    (`GOTO_TELEMETRY_SCHEMA`), a deferred repair, or null kinds on a non-empty run, else None."""
+    problem = paint_instrument.schema_problem(execute_record, GOTO_TELEMETRY_SCHEMA)
+    if problem:
+        return f"execute log {problem}"
+    if execute_record["autoPlayDeferredReason"] is not None:
+        return f"goTo autoplay repair was deferred: {execute_record['autoPlayDeferredReason']}"
+    if execute_record["autoPlayRunKinds"] is None and execute_record["autoPlayRunLength"] != 0:
+        return "execute log has no autoPlayRunKinds for a non-empty run"
+    return None
 
 
 def goto_telemetry(execute_record: dict[str, Any] | None) -> dict[str, Any]:
@@ -4905,11 +4925,10 @@ def goto_telemetry(execute_record: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def telemetry_present(execute_record: dict[str, Any] | None) -> bool | None:
-    """`True` only when the execute-log record carries all four autoplay-repair fields (even if a
-    field's own value is legitimately `null`); otherwise inconclusive, never a silent pass."""
-    if isinstance(execute_record, dict) and all(field in execute_record for field in GOTO_TELEMETRY_FIELDS):
-        return True
-    return None
+    """`True` only when the execute-log telemetry passes `telemetry_problem`; otherwise
+    inconclusive, never a silent pass (every armed destination, with or without the
+    no-consumption check)."""
+    return True if telemetry_problem(execute_record) is None else None
 
 
 def _crop_screen_rect(frame: np.ndarray, rect: dict[str, float]) -> np.ndarray:
@@ -5676,6 +5695,18 @@ def visible_slides_of(entry: Any) -> list[dict[str, Any]]:
     return [slide for slide in slides if isinstance(slide, dict)] if isinstance(slides, list) else []
 
 
+def visible_unknown(result: dict[str, Any]) -> list[str]:
+    """Every scored V/Voff slide whose verdict is unreadable (None): inconclusive in every status,
+    never counted as a failed slide by a later comparison."""
+    visible = result.get("visible") if isinstance(result.get("visible"), dict) else {}
+    skipped = skipped_arms(result)[0]
+    return [
+        f"visible pass {label} slide {slide.get('originalOrdinal')} is inconclusive"
+        for label in ("V", "Voff") if label not in skipped
+        for slide in visible_slides_of(visible.get(label)) if slide.get("verdict") is None
+    ]
+
+
 def visible_pass_reasons(entry: Any, label: str, expected_mode: str) -> list[str]:
     """Fail-closed, in the style of `stage_fit_reason`: a pass that is absent,
     errored, ran the wrong mechanism, was not fitted as expected on every
@@ -6054,8 +6085,9 @@ def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     ok = a_ok and b_ok and c_ok and attach_ok and not visible and not gl_fails
     if not ok and not reasons:
         reasons.append("a boundary verdict did not match the expected pattern for its arm")
-    if ok and gl_unknown:
-        return "inconclusive", reasons + gl_unknown
+    unknown = gl_unknown + visible_unknown(result)
+    if unknown:
+        return "inconclusive", unknown + reasons
     return ("pass" if ok else "fail"), reasons
 
 
@@ -6151,12 +6183,11 @@ def generated_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     reasons.extend(visible_reasons(result))
     gl_fails, gl_unknown = gl_replay_reasons(result) if gl_requested(result) else ([], [])
     reasons.extend(gl_fails)
+    unknown += gl_unknown + visible_unknown(result)
     if unknown:
         return "inconclusive", unknown + reasons
     if reasons:
         return "fail", reasons
-    if gl_unknown:
-        return "inconclusive", gl_unknown
     return "pass", []
 
 
@@ -6432,11 +6463,11 @@ def paint_control_status(result: dict[str, Any]) -> tuple[str, list[str]]:
         return "invalid", [f"control arm sampled {len(arm['unplannedWraps'])} unplanned loop wrap(s); retake"]
     if result.get("unknown"):
         return "inconclusive", [f"unreadable: {', '.join(result['unknown'])}"]
+    check = result.get("paintControl") if isinstance(result.get("paintControl"), dict) else {}
+    if check.get("status") == "inconclusive":
+        return "inconclusive", [f"paint control check: {check.get('reasons')}"]
     wanted = [] if (result.get("controlSpec") or {}).get("n") == 0 else [result.get("targetVerdictId")]
     reasons = [] if sorted(result.get("redSet") or []) == wanted else [f"red set {result.get('redSet')}, expected {wanted}"]
-    check = result.get("paintControl") if isinstance(result.get("paintControl"), dict) else {}
-    if check.get("status") == "inconclusive" and not reasons:
-        return "inconclusive", [f"paint control check: {check.get('reasons')}"]
     if check.get("status") != "pass":
         reasons.append(f"paint control check {check.get('status')!r}: {check.get('reasons')}")
     return ("fail" if reasons else "pass"), reasons
@@ -6816,11 +6847,14 @@ def score_forced_wrap(
     *, boundary: str, offset_ms: float, take: dict[str, Any], recorder: Any, node_period_s: float,
     continuity: dict[str, Any], clock: dict[str, Any], reads: Any, armed: dict[str, Any] | None,
     restart: dict[str, Any], rects: list[dict[str, float]], page_errors: list[dict[str, Any]] | None,
-    fps: float = WRAP_FPS,
+    fps: float = WRAP_FPS, samples_problem: str | None = None,
 ) -> dict[str, Any]:
     """L2: INVALID (retake), or PASS when the carry held across exactly one wrap or the take
     took a listed fail-closed fallback after a real wrap, else FAIL. Any page error from the
-    seek to the end of the window FAILs, as in the P2 gate (no benign-error allowance)."""
+    seek to the end of the window FAILs, as in the P2 gate (no benign-error allowance). Unreadable
+    sampler rows (`samples_problem`) invalidate a take that rests on them (the standard path, and
+    the armed path's raw-restart fallback); an unreadable continuity, recorder-clock or restart
+    verdict is INVALID, never a failed carry. The armed path's own recorder evidence still stands."""
     wrap = recorded_wrap(recorder)
     press = _finite_number(take.get("pressT"))
     result: dict[str, Any] = {
@@ -6836,6 +6870,8 @@ def score_forced_wrap(
     if page_errors:
         return {**result, "status": "fail", "outcome": None, "reasons": [f"{len(page_errors)} page error(s) after the seek"]}
     armed_boundary = armed is not None and armed.get("boundaryKey") == f"continue{boundary}"
+    if samples_problem and not armed_boundary:
+        return {**result, "status": "invalid", "outcome": None, "reasons": [f"sampler rows unreadable: {samples_problem}"]}
     if armed_boundary:
         held, carry = armed_carry(reads, armed, recorder)
         held = held and clock.get("verdict") is True
@@ -6859,6 +6895,15 @@ def score_forced_wrap(
     result["fallback"] = detail
     if outcome is not None:
         return {**result, "status": "pass", "outcome": outcome, "reasons": []}
+    evidence = {"recorder clock": clock.get("verdict"), "restart": restart.get("verdict")}
+    if not armed_boundary:
+        evidence["continuity"] = continuity.get("verdict")
+    unreadable = [name for name, value in evidence.items() if value is None]
+    if samples_problem:
+        unreadable.append(f"sampler rows ({samples_problem})")
+    if unreadable:
+        return {**result, "status": "invalid", "outcome": None,
+                "reasons": [f"the carry did not hold on unreadable evidence: {', '.join(unreadable)}"]}
     reasons = ["no wrap was recorded" if wrap is None else "the carry did not hold and no listed fallback was taken"]
     return {**result, "status": "fail", "outcome": None, "reasons": reasons}
 
@@ -6958,12 +7003,16 @@ def score_force_wrap_run(result: dict[str, Any], gt: dict[str, Any], boundary: s
         if window is not None:
             window["rule"] = "sampler: continuity window, start clipped to seekedT + 1 s"
     result["recorderClock"] = score_recorder_clock(recorder, window)
-    result["restart"] = score_raw_restart(samples, facts["asset"], scene)
+    result["restart"] = (
+        _inconclusive("sample schema is invalid", schemaErrors=schema_errors) if schema_errors
+        else score_raw_restart(samples, facts["asset"], scene)
+    )
     result["forced"] = score_forced_wrap(
         boundary=boundary, offset_ms=offset_ms, take=result.get("take") or {}, recorder=recorder,
         node_period_s=source["periodS"], continuity=result["continuityVerdict"], clock=result["recorderClock"],
         reads=result.get("reads"), armed=armed, restart=result["restart"], rects=[gt["dstRect"]],
         page_errors=page_errors_in(result.get("pageErrorNotes"), seeked, window),
+        samples_problem="; ".join(schema_errors) or None,
     )
     result["status"] = result["forced"]["status"]
 
