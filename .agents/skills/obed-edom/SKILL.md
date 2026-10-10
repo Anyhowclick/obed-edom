@@ -774,7 +774,8 @@ for the parked `iwa-surgical-write-generator` feature.
   Chrome), so footage brightness can step at G2 takeover and at the build-1 hand-back; timing is continuous (±1–2
   frames). Grey-coded counters therefore misread across the two paths — qualify with the binary counter fixture.
 * **Magic Move opacity** (`keynote_live_mm_opacity.plan.md`): `patch_player(player, mm_opacity=True)` applies five
-  count-checked, in-memory replacements on the pinned player (sha `e9b2fad4…`, else `LiveRuntimeUnsupported`). R1–R4:
+  count-checked, in-memory replacements on a `SUPPORTED_PLAYERS` player (stock `e9b2fad4…` or `17c0c938…`, each with
+  pinned on/off/rendering outputs; else `LiveRuntimeUnsupported`). R1–R4:
   each `eB` leaf draws at its chain opacity (per node, a constant `both` opacity animation's value, else the model value);
   a fade, `hidden`, several or nested animations leave the subtree at today's value. R5: the swapped DOM node hides in
   the same task as the first GL draw (no one-frame DOM+GL double image). `mm_opacity=False` is byte-identical to the
