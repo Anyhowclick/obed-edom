@@ -505,7 +505,10 @@ skipped by `attach_group_children`; a fresh two-tier read stamps a top-level
 so banked JXA/kind-count fixtures need no re-stamp. Same pattern for the bulk splice's
 aspect refresh (a row moving w or h by > 1 pt replaces the stale offline `aspect`): a fresh
 two-tier read stamps `spliceAspectRefreshed`, and an offline cache without it is re-read
-(served with every aspect nulled only when the offline read is unavailable). A spec with no `w`/`h` means position-only:
+(served with every aspect nulled only when the offline read is unavailable — owner decision
+2026-10-10, no full Keynote re-read). A fallback slide's JXA image/movie keeps its offline
+`aspect` only when its kind's count matched and its frame agrees within 1 pt; every other
+fallback image/movie/group carries `aspect: None`. A spec with no `w`/`h` means position-only:
 every consumer must key off presence (`"w" in spec`), never infer it from role or
 kind — that crashed `framing.planned_rects` once already.
 

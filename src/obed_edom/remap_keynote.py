@@ -300,7 +300,10 @@ def _merge_legacy_slides(
     *,
     use_cache: bool | None = None,
 ) -> None:
-    """Replace the given slides' items in `payload` with one scoped legacy inspect."""
+    """Replace the given slides' items in `payload` with one scoped legacy inspect.
+
+    Media keep the offline `aspect` only when their kind's count matched and the live
+    frame agrees with the offline one; every other image/movie/group gets `aspect: None`."""
     if not slide_numbers:
         return
     legacy = inspect_keynote(
@@ -310,13 +313,18 @@ def _merge_legacy_slides(
         int(s.get("number") or (int(s.get("index") or 0) + 1)): s
         for s in legacy.get("slides") or []
     }
+    mismatched = {
+        (int(f["slide"]), f.get("kind"))
+        for f in (payload.get("_offline") or {}).get("fallback") or []
+        if f.get("reason") == "count-mismatch"
+    }
     for slide in payload.get("slides") or []:
         number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
         repl = by_number.get(number)
         if repl is None:
             continue
         prior = {
-            (it.get("kind"), it.get("kindIndex")): it.get("aspect")
+            (it.get("kind"), it.get("kindIndex")): it
             for it in (slide.get("items") or [])
             if "aspect" in it
         }
@@ -324,10 +332,18 @@ def _merge_legacy_slides(
             if key in repl:
                 slide[key] = repl[key]
         for it in slide.get("items") or []:
-            if it.get("kind") in {"image", "movie"}:
-                key = (it.get("kind"), it.get("kindIndex"))
-                if key in prior:
-                    it["aspect"] = prior[key]
+            kind = it.get("kind")
+            if kind not in {"image", "movie", "group"}:
+                continue
+            old = prior.get((kind, it.get("kindIndex")))
+            trusted = (
+                kind != "group"
+                and old is not None
+                and (number, kind) not in mismatched
+                and abs(float(it.get("w") or 0) - float(old.get("w") or 0)) <= 1
+                and abs(float(it.get("h") or 0) - float(old.get("h") or 0)) <= 1
+            )
+            it["aspect"] = old["aspect"] if trusted else None
         # This slide's items came from a scoped legacy (JXA) inspect, not the offline
         # decode — its group rects are live union frames, not archive offsets, so
         # attach_group_children must not attach children to it despite the payload's

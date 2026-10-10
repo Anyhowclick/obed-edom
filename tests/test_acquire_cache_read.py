@@ -31,6 +31,10 @@ def _no_bulk_geometry(key_path, slides=None, *, keep_open=False, log=None):
     return {}
 
 
+def _fail_two_tier(key_path, bulk_geometry_fn=None, slide_range=None, *, deck=None, log=None):
+    raise RuntimeError("bad IWA")
+
+
 @pytest.mark.parametrize(
     # A cached jxa read in mode "on" is no longer directly compatible — see
     # test_stale_jxa_cache_is_rejected_and_offline_reread_in_mode_on below.
@@ -100,16 +104,13 @@ def test_rejected_cache_bypasses_cache_after_two_tier_failure(monkeypatch, tmp_p
         calls.append({"use_cache": use_cache})
         return {"legacy": True}
 
-    def boom_two_tier(key_path, bulk_geometry_fn=None, slide_range=None, *, deck=None, log=None):
-        raise RuntimeError("bad IWA")
-
     monkeypatch.setattr(rk, "cached_payload", lambda _source: {"reader": "offline", "slides": []})
     monkeypatch.setattr(rk, "inspect_keynote", fake_inspect)
     import obed_edom.inspect as inspect_mod
     import obed_edom.offline_inspect as offline_mod
 
     monkeypatch.setattr(inspect_mod, "bulk_geometry", _no_bulk_geometry)
-    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", boom_two_tier)
+    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", _fail_two_tier)
 
     out = rk.acquire_wall_payload(source, slide_range=frozenset({2}), mode="on", say=lambda _m: None)
 
@@ -323,12 +324,9 @@ def test_stale_aspect_cache_serves_the_cached_payload_when_offline_read_genuinel
     monkeypatch.setattr(rk, "cached_payload", lambda _source: cached)
     monkeypatch.setattr(rk, "inspect_keynote", _fail_inspect)
 
-    def boom_two_tier(key_path, bulk_geometry_fn=None, slide_range=None, *, deck=None, log=None):
-        raise RuntimeError("bad IWA")
-
     import obed_edom.offline_inspect as offline_mod
 
-    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", boom_two_tier)
+    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", _fail_two_tier)
 
     out = rk.acquire_wall_payload(source, slide_range=None, mode="on", say=logs.append)
 
@@ -355,12 +353,9 @@ def test_stale_mixed_and_stale_aspect_cache_refuses_both_when_offline_read_unava
     monkeypatch.setattr(rk, "cached_payload", lambda _source: cached)
     monkeypatch.setattr(rk, "inspect_keynote", _fail_inspect)
 
-    def boom_two_tier(key_path, bulk_geometry_fn=None, slide_range=None, *, deck=None, log=None):
-        raise RuntimeError("bad IWA")
-
     import obed_edom.offline_inspect as offline_mod
 
-    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", boom_two_tier)
+    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", _fail_two_tier)
 
     out = rk.acquire_wall_payload(source, slide_range=None, mode="on", say=logs.append)
 
@@ -457,12 +452,9 @@ def test_stale_jxa_cache_serves_the_cached_payload_when_offline_read_genuinely_u
 
     monkeypatch.setattr(rk, "inspect_keynote", fake_inspect)
 
-    def boom_two_tier(key_path, bulk_geometry_fn=None, slide_range=None, *, deck=None, log=None):
-        raise RuntimeError("bad IWA")
-
     import obed_edom.offline_inspect as offline_mod
 
-    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", boom_two_tier)
+    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", _fail_two_tier)
 
     out = rk.acquire_wall_payload(source, slide_range=None, mode="on", say=lambda _m: None)
 
@@ -488,12 +480,9 @@ def test_stale_mixed_cache_serves_the_cached_payload_when_offline_read_genuinely
 
     monkeypatch.setattr(rk, "inspect_keynote", fake_inspect)
 
-    def boom_two_tier(key_path, bulk_geometry_fn=None, slide_range=None, *, deck=None, log=None):
-        raise RuntimeError("bad IWA")
-
     import obed_edom.offline_inspect as offline_mod
 
-    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", boom_two_tier)
+    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", _fail_two_tier)
 
     out = rk.acquire_wall_payload(source, slide_range=None, mode="on", say=lambda _m: None)
 
@@ -600,7 +589,9 @@ def test_wall_payload_carries_aspect_accepts_none_for_masked():
     assert wall_payload_carries_aspect(payload) is True
 
 
-def test_legacy_merge_preserves_media_aspect_and_drops_group_aspect(monkeypatch, tmp_path):
+def test_legacy_merge_preserves_media_aspect_and_nulls_group_aspect(monkeypatch, tmp_path):
+    """A JXA group's frame is its live union, so its offline aspect never carries over;
+    it still gets an explicit `aspect: None` so the payload carries aspect."""
     source = tmp_path / "wall.key"
     source.touch()
     payload = {
@@ -630,7 +621,143 @@ def test_legacy_merge_preserves_media_aspect_and_drops_group_aspect(monkeypatch,
 
     items = {(it["kind"], it["kindIndex"]): it for it in payload["slides"][0]["items"]}
     assert items[("image", 0)]["aspect"] == 1.5
-    assert "aspect" not in items[("group", 0)]
+    assert items[("group", 0)]["aspect"] is None
+    from obed_edom.inspect import wall_payload_carries_aspect
+
+    assert wall_payload_carries_aspect(payload) is True
+
+
+def test_legacy_merge_restores_an_aspect_only_where_correspondence_and_frame_hold(
+    monkeypatch, tmp_path,
+):
+    """Codex r2 MAJOR: a count mismatch means the offline kindIndex may not address the
+    same object as the JXA one, so a restored aspect could be another image's ratio.
+    Slide 1's images count-mismatch: both JXA images get None even though image 0's
+    frame happens to agree with offline image 0's. Its movies matched by count: movie 0
+    (frame within 1 pt) keeps its precise offline aspect, movie 1 (frame moved > 1 pt,
+    a stale offline frame) gets None, and movie 2 (new in JXA, no offline twin) gets
+    None. Slide 2 has no mismatch, so its image keeps its aspect."""
+    source = tmp_path / "wall.key"
+    source.touch()
+    payload = {
+        "slides": [
+            {"number": 1, "index": 0, "items": [
+                {"kind": "image", "kindIndex": 0, "w": 100, "h": 50, "aspect": 2.01},
+                {"kind": "image", "kindIndex": 1, "w": 30, "h": 90, "aspect": 0.33},
+                {"kind": "movie", "kindIndex": 0, "w": 160, "h": 90, "aspect": 1.7778},
+                {"kind": "movie", "kindIndex": 1, "w": 160, "h": 90, "aspect": 1.7778},
+            ]},
+            {"number": 2, "index": 1, "items": [
+                {"kind": "image", "kindIndex": 0, "w": 40, "h": 20, "aspect": 2.02},
+            ]},
+        ],
+        "_offline": {"fallback": [
+            {"slide": 1, "kind": "image", "kindIndex": -1, "reason": "count-mismatch"},
+            {"slide": 2, "kind": "group", "kindIndex": 3, "reason": "bulk-missing"},
+        ]},
+    }
+
+    def fake_inspect_keynote(key_path, *, slide_range=None, use_cache=None):
+        return {"slides": [
+            {"number": 1, "index": 0, "items": [
+                {"kind": "image", "kindIndex": 0, "w": 100, "h": 50},
+                {"kind": "image", "kindIndex": 1, "w": 100, "h": 50},
+                {"kind": "image", "kindIndex": 2, "w": 30, "h": 90},
+                {"kind": "movie", "kindIndex": 0, "w": 161, "h": 90},
+                {"kind": "movie", "kindIndex": 1, "w": 120, "h": 90},
+                {"kind": "movie", "kindIndex": 2, "w": 160, "h": 90},
+            ]},
+            {"number": 2, "index": 1, "items": [
+                {"kind": "image", "kindIndex": 0, "w": 40, "h": 20},
+                {"kind": "group", "kindIndex": 0, "w": 300, "h": 100},
+            ]},
+        ]}
+
+    monkeypatch.setattr(rk, "inspect_keynote", fake_inspect_keynote)
+
+    rk._merge_legacy_slides(payload, source, [1, 2])
+
+    one = {(it["kind"], it["kindIndex"]): it.get("aspect", "absent")
+           for it in payload["slides"][0]["items"]}
+    two = {(it["kind"], it["kindIndex"]): it.get("aspect", "absent")
+           for it in payload["slides"][1]["items"]}
+    assert one == {
+        ("image", 0): None, ("image", 1): None, ("image", 2): None,
+        ("movie", 0): 1.7778, ("movie", 1): None, ("movie", 2): None,
+    }
+    assert two == {("image", 0): 2.02, ("group", 0): None}
+
+
+def test_count_mismatch_fallback_round_trips_fresh_and_plans_the_raw_affine(
+    monkeypatch, tmp_path,
+):
+    """Codex r2 MAJOR + MINOR end to end. A fresh two-tier read whose slide 1 falls
+    back on an image count mismatch, with a JXA group and a JXA-only image on it:
+    the stamped (spliceAspectRefreshed) payload carries no restored offline aspect
+    on the desynced kind, every fallback image/group carries an explicit aspect key,
+    so the stored cache is served on the next acquire with no re-read, and the
+    planner maps the desynced image by its raw affine instead of snapping it to the
+    wrong image's ratio (offline image 0 was 3.0 wide; Keynote's image 0 is 110x244)."""
+    monkeypatch.setenv(CACHE_DIR_ENV, str(tmp_path / "cache"))
+    source = tmp_path / "wall.key"
+    source.write_bytes(b"deck")
+    import obed_edom.inspect as inspect_mod
+    import obed_edom.offline_inspect as offline_mod
+    from obed_edom.map_remap import plan_slide_transforms
+
+    monkeypatch.setattr(rk, "_truthy_cache", lambda *_a: True)
+    monkeypatch.setattr(inspect_mod, "bulk_geometry", _no_bulk_geometry)
+
+    def fake_two_tier(key_path, bulk_geometry_fn=None, slide_range=None, *, deck=None, log=None):
+        return {
+            "slideCount": 1,
+            "slides": [{"number": 1, "index": 0, "items": [
+                {"index": 0, "kind": "image", "kindIndex": 0, "x": 4687, "y": 97,
+                 "w": 110, "h": 244, "aspect": 3.0, "iwaId": "301"},
+            ]}],
+            "_offline": {
+                "bulk_ok": True,
+                "fallback_slides": [1],
+                "fallback": [{"slide": 1, "kind": "image", "kindIndex": -1,
+                              "reason": "count-mismatch"}],
+            },
+        }
+
+    def fake_inspect_keynote(key_path, *, slide_range=None, use_cache=None):
+        return {"slides": [{"number": 1, "index": 0, "items": [
+            {"index": 0, "kind": "image", "kindIndex": 0, "x": 4687, "y": 97, "w": 110,
+             "h": 244, "text": "", "fileName": "a.png", "locked": False},
+            {"index": 1, "kind": "image", "kindIndex": 1, "x": 10, "y": 10, "w": 300,
+             "h": 100, "text": "", "fileName": "b.png", "locked": False},
+            {"index": 2, "kind": "group", "kindIndex": 0, "x": 0, "y": 0, "w": 50,
+             "h": 50, "text": "", "fileName": "", "locked": False},
+        ]}]}
+
+    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", fake_two_tier)
+    monkeypatch.setattr(rk, "inspect_keynote", fake_inspect_keynote)
+
+    fresh = rk.acquire_wall_payload(source, slide_range=None, mode="on", say=lambda _m: None)
+
+    assert fresh["spliceAspectRefreshed"] is True
+    assert [it["aspect"] for it in fresh["slides"][0]["items"]] == [None, None, None]
+
+    def no_reread(*_a, **_k):
+        pytest.fail("a fresh, correctly marked cache must not be re-read")
+
+    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", no_reread)
+    monkeypatch.setattr(rk, "inspect_keynote", _fail_inspect)
+    logs: list[str] = []
+
+    served = rk.acquire_wall_payload(source, slide_range=None, mode="on", say=logs.append)
+
+    assert any("cached offline payload" in line for line in logs)
+    assert [it["aspect"] for it in served["slides"][0]["items"]] == [None, None, None]
+    recipe = {"destWidth": 1920.0, "destHeight": 1080.0,
+              "groups": [{"s": 0.25, "tx": 0.0, "ty": 0.0,
+                          "src": {"x": 4687, "y": 97, "w": 110, "h": 244}}]}
+    planned = plan_slide_transforms(served["slides"][0], recipe, wall_size=(7680, 1080))
+    image0 = next(t for t in planned if t.kind == "image" and t.kind_index == 0).as_dict()
+    assert (image0["w"], image0["h"]) == (27.5, 61.0)
 
 
 def test_no_cache_keeps_legacy_cache_behavior(monkeypatch, tmp_path):
