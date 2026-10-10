@@ -21,12 +21,13 @@ if str(REPO / "src") not in sys.path:
 
 from obed_edom.live_continuity_js import PRESERVE_CORE_JS  # noqa: E402
 
-VARIANTS: tuple[str, ...] = ("stash-any", "wrong-instance", "fifo-reuse", "linear-bridge", "no-pin-hold")
+VARIANTS: tuple[str, ...] = ("stash-any", "wrong-instance", "fifo-reuse", "linear-bridge", "no-pin-hold", "gl-clock-bridge")
 
 _POOL_PLANNED_ONLY = "    if (!armedPool && !poolable(v)) return;\n"
 _PICK_SRC_ONLY = "      if (c === el || !isCarrySource(c, entry)) return;\n"
 _PICK_SAME_ASSET = "      if (c === el || movieKeyFor(c, c.currentSrc || c.src || '') !== entry.movieKey) return;\n"
 _PICK_VERDICT = "    const reason = found.length === 0 ? 'absent'\n"
+_BRIDGE_PROGRESS = "const progress = easeInEaseOut((performance.now() - started) / (1000 * boundary.durationSeconds));"
 
 _TRANSFORMS: dict[str, tuple[tuple[str, str], ...]] = {
     # Pool every decoder: neither the plan-asset filter nor the planned-instance filter.
@@ -49,13 +50,41 @@ _TRANSFORMS: dict[str, tuple[tuple[str, str], ...]] = {
     # Restore the pre-easing linear bridge progress: the carry-cover red.
     "linear-bridge": (
         (
-            "const progress = easeInEaseOut((performance.now() - started) / (1000 * boundary.durationSeconds));",
+            _BRIDGE_PROGRESS,
             "const progress = Math.min(1, Math.max(0, (performance.now() - started) / (1000 * boundary.durationSeconds)));",
         ),
     ),
     # Never hold a pin through its transition scene: only bridges ride it on the stage (the pre-pin-hold core), so a
     # pin's decoder sits in the source layer the player hides for the move.
     "no-pin-hold": (("  function keepThroughPin(v) {\n", "  function keepThroughPin(v) {\n    return false;\n"),),
+    # Experiment, not a red: time the bridge overlay on Keynote's own GL clock. A setter trap survives main.js's
+    # `window.requestAnimFrame = window.requestAnimationFrame`; the first call outside a wrapped callback (a loop start)
+    # during a departure stamps the origin, keyed on the departure's scene:gen. Shares linear-bridge's anchor.
+    "gl-clock-bridge": (
+        (
+            "  let departure = null;\n",
+            "  let departure = null;\n"
+            "  let glOrigin = null, glOriginKey = null, inGlFrame = false, rawAnimFrame;\n"
+            "  function departureKey() { return departure ? departure.scene + ':' + departure.gen : null; }\n"
+            "  try {\n"
+            "    Object.defineProperty(window, 'requestAnimFrame', {configurable: true,\n"
+            "      get: function() { return rawAnimFrame && function(cb) {\n"
+            "        const k = departureKey();\n"
+            "        if (!inGlFrame && k !== null && k !== glOriginKey) { glOrigin = Date.now(); glOriginKey = k; }\n"
+            "        return rawAnimFrame.call(window, function(ts) {\n"
+            "          inGlFrame = true;\n"
+            "          try { return cb(ts); } finally { inGlFrame = false; }\n"
+            "        });\n"
+            "      }; },\n"
+            "      set: function(f) { rawAnimFrame = f; }});\n"
+            "  } catch (e) {}\n",
+        ),
+        (
+            _BRIDGE_PROGRESS,
+            "const progress = glOriginKey !== null && glOriginKey === departureKey()"
+            " ? easeInEaseOut((Date.now() - glOrigin) / (1000 * boundary.durationSeconds)) : 0;",
+        ),
+    ),
 }
 
 
