@@ -883,3 +883,103 @@ def test_the_first_destination_paint_at_the_pin_is_reported() -> None:
     prepaint[first]["pins"][1]["videoAt"] = [9]
     (event,) = classify(samples, prepaint=prepaint)
     assert event["pinPaint"]["decoderAtPin"] is False
+
+
+# --- detach gaps by phase: same delivery / same checkpoint (owner decision 2026-10-10: a1 is the fix) -------------
+
+
+def test_i2_numbers_its_deliveries_and_reads_connectivity_after_the_round() -> None:
+    """The post-round read is a microtask queued inside I2's callback: it runs after every observer of the same
+    notify round (the facade observers are created later, so they are delivered after I2) and before any rendering."""
+    js = dx.instrumented_sampler_js(None)
+    assert "delivery = ++deliveries" in js and "t: t, delivery: delivery, rafTs:" in js
+    assert "queueMicrotask(function(){\n        seen.forEach(function(p){ p[0].connectedAfterRound = p[1].isConnected; });" in js
+
+
+# V8: the teardown's second removal is swallowed and comes back only at the carry's dom-swap, a task later.
+V8_EVENT = {"tracked": [7], "tSetup": 900.0, "tPlay": 1004.0}
+V8_LIFECYCLE = [*H3_LIFECYCLE[:3], lc(1007.2, "add", True, el=8, layer="layer113"), lc(1008.0, "add", True, layer="layer113")]
+
+# a1: the teardown removal is re-homed inside the core's own delivery; the carry task then removes the outgoing layer
+# with the (now held) decoder in it, in the same delivery that inserts the facade stub, and the facade observer swaps it
+# back in the next round of that checkpoint.
+A1_LIFECYCLE = [lc(1000.0, "remove", True, remounting=True, layer="layer105"), lc(1000.0, "add", True, remounting=True, layer="layer110"),
+                lc(1008.0, "add", True, el=8, layer="layer113"), lc(1008.0, "remove", False, layer="layer105"),
+                lc(1008.9, "remove", False, el=8, remounting=True, layer="layer113"), lc(1008.9, "add", True, remounting=True, layer="layer113")]
+A1_NOTES = [note(999.5, "preserve-on-detach-subtree"), note(999.5, "remount-into-authored-layer", inDocument=True),
+            note(1007.0, "reuse-decoder", oldElId=7, newElId=8), note(1008.4, "dom-swap")]
+
+
+def test_v8_teardown_gap_crosses_a_delivery_and_a_paint() -> None:
+    raw = gap_raw(V8_LIFECYCLE, [*H3_NOTES[:3], note(1007.0, "reuse-decoder", oldElId=7, newElId=8), note(1007.5, "dom-swap")],
+                  prepaint=[{"t": 1005.0, "n": 0, "ids": []}])
+    phases = dx.removal_phases(V8_EVENT, raw)
+    assert phases["carry"] is None
+    assert phases["teardown"] == {"removals": 2, "sameDelivery": False, "sameCheckpoint": False, "basis": ["proxy"],
+                                  "gapMs": 7.0, "paintsInGap": 1, "domSwapAfterMs": 6.5}
+
+
+def test_a1_teardown_is_same_delivery_and_the_carry_removal_same_checkpoint() -> None:
+    phases = dx.removal_phases(V8_EVENT, gap_raw(A1_LIFECYCLE, A1_NOTES, prepaint=[{"t": 1010.0, "n": 1, "ids": [7]}]))
+    assert phases["teardown"] == {"removals": 1, "sameDelivery": True, "sameCheckpoint": True, "basis": ["delivery"],
+                                  "gapMs": 0.0, "paintsInGap": 0, "domSwapAfterMs": None}
+    assert phases["carry"] == {"removals": 1, "sameDelivery": False, "sameCheckpoint": True, "basis": ["proxy"],
+                               "gapMs": 0.9, "paintsInGap": 0, "domSwapAfterMs": 0.4}
+
+
+def test_the_proxy_refuses_an_intervening_delivery_a_new_frame_or_a_paint() -> None:
+    def carry(lifecycle, prepaint=None):
+        raw = gap_raw(lifecycle, A1_NOTES, prepaint=prepaint or [{"t": 1010.0, "n": 1, "ids": [7]}])
+        return dx.removal_phases(V8_EVENT, raw)["carry"]["sameCheckpoint"]
+
+    assert carry(A1_LIFECYCLE)
+    assert not carry([*A1_LIFECYCLE[:4], lc(1008.5, "add", True, el=9), *A1_LIFECYCLE[4:]])
+    assert not carry([*A1_LIFECYCLE[:5], {**A1_LIFECYCLE[5], "rafTs": 1006.0}])
+    assert not carry(A1_LIFECYCLE, prepaint=[{"t": 1008.5, "n": 0, "ids": []}])
+    assert not carry(A1_LIFECYCLE[:5])
+
+
+def test_the_observed_post_round_read_overrides_the_proxy_and_deliveries_split_tied_times() -> None:
+    observed = [dict(row, delivery=i) for i, row in enumerate(A1_LIFECYCLE)]
+    observed[3]["connectedAfterRound"] = True
+    phases = dx.removal_phases(V8_EVENT, gap_raw(observed, A1_NOTES))
+    assert phases["carry"]["sameCheckpoint"] and phases["carry"]["basis"] == ["observed"]
+    observed[3]["connectedAfterRound"] = False
+    assert not dx.removal_phases(V8_EVENT, gap_raw(observed, A1_NOTES))["carry"]["sameCheckpoint"]
+    tied = [dict(row, delivery=1 if row["t"] < 1008.0 else 2 if row["t"] == 1008.0 else 3) for row in A1_LIFECYCLE]
+    tied[4]["t"] = tied[5]["t"] = 1008.0
+    assert dx.removal_phases(V8_EVENT, gap_raw(tied, A1_NOTES))["carry"]["sameCheckpoint"]
+    tied.insert(4, lc(1008.0, "add", True, el=9) | {"delivery": 5})
+    assert not dx.removal_phases(V8_EVENT, gap_raw(tied, A1_NOTES))["carry"]["sameCheckpoint"]
+
+
+def test_records_summary_and_classify_print_the_readout() -> None:
+    a1 = dx.removal_phases(V8_EVENT, gap_raw(A1_LIFECYCLE, A1_NOTES))
+    records = [_block_record(b, arm, 0, 1) for b in range(2) for arm in ("V8", "V8+a1")]
+    for record in records:
+        if record["variant"] == "V8+a1":
+            record["events"][0]["removals"] = a1
+    summary = dx.summarize(records, 1)
+    assert summary["readout"] == [
+        "V8: teardown sameDelivery 0/0; carry sameDelivery 0/0; pre-paint in gap 0",
+        "V8+a1: teardown sameDelivery 2/2; carry sameDelivery 0/2, sameCheckpoint 2/2 (proxy), gapMs max 0.9; "
+        "pre-paint in gap 0",
+    ]
+    rows = [{"variant": "V8+a1", "removals": a1}] * 2
+    assert dx.tally_classification(rows)["V8+a1"]["removals"] == summary["perVariant"]["V8+a1"]["removals"]
+
+
+def test_build_record_attaches_the_phases_to_eligible_events_only() -> None:
+    record = dx.build_record(raw_run(post_mm()))
+    (event,) = record["events"]
+    assert event["eligible"] and event["removals"] == {"teardown": None, "carry": None}
+    (ineligible,) = dx.build_record(raw_run(post_mm(dst=[video(7, SRC)])))["events"]
+    assert "removals" not in ineligible
+
+
+def test_rescore_and_classify_write_where_told(tmp_path: Path) -> None:
+    out = tmp_path / "rescore" / "runs.rescored.jsonl"
+    args = dx.parse_args(["rescore", "--out-dir", str(tmp_path / "evidence"), "--output", str(out)])
+    assert args.output == out
+    assert dx.parse_args(["classify", "--out-dir", str(tmp_path), "--output", str(out)]).output == out
+    assert dx.parse_args(["rescore", "--out-dir", str(tmp_path)]).output is None

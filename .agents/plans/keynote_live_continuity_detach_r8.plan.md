@@ -373,13 +373,23 @@ Evidence (main checkout, git-ignored): `output/evidence/s2-dev/detach-{controls,
   event in every arm (waited ≈3.6 ms median, direct ≈7.8 ms); R8's direct path only widens it past a paint.
 - **Fix A/B (23 blocks, 69/69 ok; 23 events per arm, not 30):** V8 8/23; **V8+a1 0/23 (Fisher 0.0019)**;
   V8+a2 4/23 (0.16, no effect, as predicted — it never runs in this signature). Positive control on plain V8 in the same
-  session: pass. Gap length: V8 7.8 ms (6.8–9.9), a2 7.9 ms, **a1 0.7 ms (0.5–1.3)**; decoderAtPin on the first
-  destination frame: a1 23/23, V8 15/23.
-- **a1 shrinks the gap ~10x but does not close it** (the decoder is re-stashed and re-homed a task later, ~0.7 ms out of
-  the DOM). Expected residual blink rate if paints land uniformly ≈ 4% per event — 0/23 is consistent with that.
-  **Next:** a same-delivery re-home (no task boundary: re-home synchronously in the detach observer when the removed
-  decoder's `__obedRemounting` re-home target was itself removed) to make the gap 0, verified by gapMs = 0 / sameDelivery,
-  then land it in the core (sha re-pin, variant shas re-derive) and run the owed gates.
+  session: pass. decoderAtPin on the first destination frame: a1 23/23, V8 15/23.
+- **a1 closes the gap; its sub-ms residual is a different removal that cannot paint** (rescore of the fix evidence by
+  removal phase, `detach-fix-rescore/`, read-only over `detach-fix/`):
+  - **Teardown (the H3 removal).** a1's detach-observer `stash` reaches `scheduleRemount`, whose `tryRemount` is already
+    synchronous, so the decoder is re-homed inside the core's own delivery (same placement as the delayed path) and I2
+    sees it connected: sameDelivery a1 23/23, V8 0/23, a2 0/23 (V8 gap 6.8–9.9 ms, 8 painted).
+  - **Carry.** The fresh-element task removes the outgoing layer holding the now-carried (held, not poolable) decoder in
+    the same delivery that inserts the facade stub; `bindFacade`'s observer (created at the carry, so delivered after
+    I2) swaps it back in the next notify round of the same microtask checkpoint (dom-swap 0.1–0.5 ms after I2's
+    delivery, 69/69 runs in every arm). a1: sameCheckpoint 23/23 (proxy: next I2 delivery, same frame, no pre-paint
+    row), pre-paint rows in the gap 0, wall gap 0.5–1.3 ms. No task boundary, so no residual blink rate (the earlier
+    "~4 %" assumed one).
+  - Old dumps support only the proxy; the driver's I2 now records `delivery` and a post-round `connectedAfterRound`
+    (a microtask queued in I2's callback runs after every observer of that round), so new runs observe sameCheckpoint.
+- **Owner decision (2026-10-10): a1 is the fix.** `CONTINUITY_VERSION` stays 6 (no bump). **Next:** a fresh ≥30-event
+  interleaved V8 vs V8+a1 session with the new instrument (positive control first), then land a1 in the core (sha
+  re-pin, variant shas re-derive) and run the owed gates.
 - **Main (P2, GL replay auto, 10 runs, rescored):** the 1→2 hand-back is eligible 10/10, 0 blinks. Main's decoder is
   out of the DOM during the MM (GL paints it) and is inserted after the teardown, so S2's race is not reached; slide 2's
   click-build re-homes happen in the same delivery (no gap). Main's continuity qualifies only the P2 plan. **No main

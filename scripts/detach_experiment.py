@@ -11,7 +11,8 @@ V5+8 = R1-R5 + R8; `off` = OBED_LIVE_MM_OPACITY=off). One run = one deck through
            or `--mode r8flag --variant off|V5|V7|V8`
   blocks   §2.4 interleaved blocks of {V8, V7, V5} (or fix arms `V8,V8+a1,V8+a2`), seeded order, deck rotated
            per block, resumable
-  summary  §2.3 counts, Fisher one-sided V8 vs every other arm, early stop / futility
+  summary  §2.3 counts, Fisher one-sided V8 vs every other arm, early stop / futility, and the detach-gap readout
+           (teardown / carry removals: same delivery, same checkpoint, pre-paint rows in the gap)
   rescore  rebuild every record from its raw dump
   classify §4 step 3: name the branch (H1-H4) of every blink from its raw dump
 
@@ -143,16 +144,17 @@ INSTRUMENT_JS = r"""
     return node && node.querySelectorAll ? Array.prototype.slice.call(node.querySelectorAll('video')) : [];
   }
   function nn(x){ return x == null ? null : x; }
+  var deliveries = 0;
   try {
     new MutationObserver(function(muts){
-      var t = performance.now(), s;
+      var t = performance.now(), s, delivery = ++deliveries, seen = [];
       muts.forEach(function(m){
         [['remove', m.removedNodes], ['add', m.addedNodes]].forEach(function(pair){
           Array.prototype.forEach.call(pair[1], function(node){
             videosIn(node).forEach(function(v){
               if (s === undefined) s = snap();
               var row = {
-                t: t, rafTs: instr.lastRafTs, op: pair[0], direct: node === v,
+                t: t, delivery: delivery, rafTs: instr.lastRafTs, op: pair[0], direct: node === v,
                 probeId: nn(v.__obedProbeId), elId: nn(v.__obedElId),
                 instance: v.__obedInstance != null ? String(v.__obedInstance) : null,
                 isConnected: v.isConnected, remounting: !!v.__obedRemounting,
@@ -164,9 +166,13 @@ INSTRUMENT_JS = r"""
               if (cfg.level2) row.seq = window.__obedSeq__ = (window.__obedSeq__ || 0) + 1;
               instr.lifecycle.push(row);
               cap(instr.lifecycle);
+              seen.push([row, v]);
             });
           });
         });
+      });
+      if (seen.length) queueMicrotask(function(){
+        seen.forEach(function(p){ p[0].connectedAfterRound = p[1].isConnected; });
       });
     }).observe(document.documentElement, {childList: true, subtree: true});
   } catch (e) { fail('lifecycle', e); }
@@ -1119,6 +1125,106 @@ def classify_event(event: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]
     return out
 
 
+def _delivery(row: dict[str, Any]) -> Any:
+    return row.get("delivery", row.get("t"))
+
+
+def removal_gap(lifecycle: list[dict[str, Any]], index: int, prepaint: list[dict[str, Any]],
+                notes: list[dict[str, Any]]) -> dict[str, Any]:
+    """One I2 removal of a tracked decoder. `sameDelivery`: connected at its own I2 delivery (the core's observer,
+    delivered first, put it back). `sameCheckpoint`: back before the microtask checkpoint ended, so no frame could paint
+    without it: observed by the instrument's post-round microtask (`connectedAfterRound`); on older dumps a proxy (the
+    re-add is the next I2 delivery, in the same frame, with no pre-paint row between)."""
+    removal = lifecycle[index]
+    el = removal.get("elId")
+    if removal.get("isConnected"):
+        return {"t": removal["t"], "sameDelivery": True, "sameCheckpoint": True, "basis": "delivery", "gapMs": 0.0,
+                "paintsInGap": 0, "domSwapAfterMs": None}
+    at = next((i for i in range(index + 1, len(lifecycle)) if lifecycle[i].get("elId") == el
+               and lifecycle[i].get("op") == "add" and lifecycle[i].get("isConnected")), None)
+    readd = lifecycle[at] if at is not None else None
+    paints = None if readd is None else sum(removal["t"] < p["t"] < readd["t"] for p in prepaint)
+    if "connectedAfterRound" in removal:
+        same, basis = bool(removal["connectedAfterRound"]), "observed"
+    else:
+        ends = {_delivery(removal), None if readd is None else _delivery(readd)}
+        same = readd is not None and paints == 0 and removal.get("rafTs") == readd.get("rafTs") and all(
+            _delivery(row) in ends for row in lifecycle[index + 1:at])
+        basis = "proxy"
+    swap = None if readd is None else next((n["t"] for n in notes if n.get("kind") == "dom-swap" and el in note_el_ids(n)
+                                            and removal["t"] <= n["t"] <= readd["t"]), None)
+    return {"t": removal["t"], "sameDelivery": False, "sameCheckpoint": same, "basis": basis,
+            "gapMs": None if readd is None else round(readd["t"] - removal["t"], 3), "paintsInGap": paints,
+            "domSwapAfterMs": None if swap is None else round(swap - removal["t"], 3)}
+
+
+def removal_phases(event: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
+    """Every removal of the event's tracked decoders in its window, split at the carry (the decoder's first
+    `reuse-decoder` note in the window): `teardown` = delivered before it (the H3 removal), `carry` = from it on. Per
+    phase: all re-homed in the same delivery / the same checkpoint, the longest wall-clock gap and the paints in gaps."""
+    instrument = raw.get("instrument") or {}
+    lifecycle = _rows(instrument.get("lifecycle"))
+    prepaint = _rows(instrument.get("prepaint"))
+    notes = _rows(raw.get("coreEvents"))
+    w0, w1 = event["tSetup"] - JUMP_PAD_MS, event["tPlay"] + CARRY_WINDOW_MS
+    gaps: dict[str, list[dict[str, Any]]] = {"teardown": [], "carry": []}
+    for el in event.get("tracked") or []:
+        carry_t = min((n["t"] for n in notes if n.get("kind") == "reuse-decoder" and (n.get("detail") or {}).get("oldElId") == el
+                       and _num(n.get("t")) is not None and w0 <= n["t"] <= w1), default=None)
+        for i, row in enumerate(lifecycle):
+            if row.get("op") == "remove" and row.get("elId") == el and _num(row.get("t")) is not None and w0 <= row["t"] <= w1:
+                phase = "carry" if carry_t is not None and row["t"] >= carry_t else "teardown"
+                gaps[phase].append(removal_gap(lifecycle, i, prepaint, notes))
+    out: dict[str, Any] = {}
+    for phase, rows in gaps.items():
+        if not rows:
+            out[phase] = None
+            continue
+        spans = [g["gapMs"] for g in rows]
+        out[phase] = {
+            "removals": len(rows), "sameDelivery": all(g["sameDelivery"] for g in rows),
+            "sameCheckpoint": all(g["sameCheckpoint"] for g in rows),
+            "basis": sorted({g["basis"] for g in rows if not g["sameDelivery"]}) or ["delivery"],
+            "gapMs": None if None in spans else max(spans),
+            "paintsInGap": sum(g["paintsInGap"] or 0 for g in rows),
+            "domSwapAfterMs": max((g["domSwapAfterMs"] for g in rows if g["domSwapAfterMs"] is not None), default=None),
+        }
+    return out
+
+
+def new_removal_tally() -> dict[str, Any]:
+    return {phase: {"events": 0, "sameDelivery": 0, "sameCheckpoint": 0, "paintsInGap": 0, "gapMsMax": None, "basis": []}
+            for phase in ("teardown", "carry")}
+
+
+def bump_removals(tally: dict[str, Any], removals: Any) -> None:
+    for phase, cell in tally.items():
+        row = (removals or {}).get(phase) if isinstance(removals, dict) else None
+        if not row:
+            continue
+        cell["events"] += 1
+        cell["sameDelivery"] += int(row["sameDelivery"])
+        cell["sameCheckpoint"] += int(row["sameCheckpoint"])
+        cell["paintsInGap"] += row["paintsInGap"]
+        if row["gapMs"] is not None:
+            cell["gapMsMax"] = row["gapMs"] if cell["gapMsMax"] is None else max(cell["gapMsMax"], row["gapMs"])
+        cell["basis"] = sorted(set(cell["basis"]) | set(row["basis"]))
+
+
+def removal_readout(arm: str, tally: dict[str, Any]) -> str:
+    """`V8+a1: teardown sameDelivery 23/23; carry sameDelivery 0/23, sameCheckpoint 23/23 (proxy); pre-paint in gap 0`."""
+    parts = []
+    for phase, cell in tally.items():
+        n = cell["events"]
+        basis = [b for b in cell["basis"] if b != "delivery"]
+        text = f"{phase} sameDelivery {cell['sameDelivery']}/{n}"
+        if cell["sameDelivery"] < n:
+            text += f", sameCheckpoint {cell['sameCheckpoint']}/{n} ({'+'.join(basis)}), gapMs max {cell['gapMsMax']}"
+        parts.append(text)
+    paints = sum(cell["paintsInGap"] for cell in tally.values())
+    return f"{arm}: {'; '.join(parts)}; pre-paint in gap {paints}"
+
+
 def serving_of(config: dict[str, Any]) -> Any:
     return config.get("serving") or config.get("variant")
 
@@ -1250,6 +1356,8 @@ def build_record(raw: dict[str, Any]) -> dict[str, Any]:
         record["level2Wrapped"] = level2.get("wrapped")
         record["coreTraceRows"] = len(_rows(raw.get("coreTrace")))
     for event in events:
+        if event["eligible"]:
+            event["removals"] = removal_phases(event, raw)
         if event["eligible"] and (event["blink"] or event["blinkDecoder"]):
             verdict = classify_event(event, raw)
             event["hypothesis"] = {key: verdict[key] for key in ("hypothesis", "then", "reason", "basis")}
@@ -1355,7 +1463,7 @@ def summarize(records: Sequence[dict[str, Any]], seed: int | None = None) -> dic
         blocks.setdefault((run_seed, block), set()).add(variant)
         row = per.setdefault(variant, {
             "runs": 0, "events": 0, "blinks": 0, "blinkSamplesOnly": 0, "blinkPrepaintOnly": 0, "blinkDecoder": 0,
-            "byPath": {}, "byPhase": {}, "byLoad": {}, "byDeck": {}, "byHypothesis": {},
+            "byPath": {}, "byPhase": {}, "byLoad": {}, "byDeck": {}, "byHypothesis": {}, "removals": new_removal_tally(),
         })
         row["runs"] += 1
         for e in r.get("events") or []:
@@ -1370,6 +1478,7 @@ def summarize(records: Sequence[dict[str, Any]], seed: int | None = None) -> dic
             _bump(row["byPhase"], (e.get("teardown") or {}).get("phase"), e["blink"])
             _bump(row["byLoad"], load_stratum(r.get("meta")), e["blink"])
             _bump(row["byDeck"], r.get("deck"), e["blink"])
+            bump_removals(row["removals"], e.get("removals"))
             if e["blink"]:
                 h = e.get("hypothesis") or {}
                 name = f"{h.get('hypothesis')}>{h['then']}" if h.get("then") else h.get("hypothesis")
@@ -1380,7 +1489,8 @@ def summarize(records: Sequence[dict[str, Any]], seed: int | None = None) -> dic
     }
     arms = set(BLOCK_VARIANTS) if set(BLOCK_VARIANTS) <= set(per) else set(per)
     complete = sum(1 for variants in blocks.values() if arms <= variants)
-    return {"statuses": statuses, "completeBlocks": complete, "perVariant": per, "fisherOneSided": tests,
+    return {"readout": [removal_readout(arm, row["removals"]) for arm, row in sorted(per.items())],
+            "statuses": statuses, "completeBlocks": complete, "perVariant": per, "fisherOneSided": tests,
             "decision": decide(per, complete)}
 
 
@@ -1522,7 +1632,7 @@ def _brief(record: dict[str, Any]) -> dict[str, Any]:
     brief = {key: record.get(key) for key in keys if key in record}
     brief["events"] = [
         {key: e.get(key) for key in ("scene", "eligible", "waited", "blink", "blinkSamples", "blinkPrepaint", "firstPlaying",
-                                     "invalid", "maxDtMs", "hypothesis")} | {"phase": (e.get("teardown") or {}).get("phase")}
+                                     "invalid", "maxDtMs", "hypothesis", "removals")} | {"phase": (e.get("teardown") or {}).get("phase")}
         for e in record.get("events") or []
     ]
     if isinstance(brief.get("controlVerdict"), dict):
@@ -1626,7 +1736,7 @@ def classification_rows(record: dict[str, Any], raw: dict[str, Any]) -> list[dic
         verdict = classify_event(event, raw)
         rows.append({
             **{key: record.get(key) for key in ("runId", "variant", "serving", "coreFix", "level2", "deck", "block")},
-            **{key: event.get(key) for key in ("scene", "waited", "blink", "blinkDecoder", "invalid")},
+            **{key: event.get(key) for key in ("scene", "waited", "blink", "blinkDecoder", "invalid", "removals")},
             "phase": (event.get("teardown") or {}).get("phase"), **verdict,
         })
     return rows
@@ -1635,8 +1745,10 @@ def classification_rows(record: dict[str, Any], raw: dict[str, Any]) -> list[dic
 def tally_classification(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for row in rows:
-        cell = out.setdefault(str(row.get("variant")), {"events": 0, "blinks": 0, "hypotheses": {}, "gapsAll": {}})
+        cell = out.setdefault(str(row.get("variant")), {"events": 0, "blinks": 0, "hypotheses": {}, "gapsAll": {},
+                                                        "removals": new_removal_tally()})
         cell["events"] += 1
+        bump_removals(cell["removals"], row.get("removals"))
         cell["blinks"] += int(bool(row.get("blink")))
         if row.get("blink"):
             name = f"{row['hypothesis']}>{row['then']}" if row.get("then") else str(row.get("hypothesis"))
@@ -1650,6 +1762,7 @@ def tally_classification(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
 
 def cmd_classify(args: argparse.Namespace) -> int:
     out_path = args.output or args.out_dir / "classify.jsonl"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.unlink(missing_ok=True)
     rows: list[dict[str, Any]] = []
     for record in read_jsonl(args.out_dir / "runs.jsonl"):
@@ -1667,12 +1780,16 @@ def cmd_classify(args: argparse.Namespace) -> int:
         if row.get("blink"):
             print(json.dumps({key: row.get(key) for key in ("runId", "variant", "deck", "scene", "waited", "phase",
                                                              "hypothesis", "then", "reason", "basis")}, default=str))
-    print(json.dumps(tally_classification(rows), indent=2, default=str))
+    tally = tally_classification(rows)
+    print(json.dumps(tally, indent=2, default=str))
+    for arm, cell in sorted(tally.items()):
+        print(removal_readout(arm, cell["removals"]))
     return 0
 
 
 def cmd_rescore(args: argparse.Namespace) -> int:
-    out = args.out_dir / "runs.rescored.jsonl"
+    out = args.output or args.out_dir / "runs.rescored.jsonl"
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.unlink(missing_ok=True)
     for path in sorted((args.out_dir / "raw").glob("*.json.gz")):
         with gzip.open(path, "rt") as handle:
@@ -1726,8 +1843,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         p = sub.add_parser(name)
         p.add_argument("--out-dir", type=Path, required=True)
         p.add_argument("--seed", type=int, default=None)
-        if name == "classify":
-            p.add_argument("--output", type=Path, default=None, help="default: <out-dir>/classify.jsonl")
+        if name != "summary":
+            default = "classify.jsonl" if name == "classify" else "runs.rescored.jsonl"
+            p.add_argument("--output", type=Path, default=None, help=f"default: <out-dir>/{default}")
         p.set_defaults(func=func)
 
     args = parser.parse_args(argv)
