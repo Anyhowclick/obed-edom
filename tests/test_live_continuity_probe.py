@@ -5939,11 +5939,13 @@ class TestWrapAwareScorerDefaultIsLegacy:
         }
         samples = wrap_samples()
         legacy = LEGACY.score_boundaries(samples, facts, True)
+        scored = probe.score_boundaries(samples, facts, True)
+        no_crossing = probe._inconclusive("boundary crossing not observed in samples")
         for key, verdict in legacy.items():
-            # Astra r8 #3: the no-crossing exit is inconclusive now, the only intended difference.
-            if verdict.get("reason") == "boundary crossing not observed in samples":
-                legacy[key] = probe._inconclusive("boundary crossing not observed in samples")
-        assert json.dumps(probe.score_boundaries(samples, facts, True), sort_keys=True) == json.dumps(legacy, sort_keys=True)
+            # Astra r8 #3: an unsampled crossing was a legacy False and is inconclusive now, the only intended difference.
+            if scored[key] == no_crossing and verdict.get("verdict") is False:
+                legacy[key] = no_crossing
+        assert json.dumps(scored, sort_keys=True) == json.dumps(legacy, sort_keys=True)
 
     @pytest.mark.parametrize("name", sorted(_continuity_batteries()))
     def test_none_adds_no_keys(self, name: str) -> None:
@@ -6619,6 +6621,10 @@ class TestForcedWrapUnreadable:
                      id="null-destination-scenes-erase-the-crossing"),
         pytest.param(lambda: TestForcedWrapUnreadable._schema_rejected_run()["forced"], "invalid",
                      id="schema-rejected-rows-never-reach-the-window"),
+        pytest.param(lambda held=NOT_HELD: _fw_score(continuity=held, restart=probe.score_restart(
+            TestScoreRestart()._samples(fresh_id=1), ASSET, 3.0)), "fail", id="control-sampled-crossing-same-decoder-fails"),
+        pytest.param(lambda held=NOT_HELD: _fw_score(continuity=held, restart=probe.score_restart(
+            TestScoreRestart()._samples()[:10], ASSET, 3.0)), "invalid", id="restart-crossing-never-sampled"),
         pytest.param(lambda held=NOT_HELD: dict(_fw_score(continuity=held), sampler=dict(_sampler_ok(), selfCheck={"ok": False})),
                      "invalid", id="failed-sampler-integrity-over-a-failure"),
         pytest.param(lambda held=NOT_HELD: dict(_fw_score(continuity=held), sampler=_sampler_ok()), "fail",

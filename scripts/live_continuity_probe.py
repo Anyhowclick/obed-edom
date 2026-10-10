@@ -2358,10 +2358,13 @@ def score_restart(
 ) -> dict[str, Any]:
     """Pure: samples in, verdict dict out. A restart is a genuinely NEW decoder id
     (never seen anywhere with `scene < boundary_scene`, at any time in the run, not
-    just within a window) whose own clock starts near zero shortly after the cut."""
+    just within a window) whose own clock starts near zero shortly after the cut. A crossing
+    the samples never span is inconclusive, never a failed restart."""
     tracks = track_by_id(samples, asset_substr)
     if not decoded_anywhere(tracks):
         return {"verdict": None, "reason": "inconclusive: movie never decoded"}
+    if find_boundary_window(samples, boundary_scene) is None:
+        return _inconclusive("boundary crossing not observed in samples")
     before_ids = {i for i, rows in tracks.items() if any(r["scene"] is not None and r["scene"] < boundary_scene for r in rows)}
     after_ids = {i for i, rows in tracks.items() if any(r["scene"] is not None and r["scene"] >= boundary_scene for r in rows)}
     fresh_ids = after_ids - before_ids
