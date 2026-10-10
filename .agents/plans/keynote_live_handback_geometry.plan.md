@@ -5,7 +5,7 @@ launch, no Keynote. Base: `main` @ `0df5ea10` (MM opacity #233/#234 and preview 
 `e9b2fad4…` (= `live_runtime.PLAYER_SHA256`); every offset below is a **byte** offset (`grep -bo` convention, as the MMO plan's
 §3). Evidence: main checkout `output/evidence/handback-geometry/` (gitignored; JSON tables, crops, scratch probe/scorer/candidate; raw P2 `runs/` screenshots not retained).
 Parents: `keynote_live_mm_opacity.plan.md` (R1–R5, §7 G2), `keynote_live_gl_replay_arming.plan.md`,
-`keynote_live_gl_replay_managed_obs.plan.md`, `dashboard_preview_mm_opacity.plan.md`.
+`keynote_live_gl_replay_managed_obs.plan.md`, `dashboard_preview_mm_opacity.plan.md` (removed; `git show 0f0a70aa:.agents/plans/dashboard_preview_mm_opacity.plan.md`).
 
 ## 0. Summary
 
@@ -364,7 +364,7 @@ Headless is primary. OBS confirms on the real render path (they agree within 0.0
     (§3.4); HB-OBS geometry report importing W2's scorer (lands after W2).
   - `mm_opacity_probe.py:81` `UNPROVEN_ON`; MO-4 `liveGreenEqual` re-cast (§3.4); on-arm engagement premise.
   - Their tests.
-  - README live section, SKILL live section, MMO plan §7 cross-reference, `dashboard_preview_mm_opacity.plan.md` note if
+  - README live section, SKILL live section, MMO plan §7 cross-reference, `dashboard_preview_mm_opacity.plan.md` (removed; `git show 0f0a70aa:.agents/plans/dashboard_preview_mm_opacity.plan.md`) note if
     decision 4 = yes.
 - **W4 qualification** (5–7) and the gate record `.agents/reviews/handback-geometry/gates-r1.md`.
 

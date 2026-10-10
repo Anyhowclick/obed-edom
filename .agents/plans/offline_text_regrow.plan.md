@@ -125,7 +125,7 @@ todos:
       delta form is off by a·(rep_h − h_new) where rep_h is the narrow-wrap height. spec.h is NOT a
       safe h_new: role "other" also covers body text (`map_remap.py:2602`), corner-translated text
       (:2534), demoted list (:2554-2555); style-matched boxes use src.h·ratio clamped ≥8 (:2117-2118)
-      — so the earlier "restrict to role other" idea (offline_text_middle_anchor.plan
+      — so the earlier "restrict to role other" idea (git show 1379b2df:.agents/plans/offline_text_middle_anchor.plan.md
       impl-four-diff-bugs(3)) is unsound. Candidates if m1(1) shows a large share: a planner-emitted
       wrap-preserving provenance bit, or `iwa_text_shape.shaped_height` (:262-266) under its own gate.
     status: pending

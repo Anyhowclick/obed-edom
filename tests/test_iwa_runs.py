@@ -1386,7 +1386,7 @@ def test_group_child_records_reads_non_bezier_natural_size():
 
 # --------------------------------------------------------------------------
 # attach_magic_move — per-slide `magicMoveOut` + `mmKeys` content identity
-# (mm_offcanvas_partners.plan.md §Partner rule / §Stream A). Synthetic archives
+# (git show 1379b2df:.agents/plans/mm_offcanvas_partners.plan.md §Partner rule / §Stream A). Synthetic archives
 # only; deck_builds needs a real zip for its data index, so an empty one is used.
 # --------------------------------------------------------------------------
 _MM_EFFECT = "apple:magic-move-implied-motion-path"

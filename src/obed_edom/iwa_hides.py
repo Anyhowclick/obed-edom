@@ -3,7 +3,7 @@
 One strict whole-deck decode, pure per-slide planning over it (any failure refuses that
 slide only, its member byte-identical), one ``_rewrite_members`` that also drops orphaned
 ``Data/`` members, then one batched read-back of the touched members plus Metadata.
-Rules R1-R8 and invariants I1-I6: ``.agents/plans/pass1_hides_offline.plan.md`` §Writer.
+Rules R1-R8 and invariants I1-I6: ``git show 1379b2df:.agents/plans/pass1_hides_offline.plan.md`` §Writer.
 """
 from __future__ import annotations
 
