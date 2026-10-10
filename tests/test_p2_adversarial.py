@@ -1947,11 +1947,6 @@ def test_freeze_control_at_cut_boundary_zero_still_passes():
         snap["atCutBoundary"] = p2._at_cut_boundary(snap["indexSamples"], first_perf)
         assert snap["atCutBoundary"]["from"] == 0 and snap["atCutBoundary"]["ok"] is True
     b["nullControl"]["advanceKeyAt"] = b["advanceKeyPerfMs"]
-    # The keydown moved ~36.7 ms (two of this run's ~20 ms poll callbacks) later,
-    # so the poll's frame counts from it shrink by two as well; keeping 8 frames
-    # would claim 15.6 ms callbacks, which the page-clock motion band rejects.
-    b["nullControl"]["triggerFramesAfterAdvance"] -= 2
-    b["nullControl"]["motionStartedFrame"] -= 2
     verdict = _score_34(a1, b, a2)
     assert verdict["verdict"] == "pass", verdict["failed"]
 
@@ -2771,7 +2766,8 @@ def test_freeze_control_trigger_within_the_motion_slack_still_passes():
 #     latency (L - 4.8 ms); they move, they never disappear.
 #   * firedAtRuntimeMotionStart: marker -> trigger must lie in
 #     [-2 callbacks, L + one read-lag callback + 2 callbacks] on the page clock
-#     (a callback = the poll's own mean keydown->trigger interval), the frame
+#     (a callback = the median of the poll's first rAF intervals from the
+#     trigger on, so slow startup callbacks cannot widen it), the frame
 #     lead is shifted like the ceiling, and the overlay's displacement at the
 #     trigger may not exceed the curve's at the band's end.
 # The real fixture is linear-era; these snapshots move only the trigger timing
@@ -2785,6 +2781,7 @@ MAIN_LINEAR_DEPARTURE = {"x": 0.600464, "y": -0.50354, "w": 1.890625, "h": 0.781
 
 def _trigger_timed_b(
     *, frames: int, marker: int, delay_ms: float, marker_to_trigger_ms: float, departure: dict,
+    poll_max_gap_ms: float | None = None,
 ) -> dict:
     """The real B arm with its trigger re-timed. `holdStartedAt` (and so every
     scored window) is kept; the keydown clock moves to give `delay_ms`, and the
@@ -2807,6 +2804,8 @@ def _trigger_timed_b(
         "obedMotionAtTrigger": {**nc["obedMotionAtTrigger"], "started": started},
         "movedToRect": {k: moved_from[k] + departure[k] for k in ("x", "y", "w", "h")},
     }
+    if poll_max_gap_ms is not None:
+        b["nullControl"]["pollMaxGapMs"] = poll_max_gap_ms
     return b
 
 
@@ -2900,6 +2899,8 @@ _LINEAR_ERA = dict(
     pytest.param(dict(delay_ms=247.3), _EASED, BRIDGE_34, _MOVE_START, id="delay-ceiling+1"),
     pytest.param(dict(frames=12, marker=5), _EASED, BRIDGE_34, _MOTION_START, id="frame-lead+1"),
     pytest.param(dict(frames=10, marker=13), _EASED, BRIDGE_34, _MOTION_START, id="before-marker-3"),
+    pytest.param(dict(frames=6, marker=2, delay_ms=215.0, marker_to_trigger_ms=124.0, poll_max_gap_ms=90.0),
+                 _EASED, BRIDGE_34, _MOTION_START, id="slow-startup-callbacks-do-not-widen-the-band"),
     pytest.param({}, _EASED, None, _BOTH, id="no-bridge"),
     pytest.param({}, _EASED, {**BRIDGE_34, "atScene": 6}, _BOTH, id="bridge-of-another-boundary"),
     pytest.param({}, _EASED, {k: v for k, v in BRIDGE_34.items() if k != "durationSeconds"}, _BOTH,
@@ -2919,7 +2920,11 @@ def test_freeze_control_trigger_bounds_follow_the_bridge_curve(timing, curve, br
     end, so a trigger 125 ms after the marker, or one that reads a 10 px move,
     is not the move start. Each shifted ceiling (13 frames, 246.2 ms, 6 frames
     of lead) and the -2 callback floor still bite one past. No usable 3->4
-    bridge geometry means no bounds: both checks fail closed."""
+    bridge geometry means no bounds: both checks fail closed. Slow startup
+    callbacks (review astra-fixA-r1: polls 90, 155, 170, ... ms, marker seen on
+    frame 2, trigger on frame 6 at 215 ms) once inflated a whole-window mean to
+    35.8 ms and passed a stalled overlay three callbacks late; the band now
+    counts in the cadence around the departure (~17 ms here), so it fails."""
     verdict = _score_34(
         _positive_snap_34(), _r3_eased_b(**timing), _a2_snap_34(), bridge=bridge, bridge_curve=curve
     )

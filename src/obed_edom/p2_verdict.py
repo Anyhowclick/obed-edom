@@ -15,6 +15,7 @@ import hashlib
 import io
 import json
 import math
+import statistics
 import time
 import uuid
 import zlib
@@ -222,6 +223,12 @@ FREEZE_TRIGGER_MOTION_SLACK_FRAMES = 2  # poll callbacks between the runtime's f
 FREEZE_TRIGGER_DEPARTURE_PX = 1.0
 FREEZE_TRIGGER_CALIBRATED_LATENCY_MS = 4.8
 FREEZE_TRIGGER_NOMINAL_FRAME_MS = 1000.0 / 60.0
+# The callback the motion band is counted in is the median of the poll's rAF
+# intervals from the trigger on: the cadence AROUND the departure, so a slow
+# startup before it (keydown -> first poll, or an early stall) cannot widen the
+# band. Pre-trigger callbacks carry no timestamps, so a stall right before the
+# trigger is not credited: such a run reads INCONCLUSIVE, never PASS.
+FREEZE_TRIGGER_CADENCE_INTERVALS = 1 + 2 * FREEZE_TRIGGER_MOTION_SLACK_FRAMES
 BRIDGE_EASE_IN_EASE_OUT = (0.42, 0.0, 0.58, 1.0)  # the core's EASE_IN_EASE_OUT (x1, y1, x2, y2)
 BRIDGE_LINEAR = (0.0, 0.0, 1.0, 1.0)
 
@@ -3775,17 +3782,17 @@ def _score_freeze_control(
     # displacement at the trigger may not exceed the curve's at the band's end.
     motion_started_frame = nc.get("motionStartedFrame")
     expected = _freeze_trigger_expectation(nc, bridge, bridge_curve)
-    trigger_frame_ms = (
-        trigger_delay_ms / trigger_frames
-        if isinstance(trigger_frames, int) and trigger_frames >= 1
-        and trigger_delay_ms is not None and trigger_delay_ms >= 0.0
+    cadence_ts = raf_ts_from_trigger[: FREEZE_TRIGGER_CADENCE_INTERVALS + 1]
+    trigger_callback_ms = (
+        statistics.median(b - a for a, b in zip(cadence_ts, cadence_ts[1:]))
+        if hold_started is not None and len(cadence_ts) == FREEZE_TRIGGER_CADENCE_INTERVALS + 1
         else None
     )
     marker_started = _finite(motion_marker.get("started"))
     marker_to_trigger_ms = hold_started - marker_started if marker_started is not None else None
     motion_band_ms = (
-        expected["departureLatencyMs"] + (1 + FREEZE_TRIGGER_MOTION_SLACK_FRAMES) * trigger_frame_ms
-        if expected is not None and trigger_frame_ms is not None
+        expected["departureLatencyMs"] + (1 + FREEZE_TRIGGER_MOTION_SLACK_FRAMES) * trigger_callback_ms
+        if expected is not None and trigger_callback_ms is not None
         else None
     )
     trigger_displacement_cap_px = (
@@ -3821,7 +3828,7 @@ def _score_freeze_control(
         <= expected["maxMotionLeadFrames"]
         and motion_band_ms is not None
         and marker_to_trigger_ms is not None
-        and -FREEZE_TRIGGER_MOTION_SLACK_FRAMES * trigger_frame_ms <= marker_to_trigger_ms <= motion_band_ms
+        and -FREEZE_TRIGGER_MOTION_SLACK_FRAMES * trigger_callback_ms <= marker_to_trigger_ms <= motion_band_ms
         and trigger_displacement_px is not None
         and trigger_displacement_cap_px is not None
         and trigger_displacement_px <= trigger_displacement_cap_px
@@ -4030,7 +4037,7 @@ def _score_freeze_control(
             "motionStartedAt": nc.get("motionStartedAt"),
             "bridgeCurve": list(bridge_curve),
             "triggerExpectation": expected,
-            "triggerFrameMs": trigger_frame_ms,
+            "triggerCallbackMs": trigger_callback_ms,
             "markerToTriggerMs": marker_to_trigger_ms,
             "motionBandMs": motion_band_ms,
             "triggerDisplacementPx": trigger_displacement_px,
