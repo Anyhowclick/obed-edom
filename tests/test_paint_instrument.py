@@ -36,7 +36,7 @@ def _pv(id: int = 1, src: str = "movie-a.mov", **kw: Any) -> dict[str, Any]:
         id=id, elId=10 + id, instance=None, src=src, connected=True, facade=False, suppressed=False,
         readyState=4, seeking=False, videoWidth=640, videoHeight=360, currentTime=1.0, paused=False, ended=False,
         checkVisibility=True, visibility="visible", displayNone=None, opacity=1.0, hiding=None, effects=None,
-        rect=dict(SLOT), visibleRect=dict(SLOT), clippedBy=None, parent="div#body", layer=None,
+        transform=None, rect=dict(SLOT), visibleRect=dict(SLOT), clippedBy=None, parent="div#body", layer=None,
     )
     base.update(kw)
     return base
@@ -65,6 +65,8 @@ TRUTH = [
     ("nan-opacity-is-unreadable", _pv(opacity=None), {}, ("unreadable", "opacity")),
     ("no-checkVisibility", _pv(checkVisibility=None), {}, ("unreadable", "checkVisibility")),
     ("effects", _pv(effects="div#layer3:filter"), {}, ("unreadable", "effects")),
+    # Astra r1 #2: a rotated/skewed (or unmappable) box is not axis-aligned, so no rect read can be trusted.
+    ("rotated-or-skewed-box", _pv(transform="div#clip"), {}, ("unreadable", "transform")),
     ("cover", _pv(), {"cover": True}, ("unreadable", "cover")),
     ("display", _pv(displayNone="div#layer104", checkVisibility=False), {}, ("unpainted", "display")),
     ("own-visibility-hidden", _pv(visibility="hidden", checkVisibility=False), {}, ("unpainted", "visibility")),
@@ -252,8 +254,9 @@ class El {
     for (let n = this; n && n.nodeType === 1; n = flat(n)) if (getComputedStyle(n).display === 'none') return box(null);
     return box(this._rect);
   }
-  get clientLeft(){ return 0; } get clientTop(){ return 0; }
-  get clientWidth(){ return this._rect ? this._rect.w : 0; } get clientHeight(){ return this._rect ? this._rect.h : 0; }
+  get clientLeft(){ return this._border || 0; } get clientTop(){ return this._border || 0; }
+  get offsetWidth(){ return (this._layout || this._rect || {w: 0}).w; } get offsetHeight(){ return (this._layout || this._rect || {h: 0}).h; }
+  get clientWidth(){ return this.offsetWidth - 2 * (this._border || 0); } get clientHeight(){ return this.offsetHeight - 2 * (this._border || 0); }
   checkVisibility(){
     if (getComputedStyle(this).visibility !== 'visible') return false;
     for (let n = this; n && n.nodeType === 1; n = flat(n)) {
@@ -377,6 +380,19 @@ keynoteBody.appendChild(v);
 const clip = new El('div', 'clip', {overflowX: 'hidden', overflowY: 'hidden'}, {x: 100, y: 100, w: 200, h: 225});
 keynoteBody.appendChild(clip); clip.appendChild(v);
 """, ("partial", "clipped"), {"visibleRect": {"x": 100, "y": 100, "w": 200, "h": 225}, "clippedBy": "div#clip"}),
+    # Astra r1 #2: under scale(.5) a 400x450 layout padding box (10 px border) is 200x225 on screen; the unscaled
+    # clientWidth/clientHeight/clientLeft read it as 400x450 at (105, 105), leaving the decoder nearly uncut.
+    ("scaled-clipping-ancestor-in-screen-px", """
+const clip = new El('div', 'clip', {overflowX: 'hidden', overflowY: 'hidden', transform: 'matrix(0.5, 0, 0, 0.5, 0, 0)'},
+                    {x: 95, y: 95, w: 210, h: 235});
+clip._layout = {w: 420, h: 470}; clip._border = 10;
+keynoteBody.appendChild(clip); clip.appendChild(v);
+""", ("partial", "clipped"), {"visibleRect": {"x": 100, "y": 100, "w": 200, "h": 225}, "clippedBy": "div#clip", "transform": None}),
+    ("rotated-ancestor-is-unreadable", """
+const clip = new El('div', 'clip', {overflowX: 'hidden', overflowY: 'hidden',
+                    transform: 'matrix(0.7071, 0.7071, -0.7071, 0.7071, 0, 0)'}, {x: 100, y: 100, w: 200, h: 225});
+keynoteBody.appendChild(clip); clip.appendChild(v);
+""", ("unreadable", "transform"), {"transform": "div#clip"}),
     # An absolutely positioned decoder escapes a non-positioned clipping ancestor (its containing block is #body).
     ("absolute-escapes-static-overflow", """
 const clip = new El('div', 'clip', {overflowX: 'hidden', overflowY: 'hidden'}, {x: 100, y: 100, w: 200, h: 225});

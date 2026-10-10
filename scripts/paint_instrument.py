@@ -68,6 +68,21 @@ PAINT_READ_FN_JS = r"""
     return paintSet(cs.transform) || paintSet(cs.perspective) || paintSet(cs.filter)
       || /transform|perspective|filter/.test(String(cs.willChange || ''));
   }
+  function paintSkewed(cs){
+    if (paintSet(cs.rotate)) return true;
+    var t = String(cs.transform || 'none');
+    if (t === 'none') return false;
+    var m = /^matrix\(([^)]*)\)$/.exec(t);
+    if (!m) return true;
+    var p = m[1].split(',').map(parseFloat);
+    return p.length !== 6 || !p.every(isFinite) || p[1] !== 0 || p[2] !== 0;
+  }
+  function paintClipBox(n){
+    if (typeof n.offsetWidth !== 'number' || typeof n.offsetHeight !== 'number') return null;
+    var b = n.getBoundingClientRect();
+    var sx = n.offsetWidth ? b.width / n.offsetWidth : 0, sy = n.offsetHeight ? b.height / n.offsetHeight : 0;
+    return {x: b.left + n.clientLeft * sx, y: b.top + n.clientTop * sy, w: n.clientWidth * sx, h: n.clientHeight * sy};
+  }
   function paintClips(n, cs){
     if (n === document.documentElement) return false;
     if (n === document.body && getComputedStyle(document.documentElement).overflowX === 'visible') return false;
@@ -83,7 +98,7 @@ PAINT_READ_FN_JS = r"""
       connected: v.isConnected === true, facade: !!v.__obedFacadeFor, suppressed: !!v.__obedSuppressed34,
       readyState: v.readyState, seeking: !!v.seeking, videoWidth: v.videoWidth, videoHeight: v.videoHeight,
       currentTime: v.currentTime, paused: v.paused, ended: v.ended,
-      checkVisibility: null, visibility: null, displayNone: null, opacity: null, hiding: null, effects: null,
+      checkVisibility: null, visibility: null, displayNone: null, opacity: null, hiding: null, effects: null, transform: null,
       rect: rect, visibleRect: null, clippedBy: null, parent: labelOf(v.parentNode), layer: layerOf(v)
     };
     if (!pv.connected) return pv;
@@ -108,13 +123,15 @@ PAINT_READ_FN_JS = r"""
       }
       var fx = paintEffectOf(cs);
       if (fx && pv.effects === null) pv.effects = labelOf(n) + ':' + fx;
+      if (pv.transform === null && paintSkewed(cs)) pv.transform = labelOf(n);
       if (n !== v) {
         var contains = mode === 'fixed' ? paintMakesBlock(cs)
           : mode === 'absolute' ? (cs.position !== 'static' || paintMakesBlock(cs)) : true;
         if (contains) {
           if (visible && paintClips(n, cs)) {
-            var b = n.getBoundingClientRect();
-            var next = paintMeet(visible, {x: b.left + n.clientLeft, y: b.top + n.clientTop, w: n.clientWidth, h: n.clientHeight});
+            var clipBox = paintClipBox(n);
+            if (!clipBox && pv.transform === null) pv.transform = labelOf(n);
+            var next = clipBox ? paintMeet(visible, clipBox) : null;
             if ((!next || next.w < visible.w || next.h < visible.h) && pv.clippedBy === null) pv.clippedBy = labelOf(n);
             visible = next;
           }
@@ -424,6 +441,8 @@ def painted_state(
         return UNREADABLE, "checkVisibility"
     if pv.get("effects"):
         return UNREADABLE, "effects"
+    if pv.get("transform"):
+        return UNREADABLE, "transform"
     if cover:
         return UNREADABLE, "cover"
     if pv.get("displayNone"):
