@@ -15,7 +15,6 @@ import hashlib
 import io
 import json
 import math
-import statistics
 import time
 import uuid
 import zlib
@@ -223,12 +222,11 @@ FREEZE_TRIGGER_MOTION_SLACK_FRAMES = 2  # poll callbacks between the runtime's f
 FREEZE_TRIGGER_DEPARTURE_PX = 1.0
 FREEZE_TRIGGER_CALIBRATED_LATENCY_MS = 4.8
 FREEZE_TRIGGER_NOMINAL_FRAME_MS = 1000.0 / 60.0
-# The callback the motion band is counted in is the median of the poll's rAF
-# intervals from the trigger on: the cadence AROUND the departure, so a slow
-# startup before it (keydown -> first poll, or an early stall) cannot widen the
-# band. Pre-trigger callbacks carry no timestamps, so a stall right before the
-# trigger is not credited: such a run reads INCONCLUSIVE, never PASS.
-FREEZE_TRIGGER_CADENCE_INTERVALS = 1 + 2 * FREEZE_TRIGGER_MOTION_SLACK_FRAMES
+# The poll records each callback's page clock from the keydown to the trigger
+# (`pollTimes`, at most this many -- the probe's POLL_TIMES_MAX); the motion
+# deadline is counted on those recorded callbacks, never on a cadence measured
+# elsewhere.
+FREEZE_POLL_TIMES_MAX = 256
 BRIDGE_EASE_IN_EASE_OUT = (0.42, 0.0, 0.58, 1.0)  # the core's EASE_IN_EASE_OUT (x1, y1, x2, y2)
 BRIDGE_LINEAR = (0.0, 0.0, 1.0, 1.0)
 
@@ -3465,6 +3463,58 @@ def _freeze_trigger_bounds(departure_latency_ms: float) -> dict[str, float]:
     }
 
 
+def _freeze_poll_times(
+    nc: dict, trigger_frames: object, advance_key_at: object, hold_started: object,
+) -> list[float] | None:
+    """The poll's recorded callback clocks: one per delivered frame from the keydown
+    to the trigger, strictly increasing inside [keydown, trigger], or `None`."""
+    times = nc.get("pollTimes")
+    key_at, hold_at = _finite(advance_key_at), _finite(hold_started)
+    if (
+        not isinstance(times, list) or isinstance(trigger_frames, bool) or not isinstance(trigger_frames, int)
+        or len(times) != trigger_frames or not 1 <= len(times) <= FREEZE_POLL_TIMES_MAX
+        or key_at is None or hold_at is None
+    ):
+        return None
+    values = [_finite(t) for t in times]
+    if any(v is None for v in values):
+        return None
+    if not (key_at <= values[0] and values[-1] <= hold_at and all(a < b for a, b in zip(values, values[1:]))):
+        return None
+    return values
+
+
+def _freeze_trigger_deadline(
+    poll_times: list[float] | None, marker_started: float | None, marker_frame: object,
+    departure_latency_ms: float,
+) -> dict | None:
+    """The last poll frame the departure may first be seen on: the first recorded
+    callback at or after the predicted departure (marker + L), plus one read-lag
+    callback and the motion slack. `None` unless the recorded callbacks bracket the
+    marker: the marker frame's callback is the first at or after its `started`, or,
+    for a marker frame past the trigger, no recorded callback reaches `started`."""
+    if (
+        poll_times is None or marker_started is None or isinstance(marker_frame, bool)
+        or not isinstance(marker_frame, int) or marker_frame < 1
+    ):
+        return None
+    if marker_frame > len(poll_times):
+        if poll_times[-1] >= marker_started:
+            return None
+    elif poll_times[marker_frame - 1] < marker_started or (
+        marker_frame >= 2 and poll_times[marker_frame - 2] >= marker_started
+    ):
+        return None
+    departs_at = marker_started + departure_latency_ms
+    departure_frame = next(
+        (i + 1 for i, t in enumerate(poll_times) if t >= departs_at), len(poll_times) + 1
+    )
+    return {
+        "departureFrame": departure_frame,
+        "deadlineFrame": departure_frame + 1 + FREEZE_TRIGGER_MOTION_SLACK_FRAMES,
+    }
+
+
 def _freeze_trigger_expectation(
     nc: dict, bridge: object, curve: tuple[float, float, float, float],
 ) -> dict | None:
@@ -3778,26 +3828,30 @@ def _score_freeze_control(
     # delay, plus agreement with the runtime's OWN fresh motion-start marker to
     # within a couple of callbacks. The frame count stays as secondary evidence.
     # Every bound is shifted by the injected bridge's own departure latency under
-    # its curve (an eased overlay needs ~61 ms to move 1 px), and the overlay's
-    # displacement at the trigger may not exceed the curve's at the band's end.
+    # its curve (an eased overlay needs ~61 ms to move 1 px). The departure must be
+    # seen by a deadline counted on the poll's RECORDED callbacks after marker + L,
+    # and the overlay's displacement at the trigger may not exceed the curve's at
+    # that deadline (an unrecorded deadline callback counts one nominal frame).
     motion_started_frame = nc.get("motionStartedFrame")
     expected = _freeze_trigger_expectation(nc, bridge, bridge_curve)
-    cadence_ts = raf_ts_from_trigger[: FREEZE_TRIGGER_CADENCE_INTERVALS + 1]
-    trigger_callback_ms = (
-        statistics.median(b - a for a, b in zip(cadence_ts, cadence_ts[1:]))
-        if hold_started is not None and len(cadence_ts) == FREEZE_TRIGGER_CADENCE_INTERVALS + 1
-        else None
-    )
     marker_started = _finite(motion_marker.get("started"))
     marker_to_trigger_ms = hold_started - marker_started if marker_started is not None else None
-    motion_band_ms = (
-        expected["departureLatencyMs"] + (1 + FREEZE_TRIGGER_MOTION_SLACK_FRAMES) * trigger_callback_ms
-        if expected is not None and trigger_callback_ms is not None
+    poll_times = _freeze_poll_times(nc, trigger_frames, advance_key_at, hold_started)
+    deadline = (
+        _freeze_trigger_deadline(poll_times, marker_started, motion_started_frame, expected["departureLatencyMs"])
+        if expected is not None
         else None
     )
+    deadline_at = None
+    if deadline is not None:
+        late_frames = deadline["deadlineFrame"] - len(poll_times)
+        deadline_at = (
+            poll_times[deadline["deadlineFrame"] - 1] if late_frames <= 0
+            else hold_started + late_frames * FREEZE_TRIGGER_NOMINAL_FRAME_MS
+        )
     trigger_displacement_cap_px = (
-        _bridge_displacement_px(bridge, expected["scale"], bridge_curve, motion_band_ms)
-        if motion_band_ms is not None
+        _bridge_displacement_px(bridge, expected["scale"], bridge_curve, deadline_at - marker_started)
+        if deadline_at is not None
         else None
     )
     moved_from = _rect_or_none(nc.get("movedFromRect"))
@@ -3826,9 +3880,8 @@ def _score_freeze_control(
         and -FREEZE_TRIGGER_MOTION_SLACK_FRAMES
         <= trigger_frames - motion_started_frame
         <= expected["maxMotionLeadFrames"]
-        and motion_band_ms is not None
-        and marker_to_trigger_ms is not None
-        and -FREEZE_TRIGGER_MOTION_SLACK_FRAMES * trigger_callback_ms <= marker_to_trigger_ms <= motion_band_ms
+        and deadline is not None
+        and trigger_frames <= deadline["deadlineFrame"]
         and trigger_displacement_px is not None
         and trigger_displacement_cap_px is not None
         and trigger_displacement_px <= trigger_displacement_cap_px
@@ -4037,9 +4090,10 @@ def _score_freeze_control(
             "motionStartedAt": nc.get("motionStartedAt"),
             "bridgeCurve": list(bridge_curve),
             "triggerExpectation": expected,
-            "triggerCallbackMs": trigger_callback_ms,
+            "pollTimes": poll_times,
             "markerToTriggerMs": marker_to_trigger_ms,
-            "motionBandMs": motion_band_ms,
+            "triggerDeadline": deadline,
+            "triggerDeadlineAt": deadline_at,
             "triggerDisplacementPx": trigger_displacement_px,
             "triggerDisplacementCapPx": trigger_displacement_cap_px,
             "pollMaxGapMs": poll_max_gap_ms,

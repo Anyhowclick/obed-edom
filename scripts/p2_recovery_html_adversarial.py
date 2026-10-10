@@ -938,6 +938,7 @@ NULL_CONTROL_JS = r"""
   var P = window.__OBED_P2_PRESERVE__;
   var dpr = window.devicePixelRatio || 1;
   var LEFT_FRAC = 0.4;
+  var POLL_TIMES_MAX = 256;
 
   var st = {
     arm: 'A',
@@ -967,6 +968,7 @@ NULL_CONTROL_JS = r"""
     holdStartedAt: null,
     coverPaintedAt: null,
     pollMaxGapMs: 0,
+    pollTimes: [],
     motionStartedAt: null,
     motionStartedFrame: null,
     motionStartedMarker: null,
@@ -1240,6 +1242,7 @@ NULL_CONTROL_JS = r"""
     if (st.advanceKeyAt != null) return;
     st.advanceKeyAt = e.timeStamp;
     st.framesAfterAdvance = 0;
+    st.pollTimes = [];
   }
 
   function stageRectNow() {
@@ -1337,6 +1340,7 @@ NULL_CONTROL_JS = r"""
         if (since != null && (pollAt - since) > st.pollMaxGapMs) st.pollMaxGapMs = pollAt - since;
         lastPollAt = pollAt;
         st.framesAfterAdvance += 1;
+        if (st.pollTimes.length < POLL_TIMES_MAX) st.pollTimes.push(pollAt);
         // The runtime's own move-start marker, only counted when it is FRESH
         // (stamped at or after the advance keydown): keepThroughBridge can carry
         // an older generation's marker. The COMPLETE marker is retained so the
@@ -1392,7 +1396,7 @@ NULL_CONTROL_JS = r"""
         ownerDisconnectedInWindow: st.ownerDisconnectedInWindow,
         firedVia: st.firedVia,
         holdStartedAt: st.holdStartedAt, coverPaintedAt: st.coverPaintedAt,
-        pollMaxGapMs: st.pollMaxGapMs,
+        pollMaxGapMs: st.pollMaxGapMs, pollTimes: st.pollTimes,
         motionStartedAt: st.motionStartedAt, motionStartedFrame: st.motionStartedFrame,
         motionStartedMarker: st.motionStartedMarker,
         releaseAt: st.releaseAt,
