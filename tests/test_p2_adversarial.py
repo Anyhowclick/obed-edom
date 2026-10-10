@@ -2776,7 +2776,7 @@ def test_freeze_control_trigger_within_the_motion_slack_still_passes():
 # The real fixture is linear-era; these snapshots move only the trigger timing
 # (keydown clock, marker instant, frame counts, departure rect) to real values.
 P2_BRIDGE_SCALE = (
-    _FIXTURE_34["b"]["nullControl"]["movedFromRect"]["w"] / BRIDGE_34["srcRect"]["w"]
+    _FIXTURE_34["b"]["nullControl"]["movedFromRect"]["w"] / BRIDGE_34["src"]["rect"]["w"]
 )
 R3_EASED_DEPARTURE = {"x": 0.334839, "y": -0.31604, "w": 1.234375, "h": 0.59375}
 MAIN_LINEAR_DEPARTURE = {"x": 0.600464, "y": -0.50354, "w": 1.890625, "h": 0.78125}
@@ -2903,10 +2903,13 @@ _LINEAR_ERA = dict(
     pytest.param({}, _EASED, {**BRIDGE_34, "atScene": 6}, _BOTH, id="bridge-of-another-boundary"),
     pytest.param({}, _EASED, {k: v for k, v in BRIDGE_34.items() if k != "durationSeconds"}, _BOTH,
                  id="bridge-without-duration"),
-    pytest.param({}, _EASED, {**BRIDGE_34, "srcRect": {**BRIDGE_34["srcRect"], "w": None}}, _BOTH,
+    pytest.param({}, _EASED, {**BRIDGE_34, "src": {**BRIDGE_34["src"], "rect": {**BRIDGE_34["src"]["rect"], "w": None}}}, _BOTH,
                  id="bridge-src-partial"),
-    pytest.param({}, _EASED, {**BRIDGE_34, "rect": dict(BRIDGE_34["srcRect"])}, _BOTH,
-                 id="bridge-without-travel"),
+    pytest.param({}, _EASED, {**BRIDGE_34, "dst": {**BRIDGE_34["dst"], "rect": dict(BRIDGE_34["src"]["rect"])}},
+                 _BOTH, id="bridge-without-travel"),
+    pytest.param({}, _EASED, {**{k: v for k, v in BRIDGE_34.items() if k not in ("src", "dst")},
+                              "srcRect": BRIDGE_34["src"]["rect"], "rect": BRIDGE_34["dst"]["rect"]},
+                 _BOTH, id="bridge-schema-1-shape"),
 ])
 def test_freeze_control_trigger_bounds_follow_the_bridge_curve(timing, curve, bridge, failed):
     """Default timing is r3 `p2--wait-profilefast` (eased core 06789fbd): marker

@@ -3416,11 +3416,16 @@ def _bridge_progress(fraction: float, curve: tuple[float, float, float, float]) 
     return _bezier_axis(_bezier_param(fraction, x1, x2), y1, y2)
 
 
+def _bridge_side_rect(bridge: dict, side: str) -> dict | None:
+    entry = bridge.get(side)
+    return _rect_or_none(entry.get("rect")) if isinstance(entry, dict) else None
+
+
 def _bridge_axis_spans_px(bridge: object, scale: float) -> dict[str, float] | None:
-    """Screen-px travel of each axis of a bridge's srcRect -> rect at `scale`, or `None`."""
+    """Screen-px travel of each axis of a bridge's src.rect -> dst.rect at `scale`, or `None`."""
     if not isinstance(bridge, dict):
         return None
-    src, dest = _rect_or_none(bridge.get("srcRect")), _rect_or_none(bridge.get("rect"))
+    src, dest = _bridge_side_rect(bridge, "src"), _bridge_side_rect(bridge, "dst")
     if src is None or dest is None:
         return None
     return {k: abs(dest[k] - src[k]) * scale for k in ("x", "y", "w", "h")}
@@ -3482,7 +3487,7 @@ def _freeze_trigger_expectation(
     ):
         return None
     moved_from = _rect_or_none(nc.get("movedFromRect"))
-    src = _rect_or_none(bridge.get("srcRect"))
+    src = _bridge_side_rect(bridge, "src")
     if moved_from is None or src is None or not src["w"] > 0:
         return None
     scale = moved_from["w"] / src["w"]
