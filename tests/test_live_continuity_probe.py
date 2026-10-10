@@ -1324,8 +1324,6 @@ class TestOverallStatusVisible:
     @pytest.mark.parametrize(("mutate", "reason"), [
         pytest.param(lambda r: r["visible"]["V"]["slides"][2].update(verdict=False), "visible pass V slide 3",
                      id="V-with-one-dead-slide"),
-        pytest.param(lambda r: r["visible"]["V"]["slides"][1].update(verdict=None, status="inconclusive"), "inconclusive",
-                     id="V-with-one-inconclusive-slide-is-never-a-pass"),
         pytest.param(lambda r: r["visible"]["V"]["continuity"].update(mode="unsupported"), "visible pass V continuity.mode",
                      id="V-in-the-wrong-continuity-mode-even-if-every-slide-is-live"),
         pytest.param(lambda r: r["visible"]["Voff"]["continuity"].update(mode="qualified"), "visible pass Voff continuity.mode",
@@ -1337,8 +1335,6 @@ class TestOverallStatusVisible:
         # proves nothing.
         pytest.param(lambda r: r["visible"]["Voff"]["slides"][0].update(verdict=False), "always-red",
                      id="Voff-red-on-slide-one-the-instrument-is-always-red"),
-        pytest.param(lambda r: r["visible"]["Voff"]["slides"][1].update(verdict=None, status="inconclusive"), "blind",
-                     id="Voff-inconclusive-at-the-boundary-slide-is-not-the-required-red"),
         *(pytest.param(lambda r, n=name: r["visible"].pop(n), f"visible pass {name} missing",
                        id=f"missing-{name}-pass-fails-with-its-own-reason") for name in ("V", "Voff")),
         pytest.param(lambda r: r["groundTruth"].pop("boundaryPlayerIndex"), "expected-red slide is unknown",
@@ -1352,6 +1348,20 @@ class TestOverallStatusVisible:
         status, reasons = probe.overall_status(result)
         assert status == "fail"
         assert any(reason in r for r in reasons)
+
+    # Astra r7 general rule: an unreadable slide is inconclusive, never a pass and never overwritten by a fail.
+    @pytest.mark.parametrize(("mutate", "reason"), [
+        pytest.param(lambda r: r["visible"]["V"]["slides"][1].update(verdict=None, status="inconclusive"),
+                     "visible pass V slide 2 is inconclusive", id="V-with-one-inconclusive-slide-is-never-a-pass"),
+        pytest.param(lambda r: r["visible"]["Voff"]["slides"][1].update(verdict=None, status="inconclusive"), "blind",
+                     id="Voff-inconclusive-at-the-boundary-slide-is-not-the-required-red"),
+    ])
+    def test_an_inconclusive_visible_slide_is_inconclusive(self, mutate: Any, reason: str) -> None:
+        result = _base_result()
+        mutate(result)
+        status, reasons = probe.overall_status(result)
+        assert status == "inconclusive"
+        assert any(reason in r for r in reasons), reasons
 
     def test_a_missing_visible_block_fails_both_passes(self) -> None:
         result = _base_result()
@@ -2141,15 +2151,15 @@ class TestVisibleExpectationModel:
         assert status == "fail"
         assert any("no live-expected rect that read live" in r for r in reasons)
 
-    def test_a_pass_that_never_read_its_dead_rect_dead_is_blind_and_fails(self) -> None:
+    def test_a_pass_that_never_read_its_dead_rect_dead_is_blind_and_never_passes(self) -> None:
         """Slide 2's dead expectation is the only proof the pass can see a frozen
-        movie at all; an inconclusive slide 2 does not supply it."""
+        movie at all; an inconclusive slide 2 does not supply it (inconclusive, r7)."""
         result = self._result()
         result["visible"]["V"]["slides"][1] = {
             "playerIndex": 1, "originalOrdinal": 2, "verdict": None, "status": "inconclusive", "perRect": [],
         }
         status, reasons = probe.overall_status(result)
-        assert status == "fail"
+        assert status == "inconclusive"
         assert any("blind to a frozen movie" in r for r in reasons)
 
     def test_an_inconclusive_slide_never_counts_as_meeting_an_expectation(self) -> None:
