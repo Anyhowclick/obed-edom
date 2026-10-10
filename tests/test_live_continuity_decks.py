@@ -149,6 +149,61 @@ def test_minimal_sub_deck_parity_with_real_export(slice_):
     assert dump(real) == dump(fixture)
 
 
+def _translucent_minimal(tmp_path: Path, where: str) -> Path:
+    """Minimal S4 -> S5 (one instance each side, a clean pin) with both instances at opacity 0.5
+    in one place the export exposes it: the movie node's own layers, or the draw tree."""
+    root = tmp_path / "minimal"
+    shutil.copytree(MINIMAL_ROOT, root)
+    for uuid in MINIMAL_UUIDS[:2]:
+        path = root / "assets" / uuid / f"{uuid}.json"
+        data = json.loads(path.read_text())
+        [node] = _movie_nodes(data["events"])
+        base = node["baseLayer"]
+        if where == "movie layer":
+            base["initialState"]["opacity"] = 0.5
+        elif where == "video layer":
+            next(layer for layer in base["layers"] if layer.get("isVideoLayer"))["initialState"]["opacity"] = 0.5
+        else:
+            slots = [
+                slot
+                for event in data["events"]
+                for slot in event["baseLayer"]["layers"]
+                if slot["layers"] and slot["layers"][0].get("objectID") == node["objectID"]
+            ]
+            assert slots
+            for slot in slots:
+                (slot["layers"][0] if where == "draw slot object" else slot)["initialState"]["opacity"] = 0.5
+        path.write_text(json.dumps(data))
+    return root
+
+
+def _movie_nodes(value) -> list[dict]:
+    if isinstance(value, dict):
+        own = [value] if "movie" in value and "baseLayer" in value else []
+        return own + [node for child in value.values() for node in _movie_nodes(child)]
+    if isinstance(value, list):
+        return [node for child in value for node in _movie_nodes(child)]
+    return []
+
+
+@pytest.mark.parametrize("where", ["movie layer", "video layer", "draw slot object", "draw slot wrapper"])
+@pytest.mark.parametrize("gl_replay", [False, True])
+def test_r9_a_single_translucent_pin_refuses_the_boundary(tmp_path, where, gl_replay):
+    """S2 review r2 #2: with one instance each side R1b has no choice to judge, yet the pin's
+    keep-at-slot hold draws the decoder at opacity 1 outside its authored layers."""
+    plan = derive_plan(
+        _translucent_minimal(tmp_path, where), _slides(MINIMAL_UUIDS[:2]), resolver=_resolver, gl_replay=gl_replay
+    )
+    assert isinstance(plan, ContinuityPlan)
+    [pin] = plan.boundaries[0].movies
+    assert (pin.action, pin.code, pin.gl_replay) == ("pin", "R9", None)
+    assert pin.refusal == (
+        "'untitled.mov' is not fully opaque on the source slide of player index 0 -> 1; "
+        "a carried decoder is drawn at opacity 1"
+    )
+    assert [r["code"] for r in plan.refusals] == ["R9"]
+
+
 # --- looping movies (keynote_live_continuity_loopmode plan sections 2 and 4) ---------------
 #
 # `minimal_alpha_dsk_loop/` is the owner's Repeat -> Loop export of Minimal Alpha_DSK

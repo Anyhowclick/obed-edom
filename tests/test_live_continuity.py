@@ -3160,6 +3160,138 @@ def test_r8_a_trim_mismatch_refuses_the_boundary(transform):
     assert _refusal_codes(plan) == [(1, "overlap"), (3, "R8")]
 
 
+# --- R9: a carried instance must be fully opaque (S2 review r2 #2) ---------------------------
+#
+# Every carry path (bridge reparent, settled hold, pin keep-at-slot, the glReplay hand-off) sets
+# the decoder's `opacity` to 1 outside its authored layers, and the runtime plan carries no
+# opacity at all. R1b only compares opacities when there is a pairing CHOICE, so a single
+# translucent pair, or repeated instances that all agree on a translucent opacity, used to carry.
+# The export exposes opacity on the movie node's own layers (movie layer, video sub-layer, the
+# poster's `singleTextureOpacity`) and on the slide's draw tree (the draw slot wrapper and the
+# object layer it holds); all of them must read exactly 1.
+
+OPACITY_SOURCES = ["movie layer", "video layer", "draw slot object", "draw slot wrapper"]
+
+
+def _set_opacity(object_id: str, value, where: str = "movie layer"):
+    def apply(data):
+        data = copy.deepcopy(data)
+        for node in _find_movie_nodes(data["events"]):
+            if node.get("objectID") != object_id:
+                continue
+            base = node["baseLayer"]
+            if where == "movie layer":
+                base["initialState"]["opacity"] = value
+            elif where == "video layer":
+                next(layer for layer in base["layers"] if layer.get("isVideoLayer"))["initialState"]["opacity"] = value
+        if where.startswith("draw slot"):
+            drawn = _events_drawing(data, object_id)
+            assert drawn, f"{object_id} has no draw slot to mutate"
+            for index in drawn:
+                for slot in _draw_slots(data, index):
+                    if len(slot["layers"]) == 1 and slot["layers"][0].get("objectID") == object_id:
+                        target = slot["layers"][0] if where == "draw slot object" else slot
+                        target.setdefault("initialState", {})["opacity"] = value
+        return data
+
+    return apply
+
+
+def _with_opacities(*changes) -> Path:
+    """A fixture copy with each (slide uuid, P2_OBJECT_IDS key, value, where) applied in turn."""
+    root = _copy_fixture_tree()
+    for uuid, key, value, where in changes:
+        _rewrite_slide_json(root, uuid, _set_opacity(P2_OBJECT_IDS[key], value, where))
+    return root
+
+
+@pytest.mark.parametrize("where", OPACITY_SOURCES)
+def test_r9_a_single_translucent_bridge_refuses_the_boundary(where):
+    """Slide 3 -> 4 is one instance on each side, so R1b never looks at it."""
+    root = _with_opacities((SLIDE3, "slide3", 0.5, where), (SLIDE4, "slide4", 0.5, where))
+    plan = _plan(root)
+    assert isinstance(plan, ContinuityPlan)
+    [bridge] = plan.boundaries[2].movies
+    assert (bridge.action, bridge.code, bridge.src_object_id, bridge.dst_object_id) == (
+        "bridge", "R9", P2_OBJECT_IDS["slide3"], P2_OBJECT_IDS["slide4"],
+    )
+    assert "is not fully opaque" in bridge.refusal
+    assert _refusal_codes(plan) == [(1, "overlap"), (3, "R9")]
+
+
+@pytest.mark.parametrize("where", OPACITY_SOURCES)
+@pytest.mark.parametrize("uuid, key, side", [(SLIDE3, "slide3", "source"), (SLIDE4, "slide4", "destination")])
+def test_r9_an_opacity_change_across_the_move_refuses_the_boundary(uuid, key, side, where):
+    plan = _plan(_with_opacities((uuid, key, 0.5, where)))
+    assert isinstance(plan, ContinuityPlan)
+    [bridge] = plan.boundaries[2].movies
+    assert (bridge.action, bridge.code) == ("bridge", "R9")
+    assert bridge.refusal == (
+        f"'untitled.mov' is not fully opaque on the {side} slide of player index 2 -> 3; "
+        "a carried decoder is drawn at opacity 1"
+    )
+
+
+@pytest.mark.parametrize("gl_replay", [False, True])
+def test_r9_repeated_instances_that_agree_on_a_translucent_opacity_refuse_the_pin_and_gl_replay(gl_replay):
+    """All three slide 1 -> 2 candidates at 0.5: R1b sees no difference and pairs by distance.
+    The pin is refused before its overlap is considered, so glReplay (which hands off to the
+    same opacity-1 hold) is not derived either."""
+    root = _with_opacities(
+        (SLIDE1, "slide1", 0.5, "movie layer"),
+        (SLIDE1, "slide1_small", 0.5, "movie layer"),
+        (SLIDE2, "slide2", 0.5, "movie layer"),
+    )
+    plan = derive_plan(root, SLIDES, resolver=_resolver, gl_replay=gl_replay)
+    assert isinstance(plan, ContinuityPlan)
+    [pin] = plan.boundaries[0].movies
+    assert (pin.action, pin.code, pin.src_object_id, pin.dst_object_id) == (
+        "pin", "R9", P2_OBJECT_IDS["slide1"], P2_OBJECT_IDS["slide2"],
+    )
+    assert pin.gl_replay is None
+    assert pin.gl_replay_reason == (pin.refusal if gl_replay else None)
+    assert _refusal_codes(plan) == [(1, "R9")]
+
+
+@pytest.mark.parametrize("value", [0.999, 0, True, "1", None], ids=["near-one", "zero", "bool", "string", "null"])
+def test_r9_only_an_exact_numeric_one_is_opaque(value):
+    plan = _plan(_with_opacities((SLIDE4, "slide4", value, "movie layer")))
+    assert isinstance(plan, ContinuityPlan)
+    assert _refusal_codes(plan) == [(1, "overlap"), (3, "R9")]
+
+
+@pytest.mark.parametrize("layer", ["movie layer", "video layer"])
+def test_r9_a_movie_layer_that_exports_no_opacity_is_not_assumed_opaque(layer):
+    def drop(node):
+        if node.get("objectID") == P2_OBJECT_IDS["slide4"]:
+            base = node["baseLayer"]
+            target = base if layer == "movie layer" else next(l for l in base["layers"] if l.get("isVideoLayer"))
+            del target["initialState"]["opacity"]
+
+    plan = _plan(_mutate_slide(SLIDE4, lambda data: _map_movie_nodes(data, drop)))
+    assert isinstance(plan, ContinuityPlan)
+    assert _refusal_codes(plan) == [(1, "overlap"), (3, "R9")]
+
+
+@pytest.mark.parametrize("gl_replay", [False, True])
+def test_r9_an_explicit_unit_opacity_everywhere_still_carries(gl_replay):
+    """Guard: writing opacity 1.0 into every source the rule reads -- including the draw-tree
+    keys the trimmed fixture omits -- changes nothing, glReplay included."""
+    changes = [
+        (uuid, key, 1.0, where)
+        for uuid, key in (
+            (SLIDE1, "slide1"), (SLIDE1, "slide1_small"), (SLIDE2, "slide2"), (SLIDE3, "slide3"), (SLIDE4, "slide4"),
+        )
+        for where in OPACITY_SOURCES
+    ]
+    plan = derive_plan(_with_opacities(*changes), SLIDES, resolver=_resolver, gl_replay=gl_replay)
+    baseline = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=gl_replay)
+    assert isinstance(plan, ContinuityPlan)
+    assert plan.as_dict() == baseline.as_dict()
+    assert [m.action for b in plan.boundaries for m in b.movies] == ["pin", "restart", "bridge", "restart"]
+    assert (plan.boundaries[0].movies[0].gl_replay is not None) is gl_replay
+
+
 def _parsed_slide(player_index: int, uuid: str, root: Path = FIXTURE_ROOT):
     from obed_edom.live_continuity import _Slide, _slide_movie_instances
 

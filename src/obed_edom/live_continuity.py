@@ -708,7 +708,7 @@ class MovieContinuity:
     loop: bool = False
     """The source instance's loop setting, which a carried decoder keeps."""
     code: str | None = None
-    """The refusal's code (`overlap`, `R1`, `R1b`, `R2`, `R4`, `R7`, `R8`) when `refusal` is set."""
+    """The refusal's code (`overlap`, `R1`, `R1b`, `R2`, `R4`, `R7`, `R8`, `R9`) when `refusal` is set."""
 
     def as_dict(self) -> dict[str, Any]:
         result = {
@@ -1267,6 +1267,57 @@ def _movie_opacity(node: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def _unit_opacity(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and value == 1
+
+
+def _children(layer: dict[str, Any]) -> list[Any]:
+    children = layer.get("layers")
+    return children if isinstance(children, list) else []
+
+
+def _subtree_opacities(layer: Any) -> list[Any]:
+    if not isinstance(layer, dict):
+        return []
+    found = [
+        owner[key]
+        for owner, key in (
+            (layer.get("initialState"), "opacity"), (layer.get("texturedRectangle"), "singleTextureOpacity"),
+        )
+        if isinstance(owner, dict) and key in owner
+    ]
+    return found + [value for child in _children(layer) for value in _subtree_opacities(child)]
+
+
+def _drawn_opacities(layer: Any, object_id: str) -> list[Any] | None:
+    """The opacities the draw tree exports on the path from `layer` down to the layer drawing
+    `object_id`, or None when it is not drawn below `layer`."""
+    if not isinstance(layer, dict):
+        return None
+    state = layer.get("initialState")
+    own = [state["opacity"]] if isinstance(state, dict) and "opacity" in state else []
+    if layer.get("objectID") == object_id:
+        return own
+    for child in _children(layer):
+        below = _drawn_opacities(child, object_id)
+        if below is not None:
+            return own + below
+    return None
+
+
+def _opaque(node: dict[str, Any], object_id: str, events: list[Any]) -> bool:
+    """Every opacity the export gives for the instance is exactly 1: each layer of the movie node
+    (the movie and video layers must carry one) and its draw-tree path on every event."""
+    base_layer = node["baseLayer"]
+    if any("opacity" not in layer["initialState"] for layer in (base_layer, *_find_video_sublayers(base_layer))):
+        return False
+    values = _subtree_opacities(base_layer)
+    for event in events:
+        if isinstance(event, dict):
+            values += _drawn_opacities(event.get("baseLayer"), object_id) or []
+    return all(_unit_opacity(value) for value in values)
+
+
 @dataclass(frozen=True)
 class _MovieInstance:
     rect: Rect
@@ -1275,6 +1326,7 @@ class _MovieInstance:
     opacity: tuple[Any, ...] = ()
     kind: str = "video"
     trim: tuple[Any, ...] = ()
+    opaque: bool = True
 
 
 def _loops(movie: dict[str, Any], slide_name: str) -> bool:
@@ -1305,7 +1357,7 @@ def _slide_movie_instances(
         instances.setdefault(_normalize_asset_key(assets_table, asset_id), []).append(
             _MovieInstance(
                 rect, object_id, _loops(movie, slide_name), _movie_opacity(node),
-                _movie_kind(movie, url), _movie_trim(movie, url),
+                _movie_kind(movie, url), _movie_trim(movie, url), _opaque(node, object_id, events),
             )
         )
     for found in instances.values():
@@ -1545,6 +1597,11 @@ def _carry_refusal(
             return "R7", f"'{asset}' at {desc} is a {instance.kind} movie, which the player draws without a <video>"
     if src.trim != dst.trim:
         return "R8", f"'{asset}' is trimmed differently on each side of {desc}"
+    for side, instance in (("source", src), ("destination", dst)):
+        if not instance.opaque:
+            return "R9", (
+                f"'{asset}' is not fully opaque on the {side} slide of {desc}; a carried decoder is drawn at opacity 1"
+            )
     built_out, out_unattributed = _build_targets(source.events, "buildOut")
     built_in, in_unattributed = _build_targets(destination.events, "buildIn")
     if src.object_id in built_out or dst.object_id in built_in:
