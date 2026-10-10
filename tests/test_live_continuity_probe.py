@@ -308,14 +308,15 @@ class TestClockReset:
 
 
 class TestNoCrossing:
-    def test_asset_never_crosses_boundary_fails(self) -> None:
+    def test_asset_never_crosses_boundary_is_inconclusive(self) -> None:
+        """Astra r8 #3: an unobserved crossing is no evidence of a broken carry."""
         samples = [
             sample(0.0, 0.0, video(id=1, el_id=1, t=0.0, scene=0.0, current_time=0.0)),
             sample(16.0, 0.0, video(id=1, el_id=1, t=16.0, scene=0.0, current_time=0.016)),
         ]
         verdict = probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
-        assert verdict["verdict"] is False
-        assert verdict["reason"] == "boundary crossing not observed in samples"
+        assert verdict["verdict"] is None
+        assert verdict["reason"] == "inconclusive: boundary crossing not observed in samples"
 
     def test_never_decoded_is_inconclusive_not_pass_or_fail(self) -> None:
         samples = [
@@ -4318,11 +4319,9 @@ class TestAutoOverallStatus:
         assert status == "fail" and any("visible pass Vgl missing" in r for r in reasons)
 
     @pytest.mark.parametrize("mutate", [
-        lambda s: s["perRect"][0]["oracles"]["inpage"].update(verdict=None),
         lambda s: s["perRect"][0]["oracles"]["inpage"]["controls"]["pausedDecoder"].update(verdict=True),
         lambda s: s["perRect"][0]["oracles"].update(inpage=None),
         lambda s: s["perRect"][0]["oracles"]["screenshot"].update(verdict=False),
-        lambda s: s["perRect"][0].update(occlusion={"status": "unavailable"}),
         lambda s: s["instanceCheck"].update(painting=[{"authored": dict(BIG_INSTANCE)}]),
         lambda s: s["perRect"][0].update(label="other#1"),
     ])
@@ -4331,6 +4330,26 @@ class TestAutoOverallStatus:
         mutate(result["visible"]["Vgl"]["slides"][1])
         status, reasons = probe.overall_status(result)
         assert status == "fail" and any("Vgl armed slide" in r for r in reasons)
+
+    @pytest.mark.parametrize("mutate", [
+        pytest.param(lambda r: None, id="complete-control"),
+        pytest.param(lambda r: r["arms"]["A"]["armed1to2"].update(verdict=None), id="armed1to2-unknown"),
+        pytest.param(lambda r: r["arms"]["C"]["armed1to2"].update(verdict=None), id="c-armed1to2-unknown"),
+        pytest.param(lambda r: r["attach"]["refused1to2"].update(verdict=None), id="refused1to2-unknown"),
+        pytest.param(lambda r: r["visible"]["Vgl"]["slides"][1].update(verdict=None), id="vgl-armed-slide-unknown"),
+        pytest.param(lambda r: r["visible"]["Vgl"]["slides"][0].update(verdict=None), id="vgl-slide-unknown"),
+        pytest.param(lambda r: r["visible"]["Vgl"]["slides"][1]["perRect"][0]["oracles"]["inpage"].update(verdict=None),
+                     id="vgl-inpage-unknown"),
+        pytest.param(lambda r: r["visible"]["Vgl"]["slides"][1]["perRect"][0].update(occlusion={"status": "unavailable"}),
+                     id="vgl-mask-unavailable"),
+        pytest.param(lambda r: r["visible"]["Vgl"]["slides"][1]["instanceCheck"].update(painting=None), id="vgl-painting-unread"),
+    ])
+    def test_an_unknown_positive_or_vgl_verdict_is_inconclusive_never_fail(self, mutate: Any) -> None:
+        """Astra r8 #2: every applicable positive verdict and every Vgl unknown is collected before
+        the behavioural comparisons; the complete auto record keeps its pass."""
+        result = _auto_result()
+        mutate(result)
+        assert probe.overall_status(result)[0] == ("pass" if result == _auto_result() else "inconclusive")
 
     def test_a_red_hand_back_fails_and_an_unknown_one_is_inconclusive(self) -> None:
         result = _auto_result()
@@ -5256,7 +5275,6 @@ class TestForcedFailScoring:
         {"g_handback": _forced_after("glError")},
         {"g_handback": {"status": "inconclusive"}},
         {"refusal": {"verdict": False}},
-        {"parity": {"verdict": None}},
         {"parity": {"verdict": False}},
         {"g_pass": _forced_pass([True, False, True, True])},
         {"g_pass": dict(_forced_pass([True] * 4), continuity={"mode": "qualified", "glReplay": {"mode": "off"}})},
@@ -5269,6 +5287,74 @@ class TestForcedFailScoring:
     ])
     def test_every_deviation_is_forced_fail(self, override: dict[str, Any]) -> None:
         assert self._score(**override)["status"] == "forced-fail"
+
+
+def _live_rect(met: Any, inpage: Any) -> Any:
+    return probe.combine_rect_oracles({"expect": probe.LIVE, "verdict": met, "label": "m#1"}, inpage)["verdict"]
+
+
+def _visible_pass_verdict(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, verdicts: list[Any]) -> Any:
+    class Host:
+        output = {"continuity": {"mode": "qualified"}}
+
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+        def execute(self, command: str) -> None:
+            pass
+
+        def _require_transport(self) -> Any:
+            return argparse.Namespace(evaluate=lambda expression: True)
+
+    monkeypatch.setattr(probe, "LiveOutputHost", Host)
+    monkeypatch.setattr(probe, "force_viewport", lambda *a: None)
+    monkeypatch.setattr(probe, "wait_for_decode", lambda *a: True)
+    monkeypatch.setattr(probe, "CLICK_DELAY_S", 0.0)
+    monkeypatch.setattr(probe, "run_visible_slides", lambda *a, **k: [{"verdict": v} for v in verdicts])
+    monkeypatch.setattr(probe, "visible_stage_summary", lambda *a: {})
+    monkeypatch.setattr(probe, "score_stage_fit", lambda *a: {"verdict": True})
+    return probe.run_visible_pass("V", Path("x"), [], synthetic_plan(), (64, 32), {}, tmp_path)["verdict"]
+
+
+class TestOracleAndForcedUnknowns:
+    INPAGE_UNKNOWN = {"verdict": None, "status": "inconclusive", "reason": "mask"}
+
+    @staticmethod
+    def _forced(**overrides: Any) -> Any:
+        return TestForcedFailScoring()._score(**overrides)["status"]
+
+    # Astra r8 #4: an applicable unknown survives every Boolean reduction; the complete records and the
+    # legitimate not-applicable in-page oracle keep their outcomes.
+    @pytest.mark.parametrize(("build", "expected"), [
+        pytest.param(lambda mp, tmp: _live_rect(False, {"verdict": False, "status": "dead"}), False, id="rect-control-both-dead"),
+        pytest.param(lambda mp, tmp: _live_rect(False, None), False, id="rect-inpage-absent-not-applicable"),
+        pytest.param(lambda mp, tmp: _live_rect(False, {"verdict": None, "status": "n/a"}), False, id="rect-inpage-n/a"),
+        pytest.param(lambda mp, tmp: _live_rect(False, TestOracleAndForcedUnknowns.INPAGE_UNKNOWN), None,
+                     id="rect-screenshot-false-inpage-unknown"),
+        pytest.param(lambda mp, tmp: TestOracleAndForcedUnknowns._forced(), "forced-ok", id="forced-control"),
+        pytest.param(lambda mp, tmp: TestOracleAndForcedUnknowns._forced(parity={"verdict": None}), "inconclusive",
+                     id="forced-parity-unknown"),
+        pytest.param(lambda mp, tmp: TestOracleAndForcedUnknowns._forced(refusal={"verdict": None}), "inconclusive",
+                     id="forced-refusal-unknown"),
+        pytest.param(lambda mp, tmp: TestOracleAndForcedUnknowns._forced(g_pass=_forced_pass([True, None, True, True])),
+                     "inconclusive", id="forced-slide-unknown"),
+        pytest.param(lambda mp, tmp: TestOracleAndForcedUnknowns._forced(
+            v_pass=dict(_forced_pass([True, None, True, True]), continuity={"mode": "qualified", "glReplay": {"mode": "off"}})),
+                     "inconclusive", id="forced-reference-slide-unknown"),
+        pytest.param(lambda mp, tmp: _visible_pass_verdict(mp, tmp, [True, True]), True, id="pass-control"),
+        pytest.param(lambda mp, tmp: _visible_pass_verdict(mp, tmp, [True, False]), False, id="pass-red-slide"),
+        pytest.param(lambda mp, tmp: _visible_pass_verdict(mp, tmp, [False, None]), None, id="pass-unreadable-slide"),
+    ])
+    def test_an_applicable_unknown_is_never_reduced_to_a_boolean(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, build: Any, expected: Any,
+    ) -> None:
+        assert build(monkeypatch, tmp_path) == expected
 
 
 class TestCodexR1ProbeFixes:
@@ -5853,7 +5939,13 @@ class TestWrapAwareScorerDefaultIsLegacy:
         }
         samples = wrap_samples()
         legacy = LEGACY.score_boundaries(samples, facts, True)
-        assert json.dumps(probe.score_boundaries(samples, facts, True), sort_keys=True) == json.dumps(legacy, sort_keys=True)
+        scored = probe.score_boundaries(samples, facts, True)
+        no_crossing = probe._inconclusive("boundary crossing not observed in samples")
+        for key, verdict in legacy.items():
+            # Astra r8 #3: an unsampled crossing was a legacy False and is inconclusive now, the only intended difference.
+            if scored[key] == no_crossing and verdict.get("verdict") is False:
+                legacy[key] = no_crossing
+        assert json.dumps(scored, sort_keys=True) == json.dumps(legacy, sort_keys=True)
 
     @pytest.mark.parametrize("name", sorted(_continuity_batteries()))
     def test_none_adds_no_keys(self, name: str) -> None:
@@ -6244,8 +6336,6 @@ class TestScoreForcedWrap:
                      id="any-other-stand-down-alongside-videoNotReady"),
         pytest.param(lambda: {"boundary": "3to4", "reads": _fw_reads(stand_downs=["videoNotReady"]), "armed": ARMED,
                               "continuity": {"verdict": False, "wraps": 1}}, id="g2-fallbacks-do-not-count-on-the-unarmed-boundary"),
-        pytest.param(lambda: {"continuity": {"verdict": False, "wraps": 0}, "reads": None, "restart": {"verdict": True}},
-                     id="raw-restart-needs-a-readable-destination"),
     ])
     def test_an_unlisted_outcome_fails(self, kwargs: Any) -> None:
         assert _fw_score(**kwargs())["status"] == "fail"
@@ -6489,6 +6579,63 @@ class TestForcedWrapUnreadable:
     def test_unreadable_evidence_is_an_invalid_take(self, kw: dict[str, Any], status: str) -> None:
         assert _fw_score(**kw)["status"] == status
 
+    @staticmethod
+    def _null_scene_crossing() -> dict[str, Any]:
+        samples = rows_around_boundary()
+        for row in samples:
+            if row["scene"] == 2.0:
+                row["scene"] = None
+                for v in row["videos"]:
+                    v["scene"] = None
+        return probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, True)
+
+    @staticmethod
+    def _schema_rejected_run() -> dict[str, Any]:
+        samples = rows_around_boundary()
+        samples[0]["scene"] = "bad"
+        result = {"continuity": {"mode": "qualified"}, "samples": samples, "recorder": _fw_recorder(), "take": _fw_take(),
+                  "reads": None, "pageErrorNotes": []}
+        gt = {"facts": {"asset": ASSET}, "factsOn": None, "source": {"periodS": FW_PERIOD}, "scene": 2.0,
+              "srcRect": dict(SRC_RECT), "dstRect": dict(DST_RECT), "transition": None}
+        probe.score_force_wrap_run(result, gt, "3to4", 375.0)
+        return result
+
+    @staticmethod
+    def _no_stand_downs() -> list[dict[str, Any]]:
+        reads = _fw_reads()
+        for read in reads:
+            read["glReplay"]["api"].pop("standDowns")
+        return reads
+
+    # Astra r8 #3: each unknown makes an otherwise failing take invalid; the complete records keep their outcome.
+    @pytest.mark.parametrize(("build", "status"), [
+        pytest.param(lambda held=NOT_HELD: _fw_score(continuity=held), "fail", id="control-readable-unheld-carry-fails"),
+        pytest.param(lambda: _fw_score(boundary="1to2", reads=_fw_reads(stand_downs=["videoNotReady"]), armed=ARMED), "pass",
+                     id="control-armed-fallback-passes"),
+        pytest.param(lambda held=NOT_HELD: _fw_score(continuity=held, reads=None, restart={"verdict": True}), "invalid",
+                     id="readable-restart-unreadable-destination-painting"),
+        pytest.param(lambda: _fw_score(boundary="1to2", reads=TestForcedWrapUnreadable._no_stand_downs(), armed=ARMED,
+                                       recorder=_fw_recorder(stop_at=FW_SEEKED + 4000.0)), "invalid",
+                     id="armed-stand-downs-unreadable"),
+        pytest.param(lambda: _fw_score(continuity=TestForcedWrapUnreadable._null_scene_crossing()), "invalid",
+                     id="null-destination-scenes-erase-the-crossing"),
+        pytest.param(lambda: TestForcedWrapUnreadable._schema_rejected_run()["forced"], "invalid",
+                     id="schema-rejected-rows-never-reach-the-window"),
+        pytest.param(lambda held=NOT_HELD: _fw_score(continuity=held, restart=probe.score_restart(
+            TestScoreRestart()._samples(fresh_id=1), ASSET, 3.0)), "fail", id="control-sampled-crossing-same-decoder-fails"),
+        pytest.param(lambda held=NOT_HELD: _fw_score(continuity=held, restart=probe.score_restart(
+            TestScoreRestart()._samples()[:10], ASSET, 3.0)), "invalid", id="restart-crossing-never-sampled"),
+        pytest.param(lambda held=NOT_HELD: dict(_fw_score(continuity=held), sampler=dict(_sampler_ok(), selfCheck={"ok": False})),
+                     "invalid", id="failed-sampler-integrity-over-a-failure"),
+        pytest.param(lambda held=NOT_HELD: dict(_fw_score(continuity=held), sampler=_sampler_ok()), "fail",
+                     id="control-vouching-sampler-keeps-the-failure"),
+    ])
+    def test_every_unknown_reaches_the_force_wrap_status(self, build: Any, status: str) -> None:
+        result = dict(build())
+        if "sampler" in result:
+            probe.apply_sampler_integrity(result)
+        assert result["status"] == status
+
 
 class TestForcedWrapPageErrors:
     def test_known_bad_a_page_error_fails_a_carried_take(self) -> None:
@@ -6587,7 +6734,7 @@ class TestArmedRecorderWindow:
         else:
             reads = _armed_reads_at(FW_SEEKED + 900.0)
         assert probe.armed_recorder_window(recorder, reads) is None
-        assert probe.score_recorder_clock(recorder, None)["verdict"] is False
+        assert probe.score_recorder_clock(recorder, None)["verdict"] is None
 
     @pytest.mark.parametrize(("recorder", "verdict"), [
         pytest.param(_fw_recorder, True, id="steady-recorder-holds"),
@@ -7120,7 +7267,7 @@ class TestCarryVerdict:
         samples = [row for row in _p2_run_samples() if row["scene"] < 8]
         scored = probe.score_verdicts(samples, {}, facts, True, {"mode": "qualified"})
         assert scored[P2_CARRY34]["verdict"] is None
-        assert probe.score_continuity(samples, "untitled.mov", 8, facts["bridgeSrcRect"], facts["destRect"], True, transition_scene=7)["verdict"] is False
+        assert probe.score_continuity(samples, "untitled.mov", 8, facts["bridgeSrcRect"], facts["destRect"], True, transition_scene=7)["verdict"] is None
 
     def test_a_fully_observed_restart_across_a_carry_is_red(self) -> None:
         facts = _p2_facts()
@@ -9784,7 +9931,7 @@ LEG_SPEC = {"id": P2_CARRY34, "kind": "carry", "expect": True, "action": "bridge
 
 def _leg(verdict: bool | None = True, **extra: Any) -> dict[str, Any]:
     return {"specs": [LEG_SPEC], "verdicts": {P2_CARRY34: {"verdict": verdict}}, "sampler": _sampler_ok(),
-            "verdict": verdict, **extra}
+            "reached": True, "verdict": verdict, **extra}
 
 
 def _g_leg_result() -> dict[str, Any]:
@@ -9877,6 +10024,23 @@ class TestPassGRedStatus:
         then the red multiset must equal the registration exactly."""
         result = _passg_red_result()
         mutate(result)
+        assert probe.passg_red_status(result)[0] == status
+
+
+    @pytest.mark.parametrize(("mutate", "status"), [
+        pytest.param(lambda leg, dest: None, "pass", id="complete-control"),
+        pytest.param(lambda leg, dest: (leg.update(reached=None, verdict=None), dest.update(verdict=None)),
+                     "inconclusive", id="leg-reached-unknown"),
+        pytest.param(lambda leg, dest: leg.pop("reached"), "inconclusive", id="leg-reached-missing"),
+        pytest.param(lambda leg, dest: dest.update(verdict=None), "inconclusive", id="destination-verdict-unknown"),
+    ])
+    def test_an_unknown_leg_is_inconclusive_never_a_registered_pass(self, mutate: Any, status: str) -> None:
+        """Astra r8 #1: an unknown in the advance leg (reached, leg or destination verdict) is
+        inconclusive before the red-set comparison; the complete record keeps its registered pass."""
+        result = _passg_red_result()
+        dest = result["armed"]["destinations"][-1]
+        mutate(dest["advanceCarry"], dest)
+        result["redSet"], result["unknown"] = probe.passg_red_ids(result)
         assert probe.passg_red_status(result)[0] == status
 
 
