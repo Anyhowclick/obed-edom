@@ -3491,18 +3491,19 @@ def _freeze_trigger_deadline(
     """The last poll frame the departure may first be seen on: the first recorded
     callback at or after the predicted departure (marker + L), plus one read-lag
     callback and the motion slack. `None` unless the recorded callbacks bracket the
-    marker: the marker frame's callback is the first at or after its `started`, or,
-    for a marker frame past the trigger, no recorded callback reaches `started`."""
+    marker: the marker frame's callback is at or after its `started` and no earlier
+    callback is strictly after it (an equal clock reading cannot order the two), or,
+    for a marker frame past the trigger, no recorded callback is strictly after it."""
     if (
         poll_times is None or marker_started is None or isinstance(marker_frame, bool)
         or not isinstance(marker_frame, int) or marker_frame < 1
     ):
         return None
     if marker_frame > len(poll_times):
-        if poll_times[-1] >= marker_started:
+        if poll_times[-1] > marker_started:
             return None
     elif poll_times[marker_frame - 1] < marker_started or (
-        marker_frame >= 2 and poll_times[marker_frame - 2] >= marker_started
+        marker_frame >= 2 and poll_times[marker_frame - 2] > marker_started
     ):
         return None
     departs_at = marker_started + departure_latency_ms

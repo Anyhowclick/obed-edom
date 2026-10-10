@@ -2950,6 +2950,10 @@ _LINEAR_ERA = dict(
     pytest.param(_ASTRA_LOADED, _EASED, BRIDGE_34, [], id="healthy-loaded"),
     pytest.param({**_ASTRA_LOADED, "post_cadence_ms": 30.0}, _EASED, BRIDGE_34, [],
                  id="healthy-loaded-slow-hold"),
+    pytest.param({**_ASTRA_LOADED, "marker_to_trigger_ms": 125.0}, _EASED, BRIDGE_34, [],
+                 id="marker-clock-ties-the-preceding-poll"),
+    pytest.param({**_ASTRA_LOADED, "marker_to_trigger_ms": 125.1}, _EASED, BRIDGE_34, _MOTION_START,
+                 id="marker-before-the-preceding-poll"),
     pytest.param({}, _EASED, None, _BOTH, id="no-bridge"),
     pytest.param({}, _EASED, {**BRIDGE_34, "atScene": 6}, _BOTH, id="bridge-of-another-boundary"),
     pytest.param({}, _EASED, {k: v for k, v in BRIDGE_34.items() if k != "durationSeconds"}, _BOTH,
@@ -2975,7 +2979,10 @@ def test_freeze_control_trigger_bounds_follow_the_bridge_curve(timing, curve, br
     170, ... 215 ms with the marker at 91 ms first allow the departure at 155 ms,
     so frame 6 is one past the deadline (frame 5) whatever the hold cadence after
     the trigger; a healthy loaded run on 30 ms callbacks (marker->trigger 120 ms,
-    D(90 ms) = 2.192 px) passes whether the hold cadence recovers or not."""
+    D(90 ms) = 2.192 px) passes whether the hold cadence recovers or not, and
+    still passes when a coarsened clock gives the marker the preceding poll's
+    reading (90 ms, astra-fixA-r3); a marker strictly before that poll was
+    observable by it, so marker frame 4 is then not the first and it fails."""
     verdict = _score_34(
         _positive_snap_34(), _r3_eased_b(**timing), _a2_snap_34(), bridge=bridge, bridge_curve=curve
     )
