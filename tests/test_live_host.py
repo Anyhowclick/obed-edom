@@ -1172,7 +1172,7 @@ def write_one_movie_export(
     assets_dir.mkdir(parents=True, exist_ok=True)
     (assets_dir / "header.json").write_text(json.dumps({"slideWidth": 1920, "slideHeight": 1080, "showMode": 0, "slideList": ["s1", "s2"]}))
     assets = {"movie-asset": {"url": {"web": "assets/movie.mov"}}}
-    movie_state: dict[str, Any] = {"position": {"pointX": 200.0, "pointY": 200.0}, "width": 100.0, "height": 100.0}
+    movie_state: dict[str, Any] = {"position": {"pointX": 200.0, "pointY": 200.0}, "width": 100.0, "height": 100.0, "opacity": 1.0}
     if masked:
         movie_state["masksToBounds"] = True
     # Keynote gives every movie instance its own objectID, per slide and across slides
@@ -1186,7 +1186,7 @@ def write_one_movie_export(
                 "layers": [
                     {
                         "isVideoLayer": True,
-                        "initialState": {"position": {"pointX": 50.0, "pointY": 50.0}, "width": 100.0, "height": 100.0},
+                        "initialState": {"position": {"pointX": 50.0, "pointY": 50.0}, "width": 100.0, "height": 100.0, "opacity": 1.0},
                     }
                 ],
             },
@@ -1199,11 +1199,11 @@ def write_one_movie_export(
             "objectID": "extra-movie-object",
             "movie": {"asset": "extra-movie-asset", "isStreaming": False},
             "baseLayer": {
-                "initialState": {"position": {"pointX": 600.0, "pointY": 600.0}, "width": 50.0, "height": 50.0},
+                "initialState": {"position": {"pointX": 600.0, "pointY": 600.0}, "width": 50.0, "height": 50.0, "opacity": 1.0},
                 "layers": [
                     {
                         "isVideoLayer": True,
-                        "initialState": {"position": {"pointX": 25.0, "pointY": 25.0}, "width": 50.0, "height": 50.0},
+                        "initialState": {"position": {"pointX": 25.0, "pointY": 25.0}, "width": 50.0, "height": 50.0, "opacity": 1.0},
                     }
                 ],
             },
