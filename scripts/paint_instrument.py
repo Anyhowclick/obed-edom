@@ -549,8 +549,8 @@ def score_paint(
     min_fps: float,
 ) -> dict[str, Any]:
     """Plan §2.4 over the rows with `start <= t <= end`. `slot_of`/`stage_box_of` and every `pv.rect`/`visibleRect`
-    must share one coordinate space. Any violating frame fails; otherwise an unobserved or unreadable frame, or
-    failed coverage, is inconclusive."""
+    must share one coordinate space. An unobserved or unreadable frame, failed coverage or no rows is inconclusive
+    whatever else the window shows; on complete evidence any violating frame fails."""
     window_rows = sorted((r for r in rows if _num(r.get("t")) and start <= r["t"] <= end), key=lambda r: r.get("seq") or 0)
     coverage = frame_coverage(window_rows, max_gap_frames=max_gap_frames, min_fps=min_fps)
     period = coverage.get("periodMs")
@@ -629,7 +629,8 @@ def score_paint(
         reasons.append(f"{len(unreadable)} frames unreadable")
     if window_rows and not coverage["ok"]:
         reasons.append("coverage: " + "; ".join(coverage["reasons"]))
-    status = "fail" if violations else ("inconclusive" if reasons else "ok")
+    status = "inconclusive" if _evidence_gaps(len(window_rows), coverage, unobserved, unreadable) else (
+        "fail" if violations else "ok")
     return {
         "status": status,
         "reasons": reasons,
@@ -653,11 +654,25 @@ def score_paint(
     }
 
 
+def _evidence_gaps(frames: Any, coverage: Any, unobserved: Any, unreadable: Any) -> list[str]:
+    gaps: list[str] = []
+    if not frames:
+        gaps.append("no frames")
+    if not (isinstance(coverage, dict) and coverage.get("ok") is True):
+        gaps.append("coverage failed")
+    if unobserved:
+        gaps.append("frames unobserved before paint")
+    if unreadable:
+        gaps.append("frames unreadable")
+    return gaps
+
+
 def sampler_self_check(
     rows: list[dict[str, Any]], meta: dict[str, Any], *, read_now: float, max_gap_frames: int
 ) -> dict[str, Any]:
     """Plan §2.1 sampler liveness over every drained row of an arm: overflow, errors, duplicate or mismatched
-    pre-paint reads, rows out of order or missing, no pre-paint read at all, or a stale last tick fail."""
+    pre-paint reads, rows out of order or missing, a row without a pre-paint read, retained rows that do not
+    reconcile with `meta.rafTicks`/`meta.prepaint`/`meta.lastTs`, or a stale last tick fail."""
     reasons: list[str] = []
     if not isinstance(meta, dict):
         return {"ok": False, "reasons": ["sampler meta missing"], "rows": len(rows)}
@@ -688,13 +703,23 @@ def sampler_self_check(
     with_pp = sum(1 for r in rows if isinstance(r.get("pp"), dict))
     if rows and not with_pp:
         reasons.append("no pre-paint reads")
+    elif with_pp < len(rows):
+        reasons.append(f"{len(rows) - with_pp} rows without a pre-paint read")
     if not rows:
         reasons.append("no rows")
+    for key, retained in (("rafTicks", len(rows)), ("prepaint", with_pp)):
+        value = meta.get(key)
+        if not isinstance(value, int) or isinstance(value, bool):
+            reasons.append(f"meta.{key} missing")
+        elif value != retained:
+            reasons.append(f"{retained} rows retained against meta.{key} {value}")
     period = _period(rows)
     last_ts = meta.get("lastTs")
     stale_ms = round(read_now - last_ts, 3) if _num(last_ts) and _num(read_now) else None
     if stale_ms is None:
         reasons.append("meta.lastTs missing")
+    elif rows and rows[-1].get("ts") != last_ts:
+        reasons.append(f"last retained row ts {rows[-1].get('ts')!r} is not meta.lastTs {last_ts!r}")
     elif period is not None and stale_ms > (max_gap_frames + 1) * period:
         reasons.append(f"sampler stopped {stale_ms:.1f} ms before the read (> {(max_gap_frames + 1) * period:.1f} ms)")
     return {
@@ -783,8 +808,9 @@ def _paint_of(verdict: Any) -> dict[str, Any] | None:
 
 def score_paint_control(record: dict[str, Any], target_verdict: dict[str, Any], n: int, timing: str) -> dict[str, Any]:
     """Plan §4 positive control, against the target carry's `score_paint` result (or a verdict holding it under
-    `paint`). Pass needs the exact injected seq set; integrity breaks (abort, placement events, injector errors) or
-    an inconclusive paint score are inconclusive. `redSet == [target]` is the caller's check."""
+    `paint`). Pass needs the exact injected seq set on complete evidence; integrity breaks (abort, placement events,
+    injector errors), an inconclusive paint score or any evidence gap (no frames, failed coverage, an unobserved or
+    unreadable frame) are inconclusive. `redSet == [target]` is the caller's check."""
     reasons: list[str] = []
     blockers: list[str] = []
     paint = _paint_of(target_verdict)
@@ -813,8 +839,9 @@ def score_paint_control(record: dict[str, Any], target_verdict: dict[str, Any], 
     if paint is None:
         reasons.append("target verdict has no paint score")
     else:
-        if paint.get("status") == "inconclusive":
-            blockers.append("paint score inconclusive: " + "; ".join(paint.get("reasons") or []))
+        gaps = _evidence_gaps(paint.get("frames"), paint.get("coverage"), paint.get("unobserved"), paint.get("unreadable"))
+        if paint.get("status") == "inconclusive" or gaps:
+            blockers.append("paint score inconclusive: " + "; ".join(paint.get("reasons") or gaps))
         half = control.get("variant") == "ancestor-half"
         seq_key, count_key, zero_key = (
             ("partialSeqs", "partialFrames", "unpaintedFrames") if half else ("unpaintedSeqs", "unpaintedFrames", "partialFrames")

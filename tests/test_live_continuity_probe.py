@@ -9468,6 +9468,11 @@ class TestSamplerV2:
         assert evaluations[0] == probe.SAMPLER_JS
         assert evaluations[-4:] == [probe.SAMPLER_STOP_JS, *[probe.SAMPLER_DRAIN_JS] * 3]
         assert probe.SAMPLER_DRAIN_JS.endswith(f".drain({probe.SAMPLER_DRAIN_ROWS})")
+        # Astra r1 #4: a malformed chunk mid-drain is an arm error, never the prefix read so far.
+        for bad in (None, {"rows": []}, [{"t": 4.0}, 5]):
+            chunks[:] = [[{"t": 1.0}], bad]
+            with pytest.raises(RuntimeError, match="sampler drain returned"):
+                probe.drain_samples(player.transport)
 
     @pytest.mark.parametrize("valid", [True, False])
     def test_pre_paint_rects_and_stage_box_convert_to_authored_or_the_read_is_unreadable(self, valid: bool) -> None:

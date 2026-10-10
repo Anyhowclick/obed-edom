@@ -149,6 +149,9 @@ SCORE_CASES = [
                                               stage=LETTERBOX), BLEED,
      {"status": "ok", "outsideStagePx": 400.0 * 60.0}),
     ("missing-pp", _drop_pp(_rows()), SLOT, {"status": "inconclusive", "_reason": "unobserved"}),
+    # Astra r1 #1: violations never outrank incomplete evidence; the dark frames are still reported.
+    ("dark-frames-with-one-unobserved-frame", _drop_pp(_rows(videos=_hide(60, 65, opacity=0.0))), SLOT,
+     {"status": "inconclusive", "unpaintedFrames": 6, "_reason": "unobserved"}),
     ("mismatched-pp", _wrong_pp(_rows()), SLOT, {"status": "inconclusive", "_reason": "unobserved"}),
     ("gap-of-4.5-periods", _gap(4.5)(_rows()), SLOT, {"status": "inconclusive", "_reason": "frame gap"}),
     ("one-missed-frame", _gap(2.0)(_rows()), SLOT, {"status": "ok", "_missed": 1}),
@@ -189,6 +192,11 @@ SELF_CHECKS = [
     ("errors", _rows(), {**META, "errors": ["prepaint: boom"]}, 120 * PERIOD, "sampler errors"),
     ("duplicate-rows", _duplicated(_rows()), META, 120 * PERIOD, "duplicate rows"),
     ("no-pre-paint-reads", [dict(r, pp=None) for r in _rows()], META, 120 * PERIOD, "no pre-paint reads"),
+    # Astra r1 #1: partial pre-paint coverage never vouches.
+    ("one-row-without-pp", _drop_pp(_rows()), {**META, "prepaint": 119}, 120 * PERIOD, "1 rows without a pre-paint read"),
+    # Astra r1 #4: a consecutive prefix (the tail lost to a malformed drain) does not reconcile with the meta.
+    ("tail-not-retained", _rows()[:100], META, 120 * PERIOD, "100 rows retained against meta.rafTicks 120"),
+    ("tail-endpoint", _rows()[:100], {**META, "rafTicks": 100, "prepaint": 100}, 120 * PERIOD, "is not meta.lastTs"),
 ]
 
 
@@ -514,6 +522,13 @@ def test_the_injector_hides_exactly_k_to_k_plus_n_minus_1_before_paint(setup: st
     if n:
         shifted_paint = dict(paint, **{"partialSeqs" if state == "partial" else "unpaintedSeqs": [s + 1 for s in injected]})
         assert pi.score_paint_control(record, shifted_paint, n, timing)["status"] == "fail"
+    # Astra r1 #1: the exact set on incomplete evidence never passes, whether the score said so or not.
+    rows[-1]["pp"] = None
+    gappy = pi.score_paint(rows, 1, "movie-a", start=rows[TRIGGER_FRAME - 1]["t"], end=math.inf,
+                           slot_of=lambda r: SLOT, stage_box_of=lambda r: r["pp"]["stageBox"], **SCORE_KW)
+    assert gappy["status"] == "inconclusive"
+    for evidence in (gappy, dict(paint, unobserved=gappy["unobserved"]), dict(paint, coverage={"ok": False})):
+        assert pi.score_paint_control(record, evidence, n, timing)["status"] == "inconclusive"
 
 
 @pytest.mark.parametrize(("extra", "expected"), [

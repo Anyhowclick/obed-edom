@@ -1669,11 +1669,13 @@ def drive_and_sample(
 
 def drain_samples(transport: Any) -> list[dict[str, Any]]:
     """Every retained sampler row, read `SAMPLER_DRAIN_ROWS` at a time so no CDP payload grows
-    with the run."""
+    with the run, until an empty chunk. Anything but a list of row objects raises (an arm error)."""
     rows: list[dict[str, Any]] = []
     while True:
         chunk = transport.evaluate(SAMPLER_DRAIN_JS)
-        if not isinstance(chunk, list) or not chunk:
+        if not isinstance(chunk, list) or not all(isinstance(row, dict) for row in chunk):
+            raise RuntimeError(f"sampler drain returned {type(chunk).__name__} after {len(rows)} rows, expected a list of rows")
+        if not chunk:
             return rows
         rows.extend(chunk)
 
