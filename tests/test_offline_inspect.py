@@ -1597,10 +1597,23 @@ def test_two_tier_granular_fallback_is_per_slide_not_deck():
     jxa = _cached_payload(GOLD_DECK)
     if jxa is None:
         pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
-    # Pick a slide index that actually carries soft group geometry.
+
+    def frame(it):
+        return tuple(float(it[k]) for k in ("x", "y", "w", "h"))
+
     off_probe = two_tier_wall_payload(GOLD_DECK, bulk_geometry_fn=None)
-    soft = off_probe["_offline"]["soft_geometry"]
-    victim_number = next(f["slide"] for f in soft if f["kind"] == "group")
+    jby = {(s["index"], it["kindIndex"]): frame(it)
+           for s in jxa["slides"] for it in s["items"] if it["kind"] == "group"}
+    pure = {(s["index"], it["kindIndex"]): frame(it)
+            for s in off_probe["slides"] for it in s["items"] if it["kind"] == "group"}
+    # The victim is the first slide whose soft group geometry visibly differs from
+    # Keynote's (Gold slide 2's soft groups already agree), so "kept offline" is
+    # observable rather than vacuous.
+    victim_number = next(
+        f["slide"] for f in off_probe["_offline"]["soft_geometry"]
+        if f["kind"] == "group"
+        and pure[(f["slide"] - 1, f["kindIndex"])] != jby.get((f["slide"] - 1, f["kindIndex"]))
+    )
     victim_index = victim_number - 1
 
     fn = _bulk_double_from_jxa(jxa, omit={(victim_index, "group")})
@@ -1611,22 +1624,23 @@ def test_two_tier_granular_fallback_is_per_slide_not_deck():
     assert side["fallback_slides"] == [victim_number]
     assert {f["kind"] for f in side["fallback"]} == {"group"}
     assert all(f["slide"] == victim_number for f in side["fallback"])
-    # A group on the victim slide kept its OFFLINE geometry (not spliced); a group
-    # on another slide was overwritten by the bulk value.
-    jby = {s["index"]: {(it["kind"], it["kindIndex"]): it for it in s["items"]}
-           for s in jxa["slides"]}
+    # Every victim-slide group kept its pure-offline frame (not spliced), and at least
+    # one of them differs from Keynote's. Every other slide's groups took the bulk
+    # (JXA) frame, and at least one of those differed offline.
+    victim_kept_offline = non_victim_overwritten = 0
     for slide in off["slides"]:
-        if slide["index"] != victim_index:
-            continue
         for it in slide["items"]:
-            if it["kind"] == "group":
-                # unconfirmed => did NOT take the JXA value (offline union frame)
-                j = jby[victim_index].get(("group", it["kindIndex"]))
-                if j is not None and (j["x"], j["y"]) != (it["x"], it["y"]):
-                    break
-        else:
-            continue
-        break
+            key = (slide["index"], it["kindIndex"])
+            if it["kind"] != "group" or key not in jby:
+                continue
+            if slide["index"] == victim_index:
+                assert frame(it) == pure[key], key
+                victim_kept_offline += frame(it) != jby[key]
+            else:
+                assert all(abs(a - b) <= 0.5 for a, b in zip(frame(it), jby[key])), key
+                non_victim_overwritten += any(abs(a - b) > 0.5 for a, b in zip(pure[key], jby[key]))
+    assert victim_kept_offline > 0, "no victim group differs from Keynote: kept-offline is unobservable"
+    assert non_victim_overwritten > 0, "no non-victim group differed offline: the overwrite is unobservable"
 
 
 @pytest.mark.skipif(not GOLD_DECK.exists(), reason="local gold deck only")

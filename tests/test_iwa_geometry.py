@@ -605,7 +605,10 @@ def _cached_payload(deck: Path):
         path = inspect_cache_path(deck_digest(deck))
     except Exception:  # pragma: no cover
         return None
-    return json.loads(path.read_text()) if path.is_file() else None
+    if not path.is_file():
+        return None
+    payload = json.loads(path.read_text())
+    return payload if payload.get("reader") == "jxa" else None
 
 
 def _p90(values):
