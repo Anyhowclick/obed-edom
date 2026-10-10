@@ -1,7 +1,10 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LivePresenter } from "../src/live/LivePresenter";
+import { applyHtmlPreview, chooseKeynote, pollJob, startHtmlPreview, type Job } from "../src/api";
 import { liveClient, type LiveClient, type LiveCommand, type LiveContinuity, type LiveEngine, type LiveOutputSettings, type LiveResult, type LiveSnapshot } from "../src/live/api";
+
+vi.mock("../src/api", () => ({ applyHtmlPreview: vi.fn(), chooseKeynote: vi.fn(), pollJob: vi.fn(), startHtmlPreview: vi.fn(), resolveDrop: vi.fn() }));
 
 function state(overrides: Partial<LiveSnapshot> = {}): LiveSnapshot {
   return {
@@ -32,6 +35,7 @@ function state(overrides: Partial<LiveSnapshot> = {}): LiveSnapshot {
 function engineState(overrides: Partial<LiveEngine> = {}): LiveEngine {
   return {
     state: "ready",
+    taken: !["stopped", "unavailable"].includes(overrides.state || "ready"),
     obs: { path: "/Applications/OBS.app", version: "32.2.2", pinned: "32.2.2" },
     rate: { output: 25, canvas: "25 PAL", source: 50 },
     device: { name: "UltraStudio HD Mini", set: true },
@@ -49,6 +53,7 @@ function client(overrides: Partial<LiveClient> = {}): LiveClient {
   return {
     state: vi.fn(async () => null),
     decks: vi.fn(async () => [{ previewJobId: "prepared-1", name: "Sunday service", slides: 3, sourceDigest: "source" }]),
+    qualification: vi.fn(async (previewJobId) => ({ previewJobId, name: "Sunday service", slides: 3, sourceDigest: "source", qualified: true, reason: null })),
     displays: vi.fn(async () => [{ id: "screen-2", name: "HDMI projector", width: 1920, height: 1080, x: 0, y: 0, primary: true }]),
     start: vi.fn(async () => state()),
     command: vi.fn(async (_sessionId: string, command: LiveCommand): Promise<LiveResult> => ({ requestId: command.requestId, outcome: "completed", state: state() })),
@@ -70,20 +75,21 @@ describe("LivePresenter", () => {
     const api = client();
     render(<LivePresenter client={api} pollMs={60_000} />);
     await screen.findByRole("option", { name: /Sunday service/ });
-    expect(screen.getByRole("checkbox", { name: "Enable movie continuity when qualified" })).toBeChecked();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Start output session" })).toBeEnabled());
+    expect(screen.queryByRole("checkbox", { name: /movie continuity/i })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Start output session" }));
     await waitFor(() => expect(api.start).toHaveBeenCalledWith("prepared-1", "screen-2"));
     expect(screen.queryByTitle(/player|preview/i)).not.toBeInTheDocument();
   });
 
-  it("turns continuity off for the next session without changing a running session", async () => {
-    const api = client({ start: vi.fn(async () => state({ continuity: { mode: "off" } })) });
+  it("starts with automatic continuity and no continuity preference", async () => {
+    const api = client({ start: vi.fn(async () => state({ continuity: { mode: "qualified" } })) });
     render(<LivePresenter client={api} pollMs={60_000} />);
     await screen.findByRole("option", { name: /Sunday service/ });
-    fireEvent.click(screen.getByRole("checkbox", { name: "Enable movie continuity when qualified" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Start output session" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Start output session" }));
-    await waitFor(() => expect(api.start).toHaveBeenCalledWith("prepared-1", "screen-2", "off"));
-    expect(await screen.findByText("Movie continuity · Off")).toBeInTheDocument();
+    await waitFor(() => expect(api.start).toHaveBeenCalledWith("prepared-1", "screen-2"));
+    expect(await screen.findByText("Movie continuity · Qualified")).toBeInTheDocument();
     expect(screen.queryByRole("checkbox", { name: "Enable movie continuity when qualified" })).not.toBeInTheDocument();
     expect(api.command).not.toHaveBeenCalled();
   });
@@ -93,14 +99,14 @@ describe("LivePresenter", () => {
     ["unsupported", "Unsupported", "stage is not the authored size"],
     ["off", "Off", "Using the deck’s native movie playback."],
     ["pending", "Checking", "Checking this deck and output size."],
-  ] as const)("shows observed %s continuity before Show output", async (mode, label, detail) => {
+  ] as const)("shows observed %s continuity alongside Show output", async (mode, label, detail) => {
     const continuity: LiveContinuity = { mode, ...(mode === "unsupported" ? { reason: detail } : {}) };
     const api = client({ state: vi.fn(async () => state({ outputVisible: false, continuity })) });
     render(<LivePresenter client={api} pollMs={60_000} />);
     const badge = await screen.findByText(`Movie continuity · ${label}`);
     expect(screen.getByText(detail)).toBeInTheDocument();
-    const show = screen.getByRole("button", { name: "Show output" });
-    expect(badge.compareDocumentPosition(show) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(badge).toBeVisible();
+    expect(screen.getByRole("button", { name: "Show output" })).toBeEnabled();
   });
 
   it.each([
@@ -139,7 +145,7 @@ describe("LivePresenter", () => {
     expect(screen.queryByText(/more$/)).not.toBeInTheDocument();
   });
 
-  it("warns about every unplayable movie above Show output", async () => {
+  it("keeps every unplayable movie warning visible alongside Show output", async () => {
     const codecWarnings = ["clip.mov (hvc1) may not play in this output", "sting.mov (apcn) may not play in this output"];
     const output = { ...state().output, codecWarnings };
     const api = client({ state: vi.fn(async () => state({ outputVisible: false, output })) });
@@ -147,8 +153,8 @@ describe("LivePresenter", () => {
     const heading = await screen.findByText("Some movies may not play in this output");
     for (const warning of codecWarnings) expect(screen.getByText(warning)).toBeInTheDocument();
     expect(screen.queryByText(/^\+\d+ more$/)).not.toBeInTheDocument();
-    const show = screen.getByRole("button", { name: "Show output" });
-    expect(heading.compareDocumentPosition(show) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(heading).toBeVisible();
+    expect(screen.getByRole("button", { name: "Show output" })).toBeEnabled();
   });
 
   it("caps the codec warning list at five and counts the rest", async () => {
@@ -294,10 +300,11 @@ describe("LivePresenter", () => {
   it("uses number and Enter from a focused sidebar-like button without taking its native Space key", async () => {
     const api = client({ state: vi.fn(async () => state()) });
     render(<><button type="button">Alpha Keynote</button><LivePresenter client={api} pollMs={60_000} /></>);
+    await screen.findByText("Player ready · Output visible");
     const sidebarButton = screen.getByRole("button", { name: "Alpha Keynote" });
     sidebarButton.focus();
     await act(async () => { fireEvent.keyDown(sidebarButton, { key: "1" }); });
-    expect(screen.getByText("Go to: 1 (Esc clears)")).toBeInTheDocument();
+    expect(screen.getByText("Go to: 1 · Enter to jump · Esc to clear")).toBeInTheDocument();
     fireEvent.keyDown(sidebarButton, { key: "Enter" });
     await waitFor(() => expect(api.command).toHaveBeenCalledWith("live-1", expect.objectContaining({ operation: "goTo", slide: 1 })));
     vi.mocked(api.command).mockClear();
@@ -330,7 +337,7 @@ describe("LivePresenter", () => {
     render(<LivePresenter client={api} pollMs={60_000} />);
     expect(await screen.findByRole("alert")).toHaveTextContent("Output window closed");
     expect(screen.getByRole("button", { name: "Stop session" })).toBeEnabled();
-    expect(screen.getByText("Movie continuity is available only for qualified decks. Alpha output is not qualified.")).toBeInTheDocument();
+    expect(screen.getByText("Movie continuity · Unavailable")).toBeInTheDocument();
   });
 
   it("allows output hiding while the player is busy but blocks navigation", async () => {
@@ -414,8 +421,9 @@ describe("LivePresenter output mode", () => {
     expect(await screen.findByText("Output engine · Ready")).toBeInTheDocument();
     expect(screen.queryByRole("combobox", { name: "Output display" })).not.toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Output rate" })).toHaveValue("25");
-    expect(screen.getByText("Match the standard the Pulse shows")).toBeInTheDocument();
-    expect(screen.getByRole("checkbox", { name: "Keyer on" })).toBeChecked();
+    expect(screen.getByRole("combobox", { name: "Output rate" })).toHaveAttribute("title", "Match the standard shown on the Pulse.");
+    expect(screen.getByRole("checkbox", { name: "Enable Keyer" })).toHaveAccessibleDescription(/picture \(fill\).*transparency \(key\)/);
+    expect(screen.getByRole("checkbox", { name: "Enable Keyer" })).toBeChecked();
     expect(api.engine).toHaveBeenCalled();
     fireEvent.change(screen.getByRole("combobox", { name: "Output" }), { target: { value: "screen" } });
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Output display" })).toBeInTheDocument());
@@ -428,10 +436,10 @@ describe("LivePresenter output mode", () => {
     const rate = await screen.findByRole("combobox", { name: "Output rate" });
     fireEvent.change(rate, { target: { value: "30" } });
     await waitFor(() => expect(api.saveOutputSettings).toHaveBeenCalledWith({ ...keyerSettings, akOutputRate: 30 }));
-    await waitFor(() => expect(screen.getByRole("checkbox", { name: "Keyer on" })).toBeEnabled());
-    fireEvent.click(screen.getByRole("checkbox", { name: "Keyer on" }));
+    await waitFor(() => expect(screen.getByRole("checkbox", { name: "Enable Keyer" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("checkbox", { name: "Enable Keyer" }));
     await waitFor(() => expect(api.saveOutputSettings).toHaveBeenCalledWith({ ...keyerSettings, akOutputRate: 30, akKeyer: "off" }));
-    expect(screen.getByRole("checkbox", { name: "Keyer on" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Enable Keyer" })).not.toBeChecked();
   });
 
   it("shows a refused settings change and keeps the saved mode", async () => {
@@ -492,7 +500,7 @@ describe("LivePresenter output mode", () => {
     await screen.findByText("Output engine · Ready");
     expect(screen.getByRole("combobox", { name: "Output" })).toBeDisabled();
     expect(screen.getByRole("combobox", { name: "Output rate" })).toBeDisabled();
-    expect(screen.getByRole("checkbox", { name: "Keyer on" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Enable Keyer" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Release output" })).toBeDisabled();
   });
 
@@ -552,5 +560,114 @@ describe("live engine and output-settings requests", () => {
     } finally {
       fetch.mockRestore();
     }
+  });
+});
+
+describe("Alpha Keynote intake and slide grid", () => {
+  beforeEach(() => {
+    let request = 0;
+    vi.stubGlobal("crypto", { randomUUID: () => `new-${++request}` });
+    for (const fn of [chooseKeynote, startHtmlPreview, applyHtmlPreview, pollJob]) vi.mocked(fn).mockReset();
+  });
+
+  it.each(["chooser", "drop"])("prepares a Keynote from %s, qualifies it, then enables Start", async (method) => {
+    const proposal: Job = { id: "new-deck", kind: "html-preview", status: "done", logs: [], result: { phase: "review" } };
+    const ready: Job = { ...proposal, result: { phase: "ready" } };
+    vi.mocked(startHtmlPreview).mockResolvedValue(proposal);
+    vi.mocked(applyHtmlPreview).mockResolvedValue(ready);
+    vi.mocked(pollJob).mockResolvedValueOnce(proposal).mockResolvedValueOnce(ready);
+    vi.mocked(chooseKeynote).mockResolvedValue({ path: "/Slides/Service.key", name: "Service.key" });
+    const api = client({ decks: vi.fn(async () => []) });
+    const { container } = render(<LivePresenter client={api} pollMs={60_000} />);
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Output" })).toBeEnabled());
+    expect(screen.getByRole("button", { name: "Start output session" })).toBeDisabled();
+    expect(screen.queryByLabelText("Or enter a file path")).not.toBeInTheDocument();
+    if (method === "chooser") {
+      fireEvent.click(screen.getByRole("button", { name: "Choose on this Mac" }));
+    } else {
+      fireEvent.drop(container.querySelector(".well")!, { dataTransfer: { getData: () => "file:///Slides/Service.key", files: [] } });
+    }
+    await screen.findByText("Service.key");
+    fireEvent.click(screen.getByRole("button", { name: "Qualify Keynote" }));
+    await screen.findByText("Deck qualified");
+    expect(startHtmlPreview).toHaveBeenCalledWith("/Slides/Service.key");
+    expect(applyHtmlPreview).toHaveBeenCalledWith("new-deck");
+    expect(api.qualification).toHaveBeenCalledWith("new-deck");
+    expect(api.start).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Start output session" }));
+    await waitFor(() => expect(api.start).toHaveBeenCalledWith("new-deck", "screen-2"));
+    expect(container.querySelector("iframe")).toBeNull();
+  });
+
+  it("does not export again when the preparation reuses a ready cache", async () => {
+    const ready: Job = { id: "cached", kind: "html-preview", status: "done", logs: [], result: { phase: "ready" } };
+    vi.mocked(startHtmlPreview).mockResolvedValue(ready);
+    vi.mocked(pollJob).mockResolvedValue(ready);
+    const api = client({ decks: vi.fn(async () => []) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    vi.mocked(chooseKeynote).mockResolvedValue({ path: "/Slides/Cached.key", name: "Cached.key" });
+    fireEvent.click(screen.getByRole("button", { name: "Choose on this Mac" }));
+    await screen.findByText("Cached.key");
+    fireEvent.click(screen.getByRole("button", { name: "Qualify Keynote" }));
+    await screen.findByText("Deck qualified");
+    expect(applyHtmlPreview).not.toHaveBeenCalled();
+  });
+
+  it("blocks unqualified decks and can recheck", async () => {
+    const api = client({ qualification: vi.fn(async (previewJobId) => ({ previewJobId, name: "Unqualified.key", slides: 3, sourceDigest: "source", qualified: false, reason: "Deck is outside the current allowlist." })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    await screen.findByText("Not qualified yet");
+    expect(screen.getByText("Deck is outside the current allowlist.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Start output session" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Check qualification again" }));
+    await waitFor(() => expect(api.qualification).toHaveBeenCalledTimes(2));
+    expect(api.start).not.toHaveBeenCalled();
+  });
+
+  it("shows preparation failure without proceeding to qualification", async () => {
+    vi.mocked(startHtmlPreview).mockRejectedValue(new Error("Close Keynote before exporting."));
+    const api = client({ decks: vi.fn(async () => []) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    vi.mocked(chooseKeynote).mockResolvedValue({ path: "/Slides/Service.key", name: "Service.key" });
+    fireEvent.click(screen.getByRole("button", { name: "Choose on this Mac" }));
+    await screen.findByText("Service.key");
+    fireEvent.click(screen.getByRole("button", { name: "Qualify Keynote" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Close Keynote before exporting.");
+    expect(api.qualification).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Start output session" })).toBeDisabled();
+  });
+
+  it("uses previous playable slide on left arrow, even with a button focused", async () => {
+    const api = client({ state: vi.fn(async () => state({ originalSlide: 3 })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    const advance = await screen.findByRole("button", { name: "Advance" });
+    advance.focus();
+    fireEvent.keyDown(advance, { key: "ArrowLeft" });
+    await waitFor(() => expect(api.command).toHaveBeenCalledWith("live-1", expect.objectContaining({ operation: "goTo", slide: 1 })));
+  });
+
+  it("keeps chevrons below the only current preview and highlights only observed state", async () => {
+    const api = client({ state: vi.fn(async () => state()), command: vi.fn(async (_session, command): Promise<LiveResult> => ({ requestId: command.requestId, outcome: "rejected", reason: "Busy", state: state() })) });
+    const { container } = render(<LivePresenter client={api} pollMs={60_000} />);
+    const previous = await screen.findByRole("button", { name: "Previous slide" });
+    expect(previous).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Slide 2 · Skipped / unavailable" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Slide 3" }));
+    await screen.findByText("Busy");
+    expect(screen.getByRole("button", { name: "Slide 1" })).toHaveAttribute("aria-current", "true");
+    expect(screen.getByRole("button", { name: "Slide 3" })).not.toHaveAttribute("aria-current");
+    expect(container.querySelector(".live-monitor > .live-placeholder + .live-transport")).not.toBeNull();
+    expect(screen.queryByText("Upcoming slides")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /pause|play/i })).not.toBeInTheDocument();
+  });
+
+  it("ignores navigation keys in inputs and repeated or modified keys", async () => {
+    const api = client({ state: vi.fn(async () => state({ originalSlide: 3 })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    const input = await screen.findByLabelText("Go to slide");
+    fireEvent.keyDown(input, { key: "ArrowLeft" });
+    fireEvent.keyDown(window, { key: "ArrowRight", repeat: true });
+    fireEvent.keyDown(window, { key: "ArrowLeft", metaKey: true });
+    expect(api.command).not.toHaveBeenCalled();
   });
 });

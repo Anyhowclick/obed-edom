@@ -395,6 +395,7 @@ def test_launch_configuration_hidden(rig):
     r = rig()
     state = r.run(lambda: r.engine.ensure_started(25, "external"))
     assert state["state"] == "ready"
+    assert state["taken"] is True
     launch = r.launcher.launches[0]
     assert launch["app"] == r.app
     assert launch["hidden"] is True
@@ -1259,6 +1260,7 @@ def test_our_own_engine_is_not_an_orphan(rig):
 def test_actions_publish_pending_state_before_the_engine_runs_them(rig):
     r = rig()
     assert r.engine.active is False
+    assert r.engine.state()["taken"] is False
     r.launcher.block = threading.Event()
     r.engine.ensure_started(25, "external")
     assert r.engine.state()["state"] == "starting" and "reason" not in r.engine.state()
@@ -1287,10 +1289,12 @@ def test_quit_is_quitting_until_the_engine_confirms(rig):
     r.launcher.on_terminate = lambda pid: hold.wait(15)
     r.engine.quit()
     assert r.engine.state()["state"] == "quitting" and r.engine.active is True
+    assert r.engine.state()["taken"] is True
     assert r.engine.cdp_endpoint is not None
     hold.set()
     assert r.engine.wait_idle(15)
     assert r.engine.state()["state"] == "stopped" and r.engine.active is False
+    assert r.engine.state()["taken"] is False
 
 
 def test_noop_ensure_started_does_not_flash_starting(rig):

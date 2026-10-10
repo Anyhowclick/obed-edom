@@ -59,6 +59,17 @@ _CONTINUITY_STAGE_GATE_EXPR = (
 )
 
 
+def derive_runtime(export_root: Path, slides: list[dict[str, Any]], *, resolver=safe_export_file, **kwargs: Any) -> tuple[ContinuityPlan, dict[str, Any]] | Unsupported:
+    try:
+        plan = derive_plan(export_root, slides, resolver=resolver, **kwargs)
+        if isinstance(plan, Unsupported):
+            return plan
+        runtime = plan.to_runtime()
+    except Exception as exc:  # noqa: BLE001 - fail closed, never let derivation crash the host
+        return Unsupported(str(exc))
+    return runtime if isinstance(runtime, Unsupported) else (plan, runtime)
+
+
 def _continuity_plan_script(plan: dict[str, Any], canvas: dict[str, int]) -> str:
     """Embed the runtime plan as `window.__OBED_CONTINUITY__`, always installed:
     footprints are authored-size pixels and the shared runtime maps authored to
@@ -886,16 +897,7 @@ class LiveOutputHost:
         return "pending", None, runtime
 
     def _derive_runtime(self, **kwargs: Any) -> tuple[ContinuityPlan, dict[str, Any]] | Unsupported:
-        try:
-            plan = derive_plan(self.export_root, self.slides, resolver=self.resolver, **kwargs)
-            if isinstance(plan, Unsupported):
-                return plan
-            runtime = plan.to_runtime()
-        except Exception as exc:  # noqa: BLE001 - fail closed, never let derivation crash the host
-            return Unsupported(str(exc))
-        if isinstance(runtime, Unsupported):
-            return runtime
-        return plan, runtime
+        return derive_runtime(self.export_root, self.slides, resolver=self.resolver, **kwargs)
 
     def _resolve_gl_replay(self) -> tuple[str, str | None, tuple[ContinuityPlan, dict[str, Any]] | None, str]:
         """GL replay `(mode, reason, flag-on derivation, script)` for `auto`. The derivation
