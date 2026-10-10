@@ -424,6 +424,31 @@ def _str_or_null(value: Any) -> bool:
     return value is None or isinstance(value, str)
 
 
+def _int_ok(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _ints_ok(value: Any) -> bool:
+    return isinstance(value, list) and all(_int_ok(item) for item in value)
+
+
+def is_box(value: Any) -> bool:
+    return _box(value) is not None
+
+
+def schema_problem(value: Any, fields: Mapping[str, Callable[[Any], bool]]) -> str | None:
+    """Why `value` cannot be read against `fields`: not an object, or a field missing or ill-typed (an explicit null
+    is a reading only where the field's check allows it), else None. Every schema in this instrument uses it."""
+    if not isinstance(value, dict):
+        return "not an object"
+    for key, valid in fields.items():
+        if key not in value:
+            return f"{key} missing"
+        if not valid(value[key]):
+            return f"{key} ill-typed"
+    return None
+
+
 PV_FIELDS: dict[str, Callable[[Any], bool]] = {
     "id": _id_ok,
     "src": lambda value: isinstance(value, str),
@@ -445,16 +470,74 @@ PV_FIELDS: dict[str, Callable[[Any], bool]] = {
 }
 
 
+PP_FIELDS: dict[str, Callable[[Any], bool]] = {
+    "seq": _int_ok,
+    "ts": _num,
+    "t": _num,
+    "cover": _bool_ok,
+    "videos": lambda value: isinstance(value, list),
+    "stageBox": lambda value: value is None or is_box(value),
+}
+CONTROL_SPEC_FIELDS: dict[str, Callable[[Any], bool]] = {
+    "n": _int_ok,
+    "variant": lambda value: value in PAINT_CONTROL_VARIANTS,
+    "phase": lambda value: value in PAINT_CONTROL_PHASES,
+    "timing": lambda value: value in PAINT_CONTROL_TIMINGS,
+    "atScene": _int_ok,
+    "depth": _int_ok,
+    "delayTicks": _int_ok,
+}
+CONTROL_RECORD_FIELDS: dict[str, Callable[[Any], bool]] = {
+    "control": lambda value: schema_problem(value, CONTROL_SPEC_FIELDS) is None,
+    "fired": _bool_ok,
+    "aborted": _str_or_null,
+    "events": lambda value: isinstance(value, list) and all(isinstance(item, dict) for item in value),
+    "errors": lambda value: isinstance(value, list),
+    "triggerSeq": lambda value: value is None or _int_ok(value),
+    "onSeq": lambda value: value is None or _int_ok(value),
+    "offSeq": lambda value: value is None or _int_ok(value),
+    "hiddenTicks": lambda value: value is None or _int_ok(value),
+    "hiddenSeqs": _ints_ok,
+    "lateSeqs": lambda value: isinstance(value, list) and all(item is None or _int_ok(item) for item in value),
+    "target": lambda value: value is None or isinstance(value, dict),
+}
+PAINT_SCORE_FIELDS: dict[str, Callable[[Any], bool]] = {
+    "status": lambda value: value in ("ok", "fail", "inconclusive"),
+    "frames": _int_ok,
+    "coverage": lambda value: isinstance(value, dict),
+    "unobserved": lambda value: isinstance(value, list),
+    "unreadable": lambda value: isinstance(value, list),
+    "unpaintedSeqs": _ints_ok,
+    "partialSeqs": _ints_ok,
+    "unpaintedFrames": _int_ok,
+    "partialFrames": _int_ok,
+    "doubleFrames": _int_ok,
+    "substituteFrames": _int_ok,
+}
+
+
 def pv_schema_problem(pv: Any) -> str | None:
-    """Why a pre-paint read cannot be classified: not an object, or a `PV_FIELDS` field missing or ill-typed (an
-    explicit null is a reading where the field allows it, e.g. `visibleRect: null` is offscreen), else None."""
-    if not isinstance(pv, dict):
-        return "not an object"
-    for key, valid in PV_FIELDS.items():
-        if key not in pv:
-            return f"{key} missing"
-        if not valid(pv[key]):
-            return f"{key} ill-typed"
+    """`schema_problem` against `PV_FIELDS` (e.g. `visibleRect: null` is the offscreen reading, a missing one is not)."""
+    return schema_problem(pv, PV_FIELDS)
+
+
+def pp_schema_problem(pp: Any) -> str | None:
+    """`schema_problem` of a frame's pre-paint read against `PP_FIELDS` (`cover` a present bool)."""
+    return schema_problem(pp, PP_FIELDS)
+
+
+def control_record_problem(record: Any) -> str | None:
+    """Why an injector record cannot vouch for a control: `CONTROL_RECORD_FIELDS`, and once fired without an abort
+    (itself inconclusive), integer `onSeq`/`offSeq`/`hiddenTicks` with `offSeq == onSeq + control.n` (never an
+    early off), else None."""
+    problem = schema_problem(record, CONTROL_RECORD_FIELDS)
+    if problem or not record["fired"] or record["aborted"]:
+        return problem
+    on, off, ticks = record["onSeq"], record["offSeq"], record["hiddenTicks"]
+    if not (_int_ok(on) and _int_ok(off) and _int_ok(ticks)):
+        return "fired without integer onSeq/offSeq/hiddenTicks"
+    if off != on + record["control"]["n"]:
+        return f"offSeq {off} is not onSeq {on} + n {record['control']['n']}"
     return None
 
 
@@ -557,12 +640,13 @@ def _pp_problem(row: dict[str, Any]) -> str | None:
     pp = row.get("pp")
     if not isinstance(pp, dict):
         return "no pre-paint read"
-    if pp.get("seq") != row.get("seq") or pp.get("ts") != row.get("ts"):
+    problem = pp_schema_problem(pp)
+    if problem:
+        return f"pre-paint read {problem}"
+    if pp["seq"] != row.get("seq") or pp["ts"] != row.get("ts"):
         return "pre-paint read of another frame"
-    if not (_num(pp.get("t")) and _num(row.get("t")) and pp["t"] >= row["t"]):
+    if not (_num(row.get("t")) and pp["t"] >= row["t"]):
         return "pre-paint read before the rAF read"
-    if not isinstance(pp.get("videos"), list):
-        return "pre-paint read without videos"
     return None
 
 
@@ -623,7 +707,7 @@ def score_paint(
             unreadable.append(dict(frame, reason="stage box"))
             continue
         expected = _meet(slot, stage)
-        cover = bool(row["pp"].get("cover"))
+        cover = row["pp"]["cover"]
         carried_state: tuple[str, str | None] = (UNPAINTED, "absent")
         carried_pv: dict[str, Any] | None = None
         at_slot: list[dict[str, Any]] = []
@@ -869,13 +953,18 @@ def score_paint_control(record: dict[str, Any], target_verdict: dict[str, Any], 
     """Plan §4 positive control, against the target carry's `score_paint` result (or a verdict holding it under
     `paint`). Pass needs the exact injected seq set on complete evidence; integrity breaks (abort, placement events,
     injector errors), an inconclusive paint score or any evidence gap (no frames, failed coverage, an unobserved or
-    unreadable frame) are inconclusive. `redSet == [target]` is the caller's check."""
+    unreadable frame) are inconclusive, as is a record failing `control_record_problem` or a paint score failing
+    `PAINT_SCORE_FIELDS`. `redSet == [target]` is the caller's check."""
     reasons: list[str] = []
     blockers: list[str] = []
     paint = _paint_of(target_verdict)
     if not isinstance(record, dict):
         return {"status": "fail", "reasons": ["no control record"]}
-    control = record.get("control") or {}
+    record_problem = control_record_problem(record)
+    if record_problem:
+        return {"status": "inconclusive", "reasons": [f"control record unreadable: {record_problem}"], "expectedSeqs": [],
+                "observedSeqs": None, "fired": record.get("fired") is True, "hiddenTicks": record.get("hiddenTicks")}
+    control = record["control"]
     if control.get("n") != n or control.get("timing") != timing:
         reasons.append(f"control record is n={control.get('n')} timing={control.get('timing')}, expected n={n} timing={timing}")
     if record.get("aborted"):
@@ -895,8 +984,11 @@ def score_paint_control(record: dict[str, Any], target_verdict: dict[str, Any], 
     if timing == "late" and n and record.get("lateSeqs") != [on, off]:
         reasons.append(f"late writer seqs {record.get('lateSeqs')} != {[on, off]}")
     observed: list[int] | None = None
+    paint_problem = schema_problem(paint, PAINT_SCORE_FIELDS) if paint is not None else None
     if paint is None:
-        reasons.append("target verdict has no paint score")
+        blockers.append("target verdict has no paint score")
+    elif paint_problem:
+        blockers.append(f"paint score unreadable: {paint_problem}")
     else:
         gaps = _evidence_gaps(paint.get("frames"), paint.get("coverage"), paint.get("unobserved"), paint.get("unreadable"))
         if paint.get("status") == "inconclusive" or gaps:

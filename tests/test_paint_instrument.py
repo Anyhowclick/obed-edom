@@ -184,6 +184,50 @@ def test_score_paint(rows, slot, expected) -> None:
             assert result[key] == value, (key, result)
 
 
+# Astra r6 #1: a pre-paint frame field missing or ill-typed is unobserved (inconclusive), never a reading.
+@pytest.mark.parametrize("change", [None, *({k: pi.schema_problem} for k in pi.PP_FIELDS), {"cover": None}],
+                         ids=["complete-dark-frames-stay-red", *(f"no-pp.{k}" for k in pi.PP_FIELDS), "null-cover"])
+def test_a_pre_paint_frame_field_missing_or_ill_typed_is_inconclusive(change) -> None:
+    rows = _rows(videos=_hide(60, 65, opacity=0.0))
+    for key, value in (change or {}).items():
+        if value is pi.schema_problem:
+            del rows[62]["pp"][key]
+        else:
+            rows[62]["pp"][key] = value
+    result = pi.score_paint(rows, 1, "movie-a", start=0.0, end=math.inf, slot_of=lambda r: SLOT,
+                            stage_box_of=lambda r: r["pp"].get("stageBox"), **SCORE_KW)
+    assert result["status"] == ("fail" if change is None else "inconclusive"), result["reasons"]
+
+
+def _clean_control() -> tuple[dict[str, Any], dict[str, Any]]:
+    record = {"control": {"n": 6, "variant": "ancestor-opacity", "phase": "pin", "timing": "early", "atScene": 2,
+                          "depth": 1, "delayTicks": 10},
+              "fired": True, "aborted": None, "events": [], "errors": [], "triggerSeq": 5, "onSeq": 15, "offSeq": 21,
+              "hiddenTicks": 6, "hiddenSeqs": list(range(15, 21)), "lateSeqs": [], "target": {"elId": 11, "node": "div#body"}}
+    paint = pi.score_paint(_rows(videos=_hide(15, 20, opacity=0.0)), 1, "movie-a", start=0.0, end=math.inf,
+                           slot_of=lambda r: SLOT, stage_box_of=lambda r: r["pp"]["stageBox"], **SCORE_KW)
+    return record, paint
+
+
+# Astra r6 #2: every recorder and paint-score field the control reads is present and typed, or it is inconclusive.
+@pytest.mark.parametrize("change", [
+    None, *(("record", k) for k in pi.CONTROL_RECORD_FIELDS), *(("paint", k) for k in pi.PAINT_SCORE_FIELDS),
+    ("early-off", None), ("string-on", None),
+], ids=["complete-control-passes", *(f"no-record.{k}" for k in pi.CONTROL_RECORD_FIELDS),
+        *(f"no-paint.{k}" for k in pi.PAINT_SCORE_FIELDS), "early-offSeq", "string-onSeq"])
+def test_a_control_record_or_paint_score_field_missing_is_inconclusive(change) -> None:
+    record, paint = _clean_control()
+    if change is not None:
+        where, key = change
+        if where == "early-off":
+            record["offSeq"] = 20
+        elif where == "string-on":
+            record["onSeq"] = "15"
+        else:
+            del (record if where == "record" else paint)[key]
+    assert pi.score_paint_control(record, paint, 6, "early")["status"] == ("pass" if change is None else "inconclusive")
+
+
 # ---------------------------------------------------------------- sampler_self_check, paint_census
 
 META = {"schema": 2, "rafTicks": 120, "overflow": 0, "errors": [], "lastTs": 120 * PERIOD, "prepaint": 120,
