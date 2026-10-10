@@ -3357,3 +3357,47 @@ console.log(JSON.stringify({
     }, result["module"]
     assert result["pooled"] == [result["srcInstance"]], result
     assert result["loop"] is True
+
+
+@pytest.mark.parametrize("loop,carried", [(True, False), (False, True)], ids=["loop-mismatch", "loop-match"])
+def test_the_real_core_refuses_a_loop_mismatched_carry_and_the_module_falls_back_to_retire(loop, carried):
+    """Codex S2 r1 #6 (plan §2.4): the real core's `carried` compares the source
+    decoder's `loop` with the glReplay entry's, as pin/bridge do. A mismatch is
+    refused before memoisation, so the module's `assetUnbound` stand-down and its
+    `release` retire the zone and the decoder; a matching decoder still binds."""
+    from test_live_continuity_js import _IDENTITY_STAGE, _gl_prelude, _run_full_core_in_node
+
+    entry = RUNTIME_PLAN["boundaries"][0]
+    assert entry["loop"] is False
+    result = _run_full_core_in_node(
+        plan=RUNTIME_PLAN, stage=_IDENTITY_STAGE,
+        after_core=_REAL_MODULE_AFTER_CORE.replace(
+            "__MODULE_SOURCE__", json.dumps(live_gl_replay_js.GL_REPLAY_JS)),
+        script=_gl_prelude(instance=entry["instanceRect"], measured=entry["instanceRect"]) + r"""
+location.hash = '#1';
+const v = makeMovie(INSTANCE, undefined, '__SRC__');
+v.loop = __LOOP__;
+tick();
+playerDetach(v);
+if (!v.__obedGlPooled) throw new Error('not pooled armed');
+S.note('glreplay-arm', {canvasId: '0-canvas', atScene: 2});
+const r = S.carried('movie1');
+const bound = {video: r.video === v, reason: r.reason, memo: S.carried('movie1').video === v,
+  notes: notesOf('glreplay-carried').length};
+if (!r.video) {
+  G2.standDowns.push('assetUnbound');
+  const out = S.release('movie1', {rect: SLOT});
+  console.log(JSON.stringify({bound, out: {ok: out.ok, mode: out.mode, reason: out.reason},
+    zone: zones().slice(-1)[0], v: census(v)}));
+} else {
+  console.log(JSON.stringify({bound, zone: zones().slice(-1)[0]}));
+}
+""".replace("__SRC__", entry["src"]["objectId"]).replace("__LOOP__", json.dumps(loop)))
+    if carried:
+        assert result["bound"] == {"video": True, "reason": None, "memo": True, "notes": 1}
+        assert result["zone"][:3] == ["pending", "armed", "moduleReady"]
+        return
+    assert result["bound"] == {"video": False, "reason": "loopMismatch", "memo": False, "notes": 0}
+    assert result["out"] == {"ok": True, "mode": "retire", "reason": "failure"}
+    assert result["zone"][:3] == ["armed", "retired", "failure"]
+    assert (result["v"]["paused"], result["v"]["gen"], result["v"]["pooled"]) == (True, -1, False)

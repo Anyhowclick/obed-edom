@@ -11,7 +11,7 @@ or any `schema` other than 2 => the core installs nothing):
     {
       "schema": 2,
       "movies": {
-        "<movieKey>": {"assetKeys": ["<substring(s) of the <video> src>"],
+        "<movieKey>": {"assetKeys": ["<canonical asset name of the <video> src>"],
                         "footprint": {"x": int, "y": int, "w": int, "h": int}}
       },
       "boundaries": [   // one entry per (boundary, planned instance)
@@ -376,7 +376,7 @@ PRESERVE_CORE_JS = r"""
   function assetKey(src) {
     const s = String(src || '');
     const tail = (s.split('/').pop() || s).split('?')[0];
-    const m = tail.match(/^(.+\.(mov|mp4|m4v))-\d+\.\d+-\d+\.\d+\.\2$/i);
+    const m = tail.match(/^(.+)-\d+\.\d+-\d+\.\d+\.[A-Za-z0-9]+$/);
     if (m) return m[1].toLowerCase();
     return tail.toLowerCase();
   }
@@ -621,6 +621,7 @@ PRESERVE_CORE_JS = r"""
     const matches = measured.filter(function(v) { return rectDelta(v.__obedAuthoredRect, GL.instanceRect) <= 1.0; });
     if (matches.length !== 1) return {video: null, reason: 'ambiguous'};
     const v = matches[0];
+    if (!!v.loop !== !!GL.loop) return {video: null, reason: 'loopMismatch'};
     carriedMemo = v;
     v.__obedGlCarried = true;
     note('glreplay-carried', {
@@ -1341,17 +1342,21 @@ PRESERVE_CORE_JS = r"""
     return (OBED_PLAN && OBED_PLAN.movies && typeof OBED_PLAN.movies === 'object') ? OBED_PLAN.movies : {};
   }
   // Asset identity of a movie <video> by its source, never elId parity (which
-  // lets a second movie alias onto the wrong movie's canvas).
+  // lets a second movie alias onto the wrong movie's canvas). Exact canonical
+  // name, as the derivation keys it; a name two movies claim is no match.
   function movieAssetKey(src) {
-    const s = String(src || '').toLowerCase();
+    const name = assetKey(src);
     const movies = planMovies();
+    let found = null;
     for (const k in movies) {
       const keys = (movies[k] && movies[k].assetKeys) || [];
       for (let i = 0; i < keys.length; i++) {
-        if (s.indexOf(String(keys[i]).toLowerCase()) >= 0) return k;
+        if (String(keys[i]).toLowerCase() !== name) continue;
+        if (found !== null && found !== k) return null;
+        found = k;
       }
     }
-    return null;
+    return found;
   }
   function footprintKeyForRect(rect) {
     let bestKey = null, bestDist = Infinity;

@@ -30,7 +30,7 @@ def test_continuity_version_is_pinned_int():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "00c8fb825c61a7e527c82b656517077bde59944ce986fcd00d3fb27a526d3e36"
+PINNED_CORE_SHA256 = "9cd8b4197d27750e1761ab7515989fa2f6e7760ca17842fa8c21ec57e335eba7"
 
 
 def test_js_sha256_hashes_the_core_bytes_and_matches_the_pinned_literal():
@@ -4062,6 +4062,108 @@ console.log(JSON.stringify({pooled: P.snapshot().length, src: a.src, kinds: kind
   ['reuse-skip-boundary', 'retire-on-start-movie', 'preserve-refused', 'reuse-decoder'].indexOf(k) >= 0)}));
 """)
     assert result == {"pooled": 0, "src": "", "kinds": []}
+
+
+#: Two movies whose canonical asset names overlap: `a.mov` is a substring of
+#: `ba.mov`, and the derivation emits `a.mov` first. movie2 pins B1->B2 and
+#: restarts at scene 6 (B2->B3); movie1 pins A1->A2 and never restarts.
+_OVERLAP_PLAN = {
+    "schema": 2,
+    "movies": {
+        "movie1": {"assetKeys": ["a.mov"], "footprint": _FOOTPRINT},
+        "movie2": {"assetKeys": ["ba.mov"], "footprint": _W_RECT},
+    },
+    "boundaries": [
+        {"atScene": 2, "action": "pin", "movieKey": "movie1", "loop": False,
+         "src": _inst("A1", _FOOTPRINT), "dst": _inst("A2", _FOOTPRINT)},
+        {"atScene": 2, "action": "pin", "movieKey": "movie2", "loop": False,
+         "src": _inst("B1", _W_RECT), "dst": _inst("B2", _W_RECT)},
+        {"atScene": 6, "action": "restart", "movieKey": "movie2",
+         "src": _inst("B2", _W_RECT), "dst": _inst("B3", _W_RECT)},
+    ],
+}
+
+
+def test_restart_of_an_overlapping_asset_name_retires_its_own_carried_decoder():
+    """Codex S2 r1 #3: a fresh `ba.mov` must be classified as `ba.mov`, not as the
+    first plan key it contains (`a.mov`), or `retireRestarted` skips movie2's
+    restart entry and the carried overlay lingers beside the fresh decoder."""
+    result = _run_chain(_OVERLAP_PLAN, r"""
+const A = 'https://host/a.mov', BA = 'https://host/ba.mov';
+goToScene(0);
+const a = playing('A1', A);
+const b = playing('B1', BA);
+goToScene(1);
+detach(a);
+detach(b);
+goToScene(2);
+const a2 = fresh('A2', A);
+const b2 = fresh('B2', BA);
+const carried = {a: a2.__obedFacadeFor === a, b: b2.__obedFacadeFor === b};
+goToScene(5);
+detach(b);
+goToScene(6);
+const c = fresh('B3', BA);
+console.log(JSON.stringify({
+  carried, bId: b.__obedElId,
+  retire: notesOf('retire-on-start-movie'),
+  b: {gen: b.__obedGen, paused: b.paused}, aGen: a.__obedGen, cFacade: !!c.__obedFacadeFor,
+}));
+""")
+    assert result["carried"] == {"a": True, "b": True}
+    assert result["retire"] == [{"key": "ba.mov", "elIds": [result["bId"]], "hashNum": 6, "sceneHash": "#6"}]
+    assert result["b"] == {"gen": -1, "paused": True}
+    assert result["aGen"] == 0
+    assert result["cFacade"] is False
+
+
+@pytest.mark.parametrize("filename", [
+    "Untitled.mov-0.0000-46.0333.mov", "Clip.m4v-0.0000-1.5000.mp4", "Talk.webm-1.0-2.0.webm", "plain.MOV",
+])
+def test_a_src_matches_the_movie_the_derivation_keyed_by_its_canonical_name(filename):
+    """The exact match is against the derivation's own canonical name
+    (`_normalize_asset_key`), so the core must canonicalize a src the same way."""
+    from obed_edom.live_continuity import _normalize_asset_key
+
+    key = _normalize_asset_key({"x": {"url": {"web": "assets/" + filename}}}, "x")
+    plan = {**_MOVIE_PLAN, "movies": {"movie1": {"assetKeys": [key], "footprint": _FOOTPRINT}}}
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing('A1');
+goToScene(1);
+detach(a);
+goToScene(2);
+const a2 = fresh('A2');
+console.log(JSON.stringify({facade: a2.__obedFacadeFor === a, carries: notesOf('reuse-decoder').length}));
+""", src="assets/" + filename)
+    assert result == {"facade": True, "carries": 1}
+
+
+def test_an_asset_name_two_movies_claim_matches_neither():
+    """Fail safe: a src whose canonical name more than one plan movie claims has
+    no movie identity, so it is never pooled for a carry."""
+    plan = {
+        "schema": 2,
+        "movies": {
+            "movie1": {"assetKeys": ["a.mov"], "footprint": _FOOTPRINT},
+            "movie2": {"assetKeys": ["A.mov"], "footprint": _W_RECT},
+        },
+        "boundaries": [
+            {"atScene": 2, "action": "pin", "movieKey": "movie1", "loop": False,
+             "src": _inst("A1", _FOOTPRINT), "dst": _inst("A2", _FOOTPRINT)},
+        ],
+    }
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing('A1', 'https://host/a.mov');
+goToScene(1);
+detach(a);
+goToScene(2);
+const a2 = fresh('A2', 'https://host/a.mov');
+console.log(JSON.stringify({pooled: P.snapshot().filter(x => !x.fromDom).length, facade: !!a2.__obedFacadeFor,
+  carries: notesOf('reuse-decoder').length}));
+""")
+    assert result == {"pooled": 0, "facade": False, "carries": 0}
 
 
 def test_p2_flag_off_contract_end_to_end():
