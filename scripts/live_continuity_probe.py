@@ -2118,8 +2118,9 @@ def score_continuity(
     `min_window_start` clips the window's start (a forced wrap's seek stays outside it);
     `chain_clip` (`carry_window_clip`) narrows it to the boundary's own two slides, noted as
     `chainClipped` only when it does narrow.
-    Schema-2 rows (`seq`) are also scored per frame (`carry_paint`) unless `paint` is False: a
-    failing paint score is False and an inconclusive one turns an otherwise green verdict None.
+    Schema-2 rows (`seq`) are also scored per frame (`carry_paint`) unless `paint` is False, on
+    every exit once the window is known (the no-spanning-decoder False included): a failing paint
+    score is False and an incomplete one makes the verdict None, whatever the legacy checks said.
     """
     tracks = track_by_id(samples, asset_substr)
     if not decoded_anywhere(tracks):
@@ -2138,6 +2139,23 @@ def score_continuity(
         clipped["end"], window["end"] = window["end"], clip_end
     if clipped:
         window["chainClipped"] = clipped
+
+    def paint_gated(scored: dict[str, Any], element_id: Any) -> dict[str, Any]:
+        if not (paint and any("seq" in sample for sample in samples)):
+            return scored
+        floor = [value for value in (clip_start, min_window_start) if value is not None]
+        scored["paint"] = carry_paint(
+            samples, element_id, asset_substr, window, boundary_scene, src_rect, dst_rect,
+            transition_scene=transition_scene, rect_tolerance=rect_tolerance, floor=max(floor) if floor else None,
+        )
+        status = scored["paint"].get("status")
+        if status == "fail":
+            scored["verdict"] = False
+        elif status != "ok":
+            scored["verdict"] = None
+            scored["reason"] = f"inconclusive: paint {'; '.join(map(str, scored['paint'].get('reasons') or [])) or status}"
+        return scored
+
     windowed = {
         element_id: [r for r in rows if window["start"] <= r["t"] <= window["end"]]
         for element_id, rows in tracks.items()
@@ -2147,13 +2165,13 @@ def score_continuity(
     after_ids = {i for i, rows in windowed.items() if any(r["scene"] is not None and r["scene"] >= boundary_scene for r in rows)}
     common = before_ids & after_ids
     if not common:
-        return {
+        return paint_gated({
             "verdict": False,
             "reason": "no decoder id spans the boundary within the window",
             "beforeIds": sorted(before_ids),
             "afterIds": sorted(after_ids),
             "window": window,
-        }
+        }, min(before_ids or after_ids, default=None))
     def _at_expected_rect(row: dict[str, Any]) -> bool:
         if is_move_sample(row, transition_scene):
             return path_progress(row.get("rect"), src_rect, dst_rect, rect_tolerance) is not None
@@ -2257,19 +2275,7 @@ def score_continuity(
     }
     if wraps is not None:
         scored.update(wraps=len(wraps), wrapTimes=wraps, wrapOwnerExcused=wrap_owner_excused)
-    if paint and any("seq" in sample for sample in samples):
-        floor = [value for value in (clip_start, min_window_start) if value is not None]
-        scored["paint"] = carry_paint(
-            samples, element_id, asset_substr, window, boundary_scene, src_rect, dst_rect,
-            transition_scene=transition_scene, rect_tolerance=rect_tolerance, floor=max(floor) if floor else None,
-        )
-        status = scored["paint"].get("status")
-        if status == "fail":
-            scored["verdict"] = False
-        elif status != "ok":
-            scored["verdict"] = None
-            scored["reason"] = f"inconclusive: paint {'; '.join(map(str, scored['paint'].get('reasons') or [])) or status}"
-    return scored
+    return paint_gated(scored, element_id)
 
 
 def paint_start(

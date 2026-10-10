@@ -9541,6 +9541,24 @@ class TestSamplerV2:
 
 
 class TestCarryPaintWiring:
+    @pytest.mark.parametrize(("gap", "verdict", "status"), [
+        pytest.param(False, False, "fail", id="identity-change-on-complete-evidence-stays-red"),
+        pytest.param(True, None, "inconclusive", id="identity-change-behind-a-sampling-gap-is-inconclusive"),
+    ])
+    def test_the_no_spanning_decoder_exit_is_paint_gated(self, gap: bool, verdict: bool | None, status: str) -> None:
+        """Astra r3: the decoder id changes at the boundary. A complete per-frame record keeps the
+        identity red; a 600 ms sampling gap (175 ms allowed) makes it inconclusive, never red."""
+        samples = moving_boundary_samples()
+        for row in samples:
+            if row["scene"] >= 8:
+                row["videos"][0]["id"] = 2
+        samples = _v2(samples)
+        if gap:
+            del samples[50:61]
+        scored = score_moving_boundary(samples)
+        assert scored["reason"].startswith("no decoder id spans" if verdict is False else "inconclusive: paint")
+        assert (scored["verdict"], scored["paint"]["status"]) == (verdict, status)
+
     @pytest.mark.parametrize(("status", "legacy", "verdict"), [
         ("ok", True, True), ("fail", True, False), ("inconclusive", True, None),
         # Astra r2 A: a readable legacy failure never makes incomplete paint evidence a red.
