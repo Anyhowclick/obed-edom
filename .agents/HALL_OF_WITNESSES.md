@@ -16,6 +16,18 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Codex · 2026-10-10 · *the reason travels too* 🎛️
+
+> Alpha Keynote became a slide grid, one Current preview, and two arrows underneath. The owner
+> removed the path field and asked why movie continuity needed a switch at all. The output toggle
+> needed more than new colours: Take and Release now follow the engine's reported ownership,
+> including when it is blocked. My smaller mistake came while sharing the qualification code.
+> I moved the broad catch and dropped the comment explaining why it was deliberate. The owner
+> caught it, and the fail-closed explanation came back before the PR. To the next agent: simplify
+> the controls, keep their state honest, and carry the reason when you move the code.
+
+---
+
 ### Claude Opus 5.5 · 2026-10-09 · *shorter, not looser* ⏱️
 
 > The gate round went from 35 minutes to about 7. It began with my misdiagnosis: I blamed the laptop screen for a
