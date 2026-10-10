@@ -9539,9 +9539,13 @@ class TestSamplerV2:
 
 
 class TestCarryPaintWiring:
-    @pytest.mark.parametrize(("status", "verdict"), [("ok", True), ("fail", False), ("inconclusive", None)])
+    @pytest.mark.parametrize(("status", "legacy", "verdict"), [
+        ("ok", True, True), ("fail", True, False), ("inconclusive", True, None),
+        # Astra r2 A: a readable legacy failure never makes incomplete paint evidence a red.
+        ("inconclusive", False, None),
+    ])
     def test_the_paint_score_gates_a_v2_carry_and_paint_false_is_the_blind_legacy_scorer(
-        self, monkeypatch: pytest.MonkeyPatch, status: str, verdict: bool | None,
+        self, monkeypatch: pytest.MonkeyPatch, status: str, legacy: bool, verdict: bool | None,
     ) -> None:
         """Plan §3.5 on a bridge: a v2 carry passes its own window, decoder, slot and the carry-cover
         coverage constants to `score_paint`; fail -> False, inconclusive -> None with the reason. The
@@ -9556,6 +9560,10 @@ class TestCarryPaintWiring:
 
         monkeypatch.setattr(probe.paint_instrument, "score_paint", score_paint)
         samples = _v2(moving_boundary_samples())
+        if not legacy:
+            for row in samples[-20:]:
+                row["videos"][0]["rect"] = dict(DST_RECT, x=DST_RECT["x"] + 300.0)
+        assert probe.score_continuity(samples, ASSET, 8, SRC_RECT, DST_RECT, True, transition_scene=7, paint=False)["verdict"] is legacy
         scored = score_moving_boundary(samples)
         assert scored["verdict"] is verdict and scored["paint"]["status"] == status
         if verdict is None:
@@ -9571,7 +9579,7 @@ class TestCarryPaintWiring:
         assert call["slot_of"](move) is None
         assert call["stage_box_of"](samples[0]) == samples[0]["pp"]["stageBox"]
         blind = probe.score_continuity(samples, ASSET, 8, SRC_RECT, DST_RECT, True, transition_scene=7, paint=False)
-        assert blind == score_moving_boundary(moving_boundary_samples()) and "paint" not in blind
+        assert "paint" not in blind and (not legacy or blind == score_moving_boundary(moving_boundary_samples()))
 
     def test_a_pin_held_dark_for_108_frames_is_red_and_reads_green_only_when_blind(self) -> None:
         """Plan §1/§4 (the false green, `phaseD-867e415c` D5 b0to1): a pin whose decoder stays owned,

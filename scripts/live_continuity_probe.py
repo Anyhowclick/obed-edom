@@ -2264,7 +2264,7 @@ def score_continuity(
         status = scored["paint"].get("status")
         if status == "fail":
             scored["verdict"] = False
-        elif status != "ok" and ok:
+        elif status != "ok":
             scored["verdict"] = None
             scored["reason"] = f"inconclusive: paint {'; '.join(map(str, scored['paint'].get('reasons') or [])) or status}"
     return scored
