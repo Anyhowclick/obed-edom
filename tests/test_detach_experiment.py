@@ -11,6 +11,7 @@ import hashlib
 import sys
 from pathlib import Path
 from typing import Any
+from unittest.mock import ANY
 
 import pytest
 
@@ -116,10 +117,14 @@ def test_the_slice_refuses_a_table_whose_r8_is_not_the_preload() -> None:
 def test_serving_patches_only_inside_the_context_and_restores(monkeypatch) -> None:
     monkeypatch.delenv(live_runtime.MM_OPACITY_ENV, raising=False)
     original = live_runtime._MM_OPACITY_REPLACEMENTS
+    pinned = live_runtime._pinned
     with dx.serving("V7"):
         assert live_runtime._MM_OPACITY_REPLACEMENTS == tuple(original[:7])
         assert dx.os.environ[live_runtime.MM_OPACITY_ENV] == "auto"
+        # The variant's bytes are not the product's pinned digest; the experiment pins them itself.
+        assert live_runtime._pinned(b"unpinned", "0" * 64) == b"unpinned"
     assert live_runtime._MM_OPACITY_REPLACEMENTS is original
+    assert live_runtime._pinned is pinned
     with dx.serving("off"):
         assert live_runtime._MM_OPACITY_REPLACEMENTS is original
         assert dx.os.environ[live_runtime.MM_OPACITY_ENV] == "off"
@@ -133,7 +138,7 @@ def _synthetic_player() -> bytes:
 @pytest.mark.parametrize("variant", ["V8", "V7", "V5", "V5+8"])
 def test_served_sha_is_the_sha_of_exactly_the_variants_replacements(monkeypatch, variant: str) -> None:
     player = _synthetic_player()
-    monkeypatch.setattr(live_runtime, "PLAYER_SHA256", hashlib.sha256(player).hexdigest())
+    monkeypatch.setitem(live_runtime.SUPPORTED_PLAYERS, hashlib.sha256(player).hexdigest(), (ANY,) * 3)
     with dx.serving(variant):
         served = live_runtime.patch_player(player)
     applied = set(dx.VARIANT_INDICES[variant])
@@ -492,7 +497,7 @@ def test_level2_install_patches_only_inside_the_context_and_restores() -> None:
 
 def test_level2_served_sha_differs_from_level1_by_exactly_the_install(monkeypatch) -> None:
     player = _synthetic_player()
-    monkeypatch.setattr(live_runtime, "PLAYER_SHA256", hashlib.sha256(player).hexdigest())
+    monkeypatch.setitem(live_runtime.SUPPORTED_PLAYERS, hashlib.sha256(player).hexdigest(), (ANY,) * 3)
     with dx.serving("V8"), dx.level2_install():
         served = live_runtime.patch_player(player)
     assert b"__obedDebugController" in served

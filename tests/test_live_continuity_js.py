@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -30,7 +31,7 @@ def test_continuity_version_is_pinned_int():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "6431ec0e83eab0e3f6fe9ea56a0f7dabb521918f2c58fd938ef7c9287bd8fed2"
+PINNED_CORE_SHA256 = "d71d1e76caa1c321cb784d15c29701793ee3e24afdcb1b06e6df7a3d0909af8f"
 
 
 def test_js_sha256_hashes_the_core_bytes_and_matches_the_pinned_literal():
@@ -231,6 +232,36 @@ def _stage_map_el_js(stage: dict) -> str:
 }};"""
 
 
+def _ease_in_ease_out_reference(p: float) -> float:
+    """Keynote's `EaseInEaseOut` = CSS cubic-bezier(.42,0,.58,1), solved independently
+    of the core: Bernstein form in exact rationals, x(t) = p by 80 bisection steps
+    (|t error| < 2**-80), then y(t). Python's own reference, not the JS evaluator."""
+    x1, y1, x2, y2 = Fraction(42, 100), Fraction(0), Fraction(58, 100), Fraction(1)
+
+    def bernstein(t: Fraction, a: Fraction, b: Fraction) -> Fraction:
+        return 3 * (1 - t) ** 2 * t * a + 3 * (1 - t) * t ** 2 * b + t ** 3
+
+    target = Fraction(p)
+    lo, hi = Fraction(0), Fraction(1)
+    for _ in range(80):
+        mid = (lo + hi) / 2
+        if bernstein(mid, x1, x2) < target:
+            lo = mid
+        else:
+            hi = mid
+    return float(bernstein((lo + hi) / 2, y1, y2))
+
+
+#: The bridge fixture's authored rects (P2 3->4 shape), shared by the motion harnesses.
+_BRIDGE_SRC = {"x": 198, "y": 797, "w": 952, "h": 268}
+_BRIDGE_DEST = {"x": 327, "y": 709, "w": 1266, "h": 356}
+
+
+def _eased_bridge_rect(fraction: float) -> dict:
+    e = _ease_in_ease_out_reference(fraction)
+    return {k: _BRIDGE_SRC[k] + (_BRIDGE_DEST[k] - _BRIDGE_SRC[k]) * e for k in ("x", "y", "w", "h")}
+
+
 def _run_bridge_motion_in_node(*, stop_before_retry: bool = False, stage: dict = _IDENTITY_STAGE) -> dict:
     core = live_continuity_js.PRESERVE_CORE_JS
     start = core.index("  function dstRect(entry) {")
@@ -286,12 +317,14 @@ console.log(JSON.stringify({{
 
 @pytest.mark.parametrize("stop_before_retry", [False, True])
 def test_bridge_redetach_reconnects_without_rewinding_motion(stop_before_retry):
+    """The retry keeps the original start time: 550 ms into the 1.5 s move is
+    still 11/30 of the eased curve, not a restart from the source rect."""
     result = _run_bridge_motion_in_node(stop_before_retry=stop_before_retry)
-    assert result["beforeDetach"] == pytest.approx(241)
+    assert result["beforeDetach"] == pytest.approx(_eased_bridge_rect(1 / 3)["x"])
     assert result["reattached"] is True
+    at = _eased_bridge_rect(11 / 30)
     assert result["afterRetry"] == pytest.approx({
-        "left": 245.3, "top": 764.7333333333,
-        "width": 1067.1333333333, "height": 300.2666666667,
+        "left": at["x"], "top": at["y"], "width": at["w"], "height": at["h"],
     })
     # A clear (generation bump) stops the motion callbacks.
     assert result["unchangedAfterClear"] is True
@@ -1524,6 +1557,68 @@ console.log(JSON.stringify({
     assert result["refusalVias"] == ["stash"]
     assert result["bridge"] == [result["freshElId"]]
     assert result["suppressed"] is True
+
+
+_BRIDGE_FRACTIONS = (0, 0.25, 0.5, 0.75, 1)
+
+
+def _bridge_overlay_rects() -> dict:
+    """Drive the real core's bridge overlay: a live `movie1` decoder detached on
+    the 3->4 transition scene (#7) engages `keepThroughBridge` synchronously (its
+    first frame is fraction 0), then its rAF loop is stepped at each fraction of
+    the plan's 1.5 s `durationSeconds`."""
+    script = r"""
+const t0 = 1000;
+nowMs = t0;
+goToScene(7);
+const v = video('A3');
+v.readyState = 4; v.currentTime = 2; v.parentNode = bodyEl;
+v.src = 'https://host/untitled.mov';
+detach(v);
+const read = () => Object.fromEntries(
+  [['x', 'left'], ['y', 'top'], ['w', 'width'], ['h', 'height']].map(([k, css]) => [k, parseFloat(v.style[css])])
+);
+const rects = [read()];
+__FRACTIONS__.slice(1).forEach((f) => {
+  nowMs = t0 + f * 1500;
+  pump();
+  rects.push(read());
+});
+console.log(JSON.stringify({
+  rects,
+  onBody: v.parentNode === bodyEl,
+  motionStarts: P.events.filter(e => e.kind === 'bridge-motion-start').length,
+}));
+""".replace("__FRACTIONS__", json.dumps(list(_BRIDGE_FRACTIONS)))
+    return _run_full_core_in_node(plan=_NO_RETIRE_PLAN, stage=_IDENTITY_STAGE, script=script)
+
+
+def test_bridge_overlay_follows_the_exports_ease_in_ease_out():
+    """Root cause of the 3->4 "rubber band": Keynote's player draws the movie's GL
+    poster along the export's `EaseInEaseOut` (cubic-bezier(.42,0,.58,1), the only
+    timing function the plan admits), so a linearly moved overlay lets the poster
+    peek out mid-move. The overlay rect at each fraction of the duration must equal
+    the eased prediction from an independent Python solver; endpoints exactly."""
+    result = _bridge_overlay_rects()
+    assert result["onBody"] is True
+    assert result["motionStarts"] == 1
+    rects = dict(zip(_BRIDGE_FRACTIONS, result["rects"]))
+    assert rects[0] == _BRIDGE_SRC
+    assert rects[1] == _BRIDGE_DEST
+    for fraction in _BRIDGE_FRACTIONS:
+        assert rects[fraction] == pytest.approx(_eased_bridge_rect(fraction), abs=1e-6), fraction
+
+
+def test_bridge_overlay_is_not_linear_off_the_midpoint():
+    """Red check for the old model: a linear overlay matches at 0, .5 and 1 (the
+    curve is symmetric) but lags/leads at .25/.75 by >10 authored px on every axis."""
+    result = _bridge_overlay_rects()
+    rects = dict(zip(_BRIDGE_FRACTIONS, result["rects"]))
+    for fraction in (0.25, 0.75):
+        linear = {k: _BRIDGE_SRC[k] + (_BRIDGE_DEST[k] - _BRIDGE_SRC[k]) * fraction for k in _BRIDGE_SRC}
+        for key in ("x", "y", "w", "h"):
+            assert abs(rects[fraction][key] - linear[key]) > 10, (fraction, key)
+    assert rects[0.5] == pytest.approx({k: (_BRIDGE_SRC[k] + _BRIDGE_DEST[k]) / 2 for k in _BRIDGE_SRC})
 
 
 @pytest.mark.parametrize("scene", _IN_ZONE, ids=[f"scene{s}" for s in _IN_ZONE])

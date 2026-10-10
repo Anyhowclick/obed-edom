@@ -1,4 +1,4 @@
-"""Observation hook and Magic Move rendering fidelity patch for one explicitly supported Keynote HTML player."""
+"""Observation hook and Magic Move rendering fidelity patch for explicitly supported Keynote HTML players."""
 
 from __future__ import annotations
 
@@ -6,7 +6,20 @@ import hashlib
 
 RUNTIME_VERSION = 2
 MM_OPACITY_ENV = "OBED_LIVE_MM_OPACITY"
-PLAYER_SHA256 = "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354"
+# Stock player sha256 -> sha256 of its patch_player output with Magic Move opacity on, off, and its patch_rendering output.
+# 17c0c938 is e9b2fad4 plus two `,isEvalSupported:!1` PDF.js options, outside every anchor.
+SUPPORTED_PLAYERS = {
+    "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354": (
+        "574274e88485745a6f55a8563d43ddfb91299db6e4d749fd34719436ade751bf",
+        "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
+        "fd81193887728094df6d017fff5dfac99a5058fab02b3c9a1b92bd93ac88fe23",
+    ),
+    "17c0c938caa49d5c70bd83bd5b84f57381faa51602932ca733aa965055026d91": (
+        "330ef72c1725c327b7bf025654299851cf4405947b303f03ebfee0d2e59b007f",
+        "4f9fbffd95e4649543142b2e95586babd9d75f0a0d9a4974e21d6f33c8389e3b",
+        "33fcdcd2195d8b65431b02c84641e565168dfb74ff3c0911a3c70227c83ac460",
+    ),
+}
 _ANCHOR = b"UC=new Eg,UC.displayManager.showWaitingIndicator()"
 
 _MM_OPACITY_NODE = (
@@ -169,7 +182,8 @@ def patch_player(player: bytes, *, mm_opacity: bool = True) -> bytes:
     """Instrument a known player; with `mm_opacity`, draw Magic Move leaves at their authored chain opacity,
     hide each swapped DOM node in the same task that queues its first GL draw, and crossfade each scaled leaf
     without a `contents` animation to its matched next-slide texture so the settled frame lands on the DOM."""
-    if hashlib.sha256(player).hexdigest() != PLAYER_SHA256:
+    pins = SUPPORTED_PLAYERS.get(hashlib.sha256(player).hexdigest())
+    if pins is None:
         raise LiveRuntimeUnsupported("This Keynote HTML player version is not supported for live output.")
     if player.count(_ANCHOR) != 1:
         raise LiveRuntimeUnsupported("The supported player observation hook is missing or ambiguous.")
@@ -177,14 +191,21 @@ def patch_player(player: bytes, *, mm_opacity: bool = True) -> bytes:
         _ANCHOR,
         b"UC=new Eg," + _INSTALL + b",UC.displayManager.showWaitingIndicator()",
     )
-    return _apply_mm_opacity(patched) if mm_opacity else patched
+    return _pinned(_apply_mm_opacity(patched), pins[0]) if mm_opacity else _pinned(patched, pins[1])
 
 
 def patch_rendering(player: bytes) -> bytes:
     """Apply only the Magic Move rendering fidelity patch of `patch_player`, without the observation hook."""
-    if hashlib.sha256(player).hexdigest() != PLAYER_SHA256:
+    pins = SUPPORTED_PLAYERS.get(hashlib.sha256(player).hexdigest())
+    if pins is None:
         raise LiveRuntimeUnsupported("This Keynote HTML player version is not supported for the preview opacity patch.")
-    return _apply_mm_opacity(player)
+    return _pinned(_apply_mm_opacity(player), pins[2])
+
+
+def _pinned(patched: bytes, expected: str) -> bytes:
+    if hashlib.sha256(patched).hexdigest() != expected:
+        raise LiveRuntimeUnsupported("The patched player does not match its pinned digest.")
+    return patched
 
 
 def _apply_mm_opacity(player: bytes) -> bytes:

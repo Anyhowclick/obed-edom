@@ -8,7 +8,9 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+
 from pathlib import Path
+from unittest.mock import ANY
 
 import pytest
 
@@ -476,7 +478,7 @@ def _pinned_player(monkeypatch) -> bytes:
     from tests.test_live_runtime import _synthetic_player
 
     player = _synthetic_player()
-    monkeypatch.setattr(live_runtime, "PLAYER_SHA256", hashlib.sha256(player).hexdigest())
+    monkeypatch.setitem(live_runtime.SUPPORTED_PLAYERS, hashlib.sha256(player).hexdigest(), (ANY,) * 3)
     return player
 
 

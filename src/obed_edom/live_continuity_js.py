@@ -66,9 +66,11 @@ paints it; `released` is pin. The module talks to it only through
 `window.__OBED_P2_PRESERVE__.glReplay` (installed only for such a plan).
 Plan: the G3+G4 plan §1–§2 (PR #214).
 
-The bridge moves during the preceding transition scene using linear interpolation
-over the exported duration. This is a fallback for WebGL movie geometry with no
-unambiguous animated DOM rectangle; it does not attest native Keynote easing.
+The bridge moves during the preceding transition scene over the exported duration,
+eased by the export's `EaseInEaseOut` (CSS cubic-bezier(.42,0,.58,1), the only
+timing function the plan admits) so the carried movie tracks the player's GL
+poster. This is a fallback for WebGL movie geometry with no unambiguous animated
+DOM rectangle.
 
 Scaled-stage mapping (I3): the player scales `#stage` with a CSS transform, so
 `#stage.offsetWidth/Height` (authored px, transform-blind) and
@@ -1042,6 +1044,32 @@ PRESERVE_CORE_JS = r"""
     if (r && typeof r === 'object' && r.w > 1 && r.h > 1) return r;
     return null;
   }
+  const EASE_IN_EASE_OUT = {x1: 0.42, y1: 0, x2: 0.58, y2: 1};
+  function bezierAxis(t, p1, p2) {
+    return ((1 + 3 * p1 - 3 * p2) * t + (3 * p2 - 6 * p1)) * t * t + 3 * p1 * t;
+  }
+  function bezierAxisSlope(t, p1, p2) {
+    return (3 * (1 + 3 * p1 - 3 * p2) * t + 2 * (3 * p2 - 6 * p1)) * t + 3 * p1;
+  }
+  function easeInEaseOut(p) {
+    const e = EASE_IN_EASE_OUT;
+    if (!(p > 0)) return 0;
+    if (p >= 1) return 1;
+    let t = p;
+    for (let i = 0; i < 8; i++) {
+      const err = bezierAxis(t, e.x1, e.x2) - p;
+      if (Math.abs(err) < 1e-9) return bezierAxis(t, e.y1, e.y2);
+      const slope = bezierAxisSlope(t, e.x1, e.x2);
+      if (Math.abs(slope) < 1e-6) break;
+      t -= err / slope;
+    }
+    let lo = 0, hi = 1;
+    while (hi - lo > 1e-9) {
+      t = (lo + hi) / 2;
+      if (bezierAxis(t, e.x1, e.x2) < p) lo = t; else hi = t;
+    }
+    return bezierAxis((lo + hi) / 2, e.y1, e.y2);
+  }
   function keepThroughBridge(v) {
     const boundary = nextEntry(instanceOf(v));
     const hn = currentHashNum();
@@ -1084,7 +1112,7 @@ PRESERVE_CORE_JS = r"""
         v.__obedMotionPinning = false;
         return;
       }
-      const progress = Math.min(1, Math.max(0, (performance.now() - started) / (1000 * boundary.durationSeconds)));
+      const progress = easeInEaseOut((performance.now() - started) / (1000 * boundary.durationSeconds));
       const authored = {
         x: src.x + (dest.x - src.x) * progress,
         y: src.y + (dest.y - src.y) * progress,

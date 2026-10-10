@@ -5,7 +5,9 @@ import json
 import math
 import shutil
 import subprocess
+
 from pathlib import Path
+from unittest.mock import ANY
 
 import pytest
 
@@ -22,14 +24,14 @@ def test_unknown_player_is_refused():
 
 def test_patch_requires_exactly_one_hook(monkeypatch):
     for player in (b"no hook", live_runtime._ANCHOR * 2):
-        monkeypatch.setattr(live_runtime, "PLAYER_SHA256", hashlib.sha256(player).hexdigest())
+        monkeypatch.setitem(live_runtime.SUPPORTED_PLAYERS, hashlib.sha256(player).hexdigest(), (ANY,) * 3)
         with pytest.raises(live_runtime.LiveRuntimeUnsupported):
             live_runtime.patch_player(player)
 
 
 def test_patch_preserves_surrounding_player(monkeypatch):
     player = b"before;" + live_runtime._ANCHOR + b";after"
-    monkeypatch.setattr(live_runtime, "PLAYER_SHA256", hashlib.sha256(player).hexdigest())
+    monkeypatch.setitem(live_runtime.SUPPORTED_PLAYERS, hashlib.sha256(player).hexdigest(), (ANY,) * 3)
     patched = live_runtime.patch_player(player, mm_opacity=False)
     assert patched.startswith(b"before;UC=new Eg,")
     assert patched.endswith(b",UC.displayManager.showWaitingIndicator();after")
@@ -174,7 +176,7 @@ def _synthetic_player(anchors: list[bytes] | None = None) -> bytes:
 
 
 def _pin(monkeypatch, player: bytes) -> None:
-    monkeypatch.setattr(live_runtime, "PLAYER_SHA256", hashlib.sha256(player).hexdigest())
+    monkeypatch.setitem(live_runtime.SUPPORTED_PLAYERS, hashlib.sha256(player).hexdigest(), (ANY,) * 3)
 
 
 def test_mm_opacity_off_is_byte_identical_to_the_hook_only_output(monkeypatch):
@@ -232,11 +234,23 @@ def test_mm_opacity_refuses_a_replacement_that_is_not_unique(monkeypatch, index,
         MM_PATCHERS[patcher](player)
 
 
-def _real_player() -> bytes:
-    if not REAL_PLAYER.is_file():
+OLD_PLAYER_SHA256 = "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354"
+NEW_PLAYER_SHA256 = "17c0c938caa49d5c70bd83bd5b84f57381faa51602932ca733aa965055026d91"
+# The current Keynote's export (2,369,526 bytes); REAL_PLAYER is the older 2,369,488-byte export.
+NEW_PLAYER = MAIN_OUTPUT / "fixtures" / "keynote-player-17c0c938" / "main.js"
+REAL_PLAYERS = {OLD_PLAYER_SHA256: REAL_PLAYER, NEW_PLAYER_SHA256: NEW_PLAYER}
+# The only difference between the two: the newer player passes `isEvalSupported:!1` to both PDF.js getDocument calls.
+NEW_PLAYER_INSERTIONS = (
+    (b"{url:Q,cMapUrl:_C,cMapPacked:!0,disableRange:!0", b",isEvalSupported:!1", b"};C.getDocument(A)"),
+    (b"C.getDocument({data:Q,cMapUrl:_C,cMapPacked:!0", b",isEvalSupported:!1", b"}).promise."),
+)
+
+
+def _real_player(sha: str = OLD_PLAYER_SHA256) -> bytes:
+    if not REAL_PLAYERS[sha].is_file():
         pytest.skip("real player export not available")
-    player = REAL_PLAYER.read_bytes()
-    assert hashlib.sha256(player).hexdigest() == live_runtime.PLAYER_SHA256
+    player = REAL_PLAYERS[sha].read_bytes()
+    assert hashlib.sha256(player).hexdigest() == sha
     return player
 
 
@@ -254,27 +268,87 @@ def test_mm_opacity_anchors_are_unique_on_the_real_player():
     assert live_runtime.patch_player(player, mm_opacity=False) == _hook_only(player)
 
 
-# sha256 of patch_player(real, mm_opacity=...). False: recorded on 3eb3b0fe (hook only, unchanged since).
-# True: with the hand-back replacements R6-R8 (keynote_live_handback_geometry.plan.md); was 21476f78... with R1-R5.
+# sha256 of patch_player(real, mm_opacity=...) and patch_rendering(real), per stock player.
+# Old False: recorded on 3eb3b0fe (hook only, unchanged since). Old True: with the hand-back replacements R6-R8
+# (keynote_live_handback_geometry.plan.md); was 21476f78... with R1-R5. New: recorded when the new player was admitted.
 REAL_PATCHED_SHA256 = {
-    True: "574274e88485745a6f55a8563d43ddfb91299db6e4d749fd34719436ade751bf",
-    False: "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
+    OLD_PLAYER_SHA256: {
+        True: "574274e88485745a6f55a8563d43ddfb91299db6e4d749fd34719436ade751bf",
+        False: "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
+    },
+    NEW_PLAYER_SHA256: {
+        True: "330ef72c1725c327b7bf025654299851cf4405947b303f03ebfee0d2e59b007f",
+        False: "4f9fbffd95e4649543142b2e95586babd9d75f0a0d9a4974e21d6f33c8389e3b",
+    },
 }
-REAL_RENDERING_SHA256 = "fd81193887728094df6d017fff5dfac99a5058fab02b3c9a1b92bd93ac88fe23"
+REAL_RENDERING_SHA256 = {
+    OLD_PLAYER_SHA256: "fd81193887728094df6d017fff5dfac99a5058fab02b3c9a1b92bd93ac88fe23",
+    NEW_PLAYER_SHA256: "33fcdcd2195d8b65431b02c84641e565168dfb74ff3c0911a3c70227c83ac460",
+}
 
 
+def test_supported_players_pin_exactly_the_recorded_outputs():
+    assert live_runtime.SUPPORTED_PLAYERS == {
+        sha: (REAL_PATCHED_SHA256[sha][True], REAL_PATCHED_SHA256[sha][False], REAL_RENDERING_SHA256[sha])
+        for sha in REAL_PLAYERS
+    }
+
+
+@pytest.mark.parametrize("sha", REAL_PLAYERS)
 @pytest.mark.parametrize("flag", [True, False])
-def test_patch_player_output_is_pinned_on_the_real_player(flag):
-    player = _real_player()
-    assert hashlib.sha256(live_runtime.patch_player(player, mm_opacity=flag)).hexdigest() == REAL_PATCHED_SHA256[flag]
+def test_patch_player_output_is_pinned_on_the_real_player(flag, sha):
+    player = _real_player(sha)
+    assert hashlib.sha256(live_runtime.patch_player(player, mm_opacity=flag)).hexdigest() == REAL_PATCHED_SHA256[sha][flag]
 
 
-def test_patch_rendering_is_the_live_output_minus_the_hook_on_the_real_player():
-    player = _real_player()
+@pytest.mark.parametrize("sha", REAL_PLAYERS)
+def test_patch_rendering_is_the_live_output_minus_the_hook_on_the_real_player(sha):
+    player = _real_player(sha)
     rendering = live_runtime.patch_rendering(player)
     assert _hook_only(rendering) == live_runtime.patch_player(player)
     assert b"__obedLive" not in rendering
-    assert hashlib.sha256(rendering).hexdigest() == REAL_RENDERING_SHA256
+    assert hashlib.sha256(rendering).hexdigest() == REAL_RENDERING_SHA256[sha]
+
+
+def _without_insertions(data: bytes) -> bytes:
+    for before, inserted, after in NEW_PLAYER_INSERTIONS:
+        assert data.count(before + inserted + after) == 1
+        data = data.replace(before + inserted + after, before + after)
+    return data
+
+
+def test_new_player_is_the_old_player_plus_two_pdfjs_options_outside_every_anchor():
+    old, new = _real_player(OLD_PLAYER_SHA256), _real_player(NEW_PLAYER_SHA256)
+    assert len(new) - len(old) == 2 * len(b",isEvalSupported:!1")
+    assert old.count(b"isEvalSupported") == 11 and new.count(b"isEvalSupported") == 13
+    assert hashlib.sha256(_without_insertions(new)).hexdigest() == OLD_PLAYER_SHA256
+    inserted = [(new.index(before + text) + len(before), len(text)) for before, text, _ in NEW_PLAYER_INSERTIONS]
+    anchors = [live_runtime._ANCHOR] + [before for before, _ in live_runtime._MM_OPACITY_REPLACEMENTS]
+    for anchor in anchors:
+        assert old.count(anchor) == new.count(anchor) == 1
+        start = new.index(anchor)
+        for offset, length in inserted:
+            assert start + len(anchor) <= offset or offset + length <= start
+    for _, after in live_runtime._MM_OPACITY_REPLACEMENTS:
+        assert old.count(after) == new.count(after) == 0
+    for flag in (True, False):
+        assert _without_insertions(live_runtime.patch_player(new, mm_opacity=flag)) == live_runtime.patch_player(old, mm_opacity=flag)
+    assert _without_insertions(live_runtime.patch_rendering(new)) == live_runtime.patch_rendering(old)
+
+
+@pytest.mark.parametrize("pin", range(3))
+def test_patched_output_must_match_its_pin(monkeypatch, pin):
+    player = _synthetic_player()
+    pins = [ANY] * 3
+    pins[pin] = "0" * 64
+    monkeypatch.setitem(live_runtime.SUPPORTED_PLAYERS, hashlib.sha256(player).hexdigest(), tuple(pins))
+    patchers = (live_runtime.patch_player, lambda p: live_runtime.patch_player(p, mm_opacity=False), live_runtime.patch_rendering)
+    for index, patcher in enumerate(patchers):
+        if index == pin:
+            with pytest.raises(live_runtime.LiveRuntimeUnsupported, match="pinned digest"):
+                patcher(player)
+        else:
+            patcher(player)
 
 
 # Hand-back geometry (keynote_live_handback_geometry.plan.md §3.2): R6-R8 are the last three replacements, at these

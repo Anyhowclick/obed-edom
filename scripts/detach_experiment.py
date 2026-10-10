@@ -73,7 +73,7 @@ SERVED_SHA256 = {
     "V8": "574274e88485745a6f55a8563d43ddfb91299db6e4d749fd34719436ade751bf",
     "V5+8": "ac8dcda082fa2cb2e3261fe9e5fc48d08c50cc4e59b459ffa1903e0778bc37a8",
 }
-CORE_SHA256 = "6431ec0e83eab0e3f6fe9ea56a0f7dabb521918f2c58fd938ef7c9287bd8fed2"
+CORE_SHA256 = "d71d1e76caa1c321cb784d15c29701793ee3e24afdcb1b06e6df7a3d0909af8f"
 L2_INSTALL_ANCHOR = b"(function(controller) {\n"
 L2_INSTALL_REPLACEMENT = L2_INSTALL_ANCHOR + b"  Object.defineProperty(window, '__obedDebugController', {value: controller});\n"
 L2_SERVED_SHA256 = {
@@ -508,17 +508,21 @@ def variant_replacements(variant: str, table: Sequence[tuple[bytes, bytes]] | No
 
 @contextmanager
 def serving(variant: str) -> Iterator[None]:
-    """Serve `variant`'s player bytes from this process's `patch_player` (no product file changes)."""
+    """Serve `variant`'s player bytes from this process's `patch_player` (no product file changes). The product's
+    patched-player digest pin is lifted: the served bytes are pinned by `SERVED_SHA256` / `L2_SERVED_SHA256` instead."""
     if variant not in SERVINGS:
         raise ValueError(f"unknown serving {variant!r}; expected one of {SERVINGS}")
     original = live_runtime._MM_OPACITY_REPLACEMENTS
+    original_pinned = live_runtime._pinned
     table = original if variant == "off" else variant_replacements(variant, original)
     live_runtime._MM_OPACITY_REPLACEMENTS = table
+    live_runtime._pinned = lambda patched, expected: patched
     try:
         with probe.env_override({MM_OPACITY_ENV: "off" if variant == "off" else "auto"}):
             yield
     finally:
         live_runtime._MM_OPACITY_REPLACEMENTS = original
+        live_runtime._pinned = original_pinned
 
 
 def level2_install_bytes(install: bytes | None = None) -> bytes:

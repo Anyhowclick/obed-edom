@@ -21,7 +21,7 @@ if str(REPO / "src") not in sys.path:
 
 from obed_edom.live_continuity_js import PRESERVE_CORE_JS  # noqa: E402
 
-VARIANTS: tuple[str, ...] = ("stash-any", "wrong-instance", "fifo-reuse")
+VARIANTS: tuple[str, ...] = ("stash-any", "wrong-instance", "fifo-reuse", "linear-bridge")
 
 _POOL_PLANNED_ONLY = "    if (!armedPool && !poolable(v)) return;\n"
 _PICK_SRC_ONLY = "      if (c === el || !isCarrySource(c, entry)) return;\n"
@@ -45,6 +45,13 @@ _TRANSFORMS: dict[str, tuple[tuple[str, str], ...]] = {
         (_POOL_PLANNED_ONLY, ""),
         (_PICK_SRC_ONLY, _PICK_SAME_ASSET),
         (_PICK_VERDICT, "    if (found.length) return found[0];\n" + _PICK_VERDICT),
+    ),
+    # Restore the pre-easing linear bridge progress: the carry-cover red.
+    "linear-bridge": (
+        (
+            "const progress = easeInEaseOut((performance.now() - started) / (1000 * boundary.durationSeconds));",
+            "const progress = Math.min(1, Math.max(0, (performance.now() - started) / (1000 * boundary.durationSeconds)));",
+        ),
     ),
 }
 
