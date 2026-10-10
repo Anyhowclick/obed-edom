@@ -879,6 +879,7 @@ PRESERVE_CORE_JS = r"""
       noteRefused(v, src, 'stash');
       return;
     }
+    if (detached && v.__obedRemountEpoch === remountEpoch && !armedPool && !poolable(v)) v.__obedRemountEpoch = -1;
     if (!armedPool && !poolable(v)) return;
     if (!(v.readyState >= 2 || v.currentTime > 0.05)) return;
     tag(v);
