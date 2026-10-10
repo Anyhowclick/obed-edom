@@ -37,7 +37,7 @@ from obed_edom.iwa_geometry import (
 )
 from obed_edom.iwa_kindindex import derive_kind_index
 
-MAP_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Map_Extracted_Wall_1st.key")
+GOLD_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Gold_Wall_Input.key")
 FULL_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Full_Report_Card_Wall.key")
 
 
@@ -605,7 +605,10 @@ def _cached_payload(deck: Path):
         path = inspect_cache_path(deck_digest(deck))
     except Exception:  # pragma: no cover
         return None
-    return json.loads(path.read_text()) if path.is_file() else None
+    if not path.is_file():
+        return None
+    payload = json.loads(path.read_text())
+    return payload if payload.get("reader") == "jxa" else None
 
 
 def _p90(values):
@@ -613,18 +616,23 @@ def _p90(values):
     return values[min(len(values) - 1, int(len(values) * 0.9))]
 
 
-@pytest.mark.skipif(not MAP_DECK.exists(), reason="local gold deck only")
-def test_integration_map_deck_acceptance_targets():
+@pytest.mark.skipif(not GOLD_DECK.exists(), reason="local gold deck only")
+def test_integration_gold_deck_acceptance_targets():
     pytest.importorskip("keynote_parser")
-    payload = _cached_payload(MAP_DECK)
+    payload = _cached_payload(GOLD_DECK)
     if payload is None:
         pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
-    composed = compose_deck_geometry(MAP_DECK)
+    from obed_edom.iwa_runs import _load_deck
+    from obed_edom.iwa_text_shape import shape_style
+
+    composed = compose_deck_geometry(GOLD_DECK)
+    objects, _a, _b = _load_deck(GOLD_DECK)
+    style_cache: dict = {}
     pslides = {s["index"]: s for s in payload.get("slides") or []}
 
     pool: dict[str, list[float]] = {}
     flagged_kinds: dict[str, set] = {}
-    autosize_x: list[float] = []
+    autosize_x: dict[tuple[int, int], tuple[float, float, str | None]] = {}
     for idx, recs in composed.items():
         jby = {(it["kind"], it["kindIndex"]): it
                for it in ((pslides.get(idx) or {}).get("items") or [])}
@@ -637,7 +645,9 @@ def test_integration_map_deck_acceptance_targets():
                 continue
             if rec["kind"] == "text":
                 if reason == "autosize-soft":
-                    autosize_x.append(abs(rec["x"] - j["x"]))
+                    style = shape_style(objects[rec["id"]], objects, style_cache)
+                    autosize_x[(idx + 1, rec["kindIndex"])] = (
+                        rec["x"] - j["x"], float(j["w"]), style.alignment if style else None)
                 continue
             if reason:
                 continue
@@ -655,9 +665,25 @@ def test_integration_map_deck_acceptance_targets():
     # group: >=84% of the non-flagged pool within 2px.
     group = pool.get("group", [])
     assert group and sum(1 for d in group if d < 2.0) / len(group) >= 0.84
-    # autosize x: 100% within 2px on the Map deck (all left-aligned).
-    assert autosize_x and all(d < 2.0 for d in autosize_x), \
-        f"autosize x not all <2px: max={max(autosize_x):.2f}"
+    # autosize x: 100% within 2px for every LEFT-aligned box (TATvalue0; 445 on Gold).
+    # Unlike the retired Map deck, Gold also carries centred (TATvalue2) and right
+    # (TATvalue1) autosize boxes; 20 of them sit at their alignment anchor offline, so
+    # they lead Keynote's left edge by exactly w/2 or w (slide 2's "CHC Kuching" and
+    # slide 11's church labels centred, slide 11's "CHC Yangon Bible School" right).
+    assert len(autosize_x) == 497
+    left = {key for key, (_dx, _w, align) in autosize_x.items() if align == "TATvalue0"}
+    assert len(left) == 445
+    left_max = max(abs(autosize_x[key][0]) for key in left)
+    assert left_max < 2.0, f"left-aligned autosize x not all <2px: max={left_max:.2f}"
+    centred = {(2, 0)} | {(11, k) for k in range(3, 22) if k != 7}
+    right = {(11, 22)}
+    off_left = {key for key, (dx, _w, _align) in autosize_x.items() if abs(dx) >= 2.0}
+    assert off_left == centred | right, sorted(off_left ^ (centred | right))
+    for key in centred | right:
+        dx, w, align = autosize_x[key]
+        anchor_align, anchor = ("TATvalue2", 0.5 * w) if key in centred else ("TATvalue1", w)
+        assert align == anchor_align, (key, align)
+        assert abs(dx - anchor) < 2.0, (key, dx, w)
 
     # Flags appear only on the expected kinds: masked images, groups, autosize text.
     assert flagged_kinds.get("rotated-masked", set()) <= {"image", "movie"}
@@ -669,16 +695,16 @@ def test_integration_map_deck_acceptance_targets():
                                   "group-residual", "autosize-soft"}
 
 
-@pytest.mark.skipif(not MAP_DECK.exists(), reason="local gold deck only")
+@pytest.mark.skipif(not GOLD_DECK.exists(), reason="local gold deck only")
 def test_integration_composition_preserves_addressing():
     """Geometry-only invariant on a real deck: (id, kind, kindIndex) identical to derive."""
     pytest.importorskip("keynote_parser")
-    if _cached_payload(MAP_DECK) is None:
+    if _cached_payload(GOLD_DECK) is None:
         pytest.skip("deck bytes not cached")
     from obed_edom.iwa_kindindex import derive_deck_kind_index
 
-    derived = derive_deck_kind_index(MAP_DECK)
-    composed = compose_deck_geometry(MAP_DECK)
+    derived = derive_deck_kind_index(GOLD_DECK)
+    composed = compose_deck_geometry(GOLD_DECK)
     assert set(derived) == set(composed)
     key = lambda r: (r["id"], r["kind"], r["kindIndex"])
     for idx in derived:

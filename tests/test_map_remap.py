@@ -5423,7 +5423,7 @@ def test_gold_roster_is_dropped_on_every_slide_after_the_church_list():
     assert len(name_column_ids(s21["items"], gct)) == 2
 
 
-# --- Off-canvas Magic Move partners (.agents/plans/mm_offcanvas_partners.plan.md) ---
+# --- Off-canvas Magic Move partners (git show 1379b2df:.agents/plans/mm_offcanvas_partners.plan.md) ---
 #
 # The payloads below carry `magicMoveOut` / `mmKeys` directly, in the shape
 # `iwa_runs.attach_magic_move` produces: `magicMoveOut` on slide n pairs n with n+1,

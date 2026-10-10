@@ -1,4 +1,4 @@
-"""Stream D of `.agents/plans/pass1_hides_offline.plan.md`: the `OBED_OFFLINE_HIDES` flag,
+"""Stream D of `git show 1379b2df:.agents/plans/pass1_hides_offline.plan.md`: the `OBED_OFFLINE_HIDES` flag,
 pure eligibility, `run_offline_hides` orchestration + AppleScript delete fallback, and the
 `remap_keynote` wiring (plan field, abort, Applied accounting, call order).
 

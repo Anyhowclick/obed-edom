@@ -4,7 +4,7 @@ The field synthesis is pure and exercised WITHOUT keynote-parser by building
 synthetic IWA archive dicts (mirroring test_iwa_geometry): item-level
 font/size/colour with paragraph-style inheritance, line endpoints, locked,
 fileName clean-vs-dirty, the childCount rule, and the structural guard.
-A local-only integration test builds the real Map deck offline and checks
+A local-only integration test builds the real Gold wall offline and checks
 field parity against its cached exact-bytes JXA payload.
 
 NOTE ON THE PLAN GATE: full remap-plan equivalence (offline vs JXA transforms
@@ -49,7 +49,7 @@ import obed_edom.offline_inspect as offline_inspect
 
 pytestmark = pytest.mark.usefixtures("shared_iwa_decode")
 
-MAP_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Map_Extracted_Wall_1st.key")
+GOLD_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Gold_Wall_Input.key")
 FULL_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Full_Report_Card_Wall.key")
 def test_deck_slide_digests_ignore_image_rotation():
     """Regression: the slide-IDENTITY digest (which decides pairing) must NOT depend on
@@ -346,6 +346,10 @@ def test_aspect_is_none_for_masked_geometry():
 
 @pytest.mark.skipif(not FULL_DECK.exists(), reason="local gold deck only")
 def test_two_tier_bulk_splice_leaves_aspect_untouched():
+    # The bulk double replays the offline read's own whole-point frames, so every row
+    # agrees with its item within rounding (<= 0.5 pt): no frame is stale and the
+    # precise unrounded aspects must survive. A stale frame (> 1 pt) does refresh —
+    # see test_splice_refreshes_a_stale_aspect_and_keeps_a_consistent_one.
     template = offline_wall_payload(FULL_DECK)
     assert all("aspect" in it for s in template["slides"] for it in s["items"])
     aspects_before = {
@@ -359,6 +363,69 @@ def test_two_tier_bulk_splice_leaves_aspect_untouched():
         for item in slide["items"]:
             key = (slide["index"], item["kind"], item["kindIndex"])
             assert item["aspect"] == aspects_before[key]
+
+
+@pytest.mark.skipif(not FULL_DECK.exists(), reason="local gold deck only")
+def test_two_tier_bulk_splice_refreshes_every_stale_aspect_including_hidden_items_full_deck():
+    """Against Keynote's real rows (the banked Full-wall JXA payload as the bulk double),
+    EVERY item whose offline frame is stale (> 1 pt in w or h) leaves the splice with
+    the row's ratio, and every consistent item keeps its precise offline aspect.
+
+    This reaches items the Full-deck plan gate cannot see: the gate compares the
+    PLANS, and five of the 40 stale group-union groups are planned role "hide"
+    (slides 19/20's full-bleed groups, slide 124 groups 5 and 7); without the product
+    fix the gate fails on the other 35 only, so those five would keep their stale
+    aspect silently."""
+    pytest.importorskip("keynote_parser")
+    jxa = _cached_payload(FULL_DECK)
+    if jxa is None:
+        pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
+    tmpl_deck = FULL_DECK.parent / "Base_CG_Assets.key"
+    if not tmpl_deck.exists():
+        pytest.skip("no CG template deck available to name the hidden items")
+
+    from obed_edom.map_remap import plan_payload
+    from obed_edom.remap_keynote import recipe_for
+
+    before = {
+        (s["index"], it["kind"], it["kindIndex"]): it
+        for s in offline_wall_payload(FULL_DECK)["slides"] for it in s["items"]
+    }
+    rows = {
+        (s["index"], it["kind"], it["kindIndex"]): (float(it["w"]), float(it["h"]))
+        for s in jxa["slides"] for it in s["items"] if it["kind"] in BULK_KINDS
+    }
+    off = two_tier_wall_payload(FULL_DECK, bulk_geometry_fn=_bulk_double_from_jxa(jxa))
+
+    stale_groups: set[tuple[int, int]] = set()
+    refreshed = kept = 0
+    for slide in off["slides"]:
+        for item in slide["items"]:
+            key = (slide["index"], item["kind"], item["kindIndex"])
+            if key not in rows or key not in before:
+                continue
+            pre = before[key]
+            row_w, row_h = rows[key]
+            stale = abs(row_w - pre["w"]) > 1 or abs(row_h - pre["h"]) > 1
+            if pre["aspect"] is None:
+                assert item["aspect"] is None, key
+            elif stale:
+                assert item["aspect"] == row_w / row_h, key
+                refreshed += 1
+            else:
+                assert item["aspect"] == pre["aspect"], key
+                kept += 1
+            if stale and item["kind"] == "group":
+                stale_groups.add((slide["number"], item["kindIndex"]))
+    assert len(stale_groups) == 40
+    assert refreshed > 0 and kept > 0
+
+    template = offline_wall_payload(tmpl_deck)
+    transforms = plan_payload(off, recipe_for(off, template), template=template).transforms
+    hidden = {
+        (t.slide_number, t.kind_index) for t in transforms if t.kind == "group" and t.role == "hide"
+    }
+    assert stale_groups & hidden == {(19, 0), (19, 1), (20, 0), (124, 5), (124, 7)}
 
 
 # --------------------------------------------------------------------------
@@ -556,7 +623,7 @@ def test_all_slides_emitted_and_plan_filters_by_range():
 
 
 # --------------------------------------------------------------------------
-# Local integration — build the real Map deck offline and check field parity
+# Local integration — build the real Gold wall offline and check field parity
 # against its cached exact-bytes JXA payload.
 # --------------------------------------------------------------------------
 def _cached_payload(deck: Path):
@@ -615,13 +682,13 @@ def test_cached_payload_hashes_only_when_a_payload_for_this_keynote_exists(tmp_p
     assert _cached_payload(tmp_path / "missing.key") is None
 
 
-@pytest.mark.skipif(not MAP_DECK.exists(), reason="local gold deck only")
-def test_integration_offline_field_parity_map_deck():
+@pytest.mark.skipif(not GOLD_DECK.exists(), reason="local gold deck only")
+def test_integration_offline_field_parity_gold_deck():
     pytest.importorskip("keynote_parser")
-    payload = _cached_payload(MAP_DECK)
+    payload = _cached_payload(GOLD_DECK)
     if payload is None:
         pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
-    off = offline_wall_payload(MAP_DECK)
+    off = offline_wall_payload(GOLD_DECK)
 
     # Deck-level + all-slides-with-doc-number emission.
     assert off["slideCount"] == payload["slideCount"]
@@ -652,7 +719,7 @@ def test_integration_offline_field_parity_map_deck():
     # images (geom_source "iwa", not flagged) within 2px of JXA. (Autosize text and
     # groups are the known-soft categories, excluded here and pinned by the gate.)
     from obed_edom.iwa_runs import _load_deck, slide_order
-    objects, _a, _b = _load_deck(MAP_DECK)
+    objects, _a, _b = _load_deck(GOLD_DECK)
     for index, (sid, _skip) in enumerate(slide_order(objects)):
         if sid not in objects:
             continue
@@ -669,7 +736,7 @@ def test_integration_offline_field_parity_map_deck():
     assert geom_checked > 20
 
 
-@pytest.mark.skipif(not MAP_DECK.exists(), reason="local gold deck only")
+@pytest.mark.skipif(not GOLD_DECK.exists(), reason="local gold deck only")
 @pytest.mark.xfail(reason="Full remap-plan equivalence not reachable offline: two "
                           "residuals remain, both guard-detected. Group geometry the "
                           "child-union/stored-frame cannot pin down now TRIPS the guard "
@@ -692,17 +759,17 @@ def test_gate_is_not_green_pending_a_geometry_model():
     trigger. See scratchpad/validate_remap_plan.py + module docstring.
     """
     pytest.importorskip("keynote_parser")
-    payload = _cached_payload(MAP_DECK)
+    payload = _cached_payload(GOLD_DECK)
     if payload is None:
         pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
     from obed_edom.map_remap import plan_payload
     from obed_edom.remap_keynote import _specs_equivalent, recipe_for
 
     template = offline_wall_payload(
-        MAP_DECK.parent / "Base_CG_Assets.key") if (MAP_DECK.parent / "Base_CG_Assets.key").exists() else None
+        GOLD_DECK.parent / "Base_CG_Assets.key") if (GOLD_DECK.parent / "Base_CG_Assets.key").exists() else None
     if template is None:
         pytest.skip("no CG template deck available for the plan gate")
-    off = offline_wall_payload(MAP_DECK)
+    off = offline_wall_payload(GOLD_DECK)
 
     def specs(wall):
         return [t.as_dict() for t in plan_payload(
@@ -839,6 +906,113 @@ def test_splice_rounds_to_integers_like_jxa():
     it = payload["slides"][0]["items"][0]
     assert (it["x"], it["y"], it["w"], it["h"]) == (10, -3, 100, 0)
     assert all(isinstance(it[k], int) for k in ("x", "y", "w", "h"))
+
+
+def _aspect_slide(*items):
+    return {"slides": [{"index": 0, "number": 1, "items": [
+        {"index": i, "text": "", "fileName": "", "locked": False, **it} for i, it in enumerate(items)]}]}
+
+
+def test_splice_refreshes_a_stale_aspect_and_keeps_a_consistent_one():
+    """Regression (Full wall slide 127 group 2): the offline group-union frame was
+    stale (4921,97,126,278 offline vs Keynote 110x244), and the splice overwrote
+    x/y/w/h but left the stale offline aspect, so the planner's aspect snap
+    (w = round(h) * aspect) planned a 406 pt wide group where Keynote's frame
+    plans ~108 pt.
+
+    Keynote bulk rows are WHOLE points (Keynote's scripting width()/height()), so
+    the bulk ratio is less precise than the offline unrounded composed aspect —
+    replacing a consistent aspect with it reintroduces the reader-rounding error
+    296b635d removed (slide 86 image 7: offline 1.4344 vs Keynote 11/8 = 1.375).
+    Rule: refresh only when the row moves w or h by more than 1 pt (a stale frame);
+    a rounding-only difference keeps the offline aspect. On the Full wall the two
+    populations separate cleanly: consistent items differ by <= 0.499 pt, the 40
+    stale groups by >= 12.34 pt. A None aspect (masked media, or no offline frame)
+    stays None — the splice never invents an aspect lock."""
+    stale_aspect = 243.4 / 87.6
+    precise = 11.47 / 8.0
+    payload = _aspect_slide(
+        {"kind": "group", "kindIndex": 0, "x": 4921, "y": 97, "w": 243, "h": 88, "aspect": stale_aspect},
+        {"kind": "image", "kindIndex": 0, "x": 10, "y": 10, "w": 11, "h": 8, "aspect": precise},
+        {"kind": "image", "kindIndex": 1, "x": 10, "y": 10, "w": 40, "h": 30, "aspect": None},
+        {"kind": "group", "kindIndex": 1, "x": 0, "y": 0, "w": 50, "h": 20, "aspect": 2.5},
+    )
+    bulk = {0: {
+        "group": [[4687, 97, 110, 244], [0, 0, 50, 0]],
+        "image": [[10, 10, 11.5, 8], [10, 10, 80, 30]],
+    }}
+    spliced, _ = _splice_bulk_geometry(payload, bulk)
+    assert len(spliced) == 4
+    g0, i0, i1, g1 = payload["slides"][0]["items"]
+    assert g0["aspect"] == 110 / 244  # stale frame -> aspect follows the row
+    assert i0["aspect"] == precise  # 0.5 pt rounding-only difference -> precise aspect kept
+    assert i1["aspect"] is None  # masked/None stays None, even when the frame moves
+    assert g1["aspect"] is None  # stale frame with a zero dimension -> no aspect
+
+
+_PRECISE_ASPECT = 50.37 / 20.12  # an offline unrounded composed aspect for a 50 x 20 frame
+
+
+@pytest.mark.parametrize(
+    ("offline", "row", "expected_aspect"),
+    [
+        # The load-bearing boundary: Keynote rows are whole points, so a difference of
+        # EXACTLY 1.0 pt is still rounding-compatible and keeps the precise aspect...
+        pytest.param((0, 0, 50, 20, _PRECISE_ASPECT), (0, 0, 51.0, 20.0), _PRECISE_ASPECT,
+                     id="w-exactly-1pt-kept"),
+        pytest.param((0, 0, 50, 20, _PRECISE_ASPECT), (0, 0, 50.0, 19.0), _PRECISE_ASPECT,
+                     id="h-exactly-1pt-kept"),
+        # ...and anything over 1 pt is a stale frame whose aspect follows the row.
+        pytest.param((0, 0, 50, 20, _PRECISE_ASPECT), (0, 0, 51.01, 20.0), 51.01 / 20.0,
+                     id="w-just-over-1pt-refreshed"),
+        pytest.param((0, 0, 50, 20, _PRECISE_ASPECT), (0, 0, 50.0, 18.99), 50.0 / 18.99,
+                     id="h-just-over-1pt-refreshed"),
+        # One axis alone is enough; the other axis agreeing does not veto it.
+        pytest.param((0, 0, 50, 20, _PRECISE_ASPECT), (0, 0, 50.0, 30.0), 50.0 / 30.0,
+                     id="h-only-stale-refreshed"),
+        pytest.param((0, 0, 50, 20, _PRECISE_ASPECT), (0, 0, 80.0, 20.0), 80.0 / 20.0,
+                     id="w-only-stale-refreshed"),
+        # A pure move never makes the frame stale: position does not enter the ratio.
+        pytest.param((0, 0, 50, 20, _PRECISE_ASPECT), (4687.0, 97.0, 50.0, 20.0), _PRECISE_ASPECT,
+                     id="xy-only-move-kept"),
+        # Offline-zero frame (the reader gives it a None aspect) with a valid bulk row:
+        # stale by size, but the splice never invents an aspect lock.
+        pytest.param((0, 0, 0, 0, None), (10.0, 10.0, 110.0, 244.0), None,
+                     id="offline-zero-frame-stays-none"),
+        # Masked media (None aspect) stays None whether or not its frame moved.
+        pytest.param((0, 0, 50, 20, None), (0, 0, 50.0, 20.0), None, id="masked-consistent-stays-none"),
+        pytest.param((0, 0, 50, 20, None), (0, 0, 120.0, 60.0), None, id="masked-stale-stays-none"),
+    ],
+)
+def test_splice_aspect_refresh_boundaries(offline, row, expected_aspect):
+    x, y, w, h, aspect = offline
+    payload = _aspect_slide({"kind": "image", "kindIndex": 0, "x": x, "y": y, "w": w, "h": h, "aspect": aspect})
+    spliced, _ = _splice_bulk_geometry(payload, {0: {"image": [list(row)]}})
+    assert spliced == {(1, "image", 0)}
+    item = payload["slides"][0]["items"][0]
+    assert (item["x"], item["y"], item["w"], item["h"]) == tuple(round(v) for v in row)
+    if expected_aspect is None:
+        assert item["aspect"] is None
+    else:
+        assert item["aspect"] == pytest.approx(expected_aspect, abs=1e-12)
+
+
+def test_planned_group_width_follows_the_spliced_frame():
+    """End-to-end-ish: splice a stale group, then plan it. The snapped width is
+    round(h) * the SPLICED frame's aspect, not the stale offline one."""
+    from obed_edom.map_remap import plan_slide_transforms
+
+    payload = _aspect_slide(
+        {"kind": "group", "kindIndex": 0, "x": 4921, "y": 97, "w": 126, "h": 278, "aspect": 126 / 278 * 3.76},
+    )
+    _splice_bulk_geometry(payload, {0: {"group": [[4687, 97, 110, 244]]}})
+    slide = {**payload["slides"][0], "number": 1}
+    recipe = {"destWidth": 1920.0, "destHeight": 1080.0,
+              "groups": [{"s": 0.25, "tx": 0.0, "ty": 0.0, "src": {"x": 4687, "y": 97, "w": 110, "h": 244}}]}
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    d = next(t for t in out if t.kind == "group").as_dict()
+    assert d["h"] == 61.0  # round(244 * 0.25)
+    assert abs(d["w"] - 61.0 * 110 / 244) <= 0.01
 
 
 def test_count_guard_exact_kind_mismatch_is_unspliced_and_flagged():
@@ -1116,18 +1290,18 @@ def test_slide_range_intersects_non_skipped(monkeypatch):
 
 
 def test_subset_bulk_requests_every_slide_when_none_skipped_and_digests_hold():
-    """The Map deck has 0 skipped slides, so ``wanted`` (1-based) must cover every
+    """The Gold wall has 0 skipped slides (24 live), so ``wanted`` (1-based) must cover every
     slide the JXA payload has (0-based bulk keys aside) — the discriminating
     assertion is the recorded ``slides`` kwarg. The digest equalities are a sanity
     check, not the point: the slide-identity digest never depends on geometry, so a
     subset or partial (some kinds omitted) bulk read holds it by construction."""
     pytest.importorskip("keynote_parser")
-    jxa = _cached_payload(MAP_DECK)
+    jxa = _cached_payload(GOLD_DECK)
     if jxa is None:
         pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
     from obed_edom.baseline import deck_slide_digests
 
-    full = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=_bulk_double_from_jxa(jxa))
+    full = two_tier_wall_payload(GOLD_DECK, bulk_geometry_fn=_bulk_double_from_jxa(jxa))
 
     seen: dict = {}
     honour_fn = _bulk_double_from_jxa(jxa, honour_slides=True)
@@ -1136,12 +1310,12 @@ def test_subset_bulk_requests_every_slide_when_none_skipped_and_digests_hold():
         seen["slides"] = slides
         return honour_fn(key_path, slides=slides)
 
-    subset = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=spy)
+    subset = two_tier_wall_payload(GOLD_DECK, bulk_geometry_fn=spy)
     assert seen["slides"] == [s["number"] for s in full["slides"]]
 
     omit = {(i, k) for i in (1, 2) for k in BULK_KINDS}
     partial = two_tier_wall_payload(
-        MAP_DECK, bulk_geometry_fn=_bulk_double_from_jxa(jxa, omit=omit, honour_slides=True)
+        GOLD_DECK, bulk_geometry_fn=_bulk_double_from_jxa(jxa, omit=omit, honour_slides=True)
     )
     assert deck_slide_digests(partial) == deck_slide_digests(full) == deck_slide_digests(subset)
 
@@ -1149,10 +1323,10 @@ def test_subset_bulk_requests_every_slide_when_none_skipped_and_digests_hold():
 def test_two_tier_none_fn_is_pure_offline_with_soft_fallback():
     # With no bulk fn the payload is the tier-1 offline read, and every soft item
     # (unconfirmed) is a fallback unit — bulk_ok False.
-    if not MAP_DECK.exists():
+    if not GOLD_DECK.exists():
         pytest.skip("local gold deck only")
     pytest.importorskip("keynote_parser")
-    payload = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=None)
+    payload = two_tier_wall_payload(GOLD_DECK, bulk_geometry_fn=None)
     side = payload["_offline"]
     assert side["bulk_ok"] is False and side["spliced"] == 0
     assert side["fallback"], "pure offline must flag the soft classes for confirmation"
@@ -1198,37 +1372,76 @@ def _assert_two_tier_gate_green(deck: Path):
         return [t.as_dict() for t in transforms]
 
     off_t = plan(off)
-    jxa_t = plan(jxa)
+    jxa_t = plan(_jxa_with_consistent_aspects(jxa, offline_wall_payload(deck)))
     tdiffs = _transform_wa_diffs(off_t, jxa_t)
     assert tdiffs == [], f"transform write-affecting diffs: {tdiffs[:5]}"
 
 
-@pytest.mark.skipif(not MAP_DECK.exists(), reason="local gold deck only")
-def test_two_tier_splice_makes_write_affecting_gate_green_map_deck():
-    # Map deck: 0 rotated-masked images, so it does not exercise the L1 guard; it pins
+def _jxa_with_consistent_aspects(jxa: dict, offline: dict) -> dict:
+    """The JXA plan, snapped like Keynote's aspect lock (mirrors 296b635d's arm-A oracle).
+
+    JXA payloads carry no ``aspect`` (Keynote reports whole-point frames), so the bare
+    JXA plan keeps the raw affine while the offline plan snaps image/movie/group to
+    ``round(x), round(y), round(h) * aspect`` with the offline UNROUNDED composed
+    aspect. For a wide group that gap alone exceeds the 2 pt tolerance without any
+    product error. Full wall slide 75 group 1: the frames agree (offline union
+    243.371 x 87.570, aspect 2.77915; JXA 243 x 88, ratio 2.76136). Offline plans
+    h = round(80.67) = 81, w = 81 * 2.77915 = 225.11; the JXA affine plans
+    222.76 x 80.67. The 2.35 pt gap = aspect precision 80.67 * (2.77915 - 2.76136)
+    = 1.43 + height snap (81 - 80.67) * 2.779 = 0.92 — rounding, not geometry.
+
+    So the JXA side borrows the offline (pre-splice) aspect, by address, ONLY where
+    the offline frame agrees with JXA's within 1 pt — the only place that aspect is
+    trustworthy. A stale offline frame (> 1 pt off; on the Full wall the 40
+    group-union frames, all >= 12.34 pt off) gets no aspect and keeps the raw JXA
+    affine, so a product splice that keeps a stale aspect still fails this gate.
+    Masked/None aspects are not borrowed. Tolerance unchanged (2 pt).
+
+    Circularity (Codex r1 finding 2): where the frames agree, the expected aspect IS
+    the production offline reader's own, so an upstream error that computes or assigns
+    a wrong aspect while leaving w/h within 1 pt lands in both plans and this gate
+    stays green. The gate therefore ASSUMES consistent-frame aspects are validated
+    separately — the reader's unrounded composed ratio by
+    ``test_aspect_is_the_unrounded_composed_ratio_not_the_rounded_wh`` and the splice
+    keep/refresh rule by ``test_splice_aspect_refresh_boundaries`` — and proves only
+    that stale frames are caught."""
+    offline_items = {
+        (s["index"], it["kind"], it["kindIndex"]): it
+        for s in offline["slides"] for it in s["items"]
+    }
+    out = json.loads(json.dumps(jxa))
+    for slide in out["slides"]:
+        for item in slide.get("items") or []:
+            if item.get("kind") not in {"image", "movie", "group"}:
+                continue
+            src = offline_items.get((slide["index"], item["kind"], item["kindIndex"]))
+            if src is None or src.get("aspect") is None:
+                continue
+            if abs(float(src["w"]) - float(item["w"])) <= 1 and abs(float(src["h"]) - float(item["h"])) <= 1:
+                item["aspect"] = src["aspect"]
+    return out
+
+
+@pytest.mark.skipif(not GOLD_DECK.exists(), reason="local gold deck only")
+def test_two_tier_splice_makes_write_affecting_gate_green_gold_deck():
+    # Gold wall: 0 rotated-masked images, so it does not exercise the L1 guard; it pins
     # the shape/line/group/autosize-text plan neutrality of the two-tier read.
-    _assert_two_tier_gate_green(MAP_DECK)
+    _assert_two_tier_gate_green(GOLD_DECK)
 
 
 @pytest.mark.skipif(not FULL_DECK.exists(), reason="local gold deck only")
 def test_two_tier_splice_makes_write_affecting_gate_green_full_deck():
-    # Full report-card deck carries the rotated-masked images the Map deck lacks (10
+    # Full report-card deck carries the rotated-masked images the Gold wall lacks (10
     # pre-L1), so THIS is the gate that proves L1's masked-image change is plan-neutral
     # for the resizer: whether L1 flags or vouches those images, the bulk splice
     # overwrites their geometry and the remap plan stays JXA-identical.
     _assert_two_tier_gate_green(FULL_DECK)
 
 
-# Digest of the Full wall's bytes as banked when the JXA payload below was captured;
-# the deck has since been re-saved, so ``_cached_payload(FULL_DECK)`` no longer finds
-# it under the deck's current digest. Load it by this explicit path instead.
-BANKED_FULL_WALL_JXA_DIGEST = "8f5e69b10e39ceeb26429b4ec1ac2bba25aadb491b987b4a43ad11637392c0d4"
-
-
 @pytest.mark.skipif(not FULL_DECK.exists(), reason="local gold deck only")
 def test_data_member_names_decode_cleanly_on_the_full_deck():
     pytest.importorskip("keynote_parser")
-    from obed_edom.baseline import deck_slide_digests, inspect_cache_path
+    from obed_edom.baseline import deck_slide_digests
 
     off = offline_wall_payload(FULL_DECK)
     for slide in off["slides"]:
@@ -1237,14 +1450,13 @@ def test_data_member_names_decode_cleanly_on_the_full_deck():
             if file_name:
                 assert "�" not in file_name
 
-    banked_path = inspect_cache_path(BANKED_FULL_WALL_JXA_DIGEST)
-    jxa = json.loads(banked_path.read_text()) if banked_path.is_file() else {}
-    if jxa.get("reader") != "jxa":
-        pytest.skip("no banked JXA payload for the Full wall in this cache")
+    jxa = _cached_payload(FULL_DECK)
+    if jxa is None:
+        pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
     assert deck_slide_digests(off) == deck_slide_digests(jxa)
 
 
-@pytest.mark.parametrize("deck", [MAP_DECK, FULL_DECK], ids=["map", "full"])
+@pytest.mark.parametrize("deck", [GOLD_DECK, FULL_DECK], ids=["gold", "full"])
 def test_l1_cleared_rotated_masked_images_are_write_safe(deck):
     """L1's load-bearing property: a masked image the guard CLEARS (rotated-masked no
     longer flagged) is within the 2px write tolerance of the JXA oracle, so a path that
@@ -1254,7 +1466,7 @@ def test_l1_cleared_rotated_masked_images_are_write_safe(deck):
 
     On FULL we also assert that at least one OFF-AXIS mask (frame or mask angle not a
     90° multiple) is vouched — otherwise a regression to the old flag-every-rotated
-    guard would leave this test green while silently losing all L1 coverage. MAP has no
+    guard would leave this test green while silently losing all L1 coverage. GOLD has no
     off-axis masks (all vouched masks are axis-aligned), so that leg is FULL-only."""
     pytest.importorskip("keynote_parser")
     if not deck.exists():
@@ -1296,7 +1508,7 @@ def test_l1_cleared_rotated_masked_images_are_write_safe(deck):
         assert off_axis_vouched > 0, "L1 vouched no off-axis mask — lost its coverage"
 
 
-@pytest.mark.parametrize("deck", [MAP_DECK, FULL_DECK], ids=["map", "full"])
+@pytest.mark.parametrize("deck", [GOLD_DECK, FULL_DECK], ids=["gold", "full"])
 def test_l2a_cleared_masked_child_groups_are_write_safe(deck):
     """L2a's load-bearing property: a GROUP vouched (needs_keynote None) whose subtree
     contains a masked child is within the 2px write tolerance of the JXA oracle AND
@@ -1306,8 +1518,8 @@ def test_l2a_cleared_masked_child_groups_are_write_safe(deck):
     Also asserts ≥1 such vouched group has an OFF-AXIS masked child, else a regression
     to the old flag-every-rotated-masked-child rule would leave this green while losing
     L2a's coverage. (Asserted for BOTH decks — unlike the L1 test's FULL-only guard —
-    because MAP's off-axis masks live only as in-group children, never as top-level
-    masked-image records, so MAP exercises L2a even though it did not exercise L1.)"""
+    because GOLD's off-axis masks live only as in-group children, never as top-level
+    masked-image records, so GOLD exercises L2a even though it does not exercise L1.)"""
     pytest.importorskip("keynote_parser")
     if not deck.exists():
         pytest.skip("local gold deck only")
@@ -1377,57 +1589,71 @@ def test_l2a_cleared_masked_child_groups_are_write_safe(deck):
     assert off_axis_vouched > 0, "L2a vouched no off-axis masked-child group"
 
 
-@pytest.mark.skipif(not MAP_DECK.exists(), reason="local gold deck only")
+@pytest.mark.skipif(not GOLD_DECK.exists(), reason="local gold deck only")
 def test_two_tier_granular_fallback_is_per_slide_not_deck():
     """Omitting one slide's groups from the bulk read flags ONLY that slide (its
     unconfirmed group frames) — every other slide stays served offline+bulk."""
     pytest.importorskip("keynote_parser")
-    jxa = _cached_payload(MAP_DECK)
+    jxa = _cached_payload(GOLD_DECK)
     if jxa is None:
         pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
-    # Pick a slide index that actually carries soft group geometry.
-    off_probe = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=None)
-    soft = off_probe["_offline"]["soft_geometry"]
-    victim_number = next(f["slide"] for f in soft if f["kind"] == "group")
+
+    def frame(it):
+        return tuple(float(it[k]) for k in ("x", "y", "w", "h"))
+
+    off_probe = two_tier_wall_payload(GOLD_DECK, bulk_geometry_fn=None)
+    jby = {(s["index"], it["kindIndex"]): frame(it)
+           for s in jxa["slides"] for it in s["items"] if it["kind"] == "group"}
+    pure = {(s["index"], it["kindIndex"]): frame(it)
+            for s in off_probe["slides"] for it in s["items"] if it["kind"] == "group"}
+    # The victim is the first slide whose soft group geometry visibly differs from
+    # Keynote's (Gold slide 2's soft groups already agree), so "kept offline" is
+    # observable rather than vacuous.
+    victim_number = next(
+        f["slide"] for f in off_probe["_offline"]["soft_geometry"]
+        if f["kind"] == "group"
+        and pure[(f["slide"] - 1, f["kindIndex"])] != jby.get((f["slide"] - 1, f["kindIndex"]))
+    )
     victim_index = victim_number - 1
 
     fn = _bulk_double_from_jxa(jxa, omit={(victim_index, "group")})
-    off = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=fn)
+    off = two_tier_wall_payload(GOLD_DECK, bulk_geometry_fn=fn)
     side = off["_offline"]
     assert side["bulk_ok"] is True
     # Only the victim slide falls back, and only for its (unconfirmed) groups.
     assert side["fallback_slides"] == [victim_number]
     assert {f["kind"] for f in side["fallback"]} == {"group"}
     assert all(f["slide"] == victim_number for f in side["fallback"])
-    # A group on the victim slide kept its OFFLINE geometry (not spliced); a group
-    # on another slide was overwritten by the bulk value.
-    jby = {s["index"]: {(it["kind"], it["kindIndex"]): it for it in s["items"]}
-           for s in jxa["slides"]}
+    # Every victim-slide group kept its pure-offline frame (not spliced), and at least
+    # one of them differs from Keynote's. Every other slide's groups took the bulk
+    # (JXA) frame, and at least one of those differed offline.
+    victim_kept_offline = non_victim_overwritten = 0
     for slide in off["slides"]:
-        if slide["index"] != victim_index:
-            continue
         for it in slide["items"]:
-            if it["kind"] == "group":
-                # unconfirmed => did NOT take the JXA value (offline union frame)
-                j = jby[victim_index].get(("group", it["kindIndex"]))
-                if j is not None and (j["x"], j["y"]) != (it["x"], it["y"]):
-                    break
-        else:
-            continue
-        break
+            key = (slide["index"], it["kindIndex"])
+            if it["kind"] != "group" or key not in jby:
+                continue
+            if slide["index"] == victim_index:
+                assert frame(it) == pure[key], key
+                victim_kept_offline += frame(it) != jby[key]
+            else:
+                assert all(abs(a - b) <= 0.5 for a, b in zip(frame(it), jby[key])), key
+                non_victim_overwritten += any(abs(a - b) > 0.5 for a, b in zip(pure[key], jby[key]))
+    assert victim_kept_offline > 0, "no victim group differs from Keynote: kept-offline is unobservable"
+    assert non_victim_overwritten > 0, "no non-victim group differed offline: the overwrite is unobservable"
 
 
-@pytest.mark.skipif(not MAP_DECK.exists(), reason="local gold deck only")
+@pytest.mark.skipif(not GOLD_DECK.exists(), reason="local gold deck only")
 def test_two_tier_splice_does_not_touch_addressing_or_style():
     """The splice overwrites geometry ONLY: every item's addressing (index/kind/
     kindIndex), style (font/size/color), fileName, locked and text are byte-equal
     to the pure-offline payload."""
     pytest.importorskip("keynote_parser")
-    jxa = _cached_payload(MAP_DECK)
+    jxa = _cached_payload(GOLD_DECK)
     if jxa is None:
         pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
-    base = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=None)
-    spliced = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=_bulk_double_from_jxa(jxa))
+    base = two_tier_wall_payload(GOLD_DECK, bulk_geometry_fn=None)
+    spliced = two_tier_wall_payload(GOLD_DECK, bulk_geometry_fn=_bulk_double_from_jxa(jxa))
     keep = ("index", "kind", "kindIndex", "font", "size", "color", "fileName",
             "locked", "text", "duplicateOf")
     for bs, ss in zip(base["slides"], spliced["slides"]):

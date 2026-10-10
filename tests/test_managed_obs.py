@@ -1678,7 +1678,7 @@ def test_setup_active_covers_queued_running_and_waiting_setup(rig):
     assert r.engine.setup_active is False
 
 
-# --- LaunchServices blips (plan: managed_obs_false_exit rev 2) ----------------
+# --- LaunchServices blips (plan: git show 1379b2df:.agents/plans/managed_obs_false_exit.plan.md rev 2) ----------------
 # LaunchServices (`processes()`) sometimes returns an empty list for a few ms while the pid is
 # alive. `_identify` must then ask the kernel (`env_marker`, i.e. `ps -E`) before saying "gone",
 # and liveness must ask CDP for the target id before raising W5.

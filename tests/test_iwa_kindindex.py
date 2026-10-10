@@ -41,7 +41,6 @@ from scripts.bank_jxa_kind_counts import BANK_VERSION as KIND_COUNTS_BANK_VERSIO
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
-MAP_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Map_Extracted_Wall_1st.key")
 FULL_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Full_Report_Card_Wall.key")
 GOLD_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Gold_Wall_Input.key")
 
@@ -382,10 +381,10 @@ def _cached_exact_payload(deck: Path):
     return payload if payload.get("reader") == "jxa" else None
 
 
-@pytest.mark.skipif(not MAP_DECK.exists(), reason="local gold deck only")
-def test_integration_map_deck_reconstructs_addressing():
+@pytest.mark.skipif(not GOLD_DECK.exists(), reason="local gold deck only")
+def test_integration_gold_deck_reconstructs_addressing():
     pytest.importorskip("keynote_parser")
-    payload = _cached_exact_payload(MAP_DECK)
+    payload = _cached_exact_payload(GOLD_DECK)
     if payload is None:
         pytest.skip(
             "no reader='jxa' payload cached for the current deck bytes: warm the shared "
@@ -393,7 +392,7 @@ def test_integration_map_deck_reconstructs_addressing():
         )
     from obed_edom.iwa_runs import _normalize_text
 
-    derived = derive_deck_kind_index(MAP_DECK)
+    derived = derive_deck_kind_index(GOLD_DECK)
     pslides = {s["index"]: s for s in payload.get("slides") or []}
     count_mismatches, text_order_bad = [], 0
     for idx, recs in derived.items():
@@ -410,7 +409,7 @@ def test_integration_map_deck_reconstructs_addressing():
         for j, d in zip(jtext, dtext):
             if _normalize_text(j.get("text") or "") != _normalize_text(d.get("text") or ""):
                 text_order_bad += 1
-    # The Map deck reconstructs exactly: no count mismatch, no text mis-order.
+    # The Gold wall reconstructs exactly: no count mismatch, no text mis-order.
     assert count_mismatches == []
     assert text_order_bad == 0
 

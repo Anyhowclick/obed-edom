@@ -300,7 +300,10 @@ def _merge_legacy_slides(
     *,
     use_cache: bool | None = None,
 ) -> None:
-    """Replace the given slides' items in `payload` with one scoped legacy inspect."""
+    """Replace the given slides' items in `payload` with one scoped legacy inspect.
+
+    Media keep the offline `aspect` only when their kind's count matched and the live
+    frame agrees with the offline one; every other image/movie/group gets `aspect: None`."""
     if not slide_numbers:
         return
     legacy = inspect_keynote(
@@ -310,13 +313,18 @@ def _merge_legacy_slides(
         int(s.get("number") or (int(s.get("index") or 0) + 1)): s
         for s in legacy.get("slides") or []
     }
+    mismatched = {
+        (int(f["slide"]), f.get("kind"))
+        for f in (payload.get("_offline") or {}).get("fallback") or []
+        if f.get("reason") == "count-mismatch"
+    }
     for slide in payload.get("slides") or []:
         number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
         repl = by_number.get(number)
         if repl is None:
             continue
         prior = {
-            (it.get("kind"), it.get("kindIndex")): it.get("aspect")
+            (it.get("kind"), it.get("kindIndex")): it
             for it in (slide.get("items") or [])
             if "aspect" in it
         }
@@ -324,10 +332,18 @@ def _merge_legacy_slides(
             if key in repl:
                 slide[key] = repl[key]
         for it in slide.get("items") or []:
-            if it.get("kind") in {"image", "movie"}:
-                key = (it.get("kind"), it.get("kindIndex"))
-                if key in prior:
-                    it["aspect"] = prior[key]
+            kind = it.get("kind")
+            if kind not in {"image", "movie", "group"}:
+                continue
+            old = prior.get((kind, it.get("kindIndex")))
+            trusted = (
+                kind != "group"
+                and old is not None
+                and (number, kind) not in mismatched
+                and abs(float(it.get("w") or 0) - float(old.get("w") or 0)) <= 1
+                and abs(float(it.get("h") or 0) - float(old.get("h") or 0)) <= 1
+            )
+            it["aspect"] = old["aspect"] if trusted else None
         # This slide's items came from a scoped legacy (JXA) inspect, not the offline
         # decode — its group rects are live union frames, not archive offsets, so
         # attach_group_children must not attach children to it despite the payload's
@@ -382,7 +398,16 @@ def acquire_wall_payload(
         and cached.get("reader") == "offline"
         and not cached.get("offlineFallbackTagged")
     )
-    if usable and carries and not stale_jxa and not stale_mixed:
+    # An offline cache written before the splice refreshed a stale frame's aspect may
+    # carry the pre-splice aspect, which mis-sizes the planner's aspect snap; re-read.
+    stale_aspect = (
+        mode == "on"
+        and usable
+        and carries
+        and cached.get("reader") == "offline"
+        and not cached.get("spliceAspectRefreshed")
+    )
+    if usable and carries and not stale_jxa and not stale_mixed and not stale_aspect:
         bulk_errors = cached.get("bulkErrors") or []
         if bulk_errors:
             say(f"WARN: cached {cached['reader']} read for {source.name} carries "
@@ -398,6 +423,10 @@ def acquire_wall_payload(
     if stale_mixed:
         say(f"Cached offline read of {source.name} is not from a mixed-slide-tagged "
             "two-tier read; re-reading offline.")
+
+    if stale_aspect:
+        say(f"Cached offline read of {source.name} predates the splice aspect refresh; "
+            "re-reading offline.")
 
     if rejected_cache and mode == "on" and usable and not carries_aspect:
         say(f"Cached {cached['reader']} read of {source.name} predates per-item aspect; "
@@ -427,13 +456,23 @@ def acquire_wall_payload(
             say(f"Offline source read unavailable ({type(exc).__name__}: {exc}); "
                 f"serving cached jxa payload for {source.name}.")
             return cached
-        if stale_mixed:
-            # Untagged: we cannot tell a fallback slide from a genuinely offline one, so
-            # refuse every autosize group's size rather than re-read Keynote in full.
-            for slide in cached.get("slides") or []:
-                slide["groupChildrenUnavailable"] = True
+        if stale_mixed or stale_aspect:
+            # Untagged: we cannot tell a fallback slide from a genuinely offline one, nor
+            # a stale aspect from a fresh one, so refuse what is untrusted rather than
+            # re-read Keynote in full.
+            refused = []
+            if stale_mixed:
+                for slide in cached.get("slides") or []:
+                    slide["groupChildrenUnavailable"] = True
+                refused.append("group sizes")
+            if stale_aspect:
+                for slide in cached.get("slides") or []:
+                    for item in slide.get("items") or []:
+                        if item.get("aspect") is not None:
+                            item["aspect"] = None
+                refused.append("aspect snaps")
             say(f"Offline source read unavailable ({type(exc).__name__}: {exc}); serving "
-                f"cached offline payload for {source.name} with group sizes refused.")
+                f"cached offline payload for {source.name} with {' and '.join(refused)} refused.")
             return cached
         say(f"Offline source read unavailable ({type(exc).__name__}: {exc}); "
             f"using Keynote inspect of {source.name}.")
@@ -469,6 +508,7 @@ def acquire_wall_payload(
         f"skipped the full Keynote source inspect.")
     offline["reader"] = "offline"
     offline["offlineFallbackTagged"] = True
+    offline["spliceAspectRefreshed"] = True
     if _truthy_cache(None, None):
         try:
             store_inspect_payload(source, offline)
