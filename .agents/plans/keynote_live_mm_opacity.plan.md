@@ -371,7 +371,7 @@ per-frame `readPixels` pair (a sync stall on every frame, inside G2's recording 
   authors see Keynote's opacity. Needs the replacements split from the observation hook in `live_runtime.py` (a
   rendering-only function), the preview's `player_digest` / cache contract (`html_preview.py:686`) to key on the served bytes,
   and its own on/off parity test. Separate small PR after this one lands.
-  Done: merged #235, `dashboard_preview_mm_opacity.plan.md` (serve-time patch; cache and `player_digest` stay stock).
+  Done: merged #235, `dashboard_preview_mm_opacity.plan.md` (removed; `git show 0f0a70aa:.agents/plans/dashboard_preview_mm_opacity.plan.md`) (serve-time patch; cache and `player_digest` stay stock).
 - G2's LIVE semantics.
 - The midtone LUT (OD-2 finding 1).
 - **Fixed in implementation (R5):** a one-frame DOM+GL double image at a translucent Magic Move start (seen in managed OBS;
