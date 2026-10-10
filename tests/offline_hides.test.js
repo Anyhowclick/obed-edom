@@ -1,5 +1,5 @@
 // Unit tests for pass-1 offline hides (remap_keynote.js, Stream C of
-// .agents/plans/pass1_hides_offline.plan.md). Pure JS — no Keynote, no Apple
+// git show 1379b2df:.agents/plans/pass1_hides_offline.plan.md). Pure JS — no Keynote, no Apple
 // Events. Run with:
 //
 //     node tests/offline_hides.test.js

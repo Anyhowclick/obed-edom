@@ -30,7 +30,7 @@ todos:
 | `h-layouts` | below gate: 39 s total |
 | `h-open-size` | recorded: open 3.6 s, slideSize 6.0 s |
 | `h-zorder-patch` | read-back loads the deck once (`d9cf7f2b`): z-order block 183 → 20 s |
-| `h-hides-offline` | `pass1_hides_offline.plan.md`, `OBED_OFFLINE_HIDES` default on |
+| `h-hides-offline` | `git show 1379b2df:.agents/plans/pass1_hides_offline.plan.md`, `OBED_OFFLINE_HIDES` default on |
 | `design-offline-attrs` | not triggered: its gate was attrs ≥ 60 s after `h-attrs-roundtrips`; attrs is ≈ 19 s |
 
 ## What pass 1 does today (OBED_OFFLINE_WRITE on)
@@ -50,7 +50,7 @@ Attrs mode writes per spec (applyGeom :200-261): opacity, objectText font / size
 fallback to attributeRuns[0]), unlock/relock around them if locked. No size, position or child write.
 
 With `OBED_OFFLINE_HIDES` on (default) eligible slides skip `deleteHides`; the IWA writer deletes their
-hides after the pass-1 save (`pass1_hides_offline.plan.md`). Line numbers above are from 2026-09-23.
+hides after the pass-1 save (`git show 1379b2df:.agents/plans/pass1_hides_offline.plan.md`). Line numbers above are from 2026-09-23.
 
 ## Levers
 

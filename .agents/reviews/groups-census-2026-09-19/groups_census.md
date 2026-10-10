@@ -54,7 +54,7 @@ Zero `rotated-group` (no group on the deck carries a non-zero angle).
 All 935 carry a `bezierPathSource`. **None is a connector.** The comment in
 `_group_residual_reason` ("zero-size connector") is a misnomer: 96.6% of them are
 **autosize text boxes with the `h == 0.0` layout-cache sentinel** — the *same phantom class*
-the middle-anchor text increment cleared (`.agents/plans/offline_text_middle_anchor.plan.md`).
+the middle-anchor text increment cleared (`git show 1379b2df:.agents/plans/offline_text_middle_anchor.plan.md`).
 In the SOURCE deck their `naturalSize.height` is still populated; pass 1 zeroes it, which is why
 an offline-only union reconstruction cannot rely on it (see §2).
 

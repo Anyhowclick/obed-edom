@@ -715,7 +715,7 @@ def _slide_edits(
                 # frame is not the live anchor. There is NO laid-out gate -- pass 1 zeroes
                 # naturalSize on every autosize box, and admitting those is live-validated
                 # (2026-09-18: 137 boxes, 136/136 un-laid-out post-pass-1, verify text max
-                # 0.98px; see .agents/plans/offline_text_middle_anchor.plan.md).
+                # 0.98px; see git show 1379b2df:.agents/plans/offline_text_middle_anchor.plan.md).
                 seed_ok = have_reported and rep[2] > 0.0 and rep[3] > 0.0
                 if not text_reposition or not seed_ok:
                     _miss("text-autosize")

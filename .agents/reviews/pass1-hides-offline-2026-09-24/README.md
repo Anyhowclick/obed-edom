@@ -1,6 +1,6 @@
 # Pass-1 hides offline — live gate record (2026-09-24)
 
-Plan: `.agents/plans/pass1_hides_offline.plan.md` (§Oracles, §Gate, todo `f-live-gate`).
+Plan: `git show 1379b2df:.agents/plans/pass1_hides_offline.plan.md` (§Oracles, §Gate, todo `f-live-gate`).
 
 - **A:** `origin/main` b3127ed5. Its remap code is identical to the branch's merge base; main's newer commits touch only GL-replay and live-probe code.
 - **B:** branch `claude/pass1-hides-offline` at ebd5c01b (the code at e218607f plus a docstring change).

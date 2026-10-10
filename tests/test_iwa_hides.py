@@ -3,7 +3,7 @@
 A synthetic but REAL .key is serialized through keynote_parser (the codec the writer
 uses), with a ``TSP.PackageMetadata`` whose component tables (uuid entries,
 dataReferences, externalReferences) are derived from the archive headers exactly as
-Keynote keeps them (invariants I1-I6 of .agents/plans/pass1_hides_offline.plan.md).
+Keynote keeps them (invariants I1-I6 of git show 1379b2df:.agents/plans/pass1_hides_offline.plan.md).
 
 Deck layout (default ``_build``):
 - Index/DocumentStylesheet.iwa (component 950): stylesheet root 950, styles 900 (media),
