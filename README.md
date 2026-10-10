@@ -143,6 +143,8 @@ continuity badge. The codes:
 - `R8`: the pair is trimmed differently.
 - `R9`: the movie is not fully opaque on either side (a carried decoder is drawn
   at opacity 1, so a fade would turn solid).
+- `R10`: a movie that moves across the transition does not ease in and out over
+  the whole transition (the carried movie can only follow that timing).
 - `overlap`: artwork above the carried movie on the destination slide (GL replay
   may still carry it; see below).
 

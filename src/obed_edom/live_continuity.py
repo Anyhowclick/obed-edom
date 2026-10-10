@@ -262,6 +262,23 @@ def _v_animation_group(value: Any, path: str) -> None:
     _v_dict_exact(required)(value, path)
 
 
+def _v_motion_leaf(value: Any, path: str) -> None:
+    if not isinstance(value, dict):
+        raise _Refuse(f"{path} is not a readable animation")
+    _v_nonempty_str(value.get("property"), f"{path}.property")
+
+
+def _v_motion_group(value: Any, path: str) -> None:
+    """What the bridge timing check reads of one animation group: its leaves' properties, and
+    `beginTime`/`duration` (read only when the group moves the slot, but required of every group
+    so a group cannot hide motion behind an unreadable field)."""
+    if not isinstance(value, dict):
+        raise _Refuse(f"{path} is not a readable animation group")
+    _v_list_of(_v_motion_leaf)(value.get("animations"), f"{path}.animations")
+    _v_finite_number(value.get("beginTime"), f"{path}.beginTime")
+    _v_finite_number(value.get("duration"), f"{path}.duration")
+
+
 _v_point_pair = _v_list_of(_v_finite_number, length=2)
 _EFFECT_SHAPE_ELEMENT_SCHEMAS: dict[str, Callable[[Any, str], None]] = {
     "MoveToPoint": _v_dict_exact({"type": _v_one_of(frozenset({"MoveToPoint"})), "points": _v_list_of(_v_point_pair, length=1)}),
@@ -708,7 +725,7 @@ class MovieContinuity:
     loop: bool = False
     """The source instance's loop setting, which a carried decoder keeps."""
     code: str | None = None
-    """The refusal's code (`overlap`, `R1`, `R1b`, `R2`, `R4`, `R7`, `R8`, `R9`) when `refusal` is set."""
+    """The refusal's code (`overlap`, `R1`, `R1b`, `R2`, `R4`, `R7`, `R8`, `R9`, `R10`) when `refusal` is set."""
 
     def as_dict(self) -> dict[str, Any]:
         result = {
@@ -1327,6 +1344,8 @@ class _MovieInstance:
     kind: str = "video"
     trim: tuple[Any, ...] = ()
     opaque: bool = True
+    layer_rect: Rect | None = None
+    """The movie layer's own rect, which a transition slot carrying the movie starts at."""
 
 
 def _loops(movie: dict[str, Any], slide_name: str) -> bool:
@@ -1353,11 +1372,12 @@ def _slide_movie_instances(
         if not isinstance(object_id, str) or not object_id:
             raise _Refuse(f"movie on slide {slide_name} has no object id")
         rect = _movie_rect(node, slide_name)
+        layer_rect = _state_rect(node["baseLayer"]["initialState"], "movie layer", slide_name)
         url = _asset_url(assets_table, asset_id)
         instances.setdefault(_normalize_asset_key(assets_table, asset_id), []).append(
             _MovieInstance(
                 rect, object_id, _loops(movie, slide_name), _movie_opacity(node),
-                _movie_kind(movie, url), _movie_trim(movie, url), _opaque(node, object_id, events),
+                _movie_kind(movie, url), _movie_trim(movie, url), _opaque(node, object_id, events), layer_rect,
             )
         )
     for found in instances.values():
@@ -1514,6 +1534,90 @@ def _gl_replay_attempt(
     return replace(movie, gl_replay=result, gl_replay_reason=None, gl_replay_slot=slot)
 
 
+def _bridge_slot_chain(transition: dict[str, Any], src: "_MovieInstance", slide_name: str) -> list[dict[str, Any]]:
+    """The carried movie's layer chain in the transition: the one slot whose top-level layer starts
+    at the source movie layer's rect within `_GEOMETRY_TOLERANCE`. The transition's layers carry no
+    `objectID`, and a slide whose builds add objects draws fewer slots on its earlier events, so no
+    draw order indexes the slot reliably; Keynote copies the movie layer's frame onto the slot."""
+    if src.layer_rect is None:
+        raise _Refuse("the carried movie has no readable layer rect")
+    base_layer = transition.get("baseLayer")
+    slots = base_layer.get("layers") if isinstance(base_layer, dict) else None
+    if not isinstance(slots, list):
+        raise _Refuse("the transition has no readable slot list")
+    matches = []
+    for index, slot in enumerate(slots):
+        where = f"transition slot {index}"
+        state = _object_state(slot, where, slide_name)
+        width = _number(state, "width", where=where, slide_name=slide_name)
+        height = _number(state, "height", where=where, slide_name=slide_name)
+        rect = Rect(
+            _number(state, "position", "pointX", where=where, slide_name=slide_name)
+            - _number(state, "anchorPoint", "pointX", where=where, slide_name=slide_name) * width,
+            _number(state, "position", "pointY", where=where, slide_name=slide_name)
+            - _number(state, "anchorPoint", "pointY", where=where, slide_name=slide_name) * height,
+            width,
+            height,
+        )
+        if rect.close_to(src.layer_rect):
+            matches.append(index)
+    if not matches:
+        raise _Refuse("no transition slot starts at the carried movie's rect")
+    if len(matches) > 1:
+        raise _Refuse(f"transition slots {matches} all start at the carried movie's rect")
+    return _effect_chain(slots[matches[0]], matches[0])
+
+
+def _bridge_timing_refusal(
+    transition: dict[str, Any] | None, src: "_MovieInstance", slide_name: str, asset: str, desc: str
+) -> str | None:
+    """R10: the bridge overlay eases the carried movie with EaseInEaseOut from the transition's
+    start over its `duration`, so every motion animation on the movie's transition slot must run
+    exactly that. Only the fields read here are validated, failing closed when one is missing or
+    ill-typed; the glReplay vocabulary does not apply. A missing or non-positive duration is left
+    to `to_runtime`, which refuses it."""
+    duration = transition.get("duration") if transition else None
+    if not _positive_duration(duration):
+        return None
+    try:
+        begin = transition.get("beginTime")
+        _v_finite_number(begin, "the transition's beginTime")
+        if begin != 0:
+            raise _Refuse(f"the transition begins at {begin}s")
+        groups = []
+        for depth, node in enumerate(_bridge_slot_chain(transition, src, slide_name)):
+            _v_list_of(_v_motion_group)(node.get("animations"), f"slot layer {depth}.animations")
+            groups += [
+                group for group in node["animations"]
+                if any(leaf["property"] in _EFFECT_LEAF_ONLY_PROPERTIES for leaf in group["animations"])
+            ]
+        if not groups:
+            raise _Refuse("the carried movie's slot has no motion animation")
+        for group in groups:
+            if group["beginTime"] != 0 or group["duration"] != duration:
+                raise _Refuse(
+                    f"a motion group runs {group['duration']}s from {group['beginTime']}s, "
+                    f"not {duration}s from 0s"
+                )
+            for leaf in group["animations"]:
+                if leaf["property"] not in _EFFECT_LEAF_ONLY_PROPERTIES:
+                    continue
+                if leaf.get("timingFunction") not in _EFFECT_TIMING_FUNCTIONS:
+                    raise _Refuse(
+                        f"{leaf['property']} has timingFunction {leaf.get('timingFunction')!r}, not 'EaseInEaseOut'"
+                    )
+                _v_finite_number(leaf.get("beginTime"), f"{leaf['property']}.beginTime")
+                _v_finite_number(leaf.get("duration"), f"{leaf['property']}.duration")
+                if leaf["beginTime"] != 0 or leaf["duration"] != duration:
+                    raise _Refuse(
+                        f"{leaf['property']} runs {leaf['duration']}s from {leaf['beginTime']}s, "
+                        f"not {duration}s from 0s"
+                    )
+    except _Refuse as exc:
+        return f"'{asset}' does not move with the bridge's eased timing at {desc}: {exc}"
+    return None
+
+
 def _drawn_slot_index(
     events: list[Any], instance: "_MovieInstance", slide_name: str, slot_count: int
 ) -> int | None:
@@ -1649,6 +1753,9 @@ def _magic_move_movies(
         raise _Refuse(f"more than one movie changes geometry at {desc}")
     for movie, src, dst in carried:
         refusal = _carry_refusal(movie.asset, src, dst, source, destination, desc)
+        if refusal is None and movie.action == "bridge":
+            timing = _bridge_timing_refusal(transition, src, source.uuid, movie.asset, desc)
+            refusal = ("R10", timing) if timing is not None else None
         if refusal is not None:
             code, reason = refusal
             movie = replace(movie, refusal=reason, code=code)

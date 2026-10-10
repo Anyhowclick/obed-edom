@@ -120,6 +120,25 @@ def test_positive_control_actions_and_to_runtime():
     assert plan.to_runtime() == Unsupported(NOT_YET_QUALIFIED)
 
 
+@pytest.mark.parametrize(
+    "root",
+    [
+        POSITIVE_ROOT,
+        pytest.param(
+            POSITIVE_REAL_ROOT,
+            marks=pytest.mark.skipif(not GL_DECKS_ROOT.is_dir(), reason="real gl-deck exports not available"),
+        ),
+    ],
+    ids=["fixture", "real"],
+)
+def test_positive_control_bridge_passes_the_eased_timing_check(root):
+    plan = _plan(root, POSITIVE_UUIDS)
+    assert isinstance(plan, ContinuityPlan)
+    (bridge,) = [m for b in plan.boundaries for m in b.movies if m.action == "bridge"]
+    assert bridge.refusal is None
+    assert plan.refusals == ()
+
+
 @pytest.mark.skipif(not GL_DECKS_ROOT.is_dir(), reason="real gl-deck exports not available")
 @pytest.mark.parametrize(
     "real_root, fixture_root, uuids",
@@ -493,3 +512,41 @@ def test_d2_with_its_dissolve_exported_as_none_signs_the_same_plan(tmp_path):
     runtime = derive_plan(root, _slides(_slide_list(root)), resolver=_resolver).to_runtime()
     assert isinstance(runtime, dict)
     assert live_continuity.plan_signature(runtime) == QUAL_PLAN_SHA256["D2"]
+
+
+QUAL_BRIDGES = {
+    "D1": ["7469", "565D"],
+    "D2": ["D4E3", "1D37"],
+    "D3": ["F6AC", "1441"],
+    "D4": ["254E"],
+    "D5": [],
+    "D6": ["41D0", "8A80"],
+}
+
+
+@pytest.mark.parametrize("deck", sorted(QUAL_BRIDGES))
+@pytest.mark.parametrize("gl_replay", [False, True])
+def test_every_s0_bridge_passes_the_eased_timing_check_by_rect(deck, gl_replay):
+    """R10 finds the carried movie's transition slot by its start rect because no draw order
+    indexes it: on every S0 bridge the source slide's events that draw the movie have one slot
+    fewer than the boundary transition, so `_drawn_slot_index` would refuse each one ("draws N
+    slots where the boundary transition has N+1"). All nine bridges still qualify."""
+    deck_root = QUAL_ROOT / deck
+    uuids = _slide_list(deck_root)
+    plan = _qual_plan(deck, gl_replay=gl_replay)
+    bridges = [(b, m) for b in plan.boundaries for m in b.movies if m.action == "bridge"]
+    assert [m.src_object_id[:4] for _, m in bridges] == QUAL_BRIDGES[deck]
+    for boundary, movie in bridges:
+        assert (movie.refusal, movie.code, movie.gl_replay_reason) == (None, None, None)
+        source = json.loads((deck_root / "assets" / uuids[boundary.from_player_index] / f"{uuids[boundary.from_player_index]}.json").read_text())
+        (transition,) = [e for event in source["events"] for e in event["effects"] if e.get("type") == "transition"]
+        drawn = {
+            len(event["baseLayer"]["layers"])
+            for event in source["events"]
+            if any(
+                len(slot["layers"]) == 1 and slot["layers"][0].get("objectID") == movie.src_object_id
+                for slot in event["baseLayer"]["layers"]
+            )
+        }
+        assert drawn == {len(transition["baseLayer"]["layers"]) - 1}
+    assert all(record["code"] != "R10" for record in plan.refusals)

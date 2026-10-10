@@ -569,6 +569,298 @@ def _signed(monkeypatch, plan: ContinuityPlan) -> dict:
     return signed[0]
 
 
+# --- R10: a bridged movie must move with the overlay's eased timing --------------------------
+#
+# The bridge overlay eases the carried movie with cubic-bezier(.42,0,.58,1) over the transition's
+# duration from its start. Slide 3's transition draws the carried untitled.mov in slot 1 (its
+# source draw order: background, untitled.mov, WA0125); its motion leaves are
+# transform.scale.x/.y and transform.translation, all EaseInEaseOut, 1.5s from 0s, in one group
+# on the slot's second chain layer. The slot is found by its start rect, not its index: the
+# transition's layers carry no objectID, and on every D-deck bridge the source slide draws fewer
+# slots than the transition has (see the decks file).
+SLIDE3_BRIDGE_MOVIE_SLOT = 1
+_MOTION_PROPERTIES = {"transform.scale.x", "transform.scale.y", "transform.translation"}
+R10_PREFIX = "'untitled.mov' does not move with the bridge's eased timing at player index 2 -> 3: "
+
+
+def _transition(data: dict) -> dict:
+    (effect,) = [e for event in data["events"] for e in event["effects"] if e.get("type") == "transition"]
+    return effect
+
+
+def _bridge_slot_chain(data: dict) -> list[dict]:
+    node = _transition(data)["baseLayer"]["layers"][SLIDE3_BRIDGE_MOVIE_SLOT]
+    chain = [node]
+    while node["layers"]:
+        (node,) = node["layers"]
+        chain.append(node)
+    return chain
+
+
+def _bridge_motion_groups(data: dict) -> list[dict]:
+    return [
+        group for node in _bridge_slot_chain(data) for group in node["animations"]
+        if any(leaf["property"] in _MOTION_PROPERTIES for leaf in group["animations"])
+    ]
+
+
+def _bridge_motion_leaves(data: dict) -> list[dict]:
+    return [
+        leaf for group in _bridge_motion_groups(data) for leaf in group["animations"]
+        if leaf["property"] in _MOTION_PROPERTIES
+    ]
+
+
+def _bridge_movie(plan: ContinuityPlan) -> MovieContinuity:
+    (movie,) = [m for b in plan.boundaries for m in b.movies if m.action == "bridge"]
+    return movie
+
+
+def test_fixture_bridge_motion_is_the_eased_transition_timing():
+    data = json.loads((FIXTURE_ROOT / "assets" / SLIDE3 / f"{SLIDE3}.json").read_text())
+    assert (_transition(data)["beginTime"], _transition(data)["duration"]) == (0, 1.5)
+    leaves = _bridge_motion_leaves(data)
+    assert sorted(leaf["property"] for leaf in leaves) == sorted(_MOTION_PROPERTIES)
+    assert {(leaf["timingFunction"], leaf["beginTime"], leaf["duration"]) for leaf in leaves} == {
+        ("EaseInEaseOut", 0, 1.5)
+    }
+    assert {(group["beginTime"], group["duration"]) for group in _bridge_motion_groups(data)} == {(0, 1.5)}
+    plan = _plan()
+    assert isinstance(plan, ContinuityPlan)
+    assert _bridge_movie(plan).refusal is None
+    assert _refusal_codes(plan) == [(1, "overlap")]
+    assert plan.to_runtime() == EXPECTED_RUNTIME_PLAN
+
+
+def _each_leaf(change):
+    def mutate(data):
+        for leaf in _bridge_motion_leaves(data):
+            change(leaf)
+        return data
+
+    return mutate
+
+
+def _each_group(change):
+    def mutate(data):
+        for group in _bridge_motion_groups(data):
+            change(group)
+        return data
+
+    return mutate
+
+
+def _set_transition_begin(data):
+    _transition(data)["beginTime"] = 0.2
+    return data
+
+
+def _drop_transition_slots(data):
+    _transition(data)["baseLayer"]["layers"] = []
+    return data
+
+
+def _nudge_bridge_slot(dx: float):
+    def mutate(data):
+        _transition(data)["baseLayer"]["layers"][SLIDE3_BRIDGE_MOVIE_SLOT]["initialState"]["position"]["pointX"] += dx
+        return data
+
+    return mutate
+
+
+def _duplicate_bridge_slot(data):
+    slots = _transition(data)["baseLayer"]["layers"]
+    slots.append(copy.deepcopy(slots[SLIDE3_BRIDGE_MOVIE_SLOT]))
+    return data
+
+
+def _strip_bridge_motion(data):
+    for node in _bridge_slot_chain(data):
+        node["animations"] = [
+            group for group in node["animations"]
+            if not any(leaf["property"] in _MOTION_PROPERTIES for leaf in group["animations"])
+        ]
+    return data
+
+
+def _drop_first_leaf_property(data):
+    del _bridge_motion_groups(data)[0]["animations"][0]["property"]
+    return data
+
+
+R10_CASES = [
+    pytest.param(
+        _each_leaf(lambda leaf: leaf.__setitem__("timingFunction", "Linear")),
+        "transform.scale.x has timingFunction 'Linear', not 'EaseInEaseOut'",
+        id="leaf-linear",
+    ),
+    pytest.param(
+        _each_leaf(lambda leaf: leaf.pop("timingFunction")),
+        "transform.scale.x has timingFunction None, not 'EaseInEaseOut'",
+        id="leaf-no-timing-function",
+    ),
+    pytest.param(
+        _each_leaf(lambda leaf: leaf.__setitem__("beginTime", 0.2)),
+        "transform.scale.x runs 1.5s from 0.2s, not 1.5s from 0s",
+        id="leaf-begin-offset",
+    ),
+    pytest.param(
+        _each_leaf(lambda leaf: leaf.__setitem__("duration", 1.0)),
+        "transform.scale.x runs 1.0s from 0s, not 1.5s from 0s",
+        id="leaf-short-duration",
+    ),
+    pytest.param(
+        _each_group(lambda group: group.__setitem__("beginTime", 0.2)),
+        "a motion group runs 1.5s from 0.2s, not 1.5s from 0s",
+        id="group-begin-offset",
+    ),
+    pytest.param(
+        _each_group(lambda group: group.__setitem__("duration", 1.0)),
+        "a motion group runs 1.0s from 0s, not 1.5s from 0s",
+        id="group-short-duration",
+    ),
+    pytest.param(_set_transition_begin, "the transition begins at 0.2s", id="transition-begin-offset"),
+    pytest.param(
+        _each_group(lambda group: group.pop("duration")),
+        "slot layer 1.animations[0].duration is not a readable finite number",
+        id="group-duration-missing",
+    ),
+    pytest.param(
+        _each_group(lambda group: group.__setitem__("duration", "1.5")),
+        "slot layer 1.animations[0].duration is not a readable finite number",
+        id="group-duration-string",
+    ),
+    pytest.param(
+        _drop_first_leaf_property,
+        "slot layer 1.animations[0].animations[0].property is not a readable non-empty string",
+        id="leaf-property-missing",
+    ),
+    pytest.param(_drop_transition_slots, "no transition slot starts at the carried movie's rect", id="no-slots"),
+    pytest.param(_nudge_bridge_slot(0.6), "no transition slot starts at the carried movie's rect", id="slot-nudged-0.6px"),
+    pytest.param(
+        _duplicate_bridge_slot,
+        "transition slots [1, 3] all start at the carried movie's rect",
+        id="ambiguous-slot",
+    ),
+    pytest.param(_strip_bridge_motion, "the carried movie's slot has no motion animation", id="no-motion"),
+]
+
+
+@pytest.mark.parametrize(("mutation", "detail"), R10_CASES)
+def test_r10_bridge_refuses_motion_the_overlay_does_not_ease(monkeypatch, mutation, detail):
+    """Only slide 3's transition changes: geometry, opacity and the transition's own duration are
+    untouched, so before the timing check each case derived the qualified bridge. A refusal retires
+    that boundary alone; an unreadable field refuses, it never raises."""
+    plan = _plan(_mutate_slide(SLIDE3, mutation))
+    assert isinstance(plan, ContinuityPlan)
+    movie = _bridge_movie(plan)
+    assert (movie.action, movie.code) == ("bridge", "R10")
+    assert movie.refusal == R10_PREFIX + detail
+    assert _refusal_codes(plan) == [(1, "overlap"), (3, "R10")]
+    runtime = _signed(monkeypatch, plan)
+    assert runtime["boundaries"][2] == {
+        "atScene": 8, "action": "retire", "movieKey": "movie1", "reason": "refused",
+        "src": EXPECTED_RUNTIME_PLAN["boundaries"][2]["src"],
+    }
+    assert runtime["boundaries"][:2] == EXPECTED_RUNTIME_PLAN["boundaries"][:2]
+
+
+def test_r10_with_gl_replay_names_the_refusal_as_the_gl_replay_reason():
+    root = _mutate_slide(SLIDE3, _each_leaf(lambda leaf: leaf.__setitem__("timingFunction", "Linear")))
+    plan = derive_plan(root, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, ContinuityPlan)
+    movie = _bridge_movie(plan)
+    assert (movie.action, movie.code) == ("bridge", "R10")
+    assert movie.gl_replay is None
+    assert movie.gl_replay_reason == movie.refusal
+    assert movie.refusal.startswith(R10_PREFIX)
+    assert _refusal_codes(plan) == [(1, "overlap"), (3, "R10")]
+
+
+def test_r10_a_slot_within_the_geometry_tolerance_still_qualifies():
+    """Guard for the nudged-slot case: 0.4 px is inside `_GEOMETRY_TOLERANCE` (0.5)."""
+    plan = _plan(_mutate_slide(SLIDE3, _nudge_bridge_slot(0.4)))
+    assert isinstance(plan, ContinuityPlan)
+    assert _bridge_movie(plan).refusal is None
+    assert _refusal_codes(plan) == [(1, "overlap")]
+    assert plan.to_runtime() == EXPECTED_RUNTIME_PLAN
+
+
+def test_r10_finds_the_movie_slot_by_rect_not_index():
+    """An unrelated slot (WA0125's, a different rect) inserted before the movie's moves it to
+    index 2; the rect lookup still finds it, so the bridge qualifies and the runtime is unchanged."""
+
+    def insert_unrelated_slot(data):
+        slots = _transition(data)["baseLayer"]["layers"]
+        slots.insert(SLIDE3_BRIDGE_MOVIE_SLOT, copy.deepcopy(slots[2]))
+        return data
+
+    plan = _plan(_mutate_slide(SLIDE3, insert_unrelated_slot))
+    assert isinstance(plan, ContinuityPlan)
+    assert _bridge_movie(plan).refusal is None
+    assert _refusal_codes(plan) == [(1, "overlap")]
+    assert plan.to_runtime() == EXPECTED_RUNTIME_PLAN
+
+
+SLIDE1_PIN_SLOT = 3
+
+
+def test_r10_pins_are_exempt_from_the_eased_timing_check():
+    """The pin hold is static, so a pin's transition timing is never read. Slide 1's transition
+    has motion only on other objects' slots (2 and 4), and the pinned movie's slot 3 has none: every
+    existing motion leaf is made Linear and a Linear motion group is added to the pin's own slot.
+    The green square is moved below the movie so the pin is not already refused for overlap
+    (which `_carry_refusal` would report first), and no refusal appears."""
+
+    def linear_motion(data):
+        slots = _transition(data)["baseLayer"]["layers"]
+        pin_state = slots[SLIDE1_PIN_SLOT]["initialState"]
+        assert pin_state["width"] == pytest.approx(SLIDE1_BIG[2] + 5, abs=0.05)
+        moving = []
+        for slot in slots:
+            node = slot
+            while True:
+                for group in node["animations"]:
+                    for leaf in group["animations"]:
+                        if leaf["property"] in _MOTION_PROPERTIES:
+                            leaf["timingFunction"] = "Linear"
+                            moving.append(group)
+                if not node["layers"]:
+                    break
+                (node,) = node["layers"]
+        assert moving
+        slots[SLIDE1_PIN_SLOT]["animations"].append(copy.deepcopy(moving[0]))
+        return data
+
+    root = _copy_fixture_tree()
+    _rewrite_slide_json(root, SLIDE2, _move_green_square_below_the_movie)
+    _rewrite_slide_json(root, SLIDE1, linear_motion)
+    plan = _plan(root)
+    assert isinstance(plan, ContinuityPlan)
+    [pin] = plan.boundaries[0].movies
+    assert (pin.action, pin.refusal, pin.code) == ("pin", None, None)
+    assert plan.refusals == ()
+
+
+@pytest.mark.skipif(not REAL_EXPORT_ROOT.is_dir(), reason="real P2 export not available")
+def test_fixture_bridge_transition_is_the_real_exports_with_textures_sanitized():
+    def strip(value):
+        if isinstance(value, dict):
+            return {k: None if k == "texture" else strip(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [strip(v) for v in value]
+        return value
+
+    def transition(root: Path) -> dict:
+        return _transition(json.loads((root / "assets" / SLIDE3 / f"{SLIDE3}.json").read_text()))
+
+    assert strip(transition(FIXTURE_ROOT)) == strip(transition(REAL_EXPORT_ROOT))
+    real_plan = derive_plan(REAL_EXPORT_ROOT, SLIDES, resolver=_resolver)
+    assert isinstance(real_plan, ContinuityPlan)
+    assert _bridge_movie(real_plan).refusal is None
+    assert _refusal_codes(real_plan) == [(1, "overlap")]
+
+
 def test_r6_an_empty_boundary_after_a_bridge_breaks_the_chain():
     """R6: the bridged slide-4 instance is carried, so the boundary out of slide 4 must continue or
     end it; a deck that goes on to a slide with no entry for it cannot be expressed."""
@@ -3433,15 +3725,17 @@ def test_r2_the_repeated_instance_geometry_pairs_the_sibling_onto_the_far_destin
     """Positive control for the test below, with no build anywhere: sources A (slide 1's big
     instance) and B (its small one), destinations C (slide 2's instance, A's rect) and CLONE (far
     above B). The minimum-total assignment is A->C, B->CLONE; B alone would pair with C, which is
-    nearer to it than CLONE by well over the 16 px margin."""
+    nearer to it than CLONE by well over the 16 px margin. The clone's slide-1 transition slot only
+    fades (no motion), so R10 refuses the B->CLONE bridge; the pairing assertions are the point."""
     from obed_edom.live_continuity import _pair_instances
 
     plan = _plan(_mutate_slide(SLIDE2, _clone_onto_slide2_top_right))
     assert isinstance(plan, ContinuityPlan)
     assert [(m.action, m.src_object_id, m.dst_object_id, m.code) for m in plan.boundaries[0].movies] == [
         ("pin", P2_OBJECT_IDS["slide1"], P2_OBJECT_IDS["slide2"], "overlap"),
-        ("bridge", P2_OBJECT_IDS["slide1_small"], "CLONE", None),
+        ("bridge", P2_OBJECT_IDS["slide1_small"], "CLONE", "R10"),
     ]
+    assert plan.boundaries[0].movies[1].refusal.endswith("the carried movie's slot has no motion animation")
     source, destination = _parsed_slide(0, SLIDE1), _parsed_slide(
         1, SLIDE2, _mutate_slide(SLIDE2, _clone_onto_slide2_top_right)
     )

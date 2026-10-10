@@ -702,7 +702,7 @@ for the parked `iwa-surgical-write-generator` feature.
 * **Refusals.** Per (boundary, instance) → `retire refused` + one `ContinuityPlan.refusals` record (`code`,
   `objectId` of `src`), reported on `output.continuity.notCarried`: `overlap` artwork above on the destination, R1
   ambiguous pairing (runner-up within 16 authored px), R1b opacity differs, R2 builds in/out, R4 loop mismatch, R7
-  web/image movie, R8 trim differs, R9 not fully opaque (checked after R2). Deck-wide → `Unsupported("Rn: …")`: R3 transition not on the outgoing slide's last
+  web/image movie, R8 trim differs, R9 not fully opaque (checked after R2), R10 bridge motion not EaseInEaseOut over the whole transition (checked last). Deck-wide → `Unsupported("Rn: …")`: R3 transition not on the outgoing slide's last
   event, R5 objectID repeats across slides, R6 chain invariant. `retire ends` is not a refusal. Never relax one to
   qualify a deck.
 * **Allowlist.** `QUALIFIED_PLAN_SHA256` stays in force until S3; a deck joins only after its gates pass.

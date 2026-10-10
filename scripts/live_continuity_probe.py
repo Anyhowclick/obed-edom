@@ -6432,7 +6432,10 @@ def run_rescore_cli(args: argparse.Namespace) -> None:
 # (dilated by the poster's 4 px texture outline) inside the bridge's source/destination union plus a margin; other
 # objects of the boundary's transition effect are masked while they animate (and always, if they stay visible).
 # Calibrated on output/evidence/s2-dev/rubber (P2 3->4): the linear core exposes 4.6% / 54 px strips, the eased
-# one 0; a frame shows the rAF rect sampled -8..+13 ms from its screencast timestamp, so candidates are +/-1 frame.
+# one 0. Sync never comes from the screencast clock: each rAF tick paints its counter into a probe-only bar of
+# black/white cell pairs at the viewport's top-left, so every frame names the tick whose DOM it shows; that tick's
+# overlay rect is read after the frame (setTimeout) and again at the next tick's start, and a frame whose two reads
+# disagree on the cover rule is undecided.
 CARRY_COVER_DILATE_PX = 4
 CARRY_COVER_MARGIN_PX = 120
 CARRY_COVER_LIT_DELTA = 60
@@ -6442,7 +6445,13 @@ CARRY_COVER_MAX_STRIP_PX = 5
 CARRY_COVER_STRIP_MIN_RUN_PX = 8
 CARRY_COVER_MID_MOVE = (0.1, 0.9)
 CARRY_COVER_MIN_FPS = 20.0
-CARRY_COVER_ALIGN_MS = (-17.0, 17.0)
+CARRY_COVER_MAX_GAP_FRAMES = 3
+CARRY_COVER_MAX_DISCARDED_SHARE = 0.1
+CARRY_COVER_SYNC_BITS = 12
+CARRY_COVER_SYNC_CELL_PX = 4
+CARRY_COVER_SYNC_MAX_SKEW_MS = 250.0
+CARRY_COVER_SYNC_RECT = {"x": 0.0, "y": 0.0, "w": 2.0 * CARRY_COVER_SYNC_BITS * CARRY_COVER_SYNC_CELL_PX,
+                         "h": float(CARRY_COVER_SYNC_CELL_PX)}
 CARRY_COVER_FADE_SLACK_S = 0.1
 CARRY_COVER_BG_MIN_UNIFORM = 0.99
 CARRY_COVER_BG_MIN_PX = 1000
@@ -6456,15 +6465,26 @@ CARRY_COVER_HIDE_OVERLAY_JS = (
 CARRY_COVER_SAMPLER_JS = r"""
 (function(){
   if (window.__obedCarryCover__) return performance.timeOrigin;
-  var rows = [];
+  var BITS = __BITS__, CELL = __CELL__;
+  var rows = [], cells = [], count = 0;
   window.__obedCarryCover__ = {rows: rows, on: true};
+  var bar = document.createElement('div');
+  bar.id = '__obedCarryCoverSync';
+  bar.style.cssText = 'position:fixed;left:0;top:0;margin:0;padding:0;border:0;display:flex;pointer-events:none;'
+    + 'z-index:2147483647;width:' + (2 * BITS * CELL) + 'px;height:' + CELL + 'px';
+  for (var i = 0; i < 2 * BITS; i++) {
+    var cell = document.createElement('div');
+    cell.style.cssText = 'flex:none;width:' + CELL + 'px;height:' + CELL + 'px';
+    bar.appendChild(cell);
+    cells.push(cell);
+  }
+  document.documentElement.appendChild(bar);
   function opacityOf(v){
     var o = 1;
     for (var n = v; n && n.nodeType === 1; n = n.parentNode) o *= parseFloat(getComputedStyle(n).opacity);
     return o;
   }
-  function tick(ts){
-    if (!window.__obedCarryCover__.on) return;
+  function read(){
     var vids = [];
     document.querySelectorAll('video').forEach(function(v){
       if (v.__obedElId == null) return;
@@ -6472,14 +6492,26 @@ CARRY_COVER_SAMPLER_JS = r"""
       vids.push({elId: v.__obedElId, x: r.left, y: r.top, w: r.width, h: r.height, readyState: v.readyState,
                  opaque: document.contains(v) && cs.visibility === 'visible' && cs.display !== 'none' && opacityOf(v) >= 0.99});
     });
-    rows.push({ts: ts, vids: vids});
+    return vids;
+  }
+  function tick(ts){
+    if (!window.__obedCarryCover__.on) return;
+    var n = count++ % (1 << BITS);
+    for (var b = 0; b < BITS; b++) {
+      var on = (n >> b) & 1;
+      cells[2 * b].style.background = on ? '#fff' : '#000';
+      cells[2 * b + 1].style.background = on ? '#000' : '#fff';
+    }
+    var row = {ts: ts, tick: n, pre: read()};
+    rows.push(row);
     if (rows.length > 20000) rows.shift();
+    setTimeout(function(){ row.vids = read(); row.readAt = performance.now(); }, 0);
     requestAnimationFrame(tick);
   }
   requestAnimationFrame(tick);
   return performance.timeOrigin;
 })()
-"""
+""".replace("__BITS__", str(CARRY_COVER_SYNC_BITS)).replace("__CELL__", str(CARRY_COVER_SYNC_CELL_PX))
 CARRY_COVER_READ_JS = r"""
 (function(){
   var cc = window.__obedCarryCover__;
@@ -6687,23 +6719,62 @@ def carry_cover_exposure(
     return {"exposedPx": count, "exposedFraction": round(count / area, 6), "strips": strips, "opaque": opaque}
 
 
-def _carried_rect(row: dict[str, Any], el_id: Any) -> dict[str, Any] | None:
-    for video in row.get("vids") or []:
+def _carried_rect(row: dict[str, Any] | None, el_id: Any, key: str = "vids") -> dict[str, Any] | None:
+    for video in (row or {}).get(key) or []:
         if video.get("elId") == el_id and video.get("w", 0) > 0 and video.get("h", 0) > 0:
             return video
     return None
+
+
+def carry_cover_sync_tick(image: np.ndarray) -> int | None:
+    """The rAF tick the sampler's sync bar shows in `image`, or None unless every cell pair is one white, one black."""
+    cell, bits = CARRY_COVER_SYNC_CELL_PX, CARRY_COVER_SYNC_BITS
+    if image.shape[0] < cell or image.shape[1] < 2 * bits * cell:
+        return None
+    levels = image[:cell, :2 * bits * cell].reshape(cell, 2 * bits, cell, -1).mean(axis=(0, 2, 3))
+    tick = 0
+    for bit in range(bits):
+        on, off = levels[2 * bit], levels[2 * bit + 1]
+        if on >= 192 and off <= 63:
+            tick |= 1 << bit
+        elif not (on <= 63 and off >= 192):
+            return None
+    return tick
+
+
+def _cover_ok(fraction: float, strip: int) -> tuple[bool, bool]:
+    return fraction <= CARRY_COVER_MAX_EXPOSED_FRACTION, strip <= CARRY_COVER_MAX_STRIP_PX
+
+
+def _cover_reasons(frames: Sequence[dict[str, Any]], fraction_key: str, strip_key: str) -> tuple[int, int, list[str]]:
+    clean = sum(f[fraction_key] <= CARRY_COVER_MAX_EXPOSED_FRACTION for f in frames)
+    widest = max(f[strip_key] for f in frames)
+    reasons = []
+    if clean / len(frames) < CARRY_COVER_MIN_CLEAN_SHARE:
+        reasons.append(f"{len(frames) - clean}/{len(frames)} mid-move frames expose more than "
+                       f"{CARRY_COVER_MAX_EXPOSED_FRACTION:.1%} of the overlay")
+    if widest > CARRY_COVER_MAX_STRIP_PX:
+        reasons.append(f"a {widest} px strip of the poster shows beyond the overlay (max {CARRY_COVER_MAX_STRIP_PX})")
+    return clean, widest, reasons
 
 
 def score_carry_cover(
     frames: Sequence[tuple[float, np.ndarray]], rows: Any, notes: Any, bridge: dict[str, Any], stage_map: Any, *,
     viewport: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
-    """`frames`: (page-clock ms, RGB) screencast frames; `rows`: the rAF sampler's rows; `notes`: the core's
-    `bridge-motion-start` notes. PASS: at least `CARRY_COVER_MIN_CLEAN_SHARE` of the aligned mid-move frames expose
-    at most `CARRY_COVER_MAX_EXPOSED_FRACTION` of the overlay's area and no strip is wider than
-    `CARRY_COVER_MAX_STRIP_PX`. Every integrity gap is INCONCLUSIVE, never a pass."""
-    def inconclusive(reason: str, **detail: Any) -> dict[str, Any]:
-        return {"verdict": "inconclusive", "reasons": [reason], **detail}
+    """`frames`: (page-clock ms, RGB) screencast frames; `rows`: the rAF sampler's rows (`tick`, `pre` read at the
+    tick's start, `vids` read after its frame); `notes`: the core's `bridge-motion-start` notes.
+
+    Each frame is placed at the tick its sync bar names (its timestamp only picks between counter wraps) and scored
+    against both reads of that tick's overlay: its post-frame read and the next tick's pre read. A frame whose reads
+    disagree on the cover rule is undecided; when the undecided frames decide the verdict it is INCONCLUSIVE.
+    PASS: at least `CARRY_COVER_MIN_CLEAN_SHARE` of the scored mid-move frames expose at most
+    `CARRY_COVER_MAX_EXPOSED_FRACTION` of the overlay's area and no strip is wider than `CARRY_COVER_MAX_STRIP_PX`.
+    Coverage: at least `CARRY_COVER_MIN_FPS` scored frames per second, no stretch of the mid-move window longer than
+    `CARRY_COVER_MAX_GAP_FRAMES` (+ half) rAF ticks without one, and at most `CARRY_COVER_MAX_DISCARDED_SHARE` of its
+    frames unplaceable. Every integrity or coverage gap is INCONCLUSIVE, never a pass."""
+    def inconclusive(*reasons: str, **detail: Any) -> dict[str, Any]:
+        return {"verdict": "inconclusive", "reasons": list(reasons), **detail}
 
     if bridge.get("problem"):
         return inconclusive(bridge["problem"])
@@ -6717,12 +6788,20 @@ def score_carry_cover(
         return inconclusive(f"no move window: {len(motion)} bridge-motion-start notes (expected exactly one)")
     t0, el_id = float(motion[0]["t"]), motion[0]["detail"].get("elId")
     duration_ms = 1000.0 * float(bridge["durationSeconds"])
-    rows = [r for r in rows or [] if isinstance(r, dict) and isinstance(r.get("ts"), (int, float))]
+    rows = [
+        r for r in rows or []
+        if isinstance(r, dict) and isinstance(r.get("ts"), (int, float)) and isinstance(r.get("tick"), int)
+    ]
     in_move = [v for r in rows if t0 <= r["ts"] <= t0 + duration_ms for v in [_carried_rect(r, el_id)] if v]
     if not in_move:
         return inconclusive("no carried decoder sampled during the move", elId=el_id)
     if not any((v.get("readyState") or 0) >= 2 for v in in_move):
         return inconclusive("the carried decoder never decoded during the move", elId=el_id)
+    ticks = [r["ts"] for r in rows if t0 <= r["ts"] <= t0 + duration_ms]
+    cadence = float(np.median(np.diff(ticks))) if len(ticks) > 1 else math.inf
+    if cadence > 1000.0 / CARRY_COVER_MIN_FPS:
+        return inconclusive(f"the page's rAF ticked every {cadence:.1f} ms during the move "
+                            f"(slower than {CARRY_COVER_MIN_FPS:g} fps)", elId=el_id)
     if not frames:
         return inconclusive("no screencast frames")
     shape = frames[0][1].shape
@@ -6734,49 +6813,95 @@ def score_carry_cover(
     roi = carry_cover_roi(src, dst, shape)
     if roi is None:
         return inconclusive("the measurement region is off-frame")
+    near = _dilated(_rect_union(src, dst), CARRY_COVER_DILATE_PX + CARRY_COVER_MAX_STRIP_PX + 1)
+    if rects_overlap(near, CARRY_COVER_SYNC_RECT, 0):
+        return inconclusive("the probe's sync bar lies on the carried movie's path, where it would hide exposure")
     masks = [{**m, "screen": to_screen_rect(m["rect"], stage_map)} for m in bridge.get("masks") or []]
-    before = [f for f in frames if f[0] < t0]
+    masks.append({"slot": "sync", "screen": dict(CARRY_COVER_SYNC_RECT), "untilS": None})
+    by_tick: dict[int, list[int]] = {}
+    for index, row in enumerate(rows):
+        by_tick.setdefault(row["tick"], []).append(index)
+    placed = []
+    for pts, image in frames:
+        tick = carry_cover_sync_tick(image)
+        near = [i for i in by_tick.get(tick, []) if abs(rows[i]["ts"] - pts) <= CARRY_COVER_SYNC_MAX_SKEW_MS]
+        index = min(near, key=lambda i: abs(rows[i]["ts"] - pts)) if near else None
+        placed.append((pts if index is None else rows[index]["ts"], pts, image, tick, index))
+    before = [p for p in placed if p[4] is not None and p[0] < t0]
     if not before:
         return inconclusive("no pre-press reference frame")
-    background = carry_cover_background(before[-1][1], roi, src, [m["screen"] for m in masks])
+    background = carry_cover_background(before[-1][2], roi, src, [m["screen"] for m in masks])
     if background.get("problem"):
         return inconclusive(background["problem"], background=background)
     lo, hi = (t0 + duration_ms * share for share in CARRY_COVER_MID_MOVE)
-    mid = [f for f in frames if lo <= f[0] <= hi]
+    mid = [p for p in placed if lo <= p[0] <= hi]
     need = math.ceil(CARRY_COVER_MIN_FPS * (hi - lo) / 1000.0)
     detail: dict[str, Any] = {
         "t0": t0, "elId": el_id, "roi": roi, "background": background, "midWindowMs": [lo, hi],
-        "midFrames": len(mid), "minFrames": need,
+        "midFrames": len(mid), "minFrames": need, "cadenceMs": round(cadence, 2),
     }
+    wrap = 1 << CARRY_COVER_SYNC_BITS
     per_frame = []
-    for pts, image in mid:
-        candidates = [
-            (r["ts"], v) for r in rows if pts + CARRY_COVER_ALIGN_MS[0] <= r["ts"] <= pts + CARRY_COVER_ALIGN_MS[1]
-            for v in [_carried_rect(r, el_id)] if v
+    for at, pts, image, tick, index in mid:
+        entry: dict[str, Any] = {"pts": round(pts, 2), "tick": tick}
+        if index is None:
+            per_frame.append({**entry, "unaligned": "no sync bar" if tick is None else "no sampler row for its tick"})
+            continue
+        row = rows[index]
+        after = rows[index + 1] if index + 1 < len(rows) else None
+        if after is not None and after["tick"] != (row["tick"] + 1) % wrap:
+            after = None
+        reads = [
+            (name, v) for name, v in (("post", _carried_rect(row, el_id)), ("pre", _carried_rect(after, el_id, "pre"))) if v
         ]
-        active = [m["screen"] for m in masks if m["untilS"] is None or pts - t0 <= 1000.0 * m["untilS"]]
-        best = None
-        for ts, video in candidates:
+        if not reads:
+            per_frame.append({**entry, "unaligned": "the carried video was not sampled at its tick"})
+            continue
+        active = [m["screen"] for m in masks if m["untilS"] is None or at - t0 <= 1000.0 * m["untilS"]]
+        scored = []
+        for name, video in reads:
             overlay = {k: float(video[k]) for k in ("x", "y", "w", "h")}
-            scored = carry_cover_exposure(image, roi, background["color"], overlay, bool(video.get("opaque")), active)
-            if best is None or scored["exposedPx"] < best["exposedPx"]:
-                best = {**scored, "domTs": ts, "overlay": {k: round(v, 2) for k, v in overlay.items()}}
-        per_frame.append({"pts": round(pts, 2), "dt": round(pts - t0, 2), **(best or {"unaligned": True})})
+            measured = carry_cover_exposure(image, roi, background["color"], overlay, bool(video.get("opaque")), active)
+            scored.append({"read": name, "overlay": {k: round(v, 2) for k, v in overlay.items()}, **measured})
+        widths = [max(s["strips"].values()) for s in scored]
+        fractions = [s["exposedFraction"] for s in scored]
+        per_frame.append({
+            **entry, "domTs": round(at, 2), "dt": round(at - t0, 2),
+            "exposedPx": max(s["exposedPx"] for s in scored), "exposedFraction": max(fractions),
+            "strips": {side: max(s["strips"][side] for s in scored) for side in scored[0]["strips"]},
+            "stripPx": max(widths), "bestExposedFraction": min(fractions), "bestStripPx": min(widths),
+            "opaque": all(s["opaque"] for s in scored),
+            "undecided": len({_cover_ok(f, w) for f, w in zip(fractions, widths)}) > 1, "reads": scored,
+        })
     detail["frames"] = per_frame
-    aligned = [f for f in per_frame if not f.get("unaligned")]
-    detail["alignedFrames"] = len(aligned)
+    aligned = [f for f in per_frame if "unaligned" not in f]
+    discarded = len(per_frame) - len(aligned)
+    edges = [lo, *sorted({f["domTs"] for f in aligned}), hi]
+    max_gap = max(b - a for a, b in zip(edges, edges[1:]))
+    allowed_gap = (CARRY_COVER_MAX_GAP_FRAMES + 0.5) * cadence
+    detail.update(
+        alignedFrames=len(aligned), discardedFrames=discarded,
+        discardedShare=round(discarded / len(per_frame), 4) if per_frame else None,
+        maxGapMs=round(max_gap, 2), maxGapAllowedMs=round(allowed_gap, 2),
+        undecidedFrames=sum(f["undecided"] for f in aligned),
+    )
+    gaps = []
     if len(aligned) < need:
-        return inconclusive(f"too few aligned mid-move frames ({len(aligned)} < {need})", **detail)
-    clean = sum(f["exposedFraction"] <= CARRY_COVER_MAX_EXPOSED_FRACTION for f in aligned)
-    widest = max(max(f["strips"].values()) for f in aligned)
+        gaps.append(f"too few aligned mid-move frames ({len(aligned)} < {need})")
+    if max_gap > allowed_gap:
+        gaps.append(f"a {max_gap:.0f} ms stretch of the mid-move window has no scored frame (max {allowed_gap:.0f} ms: "
+                    f"{CARRY_COVER_MAX_GAP_FRAMES} ticks at the observed {cadence:.1f} ms cadence)")
+    if per_frame and discarded / len(per_frame) > CARRY_COVER_MAX_DISCARDED_SHARE:
+        gaps.append(f"{discarded}/{len(per_frame)} mid-move frames could not be placed at a sampled tick "
+                    f"(max {CARRY_COVER_MAX_DISCARDED_SHARE:.0%})")
+    if gaps:
+        return inconclusive(*gaps, **detail)
+    clean, widest, reasons = _cover_reasons(aligned, "exposedFraction", "stripPx")
     detail.update(cleanShare=round(clean / len(aligned), 4), maxStripPx=widest,
                   maxExposedFraction=max(f["exposedFraction"] for f in aligned))
-    reasons = []
-    if clean / len(aligned) < CARRY_COVER_MIN_CLEAN_SHARE:
-        reasons.append(f"{len(aligned) - clean}/{len(aligned)} mid-move frames expose more than "
-                       f"{CARRY_COVER_MAX_EXPOSED_FRACTION:.1%} of the overlay")
-    if widest > CARRY_COVER_MAX_STRIP_PX:
-        reasons.append(f"a {widest} px strip of the poster shows beyond the overlay (max {CARRY_COVER_MAX_STRIP_PX})")
+    if bool(reasons) != bool(_cover_reasons(aligned, "bestExposedFraction", "bestStripPx")[2]):
+        return inconclusive(f"{detail['undecidedFrames']} mid-move frames have overlay reads that disagree on the "
+                            "cover rule, and they decide the verdict", **detail)
     return {"verdict": "fail" if reasons else "pass", "reasons": reasons, **detail}
 
 
@@ -6945,7 +7070,10 @@ def run_carry_cover_cli(args: argparse.Namespace) -> None:
             "dilatePx": CARRY_COVER_DILATE_PX, "marginPx": CARRY_COVER_MARGIN_PX, "litDelta": CARRY_COVER_LIT_DELTA,
             "maxExposedFraction": CARRY_COVER_MAX_EXPOSED_FRACTION, "minCleanShare": CARRY_COVER_MIN_CLEAN_SHARE,
             "maxStripPx": CARRY_COVER_MAX_STRIP_PX, "stripMinRunPx": CARRY_COVER_STRIP_MIN_RUN_PX,
-            "midMove": list(CARRY_COVER_MID_MOVE), "minFps": CARRY_COVER_MIN_FPS, "alignMs": list(CARRY_COVER_ALIGN_MS),
+            "midMove": list(CARRY_COVER_MID_MOVE), "minFps": CARRY_COVER_MIN_FPS,
+            "maxGapFrames": CARRY_COVER_MAX_GAP_FRAMES, "maxDiscardedShare": CARRY_COVER_MAX_DISCARDED_SHARE,
+            "syncBits": CARRY_COVER_SYNC_BITS, "syncCellPx": CARRY_COVER_SYNC_CELL_PX,
+            "syncMaxSkewMs": CARRY_COVER_SYNC_MAX_SKEW_MS,
             "fadeSlackS": CARRY_COVER_FADE_SLACK_S,
         },
     }
