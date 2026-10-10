@@ -119,6 +119,7 @@ def _gap(periods: float):
 ELSEWHERE = {"x": 1200.0, "y": 600.0, "w": 400.0, "h": 225.0}
 LETTERBOX = {"x": 0.0, "y": 60.0, "w": 1920.0, "h": 960.0}
 BLEED = {"x": 100.0, "y": 900.0, "w": 400.0, "h": 225.0}
+BIG = {"x": 0.0, "y": 0.0, "w": 1200.0, "h": 700.0}
 
 SCORE_CASES = [
     ("clean", _rows(), SLOT, {"status": "ok", "frames": 120, "unpaintedFrames": 0, "longestRun": 0}),
@@ -149,6 +150,13 @@ SCORE_CASES = [
                                               stage=LETTERBOX), BLEED,
      {"status": "ok", "outsideStagePx": 400.0 * 60.0}),
     ("missing-pp", _drop_pp(_rows()), SLOT, {"status": "inconclusive", "_reason": "unobserved"}),
+    # Astra r4: readability is established before any classification, the no-slot short circuit included.
+    ("no-slot-readable-stays-red", _rows(), None, {"status": "fail", "unpaintedFrames": 120, "_firstReason": "no-slot"}),
+    ("no-slot-with-an-unreadable-decoder", _rows(videos=lambda i: [_pv(transform="div#x")]), None,
+     {"status": "inconclusive", "unpaintedFrames": 0, "_reason": "unreadable"}),
+    # A rotated substitute's bounding box meets the slot below the IoU bar: its nearness is unknowable.
+    ("unreadable-substitute-overlapping-the-slot", _rows(videos=lambda i: [_pv(id=2, transform="div#x", rect=BIG)]), SLOT,
+     {"status": "inconclusive", "unpaintedFrames": 0, "_reason": "unreadable"}),
     # Astra r1 #1: violations never outrank incomplete evidence; the dark frames are still reported.
     ("dark-frames-with-one-unobserved-frame", _drop_pp(_rows(videos=_hide(60, 65, opacity=0.0))), SLOT,
      {"status": "inconclusive", "unpaintedFrames": 6, "_reason": "unobserved"}),

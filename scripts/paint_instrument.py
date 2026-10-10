@@ -549,8 +549,10 @@ def score_paint(
     min_fps: float,
 ) -> dict[str, Any]:
     """Plan §2.4 over the rows with `start <= t <= end`. `slot_of`/`stage_box_of` and every `pv.rect`/`visibleRect`
-    must share one coordinate space. An unobserved or unreadable frame, failed coverage or no rows is inconclusive
-    whatever else the window shows; on complete evidence any violating frame fails."""
+    must share one coordinate space. Readability comes before any classification: a frame is unreadable when the
+    carried decoder, or any decoder of the asset whose rect meets the slot (any, without a slot), reads unreadable.
+    An unobserved or unreadable frame, failed coverage or no rows is inconclusive whatever else the window shows;
+    on complete evidence any violating frame (no slot included) fails."""
     window_rows = sorted((r for r in rows if _num(r.get("t")) and start <= r["t"] <= end), key=lambda r: r.get("seq") or 0)
     coverage = frame_coverage(window_rows, max_gap_frames=max_gap_frames, min_fps=min_fps)
     period = coverage.get("periodMs")
@@ -570,9 +572,6 @@ def score_paint(
         if stage is None:
             unreadable.append(dict(frame, reason="stage box"))
             continue
-        if slot is None:
-            violations.append(dict(frame, kind=UNPAINTED, reason="no-slot"))
-            continue
         expected = _meet(slot, stage)
         cover = bool(row["pp"].get("cover"))
         carried_state: tuple[str, str | None] = (UNPAINTED, "absent")
@@ -582,7 +581,8 @@ def score_paint(
         for pv in row["pp"]["videos"]:
             if not isinstance(pv, dict) or asset not in str(pv.get("src") or "").lower():
                 continue
-            state = painted_state(pv, cover=cover, expected=expected, stage=stage, rect_tolerance=rect_tolerance)
+            state = painted_state(pv, cover=cover, expected=expected, stage=stage,
+                                  rect_tolerance=rect_tolerance if slot is not None else None)
             mine = pv.get("id") == element_id
             near = _iou(_box(pv.get("rect")), slot) >= iou_min
             if mine:
@@ -591,12 +591,16 @@ def score_paint(
                     min_opacity = pv["opacity"] if min_opacity is None else min(min_opacity, pv["opacity"])
                 if state[0] in (PAINTED, PARTIAL):
                     outside = max(outside, _area(_box(pv.get("visibleRect"))) - _area(_meet(_box(pv.get("visibleRect")), stage)))
-            if state[0] == UNREADABLE and (mine or near):
+            rect = _box(pv.get("rect"))
+            if state[0] == UNREADABLE and (mine or slot is None or rect is None or _meet(rect, slot) is not None):
                 blind = True
                 unreadable.append(dict(frame, reason=state[1], id=pv.get("id")))
             if state[0] in (PAINTED, PARTIAL) and near:
                 at_slot.append(pv)
         if blind:
+            continue
+        if slot is None:
+            violations.append(dict(frame, kind=UNPAINTED, reason="no-slot"))
             continue
         ids = [pv.get("id") for pv in at_slot]
         if len(at_slot) >= 2:
