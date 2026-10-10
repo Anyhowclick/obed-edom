@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -29,7 +30,7 @@ def test_continuity_version_is_pinned_int():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "9c4fc61fcce22e8acf3b1dab9a6eb66722e7e0ae9dcf943bda69e3bcbd87ea01"
+PINNED_CORE_SHA256 = "00c8fb825c61a7e527c82b656517077bde59944ce986fcd00d3fb27a526d3e36"
 
 
 def test_js_sha256_hashes_the_core_bytes_and_matches_the_pinned_literal():
@@ -645,6 +646,8 @@ function makeVideo() {
   };
   v.getAttribute = function(name) { if (name === 'style') return this.__styleAttr || ''; return null; };
   v.removeAttribute = function(name) { return Element.prototype.removeAttribute.call(this, name); };
+  // `detach()` drops only the parent (an in-stage flag can outlive it), so connected = parented AND in the document.
+  Object.defineProperty(v, 'isConnected', {get() { return !!this.parentNode && document.contains(this); }});
   videos.push(v);
   return v;
 }
@@ -1038,6 +1041,72 @@ console.log(JSON.stringify({
 """
     result = _run_full_core_in_node(plan=_MOVIE_PLAN, stage=_IDENTITY_STAGE, script=script)
     assert result == {"disableReturned": False, "disabled": False}
+
+
+# --- Detach inside a move's window (detach plan r8 §3 (a1), landed 2026-10-10) ---
+#
+# The measured blink: the core re-homes a pooled decoder (`beginMove` sets
+# `__obedRemounting` until the next macrotask), and the player then tears down
+# the layer it was re-homed into before that flag clears. The detach observer
+# must tell that teardown (node still out of the document at delivery) from a
+# self-move (already re-inserted at delivery): the first is stashed and
+# re-homed inside the same delivery, the second stays refused by the guard.
+
+#: Pool `A1` at its teardown; the synchronous remount re-homes it into the body
+#: and leaves `__obedRemounting` set (the harness never runs timers).
+_REHOMED_A1 = r"""
+const v = video('A1');
+v.readyState = 4; v.currentTime = 1;
+v.parentNode = bodyEl;
+v.src = 'https://host/untitled.mov';
+goToScene(1);
+detach(v);
+const rehomed = {connected: v.isConnected, remounting: !!v.__obedRemounting};
+const n0 = P.events.length;
+"""
+_REMOVAL_INSIDE_THE_WINDOW = {
+    "direct": "detach(v);",
+    "subtree": r"""
+const layer = {querySelectorAll: (sel) => (sel === 'video' && v.parentNode === layer ? [v] : [])};
+v.parentNode = layer;
+moCallbacks.slice().forEach((cb) => cb([{removedNodes: [layer]}]));
+""",
+    "self-move": "moCallbacks.slice().forEach((cb) => cb([{removedNodes: [v]}]));",
+}
+_AFTER_REMOVAL = r"""
+console.log(JSON.stringify({
+  rehomed, connected: v.isConnected, parentIsBody: v.parentNode === bodyEl,
+  kinds: P.events.slice(n0).map(e => e.kind),
+}));
+"""
+
+
+@pytest.mark.parametrize("removal", ["direct", "subtree"])
+def test_a_teardown_inside_a_moves_window_is_stashed_and_rehomed_in_the_same_delivery(removal):
+    script = _REHOMED_A1 + _REMOVAL_INSIDE_THE_WINDOW[removal] + _AFTER_REMOVAL
+    result = _run_full_core_in_node(plan=_MOVIE_PLAN, stage=_IDENTITY_STAGE, script=script)
+    assert result["rehomed"] == {"connected": True, "remounting": True}
+    why = "preserve-on-detach" if removal == "direct" else "preserve-on-detach-subtree"
+    assert result["kinds"] == [why, "remount-scheduled", "remount-done"]
+    assert result["connected"] and result["parentIsBody"]
+
+
+def test_a_self_move_still_connected_at_delivery_stays_refused_by_the_guard():
+    script = _REHOMED_A1 + _REMOVAL_INSIDE_THE_WINDOW["self-move"] + _AFTER_REMOVAL
+    result = _run_full_core_in_node(plan=_MOVIE_PLAN, stage=_IDENTITY_STAGE, script=script)
+    assert result["rehomed"] == {"connected": True, "remounting": True}
+    assert result["kinds"] == []
+    assert result["connected"]
+
+
+def test_only_the_detach_observer_passes_the_connectivity_at_delivery_to_stash():
+    """Every other `stash` caller keeps the `__obedRemounting` guard unconditionally."""
+    core = live_continuity_js.PRESERVE_CORE_JS
+    calls = re.findall(r"(?<!function )\bstash\(([^()]*)\)", core)
+    assert [args for args in calls if args.count(",") == 2] == [
+        "node, 'preserve-on-detach', !node.isConnected", "v, 'preserve-on-detach-subtree', !v.isConnected"]
+    assert len(calls) > 2
+    assert core.count("if (v.__obedRemounting && !detached) return;") == 1
 
 
 # --- I2: the retire zone (per-boundary refusal) -------------------------

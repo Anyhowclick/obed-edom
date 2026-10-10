@@ -823,12 +823,14 @@ PRESERVE_CORE_JS = r"""
     v.__obedHold = entry;
     if (held.indexOf(v) < 0) held.push(v);
   }
-  function stash(v, why) {
+  function stash(v, why, detached) {
     if (disabled) return;
     if (!(v instanceof HTMLVideoElement)) return;
     // Our own remount moves briefly detach the node; that self-triggered detach
     // must not re-stash and re-schedule a remount (exponential reschedule blowup).
-    if (v.__obedRemounting) return;
+    // A node still out of the document when the detach observer runs was not
+    // moved but torn down, so it is stashed even inside a move's window.
+    if (v.__obedRemounting && !detached) return;
     // A decoder bridged through the 3->4 magic move is held at the slide-4 slot by
     // keepAtSlot; a re-detach must not re-stash/re-remount it back onto the
     // slide-1/2 footprint (that dropped it to the fallback position at #8->#9).
@@ -1900,11 +1902,11 @@ PRESERVE_CORE_JS = r"""
       m.removedNodes.forEach(function(node){
         if (node instanceof HTMLVideoElement) {
           noteDeparture(node);
-          stash(node, 'preserve-on-detach');
+          stash(node, 'preserve-on-detach', !node.isConnected);
         } else if (node && node.querySelectorAll) {
           node.querySelectorAll('video').forEach(function(v){
             noteDeparture(v);
-            stash(v, 'preserve-on-detach-subtree');
+            stash(v, 'preserve-on-detach-subtree', !v.isConnected);
           });
         }
       });

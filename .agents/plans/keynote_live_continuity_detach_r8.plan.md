@@ -387,9 +387,15 @@ Evidence (main checkout, git-ignored): `output/evidence/s2-dev/detach-{controls,
     "~4 %" assumed one).
   - Old dumps support only the proxy; the driver's I2 now records `delivery` and a post-round `connectedAfterRound`
     (a microtask queued in I2's callback runs after every observer of that round), so new runs observe sameCheckpoint.
-- **Owner decision (2026-10-10): a1 is the fix.** `CONTINUITY_VERSION` stays 6 (no bump). **Next:** a fresh ≥30-event
-  interleaved V8 vs V8+a1 session with the new instrument (positive control first), then land a1 in the core (sha
-  re-pin, variant shas re-derive) and run the owed gates.
+- **Owner decision (2026-10-10): a1 is the fix.** `CONTINUITY_VERSION` stays 6 (no bump).
+- **Fresh A/B (2026-10-10, `detach-a1/`; controls `detach-a1-ctl/`: null, positive, timeout0 pass/recorded; driver
+  a041eec8):** 30 blocks, 60/60 ok, decks D4/D1/D6, arm default, 2560×1440. V8 5/30 blinks (all direct, late phase,
+  H3>H1); **V8+a1 0/30** (Fisher one-sided 0.026). Removal readout (observed): V8 teardown sameDelivery 0/30, gap max
+  9.4 ms, pre-paint in gap 5; a1 teardown sameDelivery 30/30 (gap 0), carry sameCheckpoint 30/30, gap max 1.2 ms,
+  pre-paint in gap 0. With the 23-block session: **a1 0/53 vs V8 13/53.**
+- **Landed:** a1 is in the core (core sha `9c4fc61f` → `00c8fb82`, v6), with a Node test of the teardown-inside-a-move
+  case. The driver's probe-only `--core-fix a1|a2` arms are removed; every fix-arm result above reproduces from
+  a041eec8. **Next:** the owed S2 gates.
 - **Main (P2, GL replay auto, 10 runs, rescored):** the 1→2 hand-back is eligible 10/10, 0 blinks. Main's decoder is
   out of the DOM during the MM (GL paints it) and is inserted after the teardown, so S2's race is not reached; slide 2's
   click-build re-homes happen in the same delivery (no gap). Main's continuity qualifies only the P2 plan. **No main

@@ -8,7 +8,6 @@ ResizeObserver callback (`t`, `n`, `ids`), and an I2 row per `<video>` add/remov
 from __future__ import annotations
 
 import hashlib
-import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -473,7 +472,7 @@ def test_summary_counts_one_done_record_per_slot_and_ignores_other_records() -> 
     assert summary["decision"] == "n/a"
 
 
-# --- Level 2: served bytes, core trace and fix variants (plan §1 Level 2, §3 (a1)/(a2)) --------------------------
+# --- Level 2: served bytes and core trace (plan §1 Level 2) ------------------------------------------------------
 
 
 def test_level2_install_exposes_the_controller_inside_the_hook_only() -> None:
@@ -515,33 +514,27 @@ def test_planned_level2_served_shas_match_the_pinned_player(variant: str) -> Non
     assert dx.served_sha256(_PLAYER.read_bytes(), variant, level2=True) == dx.L2_SERVED_SHA256[variant]
 
 
-CORE_ANCHORS = [("trace", anchor) for anchor, _ in dx._CORE_TRACE_TRANSFORMS] + [
-    (fix, anchor) for fix in dx.CORE_FIXES for anchor, _ in dx._CORE_FIX_TRANSFORMS[fix]
-]
+CORE_ANCHORS = [anchor for anchor, _ in dx._CORE_TRACE_TRANSFORMS]
 
 
-@pytest.mark.parametrize(("label", "anchor"), CORE_ANCHORS)
-def test_each_core_anchor_occurs_exactly_once_in_todays_core(label: str, anchor: str) -> None:
+@pytest.mark.parametrize("anchor", CORE_ANCHORS)
+def test_each_core_anchor_occurs_exactly_once_in_todays_core(anchor: str) -> None:
     from obed_edom.live_continuity_js import PRESERVE_CORE_JS
     assert PRESERVE_CORE_JS.count(anchor) == 1
 
 
-@pytest.mark.parametrize(("label", "anchor"), CORE_ANCHORS)
-def test_a_core_without_an_anchor_raises_naming_it(label: str, anchor: str) -> None:
+@pytest.mark.parametrize("anchor", CORE_ANCHORS)
+def test_a_core_without_an_anchor_raises_naming_it(anchor: str) -> None:
     from obed_edom.live_continuity_js import PRESERVE_CORE_JS
-    fix = label if label in dx.CORE_FIXES else None
     with pytest.raises(ValueError) as caught:
-        dx.experiment_core(fix, label == "trace", PRESERVE_CORE_JS.replace(anchor, ""))
-    assert f"core {label}" in str(caught.value)
+        dx.experiment_core(True, PRESERVE_CORE_JS.replace(anchor, ""))
+    assert "core trace" in str(caught.value)
 
 
-def test_the_plain_core_is_the_shipped_core_and_every_combination_has_its_own_sha() -> None:
+def test_the_plain_core_is_the_shipped_core_and_the_trace_has_its_own_sha() -> None:
     from obed_edom.live_continuity_js import PRESERVE_CORE_JS
     assert dx.experiment_core() == PRESERVE_CORE_JS and dx.experiment_core_sha() == dx.CORE_SHA256
-    shas = {(fix, trace): dx.experiment_core_sha(fix, trace) for fix in (None, *dx.CORE_FIXES) for trace in (False, True)}
-    assert len(set(shas.values())) == len(shas)
-    with pytest.raises(ValueError, match="unknown core fix"):
-        dx.experiment_core("a3")
+    assert dx.experiment_core_sha(True) != dx.CORE_SHA256
 
 
 def _undo(core: str, transforms) -> str:
@@ -551,70 +544,22 @@ def _undo(core: str, transforms) -> str:
     return core
 
 
-@pytest.mark.parametrize("fix", [None, *dx.CORE_FIXES])
-def test_the_trace_is_the_same_pure_insertion_on_every_arm(fix) -> None:
-    """Undoing the trace's replacements gives back the arm's untraced core byte for byte, so the trace adds only
-    its wrappers and helpers (identical text in every arm) and changes no branch."""
-    traced = dx.experiment_core(fix, trace=True)
-    assert _undo(traced, dx._CORE_TRACE_TRANSFORMS) == dx.experiment_core(fix)
+def test_the_trace_is_a_pure_insertion() -> None:
+    """Undoing the trace's replacements gives back the untraced core byte for byte, so the trace adds only its
+    wrappers and helpers (identical text in every arm) and changes no branch."""
+    traced = dx.experiment_core(trace=True)
+    assert _undo(traced, dx._CORE_TRACE_TRANSFORMS) == dx.experiment_core()
     for snippet in (dx._TRACE_HELPERS, dx._SCHEDULE_TRACE, dx._TRY_REMOUNT_TRACE):
         assert traced.count(snippet) == 1
 
 
-@pytest.mark.parametrize("fix", dx.CORE_FIXES)
-def test_each_fix_is_exactly_its_own_replacements(fix: str) -> None:
-    from obed_edom.live_continuity_js import PRESERVE_CORE_JS
-    assert _undo(dx.experiment_core(fix), dx._CORE_FIX_TRANSFORMS[fix]) == PRESERVE_CORE_JS
-
-
-def test_a1_stashes_a_decoder_disconnected_at_delivery_past_the_self_move_guard() -> None:
-    core = dx.experiment_core("a1")
-    assert "function stash(v, why, detached) {" in core
-    assert "if (v.__obedRemounting && !detached) return;" in core and "if (v.__obedRemounting) return;" not in core
-    assert "stash(node, 'preserve-on-detach', !node.isConnected);" in core
-    assert "stash(v, 'preserve-on-detach-subtree', !v.isConnected);" in core
-    # Only the detach observer passes `detached`; every other stash caller keeps the guard, and the departure mark is
-    # untouched.
-    calls = re.findall(r"(?<!function )\bstash\(([^()]*)\)", core)
-    assert [args for args in calls if args.count(",") == 2] == [
-        "node, 'preserve-on-detach', !node.isConnected", "v, 'preserve-on-detach-subtree', !v.isConnected"]
-    assert len(calls) > 2
-    assert "if (!v.__obedRemounting) markTransition(currentHashNum());" in core
-
-
-def test_a2_falls_back_to_the_stage_overlay_only_for_a_live_pooled_or_held_decoder() -> None:
-    core = dx.experiment_core("a2")
-    wrapper = core[core.index("  function tryRemount(v, epoch) {\n"):core.index("  function __obedRemountStageOverlay(v) {")]
-    assert wrapper.index("__obedPlaceRemount(v, epoch);") < wrapper.index("__obedRemountStageOverlay(v);")
-    for gate in ("v.isConnected) return;", "v.__obedGen === -1", "v.__obedFacadeFor) return;",
-                 "epoch !== remountEpoch) return;", "held.indexOf(v) < 0 && !isPooled(v)) return;",
-                 "zoneMode(v) !== 'allow') return;"):
-        assert gate in wrapper
-    assert "function __obedPlaceRemount(v, epoch) {\n    if (disabled) return;" in core
-    assert "note('remount-fallback-stage'" in core
-
-
-def test_injected_core_serves_the_variant_and_restores_the_host() -> None:
+def test_injected_core_serves_the_trace_and_restores_the_host() -> None:
     host = probe.live_host_module
     original_core, original_sha = host.PRESERVE_CORE_JS, host.js_sha256
-    with dx.injected_core("a1", True) as sha:
-        assert host.PRESERVE_CORE_JS == dx.experiment_core("a1", True) and host.js_sha256() == sha
-        assert sha == dx.experiment_core_sha("a1", True)
+    with dx.injected_core(True) as sha:
+        assert host.PRESERVE_CORE_JS == dx.experiment_core(True) and host.js_sha256() == sha
+        assert sha == dx.experiment_core_sha(True)
     assert host.PRESERVE_CORE_JS is original_core and host.js_sha256 is original_sha
-
-
-@pytest.mark.parametrize(("label", "parsed"), [
-    ("V8", ("V8", None)), ("V8+a1", ("V8", "a1")), ("V8+a2", ("V8", "a2")), ("V5+8", ("V5+8", None)),
-    ("V5+8+a1", ("V5+8", "a1")),
-])
-def test_arm_labels_round_trip(label: str, parsed) -> None:
-    assert dx.parse_arm(label) == parsed and dx.arm_label(*parsed) == label
-
-
-@pytest.mark.parametrize("label", ["V6", "V8+a3", "off+a1", "+a1"])
-def test_unknown_arms_are_refused(label: str) -> None:
-    with pytest.raises(ValueError):
-        dx.parse_arm(label)
 
 
 def test_level2_sampler_adds_the_page_wraps_and_sequences_i2() -> None:
@@ -817,9 +762,9 @@ def test_a_level2_record_without_level2_data_is_an_error() -> None:
 
 
 def test_records_check_the_configured_core_and_served_shas() -> None:
-    raw = raw_run(post_mm(), served=dx.L2_SERVED_SHA256["V8"], core=dx.experiment_core_sha("a1", True))
-    raw["config"].update(serving="V8", variant="V8+a1", coreFix="a1",
-                         expectedServedSha256=dx.L2_SERVED_SHA256["V8"], expectedCoreSha256=dx.experiment_core_sha("a1", True))
+    raw = raw_run(post_mm(), served=dx.L2_SERVED_SHA256["V8"], core=dx.experiment_core_sha(True))
+    raw["config"].update(serving="V8", variant="V8",
+                         expectedServedSha256=dx.L2_SERVED_SHA256["V8"], expectedCoreSha256=dx.experiment_core_sha(True))
     raw.update(level2={"rows": [], "errors": [], "wrapped": []}, coreTrace=[{"t": 1.0}])
     raw["config"]["level2"] = True
     record = dx.build_record(raw)
@@ -846,16 +791,6 @@ def test_level2_r8_flag_needs_the_preload_log_to_agree() -> None:
     assert dx.build_record(stock)["controlVerdict"]["status"] == "pass"
 
 
-def test_fix_blocks_compare_every_arm_to_v8_and_decide_on_the_target_only() -> None:
-    arms = ("V8", "V8+a1", "V8+a2")
-    records = [_block_record(b, v, int(v == "V8" and b < 3), 2) for b in range(15) for v in arms]
-    summary = dx.summarize(records, 1)
-    assert summary["completeBlocks"] == 15 and summary["decision"] == "target-met"
-    assert set(summary["fisherOneSided"]) == {"V8vsV8+a1", "V8vsV8+a2"}
-    assert summary["fisherOneSided"]["V8vsV8+a1"] == pytest.approx(dx.fisher_one_sided(3, 30, 0, 30))
-    assert dx.summarize(records[:-6], 1)["decision"] == "continue"
-
-
 def test_summary_tallies_blink_hypotheses() -> None:
     record = _block_record(0, "V8", 2, 2)
     record["events"][0]["hypothesis"] = {"hypothesis": "H3", "then": "H1"}
@@ -863,13 +798,13 @@ def test_summary_tallies_blink_hypotheses() -> None:
     assert dx.summarize([record], 1)["perVariant"]["V8"]["byHypothesis"] == {"H3>H1": 1, "H2": 1}
 
 
-def test_blocks_accept_fix_arms_and_level2(tmp_path: Path) -> None:
-    args = dx.parse_args(["blocks", "--out-dir", str(tmp_path), "--blocks", "2", "--variants", "V8,V8+a1", "--level2"])
-    assert args.variants == ["V8", "V8+a1"] and args.level2
+def test_blocks_accept_level2_and_refuse_the_retired_fix_arms(tmp_path: Path) -> None:
+    args = dx.parse_args(["blocks", "--out-dir", str(tmp_path), "--blocks", "2", "--variants", "V8,V5+8", "--level2"])
+    assert args.variants == ["V8", "V5+8"] and args.level2
     with pytest.raises(SystemExit):
-        dx.parse_args(["blocks", "--out-dir", str(tmp_path), "--blocks", "2", "--variants", "V8,V8+a9"])
-    run = dx.parse_args(["run", "--out-dir", str(tmp_path), "--variant", "V8", "--deck", "D4", "--core-fix", "a2"])
-    assert run.core_fix == "a2" and not run.level2
+        dx.parse_args(["blocks", "--out-dir", str(tmp_path), "--blocks", "2", "--variants", "V8,V8+a1"])
+    with pytest.raises(SystemExit):
+        dx.parse_args(["run", "--out-dir", str(tmp_path), "--variant", "V8", "--deck", "D4", "--core-fix", "a1"])
 
 
 def test_the_first_destination_paint_at_the_pin_is_reported() -> None:

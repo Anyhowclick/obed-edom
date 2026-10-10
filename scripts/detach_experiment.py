@@ -9,7 +9,7 @@ V5+8 = R1-R5 + R8; `off` = OBED_LIVE_MM_OPACITY=off). One run = one deck through
   run      one arm (`--variant`, `--deck`, `--arm C` = bridges stripped) -> one record
   control  §1 Controls: `--mode null|positive|timeout0` (page injection at the first pin carry, arm A)
            or `--mode r8flag --variant off|V5|V7|V8`
-  blocks   §2.4 interleaved blocks of {V8, V7, V5} (or fix arms `V8,V8+a1,V8+a2`), seeded order, deck rotated
+  blocks   §2.4 interleaved blocks of {V8, V7, V5}, seeded order, deck rotated
            per block, resumable
   summary  §2.3 counts, Fisher one-sided V8 vs every other arm, early stop / futility, and the detach-gap readout
            (teardown / carry removals: same delivery, same checkpoint, pre-paint rows in the gap)
@@ -19,9 +19,9 @@ V5+8 = R1-R5 + R8; `off` = OBED_LIVE_MM_OPACITY=off). One run = one deck through
 `--level2` (run, control, blocks) adds plan §1 Level 2: the player controller exposed through a patched
 `live_runtime._INSTALL`, page wraps of the player's preload / jump / render methods and of DOM removals that take a
 preserved decoder out, and a trace-only core variant (wraps of `stash`, `scheduleRemount`, `tryRemount`, `beginMove`,
-`retireDecoder`; no branch changes). `--core-fix a1|a2` serves a probe-only core fix candidate (plan §3 (a1)/(a2)).
-Both are string transforms of the in-process bytes with count-checked anchors; served and core shas are recorded and
-checked per run.
+`retireDecoder`; no branch changes). Both are string transforms of the in-process bytes with count-checked anchors;
+served and core shas are recorded and checked per run. The fix A/B's probe-only `--core-fix a1|a2` arms are at
+a041eec8 (a1 is in the core since).
 
 Every run appends one record to `<out-dir>/runs.jsonl` and keeps its raw dump in `<out-dir>/raw/<runId>.json.gz`.
 """
@@ -73,9 +73,7 @@ SERVED_SHA256 = {
     "V8": "574274e88485745a6f55a8563d43ddfb91299db6e4d749fd34719436ade751bf",
     "V5+8": "ac8dcda082fa2cb2e3261fe9e5fc48d08c50cc4e59b459ffa1903e0778bc37a8",
 }
-CORE_SHA256 = "9c4fc61fcce22e8acf3b1dab9a6eb66722e7e0ae9dcf943bda69e3bcbd87ea01"
-CORE_FIXES = ("a1", "a2")
-FIX_ARM_RE = re.compile(r"^(?P<serving>.+?)\+(?P<fix>a1|a2)$")
+CORE_SHA256 = "00c8fb825c61a7e527c82b656517077bde59944ce986fcd00d3fb27a526d3e36"
 L2_INSTALL_ANCHOR = b"(function(controller) {\n"
 L2_INSTALL_REPLACEMENT = L2_INSTALL_ANCHOR + b"  Object.defineProperty(window, '__obedDebugController', {value: controller});\n"
 L2_SERVED_SHA256 = {
@@ -497,78 +495,6 @@ _CORE_TRACE_TRANSFORMS: tuple[tuple[str, str], ...] = (
      "  function retireDecoder(v) {\n    __obedTrace('retireDecoder', v, {by: __obedCaller()});\n"),
 )
 
-_A2_FALLBACK = r"""  function tryRemount(v, epoch) {
-    __obedPlaceRemount(v, epoch);
-    if (!v || disabled || suppressRemount || v.isConnected) return;
-    if (v.__obedRemountEpoch === -1 || v.ended || v.__obedGen === -1 || v.__obedFacadeFor) return;
-    if (epoch != null && epoch !== remountEpoch) return;
-    if (held.indexOf(v) < 0 && !isPooled(v)) return;
-    if (zoneMode(v) !== 'allow') return;
-    __obedRemountStageOverlay(v);
-  }
-  function __obedRemountStageOverlay(v) {
-    const map = stageMap();
-    const rest = restingRect(v);
-    const last = v.__obedRect && v.__obedRect.w > 1 && v.__obedRect.h > 1 ? v.__obedRect : null;
-    const box = rest && map ? toScreen(rest, map) : last;
-    if (!box) {
-      note('remount-fallback-none', {elId: v.__obedElId});
-      return;
-    }
-    const stage = document.getElementById('body') || document.querySelector('[class*="stage"]') || document.body;
-    if (!stage) {
-      note('remount-no-stage', {elId: v.__obedElId});
-      return;
-    }
-    try {
-      v.__obedRect = box;
-      v.style.position = 'absolute';
-      v.style.left = box.x + 'px';
-      v.style.top = box.y + 'px';
-      v.style.width = box.w + 'px';
-      v.style.height = box.h + 'px';
-      v.style.visibility = 'visible';
-      v.style.display = 'block';
-      v.style.opacity = '1';
-      if (/^-?\d+$/.test(String(v.__obedZ))) {
-        v.style.zIndex = String(v.__obedZ);
-      } else {
-        v.style.removeProperty('z-index');
-      }
-      v.style.pointerEvents = 'none';
-      if (v.__obedId && !document.getElementById(v.__obedId)) v.id = v.__obedId;
-      beginMove(v);
-      stage.appendChild(v);
-      if (v.paused && !v.ended) {
-        const p = v.play();
-        if (p && p.catch) p.catch(function(){});
-      }
-      v.dataset.obedRemounted = '1';
-      note('remount-fallback-stage', {
-        elId: v.__obedElId, rect: box, fromRest: !!(rest && map), inDocument: document.contains(v)
-      });
-    } catch (e) {
-      note('remount-error', {elId: v.__obedElId, message: String(e && e.message || e)});
-    }
-  }
-  function __obedPlaceRemount(v, epoch) {
-"""
-
-_CORE_FIX_TRANSFORMS: dict[str, tuple[tuple[str, str], ...]] = {
-    # The detach observer treats a removed decoder as a self-move only while it is still connected at delivery; a
-    # disconnected one is always stashed, past the `__obedRemounting` time-window guard (kept for every other caller).
-    "a1": (
-        ("  function stash(v, why) {\n", "  function stash(v, why, detached) {\n"),
-        ("    if (v.__obedRemounting) return;\n", "    if (v.__obedRemounting && !detached) return;\n"),
-        ("          stash(node, 'preserve-on-detach');\n", "          stash(node, 'preserve-on-detach', !node.isConnected);\n"),
-        ("            stash(v, 'preserve-on-detach-subtree');\n",
-         "            stash(v, 'preserve-on-detach-subtree', !v.isConnected);\n"),
-    ),
-    # tryRemount never returns with a pooled or held decoder disconnected: when placement leaves it out of the
-    # document, fall back to the stage overlay at its resting rect (or its last screen rect without a stage map).
-    "a2": (("  function tryRemount(v, epoch) {\n", _A2_FALLBACK),),
-}
-
 
 def variant_replacements(variant: str, table: Sequence[tuple[bytes, bytes]] | None = None) -> tuple[tuple[bytes, bytes], ...]:
     """The served replacement table of `variant`, sliced from the full R1-R8 table after asserting R8's identity."""
@@ -635,26 +561,20 @@ def transform_core(core: str, label: str, transforms: Sequence[tuple[str, str]])
     return core
 
 
-def experiment_core(fix: str | None = None, trace: bool = False, core: str = PRESERVE_CORE_JS) -> str:
-    """The core this run serves: the fix candidate's transforms first, then the trace wraps (identical in every arm)."""
-    if fix is not None:
-        if fix not in CORE_FIXES:
-            raise ValueError(f"unknown core fix {fix!r}; expected one of {CORE_FIXES}")
-        core = transform_core(core, fix, _CORE_FIX_TRANSFORMS[fix])
-    if trace:
-        core = transform_core(core, "trace", _CORE_TRACE_TRANSFORMS)
-    return core
+def experiment_core(trace: bool = False, core: str = PRESERVE_CORE_JS) -> str:
+    """The core this run serves: the shipped core, with the trace wraps (identical in every arm) under Level 2."""
+    return transform_core(core, "trace", _CORE_TRACE_TRANSFORMS) if trace else core
 
 
-def experiment_core_sha(fix: str | None = None, trace: bool = False) -> str:
-    return hashlib.sha256(experiment_core(fix, trace).encode()).hexdigest()
+def experiment_core_sha(trace: bool = False) -> str:
+    return hashlib.sha256(experiment_core(trace).encode()).hexdigest()
 
 
 @contextmanager
-def injected_core(fix: str | None, trace: bool) -> Iterator[str]:
-    """Serve `experiment_core(fix, trace)` from this process's host (as the probe's `injected_core_variant`); yields its sha."""
+def injected_core(trace: bool) -> Iterator[str]:
+    """Serve `experiment_core(trace)` from this process's host (as the probe's `injected_core_variant`); yields its sha."""
     host = probe.live_host_module
-    core = experiment_core(fix, trace)
+    core = experiment_core(trace)
     sha = hashlib.sha256(core.encode()).hexdigest()
     original_core, original_sha = host.PRESERVE_CORE_JS, host.js_sha256
     host.PRESERVE_CORE_JS, host.js_sha256 = core, (lambda: sha)
@@ -662,19 +582,6 @@ def injected_core(fix: str | None, trace: bool) -> Iterator[str]:
         yield sha
     finally:
         host.PRESERVE_CORE_JS, host.js_sha256 = original_core, original_sha
-
-
-def parse_arm(label: str) -> tuple[str, str | None]:
-    """`"V8+a1"` -> `("V8", "a1")`; `"V5+8"` -> `("V5+8", None)`."""
-    match = FIX_ARM_RE.match(label)
-    serving_name, fix = (match["serving"], match["fix"]) if match else (label, None)
-    if serving_name not in VARIANT_INDICES:
-        raise ValueError(f"unknown arm {label!r}: serving {serving_name!r} is not one of {tuple(VARIANT_INDICES)}")
-    return serving_name, fix
-
-
-def arm_label(variant: str, fix: str | None) -> str:
-    return f"{variant}+{fix}" if fix else variant
 
 
 def instrumented_sampler_js(control: dict[str, Any] | None = None, sampler: str | None = None, level2: bool = False) -> str:
@@ -1212,7 +1119,7 @@ def bump_removals(tally: dict[str, Any], removals: Any) -> None:
 
 
 def removal_readout(arm: str, tally: dict[str, Any]) -> str:
-    """`V8+a1: teardown sameDelivery 23/23; carry sameDelivery 0/23, sameCheckpoint 23/23 (proxy); pre-paint in gap 0`."""
+    """`V8: teardown sameDelivery 23/23; carry sameDelivery 0/23, sameCheckpoint 23/23 (proxy); pre-paint in gap 0`."""
     parts = []
     for phase, cell in tally.items():
         n = cell["events"]
@@ -1495,10 +1402,6 @@ def summarize(records: Sequence[dict[str, Any]], seed: int | None = None) -> dic
 
 
 def decide(per: dict[str, dict[str, Any]], complete_blocks: int) -> str:
-    """§2.3 on the R8 A/B; on a fix A/B (V8 against V8+fix arms) only whether every arm reached the target."""
-    fix_arms = [arm for arm in per if FIX_ARM_RE.match(arm)]
-    if "V8" in per and fix_arms and not set(BLOCK_VARIANTS) <= set(per):
-        return "target-met" if all(per[arm]["events"] >= TARGET_EVENTS for arm in ("V8", *fix_arms)) else "continue"
     if not set(BLOCK_VARIANTS) <= set(per):
         return "n/a"
     v8, v7, v5 = (per[v] for v in BLOCK_VARIANTS)
@@ -1574,16 +1477,15 @@ def deck_paths(deck: str) -> tuple[Path, Path]:
 
 def execute_run(
     out_dir: Path, run_id: str, *, deck: str, variant: str, arm: str, viewport: tuple[int, int],
-    control: dict[str, Any] | None = None, extra: dict[str, Any] | None = None, core_fix: str | None = None,
-    level2: bool = False,
+    control: dict[str, Any] | None = None, extra: dict[str, Any] | None = None, level2: bool = False,
 ) -> dict[str, Any]:
     """One live arm under the given serving, core and instrument; writes the raw dump and appends the record."""
     fixture_dir, original_index = deck_paths(deck)
-    config = {"deck": deck, "variant": arm_label(variant, core_fix), "serving": variant, "coreFix": core_fix,
+    config = {"deck": deck, "variant": variant, "serving": variant,
               "level2": level2, "arm": arm, "viewport": list(viewport),
               "control": control["mode"] if control else None, "controlAtScene": control and control.get("atScene"),
               "expectedServedSha256": expected_served_sha256(variant, level2),
-              "expectedCoreSha256": experiment_core_sha(core_fix, level2), **(extra or {})}
+              "expectedCoreSha256": experiment_core_sha(level2), **(extra or {})}
     raw: dict[str, Any] = {"runId": run_id, "config": config, "meta": collect_metadata(),
                            "startedAt": datetime.now().isoformat(timespec="seconds"), "error": None}
     started = time.monotonic()
@@ -1600,8 +1502,7 @@ def execute_run(
             stack.enter_context(serving(variant))
             if level2:
                 stack.enter_context(level2_install())
-            if core_fix or level2:
-                stack.enter_context(injected_core(core_fix, level2))
+                stack.enter_context(injected_core(level2))
             stack.enter_context(probe.env_override({probe.CONTINUITY_ENV: None}))
             stack.enter_context(instrumented(sink, control, level2))
             if arm == "C":
@@ -1642,13 +1543,13 @@ def _brief(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def _run_tag(args: argparse.Namespace) -> str:
-    return _safe(arm_label(args.variant, args.core_fix)) + ("-L2" if args.level2 else "")
+    return _safe(args.variant) + ("-L2" if args.level2 else "")
 
 
 def cmd_run(args: argparse.Namespace) -> int:
     run_id = f"{datetime.now():%Y%m%dT%H%M%S}-{_run_tag(args)}-{args.deck}-{args.arm}"
     record = execute_run(args.out_dir, run_id, deck=args.deck, variant=args.variant, arm=args.arm, viewport=args.viewport,
-                         core_fix=args.core_fix, level2=args.level2)
+                         level2=args.level2)
     print(json.dumps(_brief(record), indent=2, default=str))
     return 0 if record["status"] in DONE_STATUSES else 1
 
@@ -1657,7 +1558,7 @@ def cmd_control(args: argparse.Namespace) -> int:
     control = None if args.mode == "r8flag" else {"mode": args.mode, "atScene": args.at_scene}
     run_id = f"{datetime.now():%Y%m%dT%H%M%S}-ctl-{args.mode}-{_run_tag(args)}-{args.deck}-{args.arm}"
     record = execute_run(args.out_dir, run_id, deck=args.deck, variant=args.variant, arm=args.arm, viewport=args.viewport,
-                         control=control, extra={"control": args.mode}, core_fix=args.core_fix, level2=args.level2)
+                         control=control, extra={"control": args.mode}, level2=args.level2)
     print(json.dumps(_brief(record), indent=2, default=str))
     verdict = record.get("controlVerdict") or {}
     return 0 if verdict.get("status") in ("pass", "recorded") else 1
@@ -1700,13 +1601,12 @@ def cmd_blocks(args: argparse.Namespace) -> int:
             break
         run = todo[0]
         level2 = bool(manifest.get("level2"))
-        serving_name, fix = parse_arm(run["variant"])
         run_id = f"s{seed}-b{run['block']:02d}-{_safe(run['variant'])}{'-L2' if level2 else ''}-{run['deck']}-a{run['attempt']}"
         record = execute_run(
-            args.out_dir, run_id, deck=run["deck"], variant=serving_name, arm=manifest["arm"],
+            args.out_dir, run_id, deck=run["deck"], variant=run["variant"], arm=manifest["arm"],
             viewport=tuple(manifest["viewport"]), extra={"seed": seed, "block": run["block"], "attempt": run["attempt"],
                                                          "order": run["order"]},
-            core_fix=fix, level2=level2,
+            level2=level2,
         )
         print(json.dumps(_brief(record), default=str), flush=True)
         if (record["servedSha256"] is not None and not record["servedShaOk"]) or (
@@ -1808,10 +1708,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         p.add_argument("--arm", choices=("A", "C"), default=arm, help="A = continuity on; C = bridges stripped")
         p.add_argument("--viewport", type=probe.parse_viewport_arg, default=DEFAULT_VIEWPORT)
 
-    def bytes_options(p: argparse.ArgumentParser, fix: bool = True) -> None:
+    def bytes_options(p: argparse.ArgumentParser) -> None:
         p.add_argument("--level2", action="store_true", help="plan §1 Level 2: controller wraps and the core trace")
-        if fix:
-            p.add_argument("--core-fix", choices=CORE_FIXES, default=None, help="probe-only core fix candidate (plan §3)")
 
     run = sub.add_parser("run", help="one instrumented arm")
     live(run, "C")
@@ -1829,9 +1727,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     control.add_argument("--at-scene", type=int, default=None, help="fire at this pin boundary (default: the first)")
     control.set_defaults(func=cmd_control)
 
-    blocks = sub.add_parser("blocks", help="the interleaved A/B, resumable (arms: V8, V7, V5, V5+8, or V8+a1 / V8+a2)")
+    blocks = sub.add_parser("blocks", help="the interleaved A/B, resumable (arms: V8, V7, V5, V5+8)")
     live(blocks, "C")
-    bytes_options(blocks, fix=False)
+    bytes_options(blocks)
     blocks.add_argument("--blocks", type=int, required=True)
     blocks.add_argument("--seed", type=int, default=None)
     blocks.add_argument("--variants", type=lambda s: s.split(","), default=list(BLOCK_VARIANTS))
@@ -1851,12 +1749,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     args = parser.parse_args(argv)
     if args.command == "blocks":
-        bad = [d for d in args.decks if d not in DECKS]
-        for label in args.variants:
-            try:
-                parse_arm(label)
-            except ValueError:
-                bad.append(label)
+        bad = [v for v in args.variants if v not in VARIANT_INDICES] + [d for d in args.decks if d not in DECKS]
         if bad:
             parser.error(f"unknown variants/decks: {bad}")
     return args

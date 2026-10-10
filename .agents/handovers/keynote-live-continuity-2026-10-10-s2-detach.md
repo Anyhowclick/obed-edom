@@ -10,7 +10,7 @@ Verify every branch/PR on GitHub before acting; nothing below was merged except 
 |---|---|---|---|
 | `main` | `1379b2df` | origin | #247 (gate round 35 -> ~7¼ min at GATE_JOBS=3), then #248/#249 (resizer splice aspect, Gold oracles). S2 is still on `0f0a70aa`. |
 | `claude/continuity-generalisation-s2` | `dcbb6363` | **origin** | S2 rebased onto `0f0a70aa` (#247) + owner-approved P2 re-registrations + plan §4 option (a) + detach plan (force-pushed; = the former `-s2-rebase`). No PR. |
-| `claude/s2-detach-fix` | this commit | **origin**, worktree `obs-mac-camera-swap-fbc63b` | S2 + detach driver (`scripts/detach_experiment.py`, Level 1+2, a1/a2 core-fix arms, removal-phase readout) + plan results + this handover. |
+| `claude/s2-detach-fix` | this commit | **origin**, worktree `obs-mac-camera-swap-fbc63b` | S2 + detach driver (`scripts/detach_experiment.py`, Level 1+2, removal-phase readout; the a1/a2 fix arms are at a041eec8) + **a1 landed in the core** (`00c8fb82`) + plan results + this handover. |
 | `claude/detach-main-p2` | `97332ef6` | **origin** only (worktree trashed) | Driver ported to main for the P2 relevance check. Evidence only; kept because plan §5 cites it. |
 
 Deleted: `claude/continuity-generalisation-s2-rebase`, `claude/s2-detach-experiment`, `attach-viewport-session`.
@@ -33,9 +33,8 @@ Deleted: `claude/continuity-generalisation-s2-rebase`, `claude/s2-detach-experim
 3. **S2 force-pushed** to `dcbb6363`.
 
 ## Next steps, in order
-1. Detach fix: a fresh ≥ 30-event interleaved V8 vs V8+a1 session with the new instrument (positive control first),
-   then land a1 in the core (core sha re-pin; red-arm variant shas re-derive) on S2.
-2. The owed S2 gates on the rebased head: full `run_gates.sh` (now 38 runs incl. 22 deck red arms — GATE_JOBS=3 was
+1. Done: fresh A/B a1 0/30 vs V8 5/30 (p 0.026; 0/53 vs 13/53 combined), a1 landed in the core (plan §5).
+2. **Next:** the owed S2 gates (on core `00c8fb82`) on the rebased head: full `run_gates.sh` (now 38 runs incl. 22 deck red arms — GATE_JOBS=3 was
    qualified only for the 16-run mix; deck arms have never run concurrently, re-qualify serial vs 3-wide), decks at
    1600×1000 and 2560×1440, Pass G on D1–D6, then review and the Q2–Q7 re-qualification (plan §3.4).
 3. Housekeeping: trash the agent worktrees once their branches are pushed/merged (check git-ignored `output/` first).
@@ -43,7 +42,7 @@ Deleted: `claude/continuity-generalisation-s2-rebase`, `claude/s2-detach-experim
 ## Open bugs (owner-raised or found)
 - **One-frame detach (S2):** symptom — one rAF with no `<video>` at the destination's movie start after an MM (D-deck
   pin carries, arm C/attach, 2560 and 1920). Expected — the carried decoder stays painted. Cause — H3→H1 above. Fix — a1
-  (decided; not yet in the core).
+  (landed in the core; the owed gates still to run).
   Evidence: main checkout `output/evidence/s2-dev/detach-{controls,s1,ab,1920,l2,l2-smoke,fix-ctl,fix}/`.
 - **Flaky test:** `tests/test_watercolour.py::test_cancel_after_png_encoding_still_discards_the_item` failed once under
   `-n auto` load (cancelled vs done); untouched code, passes alone 5/5.
