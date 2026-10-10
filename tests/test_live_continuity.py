@@ -3201,7 +3201,7 @@ def test_a_cut_restarts_every_video_instance_whose_asset_continues():
     `restart`, naming slide 2's only instance as its informational destination."""
     from obed_edom.live_continuity import _cut_movies
 
-    movies = _cut_movies(_parsed_slide(0, SLIDE1), _parsed_slide(1, SLIDE2), set())
+    movies = _cut_movies(_parsed_slide(0, SLIDE1), _parsed_slide(1, SLIDE2), set(), "0 -> 1")
     assert [(m.action, m.src_object_id, m.dst_object_id) for m in movies] == [
         ("restart", P2_OBJECT_IDS["slide1"], P2_OBJECT_IDS["slide2"]),
         ("restart", P2_OBJECT_IDS["slide1_small"], P2_OBJECT_IDS["slide2"]),
@@ -3214,12 +3214,12 @@ def test_a_cut_ends_a_carried_instance_whose_asset_does_not_continue():
     from obed_edom.live_continuity import _cut_movies
 
     source, destination = _parsed_slide(2, SLIDE3), _parsed_slide(3, SLIDE4)
-    held = _cut_movies(source, destination, {P2_OBJECT_IDS["slide3_wa0125"]})
+    held = _cut_movies(source, destination, {P2_OBJECT_IDS["slide3_wa0125"]}, "2 -> 3")
     assert [(m.action, m.src_object_id, m.refusal) for m in held] == [
         ("restart", P2_OBJECT_IDS["slide3"], None),
         ("retire", P2_OBJECT_IDS["slide3_wa0125"], None),
     ]
-    assert [m.action for m in _cut_movies(source, destination, set())] == ["restart"]
+    assert [m.action for m in _cut_movies(source, destination, set(), "2 -> 3")] == ["restart"]
 
 
 def test_a_magic_move_ends_a_carried_instance_that_pairs_with_nothing():
@@ -3267,3 +3267,179 @@ def test_r2_an_unattributed_build_says_it_cannot_be_ruled_out():
         "export gives no other way to tell whether it builds 'untitled.mov', so the carry is refused "
         "rather than guessed"
     )
+
+
+# --- R2 before pairing, nested builds, and cuts onto a web destination (S2 Codex r1) ---------
+
+
+def _clone_onto_slide2_top_right(data):
+    """Slide 2 gains a second untitled.mov instance, objectID CLONE, the size of slide 1's small
+    instance but centred far above it, drawn on top of everything so no overlap refuses it."""
+    data = _clone_second_instance_onto_slide2(data)
+    clone = data["events"][-1]["effects"][0]["effects"][-1]
+    clone["objectID"] = "CLONE"
+    _, (small_x, _) = _slide1_centres()
+    clone["baseLayer"]["initialState"]["position"] = {"pointX": small_x, "pointY": 100.0}
+    w, h = SLIDE1_SMALL[2], SLIDE1_SMALL[3]
+    _draw_slots(data, 0).append(_authored_slot(small_x - w / 2, 100.0 - h / 2, w, h, object_id="CLONE"))
+    return data
+
+
+def test_r2_the_repeated_instance_geometry_pairs_the_sibling_onto_the_far_destination():
+    """Positive control for the test below, with no build anywhere: sources A (slide 1's big
+    instance) and B (its small one), destinations C (slide 2's instance, A's rect) and CLONE (far
+    above B). The minimum-total assignment is A->C, B->CLONE; B alone would pair with C, which is
+    nearer to it than CLONE by well over the 16 px margin."""
+    from obed_edom.live_continuity import _pair_instances
+
+    plan = _plan(_mutate_slide(SLIDE2, _clone_onto_slide2_top_right))
+    assert isinstance(plan, ContinuityPlan)
+    assert [(m.action, m.src_object_id, m.dst_object_id, m.code) for m in plan.boundaries[0].movies] == [
+        ("pin", P2_OBJECT_IDS["slide1"], P2_OBJECT_IDS["slide2"], "overlap"),
+        ("bridge", P2_OBJECT_IDS["slide1_small"], "CLONE", None),
+    ]
+    source, destination = _parsed_slide(0, SLIDE1), _parsed_slide(
+        1, SLIDE2, _mutate_slide(SLIDE2, _clone_onto_slide2_top_right)
+    )
+    [small] = [i for i in source.instances["untitled.mov"] if i.object_id == P2_OBJECT_IDS["slide1_small"]]
+    pairs, refusal = _pair_instances([small], destination.instances["untitled.mov"], set())
+    assert refusal is None
+    assert [(src.object_id, dst.object_id) for src, dst in pairs] == [
+        (P2_OBJECT_IDS["slide1_small"], P2_OBJECT_IDS["slide2"])
+    ]
+
+
+def test_r2_a_building_instance_of_a_repeated_asset_refuses_its_whole_pairing():
+    """The review's shape: A builds out, so Keynote (validate._mm_matches' model, measured on
+    images, not movies) would drop A and move B onto C. Distance-pairing first and refusing A->C
+    afterwards would carry B onto CLONE instead, a destination Keynote never moves it to. Which
+    pairing Keynote makes for the rest is unmeasured for movies, so every instance of the asset
+    is refused at that boundary (R2), as an ambiguous pairing is (R1)."""
+    root = _mutate_slide(SLIDE2, _clone_onto_slide2_top_right)
+    _rewrite_slide_json(root, SLIDE1, _add_build("buildOut", "apple:dissolve", P2_OBJECT_IDS["slide1"]))
+    plan = _plan(root)
+    assert isinstance(plan, ContinuityPlan)
+    movies = plan.boundaries[0].movies
+    assert [(m.action, m.code, m.src_object_id, m.dst_object_id) for m in movies] == [
+        ("retire", "R2", P2_OBJECT_IDS["slide1"], None),
+        ("retire", "R2", P2_OBJECT_IDS["slide1_small"], None),
+    ]
+    assert movies[0].refusal == (
+        "'untitled.mov' pairing at player index 0 -> 1: an instance builds in or out, which Magic Move "
+        "leaves unpaired, and how Keynote then pairs the rest of a movie is unmeasured"
+    )
+    assert "CLONE" not in json.dumps(plan.as_dict()["boundaries"][0])
+
+
+def test_r2_a_destination_build_in_on_a_repeated_asset_refuses_its_whole_pairing():
+    root = _mutate_slide(SLIDE2, _clone_onto_slide2_top_right)
+    _rewrite_slide_json(root, SLIDE2, _add_build("buildIn", "apple:dissolve", P2_OBJECT_IDS["slide2"]))
+    plan = _plan(root)
+    assert isinstance(plan, ContinuityPlan)
+    assert [(m.action, m.code) for m in plan.boundaries[0].movies] == [("retire", "R2"), ("retire", "R2")]
+
+
+def _nest_build(build_type: str, name: str, object_id: str | None, *, leader: str):
+    """A build "with previous" nests in its leader's `effects`. `leader="movie-start"` nests it
+    under event 0's first effect, the slide movie's own `apple:movie-start`; `leader="text"`
+    under a new top-level build of another object."""
+
+    def apply(data):
+        effect = {"name": name, "type": build_type, "beginTime": 0, "effects": []}
+        if object_id is not None:
+            effect["objectID"] = object_id
+        first = data["events"][0]["effects"]
+        if leader == "movie-start":
+            assert first[0]["name"] == "apple:movie-start"
+            first[0]["effects"].append(effect)
+        else:
+            first.append(
+                {"name": "apple:dissolve", "type": build_type, "beginTime": 0, "objectID": "SOME-TEXT-BOX",
+                 "effects": [effect]}
+            )
+        return data
+
+    return apply
+
+
+@pytest.mark.parametrize(
+    "uuid, build_type, name, object_id, leader, codes",
+    [
+        pytest.param(SLIDE4, "buildIn", "apple:dissolve", P2_OBJECT_IDS["slide4"], "text", [(1, "overlap"), (3, "R2")], id="dst-nested-under-another-build"),
+        pytest.param(SLIDE4, "buildIn", "apple:dissolve", P2_OBJECT_IDS["slide4"], "movie-start", [(1, "overlap"), (3, "R2")], id="dst-nested-under-the-movie-start"),
+        pytest.param(SLIDE3, "buildOut", "apple:dissolve", P2_OBJECT_IDS["slide3"], "text", [(1, "overlap"), (3, "R2")], id="src-nested-under-another-build"),
+        pytest.param(SLIDE3, "buildOut", "apple:dissolve", P2_OBJECT_IDS["slide3"], "movie-start", [(1, "overlap"), (3, "R2")], id="src-nested-under-the-movie-start"),
+        pytest.param(SLIDE4, "buildIn", "apple:dissolve", None, "text", [(1, "overlap"), (3, "R2")], id="unattributed-nested"),
+        pytest.param(SLIDE4, "buildIn", "apple:dissolve", None, "movie-start", [(1, "overlap"), (3, "R2")], id="unattributed-nested-under-the-movie-start"),
+        # Only the movie-start build itself and its own renderMovie child are exempt (F3).
+        pytest.param(SLIDE4, "buildIn", "renderMovie", P2_OBJECT_IDS["slide4"], "text", [(1, "overlap"), (3, "R2")], id="render-movie-outside-a-movie-start"),
+        pytest.param(SLIDE4, "buildIn", "apple:movie-start", P2_OBJECT_IDS["slide4"], "text", [(1, "overlap")], id="nested-movie-start-does-not-refuse"),
+        pytest.param(SLIDE4, "buildIn", "renderMovie", P2_OBJECT_IDS["slide4"], "movie-start", [(1, "overlap")], id="render-movie-of-a-movie-start-does-not-refuse"),
+        pytest.param(SLIDE4, "buildIn", "apple:dissolve", "OTHER-OBJECT", "movie-start", [(1, "overlap")], id="nested-build-on-another-object-does-not-refuse"),
+    ],
+)
+def test_r2_a_nested_build_refuses_the_boundary(uuid, build_type, name, object_id, leader, codes):
+    plan = _plan(_mutate_slide(uuid, _nest_build(build_type, name, object_id, leader=leader)))
+    assert isinstance(plan, ContinuityPlan)
+    assert _refusal_codes(plan) == codes
+
+
+def _web_slide3_after_a_clean_1_to_2_pin(*, slide3_kind_field=("isStreaming", True)) -> Path:
+    """Slide 2's green square moves behind the movie, so the 1 -> 2 pin carries unrefused and
+    slide 2's instance is held into the 2 -> 3 Dissolve; slide 3's untitled.mov is then made a
+    web video, which the player draws as an <iframe>, never a <video>."""
+    root = _mutate_slide(SLIDE2, _move_green_square_below_the_movie)
+    _rewrite_slide_json(root, SLIDE3, _set_movie_field(P2_OBJECT_IDS["slide3"], *slide3_kind_field))
+    return root
+
+
+def test_r7_a_cut_from_a_carried_video_onto_a_web_destination_refuses_instead_of_restarting():
+    """A restart's carried decoder is retired only when a fresh <video> of its asset sets `src`
+    at or after `atScene`. A web destination never creates one, so `restart` would leave the held
+    decoder alive; the boundary is refused (R7) and the decoder retired from `atScene - 1`."""
+    plan = _plan(_web_slide3_after_a_clean_1_to_2_pin())
+    assert isinstance(plan, ContinuityPlan)
+    assert [(m.action, m.src_object_id) for m in plan.boundaries[0].movies] == [("pin", P2_OBJECT_IDS["slide1"])]
+    assert plan.boundaries[0].movies[0].refusal is None
+    [cut] = plan.boundaries[1].movies
+    assert (cut.action, cut.code, cut.src_object_id, cut.dst_object_id) == ("retire", "R7", P2_OBJECT_IDS["slide2"], None)
+    assert cut.refusal == "'untitled.mov' at player index 1 -> 2 is a web movie, which the player draws without a <video>"
+    assert (1, "R7") in [(r["fromPlayer"], r["code"]) for r in plan.refusals]
+
+
+def test_r7_a_cut_onto_a_web_destination_retires_in_the_runtime_plan(monkeypatch):
+    from obed_edom import live_continuity
+
+    plan = _plan(_web_slide3_after_a_clean_1_to_2_pin())
+    assert isinstance(plan, ContinuityPlan)
+    monkeypatch.setattr(live_continuity, "plan_signature", lambda _runtime: next(iter(live_continuity.QUALIFIED_PLAN_SHA256)))
+    runtime = plan.to_runtime()
+    assert isinstance(runtime, dict)
+    at_scene_6 = [b for b in runtime["boundaries"] if b["atScene"] == 6]
+    assert [(b["action"], b.get("reason"), b["src"]["objectId"]) for b in at_scene_6] == [
+        ("retire", "refused", P2_OBJECT_IDS["slide2"])
+    ]
+    assert not any(b["action"] == "restart" for b in runtime["boundaries"] if b["atScene"] == 6)
+
+
+def test_a_cut_onto_an_image_destination_refuses_too():
+    root = _mutate_slide(SLIDE2, _move_green_square_below_the_movie)
+    _rewrite_slide_json(root, SLIDE3, _set_asset_url("assets/Untitled.mov-0.0000-46.0333.png"))
+    plan = _plan(root)
+    assert isinstance(plan, ContinuityPlan)
+    [cut] = plan.boundaries[1].movies
+    assert (cut.action, cut.code) == ("retire", "R7")
+    assert "is a image movie" in cut.refusal
+
+
+def test_a_cut_restarts_when_any_destination_instance_is_a_video():
+    """A fresh <video> of the asset still sets `src` on the far side, so the restart retires the
+    carried decoder as before; only an all-non-video far side is refused."""
+    from obed_edom.live_continuity import _cut_movies
+
+    source = _parsed_slide(0, SLIDE1)
+    destination = _parsed_slide(1, SLIDE2, _mutate_slide(SLIDE2, _clone_onto_slide2_top_right))
+    first, *rest = destination.instances["untitled.mov"]
+    mixed = replace(destination, instances={"untitled.mov": [replace(first, kind="web"), *rest]})
+    movies = _cut_movies(source, mixed, {P2_OBJECT_IDS["slide1"]}, "0 -> 1")
+    assert [m.action for m in movies] == ["restart", "restart"]

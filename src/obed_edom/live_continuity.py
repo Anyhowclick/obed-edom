@@ -36,6 +36,7 @@ _GL_REPLAY_TRANSITIONS: frozenset[str] = frozenset({"apple:magic-move-implied-mo
 _TRIM_SUFFIX_RE = re.compile(r"^(?P<name>.+)(?P<trim>-\d+\.\d+-\d+\.\d+)(?P<ext>\.[A-Za-z0-9]+)$")
 _IMAGE_MOVIE_RE = re.compile(r"\.(png|gif|heic\w*)$", re.IGNORECASE)
 _MOVIE_START_BUILD = "apple:movie-start"
+_RENDER_MOVIE_BUILD = "renderMovie"
 _CUT_TRANSITIONS: frozenset[str | None] = frozenset({None, "none", "apple:dissolve"})
 """No transition (absent, or exported as `none`) and Dissolve: the player restarts each movie."""
 _PAIRING_MARGIN_PX = 16.0
@@ -1357,32 +1358,50 @@ def _boundary_transition_off_last_event(events: list[Any], transition: dict[str,
 
 
 def _build_targets(events: list[Any], build_type: str) -> tuple[set[str], list[str]]:
-    """Object ids that build in/out on a slide, ignoring movie-start builds (they do not stop
-    Magic Move pairing, F3), plus the names of any such builds that name no object."""
+    """Object ids that build in/out on a slide, plus the names of any such builds that name no
+    object. Builds "with previous" nest in their leader's `effects`, a movie-start's included, so
+    the whole tree is read; only a movie-start build and its own `renderMovie` are exempt (they do
+    not stop Magic Move pairing, F3)."""
     targets: set[str] = set()
     unattributed: list[str] = []
+
+    def walk(effects: Any, under_movie_start: bool) -> None:
+        for effect in effects if isinstance(effects, list) else []:
+            if not isinstance(effect, dict):
+                continue
+            name = effect.get("name")
+            exempt = name == _MOVIE_START_BUILD or (under_movie_start and name == _RENDER_MOVIE_BUILD)
+            if effect.get("type") == build_type and not exempt:
+                object_id = effect.get("objectID")
+                if isinstance(object_id, str) and object_id:
+                    targets.add(object_id)
+                else:
+                    unattributed.append(str(name))
+            walk(effect.get("effects"), name == _MOVIE_START_BUILD)
+
     for event in events:
-        for effect in (event.get("effects") if isinstance(event, dict) else None) or []:
-            if not isinstance(effect, dict) or effect.get("type") != build_type:
-                continue
-            if effect.get("name") == _MOVIE_START_BUILD:
-                continue
-            object_id = effect.get("objectID")
-            if isinstance(object_id, str) and object_id:
-                targets.add(object_id)
-            else:
-                unattributed.append(str(effect.get("name")))
+        walk(event.get("effects") if isinstance(event, dict) else None, False)
     return targets, unattributed
 
 
 def _pair_instances(
-    outgoing: list[_MovieInstance], incoming: list[_MovieInstance]
+    outgoing: list[_MovieInstance], incoming: list[_MovieInstance], building: set[str]
 ) -> tuple[list[tuple[_MovieInstance, _MovieInstance]], None] | tuple[None, tuple[str, str]]:
     """Keynote's Magic Move pairing of one asset's instances (F3, plan section 2.2): the
-    assignment of minimum total centre distance. Refused (R1b) when the candidates differ in
-    exported opacity, since Keynote's tier-1 preference would then override distance, and (R1)
-    when the runner-up assignment is within `_PAIRING_MARGIN_PX` or the search exceeds the cap."""
-    if (len(outgoing) > 1 or len(incoming) > 1) and len({i.opacity for i in outgoing + incoming}) > 1:
+    assignment of minimum total centre distance. When there is a choice it is refused (R2) if
+    any candidate is in `building` (it builds out on the source or in on the destination, so
+    Keynote leaves it unpaired, but how the rest then pair is unmeasured for movies), (R1b) when
+    the candidates differ in exported opacity, since Keynote's tier-1 preference would then
+    override distance, and (R1) when the runner-up assignment is within `_PAIRING_MARGIN_PX` or
+    the search exceeds the cap."""
+    several = len(outgoing) > 1 or len(incoming) > 1
+    if several and any(i.object_id in building for i in outgoing + incoming):
+        return None, (
+            "R2",
+            "an instance builds in or out, which Magic Move leaves unpaired, and how Keynote then "
+            "pairs the rest of a movie is unmeasured",
+        )
+    if several and len({i.opacity for i in outgoing + incoming}) > 1:
         return None, ("R1b", "its instances differ in opacity, which Keynote pairs by before distance")
     swapped = len(outgoing) > len(incoming)
     smaller, larger = (incoming, outgoing) if swapped else (outgoing, incoming)
@@ -1557,9 +1576,10 @@ def _magic_move_movies(
 ) -> list[MovieContinuity]:
     movies: list[MovieContinuity] = []
     carried: list[tuple[MovieContinuity, _MovieInstance, _MovieInstance]] = []
+    building = _build_targets(source.events, "buildOut")[0] | _build_targets(destination.events, "buildIn")[0]
     for asset, outgoing in sorted(source.instances.items()):
         incoming = destination.instances.get(asset)
-        pairs, refusal = _pair_instances(outgoing, incoming) if incoming else ([], None)
+        pairs, refusal = _pair_instances(outgoing, incoming, building) if incoming else ([], None)
         if refusal is not None:
             code, reason = refusal
             movies.extend(_retire(asset, src, (code, f"'{asset}' pairing at {desc}: {reason}")) for src in outgoing)
@@ -1589,15 +1609,20 @@ def _magic_move_movies(
     return sorted(movies, key=lambda movie: movie.asset)
 
 
-def _cut_movies(source: _Slide, destination: _Slide, held: set[str]) -> list[MovieContinuity]:
+def _cut_movies(source: _Slide, destination: _Slide, held: set[str], desc: str) -> list[MovieContinuity]:
     """A Dissolve or no transition: the player restarts every `<video>` instance whose asset is on
-    the far side; a carried one whose asset is not ends."""
+    the far side; a carried one whose asset is not ends. A restart retires its carried decoder
+    only when a fresh `<video>` of the asset starts, so a far side with none refuses (R7)."""
     movies: list[MovieContinuity] = []
     for asset, outgoing in sorted(source.instances.items()):
         incoming = destination.instances.get(asset) or []
         dst = incoming[0] if len(incoming) == 1 else None
+        drawn_without_video = bool(incoming) and all(i.kind != "video" for i in incoming)
         for src in outgoing:
-            if incoming and src.kind == "video":
+            if drawn_without_video and src.kind == "video":
+                reason = f"'{asset}' at {desc} is a {incoming[0].kind} movie, which the player draws without a <video>"
+                movies.append(_retire(asset, src, ("R7", reason)))
+            elif incoming and src.kind == "video":
                 movies.append(MovieContinuity(
                     asset, "restart", src.rect, dst.rect if dst else None,
                     src_object_id=src.object_id, dst_object_id=dst.object_id if dst else None, loop=src.loop,
@@ -1701,7 +1726,7 @@ def derive_plan(
                     source, destination, held, desc, transition, transition_name, gl_replay, gl_replay_used
                 )
             elif transition_name in _CUT_TRANSITIONS:
-                movies_list = _cut_movies(source, destination, held)
+                movies_list = _cut_movies(source, destination, held, desc)
             else:
                 return Unsupported(f"unsupported transition '{transition_name}' at {desc}")
         except _Refuse as exc:
