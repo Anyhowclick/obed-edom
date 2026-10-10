@@ -70,7 +70,7 @@ each, tables identical. **Invalidated for pins by finding 1** (instrument blind 
 4. Open item 4 (dissolve alpha) — investigate after the owner's Keynote comparison.
 
 ## Machine / coordination
-- The owner's OBS is running with `--remote-debugging-port=9222` (pid 3941): do not drive it without the owner's go.
+- The owner's OBS was closed at handover. For Q7 it is launched with `--remote-debugging-port=9222`; never drive it without the owner's go.
 - One heavy job at a time machine-wide (full suite, run_gates round, live headless gates). The arrow-key/presenter-keys
   session (PR #254) agreed to message before running full suites; its session has since been deleted.
 - OBS page tools (read-only), in `output/evidence/s2-dev/tools-2026-10-10/`: `obs_sampler.py` (rAF DOM sampler over CDP), `obs_screencast.py`
