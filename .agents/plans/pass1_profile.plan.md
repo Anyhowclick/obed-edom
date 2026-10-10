@@ -14,6 +14,14 @@ todos:
       unused since the groups branch stopped) and whether the read can be narrowed to the kinds and
       slides that need a seed. Gate: projected saving ≥ 60 s; needs one owner-gated live run.
     status: pending
+  - id: followup-single-rewrite
+    content: >-
+      GATED (moved from the hides-offline plan). Fold the hide delete into `patch_deck_geometry`'s rewrite
+      (one decode and one rewrite instead of two). Precondition: the bulk seed read must run on the
+      undeleted deck, with rows re-keyed through `bridge_kind_index`, which changes a live-validated
+      path (offline_write.py:122-133). Pursue only if the measured hide stage is ≥ 10 s AND
+      `h-bulk-seed-read` has settled what the seed read looks like.
+    status: pending
 ---
 
 # Pass 1 profile
@@ -31,6 +39,7 @@ todos:
 | `h-open-size` | recorded: open 3.6 s, slideSize 6.0 s |
 | `h-zorder-patch` | read-back loads the deck once (`d9cf7f2b`): z-order block 183 → 20 s |
 | `h-hides-offline` | `git show 1379b2df:.agents/plans/pass1_hides_offline.plan.md`, `OBED_OFFLINE_HIDES` default on |
+| `deferred-build-hides` | not planned: hides carrying a build (slide 122, ≈ 0.7 s) stay on the Keynote delete; offline would need `buildEventCount`/`hasBuilds`, formula unknown — revisit only if a deck puts material time there |
 | `design-offline-attrs` | not triggered: its gate was attrs ≥ 60 s after `h-attrs-roundtrips`; attrs is ≈ 19 s |
 
 ## What pass 1 does today (OBED_OFFLINE_WRITE on)

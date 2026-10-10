@@ -64,6 +64,9 @@ that yearly content churn justifies this automation before building it.
 - Off-slide map-label deletion stays parked until a current output reproduces it.
 - Live verify routes the AppleScript-fallback group buckets NOT-GATED per `(slide, kind)`; per-index
   dedup delete tokens that would gate them too (live-verify bridge "piece 3") remain unbuilt.
+- MM shape identity (#228) open questions: the build-out exclusion rule is observed live only on FRC
+  slide 147; one Action (blink) build on an MM slide still pairs; a partner row's `ambiguous` flag
+  counts build-excluded objects (documented).
 
 ## Retained design rules
 
