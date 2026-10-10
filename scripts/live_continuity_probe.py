@@ -6295,6 +6295,9 @@ def score_carry_cover(
     roi = carry_cover_roi(src, dst, shape)
     if roi is None:
         return inconclusive("the measurement region is off-frame")
+    near = _dilated(_rect_union(src, dst), CARRY_COVER_DILATE_PX + CARRY_COVER_MAX_STRIP_PX + 1)
+    if rects_overlap(near, CARRY_COVER_SYNC_RECT, 0):
+        return inconclusive("the probe's sync bar lies on the carried movie's path, where it would hide exposure")
     masks = [{**m, "screen": to_screen_rect(m["rect"], stage_map)} for m in bridge.get("masks") or []]
     masks.append({"slot": "sync", "screen": dict(CARRY_COVER_SYNC_RECT), "untilS": None})
     by_tick: dict[int, list[int]] = {}

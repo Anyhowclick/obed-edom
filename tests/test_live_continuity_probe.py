@@ -8213,6 +8213,14 @@ class TestCarryCoverMetric:
         assert result["roi"]["x"] == 0 and result["roi"]["y"] == 0
         assert result["verdict"] == "pass" and result["maxExposedFraction"] == 0.0
 
+    def test_a_path_that_reaches_the_sync_bar_is_inconclusive(self) -> None:
+        """Review r2 (edge case): the bar overwrites 96x4 px at the viewport's top-left and is masked, so exposure
+        there is unobservable; a bridge whose path comes within the strip tolerance of it cannot be judged."""
+        bridge = _cc_bridge(srcRect={"x": 4.0, "y": 2.0, "w": 100.0, "h": 50.0})
+        result = _cc_score(*_cc_scene(), bridge=bridge)
+        assert result["verdict"] == "inconclusive"
+        assert "sync bar" in " ".join(result.get("reasons") or [result.get("reason") or ""])
+
     def test_the_scaled_stage_maps_authored_rects_to_screen(self) -> None:
         """Authored rects at half size with a 2x stage map land on the same screen pixels."""
         half = {k: v / 2 for k, v in CC_SRC.items()}, {k: v / 2 for k, v in CC_DST.items()}
