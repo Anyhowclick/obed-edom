@@ -3063,6 +3063,201 @@ class TestResolveNoConsumption:
         assert result["verdict"] is None
         assert reason in result["reason"]
 
+    class _ObserveOnlyPlayer:
+        """Answers `observe()` with a fixed scene; any attempt to advance the deck or grab a
+        screenshot is a test failure (the pixel half must not run)."""
+
+        def __init__(self, scene_id: str) -> None:
+            self.scene_id = scene_id
+            self.observations = 0
+
+        def observe(self) -> Any:
+            self.observations += 1
+            return argparse.Namespace(scene_id=self.scene_id, busy=False)
+
+        def execute(self, *args: Any) -> Any:
+            raise AssertionError(f"the pixel half advanced the player: execute{args!r}")
+
+        def _require_transport(self) -> Any:
+            raise AssertionError("the pixel half asked for the transport")
+
+    @pytest.mark.parametrize(("scene", "record", "verdict"), [
+        pytest.param("2", {"autoPlayRunLength": 0, "autoPlayFired": False, "autoPlayRunKinds": []}, True,
+                     id="clean-consumption-evidence-passes"),
+        pytest.param("6", {"autoPlayRunLength": 0, "autoPlayFired": False, "autoPlayRunKinds": []}, False,
+                     id="wrong-scene-fails"),
+        pytest.param("2", None, None, id="missing-execute-record-stays-inconclusive"),
+    ])
+    def test_no_click_builds_scores_only_the_consumption_half(self, scene: str, record: Any, verdict: bool | None) -> None:
+        # Owner 2026-10-10 (option 1): a destination PARSED as having no click-driven builds has
+        # nothing for the pixel half to prove. The verdict is exactly the scene + execute-log
+        # verdict, the pixel half is marked n/a with the canonical reason, and the player is never
+        # advanced. Characters geometry and the stage map are irrelevant on this path, so both
+        # are passed as None here to prove they cannot drag the verdict to inconclusive.
+        player = self._ObserveOnlyPlayer(scene)
+        result = probe.resolve_no_consumption(player, "2", None, None, execute_record=record, click_builds=False)
+        assert result["verdict"] is verdict
+        assert result["consumption"] == probe.score_no_consumption(scene, "2", record)
+        assert result["regionChanged"] == {
+            "verdict": "n/a", "applicable": False, "reason": "destination has no click-driven builds",
+        }
+        assert player.observations == 1
+
+    @pytest.mark.parametrize("click_builds", [
+        pytest.param(True, id="click-builds-present"),
+        pytest.param(None, id="click-builds-unknown"),
+    ])
+    def test_click_builds_with_characters_take_todays_full_path(
+        self, monkeypatch: pytest.MonkeyPatch, click_builds: bool | None,
+    ) -> None:
+        # A destination that has (or may have) click-driven builds and readable characters geometry
+        # is scored exactly as before: the full scene + execute-log + pixel check, same arguments.
+        calls: list[tuple[Any, ...]] = []
+
+        def full(player: Any, expected: Any, rect: Any, stage_map: Any, *, execute_record: Any) -> dict[str, Any]:
+            calls.append((player, expected, rect, stage_map, execute_record))
+            return {"verdict": True, "sentinel": "full-path"}
+
+        monkeypatch.setattr(probe, "score_no_build_consumed", full)
+        player, rect, stage_map, record = object(), {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}, {"s": 1}, {"slide": 2}
+        monkeypatch.setattr(probe, "stage_map_valid", lambda value: value is stage_map)
+        result = probe.resolve_no_consumption(player, "2", rect, stage_map, execute_record=record, click_builds=click_builds)
+        assert result == {"verdict": True, "sentinel": "full-path"}
+        assert calls == [(player, "2", rect, stage_map, record)]
+
+    @pytest.mark.parametrize("click_builds", [
+        pytest.param(True, id="click-builds-present"),
+        pytest.param(None, id="click-builds-unknown"),
+    ])
+    def test_click_builds_without_character_geometry_stay_inconclusive(self, click_builds: bool | None) -> None:
+        # `player=None`: reaching the player at all would raise, so this also proves it is untouched.
+        result = probe.resolve_no_consumption(
+            None, "2", None, {"s": 1}, execute_record={"autoPlayRunLength": 0, "autoPlayFired": False},
+            click_builds=click_builds,
+        )
+        assert result == {"verdict": None, "reason": "characters region rect is unavailable (missing/unreadable slide geometry)"}
+
+    @pytest.mark.parametrize("content", [
+        pytest.param(None, id="missing-slide-json"),
+        pytest.param("{not valid json", id="malformed-slide-json"),
+    ])
+    def test_unreadable_slide_json_stays_inconclusive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str | None,
+    ) -> None:
+        # End to end from the export: an unreadable slide must never be read as "no click-driven
+        # builds" -- both readers report unknown, and the check stays inconclusive without
+        # touching the player.
+        monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
+        if content is not None:
+            slide_dir = tmp_path / "assets" / "SLIDE-UUID"
+            slide_dir.mkdir(parents=True)
+            (slide_dir / "SLIDE-UUID.json").write_text(content)
+        slide = {"exportedUuid": "SLIDE-UUID"}
+        click_builds = probe.has_click_builds(tmp_path, slide)
+        assert click_builds is None
+        result = probe.resolve_no_consumption(
+            None, "2", probe.character_region_rect(tmp_path, slide), {"s": 1}, execute_record=None,
+            click_builds=click_builds,
+        )
+        assert result["verdict"] is None
+        assert "characters region rect is unavailable" in result["reason"]
+
+
+def _transition(name: str = "apple:dissolve") -> dict[str, Any]:
+    return {"type": "transition", "name": name, "beginTime": 0, "duration": 1}
+
+
+def _movie_start(object_id: str = "M") -> dict[str, Any]:
+    return {
+        "type": "buildIn", "name": "apple:movie-start", "objectID": object_id,
+        "effects": [{"type": "buildIn", "name": "renderMovie", "objectID": object_id}],
+    }
+
+
+class TestHasClickBuilds:
+    """`has_click_builds` reads the same per-slide JSON as `character_region_rect`. Shapes, as
+    exported (D1 and P2 `html-unmodified`): an automatic `apple:movie-start` buildIn event
+    (`automaticPlay: true`), click `apple:dissolve character` buildIn events (`automaticPlay:
+    false`), and the final click event carrying only the outgoing `transition`."""
+
+    @pytest.mark.parametrize(("events", "expected"), [
+        pytest.param([{"automaticPlay": True, "effects": [_movie_start()]},
+                      {"automaticPlay": False, "effects": [_transition("apple:magic-move-implied-motion-path")]}],
+                     False, id="d-deck-shape-auto-movie-start-then-click-transition"),
+        pytest.param([{"automaticPlay": False, "effects": [_transition()]}], False, id="transition-only"),
+        pytest.param([], False, id="no-events"),
+        pytest.param([{"automaticPlay": False, "effects": [_character_effect("A", 10, 10, 4, 4)]},
+                      {"automaticPlay": False, "effects": [_transition()]}],
+                     True, id="p2-shape-click-character-build"),
+        pytest.param([{"automaticPlay": False, "effects": [_movie_start()]},
+                      {"automaticPlay": False, "effects": [_transition()]}],
+                     True, id="click-started-movie-is-a-click-build"),
+        pytest.param([{"automaticPlay": False, "effects": [_character_effect("A", 10, 10, 4, 4), _transition()]}],
+                     True, id="click-event-with-a-build-beside-the-transition"),
+        pytest.param([{"automaticPlay": False, "effects": []}], False, id="empty-click-event"),
+        pytest.param([{"effects": [_transition()]}], None, id="missing-automaticPlay-is-unknown"),
+        pytest.param([{"automaticPlay": 0, "effects": [_transition()]}], None, id="non-bool-automaticPlay-is-unknown"),
+        pytest.param([{"automaticPlay": False}], None, id="missing-effects-is-unknown"),
+        pytest.param([{"automaticPlay": False, "effects": [{"name": "apple:dissolve"}]}], None,
+                     id="effect-without-a-type-is-unknown"),
+        pytest.param(["not an event"], None, id="non-dict-event-is-unknown"),
+        pytest.param([{"automaticPlay": False, "effects": [_character_effect("A", 1, 1, 1, 1)]}, "junk"], None,
+                     id="malformed-event-after-a-click-build-is-still-unknown"),
+    ])
+    def test_shapes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, events: list[Any], expected: bool | None) -> None:
+        monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
+        slide_dir = tmp_path / "assets" / "SLIDE-UUID"
+        slide_dir.mkdir(parents=True)
+        (slide_dir / "SLIDE-UUID.json").write_text(json.dumps({"events": events, "assets": {}}))
+        assert probe.has_click_builds(tmp_path, {"exportedUuid": "SLIDE-UUID"}) is expected
+
+    @pytest.mark.parametrize(("content", "slide"), [
+        pytest.param(None, {"exportedUuid": "SLIDE-UUID"}, id="missing-slide-json"),
+        pytest.param("{not valid json", {"exportedUuid": "SLIDE-UUID"}, id="malformed-slide-json"),
+        pytest.param(json.dumps({"assets": {}}), {"exportedUuid": "SLIDE-UUID"}, id="no-events-key"),
+        pytest.param(json.dumps({"events": None, "assets": {}}), {"exportedUuid": "SLIDE-UUID"}, id="events-not-a-list"),
+        pytest.param(None, {}, id="missing-uuid"),
+    ])
+    def test_unreadable_slide_is_unknown_never_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str | None, slide: dict[str, str],
+    ) -> None:
+        monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
+        if content is not None:
+            slide_dir = tmp_path / "assets" / "SLIDE-UUID"
+            slide_dir.mkdir(parents=True)
+            (slide_dir / "SLIDE-UUID.json").write_text(content)
+        assert probe.has_click_builds(tmp_path, slide) is None
+
+
+_D1_EXPORT = Path(probe.fixture("qual-decks")) / "D1" / "html-unmodified"
+_P2_EXPORT = Path(probe.fixture("p2-recovery")) / "html-adversarial" / "html-unmodified"
+
+
+class TestHasClickBuildsOnRealExports:
+    """Against the real exports Pass G runs on: every D1 slide (including the Pass G consumption
+    destination, slide 2) is a positive "no click-driven builds"; P2's slide 2 -- the original
+    target of the check, with three click `apple:dissolve character` builds -- is not. Read in
+    place: `safe_export_file` only admits the preview cache that `prepare_export` copies into, so
+    it is bypassed here exactly as the synthetic-export tests above bypass it."""
+
+    @pytest.fixture(autouse=True)
+    def _read_fixture_in_place(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
+
+    @pytest.mark.skipif(not (_D1_EXPORT / "assets" / "header.json").is_file(), reason="qual-decks fixture is not in this checkout")
+    def test_d1_destinations_have_no_click_builds(self) -> None:
+        slides = probe.load_slides(_D1_EXPORT)
+        assert [probe.has_click_builds(_D1_EXPORT, slide) for slide in slides] == [False] * len(slides)
+        destination = next(s for s in slides if s["originalOrdinal"] == probe.GOTO_CONSUMPTION_CHECK_TO)
+        assert probe.character_region_rect(_D1_EXPORT, destination) is None
+
+    @pytest.mark.skipif(not (_P2_EXPORT / "assets" / "header.json").is_file(), reason="p2-recovery fixture is not in this checkout")
+    def test_p2_character_build_slide_has_click_builds(self) -> None:
+        slides = probe.load_slides(_P2_EXPORT)
+        destination = next(s for s in slides if s["originalOrdinal"] == probe.GOTO_CONSUMPTION_CHECK_TO)
+        assert probe.has_click_builds(_P2_EXPORT, destination) is True
+        assert probe.character_region_rect(_P2_EXPORT, destination) is not None
+
 
 class TestGotoTelemetry:
     def test_extracts_the_four_autoplay_fields(self) -> None:

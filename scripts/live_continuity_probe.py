@@ -304,6 +304,7 @@ G_BURST_OFFSETS_MS: tuple[int, ...] = (0, 450, 910, 1360, 1820, 2270, 2730, 3180
 # The one destination the plan requires no-consumption evidence for.
 GOTO_CONSUMPTION_CHECK_TO = 2
 CHARACTERS_ASSET_KEY = "__characters__"
+NO_CLICK_BUILDS_REASON = "destination has no click-driven builds"
 MOVIE_START_EFFECTS = frozenset({"apple:movie-start", "renderMovie"})
 # A completed dissolve build is static, so "did it fire" is judged by pixel content change, never motion.
 CHARACTER_REGION_MAE_MIN = 8.0
@@ -4411,27 +4412,50 @@ def _union_rect(rects: Sequence[dict[str, float]]) -> dict[str, float] | None:
     return {"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0}
 
 
+def _slide_events(export_root: Path, slide: dict[str, Any]) -> list[Any] | None:
+    uuid = slide.get("exportedUuid")
+    if not isinstance(uuid, str) or not uuid:
+        return None
+    try:
+        events = json.loads(safe_export_file(export_root, f"assets/{uuid}/{uuid}.json").read_text())["events"]
+    except Exception:  # noqa: BLE001 - an unreadable slide is a valid, checkable answer
+        return None
+    return events if isinstance(events, list) else None
+
+
 def character_region_rect(export_root: Path, slide: dict[str, Any]) -> dict[str, float] | None:
     """The authored bounding box of this slide's own `apple:*character*` builds
     (ground truth read straight from the export's per-slide JSON, the way
     `derive_plan` reads it), or `None` if the slide has none. Pass G's own
     no-consumption evidence: unrelated to any tracked movie asset, so it
     cannot be derived from `plan.slide_instances`."""
-    uuid = slide.get("exportedUuid")
-    if not isinstance(uuid, str) or not uuid:
-        return None
-    try:
-        data = json.loads(safe_export_file(export_root, f"assets/{uuid}/{uuid}.json").read_text())
-        events = data["events"]
-    except Exception:  # noqa: BLE001 - no character region is a valid, checkable answer
-        return None
     rects: list[dict[str, float]] = [
         rect
-        for event in (events if isinstance(events, list) else [])
+        for event in _slide_events(export_root, slide) or []
         if isinstance(event, dict)
         for rect in _walk_character_rects(event.get("effects"))
     ]
     return _union_rect(rects)
+
+
+def has_click_builds(export_root: Path, slide: dict[str, Any]) -> bool | None:
+    """Whether the slide's per-slide JSON has a click-driven build: an event with
+    `automaticPlay` false carrying any effect other than the outgoing `transition`.
+    `False` only from a fully parsed slide; missing/unreadable or malformed events are `None`."""
+    events = _slide_events(export_root, slide)
+    if events is None:
+        return None
+    found = False
+    for event in events:
+        effects = event.get("effects") if isinstance(event, dict) else None
+        if (
+            not isinstance(effects, list) or not isinstance(event.get("automaticPlay"), bool)
+            or not all(isinstance(effect, dict) and isinstance(effect.get("type"), str) for effect in effects)
+        ):
+            return None
+        if event["automaticPlay"] is False and any(effect["type"] != "transition" for effect in effects):
+            found = True
+    return found
 
 
 def score_no_build_consumed(
@@ -4460,10 +4484,19 @@ def score_no_build_consumed(
 
 def resolve_no_consumption(
     player: LiveOutputHost, expected_scene_id: str | None, character_rect: dict[str, float] | None,
-    stage_map: dict[str, Any] | None, *, execute_record: dict[str, Any] | None,
+    stage_map: dict[str, Any] | None, *, execute_record: dict[str, Any] | None, click_builds: bool | None = None,
 ) -> dict[str, Any]:
     """Fail-closed: missing/unreadable characters geometry or an invalid stage map is inconclusive
-    (never silently `True`) and never touches `player`; only then is the real evidence scored."""
+    (never silently `True`) and never touches `player`; only then is the real evidence scored. A
+    destination parsed as having no click-driven builds (`click_builds is False`, owner 2026-10-10)
+    has nothing for the pixel half to prove: only the scene + execute-log half is scored."""
+    if click_builds is False:
+        consumption = score_no_consumption(player.observe().scene_id, expected_scene_id, execute_record)
+        return {
+            "consumption": consumption,
+            "regionChanged": {"verdict": "n/a", "applicable": False, "reason": NO_CLICK_BUILDS_REASON},
+            "verdict": consumption.get("verdict"),
+        }
     if character_rect is None:
         return {"verdict": None, "reason": "characters region rect is unavailable (missing/unreadable slide geometry)"}
     if not stage_map_valid(stage_map):
@@ -4488,7 +4521,7 @@ def run_goto_destination(
     instances: dict[int, dict[str, list[Any]]], viewport: tuple[int, int], *,
     expectations: dict[int, dict[str, str]], evidence: Callable[..., dict[str, str]] | None,
     expected_scene_id: str | None, character_rect: dict[str, float] | None,
-    armed: bool, require_no_consumption: bool, advance_to: int | None = None,
+    armed: bool, require_no_consumption: bool, advance_to: int | None = None, click_builds: bool | None = None,
 ) -> dict[str, Any]:
     """One goTo, driven for real through `LiveOutputHost.execute`, scored with the same
     `visible_slide_record` the V/Voff passes use -- never a re-derived scorer. With
@@ -4549,6 +4582,7 @@ def run_goto_destination(
     if require_no_consumption:
         no_consumption = resolve_no_consumption(
             player, expected_scene_id, character_rect, stage_map, execute_record=execute_record,
+            click_builds=click_builds,
         )
         if no_consumption.get("verdict") is not True:
             reasons.append(f"no-consumption check for destination {to_ordinal}: {no_consumption}")
@@ -4627,7 +4661,7 @@ def _run_goto_arm(
     export_root: Path, slides: list[dict[str, Any]], *, env: dict[str, str | None], tag: str, armed: bool,
     instances: dict[int, dict[str, list[Any]]], expectations: dict[int, dict[str, str]], viewport: tuple[int, int],
     evidence_dir: Path, character_rect: dict[str, float] | None, onset_scene_id: str, gl_replay: str = "off",
-    matrix: Sequence[Sequence[int]] = GOTO_MATRIX,
+    matrix: Sequence[Sequence[int]] = GOTO_MATRIX, click_builds: bool | None = None,
 ) -> dict[str, Any]:
     """One armed or null-control goTo session: start, warm up, drive every `matrix` case (the
     advance leg of a mid-chain case only when armed), stop."""
@@ -4647,7 +4681,7 @@ def _run_goto_arm(
                     expected_scene_id=onset_scene_id if to_ordinal == GOTO_CONSUMPTION_CHECK_TO else None,
                     character_rect=character_rect, armed=armed,
                     require_no_consumption=armed and to_ordinal == GOTO_CONSUMPTION_CHECK_TO,
-                    advance_to=advance[0] if armed and advance else None,
+                    advance_to=advance[0] if armed and advance else None, click_builds=click_builds,
                 )
                 for from_ordinal, to_ordinal, *advance in matrix
             ]
@@ -4672,6 +4706,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
 
     consumption_slide = next(s for s in plan_slides if s["originalOrdinal"] == GOTO_CONSUMPTION_CHECK_TO)
     character_rect = character_region_rect(plan_export, consumption_slide)
+    click_builds = has_click_builds(plan_export, consumption_slide)
     consumption_index = int(consumption_slide["playerIndex"])
 
     instances_g = {index: dict(assets) for index, assets in instances.items()}
@@ -4702,7 +4737,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
             export_armed, load_slides(export_armed), env=env, tag="G", armed=True,
             instances=instances_g, expectations=goto_rect_expectations(expectations_g, armed=True),
             viewport=viewport, evidence_dir=evidence_dir, character_rect=character_rect, onset_scene_id=onset_scene_id,
-            gl_replay=args.gl_replay, matrix=matrix,
+            gl_replay=args.gl_replay, matrix=matrix, click_builds=click_builds,
         )
 
         export_off = prepare_export(args.fixture, args.original_index, root, "pass-g-off")
@@ -4710,7 +4745,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
             export_off, load_slides(export_off), env={**env, GOTO_AUTOPLAY_ENV: "off"}, tag="Goff", armed=False,
             instances=instances_g, expectations=goto_rect_expectations(expectations_g, armed=False),
             viewport=viewport, evidence_dir=evidence_dir, character_rect=character_rect, onset_scene_id=onset_scene_id,
-            gl_replay=args.gl_replay, matrix=matrix,
+            gl_replay=args.gl_replay, matrix=matrix, click_builds=click_builds,
         )
 
     result["status"], result["reasons"] = overall_status_g(result)
