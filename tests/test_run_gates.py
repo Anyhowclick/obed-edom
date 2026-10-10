@@ -10,6 +10,9 @@ an events file and behaves per `STUB_MODES` (artifact/out-dir stem -> mode):
 - `report`  (P2) print a well-formed 15-finding report whose red set is `STUB_P2_RED[<out-dir name>]`
             and whose `Freeze bracket:` header names the arm's own flags (or `STUB_P2_FREEZE`);
 - `ignore-skip` / `lose-A` (probe) run every arm and record no skip / record the skip but drop arm A;
+- `g-fail` / `g-inconclusive` / `g-error` (probe `--pass G`) write a Pass G artifact with that status and exit 0;
+  `g-none` writes no artifact and exits 0; `g-exit1` writes a passing one and exits 1; `g-full` writes a full-run
+  (not Pass G) artifact whose status is pass;
 - `die`     kill its parent -- the per-run wrapper -- before the wrapper can write the status, as
             when a wrapper is killed or crashes mid-run;
 - `foreign` publish a status carrying another round's nonce, then kill the wrapper;
@@ -25,6 +28,10 @@ What is pinned here:
 - the S0 deck red arms (S2, plan §3.4 Q3): every `DECK_ARMS` entry goes through the same queue as a host
   red run on its deck's own `html-unmodified` export, after the P2 host red arms and before the P2 arms,
   is checked after the wait in the same order, and runs in the full tier only;
+- Pass G (owner decision 2026-10-10, plan §3.4 Q3): one `--pass G` probe run per fixture (P2 and D1-D6) goes through
+  the same queue after the deck red arms and before the P2 arms, full tier only, each with its own artifact under
+  `<outdir>`; a run passes only with this round's exit 0 and a Pass G artifact whose status is pass, and every other
+  outcome is counted FAILED (never pending);
 - the P2 arm list: no `--strip bridge@8` arm, `--skip-freeze-bracket` on every arm but the two
   positive freeze-bracket arms (and refused on those), and the `Freeze bracket:` header checked;
 - `--tier dev` runs the 1920x1080 + 1600x1000 host gates and three P2 arms, says DEV loudly and
@@ -95,6 +102,15 @@ event(f"probe {stem} viewport={arg('--viewport')} skip={arg('--skip-arms')} star
 event(f"probeargs {stem} fixture={arg('--fixture')} index={arg('--original-index')} argv={json.dumps(sys.argv[1:])}")
 mode = mode_of(stem)
 act(mode, artifact.with_suffix(""))
+if arg("--pass") == "G":
+    statuses = {"g-fail": "fail", "g-inconclusive": "inconclusive", "g-error": "error"}
+    g = {"kind": "live-continuity-probe-pass-g", "pass": "G", "status": statuses.get(mode, "pass"),
+         "reasons": [f"stub {mode}"] if mode in statuses else []}
+    if mode == "g-full":
+        g = {"kind": "live-continuity-probe", "status": "pass"}
+    if mode != "g-none":
+        artifact.write_text(json.dumps(g))
+    sys.exit(1 if mode == "g-exit1" else 0)
 given = (arg("--skip-arms") or "").split(",")
 skip = [] if mode == "ignore-skip" else [n for n in ("A", "B", "C", "V", "Voff", "attach") if n in given]
 d = {
@@ -352,7 +368,7 @@ def test_the_pattern_cache_is_prewarmed_and_verified_before_the_first_timed_run(
     events = gates["events"]()
     assert events[:2] == ["prewarm html-unmodified", "prewarm html-unmodified"], "the fill, then the verifying lookup"
     assert all(not e.startswith("prewarm") for e in events[2:])
-    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + 22 + 8
+    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + 22 + 7 + 8
     assert f"h264 pattern prewarm 46.0333s: encoded key={'k' * 64}" in done.stdout
     assert f"h264 pattern cache verified 46.0333s: hit key={'k' * 64} sha256={'s' * 64}" in done.stdout
     assert "cache hit" in gates["run"](outdir=gates["tmp"] / "out2").stdout
@@ -509,6 +525,8 @@ DECK_ARMS = [
     ("D6", "--strip bridge@2"), ("D6", "--strip retire@8"),
 ]
 DECK_RED_STEMS = [f"host-red{deck}{args.replace(' ', '')}" for deck, args in DECK_ARMS]
+PASSG_FIXTURES = ("P2", "D1", "D2", "D3", "D4", "D5", "D6")
+PASSG_STEMS = [f"passG-{name}" for name in PASSG_FIXTURES]
 ARMS = ("A", "B", "C", "V", "Voff", "attach")
 
 
@@ -617,7 +635,8 @@ def test_the_deck_red_arms_run_on_their_own_export_through_the_queue_in_order(ga
     p2_host_red = [s for s in starts if s.startswith("host-red--")]
     assert [s for s in starts if s.startswith("host-redD")] == DECK_RED_STEMS
     assert starts.index(DECK_RED_STEMS[0]) == starts.index(p2_host_red[-1]) + 1
-    assert starts.index(DECK_RED_STEMS[-1]) + 1 == next(i for i, s in enumerate(starts) if s.startswith("p2"))
+    assert starts.index(DECK_RED_STEMS[-1]) + 1 == starts.index(PASSG_STEMS[0]), "Pass G runs between them"
+    assert starts.index(DECK_RED_STEMS[-1]) < next(i for i, s in enumerate(starts) if s.startswith("p2"))
     args = _probe_args(events)
     for (deck, arm), stem in zip(DECK_ARMS, DECK_RED_STEMS, strict=True):
         fixture, index, argv = args[stem]
@@ -637,6 +656,80 @@ def test_known_bad_a_deck_red_run_that_writes_no_status_fails_closed(gates) -> N
     done = gates["run"](STUB_MODES=json.dumps({"host-redD4--core-variantwrong-instance": "die"}))
     assert "[HOST D4 --core-variant wrong-instance] no fresh status (missing) -> MISMATCH" in done.stdout, done.stdout
     assert "GATE FAILED: HOST red D4 --core-variant wrong-instance" in done.stdout
+
+
+def test_pass_g_runs_on_p2_and_every_deck_through_the_queue_in_order(gates) -> None:
+    """Owner decision 2026-10-10 (plan §3.4 Q3): Pass G moved into the round. One `--pass G` probe run per
+    fixture -- P2 on its player export with the unmodified index, each S0 deck on its own `html-unmodified`
+    export as both fixture and original index -- queued after the deck red arms and before the P2 arms, and
+    checked after the wait in the same order. Each run has its own artifact under <outdir> (the probe's
+    `run_scope` keys its private run folder by the artifact path), so no two runs share a folder."""
+    done = gates["run"](GATE_JOBS="1")
+    events = gates["events"]()
+    starts = [e.split()[1] for e in events if e.endswith(" start")]
+    assert [s for s in starts if s.startswith("passG-")] == PASSG_STEMS
+    first_p2 = next(i for i, s in enumerate(starts) if s.startswith("p2"))
+    assert starts.index(PASSG_STEMS[-1]) + 1 == first_p2
+    args = _probe_args(events)
+    artifacts = []
+    for name, stem in zip(PASSG_FIXTURES, PASSG_STEMS, strict=True):
+        fixture, index, argv = args[stem]
+        if name == "P2":
+            assert Path(fixture).parts[-2:] == ("html-adversarial", "html-player"), fixture
+            assert Path(index).parts[-3:] == ("html-adversarial", "html-unmodified", "index.html"), index
+        else:
+            assert Path(fixture).parts[-3:] == ("qual-decks", name, "html-unmodified"), fixture
+            assert index == f"{fixture}/index.html"
+        artifact = str(gates["out"].resolve() / f"{stem}.json")
+        assert argv == ["--fixture", fixture, "--original-index", index, "--pass", "G", "--artifact", artifact]
+        artifacts.append(artifact)
+    assert len(set(artifacts)) == len(PASSG_FIXTURES)
+    checks = [line for line in done.stdout.splitlines() if line.startswith("[PASSG ")]
+    assert checks == [f"[PASSG {name}] status=pass exit=0" for name in PASSG_FIXTURES], done.stdout
+    assert "GATE FAILED: PASSG" not in done.stdout
+    assert done.stdout.index("GATE FAILED: HOST red D6 --strip retire@8") < done.stdout.index("[PASSG P2]")
+    assert done.stdout.index("[PASSG D6]") < done.stdout.index("[P2 --wait-profile fast]")
+
+
+def test_known_bad_every_non_pass_pass_g_outcome_fails_the_round_and_is_counted(gates) -> None:
+    """Fail closed: fail, inconclusive, no artifact, a non-zero exit, a missing status, a status from another
+    round, and an artifact that is not a Pass G one each count as one GATE FAILED -- never pending."""
+    modes = {
+        "P2": "g-full", "D1": "g-fail", "D2": "g-inconclusive", "D3": "g-none", "D4": "g-exit1", "D5": "die",
+        "D6": "foreign",
+    }
+    done = gates["run"](STUB_MODES=json.dumps({f"passG-{name}": mode for name, mode in modes.items()}))
+    out = done.stdout
+    assert "[PASSG P2] status=pass exit=0" in out and "    not a Pass G artifact (pass=None)" in out, out
+    assert "[PASSG D1] status=fail exit=0" in out and "    stub g-fail" in out
+    assert "[PASSG D2] status=inconclusive exit=0" in out and "    stub g-inconclusive" in out
+    assert re.search(r"^\[PASSG D3\] no artifact \(.+\) exit=0$", out, re.M)
+    assert "[PASSG D4] status=pass exit=1" in out
+    assert re.search(r"^\[PASSG D5\] no artifact \(.+\) exit=missing$", out, re.M)
+    assert re.search(r"^\[PASSG D6\] no artifact \(.+\) exit=stale\(1-2-3 0\)$", out, re.M)
+    failed = [line for line in out.splitlines() if line.startswith("    GATE FAILED: PASSG ")]
+    assert failed == [f"    GATE FAILED: PASSG {name}" for name in PASSG_FIXTURES]
+    summary = re.search(r"^DONE tier=full failed=(\d+) pending=(\d+)$", out, re.M)
+    assert summary, out
+    assert int(summary.group(1)) == len([line for line in out.splitlines() if line.startswith("    GATE FAILED: ")])
+    assert summary.group(2) == "0"
+    assert "PENDING REGISTRATION: PASSG" not in out
+    assert done.returncode == 1
+
+
+def test_known_bad_one_errored_pass_g_adds_exactly_one_failure_to_the_summary(gates) -> None:
+    """The positive control is the same round with every Pass G run passing."""
+    def failed(stdout: str) -> int:
+        summary = re.search(r"^DONE tier=full failed=(\d+) pending=0$", stdout, re.M)
+        assert summary, stdout
+        return int(summary.group(1))
+
+    good = gates["run"](outdir=gates["tmp"] / "good")
+    bad = gates["run"](outdir=gates["tmp"] / "bad", STUB_MODES=json.dumps({"passG-D3": "g-error"}))
+    assert "GATE FAILED: PASSG" not in good.stdout
+    assert "[PASSG D3] status=error exit=0" in bad.stdout and "    stub g-error" in bad.stdout
+    assert [line for line in bad.stdout.splitlines() if "GATE FAILED: PASSG" in line] == ["    GATE FAILED: PASSG D3"]
+    assert failed(bad.stdout) == failed(good.stdout) + 1
 
 
 def test_the_full_round_p2_arm_list(gates) -> None:
@@ -715,6 +808,7 @@ def test_the_dev_tier_runs_its_subset_and_a_pass_exits_10(gates) -> None:
     events = gates["events"]()
     assert _probe_runs(events) == {"host-1920x1080": ("1920x1080", "C"), "host-1600x1000": ("1600x1000", "attach,B,Voff")}
     assert _p2_argvs(events) == DEV_P2_ARMS
+    assert not [e for e in events if e.startswith("probe passG-")] and "[PASSG" not in done.stdout, "Pass G is full tier only"
     assert done.stdout.count("DEV TIER -- NOT A QUALIFICATION PASS") == 2, done.stdout
     assert done.stdout.rstrip().splitlines()[-1] == "## DEV TIER -- NOT A QUALIFICATION PASS (exit 10) ##"
     assert "DONE tier=dev failed=0 pending=0" in done.stdout

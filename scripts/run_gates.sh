@@ -1,6 +1,6 @@
 #!/bin/zsh
-# usage: run_gates.sh <gate-worktree> <outdir> [--allow-record] [--tier dev|full]   (runs the host gates, host red arms
-# and P2 arms through one queue, GATE_JOBS at a time (1..5, default 3; 1 = serial), from a clean pinned worktree, into a
+# usage: run_gates.sh <gate-worktree> <outdir> [--allow-record] [--tier dev|full]   (runs the host gates, host red arms,
+# Pass G and P2 arms through one queue, GATE_JOBS at a time (1..5, default 3; 1 = serial), from a clean pinned worktree, into a
 # missing or empty <outdir>). --tier full (default) runs everything; --tier dev runs the 1920x1080 and 1600x1000 host
 # gates and the P2 fast, --disable-bridge34 and --gl-replay auto arms, and is never a qualification pass.
 # GATE_JOBS above 3 is allowed but loudly unqualified. A round refuses to start when the 1-minute load average exceeds
@@ -57,6 +57,10 @@ DECK_ARMS=(
   "D6 --strip bridge@2" "D6 --strip retire@8"
 )
 [[ $TIER == full ]] || DECK_ARMS=()
+# Pass G (plan §3.4 Q3; owner 2026-10-10): the plan-derived go-to gate, armed + null control, on P2 and each S0 deck.
+# Full tier only.
+PASSG_FIXTURES=(P2 D1 D2 D3 D4 D5 D6)
+[[ $TIER == full ]] || PASSG_FIXTURES=()
 # P2 arms: p2 <tier> "<expected red>" "<expected inconclusive>" <args>; tier dev runs in both tiers, full only in full.
 # --skip-freeze-bracket goes on every arm but the two positive bracket arms, which must run it. As in P2 itself, the flag
 # is refused on any arm that is not a red arm (--core-variant, --strip, --disable-bridge34) unless it is a DOM
@@ -219,7 +223,7 @@ print(f"    expected red: {sorted(want) or '{}'}; expected inconclusive: {sorted
 sys.exit(0 if ok else 1)
 PYEOF
 }
-# Every run (host gates, host red arms, P2 arms) goes through one queue, GATE_JOBS at a time (1..5, default 3;
+# Every run (host gates, host red arms, Pass G, P2 arms) goes through one queue, GATE_JOBS at a time (1..5, default 3;
 # GATE_JOBS=1 runs them serially), launched in the listed order. <outdir> starts empty; each run runs in its own process
 # group and atomically writes <name>.rc as "<round nonce> <exit>"; a missing .rc or one from another round fails its
 # check. The checks run and print in the listed order once every run has finished. Exit, HUP, INT or TERM stops the running groups (TERM, then KILL after 5 s).
@@ -339,6 +343,25 @@ PYEOF
 }
 for A in $HOST_RED_ARMS; do run_host_red ${=A}; done
 for DA in "${DECK_ARMS[@]}"; do d=${DA%% *}; A=${DA#* }; HOST_DECK=$d run_host_red ${=A}; done
+# A Pass G run passes only with this round's exit 0 and a Pass G artifact whose top-level status is pass; anything else
+# (fail, inconclusive, error, no artifact, a missing or stale status) is FAILED, never pending.
+run_passg(){ fix=$F/html-player; idx=$F/html-unmodified/index.html
+  if [[ $1 != P2 ]]; then fix=$Q/$1/html-unmodified; idx=$fix/index.html; fi
+  queue $O/passG-$1 $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $idx --pass G --artifact $O/passG-$1.json; }
+check_passg(){ $PY - "$O/passG-$1.json" "$1" "$(status_of $O/passG-$1)" <<'PYEOF' || fail "PASSG $1"
+import json,sys
+path,name,rc=sys.argv[1:]
+try: d=json.load(open(path))
+except Exception as e: print(f"[PASSG {name}] no artifact ({e}) exit={rc}"); sys.exit(1)
+d=d if isinstance(d,dict) else {}
+print(f"[PASSG {name}] status={d.get('status')} exit={rc}")
+if d.get("pass")!="G": print(f"    not a Pass G artifact (pass={d.get('pass')!r})")
+for r in d.get("reasons") or []: print(f"    {r}")
+if d.get("error"): print(f"    error: {d['error']}")
+sys.exit(0 if rc=="0" and d.get("pass")=="G" and d.get("status")=="pass" else 1)
+PYEOF
+}
+for P in $PASSG_FIXTURES; do run_passg $P; done
 # Each P2 arm runs in its own --out-dir.
 run_p2(){ shift 2; n=$(echo "$*" | tr -d ' ')
   queue "$O/p2$n" $PY scripts/p2_recovery_html_adversarial.py --reuse-export --disposable --out-dir "$O/p2$n" "$@"; }
@@ -348,6 +371,7 @@ wait
 for V in $HOST_VIEWPORTS; do check_host $V; done
 for A in $HOST_RED_ARMS; do check_host_red ${=A}; tally $? "HOST red $A"; done
 for DA in "${DECK_ARMS[@]}"; do d=${DA%% *}; A=${DA#* }; HOST_DECK=$d check_host_red ${=A}; tally $? "HOST red $d $A"; done
+for P in $PASSG_FIXTURES; do check_passg $P; done
 for A in "${P2_ARMS[@]}"; do check_p2 "${(@Q)${(z)A}}"; done
 $PY -c "from obed_edom.live_continuity_js import js_sha256; print('runtime sha at end', js_sha256())"
 pgrep -fl obed-live-chrome | cut -c1-80 | head -2

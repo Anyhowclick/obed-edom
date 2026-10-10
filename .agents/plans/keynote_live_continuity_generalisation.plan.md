@@ -238,6 +238,8 @@ here, so the §3.4 round runs once.
 
 Q3 amendment (owner 2026-10-10): Pass G no-consumption (destination `GOTO_CONSUMPTION_CHECK_TO` only) detects consumption by the post-burst settled position: with k = the destination's onset scene and L = its leading `automaticPlay` events, `IdleAtInitialState` at k when L = 0, else `IdleAtFinalState` at k+L-1 with `nextSceneId` k+L, still on the destination slide. The execute log is a host-vs-JSON agreement check: `autoPlayRunKinds` equals those events' first-effect names, `autoPlayFired` iff L > 0, no `autoPlayDeferredReason` (else inconclusive). A destination parsed as having no click-driven builds (nested effects walked) scores only that half, with the pixel half n/a. Unreadable slide JSON, a click event with no effects, or a leading automatic transition stays inconclusive.
 
+Q3 Pass G runs inside `run_gates.sh` (owner 2026-10-10): full tier, one queued `--pass G` run each on P2 and D1–D6, a pass only on exit 0 and artifact status `pass`.
+
 Gate record: `.agents/reviews/continuity-generalisation/gates-r1.md`. The gate commit keeps in the allowlist only the S2
 shas of P2 off/on, p2-loop off/on, and the decks that passed Q3+Q7. The others are removed before the PR is offered.
 
