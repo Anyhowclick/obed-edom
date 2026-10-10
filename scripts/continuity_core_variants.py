@@ -21,12 +21,16 @@ if str(REPO / "src") not in sys.path:
 
 from obed_edom.live_continuity_js import PRESERVE_CORE_JS  # noqa: E402
 
-VARIANTS: tuple[str, ...] = ("stash-any", "wrong-instance", "fifo-reuse")
+VARIANTS: tuple[str, ...] = ("stash-any", "wrong-instance", "fifo-reuse", "linear-bridge")
 
 _TRANSFORMS: dict[str, tuple[str, str]] = {
     "stash-any": ("    if (!movieAssetKey(src)) return;\n", ""),
     "wrong-instance": ("const cand = q.shift();", "const cand = q.pop();"),
     "fifo-reuse": ("const cand = q.shift();", "const cand = q.shift();"),
+    "linear-bridge": (
+        "const progress = easeInEaseOut((performance.now() - started) / (1000 * boundary.durationSeconds));",
+        "const progress = Math.min(1, Math.max(0, (performance.now() - started) / (1000 * boundary.durationSeconds)));",
+    ),
 }
 
 
