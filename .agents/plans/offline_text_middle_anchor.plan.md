@@ -122,4 +122,4 @@ See the todos above for the actionable record. Narrative and evidence live in th
 (this session's scratchpad): `dh_middle_analysis.md` and `dh_middle_review.md` (+ `adv/`). Implementation
 landed before the whole-deck rollout on `codex/resizer-offline-flip-gate`. `OBED_OFFLINE_TEXT` is now
 default-on; explicit `off`/`0`/`false`/`no` remain the production kill switch. Final evidence and the
-owner-approved acceptance bar are recorded in `cg_resizer.plan.md`.
+owner-approved acceptance bar are recorded in SKILL.md (bank `output/bank/2026-09-21/text-mask-default-flip/`).
