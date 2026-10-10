@@ -2162,42 +2162,57 @@ def retire_instance_ids(retire: dict[str, Any]) -> set[str]:
     }
 
 
-def foreign_decoders(samples: Any, ids: Collection[str]) -> set[Any]:
-    """The `elId`s the retained samples always stamp (`instance`) with an objectId outside `ids`:
-    another instance's decoder. Nothing is foreign without `ids` or samples."""
+def instance_decoders(samples: Any, ids: Collection[str]) -> tuple[set[Any], set[Any]]:
+    """(linked, foreign) `elId`s from the retained samples' `instance` stamps: linked when ever
+    stamped with an objectId in `ids`, foreign when always stamped with another. Neither without
+    `ids` or samples."""
     if not ids or not isinstance(samples, list):
-        return set()
+        return set(), set()
     stamps: dict[Any, set[str | None]] = {}
     for row in samples:
         for v in (row.get("videos") or []) if isinstance(row, dict) else []:
             if isinstance(v, dict) and v.get("elId") is not None:
                 stamp = v.get("instance")
                 stamps.setdefault(v["elId"], set()).add(stamp.lower() if isinstance(stamp, str) and stamp else None)
-    return {el for el, seen in stamps.items() if None not in seen and not seen & set(ids)}
+    linked = {el for el, seen in stamps.items() if seen & set(ids)}
+    return linked, {el for el, seen in stamps.items() if el not in linked and None not in seen}
 
 
-def bound_to_instances(detail: dict[str, Any], ids: Collection[str], foreign: Collection[Any] = ()) -> bool:
-    """Whether a core note or pool entry may concern the instance pair `ids`: its objectId stamp
-    (`instance`, or a carry entry's `src`/`dst`) names one of them, or, unstamped, it names a
-    decoder that is not all `foreign`. Unattributable is bound (fail closed)."""
-    owners = {detail[f].lower() for f in ("instance", "src", "dst") if isinstance(detail.get(f), str) and detail[f]}
-    if owners and ids:
-        return bool(owners & set(ids))
+def instance_stamps(detail: dict[str, Any]) -> set[str]:
+    """A core note's or pool entry's lowercased objectId stamps (`instance`, a carry's `src`/`dst`)."""
+    return {detail[f].lower() for f in ("instance", "src", "dst") if isinstance(detail.get(f), str) and detail[f]}
+
+
+def instance_owner(
+    detail: dict[str, Any], ids: Collection[str], linked: Collection[Any] = (), foreign: Collection[Any] = (),
+) -> str:
+    """Whom a core note or pool entry is proven to concern, against the instance pair `ids` and
+    the decoders `instance_decoders` ties to it (`linked`) or to other instances (`foreign`):
+    "foreign" when its stamps name only other instances (unstamped: every decoder is `foreign`)
+    and no decoder is `linked`; "target" when its stamps name only the pair (unstamped: a decoder
+    is `linked`) and no decoder is `foreign`; else "unknown" (unattributable or conflicting)."""
+    owners = instance_stamps(detail)
     elements = [detail.get(f) for f in ("elId", "newElId", "oldElId")] + list(detail.get("elIds") or [])
     elements = [el for el in elements if el is not None]
-    return not elements or not all(el in foreign for el in elements)
+    tied = any(el in linked for el in elements)
+    elsewhere = bool(owners and ids and not owners & set(ids)) if owners else bool(elements) and all(el in foreign for el in elements)
+    if elsewhere:
+        return "unknown" if tied else "foreign"
+    if (owners <= set(ids) if owners else tied) and not any(el in foreign for el in elements):
+        return "target"
+    return "unknown"
 
 
 def score_refusal(
     sample: Any, retire: dict[str, Any], runtime_installed: bool, handed_back: Collection[Any] = (),
-    foreign: Collection[Any] = (),
+    foreign: Collection[Any] = (), linked: Collection[Any] = (),
 ) -> dict[str, Any]:
     """The POSITIVE half of a refused boundary: on the settled destination slide the
     retired movie is back under the raw player -- no painting `<video>` over its
     authored rect other than the raw player's own element for it (`handed_back`: its
     `__obedElId`s, proven by `score_raw_handback`) or another instance's decoder (`foreign`,
-    from `foreign_decoders`), and nothing pooled or preserved for its asset that is bound to
-    the retired pair (`bound_to_instances`). "Did not continue" on its own is vacuous, so every
+    from `instance_decoders`), and nothing pooled or preserved for its asset that is not proven
+    another instance's (`instance_owner`). "Did not continue" on its own is vacuous, so every
     way of not knowing is a False here, never a pass."""
     if not isinstance(sample, dict):
         return {"verdict": False, "reason": "no refusal evidence was sampled on the destination slide"}
@@ -2222,7 +2237,7 @@ def score_refusal(
         pooled = [
             entry for entry in snapshot
             if isinstance(entry, dict) and matches_asset_keys(entry.get("key"), retire["assetKeys"])
-            and bound_to_instances(entry, ids, foreign)
+            and instance_owner(entry, ids, linked, foreign) != "foreign"
         ]
     reason = None
     if over:
@@ -2760,8 +2775,9 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
     `retire-boundary` (key, elIds, atScene) from the keep-warm sweep of decoders pooled before
     the zone, and no carry note (`CARRY_EVENT_KINDS`) for its key or elements in that zone. Every
     note, pool entry and painter is bound to the retired instance pair, never asset-wide
-    (`bound_to_instances`, `foreign_decoders`): a stamped refusal note must name its source
-    instance, and a same-asset sibling's notes and decoders never count. The
+    (`instance_owner`, `instance_decoders`): a refusal note counts only when proven the pair's
+    and, stamped, names its source instance; adverse evidence is set aside only when proven
+    another instance's, and a decoder tied to the pair outranks a foreign stamp. The
     zone is placed in page time from the samples (`retire_zone_times`) when the notes carry `t`,
     never by the page hash. Unreadable evidence is INCONCLUSIVE."""
     if not isinstance(sample, dict):
@@ -2773,16 +2789,16 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
     except VisiblePassError as exc:
         return _inconclusive(str(exc))
     ids = retire_instance_ids(spec)
-    foreign = foreign_decoders(samples, ids)
+    linked, foreign = instance_decoders(samples, ids)
     handback = score_raw_handback(samples, spec)
     if handback["verdict"] is False:
-        return {**score_refusal(sample, spec, runtime_installed, foreign=foreign), "verdict": False, "handback": handback,
-                "reason": handback["reason"]}
+        return {**score_refusal(sample, spec, runtime_installed, foreign=foreign, linked=linked), "verdict": False,
+                "handback": handback, "reason": handback["reason"]}
     if handback["verdict"] is None:
         return _inconclusive(f"hand-back: {handback['reason']}", handback=handback)
     handed_back = handback.get("elIds") or ()
     if not runtime_installed:
-        return {**score_refusal(sample, spec, runtime_installed, handed_back, foreign), "handback": handback}
+        return {**score_refusal(sample, spec, runtime_installed, handed_back, foreign, linked), "handback": handback}
     events = sample.get("coreEvents")
     if not isinstance(sample.get("poolSnapshot"), list):
         return _inconclusive(f"preserve snapshot is unreadable: {sample.get('poolSnapshot')!r}")
@@ -2791,6 +2807,9 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
     movie_key, scene = spec.get("movieKey"), spec["atScene"]
     if movie_key is None:
         return _inconclusive("the retire verdict is bound to no runtime movie key")
+    src_ids = {spec["srcObjectId"].lower()} if isinstance(spec.get("srcObjectId"), str) and spec["srcObjectId"] else set()
+    if not src_ids:
+        return _inconclusive("the retire verdict names no source instance")
     zone_end = spec["zoneUntilScene"] - 1 if spec.get("zoneUntilScene") is not None else math.inf
     timed = retire_zone_times(samples, scene, spec.get("zoneUntilScene"))
 
@@ -2809,11 +2828,10 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
         key = detail.get("key")
         return key == movie_key or (isinstance(key, str) and matches_asset_keys(key, spec["assetKeys"]))
 
-    src_ids = {spec["srcObjectId"].lower()} if isinstance(spec.get("srcObjectId"), str) and spec["srcObjectId"] else set()
     details = [
         (e, d) for e in events
         for d in [e.get("detail") if isinstance(e.get("detail"), dict) else {}]
-        if bound_to_instances(d, ids, foreign)
+        if instance_owner(d, ids, linked, foreign) != "foreign"
     ]
     el_ids = {
         value for _, d in details if keyed(d)
@@ -2821,7 +2839,8 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
     }
     notes = [
         {"kind": e.get("kind"), **d} for e, d in details
-        if d.get("key") == movie_key and bound_to_instances(d, src_ids) and (
+        if d.get("key") == movie_key and instance_owner(d, ids, linked, foreign) == "target"
+        and (not instance_stamps(d) or instance_stamps(d) & src_ids) and (
             (e.get("kind") == "retire-boundary" and d.get("atScene") == scene and isinstance(d.get("elIds"), list))
             or (
                 e.get("kind") == "preserve-refused" and isinstance(d.get("via"), str) and d["via"]
@@ -2835,7 +2854,7 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
         and (keyed(d) or any(d.get(f) in el_ids for f in ("elId", "newElId") if d.get(f) is not None))
         and event_in_zone(e, _event_scene_of(e), unplaced=True)
     ]
-    scored = score_refusal(sample, spec, runtime_installed, handed_back, foreign)
+    scored = score_refusal(sample, spec, runtime_installed, handed_back, foreign, linked)
     reasons = [scored["reason"]] if scored.get("reason") else []
     if not notes:
         reasons.append(f"no preserve-refused/retire-boundary note for {movie_key} in scenes [{scene - 1}, {zone_end})")

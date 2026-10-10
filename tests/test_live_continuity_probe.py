@@ -6774,6 +6774,7 @@ def _p2_facts(gl: bool = False) -> dict[str, Any]:
 
 
 P2_SLIDE2_DOM_ID = "F9AFED1B-E2D7-47D4-942E-14992C808383-video"
+P2_SLIDE1_OBJECT_ID = "6BB39942-6C61-4763-839D-777C09E7E594"
 
 
 def _spec(facts: dict[str, Any], spec_id: str) -> dict[str, Any]:
@@ -7134,10 +7135,11 @@ def _handback_samples(
     return rows
 
 
-RETIRE_NOTE = _ev("retire-boundary", key="movie1", elIds=[3], atScene=2, sceneHash="#2")
-# Live gate r1 (331f944d): what today's core emits on P2 -- one preserve-refused at the transition
-# scene and no retire-boundary (nothing was pooled before the zone for the sweep to retire).
-REFUSED_NOTE = _ev("preserve-refused", key="movie1", scene=1, via="stash", sceneHash="#1")
+RETIRE_NOTE = _ev("retire-boundary", key="movie1", elIds=[3], atScene=2, sceneHash="#2", instance=P2_SLIDE1_OBJECT_ID)
+# Live gate r1 (331f944d): what the core emits on P2 -- one preserve-refused at the transition
+# scene and no retire-boundary (nothing was pooled before the zone for the sweep to retire). Both
+# notes carry the source instance's stamp, as the core stamps them since S2.
+REFUSED_NOTE = _ev("preserve-refused", key="movie1", scene=1, via="stash", sceneHash="#1", instance=P2_SLIDE1_OBJECT_ID)
 
 
 class TestRetireVerdict:
@@ -7165,11 +7167,15 @@ class TestRetireVerdict:
         assert scored["handback"]["verdict"] is True
 
     @pytest.mark.parametrize("notes", [
-        (), (_ev("retire-boundary", key="movie1", elIds=[3], atScene=6),), (_ev("retire-boundary", key="movie2", elIds=[3], atScene=2),),
-        (_ev("retire-boundary", key="movie1", atScene=2),), (_ev("preserve-refused", key="movie1", scene=0, via="stash"),),
-        (_ev("preserve-refused", key="movie2", scene=1, via="stash"),), (_ev("preserve-refused", key="movie1", scene=1),),
-        (_ev("preserve-refused", key="movie1", scene=None, via="stash"),),
-        (_ev("preserve-refused", key="movie1", scene=5, via="stash"),), (_ev("preserve-refused", key="movie1", scene=7, via="stash"),),
+        (), (_ev("retire-boundary", key="movie1", elIds=[3], atScene=6, instance=P2_SLIDE1_OBJECT_ID),),
+        (_ev("retire-boundary", key="movie2", elIds=[3], atScene=2, instance=P2_SLIDE1_OBJECT_ID),),
+        (_ev("retire-boundary", key="movie1", atScene=2, instance=P2_SLIDE1_OBJECT_ID),),
+        (_ev("preserve-refused", key="movie1", scene=0, via="stash", instance=P2_SLIDE1_OBJECT_ID),),
+        (_ev("preserve-refused", key="movie2", scene=1, via="stash", instance=P2_SLIDE1_OBJECT_ID),),
+        (_ev("preserve-refused", key="movie1", scene=1, instance=P2_SLIDE1_OBJECT_ID),),
+        (_ev("preserve-refused", key="movie1", scene=None, via="stash", instance=P2_SLIDE1_OBJECT_ID),),
+        (_ev("preserve-refused", key="movie1", scene=5, via="stash", instance=P2_SLIDE1_OBJECT_ID),),
+        (_ev("preserve-refused", key="movie1", scene=7, via="stash", instance=P2_SLIDE1_OBJECT_ID),),
     ])
     def test_known_bad_no_matching_refusal_note_in_the_zone_is_red(self, notes: tuple[Any, ...]) -> None:
         """The zone is [atScene - 1, next slide's transition scene): a later note of the same key does not count."""
@@ -7234,6 +7240,11 @@ class TestRetireVerdict:
 
     def test_a_spec_without_its_dom_id_is_inconclusive(self) -> None:
         spec = {k: v for k, v in _spec(_p2_facts(), P2_RETIRE12).items() if k != "dstDomId"}
+        assert probe.score_retire(_retire_read((RETIRE_NOTE,)), spec, True, _handback_samples())["verdict"] is None
+
+    def test_a_spec_without_its_source_instance_is_inconclusive(self) -> None:
+        """No source objectId: no refusal note can be proven the retired instance's (Astra S2 r2 #3)."""
+        spec = dict(_spec(_p2_facts(), P2_RETIRE12), srcObjectId=None)
         assert probe.score_retire(_retire_read((RETIRE_NOTE,)), spec, True, _handback_samples())["verdict"] is None
 
     def test_the_observer_retains_the_core_events(self) -> None:
@@ -7330,9 +7341,14 @@ class TestRetireIsInstanceBound:
     refusal note must not stand in for the retired instance's. Snapshots, notes and carry events
     bind to the retired pair's objectIds (`srcObjectId`/`dstObjectId`) and, for an unstamped note,
     to the decoder ids the retained samples stamp with them; anything unattributable still counts
-    (fail closed)."""
+    (fail closed).
+
+    Astra S2 r2 #3: ownership is TARGET, FOREIGN or UNKNOWN (unattributable or conflicting). A
+    decoder the samples tie to the retired pair outranks a foreign stamp, so only proven-FOREIGN
+    evidence is set aside, and only proven-TARGET notes prove the refusal."""
 
     SIBLING_EL = 9
+    RETIRING_EL = 3
 
     def _spec(self) -> dict[str, Any]:
         """P2's refused 1->2 pin, on a destination that also holds a second instance of its asset
@@ -7346,9 +7362,17 @@ class TestRetireIsInstanceBound:
 
     def _samples(self) -> list[dict[str, Any]]:
         """The P2 hand-back rows plus the sibling's carried decoder, stamped with its own source
-        instance on slide 1 and its destination instance once the pin has landed (`hold`)."""
+        instance on slide 1 and its destination instance once the pin has landed (`hold`), and the
+        retiring decoder, stamped with the retired source instance on slide 1."""
         rows = _handback_samples()
+        src, _ = self._ids()
         for row in rows:
+            if row["scene"] < 2:
+                retiring = video(
+                    id=self.RETIRING_EL, el_id=self.RETIRING_EL, t=row["t"], scene=row["scene"], current_time=row["t"] / 1000,
+                    rect=dict(self._spec()["rects"][0]),
+                )
+                row["videos"].append(_dom(retiring, f"{src}-video", instance=src))
             sibling = video(
                 id=self.SIBLING_EL, el_id=self.SIBLING_EL, t=row["t"], scene=row["scene"], current_time=row["t"] / 1000,
                 rect=dict(OTHER_INSTANCE),
@@ -7398,8 +7422,66 @@ class TestRetireIsInstanceBound:
     def test_the_retired_instances_own_refusal_notes_qualify(self) -> None:
         src, dst = self._ids()
         reuse_refused = _ev("preserve-refused", key="movie1", scene=1, via="reuse", sceneHash="#1", instance=dst, src=src, reason="absent")
-        for note in (self._note(src), _ev("preserve-refused", key="movie1", scene=1, via="stash", sceneHash="#1", instance=src), reuse_refused):
+        unstamped_on_the_retiring_decoder = _ev("retire-boundary", key="movie1", elIds=[self.RETIRING_EL], atScene=2, sceneHash="#2")
+        for note in (
+            self._note(src), _ev("preserve-refused", key="movie1", scene=1, via="stash", sceneHash="#1", instance=src), reuse_refused,
+            unstamped_on_the_retiring_decoder,
+        ):
             assert self._score((note,))["verdict"] is True
+
+    @pytest.mark.parametrize("note", [
+        pytest.param(_ev("preserve-refused", key="movie1", scene=1, via="stash", sceneHash="#1"), id="unstamped-no-decoders"),
+        pytest.param(_ev("retire-boundary", key="movie1", elIds=[42], atScene=2, sceneHash="#2"), id="unstamped-unknown-decoder"),
+        pytest.param(_ev("retire-boundary", key="movie1", elIds=[RETIRING_EL, SIBLING_EL], atScene=2, sceneHash="#2"),
+                     id="unstamped-decoders-of-both-instances"),
+        pytest.param(_ev("retire-boundary", key="movie1", elIds=[RETIRING_EL], atScene=2, sceneHash="#2", instance=SIBLING_SRC),
+                     id="sibling-stamp-on-the-retiring-decoder"),
+        pytest.param(_ev("preserve-refused", key="movie1", scene=1, via="reuse", sceneHash="#1", instance=P2_SLIDE1_OBJECT_ID,
+                         src=SIBLING_SRC, reason="absent"), id="stamps-of-both-instances"),
+    ])
+    def test_known_bad_an_unattributed_or_conflicting_refusal_note_is_no_proof(self, note: dict[str, Any]) -> None:
+        """Astra S2 r2 #3: "cannot exclude this note" is not proof the retired instance was refused.
+        Only a note whose stamps or decoders tie it to the retired pair, and nothing ties elsewhere,
+        satisfies the positive requirement."""
+        scored = self._score((note,), pool=[], painting=[])
+        assert scored["verdict"] is False and scored["reason"].startswith("no preserve-refused/retire-boundary note")
+
+    def _runtime_refusal(self, src: str, dst: str, el: int) -> tuple[dict[str, Any], ...]:
+        """What the core (8faec19a) notes when it refuses a carry at runtime: `preserve-refused`
+        via reuse, then the `retire-boundary` retiring its source candidates at the boundary's scene."""
+        return (
+            _ev("preserve-refused", key="movie1", scene=1, via="reuse", sceneHash="#1", instance=dst, src=src, reason="ambiguous",
+                atScene=2, candidates=[el]),
+            _ev("retire-boundary", key="movie1", elIds=[el], atScene=2, sceneHash="#2", instance=src),
+        )
+
+    def test_a_runtime_refusal_of_one_instance_never_satisfies_anothers_retire(self) -> None:
+        """Two same-asset instances refused at the same scene: each retire counts only its own
+        runtime refusal notes, attributed by their `instance`/`src` stamps and `elIds`."""
+        src, dst = self._ids()
+        sibling = self._runtime_refusal(SIBLING_SRC, SIBLING_DST, self.SIBLING_EL)
+        alone = self._score(sibling, pool=[], painting=[])
+        assert alone["verdict"] is False and alone["reason"].startswith("no preserve-refused/retire-boundary note")
+        own = self._runtime_refusal(src, dst, self.RETIRING_EL)
+        both = self._score((*sibling, *own), pool=[], painting=[])
+        assert both["verdict"] is True, both["reason"]
+        assert [n["instance"] for n in both["retireNotes"]] == [dst, src]
+
+    def test_known_bad_a_foreign_stamped_carry_of_the_retiring_decoder_stays_red(self) -> None:
+        """Astra S2 r2 #3: a wrong-instance reuse names the sibling's pair, but its `oldElId` is the
+        decoder the samples stamp with the retired source. The decoder outranks the stamp."""
+        src, _ = self._ids()
+        reuse = _ev("reuse-decoder", key="untitled.mov", newElId=7, oldElId=self.RETIRING_EL, atScene=2,
+                    src=SIBLING_SRC, dst=SIBLING_DST, sceneHash="#2")
+        scored = self._score((self._note(src), *self._sibling_carry(), reuse))
+        assert scored["verdict"] is False and scored["carryNotes"] == [reuse]
+
+    def test_known_bad_the_retiring_decoder_pooled_under_a_foreign_stamp_stays_red(self) -> None:
+        """Astra S2 r2 #3: a pool entry restamped to the sibling still holds the retiring decoder."""
+        src, _ = self._ids()
+        restamped = {"key": "untitled.mov", "movieKey": "movie1", "instance": SIBLING_DST, "elId": self.RETIRING_EL}
+        scored = self._score((self._note(src),), pool=[*self._sibling_pool(), restamped])
+        assert scored["verdict"] is False and scored["pooled"] == [restamped]
 
     def test_known_bad_the_retired_pair_carried_is_still_red(self) -> None:
         src, dst = self._ids()
