@@ -248,8 +248,8 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
       if (/^\d$/.test(event.key)) { event.preventDefault(); setDigits((value) => (value + event.key).slice(0, 6)); }
       else if (event.key === "Enter" && digits) { event.preventDefault(); goTo(digits); setDigits(""); }
       else if (event.key === "Escape") setDigits("");
-      else if (event.key === "ArrowLeft" && !digits) { event.preventDefault(); previous(); }
-      else if ((event.key === "ArrowRight" || (event.key === " " && !button)) && !digits) { event.preventDefault(); void send("advance"); }
+      else if ((event.key === "ArrowLeft" || event.key === "PageUp") && !digits) { event.preventDefault(); previous(); }
+      else if ((event.key === "ArrowRight" || event.key === "PageDown" || ((event.key === " " || event.key === "Enter") && !button)) && !digits) { event.preventDefault(); void send("advance"); }
     }
     window.addEventListener("keydown", keydown);
     return () => window.removeEventListener("keydown", keydown);
@@ -337,13 +337,13 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
             <div className="live-monitor">
               <Still slide={current} />
               <div className="live-transport" aria-label="Slide navigation">
-                <button type="button" aria-label="Previous slide" disabled={!!backReason} title={backReason || "Previous slide (←)"} onClick={previous}><IconChevronLeft /></button>
-                <button type="button" aria-label="Advance" disabled={!!disabledReason("advance")} title={disabledReason("advance") || "Next build or slide (→ / Space)"} onClick={() => void send("advance")}><IconChevronLeft className="flip" /></button>
+                <button type="button" aria-label="Previous slide" disabled={!!backReason} title={backReason || "Previous slide (← / Page Up)"} onClick={previous}><IconChevronLeft /></button>
+                <button type="button" aria-label="Advance" disabled={!!disabledReason("advance")} title={disabledReason("advance") || "Next build or slide (→ / Space / Enter / Page Down)"} onClick={() => void send("advance")}><IconChevronLeft className="flip" /></button>
               </div>
             </div>
             <p className="live-slide-position">Slide {snapshot.originalSlide ?? "unknown"} · Build {snapshot.buildIndex ?? "unknown"}</p>
             {snapshot.autoPlayDeferred && <p className="note" aria-live="polite">{snapshot.autoPlayDeferred}</p>}
-            <p className="note live-keyboard-hint">← Previous slide · → Next build or slide</p>
+            <p className="note live-keyboard-hint">← / Page Up Previous slide · → / Space / Enter / Page Down Next build or slide</p>
             <form className="live-jump" onSubmit={(event) => { event.preventDefault(); goTo(target); }}>
               <label htmlFor="live-slide-target">Go to slide</label><input id="live-slide-target" inputMode="numeric" value={target} onChange={(event) => setTarget(event.target.value)} /><button className="btn secondary" disabled={!!disabledReason("goTo")} title={disabledReason("goTo")}>Go</button>
             </form>
