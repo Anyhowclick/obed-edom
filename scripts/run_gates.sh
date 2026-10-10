@@ -412,7 +412,7 @@ def entries():
         yield s,sess
         for dest in sess.get("destinations") or []:
             dest=dest if isinstance(dest,dict) else {}
-            yield f"{s} goTo {dest.get('fromOrdinal')}->{dest.get('toOrdinal')} advance",dest.get("advanceCarry")
+            yield f"{s} leg G{dest.get('fromOrdinal')}-{dest.get('toOrdinal')}-{dest.get('advanceTo')}",dest.get("advanceCarry")
 def run_of(p): r=p.get("longestRun"); return r.get("frames") if isinstance(r,dict) else r
 with open(sink,"a") as out:
     for where,e in entries():
@@ -471,19 +471,18 @@ elif unknown: problems.append(f"unknown {unknown}")
 if d.get("status")!="pass": problems.append(f"status {d.get('status')!r} != 'pass'")
 if rc!="0": problems.append(f"exit {rc} != 0")
 if floor is not None:
-    legs={}
+    runs={}
     for dest in (d.get("armed") or {}).get("destinations") or [] if isinstance(d.get("armed"),dict) else []:
-        ac=(dest or {}).get("advanceCarry") if isinstance(dest,dict) else None
-        for vid,v in ((ac or {}).get("verdicts") or {}).items() if isinstance(ac,dict) else []:
-            if isinstance(v,dict) and isinstance(v.get("paint"),dict): legs.setdefault(vid,[]).append(v["paint"])
+        if not isinstance(dest,dict) or not isinstance(dest.get("advanceCarry"),dict): continue
+        case=f"G{dest.get('fromOrdinal')}-{dest.get('toOrdinal')}-{dest.get('advanceTo')}"
+        for vid,v in (dest["advanceCarry"].get("verdicts") or {}).items():
+            if isinstance(v,dict) and isinstance(v.get("paint"),dict): runs[f"{case}:{vid}"]=v["paint"].get("longestRun")
     if not isinstance(floor,int) or isinstance(floor,bool): problems.append(f"paintFloor {floor!r} is not a frame count")
     else:
         for red in got if strs(got) else []:
-            spec=red.split(":",1)[1] if ":" in red else red
-            if spec=="destination": continue
-            runs=[p.get("longestRun") for p in legs.get(spec,[])]
-            runs=[r.get("frames") if isinstance(r,dict) else r for r in runs]
-            if not runs or not all(isinstance(r,int) and r>=floor for r in runs): problems.append(f"{red} longest unpainted run {runs} below the {floor}-frame floor")
+            if red.endswith(":destination"): continue
+            run=runs.get(red)
+            if not (isinstance(run,int) and not isinstance(run,bool) and run>=floor): problems.append(f"{red} longest unpainted run {run!r} below the {floor}-frame floor")
 for p in problems: print(f"    MISMATCH: {p}")
 sys.exit(1 if problems else 0)
 PYEOF

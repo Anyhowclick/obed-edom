@@ -128,7 +128,7 @@ if arg("--pass") == "G" and arg("--core-variant"):
     d = {"kind": "live-continuity-probe-pass-g", "pass": "G", "status": "pass", "redArm": f"core:{arg('--core-variant')}",
          "expectedCoreSha256": sha, "expectedRedSet": red, "redSet": red + (["G2-1-2:b0to1:carry"] if mode == "gr-extra" else []),
          "unknown": ["G1-2-3:b1to2:carry"] if mode == "gr-unknown" else [],
-         "armed": {"continuity": {"sha256": sha}, "destinations": [{"fromOrdinal": 1, "toOrdinal": 3, **leg}]},
+         "armed": {"continuity": {"sha256": sha}, "destinations": [{"fromOrdinal": 1, "toOrdinal": 3, "advanceTo": 4, **leg}]},
          "nullControl": {"continuity": {"sha256": "0" * 64 if mode == "gr-sha" else sha}, "destinations": []}}
     if mode == "gr-floor":
         d["paintFloor"] = 109
@@ -749,7 +749,7 @@ def test_pass_g_runs_on_p2_and_every_deck_through_the_queue_in_order(gates) -> N
     done = gates["run"](GATE_JOBS="1")
     events = gates["events"]()
     starts = [e.split()[1] for e in events if e.endswith(" start")]
-    assert [s for s in starts if s.startswith("passG-")] == PASSG_STEMS
+    assert [s for s in starts if s.startswith("passG-") and not s.startswith("passG-red")] == PASSG_STEMS
     assert starts.index(PASSG_STEMS[-1]) + 1 == starts.index(PASSG_RED_STEM)
     args = _probe_args(events)
     artifacts = []
@@ -1035,7 +1035,7 @@ def test_pass_g_red_and_the_paint_controls_run_in_order_and_match_a_well_formed_
                         "--artifact", f"{out}/{stem}.json"]
     stdout = done.stdout
     assert "GATE FAILED: PASSG-RED" not in stdout and "GATE FAILED: PAINT-CONTROL" not in stdout, stdout
-    assert ("    [PASSG-RED D1 --core-variant no-pin-hold] armed goTo 1->3 advance b2to3:carry paint fail unpainted=108 "
+    assert ("    [PASSG-RED D1 --core-variant no-pin-hold] armed leg G1-3-4 b2to3:carry paint fail unpainted=108 "
             "partial=0 double=0 substitute=0 longestRun=108") in stdout
     order = ["[PASSG D6]", "[PASSG-RED D1 --core-variant no-pin-hold]", *[f"[PAINT-CONTROL D5 {s}]" for s in PAINT_CONTROLS],
              "[CARRY-COVER green]"]
@@ -1049,7 +1049,7 @@ _RED = "PASSG-RED D1 --core-variant no-pin-hold"
     (PASSG_RED_STEM, "gr-sha", _RED, "nullControl installed core sha"),
     (PASSG_RED_STEM, "gr-extra", _RED, "red set ['G1-3-4:b2to3:carry', 'G2-1-2:b0to1:carry'] != registered"),
     (PASSG_RED_STEM, "gr-unknown", _RED, "unknown ['G1-2-3:b1to2:carry']"),
-    (PASSG_RED_STEM, "gr-floor", _RED, "longest unpainted run [108] below the 109-frame floor"),
+    (PASSG_RED_STEM, "gr-floor", _RED, "G1-3-4:b2to3:carry longest unpainted run 108 below the 109-frame floor"),
     (PASSG_RED_STEM, "die", _RED, None),
     (PC_STEMS[0], "pc-plus", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}", "hiddenTicks 7 != 6"),
     (PC_STEMS[1], "pc-minus", f"PAINT-CONTROL D5 {PAINT_CONTROLS[1]}", "hiddenTicks 5 != 6"),
