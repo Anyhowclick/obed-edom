@@ -2,6 +2,7 @@ export type LiveOperation = "advance" | "goTo" | "hide" | "show" | "stop";
 export type LiveCapability = { supported: boolean; reason?: string };
 export type LiveSlide = { originalOrdinal: number; skipped: boolean; thumbnailUrl?: string; notes?: string };
 export type LivePreparedDeck = { previewJobId: string; name: string; slides: number; sourceDigest: string };
+export type LiveQualification = LivePreparedDeck & { qualified: boolean; reason: string | null };
 export type LiveDisplay = { id: string; name: string; width: number; height: number; x: number; y: number; primary: boolean };
 export type LiveCodec = { asset: string; codec: string | null; family: "h264" | "hevc" | "prores" | "av1" | "vp9" | "other" };
 export type LiveNotCarried = { fromSlide: number; toSlide: number; asset: string; reason: string };
@@ -50,6 +51,7 @@ export type LiveEngineAction = "start" | "restart" | "check" | "show" | "quit" |
 export type LiveEngineWarning = { id: string; severity: "block" | "warn" | "info"; text: string; action?: string };
 export type LiveEngine = {
   state: "unavailable" | "stopped" | "starting" | "ready" | "blocked" | "stuck" | "quitting";
+  taken: boolean;
   reason?: string;
   obs: { path: string | null; version: string | null; pinned: string };
   rate: { output: number; canvas: "25 PAL" | "30" | null; source: number | null };
@@ -61,6 +63,7 @@ export type LiveEngine = {
 export interface LiveClient {
   state(): Promise<LiveSnapshot | null>;
   decks(): Promise<LivePreparedDeck[]>;
+  qualification(previewJobId: string): Promise<LiveQualification>;
   displays(): Promise<LiveDisplay[]>;
   start(previewJobId: string, displayId?: string, continuity?: "off"): Promise<LiveSnapshot>;
   command(sessionId: string, command: LiveCommand): Promise<LiveResult>;
@@ -83,6 +86,7 @@ async function request<T>(url: string, body?: unknown, method = body === undefin
 export const liveClient: LiveClient = {
   state: () => request<LiveSnapshot | null>("/api/live"),
   decks: () => request<LivePreparedDeck[]>("/api/live/decks"),
+  qualification: (previewJobId) => request<LiveQualification>(`/api/live/decks/${encodeURIComponent(previewJobId)}/qualification`),
   displays: () => request<LiveDisplay[]>("/api/live/displays"),
   start: (previewJobId, displayId, continuity) => request<LiveSnapshot>("/api/live", { previewJobId, ...(displayId ? { displayId } : {}), ...(continuity ? { continuity } : {}) }),
   command: (sessionId, command) => request<LiveResult>(`/api/live/${encodeURIComponent(sessionId)}/commands`, command),

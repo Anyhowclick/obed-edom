@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import os
 from pathlib import Path
 from threading import RLock
 from typing import Any, Literal
@@ -21,6 +22,8 @@ from obed_edom.html_preview import (
     safe_export_file,
 )
 from obed_edom.live_runtime import PLAYER_SHA256, RUNTIME_VERSION
+from obed_edom.live_continuity import Unsupported
+from obed_edom.live_host import GL_REPLAY_ENV, derive_runtime
 from obed_edom.live_session import LiveSessionService
 from obed_edom.settings import load_settings, save_settings
 
@@ -61,6 +64,16 @@ def _output_settings(settings: dict) -> dict:
     return {key: settings[key] for key in ("akOutputMode", "akOutputRate", "akKeyer")}
 
 
+def _deck_qualification(root: Path, slides: list[dict], settings: dict) -> str | None:
+    preference = os.environ.get(GL_REPLAY_ENV, "auto" if settings["akOutputMode"] == "keyer" else "off")
+    if preference not in ("auto", "off"):
+        return "GL replay must be auto or off."
+    derived = derive_runtime(root, slides, gl_replay=preference == "auto")
+    if isinstance(derived, Unsupported) and preference == "auto":
+        derived = derive_runtime(root, slides)
+    return derived.reason if isinstance(derived, Unsupported) else None
+
+
 def live_router(runner, *, service=None, host_factory=None, displays=None, engine_factory=None) -> APIRouter:
     from obed_edom.live_host import LiveOutputHost, list_displays
     from obed_edom.managed_obs import ManagedObs
@@ -89,6 +102,30 @@ def live_router(runner, *, service=None, host_factory=None, displays=None, engin
 
     def stop_session(current) -> None:
         sessions.command(current["sessionId"], uuid4().hex, "stop")
+
+    def prepared_deck(job_id):
+        job = runner.get(job_id)
+        if not job or job.kind != "html-preview" or job.status != "done":
+            raise HTTPException(404, "Prepared preview job not found.")
+        result = job.result or {}
+        if result.get("phase") != "ready":
+            raise HTTPException(409, "Prepare the HTML preview before loading live output.")
+        root = registered_export_root(result, job.id)
+        digest = file_sha256(safe_export_file(root, "assets/player/main.js"))
+        if digest != PLAYER_SHA256 or digest != (result.get("manifest") or {}).get("playerDigest"):
+            raise ValueError("This player version is not supported for live controls.")
+        header, _ = load_header(root)
+        width, height = header.get("slideWidth", 0), header.get("slideHeight", 0)
+        if not width or not height or abs(width / height - 16 / 9) > 0.001:
+            raise ValueError("Live output currently requires a prepared 16:9 deck.")
+        if header.get("showMode") != 0:
+            raise ValueError("Live output requires manual presentation mode.")
+        slides = [dict(row) for row in result.get("slides", [])]
+        if not any(not row.get("skipped") for row in slides):
+            raise ValueError("This deck has no playable slides.")
+        if any(row.get("unsupportedMedia") for row in slides):
+            raise ValueError("This deck contains unsupported media.")
+        return result, root, digest, header, slides
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -143,6 +180,22 @@ def live_router(runner, *, service=None, host_factory=None, displays=None, engin
                 "sourceDigest": result.get("sourceDigest"),
             })
         return rows
+
+    @router.get("/decks/{job_id}/qualification")
+    def qualification(job_id: str):
+        try:
+            result, root, _digest, _header, slides = prepared_deck(job_id)
+            reason = _deck_qualification(root, slides, load_settings())
+            return {
+                "previewJobId": job_id,
+                "name": Path(result.get("path", "")).name,
+                "sourceDigest": result["sourceDigest"],
+                "slides": len(slides),
+                "qualified": reason is None,
+                "reason": reason,
+            }
+        except (PreviewError, ValueError, OSError, RuntimeError) as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @router.get("/engine")
     def engine_state():
@@ -201,27 +254,13 @@ def live_router(runner, *, service=None, host_factory=None, displays=None, engin
         with lock:
             if loaded_session():
                 raise HTTPException(409, "Stop the active session before loading another deck.")
-            job = runner.get(body.previewJobId)
-            if not job or job.kind != "html-preview" or job.status != "done":
-                raise HTTPException(404, "Prepared preview job not found.")
-            result = job.result or {}
-            if result.get("phase") != "ready":
-                raise HTTPException(409, "Prepare the HTML preview before loading live output.")
             try:
-                root = registered_export_root(result, job.id)
-                digest = file_sha256(safe_export_file(root, "assets/player/main.js"))
-                if digest != PLAYER_SHA256 or digest != (result.get("manifest") or {}).get("playerDigest"):
-                    raise ValueError("This player version is not supported for live controls.")
-                header, _ = load_header(root)
+                result, root, digest, header, slides = prepared_deck(body.previewJobId)
                 width, height = header.get("slideWidth", 0), header.get("slideHeight", 0)
-                if not width or not height or abs(width / height - 16 / 9) > 0.001:
-                    raise ValueError("Live output currently requires a prepared 16:9 deck.")
-                if header.get("showMode") != 0:
-                    raise ValueError("Live output requires manual presentation mode.")
-                slides = [dict(row) for row in result.get("slides", [])]
-                if any(row.get("unsupportedMedia") for row in slides):
-                    raise ValueError("This deck contains unsupported media.")
                 settings = load_settings()
+                reason = _deck_qualification(root, slides, settings)
+                if reason:
+                    raise ValueError(f"This deck is not qualified yet: {reason}")
                 if settings["akOutputMode"] == "keyer":
                     managed = engine()
                     status = managed.state()

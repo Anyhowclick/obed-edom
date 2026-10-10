@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { liveClient, type LiveClient, type LiveContinuity, type LiveDisplay, type LiveEngine, type LiveOperation, type LiveOutputSettings, type LivePreparedDeck, type LiveSlide, type LiveSnapshot } from "./api";
+import { liveClient, type LiveClient, type LiveContinuity, type LiveDisplay, type LiveEngine, type LiveOperation, type LiveOutputSettings, type LivePreparedDeck, type LiveQualification, type LiveSlide, type LiveSnapshot } from "./api";
 import { engineBlocks, OutputEngine } from "./OutputEngine";
+import { LiveDeckInput } from "./LiveDeckInput";
+import { IconChevronLeft } from "../components/icons";
 import "./live.css";
 
-function Still({ slide, label }: { slide?: LiveSlide; label: string }) {
-  return <figure className="live-still">
-    <figcaption>{label}{slide ? ` · Slide ${slide.originalOrdinal}` : ""} · Still preview</figcaption>
-    {slide?.thumbnailUrl ? <img src={slide.thumbnailUrl} alt={`Slide ${slide.originalOrdinal} still`} /> : <div className="live-placeholder">{slide ? "Still unavailable" : "No slide"}</div>}
-  </figure>;
+function Still({ slide, lazy = false }: { slide?: LiveSlide; lazy?: boolean }) {
+  return slide?.thumbnailUrl
+    ? <img src={slide.thumbnailUrl} alt={`Slide ${slide.originalOrdinal} still`} loading={lazy ? "lazy" : "eager"} />
+    : <div className="live-placeholder">{slide?.skipped ? "Skipped" : slide ? "Still unavailable" : "No slide"}</div>;
 }
 
 function ContinuityStatus({ continuity }: { continuity?: LiveContinuity }) {
@@ -63,13 +64,25 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
   const [displays, setDisplays] = useState<LiveDisplay[]>([]);
   const [jobId, setJobId] = useState(previewJobId);
   const [displayId, setDisplayId] = useState("");
-  const [continuityEnabled, setContinuityEnabled] = useState(true);
   const [target, setTarget] = useState("");
   const [digits, setDigits] = useState("");
-  const [upcomingCount, setUpcomingCount] = useState(3);
+  const [qualification, setQualification] = useState<(LiveQualification & { outputMode: string }) | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [qualificationAttempt, setQualificationAttempt] = useState(0);
+  const [preparing, setPreparing] = useState(false);
+  const selectionTouched = useRef(false);
   const [outputSettings, setOutputSettings] = useState<LiveOutputSettings | null>(null);
   const [savingSettings, setSavingSettings] = useState(false);
   const [engine, setEngine] = useState<LiveEngine | null>(null);
+  const active = !!snapshot && snapshot.status !== "stopped";
+  const qualified = !!qualification?.qualified && qualification.previewJobId === jobId && qualification.outputMode === outputSettings?.akOutputMode;
+
+  const selectDeck = useCallback((id: string) => {
+    selectionTouched.current = true;
+    setQualification(null);
+    setJobId(id);
+    setQualificationAttempt((attempt) => attempt + 1);
+  }, []);
 
   const accept = useCallback((next: LiveSnapshot | null) => {
     const current = observed.current;
@@ -114,7 +127,7 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
         if (cancelled) return;
         setDecks(nextDecks);
         setDisplays(nextDisplays);
-        setJobId((selected) => nextDecks.some((deck) => deck.previewJobId === selected) ? selected : nextDecks[0]?.previewJobId || "");
+        if (!selectionTouched.current) setJobId((selected) => nextDecks.some((deck) => deck.previewJobId === selected) ? selected : nextDecks[0]?.previewJobId || "");
         setDisplayId((selected) => {
           if (nextDisplays.some((display) => display.id === selected)) return selected;
           return nextDisplays.find((display) => !display.primary)?.id || nextDisplays[0]?.id || "";
@@ -126,6 +139,21 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
     void loadChoices();
     return () => { cancelled = true; };
   }, [client]);
+
+  useEffect(() => {
+    if (!jobId || !outputSettings || active) { setChecking(false); return; }
+    let cancelled = false;
+    const outputMode = outputSettings.akOutputMode;
+    setChecking(true);
+    setQualification(null);
+    setMessage("");
+    client.qualification(jobId).then((result) => {
+      if (!cancelled) setQualification({ ...result, outputMode });
+    }).catch((error) => {
+      if (!cancelled) setMessage(error instanceof Error ? error.message : String(error));
+    }).finally(() => { if (!cancelled) setChecking(false); });
+    return () => { cancelled = true; };
+  }, [active, client, jobId, qualificationAttempt, outputSettings?.akOutputMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -203,7 +231,15 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
     void send("goTo", slide);
   }, [send]);
 
+  const previous = useCallback(() => {
+    const state = observed.current;
+    const slides = state?.slides.filter((slide) => !slide.skipped) || [];
+    const index = slides.findIndex((slide) => slide.originalOrdinal === state?.originalSlide);
+    if (index > 0) void send("goTo", slides[index - 1].originalOrdinal);
+  }, [send]);
+
   useEffect(() => {
+    if (!active) { setDigits(""); return; }
     function keydown(event: KeyboardEvent) {
       const element = event.target;
       const editing = element instanceof HTMLElement && (element.isContentEditable || element.closest("input, textarea, select, [contenteditable], [role=textbox]"));
@@ -212,23 +248,22 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
       if (/^\d$/.test(event.key)) { event.preventDefault(); setDigits((value) => (value + event.key).slice(0, 6)); }
       else if (event.key === "Enter" && digits) { event.preventDefault(); goTo(digits); setDigits(""); }
       else if (event.key === "Escape") setDigits("");
-      else if ((event.key === " " || event.key === "ArrowRight") && !digits && !button) { event.preventDefault(); void send("advance"); }
+      else if (event.key === "ArrowLeft" && !digits) { event.preventDefault(); previous(); }
+      else if ((event.key === "ArrowRight" || (event.key === " " && !button)) && !digits) { event.preventDefault(); void send("advance"); }
     }
     window.addEventListener("keydown", keydown);
     return () => window.removeEventListener("keydown", keydown);
-  }, [digits, goTo, send]);
+  }, [active, digits, goTo, previous, send]);
 
   async function start() {
-    if (inFlight.current || !connected || !jobId.trim() || engineReason) return;
+    if (inFlight.current || !connected || !qualified || preparing || checking || savingSettings || engineReason || (!keyer && !displayId)) return;
     inFlight.current = true;
     setPending(true);
     const epoch = ++generation.current;
     setMessage("");
     try {
       const display = keyer ? undefined : displayId || undefined;
-      const next = continuityEnabled
-        ? await client.start(jobId, display)
-        : await client.start(jobId, display, "off");
+      const next = await client.start(jobId, display);
       if (mounted.current && epoch === generation.current) accept(next);
     } catch (error) {
       if (mounted.current) setMessage(error instanceof Error ? error.message : String(error));
@@ -238,82 +273,118 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
   const current = snapshot?.slides.find((slide) => slide.originalOrdinal === snapshot.originalSlide);
   const available = snapshot?.slides.filter((slide) => !slide.skipped) || [];
   const currentIndex = available.findIndex((slide) => slide.originalOrdinal === snapshot?.originalSlide);
-  const upcoming = currentIndex < 0 ? [] : available.slice(currentIndex + 1, currentIndex + 1 + upcomingCount);
   const visibilityOperation = snapshot?.outputVisible ? "hide" : "show";
-  const active = !!snapshot && snapshot.status !== "stopped";
   const keyer = outputSettings?.akOutputMode === "keyer";
   const engineReason = keyer ? engineBlocks(engine) : "";
-  const outputLocked = !outputSettings || savingSettings || active;
+  const outputLocked = !outputSettings || savingSettings || active || pending;
+  const deckName = active
+    ? (qualification?.sourceDigest === snapshot.sourceDigest ? qualification.name : decks.find((deck) => deck.sourceDigest === snapshot.sourceDigest)?.name) || "Presentation"
+    : qualification?.name;
+  const backReason = disabledReason("goTo") || (currentIndex <= 0 ? "No previous playable slide" : "");
+  const startDisabled = !connected || pending || preparing || checking || savingSettings || !qualified || (keyer ? !!engineReason : !displayId);
   return <section className="live-presenter" aria-label="Live presenter">
-    <h1>Alpha Keynote</h1>
-    <p className="lede">Experimental silent HDMI output. The picture is 16:9 within the detected display. DeckLink fill + key is not qualified.</p>
-    <p className="note">Movie continuity is available only for qualified decks. Alpha output is not qualified.</p>
-    <p role="status">{connected ? snapshot ? `Player ${snapshot.status} · Output ${snapshot.outputVisible ? "visible" : "hidden"}` : "No active session" : connectionError ? "Disconnected · Reconnecting…" : "Connecting…"}</p>
-    {connectionError && <p role="alert">{connectionError}. Existing output may still be running; commands are disabled until reconnected.</p>}
-    {(message || awaitingObservation || snapshot?.error) && <p role="alert">{message || (awaitingObservation ? "Command accepted; waiting for observed player state." : snapshot?.error)}</p>}
-    <div className="actions live-output-settings">
-      <label>Output
-        <select aria-label="Output" value={outputSettings?.akOutputMode ?? "screen"} disabled={outputLocked} title={active ? "Stop the show first." : ""} onChange={(event) => void saveOutputSettings({ akOutputMode: event.target.value as LiveOutputSettings["akOutputMode"] })}>
-          <option value="screen">Screen (HDMI)</option>
-          <option value="keyer">Keyer (fill + key via UltraStudio)</option>
-        </select>
-      </label>
-      {keyer && outputSettings && <>
-        <label>Match the standard the Pulse shows
-          <select aria-label="Output rate" value={outputSettings.akOutputRate} disabled={outputLocked} title={active ? "Stop the show first." : ""} onChange={(event) => void saveOutputSettings({ akOutputRate: Number(event.target.value) as LiveOutputSettings["akOutputRate"] })}>
-            <option value={25}>25 fps</option>
-            <option value={30}>30 fps</option>
-          </select>
-        </label>
-        <label>
-          <input type="checkbox" checked={outputSettings.akKeyer === "external"} disabled={outputLocked} onChange={(event) => void saveOutputSettings({ akKeyer: event.target.checked ? "external" : "off" })} />
-          Keyer on
-        </label>
-      </>}
-    </div>
-    {keyer && outputSettings && <OutputEngine client={client} sessionLoaded={active} pollMs={enginePollMs} onEngine={setEngine} />}
-    {!active && <form className="actions" onSubmit={(event) => { event.preventDefault(); void start(); }}>
-      <label>Prepared deck
-        <select aria-label="Prepared deck" value={jobId} onChange={(event) => setJobId(event.target.value)} disabled={!decks.length}>
-          {decks.length ? decks.map((deck) => <option key={deck.previewJobId} value={deck.previewJobId}>{deck.name} · {deck.slides} slides</option>) : <option value="">No prepared decks available</option>}
-        </select>
-      </label>
-      {!keyer && <label>Output display
-        <select aria-label="Output display" value={displayId} onChange={(event) => setDisplayId(event.target.value)} disabled={!displays.length}>
-          {displays.length ? displays.map((display) => <option key={display.id} value={display.id}>{display.name} · {display.width} × {display.height}{display.primary ? " · Primary" : ""}</option>) : <option value="">No display detected</option>}
-        </select>
-      </label>}
-      <label className="live-continuity-choice">
-        <input type="checkbox" checked={continuityEnabled} disabled={pending} onChange={(event) => setContinuityEnabled(event.target.checked)} />
-        Enable movie continuity when qualified
-      </label>
-      <p className="note live-continuity-help">Applies to the next session. Check its continuity status before showing output.</p>
-      {!decks.length && <p className="note">Prepare a deck in Sermon Checker with Build Preview first. Live output never creates a new export.</p>}
-      <button className="btn" disabled={!connected || pending || !jobId || (keyer ? !!engineReason : !displays.length)} title={engineReason}>Start output session</button>
-    </form>}
-    {active && <ContinuityStatus continuity={snapshot.continuity} />}
-    {active && <MovieWarnings warnings={snapshot.output.codecWarnings} heading="Some movies may not play in this output" />}
-    {active && <MovieWarnings warnings={snapshot.output.rateWarnings} heading="Some movies do not match the output rate" />}
-    {snapshot && <>
-      <p className="note">Slide {snapshot.originalSlide ?? "unknown"} · Build {snapshot.buildIndex ?? "unknown"} · Display {snapshot.output.width} × {snapshot.output.height} · Audio off</p>
-      {snapshot.autoPlayDeferred && <p className="note" aria-live="polite">{snapshot.autoPlayDeferred}</p>}
-      <Still slide={current} label="Current" />
-      <p className="live-notes"><strong>Presenter notes</strong><br />{current?.notes || "Presenter notes are unavailable in this prepared export."}</p>
-      <div className="actions">
-        <button className="btn" disabled={!!disabledReason("advance")} title={disabledReason("advance")} onClick={() => void send("advance")}>Advance</button>
+    <header className="live-heading">
+      <div><h1>Alpha Keynote</h1><p className="note" role="status">{connected ? active ? `Player ${snapshot.status} · Output ${snapshot.outputVisible ? "visible" : "hidden"}` : "Add a Keynote, qualify it, then present." : connectionError ? "Disconnected · Reconnecting…" : "Connecting…"}</p></div>
+      {active && <div className="actions">
         <button className="btn secondary" disabled={!!disabledReason(visibilityOperation)} title={disabledReason(visibilityOperation)} onClick={() => void send(visibilityOperation)}>{snapshot.outputVisible ? "Hide output" : "Show output"}</button>
         <button className="btn secondary" disabled={!!disabledReason("stop")} title={disabledReason("stop")} onClick={() => void send("stop")}>Stop session</button>
+      </div>}
+    </header>
+    {connectionError && <p className="live-alert" role="alert">{connectionError}. Existing output may still be running; commands are disabled until reconnected.</p>}
+    {(message || awaitingObservation || (active && snapshot.error)) && <p className="live-alert" role="alert">{message || (awaitingObservation ? "Command accepted; waiting for observed player state." : snapshot?.error)}</p>}
+    {!active && <div className="live-setup">
+      <section className="live-panel live-intake">
+        <h2>1. Add & qualify</h2>
+        <LiveDeckInput disabled={pending || checking} onPrepared={selectDeck} onPreparing={setPreparing} />
+        {decks.length > 0 && <label className="live-prepared">Or use a prepared deck
+          <select aria-label="Prepared deck" value={jobId} disabled={preparing || pending || checking} onChange={(event) => selectDeck(event.target.value)}>
+            <option value="">Choose a prepared deck</option>
+            {decks.map((deck) => <option key={deck.previewJobId} value={deck.previewJobId}>{deck.name} · {deck.slides} slides</option>)}
+            {!!jobId && !decks.some((deck) => deck.previewJobId === jobId) && <option value={jobId}>{qualification?.name || "Selected Keynote"}</option>}
+          </select>
+        </label>}
+        <div className="live-qualification" aria-live="polite">
+          {checking ? <p>Checking deck qualification…</p> : qualification && <>
+            <strong className={qualified ? "live-qualified" : "live-unqualified"}>{qualified ? "Deck qualified" : "Not qualified yet"}</strong>
+            <p className="note">{qualified ? `${qualification.name} · ${qualification.slides} slides. Output is checked when the session starts.` : qualification.reason}</p>
+          </>}
+          {!!jobId && !checking && !qualified && <button className="btn secondary" type="button" onClick={() => selectDeck(jobId)}>Check qualification again</button>}
+        </div>
+        <p className="note">Qualification uses the current playback allowlist. Preparation works from a copy of your Keynote.</p>
+      </section>
+      <section className="live-panel live-start">
+        <h2>2. Present</h2>
+        <p className="note">Start with the output hidden, then show it when you are ready.</p>
+        <button className="btn" disabled={startDisabled} title={engineReason || (!qualified ? "Qualify a Keynote first" : "")} onClick={() => void start()}>Start output session</button>
+      </section>
+    </div>}
+    {active && <>
+      <div className="live-filebar"><strong title={deckName}>{deckName}</strong><span>{snapshot.slides.length} slides</span><span>{snapshot.output.transport === "fill-key" ? "Keyer output" : "Screen output"} · {snapshot.output.width} × {snapshot.output.height}</span><span>Audio off</span></div>
+      <div className="live-workspace">
+        <section className="live-panel live-slides" aria-label="Deck slides">
+          <div className="live-section-heading"><h2>Deck slides</h2><span className="note">Click a slide to jump</span></div>
+          <div className="live-slide-grid">{snapshot.slides.map((slide) => {
+            const selected = slide.originalOrdinal === snapshot.originalSlide;
+            return <button type="button" className={`live-slide-tile${selected ? " selected" : ""}`} key={slide.originalOrdinal} aria-label={`Slide ${slide.originalOrdinal}${slide.skipped ? " · Skipped / unavailable" : ""}`} aria-current={selected ? "true" : undefined} disabled={slide.skipped || !!disabledReason("goTo")} title={slide.skipped ? "Skipped in Keynote" : disabledReason("goTo") || `Go to slide ${slide.originalOrdinal}`} onClick={() => goTo(String(slide.originalOrdinal))}>
+              <Still slide={slide} lazy />
+              <span className="live-tile-caption"><span>{slide.originalOrdinal}</span>{selected && <strong>{snapshot.outputVisible ? "On screen" : "Current"}</strong>}{slide.skipped && <span>Skipped</span>}</span>
+            </button>;
+          })}</div>
+        </section>
+        <aside className="live-current-column">
+          <section className="live-panel live-current" aria-label="Current slide">
+            <div className="live-section-heading"><h2>Current</h2><span className="note">Still preview</span></div>
+            <div className="live-monitor">
+              <Still slide={current} />
+              <div className="live-transport" aria-label="Slide navigation">
+                <button type="button" aria-label="Previous slide" disabled={!!backReason} title={backReason || "Previous slide (←)"} onClick={previous}><IconChevronLeft /></button>
+                <button type="button" aria-label="Advance" disabled={!!disabledReason("advance")} title={disabledReason("advance") || "Next build or slide (→ / Space)"} onClick={() => void send("advance")}><IconChevronLeft className="flip" /></button>
+              </div>
+            </div>
+            <p className="live-slide-position">Slide {snapshot.originalSlide ?? "unknown"} · Build {snapshot.buildIndex ?? "unknown"}</p>
+            {snapshot.autoPlayDeferred && <p className="note" aria-live="polite">{snapshot.autoPlayDeferred}</p>}
+            <p className="note live-keyboard-hint">← Previous slide · → Next build or slide</p>
+            <form className="live-jump" onSubmit={(event) => { event.preventDefault(); goTo(target); }}>
+              <label htmlFor="live-slide-target">Go to slide</label><input id="live-slide-target" inputMode="numeric" value={target} onChange={(event) => setTarget(event.target.value)} /><button className="btn secondary" disabled={!!disabledReason("goTo")} title={disabledReason("goTo")}>Go</button>
+            </form>
+            {digits && <p className="note" aria-live="polite">Go to: {digits} · Enter to jump · Esc to clear</p>}
+            {current?.notes && <details className="live-notes"><summary>Presenter notes</summary><p>{current.notes}</p></details>}
+          </section>
+          <div className="live-playback-status">
+            <ContinuityStatus continuity={snapshot.continuity} />
+            <MovieWarnings warnings={snapshot.output.codecWarnings} heading="Some movies may not play in this output" />
+            <MovieWarnings warnings={snapshot.output.rateWarnings} heading="Some movies do not match the output rate" />
+            {keyer && engineReason && <p className="live-alert">{engineReason}</p>}
+          </div>
+        </aside>
       </div>
-      <p className="note">Hiding keeps playback running. Closing this presenter leaves the session running.</p>
-      {(["advance", "goTo", "hide", "show"] as const).filter((operation) => !snapshot.capabilities?.[operation]?.supported).map((operation) => <p className="note" key={operation}>{operation === "goTo" ? "Go to slide" : operation}: {snapshot.capabilities?.[operation]?.reason || "Not supported by this player"}</p>)}
-      <form className="actions" onSubmit={(event) => { event.preventDefault(); goTo(target); }}>
-        <label>Go to slide <input inputMode="numeric" value={target} onChange={(event) => setTarget(event.target.value)} /></label>
-        <button className="btn secondary" disabled={!!disabledReason("goTo")} title={disabledReason("goTo")}>Go</button>
-      </form>
-      <p className="note">Type a slide number then Enter, or use the field above. Space / right arrow advances. {digits && <strong>Go to: {digits} (Esc clears)</strong>}</p>
-      <label>Upcoming slides <select value={upcomingCount} onChange={(event) => setUpcomingCount(Number(event.target.value))}>{[1, 2, 3, 4].map((count) => <option key={count}>{count}</option>)}</select></label>
-      <div className="live-upcoming">{upcoming.map((slide, index) => <Still key={slide.originalOrdinal} slide={slide} label={index === 0 ? "Next" : "Upcoming"} />)}</div>
-      <details><summary>Deck slides</summary><ol className="live-deck">{snapshot.slides.map((slide) => <li key={slide.originalOrdinal}><button className="btn secondary" disabled={slide.skipped || !!disabledReason("goTo")} onClick={() => goTo(String(slide.originalOrdinal))}>Slide {slide.originalOrdinal}{slide.skipped ? " · Skipped / unavailable" : ""}</button></li>)}</ol></details>
     </>}
+    <details className="live-panel live-output-options" open={!active}>
+      <summary>Output settings</summary>
+      <div className="live-output-settings">
+        <label className="live-output-field">Output
+          <select aria-label="Output" value={outputSettings?.akOutputMode ?? "screen"} disabled={outputLocked} title={active ? "Stop the show first." : ""} onChange={(event) => void saveOutputSettings({ akOutputMode: event.target.value as LiveOutputSettings["akOutputMode"] })}>
+            <option value="screen">Screen (HDMI)</option><option value="keyer">Keyer (fill + key via UltraStudio)</option>
+          </select>
+        </label>
+        {!keyer && <label className="live-output-field">Output display
+          <select aria-label="Output display" value={displayId} disabled={outputLocked || !displays.length} onChange={(event) => setDisplayId(event.target.value)}>
+            {displays.length ? displays.map((display) => <option key={display.id} value={display.id}>{display.name} · {display.width} × {display.height}{display.primary ? " · Primary" : ""}</option>) : <option value="">No display detected</option>}
+          </select>
+        </label>}
+        {keyer && outputSettings && <>
+          <label className="live-output-field">Output rate
+            <select aria-label="Output rate" value={outputSettings.akOutputRate} disabled={outputLocked} title={active ? "Stop the show first." : "Match the standard shown on the Pulse."} onChange={(event) => void saveOutputSettings({ akOutputRate: Number(event.target.value) as LiveOutputSettings["akOutputRate"] })}><option value={25}>25 fps</option><option value={30}>30 fps</option></select>
+          </label>
+          <div className="live-keyer-row">
+            <label className="live-keyer-choice"><input type="checkbox" aria-label="Enable Keyer" aria-describedby="live-keyer-help" checked={outputSettings.akKeyer === "external"} disabled={outputLocked} onChange={(event) => void saveOutputSettings({ akKeyer: event.target.checked ? "external" : "off" })} />Enable Keyer
+              <span id="live-keyer-help" className="live-keyer-help" role="tooltip">Sends separate picture (fill) and transparency (key) signals through UltraStudio, so the switcher can overlay your slides on live video. Turn off for ordinary video output.</span>
+            </label>
+          </div>
+        </>}
+      </div>
+      {keyer && outputSettings && <OutputEngine client={client} sessionLoaded={active} pollMs={enginePollMs} onEngine={setEngine} />}
+      <p className="note">Hiding keeps playback running. Closing this presenter leaves the session running.</p>
+    </details>
   </section>;
 }
