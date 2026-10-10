@@ -7281,8 +7281,14 @@ class TestAssetKeysAreExactNames:
         assert probe.asset_of("a.mov-0.0000-10.0000.mov", assets) == "a.mov"
         assert probe.asset_of("c.mov-0.0000-10.0000.mov", assets) == "unknown"
 
-    def test_the_sampler_resolves_an_overlapping_name_to_its_own_movie(self) -> None:
-        """Executes the real `SAMPLER_JS` under Node: the key it pins on each footprint-owner query."""
+    @pytest.mark.parametrize(("movies", "expected"), [
+        pytest.param({"movie1": ["a.mov"], "movie2": ["ba.mov"]}, ["movie2", "movie1", None], id="overlapping-names"),
+        pytest.param({"movie1": ["a.mov"], "movie2": ["A.MOV"]}, [None, None, None], id="a-name-two-movies-claim-is-no-match"),
+    ])
+    def test_the_sampler_pins_only_the_one_movie_of_that_exact_name(self, movies: dict[str, list[str]], expected: list[Any]) -> None:
+        """Executes the real `SAMPLER_JS` under Node: the key it pins on each footprint-owner query
+        (none for an ambiguous name, as the core's `movieAssetKey`)."""
+        plan = json.dumps({"movies": {key: {"assetKeys": keys} for key, keys in movies.items()}})
         node = shutil.which("node")
         if node is None:
             pytest.skip("node is not available")
@@ -7291,7 +7297,7 @@ class TestAssetKeysAreExactNames:
         var asked = [];
         var tick = null;
         global.requestAnimationFrame = function(cb){{ tick = cb; return 1; }};
-        window.__OBED_CONTINUITY__ = {{movies: {{movie1: {{assetKeys: ['a.mov']}}, movie2: {{assetKeys: ['ba.mov']}}}}}};
+        window.__OBED_CONTINUITY__ = {plan};
         window.__OBED_P2_PRESERVE__ = {{footprintOwnerDecoderId: function(q){{ asked.push(q.key === undefined ? null : q.key); return null; }}}};
         function vid(src){{
           return {{currentSrc: src, src: src, dataset: {{}},
@@ -7312,7 +7318,7 @@ class TestAssetKeysAreExactNames:
         """
         result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=10)
         assert result.returncode == 0, result.stderr
-        assert json.loads(result.stdout.strip()) == ["movie2", "movie1", None]
+        assert json.loads(result.stdout.strip()) == expected
 
 
 SIBLING_SRC, SIBLING_DST = "SIBLING-SRC-OBJECT", "SIBLING-DST-OBJECT"

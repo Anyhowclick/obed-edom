@@ -456,7 +456,8 @@ SAMPLER_JS = r"""
   // pin the asset key directly (rect.key) when it queries a rect the fixed
   // footprint table does not classify"). Resolve the key ourselves from the
   // already-public plan object (window.__OBED_CONTINUITY__, never mutated here)
-  // by the exact canonical asset name (`canonical_asset_name`), so ownership can be
+  // by the exact canonical asset name (`canonical_asset_name`; a name two movies
+  // claim is no match, as the core's movieAssetKey), so ownership can be
   // asked about ANY on-screen position, not just the static footprint.
   function assetNameOf(src){
     var name = String(src || '').split('?')[0].split('/').pop();
@@ -469,12 +470,16 @@ SAMPLER_JS = r"""
       var movies = (plan && plan.movies) || {};
       var name = assetNameOf(src);
       if (!name) return null;
+      var found = null;
       for (var k in movies) {
         var keys = (movies[k] && movies[k].assetKeys) || [];
         for (var i = 0; i < keys.length; i++) {
-          if (assetNameOf(keys[i]) === name) return k;
+          if (assetNameOf(keys[i]) !== name) continue;
+          if (found !== null && found !== k) return null;
+          found = k;
         }
       }
+      return found;
     } catch (e) {}
     return null;
   }
