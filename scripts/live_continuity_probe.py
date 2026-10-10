@@ -276,6 +276,8 @@ PASSG_RED_EXPECTATIONS: dict[tuple[str, str], tuple[str, ...]] = {}
 # Floor on every red carry's longest unpainted run (frames), carried as `paintFloor` and enforced by the red status
 # functions (decision 3: at least PAINT_FLOOR_MIN_FRAMES). Keyed as the arm's expectations; empty until V3.
 PAINT_FLOOR_MIN_FRAMES = 60
+# Red arms whose registered ids only count with a registered floor (the paint-red mechanism, decision 3).
+PAINT_RED_ARMS = ("core:no-pin-hold",)
 RED_ARM_PAINT_FLOOR: dict[tuple[str, str, str], int] = {}
 PASSG_RED_PAINT_FLOOR: dict[tuple[str, str], int] = {}
 # Ids an arm must turn red whatever else it registers (plan §3.4 Q2/Q3, §4): the stray red and the
@@ -5434,11 +5436,11 @@ def passg_red_ids(result: dict[str, Any]) -> tuple[list[str], list[str]]:
     return sorted(red), sorted(unknown)
 
 
-def paint_floor_reasons(floor: Any, red: Sequence[str], runs: dict[str, Any]) -> list[str]:
+def paint_floor_reasons(floor: Any, red: Sequence[str], runs: dict[str, Any], arm: Any = None) -> list[str]:
     """Decision 3: with a registered `paintFloor`, every red carry id's longest unpainted run (`runs`) must reach it,
-    and the floor itself must be at least `PAINT_FLOOR_MIN_FRAMES`."""
+    and the floor itself must be at least `PAINT_FLOOR_MIN_FRAMES`; a `PAINT_RED_ARMS` arm needs one."""
     if floor is None:
-        return []
+        return [f"{arm} needs a registered paintFloor of at least {PAINT_FLOOR_MIN_FRAMES}"] if arm in PAINT_RED_ARMS else []
     if not isinstance(floor, int) or isinstance(floor, bool) or floor < PAINT_FLOOR_MIN_FRAMES:
         return [f"paintFloor {floor!r} is not a frame count of at least {PAINT_FLOOR_MIN_FRAMES}"]
     reasons = []
@@ -5484,7 +5486,7 @@ def passg_red_status(result: dict[str, Any]) -> tuple[str, list[str]]:
         for dest in destinations_of(result.get("armed")) if isinstance(dest.get("advanceCarry"), dict)
         for spec_id, verdict in (dest["advanceCarry"].get("verdicts") or {}).items()
     }
-    reasons += paint_floor_reasons(result.get("paintFloor"), result.get("redSet") or [], runs)
+    reasons += paint_floor_reasons(result.get("paintFloor"), result.get("redSet") or [], runs, result.get("redArm"))
     return ("fail" if reasons else "pass"), reasons
 
 
@@ -6196,7 +6198,9 @@ def red_arm_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     reasons = [f"unexpectedly red: {red_id}" for red_id in sorted((observed - wanted).elements())]
     reasons += [f"expected red but green: {red_id}" for red_id in sorted((wanted - observed).elements())]
     red = result.get("redSet") or []
-    reasons += paint_floor_reasons(result.get("paintFloor"), red, {red_id: _longest_run(arm.get(red_id)) for red_id in red})
+    reasons += paint_floor_reasons(
+        result.get("paintFloor"), red, {red_id: _longest_run(arm.get(red_id)) for red_id in red}, result.get("redArm"),
+    )
     return ("fail" if reasons else "pass"), reasons
 
 

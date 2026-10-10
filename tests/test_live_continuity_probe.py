@@ -8080,9 +8080,11 @@ class TestRedArmStatus:
         pytest.param(60, 59, "fail", id="known-bad-run-below-the-floor"),
         pytest.param(60, None, "fail", id="known-bad-red-carry-without-a-paint-score"),
         pytest.param(59, 108, "fail", id="known-bad-floor-under-the-owner-minimum"),
+        # Astra r2 D: a paint-red variant's registered ids never count without a registered floor.
+        pytest.param(None, 108, "fail", id="known-bad-paint-red-arm-without-a-floor"),
     ])
     @pytest.mark.parametrize(("build", "status_of", "verdict_of"), [
-        pytest.param(lambda: _red_result([P2_CARRY34]), probe.red_arm_status,
+        pytest.param(lambda: dict(_red_result([P2_CARRY34]), redArm="core:no-pin-hold"), probe.red_arm_status,
                      lambda r: r["arm"].setdefault(P2_CARRY34, {"verdict": False}), id="host-red-arm"),
         pytest.param(lambda: _passg_red_result(), probe.passg_red_status,
                      lambda r: r["armed"]["destinations"][-1]["advanceCarry"]["verdicts"][P2_CARRY34], id="pass-g-red-arm"),
@@ -8093,8 +8095,8 @@ class TestRedArmStatus:
         """Astra r1 #5 / decision 3: matching red ids with a one-frame failure never pass a floored arm. The
         registrations stay empty until V3; any floor is keyed by a registered arm."""
         result = build()
-        if run is not None:
-            verdict_of(result)["paint"] = {"status": "fail", "longestRun": run}
+        verdict_of(result)["paint"] = {"status": "fail", "longestRun": run} if run is not None else None
+        result.pop("paintFloor", None)
         if floor is not None:
             result["paintFloor"] = floor
         assert status_of(result)[0] == status
@@ -9667,8 +9669,10 @@ def _passg_red_result(expected: Any = (f"G1-3-4:{P2_CARRY34}",), leg_verdict: bo
         result[session]["continuity"] = {"mode": "qualified", "sha256": sha}
     leg = result["armed"]["destinations"][-1]
     leg["advanceCarry"] = _leg(leg_verdict)
+    leg["advanceCarry"]["verdicts"][P2_CARRY34]["paint"] = {"status": "fail", "longestRun": 108}
     leg["verdict"] = probe.combine_verdicts(True, leg_verdict)
-    result.update(redArm="core:no-pin-hold", expectedCoreSha256=sha, expectedRedSet=list(expected) if expected is not None else None)
+    result.update(redArm="core:no-pin-hold", expectedCoreSha256=sha, expectedRedSet=list(expected) if expected is not None else None,
+                  paintFloor=probe.PAINT_FLOOR_MIN_FRAMES)
     result["redSet"], result["unknown"] = probe.passg_red_ids(result)
     return result
 
