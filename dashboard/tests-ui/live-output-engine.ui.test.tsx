@@ -6,6 +6,7 @@ import type { LiveClient, LiveEngine, LiveEngineAction, LiveEngineWarning } from
 function engineState(overrides: Partial<LiveEngine> = {}): LiveEngine {
   return {
     state: "ready",
+    taken: !["stopped", "unavailable"].includes(overrides.state || "ready"),
     obs: { path: "/Applications/OBS.app", version: "32.2.2", pinned: "32.2.2" },
     rate: { output: 25, canvas: "25 PAL", source: 50 },
     device: { name: "UltraStudio HD Mini", set: true },
@@ -18,6 +19,7 @@ function engineState(overrides: Partial<LiveEngine> = {}): LiveEngine {
 
 function client(overrides: Partial<LiveClient> = {}): LiveClient {
   return {
+    qualification: vi.fn(async (previewJobId) => ({ previewJobId, name: "Sunday service", slides: 3, sourceDigest: "source", qualified: true, reason: null })),
     state: vi.fn(async () => null),
     decks: vi.fn(async () => []),
     displays: vi.fn(async () => []),
@@ -39,7 +41,7 @@ const WARNINGS: [LiveEngineWarning, string[]][] = [
   [{ id: "obsSafeMode", severity: "block", text: "OBS started in Safe Mode, so Alpha Keynote cannot watch it. Press Restart output engine and choose Normal Mode when OBS asks." }, ["Restart output engine"]],
   [{ id: "obsExited", severity: "block", text: "OBS stopped unexpectedly — nothing is going to the keyer. Press Restart output engine. OBS may then ask a question (see Show OBS)." }, ["Restart output engine"]],
   [{ id: "noDevice", severity: "warn", text: "No output device set for 25 fps — the keyer receives nothing. With the UltraStudio connected, press Set up output device (one time)." }, ["Set up output device"]],
-  [{ id: "deviceInactive", severity: "block", text: "Alpha Keynote cannot open the UltraStudio. If ProPresenter is running, remove its SDI screen in Screen Configuration or quit ProPresenter; otherwise check the Thunderbolt cable and Desktop Video. Then press Release output and Take output again." }, ["Release output", "Take output"]],
+  [{ id: "deviceInactive", severity: "block", text: "Alpha Keynote cannot open the UltraStudio. If ProPresenter is running, remove its SDI screen in Screen Configuration or quit ProPresenter; otherwise check the Thunderbolt cable and Desktop Video. Then press Release output and Take output again." }, []],
   [{ id: "stuck", severity: "block", text: "OBS is not responding to Quit. Press Show OBS and quit it from the OBS menu, then press Check again." }, ["Show OBS", "Check again"]],
   [{ id: "ownedElsewhere", severity: "block", text: "The output engine is being used by another dashboard window (pid 4242). Close that dashboard first." }, ["Check again"]],
   [{ id: "obsUnreachable", severity: "block", text: "Alpha Keynote cannot reach OBS. Press Restart output engine.", action: "restart" }, ["Restart output engine"]],
@@ -95,7 +97,7 @@ describe("OutputEngine", () => {
     const enabled = within(item).queryAllByRole("button").filter((button) => !(button as HTMLButtonElement).disabled).map((button) => button.textContent);
     expect(enabled).toEqual(ENABLED_WHILE_LOADED[warning.id]);
     expect(buttons).toEqual(expect.arrayContaining(ENABLED_WHILE_LOADED[warning.id]));
-    for (const take of screen.getAllByRole("button", { name: "Take output" })) expect(take).toBeDisabled();
+    for (const take of screen.getAllByRole("button", { name: /^(Take|Release) output$/ })) expect(take).toBeDisabled();
   });
 
   it.each(["obsPageLost", "engineError"])("offers Restart output engine during a session for %s", async (id) => {
@@ -123,12 +125,16 @@ describe("OutputEngine", () => {
     });
     render(<OutputEngine client={api} sessionLoaded={false} pollMs={60_000} />);
     await screen.findByText("Output engine · Released");
-    expect(screen.getByRole("button", { name: "Release output" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "Take output" }));
+    expect(screen.queryByRole("button", { name: "Release output" })).not.toBeInTheDocument();
+    const toggle = screen.getByRole("button", { name: "Take output" });
+    expect(toggle).toHaveClass("live-take-output");
+    fireEvent.click(toggle);
     await waitFor(() => expect(api.engineAction).toHaveBeenCalledWith("start"));
     await screen.findByText("Output engine · Ready");
-    expect(screen.getByRole("button", { name: "Take output" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "Release output" }));
+    expect(screen.queryByRole("button", { name: "Take output" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Release output" })).toBe(toggle);
+    expect(toggle).toHaveClass("live-release-output");
+    fireEvent.click(toggle);
     await waitFor(() => expect(api.engineAction).toHaveBeenCalledWith("quit"));
     await screen.findByText("Output engine · Released");
     expect(api.engineAction).toHaveBeenCalledTimes(2);
@@ -138,6 +144,24 @@ describe("OutputEngine", () => {
     const api = client({ engine: vi.fn(async () => engineState({ state: "stopped" })) });
     render(<OutputEngine client={api} sessionLoaded={false} pollMs={60_000} />);
     await screen.findByText("Output engine · Released");
+    expect(api.engineAction).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("uses reported output ownership for the toggle when blocked (taken: %s)", async (taken) => {
+    const api = client({ engine: vi.fn(async () => engineState({ state: "blocked", taken })) });
+    render(<OutputEngine client={api} sessionLoaded={false} pollMs={60_000} />);
+    await screen.findByText("Output engine · Blocked");
+    const toggle = screen.getByRole("button", { name: taken ? "Release output" : "Take output" });
+    expect(screen.queryByRole("button", { name: taken ? "Take output" : "Release output" })).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+    await waitFor(() => expect(api.engineAction).toHaveBeenCalledWith(taken ? "quit" : "start"));
+  });
+
+  it("keeps the toggle disabled until release is observed", async () => {
+    const api = client({ engine: vi.fn(async () => engineState({ state: "quitting", taken: true })) });
+    render(<OutputEngine client={api} sessionLoaded={false} pollMs={60_000} />);
+    expect(await screen.findByRole("button", { name: "Releasing output…" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Take output" })).not.toBeInTheDocument();
     expect(api.engineAction).not.toHaveBeenCalled();
   });
 
@@ -232,6 +256,7 @@ describe("OutputEngine", () => {
       const view = render(<OutputEngine client={client({ engine })} sessionLoaded={false} pollMs={2000} onEngine={onEngine} />);
       await act(async () => {});
       expect(screen.getByText("Output engine · Starting")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Taking output…" })).toBeDisabled();
       await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
       expect(screen.getByText("Output engine · Ready")).toBeInTheDocument();
       expect(engine).toHaveBeenCalledTimes(2);

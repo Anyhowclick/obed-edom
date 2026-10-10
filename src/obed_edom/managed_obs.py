@@ -425,6 +425,7 @@ class ManagedObs:
                 state, reason = self._state, self._reason
             payload: dict[str, Any] = {
                 "state": state,
+                "taken": self._pid is not None,
                 "obs": {"path": obs["path"], "version": obs["version"], "pinned": PINNED_OBS},
                 "rate": rate_info(self._rate),
                 "device": {"name": (device or {}).get("deviceName"), "set": mode_set},

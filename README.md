@@ -16,7 +16,7 @@ If macOS blocks the launcher, Control-click it and choose **Open**.
 
 - **Sermon Base Generator** — create LW and DSK decks, an operator-cued Word outline, previews, and a review PDF.
 - **Sermon Checker** — check an outline, one deck, or an LW/DSK pair for cue, wording, layout, photo, and house-style issues. Checks do not alter the source files.
-- **Alpha Keynote** — experimental presenter for a prepared 16:9 Keynote HTML export, with current/upcoming stills, slide-number navigation, and a separate silent display output. Native HTML alpha and movie continuity are not qualified; DeckLink fill/key is not available yet.
+- **Alpha Keynote** — drop or choose a Keynote, qualify it against the current playback allowlist, then present using a slide grid and current still preview. Supports silent screen output and managed DeckLink fill/key output.
 - **CG Resizer** — turn a finalised wide-wall deck into a 16:9 CG deck and review any framing choices.
 - **DSK Generator** — turn a full-wall (FW) deck into a lower-thirds (DSK) deck; the DSK template is optional for image/video decks (the wall deck's own transparent layout, then the reference deck, are tried first), required for reformatted text verses; chosen once and remembered on this Mac, shared with Sermon Base Generator.
 - **Maps** — build and export map slides for LW, DSK, and CG.
@@ -54,18 +54,33 @@ The generator writes one operator cue for every generated slide into the `_CUED.
 
 ## Alpha Keynote experiment
 
-Prepare a deck using **Sermon Checker → Build Preview**, then select that prepared
-deck and a detected display in **Alpha Keynote**. Starting creates one hidden
+In **Alpha Keynote**, drop a `.key` file from Finder or **Choose on this Mac**.
+**Qualify Keynote** prepares a cached HTML
+export from a scratch copy and checks the current playback allowlist. A prepared
+deck from **Sermon Checker → Build Preview** can also be selected. Unqualified
+decks show the refusal reason and cannot start. Movie continuity is enabled
+automatically when qualified.
+The server checks the export and allowlist again when starting.
+
+Choose the output under **Output settings**, then **Start output session**.
+For UltraStudio, **Enable Keyer** sends fill/key for overlaying slides on live
+video. **Take output** turns into **Release output** once the engine is running.
+Starting creates one hidden
 output session; **Show output** makes it visible. The 16:9 picture fits inside
 the display without stretching. HDMI hiding produces black and leaves playback
-running. Type an original slide number and press Enter to restart that slide at
-its initial state. Skipped slides are unavailable. Build Preview and live output
+running. Click a thumbnail or type an original slide number and press Enter to
+restart that slide at its initial state. The right chevron, right arrow, or Space
+advances the next build or slide. The left chevron or left arrow restarts the
+previous playable slide; reverse-build is unavailable. Skipped slides are disabled.
+Build Preview and live output
 both draw Magic Move objects at Keynote's opacity; `OBED_LIVE_MM_OPACITY=off`
 turns this off for both.
 
 Switching tabs or closing the presenter does not stop output. **Stop session**
 ends it. Keep the dashboard server running; restarting the server does not restore
-a movie position. Current/upcoming pictures are still previews, and presenter
+a movie position. The Current picture and grid thumbnails are still previews;
+the chevrons sit directly below Current. Motion preview, video pause/play, and loop
+overrides are deferred. Presenter
 notes are unavailable in the current HTML preparation path. Audio is disabled.
 Only the recognised Keynote player version and manual presentation mode are
 accepted. This experiment does not enable the separate DSK animation-file exporter.

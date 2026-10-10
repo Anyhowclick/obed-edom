@@ -22,7 +22,7 @@ const WARNING_ACTIONS: Record<string, LiveEngineAction[]> = {
   engineError: ["restart"],
   obsUnreachable: ["restart"],
   noDevice: ["setupDevice"],
-  deviceInactive: ["quit", "start"],
+  deviceInactive: [],
   stuck: ["show", "check"],
   obsIdentityUnknown: ["check"],
   ownedElsewhere: ["check"],
@@ -112,8 +112,9 @@ export function OutputEngine({ client, sessionLoaded, pollMs = 2000, onEngine }:
   const state = engine?.state;
   const setup = engine?.setup ?? null;
   const locked = (action: LiveEngineAction, warningId?: string) => busy || (sessionLoaded && !allowedWhileLoaded(action, warningId));
-  const takeDisabled = locked("start") || !engine || state === "starting" || state === "ready" || state === "quitting";
-  const releaseDisabled = locked("quit") || !engine || state === "stopped" || state === "unavailable" || state === "quitting";
+  const outputAction = engine?.taken ? "quit" : "start";
+  const outputDisabled = locked(outputAction) || !engine || state === "unavailable" || state === "starting" || state === "quitting";
+  const outputLabel = state === "starting" ? "Taking output…" : state === "quitting" ? "Releasing output…" : ACTION_LABELS[outputAction];
   return <div className="live-engine" aria-label="Output engine">
     <p className="live-engine-state">
       <span className="live-continuity-badge" data-mode={state === "ready" ? "qualified" : state === "blocked" || state === "stuck" ? "unsupported" : "unknown"}>
@@ -123,8 +124,7 @@ export function OutputEngine({ client, sessionLoaded, pollMs = 2000, onEngine }:
     </p>
     <p className="note">Output device · {engine?.device.set ? engine.device.name || "Set up" : "Not set up"}</p>
     <div className="actions">
-      <button type="button" className="btn" disabled={takeDisabled} title={sessionLoaded ? "Stop the show first." : ""} onClick={() => void run("start")}>{ACTION_LABELS.start}</button>
-      <button type="button" className="btn secondary" disabled={releaseDisabled} title={sessionLoaded ? "Stop the show first." : ""} onClick={() => void run("quit")}>{ACTION_LABELS.quit}</button>
+      <button type="button" className={`btn live-output-toggle ${outputAction === "start" ? "live-take-output" : "live-release-output"}`} disabled={outputDisabled} title={sessionLoaded ? "Stop the show first." : ""} onClick={() => void run(outputAction)}>{outputLabel}</button>
     </div>
     {message && <p role="alert">{message}</p>}
     {setup !== null && <div className="live-engine-setup" aria-label="Output device setup">
@@ -139,7 +139,7 @@ export function OutputEngine({ client, sessionLoaded, pollMs = 2000, onEngine }:
         aria-label={warning.text}
       >
         <span>{warning.text}</span>
-        {warningActions(warning).map((action) => <button type="button" key={action} className="btn secondary" disabled={locked(action, warning.id)} title={locked(action, warning.id) && sessionLoaded ? "Stop the show first." : ""} onClick={() => void run(action)}>{ACTION_LABELS[action]}</button>)}
+        {warningActions(warning).map((action) => <button type="button" key={action} className={`btn secondary${action === "setupDevice" ? " live-setup-device" : ""}`} disabled={locked(action, warning.id)} title={locked(action, warning.id) && sessionLoaded ? "Stop the show first." : ""} onClick={() => void run(action)}>{ACTION_LABELS[action]}</button>)}
       </li>)}
     </ul>}
   </div>;

@@ -152,6 +152,7 @@ def client_for(tmp_path, monkeypatch, engine=None, events=None):
     monkeypatch.setattr(live, 'safe_export_file', lambda *_: thumb)
     monkeypatch.setattr(live, 'file_sha256', lambda *_: live.PLAYER_SHA256)
     monkeypatch.setattr(live, 'load_header', lambda *_: ({'slideWidth': 1920, 'slideHeight': 1080, 'showMode': 0}, 'header.json'))
+    monkeypatch.setattr(live, 'derive_runtime', lambda *args, **kwargs: (None, {}))
     claims, releases = [], []
     events = events if events is not None else []
 
@@ -323,12 +324,13 @@ def test_live_api_attach_mode_starts_without_consulting_displays(tmp_path, monke
     job = SimpleNamespace(id='prepared', kind='html-preview', status='done', result={
         'phase': 'ready', 'path': '/example/deck.key', 'exportKey': export_key,
         'sourceDigest': digest, 'manifest': {'playerDigest': live.PLAYER_SHA256},
-        'slides': [],
+        'slides': [{'originalOrdinal': 1, 'playerIndex': 0, 'skipped': False}],
     })
     runner = SimpleNamespace(get=lambda key: job if key == job.id else None, list=lambda **kwargs: [job])
     monkeypatch.setattr(live, 'registered_export_root', lambda *_: root)
     monkeypatch.setattr(live, 'file_sha256', lambda *_: live.PLAYER_SHA256)
     monkeypatch.setattr(live, 'load_header', lambda *_: ({'slideWidth': 1920, 'slideHeight': 1080, 'showMode': 0}, 'header.json'))
+    monkeypatch.setattr(live, 'derive_runtime', lambda *args, **kwargs: (None, {}))
     service = LiveSessionService()
 
     def host_factory(export_root, slides, *, display_id=None, continuity="auto"):
@@ -655,3 +657,72 @@ def test_routes_only_use_engine_attributes_the_real_managed_obs_has():
 
     assert "reset_page" in inspect.signature(ManagedObs.check).parameters
     assert list(inspect.signature(ManagedObs.apply_settings).parameters)[1:] == ["mode", "rate", "keyer"]
+
+
+def test_deck_qualification_checks_allowlist_without_starting_output(tmp_path, monkeypatch):
+    client, claims, _, _, adapters, _ = client_for(tmp_path, monkeypatch)
+    response = client.get('/api/live/decks/prepared/qualification')
+    assert response.status_code == 200
+    assert response.json() == {
+        'previewJobId': 'prepared', 'name': 'deck.key', 'sourceDigest': 'source',
+        'slides': 1, 'qualified': True, 'reason': None,
+    }
+    assert not claims
+    assert not adapters
+    assert client.get('/api/live').json() is None
+
+
+def test_qualification_refusal_also_blocks_start_even_with_continuity_off(tmp_path, monkeypatch):
+    client, claims, _, _, adapters, _ = client_for(tmp_path, monkeypatch)
+    monkeypatch.setattr(live, 'derive_runtime', lambda *args, **kwargs: live.Unsupported('outside the measured allowlist'))
+    report = client.get('/api/live/decks/prepared/qualification').json()
+    assert report['qualified'] is False
+    assert report['reason'] == 'outside the measured allowlist'
+    response = client.post('/api/live', json={'previewJobId': 'prepared', 'continuity': 'off'})
+    assert response.status_code == 409
+    assert 'outside the measured allowlist' in response.json()['detail']
+    assert not adapters
+    assert not claims
+
+
+def test_start_rechecks_qualification_instead_of_trusting_prior_result(tmp_path, monkeypatch):
+    client, claims, _, _, adapters, _ = client_for(tmp_path, monkeypatch)
+    assert client.get('/api/live/decks/prepared/qualification').json()['qualified']
+    monkeypatch.setattr(live, 'derive_runtime', lambda *args, **kwargs: live.Unsupported('export changed'))
+    assert client.post('/api/live', json={'previewJobId': 'prepared'}).status_code == 409
+    assert not adapters
+    assert not claims
+
+
+@pytest.mark.parametrize('invalid', ['player', 'canvas', 'mode', 'media', 'slides'])
+def test_qualification_uses_same_export_checks_as_start(tmp_path, monkeypatch, invalid):
+    client, _, _, job, adapters, _ = client_for(tmp_path, monkeypatch)
+    if invalid == 'player':
+        job.result['manifest']['playerDigest'] = 'changed'
+    elif invalid in ('canvas', 'mode'):
+        header = {'slideWidth': 7680 if invalid == 'canvas' else 1920, 'slideHeight': 1080, 'showMode': 1 if invalid == 'mode' else 0}
+        monkeypatch.setattr(live, 'load_header', lambda *_: (header, 'header.json'))
+    elif invalid == 'media':
+        job.result['slides'][0]['unsupportedMedia'] = ['remote video']
+    else:
+        job.result['slides'] = []
+    report = client.get('/api/live/decks/prepared/qualification')
+    start = client.post('/api/live', json={'previewJobId': 'prepared'})
+    assert report.status_code == start.status_code == 409
+    assert report.json()['detail'] == start.json()['detail']
+    assert not adapters
+
+
+def test_keyer_qualification_uses_gl_plan_and_native_fallback(tmp_path, monkeypatch):
+    client, _, _, _, _, _ = client_for(tmp_path, monkeypatch)
+    settings_mod.save_settings({'akOutputMode': 'keyer'}, validate_dir=False)
+    monkeypatch.delenv('OBED_LIVE_GL_REPLAY', raising=False)
+    calls = []
+
+    def derive(*args, **kwargs):
+        calls.append(kwargs.get('gl_replay', False))
+        return live.Unsupported('no GL plan') if kwargs.get('gl_replay') else (None, {})
+
+    monkeypatch.setattr(live, 'derive_runtime', derive)
+    assert client.get('/api/live/decks/prepared/qualification').json()['qualified']
+    assert calls == [True, False]
