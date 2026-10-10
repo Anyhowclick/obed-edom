@@ -388,6 +388,11 @@ class TestBackgroundAlpha:
         assert probe.background_alpha(css) == expected
 
 
+def _sampler_ok() -> dict[str, Any]:
+    """A schema-2 sampler record whose self-check passed: what every fresh arm must carry."""
+    return {"schema": 2, "meta": {"rafTicks": 10, "prepaint": 10}, "selfCheck": {"ok": True}}
+
+
 def _base_result() -> dict[str, Any]:
     """The all-green host artifact every `overall_status` table below deviates from."""
 
@@ -400,7 +405,7 @@ def _base_result() -> dict[str, Any]:
             "status": "pass" if verdict is True else "fail",
         }
 
-    return {
+    result = {
         # The 1->2 destination slide, derived by the probe from the plan (never
         # hardcoded as "slide 2"): the slide the Voff control must be RED on.
         "groundTruth": {"boundaryPlayerIndex": 1},
@@ -445,6 +450,9 @@ def _base_result() -> dict[str, Any]:
             "stageFit": verdict(True),
         },
     }
+    for entry in (*result["arms"].values(), result["attach"]):
+        entry["sampler"] = _sampler_ok()
+    return result
 
 
 class TestOverallStatusTruthTable:
@@ -6341,7 +6349,7 @@ class _WrapTransport:
             return FW_SEEKED + 2000.0
         if expression == probe.FORCE_WRAP_READ_JS:
             return _fw_recorder()
-        if expression == "window.__obedContinuityProbe__.samples":
+        if expression == probe.SAMPLER_DRAIN_JS:
             return []
         if expression == probe.PAGE_ERRORS_JS:
             return [{"kind": "player-build-error", "t": FW_SEEKED - 500.0, "detail": {"message": "before the seek"}}]
@@ -6371,7 +6379,12 @@ class _WrapHost:
 
 
 class TestRunForceWrap:
-    def test_one_take_seeks_the_source_presses_once_and_scores(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(("self_check", "status"), [(True, "pass"), (False, "invalid")])
+    def test_one_take_seeks_the_source_presses_once_and_scores(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, self_check: bool, status: str,
+    ) -> None:
+        """Plan §3.3: the force-wrap drive records the same sampler meta as the arms, and a take
+        whose sampler cannot vouch for its rows is never a pass."""
         hosts: list[_WrapHost] = []
 
         def host(*args: Any, **kwargs: Any) -> _WrapHost:
@@ -6406,6 +6419,7 @@ class TestRunForceWrap:
         monkeypatch.setattr(probe, "CLICK_DELAY_S", 0.0)
         monkeypatch.setattr(probe, "POST_ADVANCE_SETTLE_S", 0.0)
         monkeypatch.setattr(probe, "forced_window", lambda *a: _fw_window())
+        monkeypatch.setattr(probe, "sampler_record", lambda transport, rows: dict(_sampler_ok(), selfCheck={"ok": self_check}))
 
         args = probe.parse_args(["--force-wrap", "3to4:375", "--fixture", str(tmp_path)])
         result = probe.run_force_wrap(args)
@@ -6418,7 +6432,9 @@ class TestRunForceWrap:
         assert scored["loop_period_s"] == FW_PERIOD
         assert scored["min_window_start"] == FW_SEEKED + probe.FORCE_WRAP_WINDOW_AFTER_SEEK_MS
         assert scored["transition_scene"] == 7
-        assert (result["status"], result["forced"]["outcome"]) == ("pass", "carried")
+        assert (result["status"], result["forced"]["outcome"]) == (status, "carried")
+        assert result["sampler"]["selfCheck"]["ok"] is self_check
+        assert hosts[0].transport.evaluations.index(probe.SAMPLER_STOP_JS) < hosts[0].transport.evaluations.index(probe.SAMPLER_DRAIN_JS)
         assert len(result["pageErrorNotes"]) == 1 and result["forced"]["pageErrors"] == []
 
 
@@ -7383,7 +7399,14 @@ class TestAssetKeysAreExactNames:
             return [vid('http://h/x/ba.mov-0.0000-10.0000.mov'), vid('http://h/x/a.mov-0.0000-10.0000.mov'), vid('http://h/x/c.mov')];
           }},
           contains: function(){{ return true; }},
+          createElement: function(){{ return {{style: {{}}, attachShadow: function(){{ return {{appendChild: function(){{}}}}; }}}}; }},
+          documentElement: {{appendChild: function(){{}}}},
         }};
+        global.location = {{hash: '#1'}};
+        global.ResizeObserver = function(){{ this.observe = function(){{}}; }};
+        global.WeakRef = function(v){{ this.deref = function(){{ return v; }}; }};
+        global.Element = function(){{}};
+        Element.prototype.checkVisibility = function(){{ return true; }};
         {probe.SAMPLER_JS}
         tick();
         console.log(JSON.stringify(asked));
@@ -7684,8 +7707,27 @@ class TestRescoreGenerated:
 
 
 class TestGotoMatrixFromThePlan:
-    def test_p2_is_todays_matrix(self) -> None:
-        assert probe.goto_matrix(probe.verdict_specs(_p2_plan()), 4) == probe.GOTO_MATRIX
+    def test_p2_is_todays_matrix_plus_its_bridge_leg(self) -> None:
+        """Owner decision 5: P2's one expected-True carry (the 3->4 bridge) gains its advance leg."""
+        assert probe.goto_matrix(probe.verdict_specs(_p2_plan()), 4) == (*probe.GOTO_MATRIX, (1, 3, 4))
+
+    @pytest.mark.parametrize("deck", ["P2", "D1", "D2", "D3", "D4", "D5", "D6"])
+    def test_every_expected_true_carry_of_a_committed_deck_gets_one_advance_leg(self, deck: str) -> None:
+        """Plan §3.8, from the committed deck plan: the matrix is today's fitting cases followed by
+        exactly one leg per distinct expected-True carry boundary, each a goTo away from the source
+        first (slide 1, or slide 2 when the source is slide 1), then the source, then the advance."""
+        plan = _deck_plan(deck)
+        slides = len(plan.scene_index_by_player)
+        matrix = probe.goto_matrix(probe.verdict_specs(plan), slides)
+        base = tuple(case for case in probe.GOTO_MATRIX if max(case) <= slides)
+        legs = matrix[len(base):]
+        assert matrix[:len(base)] == base
+        carried = {
+            (spec["fromPlayer"] + 1, spec["toPlayer"] + 1) for spec in probe.verdict_specs(plan)
+            if spec["kind"] == "carry" and spec["expect"] is True
+        }
+        assert carried and sorted((src, dst) for _, src, dst in legs) == sorted(carried)
+        assert all(first == (2 if src == 1 else 1) and dst <= slides for first, src, dst in legs)
 
     def test_a_chain_adds_goto_mid_chain_then_advance_across_the_next_carry(self) -> None:
         pin = _MOVIE(BIG_ASSET, "pin", _RECT(**BIG_INSTANCE), _RECT(**BIG_INSTANCE))
@@ -7694,7 +7736,7 @@ class TestGotoMatrixFromThePlan:
             (_BOUNDARY(0, 1, (pin,)), _BOUNDARY(1, 2, (bridge,), 1.5)), {0: 0, 1: 2, 2: 4},
             {0: {BIG_ASSET: [BIG_INSTANCE]}, 1: {BIG_ASSET: [BIG_INSTANCE]}, 2: {BIG_ASSET: [OTHER_INSTANCE]}},
         )
-        assert probe.goto_matrix(probe.verdict_specs(plan), 3) == ((1, 2), (1, 3), (3, 1), (1, 2, 3))
+        assert probe.goto_matrix(probe.verdict_specs(plan), 3) == ((1, 2), (1, 3), (3, 1), (2, 1, 2), (1, 2, 3))
 
     def test_overall_status_g_counts_against_the_recorded_matrix(self) -> None:
         matrix = [[1, 2], [1, 2, 3]]
@@ -7976,7 +8018,8 @@ STRAY4 = "stray:slide4:vid-20250608-wa0125.mp4"
 
 def _red_result(red: list[str], expected: Any = (P2_CARRY34,), **arm: Any) -> dict[str, Any]:
     sha = probe.js_sha256()
-    entry = {"continuity": {"mode": "qualified", "sha256": sha}, "stageFit": {"verdict": True}, "unplannedWraps": [], **arm}
+    entry = {"continuity": {"mode": "qualified", "sha256": sha}, "stageFit": {"verdict": True}, "unplannedWraps": [],
+             "sampler": _sampler_ok(), **arm}
     return {
         "redArm": "strip:bridge@8", "expectedCoreSha256": sha, "arm": entry, "redSet": sorted(red),
         "unknown": [], "expectedRedSet": list(expected) if isinstance(expected, tuple) else expected,
@@ -8108,7 +8151,7 @@ def _generated_result() -> dict[str, Any]:
     ]
     pin, bridge = specs[0]["id"], specs[1]["id"]
     green = {"verdict": True}
-    arm = {"continuity": {"mode": "qualified"}, "stageFit": {"verdict": True}, pin: green, bridge: green}
+    arm = {"continuity": {"mode": "qualified"}, "stageFit": {"verdict": True}, "sampler": _sampler_ok(), pin: green, bridge: green}
     off = dict(arm, continuity={"mode": "off"}, **{bridge: {"verdict": False}})
     stripped = dict(arm, **{bridge: {"verdict": False}})
     visible = {name: {"verdict": True} for name in ("V", "Voff")}
@@ -9307,3 +9350,421 @@ class TestCarryCoverCli:
             probe.main()
         result = json.loads(artifact.read_text())
         assert (result["status"], result["error"]) == ("error", "chrome died")
+
+
+# --- painted instrument, stream B (`.agents/plans/keynote_live_continuity_instrument.plan.md` §3.2-§3.10) ---------
+
+
+def _v2(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Mark sampler rows as schema 2: a frame `seq`/`ts`, and a pre-paint read whose videos mirror
+    the rAF-phase ones (same probe id, src and authored rect)."""
+    for index, row in enumerate(samples):
+        row.update(seq=index + 1, ts=row["t"], hash=f"#{row['scene']}", sceneCount=99)
+        row["pp"] = {
+            "seq": index + 1, "ts": row["t"], "t": row["t"] + 1.0, "cover": False,
+            "stageBox": {"x": 0.0, "y": 0.0, "w": 1920.0, "h": 1080.0},
+            "videos": [{
+                "id": v["id"], "src": v["src"], "rect": dict(v["rect"]), "visibleRect": dict(v["rect"]),
+                "connected": True, "facade": False, "suppressed": False, "readyState": 4, "seeking": False,
+                "videoWidth": 640, "videoHeight": 360, "opacity": 1.0, "checkVisibility": True, "visibility": "visible",
+                "displayNone": None, "hiding": None, "effects": None, "parent": "div#body", "layer": None,
+            } for v in row["videos"]],
+        }
+    return samples
+
+
+class TestSamplerV2:
+    def test_the_sampler_keeps_the_detach_literals_and_feeds_tick_the_frame_time(self) -> None:
+        """Plan §3.2: `detach_experiment.py` patches `tick(){` into `tick(ts){` and the push literal, so
+        both stay byte-for-byte exactly once and `rafTs` never appears; `frame(ts)` runs the control
+        hook, then `tick(ts)` WITH the frame time, then the pre-paint toggle. Overflow drops the row
+        and counts it instead of the silent `samples.shift()`."""
+        js = probe.SAMPLER_JS
+        assert js.count("  function tick(){\n    var t = performance.now();\n") == 1
+        assert js.count("samples.push({t: t, scene: state.sceneId,") == 1
+        assert "window.__obedContinuityProbe__ = {samples" in js and "rafTs" not in js
+        frame = js[js.index("function frame(ts){"):]
+        assert frame.index("ctl.tick(frameSeq, ts)") < frame.index("tick(ts);") < frame.index("prepaint.toggle(frameSeq, ts)")
+        assert "samples.shift()" not in js and "meta.overflow++" in js
+        assert "seq: frameSeq, ts: frameTs, hash:" in js and "sceneCount:" in js
+
+    def test_drive_stops_the_sampler_then_drains_it_in_chunks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Plan §2.1/§3.2: rows are read in bounded chunks until empty, after the sampler stopped (so
+        its meta and its rows describe the same frames)."""
+        chunks = [[{"t": 1.0}, {"t": 2.0}], [{"t": 3.0}], []]
+        evaluations: list[str] = []
+
+        def evaluate(js: str) -> Any:
+            evaluations.append(js)
+            return chunks.pop(0) if js == probe.SAMPLER_DRAIN_JS else None
+
+        monkeypatch.setattr(probe, "wait_for_decode", lambda player: True)
+        monkeypatch.setattr(probe.time, "sleep", lambda s: None)
+        player = _SlidesPlayer(1)
+        player.transport.evaluate = evaluate
+        assert probe.drive_and_sample(player) == [{"t": 1.0}, {"t": 2.0}, {"t": 3.0}]
+        assert evaluations[0] == probe.SAMPLER_JS
+        assert evaluations[-4:] == [probe.SAMPLER_STOP_JS, *[probe.SAMPLER_DRAIN_JS] * 3]
+        assert probe.SAMPLER_DRAIN_JS.endswith(f".drain({probe.SAMPLER_DRAIN_ROWS})")
+
+    @pytest.mark.parametrize("valid", [True, False])
+    def test_pre_paint_rects_and_stage_box_convert_to_authored_or_the_read_is_unreadable(self, valid: bool) -> None:
+        """Plan §3.4: `pp` rects and stage box use the read's own stage map (screen values kept); an
+        untrustworthy map removes the read, so its frame scores as unobserved, never as offscreen."""
+        stage = dict(SCALED_STAGE_MAP_4_3) if valid else {"s": 1.0, "sy": 2.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1.0, "offsetHeight": 1.0}
+        screen = _screen_rect(SRC_RECT, SCALED_STAGE_MAP_4_3)
+        pp = {"stageMap": stage, "stageBox": dict(screen), "videos": [{"id": 1, "rect": dict(screen), "visibleRect": dict(screen)}]}
+        row = sample(0.0, 1, video(id=1, el_id=1, t=0.0, scene=1, current_time=1.0, rect=screen), stage_map=SCALED_STAGE_MAP_4_3)
+        converted = probe.convert_samples_to_authored([dict(row, pp=pp)])[0][0]
+        if not valid:
+            assert "pp" not in converted and converted["ppUnreadable"] == pp
+            return
+        pv = converted["pp"]["videos"][0]
+        for key in ("rect", "visibleRect"):
+            assert pv[key] == pytest.approx(SRC_RECT) and pv[f"{key}Screen"] == screen
+        assert converted["pp"]["stageBox"] == pytest.approx(SRC_RECT) and converted["pp"]["stageBoxScreen"] == screen
+
+    @pytest.mark.parametrize(("mutate", "error"), [
+        (lambda rows: rows[0].pop("seq"), "mix sampler schemas"),
+        (lambda rows: rows[1].update(seq=True), "seq is not an integer"),
+        (lambda rows: rows[1].update(ts=float("nan")), "ts is not a finite number"),
+        (lambda rows: rows[1].update(pp=[]), "pp is not an object"),
+        (lambda rows: rows[1]["pp"]["videos"].append({"id": None}), "pp video id is unusable"),
+        (lambda rows: None, None),
+    ])
+    def test_schema_two_fields_are_validated_and_mixed_schemas_are_refused(self, mutate: Any, error: str | None) -> None:
+        """Plan §3.7: a malformed or mixed-schema row makes every carry INCONCLUSIVE (`score_carry`)."""
+        rows = _v2(rows_around_boundary(n_before=3, n_after=3))
+        for row in rows:
+            row.update(playerState="Playing", busy=False)
+        mutate(rows)
+        errors = probe.sample_schema_errors(rows)
+        assert any(error in e for e in errors) if error else errors == []
+        if error:
+            spec = {"asset": ASSET, "atScene": 2, "srcRect": SRC_RECT, "dstRect": DST_RECT, "transitionScene": None}
+            assert probe.score_carry(rows, spec, True)["verdict"] is None
+
+
+class TestCarryPaintWiring:
+    @pytest.mark.parametrize(("status", "verdict"), [("ok", True), ("fail", False), ("inconclusive", None)])
+    def test_the_paint_score_gates_a_v2_carry_and_paint_false_is_the_blind_legacy_scorer(
+        self, monkeypatch: pytest.MonkeyPatch, status: str, verdict: bool | None,
+    ) -> None:
+        """Plan §3.5 on a bridge: a v2 carry passes its own window, decoder, slot and the carry-cover
+        coverage constants to `score_paint`; fail -> False, inconclusive -> None with the reason. The
+        slot is the source before the move, the decoder's own pre-paint rect on the path during it
+        (none off the path), the destination after. `paint=False` is byte-identical to legacy rows
+        (no `paint` key): the blindness rescore."""
+        calls: list[dict[str, Any]] = []
+
+        def score_paint(rows: Any, element_id: Any, asset: str, **kwargs: Any) -> dict[str, Any]:
+            calls.append({"element_id": element_id, "asset": asset, **kwargs})
+            return {"status": status, "reasons": ["2 unpainted frames"]}
+
+        monkeypatch.setattr(probe.paint_instrument, "score_paint", score_paint)
+        samples = _v2(moving_boundary_samples())
+        scored = score_moving_boundary(samples)
+        assert scored["verdict"] is verdict and scored["paint"]["status"] == status
+        if verdict is None:
+            assert scored["reason"] == "inconclusive: paint 2 unpainted frames"
+        call = calls[0]
+        assert (call["element_id"], call["asset"], call["end"]) == (1, ASSET, scored["window"]["end"])
+        assert (call["iou_min"], call["rect_tolerance"]) == (probe.INSTANCE_IOU_MIN, probe.RECT_TOLERANCE_PX)
+        assert (call["max_gap_frames"], call["min_fps"]) == (probe.CARRY_COVER_MAX_GAP_FRAMES, probe.CARRY_COVER_MIN_FPS)
+        move = samples[25]
+        assert call["slot_of"](samples[0]) == SRC_RECT and call["slot_of"](samples[-1]) == DST_RECT
+        assert call["slot_of"](move) == move["pp"]["videos"][0]["rect"] != SRC_RECT
+        move["pp"]["videos"][0]["rect"] = dict(move["pp"]["videos"][0]["rect"], x=1500.0)
+        assert call["slot_of"](move) is None
+        assert call["stage_box_of"](samples[0]) == samples[0]["pp"]["stageBox"]
+        blind = probe.score_continuity(samples, ASSET, 8, SRC_RECT, DST_RECT, True, transition_scene=7, paint=False)
+        assert blind == score_moving_boundary(moving_boundary_samples()) and "paint" not in blind
+
+    def test_a_pin_held_dark_for_108_frames_is_red_and_reads_green_only_when_blind(self) -> None:
+        """Plan §1/§4 (the false green, `phaseD-867e415c` D5 b0to1): a pin whose decoder stays owned,
+        at its rect and decoded while an ancestor (layer104) holds it at opacity 0 for 108 frames.
+        The legacy scorer (`paint=False`, the blindness rescore) reads it True; per-frame paint reads
+        it False with exactly those frames, naming the hiding ancestor."""
+        samples = _v2(rows_around_boundary(n_before=150, n_after=60, src_rect=DST_RECT, dst_rect=DST_RECT))
+        for row in samples[40:148]:
+            row["pp"]["videos"][0].update(opacity=0.0, hiding={"node": "div#layer104", "prop": "opacity", "value": 0})
+        args = (samples, ASSET, 2.0, DST_RECT, DST_RECT, True)
+        assert probe.score_continuity(*args, paint=False)["verdict"] is True
+        scored = probe.score_continuity(*args)
+        paint = scored["paint"]
+        assert scored["verdict"] is False and paint["status"] == "fail"
+        assert paint["unpaintedFrames"] == paint["longestRun"] == 108 and paint["unpaintedSeqs"] == list(range(41, 149))
+        assert "div#layer104" in paint["reasons"][0]
+        for row in samples[40:148]:
+            row["pp"]["videos"][0].update(opacity=1.0, hiding=None)
+        assert probe.score_continuity(*args)["verdict"] is True
+
+    @pytest.mark.parametrize(("decoded_from", "floor", "expected"), [
+        pytest.param(0, None, 0.0, id="a-pin-transition-longer-than-the-pad-is-covered-from-the-settled-source"),
+        pytest.param(50, None, 800.0, id="never-before-the-first-decode-no-initial-load-false-red"),
+        pytest.param(200, None, 1184.0, id="no-decoded-settled-source-keeps-the-window-start"),
+        pytest.param(0, 1500.0, 1500.0, id="never-before-the-chain-clip"),
+    ])
+    def test_paint_start_is_grounded_at_the_first_decoded_settled_source_row(
+        self, decoded_from: int, floor: float | None, expected: float,
+    ) -> None:
+        """Plan §3.5: paintStart = max(clip, min(window.start, t0)), t0 the first settled row of
+        scene atScene-1 on which the carried decoder has readyState >= 2."""
+        samples = rows_around_boundary(n_before=200)
+        for index, row in enumerate(samples[:200]):
+            row["busy"] = False
+            row["videos"][0]["readyState"] = 4 if index >= decoded_from else 0
+        window = probe.find_boundary_window(samples, 2.0)
+        assert window["start"] == 1184.0
+        assert probe.paint_start(samples, 1, 2.0, window, floor) == expected
+
+    @pytest.mark.parametrize(("source_frames", "fresh_from", "expected"), [
+        (5, 6, {"frames": 1, "ms": 16.0, "t0": 80.0, "t1": 96.0}),
+        (5, 7, {"frames": 2, "ms": 32.0, "t0": 80.0, "t1": 112.0}),
+        (6, 6, {"frames": 0, "ms": 0.0, "t0": 96.0, "t1": 96.0}),
+        (5, None, {"frames": None, "reason": "the fresh decoder never painted its destination"}),
+    ])
+    def test_restart_slot_gap_is_reported(
+        self, monkeypatch: pytest.MonkeyPatch, source_frames: int, fresh_from: int | None, expected: dict[str, Any],
+    ) -> None:
+        """Plan §3.6 (report only; D2 restart@4 expects 1 frame): the pre-paint frames between the last
+        one painting the source instance and the first on which the fresh decoder paints its
+        destination; an unpainted element at the slot never closes the gap."""
+        monkeypatch.setattr(probe.paint_instrument, "painted_state", lambda pv, **kw: (pv["state"], None))
+        rows = []
+        for index in range(10):
+            videos = [{"id": 3, "src": ASSET, "rect": dict(DST_RECT), "state": "unpainted"}]
+            if index < source_frames:
+                videos.append({"id": 1, "src": ASSET, "rect": dict(SRC_RECT), "state": "painted"})
+            if fresh_from is not None and index >= fresh_from:
+                videos.append({"id": 2, "src": ASSET, "rect": dict(DST_RECT), "state": "painted"})
+            rows.append({"t": index * 16.0, "ts": index * 16.0, "seq": index, "pp": {"videos": videos}})
+        window = {"start": 0.0, "end": 1e9}
+        assert probe.restart_slot_gap(rows, {"asset": ASSET, "srcRect": SRC_RECT}, 2, window, [DST_RECT]) == expected
+
+
+LEG_SPEC = {"id": P2_CARRY34, "kind": "carry", "expect": True, "action": "bridge", "fromPlayer": 2, "toPlayer": 3}
+
+
+def _leg(verdict: bool | None = True, **extra: Any) -> dict[str, Any]:
+    return {"specs": [LEG_SPEC], "verdicts": {P2_CARRY34: {"verdict": verdict}}, "sampler": _sampler_ok(),
+            "verdict": verdict, **extra}
+
+
+def _g_leg_result() -> dict[str, Any]:
+    """A green Pass G result whose armed session carries P2's (1, 3, 4) advance leg."""
+    leg_dest = dict(_g_destination(1, 3, True), advanceTo=4, baseVerdict=True, advanceCarry=_leg())
+    armed = _g_arm([*(_g_destination(f, t, True) for f, t in probe.GOTO_MATRIX), leg_dest])
+    off = _g_arm([_g_destination(f, t, True) for f, t in [*probe.GOTO_MATRIX, (1, 3)]])
+    return {"matrix": [*map(list, probe.GOTO_MATRIX), [1, 3, 4]], "armed": armed, "nullControl": off}
+
+
+def _passg_red_result(expected: Any = (f"G1-3-4:{P2_CARRY34}",), leg_verdict: bool | None = False) -> dict[str, Any]:
+    sha = probe.variant_sha("no-pin-hold")
+    result = _g_leg_result()
+    for session in ("armed", "nullControl"):
+        result[session]["continuity"] = {"mode": "qualified", "sha256": sha}
+    leg = result["armed"]["destinations"][-1]
+    leg["advanceCarry"] = _leg(leg_verdict)
+    leg["verdict"] = probe.combine_verdicts(True, leg_verdict)
+    result.update(redArm="core:no-pin-hold", expectedCoreSha256=sha, expectedRedSet=list(expected) if expected is not None else None)
+    result["redSet"], result["unknown"] = probe.passg_red_ids(result)
+    return result
+
+
+def _paint_control_result(n: int = 6, red: Any = ("T",), check: str = "pass") -> dict[str, Any]:
+    sha = probe.js_sha256()
+    arm = {"continuity": {"mode": "qualified", "sha256": sha}, "stageFit": {"verdict": True}, "unplannedWraps": [],
+           "sampler": _sampler_ok()}
+    return {"arm": arm, "expectedCoreSha256": sha, "controlSpec": {"n": n}, "targetVerdictId": "T",
+            "controlRecord": {"fired": True, "hiddenTicks": n, "aborted": None}, "redSet": list(red), "unknown": [],
+            "paintControl": {"status": check, "reasons": []}}
+
+
+class TestSamplerStatus:
+    @pytest.mark.parametrize(("build", "status_of", "entry_of"), [
+        pytest.param(_base_result, probe.overall_status, lambda r: r["arms"]["A"], id="p2-host-arm"),
+        pytest.param(_base_result, probe.overall_status, lambda r: r["attach"], id="p2-attach"),
+        pytest.param(_generated_result, probe.overall_status, lambda r: r["arms"]["B"], id="generated-host-arm"),
+        pytest.param(lambda: _red_result([P2_CARRY34]), probe.red_arm_status, lambda r: r["arm"], id="red-arm"),
+        pytest.param(_g_leg_result, probe.overall_status_g, lambda r: r["armed"]["destinations"][-1]["advanceCarry"], id="pass-g-leg"),
+        pytest.param(_passg_red_result, probe.passg_red_status, lambda r: r["armed"]["destinations"][-1]["advanceCarry"], id="pass-g-red-leg"),
+        pytest.param(_paint_control_result, probe.paint_control_status, lambda r: r["arm"], id="paint-control"),
+    ])
+    @pytest.mark.parametrize("break_it", [
+        pytest.param(lambda e: e.pop("sampler"), id="no-sampler"),
+        pytest.param(lambda e: e["sampler"].update(schema=1), id="schema-1"),
+        pytest.param(lambda e: e["sampler"].update(selfCheck={"ok": False, "reasons": ["meta.overflow = 3"]}), id="self-check-failed"),
+    ])
+    def test_every_status_fails_closed_without_a_vouching_sampler(
+        self, monkeypatch: pytest.MonkeyPatch, build: Any, status_of: Any, entry_of: Any, break_it: Any,
+    ) -> None:
+        """Plan §3.7 / §4 silent-sampler guard: each fresh-run status passes as built (the positive
+        control), and is an error once the arm's or leg's sampler is missing, not schema 2, or its
+        self-check failed."""
+        if build is _generated_result:
+            monkeypatch.setattr(probe, "visible_reasons", lambda result: [])
+        result = build()
+        assert status_of(result)[0] == "pass"
+        break_it(entry_of(result))
+        assert status_of(result)[0] == "error"
+
+    def test_a_leg_with_no_matching_spec_is_an_error_never_vacuous(self) -> None:
+        result = _g_leg_result()
+        result["armed"]["destinations"][-1]["advanceCarry"] = {"specs": [], "verdicts": {}, "sampler": None, "verdict": None,
+                                                              "error": "no expected-True carry matches the advance 3->4"}
+        status, reasons = probe.overall_status_g(result)
+        assert status == "error" and "no expected-True carry" in reasons[0]
+
+
+class TestPassGRedStatus:
+    def test_red_ids_name_each_leg_verdict_and_each_failed_destination(self) -> None:
+        result = _passg_red_result()
+        result["armed"]["destinations"][0].update(verdict=False, baseVerdict=False)
+        result["nullControl"]["destinations"][0]["verdict"] = None
+        assert probe.passg_red_ids(result) == (["G1-2:destination", f"G1-3-4:{P2_CARRY34}"], ["Goff1-2:destination"])
+
+    @pytest.mark.parametrize(("mutate", "status"), [
+        pytest.param(lambda r: None, "pass", id="registered-red-set"),
+        pytest.param(lambda r: r.update(expectedRedSet=None), "unregistered", id="unregistered"),
+        pytest.param(lambda r: r.update(expectedRedSet=[]), "fail", id="unexpected-red"),
+        pytest.param(lambda r: r.update(redSet=[]), "fail", id="expected-red-came-back-green"),
+        pytest.param(lambda r: r.update(unknown=[f"G1-3-4:{P2_CARRY34}"]), "inconclusive", id="unreadable-leg"),
+        pytest.param(lambda r: r["nullControl"]["continuity"].update(sha256=probe.js_sha256()), "error", id="a-session-ran-the-shipped-core"),
+        pytest.param(lambda r: r["armed"]["continuity"].update(mode="off"), "error", id="continuity-off"),
+        pytest.param(lambda r: r["armed"].update(outputVisible=False), "error", id="output-hidden"),
+    ])
+    def test_passg_red_status_truth_table(self, mutate: Any, status: str) -> None:
+        """Plan §3.9, after `red_arm_status`: the variant must have run in both sessions (its core sha);
+        then the red multiset must equal the registration exactly."""
+        result = _passg_red_result()
+        mutate(result)
+        assert probe.passg_red_status(result)[0] == status
+
+
+class TestPaintControlStatus:
+    @pytest.mark.parametrize(("result", "status"), [
+        pytest.param(_paint_control_result(), "pass", id="target-only-red-and-exact-seq-set"),
+        pytest.param(_paint_control_result(n=0, red=()), "pass", id="n0-null-nothing-red"),
+        pytest.param(_paint_control_result(n=0), "fail", id="n0-but-the-target-went-red"),
+        pytest.param(_paint_control_result(red=()), "fail", id="hidden-frames-but-target-green"),
+        pytest.param(_paint_control_result(red=("T", "other")), "fail", id="another-verdict-red"),
+        pytest.param(_paint_control_result(check="fail"), "fail", id="seq-set-off-by-one"),
+        pytest.param(_paint_control_result(check="inconclusive"), "inconclusive", id="integrity-break"),
+        pytest.param(dict(_paint_control_result(), controlRecord=None), "error", id="no-record"),
+        pytest.param(dict(_paint_control_result(), controlRecord={"aborted": "decoder parent changed"}), "error", id="aborted"),
+        pytest.param(dict(_paint_control_result(), expectedCoreSha256="0" * 64), "error", id="not-the-shipped-core"),
+        pytest.param(dict(_paint_control_result(), unknown=["T"]), "inconclusive", id="unreadable-verdict"),
+    ])
+    def test_paint_control_status_truth_table(self, result: dict[str, Any], status: str) -> None:
+        assert probe.paint_control_status(result)[0] == status
+
+
+class _LegTransport:
+    def __init__(self, events: list[str], rows: list[dict[str, Any]]) -> None:
+        self.events = events
+        self.drains = [[], rows, []]
+
+    def evaluate(self, js: str) -> Any:
+        self.events.append({probe.SAMPLER_DRAIN_JS: "drain", probe.SAMPLER_START_JS: "start", probe.SAMPLER_STOP_JS: "stop"}.get(js, js))
+        return self.drains.pop(0) if js == probe.SAMPLER_DRAIN_JS else None
+
+
+class TestAdvanceLeg:
+    @pytest.mark.parametrize("end_of_show", [False, True])
+    def test_a_leg_restarts_the_sampler_on_the_source_then_scores_its_carry_per_frame(
+        self, monkeypatch: pytest.MonkeyPatch, end_of_show: bool,
+    ) -> None:
+        """Plan §3.8 call order: drain-and-discard, start, click delay, advance, settle, pad, stop,
+        drain; the leg's rows are scored against its specs with the session's continuity. Rows at
+        or past the end of show (`hash >= sceneCount`) are an exit: dropped and reported, never red."""
+        events: list[Any] = []
+        rows = [{"t": float(i), "hash": "#7", "sceneCount": 9, "videos": [], "stageMap": None} for i in range(3)]
+        if end_of_show:
+            rows += [{"t": 3.0 + i, "hash": "#9", "sceneCount": 9, "videos": [], "stageMap": None} for i in range(2)]
+        transport = _LegTransport(events, rows)
+        player = argparse.Namespace(
+            _require_transport=lambda: transport, observe=lambda: argparse.Namespace(original_slide=4, busy=False),
+        )
+        seen: dict[str, Any] = {}
+
+        def score_verdicts(samples: Any, evidence: Any, facts: Any, installed: bool, continuity: Any) -> dict[str, Any]:
+            seen.update(times=[row["t"] for row in samples], installed=installed, specs=facts["verdicts"])
+            return {P2_CARRY34: {"verdict": True}}
+
+        monkeypatch.setattr(probe.time, "sleep", lambda s: events.append(f"sleep {s}"))
+        monkeypatch.setattr(probe, "advance_until_original_slide", lambda p, ordinal: events.append(f"advance {ordinal}"))
+        monkeypatch.setattr(probe, "wait_until_settled", lambda p: events.append("settled"))
+        monkeypatch.setattr(probe, "sampler_record", lambda t, r: _sampler_ok())
+        monkeypatch.setattr(probe, "score_verdicts", score_verdicts)
+        leg = probe.run_advance_leg(player, 3, 4, [LEG_SPEC], {"mode": "qualified"})
+        assert events == [
+            "drain", "start", f"sleep {probe.CLICK_DELAY_S}", "advance 4", "settled", f"sleep {probe.WINDOW_PAD_S}",
+            "stop", "drain", "drain",
+        ]
+        assert seen == {"times": [0.0, 1.0, 2.0], "installed": True, "specs": [LEG_SPEC]}
+        assert leg["verdict"] is True and leg["reasons"] == []
+        assert leg["endOfShow"] == ({"rows": 2, "firstT": 3.0} if end_of_show else None)
+
+    def test_a_leg_without_a_matching_spec_is_an_error_and_drives_nothing(self) -> None:
+        leg = probe.run_advance_leg(argparse.Namespace(), 3, 4, [], {"mode": "qualified"})
+        assert leg["verdict"] is None and "no expected-True carry" in leg["error"]
+
+
+class TestInstrumentArgs:
+    def test_pass_g_takes_a_core_variant_and_dispatches_to_pass_g(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Plan §3.9 (owner decision 4): `--pass G --core-variant NAME` is a Pass G red arm; `run_cli`
+        checks the pass before dispatching a host red arm. `--pass` with `--strip` stays refused."""
+        args = probe.parse_args(["--pass", "G", "--core-variant", "no-pin-hold", "--fixture", str(tmp_path),
+                                 "--original-index", str(tmp_path / "index.html")])
+        (tmp_path / "index.html").write_text("")
+        ran: list[str] = []
+        monkeypatch.setattr(probe, "run_pass_g_cli", lambda a: ran.append("G"))
+        monkeypatch.setattr(probe, "run_red_arm_cli", lambda a: ran.append("red"))
+        probe.run_cli(args)
+        assert ran == ["G"]
+        with pytest.raises(SystemExit):
+            probe.parse_args(["--pass", "G", "--strip", "bridge@8"])
+
+    @pytest.mark.parametrize(("value", "parsed"), [
+        ("6:ancestor-opacity:pin@2", {"n": 6, "variant": "ancestor-opacity", "phase": "pin", "atScene": 2, "timing": "early", "depth": 1}),
+        ("0:ancestor-opacity:pin@2:late", {"n": 0, "variant": "ancestor-opacity", "phase": "pin", "atScene": 2, "timing": "late", "depth": 1}),
+        ("6:ancestor-display:settled@2", {"n": 6, "variant": "ancestor-display", "phase": "settled", "atScene": 2, "timing": "early", "depth": 2}),
+        ("6:element-visibility:bridge@2:late:depth=1", {"n": 6, "variant": "element-visibility", "phase": "bridge", "atScene": 2, "timing": "late", "depth": 1}),
+        ("6:ancestor-display:pin@2", None),
+        ("6:ancestor-half:settled@2:depth=1", None),
+        ("6:ancestor-dim:pin@2", None),
+        ("6:ancestor-opacity:pin", None),
+        ("6:ancestor-opacity:pin@2:late:late", None),
+        ("x:ancestor-opacity:pin@2", None),
+    ])
+    def test_paint_control_parses_or_is_refused(self, value: str, parsed: dict[str, Any] | None) -> None:
+        """Plan §3.10: `ancestor-display` only at `settled`; `settled` needs depth >= 2."""
+        if parsed is None:
+            with pytest.raises(SystemExit):
+                probe.parse_args(["--paint-control", value])
+        else:
+            assert probe.parse_args(["--paint-control", value]).paint_control == {"raw": value, **parsed}
+
+    @pytest.mark.parametrize("extra", [["--attach"], ["--core-variant", "no-pin-hold"], ["--pass", "G"], ["--gl-replay", "auto"]])
+    def test_paint_control_runs_on_its_own_in_launch_mode(self, extra: list[str]) -> None:
+        with pytest.raises(SystemExit):
+            probe.parse_args(["--paint-control", "6:ancestor-opacity:pin@2", *extra])
+
+    @pytest.mark.parametrize(("value", "target"), [
+        ("6:ancestor-opacity:pin@2", f"b0to1:{probe._A}:carry"),
+        ("6:ancestor-opacity:pin@4", f"b1to2:{probe._A}:carry"),
+        ("6:ancestor-opacity:bridge@2", None),
+        ("6:ancestor-display:settled@2", None),
+        ("6:ancestor-opacity:pin@3", None),
+    ])
+    def test_the_control_targets_exactly_one_expected_true_carry_of_its_action(self, value: str, target: str | None) -> None:
+        """Plan §3.10 on the committed D5 plan (pins at 2 and 4, no bridge): a phase/scene that
+        matches no carry of that action, or `settled` on a non-bridge, is refused."""
+        specs = probe.verdict_specs(_deck_plan("D5"))
+        control = probe.parse_paint_control(value)
+        if target is None:
+            with pytest.raises(SystemExit):
+                probe.paint_control_target(specs, control)
+        else:
+            assert probe.paint_control_target(specs, control)["id"] == target
