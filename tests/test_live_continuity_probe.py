@@ -9772,20 +9772,18 @@ class _LegTransport:
 
 
 class TestAdvanceLeg:
-    @pytest.mark.parametrize(("end_of_show", "window_end", "verdict"), [
-        pytest.param(False, 2.5, True, id="no-end-of-show"),
-        pytest.param(True, 2.5, True, id="end-of-show-after-the-scored-window-is-an-exit"),
-        # Astra r1 #3: an end of show that cuts into (or comes before) the scored window is inconclusive, never green.
-        pytest.param(True, 3.0, None, id="end-of-show-inside-the-scored-window"),
-        pytest.param(True, None, None, id="end-of-show-without-a-scored-window"),
+    # Astra r1 #3 / r2 C: any end of show in the leg is inconclusive, even after a fully covered window.
+    @pytest.mark.parametrize(("end_of_show", "verdict"), [
+        pytest.param(False, True, id="no-end-of-show"),
+        pytest.param(True, None, id="end-of-show-after-the-scored-window-is-inconclusive"),
     ])
     def test_a_leg_restarts_the_sampler_on_the_source_then_scores_its_carry_per_frame(
-        self, monkeypatch: pytest.MonkeyPatch, end_of_show: bool, window_end: float | None, verdict: bool | None,
+        self, monkeypatch: pytest.MonkeyPatch, end_of_show: bool, verdict: bool | None,
     ) -> None:
         """Plan §3.8 call order: drain-and-discard, start, click delay, advance, settle, pad, stop,
-        drain; every row of the leg is scored against its specs with the session's continuity. An
-        end of show (`hash >= sceneCount`) after the scored window is an exit, reported and never red;
-        one at or before the window end makes that verdict inconclusive."""
+        drain; every row of the leg is scored against its specs with the session's continuity. Any
+        end of show (`hash >= sceneCount`) in the leg is reported and makes its verdicts inconclusive,
+        never green or red."""
         events: list[Any] = []
         rows = [{"t": float(i), "hash": "#7", "sceneCount": 9, "videos": [], "stageMap": None} for i in range(3)]
         if end_of_show:
@@ -9798,7 +9796,7 @@ class TestAdvanceLeg:
 
         def score_verdicts(samples: Any, evidence: Any, facts: Any, installed: bool, continuity: Any) -> dict[str, Any]:
             seen.update(times=[row["t"] for row in samples], installed=installed, specs=facts["verdicts"])
-            return {P2_CARRY34: {"verdict": True, "window": {"start": 0.0, "end": window_end}}}
+            return {P2_CARRY34: {"verdict": True, "window": {"start": 0.0, "end": 2.5}}}
 
         monkeypatch.setattr(probe.time, "sleep", lambda s: events.append(f"sleep {s}"))
         monkeypatch.setattr(probe, "advance_until_original_slide", lambda p, ordinal: events.append(f"advance {ordinal}"))
@@ -9813,8 +9811,9 @@ class TestAdvanceLeg:
         assert seen == {"times": [r["t"] for r in rows], "installed": True, "specs": [LEG_SPEC]}
         assert leg["verdict"] is verdict and leg["verdicts"][P2_CARRY34]["verdict"] is verdict
         assert leg["reasons"] == ([] if verdict else [f"{P2_CARRY34}=None"])
-        cut = [] if verdict else [P2_CARRY34]
-        assert leg["endOfShow"] == ({"rows": 2, "firstT": 3.0, "cutsWindow": cut} if end_of_show else None)
+        assert leg["endOfShow"] == ({"rows": 2, "firstT": 3.0} if end_of_show else None)
+        if end_of_show:
+            assert leg["verdicts"][P2_CARRY34]["reason"] == "inconclusive: the leg passed the end of show at t=3.0"
 
     def test_a_leg_without_a_matching_spec_is_an_error_and_drives_nothing(self) -> None:
         leg = probe.run_advance_leg(argparse.Namespace(), 3, 4, [], {"mode": "qualified"})
