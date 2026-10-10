@@ -339,6 +339,7 @@ STAGE_MAP_FN_JS = r"""
 STAGE_MAP_JS = "(function(){" + STAGE_MAP_FN_JS + "return stageMapOf();})()"
 
 SCENE_ID_JS = "window.__obedLive ? window.__obedLive.snapshot().sceneId : null"
+RUNTIME_SNAPSHOT_JS = "window.__obedLive ? window.__obedLive.snapshot() : null"
 HASH_JS = "String(location.hash || '')"
 
 # Never the oracle handle, its context, `markerBands` or `pause` (Vgl pass only).
@@ -4266,41 +4267,77 @@ def wait_for_execute_record(
     return record
 
 
-def score_no_consumption(
-    observed_scene_id: str | None, expected_scene_id: str | None, execute_record: dict[str, Any] | None,
-    *, auto_kinds: Sequence[str] | None,
+def _is_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def score_settled_position(
+    snapshot: Any, onset_scene_id: str | None, slide_index: int | None, leading_count: int,
 ) -> dict[str, Any]:
-    """Pure: the settled scene plus the host's own execute-log evidence in, a
-    verdict out. `autoPlayRunLength`/`autoPlayRunKinds`/`autoPlayFired` are
-    read defensively -- another stream is landing them on `live_host.py`
-    concurrently -- so a record that predates them is INCONCLUSIVE, never a
-    false pass. The arrival auto-run must be an ordered prefix of the destination's
-    own leading automatic events (`auto_kinds`, `leading_auto_kinds`; owner 2026-10-10):
-    anything longer or out of order consumed a click event. Unknown `auto_kinds` is inconclusive."""
-    scene_ok = observed_scene_id is not None and observed_scene_id == expected_scene_id
+    """Pure: the consumption detector. After a correct goTo the player has run exactly the
+    destination's leading automatic events: none -> `IdleAtInitialState` at the onset scene k;
+    L >= 1 -> `IdleAtFinalState` at k+L-1 with `nextSceneId` k+L. Either way still on the
+    destination slide. An unreadable snapshot or onset is inconclusive."""
+    onset = int(onset_scene_id) if isinstance(onset_scene_id, str) and onset_scene_id.isdigit() else None
+    if onset is None or not _is_count(slide_index):
+        return {"verdict": None, "reason": "onset scene or destination slide index is unknown"}
+    expected: dict[str, Any] = (
+        {"playerState": "IdleAtInitialState", "sceneId": onset, "exportedSlideIndex": slide_index}
+        if leading_count == 0 else
+        {"playerState": "IdleAtFinalState", "sceneId": onset + leading_count - 1,
+         "nextSceneId": onset + leading_count, "exportedSlideIndex": slide_index}
+    )
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("playerState"), str):
+        return {"verdict": None, "expected": expected, "observed": snapshot, "reason": "no runtime snapshot at the sample"}
+    observed = {key: snapshot.get(key) for key in expected}
+    numbers_ok = all(_is_count(observed[key]) for key in expected if key != "playerState")
+    ok = numbers_ok and observed == expected
+    return {
+        "verdict": ok, "expected": expected, "observed": observed,
+        "reason": None if ok else "settled position is not the destination's leading automatic run",
+    }
+
+
+def score_no_consumption(
+    snapshot: Any, expected_scene_id: str | None, execute_record: dict[str, Any] | None,
+    *, auto_kinds: Sequence[str] | None, slide_index: int | None,
+) -> dict[str, Any]:
+    """Pure: the post-burst runtime snapshot plus the host's own execute-log evidence in, a
+    verdict out. The settled position (`score_settled_position`) is the consumption detector.
+    The log half is a host-vs-JSON agreement check: the host's arrival scan
+    (`autoPlayRunKinds`/`autoPlayRunLength`) must EQUAL the destination's leading automatic
+    events (`leading_auto_kinds`), `autoPlayFired` iff that list is non-empty, and no
+    `autoPlayDeferredReason`. Missing telemetry, unknown `auto_kinds` or a deferred run is
+    INCONCLUSIVE, never a false pass (owner 2026-10-10)."""
     if not isinstance(execute_record, dict):
-        return {"verdict": None, "sceneOk": scene_ok, "reason": "no execute-log record for this goTo"}
+        return {"verdict": None, "reason": "no execute-log record for this goTo"}
     run_length, fired = execute_record.get("autoPlayRunLength"), execute_record.get("autoPlayFired")
-    run_kinds = execute_record.get("autoPlayRunKinds")
+    run_kinds, deferred = execute_record.get("autoPlayRunKinds"), execute_record.get("autoPlayDeferredReason")
     fields = {
         "autoPlayRunLength": run_length, "autoPlayRunKinds": run_kinds, "autoPlayFired": fired,
-        "leadingAutoKinds": None if auto_kinds is None else list(auto_kinds),
+        "autoPlayDeferredReason": deferred, "leadingAutoKinds": None if auto_kinds is None else list(auto_kinds),
     }
     if run_length is None or fired is None:
-        return {"verdict": None, "sceneOk": scene_ok, **fields, "reason": "execute log has no autoPlayRunLength/autoPlayFired yet"}
+        return {"verdict": None, **fields, "reason": "execute log has no autoPlayRunLength/autoPlayFired yet"}
     if auto_kinds is None:
-        return {"verdict": None, "sceneOk": scene_ok, **fields, "reason": "destination's leading automatic events are unreadable"}
-    if isinstance(run_length, bool) or not isinstance(run_length, int) or run_length < 0:
-        return {"verdict": None, "sceneOk": scene_ok, **fields, "reason": "autoPlayRunLength is not a count"}
-    within = run_length <= len(auto_kinds)
-    observed = [] if run_kinds is None and run_length == 0 else run_kinds
-    if within and (not isinstance(observed, list) or len(observed) != run_length):
-        return {"verdict": None, "sceneOk": scene_ok, **fields, "reason": "autoPlayRunKinds does not match autoPlayRunLength"}
-    log_ok = within and observed == list(auto_kinds[:run_length]) and fired is (run_length > 0)
-    ok = scene_ok and log_ok
+        return {"verdict": None, **fields, "reason": "destination's leading automatic events are unreadable"}
+    if deferred is not None:
+        return {"verdict": None, **fields, "reason": f"goTo autoplay repair was deferred: {deferred}"}
+    if not _is_count(run_length):
+        return {"verdict": None, **fields, "reason": "autoPlayRunLength is not a count"}
+    leading = list(auto_kinds)
+    if run_length == len(leading):
+        observed_kinds = [] if run_kinds is None and run_length == 0 else run_kinds
+        if not isinstance(observed_kinds, list):
+            return {"verdict": None, **fields, "reason": "execute log has no autoPlayRunKinds"}
+        log_ok = observed_kinds == leading and fired is (run_length > 0)
+    else:
+        log_ok = False
+    position = score_settled_position(snapshot, expected_scene_id, slide_index, len(leading))
+    verdict = combine_verdicts(position["verdict"], log_ok)
     return {
-        "verdict": bool(ok), "sceneOk": scene_ok, "logOk": log_ok, **fields,
-        "reason": None if ok else "scene or execute-log evidence contradicts no-consumption",
+        "verdict": verdict, "positionOk": position["verdict"], "logOk": log_ok, "position": position, **fields,
+        "reason": None if verdict else (position["reason"] or "execute log disagrees with the destination's leading automatic events"),
     }
 
 
@@ -4452,7 +4489,8 @@ def character_region_rect(export_root: Path, slide: dict[str, Any]) -> dict[str,
 
 def leading_auto_kinds(export_root: Path, slide: dict[str, Any]) -> list[str] | None:
     """The first effect `name` of each of the slide's leading `automaticPlay: true` events (the
-    kinds `autoPlayRunKinds` reports), up to its first click event; `None` if unreadable/malformed."""
+    kinds `autoPlayRunKinds` reports), up to its first click event; `None` if unreadable/malformed
+    or an automatic event leads with a transition (an auto-advancing slide)."""
     events = _slide_events(export_root, slide)
     if events is None:
         return None
@@ -4464,28 +4502,42 @@ def leading_auto_kinds(export_root: Path, slide: dict[str, Any]) -> list[str] | 
             break
         effects = event.get("effects")
         first = effects[0] if isinstance(effects, list) and effects else None
-        if not isinstance(first, dict) or not isinstance(first.get("name"), str):
+        if not isinstance(first, dict) or not isinstance(first.get("name"), str) or first.get("type") == "transition":
             return None
         kinds.append(first["name"])
     return kinds
 
 
+def _effect_types(effects: Any) -> list[str] | None:
+    if not isinstance(effects, list):
+        return None
+    types: list[str] = []
+    for effect in effects:
+        if not isinstance(effect, dict) or not isinstance(effect.get("type"), str):
+            return None
+        nested = _effect_types(effect.get("effects") or [])
+        if nested is None:
+            return None
+        types += [effect["type"], *nested]
+    return types
+
+
 def has_click_builds(export_root: Path, slide: dict[str, Any]) -> bool | None:
     """Whether the slide's per-slide JSON has a click-driven build: an event with
-    `automaticPlay` false carrying any effect other than the outgoing `transition`.
-    `False` only from a fully parsed slide; missing/unreadable or malformed events are `None`."""
+    `automaticPlay` false carrying any effect, nested ones included, other than the outgoing
+    `transition`. `False` only from a fully parsed slide; missing/unreadable or malformed events,
+    and a click event with no effects, are `None`."""
     events = _slide_events(export_root, slide)
     if events is None:
         return None
     found = False
     for event in events:
-        effects = event.get("effects") if isinstance(event, dict) else None
-        if (
-            not isinstance(effects, list) or not isinstance(event.get("automaticPlay"), bool)
-            or not all(isinstance(effect, dict) and isinstance(effect.get("type"), str) for effect in effects)
-        ):
+        if not isinstance(event, dict) or not isinstance(event.get("automaticPlay"), bool):
             return None
-        if event["automaticPlay"] is False and any(effect["type"] != "transition" for effect in effects):
+        types = _effect_types(event.get("effects"))
+        if types is None or (event["automaticPlay"] is False and not types):
+            return None
+        if event["automaticPlay"] is False and any(kind != "transition" for kind in types):
             found = True
     return found
 
@@ -4493,12 +4545,15 @@ def has_click_builds(export_root: Path, slide: dict[str, Any]) -> bool | None:
 def score_no_build_consumed(
     player: LiveOutputHost, expected_scene_id: str | None, character_rect: dict[str, float],
     stage_map: dict[str, Any], *, execute_record: dict[str, Any] | None, auto_kinds: Sequence[str] | None,
+    slide_index: int | None,
 ) -> dict[str, Any]:
-    """Scene + execute-log evidence the click-driven builds are still pending, plus pixel evidence
-    the characters' region only changes after one more `advance` -- proving it really was pending."""
-    observed = player.observe()
-    consumption = score_no_consumption(observed.scene_id, expected_scene_id, execute_record, auto_kinds=auto_kinds)
+    """Settled-position + execute-log evidence the click-driven builds are still pending, plus pixel
+    evidence the characters' region only changes after one more `advance` -- proving it really was pending."""
     transport = player._require_transport()
+    consumption = score_no_consumption(
+        transport.evaluate(RUNTIME_SNAPSHOT_JS), expected_scene_id, execute_record,
+        auto_kinds=auto_kinds, slide_index=slide_index,
+    )
     screen_rect = to_screen_rect(character_rect, stage_map)
     before = decode_png(transport.call("Page.captureScreenshot", format="png")["data"])
     player.execute("advance")
@@ -4517,15 +4572,16 @@ def score_no_build_consumed(
 def resolve_no_consumption(
     player: LiveOutputHost, expected_scene_id: str | None, character_rect: dict[str, float] | None,
     stage_map: dict[str, Any] | None, *, execute_record: dict[str, Any] | None, click_builds: bool | None = None,
-    auto_kinds: Sequence[str] | None = None,
+    auto_kinds: Sequence[str] | None = None, slide_index: int | None = None,
 ) -> dict[str, Any]:
     """Fail-closed: missing/unreadable characters geometry or an invalid stage map is inconclusive
     (never silently `True`) and never touches `player`; only then is the real evidence scored. A
     destination parsed as having no click-driven builds (`click_builds is False`, owner 2026-10-10)
-    has nothing for the pixel half to prove: only the scene + execute-log half is scored."""
+    has nothing for the pixel half to prove: only the settled-position + execute-log half is scored."""
     if click_builds is False:
         consumption = score_no_consumption(
-            player.observe().scene_id, expected_scene_id, execute_record, auto_kinds=auto_kinds,
+            player._require_transport().evaluate(RUNTIME_SNAPSHOT_JS), expected_scene_id, execute_record,
+            auto_kinds=auto_kinds, slide_index=slide_index,
         )
         return {
             "consumption": consumption,
@@ -4538,6 +4594,7 @@ def resolve_no_consumption(
         return {"verdict": None, "reason": "stage map invalid at the no-consumption sample"}
     return score_no_build_consumed(
         player, expected_scene_id, character_rect, stage_map, execute_record=execute_record, auto_kinds=auto_kinds,
+        slide_index=slide_index,
     )
 
 
@@ -4620,7 +4677,7 @@ def run_goto_destination(
     if require_no_consumption:
         no_consumption = resolve_no_consumption(
             player, expected_scene_id, character_rect, stage_map, execute_record=execute_record,
-            click_builds=click_builds, auto_kinds=auto_kinds,
+            click_builds=click_builds, auto_kinds=auto_kinds, slide_index=slide.get("playerIndex"),
         )
         if no_consumption.get("verdict") is not True:
             reasons.append(f"no-consumption check for destination {to_ordinal}: {no_consumption}")

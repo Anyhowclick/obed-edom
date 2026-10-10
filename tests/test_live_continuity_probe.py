@@ -2861,73 +2861,110 @@ class TestGotoRectExpectations:
         assert self.V_EXPECTATIONS == before
 
 
+def _snapshot(state: str, scene: int, next_scene: int | None, slide: int = 1) -> dict[str, Any]:
+    return {"playerState": state, "sceneId": scene, "nextSceneId": next_scene, "exportedSlideIndex": slide, "ready": True}
+
+
+# P2's destination (onset scene 2, slide index 1, no leading automatic events) after a correct goTo.
+P2_SETTLED = _snapshot("IdleAtInitialState", 2, 2)
+# A D-deck destination (onset 2, slide index 1, one leading `apple:movie-start`) after a correct goTo.
+D_SETTLED = _snapshot("IdleAtFinalState", 2, 3)
+D_RUN = {"autoPlayRunLength": 1, "autoPlayRunKinds": ["apple:movie-start"], "autoPlayFired": True, "autoPlayDeferredReason": None}
+NO_RUN = {"autoPlayRunLength": 0, "autoPlayRunKinds": [], "autoPlayFired": False, "autoPlayDeferredReason": None}
+
+
+class TestScoreSettledPosition:
+    """Owner 2026-10-10: the settled position is the consumption detector. A goTo that consumed
+    a click event leaves the player one or more scenes further on than the destination's own
+    leading automatic run (k = onset scene, L = that run's length)."""
+
+    @pytest.mark.parametrize(("snapshot", "leading", "verdict"), [
+        pytest.param(P2_SETTLED, 0, True, id="L0-initial-state-at-onset-passes"),
+        pytest.param(_snapshot("IdleAtFinalState", 2, 3), 0, False,
+                     id="L0-consumed-first-event-final-state-at-onset-fails"),
+        pytest.param(_snapshot("IdleAtInitialState", 3, 3), 0, False, id="L0-wrong-scene-fails"),
+        pytest.param(D_SETTLED, 1, True, id="L1-final-state-at-onset-passes"),
+        pytest.param(_snapshot("IdleAtFinalState", 4, 5, 2), 2, False, id="L2-left-the-slide-fails"),
+        pytest.param(_snapshot("IdleAtFinalState", 3, 4, 2), 3, True, id="L3-final-state-at-k-plus-2-passes"),
+        pytest.param(_snapshot("IdleAtInitialState", 2, 2), 1, False, id="L1-wrong-state-run-never-fired-fails"),
+        pytest.param(_snapshot("IdleAtFinalState", 3, 4), 1, False, id="L1-wrong-scene-consumed-a-click-event-fails"),
+        pytest.param(_snapshot("IdleAtFinalState", 2, 4), 1, False, id="L1-wrong-next-scene-fails"),
+        pytest.param(_snapshot("IdleAtFinalState", 2, 3, slide=2), 1, False, id="L1-left-the-destination-slide-fails"),
+        pytest.param(_snapshot("Playing", 2, 3), 1, False, id="L1-not-idle-fails"),
+        pytest.param({**D_SETTLED, "sceneId": True}, 1, False, id="non-count-scene-fails"),
+        pytest.param(None, 1, None, id="no-snapshot-is-inconclusive"),
+        pytest.param({"sceneId": 2}, 1, None, id="snapshot-without-a-player-state-is-inconclusive"),
+    ])
+    def test_position(self, snapshot: Any, leading: int, verdict: bool | None) -> None:
+        onset = "2" if leading != 3 else "1"
+        slide = 1 if leading != 3 else 2
+        assert probe.score_settled_position(snapshot, onset, slide, leading)["verdict"] is verdict
+
+    @pytest.mark.parametrize(("onset", "slide"), [
+        pytest.param(None, 1, id="unknown-onset"), pytest.param("x", 1, id="non-numeric-onset"),
+        pytest.param("2", None, id="unknown-slide-index"),
+    ])
+    def test_unknown_expectation_is_inconclusive(self, onset: Any, slide: Any) -> None:
+        assert probe.score_settled_position(D_SETTLED, onset, slide, 1)["verdict"] is None
+
+
 class TestScoreNoConsumption:
-    @pytest.mark.parametrize(("scene", "record", "verdict", "scene_ok"), [
-        pytest.param("2", None, None, True, id="missing-execute-record-is-inconclusive"),
+    def score(self, record: Any, auto_kinds: list[str] | None, snapshot: Any) -> dict[str, Any]:
+        return probe.score_no_consumption(snapshot, "2", record, auto_kinds=auto_kinds, slide_index=1)
+
+    @pytest.mark.parametrize(("record", "snapshot", "verdict"), [
+        # P2 parity: its destination has NO leading automatic events (L = 0).
+        pytest.param(None, P2_SETTLED, None, id="missing-execute-record-is-inconclusive"),
         # Another stream is landing autoPlayRunLength/autoPlayFired on live_host.py
         # concurrently -- a record that predates them must not be read as a false pass.
-        pytest.param("2", {"outcome": "ok"}, None, True, id="missing-fields-on-the-record-are-inconclusive"),
-        pytest.param("6", {"autoPlayRunLength": 0, "autoPlayFired": False}, False, False, id="wrong-scene-fails"),
-        pytest.param("2", {"autoPlayRunLength": 1, "autoPlayFired": True}, False, True, id="nonzero-run-length-fails"),
-        pytest.param("2", {"autoPlayRunLength": 0, "autoPlayFired": True}, False, True, id="fired-true-fails-even-with-zero-run-length"),
-        pytest.param("2", {"autoPlayRunLength": 0, "autoPlayFired": False, "autoPlayRunKinds": []}, True, True,
-                     id="clean-no-consumption-passes"),
+        pytest.param({"outcome": "ok"}, P2_SETTLED, None, id="missing-fields-on-the-record-are-inconclusive"),
+        pytest.param(NO_RUN, _snapshot("IdleAtInitialState", 6, 6), False, id="wrong-scene-fails"),
+        pytest.param({"autoPlayRunLength": 1, "autoPlayFired": True}, P2_SETTLED, False, id="nonzero-run-length-fails"),
+        pytest.param({**D_RUN}, P2_SETTLED, False, id="any-run-against-an-empty-leading-list-fails"),
+        pytest.param({"autoPlayRunLength": 0, "autoPlayFired": True}, P2_SETTLED, False,
+                     id="fired-true-fails-even-with-zero-run-length"),
+        pytest.param({"autoPlayRunLength": 0, "autoPlayFired": False}, P2_SETTLED, True,
+                     id="zero-run-without-kinds-passes"),
+        pytest.param(NO_RUN, P2_SETTLED, True, id="clean-no-consumption-passes"),
+        pytest.param(NO_RUN, _snapshot("IdleAtFinalState", 2, 3), False, id="consumed-first-click-event-fails"),
     ])
-    def test_score_no_consumption(self, scene: str, record: Any, verdict: bool | None, scene_ok: bool) -> None:
-        # P2 parity: its destination's leading automatic list is empty, so these are today's cases.
-        scored = probe.score_no_consumption(scene, "2", record, auto_kinds=[])
-        assert scored["verdict"] is verdict
-        assert scored["sceneOk"] is scene_ok
+    def test_p2_parity(self, record: Any, snapshot: Any, verdict: bool | None) -> None:
+        assert self.score(record, [], snapshot)["verdict"] is verdict
 
-    @pytest.mark.parametrize(("auto_kinds", "record", "verdict"), [
-        # Owner 2026-10-10: the arrival auto-run must be an ORDERED PREFIX of the destination's own
-        # leading automatic events; `autoPlayFired` must agree with the run (fired iff length > 0).
-        pytest.param([], {"autoPlayRunLength": 1, "autoPlayRunKinds": ["apple:movie-start"], "autoPlayFired": True},
-                     False, id="empty-leading-list-any-run-fails"),
-        pytest.param([], {"autoPlayRunLength": 2, "autoPlayRunKinds": ["a", "b"], "autoPlayFired": True},
-                     False, id="empty-leading-list-longer-run-fails"),
-        pytest.param(["apple:movie-start"],
-                     {"autoPlayRunLength": 1, "autoPlayRunKinds": ["apple:movie-start"], "autoPlayFired": True},
-                     True, id="d-style-full-run-passes"),
-        pytest.param(["apple:movie-start"], {"autoPlayRunLength": 0, "autoPlayRunKinds": [], "autoPlayFired": False},
-                     True, id="d-style-empty-run-passes"),
-        pytest.param(["apple:movie-start", "apple:appear"],
-                     {"autoPlayRunLength": 1, "autoPlayRunKinds": ["apple:movie-start"], "autoPlayFired": True},
-                     True, id="shorter-ordered-prefix-passes"),
-        pytest.param(["apple:movie-start"],
-                     {"autoPlayRunLength": 2, "autoPlayRunKinds": ["apple:movie-start", "apple:dissolve character"],
-                      "autoPlayFired": True},
-                     False, id="run-longer-than-leading-list-fails"),
-        pytest.param(["apple:movie-start"],
-                     {"autoPlayRunLength": 1, "autoPlayRunKinds": ["apple:dissolve character"], "autoPlayFired": True},
-                     False, id="wrong-kind-fails"),
-        pytest.param(["apple:movie-start", "apple:appear"],
-                     {"autoPlayRunLength": 2, "autoPlayRunKinds": ["apple:appear", "apple:movie-start"], "autoPlayFired": True},
-                     False, id="out-of-order-fails"),
-        pytest.param(["apple:movie-start"],
-                     {"autoPlayRunLength": 1, "autoPlayRunKinds": ["apple:movie-start"], "autoPlayFired": False},
-                     False, id="nonempty-run-not-fired-fails"),
-        pytest.param(["apple:movie-start"], {"autoPlayRunLength": 0, "autoPlayRunKinds": [], "autoPlayFired": True},
-                     False, id="empty-run-but-fired-fails"),
-        pytest.param(None, {"autoPlayRunLength": 0, "autoPlayRunKinds": [], "autoPlayFired": False},
-                     None, id="unreadable-leading-list-is-inconclusive"),
-        pytest.param(["apple:movie-start"], {"autoPlayRunLength": 1, "autoPlayFired": True},
-                     None, id="run-within-the-list-without-kinds-is-inconclusive"),
-        pytest.param(["apple:movie-start"], {"autoPlayRunLength": 1, "autoPlayRunKinds": [], "autoPlayFired": True},
-                     None, id="kinds-length-disagreeing-with-run-length-is-inconclusive"),
-        pytest.param(["apple:movie-start"], {"autoPlayRunLength": True, "autoPlayRunKinds": [], "autoPlayFired": True},
-                     None, id="non-count-run-length-is-inconclusive"),
+    @pytest.mark.parametrize(("record", "snapshot", "verdict"), [
+        # D-style destination: ONE leading automatic `apple:movie-start` (L = 1). The log half is a
+        # host-vs-JSON agreement check and must EQUAL the leading list; the settled position is
+        # what detects consumption.
+        pytest.param(D_RUN, D_SETTLED, True, id="d-style-full-run-at-the-right-position-passes"),
+        pytest.param(NO_RUN, D_SETTLED, False, id="empty-run-against-a-nonempty-leading-list-fails"),
+        pytest.param({**D_RUN, "autoPlayRunLength": 2, "autoPlayRunKinds": ["apple:movie-start", "apple:dissolve"]},
+                     D_SETTLED, False, id="longer-run-fails"),
+        pytest.param({**D_RUN, "autoPlayRunKinds": ["apple:dissolve character"]}, D_SETTLED, False, id="wrong-kind-fails"),
+        pytest.param({**D_RUN, "autoPlayFired": False}, D_SETTLED, False, id="not-fired-fails"),
+        pytest.param(D_RUN, _snapshot("IdleAtInitialState", 2, 2), False, id="run-never-landed-fails"),
+        pytest.param(D_RUN, _snapshot("IdleAtFinalState", 3, 4), False, id="consumed-the-click-event-fails"),
+        pytest.param(D_RUN, _snapshot("IdleAtFinalState", 2, 3, slide=2), False, id="left-the-slide-fails"),
+        pytest.param({**D_RUN, "autoPlayDeferredReason": "settle unconfirmed: timeout"}, D_SETTLED, None,
+                     id="deferred-run-is-inconclusive"),
+        pytest.param({**D_RUN, "autoPlayDeferredReason": "busy", "autoPlayFired": False}, D_SETTLED, None,
+                     id="deferred-not-fired-is-inconclusive"),
+        pytest.param({**D_RUN, "autoPlayRunKinds": None}, D_SETTLED, None, id="missing-kinds-is-inconclusive"),
+        pytest.param({**D_RUN, "autoPlayRunLength": True}, D_SETTLED, None, id="non-count-run-length-is-inconclusive"),
+        pytest.param(D_RUN, None, None, id="missing-snapshot-is-inconclusive"),
     ])
-    def test_arrival_run_must_be_an_ordered_prefix_of_the_leading_automatic_events(
-        self, auto_kinds: list[str] | None, record: dict[str, Any], verdict: bool | None,
-    ) -> None:
-        scored = probe.score_no_consumption("2", "2", record, auto_kinds=auto_kinds)
-        assert scored["verdict"] is verdict
-        assert scored["leadingAutoKinds"] == auto_kinds
+    def test_leading_automatic_run(self, record: dict[str, Any], snapshot: Any, verdict: bool | None) -> None:
+        assert self.score(record, ["apple:movie-start"], snapshot)["verdict"] is verdict
 
-    def test_a_wrong_scene_still_fails_a_valid_prefix(self) -> None:
-        record = {"autoPlayRunLength": 1, "autoPlayRunKinds": ["apple:movie-start"], "autoPlayFired": True}
-        assert probe.score_no_consumption("3", "2", record, auto_kinds=["apple:movie-start"])["verdict"] is False
+    def test_unreadable_leading_list_is_inconclusive(self) -> None:
+        assert self.score(NO_RUN, None, P2_SETTLED)["verdict"] is None
+
+    def test_the_result_reports_both_halves(self) -> None:
+        scored = self.score(D_RUN, ["apple:movie-start"], D_SETTLED)
+        assert scored["positionOk"] is True and scored["logOk"] is True
+        assert scored["position"]["expected"] == {
+            "playerState": "IdleAtFinalState", "sceneId": 2, "nextSceneId": 3, "exportedSlideIndex": 1,
+        }
+        assert scored["leadingAutoKinds"] == ["apple:movie-start"]
 
 
 class TestExecuteLog:
@@ -3114,47 +3151,54 @@ class TestResolveNoConsumption:
         assert result["verdict"] is None
         assert reason in result["reason"]
 
-    class _ObserveOnlyPlayer:
-        """Answers `observe()` with a fixed scene; any attempt to advance the deck or grab a
-        screenshot is a test failure (the pixel half must not run)."""
+    class _SnapshotOnlyPlayer:
+        """Answers the runtime snapshot read with a fixed snapshot; any attempt to advance the
+        deck or grab a screenshot is a test failure (the pixel half must not run)."""
 
-        def __init__(self, scene_id: str) -> None:
-            self.scene_id = scene_id
-            self.observations = 0
-
-        def observe(self) -> Any:
-            self.observations += 1
-            return argparse.Namespace(scene_id=self.scene_id, busy=False)
+        def __init__(self, snapshot: Any) -> None:
+            self.snapshot = snapshot
+            self.evaluations: list[str] = []
 
         def execute(self, *args: Any) -> Any:
             raise AssertionError(f"the pixel half advanced the player: execute{args!r}")
 
-        def _require_transport(self) -> Any:
-            raise AssertionError("the pixel half asked for the transport")
+        def evaluate(self, js: str) -> Any:
+            self.evaluations.append(js)
+            return self.snapshot
 
-    @pytest.mark.parametrize(("scene", "record", "verdict"), [
-        pytest.param("2", {"autoPlayRunLength": 0, "autoPlayFired": False, "autoPlayRunKinds": []}, True,
-                     id="clean-consumption-evidence-passes"),
-        pytest.param("6", {"autoPlayRunLength": 0, "autoPlayFired": False, "autoPlayRunKinds": []}, False,
-                     id="wrong-scene-fails"),
-        pytest.param("2", None, None, id="missing-execute-record-stays-inconclusive"),
+        def call(self, method: str, **params: Any) -> Any:
+            raise AssertionError(f"the pixel half captured a screenshot: {method}")
+
+        def _require_transport(self) -> Any:
+            return self
+
+    @pytest.mark.parametrize(("snapshot", "record", "auto_kinds", "verdict"), [
+        pytest.param(D_SETTLED, D_RUN, ["apple:movie-start"], True, id="d-style-clean-evidence-passes"),
+        pytest.param(_snapshot("IdleAtFinalState", 3, 4), D_RUN, ["apple:movie-start"], False,
+                     id="d-style-consumed-click-event-fails"),
+        pytest.param(P2_SETTLED, NO_RUN, [], True, id="no-leading-run-clean-evidence-passes"),
+        pytest.param(D_SETTLED, None, ["apple:movie-start"], None, id="missing-execute-record-stays-inconclusive"),
     ])
-    def test_no_click_builds_scores_only_the_consumption_half(self, scene: str, record: Any, verdict: bool | None) -> None:
+    def test_no_click_builds_scores_only_the_consumption_half(
+        self, snapshot: Any, record: Any, auto_kinds: list[str], verdict: bool | None,
+    ) -> None:
         # Owner 2026-10-10 (option 1): a destination PARSED as having no click-driven builds has
-        # nothing for the pixel half to prove. The verdict is exactly the scene + execute-log
-        # verdict, the pixel half is marked n/a with the canonical reason, and the player is never
-        # advanced. Characters geometry and the stage map are irrelevant on this path, so both
-        # are passed as None here to prove they cannot drag the verdict to inconclusive.
-        player = self._ObserveOnlyPlayer(scene)
+        # nothing for the pixel half to prove. The verdict is exactly the settled-position +
+        # execute-log verdict, the pixel half is marked n/a with the canonical reason, and the
+        # player is never advanced. Characters geometry and the stage map are irrelevant on this
+        # path, so both are passed as None to prove they cannot drag the verdict to inconclusive.
+        player = self._SnapshotOnlyPlayer(snapshot)
         result = probe.resolve_no_consumption(
-            player, "2", None, None, execute_record=record, click_builds=False, auto_kinds=[],
+            player, "2", None, None, execute_record=record, click_builds=False, auto_kinds=auto_kinds, slide_index=1,
         )
         assert result["verdict"] is verdict
-        assert result["consumption"] == probe.score_no_consumption(scene, "2", record, auto_kinds=[])
+        assert result["consumption"] == probe.score_no_consumption(
+            snapshot, "2", record, auto_kinds=auto_kinds, slide_index=1,
+        )
         assert result["regionChanged"] == {
             "verdict": "n/a", "applicable": False, "reason": "destination has no click-driven builds",
         }
-        assert player.observations == 1
+        assert player.evaluations == [probe.RUNTIME_SNAPSHOT_JS]
 
     @pytest.mark.parametrize("click_builds", [
         pytest.param(True, id="click-builds-present"),
@@ -3167,18 +3211,20 @@ class TestResolveNoConsumption:
         # is scored exactly as before: the full scene + execute-log + pixel check, same arguments.
         calls: list[tuple[Any, ...]] = []
 
-        def full(player: Any, expected: Any, rect: Any, stage_map: Any, *, execute_record: Any, auto_kinds: Any) -> dict[str, Any]:
-            calls.append((player, expected, rect, stage_map, execute_record, auto_kinds))
+        def full(
+            player: Any, expected: Any, rect: Any, stage_map: Any, *, execute_record: Any, auto_kinds: Any, slide_index: Any,
+        ) -> dict[str, Any]:
+            calls.append((player, expected, rect, stage_map, execute_record, auto_kinds, slide_index))
             return {"verdict": True, "sentinel": "full-path"}
 
         monkeypatch.setattr(probe, "score_no_build_consumed", full)
         player, rect, stage_map, record = object(), {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}, {"s": 1}, {"slide": 2}
         monkeypatch.setattr(probe, "stage_map_valid", lambda value: value is stage_map)
         result = probe.resolve_no_consumption(
-            player, "2", rect, stage_map, execute_record=record, click_builds=click_builds, auto_kinds=[],
+            player, "2", rect, stage_map, execute_record=record, click_builds=click_builds, auto_kinds=[], slide_index=1,
         )
         assert result == {"verdict": True, "sentinel": "full-path"}
-        assert calls == [(player, "2", rect, stage_map, record, [])]
+        assert calls == [(player, "2", rect, stage_map, record, [], 1)]
 
     @pytest.mark.parametrize("click_builds", [
         pytest.param(True, id="click-builds-present"),
@@ -3250,7 +3296,17 @@ class TestHasClickBuilds:
                      True, id="click-started-movie-is-a-click-build"),
         pytest.param([{"automaticPlay": False, "effects": [_character_effect("A", 10, 10, 4, 4), _transition()]}],
                      True, id="click-event-with-a-build-beside-the-transition"),
-        pytest.param([{"automaticPlay": False, "effects": []}], False, id="empty-click-event"),
+        pytest.param([{"automaticPlay": False, "effects": []}], None, id="empty-click-event-is-unknown"),
+        pytest.param([{"automaticPlay": False, "effects": [{"type": "transition", "name": "x",
+                                                             "effects": [_character_effect("A", 1, 1, 1, 1)]}]}],
+                     True, id="nested-click-build-under-a-transition-is-detected"),
+        pytest.param([{"automaticPlay": False, "effects": [{"type": "transition", "name": "x",
+                                                             "effects": [{"type": "transition", "name": "y"}]}]}],
+                     False, id="nested-transitions-only-are-not-builds"),
+        pytest.param([{"automaticPlay": False, "effects": [{"type": "transition", "name": "x", "effects": [{"name": "y"}]}]}],
+                     None, id="malformed-nested-effect-is-unknown"),
+        pytest.param([{"automaticPlay": True, "effects": []}, {"automaticPlay": False, "effects": [_transition()]}],
+                     False, id="empty-automatic-event-is-not-a-click-build"),
         pytest.param([{"effects": [_transition()]}], None, id="missing-automaticPlay-is-unknown"),
         pytest.param([{"automaticPlay": 0, "effects": [_transition()]}], None, id="non-bool-automaticPlay-is-unknown"),
         pytest.param([{"automaticPlay": False}], None, id="missing-effects-is-unknown"),
@@ -3310,6 +3366,10 @@ class TestLeadingAutoKinds:
                      id="automatic-effect-without-a-name-is-unknown"),
         pytest.param([{"effects": [_movie_start()]}], None, id="missing-automaticPlay-is-unknown"),
         pytest.param(["junk"], None, id="non-dict-event-is-unknown"),
+        pytest.param([{"automaticPlay": True, "effects": [_movie_start()]},
+                      {"automaticPlay": True, "effects": [_transition()]}], None,
+                     id="auto-advancing-slide-is-refused"),
+        pytest.param([{"automaticPlay": True, "effects": [_transition()]}], None, id="leading-auto-transition-is-refused"),
     ])
     def test_shapes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, events: list[Any], expected: list[str] | None) -> None:
         monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
