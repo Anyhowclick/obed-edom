@@ -687,7 +687,8 @@ def _patch_offline_slides(
     mask_crop: bool = False,
 ) -> dict[int, Any]:
     """Patch every offline slide in ONE zip rewrite. Empty result ⇒ caller falls the whole
-    run back to AppleScript (never patch text without a live seed).
+    run back to AppleScript (a failed seed read included). Without a seed row, autosize text
+    misses to the fallback and fixed-frame text writes its composed frame as a soft fallback.
 
     `iwa_write.OfflineWriteCorrupted` means the in-place copy-back itself failed: the deck
     IS truncated and the temp `.<name>.obedwrite.tmp` beside it holds the full rewrite.
@@ -704,7 +705,8 @@ def _patch_offline_slides(
             from obed_edom import inspect as _inspect  # noqa: PLC0415
 
             say(f"Offline-write: bulk live seed read of {len(soft_slides)} slide(s)…")
-            bulk = _inspect.bulk_geometry(dest, slides=sorted(soft_slides), log=say)
+            bulk = _inspect.bulk_geometry(
+                dest, slides=sorted(soft_slides), kinds=_OFFLINE_SOFT_SEED_KINDS, log=say)
             say("Offline-write: bulk seed read done; patching members.")
             reported_by_slide = _reported_from_bulk_rows(bulk)
             reported_by_slide = _drop_unreadable_seed_rows(

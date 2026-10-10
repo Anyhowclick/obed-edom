@@ -370,4 +370,124 @@ test("run(): open() succeeds but doc.slides() throws still closes the doc", func
   }
 });
 
+// --- kinds filter: an unread kind is never touched and is absent, never [] ---------
+//
+// `recording` wraps a collection so the specifier call AND every bulk sub-accessor push
+// the kind onto `calls`; with `boom` set, each of those also throws. A kinds-filtered read
+// must make zero calls on an unread kind (a read-all-then-drop implementation would
+// record calls and push collection errors).
+
+function recording(kind, calls, inner, boom) {
+  const fn = function () {
+    calls.push(kind);
+    if (boom) throw new Error("unexpected read of " + kind);
+    return inner();
+  };
+  ["position", "width", "height"].forEach(function (prop) {
+    fn[prop] = function () {
+      calls.push(kind);
+      if (boom) throw new Error("unexpected bulk " + prop + " of " + kind);
+      return inner[prop]();
+    };
+  });
+  return fn;
+}
+
+function recordingSlide(calls, boomNonText) {
+  return {
+    textItems: recording("text", calls, collection([elem(1, 2, 3, 4)], {
+      position: [[1, 2]], width: [3], height: [4],
+    }), false),
+    images: recording("image", calls, collection([elem(5, 6, 7, 8)], {
+      position: [[5, 6]], width: [7], height: [8],
+    }), boomNonText),
+    movies: recording("movie", calls, collection([], {}), boomNonText),
+    groups: recording("group", calls, collection([elem(9, 10, 11, 12)], {
+      position: [[9, 10]], width: [11], height: [12],
+    }), boomNonText),
+  };
+}
+
+test("slideGeom kinds ['text'] reads text only: no non-text calls, no errors, same text rows", function () {
+  m.resetErrors();
+  const defaultGeom = m.slideGeom(recordingSlide([], false), 7);
+  m.resetErrors();
+  const calls = [];
+  const geom = m.slideGeom(recordingSlide(calls, true), 7, ["text"]);
+  assert.deepStrictEqual(Object.keys(geom), ["text"]);
+  assert.deepStrictEqual(geom.text, defaultGeom.text);
+  assert.deepStrictEqual(calls.filter(function (k) { return k !== "text"; }), []);
+  assert.deepStrictEqual(m.getErrors(), []);
+  assert.strictEqual(m.getErrorCount(), 0);
+});
+
+test("slideGeom kinds ['group', 'text'] still reads in COLLECTIONS order (text first)", function () {
+  m.resetErrors();
+  const calls = [];
+  const geom = m.slideGeom(recordingSlide(calls, false), 7, ["group", "text"]);
+  assert.deepStrictEqual(Object.keys(geom), ["text", "group"]);
+  assert.ok(calls.indexOf("text") >= 0 && calls.indexOf("group") >= 0);
+  assert.ok(calls.lastIndexOf("text") < calls.indexOf("group"), "text must be read before group");
+  assert.deepStrictEqual(calls.filter(function (k) { return k === "image" || k === "movie"; }), []);
+  assert.deepStrictEqual(m.getErrors(), []);
+});
+
+test("run(): plan kinds ['text'] reads only text on every slide and still closes", function () {
+  let closeCalled = false;
+  const calls = [];
+  const fakeDoc = {
+    slides: function () { return [recordingSlide(calls, true), recordingSlide(calls, true)]; },
+  };
+  const fakeApp = {
+    includeStandardAdditions: false,
+    open: function () { return fakeDoc; },
+    close: function () { closeCalled = true; },
+  };
+  stubJXAGlobals(fakeApp);
+  try {
+    withPlanFile({ path: "/tmp/deck.key", bundleId: "com.apple.Keynote", kinds: ["text"] }, function (planPath) {
+      const out = JSON.parse(m.run([planPath]));
+      assert.ok(!out.error, "no error expected: " + out.error);
+      assert.deepStrictEqual(Object.keys(out.geometry).sort(), ["0", "1"]);
+      Object.keys(out.geometry).forEach(function (k) {
+        assert.deepStrictEqual(Object.keys(out.geometry[k]), ["text"]);
+        assert.deepStrictEqual(out.geometry[k].text, [[1, 2, 3, 4]]);
+      });
+      assert.deepStrictEqual(calls.filter(function (k) { return k !== "text"; }), []);
+      assert.deepStrictEqual(out.errors, []);
+      assert.strictEqual(out.errorCount, 0);
+      assert.strictEqual(closeCalled, true, "the doc must still close");
+    });
+  } finally {
+    unstubJXAGlobals();
+  }
+});
+
+test("run(): no plan kinds reads all four kinds (absent means all)", function () {
+  const calls = [];
+  const fakeDoc = { slides: function () { return [recordingSlide(calls, false)]; } };
+  const fakeApp = {
+    includeStandardAdditions: false,
+    open: function () { return fakeDoc; },
+    close: function () {},
+  };
+  stubJXAGlobals(fakeApp);
+  try {
+    withPlanFile({ path: "/tmp/deck.key", bundleId: "com.apple.Keynote" }, function (planPath) {
+      const out = JSON.parse(m.run([planPath]));
+      assert.ok(!out.error, "no error expected: " + out.error);
+      assert.deepStrictEqual(out.geometry["0"], {
+        text: [[1, 2, 3, 4]],
+        image: [[5, 6, 7, 8]],
+        movie: [],
+        group: [[9, 10, 11, 12]],
+      });
+      assert.deepStrictEqual(Object.keys(out.geometry["0"]), ["text", "image", "movie", "group"]);
+      assert.deepStrictEqual(out.errors, []);
+    });
+  } finally {
+    unstubJXAGlobals();
+  }
+});
+
 console.log("\n" + passed + " passing");

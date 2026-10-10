@@ -10,6 +10,7 @@ path, and that whichever the flag resolves to actually reaches the JXA plan.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -383,6 +384,54 @@ def test_bulk_geometry_resets_last_kept_open_every_call(tmp_path, monkeypatch):
     _capture_bulk_plan(monkeypatch, kept_open=False)
     inspect_mod.bulk_geometry(key)
     assert inspect_mod.LAST_BULK_KEPT_OPEN is None
+
+
+def test_bulk_geometry_default_call_carries_no_kinds(tmp_path, monkeypatch):
+    # Absent `kinds` means "read all four" in the JS; every caller but the offline writer
+    # (two-tier read, checker, probe) depends on the plan staying byte-identical.
+    captured = _capture_bulk_plan(monkeypatch, kept_open=False)
+    key = tmp_path / "deck.key"
+    key.write_text("stub")
+
+    inspect_mod.bulk_geometry(key)
+
+    assert "kinds" not in captured["plan"]
+
+
+def test_bulk_geometry_kinds_reach_plan_sorted(tmp_path, monkeypatch):
+    captured = _capture_bulk_plan(monkeypatch, kept_open=False)
+    key = tmp_path / "deck.key"
+    key.write_text("stub")
+
+    inspect_mod.bulk_geometry(key, kinds=frozenset({"text", "image"}))
+
+    assert captured["plan"]["kinds"] == ["image", "text"]
+
+
+@pytest.mark.parametrize(
+    "kinds",
+    [set(), {"texts"}, "text", ["text", None]],
+    ids=["empty", "unknown_kind", "bare_string_splits_into_chars", "non_string_member"],
+)
+def test_bulk_geometry_rejects_bad_kinds_before_osascript(tmp_path, monkeypatch, kinds):
+    captured = _capture_bulk_plan(monkeypatch, kept_open=False)
+    key = tmp_path / "deck.key"
+    key.write_text("stub")
+
+    with pytest.raises(ValueError, match="kinds"):
+        inspect_mod.bulk_geometry(key, kinds=kinds)
+
+    assert captured == {}, "osascript must never run for a rejected kinds argument"
+
+
+def test_bulk_geometry_kinds_match_js_collections_order():
+    # bulk_geometry.js reads kinds in COLLECTIONS order; BULK_GEOMETRY_KINDS is the Python
+    # whitelist. Drift would let Python accept a kind the JS never reads (silently absent).
+    js = (Path(__file__).resolve().parents[1] / "src/obed_edom/bulk_geometry.js").read_text()
+    block = re.search(r"var COLLECTIONS = \[(.*?)\];", js, re.S)
+    assert block is not None
+    js_kinds = re.findall(r'\["\w+",\s*"(\w+)"\]', block.group(1))
+    assert tuple(js_kinds) == inspect_mod.BULK_GEOMETRY_KINDS
 
 
 @pytest.mark.parametrize("keep_open", [True, False], ids=["keep_open_closes_by_name", "default_no_close"])

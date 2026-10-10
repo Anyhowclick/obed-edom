@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any, Callable
 
@@ -16,6 +17,7 @@ from obed_edom.paths import output_root
 
 INSPECT_JS = Path(__file__).resolve().parent / "inspect_keynote.js"
 BULK_GEOMETRY_JS = Path(__file__).resolve().parent / "bulk_geometry.js"
+BULK_GEOMETRY_KINDS = ("text", "image", "movie", "group")
 
 
 def bulk_read_enabled() -> bool:
@@ -339,15 +341,22 @@ def bulk_geometry(
     key_path: Path | str,
     slides: list[int] | None = None,
     *,
+    kinds: Collection[str] | None = None,
     keep_open: bool = False,
     log: Any = None,
 ) -> dict[int, dict[str, list[list[float]]]]:
-    """{slide (0-based): {kind: [[x, y, w, h], ...]}}; `keep_open` stamps `LAST_BULK_KEPT_OPEN`."""
+    """{slide (0-based): {kind: [[x, y, w, h], ...]}}; `keep_open` stamps `LAST_BULK_KEPT_OPEN`;
+    `kinds` limits the read, and an unread kind is absent."""
     global LAST_BULK_ERRORS, LAST_BULK_NOTES, LAST_BULK_KEPT_OPEN
     with _KEYNOTE_LOCK:
         LAST_BULK_ERRORS = []
         LAST_BULK_NOTES = []
         LAST_BULK_KEPT_OPEN = None
+        if kinds is not None:
+            want = set(kinds)
+            if not want or not want <= set(BULK_GEOMETRY_KINDS):
+                raise ValueError(f"bulk_geometry kinds must be a non-empty subset of "
+                                 f"{BULK_GEOMETRY_KINDS}, got {sorted(want, key=str)}")
         key_path = Path(key_path).expanduser().resolve()
         path_str = str(key_path)
         if not key_path.exists():
@@ -356,6 +365,8 @@ def bulk_geometry(
             "path": path_str,
             "bundleId": keynote_app.bundle_id(),
         }
+        if kinds is not None:
+            plan["kinds"] = sorted(want)
         if keep_open:
             plan["keepOpen"] = True
         if slides:
