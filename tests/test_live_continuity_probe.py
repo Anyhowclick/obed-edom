@@ -4318,11 +4318,9 @@ class TestAutoOverallStatus:
         assert status == "fail" and any("visible pass Vgl missing" in r for r in reasons)
 
     @pytest.mark.parametrize("mutate", [
-        lambda s: s["perRect"][0]["oracles"]["inpage"].update(verdict=None),
         lambda s: s["perRect"][0]["oracles"]["inpage"]["controls"]["pausedDecoder"].update(verdict=True),
         lambda s: s["perRect"][0]["oracles"].update(inpage=None),
         lambda s: s["perRect"][0]["oracles"]["screenshot"].update(verdict=False),
-        lambda s: s["perRect"][0].update(occlusion={"status": "unavailable"}),
         lambda s: s["instanceCheck"].update(painting=[{"authored": dict(BIG_INSTANCE)}]),
         lambda s: s["perRect"][0].update(label="other#1"),
     ])
@@ -4331,6 +4329,26 @@ class TestAutoOverallStatus:
         mutate(result["visible"]["Vgl"]["slides"][1])
         status, reasons = probe.overall_status(result)
         assert status == "fail" and any("Vgl armed slide" in r for r in reasons)
+
+    @pytest.mark.parametrize("mutate", [
+        pytest.param(lambda r: None, id="complete-control"),
+        pytest.param(lambda r: r["arms"]["A"]["armed1to2"].update(verdict=None), id="armed1to2-unknown"),
+        pytest.param(lambda r: r["arms"]["C"]["armed1to2"].update(verdict=None), id="c-armed1to2-unknown"),
+        pytest.param(lambda r: r["attach"]["refused1to2"].update(verdict=None), id="refused1to2-unknown"),
+        pytest.param(lambda r: r["visible"]["Vgl"]["slides"][1].update(verdict=None), id="vgl-armed-slide-unknown"),
+        pytest.param(lambda r: r["visible"]["Vgl"]["slides"][0].update(verdict=None), id="vgl-slide-unknown"),
+        pytest.param(lambda r: r["visible"]["Vgl"]["slides"][1]["perRect"][0]["oracles"]["inpage"].update(verdict=None),
+                     id="vgl-inpage-unknown"),
+        pytest.param(lambda r: r["visible"]["Vgl"]["slides"][1]["perRect"][0].update(occlusion={"status": "unavailable"}),
+                     id="vgl-mask-unavailable"),
+        pytest.param(lambda r: r["visible"]["Vgl"]["slides"][1]["instanceCheck"].update(painting=None), id="vgl-painting-unread"),
+    ])
+    def test_an_unknown_positive_or_vgl_verdict_is_inconclusive_never_fail(self, mutate: Any) -> None:
+        """Astra r8 #2: every applicable positive verdict and every Vgl unknown is collected before
+        the behavioural comparisons; the complete auto record keeps its pass."""
+        result = _auto_result()
+        mutate(result)
+        assert probe.overall_status(result)[0] == ("pass" if result == _auto_result() else "inconclusive")
 
     def test_a_red_hand_back_fails_and_an_unknown_one_is_inconclusive(self) -> None:
         result = _auto_result()

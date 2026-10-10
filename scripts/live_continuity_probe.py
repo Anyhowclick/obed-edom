@@ -4362,8 +4362,11 @@ def occlusion_rescorer(armed: dict[str, Any]) -> Callable[[dict[str, Any], list[
 
 
 def score_vgl_armed_slide(entry: Any, armed: dict[str, Any]) -> dict[str, Any]:
-    """Vgl's armed slide (plan g5g6 §3.4): LIVE in both oracles, paused DEAD, no painting video."""
-    checks = {key: False for key in ("slide", "inpageLive", "pausedDead", "screenshotLive", "masked", "noPainting")}
+    """Vgl's armed slide (plan g5g6 §3.4): LIVE in both oracles, paused DEAD, no painting video.
+    Each check is tri-state, and an unreadable one makes the verdict None before any failed one."""
+    checks: dict[str, bool | None] = {
+        key: False for key in ("slide", "inpageLive", "pausedDead", "screenshotLive", "masked", "noPainting")
+    }
     slide = next((s for s in visible_slides_of(entry) if s.get("playerIndex") == armed["playerIndex"]), None)
     rect = next(
         (r for r in (slide or {}).get("perRect") or [] if isinstance(r, dict) and r.get("label") == armed["instanceId"]),
@@ -4371,24 +4374,32 @@ def score_vgl_armed_slide(entry: Any, armed: dict[str, Any]) -> dict[str, Any]:
     )
     if slide is not None and rect is not None:
         oracles = rect.get("oracles") if isinstance(rect.get("oracles"), dict) else {}
-        inpage = oracles.get("inpage") if isinstance(oracles.get("inpage"), dict) else {}
-        paused = ((inpage.get("controls") or {}).get("pausedDecoder") or {}) if isinstance(inpage.get("controls"), dict) else {}
+        inpage = oracles.get("inpage")
+        controls = inpage.get("controls") if isinstance(inpage, dict) and isinstance(inpage.get("controls"), dict) else {}
+        paused = (controls.get("pausedDecoder") or {}).get("verdict")
+        screenshot = oracles.get("screenshot") if isinstance(oracles.get("screenshot"), dict) else {}
         painting = (slide.get("instanceCheck") or {}).get("painting")
         checks.update(
-            slide=slide.get("verdict") is True,
-            inpageLive=inpage.get("verdict") is True,
-            pausedDead=paused.get("verdict") is False,
-            screenshotLive=rect.get("expect") == LIVE and (oracles.get("screenshot") or {}).get("status") == "live"
-            and (oracles.get("screenshot") or {}).get("verdict") is True,
-            masked=(rect.get("occlusion") or {}).get("status") == "ok",
-            noPainting=isinstance(painting, list) and not any(
+            slide=_tri_state(slide.get("verdict")),
+            inpageLive=_tri_state(inpage.get("verdict")) if isinstance(inpage, dict) else False,
+            pausedDead=False if not isinstance(inpage, dict) else None if paused is None else paused is False,
+            screenshotLive=False if rect.get("expect") != LIVE else None if screenshot.get("verdict") is None
+            else screenshot.get("status") == "live" and screenshot.get("verdict") is True,
+            masked=True if (rect.get("occlusion") or {}).get("status") == "ok" else None,
+            noPainting=None if not isinstance(painting, list) else not any(
                 isinstance(v, dict) and isinstance(v.get("authored"), dict)
                 and any(rects_overlap(v["authored"], r) for r in armed["rects"])
                 for v in painting
             ),
         )
-    failing = [key for key, ok in checks.items() if not ok]
-    return {"verdict": not failing, "checks": checks, "reason": f"failed {failing}" if failing else None}
+    unreadable = [key for key, ok in checks.items() if ok is None]
+    failing = [key for key, ok in checks.items() if ok is False]
+    reason = f"unreadable {unreadable}" if unreadable else f"failed {failing}" if failing else None
+    return {"verdict": combine_verdicts(*checks.values()), "checks": checks, "reason": reason}
+
+
+def _tri_state(value: Any) -> bool | None:
+    return None if value is None else value is True
 
 
 def _handback_ready(read: Any, target: int, expect_handoff: bool) -> bool:
@@ -5915,6 +5926,14 @@ def armed_reasons(entry: dict[str, Any], label: str) -> list[str]:
     return [f"{label} armed1to2={value!r}: {scored.get('reason') if isinstance(scored, dict) else None}"]
 
 
+def positive_verdicts(entry: dict[str, Any], armed: bool, refused: Sequence[str]) -> list[bool | None]:
+    """The scored positive verdict an arm's 1->2 expectation also needs: `armed1to2` when armed,
+    the refusal's own verdict when the plan retires that boundary. One never recorded is a
+    failure (`armed_reasons` / `boundary_expectation_reasons`), not an unreadable read."""
+    key = "armed1to2" if armed else REFUSAL_VERDICT_KEY["continue1to2"] if "continue1to2" in refused else None
+    return [entry[key].get("verdict")] if key is not None and isinstance(entry.get(key), dict) else []
+
+
 def gl_requested(result: dict[str, Any]) -> bool:
     gl = result.get("glReplay")
     return isinstance(gl, dict) and gl.get("requested") == "auto"
@@ -5943,16 +5962,24 @@ def gl_replay_reasons(result: dict[str, Any]) -> tuple[list[str], list[str]]:
         return fails + ["groundTruthGl.armed is missing, so nothing armed can be scored"], []
     vgl = (result.get("visible") or {}).get("Vgl")
     vgl_reasons = visible_pass_reasons(vgl, "Vgl", "qualified")
+    unknown: list[str] = []
     if not vgl_reasons:
         vgl_reasons = visible_expectation_reasons(vgl, "Vgl")
+        unknown += [
+            f"visible pass Vgl slide {slide.get('originalOrdinal')} is inconclusive"
+            for slide in visible_slides_of(vgl) if slide.get("verdict") is None
+        ]
         armed_slide = score_vgl_armed_slide(vgl, armed)
-        if armed_slide["verdict"] is not True:
+        if armed_slide["verdict"] is None:
+            unknown.append(f"visible pass Vgl armed slide inconclusive: {armed_slide['reason']}")
+        elif armed_slide["verdict"] is not True:
             vgl_reasons.append(f"visible pass Vgl armed slide: {armed_slide['reason']}")
     fails.extend(vgl_reasons)
     handback = result.get("handback")
     verdict = handback.get("verdict") if isinstance(handback, dict) else None
     reason = handback.get("reason") if isinstance(handback, dict) else "not captured"
-    unknown = [f"hand-back inconclusive: {reason}"] if verdict is None else []
+    if verdict is None:
+        unknown.append(f"hand-back inconclusive: {reason}")
     if verdict is False:
         fails.append(f"hand-back failed: {reason}")
     ring = result.get("liveRing")
@@ -5997,25 +6024,26 @@ def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
         return generated_status(result)
     a, b, c = arms.get("A", {}), arms.get("B", {}), arms.get("C", {})
     a_armed, c_armed = gl_replay_mode(a) == "injected", gl_replay_mode(c) == "injected"
+    refused = refused_boundaries(result)
     all_gated = [
         *([] if "A" in skipped else [
-            *([] if a_armed else [boundary_verdict(a, "continue1to2")]),
+            *([] if a_armed else [boundary_verdict(a, "continue1to2")]), *positive_verdicts(a, a_armed, refused),
             boundary_verdict(a, "restart2to3"), boundary_verdict(a, "continue3to4"),
         ]),
         *([] if "B" in skipped else [boundary_verdict(b, "continue3to4")]),
         *([] if "C" in skipped else [
-            *([] if c_armed else [boundary_verdict(c, "continue1to2")]), boundary_verdict(c, "continue3to4"),
+            *([] if c_armed else [boundary_verdict(c, "continue1to2")]), *positive_verdicts(c, c_armed, refused),
+            boundary_verdict(c, "continue3to4"),
         ]),
         *([] if "attach" in skipped else [
-            boundary_verdict(attach, "continue1to2"), boundary_verdict(attach, "restart2to3"),
-            boundary_verdict(attach, "continue3to4"),
+            boundary_verdict(attach, "continue1to2"), *positive_verdicts(attach, False, refused),
+            boundary_verdict(attach, "restart2to3"), boundary_verdict(attach, "continue3to4"),
         ]),
     ]
     if any(v is None for v in all_gated):
-        return "inconclusive", ["at least one gated boundary verdict is inconclusive (movie never decoded)"]
+        return "inconclusive", ["at least one gated boundary or positive verdict is inconclusive"]
 
     reasons: list[str] = []
-    refused = refused_boundaries(result)
     a_ok = b_ok = c_ok = attach_ok = True
 
     if "A" not in skipped:
