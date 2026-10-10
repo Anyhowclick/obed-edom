@@ -5275,7 +5275,6 @@ class TestForcedFailScoring:
         {"g_handback": _forced_after("glError")},
         {"g_handback": {"status": "inconclusive"}},
         {"refusal": {"verdict": False}},
-        {"parity": {"verdict": None}},
         {"parity": {"verdict": False}},
         {"g_pass": _forced_pass([True, False, True, True])},
         {"g_pass": dict(_forced_pass([True] * 4), continuity={"mode": "qualified", "glReplay": {"mode": "off"}})},
@@ -5288,6 +5287,74 @@ class TestForcedFailScoring:
     ])
     def test_every_deviation_is_forced_fail(self, override: dict[str, Any]) -> None:
         assert self._score(**override)["status"] == "forced-fail"
+
+
+def _live_rect(met: Any, inpage: Any) -> Any:
+    return probe.combine_rect_oracles({"expect": probe.LIVE, "verdict": met, "label": "m#1"}, inpage)["verdict"]
+
+
+def _visible_pass_verdict(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, verdicts: list[Any]) -> Any:
+    class Host:
+        output = {"continuity": {"mode": "qualified"}}
+
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+        def execute(self, command: str) -> None:
+            pass
+
+        def _require_transport(self) -> Any:
+            return argparse.Namespace(evaluate=lambda expression: True)
+
+    monkeypatch.setattr(probe, "LiveOutputHost", Host)
+    monkeypatch.setattr(probe, "force_viewport", lambda *a: None)
+    monkeypatch.setattr(probe, "wait_for_decode", lambda *a: True)
+    monkeypatch.setattr(probe, "CLICK_DELAY_S", 0.0)
+    monkeypatch.setattr(probe, "run_visible_slides", lambda *a, **k: [{"verdict": v} for v in verdicts])
+    monkeypatch.setattr(probe, "visible_stage_summary", lambda *a: {})
+    monkeypatch.setattr(probe, "score_stage_fit", lambda *a: {"verdict": True})
+    return probe.run_visible_pass("V", Path("x"), [], synthetic_plan(), (64, 32), {}, tmp_path)["verdict"]
+
+
+class TestOracleAndForcedUnknowns:
+    INPAGE_UNKNOWN = {"verdict": None, "status": "inconclusive", "reason": "mask"}
+
+    @staticmethod
+    def _forced(**overrides: Any) -> Any:
+        return TestForcedFailScoring()._score(**overrides)["status"]
+
+    # Astra r8 #4: an applicable unknown survives every Boolean reduction; the complete records and the
+    # legitimate not-applicable in-page oracle keep their outcomes.
+    @pytest.mark.parametrize(("build", "expected"), [
+        pytest.param(lambda mp, tmp: _live_rect(False, {"verdict": False, "status": "dead"}), False, id="rect-control-both-dead"),
+        pytest.param(lambda mp, tmp: _live_rect(False, None), False, id="rect-inpage-absent-not-applicable"),
+        pytest.param(lambda mp, tmp: _live_rect(False, {"verdict": None, "status": "n/a"}), False, id="rect-inpage-n/a"),
+        pytest.param(lambda mp, tmp: _live_rect(False, TestOracleAndForcedUnknowns.INPAGE_UNKNOWN), None,
+                     id="rect-screenshot-false-inpage-unknown"),
+        pytest.param(lambda mp, tmp: TestOracleAndForcedUnknowns._forced(), "forced-ok", id="forced-control"),
+        pytest.param(lambda mp, tmp: TestOracleAndForcedUnknowns._forced(parity={"verdict": None}), "inconclusive",
+                     id="forced-parity-unknown"),
+        pytest.param(lambda mp, tmp: TestOracleAndForcedUnknowns._forced(refusal={"verdict": None}), "inconclusive",
+                     id="forced-refusal-unknown"),
+        pytest.param(lambda mp, tmp: TestOracleAndForcedUnknowns._forced(g_pass=_forced_pass([True, None, True, True])),
+                     "inconclusive", id="forced-slide-unknown"),
+        pytest.param(lambda mp, tmp: TestOracleAndForcedUnknowns._forced(
+            v_pass=dict(_forced_pass([True, None, True, True]), continuity={"mode": "qualified", "glReplay": {"mode": "off"}})),
+                     "inconclusive", id="forced-reference-slide-unknown"),
+        pytest.param(lambda mp, tmp: _visible_pass_verdict(mp, tmp, [True, True]), True, id="pass-control"),
+        pytest.param(lambda mp, tmp: _visible_pass_verdict(mp, tmp, [True, False]), False, id="pass-red-slide"),
+        pytest.param(lambda mp, tmp: _visible_pass_verdict(mp, tmp, [False, None]), None, id="pass-unreadable-slide"),
+    ])
+    def test_an_applicable_unknown_is_never_reduced_to_a_boolean(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, build: Any, expected: Any,
+    ) -> None:
+        assert build(monkeypatch, tmp_path) == expected
 
 
 class TestCodexR1ProbeFixes:

@@ -866,7 +866,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--gl-force-fail", metavar="REASON", default=None,
         help="With --gl-replay auto: seed the module's debugForceFail and run only V and a forced Vgl "
-        f"(one of {', '.join(GL_FORCE_FAIL_REASONS)}); status is forced-ok/forced-fail, never pass",
+        f"(one of {', '.join(GL_FORCE_FAIL_REASONS)}); status is forced-ok/forced-fail/inconclusive, never pass",
     )
     parser.add_argument(
         "--force-wrap", type=parse_force_wrap, default=None, metavar="{1to2,3to4}:OFFSET_MS",
@@ -3829,9 +3829,9 @@ def combine_rect_oracles(entry: dict[str, Any], inpage: dict[str, Any] | None) -
     in-page physical-liveness read (Codex r1 Spec 2). Converts the screenshot
     verdict to physical LIVE/DEAD via `expect`, combines physical liveness,
     then translates the combined physical verdict back to expectation-met.
-    An applicable but INCONCLUSIVE in-page read never lets a met expectation
-    stand uncorroborated (Codex r2 Spec 1): that holds regardless of `expect`,
-    not only when the physical reading happens to be LIVE."""
+    An applicable but INCONCLUSIVE in-page read makes the rect inconclusive
+    whatever the screenshot read (Codex r2 Spec 1, Astra r8 #4), regardless of
+    `expect`; an absent or `n/a` in-page oracle leaves the screenshot verdict."""
     expect = entry.get("expect", LIVE)
     met = entry.get("verdict")
     physical = None if met is None else (met if expect != DEAD else not met)
@@ -3840,7 +3840,7 @@ def combine_rect_oracles(entry: dict[str, Any], inpage: dict[str, Any] | None) -
     combined = combine_oracle_verdicts(screenshot_physical, inpage)
     combined_physical = combined["verdict"]
     reason = combined.get("reason")
-    if met is True and inpage is not None and inpage.get("verdict") is None:
+    if inpage is not None and inpage.get("status") != "n/a" and inpage.get("verdict") is None:
         combined_physical = None
         reason = reason or f"in-page oracle inconclusive: {inpage.get('reason')}"
     if combined_physical is None:
@@ -4292,7 +4292,10 @@ def run_visible_pass(
     scored = result.get("slides") or []
     result["stageMap"] = visible_stage_summary(scored, expected_stage)
     result["stageFit"] = score_stage_fit(visible_stage_samples(scored), expected_stage)
-    result["verdict"] = bool(scored) and all(slide.get("verdict") is True for slide in scored)
+    result["verdict"] = (
+        None if any(slide.get("verdict") is None for slide in scored)
+        else bool(scored) and all(slide.get("verdict") is True for slide in scored)
+    )
     return result
 
 
@@ -4716,7 +4719,8 @@ def forced_fail_seed(reason: str) -> Iterator[dict[str, Any]]:
 def score_forced(
     *, v_pass: Any, g_pass: Any, refusal: Any, g_handback: Any, parity: Any, reason: str, splice: Any,
 ) -> dict[str, Any]:
-    """`forced-ok` iff the forced page is V's flag-off twin (plan g5g6 §3.8); never `pass`."""
+    """`forced-ok` iff the forced page is V's flag-off twin (plan g5g6 §3.8); never `pass`. An
+    unreadable slide, refusal or parity verdict is `inconclusive`, never `forced-fail`."""
     after = g_handback.get("after") if isinstance(g_handback, dict) and isinstance(g_handback.get("after"), dict) else None
     zones = _notes(after, "glreplay-zone") if after else []
     last = zones[-1] if zones else {}
@@ -4724,23 +4728,34 @@ def score_forced(
     stand_downs = api.get("standDowns") if isinstance(api.get("standDowns"), list) else []
     v_verdicts = [slide.get("verdict") for slide in visible_slides_of(v_pass)]
     g_verdicts = [slide.get("verdict") for slide in visible_slides_of(g_pass)]
-    checks = {
+    slides_unread = None in v_verdicts or None in g_verdicts
+    checks: dict[str, bool | None] = {
         "splice": isinstance(splice, dict) and splice.get("splices") == 1,
         "mode": gl_replay_mode(g_pass) == "injected",
-        "slides": bool(g_verdicts) and all(v is True for v in g_verdicts)
+        "slides": None if None in g_verdicts else bool(g_verdicts) and all(v is True for v in g_verdicts)
         and not visible_pass_reasons(g_pass, "VglForced", "qualified"),
         "reference": gl_replay_mode(v_pass) == "off" and not visible_pass_reasons(v_pass, "V", "qualified"),
-        "matchesV": v_verdicts == g_verdicts,
-        "refused": isinstance(refusal, dict) and refusal.get("verdict") is True,
+        "matchesV": None if slides_unread else v_verdicts == g_verdicts,
+        "refused": _verdict_check(refusal),
         "zone": last.get("to") == "retired" and reason in stand_downs and (
             (last.get("reason") == "failure" and last.get("standDown") == reason) or last.get("reason") == "moduleRetired"
         ),
         "noLive": after is not None and not _notes(after, "glreplay-live") and not _notes(after, "glreplay-live", "api"),
-        "parity": isinstance(parity, dict) and parity.get("verdict") is True,
+        "parity": _verdict_check(parity),
         "knownReason": reason in GL_FORCE_FAIL_REASONS,
     }
+    unreadable = [key for key, ok in checks.items() if ok is None]
+    if unreadable:
+        return {"status": "inconclusive", "checks": checks, "reason": f"unreadable {unreadable}"}
     failing = [key for key, ok in checks.items() if not ok]
     return {"status": "forced-fail" if failing else "forced-ok", "checks": checks, "reason": f"failed {failing}" if failing else None}
+
+
+def _verdict_check(scored: Any) -> bool | None:
+    """A scored dict's verdict as a check: None when it was scored but unreadable, False when absent."""
+    if not isinstance(scored, dict):
+        return False
+    return _tri_state(scored.get("verdict"))
 
 
 def slide_reached(observed: Any, ordinal: int) -> bool | None:
