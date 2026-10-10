@@ -708,7 +708,8 @@ for the parked `iwa-surgical-write-generator` feature.
 * **Allowlist.** `QUALIFIED_PLAN_SHA256` stays in force until S3; a deck joins only after its gates pass.
 * **F5 names are frozen instrument API.** Scorers read note kinds (`bridge-3to4`, `reuse-decoder`,
   `reuse-skip-boundary`, `retire-on-start-movie`, `retire-boundary`, `preserve-refused`, `dom-swap`,
-  `facade-block-clear`, `remount-*`, `pool-cleared`, `glreplay-*`) with their `detail` fields, element properties
+  `facade-block-clear`, `remount-*`, `pool-cleared`, `glreplay-*`, `pin-hold-start`, `bridge-motion-start`; the last
+  two are also read by the paint-control injector) with their `detail` fields, element properties
   (`__obedSuppressed34`, `dataset.obedPreserved`, `dataset.obedRemounted`, `__obedElId`, `__obedGen`,
   `__obedFacadeFor`) and `footprintOwnerDecoderId` by name. Dropping or renaming one is a finding even if the suites
   pass.
@@ -832,6 +833,22 @@ for the parked `iwa-surgical-write-generator` feature.
   `#slideNumberControl` is hidden on output.
 * **Gate G:** `scripts/live_continuity_probe.py --pass G [--viewport WxH | --attach]`; fails closed on missing evidence.
   `run_gates.sh` (full tier) queues it on P2 and D1–D6; a run passes only on exit 0 with artifact `status` `pass`.
+  Every expected-True carry also gets an advance leg (go to the source, advance across) scored per frame by the
+  painted instrument. Red: `--pass G --core-variant no-pin-hold` on D1 must red exactly the (1,3,4) b2to3 leg.
+* **Painted instrument** (plan `.agents/plans/keynote_live_continuity_instrument.plan.md`): a pre-paint
+  (`ResizeObserver`) sampler reads every candidate decoder each frame (flat-tree opacity product, own `visibility`,
+  `display`, `checkVisibility`, clipped visible rect, decode state); `score_paint` requires the carried decoder to be the
+  only painter of its slot in every frame of every carry window. Zero tolerance for unpainted, partial (opacity < 0.99
+  or clipped), double and substitute frames; a frame gap, a missing pre-paint read or a failed `selfCheck` is
+  INCONCLUSIVE, which fails. `run_gates.sh` (full tier) adds the D5 `no-pin-hold` host red arm, the D1 Pass G red arm
+  and three D5 pin@2 paint controls (N=6 early, N=6 late, N=0 null) whose target must read exactly the injected seq set;
+  it prints per-carry paint counts and counts paint census entries as `findings=N` on the DONE line (report only, every
+  class, `endOfShow` included; the exit is unchanged). The first `no-pin-hold` registrations are predictions pending owner
+  sign-off; D2/D3 `no-pin-hold` arms join only after V3 measures them. **The DOM cannot see:** GL content (poster copies,
+  rubber band, poster lag; carry-cover covers bridges), occlusion by a later canvas or layer (`elementsFromPoint` is
+  blind), frozen or black decoder pixels (clock rules and V/G liveness cover these), ≤ 1 frame compositor vs
+  main-thread skew at CSS animation edges, 3D backface and OBS alpha/throttling (Q6, Q7), and pin mid-move pixels (no
+  pixel gate; one-off V3b spot check).
   No-consumption = the settled position after the go-to (L leading automatic events: L=0 `IdleAtInitialState` at the
   onset scene, L≥1 `IdleAtFinalState` at onset+L−1, same slide) plus exact host/JSON auto-run kinds; the pixel half is
   n/a on destinations with no click-driven builds.

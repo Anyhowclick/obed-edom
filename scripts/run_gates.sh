@@ -1,6 +1,6 @@
 #!/bin/zsh
 # usage: run_gates.sh <gate-worktree> <outdir> [--allow-record] [--tier dev|full]   (runs the host gates, host red arms,
-# Pass G and P2 arms through one queue, GATE_JOBS at a time (1..5, default 3; 1 = serial), from a clean pinned worktree, into a
+# Pass G, Pass G red, paint control, carry-cover and P2 arms through one queue, GATE_JOBS at a time (1..5, default 3; 1 = serial), from a clean pinned worktree, into a
 # missing or empty <outdir>). --tier full (default) runs everything; --tier dev runs the 1920x1080 and 1600x1000 host
 # gates and the P2 fast, --disable-bridge34 and --gl-replay auto arms, and is never a qualification pass.
 # GATE_JOBS above 3 is allowed but loudly unqualified. A round refuses to start when the 1-minute load average exceeds
@@ -8,7 +8,7 @@
 # prewarmed and re-read as a sha-verified hit for every duration, or when the load has not settled under the limit
 # GATE_SETTLE_S (default 300) after the prewarm. Nothing is ever retried.
 # Exit: 0 full pass; 10 dev pass; 1 when any gate FAILED, or a RECORD arm is PENDING registration unless --allow-record
-# (discovery runs only); 2 when refused before anything runs.
+# (discovery runs only); 2 when refused before anything runs. Paint census findings (DONE findings=N) never change it.
 GATE_JOBS=${GATE_JOBS:-3}
 [[ $GATE_JOBS == [1-5] ]] || { echo "GATE_JOBS must be an integer in 1..5, got '$GATE_JOBS'" >&2; exit 2; }
 GATE_MAX_START_LOAD=${GATE_MAX_START_LOAD:-4}
@@ -56,11 +56,35 @@ DECK_ARMS=(
   "D5 --core-variant stash-any" "D5 --core-variant fifo-reuse" "D5 --strip pin@2" "D5 --strip pin@4"
   "D6 --strip bridge@2" "D6 --strip retire@8"
 )
+# Painted-instrument red arm (S2 instrument plan §4/§5, §3.11): the pin hold off on D5. Prediction, PENDING owner
+# sign-off (first registration; probe-owned RED_ARM_EXPECTATIONS, not measured on the landed core until V3): red set
+# exactly (b0to1 A carry, b1to2 A carry), each with a longest unpainted run of at least 60 frames (decision 3; ~108
+# expected at 1920x1080). Source (older core, trace wraps on): main checkout output/evidence/s2-dev/pingap/r9-D5-seq.json
+# (108 frames / 1813 ms at layer16 opacity 0; 107 / 1834 ms at layer78). Until the probe registers it the arm reads
+# unregistered and FAILS.
+# TODO(decision 11): add "D2 --core-variant no-pin-hold" (D2 b2to3, ~108; pingap r10-D2-seq.json) and
+# "D3 --core-variant no-pin-hold" (D3 b0to1 A, ~108; pingap c7-D3seq-ctl.json) only after V3 measures them.
+DECK_ARMS+=("D5 --core-variant no-pin-hold")
 [[ $TIER == full ]] || DECK_ARMS=()
 # Pass G (plan §3.4 Q3; owner 2026-10-10): the plan-derived go-to gate, armed + null control, on P2 and each S0 deck.
 # Full tier only.
 PASSG_FIXTURES=(P2 D1 D2 D3 D4 D5 D6)
 [[ $TIER == full ]] || PASSG_FIXTURES=()
+# Pass G red (S2 instrument plan §3.9/§5, §3.11): "<deck> <probe args>", the advance legs scored per frame under a core
+# variant. Prediction, PENDING owner sign-off (first registration; probe-owned PASSG_RED_EXPECTATIONS, measured on the
+# landed core only at V3): D1 no-pin-hold reds exactly the (1,3,4) leg's b2to3 carry, longest unpainted run at least
+# 60 frames (decision 3; ~108 expected), and leaves (2,1,2) and (1,2,3) green. Source (older core, trace wraps on):
+# main checkout output/evidence/s2-dev/pingap/r1-a2g3-1080.json (108/1814), r3-g3from1-1080.json (108/1811),
+# r4-g3from4-1080.json (108/1811), c1-a2g3-1080-ctl.json (108/1813), r7-a2g3-1440.json (2560: 108/1817); r5-g2-1080.json
+# and c6-g1-ctl-*.json 0. The pre-pin-hold core red runs once outside this script (decision 7). Full tier only.
+PASSG_RED_ARMS=("D1 --core-variant no-pin-hold")
+[[ $TIER == full ]] || PASSG_RED_ARMS=()
+# Painted-instrument positive control (S2 instrument plan §3.10/§4/§5): "<deck> <N:VARIANT:PHASE@SCENE[:late]>". The
+# injected N-frame hide must read as exactly the injected seq set on the target carry and nowhere else; N=0 is the
+# injector's null (armed, nothing hidden, every count 0). The late timing makes the pre-paint phase load-bearing.
+# Full tier only.
+PAINT_CONTROL_ARMS=("D5 6:ancestor-opacity:pin@2" "D5 6:ancestor-opacity:pin@2:late" "D5 0:ancestor-opacity:pin@2")
+[[ $TIER == full ]] || PAINT_CONTROL_ARMS=()
 # Carry-cover gate (rubber band, 2026-10-10): P2's 3->4 bridge carry screencast; the GL poster must not show beyond the
 # moving overlay. Full tier only: "<expected status> [probe args]" -- the default core must pass, today's linear overlay
 # (red, --core-variant linear-bridge) and a hidden overlay (null, --carry-cover-null) must fail.
@@ -280,7 +304,8 @@ echo "load average (1 min) at launch $LAUNCH_LOAD"
 for V in $HOST_VIEWPORTS; do
   queue $O/host-$V $PY -u scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport $V --artifact $O/host-$V.json ${HOST_SKIP[$V]:+--skip-arms} ${HOST_SKIP[$V]}
 done
-check_host(){ rc=$(status_of $O/host-$1); [[ $rc == 0 ]] || fail "HOST $1 exit $rc"; summ $O/host-$1.json "HOST $1" "${HOST_SKIP[$1]}" || fail "HOST $1 status"; }
+check_host(){ rc=$(status_of $O/host-$1); [[ $rc == 0 ]] || fail "HOST $1 exit $rc"; summ $O/host-$1.json "HOST $1" "${HOST_SKIP[$1]}" || fail "HOST $1 status"
+  paint_report $O/host-$1.json "HOST $1"; }
 # Host red arms (probe-owned pre-registered sets, keyed in the probe by the P2 off-plan sha). The artifact contract is
 # checked in full: every key present and typed, redArm equal to the label the CLI arguments imply, expectedCoreSha256
 # the arm's sha, `unknown` an empty list, the census stray/duplicate multiset reconciled with redSet, and the red and
@@ -319,6 +344,9 @@ if not strs(unknown): problems.append("unknown not a list of strings")
 elif unknown: problems.append(f"unknown {unknown}")
 if not strs(got): problems.append("redSet not a list of strings")
 if not (exp=="record" or strs(exp)): problems.append("expectedRedSet neither 'record' nor a list of strings")
+sampler=arm.get("sampler") if isinstance(arm,dict) else None
+if not (isinstance(sampler,dict) and sampler.get("schema")==2 and isinstance(sampler.get("selfCheck"),dict) and sampler["selfCheck"].get("ok") is True):
+    problems.append("arm.sampler is not schema 2 with selfCheck.ok")
 if not (isinstance(census,dict) and census and all(isinstance(c,dict) for c in census.values())): problems.append("arm.census missing or malformed")
 elif strs(got):
     strays=[r for r in got if r.startswith("stray:")]; dups=[r for r in got if r.startswith("duplicate:")]
@@ -345,7 +373,7 @@ for o,c in sorted((census or {}).items()):
     if isinstance(c,dict) and (c.get("unexpectedVideos") or c.get("duplicateVideos")): print(f"    slide {o}: unexpected={[(v or {}).get('src') for v in c.get('unexpectedVideos') or []]} duplicates={len(c.get('duplicateVideos') or [])}")
 sys.exit((3 if exp=="record" else 0) if ok else 1)
 PYEOF
-}
+  local r=$?; paint_report "$O/host-red$n.json" "HOST ${HOST_DECK:+$HOST_DECK }$*"; return $r; }
 for A in $HOST_RED_ARMS; do run_host_red ${=A}; done
 for DA in "${DECK_ARMS[@]}"; do d=${DA%% *}; A=${DA#* }; HOST_DECK=$d run_host_red ${=A}; done
 # A Pass G run passes only with this round's exit 0 and a Pass G artifact whose top-level status is pass; anything else
@@ -365,8 +393,156 @@ for r in d.get("reasons") or []: print(f"    {r}")
 if d.get("error"): print(f"    error: {d['error']}")
 sys.exit(0 if rc=="0" and d.get("pass")=="G" and d.get("status")=="pass" else 1)
 PYEOF
-}
+  paint_report "$O/passG-$1.json" "PASSG $1"; }
 for P in $PASSG_FIXTURES; do run_passg $P; done
+# Painted-instrument report (S2 instrument plan §5), report only: per scored carry its unpainted/partial/double/substitute
+# frames and longest run, each sampler's schema and selfCheck, and every paint census entry, which is a finding whatever
+# its class (endOfShow included; decision 8) and is appended to <outdir>/paint-findings.txt for the DONE line.
+paint_report(){ $PY - "$1" "$2" "$O/paint-findings.txt" <<'PYEOF'
+import json,sys
+path,label,sink=sys.argv[1:]
+try: d=json.load(open(path))
+except Exception: sys.exit(0)
+d=d if isinstance(d,dict) else {}
+def entries():
+    for k,a in (d.get("arms") if isinstance(d.get("arms"),dict) else {}).items(): yield f"arm {k}",a
+    for k in ("attach","arm"): yield k,d.get(k)
+    for s in ("armed","nullControl"):
+        sess=d.get(s) if isinstance(d.get(s),dict) else {}
+        yield s,sess
+        for dest in sess.get("destinations") or []:
+            dest=dest if isinstance(dest,dict) else {}
+            yield f"{s} goTo {dest.get('fromOrdinal')}->{dest.get('toOrdinal')} advance",dest.get("advanceCarry")
+def run_of(p): r=p.get("longestRun"); return r.get("frames") if isinstance(r,dict) else r
+with open(sink,"a") as out:
+    for where,e in entries():
+        if not isinstance(e,dict): continue
+        s=e.get("sampler")
+        if isinstance(s,dict): print(f"    [{label}] {where} sampler schema={s.get('schema')} selfCheck.ok={(s.get('selfCheck') or {}).get('ok') if isinstance(s.get('selfCheck'),dict) else None}")
+        scored=list(e.items())+list((e.get("verdicts") if isinstance(e.get("verdicts"),dict) else {}).items())
+        for vid,v in scored:
+            p=v.get("paint") if isinstance(v,dict) else None
+            if isinstance(p,dict): print(f"    [{label}] {where} {vid} paint {p.get('status')} unpainted={p.get('unpaintedFrames')} partial={p.get('partialFrames')} double={p.get('doubleFrames')} substitute={p.get('substituteFrames')} longestRun={run_of(p)}")
+        census=e.get("paintCensus") if isinstance(e.get("paintCensus"),dict) else {}
+        for f in census.get("findings") or []:
+            f=f if isinstance(f,dict) else {"entry":f}
+            line=f"{label} | {where} | {f.get('class')} | {json.dumps({k:v for k,v in f.items() if k!='class'},sort_keys=True,default=str)[:300]}"
+            print(f"    FINDING {line}"); out.write(line+"\n")
+PYEOF
+}
+# A Pass G red run matches only with this round's exit 0, a Pass G artifact whose redArm is the variant's label, whose
+# expectedCoreSha256 and both sessions' installed core sha are the variant's, whose registered red set is a list equal
+# (Counter) to the observed one, whose `unknown` is an empty list and whose status is pass; when the artifact carries a
+# paintFloor, every red leg verdict's longest unpainted run must reach it. An unregistered set, inconclusive, error, no
+# artifact, a missing or stale status: FAILED, never pending.
+run_passg_red(){ n=$1$(echo "${@[2,-1]}" | tr -d ' '); fix=$Q/$1/html-unmodified
+  queue $O/passG-red$n $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $fix/index.html --pass G --artifact $O/passG-red$n.json "${@[2,-1]}"; }
+check_passg_red(){ n=$1$(echo "${@[2,-1]}" | tr -d ' '); $PY - "$O/passG-red$n.json" "$(status_of $O/passG-red$n)" "$@" <<'PYEOF' || fail "PASSG-RED $*"
+import json,sys
+from collections import Counter
+sys.path.insert(0,"scripts")
+from continuity_core_variants import variant_sha
+path,rc,deck,args=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4:]
+label=" ".join([deck,*args])
+variant=args[args.index("--core-variant")+1] if "--core-variant" in args else None
+try: want_sha=variant_sha(variant)
+except Exception as e: print(f"[PASSG-RED {label}] no expected core sha ({e}) exit={rc}"); sys.exit(1)
+try: d=json.load(open(path))
+except Exception as e: print(f"[PASSG-RED {label}] no artifact ({e}) exit={rc}"); sys.exit(1)
+d=d if isinstance(d,dict) else {}
+def strs(v): return isinstance(v,list) and all(isinstance(x,str) for x in v)
+def sha_of(s): c=(d.get(s) or {}).get("continuity") if isinstance(d.get(s),dict) else None; return c.get("sha256") if isinstance(c,dict) else None
+exp,got,unknown,floor=d.get("expectedRedSet"),d.get("redSet"),d.get("unknown"),d.get("paintFloor")
+print(f"[PASSG-RED {label}] {d.get('redArm')} status={d.get('status')} exit={rc} expectedCoreSha256={d.get('expectedCoreSha256')} (want {want_sha}) unknown={unknown}")
+print(f"    expected red: {exp}\n    observed red: {got}")
+for r in d.get("statusReasons") or d.get("reasons") or []: print(f"    {r}")
+if d.get("error"): print(f"    error: {d['error']}")
+problems=[]
+if d.get("kind")!="live-continuity-probe-pass-g" or d.get("pass")!="G": problems.append(f"not a Pass G artifact (kind={d.get('kind')!r}, pass={d.get('pass')!r})")
+if d.get("redArm")!=f"core:{variant}": problems.append(f"redArm {d.get('redArm')!r} != {'core:'+str(variant)!r}")
+if d.get("expectedCoreSha256")!=want_sha: problems.append("expectedCoreSha256 is not the variant's")
+for s in ("armed","nullControl"):
+    if sha_of(s)!=want_sha: problems.append(f"{s} installed core sha {sha_of(s)!r} is not the variant's")
+if not strs(exp): problems.append("expectedRedSet is not a registered list of ids")
+if not strs(got): problems.append("redSet not a list of strings")
+elif strs(exp) and Counter(got)!=Counter(exp): problems.append(f"red set {sorted(got)} != registered {sorted(exp)}")
+if not strs(unknown): problems.append("unknown not a list of strings")
+elif unknown: problems.append(f"unknown {unknown}")
+if d.get("status")!="pass": problems.append(f"status {d.get('status')!r} != 'pass'")
+if rc!="0": problems.append(f"exit {rc} != 0")
+if floor is not None:
+    legs={}
+    for dest in (d.get("armed") or {}).get("destinations") or [] if isinstance(d.get("armed"),dict) else []:
+        ac=(dest or {}).get("advanceCarry") if isinstance(dest,dict) else None
+        for vid,v in ((ac or {}).get("verdicts") or {}).items() if isinstance(ac,dict) else []:
+            if isinstance(v,dict) and isinstance(v.get("paint"),dict): legs.setdefault(vid,[]).append(v["paint"])
+    if not isinstance(floor,int) or isinstance(floor,bool): problems.append(f"paintFloor {floor!r} is not a frame count")
+    else:
+        for red in got if strs(got) else []:
+            spec=red.split(":",1)[1] if ":" in red else red
+            if spec=="destination": continue
+            runs=[p.get("longestRun") for p in legs.get(spec,[])]
+            runs=[r.get("frames") if isinstance(r,dict) else r for r in runs]
+            if not runs or not all(isinstance(r,int) and r>=floor for r in runs): problems.append(f"{red} longest unpainted run {runs} below the {floor}-frame floor")
+for p in problems: print(f"    MISMATCH: {p}")
+sys.exit(1 if problems else 0)
+PYEOF
+  paint_report "$O/passG-red$n.json" "PASSG-RED $*"; }
+for PR in "${PASSG_RED_ARMS[@]}"; do run_passg_red ${=PR}; done
+# A paint control run matches only with this round's exit 0 and a paint-control artifact whose control is the arm's,
+# whose core is today's, whose sampler is schema 2 with selfCheck ok, whose injector fired and hid exactly N ticks on a
+# consecutive seq set, whose target carry reads exactly that set (unpaintedSeqs; partialSeqs for ancestor-half, with no
+# unpainted frame) with every other count 0, whose red set is exactly the target (empty for N=0), whose `unknown` is an
+# empty list and whose status is pass. Inconclusive, error, no artifact, a missing or stale status: FAILED, never pending.
+pc_name(){ print -r -- "$1-${2//:/_}"; }
+run_paint_control(){ n=$(pc_name $1 $2); fix=$Q/$1/html-unmodified
+  queue $O/paint-control$n $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $fix/index.html --viewport 1920x1080 --paint-control $2 --artifact $O/paint-control$n.json; }
+check_paint_control(){ n=$(pc_name $1 $2); $PY - "$O/paint-control$n.json" "$(status_of $O/paint-control$n)" "$1" "$2" <<'PYEOF' || fail "PAINT-CONTROL $1 $2"
+import json,sys
+sys.path.insert(0,"scripts")
+from obed_edom.live_continuity_js import js_sha256
+path,rc,deck,spec=sys.argv[1:]
+label=f"{deck} {spec}"
+parts=spec.split(":"); n=int(parts[0]); variant=parts[1]
+try: d=json.load(open(path))
+except Exception as e: print(f"[PAINT-CONTROL {label}] no artifact ({e}) exit={rc}"); sys.exit(1)
+d=d if isinstance(d,dict) else {}
+def ints(v): return isinstance(v,list) and all(isinstance(x,int) and not isinstance(x,bool) for x in v)
+rec=d.get("controlRecord") if isinstance(d.get("controlRecord"),dict) else {}
+arm=d.get("arm") if isinstance(d.get("arm"),dict) else {}
+target=d.get("targetVerdictId")
+tv=arm.get(target) if isinstance(target,str) and isinstance(arm.get(target),dict) else {}
+paint=tv.get("paint") if isinstance(tv.get("paint"),dict) else {}
+sampler=arm.get("sampler") if isinstance(arm.get("sampler"),dict) else {}
+self_ok=isinstance(sampler.get("selfCheck"),dict) and sampler["selfCheck"].get("ok") is True
+hidden=rec.get("hiddenSeqs")
+half=variant=="ancestor-half"
+seen,other=(paint.get("partialSeqs"),"unpaintedFrames") if half else (paint.get("unpaintedSeqs"),"partialFrames")
+print(f"[PAINT-CONTROL {label}] control={d.get('control')} status={d.get('status')} exit={rc} target={target} fired={rec.get('fired')} hiddenTicks={rec.get('hiddenTicks')} (want {n})")
+print(f"    injected seqs: {hidden}\n    {'partial' if half else 'unpainted'} seqs on target: {seen}")
+print(f"    paint {paint.get('status')} unpainted={paint.get('unpaintedFrames')} partial={paint.get('partialFrames')} double={paint.get('doubleFrames')} substitute={paint.get('substituteFrames')}; redSet={d.get('redSet')} unknown={d.get('unknown')}")
+for r in d.get("statusReasons") or []: print(f"    {r}")
+if d.get("error"): print(f"    error: {d['error']}")
+problems=[]
+if d.get("kind")!="live-continuity-probe-paint-control": problems.append(f"not a paint-control artifact (kind={d.get('kind')!r})")
+if d.get("control")!=spec: problems.append(f"control {d.get('control')!r} != {spec!r}")
+if d.get("expectedCoreSha256")!=js_sha256(): problems.append("expectedCoreSha256 is not today's core")
+if sampler.get("schema")!=2 or not self_ok: problems.append("arm.sampler is not schema 2 with selfCheck.ok")
+if rec.get("fired") is not True: problems.append("injector never fired")
+if rec.get("hiddenTicks")!=n: problems.append(f"hiddenTicks {rec.get('hiddenTicks')!r} != {n}")
+if not (ints(hidden) and len(hidden)==n and hidden==list(range(hidden[0],hidden[0]+n)) if n else hidden==[]): problems.append(f"injected seqs {hidden!r} are not {n} consecutive ticks")
+if not ints(seen) or seen!=hidden: problems.append(f"target seq set {seen!r} != injected {hidden!r}")
+for k in (other,"doubleFrames","substituteFrames"):
+    if paint.get(k)!=0: problems.append(f"target {k} {paint.get(k)!r} != 0")
+if d.get("redSet")!=([target] if n else []): problems.append(f"redSet {d.get('redSet')!r} != {[target] if n else []!r}")
+if d.get("unknown")!=[]: problems.append(f"unknown {d.get('unknown')!r} not an empty list")
+if d.get("status")!="pass": problems.append(f"status {d.get('status')!r} != 'pass'")
+if rc!="0": problems.append(f"exit {rc} != 0")
+for p in problems: print(f"    MISMATCH: {p}")
+sys.exit(1 if problems else 0)
+PYEOF
+}
+for PC in "${PAINT_CONTROL_ARMS[@]}"; do run_paint_control ${=PC}; done
 # A carry-cover run matches only with this round's exit (0 for pass, 1 for fail), a carry-cover artifact whose status is
 # the expected one, whose control and core variant are the ones its arguments imply, and whose installed continuity core
 # sha is that variant's (else today's). Inconclusive, error, no artifact, a missing or stale status: FAILED, never pending.
@@ -412,12 +588,16 @@ for V in $HOST_VIEWPORTS; do check_host $V; done
 for A in $HOST_RED_ARMS; do check_host_red ${=A}; tally $? "HOST red $A"; done
 for DA in "${DECK_ARMS[@]}"; do d=${DA%% *}; A=${DA#* }; HOST_DECK=$d check_host_red ${=A}; tally $? "HOST red $d $A"; done
 for P in $PASSG_FIXTURES; do check_passg $P; done
+for PR in "${PASSG_RED_ARMS[@]}"; do check_passg_red ${=PR}; done
+for PC in "${PAINT_CONTROL_ARMS[@]}"; do check_paint_control ${=PC}; done
 for A in $CARRY_COVER_ARMS; do check_cc ${=A}; done
 for A in "${P2_ARMS[@]}"; do check_p2 "${(@Q)${(z)A}}"; done
 $PY -c "from obed_edom.live_continuity_js import js_sha256; print('runtime sha at end', js_sha256())"
 pgrep -fl obed-live-chrome | cut -c1-80 | head -2
 echo "load average (1 min) at start $START_LOAD, at launch $LAUNCH_LOAD, at end $(load1 || echo unreadable); wall ${SECONDS}s"
-echo "DONE tier=$TIER failed=$FAIL pending=$PENDING"
+FINDINGS=0; [[ -f $O/paint-findings.txt ]] && FINDINGS=$(wc -l < $O/paint-findings.txt | tr -d ' ')
+(( FINDINGS )) && echo "paint census findings by class (report only): $(cut -d'|' -f3 $O/paint-findings.txt | tr -d ' ' | sort | uniq -c | awk '{printf "%s=%s ", $2, $1}')"
+echo "DONE tier=$TIER failed=$FAIL pending=$PENDING findings=$FINDINGS"
 if (( ALLOW_RECORD && PENDING )); then echo "## --allow-record: $PENDING RECORD arm(s) left ungated -- DISCOVERY RUN, NOT A PASS ##"; fi
 (( FAIL == 0 && (PENDING == 0 || ALLOW_RECORD) )); rc=$?
 if [[ $TIER == dev ]]; then echo "## DEV TIER -- NOT A QUALIFICATION PASS (exit $(( rc ? 1 : 10 ))) ##"; exit $(( rc ? 1 : 10 )); fi

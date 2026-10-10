@@ -19,7 +19,14 @@ an events file and behaves per `STUB_MODES` (artifact/out-dir stem -> mode):
 - `hang`    start a child process and sleep, as a live probe holding Chrome does;
 - `cc-<status>` (probe `--carry-cover`) write a carry-cover artifact with that status (exit 0 only for
             pass); `cc-sha` / `cc-control` the expected status with a foreign core sha / the wrong control;
-            `cc-none` write no artifact. Without a mode a carry-cover run writes its arm's expected outcome.
+            `cc-none` write no artifact. Without a mode a carry-cover run writes its arm's expected outcome;
+- a `--pass G --core-variant` run (Pass G red) and a `--paint-control` run write a matching artifact unless the
+  mode breaks one thing: `gr-sha` (null-control session on a foreign core), `gr-extra` (an extra red leg),
+  `gr-unknown` (an unreadable leg), `gr-floor` (a paintFloor above the red leg's longest run); `pc-plus` /
+  `pc-minus` (N+1 / N-1 hidden ticks), `pc-shift` (the target reads the injected set one tick late, the rAF-phase
+  shape), `pc-unfired`, `pc-control` (another control's artifact);
+- `red-ok` / `red-noself` (host red run) write a matching red artifact with one `endOfShow` paint census entry /
+  the same with no `sampler.selfCheck`.
 
 What is pinned here:
 - a non-empty (or non-directory) `<outdir>` is refused before anything runs, so nothing from an
@@ -46,7 +53,11 @@ What is pinned here:
   hit of the prewarmed entry (Codex round 2);
 - the load guard: a round refuses to start (exit 2) when the 1-minute load average (`sysctl -n vm.loadavg`, stubbed
   on PATH here so the real host's load never decides a test) exceeds `GATE_MAX_START_LOAD` (default 4), and the
-  summary prints the load at start and end and the round's wall time.
+  summary prints the load at start and end and the round's wall time;
+- the painted instrument (S2 instrument plan §5): the D5 `no-pin-hold` deck red arm, one Pass G red arm and three
+  paint controls run in the full tier only, queued and checked Pass G -> Pass G red -> paint control -> carry-cover;
+  each check fails closed on every known-bad shape, a host red artifact without `sampler.selfCheck.ok` fails, and
+  paint census entries are printed and counted as `findings=` on the DONE line without changing the exit code.
 """
 
 from __future__ import annotations
@@ -105,6 +116,52 @@ event(f"probe {stem} viewport={arg('--viewport')} skip={arg('--skip-arms')} star
 event(f"probeargs {stem} fixture={arg('--fixture')} index={arg('--original-index')} argv={json.dumps(sys.argv[1:])}")
 mode = mode_of(stem)
 act(mode, artifact.with_suffix(""))
+PAINT = {"status": "fail", "unpaintedFrames": 108, "partialFrames": 0, "doubleFrames": 0, "substituteFrames": 0,
+         "longestRun": 108}
+SAMPLER = {"schema": 2, "meta": {}, "selfCheck": {"ok": True}}
+if arg("--pass") == "G" and arg("--core-variant"):
+    sys.path.insert(0, "scripts")
+    from continuity_core_variants import variant_sha
+    sha = variant_sha(arg("--core-variant"))
+    red = ["G1-3-4:b2to3:carry"]
+    leg = {"advanceCarry": {"verdicts": {"b2to3:carry": {"verdict": False, "paint": PAINT}}, "sampler": SAMPLER}}
+    d = {"kind": "live-continuity-probe-pass-g", "pass": "G", "status": "pass", "redArm": f"core:{arg('--core-variant')}",
+         "expectedCoreSha256": sha, "expectedRedSet": red, "redSet": red + (["G2-1-2:b0to1:carry"] if mode == "gr-extra" else []),
+         "unknown": ["G1-2-3:b1to2:carry"] if mode == "gr-unknown" else [],
+         "armed": {"continuity": {"sha256": sha}, "destinations": [{"fromOrdinal": 1, "toOrdinal": 3, **leg}]},
+         "nullControl": {"continuity": {"sha256": "0" * 64 if mode == "gr-sha" else sha}, "destinations": []}}
+    if mode == "gr-floor":
+        d["paintFloor"] = 109
+    artifact.write_text(json.dumps(d))
+    sys.exit(0)
+if arg("--paint-control"):
+    sys.path.insert(0, "scripts")
+    from obed_edom.live_continuity_js import js_sha256
+    spec = arg("--paint-control")
+    n = int(spec.split(":")[0])
+    ticks = n + {"pc-plus": 1, "pc-minus": -1}.get(mode, 0) if n else n
+    hidden = list(range(300, 300 + ticks))
+    seen = [s + 1 for s in hidden] if mode == "pc-shift" else hidden
+    target = "b0to1:A:carry"
+    paint = {**PAINT, "unpaintedFrames": len(seen), "unpaintedSeqs": seen, "partialSeqs": []}
+    d = {"kind": "live-continuity-probe-paint-control", "status": "pass", "statusReasons": [],
+         "control": "1:ancestor-half:pin@2" if mode == "pc-control" else spec,
+         "controlRecord": {"fired": mode != "pc-unfired", "hiddenTicks": ticks, "hiddenSeqs": hidden},
+         "targetVerdictId": target, "arm": {"sampler": SAMPLER, target: {"verdict": not n, "paint": paint}},
+         "redSet": [target] if n else [], "unknown": [], "expectedCoreSha256": js_sha256()}
+    artifact.write_text(json.dumps(d))
+    sys.exit(0)
+if mode in ("red-ok", "red-noself"):
+    sys.path.insert(0, "scripts")
+    from continuity_core_variants import variant_sha
+    red = ["b0to1:A:carry"]
+    d = {"status": "pass", "redArm": f"core:{arg('--core-variant')}", "expectedRedSet": red, "redSet": red, "unknown": [],
+         "expectedCoreSha256": variant_sha(arg("--core-variant")),
+         "arm": {"census": {"1": {"unexpectedVideos": [], "duplicateVideos": []}}, "b0to1:A:carry": {"paint": PAINT},
+                 "sampler": {"schema": 2} if mode == "red-noself" else SAMPLER,
+                 "paintCensus": {"findings": [{"class": "endOfShow", "element": "counter-a.mov#1", "frames": 14}]}}}
+    artifact.write_text(json.dumps(d))
+    sys.exit(0)
 if arg("--pass") == "G":
     statuses = {"g-fail": "fail", "g-inconclusive": "inconclusive", "g-error": "error"}
     g = {"kind": "live-continuity-probe-pass-g", "pass": "G", "status": statuses.get(mode, "pass"),
@@ -390,7 +447,7 @@ def test_the_pattern_cache_is_prewarmed_and_verified_before_the_first_timed_run(
     events = gates["events"]()
     assert events[:2] == ["prewarm html-unmodified", "prewarm html-unmodified"], "the fill, then the verifying lookup"
     assert all(not e.startswith("prewarm") for e in events[2:])
-    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + 22 + 7 + 3 + 8
+    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + 23 + 7 + 1 + 3 + 3 + 8
     assert f"h264 pattern prewarm 46.0333s: encoded key={'k' * 64}" in done.stdout
     assert f"h264 pattern cache verified 46.0333s: hit key={'k' * 64} sha256={'s' * 64}" in done.stdout
     assert "cache hit" in gates["run"](outdir=gates["tmp"] / "out2").stdout
@@ -544,11 +601,14 @@ DECK_ARMS = [
     ("D4", "--core-variant wrong-instance"), ("D4", "--core-variant fifo-reuse"), ("D4", "--strip bridge@3"),
     ("D4", "--strip pin@5"),
     ("D5", "--core-variant stash-any"), ("D5", "--core-variant fifo-reuse"), ("D5", "--strip pin@2"), ("D5", "--strip pin@4"),
-    ("D6", "--strip bridge@2"), ("D6", "--strip retire@8"),
+    ("D6", "--strip bridge@2"), ("D6", "--strip retire@8"), ("D5", "--core-variant no-pin-hold"),
 ]
 DECK_RED_STEMS = [f"host-red{deck}{args.replace(' ', '')}" for deck, args in DECK_ARMS]
 PASSG_FIXTURES = ("P2", "D1", "D2", "D3", "D4", "D5", "D6")
 PASSG_STEMS = [f"passG-{name}" for name in PASSG_FIXTURES]
+PASSG_RED_STEM = "passG-redD1--core-variantno-pin-hold"
+PAINT_CONTROLS = ["6:ancestor-opacity:pin@2", "6:ancestor-opacity:pin@2:late", "0:ancestor-opacity:pin@2"]
+PC_STEMS = [f"paint-controlD5-{spec.replace(':', '_')}" for spec in PAINT_CONTROLS]
 ARMS = ("A", "B", "C", "V", "Voff", "attach")
 
 
@@ -690,7 +750,7 @@ def test_pass_g_runs_on_p2_and_every_deck_through_the_queue_in_order(gates) -> N
     events = gates["events"]()
     starts = [e.split()[1] for e in events if e.endswith(" start")]
     assert [s for s in starts if s.startswith("passG-")] == PASSG_STEMS
-    assert starts.index(PASSG_STEMS[-1]) + 1 == starts.index(CC_STEMS[0])
+    assert starts.index(PASSG_STEMS[-1]) + 1 == starts.index(PASSG_RED_STEM)
     args = _probe_args(events)
     artifacts = []
     for name, stem in zip(PASSG_FIXTURES, PASSG_STEMS, strict=True):
@@ -730,7 +790,7 @@ def test_known_bad_every_non_pass_pass_g_outcome_fails_the_round_and_is_counted(
     assert re.search(r"^\[PASSG D6\] no artifact \(.+\) exit=stale\(1-2-3 0\)$", out, re.M)
     failed = [line for line in out.splitlines() if line.startswith("    GATE FAILED: PASSG ")]
     assert failed == [f"    GATE FAILED: PASSG {name}" for name in PASSG_FIXTURES]
-    summary = re.search(r"^DONE tier=full failed=(\d+) pending=(\d+)$", out, re.M)
+    summary = re.search(r"^DONE tier=full failed=(\d+) pending=(\d+) findings=0$", out, re.M)
     assert summary, out
     assert int(summary.group(1)) == len([line for line in out.splitlines() if line.startswith("    GATE FAILED: ")])
     assert summary.group(2) == "0"
@@ -741,7 +801,7 @@ def test_known_bad_every_non_pass_pass_g_outcome_fails_the_round_and_is_counted(
 def test_known_bad_one_errored_pass_g_adds_exactly_one_failure_to_the_summary(gates) -> None:
     """The positive control is the same round with every Pass G run passing."""
     def failed(stdout: str) -> int:
-        summary = re.search(r"^DONE tier=full failed=(\d+) pending=0$", stdout, re.M)
+        summary = re.search(r"^DONE tier=full failed=(\d+) pending=0 findings=0$", stdout, re.M)
         assert summary, stdout
         return int(summary.group(1))
 
@@ -832,7 +892,7 @@ def test_the_dev_tier_runs_its_subset_and_a_pass_exits_10(gates) -> None:
     assert not [e for e in events if e.startswith("probe passG-")] and "[PASSG" not in done.stdout, "Pass G is full tier only"
     assert done.stdout.count("DEV TIER -- NOT A QUALIFICATION PASS") == 2, done.stdout
     assert done.stdout.rstrip().splitlines()[-1] == "## DEV TIER -- NOT A QUALIFICATION PASS (exit 10) ##"
-    assert "DONE tier=dev failed=0 pending=0" in done.stdout
+    assert "DONE tier=dev failed=0 pending=0 findings=0" in done.stdout
     assert done.stdout.count("-> MATCH") == 3, done.stdout
     assert done.returncode == 10, done.stdout
 
@@ -887,7 +947,7 @@ def test_carry_cover_runs_its_three_controls_on_p2_through_the_queue_in_order(ga
     starts = [e.split()[1] for e in events if e.endswith(" start")]
     assert [s for s in starts if s.startswith("carry-cover")] == CC_STEMS
     first_p2 = next(i for i, s in enumerate(starts) if s.startswith("p2"))
-    assert starts.index(CC_STEMS[0]) == starts.index(PASSG_STEMS[-1]) + 1 and starts.index(CC_STEMS[-1]) + 1 == first_p2
+    assert starts.index(CC_STEMS[0]) == starts.index(PC_STEMS[-1]) + 1 and starts.index(CC_STEMS[-1]) + 1 == first_p2
     out = str(gates["out"].resolve())
     fixture, index, _ = _probe_args(events)["passG-P2"]
     assert _cc_argvs(events) == [
@@ -906,9 +966,10 @@ def test_carry_cover_runs_its_three_controls_on_p2_through_the_queue_in_order(ga
     assert done.stdout.index("[CARRY-COVER --carry-cover-null]") < done.stdout.index("[P2 --wait-profile fast]")
 
 
-def test_the_dev_tier_runs_no_carry_cover(gates) -> None:
-    gates["run"]("--tier", "dev")
-    assert not [e for e in gates["events"]() if "carry-cover" in e]
+def test_the_dev_tier_runs_no_carry_cover_pass_g_red_paint_control_or_pin_hold_red(gates) -> None:
+    done = gates["run"]("--tier", "dev")
+    assert not [e for e in gates["events"]() if any(k in e for k in ("carry-cover", "passG-red", "paint-control", "no-pin-hold"))]
+    assert "[PASSG-RED" not in done.stdout and "[PAINT-CONTROL" not in done.stdout
 
 
 @pytest.mark.parametrize(("stem", "mode", "why"), [
@@ -940,9 +1001,97 @@ def test_known_bad_every_unexpected_carry_cover_outcome_fails_the_round(gates, s
         assert re.search(rf"^\[CARRY-COVER {re.escape(label)}\] no artifact \(.+\) exit=", bad.stdout, re.M), bad.stdout
 
     def count(stdout: str) -> int:
-        summary = re.search(r"^DONE tier=full failed=(\d+) pending=0$", stdout, re.M)
+        summary = re.search(r"^DONE tier=full failed=(\d+) pending=0 findings=0$", stdout, re.M)
         assert summary, stdout
         return int(summary.group(1))
 
     assert count(bad.stdout) == count(good.stdout) + 1
     assert "PENDING REGISTRATION: CARRY-COVER" not in bad.stdout and bad.returncode == 1
+
+
+# --------------------------------------------------------------------------
+# Painted instrument (S2 instrument plan §5): the Pass G red arm and the paint positive controls, full tier only,
+# queued and checked Pass G -> Pass G red -> paint control -> carry-cover; census findings are report only.
+# --------------------------------------------------------------------------
+
+
+def test_pass_g_red_and_the_paint_controls_run_in_order_and_match_a_well_formed_artifact(gates) -> None:
+    """The stub writes a matching artifact for both new kinds by default: this is the positive control for every
+    known-bad case below, and it pins the queue order, the argv and the check order."""
+    done = gates["run"](GATE_JOBS="1")
+    events = gates["events"]()
+    starts = [e.split()[1] for e in events if e.endswith(" start")]
+    assert starts[starts.index(PASSG_STEMS[-1]) + 1:starts.index(CC_STEMS[0])] == [PASSG_RED_STEM, *PC_STEMS]
+    args = _probe_args(events)
+    out = str(gates["out"].resolve())
+    fixture, index, argv = args[PASSG_RED_STEM]
+    assert Path(fixture).parts[-3:] == ("qual-decks", "D1", "html-unmodified") and index == f"{fixture}/index.html"
+    assert argv == ["--fixture", fixture, "--original-index", index, "--pass", "G", "--artifact",
+                    f"{out}/{PASSG_RED_STEM}.json", "--core-variant", "no-pin-hold"]
+    for spec, stem in zip(PAINT_CONTROLS, PC_STEMS, strict=True):
+        fixture, index, argv = args[stem]
+        assert Path(fixture).parts[-3:] == ("qual-decks", "D5", "html-unmodified"), fixture
+        assert argv == ["--fixture", fixture, "--original-index", index, "--viewport", "1920x1080", "--paint-control", spec,
+                        "--artifact", f"{out}/{stem}.json"]
+    stdout = done.stdout
+    assert "GATE FAILED: PASSG-RED" not in stdout and "GATE FAILED: PAINT-CONTROL" not in stdout, stdout
+    assert ("    [PASSG-RED D1 --core-variant no-pin-hold] armed goTo 1->3 advance b2to3:carry paint fail unpainted=108 "
+            "partial=0 double=0 substitute=0 longestRun=108") in stdout
+    order = ["[PASSG D6]", "[PASSG-RED D1 --core-variant no-pin-hold]", *[f"[PAINT-CONTROL D5 {s}]" for s in PAINT_CONTROLS],
+             "[CARRY-COVER green]"]
+    assert [stdout.index(o) for o in order] == sorted(stdout.index(o) for o in order)
+
+
+_RED = "PASSG-RED D1 --core-variant no-pin-hold"
+
+
+@pytest.mark.parametrize(("stem", "mode", "failed", "why"), [
+    (PASSG_RED_STEM, "gr-sha", _RED, "nullControl installed core sha"),
+    (PASSG_RED_STEM, "gr-extra", _RED, "red set ['G1-3-4:b2to3:carry', 'G2-1-2:b0to1:carry'] != registered"),
+    (PASSG_RED_STEM, "gr-unknown", _RED, "unknown ['G1-2-3:b1to2:carry']"),
+    (PASSG_RED_STEM, "gr-floor", _RED, "longest unpainted run [108] below the 109-frame floor"),
+    (PASSG_RED_STEM, "die", _RED, None),
+    (PC_STEMS[0], "pc-plus", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}", "hiddenTicks 7 != 6"),
+    (PC_STEMS[1], "pc-minus", f"PAINT-CONTROL D5 {PAINT_CONTROLS[1]}", "hiddenTicks 5 != 6"),
+    (PC_STEMS[1], "pc-shift", f"PAINT-CONTROL D5 {PAINT_CONTROLS[1]}", "target seq set [301, 302, 303, 304, 305, 306] != injected"),
+    (PC_STEMS[2], "pc-unfired", f"PAINT-CONTROL D5 {PAINT_CONTROLS[2]}", "injector never fired"),
+    (PC_STEMS[0], "pc-control", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}", "control '1:ancestor-half:pin@2' != "),
+    ("host-redD5--core-variantno-pin-hold", "red-noself", "HOST red D5 --core-variant no-pin-hold",
+     "arm.sampler is not schema 2 with selfCheck.ok"),
+])
+def test_known_bad_every_broken_instrument_artifact_fails_exactly_its_own_check(
+    gates, stem: str, mode: str, failed: str, why: str | None,
+) -> None:
+    """Fail closed: a foreign core sha, an extra red, an unreadable leg, a red run below the registered floor, no
+    status; N+1 / N-1 hidden ticks, a set shifted one tick (what a rAF-phase reader sees under `late`), a control that
+    never fired, another control's artifact; a host red artifact with no selfCheck. Each is exactly one GATE FAILED
+    among the instrument checks (the default host red stub artifact for D5 no-pin-hold already fails, so it is
+    counted only in its own case)."""
+    done = gates["run"](STUB_MODES=json.dumps({stem: mode}))
+    prefixes = ("    GATE FAILED: PASSG-RED", "    GATE FAILED: PAINT-CONTROL")
+    lines = [line for line in done.stdout.splitlines() if line.startswith(prefixes)]
+    if failed.startswith("HOST"):
+        assert lines == [] and f"    GATE FAILED: {failed}" in done.stdout, done.stdout
+    else:
+        assert lines == [f"    GATE FAILED: {failed}"], done.stdout
+    if why is not None:
+        assert why in done.stdout, done.stdout
+    else:
+        assert f"[{_RED}] no artifact (" in done.stdout
+    assert "PENDING REGISTRATION: PASSG-RED" not in done.stdout and done.returncode == 1
+
+
+def test_paint_census_entries_are_findings_that_never_change_the_verdict_or_the_exit(gates) -> None:
+    """A matching host red artifact with one endOfShow census entry: the arm still MATCHes, the entry is printed,
+    written to <outdir>/paint-findings.txt and counted on the DONE line, and FAIL counts only the GATE FAILED lines."""
+    done = gates["run"](STUB_MODES=json.dumps({"host-redD5--core-variantno-pin-hold": "red-ok"}))
+    out = done.stdout
+    assert "    observed red: ['b0to1:A:carry'] -> MATCH" in out and "GATE FAILED: HOST red D5 --core-variant no-pin-hold" not in out, out
+    assert "    [HOST D5 --core-variant no-pin-hold] arm b0to1:A:carry paint fail unpainted=108 " in out
+    assert "    FINDING HOST D5 --core-variant no-pin-hold | arm | endOfShow | " in out
+    assert (gates["out"] / "paint-findings.txt").read_text().count("\n") == 1
+    assert "paint census findings by class (report only): endOfShow=1 " in out
+    summary = re.search(r"^DONE tier=full failed=(\d+) pending=0 findings=1$", out, re.M)
+    assert summary, out
+    assert int(summary.group(1)) == len([line for line in out.splitlines() if line.startswith("    GATE FAILED: ")])
+    assert done.returncode == 1, "the stub's other red arms cannot match"
