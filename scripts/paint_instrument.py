@@ -412,6 +412,52 @@ def _rects_match(a: dict[str, float] | None, b: dict[str, float] | None, toleran
     return all(abs(a[k] - b[k]) <= tolerance for k in ("x", "y", "w", "h"))
 
 
+def _id_ok(value: Any) -> bool:
+    return value is not None and not isinstance(value, bool) and isinstance(value, (int, str))
+
+
+def _bool_ok(value: Any) -> bool:
+    return isinstance(value, bool)
+
+
+def _str_or_null(value: Any) -> bool:
+    return value is None or isinstance(value, str)
+
+
+PV_FIELDS: dict[str, Callable[[Any], bool]] = {
+    "id": _id_ok,
+    "src": lambda value: isinstance(value, str),
+    "connected": _bool_ok,
+    "facade": _bool_ok,
+    "suppressed": _bool_ok,
+    "seeking": _bool_ok,
+    "readyState": _num,
+    "videoWidth": _num,
+    "videoHeight": _num,
+    "opacity": lambda value: value is None or _num(value),
+    "checkVisibility": lambda value: value is None or isinstance(value, bool),
+    "visibility": _str_or_null,
+    "displayNone": _str_or_null,
+    "effects": _str_or_null,
+    "transform": _str_or_null,
+    "rect": lambda value: _box(value) is not None,
+    "visibleRect": lambda value: value is None or _box(value) is not None,
+}
+
+
+def pv_schema_problem(pv: Any) -> str | None:
+    """Why a pre-paint read cannot be classified: not an object, or a `PV_FIELDS` field missing or ill-typed (an
+    explicit null is a reading where the field allows it, e.g. `visibleRect: null` is offscreen), else None."""
+    if not isinstance(pv, dict):
+        return "not an object"
+    for key, valid in PV_FIELDS.items():
+        if key not in pv:
+            return f"{key} missing"
+        if not valid(pv[key]):
+            return f"{key} ill-typed"
+    return None
+
+
 def painted_state(
     pv: dict[str, Any] | None,
     *,
@@ -422,9 +468,13 @@ def painted_state(
 ) -> tuple[str, str | None]:
     """Plan §2.3, first matching rule wins; `cover` is the frame's `pp.cover`. Rule 13 (clipped) applies only when
     `rect_tolerance` is given: `visibleRect ∩ stage` against `expected` (= slot ∩ stage). A held decoder painting
-    outside the stage is `outsideStagePx` in `score_paint`, never partial."""
-    if not isinstance(pv, dict):
+    outside the stage is `outsideStagePx` in `score_paint`, never partial. A read failing `pv_schema_problem` is
+    unreadable before any rule."""
+    if pv is None:
         return UNPAINTED, "absent"
+    problem = pv_schema_problem(pv)
+    if problem:
+        return UNREADABLE, f"schema: {problem}"
     if pv.get("connected") is not True:
         return UNPAINTED, "detached"
     if pv.get("facade"):
@@ -579,7 +629,12 @@ def score_paint(
         at_slot: list[dict[str, Any]] = []
         blind = False
         for pv in row["pp"]["videos"]:
-            if not isinstance(pv, dict) or asset not in str(pv.get("src") or "").lower():
+            problem = pv_schema_problem(pv)
+            if problem:
+                blind = True
+                unreadable.append(dict(frame, reason=f"schema: {problem}", id=pv.get("id") if isinstance(pv, dict) else None))
+                continue
+            if asset not in pv["src"].lower():
                 continue
             state = painted_state(pv, cover=cover, expected=expected, stage=stage,
                                   rect_tolerance=rect_tolerance if slot is not None else None)

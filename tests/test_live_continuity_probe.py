@@ -9457,7 +9457,8 @@ def _v2(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "id": v["id"], "src": v["src"], "rect": dict(v["rect"]), "visibleRect": dict(v["rect"]),
                 "connected": True, "facade": False, "suppressed": False, "readyState": 4, "seeking": False,
                 "videoWidth": 640, "videoHeight": 360, "opacity": 1.0, "checkVisibility": True, "visibility": "visible",
-                "displayNone": None, "hiding": None, "effects": None, "parent": "div#body", "layer": None,
+                "displayNone": None, "hiding": None, "effects": None, "transform": None, "parent": "div#body",
+                "layer": None,
             } for v in row["videos"]],
         }
     return samples
@@ -9524,7 +9525,7 @@ class TestSamplerV2:
         (lambda rows: rows[1].update(seq=True), "seq is not an integer"),
         (lambda rows: rows[1].update(ts=float("nan")), "ts is not a finite number"),
         (lambda rows: rows[1].update(pp=[]), "pp is not an object"),
-        (lambda rows: rows[1]["pp"]["videos"].append({"id": None}), "pp video id is unusable"),
+        (lambda rows: rows[1]["pp"]["videos"].append({"id": None}), "pp video id ill-typed"),
         (lambda rows: None, None),
     ])
     def test_schema_two_fields_are_validated_and_mixed_schemas_are_refused(self, mutate: Any, error: str | None) -> None:
@@ -9541,6 +9542,24 @@ class TestSamplerV2:
 
 
 class TestCarryPaintWiring:
+    @pytest.mark.parametrize("field", [*probe.paint_instrument.PV_FIELDS, None])
+    def test_a_missing_pre_paint_field_is_unreadable_never_a_violation(self, field: str | None) -> None:
+        """Astra r5: one `PV_FIELDS` schema for the probe's pre-paint validation and `painted_state`.
+        Deleting any field from every read is a schema error and an unreadable (inconclusive) paint
+        score, never a detached/not-decoded/visibility/offscreen violation. `None`: an explicit
+        `visibleRect: null` is still the offscreen reading, a complete red."""
+        rows = _v2(moving_boundary_samples())
+        for row in rows:
+            if field:
+                del row["pp"]["videos"][0][field]
+            else:
+                row["pp"]["videos"][0]["visibleRect"] = None
+        expected = ("unreadable", f"schema: {field} missing") if field else ("unpainted", "offscreen")
+        assert probe.paint_instrument.painted_state(rows[0]["pp"]["videos"][0]) == expected
+        assert bool(probe.sample_schema_errors(rows)) is bool(field)
+        paint = score_moving_boundary(rows)["paint"]
+        assert (paint["status"], bool(paint["unreadable"])) == (("inconclusive", True) if field else ("fail", False))
+
     @pytest.mark.parametrize(("gap", "verdict", "status"), [
         pytest.param(False, False, "fail", id="identity-change-on-complete-evidence-stays-red"),
         pytest.param(True, None, "inconclusive", id="identity-change-behind-a-sampling-gap-is-inconclusive"),

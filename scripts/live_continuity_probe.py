@@ -2812,7 +2812,8 @@ def _sample_problem(row: Any) -> str | None:
 
 
 def _prepaint_problem(row: dict[str, Any]) -> str | None:
-    """The schema-2 fields (`seq`, `ts`, `pp` and its `pv`s), checked when present."""
+    """The schema-2 fields (`seq`, `ts`, `pp` and each `pv` against `paint_instrument.PV_FIELDS`), checked when
+    present."""
     if "seq" in row and (isinstance(row["seq"], bool) or not isinstance(row["seq"], int)):
         return "seq is not an integer"
     if "ts" in row and _finite_number(row["ts"]) is None:
@@ -2823,11 +2824,9 @@ def _prepaint_problem(row: dict[str, Any]) -> str | None:
     if not isinstance(pp, dict) or not isinstance(pp.get("videos"), list):
         return "pp is not an object with a videos list"
     for pv in pp["videos"]:
-        if not isinstance(pv, dict):
-            return "a pp video is not an object"
-        pv_id = pv.get("id")
-        if pv_id is None or isinstance(pv_id, bool) or not isinstance(pv_id, (int, str)):
-            return "a pp video id is unusable"
+        problem = paint_instrument.pv_schema_problem(pv)
+        if problem:
+            return f"a pp video {problem}"
     return None
 
 

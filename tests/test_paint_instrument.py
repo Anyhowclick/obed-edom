@@ -426,7 +426,7 @@ keynoteBody.appendChild(clip); clip.appendChild(v);
 
 @pytest.mark.parametrize(("dom", "state", "fields"), [r[1:] for r in READS], ids=[r[0] for r in READS])
 def test_paint_read_walks_the_flat_tree(dom: str, state, fields) -> None:
-    out = _run_js("const v = video(7, 'movie-a.mov', {x: 100, y: 100, w: 400, h: 225});\n" + dom
+    out = _run_js("const v = video(7, 'movie-a.mov', {x: 100, y: 100, w: 400, h: 225}); v.__obedProbeId = 1;\n" + dom
                   + "\nconsole.log(JSON.stringify(paintReadOf(v)));")
     assert pi.painted_state(out, expected=SLOT, stage=STAGE, rect_tolerance=3.0) == state
     for key, value in fields.items():
