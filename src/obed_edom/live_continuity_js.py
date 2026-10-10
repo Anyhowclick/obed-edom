@@ -44,7 +44,9 @@ or held) whose instance is the entry's `src` is carried: a pin facades the
 fresh element onto it, a bridge moves it `src.rect -> dst.rect` over the
 transition scene and suppresses the fresh element. Zero or several
 candidates, or a `loop` mismatch, refuse that one boundary (`preserve-refused`
-with `reason`) and the fresh element plays raw. A restart retires a held
+with `reason`) and the fresh element plays raw; for the rest of the preserve
+generation the boundary is then a retire of its `src`, so its candidates are
+retired at once (`retire-boundary`). A restart retires a held
 `src` decoder when a fresh element of the same movie sets `src` at or after
 `atScene`. A retire hands `src` back to the raw player from the transition
 scene (`atScene - 1`, where the player already detaches the movie): nothing
@@ -349,6 +351,11 @@ PRESERVE_CORE_JS = r"""
   let preserveGeneration = 0;
   const stageMapWarned = {};
   const refusedNoted = {};
+  // Boundaries `pickCarried` refused, by generation: each is then a retire of its `src`.
+  const refusedAt = new Map();
+  function refusedHere(b) {
+    return refusedAt.get(b) === preserveGeneration;
+  }
   // Plan rects are AUTHORED px; getBoundingClientRect() and <body>-level overlays
   // are SCREEN px; inline styles inside the transform-scaled #stage are AUTHORED px.
   function stageMap() {
@@ -505,7 +512,7 @@ PRESERVE_CORE_JS = r"""
       return (z === 'armed' || z === 'released') ? z : 'refuse';
     }
     const n = nextEntry(inst);
-    return n && n.action === 'retire' && inRetireZone(n) ? 'refuse' : 'allow';
+    return n && (n.action === 'retire' || refusedHere(n)) && inRetireZone(n) ? 'refuse' : 'allow';
   }
   function noteRefused(v, src, via, extra) {
     const key = movieKeyFor(v, src);
@@ -1421,7 +1428,7 @@ PRESERVE_CORE_JS = r"""
   function sweepRetireZone() {
     zoneState(false);
     ENTRIES.forEach(function(b) {
-      if ((b.action !== 'retire' && b !== GL) || !inRetireZone(b)) return;
+      if ((b.action !== 'retire' && b !== GL && !refusedHere(b)) || !inRetireZone(b)) return;
       if (b === GL && zone === 'released') return;
       if (b === GL && zone === 'armed') {
         retireVictims(b, zoneVictims(b, []).filter(function(v) { return !v.__obedGlPooled; }), true);
@@ -1933,9 +1940,11 @@ PRESERVE_CORE_JS = r"""
   }
   /**
    * The one live candidate whose instance is `entry.src`, or null after noting
-   * why this boundary is refused (the fresh element then plays raw).
+   * why this boundary is refused (the fresh element then plays raw) and
+   * retiring the rejected candidates.
    */
   function pickCarried(el, value, entry) {
+    if (refusedHere(entry)) return null;
     const found = [];
     carryCandidates().forEach(function(c) {
       if (c === el || !isCarrySource(c, entry)) return;
@@ -1952,10 +1961,12 @@ PRESERVE_CORE_JS = r"""
       : found.length > 1 ? 'ambiguous'
       : !!found[0].loop !== !!entry.loop ? 'loopMismatch' : null;
     if (!reason) return found[0];
+    refusedAt.set(entry, preserveGeneration);
     noteRefused(el, value, 'reuse', {
       reason: reason, atScene: entry.atScene, src: entry.src.objectId,
       candidates: found.map(function(c) { return c.__obedElId; })
     });
+    retireVictims(entry, found, true);
     return null;
   }
   function authoredOfScreen(r) {

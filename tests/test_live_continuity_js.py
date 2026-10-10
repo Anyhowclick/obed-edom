@@ -30,7 +30,7 @@ def test_continuity_version_is_pinned_int():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "9cd8b4197d27750e1761ab7515989fa2f6e7760ca17842fa8c21ec57e335eba7"
+PINNED_CORE_SHA256 = "6431ec0e83eab0e3f6fe9ea56a0f7dabb521918f2c58fd938ef7c9287bd8fed2"
 
 
 def test_js_sha256_hashes_the_core_bytes_and_matches_the_pinned_literal():
@@ -4325,6 +4325,202 @@ const b = fresh('A2');
 console.log(JSON.stringify({facade: b.__obedFacadeFor === a, refusals: notesOf('preserve-refused').length}));
 """)
     assert result == {"facade": True, "refusals": 0}
+
+
+# --- A runtime-refused carry hands its source back (S2 review r2 #1) ---------------------
+#
+# Plan §2.2: a carry refused at the fresh `dst` element (`ambiguous` / `loopMismatch` /
+# `absent`) refuses that ONE boundary, and §2.1 says a refused boundary hands `src` back
+# to the raw player the way a derived `retire refused` does. Before the fix `pickCarried`
+# only noted the refusal: every rejected candidate stayed alive — a pooled one remounted
+# at the source footprint, a held bridge overlay pinned at its slot — painting beside
+# the raw destination, kept warm and eligible for remount.
+
+#: Bridge `A1` -> `A2` at 2 (the overlay is HELD as `A2`), then pin `A2` -> `A3` at 4.
+_BRIDGE_THEN_PIN_PLAN = {
+    "schema": 2, "movies": _MOVIE_PLAN["movies"],
+    "boundaries": [
+        {"atScene": 2, "action": "bridge", "movieKey": "movie1", "durationSeconds": 1.5, "loop": False,
+         "src": _inst("A1", _FOOTPRINT), "dst": _inst("A2", _RECT_S3)},
+        {"atScene": 4, "action": "pin", "movieKey": "movie1", "loop": False,
+         "src": _inst("A2", _RECT_S3), "dst": _inst("A3", _RECT_S3)},
+    ],
+}
+#: The same chain whose pin expects a looping decoder: the held overlay does not loop.
+_BRIDGE_THEN_LOOPING_PIN_PLAN = {
+    **_BRIDGE_THEN_PIN_PLAN,
+    "boundaries": [_BRIDGE_THEN_PIN_PLAN["boundaries"][0], {**_BRIDGE_THEN_PIN_PLAN["boundaries"][1], "loop": True}],
+}
+
+#: Each case leaves `cands` (the rejected candidates), `before` (were they painting?) and
+#: the raw destination `d`, built at the refused boundary.
+_REFUSED_CARRY_CASES = {
+    "pooled-ambiguous": (_MOVIE_PLAN, "A1", "A2", 2, r"""
+goToScene(0);
+const a = playing('A1');
+const twin = playing('A1');
+twin.currentTime = 2;
+goToScene(1);
+detach(a);
+detach(twin);
+const cands = [a, twin];
+const before = cands.map(v => document.contains(v) && !v.paused);
+goToScene(2);
+const d = fresh('A2');
+"""),
+    "pooled-loopMismatch": (_MOVIE_PLAN, "A1", "A2", 2, r"""
+goToScene(0);
+const a = playing('A1');
+a.loop = true;
+goToScene(1);
+detach(a);
+const cands = [a];
+const before = cands.map(v => document.contains(v) && !v.paused);
+goToScene(2);
+const d = fresh('A2');
+"""),
+    # A second element claiming the held instance (src set through the property, so it
+    # never reaches the bridge's own carry hook) is pooled beside the held overlay.
+    "held-ambiguous": (_BRIDGE_THEN_PIN_PLAN, "A2", "A3", 4, r"""
+goToScene(0);
+const a = playing('A1');
+goToScene(1);
+detach(a);
+goToScene(2);
+const b = fresh('A2');
+b.parentNode = bodyEl;
+goToScene(3);
+detach(b);
+pump();
+const twin = video('A2');
+twin.src = SRC;
+twin.readyState = 4; twin.currentTime = 2; twin.paused = false; twin.parentNode = bodyEl;
+detach(twin);
+const cands = [a, twin];
+const before = cands.map(v => document.contains(v) && !v.paused);
+goToScene(4);
+const d = fresh('A3');
+"""),
+    "held-loopMismatch": (_BRIDGE_THEN_LOOPING_PIN_PLAN, "A2", "A3", 4, r"""
+goToScene(0);
+const a = playing('A1');
+goToScene(1);
+detach(a);
+goToScene(2);
+const b = fresh('A2');
+b.parentNode = bodyEl;
+goToScene(3);
+detach(b);
+pump();
+const cands = [a];
+const before = cands.map(v => document.contains(v) && !v.paused);
+goToScene(4);
+const d = fresh('A3');
+"""),
+}
+
+_AFTER_REFUSED_CARRY = r"""
+const n0 = P.events.length;
+pump(); pump();
+P.remountAll();
+tick();
+pump();
+console.log(JSON.stringify({
+  before, ids: cands.map(v => v.__obedElId).sort(),
+  raw: {facade: !!d.__obedFacadeFor, suppressed: !!d.__obedSuppressed34},
+  refusals: notesOf('preserve-refused').filter(n => n.via === 'reuse').map(n => [n.reason, n.instance, n.src]),
+  retired: notesOf('retire-boundary').map(n => [n.instance, n.atScene, n.elIds.slice().sort()]),
+  cands: cands.map(v => ({gen: v.__obedGen, paused: v.paused, inDocument: document.contains(v),
+    preserved: v.dataset.obedPreserved || null, remounted: v.dataset.obedRemounted || null})),
+  snapshot: P.snapshot().length,
+  revived: P.events.slice(n0).filter(e => /^(remount-(scheduled|done|authored|into)|reuse-decoder|bridge-3to4|dom-swap|bridge-slot-reattach)/.test(e.kind))
+    .map(e => e.kind),
+}));
+"""
+
+
+@pytest.mark.parametrize("case", list(_REFUSED_CARRY_CASES))
+def test_a_refused_carry_retires_every_rejected_candidate_and_the_destination_plays_raw(case):
+    """Held or pooled, ambiguous or loop-mismatched: each rejected candidate was
+    painting before the refusal; after it, each is retired exactly like a derived
+    `retire refused` (paused, out of the DOM, dead, one `retire-boundary` naming the
+    source instance), nothing keeps it warm or remounts it, and the fresh
+    destination plays raw."""
+    plan, src, dst, at_scene, script = _REFUSED_CARRY_CASES[case]
+    result = _run_chain(plan, script + _AFTER_REFUSED_CARRY)
+    reason = case.split("-", 1)[1]
+    assert all(result["before"]), "the rejected candidates must be painting before the refusal"
+    assert result["raw"] == {"facade": False, "suppressed": False}
+    assert result["refusals"] == [[reason, dst, src]]
+    assert result["retired"] == [[src, at_scene, result["ids"]]]
+    assert result["cands"] == [
+        {"gen": -1, "paused": True, "inDocument": False, "preserved": None, "remounted": None}
+    ] * len(result["ids"])
+    assert result["snapshot"] == 0
+    assert result["revived"] == []
+
+
+@pytest.mark.parametrize(
+    "setup,reason",
+    [
+        ("", "absent"),
+        ("const twin = playing('A1'); twin.currentTime = 2; detach(twin);", "ambiguous"),
+        ("a.loop = true;", "loopMismatch"),
+    ],
+    ids=["absent", "ambiguous", "loop-mismatch"],
+)
+def test_a_refused_source_is_never_stashed_again_not_even_by_a_teardown_inside_a_move(setup, reason):
+    """The refusal persists for the boundary: a source decoder that turns up after it
+    (a late teardown, here inside a move's window so the detach-fix a1 bypass of the
+    `__obedRemounting` guard is taken) is declined at `stash` and never remounted."""
+    script = r"""
+goToScene(0);
+const a = playing('A1');
+goToScene(1);
+__DETACH__
+__SETUP__
+goToScene(2);
+const d = fresh('A2');
+const late = __LATE__;
+late.__obedRemounting = true;
+detachNow(late);
+tick();
+console.log(JSON.stringify({
+  facade: !!d.__obedFacadeFor, pooled: P.snapshot().some(x => x.elId === late.__obedElId),
+  preserved: late.dataset.obedPreserved || null, gen: late.__obedGen,
+  remounts: P.events.filter(e => e.kind.indexOf('remount-') === 0 && e.detail.elId === late.__obedElId).length,
+  stashRefused: notesOf('preserve-refused').filter(n => n.via === 'stash').map(n => [n.instance, n.scene]),
+}));
+""".replace("__DETACH__", "" if reason == "absent" else "detach(a);").replace("__SETUP__", setup).replace(
+        "__LATE__", "a" if reason == "absent" else "playing('A1')")
+    result = _run_chain(_MOVIE_PLAN, script)
+    assert result == {"facade": False, "pooled": False, "preserved": None, "gen": 0, "remounts": 0,
+                      "stashRefused": [["A1", 2]]}
+
+
+def test_a_go_to_clear_lifts_a_runtime_refusal_and_the_boundary_carries_again():
+    """The refusal belongs to the preserve generation it was made in: the host's
+    go-to `clear()` starts a fresh one, so the same boundary carries on the next pass."""
+    result = _run_chain(_MOVIE_PLAN, r"""
+goToScene(0);
+const a = playing('A1');
+const twin = playing('A1');
+goToScene(1);
+detach(a);
+detach(twin);
+goToScene(2);
+const d = fresh('A2');
+P.clear();
+goToScene(0);
+const a2 = playing('A1');
+goToScene(1);
+detach(a2);
+goToScene(2);
+const d2 = fresh('A2');
+console.log(JSON.stringify({first: !!d.__obedFacadeFor, second: d2.__obedFacadeFor === a2,
+  reasons: notesOf('preserve-refused').map(n => n.reason || n.via)}));
+""")
+    assert result == {"first": False, "second": True, "reasons": ["ambiguous"]}
 
 
 def test_go_to_clear_mid_chain_drops_the_held_decoder_and_the_chain_resumes():
