@@ -509,7 +509,9 @@ for PR in "${PASSG_RED_ARMS[@]}"; do run_passg_red ${=PR}; done
 # whose core is today's, whose sampler is schema 2 with selfCheck ok, whose injector fired and hid exactly N ticks on a
 # consecutive seq set, whose target carry reads exactly that set (unpaintedSeqs; partialSeqs for ancestor-half, with no
 # unpainted frame) with every other count 0, whose red set is exactly the target (empty for N=0), whose `unknown` is an
-# empty list and whose status is pass. Inconclusive, error, no artifact, a missing or stale status: FAILED, never pending.
+# empty list and whose status is pass. The injector record must pass paint_instrument.control_record_problem and the
+# target's paint score PAINT_SCORE_FIELDS (the probe's own schemas): a missing integrity field is never "no problem".
+# Inconclusive, error, no artifact, a missing or stale status: FAILED, never pending.
 pc_name(){ print -r -- "$1-${2//:/_}"; }
 run_paint_control(){ n=$(pc_name $1 $2); fix=$Q/$1/html-unmodified
   queue $O/paint-control$n $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $fix/index.html --viewport 1920x1080 --paint-control $2 --artifact $O/paint-control$n.json; }
@@ -517,6 +519,7 @@ check_paint_control(){ n=$(pc_name $1 $2); $PY - "$O/paint-control$n.json" "$(st
 import json,sys
 sys.path.insert(0,"scripts")
 from obed_edom.live_continuity_js import js_sha256
+import paint_instrument
 path,rc,deck,spec=sys.argv[1:]
 label=f"{deck} {spec}"
 parts=spec.split(":"); n=int(parts[0]); variant=parts[1]
@@ -544,6 +547,10 @@ if d.get("kind")!="live-continuity-probe-paint-control": problems.append(f"not a
 if d.get("control")!=spec: problems.append(f"control {d.get('control')!r} != {spec!r}")
 if d.get("expectedCoreSha256")!=js_sha256(): problems.append("expectedCoreSha256 is not today's core")
 if sampler.get("schema")!=2 or not self_ok: problems.append("arm.sampler is not schema 2 with selfCheck.ok")
+rec_problem=paint_instrument.control_record_problem(d.get("controlRecord"))
+if rec_problem: problems.append(f"controlRecord unreadable: {rec_problem}")
+paint_problem=paint_instrument.schema_problem(tv.get("paint"),paint_instrument.PAINT_SCORE_FIELDS)
+if paint_problem: problems.append(f"target paint score unreadable: {paint_problem}")
 if rec.get("fired") is not True: problems.append("injector never fired")
 if rec.get("hiddenTicks")!=n: problems.append(f"hiddenTicks {rec.get('hiddenTicks')!r} != {n}")
 if not (ints(hidden) and len(hidden)==n and hidden==list(range(hidden[0],hidden[0]+n)) if n else hidden==[]): problems.append(f"injected seqs {hidden!r} are not {n} consecutive ticks")

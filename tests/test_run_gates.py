@@ -25,7 +25,7 @@ an events file and behaves per `STUB_MODES` (artifact/out-dir stem -> mode):
   `gr-unknown` (an unreadable leg), `gr-floor` (a paintFloor above the red leg's longest run), `gr-nofloor` (no
   paintFloor on a no-pin-hold arm); `pc-plus` /
   `pc-minus` (N+1 / N-1 hidden ticks), `pc-shift` (the target reads the injected set one tick late, the rAF-phase
-  shape), `pc-unfired`, `pc-control` (another control's artifact);
+  shape), `pc-unfired`, `pc-control` (another control's artifact), `pc-no-<field>` (a recorder field deleted);
 - `red-ok` / `red-noself` (host red run) write a matching red artifact (paintFloor 60) with one `endOfShow` paint
   census entry / the same with no `sampler.selfCheck`; `red-floor` / `red-nofloor` the same with a paintFloor above the
   red carry's longest run / with no paintFloor.
@@ -146,10 +146,18 @@ if arg("--paint-control"):
     hidden = list(range(300, 300 + ticks))
     seen = [s + 1 for s in hidden] if mode == "pc-shift" else hidden
     target = "b0to1:A:carry"
-    paint = {**PAINT, "unpaintedFrames": len(seen), "unpaintedSeqs": seen, "partialSeqs": []}
+    paint = {**PAINT, "unpaintedFrames": len(seen), "unpaintedSeqs": seen, "partialSeqs": [], "frames": 120,
+             "coverage": {"ok": True}, "unobserved": [], "unreadable": []}
+    fields = spec.split(":")
+    record = {"control": {"n": n, "variant": fields[1], "phase": fields[2].split("@")[0], "timing": "late" if "late" in fields else "early",
+                          "atScene": int(fields[2].split("@")[1]), "depth": 1, "delayTicks": 10},
+              "fired": mode != "pc-unfired", "aborted": None, "events": [], "errors": [], "triggerSeq": 290,
+              "onSeq": 300, "offSeq": 300 + ticks, "hiddenTicks": ticks, "hiddenSeqs": hidden, "lateSeqs": [], "target": None}
+    if mode.startswith("pc-no-"):
+        del record[mode[len("pc-no-"):]]
     d = {"kind": "live-continuity-probe-paint-control", "status": "pass", "statusReasons": [],
          "control": "1:ancestor-half:pin@2" if mode == "pc-control" else spec,
-         "controlRecord": {"fired": mode != "pc-unfired", "hiddenTicks": ticks, "hiddenSeqs": hidden},
+         "controlRecord": record,
          "targetVerdictId": target, "arm": {"sampler": SAMPLER, target: {"verdict": not n, "paint": paint}},
          "redSet": [target] if n else [], "unknown": [], "expectedCoreSha256": js_sha256()}
     artifact.write_text(json.dumps(d))
@@ -289,6 +297,7 @@ def gates(tmp_path: Path):
     (g / "scripts").mkdir(parents=True)
     (g / "src").symlink_to(REPO / "src")
     (g / "scripts" / "continuity_core_variants.py").symlink_to(REPO / "scripts" / "continuity_core_variants.py")
+    (g / "scripts" / "paint_instrument.py").symlink_to(REPO / "scripts" / "paint_instrument.py")
     (g / "scripts" / "live_continuity_probe.py").write_text(PROBE_STUB)
     (g / "scripts" / "p2_recovery_html_adversarial.py").write_text(P2_STUB)
     (g / "scripts" / "p2_recovery_html_dissolve_live.py").write_text(PREWARM_STUB)
@@ -1064,6 +1073,9 @@ _RED = "PASSG-RED D1 --core-variant no-pin-hold"
     (PC_STEMS[1], "pc-shift", f"PAINT-CONTROL D5 {PAINT_CONTROLS[1]}", "target seq set [301, 302, 303, 304, 305, 306] != injected"),
     (PC_STEMS[2], "pc-unfired", f"PAINT-CONTROL D5 {PAINT_CONTROLS[2]}", "injector never fired"),
     (PC_STEMS[0], "pc-control", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}", "control '1:ancestor-half:pin@2' != "),
+    # Astra r6 #2: a record missing an integrity field is never "no problems".
+    *((PC_STEMS[0], f"pc-no-{key}", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}", f"controlRecord unreadable: {key} missing")
+      for key in ("aborted", "events", "errors")),
     ("host-redD5--core-variantno-pin-hold", "red-noself", "HOST red D5 --core-variant no-pin-hold",
      "arm.sampler is not schema 2 with selfCheck.ok"),
     ("host-redD5--core-variantno-pin-hold", "red-floor", "HOST red D5 --core-variant no-pin-hold",
