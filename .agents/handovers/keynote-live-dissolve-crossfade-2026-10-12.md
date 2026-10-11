@@ -12,8 +12,8 @@ launched). Branch `claude/keynote-live-dissolve-crossfade` (local only: NOT push
 | W0 | `7fa7c8dd` | strip fix `715cb3f1` cherry-picked |
 | W4 docs | `571237e2` | README fallback line, SKILL sentence, follow-ups handover (Q/L placeholder still TBD) |
 | W1 `live_runtime.py` | `debfc685` + test folds `dc4dad8b`, `2aadd074`, `1091285c`, `8a53c0b9`, `de83681b` | D1–D4 byte-exact to §3.1 (product bytes unchanged since `debfc685`); §8 counts reproduced; **Astra impl r1–r6, r6 APPROVE** (all folds were test hardening: proxy guards on every stub element, real node-move semantics, whole-tree/placement invariants, deep tree compare, call-site spies, full LUT, work clock; 61 mutants caught, two decoded-size mutants accepted as safety-equivalent). 125 passed / 0 skipped. Pins on/rendering: e9b2fad4 `49d56adc…` / `117fd39d…`; 17c0c938 `7a5e315b…` / `52d7edb5…`; off unchanged. **`Q`/`L` provisional** (`_FREEZE_QUALIFIED_TUPLES`, `_FREEZE_TONE_LUT`): swap + re-pin when Q0b's decision record lands. |
-| W2 `dissolve_probe.py` | `15dc7d33`, r1 fold `34f4779e` | Astra r1 (13) folded; **Astra r2 on W2+W3: CHANGES REQUIRED** (10: B1 absent inventories → MATCH, B2 incomplete captures satisfy negative controls, M3–M8, m9–m10) — fold in flight at handover time: _see final note_. Tone risk: P2 build-frame canvas `3231B69B` (960×276) covers the movie rect → tone mask empty → `m-tone` INCONCLUSIVE; needs a tone fixture with exposed ramp/patch interiors or a painted-pixel foreground mask (never count covered pixels). no_flash needs a pre-animation rAF on real captures (fail-closed; check at first gate run). |
-| W3 `managed_obs_qualify.py --arm dissolve` | `47135f64` (+ CEF profile switch in `34f4779e`) | 19 CEF sessions, calibration from `opaque-off` first; reviewed with W2 in r2 (M7 cut-shot timing interval, m9 cached calibration) — folded by W2's agent. |
+| W2 `dissolve_probe.py` | `15dc7d33`; folds `34f4779e` (r1), `243de015` (r2), `1c5d3004` (r3) | Astra impl r1–r4 on W2+W3. r4: r3 #2/#4 closed; **two items open** — video measurement ranges (`eff` in [0,1], non-negative rect size) and removing the interrupted lifecycle rows' `minMid: 2` override (not in §9.1) — fold in flight at shutdown: _see final note_. Pattern that converged: per-record schema validation before any filtering + one `COVERAGE` table + shared integrity always reaching the arm. Tone risk: P2 build-frame canvas `3231B69B` (960×276) covers the movie rect → tone mask empty → `m-tone` INCONCLUSIVE; needs a tone fixture with exposed ramp/patch interiors or a painted-pixel foreground mask (never count covered pixels). no_flash needs a pre-animation rAF on real captures (fail-closed; check at first gate run). |
+| W3 `managed_obs_qualify.py --arm dissolve` | `47135f64` (+ CEF profile switch in `34f4779e`) | 19 CEF sessions, calibration from `opaque-off` first (re-derived, cached copy compared); cut shots keep `[t0,t1]` and must lie inside the cut window; reviewed with W2 (r2–r4), no open W3-specific item. |
 | Q0b step 0 | evidence only | headless done, CEF pending; **five re-plan triggers** (below) |
 
 ## Q0b results (headless Chrome 154; evidence `output/evidence/s2-dev/dissolve-alpha-2026-10-11/q0b-2026-10-11/README.md`)
@@ -54,6 +54,7 @@ is cleared; the evidence copy has the scripts and decision JSON).
 
 ## Verified
 
+- Full suite at `1c5d3004` (after W2 r3): **3.12: 9324 passed, 28 skipped, 1 xfailed** (127 s).
 - Full suite at `de83681b` (all W1–W4 code + W2 r1 fold): **3.12: 9291 passed, 28 skipped, 1 xfailed** (143 s); **3.10.10 floor: 9291 passed, 28 skipped, 1 xfailed** (187 s; venv in session scratch). Dashboard suites not run (no dashboard files touched).
 
 ## Not done (in plan order)
