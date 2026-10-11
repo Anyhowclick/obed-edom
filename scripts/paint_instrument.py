@@ -572,6 +572,8 @@ def painted_state(
         return UNREADABLE, "opacity"
     if not isinstance(visible, bool):
         return UNREADABLE, "checkVisibility"
+    if not isinstance(pv.get("visibility"), str):
+        return UNREADABLE, "visibility"
     if pv.get("effects"):
         return UNREADABLE, "effects"
     if pv.get("transform"):
@@ -688,11 +690,18 @@ def score_paint(
     carried decoder, or any decoder of the asset whose rect meets the slot (any, without a slot), reads unreadable.
     An unobserved or unreadable frame, failed coverage or no rows is inconclusive whatever else the window shows;
     on complete evidence any violating frame (no slot included) fails. `unreadable_of(row)` names a frame whose
-    context the caller cannot read (e.g. its phase), which is unreadable before any slot is chosen."""
+    context the caller cannot read (e.g. its phase), which is unreadable before any slot is chosen. Identity comes
+    before source: `element_id` and every id whose src names the asset on any of `rows` is a decoder of the asset,
+    so a frame where one no longer names it, or where two pre-paint reads share an id, is unreadable; so is one where a
+    painter that names no source at all (painted, partial or unreadable) meets the slot (any, without a slot)."""
     window_rows = sorted((r for r in rows if _num(r.get("t")) and start <= r["t"] <= end), key=lambda r: r.get("seq") or 0)
     coverage = frame_coverage(window_rows, max_gap_frames=max_gap_frames, min_fps=min_fps)
     period = coverage.get("periodMs")
     asset = asset_substr.lower()
+    movie = {element_id} | {
+        pv["id"] for r in rows if isinstance(r, dict) and isinstance(r.get("pp"), dict) and isinstance(r["pp"].get("videos"), list)
+        for pv in r["pp"]["videos"] if pv_schema_problem(pv) is None and asset in pv["src"].lower()
+    }
     violations: list[dict[str, Any]] = []
     unobserved: list[dict[str, Any]] = []
     unreadable: list[dict[str, Any]] = []
@@ -718,16 +727,30 @@ def score_paint(
         carried_pv: dict[str, Any] | None = None
         at_slot: list[dict[str, Any]] = []
         blind = False
+        ids = [pv["id"] for pv in row["pp"]["videos"] if pv_schema_problem(pv) is None]
+        if len(ids) != len(set(ids)):
+            unreadable.append(dict(frame, reason="two pre-paint reads share an id"))
+            continue
         for pv in row["pp"]["videos"]:
             problem = pv_schema_problem(pv)
             if problem:
                 blind = True
                 unreadable.append(dict(frame, reason=f"schema: {problem}", id=pv.get("id") if isinstance(pv, dict) else None))
                 continue
-            if asset not in pv["src"].lower():
+            if asset not in pv["src"].lower() and pv["id"] in movie:
+                blind = True
+                unreadable.append(dict(frame, reason="a decoder of the asset no longer names it", id=pv["id"]))
+                continue
+            if asset not in pv["src"].lower() and pv["src"]:
                 continue
             state = painted_state(pv, cover=cover, expected=expected, stage=stage,
                                   rect_tolerance=rect_tolerance if slot is not None else None)
+            if not pv["src"]:
+                rect = _box(pv.get("rect"))
+                if state[0] in (PAINTED, PARTIAL, UNREADABLE) and (slot is None or rect is None or _meet(rect, slot) is not None):
+                    blind = True
+                    unreadable.append(dict(frame, reason="a painter that names no source meets the slot", id=pv["id"]))
+                continue
             mine = pv.get("id") == element_id
             near = _iou(_box(pv.get("rect")), slot) >= iou_min
             if mine:

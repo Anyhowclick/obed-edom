@@ -64,6 +64,8 @@ TRUTH = [
     ("seeking", _pv(readyState=1, seeking=True), {}, ("unpainted", "seeking")),
     ("nan-opacity-is-unreadable", _pv(opacity=None), {}, ("unreadable", "opacity")),
     ("no-checkVisibility", _pv(checkVisibility=None), {}, ("unreadable", "checkVisibility")),
+    # fold5 v3 #7: a connected element always has a computed visibility; null was read as unpainted (a matching red).
+    ("connected-null-visibility", _pv(visibility=None), {}, ("unreadable", "visibility")),
     ("effects", _pv(effects="div#layer3:filter"), {}, ("unreadable", "effects")),
     # Astra r1 #2: a rotated/skewed (or unmappable) box is not axis-aligned, so no rect read can be trusted.
     ("rotated-or-skewed-box", _pv(transform="div#clip"), {}, ("unreadable", "transform")),
