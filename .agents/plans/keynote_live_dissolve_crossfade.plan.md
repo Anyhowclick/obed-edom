@@ -1,9 +1,9 @@
 # Dissolve and cut over fill-less slides: a true cross-fade, a clean cut, and movies that freeze and fade
 
-**DRAFT rev 8**, 2026-10-11. Rev 1: Opus planner (`8e572864`). Critique r1–r6: GPT-6 Astra high via Codex (not Opus; owner
-2026-10-11), 12 + 7 + 11 + 7 + 6 + 4 findings, all folded, plus the first real-DOM probe (§8, §14). Revs 2–8: Opus planner
-(`cd289a05`, `f3bd8b55`, `4ffcd8ad`, `e5c644bb`, `218308c3`, `cacfe9fb`, this). Owner decisions 1–7 recorded (§12). Round 7
-is the owner's last critique round. Plan only: no product code, no commits, no OBS, no Keynote. Base: `main` @ `1589d096`.
+**rev 9 — final for owner review**, 2026-10-11. Rev 1: Opus planner (`8e572864`). Critique r1–r7: GPT-6 Astra high via Codex
+(not Opus; owner 2026-10-11), 12 + 7 + 11 + 7 + 6 + 4 + 3 findings, all folded; r7 verdict "ready for owner review after listed
+fixes" (§14). Revs 2–9: Opus planner (`cd289a05`, `f3bd8b55`, `4ffcd8ad`, `e5c644bb`, `218308c3`, `cacfe9fb`, `d299b549`,
+this). Owner decisions 1–7 in §12. Plan only: no product code, no commits, no OBS, no Keynote. Base: `main` @ `1589d096`.
 Players: stock `main.js` `e9b2fad4…` and `17c0c938…` (`live_runtime.SUPPORTED_PLAYERS`). Every offset is a **byte** offset,
 read on both players; they are equal below 2331091 (17c0c938 = e9b2fad4 + two 19-byte `,isEvalSupported:!1` at 17c0c938
 offsets 2331091 and 2331362: +19 between them, +38 after; among the listed anchors only R8, D4 and the hook `_ANCHOR` move,
@@ -24,11 +24,11 @@ its `plan-2026-10-11/planner/x`. Parents: `keynote_live_mm_opacity.plan.md` (R1�
   stock. Result: premultiplied `(1−e)·P_out + e·P_in`; a cut that swaps within its 1 ms, never both at full strength.
 - **Movie freeze (D4 takes, D3 attaches; add-only).** Owner: "in Keynote the vid stops playing and dissolves out". The player
   deletes the playing `<video>` as the transition starts, so the movie jumps back to the **opening frame** baked into the
-  outgoing texture (§1.4). D4 first requires the page's paint to stay inside element boxes (**paint gate**), then snapshots
-  each `<video>` whose chain lies inside a **positive allowlist of the computed styles the player generates** (§3.2),
-  tone-matches it (Q5) and redraws overlying texture canvases (Q7); D3 puts it in the outgoing layer's fading wrapper, or
-  discards it. The `<video>` is never touched; anything outside keeps today's look. Real P2 DOM (debug build, §8): both movies
-  admitted, square redrawn, frozen 48 held; stub DOMs admit every movie on the six Dissolve-ending movie slides.
+  outgoing texture (§1.4). D4 requires every page paint to be a supported, box-confined family (**paint gate**), snapshots each
+  `<video>` whose chain is inside a **positive allowlist of the computed styles the player generates** (§3.2), tone- matches it
+  (Q5), redraws overlying canvases (Q7); D3 puts it in the outgoing fading wrapper, or discards it. The `<video>` is never
+  touched; anything outside keeps today's look. Real P2 DOM (debug build, §8): both movies admitted, square redrawn, frozen 48
+  held; stub DOMs admit every movie on the six Dissolve-ending movie slides.
 - **Not in this patch (owner Q6):** main's bridge keeps P2's slide-4 decoder at full strength over the terminal fade, stock and
   patched alike; stopping it and S2's hold at the outgoing transition start is a separate follow-up PR after S2 merges.
 - **Measured** (headless Chrome 154, §8): cross-fade residual ≤ 1.5 LSB; nulls pop in (205–206); KB dips to α 191; opaque
@@ -113,19 +113,19 @@ shows both slides (§8). On-disk cuts end on the empty background; a cut between
 
 | # | Where (byte, length) | Before | After |
 |---|---|---|---|
-| D1 (R9) | end of `processEffects` / head of `renderEffects` @2311794 (26 B) | `return B}renderEffects(A){` | `return B}` + `__obedShape`, `__obedDissolveLayer`, `__obedFreezeTake`, `__obedFreeze` + `renderEffects(A){` (8 990 B) |
+| D1 (R9) | end of `processEffects` / head of `renderEffects` @2311794 (26 B) | `return B}renderEffects(A){` | `return B}` + `__obedShape`, `__obedDissolveLayer`, `__obedFreezeTake`, `__obedFreeze` + `renderEffects(A){` (9 225 B) |
 | D2 (R10) | base-layer `VB` @2312557 (65 B) | `const A=new VB(C.baseLayer,{name:C.name,type:C.type,objectID:e});` | `const A=new VB(this.__obedDissolveLayer(C),{name:C.name,type:C.type,objectID:e});` |
 | D3 (R11) | after the CSS draw @2313053 (42 B) | `this.cssRenderer.draw(a),a.removeChild(w)}` | `this.cssRenderer.draw(a),this.__obedFreeze(C,A),a.removeChild(w)}` |
 | D4 (R12) | `jumpToScene_partFour` @2353722 / @2353760 (50 B) | `jumpToScene_partFour(A,B){if(this.displayScene(A),` | `jumpToScene_partFour(A,B){if(B&&PB.prototype.__obedFreezeTake(this,A),this.displayScene(A),` |
 
-The methods (scratch `dpatch11.py`; `node --check` passes on both patched players; `PB` and the controller share the module
+The methods (scratch `dpatch12.py`; `node --check` passes on both patched players; `PB` and the controller share the module
 scope of `TB` and `UC`). `Q` (qualified colour tuples) and `L` (the tone map) are the two constants Q0b's decision record
 fixes (§9.0, §12.5); shown with their provisional values.
 
 ```
 __obedShape(C){try{var b=C.baseLayer,K=b.layers,k=1===K.length?K[0]:null,P=k&&k.layers,i=P&&2===P.length?P[0]:null,o=i&&P[1],x=o&&o.animations&&1===o.animations.length?o.animations[0]:null,u="none"===C.name,f=function(l,c){var s=l.initialState,a=s.affineTransform,t=s.sublayerTransform;return!l.isVideoLayer&&!l.isWebVideoPosterLayer&&null==l.objectID&&!s.transform&&0===s.rotation&&1===s.scale&&1===s.opacity&&!s.hidden&&!!a&&6===a.length&&a.every(function(v,j){return v===(j%3?0:1)})&&(c||!!t&&16===t.length&&t.every(function(v,j){return v===(j%5?0:1)}))};return"transition"!==C.type||!u&&"apple:dissolve"!==C.name||!x||b.texture||k.texture||(b.animations||[]).length||(k.animations||[]).length||!f(k,1)||!f(i)||!f(o)||!i.texture||!o.texture||(i.layers||[]).length||(o.layers||[]).length||(i.animations||[]).length||x.keyTimes||x.path||x.animations||(u?"hidden"!==x.property||!1!==x.from.scalar||!0!==x.to.scalar||.001!==x.duration||0!==x.beginTime||"both"!==x.fillMode||x.timingFunction||x.timeOffset||x.repeatCount||x.autoreverses:"opacity"!==x.property||1!==x.from.scalar||0!==x.to.scalar)?null:[b,k,i,o,x,u]}catch(E){return null}}
 __obedDissolveLayer(C){var b=C.baseLayer,n=0,z=this.__obedShape(C);if(!z)return b;try{var k=z[1],i=z[2],o=z[3],x=z[4],u=z[5];if(!u){var S=UC.animationManager.styleSheet,L=function(j){return"#layer"+(TB+j)};S.insertRule(L(1)+"{isolation:isolate}",0),n=1,S.insertRule(L(2)+","+L(3)+"{mix-blend-mode:plus-lighter}",0),n=2;if("isolate"!==S.cssRules[1].style.isolation||"plus-lighter"!==S.cssRules[0].style.mixBlendMode)throw 0}return C.obedDissolve=u?"cut":"dissolve",Object.assign({},b,{layers:[Object.assign({},k,{layers:[Object.assign({},i,{initialState:Object.assign({},i.initialState,u?{hidden:!0}:{opacity:0}),animations:[Object.assign({},x,{from:{scalar:u?!0:0},to:{scalar:u?!1:1}})]}),o]})]})}catch(E){return n&&(TB+=4),b}}
-__obedFreezeTake(U,A){U.__obedFrozen=null;var t0=performance.now();try{var e=U.script.events[A],y=e&&e.effects&&e.effects[0],G=document.getElementById("stage");if(!y||!G||!this.__obedShape(y))return;var R=document.getElementById("layer"+U.playbackController.kpfEvent.baseLayer.layerId).getBoundingClientRect(),kx=U.script.slideWidth/R.width,ky=U.script.slideHeight/R.height,H=[],N=document.getElementsByTagName("*"),Q=["bt709/bt709/bt709/false"],cs=function(n){return getComputedStyle(n)},dv=function(s,d){return(s||d)===d},bd=function(z){return"none"!==z.borderTopStyle||"none"!==z.borderRightStyle||"none"!==z.borderBottomStyle||"none"!==z.borderLeftStyle},rd=function(z){return"0px"!==z.borderTopLeftRadius||"0px"!==z.borderTopRightRadius||"0px"!==z.borderBottomLeftRadius||"0px"!==z.borderBottomRightRadius},deco=function(z){return!/rgba\(0, 0, 0, 0\)|transparent/.test(z.backgroundColor)||"none"!==z.backgroundImage||"none"!==z.boxShadow||bd(z)||"none"!==z.outlineStyle||!dv(z.backdropFilter,"none")},own=function(n,z){return/^(CANVAS|VIDEO|IMG|SVG|IFRAME|OBJECT|EMBED|INPUT|TEXTAREA|SELECT|BUTTON)$/i.test(n.tagName)||deco(z)||Array.prototype.some.call(n.childNodes,function(c){return 3===c.nodeType&&/\S/.test(c.data)})},bm=function(z){return!deco(z)&&!rd(z)&&"0px"===z.paddingTop&&"0px"===z.paddingRight&&"0px"===z.paddingBottom&&"0px"===z.paddingLeft&&dv(z.objectViewBox,"none")&&dv(z.imageRendering,"auto")},al=function(a){var w=cs(a),s=a===G,u=!s&&a.contains(G),m=w.transform,M;if("block"!==w.display||!dv(w.contain,"none")||!dv(w.contentVisibility,"visible")||"none"!==w.filter||!dv(w.backdropFilter,"none")||"normal"!==w.mixBlendMode||!dv(w.isolation,"auto")||"none"!==w.clipPath||!dv(w.maskImage,"none")||!dv(w.clip,"auto")||"auto"!==w.zIndex||!dv(w.translate,"none")||!dv(w.rotate,"none")||!dv(w.scale,"none")||!dv(w.offsetPath,"none")||!dv(w.willChange,"auto")||!dv(w.zoom,"1")||"none"!==w.outlineStyle||w.overflowX!==w.overflowY||"visible"!==w.overflowX&&!("clip"===w.overflowX&&/^(VIDEO|CANVAS)$/.test(a.tagName))&&("hidden"!==w.overflowX||rd(w)||bd(w)))return!1;if(u)return("static"===w.position||"absolute"===w.position)&&"none"===m;if("absolute"!==w.position||!dv(w.perspective,"none")||!dv(w.backfaceVisibility,"visible")||(s?"preserve-3d"!==w.transformStyle&&"flat"!==w.transformStyle:"flat"!==w.transformStyle&&("preserve-3d"!==w.transformStyle||"none"!==m)||"visible"!==w.visibility))return!1;if("none"===m)return!0;M=new DOMMatrix(m);return M.is2D&&!M.b&&!M.c&&M.a>0&&M.d>0&&Math.abs(M.a/M.d-1)<=.001},vp=function(a){var h=document.documentElement;return a===h||a===document.body&&"visible"===cs(h).overflowX},pc=function(n){if(!n.checkVisibility({opacityProperty:!0,visibilityProperty:!0}))return!0;var w=cs(n),b=getComputedStyle(n,"::before").content,f=getComputedStyle(n,"::after").content;return"none"===w.boxShadow&&"none"===w.filter&&dv(w.backdropFilter,"none")&&"none"===w.outlineStyle&&dv(w.borderImageSource,"none")&&dv(w.webkitBoxReflect,"none")&&/^(normal|none)$/.test(w.content||"normal")&&/^(normal|none)$/.test(b||"none")&&/^(normal|none)$/.test(f||"none")&&"list-item"!==w.display&&!Array.prototype.some.call(n.childNodes,function(c){return 3===c.nodeType&&/\S/.test(c.data)})&&(!/^(CANVAS|VIDEO|IMG|SVG|IFRAME|OBJECT|EMBED)$/i.test(n.tagName)||"visible"!==w.overflowX||/^(fill|contain|scale-down)$/.test(w.objectFit))},L=UC.__obedLut||(UC.__obedLut=function(){for(var T=new Uint8ClampedArray(256),i=0,l;i<256;i++)l=Math.pow(i/255,1.961),T[i]=255*(l<=.0031308?12.92*l:1.055*Math.pow(l,1/2.4)-.055);return T}());if(!(R.width>0&&R.height>0)||!Array.prototype.every.call(N,pc))return;var ad=[];Array.prototype.slice.call(document.querySelectorAll("video")).reverse().forEach(function(v){try{if(!G.contains(v)||v.readyState<2||!v.videoWidth||!v.videoHeight||!v.checkVisibility({opacityProperty:!0,visibilityProperty:!0}))return;var z=cs(v),fit=z.objectFit,K;if(!bm(z)||"50% 50%"!==z.objectPosition||"fill"!==fit&&"contain"!==fit)return;try{var vf=new VideoFrame(v),cc=vf.colorSpace;K=[cc.primaries,cc.transfer,cc.matrix,cc.fullRange].join("/");vf.close()}catch(E){return}if(Q.indexOf(K)<0)return;var Y=[],r=v.getBoundingClientRect(),c=[r.left,r.top,r.right,r.bottom],a,q,w,b;for(a=v,q=1;a;a=a.parentElement){if(!al(a))return;w=cs(a);q*=+w.opacity;if(a!==v&&"visible"!==w.overflowX&&(vp(a)||"static"!==w.position)){b=vp(a)?{left:0,top:0,right:innerWidth,bottom:innerHeight}:a.getBoundingClientRect();c=[Math.max(c[0],b.left),Math.max(c[1],b.top),Math.min(c[2],b.right),Math.min(c[3],b.bottom)]}}if(q<.999)return;var vw=v.videoWidth,vh=v.videoHeight,f="fill"===fit?0:Math.min(r.width/vw,r.height/vh),cw=f?vw*f:r.width,ch2=f?vh*f:r.height,cx=r.left+(r.width-cw)/2,cy=r.top+(r.height-ch2)/2,sx=vw/cw,sy=vh/ch2;if(Math.abs(sx/sy-1)>.001)return;c=[Math.max(c[0],cx),Math.max(c[1],cy),Math.min(c[2],cx+cw),Math.min(c[3],cy+ch2)];if(c[2]-c[0]<1||c[3]-c[1]<1)return;for(var I=Array.prototype.indexOf.call(N,v),i=0,n,o,P,T;i<N.length;i++){n=N[i];if(i===I||n.contains(v))continue;o=n.getBoundingClientRect();if(o.right<=c[0]||o.left>=c[2]||o.bottom<=c[1]||o.top>=c[3]||!n.checkVisibility({opacityProperty:!0,visibilityProperty:!0})||!own(n,cs(n)))continue;for(P=n.parentElement;!P.contains(v);P=P.parentElement);if(P===G||!G.contains(P))return;for(T=n,a=1;T!==P;T=T.parentElement){w=cs(T);if(!al(T)||i>I&&T!==n&&"visible"!==w.overflowX)return;a*=+w.opacity;if(T!==n&&+w.opacity<1&&Array.prototype.some.call(T.getElementsByTagName("*"),function(m){return m!==n&&own(m,cs(m))}))a=0}if(i<I)continue;if("VIDEO"===n.tagName){if(ad.indexOf(n)<0)return;continue}w=cs(n);if("CANVAS"!==n.tagName||!bm(w)||"fill"!==w.objectFit||!a)return;Y.push([n,o,a])}var x=document.createElement("canvas");x.width=vw,x.height=vh;var g=x.getContext("2d");g.drawImage(v,0,0);var X0=Math.floor((c[0]-cx)*sx),Y0=Math.floor((c[1]-cy)*sy),D=g.getImageData(X0,Y0,Math.max(1,Math.min(vw,Math.ceil((c[2]-cx)*sx))-X0),Math.max(1,Math.min(vh,Math.ceil((c[3]-cy)*sy))-Y0)),d=D.data,j;for(j=0;j<d.length;j+=4){if(d[j+3]<255)return;d[j]=L[d[j]],d[j+1]=L[d[j+1]],d[j+2]=L[d[j+2]]}g.putImageData(D,X0,Y0);Y.forEach(function(y){g.globalAlpha=y[2],g.drawImage(y[0],(y[1].left-cx)*sx,(y[1].top-cy)*sy,y[1].width*sx,y[1].height*sy)}),g.globalAlpha=1;var h=document.createElement("div"),s=h.style,t=x.style;s.position=t.position="absolute",s.overflow="hidden",s.left=(c[0]-R.left)*kx+"px",s.top=(c[1]-R.top)*ky+"px",s.width=(c[2]-c[0])*kx+"px",s.height=(c[3]-c[1])*ky+"px",t.left=(cx-c[0])*kx+"px",t.top=(cy-c[1])*ky+"px",t.width=cw*kx+"px",t.height=ch2*ky+"px",h.appendChild(x),H.push(h),ad.push(v)}catch(E){}}),H.length&&(U.__obedFrozen={scene:A,holders:H.reverse()})}catch(E){U.__obedFrozen=null}finally{window.__obedTakeMs=U.__obedTakeMs=performance.now()-t0}}
+__obedFreezeTake(U,A){U.__obedFrozen=null;var t0=performance.now();try{var e=U.script.events[A],y=e&&e.effects&&e.effects[0],G=document.getElementById("stage");if(!y||!G||!this.__obedShape(y))return;var R=document.getElementById("layer"+U.playbackController.kpfEvent.baseLayer.layerId).getBoundingClientRect(),kx=U.script.slideWidth/R.width,ky=U.script.slideHeight/R.height,H=[],N=document.getElementsByTagName("*"),Q=["bt709/bt709/bt709/false"],cs=function(n){return getComputedStyle(n)},dv=function(s,d){return(s||d)===d},bd=function(z){return"none"!==z.borderTopStyle||"none"!==z.borderRightStyle||"none"!==z.borderBottomStyle||"none"!==z.borderLeftStyle},rd=function(z){return"0px"!==z.borderTopLeftRadius||"0px"!==z.borderTopRightRadius||"0px"!==z.borderBottomLeftRadius||"0px"!==z.borderBottomRightRadius},deco=function(z){return!/rgba\(0, 0, 0, 0\)|transparent/.test(z.backgroundColor)||"none"!==z.backgroundImage||"none"!==z.boxShadow||bd(z)||"none"!==z.outlineStyle||!dv(z.backdropFilter,"none")},own=function(n,z){return/^(CANVAS|VIDEO|IMG|SVG|IFRAME|OBJECT|EMBED|INPUT|TEXTAREA|SELECT|BUTTON)$/i.test(n.tagName)||deco(z)||Array.prototype.some.call(n.childNodes,function(c){return 3===c.nodeType&&/\S/.test(c.data)})},bm=function(z){return!deco(z)&&!rd(z)&&"0px"===z.paddingTop&&"0px"===z.paddingRight&&"0px"===z.paddingBottom&&"0px"===z.paddingLeft&&dv(z.objectViewBox,"none")&&dv(z.imageRendering,"auto")},al=function(a){var w=cs(a),s=a===G,u=!s&&a.contains(G),m=w.transform,M;if("block"!==w.display||!dv(w.contain,"none")||!dv(w.contentVisibility,"visible")||"none"!==w.filter||!dv(w.backdropFilter,"none")||"normal"!==w.mixBlendMode||!dv(w.isolation,"auto")||"none"!==w.clipPath||!dv(w.maskImage,"none")||!dv(w.clip,"auto")||"auto"!==w.zIndex||!dv(w.translate,"none")||!dv(w.rotate,"none")||!dv(w.scale,"none")||!dv(w.offsetPath,"none")||!dv(w.willChange,"auto")||!dv(w.zoom,"1")||"none"!==w.outlineStyle||w.overflowX!==w.overflowY||"visible"!==w.overflowX&&!("clip"===w.overflowX&&/^(VIDEO|CANVAS)$/.test(a.tagName))&&("hidden"!==w.overflowX||rd(w)||bd(w)))return!1;if(u)return("static"===w.position||"absolute"===w.position)&&"none"===m;if("absolute"!==w.position||!dv(w.perspective,"none")||!dv(w.backfaceVisibility,"visible")||(s?"preserve-3d"!==w.transformStyle&&"flat"!==w.transformStyle:"flat"!==w.transformStyle&&("preserve-3d"!==w.transformStyle||"none"!==m)||"visible"!==w.visibility))return!1;if("none"===m)return!0;M=new DOMMatrix(m);return M.is2D&&!M.b&&!M.c&&M.a>0&&M.d>0&&Math.abs(M.a/M.d-1)<=.001},vp=function(a){var h=document.documentElement;return a===h||a===document.body&&"visible"===cs(h).overflowX},pc=function(n){var t=n.tagName,w,b,f;if(/^(HEAD|SCRIPT|STYLE|LINK|META|TITLE|BASE|TEMPLATE|NOSCRIPT)$/i.test(t))return!0;w=cs(n);if("contents"===w.display)return!1;if(!n.checkVisibility({opacityProperty:!0}))return!0;b=getComputedStyle(n,"::before").content;f=getComputedStyle(n,"::after").content;if(!/^(normal|none)$/.test(b||"none")||!/^(normal|none)$/.test(f||"none")||!/^(normal|none)$/.test(w.content||"normal")||"list-item"===w.display||Array.prototype.some.call(n.childNodes,function(c){return 3===c.nodeType&&/\S/.test(c.data)}))return!1;if("visible"!==w.visibility)return!0;if(!/^(HTML|BODY|DIV|CANVAS|VIDEO)$/.test(t)||/^(CANVAS|VIDEO)$/.test(t)&&("50% 50%"!==w.objectPosition||!dv(w.objectViewBox,"none")||!/^(fill|contain)$/.test(w.objectFit)))return!1;return"none"===w.boxShadow&&"none"===w.filter&&dv(w.backdropFilter,"none")&&"none"===w.outlineStyle&&dv(w.borderImageSource,"none")&&dv(w.webkitBoxReflect,"none")&&dv(w.columnRuleStyle,"none")},L=UC.__obedLut||(UC.__obedLut=function(){for(var T=new Uint8ClampedArray(256),i=0,l;i<256;i++)l=Math.pow(i/255,1.961),T[i]=255*(l<=.0031308?12.92*l:1.055*Math.pow(l,1/2.4)-.055);return T}());if(!(R.width>0&&R.height>0)||!Array.prototype.every.call(N,pc))return;var ad=[];Array.prototype.slice.call(document.querySelectorAll("video")).reverse().forEach(function(v){try{if(!G.contains(v)||v.readyState<2||!v.videoWidth||!v.videoHeight||!v.checkVisibility({opacityProperty:!0,visibilityProperty:!0}))return;var z=cs(v),fit=z.objectFit,K;if(!bm(z)||"50% 50%"!==z.objectPosition||"fill"!==fit&&"contain"!==fit)return;try{var vf=new VideoFrame(v),cc=vf.colorSpace;K=[cc.primaries,cc.transfer,cc.matrix,cc.fullRange].join("/");vf.close()}catch(E){return}if(Q.indexOf(K)<0)return;var Y=[],r=v.getBoundingClientRect(),c=[r.left,r.top,r.right,r.bottom],a,q,w,b;for(a=v,q=1;a;a=a.parentElement){if(!al(a))return;w=cs(a);q*=+w.opacity;if(a!==v&&"visible"!==w.overflowX&&(vp(a)||"static"!==w.position)){b=vp(a)?{left:0,top:0,right:innerWidth,bottom:innerHeight}:a.getBoundingClientRect();c=[Math.max(c[0],b.left),Math.max(c[1],b.top),Math.min(c[2],b.right),Math.min(c[3],b.bottom)]}}if(q<.999)return;var vw=v.videoWidth,vh=v.videoHeight,f="fill"===fit?0:Math.min(r.width/vw,r.height/vh),cw=f?vw*f:r.width,ch2=f?vh*f:r.height,cx=r.left+(r.width-cw)/2,cy=r.top+(r.height-ch2)/2,sx=vw/cw,sy=vh/ch2;if(Math.abs(sx/sy-1)>.001)return;c=[Math.max(c[0],cx),Math.max(c[1],cy),Math.min(c[2],cx+cw),Math.min(c[3],cy+ch2)];if(c[2]-c[0]<1||c[3]-c[1]<1)return;for(var I=Array.prototype.indexOf.call(N,v),i=0,n,o,P,T;i<N.length;i++){n=N[i];if(i===I||n.contains(v))continue;o=n.getBoundingClientRect();if(o.right<=c[0]||o.left>=c[2]||o.bottom<=c[1]||o.top>=c[3]||!n.checkVisibility({opacityProperty:!0,visibilityProperty:!0})||!own(n,cs(n)))continue;for(P=n.parentElement;!P.contains(v);P=P.parentElement);if(P===G||!G.contains(P))return;for(T=n,a=1;T!==P;T=T.parentElement){w=cs(T);if(!al(T)||i>I&&T!==n&&"visible"!==w.overflowX)return;a*=+w.opacity;if(T!==n&&+w.opacity<1&&Array.prototype.some.call(T.getElementsByTagName("*"),function(m){return m!==n&&own(m,cs(m))}))a=0}if(i<I)continue;if("VIDEO"===n.tagName){if(ad.indexOf(n)<0)return;continue}w=cs(n);if("CANVAS"!==n.tagName||!bm(w)||"fill"!==w.objectFit||!a)return;Y.push([n,o,a])}var x=document.createElement("canvas");x.width=vw,x.height=vh;var g=x.getContext("2d");g.drawImage(v,0,0);var X0=Math.floor((c[0]-cx)*sx),Y0=Math.floor((c[1]-cy)*sy),D=g.getImageData(X0,Y0,Math.max(1,Math.min(vw,Math.ceil((c[2]-cx)*sx))-X0),Math.max(1,Math.min(vh,Math.ceil((c[3]-cy)*sy))-Y0)),d=D.data,j;for(j=0;j<d.length;j+=4){if(d[j+3]<255)return;d[j]=L[d[j]],d[j+1]=L[d[j+1]],d[j+2]=L[d[j+2]]}g.putImageData(D,X0,Y0);Y.forEach(function(y){g.globalAlpha=y[2],g.drawImage(y[0],(y[1].left-cx)*sx,(y[1].top-cy)*sy,y[1].width*sx,y[1].height*sy)}),g.globalAlpha=1;var h=document.createElement("div"),s=h.style,t=x.style;s.position=t.position="absolute",s.overflow="hidden",s.left=(c[0]-R.left)*kx+"px",s.top=(c[1]-R.top)*ky+"px",s.width=(c[2]-c[0])*kx+"px",s.height=(c[3]-c[1])*ky+"px",t.left=(cx-c[0])*kx+"px",t.top=(cy-c[1])*ky+"px",t.width=cw*kx+"px",t.height=ch2*ky+"px",h.appendChild(x),H.push(h),ad.push(v)}catch(E){}}),H.length&&(U.__obedFrozen={scene:A,holders:H.reverse()})}catch(E){U.__obedFrozen=null}finally{window.__obedTakeMs=U.__obedTakeMs=performance.now()-t0}}
 __obedFreeze(C,A){var F=UC.__obedFrozen;UC.__obedFrozen=null;if(C.obedDissolve&&F&&F.scene===this.sceneIndex)try{var O=A.layers[0].layers[1],W=document.getElementById("layer"+O.layerId+("cut"===C.obedDissolve?"":"-opacity"));if(!W)return;var Q=document.createDocumentFragment();F.holders.forEach(function(h){Q.appendChild(h)}),W.appendChild(Q)}catch(E){}}
 ```
 
@@ -150,13 +150,15 @@ __obedFreeze(C,A){var F=UC.__obedFrozen;UC.__obedFrozen=null;if(C.obedDissolve&&
 holders}`. `__obedFreeze` (D3) always clears the slot and attaches **by engaged kind**: a Dissolve needs `layer<out>-opacity`
 (absent → discard); a cut uses `layer<out>`; one `DocumentFragment` append, so a throwing append attaches none.
 
-**Paint gate (once per take, before any rectangle test).** Every rendered element of the document (`checkVisibility` with
-opacity and visibility) and its `::before`/`::after` must paint only inside its border box and replace nothing: `box-shadow`,
-`filter`, `backdrop-filter`, `border-image-source`, `-webkit-box-reflect` none; `outline-style: none`; `content` `normal`/`none`
-(element and both pseudo-elements); no `display: list-item` (marker); no direct text (glyph ink, `text-shadow`, decorations);
-a replaced element (`canvas`, `video`, `img`, `svg`, `iframe`, `object`, `embed`) clips its content or uses `object-fit`
-`fill`/`contain`/`scale-down`. Any failure skips the whole take (today's look). With paint confined to border boxes, the
-rectangle prefilter below is sound.
+**Paint gate (once per take, before any rectangle test; any failure skips the take).** Per element of the document:
+non-rendering `head`/`script`/`style`/`link`/`meta`/`title`/`base`/`template`/`noscript` pass; `display: contents` fails; no box
+or an opacity-0 group (`checkVisibility({opacityProperty})` false: nothing of it paints) passes. Otherwise, before any
+visibility shortcut, `::before`/`::after` and own `content` must be `none`/`normal`, no `display: list-item`, no direct text. A
+`visibility`-hidden element then passes (its own box does not paint). A visible one must be a supported paint family — `html`,
+`body`, `div`, `canvas`, `video` (no `img`, `svg`, `object`, `embed`, `iframe`, form control) — without `box-shadow`, `filter`,
+`backdrop-filter`, `outline`, `border-image`, `-webkit-box-reflect` or column rule; a `canvas`/`video` needs `object-position:
+50% 50%`, `object-fit` `fill`/`contain`, no `object-view-box` (content inside its box). Paint is then confined to border boxes,
+so the prefilter is sound.
 
 **Admission: a positive allowlist of computed values, derived from what the player generates (§1.1).** A movie is admitted
 only if every element from it up to `<html>` is inside the profile below; every other painted element meeting its region must
@@ -221,7 +223,7 @@ the intersected rectangles; nothing crops, filters, blends or contains paint; an
 
 R7 2190367 (36) · R3 2190440 (46) · R4 2192650 (72) · R6 2263321 (52) · R1 2263373 (165) · R2 2264160 (68) ·
 **D1 2311794 (26)** · **D2 2312557 (65)** · **D3 2313053 (42)** · R5 2317031 (62) · R8 2347821 / 2347859 (50) · **D4 2353722 /
-2353760 (50)** · hook 2368820 / 2368858 (50). Measured (`overlap_dpatch11.py`, both players): 13 intervals disjoint; no
+2353760 (50)** · hook 2368820 / 2368858 (50). Measured (`overlap_dpatch12.py`, both players): 13 intervals disjoint; no
 replacement contains any anchor, its own included; all 6 orders of R1–R5, R6–R8, D1–D4 give identical bytes; every anchor 0
 times after, every replacement once.
 
@@ -246,30 +248,28 @@ tone path and LUT: DX-2). Headless: Chrome 154.0.8037.59, ANGLE Metal; software 
 
 ## 8. Feasibility prototype (Q0; `plan-2026-10-11/planner/`)
 
-Builders `dpatch3.py` → `dpatch11.py` (rev 8); drivers `proto3.py` → `proto6.py`, `probe7.py` + `diag7{,b}.js` (one
+Builders `dpatch3.py` → `dpatch12.py` (rev 9); drivers `proto3.py` → `proto6.py`, `probe7.py` + `diag7{,b}.js` (one
 headless Chrome per arm; `p2cut` = P2 2→3 in Keynote's cut shape, in memory); analysis `analyze_full.py`, `f3analyze.py`,
-`f1analyze.py`, `f3model2.py`, `curve.py`, `matched.py`; Node `overlap_dpatch11.py`, `node_ids.py`, `node_r6_test_r11.py`,
-`node_r11_near.py`, `node_f3_r11_test.py`, `node_f3_r11_decks.py`; `bake/bake.py`.
+`f1analyze.py`, `f3model2.py`, `curve.py`, `matched.py`; Node `overlap_dpatch12.py`, `node_ids.py`, `node_r6_test_r12.py`,
+`node_r12_near.py`, `node_f3_r12_test.py`, `node_f3_r12_decks.py`; `bake/bake.py`.
 
-**Real P2 DOM, first evidence (Q0b 2; exploratory, untimed, 1-min load 6.2–7.0; `runs11/{exact,dbg}/probe7.json`).** Raw
-player, `p2-binary`, headless Chrome 154. Rev-7 bytes skipped the slide-2 movie (`<video>` UA `overflow: clip`; the seven
-`preserve-3d` build wrappers; `body`'s propagated `overflow: hidden` clipped to its zero-height box). A debug build allowing
-the three admitted both movies: 2→3 redraws `3231B69B` (build frame, α 1) and `3F22E494` (α 0.2947), take 22 ms; 4→end
-redraws `2A293753`, `219585B0`, 20 ms. Rev 8's rules replayed on the recorded computed values admit both. Untagged H.264
-decodes as `bt709/bt709/bt709/false`. Counter: live 42, 44 (`t23-live-0{0,1}.png`), then 48 in every fade frame
-(`t23-fade-00…06.png`, `t23-sheet.png`), square intact. No rVFC hook ran, so 48 = last presented frame is **not** shown (only
-consistent with ≈ 4 frames of play after the 44 shot); Q0b 6 binds it. Not covered: the paint gate, DSK, CEF.
+**Real P2 DOM, first evidence (Q0b 2; exploratory, untimed, load 6.2–7.0; `runs11/{exact,dbg}/probe7.json`).** Raw player,
+`p2-binary`, headless Chrome 154. Rev-7 bytes skipped the slide-2 movie (`<video>` UA `overflow: clip`; seven `preserve-3d`
+build wrappers; `body`'s propagated `overflow: hidden` clipped to its zero-height box). A debug build allowing the three
+admitted both movies: 2→3 redraws `3231B69B` (build frame, α 1) and `3F22E494` (α 0.2947), take 22 ms; 4→end redraws `2A293753`,
+`219585B0`, 20 ms. Rev 9's rules on the recorded computed values (admission and the gate's recorded properties, 53 elements)
+admit both; untagged H.264 decodes as `bt709/bt709/bt709/false`. Counter: live 42, 44 (`t23-live-0{0,1}.png`), then 48 in every
+fade frame (`t23-fade-00…06.png`, `t23-sheet.png`), square intact; with no rVFC hook, 48 = last presented frame is **not** shown
+(Q0b 6 binds it). Not covered: the whole-page gate, DSK, CEF.
 
-**Node, real extracted code, both players (rev 8).** Ids pre-order on the real `VB` classes. All 133 transitions: 46
-Dissolves copied (two rules on exactly the ids `VB` then allocates), 8 cuts (no rule), 79 stock, 0 mutations; 21 + 10
-near-misses stay stock; five construction failures build the stock tree. **F3 stub table, 123 rows** (UA-correct, zero-height
-`body`), video proxy untouched: one out-of-profile row per property of the movie chain (30), the movie (12), a redrawn canvas
-or its branch (13) and the gate (12, plus confined and hidden-shadow positives), each skipping; geometry (scales, 2560×1440,
-letterbox, clip panel, `fill` equal / unequal, `#stage` 0.05 % / 1 %), attach (cut, missing wrapper, throwing append), order
-(earlier behind; earlier static, flex `order`, z-index, outside-scene skip; later movie admitted / not), redraw at α 1 /
-0.2947 / 0.5, opacity (sparse, edge, row 400), tuples (BT.709 limited taken; others and missing `VideoFrame` skip), `L(128) =
-139`, take time 37 under a controlled clock on every path; root/body propagation and build-wrapper rows admit.
-**Deck stub DOMs** (`node_f3_r11_decks.py`; §1.1's live slide as measured, in document order):
+**Node, real extracted code, both players (rev 9).** Ids pre-order on the real `VB` classes. All 133 transitions: 46 Dissolves
+copied (two rules on exactly the ids `VB` then allocates), 8 cuts, 79 stock, 0 mutations; 21 + 10 near-misses stay stock; five
+construction failures build the stock tree. **F3 stub table, 134 rows** (UA-correct, zero-height `body`), video proxy untouched:
+one out-of-profile row per property of the movie chain (30), the movie (12), a redrawn canvas or branch (13) and the gate (20
+negatives incl. r7's shifted `img`/`canvas`, SVG, column rule, hidden-origin pseudo, `display: contents`; 5 positives), each
+skipping; geometry, attach, order, redraw (α 1 / 0.2947 / 0.5), opacity, tuple, `L(128) = 139` and controlled-clock cost rows
+(37 on every path); root/body propagation and build-wrapper rows admit.
+**Deck stub DOMs** (`node_f3_r12_decks.py`; §1.1's live slide as measured, in document order):
 
 | Slide (outgoing Dissolve) | Movies | Admitted | Redrawn foreground |
 |---|---|---|---|
@@ -302,7 +302,7 @@ expected FAIL. One headless Chrome at a time; 1-min load < 4 and no other headle
 | Cut swap | `cut-on`; scorer case: complementary (0.5, 0.5) | `cut-off` |
 | Frozen frame (index, constancy) | `m-paused` (frame known in advance) | `m-off` (baked frame) |
 | Frozen region fades | `m-on` | `m-hold` (full-strength copy) |
-| Foreground preserved (tone-invariant) | `m-fg` | `m-fg-omit`; scorer cases: shifted, double-painted |
+| Foreground preserved and ordered (tone-invariant) | `m-fg` | `m-fg-omit`, `m-fg-swap`; scorer cases: shifted, double-painted, swapped |
 | Tone match — only when Q0b recorded a non-identity `L` | `m-tone` | `m-tone-raw` (identity `L`) |
 | No independent overlay | `m-on` | `m-bridge-off` (stock twin) |
 | Cost | scorer case: 50 ms; stub rows: total published on success, rejection, exception | scorer case: 50 ms + ε (missing or non-finite → INCONCLUSIVE) |
@@ -316,11 +316,11 @@ Done (§8): cross-fade, KB, opaque controls, matched progress, cut, rev-4 freeze
    one shared table if channels agree within 1 at every s (else 3-D → fallback); unobserved s interpolated linearly; `L[0] =
    0`, `L[255] = 255`; observed set recorded; analytic curve if within 1 everywhere observed. **HEVC:** undecodable on a path →
    "N/A — never plays live there" with decode evidence; decoded but uncaptured → INCONCLUSIVE; never satisfies (iii) silently.
-2. **Engagement on the real DOM** (debug build logging the gate's first failing element and each video's first failed
-   property): P2 2→3 and 4→end (first evidence, §8) and DSK 3, 5, 7 admitted as the stubs predict, the gate passing; any
-   other verdict → re-plan. Root and body rectangles and overflow recorded.
-3. **Foreground and reference:** `m-fg` / `m-fg-omit` outcomes; texture + holder vs the first transition frame, full
-   resolution, every pixel incl. geometry and redraw-edge maxima ≤ τ.
+2. **Engagement on the real DOM** (debug build logging the gate's first failing element, each video's first failed property, root
+   and body boxes): P2 2→3, 4→end (first evidence, §8) and DSK 3, 5, 7 (decodable copies) admitted, gate passing; else re-plan.
+3. **Foreground, order and reference:** `m-fg` / `m-fg-omit` / `m-fg-swap` outcomes on the real build-wrapper topology, the
+   actual wrapper/branch ordering recorded; texture + holder vs the first transition frame, every pixel at full resolution
+   incl. geometry and redraw-edge maxima ≤ τ.
 4. **Cost:** `window.__obedTakeMs` per take (and per-movie times in the debug build); total > 50 ms stops for re-planning.
 5. **Host-path geometry** (letterboxed, 2560×1440, DSF 2) holder residual ≤ τ; **stock P2 4→end** confirms §1.4's bridge.
 6. Cut ×3, freeze ×3 incl. `m-paused`, `m-hold`, `m-off`; `screen-on`/`-off`; D2 `on`; CvC; `--disable-gpu` and DSK on
@@ -385,15 +385,15 @@ Done (§8): cross-fade, KB, opaque controls, matched progress, cut, rev-4 freeze
 | `m-paused` | as `m-on`, the movie paused on a known frame before the advance | as `m-on` | frozen index = that frame exactly → PASS | as `m-on` | pinned `on` |
 | `m-off` | as `m-on`, patch off | out-only, in-only | frozen frame → FAIL | none | pinned `off` |
 | `m-hold` | as `m-on`; one counted splice appends the holder to the container instead of the wrapper | as `m-on` | frozen region → FAIL (`Ô` drifts with 1/(1 − e)) | as `on` | base + splice |
-| `m-fg` / `m-fg-omit` | `m-paused` + in-memory: an opaque texture layer and P2's square moved over the counter blocks / plus one counted splice `Y.forEach(` → `[].forEach(` | out-only | foreground preserved → PASS / FAIL (model N/A: live-only edit) | as `on` + one holder | pinned `on` / + splice |
+| `m-fg` / `m-fg-omit` / `m-fg-swap` | `m-paused` + in-memory: two distinguishable opaque texture layers added to the movie's `renderMovie` build tree (inside the seven `preserve-3d` wrappers), overlapping each other over the counter blocks, and P2's square moved there / + one counted splice `Y.forEach(` → `[].forEach(` / + `Y.forEach(` → `Y.reverse().forEach(` | out-only | holder and every `Ô` vs paused pre-D4 `S_live` ≤ τ on counter-block pixels → PASS / FAIL / FAIL; missing overlap, reference or engagement → INCONCLUSIVE (model N/A: live-only edit) | as `on` + one holder | pinned `on` / + splice |
 | `m-tone` / `m-tone-raw` | tone movie on P2 slide 2, paused / plus one counted splice making `L` identity | out-only | non-identity `L`: tone match → PASS / FAIL (mid-grey −11); identity `L`: `m-tone` reported only, `m-tone-raw` not run | as `on` + one holder | pinned `on` / + splice |
 | `m-bridge-off` / `m-bridge` | P2 `html-player` (measured plan), slide 4 → end, continuity on | out-only | no independent overlay → FAIL / reported, expected FAIL (known residual until the Q6 follow-up makes it blocking) | none / as `on` | `off` / `on` |
 | `on-sw` | P2, `--disable-gpu` | as `on` | all → PASS (tone match report-only) | as `on` | `on` |
 
-**Media evidence** (missing → INCONCLUSIVE, never a negative-control FAIL). `m-on`, `m-paused`, `m-hold`, `m-fg`, `m-tone`: one
-bound D4 holder, a reference rVFC record, the colour tuple, ≥ 3 demixable frames. `m-off`: served `off`; live playback first
-(≥ 10 presented frames); transition and outgoing texture captured; movie-region pixels on ≥ 3 demixable frames; **no holder by
-design** (a holder → INCONCLUSIVE); FAIL: `Ô` misses the reference index. `m-bridge(-off)`: bridged decoder tagged, rVFC, rAF.
+**Media evidence** (missing → INCONCLUSIVE, never a negative-control FAIL). `m-on`, `m-paused`, `m-hold`, `m-fg*`, `m-tone`: a
+bound D4 holder, reference rVFC record, colour tuple, ≥ 3 demixable frames. `m-off`: served `off`; ≥ 10 presented frames first;
+transition, outgoing texture and movie-region pixels on ≥ 3 demixable frames; **no holder by design** (a holder → INCONCLUSIVE);
+FAIL: `Ô` misses the reference index. `m-bridge(-off)`: bridged decoder tagged, rVFC, rAF.
 
 **Lifecycle scenario** (one parametrized driver function on `p2-binary` with the patch; each row also passes complement and no
 flash on its visible frames; "cleanup" = no transition `layer<id>` node, holder or rule after the next scene):
@@ -439,20 +439,19 @@ session) `--arm mmo`, `--arm g2`, `--arm mmo-cef`. Root-cause any change.
 
 ## 10. Tests (three new test functions, as rev 3; everything else extends them)
 
-1. **Free:** tuple-parametrized anchor/replacement refusal (both patchers); off identity; `patch_rendering` = `patch_player`
-   minus the hook; "every original anchor gone" (`test_live_runtime.py:205`, `:265`, `:367`); new-player equivalence;
-   `node --check`; pin mismatch. Synthetic builders derive from the tuple.
+1. **Free:** tuple-parametrized anchor/replacement refusal (both patchers); off identity; `patch_rendering` = `patch_player` minus
+   the hook; "every original anchor gone" (`test_live_runtime.py:205`, `:265`, `:367`); equivalence; `node --check`; pin mismatch.
 2. **Edits** (`test_live_runtime.py`): re-pin; hand-back tests use `HANDBACK = slice(5, 8)`; the composition test runs R1–R5,
    R6–R8, D1–D4 in every order and checks containment including self.
 3. **New, REAL-gated, parametrized over both players and one case table** (Node, real extracted code): D1–D4 offsets; ids;
    every committed `tests/fixtures/live_continuity` transition (§8); the 21 + 10 near-misses; the five construction failures;
-   the 123 F3 stub rows of §8, profile and gate rows generated from one property → out-of-profile-value table (take/attach count and
+   the 134 F3 stub rows of §8, profile and gate rows generated from one property → out-of-profile-value table (take/attach count and
    target, geometry, redraws and alpha, `L` output, published `__obedTakeMs`, no write or call on the video).
 4. **New `tests/test_dissolve_probe.py`, one parametrized function** (synthetic numpy): cross-fade, pop-in, dip, ±1 LSB, masked
    video, curve, monotone, hand-off and integrity rows, plus: cut union (1, 1) FAIL, complementary (0.5, 0.5) and clean swap
    PASS; strip decode (valid / parity error); strip under incoming content (`Ô` PASS, raw flips); two decoders (match /
    ambiguous → INCONCLUSIVE); index ≠ reference FAIL; `Ô` drifting FAIL; < 3 demixable frames → INCONCLUSIVE; `m-off` complete →
-   FAIL, without playback or with a holder → INCONCLUSIVE; foreground correct PASS, omitted / shifted 2 px / double-painted
+   FAIL, without playback or with a holder → INCONCLUSIVE; foreground correct PASS, omitted / shifted 2 px / double-painted / swapped
    FAIL; tone within 2 PASS, untoned (−11) FAIL, identity decision → reported only; cost 50 ms PASS, 50 ms + ε FAIL, missing /
    NaN → INCONCLUSIVE; independent overlay present FAIL / absent PASS; LUT construction (median, interpolation, endpoints).
 5. **`test_managed_obs_qualify.py`:** the env-refusal test parametrized over the new arm; the calibration test (n = 4 / 4 + ε).
@@ -482,13 +481,13 @@ at the exported timing. (5) D4/D3 add-only, never touch a `<video>`; only gate +
 1. **Switch: fold into `mm_opacity`.** 2. **Scope: every output.** 3. **F1 (`none` cut) in this patch; F2 a separate
    follow-up** with an owner Q-deck (final). 4. **F3 in this patch** (re-confirmed after rev 4: splitting it out declined).
 5. **Mid-tone step at the freeze: remove it, player-only** (owner: "is it observable? If the cost is a re-plan let's do it").
-   *Observable?* Estimated yes for an attentive viewer: mid-grey 139 → 128 is ≈ 16 % less luminance (ΔL* ≈ 4.3) in one frame
-   at near-full outgoing opacity; darks and lights move less; DX-3's eye check confirms. *Design:* the fixed per-channel `L`
-   (§1.4, §3.2); moving or pausing the live `<video>` stays out (core changes, deferred by Q6). *Decision record (Q0b 1, DX-2):*
-   `Q` = the decoded tuples measured; `L` non-identity when (i) colour patches land within 2/255 after the per-channel map,
-   (ii) two CEF launches agree within 1 (headless GPU off by > 1 → DX-1 tone row report-only), (iii) every decodable encoding
-   of a tuple in `Q` fits it within 2/255; analytic gamma 1.961 if within 1 of the table, else the table (+≈ 1 KB).
-   **Fallback:** `L` = identity, a documented known limit (tone non-blocking; §9.3); moving the `<video>` reconsidered after S2.
+   *Observable?* Estimated yes for an attentive viewer: mid-grey 139 → 128 is ≈ 16 % less luminance (ΔL* ≈ 4.3) in one frame at
+   near-full opacity (DX-3's eye check confirms). *Design:* the fixed per-channel `L` (§1.4, §3.2); moving or pausing the live
+   `<video>` stays out (core changes, deferred by Q6). *Decision record (Q0b 1, DX-2):* `Q` = the decoded tuples measured; `L`
+   non-identity when (i) colour patches land within 2/255 after the per-channel map, (ii) two CEF launches agree within 1
+   (headless GPU off by > 1 → DX-1 tone row report-only), (iii) every decodable encoding of a tuple in `Q` fits it within 2/255;
+   analytic gamma 1.961 if within 1 of the table, else the table (+≈ 1 KB). **Fallback:** `L` = identity, a known limit (tone
+   non-blocking; §9.3); moving the `<video>` reconsidered after S2.
 6. **Main's bridged movie over P2 slide 4's terminal fade: follow-up after S2.** Player-only on `main`; `m-bridge` reports the
    residual. Stopping a bridged or held decoder's paint at the outgoing transition start (main's `keepAtSlot`, S2's hold) is
    a separate PR after S2 merges, not pushed into S2's in-flight branch; it makes `m-bridge` blocking.
@@ -496,21 +495,20 @@ at the exported timing. (5) D4/D3 add-only, never touch a `<video>`; only gate +
 
 ## 13. Risks and out of scope
 
-CEF compositor, tone path and `L` unproven until Q0b/DX-2 (fallback §12.5). Id prediction relies on `VB`'s pre-order
-allocation (proved; re-checked every run). The allowlist matches one real P2 DOM; gate and DSK unconfirmed: a value outside
-either leaves F3 inert (Q0b 2 names it); take cost; software compositing; production transparency; the bridge/hold (Q6). Out of scope: F2, GL effects, Keynote-app comparison (hands off Keynote), S2 and its PR.
+CEF compositor, tone path and `L` unproven until Q0b/DX-2 (fallback §12.5); ids rest on `VB`'s pre-order allocation (proved);
+the whole-page gate and DSK are unconfirmed on the real DOM (a miss leaves F3 inert; Q0b 2 names it); take cost; production
+transparency; the bridge/hold (Q6). Out of scope: F2, GL effects, Keynote-app comparison, S2 and its follow-up.
 
 ## 14. Critique log
 
-Raw rounds: `.agents/reviews/dissolve-crossfade/plan-astra-r{1,…,6}.md`. r1–r5 (12, 7, 11, 7, 6): all folded, rows in `4ffcd8ad`
-/ `e5c644bb` / `218308c3` / `cacfe9fb` §14; r6 closed r5-2…6, completes r5-1 with r6 #3, #4. Owner answers in §12.
+Raw rounds: `.agents/reviews/dissolve-crossfade/plan-astra-r{1,…,7}.md`. r1–r5 (12, 7, 11, 7, 6): folded, rows in `4ffcd8ad` /
+`e5c644bb` / `218308c3` / `cacfe9fb` §14. r6 (4, on rev 7) and the first real-DOM probe, folded in `d299b549` §14: UA
+`overflow: clip` leaves, viewport-propagated `body` overflow, the paint gate, `preserve-3d` build wrappers. Owner answers: §12.
 
-### r6 — GPT-6 Astra high (Codex), on rev 7 `cacfe9fb`, and the real-DOM probe
+### r7 — GPT-6 Astra high (Codex), on rev 8 `d299b549` — verdict: ready for owner review after listed fixes — folded
 
 | # | Severity / class | Disposition | Where |
 |---|---|---|---|
-| 1 | major / new | Folded (the probe found it too): `overflow: clip` admitted on `<video>`/`<canvas>` leaves (UA default; content-box clip, no border or padding), including redrawn canvases; ancestor clip rules unchanged; stubs UA-correct; real-DOM admission required before W1 (Q0b 2). | §1.1, §3.2, §8, §9.0 |
-| 2 | major / new | Folded (the probe found it too): the root, or `body` when the root is `visible`, clips to the viewport; a static, non-propagating ancestor clips nothing absolute; zero-height propagating `body` rows; stubs corrected; root/body recorded in Q0b. | §1.1, §3.2, §8, §9.0 |
-| 3 | major / edge | Folded by the paint gate: `border-image-source`, replacement `content`, `::before`/`::after` content, markers and direct text skip the take; one row each. | §3.2, §8, §10 |
-| 4 | major / edge | Folded by the paint gate, run before any rectangle test: shadows, filters, outlines, reflections and replaced-content overflow skip the take, so the rectangle prefilter is sound; outside-box shadow row skips, confined non-intersecting row admits. | §3.2, §8, §10 |
-| probe | evidence | Rev-7 bytes skipped the real movie (UA `overflow: clip`; seven `preserve-3d` build wrappers; body clip); a debug build admitted 2→3 and 4→end (22 / 20 ms), redrew the square, held 48; rev 8 allows the wrappers (`preserve-3d` with no transform). Index = last presented not shown (no rVFC hook). | §1.1, §3.2, §8 |
+| 1 | major / edge | Folded: the gate admits only supported paint families (`html`, `body`, `div`, centred `canvas`/`video` with `fill`/`contain`, no view-box); `img`, `svg` and other replaced or vector paint, column rules and anything unqualified skip the take; confinement no longer inferred from `object-fit`; rows: shifted outside-box `img` and `canvas`, shifted clipped canvas, SVG, column rule. | §3.2, §8, §10 |
+| 2 | major / closed | Folded: pseudo-element, `content` and direct-text checks run before the visibility shortcut; `display: contents` skips; only no-box / opacity-0 subtrees and non-rendering elements are exempt; rows: hidden origin with visible pseudo, `display: contents` text and pseudo; positives for suppressed, opacity-0 and `script` text. | §3.2, §8, §10 |
+| 3 | minor / new | Folded: Q0b 3 and `m-fg` exercise the real build-wrapper topology with two overlapping, distinguishable canvases over counter pixels vs paused pre-D4 `S_live` ≤ τ; `m-fg-swap` (reversed redraw) must FAIL; missing overlap, reference or engagement INCONCLUSIVE; ordering recorded. | §9, §9.0, §9.1, §10 |
