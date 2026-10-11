@@ -386,26 +386,23 @@ def test_bulk_geometry_resets_last_kept_open_every_call(tmp_path, monkeypatch):
     assert inspect_mod.LAST_BULK_KEPT_OPEN is None
 
 
-def test_bulk_geometry_default_call_carries_no_kinds(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("kinds", "expected"),
+    [(None, "absent"), (frozenset({"text", "image"}), ["image", "text"])],
+    ids=["default_carries_no_kinds", "kinds_reach_plan_sorted"],
+)
+def test_bulk_geometry_kinds_in_plan(tmp_path, monkeypatch, kinds, expected):
     # Absent `kinds` means "read all four" in the JS; every caller but the offline writer
-    # (two-tier read, checker, probe) depends on the plan staying byte-identical.
+    # (two-tier read, checker, probe) depends on the default plan staying byte-identical,
+    # so None (the default) must omit the key entirely. A given set reaches the plan as a
+    # sorted list.
     captured = _capture_bulk_plan(monkeypatch, kept_open=False)
     key = tmp_path / "deck.key"
     key.write_text("stub")
 
-    inspect_mod.bulk_geometry(key)
+    inspect_mod.bulk_geometry(key, kinds=kinds)
 
-    assert "kinds" not in captured["plan"]
-
-
-def test_bulk_geometry_kinds_reach_plan_sorted(tmp_path, monkeypatch):
-    captured = _capture_bulk_plan(monkeypatch, kept_open=False)
-    key = tmp_path / "deck.key"
-    key.write_text("stub")
-
-    inspect_mod.bulk_geometry(key, kinds=frozenset({"text", "image"}))
-
-    assert captured["plan"]["kinds"] == ["image", "text"]
+    assert captured["plan"].get("kinds", "absent") == expected
 
 
 @pytest.mark.parametrize(
