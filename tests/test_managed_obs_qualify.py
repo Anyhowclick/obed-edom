@@ -263,12 +263,13 @@ def test_g2_take_with_an_unengaged_fix_is_invalid_not_failed(tmp_path):
 
 def armed_scores(monkeypatch, run: dict[str, Any], clause: str = "pool", value: bool | None = True,
                  off_verdict: bool | None = False) -> dict[str, Any]:
-    """Stub `score_armed` to echo each session's `armed` record: G2 with every clause True but `clause` = `value`, g2-off
-    scored to `off_verdict`."""
+    """Stub `score_armed` to echo each session's `armed` record: G2 with every clause True but `clause` = `value`; g2-off
+    with `live` = `off_verdict` and, as on every real take (no pre-flip owner ids), an unknown report-only owner."""
     monkeypatch.setattr(q, "score_armed", lambda reads, armed, continuity: reads)
     checks = {**dict.fromkeys(("mode", "live", "events", "noPainting", "pool", "owner"), True), clause: value}
+    off = {**dict.fromkeys(("mode", "events", "noPainting", "pool"), True), "live": off_verdict, "owner": None}
     run["sessions"][0]["armed"] = {"verdict": lcp.combine_verdicts(*checks.values()), "checks": checks, "reason": None}
-    run["sessions"][1]["armed"] = {"verdict": off_verdict, "checks": {}, "reason": "armed checks unreadable: ['live']"}
+    run["sessions"][1]["armed"] = {"verdict": None, "checks": off, "reason": "armed checks unreadable: ['owner']"}
     return run
 
 
@@ -282,14 +283,14 @@ def test_g2_take_with_an_engaged_fix_is_not_invalidated(tmp_path, monkeypatch):
 @pytest.mark.parametrize("clause, value, off_verdict, unreadable", [
     ("pool", None, False, "g2: score_armed clauses unreadable: ['pool']"),
     ("live", False, False, None),
-    ("pool", True, None, "g2-off: score_armed verdict unreadable"),
+    ("pool", True, None, "g2-off: score_armed clauses unreadable: ['live']"),
     ("owner", None, False, None),
 ])
 def test_g2_m1_reads_an_unreadable_score_armed_as_invalid_never_a_failure(tmp_path, monkeypatch, clause, value, off_verdict,
                                                                          unreadable):
-    # An unknown enforced clause (or an unknown g2-off KB verdict) is evidence never observed: M1 is INVALID, the clause
-    # is not in `failing`, and arm_gates carries the reason into the run. A readable False clause still FAILs M1; the
-    # report-only owner clause never invalidates.
+    # An unknown enforced clause (G2's, or g2-off's in the KB) is evidence never observed: M1 is INVALID, the clause is
+    # not in `failing`, and arm_gates carries the reason into the run. A readable False clause still FAILs M1; the
+    # report-only owner clause never invalidates, on G2 or on g2-off (whose owner is always unknown).
     run = armed_scores(monkeypatch, m3_run(tmp_path, mm_off_alpha=255, g2_stats=dict(q.EXPECTED_STATS["on"])), clause,
                        value, off_verdict)
     m1 = q.g2_gates(run, ARMED)["M1"]

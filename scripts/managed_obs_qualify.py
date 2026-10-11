@@ -94,6 +94,7 @@ from live_continuity_probe import (  # noqa: E402
     _movie_entries,
     _notes,
     armed_evidence,
+    combine_verdicts,
     forced_fail_seed,
     ground_truth_facts,
     ground_truth_plan,
@@ -981,14 +982,14 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
           f"<= {LIMITS['staticMax']}")
     check(m1, "KB: g2 slide2-live movie rect fails the static check", static_g2, static_g2 is not None and static_g2 > LIMITS["staticMax"],
           f"> {LIMITS['staticMax']}")
-    off_scored = score_armed(off.get("armed"), armed, continuity_of(off))
-    check(m1, "KB: g2-off score_armed False", off_scored["verdict"], off_scored["verdict"] is False, "False",
-          enforced=off_scored["verdict"] is not None)
+    off_checks = score_armed(off.get("armed"), armed, continuity_of(off))["checks"]
+    off_verdict = combine_verdicts(*(off_checks[c] for c in clauses))
+    check(m1, "KB: g2-off score_armed False", off_verdict, off_verdict is False, "False", enforced=off_verdict is not None)
     check(m1, "report: page rAF Hz from each phase start", raf_rates(g2), True, enforced=False)
     unengaged = handback_unengaged(g2)
     unreadable = [c for c in clauses if scored["checks"][c] is None]
     reasons = [unengaged, f"g2: score_armed clauses unreadable: {unreadable}" if unreadable else None,
-               f"g2-off: score_armed verdict unreadable ({off_scored['reason']})" if off_scored["verdict"] is None else None]
+               f"g2-off: score_armed clauses unreadable: {[c for c in clauses if off_checks[c] is None]}" if off_verdict is None else None]
     gates["M1"] = gate(m1, "; ".join(r for r in reasons if r) or None)
 
     m2: list[dict[str, Any]] = []
