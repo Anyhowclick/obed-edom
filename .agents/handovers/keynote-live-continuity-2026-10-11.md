@@ -101,7 +101,7 @@ before — no `reads.postHandback`; predates the hand-off requirement (Codex r4 
 1. **gl-clock:** DONE (Astra r2 APPROVE; live GL-1/2/3 above). Its Astra rounds: `s2-dev/glclock-review/astra-r{1,2}.md`.
 2. **Instrument review loop:** DONE — Astra r17 APPROVE at `510de8bb` (section above). Folds 3–5's guards stay; a
    simplification pass after S2 may remove the ones the contract made redundant (owner's option). **Start next session at
-   step 4 (V0–V6).** The carry-cover producer changed (additive `src`): GL-3's six CARRY-COVER lines in the next
+   step 4 (V1–V6; V0 done).** The carry-cover producer changed (additive `src`): GL-3's six CARRY-COVER lines in the next
    `run_gates` round are its full live check (only a D1 green/null smoke ran tonight).
 3. **Live GL-1/2/3 — DONE 2026-10-11** (results above; kept here as the re-run recipe). Coordinator-only, serial, load < 3 at start, ≤ 3 Chromes, peers told "go idle"
    first, never during the owner's OBS session. From a clean gate worktree `G` at the merged head; evidence to
@@ -134,7 +134,9 @@ before — no `reads.postHandback`; predates the hand-off requirement (Codex r4 
      margin), the D1 red becomes `linear-bridge`; thresholds are never tuned.
 4. Then the instrument's live validation V0–V6, red registrations, the full S2 re-run, Q6, Q7 with the owner, and the S2
    gate record `.agents/reviews/continuity-generalisation/gates-r1.md`:
-   - V0: streams A–D targeted tests green on 3.10 and 3.11.
+   - V0: **DONE 2026-10-12 at `14f49c8c`** — streams A–D targeted tests (15 files: paint, probe, detach, managed, run_gates,
+     core js, core variants, contract, p2_adversarial ×5, html_alpha_probe, live_continuity) 3.11.3 4562 passed and 3.10.10
+     4562 passed, 0 failed (`fold-r12-r16/suites/v0-31{0,1}-14f49c8c.log`; 3.11 venv built in the session scratchpad).
    - V1 smoke: D1 attach arm without, then with, B0 `show()`; D1 host 1920 `--skip-arms B,C,V,Voff,attach`; a full P2 host
      run; check whether any P2 harness reading `footprintOwnerDecoderId` (`p2_recovery_html_adversarial.py:893`) runs hidden in
      alpha mode. V2 positive controls (exact seq sets); V2b L2 force-wrap with paint on (measure
