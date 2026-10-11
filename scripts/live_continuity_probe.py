@@ -119,6 +119,8 @@ except ImportError:  # pragma: no cover - stream B is landing this constant conc
 import live_host_probe  # noqa: E402 - reuse the headless window-size compensation
 from continuity_core_variants import VARIANTS, parse_strip, strip_entries, strip_label, variant_core, variant_sha  # noqa: E402
 import paint_instrument  # noqa: E402
+import live_evidence_contract as contract  # noqa: E402
+from live_evidence_contract import stage_map_valid  # noqa: E402
 
 FIXTURE = fixture("p2-recovery") / "html-adversarial/html-player"
 ORIGINAL_INDEX = fixture("p2-recovery") / "html-adversarial/html-unmodified/index.html"
@@ -1784,20 +1786,6 @@ def duplicate_ids(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def stage_map_valid(stage_map: dict[str, Any] | None) -> bool:
-    """Fail-closed: missing `#stage`, a zero box, or a non-uniform scale (`|s -
-    sy| / s` over 0.1%) is invalid, never silently treated as identity."""
-    if not isinstance(stage_map, dict):
-        return False
-    s, sy = _finite_number(stage_map.get("s")), _finite_number(stage_map.get("sy"))
-    ow, oh = _finite_number(stage_map.get("offsetWidth")), _finite_number(stage_map.get("offsetHeight"))
-    if not all(v is not None and v > 0 for v in (s, sy, ow, oh)):
-        return False
-    if _finite_number(stage_map.get("ox")) is None or _finite_number(stage_map.get("oy")) is None:
-        return False
-    return abs(s - sy) / s <= 0.001
-
-
 def to_authored_rect(rect: dict[str, float], stage_map: dict[str, Any]) -> dict[str, float]:
     s = stage_map["s"]
     return {
@@ -3245,6 +3233,14 @@ def _inconclusive(reason: str, **detail: Any) -> dict[str, Any]:
     return {"verdict": None, "reason": f"inconclusive: {reason}", **detail}
 
 
+def _contract_reason(errors: list[str]) -> str:
+    return f"evidence contract: {'; '.join(errors)}"
+
+
+def _contract_inconclusive(errors: list[str]) -> dict[str, Any]:
+    return _inconclusive(_contract_reason(errors), contractErrors=errors)
+
+
 def _carry_integrity_gap(samples: list[dict[str, Any]], scored: dict[str, Any], spec: dict[str, Any]) -> str | None:
     """Why a False carry is not a fully observed contrary behaviour, or None when it is."""
     if scored.get("stageMapInvalid"):
@@ -3802,7 +3798,11 @@ def score_verdicts(
 ) -> dict[str, Any]:
     """Pure: every plan-generated verdict (`facts["verdicts"]`), keyed by id. False only for a
     fully observed contrary behaviour; every integrity or missing-evidence path is None. `schema`
-    is the sampler's (a schema-2 stream never scores as legacy)."""
+    is the sampler's (a schema-2 stream never scores as legacy). Rows or evidence outside the
+    producer contract make every verdict of the arm None."""
+    errors = contract.first_errors(contract.sample_rows(samples, schema=schema), contract.evidence(evidence))
+    if errors:
+        return {spec["id"]: _contract_inconclusive(errors) for spec in facts.get("verdicts") or []}
     scored: dict[str, Any] = {}
     for spec in facts.get("verdicts") or []:
         kind, scene = spec["kind"], spec["atScene"]
@@ -3935,6 +3935,9 @@ def score_census(
                 raise VisiblePassError(f"slide {ordinal} was read {len(slide_reads)} times (extra read)")
             if not isinstance(read, dict):
                 raise VisiblePassError(f"slide {ordinal} has no census read")
+            errors = contract.first_errors(contract.refusal_read(read, f"census.{key}"))
+            if errors:
+                raise VisiblePassError(_contract_reason(errors))
             stage_map = read.get("stageMap")
             if not stage_map_valid(stage_map):
                 raise VisiblePassError("stage map is missing or untrustworthy at the census read")
@@ -4621,6 +4624,10 @@ def visible_slide_record(
         "uniqueShas": len(set(shas)), "shas": shas,
     }
 
+    errors = contract.first_errors(contract.stage_map(stage_map, "stageMap"), contract.painting(painting_raw, "painting"))
+    if errors:
+        record.update(reason=_contract_reason(errors), contractErrors=errors)
+        return record
     if not stage_map_valid(stage_map):
         record.update(reason="stage map is missing or untrustworthy at burst time")
         return record
@@ -5065,6 +5072,12 @@ def score_live_ring(
 ) -> dict[str, Any]:
     """N3: max|V - Vgl| over the movie slot's ring while LIVE must be 0."""
     lives = [sink.get("live") if isinstance(sink, dict) else None for sink in (v_sink, g_sink)]
+    errors = contract.first_errors(*(
+        contract.stage_map(live.get("stageMap"), f"live[{index}].stageMap")
+        for index, live in enumerate(lives) if isinstance(live, dict)
+    ))
+    if errors:
+        return {"verdict": None, "reason": _contract_reason(errors), "contractErrors": errors}
     if any(not isinstance(live, dict) or live.get("frame") is None for live in lives):
         reasons = [live.get("reason") for live in lives if isinstance(live, dict) and live.get("reason")]
         return {"verdict": None, "reason": "; ".join(reasons) or "a live capture is missing"}
@@ -5094,6 +5107,10 @@ def score_handback_carry(record: Any, armed: dict[str, Any]) -> dict[str, Any]:
     facade element) or by its src; one over the instance rect that names no source is None."""
     checks: dict[str, bool | None] = dict.fromkeys(("painting", "release", "noRemount", "handoff"))
     detail: dict[str, Any] = {}
+    errors = contract.first_errors(contract.handback_record(record)) if isinstance(record, dict) else []
+    if errors:
+        return {"verdict": None, "checks": checks, "carried": None, "detail": detail, "reason": _contract_reason(errors),
+                "contractErrors": errors}
     record = record if isinstance(record, dict) else {}
     after, before = record.get("after"), record.get("before")
     named = _events_readable(after)
@@ -5215,10 +5232,18 @@ def forced_fail_seed(reason: str) -> Iterator[dict[str, Any]]:
 
 def score_forced(
     *, v_pass: Any, g_pass: Any, refusal: Any, g_handback: Any, parity: Any, reason: str, splice: Any,
+    refusal_read: Any = None,
 ) -> dict[str, Any]:
     """`forced-ok` iff the forced page is V's flag-off twin (plan g5g6 §3.8); never `pass`. An
     unreadable slide, pass, mode, refusal, parity, hand-back read, note list or stand-down list
-    is `inconclusive`, never `forced-fail`."""
+    is `inconclusive`, never `forced-fail`; so is a hand-back record or refusal read (`refusal_read`, the
+    evidence `refusal` scored) outside the producer contract."""
+    errors = contract.first_errors(
+        contract.handback_record(g_handback) if isinstance(g_handback, dict) else (),
+        contract.refusal_read(refusal_read, "refusal") if refusal_read is not None else (),
+    )
+    if errors:
+        return {"status": "inconclusive", "checks": {}, "reason": _contract_reason(errors), "contractErrors": errors}
     after = g_handback.get("after") if isinstance(g_handback, dict) else None
     api = after.get("api") if isinstance(after, dict) else None
     notes_ok = _events_readable(after) and _events_readable(after, "api") and (
@@ -5338,25 +5363,30 @@ def read_execute_log(log_path: str | Path | None) -> list[dict[str, Any]]:
     return records
 
 
-def find_execute_record(records: list[dict[str, Any]], *, operation: str, slide: int) -> dict[str, Any] | None:
+def find_execute_record(
+    records: list[dict[str, Any]], *, operation: str, slide: int, since: float | None = None,
+) -> dict[str, Any] | None:
+    """The newest matching record, logged at or after `since` (wall clock) when given."""
     for record in reversed(records):
         if record.get("kind") == "execute" and record.get("operation") == operation and record.get("slide") == slide:
-            return record
+            logged = _finite_number(record.get("ts"))
+            if since is None or logged is not None and logged >= since:
+                return record
     return None
 
 
 def wait_for_execute_record(
-    log_path: str | Path | None, *, operation: str, slide: int, timeout_s: float = 2.0,
+    log_path: str | Path | None, *, operation: str, slide: int, since: float | None = None, timeout_s: float = 2.0,
     now: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any] | None:
     """The host's execute log is drained by a background writer thread, so a
     record can lag its call by a few ms -- poll briefly rather than assume it
     is already flushed. Bounded: a record that never lands is `None`, never a
-    hang."""
+    hang; with `since`, an older record never stands in for a dropped one."""
     deadline = now() + timeout_s
     record = None
     while now() < deadline:
-        record = find_execute_record(read_execute_log(log_path), operation=operation, slide=slide)
+        record = find_execute_record(read_execute_log(log_path), operation=operation, slide=slide, since=since)
         if record is not None:
             return record
         sleep(0.05)
@@ -5741,6 +5771,7 @@ def run_goto_destination(
     if source_reached is not True:
         reasons.append(f"source goTo did not reach slide {from_ordinal} (landed on {from_observed.original_slide!r})")
     slide = next(s for s in slides if s["originalOrdinal"] == to_ordinal)
+    issued = time.time()
     player.execute("goTo", to_ordinal)
     wait_until_settled(player)
     to_observed = player.observe()
@@ -5776,7 +5807,7 @@ def run_goto_destination(
     if static_control.get("verdict") is not True:
         reasons.append(f"destination {to_ordinal} static content control: {static_control}")
 
-    execute_record = wait_for_execute_record(player.output.get("logPath"), operation="goTo", slide=to_ordinal)
+    execute_record = wait_for_execute_record(player.output.get("logPath"), operation="goTo", slide=to_ordinal, since=issued)
     telemetry = goto_telemetry(execute_record)
     telemetry_ok = telemetry_present(execute_record) if armed else True
     if telemetry_ok is not True:
@@ -6825,7 +6856,7 @@ def run_forced_fail(args: argparse.Namespace) -> dict[str, Any]:
     )
     result["forced"] = score_forced(
         v_pass=result["visible"]["V"], g_pass=g_pass, refusal=result["refused1to2"], g_handback=g_sink.get("record"),
-        parity=result["parity"], reason=reason, splice=splice,
+        parity=result["parity"], reason=reason, splice=splice, refusal_read=g_sink.get("refusal"),
     )
     result["status"] = result["forced"]["status"]
     result["leftoverChrome"] = check_no_leftover_chrome()
@@ -7587,7 +7618,16 @@ def armed_recorder_window(recorder: Any, reads: Any) -> dict[str, Any] | None:
 
 
 def score_force_wrap_run(result: dict[str, Any], gt: dict[str, Any], boundary: str, offset_ms: float) -> None:
-    """Score one force-wrap take in place from what it recorded (live, or re-read from its artifact)."""
+    """Score one force-wrap take in place from what it recorded (live, or re-read from its artifact); a take whose
+    evidence is outside the producer contract is invalid."""
+    errors = contract.first_errors(contract.force_wrap(result))
+    if errors:
+        for key in ("continuityVerdict", "recorderClock", "restart"):
+            result[key] = _contract_inconclusive(errors)
+        result["forced"] = {"boundary": boundary, "offsetMs": offset_ms, "wrapFromPressMs": None, "status": "invalid",
+                            "outcome": None, "reasons": [_contract_reason(errors)], "contractErrors": errors}
+        result["status"] = "invalid"
+        return
     facts, source, scene = gt["facts"], gt["source"], gt["scene"]
     arm_facts = facts_for(result.get("continuity"), facts, gt["factsOn"])
     armed = arm_facts.get("armed")
@@ -7738,6 +7778,11 @@ def rescore_artifact(path: Path, period_s: float) -> dict[str, Any]:
         if not isinstance(entry, dict) or not isinstance(entry.get("samples"), list):
             out[label] = {"identical": None, "reason": "no samples"}
             continue
+        sampler = entry.get("sampler") if isinstance(entry.get("sampler"), dict) else {}
+        errors = contract.first_errors(contract.sample_rows(entry["samples"], schema=sampler.get("schema")))
+        if errors:
+            out[label] = {"identical": None, "reason": _contract_reason(errors), "contractErrors": errors}
+            continue
         installed = continuity_mode(entry) == "qualified"
         strict = score_boundaries(entry["samples"], facts, installed)
         aware = score_boundaries(entry["samples"], facts, installed, loop_period_s=period_s)
@@ -7805,8 +7850,10 @@ def rescore_generated(result: dict[str, Any], facts: dict[str, Any], facts_on: d
         arm_facts = facts_on if facts_on is not None and entry.get("factsSet") == "on" else facts
         installed = continuity_mode(entry) == "qualified"
         evidence = entry.get("evidence")
+        sampler = entry.get("sampler") if isinstance(entry.get("sampler"), dict) else {}
         scored = score_verdicts(
             entry["samples"], evidence if isinstance(evidence, dict) else {}, arm_facts, installed, entry.get("continuity"),
+            schema=sampler.get("schema"),
         )
         rows: dict[str, Any] = {}
         for spec in arm_facts["verdicts"]:
@@ -8271,6 +8318,9 @@ def score_carry_cover(
 
     if bridge.get("problem"):
         return inconclusive(bridge["problem"])
+    errors = contract.first_errors(contract.carry_cover(rows, notes, stage_map))
+    if errors:
+        return inconclusive(_contract_reason(errors), contractErrors=errors)
     if not stage_map_valid(stage_map):
         return inconclusive("stage map unreadable")
     rows = list(rows or [])

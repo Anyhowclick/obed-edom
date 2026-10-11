@@ -862,6 +862,8 @@ for the parked `iwa-surgical-write-generator` feature.
   No-consumption = the settled position after the go-to (L leading automatic events: L=0 `IdleAtInitialState` at the
   onset scene, L≥1 `IdleAtFinalState` at onset+L−1, same slide) plus exact host/JSON auto-run kinds; the pixel half is
   n/a on destinations with no click-driven builds.
+* **Producer contract:** `scripts/live_evidence_contract.py` validates every live record once at ingestion (any
+  violation is INCONCLUSIVE/INVALID); a change to any `*_JS` producer or note payload updates it in the same commit.
 * **Residuals:** a physical input between the R1 re-read and the host's advance can race it (the in-page
   `jumpToSlide(n,true)` answer is deferred); visible auto animations on arrival are not gated. **Unverified lead:** the
   player's `handleClickEvent` ignores clicks whose target is a `<video>`, so a playing movie over the stage centre may

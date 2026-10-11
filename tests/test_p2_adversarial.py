@@ -2764,15 +2764,18 @@ def test_freeze_control_motion_marker_replaced_before_the_trigger_is_inconclusiv
 def test_freeze_control_trigger_within_the_motion_slack_still_passes():
     """...and the slack is real: the marker is stamped inside keepThroughBridge's
     first SYNCHRONOUS frame(), which runs in a task, so the poll can see it a
-    callback before or after the rect visibly departs."""
-    for frames, marker in ((3, 1), (1, 3), (2, 2)):
+    callback before the rect visibly departs. The poll records the marker only
+    while armed (p2_recovery_html_adversarial `poll`), so a marker frame past the
+    trigger frame is no reading of the page: the producer contract voids it."""
+    for frames, marker, verdict_ in ((3, 1, "pass"), (2, 2, "pass"), (1, 3, "inconclusive")):
         b = _freeze_b_snap_34()
         b["nullControl"] = {
             **b["nullControl"], "triggerFramesAfterAdvance": frames,
             "motionStartedFrame": marker,
         }
         verdict = _score_34(_positive_snap_34(), _with_poll_times(b), _a2_snap_34())
-        assert verdict["verdict"] == "pass", (frames, marker, verdict["failed"])
+        assert verdict["verdict"] == verdict_, (frames, marker, verdict["failed"])
+        assert ("nullControlSound" in verdict["integrityFailed"]) is (marker > frames)
 
 
 # --- Eased bridge (8204b87a): the trigger bounds follow the bridge's own curve -- #
@@ -2947,7 +2950,7 @@ _LINEAR_ERA = dict(
     pytest.param(dict(frames=14, marker=12), _EASED, BRIDGE_34, _MOVE_START, id="frame-ceiling+1"),
     pytest.param(dict(delay_ms=247.3), _EASED, BRIDGE_34, _MOVE_START, id="delay-ceiling+1"),
     pytest.param(dict(frames=12, marker=5), _EASED, BRIDGE_34, _MOTION_START, id="frame-lead+1"),
-    pytest.param(dict(frames=10, marker=13), _EASED, BRIDGE_34, _MOTION_START, id="before-marker-3"),
+    pytest.param(dict(frames=10, marker=13), _EASED, BRIDGE_34, ["nullControlSound", *_MOTION_START], id="before-marker-3"),
     pytest.param(_ASTRA_LATE, _EASED, BRIDGE_34, _MOTION_START, id="late-after-slow-startup"),
     pytest.param({**_ASTRA_LATE, "post_cadence_ms": 25.0}, _EASED, BRIDGE_34, _MOTION_START,
                  id="late-after-slow-startup-slow-hold"),
@@ -5145,6 +5148,7 @@ def _drop(snap: dict, *path):
 
 # (integrity key, arm, path to delete, does THAT key have to go red?)
 _ABSENCE_CASES = [
+    ("nullControlSound", "b", ("nullControl", "error"), True),
     ("firedAtMoveStart", "b", ("nullControl", "firedVia"), True),
     ("firedAtMoveStart", "b", ("nullControl", "triggerFramesAfterAdvance"), True),
     ("firedAtRuntimeMotionStart", "b", ("nullControl", "motionStartedFrame"), True),
@@ -5801,23 +5805,10 @@ _SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('b', ('movingIndexRunAtCut', 'reason')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
     ('b', ('movingIndexRunAtCut', 'totalProgressAfter')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
     ('b', ('movingIndexRunAtCut', 'totalProgressBefore')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('b', ('nullControl', 'arm')): 'report-only: the arm ack; armResult.ok and the gated arm geometry carry it',
-    ('b', ('nullControl', 'armedAt')): 'report-only: the arm instant; the trigger is timed from the advance keydown',
-    ('b', ('nullControl', 'armedElId')): 'report-only: boundDecoderId is the gated identity',
-    ('b', ('nullControl', 'armedHash')): 'report-only: drain.hashAtArmExact is the gated arm-hash evidence',
     ('b', ('nullControl', 'armedOwnerRect', 'h')): 'report-only: the MEASURED departure, not the armed rect, is gated',
     ('b', ('nullControl', 'armedOwnerRect', 'w')): 'report-only: the MEASURED departure, not the armed rect, is gated',
     ('b', ('nullControl', 'armedOwnerRect', 'x')): 'report-only: the MEASURED departure, not the armed rect, is gated',
     ('b', ('nullControl', 'armedOwnerRect', 'y')): 'report-only: the MEASURED departure, not the armed rect, is gated',
-    ('b', ('nullControl', 'error')): 'negative: green IS absence (noControlError)',
-    ('b', ('nullControl', 'fellBackToArmOwner')): 'report-only: noOwnerAmbiguousInWindow gates the binding',
-    ('b', ('nullControl', 'holdFrames')): 'report-only: the rAF series itself is what loopLive and maxRafGapOk are measured on',
-    ('b', ('nullControl', 'loopHandedOff')): 'report-only: the hand-off is proved by the rafLog itself',
-    ('b', ('nullControl', 'motionStartedAt')): 'redundant: motionStartedMarker.started is the gated instant',
-    ('b', ('nullControl', 'preAdvanceDepartureAt')): 'negative: green IS absence (noPreAdvanceDeparture)',
-    ('b', ('nullControl', 'preAdvanceDepartureRect')): 'negative: forensics for noPreAdvanceDeparture',
-    ('b', ('nullControl', 'rafLog', 't')): 'one frame with no clock widens the gap it sits in; the bound still applies',
-    ('b', ('nullControl', 'staleIndexExpected')): 'report-only: superseded by coverPatchMean',
     ('b', ('ownerSamples', 'captureOffsetS')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash/decoderId/ownerAmbiguous',
     ('b', ('ownerSamples', 'footprint')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash/decoderId/ownerAmbiguous',
     ('b', ('ownerSamples', 'progress')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash/decoderId/ownerAmbiguous',

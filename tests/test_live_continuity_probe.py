@@ -59,9 +59,9 @@ ASSET = "untitled.mov"
 SRC_RECT = {"x": 100.0, "y": 100.0, "w": 200.0, "h": 100.0}
 DST_RECT = {"x": 300.0, "y": 300.0, "w": 260.0, "h": 130.0}
 
-IDENTITY_STAGE_MAP = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0}
-SCALED_STAGE_MAP_4_3 = {"s": 4 / 3, "sy": 4 / 3, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0}
-LETTERBOXED_STAGE_MAP_5_6 = {"s": 5 / 6, "sy": 5 / 6, "ox": 0.0, "oy": 50.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0}
+IDENTITY_STAGE_MAP = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920, "offsetHeight": 1080}
+SCALED_STAGE_MAP_4_3 = {"s": 4 / 3, "sy": 4 / 3, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920, "offsetHeight": 1080}
+LETTERBOXED_STAGE_MAP_5_6 = {"s": 5 / 6, "sy": 5 / 6, "ox": 0.0, "oy": 50.0, "offsetWidth": 1920, "offsetHeight": 1080}
 
 _UNSET = object()
 
@@ -93,13 +93,15 @@ def video(
     rect: dict[str, float] | None = None,
     owner_el_id: int | None | object = "SELF",
 ) -> dict[str, Any]:
-    """Build one sampled `<video>` row the way SAMPLER_JS emits it. `owner_el_id`
+    """Build one sampled `<video>` row the way SAMPLER_JS emits it (the G2 decoder generation). `owner_el_id`
     defaults to the sentinel "SELF" (footprintOwnerDecoderId agrees the tracked
-    element owns its own footprint); pass an explicit id, None (no owner
-    resolved), or a dict for other cases."""
+    element owns its own footprint; an untagged element is no candidate, so it reads `via: none`); pass an
+    explicit id, None (no owner resolved), or a dict for other cases."""
     if rect is None:
         rect = dict(SRC_RECT if (scene or 0) < 2 else DST_RECT)
-    if owner_el_id == "SELF":
+    if owner_el_id == "SELF" and el_id is None:
+        owner = {"elId": None, "key": None, "via": "none", "contextType": None}
+    elif owner_el_id == "SELF":
         owner = {"elId": el_id, "key": "movie1", "via": "footprint-video", "contextType": None}
     elif owner_el_id is None:
         owner = None
@@ -111,6 +113,7 @@ def video(
         "src": src,
         "currentTime": current_time,
         "paused": paused,
+        "ended": False,
         "loop": False,
         "duration": None,
         "readyState": ready_state,
@@ -727,8 +730,8 @@ class TestStageMapInvalid:
         "stage_map",
         [
             None,
-            {"s": 0.0, "sy": 0.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 0.0, "offsetHeight": 0.0},
-            {"s": 1.0, "sy": 1.2, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0},
+            {"s": 0.0, "sy": 0.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 0, "offsetHeight": 0},
+            {"s": 1.0, "sy": 1.2, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920, "offsetHeight": 1080},
         ],
         ids=["no-stage-element", "zero-box", "non-uniform-scale"],
     )
@@ -866,7 +869,7 @@ class TestViewportParsing:
 # --------------------------------------------------------------------------
 
 VISIBLE_VIEWPORT = (64, 32)
-FULL_BLEED_STAGE_MAP = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 64.0, "offsetHeight": 32.0}
+FULL_BLEED_STAGE_MAP = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 64, "offsetHeight": 32}
 
 
 class FakeClock:
@@ -1246,7 +1249,7 @@ class TestVisibleScorerContract:
     shapes it documents."""
 
     VIEWPORT = (320, 200)
-    STAGE_MAP = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 320.0, "offsetHeight": 200.0}
+    STAGE_MAP = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 320, "offsetHeight": 200}
     INSTANCES = {0: {"Untitled.mov": [{"x": 40.0, "y": 60.0, "w": 200.0, "h": 100.0}]}}
 
     def test_the_shared_pure_scorers_are_importable_under_their_agreed_names(self) -> None:
@@ -1425,9 +1428,9 @@ DUPLICATE_SCREEN_RECT = {"x": 20.0, "y": 70.0, "w": 663.0, "h": 186.0}
 DUPLICATE_IOU = (663.0 * 186.0) / (952.0 * 268.0)
 
 PAINT_STAGE_MAPS = {
-    "full-bleed": {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1000.0, "offsetHeight": 400.0},
-    "scaled-4-3": {"s": 4 / 3, "sy": 4 / 3, "ox": 0.0, "oy": 0.0, "offsetWidth": 750.0, "offsetHeight": 300.0},
-    "letterboxed-origin-0-50": {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 50.0, "offsetWidth": 1000.0, "offsetHeight": 300.0},
+    "full-bleed": {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1000, "offsetHeight": 400},
+    "scaled-4-3": {"s": 4 / 3, "sy": 4 / 3, "ox": 0.0, "oy": 0.0, "offsetWidth": 750, "offsetHeight": 300},
+    "letterboxed-origin-0-50": {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 50.0, "offsetWidth": 1000, "offsetHeight": 300},
 }
 
 
@@ -1598,21 +1601,22 @@ class TestPaintingVideoInstanceCheck:
         assert record["instanceCheck"]["verdict"] is True
 
     @pytest.mark.parametrize(
-        "raw",
+        ("raw", "reason"),
         [
-            True,
-            None,
-            {"error": "checkVisibility is unavailable in this browser"},
-            [{"src": "Untitled.mov"}],
-            [{"src": "Untitled.mov", "rect": {"x": 0.0, "y": 0.0, "w": float("nan"), "h": 10.0}}],
+            (True, "evidence contract: painting:list"),
+            (None, "evidence contract: painting:list"),
+            ({"error": "checkVisibility is unavailable in this browser"}, "painting-video probe"),
+            ([{"src": "Untitled.mov", "elId": None}], "evidence contract: painting.rect:missing"),
+            ([{"src": "Untitled.mov", "elId": None, "rect": {"x": 0.0, "y": 0.0, "w": float("nan"), "h": 10.0}}],
+             "evidence contract: painting.rect"),
         ],
         ids=["true", "null", "error-object", "row-without-a-rect", "non-finite-rect"],
     )
-    def test_a_malformed_painting_result_is_an_instrument_error_never_a_verdict(self, raw: Any) -> None:
+    def test_a_malformed_painting_result_is_an_instrument_error_never_a_verdict(self, raw: Any, reason: str) -> None:
         record = self._record(PAINT_STAGE_MAPS["full-bleed"], raw)
         assert record["status"] == "error"
         assert record["verdict"] is None
-        assert "painting-video probe" in record["reason"]
+        assert reason in record["reason"]
 
     def test_an_instance_failure_does_not_promote_an_inconclusive_slide_to_red(self) -> None:
         """An unusable noise floor means the instrument is not trusted at all --
@@ -1964,7 +1968,7 @@ class TestRefusalScoring:
     """The POSITIVE half: "did not continue" alone is vacuous, so the refusal has
     to be shown on the destination slide's DOM."""
 
-    STAGE_MAP = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0}
+    STAGE_MAP = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920, "offsetHeight": 1080}
     RETIRE = {"assetKeys": ["untitled.mov"], "rects": [BIG_INSTANCE]}
 
     def _sample(self, painting: Any = None, snapshot: Any = None, stage_map: Any = _UNSET) -> dict[str, Any]:
@@ -3617,18 +3621,36 @@ GL_RUNTIME = {"schema": 2, "movies": RUNTIME_MOVIES, "boundaries": [GL_BOUNDARY,
 GL_REPLAY_VERSION = probe.GL_REPLAY_VERSION
 GL_CONTINUITY = {"mode": "qualified", "glReplay": {"mode": "injected", "version": GL_REPLAY_VERSION, "sha256": probe.gl_replay_js_sha256()}}
 ARMED = probe.armed_fact(synthetic_plan(), GL_RUNTIME, BOUNDARY_KEYS)
-GL_STAGE = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0}
+GL_STAGE = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920, "offsetHeight": 1080}
 
 
 def _ev(kind: str, **detail: Any) -> dict[str, Any]:
-    return {"kind": kind, "detail": detail, "t": 1.0}
+    """A core note (`note()` stamps the page hash; a module event carries it harmlessly)."""
+    return {"kind": kind, "detail": {"sceneHash": "", **detail}, "t": 1.0}
 
 
 def _pool_entry(el_id: int, current_time: float, **extra: Any) -> dict[str, Any]:
     return {
         "key": "untitled.mov", "movieKey": "movie1", "elId": el_id, "currentTime": current_time,
-        "paused": False, "readyState": 4, "inDocument": False, **extra,
+        "paused": False, "ended": False, "readyState": 4, "inDocument": False, "videoWidth": 640, "videoHeight": 360,
+        **extra,
     }
+
+
+def _gl_read(**fields: Any) -> dict[str, Any]:
+    """`GL_REPLAY_READ_JS` on a page with a core and no G2 module, overridden by `fields`."""
+    return {"t": 1.0, "hash": "#2", "ready": True, "api": None, "coreEvents": [], "pool": [], "facades": [], **fields}
+
+
+def _gl_api(state: str = "LIVE", stand_downs: tuple[str, ...] = (), events: tuple[Any, ...] = (), **stats: Any) -> dict[str, Any]:
+    return {"version": 1, "state": state, "standDowns": list(stand_downs), "events": list(events),
+            "stats": {"epoch": 1, "iter": 10, "uploads": 10, "glErrors": 0, **stats}}
+
+
+def _handback_record(after: dict[str, Any], *, expect_handoff: bool = True, **fields: Any) -> dict[str, Any]:
+    """`capture_handback`'s `ok` record around the post-build-1 GL read `after`."""
+    return {"status": "ok", "reason": None, "targetHash": 3, "expectHandoff": expect_handoff, "before": _gl_read(),
+            "stageMap": dict(HB_STAGE), "painting": [], "preserve": [], "after": after, **fields}
 
 
 def _armed_read(t: float, iteration: int, carried_time: float) -> dict[str, Any]:
@@ -3983,7 +4005,7 @@ class TestRectExpectationModelGl:
 
 
 # Hand-back geometry: a 0.1 stage scale keeps the frames small.
-HB_STAGE = {"s": 0.1, "sy": 0.1, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0}
+HB_STAGE = {"s": 0.1, "sy": 0.1, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920, "offsetHeight": 1080}
 HB_SHAPE = (108, 192, 3)
 
 
@@ -3996,34 +4018,26 @@ def _hb_frames() -> tuple[np.ndarray, np.ndarray]:
 
 
 def _hb_v_record() -> dict[str, Any]:
-    return {
-        "status": "ok", "stageMap": dict(HB_STAGE), "painting": [],
-        "before": {"pool": [], "facades": [], "coreEvents": []},
-        "after": {"hash": "#3", "coreEvents": [], "api": None, "facades": []},
-    }
+    return _handback_record(_gl_read(hash="#3"), expect_handoff=False)
 
 
 def _hb_vgl_record() -> dict[str, Any]:
     screen = probe.to_screen_rect(BIG_INSTANCE, HB_STAGE)
-    return {
-        "status": "ok", "stageMap": dict(HB_STAGE),
-        "painting": [{"src": "untitled.mov", "elId": 1, "rect": dict(screen)}],
-        "before": {"pool": [_pool_entry(1, 5.0), _pool_entry(2, 3.0)], "facades": [], "coreEvents": []},
-        "after": {
-            "hash": "#3",
-            "coreEvents": [
+    return _handback_record(
+        _gl_read(
+            hash="#3",
+            coreEvents=[
                 _ev("glreplay-carried", elId=1, delta=0.01),
                 _ev("glreplay-release", ok=True, mode="handoff", reason=None, elId=1, retired=[2]),
                 _ev("remount-into-authored-layer", elId=1),
             ],
-            "api": {
-                "version": 1, "state": "RETIRED", "standDowns": ["canvasRemoved"],
-                "events": [_ev("glreplay-handoff", reason="canvasRemoved", completedMs=1.8)],
-                "stats": {"mutationScanMs": 0.3},
-            },
-            "facades": [{"elId": 3, "forElId": 1}],
-        },
-    }
+            api=_gl_api("RETIRED", ("canvasRemoved",), (_ev("glreplay-handoff", reason="canvasRemoved", completedMs=1.8),),
+                        mutationScanMs=0.3),
+            facades=[{"elId": 3, "forElId": 1}],
+        ),
+        painting=[{"src": "untitled.mov", "elId": 1, "rect": dict(screen)}],
+        before=_gl_read(pool=[_pool_entry(1, 5.0), _pool_entry(2, 3.0)]),
+    )
 
 
 class TestHandbackScoring:
@@ -4076,7 +4090,7 @@ class TestHandbackScoring:
     @pytest.mark.parametrize("mutate,check", [
         (lambda r: r["painting"][0].update(elId=7), "painting"),
         (lambda r: r["painting"][0]["rect"].update(x=r["painting"][0]["rect"]["x"] + 1.0), "painting"),
-        (lambda r: r["painting"].append(dict(r["painting"][0])), "painting"),
+        (lambda r: r["painting"].append(dict(r["painting"][0], elId=2)), "painting"),
         (lambda r: r["after"]["coreEvents"][1]["detail"].update(mode="retire"), "release+handoff"),
         (lambda r: r["after"]["coreEvents"][1]["detail"].update(retired=[]), "release"),
         (lambda r: r["after"]["coreEvents"].append(_ev("remount-done", elId=1)), "noRemount"),
@@ -4110,11 +4124,10 @@ class TestHandbackScoring:
 
 
 def _hb_read(hash_: str, *, handoff: bool = False) -> dict[str, Any]:
-    read: dict[str, Any] = {"t": 1.0, "hash": hash_, "ready": True, "api": {"events": []}, "coreEvents": [], "pool": [], "facades": []}
-    if handoff:
-        read["api"]["events"].append(_ev("glreplay-handoff", completedMs=1.0))
-        read["coreEvents"].append(_ev("glreplay-release", mode="handoff"))
-    return read
+    if not handoff:
+        return _gl_read(hash=hash_, api=_gl_api())
+    return _gl_read(hash=hash_, api=_gl_api("RETIRED", ("canvasRemoved",), (_ev("glreplay-handoff", completedMs=1.0),)),
+                    coreEvents=[_ev("glreplay-release", ok=True, mode="handoff", retired=[])])
 
 
 class TestHandbackCapture:
@@ -5222,16 +5235,13 @@ class TestForcedFailSplice:
 
 
 def _forced_after(reason: str, *, zone_reason: str = "failure", live: bool = False) -> dict[str, Any]:
-    zone = _ev("glreplay-zone", **{"from": "armed"}, to="retired", reason=zone_reason)
+    zone = _ev("glreplay-zone", key="movie1", **{"from": "armed"}, to="retired", reason=zone_reason)
     if zone_reason == "failure":
         zone["detail"]["standDown"] = reason
-    record = {
-        "status": "ok",
-        "after": {
-            "hash": "#3", "api": {"version": 1, "state": "RETIRED", "standDowns": [reason], "events": []},
-            "coreEvents": [_ev("glreplay-zone", **{"from": "pending"}, to="armed", reason="moduleReady"), zone],
-        },
-    }
+    record = _handback_record(_gl_read(
+        hash="#3", api=_gl_api("RETIRED", (reason,)),
+        coreEvents=[_ev("glreplay-zone", key="movie1", **{"from": "pending"}, to="armed", reason="moduleReady"), zone],
+    ), expect_handoff=False)
     if live:
         record["after"]["coreEvents"].append(_ev("glreplay-live"))
     return record
@@ -5557,8 +5567,8 @@ C_ARMED = {
     "atScene": 2, "originalOrdinal": 2, "movieSlot": 1, "overrideSlots": [], "instanceRect": dict(C_INSTANCE),
     "slotRects": [{"x": 0.0, "y": 0.0, "w": 1920.0, "h": 1080.0}, dict(C_SLOT)],
 }
-STAGE_2560 = {"s": 4 / 3, "sy": 4 / 3, "ox": 0.0, "oy": 0.0, "offsetWidth": 2560.0, "offsetHeight": 1440.0}
-STAGE_1920 = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0}
+STAGE_2560 = {"s": 4 / 3, "sy": 4 / 3, "ox": 0.0, "oy": 0.0, "offsetWidth": 2560, "offsetHeight": 1440}
+STAGE_1920 = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920, "offsetHeight": 1080}
 FRAME_BG, FRAME_VIDEO = 50, 200
 
 
@@ -5642,7 +5652,7 @@ class TestLiveRingScoring:
     def test_the_ring_follows_the_stage_map(self) -> None:
         """At s=2 with an offset, a diff on the scaled ring is RED, and a diff at the
         unscaled ring's position (now inside the dilated instance) is ignored."""
-        stage = {"s": 2.0, "sy": 2.0, "ox": -100.0, "oy": -1000.0, "offsetWidth": 3840.0, "offsetHeight": 2160.0}
+        stage = {"s": 2.0, "sy": 2.0, "ox": -100.0, "oy": -1000.0, "offsetWidth": 3840, "offsetHeight": 2160}
         v, g = _live_frames(stage, (1200, 2100), BIG_INSTANCE)
         g[791, 500] = 0
         assert _ring(v, g, ARMED, stage)["verdict"] is True
@@ -5677,7 +5687,7 @@ class TestLiveRingScoring:
         if isinstance(sink, dict) and sink.get("live"):
             assert scored["reason"] == "live capture failed: boom"
 
-    @pytest.mark.parametrize("stage", [None, {"s": 1.0, "sy": 1.2, "ox": 0.0, "oy": 0.0, "offsetWidth": 1.0, "offsetHeight": 1.0}])
+    @pytest.mark.parametrize("stage", [None, {"s": 1.0, "sy": 1.2, "ox": 0.0, "oy": 0.0, "offsetWidth": 1, "offsetHeight": 1}])
     def test_an_untrustworthy_stage_map_is_inconclusive(self, stage: Any) -> None:
         v, g = _live_frames(STAGE_1920, (1080, 1920), BIG_INSTANCE)
         assert probe.score_live_ring(_sink(v, STAGE_1920), _sink(g, stage), ARMED)["verdict"] is None
@@ -6074,13 +6084,16 @@ def _fw_recorder(
         frames.append({"now": t, "mediaTime": media, "presentedFrames": len(frames)})
         t += dt
     return {
-        "seekedT": FW_SEEKED, "target": period - lead_s, "frames": frames, "elId": el_id, "probeId": 1, "loop": wrap,
-        "duration": period, "playbackRate": 1, "ended": not wrap,
+        "t": end, "seekedT": FW_SEEKED, "seekFrom": 3.0, "target": period - lead_s, "frames": frames, "id": "6BB39942-video",
+        "elId": el_id, "probeId": 1, "loop": wrap, "ended": not wrap, "paused": False, "isConnected": True,
+        "duration": period, "playbackRate": 1,
     }
 
 
 def _fw_take(*, press: float = FW_SEEKED + 2000.0, count: int = 1, reached: bool = True, **extra: Any) -> dict[str, Any]:
-    return {"domId": "6BB39942-video", "select": {"count": count}, "pressT": press, "reached": reached, **extra}
+    seek = {"duration": FW_PERIOD, "loop": True, "playbackRate": 1, "seekFrom": 3.0, "target": FW_PERIOD - 2.375}
+    select = {"domId": "6BB39942-video", "count": count, "t": FW_SEEKED - 100.0, **(seek if count == 1 else {})}
+    return {"domId": "6BB39942-video", "select": select, "pressT": press, "reached": reached, **extra}
 
 
 def _fw_window() -> dict[str, float]:
@@ -6111,7 +6124,7 @@ def _fw_reads(*, stand_downs: list[str] | None = None, zones: list[tuple[str, st
         _set_detail(read, "glreplay-carried", elId=carried)
         if stand_downs is not None:
             gl["api"]["standDowns"] = list(stand_downs)
-            gl["api"]["state"] = "STOOD_DOWN" if stand_downs else "LIVE"
+            gl["api"]["state"] = "RETIRED" if stand_downs else "LIVE"
         gl["coreEvents"].extend(
             _ev("glreplay-zone", key="movie1", **{"from": a}, to=b, reason=c, sceneHash="#1") for a, b, c in zones
         )
@@ -6385,6 +6398,8 @@ class TestRescoreArtifact:
     }
 
     def _artifact(self, tmp_path: Path, samples: list[dict[str, Any]]) -> Path:
+        for row in samples:
+            row.update(scene=int(row["scene"]), playerState="IdleAtFinalState", busy=False)
         arm = {"continuity": {"mode": "qualified"}, "samples": samples}
         arm.update(json.loads(json.dumps(probe.score_boundaries(samples, self.FACTS, True))))
         path = tmp_path / "host.json"
@@ -6452,11 +6467,12 @@ class _WrapTransport:
     def evaluate(self, expression: str) -> Any:
         self.evaluations.append(expression)
         if expression.startswith(probe.FORCE_WRAP_SEEK_JS):
-            return {"count": 1, "duration": FW_PERIOD, "loop": True, "playbackRate": 1}
+            return {"domId": "98D59E27-X-video", "count": 1, "t": FW_SEEKED - 100.0, "duration": FW_PERIOD, "loop": True,
+                    "playbackRate": 1, "seekFrom": 3.0, "target": FW_PERIOD - 2.375}
         if expression == probe.FORCE_WRAP_STATUS_JS:
             return {
-                "seekedT": FW_SEEKED, "framesAfterSeek": 12, "duration": FW_PERIOD, "playbackRate": 1,
-                "last": {"now": FW_SEEKED + 2000.0, "mediaTime": FW_PERIOD - 0.375},
+                "t": FW_SEEKED + 2000.0, "seekedT": FW_SEEKED, "framesAfterSeek": 12, "duration": FW_PERIOD, "playbackRate": 1,
+                "last": {"now": FW_SEEKED + 2000.0, "mediaTime": FW_PERIOD - 0.375, "presentedFrames": 60},
             }
         if expression == probe.PAGE_NOW_JS:
             return FW_SEEKED + 2000.0
@@ -6465,7 +6481,8 @@ class _WrapTransport:
         if expression == probe.SAMPLER_DRAIN_JS:
             return []
         if expression == probe.PAGE_ERRORS_JS:
-            return [{"kind": "player-build-error", "t": FW_SEEKED - 500.0, "detail": {"message": "before the seek"}}]
+            return [{"kind": "player-build-error", "t": FW_SEEKED - 500.0,
+                     "detail": {"errorType": "error", "message": "before the seek", "sceneHash": "#7"}}]
         return True
 
 
@@ -6526,7 +6543,7 @@ class TestRunForceWrap:
         monkeypatch.setattr(probe, "advance_until_original_slide", lambda player, ordinal: player.commands.append(f"to{ordinal}"))
         monkeypatch.setattr(probe, "wait_until_settled", lambda *a, **k: True)
         monkeypatch.setattr(probe, "wait_for_destination_hash", lambda *a, **k: True)
-        monkeypatch.setattr(probe, "armed_evidence", lambda *a, **k: [])
+        monkeypatch.setattr(probe, "armed_evidence", lambda *a, **k: _armed_reads())
         monkeypatch.setattr(probe, "score_continuity", continuity)
         monkeypatch.setattr(probe, "check_no_leftover_chrome", lambda: "")
         monkeypatch.setattr(probe, "CLICK_DELAY_S", 0.0)
@@ -6551,7 +6568,7 @@ class TestRunForceWrap:
         assert len(result["pageErrorNotes"]) == 1 and result["forced"]["pageErrors"] == []
 
 
-PAGE_ERROR = {"kind": "player-build-error", "t": FW_SEEKED + 2500.0, "detail": {"errorType": "error", "message": "boom"}}
+PAGE_ERROR = {"kind": "player-build-error", "t": FW_SEEKED + 2500.0, "detail": {"errorType": "error", "message": "boom", "sceneHash": "#7"}}
 
 
 class TestForcedWrapUnreadable:
@@ -7308,7 +7325,7 @@ class TestCarryVerdict:
             del vid[breakage]
         scored = probe.score_verdicts(samples, {}, facts, True, {"mode": "qualified"})
         for spec_id in (P2_CARRY12, P2_RESTART23, P2_CARRY34):
-            assert scored[spec_id]["verdict"] is None and scored[spec_id]["schemaErrors"], spec_id
+            assert scored[spec_id]["verdict"] is None and scored[spec_id]["contractErrors"], spec_id
 
     def test_the_real_samples_have_a_valid_schema(self) -> None:
         assert probe.sample_schema_errors(_real_samples()) == []
@@ -8479,7 +8496,7 @@ class TestCoordinatorR2:
         assert scored["verdict"] is None and "footprint owner" in scored["integrity"]
         for row in samples:
             if row["scene"] == 8:
-                row["videos"][0]["footprintOwner"] = {"elId": 9, "key": "movie1", "via": "footprint-video"}
+                row["videos"][0]["footprintOwner"] = {"elId": 9, "key": "movie1", "via": "footprint-video", "contextType": None}
         assert probe.score_verdicts(samples, {}, _p2_facts(), True, {"mode": "qualified"})[P2_CARRY34]["verdict"] is False
 
     def _two_instance_plan(self) -> Any:
@@ -9110,7 +9127,8 @@ def _cc_scene(
             pre = pre_read(ts) if pre_read is not None else overlay_at(max(k - 1, 0))
             rows.append({"ts": ts, "tick": k % (1 << probe.CARRY_COVER_SYNC_BITS),
                          "pre": [{"elId": CC_EL_ID, **pre, "readyState": ready_state, "opaque": opaque}],
-                         "vids": [{"elId": CC_EL_ID, **overlay_at(k), "readyState": ready_state, "opaque": opaque}]})
+                         "vids": [{"elId": CC_EL_ID, **overlay_at(k), "readyState": ready_state, "opaque": opaque}],
+                         "readAt": ts + 1.0})
         k += 1
     return frames, rows, [_cc_note(dst=dst, duration_s=duration_s)]
 
@@ -9353,9 +9371,10 @@ class TestCarryCoverCoverage:
         assert 0 < result["discardedShare"] <= probe.CARRY_COVER_MAX_DISCARDED_SHARE
 
     def test_known_bad_frames_whose_tick_the_sampler_missed_are_unplaced(self) -> None:
+        """The sampler pushes a row on every tick it counts (`CARRY_COVER_SAMPLER_JS`), so rows that skip ticks are
+        outside the producer contract and void the bridge before any frame is placed."""
         result = _cc_score(*_cc_scene(sampled=lambda k, ts: k % 4 != 0))
-        self._assert(result, "could not be placed at a sampled tick")
-        assert any(f.get("unaligned") == "no sampler row for its tick" for f in result["frames"])
+        self._assert(result, "evidence contract: carryCover:tick not contiguous")
 
     def test_known_bad_a_page_ticking_slower_than_20fps_is_inconclusive(self) -> None:
         self._assert(_cc_score(*_cc_scene(tick_ms=200.0)), "the page's rAF ticked every 200.0 ms")
@@ -9384,7 +9403,7 @@ class TestCarryCoverInconclusive:
         ([_cc_note(), _cc_note(t=CC_T0 + 300.0, dst={**CC_DST, "x": 210.0})], "1 other bridge-motion-start notes"),
         ([_cc_note(), _cc_note(t=CC_T0 + 300.0, scene=CC_AT_SCENE)], "1 other bridge-motion-start notes"),
         ([{"kind": "bridge-motion-start", "t": CC_T0, "detail": {"elId": CC_EL_ID, "durationSeconds": CC_DURATION_S}}],
-         "no move window: 0 bridge-motion-start notes for this bridge"),
+         "evidence contract: note.sceneHash"),
     ], ids=["earlier-bridge-before-rows", "second-own-note", "foreign-rect-in-window", "foreign-hash-in-window",
             "no-identity"])
     def test_only_this_bridges_one_note_opens_the_move_window(
@@ -9717,7 +9736,7 @@ class TestSamplerV2:
     def test_pre_paint_rects_and_stage_box_convert_to_authored_or_the_read_is_unreadable(self, valid: bool) -> None:
         """Plan §3.4: `pp` rects and stage box use the read's own stage map (screen values kept); an
         untrustworthy map removes the read, so its frame scores as unobserved, never as offscreen."""
-        stage = dict(SCALED_STAGE_MAP_4_3) if valid else {"s": 1.0, "sy": 2.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1.0, "offsetHeight": 1.0}
+        stage = dict(SCALED_STAGE_MAP_4_3) if valid else {"s": 1.0, "sy": 2.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1, "offsetHeight": 1}
         screen = _screen_rect(SRC_RECT, SCALED_STAGE_MAP_4_3)
         pp = {"stageMap": stage, "stageBox": dict(screen), "videos": [{"id": 1, "rect": dict(screen), "visibleRect": dict(screen)}]}
         row = sample(0.0, 1, video(id=1, el_id=1, t=0.0, scene=1, current_time=1.0, rect=screen), stage_map=SCALED_STAGE_MAP_4_3)
@@ -10529,8 +10548,8 @@ class TestFold4MissingIdentityAndPairsNeverAVerdict:
         assert probe.score_handback_carry(record, ARMED)["verdict"] is expected
 
     @pytest.mark.parametrize(("note", "expected"), [
-        ({"kind": "remount-done", "detail": {"elId": 1, "key": "untitled.mov"}}, False),
-        ({"kind": "remount-done", "detail": {"elId": 9, "key": "untitled.mov"}}, True),  # another element's
+        ({"kind": "remount-done", "t": 1.0, "detail": {"elId": 1, "key": "untitled.mov", "sceneHash": "#3"}}, False),
+        ({"kind": "remount-done", "t": 1.0, "detail": {"elId": 9, "key": "untitled.mov", "sceneHash": "#3"}}, True),
         ({"kind": "remount-done", "detail": {"key": "untitled.mov"}}, None),  # fold4 verify: no elId; passed
         ({"kind": "remount-done", "detail": "unreadable"}, None),  # fold4 verify: non-object detail; passed
         ({"kind": "remount-footprint-rect", "detail": {"rect": {}}}, None),  # fold4 verify: passed
@@ -11264,3 +11283,101 @@ class TestFold5VerificationRound3:
         elif case == "readHashEmpty":
             _gl(reads[1])["hash"] = ""
         assert probe.score_armed_strict(reads, ARMED, GL_CONTINUITY, samples)["verdict"] is expected
+
+
+# --- Producer contract wiring (plan keynote_live_continuity_contract §3, §4 N2) -----------------------------------------
+# One violation at each ingestion point reaches that point's unknown outcome; the clause tables themselves are
+# tested in test_live_evidence_contract.py.
+
+
+def _wired_verdicts(tmp_path: Path) -> Any:
+    samples = _p2_run_samples()
+    samples[70]["videos"][0]["isConnected"] = False
+    return [s["verdict"] for s in probe.score_verdicts(samples, {}, _p2_facts(), True, {"mode": "qualified"}).values()]
+
+
+def _wired_rescore(tmp_path: Path) -> Any:
+    samples = rows_around_boundary()
+    samples[3]["videos"][0]["isConnected"] = False
+    report = probe.rescore_artifact(TestRescoreArtifact()._artifact(tmp_path, samples), LOOP_P)
+    return report["ok"], report["arms"]["arm A"]["identical"]
+
+
+def _wired_force_wrap(tmp_path: Path) -> Any:
+    recorder = _fw_recorder()
+    recorder["frames"][3]["presentedFrames"] = 2.5
+    result = {"continuity": GL_CONTINUITY, "samples": [], "recorder": recorder, "take": _fw_take(),
+              "reads": _armed_reads_at(FW_SEEKED + 6000.0), "pageErrorNotes": []}
+    probe.score_force_wrap_run(result, TestArmedRecorderWindow()._gt(), "1to2", 375.0)
+    return result["status"], result["forced"]["outcome"], result["continuityVerdict"]["verdict"]
+
+
+def _wired_carry_cover(tmp_path: Path) -> Any:
+    frames, rows, notes = _cc_scene()
+    del rows[10]["readAt"]
+    scored = _cc_score(frames, rows, notes)
+    return scored["verdict"], probe.carry_cover_status({"mode": "qualified"}, [{"boundary": "b3to4", "result": scored}])[0]
+
+
+def _wired_handback(tmp_path: Path) -> Any:
+    record = _hb_vgl_record()
+    record["after"]["ready"] = "yes"
+    return probe.score_handback_carry(record, ARMED)["verdict"]
+
+
+def _wired_forced(tmp_path: Path) -> Any:
+    refusal_read = {"stageMap": dict(GL_STAGE), "painting": [], "poolSnapshot": [_pool_entry(1, 1.0, elId=0)]}
+    return probe.score_forced(
+        v_pass=_v_reference(), g_pass=_forced_pass([True] * 4), refusal={"verdict": True},
+        g_handback=_forced_after("posterAmbiguous"), parity={"verdict": True}, reason="posterAmbiguous",
+        splice={"splices": 1}, refusal_read=refusal_read,
+    )["status"]
+
+
+def _wired_live_ring(tmp_path: Path) -> Any:
+    v, g = _live_frames(STAGE_2560, (1440, 2560), C_INSTANCE)
+    return _ring(v, g, C_ARMED, dict(STAGE_2560, offsetWidth=2560.5))["verdict"]
+
+
+def _wired_visible_slide(tmp_path: Path) -> Any:
+    painting = [painting_video(EXPECTED_SCREEN_RECT, el_id=4), painting_video(DUPLICATE_SCREEN_RECT, el_id=4)]
+    record = TestPaintingVideoInstanceCheck()._record(PAINT_STAGE_MAPS["full-bleed"], painting)
+    return record["status"], record["verdict"]
+
+
+def _wired_census(tmp_path: Path) -> Any:
+    census = TestStrayCensus()
+    raw = census._clean()
+    raw["2"][0]["stageMap"]["offsetHeight"] = 1080.5
+    records, red, unknown = probe.score_census(raw, census.PLAN_INSTANCES, {}, census.PLAYERS)
+    return records["2"]["verdict"], red, unknown
+
+
+@pytest.mark.parametrize(("ingest", "outcome"), [
+    pytest.param(_wired_verdicts, [None] * 4, id="1-score_verdicts-every-verdict-of-the-arm"),
+    pytest.param(_wired_rescore, (False, None), id="2-rescore_artifact"),
+    pytest.param(_wired_force_wrap, ("invalid", None, None), id="3-score_force_wrap_run"),
+    pytest.param(_wired_carry_cover, ("inconclusive", "inconclusive"), id="4-score_carry_cover"),
+    pytest.param(_wired_handback, None, id="5-score_handback_carry"),
+    pytest.param(_wired_forced, "inconclusive", id="5-score_forced-refusal-read"),
+    pytest.param(_wired_live_ring, None, id="5-score_live_ring"),
+    pytest.param(_wired_visible_slide, ("error", None), id="6-visible_slide_record"),
+    pytest.param(_wired_census, (None, [], ["census:slide2"]), id="6-score_census"),
+])
+def test_a_contract_violation_at_each_ingestion_point_is_never_a_verdict(ingest: Any, outcome: Any, tmp_path: Path) -> None:
+    assert ingest(tmp_path) == outcome
+
+
+def test_a_goto_execute_record_is_this_calls_or_none(tmp_path: Path) -> None:
+    """N2: goTo 3 runs three times, and the host's logger drops a record on a full queue, so an older record of the
+    same slide must never stand in for this call's."""
+    older = {"ts": 100.0, "kind": "execute", "operation": "goTo", "slide": 3, "autoPlayFired": True}
+    assert probe.find_execute_record([older], operation="goTo", slide=3) == older
+    assert probe.find_execute_record([older], operation="goTo", slide=3, since=150.0) is None
+    log = tmp_path / "log.jsonl"
+    log.write_text(json.dumps(older) + "\n")
+    clock = FakeClock()
+    assert probe.wait_for_execute_record(log, operation="goTo", slide=3, since=150.0, now=clock.now, sleep=clock.sleep) is None
+    fresh = dict(older, ts=150.0, autoPlayFired=False)
+    log.write_text(json.dumps(older) + "\n" + json.dumps(fresh) + "\n")
+    assert probe.wait_for_execute_record(log, operation="goTo", slide=3, since=150.0, now=clock.now, sleep=clock.sleep) == fresh
