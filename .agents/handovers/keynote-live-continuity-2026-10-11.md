@@ -9,7 +9,7 @@ is copied below. Verify branches and PRs on GitHub before acting. Evidence paths
 |---|---|
 | `main` | `1589d096` = #257 (raw Astra rounds of #256 removed) on #255 (resizer seed read) on #256 (bridge easing). |
 | PR #256 | Merged 2026-10-10. **Owner confirmed in real OBS 2026-10-11: the 3→4 rubber band is gone.** Post-merge chore done (#257). |
-| `claude/s2-detach-fix` | `510de8bb` + this handover, pushed. Instrument folds r12–r16 on top of the contract pass. Worktree `obs-mac-camera-swap-fbc63b`. Contains everything below. |
+| `claude/s2-detach-fix` | `14f49c8c` (+ docs), pushed. Instrument folds r12–r16 on top of the contract pass. Worktree `obs-mac-camera-swap-fbc63b`. Contains everything below. |
 | gl-clock | Core `a9e1e66a` merged (Astra gl-clock r1 REQUEST CHANGES → fold `5e9c9faf` → **r2 APPROVE**). Live GL-1/2/3 done 2026-10-11 (below). |
 | Contract pass | MERGED (`1c02c447` → `de6df228`). Plan `.agents/plans/keynote_live_continuity_contract.plan.md` (owner GO; Q1 N1–N3 yes, Q2 admit rare legal shapes, Q3 smoke yes). Astra r12 → r16 folded; **r17 APPROVE** (section below). |
 | Gate worktrees | All trashed. Their live host logs were recovered to `s2-dev/live-logs/<wt>/` (`gate-glclock-c7d2d649`, `gate-preglclock-8ee7077d`, `gate-contract-de6df228`). |
@@ -84,11 +84,12 @@ implementer briefs (`common.md`, `sweep.md`) and their scratch scripts in `s2-de
 | r15 | 2 blocking | `9dc88785`: `match_painting_videos` judges the claimed instance's asset (visible slide + census); retire's handed-back exemption needs the retired asset |
 | r16 | 2 blocking | `510de8bb`: managed precheck judges the handed-back element's src; **`CARRY_COVER_SAMPLER_JS` reads now carry `src`** (additive; contract: new read generation, no mixing, legacy without src stays legal and pixel-only) |
 | **r17** | **APPROVE** (1 MINOR) | — |
+| r18 (follow-up) | **APPROVE** | `14f49c8c`: r16 #3 — geometry-tied instances go to the one whose asset the painter names (IoU first, exact) |
 Rules now in force (owner): (A) exact canonical asset matching in every scorer; (B) identity first (probe id / elId /
 carried / pooled / facade / armed rect), then src: exact → the movie; foreign on an identity-resolved element →
 False/FAIL; empty/unreadable → unreadable; unresolved exact-asset elements still count. Exception (coordinator, Astra
 accepted): in multi-row decoder TRACKS a row naming another asset is INCONCLUSIVE, not False (element reuse).
-Verification at `510de8bb`: full 3.12 **10455 passed / 0 failed** (`9dc88785`: 10446); 3.10 floor touched files 4651
+Verification at `510de8bb` (`14f49c8c` is one scorer line + 2 test cases: targeted `-k` subsets only — the next session's first full suite covers it): full 3.12 **10455 passed / 0 failed** (`9dc88785`: 10446); 3.10 floor touched files 4651
 (`9dc88785`) + 2040 (`510de8bb`) passed; regression oracle vs `de6df228` **0 changes / 1503 records** at every fold;
 acceptance scan 0 rejections / 3,879 records; live D1 carry-cover (from this worktree, load ~4.5): green pass, null fail
 (72/72 both bridges), an instrumented green run showed every `vids`/`pre` read carrying `src`
@@ -188,9 +189,7 @@ before — no `reads.postHandback`; predates the hand-off requirement (Codex r4 
    conflicting refusal notes are None (was False, Astra S2 r2 #3's test); the pre-flip census needs a non-null probe id.
 7b. **Instrument follow-ups from r12–r17 (non-blocking, Astra-classified):** r15 #3 MINOR (4) — a
    legitimately overlapping second movie at the carried/instance rect now reads hand-back/arming False (needs explicit
-   unrelated-instance provenance before the rect fallback; ignoring foreign src would reopen r14 #1); r16 #3 MINOR (4) —
-   tied authored rects (`a.mov#1`/`z.mov#1`) can give a false `foreign:` census red (resolve ambiguous instance ownership
-   first); r17 MINOR (4) — a looping handed-back element hidden behind the GL layer is omitted by `PAINTING_VIDEOS_JS`, so
+   unrelated-instance provenance before the rect fallback; ignoring foreign src would reopen r14 #1); r17 MINOR (4) — a looping handed-back element hidden behind the GL layer is omitted by `PAINTING_VIDEOS_JS`, so
    the managed precheck reads INVALID (fix: capture src in the identity-specific `HANDED_BACK_JS` read — a producer +
    contract change); (2) the adversarial census `mineByKey` substring branches are in-page JS producers
    (`CARRY_CENSUS_JS` and the GL carry census, adversarial ~:236/378; over-count, fail closed) — exact-match them with a
