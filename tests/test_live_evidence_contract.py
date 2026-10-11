@@ -94,6 +94,10 @@ def _append_copy(target: Callable[[Any], list[Any]], index: int = 0, **values: A
     return lambda record: target(record).append({**copy.deepcopy(target(record)[index]), **values})
 
 
+def _release(read: dict[str, Any]) -> dict[str, Any]:
+    return next(e for e in read["coreEvents"] if e["kind"] == "glreplay-release")["detail"]
+
+
 S2, G4 = "rows-S2-raw-rare-shapes", "rows-G4-converted"
 POOL, GL, HB = "refusal-read-pool-and-fromDom-hold-one-decoder", "gl-read-release-elId-null-retire-without-instance", "handback-ok"
 FW, CC, MANAGED, NC = "force-wrap-take", "carry-cover-trailing-rows-unread", "managed-g2-session", "null-control-40-keys"
@@ -112,6 +116,7 @@ VIOLATIONS = [
     ("decoder-domId-empty", S2, _set(_video, domId=""), "decoder.domId"),
     ("decoder-elId-changes", S2, _set(lambda r: r[3]["videos"][0], elId=8), "row:elId changed"),
     ("decoder-elId-untagged-again", S2, _set(lambda r: r[3]["videos"][0], elId=None), "row:elId untagged after tagging"),
+    ("decoder-elId-under-another-probe-id", S2, _set(lambda r: r[3]["videos"][0], id=2), "row:elId under another id"),
     ("rows-ts-not-increasing", S2, _set(lambda r: r[2], ts=900.0), "row:ts not increasing"),
     ("rows-t-decreasing", S2, _set(lambda r: r[2], t=1.0), "row:t decreasing"),
     ("rows-mixed-schemas", S2, _drop(lambda r: r[0], "seq", "ts", "hash", "sceneCount"), "rows:mixed sampler schemas"),
@@ -150,8 +155,10 @@ VIOLATIONS = [
                                               elIds=[]), "note.elIds"),
     ("retire-boundary-instance-null", GL, _set(lambda r: next(e for e in r["coreEvents"] if e["kind"] == "retire-boundary")["detail"],
                                                 instance=None), "retire-boundary.instance"),
-    ("release-mode-not-an-enum", GL, _set(lambda r: next(e for e in r["coreEvents"] if e["kind"] == "glreplay-release")["detail"],
-                                           mode="pin"), "glreplay-release.mode"),
+    ("release-mode-not-an-enum", GL, _set(_release, mode="pin"), "glreplay-release.mode"),
+    ("release-handoff-not-ok", HB, _set(lambda r: _release(r["after"]), ok=False), "glreplay-release:handoff without ok and its elId"),
+    ("release-handoff-elId-null", HB, _set(lambda r: _release(r["after"]), elId=None),
+     "glreplay-release:handoff without ok and its elId"),
     ("zone-from-not-an-enum", GL, _set(lambda r: next(e for e in r["coreEvents"] if e["kind"] == "glreplay-zone")["detail"],
                                         **{"from": "retired"}), "glreplay-zone.from"),
     ("api-state-not-an-enum", GL, _set(lambda r: r["api"], state="DONE"), "api.state"),

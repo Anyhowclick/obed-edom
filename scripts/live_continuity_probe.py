@@ -5019,8 +5019,14 @@ def handback_parity(
     v_record: Any, v_frame: np.ndarray | None, g_record: Any, g_frame: np.ndarray | None, armed: dict[str, Any], *,
     poke: bool = False, dilate_px: float = HANDBACK_DILATE_PX,
 ) -> dict[str, Any]:
-    """max|V - Vgl| over every pixel outside both captures' masks must be 0."""
+    """max|V - Vgl| over every pixel outside both captures' masks must be 0. Either record outside the
+    producer contract is None."""
     records = (v_record, g_record)
+    errors = contract.first_errors(*(
+        contract.handback_record(r, f"handback[{index}]") for index, r in enumerate(records) if isinstance(r, dict)
+    ))
+    if errors:
+        return {"verdict": None, "reason": _contract_reason(errors), "contractErrors": errors}
     if any(not isinstance(r, dict) or r.get("status") != "ok" for r in records) or v_frame is None or g_frame is None:
         return {"verdict": None, "reason": "a hand-back capture is inconclusive"}
     if any(not stage_map_valid(r.get("stageMap")) for r in records):
@@ -5104,7 +5110,8 @@ def score_handback_carry(record: Any, armed: dict[str, Any]) -> dict[str, Any]:
     facade list or facade entry (its integer `elId`/`forElId`, explicit nulls readable), or remount note without an object
     detail naming an integer `elId` is None, and any None makes the verdict None before any
     failure. A painter is the movie's by identity before source (the carried, a pooled or a
-    facade element) or by its src; one over the instance rect that names no source is None."""
+    facade element) or by its src; one over the instance rect that names no source is None, and
+    one of the movie's by identity that names another asset is False."""
     checks: dict[str, bool | None] = dict.fromkeys(("painting", "release", "noRemount", "handoff"))
     detail: dict[str, Any] = {}
     errors = contract.first_errors(contract.handback_record(record)) if isinstance(record, dict) else []
@@ -5150,15 +5157,16 @@ def score_handback_carry(record: Any, armed: dict[str, Any]) -> dict[str, Any]:
                 mine |= {f["elId"] for read in reads for f in read["facades"] if f["forElId"] in mine}
             mine.discard(None)
             movie = [v for v in videos if matches_asset_keys(v.get("src"), armed["assetKeys"]) or v.get("elId") in mine]
+            foreign = [v for v in movie if v.get("src") and not matches_asset_keys(v["src"], armed["assetKeys"])]
             unknown = [
                 v for v in videos
                 if v not in movie and not v.get("src") and rects_overlap(v["authored"], armed["instanceRect"])
             ]
             want = to_screen_rect(armed["instanceRect"], stage_map)
-            detail.update(painting=movie, unidentifiedPainters=unknown)
-            checks["painting"] = None if unknown else len(movie) == 1 and movie[0].get("elId") == carried and all(
-                abs(movie[0]["screen"][k] - want[k]) <= HANDBACK_RECT_TOLERANCE_PX for k in ("x", "y", "w", "h")
-            )
+            detail.update(painting=movie, unidentifiedPainters=unknown, foreignPainters=foreign)
+            checks["painting"] = None if unknown else not foreign and len(movie) == 1 and (
+                movie[0].get("elId") == carried
+            ) and all(abs(movie[0]["screen"][k] - want[k]) <= HANDBACK_RECT_TOLERANCE_PX for k in ("x", "y", "w", "h"))
     if none:
         checks["release"] = False
     elif carried_ok and pool_ok and not release_unreadable:
@@ -7834,7 +7842,8 @@ def rescore_generated(result: dict[str, Any], facts: dict[str, Any], facts_on: d
     with the stored ones. A verdict the artifact did not retain the raw evidence for is
     reported INCONCLUSIVE (`match: None`), never as reproduced, and the `claim` says how many.
     `ok` needs the complete arm inventory (A, B, attach, and C when the plan has a bridge),
-    every re-derivable verdict reproduced (at least one), every stored legacy verdict to have
+    every re-derivable verdict reproduced (at least one) and none outside the evidence contract (an
+    arm with one is not compared with the legacy scorer), every stored legacy verdict to have
     a generated counterpart, and -- when the artifact carries P2's legacy ground truth -- the
     generated sample verdicts to equal today's `score_boundaries` verdicts."""
     ground = result.get("groundTruth") if isinstance(result.get("groundTruth"), dict) else {}
@@ -7842,7 +7851,7 @@ def rescore_generated(result: dict[str, Any], facts: dict[str, Any], facts_on: d
     required = {"A", "B", *(["C"] if bridge_carry_ids(facts["verdicts"]) else [])}
     entries = [*((f"arm {name}", arms.get(name)) for name in sorted(required | set(arms))), ("attach", result.get("attach"))]
     out: dict[str, Any] = {}
-    counts = {"reproduced": 0, "differ": 0, "notRederivable": 0}
+    counts = {"reproduced": 0, "differ": 0, "notRederivable": 0, "contractRejected": 0}
     for label, entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("samples"), list):
             out[label] = {"reason": "missing, or no samples"}
@@ -7865,12 +7874,19 @@ def rescore_generated(result: dict[str, Any], facts: dict[str, Any], facts_on: d
                 rows[key] = {"id": spec["id"], "match": None, "storedVerdict": stored_verdict, "reason": f"inconclusive: {why}"}
                 counts["notRederivable"] += 1
                 continue
-            verdict = scored[spec["id"]].get("verdict")
+            value = scored[spec["id"]]
+            if value.get("contractErrors"):
+                rows[key] = {"id": spec["id"], "match": None, "storedVerdict": stored_verdict, "reason": value["reason"],
+                             "contractErrors": value["contractErrors"]}
+                counts["contractRejected"] += 1
+                continue
+            verdict = value.get("verdict")
             rows[key] = {"id": spec["id"], "match": isinstance(stored, dict) and verdict == stored_verdict,
                          "verdict": verdict, "storedVerdict": stored_verdict}
             counts["reproduced" if rows[key]["match"] else "differ"] += 1
         legacy_scorer = None
-        if all(key in ground for key in ("asset", "onset1to2", "restartScene", "bridgeScene")):
+        rejected = any("contractErrors" in row for row in rows.values())
+        if not rejected and all(key in ground for key in ("asset", "onset1to2", "restartScene", "bridgeScene")):
             by_key = {spec_key(spec): scored[spec["id"]].get("verdict") for spec in arm_facts["verdicts"]}
             legacy = score_boundaries(entry["samples"], ground, installed)
             legacy_scorer = all(by_key.get(key) == value.get("verdict") for key, value in legacy.items())
@@ -7882,12 +7898,12 @@ def rescore_generated(result: dict[str, Any], facts: dict[str, Any], facts_on: d
             "equalsLegacyScorer": legacy_scorer,
         }
     complete = all("verdicts" in item for item in out.values())
-    ok = complete and counts["reproduced"] > 0 and counts["differ"] == 0 and all(
+    ok = complete and counts["reproduced"] > 0 and counts["differ"] == counts["contractRejected"] == 0 and all(
         not item["legacyWithoutGenerated"] and item["equalsLegacyScorer"] is not False for item in out.values()
     )
     claim = (
         f"re-derivable verdicts reproduced: {counts['reproduced']}/{counts['reproduced'] + counts['differ']}; "
-        f"{counts['notRederivable']} not re-derivable (INCONCLUSIVE)"
+        f"{counts['notRederivable']} not re-derivable (INCONCLUSIVE); {counts['contractRejected']} outside the evidence contract"
     )
     return {"arms": out, "counts": counts, "claim": claim, "inventoryComplete": complete, "ok": ok}
 

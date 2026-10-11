@@ -287,13 +287,14 @@ ROW_S2_FIELDS = {"seq": _id, "ts": _finite, "hash": lambda v: isinstance(v, str)
 def sample_rows(rows: Any, *, schema: Any = None, path: str = "samples") -> Iterator[str]:
     """`SAMPLER_JS` rows, raw or after `convert_samples_to_authored`. One sampler schema and one decoder generation
     per stream, schema 2 iff the sampler reported it; `t` non-decreasing and (schema 2) `ts` strictly increasing; a
-    probe id's `elId` is null until tagged, then one int."""
+    probe id's `elId` is null until tagged, then one int that no other probe id carries."""
     if not isinstance(rows, list):
         yield f"rows:list at {path}"
         return
     schemas: set[bool] = set()
     generations: set[frozenset[str]] = set()
     el_ids: dict[Any, Any] = {}
+    probe_ids: dict[Any, Any] = {}
     prev_t = prev_ts = None
     for index, row in enumerate(rows):
         where = f"{path}[{index}]"
@@ -356,6 +357,8 @@ def sample_rows(rows: Any, *, schema: Any = None, path: str = "samples") -> Iter
                 elif _id(el):
                     if el_ids.setdefault(vid, el) != el:
                         yield f"row:elId changed at {vwhere}"
+                    if probe_ids.setdefault(el, vid) != vid:
+                        yield f"row:elId under another id at {vwhere}"
             if _id(el):
                 els.append(el)
         yield from _unique(ids, "row:duplicate id", where)
@@ -459,6 +462,9 @@ def _note_detail(kind: str, detail: dict[str, Any], path: str) -> Iterator[str]:
         if not valid(detail[key]):
             yield f"note.{key} at {path}"
     yield from _fields(detail, kind, path, NOTE_PAYLOADS.get(kind, {}))
+    if kind == "glreplay-release" and detail.get("mode") == "handoff" \
+            and not (detail.get("ok") is True and _id(detail.get("elId"))):
+        yield f"glreplay-release:handoff without ok and its elId at {path}"
     if kind == "retire-boundary" and "instance" in detail and not isinstance(detail["instance"], str):
         yield f"retire-boundary.instance at {path}"
     if kind == "bridge-clock" and detail.get("via") == "fallback" and _finite(detail.get("lagMs")) \

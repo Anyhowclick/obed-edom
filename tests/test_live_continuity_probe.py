@@ -4091,6 +4091,8 @@ class TestHandbackScoring:
         (lambda r: r["painting"][0].update(elId=7), "painting"),
         (lambda r: r["painting"][0]["rect"].update(x=r["painting"][0]["rect"]["x"] + 1.0), "painting"),
         (lambda r: r["painting"].append(dict(r["painting"][0], elId=2)), "painting"),
+        # Astra r12 #2: the carried decoder reassigned to another asset keeps its elId (core `reidentify`).
+        (lambda r: r["painting"][0].update(src="another.mov"), "painting"),
         (lambda r: r["after"]["coreEvents"][1]["detail"].update(mode="retire"), "release+handoff"),
         (lambda r: r["after"]["coreEvents"][1]["detail"].update(retired=[]), "release"),
         (lambda r: r["after"]["coreEvents"].append(_ev("remount-done", elId=1)), "noRemount"),
@@ -4108,10 +4110,15 @@ class TestHandbackScoring:
         record["after"]["coreEvents"].append(_ev("remount-done", elId=9))
         assert self._score(g_rec=record)["verdict"] is True
 
+    @pytest.mark.parametrize("mutate", [
+        lambda r: r.update(status="inconclusive"),
+        # Astra r12 #6a: a record outside the producer contract (V's too) is inconclusive.
+        lambda r: r["stageMap"].update(offsetWidth=1920.5),
+    ])
     @pytest.mark.parametrize("which", ["v", "g"])
-    def test_an_inconclusive_capture_is_inconclusive(self, which: str) -> None:
+    def test_an_inconclusive_capture_is_inconclusive(self, which: str, mutate: Any) -> None:
         record = _hb_v_record() if which == "v" else _hb_vgl_record()
-        record["status"] = "inconclusive"
+        mutate(record)
         scored = self._score(**({"v_rec": record} if which == "v" else {"g_rec": record}))
         assert scored["verdict"] is None
 
@@ -7287,7 +7294,8 @@ class TestCarryVerdict:
         samples = _p2_run_samples()
         for row in samples:
             if row["scene"] == 8:
-                row["videos"][0]["id"] = 9
+                row["videos"][0].update(id=9, elId=9)
+                row["videos"][0]["footprintOwner"]["elId"] = 9
         assert probe.score_verdicts(samples, {}, facts, True, {"mode": "qualified"})[P2_CARRY34]["verdict"] is False
 
     def test_a_sampler_gap_over_the_move_is_inconclusive(self) -> None:
@@ -7876,8 +7884,10 @@ class TestRescoreGenerated:
     def test_a_legacy_artifact_reproduces_its_rederivable_verdicts_and_counts_the_rest(self) -> None:
         report = probe.rescore_generated(_stored_artifact(), _p2_facts(), None)
         assert report["ok"] is True and report["inventoryComplete"] is True
-        assert report["counts"] == {"reproduced": 12, "differ": 0, "notRederivable": 4}
-        assert report["claim"] == "re-derivable verdicts reproduced: 12/12; 4 not re-derivable (INCONCLUSIVE)"
+        assert report["counts"] == {"reproduced": 12, "differ": 0, "notRederivable": 4, "contractRejected": 0}
+        assert report["claim"] == (
+            "re-derivable verdicts reproduced: 12/12; 4 not re-derivable (INCONCLUSIVE); 0 outside the evidence contract"
+        )
         arm = report["arms"]["arm A"]
         assert arm["equalsLegacyScorer"] is True and arm["legacyWithoutGenerated"] == []
         assert arm["verdicts"]["refused1to2"]["match"] is None and arm["verdicts"]["refused1to2"]["reason"].startswith("inconclusive")
@@ -7893,6 +7903,19 @@ class TestRescoreGenerated:
         artifact["arms"]["A"][key]["verdict"] = not artifact["arms"]["A"][key]["verdict"]
         report = probe.rescore_generated(artifact, _p2_facts(), None)
         assert report["ok"] is False and report["arms"]["arm A"]["verdicts"][key]["match"] is False
+
+    def test_known_bad_evidence_outside_the_contract_is_never_reproduced(self) -> None:
+        """Astra r12 #6b: a contract-rejected None must not "reproduce" a stored None, nor reach the legacy scorer."""
+        artifact = _stored_artifact()
+        arm = artifact["arms"]["A"] = json.loads(json.dumps(artifact["arms"]["A"]))
+        arm["samples"][0]["stageMap"]["offsetWidth"] = 1920.5
+        for key in (*probe.LEGACY_SAMPLE_VERDICTS, "refused1to2"):
+            arm[key] = {"verdict": None}
+        report = probe.rescore_generated(artifact, _p2_facts(), None)
+        rows = report["arms"]["arm A"]["verdicts"]
+        assert report["ok"] is False and report["counts"]["contractRejected"] == 3
+        assert all(rows[key]["match"] is None and rows[key]["contractErrors"] for key in probe.LEGACY_SAMPLE_VERDICTS)
+        assert report["arms"]["arm A"]["equalsLegacyScorer"] is None
 
     @pytest.mark.parametrize("arms", [("A", "B"), ("A", "C"), ()])
     def test_known_bad_an_incomplete_arm_inventory_is_not_ok(self, arms: tuple[str, ...]) -> None:

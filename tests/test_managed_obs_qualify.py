@@ -261,6 +261,32 @@ def test_g2_take_with_an_unengaged_fix_is_invalid_not_failed(tmp_path):
     assert any("hand-back fix not engaged" in r for r in invalid)
 
 
+G2_MOVIE_AT = {"x": 109.0, "y": 795.0, "w": 952.0, "h": 268.0}
+
+
+@pytest.mark.parametrize(("painting", "ok", "invalid"), [
+    pytest.param([{"src": "untitled.mov", "elId": 3, "rect": G2_MOVIE_AT}], True, None, id="the-movie-alone-passes"),
+    pytest.param([{"src": "untitled.mov", "elId": 3, "rect": G2_MOVIE_AT},
+                  {"src": "another.mov", "elId": 4, "rect": G2_MOVIE_AT}], False, None, id="another-asset-at-the-rect-fails"),
+    pytest.param([{"src": "", "elId": 3, "rect": G2_MOVIE_AT}], False, "g2: painting at P3 unreadable",
+                 id="an-empty-source-at-the-rect-is-unreadable"),
+    pytest.param([{"src": "untitled.mov", "elId": 3, "rect": G2_MOVIE_AT},
+                  {"src": "another.mov", "elId": 4, "rect": {"x": 1500.0, "y": 20.0, "w": 300.0, "h": 200.0}}], True, None,
+                 id="another-asset-away-from-the-movie-is-not-counted"),
+])
+def test_g2_m2_painters_are_found_by_rect_before_their_source_is_judged(tmp_path, painting, ok, invalid):
+    """Astra r12 #1 sibling: before the fix M2 filtered P3 painters by source first, so a second, other-asset painter at
+    the movie rect vanished (PASS) and an empty source read as zero (FAIL, not INVALID)."""
+    run = m3_run(tmp_path, mm_off_alpha=255)
+    run["sessions"][0]["reads"] = {"after": {**live_read({}), "painting": painting}}
+    gates = q.g2_gates(run, {**ARMED, "rects": [G2_MOVIE_AT]})
+    assert checks_of(gates["M2"])["one painting movie <video> at P3"]["ok"] is ok
+    assert gates["M2"]["invalid"] == invalid
+    reasons: list[str] = []
+    q.arm_gates("g2", run, types.SimpleNamespace(), {**ARMED, "rects": [G2_MOVIE_AT]}, reasons)
+    assert (invalid in reasons) is (invalid is not None)
+
+
 def armed_scores(monkeypatch, run: dict[str, Any], clause: str = "pool", value: bool | None = True,
                  off_verdict: bool | None = False) -> dict[str, Any]:
     """Stub `score_armed` to echo each session's `armed` record: G2 with every clause True but `clause` = `value`; g2-off
@@ -1385,17 +1411,21 @@ class TestTiming:
 
 # --- Producer contract wiring (plan keynote_live_continuity_contract §3 row 7, §4 N1/N3) ---------------------------------
 
-def _failsafe_checks(*, zone_painting: Any = (), bogus_notes: Any = ()) -> dict[str, dict[str, Any]]:
-    """`failsafe_gates` on page reads alone (no shots): `fail-zone`'s painting read and `fail-bogus`'s core notes."""
+def _failsafe_run(*, zone_painting: Any = (), bogus_notes: Any = ()) -> dict[str, Any]:
+    """A failsafe run of page reads alone (no shots): `fail-zone`'s painting read and `fail-bogus`'s core notes."""
     def session(name: str, painting: Any = (), notes: Any = ()) -> dict[str, Any]:
         after = live_read({})
         after["painting"] = painting if isinstance(painting, dict) else list(painting)
-        after["gl"]["coreEvents"] = notes if notes is None else list(notes)
+        after["gl"]["coreEvents"] = notes if notes is None or isinstance(notes, dict) else list(notes)
         return {"session": name, "reads": {"after": after}}
 
     sessions = [session(name) for name in ("off", "off-2", "fail-module", "goto2")]
     sessions += [session("fail-zone", painting=zone_painting), session("fail-bogus", notes=bogus_notes)]
-    return checks_of(q.failsafe_gates({"sessions": sessions}, ARMED)["M5"])
+    return {"sessions": sessions}
+
+
+def _failsafe_checks(**reads: Any) -> dict[str, dict[str, Any]]:
+    return checks_of(q.failsafe_gates(_failsafe_run(**reads), ARMED)["M5"])
 
 
 def _wired_arm_gates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
@@ -1439,3 +1469,38 @@ def test_contract_violations_and_unreadable_reads_never_pass_a_gate(
     ingest: Any, outcome: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert ingest(tmp_path, monkeypatch) == outcome
+
+
+MOVIE_AT = {"x": 109.0, "y": 795.0, "w": 952.0, "h": 268.0}
+
+
+@pytest.mark.parametrize(("src", "rect", "ok", "verdict"), [
+    pytest.param("untitled.mov", MOVIE_AT, False, "FAIL", id="the-movie-painting-where-off-has-none-fails"),
+    pytest.param("another.mov", MOVIE_AT, False, "FAIL", id="another-asset-at-the-movie-rect-fails-not-vanishes"),
+    pytest.param("", MOVIE_AT, False, "INVALID", id="an-empty-source-at-the-movie-rect-is-unreadable-not-zero"),
+    pytest.param("another.mov", {"x": 1500.0, "y": 20.0, "w": 300.0, "h": 200.0}, True, "FAIL",
+                 id="another-asset-away-from-the-movie-is-not-counted"),
+])
+def test_m5_painters_are_found_by_rect_before_their_source_is_judged(src: str, rect: Any, ok: bool, verdict: str) -> None:
+    """Astra r12 #1: one painter on `fail-zone`, none on `off`. Before the fix the painter was filtered by source first, so
+    an empty or another-asset source read as [0, 0] and the count check passed. The M5 verdict is FAIL even when the
+    count passes (no shots, so P3 parity is unreadable); INVALID only for the unreadable source."""
+    armed = {**ARMED, "rects": [MOVIE_AT]}
+    run = _failsafe_run(zone_painting=[{"src": src, "elId": 7, "rect": rect}])
+    m5 = q.failsafe_gates(run, armed)["M5"]
+    assert checks_of(m5)["fail-zone: painting movie count == off"]["ok"] is ok
+    assert m5["verdict"] == verdict
+
+
+@pytest.mark.parametrize("reads", [
+    pytest.param({"bogus_notes": {"error": "unreadable"}}, id="fail-bogus-coreEvents-error"),
+    pytest.param({"bogus_notes": None}, id="fail-bogus-null-notes"),
+    pytest.param({"zone_painting": {"error": "unavailable"}}, id="fail-zone-painting-error"),
+])
+def test_m5_unreadable_failsafe_containers_make_the_run_invalid(reads: dict[str, Any]) -> None:
+    """Astra r12 #5: producer-legal unreadable containers (`probe` GL_REPLAY_READ_JS null/`{error}` notes,
+    PAINTING_VIDEOS_JS `{error}`) are INVALID in M5 and in the run's validity -- never an exception or a FAIL."""
+    invalid: list[str] = []
+    gates = q.arm_gates("failsafe", _failsafe_run(**reads), types.SimpleNamespace(), ARMED, invalid)
+    assert gates["M5"]["verdict"] == "INVALID"
+    assert len(invalid) == 1 and invalid[0].startswith("M5 INCONCLUSIVE: ")
