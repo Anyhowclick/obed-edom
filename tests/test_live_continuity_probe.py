@@ -6917,6 +6917,7 @@ class TestRescoreForceWrapCli:
             "forceWrap": {"boundary": "1to2", "offsetMs": 375}, "glReplay": {"requested": "auto"},
             "continuity": GL_CONTINUITY, "samples": [], "recorder": _fw_recorder(), "take": _fw_take(),
             "reads": _armed_reads_at(FW_SEEKED + 6000.0), "pageErrorNotes": [],
+            "sampler": {"schema": probe.paint_instrument.SAMPLER_SCHEMA, "selfCheck": {"ok": True}},
         }
         path = tmp_path / "fw.json"
         path.write_text(json.dumps(saved))
@@ -10425,3 +10426,148 @@ class TestFold3UnknownEvidenceNeverAVerdict:
             recorder["duration"] = None
             assert probe.score_recorder_clock(recorder, _fw_window())["verdict"] is None
         assert _fw_score(recorder=recorder, **kwargs)["status"] == status
+
+
+class TestFold4MissingIdentityAndPairsNeverAVerdict:
+    """S2 fold4 (Astra r10 #1-#5): an unplaced carry row, a preserved decoder known only by its
+    stamps, an entry or painter with no identity, a rescore without its sampler check, and a
+    carry-cover frame without a readable read pair are never a pass (nor a manufactured fail);
+    the readable controls keep their outcome. Every case marked "r10" scored a pass on 4a389a72
+    (the carry-cover opacity case a manufactured fail, the status case a fail)."""
+
+    @pytest.mark.parametrize(("case", "expected", "carry"), [
+        ("complete", True, True),
+        ("offSlot", False, False),
+        ("offSlotUnowned", False, None),  # score_carry: an unowned row is an integrity gap
+        ("offSlotUnownedUnplaced", None, None),  # r10 #1: row 21 off-slot, unowned and scene None passed both
+    ])
+    def test_carry_keeps_an_unplaced_row(self, case: str, expected: bool | None, carry: bool | None) -> None:
+        samples = rows_around_boundary()
+        for row in samples:
+            row.update(playerState="IdleAtFinalState", busy=False)
+        if case != "complete":
+            row = samples[21]
+            row["videos"][0]["rect"]["x"] += 50
+            if case != "offSlot":
+                row["videos"][0]["footprintOwner"] = None
+            if case == "offSlotUnownedUnplaced":
+                row["scene"] = None
+        assert probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, True)["verdict"] is expected
+        spec = {"asset": ASSET, "atScene": 2.0, "srcRect": SRC_RECT, "dstRect": DST_RECT, "transitionScene": None}
+        assert probe.score_carry(samples, spec, True)["verdict"] is carry
+
+    @pytest.mark.parametrize(("entry", "expected"), [
+        (None, True),
+        ({"key": "untitled.mov", "movieKey": "movie1"}, False),
+        ({"key": "", "movieKey": "movie1"}, False),  # r10 #2: a cleared source, identified by its stamps, passed
+        ({"key": "", "movieKey": None, "instance": None}, None),  # r10 #2/#3: nothing identifies it; passed
+        ("unplacedRow", None),  # closing sweep: a mid-run scene-None row could shift the retire zone; passed
+    ])
+    def test_retire_identifies_a_preserved_decoder_by_its_stamps(self, entry: Any, expected: bool | None) -> None:
+        pool = () if not isinstance(entry, dict) else [{
+            "instance": P2_SLIDE1_OBJECT_ID, "elId": 3, "inDocument": True, "fromDom": True, **entry,
+        }]
+        samples = _handback_samples()
+        if entry == "unplacedRow":
+            next(r for r in samples if r["scene"] == 2)["scene"] = None
+        read = _retire_read((RETIRE_NOTE,), pool=pool)
+        assert probe.score_retire(read, _spec(_p2_facts(), P2_RETIRE12), True, samples)["verdict"] is expected
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("complete", True),
+        ("preFlipOtherOwner", False),
+        ("poolEntryNoIdentity", None),  # r10 #3a
+        ("unplacedOtherOwner", None),  # closing sweep: a scene-None row's owner was dropped from the census
+    ])
+    def test_armed_identity_and_placement(self, case: str, expected: bool | None) -> None:
+        reads, samples = _armed_reads(), copy.deepcopy(PRE_FLIP)
+        if case == "poolEntryNoIdentity":
+            for read in reads:
+                _gl(read)["pool"].append({"elId": 99, "inDocument": True})
+        elif case in ("preFlipOtherOwner", "unplacedOtherOwner"):
+            other = copy.deepcopy(samples[0])
+            other["videos"][0]["footprintOwner"] = {"elId": 2}
+            other["scene"] = 1 if case == "preFlipOtherOwner" else None
+            samples.append(other)
+        assert probe.score_armed_strict(reads, ARMED, GL_CONTINUITY, samples)["verdict"] is expected
+        owners = probe.pre_flip_owner_ids(samples, ARMED)
+        assert probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=owners)["verdict"] is expected
+
+    @pytest.mark.parametrize(("facades", "expected"), [
+        (None, True),
+        ([{"elId": 7, "forElId": None}], True),  # explicit nulls are readable
+        ([{"error": "unreadable"}], None),  # r10 #3b
+    ])
+    def test_handback_facade_entries(self, facades: Any, expected: bool | None) -> None:
+        record = _hb_vgl_record()
+        if facades is not None:
+            record["after"]["facades"] = facades
+        assert probe.score_handback_carry(record, ARMED)["verdict"] is expected
+
+    @pytest.mark.parametrize(("painter", "status", "outcome"), [
+        ({"elId": None}, "pass", "rawRestart"),
+        ({"elId": 1}, "fail", None),
+        ({}, "invalid", None),  # r10 #3c: a missing elId read as "unpreserved" and passed rawRestart
+    ])
+    def test_force_wrap_fallback_needs_the_painters_identity(self, painter: dict[str, Any], status: str, outcome: Any) -> None:
+        reads = _fw_reads(zones=[("armed", "retired", "failure")])
+        for read in reads:
+            _gl(read)["api"]["state"] = "RETIRED"
+            read["painting"] = [{"src": "untitled.mov", "rect": dict(BIG_INSTANCE), **painter}]
+        result = _fw_score(boundary="1to2", reads=reads, armed=ARMED, continuity={"verdict": False}, restart={"verdict": True})
+        assert (result["status"], result["outcome"]) == (status, outcome)
+
+    @pytest.mark.parametrize(("ok", "status"), [(True, "pass"), (False, "invalid")])  # r10 #4
+    def test_rescore_force_wrap_applies_sampler_integrity(
+        self, ok: bool, status: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        saved = {
+            "kind": "live-continuity-probe-force-wrap", "status": "pass", "fixture": "f", "originalIndex": "i",
+            "forceWrap": {"boundary": "1to2", "offsetMs": 375}, "glReplay": {"requested": "auto"},
+            "continuity": GL_CONTINUITY, "samples": [], "recorder": _fw_recorder(), "take": _fw_take(),
+            "reads": _armed_reads_at(FW_SEEKED + 6000.0), "pageErrorNotes": [],
+            "sampler": {"schema": probe.paint_instrument.SAMPLER_SCHEMA, "selfCheck": {"ok": ok}},
+        }
+        path = tmp_path / "fw.json"
+        path.write_text(json.dumps(saved))
+        monkeypatch.setattr(probe, "force_wrap_ground_truth", lambda *a: TestArmedRecorderWindow()._gt())
+        assert probe.rescore_force_wrap(path)["status"] == status
+        args = probe.parse_args(["--rescore", str(path)])
+        if ok:
+            probe.run_rescore_cli(args)
+        else:
+            with pytest.raises(SystemExit):
+                probe.run_rescore_cli(args)
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("clean", "pass"),
+        ("linear", "fail"),
+        ("disagreeing", "inconclusive"),
+        ("disagreeingWithoutPre", "inconclusive"),  # r10 #5: the pre reads removed, it passed
+        ("cleanWithoutOpacity", "inconclusive"),  # r10 #5: bool(None) manufactured a fail
+    ])
+    def test_carry_cover_needs_readable_read_pairs(self, case: str, expected: str) -> None:
+        kw: dict[str, Any] = {}
+        if case == "linear":
+            kw["overlay_curve"] = lambda p: p
+        elif case.startswith("disagreeing"):
+            kw["pre_read"] = lambda ts: _cc_fast_rect(ts - 2 * CC_FRAME_MS)
+        frames, rows, notes = _cc_scene(duration_s=CC_FAST_S, dst=CC_GROW_DST, **kw)
+        for row in rows:
+            if case == "disagreeingWithoutPre":
+                row["pre"] = []
+            elif case == "cleanWithoutOpacity":
+                for read in (*row["pre"], *row["vids"]):
+                    del read["opaque"]
+        bridge = _cc_bridge(durationSeconds=CC_FAST_S, dstRect=dict(CC_GROW_DST))
+        assert _cc_score(frames, rows, notes, bridge=bridge)["verdict"] == expected
+
+    @pytest.mark.parametrize(("second", "status"), [
+        ({"verdict": "pass", "reasons": []}, "fail"),
+        ({"verdict": None, "reasons": ["x"]}, "inconclusive"),  # r10 #5: one fail + one unknown was a fail
+        ({"verdict": "bogus"}, "inconclusive"),
+    ])
+    def test_carry_cover_status_normalises_unknown_bridges_first(self, second: dict[str, Any], status: str) -> None:
+        bridges = [{"boundary": "b1to2", "result": {"verdict": "fail", "reasons": ["strip"]}},
+                   {"boundary": "b3to4", "result": second}]
+        assert probe.carry_cover_status({"mode": "qualified"}, bridges)[0] == status
