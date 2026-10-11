@@ -70,7 +70,7 @@ import sys
 import time
 import traceback
 import types
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -188,10 +188,7 @@ MMO_ALPHA_FLOOR_MAX = 0.1
 MMO_SLIDE1_S = 6.0
 MMO_LIVE_S = 4.0
 MMO_CEF_GL = ("off", "auto")
-DISSOLVE_ARMS = ("opaque-off", "off", "noblend", "on2", "cut-on", "cut-off", "m-paused", "m-off", "m-hold", "m-fg", "m-fg-omit",
-                 "m-fg-swap", "m-tone", "m-tone-raw", "m-bridge-off", "m-on", "on", "opaque-on", "m-bridge")
-DISSOLVE_UNCONTROLLED = tuple(c for c, pair in dissolve_probe.CONTROLS.items()
-                              if any(not a.startswith("case:") and a not in DISSOLVE_ARMS for a in itertools.chain(*pair)))
+DISSOLVE_ARMS = dissolve_probe.CEF.arms
 DX2_TAU_MAX = 8.0
 DX2_COMPLEMENT_MAX = 6.0
 DX2_NO_DIP_MIN = 248.0
@@ -673,7 +670,7 @@ def dissolve_calibration(n: float | None) -> dissolve_probe.Calibration | None:
 
 
 def opaque_off_calibration(record: dict[str, Any], images: dict[str, np.ndarray]) -> dict[str, Any]:
-    scored = dissolve_probe.score_arm(record, images, dissolve_probe.ARMS["opaque-off"])
+    scored = dissolve_probe.score_arm(record, images, dissolve_probe.CEF.arm("opaque-off"), profile=dissolve_probe.CEF)
     model = scored["checks"].get("model", {}).get("verdict")
     n = max(scored["midResiduals"]) if model in ("PASS", "FAIL") and scored["midResiduals"] else None
     cal = dissolve_calibration(n)
@@ -1521,16 +1518,6 @@ def mmo_cef_gates(run: dict[str, Any]) -> dict[str, Any]:
     return {"MO-3": gate(checks), "probeVerdict": verdict}
 
 
-@contextlib.contextmanager
-def dissolve_view() -> Iterator[None]:
-    """`dissolve_probe`'s scorer as DX-2 runs it: the checks in `DISSOLVE_UNCONTROLLED` are reported per arm and not gated."""
-    arms = {n: replace(a, expect={k: "REPORTED" if k in DISSOLVE_UNCONTROLLED else v for k, v in a.expect.items()})
-            for n, a in dissolve_probe.ARMS.items() if n in DISSOLVE_ARMS}
-    controls = {k: v for k, v in dissolve_probe.CONTROLS.items() if k not in DISSOLVE_UNCONTROLLED}
-    with mock.patch.dict(dissolve_probe.ARMS, arms), mock.patch.dict(dissolve_probe.CONTROLS, controls, clear=True):
-        yield
-
-
 def dissolve_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dict[str, Any]:
     sessions = {s["session"]: s for s in run["sessions"]}
     want = dissolve_arms(decision)
@@ -1542,8 +1529,7 @@ def dissolve_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dict
           f"n <= 4: tau <= {DX2_TAU_MAX}, complement <= {DX2_COMPLEMENT_MAX}, no dip >= {DX2_NO_DIP_MIN}")
     runs = {name: (json.loads((Path(s["runDir"]) / "record.json").read_text()), dissolve_probe.RunImages(Path(s["runDir"])))
             for name, s in sessions.items() if s.get("runDir") and (Path(s["runDir"]) / "record.json").is_file()}
-    with dissolve_view():
-        verdict = dissolve_probe.score_runs(runs, decision, cal or dissolve_probe.Calibration())
+    verdict = dissolve_probe.score_runs(runs, decision, cal or dissolve_probe.Calibration(), profile=dissolve_probe.CEF)
     for name, g in verdict["gates"].items():
         reported = g["verdict"] in ("REPORTED", "N/A")
         check(checks, name, [g["verdict"], g.get("reasons") or g.get("problems")], g["verdict"] == "PASS" or reported, "PASS",
