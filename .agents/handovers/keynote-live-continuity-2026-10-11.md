@@ -1,0 +1,135 @@
+# Handover: S2 gl-clock core v6 and instrument folds 4–5 merged; contract pass planned (2026-10-11)
+
+Read this first. It supersedes `keynote-live-continuity-2026-10-10-night.md` (deleted; in git history); every live item
+from it is carried below. Verify branches and PRs on GitHub before acting. Evidence paths are in the MAIN checkout
+(`/Users/anyhowclick/Desktop/work/obed-edom/output/evidence/`), which is git-ignored.
+
+## Where everything is
+| Thing | State |
+|---|---|
+| `main` | `1589d096` = #257 (raw Astra rounds of #256 removed) on #255 (resizer seed read) on #256 (bridge easing). |
+| PR #256 | Merged 2026-10-10. **Owner confirmed in real OBS 2026-10-11: the 3→4 rubber band is gone.** Post-merge chore done (#257). |
+| `claude/s2-detach-fix` | `5fa7d48b`, pushed. Worktree `obs-mac-camera-swap-fbc63b`. Contains everything below. |
+| `s2-glclock-fold1` | In flight (agent worktree `wf_07e0a5a2-be8-*`, off `5fa7d48b`): Astra gl-clock r1 fixes. |
+| Contract-pass plan | In flight (workflow `wf_f1d7e30e-153`): to be saved as `.agents/plans/keynote_live_continuity_contract.plan.md`. |
+| Dissolve cross-fade plan | Separate session (owner-started), branch `claude/keynote-live-dissolve-crossfade-plan`, worktree `brave-goodall-bd9851`. Plan only. |
+| `claude/continuity-generalisation-s2` | Old S2 head `dcbb6363`, superseded; deleting it is the owner's call. |
+| `confident-elion-b41768` | Not ours. Leave it. |
+
+## Done 2026-10-11 (S2 history, in order)
+1. Merged fold3 (`effdae21`), s2-main-final (`513b40b6`) and `origin/main` → `4a389a72`. Suites: 3.12 10099 / 0 failed;
+   3.10 floor 4499; test:ui 320; maps 542+2.
+2. Astra r10 (`s2-dev/instrument-review/astra-r10.md`): 5 false passes → fold4 (`aa7bab37`, `cd27b46d`; independent
+   verification found 5 more, all fixed). OBS qualifier: unknown `score_armed` clause → M1 INVALID (`1316589d`); the g2-off
+   known-bad check scored on M1's five enforced clauses (`8ee7077d`; fold3 had made it always unknown → M1 INVALID on every
+   real take; rescored the two saved 2026-09-25 g2 takes: KB False again). Suites 10149 / 0.
+3. Astra r11 (`astra-r11.md`): 5 more false passes → fold5 (`2fb41d89`..`ad35364e`): 162-site inventory (73 flagged) and
+   3 verification rounds (10 / 4 / 8 found, all fixed; round 3's fix NOT re-verified). Real-artifact rescore: 2280 verdicts,
+   0 changes. Owner then chose the **producer-contract pass** (below) instead of more folds.
+4. gl-clock core v6 (plan `.agents/plans/keynote_live_continuity_glclock.plan.md`): core `7b1e04ba` (`CONTINUITY_VERSION` 6),
+   red `no-gl-clock`, D1 carry-cover arms (green/red/null) with the `via` clock rule in `check_cc`, docs, `bridge-clock` in
+   the frozen F5 note kinds. Interplay fix `5fa7d48b`: carry-cover sets aside `bridge-clock` notes before fold5's
+   note checks (else every live carry-cover run would read inconclusive). Suites at `5fa7d48b`: 3.12 10280 / 0.
+5. Fixture strip fix `715cb3f1` (dissolve item, below).
+
+## In flight / next steps, in order
+1. **gl-clock Astra r1** (`s2-dev/glclock-review/astra-r1.md`): REQUEST CHANGES, 2 Medium: (1) late hook install can let a
+   pre-install loop's re-arm stamp the origin (new class); (2) `#7→#8→#7` within one frame keeps the old ride closure
+   (edge case, not reachable via host navigation). Fold `s2-glclock-fold1` in flight → merge → suites → Astra r2 until APPROVE.
+2. **Contract pass:** plan in flight → owner review → one implementer → regression oracle (the 2280 real verdicts must not
+   change) → Astra r12 with the new criterion: only false passes reachable with producer-legal evidence block; findings
+   needing producer-impossible input are "closed by contract" (cite the clause). Keep folds 3–5's guards (no churn); a
+   simplification pass after S2 may remove the redundant ones (owner's option).
+3. **Live GL-1/2/3** (gl-clock plan §9) after gl-clock APPROVE: GL-1 D1 carry-cover 5× green vs `no-gl-clock` interleaved +
+   2 nulls; GL-2 P2 carry-cover + P2 adversarial ×2 + `--gl-replay auto`; GL-3 one full `run_gates` round, expected
+   `failed=2 pending=0` (the two unregistered no-pin-hold reds). Coordinator-only, load < 3, ≤ 3 Chromes, message peers
+   "go idle" first. Q1/Q2 are pre-approved but apply only on the live triggers in the plan.
+4. Then the instrument's live validation V0–V6 (instrument plan §7), red registrations, the full S2 re-run, Q6, Q7 with the
+   owner, the S2 gate record (`.agents/reviews/continuity-generalisation/gates-r1.md`), `QUALIFIED_PLAN_SHA256` pruning
+   (plan §3.4). Details unchanged from the night handover:
+   - V1 smoke: D1 attach arm without, then with, B0 `show()`; D1 host 1920 `--skip-arms B,C,V,Voff,attach`; a full P2 host
+     run; check whether any P2 harness reading `footprintOwnerDecoderId` (`p2_recovery_html_adversarial.py:893`) runs hidden in
+     alpha mode (plan §8). V2 positive controls (exact seq sets); V2b L2 force-wrap with paint on (measure
+     `seeking`/`readyState` at wraps, decision 14); V3 reds + V3b pin pixel spot check; V4 moved sets (strip arms
+     `D1/D2 strip:pin@6`, `D3 strip:pin@2/@4`, `D4 strip:pin@5`, `D5 strip:pin@2/@4`; post-hoc `D4 wrong-instance`/`fifo-reuse`,
+     `D5 fifo-reuse`/`stash-any`; re-register only with a measured reason and owner sign-off); V5 null sweep; V6 overhead.
+   - Red registrations (conditional owner sign-off, 2026-10-10): register only on exact match — D5 host
+     `--core-variant no-pin-hold`: exactly the A carries at b0to1 and b1to2, longest unpainted run ≥ 60 frames (~108
+     expected); D1 Pass G: exactly leg `G1-3-4` at b2to3 red, legs (2,1,2) and (1,2,3) green, ≥ 60 frames. Any difference
+     goes back to the owner with evidence.
+   - Full S2 re-run: Phases A (decks × 3 viewports), B/D1 (`run_gates` 3-wide incl. Pass G, carry-cover, paint arms) plus one
+     `GATE_JOBS=1` round (identical verdicts and exact seq sets; red counts ±3 frames; restart margins within the 2026-10-09
+     baseline), D2, D3 (P2 main vs S2 interleaved), D4 (G2 seam), D5 (loop); then Q6 (managed OBS 25/30, KBs, soak 4 min;
+     pre-approved), then Q7 with the owner (Q7a external attach D1/D4; Q7b dashboard Keyer on D1–D5).
+   - After S2 merges: delete the main checkout's `output/<name>` → `output/fixtures/<name>` compat symlinks once no branch
+     reads the old paths (plan §3.7). S3 (delete the allowlist) stays the owner's call.
+5. **After the S2 gate record:** rebuild the 8 stripped P2 fixture variants with the strip fix and re-pin their digests
+   (owner, 2026-10-11).
+
+## Open items (owner-raised or found; symptom / expected / evidence)
+1. **Q7 #1 pins dark during the move** — FIXED on S2 (pin hold `fbba575e`); per-frame proof = the instrument's V-runs, owed.
+   Evidence `s2-dev/pingap/`; `pingap/run.sh` names a trashed worktree — re-point `W=` first.
+2. **Q7 #2 bridge rubber band** — FIXED on main (#256), owner-confirmed in OBS 2026-10-11. The faster D decks' ~6.8 ms
+   GL-clock start offset is fixed by gl-clock v6 (live GL-1 owed). Not started: hide the carried movie's GL quad via
+   `patch_player`.
+3. **53 px D1 outlier (green-2)** — EXPLAINED: a macOS wall-clock step (`timed` `settimeofday`, −89 ms, 20:17:16) mid-bridge.
+   Keynote's animation runs on `Date`, the old core on `performance.now()`. Live-show hazard on today's core (main too); the
+   GL clock removes it by construction (plan §2).
+4. **P2 2→3 Dissolve on a transparent page** — LOCALISED (`s2-dev/dissolve-alpha-2026-10-11/`). Owner checked the Keynote
+   app: normal cross-fade. Two causes, neither OBS nor our host/patches:
+   - grey/white squares = our fixture strip dropped `/Cs1 cs` (pdf.js DeviceGray, grey = 255×R). Code fixed `715cb3f1`;
+     the 8 stripped fixtures are rebuilt after S2 (until then P2 shows grey squares).
+   - slide 3 pops in = Keynote's HTML export draws `apple:dissolve` as CSS opacity on the OUTGOING layer only (incoming
+     fixed at 1); opaque backgrounds hide it, transparent pages don't. Hits real DSK decks (clip slides forced to dissolve).
+     Cross-fade patch being planned in the owner-started session (see the table).
+   - Tooling: our CDP JPEG screencast squares alpha on transparent pages (opacity²); judge fades from PNG-with-alpha or OBS.
+5. **End of show** (deferred by owner): D1–D3 hold the carried movie at end of show; D5 ends empty. Resume options: a scene
+   count in the schema-2 plan, or read `__obedLive`.
+6. **Dashboard gating** (owner: keep): a continuity-refused deck can't start even with continuity off until the allowlist
+   widens and is removed. The fresh `Minimal Alpha_DSK` export (player `17c0c938`) is blocked on main (ambiguous ownership 7→8).
+7. **Instrument follow-ups (tracked, not blocking):** Astra r10/r11 MINOR false fails (`_recompute_slide_verdict` with an
+   unknown stray verdict; `score_vgl_armed_slide` missing armed slide; `score_paint_control` absent record). Fold5 calls left
+   for the owner: dropping a null/'ambiguous' footprint owner (2026-09-23 decision); `unplanned_wraps` with no readable
+   duration; keyed-note tie vs foreign stamp in `score_retire`; binding the execute log to its call; the paint-control JS
+   `placementEvents` gap; substring asset matching; untimed carry-cover frames. Fold5 changed (owner FYI): a preserve-refused
+   note without `via` / a retire-boundary note without `elIds` left the known-bad red list (now INCONCLUSIVE); unattributed or
+   conflicting refusal notes are None (was False, Astra S2 r2 #3's test); the pre-flip census needs a non-null probe id.
+8. **Watch items:** the carry-cover null control can read inconclusive under round load (never widen the gap; re-run at
+   `GATE_JOBS=1`). Carry-cover thresholds/masks are P2-calibrated and now also run on D1 unchanged. The strip rule rounds
+   left/top up but right/bottom down (1 px inconsistency; fix separately, never to pass a deck).
+
+## Owner decisions (still governing)
+- 2026-10-11: dissolve — fixture strip code now, fixtures rebuilt after S2; cross-fade patch planned in a separate session.
+  gl-clock plan GO as written; Q3 = hold at the source, then today's clock after 50 ms; Q1 (wait from the latest setup mark)
+  and Q2 (D1 red → `linear-bridge`) pre-approved, applied only on their live triggers. Instrument audit closes with the
+  producer-contract pass. OBS qualifier: unknown armed clause → INVALID; g2-off KB on the five enforced clauses.
+  `score_stage_fit` stays an integrity FAIL. Planning agents run at HIGH (not EXTRA HIGH). Agent scratch goes in the
+  session scratchpad, never under `output/`.
+- 2026-10-10: gl-clock into S2 core v6, hardened; red registrations conditionally signed off (exact match only); audit scope C.
+- `CONTINUITY_VERSION` stays 6 for every S2 core change. Detach fix a1. R9 = movie not fully opaque (R2 reports first).
+  R10 = bridge timing (S2 narrow reader, bridges only, checked last). A runtime carry refusal lasts until the next go-to.
+- Pass G: no-consumption = settled position + exact auto-run kinds; runs inside `run_gates` (full tier). Advance legs treat
+  end of show as an exit; any end of show in a leg makes it inconclusive, never red.
+- Pin hold accepted (a pinned movie paints above authored content during its move). Main fix = "fix properly", including
+  the new player on a byte-level argument. Main freeze bracket: option A (never relax `firedVia=='moved'`, marker identity,
+  the 1 px detector).
+- Instrument plan: all 14 recommendations (see that plan's owner-decisions section). Minimal test additions.
+- Reviews on GPT-6 Astra (high) while the owner's resets last
+  (`codex exec -m gpt-6-astra -c model_reasoning_effort=high -s read-only -o out.md "$(cat p.md)" < /dev/null`).
+
+## Machine / coordination
+- One heavy job at a time machine-wide. `run_gates` refuses above load 4; timed runs start below 3. macOS `mediaanalysisd`,
+  `spindump` and the Claude app push baseline load up; agents' `-n auto` runs push it far higher.
+- Peer sessions: "Resizer optimizations" finished its round (#255 merged). The dissolve-plan session may run headless Chrome;
+  message it "go idle" before timed windows.
+- OBS: the owner launches it (`/Applications/OBS.app/Contents/MacOS/OBS --remote-debugging-port=9222`); never drive it
+  without the owner's go. OBS 32.2.2 = CEF/Chromium 127. Presenter into OBS from the main checkout:
+  `OBED_LIVE_ATTACH=http://127.0.0.1:9222 OBED_LIVE_ATTACH_MATCH='about:blank#program' PYTHONPATH=$PWD/src .venv/bin/python -u scripts/live_fixture_session.py --export output/fixtures/p2-recovery/html-adversarial/html-player --index output/fixtures/p2-recovery/html-adversarial/html-unmodified/index.html`.
+- Suites: `uv run` inside the worktree (`OBED_EDOM_CACHE_DIR=/Users/anyhowclick/Desktop/work/obed-edom/.cache`); 3.10 floor
+  with the main checkout's `.venv` and `PYTHONPATH=<wt>/src:<wt>/scripts` (no xdist). Logs: `s2-dev/suites-4a389a72/`.
+- Agent worktrees start at `main`: briefs say `git checkout -B <branch> <sha>`; agents can't use `env …` (plain assignments).
+  A fresh worktree needs `uv sync --frozen --all-extras --all-groups` and the `output/{fixtures,evidence,bank}` links, or
+  ~80 tests skip. The probe tests load the probe by file path (PYTHONPATH alone doesn't swap it).
+- Hook: this session and its subagents cannot Edit/Write in another session's worktree; agent isolation worktrees are fine.
+- Tools: `s2-dev/tools-2026-10-10/` (old drivers hard-code trashed worktrees; re-pin `W=`/`GM=` before re-running);
+  `s2-dev/dissolve-alpha-2026-10-11/scripts/dissolve_ab.py` (one-Chrome transparent A/B driver).
