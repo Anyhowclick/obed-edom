@@ -379,8 +379,8 @@ def _advancing_presented(decoder_id="dec-1") -> list[dict]:
     """Media snapshots whose bound decoder's presentedMediaTime advances >0.05
     on/after the flip (`#2`, `#3` are both in-window for hash2 == "#2")."""
     return [
-        {"sceneHash": "#2", "videos": [{"decoderId": decoder_id, "presentedMediaTime": 10.0}]},
-        {"sceneHash": "#3", "videos": [{"decoderId": decoder_id, "presentedMediaTime": 10.5}]},
+        {"sceneHash": "#2", "videos": [{"decoderId": decoder_id, "src": "untitled.mov", "presentedMediaTime": 10.0}]},
+        {"sceneHash": "#3", "videos": [{"decoderId": decoder_id, "src": "untitled.mov", "presentedMediaTime": 10.5}]},
     ]
 
 
@@ -573,8 +573,8 @@ def test_live_continuity_fails_closed_when_presented_time_flat():
     """A stable bound decoder whose presentedMediaTime does NOT advance across
     the cut fails rvfcAdvance in isolation (the freeze this whole probe hunts)."""
     flat = [
-        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.0}]},
-        {"sceneHash": "#3", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.0}]},
+        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 10.0}]},
+        {"sceneHash": "#3", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 10.0}]},
     ]
     verdict = p2.liveContinuity1to2(
         _motion_healthy(), _flip_samples(), flat, "#1", "#2", restart_min_hash=RESTART
@@ -601,8 +601,8 @@ def test_live_continuity_fails_closed_on_rvfc_regression():
     10.0 -> 1.0, a restart/seek) must NOT count as advance: ordered progression is
     required, not max-min (which read the rewind as +9.0)."""
     regress = [
-        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.0}]},
-        {"sceneHash": "#3", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 1.0}]},
+        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 10.0}]},
+        {"sceneHash": "#3", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 1.0}]},
     ]
     verdict = p2.liveContinuity1to2(
         _motion_healthy(), _flip_samples(), regress, "#1", "#2", restart_min_hash=RESTART
@@ -619,10 +619,10 @@ def test_live_continuity_fails_closed_on_a_split_cumulative_rewind():
     RUNNING MAX seen so far, so it catches the -0.08 dip below the prior peak
     (10.00) and fails closed."""
     split_rewind = [
-        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.00}]},
-        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 9.96}]},
-        {"sceneHash": "#3", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 9.92}]},
-        {"sceneHash": "#3", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.10}]},
+        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 10.00}]},
+        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 9.96}]},
+        {"sceneHash": "#3", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 9.92}]},
+        {"sceneHash": "#3", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 10.10}]},
     ]
     verdict = p2.liveContinuity1to2(
         _motion_healthy(), _flip_samples(), split_rewind, "#1", "#2", restart_min_hash=RESTART
@@ -640,15 +640,15 @@ def test_live_continuity_rvfc_bound_to_footprint_decoder_not_sibling():
         {
             "sceneHash": "#2",
             "videos": [
-                {"decoderId": "dec-1", "presentedMediaTime": 10.0},  # bound
-                {"decoderId": "dec-2", "presentedMediaTime": 20.0},  # sibling
+                {"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 10.0},  # bound
+                {"decoderId": "dec-2", "src": "untitled.mov", "presentedMediaTime": 20.0},  # sibling
             ],
         },
         {
             "sceneHash": "#3",
             "videos": [
-                {"decoderId": "dec-1", "presentedMediaTime": 10.0},  # bound STALLED
-                {"decoderId": "dec-2", "presentedMediaTime": 29.0},  # sibling advances
+                {"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 10.0},  # bound STALLED
+                {"decoderId": "dec-2", "src": "untitled.mov", "presentedMediaTime": 29.0},  # sibling advances
             ],
         },
     ]
@@ -665,8 +665,8 @@ def test_live_continuity_ignores_presented_advance_before_flip():
     with a single in-window presented-time sample the advance is unprovable =>
     rvfcAdvance fails closed."""
     presented = [
-        {"sceneHash": "#1", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 5.0}]},
-        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.0}]},
+        {"sceneHash": "#1", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 5.0}]},
+        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 10.0}]},
     ]
     verdict = p2.liveContinuity1to2(
         _motion_healthy(), _flip_samples(), presented, "#1", "#2", restart_min_hash=RESTART
@@ -710,8 +710,8 @@ def test_live_continuity_fails_closed_on_regressive_boundary():
         {"sceneHash": "#0", "decoderId": "dec-1"},
     ]
     regressed_presented = [
-        {"sceneHash": "#0", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.0}]},
-        {"sceneHash": "#0", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.9}]},
+        {"sceneHash": "#0", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 10.0}]},
+        {"sceneHash": "#0", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 10.9}]},
     ]
     verdict = p2.liveContinuity1to2(
         _motion_healthy(), regressed_post, regressed_presented, "#1", "#0", restart_min_hash=RESTART
@@ -784,7 +784,7 @@ def _video_entry_34(decoder_id, t, **over):
     decision is re-derived from."""
     box = dict(zip(("x", "y", "w", "h"), _FP_34))
     entry = {
-        "decoderId": decoder_id, "presentedMediaTime": t, "visible": True,
+        "decoderId": decoder_id, "src": "untitled.mov", "presentedMediaTime": t, "visible": True,
         "hiddenBy": None, "suppressed34": False, "rect": dict(box),
         "inDocument": True, "documentHidden": False, "display": "block", "visibility": "visible",
         "opacityProduct": 1.0, "checkVisibility": True,
@@ -802,16 +802,25 @@ def _presented_34(decoder_id=4):
     ]
 
 
-def test_moving_continuity_passes_when_bridged_decoder_continues():
+@pytest.mark.parametrize(("src", "ok", "unreadable"), [
+    ("untitled.mov", True, False),
+    # r14 #3: the bound decoder's sources are judged before its rVFC clock. Another asset
+    # fails -- a path whose name is the logical key `movie1` included -- and no source is
+    # unreadable, never an advancing clock.
+    ("foreign.mov", False, False),
+    ("/media/movie1", False, False),
+    ("", False, True),
+])
+def test_moving_continuity_passes_when_bridged_decoder_continues(src, ok, unreadable):
     """Positive control: the slide-3 decoder (4) owns the slide-4 footprint with a
     monotonic clock => ok, no failures. Proves the gate is not wired to always-fail."""
-    verdict = p2.movingContinuity3to4(
-        _owner_samples_34(4), _presented_34(4), 4, "#7", "#8", S4MIN
-    )
-    assert verdict["ok"] is True
-    assert verdict["failed"] == []
+    presented = _presented_34(4)
+    presented[1]["videos"][0]["src"] = src
+    verdict = p2.movingContinuity3to4(_owner_samples_34(4), presented, 4, "#7", "#8", S4MIN)
+    assert verdict["ok"] is ok
+    assert verdict["failed"] == ([] if ok else ["rvfcMonotonic"])
     assert verdict["slide4Owner"] == 4
-    assert verdict["rvfcMonotonic"]["ok"] is True
+    assert verdict["unreadable"] is unreadable
 
 
 def test_moving_continuity_fails_closed_on_export_restart():
@@ -865,8 +874,8 @@ def test_moving_continuity_fails_closed_on_rvfc_rewind():
     RESETS/rewinds (a restart signature even under the same reported id) => the
     rvfcMonotonic check fails closed."""
     rewind = [
-        {"sceneHash": "#8", "videos": [{"decoderId": 4, "presentedMediaTime": 2.4}]},
-        {"sceneHash": "#9", "videos": [{"decoderId": 4, "presentedMediaTime": 0.05}]},
+        {"sceneHash": "#8", "videos": [{"decoderId": 4, "src": "untitled.mov", "presentedMediaTime": 2.4}]},
+        {"sceneHash": "#9", "videos": [{"decoderId": 4, "src": "untitled.mov", "presentedMediaTime": 0.05}]},
     ]
     verdict = p2.movingContinuity3to4(_owner_samples_34(4), rewind, 4, "#7", "#8", S4MIN)
     assert verdict["ok"] is False
@@ -3898,7 +3907,7 @@ def test_never_pooled_route_dies_when_a_decoder_is_still_pooled_on_slide2():
     """A detached movie1 decoder sitting in the pool through slide 2 is never
     reused or remounted — only the census can see it."""
     census = _pool_census([
-        {"key": "movie1", "elId": 1, "inDocument": False, "currentTime": 4.0},
+        {"key": "untitled.mov", "elId": 1, "inDocument": False, "currentTime": 4.0},
     ])
     evidence = p2.neverPooledEvidence(_refusal_events(), _carry_census(), census)
     assert evidence["ok"] is False
@@ -4474,7 +4483,7 @@ def _competitor_entry(rect, visible, decoder) -> dict:
     """An extra `videos` entry whose raw readings AGREE with its paint flag, so
     the attestation is exercised on the overlap rather than on a contradiction."""
     return {
-        "index": 99, "decoderId": decoder, "presentedMediaTime": None,
+        "index": 99, "decoderId": decoder, "src": "untitled.mov", "presentedMediaTime": None,
         "visible": visible,
         "hiddenBy": None if visible else "hidden",
         "suppressed34": False,
@@ -5764,7 +5773,7 @@ _SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('b', ('mediaSamples', 'videos', 'rect', 'w')): "not read for a NON-painting entry: a rect is compared to the footprint only when `visible` is true, and a visible entry's missing component fails closed",
     ('b', ('mediaSamples', 'videos', 'rect', 'x')): "not read for a NON-painting entry: a rect is compared to the footprint only when `visible` is true, and a visible entry's missing component fails closed",
     ('b', ('mediaSamples', 'videos', 'rect', 'y')): "not read for a NON-painting entry: a rect is compared to the footprint only when `visible` is true, and a visible entry's missing component fails closed",
-    ('b', ('mediaSamples', 'videos', 'src')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('b', ('mediaSamples', 'videos', 'src')): 'read only at the bound decoder AFTER-WINDOW entries (source judged before its rVFC clock, r14 #3); see _SWEEP_PARTIAL_ALLOW',
     ('b', ('mediaSamples', 'videos', 'viewport', 'h')): 'not read for a POOL entry, which is classified by its retained `inDocument` alone; gated at every DOM entry, where the paint decision is re-derived from it',
     ('b', ('mediaSamples', 'videos', 'viewport', 'w')): 'not read for a POOL entry, which is classified by its retained `inDocument` alone; gated at every DOM entry, where the paint decision is re-derived from it',
     ('b', ('mediaSamples', 'videos', 'visibility')): 'not read for a POOL entry, which is classified by its retained `inDocument` alone; gated at every DOM entry, where the paint decision is re-derived from it',
@@ -6187,6 +6196,9 @@ def _walk(snap: dict, score) -> dict:
 # the shape the round-12 OR-aggregation hid. Each must say which positions are
 # merely diagnostic.
 _SWEEP_PARTIAL_ALLOW: dict[tuple[str, tuple], str] = {
+    ('b', ('mediaSamples', 'videos', 'src')): 'gated at the bound decoder AFTER-WINDOW entries, whose source is judged before its rVFC clock (r14 #3); other decoders and the pre-boundary samples are outside the scored window',
+    ('positive', ('mediaSamples', 'videos', 'src')): 'gated at the bound decoder AFTER-WINDOW entries, whose source is judged before its rVFC clock (r14 #3); other decoders and the pre-boundary samples are outside the scored window',
+    ('positiveA2', ('mediaSamples', 'videos', 'src')): 'gated at the bound decoder AFTER-WINDOW entries, whose source is judged before its rVFC clock (r14 #3); other decoders and the pre-boundary samples are outside the scored window',
     ('b', ('mediaSamples', 'videos', 'clientRect', 'h')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
     ('b', ('mediaSamples', 'videos', 'clientRect', 'w')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
     ('b', ('mediaSamples', 'videos', 'clientRect', 'x')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',

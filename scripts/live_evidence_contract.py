@@ -400,7 +400,8 @@ POOL_FIELDS = {
 
 def pool(value: Any, path: str) -> Iterator[str]:
     """The core's `snapshot()`: null, `{error}`, or pool entries then `fromDom` entries. `instance` is on every entry
-    or none; an empty `key` only on a `fromDom` entry; `elId` unique within each half."""
+    or none; an empty `key` only on a `fromDom` entry (a cleared src), which keeps its movie stamp; `elId` unique
+    within each half."""
     if value is None or _error_read(value):
         return
     if not isinstance(value, list):
@@ -420,6 +421,8 @@ def pool(value: Any, path: str) -> Iterator[str]:
             yield f"pool.fromDom at {where}"
         if entry.get("key") == "" and "fromDom" not in entry:
             yield f"pool:empty key off the DOM at {where}"
+        elif entry.get("key") == "" and entry.get("movieKey") is None:
+            yield f"pool:empty key without its movie stamp at {where}"
     if len(instances) > 1:
         yield f"pool:instance on some entries at {path}"
     entries = [e for e in value if isinstance(e, dict) and _id(e.get("elId"))]

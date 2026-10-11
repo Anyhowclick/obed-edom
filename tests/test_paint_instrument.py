@@ -170,9 +170,14 @@ SCORE_CASES = [
     ("trim-suffixed-src-is-the-asset", _rows(videos=lambda i: [_pv(src="movie-a.mov-0.0000-46.0333.mov")]), SLOT,
      {"status": "ok"}),
     ("carried-src-names-a-longer-asset", _rows(videos=_hide(60, 65, src="another-movie-a.mov")), SLOT,
-     {"status": "fail", "unpaintedFrames": 6, "_firstReason": "absent"}),
+     {"status": "fail", "substituteFrames": 6, "unpaintedFrames": 0}),
     ("carried-src-names-another-asset", _rows(videos=_hide(60, 65, src="movie-b.mov")), SLOT,
-     {"status": "fail", "unpaintedFrames": 6, "_firstReason": "absent"}),
+     {"status": "fail", "substituteFrames": 6, "unpaintedFrames": 0}),
+    # r14 #2: decoder 2 names the asset (hidden) once, then paints another asset at the slot.
+    ("decoder-of-the-asset-paints-another-asset-at-the-slot",
+     _rows(videos=lambda i: [_pv(), _pv(id=2, visibility="hidden", checkVisibility=False) if i == 1
+                             else _pv(id=2, src="foreign.mov")]), SLOT,
+     {"status": "fail", "substituteFrames": 119, "doubleFrames": 0}),
     ("carried-src-cleared", _rows(videos=_hide(60, 65, src="")), SLOT,
      {"status": "inconclusive", "unpaintedFrames": 0, "_reason": "unreadable"}),
 ]

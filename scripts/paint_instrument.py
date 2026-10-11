@@ -696,7 +696,8 @@ def score_paint(
     before source: `element_id` and every id whose src is exactly the asset (canonical name) on any of `rows` is a
     decoder of the asset. A frame where one names no source, or where two pre-paint reads share an id, is unreadable;
     so is one where a painter that names no source at all (painted, partial or unreadable) meets the slot (any, without
-    a slot). A read naming another asset is never the movie, whatever its id."""
+    a slot). A read naming another asset is never the movie: on a decoder of the asset that paints where it meets the
+    slot it is a substitute (red), and unreadable there when its paint is."""
     window_rows = sorted((r for r in rows if _num(r.get("t")) and start <= r["t"] <= end), key=lambda r: r.get("seq") or 0)
     coverage = frame_coverage(window_rows, max_gap_frames=max_gap_frames, min_fps=min_fps)
     period = coverage.get("periodMs")
@@ -729,6 +730,7 @@ def score_paint(
         carried_state: tuple[str, str | None] = (UNPAINTED, "absent")
         carried_pv: dict[str, Any] | None = None
         at_slot: list[dict[str, Any]] = []
+        foreign: list[dict[str, Any]] = []
         blind = False
         ids = [pv["id"] for pv in row["pp"]["videos"] if pv_schema_problem(pv) is None]
         if len(ids) != len(set(ids)):
@@ -741,7 +743,7 @@ def score_paint(
                 unreadable.append(dict(frame, reason=f"schema: {problem}", id=pv.get("id") if isinstance(pv, dict) else None))
                 continue
             name = canonical_asset_name(pv["src"])
-            if name and name != asset_name:
+            if name and name != asset_name and pv["id"] not in movie:
                 continue
             if not name and pv["id"] in movie:
                 blind = True
@@ -754,6 +756,15 @@ def score_paint(
                 if state[0] in (PAINTED, PARTIAL, UNREADABLE) and (slot is None or rect is None or _meet(rect, slot) is not None):
                     blind = True
                     unreadable.append(dict(frame, reason="a painter that names no source meets the slot", id=pv["id"]))
+                continue
+            if name != asset_name:
+                rect = _box(pv.get("rect"))
+                if slot is None or rect is None or _meet(rect, slot) is not None:
+                    if state[0] == UNREADABLE:
+                        blind = True
+                        unreadable.append(dict(frame, reason=state[1], id=pv["id"]))
+                    elif state[0] in (PAINTED, PARTIAL):
+                        foreign.append(pv)
                 continue
             mine = pv.get("id") == element_id
             near = _iou(_box(pv.get("rect")), slot) >= iou_min
@@ -775,7 +786,9 @@ def score_paint(
             violations.append(dict(frame, kind=UNPAINTED, reason="no-slot"))
             continue
         ids = [pv.get("id") for pv in at_slot]
-        if len(at_slot) >= 2:
+        if foreign:
+            kind, reason = "substitute", f"id {foreign[0]['id']} of the asset paints another asset"
+        elif len(at_slot) >= 2:
             kind, reason = "double", f"ids {ids}"
         elif ids == [element_id]:
             if carried_state[0] == PAINTED:

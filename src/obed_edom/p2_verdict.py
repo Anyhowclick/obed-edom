@@ -45,12 +45,39 @@ from obed_edom.live_continuity import canonical_asset_name
 MOVIE1_TOKEN = "Untitled.mov"
 MOVIE2_TOKEN = "WA0125"
 MOVIE_BY_ASSET = {MOVIE1_TOKEN.lower(): "movie1", "vid-20250608-wa0125.mp4": "movie2"}
+LOGICAL_MOVIE_KEYS = frozenset(MOVIE_BY_ASSET.values())
 
 
 def _movie_key(src: str) -> str:
-    """The fixture movie a source is, by exact canonical asset name (never a substring), else its name."""
+    """The fixture movie a SOURCE is, by exact canonical asset name (never a substring); any other
+    asset is `other:<name>`, so no source reads as a logical movie key."""
     name = canonical_asset_name(src)
-    return MOVIE_BY_ASSET.get(name) or name[:40] or "unknown"
+    return MOVIE_BY_ASSET.get(name) or (f"other:{name[:40]}" if name else "unknown")
+
+
+def _note_movie_key(key: object) -> str:
+    """A note or stamp key, which the runtime writes as a logical movie key or an asset key."""
+    return key if isinstance(key, str) and key in LOGICAL_MOVIE_KEYS else _movie_key(str(key or ""))
+
+
+def _bound_source_problem(
+    samples: list[dict], key: str, decoder_id: object, min_hash: int | None = None
+) -> str | None:
+    """Identity before source for a bound decoder's rows (on/after `min_hash`): `foreign` when one
+    names another asset, `unreadable` when one names no source, else `None`."""
+    problem = None
+    for s in samples:
+        hn = _hash_num(s.get("sceneHash"))
+        if min_hash is not None and (hn is None or hn < min_hash):
+            continue
+        for v in s.get("videos") or []:
+            if v.get("decoderId") != decoder_id:
+                continue
+            if not canonical_asset_name(v.get("src")):
+                problem = "unreadable"
+            elif _movie_key(v.get("src")) != key:
+                return "foreign"
+    return problem
 
 
 def _norm_hash(h: str | None) -> str:
@@ -576,7 +603,7 @@ def _target_elids(events: list[dict], target_key: str) -> set:
         detail = e.get("detail")
         if not isinstance(detail, dict):
             continue
-        if _movie_key(detail.get("key") or "") != target_key:
+        if _note_movie_key(detail.get("key")) != target_key:
             continue
         for field in ("elId", "newElId"):
             if detail.get(field) is not None:
@@ -593,7 +620,7 @@ def refusalEvents(events: list[dict], target_key: str, min_scene: int) -> list[d
         if e.get("kind") not in ("preserve-refused", "retire-boundary"):
             continue
         detail = e.get("detail") if isinstance(e.get("detail"), dict) else {}
-        if _movie_key(detail.get("key") or "") != target_key:
+        if _note_movie_key(detail.get("key")) != target_key:
             continue
         scene = _event_scene(e)
         if scene is None or scene < min_scene:
@@ -616,7 +643,7 @@ def carryEvents(events: list[dict], target_key: str, lo_scene: int, hi_scene: in
         if kind not in CARRY_EVENT_KINDS:
             continue
         detail = e.get("detail") if isinstance(e.get("detail"), dict) else {}
-        keyed = _movie_key(detail.get("key") or "") == target_key
+        keyed = _note_movie_key(detail.get("key")) == target_key
         el_match = any(detail.get(f) in el_ids for f in ("elId", "newElId") if detail.get(f) is not None)
         if not (keyed or el_match):
             continue
@@ -685,7 +712,7 @@ def poolCensusVerdict(
         stamped = e.get("movieKey")
         raw = str(e.get("key") or "")
         if isinstance(stamped, str) and stamped:
-            attributed = _movie_key(stamped)
+            attributed = _note_movie_key(stamped)
         elif raw:
             attributed = _movie_key(raw)
         else:
@@ -1032,7 +1059,7 @@ def _kind_details(preserve_events: list[dict], kind: str) -> list[dict]:
 def _entry_movie_key(entry: dict) -> str | None:
     stamped = entry.get("movieKey")
     if isinstance(stamped, str) and stamped:
-        return _movie_key(stamped)
+        return _note_movie_key(stamped)
     raw = str(entry.get("key") or "")
     return _movie_key(raw) if raw else None
 
@@ -1812,6 +1839,7 @@ def liveContinuity1to2(
             "afterOwner": bound_decoder_id,
         },
         "rvfcAdvance": rvfc,
+        "unreadable": rvfc.get("status") == "inconclusive",
         # Reported for provenance only — NOT a gating sub-condition (aliased pixel
         # crossing-MAE; the crossing IDENTITY fields above ARE gated).
         "motionAcrossFlipOk": motion_ok,
@@ -2151,6 +2179,7 @@ def movingContinuity3to4(
         },
         "crossingIdentity": {"ok": crossing_identity},
         "rvfcMonotonic": rvfc,
+        "unreadable": rvfc.get("status") == "inconclusive",
     }
 
 
@@ -2244,15 +2273,24 @@ def _mae_rgb(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.mean(np.abs(a[:, :, :3].astype(np.float64) - b[:, :, :3].astype(np.float64))))
 
 
-def _presented_time_advances(samples: list[dict], decoder_id: object, min_hash: int) -> dict:
+def _presented_time_advances(
+    samples: list[dict], decoder_id: object, min_hash: int, key: str = MOVIE1_KEY
+) -> dict:
     """rVFC-presented mediaTime advancement for a decoder, on/after min_hash.
 
     An alternate, pixel-independent signal for presentedMotionOk: the decoder
     is genuinely presenting new frames even if the composed-ROI pixel check
-    is inconclusive (e.g. a still moment in the source pattern).
+    is inconclusive (e.g. a still moment in the source pattern). Its sources are
+    judged first (`_bound_source_problem`): another asset fails, no source is
+    inconclusive.
     """
     if decoder_id is None:
         return {"ok": False, "reason": "no decoderId", "n": 0}
+    problem = _bound_source_problem(samples, key, decoder_id, min_hash)
+    if problem == "foreign":
+        return {"ok": False, "reason": "the decoder names another asset", "n": 0}
+    if problem == "unreadable":
+        return {"ok": False, "status": "inconclusive", "reason": "the decoder names no source", "n": 0}
     vals: list[float] = []
     for s in samples:
         hn = _hash_num(s.get("sceneHash"))
@@ -3298,7 +3336,7 @@ def _bridge_engaged(snap: dict) -> bool:
             continue
         gen, old_gen = detail.get("generation"), detail.get("oldGen")
         if (
-            _movie_key(detail.get("key") or "") in EXPECTED_MOVIE_KEYS
+            _note_movie_key(detail.get("key")) in EXPECTED_MOVIE_KEYS
             and (_event_scene(e) if isinstance(e, dict) else None) is not None
             and _event_scene(e) >= SLIDE4_MIN_HASH
             and detail.get("oldElId") is not None

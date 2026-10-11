@@ -137,6 +137,7 @@ from obed_edom.p2_verdict import (  # noqa: E402
     _advance_key_clock,
     _advance_press_decision,
     _at_cut_boundary,
+    _bound_source_problem,
     _collector_ok,
     _collector_rows_for,
     _collector_sample_times,
@@ -155,6 +156,7 @@ from obed_edom.p2_verdict import (  # noqa: E402
     _new_advance_press_state,
     _new_bracket_manifest,
     _norm_hash,
+    _note_movie_key,
     _presented_time_advances,
     _restart_observations,
     _score_freeze_control,
@@ -3720,6 +3722,13 @@ async def _run() -> dict:
             dissolve_s=TRANS_S,
             position_eps=1.25,  # MM can take >0.75s before first pooled sample
         )
+        bound_source = (
+            _bound_source_problem(samples_a, EXPECTED_MOVIE_KEYS[0], green_decoder_id)
+            if green_decoder_id is not None else None
+        )
+        if bound_source is not None:
+            cont = {**cont, "continuesThroughDissolve": False if bound_source == "foreign" else None,
+                    "boundSource": bound_source}
         mm_paths = sorted(run_dir.glob("mm12-t*.png"))
         visible_motion = _score_visible_movie_motion(mm_paths, MOVIE_ROI)
         capture_race_frames_a = sum(
@@ -3958,12 +3967,12 @@ async def _run() -> dict:
         reuse_skip_boundary_for_target = [
             e
             for e in reuse_skip_boundary_events
-            if _movie_key((e.get("detail") or {}).get("key") or "") == target_key
+            if _note_movie_key((e.get("detail") or {}).get("key")) == target_key
         ]
         retire_events_for_target = [
             e
             for e in retire_events
-            if _movie_key((e.get("detail") or {}).get("key") or "") == target_key
+            if _note_movie_key((e.get("detail") or {}).get("key")) == target_key
         ]
         # Reuse of a preserved decoder is the LEGITIMATE 1→2 continue mechanism; only a
         # reuse on/after the restart boundary would stitch a fake restart. Scope the ban there.
@@ -4004,7 +4013,7 @@ async def _run() -> dict:
             # required too as corroboration, via the parity-immune burnt-in index
             # counter (pixelMotion stays as a diagnostic only — see above).
             restart_decoder_id = per_movie_boundary[key].get("restartDecoderId")
-            presented_rvfc = _presented_time_advances(samples_b, restart_decoder_id, SLIDE3_MIN_HASH)
+            presented_rvfc = _presented_time_advances(samples_b, restart_decoder_id, SLIDE3_MIN_HASH, key)
             per_movie_boundary[key]["presentedMotionOk"] = bool(
                 presented_rvfc.get("ok") and restart_index_progression.get("ok")
             )
@@ -4030,7 +4039,7 @@ async def _run() -> dict:
         reuse_stitched_restart = [
             e
             for e in reuse_decoder_events
-            if _movie_key((e.get("detail") or {}).get("key") or "") == target_key
+            if _note_movie_key((e.get("detail") or {}).get("key")) == target_key
             and (_hash_num((e.get("detail") or {}).get("sceneHash")) or -1) >= SLIDE3_MIN_HASH
             and (
                 (e.get("detail") or {}).get("newElId") == target_restart_decoder_id

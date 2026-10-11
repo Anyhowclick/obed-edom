@@ -30,6 +30,14 @@ import live_evidence_contract as contract  # noqa: E402
 from obed_edom import p2_verdict  # noqa: E402
 
 LEGAL = {c["name"]: c for c in json.loads((REPO / "tests/fixtures/live_continuity/contract/legal.json").read_text())["cases"]}
+#: No retained artifact holds a cleared-src `fromDom` entry (core:185-190 reads `movieKeyFor`, core:455-457). Only
+#: `stash` preserves, right after stamping a planned movie (core:918-943); a clear never restamps (core:466-468,
+#: 2026-2027); a different asset unpreserves before restamping (core:485-490), its `prev` never empty on a preserved
+#: decoder since preserving needs the instance only `reidentify` stamps alongside `__obedAssetKey` (core:470-491).
+_CLEARED = copy.deepcopy(LEGAL["refusal-read-pool-and-fromDom-hold-one-decoder"])
+_CLEARED.update(name="refusal-read-fromDom-cleared-src-keeps-its-stamp", source="core:185-190")
+_CLEARED["record"]["poolSnapshot"][-1]["key"] = ""
+LEGAL[_CLEARED["name"]] = _CLEARED
 
 
 def _load_probe():
@@ -146,6 +154,8 @@ VIOLATIONS = [
     ("pool-empty-key-off-the-dom", POOL, _set(lambda r: r["poolSnapshot"][0], key=""), "pool:empty key off the DOM"),
     ("pool-instance-on-some-entries", POOL, _drop(lambda r: r["poolSnapshot"][0], "instance"), "pool:instance on some entries"),
     ("pool-duplicate-elId", POOL, _append_copy(lambda r: r["poolSnapshot"]), "pool:duplicate elId"),
+    ("pool-empty-key-without-its-stamp", POOL, _set(lambda r: r["poolSnapshot"][-1], key="", movieKey=None),
+     "pool:empty key without its movie stamp"),
     ("pool-fromDom-false", POOL, _set(lambda r: r["poolSnapshot"][-1], fromDom=False), "pool.fromDom"),
     ("notes-t-decreasing", GL, _set(lambda r: r["coreEvents"][-1], t=-1.0), "note:t decreasing"),
     ("notes-no-scene-hash", GL, _drop(lambda r: r["coreEvents"][0]["detail"], "sceneHash"), "note.sceneHash"),

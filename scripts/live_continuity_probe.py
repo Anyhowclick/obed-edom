@@ -3014,7 +3014,8 @@ def pre_flip_owner_ids(samples: list[dict[str, Any]], armed: dict[str, Any]) -> 
     source (its probe id named the asset on any row), so one whose src no longer names the asset
     makes the census None; so does a row listing one probe id twice (`duplicate_ids`) and, before
     the flip, a row that names no source, is not proven idle (`_maybe_decoded`) and is not proven off
-    the instance rect."""
+    the instance rect. Such a row that names another asset is an owner of its own (`foreignId`), never
+    the carried decoder, unless it carries no scene (None)."""
     rows = samples or []
     if not all(isinstance(s, dict) and isinstance(s.get("videos"), list) for s in rows) or not all(
         isinstance(v, dict) and isinstance(v.get("src"), str) and _owner_named(v.get("footprintOwner"))
@@ -3036,6 +3037,12 @@ def pre_flip_owner_ids(samples: list[dict[str, Any]], armed: dict[str, Any]) -> 
             ):
                 return None
             if not named and video["id"] not in movie:
+                if video["src"] and _maybe_decoded(video) and not (
+                    _is_rect(video.get("rect")) and not rect_matches(video["rect"], armed["instanceRect"])
+                ):
+                    if scene is None or not _is_rect(video.get("rect")) or not _decoded(video):
+                        return None
+                    owners.append({"foreignId": video["id"], "src": video["src"]})
                 continue
             if not named or scene is None or not _is_rect(video.get("rect")):
                 return None
@@ -5113,8 +5120,8 @@ def score_handback_carry(record: Any, armed: dict[str, Any]) -> dict[str, Any]:
     facade list or facade entry (its integer `elId`/`forElId`, explicit nulls readable), or remount note without an object
     detail naming an integer `elId` is None, and any None makes the verdict None before any
     failure. A painter is the movie's by identity before source (the carried, a pooled or a
-    facade element) or by its src; one of the movie's by identity, or over the instance rect, that
-    names no source is None, and one of the movie's by identity that names another asset is False."""
+    facade element) or over the instance rect, then by its src: one of these that names no source is
+    None, and one that names another asset is False."""
     checks: dict[str, bool | None] = dict.fromkeys(("painting", "release", "noRemount", "handoff"))
     detail: dict[str, Any] = {}
     errors = contract.first_errors(contract.handback_record(record)) if isinstance(record, dict) else []
@@ -5159,12 +5166,12 @@ def score_handback_carry(record: Any, armed: dict[str, Any]) -> dict[str, Any]:
             if facades_ok:
                 mine |= {f["elId"] for read in reads for f in read["facades"] if f["forElId"] in mine}
             mine.discard(None)
-            movie = [v for v in videos if matches_asset_keys(v.get("src"), armed["assetKeys"]) or v.get("elId") in mine]
-            foreign = [v for v in movie if v.get("src") and not matches_asset_keys(v["src"], armed["assetKeys"])]
-            unknown = [
-                v for v in videos
-                if not v.get("src") and (v in movie or rects_overlap(v["authored"], armed["instanceRect"]))
+            movie = [
+                v for v in videos if matches_asset_keys(v.get("src"), armed["assetKeys"]) or v.get("elId") in mine
+                or rects_overlap(v["authored"], armed["instanceRect"])
             ]
+            foreign = [v for v in movie if v.get("src") and not matches_asset_keys(v["src"], armed["assetKeys"])]
+            unknown = [v for v in movie if not v.get("src")]
             want = to_screen_rect(armed["instanceRect"], stage_map)
             detail.update(painting=movie, unidentifiedPainters=unknown, foreignPainters=foreign)
             checks["painting"] = None if unknown else not foreign and len(movie) == 1 and (

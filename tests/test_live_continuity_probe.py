@@ -5397,7 +5397,7 @@ class TestCodexR1ProbeFixes:
         samples = [
             {"scene": 0, "videos": [{"id": 1, "src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 1}}]},
             {"scene": 1, "videos": [{"id": 1, "src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": None}]},
-            {"scene": 1, "videos": [{"id": 9, "src": "other.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 9}}]},
+            {"scene": 1, "videos": [{"id": 9, "src": "other.mov", "rect": dict(BIG_INSTANCE, x=1500.0), "footprintOwner": {"elId": 9}}]},
             {"scene": 2, "videos": [{"id": 1, "src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 7}}]},
         ]
         assert probe.pre_flip_owner_ids(samples, ARMED) == [1, None]
@@ -10562,6 +10562,7 @@ class TestFold4MissingIdentityAndPairsNeverAVerdict:
         ("preFlipOtherOwner", False),
         ("poolEntryNoIdentity", None),  # r10 #3a
         ("unplacedOtherOwner", None),  # closing sweep: a scene-None row's owner was dropped from the census
+        ("preFlipForeignAtRect", False),  # Astra r14 #1: a foreign decoder at the instance rect was dropped by its src
     ])
     def test_armed_identity_and_placement(self, case: str, expected: bool | None) -> None:
         reads, samples = _armed_reads(), copy.deepcopy(PRE_FLIP)
@@ -10573,6 +10574,10 @@ class TestFold4MissingIdentityAndPairsNeverAVerdict:
             other["videos"][0]["footprintOwner"] = {"elId": 2}
             other["scene"] = 1 if case == "preFlipOtherOwner" else None
             samples.append(other)
+        elif case == "preFlipForeignAtRect":
+            owner = {"elId": None, "key": None, "via": "none", "contextType": None}
+            samples.append({"scene": 1, "videos": [{"id": 9, "src": "foreign.mov", "rect": dict(BIG_INSTANCE),
+                                                    "readyState": 4, "videoWidth": 640, "footprintOwner": owner}]})
         assert probe.score_armed_strict(reads, ARMED, GL_CONTINUITY, samples)["verdict"] is expected
         owners = probe.pre_flip_owner_ids(samples, ARMED)
         assert probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=owners)["verdict"] is expected
@@ -10830,6 +10835,7 @@ class TestFold5IdentityBeforeSourceAndGrounding:
         ("remountElIdString", None),  # inv: '1' missed the guarded set
         ("secondPainter", False),
         ("secondPainterNoSource", None),  # inv R7: a src-less painter at the instance rect was filtered out
+        ("secondPainterForeign", False),  # Astra r14 #1: a foreign painter at the carried rect was filtered out
         ("carriedNoSource", None),  # Astra r13 #2: the carried painter's src cleared (core 2026-2032) passed
         ("carriedElIdMissing", None),  # inv: an unreadable carried note made painting/release/noRemount False
     ])
@@ -10843,8 +10849,8 @@ class TestFold5IdentityBeforeSourceAndGrounding:
             after["coreEvents"].append(_ev("remount-done", elId="1", key="untitled.mov"))
         elif case.startswith("secondPainter"):
             screen = probe.to_screen_rect(BIG_INSTANCE, HB_STAGE)
-            src = "" if case.endswith("NoSource") else "untitled.mov"
-            record["painting"].append({"src": src, "elId": 9, "rect": dict(screen)})
+            src = {"secondPainterNoSource": "", "secondPainterForeign": "foreign.mov"}.get(case, "untitled.mov")
+            record["painting"].append({"src": src, "elId": 999 if case.endswith("Foreign") else 9, "rect": dict(screen)})
         elif case == "carriedNoSource":
             record["painting"][0]["src"] = ""
         elif case == "carriedElIdMissing":
