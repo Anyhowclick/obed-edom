@@ -712,7 +712,7 @@ for the parked `iwa-surgical-write-generator` feature.
 * **Allowlist.** `QUALIFIED_PLAN_SHA256` stays in force until S3; a deck joins only after its gates pass.
 * **F5 names are frozen instrument API.** Scorers read note kinds (`bridge-3to4`, `reuse-decoder`,
   `reuse-skip-boundary`, `retire-on-start-movie`, `retire-boundary`, `preserve-refused`, `dom-swap`,
-  `facade-block-clear`, `remount-*`, `pool-cleared`, `glreplay-*`, `pin-hold-start`, `bridge-motion-start`; the last
+  `facade-block-clear`, `remount-*`, `pool-cleared`, `glreplay-*`, `bridge-clock`, `pin-hold-start`, `bridge-motion-start`; the last
   two are also read by the paint-control injector) with their `detail` fields, element properties
   (`__obedSuppressed34`, `dataset.obedPreserved`, `dataset.obedRemounted`, `__obedElId`, `__obedGen`,
   `__obedFacadeFor`) and `footprintOwnerDecoderId` by name. Dropping or renaming one is a finding even if the suites
