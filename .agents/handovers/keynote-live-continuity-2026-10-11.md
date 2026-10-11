@@ -1,7 +1,7 @@
 # Handover: S2 gl-clock core v6 and instrument folds 4–5 merged; contract pass planned (2026-10-11)
 
-Read this first. It supersedes `keynote-live-continuity-2026-10-10-night.md` (deleted; in git history); every live item
-from it is carried below. Verify branches and PRs on GitHub before acting. Evidence paths are in the MAIN checkout
+Read this first. It supersedes every earlier keynote-live-continuity handover (all deleted); every live item from them
+is copied below. Verify branches and PRs on GitHub before acting. Evidence paths are in the MAIN checkout
 (`/Users/anyhowclick/Desktop/work/obed-edom/output/evidence/`), which is git-ignored.
 
 ## Where everything is
@@ -40,16 +40,41 @@ from it is carried below. Verify branches and PRs on GitHub before acting. Evide
    change) → Astra r12 with the new criterion: only false passes reachable with producer-legal evidence block; findings
    needing producer-impossible input are "closed by contract" (cite the clause). Keep folds 3–5's guards (no churn); a
    simplification pass after S2 may remove the redundant ones (owner's option).
-3. **Live GL-1/2/3** (gl-clock plan §9) after gl-clock APPROVE: GL-1 D1 carry-cover 5× green vs `no-gl-clock` interleaved +
-   2 nulls; GL-2 P2 carry-cover + P2 adversarial ×2 + `--gl-replay auto`; GL-3 one full `run_gates` round, expected
-   `failed=2 pending=0` (the two unregistered no-pin-hold reds). Coordinator-only, load < 3, ≤ 3 Chromes, message peers
-   "go idle" first. Q1/Q2 are pre-approved but apply only on the live triggers in the plan.
-4. Then the instrument's live validation V0–V6 (instrument plan §7), red registrations, the full S2 re-run, Q6, Q7 with the
-   owner, the S2 gate record (`.agents/reviews/continuity-generalisation/gates-r1.md`), `QUALIFIED_PLAN_SHA256` pruning
-   (plan §3.4). Details unchanged from the night handover:
+3. **Live GL-1/2/3** after gl-clock APPROVE. Coordinator-only, serial, load < 3 at start, ≤ 3 Chromes, peers told "go idle"
+   first, never during the owner's OBS session. From a clean gate worktree `G` at the merged head; evidence to
+   `output/evidence/s2-dev/glclock-v6/`.
+   - **GL-1, D1 carry-cover:** 5× green and `--core-variant no-gl-clock` interleaved, then 2× `--carry-cover-null`:
+     `PYTHONPATH=$G/src $PY -u scripts/live_continuity_probe.py --fixture $FX --original-index $FX/index.html --viewport 1920x1080 --carry-cover [--core-variant no-gl-clock | --carry-cover-null] --artifact $OUT/GL1/<arm>-<i>.json`
+     with `FX=<main>/output/fixtures/qual-decks/D1/html-unmodified`. Read per bridge: verdict, `maxStripPx`, strips,
+     `clock`; and the largest jump in `pts−domTs` between frames (over 17 ms → `log show --predicate 'process == "timed"'`
+     around `timeOrigin + t`, a wall-clock step). Predicted: green 5/5 pass (b1to2 strip ≤ 1, `gl`, lag 5–9 ms; b2to3
+     scored — first live proof of the note-scoping fix — strip ≤ 1, `gl`, lag < 50); red 5/5 fail (b1to2 6–9 px,
+     `fallback`, lag ≥ 50); null 2/2 fail on both bridges.
+   - **GL-2, P2:** carry-cover green / `linear-bridge` / null once each → pass / fail / fail, green `gl`. Then
+     `p2_recovery_html_adversarial.py --reuse-export --disposable --wait-profile fast` ×2 and once with `--gl-replay auto`:
+     the same success line as the last S2 round; freeze bracket passes with marker→trigger ≈ L+Δ … L+Δ+16.7 ms (L = 61.0,
+     Δ = the run's own `bridge-clock` `lagMs`, ≈ 68–85 ms); slide-3 restart 0.106–0.222 s; a kept `bridge-clock` note
+     showing `gl`.
+   - **GL-3, only if GL-1 and GL-2 met their predictions:** `GATE_JOBS=3 scripts/run_gates.sh $G $OUT/GL3 --tier full` →
+     `failed=2 pending=0`, exit 1; the two FAILED lines are exactly the unregistered `HOST red D5 --core-variant
+     no-pin-hold` and `PASSG-RED D1 --core-variant no-pin-hold`; six CARRY-COVER lines as predicted above; wall time ≈ the
+     last S2 round + 30 s.
+   - **Back to the owner if:** a green strip over 1 px or any green `fallback` (D1 or P2); a D1 red reading pass; a green
+     trailing strip of ~10–15 px (Keynote losing its first frame's delta); any playback break (player build or page errors,
+     a missing Magic Move, an error mentioning `requestAnimFrame` → revert); a P2 freeze-bracket INCONCLUSIVE or any P2/host
+     verdict differing from the last S2 round; a null arm passing; any GL-3 FAILED line beyond the two above. A null
+     INCONCLUSIVE under round load is the known watch item (re-run at `GATE_JOBS=1`, never widen the gap). A run with a
+     `timed` step is reported, re-run once, both reported; neither ever turns a FAILED into a pass.
+   - **Pre-approved conditional changes (owner 2026-10-11):** Q1 — if a green bridge reports `fallback` with a held-path
+     lag ≥ 50 ms, the 50 ms wait starts at the departure's latest setup mark (`markTransition` refreshes `departure.at`;
+     wait = `max(started, departure.at)`; 2 lines + 1 assertion). Q2 — if the D1 `no-gl-clock` red ever reads pass (1 px
+     margin), the D1 red becomes `linear-bridge`; thresholds are never tuned.
+4. Then the instrument's live validation V0–V6, red registrations, the full S2 re-run, Q6, Q7 with the owner, and the S2
+   gate record `.agents/reviews/continuity-generalisation/gates-r1.md`:
+   - V0: streams A–D targeted tests green on 3.10 and 3.11.
    - V1 smoke: D1 attach arm without, then with, B0 `show()`; D1 host 1920 `--skip-arms B,C,V,Voff,attach`; a full P2 host
      run; check whether any P2 harness reading `footprintOwnerDecoderId` (`p2_recovery_html_adversarial.py:893`) runs hidden in
-     alpha mode (plan §8). V2 positive controls (exact seq sets); V2b L2 force-wrap with paint on (measure
+     alpha mode. V2 positive controls (exact seq sets); V2b L2 force-wrap with paint on (measure
      `seeking`/`readyState` at wraps, decision 14); V3 reds + V3b pin pixel spot check; V4 moved sets (strip arms
      `D1/D2 strip:pin@6`, `D3 strip:pin@2/@4`, `D4 strip:pin@5`, `D5 strip:pin@2/@4`; post-hoc `D4 wrong-instance`/`fifo-reuse`,
      `D5 fifo-reuse`/`stash-any`; re-register only with a measured reason and owner sign-off); V5 null sweep; V6 overhead.
@@ -61,8 +86,11 @@ from it is carried below. Verify branches and PRs on GitHub before acting. Evide
      `GATE_JOBS=1` round (identical verdicts and exact seq sets; red counts ±3 frames; restart margins within the 2026-10-09
      baseline), D2, D3 (P2 main vs S2 interleaved), D4 (G2 seam), D5 (loop); then Q6 (managed OBS 25/30, KBs, soak 4 min;
      pre-approved), then Q7 with the owner (Q7a external attach D1/D4; Q7b dashboard Keyer on D1–D5).
+   - Final: full suites, Astra on the final diff, the gate record. The gate commit keeps in `QUALIFIED_PLAN_SHA256` only
+     the S2 shas of P2 off/on, p2-loop off/on and the decks that passed Q3+Q7, and removes the others before the PR is
+     offered. The owner opens and merges. S3 (delete the allowlist) stays the owner's call.
    - After S2 merges: delete the main checkout's `output/<name>` → `output/fixtures/<name>` compat symlinks once no branch
-     reads the old paths (plan §3.7). S3 (delete the allowlist) stays the owner's call.
+     reads the old paths.
 5. **After the S2 gate record:** rebuild the 8 stripped P2 fixture variants with the strip fix and re-pin their digests
    (owner, 2026-10-11).
 
@@ -74,14 +102,16 @@ from it is carried below. Verify branches and PRs on GitHub before acting. Evide
    `patch_player`.
 3. **53 px D1 outlier (green-2)** — EXPLAINED: a macOS wall-clock step (`timed` `settimeofday`, −89 ms, 20:17:16) mid-bridge.
    Keynote's animation runs on `Date`, the old core on `performance.now()`. Live-show hazard on today's core (main too); the
-   GL clock removes it by construction (plan §2).
+   GL clock removes it by construction: origin and progress both on Keynote's `Date`; the fallback deadline on
+   `performance.now()`.
 4. **P2 2→3 Dissolve on a transparent page** — LOCALISED (`s2-dev/dissolve-alpha-2026-10-11/`). Owner checked the Keynote
    app: normal cross-fade. Two causes, neither OBS nor our host/patches:
    - grey/white squares = our fixture strip dropped `/Cs1 cs` (pdf.js DeviceGray, grey = 255×R). Code fixed `715cb3f1`;
      the 8 stripped fixtures are rebuilt after S2 (until then P2 shows grey squares).
    - slide 3 pops in = Keynote's HTML export draws `apple:dissolve` as CSS opacity on the OUTGOING layer only (incoming
      fixed at 1); opaque backgrounds hide it, transparent pages don't. Hits real DSK decks (clip slides forced to dissolve).
-     Cross-fade patch being planned in the owner-started session (see the table).
+     Cross-fade patch being planned in the owner-started session on branch `claude/keynote-live-dissolve-crossfade-plan`
+     (plan only: an in-memory sha-pinned player patch fading the incoming layer 0→1, exact compositing, CEF 127 support).
    - Tooling: our CDP JPEG screencast squares alpha on transparent pages (opacity²); judge fades from PNG-with-alpha or OBS.
 5. **End of show** (deferred by owner): D1–D3 hold the carried movie at end of show; D5 ends empty. Resume options: a scene
    count in the schema-2 plan, or read `__obedLive`.
@@ -113,7 +143,13 @@ from it is carried below. Verify branches and PRs on GitHub before acting. Evide
 - Pin hold accepted (a pinned movie paints above authored content during its move). Main fix = "fix properly", including
   the new player on a byte-level argument. Main freeze bracket: option A (never relax `firedVia=='moved'`, marker identity,
   the 1 px detector).
-- Instrument plan: all 14 recommendations (see that plan's owner-decisions section). Minimal test additions.
+- Instrument plan (all 14 recommendations): (1) opacity ≥ 0.99; (2) D2 restart 1-frame blank report-only; (3) red
+  registration = id sets + 60-frame floor; (4) CLI `--pass G --core-variant` and `--paint-control`; (5) every expected-True
+  carry gets a Pass G leg; (6) V3b pin pixel spot check now, a pin carry-cover gate after the D1 lag fix; (7) the
+  pre-pin-hold red once, outside `run_gates`; (8) census incl. `endOfShow` report-only, triaged before the full re-run;
+  (9) consolidating the duplicate opacity logic deferred until after the S2 gates; (10) Stream D in parallel, landed before
+  V2–V5; (11) D2/D3 `no-pin-hold` arms added to `run_gates` only after V3; (12) B0 `show()` its own commit;
+  (13) `outsideStagePx` report-only; (14) no loop-wrap `seeking` excuse until V2b. Minimal test additions.
 - Reviews on GPT-6 Astra (high) while the owner's resets last
   (`codex exec -m gpt-6-astra -c model_reasoning_effort=high -s read-only -o out.md "$(cat p.md)" < /dev/null`).
 
