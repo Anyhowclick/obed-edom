@@ -12,7 +12,7 @@ launched). Branch `claude/keynote-live-dissolve-crossfade` (local only: NOT push
 | W0 | `7fa7c8dd` | strip fix `715cb3f1` cherry-picked |
 | W4 docs | `571237e2` | README fallback line, SKILL sentence, follow-ups handover (Q/L placeholder still TBD) |
 | W1 `live_runtime.py` | `debfc685` + test folds `dc4dad8b`, `2aadd074`, `1091285c`, `8a53c0b9`, `de83681b` | D1–D4 byte-exact to §3.1 (product bytes unchanged since `debfc685`); §8 counts reproduced; **Astra impl r1–r6, r6 APPROVE** (all folds were test hardening: proxy guards on every stub element, real node-move semantics, whole-tree/placement invariants, deep tree compare, call-site spies, full LUT, work clock; 61 mutants caught, two decoded-size mutants accepted as safety-equivalent). 125 passed / 0 skipped. Pins on/rendering: e9b2fad4 `49d56adc…` / `117fd39d…`; 17c0c938 `7a5e315b…` / `52d7edb5…`; off unchanged. **`Q`/`L` provisional** (`_FREEZE_QUALIFIED_TUPLES`, `_FREEZE_TONE_LUT`): swap + re-pin when Q0b's decision record lands. |
-| W2 `dissolve_probe.py` | `15dc7d33`; folds `34f4779e` (r1), `243de015` (r2), `1c5d3004` (r3) | Astra impl r1–r4 on W2+W3, r4 folded in `f51f70d7` (physical value ranges in every record validator; lifecycle fades need 6 mid frames; goto/back act at 1.3 s of the 1.5 s fade so the mid window precedes the action). r5 verification: _see final note_. **Open owner/next-session item:** hide / hide-screen lifecycle rows are INCONCLUSIVE-by-construction at DX-1's ~6 fps full-res screenshots (hidden interval eats the mid window) — coordinator recommendation: capture those rows' fade with the per-frame screencast as the cut arms do (measurement change, no contract change). Pattern that converged: per-record schema validation before any filtering + one `COVERAGE` table + shared integrity always reaching the arm. Tone risk: P2 build-frame canvas `3231B69B` (960×276) covers the movie rect → tone mask empty → `m-tone` INCONCLUSIVE; needs a tone fixture with exposed ramp/patch interiors or a painted-pixel foreground mask (never count covered pixels). no_flash needs a pre-animation rAF on real captures (fail-closed; check at first gate run). |
+| W2 `dissolve_probe.py` | `15dc7d33`; folds `34f4779e` (r1), `243de015` (r2), `1c5d3004` (r3) | Astra impl r1–r4 on W2+W3, r4 folded in `f51f70d7` (physical value ranges in every record validator; lifecycle fades need 6 mid frames; goto/back act at 1.3 s of the 1.5 s fade so the mid window precedes the action). **r5 APPROVE** (136 scorer cases re-run in memory; goto/back at 1.3 s still a mid-dissolve action). **Open owner/next-session item:** hide / hide-screen lifecycle rows are INCONCLUSIVE-by-construction at DX-1's ~6 fps full-res screenshots (hidden interval eats the mid window) — coordinator recommendation: capture those rows' fade with the per-frame screencast as the cut arms do (measurement change, no contract change). Pattern that converged: per-record schema validation before any filtering + one `COVERAGE` table + shared integrity always reaching the arm. Tone risk: P2 build-frame canvas `3231B69B` (960×276) covers the movie rect → tone mask empty → `m-tone` INCONCLUSIVE; needs a tone fixture with exposed ramp/patch interiors or a painted-pixel foreground mask (never count covered pixels). no_flash needs a pre-animation rAF on real captures (fail-closed; check at first gate run). |
 | W3 `managed_obs_qualify.py --arm dissolve` | `47135f64` (+ CEF profile switch in `34f4779e`) | 19 CEF sessions, calibration from `opaque-off` first (re-derived, cached copy compared); cut shots keep `[t0,t1]` and must lie inside the cut window; reviewed with W2 (r2–r4), no open W3-specific item. |
 | Q0b step 0 | evidence only | headless done, CEF pending; **five re-plan triggers** (below) |
 
@@ -63,7 +63,7 @@ is cleared; the evidence copy has the scripts and decision JSON).
    on product bytes except DX-1/DX-2.
 1. CEF part of Q0b 1 (two OBS launches; tone movie paused at frames 30/300/900 in h264u/h264t/hevc10 + Keynote HEVC; needs a
    scratch `ManagedObs` driver) → final `Q`/`L` (re-pin only if they change).
-2. W2 Astra r2 fold (see final note), then one more Astra round on W2+W3.
+2. Hide/hide-screen lifecycle cadence (screencast capture recommended), then the W2 tone-fixture item.
 3. Re-run full local suites after the re-plan code lands (`env -u PYTHONDONTWRITEBYTECODE uv run pytest tests/ -n auto --dist worksteal`), Python 3.10 floor
    (`UV_PROJECT_ENVIRONMENT=<dir> uv sync --frozen --all-extras --all-groups --python 3.10`), dashboard suites untouched.
    Coordinate the heavy window with peer sessions (one heavy job machine-wide).
@@ -76,3 +76,14 @@ is cleared; the evidence copy has the scripts and decision JSON).
 - Machine: shared with the S2 session ("Keynote test optimization"); they ran a full suite ~23:40; load spikes > 20 seen
   around 22:50 — discard timed runs started at load ≥ 4.
 - Keynote was open all session (owner's); untouched.
+
+## Final note (01:20, before the 02:00 shutdown)
+
+- All work is committed on `claude/keynote-live-dissolve-crossfade`; tree clean; nothing pushed, no PR, nothing merged.
+- Reviews: W1 Astra impl r6 APPROVE; W2+W3 Astra impl r5 APPROVE (raw rounds in `.agents/reviews/dissolve-crossfade/`).
+- Tests at HEAD: `test_dissolve_probe` + `test_managed_obs_qualify` + `test_live_runtime` re-run by the coordinator at `f51f70d7`:
+  **404 passed, 1 skipped** (pre-existing REAL recording skip); full suite last run at `1c5d3004` (only probe files changed since).
+- No agents running. Keynote untouched. OBS never launched. The S2 session holds the machine for its 3.11 run.
+- Session scratch (Q0b drivers, 3.10 venv, review prompts) lives under `/private/tmp/claude-501/…/scratchpad/` and may not
+  survive the reboot; the Q0b evidence copy and every review are in durable locations.
+
