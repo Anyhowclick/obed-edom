@@ -47,7 +47,7 @@ This is why `show()` is commit B0, measured in V1 before anything else is attrib
 ### What the DOM cannot see (named, not hidden)
 | Not visible | Why | Covered by |
 |---|---|---|
-| GL content: poster copies, rubber band, the ~7 ms poster lag | Drawn in the transition canvas | carry-cover (bridges; P2 only in `run_gates`) |
+| GL content: poster copies, rubber band, the ~7 ms poster lag | Drawn in the transition canvas | carry-cover (bridges; P2 and D1 in `run_gates`) |
 | Occlusion by a later canvas or layer | `elementsFromPoint` is blind (`pointer-events:none`) | Pixels only. Held decoders on `#body` are pixel-proven above the GL canvas **for bridges** (eased S2 D1: ≤95 exposed px, `rubber/s2D1-eased/expose.json`). Pins use the same container but were never measured (V3b) |
 | Frozen or black decoder pixels | DOM sees the element, not pixels | Clock rules, V/G liveness |
 | Compositor vs main-thread skew (≤1 frame at the edges of CSS animations) | `getComputedStyle` reports main-thread time | None. Keynote's GL hide is an inline step change set from a task, so it is exact |
@@ -395,7 +395,7 @@ Procedure for each:
 3. Run the blindness rescore, which separates a scorer cause from a core cause.
 4. Re-register only with a reason, an evidence path and owner sign-off.
 
-**Carry-cover strip failure.** Untouched here; separate (triage: ~7 ms GL lag).
+**Carry-cover strip failure.** Untouched here; separate (triage: ~7 ms GL lag). Fix: `.agents/plans/keynote_live_continuity_glclock.plan.md`.
 
 **D5 #5→#6.** This is end of show plus the stale-timer revival (`triage-2026-10-10/d5-end-of-show.md`). No gate drive reaches it. If a census ever sees it, it is listed as a finding with the label `endOfShow`, never dropped. Stream D and E1–E3 handle it.
 

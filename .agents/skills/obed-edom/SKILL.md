@@ -699,6 +699,10 @@ for the parked `iwa-surgical-write-generator` feature.
 * **Identity.** Runtime: objectID only. The player sets `id = objectID + "-video"` before `src`; a carried decoder
   is re-stamped to `dst.objectId`. Offline: `to_runtime` checks each objectId and rect name the same export instance;
   the gates score landing rects. glReplay keeps its ≤ 1 px `instanceRect` check.
+* **Bridge clock.** A bridge overlay moves on Keynote's `Date` from its GL loop start, stamped by a `requestAnimFrame`
+  setter hook that never throws (`main.js` untouched). With no stamp after `GL_CLOCK_WAIT_MS` (50) it holds at the
+  source, then follows `performance.now()` from the core's trigger. One `bridge-clock` note per motion records `via`
+  (`gl`|`fallback`) and `lagMs`. Plan: `.agents/plans/keynote_live_continuity_glclock.plan.md`.
 * **Refusals.** Per (boundary, instance) → `retire refused` + one `ContinuityPlan.refusals` record (`code`,
   `objectId` of `src`), reported on `output.continuity.notCarried`: `overlap` artwork above on the destination, R1
   ambiguous pairing (runner-up within 16 authored px), R1b opacity differs, R2 builds in/out, R4 loop mismatch, R7
@@ -850,6 +854,11 @@ for the parked `iwa-surgical-write-generator` feature.
   blind), frozen or black decoder pixels (clock rules and V/G liveness cover these), ≤ 1 frame compositor vs
   main-thread skew at CSS animation edges, 3D backface and OBS alpha/throttling (Q6, Q7), and pin mid-move pixels (no
   pixel gate; one-off V3b spot check).
+* **Carry-cover gate:** `run_gates.sh` (full tier) runs `--carry-cover` on P2 and D1: green must pass; the red
+  (`linear-bridge` on P2, `no-gl-clock` on D1) and the null (`--carry-cover-null`) must fail. Besides the status,
+  `check_cc` requires the deck's own `fixture` and, except on the null, a non-empty `bridges` where every
+  `clock.via` is `gl` (`fallback` on `no-gl-clock`); a missing clock fails. P2 passes on either clock, so `via` is
+  what proves the GL clock there. It prints one line per bridge (verdict, max strip, clean share, clock).
   No-consumption = the settled position after the go-to (L leading automatic events: L=0 `IdleAtInitialState` at the
   onset scene, L≥1 `IdleAtFinalState` at onset+L−1, same slide) plus exact host/JSON auto-run kinds; the pixel half is
   n/a on destinations with no click-driven builds.
