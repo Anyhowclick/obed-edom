@@ -1,4 +1,4 @@
-# Handover: S2 gl-clock v6 validated live; contract pass merged; Astra r12 to fold (2026-10-11, end of session)
+# Handover: S2 instrument review APPROVED (Astra r17); gl-clock v6 validated live; next = V0–V6 (2026-10-12, 01:45)
 
 Read this first. It supersedes every earlier keynote-live-continuity handover (all deleted); every live item from them
 is copied below. Verify branches and PRs on GitHub before acting. Evidence paths are in the MAIN checkout
@@ -9,9 +9,9 @@ is copied below. Verify branches and PRs on GitHub before acting. Evidence paths
 |---|---|
 | `main` | `1589d096` = #257 (raw Astra rounds of #256 removed) on #255 (resizer seed read) on #256 (bridge easing). |
 | PR #256 | Merged 2026-10-10. **Owner confirmed in real OBS 2026-10-11: the 3→4 rubber band is gone.** Post-merge chore done (#257). |
-| `claude/s2-detach-fix` | `de6df228`+ (contract pass merged; docs on top), pushed. Worktree `obs-mac-camera-swap-fbc63b`. Contains everything below. |
+| `claude/s2-detach-fix` | `510de8bb` + this handover, pushed. Instrument folds r12–r16 on top of the contract pass. Worktree `obs-mac-camera-swap-fbc63b`. Contains everything below. |
 | gl-clock | Core `a9e1e66a` merged (Astra gl-clock r1 REQUEST CHANGES → fold `5e9c9faf` → **r2 APPROVE**). Live GL-1/2/3 done 2026-10-11 (below). |
-| Contract pass | MERGED (`1c02c447` → `de6df228`). Plan `.agents/plans/keynote_live_continuity_contract.plan.md` (owner GO; Q1 N1–N3 yes, Q2 admit rare legal shapes, Q3 smoke yes). **Astra r12: REQUEST CHANGES, 4 blocking — fold next session.** |
+| Contract pass | MERGED (`1c02c447` → `de6df228`). Plan `.agents/plans/keynote_live_continuity_contract.plan.md` (owner GO; Q1 N1–N3 yes, Q2 admit rare legal shapes, Q3 smoke yes). Astra r12 → r16 folded; **r17 APPROVE** (section below). |
 | Gate worktrees | All trashed. Their live host logs were recovered to `s2-dev/live-logs/<wt>/` (`gate-glclock-c7d2d649`, `gate-preglclock-8ee7077d`, `gate-contract-de6df228`). |
 | Dissolve cross-fade plan | Separate session (owner-started), branch `claude/keynote-live-dissolve-crossfade-plan`, worktree `brave-goodall-bd9851`. Plan only. |
 | Stale branches | `claude/continuity-generalisation-s2`, `s2-instr-fold3`, `s2-main-final`, the fold4/fold5/gl-clock agent branches: all contained in S2, deleted 2026-10-11 (with their stale handovers). |
@@ -72,35 +72,36 @@ is copied below. Verify branches and PRs on GitHub before acting. Evidence paths
   fix = tighten the table); (3) FALSE PASS (producer-legal evidence scores pass/True/matching red; blocks; needs a repro
   with producer citations); (4) FALSE REJECTION (blocks only if a retained verdict would change; else MINOR).
 
-## Astra r12 (`s2-dev/instrument-review/astra-r12.md`) — FOLD THESE FIRST next session
-r11 findings 1–5 all CLOSED; N2 closed; N1/N3 partly. The first attempt was stopped by OpenAI's cyber filter (false
-positive on the wording "hunt"/"bypass"; log `astra-r12-attempt1.log`); the re-run with neutral QA wording completed.
-Blocking (use the reviewer's fix wording; refute only with a measurement):
-1. **MAJOR, class 3, L2** — managed failsafe M5 (`managed_obs_qualify.py:1486,1515–1516`, `movie_painting`): a painter at
-   the movie rect with `src` "" or another movie is not counted → counts [0,0] → M5 PASS. Fix: resolve painters by
-   identity/rect before source filtering; an uncertain or mismatched source never becomes a zero count.
-2. **MAJOR, class 3, L2** — hand-back accepts the carried decoder playing another asset (`probe:5152–5160`; repro: retained
-   `output/evidence/gates-glc/r2/p5a/1920x1080-rep2/probe.json`, `visible.Vgl.handback.painting[0].src = "another.mov"` →
-   `score_handback_carry` still True). Producer-legal: `core:2026–2032` reidentify keeps `__obedElId`. Fix: after
-   resolving the carried identity, require its source to be the expected asset.
-3. **MAJOR, class 2 → false pass** — the contract's handoff release (`contract:435–436,453–461`) admits `ok=false` or a null
-   `elId`; the core (`core:734–736`) always sets `ok=true`, `mode="handoff"` and the carried id together. Fix: tighten the table.
-4. **MAJOR, class 2 → false pass** — stream identity (`contract:351–362`) checks only probeId → elId and per-sample
-   uniqueness; making two probe ids share runtime `elId` 1 passes and `score_verdicts` reads a false fresh decoder (restart
-   True). Fix: enforce stream-wide `elId → probeId` consistency (`probe:466`, `core:751–754`).
-Non-blocking:
-5. MINOR, class 4 — failsafe unreadable containers (fail-bogus `coreEvents` `{error}` raises AttributeError at
-   `managed:1513` before N3's guard; null notes and N1's `{error}` painting give FAIL): detect before iterating and
-   propagate INVALID into run validity.
-6. Class-1 coverage gaps: the reference V hand-back stage map is not validated (`probe:5195–5196`); generated rescore
-   compares rejected verdicts as `None == None` and can report `ok=True` (`probe:7869`, legacy `7875`) — keep contract
-   rejection explicit in rescore results.
-Then: full suites (3.12 + 3.10 floor), the oracle (0 changes), Astra r13 with the same criterion, until APPROVE.
+## Instrument review r12 → r17: APPROVED (2026-10-11 night, `baa07e36`..`510de8bb`)
+Owner GO "Sweep + exact match" (2026-10-11 ~22:40), then "I trust ur decisions" for the night. Reviews on GPT-6 Astra
+(high); rounds + prompts + logs in `s2-dev/instrument-review/astra-r{12..17}*`; oracle outputs, suite logs, the live smoke,
+implementer briefs (`common.md`, `sweep.md`) and their scratch scripts in `s2-dev/fold-r12-r16/`.
+| Round | Verdict | Folded in |
+|---|---|---|
+| r12 (at `de6df228`) | 4 blocking | `baa07e36`: managed `movie_painters` identity/rect-first (M5 + sibling g2 M2); hand-back foreign src False; contract handoff release needs `ok=True`+elId; stream-wide elId→probeId; failsafe unreadable containers → INVALID (M5 + run); reference V contract-validated; rescore reports contract rejection |
+| r13 | 4 blocking (incl. a regression from our M2 fold) | `ae4e05ff` + **L2 closing sweep**: substring asset matching RETIRED (`names_asset` gone); one shared `obed_edom.live_continuity.canonical_asset_name`; rule B everywhere (paint, P2 `_movie_key`, managed precheck, adversarial 2→3 restart `unnamedRows`) |
+| r14 | 3 blocking | `7e185bd2`: rect identity before src (hand-back, arming census `foreignId`); paint `substitute` for a decoder of the asset painting another; P2 `_movie_key` sources-only vs `_note_movie_key` logical keys; bound-decoder src before presented-time aggregation (1→2, 3→4, restart); contract R4 (empty-key fromDom needs its stamp) |
+| r15 | 2 blocking | `9dc88785`: `match_painting_videos` judges the claimed instance's asset (visible slide + census); retire's handed-back exemption needs the retired asset |
+| r16 | 2 blocking | `510de8bb`: managed precheck judges the handed-back element's src; **`CARRY_COVER_SAMPLER_JS` reads now carry `src`** (additive; contract: new read generation, no mixing, legacy without src stays legal and pixel-only) |
+| **r17** | **APPROVE** (1 MINOR) | — |
+Rules now in force (owner): (A) exact canonical asset matching in every scorer; (B) identity first (probe id / elId /
+carried / pooled / facade / armed rect), then src: exact → the movie; foreign on an identity-resolved element →
+False/FAIL; empty/unreadable → unreadable; unresolved exact-asset elements still count. Exception (coordinator, Astra
+accepted): in multi-row decoder TRACKS a row naming another asset is INCONCLUSIVE, not False (element reuse).
+Verification at `510de8bb`: full 3.12 **10455 passed / 0 failed** (`9dc88785`: 10446); 3.10 floor touched files 4651
+(`9dc88785`) + 2040 (`510de8bb`) passed; regression oracle vs `de6df228` **0 changes / 1503 records** at every fold;
+acceptance scan 0 rejections / 3,879 records; live D1 carry-cover (from this worktree, load ~4.5): green pass, null fail
+(72/72 both bridges), an instrumented green run showed every `vids`/`pre` read carrying `src`
+`counter-a.mov-0.0000-60.0000.mov` (`fold-r12-r16/smoke-510de8bb/`, spy `scripts/srcspy.py`).
+Known: retained `loop-gates/l5/runs/soak-20260925-121732.json` (recorded PASS) re-scores FAIL already at `9dc88785` and
+before — no `reads.postHandback`; predates the hand-off requirement (Codex r4 #5); not caused by these folds.
 
-## Next steps after r12, in order
+## Next steps, in order
 1. **gl-clock:** DONE (Astra r2 APPROVE; live GL-1/2/3 above). Its Astra rounds: `s2-dev/glclock-review/astra-r{1,2}.md`.
-2. **Instrument review loop:** fold r12 → Astra r13 … until APPROVE under the criterion above. Folds 3–5's guards stay;
-   a simplification pass after S2 may remove the ones the contract made redundant (owner's option).
+2. **Instrument review loop:** DONE — Astra r17 APPROVE at `510de8bb` (section above). Folds 3–5's guards stay; a
+   simplification pass after S2 may remove the ones the contract made redundant (owner's option). **Start next session at
+   step 4 (V0–V6).** The carry-cover producer changed (additive `src`): GL-3's six CARRY-COVER lines in the next
+   `run_gates` round are its full live check (only a D1 green/null smoke ran tonight).
 3. **Live GL-1/2/3 — DONE 2026-10-11** (results above; kept here as the re-run recipe). Coordinator-only, serial, load < 3 at start, ≤ 3 Chromes, peers told "go idle"
    first, never during the owner's OBS session. From a clean gate worktree `G` at the merged head; evidence to
    `output/evidence/s2-dev/glclock-v6/`.
@@ -185,11 +186,24 @@ Then: full suites (3.12 + 3.10 floor), the oracle (0 changes), Astra r13 with th
    `placementEvents` gap; substring asset matching; untimed carry-cover frames. Fold5 changed (owner FYI): a preserve-refused
    note without `via` / a retire-boundary note without `elIds` left the known-bad red list (now INCONCLUSIVE); unattributed or
    conflicting refusal notes are None (was False, Astra S2 r2 #3's test); the pre-flip census needs a non-null probe id.
+7b. **Instrument follow-ups from r12–r17 (non-blocking, Astra-classified):** r15 #3 MINOR (4) — a
+   legitimately overlapping second movie at the carried/instance rect now reads hand-back/arming False (needs explicit
+   unrelated-instance provenance before the rect fallback; ignoring foreign src would reopen r14 #1); r16 #3 MINOR (4) —
+   tied authored rects (`a.mov#1`/`z.mov#1`) can give a false `foreign:` census red (resolve ambiguous instance ownership
+   first); r17 MINOR (4) — a looping handed-back element hidden behind the GL layer is omitted by `PAINTING_VIDEOS_JS`, so
+   the managed precheck reads INVALID (fix: capture src in the identity-specific `HANDED_BACK_JS` read — a producer +
+   contract change); (2) the adversarial census `mineByKey` substring branches are in-page JS producers
+   (`CARRY_CENSUS_JS` and the GL carry census, adversarial ~:236/378; over-count, fail closed) — exact-match them with a
+   contract update + live re-check; legacy carry-cover records without `src` stay pixel-only (criterion 2, accepted);
+   P2 pool entries with no key and no stamp fail closed (pre-existing); managed rect matching assumes the stage is 1:1
+   with the 1920×1080 browser source (true on retained runs; removing it = `STAGE_MAP_JS` in `Session.read`).
 8. **Watch items:** the carry-cover null control can read inconclusive under round load (never widen the gap; re-run at
    `GATE_JOBS=1`). Carry-cover thresholds/masks are P2-calibrated and now also run on D1 unchanged. The strip rule rounds
    left/top up but right/bottom down (1 px inconsistency; fix separately, never to pass a deck).
 
 ## Owner decisions (still governing)
+- 2026-10-11 night: r13 fold = "Sweep + exact match" (exact canonical asset matching in every scorer; identity first,
+  then src — rules A/B in the r12→r17 section); then delegated the night's calls to the coordinator ("I trust ur decisions").
 - 2026-10-11: dissolve — fixture strip code now, fixtures rebuilt after S2; cross-fade patch planned in a separate session.
   gl-clock plan GO as written; Q3 = hold at the source, then today's clock after 50 ms; Q1 (wait from the latest setup mark)
   and Q2 (D1 red → `linear-bridge`) pre-approved, applied only on their live triggers. Instrument audit closes with the

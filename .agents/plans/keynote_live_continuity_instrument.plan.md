@@ -143,7 +143,7 @@ The slot for row f:
 - `dstRect` on move-complete and after rows (`is_move_complete` `:1726`);
 - on bridge move rows, the carried decoder's own rect when `path_progress` (`:1693`) accepts it. Otherwise there is no slot, and the frame already fails.
 
-S(f) = the `pp` elements of the verdict's asset (the `track_by_id` substring rule `:1556`) in state painted or partial, with `rect_iou` (`:3510`) ≥ `INSTANCE_IOU_MIN` (0.75, `:169`).
+S(f) = the `pp` elements of the verdict's asset (the `track_by_id` exact canonical asset rule; substring matching retired 2026-10-11) in state painted or partial, with `rect_iou` (`:3510`) ≥ `INSTANCE_IOU_MIN` (0.75, `:169`).
 
 | S(f) | Result |
 |---|---|
