@@ -2149,6 +2149,10 @@ def score_continuity(
     Schema-2 rows (`seq`) are also scored per frame (`carry_paint`) unless `paint` is False, on
     every exit once the window is known (the no-spanning-decoder False included): a failing paint
     score is False and an incomplete one makes the verdict None, whatever the legacy checks said.
+    A tracked row whose phase is unreadable (`phase_unreadable`) in the window, or anywhere back
+    to the source slide's predecessor (where the window's or the paint's grounding would reach had
+    it been placed), is INCONCLUSIVE, never dropped from the before/after partition; so is a tracked
+    decoder's row there whose source no longer names the asset (cleared or swapped).
     """
     tracks = track_by_id(samples, asset_substr)
     if not decoded_anywhere(tracks):
@@ -2189,6 +2193,28 @@ def score_continuity(
         for element_id, rows in tracks.items()
     }
     windowed = {element_id: rows for element_id, rows in windowed.items() if rows}
+    source = (boundary_scene if transition_scene is None else transition_scene) - 1
+    prior = [s["t"] for s in samples if (scene := _finite_number(s.get("scene"))) is not None and scene < source]
+    floor = -math.inf if min_window_start is None else min_window_start
+    reach = min(window["start"], max(max(prior, default=-math.inf), floor))
+    unplaced = [
+        {"t": r["t"], "id": i, "reason": why} for i, rows in tracks.items() for r in rows
+        if reach <= r["t"] <= window["end"] and (why := phase_unreadable(r, transition_scene))
+    ]
+    if unplaced:
+        return _inconclusive(
+            "a tracked row the carry window reaches has an unreadable phase", unplaced=unplaced[:5], window=window,
+        )
+    unnamed = [
+        {"t": sample["t"], "id": video.get("id"), "src": video.get("src")} for sample in samples
+        if reach <= sample["t"] <= window["end"]
+        for video in sample.get("videos") or []
+        if video.get("id") in tracks and asset_substr not in str(video.get("src") or "").lower()
+    ]
+    if unnamed:
+        return _inconclusive(
+            "a tracked decoder's row the carry window reaches does not name the asset", unnamed=unnamed[:5], window=window,
+        )
     before_ids = {i for i, rows in windowed.items() if any(r["scene"] is not None and r["scene"] < boundary_scene for r in rows)}
     after_ids = {i for i, rows in windowed.items() if any(r["scene"] is not None and r["scene"] >= boundary_scene for r in rows)}
     common = before_ids & after_ids
@@ -2538,9 +2564,12 @@ def score_refusal(
     authored rect other than the raw player's own element for it (`handed_back`: its
     `__obedElId`s, proven by `score_raw_handback`) or another instance's decoder (`foreign`,
     from `instance_decoders`), and nothing pooled or preserved for its asset that is not proven
-    another instance's (`instance_owner`). "Did not continue" on its own is vacuous, so every
-    way of not knowing (no sample, an untrustworthy stage map, a painting-probe error, an
-    unreadable preserve snapshot or entry) is INCONCLUSIVE, never a pass and never a red."""
+    another instance's (`instance_owner`). A preserved decoder is the movie's by its asset key,
+    its movie key, an instance stamp of the pair or a `linked` decoder id, so a cleared source
+    (`key` "") is still identified by its stamps. "Did not continue" on its own is vacuous, so
+    every way of not knowing (no sample, an untrustworthy stage map, a painting-probe error, an
+    unreadable preserve snapshot or entry, an entry nothing identifies) is INCONCLUSIVE, never a
+    pass and never a red."""
     if not isinstance(sample, dict):
         return _inconclusive("no refusal evidence was sampled on the destination slide")
     stage_map = sample.get("stageMap")
@@ -2558,14 +2587,18 @@ def score_refusal(
     pooled: list[dict[str, Any]] = []
     if runtime_installed:
         snapshot = sample.get("poolSnapshot")
-        if not isinstance(snapshot, list) or not all(isinstance(e, dict) and isinstance(e.get("key"), str) for e in snapshot):
+        if not isinstance(snapshot, list) or not all(isinstance(e, dict) and _id_or_null(e.get("elId")) for e in snapshot):
             return _inconclusive(f"preserve snapshot is unreadable: {snapshot!r}")
         ids = retire_instance_ids(retire)
-        pooled = [
-            entry for entry in snapshot
-            if matches_asset_keys(entry["key"], retire["assetKeys"])
-            and instance_owner(entry, ids, linked, foreign) != "foreign"
-        ]
+        adverse = {
+            index: True if instance_stamps(entry) & ids or entry.get("elId") in linked
+            else _movie_identity(entry, retire["assetKeys"], retire.get("movieKey"))
+            for index, entry in enumerate(snapshot) if instance_owner(entry, ids, linked, foreign) != "foreign"
+        }
+        unknown = [snapshot[index] for index, held in adverse.items() if held is None]
+        if unknown:
+            return _inconclusive("a preserve snapshot entry names no readable movie or instance", unidentified=unknown)
+        pooled = [snapshot[index] for index, held in adverse.items() if held]
     reason = None
     if over:
         reason = f"{len(over)} painting video(s) still overlap the retired movie on its destination slide"
@@ -2679,6 +2712,18 @@ def _carried_el_id(state: Any) -> Any:
     return carried[0].get("elId") if len(carried) == 1 else None
 
 
+def _movie_identity(entry: dict[str, Any], asset_keys: Sequence[str], movie_key: Any) -> bool | None:
+    """Whether a pool or preserve-snapshot entry holds the movie, by its asset `key` or its
+    `movieKey`; None when its `key` is missing or ill-typed, or when a cleared source (`key` "")
+    carries no movie key to say."""
+    key, movie = entry.get("key"), entry.get("movieKey")
+    if not isinstance(key, str) or not (movie is None or isinstance(movie, str)):
+        return None
+    if matches_asset_keys(key, asset_keys) or (movie is not None and movie == movie_key):
+        return True
+    return False if key or movie else None
+
+
 def _movie_entries(pool: list[Any], armed: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         entry for entry in pool
@@ -2779,12 +2824,15 @@ def _armed_pool(
     states: list[dict[str, Any]], armed: dict[str, Any], carried: Any, carried_readable: bool = True,
 ) -> tuple[bool | None, dict[str, Any]]:
     """The pool is {carried} plus out-of-document siblings, the carried decoding in real time;
-    None when the carried decoder cannot be named (`carried_readable`) or a pool field it needs
-    is unreadable."""
+    None when the carried decoder cannot be named (`carried_readable`), a pool field it needs
+    is unreadable, or an entry's movie cannot be told (`_movie_identity`)."""
     for state in states:
         pool = state.get("pool")
         if not isinstance(pool, list) or not all(isinstance(entry, dict) for entry in pool):
             return None, {"reason": f"pool census is unreadable: {pool!r}"}
+        unidentified = [e for e in pool if _movie_identity(e, armed["assetKeys"], armed["movieKey"]) is None]
+        if unidentified:
+            return None, {"reason": "a pooled entry names no readable movie", "unidentified": unidentified}
         if any(not isinstance(entry.get("inDocument"), bool) for entry in _movie_entries(pool, armed)):
             return None, {"reason": "a pooled movie entry's inDocument is unreadable"}
     if not carried_readable:
@@ -2817,15 +2865,23 @@ def _armed_pool(
     return (c1 > c0 and low <= rate <= high), {"clock": clock, "rate": rate}
 
 
-def pre_flip_owner_ids(samples: list[dict[str, Any]], armed: dict[str, Any]) -> list[Any]:
-    """Footprint owners resolved at the armed instance rect before the flip (None if unresolved)."""
+def pre_flip_owner_ids(samples: list[dict[str, Any]], armed: dict[str, Any]) -> list[Any] | None:
+    """Footprint owners resolved at the armed instance rect before the flip (None if unresolved);
+    None for the whole census when a decoder row cannot be placed (no readable `src`, or for
+    the movie no readable scene, or before the flip no readable rect), never dropped from it."""
     owners: list[Any] = []
     for sample in samples or []:
-        scene = sample.get("scene")
-        if not isinstance(scene, (int, float)) or scene >= armed["atScene"]:
+        scene = _finite_number(sample.get("scene")) if isinstance(sample, dict) else None
+        if scene is not None and scene >= armed["atScene"]:
             continue
-        for video in sample.get("videos") or []:
-            if matches_asset_keys(video.get("src"), armed["assetKeys"]) and rect_matches(video.get("rect"), armed["instanceRect"]):
+        for video in (sample.get("videos") or []) if isinstance(sample, dict) else [None]:
+            if not isinstance(video, dict) or not isinstance(video.get("src"), str):
+                return None
+            if not matches_asset_keys(video["src"], armed["assetKeys"]):
+                continue
+            if scene is None or not _is_rect(video.get("rect")):
+                return None
+            if rect_matches(video.get("rect"), armed["instanceRect"]):
                 owner = video.get("footprintOwner")
                 owners.append(owner.get("elId") if isinstance(owner, dict) else None)
     return owners
@@ -3274,6 +3330,22 @@ def score_raw_handback(samples: Any, spec: dict[str, Any]) -> dict[str, Any]:
     return {"verdict": False, "reason": f"{dom_id} is present but never connected at its authored rect", **detail}
 
 
+def unplaced_after_start(samples: Any, below: float | None = None) -> bool:
+    """Whether a timed sampler row after the first placed one carries no readable scene or, on a
+    scene before `below`, no Boolean `busy`, so `leave_rest_t` cannot place the rest it may be (the
+    leading rows before the player reports a scene are not)."""
+    rows = sorted(
+        (r for r in samples if isinstance(r, dict) and _finite_number(r.get("t")) is not None), key=lambda r: r["t"],
+    ) if isinstance(samples, list) else []
+    placed = [_finite_number(r.get("scene")) is not None for r in rows]
+    if True not in placed:
+        return False
+    run = rows[placed.index(True):]
+    return not all(placed[placed.index(True):]) or below is not None and any(
+        r["scene"] < below and not isinstance(r.get("busy"), bool) for r in run
+    )
+
+
 def leave_rest_t(samples: Any, transition_scene: int) -> float | None:
     """When the player leaves its rest for `transition_scene`: the first row after the last settled
     row (busy False) on an earlier scene. The page hash is no clock for this -- while idle at the
@@ -3309,11 +3381,12 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
     "retire"): at least one refusal note for the movie in the zone `[atScene - 1, the next
     slide's transition scene)`, `preserve-refused` (key, via, scene) from a declining hook or
     `retire-boundary` (key, elIds, atScene) from the keep-warm sweep of decoders pooled before
-    the zone, and no carry note (`CARRY_EVENT_KINDS`) for its key or elements in that zone. Every
+    the zone, and no carry note (`CARRY_EVENT_KINDS`) for its key, elements or instance pair in that zone. Every
     note, pool entry and painter is bound to the retired instance pair, never asset-wide
     (`instance_owner`, `instance_decoders`): a refusal note counts only when proven the pair's
     and, stamped, names its source instance; adverse evidence is set aside only when proven
-    another instance's, and a decoder tied to the pair outranks a foreign stamp. The
+    another instance's or keyed to another movie, and a decoder tied to the pair outranks a foreign
+    stamp; a carry note in the zone nothing identifies is INCONCLUSIVE. The
     zone is placed in page time from the samples (`retire_zone_times`) when the notes carry `t`,
     never by the page hash. Unreadable evidence is INCONCLUSIVE."""
     if not isinstance(sample, dict):
@@ -3349,6 +3422,12 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
         return {**scored, "verdict": False, "handback": handback, "reason": handback["reason"]}
     if not runtime_installed:
         return {**scored, "handback": handback}
+    transitions = [scene - 1, *([spec["zoneUntilScene"] - 1] if spec.get("zoneUntilScene") is not None else [])]
+    if unplaced_after_start(samples, max(transitions)):
+        return _inconclusive(
+            "a sampler row carries no scene, or no move state before the zone's end, so the retire zone cannot be "
+            "placed", handback=handback,
+        )
     zone_end = spec["zoneUntilScene"] - 1 if spec.get("zoneUntilScene") is not None else math.inf
     timed = retire_zone_times(samples, scene, spec.get("zoneUntilScene"))
 
@@ -3387,12 +3466,19 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
             )
         )
     ]
-    carries = [
-        e for e, d in details
-        if e.get("kind") in CARRY_EVENT_KINDS
-        and (keyed(d) or any(d.get(f) in el_ids for f in ("elId", "newElId") if d.get(f) is not None))
-        and event_in_zone(e, _event_scene_of(e), unplaced=True)
-    ]
+    held = {
+        index: True if (
+            keyed(d) or instance_owner(d, ids, linked, foreign) == "target"
+            or any(d.get(f) in el_ids for f in ("elId", "newElId") if d.get(f) is not None)
+        ) else _movie_identity(d, spec["assetKeys"], movie_key)
+        for index, (e, d) in enumerate(details)
+        if e.get("kind") in CARRY_EVENT_KINDS and event_in_zone(e, _event_scene_of(e), unplaced=True)
+    }
+    unknown = [details[index][0] for index, mine in held.items() if mine is None]
+    if unknown:
+        return _inconclusive("a carry note in the retire zone names no readable movie or instance",
+                             unidentified=unknown, handback=handback)
+    carries = [details[index][0] for index, mine in held.items() if mine]
     reasons = [scored["reason"]] if scored.get("reason") else []
     if not notes:
         reasons.append(f"no preserve-refused/retire-boundary note for {movie_key} in scenes [{scene - 1}, {zone_end})")
@@ -3452,6 +3538,8 @@ def score_armed_strict(reads: Any, armed: dict[str, Any], continuity: Any, sampl
     if not isinstance(continuity, dict):
         return _inconclusive(f"the host continuity read is unreadable: {continuity!r}")
     owners = pre_flip_owner_ids(samples if isinstance(samples, list) else [], armed)
+    if owners is None:
+        return _inconclusive("a sampled decoder row cannot be placed before or after the armed flip")
     if not any(owner is not None for owner in owners):
         return _inconclusive("no pre-flip sample at the armed instance rect resolved an owner")
     return score_armed(reads, armed, continuity, owner_ids=owners)
@@ -4085,7 +4173,8 @@ def rect_iou(a: dict[str, float], b: dict[str, float]) -> float:
 def painting_videos(raw: Any, stage_map: dict[str, Any]) -> list[dict[str, Any]]:
     """`PAINTING_VIDEOS_JS`'s result in authored px. Anything but a list of
     well-formed rows is an instrument error, never an empty (and therefore
-    silently clean) list."""
+    silently clean) list; a row's identity is well-formed with a string `src` and an
+    `elId` that is present (an explicit null is the untagged reading, a missing one is not)."""
     if not isinstance(raw, list):
         raise VisiblePassError(f"painting-video probe returned {raw!r}")
     videos: list[dict[str, Any]] = []
@@ -4093,7 +4182,7 @@ def painting_videos(raw: Any, stage_map: dict[str, Any]) -> list[dict[str, Any]]
         rect = row.get("rect") if isinstance(row, dict) else None
         if not isinstance(rect, dict) or not all(
             isinstance(rect.get(key), (int, float)) and math.isfinite(rect[key]) for key in ("x", "y", "w", "h")
-        ):
+        ) or not isinstance(row.get("src"), str) or "elId" not in row or not _id_or_null(row["elId"]):
             raise VisiblePassError(f"painting-video probe returned an unusable row: {row!r}")
         screen = {key: float(rect[key]) for key in ("x", "y", "w", "h")}
         videos.append({
@@ -4746,8 +4835,9 @@ def score_live_ring(
 
 def score_handback_carry(record: Any, armed: dict[str, Any]) -> dict[str, Any]:
     """Vgl after build 1: carried paints alone, released by hand-off, never remounted. Each check
-    is tri-state: an unread or unreadable read, note list, stage map, painting probe, pool,
-    release note or facade list is None, and any None makes the verdict None before any failure."""
+    is tri-state: an unread or unreadable read, note list, stage map, painting probe, pool or pool
+    entry identity, release note, facade list or facade entry (its `elId`/`forElId`, explicit
+    nulls readable), or remount note without an object detail naming `elId` is None, and any None makes the verdict None before any failure."""
     checks: dict[str, bool | None] = dict.fromkeys(("painting", "release", "noRemount", "handoff"))
     detail: dict[str, Any] = {}
     record = record if isinstance(record, dict) else {}
@@ -4776,7 +4866,9 @@ def score_handback_carry(record: Any, armed: dict[str, Any]) -> dict[str, Any]:
                 abs(movie[0]["screen"][k] - want[k]) <= HANDBACK_RECT_TOLERANCE_PX for k in ("x", "y", "w", "h")
             )
     pool = before.get("pool") if isinstance(before, dict) else None
-    pool_ok = isinstance(pool, list) and all(isinstance(e, dict) for e in pool)
+    pool_ok = isinstance(pool, list) and all(
+        isinstance(e, dict) and _movie_identity(e, armed["assetKeys"], armed["movieKey"]) is not None for e in pool
+    )
     pooled = sorted({e.get("elId") for e in _movie_entries(pool, armed)}, key=str) if pool_ok else None
     detail.update(pooled=pooled, releases=releases)
     if named and carried is None:
@@ -4787,17 +4879,23 @@ def score_handback_carry(record: Any, armed: dict[str, Any]) -> dict[str, Any]:
             sorted(release["retired"], key=str) == [e for e in pooled if e != carried]
         )
     reads = (before, after)
-    facades_ok = all(isinstance(read, dict) and isinstance(read.get("facades"), list) for read in reads)
+    facades_ok = all(
+        isinstance(read, dict) and isinstance(read.get("facades"), list)
+        and all(isinstance(f, dict) and "elId" in f and "forElId" in f for f in read["facades"])
+        for read in reads
+    )
+    remount_kinds = ("remount-done", "remount-footprint-rect")
+    remounts_ok = named and all(
+        isinstance(event.get("detail"), dict) and "elId" in event["detail"]
+        for event in after["coreEvents"] if event.get("kind") in remount_kinds
+    )
     if named and carried is None:
         checks["noRemount"] = False
-    elif named and facades_ok:
-        facades = [
-            f.get("elId") for read in reads for f in read["facades"]
-            if isinstance(f, dict) and f.get("forElId") == carried
-        ]
+    elif named and facades_ok and remounts_ok:
+        facades = [f["elId"] for read in reads for f in read["facades"] if f["forElId"] == carried]
         guarded = {carried, *facades}
         remounts = [
-            {"kind": kind, **note} for kind in ("remount-done", "remount-footprint-rect")
+            {"kind": kind, **note} for kind in remount_kinds
             for note in _notes(after, kind) if note.get("elId") in guarded
         ]
         detail.update(guarded=sorted(guarded, key=str), remounts=remounts)
@@ -7310,7 +7408,8 @@ def apply_sampler_integrity(result: dict[str, Any]) -> None:
 
 
 def rescore_force_wrap(path: Path) -> dict[str, Any]:
-    """Re-score a saved force-wrap artifact with today's scorer; no browser."""
+    """Re-score a saved force-wrap artifact with today's scorer and the live run's sampler
+    integrity (`apply_sampler_integrity`); no browser."""
     result = json.loads(path.read_text())
     boundary, offset_ms = result["forceWrap"]["boundary"], result["forceWrap"]["offsetMs"]
     gt = force_wrap_ground_truth(
@@ -7319,9 +7418,11 @@ def rescore_force_wrap(path: Path) -> dict[str, Any]:
     )
     before = result.get("status")
     score_force_wrap_run(result, gt, boundary, offset_ms)
+    apply_sampler_integrity(result)
     forced = result["forced"]
     return {
         "artifact": str(path), "statusBefore": before, "status": result["status"], "outcome": forced.get("outcome"),
+        "samplerReason": result.get("samplerReason"),
         "reasons": forced.get("reasons"), "wrapFromPressMs": forced.get("wrapFromPressMs"),
         "carry": forced.get("carry"), "wrapOwnerExcused": result["continuityVerdict"].get("wrapOwnerExcused"),
         "recorderWindow": result["recorderClock"].get("window"),
@@ -7796,9 +7897,17 @@ def carry_cover_exposure(
 
 def _carried_rect(row: dict[str, Any] | None, el_id: Any, key: str = "vids") -> dict[str, Any] | None:
     for video in (row or {}).get(key) or []:
-        if video.get("elId") == el_id and video.get("w", 0) > 0 and video.get("h", 0) > 0:
+        if isinstance(video, dict) and video.get("elId") == el_id:
             return video
     return None
+
+
+def _overlay_readable(video: dict[str, Any] | None) -> bool:
+    """A carried read with a finite, non-negative rect (a collapsed overlay is a readable 0) and a Boolean `opaque`."""
+    return (
+        video is not None and _is_rect(video) and video["w"] >= 0 and video["h"] >= 0
+        and isinstance(video.get("opaque"), bool)
+    )
 
 
 def carry_cover_sync_tick(image: np.ndarray) -> int | None:
@@ -7855,7 +7964,9 @@ def score_carry_cover(
 
     Each frame is placed at the tick its sync bar names (its timestamp only picks between counter wraps) and scored
     against both reads of that tick's overlay: its post-frame read and the next tick's pre read. A frame whose reads
-    disagree on the cover rule is undecided; when the undecided frames decide the verdict it is INCONCLUSIVE.
+    disagree on the cover rule is undecided; when the undecided frames decide the verdict it is INCONCLUSIVE. A placed
+    frame with only one read, or a read of the carried decoder without a finite, non-negative rect or a Boolean
+    `opaque`, is never scored on what remains or discarded as unsampled: INCONCLUSIVE.
     PASS: at least `CARRY_COVER_MIN_CLEAN_SHARE` of the scored mid-move frames expose at most
     `CARRY_COVER_MAX_EXPOSED_FRACTION` of the overlay's area and no strip is wider than `CARRY_COVER_MAX_STRIP_PX`.
     Coverage: at least `CARRY_COVER_MIN_FPS` scored frames per second, no stretch of the mid-move window longer than
@@ -7891,6 +8002,8 @@ def score_carry_cover(
             f"{len(late)} other bridge-motion-start notes during the capture (only this bridge's may be)"
         )
     t0, el_id = float(own[0]["t"]), own[0]["detail"].get("elId")
+    if el_id is None or not _id_or_null(el_id):
+        return inconclusive("this bridge's bridge-motion-start note names no carried decoder")
     duration_ms = 1000.0 * float(bridge["durationSeconds"])
     in_move = [v for r in rows if t0 <= r["ts"] <= t0 + duration_ms for v in [_carried_rect(r, el_id)] if v]
     if not in_move:
@@ -7951,17 +8064,19 @@ def score_carry_cover(
         after = rows[index + 1] if index + 1 < len(rows) else None
         if after is not None and after["tick"] != (row["tick"] + 1) % wrap:
             after = None
-        reads = [
-            (name, v) for name, v in (("post", _carried_rect(row, el_id)), ("pre", _carried_rect(after, el_id, "pre"))) if v
-        ]
-        if not reads:
+        reads = [("post", _carried_rect(row, el_id)), ("pre", _carried_rect(after, el_id, "pre"))]
+        if all(v is None for _, v in reads):
             per_frame.append({**entry, "unaligned": "the carried video was not sampled at its tick"})
+            continue
+        if not all(_overlay_readable(v) for _, v in reads):
+            per_frame.append({**entry, "unreadable": "its post/pre overlay reads are unpaired or carry no readable rect "
+                                                     "or Boolean opacity"})
             continue
         active = [m["screen"] for m in masks if m["untilS"] is None or at - t0 <= 1000.0 * m["untilS"]]
         scored = []
         for name, video in reads:
             overlay = {k: float(video[k]) for k in ("x", "y", "w", "h")}
-            measured = carry_cover_exposure(image, roi, background["color"], overlay, bool(video.get("opaque")), active)
+            measured = carry_cover_exposure(image, roi, background["color"], overlay, video["opaque"], active)
             scored.append({"read": name, "overlay": {k: round(v, 2) for k, v in overlay.items()}, **measured})
         widths = [max(s["strips"].values()) for s in scored]
         fractions = [s["exposedFraction"] for s in scored]
@@ -7974,18 +8089,21 @@ def score_carry_cover(
             "undecided": len({_cover_ok(f, w) for f, w in zip(fractions, widths)}) > 1, "reads": scored,
         })
     detail["frames"] = per_frame
-    aligned = [f for f in per_frame if "unaligned" not in f]
-    discarded = len(per_frame) - len(aligned)
+    aligned = [f for f in per_frame if "unaligned" not in f and "unreadable" not in f]
+    unreadable = sum("unreadable" in f for f in per_frame)
+    discarded = sum("unaligned" in f for f in per_frame)
     edges = [lo, *sorted({f["domTs"] for f in aligned}), hi]
     max_gap = max(b - a for a, b in zip(edges, edges[1:]))
     allowed_gap = (CARRY_COVER_MAX_GAP_FRAMES + 0.5) * cadence
     detail.update(
-        alignedFrames=len(aligned), discardedFrames=discarded,
+        alignedFrames=len(aligned), discardedFrames=discarded, unreadableFrames=unreadable,
         discardedShare=round(discarded / len(per_frame), 4) if per_frame else None,
         maxGapMs=round(max_gap, 2), maxGapAllowedMs=round(allowed_gap, 2),
         undecidedFrames=sum(f["undecided"] for f in aligned),
     )
     gaps = []
+    if unreadable:
+        gaps.append(f"{unreadable} mid-move frames lack a readable pair of overlay reads (rect and Boolean opacity)")
     if len(aligned) < need:
         gaps.append(f"too few aligned mid-move frames ({len(aligned)} < {need})")
     if max_gap > allowed_gap:
@@ -8017,21 +8135,22 @@ def carry_cover_capture_problems(capture: dict[str, Any], bridge: dict[str, Any]
 
 
 def carry_cover_status(continuity: Any, bridges: Sequence[dict[str, Any]]) -> tuple[str, list[str]]:
-    """Integrity first: no bridge, continuity not installed, or any bridge INCONCLUSIVE is INCONCLUSIVE; else any FAIL
-    is FAIL; else PASS."""
+    """Integrity first: no bridge, continuity not installed, or any bridge whose verdict is not "pass" or "fail"
+    (unmeasured, INCONCLUSIVE or unreadable) is INCONCLUSIVE; else any FAIL is FAIL; else PASS."""
     mode = continuity.get("mode") if isinstance(continuity, dict) else None
     if mode != "qualified":
         return "inconclusive", [f"continuity runtime not installed (mode {mode!r})"]
     if not bridges:
         return "inconclusive", ["the plan carries no bridge"]
-    verdicts = [(b["boundary"], b.get("result") or {"verdict": "inconclusive", "reasons": ["not measured"]}) for b in bridges]
-    for want in ("inconclusive", "fail"):
-        hit = [f"{name}: {why}" for name, r in verdicts if r.get("verdict") == want for why in r.get("reasons") or [want]]
-        if hit:
-            return want, hit
-    if any(r.get("verdict") != "pass" for _, r in verdicts):
-        return "inconclusive", [f"{name}: verdict {r.get('verdict')!r}" for name, r in verdicts]
-    return "pass", []
+    verdicts = [(b.get("boundary"), b.get("result") if isinstance(b.get("result"), dict) else {}) for b in bridges]
+    unknown = [(name, r) for name, r in verdicts if r.get("verdict") not in ("pass", "fail")]
+    if unknown:
+        return "inconclusive", [
+            f"{name}: {why}" for name, r in unknown
+            for why in r.get("reasons") or [f"verdict {r.get('verdict')!r}" if r else "not measured"]
+        ]
+    fails = [f"{name}: {why}" for name, r in verdicts if r["verdict"] == "fail" for why in r.get("reasons") or ["fail"]]
+    return ("fail", fails) if fails else ("pass", [])
 
 
 def _screencast(
@@ -8123,7 +8242,7 @@ def run_carry_cover(args: argparse.Namespace) -> dict[str, Any]:
     result: dict[str, Any] = {"bridges": bridges}
     force_viewport(*args.viewport)
     evidence = evidence_dir_of(args.artifact)
-    continuity: Any = None
+    continuities: list[Any] = []
     with ExitStack() as stack:
         result["coreSha256"] = (
             stack.enter_context(injected_core_variant(args.core_variant)) if args.core_variant else js_sha256()
@@ -8136,7 +8255,7 @@ def run_carry_cover(args: argparse.Namespace) -> dict[str, Any]:
             capture = capture_carry_cover(
                 export, load_slides(export), bridge, args.viewport, hide_overlay=args.carry_cover_null,
             )
-            continuity = capture.get("continuity")
+            continuities.append(capture.get("continuity"))
             frames = capture.pop("frames")
             read = capture.pop("read", None) or {}
             scored = score_carry_cover(frames, read.get("rows"), read.get("notes"), bridge, capture.get("stageMap"),
@@ -8153,6 +8272,10 @@ def run_carry_cover(args: argparse.Namespace) -> dict[str, Any]:
                 path = evidence / f"carry-cover-{bridge['boundary']}-worst.png"
                 cv2.imwrite(str(path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
                 scored["worstFrame"] = {"path": str(path), "pts": worst["pts"], "exposedPx": worst["exposedPx"]}
+    continuity = next(
+        (c for c in continuities if not (isinstance(c, dict) and c.get("mode") == "qualified")),
+        continuities[-1] if continuities else None,
+    )
     result["continuity"] = continuity
     result["status"], result["reasons"] = carry_cover_status(continuity, bridges)
     return result
