@@ -3259,9 +3259,10 @@ def write_json(path: Path, data: Any) -> Path:
 _BG_FILL_SOLO = re.compile(
     rb"^q Q q /Cs1 cs 0 0 0 sc 0 1080 m 1920 1080 l 1920 0 l 0 0 l h f Q\s*"
 )
-# Same fill when the trailing Q is deferred (content continues in the same q-block).
+# Same fill when the trailing Q is deferred (content continues in the same q-block): the colour space
+# stays set, since later `sc` fills in that block depend on it.
 _BG_FILL_INLINE = re.compile(
-    rb"^(q Q q) /Cs1 cs 0 0 0 sc 0 1080 m 1920 1080 l 1920 0 l 0 0 l h f "
+    rb"^(q Q q /Cs1 cs 0 0 0 sc) 0 1080 m 1920 1080 l 1920 0 l 0 0 l h f "
 )
 
 

@@ -463,7 +463,7 @@ def test_strip_pdf_page_bg_fill_solo_and_inline():
     solo = b"q Q q /Cs1 cs 0 0 0 sc 0 1080 m 1920 1080 l 1920 0 l 0 0 l h f Q"
     inline = (
         b"q Q q /Cs1 cs 0 0 0 sc 0 1080 m 1920 1080 l 1920 0 l 0 0 l h f "
-        b"/Perceptual\nri q 1 0 0 1 0 0 cm /Im1 Do Q Q"
+        b"/Perceptual\nri q 1 0 0 1 0 0 cm /Im1 Do Q 0.9331 0.1350 0.0468 sc 545 80 160 160 re f Q"
     )
     other = b"q Q q /Perceptual ri q 1 0 0 1 0 0 cm /Im1 Do Q Q"
 
@@ -481,8 +481,15 @@ def test_strip_pdf_page_bg_fill_solo_and_inline():
 
     s = strip_pdf_page_bg_fill(page_with(solo))
     assert s["stripped"] is True and s["kind"] == "solo"
-    i = strip_pdf_page_bg_fill(page_with(inline))
+    stripped = page_with(inline)
+    i = strip_pdf_page_bg_fill(stripped)
     assert i["stripped"] is True and i["kind"] == "inline"
+    # The colour space stays set for the block's later fills: without `/Cs1 cs`, pdf.js paints `r g b sc` in its
+    # default DeviceGray (grey = 255 x r), which turned P2 slide 2's red, magenta and orange squares grey.
+    data = stripped.get_contents().get_data()
+    assert b"0 1080 m 1920 1080 l" not in data
+    assert data.startswith(b"q Q q /Cs1 cs 0 0 0 sc ")
+    assert data.index(b"/Cs1 cs") < data.index(b"0.9331 0.1350 0.0468 sc")
     n = strip_pdf_page_bg_fill(page_with(other))
     assert n["stripped"] is False
 
