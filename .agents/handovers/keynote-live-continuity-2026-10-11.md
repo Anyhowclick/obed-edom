@@ -13,7 +13,7 @@ is copied below. Verify branches and PRs on GitHub before acting. Evidence paths
 | `s2-glclock-fold1` | In flight (agent worktree `wf_07e0a5a2-be8-*`, off `5fa7d48b`): Astra gl-clock r1 fixes. |
 | Contract-pass plan | In flight (workflow `wf_f1d7e30e-153`): to be saved as `.agents/plans/keynote_live_continuity_contract.plan.md`. |
 | Dissolve cross-fade plan | Separate session (owner-started), branch `claude/keynote-live-dissolve-crossfade-plan`, worktree `brave-goodall-bd9851`. Plan only. |
-| `claude/continuity-generalisation-s2` | Old S2 head `dcbb6363`, superseded; deleting it is the owner's call. |
+| Stale branches | `claude/continuity-generalisation-s2`, `s2-instr-fold3`, `s2-main-final`, the fold4/fold5/gl-clock agent branches: all contained in S2, deleted 2026-10-11 (with their stale handovers). |
 | `confident-elion-b41768` | Not ours. Leave it. |
 
 ## Done 2026-10-11 (S2 history, in order)
