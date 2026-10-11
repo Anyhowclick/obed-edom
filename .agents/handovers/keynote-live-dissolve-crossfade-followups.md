@@ -6,7 +6,9 @@ Evidence: main checkout `output/evidence/s2-dev/dissolve-alpha-2026-10-11/` (git
 
 ## Q0b decision record
 
-`Q` = _TBD (coordinator)_ · `L` = _TBD (coordinator)_ — §9.0 item 1, criteria §12.5.
+Provisional (headless Q0b 1, 2026-10-12; CEF criterion (ii) pending): `Q` = `["bt709/bt709/bt709/false"]` · `L` = analytic
+gamma 1.961 (measured LUT within 1). Software compositing needs identity `L` and is not distinguishable by tuple — see the
+2026-10-12 implementation handover. §9.0 item 1, criteria §12.5.
 
 ## (a) Bridged / held decoder over the outgoing transition — owner Q6, separate PR after S2
 
