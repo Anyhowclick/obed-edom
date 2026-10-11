@@ -68,7 +68,8 @@ TAU = 4.0
 COMPLEMENT_TOL = 2.0
 NO_DIP_MIN = 252.0
 MID_E = (0.05, 0.95)
-MIN_MID_FRAMES = 6
+COVERAGE = {"midFrames": 6, "delayShots": 2, "demixable": 3}
+MIN_MID_FRAMES = COVERAGE["midFrames"]
 MIN_CLASS_PX = 2000
 FIT_DIFF_MIN = 20.0
 OVERLAP_DIFF_MIN = 30.0
@@ -79,7 +80,7 @@ HANDOFF_E_MIN = 0.99
 CUT_SUM_TOL = 1e-3
 CUT_AFTER_FRAMES = 3
 DEMIX_E_MAX = 0.8
-DEMIX_MIN_FRAMES = 3
+DEMIX_MIN_FRAMES = COVERAGE["demixable"]
 DEMIX_SPREAD = 0.1
 BIND_TOL_PX = 1.0
 MEDIA_PAD_PX = 2
@@ -230,10 +231,10 @@ LIFECYCLE: dict[str, dict[str, Any]] = {
     "replay": {"replay": True},
     "queued-advance": {"actions": ((0.5, "space"),)},
     "queued-skip": {"actions": ((0.5, "skip"),)},
-    "goto": {"actions": ((0.5, "goto1"),)},
-    "back": {"actions": ((0.5, "back"),)},
-    "hide": {"actions": ((0.5, "hide"), (1.0, "show"))},
-    "hide-screen": {"actions": ((0.5, "hide"), (1.0, "show")), "page": "screen"},
+    "goto": {"actions": ((0.5, "goto1"),), "minMid": 2},
+    "back": {"actions": ((0.5, "back"),), "minMid": 2},
+    "hide": {"actions": ((0.5, "hide"), (1.0, "show")), "minMid": 2},
+    "hide-screen": {"actions": ((0.5, "hide"), (1.0, "show")), "page": "screen", "minMid": 2},
     "automatic": {"overrides": ("automatic",)},
     "loop-wrap": {"overrides": ("loop",), "slide": 4},
     "end-of-show": {"slide": 4, "end": True},
@@ -1026,11 +1027,9 @@ def score_curve(raf: list[dict[str, Any]], min_frames: int = MIN_MID_FRAMES) -> 
     both, problems = [], []
     for r in raf:
         for a in r.get("anims") or []:
-            live = a.get("state") in ("running", "finished")
-            if (a.get("leaf") not in ("in", "out") or not isinstance(a.get("state"), str) or not number(a.get("value"))
-                    or not number(a.get("dur")) or a["dur"] <= 0
-                    or (live and not (number(a.get("ct")) and number(a.get("start"))))):
-                problems.append(f"rAF at {r.get('t')}: malformed animation record {a}")
+            bad = anim_problem(a)
+            if bad:
+                problems.append(f"rAF at {r.get('t')}: malformed animation record ({bad})")
         anims = running_anims(r)
         if not anims:
             continue
@@ -1359,6 +1358,97 @@ CEF = Profile("CEF", ("opaque-off", "off", "noblend", "on2", "cut-on", "cut-off"
               reported=("no_flash", "screen"), headless=False, lifecycle=False)
 
 
+ANIM_STATES = ("idle", "running", "paused", "finished")
+TIMED_STATES = ("running", "paused", "finished")
+ACTION_NAMES = ("space", "skip", "back", "goto1", "hide", "show")
+
+
+def quad(value: Any, n: int = 4) -> bool:
+    return isinstance(value, list) and len(value) == n and all(number(v) for v in value)
+
+
+def integer(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def anim_problem(a: Any) -> str | None:
+    """One transition-animation record: leaf and CSS play state from their enums, finite value, positive duration;
+    `ct`/`start` present, finite when populated, null only outside a timed state (`start` also while a running
+    animation's start is still pending at ct 0)."""
+    if not isinstance(a, dict):
+        return "not a record"
+    if a.get("leaf") not in ("in", "out") or a.get("state") not in ANIM_STATES:
+        return f"leaf/state {a.get('leaf')!r}/{a.get('state')!r}"
+    if not number(a.get("value")) or not number(a.get("dur")) or a["dur"] <= 0:
+        return "value/duration"
+    if "ct" not in a or "start" not in a:
+        return "ct/start absent"
+    for key in ("ct", "start"):
+        if a[key] is not None and not number(a[key]):
+            return f"{key} not finite"
+    if a["state"] in TIMED_STATES and (a["ct"] is None or (a["start"] is None and a["ct"] != 0)):
+        return f"null timing while {a['state']}"
+    return None
+
+
+def video_problem(v: Any) -> str | None:
+    """One per-rAF video record: integer id, boolean `on`; connected ones with finite rect and opacity, boolean
+    membership/paused flags and a null or finite geometry."""
+    if not isinstance(v, dict) or not integer(v.get("id")) or not isinstance(v.get("on"), bool):
+        return "id/on"
+    if not v["on"]:
+        return None
+    if not quad(v.get("rect")) or not number(v.get("eff")) or not all(isinstance(v.get(k), bool) for k in ("inT", "inStage", "paused")):
+        return "rect/eff/flags"
+    geo = v.get("geo", "absent")
+    if geo is not None and not (isinstance(geo, dict) and quad(geo.get("content")) and quad(geo.get("region")) and quad(geo.get("size"), 2)):
+        return "geometry"
+    return None
+
+
+def schema_problems(record: dict[str, Any]) -> list[str]:
+    """One schema check per record kind (animation, video, decoder/rVFC, take publication, cast, holder, lifecycle
+    action), run before any scorer filters records; any violation is a shared integrity failure."""
+    dump = record.get("dump") if isinstance(record.get("dump"), dict) else {}
+    problems = []
+    for r in dump.get("raf") or []:
+        if not isinstance(r, dict):
+            continue
+        bad = [x for x in (anim_problem(a) for a in r.get("anims") or []) if x]
+        if bad:
+            problems.append(f"animation record at {r.get('t')}: {bad[0]}")
+        videos = r.get("videos") if isinstance(r.get("videos"), list) else []
+        bad = [x for x in (video_problem(v) for v in videos) if x]
+        ids = [v.get("id") for v in videos if isinstance(v, dict)]
+        if bad or len(set(map(str, ids))) != len(ids):
+            problems.append(f"video record at {r.get('t')}: {bad[0] if bad else 'duplicate id'}")
+    vids = dump.get("vids", [])
+    if not isinstance(vids, list) or not all(
+            isinstance(v, dict) and integer(v.get("id")) and isinstance(v.get("rv"), list)
+            and all(quad(x, 3) for x in v["rv"]) and (v.get("detach") is None or number(v.get("detach")))
+            and all(v.get(k) is None or isinstance(v.get(k), str) for k in ("tuple", "err", "src")) for v in vids) \
+            or len({v.get("id") for v in vids if isinstance(v, dict)}) != len(vids):
+        problems.append("decoder/rVFC records malformed")
+    takes = dump.get("takes", [])
+    if not isinstance(takes, list) or not all(isinstance(t, list) and len(t) == 2 and number(t[0]) and (t[1] is None or number(t[1]))
+                                              for t in takes):
+        problems.append("take publications malformed")
+    cast = record.get("cast", [])
+    if not isinstance(cast, list) or not all(isinstance(c, dict) and isinstance(c.get("name"), str) and c["name"]
+                                             and (number(c.get("t")) or (number(c.get("t0")) and number(c.get("t1")))) for c in cast):
+        problems.append("cast records malformed")
+    first = dump.get("first") if isinstance(dump.get("first"), dict) else {}
+    holders = first.get("holders", [])
+    if not isinstance(holders, list) or not all(isinstance(h, dict) and quad(h.get("rect")) and quad(h.get("canvasRect"))
+                                                and isinstance(h.get("natural"), list) and len(h["natural"]) == 2
+                                                and all(integer(n) and n > 0 for n in h["natural"]) for h in holders):
+        problems.append("holder records malformed")
+    actions = record.get("actions", [])
+    if not isinstance(actions, list) or not all(isinstance(a, dict) and a.get("name") in ACTION_NAMES and number(a.get("t")) for a in actions):
+        problems.append("lifecycle actions malformed")
+    return problems
+
+
 def raf_problems(raf: Any) -> list[str]:
     """Every rAF record well formed: finite, strictly increasing `t`; `eff` absent or two finite leaf opacities with an
     `anims` list beside it; `anims` and `videos` (always present; observed empty = []) lists of records; no gap > `RAF_GAP_MS` while the transition DOM is present."""
@@ -1372,6 +1462,8 @@ def raf_problems(raf: Any) -> list[str]:
     if bad:
         return [f"malformed rAF records at {bad[:3]}"]
     span = [i for i, r in enumerate(raf) if "eff" in r]
+    if span and span != list(range(span[0], span[-1] + 1)):
+        return ["the transition DOM vanishes and reappears inside one capture"]
     fade = raf[span[0]:span[-1] + 1] if span else []
     return ["rAF gap inside the transition"] if any(b["t"] - a["t"] > RAF_GAP_MS for a, b in zip(fade, fade[1:])) else []
 
@@ -1387,6 +1479,7 @@ def capture_problems(record: dict[str, Any], images: Mapping[str, np.ndarray], a
         problems.append("no rAF records")
     else:
         problems += raf_problems(dump["raf"])
+    problems += schema_problems(record)
     if not target.get("textures") or first.get("textures") != target.get("textures"):
         problems.append(f"texture ids {first.get('textures')} != {target.get('textures')}")
     for key in ("hashBefore", "hashAfter"):
@@ -1578,8 +1671,9 @@ def _voided(res: dict[str, Any], problems: list[str]) -> dict[str, Any]:
 
 
 def score_media(record: dict[str, Any], images: Mapping[str, np.ndarray], ev: Evidence, arm: Arm, fade: dict[str, Any],
-                cal: Calibration, *, identity: bool | None) -> dict[str, dict[str, Any]]:
-    """Frozen frame, frozen region, foreground, tone and overlay (DX-M), each void unless `media_integrity` holds."""
+                cal: Calibration, *, identity: bool | None) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Frozen frame, frozen region, foreground, tone and overlay (DX-M), each void unless `media_integrity` holds; the
+    shared media-integrity problems are returned too, so they reach the arm even when every media check is report-only."""
     es = [r["e"] for r in fade["rows"]]
     decoder, reference, problems = media_integrity(record, images, arm, es)
     idx, _ = demixable(es)
@@ -1618,7 +1712,7 @@ def score_media(record: dict[str, Any], images: Mapping[str, np.ndarray], ev: Ev
         missing = problems + ["no holder, S_live or decoder geometry"]
         out["foreground"] = result(None, missing)
         out["tone"] = result(None, missing)
-        return out
+        return out, problems
     shape = live.shape[:2]
     later = [c for cs in (record.get("foreground") or {}).values() for c in cs if len(c.get("rect") or []) == 4]
     fg_rects = [c["rect"] for c in later if c.get("id") in (*FOREGROUND_TEXTURES, FOREGROUND_SQUARE)]
@@ -1637,7 +1731,7 @@ def score_media(record: dict[str, Any], images: Mapping[str, np.ndarray], ev: Ev
         live2 = images.get("live-1")
         tone = score_tone(ev.holders[0], live, live2, tone_mask, identity=identity) if live2 is not None else result(None, ["no second S_live"])
         out["tone"] = _voided(tone, problems)
-    return out
+    return out, problems
 
 
 def malformed(expect: Iterable[str], exc: Exception) -> dict[str, Any]:
@@ -1697,8 +1791,9 @@ def _score_arm(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Ar
                          "out": class_range(img, masks["out"]) if ok else None})
         checks["cut"] = score_cut(ev.raf, cast, cal)
     if {"frozen_frame", "frozen_region", "foreground", "tone", "overlay"} & set(arm.expect):
-        media = score_media(record, images, ev, arm, fade, cal, identity=identity)
+        media, shared = score_media(record, images, ev, arm, fade, cal, identity=identity)
         checks.update({k: v for k, v in media.items() if k in arm.expect})
+        problems += [p for p in shared if p not in problems]
     if "cost" in arm.expect:
         insert = next((r["t"] for r in ev.raf if r.get("eff") is not None), None)
         checks["cost"] = score_cost((record.get("dump") or {}).get("takes") or [], record.get("advanceAt"), insert)
@@ -1794,7 +1889,7 @@ def _score_lifecycle(record: dict[str, Any], images: Mapping[str, np.ndarray], t
     visible = [i for i in ev.transition if i not in hidden and i not in straddle]
     if ev.A is not None and ev.B is not None:
         fade = score_fade([ev.shots[i] for i in visible], ev.A, ev.B, exclude=ev.media, classes=("out", "in"), cal=cal,
-                          screen=arm.page == "screen", min_frames=1)
+                          screen=arm.page == "screen", min_frames=spec.get("minMid", COVERAGE["midFrames"]))
         if arm.page == "screen":
             checks["model"] = result(fade["checks"].get("model"), fade["problems"])
         else:
@@ -1802,7 +1897,9 @@ def _score_lifecycle(record: dict[str, Any], images: Mapping[str, np.ndarray], t
                                           ([] if "complement" in fade["checks"] else ["no complement evidence"]))
         if row == "automatic":
             auto = replace(arm, holders=1, capture="media")
-            checks["frozen_frame"] = score_media(record, images, ev, auto, fade, cal, identity=None)["frozen_frame"]
+            frozen, shared = score_media(record, images, ev, auto, fade, cal, identity=None)
+            checks["frozen_frame"] = frozen["frozen_frame"]
+            problems += [p for p in shared if p not in problems]
             checks["frozen_delay"] = score_delay_freeze(record, images, ev, auto, [r["e"] for r in fade["rows"]])
     else:
         checks["complement"] = result(None, ["no textures"])
@@ -1842,8 +1939,8 @@ def score_delay_freeze(record: dict[str, Any], images: Mapping[str, np.ndarray],
     start = first_animation_t(ev.raf)
     meta = record.get("shots") or []
     window = [i for i in ev.transition if start is not None and meta[i]["t1"] < start]
-    if not window:
-        problems = problems + ["no screenshot inside the delay"]
+    if len(window) < COVERAGE["delayShots"]:
+        problems = problems + [f"{len(window)} screenshots inside the delay < {COVERAGE['delayShots']}"]
     if problems or decoder is None:
         return result(None, problems or ["no decoder"])
     cx, cy, cw, _ = decoder["content"]

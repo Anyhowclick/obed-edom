@@ -133,6 +133,9 @@ def raf_curve(shape: str) -> list[dict[str, Any]]:
         if shape == "final-malformed" and i == 11:
             for a in anims:
                 a.update(ct=None, value=math.nan)
+        if shape == "state-empty" and i == 11:
+            for a in anims:
+                a.update(state="", ct=math.nan)
         if shape == "duplicate-in":
             anims.append(dict(anims[0], value=0.0))
         rows.append({"t": ct, "eff": [v, 1 - v], "anims": anims})
@@ -390,6 +393,32 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         del record["dump"]["first"]["layerIds"]
     elif mutate == "layer-ids-dup":
         record["dump"]["first"]["layerIds"] = ["layer1", "layer1"]
+    elif mutate and mutate.startswith("ov-"):
+        record["dump"]["vids"].append({"id": 1, "rv": [], "detach": None, "tuple": None})
+        video = {"id": 1, "on": True, "rect": list(CONTENT), "eff": 1.0, "inT": False, "inStage": False, "paused": False, "geo": None}
+        if mutate == "ov-on-del":
+            del video["on"]
+        elif mutate == "ov-on-none":
+            video["on"] = None
+        elif mutate == "ov-rect-nan":
+            video["rect"][0] = math.nan
+        record["dump"]["raf"][20]["videos"].append(video)
+    elif mutate == "anim-state-empty":
+        for a in record["dump"]["raf"][-20]["anims"]:
+            a.update(state="", ct=math.nan)
+    elif mutate == "keep-life":
+        keep = {"shot-000", "shot-001", "shot-002", "shot-010", "shot-017", "shot-018", "shot-019"}
+        record["shots"] = [s for s in record["shots"] if s["name"] in keep]
+    elif mutate in ("tone-rv-del", "tone-tuple-del", "tone-fg-del"):
+        record["movies"] = {"x.mov": {"layout": probe.tone_layout()}}
+        if mutate == "tone-rv-del":
+            del record["dump"]["vids"][0]["rv"]
+        elif mutate == "tone-tuple-del":
+            del record["dump"]["vids"][0]["tuple"]
+        else:
+            del record["foreground"]
+    elif mutate == "eff-hole":
+        del record["dump"]["raf"][20]["eff"]
     elif mutate == "take-negative":
         record["dump"]["takes"] = [[INSERT_MS - 1.0, -42.0]]
     elif mutate == "no-action":
@@ -472,6 +501,19 @@ def round_gate(mutate: tuple[str, str, str] | None, gate: str, *, only_controls:
             scored[name]["checks"][check] = {"verdict": verdict}
     out = probe.score_round(scored, CAL, identity=False, extra={"cvc": {"verdict": cvc}} if cvc else {}, profile=profile)
     return out["overall"] if gate == "overall" else out["gates"][gate]["verdict"]
+
+
+def delay_one() -> str:
+    record, images = media_run("life-automatic", mutate="delay-42")
+    record["shots"] = [s for s in record["shots"] if not (120 < s["t0"] and s["t1"] < 596)]
+    twin = media_run("life-automatic-twin", holder=False)
+    out = probe.score_lifecycle(record, images, twin, probe.ARMS["life-automatic"], CAL)
+    return out["checks"]["frozen_delay"]["verdict"]
+
+
+def tone_identity(mutate: str) -> str:
+    record, images = media_run("m-tone", mutate=mutate)
+    return probe.score_arm(record, images, probe.DX1.arm("m-tone", True), CAL, identity=True)["outcome"]
 
 
 def cef_outcome(**kwargs: Any) -> str:
@@ -631,6 +673,19 @@ CASES = [
     ("r2-M8 CEF: a report-only no-flash gap does not block", lambda: cef_outcome(mutate="no-pre-raf"), "MATCH"),
     ("r2-m9 W3 rejects a contradictory cached calibration", w3_calibration, False),
     ("r2-m10 negative take duration", lambda: arm_check("m-on", "cost", mutate="take-negative"), "INCONCLUSIVE"),
+    ("r3-1 overlay video record without `on`", lambda: arm_check("m-on", "overlay", mutate="ov-on-del"), "INCONCLUSIVE"),
+    ("r3-1 overlay video record with on=None", lambda: arm_check("m-on", "overlay", mutate="ov-on-none"), "INCONCLUSIVE"),
+    ("r3-1 overlay video record with a NaN rect", lambda: arm_check("m-on", "overlay", mutate="ov-rect-nan"), "INCONCLUSIVE"),
+    ("r3-1 intact overlay observation still FAILs", lambda: arm_check("m-on", "overlay", mutate="ov-intact"), "FAIL"),
+    ("r3-2 curve final row state='' and ct=NaN", lambda: probe.score_curve(raf_curve("state-empty"))["verdict"], "INCONCLUSIVE"),
+    ("r3-2 CEF on with an out-of-enum animation state", lambda: cef_outcome(mutate="anim-state-empty"), "INCONCLUSIVE"),
+    ("r3-3 lifecycle fade with one mid frame", lambda: lifecycle("advance", mutate="keep-life"), "INCONCLUSIVE"),
+    ("r3-3 automatic delay with one screenshot", delay_one, "INCONCLUSIVE"),
+    ("r3-4 m-tone identity without rVFC", lambda: tone_identity("tone-rv-del"), "INCONCLUSIVE"),
+    ("r3-4 m-tone identity without a colour tuple", lambda: tone_identity("tone-tuple-del"), "INCONCLUSIVE"),
+    ("r3-4 m-tone identity without the foreground inventory", lambda: tone_identity("tone-fg-del"), "INCONCLUSIVE"),
+    ("sweep r3: transition DOM missing from one mid-fade rAF", lambda: arm_outcome("m-on", mutate="eff-hole"), "INCONCLUSIVE"),
+    ("sweep r3: cast record with an empty name", lambda: bool(probe.schema_problems({"cast": [{"name": "", "t0": 1.0, "t1": 2.0}]})), True),
     ("r1-13 CEF round needs no headless-only arms", lambda: (round_gate(None, "overall", profile=probe.CEF),
                                                             "lifecycle" in probe.score_round({}, CAL, profile=probe.CEF)["gates"]), ("PASS", False)),
     ("r1-13 headless process/load checks apply to DX-1 only", lambda: (profile_headless(probe.DX1), profile_headless(probe.CEF)), (True, False)),
