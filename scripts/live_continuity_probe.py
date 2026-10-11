@@ -2677,7 +2677,8 @@ def score_refusal(
     """The POSITIVE half of a refused boundary: on the settled destination slide the
     retired movie is back under the raw player -- no painting `<video>` over its
     authored rect other than the raw player's own element for it (`handed_back`: its
-    `__obedElId`s, proven by `score_raw_handback`) or another instance's decoder (`foreign`,
+    `__obedElId`s, proven by `score_raw_handback`, while it names the asset -- another asset paints
+    over the rect, no source is INCONCLUSIVE) or another instance's decoder (`foreign`,
     from `instance_decoders`), and nothing pooled or preserved for its asset that is not proven
     another instance's (`instance_owner`). A preserved decoder is the movie's by its asset key,
     its movie key, an instance stamp of the pair or a `linked` decoder id, so a cleared source
@@ -2698,8 +2699,12 @@ def score_refusal(
     over = [
         video for video in videos
         if any(rects_overlap(video["authored"], rect) for rect in retire["rects"])
-        and not (video.get("elId") is not None and (video["elId"] in handed_back or video["elId"] in foreign))
+        and not (video.get("elId") is not None and video["elId"] in foreign)
+        and not (video.get("elId") in handed_back and matches_asset_keys(video.get("src"), retire["assetKeys"]))
     ]
+    unnamed = [video for video in over if video.get("elId") in handed_back and not video.get("src")]
+    if unnamed:
+        return _inconclusive("a handed-back painter over the retired rect names no source", unidentified=unnamed)
     pooled: list[dict[str, Any]] = []
     if runtime_installed:
         snapshot = sample.get("poolSnapshot")
@@ -3928,8 +3933,9 @@ def score_census(
     instances (`match_painting_videos`, the visible passes' `unexpectedVideos`). Every slide in
     `player_by_ordinal` needs a list of exactly one readable read. Returns the per-slide records, the red
     ids as a multiset -- one `stray:slide{n}:{asset}` per unexpected painting video (its `elId`
-    kept in the record), one `duplicate:slide{n}:{label}` per doubly-painted instance -- and
-    the `census:slide{n}` reads that were missing, extra or unreadable."""
+    kept in the record), one `duplicate:slide{n}:{label}` per doubly-painted instance, one
+    `foreign:slide{n}:{label}` per instance claimed by another asset's video -- and the
+    `census:slide{n}` reads that were missing, extra or unreadable (a claim naming no source)."""
     records: dict[str, Any] = {}
     red: list[str] = []
     unknown: list[str] = []
@@ -3960,6 +3966,9 @@ def score_census(
         records[key] = check
         red.extend(f"stray:slide{ordinal}:{asset_of(video.get('src'), assets)}" for video in check["unexpectedVideos"])
         red.extend(f"duplicate:slide{ordinal}:{dup['label']}" for dup in check["duplicateVideos"])
+        red.extend(f"foreign:slide{ordinal}:{video['label']}" for video in check.get("foreignVideos", ()))
+        if check["verdict"] is None:
+            unknown.append(f"census:slide{ordinal}")
     return records, sorted(red), unknown
 
 
@@ -4461,7 +4470,9 @@ def match_painting_videos(videos: list[dict[str, Any]], expected: list[dict[str,
     and no rect may be claimed twice -- the only evidence that separates two
     live movies sharing one rect, which pixels alone cannot. A video painting a
     DEAD-expected rect claims nothing: the plan says that movie is back under the
-    raw player, so a `<video>` there is unexpected however live its pixels are."""
+    raw player, so a `<video>` there is unexpected however live its pixels are. A video that claims
+    an `asset#index` instance must name that asset: another asset is listed in `foreignVideos`
+    (False), no source in `unnamedVideos` (None, before any failure)."""
     claims: dict[str, list[dict[str, Any]]] = {}
     unexpected: list[dict[str, Any]] = []
     for video in videos:
@@ -4477,14 +4488,25 @@ def match_painting_videos(videos: list[dict[str, Any]], expected: list[dict[str,
     duplicates = [
         {"label": label, "videos": claimants} for label, claimants in claims.items() if len(claimants) > 1
     ]
+    named = [
+        {**video, "label": label} for label, claimants in claims.items() for video in claimants
+        if not matches_asset_keys(video.get("src"), [label.rsplit("#", 1)[0]])
+    ]
+    foreign = [video for video in named if video.get("src")]
+    unnamed = [video for video in named if not video.get("src")]
     reason = None
-    if unexpected:
+    if unnamed:
+        reason = f"{len(unnamed)} painting video(s) claim an expected instance but name no source"
+    elif foreign:
+        reason = f"{len(foreign)} painting video(s) claim an expected instance of another asset"
+    elif unexpected:
         reason = f"{len(unexpected)} painting video(s) match no expected movie instance"
     elif duplicates:
         reason = f"{len(duplicates)} expected movie instance(s) are painted by more than one video"
     return {
-        "verdict": not unexpected and not duplicates, "painting": videos,
+        "verdict": None if unnamed else not unexpected and not duplicates and not foreign, "painting": videos,
         "unexpectedVideos": unexpected, "duplicateVideos": duplicates, "reason": reason,
+        **({"foreignVideos": foreign} if foreign else {}), **({"unnamedVideos": unnamed} if unnamed else {}),
     }
 
 
@@ -4677,8 +4699,10 @@ def visible_slide_record(
     )
     if rescore is not None:
         rescore(record, frames)
-    if record["verdict"] is True and not instance_check["verdict"]:
+    if record["verdict"] is True and instance_check["verdict"] is False:
         record.update(verdict=False, status="fail", reason=instance_check["reason"])
+    elif record["verdict"] is True and instance_check["verdict"] is None:
+        record.update(verdict=None, status="inconclusive", reason=instance_check["reason"])
     if evidence is not None and record["verdict"] is not True:
         record["evidence"] = evidence(record, frames)
     return record

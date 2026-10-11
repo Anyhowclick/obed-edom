@@ -1575,6 +1575,20 @@ class TestPaintingVideoInstanceCheck:
         assert [entry["label"] for entry in duplicates] == ["Untitled.mov#1"]
         assert [video["elId"] for video in duplicates[0]["videos"]] == [1, 2]
 
+    @pytest.mark.parametrize(("src", "verdict", "status"), [
+        ("Untitled.mov", True, "pass"), ("foreign.mov", False, "fail"), ("", None, "inconclusive"),
+    ])
+    def test_a_painter_claiming_an_instance_must_name_its_asset(self, src: str, verdict: Any, status: str) -> None:
+        """Astra r15 #1: the instance was matched by geometry alone, so another asset's (or a source-less)
+        decoder at the expected rect passed under fully live pixels."""
+        from obed_edom.html_alpha_probe import score_visible_slide
+
+        record = self._record(
+            PAINT_STAGE_MAPS["full-bleed"], [painting_video(EXPECTED_SCREEN_RECT, src=src, el_id=1)],
+            scorer=score_visible_slide, shots=self._live_shots(),
+        )
+        assert (record["verdict"], record["status"], record["instanceCheck"]["verdict"]) == (verdict, status, verdict)
+
     def test_a_video_the_paint_test_filtered_out_is_ignored(self) -> None:
         """On a Magic-Move-settled slide the player paints with a stage-wide
         WebGL canvas and the DOM layer tree sits at opacity 0. The in-page paint
@@ -2208,7 +2222,7 @@ class TestPaintingVideoOnADeadRect:
     however live its pixels look."""
 
     def _expected(self, expect: str) -> list[dict[str, Any]]:
-        return [{"label": "movie1#1", "authored": dict(EXPECTED_SCREEN_RECT), "expect": expect}]
+        return [{"label": "Untitled.mov#1", "authored": dict(EXPECTED_SCREEN_RECT), "expect": expect}]
 
     def test_a_video_on_a_dead_expected_rect_is_unexpected(self) -> None:
         videos = [{"src": "Untitled.mov", "elId": 1, "authored": dict(EXPECTED_SCREEN_RECT)}]
@@ -7503,6 +7517,17 @@ class TestRetireVerdict:
         )
         assert self._score(_retire_read(events))["verdict"] is True
 
+    @pytest.mark.parametrize(("src", "expected"), [("untitled.mov", True), ("foreign.mov", False), ("", None)])
+    def test_a_handed_back_painter_must_still_name_the_asset(self, src: str, expected: bool | None) -> None:
+        """Astra r15 #2: the handed-back exemption was granted by elId before the painter's current source."""
+        samples = _handback_samples()
+        for row in samples:
+            for v in row["videos"]:
+                if v["id"] == 5:
+                    v["elId"] = 5
+        read = _retire_read((REFUSED_NOTE,), painting=[painting_video(_p2_facts()["pinRect"], src=src, el_id=5)])
+        assert self._score(read, samples=samples)["verdict"] is expected
+
     def test_known_bad_the_settled_checks_still_hold(self) -> None:
         pin = _p2_facts()["pinRect"]
         assert self._score(_retire_read((RETIRE_NOTE,), painting=[painting_video(pin)]))["verdict"] is False
@@ -8378,12 +8403,17 @@ class TestStrayCensus:
                      id="two-videos-on-one-instance-are-a-duplicate"),
         pytest.param([(BIG_INSTANCE, "untitled.mov"), (OTHER_INSTANCE, "zzz.mp4")], {}, ["stray:slide1:unknown"],
                      id="unknown-source-is-named-unknown"),
+        pytest.param([(BIG_INSTANCE, "foreign.mov")], {}, [f"foreign:slide1:{BIG_ASSET}#1"],
+                     id="another-asset-claiming-an-instance-is-foreign"),  # Astra r15 #1
     ])
     def test_the_red_census(self, slide1: list[tuple[dict[str, float], str]], expectations: dict[int, Any], red: list[str]) -> None:
         raw = dict(self._clean(), **{"1": [self._read(*slide1)]})
         assert probe.score_census(raw, self.PLAN_INSTANCES, expectations, self.PLAYERS)[1] == red
 
-    @pytest.mark.parametrize("read", [None, {"stageMap": None, "painting": []}, {"stageMap": dict(IDENTITY_STAGE_MAP), "painting": {"error": "x"}}])
+    @pytest.mark.parametrize("read", [
+        None, {"stageMap": None, "painting": []}, {"stageMap": dict(IDENTITY_STAGE_MAP), "painting": {"error": "x"}},
+        {"stageMap": dict(IDENTITY_STAGE_MAP), "painting": [painting_video(BIG_INSTANCE, src="")]},  # Astra r15 #1
+    ])
     def test_an_unreadable_or_missing_slide_is_unknown_never_clean(self, read: Any) -> None:
         raw = self._clean()
         if read is None:
