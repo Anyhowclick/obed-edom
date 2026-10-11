@@ -69,14 +69,30 @@ def checks_of(gate: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 # --- env refusal ---------------------------------------------------------------------------------------------------------
 
-def test_main_refuses_while_the_mm_opacity_env_is_set(monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize("arm", ["g2", "dissolve"])
+def test_main_refuses_while_the_mm_opacity_env_is_set(monkeypatch, tmp_path, capsys, arm):
     monkeypatch.delenv(q.GL_REPLAY_ENV, raising=False)
     monkeypatch.setenv(q.MM_OPACITY_ENV, "off")
     monkeypatch.setattr(q, "obs_running", lambda: pytest.fail("must refuse before looking for OBS"))
     with pytest.raises(SystemExit) as exc:
-        q.main(["--arm", "g2", "--out", str(tmp_path)])
+        q.main(["--arm", arm, "--out", str(tmp_path)])
     assert exc.value.code == 2
     assert "OBED_LIVE_MM_OPACITY is set" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("n, want", [
+    (0.0, (4.0, 2.0, 252.0)),
+    (1.3, (4.0, 4.0, 250.0)),
+    (4.0, (5.0, 6.0, 248.0)),
+    (4.0 + 1e-9, None),
+    (float("nan"), None),
+    (None, None),
+])
+def test_dissolve_calibration_is_the_unclamped_formula_and_inconclusive_past_n_4(n, want):
+    # DX-2 (plan §9.2): tau = max(4, ceil(n) + 1), complement = 2 + ceil(n), no dip = 252 - ceil(n); a cap breach
+    # (complement > 6 first, at n > 4) is INCONCLUSIVE (None), never clamped. n = 0 reproduces DX-1's thresholds.
+    cal = q.dissolve_calibration(n)
+    assert (None if cal is None else (cal.tau, cal.complement, cal.no_dip)) == want
 
 
 def test_main_refuses_mmo_arms_on_a_grey_counter_fixture(monkeypatch, tmp_path, capsys):
