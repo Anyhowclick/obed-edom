@@ -572,6 +572,8 @@ def painted_state(
         return UNREADABLE, "opacity"
     if not isinstance(visible, bool):
         return UNREADABLE, "checkVisibility"
+    if not isinstance(pv.get("visibility"), str):
+        return UNREADABLE, "visibility"
     if pv.get("effects"):
         return UNREADABLE, "effects"
     if pv.get("transform"):

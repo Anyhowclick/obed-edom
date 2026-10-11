@@ -1749,7 +1749,12 @@ def unnamed_rows(
 
 
 def _decoded(row: dict[str, Any]) -> bool:
-    return (row.get("readyState") or 0) >= 2 and (row.get("videoWidth") or 0) > 0
+    return (_finite_number(row.get("readyState")) or 0) >= 2 and (_finite_number(row.get("videoWidth")) or 0) > 0
+
+
+def _maybe_decoded(row: dict[str, Any]) -> bool:
+    """Not proven idle: decoding, or a `readyState` or `videoWidth` that is missing, null or ill-typed."""
+    return _decoded(row) or any(_finite_number(row.get(f)) is None for f in ("readyState", "videoWidth"))
 
 
 def decoded_anywhere(tracks: dict[int, list[dict[str, Any]]]) -> bool:
@@ -2030,9 +2035,10 @@ def find_boundary_window(
     with `scene < boundary_scene` to the first settled sample with `scene >=
     boundary_scene`, padded by `pad_s` on each side and clipped to the samples
     actually collected. Returns None if the crossing never happened (both sides of
-    the boundary must be represented and ordered)."""
+    the boundary must be represented and ordered) or cannot be placed: a row after the
+    first placed one with no readable scene may sit on either side (`unplaced_after_start`)."""
     times = [s["t"] for s in samples if s.get("t") is not None]
-    if not times:
+    if not times or unplaced_after_start(samples):
         return None
     before_times = [s["t"] for s in samples if s.get("scene") is not None and s["scene"] < boundary_scene]
     after_times = [s["t"] for s in samples if s.get("scene") is not None and s["scene"] >= boundary_scene]
@@ -2306,16 +2312,33 @@ def score_continuity(
         expected = dst_rect if is_move_complete(row, transition_scene) or (scene is not None and scene >= boundary_scene) else src_rect
         return rect_matches(row.get("rect"), expected, rect_tolerance)
 
-    def _candidate_score(rows: list[dict[str, Any]]) -> tuple[int, int, int]:
+    tagged = {i for i, rows in tracks.items() if any(r.get("elId") is not None for r in rows)}
+
+    def _owner_unreadable(row: dict[str, Any]) -> bool:
+        return not isinstance(row.get("footprintOwner"), dict) or row.get("elId") is None and row["id"] in tagged
+
+    def _candidate_score(rows: list[dict[str, Any]], unreadable_owned: bool = False) -> tuple[int, int, int]:
         owned = 0
         if runtime_installed:
             for row in rows:
                 owner = row.get("footprintOwner")
-                if isinstance(owner, dict) and owner.get("elId") is not None and owner.get("elId") == row.get("elId"):
+                if _owner_unreadable(row):
+                    owned += unreadable_owned
+                elif owner.get("elId") is not None and owner.get("elId") == row.get("elId"):
                     owned += 1
         return owned, sum(1 for row in rows if _at_expected_rect(row)), len(rows)
 
     element_id = max(sorted(common), key=lambda i: _candidate_score(windowed[i]))
+    chosen = _candidate_score(windowed[element_id])
+    contested = [
+        i for i in sorted(common) if i != element_id and _candidate_score(windowed[i], True) >= chosen
+        and _candidate_score(windowed[i], True) != _candidate_score(windowed[i])
+    ]
+    if contested:
+        return _inconclusive(
+            "an unreadable footprint owner or element id decides which decoder is the carried one",
+            elementId=element_id, contested=contested, window=window,
+        )
     rows = sorted(windowed[element_id], key=lambda r: r["t"])
     wraps: list[float] | None = None
     if loop_period_s is not None:
@@ -2354,6 +2377,8 @@ def score_continuity(
             owned = isinstance(owner, dict) and owner.get("elId") is not None and owner.get("elId") == r.get("elId")
             if not owned:
                 entry = {"t": r["t"], "footprintOwner": owner, "elId": r.get("elId")}
+                if _owner_unreadable(r):
+                    entry["ownerUnreadable"] = True
                 if wraps is not None and _wrap_seek_unowned(rows, r, wraps):
                     wrap_owner_excused.append(entry)
                 else:
@@ -2600,21 +2625,29 @@ def retire_instance_ids(retire: dict[str, Any]) -> set[str]:
 
 
 def instance_decoders(samples: Any, ids: Collection[str]) -> tuple[set[Any], set[Any]] | None:
-    """(linked, foreign) `elId`s from the retained samples' `instance` stamps: linked when ever
-    stamped with an objectId in `ids`, foreign when always stamped with another. Neither without
-    `ids` or samples; None when a tagged decoder's stamp is neither absent, null nor a string."""
+    """(linked, foreign) `elId`s from the retained samples' `instance` stamps, resolved by probe id
+    first: a probe id is linked when any of its rows, tagged or not, is stamped with an objectId in
+    `ids`, foreign when every row is stamped with another. An `elId` is linked when any probe id
+    that carried it is linked, foreign when every one is foreign. Neither without `ids` or samples;
+    None when a decoder's stamp is neither absent, null nor a string."""
     if not ids or not isinstance(samples, list):
         return set(), set()
     stamps: dict[Any, set[str | None]] = {}
+    carried: dict[Any, set[Any]] = {}
     for row in samples:
         for v in (row.get("videos") or []) if isinstance(row, dict) else []:
-            if isinstance(v, dict) and v.get("elId") is not None:
-                stamp = v.get("instance")
-                if not (stamp is None or isinstance(stamp, str)):
-                    return None
-                stamps.setdefault(v["elId"], set()).add(stamp.lower() if isinstance(stamp, str) and stamp else None)
-    linked = {el for el, seen in stamps.items() if seen & set(ids)}
-    return linked, {el for el, seen in stamps.items() if el not in linked and None not in seen}
+            if not isinstance(v, dict):
+                continue
+            stamp = v.get("instance")
+            if not (stamp is None or isinstance(stamp, str)):
+                return None
+            stamps.setdefault(v.get("id"), set()).add(stamp.lower() if isinstance(stamp, str) and stamp else None)
+            if v.get("elId") is not None:
+                carried.setdefault(v["elId"], set()).add(v.get("id"))
+    linked_ids = {pid for pid, seen in stamps.items() if seen & set(ids)}
+    foreign_ids = {pid for pid, seen in stamps.items() if pid not in linked_ids and None not in seen}
+    linked = {el for el, pids in carried.items() if pids & linked_ids}
+    return linked, {el for el, pids in carried.items() if el not in linked and pids <= foreign_ids}
 
 
 RETIRE_REFUSAL_KINDS = ("preserve-refused", "retire-boundary")
@@ -2855,10 +2888,10 @@ def _movie_entries(pool: list[Any], armed: dict[str, Any]) -> list[dict[str, Any
 
 
 def _api_unreadable(state: dict[str, Any]) -> bool:
-    """A read whose module state, stand-downs, stats or hash cannot be read (`api: null` is a
+    """A read whose module state, stand-downs, stats or scene hash cannot be read (`api: null` is a
     readable "no module published")."""
     api = state.get("api")
-    if not isinstance(state.get("hash"), str):
+    if not isinstance(state.get("hash"), str) or hash_number(state["hash"]) is None:
         return True
     if api is None:
         return False
@@ -2882,7 +2915,7 @@ def _armed_live(states: list[dict[str, Any]], armed: dict[str, Any]) -> tuple[bo
         if not (
             isinstance(stat, dict) and api.get("state") == "LIVE" and api.get("standDowns") == []
             and stat.get("glErrors") == 0
-            and (hash_number(state.get("hash")) or -1) >= armed["atScene"]
+            and hash_number(state["hash"]) >= armed["atScene"]
         ):
             return False, {"reason": "a read is not LIVE on its destination", "state": api}
         stats.append(stat)
@@ -2908,8 +2941,8 @@ def _armed_events(state: dict[str, Any], armed: dict[str, Any]) -> tuple[bool | 
     downs = _notes(state, "glreplay-standdown") + _notes(state, "glreplay-handoff")
     detail = {"arms": arms, "lives": lives, "zones": zones, "carried": carried, "downs": downs}
     if (
-        (len(arms) == 1 and not isinstance(arms[0].get("sceneHash"), str))
-        or (len(lives) == 1 and not isinstance(lives[0].get("sceneHash"), str))
+        (len(arms) == 1 and not (isinstance(arms[0].get("sceneHash"), str) and hash_number(arms[0]["sceneHash"]) is not None))
+        or (len(lives) == 1 and not (isinstance(lives[0].get("sceneHash"), str) and hash_number(lives[0]["sceneHash"]) is not None))
         or (len(carried) == 1 and _finite_number(carried[0].get("delta")) is None)
         or any(not isinstance(value, str) for zone in zones for value in zone)
     ):
@@ -2999,7 +3032,8 @@ def pre_flip_owner_ids(samples: list[dict[str, Any]], armed: dict[str, Any]) -> 
     the flip no readable rect), never dropped from it. A decoder is the movie's by identity before
     source (its probe id named the asset on any row), so one whose src no longer names the asset
     makes the census None; so does a row listing one probe id twice (`duplicate_ids`) and, before
-    the flip, a decoding row that names no source and is not proven off the instance rect."""
+    the flip, a row that names no source, is not proven idle (`_maybe_decoded`) and is not proven off
+    the instance rect."""
     rows = samples or []
     if not all(isinstance(s, dict) and isinstance(s.get("videos"), list) for s in rows) or not all(
         isinstance(v, dict) and isinstance(v.get("src"), str) and _owner_named(v.get("footprintOwner"))
@@ -3016,7 +3050,7 @@ def pre_flip_owner_ids(samples: list[dict[str, Any]], armed: dict[str, Any]) -> 
             continue
         for video in sample["videos"]:
             named = matches_asset_keys(video["src"], armed["assetKeys"])
-            if video["src"] == "" and _decoded(video) and video["id"] not in movie and not (
+            if video["src"] == "" and _maybe_decoded(video) and video["id"] not in movie and not (
                 _is_rect(video.get("rect")) and not rects_overlap(video["rect"], armed["instanceRect"])
             ):
                 return None
@@ -3215,7 +3249,9 @@ def _carry_integrity_gap(samples: list[dict[str, Any]], scored: dict[str, Any], 
     """Why a False carry is not a fully observed contrary behaviour, or None when it is."""
     if scored.get("stageMapInvalid"):
         return f"{len(scored['stageMapInvalid'])} tracked row(s) have no trustworthy stage map"
-    unowned = [m for m in scored.get("ownerMismatches") or [] if not isinstance(m.get("footprintOwner"), dict)]
+    unowned = [
+        m for m in scored.get("ownerMismatches") or [] if not isinstance(m.get("footprintOwner"), dict) or m.get("ownerUnreadable")
+    ]
     if unowned:
         return f"{len(unowned)} row(s) have no readable footprint owner"
     transition, window = spec["transitionScene"], scored.get("window") or {}
@@ -3559,7 +3595,7 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
     zone cannot place or nothing ties to an instance is INCONCLUSIVE when it decides the verdict. Unreadable
     evidence is INCONCLUSIVE: a note
     whose identity fields are ill-typed (`_note_identity_ok`), a refusal note for the movie
-    (or of unreadable key) whose detail, key, via, scene, elIds or atScene cannot be read, and the
+    (or of an unreadable or empty key) whose detail, key, via, scene, elIds or atScene cannot be read, and the
     retained samples, with or without a destination instance (`sample_schema_errors`, a decoder's
     `instance` stamp)."""
     if not isinstance(sample, dict):
@@ -3633,7 +3669,7 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
         return event_in_zone(event, _event_scene_of(event), unplaced=True)
 
     def refusal_readable(event: dict[str, Any], detail: dict[str, Any]) -> bool:
-        if not isinstance(event.get("detail"), dict) or not isinstance(detail.get("key"), str):
+        if not isinstance(event.get("detail"), dict) or not (isinstance(detail.get("key"), str) and detail["key"]):
             return False
         if event["kind"] == "retire-boundary":
             return isinstance(detail.get("elIds"), list) and _finite_number(detail.get("atScene")) is not None
@@ -3656,7 +3692,7 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
     ]
     refusals = [
         (e, d) for e, d in details
-        if e["kind"] in RETIRE_REFUSAL_KINDS and (d.get("key") == movie_key or not isinstance(d.get("key"), str))
+        if e["kind"] in RETIRE_REFUSAL_KINDS and (d.get("key") == movie_key or not (isinstance(d.get("key"), str) and d["key"]))
     ]
     unreadable = [
         e for e, d in refusals
