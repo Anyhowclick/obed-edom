@@ -964,8 +964,9 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     decodable = live.get("decodableFrac")
     check(m1, "slide2-live decodable", decodable, decodable is not None and decodable >= LIMITS["decodableMin"], f">= {LIMITS['decodableMin']}")
     scored = score_armed(g2.get("armed"), armed, continuity_of(g2))
-    for clause in ("mode", "live", "events", "noPainting", "pool"):
-        check(m1, f"score_armed.{clause}", scored["checks"][clause], scored["checks"][clause])
+    clauses = ("mode", "live", "events", "noPainting", "pool")
+    for clause in clauses:
+        check(m1, f"score_armed.{clause}", scored["checks"][clause], scored["checks"][clause], enforced=scored["checks"][clause] is not None)
     check(m1, "score_armed.owner (report-only)", scored["checks"]["owner"], scored["checks"]["owner"], enforced=False)
     rate_live = upload_rate(reads.get("liveStart"), reads.get("liveEnd"))
     check(m1, "uploads/s over slide2-live", rate_live, rate_live is not None and rate_live >= LIMITS["uploadsMin"], f">= {LIMITS['uploadsMin']}")
@@ -981,10 +982,14 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     check(m1, "KB: g2 slide2-live movie rect fails the static check", static_g2, static_g2 is not None and static_g2 > LIMITS["staticMax"],
           f"> {LIMITS['staticMax']}")
     off_scored = score_armed(off.get("armed"), armed, continuity_of(off))
-    check(m1, "KB: g2-off score_armed False", off_scored["verdict"], off_scored["verdict"] is False, "False")
+    check(m1, "KB: g2-off score_armed False", off_scored["verdict"], off_scored["verdict"] is False, "False",
+          enforced=off_scored["verdict"] is not None)
     check(m1, "report: page rAF Hz from each phase start", raf_rates(g2), True, enforced=False)
     unengaged = handback_unengaged(g2)
-    gates["M1"] = gate(m1, unengaged)
+    unreadable = [c for c in clauses if scored["checks"][c] is None]
+    reasons = [unengaged, f"g2: score_armed clauses unreadable: {unreadable}" if unreadable else None,
+               f"g2-off: score_armed verdict unreadable ({off_scored['reason']})" if off_scored["verdict"] is None else None]
+    gates["M1"] = gate(m1, "; ".join(r for r in reasons if r) or None)
 
     m2: list[dict[str, Any]] = []
     offsets = {name: ((d_g2.get("roiOffsets") or {}).get(name) or {}).get("offset") for name in ("slide2-live", "slide2-handback", "slide2-after")}
