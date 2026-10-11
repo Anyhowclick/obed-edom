@@ -5,7 +5,7 @@ Machine: M1 Pro (10 cores). Origin: the owner's real-OBS look (generalisation pl
 (a) The 3→4 bridge "rubber band": our overlay moved the carried `<video>` linearly while Keynote's player eases the movie's
 GL poster, so the poster showed past the overlay mid-move. (b) The current Keynote export's player `17c0c938` was refused.
 Reviews (GPT-6 Astra, high): branch r1 REQUEST CHANGES (3 MAJOR) → r2 APPROVE (1 MINOR folded); fix A r1–r3 REQUEST
-CHANGES (1 MAJOR, then 1 MAJOR + 1 MINOR, then 1 MINOR) → r4 APPROVE. Raw rounds beside this file; they go at merge.
+CHANGES (1 MAJOR, then 1 MAJOR + 1 MINOR, then 1 MINOR) → r4 APPROVE. Raw rounds removed after the merge (git history); the review log below is the record.
 
 **Verdict:** final round at `dcd5b9e4` DONE tier=full failed=0 pending=0; carry-cover green pass / red fail / null fail;
 full suites green. r3 at `87f8c450` failed 3 checks; all three were triaged to the instruments, not the product (below).
