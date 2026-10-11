@@ -538,6 +538,14 @@ def test_cvc_reads_zero_on_identical_sessions_and_the_worst_delta_otherwise():
 
 # --- MO-2 / MO-4 gates end to end ------------------------------------------------------------------------------------------
 
+def live_read(stats: dict[str, Any]) -> dict[str, Any]:
+    """`Session.read` on a LIVE G2 page whose module reports `stats`."""
+    api = {"version": 1, "state": "LIVE", "standDowns": [], "events": [],
+           "stats": {"epoch": 1, "iter": 10, "uploads": 10, "glErrors": 0, **stats}}
+    gl = {"t": 1.0, "hash": "#2", "ready": True, "api": api, "coreEvents": [], "pool": [], "facades": []}
+    return {"wall": 1.0, "gl": gl, "painting": [], "videos": []}
+
+
 def mmo_run(tmp_path: Path, rate: int = 25, **over: Any) -> dict[str, Any]:
     kinds = {"g2-on": "on", "g2-mmoff": "off-live", "g2off-on": "on", "g2off-mmoff": "off", "g2-on-2": "on"}
     names = list(kinds)
@@ -556,7 +564,7 @@ def mmo_run(tmp_path: Path, rate: int = 25, **over: Any) -> dict[str, Any]:
         stats = over.get(f"stats:{name}") or dict(q.EXPECTED_STATS[mode])
         sessions.append({"session": name, "decode": {"seriesPath": str(path), "phases": {}}, "shots": shots,
                          "output": {"mmOpacity": {"mode": over.get(f"mode:{name}", mode)}}, "liveWait": {"live": True},
-                         "reads": {"liveEnd": {"gl": {"api": {"stats": stats}}}}})
+                         "reads": {"liveEnd": live_read(stats)}})
     return {"rate": rate, "sessions": sessions}
 
 
@@ -1373,3 +1381,61 @@ class TestTiming:
     def test_timing_summary_of_a_run_that_never_launched(self) -> None:
         summary = q.timing_summary({"arm": "g2", "take": 1, "timingS": {"quit": 0.5}, "sessions": []})
         assert summary["launch"] is None and summary["script"] == 0 and summary["decode"] == 0
+
+
+# --- Producer contract wiring (plan keynote_live_continuity_contract §3 row 7, §4 N1/N3) ---------------------------------
+
+def _failsafe_checks(*, zone_painting: Any = (), bogus_notes: Any = ()) -> dict[str, dict[str, Any]]:
+    """`failsafe_gates` on page reads alone (no shots): `fail-zone`'s painting read and `fail-bogus`'s core notes."""
+    def session(name: str, painting: Any = (), notes: Any = ()) -> dict[str, Any]:
+        after = live_read({})
+        after["painting"] = painting if isinstance(painting, dict) else list(painting)
+        after["gl"]["coreEvents"] = notes if notes is None else list(notes)
+        return {"session": name, "reads": {"after": after}}
+
+    sessions = [session(name) for name in ("off", "off-2", "fail-module", "goto2")]
+    sessions += [session("fail-zone", painting=zone_painting), session("fail-bogus", notes=bogus_notes)]
+    return checks_of(q.failsafe_gates({"sessions": sessions}, ARMED)["M5"])
+
+
+def _wired_arm_gates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    run, invalid = mmo_run(tmp_path), []
+    run["sessions"][0]["reads"]["liveEnd"]["gl"]["ready"] = "yes"
+    q.arm_gates("mmo", run, types.SimpleNamespace(), ARMED, invalid)
+    return [reason.split(":")[0] for reason in invalid]
+
+
+def _wired_score_mmo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    (tmp_path / "runs").mkdir()
+    identity = {"manifestSha256": "m", "movieSha256": ["a"]}
+    run = {**mmo_run(tmp_path), "arm": "mmo", "fixture": str(tmp_path / "p2-binary"), "fixtureIdentity": identity,
+           "valid": True, "invalid": [], "checks": []}
+    run["sessions"][0]["reads"]["liveEnd"]["videos"] = [{"src": "untitled.mov", "paused": False, "rs": 5, "t": 1.0, "loop": True}]
+    (tmp_path / "runs" / "mmo-25.json").write_text(json.dumps(run))
+    monkeypatch.setattr(q, "fixture_facts", lambda fixture: ARMED)
+    monkeypatch.setattr(q.binary_counter_movie, "verify_fixture", lambda fixture: identity)
+    q.score_mmo(tmp_path)
+    result = json.loads(next(tmp_path.glob("rescore-*.json")).read_text())[0]
+    return result["verdict"], [reason.split(":")[0] for reason in result["invalid"]]
+
+
+def _wired_n1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    check = "fail-zone: painting movie count == off"
+    return _failsafe_checks()[check]["ok"], _failsafe_checks(zone_painting={"error": "unavailable"})[check]["ok"]
+
+
+def _wired_n3(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    check = "KB: fail-bogus does not read as retired-with-expected-reason"
+    return _failsafe_checks()[check]["ok"], _failsafe_checks(bogus_notes=None)[check]["ok"]
+
+
+@pytest.mark.parametrize(("ingest", "outcome"), [
+    pytest.param(_wired_arm_gates, ["evidence contract"], id="7-arm_gates-invalid"),
+    pytest.param(_wired_score_mmo, ("INVALID", ["evidence contract"]), id="7-score_mmo-invalid"),
+    pytest.param(_wired_n1, (True, False), id="N1-an-error-painting-read-is-no-count"),
+    pytest.param(_wired_n3, (True, False), id="N3-fail-bogus-needs-a-readable-note-list"),
+])
+def test_contract_violations_and_unreadable_reads_never_pass_a_gate(
+    ingest: Any, outcome: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert ingest(tmp_path, monkeypatch) == outcome

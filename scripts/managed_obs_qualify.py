@@ -84,6 +84,7 @@ from obed_edom.managed_obs import ManagedObs  # noqa: E402
 from obed_edom.obs_websocket import ObsWebsocket  # noqa: E402
 
 import binary_counter_movie  # noqa: E402
+import live_evidence_contract as contract  # noqa: E402
 import mm_opacity_probe  # noqa: E402
 import obs_cadence_decode  # noqa: E402
 from live_continuity_probe import (  # noqa: E402
@@ -1477,8 +1478,12 @@ def remounts_after_standdown(read: Any) -> list[str]:
             and (since is None or (e.get("t") or 0) > since)]
 
 
-def movie_painting(read: Any, armed: dict[str, Any]) -> int:
-    return sum(1 for v in (read or {}).get("painting") or [] if isinstance(v, dict) and matches_asset_keys(v.get("src"), armed["assetKeys"]))
+def movie_painting(read: Any, armed: dict[str, Any]) -> int | None:
+    """The painting movie `<video>`s in a session read; None when its painting read is not a list (`{error}` or absent)."""
+    painting = read.get("painting") if isinstance(read, dict) else None
+    if not isinstance(painting, list):
+        return None
+    return sum(1 for v in painting if isinstance(v, dict) and matches_asset_keys(v.get("src"), armed["assetKeys"]))
 
 
 def outside_parity(a: dict[str, Any], b: dict[str, Any], armed: dict[str, Any], tags: tuple[str, ...] = ("P3",)) -> int | None:
@@ -1508,7 +1513,7 @@ def failsafe_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]
         kinds = g2_kinds(after) + [e.get("kind") for e in ((after or {}).get("gl") or {}).get("coreEvents") or []]
         check(checks, "0 glreplay-live", kinds.count("glreplay-live"), "glreplay-live" not in kinds, "== 0")
         counts = [movie_painting(after, armed), movie_painting((off.get("reads") or {}).get("after"), armed)]
-        check(checks, "painting movie count == off", counts, counts[0] == counts[1])
+        check(checks, "painting movie count == off", counts, None not in counts and counts[0] == counts[1])
         parity = outside_parity(sess, off, armed)
         check(checks, "P3 == off P3 outside movie rects", [parity, tau_off], None not in (parity, tau_off) and parity <= tau_off, "<= tau_off")
         remounts = remounts_after_standdown(after)
@@ -1530,8 +1535,11 @@ def failsafe_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]
               [{**c, "check": f"{name}: {c['check']}"} for c in per[name]["checks"]]]
     check(checks, "tau_off: off vs off-2 P3", tau_off, tau_off == 0, "== 0 (expected)", enforced=False)
     bogus_zone = next((c for c in bogus["checks"] if c["check"] == "zone retired with expected reason"), None)
+    bogus_after = ((sessions.get("fail-bogus") or {}).get("reads") or {}).get("after")
+    bogus_notes = ((bogus_after or {}).get("gl") or {}).get("coreEvents") if isinstance(bogus_after, dict) else None
     check(checks, "KB: fail-bogus does not read as retired-with-expected-reason", bogus["failing"],
-          bogus_zone is not None and bogus_zone["ok"] is False, "zone check FAIL")
+          bogus_zone is not None and bogus_zone["ok"] is False and isinstance(bogus_notes, list),
+          "zone check FAIL on a readable note list")
     return {"M5": gate(checks), "perSession": {**per, "fail-bogus": bogus}, "tauOff": tau_off}
 
 
@@ -1854,8 +1862,17 @@ def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, args: ar
     return run
 
 
+def contract_problem(run: dict[str, Any]) -> str | None:
+    """Why the run's page reads are outside the producer contract (`live_evidence_contract.managed_run`), else None."""
+    errors = contract.first_errors(contract.managed_run(run))
+    return f"evidence contract: {'; '.join(errors)}" if errors else None
+
+
 def arm_gates(arm: str, run: dict[str, Any], args: argparse.Namespace, armed: dict[str, Any] | None,
               invalid: list[str]) -> dict[str, Any]:
+    problem = contract_problem(run)
+    if problem:
+        invalid.append(problem)
     if arm in ("2x", "positive"):
         run["session"] = run["sessions"][0] if run["sessions"] else {}
         run["decode"] = run["session"].get("decode")
@@ -1965,6 +1982,8 @@ def score_mmo(root: Path) -> int:
         invalid = [r for r in run.get("invalid") or [] if not r.startswith("MO-2 INCONCLUSIVE")]
         if identity[fixture] != run.get("fixtureIdentity"):
             invalid.append(f"fixture identity changed since the take: {identity[fixture]}")
+        if problem := contract_problem(run):
+            invalid.append(problem)
         if fixture not in facts:
             facts[fixture] = fixture_facts(Path(fixture))
         for sess in run["sessions"]:

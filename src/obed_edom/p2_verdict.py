@@ -3021,6 +3021,72 @@ def _media_samples_schema_ok(samples: object, bound_decoder: object) -> bool:
     return True
 
 
+_NULL_CONTROL_KEYS = frozenset({
+    "arm", "status", "armedHash", "armedElId", "armedOwnerRect", "movedFromRect", "movedToRect", "obedMotionAtTrigger",
+    "stageOrigin", "stageRectAtArm", "stageRectAtTrigger", "advanceKeyAt", "advanceKeyRejected",
+    "triggerFramesAfterAdvance", "preAdvanceDepartureAt", "preAdvanceDepartureRect", "loopHandedOff", "armedAt",
+    "boundDecoderId", "fellBackToArmOwner", "ownerDisconnectedInWindow", "firedVia", "holdStartedAt", "coverPaintedAt",
+    "pollMaxGapMs", "pollTimes", "motionStartedAt", "motionStartedFrame", "motionStartedMarker", "releaseAt",
+    "staleCurrentTime", "staleIndexExpected", "paintCount", "coverPatchStart", "coverPatchEnd", "coverPatchMean",
+    "ownerReadyState", "ownerAmbiguousInWindow", "holdFrames", "rafLog", "error",
+})
+
+
+def _int_or_none(v: object) -> bool:
+    return v is None or (isinstance(v, int) and not isinstance(v, bool))
+
+
+_RAF_LOG_KEYS = frozenset({"t", "elementFromPointIsCover", "ownerResolved", "coverRect", "measuredRect", "boundDecoderId"})
+
+
+def _raf_entry_problem(entry: object) -> str | None:
+    if not isinstance(entry, dict) or not _RAF_LOG_KEYS <= set(entry):
+        return "keys"
+    if _finite(entry["t"]) is None:
+        return "t"
+    if not isinstance(entry["elementFromPointIsCover"], bool) or not isinstance(entry["ownerResolved"], bool):
+        return "flags"
+    if entry["coverRect"] is not None and _rect_or_none(entry["coverRect"]) is None:
+        return "coverRect"
+    measured = entry["measuredRect"]
+    if measured is not None and not ((m := _rect_or_none(measured)) and m["w"] > 1 and m["h"] > 1):
+        return "measuredRect"
+    return None if _int_or_none(entry["boundDecoderId"]) else "boundDecoderId"
+
+
+def _null_control_problems(nc: object) -> list[str]:
+    """Why the freeze control's read is not what its page's `status()` returns: exactly its 41 keys (40 before
+    `pollTimes` existed) with the typed fields below, else []."""
+    if not isinstance(nc, dict):
+        return ["nullControl:object"]
+    if set(nc) not in (_NULL_CONTROL_KEYS, _NULL_CONTROL_KEYS - {"pollTimes"}):
+        return ["nullControl:keys"]
+    problems = []
+    if nc["preAdvanceDepartureAt"] is not None and _finite(nc["preAdvanceDepartureAt"]) is None:
+        problems.append("nullControl.preAdvanceDepartureAt")
+    if not (nc["error"] is None or isinstance(nc["error"], str)):
+        problems.append("nullControl.error")
+    if nc["advanceKeyRejected"] is None or not _int_or_none(nc["advanceKeyRejected"]):
+        problems.append("nullControl.advanceKeyRejected")
+    trigger, motion = nc["triggerFramesAfterAdvance"], nc["motionStartedFrame"]
+    if not _int_or_none(trigger):
+        problems.append("nullControl.triggerFramesAfterAdvance")
+    if not _int_or_none(motion):
+        problems.append("nullControl.motionStartedFrame")
+    elif motion is not None and _int_or_none(trigger) and trigger is not None and motion > trigger:
+        problems.append("nullControl:motion started after the trigger")
+    polls = nc.get("pollTimes", [])
+    if not (isinstance(polls, list) and all(_finite(t) is not None for t in polls)
+            and all(b > a for a, b in zip(polls, polls[1:]))):
+        problems.append("nullControl.pollTimes")
+    raf_log = nc["rafLog"]
+    if not isinstance(raf_log, list):
+        problems.append("nullControl.rafLog")
+    else:
+        problems.extend(f"nullControl.rafLog.{p}" for p in dict.fromkeys(filter(None, map(_raf_entry_problem, raf_log))))
+    return problems
+
+
 def _sample_schema_failures(snap: dict) -> list[str]:
     """The sample series of one arm that are not schema-sound, by name."""
     return [
@@ -3588,6 +3654,8 @@ def _score_freeze_control(
     checks["armIdentitiesMatchManifest"] = _manifest_arms_ok(
         manifest, {"a1": a1, "b": b, "a2": a2}
     )
+    null_control_problems = _null_control_problems(b.get("nullControl"))
+    checks["nullControlSound"] = not null_control_problems
 
     nc = b.get("nullControl") or {}
 
@@ -4049,7 +4117,7 @@ def _score_freeze_control(
     # and `_freeze_control_blocks_success` blocks `success` on "inconclusive"
     # exactly as it does on "fail".
     integrity_keys = (
-        "sampleSchemaSoundAllArms", "armIdentitiesMatchManifest",
+        "sampleSchemaSoundAllArms", "armIdentitiesMatchManifest", "nullControlSound",
         "firedAtMoveStart", "firedAtRuntimeMotionStart", "firedAfterAdvance",
         "advanceKeySameEventInControl", "noPreAdvanceDeparture", "drainPressesAllLanded", "advanceSinglePressAllArms",
         "coverPaintedAtPresent",
@@ -4083,6 +4151,7 @@ def _score_freeze_control(
         "integrityKeys": list(integrity_keys),
         "integrityFailed": integrity_failed,
         "schemaFailed": {k: v for k, v in schema_failed.items() if v},
+        "nullControlProblems": null_control_problems,
         "verdictFailed": verdict_failed,
         "failed": failed,
         "maxRafGapMs": max_gap_ms,
