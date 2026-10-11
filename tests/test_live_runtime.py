@@ -1065,25 +1065,29 @@ const BASE={display:'block',opacity:'1',transform:'none',filter:'none',mixBlendM
   transformStyle:'flat',scale:'none',rotate:'none',translate:'none',offsetPath:'none',clip:'auto',backdropFilter:'none',objectViewBox:'none',contain:'none',contentVisibility:'visible',isolation:'auto',
   perspective:'none',backfaceVisibility:'visible',willChange:'auto',zoom:'1',imageRendering:'auto',visibility:'visible',borderImageSource:'none',webkitBoxReflect:'none',content:'normal',columnRuleStyle:'none'};
 const r6=v=>Math.round(v*1e6)/1e6;
-const READS=['checkVisibility','getBoundingClientRect','contains'];
+const READS=['checkVisibility','getBoundingClientRect','contains','getElementsByTagName'];
+const TARGETS=['layer13-opacity','layer13'];
 const MEDIA={play(){},pause(){},load(){},fastSeek(){},requestVideoFrameCallback(){},cancelVideoFrameCallback(){},captureStream(){},setAttribute(){},removeAttribute(){},
   addEventListener(){},removeEventListener(){},dispatchEvent(){},remove(){},replaceWith(){},cloneNode(){},appendChild(){},insertBefore(){},removeChild(){},focus(){},blur(){}};
-function guard(raw,touched){const rec=(t,k)=>{if(typeof k==='string'&&!(k in t)){touched.push(raw.id+' unknown '+k);return function(){touched.push(raw.id+' call '+k)}}
-  const v=t[k];return typeof v==='function'&&!READS.includes(k)?function(...a){touched.push(raw.id+' call '+String(k));return v.apply(t,a)}:v};
+function guard(raw,touched,media){const rec=(t,k)=>{if(typeof k==='string'&&!(k in t)){touched.push(raw.id+' unknown '+k);return function(){touched.push(raw.id+' call '+k)}}
+  const v=t[k];return typeof v==='function'&&!READS.includes(k)?function(...a){
+    if(!(k==='appendChild'&&TARGETS.includes(raw.id)&&a.length===1&&a[0]&&!a[0].tagName))touched.push(raw.id+' call '+String(k));return v.apply(t,a)}:v};
   const style=new Proxy(Object.assign(raw.style,{setProperty(){},removeProperty(){}}),{set(t,k,v){touched.push(raw.id+' set style.'+String(k));t[k]=v;return true},
     deleteProperty(t,k){touched.push(raw.id+' delete style.'+String(k));return delete t[k]},get:rec});
-  return new Proxy(Object.assign(raw,MEDIA,raw._own),{set(t,k,v){touched.push(raw.id+' set '+String(k));t[k]=v;return true},deleteProperty(t,k){touched.push(raw.id+' delete '+String(k));return delete t[k]},
+  return new Proxy(Object.assign(raw,media===false?{}:MEDIA,raw._own),{set(t,k,v){touched.push(raw.id+' set '+String(k));t[k]=v;return true},deleteProperty(t,k){touched.push(raw.id+' delete '+String(k));return delete t[k]},
     get(t,k){return k==='style'?style:rec(t,k)}})}
 function guardControl(){const touched=[];const v=guard({id:'ctl',style:{},_own:{},getBoundingClientRect(){}},touched);v.style.opacity='0';v.style.setProperty('opacity','0');v.pause();v.play();v.muted=true;v.remove();
   v.toggleAttribute('hidden',true);v.style.translate;v.getBoundingClientRect();return touched}
 function run(o){
-  const touched=[];const all=[];const draws=[];const appends=[];const raws={};const s=o.scale||1,ox=(o.off||[0,0])[0],oy=(o.off||[0,0])[1];const TR=r=>[ox+r[0]*s,oy+r[1]*s,r[2]*s,r[3]*s];
+  const touched=[];const all=[];const draws=[];const appends=[];const raws={};const rawList=[];const s=o.scale||1,ox=(o.off||[0,0])[0],oy=(o.off||[0,0])[1];const TR=r=>[ox+r[0]*s,oy+r[1]*s,r[2]*s,r[3]*s];
   const el=(tag,id,cs,rect0,parent,extra)=>{const rect=TR(rect0);const e=Object.assign({tagName:tag,id,nodeType:1,_pseudo:null,_cs:Object.assign({},BASE,tag==='CANVAS'?{objectFit:'fill',overflowX:'clip',overflowY:'clip'}:{},tag==='VIDEO'?{overflowX:'clip',overflowY:'clip'}:{},cs||{}),childNodes:[],children:[],style:{},parentElement:parent||null,
      getBoundingClientRect:()=>({left:rect[0],top:rect[1],width:rect[2],height:rect[3],right:rect[0]+rect[2],bottom:rect[1]+rect[3]}),
      checkVisibility(op){for(let p=this;p;p=p.parentElement){if(p._cs.display==='none')return false;if(op&&op.opacityProperty&&+p._cs.opacity===0)return false}if(this._cs.display==='contents')return false;if(op&&op.visibilityProperty&&this._cs.visibility!=='visible')return false;return true},contains(x){for(let p=x;p;p=p.parentElement)if(p===this)return true;return false},getElementsByTagName(){return all.filter(x=>x!==this&&this.contains(x))},
-     appendChild(c){appends.push(this.id+':'+(c.tagName?'element':'fragment:'+c.children.length));if(this._throw||this._throwAt&&++this._n===this._throwAt)throw new Error('append');
-       if(c.children&&!c.tagName){c.children.forEach(x=>this.children.push(x));c.children=[]}else this.children.push(c)}},tag==='VIDEO'?{}:extra||{});
-     if(tag==='VIDEO'){e._own=extra||{};raws[id]=e;const g=guard(e,touched);all.push(g);return g}all.push(e);return e};
+     appendChild(c){appends.push(e.id+':'+(c.tagName?'element':'fragment:'+c.children.length));if(e._throw||e._throwAt&&++e._n===e._throwAt)throw new Error('append');
+       if(c.children&&!c.tagName){c.children.forEach(x=>e.children.push(x));c.children=[]}else e.children.push(c)}});
+     e._own=extra||{};raws[id]=e;rawList.push(e);const g=guard(e,touched,tag==='VIDEO');all.push(g);return g};
+  const snapshot=()=>JSON.stringify(rawList.map(e=>Object.keys(e).sort().filter(k=>typeof e[k]!=='function'&&k!=='_n'&&!(k==='children'&&TARGETS.includes(e.id)))
+    .map(k=>[k,k==='parentElement'?e[k]&&e[k].id:k==='children'?e[k].map(c=>c.id||'?'):e[k]])));
   const html=el('HTML','html',Object.assign({position:'static'},o.htmlCs||{}),[0,0,1920,1080]);const body=el('BODY','body',Object.assign({position:'static',backgroundColor:'rgb(0, 0, 0)',overflowX:'hidden',overflowY:'hidden'},o.bodyCs||{}),[0,0,1920,0],html);
   const area=el('DIV','stageArea',Object.assign({overflowX:'hidden',overflowY:'hidden',visibility:'hidden'},o.areaCs||{}),[0,0,1920,1080],body);
   const stage=el('DIV','stage',Object.assign({transformStyle:'preserve-3d',transform:'matrix(1, 0, 0, 1, 0, 0)',visibility:'hidden'},o.stageCs||{}),[0,0,1920,1080],area);
@@ -1096,20 +1100,20 @@ function run(o){
     {readyState:o.rs==null?4:o.rs,videoWidth:(o.videoSize||[1920,540])[0],videoHeight:(o.videoSize||[1920,540])[1],checkVisibility:()=>o.visible!==false});
   if(o.video2)el('VIDEO','vid2',o.video2cs||{},o.video2rect||[600,800,400,200],mlayer,{readyState:o.video2rs==null?4:o.video2rs,videoWidth:1920,videoHeight:540});
   if(o.fg){let par=root;if(o.fg.group){par=el('DIV','grp',o.fg.group,[0,0,1920,1080],root);if(o.fg.sibling)el('CANVAS','sib',{},[1500,100,100,100],par)}
-    if(o.fg.wrap)par=el('DIV','fgwrap',o.fg.wrap,o.fg.rect,par);if(o.fg.hostGroup)par=el('DIV','fghost',o.fg.hostGroup,[0,0,1920,1080],par);const fe=el(o.fg.tag||'CANVAS','fg',o.fg.cs||{},o.fg.rect,o.fg.outside?body:par);if(o.fg.pseudo)fe._pseudo=o.fg.pseudo;if(o.fg.text)fe.childNodes=[{nodeType:3,data:'Hi'}]}
+    if(o.fg.wrap)par=el('DIV','fgwrap',o.fg.wrap,o.fg.rect,par);if(o.fg.hostGroup)par=el('DIV','fghost',o.fg.hostGroup,[0,0,1920,1080],par);el(o.fg.tag||'CANVAS','fg',o.fg.cs||{},o.fg.rect,o.fg.outside?body:par);if(o.fg.pseudo)raws.fg._pseudo=o.fg.pseudo;if(o.fg.text)raws.fg.childNodes=[{nodeType:3,data:'Hi'}]}
   if(o.fg2)el('CANVAS','fg2',{},o.fg2,root);
   const t1=el('DIV','layer10',{},[0,0,1920,1080],stage),c1=el('DIV','layer11',{},[0,0,1920,1080],t1);el('DIV','layer12',{},[0,0,1920,1080],c1);
   const leafOut=el('DIV','layer13',{},[0,0,1920,1080],c1);const wrap=o.noWrap?null:el('DIV','layer13-opacity',{},[0,0,1920,1080],leafOut);
-  if(o.appendThrows&&wrap)wrap._throw=true;if(o.throwAt&&wrap){wrap._throwAt=o.throwAt;wrap._n=0}
+  const rw=raws['layer13-opacity'];if(o.appendThrows&&wrap)rw._throw=true;if(o.throwAt&&wrap){rw._throwAt=o.throwAt;rw._n=0}
   const ids={};all.forEach(e=>ids[e.id]=e);if(o.noOldBase)delete ids.layer9;
   let put=null;const traces=[];let clk=0;const tick=()=>{clk+=o.clock||1};const px=(w,h)=>{const d=new Uint8ClampedArray(w*h*4).fill(o.grey==null?255:o.grey);for(let p=3;p<d.length;p+=4)d[p]=255;(o.pixels||[]).forEach((c,i)=>d.set(c,4*i));if(o.alphaAt!=null&&o.alphaAt<w*h)d[o.alphaAt*4+3]=o.alphaVal==null?254:o.alphaVal;return d};
   globalThis.document={documentElement:html,body,getElementById:id=>ids[id]||null,querySelectorAll:()=>all.filter(e=>e.tagName==='VIDEO'),getElementsByTagName:()=>all,
     createDocumentFragment:()=>({children:[],appendChild(c){this.children.push(c)}}),
-    createElement:t=>t==='canvas'?{style:{},width:0,height:0,getContext(){const tr=[];traces.push(tr);const ctx={globalAlpha:1,
+    createElement:t=>t==='canvas'?{tagName:'CANVAS',style:{},width:0,height:0,getContext(){const tr=[];traces.push(tr);const ctx={globalAlpha:1,
       drawImage:(src,...a)=>{tick();if(o.drawThrows&&src===video)throw new Error('draw');draws.push([src.id,ctx.globalAlpha,...a.map(r6)]);
         tr.push(src.tagName==='VIDEO'?['video',src.id,...a.map(r6)]:['fg',src.id,ctx.globalAlpha,...a.map(r6)])},
       getImageData:(x,y,w,h)=>{tick();tr.push(['get',x,y,w,h]);return {data:px(w,h)}},
-      putImageData:(D,x,y)=>{tick();tr.push(['put',x,y]);put=Array.from(D.data.slice(0,4*Math.max(3,(o.pixels||[]).length)))}};return ctx}}:{style:{},children:[],appendChild(c){this.children.push(c)}}};
+      putImageData:(D,x,y)=>{tick();tr.push(['put',x,y]);put=Array.from(D.data.slice(0,4*Math.max(3,(o.pixels||[]).length)))}};return ctx}}:{tagName:t.toUpperCase(),style:{},children:[],appendChild(c){this.children.push(c)}}};
   globalThis.getComputedStyle=(e,p)=>(tick(),p)?{content:(e._pseudo&&e._pseudo[p])||'none'}:(e._cs||BASE);globalThis.innerWidth=(o.viewport||[1920,1080])[0];globalThis.window=globalThis;globalThis.innerHeight=(o.viewport||[1920,1080])[1];
   const tuple=o.vf===undefined?['bt709','bt709','bt709',false]:o.vf;let vfOpened=0,vfClosed=0;
   if(tuple==='missing')delete globalThis.VideoFrame;else globalThis.VideoFrame=class{constructor(x){tick();if(tuple==='throws')throw new Error('vf');vfOpened++;this.colorSpace={primaries:tuple[0],transfer:tuple[1],matrix:tuple[2],fullRange:tuple[3]}}close(){vfClosed++}};
@@ -1118,7 +1122,7 @@ function run(o){
   const events=Array.from({length:ev+1},()=>({effects:[]}));if(!o.noEffect)events[ev]={effects:[E]};
   const U={script:o.throwScript?null:{slideWidth:1920,slideHeight:1080,events},playbackController:{kpfEvent:{baseLayer:{layerId:9}}},
     animationManager:{styleSheet:sheet()}};globalThis.UC=U;
-  let firstTaken=null;
+  let firstTaken=null;const tree0=snapshot();
   if(o.stale){raws.vid.readyState=4;P.prototype.__obedFreezeTake(U,0);firstTaken=U.__obedFrozen?U.__obedFrozen.holders.length:0;raws.vid.readyState=o.rs;
     U.__obedFrozen={scene:0,holders:[{id:'stale',style:{},children:[{width:0,height:0,style:{}}]}]}}
   traces.length=0;const c0=clk;P.prototype.__obedFreezeTake(U,ev);const work=clk-c0;
@@ -1128,7 +1132,7 @@ function run(o){
   const holders=[...(wrap?wrap.children:[]),...leafOut.children].map(h=>{const c=h.children[0],g=st=>[st.left,st.top,st.width,st.height].map(v=>r6(parseFloat(v))).join(',');
     return [h.style.position+'/'+h.style.overflow,g(h.style),c.width+'x'+c.height,c.style.position,g(c.style)]});
   return {taken,inWrap:wrap?wrap.children.length:0,inLeaf:leafOut.children.length,draws:draws.filter(d=>d[0]!=='vid'),holders,put,appends,kind:C.obedDissolve||null,
-    traces,work,touched,ms:U.__obedTakeMs,windowMs:globalThis.__obedTakeMs,slotCleared:UC.__obedFrozen===null,clearedByTake,firstTaken,vfOpened,vfClosed};
+    traces,work,treeChanged:snapshot()!==tree0,touched,ms:U.__obedTakeMs,windowMs:globalThis.__obedTakeMs,slotCleared:UC.__obedFrozen===null,clearedByTake,firstTaken,vfOpened,vfClosed};
 }
 const CASES=JSON.parse(require('fs').readFileSync(process.argv[2],'utf8'));const out={guardControl:guardControl(),callSites:callSites()};for(const k in CASES)out[k]=run(CASES[k]);console.log(JSON.stringify(out));
 """
@@ -1606,7 +1610,9 @@ def test_dissolve_real_patched_methods_on_node(tmp_path, sha, case):
             assert {k: row[k] for k in expected} == expected, name
             # The video is only read; the cost is published on every path; the slot is always consumed; every
             # VideoFrame is closed; a gate row is refused before any candidate is read.
-            assert row["touched"] == [], name
+            # No stub element is written, called or probed for an unknown member, except D3's one fragment append to its
+            # target; the whole document tree (parents, child order, attributes, styles) is unchanged apart from it.
+            assert row["touched"] == [] and not row["treeChanged"], name
             # The cost is the take's whole deterministic work (every style read, frame, draw, readback and writeback).
             assert row["ms"] == row["windowMs"] == row["work"], name
             # Each snapshot canvas runs video draw -> readback -> toned writeback -> foreground redraws, in that order.
