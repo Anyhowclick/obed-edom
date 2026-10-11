@@ -10843,10 +10843,13 @@ class TestFold5IdentityBeforeSourceAndGrounding:
         ("collapsedWithoutElId", "inconclusive"),  # r11 #4a: unidentified reads were discarded as unsampled
         ("secondNote", "inconclusive"),
         ("secondNoteDetailNull", "inconclusive"),  # r11 #4b
+        ("clockNote", "pass"),  # the gl-clock core's report-only bridge-clock note rides the same read
     ])
     def test_carry_cover_never_discards_unreadable_reads_or_notes(self, case: str, expected: str) -> None:
         frames, rows, notes = _cc_scene()
-        if case.startswith("collapsed"):
+        if case == "clockNote":
+            notes.append(_cc_clock_note("gl", 7.0))
+        elif case.startswith("collapsed"):
             for k in (40, 50, 60, 70):
                 for read in (rows[k]["vids"][0], rows[k + 1]["pre"][0]):
                     read.update(w=0.0, h=0.0)

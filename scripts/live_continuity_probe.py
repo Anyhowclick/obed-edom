@@ -8244,7 +8244,8 @@ def score_carry_cover(
     viewport: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
     """`frames`: (page-clock ms, RGB) screencast frames; `rows`: the rAF sampler's rows (`tick`, `pre` read at the
-    tick's start, `vids` read after its frame); `notes`: the core's notes, of which only `bridge-motion-start` is read.
+    tick's start, `vids` read after its frame); `notes`: the core's notes; `bridge-clock` notes are set aside (report
+    only, `carry_cover_clock`) and only `bridge-motion-start` is read.
 
     The move window starts at this bridge's one note: the source scene's hash and the bridge's source/destination
     rects within `CARRY_COVER_NOTE_MATCH_PX`. Any other note (an earlier bridge the walk to the source slide rode)
@@ -8258,7 +8259,7 @@ def score_carry_cover(
     scored on what remains or discarded as unsampled: INCONCLUSIVE; so is a read list naming the carried decoder twice,
     and any sampler row that is not an object with a finite `ts` and an integer `tick` (never dropped before the
     window, tick index or cadence is computed); a placed frame without the next tick's row has one read at most.
-    Only a frame without a sync tick or its own sampler row is discarded. Every note must be a readable
+    Only a frame without a sync tick or its own sampler row is discarded. Every other note must be a readable
     `bridge-motion-start` (object detail, finite `t`).
     PASS: at least `CARRY_COVER_MIN_CLEAN_SHARE` of the scored mid-move frames expose at most
     `CARRY_COVER_MAX_EXPOSED_FRACTION` of the overlay's area and no strip is wider than `CARRY_COVER_MAX_STRIP_PX`.
@@ -8277,7 +8278,7 @@ def score_carry_cover(
         isinstance(r, dict) and _finite_number(r.get("ts")) is not None and _el_id(r.get("tick")) for r in rows
     ):
         return inconclusive("a sampler row is unreadable (no object, finite ts or integer tick)")
-    motion = list(notes or [])
+    motion = [n for n in notes or [] if not (isinstance(n, dict) and n.get("kind") == "bridge-clock")]
     if not all(
         isinstance(n, dict) and n.get("kind") == "bridge-motion-start" and isinstance(n.get("detail"), dict)
         and _finite_number(n.get("t")) is not None for n in motion
