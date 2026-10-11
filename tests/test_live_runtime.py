@@ -892,6 +892,14 @@ FREEZE_DECKS = {
     "P2": OUTPUT_FIXTURES / "p2-binary" / "html-unmodified" / "assets",
     "DSK": OUTPUT_FIXTURES / "minimal-alpha-dsk-17c0c938" / "html" / "assets",
 }
+# `_freeze_deck_cases()` over FREEZE_DECKS, trimmed to the fields the deck stub reads. Regenerate with
+# `json.dumps(_freeze_deck_cases(), separators=(",", ":"))`; the census case checks it still matches the exports.
+FREEZE_DECK_FIXTURE = FIXTURE_ROOT / "dissolve_freeze_decks.json"
+# Every on-disk `none` cut's outgoing animation (all 8 are identical; the census case checks it).
+CUT_OUTGOING = {"additive": False, "timeOffset": 0, "beginTime": 0, "from": {"scalar": False}, "repeatCount": 0, "fillMode": "both",
+                "duration": 0.001, "autoreverses": False, "property": "hidden", "to": {"scalar": True}, "removedOnCompletion": False}
+CUT_EFFECT = {"beginTime": 0, "effects": [], "duration": 0.001, "type": "transition", "attributes": {"direction": 0}, "name": "none",
+              "objectID": "0"}
 
 # The player's module-scope names the real `let TB`, `yB`/`WB`/`VB` classes read, stubbed as `node_ids.py` does.
 DISSOLVE_PLAYER_SCOPE = r"""
@@ -908,14 +916,16 @@ function sheet(o={}){let calls=0;const rules=[];return {rules,insertRule(text,i)
   rules.splice(i,0,{selectorText:m[1],style:{[prop]:ok?m[3]:''}});return i},get cssRules(){return rules}}}
 const IN=JSON.parse(require('fs').readFileSync(process.argv[2],'utf8'));const pp=new P();
 const tree=(e)=>e.baseLayer.layers[0].layers;
-const summary={dissolve:0,cut:0,stock:0,mutated:0,badCopy:0,badIds:0,stockTouched:0};
+const mirrors=(a,x)=>JSON.stringify(a)===JSON.stringify(Object.assign({},x,{from:x.to,to:x.from}));
+const summary={dissolve:0,cut:0,stock:0,mutated:0,badCopy:0,badIds:0,stockTouched:0};const mirrorControls={};
 for(const e of IN.transitions){UC.animationManager.styleSheet=sheet();const b=JSON.stringify(e);const before=TB;const C={type:e.type,name:e.name,baseLayer:e.baseLayer};
   const res=pp.__obedDissolveLayer(C);if(JSON.stringify(e)!==b)summary.mutated++;const rules=UC.animationManager.styleSheet.rules;
   if(res===e.baseLayer){summary.stock++;if(rules.length||C.obedDissolve||TB!==before)summary.stockTouched++;continue}
-  const L=res.layers[0].layers,a=L[0].animations[0],cut=e.name==='none';summary[cut?'cut':'dissolve']++;
-  const ok=cut?C.obedDissolve==='cut'&&rules.length===0&&L[0].initialState.hidden===true&&a.property==='hidden'&&a.from.scalar===true&&a.to.scalar===false
-    :C.obedDissolve==='dissolve'&&L[0].initialState.opacity===0&&a.property==='opacity'&&a.from.scalar===0&&a.to.scalar===1&&a.duration===tree(e)[1].animations[0].duration;
-  if(!ok||L[1]!==tree(e)[1]||L.length!==2)summary.badCopy++;
+  const L=res.layers[0].layers,a=L[0].animations[0],x=tree(e)[1].animations[0],cut=e.name==='none';summary[cut?'cut':'dissolve']++;
+  const ok=cut?C.obedDissolve==='cut'&&rules.length===0&&L[0].initialState.hidden===true:C.obedDissolve==='dissolve'&&L[0].initialState.opacity===0;
+  if(!ok||L[0].animations.length!==1||!mirrors(a,x)||L[1]!==tree(e)[1]||L.length!==2)summary.badCopy++;
+  if(!mirrorControls[C.obedDissolve])mirrorControls[C.obedDissolve]={mirror:mirrors(a,x),duration:mirrors(Object.assign({},a,{duration:a.duration*100}),x),
+    beginTime:mirrors(Object.assign({},a,{beginTime:a.beginTime+0.5}),x),fillMode:mirrors(Object.assign({},a,{fillMode:'forwards'}),x)};
   const v=new VB(res,{name:e.name,type:e.type,objectID:e.objectID});const c=v.layers[0];
   const ids=[v.layerId,c.layerId,c.layers[0].layerId,c.layers[1].layerId,TB];
   const want=cut?[]:[['#layer'+(before+2)+',#layer'+(before+3),'mixBlendMode','plus-lighter'],['#layer'+(before+1),'isolation','isolate']];
@@ -936,7 +946,7 @@ for(const [name,o] of Object.entries(IN.failures)){UC.animationManager.styleShee
   failures[name]={stock:res===e.baseLayer,kind:C.obedDissolve||null,skippedIds:v.layerId-before,rules:rules.length,
     rulesTargetBuilt:rules.some(x=>built.some(id=>x.selectorText.split(',').includes('#layer'+id))),incomingOpacity:v.layers[0].layers[0].opacity,
     incomingRules:v.layers[0].layers[0].cssAnimationRules.length}}
-console.log(JSON.stringify({summary,near,failures}));
+console.log(JSON.stringify({summary,mirrorControls,near,failures}));
 """
 
 
@@ -1025,12 +1035,23 @@ const BASE={display:'block',opacity:'1',transform:'none',filter:'none',mixBlendM
   transformStyle:'flat',scale:'none',rotate:'none',translate:'none',offsetPath:'none',clip:'auto',backdropFilter:'none',objectViewBox:'none',contain:'none',contentVisibility:'visible',isolation:'auto',
   perspective:'none',backfaceVisibility:'visible',willChange:'auto',zoom:'1',imageRendering:'auto',visibility:'visible',borderImageSource:'none',webkitBoxReflect:'none',content:'normal',columnRuleStyle:'none'};
 const r6=v=>Math.round(v*1e6)/1e6;
+const READS=['checkVisibility','getBoundingClientRect','contains'];
+const MEDIA={play(){},pause(){},load(){},fastSeek(){},requestVideoFrameCallback(){},cancelVideoFrameCallback(){},captureStream(){},setAttribute(){},removeAttribute(){},
+  addEventListener(){},removeEventListener(){},dispatchEvent(){},remove(){},replaceWith(){},cloneNode(){},appendChild(){},insertBefore(){},removeChild(){},focus(){},blur(){}};
+function guard(raw,touched){const rec=(t,k)=>{const v=t[k];return typeof v==='function'&&!READS.includes(k)?function(...a){touched.push(raw.id+' call '+String(k));return v.apply(t,a)}:v};
+  const style=new Proxy(Object.assign(raw.style,{setProperty(){},removeProperty(){}}),{set(t,k,v){touched.push(raw.id+' set style.'+String(k));t[k]=v;return true},
+    deleteProperty(t,k){touched.push(raw.id+' delete style.'+String(k));return delete t[k]},get:rec});
+  return new Proxy(Object.assign(raw,MEDIA,raw._own),{set(t,k,v){touched.push(raw.id+' set '+String(k));t[k]=v;return true},deleteProperty(t,k){touched.push(raw.id+' delete '+String(k));return delete t[k]},
+    get(t,k){return k==='style'?style:rec(t,k)}})}
+function guardControl(){const touched=[];const v=guard({id:'ctl',style:{},_own:{}},touched);v.style.opacity='0';v.style.setProperty('opacity','0');v.pause();v.play();v.muted=true;v.remove();
+  v.getBoundingClientRect;return touched}
 function run(o){
   const touched=[];const all=[];const draws=[];const s=o.scale||1,ox=(o.off||[0,0])[0],oy=(o.off||[0,0])[1];const TR=r=>[ox+r[0]*s,oy+r[1]*s,r[2]*s,r[3]*s];
   const el=(tag,id,cs,rect0,parent,extra)=>{const rect=TR(rect0);const e=Object.assign({tagName:tag,id,nodeType:1,_cs:Object.assign({},BASE,tag==='CANVAS'?{objectFit:'fill',overflowX:'clip',overflowY:'clip'}:{},tag==='VIDEO'?{overflowX:'clip',overflowY:'clip'}:{},cs||{}),childNodes:[],children:[],style:{},parentElement:parent||null,
      getBoundingClientRect:()=>({left:rect[0],top:rect[1],width:rect[2],height:rect[3],right:rect[0]+rect[2],bottom:rect[1]+rect[3]}),
      checkVisibility(op){for(let p=this;p;p=p.parentElement){if(p._cs.display==='none')return false;if(op&&op.opacityProperty&&+p._cs.opacity===0)return false}if(this._cs.display==='contents')return false;if(op&&op.visibilityProperty&&this._cs.visibility!=='visible')return false;return true},contains(x){for(let p=x;p;p=p.parentElement)if(p===this)return true;return false},getElementsByTagName(){return all.filter(x=>x!==this&&this.contains(x))},
-     appendChild(c){if(this._throw)throw new Error('append');if(c.children&&!c.tagName){c.children.forEach(x=>this.children.push(x));c.children=[]}else this.children.push(c)}},extra||{});all.push(e);return e};
+     appendChild(c){if(this._throw)throw new Error('append');if(c.children&&!c.tagName){c.children.forEach(x=>this.children.push(x));c.children=[]}else this.children.push(c)}},tag==='VIDEO'?{}:extra||{});
+     if(tag==='VIDEO'){e._own=extra||{};const g=guard(e,touched);all.push(g);return g}all.push(e);return e};
   const html=el('HTML','html',Object.assign({position:'static'},o.htmlCs||{}),[0,0,1920,1080]);const body=el('BODY','body',{position:'static',backgroundColor:'rgb(0, 0, 0)',overflowX:'hidden',overflowY:'hidden'},[0,0,1920,0],html);
   const area=el('DIV','stageArea',{overflowX:'hidden',overflowY:'hidden',visibility:'hidden'},[0,0,1920,1080],body);
   const stage=el('DIV','stage',Object.assign({transformStyle:'preserve-3d',transform:'matrix(1, 0, 0, 1, 0, 0)',visibility:'hidden'},o.stageCs||{}),[0,0,1920,1080],area);
@@ -1039,9 +1060,7 @@ function run(o){
   if(o.behind)el('CANVAS','behind',{},[100,780,400,100],root);
   const oldBase=el('DIV','layer9',o.chainStatic?{position:'static'}:{},[0,0,1920,1080],root);
   const mlayer=el('DIV','layerM',Object.assign(o.chainStatic?{position:'static'}:{},o.layerCs||{}),o.clip||[109,795,952,268],oldBase);
-  const raw=el('VIDEO','vid',Object.assign(o.chainStatic?{position:'static'}:{},o.videoCs||{}),o.vrect||[109,795,952,268],mlayer,{readyState:o.rs==null?4:o.rs,videoWidth:1920,videoHeight:540,checkVisibility:()=>o.visible!==false});
-  const video=new Proxy(raw,{set(t,k,v){touched.push('set '+String(k));t[k]=v;return true},get(t,k){const v=t[k];if(typeof v==='function'&&!['checkVisibility','getBoundingClientRect','contains'].includes(k))touched.push('call '+String(k));return v}});
-  all[all.indexOf(raw)]=video;
+  const video=el('VIDEO','vid',Object.assign(o.chainStatic?{position:'static'}:{},o.videoCs||{}),o.vrect||[109,795,952,268],mlayer,{readyState:o.rs==null?4:o.rs,videoWidth:1920,videoHeight:540,checkVisibility:()=>o.visible!==false});
   if(o.video2)el('VIDEO','vid2',o.video2cs||{},[600,800,400,200],mlayer,{readyState:4,videoWidth:1920,videoHeight:540});
   if(o.fg){let par=root;if(o.fg.group){par=el('DIV','grp',o.fg.group,[0,0,1920,1080],root);if(o.fg.sibling)el('CANVAS','sib',{},[1500,100,100,100],par)}
     if(o.fg.wrap)par=el('DIV','fgwrap',o.fg.wrap,o.fg.rect,par);if(o.fg.hostGroup)par=el('DIV','fghost',o.fg.hostGroup,[0,0,1920,1080],par);const fe=el(o.fg.tag||'CANVAS','fg',o.fg.cs||{},o.fg.rect,o.fg.outside?body:par);if(o.fg.pseudo)fe._pseudo=o.fg.pseudo;if(o.fg.text)fe.childNodes=[{nodeType:3,data:'Hi'}]}
@@ -1053,19 +1072,20 @@ function run(o){
   globalThis.document={documentElement:html,body,getElementById:id=>ids[id]||null,querySelectorAll:()=>all.filter(e=>e.tagName==='VIDEO'),getElementsByTagName:()=>all,
     createDocumentFragment:()=>({children:[],appendChild(c){this.children.push(c)}}),
     createElement:t=>t==='canvas'?{style:{},width:0,height:0,getContext(){const ctx={globalAlpha:1,drawImage:(src,...a)=>{if(o.drawThrows&&src===video)throw new Error('draw');draws.push([src.id,ctx.globalAlpha,...a.map(r6)])},getImageData:(x,y,w,h)=>({data:px(w,h)}),putImageData:(D)=>{put=D.data[0]}};return ctx}}:{style:{},children:[],appendChild(c){this.children.push(c)}}};
-  globalThis.getComputedStyle=(e,p)=>p?{content:(e._pseudo&&e._pseudo[p])||'none'}:(e._cs||BASE);globalThis.innerWidth=1920;globalThis.window=globalThis;globalThis.innerHeight=1080;
+  globalThis.getComputedStyle=(e,p)=>p?{content:(e._pseudo&&e._pseudo[p])||'none'}:(e._cs||BASE);globalThis.innerWidth=(o.viewport||[1920,1080])[0];globalThis.window=globalThis;globalThis.innerHeight=(o.viewport||[1920,1080])[1];
   const tuple=o.vf===undefined?['bt709','bt709','bt709',false]:o.vf;let vfOpened=0,vfClosed=0;
   if(tuple==='missing')delete globalThis.VideoFrame;else globalThis.VideoFrame=class{constructor(x){if(tuple==='throws')throw new Error('vf');vfOpened++;this.colorSpace={primaries:tuple[0],transfer:tuple[1],matrix:tuple[2],fullRange:tuple[3]}}close(){vfClosed++}};
   let clk=0;globalThis.performance={now:()=>{const v=clk;clk+=o.clock||1;return v}};globalThis.__obedTakeMs=undefined;
   const U={script:o.throwScript?null:{slideWidth:1920,slideHeight:1080,events:[{effects:[EFF]}]},playbackController:{kpfEvent:{baseLayer:{layerId:9}}}};globalThis.UC=U;
   P.prototype.__obedFreezeTake(U,0);const taken=U.__obedFrozen?U.__obedFrozen.holders.length:0;
-  new P(0).__obedFreeze({obedDissolve:o.kind||'dissolve'},{layers:[{layers:[{layerId:12},{layerId:13}]}]});
+  new P(o.attachScene||0).__obedFreeze({obedDissolve:'kind' in o?o.kind:'dissolve'},{layers:[{layers:[{layerId:12},{layerId:13}]}]});
   const h=(wrap&&wrap.children[0])||leafOut.children[0];const geo=h?[h.style.left,h.style.top,h.style.width,h.style.height].map(v=>r6(parseFloat(v))).join(','):'';
   return {taken,inWrap:wrap?wrap.children.length:0,inLeaf:leafOut.children.length,draws:draws.filter(d=>d[0]!=='vid'),geo,put,
     touched,ms:U.__obedTakeMs,windowMs:globalThis.__obedTakeMs,slotCleared:UC.__obedFrozen===null,vfOpened,vfClosed};
 }
-const CASES=JSON.parse(require('fs').readFileSync(process.argv[2],'utf8'));const out={};for(const k in CASES)out[k]=run(CASES[k]);console.log(JSON.stringify(out));
+const CASES=JSON.parse(require('fs').readFileSync(process.argv[2],'utf8'));const out={guardControl:guardControl()};for(const k in CASES)out[k]=run(CASES[k]);console.log(JSON.stringify(out));
 """
+FREEZE_GUARD_CONTROL = ["ctl set style.opacity", "ctl call setProperty", "ctl call pause", "ctl call play", "ctl set muted", "ctl call remove"]
 
 # §3.2's allowlist, one out-of-profile computed value per property. Each value is applied, alone, to the movie chain
 # (`layerM`), the `<video>` and a redrawn foreground canvas (plain bitmap), or a confined non-intersecting `div` (paint
@@ -1120,12 +1140,15 @@ FG_DRAW = [1369.411765, -246.302521, 711.932773, 631.260504]
 # name -> (stub options, expected take/attach count and target, redraws [id, alpha, x, y, w, h], `L` output, geometry).
 FREEZE_ROWS = {
     "success": ({}, FREEZE_ADMIT),
-    "stage2560": ({"scale": 4 / 3}, dict(FREEZE_ADMIT, geo="109,795.125,952,14.875")),
+    "stageScaledInSmallViewport": ({"scale": 4 / 3}, dict(FREEZE_ADMIT, geo="109,795.125,952,14.875")),
+    "stage2560": ({"scale": 4 / 3, "viewport": [2560, 1440]}, FREEZE_ADMIT),
     "letterbox": ({"scale": 0.75, "off": [240, 135]}, FREEZE_ADMIT),
     "uniformScale": ({"layerCs": {"transform": "matrix(0.75, 0, 0, 0.75, 10, 20)"}}, FREEZE_ADMIT),
     "realCut": ({"kind": "cut", "noWrap": True}, dict(FREEZE_ADMIT, inWrap=0, inLeaf=1)),
     "dissolveMissingWrapper": ({"noWrap": True}, dict(FREEZE_ADMIT, inWrap=0, geo="")),
     "appendThrows": ({"appendThrows": True}, dict(FREEZE_ADMIT, inWrap=0, geo="")),
+    "attachOtherScene": ({"attachScene": 1}, dict(FREEZE_ADMIT, inWrap=0, geo="")),
+    "attachUnengaged": ({"kind": None}, dict(FREEZE_ADMIT, inWrap=0, geo="")),
     "letterboxedVideo": ({"vrect": [109, 700, 952, 500]}, dict(FREEZE_ADMIT, geo="109,816.125,952,263.875")),
     "clippedPanel": ({"layerCs": {"overflowX": "hidden", "overflowY": "hidden"}, "clip": [109, 795, 300, 268]},
                      dict(FREEZE_ADMIT, geo="109,795.125,300,267.75")),
@@ -1297,12 +1320,21 @@ def _render_movies(node, out: dict) -> dict:
     return out
 
 
+_DECK_STATE_FIELDS = ("width", "height", "affineTransform", "anchorPoint", "position", "hidden", "opacity", "masksToBounds", "backgroundColor")
+
+
+def _deck_tree(layer: dict) -> dict:
+    out = {"initialState": {k: v for k, v in layer["initialState"].items() if k in _DECK_STATE_FIELDS}}
+    out.update({k: layer[k] for k in ("objectID", "texture") if layer.get(k)})
+    if layer.get("layers"):
+        out["layers"] = [_deck_tree(child) for child in layer["layers"]]
+    return out
+
+
 def _freeze_deck_cases() -> list[dict]:
     """The scene shown before each movie slide's outgoing Dissolve: the previous event's tree, its builds applied."""
     cases = []
     for deck, root in FREEZE_DECKS.items():
-        if not root.is_dir():
-            pytest.skip("deck exports under output/fixtures not available")
         for index, sid in enumerate(json.loads((root / "header.json").read_text())["slideList"]):
             slide = json.loads((root / sid / f"{sid}.json").read_text())
             movies = _render_movies(slide, {})
@@ -1313,7 +1345,7 @@ def _freeze_deck_cases() -> list[dict]:
                 previous = slide["events"][max(0, k - 1)]
                 built = sorted(e["objectID"] for e in previous.get("effects") or [] if e.get("type") == "buildIn" and e.get("objectID"))
                 sizes = {o: slide["assets"].get(asset) or {} for o, asset in movies.items()}
-                cases.append({"label": f"{deck} slide {index + 1} event {k}", "tree": previous["baseLayer"], "built": built,
+                cases.append({"label": f"{deck} slide {index + 1} event {k}", "tree": _deck_tree(previous["baseLayer"]), "built": built,
                               "movies": {o: [s.get("width"), s.get("height")] for o, s in sizes.items()}, "effect": effect})
     return cases
 
@@ -1326,7 +1358,22 @@ def _run_node_file(node: str, tmp_path: Path, name: str, script: str, data) -> d
     return json.loads(result.stdout)
 
 
-DISSOLVE_NODE_CASES = ("construction", "freeze_stub", "freeze_decks")
+def _cut_from(dissolve: dict) -> dict:
+    """A full-shape Dissolve re-timed as Keynote exports a `none` cut (the plan's in-memory `p2cut`)."""
+    cut = json.loads(json.dumps(dissolve))
+    cut.update(CUT_EFFECT)
+    cut["baseLayer"]["layers"][0]["layers"][1]["animations"] = [dict(CUT_OUTGOING)]
+    return cut
+
+
+def _full_shape(effect: dict) -> bool:
+    layers = (effect.get("baseLayer") or {}).get("layers") or []
+    return len(layers) == 1 and len(layers[0].get("layers") or []) == 2
+
+
+# construction: committed transitions plus one cut, the near-misses, failures and ids (mandatory); census: the 133
+# transitions on disk (needs the main checkout's output/fixtures).
+DISSOLVE_NODE_CASES = ("construction", "census", "freeze_stub", "freeze_decks")
 
 
 @pytest.mark.parametrize("case", DISSOLVE_NODE_CASES)
@@ -1336,30 +1383,50 @@ def test_dissolve_real_patched_methods_on_node(tmp_path, sha, case):
     patched = live_runtime.patch_player(player).decode()
     methods = _cut(patched, "__obedShape(C){", "renderEffects(A){")
     assert live_runtime._MM_OPACITY_REPLACEMENTS[DISSOLVE][0][1] == b"return B}" + methods.encode() + b"renderEffects(A){"
-    if case == "construction":
-        # §8: all 133 transitions on disk (the committed fixtures' 16 among them) give 46 Dissolves copied with two
-        # rules on exactly the ids `VB` then allocates pre-order (root, container, incoming, outgoing = TB .. TB+3),
-        # 8 cuts and 79 stock, with no export mutated.
-        if not OUTPUT_FIXTURES.is_dir():
-            pytest.skip("export fixtures under output/ not available")
-        transitions = _transitions(OUTPUT_FIXTURES, FIXTURE_ROOT)
-        assert len(_transitions(FIXTURE_ROOT)) == 16 and len(transitions) == 133
+    if case in ("construction", "census"):
         classes = _cut(patched, "let TB=0;class yB{", "class bB{")
         script = DISSOLVE_PLAYER_SCOPE + classes + DISSOLVE_CONSTRUCTION_JS.replace("%METHODS%", methods)
-        # Near-misses and failures mutate copies of the first full-shape Dissolve (P2 2->3) and cut in this order.
+        committed = _transitions(FIXTURE_ROOT)
+        assert len(committed) == 16
+    if case == "construction":
+        # The 16 committed transitions (4 full-shape Dissolves, 2 trimmed, 10 Magic Moves) plus P2 2->3 re-timed as a cut:
+        # copies with the mirrored animation, two rules on exactly the ids `VB` then allocates pre-order (root,
+        # container, incoming, outgoing = TB .. TB+3), no export mutated. Near-misses and failures mutate copies of
+        # the first full-shape Dissolve (P2 2->3) and of that cut.
+        transitions = committed + [_cut_from(next(e for e in committed if e["name"] == "apple:dissolve" and _full_shape(e)))]
         failures = {name: options for name, (options, _) in DISSOLVE_CONSTRUCTION_FAILURES.items()}
         data = {"transitions": transitions, "nearMisses": DISSOLVE_NEAR_MISSES, "failures": failures}
         result = _run_node_file(node, tmp_path, case, script, data)
-        assert result["summary"] == {"dissolve": 46, "cut": 8, "stock": 79, "mutated": 0, "badCopy": 0, "badIds": 0, "stockTouched": 0}
+        assert result["summary"] == {"dissolve": 4, "cut": 1, "stock": 12, "mutated": 0, "badCopy": 0, "badIds": 0, "stockTouched": 0}
+        # The incoming animation is the outgoing one with its endpoints swapped; altered timing is told apart.
+        control = {"mirror": True, "duration": False, "beginTime": False, "fillMode": False}
+        assert result["mirrorControls"] == {"dissolve": control, "cut": control}
         assert result["near"] == {name: DISSOLVE_NEAR_MISS_ENGAGED.get(name, "stock") for name in DISSOLVE_NEAR_MISSES}
         misses = [effect for name, (effect, _, _) in DISSOLVE_NEAR_MISSES.items() if name not in DISSOLVE_NEAR_MISS_ENGAGED]
         assert (misses.count("apple:dissolve"), misses.count("none")) == (21, 10)
         assert result["failures"] == {name: expected for name, (_, expected) in DISSOLVE_CONSTRUCTION_FAILURES.items()}
+    elif case == "census":
+        # §8: all 133 transitions on disk give 46 Dissolves copied, 8 cuts and 79 stock; every on-disk cut has the
+        # timing CUT_OUTGOING models, and the committed deck inputs still match the exports.
+        if not OUTPUT_FIXTURES.is_dir():
+            pytest.skip("export fixtures under output/ not available")
+        transitions = _transitions(OUTPUT_FIXTURES, FIXTURE_ROOT)
+        assert len(transitions) == 133
+        cuts = [e for e in transitions if e["name"] == "none"]
+        assert len(cuts) == 8
+        for cut in cuts:
+            assert {k: cut[k] for k in CUT_EFFECT} == CUT_EFFECT
+            assert cut["baseLayer"]["layers"][0]["layers"][1]["animations"] == [CUT_OUTGOING]
+        assert json.loads(FREEZE_DECK_FIXTURE.read_text()) == _freeze_deck_cases()
+        result = _run_node_file(node, tmp_path, case, script, {"transitions": transitions, "nearMisses": {}, "failures": {}})
+        assert result["summary"] == {"dissolve": 46, "cut": 8, "stock": 79, "mutated": 0, "badCopy": 0, "badIds": 0, "stockTouched": 0}
     elif case == "freeze_stub":
         effect = json.loads(FREEZE_EFFECT.read_text())["events"][1]["effects"][0]
         script = FREEZE_STUB_JS.replace("%METHODS%", methods).replace("%EFF%", json.dumps(effect))
         result = _run_node_file(node, tmp_path, case, script, {name: options for name, (options, _) in FREEZE_ROWS.items()})
-        assert len(FREEZE_ROWS) == 134
+        # §8's 134 rows plus three controls: a true 2560x1440 viewport, and attaching to another scene or an unengaged kind.
+        assert len(FREEZE_ROWS) == 137
+        assert result.pop("guardControl") == FREEZE_GUARD_CONTROL
         for name, (options, expected) in FREEZE_ROWS.items():
             row = result[name]
             assert {k: row[k] for k in expected} == expected, name
@@ -1371,6 +1438,6 @@ def test_dissolve_real_patched_methods_on_node(tmp_path, sha, case):
             if name.startswith("gate_") and expected == FREEZE_SKIP:
                 assert row["vfOpened"] == 0, name
     else:
-        cases = _freeze_deck_cases()
+        cases = json.loads(FREEZE_DECK_FIXTURE.read_text())
         result = _run_node_file(node, tmp_path, case, FREEZE_DECKS_JS.replace("%METHODS%", methods), cases)
         assert result == FREEZE_DECK_TABLE
