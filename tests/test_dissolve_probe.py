@@ -402,6 +402,10 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
             video["on"] = None
         elif mutate == "ov-rect-nan":
             video["rect"][0] = math.nan
+        elif mutate == "ov-eff-negative":
+            video["eff"] = -1.0
+        elif mutate == "ov-width-negative":
+            video["rect"][2] = -480.0
         record["dump"]["raf"][20]["videos"].append(video)
     elif mutate == "anim-state-empty":
         for a in record["dump"]["raf"][-20]["anims"]:
@@ -509,6 +513,20 @@ def delay_one() -> str:
     twin = media_run("life-automatic-twin", holder=False)
     out = probe.score_lifecycle(record, images, twin, probe.ARMS["life-automatic"], CAL)
     return out["checks"]["frozen_delay"]["verdict"]
+
+
+def interrupted(row: str) -> str:
+    """Two mid frames before the action, the transition DOM gone right after it, in run and twin."""
+    record, images = media_run(f"life-{row}")
+    twin = media_run(f"life-{row}-twin", holder=False)
+    keep = {"shot-000", "shot-001", "shot-002", "shot-005", "shot-006", "shot-017", "shot-018", "shot-019"}
+    record["shots"] = [s for s in record["shots"] if s["name"] in keep]
+    cut_at = record["actions"][0]["t"] + 12
+    for rec in (record, twin[0]):
+        for r in rec["dump"]["raf"]:
+            if r["t"] >= cut_at:
+                r.pop("eff", None), r.pop("anims", None)
+    return probe.score_lifecycle(record, images, twin, probe.ARMS[f"life-{row}"], CAL)["outcome"]
 
 
 def tone_identity(mutate: str) -> str:
@@ -686,6 +704,10 @@ CASES = [
     ("r3-4 m-tone identity without the foreground inventory", lambda: tone_identity("tone-fg-del"), "INCONCLUSIVE"),
     ("sweep r3: transition DOM missing from one mid-fade rAF", lambda: arm_outcome("m-on", mutate="eff-hole"), "INCONCLUSIVE"),
     ("sweep r3: cast record with an empty name", lambda: bool(probe.schema_problems({"cast": [{"name": "", "t0": 1.0, "t1": 2.0}]})), True),
+    ("r4-1 overlay video record with opacity -1", lambda: arm_check("m-on", "overlay", mutate="ov-eff-negative"), "INCONCLUSIVE"),
+    ("r4-1 overlay video record with width -480", lambda: arm_check("m-on", "overlay", mutate="ov-width-negative"), "INCONCLUSIVE"),
+    ("r4-2 go-to row with two mid frames before the interruption", lambda: interrupted("goto"), "INCONCLUSIVE"),
+    ("r4-2 back row with two mid frames before the interruption", lambda: interrupted("back"), "INCONCLUSIVE"),
     ("r1-13 CEF round needs no headless-only arms", lambda: (round_gate(None, "overall", profile=probe.CEF),
                                                             "lifecycle" in probe.score_round({}, CAL, profile=probe.CEF)["gates"]), ("PASS", False)),
     ("r1-13 headless process/load checks apply to DX-1 only", lambda: (profile_headless(probe.DX1), profile_headless(probe.CEF)), (True, False)),

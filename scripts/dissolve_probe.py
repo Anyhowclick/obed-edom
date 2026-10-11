@@ -231,10 +231,10 @@ LIFECYCLE: dict[str, dict[str, Any]] = {
     "replay": {"replay": True},
     "queued-advance": {"actions": ((0.5, "space"),)},
     "queued-skip": {"actions": ((0.5, "skip"),)},
-    "goto": {"actions": ((0.5, "goto1"),), "minMid": 2},
-    "back": {"actions": ((0.5, "back"),), "minMid": 2},
-    "hide": {"actions": ((0.5, "hide"), (1.0, "show")), "minMid": 2},
-    "hide-screen": {"actions": ((0.5, "hide"), (1.0, "show")), "page": "screen", "minMid": 2},
+    "goto": {"actions": ((1.3, "goto1"),)},
+    "back": {"actions": ((1.3, "back"),)},
+    "hide": {"actions": ((0.5, "hide"), (1.0, "show"))},
+    "hide-screen": {"actions": ((0.5, "hide"), (1.0, "show")), "page": "screen"},
     "automatic": {"overrides": ("automatic",)},
     "loop-wrap": {"overrides": ("loop",), "slide": 4},
     "end-of-show": {"slide": 4, "end": True},
@@ -1073,7 +1073,7 @@ def score_handoff(last: np.ndarray | None, first: np.ndarray | None, exclude: li
 
 def leaf_effs(rec: dict[str, Any]) -> list[float] | None:
     eff = rec.get("eff")
-    return list(eff) if isinstance(eff, list) and len(eff) == 2 and all(number(v) for v in eff) else None
+    return list(eff) if isinstance(eff, list) and len(eff) == 2 and all(number(v) and 0 <= v <= 1 for v in eff) else None
 
 
 def first_animation_t(raf: list[dict[str, Any]]) -> float | None:
@@ -1367,6 +1367,15 @@ def quad(value: Any, n: int = 4) -> bool:
     return isinstance(value, list) and len(value) == n and all(number(v) for v in value)
 
 
+def box_ok(value: Any) -> bool:
+    """A finite [x, y, width, height] with non-negative width and height."""
+    return quad(value) and value[2] >= 0 and value[3] >= 0
+
+
+def unit(value: Any) -> bool:
+    return number(value) and 0 <= value <= 1
+
+
 def integer(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -1379,13 +1388,15 @@ def anim_problem(a: Any) -> str | None:
         return "not a record"
     if a.get("leaf") not in ("in", "out") or a.get("state") not in ANIM_STATES:
         return f"leaf/state {a.get('leaf')!r}/{a.get('state')!r}"
-    if not number(a.get("value")) or not number(a.get("dur")) or a["dur"] <= 0:
-        return "value/duration"
+    if not unit(a.get("value")) or not number(a.get("dur")) or a["dur"] <= 0:
+        return "value outside [0, 1] or duration not positive"
     if "ct" not in a or "start" not in a:
         return "ct/start absent"
     for key in ("ct", "start"):
         if a[key] is not None and not number(a[key]):
             return f"{key} not finite"
+    if a["ct"] is not None and a["ct"] < 0:
+        return "negative currentTime"
     if a["state"] in TIMED_STATES and (a["ct"] is None or (a["start"] is None and a["ct"] != 0)):
         return f"null timing while {a['state']}"
     return None
@@ -1398,10 +1409,11 @@ def video_problem(v: Any) -> str | None:
         return "id/on"
     if not v["on"]:
         return None
-    if not quad(v.get("rect")) or not number(v.get("eff")) or not all(isinstance(v.get(k), bool) for k in ("inT", "inStage", "paused")):
-        return "rect/eff/flags"
+    if not box_ok(v.get("rect")) or not unit(v.get("eff")) or not all(isinstance(v.get(k), bool) for k in ("inT", "inStage", "paused")):
+        return "rect (non-negative size) / opacity in [0, 1] / flags"
     geo = v.get("geo", "absent")
-    if geo is not None and not (isinstance(geo, dict) and quad(geo.get("content")) and quad(geo.get("region")) and quad(geo.get("size"), 2)):
+    if geo is not None and not (isinstance(geo, dict) and box_ok(geo.get("content")) and box_ok(geo.get("region"))
+                                and quad(geo.get("size"), 2) and min(geo["size"]) > 0):
         return "geometry"
     return None
 
@@ -1425,12 +1437,12 @@ def schema_problems(record: dict[str, Any]) -> list[str]:
     vids = dump.get("vids", [])
     if not isinstance(vids, list) or not all(
             isinstance(v, dict) and integer(v.get("id")) and isinstance(v.get("rv"), list)
-            and all(quad(x, 3) for x in v["rv"]) and (v.get("detach") is None or number(v.get("detach")))
+            and all(quad(x, 3) and x[1] >= 0 and x[2] >= 0 for x in v["rv"]) and (v.get("detach") is None or number(v.get("detach")))
             and all(v.get(k) is None or isinstance(v.get(k), str) for k in ("tuple", "err", "src")) for v in vids) \
             or len({v.get("id") for v in vids if isinstance(v, dict)}) != len(vids):
         problems.append("decoder/rVFC records malformed")
     takes = dump.get("takes", [])
-    if not isinstance(takes, list) or not all(isinstance(t, list) and len(t) == 2 and number(t[0]) and (t[1] is None or number(t[1]))
+    if not isinstance(takes, list) or not all(isinstance(t, list) and len(t) == 2 and number(t[0]) and (t[1] is None or (number(t[1]) and t[1] >= 0))
                                               for t in takes):
         problems.append("take publications malformed")
     cast = record.get("cast", [])
@@ -1439,7 +1451,7 @@ def schema_problems(record: dict[str, Any]) -> list[str]:
         problems.append("cast records malformed")
     first = dump.get("first") if isinstance(dump.get("first"), dict) else {}
     holders = first.get("holders", [])
-    if not isinstance(holders, list) or not all(isinstance(h, dict) and quad(h.get("rect")) and quad(h.get("canvasRect"))
+    if not isinstance(holders, list) or not all(isinstance(h, dict) and box_ok(h.get("rect")) and box_ok(h.get("canvasRect"))
                                                 and isinstance(h.get("natural"), list) and len(h["natural"]) == 2
                                                 and all(integer(n) and n > 0 for n in h["natural"]) for h in holders):
         problems.append("holder records malformed")
@@ -1889,7 +1901,7 @@ def _score_lifecycle(record: dict[str, Any], images: Mapping[str, np.ndarray], t
     visible = [i for i in ev.transition if i not in hidden and i not in straddle]
     if ev.A is not None and ev.B is not None:
         fade = score_fade([ev.shots[i] for i in visible], ev.A, ev.B, exclude=ev.media, classes=("out", "in"), cal=cal,
-                          screen=arm.page == "screen", min_frames=spec.get("minMid", COVERAGE["midFrames"]))
+                          screen=arm.page == "screen", min_frames=COVERAGE["midFrames"])
         if arm.page == "screen":
             checks["model"] = result(fade["checks"].get("model"), fade["problems"])
         else:
