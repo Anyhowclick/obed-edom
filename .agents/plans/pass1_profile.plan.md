@@ -3,24 +3,29 @@ name: Pass 1 profile — pull only the levers the profile names
 overview: >-
   2026-09-23. `obed-edom remap` on Full_Report_Card_Wall.key was profiled stage by stage
   (`.agents/reviews/pass1-profile-2026-09-23/README.md`): pass 1 is 36% of the run, not the assumed
-  55%. The levers it named are pulled or measured dead; the bulk seed read is the one still open.
-  Whole run 785 s → 584 s (z-order patch) and a further −63/−88 s (hides offline).
+  55%. The levers it named are pulled or measured dead. Whole run 785 s → 584 s (z-order patch), a
+  further −63/−88 s (hides offline) and −112/−147 s (text-only seed read, 2026-10-11).
 todos:
-  - id: h-bulk-seed-read
-    content: >-
-      NEW from the profile (2026-09-23): the bulk live seed read (`inspect.bulk_geometry`,
-      `bulk_geometry.js`) takes 150 s (19%) for 104 slides ≈ 1.4 s/slide. Establish what it reads
-      per slide versus what the writer consumes (`_OFFLINE_SOFT_SEED_KINDS` = text only; group rows
-      unused since the groups branch stopped) and whether the read can be narrowed to the kinds and
-      slides that need a seed. Gate: projected saving ≥ 60 s; needs one owner-gated live run.
-    status: pending
   - id: followup-single-rewrite
     content: >-
       GATED (moved from the hides-offline plan). Fold the hide delete into `patch_deck_geometry`'s rewrite
       (one decode and one rewrite instead of two). Precondition: the bulk seed read must run on the
       undeleted deck, with rows re-keyed through `bridge_kind_index`, which changes a live-validated
-      path (offline_write.py:122-133). Pursue only if the measured hide stage is ≥ 10 s AND
-      `h-bulk-seed-read` has settled what the seed read looks like.
+      path (offline_write.py:122-133). Pursue only if the measured hide stage is ≥ 10 s.
+      `h-bulk-seed-read` settled the seed read (2026-10-11): text only, on the hide-deleted deck.
+    status: pending
+  - id: seed-error-cap-guard
+    content: >-
+      From the h-bulk-seed-read design (owner 2026-10-10: separate todo). `bulk_geometry.js` caps
+      `errors` at 50 (js:77-89); past the cap a text `item:i` error can be dropped, so its zero-filled
+      row survives `_drop_unreadable_seed_rows` and can pass `seed_ok`. Treat `errorCount >
+      len(errors)` as an untrusted seed. Latent today; the text-only read makes it rarer.
+    status: pending
+  - id: js-tests-runner
+    content: >-
+      From the h-bulk-seed-read design (owner 2026-10-10: separate todo). `tests/*.test.js`
+      (e.g. `tests/bulk_geometry.test.js`) run by hand only; wire them into pytest or an npm script
+      so the full-suite rule covers them.
     status: pending
 ---
 
@@ -41,6 +46,7 @@ todos:
 | `h-hides-offline` | `git show 1379b2df:.agents/plans/pass1_hides_offline.plan.md`, `OBED_OFFLINE_HIDES` default on |
 | `deferred-build-hides` | not planned: hides carrying a build (slide 122, ≈ 0.7 s) stay on the Keynote delete; offline would need `buildEventCount`/`hasBuilds`, formula unknown — revisit only if a deck puts material time there |
 | `design-offline-attrs` | not triggered: its gate was attrs ≥ 60 s after `h-attrs-roundtrips`; attrs is ≈ 19 s |
+| `h-bulk-seed-read` | PR #255: the writer's live seed reads text only (opt-in `kinds`; the writer never consumed image/movie/group rows). Live gate GREEN 2026-10-11: seed read ≈ 160 → 41 s, whole run −147/−112 s, O1 and O2 identical. Record `.agents/reviews/seed-read-narrow-2026-10-10/README.md`; design and review log `git show 245fe021:.agents/plans/pass1_profile.plan.md` |
 
 ## What pass 1 does today (OBED_OFFLINE_WRITE on)
 
