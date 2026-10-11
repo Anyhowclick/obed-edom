@@ -78,6 +78,10 @@ Byte offsets are into D1 `main.js` (e9b2fad4); 17c0c938 has the same call sites.
 - Absent property: define a configurable, enumerable accessor.
 - Configurable data property (`main.js` already ran): wrap its value.
 - Foreign accessor or non-configurable property: no hook, and the bridge falls back after 50 ms.
+- **Late install (Astra r1 #1):** callbacks queued before the install run unwrapped, so their re-arms look like loop starts.
+  An adoption window opens at install and closes in a native rAF callback queued then (ordered after every pre-install
+  callback). A candidate inside the window sets `departure.gl = false`: that departure falls back, and no later start
+  can stamp it.
 
 **Behaviour.**
 - The setter always stores the value. A getter-only accessor would make `main.js`'s plain assignment throw.
@@ -116,6 +120,10 @@ Byte offsets are into D1 `main.js` (e9b2fad4); 17c0c938 has the same call sites.
   - Until then it returns 0, so the overlay holds the source rect. Keynote's poster is also there until its loop starts.
 - **The latch.** A stamp that arrives after the fallback engaged is ignored, so there is no clock-switch jump. Under `gl`, a negative delta clamps to 0. A backward `Date` step moves the overlay back together with Keynote, by design.
 - **No mid-move snap-back.** Mid-move re-marks keep the same occurrence and motion, and `rideTransition` keeps its first `rectAt` closure (`:1097`).
+- **A ride belongs to its owner (Astra r1 #2):** `rideTransition` stores its owner (the motion for a bridge, the boundary
+  for a pin) in `__obedMotionPinning`. A different owner takes the ride over; the superseded loop stops without
+  re-queueing, and only the owner clears the field. A `#7 → #8 → #7` excursion inside one frame now re-drives the element
+  on its new motion.
 
 **The exact fallback guarantee.** From the fallback frame on, it is today's clock.
 - Before that frame, the overlay holds at the source for 50–66.7 ms, then jumps forward to today's position.
