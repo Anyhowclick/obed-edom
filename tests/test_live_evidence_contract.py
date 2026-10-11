@@ -194,6 +194,9 @@ VIOLATIONS = [
     ("carry-cover-vids-without-read-at", CC, _drop(lambda r: r["rows"][0], "readAt"), "carryCover.readAt"),
     ("carry-cover-duplicate-elId", CC, _append_copy(lambda r: r["rows"][0]["vids"]), "carryCover:duplicate elId"),
     ("carry-cover-opaque-null", CC, _set(lambda r: r["rows"][1]["pre"][0], opaque=None), "vid.opaque"),
+    ("carry-cover-src-not-a-string", CC, _set(lambda r: r["rows"][1]["pre"][0], src=None), "vid.src"),
+    ("carry-cover-mixed-read-generations", CC, _set(lambda r: r["rows"][1]["pre"][0], src="untitled.mov"),
+     "carryCover:mixed read generations (with and without src)"),
     ("bridge-clock-fallback-before-its-wait", CC, _set(lambda r: r, notes=[
         {"kind": "bridge-clock", "detail": {"elId": 3, "via": "fallback", "lagMs": 12.0, "sceneHash": "#7"}, "t": 1.0}]),
      "bridge-clock:fallback before its wait"),

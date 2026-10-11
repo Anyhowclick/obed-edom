@@ -9228,6 +9228,20 @@ class TestCarryCoverMetric:
         assert result["alignedFrames"] == result["midFrames"] >= result["minFrames"]
         assert result["discardedFrames"] == 0 and result["undecidedFrames"] == 0
 
+    @pytest.mark.parametrize(("src", "verdict"), [
+        ("Untitled.mov-0.0000-46.0333.mov", "pass"), ("foreign.mov", "fail"), ("", "inconclusive"),
+        (None, "pass"),  # a legacy record (no `src` on its reads) keeps the pixel-only scoring
+    ])
+    def test_the_carried_decoder_must_name_the_bridges_asset(self, src: str | None, verdict: str) -> None:
+        """Astra r16 #2: identical coverage by another decoded clip passed, the reads carrying no source."""
+        frames, rows, notes = _cc_scene()
+        if src is not None:
+            for row in rows:
+                for read in (*row["pre"], *row["vids"]):
+                    read["src"] = src
+        result = _cc_score(frames, rows, notes, bridge=_cc_bridge(asset="untitled.mov"))
+        assert result["verdict"] == verdict, result["reasons"]
+
     def test_known_bad_a_linear_overlay_over_an_eased_poster_is_the_rubber_band_and_fails(self) -> None:
         """Today's core: the overlay moves linearly, the GL poster EaseInEaseOut, so the poster's leading edges
         show around the overlay for most of the move."""

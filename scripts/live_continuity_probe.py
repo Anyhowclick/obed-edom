@@ -8029,7 +8029,8 @@ CARRY_COVER_SAMPLER_JS = r"""
       if (v.__obedElId == null) return;
       var r = v.getBoundingClientRect(), cs = getComputedStyle(v);
       vids.push({elId: v.__obedElId, x: r.left, y: r.top, w: r.width, h: r.height, readyState: v.readyState,
-                 opaque: document.contains(v) && cs.visibility === 'visible' && cs.display !== 'none' && opacityOf(v) >= 0.99});
+                 opaque: document.contains(v) && cs.visibility === 'visible' && cs.display !== 'none' && opacityOf(v) >= 0.99,
+                 src: String(v.currentSrc || v.src || '').split('/').pop()});
     });
     return vids;
   }
@@ -8358,6 +8359,8 @@ def score_carry_cover(
     window, tick index or cadence is computed); a placed frame without the next tick's row has one read at most.
     Only a frame without a sync tick or its own sampler row is discarded. Every other note must be a readable
     `bridge-motion-start` (object detail, finite `t`).
+    A read of the carried decoder during the move must name the bridge's `asset`: another asset FAILS, no source is
+    INCONCLUSIVE; a legacy record whose reads carry no `src` keeps the pixel-only scoring.
     PASS: at least `CARRY_COVER_MIN_CLEAN_SHARE` of the scored mid-move frames expose at most
     `CARRY_COVER_MAX_EXPOSED_FRACTION` of the overlay's area and no strip is wider than `CARRY_COVER_MAX_STRIP_PX`.
     Coverage: at least `CARRY_COVER_MIN_FPS` scored frames per second, no stretch of the mid-move window longer than
@@ -8405,6 +8408,15 @@ def score_carry_cover(
     in_move = [v for r in moving for v in [_carried_rect(r, el_id)] if v]
     if not in_move:
         return inconclusive("no carried decoder sampled during the move", elId=el_id)
+    carried = [v for r in moving for key in ("vids", "pre") for v in [_carried_rect(r, el_id, key)] if v and "src" in v]
+    if carried and not bridge.get("asset"):
+        return inconclusive("this bridge names no asset to judge the carried decoder's source by", elId=el_id)
+    if any(not v["src"] for v in carried):
+        return inconclusive("a read of the carried decoder during the move names no source", elId=el_id)
+    foreign = sorted({v["src"] for v in carried if not matches_asset_keys(v["src"], [bridge["asset"]])})
+    if foreign:
+        return {"verdict": "fail", "reasons": [f"the carried decoder names another asset during the move: {foreign}"],
+                "elId": el_id}
     if not any((v.get("readyState") or 0) >= 2 for v in in_move):
         return inconclusive("the carried decoder never decoded during the move", elId=el_id)
     ticks = [r["ts"] for r in moving]

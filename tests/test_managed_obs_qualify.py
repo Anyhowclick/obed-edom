@@ -1259,7 +1259,8 @@ def _session(**over: Any) -> dict[str, Any]:
             {"src": "WA0125.mp4", "loop": False},
         ],
         "handedBack": [{"elId": 7, "loop": True, "isConnected": True, "facade": False, "paused": False, "t": 12.0}],
-        "reads": {"postHandback": {"gl": _post_handback()}},
+        "reads": {"postHandback": {"gl": _post_handback(), "painting": [
+            {"src": "Untitled.mov-0.0000-46.0333.mov", "elId": 7, "rect": {"x": 109.0, "y": 795.0, "w": 952.0, "h": 268.0}}]}},
         "outputAtStop": {"continuity": {"mode": "qualified", "glReplay": {"mode": "injected"}}},
         "samples": [{"t": 2.0 * i, "state": "LIVE", "standDowns": [], "videoEnded": False, "uploads": 100 * (i + 1),
                      "carriedT": t} for i, t in enumerate(times)],
@@ -1338,6 +1339,21 @@ class TestPrecheckA:
         """Codex r4 #5: `.loop` on a DOM element proves nothing unless G2 retired by handing off that same element."""
         session = _session(reads={"postHandback": {"gl": post}})
         assert _precheck(session, looped)["failing"] == ["(a) video.loop on the handed-back carried element"]
+
+    @pytest.mark.parametrize(("src", "verdict"), [
+        ("Untitled.mov-0.0000-46.0333.mov", "PASS"), ("foreign.mov", "FAIL"), ("", "INVALID"),
+    ], ids=["the-movie-passes", "a-foreign-source-fails", "an-empty-source-is-invalid"])
+    def test_the_handed_back_elements_source_is_judged(self, looped: Path, src: str, verdict: str) -> None:
+        """Astra r16 #1: the handed-back id kept its loop and hand-off notes after a source reassignment (core 466-491
+        keeps `__obedElId`), so before the fix a foreign or cleared source still PASSed."""
+        session = _session()
+        session["reads"]["postHandback"]["painting"][0]["src"] = src
+        result = _precheck(session, looped)
+        assert result["verdict"] == verdict
+        if verdict == "INVALID":
+            reasons: list[str] = []
+            q.arm_gates("soak", {"sessions": [session]}, types.SimpleNamespace(precheck=True, fixture=looped), None, reasons)
+            assert "precheck INCONCLUSIVE: handed-back element's source unreadable" in reasons
 
     def test_an_extra_differing_json_fails(self, looped: Path) -> None:
         header = looped / "html-unmodified/assets/header.json"

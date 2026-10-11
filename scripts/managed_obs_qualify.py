@@ -91,6 +91,7 @@ from live_continuity_probe import (  # noqa: E402
     GL_REPLAY_READ_JS,
     PAINTING_VIDEOS_JS,
     _carried_el_id,
+    _el_id,
     _events_readable,
     _handed_off,
     _movie_entries,
@@ -1615,9 +1616,12 @@ def precheck_gates(run: dict[str, Any], fixture: Path) -> dict[str, Any]:
     check(checks, "(a) video.loop on every slide-1 untitled.mov", [v.get("loop") for v in slide1],
           bool(slide1) and all(v.get("loop") is True for v in slide1), "all true")
     handed = session.get("handedBack")
-    post = ((session.get("reads") or {}).get("postHandback") or {}).get("gl")
-    check(checks, "(a) video.loop on the handed-back carried element", {"elements": handed, "handback": handback_of(post)},
-          handed_back_loops(handed, post), "one connected non-facade element, loop true, G2 RETIRED by a hand-off of that id")
+    post_read = (session.get("reads") or {}).get("postHandback")
+    post = (post_read or {}).get("gl")
+    source = handed_back_source(handed, post_read)
+    check(checks, "(a) video.loop on the handed-back carried element",
+          {"elements": handed, "handback": handback_of(post), "source": source}, handed_back_loops(handed, post) and source is True,
+          "one connected non-facade element painting untitled.mov, loop true, G2 RETIRED by a hand-off of that id")
     continuity = continuity_of(session)
     check(checks, "(b) continuity qualified, glReplay injected", [continuity.get("mode"), (continuity.get("glReplay") or {}).get("mode")],
           continuity.get("mode") == "qualified" and (continuity.get("glReplay") or {}).get("mode") == "injected")
@@ -1630,7 +1634,7 @@ def precheck_gates(run: dict[str, Any], fixture: Path) -> dict[str, Any]:
           bool(samples) and all(s.get("state") == "LIVE" and s.get("standDowns") == [] and s.get("videoEnded") is False for s in samples))
     check(checks, "(c) uploads keep rising", uploads, all(isinstance(a, (int, float)) and isinstance(b, (int, float)) and b > a
                                                           for a, b in zip(uploads, uploads[1:])) and len(uploads) > 1)
-    return {"precheck": gate(checks)}
+    return {"precheck": gate(checks, "precheck INCONCLUSIVE: handed-back element's source unreadable" if source is None else None)}
 
 
 def handback_of(read: Any) -> dict[str, Any]:
@@ -1640,6 +1644,17 @@ def handback_of(read: Any) -> dict[str, Any]:
     module = [h.get("released") if isinstance(h.get("released"), dict) else {} for h in handoffs]
     return {"state": (api or {}).get("state"), "releases": [{"mode": r.get("mode"), "elId": r.get("elId")} for r in releases],
             "moduleReleased": [{"ok": m.get("ok"), "mode": m.get("mode"), "elId": m.get("elId")} for m in module]}
+
+
+def handed_back_source(handed: Any, read: Any) -> bool | None:
+    """Whether the handed-back element paints `untitled.mov` in the post-hand-back read (its `PAINTING_VIDEOS_JS` row by
+    `elId`); False when no single element is named, None when its row or source cannot be read."""
+    if not (isinstance(handed, list) and len(handed) == 1 and isinstance(handed[0], dict) and _el_id(handed[0].get("elId"))):
+        return False
+    painting = read.get("painting") if isinstance(read, dict) else None
+    rows = [v for v in painting if isinstance(v, dict) and v.get("elId") == handed[0]["elId"]] if isinstance(painting, list) else []
+    src = rows[0].get("src") if len(rows) == 1 else None
+    return matches_asset_keys(src, ["untitled.mov"]) if isinstance(src, str) and src else None
 
 
 def handed_back_loops(handed: Any, post: Any) -> bool:
@@ -1925,7 +1940,10 @@ def arm_gates(arm: str, run: dict[str, Any], args: argparse.Namespace, armed: di
     if arm == "mmo-cef":
         return mmo_cef_gates(run)
     if args.precheck:
-        return precheck_gates(run, args.fixture)
+        gates = precheck_gates(run, args.fixture)
+        if gates["precheck"]["invalid"]:
+            invalid.append(gates["precheck"]["invalid"])
+        return gates
     return soak_gates(run, armed, fixture_loops(args.fixture))
 
 

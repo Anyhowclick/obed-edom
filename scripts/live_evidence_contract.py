@@ -729,13 +729,16 @@ def _vids(value: Any, path: str) -> Iterator[str]:
             yield f"vid:object at {path}[{index}]"
         else:
             yield from _fields(vid, "vid", f"{path}[{index}]", VID_FIELDS)
+            if "src" in vid and not isinstance(vid["src"], str):
+                yield f"vid.src at {path}[{index}]"
     yield from _unique([v["elId"] for v in value if isinstance(v, dict) and _id(v.get("elId"))],
                        "carryCover:duplicate elId", path)
 
 
 def carry_cover(rows: Any, notes_read: Any, stage: Any) -> Iterator[str]:
     """`CARRY_COVER_SAMPLER_JS` rows (`ts` increasing, `tick` contiguous mod 4096, `vids` with its `readAt` on every
-    row but a trailing run), `CARRY_COVER_READ_JS` notes and the capture's stage map."""
+    row but a trailing run; every read with a string `src`, or none in a legacy record), `CARRY_COVER_READ_JS` notes
+    and the capture's stage map."""
     yield from stage_map(stage, "stageMap")
     yield from notes(notes_read, "notes", CARRY_COVER_NOTE_KINDS, readable=False)
     if rows is None:
@@ -745,6 +748,7 @@ def carry_cover(rows: Any, notes_read: Any, stage: Any) -> Iterator[str]:
         return
     prev = None
     unread = False
+    sourced: set[bool] = set()
     for index, row in enumerate(rows):
         where = f"rows[{index}]"
         if not isinstance(row, dict):
@@ -761,6 +765,9 @@ def carry_cover(rows: Any, notes_read: Any, stage: Any) -> Iterator[str]:
                 and row["tick"] != (prev["tick"] + 1) % CARRY_COVER_TICKS:
             yield f"carryCover:tick not contiguous at {where}"
         yield from _vids(row.get("pre"), f"{where}.pre")
+        sourced.update(
+            "src" in v for key in ("pre", "vids") if isinstance(row.get(key), list) for v in row[key] if isinstance(v, dict)
+        )
         if "vids" in row:
             if unread:
                 yield f"carryCover:read after an unread row at {where}"
@@ -772,6 +779,8 @@ def carry_cover(rows: Any, notes_read: Any, stage: Any) -> Iterator[str]:
             if "readAt" in row:
                 yield f"carryCover:readAt without vids at {where}"
         prev = row
+    if len(sourced) > 1:
+        yield "carryCover:mixed read generations (with and without src) at rows"
 
 
 def census(raw: Any, path: str = "censusRaw") -> Iterator[str]:
