@@ -1767,6 +1767,18 @@ def unidentified_decoders(
     ]
 
 
+def duplicate_ids(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Samples that list one probe id on two `<video>` rows: which is the decoder cannot be told,
+    so it is never scored by row order."""
+    out = []
+    for s in samples:
+        ids = [v.get("id") for v in s.get("videos") or [] if isinstance(v, dict) and v.get("id") is not None]
+        dupes = sorted({str(i) for i in ids if ids.count(i) > 1})
+        if dupes:
+            out.append({"t": s.get("t"), "ids": dupes})
+    return out
+
+
 def stage_map_valid(stage_map: dict[str, Any] | None) -> bool:
     """Fail-closed: missing `#stage`, a zero box, or a non-uniform scale (`|s -
     sy| / s` over 0.1%) is invalid, never silently treated as identity."""
@@ -2201,7 +2213,7 @@ def score_continuity(
     (`continuity_window`), is INCONCLUSIVE, never dropped from the before/after partition or from
     grounding; so is a tracked decoder's row there whose source no longer names the asset
     (`unnamed_rows`, identity before source), or an untracked decoding row that names no source
-    (`unidentified_decoders`).
+    (`unidentified_decoders`), or a row listing one decoder id twice (`duplicate_ids`).
     """
     tracks = track_by_id(samples, asset_substr)
     if not decoded_anywhere(tracks):
@@ -2265,6 +2277,9 @@ def score_continuity(
     unidentified = unidentified_decoders(samples, tracks, reach, window["end"])
     if unidentified:
         return _inconclusive("a decoder the carry window reaches names no source", unidentified=unidentified[:5], window=window)
+    doubled = duplicate_ids([s for s in samples if reach <= s["t"] <= window["end"]])
+    if doubled:
+        return _inconclusive("a row the carry window reaches lists one decoder id twice", doubled=doubled[:5], window=window)
     before_ids = {i for i, rows in windowed.items() if any(r["scene"] is not None and r["scene"] < boundary_scene for r in rows)}
     after_ids = {i for i, rows in windowed.items() if any(r["scene"] is not None and r["scene"] >= boundary_scene for r in rows)}
     common = before_ids & after_ids
@@ -2440,7 +2455,8 @@ def score_restart(
     the samples never span is inconclusive, never a failed restart; so is a row of a decoder not
     proven present before the boundary that carries no scene (it may be that proof), a tracked
     decoder's row whose source no longer names the asset (`unnamed_rows`), a decoding row that names
-    no source (`unidentified_decoders`), and an unreadable start clock."""
+    no source (`unidentified_decoders`), a row listing one decoder id twice (`duplicate_ids`), and an
+    unreadable start clock."""
     tracks = track_by_id(samples, asset_substr)
     if not decoded_anywhere(tracks):
         return {"verdict": None, "reason": "inconclusive: movie never decoded"}
@@ -2449,6 +2465,9 @@ def score_restart(
     unnamed, unidentified = unnamed_rows(tracks, asset_substr), unidentified_decoders(samples, tracks, -math.inf, math.inf)
     if unnamed or unidentified:
         return _inconclusive("a decoder's rows do not name the asset", unnamed=unnamed[:5], unidentified=unidentified[:5])
+    doubled = duplicate_ids(samples)
+    if doubled:
+        return _inconclusive("a row lists one decoder id twice", doubled=doubled[:5])
 
     def placed(rows: list[dict[str, Any]], after: bool) -> list[dict[str, Any]]:
         return [
@@ -2570,10 +2589,10 @@ def retire_instance_ids(retire: dict[str, Any]) -> set[str]:
     }
 
 
-def instance_decoders(samples: Any, ids: Collection[str]) -> tuple[set[Any], set[Any]]:
+def instance_decoders(samples: Any, ids: Collection[str]) -> tuple[set[Any], set[Any]] | None:
     """(linked, foreign) `elId`s from the retained samples' `instance` stamps: linked when ever
     stamped with an objectId in `ids`, foreign when always stamped with another. Neither without
-    `ids` or samples."""
+    `ids` or samples; None when a tagged decoder's stamp is neither absent, null nor a string."""
     if not ids or not isinstance(samples, list):
         return set(), set()
     stamps: dict[Any, set[str | None]] = {}
@@ -2581,6 +2600,8 @@ def instance_decoders(samples: Any, ids: Collection[str]) -> tuple[set[Any], set
         for v in (row.get("videos") or []) if isinstance(row, dict) else []:
             if isinstance(v, dict) and v.get("elId") is not None:
                 stamp = v.get("instance")
+                if not (stamp is None or isinstance(stamp, str)):
+                    return None
                 stamps.setdefault(v["elId"], set()).add(stamp.lower() if isinstance(stamp, str) and stamp else None)
     linked = {el for el, seen in stamps.items() if seen & set(ids)}
     return linked, {el for el, seen in stamps.items() if el not in linked and None not in seen}
@@ -2591,12 +2612,12 @@ RETIRE_REFUSAL_KINDS = ("preserve-refused", "retire-boundary")
 
 def _note_identity_ok(detail: dict[str, Any]) -> bool:
     """A core note's or pool entry's identity fields, where present, are readable: element ids,
-    an `elIds` list of ids, and string-or-null keys and instance stamp."""
+    an `elIds` list of ids, and string-or-null keys and instance stamps (`instance`, `src`, `dst`)."""
     return (
         all(_id_or_null(detail[f]) for f in ("elId", "newElId", "oldElId") if f in detail)
         and ("elIds" not in detail or isinstance(detail["elIds"], list)
              and all(v is not None and _id_or_null(v) for v in detail["elIds"]))
-        and all(detail[f] is None or isinstance(detail[f], str) for f in ("key", "movieKey", "instance") if f in detail)
+        and all(detail[f] is None or isinstance(detail[f], str) for f in ("key", "movieKey", "instance", "src", "dst") if f in detail)
     )
 
 
@@ -2916,8 +2937,8 @@ def _armed_pool(
 ) -> tuple[bool | None, dict[str, Any]]:
     """The pool is {carried} plus out-of-document siblings, the carried decoding in real time;
     None when the carried decoder cannot be named (`carried_readable`), a pool field it needs
-    is unreadable (`fromDom` is absent on a pool entry, true on a DOM-preserved one), or an
-    entry's movie cannot be told (`_movie_identity`)."""
+    is unreadable (`fromDom` is absent on a pool entry, true on a DOM-preserved one, a movie entry
+    has no integer `elId`), or an entry's movie cannot be told (`_movie_identity`)."""
     for state in states:
         pool = state.get("pool")
         if not isinstance(pool, list) or not all(isinstance(entry, dict) for entry in pool):
@@ -2927,6 +2948,8 @@ def _armed_pool(
             return None, {"reason": "a pooled entry names no readable movie", "unidentified": unidentified}
         if any(not isinstance(entry.get("inDocument"), bool) for entry in _movie_entries(pool, armed)):
             return None, {"reason": "a pooled movie entry's inDocument is unreadable"}
+        if any(not _el_id(entry.get("elId")) for entry in _movie_entries(pool, armed)):
+            return None, {"reason": "a pooled movie entry's elId is unreadable"}
         if any("fromDom" in entry and entry["fromDom"] is not True for entry in pool):
             return None, {"reason": "a pooled entry's fromDom is neither absent nor true"}
     if not carried_readable:
@@ -2965,12 +2988,15 @@ def pre_flip_owner_ids(samples: list[dict[str, Any]], armed: dict[str, Any]) -> 
     videos, no readable `src` or footprint owner, or for the movie no readable scene, or before
     the flip no readable rect), never dropped from it. A decoder is the movie's by identity before
     source (its probe id named the asset on any row), so one whose src no longer names the asset
-    makes the census None."""
+    makes the census None; so does a row listing one probe id twice (`duplicate_ids`) and, before
+    the flip, a decoding row that names no source and is not proven off the instance rect."""
     rows = samples or []
     if not all(isinstance(s, dict) and isinstance(s.get("videos"), list) for s in rows) or not all(
         isinstance(v, dict) and isinstance(v.get("src"), str) and _owner_named(v.get("footprintOwner"))
         and _id_or_null(v.get("id")) for s in rows for v in s["videos"]
     ):
+        return None
+    if duplicate_ids(rows):
         return None
     movie = {v.get("id") for s in rows for v in s["videos"] if matches_asset_keys(v["src"], armed["assetKeys"])}
     owners: list[Any] = []
@@ -2980,6 +3006,10 @@ def pre_flip_owner_ids(samples: list[dict[str, Any]], armed: dict[str, Any]) -> 
             continue
         for video in sample["videos"]:
             named = matches_asset_keys(video["src"], armed["assetKeys"])
+            if video["src"] == "" and _decoded(video) and video.get("id") not in movie and not (
+                _is_rect(video.get("rect")) and not rects_overlap(video["rect"], armed["instanceRect"])
+            ):
+                return None
             if not named and video.get("id") not in movie - {None}:
                 continue
             if not named or scene is None or not _is_rect(video.get("rect")):
@@ -3242,7 +3272,8 @@ def score_restart_strict(
     freshness, source membership, destination phase or rect rests on a row of unreadable scene,
     move state or rect is INCONCLUSIVE, never dropped from those checks; so is any run with a
     tracked decoder's row whose source no longer names the asset (`unnamed_rows`, identity before
-    source) or a decoding row that names no source (`unidentified_decoders`)."""
+    source), a decoding row that names no source (`unidentified_decoders`) or a row listing one
+    decoder id twice (`duplicate_ids`)."""
     errors = sample_schema_errors(samples)
     if errors:
         return _inconclusive("sample schema is invalid", schemaErrors=errors)
@@ -3258,6 +3289,9 @@ def score_restart_strict(
         return _inconclusive(
             "a decoder's rows do not name the asset", unnamed=unnamed[:5], unidentified=unidentified[:5], window=window,
         )
+    doubled = duplicate_ids(samples)
+    if doubled:
+        return _inconclusive("a row lists one decoder id twice", doubled=doubled[:5], window=window)
     first = spec.get("sourceScene")
 
     def placed(row: dict[str, Any]) -> bool:
@@ -3512,8 +3546,10 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
     zone is placed in page time from the samples (`retire_zone_times`) when the notes carry `t`,
     never by the page hash; a note the zone then cannot place (no readable `t`) is never counted
     as a refusal and makes a carry note INCONCLUSIVE. Unreadable evidence is INCONCLUSIVE: a note
-    whose identity fields are ill-typed (`_note_identity_ok`), and a refusal note for the movie
-    (or of unreadable key) whose detail, key, via, scene, elIds or atScene cannot be read."""
+    whose identity fields are ill-typed (`_note_identity_ok`), a refusal note for the movie
+    (or of unreadable key) whose detail, key, via, scene, elIds or atScene cannot be read, and the
+    retained samples, with or without a destination instance (`sample_schema_errors`, a decoder's
+    `instance` stamp)."""
     if not isinstance(sample, dict):
         return _inconclusive("no refusal evidence was sampled on the destination slide")
     if not stage_map_valid(sample.get("stageMap")):
@@ -3534,8 +3570,14 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
             return _inconclusive("the retire verdict is bound to no runtime movie key")
         if not src_ids:
             return _inconclusive("the retire verdict names no source instance")
+    errors = sample_schema_errors(samples)
+    if errors:
+        return _inconclusive("sample schema is invalid", schemaErrors=errors)
     ids = retire_instance_ids(spec)
-    linked, foreign = instance_decoders(samples, ids)
+    decoders = instance_decoders(samples, ids)
+    if decoders is None:
+        return _inconclusive("a sampled decoder's instance stamp is unreadable")
+    linked, foreign = decoders
     handback = score_raw_handback(samples, spec)
     if handback["verdict"] is None:
         return _inconclusive(f"hand-back: {handback['reason']}", handback=handback)
@@ -4990,8 +5032,8 @@ def score_live_ring(
 def score_handback_carry(record: Any, armed: dict[str, Any]) -> dict[str, Any]:
     """Vgl after build 1: carried paints alone, released by hand-off, never remounted. Each check
     is tri-state: an unread or unreadable read, note list, carried note (`_carried_named`), stage
-    map, painting probe, pool or pool entry identity, release note, facade list or facade entry
-    (its integer `elId`/`forElId`, explicit nulls readable), or remount note without an object
+    map, painting probe, pool or pool entry identity (a movie entry's integer `elId`), release note,
+    facade list or facade entry (its integer `elId`/`forElId`, explicit nulls readable), or remount note without an object
     detail naming an integer `elId` is None, and any None makes the verdict None before any
     failure. A painter is the movie's by identity before source (the carried, a pooled or a
     facade element) or by its src; one over the instance rect that names no source is None."""
@@ -5012,7 +5054,7 @@ def score_handback_carry(record: Any, armed: dict[str, Any]) -> dict[str, Any]:
     pool = before.get("pool") if isinstance(before, dict) else None
     pool_ok = isinstance(pool, list) and all(
         isinstance(e, dict) and _movie_identity(e, armed["assetKeys"], armed["movieKey"]) is not None for e in pool
-    )
+    ) and all(_el_id(e.get("elId")) for e in _movie_entries(pool, armed))
     pooled = sorted({e.get("elId") for e in _movie_entries(pool, armed)}, key=str) if pool_ok else None
     detail.update(pooled=pooled, releases=releases)
     reads = (before, after)
@@ -8073,6 +8115,12 @@ def _carried_rect(row: dict[str, Any] | None, el_id: Any, key: str = "vids") -> 
     return None
 
 
+def _carried_twice(row: dict[str, Any] | None, el_id: Any, key: str) -> bool:
+    """Whether a read list names the carried decoder more than once, so which read is its own cannot be told."""
+    reads = (row or {}).get(key)
+    return isinstance(reads, list) and sum(isinstance(v, dict) and v.get("elId") == el_id for v in reads) > 1
+
+
 def _overlay_readable(video: dict[str, Any] | None) -> bool:
     """A carried read with a finite, non-negative rect (a collapsed overlay is a readable 0) and a Boolean `opaque`."""
     return (
@@ -8138,8 +8186,10 @@ def score_carry_cover(
     disagree on the cover rule is undecided; when the undecided frames decide the verdict it is INCONCLUSIVE. A placed
     frame with only one read, a read list or entry `elId` that cannot be read, a readable pair without the carried
     decoder, or a read of the carried decoder without a finite, non-negative rect or a Boolean `opaque`, is never
-    scored on what remains or discarded as unsampled: INCONCLUSIVE. Only a frame without a sync tick, sampler row or
-    next tick's row is discarded. Every note must be a readable `bridge-motion-start` (object detail, finite `t`).
+    scored on what remains or discarded as unsampled: INCONCLUSIVE; so is a read list naming the carried decoder twice,
+    and any sampler row that is not an object with a finite `ts` and an integer `tick` (never dropped before the
+    window, tick index or cadence is computed). Only a frame without a sync tick, sampler row or next tick's row is
+    discarded. Every note must be a readable `bridge-motion-start` (object detail, finite `t`).
     PASS: at least `CARRY_COVER_MIN_CLEAN_SHARE` of the scored mid-move frames expose at most
     `CARRY_COVER_MAX_EXPOSED_FRACTION` of the overlay's area and no strip is wider than `CARRY_COVER_MAX_STRIP_PX`.
     Coverage: at least `CARRY_COVER_MIN_FPS` scored frames per second, no stretch of the mid-move window longer than
@@ -8152,10 +8202,11 @@ def score_carry_cover(
         return inconclusive(bridge["problem"])
     if not stage_map_valid(stage_map):
         return inconclusive("stage map unreadable")
-    rows = [
-        r for r in rows or []
-        if isinstance(r, dict) and isinstance(r.get("ts"), (int, float)) and isinstance(r.get("tick"), int)
-    ]
+    rows = list(rows or [])
+    if not all(
+        isinstance(r, dict) and _finite_number(r.get("ts")) is not None and _el_id(r.get("tick")) for r in rows
+    ):
+        return inconclusive("a sampler row is unreadable (no object, finite ts or integer tick)")
     motion = list(notes or [])
     if not all(
         isinstance(n, dict) and n.get("kind") == "bridge-motion-start" and isinstance(n.get("detail"), dict)
@@ -8177,12 +8228,15 @@ def score_carry_cover(
     if el_id is None or not _id_or_null(el_id):
         return inconclusive("this bridge's bridge-motion-start note names no carried decoder")
     duration_ms = 1000.0 * float(bridge["durationSeconds"])
-    in_move = [v for r in rows if t0 <= r["ts"] <= t0 + duration_ms for v in [_carried_rect(r, el_id)] if v]
+    moving = [r for r in rows if t0 <= r["ts"] <= t0 + duration_ms]
+    if any(_carried_twice(r, el_id, key) for r in moving for key in ("vids", "pre")):
+        return inconclusive("a sampler read during the move names the carried decoder twice", elId=el_id)
+    in_move = [v for r in moving for v in [_carried_rect(r, el_id)] if v]
     if not in_move:
         return inconclusive("no carried decoder sampled during the move", elId=el_id)
     if not any((v.get("readyState") or 0) >= 2 for v in in_move):
         return inconclusive("the carried decoder never decoded during the move", elId=el_id)
-    ticks = [r["ts"] for r in rows if t0 <= r["ts"] <= t0 + duration_ms]
+    ticks = [r["ts"] for r in moving]
     cadence = float(np.median(np.diff(ticks))) if len(ticks) > 1 else math.inf
     if cadence > 1000.0 / CARRY_COVER_MIN_FPS:
         return inconclusive(f"the page's rAF ticked every {cadence:.1f} ms during the move "
@@ -8241,6 +8295,9 @@ def score_carry_cover(
             isinstance(read, list) and all(isinstance(v, dict) and _el_id(v.get("elId")) for v in read) for read in lists
         ):
             per_frame.append({**entry, "unreadable": "its post/pre read list or a read's elId is unreadable"})
+            continue
+        if _carried_twice(row, el_id, "vids") or _carried_twice(after, el_id, "pre"):
+            per_frame.append({**entry, "unreadable": "its post/pre read names the carried decoder twice"})
             continue
         reads = [("post", _carried_rect(row, el_id)), ("pre", _carried_rect(after, el_id, "pre"))]
         if all(v is None for _, v in reads):
