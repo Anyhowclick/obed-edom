@@ -1575,16 +1575,21 @@ class TestPaintingVideoInstanceCheck:
         assert [entry["label"] for entry in duplicates] == ["Untitled.mov#1"]
         assert [video["elId"] for video in duplicates[0]["videos"]] == [1, 2]
 
-    @pytest.mark.parametrize(("src", "verdict", "status"), [
-        ("Untitled.mov", True, "pass"), ("foreign.mov", False, "fail"), ("", None, "inconclusive"),
+    @pytest.mark.parametrize(("src", "verdict", "status", "tied"), [
+        ("Untitled.mov", True, "pass", False), ("foreign.mov", False, "fail", False), ("", None, "inconclusive", False),
+        # Astra r16 #3: two instances on one rect; the label tie-break gave `a.mov` z.mov#1 (a false foreign red).
+        ("a.mov", True, "pass", True), ("foreign.mov", False, "fail", True),
     ])
-    def test_a_painter_claiming_an_instance_must_name_its_asset(self, src: str, verdict: Any, status: str) -> None:
+    def test_a_painter_claiming_an_instance_must_name_its_asset(self, src: str, verdict: Any, status: str, tied: bool) -> None:
         """Astra r15 #1: the instance was matched by geometry alone, so another asset's (or a source-less)
         decoder at the expected rect passed under fully live pixels."""
         from obed_edom.html_alpha_probe import score_visible_slide
 
+        stage_map = PAINT_STAGE_MAPS["full-bleed"]
+        rect = probe.to_authored_rect(EXPECTED_SCREEN_RECT, stage_map)
         record = self._record(
-            PAINT_STAGE_MAPS["full-bleed"], [painting_video(EXPECTED_SCREEN_RECT, src=src, el_id=1)],
+            stage_map, [painting_video(EXPECTED_SCREEN_RECT, src=src, el_id=1)],
+            instances={0: {"a.mov": [rect], "z.mov": [dict(rect)]}} if tied else None,
             scorer=score_visible_slide, shots=self._live_shots(),
         )
         assert (record["verdict"], record["status"], record["instanceCheck"]["verdict"]) == (verdict, status, verdict)

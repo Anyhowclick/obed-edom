@@ -4472,15 +4472,17 @@ def match_painting_videos(videos: list[dict[str, Any]], expected: list[dict[str,
     DEAD-expected rect claims nothing: the plan says that movie is back under the
     raw player, so a `<video>` there is unexpected however live its pixels are. A video that claims
     an `asset#index` instance must name that asset: another asset is listed in `foreignVideos`
-    (False), no source in `unnamedVideos` (None, before any failure)."""
+    (False), no source in `unnamedVideos` (None, before any failure). Instances tied on geometry go to the one
+    whose asset the video names."""
     claims: dict[str, list[dict[str, Any]]] = {}
     unexpected: list[dict[str, Any]] = []
     for video in videos:
         scores = [
-            (rect_iou(video["authored"], item["authored"]), item["label"], item.get("expect", LIVE))
+            (rect_iou(video["authored"], item["authored"]),
+             matches_asset_keys(video.get("src"), [item["label"].rsplit("#", 1)[0]]), item["label"], item.get("expect", LIVE))
             for item in expected
         ]
-        best_iou, best_label, best_expect = max(scores, default=(0.0, None, LIVE))
+        best_iou, _, best_label, best_expect = max(scores, default=(0.0, False, None, LIVE))
         if best_iou >= INSTANCE_IOU_MIN and best_expect != DEAD:
             claims.setdefault(best_label, []).append(video)
         else:
