@@ -9067,6 +9067,12 @@ def _cc_note(
     }}
 
 
+def _cc_clock_note(via: str, lag_ms: float, el_id: int = CC_EL_ID, scene: int = CC_AT_SCENE - 1) -> dict[str, Any]:
+    """The core's `bridge-clock` note: the clock a bridge's overlay rode, from the hash it rode from."""
+    return {"kind": "bridge-clock", "t": CC_T0 + 7.0,
+            "detail": {"elId": el_id, "via": via, "lagMs": lag_ms, "sceneHash": f"#{scene}"}}
+
+
 def _cc_scene(
     *, overlay_curve: Any = _ease_in_out, poster_shift: tuple[float, float] = (0.0, 0.0), opaque: bool = True,
     extra_object: tuple[dict[str, float], float] | None = None, ready_state: int = 4, marker_only: bool = False,
@@ -9570,6 +9576,18 @@ class TestCarryCoverStatus:
 
     def test_an_unmeasured_bridge_is_inconclusive(self) -> None:
         assert probe.carry_cover_status(self.QUALIFIED, [{"boundary": "b3to4"}])[0] == "inconclusive"
+
+    @pytest.mark.parametrize(("notes", "expected"), [
+        ([_cc_note(), _cc_clock_note("fallback", 55.0, scene=CC_AT_SCENE),
+          _cc_clock_note("fallback", 52.0, el_id=CC_EL_ID + 1), _cc_clock_note("gl", 7.0)], {"via": "gl", "lagMs": 7.0}),
+        ([_cc_clock_note("fallback", 51.5)], {"via": "fallback", "lagMs": 51.5}),
+        ([_cc_clock_note("gl", 7.0), _cc_clock_note("gl", 6.0)], None),
+    ], ids=["gl-among-foreign-scene-and-decoder", "fallback", "two-own-notes"])
+    def test_carry_cover_clock_names_this_bridges_clock(self, notes: list[dict[str, Any]], expected: Any) -> None:
+        """Report only (the probe status stays pixel-only): the one `bridge-clock` note naming this bridge's carried
+        decoder from its source scene's hash, matched on identity (never time); a note from another scene or decoder
+        is not this bridge's, and two of its own are ambiguous (None)."""
+        assert probe.carry_cover_clock(notes, _cc_bridge(), CC_EL_ID) == expected
 
 
 class TestCarryCoverCli:
