@@ -831,7 +831,7 @@ def build_lut(snapshot: np.ndarray, live: np.ndarray, *, agree: float = 1.0, ana
     """Q0b 1's measured LUT from paired (N, 3) snapshot/live pixels of eroded ramp and patch interiors: per channel and
     observed snapshot value s the median live value (all kept in `medians`); one shared table if the channels agree
     within `agree` at every s (else `kind` "fallback", the 3-D case); unobserved s interpolated linearly; L[0] = 0,
-    L[255] = 255; "analytic" when the gamma-1.961 curve is within `analytic_tol` of every observed per-channel median,
+    L[255] = 255 pinned; "analytic" (endpoint observations included) when the gamma-1.961 curve is within `analytic_tol` of every observed per-channel median,
     else "table". Empty, non-finite, out-of-range or mismatched samples are "INCONCLUSIVE"."""
     snap, liv = np.asarray(snapshot, dtype=float), np.asarray(live, dtype=float)
     if (snap.ndim != 2 or snap.shape[1:] != (3,) or snap.shape != liv.shape or not len(snap) or not np.isfinite(snap).all()
@@ -844,14 +844,15 @@ def build_lut(snapshot: np.ndarray, live: np.ndarray, *, agree: float = 1.0, ana
     for s in np.unique(snap):
         medians[int(s)] = [float(np.median(liv[snap[:, c] == s, c])) for c in range(3) if np.any(snap[:, c] == s)]
     disagree = sorted(s for s, per in medians.items() if max(per) - min(per) > agree)
-    observed = sorted(s for s in medians if 0 < s < 255)
+    observed = sorted(medians)
+    inner = [s for s in observed if 0 < s < 255]
     if disagree:
         return {"kind": "fallback", "table": None, "observed": observed, "disagree": disagree, "medians": medians}
-    xs = [0, *observed, 255]
-    ys = [0.0, *(float(np.median(medians[s])) for s in observed), 255.0]
+    xs = [0, *inner, 255]
+    ys = [0.0, *(float(np.median(medians[s])) for s in inner), 255.0]
     table = np.clip(np.rint(np.interp(np.arange(256), xs, ys)), 0, 255).astype(np.uint8)
     curve = analytic_lut()
-    analytic = bool(observed) and all(abs(m - float(curve[s])) <= analytic_tol for s in observed for m in medians[s])
+    analytic = bool(inner) and all(abs(m - float(curve[s])) <= analytic_tol for s in observed for m in medians[s])
     return {"kind": "analytic" if analytic else "table", "table": table.tolist(), "observed": observed, "disagree": [],
             "medians": medians}
 
@@ -984,7 +985,8 @@ def score_fade(frames: list[np.ndarray], A: np.ndarray, B: np.ndarray, *, exclud
                classes: Iterable[str] = (), cal: Calibration = Calibration(), screen: bool = False,
                min_frames: int = MIN_MID_FRAMES) -> dict[str, Any]:
     """Model, complement and no-dip over transition frames (time order); `exclude` = media rects (padded here). The
-    complement and overlap-alpha bounds hold for every class pixel of every admitted (mid) frame."""
+    complement and overlap-alpha bounds hold for every class pixel of every admitted (fitted transition) frame; the
+    model only on mid frames."""
     shape = A.shape[:2]
     problems = []
     if A.shape != B.shape or any(f.shape[:2] != shape for f in frames):
@@ -1005,11 +1007,12 @@ def score_fade(frames: list[np.ndarray], A: np.ndarray, B: np.ndarray, *, exclud
     mid = [r for r in rows if number(r["e"]) and MID_E[0] < r["e"] < MID_E[1]]
     if len(mid) < min_frames:
         problems.append(f"{len(mid)} mid frames < {min_frames}")
+    admitted = [r for r in rows if number(r["e"])]
     checks = {"model": bool(mid) and all(r["residual"] <= cal.tau for r in mid)}
-    if not screen and {"in", "out"} <= set(classes) and not any(r["in"] is None or r["out"] is None for r in mid):
-        checks["complement"] = bool(mid) and all(complement_error(r["in"], r["out"]) <= cal.complement for r in mid)
-    if not screen and "overlap" in classes and not any(r["overlap"] is None for r in mid):
-        checks["no_dip"] = bool(mid) and all(r["overlap"][0] >= cal.no_dip for r in mid)
+    if not screen and {"in", "out"} <= set(classes) and not any(r["in"] is None or r["out"] is None for r in admitted):
+        checks["complement"] = bool(mid) and all(complement_error(r["in"], r["out"]) <= cal.complement for r in admitted)
+    if not screen and "overlap" in classes and not any(r["overlap"] is None for r in admitted):
+        checks["no_dip"] = bool(mid) and all(r["overlap"][0] >= cal.no_dip for r in admitted)
     return {"problems": problems, "rows": rows, "mid": len(mid), "classPx": sizes, "checks": checks}
 
 
@@ -1022,6 +1025,12 @@ def score_curve(raf: list[dict[str, Any]], min_frames: int = MIN_MID_FRAMES) -> 
     value and a positive duration; one start time; |in + out - 1| and |in - ease-in-out(ct / T)| within tolerance."""
     both, problems = [], []
     for r in raf:
+        for a in r.get("anims") or []:
+            live = a.get("state") in ("running", "finished")
+            if (a.get("leaf") not in ("in", "out") or not isinstance(a.get("state"), str) or not number(a.get("value"))
+                    or not number(a.get("dur")) or a["dur"] <= 0
+                    or (live and not (number(a.get("ct")) and number(a.get("start"))))):
+                problems.append(f"rAF at {r.get('t')}: malformed animation record {a}")
         anims = running_anims(r)
         if not anims:
             continue
@@ -1101,7 +1110,8 @@ def score_no_flash(raf: list[dict[str, Any]], window_in_alpha: list[float] | Non
 def score_cut(raf: list[dict[str, Any]], cast: list[dict[str, Any]], cal: Calibration = Calibration()) -> dict[str, Any]:
     """rAFs from DOM insertion: incoming 0 before the cut's first animation frame, then in + out = 1 through the frame
     where incoming reaches 1 (included); every screencast (or CEF source) frame within the complement over every
-    in-only/out-only pixel pair, and at least one of them inside [DOM insertion, cut completion]."""
+    in-only/out-only pixel pair, and at least one whose whole capture interval [t0, t1] (a screencast frame has
+    t0 = t1) lies inside [DOM insertion, cut completion]; a straddling capture alone is INCONCLUSIVE."""
     dom = [r for r in raf if r.get("eff") is not None]
     if not dom:
         return result(None, ["no rAF with the transition DOM"])
@@ -1119,10 +1129,11 @@ def score_cut(raf: list[dict[str, Any]], cast: list[dict[str, Any]], cal: Calibr
         problems.append("no rAF before the cut's first animation frame")
     if any(b["t"] - a["t"] > RAF_GAP_MS for a, b in zip(dom, dom[1:])):
         problems.append("rAF gap inside the cut")
-    if any(not number(c.get("t")) or c.get("in") is None or c.get("out") is None for c in cast):
+    if any(not number(c.get("t0")) or not number(c.get("t1")) or c["t1"] < c["t0"] or c.get("in") is None or c.get("out") is None
+           for c in cast):
         problems.append("malformed screencast frame")
     end = post[done]["t"] if done is not None else None
-    inside = [c for c in cast if end is not None and number(c.get("t")) and dom[0]["t"] <= c["t"] <= end]
+    inside = [c for c in cast if end is not None and number(c.get("t0")) and number(c.get("t1")) and dom[0]["t"] <= c["t0"] and c["t1"] <= end]
     if not inside:
         problems.append("no screencast frame inside [DOM insertion, cut completion]")
     if problems:
@@ -1224,7 +1235,7 @@ def score_cost(publications: list[Any], start: float | None, end: float | None) 
     if any(b[0] <= a[0] for a, b in zip(publications, publications[1:])):
         return result(None, ["take publications duplicated or out of order"])
     current = [p[1] for p in publications if start <= p[0] <= end]
-    if len(current) != 1 or not number(current[0]):
+    if len(current) != 1 or not number(current[0]) or current[0] < 0:
         return result(None, [f"need exactly one finite take cost published for the exercised take: {current}"])
     return result(max(current) <= COST_MS, takeMs=current)
 
@@ -1350,12 +1361,13 @@ CEF = Profile("CEF", ("opaque-off", "off", "noblend", "on2", "cut-on", "cut-off"
 
 def raf_problems(raf: Any) -> list[str]:
     """Every rAF record well formed: finite, strictly increasing `t`; `eff` absent or two finite leaf opacities with an
-    `anims` list beside it; `anims` and `videos` lists of records; no gap > `RAF_GAP_MS` while the transition DOM is present."""
+    `anims` list beside it; `anims` and `videos` (always present; observed empty = []) lists of records; no gap > `RAF_GAP_MS` while the transition DOM is present."""
     if not isinstance(raf, list) or not all(isinstance(r, dict) for r in raf):
         return ["rAF log is not a list of records"]
     if not all(number(r.get("t")) for r in raf) or any(b["t"] <= a["t"] for a, b in zip(raf, raf[1:])):
         return ["rAF times missing, non-finite, duplicated or out of order"]
     bad = [r["t"] for r in raf if ("eff" in r and (leaf_effs(r) is None or not isinstance(r.get("anims"), list)))
+           or not isinstance(r.get("videos"), list)
            or not all(isinstance(r.get(k, []), list) and all(isinstance(x, dict) for x in r.get(k, [])) for k in ("anims", "videos"))]
     if bad:
         return [f"malformed rAF records at {bad[:3]}"]
@@ -1532,8 +1544,12 @@ def media_integrity(record: dict[str, Any], images: Mapping[str, np.ndarray], ar
     if decoder is None:
         problems.append("no decoder for the outgoing movie")
     else:
-        if not isinstance(decoder.get("tuple"), str) or not decoder["tuple"]:
-            problems.append("decoder colour tuple missing")
+        if not isinstance(decoder.get("tuple"), str) or not COLOUR_TUPLE.fullmatch(decoder["tuple"]):
+            problems.append(f"decoder colour tuple missing or malformed: {decoder.get('tuple')!r} (an error is not a tuple)")
+        inventory = (record.get("foreground") or {}).get(str(decoder.get("id"))) if isinstance(record.get("foreground"), dict) else None
+        if not isinstance(inventory, list) or not all(isinstance(c, dict) and isinstance(c.get("id"), str)
+                                                     and len(c.get("rect") or []) == 4 and all(number(v) for v in c["rect"]) for c in inventory):
+            problems.append("no well-formed foreground inventory for the bound decoder")
         content, size = decoder.get("content") or [], decoder.get("size") or []
         if len(content) != 4 or len(size) != 2 or not all(number(v) for v in [*content, *size]) or size[0] <= 0:
             problems.append("decoder geometry malformed")
@@ -1631,6 +1647,7 @@ def malformed(expect: Iterable[str], exc: Exception) -> dict[str, Any]:
             "midResiduals": [], "fitted": []}
 
 
+COLOUR_TUPLE = re.compile(r"[a-z0-9-]+/[a-z0-9-]+/[a-z0-9-]+/(true|false)")
 MALFORMED = (TypeError, ValueError, KeyError, IndexError, AttributeError)
 
 
@@ -1650,7 +1667,7 @@ def _score_arm(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Ar
     ev = evidence(record, images)
     checks: dict[str, dict[str, Any]] = {}
     fade = _fade_of(ev, arm, cal) if ev.A is not None and ev.B is not None else {"problems": ["no textures"], "rows": [], "checks": {}}
-    problems += [p for p in fade["problems"] if p.startswith("class ")]
+    problems += fade["problems"] if arm.capture != "cut" else [p for p in fade["problems"] if p.startswith("class ")]
     for name in ("model", "complement", "no_dip", "screen"):
         if name in arm.expect:
             key = "model" if name == "screen" else name
@@ -1676,7 +1693,7 @@ def _score_arm(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Ar
         for c in record.get("cast") or []:
             img = images.get(c.get("name"))
             ok = masks is not None and img is not None and img.shape[:2] == masks["in"].shape
-            cast.append({"t": c.get("t"), "in": class_range(img, masks["in"]) if ok else None,
+            cast.append({"t0": c.get("t0", c.get("t")), "t1": c.get("t1", c.get("t")), "in": class_range(img, masks["in"]) if ok else None,
                          "out": class_range(img, masks["out"]) if ok else None})
         checks["cut"] = score_cut(ev.raf, cast, cal)
     if {"frozen_frame", "frozen_region", "foreground", "tone", "overlay"} & set(arm.expect):
@@ -1693,8 +1710,9 @@ def _score_arm(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Ar
     if problems:
         checks = {k: {**v, "verdict": "INCONCLUSIVE" if v["verdict"] != "N/A" else "N/A", "problems": problems + v["problems"]}
                   for k, v in checks.items()}
-    mismatch = sorted(k for k, want in arm.expect.items() if checks.get(k, {}).get("verdict") != want)
-    inconclusive = any(checks.get(k, {}).get("verdict", "INCONCLUSIVE") == "INCONCLUSIVE" for k in arm.expect)
+    blocking = [k for k, want in arm.expect.items() if want not in ("REPORTED", "N/A")]
+    mismatch = sorted(k for k in blocking if checks.get(k, {}).get("verdict") != arm.expect[k])
+    inconclusive = bool(problems) or any(checks.get(k, {}).get("verdict", "INCONCLUSIVE") == "INCONCLUSIVE" for k in blocking)
     outcome = "INCONCLUSIVE" if inconclusive else ("MATCH" if not mismatch else "MISMATCH")
     return {"outcome": outcome, "checks": checks, "mismatch": mismatch, "problems": problems,
             "midResiduals": [r["residual"] for r in fade["rows"] if number(r["e"]) and MID_E[0] < r["e"] < MID_E[1]],
@@ -1736,13 +1754,9 @@ def _score_lifecycle(record: dict[str, Any], images: Mapping[str, np.ndarray], t
         problems.append("stock twin missing")
     else:
         problems += [f"twin: {p}" for p in capture_problems(twin[0], twin[1], ARMS[arm.twin or ""], profile)]
-    done = [a.get("name") for a in record.get("actions") or [] if number(a.get("t"))]
-    missing = [name for _, name in spec.get("actions", ()) if name not in done]
+    problems += action_problems(record, spec)
     if twin is not None:
-        missing += [f"twin {name}" for _, name in spec.get("actions", ()) if name not in
-                    [a.get("name") for a in twin[0].get("actions") or [] if number(a.get("t"))]]
-    if missing:
-        problems.append(f"required actions not recorded: {missing}")
+        problems += [f"twin: {p}" for p in action_problems(twin[0], spec)]
     if spec.get("replay") and not (record.get("pre") or {}).get("first"):
         problems.append("replay: no first-pass capture")
     if spec.get("end") and record.get("residueAfterGoto") is None:
@@ -1755,7 +1769,11 @@ def _score_lifecycle(record: dict[str, Any], images: Mapping[str, np.ndarray], t
     hashes = (record.get("hashAfter"), twin[0].get("hashAfter") if twin else None)
     checks["destination"] = result(hashes[0] == hashes[1], [] if all(isinstance(h, str) for h in hashes) else ["destination hash missing"],
                                    hash=hashes[0], twin=hashes[1])
-    checks["cleanup"] = score_cleanup(record.get("residueAfterGoto") if spec.get("end") else record.get("residue"))
+    ids = first.get("layerIds")
+    if isinstance(ids, list) and ids and len(set(map(str, ids))) == len(ids) and all(isinstance(i, str) and re.match(r"layer\d+", i) for i in ids):
+        checks["cleanup"] = score_cleanup(record.get("residueAfterGoto") if spec.get("end") else record.get("residue"))
+    else:
+        checks["cleanup"] = result(None, ["no valid transition layer-id inventory to bind the cleanup to"])
     if row in ("advance", "replay", "automatic", "loop-wrap"):
         checks["holder"] = result(len(first.get("holders") or []) == 1, holders=len(first.get("holders") or []))
     if row == "replay":
@@ -1785,6 +1803,7 @@ def _score_lifecycle(record: dict[str, Any], images: Mapping[str, np.ndarray], t
         if row == "automatic":
             auto = replace(arm, holders=1, capture="media")
             checks["frozen_frame"] = score_media(record, images, ev, auto, fade, cal, identity=None)["frozen_frame"]
+            checks["frozen_delay"] = score_delay_freeze(record, images, ev, auto, [r["e"] for r in fade["rows"]])
     else:
         checks["complement"] = result(None, ["no textures"])
     checks["no_flash"] = score_no_flash(ev.raf, None, cal)
@@ -1793,6 +1812,43 @@ def _score_lifecycle(record: dict[str, Any], images: Mapping[str, np.ndarray], t
     verdicts = [c["verdict"] for c in checks.values()]
     outcome = "INCONCLUSIVE" if "INCONCLUSIVE" in verdicts else ("MATCH" if all(v == "PASS" for v in verdicts) else "MISMATCH")
     return {"outcome": outcome, "checks": checks, "problems": problems}
+
+
+def action_problems(record: dict[str, Any], spec: dict[str, Any]) -> list[str]:
+    """The row's timed actions recorded in order, strictly later each, after the advance and inside the transition."""
+    want = [name for _, name in spec.get("actions", ())]
+    if not want:
+        return []
+    acts = record.get("actions")
+    if not isinstance(acts, list) or not all(isinstance(a, dict) and isinstance(a.get("name"), str) and number(a.get("t")) for a in acts):
+        return ["actions missing or malformed"]
+    got = [a for a in acts if a["name"] in want]
+    raf = [r for r in (record.get("dump") or {}).get("raf") or [] if isinstance(r, dict) and "eff" in r and number(r.get("t"))]
+    advance = record.get("advanceAt")
+    problems = []
+    if [a["name"] for a in got] != want:
+        problems.append(f"actions {[a['name'] for a in got]} != {want}")
+    elif any(b["t"] <= a["t"] for a, b in zip(got, got[1:])):
+        problems.append("actions out of order")
+    elif not raf or not number(advance) or not all(advance <= a["t"] and raf[0]["t"] <= a["t"] <= raf[-1]["t"] + RAF_SLACK_MS for a in got):
+        problems.append("an action lies outside [advance, transition DOM]")
+    return problems
+
+
+def score_delay_freeze(record: dict[str, Any], images: Mapping[str, np.ndarray], ev: Evidence, arm: Arm, es: list[float]) -> dict[str, Any]:
+    """Through an automatic event's delay (transition DOM present, no animation yet) the movie region decodes to the
+    frozen reference in every screenshot; no screenshot in the delay is INCONCLUSIVE."""
+    decoder, reference, problems = media_integrity(record, images, arm, es)
+    start = first_animation_t(ev.raf)
+    meta = record.get("shots") or []
+    window = [i for i in ev.transition if start is not None and meta[i]["t1"] < start]
+    if not window:
+        problems = problems + ["no screenshot inside the delay"]
+    if problems or decoder is None:
+        return result(None, problems or ["no decoder"])
+    cx, cy, cw, _ = decoder["content"]
+    seen = [decode_strip(ev.shots[i], (cx, cy), cw / decoder["size"][0]) for i in window]
+    return result(all(v == reference for v in seen), reference=reference, delay=seen)
 
 
 def scorer_cases(cal: Calibration = Calibration()) -> dict[str, dict[str, Any]]:
@@ -1823,7 +1879,7 @@ def scorer_cases(cal: Calibration = Calibration()) -> dict[str, dict[str, Any]]:
         "case:monotone-dip": score_monotone([0.06, 0.2, 0.4, 0.3, 0.7, 0.9, 1.0]),
         "case:handoff-unchanged": score_handoff(flat, flat.copy(), cal=cal),
         "case:handoff-step": score_handoff(flat, step, cal=cal),
-        "case:cut-complementary": score_cut(cut, [{"t": 16.0, "in": (127.5, 127.5), "out": (127.5, 127.5)}], cal),
+        "case:cut-complementary": score_cut(cut, [{"t0": 16.0, "t1": 16.0, "in": (127.5, 127.5), "out": (127.5, 127.5)}], cal),
         "case:fg-shifted": score_foreground([shifted], live, mask, cal),
         "case:fg-double": score_foreground([double], live, mask, cal),
         "case:fg-swapped": score_foreground([swapped], live, mask, cal),
@@ -1859,8 +1915,8 @@ def score_round(scored: dict[str, dict[str, Any]], cal: Calibration = Calibratio
                 got = cases[name]["verdict"]
             else:
                 arm = scored.get(name) or {}
-                if arm.get("problems"):
-                    reasons.append(f"control {name}: capture incomplete")
+                if arm.get("problems") or arm.get("outcome") != "MATCH":
+                    reasons.append(f"control {name}: {arm.get('outcome') or 'missing'} (its whole contract must match)")
                     continue
                 got = (arm.get("checks") or {}).get(check, {}).get("verdict")
             if got != want:
@@ -2048,11 +2104,11 @@ def drive(host: Any, arm: Arm, target: dict[str, Any], capture: Callable[[], np.
     images["settled"] = capture()
     record["hashAfter"] = evaluate("String(location.hash||'')")
     ids = ((record.get("dump") or {}).get("first") or {}).get("layerIds") or []
-    record["residue"] = evaluate(f"window.__obedDx.residue({json.dumps(ids)})")
+    record["residue"] = evaluate(f"window.__obedDx.residue({json.dumps(ids)})") if ids else None
     if row.get("end"):
         host.execute("goTo", 1)
         settle(host)
-        record["residueAfterGoto"] = evaluate(f"window.__obedDx.residue({json.dumps(ids)})")
+        record["residueAfterGoto"] = evaluate(f"window.__obedDx.residue({json.dumps(ids)})") if ids else None
     return record, images
 
 

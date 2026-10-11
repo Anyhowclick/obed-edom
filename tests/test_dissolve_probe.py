@@ -98,6 +98,9 @@ def fade(kind: str = "patch", *, noise: bool = False, garbage: bool = False, mas
             f[100, 510, 3] = 251
         elif dent == "in-only":
             f[100, 600, 3] = 248
+    if dent == "endpoints":
+        frames[0][100, 510, 3] = 100
+        frames[-1][100, 600, 3] = 100
     rng = np.random.default_rng(7)
     if noise:
         frames = [np.clip(f.astype(int) + rng.integers(-1, 2, f.shape) * (np.arange(4) < 3), 0, 255).astype(np.uint8) for f in frames]
@@ -127,6 +130,9 @@ def raf_curve(shape: str) -> list[dict[str, Any]]:
                   "dur": DURATION_MS, "value": 1 - v}]
         if shape == "late-nan" and i == 11:
             anims[0]["value"] = math.nan
+        if shape == "final-malformed" and i == 11:
+            for a in anims:
+                a.update(ct=None, value=math.nan)
         if shape == "duplicate-in":
             anims.append(dict(anims[0], value=0.0))
         rows.append({"t": ct, "eff": [v, 1 - v], "anims": anims})
@@ -142,8 +148,10 @@ def cut(kind: str) -> str:
     raf += [{"t": 16.0 * k} for k in range(4, 8)]
     full, none_, half = (255.0, 255.0), (0.0, 0.0), (127.5, 127.5)
     cast = {"union": [(8.0, full, full)], "complementary": [(8.0, half, half)], "swap": [(8.0, none_, full), (24.0, full, none_)],
-            "completion-union": [(8.0, half, half)], "no-pre": [(8.0, half, half)], "cast-after": [(90.0, full, none_)]}[kind]
-    return probe.score_cut(raf, [{"t": t, "in": i, "out": o} for t, i, o in cast], CAL)["verdict"]
+            "completion-union": [(8.0, half, half)], "no-pre": [(8.0, half, half)], "cast-after": [(90.0, full, none_)]}.get(kind, [])
+    if kind == "straddle":
+        return probe.score_cut(raf, [{"t": 8.0, "t0": -20.0, "t1": 36.0, "in": full, "out": none_}], CAL)["verdict"]
+    return probe.score_cut(raf, [{"t0": t, "t1": t, "in": i, "out": o} for t, i, o in cast], CAL)["verdict"]
 
 
 def no_flash(kind: str) -> str:
@@ -249,6 +257,8 @@ def lut(variant: str) -> Any:
         live = [(int(curve[s]),) * 3 for s in (32, 64, 128, 192)]
     if variant == "red-off":
         snap, live = [(128, 128, 128)], [(137, 138, 138)]
+    if variant == "endpoints":
+        snap, live = [(0, 0, 0), (128, 128, 128), (255, 255, 255)], [(30, 30, 30), (139, 139, 139), (220, 220, 220)]
     if variant == "empty":
         snap, live = np.zeros((0, 3)), np.zeros((0, 3))
     out = probe.build_lut(np.array(snap), np.array(live))
@@ -277,10 +287,15 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         rec = {"t": float(t), "hash": "#5", "scene": 5, "videos": [video]}
         if (mutate == "stale-take" and t < INSERT_MS) or (mutate == "takes-dup" and t >= INSERT_MS):
             rec["take"] = 22.0
+        if mutate in ("delay-42", "delay-99") and present and t < INSERT_MS + 500:
+            e = 0.0
         if present:
             rec["eff"] = [e, 1 - e]
-            rec["anims"] = [{"leaf": "in", "ct": t - INSERT_MS, "start": INSERT_MS, "state": "running", "dur": DURATION_MS, "value": e},
-                            {"leaf": "out", "ct": t - INSERT_MS, "start": INSERT_MS, "state": "running", "dur": DURATION_MS, "value": 1 - e}]
+            ct = 0.0 if mutate in ("delay-42", "delay-99") and t < INSERT_MS + 500 else t - INSERT_MS
+            if mutate == "no-pre-raf" and t == INSERT_MS:
+                ct = 1.0
+            rec["anims"] = [{"leaf": "in", "ct": ct, "start": INSERT_MS, "state": "running", "dur": DURATION_MS, "value": e},
+                            {"leaf": "out", "ct": ct, "start": INSERT_MS, "state": "running", "dur": DURATION_MS, "value": 1 - e}]
         raf.append(rec)
     times = [10.0, 40.0, 70.0] + [120.0 + 110.0 * k for k in range(14)] + [1650.0, 1700.0, 1750.0]
     for k, t0 in enumerate(times):
@@ -292,6 +307,8 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         else:
             e = probe.ease_in_out((t0 + 5 - INSERT_MS) / DURATION_MS)
             img = probe.over(placed, mix(A, B, e)) if arm == "m-hold" or fullstrength else mix(with_holder, B, e)
+            if mutate in ("delay-42", "delay-99") and t0 + 10 < INSERT_MS + 500:
+                img = probe.over(probe.place(strip_frame(99), CONTENT, CONTENT, (H, W)), A) if mutate == "delay-99" and k == 4 else with_holder
         images[name] = img
         shots.append({"name": name, "t0": t0, "t1": t0 + 10.0})
     blend, iso = ("plus-lighter", "isolate") if spec.styles == "on" else ("normal", "auto")
@@ -308,6 +325,7 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         "target": {"textures": ["IN", "OUT"], "hashBefore": "#5", "hashAfter": "#7"},
         "served": {"mode": spec.mode, "splice": spec.splice, "stockSha256": STOCK, "expected": expected},
         "output": {"mmOpacity": {"sha256": expected}}, "hashBefore": "#5", "hashAfter": "#7", "shots": shots, "advanceAt": 50.0,
+        "foreground": {"0": []},
         "dump": {"raf": raf, "first": {"textures": ["IN", "OUT"], "chain": chain, "holders": holders, "layerIds": ["layer1"]},
                  "vids": [{"id": 0, "rv": rv, "detach": INSERT_MS - 0.5, "tuple": "bt709/bt709/bt709/false"}],
                  "takes": [[INSERT_MS - 1.0, 22.0]]},
@@ -354,6 +372,26 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         del record["dump"]["first"]["holders"]
     elif mutate == "anims-key-missing":
         del record["dump"]["raf"][7]["anims"]
+    elif mutate == "no-videos":
+        for r in record["dump"]["raf"]:
+            if "eff" in r:
+                del r["videos"]
+    elif mutate == "tuple-malformed":
+        record["dump"]["vids"][0]["tuple"] = "malformed"
+    elif mutate == "tone-no-fg":
+        record["movies"] = {"x.mov": {"layout": probe.tone_layout()}}
+        del record["foreground"]
+    elif mutate == "three-mid":
+        keep = {"shot-000", "shot-001", "shot-002", "shot-007", "shot-009", "shot-011", "shot-017", "shot-018", "shot-019"}
+        record["shots"] = [s for s in record["shots"] if s["name"] in keep]
+    elif mutate == "action-early":
+        record["actions"][0]["t"] = -1_000_000.0
+    elif mutate == "no-layer-ids":
+        del record["dump"]["first"]["layerIds"]
+    elif mutate == "layer-ids-dup":
+        record["dump"]["first"]["layerIds"] = ["layer1", "layer1"]
+    elif mutate == "take-negative":
+        record["dump"]["takes"] = [[INSERT_MS - 1.0, -42.0]]
     elif mutate == "no-action":
         record["actions"] = []
     return record, images
@@ -428,10 +466,43 @@ def round_gate(mutate: tuple[str, str, str] | None, gate: str, *, only_controls:
         name, check, verdict = mutate
         if check == "problems":
             scored[name]["problems"] = [verdict]
+        elif check == "outcome":
+            scored[name]["outcome"] = verdict
         else:
             scored[name]["checks"][check] = {"verdict": verdict}
     out = probe.score_round(scored, CAL, identity=False, extra={"cvc": {"verdict": cvc}} if cvc else {}, profile=profile)
     return out["overall"] if gate == "overall" else out["gates"][gate]["verdict"]
+
+
+def cef_outcome(**kwargs: Any) -> str:
+    record, images = media_run("on", **kwargs)
+    return probe.score_arm(record, images, probe.CEF.arm("on"), CAL, profile=probe.CEF)["outcome"]
+
+
+def w3_evidence() -> list[str]:
+    import managed_obs_qualify as q
+
+    record = {"output": {"continuity": {"mode": "qualified", "glReplay": {"mode": "off"}}, "mmOpacity": {"sha256": "a" * 64}},
+              "dump": {"vids": [{"src": "x.mov", "rv": [[1.0, 0.0, 1]], "tuple": None, "err": "VideoFrame failed"}]}}
+    return q.dissolve_evidence(record)
+
+
+def w3_calibration() -> bool:
+    import managed_obs_qualify as q
+
+    run = {"sessions": [{"session": "opaque-off", "calibration": {"n": None, "model": "INCONCLUSIVE",
+                                                                  "calibration": {"tau": 4.0, "complement": 2.0, "no_dip": 252.0}}}]}
+    checks = q.dissolve_gates(run, None)["DX-2"]["checks"]
+    return next(c for c in checks if c["check"] == "calibration (opaque-off n)")["ok"]
+
+
+def w3_cast() -> list[str]:
+    import inspect
+
+    import managed_obs_qualify as q
+
+    source = inspect.getsource(q.dissolve_session)
+    return [k for k in ('"t0": s["t0"]', '"t1": s["t1"]') if k in source]
 
 
 def profile_headless(profile: Any) -> bool:
@@ -539,6 +610,27 @@ CASES = [
     ("r1-3 round of controls only", lambda: round_gate(None, "overall", only_controls=True), "INCONCLUSIVE"),
     ("r1-3 round without the CvC candidate", lambda: round_gate(None, "cvc", cvc=None), "INCONCLUSIVE"),
     ("r1-3 control with an incomplete capture", lambda: round_gate(("opaque-off", "problems", "no rAF records"), "model"), "INCONCLUSIVE"),
+    ("r2-B1 transition rAFs without a videos inventory", lambda: arm_check("m-on", "overlay", mutate="no-videos"), "INCONCLUSIVE"),
+    ("r2-B1 malformed colour tuple", lambda: arm_outcome("m-on", mutate="tuple-malformed"), "INCONCLUSIVE"),
+    ("r2-B1 tone without the foreground inventory", lambda: arm_check("m-tone", "tone", identity=False, mutate="tone-no-fg"), "INCONCLUSIVE"),
+    ("r2-B1 W3 evidence: no G2 state, an error for a tuple", lambda: sorted(w3_evidence()), ["G2 state", "colour tuple of x.mov"]),
+    ("r2-B2 m-off with only three mid frames", lambda: arm_outcome("m-off", holder=False, mutate="three-mid"), "INCONCLUSIVE"),
+    ("r2-B2 m-hold with only three mid frames", lambda: arm_outcome("m-hold", mutate="three-mid"), "INCONCLUSIVE"),
+    ("r2-B2 an INCONCLUSIVE control arm is not read", lambda: round_gate(("off", "outcome", "INCONCLUSIVE"), "model"), "INCONCLUSIVE"),
+    ("r2-M3 malformed animations in the final row", lambda: probe.score_curve(raf_curve("final-malformed"))["verdict"], "INCONCLUSIVE"),
+    ("r2-M4 endpoint-frame alpha violations", lambda: {k: v for k, v in fade(es=[0.01, *ES, 0.99], dent="endpoints").items() if k != "model"},
+     {"complement": "FAIL", "no_dip": "FAIL"}),
+    ("r2-M5 queued action far before the advance", lambda: lifecycle("queued-advance", mutate="action-early"), "INCONCLUSIVE"),
+    ("r2-M5 cleanup without a layer-id inventory", lambda: lifecycle("advance", mutate="no-layer-ids"), "INCONCLUSIVE"),
+    ("sweep r2: duplicated layer-id inventory", lambda: lifecycle("advance", mutate="layer-ids-dup"), "INCONCLUSIVE"),
+    ("r2-M5 automatic delay shows frame 99, reference 42", lambda: lifecycle("automatic", mutate="delay-99"), "MISMATCH"),
+    ("r2-M5 automatic delay holds the reference", lambda: lifecycle("automatic", mutate="delay-42"), "MATCH"),
+    ("r2-M6 LUT endpoint observations off the curve", lambda: lut("endpoints"), "table"),
+    ("r2-M7 a capture straddling the cut window", lambda: cut("straddle"), "INCONCLUSIVE"),
+    ("r2-M7 W3 keeps each screenshot's [t0, t1]", w3_cast, ['"t0": s["t0"]', '"t1": s["t1"]']),
+    ("r2-M8 CEF: a report-only no-flash gap does not block", lambda: cef_outcome(mutate="no-pre-raf"), "MATCH"),
+    ("r2-m9 W3 rejects a contradictory cached calibration", w3_calibration, False),
+    ("r2-m10 negative take duration", lambda: arm_check("m-on", "cost", mutate="take-negative"), "INCONCLUSIVE"),
     ("r1-13 CEF round needs no headless-only arms", lambda: (round_gate(None, "overall", profile=probe.CEF),
                                                             "lifecycle" in probe.score_round({}, CAL, profile=probe.CEF)["gates"]), ("PASS", False)),
     ("r1-13 headless process/load checks apply to DX-1 only", lambda: (profile_headless(probe.DX1), profile_headless(probe.CEF)), (True, False)),

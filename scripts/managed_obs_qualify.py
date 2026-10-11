@@ -682,7 +682,10 @@ def dissolve_evidence(record: dict[str, Any]) -> list[str]:
     continuity = output.get("continuity") or {}
     missing = [name for name, value in (("continuity", continuity.get("mode")), ("G2 mode", (continuity.get("glReplay") or {}).get("mode")),
                                         ("served digest", (output.get("mmOpacity") or {}).get("sha256"))) if not value]
-    missing += [f"colour tuple of {v.get('src')}" for v in (record.get("dump") or {}).get("vids") or [] if not (v.get("tuple") or v.get("err"))]
+    if not isinstance(record.get("g2"), str) or not record["g2"]:
+        missing.append("G2 state")
+    missing += [f"colour tuple of {v.get('src')}" for v in (record.get("dump") or {}).get("vids") or [] if v.get("rv")
+                and not (isinstance(v.get("tuple"), str) and dissolve_probe.COLOUR_TUPLE.fullmatch(v["tuple"]))]
     return missing
 
 
@@ -708,7 +711,7 @@ def dissolve_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] | 
             driven, images = dissolve_probe.drive(host, arm, resolved.target, shot)
         record.update(driven)
         if arm.capture == "cut":
-            record["cast"] = [{"name": s["name"], "t": (s["t0"] + s["t1"]) / 2} for s in record.get("shots") or []]
+            record["cast"] = [{"name": s["name"], "t0": s["t0"], "t1": s["t1"]} for s in record.get("shots") or []]
         missing = dissolve_evidence(record)
         if missing:
             record["error"] = f"DX-2 evidence missing: {'; '.join(missing)}"
@@ -1524,7 +1527,8 @@ def dissolve_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dict
     checks: list[dict[str, Any]] = []
     check(checks, "every session ran", sorted(sessions), set(sessions) == set(want), ",".join(want))
     calibration = (sessions.get("opaque-off") or {}).get("calibration") or {"n": None, "calibration": None}
-    cal = dissolve_probe.Calibration(**calibration["calibration"]) if calibration["calibration"] else None
+    derived = dissolve_calibration(calibration.get("n")) if calibration.get("model") in ("PASS", "FAIL") else None
+    cal = derived if derived is not None and calibration.get("calibration") == asdict(derived) else None
     check(checks, "calibration (opaque-off n)", calibration, cal is not None,
           f"n <= 4: tau <= {DX2_TAU_MAX}, complement <= {DX2_COMPLEMENT_MAX}, no dip >= {DX2_NO_DIP_MIN}")
     runs = {name: (json.loads((Path(s["runDir"]) / "record.json").read_text()), dissolve_probe.RunImages(Path(s["runDir"])))
