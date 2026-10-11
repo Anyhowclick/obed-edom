@@ -42,7 +42,15 @@ is cleared; the evidence copy has the scripts and decision JSON).
 **Re-plan triggers (owner decision):** (1) take cost > 50 ms on DSK 7→8; (2) raw/preview gate miss on `#slideshowNavigator`;
 (3) full-resolution holder edge residuals > τ; (4) software compositing needs identity `L` but is undetectable by tuple;
 (5) CEF (criterion (ii), DX-2) not run. **Astra xhigh advisory on these:** `.agents/reviews/dissolve-crossfade/replan-astra-xhigh.md`
-(_if present; written at the end of this session_).
+— its recommendations, for the owner to accept or override:
+
+| Trigger | Advisory recommendation | Owner design call? |
+|---|---|---|
+| 1 cost | keep 50 ms; first remove unneeded work (identity `L` skips RGB writes + `putImageData`, keep the alpha scan), try a source-resolution crop; profile per stage first | only if the bound or budget-skip changes |
+| 2 gate | keep preview coverage: stage admission + a conservative exterior pass that prunes an outside subtree only when its paint extent is proven disjoint (e.g. a validated clipping ancestor); must still see main's bridge outside `#stage` | yes (gate proof / preview scope) |
+| 3 edges | draw the snapshot at the device-pixel content grid (not natural size + CSS scale), keep strict τ; replace Q0b's Pillow reference with browser-rendered references before considering an edge envelope | yes (holder representation / acceptance) |
+| 4 tone | ship identity `L` now (§12.5 fallback, already authorised); give a host-side compositing-path calibration a focused feasibility measurement before finalising Q5; reject page-side heuristics | identity = authorised; selector = yes |
+| 5 CEF | early CEF preflight on current bytes (tone ×2 launches, engagement, DSK 7→8 cost), final DX-2 on final bytes | no (measurement) |
 
 ## Verified
 
