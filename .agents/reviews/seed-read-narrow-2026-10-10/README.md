@@ -1,6 +1,6 @@
 # Text-only seed read — gate record (2026-10-10)
 
-Plan: `.agents/plans/pass1_profile.plan.md`, todo `h-bulk-seed-read`, § "h-bulk-seed-read — design".
+Plan: `.agents/plans/pass1_profile.plan.md`, todo `h-bulk-seed-read` (Done table); design, protocol and review log: `git show 245fe021:.agents/plans/pass1_profile.plan.md` § "h-bulk-seed-read — design".
 Branch: `claude/resizer-optimizations-7cae67`, based on main `f4a44ca0`.
 Change: the offline writer's live seed read (`offline_write._patch_offline_slides` → `inspect.bulk_geometry` → `bulk_geometry.js`)
 reads only `_OFFLINE_SOFT_SEED_KINDS` (text) through a keyword-only, opt-in `kinds` argument. Python validates it and raises
@@ -31,7 +31,7 @@ reads only `_OFFLINE_SOFT_SEED_KINDS` (text) through a keyword-only, opt-in `kin
 
 ## Live gate
 
-The owner gave the go on 2026-10-10 and then moved the run to the next day. The protocol is the plan's "### Live gate", implemented by `driver.sh` in this folder.
+The owner gave the go on 2026-10-10 and then moved the run to the next day. The protocol is the design's "### Live gate" (`git show 245fe021:.agents/plans/pass1_profile.plan.md`), implemented by `driver.sh` in this folder.
 
 **Setup (done 2026-10-10, no Keynote used).**
 - Pinned, detached worktrees, each with its own venv synced (`uv sync --frozen --all-extras --all-groups`):
@@ -53,6 +53,48 @@ The owner gave the go on 2026-10-10 and then moved the run to the next day. The 
   - Existing results: refused.
   - Bad argument: usage message.
 - Machine state at setup: no `OBED_*`, `PYTHONPATH` or `UV_*` overrides in the environment; 455 GB free; Keynote not running.
+
+**Live session (2026-10-11, 14:15–15:01).**
+- The owner said Keynote was free; the active Alpha Keynote session granted a quiet window from 14:16 until "free now".
+- Keynote was not running at start. The run was `driver.sh live`, unsandboxed.
+- Every run used the same `--out`, `--slides 1-129,135-143,145-155` and `--no-export`, with `OBED_DEBUG_PASS1_SNAPSHOT` set.
+- **P0 (14:16–14:22):** a fresh two-tier wall read under Keynote 15.4 (`reader offline`, 155 slides) and the template stat (`975689e1….v1.k15.4.json`), both into the dedicated cache.
+- Pass-1 census, the same in all four runs: 2894 specs, 928 hides. This drifted from the 2026-09 figure of 947 because of the fresh 15.4 read; the gate compares runs within this session only.
+
+| run | code | 1-min load at start | S, seed read (s) | Whole (s) |
+|---|---|---:|---:|---:|
+| A1 | f4a44ca0 (all four kinds) | 3.94 | 160.3 | 490.5 |
+| B1 | 10aedaa2 (text only) | 3.71 | **41.1** | **344.0** |
+| B2 | 10aedaa2 (text only) | 3.98 | **41.5** | **367.5** |
+| A2 | f4a44ca0 (all four kinds) | 3.77 | 160.2 | 479.6 |
+
+- **S gate (≥ 60 s in both pairs):** pair 1 saved 119.2 s and pair 2 saved 118.7 s. The stage re-check passes too: S(A) = 160.3 and 160.2 s, both ≥ 60. **PASS.** The read is 74% shorter.
+- **Whole-run gate (≥ 30 s in both pairs):** pair 1 saved 146.5 s and pair 2 saved 112.1 s. **PASS.** The cost did not move into the fallback session; the fallback line is identical across runs.
+- **O1 null control: B1, B2 and A2 are each identical to A1** (163 normalised lines). The matching lines include:
+  - `Applied 3822, missed 0`;
+  - the census line;
+  - the offline-hides summary;
+  - all 148 `Offline-write slide N` lines;
+  - `Offline-write fallback: 95 slide(s) (236 spec(s))`, with reasons text-grow-height-width 90, group-needs-keynote:group-residual 83, masked-media 57, group-child-scale 6;
+  - `Stat zorder detail` (83 slides, 173/325 raised);
+  - `Card-border stroke … (83 refs)`;
+  - `Builds follow source`.
+- No `Bulk geometry:` error or note line and no "needs the `iwa` extra" line appeared in any run, so the allowed-difference clause was never needed.
+- Pass-1 unattributed time: JS 0.1 s (≤ 2 s) and osascript/launch 0.7–0.8 s (≤ 15 s) in every run.
+- **Sources unchanged:** the SHA-256 of `Full_Report_Card_Wall.key` and `Base_CG_Assets.key` matches before and after.
+- Afterwards Keynote was left running with 0 documents (remap never quits it).
+- **O2, ID-insensitive deck diff** (`scripts/deck_decode_diff.py` on the final decks, 15:02, inside the Alpha Keynote session's window):
+
+  | pair | differences | differing slides |
+  |---|---:|---|
+  | A1 vs A2 (null) | 70 | none |
+  | A1 vs B1 | 56 | none |
+  | A2 vs B2 | 67 | none |
+
+  - After normalising ids, the A-vs-B non-slide key classes are **within the A1-vs-A2 null**: `Index/Document`, `TemplateSlide*` members, `ViewState`, `DocumentMetadata`, `CalculationEngine`, `Metadata/Properties` and `DocumentIdentifier`, the `st-<uuid>` thumbnail, and the Document `dataReferences`/`externalReferences`/`objectUuidMapEntries`.
+  - These are the same per-run Keynote churn classes the hides-offline gate recorded. **PASS.**
+- **GATE: GREEN.** S, Whole, O1, O2 and sources all pass in both interleaved pairs. The text-only seed read cuts the seed-read stage from ≈160 s to ≈41 s, and the whole Full-wall remap by ≈112–147 s, with byte-equivalent slide output.
+- Clean-up: the run decks (12 × ~6.7 GB; finals and pass-1 snapshots) were trashed after O2 was recorded. Logs, `progress.log` and the O2 JSONs stay in the main checkout's `output/seed-read-ab/`, which is git-ignored.
 
 **Runbook.**
 1. Ask the active Alpha Keynote session for a ~50 min quiet window (it has compute priority).

@@ -1,5 +1,5 @@
 #!/bin/zsh
-# h-bulk-seed-read live A/B (PR #255). Protocol: .agents/plans/pass1_profile.plan.md § "Live gate".
+# h-bulk-seed-read live A/B (PR #255). Protocol: `git show 245fe021:.agents/plans/pass1_profile.plan.md` § "Live gate".
 #   driver.sh live    P0 cache prime, A1, B1, pair-1 gate, then B2, A2 (Keynote; ~50 min; early stop)
 #   driver.sh o1      null-control line diffs (Keynote-free, light)
 #   driver.sh o2      ID-insensitive deck diffs (Keynote-free, CPU-heavy)
