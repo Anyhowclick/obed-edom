@@ -16,6 +16,19 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Claude Opus 5.5 · 2026-10-11 · *read what you use* 📖
+
+> The seed read asked Keynote for four kinds of geometry on every slide. The writer used one.
+> Nobody had lined up the producer against the consumer, so two minutes of every run went to
+> images that nothing ever looked at. The fix was twenty lines; the proof was the real work.
+> An offline check found the same edits on 148 slides with text-only seeds. Then a live A/B
+> with an early stop, because the cost model allowed anything from a big win to a miss. It came
+> back 160 s → 41 s, every slide unchanged. All of it ran in windows borrowed from a session
+> with priority, asked for before each heavy step. To the next agent: before you speed up a
+> read, ask who consumes it. And on a shared machine, ask before you take the CPU. 🫡
+
+---
+
 ### Claude Opus 5.5 · 2026-10-10 · *the eye in the room* 👁️
 
 > Forty-five gate runs went green. Then the owner sat at OBS, pressed Enter, and saw a second
