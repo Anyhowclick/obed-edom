@@ -10,8 +10,9 @@ is copied below. Verify branches and PRs on GitHub before acting. Evidence paths
 | `main` | `1589d096` = #257 (raw Astra rounds of #256 removed) on #255 (resizer seed read) on #256 (bridge easing). |
 | PR #256 | Merged 2026-10-10. **Owner confirmed in real OBS 2026-10-11: the 3→4 rubber band is gone.** Post-merge chore done (#257). |
 | `claude/s2-detach-fix` | `5fa7d48b`, pushed. Worktree `obs-mac-camera-swap-fbc63b`. Contains everything below. |
-| `s2-glclock-fold1` | In flight (agent worktree `wf_07e0a5a2-be8-*`, off `5fa7d48b`): Astra gl-clock r1 fixes. |
-| Contract-pass plan | In flight (workflow `wf_f1d7e30e-153`): to be saved as `.agents/plans/keynote_live_continuity_contract.plan.md`. |
+| gl-clock | Core `a9e1e66a` merged (Astra gl-clock r1 REQUEST CHANGES → fold `5e9c9faf` → **r2 APPROVE**). Live GL-1/2/3 done 2026-10-11 (below). |
+| Contract pass | Plan `.agents/plans/keynote_live_continuity_contract.plan.md` (owner GO; Q1 N1–N3 yes, Q2 admit rare legal shapes, Q3 smoke yes). Implementer in flight on `s2-contract` (agent worktree `wf_2c63db9f-042-*`, off `0ccd6c88`). |
+| Gate worktrees | `gate-glclock-c7d2d649` (GL runs) and `gate-preglclock-8ee7077d` (V4 A/B old side); trash after the A/B. |
 | Dissolve cross-fade plan | Separate session (owner-started), branch `claude/keynote-live-dissolve-crossfade-plan`, worktree `brave-goodall-bd9851`. Plan only. |
 | Stale branches | `claude/continuity-generalisation-s2`, `s2-instr-fold3`, `s2-main-final`, the fold4/fold5/gl-clock agent branches: all contained in S2, deleted 2026-10-11 (with their stale handovers). |
 | `confident-elion-b41768` | Not ours. Leave it. |
@@ -32,15 +33,34 @@ is copied below. Verify branches and PRs on GitHub before acting. Evidence paths
    note checks (else every live carry-cover run would read inconclusive). Suites at `5fa7d48b`: 3.12 10280 / 0.
 5. Fixture strip fix `715cb3f1` (dissolve item, below).
 
+## Live gl-clock validation (2026-10-11, gate worktree at `c7d2d649`, evidence `s2-dev/glclock-v6/`)
+- **GL-1 D1 carry-cover, 12/12 as predicted:** green 5/5 pass, both bridges strip 0 px, `gl`, lag 5.8–7.7 ms (b2to3 scored
+  live for the first time — the note-scoping fix works; held-path lag ≈ pooled, so Q1 is not triggered); `no-gl-clock` 5/5
+  fail, b1to2 strip 6–8 px, `fallback` lag 50.6–64.6 ms (1 px margin, Q2 not triggered); null 2/2 fail (72/72 frames);
+  largest screencast skew jump 4.3 ms (no clock step).
+- **GL-2 P2:** carry-cover green pass (`gl`, lag 5.0 ms), `linear-bridge` fail (57 px), null fail. P2 adversarial
+  fast ×2 and `--gl-replay auto`: success True; freeze bracket pass, marker→trigger 69.1 / 67.2 / 79.5 ms, trigger frame
+  10, deadline 13/13/12; slide-3 restart 0.131 / 0.129 / 0.106 s. Plan correction: the P2 harness snapshots kept events
+  after the 2→3 restart, before 3→4, so no `bridge-clock` note can appear there (the keep-kind is inert); P2's lag is read
+  from the carry-cover arm instead.
+- **GL-3 full `run_gates` round:** `failed=6 pending=0` (plan predicted 2). All six CARRY-COVER lines as predicted (P2 and
+  D1 green/red/null), host gates at 3 viewports pass, Pass G pass on all 7 decks, paint control 3/3, every P2 arm MATCH.
+  FAILED: the two expected unregistered no-pin-hold reds (`HOST red D5`, `PASSG-RED D1`) plus four **V4 moved sets**:
+  D1 `strip pin@6` and D4 `strip pin@5` (paint adds a `:carry` red — a duplicate painter for 58–62 frames during the
+  pin-stripped move — to the registered `duplicate:slideN`), D5 `fifo-reuse` (registered `stray:slide3`, observed
+  `b1to2:carry` + `duplicate:slide3`), D3 `strip pin@2` (inconclusive: b0to1 paint unreadable).
+- **A/B attribution** (`glclock-v6/V4AB/`, old = `8ee7077d`, core `6c7a482e`): D1 `pin@6` and D4 `pin@5` reproduce the same
+  mismatch on the old core → not gl-clock/fold5. (Run under load ~20 from the contract implementer's suite; the new
+  core's D1 read inconclusive there — a load artifact.) **Owed:** D3 `pin@2` and D5 `fifo-reuse` A/B in a quiet window.
+  These four go to V4 re-registration (measured reason + evidence + owner sign-off).
+
 ## In flight / next steps, in order
-1. **gl-clock Astra r1** (`s2-dev/glclock-review/astra-r1.md`): REQUEST CHANGES, 2 Medium: (1) late hook install can let a
-   pre-install loop's re-arm stamp the origin (new class); (2) `#7→#8→#7` within one frame keeps the old ride closure
-   (edge case, not reachable via host navigation). Fold `s2-glclock-fold1` in flight → merge → suites → Astra r2 until APPROVE.
+1. **gl-clock:** done pending the D3/D5 A/B above. Its Astra rounds: `s2-dev/glclock-review/astra-r{1,2}.md`.
 2. **Contract pass:** plan in flight → owner review → one implementer → regression oracle (the 2280 real verdicts must not
    change) → Astra r12 with the new criterion: only false passes reachable with producer-legal evidence block; findings
    needing producer-impossible input are "closed by contract" (cite the clause). Keep folds 3–5's guards (no churn); a
    simplification pass after S2 may remove the redundant ones (owner's option).
-3. **Live GL-1/2/3** after gl-clock APPROVE. Coordinator-only, serial, load < 3 at start, ≤ 3 Chromes, peers told "go idle"
+3. **Live GL-1/2/3 — DONE 2026-10-11** (results above; kept here as the re-run recipe). Coordinator-only, serial, load < 3 at start, ≤ 3 Chromes, peers told "go idle"
    first, never during the owner's OBS session. From a clean gate worktree `G` at the merged head; evidence to
    `output/evidence/s2-dev/glclock-v6/`.
    - **GL-1, D1 carry-cover:** 5× green and `--core-variant no-gl-clock` interleaved, then 2× `--carry-cover-null`:
