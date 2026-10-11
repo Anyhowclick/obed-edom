@@ -786,7 +786,10 @@ for the parked `iwa-surgical-write-generator` feature.
   observation-only player. Precedence = ctor `mm_opacity` (`auto`|`off` exact, else `LiveHostError`) → env
   `OBED_LIVE_MM_OPACITY` (trimmed, any case; `off`|`auto`, else refuse) → `auto`, on every output (HDMI, managed OBS,
   external attach), independent of continuity and GL replay. Report: `output.mmOpacity = {mode: on|off, sha256}` (served
-  `main.js`); start log `mmOpacityPreference`. `RUNTIME_VERSION` stays 2. G2 bytes are unchanged; with the patch on the
+  `main.js`); start log `mmOpacityPreference`. `RUNTIME_VERSION` stays 2. Slide transitions
+  (D1–D4, `keynote_live_dissolve_crossfade.plan.md`): the same switch gives Dissolve a true cross-fade, a `none` cut a
+  clean swap, and admitted outgoing movies a frozen snapshot of their current frame that fades with the slide; `off`
+  restores the export's pop-in, double slide and jump to the baked opening frame. G2 bytes are unchanged; with the patch on the
   P2 fixture reports exactly `opacityUnproven = [{4, "size"}]` (no override: LIVE replays the player's own 0.2947) and
   `occludedBands` 0/128 (patch off: `[]`, 20/128). `frameLen` (settled-frame call count) reads 96 on / 88 off when the
   settle frame carries every uniform write, but the player's uniform cache makes it timing-dependent (headless 85/86 off):

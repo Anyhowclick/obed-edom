@@ -212,6 +212,9 @@ authored opacity from the first frame of the move; an object that fades, hides,
 or carries several or nested animations keeps the player's own look. It is on by default for every output,
 independent of continuity and GL replay. `OBED_LIVE_MM_OPACITY=off` serves the
 unpatched player; `auto` keeps it on; any other value refuses to start.
+`off` also restores the export's own Dissolve, cut and movie behaviour: the incoming
+slide pops in under a Dissolve over fill-less textures, a cut shows both slides at
+once, and a playing movie jumps back to the opening frame baked into the outgoing slide.
 `output.mmOpacity` reports `mode` (`on`/`off`) and the served player's `sha256`.
 Build Preview serves the same drawing patch, without the live observation hook. Qualify it with
 `scripts/mm_opacity_probe.py`, `scripts/p2_recovery_html_adversarial.py --mm-opacity auto|off`
