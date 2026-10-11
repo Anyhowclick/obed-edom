@@ -1991,15 +1991,15 @@ class TestRefusalScoring:
                      id="pooled-decoder-for-the-retired-asset-is-red"),
         pytest.param({"snapshot": [{"key": "wa0125.mov"}]}, True, True, None, id="another-assets-pooled-decoder-is-irrelevant"),
         pytest.param({}, False, True, None, id="pool-not-consulted-without-a-runtime"),
-        pytest.param({"snapshot": {"error": "boom"}}, True, False, "preserve snapshot is unreadable",
-                     id="unreadable-pool-census-is-red-never-silently-clean"),
-        pytest.param(None, True, False, "no refusal evidence", id="missing-sample-is-red-not-a-free-pass"),
-        pytest.param({"stage_map": None}, True, False, "stage map", id="no-stage-map-is-red"),
-        pytest.param({"stage_map": {"s": 0, "sy": 0, "offsetWidth": 0, "offsetHeight": 0}}, True, False, "stage map",
-                     id="zero-stage-map-is-red"),
-        pytest.param({"painting": {"error": "no checkVisibility"}}, True, False, None, id="malformed-painting-result-is-red"),
+        pytest.param({"snapshot": {"error": "boom"}}, True, None, "preserve snapshot is unreadable",
+                     id="unreadable-pool-census-is-inconclusive-never-silently-clean"),
+        pytest.param(None, True, None, "no refusal evidence", id="missing-sample-is-inconclusive-not-a-free-pass"),
+        pytest.param({"stage_map": None}, True, None, "stage map", id="no-stage-map-is-inconclusive"),
+        pytest.param({"stage_map": {"s": 0, "sy": 0, "offsetWidth": 0, "offsetHeight": 0}}, True, None, "stage map",
+                     id="zero-stage-map-is-inconclusive"),
+        pytest.param({"painting": {"error": "no checkVisibility"}}, True, None, None, id="malformed-painting-result-is-inconclusive"),
     ])
-    def test_refusal_evidence(self, sample: dict[str, Any] | None, installed: bool, verdict: bool, reason: str | None) -> None:
+    def test_refusal_evidence(self, sample: dict[str, Any] | None, installed: bool, verdict: bool | None, reason: str | None) -> None:
         scored = probe.score_refusal(None if sample is None else self._sample(**sample), self.RETIRE, installed)
         assert scored["verdict"] is verdict
         if reason is not None:
@@ -3699,8 +3699,6 @@ ARMED_CLAUSE_MUTATIONS = {
     "carry delta too large": ("events", lambda reads, c: _set_detail(reads[1], "glreplay-carried", delta=0.05)),
     # clause 4 -- no painting <video> over the armed rect
     "painting over the rect": ("noPainting", lambda reads, c: reads[0].update(painting=[painting_video(BIG_INSTANCE, el_id=1)])),
-    "unreadable painting": ("noPainting", lambda reads, c: reads[1].update(painting={"error": "no checkVisibility"})),
-    "bad stage map": ("noPainting", lambda reads, c: reads[1].update(stageMap=None)),
     # clause 5 -- pool = {carried} U siblings, out of the document, carried decoding in real time
     "carried not pooled": ("pool", lambda reads, c: _gl(reads[1]).update(pool=[_pool_entry(2, 3.0)])),
     "sibling in the document": ("pool", lambda reads, c: _gl(reads[0])["pool"][1].update(inDocument=True)),
@@ -3710,7 +3708,6 @@ ARMED_CLAUSE_MUTATIONS = {
     "carried clock frozen": ("pool", lambda reads, c: _set_pool_time(reads[1], 5.0)),
     "carried clock double speed": ("pool", lambda reads, c: _set_pool_time(reads[1], 6.2)),
     "carried clock half speed": ("pool", lambda reads, c: _set_pool_time(reads[1], 5.3)),
-    "unreadable pool": ("pool", lambda reads, c: _gl(reads[0]).update(pool={"error": "boom"})),
 }
 
 
@@ -3929,9 +3926,10 @@ class TestArmedScoring:
         assert not scored["checks"]["events"] and not scored["checks"]["pool"]
 
     @pytest.mark.parametrize("reads", [None, [], "x", [_armed_read(1000.0, 10, 5.0)], [{"glReplay": None}, {"glReplay": None}]])
-    def test_missing_reads_are_false_never_none(self, reads: Any) -> None:
+    def test_missing_reads_are_none_never_false(self, reads: Any) -> None:
+        """S2 fold3: missing evidence is inconclusive (owner rule), never a red."""
         scored = probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[1, 1])
-        assert scored["verdict"] is False
+        assert scored["verdict"] is None
 
     def test_the_r3_forced_shape_is_red(self) -> None:
         reads = _armed_reads()
@@ -3945,7 +3943,7 @@ class TestArmedScoring:
 
     def test_positive_halves_score_the_armed_boundary_for_an_armed_set(self) -> None:
         scored = probe.score_positive_halves({"armed1to2": _armed_reads()}, {"retire": None, "armed": ARMED}, True, GL_CONTINUITY)
-        assert list(scored) == ["armed1to2"] and scored["armed1to2"]["checks"]["owner"] is False
+        assert list(scored) == ["armed1to2"] and scored["armed1to2"]["checks"]["owner"] is None
         samples = [{"scene": 1, "videos": [
             {"src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 1}},
             {"src": "untitled.mov", "rect": dict(SMALL_INSTANCE), "footprintOwner": {"elId": 2}},
@@ -4079,10 +4077,8 @@ class TestHandbackScoring:
         (lambda r: r["painting"][0].update(elId=7), "painting"),
         (lambda r: r["painting"][0]["rect"].update(x=r["painting"][0]["rect"]["x"] + 1.0), "painting"),
         (lambda r: r["painting"].append(dict(r["painting"][0])), "painting"),
-        (lambda r: r.update(painting={"error": "x"}), "painting"),
         (lambda r: r["after"]["coreEvents"][1]["detail"].update(mode="retire"), "release+handoff"),
         (lambda r: r["after"]["coreEvents"][1]["detail"].update(retired=[]), "release"),
-        (lambda r: r["before"].update(pool={"error": "x"}), "release"),
         (lambda r: r["after"]["coreEvents"].append(_ev("remount-done", elId=1)), "noRemount"),
         (lambda r: r["after"]["coreEvents"].append(_ev("remount-footprint-rect", elId=3)), "noRemount"),
     ])
@@ -5273,7 +5269,6 @@ class TestForcedFailScoring:
         {"g_handback": _forced_after("posterAmbiguous", live=True)},
         {"g_handback": _forced_after("posterAmbiguous", zone_reason="leftDestination")},
         {"g_handback": _forced_after("glError")},
-        {"g_handback": {"status": "inconclusive"}},
         {"refusal": {"verdict": False}},
         {"parity": {"verdict": False}},
         {"g_pass": _forced_pass([True, False, True, True])},
@@ -5281,9 +5276,7 @@ class TestForcedFailScoring:
         {"splice": {"splices": 0}},
         {"v_pass": dict(_v_reference(), stageFit={"verdict": False})},
         {"v_pass": dict(_v_reference(), stopError="websocket closed")},
-        {"v_pass": dict(_v_reference(), status="error", error="boom")},
         {"v_pass": _forced_pass([True] * 4)},
-        {"v_pass": dict(_v_reference(), slides=[])},
     ])
     def test_every_deviation_is_forced_fail(self, override: dict[str, Any]) -> None:
         assert self._score(**override)["status"] == "forced-fail"
@@ -5479,14 +5472,14 @@ class TestArmedReadWaitsForDestination:
         assert len(out["armed1to2"]) == 2
 
     @pytest.mark.parametrize("stuck", ["#1", "#2junk", "#3", None])
-    def test_a_hash_that_never_settles_is_red_not_read(self, stuck: Any) -> None:
+    def test_a_hash_that_never_settles_is_not_read_and_inconclusive(self, stuck: Any) -> None:
         clock = FakeClock()
         host = ArmedHost([_gl(r) for r in _armed_reads()])
         host.hashes = [stuck]
         out: dict[str, Any] = {}
         probe.boundary_observer(host, {"retire": None, "armed": ARMED}, out, sleep=clock.sleep, now=clock.now)(2)
         assert probe.GL_REPLAY_READ_JS not in host.transport.evaluations
-        assert probe.score_armed(out["armed1to2"], ARMED, GL_CONTINUITY, owner_ids=[1, 1])["verdict"] is False
+        assert probe.score_armed(out["armed1to2"], ARMED, GL_CONTINUITY, owner_ids=[1, 1])["verdict"] is None
 
 
 class TestVglScreenshotLiveIsPhysical:
@@ -6656,10 +6649,12 @@ class TestForcedWrapPageErrors:
 
     def test_only_notes_from_the_seek_to_the_window_end_count(self) -> None:
         window = _fw_window()
-        notes = [dict(PAGE_ERROR, t=FW_SEEKED - 1.0), PAGE_ERROR, dict(PAGE_ERROR, t=window["end"] + 1.0), "junk"]
+        notes = [dict(PAGE_ERROR, t=FW_SEEKED - 1.0), PAGE_ERROR, dict(PAGE_ERROR, t=window["end"] + 1.0)]
         assert probe.page_errors_in(notes, FW_SEEKED, window) == [PAGE_ERROR]
         assert probe.page_errors_in(None, FW_SEEKED, window) is None
         assert probe.page_errors_in(notes, None, window) is None
+        assert probe.page_errors_in([*notes, "junk"], FW_SEEKED, window) is None
+        assert probe.page_errors_in([*notes, dict(PAGE_ERROR, t=None)], FW_SEEKED, window) is None
 
 
 class TestWrapScorerSparseGap:
@@ -10194,3 +10189,239 @@ class TestInstrumentArgs:
                 probe.paint_control_target(specs, control)
         else:
             assert probe.paint_control_target(specs, control)["id"] == target
+
+
+def _fold3_restart_samples(case: str) -> list[dict[str, Any]]:
+    """`_p2_run_samples` (restart at scene 6, first destination row t=5000) with one unknown injected."""
+    samples = _p2_run_samples()
+    pin, dst = _p2_facts()["pinRect"], _p2_facts()["bridgeSrcRect"]
+
+    def extra(t: float, scene: Any, vid: dict[str, Any], state: Any = "IdleAtFinalState", busy: Any = False) -> None:
+        row = sample(t, scene, vid)
+        row.update(playerState=state, busy=busy)
+        samples.append(row)
+
+    if case in ("readablePrior", "unplacedPrior"):
+        scene = 2 if case == "readablePrior" else None
+        extra(1025.0, scene, video(id=2, el_id=2, t=1025.0, scene=scene, current_time=9.0, rect=dict(dst)))
+    elif case == "unplacedLeak":
+        extra(5025.0, None, video(id=1, el_id=1, t=5025.0, scene=None, current_time=9.0, rect=dict(pin)))
+    elif case == "destinationPhase":
+        off = {**dst, "x": dst["x"] + 60}
+        extra(5025.0, 6, video(id=2, el_id=2, t=5025.0, scene=6, current_time=0.03, rect=off), state="Playing", busy=None)
+    elif case == "destinationRect":
+        vid = video(id=2, el_id=2, t=5025.0, scene=6, current_time=0.03, rect=dict(dst))
+        vid["rect"] = None
+        extra(5025.0, 6, vid)
+    elif case == "startClock":
+        samples[100]["videos"][0]["currentTime"] = None
+    elif case == "endClock":
+        samples[-1]["videos"][0]["currentTime"] = None
+    return sorted(samples, key=lambda r: r["t"])
+
+
+class TestFold3UnknownEvidenceNeverAVerdict:
+    """S2 fold3 (Astra r9 + the older-scorer audit): every unknown input to an older scorer --
+    missing, null where not allowed, an error object, ill-typed -- is INCONCLUSIVE (INVALID for a
+    force-wrap take), never a pass, a fail or a red; the complete record keeps its outcome. Each
+    injected case scored a pass or a fail (or crashed) before the fold."""
+
+    @pytest.mark.parametrize(("case", "strict", "legacy", "raw"), [
+        ("complete", True, True, True),
+        ("readablePrior", False, False, False),
+        ("unplacedPrior", None, None, None),  # Astra r9 #1: a FALSE PASS before the fold
+        ("unplacedLeak", None, True, True),  # legacy/raw restart never score leakage
+        ("destinationPhase", None, True, True),
+        ("destinationRect", None, True, True),
+        ("startClock", None, None, None),  # strict: the sample schema refuses a null clock
+        ("endClock", None, True, None),  # raw restart crashed before the fold
+    ])
+    def test_restart_scorers(self, case: str, strict: bool | None, legacy: bool | None, raw: bool | None) -> None:
+        samples = _fold3_restart_samples(case)
+        assert probe.score_restart_strict(samples, _spec(_p2_facts(), P2_RESTART23))["verdict"] is strict
+        assert probe.score_restart(samples, "untitled.mov", 6)["verdict"] is legacy
+        assert probe.score_raw_restart(samples, "untitled.mov", 6)["verdict"] is raw
+
+    @pytest.mark.parametrize("case", [
+        "complete", "paintingError", "noStageMap", "poolError", "poolEntryNotObject", "inDocumentMissing", "notesNull",
+        "apiStateIllTyped", "readTime", "carriedClock", "carriedDelta", "zoneIllTyped", "noContinuity", "noOwner",
+    ])
+    def test_armed_scorers(self, case: str) -> None:
+        """Astra r9 #3a: a painting-probe error object was a red in strict armed scoring."""
+        reads, continuity, samples = _armed_reads(), json.loads(json.dumps(GL_CONTINUITY)), copy.deepcopy(PRE_FLIP)
+        last = _gl(reads[1])
+        if case == "paintingError":
+            reads[1]["painting"] = {"error": "checkVisibility is unavailable in this browser"}
+        elif case == "noStageMap":
+            reads[1]["stageMap"] = None
+        elif case == "poolError":
+            last["pool"] = {"error": "boom"}
+        elif case == "poolEntryNotObject":
+            last["pool"].append(7)
+        elif case == "inDocumentMissing":
+            del last["pool"][1]["inDocument"]
+        elif case == "notesNull":
+            last["coreEvents"] = None
+        elif case == "apiStateIllTyped":
+            last["api"]["state"] = 3
+        elif case == "readTime":
+            last["t"] = None
+        elif case == "carriedClock":
+            last["pool"][0]["currentTime"] = None
+        elif case == "carriedDelta":
+            for event in last["coreEvents"]:
+                event["detail"].pop("delta", None)
+        elif case == "zoneIllTyped":
+            _set_detail(reads[1], "glreplay-zone", to=None)
+        elif case == "noContinuity":
+            continuity = None
+        elif case == "noOwner":
+            samples[0]["videos"][0]["footprintOwner"] = None
+        expected = True if case == "complete" else None
+        assert probe.score_armed_strict(reads, ARMED, continuity, samples)["verdict"] is expected
+        owners = probe.pre_flip_owner_ids(samples, ARMED)
+        assert probe.score_armed(reads, ARMED, continuity, owner_ids=owners)["verdict"] is expected
+
+    @pytest.mark.parametrize("case", [
+        "complete", "poolError", "paintingError", "noStageMap", "notesNull", "apiEventsIllTyped", "releaseMode",
+        "facadesMissing", "noBefore",
+    ])
+    def test_handback_scorers(self, case: str) -> None:
+        """Astra r9 #3b: a hand-back pool error beside readable, passing parity was a red."""
+        record = _hb_vgl_record()
+        if case == "poolError":
+            record["before"]["pool"] = {"error": "boom"}
+        elif case == "paintingError":
+            record["painting"] = {"error": "x"}
+        elif case == "noStageMap":
+            record["stageMap"] = None
+        elif case == "notesNull":
+            record["after"]["coreEvents"] = None
+        elif case == "apiEventsIllTyped":
+            record["after"]["api"]["events"] = None
+        elif case == "releaseMode":
+            del record["after"]["coreEvents"][1]["detail"]["mode"]
+        elif case == "facadesMissing":
+            record["after"]["facades"] = None
+        elif case == "noBefore":
+            del record["before"]
+        v, g = _hb_frames()
+        scored = probe.score_handback(_hb_v_record(), v, record, g, ARMED)
+        assert scored["carry"]["verdict"] is (True if case == "complete" else None), scored
+        assert scored["verdict"] is (True if case == "complete" else None), scored
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("complete", True),
+        ("readableRemount", False),
+        ("remountAndPoolNull", None),  # Astra r9 #4
+        ("remountAndNotesNull", None),
+        ("snapshotEntryNotObject", None),  # a FALSE PASS before the fold
+        ("snapshotEntryWithoutKey", None),  # a FALSE PASS before the fold
+        ("handbackPriorUnplaced", None),  # a FALSE PASS before the fold
+        ("handbackPhaseUnreadable", None),
+    ])
+    def test_retire_scorers(self, case: str, expected: bool | None) -> None:
+        read, samples = _retire_read((RETIRE_NOTE,)), _handback_samples()
+        if case in ("readableRemount", "remountAndPoolNull", "remountAndNotesNull"):
+            samples = _handback_samples(remounted=True)
+        if case == "remountAndPoolNull":
+            read["poolSnapshot"] = None
+        elif case == "remountAndNotesNull":
+            read["coreEvents"] = None
+        elif case == "snapshotEntryNotObject":
+            read["poolSnapshot"] = [7]
+        elif case == "snapshotEntryWithoutKey":
+            read["poolSnapshot"] = [{"elId": 3, "inDocument": False}]
+        elif case == "handbackPriorUnplaced":
+            samples = _handback_samples(before=True)
+            for row in samples:
+                if row["scene"] == 1:
+                    row["scene"] = None
+        elif case == "handbackPhaseUnreadable":
+            samples = _handback_samples(rect={"x": 400.0, "y": 100.0, "w": 300.0, "h": 100.0})
+            row = next(r for r in samples if r["scene"] == 4)
+            row["busy"] = None
+            row["videos"][0]["rect"] = dict(_p2_facts()["pinRect"])
+        assert probe.score_retire(read, _spec(_p2_facts(), P2_RETIRE12), True, samples)["verdict"] is expected
+        if case.startswith("snapshot"):
+            assert probe.score_refusal(read, {"assetKeys": ["untitled.mov"], "rects": [BIG_INSTANCE]}, True)["verdict"] is None
+
+    @pytest.mark.parametrize("case", [
+        "complete", "refusalPoolUnreadable", "refusalAbsent", "noAfter", "notesNull", "standDownsIllTyped",
+        "vErrored", "vNoSlides", "gModeMissing",
+    ])
+    def test_forced_fail_scorer(self, case: str) -> None:
+        """Astra r9 #3c: the forced run's legacy refusal turned an unreadable `poolSnapshot` into `forced-fail`."""
+        kwargs: dict[str, Any] = {
+            "v_pass": _v_reference(), "g_pass": _forced_pass([True] * 4), "refusal": {"verdict": True},
+            "g_handback": _forced_after("posterAmbiguous"), "parity": {"verdict": True}, "reason": "posterAmbiguous",
+            "splice": {"splices": 1},
+        }
+        if case == "refusalPoolUnreadable":
+            sample = {"stageMap": dict(GL_STAGE), "painting": [], "poolSnapshot": {"error": "boom"}}
+            kwargs["refusal"] = probe.score_refusal(sample, {"assetKeys": ["untitled.mov"], "rects": [BIG_INSTANCE]}, True)
+        elif case == "refusalAbsent":
+            kwargs["refusal"] = None
+        elif case == "noAfter":
+            kwargs["g_handback"] = {"status": "inconclusive"}
+        elif case == "notesNull":
+            kwargs["g_handback"]["after"]["coreEvents"] = None
+        elif case == "standDownsIllTyped":
+            kwargs["g_handback"]["after"]["api"]["standDowns"] = None
+        elif case == "vErrored":
+            kwargs["v_pass"] = dict(_v_reference(), status="error", error="boom")
+        elif case == "vNoSlides":
+            kwargs["v_pass"] = dict(_v_reference(), slides=[])
+        elif case == "gModeMissing":
+            kwargs["g_pass"] = dict(_forced_pass([True] * 4), continuity={"mode": "qualified"})
+        assert probe.score_forced(**kwargs)["status"] == ("forced-ok" if case == "complete" else "inconclusive")
+
+    @pytest.mark.parametrize(("case", "status"), [
+        ("complete", "pass"),
+        ("armedComplete", "pass"),
+        ("armedNoStageMap", "invalid"),  # Astra r9 #2: a fail before the fold
+        ("armedPaintingError", "invalid"),
+        ("armedNotesNull", "invalid"),
+        ("armedNoSeekedElId", "invalid"),
+        ("fallbackNotesNull", "invalid"),  # Astra r9 #2: a FALSE PASS (rawRestart) before the fold
+        ("fallbackZoneIllTyped", "invalid"),
+        ("noProbeId", "invalid"),
+        ("continuityWrapsMissing", "invalid"),
+        ("recorderFrameUnreadable", "invalid"),  # crashed before the fold
+        ("recorderNoDuration", "invalid"),
+    ])
+    def test_force_wrap_scorers(self, case: str, status: str) -> None:
+        recorder, kwargs = _fw_recorder(), {}
+        armed_kwargs: dict[str, Any] = {"boundary": "1to2", "reads": _fw_reads(), "armed": ARMED, "continuity": {"verdict": False}}
+        if case.startswith("armed"):
+            kwargs = armed_kwargs
+            if case == "armedNoStageMap":
+                kwargs["reads"][1]["stageMap"] = None
+            elif case == "armedPaintingError":
+                kwargs["reads"][1]["painting"] = {"error": "x"}
+            elif case == "armedNotesNull":
+                _gl(kwargs["reads"][1])["coreEvents"] = None
+            elif case == "armedNoSeekedElId":
+                recorder["elId"] = None
+        elif case.startswith("fallback"):
+            reads = _fw_reads(zones=[("armed", "retired", "failure")])
+            for read in reads:
+                _gl(read)["api"]["state"] = "RETIRED"
+                read["painting"] = [{"src": "untitled.mov", "elId": None, "rect": dict(BIG_INSTANCE)}]
+                if case == "fallbackNotesNull":
+                    _gl(read)["coreEvents"] = None
+                else:
+                    for event in _gl(read)["coreEvents"]:
+                        if event["kind"] == "glreplay-zone":
+                            event["detail"]["to"] = None
+            kwargs = {**armed_kwargs, "reads": reads, "restart": {"verdict": True}}
+        elif case == "noProbeId":
+            recorder["probeId"] = None
+        elif case == "continuityWrapsMissing":
+            kwargs = {"continuity": {"verdict": True, "elementId": 1}}
+        elif case == "recorderFrameUnreadable":
+            del recorder["frames"][3]["mediaTime"]
+        elif case == "recorderNoDuration":
+            recorder["duration"] = None
+            assert probe.score_recorder_clock(recorder, _fw_window())["verdict"] is None
+        assert _fw_score(recorder=recorder, **kwargs)["status"] == status

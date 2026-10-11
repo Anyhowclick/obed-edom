@@ -2359,27 +2359,40 @@ def score_restart(
     """Pure: samples in, verdict dict out. A restart is a genuinely NEW decoder id
     (never seen anywhere with `scene < boundary_scene`, at any time in the run, not
     just within a window) whose own clock starts near zero shortly after the cut. A crossing
-    the samples never span is inconclusive, never a failed restart."""
+    the samples never span is inconclusive, never a failed restart; so is a row of a decoder not
+    proven present before the boundary that carries no scene (it may be that proof), and an
+    unreadable start clock."""
     tracks = track_by_id(samples, asset_substr)
     if not decoded_anywhere(tracks):
         return {"verdict": None, "reason": "inconclusive: movie never decoded"}
     if find_boundary_window(samples, boundary_scene) is None:
         return _inconclusive("boundary crossing not observed in samples")
-    before_ids = {i for i, rows in tracks.items() if any(r["scene"] is not None and r["scene"] < boundary_scene for r in rows)}
-    after_ids = {i for i, rows in tracks.items() if any(r["scene"] is not None and r["scene"] >= boundary_scene for r in rows)}
+
+    def placed(rows: list[dict[str, Any]], after: bool) -> list[dict[str, Any]]:
+        return [
+            r for r in rows
+            if (scene := _finite_number(r.get("scene"))) is not None and (scene >= boundary_scene) is after
+        ]
+
+    before_ids = {i for i, rows in tracks.items() if placed(rows, False)}
+    unplaced = sorted(
+        i for i, rows in tracks.items()
+        if i not in before_ids and any(_finite_number(r.get("scene")) is None for r in rows)
+    )
+    if unplaced:
+        return _inconclusive("a decoder not seen before the boundary has rows with no scene", unplacedIds=unplaced)
+    after_ids = {i for i, rows in tracks.items() if placed(rows, True)}
     fresh_ids = after_ids - before_ids
     if not fresh_ids:
         return {"verdict": False, "reason": "no distinct decoder id after the boundary", "beforeIds": sorted(before_ids)}
-
-    def first_after_time(i: int) -> float:
-        rows = [r for r in tracks[i] if r["scene"] is not None and r["scene"] >= boundary_scene]
-        return min((r["t"] for r in rows), default=float("inf"))
-
-    element_id = min(fresh_ids, key=first_after_time)
-    rows = sorted((r for r in tracks[element_id] if r["scene"] is not None and r["scene"] >= boundary_scene), key=lambda r: r["t"])
-    start_time = rows[0]["currentTime"] if rows else None
-    ok = start_time is not None and start_time < max_start_s
-    return {"verdict": ok, "elementId": element_id, "startTimeS": start_time, "freshIds": sorted(fresh_ids)}
+    element_id = min(fresh_ids, key=lambda i: min(r["t"] for r in placed(tracks[i], True)))
+    start_time = _finite_number(min(placed(tracks[element_id], True), key=lambda r: r["t"]).get("currentTime"))
+    if start_time is None:
+        return _inconclusive("the fresh decoder's start clock is unreadable", elementId=element_id)
+    return {
+        "verdict": start_time < max_start_s, "elementId": element_id, "startTimeS": start_time,
+        "freshIds": sorted(fresh_ids),
+    }
 
 
 def score_boundaries(
@@ -2526,16 +2539,17 @@ def score_refusal(
     `__obedElId`s, proven by `score_raw_handback`) or another instance's decoder (`foreign`,
     from `instance_decoders`), and nothing pooled or preserved for its asset that is not proven
     another instance's (`instance_owner`). "Did not continue" on its own is vacuous, so every
-    way of not knowing is a False here, never a pass."""
+    way of not knowing (no sample, an untrustworthy stage map, a painting-probe error, an
+    unreadable preserve snapshot or entry) is INCONCLUSIVE, never a pass and never a red."""
     if not isinstance(sample, dict):
-        return {"verdict": False, "reason": "no refusal evidence was sampled on the destination slide"}
+        return _inconclusive("no refusal evidence was sampled on the destination slide")
     stage_map = sample.get("stageMap")
     if not stage_map_valid(stage_map):
-        return {"verdict": False, "reason": "stage map is missing or untrustworthy at the refusal sample"}
+        return _inconclusive("stage map is missing or untrustworthy at the refusal sample")
     try:
         videos = painting_videos(sample.get("painting"), stage_map)
     except VisiblePassError as exc:
-        return {"verdict": False, "reason": str(exc)}
+        return _inconclusive(str(exc))
     over = [
         video for video in videos
         if any(rects_overlap(video["authored"], rect) for rect in retire["rects"])
@@ -2544,12 +2558,12 @@ def score_refusal(
     pooled: list[dict[str, Any]] = []
     if runtime_installed:
         snapshot = sample.get("poolSnapshot")
-        if not isinstance(snapshot, list):
-            return {"verdict": False, "reason": f"preserve snapshot is unreadable: {snapshot!r}"}
+        if not isinstance(snapshot, list) or not all(isinstance(e, dict) and isinstance(e.get("key"), str) for e in snapshot):
+            return _inconclusive(f"preserve snapshot is unreadable: {snapshot!r}")
         ids = retire_instance_ids(retire)
         pooled = [
             entry for entry in snapshot
-            if isinstance(entry, dict) and matches_asset_keys(entry.get("key"), retire["assetKeys"])
+            if matches_asset_keys(entry["key"], retire["assetKeys"])
             and instance_owner(entry, ids, linked, foreign) != "foreign"
         ]
     reason = None
@@ -2645,6 +2659,21 @@ def _notes(state: dict[str, Any], kind: str, source: str = "coreEvents") -> list
     ]
 
 
+def _events_readable(state: Any, source: str = "coreEvents") -> bool:
+    """Whether `_notes` can answer for `state`: its notes are a list of objects (the module's
+    `api: null` is a readable, empty `api` source)."""
+    if not isinstance(state, dict):
+        return False
+    if source == "api":
+        api = state.get("api")
+        if api is None:
+            return True
+        events = api.get("events") if isinstance(api, dict) else None
+    else:
+        events = state.get(source)
+    return isinstance(events, list) and all(isinstance(event, dict) for event in events)
+
+
 def _carried_el_id(state: Any) -> Any:
     carried = _notes(state, "glreplay-carried") if isinstance(state, dict) else []
     return carried[0].get("elId") if len(carried) == 1 else None
@@ -2658,7 +2687,27 @@ def _movie_entries(pool: list[Any], armed: dict[str, Any]) -> list[dict[str, Any
     ]
 
 
-def _armed_live(states: list[dict[str, Any]], armed: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+def _api_unreadable(state: dict[str, Any]) -> bool:
+    """A read whose module state, stand-downs, stats or hash cannot be read (`api: null` is a
+    readable "no module published")."""
+    api = state.get("api")
+    if not isinstance(state.get("hash"), str):
+        return True
+    if api is None:
+        return False
+    if not (isinstance(api, dict) and isinstance(api.get("state"), str) and isinstance(api.get("standDowns"), list)):
+        return True
+    stat = api.get("stats")
+    return stat is not None and not (
+        isinstance(stat, dict) and all(_finite_number(stat.get(key)) is not None for key in ("iter", "uploads", "glErrors"))
+    )
+
+
+def _armed_live(states: list[dict[str, Any]], armed: dict[str, Any]) -> tuple[bool | None, dict[str, Any]]:
+    """Both reads LIVE on the destination, same epoch, strictly progressing; None when a read's
+    module state, stats, hash, time or epoch is unreadable."""
+    if any(_api_unreadable(state) for state in states):
+        return None, {"reason": "a read's module state, stats or hash is unreadable", "states": [s.get("api") for s in states]}
     stats = []
     for state in states:
         api = state.get("api")
@@ -2672,70 +2721,97 @@ def _armed_live(states: list[dict[str, Any]], armed: dict[str, Any]) -> tuple[bo
         stats.append(stat)
     first, second = stats
     times = [_finite_number(state.get("t")) for state in states]
-    counters = [
-        (_finite_number(first.get(key)), _finite_number(second.get(key))) for key in ("iter", "uploads")
-    ]
+    counters = [(_finite_number(first.get(key)), _finite_number(second.get(key))) for key in ("iter", "uploads")]
+    detail = {"epochs": [first.get("epoch"), second.get("epoch")], "counters": counters, "t": times}
+    if None in times or any(_finite_number(stat.get("epoch")) is None for stat in stats):
+        return None, {**detail, "reason": "a LIVE read's time or epoch is unreadable"}
     ok = (
-        first.get("epoch") is not None and first.get("epoch") == second.get("epoch")
-        and all(a is not None and b is not None and b > a for a, b in counters)
-        and None not in times and times[1] - times[0] >= ARMED_READ_GAP_S * 1000.0
+        first["epoch"] == second["epoch"] and all(b > a for a, b in counters)
+        and times[1] - times[0] >= ARMED_READ_GAP_S * 1000.0
     )
-    return ok, {"epochs": [first.get("epoch"), second.get("epoch")], "counters": counters, "t": times}
+    return ok, detail
 
 
-def _armed_events(state: dict[str, Any], armed: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-    if not isinstance(state.get("coreEvents"), list):
-        return False, {"reason": "runtime notes are unreadable"}
+def _armed_events(state: dict[str, Any], armed: dict[str, Any]) -> tuple[bool | None, dict[str, Any]]:
+    if not _events_readable(state):
+        return None, {"reason": "runtime notes are unreadable"}
     arms, lives = _notes(state, "glreplay-arm"), _notes(state, "glreplay-live")
     zones = [(z.get("from"), z.get("to"), z.get("reason")) for z in _notes(state, "glreplay-zone")]
     carried = _notes(state, "glreplay-carried")
     downs = _notes(state, "glreplay-standdown") + _notes(state, "glreplay-handoff")
-    delta = _finite_number(carried[0].get("delta")) if len(carried) == 1 else None
-    live_hash = hash_number(lives[0].get("sceneHash")) if len(lives) == 1 else None
+    detail = {"arms": arms, "lives": lives, "zones": zones, "carried": carried, "downs": downs}
+    if (
+        (len(arms) == 1 and not isinstance(arms[0].get("sceneHash"), str))
+        or (len(lives) == 1 and not isinstance(lives[0].get("sceneHash"), str))
+        or (len(carried) == 1 and _finite_number(carried[0].get("delta")) is None)
+        or any(not isinstance(value, str) for zone in zones for value in zone)
+    ):
+        return None, {**detail, "reason": "a runtime note's scene hash, zone or delta is unreadable"}
+    delta = _finite_number(carried[0]["delta"]) if len(carried) == 1 else None
+    live_hash = hash_number(lives[0]["sceneHash"]) if len(lives) == 1 else None
     at = armed["atScene"]
     ok = (
-        len(arms) == 1 and hash_number(arms[0].get("sceneHash")) == at - 1
+        len(arms) == 1 and hash_number(arms[0]["sceneHash"]) == at - 1
         and live_hash is not None and live_hash >= at - 1
         and not downs
         and zones == [("pending", "armed", "moduleReady")]
         and delta is not None and 0 <= delta <= ARMED_CARRY_DELTA_MAX
     )
-    return ok, {"arms": arms, "lives": lives, "zones": zones, "carried": carried, "downs": downs}
+    return ok, detail
 
 
-def _armed_no_painting(reads: list[dict[str, Any]], armed: dict[str, Any]) -> tuple[bool, list[Any]]:
+def _armed_no_painting(reads: list[Any], armed: dict[str, Any]) -> tuple[bool | None, list[Any]]:
+    """No `<video>` painting over the armed rect; None when a read's stage map or painting probe is unreadable."""
     over: list[Any] = []
     for read in reads:
-        stage_map = read.get("stageMap")
+        stage_map = read.get("stageMap") if isinstance(read, dict) else None
         if not stage_map_valid(stage_map):
-            return False, ["stage map is missing or untrustworthy"]
+            return None, ["stage map is missing or untrustworthy"]
         try:
             videos = painting_videos(read.get("painting"), stage_map)
         except VisiblePassError as exc:
-            return False, [str(exc)]
+            return None, [str(exc)]
         over.extend(v for v in videos if any(rects_overlap(v["authored"], rect) for rect in armed["rects"]))
     return not over, over
 
 
-def _armed_pool(states: list[dict[str, Any]], armed: dict[str, Any], carried: Any) -> tuple[bool, dict[str, Any]]:
-    if carried is None:
-        return False, {"reason": "no single glreplay-carried note names the carried decoder"}
-    clock: list[tuple[float | None, float | None]] = []
+def _armed_pool(
+    states: list[dict[str, Any]], armed: dict[str, Any], carried: Any, carried_readable: bool = True,
+) -> tuple[bool | None, dict[str, Any]]:
+    """The pool is {carried} plus out-of-document siblings, the carried decoding in real time;
+    None when the carried decoder cannot be named (`carried_readable`) or a pool field it needs
+    is unreadable."""
     for state in states:
         pool = state.get("pool")
-        if not isinstance(pool, list):
-            return False, {"reason": f"pool census is unreadable: {pool!r}"}
-        movie = _movie_entries(pool, armed)
-        mine = [entry for entry in movie if entry.get("elId") == carried]
-        if len(mine) != 1 or any(entry.get("inDocument") is not False or entry.get("fromDom") for entry in movie):
+        if not isinstance(pool, list) or not all(isinstance(entry, dict) for entry in pool):
+            return None, {"reason": f"pool census is unreadable: {pool!r}"}
+        if any(not isinstance(entry.get("inDocument"), bool) for entry in _movie_entries(pool, armed)):
+            return None, {"reason": "a pooled movie entry's inDocument is unreadable"}
+    if not carried_readable:
+        return None, {"reason": "the runtime notes naming the carried decoder are unreadable"}
+    if carried is None:
+        return False, {"reason": "no single glreplay-carried note names the carried decoder"}
+    mine = [[entry for entry in _movie_entries(state["pool"], armed) if entry.get("elId") == carried] for state in states]
+    if any(
+        len(entries) == 1 and (
+            not isinstance(entries[0].get("paused"), bool) or _finite_number(entries[0].get("readyState")) is None
+            or _finite_number(entries[0].get("currentTime")) is None or _finite_number(state.get("t")) is None
+        )
+        for state, entries in zip(states, mine)
+    ):
+        return None, {"reason": "the carried decoder's state or clock is unreadable", "carried": mine}
+    clock: list[tuple[float, float]] = []
+    for state, entries in zip(states, mine):
+        movie = _movie_entries(state["pool"], armed)
+        if len(entries) != 1 or any(entry["inDocument"] or entry.get("fromDom") for entry in movie):
             return False, {"reason": "pool is not {carried} plus out-of-document siblings", "movie": movie}
-        entry = mine[0]
-        if entry.get("paused") is not False or not ((_finite_number(entry.get("readyState")) or 0) >= 2):
+        entry = entries[0]
+        if entry["paused"] or entry["readyState"] < 2:
             return False, {"reason": "carried decoder is paused or not decoding", "carried": entry}
-        clock.append((_finite_number(state.get("t")), _finite_number(entry.get("currentTime"))))
+        clock.append((float(state["t"]), float(entry["currentTime"])))
     (t0, c0), (t1, c1) = clock
-    if None in (t0, c0, t1, c1) or t1 <= t0:
-        return False, {"reason": "carried clock is unreadable", "clock": clock}
+    if t1 <= t0:
+        return False, {"reason": "the reads are not in time order", "clock": clock}
     rate = (c1 - c0) / ((t1 - t0) / 1000.0)
     low, high = ARMED_CLOCK_RATE
     return (c1 > c0 and low <= rate <= high), {"clock": clock, "rate": rate}
@@ -2758,11 +2834,13 @@ def pre_flip_owner_ids(samples: list[dict[str, Any]], armed: dict[str, Any]) -> 
 def score_armed(
     reads: Any, armed: dict[str, Any], continuity: Any, *, owner_ids: Any = None
 ) -> dict[str, Any]:
-    """`armed1to2` (plan g5g6 §3.3): every clause holds; missing is False, never None."""
-    checks = {"mode": False, "live": False, "events": False, "noPainting": False, "pool": False, "owner": False}
+    """`armed1to2` (plan g5g6 §3.3): every clause holds. Each clause is tri-state: an unread or
+    unreadable input (the reads, a stage map or painting probe, the notes, the pool, no resolved
+    pre-flip owner) is None, and any None makes the verdict None before any failed clause."""
+    checks: dict[str, bool | None] = dict.fromkeys(("mode", "live", "events", "noPainting", "pool", "owner"))
     detail: dict[str, Any] = {}
     gl = continuity.get("glReplay") if isinstance(continuity, dict) else None
-    checks["mode"] = (
+    checks["mode"] = None if not isinstance(continuity, dict) else (
         isinstance(gl, dict) and gl.get("mode") == "injected"
         and gl.get("version") == GL_REPLAY_VERSION and gl.get("sha256") == gl_replay_js_sha256()
     )
@@ -2774,18 +2852,17 @@ def score_armed(
         checks["live"], detail["live"] = _armed_live(states, armed)
         checks["events"], detail["events"] = _armed_events(states[-1], armed)
         checks["noPainting"], detail["paintingOverRect"] = _armed_no_painting(reads, armed)
-        carried = _carried_el_id(states[-1])
-        checks["pool"], detail["pool"] = _armed_pool(states, armed, carried)
+        carried, named = _carried_el_id(states[-1]), _events_readable(states[-1])
+        checks["pool"], detail["pool"] = _armed_pool(states, armed, carried, named)
         owners = [o for o in owner_ids if o is not None] if isinstance(owner_ids, list) else []
-        checks["owner"] = carried is not None and bool(owners) and all(o == carried for o in owners)
+        checks["owner"] = None if not named or not owners else carried is not None and all(o == carried for o in owners)
         detail["preFlipOwners"] = sorted({str(o) for o in owners})
     else:
         detail["reason"] = "the armed slide was not read twice"
-    failing = [name for name, ok in checks.items() if not ok]
-    return {
-        "verdict": not failing, "checks": checks, "detail": detail,
-        "reason": f"armed checks failed: {failing}" if failing else None,
-    }
+    unreadable = [name for name, ok in checks.items() if ok is None]
+    failing = [name for name, ok in checks.items() if ok is False]
+    reason = f"armed checks unreadable: {unreadable}" if unreadable else f"armed checks failed: {failing}" if failing else None
+    return {"verdict": combine_verdicts(*checks.values()), "checks": checks, "detail": detail, "reason": reason}
 
 
 def score_positive_halves(
@@ -2997,7 +3074,9 @@ def score_restart_strict(
     plan names no single destination), and every decoder seen at the source
     instance's rect anywhere on the source slide (`sourceScene` .. the boundary; not bounded by
     the pad window, which a transition scene longer than `WINDOW_PAD_S` with no `<video>` would
-    swallow) is absent or disconnected inside the window after it."""
+    swallow) is absent or disconnected inside the window after it. A connected decoder whose
+    freshness, source membership, destination phase or rect rests on a row of unreadable scene,
+    move state or rect is INCONCLUSIVE, never dropped from those checks."""
     errors = sample_schema_errors(samples)
     if errors:
         return _inconclusive("sample schema is invalid", schemaErrors=errors)
@@ -3008,42 +3087,74 @@ def score_restart_strict(
     window = find_boundary_window(samples, scene, pad_s=pad_s)
     if window is None:
         return _inconclusive("boundary crossing not observed in samples")
+    first = spec.get("sourceScene")
+
+    def placed(row: dict[str, Any]) -> bool:
+        return _finite_number(row.get("scene")) is not None
 
     def windowed(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [r for r in rows if window["start"] <= r["t"] <= window["end"] and r.get("scene") is not None]
+        return [r for r in rows if window["start"] <= r["t"] <= window["end"]]
 
-    def settled(row: dict[str, Any]) -> bool:
+    def settled(row: dict[str, Any]) -> bool | None:
         """On the destination slide (`until` = the next slide's first scene, exclusive), never a
-        moving row, and never the slide's own outgoing transition scene when it has one."""
+        moving row, and never the slide's own outgoing transition scene when it has one. None
+        when the row's scene, or on the destination its move state, is unreadable."""
+        if not placed(row):
+            return None
         if row["scene"] < scene or (until is not None and row["scene"] >= until):
             return False
         if until is not None and until - 1 > scene and row["scene"] == until - 1:
             return False
-        return not (row.get("playerState") == "Playing" and row.get("busy") is True)
+        state, busy = row.get("playerState"), row.get("busy")
+        if state == "Playing" and busy is True:
+            return False
+        return True if busy is False or (isinstance(state, str) and state != "Playing") else None
 
-    if not any(settled(r) for r in windowed(samples)):
-        return _inconclusive("no sample on the settled destination scene", window=window)
-    first = spec.get("sourceScene")
-    source_ids = sorted(
-        i for i, rows in tracks.items()
-        if any(
-            r.get("scene") is not None and (first is None or r["scene"] >= first) and r["scene"] < scene
-            and rect_matches(r.get("rect"), spec["srcRect"], rect_tolerance)
-            for r in rows
+    def at_source(row: dict[str, Any]) -> bool | None:
+        """A row at the source instance on the source slide; None when its scene or rect is unreadable."""
+        if placed(row) and not ((first is None or row["scene"] >= first) and row["scene"] < scene):
+            return False
+        if not _is_rect(row.get("rect")):
+            return None
+        return rect_matches(row["rect"], spec["srcRect"], rect_tolerance) if placed(row) else (
+            None if rect_matches(row["rect"], spec["srcRect"], rect_tolerance) else False
         )
-    )
+
+    if not any(settled(r) is True for r in windowed(samples)):
+        return _inconclusive("no sample on the settled destination scene", window=window)
+    source_ids = sorted(i for i, rows in tracks.items() if any(at_source(r) is True for r in rows))
     if not source_ids:
         return _inconclusive("no decoder at the source instance before the boundary", window=window)
+    targets = [spec["dstRect"]] if spec.get("dstRect") is not None else spec.get("dstRects") or []
+    uncertain: list[dict[str, Any]] = []
+    for i, rows in tracks.items():
+        connected = [r for r in windowed(rows) if r.get("isConnected")]
+        if not connected:
+            continue
+        unplaced_after = [r for r in connected if not placed(r)]
+        if i in source_ids or any(at_source(r) is None for r in rows):
+            if unplaced_after or (i not in source_ids and any(r["scene"] >= scene for r in connected if placed(r))):
+                uncertain.append({"id": i, "why": "a possible source decoder is connected on rows of unreadable scene or source"})
+            continue
+        if any(placed(r) and r["scene"] < scene for r in rows):
+            continue
+        if any(not placed(r) for r in rows):
+            uncertain.append({"id": i, "why": "a decoder not seen before the boundary has rows with no scene"})
+        elif any(settled(r) is None for r in connected):
+            uncertain.append({"id": i, "why": "a fresh decoder's destination move state is unreadable"})
+        elif any(settled(r) and not _is_rect(r.get("rect")) for r in connected):
+            uncertain.append({"id": i, "why": "a fresh decoder's destination rect is unreadable"})
+    if uncertain:
+        return _inconclusive("a fresh or source decoder cannot be placed", uncertain=uncertain, sourceIds=source_ids, window=window)
     leaked = [
         {"id": i, "t": r["t"], "scene": r["scene"]}
-        for i in source_ids for r in windowed(tracks[i]) if r["scene"] >= scene and r.get("isConnected")
+        for i in source_ids for r in windowed(tracks[i]) if r.get("isConnected") and r["scene"] >= scene
     ]
     fresh = {
         i: sorted((r for r in windowed(rows) if settled(r) and r.get("isConnected")), key=lambda r: r["t"])
         for i, rows in tracks.items()
-        if not any(r.get("scene") is not None and r["scene"] < scene for r in rows)
+        if not any(r["scene"] < scene for r in rows if placed(r))
     }
-    targets = [spec["dstRect"]] if spec.get("dstRect") is not None else spec.get("dstRects") or []
     bound = {
         i: rows for i, rows in fresh.items()
         if rows and all(any(rect_matches(r.get("rect"), t, rect_tolerance) for t in targets) for r in rows)
@@ -3133,6 +3244,8 @@ def score_raw_handback(samples: Any, spec: dict[str, Any]) -> dict[str, Any]:
     rows = [(row, v) for row in samples for v in row["videos"] if v.get("domId") == dom_id]
     if any(any(not isinstance(v.get(flag), bool) for flag in ("preserved", "remounted", "facade")) for _, v in rows):
         return _inconclusive(f"{dom_id} rows carry unreadable preserve/remount/facade flags")
+    if any(_finite_number(row.get("scene")) is None for row, _ in rows):
+        return _inconclusive(f"{dom_id} rows carry no scene, so the retire zone cannot place them")
     before = [row["t"] for row, _ in rows if row.get("scene") is not None and row["scene"] < lo]
     zone = [
         (row, v) for row, v in rows
@@ -3154,6 +3267,10 @@ def score_raw_handback(samples: Any, spec: dict[str, Any]) -> dict[str, Any]:
         return {"verdict": True, "reason": None, **detail}
     if not settled:
         return _inconclusive(f"{dom_id} is never DOM-present on a settled row of the retire zone", **detail)
+    if any(not isinstance(row.get("busy"), bool) for row, _ in zone) or any(
+        v["isConnected"] and not _is_rect(v.get("rect")) for _, v in settled
+    ):
+        return _inconclusive(f"{dom_id} zone rows carry an unreadable move state or rect", **detail)
     return {"verdict": False, "reason": f"{dom_id} is present but never connected at its authored rect", **detail}
 
 
@@ -3207,28 +3324,31 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
         painting_videos(sample.get("painting"), sample["stageMap"])
     except VisiblePassError as exc:
         return _inconclusive(str(exc))
+    events = sample.get("coreEvents")
+    movie_key, scene = spec.get("movieKey"), spec["atScene"]
+    src_ids = {spec["srcObjectId"].lower()} if isinstance(spec.get("srcObjectId"), str) and spec["srcObjectId"] else set()
+    if runtime_installed:
+        if not isinstance(sample.get("poolSnapshot"), list):
+            return _inconclusive(f"preserve snapshot is unreadable: {sample.get('poolSnapshot')!r}")
+        if not isinstance(events, list) or not all(isinstance(e, dict) for e in events):
+            return _inconclusive("core events are unreadable")
+        if movie_key is None:
+            return _inconclusive("the retire verdict is bound to no runtime movie key")
+        if not src_ids:
+            return _inconclusive("the retire verdict names no source instance")
     ids = retire_instance_ids(spec)
     linked, foreign = instance_decoders(samples, ids)
     handback = score_raw_handback(samples, spec)
-    if handback["verdict"] is False:
-        return {**score_refusal(sample, spec, runtime_installed, foreign=foreign, linked=linked), "verdict": False,
-                "handback": handback, "reason": handback["reason"]}
     if handback["verdict"] is None:
         return _inconclusive(f"hand-back: {handback['reason']}", handback=handback)
-    handed_back = handback.get("elIds") or ()
+    handed_back = handback.get("elIds") or () if handback["verdict"] else ()
+    scored = score_refusal(sample, spec, runtime_installed, handed_back, foreign, linked)
+    if scored["verdict"] is None:
+        return {**scored, "handback": handback}
+    if handback["verdict"] is False:
+        return {**scored, "verdict": False, "handback": handback, "reason": handback["reason"]}
     if not runtime_installed:
-        return {**score_refusal(sample, spec, runtime_installed, handed_back, foreign, linked), "handback": handback}
-    events = sample.get("coreEvents")
-    if not isinstance(sample.get("poolSnapshot"), list):
-        return _inconclusive(f"preserve snapshot is unreadable: {sample.get('poolSnapshot')!r}")
-    if not isinstance(events, list) or not all(isinstance(e, dict) for e in events):
-        return _inconclusive("core events are unreadable")
-    movie_key, scene = spec.get("movieKey"), spec["atScene"]
-    if movie_key is None:
-        return _inconclusive("the retire verdict is bound to no runtime movie key")
-    src_ids = {spec["srcObjectId"].lower()} if isinstance(spec.get("srcObjectId"), str) and spec["srcObjectId"] else set()
-    if not src_ids:
-        return _inconclusive("the retire verdict names no source instance")
+        return {**scored, "handback": handback}
     zone_end = spec["zoneUntilScene"] - 1 if spec.get("zoneUntilScene") is not None else math.inf
     timed = retire_zone_times(samples, scene, spec.get("zoneUntilScene"))
 
@@ -3273,7 +3393,6 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
         and (keyed(d) or any(d.get(f) in el_ids for f in ("elId", "newElId") if d.get(f) is not None))
         and event_in_zone(e, _event_scene_of(e), unplaced=True)
     ]
-    scored = score_refusal(sample, spec, runtime_installed, handed_back, foreign, linked)
     reasons = [scored["reason"]] if scored.get("reason") else []
     if not notes:
         reasons.append(f"no preserve-refused/retire-boundary note for {movie_key} in scenes [{scene - 1}, {zone_end})")
@@ -4626,16 +4745,25 @@ def score_live_ring(
 
 
 def score_handback_carry(record: Any, armed: dict[str, Any]) -> dict[str, Any]:
-    """Vgl after build 1: carried paints alone, released by hand-off, never remounted."""
-    checks = {"painting": False, "release": False, "noRemount": False, "handoff": False}
+    """Vgl after build 1: carried paints alone, released by hand-off, never remounted. Each check
+    is tri-state: an unread or unreadable read, note list, stage map, painting probe, pool,
+    release note or facade list is None, and any None makes the verdict None before any failure."""
+    checks: dict[str, bool | None] = dict.fromkeys(("painting", "release", "noRemount", "handoff"))
     detail: dict[str, Any] = {}
     record = record if isinstance(record, dict) else {}
-    after = record.get("after") if isinstance(record.get("after"), dict) else {}
-    checks["handoff"] = _handed_off(after)
-    before = record.get("before") if isinstance(record.get("before"), dict) else {}
-    carried = _carried_el_id(after)
+    after, before = record.get("after"), record.get("before")
+    named = _events_readable(after)
+    releases = _notes(after, "glreplay-release") if named else []
+    release_unreadable = len(releases) == 1 and (
+        not isinstance(releases[0].get("mode"), str) or not isinstance(releases[0].get("retired"), list)
+    )
+    if named and _events_readable(after, "api") and not release_unreadable:
+        checks["handoff"] = _handed_off(after)
+    carried = _carried_el_id(after) if named else None
     stage_map = record.get("stageMap")
-    if carried is not None and stage_map_valid(stage_map):
+    if named and carried is None:
+        checks["painting"] = False
+    elif named and stage_map_valid(stage_map):
         try:
             videos = painting_videos(record.get("painting"), stage_map)
         except VisiblePassError as exc:
@@ -4647,20 +4775,24 @@ def score_handback_carry(record: Any, armed: dict[str, Any]) -> dict[str, Any]:
             checks["painting"] = len(movie) == 1 and movie[0].get("elId") == carried and all(
                 abs(movie[0]["screen"][k] - want[k]) <= HANDBACK_RECT_TOLERANCE_PX for k in ("x", "y", "w", "h")
             )
-    pool = before.get("pool")
-    pooled = sorted({e.get("elId") for e in _movie_entries(pool, armed)}, key=str) if isinstance(pool, list) else None
-    releases = _notes(after, "glreplay-release")
+    pool = before.get("pool") if isinstance(before, dict) else None
+    pool_ok = isinstance(pool, list) and all(isinstance(e, dict) for e in pool)
+    pooled = sorted({e.get("elId") for e in _movie_entries(pool, armed)}, key=str) if pool_ok else None
     detail.update(pooled=pooled, releases=releases)
-    if carried is not None and pooled is not None and carried in pooled and len(releases) == 1:
-        release = releases[0]
-        retired = release.get("retired")
-        checks["release"] = (
-            release.get("mode") == "handoff" and isinstance(retired, list)
-            and sorted(retired, key=str) == [e for e in pooled if e != carried]
+    if named and carried is None:
+        checks["release"] = False
+    elif named and pool_ok and not release_unreadable:
+        release = releases[0] if len(releases) == 1 else {}
+        checks["release"] = carried in pooled and len(releases) == 1 and release["mode"] == "handoff" and (
+            sorted(release["retired"], key=str) == [e for e in pooled if e != carried]
         )
-    if carried is not None:
+    reads = (before, after)
+    facades_ok = all(isinstance(read, dict) and isinstance(read.get("facades"), list) for read in reads)
+    if named and carried is None:
+        checks["noRemount"] = False
+    elif named and facades_ok:
         facades = [
-            f.get("elId") for read in (before, after) for f in read.get("facades") or []
+            f.get("elId") for read in reads for f in read["facades"]
             if isinstance(f, dict) and f.get("forElId") == carried
         ]
         guarded = {carried, *facades}
@@ -4670,9 +4802,10 @@ def score_handback_carry(record: Any, armed: dict[str, Any]) -> dict[str, Any]:
         ]
         detail.update(guarded=sorted(guarded, key=str), remounts=remounts)
         checks["noRemount"] = not remounts
-    failing = [key for key, ok in checks.items() if not ok]
-    return {"verdict": not failing, "checks": checks, "carried": carried, "detail": detail,
-            "reason": f"failed {failing}" if failing else None}
+    unreadable = [key for key, ok in checks.items() if ok is None]
+    failing = [key for key, ok in checks.items() if ok is False]
+    return {"verdict": combine_verdicts(*checks.values()), "checks": checks, "carried": carried, "detail": detail,
+            "reason": f"unreadable {unreadable}" if unreadable else f"failed {failing}" if failing else None}
 
 
 def score_handback(
@@ -4681,9 +4814,7 @@ def score_handback(
 ) -> dict[str, Any]:
     parity = handback_parity(v_record, v_frame, g_record, g_frame, armed, poke=poke, dilate_px=dilate_px)
     carry = score_handback_carry(g_record, armed)
-    if parity["verdict"] is None:
-        return {"verdict": None, "parity": parity, "carry": carry, "reason": parity["reason"]}
-    verdict = parity["verdict"] is True and carry["verdict"] is True
+    verdict = combine_verdicts(parity["verdict"], carry["verdict"])
     reason = None if verdict else "; ".join(r for r in (parity.get("reason"), carry.get("reason")) if r)
     return {"verdict": verdict, "parity": parity, "carry": carry, "reason": reason}
 
@@ -4723,27 +4854,34 @@ def score_forced(
     *, v_pass: Any, g_pass: Any, refusal: Any, g_handback: Any, parity: Any, reason: str, splice: Any,
 ) -> dict[str, Any]:
     """`forced-ok` iff the forced page is V's flag-off twin (plan g5g6 §3.8); never `pass`. An
-    unreadable slide, refusal or parity verdict is `inconclusive`, never `forced-fail`."""
-    after = g_handback.get("after") if isinstance(g_handback, dict) and isinstance(g_handback.get("after"), dict) else None
-    zones = _notes(after, "glreplay-zone") if after else []
+    unreadable slide, pass, mode, refusal, parity, hand-back read, note list or stand-down list
+    is `inconclusive`, never `forced-fail`."""
+    after = g_handback.get("after") if isinstance(g_handback, dict) else None
+    api = after.get("api") if isinstance(after, dict) else None
+    notes_ok = _events_readable(after) and _events_readable(after, "api") and (
+        api is None or isinstance(api.get("standDowns"), list)
+    )
+    zones = _notes(after, "glreplay-zone") if notes_ok else []
     last = zones[-1] if zones else {}
-    api = after.get("api") if after and isinstance(after.get("api"), dict) else {}
-    stand_downs = api.get("standDowns") if isinstance(api.get("standDowns"), list) else []
+    stand_downs = api["standDowns"] if notes_ok and isinstance(api, dict) else []
     v_verdicts = [slide.get("verdict") for slide in visible_slides_of(v_pass)]
     g_verdicts = [slide.get("verdict") for slide in visible_slides_of(g_pass)]
-    slides_unread = None in v_verdicts or None in g_verdicts
+    v_unknown, g_unknown = _visible_pass_unknown(v_pass), _visible_pass_unknown(g_pass)
+    slides_unread = None in v_verdicts or None in g_verdicts or v_unknown or g_unknown
+    v_mode, g_mode = gl_replay_mode(v_pass), gl_replay_mode(g_pass)
     checks: dict[str, bool | None] = {
         "splice": isinstance(splice, dict) and splice.get("splices") == 1,
-        "mode": gl_replay_mode(g_pass) == "injected",
-        "slides": None if None in g_verdicts else bool(g_verdicts) and all(v is True for v in g_verdicts)
+        "mode": None if g_mode is None else g_mode == "injected",
+        "slides": None if g_unknown or None in g_verdicts else all(v is True for v in g_verdicts)
         and not visible_pass_reasons(g_pass, "VglForced", "qualified"),
-        "reference": gl_replay_mode(v_pass) == "off" and not visible_pass_reasons(v_pass, "V", "qualified"),
+        "reference": None if v_unknown or v_mode is None else v_mode == "off"
+        and not visible_pass_reasons(v_pass, "V", "qualified"),
         "matchesV": None if slides_unread else v_verdicts == g_verdicts,
         "refused": _verdict_check(refusal),
-        "zone": last.get("to") == "retired" and reason in stand_downs and (
+        "zone": None if not notes_ok else last.get("to") == "retired" and reason in stand_downs and (
             (last.get("reason") == "failure" and last.get("standDown") == reason) or last.get("reason") == "moduleRetired"
         ),
-        "noLive": after is not None and not _notes(after, "glreplay-live") and not _notes(after, "glreplay-live", "api"),
+        "noLive": None if not notes_ok else not _notes(after, "glreplay-live") and not _notes(after, "glreplay-live", "api"),
         "parity": _verdict_check(parity),
         "knownReason": reason in GL_FORCE_FAIL_REASONS,
     }
@@ -4755,10 +4893,17 @@ def score_forced(
 
 
 def _verdict_check(scored: Any) -> bool | None:
-    """A scored dict's verdict as a check: None when it was scored but unreadable, False when absent."""
-    if not isinstance(scored, dict):
-        return False
-    return _tri_state(scored.get("verdict"))
+    """A scored dict's verdict as a check; None when it is absent or unreadable."""
+    return _tri_state(scored.get("verdict")) if isinstance(scored, dict) else None
+
+
+def _visible_pass_unknown(entry: Any) -> bool:
+    """A visible pass that is no evidence at all: absent, errored, without a stage-fit record, or
+    with no scored slide (a failed stage fit or a wrong mechanism is readable)."""
+    return (
+        not isinstance(entry, dict) or entry.get("status") == "error" or bool(entry.get("error"))
+        or not isinstance(entry.get("stageFit"), dict) or not visible_slides_of(entry)
+    )
 
 
 def slide_reached(observed: Any, ordinal: int) -> bool | None:
@@ -6670,14 +6815,25 @@ def loop_period_of(nodes: list[dict[str, Any]], asset: str) -> float:
     return periods.pop()
 
 
+def recorder_frames(recorder: Any) -> list[dict[str, Any]] | None:
+    """The wrap recorder's rVFC frames, or None unless every frame has a finite `now` and `mediaTime`."""
+    frames = recorder.get("frames") if isinstance(recorder, dict) else None
+    if not isinstance(frames, list) or not all(
+        isinstance(f, dict) and _finite_number(f.get("now")) is not None and _finite_number(f.get("mediaTime")) is not None
+        for f in frames
+    ):
+        return None
+    return frames
+
+
 def recorded_wrap(recorder: Any) -> dict[str, Any] | None:
     """The first recorder frame after the seek whose media time drops by over half the period."""
     if not isinstance(recorder, dict):
         return None
     period, seeked = _finite_number(recorder.get("duration")), _finite_number(recorder.get("seekedT"))
-    if period is None or seeked is None:
+    if period is None or seeked is None or recorder_frames(recorder) is None:
         return None
-    frames = [f for f in recorder.get("frames") or [] if (_finite_number(f.get("now")) or -1.0) >= seeked]
+    frames = [f for f in recorder["frames"] if f["now"] >= seeked]
     for a, b in zip(frames, frames[1:]):
         if a["mediaTime"] - b["mediaTime"] > period / 2:
             return {"t": b["now"], "from": a["mediaTime"], "to": b["mediaTime"], "fromT": a["now"]}
@@ -6695,6 +6851,8 @@ def force_wrap_invalid(
         return [str(select["error"])]
     if not isinstance(recorder, dict):
         return ["the wrap recorder was not read back"]
+    if recorder_frames(recorder) is None:
+        return ["the wrap recorder's frames are unreadable"]
     reasons: list[str] = []
     seeked = _finite_number(recorder.get("seekedT"))
     press = _finite_number(take.get("pressT"))
@@ -6729,14 +6887,13 @@ def force_wrap_invalid(
 
 def page_errors_in(notes: Any, seeked_t: float | None, window: dict[str, float] | None) -> list[dict[str, Any]] | None:
     """The core's `player-build-error` notes from the seek to the end of the scored window;
-    None when they could not be read."""
+    None when they could not be read, or a note cannot be placed in time."""
     if not isinstance(notes, list) or seeked_t is None:
         return None
+    if not all(isinstance(note, dict) and _finite_number(note.get("t")) is not None for note in notes):
+        return None
     end = window["end"] if window is not None else math.inf
-    return [
-        note for note in notes
-        if isinstance(note, dict) and seeked_t <= (_finite_number(note.get("t")) or -math.inf) <= end
-    ]
+    return [note for note in notes if seeked_t <= note["t"] <= end]
 
 
 def forced_window(
@@ -6761,11 +6918,10 @@ def score_recorder_clock(
         return _inconclusive("no recorder or no window")
     period = _finite_number(recorder.get("duration"))
     if period is None:
-        return {"verdict": False, "reason": "the recorded element has no finite duration"}
-    frames = sorted(
-        (f for f in recorder.get("frames") or [] if window["start"] <= (_finite_number(f.get("now")) or -1.0) <= window["end"]),
-        key=lambda f: f["now"],
-    )
+        return _inconclusive("the recorded element has no finite duration")
+    if recorder_frames(recorder) is None:
+        return _inconclusive("the recorder's frames are unreadable")
+    frames = sorted((f for f in recorder["frames"] if window["start"] <= f["now"] <= window["end"]), key=lambda f: f["now"])
     if not frames:
         return {"verdict": False, "reason": "no recorded frame inside the window", "window": window}
     rows, wraps = unwrap_clock([{"t": f["now"], "currentTime": f["mediaTime"]} for f in frames], period, fps)
@@ -6796,26 +6952,29 @@ def _gl_states(reads: Any) -> list[dict[str, Any]]:
     return [read["glReplay"] for read in reads if isinstance(read, dict) and isinstance(read.get("glReplay"), dict)]
 
 
-def armed_carry(reads: Any, armed: dict[str, Any], recorder: Any) -> tuple[bool, dict[str, Any]]:
+def armed_carry(reads: Any, armed: dict[str, Any], recorder: Any) -> tuple[bool | None, dict[str, Any]]:
     """The armed 1->2 carry held: armed on the source, LIVE after settle with no stand-down,
-    carrying the seeked element, and no `<video>` painting over the armed rect."""
+    carrying the seeked element, and no `<video>` painting over the armed rect. Each check is
+    tri-state; an unread or unreadable input makes the result None before any failed check."""
     states = _gl_states(reads)
-    if len(states) != 2:
-        return False, {"reason": "the destination was not read twice"}
+    if len(states) != 2 or len(reads) != 2:
+        return None, {"reason": "the destination was not read twice"}
+    named = _events_readable(states[-1])
     arms = _notes(states[-1], "glreplay-arm")
     downs = _notes(states[-1], "glreplay-standdown") + _notes(states[-1], "glreplay-handoff")
     live, live_detail = _armed_live(states, armed)
     carried = _carried_el_id(states[-1])
     seeked = recorder.get("elId") if isinstance(recorder, dict) else None
     no_painting, painting = _armed_no_painting(reads, armed)
-    checks = {
-        "armSeen": any(hash_number(note.get("sceneHash")) == armed["atScene"] - 1 for note in arms),
+    arm_hashes = [hash_number(note.get("sceneHash")) if isinstance(note.get("sceneHash"), str) else None for note in arms]
+    checks: dict[str, bool | None] = {
+        "armSeen": None if not named else True if armed["atScene"] - 1 in arm_hashes else None if None in arm_hashes else False,
         "live": live,
-        "noStandDown": not downs,
-        "carriesSeeked": carried is not None and carried == seeked,
+        "noStandDown": not downs if named else None,
+        "carriesSeeked": None if not named or seeked is None else carried is not None and carried == seeked,
         "noPainting": no_painting,
     }
-    return all(checks.values()), {
+    return combine_verdicts(*checks.values()), {
         "checks": checks, "live": live_detail, "carriedElId": carried, "seekedElId": seeked, "paintingOverRect": painting,
     }
 
@@ -6828,10 +6987,13 @@ def score_raw_restart(
     if scored.get("verdict") is not True:
         return scored
     rows = sorted(
-        (r for r in track_by_id(samples, asset)[scored["elementId"]] if r["scene"] is not None and r["scene"] >= boundary_scene),
+        (r for r in track_by_id(samples, asset)[scored["elementId"]] if (_finite_number(r.get("scene")) or -math.inf) >= boundary_scene),
         key=lambda r: r["t"],
     )
-    advance = rows[-1]["currentTime"] - rows[0]["currentTime"]
+    clocks = [_finite_number(rows[0].get("currentTime")), _finite_number(rows[-1].get("currentTime"))]
+    if None in clocks:
+        return {**scored, **_inconclusive("the fresh decoder's clock is unreadable")}
+    advance = clocks[1] - clocks[0]
     return {**scored, "verdict": advance >= min_advance_s, "advanceS": round(advance, 3)}
 
 
@@ -6860,29 +7022,48 @@ def fallback_outcome(
 ) -> tuple[str | None, dict[str, Any]]:
     """Which listed fail-closed fallback the take took, if any (OQ-4). On the armed boundary a
     raw restart counts only once G2 is no longer active and its zone is retired (or never
-    opened), so no carried canvas can still be painting. `detail["unreadable"]` names the
-    fallback evidence that could not be read."""
+    opened), so no carried canvas can still be painting; every armed fallback needs a readable
+    zone history, and unreadable notes are never "never opened". `detail["unreadable"]` names
+    the applicable fallback evidence that could not be read."""
     states = _gl_states(reads)
-    last = states[-1] if states else {}
-    api = last.get("api") if isinstance(last.get("api"), dict) else {}
-    stand_downs = api.get("standDowns") if isinstance(api.get("standDowns"), list) else None
-    zones = [(z.get("from"), z.get("to"), z.get("reason")) for z in _notes(last, "glreplay-zone")] if last else []
+    last = states[-1] if states else None
+    api = last.get("api") if last is not None else None
+    stand_downs = api.get("standDowns") if isinstance(api, dict) and isinstance(api.get("standDowns"), list) else None
+    state_known = last is not None and (api is None or isinstance(api, dict) and isinstance(api.get("state"), str))
+    g2_state = api.get("state") if isinstance(api, dict) else None
+    zones = (
+        [(z.get("from"), z.get("to"), z.get("reason")) for z in _notes(last, "glreplay-zone")]
+        if last is not None and _events_readable(last) else None
+    )
+    if zones is not None and any(not isinstance(to, str) for _, to, _ in zones):
+        zones = None
     painting, over = preserved_painting(reads, rects)
-    g2_inactive = api.get("state") not in G2_ACTIVE_STATES and (not zones or zones[-1][1] == "retired")
-    raw_restart_open = restart.get("verdict") is True and (g2_inactive or not armed_boundary)
+    if state_known and g2_state in G2_ACTIVE_STATES:
+        g2_inactive: bool | None = False
+    elif not state_known or zones is None:
+        g2_inactive = None
+    else:
+        g2_inactive = not zones or zones[-1][1] == "retired"
+    raw_restart_open = combine_verdicts(_tri_state(restart.get("verdict")), g2_inactive if armed_boundary else True)
+    if restart.get("verdict") is False or (armed_boundary and g2_inactive is False):
+        raw_restart_open = False
     detail = {
         "standDowns": stand_downs, "zones": zones, "restart": restart, "preservedPainting": over,
-        "g2State": api.get("state"), "g2Inactive": g2_inactive,
+        "g2State": g2_state, "g2Inactive": g2_inactive,
         "unreadable": [
             *(["stand-downs"] if armed_boundary and stand_downs is None else []),
-            *(["preserved painting"] if raw_restart_open and painting is None else []),
+            *(["zone history"] if armed_boundary and zones is None else []),
+            *(["G2 state"] if armed_boundary and not state_known else []),
+            *(["preserved painting"] if raw_restart_open is not False and painting is None else []),
         ],
     }
+    if armed_boundary and zones is None:
+        return None, detail
     if armed_boundary and stand_downs == ["videoNotReady"]:
         return "videoNotReady", detail
     if armed_boundary and stand_downs == [] and any(to == "retired" and why == "notPooled" for _, to, why in zones):
         return "notPooled", detail
-    if raw_restart_open and painting is False:
+    if raw_restart_open is True and painting is False:
         return "rawRestart", detail
     return None, detail
 
@@ -6907,8 +7088,9 @@ def score_forced_wrap(
     took a listed fail-closed fallback after a real wrap, else FAIL. Any page error from the
     seek to the end of the window FAILs, as in the P2 gate (no benign-error allowance). Unreadable
     sampler rows (`samples_problem`) invalidate a take that rests on them (the standard path, and
-    the armed path's raw-restart fallback); an unreadable continuity, recorder-clock or restart
-    verdict is INVALID, never a failed carry. The armed path's own recorder evidence still stands."""
+    the armed path's raw-restart fallback); an unreadable continuity, recorder-clock, restart,
+    carry or fallback input is INVALID, never a failed carry. The armed path's own recorder
+    evidence still stands."""
     wrap = recorded_wrap(recorder)
     press = _finite_number(take.get("pressT"))
     result: dict[str, Any] = {
@@ -6926,22 +7108,24 @@ def score_forced_wrap(
     armed_boundary = armed is not None and armed.get("boundaryKey") == f"continue{boundary}"
     if samples_problem and not armed_boundary:
         return {**result, "status": "invalid", "outcome": None, "reasons": [f"sampler rows unreadable: {samples_problem}"]}
+    held: bool | None
     if armed_boundary:
         held, carry = armed_carry(reads, armed, recorder)
-        held = held and clock.get("verdict") is True
+        held = combine_verdicts(held, _tri_state(clock.get("verdict")))
     else:
         tracked = continuity.get("elementId")
         seeked = recorder.get("probeId") if isinstance(recorder, dict) else None
+        wraps = continuity.get("wraps")
         checks = {
-            "continuity": continuity.get("verdict") is True,
-            "oneWrap": continuity.get("wraps") == 1,
-            "recorderClock": clock.get("verdict") is True,
-            "tracksSeeked": tracked is not None and tracked == seeked,
+            "continuity": _tri_state(continuity.get("verdict")),
+            "oneWrap": None if continuity.get("verdict") is True and not _is_count(wraps) else wraps == 1,
+            "recorderClock": _tri_state(clock.get("verdict")),
+            "tracksSeeked": None if seeked is None else tracked is not None and tracked == seeked,
         }
-        held = all(checks.values())
-        carry = {"checks": checks, "wraps": continuity.get("wraps"), "trackedId": tracked, "seekedProbeId": seeked}
+        held = combine_verdicts(*checks.values())
+        carry = {"checks": checks, "wraps": wraps, "trackedId": tracked, "seekedProbeId": seeked}
     result["carry"] = carry
-    if held:
+    if held is True:
         return {**result, "status": "pass", "outcome": "carried", "reasons": []}
     outcome, detail = (None, {}) if wrap is None else fallback_outcome(
         reads, armed_boundary=armed_boundary, restart=restart, rects=rects,
@@ -6953,6 +7137,8 @@ def score_forced_wrap(
     if not armed_boundary:
         evidence["continuity"] = continuity.get("verdict")
     unreadable = [name for name, value in evidence.items() if value is None] + detail.get("unreadable", [])
+    if held is None:
+        unreadable.append("carry evidence")
     if samples_problem:
         unreadable.append(f"sampler rows ({samples_problem})")
     if unreadable:
