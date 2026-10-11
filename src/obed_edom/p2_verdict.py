@@ -126,8 +126,10 @@ BRIDGE_EVENT_KIND = "bridge-3to4"
 # placed or swapped back in) — the notes a retire zone must never produce.
 # Event kinds the P2 script fetches from the page (every other kind is dropped before
 # the verdicts see it): the refusal notes, the pool-consuming and engagement notes the
-# 1->2 gates key off, and the glReplay zone/live notes `refusedCarry1to2` reads.
+# 1->2 gates key off, the glReplay zone/live notes `refusedCarry1to2` reads, and the
+# report-only `bridge-clock` note.
 PRESERVE_EVENT_KEEP_KINDS = (
+    "bridge-clock",
     "createElement-video",
     "dom-swap",
     "facade-block-clear",

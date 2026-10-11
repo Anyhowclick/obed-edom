@@ -18,8 +18,10 @@ an events file and behaves per `STUB_MODES` (artifact/out-dir stem -> mode):
 - `foreign` publish a status carrying another round's nonce, then kill the wrapper;
 - `hang`    start a child process and sleep, as a live probe holding Chrome does;
 - `cc-<status>` (probe `--carry-cover`) write a carry-cover artifact with that status (exit 0 only for
-            pass); `cc-sha` / `cc-control` the expected status with a foreign core sha / the wrong control;
-            `cc-none` write no artifact. Without a mode a carry-cover run writes its arm's expected outcome;
+            pass); `cc-sha` / `cc-control` / `cc-clock` / `cc-fixture` the expected status with a foreign core sha /
+            the wrong control / the other bridge clock (`gl` <-> `fallback`) / a foreign fixture; `cc-none` write no
+            artifact. Without a mode a carry-cover run writes its arm's expected outcome: the run's own fixture and one
+            bridge whose clock is `fallback` under `--core-variant no-gl-clock`, else `gl`;
 - a `--pass G --core-variant` run (Pass G red) and a `--paint-control` run write a matching artifact unless the
   mode breaks one thing: `gr-sha` (null-control session on a foreign core), `gr-extra` (an extra red leg),
   `gr-unknown` (an unreadable leg), `gr-floor` (a paintFloor above the red leg's longest run), `gr-nofloor` (no
@@ -56,6 +58,9 @@ What is pinned here:
 - the load guard: a round refuses to start (exit 2) when the 1-minute load average (`sysctl -n vm.loadavg`, stubbed
   on PATH here so the real host's load never decides a test) exceeds `GATE_MAX_START_LOAD` (default 4), and the
   summary prints the load at start and end and the round's wall time;
+- the carry-cover gate (gl-clock plan §5): green, red and null arms on P2 and on D1 (each on its deck's own export),
+  full tier only, after the paint controls and before the P2 arms; a check fails closed on every unexpected status, a
+  foreign core sha, fixture or control, and (but on the null arm) any bridge clock other than the arm's;
 - the painted instrument (S2 instrument plan §5): the D5 `no-pin-hold` deck red arm, one Pass G red arm and three
   paint controls run in the full tier only, queued and checked Pass G -> Pass G red -> paint control -> carry-cover;
   each check fails closed on every known-bad shape, a host red artifact without `sampler.selfCheck.ok` fails, and
@@ -194,12 +199,18 @@ if "--carry-cover" in sys.argv:
     control = "null" if "--carry-cover-null" in sys.argv else "red" if variant else "green"
     sha = variant_sha(variant) if variant else js_sha256()
     status = mode[3:] if mode.startswith("cc-") else "pass" if control == "green" else "fail"
-    if mode in ("cc-sha", "cc-control"):
+    if mode in ("cc-sha", "cc-control", "cc-clock", "cc-fixture"):
         status = "pass" if control == "green" else "fail"
     if mode == "cc-none":
         sys.exit(1)
+    via = "fallback" if variant == "no-gl-clock" else "gl"
+    if mode == "cc-clock":
+        via = {"gl": "fallback", "fallback": "gl"}[via]
     d = {"kind": "live-continuity-probe-carry-cover", "status": status,
          "control": "green" if mode == "cc-control" else control, "coreVariant": variant, "coreSha256": sha,
+         "fixture": "elsewhere" if mode == "cc-fixture" else arg("--fixture"),
+         "bridges": [{"boundary": "b1to2", "result": {"verdict": status, "maxStripPx": 1, "cleanShare": 1.0,
+                                                      "undecidedFrames": 0}, "clock": {"via": via, "lagMs": 7.0}}],
          "continuity": {"mode": "qualified", "sha256": "0" * 64 if mode == "cc-sha" else sha},
          "reasons": [f"stub {mode}"]}
     artifact.write_text(json.dumps(d))
@@ -462,7 +473,7 @@ def test_the_pattern_cache_is_prewarmed_and_verified_before_the_first_timed_run(
     events = gates["events"]()
     assert events[:2] == ["prewarm html-unmodified", "prewarm html-unmodified"], "the fill, then the verifying lookup"
     assert all(not e.startswith("prewarm") for e in events[2:])
-    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + 23 + 7 + 1 + 3 + 3 + 8
+    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + 23 + 7 + 1 + 3 + 6 + 8
     assert f"h264 pattern prewarm 46.0333s: encoded key={'k' * 64}" in done.stdout
     assert f"h264 pattern cache verified 46.0333s: hit key={'k' * 64} sha256={'s' * 64}" in done.stdout
     assert "cache hit" in gates["run"](outdir=gates["tmp"] / "out2").stdout
@@ -943,20 +954,28 @@ def test_known_bad_arguments_are_refused_before_anything_runs(gates, args: list[
 
 
 # --------------------------------------------------------------------------
-# Carry-cover gate (rubber band, 2026-10-10): GREEN default core must pass, RED `--core-variant linear-bridge` and
-# NULL `--carry-cover-null` must fail; full tier only, queued after the Pass G runs, fail-closed.
+# Carry-cover gate (rubber band, 2026-10-10; D1 with the GL clock, gl-clock plan §5): on P2 and on D1 the GREEN default
+# core must pass with every bridge on the GL clock, RED (P2 `--core-variant linear-bridge`, D1 `--core-variant
+# no-gl-clock` with every bridge on the fallback) and NULL `--carry-cover-null` must fail; full tier only, queued after
+# the paint controls, fail-closed.
 # --------------------------------------------------------------------------
 
-CC_STEMS = ["carry-cover", "carry-cover--core-variantlinear-bridge", "carry-cover--carry-cover-null"]
-CC_LABELS = ["green", "--core-variant linear-bridge", "--carry-cover-null"]
-CC_EXTRA = [[], ["--core-variant", "linear-bridge"], ["--carry-cover-null"]]
+CC_DECKS = ["P2", "P2", "P2", "D1", "D1", "D1"]
+CC_STEMS = ["carry-cover", "carry-cover--core-variantlinear-bridge", "carry-cover--carry-cover-null",
+            "carry-coverD1", "carry-coverD1--core-variantno-gl-clock", "carry-coverD1--carry-cover-null"]
+CC_LABELS = ["green", "--core-variant linear-bridge", "--carry-cover-null",
+             "D1 green", "D1 --core-variant no-gl-clock", "D1 --carry-cover-null"]
+CC_EXTRA = [[], ["--core-variant", "linear-bridge"], ["--carry-cover-null"],
+            [], ["--core-variant", "no-gl-clock"], ["--carry-cover-null"]]
 
 
 def _cc_argvs(events: list[str]) -> list[list[str]]:
     return [json.loads(e[len("ccargv "):]) for e in events if e.startswith("ccargv ")]
 
 
-def test_carry_cover_runs_its_three_controls_on_p2_through_the_queue_in_order(gates) -> None:
+def test_carry_cover_runs_its_three_controls_on_p2_and_d1_through_the_queue_in_order(gates) -> None:
+    """Each deck's arms run on that deck's Pass G fixture and original index; every check line names the deck (but
+    P2's, whose stems and labels are unchanged) and prints one line per bridge with its clock."""
     done = gates["run"](GATE_JOBS="1")
     events = gates["events"]()
     starts = [e.split()[1] for e in events if e.endswith(" start")]
@@ -964,21 +983,26 @@ def test_carry_cover_runs_its_three_controls_on_p2_through_the_queue_in_order(ga
     first_p2 = next(i for i, s in enumerate(starts) if s.startswith("p2"))
     assert starts.index(CC_STEMS[0]) == starts.index(PC_STEMS[-1]) + 1 and starts.index(CC_STEMS[-1]) + 1 == first_p2
     out = str(gates["out"].resolve())
-    fixture, index, _ = _probe_args(events)["passG-P2"]
+    args = _probe_args(events)
     assert _cc_argvs(events) == [
-        ["--fixture", fixture, "--original-index", index,
+        ["--fixture", args[f"passG-{deck}"][0], "--original-index", args[f"passG-{deck}"][1],
          "--viewport", "1920x1080", "--carry-cover", "--artifact", f"{out}/{stem}.json", *extra]
-        for stem, extra in zip(CC_STEMS, CC_EXTRA, strict=True)
+        for deck, stem, extra in zip(CC_DECKS, CC_STEMS, CC_EXTRA, strict=True)
     ]
     checks = [line for line in done.stdout.splitlines() if line.startswith("[CARRY-COVER ")]
     assert [c.split("]")[0][len("[CARRY-COVER "):] for c in checks] == CC_LABELS, done.stdout
-    assert "control=green status=pass (want pass) exit=0" in checks[0]
-    assert "control=red status=fail (want fail) exit=1" in checks[1]
-    assert "control=null status=fail (want fail) exit=1" in checks[2]
+    for i in (0, 3):
+        assert "control=green status=pass (want pass) exit=0" in checks[i]
+        assert "control=red status=fail (want fail) exit=1" in checks[i + 1]
+        assert "control=null status=fail (want fail) exit=1" in checks[i + 2]
+    lines = done.stdout.splitlines()
+    assert lines[lines.index(checks[3]) + 2] == (
+        "    b1to2: verdict=pass maxStripPx=1 cleanShare=1.0 undecidedFrames=0 clock=gl lagMs=7.0"), done.stdout
+    assert lines[lines.index(checks[4]) + 2].endswith(" clock=fallback lagMs=7.0"), done.stdout
     assert "GATE FAILED: CARRY-COVER" not in done.stdout and "MISMATCH: " not in done.stdout
     assert done.stdout.index("[HOST --strip glReplay@2 --gl-replay auto]") < done.stdout.index("[CARRY-COVER green]")
     assert done.stdout.index("[PASSG D6]") < done.stdout.index("[CARRY-COVER green]")
-    assert done.stdout.index("[CARRY-COVER --carry-cover-null]") < done.stdout.index("[P2 --wait-profile fast]")
+    assert done.stdout.index("[CARRY-COVER D1 --carry-cover-null]") < done.stdout.index("[P2 --wait-profile fast]")
 
 
 def test_the_dev_tier_runs_no_carry_cover_pass_g_red_paint_control_or_pin_hold_red(gates) -> None:
@@ -1000,11 +1024,15 @@ def test_the_dev_tier_runs_no_carry_cover_pass_g_red_paint_control_or_pin_hold_r
     ("carry-cover--core-variantlinear-bridge", "cc-control", "control 'green' != 'red'"),
     ("carry-cover--carry-cover-null", "cc-pass", "status 'pass' != 'fail'"),
     ("carry-cover--carry-cover-null", "cc-inconclusive", "status 'inconclusive' != 'fail'"),
+    ("carry-coverD1", "cc-clock", "bridge clocks ['fallback'] are not all 'gl'"),
+    ("carry-coverD1--core-variantno-gl-clock", "cc-clock", "bridge clocks ['gl'] are not all 'fallback'"),
+    ("carry-coverD1", "cc-fixture", "fixture 'elsewhere' != "),
 ])
 def test_known_bad_every_unexpected_carry_cover_outcome_fails_the_round(gates, stem: str, mode: str, why: str | None) -> None:
     """Fail closed: a green that does not pass, a red or null control that passes (the instrument is blind) or is
-    inconclusive, a foreign core sha, the wrong control, no artifact, and a missing or stale status each count as
-    exactly one GATE FAILED -- never pending."""
+    inconclusive, a foreign core sha, fixture or control, a bridge on the wrong clock (a green on the fallback, the D1
+    red on the GL clock), no artifact, and a missing or stale status each count as exactly one GATE FAILED -- never
+    pending."""
     good = gates["run"](outdir=gates["tmp"] / "good")
     bad = gates["run"](outdir=gates["tmp"] / "bad", STUB_MODES=json.dumps({stem: mode}))
     label = CC_LABELS[CC_STEMS.index(stem)]

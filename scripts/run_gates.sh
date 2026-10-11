@@ -1,6 +1,6 @@
 #!/bin/zsh
 # usage: run_gates.sh <gate-worktree> <outdir> [--allow-record] [--tier dev|full]   (runs the host gates, host red arms,
-# Pass G, Pass G red, paint control, carry-cover and P2 arms through one queue, GATE_JOBS at a time (1..5, default 3; 1 = serial), from a clean pinned worktree, into a
+# Pass G, Pass G red, paint control, carry-cover (P2 and D1) and P2 arms through one queue, GATE_JOBS at a time (1..5, default 3; 1 = serial), from a clean pinned worktree, into a
 # missing or empty <outdir>). --tier full (default) runs everything; --tier dev runs the 1920x1080 and 1600x1000 host
 # gates and the P2 fast, --disable-bridge34 and --gl-replay auto arms, and is never a qualification pass.
 # GATE_JOBS above 3 is allowed but loudly unqualified. A round refuses to start when the 1-minute load average exceeds
@@ -90,10 +90,13 @@ PAINT_FLOOR_FRAMES=60
 # Full tier only.
 PAINT_CONTROL_ARMS=("D5 6:ancestor-opacity:pin@2" "D5 6:ancestor-opacity:pin@2:late" "D5 0:ancestor-opacity:pin@2")
 [[ $TIER == full ]] || PAINT_CONTROL_ARMS=()
-# Carry-cover gate (rubber band, 2026-10-10): P2's 3->4 bridge carry screencast; the GL poster must not show beyond the
-# moving overlay. Full tier only: "<expected status> [probe args]" -- the default core must pass, today's linear overlay
-# (red, --core-variant linear-bridge) and a hidden overlay (null, --carry-cover-null) must fail.
-CARRY_COVER_ARMS=("pass" "fail --core-variant linear-bridge" "fail --carry-cover-null")
+# Carry-cover gate (rubber band, 2026-10-10; D1 with the GL clock, 2026-10-11): every bridge carry screencast on P2 and
+# D1; the GL poster must not show beyond the moving overlay. Full tier only: "<deck> <expected status> [probe args]" --
+# the default core must pass with every bridge on Keynote's GL clock; the red (P2: today's linear overlay,
+# --core-variant linear-bridge; D1: today's performance.now() clock, --core-variant no-gl-clock, every bridge on the
+# fallback) and a hidden overlay (null, --carry-cover-null) must fail.
+CARRY_COVER_ARMS=("P2 pass" "P2 fail --core-variant linear-bridge" "P2 fail --carry-cover-null"
+                  "D1 pass" "D1 fail --core-variant no-gl-clock" "D1 fail --carry-cover-null")
 [[ $TIER == full ]] || CARRY_COVER_ARMS=()
 # P2 arms: p2 <tier> "<expected red>" "<expected inconclusive>" <args>; tier dev runs in both tiers, full only in full.
 # --skip-freeze-bracket goes on every arm but the two positive bracket arms, which must run it. As in P2 itself, the flag
@@ -567,19 +570,23 @@ PYEOF
 }
 for PC in "${PAINT_CONTROL_ARMS[@]}"; do run_paint_control ${=PC}; done
 # A carry-cover run matches only with this round's exit (0 for pass, 1 for fail), a carry-cover artifact whose status is
-# the expected one, whose control and core variant are the ones its arguments imply, and whose installed continuity core
-# sha is that variant's (else today's). Inconclusive, error, no artifact, a missing or stale status: FAILED, never pending.
-run_cc(){ shift; n=$(echo "$*" | tr -d ' ')
-  queue $O/carry-cover$n $PY -u scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport 1920x1080 --carry-cover --artifact $O/carry-cover$n.json "$@"; }
-check_cc(){ label=${(j: :)@[2,-1]}; n=${label// /}; $PY - "$O/carry-cover$n.json" "$(status_of $O/carry-cover$n)" "$@" <<'PYEOF' || fail "CARRY-COVER ${label:-green}"
+# the expected one, whose fixture is its deck's, whose control and core variant are the ones its arguments imply, whose
+# installed continuity core sha is that variant's (else today's), and, but on the null arm, whose bridges are non-empty
+# and each rode the arm's clock (fallback under no-gl-clock, else gl). Inconclusive, error, no artifact, a missing or
+# stale status: FAILED, never pending. cc_fixture gives a deck's fixture and original index (P2's as run_host_red's).
+cc_fixture(){ fix=$F/html-player; idx=$F/html-unmodified/index.html
+  if [[ $1 != P2 ]]; then fix=$Q/$1/html-unmodified; idx=$fix/index.html; fi; }
+run_cc(){ cc_fixture $1; n=${1:#P2}$(echo "${@[3,-1]}" | tr -d ' ')
+  queue $O/carry-cover$n $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $idx --viewport 1920x1080 --carry-cover --artifact $O/carry-cover$n.json "${@[3,-1]}"; }
+check_cc(){ cc_fixture $1; label=${(j: :)@[3,-1]}; n=${1:#P2}${label// /}; label=${${1:#P2}:+$1 }${label:-green}
+  $PY - "$O/carry-cover$n.json" "$(status_of $O/carry-cover$n)" "$fix" "$label" "${@[2,-1]}" <<'PYEOF' || fail "CARRY-COVER $label"
 import json,sys
 sys.path.insert(0,"scripts")
 from continuity_core_variants import variant_sha
 from obed_edom.live_continuity_js import js_sha256
-path,rc,want,args=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4:]
+path,rc,fixture,label,want,args=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4],sys.argv[5],sys.argv[6:]
 variant=args[args.index("--core-variant")+1] if "--core-variant" in args else None
 control="null" if "--carry-cover-null" in args else "red" if variant else "green"
-label=" ".join(args) or "green"
 try: want_sha=variant_sha(variant) if variant else js_sha256()
 except Exception as e: print(f"[CARRY-COVER {label}] no expected core sha ({e}) exit={rc}"); sys.exit(1)
 try: d=json.load(open(path))
@@ -589,11 +596,20 @@ sha=(d.get("continuity") or {}).get("sha256") if isinstance(d.get("continuity"),
 print(f"[CARRY-COVER {label}] control={d.get('control')} status={d.get('status')} (want {want}) exit={rc} core sha {sha} (want {want_sha})")
 for r in d.get("reasons") or []: print(f"    {r}")
 if d.get("error"): print(f"    error: {d['error']}")
+bridges=[b if isinstance(b,dict) else {} for b in d.get("bridges")] if isinstance(d.get("bridges"),list) else []
+clocks=[b.get("clock") if isinstance(b.get("clock"),dict) else {} for b in bridges]
+for b,c in zip(bridges,clocks):
+    r=b.get("result") if isinstance(b.get("result"),dict) else {}
+    print(f"    {b.get('boundary')}: verdict={r.get('verdict')} maxStripPx={r.get('maxStripPx')} cleanShare={r.get('cleanShare')} undecidedFrames={r.get('undecidedFrames')} clock={c.get('via')} lagMs={c.get('lagMs')}")
 problems=[]
 if d.get("kind")!="live-continuity-probe-carry-cover": problems.append(f"not a carry-cover artifact (kind={d.get('kind')!r})")
+if d.get("fixture")!=fixture: problems.append(f"fixture {d.get('fixture')!r} != {fixture!r}")
 if d.get("control")!=control: problems.append(f"control {d.get('control')!r} != {control!r}")
 if d.get("coreVariant")!=variant: problems.append(f"coreVariant {d.get('coreVariant')!r} != {variant!r}")
 if sha!=want_sha or d.get("coreSha256")!=want_sha: problems.append("installed core sha is not the arm's")
+want_via="fallback" if variant=="no-gl-clock" else "gl"
+if control!="null" and (not bridges or any(c.get("via")!=want_via for c in clocks)):
+    problems.append(f"bridge clocks {[c.get('via') for c in clocks]!r} are not all {want_via!r}")
 if d.get("status")!=want: problems.append(f"status {d.get('status')!r} != {want!r}")
 if rc!=("0" if want=="pass" else "1"): problems.append(f"exit {rc} does not agree with {want}")
 for p in problems: print(f"    MISMATCH: {p}")

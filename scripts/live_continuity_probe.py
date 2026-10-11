@@ -7694,7 +7694,7 @@ CARRY_COVER_READ_JS = r"""
   var notes = [];
   try {
     notes = JSON.parse(JSON.stringify(((core && core.events) || []).filter(function(e){
-      return e && e.kind === 'bridge-motion-start';
+      return e && (e.kind === 'bridge-motion-start' || e.kind === 'bridge-clock');
     })));
   } catch (e) {}
   return {rows: cc ? cc.rows : null, notes: notes};
@@ -7951,12 +7951,26 @@ def _is_bridge_note(note: dict[str, Any], bridge: dict[str, Any]) -> bool:
     )
 
 
+def carry_cover_clock(notes: Any, bridge: dict[str, Any], el_id: Any) -> dict[str, Any] | None:
+    """The clock this bridge's overlay rode (`{via, lagMs}`, report only): exactly one `bridge-clock` note naming its
+    carried decoder from the source scene's hash, matched on identity, never time; anything else is None."""
+    scene = bridge.get("atScene")
+    if el_id is None or not isinstance(scene, int):
+        return None
+    own = [
+        n["detail"] for n in notes or []
+        if isinstance(n, dict) and n.get("kind") == "bridge-clock" and isinstance(n.get("detail"), dict)
+        and n["detail"].get("elId") == el_id and hash_number(n["detail"].get("sceneHash")) == scene - 1
+    ]
+    return {"via": own[0].get("via"), "lagMs": own[0].get("lagMs")} if len(own) == 1 else None
+
+
 def score_carry_cover(
     frames: Sequence[tuple[float, np.ndarray]], rows: Any, notes: Any, bridge: dict[str, Any], stage_map: Any, *,
     viewport: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
     """`frames`: (page-clock ms, RGB) screencast frames; `rows`: the rAF sampler's rows (`tick`, `pre` read at the
-    tick's start, `vids` read after its frame); `notes`: the core's `bridge-motion-start` notes.
+    tick's start, `vids` read after its frame); `notes`: the core's notes, of which only `bridge-motion-start` is read.
 
     The move window starts at this bridge's one note: the source scene's hash and the bridge's source/destination
     rects within `CARRY_COVER_NOTE_MATCH_PX`. Any other note (an earlier bridge the walk to the source slide rode)
@@ -8265,6 +8279,7 @@ def run_carry_cover(args: argparse.Namespace) -> dict[str, Any]:
                 scored = {**scored, "verdict": "inconclusive", "reasons": problems, "measured": scored.get("verdict")}
             bridge["capture"] = {**capture, "frameCount": len(frames), "notes": read.get("notes")}
             bridge["result"] = scored
+            bridge["clock"] = carry_cover_clock(read.get("notes"), bridge, scored.get("elId"))
             worst = max((f for f in scored.get("frames") or [] if "exposedPx" in f), key=lambda f: f["exposedPx"], default=None)
             if worst is not None:
                 image = next(img for pts, img in frames if round(pts, 2) == worst["pts"])
