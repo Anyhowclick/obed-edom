@@ -3501,17 +3501,24 @@ def test_refused_carry_fails_without_a_positive_refusal_event():
     assert "no preserve-refused/retire-boundary event in the retire zone" in verdict["reasons"]
 
 
-def test_refused_carry_accepts_a_refusal_on_the_transition_scene_alone():
+@pytest.mark.parametrize(("key", "ok"), [
+    ("movie1", True),
+    ("untitled.mov", True),
+    # r13 sweep: the movie is the exact canonical asset name, never a substring — another asset whose name
+    # contains `untitled.mov` does not refuse movie1.
+    ("another-untitled.mov", False),
+])
+def test_refused_carry_accepts_a_refusal_on_the_transition_scene_alone(key, ok):
     """The transition scene (RETIRE_ZONE_MIN_HASH) is inside the zone: a
     `preserve-refused` there satisfies (b) with no `retire-boundary` at all."""
     only_transition = [
         _zone_note(),
         {"kind": "preserve-refused",
-         "detail": {"key": "movie1", "scene": 1, "via": "src-clear", "sceneHash": "#1"}},
+         "detail": {"key": key, "scene": 1, "via": "src-clear", "sceneHash": "#1"}},
     ]
     verdict = _refused(preserve_events=only_transition)
-    assert verdict["ok"] is True
-    assert verdict["refusalEventsN"] == 1
+    assert verdict["ok"] is ok
+    assert verdict["refusalEventsN"] == int(ok)
 
 
 def test_refused_carry_ignores_a_refusal_event_before_the_retire_zone():
@@ -6924,3 +6931,31 @@ def test_absence_sweep_covers_every_integrity_key():
     covered = {case[0] for case in _ABSENCE_CASES}
     assert scored - covered == set(), f"integrity keys with no absence case: {scored - covered}"
     assert covered - scored == set(), f"absence cases for non-keys: {covered - scored}"
+
+
+# --------------------------------------------------------------------------- #
+# r13 sweep — the 2->3 restart observations resolve identity before source.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(("pre_key", "verdict"), [
+    ("movie1", "pass"),  # the old decoder reset backwards on slide 3: a genuine restart
+    # The collector's decoderId is the runtime `__obedElId`, which survives a src clear or
+    # reassignment (core reidentify); dropping those pre-boundary rows made decoder 7 look
+    # first seen at the boundary, a manufactured fresh restart (pass before the fix).
+    ("unknown", "inconclusive"),
+    ("another.mov", "inconclusive"),
+])
+def test_restart_observations_keep_an_identified_decoder_whose_src_cleared(pre_key, verdict):
+    from obed_edom.html_alpha_probe import score_restart_at_slide_boundary, score_restart_movie_from_observations
+
+    def sample(scene: int, offset: float, key: str, t: float) -> dict:
+        movie = {"key": key, "decoderId": 7, "currentTime": t, "videoWidth": 640, "fromPreservePool": False}
+        return {"sceneHash": f"#{scene}", "captureOffsetS": offset, "phase": "drain", "movies": [movie]}
+
+    samples = [sample(5, 0.0, pre_key, 30.0), sample(5, 0.2, pre_key, 30.2),
+               sample(6, 0.6, "movie1", 0.05), sample(6, 1.0, "movie1", 0.45), sample(6, 1.4, "movie1", 0.85)]
+    obs, unnamed = p2._restart_observations(samples, "movie1")
+    per_movie = score_restart_movie_from_observations(obs, slide_min_hash=p2.SLIDE3_MIN_HASH)
+    per_movie.update(presentedMotionOk=True, unnamedRows=unnamed[:6])
+    boundary = score_restart_at_slide_boundary(reached_slide=True, per_movie={"movie1": per_movie}, expected_keys=["movie1"])
+    assert boundary["verdict"] == verdict
+    assert per_movie["ok"] is True

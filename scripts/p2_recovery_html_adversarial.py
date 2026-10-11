@@ -156,6 +156,7 @@ from obed_edom.p2_verdict import (  # noqa: E402
     _new_bracket_manifest,
     _norm_hash,
     _presented_time_advances,
+    _restart_observations,
     _score_freeze_control,
     _score_visible_movie_motion,
     _slide4_settled_window,
@@ -3989,27 +3990,14 @@ async def _run() -> dict:
         restart_index_progression = score_index_progression(restart_index_seq)
         per_movie_boundary: dict[str, dict] = {}
         for key in intended_keys:
-            obs = []
-            for s in samples_b:
-                for m in s.get("movies") or []:
-                    if m.get("key") != key or m.get("currentTime") is None:
-                        continue
-                    obs.append(
-                        {
-                            "t": float(m["currentTime"]),
-                            "w": m.get("videoWidth"),
-                            "captureOffsetS": float(s.get("captureOffsetS") or 0.0),
-                            "sceneHash": s.get("sceneHash"),
-                            "phase": s.get("phase"),
-                            "decoderId": m.get("decoderId"),
-                        }
-                    )
+            obs, unnamed = _restart_observations(samples_b, key)
             per_movie_boundary[key] = score_restart_movie_from_observations(
                 obs,
                 slide_min_hash=SLIDE3_MIN_HASH,
                 progression_wall_s=PROGRESSION_WALL_S,
                 progression_media_s=PROGRESSION_MEDIA_S,
             )
+            per_movie_boundary[key]["unnamedRows"] = unnamed[:6]
             # presentedMotionOk: the TARGET decoder's own rVFC mediaTime progression
             # is mandatory (a frozen restart decoder must not pass just because some
             # OTHER movie/animation moves the shared ROI); on-screen progression is

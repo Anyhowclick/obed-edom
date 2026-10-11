@@ -1254,11 +1254,19 @@ def _asset_url(assets_table: dict[str, Any], asset_id: str) -> str:
     return url.get("web") or url.get("native") or asset_id
 
 
-def _normalize_asset_key(assets_table: dict[str, Any], asset_id: str) -> str:
-    filename = _asset_url(assets_table, asset_id).rsplit("/", 1)[-1]
+def _untrimmed_name(filename: str) -> str:
     match = _TRIM_SUFFIX_RE.match(filename)
-    name = match.group("name") if match else filename
-    return name.lower()
+    return (match.group("name") if match else filename).lower()
+
+
+def canonical_asset_name(source: Any) -> str:
+    """A source's asset name as the plan normalizes it (`_normalize_asset_key`): its file name
+    without query or Keynote trim suffix, lowercased."""
+    return _untrimmed_name(str(source or "").split("?", 1)[0].rsplit("/", 1)[-1])
+
+
+def _normalize_asset_key(assets_table: dict[str, Any], asset_id: str) -> str:
+    return _untrimmed_name(_asset_url(assets_table, asset_id).rsplit("/", 1)[-1])
 
 
 def _movie_kind(movie: dict[str, Any], url: str) -> str:

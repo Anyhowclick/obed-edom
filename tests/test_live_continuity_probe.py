@@ -7351,6 +7351,18 @@ class TestRestartVerdict:
         scored = self._score(_p2_run_samples())
         assert scored["verdict"] is True and scored["elementId"] == 2 and scored["sourceIds"] == [1]
 
+    def test_known_bad_another_asset_containing_the_name_is_not_the_fresh_decoder(self) -> None:
+        """Astra r13 #3: `another-untitled.mov` matched the substring rule; the asset match is exact."""
+        samples = _p2_run_samples()
+        for row in samples:
+            for v in row["videos"]:
+                if v["id"] == 2:
+                    v["src"] = "another-" + v["src"]
+                    v["footprintOwner"] = {"elId": None, "key": None, "via": "none", "contextType": None}
+        assert probe.contract.first_errors(probe.contract.sample_rows(samples)) == []
+        assert probe.score_verdicts(samples, {}, _p2_facts(), True, {"mode": "qualified"})[P2_RESTART23]["verdict"] is False
+        assert probe.score_restart(samples, "untitled.mov", 6)["verdict"] is False
+
     def test_known_bad_the_source_decoder_leaks_across_the_cut(self) -> None:
         samples = _p2_run_samples()
         pin = _p2_facts()["pinRect"]
@@ -7509,13 +7521,14 @@ class TestRetireVerdict:
     @pytest.mark.parametrize("change", [
         {"before": True}, {"preserved": True}, {"remounted": True}, {"facade": True}, {"connected": False},
         {"rect": {"x": 400.0, "y": 100.0, "w": 300.0, "h": 100.0}},
+        {"src": "another.mov"},  # Astra r13 #4: the destination element reassigned to another asset passed
     ])
     @pytest.mark.parametrize("installed", [True, False])
     def test_known_bad_a_carried_or_absent_raw_element_is_red(self, change: dict[str, Any], installed: bool) -> None:
         scored = self._score(_retire_read((RETIRE_NOTE,)), installed, _handback_samples(**change))
         assert scored["verdict"] is False and P2_SLIDE2_DOM_ID in scored["reason"]
 
-    @pytest.mark.parametrize("samples", ["never", "noDomIds", "onlyMoving", "notList", "badFlags"])
+    @pytest.mark.parametrize("samples", ["never", "noDomIds", "onlyMoving", "notList", "badFlags", "noSource"])
     def test_a_hand_back_the_samples_cannot_show_is_inconclusive_not_red(self, samples: str) -> None:
         """The destination element never DOM-present on a settled zone row (e.g. a WebGL poster) is not a red."""
         rows: Any
@@ -7527,6 +7540,8 @@ class TestRetireVerdict:
             rows = _handback_samples(settled=False)
         elif samples == "notList":
             rows = {"samples": []}
+        elif samples == "noSource":
+            rows = _handback_samples(src="")
         else:
             rows = _handback_samples(preserved=None)
         assert self._score(_retire_read((RETIRE_NOTE,)), samples=rows)["verdict"] is None
@@ -7905,7 +7920,8 @@ class TestRescoreGenerated:
         assert report["ok"] is False and report["arms"]["arm A"]["verdicts"][key]["match"] is False
 
     def test_known_bad_evidence_outside_the_contract_is_never_reproduced(self) -> None:
-        """Astra r12 #6b: a contract-rejected None must not "reproduce" a stored None, nor reach the legacy scorer."""
+        """Astra r12 #6b: a contract-rejected None must not "reproduce" a stored None, nor reach the legacy scorer.
+        r13 #5: nor hide as "not re-derivable" (`refused1to2` retains no refusal evidence here)."""
         artifact = _stored_artifact()
         arm = artifact["arms"]["A"] = json.loads(json.dumps(artifact["arms"]["A"]))
         arm["samples"][0]["stageMap"]["offsetWidth"] = 1920.5
@@ -7913,8 +7929,10 @@ class TestRescoreGenerated:
             arm[key] = {"verdict": None}
         report = probe.rescore_generated(artifact, _p2_facts(), None)
         rows = report["arms"]["arm A"]["verdicts"]
-        assert report["ok"] is False and report["counts"]["contractRejected"] == 3
-        assert all(rows[key]["match"] is None and rows[key]["contractErrors"] for key in probe.LEGACY_SAMPLE_VERDICTS)
+        assert report["ok"] is False and report["counts"]["contractRejected"] == 4
+        assert all(
+            rows[key]["match"] is None and rows[key]["contractErrors"] for key in (*probe.LEGACY_SAMPLE_VERDICTS, "refused1to2")
+        )
         assert report["arms"]["arm A"]["equalsLegacyScorer"] is None
 
     @pytest.mark.parametrize("arms", [("A", "B"), ("A", "C"), ()])
@@ -10812,6 +10830,7 @@ class TestFold5IdentityBeforeSourceAndGrounding:
         ("remountElIdString", None),  # inv: '1' missed the guarded set
         ("secondPainter", False),
         ("secondPainterNoSource", None),  # inv R7: a src-less painter at the instance rect was filtered out
+        ("carriedNoSource", None),  # Astra r13 #2: the carried painter's src cleared (core 2026-2032) passed
         ("carriedElIdMissing", None),  # inv: an unreadable carried note made painting/release/noRemount False
     ])
     def test_handback_carry_resolves_identity_first(self, case: str, expected: bool | None) -> None:
@@ -10826,6 +10845,8 @@ class TestFold5IdentityBeforeSourceAndGrounding:
             screen = probe.to_screen_rect(BIG_INSTANCE, HB_STAGE)
             src = "" if case.endswith("NoSource") else "untitled.mov"
             record["painting"].append({"src": src, "elId": 9, "rect": dict(screen)})
+        elif case == "carriedNoSource":
+            record["painting"][0]["src"] = ""
         elif case == "carriedElIdMissing":
             del next(e for e in after["coreEvents"] if e["kind"] == "glreplay-carried")["detail"]["elId"]
         assert probe.score_handback_carry(record, ARMED)["verdict"] is expected

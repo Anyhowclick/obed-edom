@@ -13,6 +13,8 @@ import statistics
 from collections import Counter
 from typing import Any, Callable, Mapping, Sequence
 
+from obed_edom.live_continuity import canonical_asset_name
+
 SAMPLER_SCHEMA = 2
 PAINT_OPACITY_FLOOR = 0.02
 PAINT_OPAQUE_MIN = 0.99
@@ -673,7 +675,7 @@ def _runs(frames: list[dict[str, Any]], period: float | None) -> list[dict[str, 
 def score_paint(
     rows: list[dict[str, Any]],
     element_id: int,
-    asset_substr: str,
+    asset: str,
     *,
     start: float,
     end: float,
@@ -691,16 +693,17 @@ def score_paint(
     An unobserved or unreadable frame, failed coverage or no rows is inconclusive whatever else the window shows;
     on complete evidence any violating frame (no slot included) fails. `unreadable_of(row)` names a frame whose
     context the caller cannot read (e.g. its phase), which is unreadable before any slot is chosen. Identity comes
-    before source: `element_id` and every id whose src names the asset on any of `rows` is a decoder of the asset,
-    so a frame where one no longer names it, or where two pre-paint reads share an id, is unreadable; so is one where a
-    painter that names no source at all (painted, partial or unreadable) meets the slot (any, without a slot)."""
+    before source: `element_id` and every id whose src is exactly the asset (canonical name) on any of `rows` is a
+    decoder of the asset. A frame where one names no source, or where two pre-paint reads share an id, is unreadable;
+    so is one where a painter that names no source at all (painted, partial or unreadable) meets the slot (any, without
+    a slot). A read naming another asset is never the movie, whatever its id."""
     window_rows = sorted((r for r in rows if _num(r.get("t")) and start <= r["t"] <= end), key=lambda r: r.get("seq") or 0)
     coverage = frame_coverage(window_rows, max_gap_frames=max_gap_frames, min_fps=min_fps)
     period = coverage.get("periodMs")
-    asset = asset_substr.lower()
+    asset_name = canonical_asset_name(asset)
     movie = {element_id} | {
         pv["id"] for r in rows if isinstance(r, dict) and isinstance(r.get("pp"), dict) and isinstance(r["pp"].get("videos"), list)
-        for pv in r["pp"]["videos"] if pv_schema_problem(pv) is None and asset in pv["src"].lower()
+        for pv in r["pp"]["videos"] if pv_schema_problem(pv) is None and canonical_asset_name(pv["src"]) == asset_name
     }
     violations: list[dict[str, Any]] = []
     unobserved: list[dict[str, Any]] = []
@@ -737,15 +740,16 @@ def score_paint(
                 blind = True
                 unreadable.append(dict(frame, reason=f"schema: {problem}", id=pv.get("id") if isinstance(pv, dict) else None))
                 continue
-            if asset not in pv["src"].lower() and pv["id"] in movie:
-                blind = True
-                unreadable.append(dict(frame, reason="a decoder of the asset no longer names it", id=pv["id"]))
+            name = canonical_asset_name(pv["src"])
+            if name and name != asset_name:
                 continue
-            if asset not in pv["src"].lower() and pv["src"]:
+            if not name and pv["id"] in movie:
+                blind = True
+                unreadable.append(dict(frame, reason="a decoder of the asset names no source", id=pv["id"]))
                 continue
             state = painted_state(pv, cover=cover, expected=expected, stage=stage,
                                   rect_tolerance=rect_tolerance if slot is not None else None)
-            if not pv["src"]:
+            if not name:
                 rect = _box(pv.get("rect"))
                 if state[0] in (PAINTED, PARTIAL, UNREADABLE) and (slot is None or rect is None or _meet(rect, slot) is not None):
                     blind = True

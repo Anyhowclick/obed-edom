@@ -273,6 +273,9 @@ G2_MOVIE_AT = {"x": 109.0, "y": 795.0, "w": 952.0, "h": 268.0}
     pytest.param([{"src": "untitled.mov", "elId": 3, "rect": G2_MOVIE_AT},
                   {"src": "another.mov", "elId": 4, "rect": {"x": 1500.0, "y": 20.0, "w": 300.0, "h": 200.0}}], True, None,
                  id="another-asset-away-from-the-movie-is-not-counted"),
+    pytest.param([{"src": "untitled.mov", "elId": 3, "rect": G2_MOVIE_AT},
+                  {"src": "untitled.mov", "elId": 999, "rect": {"x": 1500.0, "y": 20.0, "w": 300.0, "h": 200.0}}], False, None,
+                 id="r13-a-second-same-asset-painter-away-from-the-rect-still-counts"),
 ])
 def test_g2_m2_painters_are_found_by_rect_before_their_source_is_judged(tmp_path, painting, ok, invalid):
     """Astra r12 #1 sibling: before the fix M2 filtered P3 painters by source first, so a second, other-asset painter at
@@ -1288,8 +1291,12 @@ class TestPrecheckA:
         assert result["verdict"] == "FAIL"
         assert result["failing"] == ["(a) video.loop on every slide-1 untitled.mov"]
 
-    def test_no_slide1_movie_read_fails(self, looped: Path) -> None:
-        result = _precheck(_session(slide1Videos=[{"src": "WA0125.mp4", "loop": False}]), looped)
+    @pytest.mark.parametrize("video", [
+        {"src": "WA0125.mp4", "loop": False},
+        pytest.param({"src": "another-untitled.mov", "loop": True}, id="sweep-a-name-containing-the-asset-is-not-the-asset"),
+    ])
+    def test_no_slide1_movie_read_fails(self, looped: Path, video: dict[str, Any]) -> None:
+        result = _precheck(_session(slide1Videos=[video]), looped)
         assert result["failing"] == ["(a) video.loop on every slide-1 untitled.mov"]
 
     @pytest.mark.parametrize("handed", [

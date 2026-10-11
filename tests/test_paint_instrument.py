@@ -165,12 +165,22 @@ SCORE_CASES = [
     ("mismatched-pp", _wrong_pp(_rows()), SLOT, {"status": "inconclusive", "_reason": "unobserved"}),
     ("gap-of-4.5-periods", _gap(4.5)(_rows()), SLOT, {"status": "inconclusive", "_reason": "frame gap"}),
     ("one-missed-frame", _gap(2.0)(_rows()), SLOT, {"status": "ok", "_missed": 1}),
+    # r13 sweep: the asset is the exact canonical name (Keynote trim suffix stripped), never a substring. Identity
+    # first, then source: the carried decoder naming another asset is not the movie (red); naming none is unreadable.
+    ("trim-suffixed-src-is-the-asset", _rows(videos=lambda i: [_pv(src="movie-a.mov-0.0000-46.0333.mov")]), SLOT,
+     {"status": "ok"}),
+    ("carried-src-names-a-longer-asset", _rows(videos=_hide(60, 65, src="another-movie-a.mov")), SLOT,
+     {"status": "fail", "unpaintedFrames": 6, "_firstReason": "absent"}),
+    ("carried-src-names-another-asset", _rows(videos=_hide(60, 65, src="movie-b.mov")), SLOT,
+     {"status": "fail", "unpaintedFrames": 6, "_firstReason": "absent"}),
+    ("carried-src-cleared", _rows(videos=_hide(60, 65, src="")), SLOT,
+     {"status": "inconclusive", "unpaintedFrames": 0, "_reason": "unreadable"}),
 ]
 
 
 @pytest.mark.parametrize(("rows", "slot", "expected"), [c[1:] for c in SCORE_CASES], ids=[c[0] for c in SCORE_CASES])
 def test_score_paint(rows, slot, expected) -> None:
-    result = pi.score_paint(rows, 1, "movie-a", start=0.0, end=math.inf, slot_of=lambda r: slot,
+    result = pi.score_paint(rows, 1, "movie-a.mov", start=0.0, end=math.inf, slot_of=lambda r: slot,
                             stage_box_of=lambda r: r["pp"]["stageBox"], **SCORE_KW)
     for key, value in expected.items():
         if key == "_hiding":
@@ -196,7 +206,7 @@ def test_a_pre_paint_frame_field_missing_or_ill_typed_is_inconclusive(change) ->
             del rows[62]["pp"][key]
         else:
             rows[62]["pp"][key] = value
-    result = pi.score_paint(rows, 1, "movie-a", start=0.0, end=math.inf, slot_of=lambda r: SLOT,
+    result = pi.score_paint(rows, 1, "movie-a.mov", start=0.0, end=math.inf, slot_of=lambda r: SLOT,
                             stage_box_of=lambda r: r["pp"].get("stageBox"), **SCORE_KW)
     assert result["status"] == ("fail" if change is None else "inconclusive"), result["reasons"]
 
@@ -206,7 +216,7 @@ def _clean_control() -> tuple[dict[str, Any], dict[str, Any]]:
                           "depth": 1, "delayTicks": 10},
               "fired": True, "aborted": None, "events": [], "errors": [], "triggerSeq": 5, "onSeq": 15, "offSeq": 21,
               "hiddenTicks": 6, "hiddenSeqs": list(range(15, 21)), "lateSeqs": [], "target": {"elId": 11, "node": "div#body"}}
-    paint = pi.score_paint(_rows(videos=_hide(15, 20, opacity=0.0)), 1, "movie-a", start=0.0, end=math.inf,
+    paint = pi.score_paint(_rows(videos=_hide(15, 20, opacity=0.0)), 1, "movie-a.mov", start=0.0, end=math.inf,
                            slot_of=lambda r: SLOT, stage_box_of=lambda r: r["pp"]["stageBox"], **SCORE_KW)
     return record, paint
 
@@ -575,7 +585,7 @@ def test_the_injector_hides_exactly_k_to_k_plus_n_minus_1_before_paint(setup: st
     if timing == "late" and n:
         assert record["lateSeqs"] == [k, k + n]
 
-    paint = pi.score_paint(rows, 1, "movie-a", start=rows[TRIGGER_FRAME - 1]["t"], end=math.inf,
+    paint = pi.score_paint(rows, 1, "movie-a.mov", start=rows[TRIGGER_FRAME - 1]["t"], end=math.inf,
                            slot_of=lambda r: SLOT, stage_box_of=lambda r: r["pp"]["stageBox"], **SCORE_KW)
     assert pi.score_paint_control(record, {"scored": {"paint": paint}}, n, timing)["status"] == "pass"
     assert pi.score_paint_control(record, paint, n + 1, timing)["status"] == "fail"
@@ -584,7 +594,7 @@ def test_the_injector_hides_exactly_k_to_k_plus_n_minus_1_before_paint(setup: st
         assert pi.score_paint_control(record, shifted_paint, n, timing)["status"] == "fail"
     # Astra r1 #1: the exact set on incomplete evidence never passes, whether the score said so or not.
     rows[-1]["pp"] = None
-    gappy = pi.score_paint(rows, 1, "movie-a", start=rows[TRIGGER_FRAME - 1]["t"], end=math.inf,
+    gappy = pi.score_paint(rows, 1, "movie-a.mov", start=rows[TRIGGER_FRAME - 1]["t"], end=math.inf,
                            slot_of=lambda r: SLOT, stage_box_of=lambda r: r["pp"]["stageBox"], **SCORE_KW)
     assert gappy["status"] == "inconclusive"
     for evidence in (gappy, dict(paint, unobserved=gappy["unobserved"]), dict(paint, coverage={"ok": False})):
@@ -600,7 +610,7 @@ def test_the_injector_hides_exactly_k_to_k_plus_n_minus_1_before_paint(setup: st
 def test_injector_integrity_breaks_are_inconclusive(extra: str, expected: str) -> None:
     out, _ = _control_run("pin", 6, "early", extra)
     record = out["record"]
-    paint = pi.score_paint(out["rows"], 1, "movie-a", start=0.0, end=math.inf, slot_of=lambda r: SLOT,
+    paint = pi.score_paint(out["rows"], 1, "movie-a.mov", start=0.0, end=math.inf, slot_of=lambda r: SLOT,
                            stage_box_of=lambda r: r["pp"]["stageBox"], **SCORE_KW)
     result = pi.score_paint_control(record, paint, 6, "early")
     assert result["status"] == "inconclusive"

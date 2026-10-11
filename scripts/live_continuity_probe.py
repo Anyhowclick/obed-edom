@@ -89,7 +89,9 @@ from obed_edom.fixture_paths import fixture  # noqa: E402
 from obed_edom import live_host as live_host_module  # noqa: E402
 from obed_edom import live_continuity as live_continuity_module  # noqa: E402
 from obed_edom.html_preview import cache_dir, safe_export_file  # noqa: E402
-from obed_edom.live_continuity import ContinuityPlan, MovieContinuity, Unsupported, derive_plan, plan_signature  # noqa: E402
+from obed_edom.live_continuity import (  # noqa: E402
+    ContinuityPlan, MovieContinuity, Unsupported, canonical_asset_name, derive_plan, plan_signature,
+)
 from obed_edom.live_continuity_js import js_sha256  # noqa: E402
 from obed_edom.html_alpha_probe import (  # noqa: E402
     INPAGE_BAND_COUNT,
@@ -1032,14 +1034,6 @@ def runtime_of(plan: ContinuityPlan) -> dict[str, Any]:
     return runtime
 
 
-def canonical_asset_name(source: Any) -> str:
-    """A source's asset name as the plan normalizes it (`_normalize_asset_key`): its file name
-    without query or Keynote trim suffix, lowercased."""
-    name = str(source or "").split("?", 1)[0].rsplit("/", 1)[-1]
-    match = live_continuity_module._TRIM_SUFFIX_RE.match(name)
-    return (match.group("name") if match else name).lower()
-
-
 def matches_asset_keys(asset: Any, asset_keys: Sequence[str]) -> bool:
     """Exact canonical asset-name equality, never a substring (`a.mov` is not `ba.mov`)."""
     name = canonical_asset_name(asset)
@@ -1718,15 +1712,14 @@ def sampler_problem(entry: Any) -> str | None:
     return None
 
 
-def names_asset(video: dict[str, Any], asset_substr: str) -> bool:
-    return asset_substr in str(video.get("src") or "").lower()
-
-
-def track_by_id(samples: list[dict[str, Any]], asset_substr: str) -> dict[int, list[dict[str, Any]]]:
-    """Every row of each decoder id that names the asset on any row, whatever its src on that row
-    (identity before source): a row whose src was cleared or swapped stays in its track, for
-    `unnamed_rows`."""
-    named = {video["id"] for sample in samples for video in sample.get("videos") or [] if names_asset(video, asset_substr)}
+def track_by_id(samples: list[dict[str, Any]], asset: str) -> dict[int, list[dict[str, Any]]]:
+    """Every row of each decoder id that names the asset (`matches_asset_keys`) on any row, whatever its
+    src on that row (identity before source): a row whose src was cleared or swapped stays in its track,
+    for `unnamed_rows`."""
+    named = {
+        video["id"] for sample in samples for video in sample.get("videos") or []
+        if matches_asset_keys(video.get("src"), [asset])
+    }
     tracks: dict[int, list[dict[str, Any]]] = {}
     for sample in samples:
         for video in sample.get("videos") or []:
@@ -1741,12 +1734,12 @@ def track_by_id(samples: list[dict[str, Any]], asset_substr: str) -> dict[int, l
 
 
 def unnamed_rows(
-    tracks: dict[int, list[dict[str, Any]]], asset_substr: str, lo: float = -math.inf, hi: float = math.inf,
+    tracks: dict[int, list[dict[str, Any]]], asset: str, lo: float = -math.inf, hi: float = math.inf,
 ) -> list[dict[str, Any]]:
     """The tracked rows with `lo <= t <= hi` whose src no longer names the asset (cleared or swapped)."""
     return [
         {"t": r["t"], "id": i, "src": r.get("src")} for i, rows in tracks.items() for r in rows
-        if lo <= r["t"] <= hi and not names_asset(r, asset_substr)
+        if lo <= r["t"] <= hi and not matches_asset_keys(r.get("src"), [asset])
     ]
 
 
@@ -2170,7 +2163,7 @@ def continuity_window(
 
 def score_continuity(
     samples: list[dict[str, Any]],
-    asset_substr: str,
+    asset: str,
     boundary_scene: float,
     src_rect: dict[str, float],
     dst_rect: dict[str, float],
@@ -2217,7 +2210,7 @@ def score_continuity(
     (`unnamed_rows`, identity before source), or an untracked decoding row that names no source
     (`unidentified_decoders`), or a row listing one decoder id twice (`duplicate_ids`).
     """
-    tracks = track_by_id(samples, asset_substr)
+    tracks = track_by_id(samples, asset)
     if not decoded_anywhere(tracks):
         return {"verdict": None, "reason": "inconclusive: movie never decoded"}
     window = continuity_window(samples, boundary_scene, pad_s=pad_s, transition_scene=transition_scene)
@@ -2242,7 +2235,7 @@ def score_continuity(
             return scored
         floor = [value for value in (clip_start, min_window_start) if value is not None]
         scored["paint"] = carry_paint(
-            samples, element_id, asset_substr, window, boundary_scene, src_rect, dst_rect,
+            samples, element_id, asset, window, boundary_scene, src_rect, dst_rect,
             transition_scene=transition_scene, rect_tolerance=rect_tolerance, floor=max(floor) if floor else None,
         )
         status = scored["paint"].get("status")
@@ -2271,7 +2264,7 @@ def score_continuity(
         return _inconclusive(
             "a row the carry window or its grounding reaches has an unreadable phase", unplaced=unplaced[:5], window=window,
         )
-    unnamed = unnamed_rows(tracks, asset_substr, reach, window["end"])
+    unnamed = unnamed_rows(tracks, asset, reach, window["end"])
     if unnamed:
         return _inconclusive(
             "a tracked decoder's row the carry window reaches does not name the asset", unnamed=unnamed[:5], window=window,
@@ -2436,7 +2429,7 @@ def paint_start(
 
 
 def carry_paint(
-    samples: list[dict[str, Any]], element_id: Any, asset_substr: str, window: dict[str, float],
+    samples: list[dict[str, Any]], element_id: Any, asset: str, window: dict[str, float],
     boundary_scene: float, src_rect: dict[str, float], dst_rect: dict[str, float], *,
     transition_scene: float | None, rect_tolerance: float, floor: float | None,
 ) -> dict[str, Any]:
@@ -2461,7 +2454,7 @@ def carry_paint(
     source = (boundary_scene if transition_scene is None else transition_scene) - 1
 
     return paint_instrument.score_paint(
-        samples, element_id, asset_substr,
+        samples, element_id, asset,
         start=paint_start(samples, element_id, boundary_scene, window, floor), end=window["end"],
         slot_of=slot_of, stage_box_of=stage_box_of, rect_tolerance=rect_tolerance, iou_min=INSTANCE_IOU_MIN,
         max_gap_frames=CARRY_COVER_MAX_GAP_FRAMES, min_fps=CARRY_COVER_MIN_FPS,
@@ -2470,7 +2463,7 @@ def carry_paint(
 
 
 def score_restart(
-    samples: list[dict[str, Any]], asset_substr: str, boundary_scene: float, *, max_start_s: float = RESTART_MAX_START_S
+    samples: list[dict[str, Any]], asset: str, boundary_scene: float, *, max_start_s: float = RESTART_MAX_START_S
 ) -> dict[str, Any]:
     """Pure: samples in, verdict dict out. A restart is a genuinely NEW decoder id
     (never seen anywhere with `scene < boundary_scene`, at any time in the run, not
@@ -2480,12 +2473,12 @@ def score_restart(
     decoder's row whose source no longer names the asset (`unnamed_rows`), a decoding row that names
     no source (`unidentified_decoders`), a row listing one decoder id twice (`duplicate_ids`), and an
     unreadable start clock."""
-    tracks = track_by_id(samples, asset_substr)
+    tracks = track_by_id(samples, asset)
     if not decoded_anywhere(tracks):
         return {"verdict": None, "reason": "inconclusive: movie never decoded"}
     if find_boundary_window(samples, boundary_scene) is None:
         return _inconclusive("boundary crossing not observed in samples")
-    unnamed, unidentified = unnamed_rows(tracks, asset_substr), unidentified_decoders(samples, tracks, -math.inf, math.inf)
+    unnamed, unidentified = unnamed_rows(tracks, asset), unidentified_decoders(samples, tracks, -math.inf, math.inf)
     if unnamed or unidentified:
         return _inconclusive("a decoder's rows do not name the asset", unnamed=unnamed[:5], unidentified=unidentified[:5])
     doubled = duplicate_ids(samples)
@@ -3442,7 +3435,7 @@ def restart_slot_gap(
     def paints(row: dict[str, Any], rects: list[dict[str, float]], only: Any = None) -> bool:
         return any(
             isinstance(pv, dict) and (only is None or pv.get("id") == only)
-            and asset in str(pv.get("src") or "").lower() and isinstance(pv.get("rect"), dict)
+            and matches_asset_keys(pv.get("src"), [asset]) and isinstance(pv.get("rect"), dict)
             and paint_instrument.painted_state(pv, cover=bool(row["pp"].get("cover")))[0] in ("painted", "partial")
             and any(rect_iou(pv["rect"], rect) >= INSTANCE_IOU_MIN for rect in rects)
             for pv in row["pp"].get("videos") or []
@@ -3479,7 +3472,8 @@ def score_raw_handback(samples: Any, spec: dict[str, Any]) -> dict[str, Any]:
     from a sampler without `domId`) is INCONCLUSIVE, never False. A retire with no destination
     instance (`ends`, a refused pairing) hands nothing back: True, marked not applicable. The
     element is followed by probe id (identity before DOM id): a row of it naming another, no or an
-    unreadable DOM id is INCONCLUSIVE."""
+    unreadable DOM id is INCONCLUSIVE. Its settled rows at `dstRect` must name the asset: another
+    asset is False, no source INCONCLUSIVE."""
     if spec.get("dstRect") is None:
         return {"verdict": True, "reason": None, "applicable": False}
     dom_id, lo, hi = spec.get("dstDomId"), spec["atScene"], spec.get("zoneUntilScene")
@@ -3510,13 +3504,22 @@ def score_raw_handback(samples: Any, spec: dict[str, Any]) -> dict[str, Any]:
         (row, v) for row, v in zone
         if row.get("busy") is False and row.get("playerState") != "Playing"
     ]
-    handed = [row["t"] for row, v in settled if v["isConnected"] and rect_matches(v.get("rect"), spec["dstRect"])]
+    at_rect = [(row, v) for row, v in settled if v["isConnected"] and rect_matches(v.get("rect"), spec["dstRect"])]
+    handed = [row["t"] for row, _ in at_rect]
+    unnamed = [
+        {"t": row["t"], "src": v.get("src")} for row, v in at_rect if not matches_asset_keys(v.get("src"), [spec["asset"]])
+    ]
     detail = {
         "domId": dom_id, "rowsInZone": len(zone), "settledAtRect": len(handed), "seenBefore": before[:5],
         "flagged": flagged[:5], "elIds": sorted({v.get("elId") for _, v in zone if v.get("elId") is not None}),
+        "unnamed": unnamed[:5],
     }
     if before or flagged:
         return {"verdict": False, "reason": f"{dom_id} was carried (seen before the boundary or preserved/remounted/facaded)", **detail}
+    if any(r["src"] for r in unnamed):
+        return {"verdict": False, "reason": f"{dom_id} at its authored rect names another asset", **detail}
+    if unnamed:
+        return _inconclusive(f"{dom_id} at its authored rect names no source", **detail)
     if handed:
         return {"verdict": True, "reason": None, **detail}
     if not settled:
@@ -5110,8 +5113,8 @@ def score_handback_carry(record: Any, armed: dict[str, Any]) -> dict[str, Any]:
     facade list or facade entry (its integer `elId`/`forElId`, explicit nulls readable), or remount note without an object
     detail naming an integer `elId` is None, and any None makes the verdict None before any
     failure. A painter is the movie's by identity before source (the carried, a pooled or a
-    facade element) or by its src; one over the instance rect that names no source is None, and
-    one of the movie's by identity that names another asset is False."""
+    facade element) or by its src; one of the movie's by identity, or over the instance rect, that
+    names no source is None, and one of the movie's by identity that names another asset is False."""
     checks: dict[str, bool | None] = dict.fromkeys(("painting", "release", "noRemount", "handoff"))
     detail: dict[str, Any] = {}
     errors = contract.first_errors(contract.handback_record(record)) if isinstance(record, dict) else []
@@ -5160,7 +5163,7 @@ def score_handback_carry(record: Any, armed: dict[str, Any]) -> dict[str, Any]:
             foreign = [v for v in movie if v.get("src") and not matches_asset_keys(v["src"], armed["assetKeys"])]
             unknown = [
                 v for v in videos
-                if v not in movie and not v.get("src") and rects_overlap(v["authored"], armed["instanceRect"])
+                if not v.get("src") and (v in movie or rects_overlap(v["authored"], armed["instanceRect"]))
             ]
             want = to_screen_rect(armed["instanceRect"], stage_map)
             detail.update(painting=movie, unidentifiedPainters=unknown, foreignPainters=foreign)
@@ -7869,16 +7872,16 @@ def rescore_generated(result: dict[str, Any], facts: dict[str, Any], facts_on: d
             key = spec_key(spec)
             stored = entry.get(key)
             stored_verdict = stored.get("verdict") if isinstance(stored, dict) else None
-            why = _rederivable(spec, evidence, entry["samples"])
-            if why is not None:
-                rows[key] = {"id": spec["id"], "match": None, "storedVerdict": stored_verdict, "reason": f"inconclusive: {why}"}
-                counts["notRederivable"] += 1
-                continue
             value = scored[spec["id"]]
             if value.get("contractErrors"):
                 rows[key] = {"id": spec["id"], "match": None, "storedVerdict": stored_verdict, "reason": value["reason"],
                              "contractErrors": value["contractErrors"]}
                 counts["contractRejected"] += 1
+                continue
+            why = _rederivable(spec, evidence, entry["samples"])
+            if why is not None:
+                rows[key] = {"id": spec["id"], "match": None, "storedVerdict": stored_verdict, "reason": f"inconclusive: {why}"}
+                counts["notRederivable"] += 1
                 continue
             verdict = value.get("verdict")
             rows[key] = {"id": spec["id"], "match": isinstance(stored, dict) and verdict == stored_verdict,

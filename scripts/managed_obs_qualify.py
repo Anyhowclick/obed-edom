@@ -1482,8 +1482,9 @@ def remounts_after_standdown(read: Any) -> list[str]:
 
 
 def movie_painters(read: Any, armed: dict[str, Any]) -> list[str] | None:
-    """The sources of the `<video>`s painting at an armed movie rect (screen px == authored px on the 1920x1080 browser
-    source) or carrying a tracked movie `elId`; None when the painting read is not a list or such a source is empty."""
+    """The sources of the `<video>`s painting the movie asset, at an armed movie rect (screen px == authored px on the
+    1920x1080 browser source) or carrying a tracked movie `elId`; None when the painting read is not a list or such a
+    source is empty."""
     painting = read.get("painting") if isinstance(read, dict) else None
     if not isinstance(painting, list):
         return None
@@ -1491,7 +1492,8 @@ def movie_painters(read: Any, armed: dict[str, Any]) -> list[str] | None:
     pool = gl.get("pool") if isinstance(gl.get("pool"), list) else []
     tracked = {e.get("elId") for e in _movie_entries(pool, armed)} | {_carried_el_id(gl)}
     srcs = [v.get("src") for v in painting if isinstance(v, dict) and (
-        (v.get("elId") is not None and v.get("elId") in tracked)
+        matches_asset_keys(v.get("src"), armed["assetKeys"])
+        or (v.get("elId") is not None and v.get("elId") in tracked)
         or (isinstance(v.get("rect"), dict) and any(rects_overlap(v["rect"], r) for r in armed["rects"])))]
     return None if any(not isinstance(s, str) or not s for s in srcs) else srcs
 
@@ -1609,7 +1611,7 @@ def precheck_gates(run: dict[str, Any], fixture: Path) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     static = loop_representation(fixture)
     check(checks, "(a) loop representation", static, static["ok"], "differing JSON == loop-splice.json; added loop keys all loopMode=\"looping\"")
-    slide1 = [v for v in session.get("slide1Videos") or [] if isinstance(v, dict) and "untitled.mov" in str(v.get("src")).lower()]
+    slide1 = [v for v in session.get("slide1Videos") or [] if isinstance(v, dict) and matches_asset_keys(v.get("src"), ["untitled.mov"])]
     check(checks, "(a) video.loop on every slide-1 untitled.mov", [v.get("loop") for v in slide1],
           bool(slide1) and all(v.get("loop") is True for v in slide1), "all true")
     handed = session.get("handedBack")

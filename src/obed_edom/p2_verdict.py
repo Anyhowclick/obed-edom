@@ -40,19 +40,17 @@ from obed_edom.html_alpha_probe import (
     score_visible_movie_motion,
     score_visible_slide_from_delta,
 )
+from obed_edom.live_continuity import canonical_asset_name
 
 MOVIE1_TOKEN = "Untitled.mov"
 MOVIE2_TOKEN = "WA0125"
+MOVIE_BY_ASSET = {MOVIE1_TOKEN.lower(): "movie1", "vid-20250608-wa0125.mp4": "movie2"}
 
 
 def _movie_key(src: str) -> str:
-    s = str(src or "").lower()
-    if MOVIE1_TOKEN.lower() in s:
-        return "movie1"
-    if MOVIE2_TOKEN.lower() in s:
-        return "movie2"
-    # fallback: basename stem
-    return s.rsplit("/", 1)[-1][:40] or "unknown"
+    """The fixture movie a source is, by exact canonical asset name (never a substring), else its name."""
+    name = canonical_asset_name(src)
+    return MOVIE_BY_ASSET.get(name) or name[:40] or "unknown"
 
 
 def _norm_hash(h: str | None) -> str:
@@ -2154,6 +2152,37 @@ def movingContinuity3to4(
         "crossingIdentity": {"ok": crossing_identity},
         "rvfcMonotonic": rvfc,
     }
+
+
+def _restart_observations(samples: list[dict], key: str) -> tuple[list[dict], list[dict]]:
+    """`key`'s restart observations from annotated samples, identity before source: every decoder
+    that names `key` on any sample is the movie's, so one of its rows naming no source or another
+    asset is returned as unnamed (unreadable), never dropped from its history."""
+    named = {
+        m.get("decoderId") for s in samples for m in s.get("movies") or []
+        if m.get("key") == key and m.get("decoderId") is not None
+    }
+    obs: list[dict] = []
+    unnamed: list[dict] = []
+    for s in samples:
+        for m in s.get("movies") or []:
+            if m.get("key") != key:
+                if m.get("decoderId") in named:
+                    unnamed.append({"decoderId": m.get("decoderId"), "key": m.get("key"), "sceneHash": s.get("sceneHash")})
+                continue
+            if m.get("currentTime") is None:
+                continue
+            obs.append(
+                {
+                    "t": float(m["currentTime"]),
+                    "w": m.get("videoWidth"),
+                    "captureOffsetS": float(s.get("captureOffsetS") or 0.0),
+                    "sceneHash": s.get("sceneHash"),
+                    "phase": s.get("phase"),
+                    "decoderId": m.get("decoderId"),
+                }
+            )
+    return obs, unnamed
 
 
 def _times(
