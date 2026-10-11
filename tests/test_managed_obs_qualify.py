@@ -261,10 +261,50 @@ def test_g2_take_with_an_unengaged_fix_is_invalid_not_failed(tmp_path):
     assert any("hand-back fix not engaged" in r for r in invalid)
 
 
-def test_g2_take_with_an_engaged_fix_is_not_invalidated(tmp_path):
-    gates = q.g2_gates(m3_run(tmp_path, mm_off_alpha=255, g2_stats=dict(q.EXPECTED_STATS["on"])), ARMED)
+def armed_scores(monkeypatch, run: dict[str, Any], clause: str = "pool", value: bool | None = True,
+                 off_verdict: bool | None = False) -> dict[str, Any]:
+    """Stub `score_armed` to echo each session's `armed` record: G2 with every clause True but `clause` = `value`, g2-off
+    scored to `off_verdict`."""
+    monkeypatch.setattr(q, "score_armed", lambda reads, armed, continuity: reads)
+    checks = {**dict.fromkeys(("mode", "live", "events", "noPainting", "pool", "owner"), True), clause: value}
+    run["sessions"][0]["armed"] = {"verdict": lcp.combine_verdicts(*checks.values()), "checks": checks, "reason": None}
+    run["sessions"][1]["armed"] = {"verdict": off_verdict, "checks": {}, "reason": "armed checks unreadable: ['live']"}
+    return run
+
+
+def test_g2_take_with_an_engaged_fix_is_not_invalidated(tmp_path, monkeypatch):
+    run = armed_scores(monkeypatch, m3_run(tmp_path, mm_off_alpha=255, g2_stats=dict(q.EXPECTED_STATS["on"])))
+    gates = q.g2_gates(run, ARMED)
     assert gates["M1"]["invalid"] is None and gates["M3"]["invalid"] is None
     assert checks_of(gates["M1"])["frameLen"]["ok"] and checks_of(gates["M1"])["opacityUnproven"]["ok"]
+
+
+@pytest.mark.parametrize("clause, value, off_verdict, unreadable", [
+    ("pool", None, False, "g2: score_armed clauses unreadable: ['pool']"),
+    ("live", False, False, None),
+    ("pool", True, None, "g2-off: score_armed verdict unreadable"),
+    ("owner", None, False, None),
+])
+def test_g2_m1_reads_an_unreadable_score_armed_as_invalid_never_a_failure(tmp_path, monkeypatch, clause, value, off_verdict,
+                                                                         unreadable):
+    # An unknown enforced clause (or an unknown g2-off KB verdict) is evidence never observed: M1 is INVALID, the clause
+    # is not in `failing`, and arm_gates carries the reason into the run. A readable False clause still FAILs M1; the
+    # report-only owner clause never invalidates.
+    run = armed_scores(monkeypatch, m3_run(tmp_path, mm_off_alpha=255, g2_stats=dict(q.EXPECTED_STATS["on"])), clause,
+                       value, off_verdict)
+    m1 = q.g2_gates(run, ARMED)["M1"]
+    invalid: list[str] = []
+    q.arm_gates("g2", run, types.SimpleNamespace(), ARMED, invalid)
+    armed_failing = {c for c in m1["failing"] if "score_armed" in c}
+    if unreadable:
+        assert m1["verdict"] == "INVALID" and unreadable in m1["invalid"]
+        assert not armed_failing
+        assert any(unreadable in r for r in invalid)
+    elif value is False:
+        assert m1["verdict"] == "FAIL" and m1["invalid"] is None
+        assert armed_failing == {f"score_armed.{clause}"}
+    else:
+        assert m1["invalid"] is None and not armed_failing
 
 
 # --- MO-2 masks ------------------------------------------------------------------------------------------------------------
