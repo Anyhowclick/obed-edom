@@ -31,7 +31,7 @@ def test_continuity_version_is_pinned_int():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "6c7a482e810e562230a82c810300c87dd8a8801006ebcc3b2ce1d5c0835b0f07"
+PINNED_CORE_SHA256 = "7b1e04bad741ae6fc08e251e062afb1cc071b8cbed9523ef76e63c65c59b1efc"
 
 
 def test_js_sha256_hashes_the_core_bytes_and_matches_the_pinned_literal():
@@ -69,9 +69,11 @@ def _node_stdout(harness: str) -> str:
     return result.stdout
 
 
-def _run_core_in_node(*, plan, fail_install=False, call_disable_after=False) -> dict:
+def _run_core_in_node(*, plan, fail_install=False, call_disable_after=False, before_core="", after_core="") -> dict:
     """Execute PRESERVE_CORE_JS in a minimal DOM-less sandbox and report what
-    it installed. `plan` is JSON-serialisable or None (no plan injected)."""
+    it installed. `plan` is JSON-serialisable or None (no plan injected).
+    `before_core`/`after_core` run around the core; with `after_core` set the
+    report also carries `animFrame()`, which `after_core` must define."""
     plan_js = "undefined" if plan is None else json.dumps(plan)
     harness = f"""
 const events = [];
@@ -102,12 +104,14 @@ const MutationObserver = function() {{
 const requestAnimationFrame = function() {{}};
 const setInterval = function() {{}};
 const setTimeout = function() {{}};
+{before_core}
 let installThrew = null;
 try {{
 {live_continuity_js.PRESERVE_CORE_JS}
 }} catch (e) {{
   installThrew = String(e && e.message || e);
 }}
+{after_core}
 let disableThrew = null, disableReturned = null;
 if ({str(call_disable_after).lower()}) {{
   try {{
@@ -120,7 +124,7 @@ console.log(JSON.stringify({{
   threw: installThrew, installed: !!window.__OBED_P2_PRESERVE__,
   ready: !!(window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.ready),
   disabled: !!(window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.disabled),
-  disableThrew, disableReturned,
+  disableThrew, disableReturned,{" animFrame: animFrame()," if after_core else ""}
 }}));
 """
     return json.loads(_node_stdout(harness).strip().splitlines()[-1])
@@ -131,18 +135,43 @@ _INSTALLED_NOTHING = {
     "disableThrew": None, "disableReturned": None,
 }
 _EMPTY_V2_PLAN = {"schema": 2, "movies": {}, "boundaries": []}
+_BRIDGE_ONLY_PLAN = {
+    "schema": 2,
+    "movies": {"movie1": {"assetKeys": ["untitled.mov"], "footprint": {"x": 1, "y": 2, "w": 3, "h": 4}}},
+    "boundaries": [{"atScene": 8, "action": "bridge", "movieKey": "movie1", "loop": False, "durationSeconds": 1.5,
+                    "src": {"objectId": "A3", "rect": {"x": 1, "y": 2, "w": 3, "h": 4}},
+                    "dst": {"objectId": "A4", "rect": {"x": 5, "y": 6, "w": 7, "h": 8}}}],
+}
+# main.js's `requestAnimFrame` already on `window` when the core runs: a plain (configurable) data property, or a
+# non-configurable one the core must leave alone. Either way the page's own call must reach the raw function.
+_RAW_ANIM_FRAME = """
+const rawCalls = [];
+function rawAnimFrame(cb) { rawCalls.push(typeof cb); cb(16); return 7; }
+"""
+_LATE_DATA_ANIM_FRAME = _RAW_ANIM_FRAME + "window.requestAnimFrame = rawAnimFrame;"
+_LOCKED_ANIM_FRAME = _RAW_ANIM_FRAME + (
+    "Object.defineProperty(window, 'requestAnimFrame', {value: rawAnimFrame, writable: true, configurable: false});"
+)
+_CALL_ANIM_FRAME = """
+const hookedAtLoad = window.requestAnimFrame !== rawAnimFrame;
+let ran = false;
+const id = window.requestAnimFrame(function() { ran = true; });
+function animFrame() {
+  return {hookedAtLoad, ran, id, rawCalls, rawNow: window.requestAnimFrame === rawAnimFrame};
+}
+"""
 
 
 @pytest.mark.parametrize(
-    "plan,fail_install,expected",
+    "plan,kwargs,expected",
     [
         # Fail-closed: with no `window.__OBED_CONTINUITY__`, the core must install
         # nothing (never even reach the `__OBED_P2_PRESERVE__` idempotency object).
-        pytest.param(None, False, _INSTALLED_NOTHING, id="no-plan-guard-leaves-page-untouched"),
+        pytest.param(None, {}, _INSTALLED_NOTHING, id="no-plan-guard-leaves-page-untouched"),
         # Fail closed on the plan's shape: only `schema === 2` installs the core.
         *[
             pytest.param({k: v for k, v in {**_EMPTY_V2_PLAN, "schema": schema}.items() if v is not None},
-                         False, _INSTALLED_NOTHING, id=f"not-schema-2-{label}")
+                         {}, _INSTALLED_NOTHING, id=f"not-schema-2-{label}")
             for schema, label in ((None, "absent"), (1, "one"), (3, "three"), ("2", "string"))
         ],
         pytest.param(
@@ -152,15 +181,34 @@ _EMPTY_V2_PLAN = {"schema": 2, "movies": {}, "boundaries": []}
                 "boundaries": [{"atScene": 6, "action": "restart", "movieKey": "movie1",
                                 "src": {"objectId": "A2", "rect": {"x": 1, "y": 2, "w": 3, "h": 4}}}],
             },
-            False, {**_INSTALLED_NOTHING, "installed": True, "ready": True},
+            {}, {**_INSTALLED_NOTHING, "installed": True, "ready": True},
             id="with-plan-installs-the-preserve-object",
         ),
-        pytest.param(_EMPTY_V2_PLAN, True, {**_INSTALLED_NOTHING, "threw": "install failed", "installed": True},
+        pytest.param(_EMPTY_V2_PLAN, {"fail_install": True},
+                     {**_INSTALLED_NOTHING, "threw": "install failed", "installed": True},
                      id="partial-install-never-sets-ready"),
+        # The GL-clock hook wraps a `requestAnimFrame` main.js already assigned: the page's call reaches the raw
+        # function (callback wrapped, return value passed back), and `disable()` hands back the raw function itself.
+        pytest.param(
+            _BRIDGE_ONLY_PLAN,
+            {"before_core": _LATE_DATA_ANIM_FRAME, "after_core": _CALL_ANIM_FRAME, "call_disable_after": True},
+            {**_INSTALLED_NOTHING, "installed": True, "ready": True, "disabled": True, "disableReturned": True,
+             "animFrame": {"hookedAtLoad": True, "ran": True, "id": 7, "rawCalls": ["function"], "rawNow": True}},
+            id="bridge-plan-hooks-a-late-data-anim-frame-and-disable-unhooks-it",
+        ),
+        # A non-configurable `requestAnimFrame` cannot be hooked: the core installs without throwing, leaves it
+        # untouched, and the bridge falls back to today's clock.
+        pytest.param(
+            _BRIDGE_ONLY_PLAN,
+            {"before_core": _LOCKED_ANIM_FRAME, "after_core": _CALL_ANIM_FRAME},
+            {**_INSTALLED_NOTHING, "installed": True, "ready": True,
+             "animFrame": {"hookedAtLoad": False, "ran": True, "id": 7, "rawCalls": ["function"], "rawNow": True}},
+            id="bridge-plan-leaves-a-non-configurable-anim-frame-alone",
+        ),
     ],
 )
-def test_install_outcome(plan, fail_install, expected):
-    assert _run_core_in_node(plan=plan, fail_install=fail_install) == expected
+def test_install_outcome(plan, kwargs, expected):
+    assert _run_core_in_node(plan=plan, **kwargs) == expected
 
 
 def test_transparent_chrome_gated_by_plan_flag():
@@ -269,6 +317,7 @@ def _run_bridge_motion_in_node(*, stop_before_retry: bool = False, stage: dict =
     motion = _stage_map_fragment() + core[start:end]
     harness = f"""
 let now = 0, connected = false, preserveGeneration = 0;
+let departure = null;
 const frames = [];
 {_FRAGMENT_BOUNDARY_JS}
 const nextEntry = (inst) => inst === 'A3' ? boundary : null;
@@ -1626,6 +1675,155 @@ def test_bridge_overlay_is_not_linear_off_the_midpoint():
         for key in ("x", "y", "w", "h"):
             assert abs(rects[fraction][key] - linear[key]) > 10, (fraction, key)
     assert rects[0.5] == pytest.approx({k: (_BRIDGE_SRC[k] + _BRIDGE_DEST[k]) / 2 for k in _BRIDGE_SRC})
+
+
+#: main.js runs after the core and assigns `requestAnimFrame` (the setter trap keeps it); Keynote's `Date` gets its
+#: own fake wall clock, `dateOffset` ms off `performance.now()`, so a test can step it like `timed` did on green-2.
+_GL_CLOCK_AFTER_CORE = """
+window.requestAnimFrame = requestAnimationFrame;
+let dateOffset = 0;
+Date.now = () => nowMs + dateOffset;
+document.readyState = 'complete';
+"""
+
+#: Interpret a bridge timeline: each op may set `t` (ms on both clocks) first. `detach` is the player's 3->4 teardown
+#: of the carried `A3` decoder (the core's trigger); `oldLoop`/`loop` start a Keynote GL loop whose re-arms run inside
+#: its own callback; `write` is the player's `history.replaceState` of `#hash`; `teardown` detaches an unplanned
+#: `<video>`; `step` steps `Date` only; `detach`, `pump` and `remountAll` record the overlay rect afterwards.
+_GL_CLOCK_SCRIPT = r"""
+const read = (v) => Object.fromEntries(
+  [['x', 'left'], ['y', 'top'], ['w', 'width'], ['h', 'height']].map(([k, css]) => [k, parseFloat(v.style[css])])
+);
+nowMs = 1000;
+goToScene(7);
+const v = video('A3');
+v.readyState = 4; v.currentTime = 2; v.parentNode = bodyEl;
+v.src = 'https://host/untitled.mov';
+const rects = [];
+const loop = () => window.requestAnimFrame(function again() { window.requestAnimFrame(again); });
+__OPS__.forEach((op) => {
+  if (op.t != null) nowMs = op.t;
+  if (op.op === 'detach') detach(v);
+  if (op.op === 'oldLoop' || op.op === 'loop') loop();
+  if (op.op === 'pump') pump();
+  if (op.op === 'write') window.history.replaceState(null, '', '#' + op.hash);
+  if (op.op === 'teardown') { const z = video(); z.parentNode = bodyEl; detach(z); }
+  if (op.op === 'step') dateOffset += op.ms;
+  if (op.op === 'remountAll') P.remountAll();
+  if (['detach', 'pump', 'remountAll'].indexOf(op.op) >= 0) rects.push(read(v));
+});
+console.log(JSON.stringify({
+  rects,
+  clocks: P.events.filter(e => e.kind === 'bridge-clock').map(e => [e.detail.via, e.detail.lagMs]),
+  motionStarts: P.events.filter(e => e.kind === 'bridge-motion-start').length,
+  hooked: typeof window.requestAnimFrame === 'function' && window.requestAnimFrame !== requestAnimationFrame,
+}));
+"""
+
+
+def _gl_timeline(*steps: tuple) -> tuple[list[dict], list]:
+    """`(op, t, expected)` steps -> (the ops, the expected ms into the move at each recorded rect; None = source)."""
+    ops, expected = [], []
+    for op, t, *rest in steps:
+        ops.append({"op": op, "t": t, **(rest[1] if len(rest) > 1 else {})})
+        if op in ("detach", "pump", "remountAll"):
+            expected.append(rest[0])
+    return ops, expected
+
+
+#: Timeline 1, the pooled path. Keynote's loop starts 7 ms after the core's trigger (1000); a loop already running
+#: before the departure re-arms inside its own callback, so it never stamps. A second teardown before the loop start
+#: and, mid-move, the player's two same-index hash writes and a teardown re-mark the same occurrence (its stamp
+#: reaches the motion; no snap-back), and a -90 ms `Date` step moves the overlay with Keynote's arithmetic. Each
+#: step carries its (gl, no-gl-clock red) expectations.
+_TIMELINE_1 = (
+    ("oldLoop", 1000, (None, None)),
+    ("detach", 1000, (None, None)),
+    ("teardown", 1002, (None, None)),
+    ("pump", 1004, (None, None)),
+    ("loop", 1007, (None, None)),
+    ("pump", 1049, (42, None)),
+    ("pump", 1050, (43, 50)),
+    ("pump", 1382, (375, 382)),
+    ("write", 1382, (None, None), {"hash": 7}),
+    ("write", 1382, (None, None), {"hash": 7}),
+    ("teardown", 1382, (None, None)),
+    ("pump", 1382, (375, 382)),
+    ("pump", 1757, (750, 757)),
+    ("step", None, (None, None), {"ms": -90}),
+    ("pump", 2132, (1035, 1132)),
+    ("pump", 2597, (1500, 1597)),
+)
+
+
+def _pick(timeline: tuple, column: int) -> tuple:
+    return tuple((op, t, expected[column], *extra) for op, t, expected, *extra in timeline)
+
+
+@pytest.mark.parametrize(
+    "variant,timeline,clocks,motion_starts",
+    [
+        pytest.param(None, _gl_timeline(*_pick(_TIMELINE_1, 0)), [["gl", 7]], 1, id="gl"),
+        # No loop start: the overlay holds the source until GL_CLOCK_WAIT_MS on `performance.now()` (a `Date` step
+        # inside the wait does not move the deadline), then runs today's clock from the trigger; a loop start after
+        # the fallback engaged changes nothing.
+        pytest.param(None, _gl_timeline(
+            ("detach", 1000, None),
+            ("step", None, None, {"ms": 500}),
+            ("pump", 1020, None),
+            ("pump", 1049, None),
+            ("pump", 1050, 50),
+            ("loop", 1060, None),
+            ("pump", 1060, 60),
+            ("pump", 1375, 375),
+            ("pump", 2500, 1500),
+        ), [["fallback", 50]], 1, id="fallback"),
+        # Mid-move the hash leaves #7 and comes back without `clear()`, then the second write: a new occurrence.
+        # The same pooled decoder, re-driven by `remountAll()`, starts a new motion that holds the source until its
+        # own loop start, and notes its own clock.
+        pytest.param(None, _gl_timeline(
+            ("detach", 1000, None),
+            ("loop", 1007, None),
+            ("pump", 1382, 375),
+            ("write", 1382, None, {"hash": 8}),
+            ("pump", 1390, 375),
+            ("write", 1400, None, {"hash": 7}),
+            ("write", 1400, None, {"hash": 7}),
+            ("remountAll", 1400, None),
+            ("pump", 1405, None),
+            ("loop", 1409, None),
+            ("pump", 2159, 750),
+        ), [["gl", 7], ["gl", 9]], 2, id="re-departure"),
+        # The D1 red: timeline 1 on the core that never stamps. The overlay holds until +50 ms although Keynote
+        # started at +7, then runs today's clock from the trigger, immune to the `Date` step.
+        pytest.param("no-gl-clock", _gl_timeline(*_pick(_TIMELINE_1, 1)), [["fallback", 50]], 1, id="no-gl-clock-red"),
+    ],
+)
+def test_bridge_clock_follows_keynotes_gl_loop_start(monkeypatch, variant, timeline, clocks, motion_starts):
+    """The carried overlay times its bridge on Keynote's own GL clock: `Date` since the first `requestAnimFrame`
+    call outside a wrapped callback in this departure occurrence, chosen once per motion (`bridge-clock`), else
+    today's `performance.now()` clock after the GL_CLOCK_WAIT_MS hold at the source rect."""
+    if variant is not None:
+        repo = Path(__file__).resolve().parent.parent
+        if str(repo / "scripts") not in sys.path:
+            sys.path.insert(0, str(repo / "scripts"))
+        from continuity_core_variants import variant_core
+
+        monkeypatch.setattr(live_continuity_js, "PRESERVE_CORE_JS", variant_core(variant))
+    ops, expected = timeline
+    result = _run_full_core_in_node(
+        plan=_NO_RETIRE_PLAN, stage=_IDENTITY_STAGE, after_core=_GL_CLOCK_AFTER_CORE,
+        script=_GL_CLOCK_SCRIPT.replace("__OPS__", json.dumps(ops)),
+    )
+    assert result["hooked"] is True
+    assert result["clocks"] == clocks
+    assert result["motionStarts"] == motion_starts
+    assert len(result["rects"]) == len(expected)
+    for i, (elapsed, rect) in enumerate(zip(expected, result["rects"])):
+        if elapsed is None:
+            assert rect == _BRIDGE_SRC, i
+        else:
+            assert rect == pytest.approx(_eased_bridge_rect(min(1, elapsed / 1500)), abs=1e-6), (i, elapsed)
 
 
 @pytest.mark.parametrize("scene", _IN_ZONE, ids=[f"scene{s}" for s in _IN_ZONE])

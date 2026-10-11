@@ -2864,7 +2864,8 @@ def test_bridge_departure_latency_and_shifted_bounds_on_p2_geometry(curve, laten
     unchanged), 61.0 ms eased (every ceiling shifted by L - 4.8 = 56.2 ms, i.e.
     4 nominal frames). The verdict's eased curve is pinned to the core's
     EASE_IN_EASE_OUT and its progress line, so a curve change forces recalibration,
-    and its `pollTimes` size bound to the probe's POLL_TIMES_MAX."""
+    the GL-clock fallback wait to W <= L, and its `pollTimes` size bound to the
+    probe's POLL_TIMES_MAX."""
     import re
 
     from obed_edom.live_continuity_js import PRESERVE_CORE_JS
@@ -2903,8 +2904,12 @@ def test_bridge_departure_latency_and_shifted_bounds_on_p2_geometry(curve, laten
     assert match, "the core's EASE_IN_EASE_OUT moved: recalibrate the freeze trigger bounds"
     assert tuple(float(g) for g in match.groups()) == p2.BRIDGE_EASE_IN_EASE_OUT
     assert PRESERVE_CORE_JS.count(
-        "const progress = easeInEaseOut((performance.now() - started) / (1000 * boundary.durationSeconds));"
+        "const progress = easeInEaseOut(bridgeElapsedMs(v, motion) / (1000 * boundary.durationSeconds));"
     ) == 1
+    # The GL-clock fallback holds the source for GL_CLOCK_WAIT_MS, then runs today's clock: its first 1 px
+    # departure frame equals today's only while the wait W stays within the eased latency L (W <= L).
+    assert PRESERVE_CORE_JS.count("const GL_CLOCK_WAIT_MS = 50;") == 1
+    assert 50 <= p2._bridge_departure_latency_ms(BRIDGE_34, P2_BRIDGE_SCALE, p2.BRIDGE_EASE_IN_EASE_OUT)
     probe = (REPO / "scripts" / "p2_recovery_html_adversarial.py").read_text()
     assert probe.count(f"var POLL_TIMES_MAX = {p2.FREEZE_POLL_TIMES_MAX};") == 1
     assert probe.count("if (st.pollTimes.length < POLL_TIMES_MAX) st.pollTimes.push(pollAt);") == 1

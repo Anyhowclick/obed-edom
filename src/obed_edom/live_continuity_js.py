@@ -72,7 +72,8 @@ The bridge moves during the preceding transition scene over the exported duratio
 eased by the export's `EaseInEaseOut` (CSS cubic-bezier(.42,0,.58,1), the only
 timing function the plan admits) so the carried movie tracks the player's GL
 poster. This is a fallback for WebGL movie geometry with no unambiguous animated
-DOM rectangle.
+DOM rectangle. Its clock is Keynote's own: `Date` since the player's GL loop start
+in this departure, else today's `performance.now()` clock from the trigger after 50 ms.
 
 Scaled-stage mapping (I3): the player scales `#stage` with a CSS transform, so
 `#stage.offsetWidth/Height` (authored px, transform-blind) and
@@ -769,14 +770,17 @@ PRESERVE_CORE_JS = r"""
    * writes the hash (`history.replaceState`) once on entering idle and again
    * when it sets that scene up, so a second write of the same index — the only
    * signal when the slide has no <video> of the player's left (a decoder the
-   * runtime placed itself). The mark is per scene and lapses when the hash
-   * moves. A retire whose transition this is hands its held decoder back right
-   * there, so the raw player draws the ending movie's own fade-out.
+   * runtime placed itself). The mark is one object per occurrence (scene and
+   * generation), reused by re-marks, and lapses when the hash moves. A retire
+   * whose transition this is hands its held decoder back right there, so the
+   * raw player draws the ending movie's own fade-out.
    */
   let departure = null;
   function markTransition(hn) {
     if (hn == null) return;
-    departure = {scene: hn, gen: preserveGeneration};
+    if (!departure || departure.scene !== hn || departure.gen !== preserveGeneration) {
+      departure = {scene: hn, gen: preserveGeneration, gl: null};
+    }
     ENTRIES.forEach(function(b) {
       if (b.action === 'retire' && b.atScene - 1 === hn) retireVictims(b, zoneVictims(b, []), true);
     });
@@ -800,10 +804,45 @@ PRESERVE_CORE_JS = r"""
       hist.replaceState = function() {
         const out = origReplace.apply(this, arguments);
         const hn = currentHashNum();
+        if (departure && hn !== departure.scene) departure = null;
         if (!disabled && hn != null && hn === lastHashWrite) markTransition(hn);
         lastHashWrite = hn;
         return out;
       };
+    }
+  } catch (e) {}
+  /**
+   * Keynote's GL player times a transition on `Date` from its loop's first `requestAnimFrame` call; main.js assigns
+   * it after this core runs, so a setter keeps the value and the getter wraps it. A call outside a wrapped callback
+   * starts a loop; the first in a live departure stamps `departure.gl`.
+   */
+  let inGlFrame = false;
+  function stampGlStart() {
+    if (disabled || inGlFrame || !departure || departure.gl || departure.gen !== preserveGeneration
+        || currentHashNum() !== departure.scene) return;
+    departure.gl = {date: Date.now(), perf: performance.now()};
+  }
+  try {
+    const prior = Object.getOwnPropertyDescriptor(window, 'requestAnimFrame');
+    if (ENTRIES.some(function(b) { return b.action === 'bridge'; })
+        && (!prior || (prior.configurable && 'value' in prior))) {
+      let raw = prior ? prior.value : undefined;
+      Object.defineProperty(window, 'requestAnimFrame', {
+        configurable: true, enumerable: true,
+        get: function() {
+          if (disabled || typeof raw !== 'function') return raw;
+          const f = raw;
+          return function(cb) {
+            if (typeof cb !== 'function') return f.call(window, cb);
+            try { stampGlStart(); } catch (e) {}
+            return f.call(window, function(ts) {
+              inGlFrame = true;
+              try { return cb(ts); } finally { inGlFrame = false; }
+            });
+          };
+        },
+        set: function(value) { raw = value; }
+      });
     }
   } catch (e) {}
   function hasDeparted(inst) {
@@ -1075,6 +1114,22 @@ PRESERVE_CORE_JS = r"""
     }
     return bezierAxis((lo + hi) / 2, e.y1, e.y2);
   }
+  const GL_CLOCK_WAIT_MS = 50;
+  /**
+   * Ms into a bridge's move, chosen once per motion and noted (`bridge-clock`): Keynote's `Date` since its GL loop
+   * start in this departure, else, once GL_CLOCK_WAIT_MS have passed on `performance.now()`, today's clock from the
+   * core's trigger; 0 (the source rect) until one holds.
+   */
+  function bridgeElapsedMs(v, motion) {
+    if (!motion.clock) {
+      const gl = motion.departure && motion.departure.gl;
+      const waited = performance.now() - motion.started;
+      if (!gl && waited < GL_CLOCK_WAIT_MS) return 0;
+      motion.clock = gl ? {via: 'gl', date: gl.date, lagMs: gl.perf - motion.started} : {via: 'fallback', lagMs: waited};
+      note('bridge-clock', {elId: v.__obedElId, via: motion.clock.via, lagMs: motion.clock.lagMs});
+    }
+    return motion.clock.via === 'gl' ? Date.now() - motion.clock.date : performance.now() - motion.started;
+  }
   /**
    * The player keeps the source slide's layers hidden for its whole transition
    * scene (the WebGL move draws them), so a carried decoder rides that scene on
@@ -1134,13 +1189,13 @@ PRESERVE_CORE_JS = r"""
     if (!hasDeparted(instanceOf(v))) return false;
     const generation = preserveGeneration;
     if (!v.__obedMotion || v.__obedMotion.generation !== generation
-        || v.__obedMotion.boundary !== boundary) {
-      v.__obedMotion = {started: performance.now(), generation: generation, boundary: boundary};
+        || v.__obedMotion.boundary !== boundary || v.__obedMotion.departure !== departure) {
+      v.__obedMotion = {started: performance.now(), generation: generation, boundary: boundary, departure: departure};
     }
-    const started = v.__obedMotion.started;
+    const motion = v.__obedMotion;
     const src = boundary.src.rect, dest = boundary.dst.rect;
     const moving = rideTransition(v, boundary, function() {
-      const progress = easeInEaseOut((performance.now() - started) / (1000 * boundary.durationSeconds));
+      const progress = easeInEaseOut(bridgeElapsedMs(v, motion) / (1000 * boundary.durationSeconds));
       return {
         x: src.x + (dest.x - src.x) * progress,
         y: src.y + (dest.y - src.y) * progress,
