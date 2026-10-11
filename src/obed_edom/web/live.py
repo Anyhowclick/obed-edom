@@ -21,7 +21,7 @@ from obed_edom.html_preview import (
     registered_export_root,
     safe_export_file,
 )
-from obed_edom.live_runtime import PLAYER_SHA256, RUNTIME_VERSION
+from obed_edom.live_runtime import RUNTIME_VERSION, SUPPORTED_PLAYERS
 from obed_edom.live_continuity import Unsupported
 from obed_edom.live_host import GL_REPLAY_ENV, derive_runtime
 from obed_edom.live_session import LiveSessionService
@@ -112,7 +112,7 @@ def live_router(runner, *, service=None, host_factory=None, displays=None, engin
             raise HTTPException(409, "Prepare the HTML preview before loading live output.")
         root = registered_export_root(result, job.id)
         digest = file_sha256(safe_export_file(root, "assets/player/main.js"))
-        if digest != PLAYER_SHA256 or digest != (result.get("manifest") or {}).get("playerDigest"):
+        if digest not in SUPPORTED_PLAYERS or digest != (result.get("manifest") or {}).get("playerDigest"):
             raise ValueError("This player version is not supported for live controls.")
         header, _ = load_header(root)
         width, height = header.get("slideWidth", 0), header.get("slideHeight", 0)

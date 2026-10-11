@@ -1,7 +1,9 @@
 import hashlib
+
 from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
+from unittest.mock import ANY
 
 import pytest
 from fastapi import FastAPI
@@ -138,19 +140,23 @@ class Adapter:
             self.release.set()
 
 
-def client_for(tmp_path, monkeypatch, engine=None, events=None):
+OLD_PLAYER = 'e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354'
+NEW_PLAYER = '17c0c938caa49d5c70bd83bd5b84f57381faa51602932ca733aa965055026d91'
+
+
+def client_for(tmp_path, monkeypatch, engine=None, events=None, player=OLD_PLAYER):
     thumb = tmp_path / 'thumbnail.jpeg'
     thumb.write_bytes(b'jpeg')
     job = SimpleNamespace(id='prepared', kind='html-preview', status='done', result={
         'phase': 'ready', 'path': '/example/deck.key', 'exportKey': 'key',
-        'sourceDigest': 'source', 'manifest': {'playerDigest': live.PLAYER_SHA256},
+        'sourceDigest': 'source', 'manifest': {'playerDigest': player},
         'slides': [{'originalOrdinal': 1, 'playerIndex': 0, 'exportedUuid': 'uuid', 'skipped': False}],
     })
     runner = SimpleNamespace(get=lambda key: job if key == job.id else None,
                              list=lambda **kwargs: [job])
     monkeypatch.setattr(live, 'registered_export_root', lambda *_: tmp_path)
     monkeypatch.setattr(live, 'safe_export_file', lambda *_: thumb)
-    monkeypatch.setattr(live, 'file_sha256', lambda *_: live.PLAYER_SHA256)
+    monkeypatch.setattr(live, 'file_sha256', lambda *_: player)
     monkeypatch.setattr(live, 'load_header', lambda *_: ({'slideWidth': 1920, 'slideHeight': 1080, 'showMode': 0}, 'header.json'))
     monkeypatch.setattr(live, 'derive_runtime', lambda *args, **kwargs: (None, {}))
     claims, releases = [], []
@@ -203,6 +209,19 @@ def test_live_api_refuses_unqualified_export_and_cross_origin(tmp_path, monkeypa
     response = client.post('/api/live', json={'previewJobId': 'prepared'})
     assert response.status_code == 409
     assert not claims
+
+
+def test_live_api_accepts_both_supported_players_and_refuses_others(tmp_path, monkeypatch):
+    assert set(live.SUPPORTED_PLAYERS) == {OLD_PLAYER, NEW_PLAYER}
+    client, claims, _, _, adapters, _ = client_for(tmp_path, monkeypatch, player=NEW_PLAYER)
+    state = client.post('/api/live', json={'previewJobId': 'prepared', 'displayId': '42'}).json()
+    assert state['sessionId'] and len(claims) == 1 and len(adapters) == 1
+    client.post(f"/api/live/{state['sessionId']}/commands", json={'requestId': 'stop', 'operation': 'stop'})
+    client, claims, _, _, adapters, _ = client_for(tmp_path, monkeypatch, player='0' * 64)
+    response = client.post('/api/live', json={'previewJobId': 'prepared', 'displayId': '42'})
+    assert response.status_code == 409
+    assert 'This player version is not supported for live controls.' in response.text
+    assert not claims and not adapters
 
 
 @pytest.mark.parametrize(
@@ -317,18 +336,18 @@ def test_live_api_attach_mode_starts_without_consulting_displays(tmp_path, monke
     player_bytes = b'before;' + live_runtime._ANCHOR + b';' + mm_anchors + b';after'
     (root / 'assets' / 'player' / 'main.js').write_bytes(player_bytes)
     (root / 'assets' / 'header.json').write_text('{"slideWidth":1920,"slideHeight":1080,"showMode":0}')
-    monkeypatch.setattr(live_runtime, 'PLAYER_SHA256', hashlib.sha256(player_bytes).hexdigest())
+    monkeypatch.setitem(live_runtime.SUPPORTED_PLAYERS, hashlib.sha256(player_bytes).hexdigest(), (ANY,) * 3)
     from obed_edom import html_preview as hp
     digest = hashlib.sha256(b'attach-mode-deck').hexdigest()
     export_key = hp.cache_key(digest)
     job = SimpleNamespace(id='prepared', kind='html-preview', status='done', result={
         'phase': 'ready', 'path': '/example/deck.key', 'exportKey': export_key,
-        'sourceDigest': digest, 'manifest': {'playerDigest': live.PLAYER_SHA256},
+        'sourceDigest': digest, 'manifest': {'playerDigest': OLD_PLAYER},
         'slides': [{'originalOrdinal': 1, 'playerIndex': 0, 'skipped': False}],
     })
     runner = SimpleNamespace(get=lambda key: job if key == job.id else None, list=lambda **kwargs: [job])
     monkeypatch.setattr(live, 'registered_export_root', lambda *_: root)
-    monkeypatch.setattr(live, 'file_sha256', lambda *_: live.PLAYER_SHA256)
+    monkeypatch.setattr(live, 'file_sha256', lambda *_: OLD_PLAYER)
     monkeypatch.setattr(live, 'load_header', lambda *_: ({'slideWidth': 1920, 'slideHeight': 1080, 'showMode': 0}, 'header.json'))
     monkeypatch.setattr(live, 'derive_runtime', lambda *args, **kwargs: (None, {}))
     service = LiveSessionService()

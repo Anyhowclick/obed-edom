@@ -466,6 +466,112 @@ def test_to_runtime_refuses_unqualified_export_duration():
     assert "not yet qualified" in result.reason
 
 
+# The bridge overlay eases the carried movie with cubic-bezier(.42,0,.58,1) over the transition's
+# duration from its start. Slide 3's transition draws the carried untitled.mov in slot 1 (its
+# source draw order: background, untitled.mov, WA0125); its motion leaves are
+# transform.scale.x/.y and transform.translation, all EaseInEaseOut, 1.5s from 0s.
+SLIDE3_BRIDGE_MOVIE_SLOT = 1
+_MOTION_PROPERTIES = {"transform.scale.x", "transform.scale.y", "transform.translation"}
+
+
+def _bridge_motion_leaves(data: dict) -> list[dict]:
+    (effect,) = [e for event in data["events"] for e in event["effects"] if e.get("type") == "transition"]
+    node, leaves = effect["baseLayer"]["layers"][SLIDE3_BRIDGE_MOVIE_SLOT], []
+    while True:
+        leaves += [
+            leaf for group in node["animations"] for leaf in group["animations"]
+            if leaf["property"] in _MOTION_PROPERTIES
+        ]
+        if not node["layers"]:
+            return leaves
+        (node,) = node["layers"]
+
+
+def _bridge_movie(plan: ContinuityPlan) -> MovieContinuity:
+    (movie,) = [m for b in plan.boundaries for m in b.movies if m.action == "bridge"]
+    return movie
+
+
+def test_fixture_bridge_motion_is_the_eased_transition_timing():
+    data = json.loads((FIXTURE_ROOT / "assets" / SLIDE3 / f"{SLIDE3}.json").read_text())
+    leaves = _bridge_motion_leaves(data)
+    assert sorted(leaf["property"] for leaf in leaves) == sorted(_MOTION_PROPERTIES)
+    assert {(leaf["timingFunction"], leaf["beginTime"], leaf["duration"]) for leaf in leaves} == {
+        ("EaseInEaseOut", 0, 1.5)
+    }
+    plan = _plan()
+    assert isinstance(plan, ContinuityPlan)
+    assert _bridge_movie(plan).refusal is None
+    assert plan.to_runtime() == EXPECTED_RUNTIME_PLAN
+
+
+@pytest.mark.parametrize(
+    ("mutation", "detail"),
+    [
+        (lambda leaf: leaf.__setitem__("timingFunction", "Linear"), "timingFunction"),
+        (lambda leaf: leaf.pop("timingFunction"), "has timing None"),
+        (lambda leaf: leaf.__setitem__("beginTime", 0.2), "runs 1.5s from 0.2s, not 1.5s from 0s"),
+        (lambda leaf: leaf.__setitem__("duration", 1.0), "runs 1.0s from 0s, not 1.5s from 0s"),
+    ],
+    ids=["linear", "no-timing-function", "begin-offset", "short-duration"],
+)
+def test_bridge_refuses_motion_timing_the_overlay_does_not_ease(mutation, detail):
+    """Only the carried movie's motion timing changes: geometry and the transition's own duration
+    are untouched, so before the timing check this still derived the qualified bridge."""
+    def mutate(data):
+        for leaf in _bridge_motion_leaves(data):
+            mutation(leaf)
+        return data
+
+    plan = _plan(_mutate_slide(SLIDE3, mutate))
+    assert isinstance(plan, ContinuityPlan)
+    movie = _bridge_movie(plan)
+    assert movie.refusal is not None
+    assert movie.refusal.startswith(
+        "'untitled.mov' does not move with the bridge's eased timing at player index 2 -> 3: "
+    )
+    assert detail in movie.refusal
+    result = plan.to_runtime()
+    assert isinstance(result, Unsupported)
+    assert result.reason == f"a refusal the runtime cannot retire: {movie.refusal}"
+
+
+def test_bridge_refuses_a_transition_that_does_not_draw_the_carried_movie():
+    def drop_slots(data):
+        for event in data["events"]:
+            for effect in event["effects"]:
+                if effect.get("type") == "transition":
+                    effect["baseLayer"]["layers"] = []
+        return data
+
+    plan = _plan(_mutate_slide(SLIDE3, drop_slots))
+    assert isinstance(plan, ContinuityPlan)
+    refusal = _bridge_movie(plan).refusal
+    assert refusal is not None and "does not move with the bridge's eased timing" in refusal
+    assert isinstance(plan.to_runtime(), Unsupported)
+
+
+@pytest.mark.skipif(not REAL_EXPORT_ROOT.is_dir(), reason="real P2 export not available")
+def test_fixture_bridge_transition_is_the_real_exports_with_textures_sanitized():
+    def strip(value):
+        if isinstance(value, dict):
+            return {k: None if k == "texture" else strip(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [strip(v) for v in value]
+        return value
+
+    def transition(root: Path) -> dict:
+        data = json.loads((root / "assets" / SLIDE3 / f"{SLIDE3}.json").read_text())
+        (effect,) = [e for event in data["events"] for e in event["effects"] if e.get("type") == "transition"]
+        return effect
+
+    assert strip(transition(FIXTURE_ROOT)) == strip(transition(REAL_EXPORT_ROOT))
+    real_plan = derive_plan(REAL_EXPORT_ROOT, SLIDES, resolver=_resolver)
+    assert isinstance(real_plan, ContinuityPlan)
+    assert _bridge_movie(real_plan).refusal is None
+    assert real_plan.to_runtime() == EXPECTED_RUNTIME_PLAN
+
+
 @pytest.mark.parametrize("action", ["bridge", "restart", "pin"])
 def test_to_runtime_refuses_actionable_boundaries_after_bridge(action):
     plan = _plan()

@@ -120,6 +120,25 @@ def test_positive_control_actions_and_to_runtime():
     assert "bridge boundary precedes" in unsupported.reason
 
 
+@pytest.mark.parametrize(
+    "root",
+    [
+        POSITIVE_ROOT,
+        pytest.param(
+            POSITIVE_REAL_ROOT,
+            marks=pytest.mark.skipif(not GL_DECKS_ROOT.is_dir(), reason="real gl-deck exports not available"),
+        ),
+    ],
+    ids=["fixture", "real"],
+)
+def test_positive_control_bridge_passes_the_eased_timing_check(root):
+    plan = _plan(root, POSITIVE_UUIDS)
+    assert isinstance(plan, ContinuityPlan)
+    (bridge,) = [m for b in plan.boundaries for m in b.movies if m.action == "bridge"]
+    assert bridge.refusal is None
+    assert plan.refusals == ()
+
+
 @pytest.mark.skipif(not GL_DECKS_ROOT.is_dir(), reason="real gl-deck exports not available")
 def test_minimal_fixture_parity_with_real_export():
     real = _plan(MINIMAL_REAL_ROOT, MINIMAL_UUIDS)

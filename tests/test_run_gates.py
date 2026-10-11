@@ -13,7 +13,10 @@ an events file and behaves per `STUB_MODES` (artifact/out-dir stem -> mode):
 - `die`     kill its parent -- the per-run wrapper -- before the wrapper can write the status, as
             when a wrapper is killed or crashes mid-run;
 - `foreign` publish a status carrying another round's nonce, then kill the wrapper;
-- `hang`    start a child process and sleep, as a live probe holding Chrome does.
+- `hang`    start a child process and sleep, as a live probe holding Chrome does;
+- `cc-<status>` (probe `--carry-cover`) write a carry-cover artifact with that status (exit 0 only for
+            pass); `cc-sha` / `cc-control` the expected status with a foreign core sha / the wrong control;
+            `cc-none` write no artifact. Without a mode a carry-cover run writes its arm's expected outcome.
 
 What is pinned here:
 - a non-empty (or non-directory) `<outdir>` is refused before anything runs, so nothing from an
@@ -91,6 +94,25 @@ stem = artifact.stem
 event(f"probe {stem} viewport={arg('--viewport')} skip={arg('--skip-arms')} start")
 mode = mode_of(stem)
 act(mode, artifact.with_suffix(""))
+if "--carry-cover" in sys.argv:
+    event("ccargv " + json.dumps(sys.argv[1:]))
+    sys.path.insert(0, "scripts")
+    from continuity_core_variants import variant_sha
+    from obed_edom.live_continuity_js import js_sha256
+    variant = arg("--core-variant")
+    control = "null" if "--carry-cover-null" in sys.argv else "red" if variant else "green"
+    sha = variant_sha(variant) if variant else js_sha256()
+    status = mode[3:] if mode.startswith("cc-") else "pass" if control == "green" else "fail"
+    if mode in ("cc-sha", "cc-control"):
+        status = "pass" if control == "green" else "fail"
+    if mode == "cc-none":
+        sys.exit(1)
+    d = {"kind": "live-continuity-probe-carry-cover", "status": status,
+         "control": "green" if mode == "cc-control" else control, "coreVariant": variant, "coreSha256": sha,
+         "continuity": {"mode": "qualified", "sha256": "0" * 64 if mode == "cc-sha" else sha},
+         "reasons": [f"stub {mode}"]}
+    artifact.write_text(json.dumps(d))
+    sys.exit(0 if status == "pass" else 1)
 given = (arg("--skip-arms") or "").split(",")
 skip = [] if mode == "ignore-skip" else [n for n in ("A", "B", "C", "V", "Voff", "attach") if n in given]
 d = {
@@ -348,7 +370,7 @@ def test_the_pattern_cache_is_prewarmed_and_verified_before_the_first_timed_run(
     events = gates["events"]()
     assert events[:2] == ["prewarm html-unmodified", "prewarm html-unmodified"], "the fill, then the verifying lookup"
     assert all(not e.startswith("prewarm") for e in events[2:])
-    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + 8
+    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + 3 + 8
     assert f"h264 pattern prewarm 46.0333s: encoded key={'k' * 64}" in done.stdout
     assert f"h264 pattern cache verified 46.0333s: hit key={'k' * 64} sha256={'s' * 64}" in done.stdout
     assert "cache hit" in gates["run"](outdir=gates["tmp"] / "out2").stdout
@@ -667,3 +689,84 @@ def test_known_bad_arguments_are_refused_before_anything_runs(gates, args: list[
     done = gates["run"](*args, timeout=20)
     assert done.returncode == 2
     assert gates["events"]() == [] and not gates["out"].exists()
+
+
+# --------------------------------------------------------------------------
+# Carry-cover gate (rubber band, 2026-10-10): GREEN default core must pass, RED `--core-variant linear-bridge` and
+# NULL `--carry-cover-null` must fail; full tier only, queued after the host red arms, fail-closed.
+# --------------------------------------------------------------------------
+
+CC_STEMS = ["carry-cover", "carry-cover--core-variantlinear-bridge", "carry-cover--carry-cover-null"]
+CC_LABELS = ["green", "--core-variant linear-bridge", "--carry-cover-null"]
+CC_EXTRA = [[], ["--core-variant", "linear-bridge"], ["--carry-cover-null"]]
+
+
+def _cc_argvs(events: list[str]) -> list[list[str]]:
+    return [json.loads(e[len("ccargv "):]) for e in events if e.startswith("ccargv ")]
+
+
+def test_carry_cover_runs_its_three_controls_on_p2_through_the_queue_in_order(gates) -> None:
+    done = gates["run"](GATE_JOBS="1")
+    events = gates["events"]()
+    starts = [e.split()[1] for e in events if e.endswith(" start")]
+    assert [s for s in starts if s.startswith("carry-cover")] == CC_STEMS
+    last_red = max(i for i, s in enumerate(starts) if s.startswith("host-red"))
+    first_p2 = next(i for i, s in enumerate(starts) if s.startswith("p2"))
+    assert starts.index(CC_STEMS[0]) == last_red + 1 and starts.index(CC_STEMS[-1]) + 1 == first_p2
+    out = str(gates["out"].resolve())
+    assert _cc_argvs(events) == [
+        ["--fixture", f"{gates['g']}/output/p2-recovery/html-adversarial/html-player",
+         "--original-index", f"{gates['g']}/output/p2-recovery/html-adversarial/html-unmodified/index.html",
+         "--viewport", "1920x1080", "--carry-cover", "--artifact", f"{out}/{stem}.json", *extra]
+        for stem, extra in zip(CC_STEMS, CC_EXTRA, strict=True)
+    ]
+    checks = [line for line in done.stdout.splitlines() if line.startswith("[CARRY-COVER ")]
+    assert [c.split("]")[0][len("[CARRY-COVER "):] for c in checks] == CC_LABELS, done.stdout
+    assert "control=green status=pass (want pass) exit=0" in checks[0]
+    assert "control=red status=fail (want fail) exit=1" in checks[1]
+    assert "control=null status=fail (want fail) exit=1" in checks[2]
+    assert "GATE FAILED: CARRY-COVER" not in done.stdout and "MISMATCH: " not in done.stdout
+    assert done.stdout.index("[HOST --strip glReplay@2 --gl-replay auto]") < done.stdout.index("[CARRY-COVER green]")
+    assert done.stdout.index("[CARRY-COVER --carry-cover-null]") < done.stdout.index("[P2 --wait-profile fast]")
+
+
+def test_the_dev_tier_runs_no_carry_cover(gates) -> None:
+    gates["run"]("--tier", "dev")
+    assert not [e for e in gates["events"]() if "carry-cover" in e]
+
+
+@pytest.mark.parametrize(("stem", "mode", "why"), [
+    ("carry-cover", "cc-fail", "status 'fail' != 'pass'"),
+    ("carry-cover", "cc-inconclusive", "status 'inconclusive' != 'pass'"),
+    ("carry-cover", "cc-error", "status 'error' != 'pass'"),
+    ("carry-cover", "cc-sha", "installed core sha is not the arm's"),
+    ("carry-cover", "cc-none", None),
+    ("carry-cover", "die", None),
+    ("carry-cover", "foreign", None),
+    ("carry-cover--core-variantlinear-bridge", "cc-pass", "status 'pass' != 'fail'"),
+    ("carry-cover--core-variantlinear-bridge", "cc-inconclusive", "status 'inconclusive' != 'fail'"),
+    ("carry-cover--core-variantlinear-bridge", "cc-control", "control 'green' != 'red'"),
+    ("carry-cover--carry-cover-null", "cc-pass", "status 'pass' != 'fail'"),
+    ("carry-cover--carry-cover-null", "cc-inconclusive", "status 'inconclusive' != 'fail'"),
+])
+def test_known_bad_every_unexpected_carry_cover_outcome_fails_the_round(gates, stem: str, mode: str, why: str | None) -> None:
+    """Fail closed: a green that does not pass, a red or null control that passes (the instrument is blind) or is
+    inconclusive, a foreign core sha, the wrong control, no artifact, and a missing or stale status each count as
+    exactly one GATE FAILED -- never pending."""
+    good = gates["run"](outdir=gates["tmp"] / "good")
+    bad = gates["run"](outdir=gates["tmp"] / "bad", STUB_MODES=json.dumps({stem: mode}))
+    label = CC_LABELS[CC_STEMS.index(stem)]
+    failed = [line for line in bad.stdout.splitlines() if "GATE FAILED: CARRY-COVER" in line]
+    assert failed == [f"    GATE FAILED: CARRY-COVER {label}"], bad.stdout
+    if why is not None:
+        assert f"    MISMATCH: {why}" in bad.stdout, bad.stdout
+    else:
+        assert re.search(rf"^\[CARRY-COVER {re.escape(label)}\] no artifact \(.+\) exit=", bad.stdout, re.M), bad.stdout
+
+    def count(stdout: str) -> int:
+        summary = re.search(r"^DONE tier=full failed=(\d+) pending=0$", stdout, re.M)
+        assert summary, stdout
+        return int(summary.group(1))
+
+    assert count(bad.stdout) == count(good.stdout) + 1
+    assert "PENDING REGISTRATION: CARRY-COVER" not in bad.stdout and bad.returncode == 1

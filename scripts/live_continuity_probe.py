@@ -61,6 +61,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from collections import Counter
@@ -70,6 +71,7 @@ from typing import Any, Callable, Collection, Iterator, Sequence
 
 import cv2
 import numpy as np
+from websockets.sync.client import connect as ws_connect
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
@@ -694,7 +696,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"Full run only: leave these arms out ({', '.join(SKIPPABLE_ARMS)}); recorded as skippedArms, "
         "never scored as a pass",
     )
+    parser.add_argument(
+        "--carry-cover", action="store_true", default=False,
+        help="Carry-cover gate: screencast every bridge carry and fail when Keynote's GL poster shows beyond the "
+        "moving overlay; with --core-variant (red control) or --carry-cover-null (overlay hidden, null control)",
+    )
+    parser.add_argument(
+        "--carry-cover-null", action="store_true", default=False,
+        help="--carry-cover null control: a probe-only style hides every <video> before the bridge press",
+    )
     args = parser.parse_args(argv)
+    if args.carry_cover_null and not args.carry_cover:
+        parser.error("--carry-cover-null requires --carry-cover")
+    if args.carry_cover:
+        if args.carry_cover_null and args.core_variant is not None:
+            parser.error("--carry-cover runs one control at a time (--core-variant or --carry-cover-null)")
+        if (
+            args.strip is not None or args.only_pass is not None or args.attach or args.gl_replay != "off"
+            or args.gl_force_fail is not None or args.force_wrap is not None or args.rescore is not None
+            or args.skip_arms or args.burst_poke
+        ):
+            parser.error("--carry-cover runs on its own (optionally with --core-variant or --carry-cover-null, "
+                         "--viewport, --fixture, --original-index and --artifact)")
+        return args
     red_arm = args.strip is not None or args.core_variant is not None
     if args.skip_arms and (
         red_arm or args.only_pass is not None or args.gl_force_fail is not None
@@ -5884,6 +5908,676 @@ def run_rescore_cli(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+# Carry-cover gate (`--carry-cover`): during a bridge carry the core's overlay must cover Keynote's own GL poster
+# of the carried movie, which moves on the export's EaseInEaseOut curve. A CDP screencast of the host page plus a
+# rAF sampler of the carried <video> score, per mid-move frame, the non-background pixels outside the overlay rect
+# (dilated by the poster's 4 px texture outline) inside the bridge's source/destination union plus a margin; other
+# objects of the boundary's transition effect are masked while they animate (and always, if they stay visible).
+# Calibrated on output/evidence/s2-dev/rubber (P2 3->4): the linear core exposes 4.6% / 54 px strips, the eased
+# one 0. Sync never comes from the screencast clock: each rAF tick paints its counter into a probe-only bar of
+# black/white cell pairs at the viewport's top-left, so every frame names the tick whose DOM it shows; that tick's
+# overlay rect is read after the frame (setTimeout) and again at the next tick's start, and a frame whose two reads
+# disagree on the cover rule is undecided.
+CARRY_COVER_DILATE_PX = 4
+CARRY_COVER_MARGIN_PX = 120
+CARRY_COVER_LIT_DELTA = 60
+CARRY_COVER_MAX_EXPOSED_FRACTION = 0.005
+CARRY_COVER_MIN_CLEAN_SHARE = 0.95
+CARRY_COVER_MAX_STRIP_PX = 5
+CARRY_COVER_STRIP_MIN_RUN_PX = 8
+CARRY_COVER_MID_MOVE = (0.1, 0.9)
+CARRY_COVER_MIN_FPS = 20.0
+CARRY_COVER_MAX_GAP_FRAMES = 3
+CARRY_COVER_MAX_DISCARDED_SHARE = 0.1
+CARRY_COVER_SYNC_BITS = 12
+CARRY_COVER_SYNC_CELL_PX = 4
+CARRY_COVER_SYNC_MAX_SKEW_MS = 250.0
+CARRY_COVER_SYNC_RECT = {"x": 0.0, "y": 0.0, "w": 2.0 * CARRY_COVER_SYNC_BITS * CARRY_COVER_SYNC_CELL_PX,
+                         "h": float(CARRY_COVER_SYNC_CELL_PX)}
+CARRY_COVER_FADE_SLACK_S = 0.1
+CARRY_COVER_BG_MIN_UNIFORM = 0.99
+CARRY_COVER_BG_MIN_PX = 1000
+CARRY_COVER_SLOT_MATCH_PX = 6.0
+CARRY_COVER_PREROLL_S = 0.6
+CARRY_COVER_TAIL_S = 1.0
+CARRY_COVER_HIDE_OVERLAY_JS = (
+    "(function(){var s=document.createElement('style');s.id='__obedCarryCoverNull';"
+    "s.textContent='video{opacity:0 !important}';document.head.appendChild(s);return 1;})()"
+)
+CARRY_COVER_SAMPLER_JS = r"""
+(function(){
+  if (window.__obedCarryCover__) return performance.timeOrigin;
+  var BITS = __BITS__, CELL = __CELL__;
+  var rows = [], cells = [], count = 0;
+  window.__obedCarryCover__ = {rows: rows, on: true};
+  var bar = document.createElement('div');
+  bar.id = '__obedCarryCoverSync';
+  bar.style.cssText = 'position:fixed;left:0;top:0;margin:0;padding:0;border:0;display:flex;pointer-events:none;'
+    + 'z-index:2147483647;width:' + (2 * BITS * CELL) + 'px;height:' + CELL + 'px';
+  for (var i = 0; i < 2 * BITS; i++) {
+    var cell = document.createElement('div');
+    cell.style.cssText = 'flex:none;width:' + CELL + 'px;height:' + CELL + 'px';
+    bar.appendChild(cell);
+    cells.push(cell);
+  }
+  document.documentElement.appendChild(bar);
+  function opacityOf(v){
+    var o = 1;
+    for (var n = v; n && n.nodeType === 1; n = n.parentNode) o *= parseFloat(getComputedStyle(n).opacity);
+    return o;
+  }
+  function read(){
+    var vids = [];
+    document.querySelectorAll('video').forEach(function(v){
+      if (v.__obedElId == null) return;
+      var r = v.getBoundingClientRect(), cs = getComputedStyle(v);
+      vids.push({elId: v.__obedElId, x: r.left, y: r.top, w: r.width, h: r.height, readyState: v.readyState,
+                 opaque: document.contains(v) && cs.visibility === 'visible' && cs.display !== 'none' && opacityOf(v) >= 0.99});
+    });
+    return vids;
+  }
+  function tick(ts){
+    if (!window.__obedCarryCover__.on) return;
+    var n = count++ % (1 << BITS);
+    for (var b = 0; b < BITS; b++) {
+      var on = (n >> b) & 1;
+      cells[2 * b].style.background = on ? '#fff' : '#000';
+      cells[2 * b + 1].style.background = on ? '#000' : '#fff';
+    }
+    var row = {ts: ts, tick: n, pre: read()};
+    rows.push(row);
+    if (rows.length > 20000) rows.shift();
+    setTimeout(function(){ row.vids = read(); row.readAt = performance.now(); }, 0);
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+  return performance.timeOrigin;
+})()
+""".replace("__BITS__", str(CARRY_COVER_SYNC_BITS)).replace("__CELL__", str(CARRY_COVER_SYNC_CELL_PX))
+CARRY_COVER_READ_JS = r"""
+(function(){
+  var cc = window.__obedCarryCover__;
+  if (cc) cc.on = false;
+  var core = window.__OBED_P2_PRESERVE__;
+  var notes = [];
+  try {
+    notes = JSON.parse(JSON.stringify(((core && core.events) || []).filter(function(e){
+      return e && e.kind === 'bridge-motion-start';
+    })));
+  } catch (e) {}
+  return {rows: cc ? cc.rows : null, notes: notes};
+})()
+"""
+
+
+def _slot_chain(slot: Any) -> list[dict[str, Any]]:
+    chain, node = [], slot
+    while isinstance(node, dict):
+        chain.append(node)
+        kids = node.get("layers")
+        node = kids[0] if isinstance(kids, list) and len(kids) == 1 else None
+    return chain
+
+
+def _scalar(value: Any) -> float | None:
+    number = value.get("scalar") if isinstance(value, dict) else None
+    return float(number) if isinstance(number, (int, float)) and not isinstance(number, bool) else None
+
+
+def transition_slot(slot: Any) -> dict[str, Any] | None:
+    """One top-level slot of a transition effect: its authored start and settled rects, when its last changing
+    animation ends (None: static) and whether it is still visible once settled. None when unreadable."""
+    chain = _slot_chain(slot)
+    try:
+        wrapper, leaf = chain[0]["initialState"], chain[-1]["initialState"]
+        cx, cy = float(wrapper["position"]["pointX"]), float(wrapper["position"]["pointY"])
+        width, height = float(leaf["width"]), float(leaf["height"])
+        leaf_to = {a.get("property"): a.get("to") for a in live_continuity_module._effect_leaves(chain[-1])}
+        sx = _scalar(leaf_to.get("transform.scale.x")) or 1.0
+        sy = _scalar(leaf_to.get("transform.scale.y")) or 1.0
+        shift = leaf_to.get("transform.translation") or {}
+        tx, ty = float(shift.get("pointX") or 0.0), float(shift.get("pointY") or 0.0)
+        end: float | None = None
+        opacity = 1.0
+        for node in chain:
+            settled = None
+            for anim in live_continuity_module._effect_leaves(node):
+                if anim.get("from") != anim.get("to"):
+                    stop = float(anim.get("beginTime") or 0.0) + float(anim.get("duration") or 0.0)
+                    end = stop if end is None else max(end, stop)
+                if anim.get("property") == "opacity":
+                    settled = _scalar(anim.get("to"))
+            state = node["initialState"].get("opacity", 1.0)
+            opacity *= settled if settled is not None else float(state)
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+        return None
+    return {
+        "start": {"x": cx - width / 2, "y": cy - height / 2, "w": width, "h": height},
+        "settled": {"x": cx + tx - width * sx / 2, "y": cy + ty - height * sy / 2, "w": width * sx, "h": height * sy},
+        "endS": end, "settledVisible": opacity > 0.01,
+    }
+
+
+def _rect_union(a: dict[str, float], b: dict[str, float]) -> dict[str, float]:
+    x0, y0 = min(a["x"], b["x"]), min(a["y"], b["y"])
+    x1, y1 = max(a["x"] + a["w"], b["x"] + b["w"]), max(a["y"] + a["h"], b["y"] + b["h"])
+    return {"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0}
+
+
+def _edges(rect: dict[str, float]) -> tuple[float, float, float, float]:
+    return rect["x"], rect["y"], rect["x"] + rect["w"], rect["y"] + rect["h"]
+
+
+def carry_cover_masks(effect: Any, src_rect: dict[str, float], canvas: dict[str, Any]) -> dict[str, Any]:
+    """Masks for every slot of the boundary's transition effect other than the canvas-filling background and the
+    carried movie (the one slot whose start rect is within `CARRY_COVER_SLOT_MATCH_PX` of the bridge's source rect):
+    the hull of its start and settled rects, masked until its last animation ends plus `CARRY_COVER_FADE_SLACK_S`,
+    or for the whole capture (`untilS` None) when it is static or still visible once settled."""
+    slots = ((effect or {}).get("baseLayer") or {}).get("layers") if isinstance(effect, dict) else None
+    if not isinstance(slots, list) or not slots:
+        return {"problem": "the boundary's transition effect has no readable slots"}
+    masks, carried = [], []
+    for index, slot in enumerate(slots):
+        read = transition_slot(slot)
+        if read is None:
+            return {"problem": f"transition slot {index} has unreadable geometry"}
+        start = read["start"]
+        if start["w"] >= canvas["width"] - 1 and start["h"] >= canvas["height"] - 1:
+            continue
+        if all(abs(a - b) <= CARRY_COVER_SLOT_MATCH_PX for a, b in zip(_edges(start), _edges(src_rect))):
+            carried.append(index)
+            continue
+        until = None if read["endS"] is None or read["settledVisible"] else read["endS"] + CARRY_COVER_FADE_SLACK_S
+        masks.append({"slot": index, "rect": _rect_union(start, read["settled"]), "untilS": until})
+    if len(carried) != 1:
+        return {"problem": f"{len(carried)} transition slots match the bridge's source rect (expected exactly one)"}
+    return {"carriedSlot": carried[0], "masks": masks}
+
+
+def carry_cover_bridges(plan: ContinuityPlan, slides: list[dict[str, Any]], export_root: Path) -> list[dict[str, Any]]:
+    """Every bridge carry the plan states, with its source/destination original ordinals and its masks."""
+    ordinal = {int(s["playerIndex"]): int(s["originalOrdinal"]) for s in slides}
+    uuid_of = {int(s["playerIndex"]): s["exportedUuid"] for s in slides}
+    out = []
+    for boundary in plan.boundaries:
+        for movie in boundary.movies:
+            if movie.action != "bridge" or boundary.to_player_index is None:
+                continue
+            uuid = uuid_of[boundary.from_player_index]
+            events = json.loads((export_root / "assets" / uuid / f"{uuid}.json").read_text())["events"]
+            src = movie.src_rect.as_dict() if movie.src_rect else None
+            entry = {
+                "boundary": f"b{ordinal[boundary.from_player_index]}to{ordinal[boundary.to_player_index]}",
+                "asset": movie.asset, "fromOrdinal": ordinal[boundary.from_player_index],
+                "toOrdinal": ordinal[boundary.to_player_index], "srcRect": src,
+                "dstRect": movie.dst_rect.as_dict() if movie.dst_rect else None,
+                "durationSeconds": boundary.transition_duration,
+            }
+            if src is None or entry["dstRect"] is None or not (boundary.transition_duration or 0) > 0:
+                entry["problem"] = "the plan's bridge has no source/destination rect or positive duration"
+            else:
+                entry.update(carry_cover_masks(
+                    live_continuity_module._boundary_transition(events, uuid), src, plan.canvas,
+                ))
+            out.append(entry)
+    return out
+
+
+def _box(rect: dict[str, float], origin: tuple[int, int], shape: tuple[int, int]) -> tuple[slice, slice] | None:
+    shifted = {"x": rect["x"] - origin[0], "y": rect["y"] - origin[1], "w": rect["w"], "h": rect["h"]}
+    return _raster_box(shifted, shape[1], shape[0])
+
+
+def _dilated(rect: dict[str, float], px: float) -> dict[str, float]:
+    return {"x": rect["x"] - px, "y": rect["y"] - px, "w": rect["w"] + 2 * px, "h": rect["h"] + 2 * px}
+
+
+def carry_cover_roi(src: dict[str, float], dst: dict[str, float], frame_shape: tuple[int, ...]) -> dict[str, int] | None:
+    """Screen px: the union of the bridge's screen source and destination rects plus `CARRY_COVER_MARGIN_PX`,
+    clipped to the frame."""
+    union = _dilated(_rect_union(src, dst), CARRY_COVER_MARGIN_PX)
+    box = _raster_box(union, frame_shape[1], frame_shape[0])
+    if box is None:
+        return None
+    return {"x": box[1].start, "y": box[0].start, "w": box[1].stop - box[1].start, "h": box[0].stop - box[0].start}
+
+
+def carry_cover_background(
+    frame: np.ndarray, roi: dict[str, int], src: dict[str, float], masks: Sequence[dict[str, float]],
+) -> dict[str, Any]:
+    """The background colour of the pre-press reference frame: the median of the ROI outside the dilated source rect
+    and every mask rect, which must be uniform (`CARRY_COVER_BG_MIN_UNIFORM` within `CARRY_COVER_LIT_DELTA`)."""
+    crop = frame[roi["y"]:roi["y"] + roi["h"], roi["x"]:roi["x"] + roi["w"]].astype(np.int16)
+    keep = np.ones(crop.shape[:2], dtype=bool)
+    for rect in (_dilated(src, CARRY_COVER_DILATE_PX), *masks):
+        box = _box(rect, (roi["x"], roi["y"]), crop.shape[:2])
+        if box is not None:
+            keep[box] = False
+    pixels = crop[keep]
+    if len(pixels) < CARRY_COVER_BG_MIN_PX:
+        return {"problem": f"only {len(pixels)} background pixels in the measurement region"}
+    color = np.median(pixels, axis=0).astype(np.int16)
+    uniform = float((np.abs(pixels - color).max(axis=1) <= CARRY_COVER_LIT_DELTA).mean())
+    result = {"color": [int(c) for c in color], "uniformShare": round(uniform, 4), "pixels": int(len(pixels))}
+    if uniform < CARRY_COVER_BG_MIN_UNIFORM:
+        result["problem"] = f"the measurement region's background is not uniform ({uniform:.3f})"
+    return result
+
+
+def carry_cover_exposure(
+    frame: np.ndarray, roi: dict[str, int], background: Sequence[int], overlay: dict[str, float], opaque: bool,
+    masks: Sequence[dict[str, float]],
+) -> dict[str, Any]:
+    """Non-background pixels in the ROI outside `overlay` dilated by `CARRY_COVER_DILATE_PX` and outside `masks`
+    (inside it too when the overlay is not opaque: then nothing covers the poster), as a share of the overlay's area,
+    and the widest strip beyond each overlay edge (columns/rows holding at least `CARRY_COVER_STRIP_MIN_RUN_PX`
+    exposed pixels outside the dilated overlay)."""
+    origin = (roi["x"], roi["y"])
+    crop = frame[roi["y"]:roi["y"] + roi["h"], roi["x"]:roi["x"] + roi["w"]].astype(np.int16)
+    lit = np.abs(crop - np.asarray(background, dtype=np.int16)).max(axis=2) > CARRY_COVER_LIT_DELTA
+    for rect in masks:
+        box = _box(rect, origin, crop.shape[:2])
+        if box is not None:
+            lit[box] = False
+    outside = lit.copy()
+    box = _box(_dilated(overlay, CARRY_COVER_DILATE_PX), origin, crop.shape[:2])
+    if box is not None:
+        outside[box] = False
+    exposed = outside if opaque else lit
+    xs = np.arange(crop.shape[1]) + origin[0]
+    ys = np.arange(crop.shape[0]) + origin[1]
+    cols = xs[outside.sum(axis=0) >= CARRY_COVER_STRIP_MIN_RUN_PX]
+    rows = ys[outside.sum(axis=1) >= CARRY_COVER_STRIP_MIN_RUN_PX]
+    left, top = overlay["x"], overlay["y"]
+    right, bottom = left + overlay["w"], top + overlay["h"]
+    strips = {
+        "left": int(max([math.ceil(left - x) for x in cols if x < left], default=0)),
+        "top": int(max([math.ceil(top - y) for y in rows if y < top], default=0)),
+        "right": int(max([math.floor(x + 1 - right) for x in cols if x >= right], default=0)),
+        "bottom": int(max([math.floor(y + 1 - bottom) for y in rows if y >= bottom], default=0)),
+    }
+    count = int(exposed.sum())
+    area = max(overlay["w"] * overlay["h"], 1.0)
+    return {"exposedPx": count, "exposedFraction": round(count / area, 6), "strips": strips, "opaque": opaque}
+
+
+def _carried_rect(row: dict[str, Any] | None, el_id: Any, key: str = "vids") -> dict[str, Any] | None:
+    for video in (row or {}).get(key) or []:
+        if video.get("elId") == el_id and video.get("w", 0) > 0 and video.get("h", 0) > 0:
+            return video
+    return None
+
+
+def carry_cover_sync_tick(image: np.ndarray) -> int | None:
+    """The rAF tick the sampler's sync bar shows in `image`, or None unless every cell pair is one white, one black."""
+    cell, bits = CARRY_COVER_SYNC_CELL_PX, CARRY_COVER_SYNC_BITS
+    if image.shape[0] < cell or image.shape[1] < 2 * bits * cell:
+        return None
+    levels = image[:cell, :2 * bits * cell].reshape(cell, 2 * bits, cell, -1).mean(axis=(0, 2, 3))
+    tick = 0
+    for bit in range(bits):
+        on, off = levels[2 * bit], levels[2 * bit + 1]
+        if on >= 192 and off <= 63:
+            tick |= 1 << bit
+        elif not (on <= 63 and off >= 192):
+            return None
+    return tick
+
+
+def _cover_ok(fraction: float, strip: int) -> tuple[bool, bool]:
+    return fraction <= CARRY_COVER_MAX_EXPOSED_FRACTION, strip <= CARRY_COVER_MAX_STRIP_PX
+
+
+def _cover_reasons(frames: Sequence[dict[str, Any]], fraction_key: str, strip_key: str) -> tuple[int, int, list[str]]:
+    clean = sum(f[fraction_key] <= CARRY_COVER_MAX_EXPOSED_FRACTION for f in frames)
+    widest = max(f[strip_key] for f in frames)
+    reasons = []
+    if clean / len(frames) < CARRY_COVER_MIN_CLEAN_SHARE:
+        reasons.append(f"{len(frames) - clean}/{len(frames)} mid-move frames expose more than "
+                       f"{CARRY_COVER_MAX_EXPOSED_FRACTION:.1%} of the overlay")
+    if widest > CARRY_COVER_MAX_STRIP_PX:
+        reasons.append(f"a {widest} px strip of the poster shows beyond the overlay (max {CARRY_COVER_MAX_STRIP_PX})")
+    return clean, widest, reasons
+
+
+def score_carry_cover(
+    frames: Sequence[tuple[float, np.ndarray]], rows: Any, notes: Any, bridge: dict[str, Any], stage_map: Any, *,
+    viewport: tuple[int, int] | None = None,
+) -> dict[str, Any]:
+    """`frames`: (page-clock ms, RGB) screencast frames; `rows`: the rAF sampler's rows (`tick`, `pre` read at the
+    tick's start, `vids` read after its frame); `notes`: the core's `bridge-motion-start` notes.
+
+    Each frame is placed at the tick its sync bar names (its timestamp only picks between counter wraps) and scored
+    against both reads of that tick's overlay: its post-frame read and the next tick's pre read. A frame whose reads
+    disagree on the cover rule is undecided; when the undecided frames decide the verdict it is INCONCLUSIVE.
+    PASS: at least `CARRY_COVER_MIN_CLEAN_SHARE` of the scored mid-move frames expose at most
+    `CARRY_COVER_MAX_EXPOSED_FRACTION` of the overlay's area and no strip is wider than `CARRY_COVER_MAX_STRIP_PX`.
+    Coverage: at least `CARRY_COVER_MIN_FPS` scored frames per second, no stretch of the mid-move window longer than
+    `CARRY_COVER_MAX_GAP_FRAMES` (+ half) rAF ticks without one, and at most `CARRY_COVER_MAX_DISCARDED_SHARE` of its
+    frames unplaceable. Every integrity or coverage gap is INCONCLUSIVE, never a pass."""
+    def inconclusive(*reasons: str, **detail: Any) -> dict[str, Any]:
+        return {"verdict": "inconclusive", "reasons": list(reasons), **detail}
+
+    if bridge.get("problem"):
+        return inconclusive(bridge["problem"])
+    if not stage_map_valid(stage_map):
+        return inconclusive("stage map unreadable")
+    motion = [
+        n for n in notes or []
+        if isinstance(n, dict) and n.get("kind") == "bridge-motion-start" and isinstance(n.get("detail"), dict)
+    ]
+    if len(motion) != 1 or not isinstance(motion[0].get("t"), (int, float)):
+        return inconclusive(f"no move window: {len(motion)} bridge-motion-start notes (expected exactly one)")
+    t0, el_id = float(motion[0]["t"]), motion[0]["detail"].get("elId")
+    duration_ms = 1000.0 * float(bridge["durationSeconds"])
+    rows = [
+        r for r in rows or []
+        if isinstance(r, dict) and isinstance(r.get("ts"), (int, float)) and isinstance(r.get("tick"), int)
+    ]
+    in_move = [v for r in rows if t0 <= r["ts"] <= t0 + duration_ms for v in [_carried_rect(r, el_id)] if v]
+    if not in_move:
+        return inconclusive("no carried decoder sampled during the move", elId=el_id)
+    if not any((v.get("readyState") or 0) >= 2 for v in in_move):
+        return inconclusive("the carried decoder never decoded during the move", elId=el_id)
+    ticks = [r["ts"] for r in rows if t0 <= r["ts"] <= t0 + duration_ms]
+    cadence = float(np.median(np.diff(ticks))) if len(ticks) > 1 else math.inf
+    if cadence > 1000.0 / CARRY_COVER_MIN_FPS:
+        return inconclusive(f"the page's rAF ticked every {cadence:.1f} ms during the move "
+                            f"(slower than {CARRY_COVER_MIN_FPS:g} fps)", elId=el_id)
+    if not frames:
+        return inconclusive("no screencast frames")
+    shape = frames[0][1].shape
+    shapes = {f[1].shape[:2] for f in frames}
+    if len(shapes) != 1 or (viewport is not None and shape[:2] != (viewport[1], viewport[0])):
+        return inconclusive(f"screencast frame sizes {sorted(shapes)} are not the {viewport} viewport")
+    src = to_screen_rect(bridge["srcRect"], stage_map)
+    dst = to_screen_rect(bridge["dstRect"], stage_map)
+    roi = carry_cover_roi(src, dst, shape)
+    if roi is None:
+        return inconclusive("the measurement region is off-frame")
+    near = _dilated(_rect_union(src, dst), CARRY_COVER_DILATE_PX + CARRY_COVER_MAX_STRIP_PX + 1)
+    if rects_overlap(near, CARRY_COVER_SYNC_RECT, 0):
+        return inconclusive("the probe's sync bar lies on the carried movie's path, where it would hide exposure")
+    masks = [{**m, "screen": to_screen_rect(m["rect"], stage_map)} for m in bridge.get("masks") or []]
+    masks.append({"slot": "sync", "screen": dict(CARRY_COVER_SYNC_RECT), "untilS": None})
+    by_tick: dict[int, list[int]] = {}
+    for index, row in enumerate(rows):
+        by_tick.setdefault(row["tick"], []).append(index)
+    placed = []
+    for pts, image in frames:
+        tick = carry_cover_sync_tick(image)
+        near = [i for i in by_tick.get(tick, []) if abs(rows[i]["ts"] - pts) <= CARRY_COVER_SYNC_MAX_SKEW_MS]
+        index = min(near, key=lambda i: abs(rows[i]["ts"] - pts)) if near else None
+        placed.append((pts if index is None else rows[index]["ts"], pts, image, tick, index))
+    before = [p for p in placed if p[4] is not None and p[0] < t0]
+    if not before:
+        return inconclusive("no pre-press reference frame")
+    background = carry_cover_background(before[-1][2], roi, src, [m["screen"] for m in masks])
+    if background.get("problem"):
+        return inconclusive(background["problem"], background=background)
+    lo, hi = (t0 + duration_ms * share for share in CARRY_COVER_MID_MOVE)
+    mid = [p for p in placed if lo <= p[0] <= hi]
+    need = math.ceil(CARRY_COVER_MIN_FPS * (hi - lo) / 1000.0)
+    detail: dict[str, Any] = {
+        "t0": t0, "elId": el_id, "roi": roi, "background": background, "midWindowMs": [lo, hi],
+        "midFrames": len(mid), "minFrames": need, "cadenceMs": round(cadence, 2),
+    }
+    wrap = 1 << CARRY_COVER_SYNC_BITS
+    per_frame = []
+    for at, pts, image, tick, index in mid:
+        entry: dict[str, Any] = {"pts": round(pts, 2), "tick": tick}
+        if index is None:
+            per_frame.append({**entry, "unaligned": "no sync bar" if tick is None else "no sampler row for its tick"})
+            continue
+        row = rows[index]
+        after = rows[index + 1] if index + 1 < len(rows) else None
+        if after is not None and after["tick"] != (row["tick"] + 1) % wrap:
+            after = None
+        reads = [
+            (name, v) for name, v in (("post", _carried_rect(row, el_id)), ("pre", _carried_rect(after, el_id, "pre"))) if v
+        ]
+        if not reads:
+            per_frame.append({**entry, "unaligned": "the carried video was not sampled at its tick"})
+            continue
+        active = [m["screen"] for m in masks if m["untilS"] is None or at - t0 <= 1000.0 * m["untilS"]]
+        scored = []
+        for name, video in reads:
+            overlay = {k: float(video[k]) for k in ("x", "y", "w", "h")}
+            measured = carry_cover_exposure(image, roi, background["color"], overlay, bool(video.get("opaque")), active)
+            scored.append({"read": name, "overlay": {k: round(v, 2) for k, v in overlay.items()}, **measured})
+        widths = [max(s["strips"].values()) for s in scored]
+        fractions = [s["exposedFraction"] for s in scored]
+        per_frame.append({
+            **entry, "domTs": round(at, 2), "dt": round(at - t0, 2),
+            "exposedPx": max(s["exposedPx"] for s in scored), "exposedFraction": max(fractions),
+            "strips": {side: max(s["strips"][side] for s in scored) for side in scored[0]["strips"]},
+            "stripPx": max(widths), "bestExposedFraction": min(fractions), "bestStripPx": min(widths),
+            "opaque": all(s["opaque"] for s in scored),
+            "undecided": len({_cover_ok(f, w) for f, w in zip(fractions, widths)}) > 1, "reads": scored,
+        })
+    detail["frames"] = per_frame
+    aligned = [f for f in per_frame if "unaligned" not in f]
+    discarded = len(per_frame) - len(aligned)
+    edges = [lo, *sorted({f["domTs"] for f in aligned}), hi]
+    max_gap = max(b - a for a, b in zip(edges, edges[1:]))
+    allowed_gap = (CARRY_COVER_MAX_GAP_FRAMES + 0.5) * cadence
+    detail.update(
+        alignedFrames=len(aligned), discardedFrames=discarded,
+        discardedShare=round(discarded / len(per_frame), 4) if per_frame else None,
+        maxGapMs=round(max_gap, 2), maxGapAllowedMs=round(allowed_gap, 2),
+        undecidedFrames=sum(f["undecided"] for f in aligned),
+    )
+    gaps = []
+    if len(aligned) < need:
+        gaps.append(f"too few aligned mid-move frames ({len(aligned)} < {need})")
+    if max_gap > allowed_gap:
+        gaps.append(f"a {max_gap:.0f} ms stretch of the mid-move window has no scored frame (max {allowed_gap:.0f} ms: "
+                    f"{CARRY_COVER_MAX_GAP_FRAMES} ticks at the observed {cadence:.1f} ms cadence)")
+    if per_frame and discarded / len(per_frame) > CARRY_COVER_MAX_DISCARDED_SHARE:
+        gaps.append(f"{discarded}/{len(per_frame)} mid-move frames could not be placed at a sampled tick "
+                    f"(max {CARRY_COVER_MAX_DISCARDED_SHARE:.0%})")
+    if gaps:
+        return inconclusive(*gaps, **detail)
+    clean, widest, reasons = _cover_reasons(aligned, "exposedFraction", "stripPx")
+    detail.update(cleanShare=round(clean / len(aligned), 4), maxStripPx=widest,
+                  maxExposedFraction=max(f["exposedFraction"] for f in aligned))
+    if bool(reasons) != bool(_cover_reasons(aligned, "bestExposedFraction", "bestStripPx")[2]):
+        return inconclusive(f"{detail['undecidedFrames']} mid-move frames have overlay reads that disagree on the "
+                            "cover rule, and they decide the verdict", **detail)
+    return {"verdict": "fail" if reasons else "pass", "reasons": reasons, **detail}
+
+
+def carry_cover_capture_problems(capture: dict[str, Any], bridge: dict[str, Any]) -> list[str]:
+    problems = []
+    if not capture.get("settled"):
+        problems.append(f"slide {bridge['fromOrdinal']} never settled before the press")
+    if capture.get("screencastErrors"):
+        problems.append(f"screencast error: {capture['screencastErrors']}")
+    if capture.get("arrived") != bridge["toOrdinal"]:
+        problems.append(f"the press did not reach slide {bridge['toOrdinal']} (at {capture.get('arrived')})")
+    return problems
+
+
+def carry_cover_status(continuity: Any, bridges: Sequence[dict[str, Any]]) -> tuple[str, list[str]]:
+    """Integrity first: no bridge, continuity not installed, or any bridge INCONCLUSIVE is INCONCLUSIVE; else any FAIL
+    is FAIL; else PASS."""
+    mode = continuity.get("mode") if isinstance(continuity, dict) else None
+    if mode != "qualified":
+        return "inconclusive", [f"continuity runtime not installed (mode {mode!r})"]
+    if not bridges:
+        return "inconclusive", ["the plan carries no bridge"]
+    verdicts = [(b["boundary"], b.get("result") or {"verdict": "inconclusive", "reasons": ["not measured"]}) for b in bridges]
+    for want in ("inconclusive", "fail"):
+        hit = [f"{name}: {why}" for name, r in verdicts if r.get("verdict") == want for why in r.get("reasons") or [want]]
+        if hit:
+            return want, hit
+    if any(r.get("verdict") != "pass" for _, r in verdicts):
+        return "inconclusive", [f"{name}: verdict {r.get('verdict')!r}" for name, r in verdicts]
+    return "pass", []
+
+
+def _screencast(
+    ws_url: str, frames: list[tuple[Any, str]], stop: threading.Event, errors: list[str], size: tuple[int, int],
+) -> None:
+    try:
+        with ws_connect(ws_url, max_size=None, open_timeout=5) as ws:
+            ws.send(json.dumps({"id": 1, "method": "Page.startScreencast", "params": {
+                "format": "png", "maxWidth": size[0], "maxHeight": size[1], "everyNthFrame": 1}}))
+            while not stop.is_set():
+                try:
+                    message = json.loads(ws.recv(timeout=0.25))
+                except TimeoutError:
+                    continue
+                if message.get("method") == "Page.screencastFrame":
+                    params = message["params"]
+                    ws.send(json.dumps({"id": 1000 + len(frames), "method": "Page.screencastFrameAck",
+                                        "params": {"sessionId": params["sessionId"]}}))
+                    frames.append(((params.get("metadata") or {}).get("timestamp"), params["data"]))
+            ws.send(json.dumps({"id": 2, "method": "Page.stopScreencast"}))
+    except Exception as exc:  # noqa: BLE001 - surfaced as an integrity gap, never a pass
+        errors.append(repr(exc))
+
+
+def page_target_ws_url(port: int) -> str:
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=3) as response:
+        pages = [t for t in json.loads(response.read()) if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
+    if len(pages) != 1:
+        raise RuntimeError(f"expected exactly one page target, found {len(pages)}")
+    return pages[0]["webSocketDebuggerUrl"]
+
+
+def capture_carry_cover(
+    export: Path, slides: list[dict[str, Any]], bridge: dict[str, Any], viewport: tuple[int, int], *, hide_overlay: bool,
+) -> dict[str, Any]:
+    """One host session: reach the bridge's source slide, let it settle, then screencast the page and rAF-sample the
+    carried <video> from `CARRY_COVER_PREROLL_S` before the advance press until the transition plus
+    `CARRY_COVER_TAIL_S` after it."""
+    capture: dict[str, Any] = {}
+    player = LiveOutputHost(export, slides, headless=True)
+    try:
+        player.start()
+        capture["continuity"] = player.output.get("continuity")
+        warm_up_for_screenshots(player)
+        transport = player._require_transport()
+        if bridge["fromOrdinal"] > 1:
+            advance_until_original_slide(player, bridge["fromOrdinal"])
+        capture["settled"] = wait_until_settled(player)
+        time.sleep(CLICK_DELAY_S)
+        if hide_overlay:
+            transport.evaluate(CARRY_COVER_HIDE_OVERLAY_JS)
+        capture["stageMap"] = transport.evaluate(STAGE_MAP_JS)
+        capture["timeOrigin"] = transport.evaluate(CARRY_COVER_SAMPLER_JS)
+        raw: list[tuple[Any, str]] = []
+        errors: list[str] = []
+        stop = threading.Event()
+        thread = threading.Thread(
+            target=_screencast, args=(page_target_ws_url(transport.port), raw, stop, errors, viewport), daemon=True,
+        )
+        thread.start()
+        try:
+            time.sleep(CARRY_COVER_PREROLL_S)
+            player.execute("advance")
+            time.sleep(float(bridge["durationSeconds"]) + CARRY_COVER_TAIL_S)
+        finally:
+            stop.set()
+            thread.join(10)
+        capture["screencastErrors"] = errors
+        capture["read"] = transport.evaluate(CARRY_COVER_READ_JS)
+        capture["arrived"] = player.observe().original_slide
+    finally:
+        try:
+            player.stop()
+        except Exception as exc:  # noqa: BLE001 - record, never mask an earlier failure
+            capture["stopError"] = str(exc)
+    origin = capture.get("timeOrigin")
+    capture["frames"] = [
+        (float(ts) * 1000.0 - float(origin), decode_png(data))
+        for ts, data in raw if isinstance(ts, (int, float)) and isinstance(origin, (int, float))
+    ]
+    return capture
+
+
+def run_carry_cover(args: argparse.Namespace) -> dict[str, Any]:
+    root = run_root(args.artifact)
+    plan_export = prepare_export(args.fixture, args.original_index, root, "carry-cover-plan")
+    plan_slides = load_slides(plan_export)
+    bridges = carry_cover_bridges(ground_truth_plan(plan_export, plan_slides), plan_slides, plan_export)
+    result: dict[str, Any] = {"bridges": bridges}
+    force_viewport(*args.viewport)
+    evidence = evidence_dir_of(args.artifact)
+    continuity: Any = None
+    with ExitStack() as stack:
+        result["coreSha256"] = (
+            stack.enter_context(injected_core_variant(args.core_variant)) if args.core_variant else js_sha256()
+        )
+        for bridge in bridges:
+            if bridge.get("problem"):
+                bridge["result"] = {"verdict": "inconclusive", "reasons": [bridge["problem"]]}
+                continue
+            export = prepare_export(args.fixture, args.original_index, root, f"carry-cover-{bridge['boundary']}")
+            capture = capture_carry_cover(
+                export, load_slides(export), bridge, args.viewport, hide_overlay=args.carry_cover_null,
+            )
+            continuity = capture.get("continuity")
+            frames = capture.pop("frames")
+            read = capture.pop("read", None) or {}
+            scored = score_carry_cover(frames, read.get("rows"), read.get("notes"), bridge, capture.get("stageMap"),
+                                       viewport=args.viewport)
+            problems = carry_cover_capture_problems(capture, bridge)
+            if problems:
+                scored = {**scored, "verdict": "inconclusive", "reasons": problems, "measured": scored.get("verdict")}
+            bridge["capture"] = {**capture, "frameCount": len(frames), "notes": read.get("notes")}
+            bridge["result"] = scored
+            worst = max((f for f in scored.get("frames") or [] if "exposedPx" in f), key=lambda f: f["exposedPx"], default=None)
+            if worst is not None:
+                image = next(img for pts, img in frames if round(pts, 2) == worst["pts"])
+                evidence.mkdir(parents=True, exist_ok=True)
+                path = evidence / f"carry-cover-{bridge['boundary']}-worst.png"
+                cv2.imwrite(str(path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+                scored["worstFrame"] = {"path": str(path), "pts": worst["pts"], "exposedPx": worst["exposedPx"]}
+    result["continuity"] = continuity
+    result["status"], result["reasons"] = carry_cover_status(continuity, bridges)
+    return result
+
+
+def run_carry_cover_cli(args: argparse.Namespace) -> None:
+    artifact = args.artifact
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    control = "null" if args.carry_cover_null else "red" if args.core_variant else "green"
+    result: dict[str, Any] = {
+        "kind": "live-continuity-probe-carry-cover", "status": "running", "control": control,
+        "coreVariant": args.core_variant, "fixture": str(args.fixture), "originalIndex": str(args.original_index),
+        "viewport": {"width": args.viewport[0], "height": args.viewport[1]},
+        "thresholds": {
+            "dilatePx": CARRY_COVER_DILATE_PX, "marginPx": CARRY_COVER_MARGIN_PX, "litDelta": CARRY_COVER_LIT_DELTA,
+            "maxExposedFraction": CARRY_COVER_MAX_EXPOSED_FRACTION, "minCleanShare": CARRY_COVER_MIN_CLEAN_SHARE,
+            "maxStripPx": CARRY_COVER_MAX_STRIP_PX, "stripMinRunPx": CARRY_COVER_STRIP_MIN_RUN_PX,
+            "midMove": list(CARRY_COVER_MID_MOVE), "minFps": CARRY_COVER_MIN_FPS,
+            "maxGapFrames": CARRY_COVER_MAX_GAP_FRAMES, "maxDiscardedShare": CARRY_COVER_MAX_DISCARDED_SHARE,
+            "syncBits": CARRY_COVER_SYNC_BITS, "syncCellPx": CARRY_COVER_SYNC_CELL_PX,
+            "syncMaxSkewMs": CARRY_COVER_SYNC_MAX_SKEW_MS,
+            "fadeSlackS": CARRY_COVER_FADE_SLACK_S,
+        },
+    }
+
+    def save() -> None:
+        artifact.write_text(json.dumps(result, indent=2, default=str) + "\n")
+
+    save()
+    try:
+        result.update(run_carry_cover(args))
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - always leave a readable artifact behind
+        result["status"] = "error"
+        result["error"] = str(exc)
+    finally:
+        result["leftoverChrome"] = check_no_leftover_chrome()
+        save()
+    print(json.dumps({key: result.get(key) for key in ("status", "control", "coreVariant", "reasons", "error")}, indent=2))
+    if result.get("status") != "pass":
+        raise SystemExit(1)
+
+
+
 def main() -> None:
     args = parse_args()
     with run_scope(args.rescore if args.rescore is not None else args.artifact):
@@ -5900,6 +6594,9 @@ def run_cli(args: argparse.Namespace) -> None:
         return
     if args.force_wrap is not None:
         run_force_wrap_cli(args)
+        return
+    if args.carry_cover:
+        run_carry_cover_cli(args)
         return
     if args.strip is not None or args.core_variant is not None:
         run_red_arm_cli(args)

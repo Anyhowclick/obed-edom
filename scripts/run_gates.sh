@@ -46,6 +46,11 @@ if [[ $TIER == full ]]; then
 else
   HOST_RED_ARMS=()
 fi
+# Carry-cover gate (rubber band, 2026-10-10): P2's 3->4 bridge carry screencast; the GL poster must not show beyond the
+# moving overlay. Full tier only: "<expected status> [probe args]" -- the default core must pass, today's linear overlay
+# (red, --core-variant linear-bridge) and a hidden overlay (null, --carry-cover-null) must fail.
+CARRY_COVER_ARMS=("pass" "fail --core-variant linear-bridge" "fail --carry-cover-null")
+[[ $TIER == full ]] || CARRY_COVER_ARMS=()
 # P2 arms: p2 <tier> "<expected red>" "<expected inconclusive>" <args>; tier dev runs in both tiers, full only in full.
 # --skip-freeze-bracket goes on every arm but the two positive bracket arms, which must run it. As in P2 itself, the flag
 # is refused on any arm that is not a red arm (--core-variant, --strip, --disable-bridge34) unless it is a DOM
@@ -308,6 +313,41 @@ sys.exit((3 if exp=="record" else 0) if ok else 1)
 PYEOF
 }
 for A in $HOST_RED_ARMS; do run_host_red ${=A}; done
+# A carry-cover run matches only with this round's exit (0 for pass, 1 for fail), a carry-cover artifact whose status is
+# the expected one, whose control and core variant are the ones its arguments imply, and whose installed continuity core
+# sha is that variant's (else today's). Inconclusive, error, no artifact, a missing or stale status: FAILED, never pending.
+run_cc(){ shift; n=$(echo "$*" | tr -d ' ')
+  queue $O/carry-cover$n $PY -u scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport 1920x1080 --carry-cover --artifact $O/carry-cover$n.json "$@"; }
+check_cc(){ label=${(j: :)@[2,-1]}; n=${label// /}; $PY - "$O/carry-cover$n.json" "$(status_of $O/carry-cover$n)" "$@" <<'PYEOF' || fail "CARRY-COVER ${label:-green}"
+import json,sys
+sys.path.insert(0,"scripts")
+from continuity_core_variants import variant_sha
+from obed_edom.live_continuity_js import js_sha256
+path,rc,want,args=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4:]
+variant=args[args.index("--core-variant")+1] if "--core-variant" in args else None
+control="null" if "--carry-cover-null" in args else "red" if variant else "green"
+label=" ".join(args) or "green"
+try: want_sha=variant_sha(variant) if variant else js_sha256()
+except Exception as e: print(f"[CARRY-COVER {label}] no expected core sha ({e}) exit={rc}"); sys.exit(1)
+try: d=json.load(open(path))
+except Exception as e: print(f"[CARRY-COVER {label}] no artifact ({e}) exit={rc}"); sys.exit(1)
+d=d if isinstance(d,dict) else {}
+sha=(d.get("continuity") or {}).get("sha256") if isinstance(d.get("continuity"),dict) else None
+print(f"[CARRY-COVER {label}] control={d.get('control')} status={d.get('status')} (want {want}) exit={rc} core sha {sha} (want {want_sha})")
+for r in d.get("reasons") or []: print(f"    {r}")
+if d.get("error"): print(f"    error: {d['error']}")
+problems=[]
+if d.get("kind")!="live-continuity-probe-carry-cover": problems.append(f"not a carry-cover artifact (kind={d.get('kind')!r})")
+if d.get("control")!=control: problems.append(f"control {d.get('control')!r} != {control!r}")
+if d.get("coreVariant")!=variant: problems.append(f"coreVariant {d.get('coreVariant')!r} != {variant!r}")
+if sha!=want_sha or d.get("coreSha256")!=want_sha: problems.append("installed core sha is not the arm's")
+if d.get("status")!=want: problems.append(f"status {d.get('status')!r} != {want!r}")
+if rc!=("0" if want=="pass" else "1"): problems.append(f"exit {rc} does not agree with {want}")
+for p in problems: print(f"    MISMATCH: {p}")
+sys.exit(1 if problems else 0)
+PYEOF
+}
+for A in $CARRY_COVER_ARMS; do run_cc ${=A}; done
 # Each P2 arm runs in its own --out-dir.
 run_p2(){ shift 2; n=$(echo "$*" | tr -d ' ')
   queue "$O/p2$n" $PY scripts/p2_recovery_html_adversarial.py --reuse-export --disposable --out-dir "$O/p2$n" "$@"; }
@@ -316,6 +356,7 @@ for A in "${P2_ARMS[@]}"; do run_p2 "${(@Q)${(z)A}}"; done
 wait
 for V in $HOST_VIEWPORTS; do check_host $V; done
 for A in $HOST_RED_ARMS; do check_host_red ${=A}; tally $? "HOST red $A"; done
+for A in $CARRY_COVER_ARMS; do check_cc ${=A}; done
 for A in "${P2_ARMS[@]}"; do check_p2 "${(@Q)${(z)A}}"; done
 $PY -c "from obed_edom.live_continuity_js import js_sha256; print('runtime sha at end', js_sha256())"
 pgrep -fl obed-live-chrome | cut -c1-80 | head -2
