@@ -1,0 +1,32 @@
+NON-INTERACTIVE. Do not propose a plan, do not ask for approval, do not edit any file. You are ROUND 3 of the critique on a written implementation plan. Read files, verify claims, output findings only.
+
+# Target
+Plan rev 4 (commit 4ffcd8ad; rev 3 = f3bd8b55, rev 2 = cd289a05, rev 1 = 8e572864 on the same branch; `git diff f3bd8b55 4ffcd8ad -- .agents/plans/keynote_live_dissolve_crossfade.plan.md` shows the latest change):
+/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/.agents/plans/keynote_live_dissolve_crossfade.plan.md
+Repo worktree (origin/main 1589d096): /Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851
+Your earlier rounds: .agents/reviews/dissolve-crossfade/plan-astra-r1.md and plan-astra-r2.md in that worktree.
+Main checkout (git-ignored fixtures/evidence): /Users/anyhowclick/Desktop/work/obed-edom/output/ — players at output/fixtures/p2-recovery/html-adversarial/html-unmodified/assets/player/main.js (e9b2fad4) and output/fixtures/keynote-player-17c0c938/main.js (17c0c938); planning scratch (scripts, Node checks, result JSON) at output/evidence/s2-dev/dissolve-alpha-2026-10-11/plan-2026-10-11/{planner,rootcause,coord}/.
+S2 branch: read via git refs only (origin/claude/s2-detach-fix).
+
+# What changed since round 2
+Rev 3 folded your round 2 (the cross-fade became "commit before construct": verified stylesheet rules for the ids the player will allocate, no post-draw path). The owner then decided (2026-10-11, recorded in §12): (1) fold into the existing mm_opacity switch; (2) every output; (3) F1 — the `none` cut's union frame — is fixed in THIS patch, F2 (other transitions) is a separate follow-up; (4) F3 — the outgoing movie freezes on its current frame and fades with slide 2, the owner's observation of the Keynote app ("in Keynote the vid stops playing and dissolves out") — is in THIS patch. Rev 4 adds: the cut shape to the D1/D2 predicate and copy; D3 (post-draw, add-only attach of frozen holders inside the outgoing opacity wrapper) and D4 (snapshot of every qualifying visible <video> via drawImage in `jumpToScene_partFour`, before `displayScene` tears the live slide down); a media gate (DX-M on the binary counter fixture `output/p2-binary`); cut arms; and new owner question 5 (accept an ~11/255 mid-tone step at the freeze from the drawImage tone path, vs moving/pausing the live <video>, which crosses both continuity cores).
+
+Owner rules: never modify main.js on disk (in-memory, count-checked, sha-pinned replacements; unknown players refused); minimal tests (max coverage, fewest tests, parametrized); validate instruments with null + positive controls; integrity failures INCONCLUSIVE and never satisfy an expected FAIL; owner questions only where the answer changes the design, each with a recommendation.
+
+# Your job
+A. Status of every round-2 finding (r2-1 … r2-7) under rev 4: closed / partly closed / open / regressed (the D3 post-draw step is new — check it does not reopen r2-1's class for the cross-fade, and that its own failure model holds).
+B. NEW content, verified against primary sources (re-run cheap checks: anchor counts in both players, containment including self, order independence of R1–R5 / R6–R8 / D1–D4, `node --check` of the patched players — build them in memory/stdout, do not write files):
+   1. D4 anchor/replacement and scope: `PB.prototype.__obedFreezeTake(this,A)` is valid at that site (strict mode, module scope of `PB`, `UC`, `TB`); the `B` guard covers exactly the paths that play now; every other caller of `displayScene` (go-to, hyperlink, initial display, loop) and what the plan says about each.
+   2. The freeze logic: visibility (ancestor-opacity product up to #stage, checkVisibility options supported in CEF 127), geometry (object-fit, clipping ancestors, mapping into slide px via the live base layer rect — correct under letterboxed viewports, 2560×1440 stage origin (0,0), DSF ≠ 1, the host's alpha/screen pages), opaque-frame probe, "never touches the <video>" claim, which element is visible when continuity pins/bridges or G2 are active, the holder attach point (`layer<out>-opacity`, cut fallback), what happens when the transition is NOT engaged after a take, memory/cleanup, and races (queued keys, automatic play, go-to mid-dissolve, a second advance before D3).
+   3. The cut: arithmetic of the mirrored `hidden` animation (keyframe semantics of `hidden` → opacity/visibility in `WB`), `fillMode`, the render→animate gap, and whether the measured stock union frame (2 of 27 rAFs) is a valid stimulus given every on-disk cut goes to an empty background (the `p2cut` in-memory rewrite).
+   4. The media gate: frozen-index and frozen-region statistics, their controls (`m-paused`, `m-off`, `m-hold`), and whether each check FAILS its negative; tone-step measurement and how owner question 5 interacts with acceptance; CEF (DX-2) coverage of the drawImage path.
+   5. Interplay: main's continuity core (`live_continuity*.py` on main) really sees no change; S2's needed change is stated correctly (live_continuity_js.py at d88584eb); p2 adversarial findings at 2→3 (`deliberateRestart2to3`, bridge-off timing) and run_gates expectations that the frozen counter could move.
+   6. Owner question 5: is it design-changing, are both options' costs stated accurately, is the recommendation sound?
+   7. Tests and streams: still minimal and disjoint; anything W1–W4 cannot do without touching another stream's files.
+C. CLOSING SWEEP: one inventory table over every verifiable claim class in rev 4 (anchors/offsets; each replacement's code paths incl. failure; arithmetic + preconditions; browser support; switch/pins/report; scope table rows; each interplay row; each gate arm incl. DX-M and cut arms; each lifecycle row; each test; each stream; each owner decision/question) with status VERIFIED / FINDING # / NOT VERIFIABLE STATICALLY (what measurement settles it; is it scheduled in Q0b/DX-1/DX-2/DX-3).
+
+# Output format
+Part A: table r2 # | status | evidence | remaining fix wording.
+Part B: numbered NEW findings, most severe first: **Severity** (blocker / major / minor / nit), **Class** (new class / closed class / edge case), plan section, claim, evidence (file:line or byte offset, command summary), exact fix wording.
+Part C: the inventory table.
+End with a one-line verdict: ready for owner review / ready for owner review after listed fixes / needs another planning pass.
