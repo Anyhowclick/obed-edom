@@ -31,7 +31,7 @@ def test_continuity_version_is_pinned_int():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "7b1e04bad741ae6fc08e251e062afb1cc071b8cbed9523ef76e63c65c59b1efc"
+PINNED_CORE_SHA256 = "a9e1e66a2445d886ff500bfdc084e31a8f617e5ded2290098904931ae9a48be0"
 
 
 def test_js_sha256_hashes_the_core_bytes_and_matches_the_pinned_literal():
@@ -862,23 +862,25 @@ __AFTER_CORE__
 _LOADED = "document.readyState = 'complete';"
 
 
-def _full_harness(*, plan: dict, stage: dict | None, script: str, after_core: str = _LOADED) -> str:
-    """The real `PRESERVE_CORE_JS` IIFE against the fake DOM above, then
+def _full_harness(
+    *, plan: dict, stage: dict | None, script: str, after_core: str = _LOADED, before_core: str = ""
+) -> str:
+    """`before_core` (page scripts that ran first), the real `PRESERVE_CORE_JS` IIFE against the fake DOM above, then
     `after_core` (the rest of the page's inline scripts, then the load), then
     `script` (which must `console.log(JSON.stringify(...))` its result)."""
     return (
         _FULL_HARNESS_PREAMBLE.replace("__STAGE__", json.dumps(stage))
         .replace("__PLAN__", json.dumps(plan))
         .replace("__AFTER_CORE__", after_core)
-        .replace("__CORE__", live_continuity_js.PRESERVE_CORE_JS)
+        .replace("__CORE__", before_core + "\n" + live_continuity_js.PRESERVE_CORE_JS)
         + script
     )
 
 
 def _run_full_core_in_node(
-    *, plan: dict, stage: dict | None, script: str, after_core: str = _LOADED
+    *, plan: dict, stage: dict | None, script: str, after_core: str = _LOADED, before_core: str = ""
 ) -> dict:
-    harness = _full_harness(plan=plan, stage=stage, script=script, after_core=after_core)
+    harness = _full_harness(plan=plan, stage=stage, script=script, after_core=after_core, before_core=before_core)
     return json.loads(_node_stdout(harness).strip().splitlines()[-1])
 
 
@@ -1721,6 +1723,13 @@ console.log(JSON.stringify({
 """
 
 
+#: A late install: main.js ran first and its loop has a callback queued on the raw `requestAnimFrame`, unwrapped.
+_GL_CLOCK_LATE_INSTALL = """
+window.requestAnimFrame = requestAnimationFrame;
+window.requestAnimFrame(function again() { window.requestAnimFrame(again); });
+"""
+
+
 def _gl_timeline(*steps: tuple) -> tuple[list[dict], list]:
     """`(op, t, expected)` steps -> (the ops, the expected ms into the move at each recorded rect; None = source)."""
     ops, expected = [], []
@@ -1761,13 +1770,13 @@ def _pick(timeline: tuple, column: int) -> tuple:
 
 
 @pytest.mark.parametrize(
-    "variant,timeline,clocks,motion_starts",
+    "variant,before_core,timeline,clocks,motion_starts",
     [
-        pytest.param(None, _gl_timeline(*_pick(_TIMELINE_1, 0)), [["gl", 7]], 1, id="gl"),
+        pytest.param(None, "", _gl_timeline(*_pick(_TIMELINE_1, 0)), [["gl", 7]], 1, id="gl"),
         # No loop start: the overlay holds the source until GL_CLOCK_WAIT_MS on `performance.now()` (a `Date` step
         # inside the wait does not move the deadline), then runs today's clock from the trigger; a loop start after
         # the fallback engaged changes nothing.
-        pytest.param(None, _gl_timeline(
+        pytest.param(None, "", _gl_timeline(
             ("detach", 1000, None),
             ("step", None, None, {"ms": 500}),
             ("pump", 1020, None),
@@ -1778,15 +1787,14 @@ def _pick(timeline: tuple, column: int) -> tuple:
             ("pump", 1375, 375),
             ("pump", 2500, 1500),
         ), [["fallback", 50]], 1, id="fallback"),
-        # Mid-move the hash leaves #7 and comes back without `clear()`, then the second write: a new occurrence.
-        # The same pooled decoder, re-driven by `remountAll()`, starts a new motion that holds the source until its
-        # own loop start, and notes its own clock.
-        pytest.param(None, _gl_timeline(
+        # Mid-move the hash leaves #7 and comes back without `clear()` and with no frame in between, then the second
+        # write: a new occurrence. The same pooled decoder, re-driven by `remountAll()`, starts a new motion that takes
+        # the ride over from the old one, holds the source until its own loop start, and notes its own clock.
+        pytest.param(None, "", _gl_timeline(
             ("detach", 1000, None),
             ("loop", 1007, None),
             ("pump", 1382, 375),
             ("write", 1382, None, {"hash": 8}),
-            ("pump", 1390, 375),
             ("write", 1400, None, {"hash": 7}),
             ("write", 1400, None, {"hash": 7}),
             ("remountAll", 1400, None),
@@ -1794,12 +1802,29 @@ def _pick(timeline: tuple, column: int) -> tuple:
             ("loop", 1409, None),
             ("pump", 2159, 750),
         ), [["gl", 7], ["gl", 9]], 2, id="re-departure"),
+        # A late install: the queued callback of main.js's loop re-arms at +4, before the native frame queued at
+        # install, so that departure cannot tell it from a loop start and falls back although Keynote starts at +7.
+        # Once that frame has run, the loop's re-arms are wrapped, and the next departure stamps its own loop start.
+        pytest.param(None, _GL_CLOCK_LATE_INSTALL, _gl_timeline(
+            ("detach", 1000, None),
+            ("pump", 1004, None),
+            ("loop", 1007, None),
+            ("pump", 1049, None),
+            ("pump", 1050, 50),
+            ("write", 1100, None, {"hash": 8}),
+            ("write", 1110, None, {"hash": 7}),
+            ("write", 1110, None, {"hash": 7}),
+            ("remountAll", 1110, None),
+            ("pump", 1114, None),
+            ("loop", 1117, None),
+            ("pump", 1867, 750),
+        ), [["fallback", 50], ["gl", 7]], 2, id="late-install"),
         # The D1 red: timeline 1 on the core that never stamps. The overlay holds until +50 ms although Keynote
         # started at +7, then runs today's clock from the trigger, immune to the `Date` step.
-        pytest.param("no-gl-clock", _gl_timeline(*_pick(_TIMELINE_1, 1)), [["fallback", 50]], 1, id="no-gl-clock-red"),
+        pytest.param("no-gl-clock", "", _gl_timeline(*_pick(_TIMELINE_1, 1)), [["fallback", 50]], 1, id="no-gl-clock-red"),
     ],
 )
-def test_bridge_clock_follows_keynotes_gl_loop_start(monkeypatch, variant, timeline, clocks, motion_starts):
+def test_bridge_clock_follows_keynotes_gl_loop_start(monkeypatch, variant, before_core, timeline, clocks, motion_starts):
     """The carried overlay times its bridge on Keynote's own GL clock: `Date` since the first `requestAnimFrame`
     call outside a wrapped callback in this departure occurrence, chosen once per motion (`bridge-clock`), else
     today's `performance.now()` clock after the GL_CLOCK_WAIT_MS hold at the source rect."""
@@ -1812,7 +1837,7 @@ def test_bridge_clock_follows_keynotes_gl_loop_start(monkeypatch, variant, timel
         monkeypatch.setattr(live_continuity_js, "PRESERVE_CORE_JS", variant_core(variant))
     ops, expected = timeline
     result = _run_full_core_in_node(
-        plan=_NO_RETIRE_PLAN, stage=_IDENTITY_STAGE, after_core=_GL_CLOCK_AFTER_CORE,
+        plan=_NO_RETIRE_PLAN, stage=_IDENTITY_STAGE, before_core=before_core, after_core=_GL_CLOCK_AFTER_CORE,
         script=_GL_CLOCK_SCRIPT.replace("__OPS__", json.dumps(ops)),
     )
     assert result["hooked"] is True

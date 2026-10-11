@@ -814,12 +814,18 @@ PRESERVE_CORE_JS = r"""
   /**
    * Keynote's GL player times a transition on `Date` from its loop's first `requestAnimFrame` call; main.js assigns
    * it after this core runs, so a setter keeps the value and the getter wraps it. A call outside a wrapped callback
-   * starts a loop; the first in a live departure stamps `departure.gl`.
+   * starts a loop; the first in a live departure stamps `departure.gl`. A late install cannot tell a callback queued
+   * before it from a loop start until a native frame queued at install has run, so a departure seen in that window
+   * is marked `gl: false` and falls back.
    */
-  let inGlFrame = false;
+  let inGlFrame = false, adopting = false;
   function stampGlStart() {
-    if (disabled || inGlFrame || !departure || departure.gl || departure.gen !== preserveGeneration
+    if (disabled || inGlFrame || !departure || departure.gl !== null || departure.gen !== preserveGeneration
         || currentHashNum() !== departure.scene) return;
+    if (adopting) {
+      departure.gl = false;
+      return;
+    }
     departure.gl = {date: Date.now(), perf: performance.now()};
   }
   try {
@@ -843,6 +849,10 @@ PRESERVE_CORE_JS = r"""
         },
         set: function(value) { raw = value; }
       });
+      if (prior) {
+        adopting = true;
+        requestAnimationFrame(function() { adopting = false; });
+      }
     }
   } catch (e) {}
   function hasDeparted(inst) {
@@ -1134,9 +1144,9 @@ PRESERVE_CORE_JS = r"""
    * The player keeps the source slide's layers hidden for its whole transition
    * scene (the WebGL move draws them), so a carried decoder rides that scene on
    * the stage, above authored content, at `rectAt()` (authored px). False when
-   * the ride is already running.
+   * `owner`'s ride is already running; another owner's ride hands the decoder over.
    */
-  function rideTransition(v, boundary, rectAt, caller) {
+  function rideTransition(v, owner, boundary, rectAt, caller) {
     // The ride owns the decoder now: end any footprint hold, or it drags the
     // landed decoder back to the source slot once the hash settles (live D2).
     if (v.__obedPinning) {
@@ -1149,8 +1159,8 @@ PRESERVE_CORE_JS = r"""
       beginMove(v);
       stage.appendChild(v);
     }
-    if (v.__obedMotionPinning) return false;
-    v.__obedMotionPinning = true;
+    if (v.__obedMotionPinning === owner) return false;
+    v.__obedMotionPinning = owner;
     v.style.position = 'absolute';
     v.style.visibility = 'visible';
     v.style.display = 'block';
@@ -1158,6 +1168,7 @@ PRESERVE_CORE_JS = r"""
     v.style.pointerEvents = 'none';
     v.dataset.obedRemounted = '1';
     function frame() {
+      if (v.__obedMotionPinning !== owner) return;
       const scene = currentHashNum();
       if (generation !== preserveGeneration || v.__obedGen === -1
           || v.ended || !document.contains(v) || scene !== boundary.atScene - 1) {
@@ -1194,7 +1205,7 @@ PRESERVE_CORE_JS = r"""
     }
     const motion = v.__obedMotion;
     const src = boundary.src.rect, dest = boundary.dst.rect;
-    const moving = rideTransition(v, boundary, function() {
+    const moving = rideTransition(v, motion, boundary, function() {
       const progress = easeInEaseOut(bridgeElapsedMs(v, motion) / (1000 * boundary.durationSeconds));
       return {
         x: src.x + (dest.x - src.x) * progress,
@@ -1220,7 +1231,7 @@ PRESERVE_CORE_JS = r"""
     if (!boundary || boundary.action !== 'pin' || currentHashNum() !== boundary.atScene - 1
         || !boundary.src.rect || v.__obedBridged34 || !hasDeparted(instanceOf(v))) return false;
     const rect = boundary.src.rect;
-    if (rideTransition(v, boundary, function() { return rect; }, 'keepThroughPin')) {
+    if (rideTransition(v, boundary, boundary, function() { return rect; }, 'keepThroughPin')) {
       note('pin-hold-start', {elId: v.__obedElId, atScene: boundary.atScene, srcRect: rect, rect: rect});
     }
     return true;
