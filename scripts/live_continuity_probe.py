@@ -2151,7 +2151,8 @@ def score_continuity(
     score is False and an incomplete one makes the verdict None, whatever the legacy checks said.
     A tracked row whose phase is unreadable (`phase_unreadable`) in the window, or anywhere back
     to the source slide's predecessor (where the window's or the paint's grounding would reach had
-    it been placed), is INCONCLUSIVE, never dropped from the before/after partition.
+    it been placed), is INCONCLUSIVE, never dropped from the before/after partition; so is a tracked
+    decoder's row there whose source no longer names the asset (cleared or swapped).
     """
     tracks = track_by_id(samples, asset_substr)
     if not decoded_anywhere(tracks):
@@ -2203,6 +2204,16 @@ def score_continuity(
     if unplaced:
         return _inconclusive(
             "a tracked row the carry window reaches has an unreadable phase", unplaced=unplaced[:5], window=window,
+        )
+    unnamed = [
+        {"t": sample["t"], "id": video.get("id"), "src": video.get("src")} for sample in samples
+        if reach <= sample["t"] <= window["end"]
+        for video in sample.get("videos") or []
+        if video.get("id") in tracks and asset_substr not in str(video.get("src") or "").lower()
+    ]
+    if unnamed:
+        return _inconclusive(
+            "a tracked decoder's row the carry window reaches does not name the asset", unnamed=unnamed[:5], window=window,
         )
     before_ids = {i for i, rows in windowed.items() if any(r["scene"] is not None and r["scene"] < boundary_scene for r in rows)}
     after_ids = {i for i, rows in windowed.items() if any(r["scene"] is not None and r["scene"] >= boundary_scene for r in rows)}
@@ -3319,15 +3330,20 @@ def score_raw_handback(samples: Any, spec: dict[str, Any]) -> dict[str, Any]:
     return {"verdict": False, "reason": f"{dom_id} is present but never connected at its authored rect", **detail}
 
 
-def unplaced_after_start(samples: Any) -> bool:
-    """Whether a timed sampler row after the first placed one carries no readable scene, so
-    `leave_rest_t` cannot place the rest it may be (the leading rows before the player reports a
-    scene are not)."""
+def unplaced_after_start(samples: Any, below: float | None = None) -> bool:
+    """Whether a timed sampler row after the first placed one carries no readable scene or, on a
+    scene before `below`, no Boolean `busy`, so `leave_rest_t` cannot place the rest it may be (the
+    leading rows before the player reports a scene are not)."""
     rows = sorted(
         (r for r in samples if isinstance(r, dict) and _finite_number(r.get("t")) is not None), key=lambda r: r["t"],
     ) if isinstance(samples, list) else []
     placed = [_finite_number(r.get("scene")) is not None for r in rows]
-    return True in placed and not all(placed[placed.index(True):])
+    if True not in placed:
+        return False
+    run = rows[placed.index(True):]
+    return not all(placed[placed.index(True):]) or below is not None and any(
+        r["scene"] < below and not isinstance(r.get("busy"), bool) for r in run
+    )
 
 
 def leave_rest_t(samples: Any, transition_scene: int) -> float | None:
@@ -3369,7 +3385,8 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
     note, pool entry and painter is bound to the retired instance pair, never asset-wide
     (`instance_owner`, `instance_decoders`): a refusal note counts only when proven the pair's
     and, stamped, names its source instance; adverse evidence is set aside only when proven
-    another instance's, and a decoder tied to the pair outranks a foreign stamp. The
+    another instance's or keyed to another movie, and a decoder tied to the pair outranks a foreign
+    stamp; a carry note in the zone nothing identifies is INCONCLUSIVE. The
     zone is placed in page time from the samples (`retire_zone_times`) when the notes carry `t`,
     never by the page hash. Unreadable evidence is INCONCLUSIVE."""
     if not isinstance(sample, dict):
@@ -3405,8 +3422,12 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
         return {**scored, "verdict": False, "handback": handback, "reason": handback["reason"]}
     if not runtime_installed:
         return {**scored, "handback": handback}
-    if unplaced_after_start(samples):
-        return _inconclusive("a sampler row carries no scene, so the retire zone cannot be placed", handback=handback)
+    transitions = [scene - 1, *([spec["zoneUntilScene"] - 1] if spec.get("zoneUntilScene") is not None else [])]
+    if unplaced_after_start(samples, max(transitions)):
+        return _inconclusive(
+            "a sampler row carries no scene, or no move state before the zone's end, so the retire zone cannot be "
+            "placed", handback=handback,
+        )
     zone_end = spec["zoneUntilScene"] - 1 if spec.get("zoneUntilScene") is not None else math.inf
     timed = retire_zone_times(samples, scene, spec.get("zoneUntilScene"))
 
@@ -3445,15 +3466,19 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
             )
         )
     ]
-    carries = [
-        e for e, d in details
-        if e.get("kind") in CARRY_EVENT_KINDS
-        and (
+    held = {
+        index: True if (
             keyed(d) or instance_owner(d, ids, linked, foreign) == "target"
             or any(d.get(f) in el_ids for f in ("elId", "newElId") if d.get(f) is not None)
-        )
-        and event_in_zone(e, _event_scene_of(e), unplaced=True)
-    ]
+        ) else _movie_identity(d, spec["assetKeys"], movie_key)
+        for index, (e, d) in enumerate(details)
+        if e.get("kind") in CARRY_EVENT_KINDS and event_in_zone(e, _event_scene_of(e), unplaced=True)
+    }
+    unknown = [details[index][0] for index, mine in held.items() if mine is None]
+    if unknown:
+        return _inconclusive("a carry note in the retire zone names no readable movie or instance",
+                             unidentified=unknown, handback=handback)
+    carries = [details[index][0] for index, mine in held.items() if mine]
     reasons = [scored["reason"]] if scored.get("reason") else []
     if not notes:
         reasons.append(f"no preserve-refused/retire-boundary note for {movie_key} in scenes [{scene - 1}, {zone_end})")
@@ -4812,7 +4837,7 @@ def score_handback_carry(record: Any, armed: dict[str, Any]) -> dict[str, Any]:
     """Vgl after build 1: carried paints alone, released by hand-off, never remounted. Each check
     is tri-state: an unread or unreadable read, note list, stage map, painting probe, pool or pool
     entry identity, release note, facade list or facade entry (its `elId`/`forElId`, explicit
-    nulls readable) is None, and any None makes the verdict None before any failure."""
+    nulls readable), or remount note without an object detail naming `elId` is None, and any None makes the verdict None before any failure."""
     checks: dict[str, bool | None] = dict.fromkeys(("painting", "release", "noRemount", "handoff"))
     detail: dict[str, Any] = {}
     record = record if isinstance(record, dict) else {}
@@ -4859,13 +4884,18 @@ def score_handback_carry(record: Any, armed: dict[str, Any]) -> dict[str, Any]:
         and all(isinstance(f, dict) and "elId" in f and "forElId" in f for f in read["facades"])
         for read in reads
     )
+    remount_kinds = ("remount-done", "remount-footprint-rect")
+    remounts_ok = named and all(
+        isinstance(event.get("detail"), dict) and "elId" in event["detail"]
+        for event in after["coreEvents"] if event.get("kind") in remount_kinds
+    )
     if named and carried is None:
         checks["noRemount"] = False
-    elif named and facades_ok:
+    elif named and facades_ok and remounts_ok:
         facades = [f["elId"] for read in reads for f in read["facades"] if f["forElId"] == carried]
         guarded = {carried, *facades}
         remounts = [
-            {"kind": kind, **note} for kind in ("remount-done", "remount-footprint-rect")
+            {"kind": kind, **note} for kind in remount_kinds
             for note in _notes(after, kind) if note.get("elId") in guarded
         ]
         detail.update(guarded=sorted(guarded, key=str), remounts=remounts)
@@ -7867,9 +7897,17 @@ def carry_cover_exposure(
 
 def _carried_rect(row: dict[str, Any] | None, el_id: Any, key: str = "vids") -> dict[str, Any] | None:
     for video in (row or {}).get(key) or []:
-        if isinstance(video, dict) and video.get("elId") == el_id and _is_rect(video) and video["w"] > 0 and video["h"] > 0:
+        if isinstance(video, dict) and video.get("elId") == el_id:
             return video
     return None
+
+
+def _overlay_readable(video: dict[str, Any] | None) -> bool:
+    """A carried read with a finite, non-negative rect (a collapsed overlay is a readable 0) and a Boolean `opaque`."""
+    return (
+        video is not None and _is_rect(video) and video["w"] >= 0 and video["h"] >= 0
+        and isinstance(video.get("opaque"), bool)
+    )
 
 
 def carry_cover_sync_tick(image: np.ndarray) -> int | None:
@@ -7927,7 +7965,8 @@ def score_carry_cover(
     Each frame is placed at the tick its sync bar names (its timestamp only picks between counter wraps) and scored
     against both reads of that tick's overlay: its post-frame read and the next tick's pre read. A frame whose reads
     disagree on the cover rule is undecided; when the undecided frames decide the verdict it is INCONCLUSIVE. A placed
-    frame with only one read, or a read without a Boolean `opaque`, is never scored on what remains: INCONCLUSIVE.
+    frame with only one read, or a read of the carried decoder without a finite, non-negative rect or a Boolean
+    `opaque`, is never scored on what remains or discarded as unsampled: INCONCLUSIVE.
     PASS: at least `CARRY_COVER_MIN_CLEAN_SHARE` of the scored mid-move frames expose at most
     `CARRY_COVER_MAX_EXPOSED_FRACTION` of the overlay's area and no strip is wider than `CARRY_COVER_MAX_STRIP_PX`.
     Coverage: at least `CARRY_COVER_MIN_FPS` scored frames per second, no stretch of the mid-move window longer than
@@ -8026,11 +8065,12 @@ def score_carry_cover(
         if after is not None and after["tick"] != (row["tick"] + 1) % wrap:
             after = None
         reads = [("post", _carried_rect(row, el_id)), ("pre", _carried_rect(after, el_id, "pre"))]
-        if not any(v for _, v in reads):
+        if all(v is None for _, v in reads):
             per_frame.append({**entry, "unaligned": "the carried video was not sampled at its tick"})
             continue
-        if not all(v and isinstance(v.get("opaque"), bool) for _, v in reads):
-            per_frame.append({**entry, "unreadable": "its post/pre overlay reads are unpaired or carry no Boolean opacity"})
+        if not all(_overlay_readable(v) for _, v in reads):
+            per_frame.append({**entry, "unreadable": "its post/pre overlay reads are unpaired or carry no readable rect "
+                                                     "or Boolean opacity"})
             continue
         active = [m["screen"] for m in masks if m["untilS"] is None or at - t0 <= 1000.0 * m["untilS"]]
         scored = []
@@ -8063,7 +8103,7 @@ def score_carry_cover(
     )
     gaps = []
     if unreadable:
-        gaps.append(f"{unreadable} mid-move frames lack a readable pair of overlay reads with a Boolean opacity")
+        gaps.append(f"{unreadable} mid-move frames lack a readable pair of overlay reads (rect and Boolean opacity)")
     if len(aligned) < need:
         gaps.append(f"too few aligned mid-move frames ({len(aligned)} < {need})")
     if max_gap > allowed_gap:

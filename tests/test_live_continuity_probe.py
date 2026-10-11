@@ -10440,6 +10440,8 @@ class TestFold4MissingIdentityAndPairsNeverAVerdict:
         ("offSlot", False, False),
         ("offSlotUnowned", False, None),  # score_carry: an unowned row is an integrity gap
         ("offSlotUnownedUnplaced", None, None),  # r10 #1: row 21 off-slot, unowned and scene None passed both
+        ("offSlotUnownedSrcCleared", None, None),  # fold4 verify: the row's src "" dropped it from the track; passed
+        ("offSlotUnownedSrcOther", None, None),  # fold4 verify: same with another movie's src; passed
     ])
     def test_carry_keeps_an_unplaced_row(self, case: str, expected: bool | None, carry: bool | None) -> None:
         samples = rows_around_boundary()
@@ -10452,6 +10454,8 @@ class TestFold4MissingIdentityAndPairsNeverAVerdict:
                 row["videos"][0]["footprintOwner"] = None
             if case == "offSlotUnownedUnplaced":
                 row["scene"] = None
+            if case.startswith("offSlotUnownedSrc"):
+                row["videos"][0]["src"] = "" if case.endswith("Cleared") else "other.mov"
         assert probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, True)["verdict"] is expected
         spec = {"asset": ASSET, "atScene": 2.0, "srcRect": SRC_RECT, "dstRect": DST_RECT, "transitionScene": None}
         assert probe.score_carry(samples, spec, True)["verdict"] is carry
@@ -10462,6 +10466,7 @@ class TestFold4MissingIdentityAndPairsNeverAVerdict:
         ({"key": "", "movieKey": "movie1"}, False),  # r10 #2: a cleared source, identified by its stamps, passed
         ({"key": "", "movieKey": None, "instance": None}, None),  # r10 #2/#3: nothing identifies it; passed
         ("unplacedRow", None),  # closing sweep: a mid-run scene-None row could shift the retire zone; passed
+        ("busyUnreadable", None),  # fold4 verify: a null busy before the zone's end shifts it the same way; passed
     ])
     def test_retire_identifies_a_preserved_decoder_by_its_stamps(self, entry: Any, expected: bool | None) -> None:
         pool = () if not isinstance(entry, dict) else [{
@@ -10470,6 +10475,8 @@ class TestFold4MissingIdentityAndPairsNeverAVerdict:
         samples = _handback_samples()
         if entry == "unplacedRow":
             next(r for r in samples if r["scene"] == 2)["scene"] = None
+        elif entry == "busyUnreadable":
+            next(r for r in samples if r["scene"] == 2)["busy"] = None
         read = _retire_read((RETIRE_NOTE,), pool=pool)
         assert probe.score_retire(read, _spec(_p2_facts(), P2_RETIRE12), True, samples)["verdict"] is expected
 
@@ -10503,6 +10510,32 @@ class TestFold4MissingIdentityAndPairsNeverAVerdict:
         if facades is not None:
             record["after"]["facades"] = facades
         assert probe.score_handback_carry(record, ARMED)["verdict"] is expected
+
+    @pytest.mark.parametrize(("note", "expected"), [
+        ({"kind": "remount-done", "detail": {"elId": 1, "key": "untitled.mov"}}, False),
+        ({"kind": "remount-done", "detail": {"elId": 9, "key": "untitled.mov"}}, True),  # another element's
+        ({"kind": "remount-done", "detail": {"key": "untitled.mov"}}, None),  # fold4 verify: no elId; passed
+        ({"kind": "remount-done", "detail": "unreadable"}, None),  # fold4 verify: non-object detail; passed
+        ({"kind": "remount-footprint-rect", "detail": {"rect": {}}}, None),  # fold4 verify: passed
+    ])
+    def test_handback_remount_notes_need_an_element(self, note: dict[str, Any], expected: bool | None) -> None:
+        record = _hb_vgl_record()
+        record["after"]["coreEvents"].append(note)
+        assert probe.score_handback_carry(record, ARMED)["verdict"] is expected
+
+    @pytest.mark.parametrize(("detail", "expected"), [
+        ({"elId": 3}, False),  # linked by RETIRE_NOTE's elIds
+        ({"elId": 9, "key": "other.mov"}, True),  # keyed to another movie: set aside
+        ({"elId": 9}, None),  # fold4 verify: nothing identifies it; passed
+        ({"elId": 9, "key": ""}, None),  # fold4 verify: cleared source; passed
+        ({}, None),  # fold4 verify: no elId; passed
+        ("unreadable", None),  # fold4 verify: non-object detail; passed
+    ])
+    def test_retire_carry_notes_need_identity(self, detail: Any, expected: bool | None) -> None:
+        note = {"kind": "remount-scheduled", "t": 1.0,
+                "detail": {**detail, "sceneHash": "#2"} if isinstance(detail, dict) else detail}
+        read = _retire_read((note, RETIRE_NOTE))
+        assert probe.score_retire(read, _spec(_p2_facts(), P2_RETIRE12), True, _handback_samples())["verdict"] is expected
 
     @pytest.mark.parametrize(("painter", "status", "outcome"), [
         ({"elId": None}, "pass", "rawRestart"),
@@ -10561,6 +10594,20 @@ class TestFold4MissingIdentityAndPairsNeverAVerdict:
                     del read["opaque"]
         bridge = _cc_bridge(durationSeconds=CC_FAST_S, dstRect=dict(CC_GROW_DST))
         assert _cc_score(frames, rows, notes, bridge=bridge)["verdict"] == expected
+
+    @pytest.mark.parametrize(("read", "expected"), [
+        ({"w": 1.0, "h": 1.0}, "fail"),  # a 1x1 overlay leaves the poster exposed
+        ({"w": 0.0, "h": 0.0}, "fail"),  # fold4 verify: a collapsed overlay was discarded as unsampled; passed
+        ({"x": None}, "inconclusive"),  # fold4 verify: an unreadable rect was discarded as unsampled; passed
+    ])
+    def test_carry_cover_scores_a_present_carried_read(self, read: dict[str, Any], expected: str) -> None:
+        """Four spread mid-move ticks (both their post and next-tick pre reads) report the carried
+        decoder with `read`'s rect; the poster behind it is painted, so a small overlay exposes it."""
+        frames, rows, notes = _cc_scene()
+        for k in (40, 50, 60, 70):
+            rows[k]["vids"][0].update(read)
+            rows[k + 1]["pre"][0].update(read)
+        assert _cc_score(frames, rows, notes)["verdict"] == expected
 
     @pytest.mark.parametrize(("second", "status"), [
         ({"verdict": "pass", "reasons": []}, "fail"),
