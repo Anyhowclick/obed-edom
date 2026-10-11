@@ -1989,7 +1989,7 @@ class TestRefusalScoring:
                      True, True, None, id="edge-touching-video-is-not-an-overlap"),
         pytest.param({"snapshot": [{"key": "untitled.mov", "elId": 1}]}, True, False, "pooled/preserved",
                      id="pooled-decoder-for-the-retired-asset-is-red"),
-        pytest.param({"snapshot": [{"key": "wa0125.mov"}]}, True, True, None, id="another-assets-pooled-decoder-is-irrelevant"),
+        pytest.param({"snapshot": [{"key": "wa0125.mov", "elId": 2}]}, True, True, None, id="another-assets-pooled-decoder-is-irrelevant"),
         pytest.param({}, False, True, None, id="pool-not-consulted-without-a-runtime"),
         pytest.param({"snapshot": {"error": "boom"}}, True, None, "preserve snapshot is unreadable",
                      id="unreadable-pool-census-is-inconclusive-never-silently-clean"),
@@ -7439,10 +7439,8 @@ class TestRetireVerdict:
     @pytest.mark.parametrize("notes", [
         (), (_ev("retire-boundary", key="movie1", elIds=[3], atScene=6, instance=P2_SLIDE1_OBJECT_ID),),
         (_ev("retire-boundary", key="movie2", elIds=[3], atScene=2, instance=P2_SLIDE1_OBJECT_ID),),
-        (_ev("retire-boundary", key="movie1", atScene=2, instance=P2_SLIDE1_OBJECT_ID),),
         (_ev("preserve-refused", key="movie1", scene=0, via="stash", instance=P2_SLIDE1_OBJECT_ID),),
         (_ev("preserve-refused", key="movie2", scene=1, via="stash", instance=P2_SLIDE1_OBJECT_ID),),
-        (_ev("preserve-refused", key="movie1", scene=1, instance=P2_SLIDE1_OBJECT_ID),),
         (_ev("preserve-refused", key="movie1", scene=None, via="stash", instance=P2_SLIDE1_OBJECT_ID),),
         (_ev("preserve-refused", key="movie1", scene=5, via="stash", instance=P2_SLIDE1_OBJECT_ID),),
         (_ev("preserve-refused", key="movie1", scene=7, via="stash", instance=P2_SLIDE1_OBJECT_ID),),
@@ -7471,7 +7469,7 @@ class TestRetireVerdict:
     def test_known_bad_the_settled_checks_still_hold(self) -> None:
         pin = _p2_facts()["pinRect"]
         assert self._score(_retire_read((RETIRE_NOTE,), painting=[painting_video(pin)]))["verdict"] is False
-        assert self._score(_retire_read((RETIRE_NOTE,), pool=[{"key": "untitled.mov"}]))["verdict"] is False
+        assert self._score(_retire_read((RETIRE_NOTE,), pool=[{"key": "untitled.mov", "elId": 2}]))["verdict"] is False
 
     @pytest.mark.parametrize("read", [
         None, {"reason": "x"}, dict(_retire_read((RETIRE_NOTE,)), stageMap=None), dict(_retire_read((RETIRE_NOTE,)), painting={"error": "x"}),
@@ -9639,10 +9637,11 @@ class TestCarryCoverCli:
 
 
 def _v2(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Mark sampler rows as schema 2: a frame `seq`/`ts`, and a pre-paint read whose videos mirror
-    the rAF-phase ones (same probe id, src and authored rect)."""
+    """Mark sampler rows as schema 2: a frame `seq`/`ts`, a settled `busy` where the row has none,
+    and a pre-paint read whose videos mirror the rAF-phase ones (same probe id, src and authored rect)."""
     for index, row in enumerate(samples):
         row.update(seq=index + 1, ts=row["t"], hash=f"#{row['scene']}", sceneCount=99)
+        row.setdefault("busy", False)
         row["pp"] = {
             "seq": index + 1, "ts": row["t"], "t": row["t"] + 1.0, "cover": False,
             "stageBox": {"x": 0.0, "y": 0.0, "w": 1920.0, "h": 1080.0},
@@ -10618,3 +10617,255 @@ class TestFold4MissingIdentityAndPairsNeverAVerdict:
         bridges = [{"boundary": "b1to2", "result": {"verdict": "fail", "reasons": ["strip"]}},
                    {"boundary": "b3to4", "result": second}]
         assert probe.carry_cover_status({"mode": "qualified"}, bridges)[0] == status
+
+
+def _fold5_restart_samples(case: str) -> list[dict[str, Any]]:
+    """`_p2_run_samples` (decoder 1 on the pin, a fresh decoder 2 from scene 6) with one row added or rewritten."""
+    samples = _p2_run_samples()
+    pin, dst = _p2_facts()["pinRect"], _p2_facts()["bridgeSrcRect"]
+
+    def extra(t: float, scene: Any, vid: dict[str, Any]) -> None:
+        row = sample(t, scene, vid)
+        row.update(playerState="IdleAtFinalState", busy=False)
+        samples.append(row)
+
+    if case.startswith("prior"):
+        extra(1025.0, 2, video(id=2, el_id=2, t=1025.0, scene=2, current_time=9.0, rect=dict(dst),
+                               src="" if case == "priorSrcCleared" else ASSET))
+    elif case.startswith("leak"):
+        extra(5025.0, 6, video(id=1, el_id=1, t=5025.0, scene=6, current_time=9.0, rect=dict(pin),
+                               src="" if case == "leakSrcCleared" else ASSET))
+    elif case == "freshNamesNoSource":
+        for row in samples:
+            for v in row["videos"]:
+                if v["id"] == 2:
+                    v["src"] = ""
+    return sorted(samples, key=lambda r: r["t"])
+
+
+def _fold5_source_clip_samples(unplaced: bool) -> list[dict[str, Any]]:
+    """Scenes 0x10, 1x5, 2x5, 3x20 (a source slide of two scenes, no transition); the first scene-1 row
+    misses the decoder, and with `unplaced` that row's scene is unreadable."""
+    rows = []
+    for index, scene in enumerate([0] * 10 + [1] * 5 + [2] * 5 + [3] * 20):
+        t = index * 50.0
+        rect = dict(DST_RECT if scene >= 3 else SRC_RECT)
+        videos = [] if index == 10 else [video(id=1, el_id=1, t=t, scene=scene, current_time=5 + t / 1000, rect=rect)]
+        row = sample(t, None if index == 10 and unplaced else scene, *videos)
+        row.update(playerState="IdleAtFinalState", busy=False)
+        rows.append(row)
+    return rows
+
+
+class TestFold5IdentityBeforeSourceAndGrounding:
+    """S2 fold5 (Astra r11 #1-#5 + the closing inventory): rows, painters, facades, notes and reads are
+    resolved by identity before any source or field filter, every row that could ground a window is
+    validated before it is chosen, and an unreadable note or read is never an absent one. Every case
+    marked "r11"/"inv" scored a pass, a True or a matching red on 8ee7077d and is now INCONCLUSIVE
+    (INVALID for a force-wrap take); the readable controls keep their outcome."""
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("offSlot", False),
+        ("offSlotBusyUnreadable", None),  # r11 #1: the source row's busy None moved the grounded start past it
+    ])
+    def test_carry_grounding_validates_the_source_settle_state(self, case: str, expected: bool | None) -> None:
+        samples = moving_boundary_samples()
+        samples[0]["videos"][0]["rect"]["x"] += 50
+        if case == "offSlotBusyUnreadable":
+            samples[0]["busy"] = None
+        assert score_moving_boundary(samples)["verdict"] is expected
+        assert (probe.forced_window(samples, 8, 7, -2000.0) is None) is (expected is None)
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("dark", False),
+        ("darkBusyUnreadable", None),  # inv R2: busy None moved paintStart past the dark frames
+    ])
+    def test_paint_grounding_validates_the_source_settle_state(self, case: str, expected: bool | None) -> None:
+        samples = _v2(rows_around_boundary(n_before=250))
+        for row in samples[10:30]:
+            row["pp"]["videos"][0]["opacity"] = 0.0
+        if case == "darkBusyUnreadable":
+            for row in samples[:31]:
+                row["busy"] = None
+        assert probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, True)["verdict"] is expected
+
+    @pytest.mark.parametrize(("unplaced", "expected"), [
+        (False, False),
+        (True, None),  # inv R10: an unreadable scene moved the chain clip's start past the missing sample
+    ])
+    def test_chain_clip_validates_the_rows_it_could_start_at(self, unplaced: bool, expected: bool | None) -> None:
+        spec = {"asset": ASSET, "atScene": 3, "srcRect": SRC_RECT, "dstRect": DST_RECT, "transitionScene": None,
+                "sourceScene": 1}
+        assert probe.score_carry(_fold5_source_clip_samples(unplaced), spec, True)["verdict"] is expected
+
+    @pytest.mark.parametrize(("case", "strict", "legacy", "raw"), [
+        ("priorNamed", False, False, False),
+        ("priorSrcCleared", None, None, None),  # r11 #2c: the cleared earlier occurrence read as fresh
+        ("leakNamed", False, True, True),
+        ("leakSrcCleared", None, None, None),  # r11 #2b: the cleared leak row vanished (strict passed)
+        ("freshNamesNoSource", None, None, None),  # inv: an untracked fresh decoder made a matching restart red
+    ])
+    def test_restart_scorers_keep_an_identified_decoder(
+        self, case: str, strict: bool | None, legacy: bool | None, raw: bool | None,
+    ) -> None:
+        samples = _fold5_restart_samples(case)
+        assert probe.score_restart_strict(samples, _spec(_p2_facts(), P2_RESTART23))["verdict"] is strict
+        assert probe.score_restart(samples, "untitled.mov", 6)["verdict"] is legacy
+        assert probe.score_raw_restart(samples, "untitled.mov", 6)["verdict"] is raw
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("complete", True),
+        ("otherOwner", False),
+        ("otherOwnerSrcCleared", None),  # r11 #2a: the same decoder's row dropped by its src
+        ("otherOwnerUnreadable", None),  # inv R9: an owner error object read as unresolved and was dropped
+        ("otherOwnerRowVideosNull", None),  # inv: a row whose videos is null vanished from the census
+        ("carriedElIdMissing", None),  # inv: an unreadable carried note made pool and owner a readable False
+        ("siblingFromDomNull", None),  # inv: fromDom null read as "not from the DOM"
+        ("noteWithoutKind", None),  # inv: a note with no kind was no note at all
+    ])
+    def test_armed_census_and_notes_resolve_identity_first(self, case: str, expected: bool | None) -> None:
+        reads, samples = _armed_reads(), copy.deepcopy(PRE_FLIP)
+        samples[0]["videos"][0]["id"] = 1
+        if case.startswith("otherOwner"):
+            other = copy.deepcopy(samples[0])
+            other["videos"][0]["footprintOwner"] = {"error": "unreadable"} if case == "otherOwnerUnreadable" else {"elId": 2}
+            if case == "otherOwnerSrcCleared":
+                other["videos"][0]["src"] = ""
+            elif case == "otherOwnerRowVideosNull":
+                other["videos"] = None
+            samples.append(other)
+        elif case == "carriedElIdMissing":
+            for read in reads:
+                del next(e for e in _gl(read)["coreEvents"] if e["kind"] == "glreplay-carried")["detail"]["elId"]
+        elif case == "siblingFromDomNull":
+            for read in reads:
+                _gl(read)["pool"][1]["fromDom"] = None
+        elif case == "noteWithoutKind":
+            _gl(reads[1])["coreEvents"].append({"kind": None, "detail": {"reason": "glError"}, "t": 1.0})
+        assert probe.score_armed_strict(reads, ARMED, GL_CONTINUITY, samples)["verdict"] is expected
+        owners = probe.pre_flip_owner_ids(samples, ARMED)
+        assert probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=owners)["verdict"] is expected
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("facadeRemounted", False),
+        ("facadeForElIdUnreadable", None),  # r11 #3
+        ("remountElIdString", None),  # inv: '1' missed the guarded set
+        ("secondPainter", False),
+        ("secondPainterNoSource", None),  # inv R7: a src-less painter at the instance rect was filtered out
+        ("carriedElIdMissing", None),  # inv: an unreadable carried note made painting/release/noRemount False
+    ])
+    def test_handback_carry_resolves_identity_first(self, case: str, expected: bool | None) -> None:
+        record = _hb_vgl_record()
+        after = record["after"]
+        if case.startswith("facade"):
+            after["facades"] = [{"elId": 3, "forElId": {"error": "unreadable"} if case.endswith("Unreadable") else 1}]
+            after["coreEvents"].append(_ev("remount-done", elId=3, key="untitled.mov"))
+        elif case == "remountElIdString":
+            after["coreEvents"].append(_ev("remount-done", elId="1", key="untitled.mov"))
+        elif case.startswith("secondPainter"):
+            screen = probe.to_screen_rect(BIG_INSTANCE, HB_STAGE)
+            src = "" if case.endswith("NoSource") else "untitled.mov"
+            record["painting"].append({"src": src, "elId": 9, "rect": dict(screen)})
+        elif case == "carriedElIdMissing":
+            del next(e for e in after["coreEvents"] if e["kind"] == "glreplay-carried")["detail"]["elId"]
+        assert probe.score_handback_carry(record, ARMED)["verdict"] is expected
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("seenBefore", False),
+        ("seenBeforeDomIdUnreadable", None),  # inv R3: an error-object domId dropped the rows before elId
+        ("seenBeforeDomIdNull", None),  # inv: the same element's rows without a DOM id vanished
+        ("linkedCarry", False),
+        ("linkedCarryElIdsUnreadable", None),  # inv R4: elIds iterated as dict keys untied decoder 3
+        ("linkedCarryKeyUnreadable", None),  # inv R12: an unreadable key untied decoder 3
+        ("timedCarry", False),
+        ("timedCarryTimeUnreadable", None),  # inv R5: an unreadable t fell back to an out-of-zone scene
+        ("refusalWithoutVia", None),  # inv: a malformed refusal note made the registered "no note" red
+        ("retireBoundaryWithoutElIds", None),  # inv: same, retire-boundary
+    ])
+    def test_retire_resolves_identity_and_placement_first(self, case: str, expected: bool | None) -> None:
+        samples, carry = _handback_samples(), _ev("remount-scheduled", elId=3, key="other.mov", sceneHash="#2")
+        retire, notes = copy.deepcopy(RETIRE_NOTE), [carry, REFUSED_NOTE]
+        if case.startswith("seenBefore"):
+            samples, notes = _handback_samples(before=True), [REFUSED_NOTE]
+            dom_id = {"Unreadable": {"error": "unreadable"}, "Null": None}.get(case.removeprefix("seenBeforeDomId"), P2_SLIDE2_DOM_ID)
+            for row in samples:
+                for v in row["videos"] if row["scene"] == 1 else []:
+                    v["domId"] = dom_id
+        elif case == "linkedCarryElIdsUnreadable":
+            retire["detail"]["elIds"] = {"error": "unreadable"}
+        elif case == "linkedCarryKeyUnreadable":
+            retire["detail"]["key"] = {"error": "unreadable"}
+        elif case.startswith("timedCarry"):
+            for t in (-100.0, -50.0):
+                row = sample(t, 0)
+                row.update(playerState="IdleAtFinalState", busy=False)
+                samples.insert(0, row)
+            carry = _ev("remount-scheduled", elId=3, key="movie1", sceneHash="#9")
+            carry["t"] = "unreadable" if case.endswith("Unreadable") else 1.0
+            notes = [carry, REFUSED_NOTE]
+        elif case == "refusalWithoutVia":
+            notes = [_ev("preserve-refused", key="movie1", scene=1, instance=P2_SLIDE1_OBJECT_ID)]
+        elif case == "retireBoundaryWithoutElIds":
+            notes = [_ev("retire-boundary", key="movie1", atScene=2, instance=P2_SLIDE1_OBJECT_ID)]
+        read = _retire_read((*notes, retire) if case.startswith("linkedCarry") else tuple(notes))
+        assert probe.score_retire(read, _spec(_p2_facts(), P2_RETIRE12), True, samples)["verdict"] is expected
+
+    @pytest.mark.parametrize(("entry", "expected"), [
+        ({"elId": 3}, False),  # a linked decoder outranks the foreign stamp
+        ({}, None),  # inv: without its elId the entry read as another instance's and was set aside
+    ])
+    def test_refusal_snapshot_entries_need_their_element(self, entry: dict[str, Any], expected: bool | None) -> None:
+        snapshot = [{"key": "", "movieKey": None, "instance": "OTHER-OBJECT", "inDocument": True, **entry}]
+        retire = {"assetKeys": ["untitled.mov"], "rects": [BIG_INSTANCE], "srcObjectId": P2_SLIDE1_OBJECT_ID}
+        evidence = {"stageMap": dict(IDENTITY_STAGE_MAP), "painting": [], "poolSnapshot": snapshot}
+        assert probe.score_refusal(evidence, retire, True, linked={3})["verdict"] is expected
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("collapsed", "fail"),
+        ("collapsedWithoutElId", "inconclusive"),  # r11 #4a: unidentified reads were discarded as unsampled
+        ("secondNote", "inconclusive"),
+        ("secondNoteDetailNull", "inconclusive"),  # r11 #4b
+    ])
+    def test_carry_cover_never_discards_unreadable_reads_or_notes(self, case: str, expected: str) -> None:
+        frames, rows, notes = _cc_scene()
+        if case.startswith("collapsed"):
+            for k in (40, 50, 60, 70):
+                for read in (rows[k]["vids"][0], rows[k + 1]["pre"][0]):
+                    read.update(w=0.0, h=0.0)
+                    if case.endswith("WithoutElId"):
+                        del read["elId"]
+        else:
+            second = _cc_note(t=1300.0)
+            if case.endswith("DetailNull"):
+                second["detail"] = None
+            notes.append(second)
+        assert _cc_score(frames, rows, notes)["verdict"] == expected
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("painted", True),
+        ("carriedSrcCleared", None),  # r11 #5: the carried pv dropped by its src manufactured "absent" frames
+        ("dark", False),
+        ("darkWithDuplicatePainted", None),  # inv R13: a second pv with the carried id read last-wins painted
+    ])
+    def test_paint_resolves_the_carried_decoder_by_id_first(self, case: str, expected: bool | None) -> None:
+        samples = _v2(rows_around_boundary(n_before=150, n_after=60, src_rect=DST_RECT, dst_rect=DST_RECT))
+        for row in samples[100:106]:
+            pv = row["pp"]["videos"][0]
+            if case == "carriedSrcCleared":
+                pv["src"] = ""
+            elif case.startswith("dark"):
+                painted = copy.deepcopy(pv)
+                pv["opacity"] = 0.0
+                if case.endswith("Painted"):
+                    row["pp"]["videos"].append(painted)
+        assert probe.score_continuity(samples, ASSET, 2.0, DST_RECT, DST_RECT, True)["verdict"] is expected
+
+    @pytest.mark.parametrize(("case", "status"), [
+        ("videoNotReady", "pass"),
+        ("lastReadUnreadable", "invalid"),  # inv R6: the earlier read's stand-downs stood in for the last one's
+    ])
+    def test_force_wrap_fallback_reads_the_last_read(self, case: str, status: str) -> None:
+        reads = _fw_reads(stand_downs=["videoNotReady"])
+        if case == "lastReadUnreadable":
+            reads[1]["glReplay"] = None
+        assert _fw_score(boundary="1to2", reads=reads, armed=ARMED)["status"] == status
