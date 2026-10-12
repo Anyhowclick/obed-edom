@@ -16,7 +16,7 @@ Players: stock `main.js` `e9b2fad4…` and `17c0c938…` (`live_runtime.SUPPORTE
 read on both players; they are equal below 2331091 (17c0c938 = e9b2fad4 + two 19-byte `,isEvalSupported:!1` at 17c0c938
 offsets 2331091 and 2331362: +19 between them, +38 after; among the listed anchors only R8, D4 and the hook `_ANCHOR` move,
 each by 38). Evidence: main checkout `output/evidence/s2-dev/dissolve-alpha-2026-10-11/` (git-ignored); scratch `x` =
-its `plan-2026-10-11/planner/x`; Q0b = its `q0b-2026-10-11/`; rev-10 prototypes = its `plan-rev10-2026-10-12/`, rev-11 / 12 / 13 / 15 Node evidence = its `plan-rev1{1,2,3,5}-2026-10-12/`; hi-DPI investigation = its `hidpi-2026-10-12/`; Q0b-bis = its `q0bbis-2026-10-12/`; CEF investigation = its `cef-frac-2026-10-12/` (§8). Parents: `keynote_live_mm_opacity.plan.md` (R1–R5, switch, pins),
+its `plan-2026-10-11/planner/x`; Q0b = its `q0b-2026-10-11/`; rev-10 prototypes = its `plan-rev10-2026-10-12/`, rev-11 / 12 / 13 / 15 / 16 Node evidence = its `plan-rev1{1,2,3,5,6}-2026-10-12/`; hi-DPI investigation = its `hidpi-2026-10-12/`; Q0b-bis = its `q0bbis-2026-10-12/`; CEF investigation = its `cef-frac-2026-10-12/` (§8). Parents: `keynote_live_mm_opacity.plan.md` (R1–R5, switch, pins),
 `keynote_live_handback_geometry.plan.md` (R6–R8), `keynote_live_paint_oracle.plan.md` (oracle stays stock).
 
 ## 0. Summary
@@ -38,7 +38,7 @@ its `plan-2026-10-11/planner/x`; Q0b = its `q0b-2026-10-11/`; rev-10 prototypes 
   generates** (§3.2) onto the **device pixels of the box Chromium paints it at** (decision 9) — only on the geometry where
   that is measured (DPR 1, 1.5 or 2 at stage scale 1, base-layer box = slide, translation-only transforms; decision 12), with
   the **placement rule a host startup probe measured for the engine** (snapped for Chrome 154, fractional for OBS's CEF 127;
-  none → skip; decision 13) — with every backing pixel proven
+  none → skip; decision 13; host pages only — raw export and Build Preview keep the jump, decision 14) — with every backing pixel proven
   opaque, untoned (**identity `L`**, decision 10: the GPU mid-tone step is a known limit), redraws overlying canvases (Q7);
   D3 puts it in the outgoing fading wrapper, or discards it. The `<video>` is never touched; anything outside keeps today's
   look.
@@ -46,7 +46,8 @@ its `plan-2026-10-11/planner/x`; Q0b = its `q0b-2026-10-11/`; rev-10 prototypes 
   patched alike; stopping it and S2's hold at the outgoing transition start is a separate follow-up PR after S2 merges.
 - **Measured** (headless Chrome 154, §8): cross-fade residual ≤ 1.5 LSB; nulls pop in (205–206); KB dips to α 191; opaque
   on/off ≤ 1.51; cut: stock shows both slides, patched never; freeze: index = last presented. Q0b on rev 9 raised five
-  re-plan triggers; rev 10's prototypes answer them: raw export and preview now freeze (P2 2→3 and 4→end), an overflowing
+  re-plan triggers; rev 10's prototypes answer them: the raw export page passes the gate (P2 2→3 and 4→end; F3 is later limited to host pages,
+  decision 14), an overflowing
   off-viewport caption or an open navigator skips; holder vs the live movie, browser-rendered, ≤ 3 LSB after the documented
   tone step at 1920×1080 and letterboxed (rev 9: 78); the hi-DPI investigation's fix A (snap on the stage-local 1/DPR grid)
   brings DSF 1.5, DSF 2 and fractional letterbox origins to the same floor on the real P2 page, while scaled stages
@@ -425,7 +426,7 @@ check fails; the channel round trip fails. The cross-fade and cut never read the
   player pick them up; `mm_opacity=False` stays the hook-only bytes (`7cf00b56…` / `4f9fbffd…`); docstrings say "rendering
   fidelity"; README: `OBED_LIVE_MM_OPACITY=off` also restores the export's dissolve, cut and movie behaviour. **Pins:**
   `(on, off, rendering)` kept; `on`, `rendering` re-pinned. **Report** `output.mmOpacity = {mode, sha256}`; `RUNTIME_VERSION`
-  stays 2; preview inherits the patch (D1/D2; F3 skips there for want of a probe, decision 13); paint oracle stays stock; the report adds
+  stays 2; preview inherits the patch (D1/D2; F3 skips there — no host calibration, decision 14); paint oracle stays stock; the report adds
   `output.placement` (§3.3); `web/live.py` unchanged.
 
 ## 5. Scope
@@ -940,8 +941,9 @@ qualification: DX-1 runs every row against its stock twin, the go-to/back destin
 
 One launch, the managed bridge with DX-1's hook, resolver, integrity rules and scorer (W2), the advance, a `GetSourceScreenshot`
 burst. Sessions: DX-1's P2, `p2cut`, `p2-binary` and tone arms except `screen-*`, `delay-*`, `on-sw` and the lifecycle (tone
-arms report-only under identity `L`), **first the host's startup probe** (`probe-cef` must return `frac`; anything else makes the
-round INCONCLUSIVE), `wrongrule-cef` (FAIL expected), plus DSK 7→8 (two bound holders; cost ≤ 50 ms, decision 11) and `m-snap` at the browser
+arms report-only under identity `L`), **first the host's startup probe** in the `AK-Probe` source (`probe-cef` must return
+`frac` with `iso-obs` clean; anything else makes the round INCONCLUSIVE), `m-snap-cef[clip]` and `m-snap-cef-nooffset[x|y]`
+(r12 5), `wrongrule-cef` (FAIL expected, privileged channel), plus DSK 7→8 (two bound holders; cost ≤ 50 ms, decision 11) and `m-snap` at the browser
 source's geometry (holder pixels vs a pre-advance source screenshot, tone-compensated with that launch's measured map, ≤ τ_CEF);
 media sessions (not `m-off` or the bridge arms) show a bound D4 holder; all record
 continuity, G2 state, colour tuples and served digest; cut sessions need rAF coverage from DOM insertion to 3 frames after the
@@ -1010,11 +1012,18 @@ session) `--arm mmo`, `--arm g2`, `--arm mmo-cef`. Root-cause any change.
 5. **Rev 15 rows** (in the same functions): test 3's harness gives BASE `left`/`top` `0px`, defines `window.__obedPlacement` per row
    (default `snap`) and allows the underlay (`(vv?(gf*)?)?`); rows (§8.6): flag absent / `unknown` skip; `frac` admits at DPR 1
    with the second draw at the unsnapped quad (P2's fractional box: (0.352, 0.036), 951×268); `frac` at DPR 1.5 / 2 and at a
-   fractional stage origin skip; fractional `left`/`top` and `left: auto` skip. **New `tests/test_placement_probe.py`, one
-   parametrized function** (W6; synthetic numpy, no browser): the classifier — clean snap, clean frac, both low, both high, a share
-   at 2 % + ε / 20 % − ε, unequal screenshot pair, wrong size, DPR outside the set → unknown; the probe script string carries the
-   two fractions and the asset URL; the flag expression the host evaluates; the report field. Test 4 (`test_dissolve_probe.py`)
-   adds the `m-snap-shift` and wrong-rule arms to its arm table rows.
+   fractional stage origin skip; fractional `left`/`top` and `left: auto` skip; near-side clipped `frac` rows record the offset
+   quad (§8.7); an absent getter (the production preview/raw path, `patch_rendering` bytes) skips. **New
+   `tests/test_placement_probe.py`, one parametrized function** (W6; no browser): the classifier per §3.3 (tone maps, inner mask,
+   max-over-channels, both poses) — clean snap and frac under the GPU map; identity-map decision (software) → no lease; both low,
+   both high, 2 % + ε / 20 % − ε, poses disagreeing, two maps consistent with different rules, unequal pair, wrong size, DPR
+   mismatch → unknown; the first-run init script under Node (`vm`): the §8.7 tamper rows; the lifecycle state machine with a fake
+   transport — commit bound to the recorded unique context (late result after a context change discarded), revoke on reconnect
+   before commands, the wait-for-expiry path when revoke fails, fingerprint change / unreadable → revoke, failed re-probe stays
+   invalid, keep-alive renews only on the same connection and context; the `recalibrate` command route (`web/live.py`,
+   `live_session.py`) and the report field; the gate checks (program capture changed → result discarded). Test 4
+   (`test_dissolve_probe.py`) adds the `m-snap-shift`, `m-snap-cef*`, wrong-rule, `iso-*`, `life-cal-*` and `*-prod` arms to its
+   arm table rows.
 6. **`test_managed_obs_qualify.py`:** the env-refusal test parametrized over the new arm; the calibration test (n = 4 / 4 + ε);
    the session list includes DSK 7→8 and `m-snap`.
 
@@ -1048,7 +1057,7 @@ visibility shortcut; witnesses are HTML `div`s; the shadow-DOM invariant is a ch
 translation-only scene transforms, integer `left`/`top`, `sn` on the 1/DPR grid; everything else skips; (12) placement only from
 the host probe's frozen flag (`snap`; `frac` at DPR 1 and an integer stage origin); absent or unknown skips; safety checks never relaxed for a visual allowance.
 
-## 12. Owner decisions (1–7 2026-10-11, 8–12 2026-10-12, in chat)
+## 12. Owner decisions (1–7 2026-10-11, 8–14 2026-10-12, in chat)
 
 - **Target (movies):** "in Keynote the vid stops playing and dissolves out" — freeze on the current frame, fade with slide 2.
 1. **Switch: fold into `mm_opacity`.** 2. **Scope: every output.** 3. **F1 (`none` cut) in this patch; F2 a separate
@@ -1068,7 +1077,7 @@ the host probe's frozen flag (`snap`; `frac` at DPR 1 and an integer stage origi
 
 **2026-10-12, on Q0b's re-plan triggers (owner accepted the Astra xhigh advisory; binding):**
 
-8. **T2, gate: strict stage admission plus a conservative exterior pass.** An off-stage subtree is pruned only when its paint
+8. **T2, gate: strict stage admission plus a conservative exterior pass** (its preview clause superseded by decision 14). An off-stage subtree is pruned only when its paint
    extent is *proven* disjoint from the visible stage (a validated clipping ancestor; border-box non-intersection alone is not
    enough: overflowing text, shadows, pseudo-elements, escaping descendants). Raw export and Build Preview pages then freeze
    with `#slideshowNavigator` present, so preview inherits F3 (§4). The take still sees main's bridged decoder in `#body`.
@@ -1098,6 +1107,10 @@ the host probe's frozen flag (`snap`; `frac` at DPR 1 and an integer stage origi
     ambiguous or unknown means skip. It is **the** startup calibration: it covers the HDMI/headless host (CDP screenshot) and
     managed OBS (`GetSourceScreenshot`), and the same probe can later carry W5's tone-path map (Q5 stays open; this patch keeps
     identity `L` — recommendation §13).
+14. **Raw export and Build Preview no longer freeze (2026-10-12 ~14:30).** Without a host there is no calibration, so F3 skips
+    on those pages (stock movie behaviour); the cross-fade and cut still apply. This **supersedes decision 8's preview clause**
+    ("preview inherits F3"); decision 8's gate design is otherwise unchanged. Other rev-15 defaults stand: an on-air reconnect
+    skips the freeze until the probe re-runs; identity `L` with the tone slot reserved.
 
 ## 13. Risks and out of scope
 
@@ -1109,13 +1122,15 @@ the host probe's frozen flag (`snap`; `frac` at DPR 1 and an integer stage origi
   (content width 312.213 vs Blink's 312.656; 249–255 LSB). The translation-only guard keeps such chains out; any future model
   that admits scaled chains must solve `contain` in local units (LayoutUnit-exact) first.
 - **Cost at DSF 2:** four times the device pixels; measured 15.1–18.3 ms for DSK 7→8 (Q0b-bis), within the 50 ms bound.
-- **Placement probe (decision 13).** (a) *Off-air window:* the probe paints a 1000×740 grey box top-left for ≈ 1.5 s; the host runs
-  it before `show` and only re-runs it off-air, so an output that is already on air at a reconnect skips the freeze until the
-  operator re-calibrates. (b) *Engine updates:* the rule is re-measured at every host start, so a CEF or Chrome update is caught
-  at the next start; between starts the fingerprint check clears the flag on a visible change. A GPU-process reset that keeps
-  the page and leaves the fingerprint unchanged is not detected (W5's "GPU-state invalidation untested" applies here too).
-  (c) *Raw export and Build Preview* run without a host probe and so no longer freeze (D1/D2 still apply) — a regression against
-  decision 8's "preview inherits F3"; open question. (d) The probe classifies but does not measure τ (its 1-px synthetic lines
+- **Placement probe (decisions 13–14).** (a) *Isolation:* the probe runs in a separate target / the `AK-Probe` source with a
+  verified program-capture gate, so it never reaches program; whether OBS renders `AK-Probe` outside program is unmeasured (if
+  not, managed OBS skips calibration and F3 is off there). (b) *Reconnect:* the lease is revoked before commands resume; the
+  freeze returns after the next probe (automatic once no transition is in flight, or the operator's `recalibrate`). (c) *Engine
+  updates:* re-measured at every host start; between starts the fingerprint check revokes on a visible change. **Coverage
+  limit:** a GPU-process reset that keeps the document and leaves the fingerprint unchanged keeps the old rule (W5's
+  "GPU-state invalidation untested" too). (d) *Channel:* page code cannot set or keep a rule; a predefined getter needs code
+  running before the host's first-run script (another CDP client or an extension) and is caught by the round trip, which keeps
+  the output hidden. (e) *Raw export and Build Preview* do not freeze (decision 14); D1/D2 still apply. (f) The probe classifies but does not measure τ (its 1-px synthetic lines
   leave 32–52 on the correct rule); holder pixels are qualified separately per engine (§9.0 item 2, DX-2).
 - **Tone map on the probe (W5).** Recommendation: keep identity `L` in this patch. W5's GO is indicative (two launches, no
   GPU-state invalidation test, HEVC tone in CEF unmeasured), a non-identity map needs RGB writes and `putImageData` back in the
@@ -1218,3 +1233,14 @@ Raw rounds: `.agents/reviews/dissolve-crossfade/plan-astra-r{1,…,7}.md`. r1–
 | Instrument | DPR arms need a real `--force-device-scale-factor`; `perfect` at DPR 2 needs the teardown timer delayed; raw-page arms inject the probe result | §9.0, §9.1 |
 | Tone (W5) | identity kept; the probe's `tone` slot reserved; Q5 open | §3.3, §12.13, §13 |
 | Node | W1's 266 rows unchanged under `snap`, 13 new rows, both players, invariants hold | §8.6, §10 |
+
+### r12 — GPT-6 Astra (Codex), on rev 15 `95c55e45` — CHANGES REQUIRED (6) — folded in rev 16 with decision 14
+
+| # | Severity / class | Disposition | Where |
+|---|---|---|---|
+| 1 | major / flag integrity | Folded: private per-document state behind a non-configurable getter `window.__obedPlacement` and a token-gated, non-writable updater installed by the host's first-run script; 15 s lease on a pre-captured clock; round trip after every document; tamper rows in Node (assignment, delete, accessor, updater replacement, wrong token, clock, expiry, predefinition); wrong-rule controls through the privileged channel; take bytes read only the getter (D1 10 559 B) | §3.1, §3.2, §3.3, §8.7, §9, §10 |
+| 2 | major / output isolation | Folded: the probe never runs in the program page — a second target of the same browser (HDMI/headless) or the `AK-Probe` source in the `AK-Calibrate` scene (managed OBS); program-capture gate before/during; cleanup on every exit; no gate → no calibration; `iso-hdmi`, `iso-obs`, `iso-leak` controls | §3.3, §9, §9.0 |
+| 3 | major / classifier | Folded: max-over-channels difference after a tone map from the qualified set {identity, GPU analytic}, inner mask = box eroded 3·DPR, ≤ 2 % / ≥ 20 %, both poses agreeing, one consistent map; lease only for the GPU map (software recorded, skip); shipped clip = the measured `p2like.mp4` (sha256 recorded); `probe-sw`, `probe-undecodable` | §3.3, §9, §10 |
+| 4 | major / lifecycle | Folded: invalid / probing / valid bound to target and unique execution context; commit by `uniqueContextId` (late results discarded); revoke on reconnect before commands (or wait for lease expiry); keep-alive with fingerprint; `recalibrate` command through `web/live.py` (changed), `live_session.py`, the presenter UI; `life-cal-*` controls; unchanged-fingerprint GPU reset stated as an unresolved coverage limit | §3.3, §9, §10, §11, §13 |
+| 5 | major / acceptance coverage | Folded: `m-snap-cef[clip]` with near-side and far-side fractional clips and foreground crossing, `perfect`, omit twins, edge-inclusive scoring; `m-snap-cef-nooffset[x|y]` wrong-offset controls (Node: only near-side clips move the quad); whole-backing alpha scan stays after both draws | §3.2, §8.7, §9, §9.2 |
+| 6 | major / scope | Folded by decision 14 (supersedes decision 8's preview clause); `m-raw-prod`, `m-preview-prod` production-path arms with no channel expect stock movie behaviour; injected `m-raw*` kept as exterior-gate tests only | §3.3, §9, §12 |
