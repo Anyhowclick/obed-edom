@@ -414,25 +414,49 @@ def test_handback_and_dissolve_anchors_sit_at_their_offsets_on_the_real_player(s
         assert marker not in off
     # Shadow-DOM invariant (§3.2, r9 2): the take refuses open shadow roots but cannot see closed ones, so nothing on a
     # supported page may create an author shadow root: not the stock or patched player, the export pages, or the host.
-    sources = {"stock": player, "on": patched, "off": off, "rendering": live_runtime.patch_rendering(player)}
+    rendering = live_runtime.patch_rendering(player)
+    assert patched.count(SHADOW_ROOT_READ) == rendering.count(SHADOW_ROOT_READ) == 1
+    sources = {"stock": player, "on": patched, "off": off, "rendering": rendering}
     pages = sorted(OUTPUT_FIXTURES.rglob("index.html"))
     assert {root.parent / "index.html" for root in FREEZE_DECKS.values()} <= set(pages)
     sources.update({str(path): path.read_bytes() for path in pages})
     host = Path(live_runtime.__file__).parent
     sources.update({str(path): path.read_bytes() for path in sorted(host.rglob("*")) if path.is_file() and "__pycache__" not in path.parts})
-    assert {name: SHADOW_DOM_API.findall(data) for name, data in sources.items()} == {name: [] for name in sources}
-    # Planted control: each creation API, spliced into the stock player, is flagged.
+    assert {name: _shadow_tokens(data) for name, data in sources.items()} == {name: set() for name in sources}
+    # Planted controls: every spelling of a creation API, spliced into the stock player, is flagged.
     for planted, flagged in SHADOW_DOM_PLANTED.items():
-        assert SHADOW_DOM_API.findall(player + planted) == flagged
+        assert _shadow_tokens(player + planted) == flagged, planted
 
 
-SHADOW_DOM_API = re.compile(rb"attachShadow|shadowroot|customElements")
+# The checker flags every token containing `shadow` or `customelements` in any letter case (HTML attribute names are
+# case-insensitive), after decoding JS escapes and joining adjacent string literals, unless it is one of the exact
+# words already on the supported pages, none of which can create a root (CSS shadows, two WebGL shader names, prose).
+# `shadowRoot` occurs only as the take's own refusal, which is stripped first. Only a name computed without spelling
+# its letters (character codes, base64) escapes; the scanned sources are pinned players, exports and our own host.
+SHADOW_TOKEN = re.compile(r"(?<![\w$-])[\w$-]*(?:shadow|customelements)[\w$-]*", re.IGNORECASE)
+SHADOW_ESCAPE = re.compile(r"\\u\{([0-9a-fA-F]+)\}|\\u([0-9a-fA-F]{4})|\\x([0-9a-fA-F]{2})")
+SHADOW_JOIN = re.compile(r"(['\"`])\s*\+\s*(['\"`])")
+SHADOW_ALLOWED = frozenset({"shadow", "shadows", "box-shadow", "-moz-box-shadow", "-ms-box-shadow", "-webkit-box-shadow", "boxShadow",
+                            "ShadowPosition", "ShadowTexCoord"})
+SHADOW_ROOT_READ = b"!n.shadowRoot&&("
 SHADOW_DOM_PLANTED = {
-    b"host.attachShadow({mode:'closed'})": [b"attachShadow"],
-    b'<template shadowrootmode="open"></template>': [b"shadowroot"],
-    b'<template shadowroot="open"></template>': [b"shadowroot"],
-    b"customElements.define('x-a',A)": [b"customElements"],
+    b"host.attachShadow({mode:'closed'})": {"attachShadow"},
+    b"host['attach'+'Shadow']({mode:'closed'})": {"attachShadow"},
+    b"var a='attach';host[a+'Shadow']({mode:'closed'})": {"Shadow"},
+    b"host['attach\\u0053hadow']({mode:'closed'})": {"attachShadow"},
+    b"host[\"attach\\x53hadow\"]({mode:'closed'})": {"attachShadow"},
+    b'<template shadowrootmode="open"></template>': {"shadowrootmode"},
+    b'<template SHADOWROOTMODE="closed"></template>': {"SHADOWROOTMODE"},
+    b'<template shadowroot="open"></template>': {"shadowroot"},
+    b"customElements.define('x-a',A)": {"customElements"},
+    b"window['custom'+'Elements'].define('x-a',A)": {"customElements"},
 }
+
+
+def _shadow_tokens(data: bytes) -> set[str]:
+    text = data.replace(SHADOW_ROOT_READ, b"").decode("latin-1")
+    text = SHADOW_JOIN.sub("", SHADOW_ESCAPE.sub(lambda m: chr(int(m.group(1) or m.group(2) or m.group(3), 16)), text))
+    return set(SHADOW_TOKEN.findall(text)) - SHADOW_ALLOWED
 
 
 def _apply_in_order(player: bytes, replacements) -> bytes:
@@ -1139,7 +1163,7 @@ function run(o){globalThis.devicePixelRatio=o.dpr||1;
     if(o.fg.wrap)par=el('DIV','fgwrap',o.fg.wrap,o.fg.rect,par);if(o.fg.hostGroup)par=el('DIV','fghost',o.fg.hostGroup,[0,0,1920,1080],par);el(o.fg.tag||'CANVAS','fg',o.fg.cs||{},o.fg.rect,o.fg.outside?body:par);if(o.fg.pseudo)raws.fg._pseudo=o.fg.pseudo;if(o.fg.text)raws.fg.childNodes=[{nodeType:3,data:'Hi'}]}
   if(o.fg2)el('CANVAS','fg2',{},o.fg2,root);
   if(o.ext){let par=body;o.ext.forEach((x,i)=>{const id='ext'+i;par=el(x.tag||'DIV',id,x.cs||{},x.rect||[-200,0,100,100],par);if(x.text)raws[id].childNodes=[{nodeType:3,data:'Hi'}];
-    if(x.shadow)raws[id].shadowRoot={mode:'open'};if(x.ns){raws[id].namespaceURI=x.ns;raws[id].localName=(x.tag||'div').toLowerCase()}})}
+    if(x.shadow)raws[id].shadowRoot={mode:'open'};if(x.pseudo)raws[id]._pseudo=x.pseudo;if(x.ns){raws[id].namespaceURI=x.ns;raws[id].localName=(x.tag||'div').toLowerCase()}})}
   const t1=el('DIV','layer10',{},[0,0,1920,1080],stage),c1=el('DIV','layer11',{},[0,0,1920,1080],t1);el('DIV','layer12',{},[0,0,1920,1080],c1);
   const leafOut=el('DIV','layer13',{},[0,0,1920,1080],c1);const wrap=o.noWrap?null:el('DIV','layer13-opacity',{},[0,0,1920,1080],leafOut);
   const rw=raws['layer13-opacity'];if(o.appendThrows&&wrap)rw._throw=true;if(o.throwAt&&wrap){rw._throwAt=o.throwAt;rw._n=0}
@@ -1153,7 +1177,7 @@ function run(o){globalThis.devicePixelRatio=o.dpr||1;
         tr.push(src.tagName==='VIDEO'?['video',src.id,...a.map(r6)]:['fg',src.id,ctx.globalAlpha,...a.map(r6)])},
       getImageData:(x,y,w,h)=>{tick();tr.push(['get',x,y,w,h]);if(x||y||w!==cv.width||h!==cv.height)partialReads++;return {data:px(w,h)}},
       putImageData:(D,x,y)=>{tick();tr.push(['put',x,y]);put=Array.from(D.data.slice(0,4*Math.max(3,(o.pixels||[]).length)))}};return ctx}}):node(t.toUpperCase())};
-  globalThis.getComputedStyle=(e,p)=>(tick(),p)?{content:(e._pseudo&&e._pseudo[p])||'none'}:(e._cs||BASE);globalThis.innerWidth=(o.viewport||[1920,1080])[0];globalThis.window=globalThis;globalThis.innerHeight=(o.viewport||[1920,1080])[1];
+  globalThis.getComputedStyle=(e,p)=>(tick(),p)?Object.assign({content:'none',position:'static'},(v=>typeof v==='string'?{content:v}:v)(e._pseudo&&e._pseudo[p])):(e._cs||BASE);globalThis.innerWidth=(o.viewport||[1920,1080])[0];globalThis.window=globalThis;globalThis.innerHeight=(o.viewport||[1920,1080])[1];
   const tuple=o.vf===undefined?['bt709','bt709','bt709',false]:o.vf;let vfOpened=0,vfClosed=0;
   if(tuple==='missing')delete globalThis.VideoFrame;else globalThis.VideoFrame=class{constructor(x){tick();if(tuple==='throws')throw new Error('vf');vfOpened++;this.colorSpace={primaries:tuple[0],transfer:tuple[1],matrix:tuple[2],fullRange:tuple[3]}}close(){vfClosed++}};
   globalThis.performance={now:()=>clk};globalThis.__obedTakeMs=undefined;
@@ -1292,13 +1316,15 @@ WITNESS = {"cs": WITNESS_CS, "rect": [-140, 0, 130, 1080]}
 NAV_TEXT = {"text": True, "rect": [-140, 55, 20, 20]}
 DROP_300 = "drop-shadow(rgb(255, 0, 0) 300px 0px 0px)"
 DPR15_BOX = [109, 795, 313, 263]
+FIXED_PSEUDO = {"content": '""', "position": "fixed"}
+ABSOLUTE_PSEUDOS = {"::before": {"content": '""', "position": "absolute"}, "::after": {"content": '""', "position": "absolute"}}
 
 
 def _hidden_parent(**effects) -> dict:
     return {"cs": {"visibility": "hidden", **effects}, "rect": [-300, 0, 200, 1080]}
 
 
-FREEZE_ROW_COUNT = 234
+FREEZE_ROW_COUNT = 260
 # name -> (stub options, expected take/attach count and target, redraws [id, alpha, x, y, w, h], writeback (none on any
 # path: identity tone), geometry).
 FREEZE_ROWS = {
@@ -1439,6 +1465,33 @@ FREEZE_ROWS = {
         {"ext": [WITNESS, {"cs": {"transform": "matrix(1, 0, 0, 1, 500, 0)"}, "rect": [-140, 0, 50, 50]}, NAV_TEXT]}, FREEZE_ADMIT),
     "ext_iframeUnderWitness": ({"ext": [WITNESS, {"tag": "IFRAME", "rect": [-140, 0, 100, 100]}]}, FREEZE_ADMIT),
     "ext_iframeNoWitness": ({"ext": [{"tag": "IFRAME", "rect": [-140, 0, 100, 100]}]}, FREEZE_SKIP),
+    # Exterior proof, one witness or walk predicate at a time (impl r1 2): a fixed `::before`/`::after` below or on the
+    # witness skips while the same pseudo-elements `absolute` admit; each property the witness needs, broken alone, skips.
+    "ext_fixedBeforeBelowWitness": ({"ext": [WITNESS, dict(NAV_TEXT, pseudo={"::before": FIXED_PSEUDO})]}, FREEZE_SKIP),
+    "ext_fixedAfterBelowWitness": ({"ext": [WITNESS, dict(NAV_TEXT, pseudo={"::after": FIXED_PSEUDO})]}, FREEZE_SKIP),
+    "ext_pseudoBelowWitness": ({"ext": [WITNESS, dict(NAV_TEXT, pseudo=ABSOLUTE_PSEUDOS)]}, FREEZE_ADMIT),
+    "ext_fixedBeforeOnWitness": ({"ext": [dict(WITNESS, pseudo={"::before": FIXED_PSEUDO}), NAV_TEXT]}, FREEZE_SKIP),
+    "ext_fixedAfterOnWitness": ({"ext": [dict(WITNESS, pseudo={"::after": FIXED_PSEUDO}), NAV_TEXT]}, FREEZE_SKIP),
+    "ext_pseudoOnWitness": ({"ext": [dict(WITNESS, pseudo=ABSOLUTE_PSEUDOS), NAV_TEXT]}, FREEZE_ADMIT),
+    "ext_witnessSvgNamespaceDiv": ({"ext": [dict(WITNESS, tag="DIV", ns=SVG_NS), NAV_TEXT]}, FREEZE_SKIP),
+    "ext_witnessSection": ({"ext": [dict(WITNESS, tag="SECTION"), NAV_TEXT]}, FREEZE_SKIP),
+    "ext_witnessInline": ({"ext": [dict(WITNESS, cs=dict(WITNESS_CS, display="inline")), NAV_TEXT]}, FREEZE_SKIP),
+    "ext_witnessFlex": ({"ext": [dict(WITNESS, cs=dict(WITNESS_CS, display="flex")), NAV_TEXT]}, FREEZE_ADMIT),
+    "ext_witnessHiddenXVisibleY": ({"ext": [dict(WITNESS, cs={"overflowX": "hidden"}), NAV_TEXT]}, FREEZE_SKIP),
+    "ext_witnessVisibleXHiddenY": ({"ext": [dict(WITNESS, cs={"overflowY": "hidden"}), NAV_TEXT]}, FREEZE_SKIP),
+    "ext_witnessOverflowVisible": ({"ext": [dict(WITNESS, cs={}), NAV_TEXT]}, FREEZE_SKIP),
+    "ext_witnessOverflowClip": ({"ext": [dict(WITNESS, cs={"overflowX": "clip", "overflowY": "clip"}), NAV_TEXT]}, FREEZE_SKIP),
+    "ext_witnessFilter": ({"ext": [dict(WITNESS, cs=dict(WITNESS_CS, filter=DROP_300)), NAV_TEXT]}, FREEZE_SKIP),
+    "ext_witnessBackdropFilter": ({"ext": [dict(WITNESS, cs=dict(WITNESS_CS, backdropFilter="blur(4px)")), NAV_TEXT]}, FREEZE_SKIP),
+    "ext_witnessOutline": ({"ext": [dict(WITNESS, cs=dict(WITNESS_CS, outlineStyle="solid")), NAV_TEXT]}, FREEZE_SKIP),
+    "ext_witnessBorderImage": ({"ext": [dict(WITNESS, cs=dict(WITNESS_CS, borderImageSource="linear-gradient(red, red)")), NAV_TEXT]},
+                               FREEZE_SKIP),
+    "ext_witnessReflect": ({"ext": [dict(WITNESS, cs=dict(WITNESS_CS, webkitBoxReflect="right 400px")), NAV_TEXT]}, FREEZE_SKIP),
+    "ext_witnessFixed": ({"ext": [dict(WITNESS, cs=dict(WITNESS_CS, position="fixed")), NAV_TEXT]}, FREEZE_ADMIT),
+    "ext_absoluteDescendant": ({"ext": [WITNESS, {"cs": {"position": "absolute"}, "rect": [-140, 0, 50, 50]}, NAV_TEXT]}, FREEZE_ADMIT),
+    "ext_stickyDescendant": ({"ext": [WITNESS, {"cs": {"position": "sticky"}, "rect": [-140, 0, 50, 50]}, NAV_TEXT]}, FREEZE_ADMIT),
+    "ext_failingStageAncestor": ({"bodyCs": {"filter": DROP_300}}, FREEZE_SKIP),
+    "exteriorVideoMeetsRegion": ({"ext": [{"tag": "VIDEO", "rect": [500, 800, 200, 200]}]}, FREEZE_SKIP),
     # Geometry guard and opaque cover (r8 3-5): DPR 1.5 `fill` 313x263 would back 470x395; a transparent last backing
     # column or row skips at DPR 1; DPR 2, stage scales and a fractional stage origin skip; a letterbox at scale 1 admits.
     "dpr15_fillOpaque": ({"dpr": 1.5, "videoCs": {"objectFit": "fill"}, "vrect": DPR15_BOX, "clip": DPR15_BOX}, FREEZE_SKIP),
@@ -1446,12 +1499,14 @@ FREEZE_ROWS = {
         {"dpr": 1.5, "videoCs": {"objectFit": "fill"}, "vrect": DPR15_BOX, "clip": DPR15_BOX, "alphaAt": 469, "alphaVal": 0}, FREEZE_SKIP),
     "dpr1_lastColumnTransparent": ({"alphaAt": 951, "alphaVal": 0}, dict(FREEZE_SKIP, traces=[DEFAULT_TRACE])),
     "dpr1_lastRowTransparent": ({"alphaAt": 952 * 267, "alphaVal": 0}, dict(FREEZE_SKIP, traces=[DEFAULT_TRACE])),
+    "dpr1_lastPixelTransparent": ({"alphaAt": 952 * 268 - 1, "alphaVal": 0}, dict(FREEZE_SKIP, traces=[DEFAULT_TRACE])),
     "dpr2": ({"dpr": 2}, dict(FREEZE_SKIP, traces=[])),
     "stageScale43": ({"scale": 4 / 3, "viewport": [2560, 1440], "stageCs": {"transform": STAGE_43}}, FREEZE_SKIP),
     "stageScale075": ({"scale": 0.75, "off": [240, 135], "stageCs": {"transform": STAGE_075}}, FREEZE_SKIP),
     "stageLetterboxScale1": ({"off": [0, 60], "viewport": [1920, 1200], "stageCs": {"transform": "matrix(1, 0, 0, 1, 0, 0)"}},
                              FREEZE_ADMIT),
     "stageFractionalOrigin": ({"off": [0, 60.5], "viewport": [1920, 1201]}, FREEZE_SKIP),
+    "stageFractionalOriginX": ({"off": [0.5, 60], "viewport": [1921, 1200]}, dict(FREEZE_SKIP, traces=[])),
     "scaleBelowStage": ({"layerCs": {"transform": "matrix(1.5, 0, 0, 1.5, 0, 0)"}}, FREEZE_SKIP),
     "fractionalTranslation": ({"layerCs": {"transform": "matrix(1, 0, 0, 1, 0.5, 0.25)"}}, dict(FREEZE_ADMIT, traces=[DEFAULT_TRACE])),
     # r9: no tag is exempt by name (rendering state decides), open author shadow roots skip, `kx` = `ky` = 1.
@@ -1710,7 +1765,8 @@ def test_dissolve_real_patched_methods_on_node(tmp_path, sha, case):
         result = _run_node_file(node, tmp_path, case, script, {name: options for name, (options, _) in FREEZE_ROWS.items()})
         # §8's 134 rows grew with the review controls (viewport, attach, stale slot, append, tone, take index and
         # effect, above-stage, every edge member, refused and ignored tags, decoded size, outside stage, mixed candidates)
-        # to 200, then rev 12's 26 r8 rows (exterior proof, top layer, geometry guard, opaque cover) and 8 r9 rows.
+        # to 200, then rev 12's 26 r8 rows (exterior proof, top layer, geometry guard, opaque cover) and 8 r9 rows, then
+        # impl r1's 26 (one exterior predicate at a time, the last backing pixel, a fractional x origin).
         assert len(FREEZE_ROWS) == FREEZE_ROW_COUNT
         assert result.pop("guardControl") == FREEZE_GUARD_CONTROL
         assert result.pop("callSites") == FREEZE_CALL_SITES
