@@ -252,10 +252,10 @@ def stage_of(arm: Arm) -> dict[str, float]:
 _ALL = ("out", "in", "overlap")
 _ON_EXPECT = {c: "PASS" for c in ("model", "complement", "no_dip", "curve", "monotone", "handoff", "no_flash")}
 _MEDIA = {"deck": "p2bin", "slide": 2, "movies": "counter", "continuity": "auto"}
-_TONE = {**_MEDIA, "movies": "tone", "capture": "reference", "holders": 1}
-_SNAP = {**_MEDIA, "capture": "reference", "holders": 1}
+_TONE = {**_MEDIA, "movies": "tone", "capture": "reference", "holders": 1, "classes": ("out",)}
+_SNAP = {**_MEDIA, "capture": "reference", "holders": 1, "classes": ("out",)}
 _SNAP_EXPECT = {"holder_pixels": "PASS", "reference": "PASS", "mask": "PASS"}
-_ENGAGE = {**_MEDIA, "capture": "engage"}
+_ENGAGE = {**_MEDIA, "capture": "engage", "classes": ("out",)}
 ARMS: dict[str, Arm] = {
     "on": Arm("p2", 2, movies="player", classes=_ALL, expect=_ON_EXPECT),
     "on-dsk": Arm("dsk", 5, classes=_ALL, expect=_ON_EXPECT),
@@ -316,7 +316,7 @@ ARMS: dict[str, Arm] = {
     "m-raw-svgclip": Arm(**_ENGAGE, page="raw", holders=1, inject="svgclip", expect={"exterior": "PASS"}),
     **{f"m-raw-{n}": Arm(**_ENGAGE, page="raw", inject=n, expect={"exterior": "FAIL"})
        for n in ("caption", "nav-open", "modal", "svg", "script", "shadow-modal", "shadow-fixed")},
-    "m-dsk78": Arm("dsk", 7, movies="h264", capture="engage", holders=2, decoders=2, expect={"cost": "PASS", "geometry": "PASS"}),
+    "m-dsk78": Arm("dsk", 7, movies="h264", capture="engage", classes=("out",), holders=2, decoders=2, expect={"cost": "PASS", "geometry": "PASS"}),
     "m-bridge-off": Arm("p2", 4, mode="off", movies="player", continuity="auto", capture="media", classes=("out",), bridge=True,
                         styles="none", expect={"overlay": "FAIL"}),
     "m-bridge": Arm("p2", 4, movies="player", continuity="auto", capture="media", classes=("out",), bridge=True,
@@ -2116,9 +2116,10 @@ PAUSED = ("paused", "reference")
 
 
 def injection_problems(name: str, value: Any, viewport: tuple[int, int]) -> list[str]:
-    """The injection's own evidence that it took effect (`RAW_INJECTIONS`): a border box wholly left of the viewport whose
-    paint reaches into it (caption, script; the SVG witness box), the sidebar slid to x 0, an open modal dialog, an
-    overlay or stroke painting inside the viewport."""
+    """The injection's own evidence that it took effect where the control needs it (`RAW_INJECTIONS`): a border box
+    wholly left of the viewport whose paint reaches into it (caption, script; the SVG witness box), the sidebar slid to
+    x 0 and meeting the viewport, an open modal dialog (top layer: position-independent), an overlay or stroke painting
+    inside the viewport."""
     if not isinstance(value, dict):
         return [f"injection {name} did not apply: {value!r}"]
 
@@ -2139,7 +2140,7 @@ def injection_problems(name: str, value: Any, viewport: tuple[int, int]) -> list
           "svgclip": lambda: off_left("box") and in_view("paint"),
           "svg": lambda: in_view("paint"),
           "shadow-fixed": lambda: in_view("paint"),
-          "nav-open": lambda: rect("box") is not None and abs(value["box"][0]) < 0.5,
+          "nav-open": lambda: in_view("box") and abs(value["box"][0]) < 0.5,
           "modal": lambda: value.get("open") is True and value.get("modal") is True,
           "shadow-modal": lambda: value.get("open") is True and value.get("modal") is True}[name]()
     return [] if ok else [f"injection {name} evidence does not show it took effect: {value!r}"]
@@ -2229,9 +2230,22 @@ def capture_problems(record: dict[str, Any], images: Mapping[str, np.ndarray], a
         problems.append(f"dropped actions {sorted(map(str, dropped))} != the arm's {arm.drop!r}")
     if arm.inject:
         problems += injection_problems(arm.inject, record.get("inject"), viewport_of(arm))
-    if arm.capture == "reference":
-        problems += reference_problems(record, images, arm, evidence(record, images, arm.dsf), cal)
+    if arm.capture in ("reference", "engage"):
+        ev = evidence(record, images, arm.dsf)
+        problems += class_problems(ev.A, ev.B, ev.media, arm.classes)
+        if arm.capture == "reference":
+            problems += reference_problems(record, images, arm, ev, cal)
     return problems
+
+
+def class_problems(A: np.ndarray | None, B: np.ndarray | None, exclude: list[Iterable[float]], classes: Iterable[str]) -> list[str]:
+    """§9.1 spatial completeness, independent of temporal coverage: every required texture class has >= `MIN_CLASS_PX`
+    px outside the media rects (+ `MEDIA_PAD_PX`)."""
+    if A is None or B is None or A.shape != B.shape:
+        return ["no textures for the required classes"]
+    keep = ~rect_mask(A.shape[:2], exclude, MEDIA_PAD_PX)
+    masks = texture_classes(A, B)
+    return [f"class {k}: {int((masks[k] & keep).sum())} px < {MIN_CLASS_PX}" for k in classes if int((masks[k] & keep).sum()) < MIN_CLASS_PX]
 
 
 @dataclass

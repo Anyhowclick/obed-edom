@@ -278,7 +278,7 @@ FG_RECT = [60.0, 20.0, 40.0, 10.0]
 IDENTITY_LUT = np.arange(256, dtype=np.uint8)
 TONE_LAYOUT = {"ramp": [[400 + 200 * i, 200, 160, 160, 60 + 40 * i] for i in range(4)],
                "patches": [[400 + 200 * i, 370, 160, 160, [200, 40, 40]] for i in range(4)]}
-SHARED_MUTATIONS = ("holder-shift", "edge-step", "tone-step")
+SHARED_MUTATIONS = ("holder-shift", "edge-step", "tone-step", "tex-zero", "tex-in-opaque")
 INJECTED = {"caption": {"box": [-60.0, 300.0, 40.0, 20.0], "paint": [-60.0, 300.0, 456.0, 48.0]},
             "script": {"box": [-60.0, 300.0, 40.0, 20.0], "paint": [-60.0, 300.0, 480.0, 48.0]},
             "svgclip": {"box": [-300.0, 100.0, 200.0, 200.0], "paint": [-50.0, 130.0, 150.0, 40.0]},
@@ -454,7 +454,8 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         record["foreground"] = {"0": [] if mutate == "mask-empty" else [{"id": "FG", "rect": rect, "alpha": 1.0, "order": 7, "image": "fg-0-0"}]}
         record["reference"] = reference_block(spec, A, B, with_holder, live, mutate, images)
     if spec.inject:
-        record["inject"] = None if mutate == "no-inject" else {**INJECTED[spec.inject], **({"open": False} if mutate == "inject-false" else {})}
+        record["inject"] = None if mutate == "no-inject" else {**INJECTED[spec.inject], **({"open": False} if mutate == "inject-false" else {}),
+                                                               **({"box": [0.0, 10000.0, 130.0, 360.0]} if mutate == "nav-offscreen" else {})}
     if mutate == "no-take":
         record["dump"]["takes"] = []
     if spec.row:
@@ -569,6 +570,11 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         record["dump"]["takes"] = [[INSERT_MS - 1.0, -42.0]]
     elif mutate == "no-action":
         record["actions"] = []
+    elif mutate == "tex-zero":
+        images["tex-in"], images["tex-out"] = np.zeros_like(B), np.zeros_like(A)
+    elif mutate == "tex-in-opaque":
+        images["tex-in"] = B.copy()
+        images["tex-in"][..., 3] = 255
     elif mutate == "no-decoder-evidence":
         record["dump"]["vids"][0].update(rv=[], tuple=None)
     elif mutate == "no-media-inventory":
@@ -993,6 +999,10 @@ CASES = [
                                                                               "m-snap-twin": media_run("m-snap-twin", mutate="tone-step")},
                                                                              {"lPath": {"gpu": "analytic"}}, CAL, profile=probe.CEF)
      ["detail"]["m-snap"]["checks"]["holder_pixels"]["verdict"], "INCONCLUSIVE"),
+    ("r12b-1 m-raw-nav-open with the sidebar below the viewport", lambda: arm_outcome("m-raw-nav-open", holder=False, mutate="nav-offscreen"), "INCONCLUSIVE"),
+    ("r12b-2 m-raw-caption with zeroed textures", lambda: arm_outcome("m-raw-caption", holder=False, mutate="tex-zero"), "INCONCLUSIVE"),
+    ("r12b-2 m-geo-scale with zeroed textures", lambda: arm_outcome("m-geo-scale", holder=False, mutate="tex-zero"), "INCONCLUSIVE"),
+    ("r12b-2 m-snap and twin with an opaque incoming texture (no out-only class)", lambda: arm_outcome("m-snap", mutate="tex-in-opaque"), "INCONCLUSIVE"),
     ("r12 round: perfect-shift passing invalidates the reference gate", lambda: round_gate(("perfect-shift", "reference", "PASS"), "reference"), "INCONCLUSIVE"),
 ]
 
