@@ -1,18 +1,34 @@
 # Dissolve cross-fade — implementation handover (updated 2026-10-12 afternoon)
 
-## READ FIRST — current state (2026-10-12 ~14:45; the night section below is history)
+## READ FIRST — current state (2026-10-12 ~15:10; the night section below is history)
 
 Branch `claude/keynote-live-dissolve-crossfade` (local only: NOT pushed, no PR), worktree `.claude/worktrees/brave-goodall-bd9851`.
-Plan `.agents/plans/keynote_live_dissolve_crossfade.plan.md` is at **rev 15** (`95c55e45`); **rev 16 in progress** (folding GPT-6
-Astra plan r12). Owner decisions 8–14 are in §12 (14 = raw/Build Preview no longer freeze; recorded in rev 16).
+Plan `.agents/plans/keynote_live_dissolve_crossfade.plan.md`: rev 16 committed (`41ef609b`); **rev 17 in progress** = the
+**decision-15 split** (owner ~15:00): this PR ships the freeze only where the snapped rule is proven (the Chrome host launched
+by `LiveOutputHost`, qualified engine version via CDP `Browser.getVersion`), granted through a host-only, page-unforgeable
+per-document channel; **CEF/OBS skips** (today's jump) with the reason in `output.placement`. The startup placement probe
+(rev 16 §3.3: fractional draw for CEF 127, isolated probe target / OBS calibrate scene, output gate, lifecycle, recalibrate
+command + dashboard button, W5 tone map) becomes the **next PR**, starting with a 5-min OBS feasibility check (does
+`GetSourceScreenshot` render a non-program source?). Owner decisions 8–15 in §12 (14: raw / Build Preview no longer freeze).
 
 | Item | State |
 |---|---|
-| Code on branch | rev 13 bytes in `live_runtime.py` (`69db0c0d`, `7834624c`); probe/DX-2 for rev 13/14 (`a8e4fd3c`). Rev 15 code (host placement probe W6, take +374 B, W2/W3 arms) NOT started — waits for rev 16 + critique. |
-| Reviews | W1 rev 12: Astra impl r1–r2 folded (shadow tripwire now pinned + scoped to page-reaching host files). W2/W3 rev 12: r1–r3 folded. Rev 13 W1/W2 deltas committed after local verification; next Astra impl round runs on rev 15/16 code. |
-| Tests (latest) | `test_live_runtime` 125 / 0 skipped (266 rows); dissolve + managed_obs 409 / 1 skipped; sweep 912/924 INCONCLUSIVE, 12 accepted survivors. Full suite NOT re-run since `1c5d3004` (run after rev-16 code lands). |
-| Measurements | Q0b-bis (`output/evidence/.../q0bbis-2026-10-12/`): engagement PASS (host + raw + all negatives); cost PASS (headless ≤ 18.3 ms, CEF ≤ 34.8 ms); 18-cell DPR×origin×clip matrix PASS with a REAL `--force-device-scale-factor` (CDP emulation smooths canvases — void); W5 GO (indicative). Hi-DPI investigation (`hidpi-2026-10-12/`) → fix A (device-grid snap). CEF investigation (`cef-frac-2026-10-12/`): CEF 127 draws the video quad unsnapped → host startup probe (decision 13). |
-| Open items | rev 16 critique → implement W1 (take bytes), W6 (host probe + output gate + lifecycle), W2/W3 arms; Q0b-ter (probe qualification on both engines, CEF `frac` clip cases, rev-15 engagement); DX-1 full (~65 browser-min, needs a booked window); full suites; DX-2; DX-3 (owner, real OBS); one PR. Not run yet: m-geo-*, hide-row, D2, m-tone-twin dry runs; crop A/B; CEF HEVC tone. |
+| Code on branch | rev 13 take bytes (`69db0c0d`, `7834624c`: device-grid snap, DPR 1/1.5/2, exterior proof, top-layer/shadow refusal, identity tone); probe + DX-2 for rev 13/14 (`a8e4fd3c`). Rev 17 deltas NOT started: take grant read + integer left/top (W1), grant channel in `live_host.py` (W6), CEF-skip arms (W2/W3), docs (W4). |
+| Reviews | W1 rev 12 Astra impl r1–r2 folded; W2/W3 rev 12 r1–r3 folded; rev 13 deltas verified locally only. Plan critiques r8–r12 folded; rev 17 not yet critiqued. |
+| Tests (latest) | `test_live_runtime` 125 / 0 skipped (266 rows); dissolve + managed_obs 409 / 1 skipped; sweep 912/924 INCONCLUSIVE, 12 accepted survivors. Full suite last green at `1c5d3004` (3.12 9324 passed; 3.10 green at `de83681b`). |
+| Measurements | Q0b-bis (`output/evidence/.../q0bbis-2026-10-12/`): engagement PASS (host + raw + negatives); cost PASS (headless ≤ 18.3 ms, CEF ≤ 34.8 ms); 18-cell DPR×origin×clip matrix PASS with a REAL `--force-device-scale-factor` (CDP emulation is void); W5 GO (indicative). Hi-DPI (`hidpi-2026-10-12/`) → device-grid snap. CEF (`cef-frac-2026-10-12/`): CEF 127 draws the video quad unsnapped → follow-up PR. |
+
+**Path to a PR (estimate from 15:10):**
+1. Rev 17 written → Astra plan critique (expect 1–2 rounds, ~30–60 min).
+2. Implement W1 / W6 (grant channel) / W2 / W3 / W4 in parallel (~1 h; W1 is small, W6 is the only new host code) → Astra impl
+   review + folds (history: 2–4 rounds per stream).
+3. Full suites 3.12 + 3.10 (~10 min; book a window with the S2 session). Dashboard untouched in this PR.
+4. **Draft PR can open here** (realistically this evening if reviews converge): code reviewed, suites green, qualification pending.
+5. Ready for review after: Chrome-only DX-1 (~65 browser-min, booked window), DX-2 confirming CEF skips with reason, `mmo-cef`
+   and §9.4 regression, then DX-3 (owner, real OBS / HDMI). Never merge.
+
+Not run yet (still owed in this PR): m-geo-*, hide-row, D2, m-tone-twin dry runs; crop A/B. Dropped to the follow-up: CEF frac
+clip matrix, probe controls, CEF HEVC tone.
 
 Machine etiquette (S2 session "Keynote test optimization" runs timed validations today): send "need window" before any Chrome,
 OBS or test run; S2 replies "free now"; send "done" after. Untimed work may overlap untimed work.
