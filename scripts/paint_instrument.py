@@ -720,8 +720,9 @@ def score_paint(
     so is one where a painter that names no source at all (painted, partial or unreadable) meets the slot (any, without
     a slot). A read naming another asset is never the movie: on a decoder of the asset that paints where it meets the
     slot it is a substitute (red), and unreadable there when its paint is. The browser's loop seek is excused (owner
-    decision 14, pixel-checked: the last frame stays painted): on a classified wrap sample (`wrap_times`), the carried
-    decoder alone reading unpainted for `seeking` is `seekExcused`, never a violation."""
+    decision 14, pixel-checked: the last frame stays painted): on a classified wrap sample (`wrap_times`) whose sampler
+    read has the carried decoder looping, its `seeking` read waives only the decode-readiness rule, and every other
+    rule still judges the frame; a frame that then paints is `seekExcused`."""
     window_rows = sorted((r for r in rows if _num(r.get("t")) and start <= r["t"] <= end), key=lambda r: r.get("seq") or 0)
     coverage = frame_coverage(window_rows, max_gap_frames=max_gap_frames, min_fps=min_fps)
     period = coverage.get("periodMs")
@@ -747,6 +748,10 @@ def score_paint(
             unreadable.append(dict(frame, reason=context))
             continue
         slot, stage = _box(slot_of(row)), _box(stage_box_of(row))
+        loop_seek = row["t"] in wrap_times and any(
+            isinstance(v, dict) and v.get("id") == element_id and v.get("loop") is True for v in row.get("videos") or []
+        )
+        waived = False
         if stage is None:
             unreadable.append(dict(frame, reason="stage box"))
             continue
@@ -776,6 +781,10 @@ def score_paint(
                 continue
             state = painted_state(pv, cover=cover, expected=expected, stage=stage,
                                   rect_tolerance=rect_tolerance if slot is not None else None)
+            if loop_seek and pv["id"] == element_id and state == (UNPAINTED, "seeking"):
+                waived = True
+                state = painted_state({**pv, "readyState": 2}, cover=cover, expected=expected, stage=stage,
+                                      rect_tolerance=rect_tolerance if slot is not None else None)
             if not name:
                 rect = _box(pv.get("rect"))
                 if state[0] in (PAINTED, PARTIAL, UNREADABLE) and (slot is None or rect is None or _meet(rect, slot) is not None):
@@ -817,6 +826,8 @@ def score_paint(
             kind, reason = "double", f"ids {ids}"
         elif ids == [element_id]:
             if carried_state[0] == PAINTED:
+                if waived:
+                    seek_excused.append(frame)
                 continue
             kind, reason = PARTIAL, carried_state[1]
         elif at_slot:
@@ -824,9 +835,6 @@ def score_paint(
         else:
             kind = UNPAINTED
             reason = carried_state[1] if carried_state[0] != PAINTED and carried_state[0] != PARTIAL else "off-slot"
-            if carried_state == (UNPAINTED, "seeking") and row["t"] in wrap_times:
-                seek_excused.append(frame)
-                continue
         violations.append(dict(frame, kind=kind, reason=reason,
                                hiding=(carried_pv or {}).get("hiding"), parent=(carried_pv or {}).get("parent"),
                                layer=(carried_pv or {}).get("layer")))

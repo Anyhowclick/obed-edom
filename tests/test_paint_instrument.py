@@ -202,16 +202,27 @@ def test_score_paint(rows, slot, expected) -> None:
 
 
 # Owner decision 14: on the classified wrap sample the carried decoder reads `seeking` for one frame while the browser
-# keeps its last frame painted (pixel-checked twice, `decision14/`). Only that frame, only `seeking`, only the carried one.
-@pytest.mark.parametrize(("hidden", "kw", "wrap_seq", "status", "excused"), [
-    ((60, 60), dict(readyState=1, seeking=True), 60, "ok", [60]),
-    ((60, 60), dict(readyState=1, seeking=True), 61, "fail", []),
-    ((60, 61), dict(readyState=1, seeking=True), 60, "fail", [60]),
-    ((60, 60), dict(readyState=1), 60, "fail", []),
+# keeps its last frame painted (pixel-checked twice, `decision14/`). Only the readiness rule is waived there, only for
+# the carried decoder looping on that row; every other rule still judges the frame (Astra r24 P1).
+SEEK = dict(readyState=1, seeking=True)
+
+
+@pytest.mark.parametrize(("hidden", "kw", "wrap_seq", "loop", "status", "excused"), [
+    ((60, 60), SEEK, 60, True, "ok", [60]),
+    ((60, 60), SEEK, 61, True, "fail", []),
+    ((60, 61), SEEK, 60, True, "fail", [60]),
+    ((60, 60), dict(readyState=1), 60, True, "fail", []),
+    ((60, 60), SEEK, 60, False, "fail", []),
+    ((60, 60), dict(SEEK, opacity=0.0, checkVisibility=False), 60, True, "fail", []),
+    ((60, 60), dict(SEEK, opacity=0.5), 60, True, "fail", []),
+    ((60, 60), dict(SEEK, effects="div#x:filter"), 60, True, "inconclusive", []),
 ], ids=["seek-on-the-wrap-sample", "known-bad-a-seek-off-the-wrap-sample", "known-bad-a-second-seeking-frame",
-        "known-bad-not-decoded-on-the-wrap-sample"])
-def test_the_loop_seek_on_a_wrap_sample_is_excused(hidden, kw, wrap_seq, status, excused) -> None:
+        "known-bad-not-decoded-on-the-wrap-sample", "known-bad-not-looping", "known-bad-hidden-while-seeking",
+        "known-bad-partial-while-seeking", "unreadable-while-seeking"])
+def test_the_loop_seek_on_a_wrap_sample_waives_only_readiness(hidden, kw, wrap_seq, loop, status, excused) -> None:
     rows = _rows(videos=_hide(*hidden, **kw))
+    for row in rows:
+        row["videos"] = [{"id": 1, "loop": loop}]
     result = pi.score_paint(rows, 1, "movie-a.mov", start=0.0, end=math.inf, slot_of=lambda r: SLOT,
                             stage_box_of=lambda r: r["pp"]["stageBox"], wrap_times=[rows[wrap_seq - 1]["t"]], **SCORE_KW)
     assert result["status"] == status, result["reasons"]
