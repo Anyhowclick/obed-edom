@@ -1029,7 +1029,7 @@ visibility shortcut; witnesses are HTML `div`s; the shadow-DOM invariant is a ch
 translation-only scene transforms, integer `left`/`top`, `sn` on the 1/DPR grid; everything else skips; (12) placement only from the host's grant
 (`snap` on a host-launched, qualified Chrome; never in CEF); absent or anything else skips; safety checks never relaxed for a visual allowance.
 
-## 12. Owner decisions (1–7 2026-10-11, 8–15 2026-10-12, in chat)
+## 12. Owner decisions (1–7 2026-10-11, 8–16 2026-10-12, in chat)
 
 - **Target (movies):** "in Keynote the vid stops playing and dissolves out" — freeze on the current frame, fade with slide 2.
 1. **Switch: fold into `mm_opacity`.** 2. **Scope: every output.** 3. **F1 (`none` cut) in this patch; F2 a separate
@@ -1089,6 +1089,10 @@ translation-only scene transforms, integer `left`/`top`, `sn` on the 1/DPR grid;
     channel. The placement probe, the `frac` draw, the isolation gate, the OBS calibrate scene, `recalibrate`, the CEF clip
     matrix and W5's tone map move to a follow-up PR (§13.1), whose first step is the 5-minute OBS feasibility check of
     whether `GetSourceScreenshot` renders a non-program source.
+16. **Lease stays dropped; no rev 18 (2026-10-12 ~15:10–15:25).** On r13: keep the lease dropped; the stale-grant window after an
+    unobserved GPU fallback can occur with CDP connected too and has no guaranteed bound (stated residual, not fixed). Review
+    rule: F3 only, stop when no major/blocker, ignore ≤ medium; at most 3 plan critique rounds. No rev 18 or r14: implement
+    rev 17 with r13 #2 folded into W6; r13 #1 is a recorded follow-up (`keynote-live-dissolve-crossfade-followups.md`).
 
 ## 13. Risks and out of scope
 
@@ -1245,3 +1249,12 @@ Raw rounds: `.agents/reviews/dissolve-crossfade/plan-astra-r{1,…,7}.md`. r1–
 | Acceptance | Chrome-only qualification; `cef-skip` in DX-2 (no holder, reason recorded); `grant-*`, `life-grant-*`, channel tamper rows kept; `probe-*`, `iso-*`, `life-cal-*`, `m-snap-cef*`, wrong-rule moved; DX-3 checks the freeze on the HDMI host and the jump in OBS | §9, §9.0–9.3 |
 | Streams | W1 rev-17 bytes; W6 shrinks to `live_host.py` + `tests/test_live_host.py`; W2/W3 arms; W4 docs (OBS keeps the jump; follow-up outline) | §10, §11 |
 | Follow-up PR | Probe, `frac`, isolation gate, OBS calibrate scene, recalibrate, CEF clip matrix, W5 tone; first step the 5-minute OBS feasibility check | §13.1 |
+
+### r13 — GPT-6 Astra (Codex), on rev 17 `642e1746` — CHANGES REQUIRED (2 major, 1 medium) — not re-planned (decision 16)
+
+| # | Severity / class | Disposition | Where |
+|---|---|---|---|
+| 1 | major / flag integrity (raw/preview forgery of `snap`) | Follow-up: no freeze entry point outside the host variant | followups handover |
+| 2 | major / grant lifecycle (grant before eligibility) | Folded into W6: eligibility first; one context-bound grant/read/revoke/read evaluate, revoke in `finally`; then commit | `live_host.py` |
+| 3 | medium / lifecycle (lease-drop residual understated) | Ignored (≤ medium); residual restated in decision 16 | §12 |
+| g | W6 transport | Folded into W6: context tracking, `uniqueContextId` evaluate, browser-target `SystemInfo`, deferred grant work | `live_host.py` |
