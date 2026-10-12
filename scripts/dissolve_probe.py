@@ -918,7 +918,8 @@ def find_target(read: Callable[[str], Any], slide: int) -> dict[str, Any]:
             "durationS": float(effect["duration"]), "beginS": float(effect.get("beginTime") or 0),
             "automatic": bool(flat[scene].get("automaticPlay")), "previousS": float((flat[scene - 1]["effects"] or [{}])[0].get("duration") or 0) if scene else 0.0,
             "hashBefore": f"#{scene - 1 if flat[scene].get('automaticPlay') else scene}",
-            "hashAfter": f"#{len(flat) if nxt is None else nxt}", "sceneCount": len(flat)}
+            "hashAfter": f"#{len(flat) if nxt is None else nxt}", "sceneCount": len(flat),
+            "automaticScenes": [i for i, e in enumerate(flat) if e.get("automaticPlay")]}
 
 
 def _cut(doc: dict[str, Any], event: int) -> None:
@@ -3215,9 +3216,12 @@ def navigate(host: Any, scene: int, limit: int) -> None:
     """Advance until the next advance plays `scene`."""
     evaluate = host._require_transport().evaluate
     for _ in range(limit + 1):
-        if pending_scene(wait_ready(evaluate, snapshot_js=getattr(host, "snapshot_js", SNAPSHOT_JS))) == scene:
+        snap = wait_ready(evaluate, snapshot_js=getattr(host, "snapshot_js", SNAPSHOT_JS))
+        if pending_scene(snap) == scene:
             return
         host.execute("advance")
+        if hasattr(host, "await_advance"):
+            host.await_advance(snap)
     raise RuntimeError(f"scene {scene} not reached in {limit} advances")
 
 
@@ -3498,9 +3502,16 @@ def start_chrome(profile: Path, *, gpu: bool, viewport: tuple[int, int] | None =
     return proc, endpoint.port, args
 
 
-RAW_SNAPSHOT_JS = ("(function(){var m=/^#(\\d+)$/.exec(location.hash||''),busy=document.getAnimations().some(function(a)"
-                   "{return a.playState==='running'});return m&&document.readyState==='complete'?{ready:!busy,"
-                   "state:'IdleAtInitialState',scene:+m[1]}:null})()")
+def raw_snapshot_js(automatic: Iterable[int]) -> str:
+    """The raw page's readiness from what the production bytes expose (the controller is a module `let`, out of reach):
+    the hash the player writes only at idle (`updateWindowHistory`: the next scene to play), no running animation, and
+    that scene not automatic (the player is about to play it by itself; `automatic` from the slide JSON)."""
+    return ("(function(){var m=/^#(\\d+)$/.exec(location.hash||''),h=m?+m[1]:null,b=document.getAnimations().some("
+            "function(a){return a.playState==='running'});return {ready:document.readyState==='complete'&&h!==null&&!b&&"
+            f"{json.dumps(sorted(automatic))}.indexOf(h)<0,state:'IdleAtInitialState',scene:h}}}})()")
+
+
+ADVANCE_ACK_S = 30.0
 
 
 class RawHost:
@@ -3508,8 +3519,6 @@ class RawHost:
     diagnostics as `web.app` serves them) on the arm's served player, driven with Space over CDP: the subset of
     `LiveOutputHost` that `drive` uses. With `grant`, the host's first-run script is installed before navigation under a
     fresh token (`placement_token`), the privileged channel `commit_grant` uses; without it the page has no channel."""
-    snapshot_js = RAW_SNAPSHOT_JS
-
     def __init__(self, resolved: Resolved, player: bytes, scratch: Path, endpoint: str, tag: str, *, preview: bool = False,
                  grant: bool = True) -> None:
         import secrets
@@ -3527,6 +3536,7 @@ class RawHost:
         if preview:
             page.write_text(inject_player_diagnostics(page.read_text()))
         self.placement_token = secrets.token_hex(16) if grant else None
+        self.snapshot_js = raw_snapshot_js(resolved.target["automaticScenes"])
 
         def resolver(root: Path, relative: str) -> Path:
             return page if relative == "index.html" else resolved.resolver(root, relative)
@@ -3547,7 +3557,7 @@ class RawHost:
             self.transport.call("Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=1, mobile=False)
         self.transport.call("Emulation.setDefaultBackgroundColorOverride", color={"r": 0, "g": 0, "b": 0, "a": 0})
         self.transport.goto(f"{base}/index.html")
-        wait_ready(self.transport.evaluate, snapshot_js=RAW_SNAPSHOT_JS)
+        wait_ready(self.transport.evaluate, snapshot_js=self.snapshot_js)
 
     def stop(self) -> None:
         try:
@@ -3565,10 +3575,22 @@ class RawHost:
         elif name != "show":
             raise RuntimeError(f"raw page cannot {name}")
 
+    def await_advance(self, before: dict[str, Any] | None) -> None:
+        """`navigate`'s acknowledgement: the hash moves off the pressed scene (it is rewritten only at the next idle), so
+        a stale `ready` is never pressed again into the player's queue."""
+        deadline = time.monotonic() + ADVANCE_ACK_S
+        while time.monotonic() < deadline:
+            now = self.transport.evaluate(self.snapshot_js)
+            if now and before and now.get("scene") != before.get("scene"):
+                return
+            time.sleep(0.05)
+        raise RuntimeError(f"the player did not take the advance from {before}")
+
     def observe(self) -> Any:
         from types import SimpleNamespace
 
-        return SimpleNamespace(busy=bool(self.transport.evaluate("document.getAnimations().some(function(a){return a.playState==='running'})")))
+        snap = self.transport.evaluate(self.snapshot_js)
+        return SimpleNamespace(busy=not (snap and snap.get("ready")))
 
 
 GRANT_WAIT_S = 10.0

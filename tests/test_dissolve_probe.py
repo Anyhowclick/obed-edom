@@ -879,6 +879,36 @@ def snap_shift() -> list[int]:
     return counts
 
 
+def raw_navigate(ack: bool) -> tuple[str, int]:
+    """`navigate` on a fake raw page (hash 4 idle, target 5): the hash stays stale for a while after Space (it is
+    rewritten only at the next idle), so one press must wait for it to move instead of pressing again (the live
+    overshoot); a press the player never takes is refused."""
+    stale = [{"ready": True, "state": "IdleAtInitialState", "scene": 4}] * 4
+    moved = [{"ready": True, "state": "IdleAtInitialState", "scene": 5}] if ack else []
+    snaps = stale + moved
+
+    class Page:
+        keys = 0
+
+        def evaluate(self, expression: str) -> Any:
+            assert expression == host.snapshot_js
+            return snaps.pop(0) if len(snaps) > 1 else snaps[0]
+
+        def key(self, *_: Any) -> None:
+            Page.keys += 1
+
+    host = object.__new__(probe.RawHost)
+    host.transport, host.snapshot_js = Page(), probe.raw_snapshot_js([6])
+    wait, probe.ADVANCE_ACK_S = probe.ADVANCE_ACK_S, 0.3
+    try:
+        probe.navigate(host, 5, 10)
+        return "reached", Page.keys
+    except RuntimeError:
+        return "refused", Page.keys
+    finally:
+        probe.ADVANCE_ACK_S = wait
+
+
 def no_twin() -> str:
     record, images = media_run("m-snap")
     return probe.score_arm(record, images, probe.ARMS["m-snap"], CAL, lut=IDENTITY_LUT)["outcome"]
@@ -1132,6 +1162,14 @@ CASES = [
     ("r17 CEF profile: cross-fade, cut, opaque and cef-skip sessions only; its round passes",
      lambda: (probe.CEF.arms, round_gate(None, "overall", profile=probe.CEF), round_gate(None, "scope", profile=probe.CEF)),
      (("opaque-off", "off", "noblend", "on2", "cut-on", "cut-off", "on", "opaque-on", "cef-skip", "cef-skip-dsk"), "PASS", "PASS")),
+    ("DX-1 raw page: one press, then wait for the hash to move", lambda: raw_navigate(True), ("reached", 1)),
+    ("DX-1 raw page: a press the player never takes is refused, not re-pressed", lambda: raw_navigate(False), ("refused", 1)),
+    ("DX-1 raw page: the target lists the automatic scenes the readiness waits through",
+     lambda: probe.find_target({"assets/header.json": {"slideList": ["a"], "loopSlideshow": 0}, "assets/a/a.json": {"events": [
+         {"automaticPlay": True, "effects": []},
+         {"automaticPlay": False, "effects": [{"type": "transition", "name": "apple:dissolve", "duration": 1.5,
+                                                "baseLayer": {"layers": [{"layers": [{"texture": "IN"}, {"texture": "OUT"}]}]}}]}]}}.__getitem__, 1)
+     ["automaticScenes"], [0]),
     ("r17 round: grant-attach passing invalidates the grant gate", lambda: round_gate(("grant-attach", "grant", "PASS"), "grant"), "INCONCLUSIVE"),
 ]
 
