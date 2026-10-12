@@ -1,10 +1,39 @@
 # Dissolve cross-fade — follow-ups (handover)
 
-**2026-10-11.** Patch: `claude/keynote-live-dissolve-crossfade`, plan `.agents/plans/keynote_live_dissolve_crossfade.plan.md`
-(rev 12, cited as §n). It ships D1–D4 under `mm_opacity` (§0, §4). Everything below is deliberately **not** in that PR.
+**2026-10-12.** Patch: `claude/keynote-live-dissolve-crossfade`, plan `.agents/plans/keynote_live_dissolve_crossfade.plan.md`
+(rev 17, cited as §n). It ships D1–D4 under `mm_opacity` (§0, §4); the movie freeze only on the host-launched, qualified
+Chrome (`LiveOutputHost`, Chrome 154, GPU compositing; §3.3, decision 15). Everything below is deliberately **not** in that PR.
 Evidence: main checkout `output/evidence/s2-dev/dissolve-alpha-2026-10-11/` (git-ignored).
 
-## Tone decision record (rev 12)
+## CEF/OBS placement — follow-up PR (decision 15; §13.1)
+
+Today managed OBS/CEF keeps the movie jump (`output.placement.reason = "attached"`): CEF 127 draws the video quad unsnapped
+(x 109.352), so the snapped holder misses by up to 183 LSB there (§8.6). Full design: rev 16's §3.3 and §9 (`41ef609b`).
+1. **First: the 5-minute OBS feasibility check.** Does `GetSourceScreenshot` render a browser source that is not on program
+   (a dedicated `AK-Calibrate` scene / `AK-Probe` source)? If not, re-plan the isolation gate before anything else.
+2. **Placement probe:** isolated probe target/source; program-capture gate with cleanup on every exit; the shipped clip
+   (`p2like.mp4`, sha256 `7b7d66b5…`); rev 16's classifier (tone maps {identity, GPU analytic}, inner mask, max over channels,
+   both poses, ≤ 2 % / ≥ 20 %); lease, keep-alive and invalid / probing / valid lifecycle; operator `recalibrate`
+   (`web/live.py`, `live_session.py`, presenter UI); reconnect re-probe.
+3. **The `frac` take draw:** snapped underlay plus CEF 127's unsnapped quad (`fdrawu`, +186 B), DPR 1 and integer stage origin
+   only; its grant value joins `snap` in this PR's channel.
+4. **CEF acceptance:** `m-snap-cef[clip]`, `nooffset[x|y]`, wrong-rule controls through the privileged channel, `iso-*`,
+   `probe-*`, `life-cal-*`, CEF DSK 7→8 cost with the extra draw, CEF `hevc10` / Keynote-HEVC tone.
+5. **W5's tone-path map** on the same probe (recorded first, applied only after its own qualification).
+
+## Open review items not folded (GPT-6 Astra r13 on rev 17; owner: no rev 18, discover after implementation)
+
+Source: `.agents/reviews/dissolve-crossfade/plan-astra-r13.md`. Check each against the implemented bytes before the PR.
+- **r13 #1 — raw/preview forgery (major).** Raw export and Build Preview have no host channel, so page code assigning
+  `window.__obedPlacement = "snap"` (or a non-configurable getter returning it) on an unqualified engine (e.g. a manually
+  configured CEF source) enables the freeze with Chrome's snapped rule. Proposed fix: no executable freeze entry point outside
+  the host rendering variant; production raw/preview controls that forge `snap` both ways and require no holder.
+- **r13 #3 — stale grant after an unobserved GPU fallback (medium).** Chrome falling back to software between `observe()`
+  samples leaves `snap` granted until the next successful observation, **with CDP connected too** (not only disconnected, as
+  §3.3 "Residual" states); tagged H.264 keeps the qualified tuple on both paths, so the tuple guard does not stop it. No
+  guaranteed bound. Owner decision 16 keeps the lease dropped; a lease would bound, not remove, the window.
+
+## Tone decision record (rev 12; unchanged in rev 17)
 
 `Q` = `["bt709/bt709/bt709/false"]` · `L` = identity (owner decision 10, §12; §3.2 "Tone"). Q0b 1 found software compositing
 (`--disable-gpu`) live == snapshot for the same tagged tuple, while GPU compositing carries the `BT709_APPLE` step (mid-grey
@@ -18,15 +47,14 @@ the compositing path and its map (qualified path + tuple → `L`, unknown → id
 `LiveOutputHost` (GPU, `--disable-gpu`) and managed OBS (acceleration on/off), two fresh launches each; the tone movie paused
 in an off-screen-safe calibration slot, CDP screenshot / `GetSourceScreenshot` vs `drawImage`. Record repeatability, GPU vs
 software distinguishability for one tuple and invalidation on GPU-state change, with a go/no-go; on go, the player-boundary
-change it needs goes to the owner. No page-side heuristics.
+change it needs goes to the owner. No page-side heuristics. Decision 13/15: the map may ride the CEF placement follow-up's probe (item 5 above).
 
-## Hi-DPI investigation hook — geometry beyond the guard (decision 12, reversed; open)
+## Scaled stages (decision 12; open)
 
-The take skips (today's baked-frame jump) unless DSF 1, `kx` = `ky` = 1, stage scale 1, integer stage origin and
-translation-only scene transforms (§3.2 "Geometry guard", §12.12, §13). The investigator's model (DPR, stage scale, nested
-transforms, pixel phase, clipping) replaces exactly that guard and `sn`/`ww`/`hh`/`dx`…`dh`; the full-backing alpha scan,
-exterior proof, clipping and foreground preservation stay mandatory (§9.1 "Geometry classes"). Evidence will land in the main
-checkout's `output/evidence/s2-dev/dissolve-alpha-2026-10-11/hidpi-2026-10-12/` (not yet created).
+Fix A admits DPR 1, 1.5 and 2 at stage scale 1. Stage scale ≠ 1 and nested scales still skip (today's jump): an output not
+1920 CSS px wide (2560×1440 or 1280×720 at DSF 1); fix A at stage 4/3 still reads 162 / 9.3 % on P2 (§13). A future model
+needs a per-chain rule and must solve `object-fit: contain` in local units first (§13 anisotropic `contain` bug). Evidence:
+`hidpi-2026-10-12/`.
 
 ## (a) Bridged / held decoder over the outgoing transition — owner Q6, separate PR after S2
 
