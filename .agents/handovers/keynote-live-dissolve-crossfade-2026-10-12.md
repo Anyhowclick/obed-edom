@@ -1,5 +1,65 @@
 # Dissolve cross-fade — implementation handover (updated 2026-10-12 afternoon)
 
+## READ FIRST — end of day 2026-10-12 ~22:30 (supersedes everything below; resume here)
+
+**State.** Branch `claude/keynote-live-dissolve-crossfade` REBASED onto `origin/main` `b3b06bc9` (S2 merged) — HEAD
+`99b7271a`, local only, NOT pushed, no PR. Backup of the pre-rebase branch: `backup/dissolve-pre-rebase-243ee9a1`.
+Pinned run tree `.claude/worktrees/dx3-ac008f88` (detached at `99b7271a`; fixture symlinks under `output/` added by hand).
+Local `main` ref still old (it is checked out in the main checkout) — `git pull` there. Owner rules in force: plan
+critiques ≤ 3 rounds; reviews F3-only, stop when no major/blocker, ignore ≤ medium; no scope creep; owner hears only on a
+failure or when the draft PR is up.
+
+**Done today (after 16:45).**
+- Full suites at `958d0be0` (rebased): 3.12 and 3.10 each 10827 passed / 28 skipped / 1 xfailed. NOT re-run at `99b7271a`
+  (W3's commit touched only `scripts/managed_obs_qualify.py`, `scripts/dissolve_probe.py` + their tests: 456 passed / 1 skipped).
+- Rebase fixes: `5259d120` (dissolve census excludes S2's `qual_decks` copies), `958d0be0` (S2's `detach_experiment`
+  slices the R1–R8 prefix; no pins changed). One import conflict in `managed_obs_qualify.py`. No player digests changed.
+- Probe fixes found live: `de836d0c` (serve P2's `.mp4` as exported), `bef6a4d9` (raw-page driver waits on the hash;
+  `UC` is module-scoped, unreachable), `243ee9a1` (F3-critical instrument: rVFC `presentationTime` reference — the
+  "frame +1" was the INSTRUMENT, holder == reference after the fix; pending-rAF curve samples; capture to the hand-off;
+  destination movies excluded only after it).
+- **DX-1 F3-critical round at `958d0be0` (owner scope: grant, scope, frozen frame, base cross-fade model): ALL PASS**
+  (model, complement, no_dip, curve, monotone, handoff, frozen_frame, frozen_region, cost, grant, scope; `m-raw-prod`
+  needed one rerun for "5 mid frames < 6", first run retired). Evidence:
+  `output/evidence/s2-dev/dissolve-alpha-2026-10-11/dx1-2026-10-12/` (`dx1-final-958d0be0/`, scores, `dx1_paced.py`
+  = the load-paced runner used: waits for load < 3.5 per arm, MAX_LOAD guard unchanged). Out of owner scope, still
+  INCONCLUSIVE: reference capture ("null timing while paused", all `m-snap*`/`m-tone`), DPR arms open 1920×993,
+  `m-geo*`, `life-*`, cut, `overlay` (`m-bridge-off` = S2-bridge territory / Q6 follow-up).
+- `mmo-cef` regression at `958d0be0`: PASS (`mmo-cef-summary-958d0be0.json`).
+- **DX-2 (managed OBS) NOT passing yet.** Run 1 at `958d0be0` failed every session (advance never acked). W3 fixed at
+  `99b7271a`: (1) CEF drops CDP key input right after load → `await_input()` (Shift keyUp until a page keyup listener sees
+  one, ~0.2 s; 12/12 acks); (2) G2 state is legitimately None under gl_replay off; (3) **rAF-gap rule (coordinator
+  decision, ALL profiles):** a gap > 50 ms is allowed only before any animation starts and only if the first post-gap record
+  shows every animation pending at initial values (CEF pre-start gap 69–74 ms, recorded `preStartGapsMs`); (4)
+  `GetSourceScreenshot` returns premultiplied RGB → `source_shots(straight=True)` for DX-2 (offline re-score: `on`/`on2`/
+  `cef-skip` residual 1.1–1.6 vs τ 4; `off`/`noblend` controls still FAIL) — **fix 4 not yet confirmed live**. Latest live
+  run (r3, before fix 4): placement `{grant: null, reason: attached}` everywhere, no holder bound anywhere; `off`, `cut-off`
+  MATCH; others INCONCLUSIVE; `cut-on` MISMATCH. Debug records: `.../dx1-2026-10-12/w3-dx2-debug/`.
+
+**Open decisions for tomorrow (DX-2; owner or coordinator call — all instrument, none touch the take):**
+1. **Mid frames 5 < 6** in every CEF fade arm: `GetSourceScreenshot` costs ~60 ms idle, 130–175 ms during the 1.5 s
+   dissolve; PNG quality 100 is slower (dead end). Options: accept 5 in the CEF profile / longer in-memory dissolve for DX-2
+   arms / a faster lossless capture.
+2. **`cut-on` FAIL:** one out-only pixel (543, 792), 3 px above the movie rect (y 795), alpha 223 before the cut — fits
+   CEF's unsnapped movie edge (§8.6). Option: `score_cut` excludes padded media rects like the fade scorer does.
+3. **`cef-skip-dsk`:** "class out: 1470 px < 2000" — DSK 7→8 has too few out-only pixels for the arm's class set; change
+   the class set or the minimum for this arm.
+
+**Next steps (in order):**
+1. Decide 1–3; apply in `scripts/dissolve_probe.py` (resume agent `w3-obs` or a fresh one; brief: no scope creep).
+2. Re-run the DX-1 F3-critical round from the pinned tree at the new commit (the rAF-gap rule changed for all profiles):
+   `PYTHONPATH=$D/src <main>/.venv/bin/python <evidence>/dx1_paced.py <out> <scratch> <q0b1 decision> grant-chrome,grant-attach,channel-predefined,life-grant-reload,opaque-off,off,noblend,on,on2,m-paused,m-off,m-on,m-hold,m-raw,m-raw-prod,m-preview-prod`
+   then `scripts/dissolve_probe.py --score <out> --decision <q0b1>` (unsandboxed; load < 3.5; decision file
+   `output/evidence/s2-dev/dissolve-alpha-2026-10-11/q0b-2026-10-11/runs/decision_record_q0b1.json`).
+3. Re-run DX-2: `scripts/managed_obs_qualify.py --arm dissolve --out <new> --decision <q0b1>` from the pinned tree.
+4. Full suites 3.12 + 3.10 (3.10 venv: `UV_PROJECT_ENVIRONMENT=<dir> uv sync --frozen --all-extras --all-groups --python 3.10`).
+5. Open the DRAFT PR to `main` (never merge; never auto-merge). Body: DX-3 PASS, DX-1 F3 PASS, DX-2, suites, Astra impl
+   r1 APPROVE, r13 #1/#3 open items (followups handover), out-of-scope INCONCLUSIVE DX-1 checks listed as follow-up.
+6. Cleanup after the PR: trash the session scratchpad (`/private/tmp/claude-501/...brave-goodall-bd9851/5bd19c3f-.../scratchpad`,
+   ~4 GB incl. `w3/` 2.1 GB shots, `dx1/` 1 GB) once evidence is confirmed copied.
+
+**Machine etiquette:** other sessions may be back tomorrow — send "need window" before Chrome/OBS/suite runs.
+
 ## READ FIRST — update 2026-10-12 ~16:45 (supersedes the 14:45 state below)
 
 - **Implemented rev 17** (owner: no rev 18 / r14; plan critiques ≤ 3 rounds; reviews F3-only, stop when no major/blocker,
