@@ -26,15 +26,16 @@ Arms:
   mmo-cef       MO-3: the MO-1 logger, step loop (`mm_opacity_probe.drive`) and scorer of mm_opacity_probe inside the OBS
                 CEF, unrecorded; GL replay off x arms on, off, off2, sq and auto x those plus the forced stand-down pair fsd,
                 fsdoff (10 sessions, one launch). Binary fixture only.
-  dissolve      DX-2 (dissolve cross-fade plan §9.2): one launch, unrecorded; per DX-1 arm on P2, p2cut, p2-binary and the tone
-                movie (`DISSOLVE_ARMS`: no screen-*, delay-*, on-sw or lifecycle; m-tone-raw only without an identity `L` in
-                --decision; tone report-only under identity `L`), plus m-dsk78 (DSK 7->8, two holders, cost <= 50 ms) and
-                m-snap with its twins (reference capture at the source's 1920x1080 geometry), a `LiveOutputHost` session with
+  dissolve      DX-2 (dissolve cross-fade plan §9.2): one launch, unrecorded; DX-1's P2 cross-fade, cut and opaque arms
+                (`DISSOLVE_ARMS`: no screen-*, delay-*, on-sw, lifecycle, media, tone or m-snap) plus cef-skip and cef-skip-dsk
+                (P2 2->3 and DSK 7->8 movie slides publish a take with no holder), each a `LiveOutputHost` session with
                 `dissolve_probe`'s resolver, hook and driver, a GetSourceScreenshot burst as the capture (cut sessions score
                 those shots as the screencast), continuity, G2 state, colour tuples and the served digest recorded.
                 opaque-off runs first and fixes the calibration (`dissolve_calibration`) before the other captures;
                 `dissolve_probe`'s integrity rules and scorer then read every control before the candidates. Checks whose
-                controls DX-2 does not run (no flash, screen) are reported, not gated. Ignores --fixture.
+                controls DX-2 does not run (no flash, screen) are reported, not gated. CEF is attach mode, so every session
+                must record `output.placement` grant null, reason `attached`, and bind no holder (a bound holder is a FAIL
+                even when the round is INCONCLUSIVE). Ignores --fixture.
   soak          g2 held on slide 2 for --soak-minutes (>= 4) with per-minute reads, 20 s recordings around a loop wrap at
                 minute 1 and just before loseContext (after the first half), build 1, P3/P4; an off twin. Gate M6.
                 --precheck: the loop pre-check.
@@ -657,10 +658,6 @@ def mo3_arms(gl: str) -> dict[str, str]:
     return mm_opacity_probe.ALL_ARMS if gl == "auto" else mm_opacity_probe.ARMS
 
 
-def dissolve_arms(decision: dict[str, Any] | None) -> tuple[str, ...]:
-    return tuple(a for a in DISSOLVE_ARMS if not (a == "m-tone-raw" and (decision or {}).get("L") == "identity"))
-
-
 def dissolve_calibration(n: float | None) -> dissolve_probe.Calibration | None:
     """DX-2's CEF thresholds from n = opaque-off's max mid-frame residual, unclamped; None (INCONCLUSIVE) past a cap."""
     if n is None or not math.isfinite(n) or n < 0:
@@ -707,7 +704,7 @@ def dissolve_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] | 
         with dissolve_probe.serving(arm.splice):
             host.start()
         record["page"] = "alpha" if host.output.get("alpha") else "screen"
-        record["output"] = {k: host.output.get(k) for k in ("mmOpacity", "continuity")}
+        record["output"] = {k: host.output.get(k) for k in ("mmOpacity", "continuity", "placement")}
         record["g2"] = ((host._require_transport().evaluate(GL_REPLAY_READ_JS) or {}).get("api") or {}).get("state")
         with source_shots(*ctx["creds"]) as shot:
             driven, images = dissolve_probe.drive(host, arm, resolved.target, shot)
@@ -1525,9 +1522,8 @@ def mmo_cef_gates(run: dict[str, Any]) -> dict[str, Any]:
 
 def dissolve_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dict[str, Any]:
     sessions = {s["session"]: s for s in run["sessions"]}
-    want = dissolve_arms(decision)
     checks: list[dict[str, Any]] = []
-    check(checks, "every session ran", sorted(sessions), set(sessions) == set(want), ",".join(want))
+    check(checks, "every session ran", sorted(sessions), set(sessions) == set(DISSOLVE_ARMS), ",".join(DISSOLVE_ARMS))
     calibration = (sessions.get("opaque-off") or {}).get("calibration") or {"n": None, "calibration": None}
     derived = dissolve_calibration(calibration.get("n")) if calibration.get("model") in ("PASS", "FAIL") else None
     cal = derived if derived is not None and calibration.get("calibration") == asdict(derived) else None
@@ -1535,9 +1531,18 @@ def dissolve_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dict
           f"n <= 4: tau <= {DX2_TAU_MAX}, complement <= {DX2_COMPLEMENT_MAX}, no dip >= {DX2_NO_DIP_MIN}")
     runs = {name: (json.loads((Path(s["runDir"]) / "record.json").read_text()), dissolve_probe.RunImages(Path(s["runDir"])))
             for name, s in sessions.items() if s.get("runDir") and (Path(s["runDir"]) / "record.json").is_file()}
-    lut, lpath = dissolve_probe.launch_lut(runs, cal or dissolve_probe.Calibration())
-    check(checks, "L_path: this launch's measured map (m-tone holder vs source)", lpath, lut is not None, "analytic or table")
-    verdict = dissolve_probe.score_runs(runs, decision, cal or dissolve_probe.Calibration(), profile=dissolve_probe.CEF, lut=lut)
+    held = False
+    for name in DISSOLVE_ARMS:
+        record = runs[name][0] if name in runs else {}
+        placement = (record.get("output") or {}).get("placement") or {}
+        check(checks, f"{name}: output.placement", placement,
+              placement.get("grant") is None and placement.get("reason") == "attached", "grant null, reason attached")
+        holders = ((record.get("dump") or {}).get("first") or {}).get("holders")
+        held |= bool(holders)
+        skip = name.startswith("cef-skip")
+        check(checks, f"{name}: no bound holder", holders, holders == [] if skip else not holders,
+              "[] (a published take)" if skip else "none")
+    verdict = dissolve_probe.score_runs(runs, decision, cal or dissolve_probe.Calibration(), profile=dissolve_probe.CEF)
     for name, g in verdict["gates"].items():
         reported = g["verdict"] in ("REPORTED", "N/A")
         check(checks, name, [g["verdict"], g.get("reasons") or g.get("problems")], g["verdict"] == "PASS" or reported, "PASS",
@@ -1546,8 +1551,8 @@ def dissolve_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dict
         check(checks, f"arm {name}", outcome, outcome == "MATCH", "MATCH")
     reasons = ([] if cal else [f"calibration: opaque-off n {calibration['n']}"]) + (
         ["round INCONCLUSIVE"] if verdict["overall"] == "INCONCLUSIVE" else [])
-    invalid = f"DX-2 INCONCLUSIVE: {'; '.join(reasons)}" if reasons else None
-    return {"DX-2": gate(checks, invalid), "dissolveCalibration": calibration, "dissolveLPath": lpath, "dissolveVerdict": verdict}
+    invalid = f"DX-2 INCONCLUSIVE: {'; '.join(reasons)}" if reasons and not held else None
+    return {"DX-2": gate(checks, invalid), "dissolveCalibration": calibration, "dissolveVerdict": verdict}
 
 
 def mmo_summary(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1882,7 +1887,7 @@ def sessions_for(arm: str, ctx: dict[str, Any], args: argparse.Namespace, armed:
     if args.precheck:
         return [run_session("precheck", precheck_script(armed), ctx)]
     if arm == "dissolve":
-        return [dissolve_session(name, ctx, args.decision) for name in dissolve_arms(args.decision)]
+        return [dissolve_session(name, ctx, args.decision) for name in DISSOLVE_ARMS]
     return [run_session("soak", soak_script(args.soak_minutes, armed, fixture_loops(ctx["fixture"])), ctx),
             run_session("soak-off", soak_off_script, ctx, gl_replay="off")]
 

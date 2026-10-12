@@ -95,21 +95,56 @@ def test_dissolve_calibration_is_the_unclamped_formula_and_inconclusive_past_n_4
     assert (None if cal is None else (cal.tau, cal.complement, cal.no_dip)) == want
 
 
-@pytest.mark.parametrize("decision, tone_raw", [(None, True), ({"L": "identity"}, False), ({"L": "table"}, True)])
-def test_dissolve_sessions_add_dsk78_cost_and_m_snap_and_keep_tone_report_only(decision, tone_raw):
-    # DX-2 (plan §9.2): opaque-off first (it fixes the calibration); DX-1's CEF arms minus screen-*, delay-*, on-sw and the
-    # lifecycle, plus m-dsk78 (DSK 7->8, two bound holders, cost gated) and m-snap with its mask twin (reference capture at
-    # the source geometry); the letterbox m-snap-lb stays DX-1 only. m-tone-raw runs only without an identity L, and m-tone's tone check is
-    # REPORTED under identity L (gated otherwise).
-    sessions = q.dissolve_arms(decision)
+def test_dissolve_sessions_are_the_p2_crossfade_cut_and_opaque_arms_plus_cef_skip():
+    # DX-2 (plan §9.2, rev 17): opaque-off first (it fixes the calibration); DX-1's P2 cross-fade, cut and opaque arms
+    # minus screen-*, delay-*, on-sw and the lifecycle, plus cef-skip (P2 2->3) and cef-skip-dsk (DSK 7->8): each publishes
+    # a take with no holder.
+    # CEF never gets the snapped-placement grant (decision 15), so the media, tone and m-snap sessions (and m-dsk78's
+    # two holders) are not run in CEF in this PR.
+    sessions = q.DISSOLVE_ARMS
     assert sessions[0] == "opaque-off"
-    assert {"m-dsk78", "m-snap", "m-snap-twin", "m-tone", "m-tone-twin"} <= set(sessions)
-    assert ("m-tone-raw" in sessions) is tone_raw
-    assert not [s for s in sessions if s.startswith(("screen-", "delay-", "life-", "m-snap-lb")) or s == "on-sw"]
-    dsk = q.dissolve_probe.ARMS["m-dsk78"]
-    assert (dsk.deck, dsk.slide, dsk.holders, dsk.expect.get("cost")) == ("dsk", 7, 2, "PASS")
-    identity = (decision or {}).get("L") == "identity"
-    assert q.dissolve_probe.CEF.arm("m-tone", identity).expect["tone"] == ("REPORTED" if identity else "PASS")
+    assert {"off", "on", "on2", "cut-on", "cut-off", "opaque-on", "cef-skip", "cef-skip-dsk"} <= set(sessions)
+    assert not [s for s in sessions if s.startswith(("m-", "screen-", "delay-", "life-", "grant-", "perfect")) or s == "on-sw"]
+
+
+ATTACHED = {"grant": None, "reason": "attached", "product": "Chrome/127.0.6533.120", "gpuCompositing": True, "at": 1.0}
+
+
+def dissolve_run(tmp_path: Path, records: dict[str, dict[str, Any]], n: float | None = 1.0) -> dict[str, Any]:
+    sessions = []
+    for name in q.DISSOLVE_ARMS:
+        run_dir = tmp_path / "runs" / name
+        run_dir.mkdir(parents=True)
+        holders = [] if name.startswith("cef-skip") else None
+        record = {"arm": name, "output": {"placement": ATTACHED}, "dump": {"first": {"holders": holders}}}
+        (run_dir / "record.json").write_text(json.dumps({**record, **records.get(name, {})}))
+        sessions.append({"session": name, "runDir": str(run_dir)})
+    cal = q.dissolve_calibration(n)
+    sessions[0]["calibration"] = {"n": n, "model": "PASS", "calibration": q.asdict(cal) if cal else None}
+    return {"sessions": sessions}
+
+
+@pytest.mark.parametrize("records, n, verdict, failing", [
+    ({}, 1.0, "PASS", []),
+    ({"on": {"output": {"placement": {**ATTACHED, "grant": "snap", "reason": "granted"}}}}, 1.0, "FAIL", ["on: output.placement"]),
+    ({"off": {"output": {}}}, 1.0, "FAIL", ["off: output.placement"]),
+    ({"cef-skip": {"dump": {"first": None}}}, 1.0, "FAIL", ["cef-skip: no bound holder"]),
+    ({"cef-skip-dsk": {"dump": {"first": None}}}, 1.0, "FAIL", ["cef-skip-dsk: no bound holder"]),
+    ({"cef-skip": {"dump": {"first": {"holders": [{"rect": [0, 0, 60, 40]}]}}}}, 1.0, "FAIL", ["cef-skip: no bound holder"]),
+    ({"cef-skip-dsk": {"dump": {"first": {"holders": [{"rect": [0, 0, 60, 40]}]}}}}, 1.0, "FAIL", ["cef-skip-dsk: no bound holder"]),
+    ({}, 4.5, "INVALID", ["calibration (opaque-off n)"]),
+    ({"on": {"dump": {"first": {"holders": [{"rect": [0, 0, 60, 40]}]}}}}, 4.5, "FAIL",
+     ["calibration (opaque-off n)", "on: no bound holder"]),
+])
+def test_dissolve_gates_require_the_attached_placement_and_no_holder_in_every_cef_session(monkeypatch, tmp_path, records, n,
+                                                                                        verdict, failing):
+    # DX-2 (plan §9.2, decision 15): managed OBS is attach mode, so every session records output.placement with grant null
+    # and reason `attached`; cef-skip and cef-skip-dsk must publish a take (dump.first present) whose holder list is empty, and no other
+    # session may bind one. A bound holder is a hard FAIL even when the calibration makes the round INCONCLUSIVE.
+    monkeypatch.setattr(q.dissolve_probe, "score_runs", lambda runs, decision, cal, profile: {
+        "overall": "PASS", "gates": {}, "arms": {}})
+    gate = q.dissolve_gates(dissolve_run(tmp_path, records, n), None)["DX-2"]
+    assert (gate["verdict"], gate["failing"]) == (verdict, failing)
 
 
 def test_main_refuses_mmo_arms_on_a_grey_counter_fixture(monkeypatch, tmp_path, capsys):
