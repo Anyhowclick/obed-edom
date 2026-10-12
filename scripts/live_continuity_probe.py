@@ -8576,6 +8576,8 @@ def score_carry_cover(
         undecidedFrames=sum(f["undecided"] for f in aligned),
     )
     gaps = []
+    if not tick_ts or tick_ts[0] > lo or tick_ts[-1] < hi:
+        gaps.append("the sampler's ticks do not span the mid-move window")
     if unreadable:
         gaps.append(f"{unreadable} mid-move frames lack a readable pair of overlay reads (rect and Boolean opacity)")
     if len(aligned) < need:

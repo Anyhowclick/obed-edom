@@ -218,13 +218,13 @@ def _cadence(*runs: tuple[int, float], drop_seq: int | None = None) -> list[dict
     (_cadence((60, PERIOD), (1, 4 * PERIOD), (20, 2 * PERIOD)), False, PERIOD, "frame gap 66.7 ms exceeds 58.3 ms"),
     (_cadence((60, PERIOD), (12, 2 * PERIOD), (1, 4 * PERIOD), (4, 2 * PERIOD), (60, PERIOD)), False, PERIOD, "frame gap"),
     (_cadence((60, PERIOD), (1, 4 * PERIOD), (60, PERIOD)), False, PERIOD, "frame gap 66.7 ms exceeds 58.3 ms"),
-    (_cadence((3, PERIOD), (1, 4 * PERIOD), (3, PERIOD)), False, PERIOD, "frame gap"),
+    (_cadence((3, PERIOD), (1, 4 * PERIOD), (20, 2 * PERIOD)), False, PERIOD, "frame gap"),
     (_cadence((60, 2 * PERIOD), (1, 4 * PERIOD), (60, 2 * PERIOD)), True, 2 * PERIOD, None),
     (_cadence((60, 2 * PERIOD), (1, 9 * PERIOD), (60, 2 * PERIOD)), False, 2 * PERIOD, "frame gap"),
     (_cadence((60, PERIOD), (12, 2 * PERIOD), (4, 2 * PERIOD), (60, PERIOD), drop_seq=70), False, PERIOD, "seq gaps"),
 ], ids=["missed-30hz-frame-inside-a-30hz-stretch", "known-bad-a-hole-where-the-cadence-switches",
         "known-bad-an-unsteady-side-falls-back-to-the-faster-cadence", "4-tick-hole-at-60hz",
-        "short-window-falls-back-to-the-median", "missed-frame-all-30hz", "4.5-period-hole-all-30hz", "seq-gap"])
+        "known-bad-a-short-fast-side-still-tightens", "missed-frame-all-30hz", "4.5-period-hole-all-30hz", "seq-gap"])
 def test_frame_coverage_judges_gaps_against_the_local_cadence(rows, ok, gap_period, reason) -> None:
     cov = pi.frame_coverage(rows, max_gap_frames=3, min_fps=20.0)
     assert cov["ok"] is ok, cov

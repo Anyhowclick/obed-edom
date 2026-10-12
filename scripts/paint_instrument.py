@@ -611,10 +611,10 @@ def _period(rows: Sequence[dict[str, Any]]) -> float | None:
 def local_period(before: Sequence[float], after: Sequence[float], fallback: float) -> float:
     """The rAF period one delta is judged at when nothing inside it is observed: the faster of the
     `LOCAL_CADENCE_DELTAS`-delta medians either side when both sides are complete and steady (within
-    `LOCAL_CADENCE_SPREAD`), else the fastest of `fallback` and any complete side's median."""
-    sides = [s for s in (before, after) if len(s) == LOCAL_CADENCE_DELTAS and min(s) > 0]
+    `LOCAL_CADENCE_SPREAD`), else the fastest of `fallback` and either side's median, however short that side."""
+    sides = [s for s in (before, after) if s and min(s) > 0]
     medians = [float(statistics.median(s)) for s in sides]
-    if len(sides) == 2 and all(max(s) <= LOCAL_CADENCE_SPREAD * min(s) for s in sides):
+    if len(sides) == 2 and all(len(s) == LOCAL_CADENCE_DELTAS and max(s) <= LOCAL_CADENCE_SPREAD * min(s) for s in sides):
         return min(medians)
     return min([fallback, *medians])
 

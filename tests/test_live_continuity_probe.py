@@ -9602,6 +9602,16 @@ class TestCarryCoverCoverage:
         assert result["verdict"] == verdict, result["reasons"]
         assert result["cadenceMs"] == pytest.approx(CC_FRAME_MS, abs=0.05)
 
+    def test_known_bad_a_sampler_that_stops_before_the_window_ends_is_inconclusive(self) -> None:
+        """Astra r22 P1: 30 Hz then 60 Hz from tick 39; the sampler stops at tick 44 (1886 ms) inside the window
+        (ends 1900 ms) and frames stop at tick 39, so the last gap holds five 60 Hz ticks yet is not bracketed."""
+        result = _cc_score(*_cc_scene(
+            tick_at=lambda k: CC_FIRST_TICK_MS + (2 * min(k, 39) + max(k - 39, 0)) * CC_FRAME_MS,
+            overlay_curve=lambda p: _ease_in_out(p) + (0.25 if 0.81 < p < 0.89 else 0.0),
+            deliver=lambda k, ts: k <= 39, sampled=lambda k, ts: k <= 44,
+        ))
+        self._assert(result, "the sampler's ticks do not span the mid-move window")
+
     def test_known_bad_too_many_unplaceable_frames_are_inconclusive_even_when_spread_out(self) -> None:
         result = _cc_score(*_cc_scene(synced=lambda k, ts: ts < CC_T0 or k % 5 != 0))
         self._assert(result, "mid-move frames could not be placed at a sampled tick (max 10%)")
