@@ -1,5 +1,21 @@
 # Dissolve cross-fade — implementation handover (updated 2026-10-12 afternoon)
 
+## READ FIRST — update 2026-10-12 ~16:45 (supersedes the 14:45 state below)
+
+- **Implemented rev 17** (owner: no rev 18 / r14; plan critiques ≤ 3 rounds; reviews F3-only, stop when no major/blocker,
+  ignore ≤ medium; decision 16 keeps the lease dropped). Commits: `3941b845` W1, `619f21ca` W6 (r13 #2 + item g folded),
+  `0f29cf99` W2, `66b4145b` W3, `d2cac632` W4, `2012caf3` plan log, `ac008f88` Astra impl r1 **APPROVE**. r13 #1/#3 are
+  recorded open items in the followups handover. Nothing pushed, no PR.
+- Per-file tests before the pause: live_runtime 125, live_host 337, dissolve_probe 266, managed_obs_qualify 150/1 skipped
+  (2 later W3 cases and W2's final run still owed).
+- **DX-3 PASS (owner, ~16:30)** on the HDMI host from detached worktree `.claude/worktrees/dx3-ac008f88` via
+  `scripts/live_fixture_session.py` on the P2 fixture (both Minimal Alpha_DSK decks are refused by main's continuity
+  qualifier); grant `snap` on Chrome 154 GPU; null run showed the old behaviour. Record:
+  `output/evidence/s2-dev/dissolve-alpha-2026-10-11/dx3-2026-10-12/README.md`.
+- **Next (owner: live checks before the PR), each in an S2 "free now" window:** (1) 4 test files + full suites 3.12/3.10;
+  (2) Q0b-ter grant arms + DX-1 headless; (3) DX-2 managed OBS; then draft PR (never merge). Owner wants to hear only on a
+  failure or when the draft PR is up.
+
 ## READ FIRST — current state (2026-10-12 ~14:45; the night section below is history)
 
 Branch `claude/keynote-live-dissolve-crossfade` (local only: NOT pushed, no PR), worktree `.claude/worktrees/brave-goodall-bd9851`.
