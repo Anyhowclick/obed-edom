@@ -143,6 +143,9 @@ def raf_curve(shape: str) -> list[dict[str, Any]]:
         if shape == "duplicate-in":
             anims.append(dict(anims[0], value=0.0))
         rows.append({"t": ct, "eff": [v, 1 - v], "anims": anims})
+    if shape == "pending":
+        rows[:0] = [{"t": t, "eff": [0, 1], "anims": [{"leaf": leaf, "ct": 0, "start": None, "state": "running", "dur": DURATION_MS,
+                                                        "value": value} for leaf, value in (("in", 0), ("out", 1))]} for t in (-30.0, -15.0)]
     return rows
 
 
@@ -628,6 +631,12 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         elif mutate == "ov-width-negative":
             video["rect"][2] = -480.0
         record["dump"]["raf"][20]["videos"].append(video)
+    elif mutate == "dest-video":
+        record["dump"]["vids"].append({"id": 9, "rv": [], "detach": None, "tuple": None})
+        for r in record["dump"]["raf"]:
+            if r["t"] >= INSERT_MS + DURATION_MS:
+                r["videos"].append({"id": 9, "on": True, "rect": [500.0, 0.0, 140.0, 360.0], "eff": 1.0, "inT": False, "inStage": True,
+                                    "paused": False, "geo": None})
     elif mutate == "anim-state-empty":
         for a in record["dump"]["raf"][-20]["anims"]:
             a.update(state="", ct=math.nan)
@@ -928,6 +937,7 @@ CASES = [
     ("curve eased", lambda: probe.score_curve(raf_curve("ease"))["verdict"], "PASS"),
     ("curve linear", lambda: probe.score_curve(raf_curve("linear"))["verdict"], "FAIL"),
     ("curve two start times", lambda: probe.score_curve(raf_curve("two-starts"))["verdict"], "FAIL"),
+    ("DX-1 curve with leading rAFs whose animations are still pending (ct 0, no start)", lambda: probe.score_curve(raf_curve("pending"))["verdict"], "PASS"),
     ("r1-4 curve with every start None", lambda: probe.score_curve(raf_curve("no-start"))["verdict"], "INCONCLUSIVE"),
     ("r1-4 curve with a later NaN value", lambda: probe.score_curve(raf_curve("late-nan"))["verdict"], "INCONCLUSIVE"),
     ("r1-4 curve with a duplicate incoming animation", lambda: probe.score_curve(raf_curve("duplicate-in"))["verdict"], "INCONCLUSIVE"),
@@ -1155,6 +1165,8 @@ CASES = [
     ("r17 life-grant-reload: invalid until the re-grant, then a holder", lambda: arm_outcome("life-grant-reload"), "MATCH"),
     ("r17 life-grant-reload already snap before the re-grant", lambda: arm_outcome("life-grant-reload", mutate="reload-snap"), "INCONCLUSIVE"),
     *[(f"r17 {n}: no channel, no holder, cross-fade model", lambda n=n: arm_outcome(n, holder=False), "MATCH") for n in ("m-raw-prod", "m-preview-prod")],
+    ("DX-1 m-raw-prod: the destination's movies after the hand-off do not empty the in-only class",
+     lambda: arm_outcome("m-raw-prod", holder=False, mutate="dest-video"), "MATCH"),
     ("r17 m-raw-prod binding a holder", lambda: arm_check("m-raw-prod", "scope"), "PASS"),
     ("r17 m-preview-prod page carrying a channel", lambda: arm_outcome("m-preview-prod", holder=False, mutate="placement-invalid"), "INCONCLUSIVE"),
     ("r17 CEF cef-skip: invalid page, no holder, cross-fade model", lambda: cef_outcome_of("cef-skip", holder=False), "MATCH"),

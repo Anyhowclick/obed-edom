@@ -104,6 +104,8 @@ BLOCK_INSET = 8
 PRE_S = 0.35
 POST_S = 0.6
 SETTLE_S = 1.5
+HANDOFF_S = 3.0
+HANDOFF_SHOTS = 2
 LIVE_GAP_S = 0.1
 PAUSE_FRAME = 300
 SLIDE = (1920, 1080)
@@ -451,11 +453,11 @@ HOOK_JS = r"""
   }
   function track(v) {
     if (recs.has(v)) return;
-    var r = {id: X.vids.length, src: String(v.currentSrc || v.src || '').split('/').pop(), rv: [], detach: null, tuple: null, err: null};
+    var r = {id: X.vids.length, src: String(v.currentSrc || v.src || '').split('/').pop(), rv: [], rvAt: [], detach: null, tuple: null, err: null};
     recs.set(v, r); X.vids.push(r); els.push(v);
     function cb(t, md) {
-      r.rv.push([performance.now(), md.mediaTime, md.presentedFrames]);
-      if (r.rv.length > 900) r.rv.splice(0, r.rv.length - 900);
+      r.rv.push([md.presentationTime, md.mediaTime, md.presentedFrames]); r.rvAt.push(performance.now());
+      if (r.rv.length > 900) { r.rv.splice(0, r.rv.length - 900); r.rvAt.splice(0, r.rvAt.length - 900); }
       if (!r.tuple && !r.err) {
         try { var f = new VideoFrame(v), c = f.colorSpace; r.tuple = [c.primaries, c.transfer, c.matrix, c.fullRange].join('/'); f.close(); }
         catch (e) { r.err = String(e); }
@@ -538,6 +540,7 @@ HOOK_JS = r"""
     arm: function (tex) { scan(); X.tex = tex; X.armed = true; X.raf = []; X.first = null; requestAnimationFrame(tick);
                           return {timeOrigin: performance.timeOrigin, now: performance.now()}; },
     disarm: function () { X.armed = false; return X.raf.length; },
+    live: function () { var r = X.raf, k = r.length - 1; return k > 0 && !r[k].eff && r.slice(0, k).some(function (x) { return !!x.eff; }); },
     dump: function () {
       var f = X.first && Object.assign({}, X.first, {png: null, holders: X.first.holders.map(function (h) { return Object.assign({}, h, {png: null}); })});
       return {raf: X.raf, first: f, vids: X.vids, timeOrigin: performance.timeOrigin, takes: takes};
@@ -1340,7 +1343,9 @@ def running_anims(rec: dict[str, Any]) -> list[dict[str, Any]]:
 
 def score_curve(raf: list[dict[str, Any]], min_frames: int = MIN_MID_FRAMES) -> dict[str, Any]:
     """Every rAF with a running transition animation has exactly two, one per leaf, with finite start, currentTime,
-    value and a positive duration; one start time; |in + out - 1| and |in - ease-in-out(ct / T)| within tolerance."""
+    value and a positive duration; one start time; |in + out - 1| and |in - ease-in-out(ct / T)| within tolerance.
+    rAFs where both are still pending (running, ct 0, no start time yet, as `anim_problem` admits) carry no timing and
+    are not curve samples."""
     both, problems = [], []
     for r in raf:
         for a in r.get("anims") or []:
@@ -1348,7 +1353,7 @@ def score_curve(raf: list[dict[str, Any]], min_frames: int = MIN_MID_FRAMES) -> 
             if bad:
                 problems.append(f"rAF at {r.get('t')}: malformed animation record ({bad})")
         anims = running_anims(r)
-        if not anims:
+        if not anims or all(a.get("start") is None and a.get("ct") == 0 for a in anims):
             continue
         if sorted(str(a.get("leaf")) for a in anims) != ["in", "out"]:
             problems.append(f"rAF at {r.get('t')}: animations {[a.get('leaf') for a in anims]} (need one per leaf)")
@@ -2418,12 +2423,19 @@ class Evidence:
     raf: list[dict[str, Any]]
     transition: list[int]
     dsf: float = 1.0
+    destination: list[list[float]] = field(default_factory=list)
 
 
-def media_rects(record: dict[str, Any], dsf: float = 1.0) -> list[list[float]]:
-    """Every tagged `<video>` rect seen in the stage during the capture and every holder rect, in device px."""
+def media_rects(record: dict[str, Any], dsf: float = 1.0, *, handoff: bool = True) -> list[list[float]]:
+    """Every tagged `<video>` rect seen in the stage during the capture and every holder rect, in device px. Without
+    `handoff`, only up to the last rAF with the transition DOM: the destination's movies that start after the hand-off
+    are texture pixels in every transition frame, and excluding them could empty a required class."""
     dump = record.get("dump") or {}
-    media = [v["rect"] for r in dump.get("raf") or [] for v in r.get("videos") or [] if v.get("on") and v.get("inStage") and v.get("rect")]
+    raf = dump.get("raf") or []
+    last = max((i for i, r in enumerate(raf) if r.get("eff") is not None), default=None)
+    if not handoff and last is not None:
+        raf = raf[:last + 1]
+    media = [v["rect"] for r in raf for v in r.get("videos") or [] if v.get("on") and v.get("inStage") and v.get("rect")]
     media += [h["rect"] for h in (dump.get("first") or {}).get("holders") or [] if h.get("rect")]
     return device_rects({tuple(round(x, 1) for x in m) for m in media}, dsf)
 
@@ -2466,7 +2478,8 @@ def evidence(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Arm)
             continue
         holders.append(placed)
         A = over(placed, A)
-    return Evidence(shots, phases, A, B, holders, media_rects(record, dsf), raf, [i for i, p in enumerate(phases) if p == "transition"], dsf)
+    return Evidence(shots, phases, A, B, holders, media_rects(record, dsf, handoff=False), raf,
+                    [i for i, p in enumerate(phases) if p == "transition"], dsf, media_rects(record, dsf))
 
 
 def _fade_of(ev: Evidence, arm: Arm, cal: Calibration) -> dict[str, Any]:
@@ -2787,7 +2800,7 @@ def _score_arm(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Ar
     if "monotone" in arm.expect:
         checks["monotone"] = score_monotone([r["e"] for r in fade["rows"]])
     if "handoff" in arm.expect:
-        checks["handoff"] = score_handoff(*_handoff_frames(ev), exclude=ev.media, cal=cal)
+        checks["handoff"] = score_handoff(*_handoff_frames(ev), exclude=ev.destination, cal=cal)
     masks = texture_classes(ev.A, ev.B) if ev.A is not None and ev.B is not None else None
     if "no_flash" in arm.expect:
         window = None
@@ -2888,7 +2901,7 @@ def _score_lifecycle(record: dict[str, Any], images: Mapping[str, np.ndarray], t
     ev = evidence(record, images, arm)
     first = (record.get("dump") or {}).get("first") or {}
     checks: dict[str, dict[str, Any]] = {}
-    exclude = ev.media + (media_rects(twin[0], arm.dsf) if twin else [])
+    exclude = ev.destination + (media_rects(twin[0], arm.dsf) if twin else [])
     checks["settled"] = score_settled(images.get("settled"), twin[1].get("settled") if twin else None, exclude, cal)
     hashes = (record.get("hashAfter"), twin[0].get("hashAfter") if twin else None)
     checks["destination"] = result(hashes[0] == hashes[1], [] if all(isinstance(h, str) for h in hashes) else ["destination hash missing"],
@@ -3321,9 +3334,11 @@ def reference_burst(host: Any, target: dict[str, Any], capture: Callable[[], np.
 
 def burst(host: Any, target: dict[str, Any], capture: Callable[[], np.ndarray], *, actions: Iterable[tuple[float, str]] = (),
           screencast: Callable[[], Any] | None = None, lead_s: float = 0.0, tag: str = "",
-          drop: str | None = None) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+          drop: str | None = None, handoff: bool = False) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
     """Arm the hook, screenshot from `PRE_S` before the advance to T + `POST_S` (+ `lead_s`), run timed `actions`; the
-    action named `drop` is recorded at its time (`dropped`) but not performed."""
+    action named `drop` is recorded at its time (`dropped`) but not performed. With `handoff`, keep capturing (up to
+    `HANDOFF_S` more) until one screenshot starts after the transition DOM has gone: the player keeps the finished
+    transition until the next scene is ready, often past `POST_S`, and the hand-off needs a first live frame."""
     evaluate = host._require_transport().evaluate
     origin = evaluate(f"window.__obedDx.arm({json.dumps(target['textures'])})")["timeOrigin"]
 
@@ -3344,8 +3359,10 @@ def burst(host: Any, target: dict[str, Any], capture: Callable[[], np.ndarray], 
 
     with (screencast() if screencast else contextlib.nullcontext([])) as frames:
         cast = frames
-        started, thread = time.monotonic(), None
-        while time.monotonic() - started < span:
+        started, thread, live = time.monotonic(), None, 0
+        while time.monotonic() - started < span or (handoff and live < HANDOFF_SHOTS and time.monotonic() - started < span + HANDOFF_S):
+            if handoff and thread is not None and time.monotonic() - started >= span:
+                live = live + 1 if live or evaluate("window.__obedDx.live()") else 0
             elapsed = time.monotonic() - started
             if thread is None and elapsed >= PRE_S:
                 record["advanceAt"] = now()
@@ -3432,6 +3449,7 @@ def drive(host: Any, arm: Arm, target: dict[str, Any], capture: Callable[[], np.
         shots, shot_images = reference_burst(host, target, capture, images["live-0"], arm.shift)
     else:
         shots, shot_images = burst(host, target, capture, actions=row.get("actions", ()), screencast=screencast, lead_s=lead,
+                                   handoff="handoff" in arm.expect,
                                    drop=arm.drop)
     record.update(shots)
     images.update(shot_images)
