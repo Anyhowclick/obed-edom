@@ -1,10 +1,10 @@
 # Dissolve cross-fade — implementation handover (updated 2026-10-12 afternoon)
 
-## READ FIRST — current state (2026-10-12 ~15:10; the night section below is history)
+## READ FIRST — current state (2026-10-12 ~14:45; the night section below is history)
 
 Branch `claude/keynote-live-dissolve-crossfade` (local only: NOT pushed, no PR), worktree `.claude/worktrees/brave-goodall-bd9851`.
 Plan `.agents/plans/keynote_live_dissolve_crossfade.plan.md`: rev 16 committed (`41ef609b`); **rev 17 in progress** = the
-**decision-15 split** (owner ~15:00): this PR ships the freeze only where the snapped rule is proven (the Chrome host launched
+**decision-15 split** (owner ~14:40): this PR ships the freeze only where the snapped rule is proven (the Chrome host launched
 by `LiveOutputHost`, qualified engine version via CDP `Browser.getVersion`), granted through a host-only, page-unforgeable
 per-document channel; **CEF/OBS skips** (today's jump) with the reason in `output.placement`. The startup placement probe
 (rev 16 §3.3: fractional draw for CEF 127, isolated probe target / OBS calibrate scene, output gate, lifecycle, recalibrate
@@ -18,7 +18,7 @@ command + dashboard button, W5 tone map) becomes the **next PR**, starting with 
 | Tests (latest) | `test_live_runtime` 125 / 0 skipped (266 rows); dissolve + managed_obs 409 / 1 skipped; sweep 912/924 INCONCLUSIVE, 12 accepted survivors. Full suite last green at `1c5d3004` (3.12 9324 passed; 3.10 green at `de83681b`). |
 | Measurements | Q0b-bis (`output/evidence/.../q0bbis-2026-10-12/`): engagement PASS (host + raw + negatives); cost PASS (headless ≤ 18.3 ms, CEF ≤ 34.8 ms); 18-cell DPR×origin×clip matrix PASS with a REAL `--force-device-scale-factor` (CDP emulation is void); W5 GO (indicative). Hi-DPI (`hidpi-2026-10-12/`) → device-grid snap. CEF (`cef-frac-2026-10-12/`): CEF 127 draws the video quad unsnapped → follow-up PR. |
 
-**Path to a PR (estimate from 15:10):**
+**Path to a PR (estimate from 14:45):**
 1. Rev 17 written → Astra plan critique (expect 1–2 rounds, ~30–60 min).
 2. Implement W1 / W6 (grant channel) / W2 / W3 / W4 in parallel (~1 h; W1 is small, W6 is the only new host code) → Astra impl
    review + folds (history: 2–4 rounds per stream).
