@@ -41,10 +41,62 @@ class FakeCdp:
         self.runtime_version = 2
         self.space_rejects: bool = False
         self.slide_number_showing = False
+        self.product: str | None = "HeadlessChrome/154.0.8037.59"
+        self.gpu: Any = "enabled"
+        self.sysinfo_fails = False
+        self.predefined = False
+        self.token: str | None = None
+        self.documents = 0
+        self.context: dict[str, Any] | None = None
+        self.placement = "invalid"
+        self.snap_exposed_outside_trip = False
+        self.calls: list[str] = []
+        self.targeted: list[tuple[str, str]] = []
+        self.before_targeted: Any = None
         self.__class__.instances.append(self)
 
     def start(self): self.started = True
-    def goto(self, url): self.url = url
+    def goto(self, url):
+        self.url = url
+        self.channel_before_goto = self.token is not None
+        self.reload()
+    def reload(self, origin="http://program.test"):
+        """A fresh document: its own unique context and an `invalid` channel."""
+        self.documents += 1
+        self.context = {"id": 1, "uniqueId": f"doc-{self.documents}", "origin": origin}
+        self.placement = "invalid"
+    def call(self, method, deadline_s=None, **params):
+        self.calls.append(method)
+        if method == "Browser.getVersion":
+            if self.product is None: raise live_host.LiveHostError("CDP Browser.getVersion failed: boom")
+            return {"product": self.product}
+        if method == "Page.addScriptToEvaluateOnNewDocument":
+            self.token = re.search(r'var T="([0-9a-f]{32})"', params["source"]).group(1)
+            return {"identifier": "1"}
+        if method == "Page.getFrameTree": return {"frameTree": {"frame": {"id": "MAIN"}}}
+        return {}
+    def main_context(self, frame_id):
+        return dict(self.context) if frame_id == "MAIN" and self.context is not None else None
+    def browser_call(self, method, deadline_s=5.0, **params):
+        assert method == "SystemInfo.getInfo"
+        self.calls.append(method)
+        if self.sysinfo_fails: raise live_host.LiveHostError("Program browser target did not answer SystemInfo.getInfo.")
+        return {"gpu": {"featureStatus": {"gpu_compositing": self.gpu}}}
+    def evaluate_in(self, context, expression, deadline_s=None):
+        self.targeted.append((expression, context))
+        if self.before_targeted is not None: self.before_targeted(self, expression)
+        if self.context is None or context != self.context["uniqueId"]:
+            raise live_host.LiveHostError("CDP Runtime.evaluate failed: Cannot find context with specified id")
+        token = self.token
+        if expression == live_host._placement_round_trip_expr(token):
+            if self.predefined: return [None]
+            return ["true", "snap", "true", "invalid"]
+        for value in ("snap", "invalid"):
+            if expression == live_host._placement_set_expr(token, value):
+                if self.predefined: return None
+                self.placement = value
+                return value
+        raise AssertionError(expression)
     def stop(self): self.stopped = True
     def key(self, key, code, vk):
         if key == " " and self.space_rejects:
@@ -2314,7 +2366,7 @@ def test_cdp_sockets_accept_messages_larger_than_the_websockets_default():
 
     source = inspect.getsource(live_host.ChromeCdp)
     assert live_host._CDP_MAX_MESSAGE_BYTES >= 32 * 1024 * 1024
-    assert source.count("max_size=_CDP_MAX_MESSAGE_BYTES") == 2
+    assert source.count("max_size=_CDP_MAX_MESSAGE_BYTES") == 3
 
 
 # --- G4: the GL-replay host flag (G3+G4 plan section 4, PR #214) ---------------------------
@@ -3121,3 +3173,337 @@ def test_real_export_rate_warnings_come_from_probed_movie_fps(tmp_path, monkeypa
     output._codec_report, output._codec_warnings = output._resolve_codecs()
     assert {entry["asset"]: entry["fps"] for entry in output._codec_report} == {"untitled.mov": 30.0, "vid-20250608-wa0125.mp4": 29.978}
     assert output.output["rateWarnings"] == expected
+
+
+# --- Dissolve cross-fade W6: the host placement grant (plan rev 17 §3.3) --------------------
+# The take freezes a movie with Chrome 154's snapped rule only when `window.__obedPlacement`
+# reads "snap". The host grants it iff it launched Chrome itself, `Browser.getVersion` names a
+# qualified major and `SystemInfo.getInfo` reports GPU compositing; eligibility is decided before
+# anything exposes "snap" (r13 finding 2), the round trip and the commit are bound to the program
+# document's unique context, and a failed round trip keeps the output hidden.
+def placement_fake(monkeypatch, **attrs):
+    """Configure every FakeCdp the host builds (it builds its transport lazily in start())."""
+    real = FakeCdp.__init__
+
+    def init(self, *args, **kwargs):
+        real(self, *args, **kwargs)
+        self.__dict__.update(attrs)
+
+    monkeypatch.setattr(FakeCdp, "__init__", init)
+
+
+def round_trips(fake):
+    return [context for expression, context in fake.targeted if expression == live_host._placement_round_trip_expr(fake.token)]
+
+
+def commits(fake, value="snap"):
+    return [context for expression, context in fake.targeted if expression == live_host._placement_set_expr(fake.token, value)]
+
+
+@pytest.mark.parametrize(
+    ("mode", "attrs", "grant", "reason", "gpu"),
+    [
+        ("launch", {}, "snap", "granted", "enabled"),
+        ("launch", {"product": "Chrome/154.0.8037.59"}, "snap", "granted", "enabled"),
+        ("launch", {"product": "Chrome/153.0.7999.1"}, None, "unqualified-version", None),
+        ("launch", {"product": "Chrome/155.0.1.2"}, None, "unqualified-version", None),
+        ("launch", {"product": "HeadlessChrome/1540.0.1.2"}, None, "unqualified-version", None),
+        ("launch", {"product": "Chromium/154.0.8037.59"}, None, "unqualified-version", None),
+        ("launch", {"product": None}, None, "version-unavailable", None),
+        ("launch", {"gpu": "disabled_software"}, None, "software-compositing", "disabled_software"),
+        ("launch", {"gpu": None}, None, "software-compositing", None),
+        ("launch", {"gpu": {"enabled": True}}, None, "software-compositing", None),
+        ("launch", {"sysinfo_fails": True}, None, "software-compositing", None),
+        ("attach", {}, None, "attached", None),
+        ("managed", {}, None, "attached", None),
+    ],
+)
+def test_placement_grant_matrix(tmp_path, monkeypatch, mode, attrs, grant, reason, gpu):
+    """Only a host-launched Chrome/HeadlessChrome 154 with GPU compositing is granted, after a
+    round trip and a commit both bound to the program document's unique context. Every other
+    case is decided before the page could ever read "snap": no round trip is sent, the page
+    stays `invalid` and the report carries the reason. Attach mode (incl. managed OBS) still
+    installs the channel so page code cannot forge a grant, but never asks SystemInfo."""
+    placement_fake(monkeypatch, **attrs)
+    if mode == "launch":
+        output = host(tmp_path, monkeypatch)
+    else:
+        output = attach_host(tmp_path, monkeypatch, **({"bridge": "obs-managed"} if mode == "managed" else {}))
+    assert output.output["placement"] == {"grant": None, "reason": None, "product": None, "gpuCompositing": None, "at": None}
+
+    observed = output.observe()
+    fake = FakeCdp.instances[0]
+
+    placement = observed.output["placement"]
+    assert (placement["grant"], placement["reason"], placement["gpuCompositing"]) == (grant, reason, gpu)
+    assert placement["product"] == attrs.get("product", "HeadlessChrome/154.0.8037.59")
+    assert isinstance(placement["at"], float)
+    assert fake.channel_before_goto
+    assert fake.token is not None and re.fullmatch(r"[0-9a-f]{32}", fake.token)
+    if grant == "snap":
+        assert round_trips(fake) == ["doc-1"]
+        assert commits(fake) == ["doc-1"]
+        assert fake.placement == "snap"
+    else:
+        assert round_trips(fake) == [] and commits(fake) == []
+        assert fake.placement == "invalid"
+    if mode != "launch":
+        assert fake.targeted == []
+        assert "SystemInfo.getInfo" not in fake.calls
+        assert "Page.getFrameTree" not in fake.calls
+    for _ in range(3):
+        output.observe()
+    assert len(round_trips(fake)) == (1 if grant == "snap" else 0)
+    shown = output.execute("show")
+    assert shown.output_visible
+
+
+def test_placement_lifecycle_rebinds_to_each_fresh_document(tmp_path, monkeypatch):
+    """The grant lives in one unique context. A reload yields a fresh `invalid` document that is
+    granted only after its own round trip; a context that vanishes between round trip and
+    commit installs nothing (the commit's targeted evaluate fails, no untargeted retry); a
+    lost context or a document from another origin clears the grant without any page call."""
+    placement_fake(monkeypatch)
+    output = host(tmp_path, monkeypatch)
+    output.observe()
+    fake = FakeCdp.instances[0]
+    assert output.output["placement"]["grant"] == "snap" and fake.placement == "snap"
+
+    fake.reload()
+    assert fake.placement == "invalid"
+    observed = output.observe()
+    assert observed.output["placement"]["grant"] == "snap"
+    assert round_trips(fake) == ["doc-1", "doc-2"] and commits(fake) == ["doc-1", "doc-2"]
+    trip_at = fake.targeted.index((live_host._placement_round_trip_expr(fake.token), "doc-2"))
+    commit_at = fake.targeted.index((live_host._placement_set_expr(fake.token, "snap"), "doc-2"))
+    assert trip_at < commit_at
+
+    def navigate_before_commit(fake, expression):
+        if expression == live_host._placement_set_expr(fake.token, "snap") and fake.context["uniqueId"] == "doc-3":
+            fake.reload()
+    fake.before_targeted = navigate_before_commit
+    fake.reload()
+    observed = output.observe()
+    assert observed.output["placement"]["grant"] is None
+    assert commits(fake)[-1] == "doc-3"
+    assert fake.context["uniqueId"] == "doc-4" and fake.placement == "invalid"
+    observed = output.observe()
+    assert observed.output["placement"]["grant"] == "snap"
+    assert round_trips(fake)[-1] == "doc-4" and fake.placement == "snap"
+
+    sent = len(fake.targeted)
+    fake.context = None
+    assert output.observe().output["placement"]["grant"] is None
+    fake.reload(origin="https://elsewhere.example")
+    assert output.observe().output["placement"]["grant"] is None
+    assert len(fake.targeted) == sent
+
+
+@pytest.mark.parametrize(("attrs", "gpu"), [({"gpu": "disabled_software"}, "disabled_software"), ({"gpu": None}, None), ({"sysinfo_fails": True}, None)])
+def test_placement_fingerprint_revokes_at_observe(tmp_path, monkeypatch, attrs, gpu):
+    """A granted document is re-checked at every observe(): GPU compositing no longer
+    readably `enabled` revokes in that context and the document stays revoked."""
+    placement_fake(monkeypatch)
+    output = host(tmp_path, monkeypatch)
+    output.observe()
+    fake = FakeCdp.instances[0]
+    assert fake.placement == "snap"
+    fake.__dict__.update(attrs)
+
+    placement = output.observe().output["placement"]
+
+    assert (placement["grant"], placement["reason"], placement["gpuCompositing"]) == (None, "revoked-fingerprint", gpu)
+    assert commits(fake, "invalid") == ["doc-1"] and fake.placement == "invalid"
+    fake.gpu, fake.sysinfo_fails = "enabled", False
+    assert output.observe().output["placement"]["reason"] == "revoked-fingerprint"
+    assert round_trips(fake) == ["doc-1"]
+
+
+@pytest.mark.parametrize("failure", ["predefined", "install"])
+def test_placement_channel_failure_keeps_output_hidden_and_refuses_show(tmp_path, monkeypatch, failure):
+    """A round trip that does not read back exactly (a getter predefined before the host's
+    first-run script leaves no updater), or a channel the host could not install, reports
+    `channel-compromised`; the output stays hidden and `show` is refused for the session."""
+    placement_fake(monkeypatch, predefined=failure == "predefined")
+    if failure == "install":
+        real_call = FakeCdp.call
+
+        def call(self, method, deadline_s=None, **params):
+            if method == "Page.addScriptToEvaluateOnNewDocument":
+                raise live_host.LiveHostError("CDP Page.addScriptToEvaluateOnNewDocument failed: boom")
+            return real_call(self, method, deadline_s, **params)
+        monkeypatch.setattr(FakeCdp, "call", call)
+    output = host(tmp_path, monkeypatch)
+
+    observed = output.observe()
+    fake = FakeCdp.instances[0]
+
+    assert observed.output["placement"]["grant"] is None
+    assert observed.output["placement"]["reason"] == "channel-compromised"
+    assert not observed.output_visible
+    with pytest.raises(live_host.PlayerCommandRejected, match="stays hidden"):
+        output.execute("show")
+    assert not fake.visible
+    fake.reload()
+    output.observe()
+    assert output.output["placement"]["reason"] == "channel-compromised"
+    assert commits(fake) == []
+    assert commits(fake, "invalid") == ([] if failure == "install" else ["doc-1"])
+
+
+def test_placement_init_script_resists_page_tampering_in_node():
+    """§8.8 tamper rows on the real init script and the host's own round-trip and grant
+    expressions: page code cannot set, keep or forge a grant; a fresh document starts
+    `invalid`; a predefined getter makes the init script throw so no updater exists."""
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required to exercise the placement channel")
+    token = "0123456789abcdef0123456789abcdef"
+    with pytest.raises(ValueError):
+        live_host.placement_init_script("not-hex")
+    harness = f"""
+const vm=require('vm');const SRC={json.dumps(live_host.placement_init_script(token))};
+const TRIP={json.dumps(live_host._placement_round_trip_expr(token))};
+const SNAP={json.dumps(live_host._placement_set_expr(token, "snap"))};
+const REVOKE={json.dumps(live_host._placement_set_expr(token, "invalid"))};
+function doc(pre){{const ctx={{}};ctx.window=ctx;vm.createContext(ctx);if(pre)vm.runInContext(pre,ctx);let err=null;try{{vm.runInContext(SRC,ctx)}}catch(e){{err=String(e)}}
+  return {{err,page:c=>{{try{{return vm.runInContext(c,ctx)}}catch(e){{return 'threw:'+e.constructor.name}}}},run:c=>vm.runInContext(c,ctx),get:()=>vm.runInContext('window.__obedPlacement',ctx)}}}}
+const R={{}};let d=doc();R.newDocument=d.get();R.roundTrip=d.run(TRIP);R.afterTrip=d.get();R.commit=d.run(SNAP);
+d.page('window.__obedPlacement="invalid"');R.assignment=d.get();d.page('"use strict";window.__obedPlacement="x"');R.strictAssignment=d.get();
+R.deleteResult=d.page('delete window.__obedPlacement');R.afterDelete=d.get();R.accessorRedefine=d.page('Object.defineProperty(window,"__obedPlacement",{{get(){{return "x"}}}})');
+R.revoke=d.run(REVOKE);R.forgeAssign=d.page('window.__obedPlacement="snap";window.__obedPlacement');R.forgeRedefine=d.page('Object.defineProperty(window,"__obedPlacement",{{get(){{return "snap"}}}})');R.afterForge=d.get();
+R.updaterUnchangedAfterReplace=d.page('var f=window.__obedGrant;window.__obedGrant=function(){{return true}};window.__obedGrant===f');R.wrongToken=d.page('window.__obedGrant("ffffffffffffffffffffffffffffffff","snap")');R.afterWrongToken=d.get();
+R.tokenInSource=d.page('String(window.__obedGrant).includes("{token}")');d.page('window.__obedGrant("{token}","frac")');R.onlySnap=d.get();
+R.reloadedDocument=doc().get();
+let p=doc('Object.defineProperty(window,"__obedPlacement",{{get(){{return "snap"}},configurable:false}})');R.predefinedInitThrows=!!p.err;R.predefinedHasUpdater=p.page('typeof window.__obedGrant');
+R.predefinedTrip=p.run(TRIP);R.predefinedCommit=p.run(SNAP);
+console.log(JSON.stringify(R));
+"""
+    result = json.loads(subprocess.run([node, "-e", harness], check=True, text=True, capture_output=True).stdout)
+    assert result == {
+        "newDocument": "invalid", "roundTrip": ["true", "snap", "true", "invalid"], "afterTrip": "invalid", "commit": "snap",
+        "assignment": "snap", "strictAssignment": "snap", "deleteResult": False, "afterDelete": "snap",
+        "accessorRedefine": "threw:TypeError", "revoke": "invalid", "forgeAssign": "invalid",
+        "forgeRedefine": "threw:TypeError", "afterForge": "invalid", "updaterUnchangedAfterReplace": True,
+        "wrongToken": False, "afterWrongToken": "invalid", "tokenInSource": False, "onlySnap": "invalid",
+        "reloadedDocument": "invalid", "predefinedInitThrows": True, "predefinedHasUpdater": "undefined",
+        "predefinedTrip": [None], "predefinedCommit": None,
+    }
+    assert live_host._PLACEMENT_ROUND_TRIP == result["roundTrip"]
+
+
+class ScriptedWs:
+    """A page socket that answers each request after the events queued for it, so events
+    interleave with responses exactly as Chrome delivers them on one socket."""
+
+    def __init__(self, events_before: dict[int, list[dict[str, Any]]] | None = None, results: dict[int, Any] | None = None):
+        self.sent: list[dict[str, Any]] = []
+        self.inbox: list[str] = []
+        self.events_before = events_before or {}
+        self.results = results or {}
+        self.closed = False
+
+    def send(self, data):
+        message = json.loads(data)
+        self.sent.append(message)
+        n = len(self.sent)
+        self.inbox += [json.dumps(event) for event in self.events_before.get(n, [])]
+        reply = self.results.get(n, {})
+        self.inbox.append(json.dumps({"id": message["id"], **({"error": reply["error"]} if "error" in reply else {"result": reply})}))
+
+    def recv(self, timeout=None):
+        return self.inbox.pop(0)
+
+    def close(self):
+        self.closed = True
+
+
+def _context_event(unique, frame, *, default=True, origin="http://127.0.0.1:1", context_id=1):
+    return {"method": "Runtime.executionContextCreated", "params": {"context": {
+        "id": context_id, "uniqueId": unique, "origin": origin, "auxData": {"isDefault": default, "frameId": frame}}}}
+
+
+def test_chrome_cdp_tracks_contexts_from_interleaved_events_and_targets_evaluations(tmp_path, monkeypatch):
+    """Through the real transport: context lifecycle events that arrive before a response are
+    recorded (only a frame's default context counts; isolated worlds and child frames do not
+    replace the main frame's), destroyed/cleared contexts are forgotten (a renderer crash plus
+    reload is a fresh `uniqueId`), `evaluate_in` always sends `uniqueContextId` and surfaces a
+    vanished context as an error, and nothing is sent without a context."""
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display)
+    transport.proc = None
+    ws = ScriptedWs(
+        events_before={
+            1: [_context_event("A", "MAIN"), _context_event("iso", "MAIN", default=False, context_id=2), _context_event("child", "SUB", context_id=3)],
+            3: [{"method": "Runtime.executionContextDestroyed", "params": {"executionContextId": 1, "executionContextUniqueId": "A"}}],
+            4: [_context_event("B", "MAIN", context_id=1)],
+            5: [{"method": "Runtime.executionContextsCleared", "params": {}}, _context_event("C", "MAIN", context_id=7)],
+            6: [{"method": "Runtime.executionContextDestroyed", "params": {"executionContextId": 7}}],
+        },
+        results={2: {"result": {"value": "v"}}, 4: {"error": {"message": "Cannot find context with specified id"}}},
+    )
+    transport.ws = ws
+
+    assert transport.main_context("MAIN") is None
+    transport.call("Runtime.enable")
+    assert transport.main_context("MAIN") == {"id": 1, "uniqueId": "A", "origin": "http://127.0.0.1:1"}
+    assert transport.main_context("SUB")["uniqueId"] == "child"
+    assert transport.evaluate_in("A", "1") == "v"
+    assert ws.sent[1]["params"]["uniqueContextId"] == "A"
+    transport.call("Test.after")
+    assert transport.main_context("MAIN") is None
+    with pytest.raises(live_host.LiveHostError, match="Cannot find context"):
+        transport.evaluate_in("A", "1")
+    assert transport.main_context("MAIN")["uniqueId"] == "B"
+    transport.evaluate("2")
+    assert "uniqueContextId" not in ws.sent[4]["params"]
+    assert transport.main_context("MAIN")["uniqueId"] == "C" and transport.main_context("SUB") is None
+    transport.call("Test.after")
+    assert transport.main_context("MAIN") is None
+    with pytest.raises(live_host.LiveHostError, match="unique execution context"):
+        transport.evaluate_in("", "1")
+    assert len(ws.sent) == 6
+
+
+def test_chrome_cdp_browser_call_uses_the_launched_browser_target_and_fails_closed(tmp_path, monkeypatch):
+    """SystemInfo is browser-target only: `browser_call` goes to the browser path Chrome wrote
+    in DevToolsActivePort on its own socket (never the page socket or its lock), a failed
+    answer raises and drops that socket so the next call reconnects, attach mode has no
+    browser target, and stop() closes the browser socket too."""
+    display = live_host.OutputDisplay(2, 0, 0, 1920, 1080)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, headless=True)
+    chrome = _LaunchedChrome(tmp_path, port=51234)
+    monkeypatch.setattr(live_host.subprocess, "Popen", chrome.popen)
+    _asked, connected, _calls = _fake_cdp_endpoint(monkeypatch, transport)
+    _fake_time(monkeypatch)
+    transport.start()
+    browser_sockets = [ScriptedWs(results={1: {"gpu": {"featureStatus": {"gpu_compositing": "enabled"}}}, 2: {"error": {"message": "boom"}}}), ScriptedWs()]
+    opened: list[str] = []
+
+    def connect(url, **_kwargs):
+        opened.append(url)
+        return browser_sockets[len(opened) - 1]
+    monkeypatch.setattr(live_host, "connect", connect)
+    transport._lock.acquire()
+    try:
+        assert transport.browser_call("SystemInfo.getInfo")["gpu"]["featureStatus"]["gpu_compositing"] == "enabled"
+    finally:
+        transport._lock.release()
+    assert opened == ["ws://127.0.0.1:51234/devtools/browser/fresh"]
+    assert browser_sockets[0].sent[0]["method"] == "SystemInfo.getInfo"
+    with pytest.raises(live_host.LiveHostError, match="SystemInfo.getInfo"):
+        transport.browser_call("SystemInfo.getInfo")
+    assert browser_sockets[0].closed and transport._browser_ws is None
+    transport.browser_call("SystemInfo.getInfo")
+    assert len(opened) == 2
+    transport.stop()
+    assert browser_sockets[1].closed and transport._browser_ws is None
+    with pytest.raises(live_host.LiveHostError, match="unavailable"):
+        transport.browser_call("SystemInfo.getInfo")
+
+    attached = live_host.ChromeCdp(Path("chrome"), tmp_path, display, attach_endpoint="http://127.0.0.1:9222")
+    with pytest.raises(live_host.LiveHostError, match="unavailable"):
+        attached.browser_call("SystemInfo.getInfo")
