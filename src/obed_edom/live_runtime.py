@@ -10,14 +10,14 @@ MM_OPACITY_ENV = "OBED_LIVE_MM_OPACITY"
 # 17c0c938 is e9b2fad4 plus two `,isEvalSupported:!1` PDF.js options, outside every anchor.
 SUPPORTED_PLAYERS = {
     "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354": (
-        "409a039535ef547bf79c02a68eae6c7eee008b2c95942dd814ca9cef19f9179e",
+        "81ac1a33bee3d2e8eb62fab183876d0c17ce2e372819a7416a0720073f8a9475",
         "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
-        "53ee23db5773e6579105f82b6d9a084386460d5095f751b3b1cc701af2e0b69a",
+        "dd0db318d9ef06371bebe4d0ea8368e81d6d83799d60318f7abf1995e7feb648",
     ),
     "17c0c938caa49d5c70bd83bd5b84f57381faa51602932ca733aa965055026d91": (
-        "5dd3997ece0fc5ec0900e3ecbccab304307345e8b8af8935a0c268c6a3d442b1",
+        "a9aa0bde8cf3f8f0c69a0292cb421caf8f733b7924a2ec825828ab331c40fe18",
         "4f9fbffd95e4649543142b2e95586babd9d75f0a0d9a4974e21d6f33c8389e3b",
-        "b366bd91d370ef95f5e5827a8e6678e57194c538b756ea97259778af21f74238",
+        "c6c1eb5e368ae5e54e9b7bb94d8a9545522c34eeaca34c5c05fe396bc63841e9",
     ),
 }
 _ANCHOR = b"UC=new Eg,UC.displayManager.showWaitingIndicator()"
@@ -76,7 +76,7 @@ _DISSOLVE_METHODS = (
     b'var R=document.getElementById("layer"+U.playbackController.kpfEvent.baseLayer.layerId).getBoundingClientRect(),'
     b'kx=U.script.slideWidth/R.width,ky=U.script.slideHeight/R.height,H=[],N=document.getElementsByTagName("*"),Q='
     + _FREEZE_QUALIFIED_TUPLES
-    + b",cs=function(n){return getComputedStyle(n)},dv=function(s,d){return(s||d)===d},"
+    + b",pl=window.__obedPlacement,cs=function(n){return getComputedStyle(n)},dv=function(s,d){return(s||d)===d},"
     b'bd=function(z){return"none"!==z.borderTopStyle||"none"!==z.borderRightStyle||"none"!==z.borderBottomStyle||'
     b'"none"!==z.borderLeftStyle},rd=function(z){return"0px"!==z.borderTopLeftRadius||"0px"!==z.borderTopRightRadius||'
     b'"0px"!==z.borderBottomLeftRadius||"0px"!==z.borderBottomRightRadius},'
@@ -95,7 +95,8 @@ _DISSOLVE_METHODS = (
     b'if(u)return("static"===w.position||"absolute"===w.position)&&"none"===m;if("absolute"!==w.position||!dv(w.perspective,'
     b'"none")||!dv(w.backfaceVisibility,"visible")||(s?"preserve-3d"!==w.transformStyle&&'
     b'"flat"!==w.transformStyle:"flat"!==w.transformStyle&&("preserve-3d"!==w.transformStyle||"none"!==m)||'
-    b'"visible"!==w.visibility))return!1;if("none"===m)return!0;M=new DOMMatrix(m);return M.is2D&&!M.b&&!M.c&&1===M.a'
+    b'"visible"!==w.visibility))return!1;if(!s&&!(/^-?\\d+px$/.test(w.left)&&/^-?\\d+px$/.test(w.top)))return!1;'
+    b'if("none"===m)return!0;M=new DOMMatrix(m);return M.is2D&&!M.b&&!M.c&&1===M.a'
     b"&&1===M.d},xo=function(n){for(var a=n,w,r;!a.contains(G);a=a.parentElement){w=cs(a);"
     b'if("fixed"===getComputedStyle(a,"::before").position||"fixed"===getComputedStyle(a,"::after").position)return!1;'
     b'if("div"===a.localName&&"http://www.w3.org/1999/xhtml"===a.namespaceURI&&"hidden"===w.overflowX'
@@ -116,7 +117,7 @@ _DISSOLVE_METHODS = (
     b'innerHeight],a=G,w,b;a;a=a.parentElement)w=cs(a),"visible"!==w.overflowX&&(vp(a)||"static"!==w.position)'
     b"&&(b=vp(a)?{left:0,top:0,right:innerWidth,bottom:innerHeight}:a.getBoundingClientRect(),V=[Math.max(V[0],b.left),"
     b"Math.max(V[1],b.top),Math.min(V[2],b.right),Math.min(V[3],b.bottom)]);if(!(R.width>0&&R.height>0)"
-    b'||[1,1.5,2].indexOf(devicePixelRatio)<0||1!==kx||1!==ky||document.querySelector(":modal,:popover-open,'
+    b'||[1,1.5,2].indexOf(devicePixelRatio)<0||"snap"!==pl||1!==kx||1!==ky||document.querySelector(":modal,:popover-open,'
     b':fullscreen")||!Array.prototype.every.call(N,function(n){return!n.shadowRoot&&(pc(n)||!G.contains(n)'
     b'&&!n.contains(G)&&xo(n))}))return;var ad=[];Array.prototype.slice.call(document.querySelectorAll("video")).reverse('
     b").forEach(function(v){try{if(!G.contains(v)||v.readyState<2||!v.videoWidth||!v.videoHeight"
@@ -302,8 +303,9 @@ def patch_player(player: bytes, *, mm_opacity: bool = True) -> bytes:
 
     A freeze is a snapshot of the decoded frame at identity tone (no pixel writes), drawn into the movie's content box
     with every edge snapped to the device grid (1/DPR px) and kept only if every backing pixel is opaque. It is taken
-    only behind the geometry guard (device pixel ratio 1, 1.5 or 2, base layer = slide, translation-only stage and scene
-    transforms), with no top-layer element and no open shadow root on the page, and when every element passes the paint
+    only when the host has granted the snapped placement (`window.__obedPlacement` reads `"snap"`), behind the geometry
+    guard (device pixel ratio 1, 1.5 or 2, base layer = slide, translation-only stage and scene transforms, integer scene
+    `left`/`top`), with no top-layer element and no open shadow root on the page, and when every element passes the paint
     gate or, outside the stage, is clipped by an HTML `div` proven disjoint from the visible stage. Supported pages
     create no author shadow roots (a checked invariant), since a closed one cannot be detected; anything else keeps
     today's look."""

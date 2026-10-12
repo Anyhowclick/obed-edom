@@ -273,23 +273,24 @@ def test_mm_opacity_anchors_are_unique_on_the_real_player():
 
 # sha256 of patch_player(real, mm_opacity=...) and patch_rendering(real), per stock player.
 # Old False: recorded on 3eb3b0fe (hook only, unchanged since). True and rendering: with the dissolve replacements
-# D1-D4 = R9-R12 at plan rev 13 (keynote_live_dissolve_crossfade.plan.md); rev 12's D1 gave bfeb9377... / a211b1c3... (old)
+# D1-D4 = R9-R12 at plan rev 17 (keynote_live_dissolve_crossfade.plan.md); rev 13's D1 gave 409a0395... / 53ee23db... (old)
+# and 5dd3997e... / b366bd91... (new); rev 12's D1 gave bfeb9377... / a211b1c3... (old)
 # and 6c941ac1... / 50231d3c... (new); rev 9's D1 gave 49d56adc... / 117fd39d... (old)
 # and 7a5e315b... / 52d7edb5... (new); were 574274e8... / fd811938... (old) and 330ef72c... / 33fcdcd2... (new) with R1-R8,
 # and old True 21476f78... with R1-R5. New False: recorded when the new player was admitted.
 REAL_PATCHED_SHA256 = {
     OLD_PLAYER_SHA256: {
-        True: "409a039535ef547bf79c02a68eae6c7eee008b2c95942dd814ca9cef19f9179e",
+        True: "81ac1a33bee3d2e8eb62fab183876d0c17ce2e372819a7416a0720073f8a9475",
         False: "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
     },
     NEW_PLAYER_SHA256: {
-        True: "5dd3997ece0fc5ec0900e3ecbccab304307345e8b8af8935a0c268c6a3d442b1",
+        True: "a9aa0bde8cf3f8f0c69a0292cb421caf8f733b7924a2ec825828ab331c40fe18",
         False: "4f9fbffd95e4649543142b2e95586babd9d75f0a0d9a4974e21d6f33c8389e3b",
     },
 }
 REAL_RENDERING_SHA256 = {
-    OLD_PLAYER_SHA256: "53ee23db5773e6579105f82b6d9a084386460d5095f751b3b1cc701af2e0b69a",
-    NEW_PLAYER_SHA256: "b366bd91d370ef95f5e5827a8e6678e57194c538b756ea97259778af21f74238",
+    OLD_PLAYER_SHA256: "dd0db318d9ef06371bebe4d0ea8368e81d6d83799d60318f7abf1995e7feb648",
+    NEW_PLAYER_SHA256: "c6c1eb5e368ae5e54e9b7bb94d8a9545522c34eeaca34c5c05fe396bc63841e9",
 }
 
 
@@ -1185,7 +1186,7 @@ function callSites(){const ev=[];const PB={prototype:{__obedFreezeTake(U,A){ev.p
   const d3=function(a,w,C,A){%D3%;
   d3.call({cssRenderer:{draw(a){ev.push(['draw',a.id])}},__obedFreeze(C,A){ev.push(['freeze',C,A])}},{id:'a',removeChild(w){ev.push(['remove',w])}},'w','C','A');return ev}
 globalThis.DOMMatrix=class{constructor(s){const m=/matrix(3d)?\(([^)]*)\)/.exec(s);const v=m[2].split(',').map(Number);this.is2D=!m[1];this.a=v[0];this.b=v[1];this.c=m[1]?v[4]:v[2];this.d=m[1]?v[5]:v[3]}};
-const BASE={display:'block',opacity:'1',transform:'none',filter:'none',mixBlendMode:'normal',clipPath:'none',maskImage:'none',zIndex:'auto',overflowX:'visible',overflowY:'visible',position:'absolute',
+const BASE={left:'0px',top:'0px',display:'block',opacity:'1',transform:'none',filter:'none',mixBlendMode:'normal',clipPath:'none',maskImage:'none',zIndex:'auto',overflowX:'visible',overflowY:'visible',position:'absolute',
   borderTopLeftRadius:'0px',borderTopRightRadius:'0px',borderBottomLeftRadius:'0px',borderBottomRightRadius:'0px',objectPosition:'50% 50%',paddingTop:'0px',paddingLeft:'0px',paddingRight:'0px',paddingBottom:'0px',
   borderTopStyle:'none',borderRightStyle:'none',borderBottomStyle:'none',borderLeftStyle:'none',objectFit:'contain',backgroundColor:'rgba(0, 0, 0, 0)',backgroundImage:'none',boxShadow:'none',outlineStyle:'none',
   transformStyle:'flat',scale:'none',rotate:'none',translate:'none',offsetPath:'none',clip:'auto',backdropFilter:'none',objectViewBox:'none',contain:'none',contentVisibility:'visible',isolation:'auto',
@@ -1249,7 +1250,8 @@ function run(o){globalThis.devicePixelRatio=o.dpr||1;
   globalThis.getComputedStyle=(e,p)=>(tick(),p)?Object.assign({content:'none',position:'static'},(v=>typeof v==='string'?{content:v}:v)(e._pseudo&&e._pseudo[p])):(e._cs||BASE);globalThis.innerWidth=(o.viewport||[1920,1080])[0];globalThis.window=globalThis;globalThis.innerHeight=(o.viewport||[1920,1080])[1];
   const tuple=o.vf===undefined?['bt709','bt709','bt709',false]:o.vf;let vfOpened=0,vfClosed=0;
   if(tuple==='missing')delete globalThis.VideoFrame;else globalThis.VideoFrame=class{constructor(x){tick();if(tuple==='throws')throw new Error('vf');vfOpened++;this.colorSpace={primaries:tuple[0],transfer:tuple[1],matrix:tuple[2],fullRange:tuple[3]}}close(){vfClosed++}};
-  globalThis.performance={now:()=>clk};globalThis.__obedTakeMs=undefined;
+  globalThis.performance={now:()=>clk};globalThis.__obedTakeMs=undefined;delete globalThis.__obedPlacement;
+  if(o.placement!==null)Object.defineProperty(globalThis,'__obedPlacement',{configurable:true,get:()=>o.placement===undefined?'snap':o.placement});
   const E=o.cut?CUT:o.renamed?Object.assign({},EFF,{name:'apple:dissolve character'}):EFF,ev=o.event||0;
   const events=Array.from({length:ev+1},()=>({effects:[]}));if(!o.noEffect)events[ev]={effects:[E]};
   const U={script:o.throwScript?null:{slideWidth:1920,slideHeight:1080,events},playbackController:{kpfEvent:{baseLayer:{layerId:9}}},
@@ -1405,7 +1407,7 @@ def _hidden_parent(**effects) -> dict:
     return {"cs": {"visibility": "hidden", **effects}, "rect": [-300, 0, 200, 1080]}
 
 
-FREEZE_ROW_COUNT = 266
+FREEZE_ROW_COUNT = 274
 # name -> (stub options, expected take/attach count and target, redraws [id, alpha, x, y, w, h], writeback (none on any
 # path: identity tone), geometry).
 FREEZE_ROWS = {
@@ -1611,6 +1613,16 @@ FREEZE_ROWS = {
     "r9_baseHalfWidth": ({"baseRect": [0, 0, 960, 1080]}, FREEZE_SKIP),
     "r9_baseFractionalHeight": ({"baseRect": [0, 0, 1920, 1079.5]}, FREEZE_SKIP),
     "r9_fullSlide": ({}, dict(FREEZE_ADMIT, traces=[DEFAULT_TRACE])),
+    # Rev 17: the take proceeds only on the host's `snap` grant; an absent getter is the preview/raw page (patch_rendering).
+    "gate_grantAbsent": ({"placement": None}, FREEZE_SKIP),
+    "gate_grantInvalid": ({"placement": "invalid"}, FREEZE_SKIP),
+    "gate_grantFrac": ({"placement": "frac"}, FREEZE_SKIP),
+    "gate_grantUpperSnap": ({"placement": "SNAP"}, FREEZE_SKIP),
+    # Scene elements need integral computed `left`/`top` in px; sub-pixel offsets come only from transforms.
+    "leftFractional": ({"layerCs": {"left": "0.5px"}}, FREEZE_SKIP),
+    "topFractional": ({"layerCs": {"top": "10.25px"}}, FREEZE_SKIP),
+    "leftAuto": ({"layerCs": {"left": "auto"}}, FREEZE_SKIP),
+    "leftNegativeInteger": ({"layerCs": {"left": "-3px"}}, dict(FREEZE_ADMIT, traces=[DEFAULT_TRACE])),
 }
 for _prop in CHAIN_PROPERTIES:
     FREEZE_ROWS[f"chain_{_prop}"] = ({"layerCs": {_prop: OUT_OF_PROFILE[_prop], **CHAIN_COMPANIONS.get(_prop, {})}}, FREEZE_SKIP)
@@ -1644,7 +1656,7 @@ function node(tag,extra){const n=Object.assign({tagName:tag,style:{},children:[]
   return Object.assign(n,domMethods(()=>n),{appendChild(c){return adopt(n,c)}},extra||{})}
 class P{constructor(si){this.sceneIndex=si}%METHODS%}
 globalThis.DOMMatrix=class{constructor(s){const m=/matrix(3d)?\(([^)]*)\)/.exec(s);const v=m[2].split(',').map(Number);this.is2D=!m[1];this.a=v[0];this.b=v[1];this.c=m[1]?v[4]:v[2];this.d=m[1]?v[5]:v[3]}};
-const UA={display:'block',contain:'none',contentVisibility:'visible',isolation:'auto',perspective:'none',backfaceVisibility:'visible',willChange:'auto',zoom:'1',imageRendering:'auto',opacity:'1',transform:'none',filter:'none',mixBlendMode:'normal',clipPath:'none',maskImage:'none',zIndex:'auto',overflowX:'visible',overflowY:'visible',position:'static',
+const UA={left:'0px',top:'0px',display:'block',contain:'none',contentVisibility:'visible',isolation:'auto',perspective:'none',backfaceVisibility:'visible',willChange:'auto',zoom:'1',imageRendering:'auto',opacity:'1',transform:'none',filter:'none',mixBlendMode:'normal',clipPath:'none',maskImage:'none',zIndex:'auto',overflowX:'visible',overflowY:'visible',position:'static',
  borderTopLeftRadius:'0px',borderTopRightRadius:'0px',borderBottomLeftRadius:'0px',borderBottomRightRadius:'0px',objectPosition:'50% 50%',paddingTop:'0px',paddingLeft:'0px',paddingRight:'0px',paddingBottom:'0px',
  borderTopStyle:'none',borderRightStyle:'none',borderBottomStyle:'none',borderLeftStyle:'none',objectFit:'fill',backgroundColor:'rgba(0, 0, 0, 0)',backgroundImage:'none',boxShadow:'none',outlineStyle:'none',
  transformStyle:'flat',borderImageSource:'none',webkitBoxReflect:'none',content:'normal',columnRuleStyle:'none',scale:'none',rotate:'none',translate:'none',offsetPath:'none',clip:'auto',backdropFilter:'none',objectViewBox:'none',visibility:'visible'};
@@ -1684,7 +1696,7 @@ function run(C){
     querySelector:q=>{if(q!==':modal,:popover-open,:fullscreen')throw new Error('query '+q);return null},createDocumentFragment:()=>{const f={children:[]};f.appendChild=c=>adopt(f,c);return f},
     createElement:t=>t==='canvas'?node('CANVAS',{getContext(){const ctx={globalAlpha:1,drawImage:(s,...a)=>{if(s.tagName!=='VIDEO')draws.push([s.id,+ctx.globalAlpha.toFixed(4),...a.map(x=>Math.round(x))])},
       getImageData:(x,y,w,h)=>{const d=new Uint8ClampedArray(w*h*4).fill(255);return {data:d}},putImageData(){}};return ctx}}):node(t.toUpperCase())};
-  globalThis.getComputedStyle=(e,p)=>p?{content:'none'}:e._cs;globalThis.devicePixelRatio=1;globalThis.innerWidth=1920;globalThis.window=globalThis;globalThis.innerHeight=1080;globalThis.VideoFrame=class{constructor(x){this.colorSpace={primaries:'bt709',transfer:'bt709',matrix:'bt709',fullRange:false}}close(){}};
+  globalThis.getComputedStyle=(e,p)=>p?{content:'none'}:e._cs;globalThis.devicePixelRatio=1;globalThis.__obedPlacement='snap';globalThis.innerWidth=1920;globalThis.window=globalThis;globalThis.innerHeight=1080;globalThis.VideoFrame=class{constructor(x){this.colorSpace={primaries:'bt709',transfer:'bt709',matrix:'bt709',fullRange:false}}close(){}};
   const U={script:{slideWidth:1920,slideHeight:1080,events:[{effects:[C.effect]}]},playbackController:{kpfEvent:{baseLayer:{layerId:1}}}};globalThis.UC=U;
   all.forEach(e=>Object.assign(e,domMethods(()=>e),{appendChild(c){return adopt(e,c)}}));const PRE=new Set(all),fresh=n=>!PRE.has(n);
   const place=()=>JSON.stringify(all.map(e=>[e.id,e.parentElement&&(e.parentElement.id||'new'),e.parentElement?e.parentElement.children.indexOf(e):-1,e.children.map(c=>fresh(c)?'new':c.id)]));
@@ -1859,7 +1871,8 @@ def test_dissolve_real_patched_methods_on_node(tmp_path, sha, case):
         # to 200, then rev 12's 26 r8 rows (exterior proof, top layer, geometry guard, opaque cover) and 8 r9 rows, then
         # impl r1's 26 (one exterior predicate at a time, the last backing pixel, a fractional x origin), then rev 13's 5
         # (DPR 1.25 and 3 skip, DPR 1.5 on the P2 box, the last backing pixel at DPR 1.5 and 2) and a DPR 2 quarter-pixel
-        # edge (y 795.25 snaps to 795.5 on the device grid, 795 on the CSS grid).
+        # edge (y 795.25 snaps to 795.5 on the device grid, 795 on the CSS grid), then rev 17's 8 (grant absent or other
+        # than `snap`, fractional or `auto` scene `left`/`top`, a negative integer `left`).
         assert len(FREEZE_ROWS) == FREEZE_ROW_COUNT
         assert result.pop("guardControl") == FREEZE_GUARD_CONTROL
         assert result.pop("callSites") == FREEZE_CALL_SITES
