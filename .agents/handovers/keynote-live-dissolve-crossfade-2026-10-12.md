@@ -1,4 +1,25 @@
-# Dissolve cross-fade — implementation handover (2026-10-12, written before the 02:00 shutdown)
+# Dissolve cross-fade — implementation handover (updated 2026-10-12 afternoon)
+
+## READ FIRST — current state (2026-10-12 ~14:45; the night section below is history)
+
+Branch `claude/keynote-live-dissolve-crossfade` (local only: NOT pushed, no PR), worktree `.claude/worktrees/brave-goodall-bd9851`.
+Plan `.agents/plans/keynote_live_dissolve_crossfade.plan.md` is at **rev 15** (`95c55e45`); **rev 16 in progress** (folding GPT-6
+Astra plan r12). Owner decisions 8–14 are in §12 (14 = raw/Build Preview no longer freeze; recorded in rev 16).
+
+| Item | State |
+|---|---|
+| Code on branch | rev 13 bytes in `live_runtime.py` (`69db0c0d`, `7834624c`); probe/DX-2 for rev 13/14 (`a8e4fd3c`). Rev 15 code (host placement probe W6, take +374 B, W2/W3 arms) NOT started — waits for rev 16 + critique. |
+| Reviews | W1 rev 12: Astra impl r1–r2 folded (shadow tripwire now pinned + scoped to page-reaching host files). W2/W3 rev 12: r1–r3 folded. Rev 13 W1/W2 deltas committed after local verification; next Astra impl round runs on rev 15/16 code. |
+| Tests (latest) | `test_live_runtime` 125 / 0 skipped (266 rows); dissolve + managed_obs 409 / 1 skipped; sweep 912/924 INCONCLUSIVE, 12 accepted survivors. Full suite NOT re-run since `1c5d3004` (run after rev-16 code lands). |
+| Measurements | Q0b-bis (`output/evidence/.../q0bbis-2026-10-12/`): engagement PASS (host + raw + all negatives); cost PASS (headless ≤ 18.3 ms, CEF ≤ 34.8 ms); 18-cell DPR×origin×clip matrix PASS with a REAL `--force-device-scale-factor` (CDP emulation smooths canvases — void); W5 GO (indicative). Hi-DPI investigation (`hidpi-2026-10-12/`) → fix A (device-grid snap). CEF investigation (`cef-frac-2026-10-12/`): CEF 127 draws the video quad unsnapped → host startup probe (decision 13). |
+| Open items | rev 16 critique → implement W1 (take bytes), W6 (host probe + output gate + lifecycle), W2/W3 arms; Q0b-ter (probe qualification on both engines, CEF `frac` clip cases, rev-15 engagement); DX-1 full (~65 browser-min, needs a booked window); full suites; DX-2; DX-3 (owner, real OBS); one PR. Not run yet: m-geo-*, hide-row, D2, m-tone-twin dry runs; crop A/B; CEF HEVC tone. |
+
+Machine etiquette (S2 session "Keynote test optimization" runs timed validations today): send "need window" before any Chrome,
+OBS or test run; S2 replies "free now"; send "done" after. Untimed work may overlap untimed work.
+
+---
+
+## Night of 2026-10-11 → 12 (written before the 02:00 shutdown; history)
 
 **READ FIRST.** Plan rev 9 `.agents/plans/keynote_live_dissolve_crossfade.plan.md` (owner GO 2026-10-11 22:10, all streams
 launched). Branch `claude/keynote-live-dissolve-crossfade` (local only: NOT pushed, no PR), worktree
