@@ -702,7 +702,7 @@ for the parked `iwa-surgical-write-generator` feature.
 * **Bridge clock.** A bridge overlay moves on Keynote's `Date` from its GL loop start, stamped by a `requestAnimFrame`
   setter hook that never throws (`main.js` untouched). With no stamp after `GL_CLOCK_WAIT_MS` (50) it holds at the
   source, then follows `performance.now()` from the core's trigger. One `bridge-clock` note per motion records `via`
-  (`gl`|`fallback`) and `lagMs`. Plan: `.agents/plans/keynote_live_continuity_glclock.plan.md`.
+  (`gl`|`fallback`) and `lagMs`. Landed in S2 (#259); a `--core-variant no-gl-clock` red arm and the D1 carry-cover arms gate it.
 * **Refusals.** Per (boundary, instance) → `retire refused` + one `ContinuityPlan.refusals` record (`code`,
   `objectId` of `src`), reported on `output.continuity.notCarried`: `overlap` artwork above on the destination, R1
   ambiguous pairing (runner-up within 16 authored px), R1b opacity differs, R2 builds in/out, R4 loop mismatch, R7

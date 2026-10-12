@@ -1,5 +1,7 @@
 # Plan: producer-contract pass for the live-continuity instrument (S2)
 
+**Status: LANDED in S2 (#259, `1a169482`, 2026-10-12).** Kept because code cites it by path; results in `.agents/reviews/continuity-generalisation/gates-r1.md`.
+
 **Owner decision (2026-10-11):** close the false-pass class with a producer contract instead of further folds.
 
 **Base:** `claude/s2-detach-fix` at `c7d2d649`. `s2-glclock-fold1` was merged at `0617f24b`; its producer diff since `5fa7d48b` changes no key set or payload. The suite baseline must be re-measured at `c7d2d649`; 10280 passed at `5fa7d48b`.
