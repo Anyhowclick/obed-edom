@@ -1,13 +1,14 @@
 # Dissolve and cut over fill-less slides: a true cross-fade, a clean cut, and movies that freeze and fade
 
-**rev 13 — decision 12 resolved (fix A), for owner review**, 2026-10-12. Rev 1: Opus planner (`8e572864`). Critique r1–r7: GPT-6 Astra
+**rev 14 — r11 folded (acceptance only; bytes = rev 13), for owner review**, 2026-10-12. Rev 1: Opus planner (`8e572864`). Critique r1–r7: GPT-6 Astra
 high via Codex (not Opus; owner 2026-10-11), 12 + 7 + 11 + 7 + 6 + 4 + 3 findings, all folded (§14). Revs 2–9: Opus planner
 (`cd289a05`, `f3bd8b55`, `4ffcd8ad`, `e5c644bb`, `218308c3`, `cacfe9fb`, `d299b549`, rev 9 = owner GO 2026-10-11 22:10, W1–W4
 implemented on this branch up to `fbe105e0`). Rev 10: Opus planner, after Q0b's five re-plan triggers, the Astra xhigh advisory
 (`.agents/reviews/dissolve-crossfade/replan-astra-xhigh.md`) and owner decisions 8–11 (2026-10-12, §12); rev 10 = `891e4f40`. Rev 11:
 Opus planner, folding GPT-6 Astra r8 on rev 10 (9 findings, CHANGES REQUIRED; §14) and decision 12 (made, then reversed the
 same day; §12); rev 11 = `b4ff2576`. Rev 12: Opus planner, folding GPT-6 Astra r9 on rev 11 (3 false admissions + 1 wording;
-§14). Rev 13: Opus planner, adopting the hi-DPI investigation's fix A (owner decision 12, resolved ~11:45; §12). Owner decisions 1–7 in §12. Plan only: no product code, no commits, no OBS, no Keynote. Base: `main` @ `1589d096`.
+§14). Rev 13: Opus planner, adopting the hi-DPI investigation's fix A (owner decision 12, resolved ~11:45; §12); rev 13 = `54000459`.
+Rev 14: Opus planner, folding GPT-6 Astra r11 (geometry coverage matrix, `m-snap-frac` anchor; plan-only, §3.1 unchanged). Owner decisions 1–7 in §12. Plan only: no product code, no commits, no OBS, no Keynote. Base: `main` @ `1589d096`.
 Players: stock `main.js` `e9b2fad4…` and `17c0c938…` (`live_runtime.SUPPORTED_PLAYERS`). Every offset is a **byte** offset,
 read on both players; they are equal below 2331091 (17c0c938 = e9b2fad4 + two 19-byte `,isEvalSupported:!1` at 17c0c938
 offsets 2331091 and 2331362: +19 between them, +38 after; among the listed anchors only R8, D4 and the hook `_ANCHOR` move,
@@ -575,10 +576,10 @@ expected FAIL. One headless Chrome at a time; 1-min load < 4 and no other headle
 | Frozen frame (index, constancy) | `m-paused` (frame known in advance) | `m-off` (baked frame) |
 | Frozen region fades | `m-on` | `m-hold` (full-strength copy) |
 | Foreground preserved and ordered (tone-invariant) | `m-fg` | `m-fg-omit`, `m-fg-swap`; scorer cases: shifted, double-painted, swapped |
-| Holder pixels (browser-rendered; tone-compensated; qualified geometry, production mask) | `m-snap` (1920×1080, letterboxed, fractional letterbox 1920×1201), `m-snap-dsf15`, `m-snap-dsf2` | `m-snap-frac` (`sn` unrounded); scorer case: 1-px shifted holder under the production mask |
+| Holder pixels (browser-rendered; tone-compensated; qualified geometry, production mask) | every cell of `m-snap[dpr, origin, clip]` (§9.0 item 5) | `m-snap-frac[dpr]` (`sn` unrounded) at each DPR; scorer case: 1-px shifted holder under the production mask |
 | Reference capture (instrument, r8 7) | `perfect` on every `m-snap*` arm; scorer case: valid reference set | `perfect-shift` (canvas overwritten 1 px off) FAIL; scorer cases: stale/reused frame, missing or extra animation, unpaused animation → INCONCLUSIVE |
 | Foreground mask (instrument, r8 6) | production mask on every twin pair (missed 0, excess ≤ 1 %) | scorer cases: whole-rectangle, 3-px shifted, empty mask → INCONCLUSIVE (rejected before scoring) |
-| Geometry guard (decision 12, fix A) | `m-snap`, `m-snap-dsf15`, `m-snap-dsf2` (holder bound at stage scale 1, full-slide base layer) | `m-geo-dpr125`, `m-geo-2560`, `m-geo-scale`, `m-geo-base` (published take, no holder) |
+| Geometry guard (decision 12, fix A) | every `m-snap[dpr, origin, clip]` cell (holder bound at stage scale 1, full-slide base layer) | `m-geo-dpr125`, `m-geo-2560`, `m-geo-scale`, `m-geo-base` (published take, no holder) |
 | Exterior gate (raw / preview pages engage; unproven exterior paint skips) | `m-raw` (P2 2→3, 4→end; the ordinary page), `m-raw-svgclip` (SVG under an HTML-`div` witness) | `m-raw-caption`, `m-raw-nav-open`, `m-raw-modal`, `m-raw-svg` (false SVG witness), `m-raw-script` (rendered `script` text), `m-raw-shadow-modal`, `m-raw-shadow-fixed` |
 | Hide / show capture (instrument, r8 8) | `life-hide` (alpha) and `life-hide-screen` twins: transparent / black frames inside the hidden interval, six timestamped mid frames after show | `life-hide-nohide`, `life-hide-noshow` (driver drops the action) FAIL; scorer cases: duplicate frame, timestamp shift → INCONCLUSIVE |
 | Tone match — blocking only if a non-identity `L` returns (W5); report-only under identity | (`m-tone`) | (`m-tone-raw`) |
@@ -608,12 +609,15 @@ Done: Q0b on rev 9 (§8.1); rev-10 prototypes (§8.2); rev-11 and rev-12 Node ro
    a "CEF preflight" block of the decision record. Cost > 50 ms, an engagement miss or holder edges > τ re-plan before DX-2;
    tone results feed W5 only.
 4. **Dry runs of the new captures and controls:** `m-snap`/`-frac`/`perfect`/`perfect-shift` with their omit twins, `m-geo-*`,
-   `m-raw*` (incl. modal, SVG, clipped SVG, shadow dialog, shadow overlay), `m-snap-dsf15`/`-dsf2`, the hide rows and their dropped-action twins, D2 `on` on the both-opaque class,
+   `m-raw*` (incl. modal, SVG, clipped SVG, shadow dialog, shadow overlay), the `m-snap` matrix and `m-snap-frac[dpr]`, the hide rows and their dropped-action twins, D2 `on` on the both-opaque class,
    `m-tone` with its twin.
-5. **Clip edges at DSF ≠ 1** (unmeasured: the investigation measured unclipped content boxes): P2 2→3 with an in-memory
-   clipping layer cutting the movie at a fractional position, at DSF 1.5 and 2 — holder pixels ≤ τ including the clipped edge;
-   a miss narrows the guard to unclipped regions at DSF ≠ 1 (re-plan). Stage scale ≠ 1 and nested scales stay outside the guard
-   (decision 12); Q0b-bis only proves the skip there (`m-geo-*`).
+5. **Geometry matrix (r11 1):** the parametrized `m-snap` arm (§9.1) over DPR {1, 1.5, 2} × stage origin {integer:
+   1920×1200 at y 60 per DPR's CSS viewport; fractional: 1920×1201 at y 60.5} × clip {none; an in-memory clipping layer cutting
+   the movie at a fractional x; the same at a fractional y} = 18 cells, each with engagement (one bound holder), the
+   edge-inclusive holder comparison, `perfect` and a same-frame omit twin, plus `m-snap-frac` per DPR as the displaced-edge
+   FAIL control. The investigation measured only unclipped cells, and fractional origins only at DPR 1. **Any failing cell
+   narrows admission** to the passing cells (a guard byte change and a re-plan), whether or not it is clipped. Stage scale ≠ 1
+   and nested scales stay outside the guard (decision 12); Q0b-bis only proves the skip there (`m-geo-*`).
 
 ### 9.1 DX-1 headless gate — `scripts/dissolve_probe.py` (promotes the evidence's `dissolve_ab.py` + hook)
 
@@ -625,7 +629,8 @@ Done: Q0b on rev 9 (§8.1); rev-10 prototypes (§8.2); rev-11 and rev-12 Node ro
   `LiveOutputHost` attach or launch; `m-raw*` arms serve the resolver's export as-is (its own `index.html`, navigator present)
   over the same static server and advance with Space over CDP. **Geometry classes (decision 12, fix A):** *qualified* = DPR 1,
   1.5 or 2 at stage scale 1, base-layer box = slide, translation-only scene transforms, any letterbox origin (1920×1080,
-  letterboxed 1920×1200 and 1920×1201, DSF 1.5 and 2 at 1920×1080 CSS) — every check blocking, `m-fg` included at DSF 1.5 and 2;
+  letterboxed 1920×1200 and 1920×1201, each at DPR 1, 1.5 and 2, unclipped or fractionally clipped: the `m-snap` matrix) — every
+  check blocking, `m-fg` included at DSF 1.5 and 2;
   *outside the guard* = everything else (other DPRs, stage scale ≠ 1, nested scales, a mismatched base layer) — the only check
   is that the take skips (`m-geo-*`). A later model for scaled stages enters the same way: each geometry it admits becomes a
   qualified class with every safety check (opaque cover of every backing pixel, exterior proof, clipping, foreground
@@ -722,8 +727,8 @@ Done: Q0b on rev 9 (§8.1); rev-10 prototypes (§8.2); rev-11 and rev-12 Node ro
 | `m-hold` | as `m-on`; one counted splice appends the holder to the container instead of the wrapper | as `m-on` | frozen region → FAIL (`Ô` drifts with 1/(1 − e)) | as `on` | base + splice |
 | `m-fg` / `m-fg-omit` / `m-fg-swap` | `m-paused` + in-memory: two distinguishable opaque texture layers added to the movie's `renderMovie` build tree (inside the seven `preserve-3d` wrappers), overlapping each other over the counter blocks, and P2's square moved there / + one counted splice `Y.forEach(` → `[].forEach(` / + `Y.forEach(` → `Y.reverse().forEach(` | out-only | holder and every `Ô` vs paused pre-D4 `S_live` ≤ τ on counter-block pixels → PASS / FAIL / FAIL; missing overlap, reference or engagement → INCONCLUSIVE (model N/A: live-only edit) | as `on` + one holder | pinned `on` / + splice |
 | `m-tone` (+ its `m-fg-omit` twin) | tone movie on P2 slide 2, paused at frame 30; reference capture; twin = + splice `Y.forEach(` → `[].forEach(` (mask verification only) | out-only | tone match → REPORTED (identity `L`); `m-tone-raw` not run while `L` is identity | as `on` + one holder | pinned `on` / + splice |
-| `m-snap` / `m-snap-dsf15` / `m-snap-dsf2` (+ same-frame `m-fg-omit` twin per geometry) | `m-paused` at 1920×1080, letterboxed 1920×1200 and fractional-letterbox 1920×1201 viewports / at 1920×1080 CSS with DSF 1.5 / with DSF 2; reference-capture profile; twin = + splice `Y.forEach(` → `[].forEach(` | out-only | holder pixels → PASS; `perfect` → instrument PASS; mask verification PASS | as `on` + one holder | pinned `on` / + splice |
-| `m-snap-frac` (+ twin) | as `m-snap` 1920×1080; one counted splice `sn=function(z,e,k){return Math.round((z-e)*k)}` → `sn=function(z,e,k){return(z-e)*k}` | out-only | holder pixels → FAIL | as `m-snap` | base + splice |
+| `m-snap[dpr, origin, clip]` (one parametrized arm; + same-frame `m-fg-omit` twin per cell) | `m-paused` over the §9.0 item-5 matrix: DPR {1, 1.5, 2} × origin {integer (1920×1200 CSS, y 60), fractional (1920×1201 CSS, y 60.5)} × clip {none, fractional x, fractional y (in-memory clipping layer)}, 18 cells; plus the 1920×1080 base cell; reference-capture profile; twin = + splice `Y.forEach(` → `[].forEach(` | out-only | holder pixels → PASS; `perfect` → instrument PASS; mask verification PASS | as `on` + one holder | pinned `on` / + splice |
+| `m-snap-frac[dpr]` (+ twin) | as `m-snap` 1920×1080 at DPR 1, 1.5 and 2; one counted splice `sn=function(z,e,k){return Math.round((z-e)*k*p)/p}` → `sn=function(z,e,k){return(z-e)*k}`, exactly once on both players and on their omit twins (checked: 1 → 0, replacement 1; rev 12's anchor occurs 0 times in rev-13 bytes) | out-only | holder pixels → FAIL (displaced edges) | as `m-snap` | base + splice |
 | `perfect-shift` | as `m-snap` 1920×1080; the driver's `perfect` overwrite drawn 1 device px right | out-only | reference capture → FAIL (instrument negative) | as `m-snap` | pinned `on` |
 | `m-geo-dpr125` / `m-geo-2560` / `m-geo-scale` / `m-geo-base` | as `m-paused` at DSF 1.25 / 2560×1440 / 1920×1080 with an in-memory `affineTransform` scale 1.5 on the movie's layer / 1920×1080 with the live slide's base layer resized in memory to 960×1080 | out-only | geometry guard → no holder (today's look) | as `on` | pinned `on` |
 | `m-raw-script` / `m-raw-shadow-modal` / `m-raw-shadow-fixed` | as `m-raw` + in-page before the advance: a `script type="application/json"` styled `display: block` at x −60 whose non-wrapping text crosses the movie / an off-stage transparent `div` with an open shadow root holding a `dialog` opened with `showModal()` and a coloured `::backdrop` / the same host with a `position: fixed` coloured overlay in its shadow tree | out-only | exterior gate → FAIL (no holder) | as `on` | pinned `on` |
@@ -835,7 +840,7 @@ session) `--arm mmo`, `--arm g2`, `--arm mmo-cef`. Root-cause any change.
 |---|---|---|
 | W0 | coordinator | `git cherry-pick 715cb3f1` (done, `7fa7c8dd`) |
 | W1 | `src/obed_edom/live_runtime.py`, `tests/test_live_runtime.py` | rev 13's `__obedFreezeTake` byte-exact to §3.1 (fix A over rev 12: `sn` on the 1/DPR grid, DPR ∈ {1, 1.5, 2}, integer-origin condition dropped; the four row flips and five rows of §8.5) (`_FREEZE_TONE_LUT` removed; `Q` kept); docstrings (identity tone, device-pixel holder behind the geometry guard, exterior proof, top layer, shadow roots); re-pins; tests 1–3 incl. the shadow-DOM invariant rows |
-| W2 | `scripts/dissolve_probe.py`, `tests/test_dissolve_probe.py` | reference-capture profile (inventory, paused-state and opacity read-backs, stable pairs, `perfect`/`perfect-shift`), holder-pixel scorer with `L_path`, foreground inventory + production mask + missed/excess verification with a twin per reference geometry, tone coverage, device-scale holder paste and strip decode, `m-snap*` (incl. `-dsf15`, `-dsf2`, the 1920×1201 letterbox), `m-geo-*` (`-dpr125` replaces `-dsf2`) and `m-raw*` arms (raw-page driver and injections), hide-row screencast with timestamps and the dropped-hide/-show twins, both-opaque no-dip class; test 4 |
+| W2 | `scripts/dissolve_probe.py`, `tests/test_dissolve_probe.py` | reference-capture profile (inventory, paused-state and opacity read-backs, stable pairs, `perfect`/`perfect-shift`), holder-pixel scorer with `L_path`, foreground inventory + production mask + missed/excess verification with a twin per reference geometry, tone coverage, device-scale holder paste and strip decode, `m-snap[dpr, origin, clip]` (one parametrized arm over the §9.0 item-5 matrix) and `m-snap-frac[dpr]` with rev 13's anchor, `m-geo-*` (`-dpr125` replaces `-dsf2`) and `m-raw*` arms (raw-page driver and injections), hide-row screencast with timestamps and the dropped-hide/-show twins, both-opaque no-dip class; test 4 |
 | W3 | `scripts/managed_obs_qualify.py`, `tests/test_managed_obs_qualify.py` | DSK 7→8 cost and `m-snap` sessions; tone sessions report-only; test 5 |
 | W4 | `README.md`, `.agents/skills/obed-edom/SKILL.md`, `.agents/handovers/keynote-live-dissolve-crossfade-followups.md` | README/SKILL: the identity-tone known limit; DPR 1, 1.5 and 2 freeze; scaled stages (an output not 1920 CSS px wide, e.g. 2560×1440 or 1280×720 at DSF 1) keep today's movie jump; follow-ups handover: W5, the Q6 PR, scaled stages (option B's replica result and why it is not shippable; the local-units `contain` solve a scaled-chain model needs), the optional G2 use of a qualified `L` |
 | W5 | scratch + evidence only (no tracked file) | **Host-side compositing-path calibration feasibility probe** (decision 10; non-blocking for this PR, needed before Q5 closes): can the host, at startup, identify the compositing path and its map (qualified path + tuple → `L`, unknown → identity) from compositor-painted pixels? Headless `LiveOutputHost` (GPU, `--disable-gpu`) and managed OBS (acceleration on/off), two fresh launches each: the tone movie paused in an off-screen-safe calibration slot, CDP screenshot / `GetSourceScreenshot` vs `drawImage`; repeatability, distinguishability of GPU vs software for the same tuple, invalidation on GPU-state change (GPU process loss, acceleration toggle); a record with a go/no-go and, on go, the player-boundary change it would need (owner decision) |
@@ -989,3 +994,10 @@ Raw rounds: `.agents/reviews/dissolve-crossfade/plan-astra-r{1,…,7}.md`. r1–
 | Still to measure | DSK 7→8 cost at DSF 2 (est. 25–30 ms), the CEF source DSF, clip edges at DSF ≠ 1 | §9.0 |
 | W1 rows | 4 flips (`dpr2`, `dpr15_fillOpaque`, `stageFractionalOrigin`, `stageFractionalOriginX` admit) + 5 rows (`dpr125`, `dpr3` skip; `dpr15_p2Box` admits; last-pixel transparency at DPR 1.5 and 2 skips); 265 rows match on both players | §8.5, §10 |
 | Risks | latent anisotropic `contain` solve (excluded by the guard); scaled-stage outputs keep the jump | §13 |
+
+### r11 — GPT-6 Astra (Codex), on rev 13 `54000459` — bytes, digests and 265 rows confirmed; CHANGES REQUIRED (2, acceptance) — folded in rev 14
+
+| # | Severity / class | Disposition | Where |
+|---|---|---|---|
+| 1 | major / acceptance coverage | Folded: one parametrized `m-snap[dpr, origin, clip]` arm over DPR {1, 1.5, 2} × integer / fractional letterbox origin × unclipped / fractional x clip / fractional y clip (18 cells), each with engagement, edge-inclusive holder pixels, `perfect` and a same-frame omit twin; `m-snap-frac[dpr]` the displaced-edge FAIL control; any failing cell narrows admission (clipped or not) | §9, §9.0 item 5, §9.1, §11 |
+| 2 | major / stale control anchor | Folded: `m-snap-frac` splices `sn=function(z,e,k){return Math.round((z-e)*k*p)/p}` → `sn=function(z,e,k){return(z-e)*k}`; checked exactly once on both players and on their omit twins (rev 12's anchor occurs 0 times) | §9.1 |
