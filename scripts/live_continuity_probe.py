@@ -8515,7 +8515,7 @@ def score_carry_cover(
         "midFrames": len(mid), "minFrames": need, "cadenceMs": round(cadence, 2),
     }
     wrap = 1 << CARRY_COVER_SYNC_BITS
-    per_frame = []
+    per_frame, scored_at = [], []
     for at, pts, image, tick, index in mid:
         entry: dict[str, Any] = {"pts": round(pts, 2), "tick": tick}
         if index is None:
@@ -8551,6 +8551,7 @@ def score_carry_cover(
             scored.append({"read": name, "overlay": {k: round(v, 2) for k, v in overlay.items()}, **measured})
         widths = [max(s["strips"].values()) for s in scored]
         fractions = [s["exposedFraction"] for s in scored]
+        scored_at.append(at)
         per_frame.append({
             **entry, "domTs": round(at, 2), "dt": round(at - t0, 2),
             "exposedPx": max(s["exposedPx"] for s in scored), "exposedFraction": max(fractions),
@@ -8563,7 +8564,7 @@ def score_carry_cover(
     aligned = [f for f in per_frame if "unaligned" not in f and "unreadable" not in f]
     unreadable = sum("unreadable" in f for f in per_frame)
     discarded = sum("unaligned" in f for f in per_frame)
-    edges = [lo, *sorted({f["domTs"] for f in aligned}), hi]
+    edges = [lo, *sorted(set(scored_at)), hi]
     tick_ts = sorted(r["ts"] for r in rows)
     max_gap, local, allowed_gap = max(
         ((b - a, ref, (CARRY_COVER_MAX_GAP_FRAMES + 0.5) * ref)
@@ -8600,17 +8601,14 @@ def score_carry_cover(
 
 def local_cadence(tick_ts: list[float], start: float, end: float, fallback: float) -> float:
     """The rAF period a carry-cover gap `start`..`end` is judged at (Chrome drops to 30 Hz while two or more visible
-    videos play). With sampler ticks inside the gap, their own mean period from the enclosing ticks: the gap then
-    passes on its rAF tick count alone, which no single slow delta can stretch (a max or median can be). With none
-    (the page ran no rAF), the faster of the `CARRY_COVER_CADENCE_TICKS` tick deltas' medians either side, only when
-    both sides are complete and steady (within `CARRY_COVER_CADENCE_SPREAD`); else `fallback`."""
-    before = [t for t in tick_ts if t <= start][-1:]
-    after = [t for t in tick_ts if t >= end][:1]
-    interior = [t for t in tick_ts if start < t < end]
-    span = before + interior + after
-    if interior and len(span) > 1:
-        return (span[-1] - span[0]) / (len(span) - 1)
+    videos play). With sampler ticks inside the gap: its length over the rAF intervals it spans, each boundary interval
+    prorated by its overlap, so the gap passes on its elapsed tick count alone, which no long or partly covered
+    interval can stretch. With none (the page ran no rAF), the faster of the `CARRY_COVER_CADENCE_TICKS` tick deltas'
+    medians either side, only when both sides are complete and steady (within `CARRY_COVER_CADENCE_SPREAD`); else
+    `fallback`."""
     deltas = list(zip(tick_ts, tick_ts[1:]))
+    if any(start < t < end for t in tick_ts) and tick_ts[0] <= start and end <= tick_ts[-1]:
+        return (end - start) / sum((min(b, end) - max(a, start)) / (b - a) for a, b in deltas if a < end and b > start)
     n = CARRY_COVER_CADENCE_TICKS
     sides = ([b - a for a, b in deltas if b <= start][-n:], [b - a for a, b in deltas if a >= end][:n])
     if all(len(side) == n and min(side) > 0 and max(side) <= CARRY_COVER_CADENCE_SPREAD * min(side) for side in sides):

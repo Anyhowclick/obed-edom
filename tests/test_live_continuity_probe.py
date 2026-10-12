@@ -9577,6 +9577,11 @@ class TestCarryCoverCoverage:
         return CC_FIRST_TICK_MS + (k + min(max(k - 57, 0), hold)) * CC_FRAME_MS
 
     @staticmethod
+    def _stalled_at_48(k: int) -> float:
+        """60 Hz with one 100 ms rAF stall before tick 48 (~1303 ms)."""
+        return CC_FIRST_TICK_MS + (k + (5 if k >= 48 else 0)) * CC_FRAME_MS
+
+    @staticmethod
     def _strip_at_40(p: float) -> float:
         return _ease_in_out(p) + (0.25 if 0.400 < p < 0.440 else 0.0)
 
@@ -9588,6 +9593,9 @@ class TestCarryCoverCoverage:
         # Astra r20 P1: a 60 Hz hole right before the throttle must not borrow the 30 Hz cadence that follows it.
         pytest.param(_throttled, lambda ts: 1400.0 < ts < 1440.0, _strip_at_40, "inconclusive",
                      id="known-bad-a-60hz-hole-before-the-throttle-hides-the-strip"),
+        # Astra r21 P1: an earlier stall must not stretch the hole through a rounded or window-edge endpoint.
+        pytest.param(_stalled_at_48, lambda ts: 1400.0 < ts < 1440.0, _strip_at_40, "inconclusive",
+                     id="known-bad-a-60hz-hole-after-a-stall-hides-the-strip"),
     ])
     def test_a_gap_is_judged_against_the_local_cadence(self, tick_at: Any, dropped: Any, curve: Any, verdict: str) -> None:
         result = _cc_score(*_cc_scene(tick_at=tick_at, overlay_curve=curve, deliver=lambda k, ts: not dropped(ts)))
