@@ -26,6 +26,7 @@ PAINTED, PARTIAL, UNPAINTED, UNREADABLE, NOT_PAINTER = "painted", "partial", "un
 SEQ_LIST_CAP = 600
 RUNS_CAP = 10
 LOCAL_CADENCE_DELTAS = 8
+LOCAL_CADENCE_SPREAD = 1.25
 
 PAINT_READ_FN_JS = r"""
   function labelOf(n){
@@ -607,16 +608,26 @@ def _period(rows: Sequence[dict[str, Any]]) -> float | None:
     return statistics.median(deltas) if deltas else None
 
 
+def local_period(before: Sequence[float], after: Sequence[float], fallback: float) -> float:
+    """The rAF period one delta is judged at when nothing inside it is observed: the faster of the
+    `LOCAL_CADENCE_DELTAS`-delta medians either side when both sides are complete and steady (within
+    `LOCAL_CADENCE_SPREAD`), else the fastest of `fallback` and any complete side's median."""
+    sides = [s for s in (before, after) if len(s) == LOCAL_CADENCE_DELTAS and min(s) > 0]
+    medians = [float(statistics.median(s)) for s in sides]
+    if len(sides) == 2 and all(max(s) <= LOCAL_CADENCE_SPREAD * min(s) for s in sides):
+        return min(medians)
+    return min([fallback, *medians])
+
+
 def _local_periods(deltas: list[float], fallback: float) -> list[float]:
     k = LOCAL_CADENCE_DELTAS
-    sides = ((deltas[max(0, i - k):i], deltas[i + 1:i + 1 + k]) for i in range(len(deltas)))
-    return [max((statistics.median(s) for s in pair if len(s) == k), default=fallback) for pair in sides]
+    return [local_period(deltas[max(0, i - k):i], deltas[i + 1:i + 1 + k], fallback) for i in range(len(deltas))]
 
 
 def frame_coverage(rows: list[dict[str, Any]], *, max_gap_frames: int, min_fps: float) -> dict[str, Any]:
     """Carry-cover's rule on rAF timestamps: any delta over `(max_gap_frames + 0.5) × local period`, a cadence
-    under `min_fps`, or a missing sampler row (a seq gap) fails coverage. The local period is the slower median of
-    the 8 deltas either side (Chrome drops to 30 Hz with two playing videos), else the window's median."""
+    under `min_fps`, or a missing sampler row (a seq gap) fails coverage. The local period is `local_period` with the
+    window's median as fallback (Chrome drops to 30 Hz with two playing videos; a gap where it switches is unproven)."""
     reasons: list[str] = []
     if any(not _num(r.get("ts")) or not isinstance(r.get("seq"), int) for r in rows):
         return {"ok": False, "reasons": ["rows without seq/ts"], "frames": len(rows)}

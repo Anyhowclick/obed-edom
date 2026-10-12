@@ -8034,8 +8034,6 @@ CARRY_COVER_STRIP_MIN_RUN_PX = 8
 CARRY_COVER_MID_MOVE = (0.1, 0.9)
 CARRY_COVER_MIN_FPS = 20.0
 CARRY_COVER_MAX_GAP_FRAMES = 3
-CARRY_COVER_CADENCE_TICKS = 8
-CARRY_COVER_CADENCE_SPREAD = 1.25
 CARRY_COVER_MAX_DISCARDED_SHARE = 0.1
 CARRY_COVER_SYNC_BITS = 12
 CARRY_COVER_SYNC_CELL_PX = 4
@@ -8603,17 +8601,15 @@ def local_cadence(tick_ts: list[float], start: float, end: float, fallback: floa
     """The rAF period a carry-cover gap `start`..`end` is judged at (Chrome drops to 30 Hz while two or more visible
     videos play). With sampler ticks inside the gap: its length over the rAF intervals it spans, each boundary interval
     prorated by its overlap, so the gap passes on its elapsed tick count alone, which no long or partly covered
-    interval can stretch. With none (the page ran no rAF), the faster of the `CARRY_COVER_CADENCE_TICKS` tick deltas'
-    medians either side, only when both sides are complete and steady (within `CARRY_COVER_CADENCE_SPREAD`); else
-    `fallback`."""
+    interval can stretch. With none (the page ran no rAF), the paint instrument's `local_period` of the tick deltas
+    either side."""
     deltas = list(zip(tick_ts, tick_ts[1:]))
     if any(start < t < end for t in tick_ts) and tick_ts[0] <= start and end <= tick_ts[-1]:
         return (end - start) / sum((min(b, end) - max(a, start)) / (b - a) for a, b in deltas if a < end and b > start)
-    n = CARRY_COVER_CADENCE_TICKS
-    sides = ([b - a for a, b in deltas if b <= start][-n:], [b - a for a, b in deltas if a >= end][:n])
-    if all(len(side) == n and min(side) > 0 and max(side) <= CARRY_COVER_CADENCE_SPREAD * min(side) for side in sides):
-        return min(float(np.median(side)) for side in sides)
-    return fallback
+    n = paint_instrument.LOCAL_CADENCE_DELTAS
+    return paint_instrument.local_period(
+        [b - a for a, b in deltas if b <= start][-n:], [b - a for a, b in deltas if a >= end][:n], fallback,
+    )
 
 
 def carry_cover_capture_problems(capture: dict[str, Any], bridge: dict[str, Any]) -> list[str]:
