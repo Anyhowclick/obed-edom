@@ -1,17 +1,18 @@
 # Dissolve and cut over fill-less slides: a true cross-fade, a clean cut, and movies that freeze and fade
 
-**rev 11 — r8 folded, for owner review**, 2026-10-12. Rev 1: Opus planner (`8e572864`). Critique r1–r7: GPT-6 Astra
+**rev 12 — r9 folded, for owner review**, 2026-10-12. Rev 1: Opus planner (`8e572864`). Critique r1–r7: GPT-6 Astra
 high via Codex (not Opus; owner 2026-10-11), 12 + 7 + 11 + 7 + 6 + 4 + 3 findings, all folded (§14). Revs 2–9: Opus planner
 (`cd289a05`, `f3bd8b55`, `4ffcd8ad`, `e5c644bb`, `218308c3`, `cacfe9fb`, `d299b549`, rev 9 = owner GO 2026-10-11 22:10, W1–W4
 implemented on this branch up to `fbe105e0`). Rev 10: Opus planner, after Q0b's five re-plan triggers, the Astra xhigh advisory
 (`.agents/reviews/dissolve-crossfade/replan-astra-xhigh.md`) and owner decisions 8–11 (2026-10-12, §12); rev 10 = `891e4f40`. Rev 11:
 Opus planner, folding GPT-6 Astra r8 on rev 10 (9 findings, CHANGES REQUIRED; §14) and decision 12 (made, then reversed the
-same day; §12). Owner decisions 1–7 in §12. Plan only: no product code, no commits, no OBS, no Keynote. Base: `main` @ `1589d096`.
+same day; §12); rev 11 = `b4ff2576`. Rev 12: Opus planner, folding GPT-6 Astra r9 on rev 11 (3 false admissions + 1 wording;
+§14). Owner decisions 1–7 in §12. Plan only: no product code, no commits, no OBS, no Keynote. Base: `main` @ `1589d096`.
 Players: stock `main.js` `e9b2fad4…` and `17c0c938…` (`live_runtime.SUPPORTED_PLAYERS`). Every offset is a **byte** offset,
 read on both players; they are equal below 2331091 (17c0c938 = e9b2fad4 + two 19-byte `,isEvalSupported:!1` at 17c0c938
 offsets 2331091 and 2331362: +19 between them, +38 after; among the listed anchors only R8, D4 and the hook `_ANCHOR` move,
 each by 38). Evidence: main checkout `output/evidence/s2-dev/dissolve-alpha-2026-10-11/` (git-ignored); scratch `x` =
-its `plan-2026-10-11/planner/x`; Q0b = its `q0b-2026-10-11/`; rev-10 prototypes = its `plan-rev10-2026-10-12/`, rev-11 Node evidence = its `plan-rev11-2026-10-12/` (§8). Parents: `keynote_live_mm_opacity.plan.md` (R1–R5, switch, pins),
+its `plan-2026-10-11/planner/x`; Q0b = its `q0b-2026-10-11/`; rev-10 prototypes = its `plan-rev10-2026-10-12/`, rev-11 / rev-12 Node evidence = its `plan-rev11-2026-10-12/`, `plan-rev12-2026-10-12/` (§8). Parents: `keynote_live_mm_opacity.plan.md` (R1–R5, switch, pins),
 `keynote_live_handback_geometry.plan.md` (R6–R8), `keynote_live_paint_oracle.plan.md` (oracle stays stock).
 
 ## 0. Summary
@@ -31,7 +32,7 @@ its `plan-2026-10-11/planner/x`; Q0b = its `q0b-2026-10-11/`; rev-10 prototypes 
   paint family and every other element to be either that or **provably clipped away from the visible stage** (**paint gate**,
   decision 8), snapshots each `<video>` whose chain is inside a **positive allowlist of the computed styles the player
   generates** (§3.2) onto the **device pixels of the box Chromium paints it at** (decision 9) — only on the geometry where
-  that is measured (DSF 1, stage scale 1, integer stage origin, translation-only transforms; decision 12 open) — with every backing pixel proven
+  that is measured (DSF 1, stage scale 1, base-layer box = slide, integer stage origin, translation-only transforms; decision 12 open) — with every backing pixel proven
   opaque, untoned (**identity `L`**, decision 10: the GPU mid-tone step is a known limit), redraws overlying canvases (Q7);
   D3 puts it in the outgoing fading wrapper, or discards it. The `<video>` is never touched; anything outside keeps today's
   look.
@@ -126,25 +127,27 @@ shows both slides (§8). On-disk cuts end on the empty background; a cut between
 
 | # | Where (byte, length) | Before | After |
 |---|---|---|---|
-| D1 (R9) | end of `processEffects` / head of `renderEffects` @2311794 (26 B) | `return B}renderEffects(A){` | `return B}` + `__obedShape`, `__obedDissolveLayer`, `__obedFreezeTake`, `__obedFreeze` + `renderEffects(A){` (10 249 B; rev 10: 10 237; rev 9: 9 225) |
+| D1 (R9) | end of `processEffects` / head of `renderEffects` @2311794 (26 B) | `return B}renderEffects(A){` | `return B}` + `__obedShape`, `__obedDissolveLayer`, `__obedFreezeTake`, `__obedFreeze` + `renderEffects(A){` (10 195 B; rev 11: 10 249; rev 10: 10 237; rev 9: 9 225) |
 | D2 (R10) | base-layer `VB` @2312557 (65 B) | `const A=new VB(C.baseLayer,{name:C.name,type:C.type,objectID:e});` | `const A=new VB(this.__obedDissolveLayer(C),{name:C.name,type:C.type,objectID:e});` |
 | D3 (R11) | after the CSS draw @2313053 (42 B) | `this.cssRenderer.draw(a),a.removeChild(w)}` | `this.cssRenderer.draw(a),this.__obedFreeze(C,A),a.removeChild(w)}` |
 | D4 (R12) | `jumpToScene_partFour` @2353722 / @2353760 (50 B) | `jumpToScene_partFour(A,B){if(this.displayScene(A),` | `jumpToScene_partFour(A,B){if(B&&PB.prototype.__obedFreezeTake(this,A),this.displayScene(A),` |
 
-The methods (rev 11: `plan-rev11-2026-10-12/scripts/r10.py` `methods11()`, built by counted substitution from W1's rev-9
+The methods (rev 12: `plan-rev12-2026-10-12/scripts/r10.py` `methods12()`, built by counted substitution from W1's rev-9
 constants; `node --check` passes on both patched players, `on` and `rendering`; `PB` and the controller share the module
 scope of `TB` and `UC`). Only `__obedFreezeTake` changes against rev 9: the exterior proof `xo` with HTML-`div` witnesses,
-the visible stage `V`, the top-layer refusal and descendant-paint effects checked before the visibility shortcut (decision 8;
-r8 1–2); the snapped device-pixel holder (decision 9) behind the **geometry guard** — `devicePixelRatio` 1, the stage origin on
-integer px, `#stage` and every scene transform a pure translation (r8 4–5; the slot for the hi-DPI investigation, §3.2); identity tone with the alpha scan
-over **every** backing pixel (decision 10; r8 3; `L`, its table and `_FREEZE_TONE_LUT` go); the `fill` aspect test goes. `Q`
-stays the one qualified tuple (`_FREEZE_QUALIFIED_TUPLES`). Candidate digests (W1 re-pins; `off` unchanged): `on` e9b2fad4
-`4fea959e…`, 17c0c938 `b240a9c2…`; `rendering` e9b2fad4 `b94ba32d…`, 17c0c938 `efaac3e3…`.
+the visible stage `V`, the top-layer refusal, open author shadow roots refused, descendant-paint effects checked before the
+visibility shortcut and no tag exempt by name (decision 8; r8 1–2, r9 1–2); the snapped device-pixel holder (decision 9)
+behind the **geometry guard** — `devicePixelRatio` 1, `kx` = `ky` = 1 (the live base-layer box is the slide), the stage
+origin on integer px, `#stage` and every scene transform a pure translation (r8 4–5, r9 3; the slot for the hi-DPI
+investigation, §3.2); identity tone with the alpha scan over **every** backing pixel (decision 10; r8 3; `L`, its table and
+`_FREEZE_TONE_LUT` go); the `fill` aspect test goes. `Q` stays the one qualified tuple (`_FREEZE_QUALIFIED_TUPLES`).
+Candidate digests (W1 re-pins; `off` unchanged): `on` e9b2fad4 `bfeb9377…`, 17c0c938 `6c941ac1…`; `rendering` e9b2fad4
+`a211b1c3…`, 17c0c938 `50231d3c…`.
 
 ```
 __obedShape(C){try{var b=C.baseLayer,K=b.layers,k=1===K.length?K[0]:null,P=k&&k.layers,i=P&&2===P.length?P[0]:null,o=i&&P[1],x=o&&o.animations&&1===o.animations.length?o.animations[0]:null,u="none"===C.name,f=function(l,c){var s=l.initialState,a=s.affineTransform,t=s.sublayerTransform;return!l.isVideoLayer&&!l.isWebVideoPosterLayer&&null==l.objectID&&!s.transform&&0===s.rotation&&1===s.scale&&1===s.opacity&&!s.hidden&&!!a&&6===a.length&&a.every(function(v,j){return v===(j%3?0:1)})&&(c||!!t&&16===t.length&&t.every(function(v,j){return v===(j%5?0:1)}))};return"transition"!==C.type||!u&&"apple:dissolve"!==C.name||!x||b.texture||k.texture||(b.animations||[]).length||(k.animations||[]).length||!f(k,1)||!f(i)||!f(o)||!i.texture||!o.texture||(i.layers||[]).length||(o.layers||[]).length||(i.animations||[]).length||x.keyTimes||x.path||x.animations||(u?"hidden"!==x.property||!1!==x.from.scalar||!0!==x.to.scalar||.001!==x.duration||0!==x.beginTime||"both"!==x.fillMode||x.timingFunction||x.timeOffset||x.repeatCount||x.autoreverses:"opacity"!==x.property||1!==x.from.scalar||0!==x.to.scalar)?null:[b,k,i,o,x,u]}catch(E){return null}}
 __obedDissolveLayer(C){var b=C.baseLayer,n=0,z=this.__obedShape(C);if(!z)return b;try{var k=z[1],i=z[2],o=z[3],x=z[4],u=z[5];if(!u){var S=UC.animationManager.styleSheet,L=function(j){return"#layer"+(TB+j)};S.insertRule(L(1)+"{isolation:isolate}",0),n=1,S.insertRule(L(2)+","+L(3)+"{mix-blend-mode:plus-lighter}",0),n=2;if("isolate"!==S.cssRules[1].style.isolation||"plus-lighter"!==S.cssRules[0].style.mixBlendMode)throw 0}return C.obedDissolve=u?"cut":"dissolve",Object.assign({},b,{layers:[Object.assign({},k,{layers:[Object.assign({},i,{initialState:Object.assign({},i.initialState,u?{hidden:!0}:{opacity:0}),animations:[Object.assign({},x,{from:{scalar:u?!0:0},to:{scalar:u?!1:1}})]}),o]})]})}catch(E){return n&&(TB+=4),b}}
-__obedFreezeTake(U,A){U.__obedFrozen=null;var t0=performance.now();try{var e=U.script.events[A],y=e&&e.effects&&e.effects[0],G=document.getElementById("stage");if(!y||!G||!this.__obedShape(y))return;var R=document.getElementById("layer"+U.playbackController.kpfEvent.baseLayer.layerId).getBoundingClientRect(),kx=U.script.slideWidth/R.width,ky=U.script.slideHeight/R.height,H=[],N=document.getElementsByTagName("*"),Q=["bt709/bt709/bt709/false"],cs=function(n){return getComputedStyle(n)},dv=function(s,d){return(s||d)===d},bd=function(z){return"none"!==z.borderTopStyle||"none"!==z.borderRightStyle||"none"!==z.borderBottomStyle||"none"!==z.borderLeftStyle},rd=function(z){return"0px"!==z.borderTopLeftRadius||"0px"!==z.borderTopRightRadius||"0px"!==z.borderBottomLeftRadius||"0px"!==z.borderBottomRightRadius},deco=function(z){return!/rgba\(0, 0, 0, 0\)|transparent/.test(z.backgroundColor)||"none"!==z.backgroundImage||"none"!==z.boxShadow||bd(z)||"none"!==z.outlineStyle||!dv(z.backdropFilter,"none")},own=function(n,z){return/^(CANVAS|VIDEO|IMG|SVG|IFRAME|OBJECT|EMBED|INPUT|TEXTAREA|SELECT|BUTTON)$/i.test(n.tagName)||deco(z)||Array.prototype.some.call(n.childNodes,function(c){return 3===c.nodeType&&/\S/.test(c.data)})},bm=function(z){return!deco(z)&&!rd(z)&&"0px"===z.paddingTop&&"0px"===z.paddingRight&&"0px"===z.paddingBottom&&"0px"===z.paddingLeft&&dv(z.objectViewBox,"none")&&dv(z.imageRendering,"auto")},al=function(a){var w=cs(a),s=a===G,u=!s&&a.contains(G),m=w.transform,M;if("block"!==w.display||!dv(w.contain,"none")||!dv(w.contentVisibility,"visible")||"none"!==w.filter||!dv(w.backdropFilter,"none")||"normal"!==w.mixBlendMode||!dv(w.isolation,"auto")||"none"!==w.clipPath||!dv(w.maskImage,"none")||!dv(w.clip,"auto")||"auto"!==w.zIndex||!dv(w.translate,"none")||!dv(w.rotate,"none")||!dv(w.scale,"none")||!dv(w.offsetPath,"none")||!dv(w.willChange,"auto")||!dv(w.zoom,"1")||"none"!==w.outlineStyle||w.overflowX!==w.overflowY||"visible"!==w.overflowX&&!("clip"===w.overflowX&&/^(VIDEO|CANVAS)$/.test(a.tagName))&&("hidden"!==w.overflowX||rd(w)||bd(w)))return!1;if(u)return("static"===w.position||"absolute"===w.position)&&"none"===m;if("absolute"!==w.position||!dv(w.perspective,"none")||!dv(w.backfaceVisibility,"visible")||(s?"preserve-3d"!==w.transformStyle&&"flat"!==w.transformStyle:"flat"!==w.transformStyle&&("preserve-3d"!==w.transformStyle||"none"!==m)||"visible"!==w.visibility))return!1;if("none"===m)return!0;M=new DOMMatrix(m);return M.is2D&&!M.b&&!M.c&&1===M.a&&1===M.d},xo=function(n){for(var a=n,w,r;!a.contains(G);a=a.parentElement){w=cs(a);if("fixed"===getComputedStyle(a,"::before").position||"fixed"===getComputedStyle(a,"::after").position)return!1;if("div"===a.localName&&"http://www.w3.org/1999/xhtml"===a.namespaceURI&&"hidden"===w.overflowX&&"hidden"===w.overflowY&&"static"!==w.position&&/^(block|flow-root|flex|grid)$/.test(w.display)&&"none"===w.boxShadow&&"none"===w.filter&&dv(w.backdropFilter,"none")&&"none"===w.outlineStyle&&dv(w.borderImageSource,"none")&&dv(w.webkitBoxReflect,"none")&&(r=a.getBoundingClientRect(),r.right<=V[0]||r.left>=V[2]||r.bottom<=V[1]||r.top>=V[3]))return!0;if("fixed"===w.position)return!1}return!1},vp=function(a){var h=document.documentElement;return a===h||a===document.body&&"visible"===cs(h).overflowX},pc=function(n){var t=n.tagName,w,b,f;if(/^(HEAD|SCRIPT|STYLE|LINK|META|TITLE|BASE|TEMPLATE|NOSCRIPT)$/i.test(t))return!0;w=cs(n);if("contents"===w.display)return!1;if(!n.checkVisibility({opacityProperty:!0}))return!0;b=getComputedStyle(n,"::before").content;f=getComputedStyle(n,"::after").content;if(!/^(normal|none)$/.test(b||"none")||!/^(normal|none)$/.test(f||"none")||!/^(normal|none)$/.test(w.content||"normal")||"list-item"===w.display||Array.prototype.some.call(n.childNodes,function(c){return 3===c.nodeType&&/\S/.test(c.data)})||"none"!==w.filter||!dv(w.backdropFilter,"none")||!dv(w.webkitBoxReflect,"none"))return!1;if("visible"!==w.visibility)return!0;if(!/^(HTML|BODY|DIV|CANVAS|VIDEO)$/.test(t)||/^(CANVAS|VIDEO)$/.test(t)&&("50% 50%"!==w.objectPosition||!dv(w.objectViewBox,"none")||!/^(fill|contain)$/.test(w.objectFit)))return!1;return"none"===w.boxShadow&&"none"===w.outlineStyle&&dv(w.borderImageSource,"none")&&dv(w.columnRuleStyle,"none")};for(var V=[0,0,innerWidth,innerHeight],a=G,w,b;a;a=a.parentElement)w=cs(a),"visible"!==w.overflowX&&(vp(a)||"static"!==w.position)&&(b=vp(a)?{left:0,top:0,right:innerWidth,bottom:innerHeight}:a.getBoundingClientRect(),V=[Math.max(V[0],b.left),Math.max(V[1],b.top),Math.min(V[2],b.right),Math.min(V[3],b.bottom)]);if(!(R.width>0&&R.height>0)||1!==devicePixelRatio||R.left%1||R.top%1||document.querySelector(":modal,:popover-open,:fullscreen")||!Array.prototype.every.call(N,function(n){return pc(n)||!G.contains(n)&&!n.contains(G)&&xo(n)}))return;var ad=[];Array.prototype.slice.call(document.querySelectorAll("video")).reverse().forEach(function(v){try{if(!G.contains(v)||v.readyState<2||!v.videoWidth||!v.videoHeight||!v.checkVisibility({opacityProperty:!0,visibilityProperty:!0}))return;var z=cs(v),fit=z.objectFit,K;if(!bm(z)||"50% 50%"!==z.objectPosition||"fill"!==fit&&"contain"!==fit)return;try{var vf=new VideoFrame(v),cc=vf.colorSpace;K=[cc.primaries,cc.transfer,cc.matrix,cc.fullRange].join("/");vf.close()}catch(E){return}if(Q.indexOf(K)<0)return;var Y=[],r=v.getBoundingClientRect(),c=[r.left,r.top,r.right,r.bottom],a,q,w,b;for(a=v,q=1;a;a=a.parentElement){if(!al(a))return;w=cs(a);q*=+w.opacity;if(a!==v&&"visible"!==w.overflowX&&(vp(a)||"static"!==w.position)){b=vp(a)?{left:0,top:0,right:innerWidth,bottom:innerHeight}:a.getBoundingClientRect();c=[Math.max(c[0],b.left),Math.max(c[1],b.top),Math.min(c[2],b.right),Math.min(c[3],b.bottom)]}}if(q<.999)return;var vw=v.videoWidth,vh=v.videoHeight,f="fill"===fit?0:Math.min(r.width/vw,r.height/vh),cw=f?vw*f:r.width,ch2=f?vh*f:r.height,cx=r.left+(r.width-cw)/2,cy=r.top+(r.height-ch2)/2;c=[Math.max(c[0],cx),Math.max(c[1],cy),Math.min(c[2],cx+cw),Math.min(c[3],cy+ch2)];if(c[2]-c[0]<1||c[3]-c[1]<1)return;for(var I=Array.prototype.indexOf.call(N,v),i=0,n,o,P,T;i<N.length;i++){n=N[i];if(i===I||n.contains(v))continue;o=n.getBoundingClientRect();if(o.right<=c[0]||o.left>=c[2]||o.bottom<=c[1]||o.top>=c[3]||!n.checkVisibility({opacityProperty:!0,visibilityProperty:!0})||!own(n,cs(n)))continue;for(P=n.parentElement;!P.contains(v);P=P.parentElement);if(P===G||!G.contains(P))return;for(T=n,a=1;T!==P;T=T.parentElement){w=cs(T);if(!al(T)||i>I&&T!==n&&"visible"!==w.overflowX)return;a*=+w.opacity;if(T!==n&&+w.opacity<1&&Array.prototype.some.call(T.getElementsByTagName("*"),function(m){return m!==n&&own(m,cs(m))}))a=0}if(i<I)continue;if("VIDEO"===n.tagName){if(ad.indexOf(n)<0)return;continue}w=cs(n);if("CANVAS"!==n.tagName||!bm(w)||"fill"!==w.objectFit||!a)return;Y.push([n,o,a])}var p=devicePixelRatio||1,sn=function(z,e,k){return Math.round((z-e)*k)},u0=sn(cx,R.left,kx),v0=sn(cy,R.top,ky),u1=sn(cx+cw,R.left,kx),v1=sn(cy+ch2,R.top,ky),a0=sn(c[0],R.left,kx),b0=sn(c[1],R.top,ky),a1=sn(c[2],R.left,kx),b1=sn(c[3],R.top,ky),ww=Math.round((a1-a0)/kx*p),hh=Math.round((b1-b0)/ky*p),dx=(u0-a0)/kx*p,dy=(v0-b0)/ky*p,dw=(u1-u0)/kx*p,dh=(v1-v0)/ky*p,x,g,d,j;if(ww<1||hh<1)return;x=document.createElement("canvas");x.width=ww,x.height=hh;g=x.getContext("2d");g.drawImage(v,dx,dy,dw,dh);for(d=g.getImageData(0,0,ww,hh).data,j=3;j<d.length;j+=4)if(d[j]<255)return;Y.forEach(function(y){var l=sn(y[1].left,R.left,kx),m=sn(y[1].top,R.top,ky);g.globalAlpha=y[2],g.drawImage(y[0],(l-a0)/kx*p,(m-b0)/ky*p,(sn(y[1].right,R.left,kx)-l)/kx*p,(sn(y[1].bottom,R.top,ky)-m)/ky*p)}),g.globalAlpha=1;var h=document.createElement("div"),s=h.style,t=x.style;s.position=t.position="absolute",s.overflow="hidden",s.left=a0+"px",s.top=b0+"px",s.width=t.width=a1-a0+"px",s.height=t.height=b1-b0+"px",t.left=t.top="0px",h.appendChild(x),H.push(h),ad.push(v)}catch(E){}}),H.length&&(U.__obedFrozen={scene:A,holders:H.reverse()})}catch(E){U.__obedFrozen=null}finally{window.__obedTakeMs=U.__obedTakeMs=performance.now()-t0}}
+__obedFreezeTake(U,A){U.__obedFrozen=null;var t0=performance.now();try{var e=U.script.events[A],y=e&&e.effects&&e.effects[0],G=document.getElementById("stage");if(!y||!G||!this.__obedShape(y))return;var R=document.getElementById("layer"+U.playbackController.kpfEvent.baseLayer.layerId).getBoundingClientRect(),kx=U.script.slideWidth/R.width,ky=U.script.slideHeight/R.height,H=[],N=document.getElementsByTagName("*"),Q=["bt709/bt709/bt709/false"],cs=function(n){return getComputedStyle(n)},dv=function(s,d){return(s||d)===d},bd=function(z){return"none"!==z.borderTopStyle||"none"!==z.borderRightStyle||"none"!==z.borderBottomStyle||"none"!==z.borderLeftStyle},rd=function(z){return"0px"!==z.borderTopLeftRadius||"0px"!==z.borderTopRightRadius||"0px"!==z.borderBottomLeftRadius||"0px"!==z.borderBottomRightRadius},deco=function(z){return!/rgba\(0, 0, 0, 0\)|transparent/.test(z.backgroundColor)||"none"!==z.backgroundImage||"none"!==z.boxShadow||bd(z)||"none"!==z.outlineStyle||!dv(z.backdropFilter,"none")},own=function(n,z){return/^(CANVAS|VIDEO|IMG|SVG|IFRAME|OBJECT|EMBED|INPUT|TEXTAREA|SELECT|BUTTON)$/i.test(n.tagName)||deco(z)||Array.prototype.some.call(n.childNodes,function(c){return 3===c.nodeType&&/\S/.test(c.data)})},bm=function(z){return!deco(z)&&!rd(z)&&"0px"===z.paddingTop&&"0px"===z.paddingRight&&"0px"===z.paddingBottom&&"0px"===z.paddingLeft&&dv(z.objectViewBox,"none")&&dv(z.imageRendering,"auto")},al=function(a){var w=cs(a),s=a===G,u=!s&&a.contains(G),m=w.transform,M;if("block"!==w.display||!dv(w.contain,"none")||!dv(w.contentVisibility,"visible")||"none"!==w.filter||!dv(w.backdropFilter,"none")||"normal"!==w.mixBlendMode||!dv(w.isolation,"auto")||"none"!==w.clipPath||!dv(w.maskImage,"none")||!dv(w.clip,"auto")||"auto"!==w.zIndex||!dv(w.translate,"none")||!dv(w.rotate,"none")||!dv(w.scale,"none")||!dv(w.offsetPath,"none")||!dv(w.willChange,"auto")||!dv(w.zoom,"1")||"none"!==w.outlineStyle||w.overflowX!==w.overflowY||"visible"!==w.overflowX&&!("clip"===w.overflowX&&/^(VIDEO|CANVAS)$/.test(a.tagName))&&("hidden"!==w.overflowX||rd(w)||bd(w)))return!1;if(u)return("static"===w.position||"absolute"===w.position)&&"none"===m;if("absolute"!==w.position||!dv(w.perspective,"none")||!dv(w.backfaceVisibility,"visible")||(s?"preserve-3d"!==w.transformStyle&&"flat"!==w.transformStyle:"flat"!==w.transformStyle&&("preserve-3d"!==w.transformStyle||"none"!==m)||"visible"!==w.visibility))return!1;if("none"===m)return!0;M=new DOMMatrix(m);return M.is2D&&!M.b&&!M.c&&1===M.a&&1===M.d},xo=function(n){for(var a=n,w,r;!a.contains(G);a=a.parentElement){w=cs(a);if("fixed"===getComputedStyle(a,"::before").position||"fixed"===getComputedStyle(a,"::after").position)return!1;if("div"===a.localName&&"http://www.w3.org/1999/xhtml"===a.namespaceURI&&"hidden"===w.overflowX&&"hidden"===w.overflowY&&"static"!==w.position&&/^(block|flow-root|flex|grid)$/.test(w.display)&&"none"===w.boxShadow&&"none"===w.filter&&dv(w.backdropFilter,"none")&&"none"===w.outlineStyle&&dv(w.borderImageSource,"none")&&dv(w.webkitBoxReflect,"none")&&(r=a.getBoundingClientRect(),r.right<=V[0]||r.left>=V[2]||r.bottom<=V[1]||r.top>=V[3]))return!0;if("fixed"===w.position)return!1}return!1},vp=function(a){var h=document.documentElement;return a===h||a===document.body&&"visible"===cs(h).overflowX},pc=function(n){var t=n.tagName,w=cs(n),b,f;if("contents"===w.display)return!1;if(!n.checkVisibility({opacityProperty:!0}))return!0;b=getComputedStyle(n,"::before").content;f=getComputedStyle(n,"::after").content;if(!/^(normal|none)$/.test(b||"none")||!/^(normal|none)$/.test(f||"none")||!/^(normal|none)$/.test(w.content||"normal")||"list-item"===w.display||Array.prototype.some.call(n.childNodes,function(c){return 3===c.nodeType&&/\S/.test(c.data)})||"none"!==w.filter||!dv(w.backdropFilter,"none")||!dv(w.webkitBoxReflect,"none"))return!1;if("visible"!==w.visibility)return!0;if(!/^(HTML|BODY|DIV|CANVAS|VIDEO)$/.test(t)||/^(CANVAS|VIDEO)$/.test(t)&&("50% 50%"!==w.objectPosition||!dv(w.objectViewBox,"none")||!/^(fill|contain)$/.test(w.objectFit)))return!1;return"none"===w.boxShadow&&"none"===w.outlineStyle&&dv(w.borderImageSource,"none")&&dv(w.columnRuleStyle,"none")};for(var V=[0,0,innerWidth,innerHeight],a=G,w,b;a;a=a.parentElement)w=cs(a),"visible"!==w.overflowX&&(vp(a)||"static"!==w.position)&&(b=vp(a)?{left:0,top:0,right:innerWidth,bottom:innerHeight}:a.getBoundingClientRect(),V=[Math.max(V[0],b.left),Math.max(V[1],b.top),Math.min(V[2],b.right),Math.min(V[3],b.bottom)]);if(!(R.width>0&&R.height>0)||1!==devicePixelRatio||1!==kx||1!==ky||R.left%1||R.top%1||document.querySelector(":modal,:popover-open,:fullscreen")||!Array.prototype.every.call(N,function(n){return!n.shadowRoot&&(pc(n)||!G.contains(n)&&!n.contains(G)&&xo(n))}))return;var ad=[];Array.prototype.slice.call(document.querySelectorAll("video")).reverse().forEach(function(v){try{if(!G.contains(v)||v.readyState<2||!v.videoWidth||!v.videoHeight||!v.checkVisibility({opacityProperty:!0,visibilityProperty:!0}))return;var z=cs(v),fit=z.objectFit,K;if(!bm(z)||"50% 50%"!==z.objectPosition||"fill"!==fit&&"contain"!==fit)return;try{var vf=new VideoFrame(v),cc=vf.colorSpace;K=[cc.primaries,cc.transfer,cc.matrix,cc.fullRange].join("/");vf.close()}catch(E){return}if(Q.indexOf(K)<0)return;var Y=[],r=v.getBoundingClientRect(),c=[r.left,r.top,r.right,r.bottom],a,q,w,b;for(a=v,q=1;a;a=a.parentElement){if(!al(a))return;w=cs(a);q*=+w.opacity;if(a!==v&&"visible"!==w.overflowX&&(vp(a)||"static"!==w.position)){b=vp(a)?{left:0,top:0,right:innerWidth,bottom:innerHeight}:a.getBoundingClientRect();c=[Math.max(c[0],b.left),Math.max(c[1],b.top),Math.min(c[2],b.right),Math.min(c[3],b.bottom)]}}if(q<.999)return;var vw=v.videoWidth,vh=v.videoHeight,f="fill"===fit?0:Math.min(r.width/vw,r.height/vh),cw=f?vw*f:r.width,ch2=f?vh*f:r.height,cx=r.left+(r.width-cw)/2,cy=r.top+(r.height-ch2)/2;c=[Math.max(c[0],cx),Math.max(c[1],cy),Math.min(c[2],cx+cw),Math.min(c[3],cy+ch2)];if(c[2]-c[0]<1||c[3]-c[1]<1)return;for(var I=Array.prototype.indexOf.call(N,v),i=0,n,o,P,T;i<N.length;i++){n=N[i];if(i===I||n.contains(v))continue;o=n.getBoundingClientRect();if(o.right<=c[0]||o.left>=c[2]||o.bottom<=c[1]||o.top>=c[3]||!n.checkVisibility({opacityProperty:!0,visibilityProperty:!0})||!own(n,cs(n)))continue;for(P=n.parentElement;!P.contains(v);P=P.parentElement);if(P===G||!G.contains(P))return;for(T=n,a=1;T!==P;T=T.parentElement){w=cs(T);if(!al(T)||i>I&&T!==n&&"visible"!==w.overflowX)return;a*=+w.opacity;if(T!==n&&+w.opacity<1&&Array.prototype.some.call(T.getElementsByTagName("*"),function(m){return m!==n&&own(m,cs(m))}))a=0}if(i<I)continue;if("VIDEO"===n.tagName){if(ad.indexOf(n)<0)return;continue}w=cs(n);if("CANVAS"!==n.tagName||!bm(w)||"fill"!==w.objectFit||!a)return;Y.push([n,o,a])}var p=devicePixelRatio||1,sn=function(z,e,k){return Math.round((z-e)*k)},u0=sn(cx,R.left,kx),v0=sn(cy,R.top,ky),u1=sn(cx+cw,R.left,kx),v1=sn(cy+ch2,R.top,ky),a0=sn(c[0],R.left,kx),b0=sn(c[1],R.top,ky),a1=sn(c[2],R.left,kx),b1=sn(c[3],R.top,ky),ww=Math.round((a1-a0)/kx*p),hh=Math.round((b1-b0)/ky*p),dx=(u0-a0)/kx*p,dy=(v0-b0)/ky*p,dw=(u1-u0)/kx*p,dh=(v1-v0)/ky*p,x,g,d,j;if(ww<1||hh<1)return;x=document.createElement("canvas");x.width=ww,x.height=hh;g=x.getContext("2d");g.drawImage(v,dx,dy,dw,dh);for(d=g.getImageData(0,0,ww,hh).data,j=3;j<d.length;j+=4)if(d[j]<255)return;Y.forEach(function(y){var l=sn(y[1].left,R.left,kx),m=sn(y[1].top,R.top,ky);g.globalAlpha=y[2],g.drawImage(y[0],(l-a0)/kx*p,(m-b0)/ky*p,(sn(y[1].right,R.left,kx)-l)/kx*p,(sn(y[1].bottom,R.top,ky)-m)/ky*p)}),g.globalAlpha=1;var h=document.createElement("div"),s=h.style,t=x.style;s.position=t.position="absolute",s.overflow="hidden",s.left=a0+"px",s.top=b0+"px",s.width=t.width=a1-a0+"px",s.height=t.height=b1-b0+"px",t.left=t.top="0px",h.appendChild(x),H.push(h),ad.push(v)}catch(E){}}),H.length&&(U.__obedFrozen={scene:A,holders:H.reverse()})}catch(E){U.__obedFrozen=null}finally{window.__obedTakeMs=U.__obedTakeMs=performance.now()-t0}}
 __obedFreeze(C,A){var F=UC.__obedFrozen;UC.__obedFrozen=null;if(C.obedDissolve&&F&&F.scene===this.sceneIndex)try{var O=A.layers[0].layers[1],W=document.getElementById("layer"+O.layerId+("cut"===C.obedDissolve?"":"-opacity"));if(!W)return;var Q=document.createDocumentFragment();F.holders.forEach(function(h){Q.appendChild(h)}),W.appendChild(Q)}catch(E){}}
 ```
 
@@ -172,11 +175,20 @@ holders}`. `__obedFreeze` (D3) always clears the slot and attaches **by engaged 
 **Paint gate (once per take, before any rectangle test; any failure skips the take; decision 8, r8 1–2).** First the **top
 layer**: any `:modal`, `:popover-open` or `:fullscreen` element skips the take — top-layer content and its `::backdrop` paint
 above the page and escape every ancestor clip, so neither test below may shortcut them (a browser that cannot parse one of
-these selectors throws inside the take's `try` and skips too). Then every element of the document passes the **element test**
-or, outside the stage, the **exterior proof**.
-- *Element test (rev 9's, unchanged; mandatory for `#stage`, its subtree and its ancestors):* non-rendering
-  `head`/`script`/`style`/`link`/`meta`/`title`/`base`/`template`/`noscript` pass; `display: contents` fails; no box or an
-  opacity-0 group (`checkVisibility({opacityProperty})` false: nothing of it paints) passes. Otherwise, before any visibility
+these selectors throws inside the take's `try` and skips too). **Author shadow trees are unsupported paint boundaries** (r9
+2): their contents are invisible to `getElementsByTagName` and to the document's top-layer query, so a shadow `dialog` with a
+`::backdrop` or a fixed overlay could paint over the stage unseen. Any element with an open `shadowRoot` skips the take before
+any shortcut. A closed root cannot be detected from the page (`shadowRoot === null` proves nothing), so supported pages carry a
+**checked invariant**: nothing on them creates an author shadow root — the served players (both supported `main.js`), every
+export `index.html` and every script the host injects contain no `attachShadow`, `shadowrootmode`/`shadowroot` or
+`customElements` (verified 2026-10-12 on both players, the P2 export and `src/obed_edom`; W1 test with a planted-string
+control, §10). UA shadow roots (media controls) are not author roots and read `null`. Then every element of the document
+passes the **element test** or, outside the stage, the **exterior proof**.
+- *Element test (mandatory for `#stage`, its subtree and its ancestors):* `display: contents` fails; an element with no box
+  or in an opacity-0 group (`checkVisibility({opacityProperty})` false: nothing of it paints — `display: none` itself or
+  inside, which is the UA default for `head`, `script`, `style`, `link`, `meta`, `title`, `base`, `template`, `noscript`)
+  passes. **No tag is exempt by name** (r9 1: a rendered `display: block` `script` with overflowing text, or a rendered,
+  hidden `head` with a filter over a clipper, passed rev 11 by tag alone); non-rendering is read from the rendering state. Otherwise, before any visibility
   shortcut, `::before`/`::after` and own `content` must be `none`/`normal`, no `display: list-item`, no direct text, and **no
   effect that operates on descendant paint** — `filter`, `backdrop-filter`, `-webkit-box-reflect` — because a hidden element
   still filters or reflects its visible descendants (r8 1: a hidden parent's `drop-shadow` projected a clipped exterior
@@ -251,8 +263,10 @@ the intersected rectangles; nothing crops, filters, blends or contains paint; an
   whose backing is its device size (`ww` × `hh`); the movie is drawn once into the snapped content box,
   `drawImage(v, dx, dy, dw, dh)`, and each redrawn canvas into its own snapped rect at its effective opacity. Clipped
   boundaries snap like edges (the clip rectangle is rounded with the same `sn`).
-- **Geometry guard (the shipping rule while decision 12 is open).** The take skips unless `devicePixelRatio` is 1, the live
-  slide's base-layer origin (`R.left`, `R.top`) lies on integer px (a fractional letterbox offset is unmeasured), `#stage`'s
+- **Geometry guard (the shipping rule while decision 12 is open).** The take skips unless `devicePixelRatio` is 1, `kx` and
+  `ky` are exactly 1 (the live base-layer box measures the slide's own width and height; r9 3: a 960-wide base layer gave
+  `kx` = 2 and a holder attached at twice the width and the wrong place), the live slide's base-layer origin (`R.left`,
+  `R.top`) lies on integer px (a fractional letterbox offset is unmeasured), `#stage`'s
   transform is a pure translation and every scene element on the movie chain and on each redrawn branch is a pure translation
   (`al`: `a = d = 1`, `b = c = 0`). Rev 10 admitted any DPR, any stage scale and uniform scales below the stage; r8 showed
   that a local scale changes the order of snapping and scaling and that DPR 1.5 leaves attached pixels unproven; the owner
@@ -309,7 +323,8 @@ R7 2190367 (36) · R3 2190440 (46) · R4 2192650 (72) · R6 2263321 (52) · R1 2
 2353760 (50)** · hook 2368820 / 2368858 (50). Measured (`overlap_dpatch12.py`, both players): 13 intervals disjoint; no
 replacement contains any anchor, its own included; all 6 orders of R1–R5, R6–R8, D1–D4 give identical bytes; every anchor 0
 times after, every replacement once. **Rev 10 re-check** (`plan-rev10-2026-10-12/scripts/overlap10.py`, both players): the
-anchors and their offsets are unchanged (only D1's replacement changes: 10 237 B in rev 10, 10 249 B in rev 11); the same
+anchors and their offsets are unchanged (only D1's replacement changes: 10 237 B in rev 10, 10 249 B in
+rev 11, 10 195 B in rev 12); the same
 five properties hold on both revisions.
 
 ### 6.2 Subsystems (files outside `live_runtime.py` that change: `scripts/dissolve_probe.py` (new), `scripts/managed_obs_qualify.py`, their tests, docs)
@@ -332,7 +347,7 @@ options: Chrome 121; `VideoFrame(video).colorSpace`: Chrome 94; `:modal` 105, `:
 unsupported selector throws inside the take's `try` and skips). OBS 32.2.2 bundles CEF 127: availability only (compositor,
 tone path and LUT: DX-2). Headless: Chrome 154.0.8037.59, ANGLE Metal; software compositing via `--disable-gpu`.
 
-## 8. Feasibility prototype (Q0; `plan-2026-10-11/planner/`; Q0b; revs 10–11)
+## 8. Feasibility prototype (Q0; `plan-2026-10-11/planner/`; Q0b; revs 10–12)
 
 Builders `dpatch3.py` → `dpatch12.py` (rev 9); drivers `proto3.py` → `proto6.py`, `probe7.py` + `diag7{,b}.js` (one
 headless Chrome per arm; `p2cut` = P2 2→3 in Keynote's cut shape, in memory); analysis `analyze_full.py`, `f3analyze.py`,
@@ -481,6 +496,28 @@ r8 rows (rev 10 → rev 11):
 
 `node --check` passes on both patched players (`on`, `rendering`); the §6.1 re-check holds with D1 at 10 249 B.
 
+### 8.4 Rev 12 (r9 fold; Node, real extracted code)
+
+Evidence `plan-rev12-2026-10-12/`. The rev-11 harness plus `shadowRoot` on every stub element (`x.shadow` makes an open
+root): 234 rows (200 committed + 26 r8 + 8 r9) on both players, identical outcomes, every invariant holding; admitted rows
+65 (rev 11) → 47 (rev 12). r9 rows:
+
+| Row | rev 11 | rev 12 |
+|---|---|---|
+| exterior `script` rendered `display: block` with overflowing text, box at x −60 | **admit** | skip |
+| rendered, hidden `head` with `drop-shadow(300px 0 0)` over a valid witness | **admit** | skip |
+| `script` / `head` + `style` with text at the UA default `display: none` | admit | admit |
+| off-stage host with an open shadow root | **admit** | skip |
+| live base-layer box 960×1080 (`kx` = 2; rev 11 attached the holder at x 218, width 1 904) | **admit** | skip |
+| live base-layer box 1920×1079.5 (fractional `ky`) | **admit** | skip |
+| full-slide base layer | admit | admit |
+
+Committed rows that change: the nine `gate_*TextIgnored` rows (the stub renders metadata `display: block`; W1 gives them the UA
+`display: none` → admit, and adds the rendered variants → skip), and `stage2560`, `stageScaledInSmallViewport`, `letterbox` (at
+0.75), `baseRectUnequal` (now skip by `kx`/`ky` even without the stage transform modelled). **Shadow-DOM invariant check:**
+`attachShadow`, `shadowRoot`, `shadowroot`, `customElements` occur 0 times in both supported players, the P2 export
+`index.html` and `src/obed_edom/`. `node --check` passes on all four patched players; §6.1 holds with D1 at 10 195 B.
+
 ## 9. Acceptance
 
 **Rule.** Every blocking check has a positive control that must PASS and a negative control that must FAIL, read before the
@@ -503,23 +540,26 @@ expected FAIL. One headless Chrome at a time; 1-min load < 4 and no other headle
 | Holder pixels (browser-rendered; tone-compensated; qualified geometry, production mask) | `m-snap` (1920×1080, letterboxed) | `m-snap-frac` (`sn` unrounded); scorer case: 1-px shifted holder under the production mask |
 | Reference capture (instrument, r8 7) | `perfect` on every `m-snap*` arm; scorer case: valid reference set | `perfect-shift` (canvas overwritten 1 px off) FAIL; scorer cases: stale/reused frame, missing or extra animation, unpaused animation → INCONCLUSIVE |
 | Foreground mask (instrument, r8 6) | production mask on every twin pair (missed 0, excess ≤ 1 %) | scorer cases: whole-rectangle, 3-px shifted, empty mask → INCONCLUSIVE (rejected before scoring) |
-| Geometry guard (decision 12 open) | `m-snap` (holder bound at DSF 1, stage scale 1) | `m-geo-dsf2`, `m-geo-2560`, `m-geo-scale` (published take, no holder) |
-| Exterior gate (raw / preview pages engage; unproven exterior paint skips) | `m-raw` (P2 2→3, 4→end), `m-raw-svgclip` (SVG under an HTML-`div` witness) | `m-raw-caption`, `m-raw-nav-open`, `m-raw-modal`, `m-raw-svg` (false SVG witness) |
+| Geometry guard (decision 12 open) | `m-snap` (holder bound at DSF 1, stage scale 1, full-slide base layer) | `m-geo-dsf2`, `m-geo-2560`, `m-geo-scale`, `m-geo-base` (published take, no holder) |
+| Exterior gate (raw / preview pages engage; unproven exterior paint skips) | `m-raw` (P2 2→3, 4→end; the ordinary page), `m-raw-svgclip` (SVG under an HTML-`div` witness) | `m-raw-caption`, `m-raw-nav-open`, `m-raw-modal`, `m-raw-svg` (false SVG witness), `m-raw-script` (rendered `script` text), `m-raw-shadow-modal`, `m-raw-shadow-fixed` |
 | Hide / show capture (instrument, r8 8) | `life-hide` (alpha) and `life-hide-screen` twins: transparent / black frames inside the hidden interval, six timestamped mid frames after show | `life-hide-nohide`, `life-hide-noshow` (driver drops the action) FAIL; scorer cases: duplicate frame, timestamp shift → INCONCLUSIVE |
 | Tone match — blocking only if a non-identity `L` returns (W5); report-only under identity | (`m-tone`) | (`m-tone-raw`) |
 | No independent overlay | `m-on` | `m-bridge-off` (stock twin) |
 | Cost | scorer case: 50 ms; stub rows: total published on success, rejection, exception | scorer case: 50 ms + ε (missing or non-finite → INCONCLUSIVE) |
 
-### 9.0 Q0b-bis — step 0 on the rev-11 bytes (scratch; after W1's re-pin, before DX-1; browser windows on request)
+### 9.0 Q0b-bis — step 0 on the rev-12 bytes (scratch; after W1's re-pin, before DX-1; browser windows on request)
 
-Done: Q0b on rev 9 (§8.1); rev-10 prototypes (§8.2); rev-11 Node rows (§8.3). Pending (a miss re-plans):
-1. **Exact bytes, cost:** W1's built `on` player (the §3.1 digests): every measured DSK transition (2→3, 3→4, 5→6, 7→8; 7→8
+Done: Q0b on rev 9 (§8.1); rev-10 prototypes (§8.2); rev-11 and rev-12 Node rows (§8.3, §8.4). Pending (a miss re-plans):
+1. **Real-page engagement first** (rev-12 bytes; not yet run in a browser: revs 11–12 changed the gate and the guard after the
+   §8.2 runs; Node success does not substitute): host DSK 2/3/5/7 and P2 2→3 admitted, raw P2 2→3 / 4→end admitted, the
+   bridge still blocking P2 4→end on the host; a miss re-plans.
+2. **Exact bytes, cost:** W1's built `on` player (the §3.1 digests): every measured DSK transition (2→3, 3→4, 5→6, 7→8; 7→8
    mandatory) and raw P2 2→3 / 4→end, five fresh launches at load < 4; every take ≤ 50 ms; per-stage times from the timer
    variant; the worst case named from these runs only. **Crop experiment (decision 11, r8 9):** a clipped diagnostic (P2 2→3
    with an in-memory clipping layer halving the movie's visible region) run with the full-content draw and with a
    source-rectangle `drawImage` of the clipped region (+ 1 texel), comparing total take time and holder pixels (equal within
    1 LSB); adopted only if it saves time without a pixel change.
-2. **CEF preflight (decision 11, T5; measurement only):** a scratch `ManagedObs` driver, OBS 32.2.2 / CEF 127, the step-1
+3. **CEF preflight (decision 11, T5; measurement only):** a scratch `ManagedObs` driver, OBS 32.2.2 / CEF 127, the step-2
    bytes (W1's rebuilt bytes; owner default), two fresh launches. Per launch: OBS/CEF version, browser acceleration setting,
    served digest, source geometry (the guard needs DSF 1 and stage scale 1 — a CEF source at another geometry would skip
    every take and re-plans), continuity and G2 state; the tone movie paused at frames 30/300/900 in `h264u`, `h264t`, `hevc10`
@@ -528,12 +568,10 @@ Done: Q0b on rev 9 (§8.1); rev-10 prototypes (§8.2); rev-11 Node rows (§8.3).
    ≤ 50 ms); holder vs live at the source geometry, tone-compensated with the launch's own measured map, reported. Recorded as
    a "CEF preflight" block of the decision record. Cost > 50 ms, an engagement miss or holder edges > τ re-plan before DX-2;
    tone results feed W5 only.
-3. **Real-page engagement of the rev-11 bytes** (not yet run in a browser: rev 11 changed the gate and the guard after the
-   §8.2 runs): host DSK 2/3/5/7 and P2 2→3 admitted, raw P2 2→3 / 4→end admitted, the bridge still blocking P2 4→end on the
-   host; a miss re-plans. **Dry runs of the new captures and controls:** `m-snap`/`-frac`/`perfect`/`perfect-shift` with their omit twins, `m-geo-*`,
-   `m-raw*` (incl. modal, SVG, clipped SVG), the hide rows and their dropped-action twins, D2 `on` on the both-opaque class,
+4. **Dry runs of the new captures and controls:** `m-snap`/`-frac`/`perfect`/`perfect-shift` with their omit twins, `m-geo-*`,
+   `m-raw*` (incl. modal, SVG, clipped SVG, shadow dialog, shadow overlay), the hide rows and their dropped-action twins, D2 `on` on the both-opaque class,
    `m-tone` with its twin.
-4. **Geometry beyond the guard** (DSF ≠ 1, stage scale ≠ 1, nested scales, fractional stage origin) belongs to the hi-DPI
+5. **Geometry beyond the guard** (DSF ≠ 1, stage scale ≠ 1, nested scales, fractional stage origin) belongs to the hi-DPI
    investigation (decision 12); Q0b-bis only proves the guard skips there (`m-geo-*`).
 
 ### 9.1 DX-1 headless gate — `scripts/dissolve_probe.py` (promotes the evidence's `dissolve_ab.py` + hook)
@@ -616,7 +654,7 @@ Done: Q0b on rev 9 (§8.1); rev-10 prototypes (§8.2); rev-11 Node rows (§8.3).
 | Holder pixels | qualified classes only: interior and edge band max ≤ τ = 4 under the verified production mask (1920×1080 and letterboxed: 3 and 1; FAIL control `m-snap-frac` 216, 5.3 % of px > τ) |
 | Reference capture | `perfect` interior and edge max ≤ 1 (measured 0); `perfect-shift` > τ; profile integrity as above |
 | Geometry guard | qualified: one bound holder per admitted movie; `m-geo-*`: a published take, the transition DOM present, no holder (rev 10 measured DSF 2 / 2560 holders 250 / 165 LSB off; rev 11 skips them) |
-| Exterior gate | `m-raw`, `m-raw-svgclip`: each take publishes `__obedTakeMs` and binds one holder in `layer<out>-opacity`; negatives (`-caption`, `-nav-open`, `-modal`, `-svg`): a published take, the transition DOM present, and no holder (measured on rev 10: 1 / 1 holder; caption and open navigator 0 / 0) |
+| Exterior gate | `m-raw`, `m-raw-svgclip`: each take publishes `__obedTakeMs` and binds one holder in `layer<out>-opacity`; negatives (`-caption`, `-nav-open`, `-modal`, `-svg`, `-script`, `-shadow-modal`, `-shadow-fixed`): a published take, the transition DOM present, and no holder (measured on rev 10: 1 / 1 holder; caption and open navigator 0 / 0) |
 | Hide / show | inside the hidden interval: alpha page α ≤ 2 everywhere / screen page RGB ≤ 2 everywhere; after show: the model holds (≤ τ) on six distinct mid frames; `life-hide-nohide` must FAIL the first, `life-hide-noshow` the second |
 | Tone match | identity `L` (shipped): holder vs `S_live` per channel on the verified exposed mask, `S_live` CvC ≤ 1 — **reported** (measured: mid-grey −11, max 12); blocking at ≤ 2/255 only if W5 brings back a non-identity `L`, with `m-tone-raw` as its FAIL control |
 | No independent overlay | in every rAF of the fade no tagged `<video>` outside the transition DOM with effective opacity > 0 meets the outgoing movie rect, and `Ô` there does not drift |
@@ -644,7 +682,8 @@ Done: Q0b on rev 9 (§8.1); rev-10 prototypes (§8.2); rev-11 Node rows (§8.3).
 | `m-snap` (+ same-frame `m-fg-omit` twin per geometry) | `m-paused` at 1920×1080 and at a letterboxed 1920×1200 viewport; reference-capture profile; twin = + splice `Y.forEach(` → `[].forEach(` | out-only | holder pixels → PASS; `perfect` → instrument PASS; mask verification PASS | as `on` + one holder | pinned `on` / + splice |
 | `m-snap-frac` (+ twin) | as `m-snap` 1920×1080; one counted splice `sn=function(z,e,k){return Math.round((z-e)*k)}` → `sn=function(z,e,k){return(z-e)*k}` | out-only | holder pixels → FAIL | as `m-snap` | base + splice |
 | `perfect-shift` | as `m-snap` 1920×1080; the driver's `perfect` overwrite drawn 1 device px right | out-only | reference capture → FAIL (instrument negative) | as `m-snap` | pinned `on` |
-| `m-geo-dsf2` / `m-geo-2560` / `m-geo-scale` | as `m-paused` at DSF 2 / 2560×1440 / 1920×1080 with an in-memory `affineTransform` scale 1.5 on the movie's layer | out-only | geometry guard → no holder (today's look) | as `on` | pinned `on` |
+| `m-geo-dsf2` / `m-geo-2560` / `m-geo-scale` / `m-geo-base` | as `m-paused` at DSF 2 / 2560×1440 / 1920×1080 with an in-memory `affineTransform` scale 1.5 on the movie's layer / 1920×1080 with the live slide's base layer resized in memory to 960×1080 | out-only | geometry guard → no holder (today's look) | as `on` | pinned `on` |
+| `m-raw-script` / `m-raw-shadow-modal` / `m-raw-shadow-fixed` | as `m-raw` + in-page before the advance: a `script type="application/json"` styled `display: block` at x −60 whose non-wrapping text crosses the movie / an off-stage transparent `div` with an open shadow root holding a `dialog` opened with `showModal()` and a coloured `::backdrop` / the same host with a `position: fixed` coloured overlay in its shadow tree | out-only | exterior gate → FAIL (no holder) | as `on` | pinned `on` |
 | `m-raw-modal` / `m-raw-svg` / `m-raw-svgclip` | as `m-raw` + in-page before the advance: an off-screen `dialog` opened with `showModal()` / a hidden `svg` (overflow visible) whose `g` is styled `display: block; position: relative; overflow: hidden` with a 40 px-stroked path reaching into the stage / the same SVG inside an off-viewport HTML `div` witness (absolute, overflow hidden) | out-only | exterior gate → FAIL / FAIL / PASS | as `on` (+ one holder for `-svgclip`) | pinned `on` |
 | `m-raw` | raw export of `p2-binary` (navigator present), P2 2→3 and 4→end | out-only | exterior gate → PASS; frozen frame on 2→3 → PASS | as `on` + one holder | pinned `on` |
 | `m-raw-caption` / `m-raw-nav-open` | as `m-raw` + in-page before the advance: a `body` child at x −60 with an overflowing 40 px caption / `.navigatorThumbnailSidebar` at `left: 0` | out-only | exterior gate → FAIL (no holder) | as `on` | pinned `on` |
@@ -706,13 +745,17 @@ session) `--arm mmo`, `--arm g2`, `--arm mmo-cef`. Root-cause any change.
 ## 10. Tests (three new test functions, as rev 3; everything else extends them; rev 10 adds rows, no new function)
 
 1. **Free:** tuple-parametrized anchor/replacement refusal (both patchers); off identity; `patch_rendering` = `patch_player` minus
-   the hook; "every original anchor gone" (`test_live_runtime.py:205`, `:265`, `:367`); equivalence; `node --check`; pin mismatch.
+   the hook; "every original anchor gone" (`test_live_runtime.py:205`, `:265`, `:367`); equivalence; `node --check`; pin mismatch;
+   the **shadow-DOM invariant** (r9 2) as rows of the same table: no `attachShadow`, `shadowroot`/`shadowrootmode` or
+   `customElements` in either supported player (stock and patched), the committed export `index.html` fixtures, or any JS the
+   host injects (`src/obed_edom`), with a planted-string control that the checker flags.
 2. **Edits** (`test_live_runtime.py`): re-pin (§3.1 candidate digests); hand-back tests use `HANDBACK = slice(5, 8)`; the
    composition test runs R1–R5, R6–R8, D1–D4 in every order and checks containment including self.
 3. **REAL-gated Node function, both players, one case table** (real extracted code): D1–D4 offsets; ids; committed transitions;
-   near-misses; construction failures; the 200 freeze-stub rows (§8.2) with rev 11's expectations. Harness: every stub element
-   carries `localName`/`namespaceURI`; `document.querySelector` answers the top-layer query; `devicePixelRatio` stubbed (1 by
-   default); exterior subtrees nest under `body`; the stage-scale rows (`stage2560`, `stageScaledInSmallViewport`, `letterbox`
+   near-misses; construction failures; the 200 freeze-stub rows (§8.2) with rev 12's expectations. Harness: every stub element
+   carries `localName`/`namespaceURI` and `shadowRoot` (null unless a row opens one); `document.querySelector` answers the
+   top-layer query; `devicePixelRatio` stubbed (1 by default); exterior subtrees nest under `body`; metadata rows carry the UA
+   `display: none` (the nine `gate_*TextIgnored` rows stay positives that way); the stage-scale rows (`stage2560`, `stageScaledInSmallViewport`, `letterbox`
    at 0.75, `stageNearUniform`) carry the matching `#stage` transform and now skip. Expectations: snapped device-pixel holder
    geometry and backing; no `putImageData` on any path (trace pattern `(v(gf*)?)?`); the readback is the whole backing on every
    admitted row; the `L` rows become "pixels untouched"; `fillAspectChange` admits; `uniformScale` skips. **r8 rows** (§8.3),
@@ -725,6 +768,9 @@ session) `--arm mmo`, `--arm g2`, `--arm mmo-cef`. Root-cause any change.
    `border-image`, a `fixed` element or fixed `::before` on the walk, the overflowing caption without witness, a failing
    ancestor of `#stage`, an `iframe` without witness each skip; transformed, `absolute` and `sticky` descendants of a valid
    witness and an `iframe` under one admit; a passing exterior `<video>` meeting the region (main's bridge) skips that movie.
+   **r9 rows** (§8.4): a rendered `script` (`display: block`) with text, a rendered hidden `head` with a filter over a witness,
+   an open shadow host, a 960×1080 and a 1920×1079.5 live base layer skip; metadata at `display: none` and the full-slide base
+   layer admit.
 4. **`tests/test_dissolve_probe.py`, the one parametrized function** (synthetic numpy), existing rows kept, plus: holder pixels —
    exact holder PASS, 1-px shifted holder under the production mask FAIL, tone step only (compensated by `L_path`) PASS,
    edge-band step FAIL; mask verification — production PASS, whole-rectangle / 3-px shifted / empty mask → INCONCLUSIVE;
@@ -742,7 +788,7 @@ session) `--arm mmo`, `--arm g2`, `--arm mmo-cef`. Root-cause any change.
 | # | Files | Work |
 |---|---|---|
 | W0 | coordinator | `git cherry-pick 715cb3f1` (done, `7fa7c8dd`) |
-| W1 | `src/obed_edom/live_runtime.py`, `tests/test_live_runtime.py` | rev 11's `__obedFreezeTake` byte-exact to §3.1 (`_FREEZE_TONE_LUT` removed; `Q` kept); docstrings (identity tone, device-pixel holder behind the geometry guard, exterior proof, top layer); re-pins; tests 1–3 |
+| W1 | `src/obed_edom/live_runtime.py`, `tests/test_live_runtime.py` | rev 12's `__obedFreezeTake` byte-exact to §3.1 (`_FREEZE_TONE_LUT` removed; `Q` kept); docstrings (identity tone, device-pixel holder behind the geometry guard, exterior proof, top layer, shadow roots); re-pins; tests 1–3 incl. the shadow-DOM invariant rows |
 | W2 | `scripts/dissolve_probe.py`, `tests/test_dissolve_probe.py` | reference-capture profile (inventory, paused-state and opacity read-backs, stable pairs, `perfect`/`perfect-shift`), holder-pixel scorer with `L_path`, foreground inventory + production mask + missed/excess verification with a twin per reference geometry, tone coverage, device-scale holder paste and strip decode, `m-snap*`, `m-geo-*` and `m-raw*` arms (raw-page driver and injections), hide-row screencast with timestamps and the dropped-hide/-show twins, both-opaque no-dip class; test 4 |
 | W3 | `scripts/managed_obs_qualify.py`, `tests/test_managed_obs_qualify.py` | DSK 7→8 cost and `m-snap` sessions; tone sessions report-only; test 5 |
 | W4 | `README.md`, `.agents/skills/obed-edom/SKILL.md`, `.agents/handovers/keynote-live-dissolve-crossfade-followups.md` | README/SKILL: the identity-tone known limit and that hi-DPI / scaled stages keep today's movie jump until the investigation lands; follow-ups handover: W5, the Q6 PR, the hi-DPI investigation hook (§3.2 geometry guard), the optional G2 use of a qualified `L` |
@@ -760,9 +806,9 @@ at the exported timing. (5) D4/D3 add-only, never touch a `<video>`; only gate +
 (6) `off` = today's bytes. (7) Thresholds measured or by formula; PASS and FAIL controls for every blocking check. (8) The
 exterior proof never trusts a failing element's own border box; every pruned subtree is clipped by a validated ancestor
 disjoint from `V`. (9) Holder canvas = device pixels of the snapped box; alpha scan over every backing pixel before the redraw; no tone
-write. (10) Top layer refused first; descendant-paint effects checked before the visibility shortcut; witnesses are HTML
-`div`s. (11) Geometry guard: DSF 1, stage scale 1, integer stage origin, translation-only scene transforms; everything else
-skips; safety checks never relaxed for a visual allowance.
+write. (10) Top layer and open shadow roots refused first; no tag exempt by name; descendant-paint effects checked before the
+visibility shortcut; witnesses are HTML `div`s; the shadow-DOM invariant is a checked test. (11) Geometry guard: DSF 1, `kx` = `ky` = 1, stage scale 1, integer stage origin, translation-only scene transforms;
+everything else skips; safety checks never relaxed for a visual allowance.
 
 ## 12. Owner decisions (1–7 2026-10-11, 8–12 2026-10-12, in chat)
 
@@ -803,7 +849,7 @@ skips; safety checks never relaxed for a visual allowance.
     "documented limit" (freeze there, edge band accepted), then reversed by the owner the same day: hi-DPI (DSF ≠ 1) and stage
     scale ≠ 1 edges are not a documented limit. A separate investigator measures what the snapshot needs to match the live
     movie there. Until it reports, the shipping rule is conservative: only geometries demonstrated to meet the strict holder
-    criterion are admitted (DSF 1, stage scale 1, integer stage origin, translation-only scene transforms); every other geometry skips the take
+    criterion are admitted (DSF 1, stage scale 1, base-layer box = slide, integer stage origin, translation-only scene transforms); every other geometry skips the take
     (today's look). The investigator's model slots into the geometry guard (§3.2, §9.1).
 
 ## 13. Risks and out of scope
@@ -820,7 +866,10 @@ skips; safety checks never relaxed for a visual allowance.
 - **CEF:** compositor, snapping at the source geometry, tone path and cost unproven until the preflight and DX-2.
 - **Exterior proof** relies on HTML overflow clipping (positioned `div` clipper, no fixed escape, no descendant-paint effect
   above it, no top layer); a page that adds fixed, unclipped or top-layer chrome later simply skips the take. View-transition
-  pseudo-elements also render in the top layer; neither the player nor the host starts one, and the gate does not query them.
+  pseudo-elements also render in the top layer; neither the player nor the host starts one (no `startViewTransition` in either
+  player or `src/obed_edom`), and **an active view transition is outside the gate's guarantee**. **Shadow trees:** open author
+  roots skip; closed ones are excluded only by the checked invariant that the supported pages create none — a page that adds
+  them (an extension, a future host script) falls outside the guarantee until the invariant test is extended to it.
 - ids rest on `VB`'s pre-order allocation (proved); production transparency; the bridge/hold (Q6).
 
 Out of scope: F2, GL effects, Keynote-app comparison, S2 and its follow-up.
@@ -843,7 +892,7 @@ Raw rounds: `.agents/reviews/dissolve-crossfade/plan-astra-r{1,…,7}.md`. r1–
 
 | Trigger / item | Disposition | Where |
 |---|---|---|
-| T1 cost (DSK 7→8 47.6–51.9 ms) | Bound kept at 50 ms. Profiled per stage; the cost was full-resolution readback and toning of 1282×1080 + 1922×1080 frames shown at 312×263 + 468×263. Device-pixel holder + identity tone: 9.4–9.8 ms (rev 9 same session 70.3); source crop measured unnecessary (draw ≤ 0.3 ms, region = content box) | §3.2, §8.2, §9.0 |
+| T1 cost (DSK 7→8 47.6–51.9 ms) | Bound kept at 50 ms. Profiled per stage; the cost was full-resolution readback and toning of 1282×1080 + 1922×1080 frames shown at 312×263 + 468×263. Device-pixel holder + identity tone: 9.4–9.8 ms (rev 9 same session 70.3); No smaller source crop exists on the measured full-content regions; no crop A/B has run. The clipped diagnostic remains required in Q0b-bis. | §3.2, §8.2, §9.0 |
 | T2 gate (raw/preview miss) | Element test kept for the stage and its ancestors; exterior proof (validated clipping ancestor disjoint from `V`) for everything else; raw P2 2→3 and 4→end freeze; overflowing caption and open navigator skip; bridge still blocks | §3.1, §3.2, §8.2, §9 (`m-raw*`), §10 |
 | T3 holder edges (78 LSB) | Re-measured with browser-rendered references (seeked animations; progress exact, outside the media); the holder is drawn into the device pixels of the box Blink snaps the movie to: ≤ 3 LSB after the tone step at 1920×1080 and letterboxed (FAIL control 216); DSF 2 / 2560×1440 band quantified, open for the owner | §1.1, §3.2, §8.2, §9.1, §13 |
 | T4 tone (software path identity, same tuple) | Identity `L` shipped; RGB writes, `putImageData` and the table removed; alpha scan kept; W5 feasibility probe for a host-calibrated path + tuple → `L` | §2, §3.2, §11, §12.10 |
@@ -866,3 +915,12 @@ Raw rounds: `.agents/reviews/dissolve-crossfade/plan-astra-r{1,…,7}.md`. r1–
 | 7 | major / closed | Folded: a dedicated reference-capture profile (inventory, paused state, `currentTime`, rendered opacities, stable pairs, required images); temporal coverage stays with the timed arms; stale/reused, missing-animation INCONCLUSIVE controls and a `perfect-shift` FAIL | §9, §9.1, §10 |
 | 8 | major / new | Folded: six distinct, correctly timestamped mid frames *after show* plus frames inside the hidden interval, alpha and screen separately; dropped-hide / dropped-show twins FAIL; duplicate-frame and timestamp-shift cases INCONCLUSIVE; all in the round manifest before lifecycle candidates | §9, §9.1, §10 |
 | 9 | minor / edge | Folded: no smaller crop exists on the measured full-content regions and no crop A/B has run; the crop experiment on a clipped diagnostic is in Q0b-bis; DSK 7→8 is the previous worst case (3→4 costs more); every measured DSK transition re-timed on final bytes | §8.2, §9.0 |
+
+### r9 — GPT-6 Astra (Codex), on rev 11 `b4ff2576` — verdict: CHANGES REQUIRED (3 false admissions + 1 wording); r8 #3, #5–#8 closed; the four provisional defaults accepted — folded in rev 12
+
+| # | Severity / class | Disposition | Where |
+|---|---|---|---|
+| 1 | major / exterior-proof escape | Folded: the tag-name exemption in `pc` is gone; non-rendering is read from the rendering state (`checkVisibility` false: `display: none`, the UA default for metadata); a rendered `script` with overflowing text and a rendered hidden `head` with a filter now skip; default metadata stays a positive | §3.1, §3.2, §8.4, §9 (`m-raw-script`), §10 |
+| 2 | major / exterior-proof escape | Folded: author shadow trees are unsupported paint boundaries — an open `shadowRoot` skips before any shortcut; closed roots are excluded by a checked invariant (no `attachShadow`, `shadowroot`, `customElements` in either player, the export `index.html` or `src/obed_edom`: 0 occurrences each; W1 rows with a planted-string control); `m-raw-shadow-modal`, `m-raw-shadow-fixed` FAIL, `m-raw` the ordinary-page positive | §3.2, §8.4, §9, §10, §13 |
+| 3 | major / geometry | Folded: the guard requires `kx === 1 && ky === 1` (live base-layer box = slide); half-width (960) and fractional-height (1079.5) base layers skip, the full slide admits; `m-geo-base` real-page control | §3.1, §3.2, §8.4, §9, §10 |
+| 4 | minor / wording | Folded: §14's T1 row carries the reviewer's sentence (§0 already did not claim it); real-page engagement is §9.0 item 1; §13 states active view transitions are outside the guarantee | §9.0, §13, §14 |
