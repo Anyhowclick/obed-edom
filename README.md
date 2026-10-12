@@ -65,8 +65,8 @@ The server checks the export and allowlist again when starting.
 Choose the output under **Output settings**, then **Start output session**.
 For UltraStudio, **Enable Keyer** sends fill/key for overlaying slides on live
 video. **Take output** turns into **Release output** once the engine is running.
-Starting creates one hidden
-output session; **Show output** makes it visible. The 16:9 picture fits inside
+Starting creates one output session and shows it once
+the deck has loaded; **Hide output** / **Show output** toggles it. The 16:9 picture fits inside
 the display without stretching. HDMI hiding produces black and leaves playback
 running. Click a thumbnail or type an original slide number and press Enter to
 restart that slide at its initial state. The right chevron, right arrow, Space,
