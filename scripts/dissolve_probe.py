@@ -3,7 +3,10 @@
 
 One fresh headless Chrome per arm (1920x1080 at DSF 1 unless the arm sets `viewport`/`dsf`; its own port), driven through
 `LiveOutputHost` (attach on the alpha page, launch on the screen page) or, for `m-raw*`, `RawHost` (the export's own page,
-navigator present, Space over CDP, `RAW_INJECTIONS` before the advance). The resolver serves html-unmodified's index.html, player and slide JSON, PDFs from a fresh
+navigator present, Space over CDP, `RAW_INJECTIONS` before the advance; `m-*-prod` on the production bytes with no channel).
+The take freezes only on a page granted `snap` (decision 15): DX-1 arms commit it through the privileged channel after
+start (`commit_grant`: the attach host's token, or the raw page's own first-run script), `grant-*` / `life-grant-*` let
+the launching host grant it itself, and the `grant: "none"` arms (`grant-attach`, `*-prod`, `cef-skip*`) never get it. The resolver serves html-unmodified's index.html, player and slide JSON, PDFs from a fresh
 scratch strip (`html_alpha_probe.strip_export_pdf_bg_fills`), decodable movies (P2: html-player H.264; DX-M: the binary
 counter re-encoded with an `ENCODINGS` entry unless Q0b qualified the untagged tuple; tone arms: the tone movie, same
 encoder) and the arm's in-memory JSON edits, and records provenance. The served player is `live_runtime.patch_player` for
@@ -158,6 +161,7 @@ SPLICES = {
     "fg-swap": (b"Y.forEach(", b"Y.reverse().forEach(", 1),
     "lut-identity": (b"d[j]=L[d[j]],d[j+1]=L[d[j+1]],d[j+2]=L[d[j+2]]", b"d[j]=d[j],d[j+1]=d[j+1],d[j+2]=d[j+2]", 1),
     "sn-frac": (b"sn=function(z,e,k){return Math.round((z-e)*k*p)/p}", b"sn=function(z,e,k){return(z-e)*k}", 1),
+    "snap-shift": (b's.left=a0+"px"', b's.left=a0+1/p+"px"', 1),
 }
 
 RAW_STYLE = '<style id="obed-dx-transparent">html,body,#body{background:transparent!important}</style>'
@@ -234,6 +238,9 @@ class Arm:
     inject: str | None = None
     decoders: int = 1
     letterbox: int = 0
+    grant: str = "driver"
+    reason: str | None = None
+    regrant: str | None = None
 
 
 def viewport_of(arm: Arm) -> tuple[int, int]:
@@ -260,6 +267,8 @@ _TONE = {**_MEDIA, "movies": "tone", "capture": "reference", "holders": 1, "clas
 _SNAP = {**_MEDIA, "capture": "reference", "holders": 1, "classes": _ALL}
 _SNAP_EXPECT = {"holder_pixels": "PASS", "reference": "PASS", "mask": "PASS"}
 _ENGAGE = {**_MEDIA, "capture": "engage", "classes": ("out",)}
+_SCOPE = {**_MEDIA, "mode": "rendering", "capture": "media", "classes": ("out", "in"), "grant": "none",
+          "expect": {"model": "PASS", "scope": "FAIL"}}
 ARMS: dict[str, Arm] = {
     "on": Arm("p2", 2, movies="player", classes=_ALL, expect=_ON_EXPECT),
     "on-dsk": Arm("dsk", 5, classes=_ALL, expect=_ON_EXPECT),
@@ -314,7 +323,17 @@ ARMS: dict[str, Arm] = {
     "m-raw-svgclip": Arm(**_ENGAGE, page="raw", holders=1, inject="svgclip", expect={"exterior": "PASS"}),
     **{f"m-raw-{n}": Arm(**_ENGAGE, page="raw", inject=n, expect={"exterior": "FAIL"})
        for n in ("caption", "nav-open", "modal", "svg", "script", "shadow-modal", "shadow-fixed")},
-    "m-dsk78": Arm("dsk", 7, movies="h264", capture="engage", classes=("out",), holders=2, decoders=2, expect={"cost": "PASS", "geometry": "PASS"}),
+    "m-raw-prod": Arm(**_SCOPE, page="raw"),
+    "m-preview-prod": Arm(**_SCOPE, page="preview"),
+    "cef-skip": Arm(**{**_SCOPE, "mode": "on"}, reason="attached"),
+    "cef-skip-dsk": Arm(**{**_SCOPE, "deck": "dsk", "slide": 7, "movies": "h264", "continuity": "off", "mode": "on", "classes": ("out",)},
+                        decoders=2, reason="attached"),
+    "grant-chrome": Arm(**_ENGAGE, page="screen", grant="host", reason="granted", holders=1, expect={"grant": "PASS"}),
+    "grant-attach": Arm(**_ENGAGE, grant="none", reason="attached", expect={"grant": "FAIL"}),
+    "channel-predefined": Arm(**{**_ENGAGE, "capture": "channel"}, page="screen", grant="host", reason="channel-compromised",
+                              expect={"grant": "FAIL"}),
+    "life-grant-reload": Arm(**_ENGAGE, page="screen", holders=1, grant="host", reason="granted", regrant="reload",
+                             expect={"grant": "PASS"}),
     "m-bridge-off": Arm("p2", 4, mode="off", movies="player", continuity="auto", capture="media", classes=("out",), bridge=True,
                         styles="none", expect={"overlay": "FAIL"}),
     "m-bridge": Arm("p2", 4, movies="player", continuity="auto", capture="media", classes=("out",), bridge=True,
@@ -358,8 +377,16 @@ for _d, _dpr in SNAP_DPR.items():
             SNAPS.append(_name)
             ARMS[_name] = Arm(**_cell, expect=_SNAP_EXPECT | {"geometry": "PASS"}, twin=f"{_name}-twin")
             ARMS[f"{_name}-twin"] = Arm(**_cell, splice="fg-omit")
-            ARMS[f"{_name}-frac"] = Arm(**_cell, splice="sn-frac", expect=_SNAP_EXPECT | {"holder_pixels": "FAIL"}, twin=f"{_name}-frac-twin")
-            ARMS[f"{_name}-frac-twin"] = Arm(**_cell, splice="sn-frac+fg-omit")
+DISPLACED = {"frac": ("sn-frac", ("m-snap-dpr15", "m-snap-dpr2")), "shift": ("snap-shift", ("m-snap", "m-snap-dpr15", "m-snap-dpr2"))}
+"""Displaced-edge FAIL controls on the 1920x1080 cells: `sn` unrounded at DPR 1.5 and 2 (at DPR 1 the alpha scan rejects
+it, no holder) and the holder one device px right at every DPR."""
+FAILS: list[str] = []
+for _tag, (_splice, _cells) in DISPLACED.items():
+    for _base in _cells:
+        _name = f"{_base}-{_tag}"
+        FAILS.append(_name)
+        ARMS[_name] = replace(ARMS[_base], splice=_splice, expect=_SNAP_EXPECT | {"holder_pixels": "FAIL"}, twin=f"{_name}-twin")
+        ARMS[f"{_name}-twin"] = replace(ARMS[f"{_base}-twin"], splice=f"{_splice}+fg-omit")
 TWINS = frozenset(a.twin for a in ARMS.values() if a.twin)
 
 CONTROLS: dict[str, tuple[tuple[str, ...], ...]] = {
@@ -378,16 +405,18 @@ CONTROLS: dict[str, tuple[tuple[str, ...], ...]] = {
     "tone": (("m-tone",), ("m-tone-raw",)),
     "overlay": (("m-on",), ("m-bridge-off",)),
     "cost": (("case:cost-50",), ("case:cost-50-eps",)),
-    "holder_pixels": (tuple(SNAPS), (*(f"{n}-frac" for n in SNAPS), "case:holder-shift")),
-    "reference": ((*SNAPS, *(f"{n}-frac" for n in SNAPS), "case:reference-valid"), ("perfect-shift",),
+    "holder_pixels": (tuple(SNAPS), (*FAILS, "case:holder-shift")),
+    "reference": ((*SNAPS, *FAILS, "case:reference-valid"), ("perfect-shift",),
                   ("case:reference-stale", "case:reference-extra", "case:reference-unpaused")),
-    "mask": ((*SNAPS, *(f"{n}-frac" for n in SNAPS), "m-tone", "case:mask-production"), (),
+    "mask": ((*SNAPS, *FAILS, "m-tone", "case:mask-production"), (),
              ("case:mask-whole", "case:mask-shift3", "case:mask-empty")),
     "geometry": (tuple(SNAPS), ("m-geo-dpr125", "m-geo-2560", "m-geo-scale", "m-geo-base")),
     "exterior": (("m-raw", "m-raw-end", "m-raw-svgclip"),
                  tuple(f"m-raw-{n}" for n in ("caption", "nav-open", "modal", "svg", "script", "shadow-modal", "shadow-fixed"))),
     "hidden": (("life-hide-twin", "life-hide-screen-twin"), ("life-hide-nohide",), ("case:hide-duplicate", "case:hide-shift")),
     "shown": (("life-hide-twin", "life-hide-screen-twin"), ("life-hide-noshow",)),
+    "grant": (("grant-chrome",), ("grant-attach", "channel-predefined")),
+    "scope": ((), ("m-raw-prod", "m-preview-prod")),
 }
 """Per gated check: (positive controls -> PASS, negative controls -> FAIL[, scorer cases that must be INCONCLUSIVE])."""
 
@@ -633,6 +662,10 @@ HOOK_JS = r"""
 SNAPSHOT_JS = ("(function(){var s=null;try{s=window.__obedLive.snapshot()}catch(e){}return s?{scene:s.sceneId,"
                "next:s.nextSceneId,state:s.playerState,ready:s.ready}:null})()")
 STAGE_JS = mmo.STAGE_JS
+PLACEMENT_JS = "('__obedPlacement' in window)?String(window.__obedPlacement):null"
+PREDEFINE_JS = ("Object.defineProperty(window,'__obedPlacement',{get:function(){return 'snap'},enumerable:false,"
+                "configurable:false})")
+"""`channel-predefined`: a forged `snap` getter defined before the host's first-run script, which then throws."""
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -654,7 +687,12 @@ def apply_splices(player: bytes, splice: str | None) -> bytes:
 
 
 def served_player(stock: bytes, mode: str, splice: str | None = None) -> bytes:
-    return apply_splices(live_runtime.patch_player(stock, mm_opacity=mode == "on"), splice)
+    """`patch_player` for `on`/`off`; `rendering` = the production preview/raw bytes (`patch_rendering`, no hook)."""
+    patched = live_runtime.patch_rendering(stock) if mode == "rendering" else live_runtime.patch_player(stock, mm_opacity=mode == "on")
+    return apply_splices(patched, splice)
+
+
+PIN_INDEX = {"on": 0, "off": 1, "rendering": 2}
 
 
 @contextlib.contextmanager
@@ -677,15 +715,17 @@ def serving(splice: str | None) -> Iterator[None]:
         live_host.patch_player = real
 
 
-def hooked_transport(base: type | None = None) -> type:
-    """A `ChromeCdp` (or `base`) subclass that installs `HOOK_JS` as the innermost new-document script."""
+def hooked_transport(base: type | None = None, *, before: str | None = None) -> type:
+    """A `ChromeCdp` (or `base`) subclass that installs `HOOK_JS` as the innermost new-document script; `before` is
+    installed ahead of every script the host adds after `start` (`channel-predefined`)."""
     if base is None:
         from obed_edom.live_host import ChromeCdp as base
 
     class HookedCdp(base):
         def start(self) -> None:
             super().start()
-            self.call("Page.addScriptToEvaluateOnNewDocument", source=HOOK_JS)
+            for source in (before, HOOK_JS) if before else (HOOK_JS,):
+                self.call("Page.addScriptToEvaluateOnNewDocument", source=source)
 
     return HookedCdp
 
@@ -2021,17 +2061,15 @@ class Profile:
         return tuple(n for n in scored if not (n == "m-tone-raw" and identity))
 
 
-DX1 = Profile("DX-1", tuple(n for n in ARMS if n != "m-dsk78"))
-CEF = Profile("CEF", ("opaque-off", "off", "noblend", "on2", "cut-on", "cut-off", "m-paused", "m-off", "m-hold", "m-fg",
-                      "m-fg-omit", "m-fg-swap", "m-tone", "m-tone-twin", "m-tone-raw", "m-bridge-off", "m-on", "on", "opaque-on",
-                      "m-bridge", "m-snap", "m-snap-twin", "m-snap-frac", "m-snap-frac-twin", "perfect-shift", "m-dsk78"),
-              reported=("no_flash", "screen", "geometry", "exterior", "hidden", "shown"), headless=False, lifecycle=False,
-              overrides=(("holder_pixels", (("m-snap",), ("m-snap-frac", "case:holder-shift"))),
-                         ("reference", (("m-snap", "m-snap-frac", "case:reference-valid"), ("perfect-shift",), CONTROLS["reference"][2])),
-                         ("mask", (("m-snap", "m-snap-frac", "m-tone", "case:mask-production"), (), CONTROLS["mask"][2]))))
-"""DX-2 (§9.2): the DX-1 arms OBS can carry plus DSK 7->8 and `m-snap` at the source geometry, its holder pixels blocking
-at τ_CEF with `m-snap-frac` / `perfect-shift` as controls (no letterboxed twin in OBS); geometry, exterior gate and hide
-controls need DX-1-only arms and are reported."""
+CEF_ONLY = ("cef-skip", "cef-skip-dsk")
+DX1 = Profile("DX-1", tuple(n for n in ARMS if n not in CEF_ONLY))
+CEF = Profile("CEF", ("opaque-off", "off", "noblend", "on2", "cut-on", "cut-off", "on", "opaque-on", *CEF_ONLY),
+              reported=("no_flash", "screen", "geometry", "exterior", "hidden", "shown", "frozen_frame", "frozen_region",
+                        "foreground", "tone", "overlay", "cost", "holder_pixels", "reference", "mask", "grant"),
+              headless=False, lifecycle=False, overrides=(("scope", ((), CEF_ONLY)),))
+"""DX-2 (§9.2): the DX-1 cross-fade, cut and opaque arms OBS can carry plus `cef-skip` (P2 2->3, DSK 7->8): CEF never
+gets the snapped-placement grant (decision 15), so each publishes a take with no holder; checks without a CEF arm are
+reported."""
 
 
 ANIM_STATES = ("idle", "running", "paused", "finished")
@@ -2263,7 +2301,7 @@ def capture_problems(record: dict[str, Any], images: Mapping[str, np.ndarray], a
         problems.append("stock player is not a supported player")
     elif not output_sha or output_sha != served.get("expected"):
         problems.append(f"served digest {output_sha} != expected {served.get('expected')}")
-    elif arm.splice is None and output_sha != pins[0 if arm.mode == "on" else 1]:
+    elif arm.splice is None and output_sha != pins[PIN_INDEX[arm.mode]]:
         problems.append("served digest is not the pinned digest for the mode")
     stage, want = record.get("stage"), stage_of(arm)
     if not isinstance(stage, dict) or not all(number(stage.get(k)) and abs(stage[k] - v) <= 0.5 for k, v in want.items()):
@@ -2327,11 +2365,30 @@ def capture_problems(record: dict[str, Any], images: Mapping[str, np.ndarray], a
         problems.append(f"dropped actions {sorted(map(str, dropped))} != the arm's {arm.drop!r}")
     if arm.inject:
         problems += injection_problems(arm.inject, record.get("inject"), viewport_of(arm))
+    problems += placement_problems(record, arm, profile)
     if arm.capture in ("reference", "engage"):
         ev = evidence(record, images, arm)
         problems += class_problems(ev.A, ev.B, ev.media, arm.classes)
         if arm.capture == "reference":
             problems += reference_problems(record, images, arm, ev, cal)
+    return problems
+
+
+def placement_problems(record: dict[str, Any], arm: Arm, profile: Profile = DX1) -> list[str]:
+    """The page's own `__obedPlacement` read just before the advance: `snap` on a DX-1 arm granted through the host's
+    privileged channel (the host's token, or the raw page's first-run script); without a grant `invalid` on a host page
+    (the first-run script is always installed) and absent on the production raw/preview page; a reload row also reads
+    `invalid` in the fresh document before the host's re-grant and `snap` after it."""
+    read = record.get("placement", "missing")
+    if arm.grant == "none":
+        want = None if arm.page in ("raw", "preview") else "invalid"
+    elif profile.headless:
+        want = "snap"
+    else:
+        return []
+    problems = [] if read == want else [f"page placement {read!r} != {want!r} before the advance"]
+    if arm.regrant == "reload" and (record.get("reload") or {}).get("before") != "invalid":
+        problems.append(f"no fresh `invalid` document before the re-grant: {record.get('reload')}")
     return problems
 
 
@@ -2634,12 +2691,43 @@ COLOUR_TUPLE = re.compile(r"[a-z0-9-]+/[a-z0-9-]+/[a-z0-9-]+/(true|false)")
 MALFORMED = (TypeError, ValueError, KeyError, IndexError, AttributeError)
 
 
+def score_grant(record: dict[str, Any], ev: Any, arm: Arm) -> dict[str, Any]:
+    """Grant channel (§3.3): PASS when the host committed `snap` (reason `granted`) and the take bound its holder; FAIL
+    when the host recorded no grant with the arm's reason and the take published without a holder; anything else
+    (a reason other than the arm's, a holder without a grant, a grant without a holder) INCONCLUSIVE."""
+    placement = (record.get("output") or {}).get("placement")
+    if not isinstance(placement, dict) or placement.get("reason") != arm.reason:
+        return result(None, [f"output.placement {placement} does not carry reason {arm.reason!r}"])
+    engaged = score_engaged(record, ev, arm)
+    granted = placement.get("grant") == "snap"
+    if engaged["verdict"] == "INCONCLUSIVE" or (engaged["verdict"] == "PASS") != granted:
+        return result(None, engaged["problems"] + [f"grant {placement.get('grant')!r} with engagement {engaged['verdict']}"])
+    return result(granted, holders=engaged["detail"].get("holders", 0))
+
+
+def score_channel(record: dict[str, Any], arm: Arm) -> dict[str, Any]:
+    """`channel-predefined`: the host's round trip fails against a predefined getter, so it reports
+    `channel-compromised`, keeps the output hidden and refuses `show` -> FAIL; anything else INCONCLUSIVE."""
+    placement = (record.get("output") or {}).get("placement")
+    problems = [f"run error: {str(record['error']).strip().splitlines()[-1]}"] if record.get("error") else []
+    if not isinstance(placement, dict) or placement.get("reason") != arm.reason or placement.get("grant") is not None:
+        problems.append(f"output.placement {placement} is not a refused grant with reason {arm.reason!r}")
+    if record.get("showRefused") is not True:
+        problems.append(f"show was not refused: {record.get('showRefused')!r}")
+    checks = {"grant": result(None if problems else False, problems)}
+    outcome = "INCONCLUSIVE" if problems else ("MATCH" if arm.expect.get("grant") == "FAIL" else "MISMATCH")
+    return {"outcome": outcome, "checks": checks, "mismatch": [] if outcome != "MISMATCH" else ["grant"], "problems": problems,
+            "midResiduals": [], "fitted": []}
+
+
 def score_arm(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Arm, cal: Calibration = Calibration(), *,
               identity: bool | None = None, profile: Profile = DX1, twin: tuple[dict[str, Any], Mapping[str, np.ndarray]] | None = None,
               lut: np.ndarray | None = None) -> dict[str, Any]:
     """Every check in the arm's contract; integrity problems, or a record too malformed to read, make each one
     INCONCLUSIVE. `twin` = the arm's same-frame twin run (mask verification); `lut` = its compositing path's `L_path`."""
     try:
+        if arm.capture == "channel":
+            return score_channel(record, arm)
         return _score_arm(record, images, arm, cal, identity=identity, profile=profile, twin=twin, lut=lut)
     except MALFORMED as exc:
         return malformed(arm.expect, exc)
@@ -2720,9 +2808,11 @@ def _score_arm(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Ar
         checks["holder_pixels"] = score_holder_pixels(images.get("ref-A0-0"), live, box, mask, lut, cal)
         checks["reference"] = score_perfect(images.get("ref-perfect-0"), live, box, cal)
         checks["mask"] = result(mask is not None, [] if mask is not None else ["production mask not verified"])
-    for name in ("geometry", "exterior"):
+    for name in ("geometry", "exterior", "scope"):
         if name in arm.expect:
             checks[name] = score_engaged(record, ev, arm)
+    if "grant" in arm.expect:
+        checks["grant"] = score_grant(record, ev, arm)
     if set(MEDIA_CHECKS) & set(arm.expect):
         media, shared = score_media(record, images, ev, arm, fade, cal, identity=identity, mask=mask)
         checks.update({k: v for k, v in media.items() if k in arm.expect})
@@ -3315,6 +3405,7 @@ def drive(host: Any, arm: Arm, target: dict[str, Any], capture: Callable[[], np.
         record["inject"] = evaluate(RAW_INJECTIONS[arm.inject])
         time.sleep(0.3)
     record["stage"] = evaluate(STAGE_JS)
+    record["placement"] = evaluate(PLACEMENT_JS)
     record["dsf"] = evaluate("devicePixelRatio")
     record["viewport"] = evaluate("[innerWidth, innerHeight]")
     foreground = evaluate("window.__obedDx.foreground()") or {}
@@ -3410,11 +3501,17 @@ RAW_SNAPSHOT_JS = ("(function(){var m=/^#(\\d+)$/.exec(location.hash||''),busy=d
 
 
 class RawHost:
-    """The raw export page (its own `index.html` with `RAW_STYLE`, navigator present) on the arm's served player, driven
-    with Space over CDP: the subset of `LiveOutputHost` that `drive` uses."""
+    """The raw export page (its own `index.html` with `RAW_STYLE`, navigator present; `preview` adds the Build Preview
+    diagnostics as `web.app` serves them) on the arm's served player, driven with Space over CDP: the subset of
+    `LiveOutputHost` that `drive` uses. With `grant`, the host's first-run script is installed before navigation under a
+    fresh token (`placement_token`), the privileged channel `commit_grant` uses; without it the page has no channel."""
     snapshot_js = RAW_SNAPSHOT_JS
 
-    def __init__(self, resolved: Resolved, player: bytes, scratch: Path, endpoint: str, tag: str) -> None:
+    def __init__(self, resolved: Resolved, player: bytes, scratch: Path, endpoint: str, tag: str, *, preview: bool = False,
+                 grant: bool = True) -> None:
+        import secrets
+
+        from obed_edom.html_preview import inject_player_diagnostics
         from obed_edom.live_host import _AssetServer
 
         index = (resolved.root / "index.html").read_text()
@@ -3424,17 +3521,25 @@ class RawHost:
         page = scratch / "raw" / tag / "index.html"
         page.parent.mkdir(parents=True, exist_ok=True)
         page.write_text(index[:head.end()] + RAW_STYLE + index[head.end():])
+        if preview:
+            page.write_text(inject_player_diagnostics(page.read_text()))
+        self.placement_token = secrets.token_hex(16) if grant else None
 
         def resolver(root: Path, relative: str) -> Path:
             return page if relative == "index.html" else resolved.resolver(root, relative)
 
         self.server = _AssetServer(resolved.root, player, resolver)
         self.transport = hooked_transport()(CHROME, page.parent / "profile", None, headless=True, attach_endpoint=endpoint)
-        self.output = {"mmOpacity": {"sha256": sha256_bytes(player)}, "page": "raw", "indexSha256": binary.sha256_file(page)}
+        self.output = {"mmOpacity": {"sha256": sha256_bytes(player)}, "page": "preview" if preview else "raw",
+                       "indexSha256": binary.sha256_file(page)}
 
     def start(self, width: int, height: int, dsf: float) -> None:
         base = self.server.start().rsplit("/", 1)[0]
         self.transport.start()
+        if self.placement_token:
+            from obed_edom.live_host import placement_init_script
+
+            self.transport.call("Page.addScriptToEvaluateOnNewDocument", source=placement_init_script(self.placement_token))
         if dsf == 1:
             self.transport.call("Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=1, mobile=False)
         self.transport.call("Emulation.setDefaultBackgroundColorOverride", color={"r": 0, "g": 0, "b": 0, "a": 0})
@@ -3463,10 +3568,39 @@ class RawHost:
         return SimpleNamespace(busy=bool(self.transport.evaluate("document.getAnimations().some(function(a){return a.playState==='running'})")))
 
 
+GRANT_WAIT_S = 10.0
+
+
+def commit_grant(evaluate: Callable[[str], Any], token: str | None) -> dict[str, Any]:
+    """The privileged channel: `__obedGrant(token, "snap")` with the token the first-run script was built from (never by
+    assigning the property), read back."""
+    ok = evaluate(f"window.__obedGrant({json.dumps(token)},'snap')") if token else None
+    return {"committed": ok is True, "read": evaluate(PLACEMENT_JS)}
+
+
+def host_grant(host: Any, evaluate: Callable[[str], Any], timeout_s: float = GRANT_WAIT_S) -> Any:
+    """Let the host run its own round trip (at `observe`) and return the page's read once it is `snap` or at timeout."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        host.observe()
+        read = evaluate(PLACEMENT_JS)
+        if read == "snap" or time.monotonic() > deadline:
+            return read
+        time.sleep(0.1)
+
+
+def regrant_after_reload(host: Any, transport: Any) -> dict[str, Any]:
+    """`life-grant-reload`: a fresh document reads `invalid` until the host's next `observe` re-grants it."""
+    transport.call("Page.reload", ignoreCache=True)
+    wait_ready(transport.evaluate)
+    before = transport.evaluate(PLACEMENT_JS)
+    return {"before": before, "after": host_grant(host, transport.evaluate)}
+
+
 def run_arm(name: str, scratch: Path, decision: dict[str, Any] | None = None) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
     import live_continuity_probe as probe
 
-    from obed_edom.live_host import LiveOutputHost
+    from obed_edom.live_host import LiveOutputHost, PlayerCommandRejected
 
     arm = ARMS[name]
     width, height = viewport_of(arm)
@@ -3478,7 +3612,7 @@ def run_arm(name: str, scratch: Path, decision: dict[str, Any] | None = None) ->
         resolved = resolve(arm, scratch, decision, tag=name)
         record.update(resolved.fields())
         attach = port = None
-        if arm.page in ("alpha", "raw"):
+        if arm.page in ("alpha", "raw", "preview"):
             proc, port, args = start_chrome(profile, gpu=arm.gpu, viewport=(width, height), dsf=arm.dsf)
             attach = f"http://127.0.0.1:{port}"
             record["launch"] = {"chromeArgs": args[1:], "metricsOverride": None}
@@ -3486,24 +3620,42 @@ def run_arm(name: str, scratch: Path, decision: dict[str, Any] | None = None) ->
             raise RuntimeError("a DPR != 1 arm needs its own Chrome launch with the flag (the screen page launches at DSF 1)")
         else:
             probe.force_viewport(width, height)
-        if arm.page == "raw":
+        if arm.page in ("raw", "preview"):
             stock = (resolved.root / "assets/player/main.js").read_bytes()
-            host = RawHost(resolved, served_player(stock, arm.mode, arm.splice), scratch, attach, name)
+            host = RawHost(resolved, served_player(stock, arm.mode, arm.splice), scratch, attach, name, preview=arm.page == "preview",
+                           grant=arm.grant == "driver")
             host.start(width, height, arm.dsf)
         else:
+            before = PREDEFINE_JS if arm.capture == "channel" else None
             host = LiveOutputHost(resolved.root, resolved.slides, headless=True, resolver=resolved.resolver,
-                                  transport_factory=hooked_transport(), attach_endpoint=attach, continuity=arm.continuity,
+                                  transport_factory=hooked_transport(before=before), attach_endpoint=attach, continuity=arm.continuity,
                                   gl_replay="off", mm_opacity="auto" if arm.mode == "on" else "off")
             with serving(arm.splice):
                 host.start()
         transport = host._require_transport()
+        if arm.capture == "channel":
+            host.observe()
+            try:
+                host.execute("show")
+                record["showRefused"] = False
+            except PlayerCommandRejected as exc:
+                record["showRefused"], record["showError"] = True, str(exc)
+            record["output"] = {"placement": host.output.get("placement")}
+            return record, images
         if arm.dsf == 1:
             transport.call("Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=1, mobile=False)
             if "launch" in record:
                 record["launch"]["metricsOverride"] = {"width": width, "height": height, "deviceScaleFactor": 1}
-        if arm.page in ("alpha", "raw"):
+        if arm.page in ("alpha", "raw", "preview"):
             transport.call("Emulation.setDefaultBackgroundColorOverride", color={"r": 0, "g": 0, "b": 0, "a": 0})
-        record["output"] = {k: host.output.get(k) for k in ("mmOpacity", "continuity", "page", "indexSha256") if k in host.output}
+        if arm.grant == "driver":
+            record["grant"] = commit_grant(transport.evaluate, getattr(host, "placement_token", None) or host._placement_token)
+        elif arm.grant == "host":
+            record["grant"] = {"read": host_grant(host, transport.evaluate)}
+            if arm.regrant == "reload":
+                record["reload"] = regrant_after_reload(host, transport)
+        record["output"] = {k: host.output.get(k) for k in ("mmOpacity", "continuity", "page", "indexSha256", "placement")
+                            if k in host.output}
         port = port or transport.port
 
         def capture() -> np.ndarray:
@@ -3513,6 +3665,8 @@ def run_arm(name: str, scratch: Path, decision: dict[str, Any] | None = None) ->
         driven, images = drive(host, arm, resolved.target, capture, screencast=(lambda: screencast_frames(port)) if cast else None)
         record.update(driven)
         record.update(resolved.fields())
+        if "placement" in host.output:
+            record["output"]["placement"] = host.output["placement"]
     except Exception:  # noqa: BLE001
         record["error"] = traceback.format_exc()
     finally:

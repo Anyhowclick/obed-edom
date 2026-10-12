@@ -470,7 +470,7 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
     if holder:
         images["holder-0"] = holder_px
     pins = live_runtime.SUPPORTED_PLAYERS[STOCK]
-    expected = pins[0 if spec.mode == "on" else 1] if spec.splice is None else "f" * 64
+    expected = pins[probe.PIN_INDEX[spec.mode]] if spec.splice is None else "f" * 64
     rv = [[INSERT_MS - 1 - (presented - i) * 33.0, (REFERENCE - presented + i) / binary.FPS, i] for i in range(1, presented + 1)]
     record = {
         "arm": arm, "page": spec.page, "load": 0.5, "headlessBefore": 0, "stage": probe.stage_of(spec), "dsf": k,
@@ -488,6 +488,14 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
     }
     if spec.capture in ("paused", "reference"):
         record["paused"] = {"state": "presented", "frame": REFERENCE, "id": 0}
+    record["placement"] = (None if spec.page in ("raw", "preview") else "invalid") if spec.grant == "none" else "snap"
+    if spec.reason:
+        record["output"]["placement"] = {"grant": "snap" if spec.reason == "granted" else None, "reason": spec.reason,
+                                         "product": "HeadlessChrome/154.0.8037.59", "gpuCompositing": "enabled", "at": 1.0}
+    if spec.regrant:
+        record["reload"] = {"before": "invalid", "after": "snap"}
+    if spec.capture == "channel":
+        record["showRefused"] = True
     if spec.movies == "tone":
         layout = dict(TONE_LAYOUT)
         if mutate == "tone-under-fg":
@@ -543,6 +551,16 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         elif mutate == "hide-inside-del":
             cast = [c for c in cast if not when["hide"] <= c["t"] <= when["show"]]
         record["cast"] = cast
+    if mutate and mutate.startswith("placement-"):
+        record["placement"] = {"placement-invalid": "invalid", "placement-snap": "snap", "placement-absent": None}[mutate]
+    elif mutate == "reason-other":
+        record["output"]["placement"]["reason"] = "unqualified-version"
+    elif mutate == "grant-null":
+        record["output"]["placement"]["grant"] = None
+    elif mutate == "reload-snap":
+        record["reload"]["before"] = "snap"
+    elif mutate == "show-allowed":
+        record["showRefused"] = False
     if mutate == "digest":
         record["output"]["mmOpacity"]["sha256"] = "0" * 64
     elif mutate == "texture-ids":
@@ -648,13 +666,6 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         record["dump"]["vids"] = []
         for r in record["dump"]["raf"]:
             r["videos"] = []
-    elif mutate in ("dsk-two-holders", "dsk-no-decoder"):
-        record["dump"]["first"]["holders"].append(dict(record["dump"]["first"]["holders"][0]))
-        images["holder-1"] = images["holder-0"].copy()
-        if mutate == "dsk-no-decoder":
-            record["dump"]["vids"] = []
-            for r in record["dump"]["raf"]:
-                r["videos"] = []
     return record, images
 
 
@@ -833,8 +844,8 @@ def cases(prefix: str, variants: tuple[str, ...]) -> dict[str, str]:
     return {v: table[f"case:{prefix}-{v}"]["verdict"] for v in variants}
 
 
-def cef_outcome_of(arm: str, mutate: str) -> str:
-    record, images = media_run(arm, mutate=mutate)
+def cef_outcome_of(arm: str, mutate: str | None = None, holder: bool = True) -> str:
+    record, images = media_run(arm, mutate=mutate, holder=holder)
     return probe.score_arm(record, images, probe.CEF.arm(arm), CAL, profile=probe.CEF)["outcome"]
 
 
@@ -851,6 +862,18 @@ def stale_patch_blank_in() -> str:
     record, images = media_run("m-snap", mutate="ref-stale-patch")
     images["tex-in"] = np.zeros_like(images["tex-in"])
     return probe.score_arm(record, images, probe.ARMS["m-snap"], CAL, twin=media_run("m-snap-twin"), lut=IDENTITY_LUT)["outcome"]
+
+
+def snap_shift() -> list[int]:
+    """The `snap-shift` anchor on the served `on` bytes of both supported players, and on their `fg-omit` twins."""
+    counts = []
+    for stock, (pin, _, _) in live_runtime.SUPPORTED_PLAYERS.items():
+        player = next((f.read_bytes() for f in probe.FIXTURES.glob("**/assets/player/main.js") if probe.sha256_bytes(f.read_bytes()) == stock), None)
+        if player is None:
+            pytest.skip("supported player export not available")
+        on, twin = probe.served_player(player, "on", "snap-shift"), probe.served_player(player, "on", "snap-shift+fg-omit")
+        counts.append(on.count(b's.left=a0+1/p+"px"') + twin.count(b's.left=a0+"px"'))
+    return counts
 
 
 def no_twin() -> str:
@@ -1009,7 +1032,7 @@ CASES = [
     ("r12 holder pixels: no L_path for the compositing path", lambda: arm_check("m-snap", "holder_pixels", lut=None), "INCONCLUSIVE"),
     ("r12 holder pixels: scorer case 1-px shifted holder", lambda: probe.scorer_cases(CAL)["case:holder-shift"]["verdict"], "FAIL"),
     ("r12 m-snap complete", lambda: arm_outcome("m-snap"), "MATCH"),
-    ("r12 m-snap-frac contract on a 1-px-off movie", lambda: arm_outcome("m-snap-frac", mutate="holder-shift"), "MATCH"),
+    ("r12 m-snap-dpr15-frac contract on a 1-px-off movie", lambda: arm_outcome("m-snap-dpr15-frac", mutate="holder-shift"), "MATCH"),
     ("r12 mask verification: production mask", lambda: arm_check("m-snap", "mask"), "PASS"),
     ("r12 mask verification: whole-rectangle inventory", lambda: arm_check("m-snap", "mask", mutate="mask-whole"), "INCONCLUSIVE"),
     ("r12 mask verification: 3-px shifted inventory", lambda: arm_check("m-snap", "mask", mutate="mask-shift3"), "INCONCLUSIVE"),
@@ -1048,15 +1071,10 @@ CASES = [
      ({"x": 0.0, "y": 60.5, "width": 640.0, "height": 360.0}, (720, 1280))),
     ("r12 round: a dropped-action control passing invalidates its gate", lambda: round_gate(("life-hide-nohide", "hidden", "PASS"), "hidden"), "INCONCLUSIVE"),
     ("sweep r12: a dropped-action control recorded as performed", lambda: hide_check("life-hide-nohide", "hidden", mutate="drop-flag-del"), "INCONCLUSIVE"),
-    ("r12 CEF: m-snap holder pixels blocking, read after their controls", lambda: round_gate(None, "holder_pixels", profile=probe.CEF), "PASS"),
-    ("r12 CEF: m-snap-frac passing invalidates the holder-pixel gate",
-     lambda: round_gate(("m-snap-frac", "holder_pixels", "PASS"), "holder_pixels", profile=probe.CEF), "INCONCLUSIVE"),
     ("r12-1 m-snap without decoder rVFC and colour tuple", lambda: arm_outcome("m-snap", mutate="no-decoder-evidence"), "INCONCLUSIVE"),
-    ("r12-1 m-snap-frac (1 px off) without decoder evidence", lambda: arm_outcome("m-snap-frac", mutate="no-decoder-evidence"), "INCONCLUSIVE"),
+    ("r12-1 m-snap-dpr15-frac (1 px off) without decoder evidence", lambda: arm_outcome("m-snap-dpr15-frac", mutate="no-decoder-evidence"), "INCONCLUSIVE"),
     ("r12-1 m-raw-caption without decoder or video inventories", lambda: arm_outcome("m-raw-caption", holder=False, mutate="no-media-inventory"), "INCONCLUSIVE"),
     ("r12-1 m-geo-scale without decoder or video inventories", lambda: arm_outcome("m-geo-scale", holder=False, mutate="no-media-inventory"), "INCONCLUSIVE"),
-    ("r12-1 CEF m-dsk78: two holders, no decoder observations", lambda: cef_outcome_of("m-dsk78", "dsk-no-decoder"), "INCONCLUSIVE"),
-    ("r12-1 CEF m-dsk78: two holders bound to one decoder", lambda: cef_outcome_of("m-dsk78", "dsk-two-holders"), "INCONCLUSIVE"),
     ("r12-2 life-hide-nohide without after-show frames", lambda: hide_check("life-hide-nohide", "hidden", mutate="hide-after-del"), "INCONCLUSIVE"),
     ("r12-2 life-hide-noshow without hidden-interval frames", lambda: hide_check("life-hide-noshow", "shown", mutate="hide-inside-del"), "INCONCLUSIVE"),
     ("r12-3 tone cells wholly under the verified mask", lambda: arm_check("m-tone", "tone", identity=False, mutate="tone-under-fg"), "INCONCLUSIVE"),
@@ -1070,10 +1088,6 @@ CASES = [
     ("r12-8 m-tone identity with < 50 % tone coverage", lambda: tone_identity("tone-small-cells"), "INCONCLUSIVE"),
     ("r12-9 DX-2 L_path measured in the launch (tone step -> 139 at 128) / identity / no m-tone session",
      lambda: (launch_map("tone-step"), launch_map(None), launch_map(None, drop=True)), ((True, 139), (True, 128), (False, None))),
-    ("r12-9 DX-2 holder pixels without a launch map", lambda: probe.score_runs({"m-snap": media_run("m-snap", mutate="tone-step"),
-                                                                              "m-snap-twin": media_run("m-snap-twin", mutate="tone-step")},
-                                                                             {"lPath": {"gpu": "analytic"}}, CAL, profile=probe.CEF)
-     ["detail"]["m-snap"]["checks"]["holder_pixels"]["verdict"], "INCONCLUSIVE"),
     ("r12b-1 m-raw-nav-open with the sidebar below the viewport", lambda: arm_outcome("m-raw-nav-open", holder=False, mutate="nav-offscreen"), "INCONCLUSIVE"),
     ("r12b-2 m-raw-caption with zeroed textures", lambda: arm_outcome("m-raw-caption", holder=False, mutate="tex-zero"), "INCONCLUSIVE"),
     ("r12b-2 m-geo-scale with zeroed textures", lambda: arm_outcome("m-geo-scale", holder=False, mutate="tex-zero"), "INCONCLUSIVE"),
@@ -1081,8 +1095,8 @@ CASES = [
     ("r12c-1 stale F50/B under a blank incoming texture (Astra impl r3)", stale_patch_blank_in, "INCONCLUSIVE"),
     ("r12c-1 stale F50/B with the real incoming texture", lambda: arm_outcome("m-snap", mutate="ref-stale-patch"), "INCONCLUSIVE"),
     *[(f"r13 {n}: engagement, holder pixels, perfect, mask", lambda n=n: arm_outcome(n), "MATCH") for n in probe.SNAPS],
-    *[(f"r13 {n}-frac: displaced edge FAILs holder pixels", lambda n=n: arm_outcome(f"{n}-frac", mutate="holder-shift"), "MATCH")
-      for n in probe.SNAPS],
+    *[(f"r17 {n}: displaced edge FAILs holder pixels", lambda n=n: arm_outcome(n, mutate="holder-shift"), "MATCH")
+      for n in probe.FAILS],
     ("r13 m-geo-dpr125 publishes a take without a holder", lambda: arm_outcome("m-geo-dpr125", holder=False), "MATCH"),
     *[(f"r13 {n}: foreground preserved (blocking)", lambda n=n: arm_outcome(n), "MATCH") for n in ("m-fg", "m-fg-dsf15", "m-fg-dsf2")],
     ("r13 recorded DSF differs from the arm", lambda: arm_outcome("m-snap-dpr2", mutate="dsf-mismatch"), "INCONCLUSIVE"),
@@ -1095,6 +1109,27 @@ CASES = [
     ("r13 exact-coverage alpha support at DPR 1.5 (40 -> 60 px, one source px -> its 1.5 device px)",
      lambda: [int(v) for v in probe.coverage_support(np.eye(1, 40, 3, dtype=bool), (1, 60))[0].nonzero()[0]], [4, 5]),
     ("r12 round: perfect-shift passing invalidates the reference gate", lambda: round_gate(("perfect-shift", "reference", "PASS"), "reference"), "INCONCLUSIVE"),
+    ("r17 m-snap-shift moves the holder one device px right, once on every supported player and its omit twin", snap_shift, [1, 1]),
+    ("r17 DX-1 alpha arm whose page never received the grant", lambda: arm_outcome("m-on", mutate="placement-invalid"), "INCONCLUSIVE"),
+    ("r17 grant-chrome: host-committed snap binds a holder", lambda: arm_check("grant-chrome", "grant"), "PASS"),
+    ("r17 grant-attach: no grant (attached), published take without a holder", lambda: arm_outcome("grant-attach", holder=False), "MATCH"),
+    ("r17 grant-attach recorded with another reason", lambda: arm_check("grant-attach", "grant", holder=False, mutate="reason-other"), "INCONCLUSIVE"),
+    ("r17 grant-chrome holder without a host grant", lambda: arm_check("grant-chrome", "grant", mutate="grant-null"), "INCONCLUSIVE"),
+    ("r17 grant-attach page forged to snap", lambda: arm_outcome("grant-attach", holder=False, mutate="placement-snap"), "INCONCLUSIVE"),
+    ("r17 channel-predefined: channel-compromised and show refused", lambda: arm_outcome("channel-predefined", holder=False), "MATCH"),
+    ("r17 channel-predefined with show allowed", lambda: arm_outcome("channel-predefined", holder=False, mutate="show-allowed"), "INCONCLUSIVE"),
+    ("r17 grant-chrome complete: the committed grant freezes the next take (life-grant-valid)", lambda: arm_outcome("grant-chrome"), "MATCH"),
+    ("r17 life-grant-reload: invalid until the re-grant, then a holder", lambda: arm_outcome("life-grant-reload"), "MATCH"),
+    ("r17 life-grant-reload already snap before the re-grant", lambda: arm_outcome("life-grant-reload", mutate="reload-snap"), "INCONCLUSIVE"),
+    *[(f"r17 {n}: no channel, no holder, cross-fade model", lambda n=n: arm_outcome(n, holder=False), "MATCH") for n in ("m-raw-prod", "m-preview-prod")],
+    ("r17 m-raw-prod binding a holder", lambda: arm_check("m-raw-prod", "scope"), "PASS"),
+    ("r17 m-preview-prod page carrying a channel", lambda: arm_outcome("m-preview-prod", holder=False, mutate="placement-invalid"), "INCONCLUSIVE"),
+    ("r17 CEF cef-skip: invalid page, no holder, cross-fade model", lambda: cef_outcome_of("cef-skip", holder=False), "MATCH"),
+    ("r17 CEF cef-skip binding a holder", lambda: cef_outcome_of("cef-skip"), "MISMATCH"),
+    ("r17 CEF profile: cross-fade, cut, opaque and cef-skip sessions only; its round passes",
+     lambda: (probe.CEF.arms, round_gate(None, "overall", profile=probe.CEF), round_gate(None, "scope", profile=probe.CEF)),
+     (("opaque-off", "off", "noblend", "on2", "cut-on", "cut-off", "on", "opaque-on", "cef-skip", "cef-skip-dsk"), "PASS", "PASS")),
+    ("r17 round: grant-attach passing invalidates the grant gate", lambda: round_gate(("grant-attach", "grant", "PASS"), "grant"), "INCONCLUSIVE"),
 ]
 
 
