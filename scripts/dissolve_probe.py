@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import fnmatch
 import hashlib
 import io
 import json
@@ -1060,6 +1061,8 @@ def resolve(arm: Arm, scratch: Path, decision: dict[str, Any] | None = None, *, 
                     movies[rel] = info
                 files[rel] = Path(info["path"]) if info else unmod / rel
                 return files[rel]
+            if arm.movies != "player" and not fnmatch.fnmatch(Path(rel).name, binary.MOVIE_GLOB):
+                return unmod / rel
             if arm.movies == "player" or (arm.movies == "counter" and decision.get("counterEncoding") == "h264-untagged"):
                 if deck.player is None:
                     raise FileNotFoundError(rel)

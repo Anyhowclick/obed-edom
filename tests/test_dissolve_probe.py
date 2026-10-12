@@ -716,7 +716,8 @@ def terminal_hash() -> str | None:
 
 
 def eager_movies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> bool:
-    """Movie metadata (the tone layout) is in the resolver's fields before any capture requests a movie."""
+    """Movie metadata (the tone layout) is in the resolver's fields before any capture requests a movie; a movie the counter
+    fixture never replaced (P2's second `.mp4`) is served as exported, not parsed as a counter."""
     root = tmp_path / "deck"
     (root / "assets/a/assets").mkdir(parents=True)
     (root / "assets/player").mkdir(parents=True)
@@ -726,6 +727,7 @@ def eager_movies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> bool:
                                                     "baseLayer": {"layers": [{"layers": [{"texture": "IN"}, {"texture": "OUT"}]}]}}]}]
     (root / "assets/a/a.json").write_text(probe.json.dumps({"events": events}))
     (root / "assets/a/assets/Untitled.mov-0.0000-46.0333.mov").write_bytes(b"movie")
+    (root / "assets/a/assets/VID-20250608-WA0125.mp4-0.0000-45.1381.mp4").write_bytes(b"other movie")
     (root / "assets/player/main.js").write_bytes(b"player")
     monkeypatch.setitem(probe.DECKS, "syn", probe.Deck(root))
     monkeypatch.setattr(probe, "served_player", lambda *a, **k: b"served")
@@ -733,7 +735,8 @@ def eager_movies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> bool:
         "path": str(root / "assets/a/assets/Untitled.mov-0.0000-46.0333.mov"), "layout": probe.tone_layout()})
     arm = probe.replace(probe.ARMS["m-tone"], deck="syn", slide=1, strip=False)
     fields = probe.resolve(arm, tmp_path / "scratch").fields()
-    return bool(fields["movies"]) and all(m.get("layout") for m in fields["movies"].values())
+    return (bool(fields["movies"]) and all(m.get("layout") for m in fields["movies"].values())
+            and not any(k.endswith(".mp4") for k in fields["movies"]))
 
 
 def perfect_round(profile: Any = None) -> dict[str, dict[str, Any]]:
