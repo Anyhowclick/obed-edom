@@ -1398,6 +1398,33 @@ def leaf_effs(rec: dict[str, Any]) -> list[float] | None:
     return list(eff) if isinstance(eff, list) and len(eff) == 2 and all(number(v) and 0 <= v <= 1 for v in eff) else None
 
 
+PENDING_INITIAL = {"in": 0.0, "out": 1.0}
+
+
+def pending(rec: dict[str, Any]) -> bool:
+    """Every transition animation still pending (no start time, currentTime 0), each animated leaf's effective opacity
+    and animation value at its declared initial value (incoming 0, outgoing 1)."""
+    anims, eff = rec.get("anims"), leaf_effs(rec)
+    return bool(anims) and eff is not None and all(
+        isinstance(a, dict) and a.get("start") is None and a.get("ct") == 0 and a.get("leaf") in PENDING_INITIAL
+        and a.get("value") == PENDING_INITIAL[a["leaf"]] and eff[a["leaf"] == "out"] == PENDING_INITIAL[a["leaf"]]
+        for a in anims)
+
+
+def raf_gaps(records: list[dict[str, Any]]) -> tuple[list[float], list[float]]:
+    """(forbidden, pre-start) rAF gaps > `RAF_GAP_MS`. A gap is pre-start (allowed) only when nothing has started by its
+    end and the record ending it is `pending`: nothing changes while the animations are pending, so that record is what
+    was painted throughout the gap (CEF's first transition frame)."""
+    forbidden, pre = [], []
+    started = False
+    for a, b in zip(records, records[1:]):
+        started = started or any(isinstance(x, dict) and x.get("start") is not None for r in (a, b) for x in r.get("anims") or [])
+        gap = b["t"] - a["t"]
+        if gap > RAF_GAP_MS:
+            (pre if not started and pending(b) else forbidden).append(gap)
+    return forbidden, pre
+
+
 def first_animation_t(raf: list[dict[str, Any]]) -> float | None:
     return next((float(r["t"]) for r in raf if any(number(a.get("ct")) and a["ct"] > 0 for a in r.get("anims") or [])), None)
 
@@ -1415,7 +1442,7 @@ def score_no_flash(raf: list[dict[str, Any]], window_in_alpha: list[float] | Non
         problems.append("no rAF with the transition DOM before the first animation frame")
     elif any(leaf_effs(r) is None for r in window):
         problems.append("malformed leaf opacity in the window")
-    elif any(b["t"] - a["t"] > RAF_GAP_MS for a, b in zip(window, window[1:])):
+    elif raf_gaps(window)[0]:
         problems.append("rAF gap in the window")
     if window_in_alpha is not None:
         if len(window_in_alpha) < 2:
@@ -1448,7 +1475,7 @@ def score_cut(raf: list[dict[str, Any]], cast: list[dict[str, Any]], cal: Calibr
         problems.append("rAF coverage does not reach 3 frames after the cut")
     if not pre:
         problems.append("no rAF before the cut's first animation frame")
-    if any(b["t"] - a["t"] > RAF_GAP_MS for a, b in zip(dom, dom[1:])):
+    if raf_gaps(dom)[0]:
         problems.append("rAF gap inside the cut")
     if any(not number(c.get("t0")) or not number(c.get("t1")) or c["t1"] < c["t0"] or c.get("in") is None or c.get("out") is None
            for c in cast):
@@ -2229,7 +2256,8 @@ def reference_ok(ref: Any) -> bool:
 
 def raf_problems(raf: Any) -> list[str]:
     """Every rAF record well formed: finite, strictly increasing `t`; `eff` absent or two finite leaf opacities with an
-    `anims` list beside it; `anims` and `videos` (always present; observed empty = []) lists of records; no gap > `RAF_GAP_MS` while the transition DOM is present."""
+    `anims` list beside it; `anims` and `videos` (always present; observed empty = []) lists of records; no gap > `RAF_GAP_MS` while the transition DOM is present
+    except a pre-start one (`raf_gaps`)."""
     if not isinstance(raf, list) or not all(isinstance(r, dict) for r in raf):
         return ["rAF log is not a list of records"]
     if not all(number(r.get("t")) for r in raf) or any(b["t"] <= a["t"] for a, b in zip(raf, raf[1:])):
@@ -2243,7 +2271,7 @@ def raf_problems(raf: Any) -> list[str]:
     if span and span != list(range(span[0], span[-1] + 1)):
         return ["the transition DOM vanishes and reappears inside one capture"]
     fade = raf[span[0]:span[-1] + 1] if span else []
-    return ["rAF gap inside the transition"] if any(b["t"] - a["t"] > RAF_GAP_MS for a, b in zip(fade, fade[1:])) else []
+    return ["rAF gap inside the transition"] if raf_gaps(fade)[0] else []
 
 
 PAUSED = ("paused", "reference")

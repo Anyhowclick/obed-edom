@@ -807,7 +807,7 @@ def cef_outcome(**kwargs: Any) -> str:
 def w3_evidence() -> list[str]:
     import managed_obs_qualify as q
 
-    record = {"output": {"continuity": {"mode": "qualified", "glReplay": {"mode": "off"}}, "mmOpacity": {"sha256": "a" * 64}},
+    record = {"output": {"continuity": {"mode": "qualified", "glReplay": {"mode": "injected"}}, "mmOpacity": {"sha256": "a" * 64}},
               "dump": {"vids": [{"src": "x.mov", "rv": [[1.0, 0.0, 1]], "tuple": None, "err": "VideoFrame failed"}]}}
     return q.dissolve_evidence(record)
 
@@ -916,6 +916,21 @@ def raw_navigate(ack: bool) -> tuple[str, int]:
         return "refused", Page.keys
     finally:
         probe.ADVANCE_ACK_S = wait
+
+
+def pre_start_gap(kind: str) -> list[str]:
+    """`raf_problems` on a dissolve whose first transition frame lands 70 ms after insertion (CEF), animations pending
+    (no start, ct 0) until t 70: allowed only when the record ending the gap holds the declared initial values (incoming
+    0, outgoing 1); `incoming` shows incoming 0.2 there, `after-start` moves the 70 ms gap past the start."""
+    def rec(t: float, e: float, start: float | None) -> dict[str, Any]:
+        ct = 0.0 if start is None else t - start
+        return {"t": t, "eff": [e, 1 - e], "videos": [], "anims": [{"leaf": "in", "start": start, "ct": ct, "value": e, "state": "running"},
+                                                                    {"leaf": "out", "start": start, "ct": ct, "value": 1 - e, "state": "running"}]}
+    first = 0.2 if kind == "incoming" else 0.0
+    raf = [rec(0.0, 0.0, None), rec(70.0, first, None), *[rec(70.0 + 20 * i, i / 60, 70.0) for i in range(1, 30)]]
+    if kind == "after-start":
+        raf = [rec(0.0, 0.0, None), rec(20.0, 0.0, None), *[rec(20.0 + 20 * i + 50 * (i > 5), i / 60, 20.0) for i in range(1, 30)]]
+    return probe.raf_problems(raf)
 
 
 def no_twin() -> str:
@@ -1182,6 +1197,9 @@ CASES = [
          {"automaticPlay": False, "effects": [{"type": "transition", "name": "apple:dissolve", "duration": 1.5,
                                                 "baseLayer": {"layers": [{"layers": [{"texture": "IN"}, {"texture": "OUT"}]}]}}]}]}}.__getitem__, 1)
      ["automaticScenes"], [0]),
+    ("DX-2 CEF: a 70 ms gap before the start, ending on a pending record at the initial values", lambda: pre_start_gap("pending"), []),
+    ("DX-2 CEF: a pre-start gap ending on incoming opacity 0.2", lambda: pre_start_gap("incoming"), ["rAF gap inside the transition"]),
+    ("DX-2 CEF: a 70 ms gap after the animations started", lambda: pre_start_gap("after-start"), ["rAF gap inside the transition"]),
     ("r17 round: grant-attach passing invalidates the grant gate", lambda: round_gate(("grant-attach", "grant", "PASS"), "grant"), "INCONCLUSIVE"),
 ]
 

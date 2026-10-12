@@ -107,6 +107,47 @@ def test_dissolve_sessions_are_the_p2_crossfade_cut_and_opaque_arms_plus_cef_ski
     assert not [s for s in sessions if s.startswith(("m-", "screen-", "delay-", "life-", "grant-", "perfect")) or s == "on-sw"]
 
 
+@pytest.mark.parametrize("g2_mode, g2, missing", [("off", None, False), ("off", "IDLE", True), ("injected", "IDLE", False),
+                                                    ("injected", None, True)])
+def test_dissolve_evidence_reads_g2_state_only_where_the_module_is_injected(g2_mode, g2, missing):
+    # DX-2 sessions run gl_replay="off": the host injects no G2 module, so the page has no __OBED_GL_REPLAY__ and the
+    # recorded state must be None; a state there (or none where the module is injected) is missing evidence.
+    record = {"g2": g2, "output": {"continuity": {"mode": "off", "glReplay": {"mode": g2_mode}}, "mmOpacity": {"sha256": "ab"}}}
+    assert ("G2 state" in q.dissolve_evidence(record)) is missing
+
+
+def test_await_input_resends_a_lone_shift_keyup_until_the_page_sees_one():
+    # Live CEF (2026-10-12): key input sent within ~0.5 s of a new document is dropped (no keydown reaches the page) and
+    # the advance is never acknowledged. The player has no keyup handler, so a lone Shift keyUp probes the route safely.
+    class Page:
+        sent: list[dict[str, Any]] = []
+
+        def evaluate(self, expression: str) -> Any:
+            return len(self.sent) >= 2 if expression == "window.__obedDxInput" else None
+
+        def call(self, method: str, **params: Any) -> None:
+            self.sent.append({"method": method, **params})
+
+    page = Page()
+    q.await_input(page)
+    assert page.sent == [{"method": "Input.dispatchKeyEvent", "type": "keyUp", "key": "Shift", "code": "ShiftLeft",
+                          "windowsVirtualKeyCode": 16}] * 2
+
+
+def test_unpremultiply_gives_the_dissolve_scorer_straight_rgba_it_re_premultiplies_within_half_a_level():
+    # Live DX-2 (2026-10-12): GetSourceScreenshot's RGB is premultiplied (|shot - premul(texture)| 0.1 vs |shot - texture|
+    # 53 on translucent pixels), and the scorer premultiplies again, so the patched cross-fade read a residual of ~70.
+    rng = np.random.default_rng(7)
+    straight = rng.integers(0, 256, (64, 64, 4)).astype(np.uint8)
+    straight[0, :, 3], straight[1, :, 3] = 0, 255
+    shot = straight.copy()
+    shot[..., :3] = np.rint(straight[..., :3] * (straight[..., 3:4] / 255.0)).astype(np.uint8)
+    back = q.unpremultiply(shot)
+    assert np.array_equal(back[..., 3], straight[..., 3]) and not back[0, :, :3].any()
+    assert np.array_equal(back[1], straight[1])
+    assert np.abs(q.dissolve_probe.premul(back)[..., :3] - shot[..., :3]).max() <= 0.5 + 1e-4
+
+
 ATTACHED = {"grant": None, "reason": "attached", "product": "Chrome/127.0.6533.120", "gpuCompositing": True, "at": 1.0}
 
 

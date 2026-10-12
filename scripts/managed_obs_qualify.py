@@ -285,14 +285,23 @@ def wait_engine(engine: ManagedObs, done: tuple[str, ...], timeout_s: float) -> 
         time.sleep(0.1)
 
 
+def unpremultiply(img: np.ndarray) -> np.ndarray:
+    """GetSourceScreenshot's RGB is premultiplied by alpha; straight RGBA (as CDP screenshots) for the dissolve scorer,
+    which premultiplies again (round trip within 0.5)."""
+    a = img[..., 3:4].astype(np.float32)
+    rgb = np.where(a > 0, np.minimum(np.rint(img[..., :3] * 255.0 / np.maximum(a, 1.0)), 255.0), 0.0)
+    return np.concatenate([rgb.astype(np.uint8), img[..., 3:4]], axis=2)
+
+
 @contextlib.contextmanager
-def source_shots(port: int, password: str) -> Iterator[Callable[[], np.ndarray]]:
+def source_shots(port: int, password: str, straight: bool = False) -> Iterator[Callable[[], np.ndarray]]:
     """H x W x 4 RGBA renders of scene `AK` via obs-websocket (an independent scene render, not the DeckLink wire), over one
-    connection."""
+    connection; `straight` un-premultiplies them."""
     def shot() -> np.ndarray:
         data = ws.request("GetSourceScreenshot", {"sourceName": "AK", "imageFormat": "png", "imageWidth": 1920,
                                                   "imageHeight": 1080})["imageData"]
-        return np.array(Image.open(io.BytesIO(base64.b64decode(data.split(",", 1)[-1]))).convert("RGBA"))
+        img = np.array(Image.open(io.BytesIO(base64.b64decode(data.split(",", 1)[-1]))).convert("RGBA"))
+        return unpremultiply(img) if straight else img
 
     with mock.patch.object(obs_websocket, "_MAX_MESSAGE_BYTES", 64 * 1024 * 1024), ObsWebsocket(port, password, timeout=10.0) as ws:
         yield shot
@@ -681,11 +690,34 @@ def dissolve_evidence(record: dict[str, Any]) -> list[str]:
     continuity = output.get("continuity") or {}
     missing = [name for name, value in (("continuity", continuity.get("mode")), ("G2 mode", (continuity.get("glReplay") or {}).get("mode")),
                                         ("served digest", (output.get("mmOpacity") or {}).get("sha256"))) if not value]
-    if not isinstance(record.get("g2"), str) or not record["g2"]:
+    if (record.get("g2") is not None) if (continuity.get("glReplay") or {}).get("mode") == "off" else (
+            not isinstance(record.get("g2"), str) or not record["g2"]):
         missing.append("G2 state")
     missing += [f"colour tuple of {v.get('src')}" for v in (record.get("dump") or {}).get("vids") or [] if v.get("rv")
                 and not (isinstance(v.get("tuple"), str) and dissolve_probe.COLOUR_TUPLE.fullmatch(v["tuple"]))]
     return missing
+
+
+def await_input(transport: Any, timeout_s: float = 10.0) -> float:
+    """CEF drops CDP key input for a moment after a new document loads; a lone Shift keyUp (the player handles keydown
+    only) is resent until the page sees one. Returns the seconds it took."""
+    transport.evaluate("window.__obedDxInput=0;document.addEventListener('keyup',function f(e){window.__obedDxInput=1;"
+                       "document.removeEventListener('keyup',f,true)},true)")
+    started = time.monotonic()
+    while not transport.evaluate("window.__obedDxInput"):
+        if time.monotonic() - started > timeout_s:
+            raise RuntimeError(f"page saw no key input within {timeout_s} s")
+        transport.call("Input.dispatchKeyEvent", type="keyUp", key="Shift", code="ShiftLeft", windowsVirtualKeyCode=16)
+        time.sleep(0.1)
+    return round(time.monotonic() - started, 2)
+
+
+def pre_start_gaps(record: dict[str, Any]) -> list[float] | None:
+    """The rAF gaps `dissolve_probe.raf_gaps` allows (pending animations) while the transition DOM is present."""
+    try:
+        return [round(g, 1) for g in dissolve_probe.raf_gaps([r for r in record["dump"]["raf"] if "eff" in r])[1]]
+    except (KeyError, TypeError):
+        return None
 
 
 def dissolve_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] | None) -> dict[str, Any]:
@@ -705,8 +737,9 @@ def dissolve_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] | 
             host.start()
         record["page"] = "alpha" if host.output.get("alpha") else "screen"
         record["output"] = {k: host.output.get(k) for k in ("mmOpacity", "continuity", "placement")}
+        record["inputLiveS"] = await_input(host._require_transport())
         record["g2"] = ((host._require_transport().evaluate(GL_REPLAY_READ_JS) or {}).get("api") or {}).get("state")
-        with source_shots(*ctx["creds"]) as shot:
+        with source_shots(*ctx["creds"], straight=True) as shot:
             driven, images = dissolve_probe.drive(host, arm, resolved.target, shot)
         record.update(driven)
         if arm.capture == "cut":
@@ -726,6 +759,7 @@ def dissolve_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] | 
     out: dict[str, Any] = {"session": name, "runDir": str(ctx["shots"] / "runs" / name), "page": record.get("page"),
                            "output": record.get("output"), "g2": record.get("g2"),
                            "colourTuples": [[v.get("src"), v.get("tuple"), v.get("err")] for v in (record.get("dump") or {}).get("vids") or []],
+                           "inputLiveS": record.get("inputLiveS"), "preStartGapsMs": pre_start_gaps(record),
                            "timingS": {"script": round(time.monotonic() - started, 2)}}
     if record.get("error"):
         out["fatal"] = str(record["error"])[-3000:]
