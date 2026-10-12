@@ -1,4 +1,4 @@
-# Handover: S2 instrument review APPROVED (Astra r17); gl-clock v6 validated live; next = V0–V6 (2026-10-12, 01:45)
+# Handover: S2 V1–V6 live validation done; registrations landed; 3 instrument fixes; decision 14 + final round next (2026-10-12)
 
 Read this first. It supersedes every earlier keynote-live-continuity handover (all deleted); every live item from them
 is copied below. Verify branches and PRs on GitHub before acting. Evidence paths are in the MAIN checkout
@@ -9,7 +9,7 @@ is copied below. Verify branches and PRs on GitHub before acting. Evidence paths
 |---|---|
 | `main` | `1589d096` = #257 (raw Astra rounds of #256 removed) on #255 (resizer seed read) on #256 (bridge easing). |
 | PR #256 | Merged 2026-10-10. **Owner confirmed in real OBS 2026-10-11: the 3→4 rubber band is gone.** Post-merge chore done (#257). |
-| `claude/s2-detach-fix` | `14f49c8c` (+ docs), pushed. Instrument folds r12–r16 on top of the contract pass. Worktree `obs-mac-camera-swap-fbc63b`. Contains everything below. |
+| `claude/s2-detach-fix` | `b7e0d760` (+ docs). Gate worktrees `gate-v-277c720b` (Stage 1) and `gate-v-9d4fbef5` (Stage 3) in `.claude/worktrees/` — trash after the final round. Instrument folds r12–r16 on top of the contract pass. Worktree `obs-mac-camera-swap-fbc63b`. Contains everything below. |
 | gl-clock | Core `a9e1e66a` merged (Astra gl-clock r1 REQUEST CHANGES → fold `5e9c9faf` → **r2 APPROVE**). Live GL-1/2/3 done 2026-10-11 (below). |
 | Contract pass | MERGED (`1c02c447` → `de6df228`). Plan `.agents/plans/keynote_live_continuity_contract.plan.md` (owner GO; Q1 N1–N3 yes, Q2 admit rare legal shapes, Q3 smoke yes). Astra r12 → r16 folded; **r17 APPROVE** (section below). |
 | Gate worktrees | All trashed. Their live host logs were recovered to `s2-dev/live-logs/<wt>/` (`gate-glclock-c7d2d649`, `gate-preglclock-8ee7077d`, `gate-contract-de6df228`). |
@@ -97,8 +97,57 @@ acceptance scan 0 rejections / 3,879 records; live D1 carry-cover (from this wor
 Known: retained `loop-gates/l5/runs/soak-20260925-121732.json` (recorded PASS) re-scores FAIL already at `9dc88785` and
 before — no `reads.postHandback`; predates the hand-off requirement (Codex r4 #5); not caused by these folds.
 
+## Live validation V1–V6 (2026-10-12) — evidence `s2-dev/instr-v-277c720b/stage1/` (discovery) and `s2-dev/instr-v-9d4fbef5/stage3/` (final head)
+Owner-approved shortened schedule (target ~2.5 h): Stage 1 discovery at `277c720b` → Stage 2 freeze → Stage 3 final head.
+The deck sweep ran ONCE, serially, in Stage 1 and counts at the final head because the freeze diff touched only registration
+tables, `run_force_wrap` and `run_gates` DECK_ARMS (verified by diff); the `GATE_JOBS=1` round was replaced by a serial
+re-run of the timing-sensitive arms (P2 host ×3, Pass G ×7). Drivers/helpers: `s2-dev/fold-r12-r16/`-style scratch copies
+in the session scratchpad (`vrun/`: stage1/1b/3 drivers with an escalating load guard, summ/blind/pc/wraps/inconc/v6,
+prepinhold, v3b, wrappix).
+| Step | Result |
+|---|---|
+| V0 | 3.10 + 3.11 green (14f49c8c) |
+| V1 | D1 full host 1920: pass; A sampler ok, pp every row, 0 seq gaps, 16.7 ms, 0/0/0/0, gaps ≤ 33.3/58.45; attach True, owner 0 (B0 effective). "without B0" run dropped (owner). P2 harness never injects `#body{opacity:0}` (answered from code). |
+| V2 | all 13 positive controls exact seq sets (N 0/1/6/30 early+late, half, element-visibility, display depth 2, 1600). |
+| V3 | reds = GL-3 exactly: D5 b0to1+b1to2 (108/223), D2 b2to3 (108), D3 b0to1 (107), D4 none, D1 Pass G G1-3-4 carry (229) + `G1-3-4:destination` (slide-4 rect dead after arrival). Blind rescore (paint off): D2 b2to3 / D5 b0to1 green (old scorer blind; paint catches). Pre-pin-hold core (`fbba575e^`): D5 same set; D1 Pass G carry only (no destination red — the destination red is the current core minus pin hold). |
+| V3b | landed core: counter advances in the pin rect (D1 1-3-4, D5 pin@2); `no-pin-hold`: frozen. As predicted. |
+| V4 | D1 pin@6, D4 pin@5, D5 fifo-reuse reproduce GL-3's moved sets; reason measured (paint instrument's new coverage; blind rescore reads D1/D4 added carries green; same on pre-fold core). D3 pin@2 passes. Re-registered (owner "go with ur rec"). |
+| V5 | all 18 deck runs + P2 full pass on the real core (2 coverage inconclusives re-ran serially → pass). INCONCLUSIVE A 2/67, attach 0/25. |
+| V6 | cadence 16.7 ms everywhere; read cost mean ≤ 0.18 ms, max 1.6 ms/frame; P2 slide-3 restart 0.099/0.097 s (Phase D 0.093/0.095; limit 0.35). |
+| Registrations | `9d4fbef5` (Astra r19 APPROVE): D2/D3/D5 no-pin-hold (floor 60), D1 Pass G (carry + destination, floor 60), V4 sets; run_gates DECK_ARMS + D2/D3 no-pin-hold. |
+| Stage 3 C1 | `run_gates --tier full` 3-wide at `9d4fbef5`: `failed=1 pending=0` — only PASSG D5 inconclusive (66.7 ms coverage gap); every registered red, moved set, paint control, carry-cover arm matched. Serial subset: Pass G ×7 all pass (incl. D5); P2 host 2560/1600 pass, 1920 coverage-inconclusive (arm B red window). |
+
+**Findings fixed today (root-caused):**
+1. `run_force_wrap` never called `show_output()` (B0 missed it): every force-wrap take sampled under the launch host's black
+   cover → paint unreadable on 3→4. Fixed `9d4fbef5`.
+2. **Force-wrap 1→2 was blind** and P2's legacy `continue1to2` windowed the NEXT press: the 1→2 take rests at `#2` with the
+   sampler's `scene` still 1, so nothing crossed `onset1to2`=2; since the 2026-10-10 not-observed→None folds every unheld 1→2
+   carry read `invalid` (kb-1to2 could never fail; September's fail was vacuous). Fixed `b7e0d760`: `press_scene_1to2` shared by
+   `score_boundaries` and force-wrap; no wrap + unheld carry → fail; `rescore_artifact` compares pre-convention stored
+   `continue1to2` by verdict+reason (`--rescore` exits 1 on ok False). Oracle: no stored verdict value changes; kb-1to2 → fail.
+   Audit: every D-deck pin window contains its move, margin thin (84–100 ms before the press; a ≥ ~1.9 s pin move or a resting
+   destination would miss it) — follow-up guard.
+3. **66.7 ms coverage inconclusives = Chrome's 30 Hz throttle** with ≥ 2 visible playing videos (viz "2 or more videos"
+   frame-interval matcher; 18/18 gaps 66.6–66.8 ms, all ≥ 2 videos; 0 at steady 60 Hz; not load; predates the instrument). The
+   scorers judged gaps against the window median (16.7). Fixed `b7e0d760`: local period = slower of the medians of the 8 deltas
+   either side (gap rule unchanged). 965 retained windows: 11 fail→pass, 0 pass→fail. The r3 carry-cover null INCONCLUSIVE was a
+   genuine screencast hole at steady 60 Hz (stays). Product note (owner: low priority): with ≥ 2 movies playing the page
+   animates at 30 fps; 30 fps clips lose nothing; optionally confirm in OBS (CEF 127 offscreen) at Q6.
+4. **Decision 14 (loop-wrap `seeking`)**: with the cover fixed, 3→4 force-wrap takes show ONE `seeking` frame on the carried
+   decoder exactly at the recorded wrap (takes 375/1700 fail; it appears only when the wrap lands within ~17 ms of schedule).
+   Owner: pixel-check it; if painted → narrow excuse (carried decoder, seeking only, ±1 frame of the recorded wrap, Astra), if
+   blank → real flicker → core. First pixel run (8 attempts) inconclusive: the screencast changed timing so no seeking frame
+   occurred; driver v2 (`vrun/wrappix.py`: narrow screencast window, 5 offsets, `--no-screencast` rate comparison) ready.
+Suites: `9d4fbef5` 3.12 10466 / 3.10 floor (probe+run_gates) 1905; `b7e0d760` 3.12 **10485 passed / 0 failed**.
+
 ## Next steps, in order
 1. **gl-clock:** DONE (Astra r2 APPROVE; live GL-1/2/3 above). Its Astra rounds: `s2-dev/glclock-review/astra-r{1,2}.md`.
+1b. **Remaining before the gate record (2026-10-12 afternoon, after the dissolve session's 13:00–14:30 slot):**
+   (i) decision 14: run `wrappix.py` v2 (pixel + `--no-screencast` rate) → narrow wrap excuse or core fix (owner rule in
+   memory); (ii) Astra r20 on `b7e0d760` (+ the decision-14 change); (iii) final round at the final head: `run_gates --tier
+   full` 3-wide (must be `failed=0`), V2b force-wrap takes (kb-1to2 must FAIL, kb-3to4 fail, green takes pass), serial P2 host
+   ×3 + Pass G ×7, then Phases D3 (P2 main vs S2 interleaved), D4 (Q4 G2 seam), D5 L1 hosts (3-wide OK); V5 deck sweep and V6
+   carry over (freeze-diff rule above). Then Q6/Q7 with the owner, full suites, Astra on the final diff, gate record.
 2. **Instrument review loop:** DONE — Astra r17 APPROVE at `510de8bb` (section above). Folds 3–5's guards stay; a
    simplification pass after S2 may remove the ones the contract made redundant (owner's option). **Start next session at
    step 4 (V1–V6; V0 done).** The carry-cover producer changed (additive `src`): GL-3's six CARRY-COVER lines in the next
