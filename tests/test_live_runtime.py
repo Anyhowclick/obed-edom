@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections
 import hashlib
 import itertools
 import json
@@ -415,36 +416,101 @@ def test_handback_and_dissolve_anchors_sit_at_their_offsets_on_the_real_player(s
     # Shadow-DOM invariant (§3.2, r9 2): the take refuses open shadow roots but cannot see closed ones, so nothing on a
     # supported page may create an author shadow root: not the stock or patched player, the export pages, or the host.
     rendering = live_runtime.patch_rendering(player)
-    assert patched.count(SHADOW_ROOT_READ) == rendering.count(SHADOW_ROOT_READ) == 1
-    sources = {"stock": player, "on": patched, "off": off, "rendering": rendering}
+    players = {"stock": SHADOW_PINS["player"], "off": SHADOW_PINS["player"],
+               "on": sorted(SHADOW_PINS["player"] + SHADOW_PINS["patch"]), "rendering": sorted(SHADOW_PINS["player"] + SHADOW_PINS["patch"])}
+    assert {name: _shadow_occurrences(data) for name, data in zip(players, (player, off, patched, rendering))} == players
     pages = sorted(OUTPUT_FIXTURES.rglob("index.html"))
+    p2_page = FREEZE_DECKS["P2"].parent / "index.html"
     assert {root.parent / "index.html" for root in FREEZE_DECKS.values()} <= set(pages)
-    sources.update({str(path): path.read_bytes() for path in pages})
+    assert {str(path): _shadow_occurrences(path.read_bytes()) for path in pages} == {str(path): [] for path in pages}
     host = Path(live_runtime.__file__).parent
-    sources.update({str(path): path.read_bytes() for path in sorted(host.rglob("*")) if path.is_file() and "__pycache__" not in path.parts})
-    assert {name: _shadow_tokens(data) for name, data in sources.items()} == {name: set() for name in sources}
-    # Planted controls: every spelling of a creation API, spliced into the stock player, is flagged.
+    files = {path.relative_to(host.parent).as_posix(): path for path in sorted(host.rglob("*")) if path.is_file() and "__pycache__" not in path.parts}
+    assert set(SHADOW_PINS) - {"player", "patch"} <= set(files)
+    assert {name: _shadow_occurrences(path.read_bytes()) for name, path in files.items()} == {name: SHADOW_PINS.get(name, []) for name in files}
+    # Planted controls: each spelling of a creation API, spliced into the stock player and into the P2 export page, is
+    # an occurrence outside the pins.
     for planted, flagged in SHADOW_DOM_PLANTED.items():
-        assert _shadow_tokens(player + planted) == flagged, planted
+        assert _shadow_extra(player + planted, SHADOW_PINS["player"]) == flagged, planted
+        assert _shadow_extra(p2_page.read_bytes() + planted, []) == flagged, planted
 
 
-# The checker flags every token containing `shadow` or `customelements` in any letter case (HTML attribute names are
-# case-insensitive), after decoding JS escapes and joining adjacent string literals, unless it is one of the exact
-# words already on the supported pages, none of which can create a root (CSS shadows, two WebGL shader names, prose).
-# `shadowRoot` occurs only as the take's own refusal, which is stripped first. Only a name computed without spelling
-# its letters (character codes, base64) escapes; the scanned sources are pinned players, exports and our own host.
 SHADOW_TOKEN = re.compile(r"(?<![\w$-])[\w$-]*(?:shadow|customelements)[\w$-]*", re.IGNORECASE)
 SHADOW_ESCAPE = re.compile(r"\\u\{([0-9a-fA-F]+)\}|\\u([0-9a-fA-F]{4})|\\x([0-9a-fA-F]{2})")
 SHADOW_JOIN = re.compile(r"(['\"`])\s*\+\s*(['\"`])")
-SHADOW_ALLOWED = frozenset({"shadow", "shadows", "box-shadow", "-moz-box-shadow", "-ms-box-shadow", "-webkit-box-shadow", "boxShadow",
-                            "ShadowPosition", "ShadowTexCoord"})
-SHADOW_ROOT_READ = b"!n.shadowRoot&&("
+SHADOW_CONTEXT = 12
+# Every `shadow`/`customelements` token on the supported pages, pinned per source with its normalised context:
+# `player` is each stock player (and `off`), `patch` what `on`/`rendering` add (the take's CSS reads and its single
+# `!n.shadowRoot&&(` refusal), the rest are host files under `src/`. Regenerate only after reading every new occurrence.
+SHADOW_PINS = {
+    'player': [
+        ('-moz-box-shadow', ' 40px black;-moz-box-shadow:0px 0px 40p'),
+        ('-moz-box-shadow', '(0,0,0,0.5);-moz-box-shadow:0px 2px 4px'),
+        ('-ms-box-shadow', '(0,0,0,0.5);-ms-box-shadow:0px 2px 4px'),
+        ('-webkit-box-shadow', ' 40px black;-webkit-box-shadow:0px 0px 40p'),
+        ('-webkit-box-shadow', '5,255,0.68);-webkit-box-shadow:0px 2px 4px'),
+        ('ShadowPosition', '],Normal:[],ShadowPosition:[],ShadowTe'),
+        ('ShadowTexCoord', 'Position:[],ShadowTexCoord:[],Previous'),
+        ('box-shadow', 'height:40px;box-shadow:0px 0px 40p'),
+        ('shadow', '(){return B.shadow}}),Object.d'),
+        ('shadow', '(A=!0),(0,C.shadow)(this,"isSy'),
+        ('shadow', ')&&(Q=A)},B.shadow=o,B.string3'),
+        ('shadow', ';return(0,C.shadow)(this,"_com'),
+        ('shadow', ';return(0,C.shadow)(this,"_loa'),
+        ('shadow', ';return(0,C.shadow)(this,"isFo'),
+        ('shadow', ';return(0,Q.shadow)(this,"_isS'),
+        ('shadow', ';return(0,Q.shadow)(this,"_key'),
+        ('shadow', ';return(0,Q.shadow)(this,"_key'),
+        ('shadow', ';return(0,e.shadow)(this,"rawD'),
+        ('shadow', 'Property(A,"shadow",{enumerabl'),
+        ('shadow', 'es)(A),(0,Q.shadow)(this,"_col'),
+        ('shadow', 'urn(0,_util.shadow)(this,"_set'),
+        ('shadow', 'urn(0,_util.shadow)(this,"anno'),
+        ('shadow', 'urn(0,_util.shadow)(this,"isPu'),
+        ('shadow', 'urn(0,_util.shadow)(this,"isPu'),
+        ('shadow', 'urn(0,_util.shadow)(this,"load'),
+        ('shadow', '{return(0,Q.shadow)(this,"dire'),
+        ('shadow', '{return(0,Q.shadow)(this,"hcmF'),
+        ('shadow', '{return(0,Q.shadow)(this,"imag'),
+        ('shadow', '{return(0,Q.shadow)(this,"supp'),
+        ('shadow', '{return(0,Q.shadow)(this,"supp'),
+        ('shadow', '{return(0,e.shadow)(this,"_def'),
+        ('shadow', '}return(0,C.shadow)(this,"isFo'),
+    ],
+    'patch': [
+        ('boxShadow', '&"none"===w.boxShadow&&"none"===w'),
+        ('boxShadow', 'n"none"===w.boxShadow&&"none"===w'),
+        ('boxShadow', '|"none"!==z.boxShadow||bd(z)||"no'),
+        ('shadowRoot', 'n){return!n.shadowRoot&&(pc(n)||!G'),
+    ],
+    'obed_edom/dsk_assemble.py': [
+        ('shadows', ' own stroke shadows ``style_id`'),
+    ],
+    'obed_edom/iwa_geometry.py': [
+        ('shadow', ' for k in ("shadow", "reflecti'),
+    ],
+    'obed_edom/live_runtime.py': [
+        ('boxShadow', '&"none"===w.boxShadow&&"none"===w'),
+        ('boxShadow', '\'"none"!==z.boxShadow||bd(z)||"no'),
+        ('boxShadow', 'n"none"===w.boxShadow\'\n    b\'&&"n'),
+        ('shadow', '\n    author shadow roots (a ch'),
+        ('shadow', 'and no open shadow root on the'),
+        ('shadowRoot', 'n){return!n.shadowRoot&&(pc(n)||!G'),
+    ],
+    'obed_edom/validate.py': [
+        ('shadow', ' an edge is shadow/overhang; f'),
+    ],
+    'obed_edom/web/app.py': [
+        ('shadow', 'date` would shadow BaseModel.v'),
+    ],
+}
 SHADOW_DOM_PLANTED = {
     b"host.attachShadow({mode:'closed'})": {"attachShadow"},
     b"host['attach'+'Shadow']({mode:'closed'})": {"attachShadow"},
     b"var a='attach';host[a+'Shadow']({mode:'closed'})": {"Shadow"},
     b"host['attach\\u0053hadow']({mode:'closed'})": {"attachShadow"},
     b"host[\"attach\\x53hadow\"]({mode:'closed'})": {"attachShadow"},
+    b"h['attach'+('boxShadow').slice(3)]({mode:'closed'})": {"boxShadow"},
+    b"h['attach'+('!n.shadowRoot&&(').slice(3,9).replace('s','S')]({mode:'closed'})": {"shadowRoot"},
     b'<template shadowrootmode="open"></template>': {"shadowrootmode"},
     b'<template SHADOWROOTMODE="closed"></template>': {"SHADOWROOTMODE"},
     b'<template shadowroot="open"></template>': {"shadowroot"},
@@ -453,10 +519,19 @@ SHADOW_DOM_PLANTED = {
 }
 
 
-def _shadow_tokens(data: bytes) -> set[str]:
-    text = data.replace(SHADOW_ROOT_READ, b"").decode("latin-1")
+def _shadow_occurrences(data: bytes) -> list[tuple[str, str]]:
+    """Every token containing `shadow` or `customelements` in any letter case (HTML attribute names are case-insensitive),
+    after decoding JS escapes and joining adjacent string literals, with its surrounding context. A static tripwire, not a
+    proof: it catches any new or moved spelling, including one assembled from pinned words, but a name built without any
+    such token (character codes, base64, arithmetic) is outside it, which is acceptable because the scanned sources are
+    pinned players, our own exports and our own host."""
+    text = data.decode("latin-1")
     text = SHADOW_JOIN.sub("", SHADOW_ESCAPE.sub(lambda m: chr(int(m.group(1) or m.group(2) or m.group(3), 16)), text))
-    return set(SHADOW_TOKEN.findall(text)) - SHADOW_ALLOWED
+    return sorted((m.group(), text[max(0, m.start() - SHADOW_CONTEXT) : m.end() + SHADOW_CONTEXT]) for m in SHADOW_TOKEN.finditer(text))
+
+
+def _shadow_extra(data: bytes, pins: list[tuple[str, str]]) -> set[str]:
+    return {token for token, _ in (collections.Counter(_shadow_occurrences(data)) - collections.Counter(pins)).elements()}
 
 
 def _apply_in_order(player: bytes, replacements) -> bytes:
