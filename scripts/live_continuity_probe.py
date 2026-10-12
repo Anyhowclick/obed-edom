@@ -2529,6 +2529,13 @@ def score_restart(
     }
 
 
+def press_scene_1to2(facts: dict[str, Any]) -> float:
+    """The scene the 1to2 press plays (the source slide's outgoing scene, `onset1to2 - 1`):
+    the sampler's `scene` reaches it at the slide change and rests there until the next press.
+    Since 2026-10-12 (artifacts before it scored 1to2 at `onset1to2`, the next press; see `_stored_matches`)."""
+    return facts["onset1to2"] - 1
+
+
 def score_boundaries(
     samples: list[dict[str, Any]], facts: dict[str, Any], runtime_installed: bool, *,
     loop_period_s: float | None = None,
@@ -2536,7 +2543,7 @@ def score_boundaries(
     """Pure: samples + ground truth in, the three boundary verdicts out."""
     asset = facts["asset"]
     v12 = score_continuity(
-        samples, asset, facts["onset1to2"], facts["pinRect"], facts["pinRect"], runtime_installed,
+        samples, asset, press_scene_1to2(facts), facts["pinRect"], facts["pinRect"], runtime_installed,
         loop_period_s=loop_period_s,
     )
     v23 = score_restart(samples, asset, facts["restartScene"])
@@ -7585,6 +7592,8 @@ def score_forced_wrap(
     result["carry"] = carry
     if held is True:
         return {**result, "status": "pass", "outcome": "carried", "reasons": []}
+    if wrap is None and held is False:
+        return {**result, "status": "fail", "outcome": None, "reasons": ["no wrap was recorded"]}
     outcome, detail = (None, {}) if wrap is None else fallback_outcome(
         reads, armed_boundary=armed_boundary, restart=restart, rects=rects,
     )
@@ -7647,7 +7656,8 @@ def force_wrap_take(
 
 
 def force_wrap_ground_truth(fixture: Path, original_index: Path, boundary: str, gl_replay: str, root: Path) -> dict[str, Any]:
-    """The boundary's scene, rects and seeked source instance, derived offline from the fixture."""
+    """The boundary's sampler scene, destination hash scene, rects and seeked source instance,
+    derived offline from the fixture."""
     src_ordinal = FORCE_WRAP_BOUNDARIES[boundary][0]
     export = prepare_export(fixture, original_index, root, "force-wrap")
     slides = load_slides(export)
@@ -7655,12 +7665,16 @@ def force_wrap_ground_truth(fixture: Path, original_index: Path, boundary: str, 
     facts = ground_truth_facts(plan)
     facts_on = gl_ground_truth(export, slides, facts)[1] if gl_replay == "auto" else None
     if boundary == "1to2":
-        scene, src_rect, dst_rect, transition = facts["onset1to2"], facts["pinRect"], facts["pinRect"], None
+        destination, scene, src_rect, dst_rect, transition = (
+            facts["onset1to2"], press_scene_1to2(facts), facts["pinRect"], facts["pinRect"], None,
+        )
     else:
-        scene, src_rect, dst_rect, transition = facts["bridgeScene"], facts["bridgeSrcRect"], facts["destRect"], facts["bridgeScene"] - 1
+        destination = scene = facts["bridgeScene"]
+        src_rect, dst_rect, transition = facts["bridgeSrcRect"], facts["destRect"], facts["bridgeScene"] - 1
     src_player = sorted(plan.scene_index_by_player)[src_ordinal - 1]
     return {
         "export": export, "slides": slides, "facts": facts, "factsOn": facts_on, "scene": scene,
+        "destinationScene": destination,
         "srcRect": src_rect, "dstRect": dst_rect, "transition": transition,
         "source": source_instance(movie_nodes(export, slides), src_player, facts["asset"], src_rect),
     }
@@ -7749,7 +7763,7 @@ def run_force_wrap(args: argparse.Namespace) -> dict[str, Any]:
         take = result["take"] = force_wrap_take(player, source["domId"], offset_ms)
         if take.get("pressT") is not None:
             take["reached"] = (
-                wait_for_destination_hash(player, scene) and player.observe().original_slide == dst_ordinal
+                wait_for_destination_hash(player, gt["destinationScene"]) and player.observe().original_slide == dst_ordinal
             )
             result["reads"] = armed_evidence(transport)
         time.sleep(POST_ADVANCE_SETTLE_S)
@@ -7828,6 +7842,20 @@ def run_force_wrap_cli(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def _stored_matches(strict: dict[str, Any], stored: dict[str, Any]) -> bool:
+    """Every stored legacy verdict equals today's strict re-score; a `continue1to2` stored before
+    `press_scene_1to2` (its window after today's press crossing) is compared by verdict and reason only."""
+    def same(key: str) -> bool:
+        mine, kept = strict[key], stored.get(key)
+        before = _finite_number(((kept or {}).get("window") or {}).get("lastBeforeT")) if isinstance(kept, dict) else None
+        press = _finite_number((mine.get("window") or {}).get("firstAfterT"))
+        if key == "continue1to2" and before is not None and press is not None and before > press:
+            return all(kept.get(field) == mine.get(field) for field in ("verdict", "reason"))
+        return mine == kept
+
+    return all(same(key) for key in strict)
+
+
 def rescore_artifact(path: Path, period_s: float) -> dict[str, Any]:
     """L2 CvC: re-score a standard host artifact's arms with the strict and the wrap-aware
     scorer; `ok` needs every arm's two re-scores identical and the strict one equal to the
@@ -7855,7 +7883,7 @@ def rescore_artifact(path: Path, period_s: float) -> dict[str, Any]:
         stored = {key: entry.get(key) for key in strict}
         out[label] = {
             "identical": json.dumps(strict, sort_keys=True, default=str) == json.dumps(aware, sort_keys=True, default=str),
-            "strictMatchesArtifact": json.loads(json.dumps(strict, default=str)) == stored,
+            "strictMatchesArtifact": _stored_matches(json.loads(json.dumps(strict, default=str)), stored),
             "wrapTimes": wraps,
         }
     return {"artifact": str(path), "loopPeriodS": period_s, "arms": out,
@@ -8004,6 +8032,7 @@ CARRY_COVER_STRIP_MIN_RUN_PX = 8
 CARRY_COVER_MID_MOVE = (0.1, 0.9)
 CARRY_COVER_MIN_FPS = 20.0
 CARRY_COVER_MAX_GAP_FRAMES = 3
+CARRY_COVER_CADENCE_TICKS = 8
 CARRY_COVER_MAX_DISCARDED_SHARE = 0.1
 CARRY_COVER_SYNC_BITS = 12
 CARRY_COVER_SYNC_CELL_PX = 4
@@ -8384,7 +8413,7 @@ def score_carry_cover(
     PASS: at least `CARRY_COVER_MIN_CLEAN_SHARE` of the scored mid-move frames expose at most
     `CARRY_COVER_MAX_EXPOSED_FRACTION` of the overlay's area and no strip is wider than `CARRY_COVER_MAX_STRIP_PX`.
     Coverage: at least `CARRY_COVER_MIN_FPS` scored frames per second, no stretch of the mid-move window longer than
-    `CARRY_COVER_MAX_GAP_FRAMES` (+ half) rAF ticks without one, and at most `CARRY_COVER_MAX_DISCARDED_SHARE` of its
+    `CARRY_COVER_MAX_GAP_FRAMES` (+ half) rAF ticks at the local cadence (`local_cadence`) without one, and at most `CARRY_COVER_MAX_DISCARDED_SHARE` of its
     frames unplaceable. Every integrity or coverage gap is INCONCLUSIVE, never a pass."""
     def inconclusive(*reasons: str, **detail: Any) -> dict[str, Any]:
         return {"verdict": "inconclusive", "reasons": list(reasons), **detail}
@@ -8532,12 +8561,16 @@ def score_carry_cover(
     unreadable = sum("unreadable" in f for f in per_frame)
     discarded = sum("unaligned" in f for f in per_frame)
     edges = [lo, *sorted({f["domTs"] for f in aligned}), hi]
-    max_gap = max(b - a for a, b in zip(edges, edges[1:]))
-    allowed_gap = (CARRY_COVER_MAX_GAP_FRAMES + 0.5) * cadence
+    tick_ts = sorted(r["ts"] for r in rows)
+    max_gap, local, allowed_gap = max(
+        ((b - a, ref, (CARRY_COVER_MAX_GAP_FRAMES + 0.5) * ref)
+         for a, b in zip(edges, edges[1:]) for ref in [local_cadence(tick_ts, a, b, cadence)]),
+        key=lambda gap: gap[0] / gap[2],
+    )
     detail.update(
         alignedFrames=len(aligned), discardedFrames=discarded, unreadableFrames=unreadable,
         discardedShare=round(discarded / len(per_frame), 4) if per_frame else None,
-        maxGapMs=round(max_gap, 2), maxGapAllowedMs=round(allowed_gap, 2),
+        maxGapMs=round(max_gap, 2), maxGapAllowedMs=round(allowed_gap, 2), maxGapCadenceMs=round(local, 2),
         undecidedFrames=sum(f["undecided"] for f in aligned),
     )
     gaps = []
@@ -8547,7 +8580,7 @@ def score_carry_cover(
         gaps.append(f"too few aligned mid-move frames ({len(aligned)} < {need})")
     if max_gap > allowed_gap:
         gaps.append(f"a {max_gap:.0f} ms stretch of the mid-move window has no scored frame (max {allowed_gap:.0f} ms: "
-                    f"{CARRY_COVER_MAX_GAP_FRAMES} ticks at the observed {cadence:.1f} ms cadence)")
+                    f"{CARRY_COVER_MAX_GAP_FRAMES} ticks at the local {local:.1f} ms cadence)")
     if per_frame and discarded / len(per_frame) > CARRY_COVER_MAX_DISCARDED_SHARE:
         gaps.append(f"{discarded}/{len(per_frame)} mid-move frames could not be placed at a sampled tick "
                     f"(max {CARRY_COVER_MAX_DISCARDED_SHARE:.0%})")
@@ -8560,6 +8593,16 @@ def score_carry_cover(
         return inconclusive(f"{detail['undecidedFrames']} mid-move frames have overlay reads that disagree on the "
                             "cover rule, and they decide the verdict", **detail)
     return {"verdict": "fail" if reasons else "pass", "reasons": reasons, **detail}
+
+
+def local_cadence(tick_ts: list[float], start: float, end: float, fallback: float) -> float:
+    """The local rAF period of the gap `start`..`end` (Chrome drops to 30 Hz while two or more visible videos play): the
+    slower of the medians of the `CARRY_COVER_CADENCE_TICKS` tick deltas ending by `start` and of those starting from
+    `end`, a side counting only when it has all of them; else `fallback`."""
+    deltas = list(zip(tick_ts, tick_ts[1:]))
+    n = CARRY_COVER_CADENCE_TICKS
+    sides = ([b - a for a, b in deltas if b <= start][-n:], [b - a for a, b in deltas if a >= end][:n])
+    return max((float(np.median(side)) for side in sides if len(side) == n), default=fallback)
 
 
 def carry_cover_capture_problems(capture: dict[str, Any], bridge: dict[str, Any]) -> list[str]:

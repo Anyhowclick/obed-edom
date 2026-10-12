@@ -201,6 +201,34 @@ def test_score_paint(rows, slot, expected) -> None:
             assert result[key] == value, (key, result)
 
 
+def _cadence(*runs: tuple[int, float], drop_seq: int | None = None) -> list[dict[str, Any]]:
+    rows, ts = [{"seq": 1, "ts": 0.0}], 0.0
+    for count, delta in runs:
+        for _ in range(count):
+            ts += delta
+            rows.append({"seq": len(rows) + 1, "ts": ts})
+    return [r for r in rows if r["seq"] != drop_seq]
+
+
+# Chrome throttles rAF to 30 Hz while two videos play: a gap is judged against the local cadence, not the window's.
+# The 66.7 ms hole after 60 Hz frames is 4 periods there (red); after or before 30 Hz frames it is one missed frame.
+@pytest.mark.parametrize(("rows", "ok", "gap_period", "reason"), [
+    (_cadence((60, PERIOD), (12, 2 * PERIOD), (1, 4 * PERIOD), (4, 2 * PERIOD), (60, PERIOD)), True, 2 * PERIOD, None),
+    (_cadence((60, PERIOD), (1, 4 * PERIOD), (20, 2 * PERIOD)), True, 2 * PERIOD, None),
+    (_cadence((60, PERIOD), (1, 4 * PERIOD), (60, PERIOD)), False, PERIOD, "frame gap 66.7 ms exceeds 58.3 ms"),
+    (_cadence((3, PERIOD), (1, 4 * PERIOD), (3, PERIOD)), False, PERIOD, "frame gap"),
+    (_cadence((60, 2 * PERIOD), (1, 4 * PERIOD), (60, 2 * PERIOD)), True, 2 * PERIOD, None),
+    (_cadence((60, 2 * PERIOD), (1, 9 * PERIOD), (60, 2 * PERIOD)), False, 2 * PERIOD, "frame gap"),
+    (_cadence((60, PERIOD), (12, 2 * PERIOD), (4, 2 * PERIOD), (60, PERIOD), drop_seq=70), False, 2 * PERIOD, "seq gaps"),
+], ids=["missed-30hz-frame-after-30hz", "missed-30hz-frame-before-30hz", "4-tick-hole-at-60hz",
+        "short-window-falls-back-to-the-median", "missed-frame-all-30hz", "4.5-period-hole-all-30hz", "seq-gap"])
+def test_frame_coverage_judges_gaps_against_the_local_cadence(rows, ok, gap_period, reason) -> None:
+    cov = pi.frame_coverage(rows, max_gap_frames=3, min_fps=20.0)
+    assert cov["ok"] is ok, cov
+    assert cov["worstGap"]["periodMs"] == pytest.approx(gap_period, abs=0.01)
+    assert reason is None or any(reason in r for r in cov["reasons"]), cov["reasons"]
+
+
 # Astra r6 #1: a pre-paint frame field missing or ill-typed is unobserved (inconclusive), never a reading.
 @pytest.mark.parametrize("change", [None, *({k: pi.schema_problem} for k in pi.PP_FIELDS), {"cover": None}],
                          ids=["complete-dark-frames-stay-red", *(f"no-pp.{k}" for k in pi.PP_FIELDS), "null-cover"])

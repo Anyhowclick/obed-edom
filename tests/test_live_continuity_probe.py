@@ -6405,6 +6405,49 @@ class TestScoreForcedWrap:
         )
         assert result["status"] == "fail" and result["reasons"] == ["no wrap was recorded"]
 
+    @staticmethod
+    def _resting_1to2(**kwargs: Any) -> list[dict[str, Any]]:
+        """A 1to2 take as the sampler records it: settled on scene 0, then the press plays scene 1
+        and the page rests there (hash #2) to the end; the carried clock wraps after the press."""
+        samples = wrap_samples(
+            boundary_scene=1.0, period=FW_PERIOD, lead_s=2.2, n_before=60, n_after=100, dt_ms=33.0,
+            src_rect=SRC_RECT, dst_rect=SRC_RECT, **kwargs,
+        )
+        for row in samples:
+            row.update(t=row["t"] + FW_SEEKED + 300.0, scene=int(row["scene"]), playerState="IdleAtFinalState", busy=False)
+        return samples
+
+    @pytest.mark.parametrize(("boundary", "scene", "destination", "transition"), [("1to2", 1, 2, None), ("3to4", 8, 8, 7)])
+    def test_ground_truth_scores_1to2_at_the_scene_its_press_plays(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, boundary: str, scene: int, destination: int, transition: Any,
+    ) -> None:
+        facts = {"asset": ASSET, "onset1to2": 2, "bridgeScene": 8, "pinRect": dict(SRC_RECT),
+                 "bridgeSrcRect": dict(SRC_RECT), "destRect": dict(DST_RECT)}
+        monkeypatch.setattr(probe, "prepare_export", lambda *a: tmp_path)
+        monkeypatch.setattr(probe, "load_slides", lambda *a: [])
+        monkeypatch.setattr(probe, "ground_truth_plan", lambda *a, **k: synthetic_plan())
+        monkeypatch.setattr(probe, "ground_truth_facts", lambda *a, **k: facts)
+        monkeypatch.setattr(probe, "movie_nodes", lambda *a: [])
+        monkeypatch.setattr(probe, "source_instance", lambda *a: {"periodS": FW_PERIOD})
+        gt = probe.force_wrap_ground_truth(tmp_path, tmp_path, boundary, "off", tmp_path)
+        assert (gt["scene"], gt["destinationScene"], gt["transition"]) == (scene, destination, transition)
+
+    @pytest.mark.parametrize(("kwargs", "status", "continuity", "restart"), [
+        pytest.param({}, "pass", True, False, id="held-carry-passes"),
+        pytest.param({"stall_run_s": 1.5}, "fail", False, False, id="known-bad-stalled-carry-fails"),
+    ])
+    def test_a_1to2_take_resting_on_the_press_scene_is_scored(
+        self, kwargs: dict[str, Any], status: str, continuity: bool, restart: bool,
+    ) -> None:
+        facts = {"asset": ASSET, "onset1to2": 2, "pinRect": dict(SRC_RECT)}
+        gt = {"facts": facts, "factsOn": None, "source": {"periodS": FW_PERIOD}, "scene": probe.press_scene_1to2(facts),
+              "srcRect": dict(SRC_RECT), "dstRect": dict(SRC_RECT), "transition": None}
+        result = {"continuity": {"mode": "qualified"}, "samples": self._resting_1to2(**kwargs), "recorder": _fw_recorder(),
+                  "take": _fw_take(), "reads": _fw_reads(), "pageErrorNotes": []}
+        probe.score_force_wrap_run(result, gt, "1to2", 375.0)
+        assert (result["continuityVerdict"]["verdict"], result["restart"]["verdict"]) == (continuity, restart)
+        assert result["status"] == status
+
 
 class TestRawRestart:
     def _fresh(self, *, advancing: bool) -> list[dict[str, Any]]:
@@ -6430,7 +6473,7 @@ class TestRawRestart:
 
 class TestRescoreArtifact:
     FACTS = {
-        "asset": ASSET, "onset1to2": 2.0, "restartScene": 6, "bridgeScene": 8,
+        "asset": ASSET, "onset1to2": 3.0, "restartScene": 6, "bridgeScene": 8,
         "pinRect": SRC_RECT, "bridgeSrcRect": SRC_RECT, "destRect": DST_RECT,
     }
 
@@ -6442,6 +6485,15 @@ class TestRescoreArtifact:
         path = tmp_path / "host.json"
         path.write_text(json.dumps({"groundTruth": self.FACTS, "arms": {"A": arm}, "attach": dict(arm)}))
         return path
+
+    @pytest.mark.parametrize(("fresh", "verdict"), [(False, True), (True, False)])
+    def test_legacy_1to2_is_scored_at_the_scene_its_press_plays(self, fresh: bool, verdict: bool) -> None:
+        samples = rows_around_boundary(boundary_scene=1.0, src_rect=SRC_RECT, dst_rect=SRC_RECT)
+        for row in samples[20:] if fresh else ():
+            row["videos"][0].update(id=2, elId=2, currentTime=(row["t"] - samples[20]["t"]) / 1000.0, footprintOwner={"elId": 2, "key": "movie1"})
+        facts = dict(self.FACTS, onset1to2=2.0)
+        scored = probe.score_boundaries(samples, facts, True)["continue1to2"]
+        assert scored["verdict"] is verdict and scored["window"]["firstAfterT"] == samples[20]["t"]
 
     def test_samples_without_a_wrap_rescore_identically(self, tmp_path: Path) -> None:
         report = probe.rescore_artifact(self._artifact(tmp_path, rows_around_boundary()), LOOP_P)
@@ -6462,6 +6514,22 @@ class TestRescoreArtifact:
         assert report["arms"]["attach"]["identical"] is True
         assert report["arms"]["attach"]["strictMatchesArtifact"] is False
         assert report["ok"] is False
+
+    @pytest.mark.parametrize(("flip", "ok"), [(False, True), (True, False)])
+    def test_a_1to2_stored_before_the_press_scene_matches_by_verdict(self, tmp_path: Path, flip: bool, ok: bool) -> None:
+        """Artifacts before `press_scene_1to2` scored 1to2 at the next press: only its verdict and reason must match."""
+        samples = rows_around_boundary(n_before=40)
+        for row in samples[:20]:
+            row["scene"] = 0
+        path = self._artifact(tmp_path, samples)
+        data = json.loads(path.read_text())
+        data["groundTruth"]["onset1to2"] = 2.0
+        if flip:
+            data["attach"]["continue1to2"]["verdict"] = not data["attach"]["continue1to2"]["verdict"]
+        path.write_text(json.dumps(data))
+        report = probe.rescore_artifact(path, LOOP_P)
+        assert report["arms"]["arm A"]["strictMatchesArtifact"] is True
+        assert report["ok"] is ok
 
     def test_an_arm_without_samples_fails_closed(self, tmp_path: Path) -> None:
         path = self._artifact(tmp_path, rows_around_boundary())
@@ -6665,6 +6733,12 @@ class TestForcedWrapUnreadable:
         pytest.param(lambda: _fw_score(boundary="1to2", reads=TestForcedWrapUnreadable._no_stand_downs(), armed=ARMED,
                                        recorder=_fw_recorder(stop_at=FW_SEEKED + 4000.0)), "invalid",
                      id="armed-stand-downs-unreadable"),
+        pytest.param(lambda: _fw_score(boundary="1to2", reads=_fw_reads(stand_downs=["assetUnbound"]), armed=ARMED,
+                                       recorder=_fw_recorder(wrap=False), restart=probe._inconclusive("boundary crossing not observed in samples")),
+                     "fail", id="kb-1to2-no-wrap-unheld-carry-fails-whatever-the-restart"),
+        pytest.param(lambda: _fw_score(boundary="1to2", reads=TestForcedWrapUnreadable._no_stand_downs(), armed=ARMED,
+                                       recorder=_fw_recorder(wrap=False, stop_at=FW_SEEKED + 4000.0)), "invalid",
+                     id="no-wrap-unreadable-carry-stays-invalid"),
         pytest.param(lambda: _fw_score(continuity=TestForcedWrapUnreadable._null_scene_crossing()), "invalid",
                      id="null-destination-scenes-erase-the-crossing"),
         pytest.param(lambda: TestForcedWrapUnreadable._schema_rejected_run()["forced"], "invalid",
@@ -7911,9 +7985,15 @@ class TestArmedVerdict:
 
 
 def _stored_artifact(*, evidence: bool = False, arms: tuple[str, ...] = ("A", "B", "C")) -> dict[str, Any]:
-    """A host artifact as the S1 base probe stored it (legacy scorers, no raw evidence unless asked)."""
+    """A host artifact as the S1 base probe stored it (legacy scorers, no raw evidence unless asked), with
+    the settled source slide (scene 0) before the 1->2 press so the legacy crossing is sampled."""
     facts = _p2_facts()
-    samples = _p2_run_samples()
+    samples = []
+    for t in range(-1000, 0, 50):
+        row = sample(float(t), 0, video(id=1, el_id=1, t=float(t), scene=0, current_time=5 + t / 1000, rect=dict(facts["pinRect"])))
+        row.update(playerState="IdleAtFinalState", busy=False)
+        samples.append(row)
+    samples += _p2_run_samples()
     if evidence:
         pin = facts["pinRect"]
         for row in samples:
@@ -9202,7 +9282,7 @@ def _cc_scene(
     *, overlay_curve: Any = _ease_in_out, poster_shift: tuple[float, float] = (0.0, 0.0), opaque: bool = True,
     extra_object: tuple[dict[str, float], float] | None = None, ready_state: int = 4, marker_only: bool = False,
     duration_s: float = CC_DURATION_S, dst: dict[str, float] = CC_DST, tick_ms: float = CC_FRAME_MS,
-    overlay_lag_ticks: int = 0,
+    overlay_lag_ticks: int = 0, tick_at: Any = None,
     pts_offset_ms: float = 4.0, deliver: Any = None, synced: Any = None, sampled: Any = None, pre_read: Any = None,
 ) -> tuple[list[tuple[float, np.ndarray]], list[dict[str, Any]], list[dict[str, Any]]]:
     """One rAF tick every `tick_ms` from 503 ms to 2300 ms. The screencast delivers a frame of tick k (when
@@ -9213,15 +9293,17 @@ def _cc_scene(
     frame.
     `extra_object` is (rect, lit until ms after the press), an unrelated object lit from the press until then.
     `marker_only` paints the poster dark but for an 8x8 corner marker (D1's grating has one), so a strip of it exposes
-    little area."""
+    little area. `tick_at(k)` places tick k (default: every `tick_ms`)."""
+    def at(k: int) -> float:
+        return tick_at(k) if tick_at is not None else CC_FIRST_TICK_MS + k * tick_ms
+
     def overlay_at(k: int) -> dict[str, float]:
-        ms = CC_FIRST_TICK_MS + (k - overlay_lag_ticks) * tick_ms
-        return _cc_rect_at(ms, overlay_curve, duration_s=duration_s, dst=dst)
+        return _cc_rect_at(at(k - overlay_lag_ticks), overlay_curve, duration_s=duration_s, dst=dst)
 
     frames, rows = [], []
     k = 0
-    while CC_FIRST_TICK_MS + k * tick_ms <= 2300.0:
-        ts = CC_FIRST_TICK_MS + k * tick_ms
+    while at(k) <= 2300.0:
+        ts = at(k)
         if deliver is None or deliver(k, ts):
             image = np.zeros((CC_VIEWPORT[1], CC_VIEWPORT[0], 3), dtype=np.uint8)
             poster = _cc_rect_at(ts, _ease_in_out, poster_shift, duration_s, dst)
@@ -9482,6 +9564,21 @@ class TestCarryCoverCoverage:
         result = _cc_score(*_cc_scene(deliver=lambda k, ts: k % 6 not in (1, 2, 3)))
         self._assert(result, "ms stretch of the mid-move window has no scored frame")
         assert result["maxGapMs"] == pytest.approx(4 * CC_FRAME_MS, abs=0.05)
+
+    @staticmethod
+    def _throttled(k: int) -> float:
+        """60 Hz, but 30 Hz from tick 57 (~1453 ms) to ~1853 ms, as Chrome throttles rAF while two videos play."""
+        hold = (1853.0 - CC_FIRST_TICK_MS - 57 * CC_FRAME_MS) // (2 * CC_FRAME_MS)
+        return CC_FIRST_TICK_MS + (k + min(max(k - 57, 0), hold)) * CC_FRAME_MS
+
+    @pytest.mark.parametrize(("tick_at", "dropped", "verdict"), [
+        pytest.param(_throttled, lambda ts: 1480.0 < ts < 1495.0, "pass", id="one-missed-30hz-frame-where-the-cadence-switches"),
+        pytest.param(None, lambda ts: 1400.0 < ts < 1460.0, "inconclusive", id="known-bad-a-4-tick-hole-at-steady-60hz"),
+    ])
+    def test_a_gap_is_judged_against_the_local_cadence(self, tick_at: Any, dropped: Any, verdict: str) -> None:
+        result = _cc_score(*_cc_scene(tick_at=tick_at, deliver=lambda k, ts: not dropped(ts)))
+        assert result["verdict"] == verdict, result["reasons"]
+        assert result["cadenceMs"] == pytest.approx(CC_FRAME_MS, abs=0.05)
 
     def test_known_bad_too_many_unplaceable_frames_are_inconclusive_even_when_spread_out(self) -> None:
         result = _cc_score(*_cc_scene(synced=lambda k, ts: ts < CC_T0 or k % 5 != 0))

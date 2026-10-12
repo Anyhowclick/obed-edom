@@ -25,6 +25,7 @@ PAINT_CONTROL_TIMINGS = ("early", "late")
 PAINTED, PARTIAL, UNPAINTED, UNREADABLE, NOT_PAINTER = "painted", "partial", "unpainted", "unreadable", "not-painter"
 SEQ_LIST_CAP = 600
 RUNS_CAP = 10
+LOCAL_CADENCE_DELTAS = 8
 
 PAINT_READ_FN_JS = r"""
   function labelOf(n){
@@ -606,9 +607,16 @@ def _period(rows: Sequence[dict[str, Any]]) -> float | None:
     return statistics.median(deltas) if deltas else None
 
 
+def _local_periods(deltas: list[float], fallback: float) -> list[float]:
+    k = LOCAL_CADENCE_DELTAS
+    sides = ((deltas[max(0, i - k):i], deltas[i + 1:i + 1 + k]) for i in range(len(deltas)))
+    return [max((statistics.median(s) for s in pair if len(s) == k), default=fallback) for pair in sides]
+
+
 def frame_coverage(rows: list[dict[str, Any]], *, max_gap_frames: int, min_fps: float) -> dict[str, Any]:
-    """Carry-cover's rule on rAF timestamps: any delta over `(max_gap_frames + 0.5) × median period`, a cadence
-    under `min_fps`, or a missing sampler row (a seq gap) fails coverage."""
+    """Carry-cover's rule on rAF timestamps: any delta over `(max_gap_frames + 0.5) × local period`, a cadence
+    under `min_fps`, or a missing sampler row (a seq gap) fails coverage. The local period is the slower median of
+    the 8 deltas either side (Chrome drops to 30 Hz with two playing videos), else the window's median."""
     reasons: list[str] = []
     if any(not _num(r.get("ts")) or not isinstance(r.get("seq"), int) for r in rows):
         return {"ok": False, "reasons": ["rows without seq/ts"], "frames": len(rows)}
@@ -623,15 +631,17 @@ def frame_coverage(rows: list[dict[str, Any]], *, max_gap_frames: int, min_fps: 
     if period <= 0:
         reasons.append(f"non-increasing rAF timestamps (median delta {period:g} ms)")
     else:
-        allowed = (max_gap_frames + 0.5) * period
+        gap, local = max(zip(deltas, _local_periods(deltas, period)), key=lambda g: g[0] / g[1] if g[1] > 0 else math.inf)
+        allowed = (max_gap_frames + 0.5) * local
         missed = [d for d in deltas if d > 1.5 * period]
-        out.update(fps=round(1000.0 / period, 2), maxGapAllowedMs=round(allowed, 3),
+        out.update(fps=round(1000.0 / period, 2),
+                   worstGap={"ms": round(gap, 3), "periodMs": round(local, 3), "allowedMs": round(allowed, 3)},
                    missedFrames=sum(max(0, round(d / period) - 1) for d in missed),
                    missedMs=round(sum(d - period for d in missed), 3))
         if period > 1000.0 / min_fps:
             reasons.append(f"cadence {period:.1f} ms is slower than {min_fps:g} fps")
-        if max(deltas) > allowed:
-            reasons.append(f"frame gap {max(deltas):.1f} ms exceeds {allowed:.1f} ms")
+        if gap > allowed:
+            reasons.append(f"frame gap {gap:.1f} ms exceeds {allowed:.1f} ms ({local:.1f} ms local period)")
     if any(d <= 0 for d in deltas) and period > 0:
         reasons.append("non-increasing rAF timestamps")
     if seq_gaps:
