@@ -1810,6 +1810,9 @@ def _full_shape(effect: dict) -> bool:
 # construction: committed transitions plus one cut, the near-misses, failures and ids (mandatory); census: the 133
 # transitions on disk (needs the main checkout's output/fixtures).
 DISSOLVE_NODE_CASES = ("construction", "census", "freeze_stub", "freeze_decks")
+# The committed exports §8 counts. `qual_decks/` (S2) holds verbatim copies of exports already under OUTPUT_FIXTURES, so
+# the census would count them twice.
+DISSOLVE_COMMITTED_EXPORTS = tuple(p for p in sorted(FIXTURE_ROOT.iterdir()) if p.is_dir() and p.name != "qual_decks")
 
 
 @pytest.mark.parametrize("case", DISSOLVE_NODE_CASES)
@@ -1823,7 +1826,7 @@ def test_dissolve_real_patched_methods_on_node(tmp_path, sha, case):
         classes = _cut(patched, "let TB=0;class yB{", "class bB{")
         d2 = _cut(patched, "const A=new VB(", "objectID:e});") + "objectID:e});"
         script = DISSOLVE_PLAYER_SCOPE + classes + DISSOLVE_CONSTRUCTION_JS.replace("%METHODS%", methods).replace("%D2%", d2)
-        committed = _transitions(FIXTURE_ROOT)
+        committed = _transitions(*DISSOLVE_COMMITTED_EXPORTS)
         assert len(committed) == 16
     if case == "construction":
         # The 16 committed transitions (4 full-shape Dissolves, 2 trimmed, 10 Magic Moves) plus P2 2->3 re-timed as a cut:
@@ -1850,7 +1853,7 @@ def test_dissolve_real_patched_methods_on_node(tmp_path, sha, case):
         # timing CUT_OUTGOING models, and the committed deck inputs still match the exports.
         if not OUTPUT_FIXTURES.is_dir():
             pytest.skip("export fixtures under output/ not available")
-        transitions = _transitions(OUTPUT_FIXTURES, FIXTURE_ROOT)
+        transitions = _transitions(OUTPUT_FIXTURES, *DISSOLVE_COMMITTED_EXPORTS)
         assert len(transitions) == 133
         cuts = [e for e in transitions if e["name"] == "none"]
         assert len(cuts) == 8
