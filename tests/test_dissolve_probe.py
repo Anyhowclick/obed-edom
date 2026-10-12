@@ -7,10 +7,13 @@ complementary and clean swap; strip decode (valid / parity error) and strip unde
 frame does not); holder binding (match / ambiguous); frozen index, drifting Ô and too few demixable frames; the patch-off
 media arm (complete -> FAIL, no playback or a holder -> INCONCLUSIVE, never an expected FAIL); foreground correct /
 omitted / shifted / double-painted / swapped; tone within 2, untoned and the identity decision; cost; independent
-overlay; the measured-LUT construction; and the round's control rule (controls read before candidates).
+overlay; the measured-LUT construction; and the round's control rule (controls read before candidates). Rev 12 adds the
+both-opaque no-dip class, device-scale holder decode, holder pixels under `L_path`, production-mask verification against
+the twin, the reference-capture profile and `perfect`/`perfect-shift`, tone coverage, timestamped hide/show captures and
+their dropped-action controls, and the exterior gate / geometry guard engagement check.
 
 The world is 640x360 (`VIEWPORT` patched): outgoing texture opaque for x < 520, incoming for x >= 500, and a 1920x540
-counter movie drawn at (10, 10) x 0.25 inside the outgoing-only class.
+counter movie drawn at (10, 10) x 0.25 inside the outgoing-only class; its holder backing is the 480x135 device box.
 """
 
 from __future__ import annotations
@@ -271,15 +274,85 @@ def lut(variant: str) -> Any:
     return out["kind"], t[0], t[50], t[75], t[100], t[200], t[255], out["observed"]
 
 
+FG_RECT = [60.0, 20.0, 40.0, 10.0]
+IDENTITY_LUT = np.arange(256, dtype=np.uint8)
+TONE_LAYOUT = {"ramp": [[400 + 200 * i, 200, 160, 160, 60 + 40 * i] for i in range(4)],
+               "patches": [[400 + 200 * i, 370, 160, 160, [200, 40, 40]] for i in range(4)]}
+SHARED_MUTATIONS = ("holder-shift", "edge-step", "tone-step")
+
+
+def paint_fg(img: np.ndarray) -> np.ndarray:
+    """The redrawn foreground canvas (opaque light grey) over the movie at `FG_RECT`."""
+    out = img.copy()
+    out[20:30, 60:100] = (240, 240, 240, 255)
+    return out
+
+
+def reference_block(spec: Any, A: np.ndarray, B: np.ndarray, with_holder: np.ndarray, live: np.ndarray, mutate: str | None,
+                    images: dict[str, np.ndarray]) -> dict[str, Any]:
+    """The paused, seeked reference capture (F50, B, A0 and `perfect`, two shots each) in the driver's shape."""
+    pictures = {"F50": mix(with_holder, B, 0.5), "B": mix(with_holder, B, 0.9995), "A0": with_holder.copy()}
+    if mutate == "ref-stale":
+        pictures["F50"] = pictures["A0"].copy()
+    perfect = with_holder.copy()
+    crop = live[10:145, 10:490]
+    if spec.shift:
+        perfect[10:145, 11:490], perfect[10:145, 10] = crop[:, :-1], A[10:145, 10]
+    else:
+        perfect[10:145, 10:490] = crop
+    pictures["perfect"] = perfect
+    for k, v in pictures.items():
+        images[f"ref-{k}-0"], images[f"ref-{k}-1"] = v, v.copy()
+    if mutate == "ref-unstable":
+        images["ref-F50-1"][200, 300, 0] ^= 1
+    targets = ("layer3-opacity", "layer4-opacity")
+    inventory = [{"target": t, "leaf": leaf, "state": "running"} for t, leaf in zip(targets, ("in", "out"))]
+    if mutate == "ref-missing-anim":
+        inventory.pop()
+    elif mutate == "ref-extra-anim":
+        inventory.append({"target": "layer9", "leaf": None, "state": "running"})
+    effs = {"F50": [0.5, 0.5], "B": [0.9995, 0.0005], "A0": [0.0, 1.0]}
+    states = []
+    for k, (label, f) in enumerate(probe.REF_STATES):
+        anims = [{"target": t, "state": "paused", "ct": f * DURATION_MS, "dur": DURATION_MS} for t in targets]
+        if label == "F50" and mutate == "ref-unpaused":
+            anims[0]["state"] = "running"
+        if label == "F50" and mutate == "ref-ct-off":
+            anims[1]["ct"] += 2.0
+        states.append({"label": label, "f": f, "t": 10.0 if mutate == "ref-early" and not k else 300.0 + 100 * k, "dom": not (label == "A0" and mutate == "ref-dom-gone"),
+                       "eff": effs[label], "anims": anims, "shots": [f"ref-{label}-0", f"ref-{label}-1"]})
+    return {"inventory": inventory, "states": states,
+            "perfect": {"shift": spec.shift, "rect": [10, 10, 490, 145], "dom": True, "t": 700.0, "shots": ["ref-perfect-0", "ref-perfect-1"]}}
+
+
 def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str | None = None, fullstrength: bool = False,
               bw: bool = False) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
-    """A whole run record and its images in the hook/driver shape: P2-like 2->3 with one counter movie."""
+    """A whole run record and its images in the hook/driver shape: P2-like 2->3 with one counter movie. The holder backing
+    is device size (480x135 at (10, 10)); reference arms add `FG_RECT`'s foreground canvas (omitted from an `fg-omit`
+    twin's holder) and the reference capture; hide rows a 32-ms screencast with dark frames while hidden."""
     A, B = textures()
     spec = probe.ARMS[arm]
+    reference = spec.capture == "reference"
     frame = strip_frame(REFERENCE, bw=bw)
     placed = probe.place(frame, CONTENT, CONTENT, (H, W))
-    with_holder = probe.over(placed, A) if holder else A
-    raf, shots, images = [], [], {"tex-in": B, "tex-out": A, "live-0": with_holder, "live-1": with_holder.copy()}
+    movie = placed.copy()
+    if mutate == "holder-shift":
+        movie[10:145, 11:490] = placed[10:145, 10:489]
+    live_placed, holder_placed = (paint_fg(placed), movie if "fg-omit" in (spec.splice or "") else paint_fg(movie)) if reference else (placed, movie)
+    holder_px = holder_placed[10:145, 10:490].copy()
+    if mutate == "edge-step":
+        holder_px[:, 0, :3] = np.clip(holder_px[:, 0, :3].astype(int) + 8, 0, 255)
+    holder_full = np.zeros_like(placed)
+    holder_full[10:145, 10:490] = holder_px
+    with_holder = probe.over(holder_full, A) if holder else A
+    live = probe.over(live_placed, A) if holder else A
+    if mutate == "tone-step":
+        region = np.zeros((H, W), bool)
+        region[10:145, 10:490] = True
+        region[20:30, 60:100] = False
+        live = live.copy()
+        live[..., :3][region] = probe.analytic_lut()[live[..., :3][region]]
+    raf, shots, images = [], [], {"tex-in": B, "tex-out": A, "live-0": live, "live-1": live.copy()}
     for t in np.arange(0.0, 1900.0, 16.0):
         present = INSERT_MS <= t < INSERT_MS + DURATION_MS
         e = probe.ease_in_out((t - INSERT_MS) / DURATION_MS)
@@ -300,8 +373,20 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
             rec["anims"] = [{"leaf": "in", "ct": ct, "start": INSERT_MS, "state": "running", "dur": DURATION_MS, "value": e},
                             {"leaf": "out", "ct": ct, "start": INSERT_MS, "state": "running", "dur": DURATION_MS, "value": 1 - e}]
         raf.append(rec)
-    times = [10.0, 40.0, 70.0] + [120.0 + 110.0 * k for k in range(14)] + [1650.0, 1700.0, 1750.0]
-    for k, t0 in enumerate(times):
+    hiding = (spec.row or "").startswith("hide")
+    acts = [(INSERT_MS + 1000 * o, n) for o, n in probe.LIFECYCLE[spec.row].get("actions", ())] if spec.row else []
+    when = {n: t for t, n in acts}
+
+    def dark_at(t0: float, t1: float) -> bool:
+        if not hiding:
+            return False
+        if spec.drop == "show":
+            return t1 >= when["hide"]
+        return spec.drop != "hide" and when["hide"] <= t1 and t0 <= when["show"]
+
+    step = 60.0 if hiding else 110.0
+    times = [10.0, 40.0, 70.0] + list(np.arange(120.0, 1590.0, step)) + [1650.0, 1700.0, 1750.0]
+    for k, t0 in enumerate([] if reference else times):
         name = f"shot-{k:03d}"
         if t0 < INSERT_MS:
             img = with_holder
@@ -312,14 +397,16 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
             img = probe.over(placed, mix(A, B, e)) if arm == "m-hold" or fullstrength else mix(with_holder, B, e)
             if mutate in ("delay-42", "delay-99") and t0 + 10 < INSERT_MS + 500:
                 img = probe.over(probe.place(strip_frame(99), CONTENT, CONTENT, (H, W)), A) if mutate == "delay-99" and k == 4 else with_holder
+            if dark_at(t0, t0 + 10):
+                img = np.zeros_like(img)
         images[name] = img
-        shots.append({"name": name, "t0": t0, "t1": t0 + 10.0})
+        shots.append({"name": name, "t0": float(t0), "t1": float(t0) + 10.0})
     blend, iso = ("plus-lighter", "isolate") if spec.styles == "on" else ("normal", "auto")
     chain = [[{"id": tid, "blend": "normal", "isolation": "auto"}, {"id": leaf, "blend": blend, "isolation": "auto"},
               {"id": "layer2", "blend": "normal", "isolation": iso}] for tid, leaf in (("IN", "layer3"), ("OUT", "layer4"))]
-    holders = [{"parent": "layer4-opacity", "rect": CONTENT, "canvasRect": CONTENT, "natural": [binary.WIDTH, binary.HEIGHT]}] if holder else []
+    holders = [{"parent": "layer4-opacity", "rect": CONTENT, "canvasRect": CONTENT, "natural": [480, 135]}] if holder else []
     if holder:
-        images["holder-0"] = frame
+        images["holder-0"] = holder_px
     pins = live_runtime.SUPPORTED_PLAYERS[STOCK]
     expected = pins[0 if spec.mode == "on" else 1] if spec.splice is None else "f" * 64
     rv = [[INSERT_MS - 1 - (presented - i) * 33.0, (REFERENCE - presented + i) / binary.FPS, i] for i in range(1, presented + 1)]
@@ -329,16 +416,52 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         "served": {"mode": spec.mode, "splice": spec.splice, "stockSha256": STOCK, "expected": expected},
         "output": {"mmOpacity": {"sha256": expected}}, "hashBefore": "#5", "hashAfter": "#7", "shots": shots, "advanceAt": 50.0,
         "foreground": {"0": []},
-        "dump": {"raf": raf, "first": {"textures": ["IN", "OUT"], "chain": chain, "holders": holders, "layerIds": ["layer1"]},
+        "dump": {"raf": raf, "first": {"textures": ["IN", "OUT"], "chain": chain, "holders": holders,
+                                       "layerIds": ["layer2", "layer3-opacity", "layer4-opacity"]},
                  "vids": [{"id": 0, "rv": rv, "detach": INSERT_MS - 0.5, "tuple": "bt709/bt709/bt709/false"}],
                  "takes": [[INSERT_MS - 1.0, 22.0]]},
     }
-    if spec.capture == "paused":
+    if spec.capture in ("paused", "reference"):
         record["paused"] = {"state": "presented", "frame": REFERENCE, "id": 0}
+    if spec.movies == "tone":
+        layout = dict(TONE_LAYOUT)
+        if mutate == "tone-small-cells":
+            layout["ramp"] = [[x, y, 16 if i else w, 16 if i else h, v] for i, (x, y, w, h, v) in enumerate(TONE_LAYOUT["ramp"])]
+        record["movies"] = {"x.mov": {"layout": layout}}
+    if reference:
+        rect, size = (FG_RECT, (10, 40))
+        if mutate == "mask-whole":
+            rect, size = [40.0, 15.0, 100.0, 30.0], (30, 100)
+        elif mutate == "mask-shift3":
+            rect = [FG_RECT[0] + 3, *FG_RECT[1:]]
+        fg = np.zeros((*size, 4), np.uint8)
+        fg[...] = (240, 240, 240, 255)
+        images["fg-0-0"] = fg
+        record["foreground"] = {"0": [] if mutate == "mask-empty" else [{"id": "FG", "rect": rect, "alpha": 1.0, "order": 7, "image": "fg-0-0"}]}
+        record["reference"] = reference_block(spec, A, B, with_holder, live, mutate, images)
+    if spec.inject:
+        record["inject"] = None if mutate == "no-inject" else [-60.0, 900.0, 456.0, 48.0]
+    if mutate == "no-take":
+        record["dump"]["takes"] = []
     if spec.row:
         images["settled"] = B
         record.update(residue={"layers": 0, "rules": 0, "holders": 0},
-                      actions=[{"name": n, "t": INSERT_MS + 1000 * o} for o, n in probe.LIFECYCLE[spec.row].get("actions", ())])
+                      actions=[{"name": n, "t": t, **({"dropped": True} if n == spec.drop and mutate != "drop-flag-del" else {})}
+                               for t, n in acts])
+    if hiding:
+        cast = []
+        for k, t in enumerate(np.arange(INSERT_MS, INSERT_MS + DURATION_MS, 32.0)):
+            e = probe.ease_in_out((t - INSERT_MS) / DURATION_MS)
+            images[f"cast-{k:03d}"] = np.zeros((H, W, 4), np.uint8) if dark_at(t, t) else mix(with_holder, B, e)
+            cast.append({"name": f"cast-{k:03d}", "t": float(t)})
+        after = [c for c in cast if c["t"] > when["show"] + 20]
+        if mutate == "cast-dup":
+            images[after[3]["name"]] = images[after[2]["name"]].copy()
+        elif mutate == "cast-shift":
+            after[3]["t"] += 40.0
+        elif mutate == "cast-few":
+            cast = [c for c in cast if c["t"] <= when["show"] + 20 or c in after[:4]]
+        record["cast"] = cast
     if mutate == "digest":
         record["output"]["mmOpacity"]["sha256"] = "0" * 64
     elif mutate == "texture-ids":
@@ -355,8 +478,8 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
     elif mutate == "stale-take":
         record["dump"]["takes"] = [[10.0, 22.0]]
     elif mutate == "tone-covered":
-        record["movies"] = {"x.mov": {"layout": probe.tone_layout()}}
-        record["foreground"] = {"0": [{"id": "FRAME", "rect": [0.0, 0.0, 640.0, 360.0]}]}
+        images["fg-0-1"] = np.full((360, 640, 4), 255, np.uint8)
+        record["foreground"]["0"].append({"id": "FRAME", "rect": [0.0, 0.0, 640.0, 360.0], "alpha": 1.0, "order": 9, "image": "fg-0-1"})
     elif mutate == "dup-rv":
         record["dump"]["vids"][0]["rv"].append(record["dump"]["vids"][0]["rv"][0])
     elif mutate == "holder-rect-missing":
@@ -382,7 +505,6 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
     elif mutate == "tuple-malformed":
         record["dump"]["vids"][0]["tuple"] = "malformed"
     elif mutate == "tone-no-fg":
-        record["movies"] = {"x.mov": {"layout": probe.tone_layout()}}
         del record["foreground"]
     elif mutate == "three-mid":
         keep = {"shot-000", "shot-001", "shot-002", "shot-007", "shot-009", "shot-011", "shot-017", "shot-018", "shot-019"}
@@ -414,7 +536,6 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         keep = {"shot-000", "shot-001", "shot-002", "shot-010", "shot-017", "shot-018", "shot-019"}
         record["shots"] = [s for s in record["shots"] if s["name"] in keep]
     elif mutate in ("tone-rv-del", "tone-tuple-del", "tone-fg-del"):
-        record["movies"] = {"x.mov": {"layout": probe.tone_layout()}}
         if mutate == "tone-rv-del":
             del record["dump"]["vids"][0]["rv"]
         elif mutate == "tone-tuple-del":
@@ -430,14 +551,29 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
     return record, images
 
 
-def arm_check(arm: str, check: str, identity: bool | None = None, **kwargs: Any) -> str:
+def scored(arm: str, identity: bool | None = None, lut: np.ndarray | None = IDENTITY_LUT, spec: Any = None,
+           **kwargs: Any) -> dict[str, Any]:
+    """`score_arm` on a synthetic run and, for an arm with a twin, its same-frame twin (sharing only `SHARED_MUTATIONS`)."""
+    spec = spec or probe.ARMS[arm]
     record, images = media_run(arm, **kwargs)
-    return probe.score_arm(record, images, probe.ARMS[arm], CAL, identity=identity)["checks"][check]["verdict"]
+    twin = None
+    if spec.twin:
+        shared = {**kwargs, "mutate": kwargs.get("mutate") if kwargs.get("mutate") in SHARED_MUTATIONS else None}
+        twin = media_run(spec.twin, **shared)
+    return probe.score_arm(record, images, spec, CAL, identity=identity, twin=twin, lut=lut)
+
+
+def arm_check(arm: str, check: str, identity: bool | None = None, **kwargs: Any) -> str:
+    return scored(arm, identity, **kwargs)["checks"][check]["verdict"]
 
 
 def arm_outcome(arm: str, **kwargs: Any) -> str:
-    record, images = media_run(arm, **kwargs)
-    return probe.score_arm(record, images, probe.ARMS[arm], CAL)["outcome"]
+    return scored(arm, **kwargs)["outcome"]
+
+
+def hide_check(arm: str, check: str, **kwargs: Any) -> str:
+    record, images = media_run(arm, holder=probe.ARMS[arm].mode == "on", **kwargs)
+    return probe.score_hide_capture(record, images, probe.ARMS[arm], CAL)["checks"][check]["verdict"]
 
 
 def lifecycle(row: str, twin: str = "ok", **kwargs: Any) -> str:
@@ -529,9 +665,8 @@ def interrupted(row: str) -> str:
     return probe.score_lifecycle(record, images, twin, probe.ARMS[f"life-{row}"], CAL)["outcome"]
 
 
-def tone_identity(mutate: str) -> str:
-    record, images = media_run("m-tone", mutate=mutate)
-    return probe.score_arm(record, images, probe.DX1.arm("m-tone", True), CAL, identity=True)["outcome"]
+def tone_identity(mutate: str | None) -> str:
+    return scored("m-tone", True, spec=probe.DX1.arm("m-tone", True), mutate=mutate)["outcome"]
 
 
 def cef_outcome(**kwargs: Any) -> str:
@@ -569,6 +704,31 @@ def profile_headless(profile: Any) -> bool:
     record, images = media_run("m-on")
     record.pop("load"), record.pop("headlessBefore")
     return any("headless" in p for p in probe.capture_problems(record, images, probe.ARMS["m-on"], profile))
+
+
+def same_colour(kind: str) -> str:
+    """No dip on the both-opaque class where A and B have identical colours (rev 9's colour filter left it empty)."""
+    A, B = textures()
+    B[:, 500:520, :3] = A[:, 500:520, :3]
+    out = probe.score_fade([mix(A, B, e, kind) for e in ES], A, B, classes=("overlap",), cal=CAL)
+    return "INCONCLUSIVE" if out["problems"] else ("PASS" if out["checks"]["no_dip"] else "FAIL")
+
+
+def device_strip() -> int | None:
+    """The strip read from a 480x135 device-scale holder (content box at its origin, scale 480 / 1920)."""
+    holder_px = probe.place(strip_frame(REFERENCE), CONTENT, CONTENT, (H, W))[10:145, 10:490]
+    return probe.holder_strip(holder_px, {"canvasRect": CONTENT, "rect": CONTENT},
+                              {"content": CONTENT, "size": [binary.WIDTH, binary.HEIGHT]}, 1.0)
+
+
+def cases(prefix: str, variants: tuple[str, ...]) -> dict[str, str]:
+    table = probe.scorer_cases(CAL)
+    return {v: table[f"case:{prefix}-{v}"]["verdict"] for v in variants}
+
+
+def no_twin() -> str:
+    record, images = media_run("m-snap")
+    return probe.score_arm(record, images, probe.ARMS["m-snap"], CAL, lut=IDENTITY_LUT)["outcome"]
 
 
 CASES = [
@@ -711,6 +871,60 @@ CASES = [
     ("r1-13 CEF round needs no headless-only arms", lambda: (round_gate(None, "overall", profile=probe.CEF),
                                                             "lifecycle" in probe.score_round({}, CAL, profile=probe.CEF)["gates"]), ("PASS", False)),
     ("r1-13 headless process/load checks apply to DX-1 only", lambda: (profile_headless(probe.DX1), profile_headless(probe.CEF)), (True, False)),
+    ("r12 no dip on the both-opaque class with identical colours (alpha 255)", lambda: same_colour("patch"), "PASS"),
+    ("r12 no dip on the both-opaque class with identical colours, KB alpha 191", lambda: same_colour("noblend"), "FAIL"),
+    ("r12 strip decode from a device-scale holder", device_strip, REFERENCE),
+    ("r12 holder pixels: exact holder", lambda: arm_check("m-snap", "holder_pixels"), "PASS"),
+    ("r12 holder pixels: movie drawn 1 px off, under the production mask", lambda: arm_check("m-snap", "holder_pixels", mutate="holder-shift"), "FAIL"),
+    ("r12 holder pixels: tone step only, compensated by L_path", lambda: arm_check("m-snap", "holder_pixels", mutate="tone-step", lut=probe.analytic_lut()), "PASS"),
+    ("r12 holder pixels: the same tone step read without L_path", lambda: arm_check("m-snap", "holder_pixels", mutate="tone-step"), "FAIL"),
+    ("r12 holder pixels: edge-band step of 8", lambda: arm_check("m-snap", "holder_pixels", mutate="edge-step"), "FAIL"),
+    ("r12 holder pixels: no L_path for the compositing path", lambda: arm_check("m-snap", "holder_pixels", lut=None), "INCONCLUSIVE"),
+    ("r12 holder pixels: scorer case 1-px shifted holder", lambda: probe.scorer_cases(CAL)["case:holder-shift"]["verdict"], "FAIL"),
+    ("r12 m-snap complete", lambda: arm_outcome("m-snap"), "MATCH"),
+    ("r12 m-snap-frac contract on a 1-px-off movie", lambda: arm_outcome("m-snap-frac", mutate="holder-shift"), "MATCH"),
+    ("r12 mask verification: production mask", lambda: arm_check("m-snap", "mask"), "PASS"),
+    ("r12 mask verification: whole-rectangle inventory", lambda: arm_check("m-snap", "mask", mutate="mask-whole"), "INCONCLUSIVE"),
+    ("r12 mask verification: 3-px shifted inventory", lambda: arm_check("m-snap", "mask", mutate="mask-shift3"), "INCONCLUSIVE"),
+    ("r12 mask verification: empty inventory", lambda: arm_check("m-snap", "mask", mutate="mask-empty"), "INCONCLUSIVE"),
+    ("r12 mask verification: twin run missing", no_twin, "INCONCLUSIVE"),
+    ("r12 mask scorer cases", lambda: cases("mask", ("production", "whole", "shift3", "empty")),
+     {"production": "PASS", "whole": "INCONCLUSIVE", "shift3": "INCONCLUSIVE", "empty": "INCONCLUSIVE"}),
+    ("r12 reference: valid set", lambda: arm_check("m-snap", "reference"), "PASS"),
+    ("r12 reference: perfect-shift", lambda: arm_check("perfect-shift", "reference"), "FAIL"),
+    *[(f"r12 reference: {m}", lambda m=m: arm_check("m-snap", "reference", mutate=m), "INCONCLUSIVE")
+      for m in ("ref-stale", "ref-missing-anim", "ref-extra-anim", "ref-unpaused", "ref-ct-off", "ref-unstable", "ref-dom-gone", "ref-early")],
+    ("r12 reference scorer cases", lambda: cases("reference", ("valid", "stale", "extra", "unpaused")),
+     {"valid": "PASS", "stale": "INCONCLUSIVE", "extra": "INCONCLUSIVE", "unpaused": "INCONCLUSIVE"}),
+    ("r12 tone coverage >= 50 %", lambda: arm_check("m-tone", "tone", identity=False), "PASS"),
+    ("r12 tone coverage < 50 %", lambda: arm_check("m-tone", "tone", identity=False, mutate="tone-small-cells"), "INCONCLUSIVE"),
+    ("r12 m-tone identity complete", lambda: tone_identity(None), "MATCH"),
+    ("r12 hide row: correct capture", lambda: lifecycle("hide"), "MATCH"),
+    ("r12 hide control: stock twin dark while hidden, content after show", lambda: (hide_check("life-hide-twin", "hidden"), hide_check("life-hide-twin", "shown")),
+     ("PASS", "PASS")),
+    ("r12 hide control: dropped hide leaves a visible frame inside the interval", lambda: hide_check("life-hide-nohide", "hidden"), "FAIL"),
+    ("r12 hide control: dropped show leaves no content after show", lambda: hide_check("life-hide-noshow", "shown"), "FAIL"),
+    ("r12 hide row: duplicate after-show frame", lambda: lifecycle("hide", mutate="cast-dup"), "INCONCLUSIVE"),
+    ("r12 hide row: shifted screencast timestamp", lambda: lifecycle("hide", mutate="cast-shift"), "INCONCLUSIVE"),
+    ("r12 hide row: < 6 after-show mid frames", lambda: lifecycle("hide", mutate="cast-few"), "INCONCLUSIVE"),
+    ("r12 hide scorer cases", lambda: cases("hide", ("valid", "duplicate", "shift")),
+     {"valid": "PASS", "duplicate": "INCONCLUSIVE", "shift": "INCONCLUSIVE"}),
+    ("r12 exterior gate: bound holder", lambda: arm_check("m-raw-svgclip", "exterior"), "PASS"),
+    ("r12 exterior gate: published take without a holder", lambda: arm_check("m-raw-caption", "exterior", holder=False), "FAIL"),
+    ("r12 exterior gate: no published take", lambda: arm_check("m-raw-caption", "exterior", holder=False, mutate="no-take"), "INCONCLUSIVE"),
+    ("r12 exterior gate: injection not applied", lambda: arm_check("m-raw-script", "exterior", holder=False, mutate="no-inject"), "INCONCLUSIVE"),
+    ("r12 m-raw: exterior gate and frozen frame", lambda: arm_outcome("m-raw"), "MATCH"),
+    ("r12 geometry guard: bound holder", lambda: arm_check("m-snap", "geometry"), "PASS"),
+    ("r12 geometry guard: published take without a holder", lambda: arm_check("m-geo-scale", "geometry", holder=False), "FAIL"),
+    ("r12 geometry guard: no published take", lambda: arm_check("m-geo-base", "geometry", holder=False, mutate="no-take"), "INCONCLUSIVE"),
+    ("r12 letterboxed stage and DSF-2 device shape", lambda: (probe.stage_of(probe.ARMS["m-snap-lb"]), probe.device_shape(probe.ARMS["m-geo-dsf2"])),
+     ({"x": 0.0, "y": 60.0, "width": 1920.0, "height": 1080.0}, (720, 1280))),
+    ("r12 round: a dropped-action control passing invalidates its gate", lambda: round_gate(("life-hide-nohide", "hidden", "PASS"), "hidden"), "INCONCLUSIVE"),
+    ("sweep r12: a dropped-action control recorded as performed", lambda: hide_check("life-hide-nohide", "hidden", mutate="drop-flag-del"), "INCONCLUSIVE"),
+    ("r12 CEF: m-snap holder pixels blocking, read after their controls", lambda: round_gate(None, "holder_pixels", profile=probe.CEF), "PASS"),
+    ("r12 CEF: m-snap-frac passing invalidates the holder-pixel gate",
+     lambda: round_gate(("m-snap-frac", "holder_pixels", "PASS"), "holder_pixels", profile=probe.CEF), "INCONCLUSIVE"),
+    ("r12 round: perfect-shift passing invalidates the reference gate", lambda: round_gate(("perfect-shift", "reference", "PASS"), "reference"), "INCONCLUSIVE"),
 ]
 
 

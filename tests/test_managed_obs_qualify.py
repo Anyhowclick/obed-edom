@@ -95,6 +95,23 @@ def test_dissolve_calibration_is_the_unclamped_formula_and_inconclusive_past_n_4
     assert (None if cal is None else (cal.tau, cal.complement, cal.no_dip)) == want
 
 
+@pytest.mark.parametrize("decision, tone_raw", [(None, True), ({"L": "identity"}, False), ({"L": "table"}, True)])
+def test_dissolve_sessions_add_dsk78_cost_and_m_snap_and_keep_tone_report_only(decision, tone_raw):
+    # DX-2 (plan §9.2): opaque-off first (it fixes the calibration); DX-1's CEF arms minus screen-*, delay-*, on-sw and the
+    # lifecycle, plus m-dsk78 (DSK 7->8, two bound holders, cost gated) and m-snap with its mask twin (reference capture at
+    # the source geometry); the letterbox m-snap-lb stays DX-1 only. m-tone-raw runs only without an identity L, and m-tone's tone check is
+    # REPORTED under identity L (gated otherwise).
+    sessions = q.dissolve_arms(decision)
+    assert sessions[0] == "opaque-off"
+    assert {"m-dsk78", "m-snap", "m-snap-twin", "m-tone", "m-tone-twin"} <= set(sessions)
+    assert ("m-tone-raw" in sessions) is tone_raw
+    assert not [s for s in sessions if s.startswith(("screen-", "delay-", "life-", "m-snap-lb")) or s == "on-sw"]
+    dsk = q.dissolve_probe.ARMS["m-dsk78"]
+    assert (dsk.deck, dsk.slide, dsk.holders, dsk.expect.get("cost")) == ("dsk", 7, 2, "PASS")
+    identity = (decision or {}).get("L") == "identity"
+    assert q.dissolve_probe.CEF.arm("m-tone", identity).expect["tone"] == ("REPORTED" if identity else "PASS")
+
+
 def test_main_refuses_mmo_arms_on_a_grey_counter_fixture(monkeypatch, tmp_path, capsys):
     monkeypatch.delenv(q.MM_OPACITY_ENV, raising=False)
     monkeypatch.setattr(q, "fixture_counter", lambda _fixture: "grey")

@@ -28,11 +28,13 @@ Arms:
                 fsdoff (10 sessions, one launch). Binary fixture only.
   dissolve      DX-2 (dissolve cross-fade plan §9.2): one launch, unrecorded; per DX-1 arm on P2, p2cut, p2-binary and the tone
                 movie (`DISSOLVE_ARMS`: no screen-*, delay-*, on-sw or lifecycle; m-tone-raw only without an identity `L` in
-                --decision) a `LiveOutputHost` session with `dissolve_probe`'s resolver, hook and driver, a GetSourceScreenshot
-                burst as the capture (cut sessions score those shots as the screencast), continuity, G2 state, colour tuples and
-                the served digest recorded. opaque-off runs first and fixes the calibration (`dissolve_calibration`) before the
-                other captures; `dissolve_probe`'s integrity rules and scorer then read every control before the candidates.
-                Checks whose controls DX-2 does not run (no flash, screen) are reported, not gated. Ignores --fixture.
+                --decision; tone report-only under identity `L`), plus m-dsk78 (DSK 7->8, two holders, cost <= 50 ms) and
+                m-snap with its twins (reference capture at the source's 1920x1080 geometry), a `LiveOutputHost` session with
+                `dissolve_probe`'s resolver, hook and driver, a GetSourceScreenshot burst as the capture (cut sessions score
+                those shots as the screencast), continuity, G2 state, colour tuples and the served digest recorded.
+                opaque-off runs first and fixes the calibration (`dissolve_calibration`) before the other captures;
+                `dissolve_probe`'s integrity rules and scorer then read every control before the candidates. Checks whose
+                controls DX-2 does not run (no flash, screen) are reported, not gated. Ignores --fixture.
   soak          g2 held on slide 2 for --soak-minutes (>= 4) with per-minute reads, 20 s recordings around a loop wrap at
                 minute 1 and just before loseContext (after the first half), build 1, P3/P4; an off twin. Gate M6.
                 --precheck: the loop pre-check.
