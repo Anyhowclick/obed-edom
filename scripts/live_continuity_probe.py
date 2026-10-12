@@ -7842,15 +7842,15 @@ def run_force_wrap_cli(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
-def _stored_matches(strict: dict[str, Any], stored: dict[str, Any]) -> bool:
+def _stored_matches(strict: dict[str, Any], stored: dict[str, Any], at_onset: Callable[[], dict[str, Any]]) -> bool:
     """Every stored legacy verdict equals today's strict re-score; a `continue1to2` stored before
-    `press_scene_1to2` (its window after today's press crossing) is compared by verdict and reason only."""
+    `press_scene_1to2` (its window after today's press crossing) must equal `at_onset()`, its re-score at `onset1to2`."""
     def same(key: str) -> bool:
         mine, kept = strict[key], stored.get(key)
         before = _finite_number(((kept or {}).get("window") or {}).get("lastBeforeT")) if isinstance(kept, dict) else None
         press = _finite_number((mine.get("window") or {}).get("firstAfterT"))
         if key == "continue1to2" and before is not None and press is not None and before > press:
-            return all(kept.get(field) == mine.get(field) for field in ("verdict", "reason"))
+            return json.loads(json.dumps(at_onset(), default=str)) == kept
         return mine == kept
 
     return all(same(key) for key in strict)
@@ -7883,7 +7883,9 @@ def rescore_artifact(path: Path, period_s: float) -> dict[str, Any]:
         stored = {key: entry.get(key) for key in strict}
         out[label] = {
             "identical": json.dumps(strict, sort_keys=True, default=str) == json.dumps(aware, sort_keys=True, default=str),
-            "strictMatchesArtifact": _stored_matches(json.loads(json.dumps(strict, default=str)), stored),
+            "strictMatchesArtifact": _stored_matches(json.loads(json.dumps(strict, default=str)), stored, lambda: score_continuity(
+                entry["samples"], facts["asset"], facts["onset1to2"], facts["pinRect"], facts["pinRect"], installed,
+            )),
             "wrapTimes": wraps,
         }
     return {"artifact": str(path), "loopPeriodS": period_s, "arms": out,
@@ -8033,6 +8035,7 @@ CARRY_COVER_MID_MOVE = (0.1, 0.9)
 CARRY_COVER_MIN_FPS = 20.0
 CARRY_COVER_MAX_GAP_FRAMES = 3
 CARRY_COVER_CADENCE_TICKS = 8
+CARRY_COVER_CADENCE_SPREAD = 1.25
 CARRY_COVER_MAX_DISCARDED_SHARE = 0.1
 CARRY_COVER_SYNC_BITS = 12
 CARRY_COVER_SYNC_CELL_PX = 4
@@ -8413,8 +8416,8 @@ def score_carry_cover(
     PASS: at least `CARRY_COVER_MIN_CLEAN_SHARE` of the scored mid-move frames expose at most
     `CARRY_COVER_MAX_EXPOSED_FRACTION` of the overlay's area and no strip is wider than `CARRY_COVER_MAX_STRIP_PX`.
     Coverage: at least `CARRY_COVER_MIN_FPS` scored frames per second, no stretch of the mid-move window longer than
-    `CARRY_COVER_MAX_GAP_FRAMES` (+ half) rAF ticks at the local cadence (`local_cadence`) without one, and at most `CARRY_COVER_MAX_DISCARDED_SHARE` of its
-    frames unplaceable. Every integrity or coverage gap is INCONCLUSIVE, never a pass."""
+    `CARRY_COVER_MAX_GAP_FRAMES` (+ half) rAF ticks at the local cadence (`local_cadence`) without one, and at most
+    `CARRY_COVER_MAX_DISCARDED_SHARE` of its frames unplaceable. Every integrity or coverage gap is INCONCLUSIVE, never a pass."""
     def inconclusive(*reasons: str, **detail: Any) -> dict[str, Any]:
         return {"verdict": "inconclusive", "reasons": list(reasons), **detail}
 
@@ -8596,13 +8599,23 @@ def score_carry_cover(
 
 
 def local_cadence(tick_ts: list[float], start: float, end: float, fallback: float) -> float:
-    """The local rAF period of the gap `start`..`end` (Chrome drops to 30 Hz while two or more visible videos play): the
-    slower of the medians of the `CARRY_COVER_CADENCE_TICKS` tick deltas ending by `start` and of those starting from
-    `end`, a side counting only when it has all of them; else `fallback`."""
+    """The rAF period a carry-cover gap `start`..`end` is judged at (Chrome drops to 30 Hz while two or more visible
+    videos play). With sampler ticks inside the gap, their own mean period from the enclosing ticks: the gap then
+    passes on its rAF tick count alone, which no single slow delta can stretch (a max or median can be). With none
+    (the page ran no rAF), the faster of the `CARRY_COVER_CADENCE_TICKS` tick deltas' medians either side, only when
+    both sides are complete and steady (within `CARRY_COVER_CADENCE_SPREAD`); else `fallback`."""
+    before = [t for t in tick_ts if t <= start][-1:]
+    after = [t for t in tick_ts if t >= end][:1]
+    interior = [t for t in tick_ts if start < t < end]
+    span = before + interior + after
+    if interior and len(span) > 1:
+        return (span[-1] - span[0]) / (len(span) - 1)
     deltas = list(zip(tick_ts, tick_ts[1:]))
     n = CARRY_COVER_CADENCE_TICKS
     sides = ([b - a for a, b in deltas if b <= start][-n:], [b - a for a, b in deltas if a >= end][:n])
-    return max((float(np.median(side)) for side in sides if len(side) == n), default=fallback)
+    if all(len(side) == n and min(side) > 0 and max(side) <= CARRY_COVER_CADENCE_SPREAD * min(side) for side in sides):
+        return min(float(np.median(side)) for side in sides)
+    return fallback
 
 
 def carry_cover_capture_problems(capture: dict[str, Any], bridge: dict[str, Any]) -> list[str]:

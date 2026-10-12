@@ -6515,21 +6515,26 @@ class TestRescoreArtifact:
         assert report["arms"]["attach"]["strictMatchesArtifact"] is False
         assert report["ok"] is False
 
-    @pytest.mark.parametrize(("flip", "ok"), [(False, True), (True, False)])
-    def test_a_1to2_stored_before_the_press_scene_matches_by_verdict(self, tmp_path: Path, flip: bool, ok: bool) -> None:
-        """Artifacts before `press_scene_1to2` scored 1to2 at the next press: only its verdict and reason must match."""
-        samples = rows_around_boundary(n_before=40)
+    @pytest.mark.parametrize(("stale", "ok"), [
+        pytest.param({}, True, id="as-stored"),
+        pytest.param({"verdict": False}, False, id="known-bad-a-changed-verdict"),
+        pytest.param({"sampleCount": 1}, False, id="known-bad-a-changed-diagnostic"),
+    ])
+    def test_a_1to2_stored_before_the_press_scene_must_equal_its_rescore_at_the_onset(
+        self, tmp_path: Path, stale: dict[str, Any], ok: bool,
+    ) -> None:
+        """Artifacts before `press_scene_1to2` scored 1to2 at the next press (`onset1to2`): re-scored there, exactly."""
+        samples = rows_around_boundary(n_before=40, dst_rect=SRC_RECT)
         for row in samples[:20]:
             row["scene"] = 0
         path = self._artifact(tmp_path, samples)
         data = json.loads(path.read_text())
         data["groundTruth"]["onset1to2"] = 2.0
-        if flip:
-            data["attach"]["continue1to2"]["verdict"] = not data["attach"]["continue1to2"]["verdict"]
+        data["attach"]["continue1to2"].update(stale)
         path.write_text(json.dumps(data))
         report = probe.rescore_artifact(path, LOOP_P)
-        assert report["arms"]["arm A"]["strictMatchesArtifact"] is True
-        assert report["ok"] is ok
+        assert data["arms"]["A"]["continue1to2"]["verdict"] is True and report["arms"]["arm A"]["strictMatchesArtifact"] is True
+        assert report["arms"]["attach"]["strictMatchesArtifact"] is ok and report["ok"] is ok
 
     def test_an_arm_without_samples_fails_closed(self, tmp_path: Path) -> None:
         path = self._artifact(tmp_path, rows_around_boundary())
@@ -9571,12 +9576,21 @@ class TestCarryCoverCoverage:
         hold = (1853.0 - CC_FIRST_TICK_MS - 57 * CC_FRAME_MS) // (2 * CC_FRAME_MS)
         return CC_FIRST_TICK_MS + (k + min(max(k - 57, 0), hold)) * CC_FRAME_MS
 
-    @pytest.mark.parametrize(("tick_at", "dropped", "verdict"), [
-        pytest.param(_throttled, lambda ts: 1480.0 < ts < 1495.0, "pass", id="one-missed-30hz-frame-where-the-cadence-switches"),
-        pytest.param(None, lambda ts: 1400.0 < ts < 1460.0, "inconclusive", id="known-bad-a-4-tick-hole-at-steady-60hz"),
+    @staticmethod
+    def _strip_at_40(p: float) -> float:
+        return _ease_in_out(p) + (0.25 if 0.400 < p < 0.440 else 0.0)
+
+    @pytest.mark.parametrize(("tick_at", "dropped", "curve", "verdict"), [
+        pytest.param(_throttled, lambda ts: 1480.0 < ts < 1495.0, _ease_in_out, "pass",
+                     id="one-missed-30hz-frame-where-the-cadence-switches"),
+        pytest.param(None, lambda ts: 1400.0 < ts < 1460.0, _ease_in_out, "inconclusive", id="known-bad-a-4-tick-hole-at-steady-60hz"),
+        pytest.param(_throttled, lambda ts: False, _strip_at_40, "fail", id="control-a-complete-capture-sees-the-strip"),
+        # Astra r20 P1: a 60 Hz hole right before the throttle must not borrow the 30 Hz cadence that follows it.
+        pytest.param(_throttled, lambda ts: 1400.0 < ts < 1440.0, _strip_at_40, "inconclusive",
+                     id="known-bad-a-60hz-hole-before-the-throttle-hides-the-strip"),
     ])
-    def test_a_gap_is_judged_against_the_local_cadence(self, tick_at: Any, dropped: Any, verdict: str) -> None:
-        result = _cc_score(*_cc_scene(tick_at=tick_at, deliver=lambda k, ts: not dropped(ts)))
+    def test_a_gap_is_judged_against_the_local_cadence(self, tick_at: Any, dropped: Any, curve: Any, verdict: str) -> None:
+        result = _cc_score(*_cc_scene(tick_at=tick_at, overlay_curve=curve, deliver=lambda k, ts: not dropped(ts)))
         assert result["verdict"] == verdict, result["reasons"]
         assert result["cadenceMs"] == pytest.approx(CC_FRAME_MS, abs=0.05)
 
