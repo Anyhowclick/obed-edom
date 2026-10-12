@@ -1,6 +1,6 @@
 # Dissolve and cut over fill-less slides: a true cross-fade, a clean cut, and movies that freeze and fade
 
-**rev 14 — r11 folded (acceptance only; bytes = rev 13), for owner review**, 2026-10-12. Rev 1: Opus planner (`8e572864`). Critique r1–r7: GPT-6 Astra
+**rev 15 — decision 13 (host startup probe chooses the placement rule), for owner review**, 2026-10-12. Rev 1: Opus planner (`8e572864`). Critique r1–r7: GPT-6 Astra
 high via Codex (not Opus; owner 2026-10-11), 12 + 7 + 11 + 7 + 6 + 4 + 3 findings, all folded (§14). Revs 2–9: Opus planner
 (`cd289a05`, `f3bd8b55`, `4ffcd8ad`, `e5c644bb`, `218308c3`, `cacfe9fb`, `d299b549`, rev 9 = owner GO 2026-10-11 22:10, W1–W4
 implemented on this branch up to `fbe105e0`). Rev 10: Opus planner, after Q0b's five re-plan triggers, the Astra xhigh advisory
@@ -8,12 +8,14 @@ implemented on this branch up to `fbe105e0`). Rev 10: Opus planner, after Q0b's 
 Opus planner, folding GPT-6 Astra r8 on rev 10 (9 findings, CHANGES REQUIRED; §14) and decision 12 (made, then reversed the
 same day; §12); rev 11 = `b4ff2576`. Rev 12: Opus planner, folding GPT-6 Astra r9 on rev 11 (3 false admissions + 1 wording;
 §14). Rev 13: Opus planner, adopting the hi-DPI investigation's fix A (owner decision 12, resolved ~11:45; §12); rev 13 = `54000459`.
-Rev 14: Opus planner, folding GPT-6 Astra r11 (geometry coverage matrix, `m-snap-frac` anchor; plan-only, §3.1 unchanged). Owner decisions 1–7 in §12. Plan only: no product code, no commits, no OBS, no Keynote. Base: `main` @ `1589d096`.
+Rev 14: Opus planner, folding GPT-6 Astra r11 (geometry coverage matrix, `m-snap-frac` anchor; plan-only, §3.1 unchanged);
+rev 14 = `75a6d4ff`. Rev 15: Opus planner, after Q0b-bis (`q0bbis-2026-10-12/`) found CEF 127 does not snap the video quad, the
+CEF investigation (`cef-frac-2026-10-12/`) and owner decision 13 (~14:10; §12). Owner decisions 1–7 in §12. Plan only: no product code, no commits, no OBS, no Keynote. Base: `main` @ `1589d096`.
 Players: stock `main.js` `e9b2fad4…` and `17c0c938…` (`live_runtime.SUPPORTED_PLAYERS`). Every offset is a **byte** offset,
 read on both players; they are equal below 2331091 (17c0c938 = e9b2fad4 + two 19-byte `,isEvalSupported:!1` at 17c0c938
 offsets 2331091 and 2331362: +19 between them, +38 after; among the listed anchors only R8, D4 and the hook `_ANCHOR` move,
 each by 38). Evidence: main checkout `output/evidence/s2-dev/dissolve-alpha-2026-10-11/` (git-ignored); scratch `x` =
-its `plan-2026-10-11/planner/x`; Q0b = its `q0b-2026-10-11/`; rev-10 prototypes = its `plan-rev10-2026-10-12/`, rev-11 / 12 / 13 Node evidence = its `plan-rev1{1,2,3}-2026-10-12/`; hi-DPI investigation = its `hidpi-2026-10-12/` (§8). Parents: `keynote_live_mm_opacity.plan.md` (R1–R5, switch, pins),
+its `plan-2026-10-11/planner/x`; Q0b = its `q0b-2026-10-11/`; rev-10 prototypes = its `plan-rev10-2026-10-12/`, rev-11 / 12 / 13 / 15 Node evidence = its `plan-rev1{1,2,3,5}-2026-10-12/`; hi-DPI investigation = its `hidpi-2026-10-12/`; Q0b-bis = its `q0bbis-2026-10-12/`; CEF investigation = its `cef-frac-2026-10-12/` (§8). Parents: `keynote_live_mm_opacity.plan.md` (R1–R5, switch, pins),
 `keynote_live_handback_geometry.plan.md` (R6–R8), `keynote_live_paint_oracle.plan.md` (oracle stays stock).
 
 ## 0. Summary
@@ -33,7 +35,9 @@ its `plan-2026-10-11/planner/x`; Q0b = its `q0b-2026-10-11/`; rev-10 prototypes 
   paint family and every other element to be either that or **provably clipped away from the visible stage** (**paint gate**,
   decision 8), snapshots each `<video>` whose chain is inside a **positive allowlist of the computed styles the player
   generates** (§3.2) onto the **device pixels of the box Chromium paints it at** (decision 9) — only on the geometry where
-  that is measured (DPR 1, 1.5 or 2 at stage scale 1, base-layer box = slide, translation-only transforms; decision 12) — with every backing pixel proven
+  that is measured (DPR 1, 1.5 or 2 at stage scale 1, base-layer box = slide, translation-only transforms; decision 12), with
+  the **placement rule a host startup probe measured for the engine** (snapped for Chrome 154, fractional for OBS's CEF 127;
+  none → skip; decision 13) — with every backing pixel proven
   opaque, untoned (**identity `L`**, decision 10: the GPU mid-tone step is a known limit), redraws overlying canvases (Q7);
   D3 puts it in the outgoing fading wrapper, or discards it. The `<video>` is never touched; anything outside keeps today's
   look.
@@ -45,8 +49,12 @@ its `plan-2026-10-11/planner/x`; Q0b = its `q0b-2026-10-11/`; rev-10 prototypes 
   off-viewport caption or an open navigator skips; holder vs the live movie, browser-rendered, ≤ 3 LSB after the documented
   tone step at 1920×1080 and letterboxed (rev 9: 78); the hi-DPI investigation's fix A (snap on the stage-local 1/DPR grid)
   brings DSF 1.5, DSF 2 and fractional letterbox origins to the same floor on the real P2 page, while scaled stages
-  (2560×1440, 1280×720) and nested scales still miss and skip the take (decision 12); takes 7.7–15.7 ms on the host DSK slides (DSK 7→8 9.4–9.8, rev 9 same session 70.3;
-  budget 50; prototype bytes, final bytes re-timed in Q0b-bis).
+  (2560×1440, 1280×720) and nested scales still miss and skip the take (decision 12). Q0b-bis on the rev-13 bytes: engagement
+  PASS on host and raw pages (every negative refused); takes ≤ 18.3 ms headless (DSK 7→8 at DSF 2 included) and ≤ 34.8 ms in
+  CEF (budget 50); the 18-cell DPR × origin × clip matrix PASS under a real `--force-device-scale-factor`. **The trigger:** OBS's
+  CEF 127 does not snap the video quad (it draws at x 109.352), so snapped holders miss by up to 183 LSB there; a fractional
+  draw over a snapped underlay reads 2 / 0 % in CEF but 183 in Chrome 154 — no single rule fits both engines, and no in-page
+  test tells them apart. Decision 13: a host-side startup probe on composited pixels picks the rule (§3.3).
 - **Switch:** `mm_opacity` (`OBED_LIVE_MM_OPACITY=off` restores today's bytes); every output; `RUNTIME_VERSION` stays 2.
 
 ## 1. Facts (code-read on both players; every anchor count-checked)
@@ -62,7 +70,7 @@ its `plan-2026-10-11/planner/x`; Q0b = its `q0b-2026-10-11/`; rev-10 prototypes 
 | Cleanup | `displayScene` @2354643 / @2354681 → `deleteAllAnimations()` @1953106 + `removeEvent` @2291872 | at the next scene or any go-to; at the end of the show (`currentSceneDidComplete` @2357464 / @2357502) the held endpoint keeps its DOM and rules until navigation. |
 | Live slide DOM (read; confirmed on the real P2 DOM, §8) | page CSS (`body{overflow:hidden;margin:0}`, `div#stageArea{position:absolute;visibility:hidden;overflow:hidden}`, `div.stage{position:absolute;overflow:visible}`); Chromium UA (`video, canvas, img {overflow: clip}`); `Cg.adjustStageToFit`; `NB.draw`/`addNode`/`addAnimationNode`; `xB.initVideo`; `hideMoviePoster` | `body` has a zero-height box (every child is absolute) and its `overflow` propagates to the viewport. `#stage`: `scaleX(g) scaleY(B)` about its centre, `transform-style: preserve-3d`. Scene root and every layer: an absolute div sized to its bounds, `-webkit-transform: matrix(…)` about the anchor, `transform-style: flat`, opacity/visibility on the div, `overflow: hidden` for `masksToBounds`. Textures: absolute `<canvas>` with `translateZ(0px)`. A playing movie: the scene's own video-layer div is hidden and the movie's div from its `renderMovie` build is appended last to that layer's parent (`M.parentNode.appendChild(L.movieDiv)`): `layerN` (flat) → seven build wrappers `layerN-{opacity, position, transform-rotation-z, transform-scale-x, transform-scale-y, bounds, contents}` (`preserve-3d`, no transform) → `layerM` (flat) → the absolute `<video>` (UA `object-fit: contain`, `overflow: clip`); frame textures of the build sit beside `layerM`; the poster canvas is removed once it plays. |
 | Page chrome outside the stage (read; measured §8) | `index.html` (`#body` > `#stageArea` > `#stage`, then `#slideshowNavigator`, `#slideNumberControl`, `#slideNumberDisplay`, `#helpPlacard`, `#waitingIndicator`); player CSS | `#slideshowNavigator`: absolute, `overflow: hidden`, transparent, `left: 0`, 140 px wide. Its `.navigatorThumbnailSidebar` (absolute, overflow hidden, `left: −140px`, 129 px + 1 px border, `left` transitions to 0 when opened) holds the thumbnail `img`s, shadowed frames and number text — the 12 elements that failed rev 9's whole-page gate on the raw page. The host page sets `#slideshowNavigator{display:none!important}`. |
-| Where Chromium paints a movie (measured fit, §8; not a universal model) | Blink pixel snapping (`video_painter.cc` snaps the local replaced rect plus paint offset) | At stage scale 1 with translation-only scene transforms the live picture is a bilinear draw of the frame into the content box with every edge rounded on the stage-local device grid (1/DPR CSS px; at DSF 1 the CSS grid): P2 slide 2 `[109.35, 795.04, 951.53, 267.61]` paints at `[109, 795, 952, 268]` (fit mean 0.16 LSB after the tone step; the fractional box: max 179). At DSF 2 a row fit (x only) puts the origin on the device grid (x 219). The hi-DPI investigation (§8.5) located it: Chromium lays out zoomed by the DSF, so Blink's LayoutUnits are device px and `VideoPainter` snaps the movie's foreign layer on the stage-local **device** grid (1/DPR CSS px); the holder canvas is its own composited layer and lands 1:1. At stage scale ≠ 1 the movie's device quad follows a chain-dependent rounding that no measured model reproduces on the real P2 chain; nested scales defeat the screen-space `contain` solve. |
+| Where Chromium paints a movie (measured fit, §8; not a universal model) | Blink pixel snapping (`video_painter.cc` snaps the local replaced rect plus paint offset) | At stage scale 1 with translation-only scene transforms the live picture is a bilinear draw of the frame into the content box with every edge rounded on the stage-local device grid (1/DPR CSS px; at DSF 1 the CSS grid): P2 slide 2 `[109.35, 795.04, 951.53, 267.61]` paints at `[109, 795, 952, 268]` (fit mean 0.16 LSB after the tone step; the fractional box: max 179). At DSF 2 a row fit (x only) puts the origin on the device grid (x 219). The hi-DPI investigation (§8.5) located it: Chromium lays out zoomed by the DSF, so Blink's LayoutUnits are device px and `VideoPainter` snaps the movie's foreign layer on the stage-local **device** grid (1/DPR CSS px); the holder canvas is its own composited layer and lands 1:1. At stage scale ≠ 1 the movie's device quad follows a chain-dependent rounding that no measured model reproduces on the real P2 chain; nested scales defeat the screen-space `contain` solve. **OBS's CEF 127 does not snap** (Q0b-bis, §8.6): its video quad sits at the content box's fractional origin (x 109.352, bilinear), and its size is the local pre-snapped size; Chrome 154 snaps. A page cannot tell them apart; composited pixels can. |
 
 ### 1.2 The export data (every transition on disk)
 
@@ -129,27 +137,29 @@ shows both slides (§8). On-disk cuts end on the empty background; a cut between
 
 | # | Where (byte, length) | Before | After |
 |---|---|---|---|
-| D1 (R9) | end of `processEffects` / head of `renderEffects` @2311794 (26 B) | `return B}renderEffects(A){` | `return B}` + `__obedShape`, `__obedDissolveLayer`, `__obedFreezeTake`, `__obedFreeze` + `renderEffects(A){` (10 197 B; rev 12: 10 195; rev 11: 10 249; rev 10: 10 237; rev 9: 9 225) |
+| D1 (R9) | end of `processEffects` / head of `renderEffects` @2311794 (26 B) | `return B}renderEffects(A){` | `return B}` + `__obedShape`, `__obedDissolveLayer`, `__obedFreezeTake`, `__obedFreeze` + `renderEffects(A){` (10 571 B; rev 13–14: 10 197; rev 12: 10 195; rev 11: 10 249; rev 10: 10 237; rev 9: 9 225) |
 | D2 (R10) | base-layer `VB` @2312557 (65 B) | `const A=new VB(C.baseLayer,{name:C.name,type:C.type,objectID:e});` | `const A=new VB(this.__obedDissolveLayer(C),{name:C.name,type:C.type,objectID:e});` |
 | D3 (R11) | after the CSS draw @2313053 (42 B) | `this.cssRenderer.draw(a),a.removeChild(w)}` | `this.cssRenderer.draw(a),this.__obedFreeze(C,A),a.removeChild(w)}` |
 | D4 (R12) | `jumpToScene_partFour` @2353722 / @2353760 (50 B) | `jumpToScene_partFour(A,B){if(this.displayScene(A),` | `jumpToScene_partFour(A,B){if(B&&PB.prototype.__obedFreezeTake(this,A),this.displayScene(A),` |
 
-The methods (rev 13: `plan-rev13-2026-10-12/scripts/r10.py` `methods13()`, built by counted substitution from W1's rev-9
+The methods (rev 15: `plan-rev15-2026-10-12/scripts/r10.py` `methods15()`, built by counted substitution from W1's rev-9
 constants; `node --check` passes on both patched players, `on` and `rendering`; `PB` and the controller share the module
 scope of `TB` and `UC`). Only `__obedFreezeTake` changes against rev 9: the exterior proof `xo` with HTML-`div` witnesses,
 the visible stage `V`, the top-layer refusal, open author shadow roots refused, descendant-paint effects checked before the
 visibility shortcut and no tag exempt by name (decision 8; r8 1–2, r9 1–2); the snapped device-pixel holder (decision 9)
 snapped on the stage-local 1/DPR grid (fix A, decision 12) behind the **geometry guard** — `devicePixelRatio` ∈ {1, 1.5, 2},
-`kx` = `ky` = 1 (the live base-layer box is the slide), `#stage` and every scene transform a pure translation (r8 4–5, r9 3,
-§3.2); identity tone with the alpha scan over **every** backing pixel (decision 10; r8 3; `L`, its table and
+`kx` = `ky` = 1 (the live base-layer box is the slide), `#stage` and every scene transform a pure translation, integer computed
+`left`/`top` on every scene element (r8 4–5, r9 3, decision 13; §3.2); the **placement rule** read from
+`window.__obedCalib.placement` (set by the host's startup probe, §3.3): `"snap"` as before, `"frac"` (DPR 1, integer stage origin
+only) adds CEF 127's fractional draw over the snapped underlay, anything else skips (decision 13); identity tone with the alpha scan over **every** backing pixel (decision 10; r8 3; `L`, its table and
 `_FREEZE_TONE_LUT` go); the `fill` aspect test goes. `Q` stays the one qualified tuple (`_FREEZE_QUALIFIED_TUPLES`).
-Candidate digests (W1 re-pins; `off` unchanged): `on` e9b2fad4 `409a0395…`, 17c0c938 `5dd3997e…`; `rendering` e9b2fad4
-`53ee23db…`, 17c0c938 `b366bd91…`.
+Candidate digests (W1 re-pins; `off` unchanged): `on` e9b2fad4 `1a112497…`, 17c0c938 `433ffe55…`; `rendering` e9b2fad4
+`2070c678…`, 17c0c938 `1bc44902…`.
 
 ```
 __obedShape(C){try{var b=C.baseLayer,K=b.layers,k=1===K.length?K[0]:null,P=k&&k.layers,i=P&&2===P.length?P[0]:null,o=i&&P[1],x=o&&o.animations&&1===o.animations.length?o.animations[0]:null,u="none"===C.name,f=function(l,c){var s=l.initialState,a=s.affineTransform,t=s.sublayerTransform;return!l.isVideoLayer&&!l.isWebVideoPosterLayer&&null==l.objectID&&!s.transform&&0===s.rotation&&1===s.scale&&1===s.opacity&&!s.hidden&&!!a&&6===a.length&&a.every(function(v,j){return v===(j%3?0:1)})&&(c||!!t&&16===t.length&&t.every(function(v,j){return v===(j%5?0:1)}))};return"transition"!==C.type||!u&&"apple:dissolve"!==C.name||!x||b.texture||k.texture||(b.animations||[]).length||(k.animations||[]).length||!f(k,1)||!f(i)||!f(o)||!i.texture||!o.texture||(i.layers||[]).length||(o.layers||[]).length||(i.animations||[]).length||x.keyTimes||x.path||x.animations||(u?"hidden"!==x.property||!1!==x.from.scalar||!0!==x.to.scalar||.001!==x.duration||0!==x.beginTime||"both"!==x.fillMode||x.timingFunction||x.timeOffset||x.repeatCount||x.autoreverses:"opacity"!==x.property||1!==x.from.scalar||0!==x.to.scalar)?null:[b,k,i,o,x,u]}catch(E){return null}}
 __obedDissolveLayer(C){var b=C.baseLayer,n=0,z=this.__obedShape(C);if(!z)return b;try{var k=z[1],i=z[2],o=z[3],x=z[4],u=z[5];if(!u){var S=UC.animationManager.styleSheet,L=function(j){return"#layer"+(TB+j)};S.insertRule(L(1)+"{isolation:isolate}",0),n=1,S.insertRule(L(2)+","+L(3)+"{mix-blend-mode:plus-lighter}",0),n=2;if("isolate"!==S.cssRules[1].style.isolation||"plus-lighter"!==S.cssRules[0].style.mixBlendMode)throw 0}return C.obedDissolve=u?"cut":"dissolve",Object.assign({},b,{layers:[Object.assign({},k,{layers:[Object.assign({},i,{initialState:Object.assign({},i.initialState,u?{hidden:!0}:{opacity:0}),animations:[Object.assign({},x,{from:{scalar:u?!0:0},to:{scalar:u?!1:1}})]}),o]})]})}catch(E){return n&&(TB+=4),b}}
-__obedFreezeTake(U,A){U.__obedFrozen=null;var t0=performance.now();try{var e=U.script.events[A],y=e&&e.effects&&e.effects[0],G=document.getElementById("stage");if(!y||!G||!this.__obedShape(y))return;var R=document.getElementById("layer"+U.playbackController.kpfEvent.baseLayer.layerId).getBoundingClientRect(),kx=U.script.slideWidth/R.width,ky=U.script.slideHeight/R.height,H=[],N=document.getElementsByTagName("*"),Q=["bt709/bt709/bt709/false"],cs=function(n){return getComputedStyle(n)},dv=function(s,d){return(s||d)===d},bd=function(z){return"none"!==z.borderTopStyle||"none"!==z.borderRightStyle||"none"!==z.borderBottomStyle||"none"!==z.borderLeftStyle},rd=function(z){return"0px"!==z.borderTopLeftRadius||"0px"!==z.borderTopRightRadius||"0px"!==z.borderBottomLeftRadius||"0px"!==z.borderBottomRightRadius},deco=function(z){return!/rgba\(0, 0, 0, 0\)|transparent/.test(z.backgroundColor)||"none"!==z.backgroundImage||"none"!==z.boxShadow||bd(z)||"none"!==z.outlineStyle||!dv(z.backdropFilter,"none")},own=function(n,z){return/^(CANVAS|VIDEO|IMG|SVG|IFRAME|OBJECT|EMBED|INPUT|TEXTAREA|SELECT|BUTTON)$/i.test(n.tagName)||deco(z)||Array.prototype.some.call(n.childNodes,function(c){return 3===c.nodeType&&/\S/.test(c.data)})},bm=function(z){return!deco(z)&&!rd(z)&&"0px"===z.paddingTop&&"0px"===z.paddingRight&&"0px"===z.paddingBottom&&"0px"===z.paddingLeft&&dv(z.objectViewBox,"none")&&dv(z.imageRendering,"auto")},al=function(a){var w=cs(a),s=a===G,u=!s&&a.contains(G),m=w.transform,M;if("block"!==w.display||!dv(w.contain,"none")||!dv(w.contentVisibility,"visible")||"none"!==w.filter||!dv(w.backdropFilter,"none")||"normal"!==w.mixBlendMode||!dv(w.isolation,"auto")||"none"!==w.clipPath||!dv(w.maskImage,"none")||!dv(w.clip,"auto")||"auto"!==w.zIndex||!dv(w.translate,"none")||!dv(w.rotate,"none")||!dv(w.scale,"none")||!dv(w.offsetPath,"none")||!dv(w.willChange,"auto")||!dv(w.zoom,"1")||"none"!==w.outlineStyle||w.overflowX!==w.overflowY||"visible"!==w.overflowX&&!("clip"===w.overflowX&&/^(VIDEO|CANVAS)$/.test(a.tagName))&&("hidden"!==w.overflowX||rd(w)||bd(w)))return!1;if(u)return("static"===w.position||"absolute"===w.position)&&"none"===m;if("absolute"!==w.position||!dv(w.perspective,"none")||!dv(w.backfaceVisibility,"visible")||(s?"preserve-3d"!==w.transformStyle&&"flat"!==w.transformStyle:"flat"!==w.transformStyle&&("preserve-3d"!==w.transformStyle||"none"!==m)||"visible"!==w.visibility))return!1;if("none"===m)return!0;M=new DOMMatrix(m);return M.is2D&&!M.b&&!M.c&&1===M.a&&1===M.d},xo=function(n){for(var a=n,w,r;!a.contains(G);a=a.parentElement){w=cs(a);if("fixed"===getComputedStyle(a,"::before").position||"fixed"===getComputedStyle(a,"::after").position)return!1;if("div"===a.localName&&"http://www.w3.org/1999/xhtml"===a.namespaceURI&&"hidden"===w.overflowX&&"hidden"===w.overflowY&&"static"!==w.position&&/^(block|flow-root|flex|grid)$/.test(w.display)&&"none"===w.boxShadow&&"none"===w.filter&&dv(w.backdropFilter,"none")&&"none"===w.outlineStyle&&dv(w.borderImageSource,"none")&&dv(w.webkitBoxReflect,"none")&&(r=a.getBoundingClientRect(),r.right<=V[0]||r.left>=V[2]||r.bottom<=V[1]||r.top>=V[3]))return!0;if("fixed"===w.position)return!1}return!1},vp=function(a){var h=document.documentElement;return a===h||a===document.body&&"visible"===cs(h).overflowX},pc=function(n){var t=n.tagName,w=cs(n),b,f;if("contents"===w.display)return!1;if(!n.checkVisibility({opacityProperty:!0}))return!0;b=getComputedStyle(n,"::before").content;f=getComputedStyle(n,"::after").content;if(!/^(normal|none)$/.test(b||"none")||!/^(normal|none)$/.test(f||"none")||!/^(normal|none)$/.test(w.content||"normal")||"list-item"===w.display||Array.prototype.some.call(n.childNodes,function(c){return 3===c.nodeType&&/\S/.test(c.data)})||"none"!==w.filter||!dv(w.backdropFilter,"none")||!dv(w.webkitBoxReflect,"none"))return!1;if("visible"!==w.visibility)return!0;if(!/^(HTML|BODY|DIV|CANVAS|VIDEO)$/.test(t)||/^(CANVAS|VIDEO)$/.test(t)&&("50% 50%"!==w.objectPosition||!dv(w.objectViewBox,"none")||!/^(fill|contain)$/.test(w.objectFit)))return!1;return"none"===w.boxShadow&&"none"===w.outlineStyle&&dv(w.borderImageSource,"none")&&dv(w.columnRuleStyle,"none")};for(var V=[0,0,innerWidth,innerHeight],a=G,w,b;a;a=a.parentElement)w=cs(a),"visible"!==w.overflowX&&(vp(a)||"static"!==w.position)&&(b=vp(a)?{left:0,top:0,right:innerWidth,bottom:innerHeight}:a.getBoundingClientRect(),V=[Math.max(V[0],b.left),Math.max(V[1],b.top),Math.min(V[2],b.right),Math.min(V[3],b.bottom)]);if(!(R.width>0&&R.height>0)||[1,1.5,2].indexOf(devicePixelRatio)<0||1!==kx||1!==ky||document.querySelector(":modal,:popover-open,:fullscreen")||!Array.prototype.every.call(N,function(n){return!n.shadowRoot&&(pc(n)||!G.contains(n)&&!n.contains(G)&&xo(n))}))return;var ad=[];Array.prototype.slice.call(document.querySelectorAll("video")).reverse().forEach(function(v){try{if(!G.contains(v)||v.readyState<2||!v.videoWidth||!v.videoHeight||!v.checkVisibility({opacityProperty:!0,visibilityProperty:!0}))return;var z=cs(v),fit=z.objectFit,K;if(!bm(z)||"50% 50%"!==z.objectPosition||"fill"!==fit&&"contain"!==fit)return;try{var vf=new VideoFrame(v),cc=vf.colorSpace;K=[cc.primaries,cc.transfer,cc.matrix,cc.fullRange].join("/");vf.close()}catch(E){return}if(Q.indexOf(K)<0)return;var Y=[],r=v.getBoundingClientRect(),c=[r.left,r.top,r.right,r.bottom],a,q,w,b;for(a=v,q=1;a;a=a.parentElement){if(!al(a))return;w=cs(a);q*=+w.opacity;if(a!==v&&"visible"!==w.overflowX&&(vp(a)||"static"!==w.position)){b=vp(a)?{left:0,top:0,right:innerWidth,bottom:innerHeight}:a.getBoundingClientRect();c=[Math.max(c[0],b.left),Math.max(c[1],b.top),Math.min(c[2],b.right),Math.min(c[3],b.bottom)]}}if(q<.999)return;var vw=v.videoWidth,vh=v.videoHeight,f="fill"===fit?0:Math.min(r.width/vw,r.height/vh),cw=f?vw*f:r.width,ch2=f?vh*f:r.height,cx=r.left+(r.width-cw)/2,cy=r.top+(r.height-ch2)/2;c=[Math.max(c[0],cx),Math.max(c[1],cy),Math.min(c[2],cx+cw),Math.min(c[3],cy+ch2)];if(c[2]-c[0]<1||c[3]-c[1]<1)return;for(var I=Array.prototype.indexOf.call(N,v),i=0,n,o,P,T;i<N.length;i++){n=N[i];if(i===I||n.contains(v))continue;o=n.getBoundingClientRect();if(o.right<=c[0]||o.left>=c[2]||o.bottom<=c[1]||o.top>=c[3]||!n.checkVisibility({opacityProperty:!0,visibilityProperty:!0})||!own(n,cs(n)))continue;for(P=n.parentElement;!P.contains(v);P=P.parentElement);if(P===G||!G.contains(P))return;for(T=n,a=1;T!==P;T=T.parentElement){w=cs(T);if(!al(T)||i>I&&T!==n&&"visible"!==w.overflowX)return;a*=+w.opacity;if(T!==n&&+w.opacity<1&&Array.prototype.some.call(T.getElementsByTagName("*"),function(m){return m!==n&&own(m,cs(m))}))a=0}if(i<I)continue;if("VIDEO"===n.tagName){if(ad.indexOf(n)<0)return;continue}w=cs(n);if("CANVAS"!==n.tagName||!bm(w)||"fill"!==w.objectFit||!a)return;Y.push([n,o,a])}var p=devicePixelRatio||1,sn=function(z,e,k){return Math.round((z-e)*k*p)/p},u0=sn(cx,R.left,kx),v0=sn(cy,R.top,ky),u1=sn(cx+cw,R.left,kx),v1=sn(cy+ch2,R.top,ky),a0=sn(c[0],R.left,kx),b0=sn(c[1],R.top,ky),a1=sn(c[2],R.left,kx),b1=sn(c[3],R.top,ky),ww=Math.round((a1-a0)/kx*p),hh=Math.round((b1-b0)/ky*p),dx=(u0-a0)/kx*p,dy=(v0-b0)/ky*p,dw=(u1-u0)/kx*p,dh=(v1-v0)/ky*p,x,g,d,j;if(ww<1||hh<1)return;x=document.createElement("canvas");x.width=ww,x.height=hh;g=x.getContext("2d");g.drawImage(v,dx,dy,dw,dh);for(d=g.getImageData(0,0,ww,hh).data,j=3;j<d.length;j+=4)if(d[j]<255)return;Y.forEach(function(y){var l=sn(y[1].left,R.left,kx),m=sn(y[1].top,R.top,ky);g.globalAlpha=y[2],g.drawImage(y[0],(l-a0)/kx*p,(m-b0)/ky*p,(sn(y[1].right,R.left,kx)-l)/kx*p,(sn(y[1].bottom,R.top,ky)-m)/ky*p)}),g.globalAlpha=1;var h=document.createElement("div"),s=h.style,t=x.style;s.position=t.position="absolute",s.overflow="hidden",s.left=a0+"px",s.top=b0+"px",s.width=t.width=a1-a0+"px",s.height=t.height=b1-b0+"px",t.left=t.top="0px",h.appendChild(x),H.push(h),ad.push(v)}catch(E){}}),H.length&&(U.__obedFrozen={scene:A,holders:H.reverse()})}catch(E){U.__obedFrozen=null}finally{window.__obedTakeMs=U.__obedTakeMs=performance.now()-t0}}
+__obedFreezeTake(U,A){U.__obedFrozen=null;var t0=performance.now();try{var e=U.script.events[A],y=e&&e.effects&&e.effects[0],G=document.getElementById("stage");if(!y||!G||!this.__obedShape(y))return;var R=document.getElementById("layer"+U.playbackController.kpfEvent.baseLayer.layerId).getBoundingClientRect(),kx=U.script.slideWidth/R.width,ky=U.script.slideHeight/R.height,H=[],N=document.getElementsByTagName("*"),Q=["bt709/bt709/bt709/false"],pl=(window.__obedCalib||{}).placement,cs=function(n){return getComputedStyle(n)},dv=function(s,d){return(s||d)===d},bd=function(z){return"none"!==z.borderTopStyle||"none"!==z.borderRightStyle||"none"!==z.borderBottomStyle||"none"!==z.borderLeftStyle},rd=function(z){return"0px"!==z.borderTopLeftRadius||"0px"!==z.borderTopRightRadius||"0px"!==z.borderBottomLeftRadius||"0px"!==z.borderBottomRightRadius},deco=function(z){return!/rgba\(0, 0, 0, 0\)|transparent/.test(z.backgroundColor)||"none"!==z.backgroundImage||"none"!==z.boxShadow||bd(z)||"none"!==z.outlineStyle||!dv(z.backdropFilter,"none")},own=function(n,z){return/^(CANVAS|VIDEO|IMG|SVG|IFRAME|OBJECT|EMBED|INPUT|TEXTAREA|SELECT|BUTTON)$/i.test(n.tagName)||deco(z)||Array.prototype.some.call(n.childNodes,function(c){return 3===c.nodeType&&/\S/.test(c.data)})},bm=function(z){return!deco(z)&&!rd(z)&&"0px"===z.paddingTop&&"0px"===z.paddingRight&&"0px"===z.paddingBottom&&"0px"===z.paddingLeft&&dv(z.objectViewBox,"none")&&dv(z.imageRendering,"auto")},al=function(a){var w=cs(a),s=a===G,u=!s&&a.contains(G),m=w.transform,M;if("block"!==w.display||!dv(w.contain,"none")||!dv(w.contentVisibility,"visible")||"none"!==w.filter||!dv(w.backdropFilter,"none")||"normal"!==w.mixBlendMode||!dv(w.isolation,"auto")||"none"!==w.clipPath||!dv(w.maskImage,"none")||!dv(w.clip,"auto")||"auto"!==w.zIndex||!dv(w.translate,"none")||!dv(w.rotate,"none")||!dv(w.scale,"none")||!dv(w.offsetPath,"none")||!dv(w.willChange,"auto")||!dv(w.zoom,"1")||"none"!==w.outlineStyle||w.overflowX!==w.overflowY||"visible"!==w.overflowX&&!("clip"===w.overflowX&&/^(VIDEO|CANVAS)$/.test(a.tagName))&&("hidden"!==w.overflowX||rd(w)||bd(w)))return!1;if(u)return("static"===w.position||"absolute"===w.position)&&"none"===m;if("absolute"!==w.position||!dv(w.perspective,"none")||!dv(w.backfaceVisibility,"visible")||(s?"preserve-3d"!==w.transformStyle&&"flat"!==w.transformStyle:"flat"!==w.transformStyle&&("preserve-3d"!==w.transformStyle||"none"!==m)||"visible"!==w.visibility))return!1;if(!s&&!(/^-?\d+px$/.test(w.left)&&/^-?\d+px$/.test(w.top)))return!1;if("none"===m)return!0;M=new DOMMatrix(m);return M.is2D&&!M.b&&!M.c&&1===M.a&&1===M.d},xo=function(n){for(var a=n,w,r;!a.contains(G);a=a.parentElement){w=cs(a);if("fixed"===getComputedStyle(a,"::before").position||"fixed"===getComputedStyle(a,"::after").position)return!1;if("div"===a.localName&&"http://www.w3.org/1999/xhtml"===a.namespaceURI&&"hidden"===w.overflowX&&"hidden"===w.overflowY&&"static"!==w.position&&/^(block|flow-root|flex|grid)$/.test(w.display)&&"none"===w.boxShadow&&"none"===w.filter&&dv(w.backdropFilter,"none")&&"none"===w.outlineStyle&&dv(w.borderImageSource,"none")&&dv(w.webkitBoxReflect,"none")&&(r=a.getBoundingClientRect(),r.right<=V[0]||r.left>=V[2]||r.bottom<=V[1]||r.top>=V[3]))return!0;if("fixed"===w.position)return!1}return!1},vp=function(a){var h=document.documentElement;return a===h||a===document.body&&"visible"===cs(h).overflowX},pc=function(n){var t=n.tagName,w=cs(n),b,f;if("contents"===w.display)return!1;if(!n.checkVisibility({opacityProperty:!0}))return!0;b=getComputedStyle(n,"::before").content;f=getComputedStyle(n,"::after").content;if(!/^(normal|none)$/.test(b||"none")||!/^(normal|none)$/.test(f||"none")||!/^(normal|none)$/.test(w.content||"normal")||"list-item"===w.display||Array.prototype.some.call(n.childNodes,function(c){return 3===c.nodeType&&/\S/.test(c.data)})||"none"!==w.filter||!dv(w.backdropFilter,"none")||!dv(w.webkitBoxReflect,"none"))return!1;if("visible"!==w.visibility)return!0;if(!/^(HTML|BODY|DIV|CANVAS|VIDEO)$/.test(t)||/^(CANVAS|VIDEO)$/.test(t)&&("50% 50%"!==w.objectPosition||!dv(w.objectViewBox,"none")||!/^(fill|contain)$/.test(w.objectFit)))return!1;return"none"===w.boxShadow&&"none"===w.outlineStyle&&dv(w.borderImageSource,"none")&&dv(w.columnRuleStyle,"none")};for(var V=[0,0,innerWidth,innerHeight],a=G,w,b;a;a=a.parentElement)w=cs(a),"visible"!==w.overflowX&&(vp(a)||"static"!==w.position)&&(b=vp(a)?{left:0,top:0,right:innerWidth,bottom:innerHeight}:a.getBoundingClientRect(),V=[Math.max(V[0],b.left),Math.max(V[1],b.top),Math.min(V[2],b.right),Math.min(V[3],b.bottom)]);if(!(R.width>0&&R.height>0)||[1,1.5,2].indexOf(devicePixelRatio)<0||"snap"!==pl&&("frac"!==pl||1!==devicePixelRatio||R.left%1||R.top%1)||1!==kx||1!==ky||document.querySelector(":modal,:popover-open,:fullscreen")||!Array.prototype.every.call(N,function(n){return!n.shadowRoot&&(pc(n)||!G.contains(n)&&!n.contains(G)&&xo(n))}))return;var ad=[];Array.prototype.slice.call(document.querySelectorAll("video")).reverse().forEach(function(v){try{if(!G.contains(v)||v.readyState<2||!v.videoWidth||!v.videoHeight||!v.checkVisibility({opacityProperty:!0,visibilityProperty:!0}))return;var z=cs(v),fit=z.objectFit,K;if(!bm(z)||"50% 50%"!==z.objectPosition||"fill"!==fit&&"contain"!==fit)return;try{var vf=new VideoFrame(v),cc=vf.colorSpace;K=[cc.primaries,cc.transfer,cc.matrix,cc.fullRange].join("/");vf.close()}catch(E){return}if(Q.indexOf(K)<0)return;var Y=[],r=v.getBoundingClientRect(),c=[r.left,r.top,r.right,r.bottom],a,q,w,b;for(a=v,q=1;a;a=a.parentElement){if(!al(a))return;w=cs(a);q*=+w.opacity;if(a!==v&&"visible"!==w.overflowX&&(vp(a)||"static"!==w.position)){b=vp(a)?{left:0,top:0,right:innerWidth,bottom:innerHeight}:a.getBoundingClientRect();c=[Math.max(c[0],b.left),Math.max(c[1],b.top),Math.min(c[2],b.right),Math.min(c[3],b.bottom)]}}if(q<.999)return;var vw=v.videoWidth,vh=v.videoHeight,f="fill"===fit?0:Math.min(r.width/vw,r.height/vh),cw=f?vw*f:r.width,ch2=f?vh*f:r.height,cx=r.left+(r.width-cw)/2,cy=r.top+(r.height-ch2)/2;c=[Math.max(c[0],cx),Math.max(c[1],cy),Math.min(c[2],cx+cw),Math.min(c[3],cy+ch2)];if(c[2]-c[0]<1||c[3]-c[1]<1)return;for(var I=Array.prototype.indexOf.call(N,v),i=0,n,o,P,T;i<N.length;i++){n=N[i];if(i===I||n.contains(v))continue;o=n.getBoundingClientRect();if(o.right<=c[0]||o.left>=c[2]||o.bottom<=c[1]||o.top>=c[3]||!n.checkVisibility({opacityProperty:!0,visibilityProperty:!0})||!own(n,cs(n)))continue;for(P=n.parentElement;!P.contains(v);P=P.parentElement);if(P===G||!G.contains(P))return;for(T=n,a=1;T!==P;T=T.parentElement){w=cs(T);if(!al(T)||i>I&&T!==n&&"visible"!==w.overflowX)return;a*=+w.opacity;if(T!==n&&+w.opacity<1&&Array.prototype.some.call(T.getElementsByTagName("*"),function(m){return m!==n&&own(m,cs(m))}))a=0}if(i<I)continue;if("VIDEO"===n.tagName){if(ad.indexOf(n)<0)return;continue}w=cs(n);if("CANVAS"!==n.tagName||!bm(w)||"fill"!==w.objectFit||!a)return;Y.push([n,o,a])}var p=devicePixelRatio||1,sn=function(z,e,k){return Math.round((z-e)*k*p)/p},u0=sn(cx,R.left,kx),v0=sn(cy,R.top,ky),u1=sn(cx+cw,R.left,kx),v1=sn(cy+ch2,R.top,ky),a0=sn(c[0],R.left,kx),b0=sn(c[1],R.top,ky),a1=sn(c[2],R.left,kx),b1=sn(c[3],R.top,ky),ww=Math.round((a1-a0)/kx*p),hh=Math.round((b1-b0)/ky*p),dx=(u0-a0)/kx*p,dy=(v0-b0)/ky*p,dw=(u1-u0)/kx*p,dh=(v1-v0)/ky*p,x,g,d,j;if(ww<1||hh<1)return;x=document.createElement("canvas");x.width=ww,x.height=hh;g=x.getContext("2d");g.drawImage(v,dx,dy,dw,dh);"frac"===pl&&g.drawImage(v,dx+((r.left-R.left)*kx+Math.round((cx-r.left)*kx*p)/p-u0)/kx*p,dy+((r.top-R.top)*ky+Math.round((cy-r.top)*ky*p)/p-v0)/ky*p,Math.round(cw*kx*p)/kx,Math.round(ch2*ky*p)/ky);for(d=g.getImageData(0,0,ww,hh).data,j=3;j<d.length;j+=4)if(d[j]<255)return;Y.forEach(function(y){var l=sn(y[1].left,R.left,kx),m=sn(y[1].top,R.top,ky);g.globalAlpha=y[2],g.drawImage(y[0],(l-a0)/kx*p,(m-b0)/ky*p,(sn(y[1].right,R.left,kx)-l)/kx*p,(sn(y[1].bottom,R.top,ky)-m)/ky*p)}),g.globalAlpha=1;var h=document.createElement("div"),s=h.style,t=x.style;s.position=t.position="absolute",s.overflow="hidden",s.left=a0+"px",s.top=b0+"px",s.width=t.width=a1-a0+"px",s.height=t.height=b1-b0+"px",t.left=t.top="0px",h.appendChild(x),H.push(h),ad.push(v)}catch(E){}}),H.length&&(U.__obedFrozen={scene:A,holders:H.reverse()})}catch(E){U.__obedFrozen=null}finally{window.__obedTakeMs=U.__obedTakeMs=performance.now()-t0}}
 __obedFreeze(C,A){var F=UC.__obedFrozen;UC.__obedFrozen=null;if(C.obedDissolve&&F&&F.scene===this.sceneIndex)try{var O=A.layers[0].layers[1],W=document.getElementById("layer"+O.layerId+("cut"===C.obedDissolve?"":"-opacity"));if(!W)return;var Q=document.createDocumentFragment();F.holders.forEach(function(h){Q.appendChild(h)}),W.appendChild(Q)}catch(E){}}
 ```
 
@@ -234,7 +244,7 @@ profile. Videos are decided from the last in document order to the first. Anythi
 | Applies to | Generated by | Allowed computed values (anything else → skip) |
 |---|---|---|
 | every element of a chain or branch | — | `display: block`; `z-index: auto`; `contain: none`; `content-visibility: visible`; `filter`, `backdrop-filter`, `clip-path`, `mask-image`, `offset-path`, `translate`, `rotate`, `scale`: `none`; `clip: auto`; `mix-blend-mode: normal`; `isolation: auto`; `will-change: auto`; `zoom: 1`; `outline-style: none`; `overflow-x` = `overflow-y` ∈ {`visible`, `hidden` with no border and zero radii (a rectangle), and `clip` on a `<video>`/`<canvas>` leaf (UA default; clips nothing it shows)}. Clips applied: a positioned ancestor's rectangle; the root, or `body` when the root is `visible`, clips to the viewport; a static, non-propagating ancestor clips nothing absolute |
-| scene elements (below `#stage`): scene root, layer and movie divs, texture `<canvas>`, `<video>` | `NB.draw`, `NB.addNode`, `xB.initVideo`, `movieDiv` | `position: absolute`; `visibility: visible`; `transform-style: flat`, or `preserve-3d` with `transform: none` (the build wrappers; every transform below is 2D, so all is coplanar); `perspective: none`; `backface-visibility: visible`; `transform` none or a pure translation `matrix(1, 0, 0, 1, e, f)` (geometry guard; rev 10 allowed uniform scales) |
+| scene elements (below `#stage`): scene root, layer and movie divs, texture `<canvas>`, `<video>` | `NB.draw`, `NB.addNode`, `xB.initVideo`, `movieDiv` | `position: absolute`; `visibility: visible`; `transform-style: flat`, or `preserve-3d` with `transform: none` (the build wrappers; every transform below is 2D, so all is coplanar); `perspective: none`; `backface-visibility: visible`; `transform` none or a pure translation `matrix(1, 0, 0, 1, e, f)` (geometry guard; rev 10 allowed uniform scales); computed `left` and `top` integral px (decision 13) |
 | `#stage` | `Cg.adjustStageToFit` | `position: absolute`; `transform-style: preserve-3d` or `flat`; `transform` none or a pure translation — stage scale exactly 1 (geometry guard; `Cg.adjustStageToFit`'s `scaleX`/`scaleY` ≠ 1 skips); `visibility` any (inherits `#stageArea`'s hidden) |
 | above `#stage` (`#stageArea`, `body`, `html`) | page CSS, host | `position: absolute` or `static`; `transform: none`; background and visibility any |
 | the movie itself | | plain bitmap (below); `readyState ≥ 2`, decoded size, `checkVisibility({opacityProperty, visibilityProperty})`; chain opacity product ≥ 0.999; `object-fit` `contain` or `fill`; `object-position: 50% 50%`; `VideoFrame` colour tuple (primaries/transfer/matrix/fullRange) ∈ `Q`; alpha 255 at every backing pixel of the attached canvas, read after the draw and before any redraw; `devicePixelRatio` ∈ {1, 1.5, 2} |
@@ -277,6 +287,16 @@ the intersected rectangles; nothing crops, filters, blends or contains paint; an
   `contain` solve (§13). The alpha scan over every backing pixel, the exterior proof, clipping and foreground preservation
   are mandatory in every admitted class (§9.1 "Geometry classes"); a later model for scaled stages would replace exactly this
   guard and `sn`/`ww`/`hh`/`dx`…`dh`, under the same rule.
+- **Placement rule (decision 13).** The take reads `pl = (window.__obedCalib || {}).placement` once. `"snap"`: the snapped draw
+  above (Chrome 154's rule). `"frac"`: admitted only at DPR 1 with the base-layer origin on integer px (the only geometry CEF was
+  measured at); the snapped draw stays as an **underlay** (it makes every backing pixel opaque — a fractional `drawImage` alone
+  antialiases its edge columns and the alpha scan rejects it) and the movie is drawn again on top at CEF 127's unsnapped quad:
+  origin = the video box's own origin (`r.left`, `r.top`, relative to the holder) + the local-snapped `contain` offset, size =
+  the local pre-snapped size `round(cw·DPR)/DPR` (the investigator's `fdrawu`, measured 2 / 0 % in CEF, two launches).
+  Foreground redraws keep their snapped rects under both rules (measured equal on P2). Any other value — absent, `"unknown"`, a
+  typo — skips the take: placement is never guessed in the page. **Integer `left`/`top`:** every scene element (below `#stage`)
+  must have integral computed `left` and `top` in px (`/^-?\d+px$/`), so sub-pixel offsets come only from transforms, which is
+  what the CEF rule's origin term assumes (every export writes `0px`).
 - `object-fit: fill` needs no aspect test (the destination is the content box itself).
 - **Snapshot, not move; failure model:** a move is a detach the core observes (`stash` re-plays and remounts it); `drawImage`
   is the exact last presented frame (rVFC). Add-only, per movie, after the cross-fade rules are committed; the `<video>` is
@@ -296,13 +316,53 @@ the intersected rectangles; nothing crops, filters, blends or contains paint; an
   1.5, 2}, stage scale ≠ 1, a scale below the stage; decision 12); top-layer content on the page. **Known limit (frozen, not
   jumping):** the mid-tone step (identity `L`).
 
+### 3.3 Host startup calibration — the placement probe (decision 13; new host stream W6)
+
+**Why host-side.** The rule depends on how the engine's compositor places a video quad, which a page cannot observe (no
+pixel readback of composited output; `LayerTree` sends nothing in headless=new). The host can: a CDP `Page.captureScreenshot`
+on the HDMI/headless output, OBS `GetSourceScreenshot` on the managed browser source.
+
+**What it does (≈ 1.5 s, off-air).** In the output page, before `show`, the host injects the probe (`cef-frac-2026-10-12/
+scripts/probe.js`, productised): a fixed, top-most 1000×740 grey box holding a short test movie (a few-KB H.264 pattern clip
+shipped as `src/obed_edom/data/placement_probe.mp4`, served by the host's asset server — not a Blob of a 144 KB file) under
+two fractional `matrix()` translations (fractions 0.352/0.036 and 0.73/0.41), paused on a known frame, and below it canvases
+drawn from the paused movie by the snapped and by the fractional rule. After six rAFs + 200 ms the host takes two screenshots
+(they must be identical), removes the probe and classifies, per canvas region, the share of inner pixels whose difference to
+the composited movie exceeds τ = 4: **`snap`** if the snapped canvas is ≤ 2 % and the fractional one ≥ 20 %; **`frac`** if the
+reverse; anything else **unknown** (measured margins: correct rule 0.41–0.58 %, wrong rule 39.8–59.3 %, ≥ 80×). The probe also
+records `devicePixelRatio`, the UA, the movie's `readyState`, and the engine fingerprint (UA, DPR and, where the browser target
+answers, `SystemInfo.gpu.featureStatus.gpu_compositing`).
+
+**How the flag reaches the take.** On `snap` or `frac` the host evaluates `window.__obedCalib = Object.freeze({placement: …,
+tone: null})` in the output page (not `addScriptToEvaluateOnNewDocument`: any reload, including one after a renderer or GPU
+crash, drops the flag and the take skips until the next probe). The take reads it at D4, long after start. `tone` is reserved
+for W5's path map and stays `null` (identity) in this patch.
+
+**When it runs.** At host start (after the deck page loads, before `show`), on the operator's explicit re-calibrate, and after
+any reconnect or page reload once the host is off-air again. On every `observe()` the host re-reads the fingerprint; a change
+(or a value that could be read before and now cannot) clears the flag (`window.__obedCalib = undefined`) — skip until
+re-probed. The report carries `output.placement = {rule, snapShare, fracShare, fingerprint, at}`.
+
+**Failure modes (every one → no flag → the take skips, today's look):** probe movie not decodable or not paused on its frame;
+the two screenshots differ; DPR outside {1, 1.5, 2}; screenshot size ≠ viewport × DPR; both shares low, both high, or a share
+between 2 % and 20 %; screenshot call fails or times out (2 s); the page navigates during the probe; OBS source screenshot
+unavailable. The cross-fade and cut are unaffected (D1/D2 do not read the flag). Raw export and Build Preview pages have no host
+probe, so they no longer freeze (open question, §13).
+
+**Files (W6, disjoint from W1–W5):** `src/obed_edom/placement_probe.py` (new: probe JS builder, pure classifier, fingerprint);
+`src/obed_edom/data/placement_probe.mp4` (new asset + its generator note); `src/obed_edom/live_host.py` (run at start / on
+re-calibrate, flag set and cleared, fingerprint check in `observe()`, report field, asset route); `src/obed_edom/managed_obs.py`
+(a `source_screenshot(name)` wrapper over `GetSourceScreenshot`, used when the host is attached to managed OBS);
+`tests/test_placement_probe.py` (new).
+
 ## 4. Switch, pins, report
 
 - **Switch (decided):** D1–D4 join `_MM_OPACITY_REPLACEMENTS`; `patch_player`, `patch_rendering` and every synthetic test
   player pick them up; `mm_opacity=False` stays the hook-only bytes (`7cf00b56…` / `4f9fbffd…`); docstrings say "rendering
   fidelity"; README: `OBED_LIVE_MM_OPACITY=off` also restores the export's dissolve, cut and movie behaviour. **Pins:**
   `(on, off, rendering)` kept; `on`, `rendering` re-pinned. **Report** `output.mmOpacity = {mode, sha256}`; `RUNTIME_VERSION`
-  stays 2; preview inherits the patch, F3 included (the raw/preview page now passes the gate, decision 8); paint oracle stays stock; `web/live.py` unchanged.
+  stays 2; preview inherits the patch (D1/D2; F3 skips there for want of a probe, decision 13); paint oracle stays stock; the report adds
+  `output.placement` (§3.3); `web/live.py` unchanged.
 
 ## 5. Scope
 
@@ -328,7 +388,7 @@ R7 2190367 (36) · R3 2190440 (46) · R4 2192650 (72) · R6 2263321 (52) · R1 2
 replacement contains any anchor, its own included; all 6 orders of R1–R5, R6–R8, D1–D4 give identical bytes; every anchor 0
 times after, every replacement once. **Rev 10 re-check** (`plan-rev10-2026-10-12/scripts/overlap10.py`, both players): the
 anchors and their offsets are unchanged (only D1's replacement changes: 10 237 B in rev 10, 10 249 B in
-rev 11, 10 195 B in rev 12, 10 197 B in rev 13); the same
+rev 11, 10 195 B in rev 12, 10 197 B in revs 13–14, 10 571 B in rev 15); the same
 five properties hold on both revisions.
 
 ### 6.2 Subsystems (files outside `live_runtime.py` that change: `scripts/dissolve_probe.py` (new), `scripts/managed_obs_qualify.py`, their tests, docs)
@@ -351,7 +411,7 @@ options: Chrome 121; `VideoFrame(video).colorSpace`: Chrome 94; `:modal` 105, `:
 unsupported selector throws inside the take's `try` and skips). OBS 32.2.2 bundles CEF 127: availability only (compositor,
 tone path and LUT: DX-2). Headless: Chrome 154.0.8037.59, ANGLE Metal; software compositing via `--disable-gpu`.
 
-## 8. Feasibility prototype (Q0; `plan-2026-10-11/planner/`; Q0b; revs 10–13; hi-DPI investigation)
+## 8. Feasibility prototype (Q0; `plan-2026-10-11/planner/`; Q0b; revs 10–15; hi-DPI and CEF investigations; Q0b-bis)
 
 Builders `dpatch3.py` → `dpatch12.py` (rev 9); drivers `proto3.py` → `proto6.py`, `probe7.py` + `diag7{,b}.js` (one
 headless Chrome per arm; `p2cut` = P2 2→3 in Keynote's cut shape, in memory); analysis `analyze_full.py`, `f3analyze.py`,
@@ -557,6 +617,36 @@ rev-12 bytes; on rev 13 exactly four rows change as designed — `dpr2` (backing
 with five added rows (`dpr125` and `dpr3` skip; `dpr15_p2Box` admits at 1428×401; a transparent last pixel at DPR 1.5 and at
 DPR 2 skips) all 265 rows match the rev-13 expectations on both players, every invariant holding (`run13.py`, `exp13.py`).
 
+### 8.6 Q0b-bis, the CEF investigation and rev 15 (2026-10-12; `q0bbis-2026-10-12/`, `cef-frac-2026-10-12/`, `plan-rev15-2026-10-12/`)
+
+**Q0b-bis on the rev-13 bytes** (headless Chrome 154 and OBS 32.2.2 / CEF 127.0.6533.120 through `ManagedObs`, never together;
+timed takes at load < 4): engagement PASS — host P2 2→3 one holder, P2 4→end none (bridge), DSK 2/3/5/7 1/2/1/2; raw P2 2→3
+and 4→end one each, `svgclip` admitted, every exterior negative refused at its expected check. Cost PASS — DSK at DSF 1 ≤ 13.4
+ms, DSK 7→8 at DSF 2 15.1–18.3 ms, CEF DSK 7→8 11.7–34.8 ms. Matrix PASS: all 18 DPR × origin × clip cells one holder, holder
+max 3 (0 % > τ, flat ≤ 1), `perfect` 0/0, clip edge bands included; four DPR-1.5 cells INCONCLUSIVE on the production-mask
+excess rule (1.05 %, 6.8 % from BOX-resampled α at a non-integer scale), 3 / 0 % under the exact twin-difference mask.
+**Instrument lessons:** CDP `Emulation.setDeviceMetricsOverride` smooths composited canvases (even `perfect` reads 144 / 231),
+so DPR arms launch Chrome with `--force-device-scale-factor`; at DPR 2 `perfect` needs the player's teardown timer delayed.
+**Controls:** `perfect-shift` FAIL (255 / 64); `m-snap-frac` FAIL at DPR 1.5 (93 / 4.5 %) and 2 (42 / 2.8 %), but at DPR 1
+it binds no holder (the unrounded edge is partly covered and the full-backing alpha scan rejects it). **W5 (indicative):** GPU
++11 at mid-grey vs software identity, distinguishable on composited pixels, launches identical, CEF = GPU; GPU-state
+invalidation untested. **The trigger:** CEF holder vs live 183 max, 3.1–6.1 % > τ, all within 2 px of edges — CEF 127 draws the
+video quad unsnapped (edge offset −0.356 px on average; headless 0.000).
+
+**CEF investigation** (four OBS launches, untimed): drawing the snapped frame as an underlay and the fractional quad on top
+(`fdrawu`, +186 B) reads **2 / 0 %** in CEF (launches 1 and 4) but 183 / 6.12 % in Chrome 154; the snapped draw reads 3 / 0 %
+in Chrome 154 (DPR 1 and 2) and 183 in CEF. A fractional draw alone binds no holder (antialiased edge column). No in-page
+discriminator exists; the host-side probe separates the engines (correct rule ≤ 0.58 %, wrong rule ≥ 39.8 %).
+
+**Rev 15 bytes (Node, real extracted code, both players).** D1 10 571 B (+374 over rev 13: flag read and guard, integer
+`left`/`top`, the frac draw); `node --check` passes on all four patched players; §6.1 holds. W1's committed harness (HEAD
+`7834624c`, 266 rows, copied to scratch) with three scratch extensions (BASE `left`/`top` `0px`; `window.__obedCalib` per row,
+default `snap`; trace pattern `vv?`): all 266 rows unchanged under `snap`, and 13 new rows match — flag absent / `unknown`
+skip; `frac` admits at DPR 1 with two movie draws (on P2's fractional box the second lands at (0.352, 0.036), 951×268); `frac`
+at DPR 1.5 / 2 and at a fractional stage origin skip; `frac` with a fractional translation admits; fractional `left` / `top`
+and `left: auto` skip, a negative integer `left` admits — on both players, every invariant holding. The `m-snap-shift` splice
+`s.left=a0+"px"` → `s.left=a0+1/p+"px"` and rev 13's `m-snap-frac` anchor each occur exactly once on both players and twins.
+
 ## 9. Acceptance
 
 **Rule.** Every blocking check has a positive control that must PASS and a negative control that must FAIL, read before the
@@ -576,7 +666,7 @@ expected FAIL. One headless Chrome at a time; 1-min load < 4 and no other headle
 | Frozen frame (index, constancy) | `m-paused` (frame known in advance) | `m-off` (baked frame) |
 | Frozen region fades | `m-on` | `m-hold` (full-strength copy) |
 | Foreground preserved and ordered (tone-invariant) | `m-fg` | `m-fg-omit`, `m-fg-swap`; scorer cases: shifted, double-painted, swapped |
-| Holder pixels (browser-rendered; tone-compensated; qualified geometry, production mask) | every cell of `m-snap[dpr, origin, clip]` (§9.0 item 5) | `m-snap-frac[dpr]` (`sn` unrounded) at each DPR; scorer case: 1-px shifted holder under the production mask |
+| Holder pixels (browser-rendered; tone-compensated; qualified geometry, production mask) | every cell of `m-snap[dpr, origin, clip]` (§9.0 item 5) | `m-snap-shift[dpr]` (holder one device px right) at DPR 1, 1.5 and 2, and `m-snap-frac[dpr]` (`sn` unrounded) at DPR 1.5 and 2; scorer case: 1-px shifted holder under the production mask |
 | Reference capture (instrument, r8 7) | `perfect` on every `m-snap*` arm; scorer case: valid reference set | `perfect-shift` (canvas overwritten 1 px off) FAIL; scorer cases: stale/reused frame, missing or extra animation, unpaused animation → INCONCLUSIVE |
 | Foreground mask (instrument, r8 6) | production mask on every twin pair (missed 0, excess ≤ 1 %) | scorer cases: whole-rectangle, 3-px shifted, empty mask → INCONCLUSIVE (rejected before scoring) |
 | Geometry guard (decision 12, fix A) | every `m-snap[dpr, origin, clip]` cell (holder bound at stage scale 1, full-slide base layer) | `m-geo-dpr125`, `m-geo-2560`, `m-geo-scale`, `m-geo-base` (published take, no holder) |
@@ -584,40 +674,28 @@ expected FAIL. One headless Chrome at a time; 1-min load < 4 and no other headle
 | Hide / show capture (instrument, r8 8) | `life-hide` (alpha) and `life-hide-screen` twins: transparent / black frames inside the hidden interval, six timestamped mid frames after show | `life-hide-nohide`, `life-hide-noshow` (driver drops the action) FAIL; scorer cases: duplicate frame, timestamp shift → INCONCLUSIVE |
 | Tone match — blocking only if a non-identity `L` returns (W5); report-only under identity | (`m-tone`) | (`m-tone-raw`) |
 | No independent overlay | `m-on` | `m-bridge-off` (stock twin) |
+| Placement probe (instrument, decision 13) | `probe-chrome` → `snap`, `probe-cef` → `frac` (two launches each); scorer cases: clean snap, clean frac | scorer cases: both low, both high, a share in (2 %, 20 %), unequal screenshot pair, wrong size → unknown; `probe-undecodable` (probe clip replaced by an undecodable file) → no flag → no holder |
+| Placement rule (the probed rule is the right one) | `m-snap` on Chrome 154 under `snap`; `m-snap-cef` in DX-2 under `frac` | `wrongrule-chrome` (flag forced to `frac`), `wrongrule-cef` (forced to `snap`) → holder pixels FAIL |
 | Cost | scorer case: 50 ms; stub rows: total published on success, rejection, exception | scorer case: 50 ms + ε (missing or non-finite → INCONCLUSIVE) |
 
-### 9.0 Q0b-bis — step 0 on the rev-13 bytes (scratch; after W1's re-pin, before DX-1; browser windows on request)
+### 9.0 Q0b-ter — step 0 on the rev-15 bytes (scratch; after W1's and W6's work, before DX-1; windows on request)
 
-Done: Q0b on rev 9 (§8.1); rev-10 prototypes (§8.2); rev-11 and rev-12 Node rows (§8.3, §8.4). Pending (a miss re-plans):
-1. **Real-page engagement first** (rev-13 bytes; not yet run in a browser: revs 11–13 changed the gate and the guard after the
-   §8.2 runs; Node success does not substitute): host DSK 2/3/5/7 and P2 2→3 admitted, raw P2 2→3 / 4→end admitted, the
-   bridge still blocking P2 4→end on the host; a miss re-plans.
-2. **Exact bytes, cost:** W1's built `on` player (the §3.1 digests): every measured DSK transition (2→3, 3→4, 5→6, 7→8; 7→8
-   mandatory) and raw P2 2→3 / 4→end, five fresh launches at load < 4; every take ≤ 50 ms; per-stage times from the timer
-   variant; the worst case named from these runs only; **DSK 7→8 also at DSF 2** (four times the device pixels; estimated
-   25–30 ms; must stay ≤ 50 ms or re-plan). **Crop experiment (decision 11, r8 9):** a clipped diagnostic (P2 2→3
-   with an in-memory clipping layer halving the movie's visible region) run with the full-content draw and with a
-   source-rectangle `drawImage` of the clipped region (+ 1 texel), comparing total take time and holder pixels (equal within
-   1 LSB); adopted only if it saves time without a pixel change.
-3. **CEF preflight (decision 11, T5; measurement only):** a scratch `ManagedObs` driver, OBS 32.2.2 / CEF 127, the step-2
-   bytes (W1's rebuilt bytes; owner default), two fresh launches. Per launch: OBS/CEF version, browser acceleration setting,
-   served digest, source geometry **and DSF recorded** (the guard needs DPR 1, 1.5 or 2 and stage scale 1 — a CEF source at
-   another geometry would skip every take and re-plans), continuity and G2 state; the tone movie paused at frames 30/300/900 in `h264u`, `h264t`, `hevc10`
-   and Keynote HEVC — live `GetSourceScreenshot` vs the holder (`toDataURL`) on the verified exposed mask, decoded tuple, and
-   decode evidence for anything undecodable; engagement (P2 2→3 one bound holder, DSK 7→8 two); DSK 7→8 and 3→4 cost ×3 (each
-   ≤ 50 ms); holder vs live at the source geometry, tone-compensated with the launch's own measured map, reported. Recorded as
-   a "CEF preflight" block of the decision record. Cost > 50 ms, an engagement miss or holder edges > τ re-plan before DX-2;
-   tone results feed W5 only.
-4. **Dry runs of the new captures and controls:** `m-snap`/`-frac`/`perfect`/`perfect-shift` with their omit twins, `m-geo-*`,
-   `m-raw*` (incl. modal, SVG, clipped SVG, shadow dialog, shadow overlay), the `m-snap` matrix and `m-snap-frac[dpr]`, the hide rows and their dropped-action twins, D2 `on` on the both-opaque class,
-   `m-tone` with its twin.
-5. **Geometry matrix (r11 1):** the parametrized `m-snap` arm (§9.1) over DPR {1, 1.5, 2} × stage origin {integer:
-   1920×1200 at y 60 per DPR's CSS viewport; fractional: 1920×1201 at y 60.5} × clip {none; an in-memory clipping layer cutting
-   the movie at a fractional x; the same at a fractional y} = 18 cells, each with engagement (one bound holder), the
-   edge-inclusive holder comparison, `perfect` and a same-frame omit twin, plus `m-snap-frac` per DPR as the displaced-edge
-   FAIL control. The investigation measured only unclipped cells, and fractional origins only at DPR 1. **Any failing cell
-   narrows admission** to the passing cells (a guard byte change and a re-plan), whether or not it is clipped. Stage scale ≠ 1
-   and nested scales stay outside the guard (decision 12); Q0b-bis only proves the skip there (`m-geo-*`).
+Done: Q0b on rev 9 (§8.1); rev-10 prototypes (§8.2); revs 11–13 Node rows (§8.3–8.5); **Q0b-bis on the rev-13 bytes and the CEF
+investigation (§8.6)**: engagement, cost, the 18-cell matrix (real DSF) and W5's indicative GO. Pending (a miss re-plans):
+1. **Probe qualification on both engines:** `probe-chrome` (headless and the headed HDMI host) and `probe-cef` (managed OBS,
+   `GetSourceScreenshot`), two fresh launches each → `snap` / `frac` with the recorded shares and fingerprint; `probe-undecodable`
+   → no flag; probe wall time ≤ 2 s.
+2. **Holder pixels on the probed rule, exact rev-15 bytes:** Chrome 154 `m-snap` base cell and the `m-snap-shift[1, 1.5, 2]` /
+   `m-snap-frac[1.5, 2]` controls (the snap path is unchanged from rev 13, so the Q0b-bis matrix carries; its four DPR-1.5
+   cells re-read with the draw-mapped production mask); CEF `m-snap-cef` (P2
+   2→3, DSK 7→8) under `frac` ≤ τ with `perfect` and the omit twin; `wrongrule-chrome` and `wrongrule-cef` FAIL; CEF DSK 7→8 cost
+   ≤ 50 ms with the extra draw.
+3. **Engagement on the rev-15 bytes:** host pages after the probe as in Q0b-bis; raw pages skip in product (no probe) — the
+   `m-raw*` exterior controls inject `window.__obedCalib = {placement: "snap"}` (Chrome 154's measured rule) so the gate still
+   gets exercised.
+4. **Still open from Q0b-bis:** the crop experiment; dry runs of `m-geo-*`, the hide rows, D2 `on`, `m-tone` with its twin;
+   CEF `hevc10` / Keynote-HEVC tone (W5 input). DPR arms run with a real `--force-device-scale-factor` (never CDP emulation)
+   and, at DPR 2, with the player's teardown timer delayed for `perfect`.
 
 ### 9.1 DX-1 headless gate — `scripts/dissolve_probe.py` (promotes the evidence's `dissolve_ab.py` + hook)
 
@@ -627,7 +705,10 @@ Done: Q0b on rev 9 (§8.1); rev-10 prototypes (§8.2); rev-11 and rev-12 Node ro
   counter strip, 220-step luma ramp, 25–100 % colour patches, skin tones, in Q0b 1's encodings). Provenance recorded.
 - **Driver.** One fresh headless Chrome per arm, 1920×1080, DSF 1 unless the arm says otherwise, own port (never 9222);
   `LiveOutputHost` attach or launch; `m-raw*` arms serve the resolver's export as-is (its own `index.html`, navigator present)
-  over the same static server and advance with Space over CDP. **Geometry classes (decision 12, fix A):** *qualified* = DPR 1,
+  over the same static server and advance with Space over CDP, injecting `window.__obedCalib = {placement: "snap"}` (the
+  host's probe result for Chrome 154) before the advance; DPR arms launch Chrome with `--force-device-scale-factor` (CDP
+  emulation smooths composited canvases, §8.6). Every host arm runs the startup probe first and records its result; a probe
+  that does not return the engine's expected rule makes the arm INCONCLUSIVE. **Geometry classes (decision 12, fix A):** *qualified* = DPR 1,
   1.5 or 2 at stage scale 1, base-layer box = slide, translation-only scene transforms, any letterbox origin (1920×1080,
   letterboxed 1920×1200 and 1920×1201, each at DPR 1, 1.5 and 2, unclipped or fractionally clipped: the `m-snap` matrix) — every
   check blocking, `m-fg` included at DSF 1.5 and 2;
@@ -654,7 +735,9 @@ Done: Q0b on rev 9 (§8.1); rev-10 prototypes (§8.2); rev-11 and rev-12 Node ro
 - **Foreground inventory (r8 6).** Before the advance the hook records every canvas later in document order than the movie
   that meets its region (independently of the take): `toDataURL`, CSS rect, effective opacity, document-order index. The
   **production mask** maps each canvas's α > 0 support to device px through the take's own snapping (`sn`, backing = rect ×
-  DPR), dilated 2 px, restricted to the holder region. Every reference geometry runs a same-frame `m-fg-omit` twin; the twin
+  DPR), dilated 2 px, restricted to the holder region. At a non-integer device scale the α support is mapped the way the take draws
+  it (the canvas drawn into its snapped device rect, α > 0 read back), not by a box resample: Q0b-bis's box-resampled masks
+  over-masked four DPR-1.5 cells (excess 1.05 % and 6.8 %, missed 0); Q0b-ter re-reads those cells. Every reference geometry runs a same-frame `m-fg-omit` twin; the twin
   difference (holder vs twin holder, `toDataURL`, exact) is the known raster control.
 - **Scorer (pure, every pixel of the mask; reused by DX-2).** A = outgoing texture with the holders pasted at their device
   rects (exact at stage scale 1: the holder backing is device pixels; no resampling), B = incoming,
@@ -728,7 +811,10 @@ Done: Q0b on rev 9 (§8.1); rev-10 prototypes (§8.2); rev-11 and rev-12 Node ro
 | `m-fg` / `m-fg-omit` / `m-fg-swap` | `m-paused` + in-memory: two distinguishable opaque texture layers added to the movie's `renderMovie` build tree (inside the seven `preserve-3d` wrappers), overlapping each other over the counter blocks, and P2's square moved there / + one counted splice `Y.forEach(` → `[].forEach(` / + `Y.forEach(` → `Y.reverse().forEach(` | out-only | holder and every `Ô` vs paused pre-D4 `S_live` ≤ τ on counter-block pixels → PASS / FAIL / FAIL; missing overlap, reference or engagement → INCONCLUSIVE (model N/A: live-only edit) | as `on` + one holder | pinned `on` / + splice |
 | `m-tone` (+ its `m-fg-omit` twin) | tone movie on P2 slide 2, paused at frame 30; reference capture; twin = + splice `Y.forEach(` → `[].forEach(` (mask verification only) | out-only | tone match → REPORTED (identity `L`); `m-tone-raw` not run while `L` is identity | as `on` + one holder | pinned `on` / + splice |
 | `m-snap[dpr, origin, clip]` (one parametrized arm; + same-frame `m-fg-omit` twin per cell) | `m-paused` over the §9.0 item-5 matrix: DPR {1, 1.5, 2} × origin {integer (1920×1200 CSS, y 60), fractional (1920×1201 CSS, y 60.5)} × clip {none, fractional x, fractional y (in-memory clipping layer)}, 18 cells; plus the 1920×1080 base cell; reference-capture profile; twin = + splice `Y.forEach(` → `[].forEach(` | out-only | holder pixels → PASS; `perfect` → instrument PASS; mask verification PASS | as `on` + one holder | pinned `on` / + splice |
-| `m-snap-frac[dpr]` (+ twin) | as `m-snap` 1920×1080 at DPR 1, 1.5 and 2; one counted splice `sn=function(z,e,k){return Math.round((z-e)*k*p)/p}` → `sn=function(z,e,k){return(z-e)*k}`, exactly once on both players and on their omit twins (checked: 1 → 0, replacement 1; rev 12's anchor occurs 0 times in rev-13 bytes) | out-only | holder pixels → FAIL (displaced edges) | as `m-snap` | base + splice |
+| `m-snap-frac[dpr]` (+ twin) | as `m-snap` 1920×1080 at DPR 1.5 and 2 (at DPR 1 the unrounded edge is partly covered, the alpha scan rejects it and no holder binds — measured, so it cannot give its FAIL there); one counted splice `sn=function(z,e,k){return Math.round((z-e)*k*p)/p}` → `sn=function(z,e,k){return(z-e)*k}`, exactly once on both players and on their omit twins (checked: 1 → 0, replacement 1; rev 12's anchor occurs 0 times in rev-13 bytes) | out-only | holder pixels → FAIL (displaced edges) | as `m-snap` | base + splice |
+| `m-snap-shift[dpr]` (+ twin) | as `m-snap` 1920×1080 at DPR 1, 1.5 and 2 (real force flag); one counted splice `s.left=a0+"px"` → `s.left=a0+1/p+"px"` (the holder one device px right, every backing pixel still opaque; once on both players and twins) | out-only | holder pixels → FAIL (displaced edges) — the DPR-1 displaced-edge control | as `m-snap` | base + splice |
+| `probe-chrome` / `probe-cef` / `probe-undecodable` | the host's startup probe in headless Chrome 154 (and headed on the HDMI display) / in managed OBS via `GetSourceScreenshot` / with the probe clip replaced by an undecodable file; two fresh launches each | — | placement probe → `snap` / `frac` / unknown (no flag, the next take binds no holder) | — | pinned `on` |
+| `wrongrule-chrome` / `wrongrule-cef` | `m-snap` on Chrome 154 / `m-snap-cef` in CEF with the host's flag forced to the other rule | out-only | holder pixels → FAIL (measured 183 / 6.12 % either way) | as `m-snap` | pinned `on` |
 | `perfect-shift` | as `m-snap` 1920×1080; the driver's `perfect` overwrite drawn 1 device px right | out-only | reference capture → FAIL (instrument negative) | as `m-snap` | pinned `on` |
 | `m-geo-dpr125` / `m-geo-2560` / `m-geo-scale` / `m-geo-base` | as `m-paused` at DSF 1.25 / 2560×1440 / 1920×1080 with an in-memory `affineTransform` scale 1.5 on the movie's layer / 1920×1080 with the live slide's base layer resized in memory to 960×1080 | out-only | geometry guard → no holder (today's look) | as `on` | pinned `on` |
 | `m-raw-script` / `m-raw-shadow-modal` / `m-raw-shadow-fixed` | as `m-raw` + in-page before the advance: a `script type="application/json"` styled `display: block` at x −60 whose non-wrapping text crosses the movie / an off-stage transparent `div` with an open shadow root holding a `dialog` opened with `showModal()` and a coloured `::backdrop` / the same host with a `position: fixed` coloured overlay in its shadow tree | out-only | exterior gate → FAIL (no holder) | as `on` | pinned `on` |
@@ -765,7 +851,8 @@ qualification: DX-1 runs every row against its stock twin, the go-to/back destin
 
 One launch, the managed bridge with DX-1's hook, resolver, integrity rules and scorer (W2), the advance, a `GetSourceScreenshot`
 burst. Sessions: DX-1's P2, `p2cut`, `p2-binary` and tone arms except `screen-*`, `delay-*`, `on-sw` and the lifecycle (tone
-arms report-only under identity `L`), plus DSK 7→8 (two bound holders; cost ≤ 50 ms, decision 11) and `m-snap` at the browser
+arms report-only under identity `L`), **first the host's startup probe** (`probe-cef` must return `frac`; anything else makes the
+round INCONCLUSIVE), `wrongrule-cef` (FAIL expected), plus DSK 7→8 (two bound holders; cost ≤ 50 ms, decision 11) and `m-snap` at the browser
 source's geometry (holder pixels vs a pre-advance source screenshot, tone-compensated with that launch's measured map, ≤ τ_CEF);
 media sessions (not `m-off` or the bridge arms) show a bound D4 holder; all record
 continuity, G2 state, colour tuples and served digest; cut sessions need rAF coverage from DOM insertion to 3 frames after the
@@ -831,7 +918,15 @@ session) `--arm mmo`, `--arm g2`, `--arm mmo-cef`. Root-cause any change.
    the interval FAIL, no content after show FAIL, duplicate frame / timestamp shift / < 6 after-show mid frames →
    INCONCLUSIVE; exterior gate and geometry guard — bound holder PASS, published take without holder FAIL, no published take →
    INCONCLUSIVE; strip decode from a device-scale holder.
-5. **`test_managed_obs_qualify.py`:** the env-refusal test parametrized over the new arm; the calibration test (n = 4 / 4 + ε);
+5. **Rev 15 rows** (in the same functions): test 3's harness gives BASE `left`/`top` `0px`, sets `window.__obedCalib` per row
+   (default `snap`) and allows the underlay (`(vv?(gf*)?)?`); rows (§8.6): flag absent / `unknown` skip; `frac` admits at DPR 1
+   with the second draw at the unsnapped quad (P2's fractional box: (0.352, 0.036), 951×268); `frac` at DPR 1.5 / 2 and at a
+   fractional stage origin skip; fractional `left`/`top` and `left: auto` skip. **New `tests/test_placement_probe.py`, one
+   parametrized function** (W6; synthetic numpy, no browser): the classifier — clean snap, clean frac, both low, both high, a share
+   at 2 % + ε / 20 % − ε, unequal screenshot pair, wrong size, DPR outside the set → unknown; the probe script string carries the
+   two fractions and the asset URL; the flag expression the host evaluates; the report field. Test 4 (`test_dissolve_probe.py`)
+   adds the `m-snap-shift` and wrong-rule arms to its arm table rows.
+6. **`test_managed_obs_qualify.py`:** the env-refusal test parametrized over the new arm; the calibration test (n = 4 / 4 + ε);
    the session list includes DSK 7→8 and `m-snap`.
 
 ## 11. Work streams (Opus MEDIUM implementers, disjoint files; only the coordinator commits)
@@ -839,14 +934,16 @@ session) `--arm mmo`, `--arm g2`, `--arm mmo-cef`. Root-cause any change.
 | # | Files | Work |
 |---|---|---|
 | W0 | coordinator | `git cherry-pick 715cb3f1` (done, `7fa7c8dd`) |
-| W1 | `src/obed_edom/live_runtime.py`, `tests/test_live_runtime.py` | rev 13's `__obedFreezeTake` byte-exact to §3.1 (fix A over rev 12: `sn` on the 1/DPR grid, DPR ∈ {1, 1.5, 2}, integer-origin condition dropped; the four row flips and five rows of §8.5) (`_FREEZE_TONE_LUT` removed; `Q` kept); docstrings (identity tone, device-pixel holder behind the geometry guard, exterior proof, top layer, shadow roots); re-pins; tests 1–3 incl. the shadow-DOM invariant rows |
+| W1 | `src/obed_edom/live_runtime.py`, `tests/test_live_runtime.py` | rev 15's `__obedFreezeTake` byte-exact to §3.1 (over rev 13: the placement flag read and guard, integer `left`/`top`, the `frac` underlay draw; the 13 rows and harness changes of §8.6, §10 item 5) (`_FREEZE_TONE_LUT` removed; `Q` kept); docstrings (identity tone, device-pixel holder behind the geometry guard, exterior proof, top layer, shadow roots); re-pins; tests 1–3 incl. the shadow-DOM invariant rows |
 | W2 | `scripts/dissolve_probe.py`, `tests/test_dissolve_probe.py` | reference-capture profile (inventory, paused-state and opacity read-backs, stable pairs, `perfect`/`perfect-shift`), holder-pixel scorer with `L_path`, foreground inventory + production mask + missed/excess verification with a twin per reference geometry, tone coverage, device-scale holder paste and strip decode, `m-snap[dpr, origin, clip]` (one parametrized arm over the §9.0 item-5 matrix) and `m-snap-frac[dpr]` with rev 13's anchor, `m-geo-*` (`-dpr125` replaces `-dsf2`) and `m-raw*` arms (raw-page driver and injections), hide-row screencast with timestamps and the dropped-hide/-show twins, both-opaque no-dip class; test 4 |
-| W3 | `scripts/managed_obs_qualify.py`, `tests/test_managed_obs_qualify.py` | DSK 7→8 cost and `m-snap` sessions; tone sessions report-only; test 5 |
+| W3 | `scripts/managed_obs_qualify.py`, `tests/test_managed_obs_qualify.py` | DSK 7→8 cost and `m-snap` sessions; the startup probe first (`probe-cef` must say `frac`), `m-snap-cef` under `frac`, `wrongrule-cef`; tone sessions report-only; test 6 |
 | W4 | `README.md`, `.agents/skills/obed-edom/SKILL.md`, `.agents/handovers/keynote-live-dissolve-crossfade-followups.md` | README/SKILL: the identity-tone known limit; DPR 1, 1.5 and 2 freeze; scaled stages (an output not 1920 CSS px wide, e.g. 2560×1440 or 1280×720 at DSF 1) keep today's movie jump; follow-ups handover: W5, the Q6 PR, scaled stages (option B's replica result and why it is not shippable; the local-units `contain` solve a scaled-chain model needs), the optional G2 use of a qualified `L` |
 | W5 | scratch + evidence only (no tracked file) | **Host-side compositing-path calibration feasibility probe** (decision 10; non-blocking for this PR, needed before Q5 closes): can the host, at startup, identify the compositing path and its map (qualified path + tuple → `L`, unknown → identity) from compositor-painted pixels? Headless `LiveOutputHost` (GPU, `--disable-gpu`) and managed OBS (acceleration on/off), two fresh launches each: the tone movie paused in an off-screen-safe calibration slot, CDP screenshot / `GetSourceScreenshot` vs `drawImage`; repeatability, distinguishability of GPU vs software for the same tuple, invalidation on GPU-state change (GPU process loss, acceleration toggle); a record with a go/no-go and, on go, the player-boundary change it would need (owner decision) |
-| Q0b-bis | scratch + evidence only | §9.0: exact-bytes cost, CEF preflight (T5), geometry band beyond stage scale 1, dry runs of the new captures |
+| W6 | `src/obed_edom/placement_probe.py` (new), `src/obed_edom/data/placement_probe.mp4` (new), `src/obed_edom/live_host.py`, `src/obed_edom/managed_obs.py`, `tests/test_placement_probe.py` (new) | **The host startup calibration** (§3.3; decision 13): probe JS and pure classifier, run at start / re-calibrate / after reconnect off-air, the frozen `window.__obedCalib` flag, fingerprint check in `observe()`, `output.placement`, `GetSourceScreenshot` wrapper; `tone` reserved `null` for W5 |
+| Q0b-bis | done (§8.6) | engagement, cost, matrix, CEF preflight (the trigger) |
+| Q0b-ter | scratch + evidence only | §9.0: probe qualification on both engines, holder pixels on the probed rule (Chrome and CEF), wrong-rule negatives, rev-15 engagement, the open Q0b-bis items |
 
-Order: W1 ∥ W2 ∥ W3 ∥ W4 → Q0b-bis → GPT-6 Astra review (Opus fallback) → fixes → full local suites
+Order: W1 ∥ W2 ∥ W3 ∥ W4 ∥ W6 → Q0b-ter → GPT-6 Astra review (Opus fallback) → fixes → full local suites
 `env -u PYTHONDONTWRITEBYTECODE uv run pytest tests/ -n auto --dist worksteal` (no dashboard files), Python 3.10 floor → DX-1
 (fresh pinned worktree, controls first) → DX-2, `mmo-cef`, regression (§9.4), DX-3 (owner session) → one PR to `main`. Never
 merge. W5 runs whenever a browser window is free; it does not gate the PR.
@@ -859,7 +956,8 @@ exterior proof never trusts a failing element's own border box; every pruned sub
 disjoint from `V`. (9) Holder canvas = device pixels of the snapped box; alpha scan over every backing pixel before the redraw; no tone
 write. (10) Top layer and open shadow roots refused first; no tag exempt by name; descendant-paint effects checked before the
 visibility shortcut; witnesses are HTML `div`s; the shadow-DOM invariant is a checked test. (11) Geometry guard: DPR ∈ {1, 1.5, 2}, `kx` = `ky` = 1, stage scale 1,
-translation-only scene transforms, `sn` on the 1/DPR grid; everything else skips; safety checks never relaxed for a visual allowance.
+translation-only scene transforms, integer `left`/`top`, `sn` on the 1/DPR grid; everything else skips; (12) placement only from
+the host probe's frozen flag (`snap`; `frac` at DPR 1 and an integer stage origin); absent or unknown skips; safety checks never relaxed for a visual allowance.
 
 ## 12. Owner decisions (1–7 2026-10-11, 8–12 2026-10-12, in chat)
 
@@ -904,7 +1002,13 @@ translation-only scene transforms, `sn` on the 1/DPR grid; everything else skips
     scene chains; stage scale ≠ 1 and nested scales keep skipping (option B is not shippable without a per-chain rule). An
     output whose viewport is not 1920 CSS px wide (2560×1440 or 1280×720 at DSF 1) keeps today's baked-frame jump; a 4K output
     at DSF 2 (1920×1080 CSS) freezes. Still to measure (Q0b-bis): DSK 7→8 cost at DSF 2, the CEF source's DSF, clip edges at
-    DSF ≠ 1.
+    DSF ≠ 1 (all measured since, §8.6).
+13. **Placement rule from a host startup probe (2026-10-12 ~14:10).** OBS's CEF 127 places the video quad unsnapped, Chrome 154
+    snaps; no page-side test separates them. A host-side probe compares composited pixels of a snapped and a fractional canvas
+    against a test movie at host start (and on reconnect or GPU reset), off-air, in about 1.5 s; it sets `snap` or `frac`;
+    ambiguous or unknown means skip. It is **the** startup calibration: it covers the HDMI/headless host (CDP screenshot) and
+    managed OBS (`GetSourceScreenshot`), and the same probe can later carry W5's tone-path map (Q5 stays open; this patch keeps
+    identity `L` — recommendation §13).
 
 ## 13. Risks and out of scope
 
@@ -915,7 +1019,19 @@ translation-only scene transforms, `sn` on the 1/DPR grid; everything else skips
   bounding rect; under an anisotropic local scale (the DSK-like replica's nested 1.0008/0.9993) it picks the wrong axis
   (content width 312.213 vs Blink's 312.656; 249–255 LSB). The translation-only guard keeps such chains out; any future model
   that admits scaled chains must solve `contain` in local units (LayoutUnit-exact) first.
-- **Cost at DSF 2:** four times the device pixels (DSK 7→8 estimated 25–30 ms against the 50 ms bound); timed in Q0b-bis.
+- **Cost at DSF 2:** four times the device pixels; measured 15.1–18.3 ms for DSK 7→8 (Q0b-bis), within the 50 ms bound.
+- **Placement probe (decision 13).** (a) *Off-air window:* the probe paints a 1000×740 grey box top-left for ≈ 1.5 s; the host runs
+  it before `show` and only re-runs it off-air, so an output that is already on air at a reconnect skips the freeze until the
+  operator re-calibrates. (b) *Engine updates:* the rule is re-measured at every host start, so a CEF or Chrome update is caught
+  at the next start; between starts the fingerprint check clears the flag on a visible change. A GPU-process reset that keeps
+  the page and leaves the fingerprint unchanged is not detected (W5's "GPU-state invalidation untested" applies here too).
+  (c) *Raw export and Build Preview* run without a host probe and so no longer freeze (D1/D2 still apply) — a regression against
+  decision 8's "preview inherits F3"; open question. (d) The probe classifies but does not measure τ (its 1-px synthetic lines
+  leave 32–52 on the correct rule); holder pixels are qualified separately per engine (§9.0 item 2, DX-2).
+- **Tone map on the probe (W5).** Recommendation: keep identity `L` in this patch. W5's GO is indicative (two launches, no
+  GPU-state invalidation test, HEVC tone in CEF unmeasured), a non-identity map needs RGB writes and `putImageData` back in the
+  take (the cost rev 10 removed) and its own blocking tone controls; the probe's `tone: null` slot and fingerprint are the
+  plumbing it would use. Q5 stays open.
 - **Clip edges at DSF ≠ 1** are unmeasured (the investigation used unclipped content boxes); Q0b-bis item 5.
 - **The snapping model is a measured fit** for the qualified geometry (P2, DSK slides, the hi-DPI replica; §8.2, §8.5), located
   in Chromium's zoom-for-DSF layout snapping (same painter code in M127), not a general rule for scaled chains; a
@@ -1001,3 +1117,15 @@ Raw rounds: `.agents/reviews/dissolve-crossfade/plan-astra-r{1,…,7}.md`. r1–
 |---|---|---|---|
 | 1 | major / acceptance coverage | Folded: one parametrized `m-snap[dpr, origin, clip]` arm over DPR {1, 1.5, 2} × integer / fractional letterbox origin × unclipped / fractional x clip / fractional y clip (18 cells), each with engagement, edge-inclusive holder pixels, `perfect` and a same-frame omit twin; `m-snap-frac[dpr]` the displaced-edge FAIL control; any failing cell narrows admission (clipped or not) | §9, §9.0 item 5, §9.1, §11 |
 | 2 | major / stale control anchor | Folded: `m-snap-frac` splices `sn=function(z,e,k){return Math.round((z-e)*k*p)/p}` → `sn=function(z,e,k){return(z-e)*k}`; checked exactly once on both players and on their omit twins (rev 12's anchor occurs 0 times) | §9.1 |
+
+### Rev 15 — decision 13 (owner ~14:10, on Q0b-bis `q0bbis-2026-10-12/` and the CEF investigation `cef-frac-2026-10-12/`)
+
+| Item | Disposition | Where |
+|---|---|---|
+| CEF 127 does not snap the video quad (Q0b-bis trigger: 183 LSB in OBS) | The take reads the host-probed rule: `snap` (Chrome 154) or `frac` (CEF 127: snapped underlay + the unsnapped quad drawn on top, DPR 1 and an integer stage origin only); absent / unknown skips; integer computed `left`/`top` on scene elements; D1 10 571 B, digests re-pinned, `node --check`, §6.1 | §1.1, §3.1, §3.2 |
+| Host startup calibration | New W6: `placement_probe.py`, the probe clip, `live_host.py` (start / re-calibrate / off-air re-probe, frozen flag, fingerprint check, `output.placement`), `managed_obs.py` screenshot wrapper; classifier ≤ 2 % vs ≥ 20 %; every failure → no flag | §3.3, §11 |
+| Probe controls | `probe-chrome` → snap, `probe-cef` → frac, `probe-undecodable` → no flag; `wrongrule-chrome` / `wrongrule-cef` FAIL; classifier scorer cases | §9, §9.1, §9.2, §10 |
+| DPR-1 displaced-edge control | `m-snap-shift[dpr]` (holder one device px right, backing fully opaque) at DPR 1, 1.5, 2; `m-snap-frac` kept at 1.5 and 2 only (at DPR 1 it binds no holder) | §9, §9.1 |
+| Instrument | DPR arms need a real `--force-device-scale-factor`; `perfect` at DPR 2 needs the teardown timer delayed; raw-page arms inject the probe result | §9.0, §9.1 |
+| Tone (W5) | identity kept; the probe's `tone` slot reserved; Q5 open | §3.3, §12.13, §13 |
+| Node | W1's 266 rows unchanged under `snap`, 13 new rows, both players, invariants hold | §8.6, §10 |
