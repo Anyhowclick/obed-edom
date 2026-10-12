@@ -2254,6 +2254,7 @@ def score_continuity(
         scored["paint"] = carry_paint(
             samples, element_id, asset, window, boundary_scene, src_rect, dst_rect,
             transition_scene=transition_scene, rect_tolerance=rect_tolerance, floor=max(floor) if floor else None,
+            wrap_times=scored.get("wrapTimes") or (),
         )
         status = scored["paint"].get("status")
         if status == "fail":
@@ -2448,9 +2449,9 @@ def paint_start(
 def carry_paint(
     samples: list[dict[str, Any]], element_id: Any, asset: str, window: dict[str, float],
     boundary_scene: float, src_rect: dict[str, float], dst_rect: dict[str, float], *,
-    transition_scene: float | None, rect_tolerance: float, floor: float | None,
+    transition_scene: float | None, rect_tolerance: float, floor: float | None, wrap_times: Sequence[float] = (),
 ) -> dict[str, Any]:
-    """`paint_instrument.score_paint` over a carry's window. The slot is the source rect before
+    """`paint_instrument.score_paint` over a carry's window (`wrap_times`: the classified loop wraps). The slot is the source rect before
     the move, the destination on move-complete and after rows, and on a bridge's move rows the
     carried decoder's own pre-paint rect when it lies on the path (else no slot). A row whose
     phase is unreadable (`phase_unreadable`) is an unreadable frame, never the source phase."""
@@ -2475,7 +2476,7 @@ def carry_paint(
         start=paint_start(samples, element_id, boundary_scene, window, floor), end=window["end"],
         slot_of=slot_of, stage_box_of=stage_box_of, rect_tolerance=rect_tolerance, iou_min=INSTANCE_IOU_MIN,
         max_gap_frames=CARRY_COVER_MAX_GAP_FRAMES, min_fps=CARRY_COVER_MIN_FPS,
-        unreadable_of=lambda row: phase_unreadable(row, transition_scene, source),
+        unreadable_of=lambda row: phase_unreadable(row, transition_scene, source), wrap_times=wrap_times,
     )
 
 

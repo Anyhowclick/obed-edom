@@ -609,14 +609,14 @@ def _period(rows: Sequence[dict[str, Any]]) -> float | None:
 
 
 def local_period(before: Sequence[float], after: Sequence[float], fallback: float) -> float:
-    """The rAF period one delta is judged at when nothing inside it is observed: the faster of the
-    `LOCAL_CADENCE_DELTAS`-delta medians either side when both sides are complete and steady (within
-    `LOCAL_CADENCE_SPREAD`), else the fastest of `fallback` and either side's median, however short that side."""
-    sides = [s for s in (before, after) if s and min(s) > 0]
-    medians = [float(statistics.median(s)) for s in sides]
-    if len(sides) == 2 and all(len(s) == LOCAL_CADENCE_DELTAS and max(s) <= LOCAL_CADENCE_SPREAD * min(s) for s in sides):
-        return min(medians)
-    return min([fallback, *medians])
+    """The rAF period one delta is judged at when nothing inside it is observed: the fastest delta of the
+    `LOCAL_CADENCE_DELTAS` either side (any fast run nearby shows the page could tick that fast there), and no slower
+    than `fallback` unless both sides are complete and steady (within `LOCAL_CADENCE_SPREAD`)."""
+    sides = [[d for d in s if d > 0] for s in (before, after)]
+    near = [d for s in sides for d in s]
+    if all(len(s) == LOCAL_CADENCE_DELTAS and max(s) <= LOCAL_CADENCE_SPREAD * min(s) for s in sides):
+        return min(near)
+    return min([fallback, *near])
 
 
 def _local_periods(deltas: list[float], fallback: float) -> list[float]:
@@ -707,6 +707,7 @@ def score_paint(
     max_gap_frames: int,
     min_fps: float,
     unreadable_of: Callable[[dict[str, Any]], str | None] | None = None,
+    wrap_times: Sequence[float] = (),
 ) -> dict[str, Any]:
     """Plan §2.4 over the rows with `start <= t <= end`. `slot_of`/`stage_box_of` and every `pv.rect`/`visibleRect`
     must share one coordinate space. Readability comes before any classification: a frame is unreadable when the
@@ -718,7 +719,9 @@ def score_paint(
     decoder of the asset. A frame where one names no source, or where two pre-paint reads share an id, is unreadable;
     so is one where a painter that names no source at all (painted, partial or unreadable) meets the slot (any, without
     a slot). A read naming another asset is never the movie: on a decoder of the asset that paints where it meets the
-    slot it is a substitute (red), and unreadable there when its paint is."""
+    slot it is a substitute (red), and unreadable there when its paint is. The browser's loop seek is excused (owner
+    decision 14, pixel-checked: the last frame stays painted): on a classified wrap sample (`wrap_times`), the carried
+    decoder alone reading unpainted for `seeking` is `seekExcused`, never a violation."""
     window_rows = sorted((r for r in rows if _num(r.get("t")) and start <= r["t"] <= end), key=lambda r: r.get("seq") or 0)
     coverage = frame_coverage(window_rows, max_gap_frames=max_gap_frames, min_fps=min_fps)
     period = coverage.get("periodMs")
@@ -728,6 +731,7 @@ def score_paint(
         for pv in r["pp"]["videos"] if pv_schema_problem(pv) is None and canonical_asset_name(pv["src"]) == asset_name
     }
     violations: list[dict[str, Any]] = []
+    seek_excused: list[dict[str, Any]] = []
     unobserved: list[dict[str, Any]] = []
     unreadable: list[dict[str, Any]] = []
     min_opacity: float | None = None
@@ -820,6 +824,9 @@ def score_paint(
         else:
             kind = UNPAINTED
             reason = carried_state[1] if carried_state[0] != PAINTED and carried_state[0] != PARTIAL else "off-slot"
+            if carried_state == (UNPAINTED, "seeking") and row["t"] in wrap_times:
+                seek_excused.append(frame)
+                continue
         violations.append(dict(frame, kind=kind, reason=reason,
                                hiding=(carried_pv or {}).get("hiding"), parent=(carried_pv or {}).get("parent"),
                                layer=(carried_pv or {}).get("layer")))
@@ -861,6 +868,7 @@ def score_paint(
         "unreadable": unreadable[:RUNS_CAP],
         "coverage": coverage,
         "outsideStagePx": round(outside, 1),
+        "seekExcused": seek_excused,
     }
 
 

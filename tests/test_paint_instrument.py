@@ -201,6 +201,23 @@ def test_score_paint(rows, slot, expected) -> None:
             assert result[key] == value, (key, result)
 
 
+# Owner decision 14: on the classified wrap sample the carried decoder reads `seeking` for one frame while the browser
+# keeps its last frame painted (pixel-checked twice, `decision14/`). Only that frame, only `seeking`, only the carried one.
+@pytest.mark.parametrize(("hidden", "kw", "wrap_seq", "status", "excused"), [
+    ((60, 60), dict(readyState=1, seeking=True), 60, "ok", [60]),
+    ((60, 60), dict(readyState=1, seeking=True), 61, "fail", []),
+    ((60, 61), dict(readyState=1, seeking=True), 60, "fail", [60]),
+    ((60, 60), dict(readyState=1), 60, "fail", []),
+], ids=["seek-on-the-wrap-sample", "known-bad-a-seek-off-the-wrap-sample", "known-bad-a-second-seeking-frame",
+        "known-bad-not-decoded-on-the-wrap-sample"])
+def test_the_loop_seek_on_a_wrap_sample_is_excused(hidden, kw, wrap_seq, status, excused) -> None:
+    rows = _rows(videos=_hide(*hidden, **kw))
+    result = pi.score_paint(rows, 1, "movie-a.mov", start=0.0, end=math.inf, slot_of=lambda r: SLOT,
+                            stage_box_of=lambda r: r["pp"]["stageBox"], wrap_times=[rows[wrap_seq - 1]["t"]], **SCORE_KW)
+    assert result["status"] == status, result["reasons"]
+    assert [f["seq"] for f in result["seekExcused"]] == excused
+
+
 def _cadence(*runs: tuple[int, float], drop_seq: int | None = None) -> list[dict[str, Any]]:
     rows, ts = [{"seq": 1, "ts": 0.0}], 0.0
     for count, delta in runs:
@@ -218,13 +235,13 @@ def _cadence(*runs: tuple[int, float], drop_seq: int | None = None) -> list[dict
     (_cadence((60, PERIOD), (1, 4 * PERIOD), (20, 2 * PERIOD)), False, PERIOD, "frame gap 66.7 ms exceeds 58.3 ms"),
     (_cadence((60, PERIOD), (12, 2 * PERIOD), (1, 4 * PERIOD), (4, 2 * PERIOD), (60, PERIOD)), False, PERIOD, "frame gap"),
     (_cadence((60, PERIOD), (1, 4 * PERIOD), (60, PERIOD)), False, PERIOD, "frame gap 66.7 ms exceeds 58.3 ms"),
-    (_cadence((3, PERIOD), (1, 4 * PERIOD), (20, 2 * PERIOD)), False, PERIOD, "frame gap"),
+    (_cadence((20, 2 * PERIOD), (3, PERIOD), (1, 4 * PERIOD), (20, 2 * PERIOD)), False, PERIOD, "frame gap"),
     (_cadence((60, 2 * PERIOD), (1, 4 * PERIOD), (60, 2 * PERIOD)), True, 2 * PERIOD, None),
     (_cadence((60, 2 * PERIOD), (1, 9 * PERIOD), (60, 2 * PERIOD)), False, 2 * PERIOD, "frame gap"),
     (_cadence((60, PERIOD), (12, 2 * PERIOD), (4, 2 * PERIOD), (60, PERIOD), drop_seq=70), False, PERIOD, "seq gaps"),
 ], ids=["missed-30hz-frame-inside-a-30hz-stretch", "known-bad-a-hole-where-the-cadence-switches",
         "known-bad-an-unsteady-side-falls-back-to-the-faster-cadence", "4-tick-hole-at-60hz",
-        "known-bad-a-short-fast-side-still-tightens", "missed-frame-all-30hz", "4.5-period-hole-all-30hz", "seq-gap"])
+        "known-bad-a-short-fast-run-inside-a-slow-side-tightens", "missed-frame-all-30hz", "4.5-period-hole-all-30hz", "seq-gap"])
 def test_frame_coverage_judges_gaps_against_the_local_cadence(rows, ok, gap_period, reason) -> None:
     cov = pi.frame_coverage(rows, max_gap_frames=3, min_fps=20.0)
     assert cov["ok"] is ok, cov
