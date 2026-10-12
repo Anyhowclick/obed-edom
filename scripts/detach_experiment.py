@@ -497,9 +497,10 @@ _CORE_TRACE_TRANSFORMS: tuple[tuple[str, str], ...] = (
 
 
 def variant_replacements(variant: str, table: Sequence[tuple[bytes, bytes]] | None = None) -> tuple[tuple[bytes, bytes], ...]:
-    """The served replacement table of `variant`, sliced from the full R1-R8 table after asserting R8's identity."""
+    """The served replacement table of `variant`, sliced from the table's Magic Move R1-R8 prefix after asserting R8's
+    identity (later entries, R9+, are never served)."""
     table = live_runtime._MM_OPACITY_REPLACEMENTS if table is None else table
-    if len(table) != 8 or table[7][0] != R8_ANCHOR:
+    if len(table) < 8 or table[7][0] != R8_ANCHOR:
         raise ValueError("the player replacement table is not the R1-R8 table this experiment slices")
     if variant not in VARIANT_INDICES:
         raise ValueError(f"unknown variant {variant!r}; expected one of {tuple(VARIANT_INDICES)}")
