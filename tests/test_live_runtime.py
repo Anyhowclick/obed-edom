@@ -273,22 +273,23 @@ def test_mm_opacity_anchors_are_unique_on_the_real_player():
 
 # sha256 of patch_player(real, mm_opacity=...) and patch_rendering(real), per stock player.
 # Old False: recorded on 3eb3b0fe (hook only, unchanged since). True and rendering: with the dissolve replacements
-# D1-D4 = R9-R12 at plan rev 12 (keynote_live_dissolve_crossfade.plan.md); rev 9's D1 gave 49d56adc... / 117fd39d... (old)
+# D1-D4 = R9-R12 at plan rev 13 (keynote_live_dissolve_crossfade.plan.md); rev 12's D1 gave bfeb9377... / a211b1c3... (old)
+# and 6c941ac1... / 50231d3c... (new); rev 9's D1 gave 49d56adc... / 117fd39d... (old)
 # and 7a5e315b... / 52d7edb5... (new); were 574274e8... / fd811938... (old) and 330ef72c... / 33fcdcd2... (new) with R1-R8,
 # and old True 21476f78... with R1-R5. New False: recorded when the new player was admitted.
 REAL_PATCHED_SHA256 = {
     OLD_PLAYER_SHA256: {
-        True: "bfeb9377629dd3c61add309381d8f3efdc3eae4ac9ebfe904f98475815a81112",
+        True: "409a039535ef547bf79c02a68eae6c7eee008b2c95942dd814ca9cef19f9179e",
         False: "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
     },
     NEW_PLAYER_SHA256: {
-        True: "6c941ac18322257c6824d30ce9050d6215b37ad7ca567bd511be4934b208ac45",
+        True: "5dd3997ece0fc5ec0900e3ecbccab304307345e8b8af8935a0c268c6a3d442b1",
         False: "4f9fbffd95e4649543142b2e95586babd9d75f0a0d9a4974e21d6f33c8389e3b",
     },
 }
 REAL_RENDERING_SHA256 = {
-    OLD_PLAYER_SHA256: "a211b1c3d7024a75f044868231c915b28426cb3f6ae90903d705f8fa57814b8c",
-    NEW_PLAYER_SHA256: "50231d3cc5961d3e88d7b55ff8f46d7c24d79bbd09f5f34fcddd483d113247d1",
+    OLD_PLAYER_SHA256: "53ee23db5773e6579105f82b6d9a084386460d5095f751b3b1cc701af2e0b69a",
+    NEW_PLAYER_SHA256: "b366bd91d370ef95f5e5827a8e6678e57194c538b756ea97259778af21f74238",
 }
 
 
@@ -423,10 +424,10 @@ def test_handback_and_dissolve_anchors_sit_at_their_offsets_on_the_real_player(s
     p2_page = FREEZE_DECKS["P2"].parent / "index.html"
     assert {root.parent / "index.html" for root in FREEZE_DECKS.values()} <= set(pages)
     assert {str(path): _shadow_occurrences(path.read_bytes()) for path in pages} == {str(path): [] for path in pages}
-    host = Path(live_runtime.__file__).parent
-    files = {path.relative_to(host.parent).as_posix(): path for path in sorted(host.rglob("*")) if path.is_file() and "__pycache__" not in path.parts}
-    assert set(SHADOW_PINS) - {"player", "patch"} <= set(files)
-    assert {name: _shadow_occurrences(path.read_bytes()) for name, path in files.items()} == {name: SHADOW_PINS.get(name, []) for name in files}
+    host = Path(live_runtime.__file__).parent.parent
+    assert set(SHADOW_PINS) - {"player", "patch"} <= set(SHADOW_HOST_FILES)
+    assert {name: _shadow_occurrences((host / name).read_bytes()) for name in SHADOW_HOST_FILES} == {
+        name: SHADOW_PINS.get(name, []) for name in SHADOW_HOST_FILES}
     # Planted controls: each spelling of a creation API, spliced into the stock player and into the P2 export page, is
     # an occurrence outside the pins.
     for planted, flagged in SHADOW_DOM_PLANTED.items():
@@ -441,6 +442,11 @@ SHADOW_CONTEXT = 12
 # Every `shadow`/`customelements` token on the supported pages, pinned per source with its normalised context:
 # `player` is each stock player (and `off`), `patch` what `on`/`rendering` add (the take's CSS reads and its single
 # `!n.shadowRoot&&(` refusal), the rest are host files under `src/`. Regenerate only after reading every new occurrence.
+# The host files are the ones whose JS reaches a supported page: the player patch and hook (`live_runtime.py`), the live
+# output page and its scripts (`live_host.py`, `live_continuity_js.py`, `live_gl_replay_js.py`) and the Build Preview page
+# (`html_preview.py`). Other modules never reach a page, so prose there ("shadow") is not scanned.
+SHADOW_HOST_FILES = ("obed_edom/live_runtime.py", "obed_edom/live_host.py", "obed_edom/live_continuity_js.py",
+                     "obed_edom/live_gl_replay_js.py", "obed_edom/html_preview.py")
 SHADOW_PINS = {
     'player': [
         ('-moz-box-shadow', ' 40px black;-moz-box-shadow:0px 0px 40p'),
@@ -482,25 +488,13 @@ SHADOW_PINS = {
         ('boxShadow', '|"none"!==z.boxShadow||bd(z)||"no'),
         ('shadowRoot', 'n){return!n.shadowRoot&&(pc(n)||!G'),
     ],
-    'obed_edom/dsk_assemble.py': [
-        ('shadows', ' own stroke shadows ``style_id`'),
-    ],
-    'obed_edom/iwa_geometry.py': [
-        ('shadow', ' for k in ("shadow", "reflecti'),
-    ],
     'obed_edom/live_runtime.py': [
         ('boxShadow', '&"none"===w.boxShadow&&"none"===w'),
         ('boxShadow', '\'"none"!==z.boxShadow||bd(z)||"no'),
         ('boxShadow', 'n"none"===w.boxShadow\'\n    b\'&&"n'),
-        ('shadow', '\n    author shadow roots (a ch'),
         ('shadow', 'and no open shadow root on the'),
+        ('shadow', 'e no author shadow roots (a ch'),
         ('shadowRoot', 'n){return!n.shadowRoot&&(pc(n)||!G'),
-    ],
-    'obed_edom/validate.py': [
-        ('shadow', ' an edge is shadow/overhang; f'),
-    ],
-    'obed_edom/web/app.py': [
-        ('shadow', 'date` would shadow BaseModel.v'),
     ],
 }
 SHADOW_DOM_PLANTED = {
@@ -1342,19 +1336,26 @@ def _round(value: float) -> int:
     return math.floor(value + 0.5)
 
 
-def _snapped(vrect, clip=(0, 0, 1920, 1080), natural=(1920, 540), video="vid") -> tuple[list, list]:
-    """Independent §3.2 geometry for one movie at DPR 1 with the live base layer = slide (`kx` = `ky` = 1): the holder row
-    (position/overflow, snapped slide-px region, device-pixel canvas, its CSS rect) and the canvas trace (the movie drawn
-    into its snapped content box, then the whole backing read back). `natural` None is `object-fit: fill`."""
+def _js(value: float) -> str:
+    """A number as the stub prints it: rounded to 6 places, then JS `Number#toString`."""
+    value = math.floor(value * 1e6 + 0.5) / 1e6
+    return str(int(value)) if value == int(value) else repr(value)
+
+
+def _snapped(vrect, clip=(0, 0, 1920, 1080), natural=(1920, 540), video="vid", dpr=1) -> tuple[list, list]:
+    """Independent §3.2 geometry for one movie with the live base layer = slide (`kx` = `ky` = 1): every edge snapped to
+    the device grid (1/DPR slide px). Returns the holder row (position/overflow, snapped slide-px region, device-pixel
+    canvas, its CSS rect) and the canvas trace (the movie drawn into its snapped content box, then the whole backing read
+    back). `natural` None is `object-fit: fill`."""
     f = min(vrect[2] / natural[0], vrect[3] / natural[1]) if natural else None
     cw, ch = (natural[0] * f, natural[1] * f) if natural else vrect[2:]
     cx, cy = vrect[0] + (vrect[2] - cw) / 2, vrect[1] + (vrect[3] - ch) / 2
-    u0, v0, u1, v1 = map(_round, (cx, cy, cx + cw, cy + ch))
-    a0, b0 = _round(max(clip[0], cx)), _round(max(clip[1], cy))
-    a1, b1 = _round(min(clip[0] + clip[2], cx + cw)), _round(min(clip[1] + clip[3], cy + ch))
-    w, h = a1 - a0, b1 - b0
-    holder = ["absolute/hidden", f"{a0},{b0},{w},{h}", f"{w}x{h}", "absolute", f"0,0,{w},{h}"]
-    return holder, [["video", video, u0 - a0, v0 - b0, u1 - u0, v1 - v0], ["get", 0, 0, w, h]]
+    u0, v0, u1, v1 = (_round(z * dpr) for z in (cx, cy, cx + cw, cy + ch))
+    a0, b0 = _round(max(clip[0], cx) * dpr), _round(max(clip[1], cy) * dpr)
+    a1, b1 = _round(min(clip[0] + clip[2], cx + cw) * dpr), _round(min(clip[1] + clip[3], cy + ch) * dpr)
+    w, h = _js((a1 - a0) / dpr), _js((b1 - b0) / dpr)
+    holder = ["absolute/hidden", f"{_js(a0 / dpr)},{_js(b0 / dpr)},{w},{h}", f"{a1 - a0}x{b1 - b0}", "absolute", f"0,0,{w},{h}"]
+    return holder, [["video", video, u0 - a0, v0 - b0, u1 - u0, v1 - v0], ["get", 0, 0, a1 - a0, b1 - b0]]
 
 
 def _redraw(element: str, rect, alpha=1, origin=(109, 795)) -> list:
@@ -1364,6 +1365,9 @@ def _redraw(element: str, rect, alpha=1, origin=(109, 795)) -> list:
 
 
 DEFAULT = _snapped([109, 795, 952, 268])
+DPR2 = _snapped([109, 795, 952, 268], dpr=2)
+DPR15 = _snapped([109, 795, 952, 268], dpr=1.5)
+DPR15_FILL = _snapped([109, 795, 313, 263], natural=None, dpr=1.5)
 DEFAULT_TRACE = DEFAULT[1]
 FILL = _snapped([109, 795, 960, 270], natural=None)
 VIDEO2 = _snapped([600, 800, 400, 200], video="vid2")
@@ -1399,7 +1403,7 @@ def _hidden_parent(**effects) -> dict:
     return {"cs": {"visibility": "hidden", **effects}, "rect": [-300, 0, 200, 1080]}
 
 
-FREEZE_ROW_COUNT = 260
+FREEZE_ROW_COUNT = 265
 # name -> (stub options, expected take/attach count and target, redraws [id, alpha, x, y, w, h], writeback (none on any
 # path: identity tone), geometry).
 FREEZE_ROWS = {
@@ -1567,21 +1571,29 @@ FREEZE_ROWS = {
     "ext_stickyDescendant": ({"ext": [WITNESS, {"cs": {"position": "sticky"}, "rect": [-140, 0, 50, 50]}, NAV_TEXT]}, FREEZE_ADMIT),
     "ext_failingStageAncestor": ({"bodyCs": {"filter": DROP_300}}, FREEZE_SKIP),
     "exteriorVideoMeetsRegion": ({"ext": [{"tag": "VIDEO", "rect": [500, 800, 200, 200]}]}, FREEZE_SKIP),
-    # Geometry guard and opaque cover (r8 3-5): DPR 1.5 `fill` 313x263 would back 470x395; a transparent last backing
-    # column or row skips at DPR 1; DPR 2, stage scales and a fractional stage origin skip; a letterbox at scale 1 admits.
-    "dpr15_fillOpaque": ({"dpr": 1.5, "videoCs": {"objectFit": "fill"}, "vrect": DPR15_BOX, "clip": DPR15_BOX}, FREEZE_SKIP),
+    # Geometry guard and opaque cover (r8 3-5, rev 13 fix A): edges snap to the device grid, so DPR 1.5 `fill` 313x263
+    # backs 469x394 and the P2 box 1428x401, DPR 2 backs 1904x536; DPR 1.25 and 3 (unmeasured), stage scales and a scale
+    # below the stage skip; fractional stage origins and a letterbox at scale 1 admit; a transparent last backing column,
+    # row or pixel skips at every admitted DPR.
+    "dpr15_fillOpaque": ({"dpr": 1.5, "videoCs": {"objectFit": "fill"}, "vrect": DPR15_BOX, "clip": DPR15_BOX},
+                         dict(FREEZE_ADMIT, holders=[DPR15_FILL[0]], traces=[DPR15_FILL[1]])),
     "dpr15_fillLastColumnTransparent": (
-        {"dpr": 1.5, "videoCs": {"objectFit": "fill"}, "vrect": DPR15_BOX, "clip": DPR15_BOX, "alphaAt": 469, "alphaVal": 0}, FREEZE_SKIP),
+        {"dpr": 1.5, "videoCs": {"objectFit": "fill"}, "vrect": DPR15_BOX, "clip": DPR15_BOX, "alphaAt": 468, "alphaVal": 0}, FREEZE_SKIP),
     "dpr1_lastColumnTransparent": ({"alphaAt": 951, "alphaVal": 0}, dict(FREEZE_SKIP, traces=[DEFAULT_TRACE])),
     "dpr1_lastRowTransparent": ({"alphaAt": 952 * 267, "alphaVal": 0}, dict(FREEZE_SKIP, traces=[DEFAULT_TRACE])),
     "dpr1_lastPixelTransparent": ({"alphaAt": 952 * 268 - 1, "alphaVal": 0}, dict(FREEZE_SKIP, traces=[DEFAULT_TRACE])),
-    "dpr2": ({"dpr": 2}, dict(FREEZE_SKIP, traces=[])),
+    "dpr2": ({"dpr": 2}, dict(FREEZE_ADMIT, holders=[DPR2[0]], traces=[DPR2[1]])),
+    "dpr2_lastPixelTransparent": ({"dpr": 2, "alphaAt": 1904 * 536 - 1, "alphaVal": 0}, dict(FREEZE_SKIP, traces=[DPR2[1]])),
+    "dpr15_p2Box": ({"dpr": 1.5}, dict(FREEZE_ADMIT, holders=[DPR15[0]], traces=[DPR15[1]])),
+    "dpr15_lastPixelTransparent": ({"dpr": 1.5, "alphaAt": 1428 * 401 - 1, "alphaVal": 0}, dict(FREEZE_SKIP, traces=[DPR15[1]])),
+    "dpr125": ({"dpr": 1.25}, dict(FREEZE_SKIP, traces=[])),
+    "dpr3": ({"dpr": 3}, dict(FREEZE_SKIP, traces=[])),
     "stageScale43": ({"scale": 4 / 3, "viewport": [2560, 1440], "stageCs": {"transform": STAGE_43}}, FREEZE_SKIP),
     "stageScale075": ({"scale": 0.75, "off": [240, 135], "stageCs": {"transform": STAGE_075}}, FREEZE_SKIP),
     "stageLetterboxScale1": ({"off": [0, 60], "viewport": [1920, 1200], "stageCs": {"transform": "matrix(1, 0, 0, 1, 0, 0)"}},
                              FREEZE_ADMIT),
-    "stageFractionalOrigin": ({"off": [0, 60.5], "viewport": [1920, 1201]}, FREEZE_SKIP),
-    "stageFractionalOriginX": ({"off": [0.5, 60], "viewport": [1921, 1200]}, dict(FREEZE_SKIP, traces=[])),
+    "stageFractionalOrigin": ({"off": [0, 60.5], "viewport": [1920, 1201]}, dict(FREEZE_ADMIT, traces=[DEFAULT_TRACE])),
+    "stageFractionalOriginX": ({"off": [0.5, 60], "viewport": [1921, 1200]}, dict(FREEZE_ADMIT, traces=[DEFAULT_TRACE])),
     "scaleBelowStage": ({"layerCs": {"transform": "matrix(1.5, 0, 0, 1.5, 0, 0)"}}, FREEZE_SKIP),
     "fractionalTranslation": ({"layerCs": {"transform": "matrix(1, 0, 0, 1, 0.5, 0.25)"}}, dict(FREEZE_ADMIT, traces=[DEFAULT_TRACE])),
     # r9: no tag is exempt by name (rendering state decides), open author shadow roots skip, `kx` = `ky` = 1.
@@ -1841,7 +1853,8 @@ def test_dissolve_real_patched_methods_on_node(tmp_path, sha, case):
         # §8's 134 rows grew with the review controls (viewport, attach, stale slot, append, tone, take index and
         # effect, above-stage, every edge member, refused and ignored tags, decoded size, outside stage, mixed candidates)
         # to 200, then rev 12's 26 r8 rows (exterior proof, top layer, geometry guard, opaque cover) and 8 r9 rows, then
-        # impl r1's 26 (one exterior predicate at a time, the last backing pixel, a fractional x origin).
+        # impl r1's 26 (one exterior predicate at a time, the last backing pixel, a fractional x origin), then rev 13's 5
+        # (DPR 1.25 and 3 skip, DPR 1.5 on the P2 box, the last backing pixel at DPR 1.5 and 2).
         assert len(FREEZE_ROWS) == FREEZE_ROW_COUNT
         assert result.pop("guardControl") == FREEZE_GUARD_CONTROL
         assert result.pop("callSites") == FREEZE_CALL_SITES

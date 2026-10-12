@@ -10,14 +10,14 @@ MM_OPACITY_ENV = "OBED_LIVE_MM_OPACITY"
 # 17c0c938 is e9b2fad4 plus two `,isEvalSupported:!1` PDF.js options, outside every anchor.
 SUPPORTED_PLAYERS = {
     "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354": (
-        "bfeb9377629dd3c61add309381d8f3efdc3eae4ac9ebfe904f98475815a81112",
+        "409a039535ef547bf79c02a68eae6c7eee008b2c95942dd814ca9cef19f9179e",
         "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
-        "a211b1c3d7024a75f044868231c915b28426cb3f6ae90903d705f8fa57814b8c",
+        "53ee23db5773e6579105f82b6d9a084386460d5095f751b3b1cc701af2e0b69a",
     ),
     "17c0c938caa49d5c70bd83bd5b84f57381faa51602932ca733aa965055026d91": (
-        "6c941ac18322257c6824d30ce9050d6215b37ad7ca567bd511be4934b208ac45",
+        "5dd3997ece0fc5ec0900e3ecbccab304307345e8b8af8935a0c268c6a3d442b1",
         "4f9fbffd95e4649543142b2e95586babd9d75f0a0d9a4974e21d6f33c8389e3b",
-        "50231d3cc5961d3e88d7b55ff8f46d7c24d79bbd09f5f34fcddd483d113247d1",
+        "b366bd91d370ef95f5e5827a8e6678e57194c538b756ea97259778af21f74238",
     ),
 }
 _ANCHOR = b"UC=new Eg,UC.displayManager.showWaitingIndicator()"
@@ -116,7 +116,7 @@ _DISSOLVE_METHODS = (
     b'innerHeight],a=G,w,b;a;a=a.parentElement)w=cs(a),"visible"!==w.overflowX&&(vp(a)||"static"!==w.position)'
     b"&&(b=vp(a)?{left:0,top:0,right:innerWidth,bottom:innerHeight}:a.getBoundingClientRect(),V=[Math.max(V[0],b.left),"
     b"Math.max(V[1],b.top),Math.min(V[2],b.right),Math.min(V[3],b.bottom)]);if(!(R.width>0&&R.height>0)"
-    b'||1!==devicePixelRatio||1!==kx||1!==ky||R.left%1||R.top%1||document.querySelector(":modal,:popover-open,'
+    b'||[1,1.5,2].indexOf(devicePixelRatio)<0||1!==kx||1!==ky||document.querySelector(":modal,:popover-open,'
     b':fullscreen")||!Array.prototype.every.call(N,function(n){return!n.shadowRoot&&(pc(n)||!G.contains(n)'
     b'&&!n.contains(G)&&xo(n))}))return;var ad=[];Array.prototype.slice.call(document.querySelectorAll("video")).reverse('
     b").forEach(function(v){try{if(!G.contains(v)||v.readyState<2||!v.videoWidth||!v.videoHeight"
@@ -138,7 +138,8 @@ _DISSOLVE_METHODS = (
     b'&&Array.prototype.some.call(T.getElementsByTagName("*"),function(m){return m!==n&&own(m,cs(m))}))a=0}'
     b'if(i<I)continue;if("VIDEO"===n.tagName){if(ad.indexOf(n)<0)return;continue}w=cs(n);if("CANVAS"!==n.tagName||!bm(w)'
     b'||"fill"!==w.objectFit||!a)return;Y.push([n,o,a])}var p=devicePixelRatio||1,sn=function(z,e,'
-    b"k){return Math.round((z-e)*k)},u0=sn(cx,R.left,kx),v0=sn(cy,R.top,ky),u1=sn(cx+cw,R.left,kx),v1=sn(cy+ch2,R.top,"
+    b"k){return Math.round((z-e)*k*p)/p},"
+    b"u0=sn(cx,R.left,kx),v0=sn(cy,R.top,ky),u1=sn(cx+cw,R.left,kx),v1=sn(cy+ch2,R.top,"
     b"ky),a0=sn(c[0],R.left,kx),b0=sn(c[1],R.top,ky),a1=sn(c[2],R.left,kx),b1=sn(c[3],R.top,ky),"
     b"ww=Math.round((a1-a0)/kx*p),hh=Math.round((b1-b0)/ky*p),dx=(u0-a0)/kx*p,dy=(v0-b0)/ky*p,dw=(u1-u0)/kx*p,"
     b'dh=(v1-v0)/ky*p,x,g,d,j;if(ww<1||hh<1)return;x=document.createElement("canvas");x.width=ww,x.height=hh;'
@@ -299,12 +300,13 @@ def patch_player(player: bytes, *, mm_opacity: bool = True) -> bytes:
     without a `contents` animation to its matched next-slide texture so the settled frame lands on the DOM, cross-fade
     Dissolves and swap cuts without showing both slides, and freeze admitted outgoing movies into the transition.
 
-    A freeze is a snapshot of the decoded frame at identity tone (no pixel writes), drawn on the device-pixel grid of
-    the movie's snapped content box and kept only if every backing pixel is opaque. It is taken only behind the geometry
-    guard (device pixel ratio 1, base layer = slide, integer stage origin, translation-only stage and scene transforms),
-    with no top-layer element and no open shadow root on the page, and when every element passes the paint gate or,
-    outside the stage, is clipped by an HTML `div` proven disjoint from the visible stage. Supported pages create no
-    author shadow roots (a checked invariant), since a closed one cannot be detected; anything else keeps today's look."""
+    A freeze is a snapshot of the decoded frame at identity tone (no pixel writes), drawn into the movie's content box
+    with every edge snapped to the device grid (1/DPR px) and kept only if every backing pixel is opaque. It is taken
+    only behind the geometry guard (device pixel ratio 1, 1.5 or 2, base layer = slide, translation-only stage and scene
+    transforms), with no top-layer element and no open shadow root on the page, and when every element passes the paint
+    gate or, outside the stage, is clipped by an HTML `div` proven disjoint from the visible stage. Supported pages
+    create no author shadow roots (a checked invariant), since a closed one cannot be detected; anything else keeps
+    today's look."""
     pins = SUPPORTED_PLAYERS.get(hashlib.sha256(player).hexdigest())
     if pins is None:
         raise LiveRuntimeUnsupported("This Keynote HTML player version is not supported for live output.")
