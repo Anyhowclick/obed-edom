@@ -214,7 +214,11 @@ independent of continuity and GL replay. `OBED_LIVE_MM_OPACITY=off` serves the
 unpatched player; `auto` keeps it on; any other value refuses to start.
 `off` also restores the export's own Dissolve, cut and movie behaviour: the incoming
 slide pops in under a Dissolve over fill-less textures, a cut shows both slides at
-once, and a playing movie jumps back to the opening frame baked into the outgoing slide.
+once, and a playing movie jumps back to the opening frame baked into the outgoing slide
+(on, it freezes on its current frame and fades with the slide, raw export and Build Preview
+included). Hi-DPI outputs (scale factor ≠ 1) and scaled stages keep that jump until the hi-DPI
+investigation lands, and on GPU compositing the freeze shows a mid-tone step (identity tone, a
+known limit; Q5 open pending the W5 probe; `keynote_live_dissolve_crossfade.plan.md` §3.2, §12).
 `output.mmOpacity` reports `mode` (`on`/`off`) and the served player's `sha256`.
 Build Preview serves the same drawing patch, without the live observation hook. Qualify it with
 `scripts/mm_opacity_probe.py`, `scripts/p2_recovery_html_adversarial.py --mm-opacity auto|off`

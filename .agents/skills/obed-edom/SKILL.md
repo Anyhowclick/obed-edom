@@ -788,8 +788,10 @@ for the parked `iwa-surgical-write-generator` feature.
   external attach), independent of continuity and GL replay. Report: `output.mmOpacity = {mode: on|off, sha256}` (served
   `main.js`); start log `mmOpacityPreference`. `RUNTIME_VERSION` stays 2. Slide transitions
   (D1–D4, `keynote_live_dissolve_crossfade.plan.md`): the same switch gives Dissolve a true cross-fade, a `none` cut a
-  clean swap, and admitted outgoing movies a frozen snapshot of their current frame that fades with the slide; `off`
-  restores the export's pop-in, double slide and jump to the baked opening frame. G2 bytes are unchanged; with the patch on the
+  clean swap, and admitted outgoing movies a frozen snapshot of their current frame that fades with the slide (host
+  page, raw export and Build Preview); `off` restores the export's pop-in, double slide and jump to the baked opening frame.
+  The take is identity-tone (the GPU mid-tone step at the freeze is a known limit; Q5 open pending the W5 probe) and
+  geometry-guarded, so DSF ≠ 1 or a scaled stage keeps today's jump until the hi-DPI investigation lands (plan §3.2, §12). G2 bytes are unchanged; with the patch on the
   P2 fixture reports exactly `opacityUnproven = [{4, "size"}]` (no override: LIVE replays the player's own 0.2947) and
   `occludedBands` 0/128 (patch off: `[]`, 20/128). `frameLen` (settled-frame call count) reads 96 on / 88 off when the
   settle frame carries every uniform write, but the player's uniform cache makes it timing-dependent (headless 85/86 off):
