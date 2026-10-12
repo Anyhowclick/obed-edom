@@ -279,6 +279,12 @@ IDENTITY_LUT = np.arange(256, dtype=np.uint8)
 TONE_LAYOUT = {"ramp": [[400 + 200 * i, 200, 160, 160, 60 + 40 * i] for i in range(4)],
                "patches": [[400 + 200 * i, 370, 160, 160, [200, 40, 40]] for i in range(4)]}
 SHARED_MUTATIONS = ("holder-shift", "edge-step", "tone-step")
+INJECTED = {"caption": {"box": [-60.0, 300.0, 40.0, 20.0], "paint": [-60.0, 300.0, 456.0, 48.0]},
+            "script": {"box": [-60.0, 300.0, 40.0, 20.0], "paint": [-60.0, 300.0, 480.0, 48.0]},
+            "svgclip": {"box": [-300.0, 100.0, 200.0, 200.0], "paint": [-50.0, 130.0, 150.0, 40.0]},
+            "svg": {"paint": [-50.0, 130.0, 150.0, 40.0]}, "shadow-fixed": {"paint": [0.0, 0.0, 640.0, 360.0]},
+            "nav-open": {"box": [0.0, 0.0, 130.0, 360.0]}, "modal": {"open": True, "modal": True},
+            "shadow-modal": {"open": True, "modal": True}}
 
 
 def paint_fg(img: np.ndarray) -> np.ndarray:
@@ -305,6 +311,8 @@ def reference_block(spec: Any, A: np.ndarray, B: np.ndarray, with_holder: np.nda
         images[f"ref-{k}-0"], images[f"ref-{k}-1"] = v, v.copy()
     if mutate == "ref-unstable":
         images["ref-F50-1"][200, 300, 0] ^= 1
+    if mutate == "ref-alias-f50":
+        del images["ref-F50-1"]
     targets = ("layer3-opacity", "layer4-opacity")
     inventory = [{"target": t, "leaf": leaf, "state": "running"} for t, leaf in zip(targets, ("in", "out"))]
     if mutate == "ref-missing-anim":
@@ -319,10 +327,12 @@ def reference_block(spec: Any, A: np.ndarray, B: np.ndarray, with_holder: np.nda
             anims[0]["state"] = "running"
         if label == "F50" and mutate == "ref-ct-off":
             anims[1]["ct"] += 2.0
-        states.append({"label": label, "f": f, "t": 10.0 if mutate == "ref-early" and not k else 300.0 + 100 * k, "dom": not (label == "A0" and mutate == "ref-dom-gone"),
-                       "eff": effs[label], "anims": anims, "shots": [f"ref-{label}-0", f"ref-{label}-1"]})
+        names = [f"ref-{label}-0", f"ref-{label}-0" if label == "F50" and mutate == "ref-alias-f50" else f"ref-{label}-1"]
+        states.append({"label": label, "f": f, "t": 10.0 if mutate == "ref-early" and not k else 300.0 + 100 * k,
+                       "dom": not (label == "A0" and mutate == "ref-dom-gone"), "eff": effs[label], "anims": anims, "shots": names})
     return {"inventory": inventory, "states": states,
-            "perfect": {"shift": spec.shift, "rect": [10, 10, 490, 145], "dom": True, "t": 700.0, "shots": ["ref-perfect-0", "ref-perfect-1"]}}
+            "perfect": {"shift": spec.shift, "rect": [0, 0, 1, 1] if mutate == "perfect-rect-bad" else [10, 10, 490, 145], "dom": True,
+                        "t": 700.0, "shots": ["live-0", "live-1"] if mutate == "ref-alias-perfect" else ["ref-perfect-0", "ref-perfect-1"]}}
 
 
 def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str | None = None, fullstrength: bool = False,
@@ -403,8 +413,10 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         shots.append({"name": name, "t0": float(t0), "t1": float(t0) + 10.0})
     blend, iso = ("plus-lighter", "isolate") if spec.styles == "on" else ("normal", "auto")
     chain = [[{"id": tid, "blend": "normal", "isolation": "auto"}, {"id": leaf, "blend": blend, "isolation": "auto"},
-              {"id": "layer2", "blend": "normal", "isolation": iso}] for tid, leaf in (("IN", "layer3"), ("OUT", "layer4"))]
-    holders = [{"parent": "layer4-opacity", "rect": CONTENT, "canvasRect": CONTENT, "natural": [480, 135]}] if holder else []
+              {"id": f"{leaf}-opacity", "blend": "normal", "isolation": "auto"}, {"id": "layer2", "blend": "normal", "isolation": iso}]
+             for tid, leaf in (("IN", "layer3"), ("OUT", "layer4"))]
+    parent = "layer2" if spec.splice == "hold" else "layer3-opacity" if mutate == "parent-incoming" else "layer4-opacity"
+    holders = [{"parent": parent, "rect": CONTENT, "canvasRect": CONTENT, "natural": [480, 135]}] if holder else []
     if holder:
         images["holder-0"] = holder_px
     pins = live_runtime.SUPPORTED_PLAYERS[STOCK]
@@ -425,6 +437,8 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         record["paused"] = {"state": "presented", "frame": REFERENCE, "id": 0}
     if spec.movies == "tone":
         layout = dict(TONE_LAYOUT)
+        if mutate == "tone-under-fg":
+            layout = {"ramp": [[200, 40, 160, 40, 128]], "patches": [[200, 40, 160, 40, [128, 128, 128]]]}
         if mutate == "tone-small-cells":
             layout["ramp"] = [[x, y, 16 if i else w, 16 if i else h, v] for i, (x, y, w, h, v) in enumerate(TONE_LAYOUT["ramp"])]
         record["movies"] = {"x.mov": {"layout": layout}}
@@ -440,7 +454,7 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         record["foreground"] = {"0": [] if mutate == "mask-empty" else [{"id": "FG", "rect": rect, "alpha": 1.0, "order": 7, "image": "fg-0-0"}]}
         record["reference"] = reference_block(spec, A, B, with_holder, live, mutate, images)
     if spec.inject:
-        record["inject"] = None if mutate == "no-inject" else [-60.0, 900.0, 456.0, 48.0]
+        record["inject"] = None if mutate == "no-inject" else {**INJECTED[spec.inject], **({"open": False} if mutate == "inject-false" else {})}
     if mutate == "no-take":
         record["dump"]["takes"] = []
     if spec.row:
@@ -461,6 +475,13 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
             after[3]["t"] += 40.0
         elif mutate == "cast-few":
             cast = [c for c in cast if c["t"] <= when["show"] + 20 or c in after[:4]]
+        elif mutate == "cast-shift64":
+            for c in after:
+                c["t"] += 64.0
+        elif mutate == "hide-after-del":
+            cast = [c for c in cast if c not in after]
+        elif mutate == "hide-inside-del":
+            cast = [c for c in cast if not when["hide"] <= c["t"] <= when["show"]]
         record["cast"] = cast
     if mutate == "digest":
         record["output"]["mmOpacity"]["sha256"] = "0" * 64
@@ -548,6 +569,19 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         record["dump"]["takes"] = [[INSERT_MS - 1.0, -42.0]]
     elif mutate == "no-action":
         record["actions"] = []
+    elif mutate == "no-decoder-evidence":
+        record["dump"]["vids"][0].update(rv=[], tuple=None)
+    elif mutate == "no-media-inventory":
+        record["dump"]["vids"] = []
+        for r in record["dump"]["raf"]:
+            r["videos"] = []
+    elif mutate in ("dsk-two-holders", "dsk-no-decoder"):
+        record["dump"]["first"]["holders"].append(dict(record["dump"]["first"]["holders"][0]))
+        images["holder-1"] = images["holder-0"].copy()
+        if mutate == "dsk-no-decoder":
+            record["dump"]["vids"] = []
+            for r in record["dump"]["raf"]:
+                r["videos"] = []
     return record, images
 
 
@@ -726,6 +760,18 @@ def cases(prefix: str, variants: tuple[str, ...]) -> dict[str, str]:
     return {v: table[f"case:{prefix}-{v}"]["verdict"] for v in variants}
 
 
+def cef_outcome_of(arm: str, mutate: str) -> str:
+    record, images = media_run(arm, mutate=mutate)
+    return probe.score_arm(record, images, probe.CEF.arm(arm), CAL, profile=probe.CEF)["outcome"]
+
+
+def launch_map(mutate: str | None, drop: bool = False) -> tuple[bool, float | None]:
+    """`launch_lut` from this launch's m-tone session and twin: (found, the map at 128)."""
+    runs = {} if drop else {"m-tone": media_run("m-tone", mutate=mutate), "m-tone-twin": media_run("m-tone-twin", mutate=mutate)}
+    lut, _ = probe.launch_lut(runs, CAL)
+    return lut is not None, None if lut is None else int(lut[128])
+
+
 def no_twin() -> str:
     record, images = media_run("m-snap")
     return probe.score_arm(record, images, probe.ARMS["m-snap"], CAL, lut=IDENTITY_LUT)["outcome"]
@@ -897,7 +943,7 @@ CASES = [
     ("r12 reference scorer cases", lambda: cases("reference", ("valid", "stale", "extra", "unpaused")),
      {"valid": "PASS", "stale": "INCONCLUSIVE", "extra": "INCONCLUSIVE", "unpaused": "INCONCLUSIVE"}),
     ("r12 tone coverage >= 50 %", lambda: arm_check("m-tone", "tone", identity=False), "PASS"),
-    ("r12 tone coverage < 50 %", lambda: arm_check("m-tone", "tone", identity=False, mutate="tone-small-cells"), "INCONCLUSIVE"),
+    ("r12 tone coverage < 50 %", lambda: arm_outcome("m-tone", mutate="tone-small-cells"), "INCONCLUSIVE"),
     ("r12 m-tone identity complete", lambda: tone_identity(None), "MATCH"),
     ("r12 hide row: correct capture", lambda: lifecycle("hide"), "MATCH"),
     ("r12 hide control: stock twin dark while hidden, content after show", lambda: (hide_check("life-hide-twin", "hidden"), hide_check("life-hide-twin", "shown")),
@@ -924,6 +970,29 @@ CASES = [
     ("r12 CEF: m-snap holder pixels blocking, read after their controls", lambda: round_gate(None, "holder_pixels", profile=probe.CEF), "PASS"),
     ("r12 CEF: m-snap-frac passing invalidates the holder-pixel gate",
      lambda: round_gate(("m-snap-frac", "holder_pixels", "PASS"), "holder_pixels", profile=probe.CEF), "INCONCLUSIVE"),
+    ("r12-1 m-snap without decoder rVFC and colour tuple", lambda: arm_outcome("m-snap", mutate="no-decoder-evidence"), "INCONCLUSIVE"),
+    ("r12-1 m-snap-frac (1 px off) without decoder evidence", lambda: arm_outcome("m-snap-frac", mutate="no-decoder-evidence"), "INCONCLUSIVE"),
+    ("r12-1 m-raw-caption without decoder or video inventories", lambda: arm_outcome("m-raw-caption", holder=False, mutate="no-media-inventory"), "INCONCLUSIVE"),
+    ("r12-1 m-geo-scale without decoder or video inventories", lambda: arm_outcome("m-geo-scale", holder=False, mutate="no-media-inventory"), "INCONCLUSIVE"),
+    ("r12-1 CEF m-dsk78: two holders, no decoder observations", lambda: cef_outcome_of("m-dsk78", "dsk-no-decoder"), "INCONCLUSIVE"),
+    ("r12-1 CEF m-dsk78: two holders bound to one decoder", lambda: cef_outcome_of("m-dsk78", "dsk-two-holders"), "INCONCLUSIVE"),
+    ("r12-2 life-hide-nohide without after-show frames", lambda: hide_check("life-hide-nohide", "hidden", mutate="hide-after-del"), "INCONCLUSIVE"),
+    ("r12-2 life-hide-noshow without hidden-interval frames", lambda: hide_check("life-hide-noshow", "shown", mutate="hide-inside-del"), "INCONCLUSIVE"),
+    ("r12-3 tone cells wholly under the verified mask", lambda: arm_check("m-tone", "tone", identity=False, mutate="tone-under-fg"), "INCONCLUSIVE"),
+    ("r12-4 F50 pair aliased to one capture", lambda: arm_outcome("m-snap", mutate="ref-alias-f50"), "INCONCLUSIVE"),
+    ("r12-4 perfect pair aliased to S_live", lambda: arm_outcome("m-snap", mutate="ref-alias-perfect"), "INCONCLUSIVE"),
+    ("r12-4 perfect-shift with an unbound perfect rect", lambda: arm_outcome("perfect-shift", mutate="perfect-rect-bad"), "INCONCLUSIVE"),
+    ("r12-5 life-hide with every after-show timestamp +64 ms", lambda: lifecycle("hide", mutate="cast-shift64"), "INCONCLUSIVE"),
+    ("r12-5 hide twin control with every after-show timestamp +64 ms", lambda: hide_check("life-hide-twin", "shown", mutate="cast-shift64"), "INCONCLUSIVE"),
+    ("r12-6 m-raw-svgclip holder in the incoming wrapper", lambda: arm_outcome("m-raw-svgclip", mutate="parent-incoming"), "INCONCLUSIVE"),
+    ("r12-7 m-raw-modal whose dialog did not open", lambda: arm_outcome("m-raw-modal", holder=False, mutate="inject-false"), "INCONCLUSIVE"),
+    ("r12-8 m-tone identity with < 50 % tone coverage", lambda: tone_identity("tone-small-cells"), "INCONCLUSIVE"),
+    ("r12-9 DX-2 L_path measured in the launch (tone step -> 139 at 128) / identity / no m-tone session",
+     lambda: (launch_map("tone-step"), launch_map(None), launch_map(None, drop=True)), ((True, 139), (True, 128), (False, None))),
+    ("r12-9 DX-2 holder pixels without a launch map", lambda: probe.score_runs({"m-snap": media_run("m-snap", mutate="tone-step"),
+                                                                              "m-snap-twin": media_run("m-snap-twin", mutate="tone-step")},
+                                                                             {"lPath": {"gpu": "analytic"}}, CAL, profile=probe.CEF)
+     ["detail"]["m-snap"]["checks"]["holder_pixels"]["verdict"], "INCONCLUSIVE"),
     ("r12 round: perfect-shift passing invalidates the reference gate", lambda: round_gate(("perfect-shift", "reference", "PASS"), "reference"), "INCONCLUSIVE"),
 ]
 

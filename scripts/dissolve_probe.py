@@ -164,33 +164,37 @@ _SVG_PATH = ("var N='http://www.w3.org/2000/svg',s=document.createElementNS(N,'s
              "p.setAttribute('transform','translate(250 50)');")
 _SHADOW_HOST = ("var h=document.createElement('div');h.style.cssText='position:absolute;left:-400px;top:0;width:10px;height:10px';"
                 "document.body.appendChild(h);var r=h.attachShadow({mode:'open'});")
+_RANGE = "var g=document.createRange();g.selectNodeContents(d);var p=g.getBoundingClientRect(),b=d.getBoundingClientRect();"
+_BOXES = "return {box:[b.left,b.top,b.width,b.height],paint:[p.left,p.top,p.width,p.height]}"
 RAW_INJECTIONS = {
     "caption": "(function(){var d=document.createElement('div');d.style.cssText='position:absolute;left:-60px;top:900px;width:40px;"
                "height:20px;overflow:visible;white-space:nowrap;color:#fff;font-size:40px';d.textContent='OVERFLOWING-CAPTION';"
-               "document.body.appendChild(d);var r=d.getBoundingClientRect();return [r.left,r.top,r.width,r.height]})()",
+               "document.body.appendChild(d);" + _RANGE + _BOXES + "})()",
     "nav-open": "(function(){var s=document.querySelector('.navigatorThumbnailSidebar');if(!s)return null;s.style.transition='none';"
-                "s.style.left='0px';var r=s.getBoundingClientRect();return [r.left,r.top,r.width,r.height]})()",
+                "s.style.left='0px';var b=s.getBoundingClientRect();return {box:[b.left,b.top,b.width,b.height]}})()",
     "modal": "(function(){var d=document.createElement('dialog');d.style.cssText='position:fixed;left:-400px;top:0;margin:0;width:200px;"
              "height:100px;overflow:hidden';d.textContent='modal';document.body.appendChild(d);d.showModal();"
-             "return document.querySelector(':modal')===d?[d.open]:null})()",
+             "return {open:d.open,modal:document.querySelector(':modal')===d}})()",
     "svg": "(function(){" + _SVG_PATH + "s.setAttribute('style','position:absolute;left:-300px;top:400px;width:200px;height:200px;"
            "overflow:visible;visibility:hidden');var g=document.createElementNS(N,'g');g.setAttribute('style','display:block;"
            "position:relative;overflow:hidden;visibility:visible');g.appendChild(p);s.appendChild(g);document.body.appendChild(s);"
-           "var r=p.getBoundingClientRect();return [r.left,r.top,r.width,r.height]})()",
+           "var r=p.getBoundingClientRect();return {paint:[r.left,r.top,r.width,r.height]}})()",
     "svgclip": "(function(){" + _SVG_PATH + "var w=document.createElement('div');w.style.cssText='position:absolute;left:-300px;"
                "top:400px;width:200px;height:200px;overflow:hidden';s.setAttribute('style','overflow:visible');s.setAttribute('width',"
                "'200');s.setAttribute('height','200');s.appendChild(p);w.appendChild(s);document.body.appendChild(w);"
-               "var r=w.getBoundingClientRect();return [r.left,r.top,r.width,r.height]})()",
-    "script": "(function(){var s=document.createElement('script');s.type='application/json';s.style.cssText='display:block;"
+               "var b=w.getBoundingClientRect(),r=p.getBoundingClientRect();"
+               "return {box:[b.left,b.top,b.width,b.height],paint:[r.left,r.top,r.width,r.height]}})()",
+    "script": "(function(){var d=document.createElement('script');d.type='application/json';d.style.cssText='display:block;"
               "position:absolute;left:-60px;top:900px;width:40px;height:20px;white-space:nowrap;color:#fff;font-size:40px';"
-              "s.textContent='OVERFLOWING-SCRIPT-TEXT';document.body.appendChild(s);var r=s.getBoundingClientRect();"
-              "return [r.left,r.top,r.width,r.height]})()",
+              "d.textContent='OVERFLOWING-SCRIPT-TEXT';document.body.appendChild(d);" + _RANGE + _BOXES + "})()",
     "shadow-modal": "(function(){" + _SHADOW_HOST + "r.innerHTML='<style>dialog::backdrop{background:rgba(255,0,0,.5)}</style>"
-                    "<dialog>m</dialog>';var d=r.querySelector('dialog');d.showModal();return [d.open]})()",
+                    "<dialog>m</dialog>';var d=r.querySelector('dialog');d.showModal();return {open:d.open,modal:d.matches(':modal')}})()",
     "shadow-fixed": "(function(){" + _SHADOW_HOST + "r.innerHTML='<div style=\"position:fixed;left:0;top:0;width:100vw;height:100vh;"
                     "background:rgba(0,255,0,.4)\"></div>';var b=r.firstElementChild.getBoundingClientRect();"
-                    "return [b.left,b.top,b.width,b.height]})()",
+                    "return {paint:[b.left,b.top,b.width,b.height]}})()",
 }
+"""Each returns the evidence `injection_problems` checks: the box outside the viewport and the paint reaching into it
+(caption, script, svgclip's witness), the sidebar at x 0, the open modal dialog, the painted overlay or stroke."""
 
 CUT_ANIMATION = {"additive": False, "timeOffset": 0, "beginTime": 0, "from": {"scalar": False}, "repeatCount": 0,
                  "fillMode": "both", "duration": 0.001, "autoreverses": False, "property": "hidden", "to": {"scalar": True},
@@ -226,6 +230,7 @@ class Arm:
     drop: str | None = None
     shift: int = 0
     inject: str | None = None
+    decoders: int = 1
 
 
 def viewport_of(arm: Arm) -> tuple[int, int]:
@@ -311,7 +316,7 @@ ARMS: dict[str, Arm] = {
     "m-raw-svgclip": Arm(**_ENGAGE, page="raw", holders=1, inject="svgclip", expect={"exterior": "PASS"}),
     **{f"m-raw-{n}": Arm(**_ENGAGE, page="raw", inject=n, expect={"exterior": "FAIL"})
        for n in ("caption", "nav-open", "modal", "svg", "script", "shadow-modal", "shadow-fixed")},
-    "m-dsk78": Arm("dsk", 7, movies="h264", capture="engage", holders=2, expect={"cost": "PASS", "geometry": "PASS"}),
+    "m-dsk78": Arm("dsk", 7, movies="h264", capture="engage", holders=2, decoders=2, expect={"cost": "PASS", "geometry": "PASS"}),
     "m-bridge-off": Arm("p2", 4, mode="off", movies="player", continuity="auto", capture="media", classes=("out",), bridge=True,
                         styles="none", expect={"overlay": "FAIL"}),
     "m-bridge": Arm("p2", 4, movies="player", continuity="auto", capture="media", classes=("out",), bridge=True,
@@ -1657,9 +1662,10 @@ def score_perfect(perfect: np.ndarray | None, live: np.ndarray | None, box: tupl
 
 def reference_problems(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Arm, ev: Any,
                        cal: Calibration = Calibration()) -> list[str]:
-    """Reference-capture profile integrity (§9.1): exact inventory, paused states read back as requested, stable pairs,
-    A0/F50/B pairwise different where A and B differ, |F50 − (A0 + B)/2| ≤ `REF_MODEL_TOL`, the transition DOM present
-    at every capture, `perfect` stable and drawn with the arm's shift, in capture order."""
+    """Reference-capture profile integrity (§9.1): exact inventory, paused states read back as requested, stable pairs
+    under their own ids (`ref-<state>-<0|1>`, the images scoring reads), A0/F50/B pairwise different where A and B differ,
+    |F50 − (A0 + B)/2| ≤ `REF_MODEL_TOL`, the transition DOM present at every capture, `perfect` stable, drawn with the
+    arm's shift onto exactly the holder canvas's device box, all after the advance and in capture order."""
     ref = record.get("reference")
     if not isinstance(ref, dict):
         return ["no reference capture"]
@@ -1680,8 +1686,11 @@ def reference_problems(record: dict[str, Any], images: Mapping[str, np.ndarray],
     for s in [*states, {**perfect, "label": "perfect"}]:
         label = s["label"]
         names = s.get("shots") or []
+        if names != [f"ref-{label}-0", f"ref-{label}-1"]:
+            problems.append(f"{label}: capture ids {names} are not its own two")
+            continue
         pair = [images.get(n) for n in names]
-        if len(pair) != 2 or any(p is None or p.shape != (*shape, 4) for p in pair):
+        if any(p is None or p.shape != (*shape, 4) for p in pair):
             problems.append(f"{label}: two full-device screenshots required")
             continue
         if not np.array_equal(pair[0], pair[1]):
@@ -1706,8 +1715,12 @@ def reference_problems(record: dict[str, Any], images: Mapping[str, np.ndarray],
     times = [record.get("advanceAt"), *(s.get("t") for s in [*states, perfect])]
     if not all(number(t) for t in times) or any(b <= a for a, b in zip(times, times[1:])):
         problems.append("reference captures untimed, before the advance or out of order")
-    if perfect.get("shift") != arm.shift or not quad(perfect.get("rect")):
-        problems.append(f"perfect drawn with shift {perfect.get('shift')} (arm {arm.shift}) or without its canvas rect")
+    holders = ((record.get("dump") or {}).get("first") or {}).get("holders") or []
+    canvas = device_box(holders[0]["canvasRect"], arm.dsf) if holders and quad(holders[0].get("canvasRect")) else None
+    rect = perfect.get("rect")
+    if (perfect.get("shift") != arm.shift or canvas is None or not quad(rect) or tuple(rect) != canvas
+            or not (0 <= canvas[0] < canvas[2] <= shape[1] and 0 <= canvas[1] < canvas[3] <= shape[0])):
+        problems.append(f"perfect drawn with shift {perfect.get('shift')} (arm {arm.shift}) at {rect}, not the holder canvas {canvas}")
     if {"F50", "B", "A0"} <= set(shots):
         if ev.A is None or ev.B is None or ev.A.shape[:2] != shape:
             problems.append("no textures to qualify the reference states")
@@ -1724,27 +1737,33 @@ def reference_problems(record: dict[str, Any], images: Mapping[str, np.ndarray],
     return problems
 
 
-def score_engaged(record: dict[str, Any], ev: Any) -> dict[str, Any]:
-    """Exterior gate / geometry guard: a published take and the transition DOM are required (else INCONCLUSIVE); then
-    PASS if every holder binds to one decoder inside a transition `layer<id>-opacity` wrapper, FAIL if there is none."""
+def engage_problems(record: dict[str, Any], ev: Any) -> list[str]:
+    """Engagement completeness (shared): exactly one take published inside [advance, transition DOM], the transition DOM
+    present, a holder list recorded."""
     insert = next((r["t"] for r in ev.raf if r.get("eff") is not None), None)
-    take = score_cost((record.get("dump") or {}).get("takes") or [], record.get("advanceAt"), insert)
-    problems = list(take["problems"])
+    problems = list(score_cost((record.get("dump") or {}).get("takes") or [], record.get("advanceAt"), insert)["problems"])
     if insert is None:
         problems.append("no transition DOM")
-    first = (record.get("dump") or {}).get("first") or {}
-    holders = first.get("holders")
-    if not isinstance(holders, list):
+    if not isinstance(((record.get("dump") or {}).get("first") or {}).get("holders"), list):
         problems.append("holder list missing")
+    return problems
+
+
+def score_engaged(record: dict[str, Any], ev: Any, arm: Arm) -> dict[str, Any]:
+    """Exterior gate / geometry guard: INCONCLUSIVE unless `engage_problems` holds; FAIL with no holder; PASS when every
+    holder sits under `holder_parent` and binds to its own decoder."""
+    problems = engage_problems(record, ev)
     if problems:
         return result(None, problems)
+    first = (record.get("dump") or {}).get("first") or {}
+    holders = first["holders"]
     if not holders:
         return result(False, holders=0)
-    ids = first.get("layerIds") or []
-    wrong = [h.get("parent") for h in holders if not (re.fullmatch(r"layer\d+-opacity", str(h.get("parent"))) and h["parent"] in ids)]
+    parent = holder_parent(first, arm)
     bound, bind = bind_holders(holders, [d for d in decoders_of(record) if d.get("region")])
-    if wrong or bind:
-        return result(None, ([f"holders outside a transition wrapper: {wrong}"] if wrong else []) + bind)
+    ids = [str(d.get("id")) for _, d in bound]
+    if parent is None or any(h.get("parent") != parent for h in holders) or bind or len(set(ids)) != len(holders):
+        return result(None, [f"holders {[h.get('parent') for h in holders]} not each bound under {parent}"] + bind)
     return result(True, holders=len(bound))
 
 
@@ -1752,55 +1771,79 @@ def dark(image: np.ndarray, screen: bool) -> bool:
     return float(image[..., :3].max() if screen else image[..., 3].max()) <= DARK_MAX
 
 
+HIDE_PROGRESS_TOL = 0.02
+
+
+def image_progress(F: np.ndarray, A: np.ndarray, B: np.ndarray, keep: np.ndarray, *, screen: bool) -> float:
+    """Progress read from the pixels: on the out-only class (B transparent) both stock and patch show (1 − e)·A, so
+    e = 1 − <F, A> / <A, A> (premultiplied; screen pages RGB over black). NaN with fewer than `MIN_CLASS_PX` px."""
+    out = texture_classes(A, B)["out"] & keep
+    if int(out.sum()) < MIN_CLASS_PX:
+        return math.nan
+    Ap = premul(A)[out][:, :3 if screen else 4]
+    Fp = (F[..., :3].astype(np.float32) if screen else premul(F))[out][:, :3 if screen else 4]
+    den = float((Ap * Ap).sum())
+    return 1 - float((Fp * Ap).sum()) / den if den else math.nan
+
+
 def score_hide(cast: list[dict[str, Any]], actions: Mapping[str, float], raf: list[dict[str, Any]], *, screen: bool,
                A: np.ndarray | None = None, B: np.ndarray | None = None, exclude: list[Iterable[float]] = (),
                cal: Calibration = Calibration()) -> tuple[dict[str, dict[str, Any]], list[str]]:
-    """Hide/show rows from timestamped screencast frames ({t, img}). Integrity: CDP times strictly increasing, each within
-    one rAF interval of a rAF record. `hidden`: every frame wholly inside [hide, show] dark (α / RGB ≤ `DARK_MAX`);
-    `shown`: ≥ 6 timestamped after-show frames with rAF progress in (0.05, 0.95) — all dark is FAIL (no content), all
-    content (distinct) is PASS; `after_show`: the model ≤ τ on those frames. Mixed or duplicated content is INCONCLUSIVE."""
-    times = [float(r["t"]) for r in raf]
+    """Hide/show rows from timestamped screencast frames ({t, img}). Capture integrity, returned as shared problems:
+    CDP times strictly increasing, each within one rAF interval of a rAF record, and every content frame's pixel
+    progress (`image_progress`) inside the rAF progress over [t − 1, t + 1] rAF intervals (± `HIDE_PROGRESS_TOL`);
+    ≥ 1 frame wholly inside [hide, show]; ≥ 6 after-show frames with rAF progress in (0.05, 0.95), all dark or all
+    distinct content. Then `hidden`: those inside frames dark (α / RGB ≤ `DARK_MAX`); `shown`: content after show
+    (all dark = FAIL); `after_show`: the model ≤ τ on the after-show frames."""
     problems = []
+    times = [float(r["t"]) for r in raf]
     ts = [c.get("t") for c in cast]
+    hide, show = actions.get("hide"), actions.get("show")
     if not cast or not all(number(t) for t in ts) or any(b <= a for a, b in zip(ts, ts[1:])):
         problems.append("screencast timestamps missing, non-finite, duplicated or out of order")
     elif not times or any(min(abs(t - r) for r in times) > RAF_SLACK_MS for t in ts):
         problems.append("a screencast timestamp is not within one rAF interval of a rAF record")
-    hide, show = actions.get("hide"), actions.get("show")
     if not number(hide) or not number(show) or show <= hide:
         problems.append("hide/show times missing")
+    if A is None or B is None or A.shape != B.shape:
+        problems.append("no textures to read screencast progress")
     if problems:
         return {k: result(None, problems) for k in ("hidden", "shown", "after_show")}, problems
-    out: dict[str, dict[str, Any]] = {}
+    keep = ~rect_mask(A.shape[:2], exclude, MEDIA_PAD_PX)
+
+    def window(t: float) -> list[float]:
+        return [1 - e[1] for r in raf if abs(float(r["t"]) - t) <= RAF_SLACK_MS for e in [leaf_effs(r)] if e is not None]
+
+    for c in cast:
+        span = window(c["t"])
+        if span and not dark(c["img"], screen):
+            e = image_progress(c["img"], A, B, keep, screen=screen)
+            if not number(e) or not min(span) - HIDE_PROGRESS_TOL <= e <= max(span) + HIDE_PROGRESS_TOL:
+                problems.append(f"screencast frame at {c['t']:.1f} shows progress {e:.3f}, rAF log {min(span):.3f}..{max(span):.3f}")
+                break
     inside = [c for c in cast if hide + RAF_SLACK_MS <= c["t"] <= show]
-    out["hidden"] = result(all(dark(c["img"], screen) for c in inside), [] if inside else ["no screencast frame inside the hidden interval"],
-                           frames=len(inside))
+    if not inside:
+        problems.append("no screencast frame inside the hidden interval")
+    def mid(t: float) -> bool:
+        span = window(t)
+        return bool(span) and MID_E[0] < sum(span) / len(span) < MID_E[1]
 
-    def progress(t: float) -> float | None:
-        r = min(raf, key=lambda r: abs(float(r["t"]) - t))
-        eff = leaf_effs(r)
-        return None if eff is None else 1 - eff[1]
-
-    after = [c for c in cast if c["t"] >= show + RAF_SLACK_MS and number(progress(c["t"])) and MID_E[0] < progress(c["t"]) < MID_E[1]]
+    after = [c for c in cast if c["t"] >= show + RAF_SLACK_MS and mid(c["t"])]
     blank = [dark(c["img"], screen) for c in after]
     hashes = [hashlib.sha256(np.ascontiguousarray(c["img"]).tobytes()).hexdigest() for c in after]
     if len(after) < COVERAGE["afterShow"]:
-        bad = [f"{len(after)} timestamped after-show mid frames < {COVERAGE['afterShow']}"]
+        problems.append(f"{len(after)} timestamped after-show mid frames < {COVERAGE['afterShow']}")
     elif any(blank) and not all(blank):
-        bad = ["after-show frames mix dark and content"]
+        problems.append("after-show frames mix dark and content")
     elif not any(blank) and len(set(hashes)) != len(hashes):
-        bad = ["duplicate after-show frame"]
-    else:
-        bad = []
-    out["shown"] = result(not all(blank), bad, frames=len(after))
-    if bad:
-        out["after_show"] = result(None, bad)
-    elif all(blank):
+        problems.append("duplicate after-show frame")
+    if problems:
+        return {k: result(None, problems) for k in ("hidden", "shown", "after_show")}, problems
+    out = {"hidden": result(all(dark(c["img"], screen) for c in inside), frames=len(inside)),
+           "shown": result(not all(blank), frames=len(after))}
+    if all(blank):
         out["after_show"] = result(False, frames=len(after))
-    elif A is None or B is None:
-        out["after_show"] = result(None, ["no textures"])
     else:
-        keep = ~rect_mask(A.shape[:2], exclude, MEDIA_PAD_PX)
         fits = [fit_frame(c["img"], A, B, keep, screen=screen) for c in after]
         if not all(number(e) and number(r) for e, r in fits):
             out["after_show"] = result(None, ["an after-show frame has no finite fit"])
@@ -2072,6 +2115,36 @@ def raf_problems(raf: Any) -> list[str]:
 PAUSED = ("paused", "reference")
 
 
+def injection_problems(name: str, value: Any, viewport: tuple[int, int]) -> list[str]:
+    """The injection's own evidence that it took effect (`RAW_INJECTIONS`): a border box wholly left of the viewport whose
+    paint reaches into it (caption, script; the SVG witness box), the sidebar slid to x 0, an open modal dialog, an
+    overlay or stroke painting inside the viewport."""
+    if not isinstance(value, dict):
+        return [f"injection {name} did not apply: {value!r}"]
+
+    def rect(key: str) -> list[float] | None:
+        r = value.get(key)
+        return r if box_ok(r) and r[2] > 0 and r[3] > 0 else None
+
+    def off_left(key: str) -> bool:
+        r = rect(key)
+        return r is not None and r[0] + r[2] <= 0
+
+    def in_view(key: str) -> bool:
+        r = rect(key)
+        return r is not None and overlaps(r, [0, 0, *viewport])
+
+    ok = {"caption": lambda: off_left("box") and in_view("paint"),
+          "script": lambda: off_left("box") and in_view("paint"),
+          "svgclip": lambda: off_left("box") and in_view("paint"),
+          "svg": lambda: in_view("paint"),
+          "shadow-fixed": lambda: in_view("paint"),
+          "nav-open": lambda: rect("box") is not None and abs(value["box"][0]) < 0.5,
+          "modal": lambda: value.get("open") is True and value.get("modal") is True,
+          "shadow-modal": lambda: value.get("open") is True and value.get("modal") is True}[name]()
+    return [] if ok else [f"injection {name} evidence does not show it took effect: {value!r}"]
+
+
 def capture_problems(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Arm, profile: Profile = DX1,
                      cal: Calibration = Calibration()) -> list[str]:
     """Capture integrity (§9.1): any violation makes every check of the arm INCONCLUSIVE."""
@@ -2154,9 +2227,8 @@ def capture_problems(record: dict[str, Any], images: Mapping[str, np.ndarray], a
     dropped = {a.get("name") for a in record.get("actions") or [] if isinstance(a, dict) and a.get("dropped")}
     if dropped != ({arm.drop} if arm.drop else set()):
         problems.append(f"dropped actions {sorted(map(str, dropped))} != the arm's {arm.drop!r}")
-    inject = record.get("inject")
-    if arm.inject and (not isinstance(inject, list) or not inject or not all(isinstance(v, bool) or number(v) for v in inject)):
-        problems.append(f"injection {arm.inject} did not apply: {inject!r}")
+    if arm.inject:
+        problems += injection_problems(arm.inject, record.get("inject"), viewport_of(arm))
     if arm.capture == "reference":
         problems += reference_problems(record, images, arm, evidence(record, images, arm.dsf), cal)
     return problems
@@ -2231,65 +2303,97 @@ def pre_detach(decoder: dict[str, Any]) -> list[list[float]]:
     return [r for r in rv if r[0] <= detach]
 
 
+def holder_parent(first: dict[str, Any], arm: Arm) -> str | None:
+    """Where the arm's holders belong, from the textures' ancestry (`chain` = [incoming, outgoing]): the one
+    `layer<id>-opacity` wrapper above the outgoing texture only; for the `hold` splice, the nearest common `layer<id>`."""
+    chain = first.get("chain")
+    if not isinstance(chain, list) or len(chain) != 2 or not all(isinstance(c, list) for c in chain):
+        return None
+    ids = [[str(n.get("id")) for n in c if isinstance(n, dict)] for c in chain]
+    if "hold" in (arm.splice or "").split("+"):
+        hits = [i for i in ids[1] if re.fullmatch(r"layer\d+", i) and i in ids[0]][:1]
+    else:
+        hits = [i for i in ids[1] if re.fullmatch(r"layer\d+-opacity", i) and i not in ids[0]]
+    return hits[0] if len(hits) == 1 else None
+
+
+def media_arm(arm: Arm) -> bool:
+    """Arms whose movie evidence is shared integrity whatever checks they carry (§9.1 media evidence)."""
+    return arm.capture in ("media", "paused", "reference", "engage") or bool(set(MEDIA_CHECKS) & set(arm.expect))
+
+
+MEDIA_CHECKS = ("frozen_frame", "frozen_region", "foreground", "tone", "overlay")
+
+
 def media_integrity(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Arm,
                     es: list[float]) -> tuple[dict[str, Any] | None, int | None, list[str]]:
-    """Shared media evidence (§9.1): holder pixels and binding, decoder colour tuple and geometry, the last pre-detach
-    rVFC record (= the reference; a paused arm's requested frame must equal it), playback before a patch-off advance
-    and, on timed captures, >= 3 demixable frames. Returns (decoder, reference, problems); any problem voids every media check."""
+    """Shared media evidence (§9.1) for every outgoing movie: a patch-on arm with holders binds each to a distinct decoder
+    (`arm.holders` of them) under `holder_parent`, its strip decoding at device scale; otherwise exactly
+    `arm.decoders` detached decoders. Each decoder: colour tuple, geometry, foreground inventory, the last pre-detach rVFC
+    record (= the reference; a paused arm's requested frame must equal it), detach inside [advance, transition DOM],
+    playback before a patch-off advance; timed captures add >= 3 demixable frames. Returns (first decoder, its reference,
+    problems); any problem voids every media check and the arm."""
     first = (record.get("dump") or {}).get("first") or {}
     holders = first.get("holders") or []
     decoders = [d for d in decoders_of(record) if d.get("region")]
     outgoing = [d for d in decoders if d.get("detach") is not None]
     problems: list[str] = []
     needs_holder = arm.mode == "on" and bool(arm.holders)
-    decoder = None
-    if arm.mode == "off" or not needs_holder:
+    pairs: list[tuple[int | None, dict[str, Any]]] = []
+    if not needs_holder:
         if arm.mode == "off" and holders:
             problems.append("a holder on the patch-off arm")
-        if len(outgoing) != 1:
-            problems.append(f"{len(outgoing)} detached decoders (need exactly one)")
-        decoder = outgoing[0] if len(outgoing) == 1 else None
+        if len(outgoing) != arm.decoders:
+            problems.append(f"{len(outgoing)} detached decoders (need exactly {arm.decoders})")
+        else:
+            pairs = [(None, d) for d in outgoing]
     else:
         bound, bind_problems = bind_holders(holders, decoders)
         problems += bind_problems
-        if not holders:
-            problems.append("no bound D4 holder")
-        decoder = bound[0][1] if bound and not bind_problems else None
-    reference = None
-    if decoder is None:
+        ids = [d.get("id") for _, d in bound]
+        if len(holders) != arm.holders or len(bound) != arm.holders or len(set(map(str, ids))) != len(ids):
+            problems.append(f"{len(set(map(str, ids)))} distinct bound decoders for {len(holders)} holders (need {arm.holders})")
+        parent = holder_parent(first, arm)
+        if parent is None or any(h.get("parent") != parent for h in holders):
+            problems.append(f"holders {[h.get('parent') for h in holders]} not all in {parent} (from the outgoing texture's ancestry)")
+        if not problems:
+            pairs = list(bound)
+    if not pairs:
         problems.append("no decoder for the outgoing movie")
-    else:
+    reference = None
+    insert = next((r["t"] for r in (record.get("dump") or {}).get("raf") or [] if isinstance(r, dict) and "eff" in r), None)
+    advance = record.get("advanceAt")
+    foreground = record.get("foreground") if isinstance(record.get("foreground"), dict) else {}
+    for k, (index, decoder) in enumerate(pairs):
         if not isinstance(decoder.get("tuple"), str) or not COLOUR_TUPLE.fullmatch(decoder["tuple"]):
             problems.append(f"decoder colour tuple missing or malformed: {decoder.get('tuple')!r} (an error is not a tuple)")
-        inventory = (record.get("foreground") or {}).get(str(decoder.get("id"))) if isinstance(record.get("foreground"), dict) else None
-        if not isinstance(inventory, list) or not all(isinstance(c, dict) and isinstance(c.get("id"), str)
-                                                     and len(c.get("rect") or []) == 4 and all(number(v) for v in c["rect"]) for c in inventory):
+        inventory = foreground.get(str(decoder.get("id")))
+        if not isinstance(inventory, list) or not all(fg_canvas_ok(c) for c in inventory):
             problems.append("no well-formed foreground inventory for the bound decoder")
         content, size = decoder.get("content") or [], decoder.get("size") or []
         if len(content) != 4 or len(size) != 2 or not all(number(v) for v in [*content, *size]) or size[0] <= 0:
             problems.append("decoder geometry malformed")
-        elif needs_holder:
-            img = images.get("holder-0")
-            if img is None or not holders or holder_strip(img, holders[0], decoder, arm.dsf) is None:
+        elif index is not None:
+            img = images.get(f"holder-{index}")
+            if img is None or holder_strip(img, holders[index], decoder, arm.dsf) is None:
                 problems.append("holder pixels missing or the holder strip does not decode at its device scale")
-        before = pre_detach(decoder)
-        insert = next((r["t"] for r in (record.get("dump") or {}).get("raf") or [] if isinstance(r, dict) and "eff" in r), None)
-        advance = record.get("advanceAt")
         if not (number(advance) and number(insert) and number(decoder.get("detach")) and advance <= decoder["detach"] <= insert):
             problems.append(f"detach {decoder.get('detach')} not inside [advance {advance}, transition DOM {insert}]")
+        before = pre_detach(decoder)
         if not before:
             problems.append("no well-formed, ordered rVFC record before the detach")
         else:
-            reference = round(before[-1][1] * FPS)
+            if k == 0:
+                reference = round(before[-1][1] * FPS)
             if arm.mode == "off" and before[-1][2] < MIN_PRESENTED:
                 problems.append(f"fewer than {MIN_PRESENTED} presented frames before the advance")
     if arm.capture in PAUSED:
         requested = (record.get("paused") or {}).get("frame")
         if reference is None or requested != reference:
             problems.append(f"paused reference {reference} != requested frame {requested}")
-    if arm.capture != "reference" and demixable(es)[1] < DEMIX_MIN_FRAMES:
+    if arm.capture not in ("reference", "engage") and demixable(es)[1] < DEMIX_MIN_FRAMES:
         problems.append(f"fewer than {DEMIX_MIN_FRAMES} demixable frames pairwise >= {DEMIX_SPREAD} apart")
-    return decoder, reference, problems
+    return (pairs[0][1] if pairs else None), reference, list(dict.fromkeys(problems))
 
 
 def _voided(res: dict[str, Any], problems: list[str]) -> dict[str, Any]:
@@ -2300,7 +2404,7 @@ def score_media(record: dict[str, Any], images: Mapping[str, np.ndarray], ev: Ev
                 cal: Calibration, *, identity: bool | None, mask: np.ndarray | None = None) -> tuple[dict[str, dict[str, Any]], list[str]]:
     """Frozen frame, frozen region, foreground, tone and overlay (DX-M), each void unless `media_integrity` holds; the
     shared media-integrity problems are returned too, so they reach the arm even when every media check is report-only.
-    Tone reads the exposed cells outside the verified production `mask`."""
+    Tone reads the exposed cells outside the verified production `mask`; its coverage rule is shared integrity."""
     es = [r["e"] for r in fade["rows"]]
     decoder, reference, problems = media_integrity(record, images, arm, es)
     idx, _ = demixable(es)
@@ -2345,24 +2449,26 @@ def score_media(record: dict[str, Any], images: Mapping[str, np.ndarray], ev: Ev
     shape = live.shape[:2]
     later = [c for cs in (record.get("foreground") or {}).values() for c in cs if len(c.get("rect") or []) == 4]
     fg_rects = [c["rect"] for c in later if c.get("id") in (*FOREGROUND_TEXTURES, FOREGROUND_SQUARE)]
-    mask = block_mask(shape, origin, scale) & rect_mask(shape, fg_rects)
+    fg_mask = block_mask(shape, origin, scale) & rect_mask(shape, fg_rects)
     pair = [r for r in fg_rects if any(overlaps(r, q) for q in fg_rects if q is not r)]
-    fg = score_foreground([ev.holders[0], *[straight(o) for o in demixed]], live, mask, cal)
-    if not (rect_mask(shape, pair) & mask).any():
+    fg = score_foreground([ev.holders[0], *[straight(o) for o in demixed]], live, fg_mask, cal)
+    if not (rect_mask(shape, pair) & fg_mask).any():
         fg = result(None, ["foreground layers do not overlap over the counter blocks"] + fg["problems"])
     out["foreground"] = _voided(fg, problems)
     layout = next(iter((record.get("movies") or {}).values()), {}).get("layout") or {}
-    exposed, coverage = tone_coverage(layout, shape, origin, scale, mask)
     live2 = images.get("live-1")
-    if identity is None:
-        tone = result(None, ["no Q0b decision record"])
-    elif mask is None:
+    if mask is None:
         tone = result(None, ["no verified production mask"])
-    elif live2 is None:
-        tone = result(None, ["no second S_live"])
     else:
-        tone = score_tone(ev.holders[0], live, live2, exposed, identity=identity)
-        tone = {**tone, "problems": coverage + tone["problems"], "verdict": "INCONCLUSIVE" if coverage else tone["verdict"]}
+        exposed, coverage = tone_coverage(layout, shape, origin, scale, mask)
+        if "tone" in arm.expect:
+            problems = problems + coverage
+        if identity is None:
+            tone = result(None, ["no Q0b decision record"])
+        elif live2 is None:
+            tone = result(None, ["no second S_live"])
+        else:
+            tone = score_tone(ev.holders[0], live, live2, exposed, identity=identity)
     out["tone"] = _voided(tone, problems)
     return out, problems
 
@@ -2414,7 +2520,8 @@ def verified_mask(record: dict[str, Any], images: Mapping[str, np.ndarray], arm:
         return None, (["no twin to verify the production mask"] if {"holder_pixels", "tone", "mask"} & set(arm.expect) else [])
     if twin is None:
         return None, [f"twin {arm.twin} missing"]
-    problems = [f"twin: {p}" for p in capture_problems(twin[0], twin[1], ARMS[arm.twin], profile, cal)]
+    spec = ARMS[arm.twin]
+    problems = [f"twin: {p}" for p in capture_problems(twin[0], twin[1], spec, profile, cal) + media_integrity(twin[0], twin[1], spec, [])[2]]
     shape = device_shape(arm)
     holders = ((record.get("dump") or {}).get("first") or {}).get("holders") or []
     bound, bind = bind_holders(holders[:1], [d for d in decoders_of(record) if d.get("region")])
@@ -2440,6 +2547,10 @@ def _score_arm(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Ar
     else:
         fade = {"problems": ["no textures"] if timed else [], "rows": [], "checks": {}}
     problems += fade["problems"] if arm.capture != "cut" else [p for p in fade["problems"] if p.startswith("class ")]
+    if media_arm(arm):
+        problems += media_integrity(record, images, arm, [r["e"] for r in fade["rows"]])[2]
+    if arm.capture == "engage":
+        problems += engage_problems(record, ev)
     mask, mask_problems = verified_mask(record, images, arm, profile, cal, twin)
     problems += mask_problems
     for name in ("model", "complement", "no_dip", "screen"):
@@ -2479,14 +2590,15 @@ def _score_arm(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Ar
         checks["mask"] = result(mask is not None, [] if mask is not None else ["production mask not verified"])
     for name in ("geometry", "exterior"):
         if name in arm.expect:
-            checks[name] = score_engaged(record, ev)
-    if {"frozen_frame", "frozen_region", "foreground", "tone", "overlay"} & set(arm.expect):
+            checks[name] = score_engaged(record, ev, arm)
+    if set(MEDIA_CHECKS) & set(arm.expect):
         media, shared = score_media(record, images, ev, arm, fade, cal, identity=identity, mask=mask)
         checks.update({k: v for k, v in media.items() if k in arm.expect})
         problems += [p for p in shared if p not in problems]
     if "cost" in arm.expect:
         insert = next((r["t"] for r in ev.raf if r.get("eff") is not None), None)
         checks["cost"] = score_cost((record.get("dump") or {}).get("takes") or [], record.get("advanceAt"), insert)
+    problems = list(dict.fromkeys(problems))
     checks = {k: v for k, v in checks.items() if k in arm.expect}
     for name, expected in arm.expect.items():
         if expected == "N/A":
@@ -2693,7 +2805,8 @@ def _reference_case(variant: str, cal: Calibration) -> dict[str, Any]:
                           "dur": 1500.0} for t in targets]} for k, (label, f) in enumerate(REF_STATES)]
     record = {"reference": {"inventory": inventory, "states": states,
                             "perfect": {"shift": 0, "rect": [0, 0, 12, 8], "dom": True, "t": 50.0, "shots": ["ref-perfect-0", "ref-perfect-1"]}},
-              "dump": {"first": {"layerIds": ["layer2", *targets]}}, "advanceAt": 1.0}
+              "dump": {"first": {"layerIds": ["layer2", *targets], "holders": [{"rect": [0, 0, 12, 8], "canvasRect": [0, 0, 12, 8]}]}},
+              "advanceAt": 1.0}
     return result(True, reference_problems(record, images, arm, SimpleNamespace(A=A, B=B), cal))
 
 
@@ -2720,20 +2833,23 @@ def _holder_shift_case(cal: Calibration) -> dict[str, Any]:
 
 
 def _hide_case(variant: str) -> dict[str, Any]:
-    """rAFs and screencast frames every 40 ms, progress 0.06..0.94; hide at 40, show at 120: dark frames between,
-    distinct content after; a duplicated last frame, or one frame's timestamp 20 ms off its rAF."""
+    """A 50x50 outgoing-only world (A opaque, B transparent), rAFs and screencast frames every 40 ms, progress
+    0.06..0.94, frames at α = (1 − e)·255; hide at 40, show at 120: dark between; a duplicated last frame, or one
+    frame's timestamp 20 ms off its rAF."""
+    A = np.zeros((50, 50, 4), np.uint8)
+    A[...] = (200, 40, 30, 255)
+    B = np.zeros_like(A)
     raf = [{"t": 40.0 * k, "eff": [0.06 + 0.044 * k, 0.94 - 0.044 * k], "anims": []} for k in range(21)]
     cast = []
     for k in range(1, 20):
-        img = np.zeros((4, 4, 4), np.uint8)
-        if not 40 < 40 * k <= 120:
-            img[...] = (k * 10, 50, 50, 255)
+        img = A.copy()
+        img[..., 3] = 0 if 40 < 40 * k <= 120 else round((0.94 - 0.044 * k) * 255)
         cast.append({"t": 40.0 * k, "img": img})
     if variant == "duplicate":
         cast[-1]["img"] = cast[-2]["img"].copy()
     if variant == "shift":
         cast[8]["t"] += 20.0
-    checks, _ = score_hide(cast, {"hide": 40.0, "show": 120.0}, raf, screen=False)
+    checks, _ = score_hide(cast, {"hide": 40.0, "show": 120.0}, raf, screen=False, A=A, B=B)
     parts = [checks["hidden"], checks["shown"]]
     return result(all(c["verdict"] == "PASS" for c in parts), [p for c in parts for p in c["problems"]])
 
@@ -3308,10 +3424,46 @@ def path_lut(decision: dict[str, Any] | None, gpu: bool) -> np.ndarray | None:
     return None
 
 
+def launch_lut(runs: Mapping[str, tuple[dict[str, Any], Mapping[str, np.ndarray]]], cal: Calibration = Calibration(),
+               profile: Profile = CEF) -> tuple[np.ndarray | None, dict[str, Any]]:
+    """`L_path` measured in this launch (§9.2): the `m-tone` session's holder (the `drawImage` snapshot) against its
+    `S_live` (the compositor) on the verified exposed tone cells, through `build_lut`; the session must be complete,
+    its mask verified against `m-tone-twin` and its coverage met. None, with the reasons, otherwise."""
+    arm = profile.arm("m-tone")
+    detail: dict[str, Any] = {"source": "m-tone (this launch)", "kind": None, "samples": 0, "problems": []}
+    if "m-tone" not in runs:
+        detail["problems"] = ["no m-tone session in this launch"]
+        return None, detail
+    record, images = runs["m-tone"]
+    try:
+        decoder, _, problems = media_integrity(record, images, arm, [])
+        problems = capture_problems(record, images, arm, profile, cal) + problems
+        mask, verify = verified_mask(record, images, arm, profile, cal, runs.get(arm.twin or ""))
+        problems += verify
+        ev = evidence(record, images, arm.dsf)
+        if not problems and mask is not None and decoder is not None and ev.holders:
+            cx, cy, cw, _ = decoder["content"]
+            layout = next(iter((record.get("movies") or {}).values()), {}).get("layout") or {}
+            exposed, coverage = tone_coverage(layout, mask.shape, (cx, cy), cw / decoder["size"][0], mask)
+            problems += coverage
+            if not coverage:
+                table = build_lut(ev.holders[0][exposed][:, :3], images["live-0"][exposed][:, :3])
+                detail.update(kind=table["kind"], samples=int(exposed.sum()))
+                if table["kind"] in ("analytic", "table"):
+                    return np.asarray(table["table"], np.uint8), detail
+                problems += table.get("problems") or [f"measured map is {table['kind']}"]
+        elif not problems:
+            problems.append("no verified mask, decoder or holder")
+    except MALFORMED as exc:
+        problems = [f"malformed record: {type(exc).__name__}: {exc}"]
+    detail["problems"] = problems
+    return None, detail
+
+
 def score_runs(runs: dict[str, tuple[dict[str, Any], Mapping[str, np.ndarray]]], decision: dict[str, Any] | None = None,
                cal: Calibration = Calibration(), *, profile: Profile = DX1, lut: np.ndarray | None = None) -> dict[str, Any]:
-    """Score every run the profile names (DX-1 here; DX-2 passes `CEF` and its launch's measured `lut`; otherwise
-    `L_path` comes from the decision record) and the round."""
+    """Score every run the profile names (DX-1 here; DX-2 passes `CEF` and `launch_lut`'s map) and the round. DX-1 reads
+    `L_path` from the decision record; DX-2 never falls back to it (no launch map -> holder pixels INCONCLUSIVE)."""
     identity = None if not decision or "L" not in decision else decision["L"] == "identity"
     required = set(profile.required(identity))
     scored = {}
@@ -3326,7 +3478,7 @@ def score_runs(runs: dict[str, tuple[dict[str, Any], Mapping[str, np.ndarray]]],
         else:
             scored[name] = score_arm(record, images, arm, cal, identity=identity, profile=profile,
                                      twin=runs.get(arm.twin) if arm.twin else None,
-                                     lut=lut if lut is not None else path_lut(decision, arm.gpu))
+                                     lut=lut if lut is not None else path_lut(decision, arm.gpu) if profile.headless else None)
     extra = {}
     if "on" in scored and "on2" in scored:
         extra["cvc"] = score_cvc(scored["on"]["midResiduals"], scored["on2"]["midResiduals"])

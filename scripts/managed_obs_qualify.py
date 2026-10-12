@@ -1535,7 +1535,9 @@ def dissolve_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dict
           f"n <= 4: tau <= {DX2_TAU_MAX}, complement <= {DX2_COMPLEMENT_MAX}, no dip >= {DX2_NO_DIP_MIN}")
     runs = {name: (json.loads((Path(s["runDir"]) / "record.json").read_text()), dissolve_probe.RunImages(Path(s["runDir"])))
             for name, s in sessions.items() if s.get("runDir") and (Path(s["runDir"]) / "record.json").is_file()}
-    verdict = dissolve_probe.score_runs(runs, decision, cal or dissolve_probe.Calibration(), profile=dissolve_probe.CEF)
+    lut, lpath = dissolve_probe.launch_lut(runs, cal or dissolve_probe.Calibration())
+    check(checks, "L_path: this launch's measured map (m-tone holder vs source)", lpath, lut is not None, "analytic or table")
+    verdict = dissolve_probe.score_runs(runs, decision, cal or dissolve_probe.Calibration(), profile=dissolve_probe.CEF, lut=lut)
     for name, g in verdict["gates"].items():
         reported = g["verdict"] in ("REPORTED", "N/A")
         check(checks, name, [g["verdict"], g.get("reasons") or g.get("problems")], g["verdict"] == "PASS" or reported, "PASS",
@@ -1545,7 +1547,7 @@ def dissolve_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dict
     reasons = ([] if cal else [f"calibration: opaque-off n {calibration['n']}"]) + (
         ["round INCONCLUSIVE"] if verdict["overall"] == "INCONCLUSIVE" else [])
     invalid = f"DX-2 INCONCLUSIVE: {'; '.join(reasons)}" if reasons else None
-    return {"DX-2": gate(checks, invalid), "dissolveCalibration": calibration, "dissolveVerdict": verdict}
+    return {"DX-2": gate(checks, invalid), "dissolveCalibration": calibration, "dissolveLPath": lpath, "dissolveVerdict": verdict}
 
 
 def mmo_summary(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
