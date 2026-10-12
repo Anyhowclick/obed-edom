@@ -25,6 +25,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+from PIL import Image
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
@@ -287,6 +288,17 @@ INJECTED = {"caption": {"box": [-60.0, 300.0, 40.0, 20.0], "paint": [-60.0, 300.
             "shadow-modal": {"open": True, "modal": True}}
 
 
+TEXTURE_RECTS = ((65.0, 12.0, 40.0, 10.0), (86.0, 14.0, 40.0, 10.0))
+
+
+def paint_textures(img: np.ndarray) -> np.ndarray:
+    """`m-fg`'s two opaque texture layers, overlapping each other over the counter blocks (later one on top)."""
+    out = img.copy()
+    for (x, y, w, h), rgb in zip(TEXTURE_RECTS, ((230, 20, 20), (250, 160, 0))):
+        out[int(y):int(y + h), int(x):int(x + w)] = (*rgb, 255)
+    return out
+
+
 def paint_fg(img: np.ndarray) -> np.ndarray:
     """The redrawn foreground canvas (opaque light grey) over the movie at `FG_RECT`."""
     out = img.copy()
@@ -295,22 +307,28 @@ def paint_fg(img: np.ndarray) -> np.ndarray:
 
 
 def reference_block(spec: Any, A: np.ndarray, B: np.ndarray, with_holder: np.ndarray, live: np.ndarray, mutate: str | None,
-                    images: dict[str, np.ndarray]) -> dict[str, Any]:
+                    images: dict[str, np.ndarray], box: tuple[int, int, int, int]) -> dict[str, Any]:
     """The paused, seeked reference capture (F50, B, A0 and `perfect`, two shots each) in the driver's shape."""
     pictures = {"F50": mix(with_holder, B, 0.5), "B": mix(with_holder, B, 0.9995), "A0": with_holder.copy()}
     if mutate == "ref-stale":
         pictures["F50"] = pictures["A0"].copy()
+    x0, y0, x1, y1 = box
     perfect = with_holder.copy()
-    crop = live[10:145, 10:490]
+    crop = live[y0:y1, x0:x1]
     if spec.shift:
-        perfect[10:145, 11:490], perfect[10:145, 10] = crop[:, :-1], A[10:145, 10]
+        perfect[y0:y1, x0 + 1:x1], perfect[y0:y1, x0] = crop[:, :-1], A[y0:y1, x0]
     else:
-        perfect[10:145, 10:490] = crop
+        perfect[y0:y1, x0:x1] = crop
     pictures["perfect"] = perfect
     for k, v in pictures.items():
         images[f"ref-{k}-0"], images[f"ref-{k}-1"] = v, v.copy()
     if mutate == "ref-unstable":
         images["ref-F50-1"][200, 300, 0] ^= 1
+    if mutate == "ref-stale-patch":
+        for k, dv in (("F50", 10), ("B", 20)):
+            images[f"ref-{k}-0"] = images["ref-A0-0"].copy()
+            images[f"ref-{k}-0"][200:210, 100:110, 0] -= dv
+            images[f"ref-{k}-1"] = images[f"ref-{k}-0"].copy()
     if mutate == "ref-alias-f50":
         del images["ref-F50-1"]
     targets = ("layer3-opacity", "layer4-opacity")
@@ -330,8 +348,10 @@ def reference_block(spec: Any, A: np.ndarray, B: np.ndarray, with_holder: np.nda
         names = [f"ref-{label}-0", f"ref-{label}-0" if label == "F50" and mutate == "ref-alias-f50" else f"ref-{label}-1"]
         states.append({"label": label, "f": f, "t": 10.0 if mutate == "ref-early" and not k else 300.0 + 100 * k,
                        "dom": not (label == "A0" and mutate == "ref-dom-gone"), "eff": effs[label], "anims": anims, "shots": names})
-    return {"inventory": inventory, "states": states,
-            "perfect": {"shift": spec.shift, "rect": [0, 0, 1, 1] if mutate == "perfect-rect-bad" else [10, 10, 490, 145], "dom": True,
+    timers = None if mutate == "timers-missing" else {"minMs": probe.TIMER_MIN_MS, "extraMs": probe.TIMER_EXTRA_MS,
+                                                      "delayedMs": [] if mutate == "timers-none" else [DURATION_MS]}
+    return {"inventory": inventory, "states": states, **({"timers": timers} if timers else {}),
+            "perfect": {"shift": spec.shift, "rect": [0, 0, 1, 1] if mutate == "perfect-rect-bad" else list(box), "dom": True,
                         "t": 700.0, "shots": ["live-0", "live-1"] if mutate == "ref-alias-perfect" else ["ref-perfect-0", "ref-perfect-1"]}}
 
 
@@ -343,33 +363,63 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
     A, B = textures()
     spec = probe.ARMS[arm]
     reference = spec.capture == "reference"
+    k, dy = spec.dsf, spec.letterbox / 2
+    vh, vw = probe.device_shape(spec)
+    top = probe.jround(dy * k)
+
+    def dev(img: np.ndarray) -> np.ndarray:
+        """CSS world -> device screen: nearest-neighbour by the DSF, below the letterbox's top rows."""
+        if k == 1 and not dy:
+            return img
+        up = np.asarray(Image.fromarray(img).resize((round(W * k), round(H * k)), Image.NEAREST))
+        out = np.zeros((vh, vw, 4), np.uint8)
+        out[top:top + up.shape[0]] = up[:vh - top]
+        return out
+
+    right = 310.37 if "clipx" in spec.overrides else 490.0
+    bottom = 90.37 if "clipy" in spec.overrides else 145.0
+    box = (probe.jround(10 * k), probe.jround((10 + dy) * k), probe.jround(right * k), probe.jround((bottom + dy) * k))
+    x0, y0, x1, y1 = box
+    in_box = np.zeros((vh, vw, 1), bool)
+    in_box[y0:y1, x0:x1] = True
+    content = [10.0, 10.0 + dy, 480.0, 135.0]
+    region = [10.0, 10.0 + dy, right - 10, bottom - 10]
+    css_box = [10.0, 10.0 + dy, (x1 - x0) / k, (y1 - y0) / k]
     frame = strip_frame(REFERENCE, bw=bw)
     placed = probe.place(frame, CONTENT, CONTENT, (H, W))
     movie = placed.copy()
     if mutate == "holder-shift":
         movie[10:145, 11:490] = placed[10:145, 10:489]
-    live_placed, holder_placed = (paint_fg(placed), movie if "fg-omit" in (spec.splice or "") else paint_fg(movie)) if reference else (placed, movie)
-    holder_px = holder_placed[10:145, 10:490].copy()
+    omit = "fg-omit" in (spec.splice or "")
+    if reference:
+        live_placed, holder_placed = paint_fg(placed), movie if omit else paint_fg(movie)
+    elif "fg" in spec.overrides:
+        live_placed, holder_placed = paint_textures(placed), movie if omit else paint_textures(movie)
+    else:
+        live_placed, holder_placed = placed, movie
+    A_d, B_d = dev(A), dev(B)
+    holder_px = dev(holder_placed)[y0:y1, x0:x1].copy()
     if mutate == "edge-step":
         holder_px[:, 0, :3] = np.clip(holder_px[:, 0, :3].astype(int) + 8, 0, 255)
-    holder_full = np.zeros_like(placed)
-    holder_full[10:145, 10:490] = holder_px
-    with_holder = probe.over(holder_full, A) if holder else A
-    live = probe.over(live_placed, A) if holder else A
+    holder_full = np.zeros_like(A_d)
+    holder_full[y0:y1, x0:x1] = holder_px
+    with_holder = probe.over(holder_full, A_d) if holder else A_d
+    live = probe.over(np.where(in_box, dev(live_placed), 0).astype(np.uint8), A_d) if holder else A_d
+    movie_d = np.where(in_box, dev(placed), 0).astype(np.uint8)
     if mutate == "tone-step":
-        region = np.zeros((H, W), bool)
-        region[10:145, 10:490] = True
-        region[20:30, 60:100] = False
+        toned = in_box[..., 0].copy()
+        fx0, fy0 = x0 + probe.jround(50 * k), y0 + probe.jround(10 * k)
+        toned[fy0:fy0 + round(10 * k), fx0:fx0 + round(40 * k)] = False
         live = live.copy()
-        live[..., :3][region] = probe.analytic_lut()[live[..., :3][region]]
+        live[..., :3][toned] = probe.analytic_lut()[live[..., :3][toned]]
     raf, shots, images = [], [], {"tex-in": B, "tex-out": A, "live-0": live, "live-1": live.copy()}
     for t in np.arange(0.0, 1900.0, 16.0):
         present = INSERT_MS <= t < INSERT_MS + DURATION_MS
         e = probe.ease_in_out((t - INSERT_MS) / DURATION_MS)
         video = {"id": 0, "on": not t >= INSERT_MS}
         if video["on"]:
-            video.update(rect=CONTENT, eff=1.0, inT=False, inStage=True, paused=False,
-                         geo={"content": CONTENT, "region": CONTENT, "size": [binary.WIDTH, binary.HEIGHT]})
+            video.update(rect=list(content), eff=1.0, inT=False, inStage=True, paused=False,
+                         geo={"content": list(content), "region": list(region), "size": [binary.WIDTH, binary.HEIGHT]})
         rec = {"t": float(t), "hash": "#5", "scene": 5, "videos": [video]}
         if (mutate == "stale-take" and t < INSERT_MS) or (mutate == "takes-dup" and t >= INSERT_MS):
             rec["take"] = 22.0
@@ -396,17 +446,17 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
 
     step = 60.0 if hiding else 110.0
     times = [10.0, 40.0, 70.0] + list(np.arange(120.0, 1590.0, step)) + [1650.0, 1700.0, 1750.0]
-    for k, t0 in enumerate([] if reference else times):
-        name = f"shot-{k:03d}"
+    for n, t0 in enumerate([] if reference else times):
+        name = f"shot-{n:03d}"
         if t0 < INSERT_MS:
             img = with_holder
         elif t0 >= INSERT_MS + DURATION_MS:
-            img = B
+            img = B_d
         else:
             e = probe.ease_in_out((t0 + 5 - INSERT_MS) / DURATION_MS)
-            img = probe.over(placed, mix(A, B, e)) if arm == "m-hold" or fullstrength else mix(with_holder, B, e)
+            img = probe.over(movie_d, mix(A_d, B_d, e)) if arm == "m-hold" or fullstrength else mix(with_holder, B_d, e)
             if mutate in ("delay-42", "delay-99") and t0 + 10 < INSERT_MS + 500:
-                img = probe.over(probe.place(strip_frame(99), CONTENT, CONTENT, (H, W)), A) if mutate == "delay-99" and k == 4 else with_holder
+                img = probe.over(dev(probe.place(strip_frame(99), CONTENT, CONTENT, (H, W))), A_d) if mutate == "delay-99" and n == 4 else with_holder
             if dark_at(t0, t0 + 10):
                 img = np.zeros_like(img)
         images[name] = img
@@ -416,14 +466,17 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
               {"id": f"{leaf}-opacity", "blend": "normal", "isolation": "auto"}, {"id": "layer2", "blend": "normal", "isolation": iso}]
              for tid, leaf in (("IN", "layer3"), ("OUT", "layer4"))]
     parent = "layer2" if spec.splice == "hold" else "layer3-opacity" if mutate == "parent-incoming" else "layer4-opacity"
-    holders = [{"parent": parent, "rect": CONTENT, "canvasRect": CONTENT, "natural": [480, 135]}] if holder else []
+    holders = [{"parent": parent, "rect": list(css_box), "canvasRect": list(css_box), "natural": [x1 - x0, y1 - y0]}] if holder else []
     if holder:
         images["holder-0"] = holder_px
     pins = live_runtime.SUPPORTED_PLAYERS[STOCK]
     expected = pins[0 if spec.mode == "on" else 1] if spec.splice is None else "f" * 64
     rv = [[INSERT_MS - 1 - (presented - i) * 33.0, (REFERENCE - presented + i) / binary.FPS, i] for i in range(1, presented + 1)]
     record = {
-        "arm": arm, "page": spec.page, "load": 0.5, "headlessBefore": 0, "stage": {"x": 0, "y": 0, "width": W, "height": H},
+        "arm": arm, "page": spec.page, "load": 0.5, "headlessBefore": 0, "stage": probe.stage_of(spec), "dsf": k,
+        "viewport": list(probe.viewport_of(spec)),
+        **({"launch": {"chromeArgs": ["--headless=new", f"--force-device-scale-factor={k:g}"],
+                       "metricsOverride": {"deviceScaleFactor": k} if mutate == "dsf-emulated" else None}} if k != 1 else {}),
         "target": {"textures": ["IN", "OUT"], "hashBefore": "#5", "hashAfter": "#7"},
         "served": {"mode": spec.mode, "splice": spec.splice, "stockSha256": STOCK, "expected": expected},
         "output": {"mmOpacity": {"sha256": expected}}, "hashBefore": "#5", "hashAfter": "#7", "shots": shots, "advanceAt": 50.0,
@@ -442,33 +495,39 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         if mutate == "tone-small-cells":
             layout["ramp"] = [[x, y, 16 if i else w, 16 if i else h, v] for i, (x, y, w, h, v) in enumerate(TONE_LAYOUT["ramp"])]
         record["movies"] = {"x.mov": {"layout": layout}}
+    if "fg" in spec.overrides:
+        record["foreground"] = {"0": []}
+        for j, (tid, r) in enumerate(zip(probe.FOREGROUND_TEXTURES, TEXTURE_RECTS)):
+            images[f"fg-0-{j}"] = np.full((int(r[3]), int(r[2]), 4), 255, np.uint8)
+            record["foreground"]["0"].append({"id": tid, "rect": [r[0], r[1] + dy, r[2], r[3]], "alpha": 1.0, "order": 5 + j, "image": f"fg-0-{j}"})
     if reference:
         rect, size = (FG_RECT, (10, 40))
         if mutate == "mask-whole":
             rect, size = [40.0, 15.0, 100.0, 30.0], (30, 100)
         elif mutate == "mask-shift3":
             rect = [FG_RECT[0] + 3, *FG_RECT[1:]]
+        rect = [rect[0], rect[1] + dy, rect[2], rect[3]]
         fg = np.zeros((*size, 4), np.uint8)
         fg[...] = (240, 240, 240, 255)
         images["fg-0-0"] = fg
         record["foreground"] = {"0": [] if mutate == "mask-empty" else [{"id": "FG", "rect": rect, "alpha": 1.0, "order": 7, "image": "fg-0-0"}]}
-        record["reference"] = reference_block(spec, A, B, with_holder, live, mutate, images)
+        record["reference"] = reference_block(spec, A_d, B_d, with_holder, live, mutate, images, box)
     if spec.inject:
         record["inject"] = None if mutate == "no-inject" else {**INJECTED[spec.inject], **({"open": False} if mutate == "inject-false" else {}),
                                                                **({"box": [0.0, 10000.0, 130.0, 360.0]} if mutate == "nav-offscreen" else {})}
     if mutate == "no-take":
         record["dump"]["takes"] = []
     if spec.row:
-        images["settled"] = B
+        images["settled"] = B_d
         record.update(residue={"layers": 0, "rules": 0, "holders": 0},
                       actions=[{"name": n, "t": t, **({"dropped": True} if n == spec.drop and mutate != "drop-flag-del" else {})}
                                for t, n in acts])
     if hiding:
         cast = []
-        for k, t in enumerate(np.arange(INSERT_MS, INSERT_MS + DURATION_MS, 32.0)):
+        for n, t in enumerate(np.arange(INSERT_MS, INSERT_MS + DURATION_MS, 32.0)):
             e = probe.ease_in_out((t - INSERT_MS) / DURATION_MS)
-            images[f"cast-{k:03d}"] = np.zeros((H, W, 4), np.uint8) if dark_at(t, t) else mix(with_holder, B, e)
-            cast.append({"name": f"cast-{k:03d}", "t": float(t)})
+            images[f"cast-{n:03d}"] = np.zeros((vh, vw, 4), np.uint8) if dark_at(t, t) else mix(with_holder, B_d, e)
+            cast.append({"name": f"cast-{n:03d}", "t": float(t)})
         after = [c for c in cast if c["t"] > when["show"] + 20]
         if mutate == "cast-dup":
             images[after[3]["name"]] = images[after[2]["name"]].copy()
@@ -570,8 +629,16 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         record["dump"]["takes"] = [[INSERT_MS - 1.0, -42.0]]
     elif mutate == "no-action":
         record["actions"] = []
+    elif mutate == "dsf-mismatch":
+        record["dsf"] = 1.0
+    elif mutate == "viewport-mismatch":
+        record["viewport"] = [W, H]
+    elif mutate == "dsf-missing":
+        del record["dsf"]
     elif mutate == "tex-zero":
         images["tex-in"], images["tex-out"] = np.zeros_like(B), np.zeros_like(A)
+    elif mutate == "tex-in-short":
+        images["tex-in"] = B[:-1].copy()
     elif mutate == "tex-in-opaque":
         images["tex-in"] = B.copy()
         images["tex-in"][..., 3] = 255
@@ -778,6 +845,14 @@ def launch_map(mutate: str | None, drop: bool = False) -> tuple[bool, float | No
     return lut is not None, None if lut is None else int(lut[128])
 
 
+def stale_patch_blank_in() -> str:
+    """Astra impl r3: F50/B are copies of A0 but for a 10x10 patch (red -10 / -20) where incoming = outgoing; the main
+    incoming texture is blank."""
+    record, images = media_run("m-snap", mutate="ref-stale-patch")
+    images["tex-in"] = np.zeros_like(images["tex-in"])
+    return probe.score_arm(record, images, probe.ARMS["m-snap"], CAL, twin=media_run("m-snap-twin"), lut=IDENTITY_LUT)["outcome"]
+
+
 def no_twin() -> str:
     record, images = media_run("m-snap")
     return probe.score_arm(record, images, probe.ARMS["m-snap"], CAL, lut=IDENTITY_LUT)["outcome"]
@@ -969,8 +1044,8 @@ CASES = [
     ("r12 geometry guard: bound holder", lambda: arm_check("m-snap", "geometry"), "PASS"),
     ("r12 geometry guard: published take without a holder", lambda: arm_check("m-geo-scale", "geometry", holder=False), "FAIL"),
     ("r12 geometry guard: no published take", lambda: arm_check("m-geo-base", "geometry", holder=False, mutate="no-take"), "INCONCLUSIVE"),
-    ("r12 letterboxed stage and DSF-2 device shape", lambda: (probe.stage_of(probe.ARMS["m-snap-lb"]), probe.device_shape(probe.ARMS["m-geo-dsf2"])),
-     ({"x": 0.0, "y": 60.0, "width": 1920.0, "height": 1080.0}, (720, 1280))),
+    ("r13 fractional-letterbox stage and DSF-2 device shape", lambda: (probe.stage_of(probe.ARMS["m-snap-lbfrac"]), probe.device_shape(probe.ARMS["m-snap-dpr2"])),
+     ({"x": 0.0, "y": 60.5, "width": 640.0, "height": 360.0}, (720, 1280))),
     ("r12 round: a dropped-action control passing invalidates its gate", lambda: round_gate(("life-hide-nohide", "hidden", "PASS"), "hidden"), "INCONCLUSIVE"),
     ("sweep r12: a dropped-action control recorded as performed", lambda: hide_check("life-hide-nohide", "hidden", mutate="drop-flag-del"), "INCONCLUSIVE"),
     ("r12 CEF: m-snap holder pixels blocking, read after their controls", lambda: round_gate(None, "holder_pixels", profile=probe.CEF), "PASS"),
@@ -1003,6 +1078,22 @@ CASES = [
     ("r12b-2 m-raw-caption with zeroed textures", lambda: arm_outcome("m-raw-caption", holder=False, mutate="tex-zero"), "INCONCLUSIVE"),
     ("r12b-2 m-geo-scale with zeroed textures", lambda: arm_outcome("m-geo-scale", holder=False, mutate="tex-zero"), "INCONCLUSIVE"),
     ("r12b-2 m-snap and twin with an opaque incoming texture (no out-only class)", lambda: arm_outcome("m-snap", mutate="tex-in-opaque"), "INCONCLUSIVE"),
+    ("r12c-1 stale F50/B under a blank incoming texture (Astra impl r3)", stale_patch_blank_in, "INCONCLUSIVE"),
+    ("r12c-1 stale F50/B with the real incoming texture", lambda: arm_outcome("m-snap", mutate="ref-stale-patch"), "INCONCLUSIVE"),
+    *[(f"r13 {n}: engagement, holder pixels, perfect, mask", lambda n=n: arm_outcome(n), "MATCH") for n in probe.SNAPS],
+    *[(f"r13 {n}-frac: displaced edge FAILs holder pixels", lambda n=n: arm_outcome(f"{n}-frac", mutate="holder-shift"), "MATCH")
+      for n in probe.SNAPS],
+    ("r13 m-geo-dpr125 publishes a take without a holder", lambda: arm_outcome("m-geo-dpr125", holder=False), "MATCH"),
+    *[(f"r13 {n}: foreground preserved (blocking)", lambda n=n: arm_outcome(n), "MATCH") for n in ("m-fg", "m-fg-dsf15", "m-fg-dsf2")],
+    ("r13 recorded DSF differs from the arm", lambda: arm_outcome("m-snap-dpr2", mutate="dsf-mismatch"), "INCONCLUSIVE"),
+    ("r13 recorded viewport differs from the arm", lambda: arm_outcome("m-snap-lbfrac", mutate="viewport-mismatch"), "INCONCLUSIVE"),
+    ("r13 DSF not recorded", lambda: arm_outcome("m-fg-dsf15", mutate="dsf-missing"), "INCONCLUSIVE"),
+    ("r13 DPR 2 by CDP emulation, not the launch flag", lambda: arm_outcome("m-snap-dpr2", mutate="dsf-emulated"), "INCONCLUSIVE"),
+    ("r13 reference capture without held-back player timers", lambda: arm_outcome("m-snap-dpr2", mutate="timers-missing"), "INCONCLUSIVE"),
+    ("sweep r13: reference capture whose timer hold caught no player timer", lambda: arm_outcome("m-snap", mutate="timers-none"), "INCONCLUSIVE"),
+    ("sweep r13: an incoming texture one row short", lambda: arm_outcome("m-snap-dpr2", mutate="tex-in-short"), "INCONCLUSIVE"),
+    ("r13 exact-coverage alpha support at DPR 1.5 (40 -> 60 px, one source px -> its 1.5 device px)",
+     lambda: [int(v) for v in probe.coverage_support(np.eye(1, 40, 3, dtype=bool), (1, 60))[0].nonzero()[0]], [4, 5]),
     ("r12 round: perfect-shift passing invalidates the reference gate", lambda: round_gate(("perfect-shift", "reference", "PASS"), "reference"), "INCONCLUSIVE"),
 ]
 

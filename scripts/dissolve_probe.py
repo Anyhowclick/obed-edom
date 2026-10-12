@@ -105,6 +105,8 @@ PAUSE_FRAME = 300
 SLIDE = (1920, 1080)
 REF_STATES = (("F50", 0.5), ("B", 0.9995), ("A0", 0.0))
 REF_CT_TOL_MS = 1.0
+TIMER_MIN_MS = 400
+TIMER_EXTRA_MS = 600_000
 REF_EFF_TOL = 1e-3
 REF_MODEL_TOL = 2.0
 PERFECT_TOL = 1.0
@@ -155,7 +157,7 @@ SPLICES = {
     "fg-omit": (b"Y.forEach(", b"[].forEach(", 1),
     "fg-swap": (b"Y.forEach(", b"Y.reverse().forEach(", 1),
     "lut-identity": (b"d[j]=L[d[j]],d[j+1]=L[d[j+1]],d[j+2]=L[d[j+2]]", b"d[j]=d[j],d[j+1]=d[j+1],d[j+2]=d[j+2]", 1),
-    "sn-frac": (b"sn=function(z,e,k){return Math.round((z-e)*k)}", b"sn=function(z,e,k){return(z-e)*k}", 1),
+    "sn-frac": (b"sn=function(z,e,k){return Math.round((z-e)*k*p)/p}", b"sn=function(z,e,k){return(z-e)*k}", 1),
 }
 
 RAW_STYLE = '<style id="obed-dx-transparent">html,body,#body{background:transparent!important}</style>'
@@ -231,10 +233,12 @@ class Arm:
     shift: int = 0
     inject: str | None = None
     decoders: int = 1
+    letterbox: int = 0
 
 
 def viewport_of(arm: Arm) -> tuple[int, int]:
-    return arm.viewport or VIEWPORT
+    """The arm's CSS viewport: explicit, else `VIEWPORT` with `letterbox` CSS rows added (1920×1200 / 1920×1201)."""
+    return arm.viewport or (VIEWPORT[0], VIEWPORT[1] + arm.letterbox)
 
 
 def device_shape(arm: Arm) -> tuple[int, int]:
@@ -252,8 +256,8 @@ def stage_of(arm: Arm) -> dict[str, float]:
 _ALL = ("out", "in", "overlap")
 _ON_EXPECT = {c: "PASS" for c in ("model", "complement", "no_dip", "curve", "monotone", "handoff", "no_flash")}
 _MEDIA = {"deck": "p2bin", "slide": 2, "movies": "counter", "continuity": "auto"}
-_TONE = {**_MEDIA, "movies": "tone", "capture": "reference", "holders": 1, "classes": ("out",)}
-_SNAP = {**_MEDIA, "capture": "reference", "holders": 1, "classes": ("out",)}
+_TONE = {**_MEDIA, "movies": "tone", "capture": "reference", "holders": 1, "classes": _ALL}
+_SNAP = {**_MEDIA, "capture": "reference", "holders": 1, "classes": _ALL}
 _SNAP_EXPECT = {"holder_pixels": "PASS", "reference": "PASS", "mask": "PASS"}
 _ENGAGE = {**_MEDIA, "capture": "engage", "classes": ("out",)}
 ARMS: dict[str, Arm] = {
@@ -299,14 +303,8 @@ ARMS: dict[str, Arm] = {
     "m-tone-twin": Arm(**_TONE, splice="fg-omit"),
     "m-tone-raw": Arm(**{**_MEDIA, "movies": "tone"}, splice="lut-identity", capture="paused", classes=("out",), holders=1,
                       expect={"tone": "FAIL"}),
-    "m-snap": Arm(**_SNAP, expect=_SNAP_EXPECT | {"geometry": "PASS"}, twin="m-snap-twin"),
-    "m-snap-twin": Arm(**_SNAP, splice="fg-omit"),
-    "m-snap-lb": Arm(**_SNAP, viewport=(1920, 1200), expect=_SNAP_EXPECT, twin="m-snap-lb-twin"),
-    "m-snap-lb-twin": Arm(**_SNAP, viewport=(1920, 1200), splice="fg-omit"),
-    "m-snap-frac": Arm(**_SNAP, splice="sn-frac", expect=_SNAP_EXPECT | {"holder_pixels": "FAIL"}, twin="m-snap-frac-twin"),
-    "m-snap-frac-twin": Arm(**_SNAP, splice="sn-frac+fg-omit"),
     "perfect-shift": Arm(**_SNAP, shift=1, expect={"reference": "FAIL"}),
-    "m-geo-dsf2": Arm(**_ENGAGE, dsf=2.0, expect={"geometry": "FAIL"}),
+    "m-geo-dpr125": Arm(**_ENGAGE, dsf=1.25, expect={"geometry": "FAIL"}),
     "m-geo-2560": Arm(**_ENGAGE, viewport=(2560, 1440), expect={"geometry": "FAIL"}),
     "m-geo-scale": Arm(**_ENGAGE, overrides=("scale",), expect={"geometry": "FAIL"}),
     "m-geo-base": Arm(**_ENGAGE, overrides=("base",), expect={"geometry": "FAIL"}),
@@ -346,6 +344,22 @@ for _row, _spec in LIFECYCLE.items():
             expect={"hidden": "PASS", "shown": "PASS"} if _suffix and _row.startswith("hide") else {})
 for _drop, _check in (("hide", "hidden"), ("show", "shown")):
     ARMS[f"life-hide-no{_drop}"] = replace(ARMS["life-hide"], twin=None, drop=_drop, expect={_check: "FAIL"})
+for _dsf, _tag in ((1.5, "dsf15"), (2.0, "dsf2")):
+    ARMS[f"m-fg-{_tag}"] = replace(ARMS["m-fg"], dsf=_dsf)
+SNAP_DPR = {"": 1.0, "dpr15": 1.5, "dpr2": 2.0}
+SNAP_ORIGIN = {"": 0, "lbfrac": 121}
+SNAP_CLIP = {"": (), "clipx": ("clipx",), "clipy": ("clipy",)}
+SNAPS: list[str] = []
+for _d, _dpr in SNAP_DPR.items():
+    for _o, _lb in SNAP_ORIGIN.items():
+        for _c, _clip in SNAP_CLIP.items():
+            _name = "-".join(["m-snap", *(t for t in (_d, _o, _c) if t)])
+            _cell = {**_SNAP, "dsf": _dpr, "letterbox": _lb, "overrides": _clip}
+            SNAPS.append(_name)
+            ARMS[_name] = Arm(**_cell, expect=_SNAP_EXPECT | {"geometry": "PASS"}, twin=f"{_name}-twin")
+            ARMS[f"{_name}-twin"] = Arm(**_cell, splice="fg-omit")
+            ARMS[f"{_name}-frac"] = Arm(**_cell, splice="sn-frac", expect=_SNAP_EXPECT | {"holder_pixels": "FAIL"}, twin=f"{_name}-frac-twin")
+            ARMS[f"{_name}-frac-twin"] = Arm(**_cell, splice="sn-frac+fg-omit")
 TWINS = frozenset(a.twin for a in ARMS.values() if a.twin)
 
 CONTROLS: dict[str, tuple[tuple[str, ...], ...]] = {
@@ -364,12 +378,12 @@ CONTROLS: dict[str, tuple[tuple[str, ...], ...]] = {
     "tone": (("m-tone",), ("m-tone-raw",)),
     "overlay": (("m-on",), ("m-bridge-off",)),
     "cost": (("case:cost-50",), ("case:cost-50-eps",)),
-    "holder_pixels": (("m-snap", "m-snap-lb"), ("m-snap-frac", "case:holder-shift")),
-    "reference": (("m-snap", "m-snap-lb", "m-snap-frac", "case:reference-valid"), ("perfect-shift",),
+    "holder_pixels": (tuple(SNAPS), (*(f"{n}-frac" for n in SNAPS), "case:holder-shift")),
+    "reference": ((*SNAPS, *(f"{n}-frac" for n in SNAPS), "case:reference-valid"), ("perfect-shift",),
                   ("case:reference-stale", "case:reference-extra", "case:reference-unpaused")),
-    "mask": (("m-snap", "m-snap-lb", "m-snap-frac", "m-tone", "case:mask-production"), (),
+    "mask": ((*SNAPS, *(f"{n}-frac" for n in SNAPS), "m-tone", "case:mask-production"), (),
              ("case:mask-whole", "case:mask-shift3", "case:mask-empty")),
-    "geometry": (("m-snap",), ("m-geo-dsf2", "m-geo-2560", "m-geo-scale", "m-geo-base")),
+    "geometry": (tuple(SNAPS), ("m-geo-dpr125", "m-geo-2560", "m-geo-scale", "m-geo-base")),
     "exterior": (("m-raw", "m-raw-end", "m-raw-svgclip"),
                  tuple(f"m-raw-{n}" for n in ("caption", "nav-open", "modal", "svg", "script", "shadow-modal", "shadow-fixed"))),
     "hidden": (("life-hide-twin", "life-hide-screen-twin"), ("life-hide-nohide",), ("case:hide-duplicate", "case:hide-shift")),
@@ -573,6 +587,27 @@ HOOK_JS = r"""
       });
     },
     finish: function () { document.getAnimations().forEach(function (a) { try { a.finish(); } catch (e) {} }); },
+    delay: function (min, extra) {
+      if (X.timers) return false;
+      var T = X.timers = {min: min, extra: extra, list: [], set: window.setTimeout, clear: window.clearTimeout};
+      window.setTimeout = function (f, ms) {
+        var r = Array.prototype.slice.call(arguments, 2);
+        if (typeof f !== 'function' || !((+ms || 0) >= min)) return T.set.apply(window, arguments);
+        var e = {f: f, r: r, ms: +ms, done: false};
+        e.id = T.set.call(window, function () { e.done = true; f.apply(window, r); }, +ms + extra);
+        T.list.push(e);
+        return e.id;
+      };
+      window.clearTimeout = function (id) { T.list.forEach(function (e) { if (e.id === id) e.done = true; }); return T.clear.call(window, id); };
+      return true;
+    },
+    release: function () {
+      var T = X.timers;
+      if (!T) return null;
+      window.setTimeout = T.set; window.clearTimeout = T.clear; X.timers = null;
+      T.list.forEach(function (e) { if (!e.done) { T.clear.call(window, e.id); e.done = true; try { e.f.apply(window, e.r); } catch (err) {} } });
+      return {minMs: T.min, extraMs: T.extra, delayedMs: T.list.map(function (e) { return e.ms; })};
+    },
     pause: function (frame, fps) {
       var G = stage(), best = null, area = 0;
       els.forEach(function (v) {
@@ -916,6 +951,24 @@ def _video_layer(doc: dict[str, Any]) -> dict[str, Any]:
     return video[0]
 
 
+def _clip(axis: str) -> Callable[[dict[str, Any], int], None]:
+    """The movie's parent layer clips (`masksToBounds`) with its far edge moved to 60 % into the movie + 0.37 px on
+    `axis`, its near edge kept: a rectangular clip at a fractional position (§9.0 item 5)."""
+    def edit(doc: dict[str, Any], event: int) -> None:
+        builds = list(_effects(doc["events"]))
+        hits = [(n, p) for b in builds for n, p in _layers(b["baseLayer"]) if n.get("isVideoLayer")]
+        if len(hits) != 1 or hits[0][1] is None:
+            raise ValueError("expected one video layer with a parent in the slide's renderMovie builds")
+        video, parent = (h["initialState"] for h in hits[0])
+        size, coord = ("width", "pointX") if axis == "x" else ("height", "pointY")
+        near = video["position"][coord] - video["anchorPoint"][coord] * video[size]
+        left = parent["position"][coord] - parent["anchorPoint"][coord] * parent[size]
+        parent[size] = near + 0.6 * video[size] + 0.37
+        parent["position"] = {**parent["position"], coord: left + parent["anchorPoint"][coord] * parent[size]}
+        parent["masksToBounds"] = True
+    return edit
+
+
 def _scale(doc: dict[str, Any], event: int) -> None:
     _video_layer(doc)["initialState"]["affineTransform"] = [1.5, 0, 0, 1.5, 0, 0]
 
@@ -928,7 +981,7 @@ def _base(doc: dict[str, Any], event: int) -> None:
 
 
 SLIDE_OVERRIDES: dict[str, Callable[[dict[str, Any], int], None]] = {"cut": _cut, "automatic": _automatic, "fg": _foreground,
-                                                                    "scale": _scale, "base": _base}
+                                                                    "scale": _scale, "base": _base, "clipx": _clip("x"), "clipy": _clip("y")}
 HEADER_OVERRIDES: dict[str, Callable[[dict[str, Any]], None]] = {"loop": lambda header: header.update(loopSlideshow=1)}
 
 
@@ -1507,12 +1560,17 @@ def dilate(mask: np.ndarray, r: int) -> np.ndarray:
 
 
 def device_box(rect: Iterable[float], dsf: float) -> tuple[int, int, int, int] | None:
-    """A CSS [x, y, w, h] as device (x0, y0, x1, y1); None unless every edge lies on the device grid (within 1e-3)."""
+    """A holder's CSS [x, y, w, h] as device (x0, y0, x1, y1): the origin painted at `jround(x·DPR)` (a fractional
+    letterbox origin snaps there, fix A), the size its device size; None unless that size is whole (within 1e-3)."""
     x, y, w, h = rect
-    edges = [v * dsf for v in (x, y, x + w, y + h)]
-    if any(abs(v - round(v)) > 1e-3 for v in edges):
+    if any(abs(v * dsf - round(v * dsf)) > 1e-3 for v in (w, h)):
         return None
-    return tuple(round(v) for v in edges)
+    x0, y0 = jround(x * dsf), jround(y * dsf)
+    return x0, y0, x0 + round(w * dsf), y0 + round(h * dsf)
+
+
+def device_rects(rects: Iterable[Iterable[float]], dsf: float) -> list[list[float]]:
+    return [[v * dsf for v in r] for r in rects]
 
 
 def box_mask(shape: tuple[int, int], box: tuple[int, int, int, int], inset: int = 0) -> np.ndarray:
@@ -1545,8 +1603,9 @@ def holder_strip(image: np.ndarray, holder: dict[str, Any], decoder: dict[str, A
 
 
 def production_support(record: dict[str, Any], images: Mapping[str, np.ndarray], decoder_id: Any, shape: tuple[int, int],
-                       dsf: float) -> tuple[np.ndarray, list[str]]:
-    """α > 0 support of every inventoried later canvas (independent of the take) at its device rect, snapped as `sn`."""
+                       dsf: float, holder: Iterable[float]) -> tuple[np.ndarray, list[str]]:
+    """α > 0 support of every inventoried later canvas (independent of the take) at its device rect, snapped as fix A's
+    `sn` does relative to the holder: device edge = holder device origin + jround((z − holder origin)·DPR)."""
     support = np.zeros(shape, bool)
     inventory = (record.get("foreground") or {}).get(str(decoder_id))
     if not isinstance(inventory, list):
@@ -1558,14 +1617,33 @@ def production_support(record: dict[str, Any], images: Mapping[str, np.ndarray],
             problems.append(f"foreground canvas {c.get('id')} has no pixels")
             continue
         x, y, w, h = c["rect"]
-        x0, y0, x1, y1 = (round(jround(v) * dsf) for v in (x, y, x + w, y + h))
+        hx, hy = list(holder)[:2]
+        ox, oy = jround(hx * dsf), jround(hy * dsf)
+        x0, x1 = (ox + jround((v - hx) * dsf) for v in (x, x + w))
+        y0, y1 = (oy + jround((v - hy) * dsf) for v in (y, y + h))
         if x1 <= x0 or y1 <= y0 or not c["alpha"] > 0:
             continue
-        a = np.asarray(Image.fromarray(np.ascontiguousarray(img[..., 3])).resize((x1 - x0, y1 - y0), Image.BOX)) > 0
+        a = coverage_support(img[..., 3] > 0, (y1 - y0, x1 - x0))
         ys, xs = slice(max(0, y0), min(shape[0], y1)), slice(max(0, x0), min(shape[1], x1))
         if ys.stop > ys.start and xs.stop > xs.start:
             support[ys, xs] |= a[ys.start - y0:ys.stop - y0, xs.start - x0:xs.stop - x0]
     return support, problems
+
+
+def coverage_support(alpha: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    """A canvas's α > 0 support drawn into a `size` (rows, cols) device rect, by exact coverage: a device px is in the
+    support iff it overlaps (positive area) a source px with α > 0. No resampling filter, so a non-integer scale (DPR 1.5)
+    neither inflates nor drops support."""
+    out = alpha
+    for axis, n in ((0, size[0]), (1, size[1])):
+        src = out.shape[axis]
+        step = src / n
+        lo = np.floor(np.arange(n) * step + 1e-9).astype(int)
+        hi = np.maximum(lo + 1, np.ceil((np.arange(n) + 1) * step - 1e-9).astype(int))
+        cum = np.concatenate([np.zeros((1, out.shape[1 - axis]) if axis == 0 else (out.shape[0], 1), int),
+                              np.cumsum(out, axis=axis, dtype=int)], axis=axis)
+        out = (np.take(cum, hi, axis=axis) - np.take(cum, lo, axis=axis)) > 0
+    return out
 
 
 def twin_difference(record: dict[str, Any], images: Mapping[str, np.ndarray], twin: tuple[dict[str, Any], Mapping[str, np.ndarray]],
@@ -1663,7 +1741,8 @@ def score_perfect(perfect: np.ndarray | None, live: np.ndarray | None, box: tupl
 def reference_problems(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Arm, ev: Any,
                        cal: Calibration = Calibration()) -> list[str]:
     """Reference-capture profile integrity (§9.1): exact inventory, paused states read back as requested, stable pairs
-    under their own ids (`ref-<state>-<0|1>`, the images scoring reads), A0/F50/B pairwise different where A and B differ,
+    under their own ids (`ref-<state>-<0|1>`, the images scoring reads), A0/F50/B pairwise different where both the
+    textures and the captured A0 and B differ (>= `MIN_CLASS_PX` px),
     |F50 − (A0 + B)/2| ≤ `REF_MODEL_TOL`, the transition DOM present at every capture, `perfect` stable, drawn with the
     arm's shift onto exactly the holder canvas's device box, all after the advance and in capture order."""
     ref = record.get("reference")
@@ -1671,6 +1750,10 @@ def reference_problems(record: dict[str, Any], images: Mapping[str, np.ndarray],
         return ["no reference capture"]
     problems = []
     shape = device_shape(arm)
+    timers = ref.get("timers")
+    if (not isinstance(timers, dict) or timers.get("minMs") != TIMER_MIN_MS or timers.get("extraMs") != TIMER_EXTRA_MS
+            or not timers.get("delayedMs")):
+        problems.append(f"player timers not held back through the reference capture: {timers!r}")
     ids = ((record.get("dump") or {}).get("first") or {}).get("layerIds") or []
     inv = ref.get("inventory") if isinstance(ref.get("inventory"), list) else []
     targets = sorted(str(a.get("target")) for a in inv)
@@ -1725,10 +1808,10 @@ def reference_problems(record: dict[str, Any], images: Mapping[str, np.ndarray],
         if ev.A is None or ev.B is None or ev.A.shape[:2] != shape:
             problems.append("no textures to qualify the reference states")
         else:
-            far = far_mask(ev.A, ev.B)
+            far = far_mask(ev.A, ev.B) & far_mask(shots["A0"], shots["B"])
             p = {k: premul(v) for k, v in shots.items()}
-            if not far.any():
-                problems.append("no texture px where A and B differ")
+            if int(far.sum()) < MIN_CLASS_PX:
+                problems.append(f"{int(far.sum())} px where both the textures and the A0/B captures differ < {MIN_CLASS_PX}")
             elif any(float(np.abs(p[a] - p[b])[far].max()) <= cal.tau for a, b in (("A0", "F50"), ("F50", "B"), ("A0", "B"))):
                 problems.append("A0, F50 and B not pairwise different (a stale or reused frame)")
             model = float(np.abs(p["F50"] - (p["A0"] + p["B"]) / 2).max())
@@ -2088,6 +2171,10 @@ def reference_ok(ref: Any) -> bool:
                 and isinstance(s.get("dom"), bool) and isinstance(s.get("anims"), list) and all(anim(a, True) for a in s["anims"])
                 and (s.get("eff") is None or leaf_effs(s) is not None)):
             return False
+    t = ref.get("timers", {"minMs": TIMER_MIN_MS, "extraMs": TIMER_EXTRA_MS, "delayedMs": []})
+    if not (isinstance(t, dict) and number(t.get("minMs")) and number(t.get("extraMs")) and isinstance(t.get("delayedMs"), list)
+            and all(number(v) and v >= 0 for v in t["delayedMs"])):
+        return False
     p = ref.get("perfect")
     return (isinstance(p, dict) and integer(p.get("shift")) and (p.get("rect") is None or quad(p["rect"])) and shots(p)
             and (not p["shots"] or (isinstance(p.get("dom"), bool) and number(p.get("t")))))
@@ -2191,8 +2278,18 @@ def capture_problems(record: dict[str, Any], images: Mapping[str, np.ndarray], a
     shots = [images.get(s.get("name")) for s in meta]
     if (not shots and arm.capture != "reference") or any(s is None or s.shape != (*shape, 4) for s in shots):
         problems.append("screenshots missing or not full-device RGBA")
-    if any(images.get(k) is None or images[k].shape != (*shape, 4) for k in ("tex-in", "tex-out")):
-        problems.append("textures not captured at the device size")
+    if any(device_texture(images.get(k), arm) is None for k in ("tex-in", "tex-out")):
+        problems.append("textures missing or not the stage's CSS or device size")
+    launch = record.get("launch") if isinstance(record.get("launch"), dict) else {}
+    flags = [a for a in launch.get("chromeArgs") or [] if isinstance(a, str) and a.startswith("--force-device-scale-factor=")]
+    if arm.dsf != 1 and (flags != [f"--force-device-scale-factor={arm.dsf:g}"] or launch.get("metricsOverride", "absent") is not None):
+        problems.append(f"devicePixelRatio {arm.dsf} not from the Chrome launch flag (emulated or unrecorded): {launch or None}")
+    dsf, viewport = record.get("dsf"), record.get("viewport")
+    if not number(dsf) or not 0.5 <= dsf <= 4 or abs(dsf - arm.dsf) > 1e-6:
+        problems.append(f"recorded devicePixelRatio {dsf!r} is not the arm's {arm.dsf}")
+    if not (isinstance(viewport, list) and len(viewport) == 2 and all(integer(v) and v > 0 for v in viewport)
+            and tuple(viewport) == viewport_of(arm)):
+        problems.append(f"recorded viewport {viewport!r} is not the arm's {list(viewport_of(arm))}")
     if first and not isinstance(first.get("holders"), list):
         problems.append("holder list missing")
     holders = first.get("holders") or []
@@ -2231,7 +2328,7 @@ def capture_problems(record: dict[str, Any], images: Mapping[str, np.ndarray], a
     if arm.inject:
         problems += injection_problems(arm.inject, record.get("inject"), viewport_of(arm))
     if arm.capture in ("reference", "engage"):
-        ev = evidence(record, images, arm.dsf)
+        ev = evidence(record, images, arm)
         problems += class_problems(ev.A, ev.B, ev.media, arm.classes)
         if arm.capture == "reference":
             problems += reference_problems(record, images, arm, ev, cal)
@@ -2259,17 +2356,37 @@ class Evidence:
     media: list[list[float]]
     raf: list[dict[str, Any]]
     transition: list[int]
+    dsf: float = 1.0
 
 
-def media_rects(record: dict[str, Any]) -> list[list[float]]:
-    """Every tagged `<video>` rect seen in the stage during the capture and every holder rect."""
+def media_rects(record: dict[str, Any], dsf: float = 1.0) -> list[list[float]]:
+    """Every tagged `<video>` rect seen in the stage during the capture and every holder rect, in device px."""
     dump = record.get("dump") or {}
     media = [v["rect"] for r in dump.get("raf") or [] for v in r.get("videos") or [] if v.get("on") and v.get("inStage") and v.get("rect")]
     media += [h["rect"] for h in (dump.get("first") or {}).get("holders") or [] if h.get("rect")]
-    return [list(m) for m in {tuple(round(x, 1) for x in m) for m in media}]
+    return device_rects({tuple(round(x, 1) for x in m) for m in media}, dsf)
 
 
-def evidence(record: dict[str, Any], images: Mapping[str, np.ndarray], dsf: float = 1.0) -> Evidence:
+def device_texture(texture: np.ndarray | None, arm: Arm) -> np.ndarray | None:
+    """A transition texture (the leaf canvas backing: the slide) placed on the device screen at the stage's device box,
+    resampled (bilinear) from the stage's CSS size at DPR != 1; None unless it is exactly the stage's CSS or device size."""
+    if texture is None or texture.ndim != 3 or texture.shape[2] != 4 or not texture.size:
+        return None
+    stage = stage_of(arm)
+    x0, y0 = jround(stage["x"] * arm.dsf), jround(stage["y"] * arm.dsf)
+    w, h = round(stage["width"] * arm.dsf), round(stage["height"] * arm.dsf)
+    if texture.shape[:2] not in ((h, w), (round(stage["height"]), round(stage["width"]))):
+        return None
+    if texture.shape[:2] != (h, w):
+        texture = np.asarray(Image.fromarray(np.ascontiguousarray(texture)).resize((w, h), Image.BILINEAR))
+    out = np.zeros((*device_shape(arm), 4), np.uint8)
+    ys, xs = slice(max(0, y0), min(out.shape[0], y0 + h)), slice(max(0, x0), min(out.shape[1], x0 + w))
+    out[ys, xs] = texture[ys.start - y0:ys.stop - y0, xs.start - x0:xs.stop - x0]
+    return out
+
+
+def evidence(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Arm) -> Evidence:
+    dsf = arm.dsf
     dump = record.get("dump") or {}
     raf = dump.get("raf") or []
     meta = record.get("shots") or []
@@ -2278,7 +2395,7 @@ def evidence(record: dict[str, Any], images: Mapping[str, np.ndarray], dsf: floa
     phases = shot_phases(meta, raf) if timed else ["ambiguous"] * len(shots)
     first = dump.get("first") or {}
     holders = []
-    A, B = images.get("tex-out"), images.get("tex-in")
+    A, B = device_texture(images.get("tex-out"), arm), device_texture(images.get("tex-in"), arm)
     for i, h in enumerate(first.get("holders") or []):
         img = images.get(f"holder-{i}")
         if img is None or A is None or not quad(h.get("canvasRect")) or not quad(h.get("rect")):
@@ -2288,7 +2405,7 @@ def evidence(record: dict[str, Any], images: Mapping[str, np.ndarray], dsf: floa
             continue
         holders.append(placed)
         A = over(placed, A)
-    return Evidence(shots, phases, A, B, holders, media_rects(record), raf, [i for i, p in enumerate(phases) if p == "transition"])
+    return Evidence(shots, phases, A, B, holders, media_rects(record, dsf), raf, [i for i, p in enumerate(phases) if p == "transition"], dsf)
 
 
 def _fade_of(ev: Evidence, arm: Arm, cal: Calibration) -> dict[str, Any]:
@@ -2342,7 +2459,8 @@ MEDIA_CHECKS = ("frozen_frame", "frozen_region", "foreground", "tone", "overlay"
 def media_integrity(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Arm,
                     es: list[float]) -> tuple[dict[str, Any] | None, int | None, list[str]]:
     """Shared media evidence (§9.1) for every outgoing movie: a patch-on arm with holders binds each to a distinct decoder
-    (`arm.holders` of them) under `holder_parent`, its strip decoding at device scale; otherwise exactly
+    (`arm.holders` of them) under `holder_parent`, its strip decoding at device scale (not on `fg` arms, whose layers
+    cover the counter blocks by design; their reference is the rVFC record and the requested paused frame); otherwise exactly
     `arm.decoders` detached decoders. Each decoder: colour tuple, geometry, foreground inventory, the last pre-detach rVFC
     record (= the reference; a paused arm's requested frame must equal it), detach inside [advance, transition DOM],
     playback before a patch-off advance; timed captures add >= 3 demixable frames. Returns (first decoder, its reference,
@@ -2387,7 +2505,7 @@ def media_integrity(record: dict[str, Any], images: Mapping[str, np.ndarray], ar
         content, size = decoder.get("content") or [], decoder.get("size") or []
         if len(content) != 4 or len(size) != 2 or not all(number(v) for v in [*content, *size]) or size[0] <= 0:
             problems.append("decoder geometry malformed")
-        elif index is not None:
+        elif index is not None and "fg" not in arm.overrides:
             img = images.get(f"holder-{index}")
             if img is None or holder_strip(img, holders[index], decoder, arm.dsf) is None:
                 problems.append("holder pixels missing or the holder strip does not decode at its device scale")
@@ -2428,7 +2546,7 @@ def score_media(record: dict[str, Any], images: Mapping[str, np.ndarray], ev: Ev
     origin = scale = None
     if decoder is not None and "decoder geometry malformed" not in problems:
         cx, cy, cw, _ = decoder["content"]
-        origin, scale = (cx, cy), cw / decoder["size"][0]
+        origin, scale = (cx * arm.dsf, cy * arm.dsf), cw * arm.dsf / decoder["size"][0]
     needs_holder = arm.mode == "on" and bool(arm.holders)
     holder_img = images.get("holder-0")
     first_holders = ((record.get("dump") or {}).get("first") or {}).get("holders") or []
@@ -2436,7 +2554,7 @@ def score_media(record: dict[str, Any], images: Mapping[str, np.ndarray], ev: Ev
                     if needs_holder and holder_img is not None and first_holders and origin is not None else None)
     o_indices = [decode_strip(straight(o), origin, scale) for o in demixed] if origin else []
     out["frozen_frame"] = _voided(score_frozen(holder_index, reference, o_indices, holder=needs_holder), problems)
-    region_rect = decoder["region"] if decoder else None
+    region_rect = device_rects([decoder["region"]], arm.dsf)[0] if decoder and decoder.get("region") else None
     region_mask = rect_mask(ev.A.shape[:2], [region_rect]) if region_rect and ev.A is not None else None
     if region_mask is not None and region_mask.any():
         ys, xs = np.where(region_mask)
@@ -2462,7 +2580,7 @@ def score_media(record: dict[str, Any], images: Mapping[str, np.ndarray], ev: Ev
         return out, problems
     shape = live.shape[:2]
     later = [c for cs in (record.get("foreground") or {}).values() for c in cs if len(c.get("rect") or []) == 4]
-    fg_rects = [c["rect"] for c in later if c.get("id") in (*FOREGROUND_TEXTURES, FOREGROUND_SQUARE)]
+    fg_rects = device_rects([c["rect"] for c in later if c.get("id") in (*FOREGROUND_TEXTURES, FOREGROUND_SQUARE)], arm.dsf)
     fg_mask = block_mask(shape, origin, scale) & rect_mask(shape, fg_rects)
     pair = [r for r in fg_rects if any(overlaps(r, q) for q in fg_rects if q is not r)]
     fg = score_foreground([ev.holders[0], *[straight(o) for o in demixed]], live, fg_mask, cal)
@@ -2542,7 +2660,7 @@ def verified_mask(record: dict[str, Any], images: Mapping[str, np.ndarray], arm:
     box = device_box(holders[0]["rect"], arm.dsf) if holders else None
     if not bound or bind or box is None:
         return None, problems + bind + ["no bound holder on the device grid for the production mask"]
-    support, found = production_support(record, images, bound[0][1]["id"], shape, arm.dsf)
+    support, found = production_support(record, images, bound[0][1]["id"], shape, arm.dsf, holders[0]["rect"])
     difference, differ = twin_difference(record, images, twin, shape, arm.dsf)
     mask, verify, _ = verify_mask(support, difference, box_mask(shape, box))
     problems += found + differ + verify
@@ -2553,7 +2671,7 @@ def _score_arm(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Ar
                identity: bool | None, profile: Profile, twin: tuple[dict[str, Any], Mapping[str, np.ndarray]] | None,
                lut: np.ndarray | None) -> dict[str, Any]:
     problems = capture_problems(record, images, arm, profile, cal)
-    ev = evidence(record, images, arm.dsf)
+    ev = evidence(record, images, arm)
     checks: dict[str, dict[str, Any]] = {}
     timed = arm.capture not in ("reference", "engage")
     if timed and ev.A is not None and ev.B is not None:
@@ -2673,10 +2791,10 @@ def _score_lifecycle(record: dict[str, Any], images: Mapping[str, np.ndarray], t
         problems.append("replay: no first-pass capture")
     if spec.get("end") and record.get("residueAfterGoto") is None:
         problems.append("end of show: no residue after go-to 1")
-    ev = evidence(record, images, arm.dsf)
+    ev = evidence(record, images, arm)
     first = (record.get("dump") or {}).get("first") or {}
     checks: dict[str, dict[str, Any]] = {}
-    exclude = ev.media + (media_rects(twin[0]) if twin else [])
+    exclude = ev.media + (media_rects(twin[0], arm.dsf) if twin else [])
     checks["settled"] = score_settled(images.get("settled"), twin[1].get("settled") if twin else None, exclude, cal)
     hashes = (record.get("hashAfter"), twin[0].get("hashAfter") if twin else None)
     checks["destination"] = result(hashes[0] == hashes[1], [] if all(isinstance(h, str) for h in hashes) else ["destination hash missing"],
@@ -2745,7 +2863,7 @@ def score_hide_capture(record: dict[str, Any], images: Mapping[str, np.ndarray],
     dropped-action arms (`life-hide-nohide` hidden -> FAIL, `life-hide-noshow` shown -> FAIL)."""
     try:
         problems = capture_problems(record, images, arm, profile, cal) + action_problems(record, LIFECYCLE[arm.row or ""])
-        hide, shared = hide_checks(record, images, evidence(record, images, arm.dsf), arm, cal)
+        hide, shared = hide_checks(record, images, evidence(record, images, arm), arm, cal)
     except MALFORMED as exc:
         return malformed(arm.expect, exc)
     problems += [p for p in shared if p not in problems]
@@ -2791,16 +2909,16 @@ def score_delay_freeze(record: dict[str, Any], images: Mapping[str, np.ndarray],
     if problems or decoder is None:
         return result(None, problems or ["no decoder"])
     cx, cy, cw, _ = decoder["content"]
-    seen = [decode_strip(ev.shots[i], (cx, cy), cw / decoder["size"][0]) for i in window]
+    seen = [decode_strip(ev.shots[i], (cx * arm.dsf, cy * arm.dsf), cw * arm.dsf / decoder["size"][0]) for i in window]
     return result(all(v == reference for v in seen), reference=reference, delay=seen)
 
 
 def _reference_case(variant: str, cal: Calibration) -> dict[str, Any]:
-    """A 12x8 reference capture (A red, B blue): valid, a reused (stale) F50, an extra running animation, an unpaused one."""
+    """A 60x40 reference capture (A red, B blue): valid, a reused (stale) F50, an extra running animation, an unpaused one."""
     from types import SimpleNamespace
 
-    arm = Arm("p2bin", 2, capture="reference", viewport=(12, 8))
-    A = np.zeros((8, 12, 4), np.uint8)
+    arm = Arm("p2bin", 2, capture="reference", viewport=(60, 40))
+    A = np.zeros((40, 60, 4), np.uint8)
     A[...] = (200, 40, 30, 255)
     B = A.copy()
     B[...] = (20, 90, 150, 255)
@@ -2818,8 +2936,9 @@ def _reference_case(variant: str, cal: Calibration) -> dict[str, Any]:
                "anims": [{"target": t, "state": "running" if variant == "unpaused" and label == "F50" else "paused", "ct": f * 1500.0,
                           "dur": 1500.0} for t in targets]} for k, (label, f) in enumerate(REF_STATES)]
     record = {"reference": {"inventory": inventory, "states": states,
-                            "perfect": {"shift": 0, "rect": [0, 0, 12, 8], "dom": True, "t": 50.0, "shots": ["ref-perfect-0", "ref-perfect-1"]}},
-              "dump": {"first": {"layerIds": ["layer2", *targets], "holders": [{"rect": [0, 0, 12, 8], "canvasRect": [0, 0, 12, 8]}]}},
+                            "timers": {"minMs": TIMER_MIN_MS, "extraMs": TIMER_EXTRA_MS, "delayedMs": [1500.0]},
+                            "perfect": {"shift": 0, "rect": [0, 0, 60, 40], "dom": True, "t": 50.0, "shots": ["ref-perfect-0", "ref-perfect-1"]}},
+              "dump": {"first": {"layerIds": ["layer2", *targets], "holders": [{"rect": [0, 0, 60, 40], "canvasRect": [0, 0, 60, 40]}]}},
               "advanceAt": 1.0}
     return result(True, reference_problems(record, images, arm, SimpleNamespace(A=A, B=B), cal))
 
@@ -3046,7 +3165,10 @@ def reference_burst(host: Any, target: dict[str, Any], capture: Callable[[], np.
                     shift: int = 0) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
     """§9.1 reference-capture profile: at the first transition rAF the animation inventory; every document animation
     paused and seeked to each `REF_STATES` fraction of its duration, read back and screenshotted twice; then the holder
-    canvas overwritten with `live`'s own device pixels (`shift` px right) and screenshotted twice; then finished."""
+    canvas overwritten with `live`'s own device pixels (`shift` px right) and screenshotted twice; then finished. Page
+    timers of >= `TIMER_MIN_MS` set from just before the advance are held back by `TIMER_EXTRA_MS` (the player's
+    end-of-transition teardown would otherwise remove the transition DOM before `perfect` at DPR 2) and released, and
+    recorded, after the finish."""
     transport = host._require_transport()
     evaluate = transport.evaluate
     origin = evaluate(f"window.__obedDx.arm({json.dumps(target['textures'])})")["timeOrigin"]
@@ -3054,6 +3176,7 @@ def reference_burst(host: Any, target: dict[str, Any], capture: Callable[[], np.
     def now() -> float:
         return time.time() * 1000.0 - origin
 
+    evaluate(f"window.__obedDx.delay({TIMER_MIN_MS}, {TIMER_EXTRA_MS})")
     record: dict[str, Any] = {"shots": [], "actions": [], "cast": [], "advanceAt": now()}
     images: dict[str, np.ndarray] = {}
     errors: list[str] = []
@@ -3089,8 +3212,9 @@ def reference_burst(host: Any, target: dict[str, Any], capture: Callable[[], np.
             images[f"ref-perfect-{j}"] = capture()
             perfect["shots"].append(f"ref-perfect-{j}")
     ref["perfect"] = perfect
-    record["reference"] = ref
     evaluate("window.__obedDx.finish()")
+    ref["timers"] = evaluate("window.__obedDx.release()")
+    record["reference"] = ref
     thread.join(timeout=30)
     collect(evaluate, record, images)
     if errors:
@@ -3191,6 +3315,8 @@ def drive(host: Any, arm: Arm, target: dict[str, Any], capture: Callable[[], np.
         record["inject"] = evaluate(RAW_INJECTIONS[arm.inject])
         time.sleep(0.3)
     record["stage"] = evaluate(STAGE_JS)
+    record["dsf"] = evaluate("devicePixelRatio")
+    record["viewport"] = evaluate("[innerWidth, innerHeight]")
     foreground = evaluate("window.__obedDx.foreground()") or {}
     for vid, canvases in foreground.items() if isinstance(foreground, dict) else ():
         for k, c in enumerate(canvases if isinstance(canvases, list) else ()):
@@ -3261,20 +3387,21 @@ def screencast_frames(port: int) -> Iterator[list[tuple[float, np.ndarray]]]:
         thread.join(timeout=10)
 
 
-def start_chrome(profile: Path, *, gpu: bool, viewport: tuple[int, int] | None = None) -> tuple[subprocess.Popen[bytes], int]:
+def start_chrome(profile: Path, *, gpu: bool, viewport: tuple[int, int] | None = None,
+                 dsf: float = 1.0) -> tuple[subprocess.Popen[bytes], int, list[str]]:
     from obed_edom.devtools_port import DEVTOOLS_ACTIVE_PORT, verify_devtools_owner, wait_devtools_active_port
 
     profile.mkdir(parents=True, exist_ok=True)
     (profile / DEVTOOLS_ACTIVE_PORT).unlink(missing_ok=True)
     args = [str(CHROME), "--headless=new", "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1",
-            f"--user-data-dir={profile}", "--window-size={},{}".format(*(viewport or VIEWPORT)), "--force-device-scale-factor=1",
+            f"--user-data-dir={profile}", "--window-size={},{}".format(*(viewport or VIEWPORT)), f"--force-device-scale-factor={dsf:g}",
             "--autoplay-policy=no-user-gesture-required", "--disable-background-timer-throttling",
             "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows", "--mute-audio", "--no-first-run",
             "--no-default-browser-check", *([] if gpu else ["--disable-gpu"]), "about:blank"]
     proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     endpoint = wait_devtools_active_port(profile, proc, 20)
     verify_devtools_owner(endpoint, 2)
-    return proc, endpoint.port
+    return proc, endpoint.port, args
 
 
 RAW_SNAPSHOT_JS = ("(function(){var m=/^#(\\d+)$/.exec(location.hash||''),busy=document.getAnimations().some(function(a)"
@@ -3308,7 +3435,8 @@ class RawHost:
     def start(self, width: int, height: int, dsf: float) -> None:
         base = self.server.start().rsplit("/", 1)[0]
         self.transport.start()
-        self.transport.call("Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=dsf, mobile=False)
+        if dsf == 1:
+            self.transport.call("Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=1, mobile=False)
         self.transport.call("Emulation.setDefaultBackgroundColorOverride", color={"r": 0, "g": 0, "b": 0, "a": 0})
         self.transport.goto(f"{base}/index.html")
         wait_ready(self.transport.evaluate, snapshot_js=RAW_SNAPSHOT_JS)
@@ -3351,8 +3479,11 @@ def run_arm(name: str, scratch: Path, decision: dict[str, Any] | None = None) ->
         record.update(resolved.fields())
         attach = port = None
         if arm.page in ("alpha", "raw"):
-            proc, port = start_chrome(profile, gpu=arm.gpu, viewport=(width, height))
+            proc, port, args = start_chrome(profile, gpu=arm.gpu, viewport=(width, height), dsf=arm.dsf)
             attach = f"http://127.0.0.1:{port}"
+            record["launch"] = {"chromeArgs": args[1:], "metricsOverride": None}
+        elif arm.dsf != 1:
+            raise RuntimeError("a DPR != 1 arm needs its own Chrome launch with the flag (the screen page launches at DSF 1)")
         else:
             probe.force_viewport(width, height)
         if arm.page == "raw":
@@ -3366,7 +3497,10 @@ def run_arm(name: str, scratch: Path, decision: dict[str, Any] | None = None) ->
             with serving(arm.splice):
                 host.start()
         transport = host._require_transport()
-        transport.call("Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=arm.dsf, mobile=False)
+        if arm.dsf == 1:
+            transport.call("Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=1, mobile=False)
+            if "launch" in record:
+                record["launch"]["metricsOverride"] = {"width": width, "height": height, "deviceScaleFactor": 1}
         if arm.page in ("alpha", "raw"):
             transport.call("Emulation.setDefaultBackgroundColorOverride", color={"r": 0, "g": 0, "b": 0, "a": 0})
         record["output"] = {k: host.output.get(k) for k in ("mmOpacity", "continuity", "page", "indexSha256") if k in host.output}
@@ -3454,11 +3588,11 @@ def launch_lut(runs: Mapping[str, tuple[dict[str, Any], Mapping[str, np.ndarray]
         problems = capture_problems(record, images, arm, profile, cal) + problems
         mask, verify = verified_mask(record, images, arm, profile, cal, runs.get(arm.twin or ""))
         problems += verify
-        ev = evidence(record, images, arm.dsf)
+        ev = evidence(record, images, arm)
         if not problems and mask is not None and decoder is not None and ev.holders:
             cx, cy, cw, _ = decoder["content"]
             layout = next(iter((record.get("movies") or {}).values()), {}).get("layout") or {}
-            exposed, coverage = tone_coverage(layout, mask.shape, (cx, cy), cw / decoder["size"][0], mask)
+            exposed, coverage = tone_coverage(layout, mask.shape, (cx * arm.dsf, cy * arm.dsf), cw * arm.dsf / decoder["size"][0], mask)
             problems += coverage
             if not coverage:
                 table = build_lut(ev.holders[0][exposed][:, :3], images["live-0"][exposed][:, :3])
