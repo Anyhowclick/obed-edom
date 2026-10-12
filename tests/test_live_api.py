@@ -188,7 +188,7 @@ def test_live_api_session_survives_presenter_and_rejects_duplicate_start(tmp_pat
     assert client.get('/api/live/decks').json()[0]['previewJobId'] == 'prepared'
     state = client.post('/api/live', json={'previewJobId': 'prepared', 'displayId': '42'}).json()
     session = state['sessionId']
-    assert not state['outputVisible']
+    assert state['outputVisible']
     assert client.get(state['slides'][0]['thumbnailUrl']).content == b'jpeg'
     assert client.post('/api/live', json={'previewJobId': 'prepared'}).status_code == 409
     assert client.get('/api/live').json()['sessionId'] == session

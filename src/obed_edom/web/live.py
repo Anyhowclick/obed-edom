@@ -284,7 +284,9 @@ def live_router(runner, *, service=None, host_factory=None, displays=None, engin
                 )
                 roots.clear()
                 roots[loaded["sessionId"]] = root
-                return loaded
+                if loaded["status"] == "error":
+                    return loaded
+                return sessions.command(loaded["sessionId"], uuid4().hex, "show")["state"]
             except (PreviewError, ValueError, OSError, RuntimeError) as exc:
                 raise HTTPException(409, str(exc)) from exc
 
