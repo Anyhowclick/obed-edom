@@ -1,6 +1,6 @@
 # Live continuity — generalisation: retire `QUALIFIED_PLAN_SHA256`
 
-Status: **rev 2 + S0, APPROVED by the owner 2026-09-25. OQ-1 is (c), objectID-only runtime identity; every other OQ follows its recommendation (see §6).** **S1 LANDED #237 (`2ee95223`, 2026-09-25); S2 in progress on `claude/continuity-generalisation-s2` (no PR), see §3 S2.** Read-only against
+Status: **rev 2 + S0, APPROVED by the owner 2026-09-25. OQ-1 is (c), objectID-only runtime identity; every other OQ follows its recommendation (see §6).** **S1 LANDED #237 (`2ee95223`, 2026-09-25); S2 LANDED #259 (`1a169482`, 2026-10-12; gate record `.agents/reviews/continuity-generalisation/gates-r1.md`). Next: S3 (owner's call, OQ-8).** Read-only against
 `386f28f2` (origin/main, #228), `claude/continuity-loopmode` @ `67643332` (local; rev 1 read `b3b57fc8`; the later
 commits are docs only), and `origin/claude/od-2-gl-replay-managed-obs-5bd03f` @ `af76ed97` (rev 1 read `1dd21207`;
 `af76ed97` makes the soak wrap windows length-relative, soak ≥ 3 min, and requires both windows on a looping fixture).
@@ -211,7 +211,7 @@ worktree pinned to a commit, with at most 3 headless Chromes; OBS only on the ow
 
 ### S2: derivation v2 + core v6 (the only runtime-byte stage; after OD-2 and loopMode merge)
 
-**S2 IN PROGRESS** on `claude/s2-detach-fix` (no PR): S2.0 and all four streams, rebased onto #247 with the owner-approved P2 re-registrations (`run_gates.sh`), §4 option (a), detach fix a1 (`keynote_live_continuity_detach_r8.plan.md` §5), review folds, pin hold and bridge timing (R10). State and next steps: the latest `.agents/handovers/keynote-live-continuity-*.md` (now `…-2026-10-10-night.md`).
+**S2 DONE 2026-10-12** — merged as #259 (`1a169482`). Q1–Q7 PASS at `ecf1b553`; D1–D6 stay on the allowlist (each passed Q3 + Q7). Gate record: `.agents/reviews/continuity-generalisation/gates-r1.md` (results, known limits, follow-ups). Review log below.
 
 | WS | Files (exclusive) | Work |
 |---|---|---|
@@ -242,6 +242,16 @@ Q3 Pass G runs inside `run_gates.sh` (owner 2026-10-10): full tier, one queued `
 
 Gate record: `.agents/reviews/continuity-generalisation/gates-r1.md`. The gate commit keeps in the allowlist only the S2
 shas of P2 off/on, p2-loop off/on, and the decks that passed Q3+Q7. The others are removed before the PR is offered.
+
+**S2 review log** (raw rounds retired at merge; conclusions here and in the gate record):
+- Codex r1, Astra S2 r2–r3 (implementation streams): folded before the first gate round.
+- Instrument r10–r11 (Astra): 10 false passes → fold4/fold5; r12–r17: identity-first + exact canonical asset rule
+  (owner "Sweep + exact match"), producer contract pass; **r17 APPROVE**, r18 APPROVE (`14f49c8c`).
+- gl-clock r1 CHANGES → r2 APPROVE. Registrations r19 APPROVE (`9d4fbef5`).
+- Live-validation fixes r20–r24 (1→2 press scene, force-wrap `show()`, local cadence, carry-cover elapsed ticks, span
+  guard, decision-14 seek excuse waiving readiness only); **r25 APPROVE** (`8bdaf582`).
+- Owner reverted the r21–r23 paint coverage tightening to the slower-side median (`ecf1b553`: "fix what my eyes can
+  catch") after it failed five registered reds on a throttle-onset gap. Final diff **r26 APPROVE**.
 
 ### S3: delete the allowlist (owner's call, OQ-8; Python + docs only, no JS bytes → no re-qualification)
 - **WS-D:** remove `QUALIFIED_PLAN_SHA256` and its `to_runtime` check. Keep `plan_signature` as a reported field (`output.continuity.planSha256`). WS-P updates `tests/test_p2_adversarial*.py`/`tests/test_live_host.py` uses of the allowlist.

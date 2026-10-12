@@ -1,5 +1,7 @@
 # One-frame detach at the post-MM `Playing` onset: plan (instrument, A/B, fix options)
 
+**Status: LANDED in S2 (#259, `1a169482`, 2026-10-12).** Kept because code cites it by path; results in `.agents/reviews/continuity-generalisation/gates-r1.md`.
+
 Planner, read-only. Nothing was run live. Code citations are against the S2 head `4e6df7b5`
 (`git show origin/claude/continuity-generalisation-s2:<path>`). `main.js` citations are byte offsets in the pinned player
 (sha `e9b2fad4…`, the same in every D deck and P2). The scan scripts for §0 are in this folder's `tools/`

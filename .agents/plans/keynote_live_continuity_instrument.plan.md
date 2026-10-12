@@ -1,5 +1,7 @@
 # S2 instrument stream: final plan, per-frame "painted"
 
+**Status: LANDED in S2 (#259, `1a169482`, 2026-10-12).** Kept because code cites it by path; results in `.agents/reviews/continuity-generalisation/gates-r1.md`.
+
 **Owner: LGTM 2026-10-10 — all 14 recommendations accepted. Test additions stay minimal (max coverage, fewest new tests). Stream D also carries the end-of-show hold (owner decision (a)).**
 
 Head `63606556` (worktree `obs-mac-camera-swap-fbc63b`, branch `claude/s2-detach-fix`). Evidence lives in the main checkout under `output/evidence/`. I made this plan read-only: I ran no Chrome, gates or pytest.
@@ -395,7 +397,7 @@ Procedure for each:
 3. Run the blindness rescore, which separates a scorer cause from a core cause.
 4. Re-register only with a reason, an evidence path and owner sign-off.
 
-**Carry-cover strip failure.** Untouched here; separate (triage: ~7 ms GL lag). Fix: `.agents/plans/keynote_live_continuity_glclock.plan.md`.
+**Carry-cover strip failure.** Untouched here; separate (triage: ~7 ms GL lag). Fixed by the gl-clock core (S2, #259; SKILL "Bridge clock").
 
 **D5 #5→#6.** This is end of show plus the stale-timer revival (`triage-2026-10-10/d5-end-of-show.md`). No gate drive reaches it. If a census ever sees it, it is listed as a finding with the label `endOfShow`, never dropped. Stream D and E1–E3 handle it.
 
