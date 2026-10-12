@@ -9,7 +9,7 @@ is copied below. Verify branches and PRs on GitHub before acting. Evidence paths
 |---|---|
 | `main` | `1589d096` = #257 (raw Astra rounds of #256 removed) on #255 (resizer seed read) on #256 (bridge easing). |
 | PR #256 | Merged 2026-10-10. **Owner confirmed in real OBS 2026-10-11: the 3→4 rubber band is gone.** Post-merge chore done (#257). |
-| `claude/s2-detach-fix` | `b7e0d760` (+ docs). Gate worktrees `gate-v-277c720b` (Stage 1) and `gate-v-9d4fbef5` (Stage 3) in `.claude/worktrees/` — trash after the final round. Instrument folds r12–r16 on top of the contract pass. Worktree `obs-mac-camera-swap-fbc63b`. Contains everything below. |
+| `claude/s2-detach-fix` | `d2c619f5` (+ docs), pushed. Gate worktrees `gate-v-277c720b` (Stage 1) and `gate-v-9d4fbef5` (Stage 3) in `.claude/worktrees/` — trash after the final round. Instrument folds r12–r16 on top of the contract pass. Worktree `obs-mac-camera-swap-fbc63b`. Contains everything below. |
 | gl-clock | Core `a9e1e66a` merged (Astra gl-clock r1 REQUEST CHANGES → fold `5e9c9faf` → **r2 APPROVE**). Live GL-1/2/3 done 2026-10-11 (below). |
 | Contract pass | MERGED (`1c02c447` → `de6df228`). Plan `.agents/plans/keynote_live_continuity_contract.plan.md` (owner GO; Q1 N1–N3 yes, Q2 admit rare legal shapes, Q3 smoke yes). Astra r12 → r16 folded; **r17 APPROVE** (section below). |
 | Gate worktrees | All trashed. Their live host logs were recovered to `s2-dev/live-logs/<wt>/` (`gate-glclock-c7d2d649`, `gate-preglclock-8ee7077d`, `gate-contract-de6df228`). |
@@ -142,7 +142,20 @@ Suites: `9d4fbef5` 3.12 10466 / 3.10 floor (probe+run_gates) 1905; `b7e0d760` 3.
 
 ## Next steps, in order
 1. **gl-clock:** DONE (Astra r2 APPROVE; live GL-1/2/3 above). Its Astra rounds: `s2-dev/glclock-review/astra-r{1,2}.md`.
-1b. **Remaining before the gate record (2026-10-12 afternoon, after the dissolve session's 13:00–14:30 slot):**
+1b. **START HERE (next session).** State at stop (2026-10-12 ~13:00): `b7e0d760` = the three fixes (Astra r20 REQUEST
+   CHANGES, 1 blocking P1 — carry-cover gap borrowing the following 30 Hz allowance); `d2c619f5` = the r20 fold (interior-tick
+   cadence for carry-cover gaps; exact old-convention match in `rescore_artifact`), targeted tests 421 pass, NOT yet reviewed,
+   full suite NOT yet run at `d2c619f5`. Tools/scripts (scratchpad is wiped on reboot — use these copies):
+   `output/evidence/s2-dev/instr-v-9d4fbef5/tools/{vrun,r19,r20,r21,gap,fc,oracle}` (drivers, helpers, `wrappix.py` v2,
+   `r21/run_oracle.sh` — fix its scratch paths first, Astra prompts/reviews). Order:
+   (0) full suites at `d2c619f5`; the oracle (`r21/run_oracle.sh`: OLD `b7e0d760` vs NEW — expect no verdict changes, rescore
+   `ok` unchanged); Astra r21 on `b7e0d760..d2c619f5` with the r20 review attached.
+   (0b) **open decision — paint coverage slower-side rule:** Astra's P1 principle also applies to
+   `paint_instrument.frame_coverage` in principle (a 66.7 ms delta at true 60 Hz followed by 8×30 Hz deltas passes at 116.7 ms
+   allowed), but a paint gap is a single rAF delta with no interior evidence, so the true cadence there is unknowable.
+   Options: keep (a missed rAF = no main-frame commit, so a DOM flash cannot hide in it — exposure limited to compositor-only
+   content; ask Astra to classify) or apply carry-cover's no-interior rule (both sides complete + steady, faster median), which
+   re-trips the 6 switch-point gaps. Recommendation: ask Astra r21 to classify; keep unless it shows a producer-legal false pass.
    (i) decision 14: run `wrappix.py` v2 (pixel + `--no-screencast` rate) → narrow wrap excuse or core fix (owner rule in
    memory); (ii) Astra r20 on `b7e0d760` (+ the decision-14 change); (iii) final round at the final head: `run_gates --tier
    full` 3-wide (must be `failed=0`), V2b force-wrap takes (kb-1to2 must FAIL, kb-3to4 fail, green takes pass), serial P2 host
