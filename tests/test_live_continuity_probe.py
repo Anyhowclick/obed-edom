@@ -15,9 +15,13 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
+import dataclasses
+import gzip
 import importlib.util
 import json
 import math
+import re
 import shutil
 import subprocess
 import sys
@@ -55,9 +59,9 @@ ASSET = "untitled.mov"
 SRC_RECT = {"x": 100.0, "y": 100.0, "w": 200.0, "h": 100.0}
 DST_RECT = {"x": 300.0, "y": 300.0, "w": 260.0, "h": 130.0}
 
-IDENTITY_STAGE_MAP = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0}
-SCALED_STAGE_MAP_4_3 = {"s": 4 / 3, "sy": 4 / 3, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0}
-LETTERBOXED_STAGE_MAP_5_6 = {"s": 5 / 6, "sy": 5 / 6, "ox": 0.0, "oy": 50.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0}
+IDENTITY_STAGE_MAP = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920, "offsetHeight": 1080}
+SCALED_STAGE_MAP_4_3 = {"s": 4 / 3, "sy": 4 / 3, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920, "offsetHeight": 1080}
+LETTERBOXED_STAGE_MAP_5_6 = {"s": 5 / 6, "sy": 5 / 6, "ox": 0.0, "oy": 50.0, "offsetWidth": 1920, "offsetHeight": 1080}
 
 _UNSET = object()
 
@@ -89,13 +93,15 @@ def video(
     rect: dict[str, float] | None = None,
     owner_el_id: int | None | object = "SELF",
 ) -> dict[str, Any]:
-    """Build one sampled `<video>` row the way SAMPLER_JS emits it. `owner_el_id`
+    """Build one sampled `<video>` row the way SAMPLER_JS emits it (the G2 decoder generation). `owner_el_id`
     defaults to the sentinel "SELF" (footprintOwnerDecoderId agrees the tracked
-    element owns its own footprint); pass an explicit id, None (no owner
-    resolved), or a dict for other cases."""
+    element owns its own footprint; an untagged element is no candidate, so it reads `via: none`); pass an
+    explicit id, None (no owner resolved), or a dict for other cases."""
     if rect is None:
         rect = dict(SRC_RECT if (scene or 0) < 2 else DST_RECT)
-    if owner_el_id == "SELF":
+    if owner_el_id == "SELF" and el_id is None:
+        owner = {"elId": None, "key": None, "via": "none", "contextType": None}
+    elif owner_el_id == "SELF":
         owner = {"elId": el_id, "key": "movie1", "via": "footprint-video", "contextType": None}
     elif owner_el_id is None:
         owner = None
@@ -107,6 +113,9 @@ def video(
         "src": src,
         "currentTime": current_time,
         "paused": paused,
+        "ended": False,
+        "loop": False,
+        "duration": None,
         "readyState": ready_state,
         "videoWidth": 640,
         "isConnected": is_connected,
@@ -227,18 +236,13 @@ class TestOwnerMismatchAfterCut:
 
 
 class TestOffRectOrDisconnected:
-    def test_hidden_decoder_fails(self) -> None:
-        samples = rows_around_boundary(disconnected_after=True)
+    @pytest.mark.parametrize("defect", ["disconnected_after", "off_rect_after"], ids=["hidden-decoder", "off-rect-decoder"])
+    def test_a_hidden_or_off_rect_decoder_fails(self, defect: str) -> None:
+        samples = rows_around_boundary(**{defect: True})
         verdict = probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
         assert verdict["verdict"] is False
         assert verdict["rectMismatches"]
         assert all(m["phase"] == "after" for m in verdict["rectMismatches"])
-
-    def test_off_rect_decoder_fails(self) -> None:
-        samples = rows_around_boundary(off_rect_after=True)
-        verdict = probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
-        assert verdict["verdict"] is False
-        assert verdict["rectMismatches"]
 
 
 class TestStallDetection:
@@ -307,14 +311,15 @@ class TestClockReset:
 
 
 class TestNoCrossing:
-    def test_asset_never_crosses_boundary_fails(self) -> None:
+    def test_asset_never_crosses_boundary_is_inconclusive(self) -> None:
+        """Astra r8 #3: an unobserved crossing is no evidence of a broken carry."""
         samples = [
             sample(0.0, 0.0, video(id=1, el_id=1, t=0.0, scene=0.0, current_time=0.0)),
             sample(16.0, 0.0, video(id=1, el_id=1, t=16.0, scene=0.0, current_time=0.016)),
         ]
         verdict = probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
-        assert verdict["verdict"] is False
-        assert verdict["reason"] == "boundary crossing not observed in samples"
+        assert verdict["verdict"] is None
+        assert verdict["reason"] == "inconclusive: boundary crossing not observed in samples"
 
     def test_never_decoded_is_inconclusive_not_pass_or_fail(self) -> None:
         samples = [
@@ -389,114 +394,101 @@ class TestBackgroundAlpha:
         assert probe.background_alpha(css) == expected
 
 
-class TestOverallStatusTruthTable:
-    def _base_result(self) -> dict[str, Any]:
-        def verdict(v: bool) -> dict[str, Any]:
-            return {"verdict": v}
+def _sampler_ok() -> dict[str, Any]:
+    """A schema-2 sampler record whose self-check passed: what every fresh arm must carry."""
+    return {"schema": 2, "meta": {"rafTicks": 10, "prepaint": 10}, "selfCheck": {"ok": True}}
 
-        def visible_slide(ordinal: int, verdict: bool | None) -> dict[str, Any]:
-            return {
-                "playerIndex": ordinal - 1, "originalOrdinal": ordinal, "verdict": verdict,
-                "status": "pass" if verdict is True else "fail",
-            }
 
+def _base_result() -> dict[str, Any]:
+    """The all-green host artifact every `overall_status` table below deviates from."""
+
+    def verdict(v: bool) -> dict[str, Any]:
+        return {"verdict": v}
+
+    def visible_slide(ordinal: int, verdict: bool | None) -> dict[str, Any]:
         return {
-            # The 1->2 destination slide, derived by the probe from the plan (never
-            # hardcoded as "slide 2"): the slide the Voff control must be RED on.
-            "groundTruth": {"boundaryPlayerIndex": 1},
-            "visible": {
-                "V": {
-                    "pass": "V", "status": "ok", "continuity": {"mode": "qualified"},
-                    "stageFit": verdict(True),
-                    "slides": [visible_slide(n, True) for n in (1, 2, 3, 4)],
-                    "verdict": True,
-                },
-                "Voff": {
-                    "pass": "Voff", "status": "ok", "continuity": {"mode": "off"},
-                    "stageFit": verdict(True),
-                    "slides": [
-                        visible_slide(1, True), visible_slide(2, False),
-                        visible_slide(3, True), visible_slide(4, True),
-                    ],
-                    "verdict": False,
-                },
+            "playerIndex": ordinal - 1, "originalOrdinal": ordinal, "verdict": verdict,
+            "status": "pass" if verdict is True else "fail",
+        }
+
+    result = {
+        # The 1->2 destination slide, derived by the probe from the plan (never
+        # hardcoded as "slide 2"): the slide the Voff control must be RED on.
+        "groundTruth": {"boundaryPlayerIndex": 1},
+        "visible": {
+            "V": {
+                "pass": "V", "status": "ok", "continuity": {"mode": "qualified"},
+                "stageFit": verdict(True),
+                "slides": [visible_slide(n, True) for n in (1, 2, 3, 4)],
+                "verdict": True,
             },
-            "arms": {
-                "A": {
-                    "continuity": {"mode": "qualified"},
-                    "continue1to2": verdict(True), "restart2to3": verdict(True), "continue3to4": verdict(True),
-                    "stageFit": verdict(True),
-                },
-                "B": {
-                    "continuity": {"mode": "off"},
-                    "continue1to2": verdict(True), "restart2to3": verdict(True), "continue3to4": verdict(False),
-                    "stageFit": verdict(True),
-                },
-                "C": {
-                    "continuity": {"mode": "qualified"},
-                    "continue1to2": verdict(True), "restart2to3": verdict(True), "continue3to4": verdict(False),
-                    "stageFit": verdict(True),
-                },
+            "Voff": {
+                "pass": "Voff", "status": "ok", "continuity": {"mode": "off"},
+                "stageFit": verdict(True),
+                "slides": [
+                    visible_slide(1, True), visible_slide(2, False),
+                    visible_slide(3, True), visible_slide(4, True),
+                ],
+                "verdict": False,
             },
-            "attach": {
+        },
+        "arms": {
+            "A": {
                 "continuity": {"mode": "qualified"},
-                "transparentBackground": {"computedBackground": "rgba(0, 0, 0, 0)"},
                 "continue1to2": verdict(True), "restart2to3": verdict(True), "continue3to4": verdict(True),
                 "stageFit": verdict(True),
             },
-        }
+            "B": {
+                "continuity": {"mode": "off"},
+                "continue1to2": verdict(True), "restart2to3": verdict(True), "continue3to4": verdict(False),
+                "stageFit": verdict(True),
+            },
+            "C": {
+                "continuity": {"mode": "qualified"},
+                "continue1to2": verdict(True), "restart2to3": verdict(True), "continue3to4": verdict(False),
+                "stageFit": verdict(True),
+            },
+        },
+        "attach": {
+            "continuity": {"mode": "qualified"},
+            "transparentBackground": {"computedBackground": "rgba(0, 0, 0, 0)"},
+            "continue1to2": verdict(True), "restart2to3": verdict(True), "continue3to4": verdict(True),
+            "stageFit": verdict(True),
+        },
+    }
+    for entry in (*result["arms"].values(), result["attach"]):
+        entry["sampler"] = _sampler_ok()
+    return result
 
+
+class TestOverallStatusTruthTable:
     def test_all_green_with_correct_modes_passes(self) -> None:
-        status, reasons = probe.overall_status(self._base_result())
+        status, reasons = probe.overall_status(_base_result())
         assert status == "pass"
         assert reasons == []
 
-    def test_arm_a_wrong_mode_fails_even_if_boundaries_are_green(self) -> None:
-        result = self._base_result()
-        result["arms"]["A"]["continuity"]["mode"] = "unsupported"
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("arm A" in r for r in reasons)
-
-    def test_arm_b_wrong_mode_fails_even_if_boundary_is_correctly_red(self) -> None:
-        result = self._base_result()
-        result["arms"]["B"]["continuity"]["mode"] = "qualified"
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("arm B" in r for r in reasons)
-
-    def test_arm_c_wrong_mode_fails(self) -> None:
-        result = self._base_result()
-        result["arms"]["C"]["continuity"]["mode"] = "off"
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("arm C" in r for r in reasons)
-
-    def test_attach_opaque_background_fails(self) -> None:
-        result = self._base_result()
-        result["attach"]["transparentBackground"]["computedBackground"] = "rgb(0, 0, 0)"
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("alpha" in r for r in reasons)
-
-    def test_attach_wrong_mode_fails(self) -> None:
-        result = self._base_result()
-        result["attach"]["continuity"]["mode"] = "unsupported"
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("attach" in r for r in reasons)
-
-    def test_missing_verdict_is_inconclusive(self) -> None:
-        result = self._base_result()
-        result["arms"]["A"]["continue1to2"] = {"verdict": None}
-        status, reasons = probe.overall_status(result)
-        assert status == "inconclusive"
-
-    def test_wrong_boundary_pattern_fails(self) -> None:
-        result = self._base_result()
-        result["arms"]["B"]["continue3to4"] = {"verdict": True}  # should have been False
-        status, _ = probe.overall_status(result)
-        assert status == "fail"
+    @pytest.mark.parametrize(("mutate", "status", "reason"), [
+        pytest.param(lambda r: r["arms"]["A"]["continuity"].update(mode="unsupported"), "fail", "arm A",
+                     id="arm-A-wrong-mode-fails-even-if-boundaries-are-green"),
+        pytest.param(lambda r: r["arms"]["B"]["continuity"].update(mode="qualified"), "fail", "arm B",
+                     id="arm-B-wrong-mode-fails-even-if-boundary-is-correctly-red"),
+        pytest.param(lambda r: r["arms"]["C"]["continuity"].update(mode="off"), "fail", "arm C", id="arm-C-wrong-mode"),
+        pytest.param(lambda r: r["attach"]["transparentBackground"].update(computedBackground="rgb(0, 0, 0)"),
+                     "fail", "alpha", id="attach-opaque-background"),
+        pytest.param(lambda r: r["attach"]["continuity"].update(mode="unsupported"), "fail", "attach", id="attach-wrong-mode"),
+        pytest.param(lambda r: r["arms"]["A"].update(continue1to2={"verdict": None}), "inconclusive", None,
+                     id="missing-verdict-is-inconclusive"),
+        # Arm B's continue3to4 should have been False.
+        pytest.param(lambda r: r["arms"]["B"].update(continue3to4={"verdict": True}), "fail", None,
+                     id="wrong-boundary-pattern"),
+    ])
+    def test_a_deviation_from_the_green_artifact(self, mutate: Any, status: str, reason: str | None) -> None:
+        result = _base_result()
+        mutate(result)
+        got, reasons = probe.overall_status(result)
+        assert got == status
+        if reason is not None:
+            assert any(reason in r for r in reasons)
 
 
 def moving_boundary_samples() -> list[dict[str, Any]]:
@@ -550,30 +542,28 @@ class TestMovingBoundary:
         assert result["verdict"] is False
         assert result["motion"]["errors"]
 
-    @pytest.mark.parametrize("field,value", [("scene", 6), ("playerState", "SettingUpScene"), ("busy", False)])
-    def test_path_allowance_requires_actual_playing_transition(self, field: str, value: Any) -> None:
+    @pytest.mark.parametrize(("selects", "mutate"), [
+        # The path allowance requires an actual Playing transition.
+        pytest.param(lambda row: row["playerState"] == "Playing", lambda row: row.update(scene=6), id="playing-on-the-source-scene"),
+        pytest.param(lambda row: row["playerState"] == "Playing", lambda row: row.update(playerState="SettingUpScene"),
+                     id="setting-up-scene-instead-of-playing"),
+        pytest.param(lambda row: row["playerState"] == "Playing", lambda row: row.update(busy=False), id="playing-but-not-busy"),
+        pytest.param(lambda row: row["scene"] == 6, lambda row: row["videos"][0].update(rect=dict(DST_RECT)),
+                     id="settled-source-must-remain-at-source"),
+        pytest.param(lambda row: row["scene"] == 7 and row["playerState"] == "IdleAtFinalState",
+                     lambda row: row["videos"][0].update(rect=dict(SRC_RECT)),
+                     id="idle-final-transition-scene-must-already-be-at-destination"),
+        # The WaitingToJump relaxation below is phase-specific, not a blanket allowance: a
+        # WaitingToJump sample that is NOT yet at the destination must still fail.
+        pytest.param(lambda row: row["scene"] == 7 and row["playerState"] == "IdleAtFinalState",
+                     lambda row: (row.update(playerState="WaitingToJump"), row["videos"][0].update(rect=dict(SRC_RECT))),
+                     id="waiting-to-jump-at-source-rect-is-still-a-mismatch"),
+    ])
+    def test_a_rect_off_its_phase_expectation_is_a_mismatch(self, selects: Any, mutate: Any) -> None:
         samples = moving_boundary_samples()
         for row in samples:
-            if row["playerState"] == "Playing":
-                row[field] = value
-        result = score_moving_boundary(samples)
-        assert result["verdict"] is False
-        assert result["rectMismatches"]
-
-    def test_settled_source_must_remain_at_source(self) -> None:
-        samples = moving_boundary_samples()
-        for row in samples:
-            if row["scene"] == 6:
-                row["videos"][0]["rect"] = dict(DST_RECT)
-        result = score_moving_boundary(samples)
-        assert result["verdict"] is False
-        assert result["rectMismatches"]
-
-    def test_idle_final_transition_scene_must_already_be_at_destination(self) -> None:
-        samples = moving_boundary_samples()
-        for row in samples:
-            if row["scene"] == 7 and row["playerState"] == "IdleAtFinalState":
-                row["videos"][0]["rect"] = dict(SRC_RECT)
+            if selects(row):
+                mutate(row)
         result = score_moving_boundary(samples)
         assert result["verdict"] is False
         assert result["rectMismatches"]
@@ -701,84 +691,38 @@ class TestMovingBoundary:
         assert result["verdict"] is True
         assert result["rectMismatches"] == []
 
-    def test_waiting_to_jump_at_source_rect_is_still_a_mismatch(self) -> None:
-        """The relaxation above is phase-specific, not a blanket allowance: a
-        WaitingToJump sample that is NOT yet at the destination must still fail."""
-        samples = moving_boundary_samples()
-        for row in samples:
-            if row["scene"] == 7 and row["playerState"] == "IdleAtFinalState":
-                row["playerState"] = "WaitingToJump"
-                row["videos"][0]["rect"] = dict(SRC_RECT)
-        result = score_moving_boundary(samples)
-        assert result["verdict"] is False
-        assert result["rectMismatches"]
 
-
-class TestStageMapIdentityConversion:
-    def test_identity_stage_map_conversion_is_a_noop(self) -> None:
-        """(a) rows at 1:1 with a recorded stage map of s=1 must score exactly
-        as they did before I3 -- the conversion pipeline is a true no-op at
-        identity."""
-        samples = rows_around_boundary()
+class TestStageMapConversion:
+    @pytest.mark.parametrize(("recorded", "placed", "green"), [
+        # (a) rows at 1:1 with a recorded stage map of s=1 must score exactly as they did
+        # before I3 -- the conversion pipeline is a true no-op at identity.
+        pytest.param(IDENTITY_STAGE_MAP, IDENTITY_STAGE_MAP, True, id="a-identity-is-a-noop"),
+        # (b) the same authored trajectory expressed in SCREEN px at a scaled and at a
+        # letterboxed (non-zero origin) stage map, correctly recorded, converts back to the
+        # authored numbers and scores green.
+        pytest.param(SCALED_STAGE_MAP_4_3, SCALED_STAGE_MAP_4_3, True, id="b-scaled-4-3-origin-0-0"),
+        pytest.param(LETTERBOXED_STAGE_MAP_5_6, LETTERBOXED_STAGE_MAP_5_6, True, id="b-letterboxed-5-6-origin-0-50"),
+        # (c) NULL CONTROL: rects genuinely sampled on a 4/3-scaled stage, but the sample
+        # wrongly RECORDS an identity map -- the instrument must see the scale error, not
+        # silently accept the raw screen numbers.
+        pytest.param(IDENTITY_STAGE_MAP, SCALED_STAGE_MAP_4_3, False, id="c-wrongly-assumed-identity-null-control"),
+        # (d) UNMAPPED RUNTIME control: the stage map is correctly recorded as 4/3-scaled, but
+        # the sampled `<video>` rects sit at the raw unscaled authored numbers -- what an old v2
+        # runtime that never applied the scale to its screen writes would produce.
+        pytest.param(SCALED_STAGE_MAP_4_3, IDENTITY_STAGE_MAP, False, id="d-unmapped-runtime-control"),
+        # (e) offset bug control: the stage map is correctly recorded with the letterboxed +50
+        # y-origin, but the sampled rects were actually placed as if the origin were 0.
+        pytest.param(LETTERBOXED_STAGE_MAP_5_6, {**LETTERBOXED_STAGE_MAP_5_6, "oy": 0.0}, False,
+                     id="e-missing-letterbox-origin-control"),
+    ])
+    def test_rects_convert_back_through_the_recorded_stage_map(self, recorded: Any, placed: Any, green: bool) -> None:
+        samples = rows_around_boundary(stage_map=recorded, rect_stage_map=placed)
         converted, invalid_count = probe.convert_samples_to_authored(samples)
         assert invalid_count == 0
         verdict = probe.score_continuity(converted, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
-        assert verdict["verdict"] is True
+        assert verdict["verdict"] is green
         assert verdict["stageMapInvalid"] == []
-
-
-class TestStageMapScaledConversion:
-    @pytest.mark.parametrize(
-        "stage_map",
-        [SCALED_STAGE_MAP_4_3, LETTERBOXED_STAGE_MAP_5_6],
-        ids=["scaled-4-3-origin-0-0", "letterboxed-5-6-origin-0-50"],
-    )
-    def test_correctly_recorded_scaled_stage_passes(self, stage_map: dict[str, Any]) -> None:
-        """(b) the same authored trajectory expressed in SCREEN px at a scaled
-        and at a letterboxed (non-zero origin) stage map, correctly recorded,
-        converts back to the authored numbers and scores green."""
-        samples = rows_around_boundary(stage_map=stage_map, rect_stage_map=stage_map)
-        converted, invalid_count = probe.convert_samples_to_authored(samples)
-        assert invalid_count == 0
-        verdict = probe.score_continuity(converted, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
-        assert verdict["verdict"] is True
-        assert verdict["rectMismatches"] == []
-
-    def test_wrongly_assumed_identity_map_is_a_null_control(self) -> None:
-        """(c) NULL CONTROL: rects genuinely sampled on a 4/3-scaled stage, but
-        the sample wrongly RECORDS an identity map -- the instrument must see
-        the scale error, not silently accept the raw screen numbers."""
-        samples = rows_around_boundary(stage_map=IDENTITY_STAGE_MAP, rect_stage_map=SCALED_STAGE_MAP_4_3)
-        converted, invalid_count = probe.convert_samples_to_authored(samples)
-        assert invalid_count == 0
-        verdict = probe.score_continuity(converted, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
-        assert verdict["verdict"] is False
-        assert verdict["rectMismatches"]
-
-    def test_unmapped_runtime_control(self) -> None:
-        """(d) UNMAPPED RUNTIME control: the stage map is correctly recorded as
-        4/3-scaled, but the sampled `<video>` rects sit at the raw unscaled
-        authored numbers -- what an old v2 runtime that never applied the
-        scale to its screen writes would produce. Must be red."""
-        samples = rows_around_boundary(stage_map=SCALED_STAGE_MAP_4_3, rect_stage_map=IDENTITY_STAGE_MAP)
-        converted, invalid_count = probe.convert_samples_to_authored(samples)
-        assert invalid_count == 0
-        verdict = probe.score_continuity(converted, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
-        assert verdict["verdict"] is False
-        assert verdict["rectMismatches"]
-
-    def test_missing_letterbox_origin_control(self) -> None:
-        """(e) offset bug control: the stage map is correctly recorded with the
-        letterboxed +50 y-origin, but the sampled rects were actually placed
-        as if the origin were 0 (the bug this arm exists to catch). Must be
-        red."""
-        buggy_rect_map = {**LETTERBOXED_STAGE_MAP_5_6, "oy": 0.0}
-        samples = rows_around_boundary(stage_map=LETTERBOXED_STAGE_MAP_5_6, rect_stage_map=buggy_rect_map)
-        converted, invalid_count = probe.convert_samples_to_authored(samples)
-        assert invalid_count == 0
-        verdict = probe.score_continuity(converted, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
-        assert verdict["verdict"] is False
-        assert verdict["rectMismatches"]
+        assert bool(verdict["rectMismatches"]) is not green
 
 
 class TestStageMapInvalid:
@@ -786,8 +730,8 @@ class TestStageMapInvalid:
         "stage_map",
         [
             None,
-            {"s": 0.0, "sy": 0.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 0.0, "offsetHeight": 0.0},
-            {"s": 1.0, "sy": 1.2, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0},
+            {"s": 0.0, "sy": 0.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 0, "offsetHeight": 0},
+            {"s": 1.0, "sy": 1.2, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920, "offsetHeight": 1080},
         ],
         ids=["no-stage-element", "zero-box", "non-uniform-scale"],
     )
@@ -876,58 +820,41 @@ class TestOverallStatusStageFit:
     passing `stageFit` on every arm and on attach, so these tests exercise
     deviations from that baseline rather than an absent field."""
 
-    def _base_result(self) -> dict[str, Any]:
-        return TestOverallStatusTruthTable()._base_result()
-
-    def test_arm_a_stage_fit_failure_fails_even_if_boundaries_are_green(self) -> None:
-        result = self._base_result()
-        result["arms"]["A"]["stageFit"] = {"verdict": False}
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("arm A stageFit failed" in r for r in reasons)
-
-    def test_attach_stage_fit_failure_fails(self) -> None:
-        result = self._base_result()
-        result["attach"]["stageFit"] = {"verdict": False}
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("attach stageFit failed" in r for r in reasons)
-
-    @pytest.mark.parametrize(
-        ("path", "label"),
-        [
-            (("arms", "A"), "arm A"),
-            (("arms", "B"), "arm B"),
-            (("arms", "C"), "arm C"),
-            (("attach",), "attach"),
-        ],
-    )
-    def test_missing_stage_fit_fails_closed(self, path: tuple[str, ...], label: str) -> None:
-        """A `stageFit` key that is simply absent -- an arm that crashed before
-        scoring it, or a caller that never set it -- must fail, not pass, and
-        must be distinguishable (by reason text) from an explicit False
-        verdict."""
-        result = self._base_result()
+    @pytest.mark.parametrize(("path", "label", "missing"), [
+        pytest.param(("arms", "A"), "arm A", False, id="arm-A-failed-even-if-boundaries-are-green"),
+        pytest.param(("attach",), "attach", False, id="attach-failed"),
+        # A `stageFit` key that is simply absent -- an arm that crashed before scoring it, or a
+        # caller that never set it -- must fail, not pass, and must be distinguishable (by
+        # reason text) from an explicit False verdict.
+        pytest.param(("arms", "A"), "arm A", True, id="arm-A-missing"),
+        pytest.param(("arms", "B"), "arm B", True, id="arm-B-missing"),
+        pytest.param(("arms", "C"), "arm C", True, id="arm-C-missing"),
+        pytest.param(("attach",), "attach", True, id="attach-missing"),
+    ])
+    def test_a_failed_or_missing_stage_fit_fails_closed(self, path: tuple[str, ...], label: str, missing: bool) -> None:
+        result = _base_result()
         entry = result
-        for key in path[:-1]:
+        for key in path:
             entry = entry[key]
-        del entry[path[-1]]["stageFit"]
+        if missing:
+            del entry["stageFit"]
+        else:
+            entry["stageFit"] = {"verdict": False}
         status, reasons = probe.overall_status(result)
         assert status == "fail"
-        assert any(f"{label} stageFit missing" in r for r in reasons)
+        assert any(f"{label} stageFit {'missing' if missing else 'failed'}" in r for r in reasons)
 
 
 class TestViewportParsing:
     def test_parses_valid_viewport(self) -> None:
         assert probe.parse_viewport_arg("2560x1440") == (2560, 1440)
 
-    def test_default_viewport_is_1920x1080(self) -> None:
-        args = probe.parse_args([])
-        assert args.viewport == (probe.VIEWPORT_WIDTH, probe.VIEWPORT_HEIGHT)
-
-    def test_viewport_flag_overrides_default(self) -> None:
-        args = probe.parse_args(["--viewport", "1600x1000"])
-        assert args.viewport == (1600, 1000)
+    @pytest.mark.parametrize(("argv", "expected"), [
+        pytest.param([], (probe.VIEWPORT_WIDTH, probe.VIEWPORT_HEIGHT), id="default-is-1920x1080"),
+        pytest.param(["--viewport", "1600x1000"], (1600, 1000), id="flag-overrides-default"),
+    ])
+    def test_viewport_arg(self, argv: list[str], expected: tuple[int, int]) -> None:
+        assert probe.parse_args(argv).viewport == expected
 
     @pytest.mark.parametrize(
         "value", ["", "1920", "1920xabc", "0x1080", "1920x0", "-100x1080", "1920,1080"]
@@ -942,7 +869,7 @@ class TestViewportParsing:
 # --------------------------------------------------------------------------
 
 VISIBLE_VIEWPORT = (64, 32)
-FULL_BLEED_STAGE_MAP = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 64.0, "offsetHeight": 32.0}
+FULL_BLEED_STAGE_MAP = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 64, "offsetHeight": 32}
 
 
 class FakeClock:
@@ -1180,32 +1107,22 @@ class TestSlideInstancesGroundTruth:
 
 
 class TestControlRegion:
-    def test_letterboxed_stage_uses_the_bar_above_it(self) -> None:
-        stage = {"x": 0.0, "y": 180.0, "width": 1920.0, "height": 720.0}
+    @pytest.mark.parametrize(("stage", "source", "fields"), [
+        pytest.param({"x": 0.0, "y": 180.0, "width": 1920.0, "height": 720.0}, "letterbox-top", {"y": 0, "w": 40, "h": 40},
+                     id="letterboxed-stage-uses-the-bar-above-it"),
+        pytest.param({"x": 240.0, "y": 0.0, "width": 1440.0, "height": 1080.0}, "letterbox-left", {"x": 0, "w": 40, "h": 40},
+                     id="pillarboxed-stage-uses-the-bar-beside-it"),
+        pytest.param({"x": 0.0, "y": 0.0, "width": 1920.0, "height": 1080.0}, "stage-corner",
+                     {"x": probe.CONTROL_INSET_PX, "y": probe.CONTROL_INSET_PX}, id="full-bleed-falls-back-to-the-inset-stage-corner"),
+        # A 20px bar cannot hold a 40x40 patch -- falling back to the stage corner is correct;
+        # sampling off the end of the bar would put half the control inside the stage.
+        pytest.param({"x": 0.0, "y": 20.0, "width": 1920.0, "height": 1040.0}, "stage-corner",
+                     {"y": 20 + probe.CONTROL_INSET_PX}, id="a-bar-thinner-than-the-patch-is-not-the-control"),
+    ])
+    def test_control_region(self, stage: dict[str, float], source: str, fields: dict[str, int]) -> None:
         control = probe.control_region(stage, (1920, 1080))
-        assert control["source"] == "letterbox-top"
-        assert (control["y"], control["w"], control["h"]) == (0, 40, 40)
-
-    def test_pillarboxed_stage_uses_the_bar_beside_it(self) -> None:
-        stage = {"x": 240.0, "y": 0.0, "width": 1440.0, "height": 1080.0}
-        control = probe.control_region(stage, (1920, 1080))
-        assert control["source"] == "letterbox-left"
-        assert (control["x"], control["w"], control["h"]) == (0, 40, 40)
-
-    def test_full_bleed_stage_falls_back_to_the_inset_stage_corner(self) -> None:
-        stage = {"x": 0.0, "y": 0.0, "width": 1920.0, "height": 1080.0}
-        control = probe.control_region(stage, (1920, 1080))
-        assert control["source"] == "stage-corner"
-        assert (control["x"], control["y"]) == (probe.CONTROL_INSET_PX, probe.CONTROL_INSET_PX)
-
-    def test_a_bar_thinner_than_the_patch_is_not_used_as_the_control(self) -> None:
-        """A 20px bar cannot hold a 40x40 patch -- falling back to the stage
-        corner is correct; sampling off the end of the bar would put half the
-        control inside the stage."""
-        stage = {"x": 0.0, "y": 20.0, "width": 1920.0, "height": 1040.0}
-        control = probe.control_region(stage, (1920, 1080))
-        assert control["source"] == "stage-corner"
-        assert control["y"] == 20 + probe.CONTROL_INSET_PX
+        assert control["source"] == source
+        assert {key: control[key] for key in fields} == fields
 
 
 class TestVisibleSlideRecord:
@@ -1234,19 +1151,23 @@ class TestVisibleSlideRecord:
         assert record["attempts"] == 2
         assert record["sceneId"] == "scene-2"
 
-    def test_scene_changing_under_both_attempts_is_inconclusive_never_a_pass_or_a_red(self) -> None:
-        host = FakeHost(scene_ids=["scene-1", "scene-2", "scene-3", "scene-4"])
-        record = self._record(host)
-        assert record["status"] == "inconclusive"
-        assert record["verdict"] is None
-        assert record["attempts"] == 2
-
-    def test_player_going_busy_during_the_burst_is_inconclusive(self) -> None:
+    @pytest.mark.parametrize(("host_kwargs", "expected", "reason"), [
+        pytest.param({"scene_ids": ["scene-1", "scene-2", "scene-3", "scene-4"]}, {"status": "inconclusive", "attempts": 2}, None,
+                     id="scene-changing-under-both-attempts-is-inconclusive-never-a-pass-or-a-red"),
         # observe(): settle check, then the post-burst check of each attempt.
-        host = FakeHost(scene_ids=["s", "s", "s", "s"], busy=[False, True, True])
-        record = self._record(host)
-        assert record["status"] == "inconclusive"
+        pytest.param({"scene_ids": ["s", "s", "s", "s"], "busy": [False, True, True]}, {"status": "inconclusive"}, None,
+                     id="player-going-busy-during-the-burst-is-inconclusive"),
+        pytest.param({"scene_ids": ["s", "s"], "shot": png_b64(VISIBLE_VIEWPORT[0] - 1, VISIBLE_VIEWPORT[1])},
+                     {"status": "error"}, "expected 64x32", id="screenshot-not-the-forced-viewport-fails-closed"),
+        pytest.param({"scene_ids": ["s", "s"], "stage_map": None}, {"status": "error"}, "stage map",
+                     id="untrustworthy-stage-map-fails-closed"),
+    ])
+    def test_an_unscorable_burst_is_never_a_verdict(self, host_kwargs: dict[str, Any], expected: dict[str, Any], reason: str | None) -> None:
+        record = self._record(FakeHost(**host_kwargs))
         assert record["verdict"] is None
+        assert {key: record[key] for key in expected} == expected
+        if reason is not None:
+            assert reason in record["reason"]
 
     def test_busy_that_never_clears_is_a_bounded_wait_then_inconclusive(self) -> None:
         host = FakeHost(scene_ids=["s", "s"], busy=True)
@@ -1255,20 +1176,6 @@ class TestVisibleSlideRecord:
         assert record["verdict"] is None
         assert "never settled" in record["reason"]
         assert host.transport.captures == 0
-
-    def test_screenshot_that_is_not_the_forced_viewport_fails_closed(self) -> None:
-        host = FakeHost(scene_ids=["s", "s"], shot=png_b64(VISIBLE_VIEWPORT[0] - 1, VISIBLE_VIEWPORT[1]))
-        record = self._record(host)
-        assert record["status"] == "error"
-        assert record["verdict"] is None
-        assert "expected 64x32" in record["reason"]
-
-    def test_untrustworthy_stage_map_fails_closed(self) -> None:
-        host = FakeHost(scene_ids=["s", "s"], stage_map=None)
-        record = self._record(host)
-        assert record["status"] == "error"
-        assert record["verdict"] is None
-        assert "stage map" in record["reason"]
 
     def test_a_slide_missing_from_the_ground_truth_fails_closed(self) -> None:
         host = FakeHost(scene_ids=["s", "s"])
@@ -1342,7 +1249,7 @@ class TestVisibleScorerContract:
     shapes it documents."""
 
     VIEWPORT = (320, 200)
-    STAGE_MAP = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 320.0, "offsetHeight": 200.0}
+    STAGE_MAP = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 320, "offsetHeight": 200}
     INSTANCES = {0: {"Untitled.mov": [{"x": 40.0, "y": 60.0, "w": 200.0, "h": 100.0}]}}
 
     def test_the_shared_pure_scorers_are_importable_under_their_agreed_names(self) -> None:
@@ -1418,76 +1325,50 @@ class TestVisibleScorerContract:
 
 
 class TestOverallStatusVisible:
-    def _base_result(self) -> dict[str, Any]:
-        return TestOverallStatusTruthTable()._base_result()
-
-    def test_v_all_live_and_voff_red_at_the_boundary_slide_passes(self) -> None:
-        status, reasons = probe.overall_status(self._base_result())
-        assert status == "pass"
-        assert reasons == []
-
-    def test_v_with_one_dead_slide_fails(self) -> None:
-        result = self._base_result()
-        result["visible"]["V"]["slides"][2]["verdict"] = False
+    @pytest.mark.parametrize(("mutate", "reason"), [
+        pytest.param(lambda r: r["visible"]["V"]["slides"][2].update(verdict=False), "visible pass V slide 3",
+                     id="V-with-one-dead-slide"),
+        pytest.param(lambda r: r["visible"]["V"]["continuity"].update(mode="unsupported"), "visible pass V continuity.mode",
+                     id="V-in-the-wrong-continuity-mode-even-if-every-slide-is-live"),
+        pytest.param(lambda r: r["visible"]["Voff"]["continuity"].update(mode="qualified"), "visible pass Voff continuity.mode",
+                     id="Voff-in-the-wrong-continuity-mode"),
+        pytest.param(lambda r: r["visible"]["Voff"]["slides"][1].update(verdict=True), "blind",
+                     id="Voff-live-everywhere-the-instrument-is-blind"),
+        # Movies do play before any transition, so slide 1 with continuity OFF must still be
+        # live -- a red there means the instrument reds out on anything, and its boundary red
+        # proves nothing.
+        pytest.param(lambda r: r["visible"]["Voff"]["slides"][0].update(verdict=False), "always-red",
+                     id="Voff-red-on-slide-one-the-instrument-is-always-red"),
+        *(pytest.param(lambda r, n=name: r["visible"].pop(n), f"visible pass {name} missing",
+                       id=f"missing-{name}-pass-fails-with-its-own-reason") for name in ("V", "Voff")),
+        pytest.param(lambda r: r["groundTruth"].pop("boundaryPlayerIndex"), "expected-red slide is unknown",
+                     id="unknown-expected-red-slide-fails-closed"),
+        pytest.param(lambda r: r["groundTruth"].update(boundaryPlayerIndex=7), "never scored the expected-red slide",
+                     id="expected-red-slide-never-scored-fails-closed"),
+    ])
+    def test_a_visible_deviation_fails_with_its_reason(self, mutate: Any, reason: str) -> None:
+        result = _base_result()
+        mutate(result)
         status, reasons = probe.overall_status(result)
         assert status == "fail"
-        assert any("visible pass V slide 3" in reason for reason in reasons)
+        assert any(reason in r for r in reasons)
 
-    def test_v_with_one_inconclusive_slide_fails_it_is_never_a_pass(self) -> None:
-        result = self._base_result()
-        result["visible"]["V"]["slides"][1].update(verdict=None, status="inconclusive")
+    # Astra r7 general rule: an unreadable slide is inconclusive, never a pass and never overwritten by a fail.
+    @pytest.mark.parametrize(("mutate", "reason"), [
+        pytest.param(lambda r: r["visible"]["V"]["slides"][1].update(verdict=None, status="inconclusive"),
+                     "visible pass V slide 2 is inconclusive", id="V-with-one-inconclusive-slide-is-never-a-pass"),
+        pytest.param(lambda r: r["visible"]["Voff"]["slides"][1].update(verdict=None, status="inconclusive"), "blind",
+                     id="Voff-inconclusive-at-the-boundary-slide-is-not-the-required-red"),
+    ])
+    def test_an_inconclusive_visible_slide_is_inconclusive(self, mutate: Any, reason: str) -> None:
+        result = _base_result()
+        mutate(result)
         status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("inconclusive" in reason for reason in reasons)
-
-    def test_v_in_the_wrong_continuity_mode_fails_even_if_every_slide_is_live(self) -> None:
-        result = self._base_result()
-        result["visible"]["V"]["continuity"]["mode"] = "unsupported"
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("visible pass V continuity.mode" in reason for reason in reasons)
-
-    def test_voff_in_the_wrong_continuity_mode_fails(self) -> None:
-        result = self._base_result()
-        result["visible"]["Voff"]["continuity"]["mode"] = "qualified"
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("visible pass Voff continuity.mode" in reason for reason in reasons)
-
-    def test_voff_live_everywhere_fails_because_the_instrument_is_blind(self) -> None:
-        result = self._base_result()
-        result["visible"]["Voff"]["slides"][1]["verdict"] = True
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("blind" in reason for reason in reasons)
-
-    def test_voff_red_on_slide_one_fails_because_the_instrument_is_always_red(self) -> None:
-        """Movies do play before any transition, so slide 1 with continuity OFF
-        must still be live -- a red there means the instrument reds out on
-        anything, and its boundary red proves nothing."""
-        result = self._base_result()
-        result["visible"]["Voff"]["slides"][0]["verdict"] = False
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("always-red" in reason for reason in reasons)
-
-    def test_voff_inconclusive_at_the_boundary_slide_is_not_the_required_red(self) -> None:
-        result = self._base_result()
-        result["visible"]["Voff"]["slides"][1].update(verdict=None, status="inconclusive")
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("blind" in reason for reason in reasons)
-
-    @pytest.mark.parametrize("name", ["V", "Voff"])
-    def test_a_missing_pass_fails_with_its_own_reason(self, name: str) -> None:
-        result = self._base_result()
-        del result["visible"][name]
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any(f"visible pass {name} missing" in reason for reason in reasons)
+        assert status == "inconclusive"
+        assert any(reason in r for r in reasons), reasons
 
     def test_a_missing_visible_block_fails_both_passes(self) -> None:
-        result = self._base_result()
+        result = _base_result()
         del result["visible"]
         status, reasons = probe.overall_status(result)
         assert status == "fail"
@@ -1496,7 +1377,7 @@ class TestOverallStatusVisible:
 
     @pytest.mark.parametrize("name", ["V", "Voff"])
     def test_an_errored_pass_fails_with_the_recorded_reason(self, name: str) -> None:
-        result = self._base_result()
+        result = _base_result()
         result["visible"][name].update(status="error", error="plan has no slide_instances")
         status, reasons = probe.overall_status(result)
         assert status == "fail"
@@ -1504,7 +1385,7 @@ class TestOverallStatusVisible:
 
     @pytest.mark.parametrize("name", ["V", "Voff"])
     def test_a_pass_that_scored_no_slides_fails(self, name: str) -> None:
-        result = self._base_result()
+        result = _base_result()
         result["visible"][name]["slides"] = []
         status, reasons = probe.overall_status(result)
         assert status == "fail"
@@ -1514,7 +1395,7 @@ class TestOverallStatusVisible:
         """A deck whose first continuing boundary lands on player index 2 must be
         scored there -- with slide 2 green and slide 3 red, the same artifact
         that fails under a hardcoded "slide 2" must pass."""
-        result = self._base_result()
+        result = _base_result()
         result["groundTruth"]["boundaryPlayerIndex"] = 2
         slides = result["visible"]["Voff"]["slides"]
         slides[1]["verdict"] = True
@@ -1523,22 +1404,8 @@ class TestOverallStatusVisible:
         assert status == "pass"
         assert reasons == []
 
-    def test_an_unknown_expected_red_slide_fails_closed(self) -> None:
-        result = self._base_result()
-        del result["groundTruth"]["boundaryPlayerIndex"]
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("expected-red slide is unknown" in reason for reason in reasons)
-
-    def test_an_expected_red_slide_that_was_never_scored_fails_closed(self) -> None:
-        result = self._base_result()
-        result["groundTruth"]["boundaryPlayerIndex"] = 7
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("never scored the expected-red slide" in reason for reason in reasons)
-
     def test_visible_failures_do_not_mask_arm_failures(self) -> None:
-        result = self._base_result()
+        result = _base_result()
         result["arms"]["A"]["stageFit"] = {"verdict": False}
         result["visible"]["V"]["slides"][0]["verdict"] = False
         status, reasons = probe.overall_status(result)
@@ -1561,9 +1428,9 @@ DUPLICATE_SCREEN_RECT = {"x": 20.0, "y": 70.0, "w": 663.0, "h": 186.0}
 DUPLICATE_IOU = (663.0 * 186.0) / (952.0 * 268.0)
 
 PAINT_STAGE_MAPS = {
-    "full-bleed": {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1000.0, "offsetHeight": 400.0},
-    "scaled-4-3": {"s": 4 / 3, "sy": 4 / 3, "ox": 0.0, "oy": 0.0, "offsetWidth": 750.0, "offsetHeight": 300.0},
-    "letterboxed-origin-0-50": {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 50.0, "offsetWidth": 1000.0, "offsetHeight": 300.0},
+    "full-bleed": {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1000, "offsetHeight": 400},
+    "scaled-4-3": {"s": 4 / 3, "sy": 4 / 3, "ox": 0.0, "oy": 0.0, "offsetWidth": 750, "offsetHeight": 300},
+    "letterboxed-origin-0-50": {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 50.0, "offsetWidth": 1000, "offsetHeight": 300},
 }
 
 
@@ -1579,25 +1446,22 @@ class TestPaintingVideoPaintTest:
     (and so starts counting videos the player is not painting, or stops counting
     ones it is) fails a named test."""
 
-    def test_the_expression_tests_connectedness_decode_and_size(self) -> None:
-        assert "v.isConnected" in probe.PAINTING_VIDEOS_JS
-        assert "v.readyState >= 2" in probe.PAINTING_VIDEOS_JS
-        assert "v.videoWidth > 0" in probe.PAINTING_VIDEOS_JS
-        assert "r.width > 1 && r.height > 1" in probe.PAINTING_VIDEOS_JS
-
-    def test_the_expression_tests_visibility_and_the_ancestor_opacity_product(self) -> None:
-        """A Magic-Move-settled slide paints through a stage-wide WebGL canvas
-        with the DOM layer tree at opacity 0: those videos must NOT be listed."""
-        assert "checkVisibility({checkOpacity: true, checkVisibilityCSS: true})" in probe.PAINTING_VIDEOS_JS
-        assert "opacityProduct(v) > 0.02" in probe.PAINTING_VIDEOS_JS
-        assert "node.parentElement" in probe.PAINTING_VIDEOS_JS
-
-    def test_the_expression_tests_viewport_intersection(self) -> None:
-        assert "r.left >= window.innerWidth" in probe.PAINTING_VIDEOS_JS
-        assert "r.top >= window.innerHeight" in probe.PAINTING_VIDEOS_JS
-
-    def test_a_browser_without_check_visibility_answers_with_an_error_not_a_short_list(self) -> None:
-        assert "checkVisibility is unavailable" in probe.PAINTING_VIDEOS_JS
+    @pytest.mark.parametrize("term", [
+        pytest.param("v.isConnected", id="connectedness"),
+        pytest.param("v.readyState >= 2", id="decode"),
+        pytest.param("v.videoWidth > 0", id="video-size"),
+        pytest.param("r.width > 1 && r.height > 1", id="box-size"),
+        # A Magic-Move-settled slide paints through a stage-wide WebGL canvas with the DOM
+        # layer tree at opacity 0: those videos must NOT be listed.
+        pytest.param("checkVisibility({checkOpacity: true, checkVisibilityCSS: true})", id="visibility"),
+        pytest.param("opacityProduct(v) > 0.02", id="ancestor-opacity-product"),
+        pytest.param("node.parentElement", id="ancestor-walk"),
+        pytest.param("r.left >= window.innerWidth", id="viewport-intersection-x"),
+        pytest.param("r.top >= window.innerHeight", id="viewport-intersection-y"),
+        pytest.param("checkVisibility is unavailable", id="no-check-visibility-answers-an-error-not-a-short-list"),
+    ])
+    def test_the_expression_keeps_its_term(self, term: str) -> None:
+        assert term in probe.PAINTING_VIDEOS_JS
 
 
 class TestRectIou:
@@ -1711,6 +1575,25 @@ class TestPaintingVideoInstanceCheck:
         assert [entry["label"] for entry in duplicates] == ["Untitled.mov#1"]
         assert [video["elId"] for video in duplicates[0]["videos"]] == [1, 2]
 
+    @pytest.mark.parametrize(("src", "verdict", "status", "tied"), [
+        ("Untitled.mov", True, "pass", False), ("foreign.mov", False, "fail", False), ("", None, "inconclusive", False),
+        # Astra r16 #3: two instances on one rect; the label tie-break gave `a.mov` z.mov#1 (a false foreign red).
+        ("a.mov", True, "pass", True), ("foreign.mov", False, "fail", True),
+    ])
+    def test_a_painter_claiming_an_instance_must_name_its_asset(self, src: str, verdict: Any, status: str, tied: bool) -> None:
+        """Astra r15 #1: the instance was matched by geometry alone, so another asset's (or a source-less)
+        decoder at the expected rect passed under fully live pixels."""
+        from obed_edom.html_alpha_probe import score_visible_slide
+
+        stage_map = PAINT_STAGE_MAPS["full-bleed"]
+        rect = probe.to_authored_rect(EXPECTED_SCREEN_RECT, stage_map)
+        record = self._record(
+            stage_map, [painting_video(EXPECTED_SCREEN_RECT, src=src, el_id=1)],
+            instances={0: {"a.mov": [rect], "z.mov": [dict(rect)]}} if tied else None,
+            scorer=score_visible_slide, shots=self._live_shots(),
+        )
+        assert (record["verdict"], record["status"], record["instanceCheck"]["verdict"]) == (verdict, status, verdict)
+
     def test_a_video_the_paint_test_filtered_out_is_ignored(self) -> None:
         """On a Magic-Move-settled slide the player paints with a stage-wide
         WebGL canvas and the DOM layer tree sits at opacity 0. The in-page paint
@@ -1737,21 +1620,22 @@ class TestPaintingVideoInstanceCheck:
         assert record["instanceCheck"]["verdict"] is True
 
     @pytest.mark.parametrize(
-        "raw",
+        ("raw", "reason"),
         [
-            True,
-            None,
-            {"error": "checkVisibility is unavailable in this browser"},
-            [{"src": "Untitled.mov"}],
-            [{"src": "Untitled.mov", "rect": {"x": 0.0, "y": 0.0, "w": float("nan"), "h": 10.0}}],
+            (True, "evidence contract: painting:list"),
+            (None, "evidence contract: painting:list"),
+            ({"error": "checkVisibility is unavailable in this browser"}, "painting-video probe"),
+            ([{"src": "Untitled.mov", "elId": None}], "evidence contract: painting.rect:missing"),
+            ([{"src": "Untitled.mov", "elId": None, "rect": {"x": 0.0, "y": 0.0, "w": float("nan"), "h": 10.0}}],
+             "evidence contract: painting.rect"),
         ],
         ids=["true", "null", "error-object", "row-without-a-rect", "non-finite-rect"],
     )
-    def test_a_malformed_painting_result_is_an_instrument_error_never_a_verdict(self, raw: Any) -> None:
+    def test_a_malformed_painting_result_is_an_instrument_error_never_a_verdict(self, raw: Any, reason: str) -> None:
         record = self._record(PAINT_STAGE_MAPS["full-bleed"], raw)
         assert record["status"] == "error"
         assert record["verdict"] is None
-        assert "painting-video probe" in record["reason"]
+        assert reason in record["reason"]
 
     def test_an_instance_failure_does_not_promote_an_inconclusive_slide_to_red(self) -> None:
         """An unusable noise floor means the instrument is not trusted at all --
@@ -1808,9 +1692,6 @@ class TestVisiblePassStageFitGate:
     whose stage was shifted or cropped is not evidence -- and its slide verdicts
     must not be consulted at all."""
 
-    def _base_result(self) -> dict[str, Any]:
-        return TestOverallStatusTruthTable()._base_result()
-
     EXPECTED_FIT = {"x": 0.0, "y": 0.0, "width": 64.0, "height": 32.0}
 
     def _slides(self, *stage_maps: Any) -> list[dict[str, Any]]:
@@ -1840,51 +1721,37 @@ class TestVisiblePassStageFitGate:
 
     @pytest.mark.parametrize("name", ["V", "Voff"])
     def test_a_failed_stage_fit_fails_the_pass_and_hides_its_slide_verdicts(self, name: str) -> None:
-        result = self._base_result()
+        """The whole point for Voff: with a shifted stage, the expected rect can fall off the
+        image and come back as an ordinary red that Voff would accept -- a cropped Voff
+        cannot supply the required red (no "blind" verdict is ever consulted)."""
+        result = _base_result()
         result["visible"][name]["stageFit"] = {"verdict": False}
         status, reasons = probe.overall_status(result)
         assert status == "fail"
         assert any(f"visible pass {name} stage fit failed" in reason for reason in reasons)
         assert not any(f"visible pass {name} slide" in reason for reason in reasons)
+        assert not any("blind" in reason for reason in reasons)
 
     @pytest.mark.parametrize("name", ["V", "Voff"])
     def test_a_missing_stage_fit_fails_closed(self, name: str) -> None:
-        result = self._base_result()
+        result = _base_result()
         del result["visible"][name]["stageFit"]
         status, reasons = probe.overall_status(result)
         assert status == "fail"
         assert any(f"visible pass {name} stage fit missing" in reason for reason in reasons)
-
-    def test_a_cropped_voff_cannot_supply_the_required_red(self) -> None:
-        """The whole point: with a shifted stage, the expected rect can fall off
-        the image and come back as an ordinary red that Voff would accept."""
-        result = self._base_result()
-        result["visible"]["Voff"]["stageFit"] = {"verdict": False}
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("visible pass Voff stage fit failed" in reason for reason in reasons)
-        assert not any("blind" in reason for reason in reasons)
 
 
 class TestVisiblePassStopError:
     """Codex R1 (probe MINOR): a `player.stop()` failure can leak Chrome into the
     next pass, so it fails the pass it happened in."""
 
-    def _base_result(self) -> dict[str, Any]:
-        return TestOverallStatusTruthTable()._base_result()
-
     @pytest.mark.parametrize("name", ["V", "Voff"])
     def test_a_stop_failure_fails_the_pass_and_is_reported(self, name: str) -> None:
-        result = self._base_result()
+        result = _base_result()
         result["visible"][name]["stopError"] = "websocket closed"
         status, reasons = probe.overall_status(result)
         assert status == "fail"
         assert any(f"visible pass {name} player.stop() failed: websocket closed" in reason for reason in reasons)
-
-    def test_a_clean_pass_reports_no_stop_reason(self) -> None:
-        status, reasons = probe.overall_status(self._base_result())
-        assert status == "pass"
-        assert reasons == []
 
 
 # --------------------------------------------------------------------------
@@ -1913,38 +1780,74 @@ SLIDE_INSTANCES = {
 }
 
 RUNTIME_MOVIES = {"movie1": {"assetKeys": ["untitled.mov"], "footprint": {"x": 109, "y": 795, "w": 952, "h": 268}}}
-RESTART_BOUNDARY = {"atScene": 6, "action": "restart"}
-BRIDGE_BOUNDARY = {
-    "atScene": 8, "action": "bridge", "movieKey": "movie1",
-    "srcRect": {"x": 198, "y": 797, "w": 952, "h": 268}, "durationSeconds": 1.5,
-    "rect": {"x": 327, "y": 709, "w": 1266, "h": 356},
-}
-RETIRE_BOUNDARY = {"atScene": 2, "action": "retire", "movieKey": "movie1"}
+# The big Untitled instance's objectID on each slide (player index).
+BIG_OBJECT_IDS = {0: "OBJ-S1-BIG", 1: "OBJ-S2-BIG", 2: "OBJ-S3-BIG", 3: "OBJ-S4-BIG"}
 
-CARRIED_RUNTIME = {"movies": RUNTIME_MOVIES, "boundaries": [RESTART_BOUNDARY, BRIDGE_BOUNDARY]}
-RETIRED_RUNTIME = {"movies": RUNTIME_MOVIES, "boundaries": [RETIRE_BOUNDARY, RESTART_BOUNDARY, BRIDGE_BOUNDARY]}
-BRIDGE_ONLY_RUNTIME = {"movies": RUNTIME_MOVIES, "boundaries": [BRIDGE_BOUNDARY]}
+
+def _end(player: int) -> dict[str, Any]:
+    return {"objectId": BIG_OBJECT_IDS[player], "rect": {k: int(v) for k, v in BIG_INSTANCE.items()}}
+
+
+# Schema-2 entries (plan §2.1) for the synthetic P2 shape: the 1->2 pin (or its refusal), the
+# 2->3 restart and the 3->4 bridge, each naming its src/dst instance by objectId.
+PIN_BOUNDARY = {"atScene": 2, "action": "pin", "movieKey": "movie1", "loop": False, "src": _end(0), "dst": _end(1)}
+RESTART_BOUNDARY = {"atScene": 6, "action": "restart", "movieKey": "movie1", "src": _end(1), "dst": _end(2)}
+BRIDGE_BOUNDARY = {
+    "atScene": 8, "action": "bridge", "movieKey": "movie1", "durationSeconds": 1.5, "loop": False,
+    "src": _end(2), "dst": _end(3),
+}
+RETIRE_BOUNDARY = {"atScene": 2, "action": "retire", "movieKey": "movie1", "reason": "refused", "src": _end(0)}
+
+CARRIED_RUNTIME = {"schema": 2, "movies": RUNTIME_MOVIES, "boundaries": [PIN_BOUNDARY, RESTART_BOUNDARY, BRIDGE_BOUNDARY]}
+RETIRED_RUNTIME = {"schema": 2, "movies": RUNTIME_MOVIES, "boundaries": [RETIRE_BOUNDARY, RESTART_BOUNDARY, BRIDGE_BOUNDARY]}
+BRIDGE_ONLY_RUNTIME = {"schema": 2, "movies": RUNTIME_MOVIES, "boundaries": [BRIDGE_BOUNDARY]}
 
 BOUNDARY_KEYS = {2: "continue1to2", 6: "restart2to3", 8: "continue3to4"}
+BIG1, BIG2, OTHER1 = f"{BIG_ASSET}#1", f"{BIG_ASSET}#2", f"{OTHER_ASSET}#1"
+
+
+def synthetic_boundaries() -> tuple[Any, ...]:
+    """The plan movies behind the runtimes above: the 1->2 pin refused (so RETIRED_RUNTIME
+    proves it), the 2->3 restart and the 3->4 bridge, all on the big instance."""
+    rect = probe.live_continuity_module.Rect(**BIG_INSTANCE)
+    movie = probe.live_continuity_module.MovieContinuity
+    boundary = probe.live_continuity_module.SlideBoundary
+
+    def between(action: str, source: int, **extra: Any) -> Any:
+        return boundary(source, source + 1, (movie(
+            BIG_ASSET, action, rect, rect,
+            src_object_id=BIG_OBJECT_IDS[source], dst_object_id=BIG_OBJECT_IDS[source + 1], **extra,
+        ),))
+
+    return (between("pin", 0, refusal="overlap", code="overlap"), between("restart", 1), between("bridge", 2))
 
 
 def synthetic_plan(
     scene_index: dict[int, int] | None = None, instances: dict[int, Any] | None = None
 ) -> Any:
-    """A `ContinuityPlan` carrying only what the expectation model reads: the scene
-    onset of each slide and every authored movie instance on it."""
+    """A `ContinuityPlan` carrying what the expectation model reads: the scene onset of each
+    slide, every authored movie instance on it, and the plan movies naming them by objectId."""
     return probe.ContinuityPlan(
         canvas={"width": 1920, "height": 1080},
         scene_index_by_player=dict(SCENE_INDEX_BY_PLAYER if scene_index is None else scene_index),
         slide_rects={},
-        boundaries=(),
+        boundaries=synthetic_boundaries(),
         slide_instances=dict(SLIDE_INSTANCES if instances is None else instances),
     )
 
 
+def synthetic_retires(runtime: dict[str, Any], plan: Any = None) -> list[dict[str, Any]]:
+    return probe.retire_facts(runtime, probe.verdict_specs(synthetic_plan() if plan is None else plan))
+
+
+def synthetic_retire(runtime: dict[str, Any] = RETIRED_RUNTIME) -> dict[str, Any]:
+    (retire,) = synthetic_retires(runtime)
+    return retire
+
+
 class TestRectExpectationModel:
-    """The whole live/dead table, derived from the plan alone (plan §4, "V/Voff
-    expectation model")."""
+    """The whole live/dead table, per authored instance, derived from the schema-2 runtime plan
+    bound to the plan's instances by objectId (plan §4, "V/Voff expectation model")."""
 
     def test_a_plan_without_a_retire_is_todays_model_unchanged(self) -> None:
         """V live everywhere; Voff dead only at the geometry-static pin's
@@ -1953,16 +1856,16 @@ class TestRectExpectationModel:
         on = probe.rect_expectations(plan, CARRIED_RUNTIME, continuity_on=True)
         off = probe.rect_expectations(plan, CARRIED_RUNTIME, continuity_on=False)
         assert on == {
-            0: {BIG_ASSET: "live", OTHER_ASSET: "live"},
-            1: {BIG_ASSET: "live"},
-            2: {BIG_ASSET: "live"},
-            3: {BIG_ASSET: "live"},
+            0: {BIG1: "live", OTHER1: "live"},
+            1: {BIG1: "live"},
+            2: {BIG1: "live", BIG2: "live"},
+            3: {BIG1: "live"},
         }
         assert off == {
-            0: {BIG_ASSET: "live", OTHER_ASSET: "live"},
-            1: {BIG_ASSET: "dead"},
-            2: {BIG_ASSET: "live"},
-            3: {BIG_ASSET: "live"},
+            0: {BIG1: "live", OTHER1: "live"},
+            1: {BIG1: "dead"},
+            2: {BIG1: "live", BIG2: "live"},
+            3: {BIG1: "live"},
         }
 
     def test_the_fixture_plan_with_a_retire_at_scene_two_is_dead_in_both_passes(self) -> None:
@@ -1970,30 +1873,65 @@ class TestRectExpectationModel:
         refused boundary leaves the destination looking exactly like the raw export."""
         plan = synthetic_plan()
         expected = {
-            0: {BIG_ASSET: "live", OTHER_ASSET: "live"},
-            1: {BIG_ASSET: "dead"},
-            2: {BIG_ASSET: "live"},
-            3: {BIG_ASSET: "live"},
+            0: {BIG1: "live", OTHER1: "live"},
+            1: {BIG1: "dead"},
+            2: {BIG1: "live", BIG2: "live"},
+            3: {BIG1: "live"},
         }
         assert probe.rect_expectations(plan, RETIRED_RUNTIME, continuity_on=True) == expected
         assert probe.rect_expectations(plan, RETIRED_RUNTIME, continuity_on=False) == expected
 
-    def test_a_bridge_only_plan_keeps_every_uncut_boundary_implicitly_pinned(self) -> None:
-        """No restart and no retire: the bridge destination is live in both passes,
-        every other destination is a carried pin."""
+    def test_an_instance_no_entry_names_plays_raw_and_is_live_in_both_passes(self) -> None:
+        """Schema 2 has no implicit pin: with only the bridge planned, every other destination
+        plays raw from its own start."""
         plan = synthetic_plan()
         on = probe.rect_expectations(plan, BRIDGE_ONLY_RUNTIME, continuity_on=True)
         off = probe.rect_expectations(plan, BRIDGE_ONLY_RUNTIME, continuity_on=False)
-        assert [on[i][BIG_ASSET] for i in (0, 1, 2, 3)] == ["live", "live", "live", "live"]
-        assert [off[i][BIG_ASSET] for i in (0, 1, 2, 3)] == ["live", "dead", "dead", "live"]
+        assert on == off
+        assert all(state == "live" for per in on.values() for state in per.values())
 
-    def test_only_the_retired_asset_goes_dead_on_a_refused_destination(self) -> None:
-        """A second movie on the same destination slide follows its own (carried)
-        expectation -- the refusal is per movie, not per slide."""
+    def test_only_the_retired_instance_goes_dead_on_a_refused_destination(self) -> None:
+        """A second movie on the same destination slide follows its own expectation -- the
+        refusal is per instance, not per slide."""
         instances = dict(SLIDE_INSTANCES)
         instances[1] = {BIG_ASSET: [BIG_INSTANCE], OTHER_ASSET: [OTHER_INSTANCE]}
         on = probe.rect_expectations(synthetic_plan(instances=instances), RETIRED_RUNTIME, continuity_on=True)
-        assert on[1] == {BIG_ASSET: "dead", OTHER_ASSET: "live"}
+        assert on[1] == {BIG1: "dead", OTHER1: "live"}
+
+    def test_a_second_instance_of_the_carried_asset_is_not_the_pinned_one(self) -> None:
+        """D5's shape: an entering same-asset instance plays raw (live in both passes) while the
+        pinned instance beside it is dead with the runtime off."""
+        instances = dict(SLIDE_INSTANCES)
+        instances[1] = {BIG_ASSET: [BIG_INSTANCE, SMALL_INSTANCE]}
+        off = probe.rect_expectations(synthetic_plan(instances=instances), CARRIED_RUNTIME, continuity_on=False)
+        assert off[1] == {BIG1: "dead", BIG2: "live"}
+
+    def test_a_refused_bridge_reads_as_the_raw_export_restart(self) -> None:
+        """A retired bridge hands back to the raw player, which restarts a moving movie: live."""
+        movie = probe.live_continuity_module.MovieContinuity
+        boundaries = list(synthetic_boundaries())
+        rect = probe.live_continuity_module.Rect(**BIG_INSTANCE)
+        boundaries[0] = probe.live_continuity_module.SlideBoundary(0, 1, (movie(
+            BIG_ASSET, "bridge", rect, rect, refusal="overlap", code="overlap",
+            src_object_id=BIG_OBJECT_IDS[0], dst_object_id=BIG_OBJECT_IDS[1],
+        ),))
+        plan = dataclasses.replace(synthetic_plan(), boundaries=tuple(boundaries))
+        assert probe.rect_expectations(plan, RETIRED_RUNTIME, continuity_on=False)[1] == {BIG1: "live"}
+
+    def test_a_retire_that_ends_a_movie_states_nothing_on_the_far_side(self) -> None:
+        runtime = {**RETIRED_RUNTIME, "boundaries": [dict(RETIRE_BOUNDARY, reason="ends")]}
+        movie = probe.live_continuity_module.MovieContinuity
+        rect = probe.live_continuity_module.Rect(**BIG_INSTANCE)
+        ends = probe.live_continuity_module.SlideBoundary(0, 1, (movie(
+            BIG_ASSET, "retire", rect, None, src_object_id=BIG_OBJECT_IDS[0],
+        ),))
+        plan = dataclasses.replace(synthetic_plan(), boundaries=(ends,))
+        assert probe.rect_expectations(plan, runtime, continuity_on=False)[1] == {BIG1: "live"}
+
+    def test_an_entry_naming_an_instance_the_plan_does_not_name_fails_closed(self) -> None:
+        runtime = {**CARRIED_RUNTIME, "boundaries": [dict(PIN_BOUNDARY, dst={"objectId": "NOPE", "rect": {}})]}
+        with pytest.raises(SystemExit, match="which no plan movie names"):
+            probe.rect_expectations(synthetic_plan(), runtime, continuity_on=True)
 
     def test_both_passes_are_derived_in_one_call(self) -> None:
         plan = synthetic_plan()
@@ -2002,39 +1940,54 @@ class TestRectExpectationModel:
         assert both["Voff"] == probe.rect_expectations(plan, RETIRED_RUNTIME, continuity_on=False)
 
 
-class TestRetireFact:
-    def test_no_retire_is_none_so_nothing_downstream_changes(self) -> None:
-        assert probe.retire_fact(synthetic_plan(), CARRIED_RUNTIME, BOUNDARY_KEYS) is None
+class TestRetireFacts:
+    def test_no_retire_is_an_empty_list_so_nothing_downstream_changes(self) -> None:
+        assert synthetic_retires(CARRIED_RUNTIME) == []
 
     def test_the_retire_resolves_to_its_boundary_slide_asset_keys_and_rects(self) -> None:
-        retire = probe.retire_fact(synthetic_plan(), RETIRED_RUNTIME, BOUNDARY_KEYS)
+        retire = synthetic_retire()
         assert retire["boundaryKey"] == "continue1to2"
         assert retire["verdictKey"] == "refused1to2"
+        assert retire["verdictId"] == f"b0to1:{BIG1}->{BIG1}:retire"
         assert retire["playerIndex"] == 1 and retire["originalOrdinal"] == 2
         assert retire["assetKeys"] == ["untitled.mov"]
         assert retire["rects"] == [BIG_INSTANCE]
+        assert retire["reason"] == "refused" and retire["srcObjectId"] == BIG_OBJECT_IDS[0].lower()
 
-    def test_a_retire_at_a_scene_no_boundary_under_test_owns_fails_closed(self) -> None:
-        runtime = {"movies": RUNTIME_MOVIES, "boundaries": [{"atScene": 4, "action": "retire", "movieKey": "movie1"}]}
-        with pytest.raises(SystemExit):
-            probe.retire_fact(synthetic_plan(), runtime, BOUNDARY_KEYS)
+    @pytest.mark.parametrize(("change", "match"), [
+        pytest.param({"src": _end(1)}, "matches 0 plan verdicts", id="src-no-plan-retire-names"),
+        pytest.param({"atScene": 4}, None, id="scene-no-boundary-under-test-owns"),
+        pytest.param({"movieKey": "movie9"}, None, id="undefined-movie-key"),
+    ])
+    def test_an_unbindable_retire_fails_closed(self, change: dict[str, Any], match: str | None) -> None:
+        runtime = {**RETIRED_RUNTIME, "boundaries": [dict(RETIRE_BOUNDARY, **change)]}
+        with pytest.raises(SystemExit, match=match):
+            synthetic_retires(runtime)
 
-    def test_a_retire_naming_an_undefined_movie_key_fails_closed(self) -> None:
-        runtime = {"movies": RUNTIME_MOVIES, "boundaries": [dict(RETIRE_BOUNDARY, movieKey="movie9")]}
-        with pytest.raises(SystemExit):
-            probe.retire_fact(synthetic_plan(), runtime, BOUNDARY_KEYS)
-
-    def test_more_than_one_retire_is_outside_the_contract_and_fails_closed(self) -> None:
-        runtime = {"movies": RUNTIME_MOVIES, "boundaries": [RETIRE_BOUNDARY, dict(RETIRE_BOUNDARY, atScene=6)]}
-        with pytest.raises(SystemExit):
-            probe.retire_fact(synthetic_plan(), runtime, BOUNDARY_KEYS)
+    def test_every_retire_binds_to_its_own_verdict_and_ends_have_no_carry(self) -> None:
+        """D3's shape: one refused retire and one `ends` retire in one plan."""
+        movie = probe.live_continuity_module.MovieContinuity
+        rect = probe.live_continuity_module.Rect(**BIG_INSTANCE)
+        ends = probe.live_continuity_module.SlideBoundary(1, 2, (movie(
+            BIG_ASSET, "retire", rect, None, src_object_id=BIG_OBJECT_IDS[1],
+        ),))
+        boundaries = synthetic_boundaries()
+        plan = dataclasses.replace(synthetic_plan(), boundaries=(boundaries[0], ends, boundaries[2]))
+        runtime = {**RETIRED_RUNTIME, "boundaries": [
+            RETIRE_BOUNDARY, {"atScene": 6, "action": "retire", "movieKey": "movie1", "reason": "ends", "src": _end(1)},
+            BRIDGE_BOUNDARY,
+        ]}
+        refused, ended = synthetic_retires(runtime, plan)
+        assert refused["verdictKey"] == "refused1to2" and refused["boundaryKey"] == "continue1to2"
+        assert ended["verdictId"] == ended["boundaryKey"] == ended["verdictKey"] == f"b1to2:{BIG1}->end:retire"
+        assert ended["reason"] == "ends" and ended["rects"] == [BIG_INSTANCE] and ended["originalOrdinal"] == 3
 
 
 class TestRefusalScoring:
     """The POSITIVE half: "did not continue" alone is vacuous, so the refusal has
     to be shown on the destination slide's DOM."""
 
-    STAGE_MAP = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0}
+    STAGE_MAP = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920, "offsetHeight": 1080}
     RETIRE = {"assetKeys": ["untitled.mov"], "rects": [BIG_INSTANCE]}
 
     def _sample(self, painting: Any = None, snapshot: Any = None, stage_map: Any = _UNSET) -> dict[str, Any]:
@@ -2050,60 +2003,33 @@ class TestRefusalScoring:
         assert scored["paintingOverRect"] == [] and scored["pooled"] == []
         assert scored["reason"] is None
 
-    def test_a_painting_video_over_the_retired_rect_is_red(self) -> None:
-        scored = probe.score_refusal(
-            self._sample(painting=[painting_video(BIG_INSTANCE)]), self.RETIRE, True
-        )
-        assert scored["verdict"] is False
-        assert "overlap the retired movie" in scored["reason"]
-
-    def test_a_painting_video_elsewhere_on_the_slide_does_not_refute_the_refusal(self) -> None:
-        elsewhere = {"x": 1200.0, "y": 100.0, "w": 300.0, "h": 200.0}
-        scored = probe.score_refusal(self._sample(painting=[painting_video(elsewhere)]), self.RETIRE, True)
-        assert scored["verdict"] is True
-
-    def test_an_edge_touching_video_is_not_an_overlap(self) -> None:
-        touching = {"x": BIG_INSTANCE["x"] + BIG_INSTANCE["w"], "y": BIG_INSTANCE["y"], "w": 200.0, "h": 100.0}
-        scored = probe.score_refusal(self._sample(painting=[painting_video(touching)]), self.RETIRE, True)
-        assert scored["verdict"] is True
-
-    def test_a_pooled_decoder_for_the_retired_asset_is_red(self) -> None:
-        scored = probe.score_refusal(
-            self._sample(snapshot=[{"key": "untitled.mov", "elId": 1}]), self.RETIRE, True
-        )
-        assert scored["verdict"] is False
-        assert "pooled/preserved" in scored["reason"]
-
-    def test_another_assets_pooled_decoder_is_irrelevant(self) -> None:
-        scored = probe.score_refusal(self._sample(snapshot=[{"key": "wa0125.mov"}]), self.RETIRE, True)
-        assert scored["verdict"] is True
-
-    def test_the_pool_is_not_consulted_when_no_runtime_is_installed(self) -> None:
-        scored = probe.score_refusal(self._sample(snapshot=None), self.RETIRE, False)
-        assert scored["verdict"] is True
-
-    def test_an_unreadable_pool_census_is_red_never_a_silently_clean_one(self) -> None:
-        scored = probe.score_refusal(self._sample(snapshot={"error": "boom"}), self.RETIRE, True)
-        assert scored["verdict"] is False
-        assert "preserve snapshot is unreadable" in scored["reason"]
-
-    def test_a_missing_sample_is_red_not_a_free_pass(self) -> None:
-        scored = probe.score_refusal(None, self.RETIRE, True)
-        assert scored["verdict"] is False
-        assert "no refusal evidence" in scored["reason"]
-
-    @pytest.mark.parametrize("stage_map", [None, {"s": 0, "sy": 0, "offsetWidth": 0, "offsetHeight": 0}])
-    def test_an_untrustworthy_stage_map_is_red(self, stage_map: Any) -> None:
-        scored = probe.score_refusal(self._sample(stage_map=stage_map), self.RETIRE, True)
-        assert scored["verdict"] is False
-        assert "stage map" in scored["reason"]
-
-    def test_a_malformed_painting_result_is_red(self) -> None:
-        scored = probe.score_refusal(self._sample(painting={"error": "no checkVisibility"}), self.RETIRE, True)
-        assert scored["verdict"] is False
+    @pytest.mark.parametrize(("sample", "installed", "verdict", "reason"), [
+        pytest.param({"painting": [painting_video(BIG_INSTANCE)]}, True, False, "overlap the retired movie",
+                     id="painting-video-over-the-retired-rect-is-red"),
+        pytest.param({"painting": [painting_video({"x": 1200.0, "y": 100.0, "w": 300.0, "h": 200.0})]}, True, True, None,
+                     id="painting-video-elsewhere-does-not-refute-the-refusal"),
+        pytest.param({"painting": [painting_video({"x": BIG_INSTANCE["x"] + BIG_INSTANCE["w"], "y": BIG_INSTANCE["y"], "w": 200.0, "h": 100.0})]},
+                     True, True, None, id="edge-touching-video-is-not-an-overlap"),
+        pytest.param({"snapshot": [{"key": "untitled.mov", "elId": 1}]}, True, False, "pooled/preserved",
+                     id="pooled-decoder-for-the-retired-asset-is-red"),
+        pytest.param({"snapshot": [{"key": "wa0125.mov", "elId": 2}]}, True, True, None, id="another-assets-pooled-decoder-is-irrelevant"),
+        pytest.param({}, False, True, None, id="pool-not-consulted-without-a-runtime"),
+        pytest.param({"snapshot": {"error": "boom"}}, True, None, "preserve snapshot is unreadable",
+                     id="unreadable-pool-census-is-inconclusive-never-silently-clean"),
+        pytest.param(None, True, None, "no refusal evidence", id="missing-sample-is-inconclusive-not-a-free-pass"),
+        pytest.param({"stage_map": None}, True, None, "stage map", id="no-stage-map-is-inconclusive"),
+        pytest.param({"stage_map": {"s": 0, "sy": 0, "offsetWidth": 0, "offsetHeight": 0}}, True, None, "stage map",
+                     id="zero-stage-map-is-inconclusive"),
+        pytest.param({"painting": {"error": "no checkVisibility"}}, True, None, None, id="malformed-painting-result-is-inconclusive"),
+    ])
+    def test_refusal_evidence(self, sample: dict[str, Any] | None, installed: bool, verdict: bool | None, reason: str | None) -> None:
+        scored = probe.score_refusal(None if sample is None else self._sample(**sample), self.RETIRE, installed)
+        assert scored["verdict"] is verdict
+        if reason is not None:
+            assert reason in scored["reason"]
 
     def test_score_refusals_is_keyed_by_the_plans_own_boundary(self) -> None:
-        retire = probe.retire_fact(synthetic_plan(), RETIRED_RUNTIME, BOUNDARY_KEYS)
+        retire = synthetic_retire()
         scored = probe.score_refusals({"refused1to2": self._sample()}, {"retire": retire}, True)
         assert list(scored) == ["refused1to2"]
         assert scored["refused1to2"]["verdict"] is True
@@ -2119,7 +2045,7 @@ class TestRefusedArmTable:
         """The base artifact, re-expressed for a plan that RETIRES the 1->2
         boundary: the carry verdict goes False and the positive verdict carries the
         refusal. Arm B is continuity-off and keeps today's expectations."""
-        result = TestOverallStatusTruthTable()._base_result()
+        result = _base_result()
         result["groundTruth"]["refusedBoundaries"] = ["continue1to2"]
         for entry in (result["arms"]["A"], result["arms"]["C"], result["attach"]):
             entry["continue1to2"] = {"verdict": False}
@@ -2132,35 +2058,24 @@ class TestRefusedArmTable:
         assert reasons == []
 
     @pytest.mark.parametrize("arm", ["A", "C", "attach"])
-    def test_carrying_a_retired_boundary_fails_the_arm(self, arm: str) -> None:
-        """The runtime ignored the refusal: the movie crossed the boundary anyway."""
+    @pytest.mark.parametrize(("mutate", "reason"), [
+        # The runtime ignored the refusal: the movie crossed the boundary anyway.
+        pytest.param(lambda e: e.update(continue1to2={"verdict": True}), "expected False (the plan retires this boundary)",
+                     id="carrying-a-retired-boundary"),
+        # A painting video still over the rect, or a pooled decoder for the key.
+        pytest.param(lambda e: e.update(refused1to2={"verdict": False, "reason": "1 painting video(s) still overlap the retired movie"}),
+                     "still overlap the retired movie", id="false-positive-half"),
+        # "Did not continue" without the positive half is vacuous -- and it must not read as
+        # inconclusive either, which would hide it behind the sampler.
+        pytest.param(lambda e: e.pop("refused1to2"), "has no refused1to2 verdict, so the refusal is unproven",
+                     id="missing-positive-half"),
+    ])
+    def test_a_refused_arm_fails_with_its_reason(self, mutate: Any, reason: str, arm: str) -> None:
         result = self._result()
-        entry = result["attach"] if arm == "attach" else result["arms"][arm]
-        entry["continue1to2"] = {"verdict": True}
+        mutate(result["attach"] if arm == "attach" else result["arms"][arm])
         status, reasons = probe.overall_status(result)
         assert status == "fail"
-        assert any("expected False (the plan retires this boundary)" in reason for reason in reasons)
-
-    @pytest.mark.parametrize("arm", ["A", "C", "attach"])
-    def test_a_false_positive_half_fails_the_arm_with_its_reason(self, arm: str) -> None:
-        """A painting video still over the rect, or a pooled decoder for the key."""
-        result = self._result()
-        entry = result["attach"] if arm == "attach" else result["arms"][arm]
-        entry["refused1to2"] = {"verdict": False, "reason": "1 painting video(s) still overlap the retired movie"}
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("still overlap the retired movie" in reason for reason in reasons)
-
-    @pytest.mark.parametrize("arm", ["A", "C", "attach"])
-    def test_a_missing_positive_half_fails_with_its_own_reason(self, arm: str) -> None:
-        """"Did not continue" without the positive half is vacuous -- and it must
-        not read as inconclusive either, which would hide it behind the sampler."""
-        result = self._result()
-        entry = result["attach"] if arm == "attach" else result["arms"][arm]
-        del entry["refused1to2"]
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("has no refused1to2 verdict, so the refusal is unproven" in reason for reason in reasons)
+        assert any(reason in r for r in reasons)
 
     def test_an_inconclusive_carry_verdict_still_reads_inconclusive(self) -> None:
         result = self._result()
@@ -2175,14 +2090,14 @@ class TestRefusedArmTable:
         assert probe.overall_status(result)[0] == "pass"
 
     def test_without_a_retire_a_carried_boundary_must_still_be_true(self) -> None:
-        result = TestOverallStatusTruthTable()._base_result()
+        result = _base_result()
         result["arms"]["A"]["continue1to2"] = {"verdict": False}
         status, reasons = probe.overall_status(result)
         assert status == "fail"
         assert any("expected True (the plan carries this boundary)" in reason for reason in reasons)
 
     def test_an_unknown_refused_boundary_name_is_ignored_rather_than_trusted(self) -> None:
-        result = TestOverallStatusTruthTable()._base_result()
+        result = _base_result()
         result["groundTruth"]["refusedBoundaries"] = ["continue9to10"]
         assert probe.overall_status(result)[0] == "pass"
 
@@ -2210,7 +2125,7 @@ class TestVisibleExpectationModel:
     def _result(self) -> dict[str, Any]:
         """The baseline artifact: slide 2 is dead-expected in BOTH passes because
         the plan refuses to carry the 1->2 boundary."""
-        result = TestOverallStatusTruthTable()._base_result()
+        result = _base_result()
         result["groundTruth"]["refusedBoundaries"] = ["continue1to2"]
         result["groundTruth"]["rectExpectations"] = probe.visible_expectations(
             synthetic_plan(), RETIRED_RUNTIME
@@ -2232,29 +2147,22 @@ class TestVisibleExpectationModel:
         assert status == "pass"
         assert reasons == []
 
-    def test_v_slide_two_live_where_dead_was_expected_fails(self) -> None:
-        """The carried movie is still painting on the refused destination."""
+    @pytest.mark.parametrize(("name", "ordinal", "rect", "reason"), [
+        # The carried movie is still painting on the refused destination.
+        pytest.param("V", 2, DEAD_RED, "visible pass V slide 2 does not meet its per-rect expectations",
+                     id="V-slide-two-live-where-dead-was-expected"),
+        # The surviving carry must still be visibly live -- a refusal elsewhere is no licence
+        # for a dead bridge destination.
+        pytest.param("V", 4, LIVE_RED, "visible pass V slide 4 does not meet its per-rect expectations",
+                     id="V-slide-four-dead-where-live-was-expected"),
+        pytest.param("Voff", 2, DEAD_RED, "visible pass Voff slide 2", id="Voff-slide-two-live-where-dead-was-expected"),
+    ])
+    def test_a_slide_off_its_expectation_fails(self, name: str, ordinal: int, rect: Any, reason: str) -> None:
         result = self._result()
-        result["visible"]["V"]["slides"][1] = expectation_slide(2, [self.DEAD_RED])
+        result["visible"][name]["slides"][ordinal - 1] = expectation_slide(ordinal, [rect])
         status, reasons = probe.overall_status(result)
         assert status == "fail"
-        assert any("visible pass V slide 2 does not meet its per-rect expectations" in r for r in reasons)
-
-    def test_v_slide_four_dead_where_live_was_expected_fails(self) -> None:
-        """The surviving carry must still be visibly live -- a refusal elsewhere is
-        no licence for a dead bridge destination."""
-        result = self._result()
-        result["visible"]["V"]["slides"][3] = expectation_slide(4, [self.LIVE_RED])
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("visible pass V slide 4 does not meet its per-rect expectations" in r for r in reasons)
-
-    def test_voff_slide_two_live_where_dead_was_expected_fails(self) -> None:
-        result = self._result()
-        result["visible"]["Voff"]["slides"][1] = expectation_slide(2, [self.DEAD_RED])
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("visible pass Voff slide 2" in r for r in reasons)
+        assert any(reason in r for r in reasons)
 
     def test_a_pass_with_no_live_read_rect_is_always_red_and_fails(self) -> None:
         """Every rect dead-expected and dead: the slides all "pass", but the pass
@@ -2267,15 +2175,15 @@ class TestVisibleExpectationModel:
         assert status == "fail"
         assert any("no live-expected rect that read live" in r for r in reasons)
 
-    def test_a_pass_that_never_read_its_dead_rect_dead_is_blind_and_fails(self) -> None:
+    def test_a_pass_that_never_read_its_dead_rect_dead_is_blind_and_never_passes(self) -> None:
         """Slide 2's dead expectation is the only proof the pass can see a frozen
-        movie at all; an inconclusive slide 2 does not supply it."""
+        movie at all; an inconclusive slide 2 does not supply it (inconclusive, r7)."""
         result = self._result()
         result["visible"]["V"]["slides"][1] = {
             "playerIndex": 1, "originalOrdinal": 2, "verdict": None, "status": "inconclusive", "perRect": [],
         }
         status, reasons = probe.overall_status(result)
-        assert status == "fail"
+        assert status == "inconclusive"
         assert any("blind to a frozen movie" in r for r in reasons)
 
     def test_an_inconclusive_slide_never_counts_as_meeting_an_expectation(self) -> None:
@@ -2286,7 +2194,7 @@ class TestVisibleExpectationModel:
     def test_a_pass_without_stated_expectations_keeps_todays_rules_exactly(self) -> None:
         """A record with no per-rect expectations at all (the pre-refusal shape) is
         still scored by the V-live-everywhere / Voff-red-at-the-boundary rules."""
-        result = TestOverallStatusTruthTable()._base_result()
+        result = _base_result()
         assert probe.overall_status(result) == ("pass", [])
         result["visible"]["Voff"]["slides"][1]["verdict"] = True
         status, reasons = probe.overall_status(result)
@@ -2299,24 +2207,18 @@ class TestVisibleExpectationModel:
 
 
 class TestExpectedRectsCarryTheirExpectation:
-    def test_an_asset_the_plan_calls_dead_is_labelled_dead(self) -> None:
-        expectations = {1: {BIG_ASSET: "dead"}}
-        rects = probe.expected_screen_rects({1: {BIG_ASSET: [BIG_INSTANCE]}}, 1, IDENTITY_STAGE_MAP, expectations)
-        assert [rect["expect"] for rect in rects] == ["dead"]
-
-    def test_an_unmentioned_asset_is_expected_live_which_is_the_stricter_reading(self) -> None:
-        rects = probe.expected_screen_rects({1: {BIG_ASSET: [BIG_INSTANCE]}}, 1, IDENTITY_STAGE_MAP, {1: {}})
-        assert [rect["expect"] for rect in rects] == ["live"]
-
-    def test_without_expectations_every_rect_is_live_exactly_as_before(self) -> None:
-        rects = probe.expected_screen_rects(VISIBLE_INSTANCES, 0, IDENTITY_STAGE_MAP)
-        assert [rect["expect"] for rect in rects] == ["live"]
-
-    def test_every_instance_of_a_dead_asset_is_dead(self) -> None:
-        rects = probe.expected_screen_rects(
-            {2: {BIG_ASSET: [BIG_INSTANCE, SMALL_INSTANCE]}}, 2, IDENTITY_STAGE_MAP, {2: {BIG_ASSET: "dead"}}
-        )
-        assert [rect["expect"] for rect in rects] == ["dead", "dead"]
+    @pytest.mark.parametrize(("instances", "index", "expectations", "expected"), [
+        pytest.param({1: {BIG_ASSET: [BIG_INSTANCE]}}, 1, {1: {BIG_ASSET: "dead"}}, ["dead"], id="asset-the-plan-calls-dead"),
+        pytest.param({1: {BIG_ASSET: [BIG_INSTANCE]}}, 1, {1: {}}, ["live"],
+                     id="unmentioned-asset-is-expected-live-the-stricter-reading"),
+        pytest.param(VISIBLE_INSTANCES, 0, None, ["live"], id="without-expectations-every-rect-is-live-as-before"),
+        pytest.param({2: {BIG_ASSET: [BIG_INSTANCE, SMALL_INSTANCE]}}, 2, {2: {BIG_ASSET: "dead"}}, ["dead", "dead"],
+                     id="every-instance-of-a-dead-asset-is-dead"),
+    ])
+    def test_expected_rects_carry_the_plans_expectation(self, instances: Any, index: int, expectations: Any, expected: list[str]) -> None:
+        args = () if expectations is None else (expectations,)
+        rects = probe.expected_screen_rects(instances, index, IDENTITY_STAGE_MAP, *args)
+        assert [rect["expect"] for rect in rects] == expected
 
 
 class TestPaintingVideoOnADeadRect:
@@ -2325,7 +2227,7 @@ class TestPaintingVideoOnADeadRect:
     however live its pixels look."""
 
     def _expected(self, expect: str) -> list[dict[str, Any]]:
-        return [{"label": "movie1#1", "authored": dict(EXPECTED_SCREEN_RECT), "expect": expect}]
+        return [{"label": "Untitled.mov#1", "authored": dict(EXPECTED_SCREEN_RECT), "expect": expect}]
 
     def test_a_video_on_a_dead_expected_rect_is_unexpected(self) -> None:
         videos = [{"src": "Untitled.mov", "elId": 1, "authored": dict(EXPECTED_SCREEN_RECT)}]
@@ -2550,9 +2452,18 @@ class TestInPageOracleApplicability:
         assert probe.inpage_oracle_result(raw) is None
         assert probe.INPAGE_HANDLE_ABSENT_REASON in probe.INPAGE_LIVENESS_JS
 
-    @pytest.mark.parametrize("reason", NON_ABSENCE_REASONS)
-    def test_every_other_n_a_claim_is_an_applicable_inconclusive(self, reason: object) -> None:
-        raw = {"applicable": False, "status": "n/a", "reason": reason}
+    @pytest.mark.parametrize("raw", [
+        *({"applicable": False, "status": "n/a", "reason": reason} for reason in NON_ABSENCE_REASONS),
+        # Codex r1 Spec 8: only a well-formed, explicit `{applicable:false,status:'n/a'}` may
+        # vanish as n/a -- anything else that merely claims `applicable: False` is
+        # untrustworthy and must stay an APPLICABLE inconclusive result, never disappear into a
+        # screenshot-only pass. A non-dict response is the same.
+        pytest.param({"applicable": False, "reason": "no status field at all"}, id="malformed-n-a-without-status"),
+        pytest.param(None, id="non-dict-None"),
+        pytest.param("oops", id="non-dict-str"),
+        pytest.param(True, id="non-dict-True"),
+    ])
+    def test_every_other_n_a_claim_is_an_applicable_inconclusive(self, raw: Any) -> None:
         result = probe.inpage_oracle_result(raw)
         assert result is not None
         assert result["verdict"] is None and result["status"] == "inconclusive"
@@ -2616,57 +2527,27 @@ class TestInPageOracleApplicability:
         assert "checkVisibility" in probe.INPAGE_LIVENESS_JS
         assert "isContextLost" in probe.INPAGE_LIVENESS_JS
 
-    def test_a_malformed_not_applicable_response_is_an_applicable_inconclusive(self) -> None:
-        """Codex r1 Spec 8: only a well-formed, explicit
-        `{applicable:false,status:'n/a'}` may vanish as n/a -- anything else
-        that merely claims `applicable: False` is untrustworthy and must stay
-        an APPLICABLE inconclusive result, never disappear into a
-        screenshot-only pass."""
-        result = probe.inpage_oracle_result({"applicable": False, "reason": "no status field at all"})
-        assert result is not None
-        assert result["verdict"] is None
-        assert result["status"] == "inconclusive"
-
-    def test_a_non_dict_response_is_an_applicable_inconclusive(self) -> None:
-        assert probe.inpage_oracle_result(None) is not None
-        assert probe.inpage_oracle_result("oops")["verdict"] is None
-        assert probe.inpage_oracle_result(True)["status"] == "inconclusive"
-
-
 class TestTwoOracleRecord:
-    def _base_result(self) -> dict[str, Any]:
-        return TestOverallStatusTruthTable()._base_result()
-
-    def test_dead_expected_rect_both_oracles_physically_dead_passes(self) -> None:
-        """Codex r1 Spec 2: screenshot `verdict=True` on a dead-expected rect
-        means "frozen as expected" (physically DEAD); it must agree with an
-        in-page DEAD read, not be read as an opposite-polarity disagreement."""
+    @pytest.mark.parametrize(("inpage", "verdict"), [
+        # Codex r1 Spec 2: screenshot `verdict=True` on a dead-expected rect means "frozen as
+        # expected" (physically DEAD); it must agree with an in-page DEAD read, not be read as
+        # an opposite-polarity disagreement.
+        pytest.param({"verdict": False, "status": "dead", "reason": None}, True, id="both-oracles-physically-dead-passes"),
+        # The physical readings genuinely disagree (frozen pixels, but the GL canvas underneath
+        # is still drawing) -- a real disagreement, not resolved by either oracle alone.
+        pytest.param({"verdict": True, "status": "live", "reason": None}, None, id="screenshot-dead-inpage-live-is-inconclusive"),
+        # Codex r2 Spec 1 regression: screenshot expectation-met `True` on a DEAD-expected rect
+        # became physical `False`, and the combiner used to preserve physical DEAD when the
+        # in-page result was merely INCONCLUSIVE (a failed paused-decoder control), then
+        # translate it back to expectation-met `True` -- a silent PASS on a failed control. A
+        # failed or otherwise applicable-but-inconclusive control must make the slide
+        # INCONCLUSIVE, never a pass, regardless of `expect`.
+        pytest.param({"verdict": None, "status": "inconclusive", "reason": "paused-decoder control did not read dead"}, None,
+                     id="inconclusive-paused-control-is-inconclusive-codex-r2-spec-1"),
+    ])
+    def test_a_dead_expected_rect_combines_both_oracles(self, inpage: dict[str, Any], verdict: bool | None) -> None:
         entry = {"verdict": True, "expect": probe.DEAD, "reason": None, "liveFrac": 0.01}
-        inpage = {"verdict": False, "status": "dead", "reason": None}
-        combined = probe.combine_rect_oracles(entry, inpage)
-        assert combined["verdict"] is True
-
-    def test_dead_expected_rect_screenshot_dead_inpage_live_is_inconclusive(self) -> None:
-        """The physical readings genuinely disagree (frozen pixels, but the GL
-        canvas underneath is still drawing) -- that is a real disagreement and
-        must be inconclusive, not resolved by either oracle alone."""
-        entry = {"verdict": True, "expect": probe.DEAD, "reason": None, "liveFrac": 0.01}
-        inpage = {"verdict": True, "status": "live", "reason": None}
-        combined = probe.combine_rect_oracles(entry, inpage)
-        assert combined["verdict"] is None
-
-    def test_dead_expected_rect_with_an_inconclusive_paused_control_is_inconclusive(self) -> None:
-        """Codex r2 Spec 1 regression: screenshot expectation-met `True` on a
-        DEAD-expected rect became physical `False`, and the combiner used to
-        preserve physical DEAD when the in-page result was merely INCONCLUSIVE
-        (a failed paused-decoder control), then translate it back to
-        expectation-met `True` -- a silent PASS on a failed control. A failed
-        or otherwise applicable-but-inconclusive control must make the slide
-        INCONCLUSIVE, never a pass, regardless of `expect`."""
-        entry = {"verdict": True, "expect": probe.DEAD, "reason": None, "liveFrac": 0.01}
-        inpage = {"verdict": None, "status": "inconclusive", "reason": "paused-decoder control did not read dead"}
-        combined = probe.combine_rect_oracles(entry, inpage)
-        assert combined["verdict"] is None
+        assert probe.combine_rect_oracles(entry, inpage)["verdict"] is verdict
 
     def test_disagreement_makes_the_slide_inconclusive_and_writes_evidence(self, tmp_path: Path) -> None:
         host = FakeHost(scene_ids=["s", "s"], inpage=[_inpage_raw(live=False)])
@@ -2694,29 +2575,19 @@ class TestTwoOracleRecord:
         reasons = probe.visible_control_reasons(entry, result)
         assert any("is not RED" in reason for reason in reasons)
 
-    def test_an_inconclusive_slide_fails_overall_status(self) -> None:
-        result = self._base_result()
-        result["visible"]["V"]["slides"][1].update(verdict=None, status="inconclusive")
-        status, reasons = probe.overall_status(result)
-        assert status == "fail"
-        assert any("inconclusive" in reason for reason in reasons)
-
-    def test_a_failed_paused_decoder_control_makes_the_slide_inconclusive(self) -> None:
+    @pytest.mark.parametrize(("mutate", "reason"), [
+        pytest.param(lambda raw: raw.update(pausedDecoderSamples=raw["samples"]), "paused-decoder control did not read dead",
+                     id="failed-paused-decoder-control"),
+        pytest.param(lambda raw: raw.update(markerDark=[0.0] * probe.INPAGE_BAND_COUNT, markerLight=[0.1] * probe.INPAGE_BAND_COUNT),
+                     "occluder mask unusable", id="unusable-occluder-mask"),
+    ])
+    def test_an_untrusted_inpage_read_is_inconclusive(self, mutate: Any, reason: str) -> None:
         raw = _inpage_raw(live=True)
-        raw["pausedDecoderSamples"] = raw["samples"]
+        mutate(raw)
         result = probe.inpage_oracle_result(raw)
         assert result["verdict"] is None
         assert result["status"] == "inconclusive"
-        assert result["reason"] == "paused-decoder control did not read dead"
-
-    def test_an_unusable_occluder_mask_is_inconclusive(self) -> None:
-        raw = _inpage_raw(live=True)
-        raw["markerDark"] = [0.0] * probe.INPAGE_BAND_COUNT
-        raw["markerLight"] = [0.1] * probe.INPAGE_BAND_COUNT
-        result = probe.inpage_oracle_result(raw)
-        assert result["verdict"] is None
-        assert result["status"] == "inconclusive"
-        assert result["reason"] == "occluder mask unusable"
+        assert result["reason"] == reason
 
 
 class TestHandleIdentityBinding:
@@ -2731,7 +2602,15 @@ class TestHandleIdentityBinding:
     IDENTITY_MISMATCH_REASONS = [
         "the runtime handle was replaced",
         "handle re-recorded during the sample window",
+        # Codex r3 Spec 1: a self-consistent handle re-published for a NEW scene, whose rect
+        # happens to coincide with the previous scene's, must not corroborate the previous
+        # scene's screenshots -- the JS's own `recheck()` binds `handle.sceneId ===
+        # expectedScene === liveSceneId()`, not merely "the current live scene equals whatever
+        # the handle claims".
         "handle scene does not match the scene being scored",
+        # A handle whose `canvas`/`gl`/`video` object identity changed after entry (e.g. the
+        # runtime re-created the canvas mid-read) must not be trusted just because
+        # `handle.rect`/`sceneId` still read the same.
         "handle canvas, gl, or video identity changed",
         "canvas is not a descendant of #stage",
         "canvas disconnected",
@@ -2739,6 +2618,8 @@ class TestHandleIdentityBinding:
         "canvas is not visible",
         "handle rect does not exactly match the scored instance rect",
         "handle instance does not match the scored instance",
+        # Codex r3 Spec 1: only an ABSENT global handle may answer n/a; a PRESENT but malformed
+        # one (missing a required member) must be an applicable INCONCLUSIVE, never silently n/a.
         "handle is present but malformed",
     ]
 
@@ -2750,35 +2631,6 @@ class TestHandleIdentityBinding:
         assert result["verdict"] is None
         assert result["status"] == "inconclusive"
         assert result["reason"] == reason
-
-    def test_a_new_scene_with_the_same_rect_is_an_applicable_inconclusive(self) -> None:
-        """Codex r3 Spec 1: a self-consistent handle re-published for a NEW
-        scene, whose rect happens to coincide with the previous scene's, must
-        not corroborate the previous scene's screenshots -- the JS's own
-        `recheck()` binds `handle.sceneId === expectedScene === liveSceneId()`,
-        not merely "the current live scene equals whatever the handle claims"."""
-        raw = {"applicable": True, "status": "inconclusive", "reason": "handle scene does not match the scene being scored"}
-        result = probe.inpage_oracle_result(raw)
-        assert result["verdict"] is None
-        assert result["status"] == "inconclusive"
-
-    def test_a_swapped_canvas_object_is_an_applicable_inconclusive(self) -> None:
-        """A handle whose `canvas`/`gl`/`video` object identity changed after
-        entry (e.g. the runtime re-created the canvas mid-read) must not be
-        trusted just because `handle.rect`/`sceneId` still read the same."""
-        raw = {"applicable": True, "status": "inconclusive", "reason": "handle canvas, gl, or video identity changed"}
-        result = probe.inpage_oracle_result(raw)
-        assert result["verdict"] is None
-        assert result["status"] == "inconclusive"
-
-    def test_present_but_malformed_handle_is_inconclusive_not_n_a(self) -> None:
-        """Codex r3 Spec 1: only an ABSENT global handle may answer n/a; a
-        PRESENT but malformed one (missing a required member) must be an
-        applicable INCONCLUSIVE, never silently n/a."""
-        raw = {"applicable": True, "status": "inconclusive", "reason": "handle is present but malformed"}
-        result = probe.inpage_oracle_result(raw)
-        assert result is not None
-        assert result["status"] == "inconclusive"
 
     def test_measurement_binds_the_scene_rect_and_instance_before_reading(self) -> None:
         host = FakeHost(scene_ids=["scene-7", "scene-7"], inpage=[{"applicable": False, "status": "n/a", "reason": "no handle"}])
@@ -2817,22 +2669,18 @@ class TestAsyncOracleFailureHandling:
     applicable INCONCLUSIVE for that one rect -- never `status:"error"` for
     the whole pass."""
 
-    def test_a_rejected_promise_is_an_applicable_inconclusive_not_a_raise(self) -> None:
-        host = FakeHost(scene_ids=["s", "s"], inpage=[RuntimeError("promise rejected")])
+    @pytest.mark.parametrize("error", [
+        pytest.param(RuntimeError("promise rejected"), id="rejected-promise"),
+        pytest.param(TimeoutError("cdp deadline"), id="transport-timeout"),
+    ])
+    def test_a_failed_read_is_an_applicable_inconclusive_not_a_raise(self, error: BaseException) -> None:
+        host = FakeHost(scene_ids=["s", "s"], inpage=[error])
         result = probe.measure_inpage_oracle_with_paused_control(
             host.transport, {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}, "s", "Untitled.mov#1"
         )
         assert result["verdict"] is None
         assert result["status"] == "inconclusive"
-        assert "promise rejected" in result["reason"]
-
-    def test_a_transport_timeout_is_an_applicable_inconclusive_not_a_raise(self) -> None:
-        host = FakeHost(scene_ids=["s", "s"], inpage=[TimeoutError("cdp deadline")])
-        result = probe.measure_inpage_oracle_with_paused_control(
-            host.transport, {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}, "s", "Untitled.mov#1"
-        )
-        assert result["verdict"] is None
-        assert result["status"] == "inconclusive"
+        assert str(error) in result["reason"]
 
     def test_a_failure_never_collapses_the_whole_slide_to_status_error(self) -> None:
         host = FakeHost(scene_ids=["s", "s"], inpage=[RuntimeError("boom")])
@@ -2910,17 +2758,15 @@ class TestAsyncOracleFailureHandling:
         assert result.returncode == 0, result.stderr
         return json.loads(result.stdout.strip())
 
-    def test_resume_is_awaited_even_when_pause_rejects(self) -> None:
-        outcome = self._run_inpage_js_against_stub(pause_rejects=True, sample_rejects=False)
+    @pytest.mark.parametrize(("pause_rejects", "sample_rejects", "error"), [
+        pytest.param(True, False, "pause rejected", id="pause-rejects"),
+        pytest.param(False, True, "sample rejected", id="paused-sample-rejects"),
+    ])
+    def test_resume_is_awaited_even_when_a_phase_rejects(self, pause_rejects: bool, sample_rejects: bool, error: str) -> None:
+        outcome = self._run_inpage_js_against_stub(pause_rejects=pause_rejects, sample_rejects=sample_rejects)
         assert outcome["resumeCalls"] == 1
         assert outcome["ok"] is False
-        assert "pause rejected" in outcome["error"]
-
-    def test_resume_is_awaited_even_when_the_paused_sample_rejects(self) -> None:
-        outcome = self._run_inpage_js_against_stub(pause_rejects=False, sample_rejects=True)
-        assert outcome["resumeCalls"] == 1
-        assert outcome["ok"] is False
-        assert "sample rejected" in outcome["error"]
+        assert error in outcome["error"]
 
 
 class TestPokeIsProbabilistic:
@@ -2963,21 +2809,18 @@ class TestPokeIsProbabilistic:
 # --------------------------------------------------------------------------
 
 class TestPassGArgs:
-    def test_pass_flag_defaults_to_full_run(self) -> None:
-        assert probe.parse_args([]).only_pass is None
-
-    def test_pass_g_selectable(self) -> None:
-        assert probe.parse_args(["--pass", "G"]).only_pass == "G"
+    @pytest.mark.parametrize(("argv", "attr", "expected"), [
+        pytest.param([], "only_pass", None, id="pass-defaults-to-full-run"),
+        pytest.param(["--pass", "G"], "only_pass", "G", id="pass-G-selectable"),
+        pytest.param([], "attach", False, id="attach-defaults-false"),
+        pytest.param(["--pass", "G", "--attach"], "attach", True, id="attach-settable"),
+    ])
+    def test_pass_g_flags(self, argv: list[str], attr: str, expected: Any) -> None:
+        assert getattr(probe.parse_args(argv), attr) == expected
 
     def test_pass_rejects_other_values(self) -> None:
         with pytest.raises(SystemExit):
             probe.parse_args(["--pass", "V"])
-
-    def test_attach_flag_defaults_false(self) -> None:
-        assert probe.parse_args([]).attach is False
-
-    def test_attach_flag_settable(self) -> None:
-        assert probe.parse_args(["--pass", "G", "--attach"]).attach is True
 
 
 class TestGBurstSpacing:
@@ -3012,40 +2855,32 @@ class TestGBurstSpacing:
 
 
 class TestCombineVerdicts:
-    def test_all_true_is_true(self) -> None:
-        assert probe.combine_verdicts(True, True, True) is True
-
-    def test_any_false_is_false(self) -> None:
-        assert probe.combine_verdicts(True, False, True) is False
-
-    def test_any_none_is_none_even_with_a_false_present(self) -> None:
-        # A missing/unreadable check must not let another check's False stand
-        # in for it, and must not let a True elsewhere paper over it either.
-        assert probe.combine_verdicts(True, None) is None
-        assert probe.combine_verdicts(False, None) is None
-
-    def test_empty_is_true(self) -> None:
-        assert probe.combine_verdicts() is True
+    @pytest.mark.parametrize(("verdicts", "expected"), [
+        pytest.param((True, True, True), True, id="all-true-is-true"),
+        pytest.param((True, False, True), False, id="any-false-is-false"),
+        # A missing/unreadable check must not let another check's False stand in for it, and
+        # must not let a True elsewhere paper over it either.
+        pytest.param((True, None), None, id="any-none-is-none"),
+        pytest.param((False, None), None, id="any-none-is-none-even-with-a-false-present"),
+        pytest.param((), True, id="empty-is-true"),
+    ])
+    def test_combine_verdicts(self, verdicts: tuple[Any, ...], expected: bool | None) -> None:
+        assert probe.combine_verdicts(*verdicts) is expected
 
 
 class TestCaptureIsFresh:
-    def test_a_single_frame_burst_where_something_is_live_expected_is_stale(self) -> None:
-        assert probe.capture_is_fresh(True, 1) is False
-
-    def test_varied_frames_are_fresh(self) -> None:
-        assert probe.capture_is_fresh(True, 8) is True
-
-    def test_exactly_the_minimum_is_fresh(self) -> None:
-        assert probe.capture_is_fresh(True, 2) is True
-
-    def test_nothing_live_expected_is_never_flagged(self) -> None:
-        assert probe.capture_is_fresh(False, 1) is True
-        assert probe.capture_is_fresh(False, None) is True
-
-    def test_unreadable_count_when_live_expected_is_inconclusive(self) -> None:
-        assert probe.capture_is_fresh(True, None) is None
-        assert probe.capture_is_fresh(True, "n/a") is None
-        assert probe.capture_is_fresh(True, True) is None
+    @pytest.mark.parametrize(("live_expected", "unique", "expected"), [
+        pytest.param(True, 1, False, id="single-frame-burst-where-something-is-live-expected-is-stale"),
+        pytest.param(True, 8, True, id="varied-frames-are-fresh"),
+        pytest.param(True, 2, True, id="exactly-the-minimum-is-fresh"),
+        pytest.param(False, 1, True, id="nothing-live-expected-is-never-flagged"),
+        pytest.param(False, None, True, id="nothing-live-expected-unreadable-count-is-never-flagged"),
+        pytest.param(True, None, None, id="unreadable-count-when-live-expected-is-inconclusive-None"),
+        pytest.param(True, "n/a", None, id="unreadable-count-when-live-expected-is-inconclusive-str"),
+        pytest.param(True, True, None, id="unreadable-count-when-live-expected-is-inconclusive-bool"),
+    ])
+    def test_capture_is_fresh(self, live_expected: bool, unique: Any, expected: bool | None) -> None:
+        assert probe.capture_is_fresh(live_expected, unique) is expected
 
 
 class TestGotoRectExpectations:
@@ -3070,43 +2905,123 @@ class TestGotoRectExpectations:
         assert self.V_EXPECTATIONS == before
 
 
+def _snapshot(state: str, scene: int, next_scene: int | None, slide: int = 1) -> dict[str, Any]:
+    return {"playerState": state, "sceneId": scene, "nextSceneId": next_scene, "exportedSlideIndex": slide, "ready": True}
+
+
+# P2's destination (onset scene 2, slide index 1, no leading automatic events) after a correct goTo.
+P2_SETTLED = _snapshot("IdleAtInitialState", 2, 2)
+# A D-deck destination (onset 2, slide index 1, one leading `apple:movie-start`) after a correct goTo.
+D_SETTLED = _snapshot("IdleAtFinalState", 2, 3)
+D_RUN = {"autoPlayRunLength": 1, "autoPlayRunKinds": ["apple:movie-start"], "autoPlayFired": True, "autoPlayDeferredReason": None}
+NO_RUN = {"autoPlayRunLength": 0, "autoPlayRunKinds": [], "autoPlayFired": False, "autoPlayDeferredReason": None}
+
+
+class TestScoreSettledPosition:
+    """Owner 2026-10-10: the settled position is the consumption detector. A goTo that consumed
+    a click event leaves the player one or more scenes further on than the destination's own
+    leading automatic run (k = onset scene, L = that run's length)."""
+
+    @pytest.mark.parametrize(("snapshot", "leading", "verdict"), [
+        pytest.param(P2_SETTLED, 0, True, id="L0-initial-state-at-onset-passes"),
+        pytest.param(_snapshot("IdleAtFinalState", 2, 3), 0, False,
+                     id="L0-consumed-first-event-final-state-at-onset-fails"),
+        pytest.param(_snapshot("IdleAtInitialState", 3, 3), 0, False, id="L0-wrong-scene-fails"),
+        pytest.param(D_SETTLED, 1, True, id="L1-final-state-at-onset-passes"),
+        pytest.param(_snapshot("IdleAtFinalState", 4, 5, 2), 2, False, id="L2-left-the-slide-fails"),
+        pytest.param(_snapshot("IdleAtFinalState", 3, 4, 2), 3, True, id="L3-final-state-at-k-plus-2-passes"),
+        pytest.param(_snapshot("IdleAtInitialState", 2, 2), 1, False, id="L1-wrong-state-run-never-fired-fails"),
+        pytest.param(_snapshot("IdleAtFinalState", 3, 4), 1, False, id="L1-wrong-scene-consumed-a-click-event-fails"),
+        pytest.param(_snapshot("IdleAtFinalState", 2, 4), 1, False, id="L1-wrong-next-scene-fails"),
+        pytest.param(_snapshot("IdleAtFinalState", 2, 3, slide=2), 1, False, id="L1-left-the-destination-slide-fails"),
+        pytest.param(_snapshot("Playing", 2, 3), 1, False, id="L1-not-idle-fails"),
+        # Astra r6 #5: an unreadable snapshot field is inconclusive before any comparison, never a destination red.
+        pytest.param({**D_SETTLED, "sceneId": True}, 1, None, id="non-count-scene-is-inconclusive"),
+        *(pytest.param({k: v for k, v in D_SETTLED.items() if k != key}, 1, None, id=f"no-{key}-is-inconclusive")
+          for key in ("sceneId", "nextSceneId", "exportedSlideIndex")),
+        pytest.param(None, 1, None, id="no-snapshot-is-inconclusive"),
+        pytest.param({"sceneId": 2}, 1, None, id="snapshot-without-a-player-state-is-inconclusive"),
+    ])
+    def test_position(self, snapshot: Any, leading: int, verdict: bool | None) -> None:
+        onset = "2" if leading != 3 else "1"
+        slide = 1 if leading != 3 else 2
+        assert probe.score_settled_position(snapshot, onset, slide, leading)["verdict"] is verdict
+
+    @pytest.mark.parametrize(("onset", "slide"), [
+        pytest.param(None, 1, id="unknown-onset"), pytest.param("x", 1, id="non-numeric-onset"),
+        pytest.param("2", None, id="unknown-slide-index"),
+    ])
+    def test_unknown_expectation_is_inconclusive(self, onset: Any, slide: Any) -> None:
+        assert probe.score_settled_position(D_SETTLED, onset, slide, 1)["verdict"] is None
+
+
 class TestScoreNoConsumption:
-    def test_missing_execute_record_is_inconclusive(self) -> None:
-        verdict = probe.score_no_consumption("2", "2", None)
-        assert verdict["verdict"] is None
-        assert verdict["sceneOk"] is True
+    def score(self, record: Any, auto_kinds: list[str] | None, snapshot: Any) -> dict[str, Any]:
+        return probe.score_no_consumption(snapshot, "2", record, auto_kinds=auto_kinds, slide_index=1)
 
-    def test_missing_fields_on_the_record_are_inconclusive(self) -> None:
-        # Another stream is landing autoPlayRunLength/autoPlayFired on
-        # live_host.py concurrently -- a record that predates them must not
-        # be read as a false pass.
-        assert probe.score_no_consumption("2", "2", {"outcome": "ok"})["verdict"] is None
+    @pytest.mark.parametrize(("record", "snapshot", "verdict"), [
+        # P2 parity: its destination has NO leading automatic events (L = 0).
+        pytest.param(None, P2_SETTLED, None, id="missing-execute-record-is-inconclusive"),
+        # Another stream is landing autoPlayRunLength/autoPlayFired on live_host.py
+        # concurrently -- a record that predates them must not be read as a false pass.
+        pytest.param({"outcome": "ok"}, P2_SETTLED, None, id="missing-fields-on-the-record-are-inconclusive"),
+        pytest.param(NO_RUN, _snapshot("IdleAtInitialState", 6, 6), False, id="wrong-scene-fails"),
+        pytest.param({**D_RUN, "autoPlayRunKinds": ["apple:movie-start"]}, P2_SETTLED, False, id="nonzero-run-length-fails"),
+        pytest.param({**D_RUN}, P2_SETTLED, False, id="any-run-against-an-empty-leading-list-fails"),
+        pytest.param({**NO_RUN, "autoPlayFired": True}, P2_SETTLED, False, id="fired-true-fails-even-with-zero-run-length"),
+        pytest.param({**NO_RUN, "autoPlayRunKinds": None}, P2_SETTLED, True, id="zero-run-with-null-kinds-passes"),
+        pytest.param({"autoPlayRunLength": 0, "autoPlayFired": False}, P2_SETTLED, None,
+                     id="absent-kinds-are-not-null-kinds"),
+        pytest.param(NO_RUN, P2_SETTLED, True, id="clean-no-consumption-passes"),
+        pytest.param(NO_RUN, _snapshot("IdleAtFinalState", 2, 3), False, id="consumed-first-click-event-fails"),
+    ])
+    def test_p2_parity(self, record: Any, snapshot: Any, verdict: bool | None) -> None:
+        assert self.score(record, [], snapshot)["verdict"] is verdict
 
-    def test_wrong_scene_fails(self) -> None:
-        verdict = probe.score_no_consumption("6", "2", {"autoPlayRunLength": 0, "autoPlayFired": False})
-        assert verdict["verdict"] is False
-        assert verdict["sceneOk"] is False
+    @pytest.mark.parametrize(("record", "snapshot", "verdict"), [
+        # D-style destination: ONE leading automatic `apple:movie-start` (L = 1). The log half is a
+        # host-vs-JSON agreement check and must EQUAL the leading list; the settled position is
+        # what detects consumption.
+        pytest.param(D_RUN, D_SETTLED, True, id="d-style-full-run-at-the-right-position-passes"),
+        pytest.param(NO_RUN, D_SETTLED, False, id="empty-run-against-a-nonempty-leading-list-fails"),
+        pytest.param({**D_RUN, "autoPlayRunLength": 2, "autoPlayRunKinds": ["apple:movie-start", "apple:dissolve"]},
+                     D_SETTLED, False, id="longer-run-fails"),
+        pytest.param({**D_RUN, "autoPlayRunKinds": ["apple:dissolve character"]}, D_SETTLED, False, id="wrong-kind-fails"),
+        pytest.param({**D_RUN, "autoPlayFired": False}, D_SETTLED, False, id="not-fired-fails"),
+        pytest.param(D_RUN, _snapshot("IdleAtInitialState", 2, 2), False, id="run-never-landed-fails"),
+        pytest.param(D_RUN, _snapshot("IdleAtFinalState", 3, 4), False, id="consumed-the-click-event-fails"),
+        pytest.param(D_RUN, _snapshot("IdleAtFinalState", 2, 3, slide=2), False, id="left-the-slide-fails"),
+        pytest.param({**D_RUN, "autoPlayDeferredReason": "settle unconfirmed: timeout"}, D_SETTLED, None,
+                     id="deferred-run-is-inconclusive"),
+        pytest.param({**D_RUN, "autoPlayDeferredReason": "busy", "autoPlayFired": False}, D_SETTLED, None,
+                     id="deferred-not-fired-is-inconclusive"),
+        pytest.param({**D_RUN, "autoPlayRunKinds": None}, D_SETTLED, None, id="missing-kinds-is-inconclusive"),
+        # Astra r7 #2: null kinds on a mismatching length are inconclusive before the length comparison.
+        pytest.param({**D_RUN, "autoPlayRunLength": 2, "autoPlayRunKinds": None}, D_SETTLED, None,
+                     id="null-kinds-on-a-longer-run-are-inconclusive"),
+        pytest.param({**D_RUN, "autoPlayFired": "yes"}, D_SETTLED, None, id="non-boolean-fired-is-inconclusive"),
+        pytest.param({**D_RUN, "autoPlayRunKinds": [1]}, D_SETTLED, None, id="non-string-kinds-are-inconclusive"),
+        pytest.param({**D_RUN, "autoPlayRunLength": True}, D_SETTLED, None, id="non-count-run-length-is-inconclusive"),
+        pytest.param(D_RUN, None, None, id="missing-snapshot-is-inconclusive"),
+    ])
+    def test_leading_automatic_run(self, record: dict[str, Any], snapshot: Any, verdict: bool | None) -> None:
+        assert self.score(record, ["apple:movie-start"], snapshot)["verdict"] is verdict
 
-    def test_nonzero_run_length_fails(self) -> None:
-        verdict = probe.score_no_consumption("2", "2", {"autoPlayRunLength": 1, "autoPlayFired": True})
-        assert verdict["verdict"] is False
+    def test_unreadable_leading_list_is_inconclusive(self) -> None:
+        assert self.score(NO_RUN, None, P2_SETTLED)["verdict"] is None
 
-    def test_fired_true_fails_even_with_zero_run_length(self) -> None:
-        verdict = probe.score_no_consumption("2", "2", {"autoPlayRunLength": 0, "autoPlayFired": True})
-        assert verdict["verdict"] is False
-
-    def test_clean_no_consumption_passes(self) -> None:
-        verdict = probe.score_no_consumption(
-            "2", "2", {"autoPlayRunLength": 0, "autoPlayFired": False, "autoPlayRunKinds": []}
-        )
-        assert verdict["verdict"] is True
+    def test_the_result_reports_both_halves(self) -> None:
+        scored = self.score(D_RUN, ["apple:movie-start"], D_SETTLED)
+        assert scored["positionOk"] is True and scored["logOk"] is True
+        assert scored["position"]["expected"] == {
+            "playerState": "IdleAtFinalState", "sceneId": 2, "nextSceneId": 3, "exportedSlideIndex": 1,
+        }
+        assert scored["leadingAutoKinds"] == ["apple:movie-start"]
 
 
 class TestExecuteLog:
-    def test_read_execute_log_missing_file_returns_empty(self, tmp_path: Path) -> None:
+    def test_read_execute_log_without_a_file_or_path_returns_empty(self, tmp_path: Path) -> None:
         assert probe.read_execute_log(tmp_path / "nope.jsonl") == []
-
-    def test_read_execute_log_returns_none_for_no_path(self) -> None:
         assert probe.read_execute_log(None) == []
 
     def test_read_execute_log_skips_malformed_or_non_object_lines(self, tmp_path: Path) -> None:
@@ -3192,16 +3107,14 @@ class TestScoreRegionChanged:
         assert result["verdict"] is False
         assert result["mae"] == 0.0
 
-    def test_an_empty_crop_is_a_hard_fail(self) -> None:
-        before, after = self._frame(100, 100, 10), self._frame(100, 100, 10)
-        result = probe.score_region_changed(before, after, {"x": 500, "y": 500, "w": 10, "h": 10})
-        assert result["verdict"] is False
-        assert result["mae"] is None
-
-    def test_mismatched_crop_shapes_are_a_hard_fail(self) -> None:
-        before, after = self._frame(100, 100, 10), self._frame(50, 50, 10)
-        result = probe.score_region_changed(before, after, {"x": 30, "y": 30, "w": 40, "h": 40})
-        assert result["verdict"] is False
+    @pytest.mark.parametrize(("after_size", "rect"), [
+        pytest.param(100, {"x": 500, "y": 500, "w": 10, "h": 10}, id="empty-crop"),
+        pytest.param(50, {"x": 30, "y": 30, "w": 40, "h": 40}, id="mismatched-crop-shapes"),
+    ])
+    def test_an_unmeasurable_crop_is_inconclusive(self, after_size: int, rect: dict[str, int]) -> None:
+        before, after = self._frame(100, 100, 10), self._frame(after_size, after_size, 10)
+        result = probe.score_region_changed(before, after, rect)
+        assert result["verdict"] is None
         assert result["mae"] is None
 
 
@@ -3216,28 +3129,22 @@ def _character_effect(object_id: str, px: float, py: float, width: float, height
 
 
 class TestWalkCharacterRects:
-    def test_finds_a_character_buildin_rect(self) -> None:
-        rects = probe._walk_character_rects([_character_effect("A", 100, 200, 40, 60)])
-        assert rects == [{"x": 80.0, "y": 170.0, "w": 40.0, "h": 60.0}]
-
-    def test_ignores_non_character_effects(self) -> None:
-        node = [{
+    @pytest.mark.parametrize(("node", "expected"), [
+        pytest.param([_character_effect("A", 100, 200, 40, 60)], [{"x": 80.0, "y": 170.0, "w": 40.0, "h": 60.0}],
+                     id="finds-a-character-buildin-rect"),
+        pytest.param([{
             "type": "buildIn", "name": "apple:dissolve", "objectID": "X",
             "baseLayer": {"initialState": {"position": {"pointX": 0, "pointY": 0}, "width": 10, "height": 10}},
-        }]
-        assert probe._walk_character_rects(node) == []
-
-    def test_defaults_anchor_to_center_when_unspecified(self) -> None:
-        node = [_character_effect("A", 50, 50, 10, 10, anchor=False)]
-        assert probe._walk_character_rects(node) == [{"x": 45.0, "y": 45.0, "w": 10.0, "h": 10.0}]
-
-    def test_recurses_into_nested_effects(self) -> None:
-        node = [{"type": "buildIn", "effects": [_character_effect("A", 100, 200, 40, 60)]}]
-        assert len(probe._walk_character_rects(node)) == 1
-
-    def test_a_node_missing_geometry_is_skipped(self) -> None:
-        node = [{"name": "apple:dissolve character", "baseLayer": {"initialState": {}}}]
-        assert probe._walk_character_rects(node) == []
+        }], [], id="ignores-non-character-effects"),
+        pytest.param([_character_effect("A", 50, 50, 10, 10, anchor=False)], [{"x": 45.0, "y": 45.0, "w": 10.0, "h": 10.0}],
+                     id="defaults-anchor-to-center-when-unspecified"),
+        pytest.param([{"type": "buildIn", "effects": [_character_effect("A", 100, 200, 40, 60)]}],
+                     [{"x": 80.0, "y": 170.0, "w": 40.0, "h": 60.0}], id="recurses-into-nested-effects"),
+        pytest.param([{"name": "apple:dissolve character", "baseLayer": {"initialState": {}}}], [],
+                     id="a-node-missing-geometry-is-skipped"),
+    ])
+    def test_walk_character_rects(self, node: list[dict[str, Any]], expected: list[dict[str, float]]) -> None:
+        assert probe._walk_character_rects(node) == expected
 
 
 class TestUnionRect:
@@ -3265,30 +3172,21 @@ class TestCharacterRegionRect:
         rect = probe.character_region_rect(export_root, {"exportedUuid": uuid})
         assert rect == {"x": 80.0, "y": 80.0, "w": 240.0, "h": 240.0}
 
-    def test_missing_slide_json_is_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize(("content", "slide"), [
+        pytest.param(None, {"exportedUuid": "SLIDE-UUID"}, id="missing-slide-json"),
+        pytest.param("{not valid json", {"exportedUuid": "SLIDE-UUID"}, id="malformed-slide-json"),
+        pytest.param(json.dumps({"events": None, "assets": {}}), {"exportedUuid": "SLIDE-UUID"}, id="events-not-a-list"),
+        pytest.param(None, {}, id="missing-uuid"),
+    ])
+    def test_unreadable_character_geometry_is_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str | None, slide: dict[str, str],
+    ) -> None:
         monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
-        assert probe.character_region_rect(tmp_path, {"exportedUuid": "nope"}) is None
-
-    def test_malformed_slide_json_is_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
-        export_root = tmp_path / "export"
-        uuid = "SLIDE-UUID"
-        slide_dir = export_root / "assets" / uuid
-        slide_dir.mkdir(parents=True)
-        (slide_dir / f"{uuid}.json").write_text("{not valid json")
-        assert probe.character_region_rect(export_root, {"exportedUuid": uuid}) is None
-
-    def test_events_not_a_list_is_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
-        export_root = tmp_path / "export"
-        uuid = "SLIDE-UUID"
-        slide_dir = export_root / "assets" / uuid
-        slide_dir.mkdir(parents=True)
-        (slide_dir / f"{uuid}.json").write_text(json.dumps({"events": None, "assets": {}}))
-        assert probe.character_region_rect(export_root, {"exportedUuid": uuid}) is None
-
-    def test_missing_uuid_is_none(self) -> None:
-        assert probe.character_region_rect(Path("/nonexistent"), {}) is None
+        if content is not None:
+            slide_dir = tmp_path / "assets" / "SLIDE-UUID"
+            slide_dir.mkdir(parents=True)
+            (slide_dir / "SLIDE-UUID.json").write_text(content)
+        assert probe.character_region_rect(tmp_path, slide) is None
 
 
 class TestResolveNoConsumption:
@@ -3296,15 +3194,287 @@ class TestResolveNoConsumption:
     no-consumption check inconclusive, never silently True -- and must never
     touch the player to get there."""
 
-    def test_missing_character_rect_is_inconclusive_without_touching_the_player(self) -> None:
-        result = probe.resolve_no_consumption(None, "2", None, {"s": 1}, execute_record=None)
+    @pytest.mark.parametrize(("character_rect", "stage_map", "reason"), [
+        pytest.param(None, {"s": 1}, "characters region rect is unavailable", id="missing-character-rect"),
+        pytest.param({"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}, None, "stage map", id="invalid-stage-map"),
+    ])
+    def test_unreadable_geometry_is_inconclusive_without_touching_the_player(self, character_rect: Any, stage_map: Any, reason: str) -> None:
+        result = probe.resolve_no_consumption(None, "2", character_rect, stage_map, execute_record=None)
+        assert result["verdict"] is None
+        assert reason in result["reason"]
+
+    class _SnapshotOnlyPlayer:
+        """Answers the runtime snapshot read with a fixed snapshot; any attempt to advance the
+        deck or grab a screenshot is a test failure (the pixel half must not run)."""
+
+        def __init__(self, snapshot: Any) -> None:
+            self.snapshot = snapshot
+            self.evaluations: list[str] = []
+
+        def execute(self, *args: Any) -> Any:
+            raise AssertionError(f"the pixel half advanced the player: execute{args!r}")
+
+        def evaluate(self, js: str) -> Any:
+            self.evaluations.append(js)
+            return self.snapshot
+
+        def call(self, method: str, **params: Any) -> Any:
+            raise AssertionError(f"the pixel half captured a screenshot: {method}")
+
+        def _require_transport(self) -> Any:
+            return self
+
+    @pytest.mark.parametrize(("snapshot", "record", "auto_kinds", "verdict"), [
+        pytest.param(D_SETTLED, D_RUN, ["apple:movie-start"], True, id="d-style-clean-evidence-passes"),
+        pytest.param(_snapshot("IdleAtFinalState", 3, 4), D_RUN, ["apple:movie-start"], False,
+                     id="d-style-consumed-click-event-fails"),
+        pytest.param(P2_SETTLED, NO_RUN, [], True, id="no-leading-run-clean-evidence-passes"),
+        pytest.param(D_SETTLED, None, ["apple:movie-start"], None, id="missing-execute-record-stays-inconclusive"),
+    ])
+    def test_no_click_builds_scores_only_the_consumption_half(
+        self, snapshot: Any, record: Any, auto_kinds: list[str], verdict: bool | None,
+    ) -> None:
+        # Owner 2026-10-10 (option 1): a destination PARSED as having no click-driven builds has
+        # nothing for the pixel half to prove. The verdict is exactly the settled-position +
+        # execute-log verdict, the pixel half is marked n/a with the canonical reason, and the
+        # player is never advanced. Characters geometry and the stage map are irrelevant on this
+        # path, so both are passed as None to prove they cannot drag the verdict to inconclusive.
+        player = self._SnapshotOnlyPlayer(snapshot)
+        result = probe.resolve_no_consumption(
+            player, "2", None, None, execute_record=record, click_builds=False, auto_kinds=auto_kinds, slide_index=1,
+        )
+        assert result["verdict"] is verdict
+        assert result["consumption"] == probe.score_no_consumption(
+            snapshot, "2", record, auto_kinds=auto_kinds, slide_index=1,
+        )
+        assert result["regionChanged"] == {
+            "verdict": "n/a", "applicable": False, "reason": "destination has no click-driven builds",
+        }
+        assert player.evaluations == [probe.RUNTIME_SNAPSHOT_JS]
+
+    @pytest.mark.parametrize("click_builds", [
+        pytest.param(True, id="click-builds-present"),
+        pytest.param(None, id="click-builds-unknown"),
+    ])
+    def test_click_builds_with_characters_take_todays_full_path(
+        self, monkeypatch: pytest.MonkeyPatch, click_builds: bool | None,
+    ) -> None:
+        # A destination that has (or may have) click-driven builds and readable characters geometry
+        # is scored exactly as before: the full scene + execute-log + pixel check, same arguments.
+        calls: list[tuple[Any, ...]] = []
+
+        def full(
+            player: Any, expected: Any, rect: Any, stage_map: Any, *, execute_record: Any, auto_kinds: Any, slide_index: Any,
+        ) -> dict[str, Any]:
+            calls.append((player, expected, rect, stage_map, execute_record, auto_kinds, slide_index))
+            return {"verdict": True, "sentinel": "full-path"}
+
+        monkeypatch.setattr(probe, "score_no_build_consumed", full)
+        player, rect, stage_map, record = object(), {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}, {"s": 1}, {"slide": 2}
+        monkeypatch.setattr(probe, "stage_map_valid", lambda value: value is stage_map)
+        result = probe.resolve_no_consumption(
+            player, "2", rect, stage_map, execute_record=record, click_builds=click_builds, auto_kinds=[], slide_index=1,
+        )
+        assert result == {"verdict": True, "sentinel": "full-path"}
+        assert calls == [(player, "2", rect, stage_map, record, [], 1)]
+
+    @pytest.mark.parametrize("click_builds", [
+        pytest.param(True, id="click-builds-present"),
+        pytest.param(None, id="click-builds-unknown"),
+    ])
+    def test_click_builds_without_character_geometry_stay_inconclusive(self, click_builds: bool | None) -> None:
+        # `player=None`: reaching the player at all would raise, so this also proves it is untouched.
+        result = probe.resolve_no_consumption(
+            None, "2", None, {"s": 1}, execute_record={"autoPlayRunLength": 0, "autoPlayFired": False},
+            click_builds=click_builds,
+        )
+        assert result == {"verdict": None, "reason": "characters region rect is unavailable (missing/unreadable slide geometry)"}
+
+    @pytest.mark.parametrize("content", [
+        pytest.param(None, id="missing-slide-json"),
+        pytest.param("{not valid json", id="malformed-slide-json"),
+    ])
+    def test_unreadable_slide_json_stays_inconclusive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str | None,
+    ) -> None:
+        # End to end from the export: an unreadable slide must never be read as "no click-driven
+        # builds" -- both readers report unknown, and the check stays inconclusive without
+        # touching the player.
+        monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
+        if content is not None:
+            slide_dir = tmp_path / "assets" / "SLIDE-UUID"
+            slide_dir.mkdir(parents=True)
+            (slide_dir / "SLIDE-UUID.json").write_text(content)
+        slide = {"exportedUuid": "SLIDE-UUID"}
+        click_builds = probe.has_click_builds(tmp_path, slide)
+        assert click_builds is None
+        assert probe.leading_auto_kinds(tmp_path, slide) is None
+        result = probe.resolve_no_consumption(
+            None, "2", probe.character_region_rect(tmp_path, slide), {"s": 1}, execute_record=None,
+            click_builds=click_builds, auto_kinds=probe.leading_auto_kinds(tmp_path, slide),
+        )
         assert result["verdict"] is None
         assert "characters region rect is unavailable" in result["reason"]
 
-    def test_invalid_stage_map_is_inconclusive_without_touching_the_player(self) -> None:
-        result = probe.resolve_no_consumption(None, "2", {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}, None, execute_record=None)
-        assert result["verdict"] is None
-        assert "stage map" in result["reason"]
+
+def _transition(name: str = "apple:dissolve") -> dict[str, Any]:
+    return {"type": "transition", "name": name, "beginTime": 0, "duration": 1}
+
+
+def _movie_start(object_id: str = "M") -> dict[str, Any]:
+    return {
+        "type": "buildIn", "name": "apple:movie-start", "objectID": object_id,
+        "effects": [{"type": "buildIn", "name": "renderMovie", "objectID": object_id}],
+    }
+
+
+class TestHasClickBuilds:
+    """`has_click_builds` reads the same per-slide JSON as `character_region_rect`. Shapes, as
+    exported (D1 and P2 `html-unmodified`): an automatic `apple:movie-start` buildIn event
+    (`automaticPlay: true`), click `apple:dissolve character` buildIn events (`automaticPlay:
+    false`), and the final click event carrying only the outgoing `transition`."""
+
+    @pytest.mark.parametrize(("events", "expected"), [
+        pytest.param([{"automaticPlay": True, "effects": [_movie_start()]},
+                      {"automaticPlay": False, "effects": [_transition("apple:magic-move-implied-motion-path")]}],
+                     False, id="d-deck-shape-auto-movie-start-then-click-transition"),
+        pytest.param([{"automaticPlay": False, "effects": [_transition()]}], False, id="transition-only"),
+        pytest.param([], False, id="no-events"),
+        pytest.param([{"automaticPlay": False, "effects": [_character_effect("A", 10, 10, 4, 4)]},
+                      {"automaticPlay": False, "effects": [_transition()]}],
+                     True, id="p2-shape-click-character-build"),
+        pytest.param([{"automaticPlay": False, "effects": [_movie_start()]},
+                      {"automaticPlay": False, "effects": [_transition()]}],
+                     True, id="click-started-movie-is-a-click-build"),
+        pytest.param([{"automaticPlay": False, "effects": [_character_effect("A", 10, 10, 4, 4), _transition()]}],
+                     True, id="click-event-with-a-build-beside-the-transition"),
+        pytest.param([{"automaticPlay": False, "effects": []}], None, id="empty-click-event-is-unknown"),
+        pytest.param([{"automaticPlay": False, "effects": [{"type": "transition", "name": "x",
+                                                             "effects": [_character_effect("A", 1, 1, 1, 1)]}]}],
+                     True, id="nested-click-build-under-a-transition-is-detected"),
+        pytest.param([{"automaticPlay": False, "effects": [{"type": "transition", "name": "x",
+                                                             "effects": [{"type": "transition", "name": "y"}]}]}],
+                     False, id="nested-transitions-only-are-not-builds"),
+        pytest.param([{"automaticPlay": False, "effects": [{"type": "transition", "name": "x", "effects": [{"name": "y"}]}]}],
+                     None, id="malformed-nested-effect-is-unknown"),
+        pytest.param([{"automaticPlay": True, "effects": []}, {"automaticPlay": False, "effects": [_transition()]}],
+                     False, id="empty-automatic-event-is-not-a-click-build"),
+        pytest.param([{"effects": [_transition()]}], None, id="missing-automaticPlay-is-unknown"),
+        pytest.param([{"automaticPlay": 0, "effects": [_transition()]}], None, id="non-bool-automaticPlay-is-unknown"),
+        pytest.param([{"automaticPlay": False}], None, id="missing-effects-is-unknown"),
+        pytest.param([{"automaticPlay": False, "effects": [{"name": "apple:dissolve"}]}], None,
+                     id="effect-without-a-type-is-unknown"),
+        pytest.param(["not an event"], None, id="non-dict-event-is-unknown"),
+        pytest.param([{"automaticPlay": False, "effects": [_character_effect("A", 1, 1, 1, 1)]}, "junk"], None,
+                     id="malformed-event-after-a-click-build-is-still-unknown"),
+    ])
+    def test_shapes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, events: list[Any], expected: bool | None) -> None:
+        monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
+        slide_dir = tmp_path / "assets" / "SLIDE-UUID"
+        slide_dir.mkdir(parents=True)
+        (slide_dir / "SLIDE-UUID.json").write_text(json.dumps({"events": events, "assets": {}}))
+        assert probe.has_click_builds(tmp_path, {"exportedUuid": "SLIDE-UUID"}) is expected
+
+    @pytest.mark.parametrize(("content", "slide"), [
+        pytest.param(None, {"exportedUuid": "SLIDE-UUID"}, id="missing-slide-json"),
+        pytest.param("{not valid json", {"exportedUuid": "SLIDE-UUID"}, id="malformed-slide-json"),
+        pytest.param(json.dumps({"assets": {}}), {"exportedUuid": "SLIDE-UUID"}, id="no-events-key"),
+        pytest.param(json.dumps({"events": None, "assets": {}}), {"exportedUuid": "SLIDE-UUID"}, id="events-not-a-list"),
+        pytest.param(None, {}, id="missing-uuid"),
+    ])
+    def test_unreadable_slide_is_unknown_never_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str | None, slide: dict[str, str],
+    ) -> None:
+        monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
+        if content is not None:
+            slide_dir = tmp_path / "assets" / "SLIDE-UUID"
+            slide_dir.mkdir(parents=True)
+            (slide_dir / "SLIDE-UUID.json").write_text(content)
+        assert probe.has_click_builds(tmp_path, slide) is None
+
+
+class TestLeadingAutoKinds:
+    """The first effect `name` of each leading `automaticPlay: true` event -- the same string the
+    runtime pushes into `autoPlayRunKinds` (`effects[0].name`, `live_runtime.py`) -- up to the
+    first click event."""
+
+    @pytest.mark.parametrize(("events", "expected"), [
+        pytest.param([{"automaticPlay": True, "effects": [_movie_start()]},
+                      {"automaticPlay": False, "effects": [_transition()]}],
+                     ["apple:movie-start"], id="d-deck-shape"),
+        pytest.param([{"automaticPlay": False, "effects": [_character_effect("A", 1, 1, 1, 1)]},
+                      {"automaticPlay": True, "effects": [_movie_start()]},
+                      {"automaticPlay": False, "effects": [_transition()]}],
+                     [], id="p2-shape-click-first-stops-the-run"),
+        pytest.param([{"automaticPlay": True, "effects": [_movie_start()]},
+                      {"automaticPlay": True, "effects": [_character_effect("A", 1, 1, 1, 1)]},
+                      {"automaticPlay": False, "effects": [_transition()]}],
+                     ["apple:movie-start", "apple:dissolve character"], id="several-leading-automatic-events-in-order"),
+        pytest.param([], [], id="no-events"),
+        pytest.param([{"automaticPlay": False, "effects": [_transition()]}, "junk-after-the-run-is-not-read"], [],
+                     id="stops-at-the-first-click-event"),
+        pytest.param([{"automaticPlay": True, "effects": []}], None, id="automatic-event-without-effects-is-unknown"),
+        pytest.param([{"automaticPlay": True, "effects": [{"type": "buildIn"}]}], None,
+                     id="automatic-effect-without-a-name-is-unknown"),
+        pytest.param([{"effects": [_movie_start()]}], None, id="missing-automaticPlay-is-unknown"),
+        pytest.param(["junk"], None, id="non-dict-event-is-unknown"),
+        pytest.param([{"automaticPlay": True, "effects": [_movie_start()]},
+                      {"automaticPlay": True, "effects": [_transition()]}], None,
+                     id="auto-advancing-slide-is-refused"),
+        pytest.param([{"automaticPlay": True, "effects": [_transition()]}], None, id="leading-auto-transition-is-refused"),
+    ])
+    def test_shapes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, events: list[Any], expected: list[str] | None) -> None:
+        monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
+        slide_dir = tmp_path / "assets" / "SLIDE-UUID"
+        slide_dir.mkdir(parents=True)
+        (slide_dir / "SLIDE-UUID.json").write_text(json.dumps({"events": events, "assets": {}}))
+        assert probe.leading_auto_kinds(tmp_path, {"exportedUuid": "SLIDE-UUID"}) == expected
+
+    @pytest.mark.parametrize("content", [
+        pytest.param(None, id="missing-slide-json"),
+        pytest.param("{not valid json", id="malformed-slide-json"),
+        pytest.param(json.dumps({"events": None}), id="events-not-a-list"),
+    ])
+    def test_unreadable_slide_is_unknown(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str | None) -> None:
+        monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
+        if content is not None:
+            slide_dir = tmp_path / "assets" / "SLIDE-UUID"
+            slide_dir.mkdir(parents=True)
+            (slide_dir / "SLIDE-UUID.json").write_text(content)
+        assert probe.leading_auto_kinds(tmp_path, {"exportedUuid": "SLIDE-UUID"}) is None
+
+
+_D1_EXPORT = Path(probe.fixture("qual-decks")) / "D1" / "html-unmodified"
+_P2_EXPORT = Path(probe.fixture("p2-recovery")) / "html-adversarial" / "html-unmodified"
+
+
+class TestHasClickBuildsOnRealExports:
+    """Against the real exports Pass G runs on: every D1 slide (including the Pass G consumption
+    destination, slide 2) is a positive "no click-driven builds"; P2's slide 2 -- the original
+    target of the check, with three click `apple:dissolve character` builds -- is not. Read in
+    place: `safe_export_file` only admits the preview cache that `prepare_export` copies into, so
+    it is bypassed here exactly as the synthetic-export tests above bypass it."""
+
+    @pytest.fixture(autouse=True)
+    def _read_fixture_in_place(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
+
+    @pytest.mark.skipif(not (_D1_EXPORT / "assets" / "header.json").is_file(), reason="qual-decks fixture is not in this checkout")
+    def test_d1_destinations_have_no_click_builds(self) -> None:
+        slides = probe.load_slides(_D1_EXPORT)
+        assert [probe.has_click_builds(_D1_EXPORT, slide) for slide in slides] == [False] * len(slides)
+        destination = next(s for s in slides if s["originalOrdinal"] == probe.GOTO_CONSUMPTION_CHECK_TO)
+        assert probe.character_region_rect(_D1_EXPORT, destination) is None
+        # The stored D1-G evidence logged `autoPlayRunKinds: ['apple:movie-start']` for this goTo.
+        assert probe.leading_auto_kinds(_D1_EXPORT, destination) == ["apple:movie-start"]
+
+    @pytest.mark.skipif(not (_P2_EXPORT / "assets" / "header.json").is_file(), reason="p2-recovery fixture is not in this checkout")
+    def test_p2_character_build_slide_has_click_builds(self) -> None:
+        slides = probe.load_slides(_P2_EXPORT)
+        destination = next(s for s in slides if s["originalOrdinal"] == probe.GOTO_CONSUMPTION_CHECK_TO)
+        assert probe.has_click_builds(_P2_EXPORT, destination) is True
+        assert probe.character_region_rect(_P2_EXPORT, destination) is not None
+        assert probe.leading_auto_kinds(_P2_EXPORT, destination) == []
 
 
 class TestGotoTelemetry:
@@ -3323,15 +3493,22 @@ class TestGotoTelemetry:
 
 
 class TestTelemetryPresent:
-    def test_all_fields_present_is_true_even_with_null_values(self) -> None:
-        record = {field: None for field in probe.GOTO_TELEMETRY_FIELDS}
-        assert probe.telemetry_present(record) is True
-
-    def test_missing_record_is_inconclusive(self) -> None:
-        assert probe.telemetry_present(None) is None
-
-    def test_partial_record_is_inconclusive(self) -> None:
-        assert probe.telemetry_present({"autoPlayRunLength": 1}) is None
+    # Astra r7 #2: every armed destination validates its telemetry fully before any comparison.
+    @pytest.mark.parametrize(("record", "expected"), [
+        pytest.param(D_RUN, True, id="complete-telemetry"),
+        pytest.param({**NO_RUN, "autoPlayRunKinds": None}, True, id="null-kinds-on-an-empty-run"),
+        pytest.param({field: None for field in probe.GOTO_TELEMETRY_FIELDS}, None, id="null-values-are-inconclusive"),
+        pytest.param(None, None, id="missing-record-is-inconclusive"),
+        *(pytest.param({k: v for k, v in D_RUN.items() if k != key}, None, id=f"no-{key}")
+          for key in probe.GOTO_TELEMETRY_FIELDS),
+        pytest.param({**D_RUN, "autoPlayRunLength": "bad"}, None, id="string-run-length"),
+        pytest.param({**D_RUN, "autoPlayRunKinds": [123]}, None, id="non-string-kinds"),
+        pytest.param({**D_RUN, "autoPlayFired": "bad"}, None, id="string-fired"),
+        pytest.param({**D_RUN, "autoPlayDeferredReason": {}}, None, id="object-deferred"),
+        pytest.param({**D_RUN, "autoPlayDeferredReason": "busy"}, None, id="deferred-is-inconclusive"),
+    ])
+    def test_telemetry_present(self, record: Any, expected: bool | None) -> None:
+        assert probe.telemetry_present(record) is expected
 
 
 class _ShotTransport:
@@ -3356,51 +3533,31 @@ class TestScoreStaticControl:
     """Codex round 2: a black or wrong-slide capture must fail even though every movie rect is
     correctly DEAD-expected there -- scored on the area OUTSIDE every expected movie rect."""
 
-    def test_all_black_frame_fails_the_non_black_check(self) -> None:
-        shot = png_b64(40, 40, fill=0)
-        transport = _ShotTransport([shot, shot])
-        result = probe.score_static_control(transport, [], gap_s=0.0)
-        assert result["verdict"] is False
-        assert "no rendered content" in result["reason"]
-
-    def test_bright_content_outside_the_excluded_rect_passes(self) -> None:
+    @staticmethod
+    def _patch(region: tuple[slice, slice], value: int) -> str:
         image = np.zeros((40, 40, 3), dtype=np.uint8)
-        image[0:10, 0:10] = 200
-        shot = _png_b64_from_array(image)
-        transport = _ShotTransport([shot, shot])
-        result = probe.score_static_control(transport, [{"x": 10, "y": 10, "w": 30, "h": 30}], gap_s=0.0)
-        assert result["verdict"] is True
+        image[region] = value
+        return _png_b64_from_array(image)
 
-    def test_bright_content_only_inside_the_excluded_rect_still_fails(self) -> None:
-        image = np.zeros((40, 40, 3), dtype=np.uint8)
-        image[10:40, 10:40] = 200
-        shot = _png_b64_from_array(image)
-        transport = _ShotTransport([shot, shot])
-        result = probe.score_static_control(transport, [{"x": 10, "y": 10, "w": 30, "h": 30}], gap_s=0.0)
-        assert result["verdict"] is False
-        assert "no rendered content" in result["reason"]
-
-    def test_unstable_content_outside_the_rect_fails(self) -> None:
-        first = np.zeros((40, 40, 3), dtype=np.uint8)
-        first[0:10, 0:10] = 200
-        second = np.zeros((40, 40, 3), dtype=np.uint8)
-        second[0:10, 0:10] = 50
-        transport = _ShotTransport([_png_b64_from_array(first), _png_b64_from_array(second)])
-        result = probe.score_static_control(transport, [], gap_s=0.0)
-        assert result["verdict"] is False
-        assert "changed unexpectedly" in result["reason"]
-
-    def test_excluding_the_whole_frame_is_inconclusive(self) -> None:
-        shot = png_b64(40, 40, fill=200)
-        transport = _ShotTransport([shot, shot])
-        result = probe.score_static_control(transport, [{"x": 0, "y": 0, "w": 40, "h": 40}], gap_s=0.0)
-        assert result["verdict"] is None
-
-    def test_mismatched_shots_fail(self) -> None:
-        transport = _ShotTransport([png_b64(40, 40, fill=200), png_b64(20, 20, fill=200)])
-        result = probe.score_static_control(transport, [], gap_s=0.0)
-        assert result["verdict"] is False
-        assert "empty or mismatched" in result["reason"]
+    @pytest.mark.parametrize(("shots", "rects", "verdict", "reason"), [
+        pytest.param(lambda: [png_b64(40, 40, fill=0)] * 2, [], False, "no rendered content",
+                     id="all-black-frame-fails-the-non-black-check"),
+        pytest.param(lambda: [TestScoreStaticControl._patch(np.s_[0:10, 0:10], 200)] * 2, [{"x": 10, "y": 10, "w": 30, "h": 30}],
+                     True, None, id="bright-content-outside-the-excluded-rect-passes"),
+        pytest.param(lambda: [TestScoreStaticControl._patch(np.s_[10:40, 10:40], 200)] * 2, [{"x": 10, "y": 10, "w": 30, "h": 30}],
+                     False, "no rendered content", id="bright-content-only-inside-the-excluded-rect-still-fails"),
+        pytest.param(lambda: [TestScoreStaticControl._patch(np.s_[0:10, 0:10], 200), TestScoreStaticControl._patch(np.s_[0:10, 0:10], 50)],
+                     [], False, "changed unexpectedly", id="unstable-content-outside-the-rect-fails"),
+        pytest.param(lambda: [png_b64(40, 40, fill=200)] * 2, [{"x": 0, "y": 0, "w": 40, "h": 40}], None, None,
+                     id="excluding-the-whole-frame-is-inconclusive"),
+        pytest.param(lambda: [png_b64(40, 40, fill=200), png_b64(20, 20, fill=200)], [], None, "empty or mismatched",
+                     id="mismatched-shots-are-inconclusive"),
+    ])
+    def test_static_control(self, shots: Any, rects: list[dict[str, int]], verdict: bool | None, reason: str | None) -> None:
+        result = probe.score_static_control(_ShotTransport(shots()), rects, gap_s=0.0)
+        assert result["verdict"] is verdict
+        if reason is not None:
+            assert reason in result["reason"]
 
 
 def _g_destination(from_ordinal: int, to_ordinal: int, verdict: bool | None, reasons: Sequence[str] = ()) -> dict[str, Any]:
@@ -3434,51 +3591,34 @@ class TestOverallStatusG:
         result = {"armed": _all_true_g_arm(), "nullControl": _all_true_g_arm()}
         assert probe.overall_status_g(result) == ("pass", [])
 
-    def test_a_false_armed_destination_fails(self) -> None:
+    @staticmethod
+    def _first(verdict: bool | None, reasons: Sequence[str] = ()) -> dict[str, Any]:
         destinations = [_g_destination(f, t, True) for f, t in probe.GOTO_MATRIX]
-        destinations[0] = _g_destination(1, 2, False, ["movie rect stayed dead"])
-        result = {"armed": _g_arm(destinations), "nullControl": _all_true_g_arm()}
-        status, reasons = probe.overall_status_g(result)
-        assert status == "fail"
-        assert any("armed goTo 1->2" in reason for reason in reasons)
+        destinations[0] = _g_destination(1, 2, verdict, reasons)
+        return _g_arm(destinations)
 
-    def test_a_green_null_control_fails_the_pass(self) -> None:
-        """A null-control destination reading LIVE (verdict False, missing its
-        DEAD expectation) is the "green null control" the plan requires to
-        fail the whole pass -- never a silent pass alongside a clean armed
-        arm."""
-        destinations = [_g_destination(f, t, True) for f, t in probe.GOTO_MATRIX]
-        destinations[0] = _g_destination(1, 2, False, ["expected dead, read live"])
-        result = {"armed": _all_true_g_arm(), "nullControl": _g_arm(destinations)}
-        status, reasons = probe.overall_status_g(result)
-        assert status == "fail"
-        assert any("null control goTo 1->2" in reason for reason in reasons)
-
-    def test_any_inconclusive_destination_makes_the_pass_inconclusive(self) -> None:
-        destinations = [_g_destination(f, t, True) for f, t in probe.GOTO_MATRIX]
-        destinations[0] = _g_destination(1, 2, None)
-        result = {"armed": _g_arm(destinations), "nullControl": _all_true_g_arm()}
-        status, _ = probe.overall_status_g(result)
-        assert status == "inconclusive"
-
-    def test_missing_destinations_is_an_error(self) -> None:
-        status, _ = probe.overall_status_g({"armed": _g_arm([]), "nullControl": _all_true_g_arm()})
-        assert status == "error"
-
-    def test_output_not_visible_fails_even_with_all_true_destinations(self) -> None:
-        result = {"armed": _g_arm([_g_destination(f, t, True) for f, t in probe.GOTO_MATRIX], output_visible=False), "nullControl": _all_true_g_arm()}
-        status, reasons = probe.overall_status_g(result)
-        assert status == "fail"
-        assert any("armed output was not visible" in reason for reason in reasons)
-
-    def test_a_stop_error_fails(self) -> None:
-        result = {
-            "armed": _g_arm([_g_destination(f, t, True) for f, t in probe.GOTO_MATRIX], stop_error="boom"),
-            "nullControl": _all_true_g_arm(),
-        }
-        status, reasons = probe.overall_status_g(result)
-        assert status == "fail"
-        assert any("armed player.stop() failed: boom" in reason for reason in reasons)
+    @pytest.mark.parametrize(("arms", "status", "reason"), [
+        pytest.param(lambda: (TestOverallStatusG._first(False, ["movie rect stayed dead"]), _all_true_g_arm()), "fail",
+                     "armed goTo 1->2", id="false-armed-destination-fails"),
+        # A null-control destination reading LIVE (verdict False, missing its DEAD expectation)
+        # is the "green null control" the plan requires to fail the whole pass -- never a
+        # silent pass alongside a clean armed arm.
+        pytest.param(lambda: (_all_true_g_arm(), TestOverallStatusG._first(False, ["expected dead, read live"])), "fail",
+                     "null control goTo 1->2", id="green-null-control-fails-the-pass"),
+        pytest.param(lambda: (TestOverallStatusG._first(None), _all_true_g_arm()), "inconclusive", None,
+                     id="any-inconclusive-destination-makes-the-pass-inconclusive"),
+        pytest.param(lambda: (_g_arm([]), _all_true_g_arm()), "error", None, id="missing-destinations-is-an-error"),
+        pytest.param(lambda: (dict(_all_true_g_arm(), outputVisible=False), _all_true_g_arm()), "fail",
+                     "armed output was not visible", id="output-not-visible-fails-even-with-all-true-destinations"),
+        pytest.param(lambda: (dict(_all_true_g_arm(), stopError="boom"), _all_true_g_arm()), "fail",
+                     "armed player.stop() failed: boom", id="stop-error-fails"),
+    ])
+    def test_overall_status_g(self, arms: Any, status: str, reason: str | None) -> None:
+        armed, null_control = arms()
+        got, reasons = probe.overall_status_g({"armed": armed, "nullControl": null_control})
+        assert got == status
+        if reason is not None:
+            assert any(reason in r for r in reasons)
 
 
 # --------------------------------------------------------------------------
@@ -3494,23 +3634,42 @@ GL_BOUNDARY = {
     "slotSizes": [[1920, 1080], [960, 276], [178, 157]], "slotRects": GL_SLOT_RECTS,
     "opacityOverrides": [{"slot": 2, "opacity": 0.3, "texW": 178, "texH": 157}],
     "instanceId": f"{BIG_ASSET}#1", "instanceRect": dict(BIG_INSTANCE), "movieSlot": 1,
+    "loop": False, "src": _end(0), "dst": _end(1),
 }
-GL_RUNTIME = {"movies": RUNTIME_MOVIES, "boundaries": [GL_BOUNDARY, RESTART_BOUNDARY, BRIDGE_BOUNDARY]}
+GL_RUNTIME = {"schema": 2, "movies": RUNTIME_MOVIES, "boundaries": [GL_BOUNDARY, RESTART_BOUNDARY, BRIDGE_BOUNDARY]}
 GL_REPLAY_VERSION = probe.GL_REPLAY_VERSION
 GL_CONTINUITY = {"mode": "qualified", "glReplay": {"mode": "injected", "version": GL_REPLAY_VERSION, "sha256": probe.gl_replay_js_sha256()}}
 ARMED = probe.armed_fact(synthetic_plan(), GL_RUNTIME, BOUNDARY_KEYS)
-GL_STAGE = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0}
+GL_STAGE = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920, "offsetHeight": 1080}
 
 
 def _ev(kind: str, **detail: Any) -> dict[str, Any]:
-    return {"kind": kind, "detail": detail, "t": 1.0}
+    """A core note (`note()` stamps the page hash; a module event carries it harmlessly)."""
+    return {"kind": kind, "detail": {"sceneHash": "", **detail}, "t": 1.0}
 
 
 def _pool_entry(el_id: int, current_time: float, **extra: Any) -> dict[str, Any]:
     return {
         "key": "untitled.mov", "movieKey": "movie1", "elId": el_id, "currentTime": current_time,
-        "paused": False, "readyState": 4, "inDocument": False, **extra,
+        "paused": False, "ended": False, "readyState": 4, "inDocument": False, "videoWidth": 640, "videoHeight": 360,
+        **extra,
     }
+
+
+def _gl_read(**fields: Any) -> dict[str, Any]:
+    """`GL_REPLAY_READ_JS` on a page with a core and no G2 module, overridden by `fields`."""
+    return {"t": 1.0, "hash": "#2", "ready": True, "api": None, "coreEvents": [], "pool": [], "facades": [], **fields}
+
+
+def _gl_api(state: str = "LIVE", stand_downs: tuple[str, ...] = (), events: tuple[Any, ...] = (), **stats: Any) -> dict[str, Any]:
+    return {"version": 1, "state": state, "standDowns": list(stand_downs), "events": list(events),
+            "stats": {"epoch": 1, "iter": 10, "uploads": 10, "glErrors": 0, **stats}}
+
+
+def _handback_record(after: dict[str, Any], *, expect_handoff: bool = True, **fields: Any) -> dict[str, Any]:
+    """`capture_handback`'s `ok` record around the post-build-1 GL read `after`."""
+    return {"status": "ok", "reason": None, "targetHash": 3, "expectHandoff": expect_handoff, "before": _gl_read(),
+            "stageMap": dict(HB_STAGE), "painting": [], "preserve": [], "after": after, **fields}
 
 
 def _armed_read(t: float, iteration: int, carried_time: float) -> dict[str, Any]:
@@ -3581,8 +3740,6 @@ ARMED_CLAUSE_MUTATIONS = {
     "carry delta too large": ("events", lambda reads, c: _set_detail(reads[1], "glreplay-carried", delta=0.05)),
     # clause 4 -- no painting <video> over the armed rect
     "painting over the rect": ("noPainting", lambda reads, c: reads[0].update(painting=[painting_video(BIG_INSTANCE, el_id=1)])),
-    "unreadable painting": ("noPainting", lambda reads, c: reads[1].update(painting={"error": "no checkVisibility"})),
-    "bad stage map": ("noPainting", lambda reads, c: reads[1].update(stageMap=None)),
     # clause 5 -- pool = {carried} U siblings, out of the document, carried decoding in real time
     "carried not pooled": ("pool", lambda reads, c: _gl(reads[1]).update(pool=[_pool_entry(2, 3.0)])),
     "sibling in the document": ("pool", lambda reads, c: _gl(reads[0])["pool"][1].update(inDocument=True)),
@@ -3592,7 +3749,6 @@ ARMED_CLAUSE_MUTATIONS = {
     "carried clock frozen": ("pool", lambda reads, c: _set_pool_time(reads[1], 5.0)),
     "carried clock double speed": ("pool", lambda reads, c: _set_pool_time(reads[1], 6.2)),
     "carried clock half speed": ("pool", lambda reads, c: _set_pool_time(reads[1], 5.3)),
-    "unreadable pool": ("pool", lambda reads, c: _gl(reads[0]).update(pool={"error": "boom"})),
 }
 
 
@@ -3611,6 +3767,7 @@ class TestArmedFact:
         assert armed["instanceId"] == f"{BIG_ASSET}#1" and armed["instanceRect"] == BIG_INSTANCE
         assert armed["movieSlot"] == 1 and armed["overrideSlots"] == [2]
         assert armed["slotRects"][1] == {"x": 105.0, "y": 790.0, "w": 960.0, "h": 276.0}
+        assert armed["srcObjectId"] == "obj-s1-big" and armed["dstObjectId"] == "obj-s2-big"
 
     @pytest.mark.parametrize("boundaries", [
         [RESTART_BOUNDARY, BRIDGE_BOUNDARY],
@@ -3623,7 +3780,7 @@ class TestArmedFact:
     @pytest.mark.parametrize("change", [
         {"atScene": 4}, {"atScene": 6}, {"movieKey": "movie9"}, {"instanceId": f"{BIG_ASSET}#2"},
         {"instanceRect": dict(BIG_INSTANCE, x=110.0)}, {"movieSlot": 3}, {"slotRects": None},
-        {"opacityOverrides": [{"slot": 7}]},
+        {"opacityOverrides": [{"slot": 7}]}, {"src": None}, {"dst": {"objectId": "", "rect": BIG_INSTANCE}},
     ])
     def test_an_unscorable_entry_fails_closed(self, change: dict[str, Any]) -> None:
         runtime = {"movies": RUNTIME_MOVIES, "boundaries": [dict(GL_BOUNDARY, **change)]}
@@ -3639,9 +3796,12 @@ def _gl_plan(gl: bool = False) -> Any:
     boundary = probe.live_continuity_module.SlideBoundary
     pin = movie(
         BIG_ASSET, "pin", rect(**BIG_INSTANCE), rect(**BIG_INSTANCE), refusal="overlap", gl_replay={"x": 1} if gl else None,
+        src_object_id=BIG_OBJECT_IDS[0], dst_object_id=BIG_OBJECT_IDS[1], code="overlap",
     )
     src, dst = {"x": 198.0, "y": 797.0, "w": 952.0, "h": 268.0}, {"x": 327.0, "y": 709.0, "w": 1266.0, "h": 356.0}
-    bridge = movie(BIG_ASSET, "bridge", rect(**src), rect(**dst))
+    bridge = movie(
+        BIG_ASSET, "bridge", rect(**src), rect(**dst), src_object_id=BIG_OBJECT_IDS[2], dst_object_id=BIG_OBJECT_IDS[3],
+    )
     return probe.ContinuityPlan(
         canvas={"width": 1920, "height": 1080}, scene_index_by_player=dict(SCENE_INDEX_BY_PLAYER),
         slide_rects={}, boundaries=(boundary(0, 1, (pin,)), boundary(2, 3, (bridge,))),
@@ -3687,7 +3847,7 @@ class TestFactsPerArm:
         assert probe.facts_for({"glReplay": {"mode": "injected"}}, off, None) is off
 
     def test_the_off_observer_is_todays_refusal_observer(self) -> None:
-        retire = probe.retire_fact(synthetic_plan(), RETIRED_RUNTIME, BOUNDARY_KEYS)
+        retire = synthetic_retire()
         out: dict[str, Any] = {}
         host = ArmedHost([])
         probe.boundary_observer(host, {"retire": retire}, out)(2)
@@ -3807,9 +3967,10 @@ class TestArmedScoring:
         assert not scored["checks"]["events"] and not scored["checks"]["pool"]
 
     @pytest.mark.parametrize("reads", [None, [], "x", [_armed_read(1000.0, 10, 5.0)], [{"glReplay": None}, {"glReplay": None}]])
-    def test_missing_reads_are_false_never_none(self, reads: Any) -> None:
+    def test_missing_reads_are_none_never_false(self, reads: Any) -> None:
+        """S2 fold3: missing evidence is inconclusive (owner rule), never a red."""
         scored = probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[1, 1])
-        assert scored["verdict"] is False
+        assert scored["verdict"] is None
 
     def test_the_r3_forced_shape_is_red(self) -> None:
         reads = _armed_reads()
@@ -3823,18 +3984,18 @@ class TestArmedScoring:
 
     def test_positive_halves_score_the_armed_boundary_for_an_armed_set(self) -> None:
         scored = probe.score_positive_halves({"armed1to2": _armed_reads()}, {"retire": None, "armed": ARMED}, True, GL_CONTINUITY)
-        assert list(scored) == ["armed1to2"] and scored["armed1to2"]["checks"]["owner"] is False
+        assert list(scored) == ["armed1to2"] and scored["armed1to2"]["checks"]["owner"] is None
         samples = [{"scene": 1, "videos": [
-            {"src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 1}},
-            {"src": "untitled.mov", "rect": dict(SMALL_INSTANCE), "footprintOwner": {"elId": 2}},
-        ]}, {"scene": 2, "videos": [{"src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 2}}]}]
+            {"id": 1, "src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 1}},
+            {"id": 2, "src": "untitled.mov", "rect": dict(SMALL_INSTANCE), "footprintOwner": {"elId": 2}},
+        ]}, {"scene": 2, "videos": [{"id": 1, "src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 2}}]}]
         scored = probe.score_positive_halves(
             {"armed1to2": _armed_reads()}, {"retire": None, "armed": ARMED}, True, GL_CONTINUITY, samples,
         )
         assert scored["armed1to2"]["verdict"] is True, scored
 
     def test_positive_halves_are_todays_refusals_for_the_off_set(self) -> None:
-        retire = probe.retire_fact(synthetic_plan(), RETIRED_RUNTIME, BOUNDARY_KEYS)
+        retire = synthetic_retire()
         evidence = {"refused1to2": {"stageMap": dict(GL_STAGE), "painting": [], "poolSnapshot": []}}
         facts = {"retire": retire}
         assert probe.score_positive_halves(evidence, facts, True, {"mode": "qualified"}) == probe.score_refusals(evidence, facts, True)
@@ -3845,11 +4006,11 @@ class TestRectExpectationModelGl:
         plan = synthetic_plan()
         on = probe.rect_expectations(plan, GL_RUNTIME, continuity_on=True)
         off = probe.rect_expectations(plan, GL_RUNTIME, continuity_on=False)
-        assert on[1] == {BIG_ASSET: "live"} and off[1] == {BIG_ASSET: "dead"}
+        assert on[1] == {BIG1: "live"} and off[1] == {BIG1: "dead"}
         assert on == probe.rect_expectations(plan, CARRIED_RUNTIME, continuity_on=True)
         assert off == probe.rect_expectations(plan, CARRIED_RUNTIME, continuity_on=False)
 
-    def test_vgl_may_differ_from_v_only_at_the_armed_movie(self) -> None:
+    def test_vgl_may_differ_from_v_only_at_the_armed_instance(self) -> None:
         plan = synthetic_plan()
         v = probe.rect_expectations(plan, RETIRED_RUNTIME, continuity_on=True)
         vgl = probe.rect_expectations(plan, GL_RUNTIME, continuity_on=True)
@@ -3863,7 +4024,7 @@ class TestRectExpectationModelGl:
 
 
 # Hand-back geometry: a 0.1 stage scale keeps the frames small.
-HB_STAGE = {"s": 0.1, "sy": 0.1, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0}
+HB_STAGE = {"s": 0.1, "sy": 0.1, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920, "offsetHeight": 1080}
 HB_SHAPE = (108, 192, 3)
 
 
@@ -3876,34 +4037,26 @@ def _hb_frames() -> tuple[np.ndarray, np.ndarray]:
 
 
 def _hb_v_record() -> dict[str, Any]:
-    return {
-        "status": "ok", "stageMap": dict(HB_STAGE), "painting": [],
-        "before": {"pool": [], "facades": [], "coreEvents": []},
-        "after": {"hash": "#3", "coreEvents": [], "api": None, "facades": []},
-    }
+    return _handback_record(_gl_read(hash="#3"), expect_handoff=False)
 
 
 def _hb_vgl_record() -> dict[str, Any]:
     screen = probe.to_screen_rect(BIG_INSTANCE, HB_STAGE)
-    return {
-        "status": "ok", "stageMap": dict(HB_STAGE),
-        "painting": [{"src": "untitled.mov", "elId": 1, "rect": dict(screen)}],
-        "before": {"pool": [_pool_entry(1, 5.0), _pool_entry(2, 3.0)], "facades": [], "coreEvents": []},
-        "after": {
-            "hash": "#3",
-            "coreEvents": [
+    return _handback_record(
+        _gl_read(
+            hash="#3",
+            coreEvents=[
                 _ev("glreplay-carried", elId=1, delta=0.01),
                 _ev("glreplay-release", ok=True, mode="handoff", reason=None, elId=1, retired=[2]),
                 _ev("remount-into-authored-layer", elId=1),
             ],
-            "api": {
-                "version": 1, "state": "RETIRED", "standDowns": ["canvasRemoved"],
-                "events": [_ev("glreplay-handoff", reason="canvasRemoved", completedMs=1.8)],
-                "stats": {"mutationScanMs": 0.3},
-            },
-            "facades": [{"elId": 3, "forElId": 1}],
-        },
-    }
+            api=_gl_api("RETIRED", ("canvasRemoved",), (_ev("glreplay-handoff", reason="canvasRemoved", completedMs=1.8),),
+                        mutationScanMs=0.3),
+            facades=[{"elId": 3, "forElId": 1}],
+        ),
+        painting=[{"src": "untitled.mov", "elId": 1, "rect": dict(screen)}],
+        before=_gl_read(pool=[_pool_entry(1, 5.0), _pool_entry(2, 3.0)]),
+    )
 
 
 class TestHandbackScoring:
@@ -3956,11 +4109,11 @@ class TestHandbackScoring:
     @pytest.mark.parametrize("mutate,check", [
         (lambda r: r["painting"][0].update(elId=7), "painting"),
         (lambda r: r["painting"][0]["rect"].update(x=r["painting"][0]["rect"]["x"] + 1.0), "painting"),
-        (lambda r: r["painting"].append(dict(r["painting"][0])), "painting"),
-        (lambda r: r.update(painting={"error": "x"}), "painting"),
+        (lambda r: r["painting"].append(dict(r["painting"][0], elId=2)), "painting"),
+        # Astra r12 #2: the carried decoder reassigned to another asset keeps its elId (core `reidentify`).
+        (lambda r: r["painting"][0].update(src="another.mov"), "painting"),
         (lambda r: r["after"]["coreEvents"][1]["detail"].update(mode="retire"), "release+handoff"),
         (lambda r: r["after"]["coreEvents"][1]["detail"].update(retired=[]), "release"),
-        (lambda r: r["before"].update(pool={"error": "x"}), "release"),
         (lambda r: r["after"]["coreEvents"].append(_ev("remount-done", elId=1)), "noRemount"),
         (lambda r: r["after"]["coreEvents"].append(_ev("remount-footprint-rect", elId=3)), "noRemount"),
     ])
@@ -3976,10 +4129,15 @@ class TestHandbackScoring:
         record["after"]["coreEvents"].append(_ev("remount-done", elId=9))
         assert self._score(g_rec=record)["verdict"] is True
 
+    @pytest.mark.parametrize("mutate", [
+        lambda r: r.update(status="inconclusive"),
+        # Astra r12 #6a: a record outside the producer contract (V's too) is inconclusive.
+        lambda r: r["stageMap"].update(offsetWidth=1920.5),
+    ])
     @pytest.mark.parametrize("which", ["v", "g"])
-    def test_an_inconclusive_capture_is_inconclusive(self, which: str) -> None:
+    def test_an_inconclusive_capture_is_inconclusive(self, which: str, mutate: Any) -> None:
         record = _hb_v_record() if which == "v" else _hb_vgl_record()
-        record["status"] = "inconclusive"
+        mutate(record)
         scored = self._score(**({"v_rec": record} if which == "v" else {"g_rec": record}))
         assert scored["verdict"] is None
 
@@ -3992,11 +4150,10 @@ class TestHandbackScoring:
 
 
 def _hb_read(hash_: str, *, handoff: bool = False) -> dict[str, Any]:
-    read: dict[str, Any] = {"t": 1.0, "hash": hash_, "ready": True, "api": {"events": []}, "coreEvents": [], "pool": [], "facades": []}
-    if handoff:
-        read["api"]["events"].append(_ev("glreplay-handoff", completedMs=1.0))
-        read["coreEvents"].append(_ev("glreplay-release", mode="handoff"))
-    return read
+    if not handoff:
+        return _gl_read(hash=hash_, api=_gl_api())
+    return _gl_read(hash=hash_, api=_gl_api("RETIRED", ("canvasRemoved",), (_ev("glreplay-handoff", completedMs=1.0),)),
+                    coreEvents=[_ev("glreplay-release", ok=True, mode="handoff", retired=[])])
 
 
 class TestHandbackCapture:
@@ -4017,18 +4174,15 @@ class TestHandbackCapture:
         assert record["status"] == "inconclusive" and frame is None
         assert host.transport.captures == 0
 
-    def test_a_past_hash_poll_is_inconclusive(self) -> None:
-        record, frame, _ = self._capture([_hb_read("#2"), _hb_read("#4")])
+    @pytest.mark.parametrize(("reads", "host_kwargs"), [
+        pytest.param([_hb_read("#2"), _hb_read("#4")], {}, id="past-hash-poll"),
+        pytest.param([_hb_read("#2"), _hb_read("#3"), _hb_read("#4")], {}, id="hash-that-moves-during-the-capture"),
+        pytest.param([_hb_read("#2"), dict(_hb_read("#3"), ready=False)], {}, id="unready-player-is-not-captured"),
+        pytest.param([_hb_read("#2")], {"advance_error": probe.PlayerCommandRejected("busy")}, id="rejected-advance"),
+    ])
+    def test_an_off_build_capture_is_inconclusive(self, reads: list[Any], host_kwargs: dict[str, Any]) -> None:
+        record, frame, _ = self._capture(reads, **host_kwargs)
         assert record["status"] == "inconclusive" and frame is None
-
-    def test_a_hash_that_moves_during_the_capture_is_inconclusive(self) -> None:
-        record, frame, _ = self._capture([_hb_read("#2"), _hb_read("#3"), _hb_read("#4")])
-        assert record["status"] == "inconclusive" and frame is None
-
-    def test_an_unready_player_is_not_captured(self) -> None:
-        unready = dict(_hb_read("#3"), ready=False)
-        record, _, _ = self._capture([_hb_read("#2"), unready])
-        assert record["status"] == "inconclusive"
 
     def test_vgl_waits_for_the_hand_off_and_its_release(self) -> None:
         record, _, _ = self._capture([_hb_read("#2"), _hb_read("#3")], expect_handoff=True)
@@ -4036,9 +4190,6 @@ class TestHandbackCapture:
         record, _, _ = self._capture([_hb_read("#2"), _hb_read("#3", handoff=True), _hb_read("#3", handoff=True)], expect_handoff=True)
         assert record["status"] == "ok"
 
-    def test_a_rejected_advance_is_inconclusive(self) -> None:
-        record, frame, _ = self._capture([_hb_read("#2")], advance_error=probe.PlayerCommandRejected("busy"))
-        assert record["status"] == "inconclusive" and frame is None
 
 
 class TestOccludedScreenCells:
@@ -4138,7 +4289,7 @@ def _vgl_pass() -> dict[str, Any]:
 
 
 def _auto_result() -> dict[str, Any]:
-    result = TestOverallStatusTruthTable()._base_result()
+    result = _base_result()
     result["glReplay"] = {"requested": "auto"}
     result["groundTruth"]["refusedBoundaries"] = ["continue1to2"]
     result["groundTruthGl"] = {"armed": ARMED, "armedBoundaries": ["continue1to2"]}
@@ -4163,18 +4314,16 @@ class TestAutoOverallStatus:
         assert probe.overall_status(_auto_result()) == ("pass", [])
 
     @pytest.mark.parametrize("arm", ["A", "C"])
-    def test_an_armed_arm_needs_armed1to2(self, arm: str) -> None:
+    @pytest.mark.parametrize(("mutate", "reason"), [
+        pytest.param(lambda e: e.update(armed1to2={"verdict": False, "reason": "armed checks failed: ['pool']"}), "armed1to2=False",
+                     id="armed-arm-needs-armed1to2"),
+        pytest.param(lambda e: e.pop("armed1to2"), "has no armed1to2 verdict", id="missing-armed1to2"),
+    ])
+    def test_an_armed_arm_needs_a_true_armed1to2(self, mutate: Any, reason: str, arm: str) -> None:
         result = _auto_result()
-        result["arms"][arm]["armed1to2"] = {"verdict": False, "reason": "armed checks failed: ['pool']"}
+        mutate(result["arms"][arm])
         status, reasons = probe.overall_status(result)
-        assert status == "fail" and any(f"arm {arm} armed1to2=False" in r for r in reasons)
-
-    @pytest.mark.parametrize("arm", ["A", "C"])
-    def test_a_missing_armed1to2_fails(self, arm: str) -> None:
-        result = _auto_result()
-        del result["arms"][arm]["armed1to2"]
-        status, reasons = probe.overall_status(result)
-        assert status == "fail" and any(f"arm {arm} has no armed1to2 verdict" in r for r in reasons)
+        assert status == "fail" and any(f"arm {arm} {reason}" in r for r in reasons)
 
     @pytest.mark.parametrize("value", [None, True, False])
     def test_continue1to2_is_report_only_in_an_armed_arm(self, value: Any) -> None:
@@ -4205,11 +4354,9 @@ class TestAutoOverallStatus:
         assert status == "fail" and any("visible pass Vgl missing" in r for r in reasons)
 
     @pytest.mark.parametrize("mutate", [
-        lambda s: s["perRect"][0]["oracles"]["inpage"].update(verdict=None),
         lambda s: s["perRect"][0]["oracles"]["inpage"]["controls"]["pausedDecoder"].update(verdict=True),
         lambda s: s["perRect"][0]["oracles"].update(inpage=None),
         lambda s: s["perRect"][0]["oracles"]["screenshot"].update(verdict=False),
-        lambda s: s["perRect"][0].update(occlusion={"status": "unavailable"}),
         lambda s: s["instanceCheck"].update(painting=[{"authored": dict(BIG_INSTANCE)}]),
         lambda s: s["perRect"][0].update(label="other#1"),
     ])
@@ -4218,6 +4365,26 @@ class TestAutoOverallStatus:
         mutate(result["visible"]["Vgl"]["slides"][1])
         status, reasons = probe.overall_status(result)
         assert status == "fail" and any("Vgl armed slide" in r for r in reasons)
+
+    @pytest.mark.parametrize("mutate", [
+        pytest.param(lambda r: None, id="complete-control"),
+        pytest.param(lambda r: r["arms"]["A"]["armed1to2"].update(verdict=None), id="armed1to2-unknown"),
+        pytest.param(lambda r: r["arms"]["C"]["armed1to2"].update(verdict=None), id="c-armed1to2-unknown"),
+        pytest.param(lambda r: r["attach"]["refused1to2"].update(verdict=None), id="refused1to2-unknown"),
+        pytest.param(lambda r: r["visible"]["Vgl"]["slides"][1].update(verdict=None), id="vgl-armed-slide-unknown"),
+        pytest.param(lambda r: r["visible"]["Vgl"]["slides"][0].update(verdict=None), id="vgl-slide-unknown"),
+        pytest.param(lambda r: r["visible"]["Vgl"]["slides"][1]["perRect"][0]["oracles"]["inpage"].update(verdict=None),
+                     id="vgl-inpage-unknown"),
+        pytest.param(lambda r: r["visible"]["Vgl"]["slides"][1]["perRect"][0].update(occlusion={"status": "unavailable"}),
+                     id="vgl-mask-unavailable"),
+        pytest.param(lambda r: r["visible"]["Vgl"]["slides"][1]["instanceCheck"].update(painting=None), id="vgl-painting-unread"),
+    ])
+    def test_an_unknown_positive_or_vgl_verdict_is_inconclusive_never_fail(self, mutate: Any) -> None:
+        """Astra r8 #2: every applicable positive verdict and every Vgl unknown is collected before
+        the behavioural comparisons; the complete auto record keeps its pass."""
+        result = _auto_result()
+        mutate(result)
+        assert probe.overall_status(result)[0] == ("pass" if result == _auto_result() else "inconclusive")
 
     def test_a_red_hand_back_fails_and_an_unknown_one_is_inconclusive(self) -> None:
         result = _auto_result()
@@ -4242,7 +4409,7 @@ class TestAutoOverallStatus:
         assert status == "inconclusive" and "live ring inconclusive: not captured" in reasons
 
     def test_an_off_result_never_consults_gl_modes(self) -> None:
-        result = TestOverallStatusTruthTable()._base_result()
+        result = _base_result()
         result["arms"]["B"]["continuity"]["glReplay"] = {"mode": "whatever"}
         assert probe.overall_status(result) == ("pass", [])
 
@@ -4268,22 +4435,19 @@ class TestGlReplayCli:
         args = probe.parse_args([])
         assert args.gl_replay == "off" and args.gl_force_fail is None
 
-    def test_auto_is_selectable(self) -> None:
+    def test_auto_and_its_forced_fail_are_selectable(self) -> None:
         assert probe.parse_args(["--gl-replay", "auto"]).gl_replay == "auto"
-
-    def test_other_values_are_rejected(self) -> None:
-        with pytest.raises(SystemExit):
-            probe.parse_args(["--gl-replay", "on"])
-
-    def test_forced_fail_requires_auto(self) -> None:
-        with pytest.raises(SystemExit):
-            probe.parse_args(["--gl-force-fail", "posterAmbiguous"])
         args = probe.parse_args(["--gl-replay", "auto", "--gl-force-fail", "posterAmbiguous"])
         assert args.gl_force_fail == "posterAmbiguous"
 
-    def test_forced_fail_is_not_a_pass_g_option(self) -> None:
+    @pytest.mark.parametrize("argv", [
+        pytest.param(["--gl-replay", "on"], id="other-values-are-rejected"),
+        pytest.param(["--gl-force-fail", "posterAmbiguous"], id="forced-fail-requires-auto"),
+        pytest.param(["--pass", "G", "--gl-replay", "auto", "--gl-force-fail", "posterAmbiguous"], id="forced-fail-is-not-a-pass-G-option"),
+    ])
+    def test_invalid_combinations_are_rejected(self, argv: list[str]) -> None:
         with pytest.raises(SystemExit):
-            probe.parse_args(["--pass", "G", "--gl-replay", "auto", "--gl-force-fail", "posterAmbiguous"])
+            probe.parse_args(argv)
 
     @pytest.fixture
     def recording(self, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
@@ -4392,6 +4556,78 @@ def test_attach_arm_holds_the_viewport_override_session_until_its_chrome_is_torn
     with pytest.raises(RuntimeError):
         probe.run_attach_arm(Path("x"), [], {}, tmp_path, {})
     assert events == ["host started, hold closed=False", "hold closed", "chrome terminated"]
+
+
+@pytest.mark.parametrize("arm", ["launch", "attach", "force-wrap"])
+@pytest.mark.parametrize("visible", [True, False])
+def test_arms_show_the_output_before_sampling(
+    arm: str, visible: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan §3.3 (B0): `fbba575e`'s ancestor-walking `isCompositing` sees the attach host's inline
+    `#body{opacity:0}` (and a paint read sees the launch host's black cover) until `show()` runs, so
+    both host arms call `execute("show")` before the sampler is installed, and an output that still
+    reads hidden stops the arm before any sample is taken. V2b: the force-wrap take too (its sampler is
+    installed in the take itself, not by `drive_and_sample`)."""
+    events: list[str] = []
+
+    def evaluate(js: str) -> None:
+        if js == probe.SAMPLER_JS:
+            drive()
+
+    class Host:
+        output = {"continuity": {"mode": "qualified"}, "logPath": None}
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            events.append("start")
+
+        def execute(self, operation: str, *args: Any) -> Any:
+            events.append(operation)
+            return argparse.Namespace(output_visible=visible)
+
+        def _require_transport(self) -> Any:
+            return argparse.Namespace(evaluate=evaluate)
+
+        def stop(self) -> None:
+            events.append("stop")
+
+    def drive(*args: Any, **kwargs: Any) -> Any:
+        events.append("drive")
+        raise RuntimeError("stop after drive")
+
+    class Proc:
+        pid = 1
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self, timeout: float) -> int:
+            return 0
+
+        def poll(self) -> int:
+            return 0
+
+    monkeypatch.setattr(probe, "LiveOutputHost", Host)
+    monkeypatch.setattr(probe, "force_viewport", lambda *a: None)
+    monkeypatch.setattr(probe, "drive_and_sample", drive)
+    monkeypatch.setattr(probe, "launch_attach_chrome", lambda profile: Proc())
+    monkeypatch.setattr(probe, "wait_devtools_active_port", lambda profile, proc: DevToolsEndpoint(1, "/devtools/browser/b"))
+    monkeypatch.setattr(probe, "wait_for_cdp", lambda endpoint, proc: None)
+    monkeypatch.setattr(probe, "force_exact_viewport", lambda *a: None)
+    monkeypatch.setattr(probe, "force_wrap_ground_truth", lambda *a: {"export": Path("x"), "slides": [], "source": {}, "scene": 1})
+    with pytest.raises(RuntimeError, match="stop after drive" if visible else "not visible after show"):
+        if arm == "launch":
+            probe.run_arm("A", Path("x"), [], {}, (64, 32), {})
+        elif arm == "attach":
+            probe.run_attach_arm(Path("x"), [], {}, tmp_path, {})
+        else:
+            probe.run_force_wrap(argparse.Namespace(
+                force_wrap={"boundary": "3to4", "offsetMs": 0.0}, fixture=Path("x"), original_index=Path("x"),
+                gl_replay="off", artifact=tmp_path / "fw.json", viewport=(64, 32),
+            ))
+    assert events == ["start", "show", *(["drive"] if visible else []), "stop"]
 
 
 class TestAttachChrome:
@@ -4860,6 +5096,7 @@ class TestConcurrentRunIsolation:
         monkeypatch.setattr(probe, "ground_truth_plan", lambda *a, **k: plan)
         monkeypatch.setattr(probe, "ground_truth_facts", lambda *a, **k: {"rectExpectations": {"V": {}}, "verdicts": []})
         monkeypatch.setattr(probe, "slide_instances_of", lambda *a: {})
+        monkeypatch.setattr(probe, "arrival_starts", lambda *a: {})
         monkeypatch.setattr(probe, "character_region_rect", lambda *a: None)
         monkeypatch.setattr(probe, "goto_matrix", lambda *a: ())
         out = driven["tmp"] / "out"
@@ -4888,6 +5125,7 @@ class TestConcurrentRunIsolation:
         monkeypatch.setattr(probe, "ground_truth_plan", lambda *a, **k: plan)
         monkeypatch.setattr(probe, "ground_truth_facts", lambda *a, **k: {"rectExpectations": {"V": {}}, "verdicts": []})
         monkeypatch.setattr(probe, "slide_instances_of", lambda *a: {})
+        monkeypatch.setattr(probe, "arrival_starts", lambda *a: {})
         monkeypatch.setattr(probe, "character_region_rect", lambda *a: None)
         monkeypatch.setattr(probe, "goto_matrix", lambda *a: ())
         artifact = driven["tmp"] / "out" / "g.json"
@@ -5034,16 +5272,13 @@ class TestForcedFailSplice:
 
 
 def _forced_after(reason: str, *, zone_reason: str = "failure", live: bool = False) -> dict[str, Any]:
-    zone = _ev("glreplay-zone", **{"from": "armed"}, to="retired", reason=zone_reason)
+    zone = _ev("glreplay-zone", key="movie1", **{"from": "armed"}, to="retired", reason=zone_reason)
     if zone_reason == "failure":
         zone["detail"]["standDown"] = reason
-    record = {
-        "status": "ok",
-        "after": {
-            "hash": "#3", "api": {"version": 1, "state": "RETIRED", "standDowns": [reason], "events": []},
-            "coreEvents": [_ev("glreplay-zone", **{"from": "pending"}, to="armed", reason="moduleReady"), zone],
-        },
-    }
+    record = _handback_record(_gl_read(
+        hash="#3", api=_gl_api("RETIRED", (reason,)),
+        coreEvents=[_ev("glreplay-zone", key="movie1", **{"from": "pending"}, to="armed", reason="moduleReady"), zone],
+    ), expect_handoff=False)
     if live:
         record["after"]["coreEvents"].append(_ev("glreplay-live"))
     return record
@@ -5081,21 +5316,85 @@ class TestForcedFailScoring:
         {"g_handback": _forced_after("posterAmbiguous", live=True)},
         {"g_handback": _forced_after("posterAmbiguous", zone_reason="leftDestination")},
         {"g_handback": _forced_after("glError")},
-        {"g_handback": {"status": "inconclusive"}},
         {"refusal": {"verdict": False}},
-        {"parity": {"verdict": None}},
         {"parity": {"verdict": False}},
         {"g_pass": _forced_pass([True, False, True, True])},
         {"g_pass": dict(_forced_pass([True] * 4), continuity={"mode": "qualified", "glReplay": {"mode": "off"}})},
         {"splice": {"splices": 0}},
         {"v_pass": dict(_v_reference(), stageFit={"verdict": False})},
         {"v_pass": dict(_v_reference(), stopError="websocket closed")},
-        {"v_pass": dict(_v_reference(), status="error", error="boom")},
         {"v_pass": _forced_pass([True] * 4)},
-        {"v_pass": dict(_v_reference(), slides=[])},
     ])
     def test_every_deviation_is_forced_fail(self, override: dict[str, Any]) -> None:
         assert self._score(**override)["status"] == "forced-fail"
+
+
+def _live_rect(met: Any, inpage: Any) -> Any:
+    return probe.combine_rect_oracles({"expect": probe.LIVE, "verdict": met, "label": "m#1"}, inpage)["verdict"]
+
+
+def _visible_pass_verdict(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, verdicts: list[Any]) -> Any:
+    class Host:
+        output = {"continuity": {"mode": "qualified"}}
+
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+        def execute(self, command: str) -> None:
+            pass
+
+        def _require_transport(self) -> Any:
+            return argparse.Namespace(evaluate=lambda expression: True)
+
+    monkeypatch.setattr(probe, "LiveOutputHost", Host)
+    monkeypatch.setattr(probe, "force_viewport", lambda *a: None)
+    monkeypatch.setattr(probe, "wait_for_decode", lambda *a: True)
+    monkeypatch.setattr(probe, "CLICK_DELAY_S", 0.0)
+    monkeypatch.setattr(probe, "run_visible_slides", lambda *a, **k: [{"verdict": v} for v in verdicts])
+    monkeypatch.setattr(probe, "visible_stage_summary", lambda *a: {})
+    monkeypatch.setattr(probe, "score_stage_fit", lambda *a: {"verdict": True})
+    return probe.run_visible_pass("V", Path("x"), [], synthetic_plan(), (64, 32), {}, tmp_path)["verdict"]
+
+
+class TestOracleAndForcedUnknowns:
+    INPAGE_UNKNOWN = {"verdict": None, "status": "inconclusive", "reason": "mask"}
+
+    @staticmethod
+    def _forced(**overrides: Any) -> Any:
+        return TestForcedFailScoring()._score(**overrides)["status"]
+
+    # Astra r8 #4: an applicable unknown survives every Boolean reduction; the complete records and the
+    # legitimate not-applicable in-page oracle keep their outcomes.
+    @pytest.mark.parametrize(("build", "expected"), [
+        pytest.param(lambda mp, tmp: _live_rect(False, {"verdict": False, "status": "dead"}), False, id="rect-control-both-dead"),
+        pytest.param(lambda mp, tmp: _live_rect(False, None), False, id="rect-inpage-absent-not-applicable"),
+        pytest.param(lambda mp, tmp: _live_rect(False, {"verdict": None, "status": "n/a"}), False, id="rect-inpage-n/a"),
+        pytest.param(lambda mp, tmp: _live_rect(False, TestOracleAndForcedUnknowns.INPAGE_UNKNOWN), None,
+                     id="rect-screenshot-false-inpage-unknown"),
+        pytest.param(lambda mp, tmp: TestOracleAndForcedUnknowns._forced(), "forced-ok", id="forced-control"),
+        pytest.param(lambda mp, tmp: TestOracleAndForcedUnknowns._forced(parity={"verdict": None}), "inconclusive",
+                     id="forced-parity-unknown"),
+        pytest.param(lambda mp, tmp: TestOracleAndForcedUnknowns._forced(refusal={"verdict": None}), "inconclusive",
+                     id="forced-refusal-unknown"),
+        pytest.param(lambda mp, tmp: TestOracleAndForcedUnknowns._forced(g_pass=_forced_pass([True, None, True, True])),
+                     "inconclusive", id="forced-slide-unknown"),
+        pytest.param(lambda mp, tmp: TestOracleAndForcedUnknowns._forced(
+            v_pass=dict(_forced_pass([True, None, True, True]), continuity={"mode": "qualified", "glReplay": {"mode": "off"}})),
+                     "inconclusive", id="forced-reference-slide-unknown"),
+        pytest.param(lambda mp, tmp: _visible_pass_verdict(mp, tmp, [True, True]), True, id="pass-control"),
+        pytest.param(lambda mp, tmp: _visible_pass_verdict(mp, tmp, [True, False]), False, id="pass-red-slide"),
+        pytest.param(lambda mp, tmp: _visible_pass_verdict(mp, tmp, [False, None]), None, id="pass-unreadable-slide"),
+    ])
+    def test_an_applicable_unknown_is_never_reduced_to_a_boolean(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, build: Any, expected: Any,
+    ) -> None:
+        assert build(monkeypatch, tmp_path) == expected
 
 
 class TestCodexR1ProbeFixes:
@@ -5126,10 +5425,10 @@ class TestCodexR1ProbeFixes:
 
     def test_pre_flip_owners_read_only_the_instance_rect_before_the_flip(self) -> None:
         samples = [
-            {"scene": 0, "videos": [{"src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 1}}]},
-            {"scene": 1, "videos": [{"src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": None}]},
-            {"scene": 1, "videos": [{"src": "other.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 9}}]},
-            {"scene": 2, "videos": [{"src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 7}}]},
+            {"scene": 0, "videos": [{"id": 1, "src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 1}}]},
+            {"scene": 1, "videos": [{"id": 1, "src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": None}]},
+            {"scene": 1, "videos": [{"id": 9, "src": "other.mov", "rect": dict(BIG_INSTANCE, x=1500.0), "footprintOwner": {"elId": 9}}]},
+            {"scene": 2, "videos": [{"id": 1, "src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 7}}]},
         ]
         assert probe.pre_flip_owner_ids(samples, ARMED) == [1, None]
 
@@ -5220,14 +5519,14 @@ class TestArmedReadWaitsForDestination:
         assert len(out["armed1to2"]) == 2
 
     @pytest.mark.parametrize("stuck", ["#1", "#2junk", "#3", None])
-    def test_a_hash_that_never_settles_is_red_not_read(self, stuck: Any) -> None:
+    def test_a_hash_that_never_settles_is_not_read_and_inconclusive(self, stuck: Any) -> None:
         clock = FakeClock()
         host = ArmedHost([_gl(r) for r in _armed_reads()])
         host.hashes = [stuck]
         out: dict[str, Any] = {}
         probe.boundary_observer(host, {"retire": None, "armed": ARMED}, out, sleep=clock.sleep, now=clock.now)(2)
         assert probe.GL_REPLAY_READ_JS not in host.transport.evaluations
-        assert probe.score_armed(out["armed1to2"], ARMED, GL_CONTINUITY, owner_ids=[1, 1])["verdict"] is False
+        assert probe.score_armed(out["armed1to2"], ARMED, GL_CONTINUITY, owner_ids=[1, 1])["verdict"] is None
 
 
 class TestVglScreenshotLiveIsPhysical:
@@ -5305,8 +5604,8 @@ C_ARMED = {
     "atScene": 2, "originalOrdinal": 2, "movieSlot": 1, "overrideSlots": [], "instanceRect": dict(C_INSTANCE),
     "slotRects": [{"x": 0.0, "y": 0.0, "w": 1920.0, "h": 1080.0}, dict(C_SLOT)],
 }
-STAGE_2560 = {"s": 4 / 3, "sy": 4 / 3, "ox": 0.0, "oy": 0.0, "offsetWidth": 2560.0, "offsetHeight": 1440.0}
-STAGE_1920 = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0}
+STAGE_2560 = {"s": 4 / 3, "sy": 4 / 3, "ox": 0.0, "oy": 0.0, "offsetWidth": 2560, "offsetHeight": 1440}
+STAGE_1920 = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920, "offsetHeight": 1080}
 FRAME_BG, FRAME_VIDEO = 50, 200
 
 
@@ -5390,7 +5689,7 @@ class TestLiveRingScoring:
     def test_the_ring_follows_the_stage_map(self) -> None:
         """At s=2 with an offset, a diff on the scaled ring is RED, and a diff at the
         unscaled ring's position (now inside the dilated instance) is ignored."""
-        stage = {"s": 2.0, "sy": 2.0, "ox": -100.0, "oy": -1000.0, "offsetWidth": 3840.0, "offsetHeight": 2160.0}
+        stage = {"s": 2.0, "sy": 2.0, "ox": -100.0, "oy": -1000.0, "offsetWidth": 3840, "offsetHeight": 2160}
         v, g = _live_frames(stage, (1200, 2100), BIG_INSTANCE)
         g[791, 500] = 0
         assert _ring(v, g, ARMED, stage)["verdict"] is True
@@ -5425,7 +5724,7 @@ class TestLiveRingScoring:
         if isinstance(sink, dict) and sink.get("live"):
             assert scored["reason"] == "live capture failed: boom"
 
-    @pytest.mark.parametrize("stage", [None, {"s": 1.0, "sy": 1.2, "ox": 0.0, "oy": 0.0, "offsetWidth": 1.0, "offsetHeight": 1.0}])
+    @pytest.mark.parametrize("stage", [None, {"s": 1.0, "sy": 1.2, "ox": 0.0, "oy": 0.0, "offsetWidth": 1, "offsetHeight": 1}])
     def test_an_untrustworthy_stage_map_is_inconclusive(self, stage: Any) -> None:
         v, g = _live_frames(STAGE_1920, (1080, 1920), BIG_INSTANCE)
         assert probe.score_live_ring(_sink(v, STAGE_1920), _sink(g, stage), ARMED)["verdict"] is None
@@ -5629,22 +5928,21 @@ def wrap_samples(*, lead_s: float = 0.3, period: float = LOOP_P, n_after: int = 
     return _loop_fields(samples)
 
 
-def _load_legacy_probe():
+def _load_probe_at(rev: str) -> Any:
     try:
         text = subprocess.run(
-            ["git", "show", f"{LEGACY_REV}:scripts/live_continuity_probe.py"],
-            cwd=REPO, capture_output=True, text=True, check=True,
+            ["git", "show", f"{rev}:scripts/live_continuity_probe.py"], cwd=REPO, capture_output=True, text=True, check=True,
         ).stdout
     except (OSError, subprocess.CalledProcessError):
         return None
-    spec = importlib.util.spec_from_loader("legacy_live_continuity_probe", loader=None)
+    spec = importlib.util.spec_from_loader(f"probe_at_{rev}", loader=None)
     module = importlib.util.module_from_spec(spec)
     module.__file__ = str(REPO / "scripts" / "live_continuity_probe.py")
-    exec(compile(text, f"{LEGACY_REV}:live_continuity_probe.py", "exec"), module.__dict__)
+    exec(compile(text, f"{rev}:live_continuity_probe.py", "exec"), module.__dict__)
     return module
 
 
-LEGACY = _load_legacy_probe()
+LEGACY = _load_probe_at(LEGACY_REV)
 
 
 def _continuity_batteries() -> dict[str, tuple[list[dict[str, Any]], dict[str, Any]]]:
@@ -5681,7 +5979,13 @@ class TestWrapAwareScorerDefaultIsLegacy:
         }
         samples = wrap_samples()
         legacy = LEGACY.score_boundaries(samples, facts, True)
-        assert json.dumps(probe.score_boundaries(samples, facts, True), sort_keys=True) == json.dumps(legacy, sort_keys=True)
+        scored = probe.score_boundaries(samples, facts, True)
+        no_crossing = probe._inconclusive("boundary crossing not observed in samples")
+        for key, verdict in legacy.items():
+            # Astra r8 #3: an unsampled crossing was a legacy False and is inconclusive now, the only intended difference.
+            if scored[key] == no_crossing and verdict.get("verdict") is False:
+                legacy[key] = no_crossing
+        assert json.dumps(scored, sort_keys=True) == json.dumps(legacy, sort_keys=True)
 
     @pytest.mark.parametrize("name", sorted(_continuity_batteries()))
     def test_none_adds_no_keys(self, name: str) -> None:
@@ -5769,28 +6073,18 @@ class TestUnplannedWraps:
         assert len(found) == 1
         assert found[0]["from"] > 46.0 and found[0]["to"] < 0.1 and found[0]["duration"] == LOOP_P
 
-    def test_a_non_looping_element_never_invalidates(self) -> None:
-        samples = wrap_samples()
-        for row in samples:
-            for v in row["videos"]:
-                v["loop"] = False
-        assert probe.unplanned_wraps(samples) == []
-
-    def test_a_small_drop_is_left_to_the_strict_scorer(self) -> None:
-        assert probe.unplanned_wraps(_loop_fields(rows_around_boundary(clock_drop=0.2))) == []
-
-    def test_a_looping_element_without_a_duration_is_not_guessed(self) -> None:
-        assert probe.unplanned_wraps(_loop_fields(wrap_samples(), period=None)) == []
-
-    def test_legacy_samples_without_the_fields_find_nothing(self) -> None:
-        assert probe.unplanned_wraps(rows_around_boundary(start_time=LOOP_P - 0.3)) == []
-
-    def _green(self) -> dict[str, Any]:
-        return TestOverallStatusTruthTable()._base_result()
+    @pytest.mark.parametrize("samples", [
+        pytest.param(lambda: _loop_fields(wrap_samples(), loop=False), id="non-looping-element-never-invalidates"),
+        pytest.param(lambda: _loop_fields(rows_around_boundary(clock_drop=0.2)), id="small-drop-is-left-to-the-strict-scorer"),
+        pytest.param(lambda: _loop_fields(wrap_samples(), period=None), id="looping-element-without-a-duration-is-not-guessed"),
+        pytest.param(lambda: rows_around_boundary(start_time=LOOP_P - 0.3), id="legacy-samples-without-the-fields-find-nothing"),
+    ])
+    def test_nothing_unplanned_is_found(self, samples: Any) -> None:
+        assert probe.unplanned_wraps(samples()) == []
 
     @pytest.mark.parametrize("where", ["A", "B", "C", "attach"])
     def test_any_standard_arm_with_an_unplanned_wrap_is_invalid(self, where: str) -> None:
-        result = self._green()
+        result = _base_result()
         entry = result["attach"] if where == "attach" else result["arms"][where]
         entry["unplannedWraps"] = probe.unplanned_wraps(wrap_samples())
         status, reasons = probe.overall_status(result)
@@ -5798,7 +6092,7 @@ class TestUnplannedWraps:
         assert len(reasons) == 1 and "retake" in reasons[0]
 
     def test_an_empty_list_changes_nothing(self) -> None:
-        result = self._green()
+        result = _base_result()
         for entry in [*result["arms"].values(), result["attach"]]:
             entry["unplannedWraps"] = []
         assert probe.overall_status(result) == ("pass", [])
@@ -5827,13 +6121,16 @@ def _fw_recorder(
         frames.append({"now": t, "mediaTime": media, "presentedFrames": len(frames)})
         t += dt
     return {
-        "seekedT": FW_SEEKED, "target": period - lead_s, "frames": frames, "elId": el_id, "probeId": 1, "loop": wrap,
-        "duration": period, "playbackRate": 1, "ended": not wrap,
+        "t": end, "seekedT": FW_SEEKED, "seekFrom": 3.0, "target": period - lead_s, "frames": frames, "id": "6BB39942-video",
+        "elId": el_id, "probeId": 1, "loop": wrap, "ended": not wrap, "paused": False, "isConnected": True,
+        "duration": period, "playbackRate": 1,
     }
 
 
 def _fw_take(*, press: float = FW_SEEKED + 2000.0, count: int = 1, reached: bool = True, **extra: Any) -> dict[str, Any]:
-    return {"domId": "6BB39942-video", "select": {"count": count}, "pressT": press, "reached": reached, **extra}
+    seek = {"duration": FW_PERIOD, "loop": True, "playbackRate": 1, "seekFrom": 3.0, "target": FW_PERIOD - 2.375}
+    select = {"domId": "6BB39942-video", "count": count, "t": FW_SEEKED - 100.0, **(seek if count == 1 else {})}
+    return {"domId": "6BB39942-video", "select": select, "pressT": press, "reached": reached, **extra}
 
 
 def _fw_window() -> dict[str, float]:
@@ -5843,7 +6140,7 @@ def _fw_window() -> dict[str, float]:
 def _fw_score(
     *, boundary: str = "3to4", offset_ms: float = 375.0, recorder: Any = None, take: Any = None,
     continuity: Any = None, clock: Any = None, reads: Any = None, armed: Any = None, restart: Any = None,
-    page_errors: Any = (),
+    page_errors: Any = (), samples_problem: str | None = None,
 ) -> dict[str, Any]:
     recorder = _fw_recorder(offset_ms=offset_ms) if recorder is None else recorder
     return probe.score_forced_wrap(
@@ -5853,6 +6150,7 @@ def _fw_score(
         clock=probe.score_recorder_clock(recorder, _fw_window()) if clock is None else clock,
         reads=reads, armed=armed, restart={"verdict": False} if restart is None else restart,
         rects=[dict(BIG_INSTANCE)], page_errors=list(page_errors) if page_errors is not None else None,
+        samples_problem=samples_problem,
     )
 
 
@@ -5863,7 +6161,7 @@ def _fw_reads(*, stand_downs: list[str] | None = None, zones: list[tuple[str, st
         _set_detail(read, "glreplay-carried", elId=carried)
         if stand_downs is not None:
             gl["api"]["standDowns"] = list(stand_downs)
-            gl["api"]["state"] = "STOOD_DOWN" if stand_downs else "LIVE"
+            gl["api"]["state"] = "RETIRED" if stand_downs else "LIVE"
         gl["coreEvents"].extend(
             _ev("glreplay-zone", key="movie1", **{"from": a}, to=b, reason=c, sceneHash="#1") for a, b, c in zones
         )
@@ -5942,24 +6240,17 @@ class TestForceWrapInvalid:
     def test_no_recorded_wrap_is_not_invalid_it_is_left_to_fail(self) -> None:
         assert self._invalid(recorder=_fw_recorder(wrap=False)) == []
 
-    def test_a_press_too_soon_after_the_seek_is_invalid(self) -> None:
-        press = FW_SEEKED + 1400.0
-        reasons = self._invalid(take=_fw_take(press=press), recorder=_fw_recorder(press=press))
-        assert any("after the seek" in r for r in reasons)
-
-    def test_too_few_frames_between_seek_and_press_is_invalid(self) -> None:
-        recorder = _fw_recorder(dt=250.0)
-        assert any("frame(s) between" in r for r in self._invalid(recorder=recorder))
-
-    def test_a_duration_that_is_not_the_nodes_trim_is_invalid(self) -> None:
-        recorder = _fw_recorder()
-        recorder["duration"] = FW_PERIOD + 0.1
-        assert any("within one frame" in r for r in self._invalid(recorder=recorder))
-
-    def test_a_seek_that_landed_elsewhere_is_invalid(self) -> None:
-        recorder = _fw_recorder()
-        recorder["target"] -= 1.0
-        assert any("seek landed" in r for r in self._invalid(recorder=recorder))
+    @pytest.mark.parametrize(("take", "recorder", "reason"), [
+        pytest.param(lambda: _fw_take(press=FW_SEEKED + 1400.0), lambda: _fw_recorder(press=FW_SEEKED + 1400.0), "after the seek",
+                     id="press-too-soon-after-the-seek"),
+        pytest.param(lambda: None, lambda: _fw_recorder(dt=250.0), "frame(s) between", id="too-few-frames-between-seek-and-press"),
+        pytest.param(lambda: None, lambda: dict(_fw_recorder(), duration=FW_PERIOD + 0.1), "within one frame",
+                     id="duration-that-is-not-the-nodes-trim"),
+        pytest.param(lambda: None, lambda: dict(_fw_recorder(), target=_fw_recorder()["target"] - 1.0), "seek landed",
+                     id="seek-that-landed-elsewhere"),
+    ])
+    def test_a_take_off_its_plan_is_invalid(self, take: Any, recorder: Any, reason: str) -> None:
+        assert any(reason in r for r in self._invalid(take=take(), recorder=recorder()))
 
     @pytest.mark.parametrize("mutate", ["unseeked", "unpressed", "unreached", "rate", "error", "unread"])
     def test_every_other_harness_gap_is_invalid(self, mutate: str) -> None:
@@ -6060,11 +6351,6 @@ class TestScoreForcedWrap:
         assert result["status"] == "fail"
         assert result["carry"]["checks"]["carriesSeeked"] is False
 
-    def test_armed_carry_with_a_frozen_clock_fails(self) -> None:
-        recorder = _fw_recorder(stop_at=FW_SEEKED + 4000.0)
-        result = _fw_score(boundary="1to2", reads=_fw_reads(), armed=ARMED, recorder=recorder)
-        assert result["status"] == "fail"
-
     def test_armed_carry_without_the_arm_note_fails(self) -> None:
         reads = _fw_reads()
         for read in reads:
@@ -6084,17 +6370,18 @@ class TestScoreForcedWrap:
         result = _fw_score(boundary="1to2", reads=reads, armed=ARMED)
         assert (result["status"], result["outcome"]) == ("pass", "notPooled")
 
-    @pytest.mark.parametrize("stand_downs", [["canvasLost"], ["videoNotReady", "glError"]])
-    def test_any_other_stand_down_fails(self, stand_downs: list[str]) -> None:
-        result = _fw_score(boundary="1to2", reads=_fw_reads(stand_downs=stand_downs), armed=ARMED)
-        assert result["status"] == "fail"
-
-    def test_g2_fallbacks_do_not_count_on_the_unarmed_boundary(self) -> None:
-        result = _fw_score(
-            boundary="3to4", reads=_fw_reads(stand_downs=["videoNotReady"]), armed=ARMED,
-            continuity={"verdict": False, "wraps": 1},
-        )
-        assert result["status"] == "fail"
+    @pytest.mark.parametrize("kwargs", [
+        pytest.param(lambda: {"boundary": "1to2", "reads": _fw_reads(), "armed": ARMED, "recorder": _fw_recorder(stop_at=FW_SEEKED + 4000.0)},
+                     id="armed-carry-with-a-frozen-clock"),
+        pytest.param(lambda: {"boundary": "1to2", "reads": _fw_reads(stand_downs=["canvasLost"]), "armed": ARMED},
+                     id="any-other-stand-down-canvasLost"),
+        pytest.param(lambda: {"boundary": "1to2", "reads": _fw_reads(stand_downs=["videoNotReady", "glError"]), "armed": ARMED},
+                     id="any-other-stand-down-alongside-videoNotReady"),
+        pytest.param(lambda: {"boundary": "3to4", "reads": _fw_reads(stand_downs=["videoNotReady"]), "armed": ARMED,
+                              "continuity": {"verdict": False, "wraps": 1}}, id="g2-fallbacks-do-not-count-on-the-unarmed-boundary"),
+    ])
+    def test_an_unlisted_outcome_fails(self, kwargs: Any) -> None:
+        assert _fw_score(**kwargs())["status"] == "fail"
 
     def test_raw_restart_with_nothing_preserved_painting_is_a_listed_fallback(self) -> None:
         reads = _fw_reads()
@@ -6111,16 +6398,55 @@ class TestScoreForcedWrap:
         assert result["status"] == "fail"
         assert result["fallback"]["preservedPainting"]
 
-    def test_raw_restart_needs_a_readable_destination(self) -> None:
-        result = _fw_score(continuity={"verdict": False, "wraps": 0}, reads=None, restart={"verdict": True})
-        assert result["status"] == "fail"
-
     def test_a_fallback_without_a_recorded_wrap_fails(self) -> None:
         result = _fw_score(
             boundary="1to2", reads=_fw_reads(stand_downs=["videoNotReady"]), armed=ARMED,
             recorder=_fw_recorder(wrap=False),
         )
         assert result["status"] == "fail" and result["reasons"] == ["no wrap was recorded"]
+
+    @staticmethod
+    def _resting_1to2(**kwargs: Any) -> list[dict[str, Any]]:
+        """A 1to2 take as the sampler records it: settled on scene 0, then the press plays scene 1
+        and the page rests there (hash #2) to the end; the carried clock wraps after the press."""
+        samples = wrap_samples(
+            boundary_scene=1.0, period=FW_PERIOD, lead_s=2.2, n_before=60, n_after=100, dt_ms=33.0,
+            src_rect=SRC_RECT, dst_rect=SRC_RECT, **kwargs,
+        )
+        for row in samples:
+            row.update(t=row["t"] + FW_SEEKED + 300.0, scene=int(row["scene"]), playerState="IdleAtFinalState", busy=False)
+        return samples
+
+    @pytest.mark.parametrize(("boundary", "scene", "destination", "transition"), [("1to2", 1, 2, None), ("3to4", 8, 8, 7)])
+    def test_ground_truth_scores_1to2_at_the_scene_its_press_plays(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, boundary: str, scene: int, destination: int, transition: Any,
+    ) -> None:
+        facts = {"asset": ASSET, "onset1to2": 2, "bridgeScene": 8, "pinRect": dict(SRC_RECT),
+                 "bridgeSrcRect": dict(SRC_RECT), "destRect": dict(DST_RECT)}
+        monkeypatch.setattr(probe, "prepare_export", lambda *a: tmp_path)
+        monkeypatch.setattr(probe, "load_slides", lambda *a: [])
+        monkeypatch.setattr(probe, "ground_truth_plan", lambda *a, **k: synthetic_plan())
+        monkeypatch.setattr(probe, "ground_truth_facts", lambda *a, **k: facts)
+        monkeypatch.setattr(probe, "movie_nodes", lambda *a: [])
+        monkeypatch.setattr(probe, "source_instance", lambda *a: {"periodS": FW_PERIOD})
+        gt = probe.force_wrap_ground_truth(tmp_path, tmp_path, boundary, "off", tmp_path)
+        assert (gt["scene"], gt["destinationScene"], gt["transition"]) == (scene, destination, transition)
+
+    @pytest.mark.parametrize(("kwargs", "status", "continuity", "restart"), [
+        pytest.param({}, "pass", True, False, id="held-carry-passes"),
+        pytest.param({"stall_run_s": 1.5}, "fail", False, False, id="known-bad-stalled-carry-fails"),
+    ])
+    def test_a_1to2_take_resting_on_the_press_scene_is_scored(
+        self, kwargs: dict[str, Any], status: str, continuity: bool, restart: bool,
+    ) -> None:
+        facts = {"asset": ASSET, "onset1to2": 2, "pinRect": dict(SRC_RECT)}
+        gt = {"facts": facts, "factsOn": None, "source": {"periodS": FW_PERIOD}, "scene": probe.press_scene_1to2(facts),
+              "srcRect": dict(SRC_RECT), "dstRect": dict(SRC_RECT), "transition": None}
+        result = {"continuity": {"mode": "qualified"}, "samples": self._resting_1to2(**kwargs), "recorder": _fw_recorder(),
+                  "take": _fw_take(), "reads": _fw_reads(), "pageErrorNotes": []}
+        probe.score_force_wrap_run(result, gt, "1to2", 375.0)
+        assert (result["continuityVerdict"]["verdict"], result["restart"]["verdict"]) == (continuity, restart)
+        assert result["status"] == status
 
 
 class TestRawRestart:
@@ -6147,16 +6473,27 @@ class TestRawRestart:
 
 class TestRescoreArtifact:
     FACTS = {
-        "asset": ASSET, "onset1to2": 2.0, "restartScene": 6, "bridgeScene": 8,
+        "asset": ASSET, "onset1to2": 3.0, "restartScene": 6, "bridgeScene": 8,
         "pinRect": SRC_RECT, "bridgeSrcRect": SRC_RECT, "destRect": DST_RECT,
     }
 
     def _artifact(self, tmp_path: Path, samples: list[dict[str, Any]]) -> Path:
+        for row in samples:
+            row.update(scene=int(row["scene"]), playerState="IdleAtFinalState", busy=False)
         arm = {"continuity": {"mode": "qualified"}, "samples": samples}
         arm.update(json.loads(json.dumps(probe.score_boundaries(samples, self.FACTS, True))))
         path = tmp_path / "host.json"
         path.write_text(json.dumps({"groundTruth": self.FACTS, "arms": {"A": arm}, "attach": dict(arm)}))
         return path
+
+    @pytest.mark.parametrize(("fresh", "verdict"), [(False, True), (True, False)])
+    def test_legacy_1to2_is_scored_at_the_scene_its_press_plays(self, fresh: bool, verdict: bool) -> None:
+        samples = rows_around_boundary(boundary_scene=1.0, src_rect=SRC_RECT, dst_rect=SRC_RECT)
+        for row in samples[20:] if fresh else ():
+            row["videos"][0].update(id=2, elId=2, currentTime=(row["t"] - samples[20]["t"]) / 1000.0, footprintOwner={"elId": 2, "key": "movie1"})
+        facts = dict(self.FACTS, onset1to2=2.0)
+        scored = probe.score_boundaries(samples, facts, True)["continue1to2"]
+        assert scored["verdict"] is verdict and scored["window"]["firstAfterT"] == samples[20]["t"]
 
     def test_samples_without_a_wrap_rescore_identically(self, tmp_path: Path) -> None:
         report = probe.rescore_artifact(self._artifact(tmp_path, rows_around_boundary()), LOOP_P)
@@ -6177,6 +6514,27 @@ class TestRescoreArtifact:
         assert report["arms"]["attach"]["identical"] is True
         assert report["arms"]["attach"]["strictMatchesArtifact"] is False
         assert report["ok"] is False
+
+    @pytest.mark.parametrize(("stale", "ok"), [
+        pytest.param({}, True, id="as-stored"),
+        pytest.param({"verdict": False}, False, id="known-bad-a-changed-verdict"),
+        pytest.param({"sampleCount": 1}, False, id="known-bad-a-changed-diagnostic"),
+    ])
+    def test_a_1to2_stored_before_the_press_scene_must_equal_its_rescore_at_the_onset(
+        self, tmp_path: Path, stale: dict[str, Any], ok: bool,
+    ) -> None:
+        """Artifacts before `press_scene_1to2` scored 1to2 at the next press (`onset1to2`): re-scored there, exactly."""
+        samples = rows_around_boundary(n_before=40, dst_rect=SRC_RECT)
+        for row in samples[:20]:
+            row["scene"] = 0
+        path = self._artifact(tmp_path, samples)
+        data = json.loads(path.read_text())
+        data["groundTruth"]["onset1to2"] = 2.0
+        data["attach"]["continue1to2"].update(stale)
+        path.write_text(json.dumps(data))
+        report = probe.rescore_artifact(path, LOOP_P)
+        assert data["arms"]["A"]["continue1to2"]["verdict"] is True and report["arms"]["arm A"]["strictMatchesArtifact"] is True
+        assert report["arms"]["attach"]["strictMatchesArtifact"] is ok and report["ok"] is ok
 
     def test_an_arm_without_samples_fails_closed(self, tmp_path: Path) -> None:
         path = self._artifact(tmp_path, rows_around_boundary())
@@ -6219,20 +6577,22 @@ class _WrapTransport:
     def evaluate(self, expression: str) -> Any:
         self.evaluations.append(expression)
         if expression.startswith(probe.FORCE_WRAP_SEEK_JS):
-            return {"count": 1, "duration": FW_PERIOD, "loop": True, "playbackRate": 1}
+            return {"domId": "98D59E27-X-video", "count": 1, "t": FW_SEEKED - 100.0, "duration": FW_PERIOD, "loop": True,
+                    "playbackRate": 1, "seekFrom": 3.0, "target": FW_PERIOD - 2.375}
         if expression == probe.FORCE_WRAP_STATUS_JS:
             return {
-                "seekedT": FW_SEEKED, "framesAfterSeek": 12, "duration": FW_PERIOD, "playbackRate": 1,
-                "last": {"now": FW_SEEKED + 2000.0, "mediaTime": FW_PERIOD - 0.375},
+                "t": FW_SEEKED + 2000.0, "seekedT": FW_SEEKED, "framesAfterSeek": 12, "duration": FW_PERIOD, "playbackRate": 1,
+                "last": {"now": FW_SEEKED + 2000.0, "mediaTime": FW_PERIOD - 0.375, "presentedFrames": 60},
             }
         if expression == probe.PAGE_NOW_JS:
             return FW_SEEKED + 2000.0
         if expression == probe.FORCE_WRAP_READ_JS:
             return _fw_recorder()
-        if expression == "window.__obedContinuityProbe__.samples":
+        if expression == probe.SAMPLER_DRAIN_JS:
             return []
         if expression == probe.PAGE_ERRORS_JS:
-            return [{"kind": "player-build-error", "t": FW_SEEKED - 500.0, "detail": {"message": "before the seek"}}]
+            return [{"kind": "player-build-error", "t": FW_SEEKED - 500.0,
+                     "detail": {"errorType": "error", "message": "before the seek", "sceneHash": "#7"}}]
         return True
 
 
@@ -6251,15 +6611,21 @@ class _WrapHost:
     def _require_transport(self) -> _WrapTransport:
         return self.transport
 
-    def execute(self, command: str) -> None:
+    def execute(self, command: str) -> Any:
         self.commands.append(command)
+        return argparse.Namespace(output_visible=True)
 
     def observe(self) -> Any:
         return argparse.Namespace(original_slide=4, busy=False)
 
 
 class TestRunForceWrap:
-    def test_one_take_seeks_the_source_presses_once_and_scores(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(("self_check", "status"), [(True, "pass"), (False, "invalid")])
+    def test_one_take_seeks_the_source_presses_once_and_scores(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, self_check: bool, status: str,
+    ) -> None:
+        """Plan §3.3: the force-wrap drive records the same sampler meta as the arms, and a take
+        whose sampler cannot vouch for its rows is never a pass."""
         hosts: list[_WrapHost] = []
 
         def host(*args: Any, **kwargs: Any) -> _WrapHost:
@@ -6288,17 +6654,18 @@ class TestRunForceWrap:
         monkeypatch.setattr(probe, "advance_until_original_slide", lambda player, ordinal: player.commands.append(f"to{ordinal}"))
         monkeypatch.setattr(probe, "wait_until_settled", lambda *a, **k: True)
         monkeypatch.setattr(probe, "wait_for_destination_hash", lambda *a, **k: True)
-        monkeypatch.setattr(probe, "armed_evidence", lambda *a, **k: [])
+        monkeypatch.setattr(probe, "armed_evidence", lambda *a, **k: _armed_reads())
         monkeypatch.setattr(probe, "score_continuity", continuity)
         monkeypatch.setattr(probe, "check_no_leftover_chrome", lambda: "")
         monkeypatch.setattr(probe, "CLICK_DELAY_S", 0.0)
         monkeypatch.setattr(probe, "POST_ADVANCE_SETTLE_S", 0.0)
         monkeypatch.setattr(probe, "forced_window", lambda *a: _fw_window())
+        monkeypatch.setattr(probe, "sampler_record", lambda transport, rows: dict(_sampler_ok(), selfCheck={"ok": self_check}))
 
         args = probe.parse_args(["--force-wrap", "3to4:375", "--fixture", str(tmp_path)])
         result = probe.run_force_wrap(args)
 
-        assert hosts[0].commands == ["to2", "to3", "advance"]
+        assert hosts[0].commands == ["show", "to2", "to3", "advance"] and result["outputVisible"] is True
         seek = next(e for e in hosts[0].transport.evaluations if e.startswith(probe.FORCE_WRAP_SEEK_JS))
         assert seek.endswith('("98D59E27-X-video", 2.375)')
         assert result["take"]["pressT"] == FW_SEEKED + 2000.0 and result["take"]["reached"] is True
@@ -6306,11 +6673,95 @@ class TestRunForceWrap:
         assert scored["loop_period_s"] == FW_PERIOD
         assert scored["min_window_start"] == FW_SEEKED + probe.FORCE_WRAP_WINDOW_AFTER_SEEK_MS
         assert scored["transition_scene"] == 7
-        assert (result["status"], result["forced"]["outcome"]) == ("pass", "carried")
+        assert (result["status"], result["forced"]["outcome"]) == (status, "carried")
+        assert result["sampler"]["selfCheck"]["ok"] is self_check
+        assert hosts[0].transport.evaluations.index(probe.SAMPLER_STOP_JS) < hosts[0].transport.evaluations.index(probe.SAMPLER_DRAIN_JS)
         assert len(result["pageErrorNotes"]) == 1 and result["forced"]["pageErrors"] == []
 
 
-PAGE_ERROR = {"kind": "player-build-error", "t": FW_SEEKED + 2500.0, "detail": {"errorType": "error", "message": "boom"}}
+PAGE_ERROR = {"kind": "player-build-error", "t": FW_SEEKED + 2500.0, "detail": {"errorType": "error", "message": "boom", "sceneHash": "#7"}}
+
+
+class TestForcedWrapUnreadable:
+    NOT_HELD = {"verdict": False, "wraps": 1, "elementId": 1}
+
+    # Astra r7 #3: unreadable evidence makes the take invalid, never a failed carry.
+    @pytest.mark.parametrize(("kw", "status"), [
+        pytest.param({}, "pass", id="complete-carried-take-passes"),
+        pytest.param({"continuity": NOT_HELD}, "fail", id="readable-unheld-carry-fails"),
+        pytest.param({"samples_problem": "sample 3: a video loop missing"}, "invalid", id="unreadable-sampler-rows"),
+        pytest.param({"continuity": {"verdict": None, "reason": "inconclusive: paint"}}, "invalid", id="unreadable-continuity"),
+        pytest.param({"continuity": NOT_HELD, "restart": {"verdict": None}}, "invalid", id="unreadable-restart"),
+        pytest.param({"clock": {"verdict": None}}, "invalid", id="unreadable-recorder-clock"),
+        pytest.param({"boundary": "1to2", "reads": _fw_reads(stand_downs=["videoNotReady"]), "armed": ARMED,
+                      "samples_problem": "sample 3: a video loop missing"}, "pass",
+                     id="armed-recorder-fallback-stands-without-the-sampler"),
+    ])
+    def test_unreadable_evidence_is_an_invalid_take(self, kw: dict[str, Any], status: str) -> None:
+        assert _fw_score(**kw)["status"] == status
+
+    @staticmethod
+    def _null_scene_crossing() -> dict[str, Any]:
+        samples = rows_around_boundary()
+        for row in samples:
+            if row["scene"] == 2.0:
+                row["scene"] = None
+                for v in row["videos"]:
+                    v["scene"] = None
+        return probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, True)
+
+    @staticmethod
+    def _schema_rejected_run() -> dict[str, Any]:
+        samples = rows_around_boundary()
+        samples[0]["scene"] = "bad"
+        result = {"continuity": {"mode": "qualified"}, "samples": samples, "recorder": _fw_recorder(), "take": _fw_take(),
+                  "reads": None, "pageErrorNotes": []}
+        gt = {"facts": {"asset": ASSET}, "factsOn": None, "source": {"periodS": FW_PERIOD}, "scene": 2.0,
+              "srcRect": dict(SRC_RECT), "dstRect": dict(DST_RECT), "transition": None}
+        probe.score_force_wrap_run(result, gt, "3to4", 375.0)
+        return result
+
+    @staticmethod
+    def _no_stand_downs() -> list[dict[str, Any]]:
+        reads = _fw_reads()
+        for read in reads:
+            read["glReplay"]["api"].pop("standDowns")
+        return reads
+
+    # Astra r8 #3: each unknown makes an otherwise failing take invalid; the complete records keep their outcome.
+    @pytest.mark.parametrize(("build", "status"), [
+        pytest.param(lambda held=NOT_HELD: _fw_score(continuity=held), "fail", id="control-readable-unheld-carry-fails"),
+        pytest.param(lambda: _fw_score(boundary="1to2", reads=_fw_reads(stand_downs=["videoNotReady"]), armed=ARMED), "pass",
+                     id="control-armed-fallback-passes"),
+        pytest.param(lambda held=NOT_HELD: _fw_score(continuity=held, reads=None, restart={"verdict": True}), "invalid",
+                     id="readable-restart-unreadable-destination-painting"),
+        pytest.param(lambda: _fw_score(boundary="1to2", reads=TestForcedWrapUnreadable._no_stand_downs(), armed=ARMED,
+                                       recorder=_fw_recorder(stop_at=FW_SEEKED + 4000.0)), "invalid",
+                     id="armed-stand-downs-unreadable"),
+        pytest.param(lambda: _fw_score(boundary="1to2", reads=_fw_reads(stand_downs=["assetUnbound"]), armed=ARMED,
+                                       recorder=_fw_recorder(wrap=False), restart=probe._inconclusive("boundary crossing not observed in samples")),
+                     "fail", id="kb-1to2-no-wrap-unheld-carry-fails-whatever-the-restart"),
+        pytest.param(lambda: _fw_score(boundary="1to2", reads=TestForcedWrapUnreadable._no_stand_downs(), armed=ARMED,
+                                       recorder=_fw_recorder(wrap=False, stop_at=FW_SEEKED + 4000.0)), "invalid",
+                     id="no-wrap-unreadable-carry-stays-invalid"),
+        pytest.param(lambda: _fw_score(continuity=TestForcedWrapUnreadable._null_scene_crossing()), "invalid",
+                     id="null-destination-scenes-erase-the-crossing"),
+        pytest.param(lambda: TestForcedWrapUnreadable._schema_rejected_run()["forced"], "invalid",
+                     id="schema-rejected-rows-never-reach-the-window"),
+        pytest.param(lambda held=NOT_HELD: _fw_score(continuity=held, restart=probe.score_restart(
+            TestScoreRestart()._samples(fresh_id=1), ASSET, 3.0)), "fail", id="control-sampled-crossing-same-decoder-fails"),
+        pytest.param(lambda held=NOT_HELD: _fw_score(continuity=held, restart=probe.score_restart(
+            TestScoreRestart()._samples()[:10], ASSET, 3.0)), "invalid", id="restart-crossing-never-sampled"),
+        pytest.param(lambda held=NOT_HELD: dict(_fw_score(continuity=held), sampler=dict(_sampler_ok(), selfCheck={"ok": False})),
+                     "invalid", id="failed-sampler-integrity-over-a-failure"),
+        pytest.param(lambda held=NOT_HELD: dict(_fw_score(continuity=held), sampler=_sampler_ok()), "fail",
+                     id="control-vouching-sampler-keeps-the-failure"),
+    ])
+    def test_every_unknown_reaches_the_force_wrap_status(self, build: Any, status: str) -> None:
+        result = dict(build())
+        if "sampler" in result:
+            probe.apply_sampler_integrity(result)
+        assert result["status"] == status
 
 
 class TestForcedWrapPageErrors:
@@ -6332,10 +6783,12 @@ class TestForcedWrapPageErrors:
 
     def test_only_notes_from_the_seek_to_the_window_end_count(self) -> None:
         window = _fw_window()
-        notes = [dict(PAGE_ERROR, t=FW_SEEKED - 1.0), PAGE_ERROR, dict(PAGE_ERROR, t=window["end"] + 1.0), "junk"]
+        notes = [dict(PAGE_ERROR, t=FW_SEEKED - 1.0), PAGE_ERROR, dict(PAGE_ERROR, t=window["end"] + 1.0)]
         assert probe.page_errors_in(notes, FW_SEEKED, window) == [PAGE_ERROR]
         assert probe.page_errors_in(None, FW_SEEKED, window) is None
         assert probe.page_errors_in(notes, None, window) is None
+        assert probe.page_errors_in([*notes, "junk"], FW_SEEKED, window) is None
+        assert probe.page_errors_in([*notes, dict(PAGE_ERROR, t=None)], FW_SEEKED, window) is None
 
 
 class TestWrapScorerSparseGap:
@@ -6410,16 +6863,16 @@ class TestArmedRecorderWindow:
         else:
             reads = _armed_reads_at(FW_SEEKED + 900.0)
         assert probe.armed_recorder_window(recorder, reads) is None
-        assert probe.score_recorder_clock(recorder, None)["verdict"] is False
+        assert probe.score_recorder_clock(recorder, None)["verdict"] is None
 
-    def test_steady_recorder_holds(self) -> None:
-        window = probe.armed_recorder_window(_fw_recorder(), _armed_reads_at(FW_SEEKED + 6000.0))
-        assert probe.score_recorder_clock(_fw_recorder(), window)["verdict"] is True
-
-    def test_known_bad_frozen_recorder_fails(self) -> None:
-        recorder = _fw_recorder(stop_at=FW_SEEKED + 4000.0)
-        window = probe.armed_recorder_window(recorder, _armed_reads_at(FW_SEEKED + 6000.0))
-        assert probe.score_recorder_clock(recorder, window)["verdict"] is False
+    @pytest.mark.parametrize(("recorder", "verdict"), [
+        pytest.param(_fw_recorder, True, id="steady-recorder-holds"),
+        pytest.param(lambda: _fw_recorder(stop_at=FW_SEEKED + 4000.0), False, id="known-bad-frozen-recorder-fails"),
+    ])
+    def test_the_take_window_scores_the_recorder(self, recorder: Any, verdict: bool) -> None:
+        rec = recorder()
+        window = probe.armed_recorder_window(rec, _armed_reads_at(FW_SEEKED + 6000.0))
+        assert probe.score_recorder_clock(rec, window)["verdict"] is verdict
 
     def test_known_bad_mid_period_jump_fails(self) -> None:
         recorder = _fw_recorder()
@@ -6460,13 +6913,14 @@ class TestArmedRecorderWindow:
         assert result["recorderClock"]["window"]["rule"].startswith("armed")
         assert (result["status"], result["forced"]["outcome"]) == ("pass", "carried")
 
-    def test_the_armed_take_with_a_frozen_recorder_fails(self) -> None:
+    def test_the_armed_take_with_a_frozen_recorder_is_never_a_pass(self) -> None:
+        """No sampler rows: the raw-restart fallback is unreadable, so the unheld take is invalid (r7 #3)."""
         result = {
             "continuity": GL_CONTINUITY, "samples": [], "recorder": _fw_recorder(stop_at=FW_SEEKED + 4000.0),
             "take": _fw_take(), "reads": _armed_reads_at(FW_SEEKED + 6000.0), "pageErrorNotes": [],
         }
         probe.score_force_wrap_run(result, self._gt(), "1to2", 375.0)
-        assert result["status"] == "fail"
+        assert result["status"] == "invalid" and "restart" in result["forced"]["reasons"][0]
 
     def test_real_1to2_0_recorder_holds_under_the_take_window(self) -> None:
         artifact = json.loads((FORCED_WRAP_FIXTURES / "1to2_0.min.json").read_text())
@@ -6541,9 +6995,14 @@ class TestWrapOwnerExcuse:
         result = self._score(samples)
         assert result["verdict"] is False and result["wrapOwnerExcused"] == []
 
-    def test_known_bad_ready_wrap_row_unowned_fails(self) -> None:
+    @pytest.mark.parametrize("unown", [
+        pytest.param(lambda samples, index: _unown(samples[index], ready=4), id="known-bad-ready-wrap-row-unowned"),
+        pytest.param(lambda samples, index: (_unown(samples[index]), _unown(samples[index - 1], ready=4)),
+                     id="known-bad-unowned-row-before-the-wrap-row"),
+    ])
+    def test_an_unexcusable_unowned_row_fails(self, unown: Any) -> None:
         samples = _excuse_samples()
-        _unown(samples[_wrap_index(samples)], ready=4)
+        unown(samples, _wrap_index(samples))
         assert self._score(samples)["verdict"] is False
 
     def test_known_bad_two_consecutive_unowned_rows_at_a_wrap_fail(self) -> None:
@@ -6554,13 +7013,6 @@ class TestWrapOwnerExcuse:
         result = self._score(samples)
         assert result["verdict"] is False
         assert len(result["ownerMismatches"]) == 2
-
-    def test_known_bad_unowned_row_before_the_wrap_row_fails(self) -> None:
-        samples = _excuse_samples()
-        index = _wrap_index(samples)
-        _unown(samples[index])
-        _unown(samples[index - 1], ready=4)
-        assert self._score(samples)["verdict"] is False
 
     def test_real_3to4_750_passes_with_its_one_loop_seek_excused(self) -> None:
         artifact = json.loads((FORCED_WRAP_FIXTURES / "3to4_750.min.json").read_text())
@@ -6599,6 +7051,7 @@ class TestRescoreForceWrapCli:
             "forceWrap": {"boundary": "1to2", "offsetMs": 375}, "glReplay": {"requested": "auto"},
             "continuity": GL_CONTINUITY, "samples": [], "recorder": _fw_recorder(), "take": _fw_take(),
             "reads": _armed_reads_at(FW_SEEKED + 6000.0), "pageErrorNotes": [],
+            "sampler": {"schema": probe.paint_instrument.SAMPLER_SCHEMA, "selfCheck": {"ok": True}},
         }
         path = tmp_path / "fw.json"
         path.write_text(json.dumps(saved))
@@ -6707,20 +7160,6 @@ P2_CARRY12, P2_RETIRE12, P2_ARMED12 = (f"b0to1:{P2_ID}:{kind}" for kind in ("car
 P2_RESTART23, P2_CARRY34 = f"b1to2:{P2_ID}:restart", f"b2to3:{P2_ID}:carry"
 
 
-def _load_probe_at(rev: str) -> Any:
-    try:
-        text = subprocess.run(
-            ["git", "show", f"{rev}:scripts/live_continuity_probe.py"], cwd=REPO, capture_output=True, text=True, check=True,
-        ).stdout
-    except (OSError, subprocess.CalledProcessError):
-        return None
-    spec = importlib.util.spec_from_loader(f"probe_at_{rev}", loader=None)
-    module = importlib.util.module_from_spec(spec)
-    module.__file__ = str(REPO / "scripts" / "live_continuity_probe.py")
-    exec(compile(text, f"{rev}:live_continuity_probe.py", "exec"), module.__dict__)
-    return module
-
-
 S1_BASE = _load_probe_at(S1_BASE_REV)
 needs_base = pytest.mark.skipif(S1_BASE is None, reason=f"git history for {S1_BASE_REV} is unavailable")
 _RECT = probe.live_continuity_module.Rect
@@ -6739,6 +7178,7 @@ def _p2_facts(gl: bool = False) -> dict[str, Any]:
 
 
 P2_SLIDE2_DOM_ID = "F9AFED1B-E2D7-47D4-942E-14992C808383-video"
+P2_SLIDE1_OBJECT_ID = "6BB39942-6C61-4763-839D-777C09E7E594"
 
 
 def _spec(facts: dict[str, Any], spec_id: str) -> dict[str, Any]:
@@ -6858,14 +7298,28 @@ class TestVerdictSpecsFromThePlan:
 class TestGroundTruthFactsIsGeneral:
     @needs_base
     @pytest.mark.parametrize("gl", [False, True])
-    def test_p2_facts_equal_the_s1_base_facts_plus_the_verdicts_and_sha(self, gl: bool) -> None:
+    def test_p2_facts_equal_the_s1_base_facts_plus_the_verdicts_sha_and_instance_ids(self, gl: bool) -> None:
+        """P2 stays the oracle: on the schema-2 plan every S1 fact is unchanged once the S2
+        additions are set aside (objectIds, `retires`, the retire's `reason`) and the per-instance
+        expectations are read per asset -- every P2 instance of one asset states the same."""
         plan = _p2_plan(gl)
         base = _plain(S1_BASE.ground_truth_facts(plan, armed=gl))
         current = _plain(probe.ground_truth_facts(plan, armed=gl))
         assert current.pop("verdicts")[0]["id"] == P2_CARRY12
         assert current.pop("planSha256") in probe.P2_PLAN_SHA256
+        retires = current.pop("retires")
+        assert retires == ([] if gl else [current["retire"]])
         positive = current["armed"] if gl else current["retire"]
         assert positive.pop("verdictId") == (P2_ARMED12 if gl else P2_RETIRE12)
+        for key in ("srcObjectId", "dstObjectId", "reason"):
+            positive.pop(key, None)
+        per_asset: dict[str, dict[str, dict[str, str]]] = {}
+        for name, by_player in current["rectExpectations"].items():
+            for player, per_instance in by_player.items():
+                for label, state in per_instance.items():
+                    asset = label.rsplit("#", 1)[0]
+                    assert per_asset.setdefault(name, {}).setdefault(player, {}).setdefault(asset, state) == state
+        current["rectExpectations"] = per_asset
         assert current == base
 
     def test_legacy_slot_facts_only_for_a_pinned_p2_plan(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6882,9 +7336,12 @@ class TestGroundTruthFactsIsGeneral:
         assert probe.plan_signature(_p2_plan().to_runtime()) == probe.P2_OFF_PLAN_SHA256
 
     def test_a_deck_without_p2_shape_derives_facts_and_keeps_the_armed_contract(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        pin = _MOVIE(BIG_ASSET, "pin", _RECT(**BIG_INSTANCE), _RECT(**BIG_INSTANCE), refusal="overlap", gl_replay={"x": 1})
+        pin = _MOVIE(
+            BIG_ASSET, "pin", _RECT(**BIG_INSTANCE), _RECT(**BIG_INSTANCE), refusal="overlap", gl_replay={"x": 1},
+            src_object_id=BIG_OBJECT_IDS[0], dst_object_id=BIG_OBJECT_IDS[1],
+        )
         plan = _plan((_BOUNDARY(0, 1, (pin,)),), {0: 0, 1: 2}, {0: {BIG_ASSET: [BIG_INSTANCE]}, 1: {BIG_ASSET: [BIG_INSTANCE]}})
-        monkeypatch.setattr(probe, "runtime_of", lambda plan: {"movies": RUNTIME_MOVIES, "boundaries": [GL_BOUNDARY]})
+        monkeypatch.setattr(probe, "runtime_of", lambda plan: {"schema": 2, "movies": RUNTIME_MOVIES, "boundaries": [GL_BOUNDARY]})
         facts = probe.ground_truth_facts(plan, armed=True)
         assert "bridgeScene" not in facts and "asset" not in facts
         assert facts["armed"]["instanceRect"] == BIG_INSTANCE and facts["armed"]["verdictKey"] == "armed1to2"
@@ -6899,7 +7356,6 @@ class TestGroundTruthFactsIsGeneral:
 
     def test_retire_and_armed_facts_key_off_generated_ids_without_an_alias(self) -> None:
         keys = {2: f"b0to1:{P2_ID}:carry"}
-        assert probe.retire_fact(synthetic_plan(), RETIRED_RUNTIME, keys)["verdictKey"] == P2_RETIRE12
         assert probe.armed_fact(synthetic_plan(), GL_RUNTIME, keys)["verdictKey"] == P2_ARMED12
         with pytest.raises(SystemExit):
             probe.armed_fact(synthetic_plan(), GL_RUNTIME, {2: f"b0to1:{P2_ID}:restart"})
@@ -6918,8 +7374,11 @@ class TestCarryVerdict:
         assert {key: value["verdict"] for key, value in legacy.items()} == {
             "continue1to2": True, "restart2to3": True, "continue3to4": True,
         }
-        for key in ("continue1to2", "continue3to4"):
-            assert _plain(scored[key]) == _plain(legacy[key])
+        assert _plain(scored["continue3to4"]) == _plain(legacy["continue3to4"])
+        # S2 i1: the 1->2 window now stops before slide 2's own outgoing transition (scene 5).
+        clipped = _plain(scored["continue1to2"])
+        assert clipped["verdict"] is True and clipped["window"].pop("chainClipped") == {"end": legacy["continue1to2"]["window"]["end"]}
+        assert clipped["window"]["end"] < min(r["t"] for r in samples if r["scene"] == 5)
         assert scored["restart2to3"]["verdict"] is True
 
     @needs_base
@@ -6938,14 +7397,15 @@ class TestCarryVerdict:
         samples = [row for row in _p2_run_samples() if row["scene"] < 8]
         scored = probe.score_verdicts(samples, {}, facts, True, {"mode": "qualified"})
         assert scored[P2_CARRY34]["verdict"] is None
-        assert probe.score_continuity(samples, "untitled.mov", 8, facts["bridgeSrcRect"], facts["destRect"], True, transition_scene=7)["verdict"] is False
+        assert probe.score_continuity(samples, "untitled.mov", 8, facts["bridgeSrcRect"], facts["destRect"], True, transition_scene=7)["verdict"] is None
 
     def test_a_fully_observed_restart_across_a_carry_is_red(self) -> None:
         facts = _p2_facts()
         samples = _p2_run_samples()
         for row in samples:
             if row["scene"] == 8:
-                row["videos"][0]["id"] = 9
+                row["videos"][0].update(id=9, elId=9)
+                row["videos"][0]["footprintOwner"]["elId"] = 9
         assert probe.score_verdicts(samples, {}, facts, True, {"mode": "qualified"})[P2_CARRY34]["verdict"] is False
 
     def test_a_sampler_gap_over_the_move_is_inconclusive(self) -> None:
@@ -6983,7 +7443,7 @@ class TestCarryVerdict:
             del vid[breakage]
         scored = probe.score_verdicts(samples, {}, facts, True, {"mode": "qualified"})
         for spec_id in (P2_CARRY12, P2_RESTART23, P2_CARRY34):
-            assert scored[spec_id]["verdict"] is None and scored[spec_id]["schemaErrors"], spec_id
+            assert scored[spec_id]["verdict"] is None and scored[spec_id]["contractErrors"], spec_id
 
     def test_the_real_samples_have_a_valid_schema(self) -> None:
         assert probe.sample_schema_errors(_real_samples()) == []
@@ -7000,6 +7460,18 @@ class TestRestartVerdict:
     def test_a_clean_restart_is_green(self) -> None:
         scored = self._score(_p2_run_samples())
         assert scored["verdict"] is True and scored["elementId"] == 2 and scored["sourceIds"] == [1]
+
+    def test_known_bad_another_asset_containing_the_name_is_not_the_fresh_decoder(self) -> None:
+        """Astra r13 #3: `another-untitled.mov` matched the substring rule; the asset match is exact."""
+        samples = _p2_run_samples()
+        for row in samples:
+            for v in row["videos"]:
+                if v["id"] == 2:
+                    v["src"] = "another-" + v["src"]
+                    v["footprintOwner"] = {"elId": None, "key": None, "via": "none", "contextType": None}
+        assert probe.contract.first_errors(probe.contract.sample_rows(samples)) == []
+        assert probe.score_verdicts(samples, {}, _p2_facts(), True, {"mode": "qualified"})[P2_RESTART23]["verdict"] is False
+        assert probe.score_restart(samples, "untitled.mov", 6)["verdict"] is False
 
     def test_known_bad_the_source_decoder_leaks_across_the_cut(self) -> None:
         samples = _p2_run_samples()
@@ -7080,10 +7552,11 @@ def _handback_samples(
     return rows
 
 
-RETIRE_NOTE = _ev("retire-boundary", key="movie1", elIds=[3], atScene=2, sceneHash="#2")
-# Live gate r1 (331f944d): what today's core emits on P2 -- one preserve-refused at the transition
-# scene and no retire-boundary (nothing was pooled before the zone for the sweep to retire).
-REFUSED_NOTE = _ev("preserve-refused", key="movie1", scene=1, via="stash", sceneHash="#1")
+RETIRE_NOTE = _ev("retire-boundary", key="movie1", elIds=[3], atScene=2, sceneHash="#2", instance=P2_SLIDE1_OBJECT_ID)
+# Live gate r1 (331f944d): what the core emits on P2 -- one preserve-refused at the transition
+# scene and no retire-boundary (nothing was pooled before the zone for the sweep to retire). Both
+# notes carry the source instance's stamp, as the core stamps them since S2.
+REFUSED_NOTE = _ev("preserve-refused", key="movie1", scene=1, via="stash", sceneHash="#1", instance=P2_SLIDE1_OBJECT_ID)
 
 
 class TestRetireVerdict:
@@ -7098,22 +7571,26 @@ class TestRetireVerdict:
         spec = _spec(_p2_facts(), P2_RETIRE12)
         assert (spec["atScene"], spec["zoneUntilScene"], spec["dstRect"]) == (2, 6, _p2_facts()["pinRect"])
 
-    @pytest.mark.parametrize("notes", [(REFUSED_NOTE,), (RETIRE_NOTE,), (REFUSED_NOTE, RETIRE_NOTE), (RETIRE_NOTE, RETIRE_NOTE)])
+    @pytest.mark.parametrize("notes", [
+        # Gate r1, the live P2 shape: one preserve-refused, no retire-boundary, no <video> until scene 4.
+        pytest.param((REFUSED_NOTE,), id="live-p2-shape-gate-r1"),
+        pytest.param((RETIRE_NOTE,), id="retire-only"),
+        pytest.param((REFUSED_NOTE, RETIRE_NOTE), id="refused-and-retire"),
+        pytest.param((RETIRE_NOTE, RETIRE_NOTE), id="two-retire-notes"),
+    ])
     def test_any_refusal_note_for_the_movie_in_the_zone_is_green(self, notes: tuple[Any, ...]) -> None:
         scored = self._score(_retire_read(notes))
         assert scored["verdict"] is True and len(scored["retireNotes"]) == len(notes)
-
-    def test_the_live_p2_shape_is_green(self) -> None:
-        """Gate r1: one preserve-refused, no retire-boundary, no <video> until scene 4."""
-        scored = self._score(_retire_read((REFUSED_NOTE,)))
-        assert scored["verdict"] is True and scored["handback"]["verdict"] is True
+        assert scored["handback"]["verdict"] is True
 
     @pytest.mark.parametrize("notes", [
-        (), (_ev("retire-boundary", key="movie1", elIds=[3], atScene=6),), (_ev("retire-boundary", key="movie2", elIds=[3], atScene=2),),
-        (_ev("retire-boundary", key="movie1", atScene=2),), (_ev("preserve-refused", key="movie1", scene=0, via="stash"),),
-        (_ev("preserve-refused", key="movie2", scene=1, via="stash"),), (_ev("preserve-refused", key="movie1", scene=1),),
-        (_ev("preserve-refused", key="movie1", scene=None, via="stash"),),
-        (_ev("preserve-refused", key="movie1", scene=5, via="stash"),), (_ev("preserve-refused", key="movie1", scene=7, via="stash"),),
+        (), (_ev("retire-boundary", key="movie1", elIds=[3], atScene=6, instance=P2_SLIDE1_OBJECT_ID),),
+        (_ev("retire-boundary", key="movie2", elIds=[3], atScene=2, instance=P2_SLIDE1_OBJECT_ID),),
+        (_ev("preserve-refused", key="movie1", scene=0, via="stash", instance=P2_SLIDE1_OBJECT_ID),),
+        (_ev("preserve-refused", key="movie2", scene=1, via="stash", instance=P2_SLIDE1_OBJECT_ID),),
+        (_ev("preserve-refused", key="movie1", scene=None, via="stash", instance=P2_SLIDE1_OBJECT_ID),),
+        (_ev("preserve-refused", key="movie1", scene=5, via="stash", instance=P2_SLIDE1_OBJECT_ID),),
+        (_ev("preserve-refused", key="movie1", scene=7, via="stash", instance=P2_SLIDE1_OBJECT_ID),),
     ])
     def test_known_bad_no_matching_refusal_note_in_the_zone_is_red(self, notes: tuple[Any, ...]) -> None:
         """The zone is [atScene - 1, next slide's transition scene): a later note of the same key does not count."""
@@ -7136,10 +7613,21 @@ class TestRetireVerdict:
         )
         assert self._score(_retire_read(events))["verdict"] is True
 
+    @pytest.mark.parametrize(("src", "expected"), [("untitled.mov", True), ("foreign.mov", False), ("", None)])
+    def test_a_handed_back_painter_must_still_name_the_asset(self, src: str, expected: bool | None) -> None:
+        """Astra r15 #2: the handed-back exemption was granted by elId before the painter's current source."""
+        samples = _handback_samples()
+        for row in samples:
+            for v in row["videos"]:
+                if v["id"] == 5:
+                    v["elId"] = 5
+        read = _retire_read((REFUSED_NOTE,), painting=[painting_video(_p2_facts()["pinRect"], src=src, el_id=5)])
+        assert self._score(read, samples=samples)["verdict"] is expected
+
     def test_known_bad_the_settled_checks_still_hold(self) -> None:
         pin = _p2_facts()["pinRect"]
         assert self._score(_retire_read((RETIRE_NOTE,), painting=[painting_video(pin)]))["verdict"] is False
-        assert self._score(_retire_read((RETIRE_NOTE,), pool=[{"key": "untitled.mov"}]))["verdict"] is False
+        assert self._score(_retire_read((RETIRE_NOTE,), pool=[{"key": "untitled.mov", "elId": 2}]))["verdict"] is False
 
     @pytest.mark.parametrize("read", [
         None, {"reason": "x"}, dict(_retire_read((RETIRE_NOTE,)), stageMap=None), dict(_retire_read((RETIRE_NOTE,)), painting={"error": "x"}),
@@ -7154,13 +7642,14 @@ class TestRetireVerdict:
     @pytest.mark.parametrize("change", [
         {"before": True}, {"preserved": True}, {"remounted": True}, {"facade": True}, {"connected": False},
         {"rect": {"x": 400.0, "y": 100.0, "w": 300.0, "h": 100.0}},
+        {"src": "another.mov"},  # Astra r13 #4: the destination element reassigned to another asset passed
     ])
     @pytest.mark.parametrize("installed", [True, False])
     def test_known_bad_a_carried_or_absent_raw_element_is_red(self, change: dict[str, Any], installed: bool) -> None:
         scored = self._score(_retire_read((RETIRE_NOTE,)), installed, _handback_samples(**change))
         assert scored["verdict"] is False and P2_SLIDE2_DOM_ID in scored["reason"]
 
-    @pytest.mark.parametrize("samples", ["never", "noDomIds", "onlyMoving", "notList", "badFlags"])
+    @pytest.mark.parametrize("samples", ["never", "noDomIds", "onlyMoving", "notList", "badFlags", "noSource"])
     def test_a_hand_back_the_samples_cannot_show_is_inconclusive_not_red(self, samples: str) -> None:
         """The destination element never DOM-present on a settled zone row (e.g. a WebGL poster) is not a red."""
         rows: Any
@@ -7172,6 +7661,8 @@ class TestRetireVerdict:
             rows = _handback_samples(settled=False)
         elif samples == "notList":
             rows = {"samples": []}
+        elif samples == "noSource":
+            rows = _handback_samples(src="")
         else:
             rows = _handback_samples(preserved=None)
         assert self._score(_retire_read((RETIRE_NOTE,)), samples=rows)["verdict"] is None
@@ -7180,8 +7671,13 @@ class TestRetireVerdict:
         spec = {k: v for k, v in _spec(_p2_facts(), P2_RETIRE12).items() if k != "dstDomId"}
         assert probe.score_retire(_retire_read((RETIRE_NOTE,)), spec, True, _handback_samples())["verdict"] is None
 
+    def test_a_spec_without_its_source_instance_is_inconclusive(self) -> None:
+        """No source objectId: no refusal note can be proven the retired instance's (Astra S2 r2 #3)."""
+        spec = dict(_spec(_p2_facts(), P2_RETIRE12), srcObjectId=None)
+        assert probe.score_retire(_retire_read((RETIRE_NOTE,)), spec, True, _handback_samples())["verdict"] is None
+
     def test_the_observer_retains_the_core_events(self) -> None:
-        retire = probe.retire_fact(synthetic_plan(), RETIRED_RUNTIME, BOUNDARY_KEYS)
+        retire = synthetic_retire()
         out: dict[str, Any] = {}
         host = ArmedHost([])
         probe.boundary_observer(host, {"retire": retire}, out)(2)
@@ -7192,7 +7688,280 @@ class TestRetireVerdict:
             assert term in probe.SAMPLER_JS
 
 
-PRE_FLIP = [{"scene": 1, "videos": [{"src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 1}}]}]
+class TestAssetKeysAreExactNames:
+    """Codex S2 r1 #3 (probe half): `a.mov` is a substring of `ba.mov`, so a first-substring match
+    classified a `ba.mov` source as `a.mov`. A source is its canonical asset name (the file name
+    without query or Keynote trim suffix, lowercased) and matches only an equal key."""
+
+    @pytest.mark.parametrize(("source", "keys", "expected"), [
+        pytest.param("ba.mov", ["a.mov"], False, id="overlapping-name"),
+        pytest.param("ba.mov-0.0000-10.0000.mov", ["a.mov"], False, id="overlapping-trimmed-export-name"),
+        pytest.param("http://127.0.0.1:9/assets/ba.mov-0.0000-10.0000.mov", ["a.mov"], False, id="overlapping-url"),
+        pytest.param("a.mov", ["ba.mov"], False, id="key-longer-than-source"),
+        pytest.param("a.mov-0.0000-10.0000.mov", ["a.mov"], True, id="trimmed-export-name"),
+        pytest.param("http://127.0.0.1:9/assets/A.MOV-0.0000-10.0000.mov?v=1", ["a.mov"], True, id="url-case-and-query"),
+        pytest.param("counter-a.mov", ["counter-b.mov", "counter-a.mov"], True, id="pool-key-among-several"),
+        pytest.param("", ["a.mov"], False, id="empty-source"),
+        pytest.param(None, ["a.mov"], False, id="no-source"),
+        pytest.param("a.mov", [""], False, id="empty-key"),
+    ])
+    def test_a_source_matches_only_its_own_canonical_asset_name(self, source: Any, keys: list[str], expected: bool) -> None:
+        assert probe.matches_asset_keys(source, keys) is expected
+
+    def test_an_overlapping_name_in_the_pool_is_not_the_retired_asset(self) -> None:
+        retire = {"assetKeys": ["a.mov"], "rects": [BIG_INSTANCE]}
+        read = {"stageMap": dict(IDENTITY_STAGE_MAP), "painting": []}
+        scored = probe.score_refusal(dict(read, poolSnapshot=[{"key": "ba.mov", "elId": 4}]), retire, True)
+        assert scored["verdict"] is True and scored["pooled"] == []
+        assert probe.score_refusal(dict(read, poolSnapshot=[{"key": "a.mov", "elId": 4}]), retire, True)["verdict"] is False
+
+    def test_a_stray_is_named_by_its_own_asset_not_an_overlapping_one(self) -> None:
+        assets = ["a.mov", "ba.mov"]
+        assert probe.asset_of("ba.mov-0.0000-10.0000.mov", assets) == "ba.mov"
+        assert probe.asset_of("a.mov-0.0000-10.0000.mov", assets) == "a.mov"
+        assert probe.asset_of("c.mov-0.0000-10.0000.mov", assets) == "unknown"
+
+    @pytest.mark.parametrize(("movies", "expected"), [
+        pytest.param({"movie1": ["a.mov"], "movie2": ["ba.mov"]}, ["movie2", "movie1", None], id="overlapping-names"),
+        pytest.param({"movie1": ["a.mov"], "movie2": ["A.MOV"]}, [None, None, None], id="a-name-two-movies-claim-is-no-match"),
+    ])
+    def test_the_sampler_pins_only_the_one_movie_of_that_exact_name(self, movies: dict[str, list[str]], expected: list[Any]) -> None:
+        """Executes the real `SAMPLER_JS` under Node: the key it pins on each footprint-owner query
+        (none for an ambiguous name, as the core's `movieAssetKey`)."""
+        plan = json.dumps({"movies": {key: {"assetKeys": keys} for key, keys in movies.items()}})
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not available")
+        script = f"""
+        global.window = global;
+        var asked = [];
+        var tick = null;
+        global.requestAnimationFrame = function(cb){{ tick = cb; return 1; }};
+        window.__OBED_CONTINUITY__ = {plan};
+        window.__OBED_P2_PRESERVE__ = {{footprintOwnerDecoderId: function(q){{ asked.push(q.key === undefined ? null : q.key); return null; }}}};
+        function vid(src){{
+          return {{currentSrc: src, src: src, dataset: {{}},
+                   getBoundingClientRect: function(){{ return {{left: 0, top: 0, width: 10, height: 10}}; }}}};
+        }}
+        var stage = {{offsetWidth: 1920, offsetHeight: 1080,
+                      getBoundingClientRect: function(){{ return {{left: 0, top: 0, width: 1920, height: 1080}}; }}}};
+        global.document = {{
+          getElementById: function(id){{ return id === 'stage' ? stage : null; }},
+          querySelectorAll: function(){{
+            return [vid('http://h/x/ba.mov-0.0000-10.0000.mov'), vid('http://h/x/a.mov-0.0000-10.0000.mov'), vid('http://h/x/c.mov')];
+          }},
+          contains: function(){{ return true; }},
+          createElement: function(){{ return {{style: {{}}, attachShadow: function(){{ return {{appendChild: function(){{}}}}; }}}}; }},
+          documentElement: {{appendChild: function(){{}}}},
+        }};
+        global.location = {{hash: '#1'}};
+        global.ResizeObserver = function(){{ this.observe = function(){{}}; }};
+        global.WeakRef = function(v){{ this.deref = function(){{ return v; }}; }};
+        global.Element = function(){{}};
+        Element.prototype.checkVisibility = function(){{ return true; }};
+        {probe.SAMPLER_JS}
+        tick();
+        console.log(JSON.stringify(asked));
+        """
+        result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout.strip()) == expected
+
+
+SIBLING_SRC, SIBLING_DST = "SIBLING-SRC-OBJECT", "SIBLING-DST-OBJECT"
+
+
+class TestRetireIsInstanceBound:
+    """Codex S2 r1 #5: retire qualification was asset-wide. A same-asset sibling instance that
+    legitimately carries at the same boundary must not fail the retire, and the sibling's own
+    refusal note must not stand in for the retired instance's. Snapshots, notes and carry events
+    bind to the retired pair's objectIds (`srcObjectId`/`dstObjectId`) and, for an unstamped note,
+    to the decoder ids the retained samples stamp with them; anything unattributable still counts
+    (fail closed).
+
+    Astra S2 r2 #3: ownership is TARGET, FOREIGN or UNKNOWN (unattributable or conflicting). A
+    decoder the samples tie to the retired pair outranks a foreign stamp, so only proven-FOREIGN
+    evidence is set aside, and only proven-TARGET notes prove the refusal."""
+
+    SIBLING_EL = 9
+    RETIRING_EL = 3
+
+    def _spec(self) -> dict[str, Any]:
+        """P2's refused 1->2 pin, on a destination that also holds a second instance of its asset
+        (what `verdict_specs` lists as the retire's `rects`)."""
+        spec = _spec(_p2_facts(), P2_RETIRE12)
+        return dict(spec, rects=[*spec["rects"], dict(OTHER_INSTANCE)])
+
+    def _ids(self) -> tuple[str, str]:
+        spec = self._spec()
+        return spec["srcObjectId"].upper(), spec["dstObjectId"].upper()
+
+    def _samples(self) -> list[dict[str, Any]]:
+        """The P2 hand-back rows plus the sibling's carried decoder, stamped with its own source
+        instance on slide 1 and its destination instance once the pin has landed (`hold`), and the
+        retiring decoder, stamped with the retired source instance on slide 1."""
+        rows = _handback_samples()
+        src, _ = self._ids()
+        for row in rows:
+            if row["scene"] < 2:
+                retiring = video(
+                    id=self.RETIRING_EL, el_id=self.RETIRING_EL, t=row["t"], scene=row["scene"], current_time=row["t"] / 1000,
+                    rect=dict(self._spec()["rects"][0]),
+                )
+                row["videos"].append(_dom(retiring, f"{src}-video", instance=src))
+            sibling = video(
+                id=self.SIBLING_EL, el_id=self.SIBLING_EL, t=row["t"], scene=row["scene"], current_time=row["t"] / 1000,
+                rect=dict(OTHER_INSTANCE),
+            )
+            stamp = SIBLING_SRC if row["scene"] < 2 else SIBLING_DST
+            row["videos"].append(_dom(sibling, "SIBLING-video", remounted=row["scene"] >= 2, instance=stamp))
+        return rows
+
+    def _sibling_carry(self) -> tuple[dict[str, Any], ...]:
+        """What the core notes when it carries the sibling: the reuse naming the sibling's pair, then
+        the remount of its preserved decoder (unstamped; keyed by the shared asset)."""
+        return (
+            _ev("reuse-decoder", key="untitled.mov", newElId=7, oldElId=self.SIBLING_EL, atScene=2,
+                src=SIBLING_SRC, dst=SIBLING_DST, sceneHash="#2"),
+            _ev("remount-into-authored-layer", elId=self.SIBLING_EL, key="untitled.mov", sceneHash="#2"),
+        )
+
+    def _sibling_pool(self) -> list[dict[str, Any]]:
+        return [{"key": "untitled.mov", "movieKey": "movie1", "instance": SIBLING_DST, "elId": self.SIBLING_EL, "fromDom": True}]
+
+    def _note(self, instance: str) -> dict[str, Any]:
+        return _ev("retire-boundary", key="movie1", elIds=[3], atScene=2, sceneHash="#2", instance=instance)
+
+    def _score(self, events: tuple[Any, ...], *, pool: Any = None, painting: Any = None) -> dict[str, Any]:
+        read = _retire_read(
+            events, pool=self._sibling_pool() if pool is None else pool,
+            painting=[painting_video(OTHER_INSTANCE, el_id=self.SIBLING_EL)] if painting is None else painting,
+        )
+        return probe.score_retire(read, self._spec(), True, self._samples())
+
+    def test_a_carried_same_asset_sibling_does_not_fail_the_retire(self) -> None:
+        src, _ = self._ids()
+        scored = self._score((self._note(src), *self._sibling_carry()))
+        assert scored["verdict"] is True, scored["reason"]
+        assert scored["carryNotes"] == [] and scored["pooled"] == [] and scored["paintingOverRect"] == []
+        assert len(scored["retireNotes"]) == 1
+
+    @pytest.mark.parametrize("note", [
+        pytest.param(_ev("retire-boundary", key="movie1", elIds=[SIBLING_EL], atScene=2, sceneHash="#2", instance=SIBLING_SRC), id="retire-boundary"),
+        pytest.param(_ev("preserve-refused", key="movie1", scene=1, via="stash", sceneHash="#1", instance=SIBLING_SRC), id="preserve-refused"),
+    ])
+    def test_the_siblings_refusal_note_does_not_stand_in_for_the_retired_instances(self, note: dict[str, Any]) -> None:
+        """Nothing else on the slide: the sibling's note is the only refusal note for the movie."""
+        scored = self._score((note,), pool=[], painting=[])
+        assert scored["verdict"] is False and scored["reason"].startswith("no preserve-refused/retire-boundary note")
+
+    def test_the_retired_instances_own_refusal_notes_qualify(self) -> None:
+        src, dst = self._ids()
+        reuse_refused = _ev("preserve-refused", key="movie1", scene=1, via="reuse", sceneHash="#1", instance=dst, src=src, reason="absent")
+        unstamped_on_the_retiring_decoder = _ev("retire-boundary", key="movie1", elIds=[self.RETIRING_EL], atScene=2, sceneHash="#2")
+        for note in (
+            self._note(src), _ev("preserve-refused", key="movie1", scene=1, via="stash", sceneHash="#1", instance=src), reuse_refused,
+            unstamped_on_the_retiring_decoder,
+        ):
+            assert self._score((note,))["verdict"] is True
+
+    @pytest.mark.parametrize("note", [
+        pytest.param(_ev("preserve-refused", key="movie1", scene=1, via="stash", sceneHash="#1"), id="unstamped-no-decoders"),
+        pytest.param(_ev("retire-boundary", key="movie1", elIds=[42], atScene=2, sceneHash="#2"), id="unstamped-unknown-decoder"),
+        pytest.param(_ev("retire-boundary", key="movie1", elIds=[RETIRING_EL, SIBLING_EL], atScene=2, sceneHash="#2"),
+                     id="unstamped-decoders-of-both-instances"),
+        pytest.param(_ev("retire-boundary", key="movie1", elIds=[RETIRING_EL], atScene=2, sceneHash="#2", instance=SIBLING_SRC),
+                     id="sibling-stamp-on-the-retiring-decoder"),
+        pytest.param(_ev("preserve-refused", key="movie1", scene=1, via="reuse", sceneHash="#1", instance=P2_SLIDE1_OBJECT_ID,
+                         src=SIBLING_SRC, reason="absent"), id="stamps-of-both-instances"),
+    ])
+    def test_known_bad_an_unattributed_or_conflicting_refusal_note_is_no_proof(self, note: dict[str, Any]) -> None:
+        """Astra S2 r2 #3: "cannot exclude this note" is not proof the retired instance was refused.
+        Only a note whose stamps or decoders tie it to the retired pair, and nothing ties elsewhere,
+        satisfies the positive requirement. Nor is it proof of absence (fold5 v2 #3): INCONCLUSIVE."""
+        scored = self._score((note,), pool=[], painting=[])
+        assert scored["verdict"] is None and scored["reason"].startswith("inconclusive: a refusal note for the movie")
+
+    def _runtime_refusal(self, src: str, dst: str, el: int) -> tuple[dict[str, Any], ...]:
+        """What the core (8faec19a) notes when it refuses a carry at runtime: `preserve-refused`
+        via reuse, then the `retire-boundary` retiring its source candidates at the boundary's scene."""
+        return (
+            _ev("preserve-refused", key="movie1", scene=1, via="reuse", sceneHash="#1", instance=dst, src=src, reason="ambiguous",
+                atScene=2, candidates=[el]),
+            _ev("retire-boundary", key="movie1", elIds=[el], atScene=2, sceneHash="#2", instance=src),
+        )
+
+    def test_a_runtime_refusal_of_one_instance_never_satisfies_anothers_retire(self) -> None:
+        """Two same-asset instances refused at the same scene: each retire counts only its own
+        runtime refusal notes, attributed by their `instance`/`src` stamps and `elIds`."""
+        src, dst = self._ids()
+        sibling = self._runtime_refusal(SIBLING_SRC, SIBLING_DST, self.SIBLING_EL)
+        alone = self._score(sibling, pool=[], painting=[])
+        assert alone["verdict"] is False and alone["reason"].startswith("no preserve-refused/retire-boundary note")
+        own = self._runtime_refusal(src, dst, self.RETIRING_EL)
+        both = self._score((*sibling, *own), pool=[], painting=[])
+        assert both["verdict"] is True, both["reason"]
+        assert [n["instance"] for n in both["retireNotes"]] == [dst, src]
+
+    def test_known_bad_a_foreign_stamped_carry_of_the_retiring_decoder_stays_red(self) -> None:
+        """Astra S2 r2 #3: a wrong-instance reuse names the sibling's pair, but its `oldElId` is the
+        decoder the samples stamp with the retired source. The decoder outranks the stamp."""
+        src, _ = self._ids()
+        reuse = _ev("reuse-decoder", key="untitled.mov", newElId=7, oldElId=self.RETIRING_EL, atScene=2,
+                    src=SIBLING_SRC, dst=SIBLING_DST, sceneHash="#2")
+        scored = self._score((self._note(src), *self._sibling_carry(), reuse))
+        assert scored["verdict"] is False and scored["carryNotes"] == [reuse]
+
+    def test_known_bad_the_retiring_decoder_pooled_under_a_foreign_stamp_stays_red(self) -> None:
+        """Astra S2 r2 #3: a pool entry restamped to the sibling still holds the retiring decoder."""
+        src, _ = self._ids()
+        restamped = {"key": "untitled.mov", "movieKey": "movie1", "instance": SIBLING_DST, "elId": self.RETIRING_EL}
+        scored = self._score((self._note(src),), pool=[*self._sibling_pool(), restamped])
+        assert scored["verdict"] is False and scored["pooled"] == [restamped]
+
+    def test_known_bad_the_retired_pair_carried_is_still_red(self) -> None:
+        src, dst = self._ids()
+        reuse = _ev("reuse-decoder", key="untitled.mov", newElId=7, oldElId=3, atScene=2, src=src, dst=dst, sceneHash="#2")
+        scored = self._score((self._note(src), reuse))
+        assert scored["verdict"] is False and scored["carryNotes"] == [reuse]
+
+    @pytest.mark.parametrize("carry", [
+        pytest.param(_ev("remount-into-authored-layer", elId=3, key="untitled.mov", sceneHash="#2"), id="retired-decoder-remounted"),
+        pytest.param(_ev("remount-into-authored-layer", elId=42, key="untitled.mov", sceneHash="#2"), id="unattributable-decoder"),
+        pytest.param(_ev("reuse-decoder", key="untitled.mov", newElId=7, oldElId=42, sceneHash="#2"), id="unstamped-reuse"),
+    ])
+    def test_known_bad_an_unattributable_or_own_carry_note_stays_red(self, carry: dict[str, Any]) -> None:
+        src, _ = self._ids()
+        scored = self._score((self._note(src), carry))
+        assert scored["verdict"] is False and scored["carryNotes"] == [carry]
+
+    @pytest.mark.parametrize("entry", [
+        pytest.param({"instance": "DST"}, id="the-retired-destination-instance"),
+        pytest.param({"instance": "SRC"}, id="the-retired-source-instance"),
+        pytest.param({"instance": None, "elId": 42}, id="unstamped"),
+    ])
+    def test_known_bad_the_retired_pair_or_an_unattributable_decoder_pooled_stays_red(self, entry: dict[str, Any]) -> None:
+        src, dst = self._ids()
+        stamp = {"DST": dst, "SRC": src}.get(entry["instance"])
+        pooled = {"key": "untitled.mov", "movieKey": "movie1", "elId": entry.get("elId", 3), "instance": stamp}
+        scored = self._score((self._note(src),), pool=[*self._sibling_pool(), pooled])
+        assert scored["verdict"] is False and scored["pooled"] == [pooled]
+
+    def test_known_bad_another_decoder_over_the_siblings_rect_stays_red(self) -> None:
+        """Only a decoder the samples stamp with another instance is excused over the asset's rects."""
+        src, _ = self._ids()
+        scored = self._score((self._note(src),), painting=[painting_video(OTHER_INSTANCE, el_id=42)])
+        assert scored["verdict"] is False and [v["elId"] for v in scored["paintingOverRect"]] == [42]
+
+    def test_without_the_samples_nothing_is_excused(self) -> None:
+        """No retained stamps: the sibling's unstamped remount and its painting are unattributable."""
+        src, _ = self._ids()
+        read = _retire_read((self._note(src), *self._sibling_carry()), painting=[painting_video(OTHER_INSTANCE, el_id=self.SIBLING_EL)])
+        scored = probe.score_refusal(read, self._spec(), True)
+        assert scored["verdict"] is False and [v["elId"] for v in scored["paintingOverRect"]] == [self.SIBLING_EL]
+
+
+PRE_FLIP =[{"scene": 1, "videos": [{"id": 1, "src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 1}}]}]
 
 
 class TestArmedVerdict:
@@ -7221,9 +7990,15 @@ class TestArmedVerdict:
 
 
 def _stored_artifact(*, evidence: bool = False, arms: tuple[str, ...] = ("A", "B", "C")) -> dict[str, Any]:
-    """A host artifact as the S1 base probe stored it (legacy scorers, no raw evidence unless asked)."""
+    """A host artifact as the S1 base probe stored it (legacy scorers, no raw evidence unless asked), with
+    the settled source slide (scene 0) before the 1->2 press so the legacy crossing is sampled."""
     facts = _p2_facts()
-    samples = _p2_run_samples()
+    samples = []
+    for t in range(-1000, 0, 50):
+        row = sample(float(t), 0, video(id=1, el_id=1, t=float(t), scene=0, current_time=5 + t / 1000, rect=dict(facts["pinRect"])))
+        row.update(playerState="IdleAtFinalState", busy=False)
+        samples.append(row)
+    samples += _p2_run_samples()
     if evidence:
         pin = facts["pinRect"]
         for row in samples:
@@ -7251,8 +8026,10 @@ class TestRescoreGenerated:
     def test_a_legacy_artifact_reproduces_its_rederivable_verdicts_and_counts_the_rest(self) -> None:
         report = probe.rescore_generated(_stored_artifact(), _p2_facts(), None)
         assert report["ok"] is True and report["inventoryComplete"] is True
-        assert report["counts"] == {"reproduced": 12, "differ": 0, "notRederivable": 4}
-        assert report["claim"] == "re-derivable verdicts reproduced: 12/12; 4 not re-derivable (INCONCLUSIVE)"
+        assert report["counts"] == {"reproduced": 12, "differ": 0, "notRederivable": 4, "contractRejected": 0}
+        assert report["claim"] == (
+            "re-derivable verdicts reproduced: 12/12; 4 not re-derivable (INCONCLUSIVE); 0 outside the evidence contract"
+        )
         arm = report["arms"]["arm A"]
         assert arm["equalsLegacyScorer"] is True and arm["legacyWithoutGenerated"] == []
         assert arm["verdicts"]["refused1to2"]["match"] is None and arm["verdicts"]["refused1to2"]["reason"].startswith("inconclusive")
@@ -7268,6 +8045,22 @@ class TestRescoreGenerated:
         artifact["arms"]["A"][key]["verdict"] = not artifact["arms"]["A"][key]["verdict"]
         report = probe.rescore_generated(artifact, _p2_facts(), None)
         assert report["ok"] is False and report["arms"]["arm A"]["verdicts"][key]["match"] is False
+
+    def test_known_bad_evidence_outside_the_contract_is_never_reproduced(self) -> None:
+        """Astra r12 #6b: a contract-rejected None must not "reproduce" a stored None, nor reach the legacy scorer.
+        r13 #5: nor hide as "not re-derivable" (`refused1to2` retains no refusal evidence here)."""
+        artifact = _stored_artifact()
+        arm = artifact["arms"]["A"] = json.loads(json.dumps(artifact["arms"]["A"]))
+        arm["samples"][0]["stageMap"]["offsetWidth"] = 1920.5
+        for key in (*probe.LEGACY_SAMPLE_VERDICTS, "refused1to2"):
+            arm[key] = {"verdict": None}
+        report = probe.rescore_generated(artifact, _p2_facts(), None)
+        rows = report["arms"]["arm A"]["verdicts"]
+        assert report["ok"] is False and report["counts"]["contractRejected"] == 4
+        assert all(
+            rows[key]["match"] is None and rows[key]["contractErrors"] for key in (*probe.LEGACY_SAMPLE_VERDICTS, "refused1to2")
+        )
+        assert report["arms"]["arm A"]["equalsLegacyScorer"] is None
 
     @pytest.mark.parametrize("arms", [("A", "B"), ("A", "C"), ()])
     def test_known_bad_an_incomplete_arm_inventory_is_not_ok(self, arms: tuple[str, ...]) -> None:
@@ -7290,8 +8083,27 @@ class TestRescoreGenerated:
 
 
 class TestGotoMatrixFromThePlan:
-    def test_p2_is_todays_matrix(self) -> None:
-        assert probe.goto_matrix(probe.verdict_specs(_p2_plan()), 4) == probe.GOTO_MATRIX
+    def test_p2_is_todays_matrix_plus_its_bridge_leg(self) -> None:
+        """Owner decision 5: P2's one expected-True carry (the 3->4 bridge) gains its advance leg."""
+        assert probe.goto_matrix(probe.verdict_specs(_p2_plan()), 4) == (*probe.GOTO_MATRIX, (1, 3, 4))
+
+    @pytest.mark.parametrize("deck", ["P2", "D1", "D2", "D3", "D4", "D5", "D6"])
+    def test_every_expected_true_carry_of_a_committed_deck_gets_one_advance_leg(self, deck: str) -> None:
+        """Plan §3.8, from the committed deck plan: the matrix is today's fitting cases followed by
+        exactly one leg per distinct expected-True carry boundary, each a goTo away from the source
+        first (slide 1, or slide 2 when the source is slide 1), then the source, then the advance."""
+        plan = _deck_plan(deck)
+        slides = len(plan.scene_index_by_player)
+        matrix = probe.goto_matrix(probe.verdict_specs(plan), slides)
+        base = tuple(case for case in probe.GOTO_MATRIX if max(case) <= slides)
+        legs = matrix[len(base):]
+        assert matrix[:len(base)] == base
+        carried = {
+            (spec["fromPlayer"] + 1, spec["toPlayer"] + 1) for spec in probe.verdict_specs(plan)
+            if spec["kind"] == "carry" and spec["expect"] is True
+        }
+        assert carried and sorted((src, dst) for _, src, dst in legs) == sorted(carried)
+        assert all(first == (2 if src == 1 else 1) and dst <= slides for first, src, dst in legs)
 
     def test_a_chain_adds_goto_mid_chain_then_advance_across_the_next_carry(self) -> None:
         pin = _MOVIE(BIG_ASSET, "pin", _RECT(**BIG_INSTANCE), _RECT(**BIG_INSTANCE))
@@ -7300,7 +8112,7 @@ class TestGotoMatrixFromThePlan:
             (_BOUNDARY(0, 1, (pin,)), _BOUNDARY(1, 2, (bridge,), 1.5)), {0: 0, 1: 2, 2: 4},
             {0: {BIG_ASSET: [BIG_INSTANCE]}, 1: {BIG_ASSET: [BIG_INSTANCE]}, 2: {BIG_ASSET: [OTHER_INSTANCE]}},
         )
-        assert probe.goto_matrix(probe.verdict_specs(plan), 3) == ((1, 2), (1, 3), (3, 1), (1, 2, 3))
+        assert probe.goto_matrix(probe.verdict_specs(plan), 3) == ((1, 2), (1, 3), (3, 1), (2, 1, 2), (1, 2, 3))
 
     def test_overall_status_g_counts_against_the_recorded_matrix(self) -> None:
         matrix = [[1, 2], [1, 2, 3]]
@@ -7332,7 +8144,7 @@ class TestDriveEverySlide:
 
 
 class TestRedArmInjection:
-    PLAN = {"movies": RUNTIME_MOVIES, "boundaries": [RETIRE_BOUNDARY, RESTART_BOUNDARY, BRIDGE_BOUNDARY]}
+    PLAN = {"schema": 2, "movies": RUNTIME_MOVIES, "boundaries": [RETIRE_BOUNDARY, RESTART_BOUNDARY, BRIDGE_BOUNDARY]}
 
     def _injected(self) -> dict[str, Any]:
         script = probe.live_host_module._continuity_scripts(self.PLAN, {"width": 1920, "height": 1080})
@@ -7356,6 +8168,13 @@ class TestRedArmInjection:
             with pytest.raises(ValueError):
                 self._injected()
 
+    def test_a_keyed_strip_removes_only_the_entry_naming_the_key(self) -> None:
+        with probe.stripped_runtime("restart", 6, BIG_OBJECT_IDS[2]):
+            assert [b["atScene"] for b in self._injected()["boundaries"]] == [2, 8]
+        with probe.stripped_runtime("restart", 6, "movie9"):
+            with pytest.raises(ValueError):
+                self._injected()
+
     def test_strip_never_touches_the_derivation(self) -> None:
         with probe.stripped_runtime("retire", 2):
             assert _p2_plan().to_runtime()["boundaries"][0]["action"] == "retire"
@@ -7366,14 +8185,16 @@ class TestRedArmInjection:
         with probe.injected_core_variant(name) as sha:
             core = probe.live_host_module._continuity_core_script()
             assert sha == probe.variant_sha(name) == probe.live_host_module.js_sha256()
-            assert (core == core_before) is (name == "fifo-reuse")
+            assert core != core_before
         assert probe.live_host_module._continuity_core_script() == core_before
         assert probe.live_host_module.js_sha256() == probe.js_sha256()
 
 
 class TestRedArmArgs:
-    @pytest.mark.parametrize(("value", "expected"), [("bridge@8", ("bridge", 8)), ("retire", ("retire", None))])
-    def test_strip_parses(self, value: str, expected: tuple[str, int | None]) -> None:
+    @pytest.mark.parametrize(("value", "expected"), [
+        ("bridge@8", ("bridge", 8, None)), ("retire", ("retire", None, None)), ("pin@4:movie2", ("pin", 4, "movie2")),
+    ])
+    def test_strip_parses(self, value: str, expected: tuple[str, int | None, str | None]) -> None:
         assert probe.parse_args(["--strip", value]).strip == expected
 
     def test_core_variant_parses_and_rejects_unknown_names(self) -> None:
@@ -7392,40 +8213,211 @@ class TestRedArmArgs:
             probe.parse_args(["--strip", "bridge@8", *extra])
 
 
-class TestRedArmRegistration:
-    def test_every_registered_id_is_a_p2_verdict_or_a_stray_on_a_p2_slide(self) -> None:
-        ids = {spec["id"] for gl in (False, True) for spec in probe.verdict_specs(_p2_plan(gl))}
-        assets = {asset.lower() for per in _p2_plan().slide_instances.values() for asset in per}
-        for (sha, label, gl), expected in probe.RED_ARM_EXPECTATIONS.items():
-            assert sha == probe.P2_OFF_PLAN_SHA256 and gl in ("off", "auto")
-            for red_id in () if expected == probe.RECORD else expected:
-                if red_id.startswith("stray:"):
-                    _, slide, asset = red_id.split(":")
-                    assert asset in assets and 1 <= int(slide.removeprefix("slide")) <= 4
-                else:
-                    assert red_id in ids, red_id
+QUAL_ROOT = REPO / "tests" / "fixtures" / "live_continuity" / "qual_decks"
 
-    def test_the_pre_registered_sets_are_the_plans(self) -> None:
-        """Plan §3 G-S1c/G-S1d: stash-any reds only the slide-4 WA0125 stray; each strip only its boundary."""
-        expected = {label: value for (_, label, _), value in probe.RED_ARM_EXPECTATIONS.items()}
-        assert expected["core:stash-any"] == ("stray:slide4:vid-20250608-wa0125.mp4",)
-        assert expected["strip:bridge@8"] == (P2_CARRY34,)
-        assert expected["strip:retire@2"] == (P2_CARRY12, P2_RETIRE12, "stray:slide2:untitled.mov")
-        assert expected["strip:glReplay@2"] == (P2_ARMED12, "stray:slide2:untitled.mov")
-        assert expected["strip:restart@6"] == (P2_CARRY34,)  # post-hoc from discovery r2 (8ac39a42)
+
+def _deck_plan(name: str) -> Any:
+    root = P2_ROOT if name == "P2" else QUAL_ROOT / name
+    return probe.derive_plan(root, probe.load_slides(root), resolver=lambda r, rel: r / rel)
+
+
+REGISTERED_DECKS = ("P2", "D1", "D2", "D3", "D4", "D5", "D6")
+# Registered post hoc from discovery g1h-089a0393 (2026-09-25): observed, not derived.
+POST_HOC_G1H = {
+    ("P2", "core:stash-any"), ("D2", "strip:restart@4"), ("D2", "strip:pin@6"), ("D3", "strip:pin@4"),
+    ("D4", "core:wrong-instance"), ("D4", "core:fifo-reuse"), ("D5", "core:stash-any"), ("D5", "strip:pin@2"),
+}
+# V3 / V4 (owner 2026-10-12), measured at 277c720b: main checkout
+# `output/evidence/s2-dev/instr-v-277c720b/stage1/V3/{D2,D3,D5}-red-npH.json` and `V4/<deck>--<arm>.json`. The three V4
+# arms re-register g1h ones: the paint instrument also reds their carry. A `no-pin-hold` arm is floored at 60 frames.
+_A1 = "counter-a.mov#1->counter-a.mov#1"
+MEASURED_277C720B = {
+    ("D2", "core:no-pin-hold"): (f"b2to3:{_A1}:carry",),
+    ("D3", "core:no-pin-hold"): (f"b0to1:{_A1}:carry",),
+    ("D5", "core:no-pin-hold"): (f"b0to1:{_A1}:carry", f"b1to2:{_A1}:carry"),
+    ("D1", "strip:pin@6"): (f"b2to3:{_A1}:carry", "duplicate:slide4:counter-a.mov#1"),
+    ("D4", "strip:pin@5"): (f"b1to2:{_A1}:carry", "duplicate:slide3:counter-a.mov#1"),
+    ("D5", "core:fifo-reuse"): (f"b1to2:{_A1}:carry", "duplicate:slide3:counter-a.mov#1"),
+}
+# Plan §4 strip locality (owner, 2026-10-09, option (a)): a strip arm is red on its own boundary, plus the documented
+# cascade of that chain. Every registered red outside the stripped boundary's own `b{from}to{to}:` verdicts, per arm and
+# in registration order. Observed sets: main checkout `output/evidence/s2-dev/g1h-089a0393/host-red<deck><arm>.json`.
+STRIP_CASCADE = {
+    # Derived (WS-R, v6): the bridge overlay no entry names is held at its rect on every later slide.
+    ("D1", "strip:bridge@4"): ("stray:slide3:counter-a.mov", "stray:slide4:counter-a.mov"),
+    # Re-registered (V4): two painters claim counter-a.mov#1 on slide 4, the stripped pin's own destination.
+    ("D1", "strip:pin@6"): ("duplicate:slide4:counter-a.mov#1",),
+    # Post hoc (g1h): the chain downstream of the stripped restart. Both later carries of the same movie go red, two
+    # painters claim counter-a.mov#1 on slides 3 and 4, and an unclaimed counter-a.mov paints on slide 5.
+    ("D2", "strip:restart@4"): (
+        "b2to3:counter-a.mov#1->counter-a.mov#1:carry", "b3to4:counter-a.mov#1->counter-a.mov#1:carry",
+        "duplicate:slide3:counter-a.mov#1", "duplicate:slide4:counter-a.mov#1", "stray:slide5:counter-a.mov",
+    ),
+    # Post hoc (g1h): the chain downstream of the stripped pin. B's next carry goes red too, two painters claim
+    # counter-b.mov#1 on slide 3, and an unclaimed counter-b.mov paints on slide 4.
+    ("D3", "strip:pin@4"): (
+        "b2to3:counter-b.mov#1->counter-b.mov#1:carry", "duplicate:slide3:counter-b.mov#1", "stray:slide4:counter-b.mov",
+    ),
+    # Re-registered (V4): two painters claim counter-a.mov#1 on slide 3, the stripped pin's own destination.
+    ("D4", "strip:pin@5"): ("duplicate:slide3:counter-a.mov#1",),
+}
+
+
+class TestRedArmRegistration:
+    def test_the_deck_shas_are_the_committed_exports_plans(self) -> None:
+        shas = {name: probe.plan_signature(_deck_plan(name).to_runtime()) for name in REGISTERED_DECKS}
+        assert shas["P2"] == probe.P2_OFF_PLAN_SHA256
+        assert {name: sha for name, sha in shas.items() if name != "P2"} == probe.DECK_PLAN_SHA256
+
+    def test_every_registered_id_is_a_verdict_or_a_stray_on_its_decks_slide(self) -> None:
+        plans = {probe.plan_signature(_deck_plan(name).to_runtime()): name for name in REGISTERED_DECKS}
+        for key in [*probe.RED_ARM_EXPECTATIONS, *probe.RED_ARM_REQUIRED]:
+            sha, label, gl = key
+            deck = plans[sha]
+            plan = _deck_plan(deck)
+            ids = {spec["id"] for spec in probe.verdict_specs(plan)}
+            if gl == "auto":
+                ids |= {spec["id"] for spec in probe.verdict_specs(_p2_plan(True))}
+            assets = {asset.lower() for per in plan.slide_instances.values() for asset in per}
+            expected = probe.RED_ARM_EXPECTATIONS.get(key)
+            registered = [*(() if expected in (None, probe.RECORD) else expected), *probe.RED_ARM_REQUIRED.get(key, ())]
+            assert gl in ("off", "auto") and (gl == "off" or deck == "P2"), key
+            labels = {f"{asset}#{i}" for per in plan.slide_instances.values() for asset, rects in per.items() for i in range(1, len(rects) + 1)}
+            for red_id in registered:
+                if red_id.startswith(("stray:", "duplicate:")):
+                    kind, slide, what = red_id.split(":")
+                    assert (what in assets if kind == "stray" else what in labels), key
+                    assert 1 <= int(slide.removeprefix("slide")) <= len(plan.scene_index_by_player), key
+                else:
+                    assert red_id in ids, (key, red_id)
+            if label.startswith("strip:"):
+                action, scene, strip_key = probe.parse_strip(label.removeprefix("strip:"))
+                runtime = probe.runtime_of(plan) if gl == "off" else _p2_plan(True).to_runtime()
+                probe.strip_entries(runtime, action, scene, strip_key)
+
+    @staticmethod
+    def _reds_beyond_own_boundary(expectations: dict[Any, Any]) -> dict[tuple[str, str], tuple[str, ...]]:
+        """Per strip arm with any, the registered reds that are not its stripped boundary's own verdicts."""
+        plans = {probe.plan_signature(_deck_plan(name).to_runtime()): (name, _deck_plan(name)) for name in REGISTERED_DECKS}
+        beyond = {}
+        for (sha, label, _), expected in expectations.items():
+            if not label.startswith("strip:") or expected == probe.RECORD:
+                continue
+            name, plan = plans[sha]
+            scene = probe.parse_strip(label.removeprefix("strip:"))[1]
+            player = next(p for p, s in plan.scene_index_by_player.items() if s == scene)
+            outside = tuple(red_id for red_id in expected if not red_id.startswith(f"b{player - 1}to{player}:"))
+            if outside:
+                beyond[(name, label)] = outside
+        return beyond
+
+    def test_every_red_is_on_the_stripped_boundary_or_in_its_documented_cascade(self) -> None:
+        """Plan §4 (owner option (a), 2026-10-09): a strip arm is red on its own boundary, plus the
+        documented cascade of that chain (`STRIP_CASCADE`, exact per arm). The post-hoc chain arms are
+        checked like every other strip arm, not skipped."""
+        assert self._reds_beyond_own_boundary(probe.RED_ARM_EXPECTATIONS) == STRIP_CASCADE
+
+    @pytest.mark.parametrize("extra", [
+        "b0to1:counter-a.mov#1->counter-a.mov#1:carry", "duplicate:slide2:counter-a.mov#1", "stray:slide2:counter-a.mov",
+    ])
+    def test_known_bad_an_undocumented_red_beyond_the_boundary_fails(self, extra: str) -> None:
+        """D2 `strip:bridge@8` reds only b3to4; any other boundary, duplicate or stray must be documented."""
+        key = (probe.DECK_PLAN_SHA256["D2"], "strip:bridge@8", "off")
+        assert self._reds_beyond_own_boundary(probe.RED_ARM_EXPECTATIONS).get(("D2", "strip:bridge@8")) is None
+        widened = {**probe.RED_ARM_EXPECTATIONS, key: (*probe.RED_ARM_EXPECTATIONS[key], extra)}
+        assert self._reds_beyond_own_boundary(widened) != STRIP_CASCADE
+
+    def test_known_bad_a_documented_cascade_that_no_longer_reds_fails(self) -> None:
+        key = (probe.DECK_PLAN_SHA256["D3"], "strip:pin@4", "off")
+        narrowed = {**probe.RED_ARM_EXPECTATIONS, key: probe.RED_ARM_EXPECTATIONS[key][:1]}
+        assert self._reds_beyond_own_boundary(narrowed) != STRIP_CASCADE
+
+    def test_the_p2_sets_are_the_plans(self) -> None:
+        """Plan §3.4 Q2/Q3: stash-any must red the slide-4 WA0125 stray; each strip only its boundary."""
+        p2 = {label: value for (sha, label, _), value in probe.RED_ARM_EXPECTATIONS.items() if sha == probe.P2_OFF_PLAN_SHA256}
+        assert probe.RED_ARM_REQUIRED[(probe.P2_OFF_PLAN_SHA256, "core:stash-any", "off")] == (
+            "stray:slide4:vid-20250608-wa0125.mp4",
+        )
+        assert p2["strip:bridge@8"] == (P2_CARRY34,)
+        assert p2["strip:retire@2"] == (P2_RETIRE12,)
+        assert p2["strip:glReplay@2"] == (P2_ARMED12,)
+        assert p2["strip:restart@6"] == ()
+
+    def test_d4_wrong_instance_must_red_the_far_copys_carry(self) -> None:
+        """Plan §4 identity red: the carried clock is A-near's, not A-far's."""
+        key = (probe.DECK_PLAN_SHA256["D4"], "core:wrong-instance", "off")
+        (carry,) = probe.RED_ARM_REQUIRED[key]
+        spec = next(s for s in probe.verdict_specs(_deck_plan("D4")) if s["id"] == carry)
+        assert spec["kind"] == "carry" and spec["action"] == "bridge" and spec["srcInstance"] == "counter-a.mov#2"
+
+    def test_every_registered_set_contains_its_required_reds(self) -> None:
+        for key, required in probe.RED_ARM_REQUIRED.items():
+            expected = probe.RED_ARM_EXPECTATIONS[key]
+            assert expected != probe.RECORD and set(required) <= set(expected), key
+
+    def test_the_post_hoc_sets_are_g1hs_observed_sets(self) -> None:
+        """Discovery g1h-089a0393: every RECORD arm registered with exactly its observed multiset."""
+        shas = {name: probe.plan_signature(_deck_plan(name).to_runtime()) for name in REGISTERED_DECKS}
+        registered = {(name, label) for name, label in POST_HOC_G1H if (shas[name], label, "off") in probe.RED_ARM_EXPECTATIONS}
+        assert registered == POST_HOC_G1H
+        assert not [key for key, value in probe.RED_ARM_EXPECTATIONS.items() if value == probe.RECORD]
+        assert probe.RED_ARM_EXPECTATIONS[(shas["D4"], "core:wrong-instance", "off")] == (
+            "b0to1:counter-a.mov#2->counter-a.mov#1:carry", "b1to2:counter-a.mov#1->counter-a.mov#1:carry",
+            "duplicate:slide2:counter-a.mov#1", "duplicate:slide3:counter-a.mov#1",
+        )
+
+    @pytest.mark.parametrize(("deck", "label"), sorted(MEASURED_277C720B))
+    def test_the_v3_v4_sets_are_the_measured_sets(self, deck: str, label: str) -> None:
+        key = (probe.DECK_PLAN_SHA256[deck], label, "off")
+        assert probe.RED_ARM_EXPECTATIONS[key] == MEASURED_277C720B[(deck, label)]
+        assert probe.RED_ARM_PAINT_FLOOR.get(key) == (60 if label in probe.PAINT_RED_ARMS else None)
+
+    def test_the_pass_g_red_set_is_v3s_measured_set(self) -> None:
+        """V3 (D1-passG-red-npH.json): the (1,3,4) leg's carry and its unpainted destination, floored at 60."""
+        key = (probe.DECK_PLAN_SHA256["D1"], "core:no-pin-hold")
+        assert probe.PASSG_RED_EXPECTATIONS == {key: (f"G1-3-4:b2to3:{_A1}:carry", "G1-3-4:destination")}
+        assert probe.PASSG_RED_PAINT_FLOOR == {key: 60}
+        assert f"b2to3:{_A1}:carry" in {spec["id"] for spec in probe.verdict_specs(_deck_plan("D1"))}
+
+    def test_every_action_type_has_a_pre_registered_strip_arm(self) -> None:
+        """Plan §3.4 Q3: one --strip arm per action type (pin, bridge, restart, retire, glReplay)."""
+        registered = {
+            probe.parse_strip(label.removeprefix("strip:"))[0]
+            for (_, label, _), value in probe.RED_ARM_EXPECTATIONS.items()
+            if label.startswith("strip:") and value != probe.RECORD
+        }
+        assert registered == {"pin", "bridge", "restart", "retire", "glReplay"}
+
+    def test_run_gates_runs_every_registered_deck_arm(self) -> None:
+        """`scripts/run_gates.sh`'s DECK_ARMS is exactly the registry's S0-deck keys."""
+        text = (REPO / "scripts" / "run_gates.sh").read_text()
+        block = text.split("DECK_ARMS=(", 1)[1].split("\n)", 1)[0]
+        listed = set()
+        for item in re.findall(r'"(D\d) ([^"]+)"', block):
+            deck, args = item
+            parts = args.split()
+            label = f"core:{parts[1]}" if parts[0] == "--core-variant" else probe.strip_label(*probe.parse_strip(parts[1]))
+            listed.add((probe.DECK_PLAN_SHA256[deck], label, "off"))
+        registered = {key for key in probe.RED_ARM_EXPECTATIONS if key[0] in probe.DECK_PLAN_SHA256.values()}
+        assert listed == registered
 
     @pytest.mark.parametrize(("core", "strip", "label"), [
-        ("stash-any", None, "core:stash-any"), (None, ("bridge", 8), "strip:bridge@8"),
-        (None, ("bridge", None), "strip:bridge@8"), (None, ("restart", None), "strip:restart"),
+        ("stash-any", None, "core:stash-any"), (None, ("bridge", 8, None), "strip:bridge@8"),
+        (None, ("bridge", None, None), "strip:bridge@8"), (None, ("restart", None, None), "strip:restart"),
+        (None, ("pin", 4, "movie2"), "strip:pin@4:movie2"),
     ])
     def test_labels(self, core: Any, strip: Any, label: str) -> None:
         runtime = {"boundaries": [RETIRE_BOUNDARY, RESTART_BOUNDARY, BRIDGE_BOUNDARY, dict(RESTART_BOUNDARY, atScene=10)]}
         assert probe.red_arm_label(core, strip, runtime) == label
 
 
+STRAY4 = "stray:slide4:vid-20250608-wa0125.mp4"
+
+
 def _red_result(red: list[str], expected: Any = (P2_CARRY34,), **arm: Any) -> dict[str, Any]:
     sha = probe.js_sha256()
-    entry = {"continuity": {"mode": "qualified", "sha256": sha}, "stageFit": {"verdict": True}, "unplannedWraps": [], **arm}
+    entry = {"continuity": {"mode": "qualified", "sha256": sha}, "stageFit": {"verdict": True}, "unplannedWraps": [],
+             "sampler": _sampler_ok(), **arm}
     return {
         "redArm": "strip:bridge@8", "expectedCoreSha256": sha, "arm": entry, "redSet": sorted(red),
         "unknown": [], "expectedRedSet": list(expected) if isinstance(expected, tuple) else expected,
@@ -7436,27 +8428,30 @@ class TestRedArmStatus:
     def test_exactly_the_pre_registered_set_passes(self) -> None:
         assert probe.red_arm_status(_red_result([P2_CARRY34])) == ("pass", [])
 
-    def test_known_bad_an_extra_red_fails(self) -> None:
-        status, reasons = probe.red_arm_status(_red_result([P2_CARRY34, "stray:slide4:x.mov"]))
-        assert status == "fail" and reasons == ["unexpectedly red: stray:slide4:x.mov"]
-
-    def test_known_bad_a_red_that_stayed_green_fails(self) -> None:
-        status, reasons = probe.red_arm_status(_red_result([]))
-        assert status == "fail" and reasons == [f"expected red but green: {P2_CARRY34}"]
-
-    def test_known_bad_a_second_occurrence_of_an_expected_stray_fails(self) -> None:
-        """Codex r1 #10: exact multisets, never `set()`."""
-        stray = "stray:slide4:vid-20250608-wa0125.mp4"
-        status, reasons = probe.red_arm_status(_red_result([stray, stray], expected=(stray,)))
-        assert status == "fail" and reasons == [f"unexpectedly red: {stray}"]
+    @pytest.mark.parametrize(("red", "expected", "reason"), [
+        pytest.param([P2_CARRY34, "stray:slide4:x.mov"], (P2_CARRY34,), "unexpectedly red: stray:slide4:x.mov",
+                     id="known-bad-an-extra-red"),
+        pytest.param([], (P2_CARRY34,), f"expected red but green: {P2_CARRY34}", id="known-bad-a-red-that-stayed-green"),
+        # Codex r1 #10: exact multisets, never `set()`.
+        pytest.param([STRAY4, STRAY4], (STRAY4,), f"unexpectedly red: {STRAY4}",
+                     id="known-bad-a-second-occurrence-of-an-expected-stray-codex-r1-10"),
+    ])
+    def test_a_red_set_off_its_registration_fails(self, red: list[str], expected: tuple[str, ...], reason: str) -> None:
+        assert probe.red_arm_status(_red_result(red, expected=expected)) == ("fail", [reason])
 
     def test_record_and_unregistered_never_pass(self) -> None:
         assert probe.red_arm_status(_red_result([], expected=probe.RECORD))[0] == "recorded"
         assert probe.red_arm_status(_red_result([], expected=None))[0] == "unregistered"
 
+    def test_a_record_arm_missing_a_required_red_fails(self) -> None:
+        result = _red_result([P2_CARRY34], expected=probe.RECORD)
+        result["requiredRed"] = [STRAY4]
+        assert probe.red_arm_status(result) == ("fail", [f"required red but green: {STRAY4}"])
+        result["redSet"] = sorted([P2_CARRY34, STRAY4])
+        assert probe.red_arm_status(result)[0] == "recorded"
+
     def test_a_variant_arm_must_report_the_variants_sha(self) -> None:
-        stray = "stray:slide4:vid-20250608-wa0125.mp4"
-        result = _red_result([stray], expected=(stray,))
+        result = _red_result([STRAY4], expected=(STRAY4,))
         result["expectedCoreSha256"] = probe.variant_sha("stash-any")
         status, reasons = probe.red_arm_status(result)
         assert status == "error" and "expected" in reasons[0]
@@ -7478,6 +8473,34 @@ class TestRedArmStatus:
         result["unknown"] = [P2_CARRY34]
         assert probe.red_arm_status(result)[0] == "inconclusive"
 
+    @pytest.mark.parametrize(("floor", "run", "status"), [
+        pytest.param(60, 60, "pass", id="run-at-the-floor"),
+        pytest.param(60, 59, "fail", id="known-bad-run-below-the-floor"),
+        pytest.param(60, None, "fail", id="known-bad-red-carry-without-a-paint-score"),
+        pytest.param(59, 108, "fail", id="known-bad-floor-under-the-owner-minimum"),
+        # Astra r2 D: a paint-red variant's registered ids never count without a registered floor.
+        pytest.param(None, 108, "fail", id="known-bad-paint-red-arm-without-a-floor"),
+    ])
+    @pytest.mark.parametrize(("build", "status_of", "verdict_of"), [
+        pytest.param(lambda: dict(_red_result([P2_CARRY34]), redArm="core:no-pin-hold"), probe.red_arm_status,
+                     lambda r: r["arm"].setdefault(P2_CARRY34, {"verdict": False}), id="host-red-arm"),
+        pytest.param(lambda: _passg_red_result(), probe.passg_red_status,
+                     lambda r: r["armed"]["destinations"][-1]["advanceCarry"]["verdicts"][P2_CARRY34], id="pass-g-red-arm"),
+    ])
+    def test_a_registered_paint_floor_holds_every_red_carry(
+        self, build: Any, status_of: Any, verdict_of: Any, floor: int | None, run: int | None, status: str,
+    ) -> None:
+        """Astra r1 #5 / decision 3: matching red ids with a one-frame failure never pass a floored arm. Every
+        registered paint-red arm, and no other, carries a floor."""
+        result = build()
+        verdict_of(result)["paint"] = {"status": "fail", "longestRun": run} if run is not None else None
+        result.pop("paintFloor", None)
+        if floor is not None:
+            result["paintFloor"] = floor
+        assert status_of(result)[0] == status
+        assert set(probe.RED_ARM_PAINT_FLOOR) == {k for k in probe.RED_ARM_EXPECTATIONS if k[1] in probe.PAINT_RED_ARMS}
+        assert set(probe.PASSG_RED_PAINT_FLOOR) == {k for k in probe.PASSG_RED_EXPECTATIONS if k[1] in probe.PAINT_RED_ARMS}
+
 
 class TestStrayCensus:
     PLAN_INSTANCES = {0: {BIG_ASSET: [BIG_INSTANCE]}, 1: {BIG_ASSET: [BIG_INSTANCE], OTHER_ASSET: [OTHER_INSTANCE]}}
@@ -7495,23 +8518,26 @@ class TestStrayCensus:
         assert red == ["stray:slide1:wa0125.mov"] and unknown == []
         assert len(records["1"]["unexpectedVideos"]) == 1 and records["2"]["verdict"] is True
 
-    def test_every_occurrence_is_counted(self) -> None:
-        raw = dict(self._clean(), **{"1": [self._read((BIG_INSTANCE, "untitled.mov"), (OTHER_INSTANCE, "wa0125.mov"), (OTHER_INSTANCE, "wa0125.mov"))]})
-        assert probe.score_census(raw, self.PLAN_INSTANCES, {}, self.PLAYERS)[1] == ["stray:slide1:wa0125.mov"] * 2
+    @pytest.mark.parametrize(("slide1", "expectations", "red"), [
+        pytest.param([(BIG_INSTANCE, "untitled.mov"), (OTHER_INSTANCE, "wa0125.mov"), (OTHER_INSTANCE, "wa0125.mov")], {},
+                     ["stray:slide1:wa0125.mov"] * 2, id="every-occurrence-is-counted"),
+        pytest.param([(BIG_INSTANCE, "untitled.mov")], {1: {BIG_ASSET: "dead"}}, ["stray:slide2:untitled.mov"],
+                     id="dead-expected-rect-painted-is-a-stray"),
+        pytest.param([(BIG_INSTANCE, "untitled.mov"), (BIG_INSTANCE, "untitled.mov")], {}, [f"duplicate:slide1:{BIG_ASSET}#1"],
+                     id="two-videos-on-one-instance-are-a-duplicate"),
+        pytest.param([(BIG_INSTANCE, "untitled.mov"), (OTHER_INSTANCE, "zzz.mp4")], {}, ["stray:slide1:unknown"],
+                     id="unknown-source-is-named-unknown"),
+        pytest.param([(BIG_INSTANCE, "foreign.mov")], {}, [f"foreign:slide1:{BIG_ASSET}#1"],
+                     id="another-asset-claiming-an-instance-is-foreign"),  # Astra r15 #1
+    ])
+    def test_the_red_census(self, slide1: list[tuple[dict[str, float], str]], expectations: dict[int, Any], red: list[str]) -> None:
+        raw = dict(self._clean(), **{"1": [self._read(*slide1)]})
+        assert probe.score_census(raw, self.PLAN_INSTANCES, expectations, self.PLAYERS)[1] == red
 
-    def test_a_dead_expected_rect_painted_is_a_stray(self) -> None:
-        _, red, _ = probe.score_census(self._clean(), self.PLAN_INSTANCES, {1: {BIG_ASSET: "dead"}}, self.PLAYERS)
-        assert red == ["stray:slide2:untitled.mov"]
-
-    def test_two_videos_on_one_instance_are_a_duplicate(self) -> None:
-        raw = dict(self._clean(), **{"1": [self._read((BIG_INSTANCE, "untitled.mov"), (BIG_INSTANCE, "untitled.mov"))]})
-        assert probe.score_census(raw, self.PLAN_INSTANCES, {}, self.PLAYERS)[1] == [f"duplicate:slide1:{BIG_ASSET}#1"]
-
-    def test_an_unknown_source_is_named_unknown(self) -> None:
-        raw = dict(self._clean(), **{"1": [self._read((BIG_INSTANCE, "untitled.mov"), (OTHER_INSTANCE, "zzz.mp4"))]})
-        assert probe.score_census(raw, self.PLAN_INSTANCES, {}, self.PLAYERS)[1] == ["stray:slide1:unknown"]
-
-    @pytest.mark.parametrize("read", [None, {"stageMap": None, "painting": []}, {"stageMap": dict(IDENTITY_STAGE_MAP), "painting": {"error": "x"}}])
+    @pytest.mark.parametrize("read", [
+        None, {"stageMap": None, "painting": []}, {"stageMap": dict(IDENTITY_STAGE_MAP), "painting": {"error": "x"}},
+        {"stageMap": dict(IDENTITY_STAGE_MAP), "painting": [painting_video(BIG_INSTANCE, src="")]},  # Astra r15 #1
+    ])
     def test_an_unreadable_or_missing_slide_is_unknown_never_clean(self, read: Any) -> None:
         raw = self._clean()
         if read is None:
@@ -7556,7 +8582,7 @@ def _generated_result() -> dict[str, Any]:
     ]
     pin, bridge = specs[0]["id"], specs[1]["id"]
     green = {"verdict": True}
-    arm = {"continuity": {"mode": "qualified"}, "stageFit": {"verdict": True}, pin: green, bridge: green}
+    arm = {"continuity": {"mode": "qualified"}, "stageFit": {"verdict": True}, "sampler": _sampler_ok(), pin: green, bridge: green}
     off = dict(arm, continuity={"mode": "off"}, **{bridge: {"verdict": False}})
     stripped = dict(arm, **{bridge: {"verdict": False}})
     visible = {name: {"verdict": True} for name in ("V", "Voff")}
@@ -7631,10 +8657,10 @@ class TestGeneratedStatus:
 
     @pytest.mark.parametrize("sha", sorted(probe.P2_PLAN_SHA256))
     def test_only_a_pinned_p2_plan_keeps_the_legacy_status(self, sha: str) -> None:
-        result = TestOverallStatusTruthTable()._base_result()
+        result = _base_result()
         result["groundTruth"]["verdicts"] = []
         result["groundTruth"]["planSha256"] = sha
-        assert probe.overall_status(result) == probe.overall_status(TestOverallStatusTruthTable()._base_result())
+        assert probe.overall_status(result) == probe.overall_status(_base_result())
         result["groundTruth"]["planSha256"] = "0" * 64
         assert probe.overall_status(result)[0] == "error"
 
@@ -7665,7 +8691,7 @@ class TestCoordinatorR2:
         assert scored["verdict"] is None and "footprint owner" in scored["integrity"]
         for row in samples:
             if row["scene"] == 8:
-                row["videos"][0]["footprintOwner"] = {"elId": 9, "key": "movie1", "via": "footprint-video"}
+                row["videos"][0]["footprintOwner"] = {"elId": 9, "key": "movie1", "via": "footprint-video", "contextType": None}
         assert probe.score_verdicts(samples, {}, _p2_facts(), True, {"mode": "qualified"})[P2_CARRY34]["verdict"] is False
 
     def _two_instance_plan(self) -> Any:
@@ -7801,8 +8827,10 @@ class TestOpusR3:
         assert scored["verdict"] is True and scored["sourceIds"] == [1]
         assert probe.score_restart(samples, "untitled.mov", 6)["verdict"] is True
 
-    def test_every_arm_holds_the_source_slide_of_a_carry_before_its_press(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Stash-any r1: the 3->4 settled source must always be sampled; P2's clickDelayS (1.5 s)."""
+    def test_every_arm_holds_the_source_and_destination_of_a_carry_before_its_press(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Stash-any r1: the 3->4 settled source must always be sampled; P2's clickDelayS (1.5 s).
+        S2 i1 (D2): a carry destination is held too before the press out of it, so its settled
+        destination phase is sampled before the next boundary."""
         calls: list[Any] = []
         monkeypatch.setattr(probe, "wait_for_decode", lambda player: True)
         monkeypatch.setattr(probe, "wait_until_settled", lambda player: calls.append("settle"))
@@ -7812,9 +8840,11 @@ class TestOpusR3:
         player.transport.evaluate = lambda expression: []
         probe.drive_and_sample(player, carry_into=probe.carry_destination_players(_p2_facts()))
         assert probe.carry_destination_players(_p2_facts()) == {1, 3}
-        index = calls.index(("advance", 4))
-        assert calls[index - 2:index] == ["settle", ("sleep", probe.CLICK_DELAY_S)] and probe.CLICK_DELAY_S == 1.5
-        assert calls.count("settle") == 1
+        for target in (3, 4):
+            index = calls.index(("advance", target))
+            assert calls[index - 2:index] == ["settle", ("sleep", probe.CLICK_DELAY_S)] and probe.CLICK_DELAY_S == 1.5
+        assert calls.count("settle") == 2
+        assert calls[:2] == [("sleep", probe.FIRST_CLICK_DWELL_S), ("advance", 2)] and probe.FIRST_CLICK_DWELL_S == 3.0
 
 
 # --------------------------------------------------------------------------
@@ -7873,7 +8903,7 @@ class TestSkipArmsParsing:
 
 class TestSkipArmsStatus:
     def _base(self) -> dict[str, Any]:
-        return TestOverallStatusTruthTable()._base_result()
+        return _base_result()
 
     @pytest.mark.parametrize("names", GATE_SKIPS)
     def test_the_run_gates_shapes_pass_when_every_arm_that_ran_passes(self, names: tuple[str, ...]) -> None:
@@ -8017,6 +9047,163 @@ class TestSkipArmsRun:
 
 
 # --------------------------------------------------------------------------
+# S2 dev loop i1 (`output/evidence/s2-dev/i1-8207b263`, S2 head 8207b263, core v6): the
+# instrument defects the first deck run found, each pinned on the run's own samples
+# (`tests/fixtures/live_continuity_probe_devloop`, arm A excerpts), plus the red it must keep.
+# --------------------------------------------------------------------------
+
+I1 = json.loads(gzip.decompress((REPO / "tests" / "fixtures" / "live_continuity_probe_devloop" / "i1_arm_a_excerpts.json.gz").read_bytes()))
+
+
+def _deck_facts(name: str) -> dict[str, Any]:
+    root = QUAL_ROOT / name
+    slides = probe.load_slides(root)
+    plan = _deck_plan(name)
+    facts = probe.ground_truth_facts(plan, arrival=probe.arrival_starts(root, slides, plan))
+    probe.bind_dom_ids(facts, probe.movie_nodes(root, slides))
+    return facts
+
+
+class TestChainCarryWindow:
+    D2_CARRY12 = "b0to1:counter-a.mov#1->counter-a.mov#1:carry"
+
+    def test_a_carry_window_ends_before_its_destinations_outgoing_transition(self) -> None:
+        """D2: the 1->2 bridge's padded window used to run past slide 2's Dissolve into slide 3,
+        where the restart rightly retires the carried decoder -- a false red on a clean carry."""
+        spec = _spec(_deck_facts("D2"), self.D2_CARRY12)
+        assert (spec["sourceScene"], spec["untilScene"]) == (0, 4)
+        scored = probe.score_carry(I1["D2_A_samples"], spec, True)
+        assert scored["verdict"] is True, scored.get("reason")
+        assert scored["window"]["end"] < min(r["t"] for r in I1["D2_A_samples"] if r["scene"] == 3)
+        assert "end" in scored["window"]["chainClipped"]
+
+    def test_known_bad_without_the_clip_the_next_boundary_leaks_in(self) -> None:
+        spec = {k: v for k, v in _spec(_deck_facts("D2"), self.D2_CARRY12).items() if k not in ("sourceScene", "untilScene")}
+        scored = probe.score_carry(I1["D2_A_samples"], spec, True)
+        assert scored["verdict"] is False and scored["missingSamples"]
+
+    def test_the_v6_early_move_on_a_settled_slide_stays_red(self) -> None:
+        """D1 (runtime finding, not clipped away): the carried decoder starts toward slide 3's
+        rect while slide 2 is settled (scene 2, busy False), before any press."""
+        spec = _spec(_deck_facts("D1"), "b0to1:counter-a.mov#1->counter-a.mov#1:carry")
+        scored = probe.score_carry(I1["D1_A_samples"], spec, True)
+        assert scored["verdict"] is False
+        after = [m for m in scored["rectMismatches"] if m["phase"] == "after"]
+        assert after and all(
+            next(r for r in I1["D1_A_samples"] if r["t"] == m["t"])["scene"] == 2 for m in after
+        )
+
+    def test_a_spec_without_chain_fields_is_not_clipped(self) -> None:
+        assert probe.carry_window_clip(I1["D2_A_samples"], {"atScene": 2}) == (None, None)
+
+    def test_a_single_scene_destination_is_not_clipped_at_its_own_arrival(self) -> None:
+        rows = [{"t": 1.0, "scene": 2}, {"t": 2.0, "scene": 3}]
+        assert probe.carry_window_clip(rows, {"atScene": 2, "untilScene": 3, "sourceScene": 0}) == (1.0, None)
+
+
+class TestRetireHandback:
+    RETIRE = "b3to4:counter-a.mov#1->counter-a.mov#1:retire"
+
+    def test_the_raw_players_own_destination_element_is_not_an_overlap(self) -> None:
+        """D6 (R4 retire, S4->S5): the export restarts S5's movie, so its own
+        `<objectID>-video` paints at the retired rect -- exactly the hand-back, not a stray."""
+        spec = _spec(_deck_facts("D6"), self.RETIRE)
+        scored = probe.score_retire(I1["D6_A_refused4to5"], spec, True, I1["D6_A_samples"])
+        assert scored["verdict"] is True, scored.get("reason")
+        assert scored["handback"]["elIds"] == [6] and scored["retireNotes"]
+
+    def test_known_bad_any_other_painter_over_the_retired_rect_stays_red(self) -> None:
+        spec = _spec(_deck_facts("D6"), self.RETIRE)
+        sample = copy.deepcopy(I1["D6_A_refused4to5"])
+        sample["painting"].append(dict(sample["painting"][0], elId=99))
+        scored = probe.score_retire(sample, spec, True, I1["D6_A_samples"])
+        assert scored["verdict"] is False and [v["elId"] for v in scored["paintingOverRect"]] == [99]
+
+    def test_known_bad_a_preserved_destination_element_is_never_excused(self) -> None:
+        spec = _spec(_deck_facts("D6"), self.RETIRE)
+        samples = copy.deepcopy(I1["D6_A_samples"])
+        for row in samples:
+            for video in row["videos"]:
+                if video.get("domId") == spec["dstDomId"]:
+                    video["preserved"] = True
+        assert probe.score_retire(I1["D6_A_refused4to5"], spec, True, samples)["verdict"] is False
+
+
+class TestArrivalStarts:
+    @pytest.mark.parametrize(("deck", "expected"), [
+        # D4: A-far's movie-start is event 1 (click 1); A-near's is event 0 (automatic).
+        pytest.param("D4", {"counter-a.mov#1": True, "counter-a.mov#2": False}, id="click-started-movie-is-not-started-on-arrival"),
+        # D3 slide 1: B's movie-start nests in A's (a build "with previous").
+        pytest.param("D3", {"counter-a.mov#1": True, "counter-b.mov#1": True}, id="movie-start-grouped-under-another-build-counts"),
+    ])
+    def test_slide_one_arrival_starts(self, deck: str, expected: dict[str, bool]) -> None:
+        root = QUAL_ROOT / deck
+        assert probe.arrival_starts(root, probe.load_slides(root), _deck_plan(deck))[0] == expected
+
+    def test_p2s_click_started_slide_two_and_its_expectations_are_unchanged(self) -> None:
+        plan = _p2_plan()
+        starts = probe.arrival_starts(P2_ROOT, probe.load_slides(P2_ROOT), plan)
+        assert starts[1] == {"untitled.mov#1": False}
+        assert probe.ground_truth_facts(plan, arrival=starts)["rectExpectations"] == probe.ground_truth_facts(plan)["rectExpectations"]
+
+    def test_d4_slide_one_far_copy_is_dead_until_its_click_in_both_passes(self) -> None:
+        expectations = _deck_facts("D4")["rectExpectations"]
+        assert expectations["V"][0] == expectations["Voff"][0] == {"counter-a.mov#1": "live", "counter-a.mov#2": "dead"}
+
+    @pytest.mark.parametrize("deck", ["D1", "D5", "D6"])
+    def test_an_autostarting_pin_destination_plays_raw_from_zero_with_the_runtime_off(self, deck: str) -> None:
+        """i1 Voff: every autostarting destination read live (the export restarts it)."""
+        expectations = _deck_facts(deck)["rectExpectations"]
+        assert all(state == "live" for per in expectations["Voff"].values() for label, state in per.items() if label.startswith("counter-a.mov#1"))
+
+
+# S2 dev loop i3 (`output/evidence/s2-dev/i3-3ce02bd6`): while the player rests at the end of a
+# scene it already shows the NEXT scene's hash (main.js `updateNavigationButtons`), so a note's
+# `sceneHash` cannot open the retire zone. The zone is placed in page time from the samples.
+I3 = json.loads(gzip.decompress((REPO / "tests" / "fixtures" / "live_continuity_probe_devloop" / "i3_d3_retire.json.gz").read_bytes()))
+D3_ENDS = "b1to2:counter-a.mov#1->end:retire"
+
+
+class TestRetireZoneInPageTime:
+    def test_the_zone_opens_when_the_player_leaves_its_rest_not_at_the_hash(self) -> None:
+        start, end = probe.retire_zone_times(I3["D3_A_samples"], 4, 6)
+        rows = sorted(I3["D3_A_samples"], key=lambda r: r["t"])
+        rest = [r for r in rows if r["scene"] < 3 and r["busy"] is False]
+        assert rest[-1]["t"] < start == min(r["t"] for r in rows if r["t"] > rest[-1]["t"])
+        assert next(r for r in rows if r["t"] == start)["scene"] == 2
+        assert next(r for r in rows if r["t"] == end)["scene"] == 4 and start < end
+        hashed_at_rest = [
+            e for e in I3["D3_A_retire_evidence"]["coreEvents"]
+            if (e.get("detail") or {}).get("sceneHash") == "#3" and e["t"] < start
+        ]
+        assert hashed_at_rest, "the artifact must show '#3' notes while the player still rests on scene 2"
+
+    def test_d3_ending_movie_retires_cleanly(self) -> None:
+        spec = _spec(_deck_facts("D3"), D3_ENDS)
+        scored = probe.score_retire(I3["D3_A_retire_evidence"], spec, True, I3["D3_A_samples"])
+        assert scored["verdict"] is True, scored.get("reason")
+        assert {n["kind"] for n in scored["retireNotes"]} >= {"retire-boundary"} and scored["carryNotes"] == []
+
+    def test_known_bad_a_remount_inside_the_transition_stays_red(self) -> None:
+        """i2's shape: the held decoder remounted after the press, during the outgoing move."""
+        spec = _spec(_deck_facts("D3"), D3_ENDS)
+        start, _ = probe.retire_zone_times(I3["D3_A_samples"], 4, 6)
+        evidence = copy.deepcopy(I3["D3_A_retire_evidence"])
+        remount = next(e for e in evidence["coreEvents"] if e["kind"] == "remount-into-authored-layer")
+        evidence["coreEvents"].append(dict(remount, t=start + 50.0))
+        scored = probe.score_retire(evidence, spec, True, I3["D3_A_samples"])
+        assert scored["verdict"] is False and "carry note" in scored["reason"]
+
+    def test_without_timed_samples_the_zone_falls_back_to_the_notes_scene(self) -> None:
+        assert probe.retire_zone_times([], 4, 6) is None
+        assert probe.leave_rest_t([{"t": 1.0, "scene": 2, "busy": False}], 3) is None
+
+    def test_the_zone_is_open_ended_on_the_last_slide(self) -> None:
+        rows = [{"t": 1.0, "scene": 0, "busy": False}, {"t": 2.0, "scene": 0, "busy": True}, {"t": 3.0, "scene": 2, "busy": False}]
+        assert probe.retire_zone_times(rows, 2, None) == (2.0, math.inf)
+
+
+# --------------------------------------------------------------------------
 # Carry-cover gate (`--carry-cover`): the GL poster must not show beyond the bridge overlay while it moves.
 # Synthetic scene: a black 400x300 page, a white poster that moves on Keynote's EaseInEaseOut curve and an opaque
 # white overlay drawn over it on whatever path the test gives (eased = today's fix, linear = the rubber band).
@@ -8032,6 +9219,8 @@ CC_DURATION_S = 1.0
 CC_GROW_DST = {"x": 80.0, "y": 140.0, "w": 260.0, "h": 60.0}
 CC_FAST_S = 0.5
 CC_EL_ID = 7
+# P2's b3to4: the move starts on scene 7 and lands on scene 8.
+CC_AT_SCENE = 8
 CC_FRAME_MS = 1000.0 / 60.0
 # Off the press and the window edges, so no tick sits exactly on a boundary.
 CC_FIRST_TICK_MS = 503.0
@@ -8071,16 +9260,34 @@ def _cc_paint_sync(image: np.ndarray, tick: int) -> None:
 
 def _cc_bridge(**extra: Any) -> dict[str, Any]:
     return {
-        "boundary": "b3to4", "fromOrdinal": 3, "toOrdinal": 4, "srcRect": dict(CC_SRC), "dstRect": dict(CC_DST),
+        "boundary": "b3to4", "fromOrdinal": 3, "toOrdinal": 4, "atScene": CC_AT_SCENE, "srcRect": dict(CC_SRC),
+        "dstRect": dict(CC_DST),
         "durationSeconds": CC_DURATION_S, "carriedSlot": 1, "masks": [], **extra,
     }
+
+
+def _cc_note(
+    t: float = CC_T0, src: dict[str, float] = CC_SRC, dst: dict[str, float] = CC_DST, scene: int = CC_AT_SCENE - 1,
+    duration_s: float = CC_DURATION_S,
+) -> dict[str, Any]:
+    """The core's `bridge-motion-start` note: the authored source/destination rects and the hash it rode from."""
+    return {"kind": "bridge-motion-start", "t": t, "detail": {
+        "elId": CC_EL_ID, "durationSeconds": duration_s, "srcRect": dict(src), "rect": dict(dst),
+        "sceneHash": f"#{scene}",
+    }}
+
+
+def _cc_clock_note(via: str, lag_ms: float, el_id: int = CC_EL_ID, scene: int = CC_AT_SCENE - 1) -> dict[str, Any]:
+    """The core's `bridge-clock` note: the clock a bridge's overlay rode, from the hash it rode from."""
+    return {"kind": "bridge-clock", "t": CC_T0 + 7.0,
+            "detail": {"elId": el_id, "via": via, "lagMs": lag_ms, "sceneHash": f"#{scene}"}}
 
 
 def _cc_scene(
     *, overlay_curve: Any = _ease_in_out, poster_shift: tuple[float, float] = (0.0, 0.0), opaque: bool = True,
     extra_object: tuple[dict[str, float], float] | None = None, ready_state: int = 4, marker_only: bool = False,
     duration_s: float = CC_DURATION_S, dst: dict[str, float] = CC_DST, tick_ms: float = CC_FRAME_MS,
-    overlay_lag_ticks: int = 0,
+    overlay_lag_ticks: int = 0, tick_at: Any = None,
     pts_offset_ms: float = 4.0, deliver: Any = None, synced: Any = None, sampled: Any = None, pre_read: Any = None,
 ) -> tuple[list[tuple[float, np.ndarray]], list[dict[str, Any]], list[dict[str, Any]]]:
     """One rAF tick every `tick_ms` from 503 ms to 2300 ms. The screencast delivers a frame of tick k (when
@@ -8091,15 +9298,17 @@ def _cc_scene(
     frame.
     `extra_object` is (rect, lit until ms after the press), an unrelated object lit from the press until then.
     `marker_only` paints the poster dark but for an 8x8 corner marker (D1's grating has one), so a strip of it exposes
-    little area."""
+    little area. `tick_at(k)` places tick k (default: every `tick_ms`)."""
+    def at(k: int) -> float:
+        return tick_at(k) if tick_at is not None else CC_FIRST_TICK_MS + k * tick_ms
+
     def overlay_at(k: int) -> dict[str, float]:
-        ms = CC_FIRST_TICK_MS + (k - overlay_lag_ticks) * tick_ms
-        return _cc_rect_at(ms, overlay_curve, duration_s=duration_s, dst=dst)
+        return _cc_rect_at(at(k - overlay_lag_ticks), overlay_curve, duration_s=duration_s, dst=dst)
 
     frames, rows = [], []
     k = 0
-    while CC_FIRST_TICK_MS + k * tick_ms <= 2300.0:
-        ts = CC_FIRST_TICK_MS + k * tick_ms
+    while at(k) <= 2300.0:
+        ts = at(k)
         if deliver is None or deliver(k, ts):
             image = np.zeros((CC_VIEWPORT[1], CC_VIEWPORT[0], 3), dtype=np.uint8)
             poster = _cc_rect_at(ts, _ease_in_out, poster_shift, duration_s, dst)
@@ -8115,10 +9324,10 @@ def _cc_scene(
             pre = pre_read(ts) if pre_read is not None else overlay_at(max(k - 1, 0))
             rows.append({"ts": ts, "tick": k % (1 << probe.CARRY_COVER_SYNC_BITS),
                          "pre": [{"elId": CC_EL_ID, **pre, "readyState": ready_state, "opaque": opaque}],
-                         "vids": [{"elId": CC_EL_ID, **overlay_at(k), "readyState": ready_state, "opaque": opaque}]})
+                         "vids": [{"elId": CC_EL_ID, **overlay_at(k), "readyState": ready_state, "opaque": opaque}],
+                         "readAt": ts + 1.0})
         k += 1
-    notes = [{"kind": "bridge-motion-start", "t": CC_T0, "detail": {"elId": CC_EL_ID, "durationSeconds": duration_s}}]
-    return frames, rows, notes
+    return frames, rows, [_cc_note(dst=dst, duration_s=duration_s)]
 
 
 def _cc_score(frames: Any, rows: Any, notes: Any, bridge: dict[str, Any] | None = None, **kw: Any) -> dict[str, Any]:
@@ -8144,6 +9353,20 @@ class TestCarryCoverMetric:
         assert result["cleanShare"] == 1.0 and result["maxStripPx"] == 0 and result["maxExposedFraction"] == 0.0
         assert result["alignedFrames"] == result["midFrames"] >= result["minFrames"]
         assert result["discardedFrames"] == 0 and result["undecidedFrames"] == 0
+
+    @pytest.mark.parametrize(("src", "verdict"), [
+        ("Untitled.mov-0.0000-46.0333.mov", "pass"), ("foreign.mov", "fail"), ("", "inconclusive"),
+        (None, "pass"),  # a legacy record (no `src` on its reads) keeps the pixel-only scoring
+    ])
+    def test_the_carried_decoder_must_name_the_bridges_asset(self, src: str | None, verdict: str) -> None:
+        """Astra r16 #2: identical coverage by another decoded clip passed, the reads carrying no source."""
+        frames, rows, notes = _cc_scene()
+        if src is not None:
+            for row in rows:
+                for read in (*row["pre"], *row["vids"]):
+                    read["src"] = src
+        result = _cc_score(frames, rows, notes, bridge=_cc_bridge(asset="untitled.mov"))
+        assert result["verdict"] == verdict, result["reasons"]
 
     def test_known_bad_a_linear_overlay_over_an_eased_poster_is_the_rubber_band_and_fails(self) -> None:
         """Today's core: the overlay moves linearly, the GL poster EaseInEaseOut, so the poster's leading edges
@@ -8216,8 +9439,9 @@ class TestCarryCoverMetric:
     def test_a_path_that_reaches_the_sync_bar_is_inconclusive(self) -> None:
         """Review r2 (edge case): the bar overwrites 96x4 px at the viewport's top-left and is masked, so exposure
         there is unobservable; a bridge whose path comes within the strip tolerance of it cannot be judged."""
-        bridge = _cc_bridge(srcRect={"x": 4.0, "y": 2.0, "w": 100.0, "h": 50.0})
-        result = _cc_score(*_cc_scene(), bridge=bridge)
+        src = {"x": 4.0, "y": 2.0, "w": 100.0, "h": 50.0}
+        frames, rows, _ = _cc_scene()
+        result = _cc_score(frames, rows, [_cc_note(src=src)], bridge=_cc_bridge(srcRect=src))
         assert result["verdict"] == "inconclusive"
         assert "sync bar" in " ".join(result.get("reasons") or [result.get("reason") or ""])
 
@@ -8226,7 +9450,9 @@ class TestCarryCoverMetric:
         half = {k: v / 2 for k, v in CC_SRC.items()}, {k: v / 2 for k, v in CC_DST.items()}
         bridge = _cc_bridge(srcRect=half[0], dstRect=half[1])
         stage = {**IDENTITY_STAGE_MAP, "s": 2.0, "sy": 2.0}
-        assert _cc_score(*_cc_scene(), bridge=bridge, stage_map=stage)["verdict"] == "pass"
+        frames, rows, _ = _cc_scene()
+        notes = [_cc_note(src=half[0], dst=half[1])]
+        assert _cc_score(frames, rows, notes, bridge=bridge, stage_map=stage)["verdict"] == "pass"
 
 
 class TestCarryCoverSync:
@@ -8344,6 +9570,48 @@ class TestCarryCoverCoverage:
         self._assert(result, "ms stretch of the mid-move window has no scored frame")
         assert result["maxGapMs"] == pytest.approx(4 * CC_FRAME_MS, abs=0.05)
 
+    @staticmethod
+    def _throttled(k: int) -> float:
+        """60 Hz, but 30 Hz from tick 57 (~1453 ms) to ~1853 ms, as Chrome throttles rAF while two videos play."""
+        hold = (1853.0 - CC_FIRST_TICK_MS - 57 * CC_FRAME_MS) // (2 * CC_FRAME_MS)
+        return CC_FIRST_TICK_MS + (k + min(max(k - 57, 0), hold)) * CC_FRAME_MS
+
+    @staticmethod
+    def _stalled_at_48(k: int) -> float:
+        """60 Hz with one 100 ms rAF stall before tick 48 (~1303 ms)."""
+        return CC_FIRST_TICK_MS + (k + (5 if k >= 48 else 0)) * CC_FRAME_MS
+
+    @staticmethod
+    def _strip_at_40(p: float) -> float:
+        return _ease_in_out(p) + (0.25 if 0.400 < p < 0.440 else 0.0)
+
+    @pytest.mark.parametrize(("tick_at", "dropped", "curve", "verdict"), [
+        pytest.param(_throttled, lambda ts: 1480.0 < ts < 1495.0, _ease_in_out, "pass",
+                     id="one-missed-30hz-frame-where-the-cadence-switches"),
+        pytest.param(None, lambda ts: 1400.0 < ts < 1460.0, _ease_in_out, "inconclusive", id="known-bad-a-4-tick-hole-at-steady-60hz"),
+        pytest.param(_throttled, lambda ts: False, _strip_at_40, "fail", id="control-a-complete-capture-sees-the-strip"),
+        # Astra r20 P1: a 60 Hz hole right before the throttle must not borrow the 30 Hz cadence that follows it.
+        pytest.param(_throttled, lambda ts: 1400.0 < ts < 1440.0, _strip_at_40, "inconclusive",
+                     id="known-bad-a-60hz-hole-before-the-throttle-hides-the-strip"),
+        # Astra r21 P1: an earlier stall must not stretch the hole through a rounded or window-edge endpoint.
+        pytest.param(_stalled_at_48, lambda ts: 1400.0 < ts < 1440.0, _strip_at_40, "inconclusive",
+                     id="known-bad-a-60hz-hole-after-a-stall-hides-the-strip"),
+    ])
+    def test_a_gap_is_judged_against_the_local_cadence(self, tick_at: Any, dropped: Any, curve: Any, verdict: str) -> None:
+        result = _cc_score(*_cc_scene(tick_at=tick_at, overlay_curve=curve, deliver=lambda k, ts: not dropped(ts)))
+        assert result["verdict"] == verdict, result["reasons"]
+        assert result["cadenceMs"] == pytest.approx(CC_FRAME_MS, abs=0.05)
+
+    def test_known_bad_a_sampler_that_stops_before_the_window_ends_is_inconclusive(self) -> None:
+        """Astra r22 P1: 30 Hz then 60 Hz from tick 39; the sampler stops at tick 44 (1886 ms) inside the window
+        (ends 1900 ms) and frames stop at tick 39, so the last gap holds five 60 Hz ticks yet is not bracketed."""
+        result = _cc_score(*_cc_scene(
+            tick_at=lambda k: CC_FIRST_TICK_MS + (2 * min(k, 39) + max(k - 39, 0)) * CC_FRAME_MS,
+            overlay_curve=lambda p: _ease_in_out(p) + (0.25 if 0.81 < p < 0.89 else 0.0),
+            deliver=lambda k, ts: k <= 39, sampled=lambda k, ts: k <= 44,
+        ))
+        self._assert(result, "the sampler's ticks do not span the mid-move window")
+
     def test_known_bad_too_many_unplaceable_frames_are_inconclusive_even_when_spread_out(self) -> None:
         result = _cc_score(*_cc_scene(synced=lambda k, ts: ts < CC_T0 or k % 5 != 0))
         self._assert(result, "mid-move frames could not be placed at a sampled tick (max 10%)")
@@ -8356,9 +9624,10 @@ class TestCarryCoverCoverage:
         assert 0 < result["discardedShare"] <= probe.CARRY_COVER_MAX_DISCARDED_SHARE
 
     def test_known_bad_frames_whose_tick_the_sampler_missed_are_unplaced(self) -> None:
+        """The sampler pushes a row on every tick it counts (`CARRY_COVER_SAMPLER_JS`), so rows that skip ticks are
+        outside the producer contract and void the bridge before any frame is placed."""
         result = _cc_score(*_cc_scene(sampled=lambda k, ts: k % 4 != 0))
-        self._assert(result, "could not be placed at a sampled tick")
-        assert any(f.get("unaligned") == "no sampler row for its tick" for f in result["frames"])
+        self._assert(result, "evidence contract: carryCover:tick not contiguous")
 
     def test_known_bad_a_page_ticking_slower_than_20fps_is_inconclusive(self) -> None:
         self._assert(_cc_score(*_cc_scene(tick_ms=200.0)), "the page's rAF ticked every 200.0 ms")
@@ -8380,9 +9649,33 @@ class TestCarryCoverInconclusive:
         frames, rows, notes = _cc_scene()
         self._assert(_cc_score(frames, rows, notes * 2), "no move window: 2 bridge-motion-start notes")
 
+    @pytest.mark.parametrize(("notes", "fragment"), [
+        ([_cc_note(t=200.0, src={"x": 900.0, "y": 50.0, "w": 80.0, "h": 40.0}, dst=CC_SRC, scene=CC_AT_SCENE - 3),
+          _cc_note()], None),
+        ([_cc_note(), _cc_note(t=CC_T0 + 300.0)], "no move window: 2 bridge-motion-start notes for this bridge"),
+        ([_cc_note(), _cc_note(t=CC_T0 + 300.0, dst={**CC_DST, "x": 210.0})], "1 other bridge-motion-start notes"),
+        ([_cc_note(), _cc_note(t=CC_T0 + 300.0, scene=CC_AT_SCENE)], "1 other bridge-motion-start notes"),
+        ([{"kind": "bridge-motion-start", "t": CC_T0, "detail": {"elId": CC_EL_ID, "durationSeconds": CC_DURATION_S}}],
+         "evidence contract: note.sceneHash"),
+    ], ids=["earlier-bridge-before-rows", "second-own-note", "foreign-rect-in-window", "foreign-hash-in-window",
+            "no-identity"])
+    def test_only_this_bridges_one_note_opens_the_move_window(
+        self, notes: list[dict[str, Any]], fragment: str | None,
+    ) -> None:
+        """D1 b2to3: the walk to slide 2 rides b1to2 in the same session, so b1to2's legitimate note precedes the rows.
+        Only a note matching this bridge (source scene's hash, source/destination rects) opens the window, exactly one
+        must, and every other note must precede the capture. A note without that identity never matches."""
+        frames, rows, single = _cc_scene()
+        result = _cc_score(frames, rows, notes)
+        if fragment is not None:
+            self._assert(result, fragment)
+            return
+        assert result == _cc_score(frames, rows, single)
+        assert result["verdict"] == "pass" and result["t0"] == CC_T0
+
     def test_no_carried_decoder_in_the_rows(self) -> None:
         frames, rows, notes = _cc_scene()
-        notes = [{**notes[0], "detail": {"elId": 99}}]
+        notes = [{**notes[0], "detail": {**notes[0]["detail"], "elId": 99}}]
         self._assert(_cc_score(frames, rows, notes), "no carried decoder sampled during the move")
 
     def test_a_carried_decoder_that_never_decoded(self) -> None:
@@ -8502,6 +9795,28 @@ class TestCarryCoverMasks:
     def test_an_unreadable_effect_is_a_problem(self, effect: Any) -> None:
         assert "problem" in probe.carry_cover_masks(effect, P2_SRC, P2_CANVAS)
 
+    def test_bridges_carry_their_destination_scene_for_a_d1_shaped_plan(self, tmp_path: Path) -> None:
+        """D1: bridges at 1->2 (lands on scene 2) and 2->3 (scene 4); the scorer matches each core note's hash to
+        `atScene - 1`."""
+        lc = probe.live_continuity_module
+        src, mid, dst = lc.Rect(**P2_SRC), lc.Rect(960.0, 400.0, 800.0, 225.0), lc.Rect(400.0, 380.0, 1120.0, 315.0)
+        boundaries = (
+            lc.SlideBoundary(0, 1, (lc.MovieContinuity("m.mov", "bridge", src, mid),), 1.5),
+            lc.SlideBoundary(1, 2, (lc.MovieContinuity("m.mov", "bridge", lc.Rect(**P2_SRC), dst),), 1.5),
+            lc.SlideBoundary(2, None),
+        )
+        slides = [{"playerIndex": i, "originalOrdinal": i + 1, "exportedUuid": f"U{i}"} for i in range(3)]
+        for slide in slides:
+            uuid = slide["exportedUuid"]
+            (tmp_path / "assets" / uuid).mkdir(parents=True)
+            (tmp_path / "assets" / uuid / f"{uuid}.json").write_text(json.dumps({"events": [
+                {"effects": [_p2_like_effect()]},
+            ]}))
+        bridges = probe.carry_cover_bridges(_plan(boundaries, {0: 0, 1: 2, 2: 4}, {}), slides, tmp_path)
+        assert [(b["boundary"], b["atScene"]) for b in bridges] == [("b1to2", 2), ("b2to3", 4)]
+        assert [b["dstRect"] for b in bridges] == [mid.as_dict(), dst.as_dict()]
+        assert all(b["carriedSlot"] == 1 and "problem" not in b for b in bridges)
+
 
 class TestCarryCoverStatus:
     QUALIFIED = {"mode": "qualified"}
@@ -8531,6 +9846,18 @@ class TestCarryCoverStatus:
 
     def test_an_unmeasured_bridge_is_inconclusive(self) -> None:
         assert probe.carry_cover_status(self.QUALIFIED, [{"boundary": "b3to4"}])[0] == "inconclusive"
+
+    @pytest.mark.parametrize(("notes", "expected"), [
+        ([_cc_note(), _cc_clock_note("fallback", 55.0, scene=CC_AT_SCENE),
+          _cc_clock_note("fallback", 52.0, el_id=CC_EL_ID + 1), _cc_clock_note("gl", 7.0)], {"via": "gl", "lagMs": 7.0}),
+        ([_cc_clock_note("fallback", 51.5)], {"via": "fallback", "lagMs": 51.5}),
+        ([_cc_clock_note("gl", 7.0), _cc_clock_note("gl", 6.0)], None),
+    ], ids=["gl-among-foreign-scene-and-decoder", "fallback", "two-own-notes"])
+    def test_carry_cover_clock_names_this_bridges_clock(self, notes: list[dict[str, Any]], expected: Any) -> None:
+        """Report only (the probe status stays pixel-only): the one `bridge-clock` note naming this bridge's carried
+        decoder from its source scene's hash, matched on identity (never time); a note from another scene or decoder
+        is not this bridge's, and two of its own are ambiguous (None)."""
+        assert probe.carry_cover_clock(notes, _cc_bridge(), CC_EL_ID) == expected
 
 
 class TestCarryCoverCli:
@@ -8594,3 +9921,1725 @@ class TestCarryCoverCli:
             probe.main()
         result = json.loads(artifact.read_text())
         assert (result["status"], result["error"]) == ("error", "chrome died")
+
+
+# --- painted instrument, stream B (`.agents/plans/keynote_live_continuity_instrument.plan.md` §3.2-§3.10) ---------
+
+
+def _v2(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Mark sampler rows as schema 2: a frame `seq`/`ts`, a settled `busy` where the row has none,
+    and a pre-paint read whose videos mirror the rAF-phase ones (same probe id, src and authored rect)."""
+    for index, row in enumerate(samples):
+        row.update(seq=index + 1, ts=row["t"], hash=f"#{row['scene']}", sceneCount=99)
+        row.setdefault("busy", False)
+        row["pp"] = {
+            "seq": index + 1, "ts": row["t"], "t": row["t"] + 1.0, "cover": False,
+            "stageBox": {"x": 0.0, "y": 0.0, "w": 1920.0, "h": 1080.0},
+            "videos": [{
+                "id": v["id"], "src": v["src"], "rect": dict(v["rect"]), "visibleRect": dict(v["rect"]),
+                "connected": True, "facade": False, "suppressed": False, "readyState": 4, "seeking": False,
+                "videoWidth": 640, "videoHeight": 360, "opacity": 1.0, "checkVisibility": True, "visibility": "visible",
+                "displayNone": None, "hiding": None, "effects": None, "transform": None, "parent": "div#body",
+                "layer": None,
+            } for v in row["videos"]],
+        }
+    return samples
+
+
+class TestSamplerV2:
+    def test_the_sampler_keeps_the_detach_literals_and_feeds_tick_the_frame_time(self) -> None:
+        """Plan §3.2: `detach_experiment.py` patches `tick(){` into `tick(ts){` and the push literal, so
+        both stay byte-for-byte exactly once and `rafTs` never appears; `frame(ts)` runs the control
+        hook, then `tick(ts)` WITH the frame time, then the pre-paint toggle. Overflow drops the row
+        and counts it instead of the silent `samples.shift()`."""
+        js = probe.SAMPLER_JS
+        assert js.count("  function tick(){\n    var t = performance.now();\n") == 1
+        assert js.count("samples.push({t: t, scene: state.sceneId,") == 1
+        assert "window.__obedContinuityProbe__ = {samples" in js and "rafTs" not in js
+        frame = js[js.index("function frame(ts){"):]
+        assert frame.index("ctl.tick(frameSeq, ts)") < frame.index("tick(ts);") < frame.index("prepaint.toggle(frameSeq, ts)")
+        assert "samples.shift()" not in js and "meta.overflow++" in js
+        assert "seq: frameSeq, ts: frameTs, hash:" in js and "sceneCount:" in js
+
+    def test_drive_stops_the_sampler_then_drains_it_in_chunks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Plan §2.1/§3.2: rows are read in bounded chunks until empty, after the sampler stopped (so
+        its meta and its rows describe the same frames)."""
+        chunks = [[{"t": 1.0}, {"t": 2.0}], [{"t": 3.0}], []]
+        evaluations: list[str] = []
+
+        def evaluate(js: str) -> Any:
+            evaluations.append(js)
+            return chunks.pop(0) if js == probe.SAMPLER_DRAIN_JS else None
+
+        monkeypatch.setattr(probe, "wait_for_decode", lambda player: True)
+        monkeypatch.setattr(probe.time, "sleep", lambda s: None)
+        player = _SlidesPlayer(1)
+        player.transport.evaluate = evaluate
+        assert probe.drive_and_sample(player) == [{"t": 1.0}, {"t": 2.0}, {"t": 3.0}]
+        assert evaluations[0] == probe.SAMPLER_JS
+        assert evaluations[-4:] == [probe.SAMPLER_STOP_JS, *[probe.SAMPLER_DRAIN_JS] * 3]
+        assert probe.SAMPLER_DRAIN_JS.endswith(f".drain({probe.SAMPLER_DRAIN_ROWS})")
+        # Astra r1 #4: a malformed chunk mid-drain is an arm error, never the prefix read so far.
+        for bad in (None, {"rows": []}, [{"t": 4.0}, 5]):
+            chunks[:] = [[{"t": 1.0}], bad]
+            with pytest.raises(RuntimeError, match="sampler drain returned"):
+                probe.drain_samples(player.transport)
+
+    @pytest.mark.parametrize("valid", [True, False])
+    def test_pre_paint_rects_and_stage_box_convert_to_authored_or_the_read_is_unreadable(self, valid: bool) -> None:
+        """Plan §3.4: `pp` rects and stage box use the read's own stage map (screen values kept); an
+        untrustworthy map removes the read, so its frame scores as unobserved, never as offscreen."""
+        stage = dict(SCALED_STAGE_MAP_4_3) if valid else {"s": 1.0, "sy": 2.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1, "offsetHeight": 1}
+        screen = _screen_rect(SRC_RECT, SCALED_STAGE_MAP_4_3)
+        pp = {"stageMap": stage, "stageBox": dict(screen), "videos": [{"id": 1, "rect": dict(screen), "visibleRect": dict(screen)}]}
+        row = sample(0.0, 1, video(id=1, el_id=1, t=0.0, scene=1, current_time=1.0, rect=screen), stage_map=SCALED_STAGE_MAP_4_3)
+        converted = probe.convert_samples_to_authored([dict(row, pp=pp)])[0][0]
+        if not valid:
+            assert "pp" not in converted and converted["ppUnreadable"] == pp
+            return
+        pv = converted["pp"]["videos"][0]
+        for key in ("rect", "visibleRect"):
+            assert pv[key] == pytest.approx(SRC_RECT) and pv[f"{key}Screen"] == screen
+        assert converted["pp"]["stageBox"] == pytest.approx(SRC_RECT) and converted["pp"]["stageBoxScreen"] == screen
+
+    @pytest.mark.parametrize(("mutate", "error"), [
+        (lambda rows: [rows[0].pop(k, None) for k in probe.SAMPLE_V2_MARKERS], "mix sampler schemas"),
+        (lambda rows: rows[0].pop("seq"), "seq missing"),
+        (lambda rows: rows[1].update(seq=True), "seq ill-typed"),
+        (lambda rows: rows[1].update(ts=float("nan")), "ts ill-typed"),
+        (lambda rows: rows[1].update(pp=[]), "pp not an object"),
+        (lambda rows: rows[1]["pp"]["videos"].append({"id": None}), "pp video id ill-typed"),
+        (lambda rows: None, None),
+    ])
+    def test_schema_two_fields_are_validated_and_mixed_schemas_are_refused(self, mutate: Any, error: str | None) -> None:
+        """Plan §3.7: a malformed or mixed-schema row makes every carry INCONCLUSIVE (`score_carry`)."""
+        rows = _v2(rows_around_boundary(n_before=3, n_after=3))
+        for row in rows:
+            row.update(playerState="Playing", busy=False)
+        mutate(rows)
+        errors = probe.sample_schema_errors(rows)
+        assert any(error in e for e in errors) if error else errors == []
+        if error:
+            spec = {"asset": ASSET, "atScene": 2, "srcRect": SRC_RECT, "dstRect": DST_RECT, "transitionScene": None}
+            assert probe.score_carry(rows, spec, True)["verdict"] is None
+
+
+def _drop(path: str) -> Any:
+    """Delete one field from row 30 of a raw moving-boundary stream: `row.k`, `video.k`, `owner.k`, `pp.k`, `pv.k`."""
+    where, key = path.split(".")
+
+    def mutate(rows: list[dict[str, Any]]) -> None:
+        row = rows[30]
+        holder = {"row": row, "video": row["videos"][0], "owner": row["videos"][0]["footprintOwner"], "pp": row["pp"],
+                  "pv": row["pp"]["videos"][0], "stageMap": row["stageMap"]}[where]
+        del holder[key]
+    return mutate
+
+
+CARRY_SPEC = {"asset": ASSET, "atScene": 8, "srcRect": SRC_RECT, "dstRect": DST_RECT, "transitionScene": 7}
+RAW_DELETIONS = [
+    "row.scene", "row.seq", "row.hash", "row.sceneCount", "video.rect", "video.elId", "video.paused", "video.loop",
+    "video.duration", "video.videoWidth", "owner.elId", "owner.via", "pp.cover", "pp.seq", "pv.visibleRect",
+    "stageMap.ox",
+]
+
+
+class TestRawEvidence:
+    @pytest.mark.parametrize("break_it", [
+        pytest.param(None, id="complete-record-stays-green"),
+        *(pytest.param(_drop(path), id=f"no-{path}") for path in RAW_DELETIONS),
+        pytest.param(lambda rows: [row.pop(k, None) for row in rows for k in probe.SAMPLE_V2_MARKERS],
+                     id="schema-2-sampler-stream-stripped-to-legacy"),
+        # Astra r7 #1: a null scene or transition state is an unknown phase, never the source phase.
+        *(pytest.param(lambda rows, k=key: rows[30].update({k: None}), id=f"null-row.{key}")
+          for key in ("scene", "playerState", "busy")),
+    ])
+    def test_a_field_missing_from_raw_evidence_is_inconclusive_through_conversion(self, break_it: Any) -> None:
+        """Astra r6 #3/#4: every verdict-bearing raw field (rAF row, decoder, nested owner, stage map, pre-paint
+        frame and decoder) is validated with conversion preserving its absence, so one missing field anywhere is
+        inconclusive, never a red; a schema-2 sampler's stream never falls back to legacy scoring."""
+        rows = _v2(moving_boundary_samples())
+        for row in rows:
+            row["pp"]["stageMap"] = dict(IDENTITY_STAGE_MAP)
+            row["stageMap"] = dict(IDENTITY_STAGE_MAP)
+        if break_it is not None:
+            break_it(rows)
+        converted = probe.convert_samples_to_authored(rows)[0]
+        scored = probe.score_carry(converted, CARRY_SPEC, True, schema=probe.paint_instrument.SAMPLER_SCHEMA)
+        assert scored["verdict"] is (True if break_it is None else None), scored
+
+
+class TestCarryPaintWiring:
+    @pytest.mark.parametrize("field", [*probe.paint_instrument.PV_FIELDS, None])
+    def test_a_missing_pre_paint_field_is_unreadable_never_a_violation(self, field: str | None) -> None:
+        """Astra r5: one `PV_FIELDS` schema for the probe's pre-paint validation and `painted_state`.
+        Deleting any field from every read is a schema error and an unreadable (inconclusive) paint
+        score, never a detached/not-decoded/visibility/offscreen violation. `None`: an explicit
+        `visibleRect: null` is still the offscreen reading, a complete red."""
+        rows = _v2(moving_boundary_samples())
+        for row in rows:
+            if field:
+                del row["pp"]["videos"][0][field]
+            else:
+                row["pp"]["videos"][0]["visibleRect"] = None
+        expected = ("unreadable", f"schema: {field} missing") if field else ("unpainted", "offscreen")
+        assert probe.paint_instrument.painted_state(rows[0]["pp"]["videos"][0]) == expected
+        assert bool(probe.sample_schema_errors(rows)) is bool(field)
+        paint = score_moving_boundary(rows)["paint"]
+        assert (paint["status"], bool(paint["unreadable"])) == (("inconclusive", True) if field else ("fail", False))
+
+    @pytest.mark.parametrize(("gap", "verdict", "status"), [
+        pytest.param(False, False, "fail", id="identity-change-on-complete-evidence-stays-red"),
+        pytest.param(True, None, "inconclusive", id="identity-change-behind-a-sampling-gap-is-inconclusive"),
+    ])
+    def test_the_no_spanning_decoder_exit_is_paint_gated(self, gap: bool, verdict: bool | None, status: str) -> None:
+        """Astra r3: the decoder id changes at the boundary. A complete per-frame record keeps the
+        identity red; a 600 ms sampling gap (175 ms allowed) makes it inconclusive, never red."""
+        samples = moving_boundary_samples()
+        for row in samples:
+            if row["scene"] >= 8:
+                row["videos"][0]["id"] = 2
+        samples = _v2(samples)
+        if gap:
+            del samples[50:61]
+        scored = score_moving_boundary(samples)
+        assert scored["reason"].startswith("no decoder id spans" if verdict is False else "inconclusive: paint")
+        assert (scored["verdict"], scored["paint"]["status"]) == (verdict, status)
+
+    @pytest.mark.parametrize(("status", "legacy", "verdict"), [
+        ("ok", True, True), ("fail", True, False), ("inconclusive", True, None),
+        # Astra r2 A: a readable legacy failure never makes incomplete paint evidence a red.
+        ("inconclusive", False, None),
+    ])
+    def test_the_paint_score_gates_a_v2_carry_and_paint_false_is_the_blind_legacy_scorer(
+        self, monkeypatch: pytest.MonkeyPatch, status: str, legacy: bool, verdict: bool | None,
+    ) -> None:
+        """Plan §3.5 on a bridge: a v2 carry passes its own window, decoder, slot and the carry-cover
+        coverage constants to `score_paint`; fail -> False, inconclusive -> None with the reason. The
+        slot is the source before the move, the decoder's own pre-paint rect on the path during it
+        (none off the path), the destination after. `paint=False` is byte-identical to legacy rows
+        (no `paint` key): the blindness rescore."""
+        calls: list[dict[str, Any]] = []
+
+        def score_paint(rows: Any, element_id: Any, asset: str, **kwargs: Any) -> dict[str, Any]:
+            calls.append({"element_id": element_id, "asset": asset, **kwargs})
+            return {"status": status, "reasons": ["2 unpainted frames"]}
+
+        monkeypatch.setattr(probe.paint_instrument, "score_paint", score_paint)
+        samples = _v2(moving_boundary_samples())
+        if not legacy:
+            for row in samples[-20:]:
+                row["videos"][0]["rect"] = dict(DST_RECT, x=DST_RECT["x"] + 300.0)
+        assert probe.score_continuity(samples, ASSET, 8, SRC_RECT, DST_RECT, True, transition_scene=7, paint=False)["verdict"] is legacy
+        scored = score_moving_boundary(samples)
+        assert scored["verdict"] is verdict and scored["paint"]["status"] == status
+        if verdict is None:
+            assert scored["reason"] == "inconclusive: paint 2 unpainted frames"
+        call = calls[0]
+        assert (call["element_id"], call["asset"], call["end"]) == (1, ASSET, scored["window"]["end"])
+        assert (call["iou_min"], call["rect_tolerance"]) == (probe.INSTANCE_IOU_MIN, probe.RECT_TOLERANCE_PX)
+        assert (call["max_gap_frames"], call["min_fps"]) == (probe.CARRY_COVER_MAX_GAP_FRAMES, probe.CARRY_COVER_MIN_FPS)
+        move = samples[25]
+        assert call["slot_of"](samples[0]) == SRC_RECT and call["slot_of"](samples[-1]) == DST_RECT
+        assert call["slot_of"](move) == move["pp"]["videos"][0]["rect"] != SRC_RECT
+        move["pp"]["videos"][0]["rect"] = dict(move["pp"]["videos"][0]["rect"], x=1500.0)
+        assert call["slot_of"](move) is None
+        assert call["stage_box_of"](samples[0]) == samples[0]["pp"]["stageBox"]
+        blind = probe.score_continuity(samples, ASSET, 8, SRC_RECT, DST_RECT, True, transition_scene=7, paint=False)
+        assert "paint" not in blind and (not legacy or blind == score_moving_boundary(moving_boundary_samples()))
+
+    def test_a_pin_held_dark_for_108_frames_is_red_and_reads_green_only_when_blind(self) -> None:
+        """Plan §1/§4 (the false green, `phaseD-867e415c` D5 b0to1): a pin whose decoder stays owned,
+        at its rect and decoded while an ancestor (layer104) holds it at opacity 0 for 108 frames.
+        The legacy scorer (`paint=False`, the blindness rescore) reads it True; per-frame paint reads
+        it False with exactly those frames, naming the hiding ancestor."""
+        samples = _v2(rows_around_boundary(n_before=150, n_after=60, src_rect=DST_RECT, dst_rect=DST_RECT))
+        for row in samples[40:148]:
+            row["pp"]["videos"][0].update(opacity=0.0, hiding={"node": "div#layer104", "prop": "opacity", "value": 0})
+        args = (samples, ASSET, 2.0, DST_RECT, DST_RECT, True)
+        assert probe.score_continuity(*args, paint=False)["verdict"] is True
+        scored = probe.score_continuity(*args)
+        paint = scored["paint"]
+        assert scored["verdict"] is False and paint["status"] == "fail"
+        assert paint["unpaintedFrames"] == paint["longestRun"] == 108 and paint["unpaintedSeqs"] == list(range(41, 149))
+        assert "div#layer104" in paint["reasons"][0]
+        for row in samples[40:148]:
+            row["pp"]["videos"][0].update(opacity=1.0, hiding=None)
+        assert probe.score_continuity(*args)["verdict"] is True
+
+    @pytest.mark.parametrize(("decoded_from", "floor", "expected"), [
+        pytest.param(0, None, 0.0, id="a-pin-transition-longer-than-the-pad-is-covered-from-the-settled-source"),
+        pytest.param(50, None, 800.0, id="never-before-the-first-decode-no-initial-load-false-red"),
+        pytest.param(200, None, 1184.0, id="no-decoded-settled-source-keeps-the-window-start"),
+        pytest.param(0, 1500.0, 1500.0, id="never-before-the-chain-clip"),
+    ])
+    def test_paint_start_is_grounded_at_the_first_decoded_settled_source_row(
+        self, decoded_from: int, floor: float | None, expected: float,
+    ) -> None:
+        """Plan §3.5: paintStart = max(clip, min(window.start, t0)), t0 the first settled row of
+        scene atScene-1 on which the carried decoder has readyState >= 2."""
+        samples = rows_around_boundary(n_before=200)
+        for index, row in enumerate(samples[:200]):
+            row["busy"] = False
+            row["videos"][0]["readyState"] = 4 if index >= decoded_from else 0
+        window = probe.find_boundary_window(samples, 2.0)
+        assert window["start"] == 1184.0
+        assert probe.paint_start(samples, 1, 2.0, window, floor) == expected
+
+    @pytest.mark.parametrize(("source_frames", "fresh_from", "expected"), [
+        (5, 6, {"frames": 1, "ms": 16.0, "t0": 80.0, "t1": 96.0}),
+        (5, 7, {"frames": 2, "ms": 32.0, "t0": 80.0, "t1": 112.0}),
+        (6, 6, {"frames": 0, "ms": 0.0, "t0": 96.0, "t1": 96.0}),
+        (5, None, {"frames": None, "reason": "the fresh decoder never painted its destination"}),
+    ])
+    def test_restart_slot_gap_is_reported(
+        self, monkeypatch: pytest.MonkeyPatch, source_frames: int, fresh_from: int | None, expected: dict[str, Any],
+    ) -> None:
+        """Plan §3.6 (report only; D2 restart@4 expects 1 frame): the pre-paint frames between the last
+        one painting the source instance and the first on which the fresh decoder paints its
+        destination; an unpainted element at the slot never closes the gap."""
+        monkeypatch.setattr(probe.paint_instrument, "painted_state", lambda pv, **kw: (pv["state"], None))
+        rows = []
+        for index in range(10):
+            videos = [{"id": 3, "src": ASSET, "rect": dict(DST_RECT), "state": "unpainted"}]
+            if index < source_frames:
+                videos.append({"id": 1, "src": ASSET, "rect": dict(SRC_RECT), "state": "painted"})
+            if fresh_from is not None and index >= fresh_from:
+                videos.append({"id": 2, "src": ASSET, "rect": dict(DST_RECT), "state": "painted"})
+            rows.append({"t": index * 16.0, "ts": index * 16.0, "seq": index, "pp": {"videos": videos}})
+        window = {"start": 0.0, "end": 1e9}
+        assert probe.restart_slot_gap(rows, {"asset": ASSET, "srcRect": SRC_RECT}, 2, window, [DST_RECT]) == expected
+
+
+LEG_SPEC = {"id": P2_CARRY34, "kind": "carry", "expect": True, "action": "bridge", "fromPlayer": 2, "toPlayer": 3}
+
+
+def _leg(verdict: bool | None = True, **extra: Any) -> dict[str, Any]:
+    return {"specs": [LEG_SPEC], "verdicts": {P2_CARRY34: {"verdict": verdict}}, "sampler": _sampler_ok(),
+            "reached": True, "verdict": verdict, **extra}
+
+
+def _g_leg_result() -> dict[str, Any]:
+    """A green Pass G result whose armed session carries P2's (1, 3, 4) advance leg."""
+    leg_dest = dict(_g_destination(1, 3, True), advanceTo=4, baseVerdict=True, advanceCarry=_leg())
+    armed = _g_arm([*(_g_destination(f, t, True) for f, t in probe.GOTO_MATRIX), leg_dest])
+    off = _g_arm([_g_destination(f, t, True) for f, t in [*probe.GOTO_MATRIX, (1, 3)]])
+    return {"matrix": [*map(list, probe.GOTO_MATRIX), [1, 3, 4]], "armed": armed, "nullControl": off}
+
+
+def _passg_red_result(expected: Any = (f"G1-3-4:{P2_CARRY34}",), leg_verdict: bool | None = False) -> dict[str, Any]:
+    sha = probe.variant_sha("no-pin-hold")
+    result = _g_leg_result()
+    for session in ("armed", "nullControl"):
+        result[session]["continuity"] = {"mode": "qualified", "sha256": sha}
+    leg = result["armed"]["destinations"][-1]
+    leg["advanceCarry"] = _leg(leg_verdict)
+    leg["advanceCarry"]["verdicts"][P2_CARRY34]["paint"] = {"status": "fail", "longestRun": 108}
+    leg["verdict"] = probe.combine_verdicts(True, leg_verdict)
+    result.update(redArm="core:no-pin-hold", expectedCoreSha256=sha, expectedRedSet=list(expected) if expected is not None else None,
+                  paintFloor=probe.PAINT_FLOOR_MIN_FRAMES)
+    result["redSet"], result["unknown"] = probe.passg_red_ids(result)
+    return result
+
+
+def _paint_control_result(n: int = 6, red: Any = ("T",), check: str = "pass") -> dict[str, Any]:
+    sha = probe.js_sha256()
+    arm = {"continuity": {"mode": "qualified", "sha256": sha}, "stageFit": {"verdict": True}, "unplannedWraps": [],
+           "sampler": _sampler_ok()}
+    return {"arm": arm, "expectedCoreSha256": sha, "controlSpec": {"n": n}, "targetVerdictId": "T",
+            "controlRecord": {"fired": True, "hiddenTicks": n, "aborted": None}, "redSet": list(red), "unknown": [],
+            "paintControl": {"status": check, "reasons": []}}
+
+
+class TestSamplerStatus:
+    @pytest.mark.parametrize(("build", "status_of", "entry_of"), [
+        pytest.param(_base_result, probe.overall_status, lambda r: r["arms"]["A"], id="p2-host-arm"),
+        pytest.param(_base_result, probe.overall_status, lambda r: r["attach"], id="p2-attach"),
+        pytest.param(_generated_result, probe.overall_status, lambda r: r["arms"]["B"], id="generated-host-arm"),
+        pytest.param(lambda: _red_result([P2_CARRY34]), probe.red_arm_status, lambda r: r["arm"], id="red-arm"),
+        pytest.param(_g_leg_result, probe.overall_status_g, lambda r: r["armed"]["destinations"][-1]["advanceCarry"], id="pass-g-leg"),
+        pytest.param(_passg_red_result, probe.passg_red_status, lambda r: r["armed"]["destinations"][-1]["advanceCarry"], id="pass-g-red-leg"),
+        pytest.param(_paint_control_result, probe.paint_control_status, lambda r: r["arm"], id="paint-control"),
+    ])
+    @pytest.mark.parametrize("break_it", [
+        pytest.param(lambda e: e.pop("sampler"), id="no-sampler"),
+        pytest.param(lambda e: e["sampler"].update(schema=1), id="schema-1"),
+        pytest.param(lambda e: e["sampler"].update(selfCheck={"ok": False, "reasons": ["meta.overflow = 3"]}), id="self-check-failed"),
+    ])
+    def test_every_status_fails_closed_without_a_vouching_sampler(
+        self, monkeypatch: pytest.MonkeyPatch, build: Any, status_of: Any, entry_of: Any, break_it: Any,
+    ) -> None:
+        """Plan §3.7 / §4 silent-sampler guard: each fresh-run status passes as built (the positive
+        control), and is an error once the arm's or leg's sampler is missing, not schema 2, or its
+        self-check failed."""
+        if build is _generated_result:
+            monkeypatch.setattr(probe, "visible_reasons", lambda result: [])
+        result = build()
+        assert status_of(result)[0] == "pass"
+        break_it(entry_of(result))
+        assert status_of(result)[0] == "error"
+
+    def test_a_leg_with_no_matching_spec_is_an_error_never_vacuous(self) -> None:
+        result = _g_leg_result()
+        result["armed"]["destinations"][-1]["advanceCarry"] = {"specs": [], "verdicts": {}, "sampler": None, "verdict": None,
+                                                              "error": "no expected-True carry matches the advance 3->4"}
+        status, reasons = probe.overall_status_g(result)
+        assert status == "error" and "no expected-True carry" in reasons[0]
+
+
+class TestPassGRedStatus:
+    def test_red_ids_name_each_leg_verdict_and_each_failed_destination(self) -> None:
+        result = _passg_red_result()
+        result["armed"]["destinations"][0].update(verdict=False, baseVerdict=False)
+        result["nullControl"]["destinations"][0]["verdict"] = None
+        assert probe.passg_red_ids(result) == (["G1-2:destination", f"G1-3-4:{P2_CARRY34}"], ["Goff1-2:destination"])
+
+    @pytest.mark.parametrize(("mutate", "status"), [
+        pytest.param(lambda r: None, "pass", id="registered-red-set"),
+        pytest.param(lambda r: r.update(expectedRedSet=None), "unregistered", id="unregistered"),
+        pytest.param(lambda r: r.update(expectedRedSet=[]), "fail", id="unexpected-red"),
+        pytest.param(lambda r: r.update(redSet=[]), "fail", id="expected-red-came-back-green"),
+        pytest.param(lambda r: r.update(unknown=[f"G1-3-4:{P2_CARRY34}"]), "inconclusive", id="unreadable-leg"),
+        pytest.param(lambda r: r["nullControl"]["continuity"].update(sha256=probe.js_sha256()), "error", id="a-session-ran-the-shipped-core"),
+        pytest.param(lambda r: r["armed"]["continuity"].update(mode="off"), "error", id="continuity-off"),
+        pytest.param(lambda r: r["armed"].update(outputVisible=False), "error", id="output-hidden"),
+    ])
+    def test_passg_red_status_truth_table(self, mutate: Any, status: str) -> None:
+        """Plan §3.9, after `red_arm_status`: the variant must have run in both sessions (its core sha);
+        then the red multiset must equal the registration exactly."""
+        result = _passg_red_result()
+        mutate(result)
+        assert probe.passg_red_status(result)[0] == status
+
+
+    @pytest.mark.parametrize(("mutate", "status"), [
+        pytest.param(lambda leg, dest: None, "pass", id="complete-control"),
+        pytest.param(lambda leg, dest: (leg.update(reached=None, verdict=None), dest.update(verdict=None)),
+                     "inconclusive", id="leg-reached-unknown"),
+        pytest.param(lambda leg, dest: leg.pop("reached"), "inconclusive", id="leg-reached-missing"),
+        pytest.param(lambda leg, dest: dest.update(verdict=None), "inconclusive", id="destination-verdict-unknown"),
+    ])
+    def test_an_unknown_leg_is_inconclusive_never_a_registered_pass(self, mutate: Any, status: str) -> None:
+        """Astra r8 #1: an unknown in the advance leg (reached, leg or destination verdict) is
+        inconclusive before the red-set comparison; the complete record keeps its registered pass."""
+        result = _passg_red_result()
+        dest = result["armed"]["destinations"][-1]
+        mutate(dest["advanceCarry"], dest)
+        result["redSet"], result["unknown"] = probe.passg_red_ids(result)
+        assert probe.passg_red_status(result)[0] == status
+
+
+class TestPaintControlStatus:
+    @pytest.mark.parametrize(("result", "status"), [
+        pytest.param(_paint_control_result(), "pass", id="target-only-red-and-exact-seq-set"),
+        pytest.param(_paint_control_result(n=0, red=()), "pass", id="n0-null-nothing-red"),
+        pytest.param(_paint_control_result(n=0), "fail", id="n0-but-the-target-went-red"),
+        pytest.param(_paint_control_result(red=()), "fail", id="hidden-frames-but-target-green"),
+        pytest.param(_paint_control_result(red=("T", "other")), "fail", id="another-verdict-red"),
+        pytest.param(_paint_control_result(check="fail"), "fail", id="seq-set-off-by-one"),
+        pytest.param(_paint_control_result(check="inconclusive"), "inconclusive", id="integrity-break"),
+        # Astra r7 #4: an integrity break is never overwritten by a mismatching red set.
+        pytest.param(_paint_control_result(red=(), check="inconclusive"), "inconclusive", id="integrity-break-before-red-set"),
+        pytest.param(dict(_paint_control_result(), controlRecord=None), "error", id="no-record"),
+        pytest.param(dict(_paint_control_result(), controlRecord={"aborted": "decoder parent changed"}), "error", id="aborted"),
+        pytest.param(dict(_paint_control_result(), expectedCoreSha256="0" * 64), "error", id="not-the-shipped-core"),
+        pytest.param(dict(_paint_control_result(), unknown=["T"]), "inconclusive", id="unreadable-verdict"),
+    ])
+    def test_paint_control_status_truth_table(self, result: dict[str, Any], status: str) -> None:
+        assert probe.paint_control_status(result)[0] == status
+
+
+class _LegTransport:
+    def __init__(self, events: list[str], rows: list[dict[str, Any]]) -> None:
+        self.events = events
+        self.drains = [[], rows, []]
+
+    def evaluate(self, js: str) -> Any:
+        self.events.append({probe.SAMPLER_DRAIN_JS: "drain", probe.SAMPLER_START_JS: "start", probe.SAMPLER_STOP_JS: "stop"}.get(js, js))
+        return self.drains.pop(0) if js == probe.SAMPLER_DRAIN_JS else None
+
+
+class TestAdvanceLeg:
+    # Astra r1 #3 / r2 C: any end of show in the leg is inconclusive, even after a fully covered window.
+    # Astra r6 #5: unreadable exit evidence (hash/sceneCount) or observed slide is inconclusive, never green or red.
+    @pytest.mark.parametrize(("end_of_show", "break_it", "verdict", "reason"), [
+        pytest.param(False, None, True, None, id="no-end-of-show"),
+        pytest.param(True, None, None, "the leg passed the end of show at t=3.0",
+                     id="end-of-show-after-the-scored-window-is-inconclusive"),
+        pytest.param(False, lambda rows: rows[1].update(hash=""), None, "1 leg row(s) have no readable hash/sceneCount",
+                     id="unreadable-hash-is-inconclusive"),
+        pytest.param(False, lambda rows: rows[1].pop("sceneCount"), None, "1 leg row(s) have no readable hash/sceneCount",
+                     id="missing-scene-count-is-inconclusive"),
+        pytest.param(False, "slide", None, None, id="unreadable-observed-slide-is-inconclusive"),
+    ])
+    def test_a_leg_restarts_the_sampler_on_the_source_then_scores_its_carry_per_frame(
+        self, monkeypatch: pytest.MonkeyPatch, end_of_show: bool, break_it: Any, verdict: bool | None, reason: str | None,
+    ) -> None:
+        """Plan §3.8 call order: drain-and-discard, start, click delay, advance, settle, pad, stop,
+        drain; every row of the leg is scored against its specs with the session's continuity. Any
+        end of show (`hash >= sceneCount`) in the leg is reported and makes its verdicts inconclusive,
+        never green or red."""
+        events: list[Any] = []
+        rows = [{"t": float(i), "hash": "#7", "sceneCount": 9, "videos": [], "stageMap": None} for i in range(3)]
+        if end_of_show:
+            rows += [{"t": 3.0 + i, "hash": "#9", "sceneCount": 9, "videos": [], "stageMap": None} for i in range(2)]
+        if callable(break_it):
+            break_it(rows)
+        transport = _LegTransport(events, rows)
+        slide = None if break_it == "slide" else 4
+        player = argparse.Namespace(
+            _require_transport=lambda: transport, observe=lambda: argparse.Namespace(original_slide=slide, busy=False),
+        )
+        seen: dict[str, Any] = {}
+
+        def score_verdicts(samples: Any, evidence: Any, facts: Any, installed: bool, continuity: Any, *, schema: Any) -> dict[str, Any]:
+            seen.update(times=[row["t"] for row in samples], installed=installed, specs=facts["verdicts"], schema=schema)
+            return {P2_CARRY34: {"verdict": True, "window": {"start": 0.0, "end": 2.5}}}
+
+        monkeypatch.setattr(probe.time, "sleep", lambda s: events.append(f"sleep {s}"))
+        monkeypatch.setattr(probe, "advance_until_original_slide", lambda p, ordinal: events.append(f"advance {ordinal}"))
+        monkeypatch.setattr(probe, "wait_until_settled", lambda p: events.append("settled"))
+        monkeypatch.setattr(probe, "sampler_record", lambda t, r: _sampler_ok())
+        monkeypatch.setattr(probe, "score_verdicts", score_verdicts)
+        leg = probe.run_advance_leg(player, 3, 4, [LEG_SPEC], {"mode": "qualified"})
+        assert events == [
+            "drain", "start", f"sleep {probe.CLICK_DELAY_S}", "advance 4", "settled", f"sleep {probe.WINDOW_PAD_S}",
+            "stop", "drain", "drain",
+        ]
+        assert seen == {"times": [r["t"] for r in rows], "installed": True, "specs": [LEG_SPEC], "schema": 2}
+        assert leg["verdict"] is verdict
+        assert leg["endOfShow"] == ({"rows": 2, "firstT": 3.0} if end_of_show else None)
+        if break_it == "slide":
+            assert leg["reached"] is None and leg["reasons"] == ["advance did not reach slide 4 (reached=None)"]
+        else:
+            assert leg["verdicts"][P2_CARRY34]["verdict"] is verdict
+            assert leg["reasons"] == ([] if verdict else [f"{P2_CARRY34}=None"])
+        if reason:
+            assert leg["verdicts"][P2_CARRY34]["reason"] == f"inconclusive: {reason}"
+
+    def test_a_leg_without_a_matching_spec_is_an_error_and_drives_nothing(self) -> None:
+        leg = probe.run_advance_leg(argparse.Namespace(), 3, 4, [], {"mode": "qualified"})
+        assert leg["verdict"] is None and "no expected-True carry" in leg["error"]
+
+
+class TestInstrumentArgs:
+    def test_pass_g_takes_a_core_variant_and_dispatches_to_pass_g(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Plan §3.9 (owner decision 4): `--pass G --core-variant NAME` is a Pass G red arm; `run_cli`
+        checks the pass before dispatching a host red arm. `--pass` with `--strip` stays refused."""
+        args = probe.parse_args(["--pass", "G", "--core-variant", "no-pin-hold", "--fixture", str(tmp_path),
+                                 "--original-index", str(tmp_path / "index.html")])
+        (tmp_path / "index.html").write_text("")
+        ran: list[str] = []
+        monkeypatch.setattr(probe, "run_pass_g_cli", lambda a: ran.append("G"))
+        monkeypatch.setattr(probe, "run_red_arm_cli", lambda a: ran.append("red"))
+        probe.run_cli(args)
+        assert ran == ["G"]
+        with pytest.raises(SystemExit):
+            probe.parse_args(["--pass", "G", "--strip", "bridge@8"])
+
+    @pytest.mark.parametrize(("value", "parsed"), [
+        ("6:ancestor-opacity:pin@2", {"n": 6, "variant": "ancestor-opacity", "phase": "pin", "atScene": 2, "timing": "early", "depth": 1}),
+        ("0:ancestor-opacity:pin@2:late", {"n": 0, "variant": "ancestor-opacity", "phase": "pin", "atScene": 2, "timing": "late", "depth": 1}),
+        ("6:ancestor-display:settled@2", {"n": 6, "variant": "ancestor-display", "phase": "settled", "atScene": 2, "timing": "early", "depth": 2}),
+        ("6:element-visibility:bridge@2:late:depth=1", {"n": 6, "variant": "element-visibility", "phase": "bridge", "atScene": 2, "timing": "late", "depth": 1}),
+        ("6:ancestor-display:pin@2", None),
+        ("6:ancestor-half:settled@2:depth=1", None),
+        ("6:ancestor-dim:pin@2", None),
+        ("6:ancestor-opacity:pin", None),
+        ("6:ancestor-opacity:pin@2:late:late", None),
+        ("x:ancestor-opacity:pin@2", None),
+    ])
+    def test_paint_control_parses_or_is_refused(self, value: str, parsed: dict[str, Any] | None) -> None:
+        """Plan §3.10: `ancestor-display` only at `settled`; `settled` needs depth >= 2."""
+        if parsed is None:
+            with pytest.raises(SystemExit):
+                probe.parse_args(["--paint-control", value])
+        else:
+            assert probe.parse_args(["--paint-control", value]).paint_control == {"raw": value, **parsed}
+
+    @pytest.mark.parametrize("extra", [["--attach"], ["--core-variant", "no-pin-hold"], ["--pass", "G"], ["--gl-replay", "auto"]])
+    def test_paint_control_runs_on_its_own_in_launch_mode(self, extra: list[str]) -> None:
+        with pytest.raises(SystemExit):
+            probe.parse_args(["--paint-control", "6:ancestor-opacity:pin@2", *extra])
+
+    @pytest.mark.parametrize(("value", "target"), [
+        ("6:ancestor-opacity:pin@2", f"b0to1:{probe._A}:carry"),
+        ("6:ancestor-opacity:pin@4", f"b1to2:{probe._A}:carry"),
+        ("6:ancestor-opacity:bridge@2", None),
+        ("6:ancestor-display:settled@2", None),
+        ("6:ancestor-opacity:pin@3", None),
+    ])
+    def test_the_control_targets_exactly_one_expected_true_carry_of_its_action(self, value: str, target: str | None) -> None:
+        """Plan §3.10 on the committed D5 plan (pins at 2 and 4, no bridge): a phase/scene that
+        matches no carry of that action, or `settled` on a non-bridge, is refused."""
+        specs = probe.verdict_specs(_deck_plan("D5"))
+        control = probe.parse_paint_control(value)
+        if target is None:
+            with pytest.raises(SystemExit):
+                probe.paint_control_target(specs, control)
+        else:
+            assert probe.paint_control_target(specs, control)["id"] == target
+
+
+def _fold3_restart_samples(case: str) -> list[dict[str, Any]]:
+    """`_p2_run_samples` (restart at scene 6, first destination row t=5000) with one unknown injected."""
+    samples = _p2_run_samples()
+    pin, dst = _p2_facts()["pinRect"], _p2_facts()["bridgeSrcRect"]
+
+    def extra(t: float, scene: Any, vid: dict[str, Any], state: Any = "IdleAtFinalState", busy: Any = False) -> None:
+        row = sample(t, scene, vid)
+        row.update(playerState=state, busy=busy)
+        samples.append(row)
+
+    if case in ("readablePrior", "unplacedPrior"):
+        scene = 2 if case == "readablePrior" else None
+        extra(1025.0, scene, video(id=2, el_id=2, t=1025.0, scene=scene, current_time=9.0, rect=dict(dst)))
+    elif case == "unplacedLeak":
+        extra(5025.0, None, video(id=1, el_id=1, t=5025.0, scene=None, current_time=9.0, rect=dict(pin)))
+    elif case == "destinationPhase":
+        off = {**dst, "x": dst["x"] + 60}
+        extra(5025.0, 6, video(id=2, el_id=2, t=5025.0, scene=6, current_time=0.03, rect=off), state="Playing", busy=None)
+    elif case == "destinationRect":
+        vid = video(id=2, el_id=2, t=5025.0, scene=6, current_time=0.03, rect=dict(dst))
+        vid["rect"] = None
+        extra(5025.0, 6, vid)
+    elif case == "startClock":
+        samples[100]["videos"][0]["currentTime"] = None
+    elif case == "endClock":
+        samples[-1]["videos"][0]["currentTime"] = None
+    return sorted(samples, key=lambda r: r["t"])
+
+
+class TestFold3UnknownEvidenceNeverAVerdict:
+    """S2 fold3 (Astra r9 + the older-scorer audit): every unknown input to an older scorer --
+    missing, null where not allowed, an error object, ill-typed -- is INCONCLUSIVE (INVALID for a
+    force-wrap take), never a pass, a fail or a red; the complete record keeps its outcome. Each
+    injected case scored a pass or a fail (or crashed) before the fold."""
+
+    @pytest.mark.parametrize(("case", "strict", "legacy", "raw"), [
+        ("complete", True, True, True),
+        ("readablePrior", False, False, False),
+        ("unplacedPrior", None, None, None),  # Astra r9 #1: a FALSE PASS before the fold
+        ("unplacedLeak", None, None, None),  # fold5 v3 #6: a null-scene row after the first placed one may be either side
+        ("destinationPhase", None, True, True),
+        ("destinationRect", None, True, True),
+        ("startClock", None, None, None),  # strict: the sample schema refuses a null clock
+        ("endClock", None, True, None),  # raw restart crashed before the fold
+    ])
+    def test_restart_scorers(self, case: str, strict: bool | None, legacy: bool | None, raw: bool | None) -> None:
+        samples = _fold3_restart_samples(case)
+        assert probe.score_restart_strict(samples, _spec(_p2_facts(), P2_RESTART23))["verdict"] is strict
+        assert probe.score_restart(samples, "untitled.mov", 6)["verdict"] is legacy
+        assert probe.score_raw_restart(samples, "untitled.mov", 6)["verdict"] is raw
+
+    @pytest.mark.parametrize("case", [
+        "complete", "paintingError", "noStageMap", "poolError", "poolEntryNotObject", "inDocumentMissing", "notesNull",
+        "apiStateIllTyped", "readTime", "carriedClock", "carriedDelta", "zoneIllTyped", "noContinuity", "noOwner",
+    ])
+    def test_armed_scorers(self, case: str) -> None:
+        """Astra r9 #3a: a painting-probe error object was a red in strict armed scoring."""
+        reads, continuity, samples = _armed_reads(), json.loads(json.dumps(GL_CONTINUITY)), copy.deepcopy(PRE_FLIP)
+        last = _gl(reads[1])
+        if case == "paintingError":
+            reads[1]["painting"] = {"error": "checkVisibility is unavailable in this browser"}
+        elif case == "noStageMap":
+            reads[1]["stageMap"] = None
+        elif case == "poolError":
+            last["pool"] = {"error": "boom"}
+        elif case == "poolEntryNotObject":
+            last["pool"].append(7)
+        elif case == "inDocumentMissing":
+            del last["pool"][1]["inDocument"]
+        elif case == "notesNull":
+            last["coreEvents"] = None
+        elif case == "apiStateIllTyped":
+            last["api"]["state"] = 3
+        elif case == "readTime":
+            last["t"] = None
+        elif case == "carriedClock":
+            last["pool"][0]["currentTime"] = None
+        elif case == "carriedDelta":
+            for event in last["coreEvents"]:
+                event["detail"].pop("delta", None)
+        elif case == "zoneIllTyped":
+            _set_detail(reads[1], "glreplay-zone", to=None)
+        elif case == "noContinuity":
+            continuity = None
+        elif case == "noOwner":
+            samples[0]["videos"][0]["footprintOwner"] = None
+        expected = True if case == "complete" else None
+        assert probe.score_armed_strict(reads, ARMED, continuity, samples)["verdict"] is expected
+        owners = probe.pre_flip_owner_ids(samples, ARMED)
+        assert probe.score_armed(reads, ARMED, continuity, owner_ids=owners)["verdict"] is expected
+
+    @pytest.mark.parametrize("case", [
+        "complete", "poolError", "paintingError", "noStageMap", "notesNull", "apiEventsIllTyped", "releaseMode",
+        "facadesMissing", "noBefore",
+    ])
+    def test_handback_scorers(self, case: str) -> None:
+        """Astra r9 #3b: a hand-back pool error beside readable, passing parity was a red."""
+        record = _hb_vgl_record()
+        if case == "poolError":
+            record["before"]["pool"] = {"error": "boom"}
+        elif case == "paintingError":
+            record["painting"] = {"error": "x"}
+        elif case == "noStageMap":
+            record["stageMap"] = None
+        elif case == "notesNull":
+            record["after"]["coreEvents"] = None
+        elif case == "apiEventsIllTyped":
+            record["after"]["api"]["events"] = None
+        elif case == "releaseMode":
+            del record["after"]["coreEvents"][1]["detail"]["mode"]
+        elif case == "facadesMissing":
+            record["after"]["facades"] = None
+        elif case == "noBefore":
+            del record["before"]
+        v, g = _hb_frames()
+        scored = probe.score_handback(_hb_v_record(), v, record, g, ARMED)
+        assert scored["carry"]["verdict"] is (True if case == "complete" else None), scored
+        assert scored["verdict"] is (True if case == "complete" else None), scored
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("complete", True),
+        ("readableRemount", False),
+        ("remountAndPoolNull", None),  # Astra r9 #4
+        ("remountAndNotesNull", None),
+        ("snapshotEntryNotObject", None),  # a FALSE PASS before the fold
+        ("snapshotEntryWithoutKey", None),  # a FALSE PASS before the fold
+        ("handbackPriorUnplaced", None),  # a FALSE PASS before the fold
+        ("handbackPhaseUnreadable", None),
+    ])
+    def test_retire_scorers(self, case: str, expected: bool | None) -> None:
+        read, samples = _retire_read((RETIRE_NOTE,)), _handback_samples()
+        if case in ("readableRemount", "remountAndPoolNull", "remountAndNotesNull"):
+            samples = _handback_samples(remounted=True)
+        if case == "remountAndPoolNull":
+            read["poolSnapshot"] = None
+        elif case == "remountAndNotesNull":
+            read["coreEvents"] = None
+        elif case == "snapshotEntryNotObject":
+            read["poolSnapshot"] = [7]
+        elif case == "snapshotEntryWithoutKey":
+            read["poolSnapshot"] = [{"elId": 3, "inDocument": False}]
+        elif case == "handbackPriorUnplaced":
+            samples = _handback_samples(before=True)
+            for row in samples:
+                if row["scene"] == 1:
+                    row["scene"] = None
+        elif case == "handbackPhaseUnreadable":
+            samples = _handback_samples(rect={"x": 400.0, "y": 100.0, "w": 300.0, "h": 100.0})
+            row = next(r for r in samples if r["scene"] == 4)
+            row["busy"] = None
+            row["videos"][0]["rect"] = dict(_p2_facts()["pinRect"])
+        assert probe.score_retire(read, _spec(_p2_facts(), P2_RETIRE12), True, samples)["verdict"] is expected
+        if case.startswith("snapshot"):
+            assert probe.score_refusal(read, {"assetKeys": ["untitled.mov"], "rects": [BIG_INSTANCE]}, True)["verdict"] is None
+
+    @pytest.mark.parametrize("case", [
+        "complete", "refusalPoolUnreadable", "refusalAbsent", "noAfter", "notesNull", "standDownsIllTyped",
+        "vErrored", "vNoSlides", "gModeMissing",
+    ])
+    def test_forced_fail_scorer(self, case: str) -> None:
+        """Astra r9 #3c: the forced run's legacy refusal turned an unreadable `poolSnapshot` into `forced-fail`."""
+        kwargs: dict[str, Any] = {
+            "v_pass": _v_reference(), "g_pass": _forced_pass([True] * 4), "refusal": {"verdict": True},
+            "g_handback": _forced_after("posterAmbiguous"), "parity": {"verdict": True}, "reason": "posterAmbiguous",
+            "splice": {"splices": 1},
+        }
+        if case == "refusalPoolUnreadable":
+            sample = {"stageMap": dict(GL_STAGE), "painting": [], "poolSnapshot": {"error": "boom"}}
+            kwargs["refusal"] = probe.score_refusal(sample, {"assetKeys": ["untitled.mov"], "rects": [BIG_INSTANCE]}, True)
+        elif case == "refusalAbsent":
+            kwargs["refusal"] = None
+        elif case == "noAfter":
+            kwargs["g_handback"] = {"status": "inconclusive"}
+        elif case == "notesNull":
+            kwargs["g_handback"]["after"]["coreEvents"] = None
+        elif case == "standDownsIllTyped":
+            kwargs["g_handback"]["after"]["api"]["standDowns"] = None
+        elif case == "vErrored":
+            kwargs["v_pass"] = dict(_v_reference(), status="error", error="boom")
+        elif case == "vNoSlides":
+            kwargs["v_pass"] = dict(_v_reference(), slides=[])
+        elif case == "gModeMissing":
+            kwargs["g_pass"] = dict(_forced_pass([True] * 4), continuity={"mode": "qualified"})
+        assert probe.score_forced(**kwargs)["status"] == ("forced-ok" if case == "complete" else "inconclusive")
+
+    @pytest.mark.parametrize(("case", "status"), [
+        ("complete", "pass"),
+        ("armedComplete", "pass"),
+        ("armedNoStageMap", "invalid"),  # Astra r9 #2: a fail before the fold
+        ("armedPaintingError", "invalid"),
+        ("armedNotesNull", "invalid"),
+        ("armedNoSeekedElId", "invalid"),
+        ("fallbackNotesNull", "invalid"),  # Astra r9 #2: a FALSE PASS (rawRestart) before the fold
+        ("fallbackZoneIllTyped", "invalid"),
+        ("noProbeId", "invalid"),
+        ("continuityWrapsMissing", "invalid"),
+        ("recorderFrameUnreadable", "invalid"),  # crashed before the fold
+        ("recorderNoDuration", "invalid"),
+    ])
+    def test_force_wrap_scorers(self, case: str, status: str) -> None:
+        recorder, kwargs = _fw_recorder(), {}
+        armed_kwargs: dict[str, Any] = {"boundary": "1to2", "reads": _fw_reads(), "armed": ARMED, "continuity": {"verdict": False}}
+        if case.startswith("armed"):
+            kwargs = armed_kwargs
+            if case == "armedNoStageMap":
+                kwargs["reads"][1]["stageMap"] = None
+            elif case == "armedPaintingError":
+                kwargs["reads"][1]["painting"] = {"error": "x"}
+            elif case == "armedNotesNull":
+                _gl(kwargs["reads"][1])["coreEvents"] = None
+            elif case == "armedNoSeekedElId":
+                recorder["elId"] = None
+        elif case.startswith("fallback"):
+            reads = _fw_reads(zones=[("armed", "retired", "failure")])
+            for read in reads:
+                _gl(read)["api"]["state"] = "RETIRED"
+                read["painting"] = [{"src": "untitled.mov", "elId": None, "rect": dict(BIG_INSTANCE)}]
+                if case == "fallbackNotesNull":
+                    _gl(read)["coreEvents"] = None
+                else:
+                    for event in _gl(read)["coreEvents"]:
+                        if event["kind"] == "glreplay-zone":
+                            event["detail"]["to"] = None
+            kwargs = {**armed_kwargs, "reads": reads, "restart": {"verdict": True}}
+        elif case == "noProbeId":
+            recorder["probeId"] = None
+        elif case == "continuityWrapsMissing":
+            kwargs = {"continuity": {"verdict": True, "elementId": 1}}
+        elif case == "recorderFrameUnreadable":
+            del recorder["frames"][3]["mediaTime"]
+        elif case == "recorderNoDuration":
+            recorder["duration"] = None
+            assert probe.score_recorder_clock(recorder, _fw_window())["verdict"] is None
+        assert _fw_score(recorder=recorder, **kwargs)["status"] == status
+
+
+class TestFold4MissingIdentityAndPairsNeverAVerdict:
+    """S2 fold4 (Astra r10 #1-#5): an unplaced carry row, a preserved decoder known only by its
+    stamps, an entry or painter with no identity, a rescore without its sampler check, and a
+    carry-cover frame without a readable read pair are never a pass (nor a manufactured fail);
+    the readable controls keep their outcome. Every case marked "r10" scored a pass on 4a389a72
+    (the carry-cover opacity case a manufactured fail, the status case a fail)."""
+
+    @pytest.mark.parametrize(("case", "expected", "carry"), [
+        ("complete", True, True),
+        ("offSlot", False, False),
+        ("offSlotUnowned", False, None),  # score_carry: an unowned row is an integrity gap
+        ("offSlotUnownedUnplaced", None, None),  # r10 #1: row 21 off-slot, unowned and scene None passed both
+        ("offSlotUnownedSrcCleared", None, None),  # fold4 verify: the row's src "" dropped it from the track; passed
+        ("offSlotUnownedSrcOther", None, None),  # fold4 verify: same with another movie's src; passed
+    ])
+    def test_carry_keeps_an_unplaced_row(self, case: str, expected: bool | None, carry: bool | None) -> None:
+        samples = rows_around_boundary()
+        for row in samples:
+            row.update(playerState="IdleAtFinalState", busy=False)
+        if case != "complete":
+            row = samples[21]
+            row["videos"][0]["rect"]["x"] += 50
+            if case != "offSlot":
+                row["videos"][0]["footprintOwner"] = None
+            if case == "offSlotUnownedUnplaced":
+                row["scene"] = None
+            if case.startswith("offSlotUnownedSrc"):
+                row["videos"][0]["src"] = "" if case.endswith("Cleared") else "other.mov"
+        assert probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, True)["verdict"] is expected
+        spec = {"asset": ASSET, "atScene": 2.0, "srcRect": SRC_RECT, "dstRect": DST_RECT, "transitionScene": None}
+        assert probe.score_carry(samples, spec, True)["verdict"] is carry
+
+    @pytest.mark.parametrize(("entry", "expected"), [
+        (None, True),
+        ({"key": "untitled.mov", "movieKey": "movie1"}, False),
+        ({"key": "", "movieKey": "movie1"}, False),  # r10 #2: a cleared source, identified by its stamps, passed
+        ({"key": "", "movieKey": None, "instance": None}, None),  # r10 #2/#3: nothing identifies it; passed
+        ("unplacedRow", None),  # closing sweep: a mid-run scene-None row could shift the retire zone; passed
+        ("busyUnreadable", None),  # fold4 verify: a null busy before the zone's end shifts it the same way; passed
+    ])
+    def test_retire_identifies_a_preserved_decoder_by_its_stamps(self, entry: Any, expected: bool | None) -> None:
+        pool = () if not isinstance(entry, dict) else [{
+            "instance": P2_SLIDE1_OBJECT_ID, "elId": 3, "inDocument": True, "fromDom": True, **entry,
+        }]
+        samples = _handback_samples()
+        if entry == "unplacedRow":
+            next(r for r in samples if r["scene"] == 2)["scene"] = None
+        elif entry == "busyUnreadable":
+            next(r for r in samples if r["scene"] == 2)["busy"] = None
+        read = _retire_read((RETIRE_NOTE,), pool=pool)
+        assert probe.score_retire(read, _spec(_p2_facts(), P2_RETIRE12), True, samples)["verdict"] is expected
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("complete", True),
+        ("preFlipOtherOwner", False),
+        ("poolEntryNoIdentity", None),  # r10 #3a
+        ("unplacedOtherOwner", None),  # closing sweep: a scene-None row's owner was dropped from the census
+        ("preFlipForeignAtRect", False),  # Astra r14 #1: a foreign decoder at the instance rect was dropped by its src
+    ])
+    def test_armed_identity_and_placement(self, case: str, expected: bool | None) -> None:
+        reads, samples = _armed_reads(), copy.deepcopy(PRE_FLIP)
+        if case == "poolEntryNoIdentity":
+            for read in reads:
+                _gl(read)["pool"].append({"elId": 99, "inDocument": True})
+        elif case in ("preFlipOtherOwner", "unplacedOtherOwner"):
+            other = copy.deepcopy(samples[0])
+            other["videos"][0]["footprintOwner"] = {"elId": 2}
+            other["scene"] = 1 if case == "preFlipOtherOwner" else None
+            samples.append(other)
+        elif case == "preFlipForeignAtRect":
+            owner = {"elId": None, "key": None, "via": "none", "contextType": None}
+            samples.append({"scene": 1, "videos": [{"id": 9, "src": "foreign.mov", "rect": dict(BIG_INSTANCE),
+                                                    "readyState": 4, "videoWidth": 640, "footprintOwner": owner}]})
+        assert probe.score_armed_strict(reads, ARMED, GL_CONTINUITY, samples)["verdict"] is expected
+        owners = probe.pre_flip_owner_ids(samples, ARMED)
+        assert probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=owners)["verdict"] is expected
+
+    @pytest.mark.parametrize(("facades", "expected"), [
+        (None, True),
+        ([{"elId": 7, "forElId": None}], True),  # explicit nulls are readable
+        ([{"error": "unreadable"}], None),  # r10 #3b
+    ])
+    def test_handback_facade_entries(self, facades: Any, expected: bool | None) -> None:
+        record = _hb_vgl_record()
+        if facades is not None:
+            record["after"]["facades"] = facades
+        assert probe.score_handback_carry(record, ARMED)["verdict"] is expected
+
+    @pytest.mark.parametrize(("note", "expected"), [
+        ({"kind": "remount-done", "t": 1.0, "detail": {"elId": 1, "key": "untitled.mov", "sceneHash": "#3"}}, False),
+        ({"kind": "remount-done", "t": 1.0, "detail": {"elId": 9, "key": "untitled.mov", "sceneHash": "#3"}}, True),
+        ({"kind": "remount-done", "detail": {"key": "untitled.mov"}}, None),  # fold4 verify: no elId; passed
+        ({"kind": "remount-done", "detail": "unreadable"}, None),  # fold4 verify: non-object detail; passed
+        ({"kind": "remount-footprint-rect", "detail": {"rect": {}}}, None),  # fold4 verify: passed
+    ])
+    def test_handback_remount_notes_need_an_element(self, note: dict[str, Any], expected: bool | None) -> None:
+        record = _hb_vgl_record()
+        record["after"]["coreEvents"].append(note)
+        assert probe.score_handback_carry(record, ARMED)["verdict"] is expected
+
+    @pytest.mark.parametrize(("detail", "expected"), [
+        ({"elId": 3}, False),  # linked by RETIRE_NOTE's elIds
+        ({"elId": 9, "key": "other.mov"}, True),  # keyed to another movie: set aside
+        ({"elId": 9}, None),  # fold4 verify: nothing identifies it; passed
+        ({"elId": 9, "key": ""}, None),  # fold4 verify: cleared source; passed
+        ({}, None),  # fold4 verify: no elId; passed
+        ("unreadable", None),  # fold4 verify: non-object detail; passed
+    ])
+    def test_retire_carry_notes_need_identity(self, detail: Any, expected: bool | None) -> None:
+        note = {"kind": "remount-scheduled", "t": 1.0,
+                "detail": {**detail, "sceneHash": "#2"} if isinstance(detail, dict) else detail}
+        read = _retire_read((note, RETIRE_NOTE))
+        assert probe.score_retire(read, _spec(_p2_facts(), P2_RETIRE12), True, _handback_samples())["verdict"] is expected
+
+    @pytest.mark.parametrize(("painter", "status", "outcome"), [
+        ({"elId": None}, "pass", "rawRestart"),
+        ({"elId": 1}, "fail", None),
+        ({}, "invalid", None),  # r10 #3c: a missing elId read as "unpreserved" and passed rawRestart
+    ])
+    def test_force_wrap_fallback_needs_the_painters_identity(self, painter: dict[str, Any], status: str, outcome: Any) -> None:
+        reads = _fw_reads(zones=[("armed", "retired", "failure")])
+        for read in reads:
+            _gl(read)["api"]["state"] = "RETIRED"
+            read["painting"] = [{"src": "untitled.mov", "rect": dict(BIG_INSTANCE), **painter}]
+        result = _fw_score(boundary="1to2", reads=reads, armed=ARMED, continuity={"verdict": False}, restart={"verdict": True})
+        assert (result["status"], result["outcome"]) == (status, outcome)
+
+    @pytest.mark.parametrize(("ok", "status"), [(True, "pass"), (False, "invalid")])  # r10 #4
+    def test_rescore_force_wrap_applies_sampler_integrity(
+        self, ok: bool, status: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        saved = {
+            "kind": "live-continuity-probe-force-wrap", "status": "pass", "fixture": "f", "originalIndex": "i",
+            "forceWrap": {"boundary": "1to2", "offsetMs": 375}, "glReplay": {"requested": "auto"},
+            "continuity": GL_CONTINUITY, "samples": [], "recorder": _fw_recorder(), "take": _fw_take(),
+            "reads": _armed_reads_at(FW_SEEKED + 6000.0), "pageErrorNotes": [],
+            "sampler": {"schema": probe.paint_instrument.SAMPLER_SCHEMA, "selfCheck": {"ok": ok}},
+        }
+        path = tmp_path / "fw.json"
+        path.write_text(json.dumps(saved))
+        monkeypatch.setattr(probe, "force_wrap_ground_truth", lambda *a: TestArmedRecorderWindow()._gt())
+        assert probe.rescore_force_wrap(path)["status"] == status
+        args = probe.parse_args(["--rescore", str(path)])
+        if ok:
+            probe.run_rescore_cli(args)
+        else:
+            with pytest.raises(SystemExit):
+                probe.run_rescore_cli(args)
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("clean", "pass"),
+        ("linear", "fail"),
+        ("disagreeing", "inconclusive"),
+        ("disagreeingWithoutPre", "inconclusive"),  # r10 #5: the pre reads removed, it passed
+        ("cleanWithoutOpacity", "inconclusive"),  # r10 #5: bool(None) manufactured a fail
+    ])
+    def test_carry_cover_needs_readable_read_pairs(self, case: str, expected: str) -> None:
+        kw: dict[str, Any] = {}
+        if case == "linear":
+            kw["overlay_curve"] = lambda p: p
+        elif case.startswith("disagreeing"):
+            kw["pre_read"] = lambda ts: _cc_fast_rect(ts - 2 * CC_FRAME_MS)
+        frames, rows, notes = _cc_scene(duration_s=CC_FAST_S, dst=CC_GROW_DST, **kw)
+        for row in rows:
+            if case == "disagreeingWithoutPre":
+                row["pre"] = []
+            elif case == "cleanWithoutOpacity":
+                for read in (*row["pre"], *row["vids"]):
+                    del read["opaque"]
+        bridge = _cc_bridge(durationSeconds=CC_FAST_S, dstRect=dict(CC_GROW_DST))
+        assert _cc_score(frames, rows, notes, bridge=bridge)["verdict"] == expected
+
+    @pytest.mark.parametrize(("read", "expected"), [
+        ({"w": 1.0, "h": 1.0}, "fail"),  # a 1x1 overlay leaves the poster exposed
+        ({"w": 0.0, "h": 0.0}, "fail"),  # fold4 verify: a collapsed overlay was discarded as unsampled; passed
+        ({"x": None}, "inconclusive"),  # fold4 verify: an unreadable rect was discarded as unsampled; passed
+    ])
+    def test_carry_cover_scores_a_present_carried_read(self, read: dict[str, Any], expected: str) -> None:
+        """Four spread mid-move ticks (both their post and next-tick pre reads) report the carried
+        decoder with `read`'s rect; the poster behind it is painted, so a small overlay exposes it."""
+        frames, rows, notes = _cc_scene()
+        for k in (40, 50, 60, 70):
+            rows[k]["vids"][0].update(read)
+            rows[k + 1]["pre"][0].update(read)
+        assert _cc_score(frames, rows, notes)["verdict"] == expected
+
+    @pytest.mark.parametrize(("second", "status"), [
+        ({"verdict": "pass", "reasons": []}, "fail"),
+        ({"verdict": None, "reasons": ["x"]}, "inconclusive"),  # r10 #5: one fail + one unknown was a fail
+        ({"verdict": "bogus"}, "inconclusive"),
+    ])
+    def test_carry_cover_status_normalises_unknown_bridges_first(self, second: dict[str, Any], status: str) -> None:
+        bridges = [{"boundary": "b1to2", "result": {"verdict": "fail", "reasons": ["strip"]}},
+                   {"boundary": "b3to4", "result": second}]
+        assert probe.carry_cover_status({"mode": "qualified"}, bridges)[0] == status
+
+
+def _fold5_restart_samples(case: str) -> list[dict[str, Any]]:
+    """`_p2_run_samples` (decoder 1 on the pin, a fresh decoder 2 from scene 6) with one row added or rewritten."""
+    samples = _p2_run_samples()
+    pin, dst = _p2_facts()["pinRect"], _p2_facts()["bridgeSrcRect"]
+
+    def extra(t: float, scene: Any, vid: dict[str, Any]) -> None:
+        row = sample(t, scene, vid)
+        row.update(playerState="IdleAtFinalState", busy=False)
+        samples.append(row)
+
+    if case.startswith("prior"):
+        extra(1025.0, 2, video(id=2, el_id=2, t=1025.0, scene=2, current_time=9.0, rect=dict(dst),
+                               src="" if case == "priorSrcCleared" else ASSET))
+    elif case.startswith("leak"):
+        extra(5025.0, 6, video(id=1, el_id=1, t=5025.0, scene=6, current_time=9.0, rect=dict(pin),
+                               src="" if case == "leakSrcCleared" else ASSET))
+    elif case == "freshNamesNoSource":
+        for row in samples:
+            for v in row["videos"]:
+                if v["id"] == 2:
+                    v["src"] = ""
+    return sorted(samples, key=lambda r: r["t"])
+
+
+def _fold5_source_clip_samples(unplaced: bool) -> list[dict[str, Any]]:
+    """Scenes 0x10, 1x5, 2x5, 3x20 (a source slide of two scenes, no transition); the first scene-1 row
+    misses the decoder, and with `unplaced` that row's scene is unreadable."""
+    rows = []
+    for index, scene in enumerate([0] * 10 + [1] * 5 + [2] * 5 + [3] * 20):
+        t = index * 50.0
+        rect = dict(DST_RECT if scene >= 3 else SRC_RECT)
+        videos = [] if index == 10 else [video(id=1, el_id=1, t=t, scene=scene, current_time=5 + t / 1000, rect=rect)]
+        row = sample(t, None if index == 10 and unplaced else scene, *videos)
+        row.update(playerState="IdleAtFinalState", busy=False)
+        rows.append(row)
+    return rows
+
+
+class TestFold5IdentityBeforeSourceAndGrounding:
+    """S2 fold5 (Astra r11 #1-#5 + the closing inventory): rows, painters, facades, notes and reads are
+    resolved by identity before any source or field filter, every row that could ground a window is
+    validated before it is chosen, and an unreadable note or read is never an absent one. Every case
+    marked "r11"/"inv" scored a pass, a True or a matching red on 8ee7077d and is now INCONCLUSIVE
+    (INVALID for a force-wrap take); the readable controls keep their outcome."""
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("offSlot", False),
+        ("offSlotBusyUnreadable", None),  # r11 #1: the source row's busy None moved the grounded start past it
+    ])
+    def test_carry_grounding_validates_the_source_settle_state(self, case: str, expected: bool | None) -> None:
+        samples = moving_boundary_samples()
+        samples[0]["videos"][0]["rect"]["x"] += 50
+        if case == "offSlotBusyUnreadable":
+            samples[0]["busy"] = None
+        assert score_moving_boundary(samples)["verdict"] is expected
+        assert (probe.forced_window(samples, 8, 7, -2000.0) is None) is (expected is None)
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("dark", False),
+        ("darkBusyUnreadable", None),  # inv R2: busy None moved paintStart past the dark frames
+    ])
+    def test_paint_grounding_validates_the_source_settle_state(self, case: str, expected: bool | None) -> None:
+        samples = _v2(rows_around_boundary(n_before=250))
+        for row in samples[10:30]:
+            row["pp"]["videos"][0]["opacity"] = 0.0
+        if case == "darkBusyUnreadable":
+            for row in samples[:31]:
+                row["busy"] = None
+        assert probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, True)["verdict"] is expected
+
+    @pytest.mark.parametrize(("unplaced", "expected"), [
+        (False, False),
+        (True, None),  # inv R10: an unreadable scene moved the chain clip's start past the missing sample
+    ])
+    def test_chain_clip_validates_the_rows_it_could_start_at(self, unplaced: bool, expected: bool | None) -> None:
+        spec = {"asset": ASSET, "atScene": 3, "srcRect": SRC_RECT, "dstRect": DST_RECT, "transitionScene": None,
+                "sourceScene": 1}
+        assert probe.score_carry(_fold5_source_clip_samples(unplaced), spec, True)["verdict"] is expected
+
+    @pytest.mark.parametrize(("case", "strict", "legacy", "raw"), [
+        ("priorNamed", False, False, False),
+        ("priorSrcCleared", None, None, None),  # r11 #2c: the cleared earlier occurrence read as fresh
+        ("leakNamed", False, True, True),
+        ("leakSrcCleared", None, None, None),  # r11 #2b: the cleared leak row vanished (strict passed)
+        ("freshNamesNoSource", None, None, None),  # inv: an untracked fresh decoder made a matching restart red
+    ])
+    def test_restart_scorers_keep_an_identified_decoder(
+        self, case: str, strict: bool | None, legacy: bool | None, raw: bool | None,
+    ) -> None:
+        samples = _fold5_restart_samples(case)
+        assert probe.score_restart_strict(samples, _spec(_p2_facts(), P2_RESTART23))["verdict"] is strict
+        assert probe.score_restart(samples, "untitled.mov", 6)["verdict"] is legacy
+        assert probe.score_raw_restart(samples, "untitled.mov", 6)["verdict"] is raw
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("complete", True),
+        ("otherOwner", False),
+        ("otherOwnerSrcCleared", None),  # r11 #2a: the same decoder's row dropped by its src
+        ("otherOwnerUnreadable", None),  # inv R9: an owner error object read as unresolved and was dropped
+        ("otherOwnerRowVideosNull", None),  # inv: a row whose videos is null vanished from the census
+        ("carriedElIdMissing", None),  # inv: an unreadable carried note made pool and owner a readable False
+        ("siblingFromDomNull", None),  # inv: fromDom null read as "not from the DOM"
+        ("noteWithoutKind", None),  # inv: a note with no kind was no note at all
+    ])
+    def test_armed_census_and_notes_resolve_identity_first(self, case: str, expected: bool | None) -> None:
+        reads, samples = _armed_reads(), copy.deepcopy(PRE_FLIP)
+        samples[0]["videos"][0]["id"] = 1
+        if case.startswith("otherOwner"):
+            other = copy.deepcopy(samples[0])
+            other["videos"][0]["footprintOwner"] = {"error": "unreadable"} if case == "otherOwnerUnreadable" else {"elId": 2}
+            if case == "otherOwnerSrcCleared":
+                other["videos"][0]["src"] = ""
+            elif case == "otherOwnerRowVideosNull":
+                other["videos"] = None
+            samples.append(other)
+        elif case == "carriedElIdMissing":
+            for read in reads:
+                del next(e for e in _gl(read)["coreEvents"] if e["kind"] == "glreplay-carried")["detail"]["elId"]
+        elif case == "siblingFromDomNull":
+            for read in reads:
+                _gl(read)["pool"][1]["fromDom"] = None
+        elif case == "noteWithoutKind":
+            _gl(reads[1])["coreEvents"].append({"kind": None, "detail": {"reason": "glError"}, "t": 1.0})
+        assert probe.score_armed_strict(reads, ARMED, GL_CONTINUITY, samples)["verdict"] is expected
+        owners = probe.pre_flip_owner_ids(samples, ARMED)
+        assert probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=owners)["verdict"] is expected
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("facadeRemounted", False),
+        ("facadeForElIdUnreadable", None),  # r11 #3
+        ("remountElIdString", None),  # inv: '1' missed the guarded set
+        ("secondPainter", False),
+        ("secondPainterNoSource", None),  # inv R7: a src-less painter at the instance rect was filtered out
+        ("secondPainterForeign", False),  # Astra r14 #1: a foreign painter at the carried rect was filtered out
+        ("carriedNoSource", None),  # Astra r13 #2: the carried painter's src cleared (core 2026-2032) passed
+        ("carriedElIdMissing", None),  # inv: an unreadable carried note made painting/release/noRemount False
+    ])
+    def test_handback_carry_resolves_identity_first(self, case: str, expected: bool | None) -> None:
+        record = _hb_vgl_record()
+        after = record["after"]
+        if case.startswith("facade"):
+            after["facades"] = [{"elId": 3, "forElId": {"error": "unreadable"} if case.endswith("Unreadable") else 1}]
+            after["coreEvents"].append(_ev("remount-done", elId=3, key="untitled.mov"))
+        elif case == "remountElIdString":
+            after["coreEvents"].append(_ev("remount-done", elId="1", key="untitled.mov"))
+        elif case.startswith("secondPainter"):
+            screen = probe.to_screen_rect(BIG_INSTANCE, HB_STAGE)
+            src = {"secondPainterNoSource": "", "secondPainterForeign": "foreign.mov"}.get(case, "untitled.mov")
+            record["painting"].append({"src": src, "elId": 999 if case.endswith("Foreign") else 9, "rect": dict(screen)})
+        elif case == "carriedNoSource":
+            record["painting"][0]["src"] = ""
+        elif case == "carriedElIdMissing":
+            del next(e for e in after["coreEvents"] if e["kind"] == "glreplay-carried")["detail"]["elId"]
+        assert probe.score_handback_carry(record, ARMED)["verdict"] is expected
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("seenBefore", False),
+        ("seenBeforeDomIdUnreadable", None),  # inv R3: an error-object domId dropped the rows before elId
+        ("seenBeforeDomIdNull", None),  # inv: the same element's rows without a DOM id vanished
+        ("linkedCarry", False),
+        ("linkedCarryElIdsUnreadable", None),  # inv R4: elIds iterated as dict keys untied decoder 3
+        ("linkedCarryKeyUnreadable", None),  # inv R12: an unreadable key untied decoder 3
+        ("timedCarry", False),
+        ("timedCarryTimeUnreadable", None),  # inv R5: an unreadable t fell back to an out-of-zone scene
+        ("refusalWithoutVia", None),  # inv: a malformed refusal note made the registered "no note" red
+        ("retireBoundaryWithoutElIds", None),  # inv: same, retire-boundary
+    ])
+    def test_retire_resolves_identity_and_placement_first(self, case: str, expected: bool | None) -> None:
+        samples, carry = _handback_samples(), _ev("remount-scheduled", elId=3, key="other.mov", sceneHash="#2")
+        retire, notes = copy.deepcopy(RETIRE_NOTE), [carry, REFUSED_NOTE]
+        if case.startswith("seenBefore"):
+            samples, notes = _handback_samples(before=True), [REFUSED_NOTE]
+            dom_id = {"Unreadable": {"error": "unreadable"}, "Null": None}.get(case.removeprefix("seenBeforeDomId"), P2_SLIDE2_DOM_ID)
+            for row in samples:
+                for v in row["videos"] if row["scene"] == 1 else []:
+                    v["domId"] = dom_id
+        elif case == "linkedCarryElIdsUnreadable":
+            retire["detail"]["elIds"] = {"error": "unreadable"}
+        elif case == "linkedCarryKeyUnreadable":
+            retire["detail"]["key"] = {"error": "unreadable"}
+        elif case.startswith("timedCarry"):
+            for t in (-100.0, -50.0):
+                row = sample(t, 0)
+                row.update(playerState="IdleAtFinalState", busy=False)
+                samples.insert(0, row)
+            carry = _ev("remount-scheduled", elId=3, key="movie1", sceneHash="#9")
+            carry["t"] = "unreadable" if case.endswith("Unreadable") else 1.0
+            notes = [carry, REFUSED_NOTE]
+        elif case == "refusalWithoutVia":
+            notes = [_ev("preserve-refused", key="movie1", scene=1, instance=P2_SLIDE1_OBJECT_ID)]
+        elif case == "retireBoundaryWithoutElIds":
+            notes = [_ev("retire-boundary", key="movie1", atScene=2, instance=P2_SLIDE1_OBJECT_ID)]
+        read = _retire_read((*notes, retire) if case.startswith("linkedCarry") else tuple(notes))
+        assert probe.score_retire(read, _spec(_p2_facts(), P2_RETIRE12), True, samples)["verdict"] is expected
+
+    @pytest.mark.parametrize(("entry", "expected"), [
+        ({"elId": 3}, False),  # a linked decoder outranks the foreign stamp
+        ({}, None),  # inv: without its elId the entry read as another instance's and was set aside
+    ])
+    def test_refusal_snapshot_entries_need_their_element(self, entry: dict[str, Any], expected: bool | None) -> None:
+        snapshot = [{"key": "", "movieKey": None, "instance": "OTHER-OBJECT", "inDocument": True, **entry}]
+        retire = {"assetKeys": ["untitled.mov"], "rects": [BIG_INSTANCE], "srcObjectId": P2_SLIDE1_OBJECT_ID}
+        evidence = {"stageMap": dict(IDENTITY_STAGE_MAP), "painting": [], "poolSnapshot": snapshot}
+        assert probe.score_refusal(evidence, retire, True, linked={3})["verdict"] is expected
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("collapsed", "fail"),
+        ("collapsedWithoutElId", "inconclusive"),  # r11 #4a: unidentified reads were discarded as unsampled
+        ("secondNote", "inconclusive"),
+        ("secondNoteDetailNull", "inconclusive"),  # r11 #4b
+        ("clockNote", "pass"),  # the gl-clock core's report-only bridge-clock note rides the same read
+    ])
+    def test_carry_cover_never_discards_unreadable_reads_or_notes(self, case: str, expected: str) -> None:
+        frames, rows, notes = _cc_scene()
+        if case == "clockNote":
+            notes.append(_cc_clock_note("gl", 7.0))
+        elif case.startswith("collapsed"):
+            for k in (40, 50, 60, 70):
+                for read in (rows[k]["vids"][0], rows[k + 1]["pre"][0]):
+                    read.update(w=0.0, h=0.0)
+                    if case.endswith("WithoutElId"):
+                        del read["elId"]
+        else:
+            second = _cc_note(t=1300.0)
+            if case.endswith("DetailNull"):
+                second["detail"] = None
+            notes.append(second)
+        assert _cc_score(frames, rows, notes)["verdict"] == expected
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("painted", True),
+        ("carriedSrcCleared", None),  # r11 #5: the carried pv dropped by its src manufactured "absent" frames
+        ("dark", False),
+        ("darkWithDuplicatePainted", None),  # inv R13: a second pv with the carried id read last-wins painted
+    ])
+    def test_paint_resolves_the_carried_decoder_by_id_first(self, case: str, expected: bool | None) -> None:
+        samples = _v2(rows_around_boundary(n_before=150, n_after=60, src_rect=DST_RECT, dst_rect=DST_RECT))
+        for row in samples[100:106]:
+            pv = row["pp"]["videos"][0]
+            if case == "carriedSrcCleared":
+                pv["src"] = ""
+            elif case.startswith("dark"):
+                painted = copy.deepcopy(pv)
+                pv["opacity"] = 0.0
+                if case.endswith("Painted"):
+                    row["pp"]["videos"].append(painted)
+        assert probe.score_continuity(samples, ASSET, 2.0, DST_RECT, DST_RECT, True)["verdict"] is expected
+
+    @pytest.mark.parametrize(("case", "status"), [
+        ("videoNotReady", "pass"),
+        ("lastReadUnreadable", "invalid"),  # inv R6: the earlier read's stand-downs stood in for the last one's
+    ])
+    def test_force_wrap_fallback_reads_the_last_read(self, case: str, status: str) -> None:
+        reads = _fw_reads(stand_downs=["videoNotReady"])
+        if case == "lastReadUnreadable":
+            reads[1]["glReplay"] = None
+        assert _fw_score(boundary="1to2", reads=reads, armed=ARMED)["status"] == status
+
+
+def _fold5r1_retire(case: str) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """(read, spec, samples) for P2's 1->2 retire with one carry or refusal note, a stamped decoder or an
+    end-of-plan retire (no destination instance) built for `case`."""
+    spec, samples = _spec(_p2_facts(), P2_RETIRE12), _handback_samples()
+    unreadable = {"error": "unreadable"}
+    if case.startswith("carryStamp"):
+        carry = _ev("reuse-decoder", key="movie1", newElId=7, oldElId=8, src=P2_SLIDE1_OBJECT_ID, dst="OTHER-OBJECT",
+                    atScene=2, sceneHash="#2")
+        if case.endswith("Unreadable"):
+            carry["detail"]["src"] = unreadable
+        notes = [carry, REFUSED_NOTE]
+    elif case.startswith("refusalStamp"):
+        refusal = _ev("preserve-refused", key="movie1", scene=1, via="stash", sceneHash="#1",
+                      instance="ANOTHER-OBJECT", src="ANOTHER-OBJECT")
+        if case.endswith("Unreadable"):
+            refusal["detail"]["src"] = unreadable
+        notes = [refusal]
+    elif case.startswith("decoderStamp"):
+        for index, row in enumerate(r for r in samples if r["scene"] == 1):
+            v = video(id=9, el_id=3, t=row["t"], scene=1, current_time=1.0, rect=dict(_p2_facts()["pinRect"]))
+            v["instance"] = P2_SLIDE1_OBJECT_ID if index == 0 else "OTHER-OBJECT"
+            if index == 0 and case.endswith("Unreadable"):
+                v["instance"] = unreadable
+            row["videos"].append(v)
+        notes = [_ev("remount-scheduled", elId=3, key="other.mov", sceneHash="#2"), REFUSED_NOTE]
+    else:
+        spec = {k: v for k, v in spec.items() if k != "dstDomId"} | {"dstRect": None}
+        for t in (-100.0, -50.0):
+            row = sample(t, 0)
+            row.update(playerState="IdleAtFinalState", busy=False)
+            samples.insert(0, row)
+        if case.endswith("LeaveRowUntimed"):
+            samples[2]["t"] = None
+        carry = _ev("remount-scheduled", elId=3, key="movie1")
+        carry["t"] = 10.0
+        notes = [carry, {**REFUSED_NOTE, "t": 100.0}]
+    return _retire_read(tuple(notes)), spec, samples
+
+
+def _fold5r1_doubled_carry(doubled: bool) -> list[dict[str, Any]]:
+    """A schema-2 carry stalled 1 s after the boundary; `doubled` lists each scene-2 decoder twice, the copy ahead."""
+    samples = rows_around_boundary(n_before=150, stall_run_s=1.0, n_after=150)
+    for row in samples:
+        row.update(playerState="IdleAtFinalState", busy=False)
+    samples = _v2(samples)
+    for row in samples:
+        if doubled and row["scene"] == 2:
+            row["videos"].append({**row["videos"][0], "currentTime": row["videos"][0]["currentTime"] + 0.002})
+    return samples
+
+
+class TestFold5VerificationRound1:
+    """S2 fold5 verification round 1: the same rules, carried to the shapes the verifiers reproduced. An ill-typed
+    stamp, element id, row or read is unreadable before any instance, source or field filter applies, and one probe
+    id or carried elId read twice is never resolved by row order. Every case marked "v1" scored a pass, a True or a
+    matching red on 2fb41d89 (and 8ee7077d) and is now INCONCLUSIVE; the readable controls keep their outcome."""
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("carryStamp", False),
+        ("carryStampUnreadable", None),  # v1 #1: an error-object src left only the foreign dst stamp
+        ("refusalStamp", False),
+        ("refusalStampUnreadable", None),  # v1 #1: the same for a refusal note's src
+        ("decoderStamp", False),
+        ("decoderStampUnreadable", None),  # v1 #8: an error-object sample stamp read as unstamped
+        ("endRetire", False),
+        ("endRetireLeaveRowUntimed", None),  # v1 #9: no destination skipped the schema; the zone moved past the carry
+    ])
+    def test_retire_stamps_and_rows_are_validated_first(self, case: str, expected: bool | None) -> None:
+        read, spec, samples = _fold5r1_retire(case)
+        assert probe.score_retire(read, spec, True, samples)["verdict"] is expected
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("complete", True),
+        ("carriedEntryElIdMissing", None),  # v1 #2: the pool read "not {carried}", a matching armed red
+        ("srclessDecoderNamed", False),
+        ("srclessDecoder", None),  # v1 #4: a decoding src-less row at the instance rect left the owner census
+    ])
+    def test_armed_pool_and_census_keep_unidentified_decoders(self, case: str, expected: bool | None) -> None:
+        reads, samples = _armed_reads(), copy.deepcopy(PRE_FLIP)
+        samples[0]["videos"][0]["id"] = 1
+        if case == "carriedEntryElIdMissing":
+            for read in reads:
+                del _gl(read)["pool"][0]["elId"]
+        elif case.startswith("srclessDecoder"):
+            samples[0]["videos"].append({
+                "id": 5, "src": "untitled.mov" if case.endswith("Named") else "", "rect": dict(BIG_INSTANCE),
+                "footprintOwner": {"elId": 2}, "readyState": 4, "videoWidth": 640,
+            })
+        assert probe.score_armed_strict(reads, ARMED, GL_CONTINUITY, samples)["verdict"] is expected
+        owners = probe.pre_flip_owner_ids(samples, ARMED)
+        assert probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=owners)["verdict"] is expected
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("complete", True),
+        ("pooledElIdUnreadable", None),  # v1 #2: an unhashable pooled elId crashed the release census
+    ])
+    def test_handback_pool_entries_need_their_element(self, case: str, expected: bool | None) -> None:
+        record = _hb_vgl_record()
+        if case == "pooledElIdUnreadable":
+            record["before"]["pool"][1]["elId"] = {"error": "unreadable"}
+        assert probe.score_handback_carry(record, ARMED)["verdict"] is expected
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("skippedTickCollapsed", "fail"),
+        ("skippedTickCollapsedRowUntimed", "inconclusive"),  # v1 #3: the dropped row's frame read as unaligned
+        ("lateNote", "inconclusive"),
+        ("lateNoteFirstRowUntimed", "inconclusive"),  # v1 #6: the dropped first row moved the late-note bound
+        ("green", "pass"),
+        ("collapsedBehindCoveringCopy", "inconclusive"),  # v1 #7: the first same-elId read won (pass)
+        ("greenWithCollapsedCopyFirst", "inconclusive"),  # v1 #7: the same made a matching red
+    ])
+    def test_carry_cover_validates_rows_and_single_carried_reads(self, case: str, expected: str) -> None:
+        frames, rows, notes = _cc_scene(deliver=(lambda k, ts: k != 39) if case.startswith("skippedTick") else None)
+        if case.startswith("skippedTick"):
+            rows[40]["vids"][0].update(w=0.0, h=0.0)
+            rows[41]["pre"][0].update(w=0.0, h=0.0)
+            if case.endswith("RowUntimed"):
+                rows[40]["ts"] = None
+        elif case.startswith("lateNote"):
+            notes.append(_cc_note(t=510.0, dst={**CC_DST, "x": 210.0}))
+            if case.endswith("FirstRowUntimed"):
+                rows[0]["ts"] = None
+        elif case != "green":
+            for k in (40, 50, 60, 70):
+                for read in (rows[k]["vids"], rows[k + 1]["pre"]):
+                    copy_ = dict(read[0])
+                    (read[0] if case.startswith("collapsed") else copy_).update(w=0.0, h=0.0)
+                    read.insert(0, copy_)
+        assert _cc_score(frames, rows, notes)["verdict"] == expected
+
+    @pytest.mark.parametrize(("src", "expected"), [
+        ("untitled.mov", False),
+        ("", None),  # v1 #5: a decoded src-less pre-paint painter at the slot was skipped
+    ])
+    def test_paint_keeps_a_srcless_painter_at_the_slot(self, src: str, expected: bool | None) -> None:
+        samples = _v2(rows_around_boundary(n_before=150, n_after=60, src_rect=DST_RECT, dst_rect=DST_RECT))
+        for row in samples[100:106]:
+            row["pp"]["videos"].append({**copy.deepcopy(row["pp"]["videos"][0]), "id": 99, "src": src})
+        assert probe.score_continuity(samples, ASSET, 2.0, DST_RECT, DST_RECT, True)["verdict"] is expected
+
+    @pytest.mark.parametrize(("doubled", "expected"), [
+        (False, False),
+        (True, None),  # v1 #10a: a second rAF read of the decoder, +2 ms, hid the 1 s stall
+    ])
+    def test_carry_never_scores_a_doubled_decoder_by_row_order(self, doubled: bool, expected: bool | None) -> None:
+        spec = {"asset": ASSET, "atScene": 2, "srcRect": SRC_RECT, "dstRect": DST_RECT, "transitionScene": None}
+        samples = _fold5r1_doubled_carry(doubled)
+        assert probe.score_carry(samples, spec, True, schema=probe.paint_instrument.SAMPLER_SCHEMA)["verdict"] is expected
+
+    @pytest.mark.parametrize(("doubled", "expected"), [
+        (False, False),
+        (True, None),  # v1 #10b: a copy at the original clock ahead of the late-starting decoder read as a restart
+    ])
+    def test_restart_never_scores_a_doubled_decoder_by_row_order(self, doubled: bool, expected: bool | None) -> None:
+        samples = _p2_run_samples()
+        for row in samples:
+            fresh = [v for v in row["videos"] if v["id"] == 2]
+            for v in fresh:
+                if doubled:
+                    row["videos"].insert(0, dict(v))
+                v["currentTime"] += 5.0
+        assert probe.score_restart_strict(samples, _spec(_p2_facts(), P2_RESTART23))["verdict"] is expected
+        assert probe.score_restart(samples, ASSET, 6)["verdict"] is expected
+
+
+class TestFold5VerificationRound2:
+    """S2 fold5 verification round 2: a frame with one read, an id-less decoder, a refusal the zone cannot place or
+    tie to an instance, and a source row from an earlier visit are never set aside. Every case marked "v2" scored a
+    pass, a True or a matching red on c1e28a71 and is now INCONCLUSIVE; the readable controls keep their outcome."""
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("collapsed", "fail"),
+        ("absentPost", "inconclusive"),  # v2 #1: an empty post read and no next row was discarded as unsampled
+        ("noVidsKey", "inconclusive"),  # v2 #1: the same with the post read missing
+    ])
+    def test_carry_cover_never_discards_a_placed_frame_with_one_read(self, case: str, expected: str) -> None:
+        frames, rows, notes = _cc_scene()
+        for k in (40, 60):
+            if case == "collapsed":
+                rows[k]["vids"][0].update(w=0.0, h=0.0)
+                rows[k + 1]["pre"][0].update(w=0.0, h=0.0)
+            elif case == "absentPost":
+                rows[k]["vids"] = []
+            else:
+                del rows[k]["vids"]
+        if case != "collapsed":
+            rows = [row for k, row in enumerate(rows) if k not in (41, 61)]
+        assert _cc_score(frames, rows, notes)["verdict"] == expected
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("named", False),
+        ("srcless", None),
+        ("srclessNoId", None),  # v2 #2: an id-less movie row put None in the census, so the id-less decoder vanished
+    ])
+    def test_armed_census_needs_a_probe_id_on_every_row(self, case: str, expected: bool | None) -> None:
+        reads, samples = _armed_reads(), copy.deepcopy(PRE_FLIP)
+        decoder = {"src": "untitled.mov" if case == "named" else "", "rect": dict(BIG_INSTANCE),
+                   "footprintOwner": {"elId": 2}, "readyState": 4, "videoWidth": 640}
+        if case == "srclessNoId":
+            del samples[0]["videos"][0]["id"]
+        else:
+            decoder["id"] = 5
+        samples[0]["videos"].append(decoder)
+        assert probe.score_armed_strict(reads, ARMED, GL_CONTINUITY, samples)["verdict"] is expected
+        owners = probe.pre_flip_owner_ids(samples, ARMED)
+        assert probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=owners)["verdict"] is expected
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("timed", True),
+        ("timeNull", None),  # v2 #3: a readable refusal the timed zone cannot place read as absent (matching red)
+        ("timeUnreadable", None),
+        ("timeMissing", None),
+        ("instanceNull", None),  # v2 #3: a refusal nothing ties to an instance read as absent
+        ("instanceMissing", None),
+    ])
+    def test_retire_never_reads_an_unplaced_or_unowned_refusal_as_absent(self, case: str, expected: bool | None) -> None:
+        samples, refusal = _handback_samples(), copy.deepcopy(REFUSED_NOTE)
+        if case.startswith(("timed", "time")):
+            for t in (-100.0, -50.0):
+                row = sample(t, 0)
+                row.update(playerState="IdleAtFinalState", busy=False)
+                samples.insert(0, row)
+        if case in ("timeNull", "timeUnreadable"):
+            refusal["t"] = None if case == "timeNull" else "unreadable"
+        elif case == "timeMissing":
+            del refusal["t"]
+        elif case == "instanceNull":
+            refusal["detail"]["instance"] = None
+        elif case == "instanceMissing":
+            del refusal["detail"]["instance"]
+        read = _retire_read((_ev("remount-scheduled", elId=3, key="other.mov", sceneHash="#2"), refusal))
+        assert probe.score_retire(read, _spec(_p2_facts(), P2_RETIRE12), True, samples)["verdict"] is expected
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("offSlotEarlierVisit", True),  # v2 #4: an earlier visit grounded the window (False), skipped when unreadable
+        ("offSlotEarlierVisitBusyUnreadable", True),
+        ("cleanEarlierVisitSceneUnreadable", True),
+    ])
+    def test_grounding_is_the_source_slides_own_visit(self, case: str, expected: bool | None) -> None:
+        samples = moving_boundary_samples()
+        lead = []
+        for t, scene in ((-200.0, 6), (-150.0, 5), (-100.0, 5), (-50.0, 5)):
+            row = sample(t, scene, video(id=1, el_id=1, t=t, scene=scene, current_time=4.8 + t / 1000, rect=dict(SRC_RECT)))
+            row.update(playerState="IdleAtFinalState", busy=False)
+            lead.append(row)
+        if case.startswith("offSlot"):
+            lead[0]["videos"][0]["rect"]["x"] += 50
+        if case.endswith("BusyUnreadable"):
+            lead[0]["busy"] = None
+        elif case.endswith("SceneUnreadable"):
+            lead[0]["scene"] = None
+        result = score_moving_boundary(lead + samples)
+        assert result["verdict"] is expected
+        assert result["window"]["start"] == 0.0
+
+    def test_paint_start_is_the_source_slides_own_visit(self) -> None:
+        samples = rows_around_boundary(n_before=200)
+        for row in samples[:200]:
+            row["busy"] = False
+        lead = [dict(copy.deepcopy(samples[0]), t=t, scene=scene) for t, scene in ((-200.0, 1.0), (-100.0, 0.0))]
+        window = probe.find_boundary_window(lead + samples, 2.0)
+        assert probe.paint_start(lead + samples, 1, 2.0, window, None) == 0.0
+
+
+class TestFold5VerificationRound3:
+    """S2 fold5 verification round 3: identity is resolved by probe id before an untagged row, a null owner or
+    element id, an unreadable decoding state, an empty key, a null-scene row or an unparseable hash can move a
+    verdict. Every case marked "v3" scored a pass, a True or a matching red (or crashed) on 30eec067 and is now
+    INCONCLUSIVE or keeps its readable outcome; the readable controls keep theirs."""
+
+    @pytest.mark.parametrize(("case", "untagged", "expected"), [
+        ("carry", False, False),
+        ("carry", True, False),  # v3 #1: the untagged source-stamped row was dropped, so elId 3 read as foreign
+        ("painter", False, False),
+        ("painter", True, False),  # v3 #1: the same excused a painter over the retired movie
+    ])
+    def test_retire_resolves_instance_stamps_by_probe_id(self, case: str, untagged: bool, expected: bool) -> None:
+        read, spec, samples = _fold5r1_retire("decoderStamp")
+        if untagged:
+            next(r for r in samples if r["scene"] == 1)["videos"][-1]["elId"] = None
+        if case == "painter":
+            painting = [{"src": "untitled.mov", "elId": 3, "rect": dict(_p2_facts()["pinRect"])}]
+            read = _retire_read((REFUSED_NOTE,), painting=painting)
+        assert probe.score_retire(read, spec, True, samples)["verdict"] is expected
+
+    @pytest.mark.parametrize("state", [
+        {"readyState": None}, {"videoWidth": None}, {"readyState": "4"}, {"readyState": {"error": "unreadable"}},
+        "omitted",
+    ])
+    def test_armed_census_reads_an_unreadable_decoding_state_as_maybe_decoding(self, state: Any) -> None:
+        # v3 #2, #3: null or missing read as idle (True); ill-typed crashed
+        reads, samples = _armed_reads(), copy.deepcopy(PRE_FLIP)
+        samples[0]["videos"][0]["id"] = 1
+        decoder = {"id": 5, "src": "", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 2}, "readyState": 4,
+                   "videoWidth": 640}
+        if state == "omitted":
+            del decoder["readyState"], decoder["videoWidth"]
+        else:
+            decoder.update(state)
+        samples[0]["videos"].append(decoder)
+        assert probe.score_armed_strict(reads, ARMED, GL_CONTINUITY, samples)["verdict"] is None
+        assert probe.pre_flip_owner_ids(samples, ARMED) is None
+
+    @pytest.mark.parametrize(("second", "unreadable", "expected"), [
+        (False, None, True),
+        (False, "footprintOwner", None),
+        (False, "elId", None),  # v3 #4: a null elId on a decoder tagged elsewhere read as not-owned (False)
+        (True, None, True),
+        (True, "footprintOwner", None),  # v3 #4: the null owner switched the carry to the other decoder (False)
+        (True, "elId", None),
+    ])
+    def test_carry_selection_rests_on_readable_ownership(
+        self, second: bool, unreadable: str | None, expected: bool | None,
+    ) -> None:
+        spec = {"asset": ASSET, "atScene": 2, "srcRect": SRC_RECT, "dstRect": DST_RECT, "transitionScene": None}
+        samples = rows_around_boundary(n_before=60, n_after=60)
+        for row in samples:
+            row.update(playerState="IdleAtFinalState", busy=False)
+            if second:
+                row["videos"].append(video(id=2, el_id=2, t=row["t"], scene=row["scene"],
+                                           current_time=row["videos"][0]["currentTime"], rect=dict(SRC_RECT, x=900.0)))
+        if unreadable:
+            samples[70]["videos"][0][unreadable] = None
+        assert probe.score_carry(samples, spec, True)["verdict"] is expected
+
+    @pytest.mark.parametrize(("key", "expected"), [
+        ("movie1", True),
+        ("", None),  # v3 #5: an empty key read as another movie's refusal (the stripretire matching red)
+    ])
+    def test_retire_never_reads_an_empty_key_as_another_movie(self, key: str, expected: bool | None) -> None:
+        refusal = copy.deepcopy(REFUSED_NOTE)
+        refusal["detail"]["key"] = key
+        read = _retire_read((refusal,))
+        assert probe.score_retire(read, _spec(_p2_facts(), P2_RETIRE12), True, _handback_samples())["verdict"] is expected
+
+    @pytest.mark.parametrize(("scene", "expected"), [
+        ("none", True),
+        (5, None),
+        (None, None),  # v3 #6: a trailing null-scene row was skipped, so the unordered crossing read as placed
+    ])
+    def test_a_null_scene_row_after_the_first_placed_one_unplaces_the_crossing(
+        self, scene: Any, expected: bool | None,
+    ) -> None:
+        carry, restart = moving_boundary_samples(), _p2_run_samples()
+        if scene != "none":
+            for rows, t, at in ((carry, 5000.0, scene), (restart, max(r["t"] for r in restart) + 5000.0, scene and 2)):
+                row = sample(t, at)
+                row.update(playerState="IdleAtInitialState", busy=False)
+                rows.append(row)
+        spec = {"asset": ASSET, "atScene": 8, "srcRect": SRC_RECT, "dstRect": DST_RECT, "transitionScene": 7}
+        assert score_moving_boundary(carry)["verdict"] is expected
+        assert probe.score_carry(carry, spec, True)["verdict"] is expected
+        assert probe.score_restart_strict(restart, _spec(_p2_facts(), P2_RESTART23))["verdict"] is expected
+        assert probe.score_restart(restart, ASSET, 6)["verdict"] is expected
+        assert probe.score_raw_restart(restart, ASSET, 6)["verdict"] is expected
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("complete", True),
+        ("armHashEmpty", None),  # v3 #8: an unparseable note hash read as a wrong scene (the strip:glReplay red)
+        ("liveHashBare", None),
+        ("readHashEmpty", None),  # v3 #8: the same for a read's hash
+    ])
+    def test_armed_never_reads_an_unparseable_hash_as_a_wrong_scene(self, case: str, expected: bool | None) -> None:
+        reads, samples = _armed_reads(), copy.deepcopy(PRE_FLIP)
+        samples[0]["videos"][0]["id"] = 1
+        if case == "armHashEmpty":
+            _set_detail(reads[1], "glreplay-arm", sceneHash="")
+        elif case == "liveHashBare":
+            _set_detail(reads[1], "glreplay-live", sceneHash="#")
+        elif case == "readHashEmpty":
+            _gl(reads[1])["hash"] = ""
+        assert probe.score_armed_strict(reads, ARMED, GL_CONTINUITY, samples)["verdict"] is expected
+
+
+# --- Producer contract wiring (plan keynote_live_continuity_contract §3, §4 N2) -----------------------------------------
+# One violation at each ingestion point reaches that point's unknown outcome; the clause tables themselves are
+# tested in test_live_evidence_contract.py.
+
+
+def _wired_verdicts(tmp_path: Path) -> Any:
+    samples = _p2_run_samples()
+    samples[70]["videos"][0]["isConnected"] = False
+    return [s["verdict"] for s in probe.score_verdicts(samples, {}, _p2_facts(), True, {"mode": "qualified"}).values()]
+
+
+def _wired_rescore(tmp_path: Path) -> Any:
+    samples = rows_around_boundary()
+    samples[3]["videos"][0]["isConnected"] = False
+    report = probe.rescore_artifact(TestRescoreArtifact()._artifact(tmp_path, samples), LOOP_P)
+    return report["ok"], report["arms"]["arm A"]["identical"]
+
+
+def _wired_force_wrap(tmp_path: Path) -> Any:
+    recorder = _fw_recorder()
+    recorder["frames"][3]["presentedFrames"] = 2.5
+    result = {"continuity": GL_CONTINUITY, "samples": [], "recorder": recorder, "take": _fw_take(),
+              "reads": _armed_reads_at(FW_SEEKED + 6000.0), "pageErrorNotes": []}
+    probe.score_force_wrap_run(result, TestArmedRecorderWindow()._gt(), "1to2", 375.0)
+    return result["status"], result["forced"]["outcome"], result["continuityVerdict"]["verdict"]
+
+
+def _wired_carry_cover(tmp_path: Path) -> Any:
+    frames, rows, notes = _cc_scene()
+    del rows[10]["readAt"]
+    scored = _cc_score(frames, rows, notes)
+    return scored["verdict"], probe.carry_cover_status({"mode": "qualified"}, [{"boundary": "b3to4", "result": scored}])[0]
+
+
+def _wired_handback(tmp_path: Path) -> Any:
+    record = _hb_vgl_record()
+    record["after"]["ready"] = "yes"
+    return probe.score_handback_carry(record, ARMED)["verdict"]
+
+
+def _wired_forced(tmp_path: Path) -> Any:
+    refusal_read = {"stageMap": dict(GL_STAGE), "painting": [], "poolSnapshot": [_pool_entry(1, 1.0, elId=0)]}
+    return probe.score_forced(
+        v_pass=_v_reference(), g_pass=_forced_pass([True] * 4), refusal={"verdict": True},
+        g_handback=_forced_after("posterAmbiguous"), parity={"verdict": True}, reason="posterAmbiguous",
+        splice={"splices": 1}, refusal_read=refusal_read,
+    )["status"]
+
+
+def _wired_live_ring(tmp_path: Path) -> Any:
+    v, g = _live_frames(STAGE_2560, (1440, 2560), C_INSTANCE)
+    return _ring(v, g, C_ARMED, dict(STAGE_2560, offsetWidth=2560.5))["verdict"]
+
+
+def _wired_visible_slide(tmp_path: Path) -> Any:
+    painting = [painting_video(EXPECTED_SCREEN_RECT, el_id=4), painting_video(DUPLICATE_SCREEN_RECT, el_id=4)]
+    record = TestPaintingVideoInstanceCheck()._record(PAINT_STAGE_MAPS["full-bleed"], painting)
+    return record["status"], record["verdict"]
+
+
+def _wired_census(tmp_path: Path) -> Any:
+    census = TestStrayCensus()
+    raw = census._clean()
+    raw["2"][0]["stageMap"]["offsetHeight"] = 1080.5
+    records, red, unknown = probe.score_census(raw, census.PLAN_INSTANCES, {}, census.PLAYERS)
+    return records["2"]["verdict"], red, unknown
+
+
+@pytest.mark.parametrize(("ingest", "outcome"), [
+    pytest.param(_wired_verdicts, [None] * 4, id="1-score_verdicts-every-verdict-of-the-arm"),
+    pytest.param(_wired_rescore, (False, None), id="2-rescore_artifact"),
+    pytest.param(_wired_force_wrap, ("invalid", None, None), id="3-score_force_wrap_run"),
+    pytest.param(_wired_carry_cover, ("inconclusive", "inconclusive"), id="4-score_carry_cover"),
+    pytest.param(_wired_handback, None, id="5-score_handback_carry"),
+    pytest.param(_wired_forced, "inconclusive", id="5-score_forced-refusal-read"),
+    pytest.param(_wired_live_ring, None, id="5-score_live_ring"),
+    pytest.param(_wired_visible_slide, ("error", None), id="6-visible_slide_record"),
+    pytest.param(_wired_census, (None, [], ["census:slide2"]), id="6-score_census"),
+])
+def test_a_contract_violation_at_each_ingestion_point_is_never_a_verdict(ingest: Any, outcome: Any, tmp_path: Path) -> None:
+    assert ingest(tmp_path) == outcome
+
+
+def test_a_goto_execute_record_is_this_calls_or_none(tmp_path: Path) -> None:
+    """N2: goTo 3 runs three times, and the host's logger drops a record on a full queue, so an older record of the
+    same slide must never stand in for this call's."""
+    older = {"ts": 100.0, "kind": "execute", "operation": "goTo", "slide": 3, "autoPlayFired": True}
+    assert probe.find_execute_record([older], operation="goTo", slide=3) == older
+    assert probe.find_execute_record([older], operation="goTo", slide=3, since=150.0) is None
+    log = tmp_path / "log.jsonl"
+    log.write_text(json.dumps(older) + "\n")
+    clock = FakeClock()
+    assert probe.wait_for_execute_record(log, operation="goTo", slide=3, since=150.0, now=clock.now, sleep=clock.sleep) is None
+    fresh = dict(older, ts=150.0, autoPlayFired=False)
+    log.write_text(json.dumps(older) + "\n" + json.dumps(fresh) + "\n")
+    assert probe.wait_for_execute_record(log, operation="goTo", slide=3, since=150.0, now=clock.now, sleep=clock.sleep) == fresh

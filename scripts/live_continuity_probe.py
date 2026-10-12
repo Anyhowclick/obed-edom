@@ -38,13 +38,21 @@ sleep as proof. If the tracked movie never decodes, the verdict is INCONCLUSIVE,
 a false pass/fail.
 
 Every boundary verdict is generated from `ContinuityPlan.boundaries[].movies[]`
-(`verdict_specs`), one per (boundary, movie, kind), id `b{from}to{to}:{asset}:{kind}`;
-P2's names (`continue1to2`, `restart2to3`, `continue3to4`, `refused*`, `armed1to2`) are
-emitted alongside as aliases. `--strip ACTION[@atScene]` and `--core-variant NAME` run one
-red arm on its own and compare its red set with the arm's pre-registered one
-(`RED_ARM_EXPECTATIONS`); `--rescore` re-scores a stored artifact with both scorers.
+(`verdict_specs`), one per (boundary, movie instance, kind), id
+`b{from}to{to}:{asset}#{src}->{asset}#{dst}:{kind}`; P2's names (`continue1to2`, `restart2to3`,
+`continue3to4`, `refused*`, `armed1to2`) are emitted alongside as aliases. The schema-2 runtime
+plan's entries are bound to those instances by objectId. `--strip ACTION[@atScene[:KEY]]` and
+`--core-variant NAME` run one red arm on its own and compare its red set with the arm's
+pre-registered one (`RED_ARM_EXPECTATIONS`, plus `RED_ARM_REQUIRED` for a RECORD arm);
+`--rescore` re-scores a stored artifact with both scorers.
+Schema-2 sampler rows also carry a pre-paint read (`paint_instrument`), and every carry is scored per
+frame as well; `--pass G --core-variant NAME` runs Pass G's red arm and `--paint-control` its positive
+control.
 `--skip-arms` leaves named arms out of the full run (recorded as `skippedArms`, never a pass of
 that arm); a run that skips every positive arm (A, V, attach) fails.
+
+Any deck runs as `--fixture <export> --original-index <export>/index.html`; an S0 deck's
+`html-unmodified` export is both (its counter movies need no asset replacement).
 
 Does not qualify HDMI, alpha compositing, or audio. Offline/local Chrome only.
 """
@@ -77,10 +85,13 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
+from obed_edom.fixture_paths import fixture  # noqa: E402
 from obed_edom import live_host as live_host_module  # noqa: E402
 from obed_edom import live_continuity as live_continuity_module  # noqa: E402
 from obed_edom.html_preview import cache_dir, safe_export_file  # noqa: E402
-from obed_edom.live_continuity import ContinuityPlan, Unsupported, derive_plan, plan_signature  # noqa: E402
+from obed_edom.live_continuity import (  # noqa: E402
+    ContinuityPlan, MovieContinuity, Unsupported, canonical_asset_name, derive_plan, plan_signature,
+)
 from obed_edom.live_continuity_js import js_sha256  # noqa: E402
 from obed_edom.html_alpha_probe import (  # noqa: E402
     INPAGE_BAND_COUNT,
@@ -108,10 +119,13 @@ except ImportError:  # pragma: no cover - stream B is landing this constant conc
     GOTO_AUTOPLAY_ENV = "OBED_LIVE_GOTO_AUTOPLAY"
 
 import live_host_probe  # noqa: E402 - reuse the headless window-size compensation
-from continuity_core_variants import VARIANTS, parse_strip, strip_entries, variant_core, variant_sha  # noqa: E402
+from continuity_core_variants import VARIANTS, parse_strip, strip_entries, strip_label, variant_core, variant_sha  # noqa: E402
+import paint_instrument  # noqa: E402
+import live_evidence_contract as contract  # noqa: E402
+from live_evidence_contract import stage_map_valid  # noqa: E402
 
-FIXTURE = REPO / "output/p2-recovery/html-adversarial/html-player"
-ORIGINAL_INDEX = REPO / "output/p2-recovery/html-adversarial/html-unmodified/index.html"
+FIXTURE = fixture("p2-recovery") / "html-adversarial/html-player"
+ORIGINAL_INDEX = fixture("p2-recovery") / "html-adversarial/html-unmodified/index.html"
 ARTIFACT = Path("output/live-probes/live-continuity-probe.json")
 PROBE_DIGEST = "b" * 64
 CHROME = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
@@ -124,6 +138,9 @@ MAX_DROP_S = 0.05
 RESTART_MAX_START_S = 0.5
 RECT_TOLERANCE_PX = 3.0
 CLICK_DELAY_S = 1.5
+# Plan §4 identity red: on D4 the far copy starts on click 1, so its clock trails the near copy's
+# by at least this dwell before the first press.
+FIRST_CLICK_DWELL_S = 3.0
 POST_ADVANCE_SETTLE_S = 1.8
 VIDEO_DECODE_TIMEOUT_S = 8.0
 MAX_ADVANCE_STEPS = 40
@@ -172,34 +189,128 @@ REFUSAL_VERDICT_KEY = {
 # plan's expectation, or `stray:slide{ordinal}:{asset}` for a painting `<video>` the settled
 # slide's instances do not claim. RECORD = report the current behaviour, never pass/fail.
 RECORD = "record"
-P2_OFF_PLAN_SHA256 = "bafe26cad55cf3a390154bce2c0fdcc771b9b1821293b6aec76119d25180e81e"
+# The schema-2 runtime plans (`CONTINUITY_VERSION` 6; `tests/fixtures/live_continuity/runtime_v2_examples.json`
+# for P2 off/on, D1, D3, D5; the rest derived from the S0 exports). D2 and D2-across derive the same plan:
+# the export does not encode play-across (plan §5, R-res-1).
+P2_OFF_PLAN_SHA256 = "283f5eecd18c3412172e28a40bc716c69173a7c72bcd37379dcd3d7d6a96dd4e"
 # The pinned P2 runtime plans (off, gl-replay on; p2-loop off, on): the only decks whose status
 # is P2's legacy slot table. Every other deck is scored by `generated_status`.
 P2_PLAN_SHA256 = frozenset({
     P2_OFF_PLAN_SHA256,
-    "6a0596da54532493aee74d22fe91b7cbf3628795aca586dd3cf7dc61a37cc635",
-    "3dc6755853692a178696a35495c1929662005a8173f932607855876bfc299c5d",
-    "2ba6fbed8fc959c804e53d2f21712945230eac6dcbf90d522fe3a6a688bef924",
+    "2fbf977277a5eef1cde701c12bb157905e40ac2b0a5ed85e30bf1056a3e65c18",
+    "866de785864ad19b11ecd8cdfb4ad1729798ccf9f1764aa59718de03034ba7a5",
+    "d860a09f4f6a8e24a81e2ad0c3b37bc8a3f2b4ce3947836ca315671031870131",
 })
+DECK_PLAN_SHA256 = {
+    "D1": "4d466b2f0ee035928486dc3e61f23a5d92e3cc4e76d5d02f367e115331cc0b00",
+    "D2": "029a4c427d2f7ebe2cf7410e2010fdc03834f370f5c6d25aeea9e05c2fbc20f7",
+    "D3": "01b74c88f4622e5a0650d334d7721a247a2039a1767f232d792e823405a21b1b",
+    "D4": "e166c385753364cdc159307b8f7d9092979533b71aee93ea4b8ebbea7a366076",
+    "D5": "73d1153f086381996b5490d6f66eae2ee6996eb05b4a1dcd0af0fce70a018f5e",
+    "D6": "149e813cfe68b6bac7c5c4ea0b5829f20e017ee1d0ce742ece3444fd1f60eed1",
+}
+_P2 = "untitled.mov#1->untitled.mov#1"
+_A = "counter-a.mov#1->counter-a.mov#1"
+_B = "counter-b.mov#1->counter-b.mov#1"
+_A_FAR = "counter-a.mov#2->counter-a.mov#1"
+_D1, _D2, _D3, _D4, _D5, _D6 = (DECK_PLAN_SHA256[f"D{n}"] for n in range(1, 7))
+# Derived from the plan and the v6 core's documented behaviour (WS-R, S2): a stripped carry's
+# destination plays raw and, when the next entry names that raw element's instance, the chain
+# resumes from it; a facaded pin no entry names is detached at the next slide change and stops;
+# a bridge overlay no entry names is held at its rect indefinitely (a stray on later slides); a
+# retire/restart of a raw (never carried) src is inert apart from `retire`'s preserve-refused notes.
+# `stage1/` below: main checkout output/evidence/s2-dev/instr-v-277c720b/stage1 (measured 2026-10-12 at 277c720b).
 RED_ARM_EXPECTATIONS: dict[tuple[str, str, str], tuple[str, ...] | str] = {
+    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
+    (P2_OFF_PLAN_SHA256, "core:stash-any", "off"): (
+        f"b0to1:{_P2}:retire", "stray:slide2:untitled.mov", "stray:slide3:untitled.mov", "stray:slide4:untitled.mov",
+        "stray:slide4:vid-20250608-wa0125.mp4",
+    ),
+    (P2_OFF_PLAN_SHA256, "strip:bridge@8", "off"): (f"b2to3:{_P2}:carry",),
+    # Nothing names slide 1's raw decoder, so nothing is pooled or noted: the carry reads False
+    # as the plan expects, and only the retire's note clause goes red.
+    (P2_OFF_PLAN_SHA256, "strip:retire@2", "off"): (f"b0to1:{_P2}:retire",),
+    (P2_OFF_PLAN_SHA256, "strip:glReplay@2", "auto"): (f"b0to1:{_P2}:armed",),
+    # The restart's src (slide 2) is retired at 2 and never carried, so the entry is inert.
+    (P2_OFF_PLAN_SHA256, "strip:restart@6", "off"): (),
+    (_D1, "strip:bridge@2", "off"): (f"b0to1:{_A}:carry",),
+    (_D1, "strip:bridge@4", "off"): (f"b1to2:{_A}:carry", "stray:slide3:counter-a.mov", "stray:slide4:counter-a.mov"),
+    # Re-registered 2026-10-12 (owner): the paint instrument reds the stripped pin's own carry (longest run 62); g1h's
+    # duplicate stays. Same set on the pre-fold core (glclock-v6/V4AB). stage1/V4/D1--strippin@6.json.
+    (_D1, "strip:pin@6", "off"): (f"b2to3:{_A}:carry", "duplicate:slide4:counter-a.mov#1"),
+    (_D2, "strip:bridge@2", "off"): (f"b0to1:{_A}:carry",),
+    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
+    (_D2, "strip:restart@4", "off"): (
+        f"b1to2:{_A}:restart", f"b2to3:{_A}:carry", f"b3to4:{_A}:carry",
+        "duplicate:slide3:counter-a.mov#1", "duplicate:slide4:counter-a.mov#1", "stray:slide5:counter-a.mov",
+    ),
+    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
+    (_D2, "strip:pin@6", "off"): (f"b2to3:{_A}:carry",),
+    (_D2, "strip:bridge@8", "off"): (f"b3to4:{_A}:carry",),
+    # V3 (owner 2026-10-12): longest unpainted run 108. stage1/V3/D2-red-npH.json.
+    (_D2, "core:no-pin-hold", "off"): (f"b2to3:{_A}:carry",),
+    (_D3, "strip:pin@2", "off"): (f"b0to1:{_A}:carry",),
+    (_D3, "strip:bridge@2", "off"): (f"b0to1:{_B}:carry",),
+    (_D3, "strip:retire@4", "off"): ("b1to2:counter-a.mov#1->end:retire",),
+    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
+    (_D3, "strip:pin@4", "off"): (
+        f"b1to2:{_B}:carry", f"b2to3:{_B}:carry", "duplicate:slide3:counter-b.mov#1", "stray:slide4:counter-b.mov",
+    ),
+    (_D3, "strip:bridge@6", "off"): (f"b2to3:{_B}:carry",),
+    # V3 (owner 2026-10-12): longest unpainted run 107. stage1/V3/D3-red-npH.json.
+    (_D3, "core:no-pin-hold", "off"): (f"b0to1:{_A}:carry",),
+    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
+    (_D4, "core:wrong-instance", "off"): (
+        f"b0to1:{_A_FAR}:carry", f"b1to2:{_A}:carry", "duplicate:slide2:counter-a.mov#1", "duplicate:slide3:counter-a.mov#1",
+    ),
+    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
+    (_D4, "core:fifo-reuse", "off"): (
+        f"b0to1:{_A_FAR}:carry", f"b1to2:{_A}:carry", "duplicate:slide2:counter-a.mov#1", "duplicate:slide3:counter-a.mov#1",
+    ),
+    (_D4, "strip:bridge@3", "off"): (f"b0to1:{_A_FAR}:carry",),
+    # Re-registered 2026-10-12 (owner): the paint instrument reds the stripped pin's own carry (longest run 63); g1h's
+    # duplicate stays. Same set on the pre-fold core (glclock-v6/V4AB). stage1/V4/D4--strippin@5.json.
+    (_D4, "strip:pin@5", "off"): (f"b1to2:{_A}:carry", "duplicate:slide3:counter-a.mov#1"),
+    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
+    (_D5, "core:stash-any", "off"): ("stray:slide3:counter-a.mov", "stray:slide3:counter-b.mov"),
+    # Re-registered 2026-10-12 (owner): the reused decoder's carry reds (paint run 59; 59 owner mismatches with paint
+    # off) and duplicates on slide 3 instead of g1h's stray. Same set on the pre-fold core (glclock-v6/V4AB).
+    # stage1/V4/D5--core-variantfifo-reuse.json.
+    (_D5, "core:fifo-reuse", "off"): (f"b1to2:{_A}:carry", "duplicate:slide3:counter-a.mov#1"),
+    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
+    (_D5, "strip:pin@2", "off"): (f"b0to1:{_A}:carry",),
+    (_D5, "strip:pin@4", "off"): (f"b1to2:{_A}:carry",),
+    # V3 (owner 2026-10-12): longest unpainted runs 108 / 223. stage1/V3/D5-red-npH.json.
+    (_D5, "core:no-pin-hold", "off"): (f"b0to1:{_A}:carry", f"b1to2:{_A}:carry"),
+    (_D6, "strip:bridge@2", "off"): (f"b0to1:{_A_FAR}:carry",),
+    (_D6, "strip:retire@8", "off"): (f"b3to4:{_A}:retire",),
+}
+# Pass G red arms (`--pass G --core-variant NAME`), keyed by (flag-off runtime plan sha, arm label); ids
+# from `passg_red_ids`. `stage1/` as above.
+PASSG_RED_EXPECTATIONS: dict[tuple[str, str], tuple[str, ...]] = {
+    # V3 (owner 2026-10-12): the (1,3,4) leg's carry (longest unpainted run 229) and its destination (the slide-4 rect
+    # stays unpainted past arrival); the landed core passes this leg. stage1/V3/D1-passG-red-npH.json.
+    (_D1, "core:no-pin-hold"): (f"G1-3-4:b2to3:{_A}:carry", "G1-3-4:destination"),
+}
+# Floor on every red carry's longest unpainted run (frames), carried as `paintFloor` and enforced by the red status
+# functions (decision 3: at least PAINT_FLOOR_MIN_FRAMES). Keyed as the arm's expectations.
+PAINT_FLOOR_MIN_FRAMES = 60
+# Red arms whose registered ids only count with a registered floor (the paint-red mechanism, decision 3).
+PAINT_RED_ARMS = ("core:no-pin-hold",)
+RED_ARM_PAINT_FLOOR: dict[tuple[str, str, str], int] = {
+    (deck, "core:no-pin-hold", "off"): PAINT_FLOOR_MIN_FRAMES for deck in (_D2, _D3, _D5)
+}
+PASSG_RED_PAINT_FLOOR: dict[tuple[str, str], int] = {(_D1, "core:no-pin-hold"): PAINT_FLOOR_MIN_FRAMES}
+# Ids an arm must turn red whatever else it registers (plan §3.4 Q2/Q3, §4): the stray red and the
+# identity red. A RECORD arm missing one of these fails; a registered set must contain them.
+RED_ARM_REQUIRED: dict[tuple[str, str, str], tuple[str, ...]] = {
     (P2_OFF_PLAN_SHA256, "core:stash-any", "off"): ("stray:slide4:vid-20250608-wa0125.mp4",),
-    (P2_OFF_PLAN_SHA256, "strip:bridge@8", "off"): ("b2to3:untitled.mov#1->untitled.mov#1:carry",),
-    (P2_OFF_PLAN_SHA256, "strip:retire@2", "off"): (
-        "b0to1:untitled.mov#1->untitled.mov#1:carry", "b0to1:untitled.mov#1->untitled.mov#1:retire",
-        "stray:slide2:untitled.mov",
-    ),
-    (P2_OFF_PLAN_SHA256, "strip:glReplay@2", "auto"): (
-        "b0to1:untitled.mov#1->untitled.mov#1:armed", "stray:slide2:untitled.mov",
-    ),
-    # Post-hoc from discovery round r2 (8ac39a42), not pre-registered: with the restart entry
-    # stripped, the un-retired pre-restart decoder breaks the 3->4 carry while the export's own
-    # 2->3 restart still scores green.
-    (P2_OFF_PLAN_SHA256, "strip:restart@6", "off"): ("b2to3:untitled.mov#1->untitled.mov#1:carry",),
+    (_D4, "core:wrong-instance", "off"): (f"b0to1:{_A_FAR}:carry",),
 }
 GROUND_TRUTH_KEYS = (
     "asset", "onset1to2", "boundaryPlayerIndex", "restartScene", "bridgeScene",
     "pinRect", "bridgeSrcRect", "destRect", "canvas",
-    "retire", "refusedBoundaries", "refusals", "rectExpectations", "verdicts", "planSha256",
+    "retire", "retires", "refusedBoundaries", "refusals", "rectExpectations", "verdicts", "planSha256",
 )
 # A painting `<video>` overlaps a retired movie's rect when it does so by more
 # than this in authored px -- edge-touching and AA seams are not an overlap.
@@ -230,6 +341,8 @@ G_BURST_OFFSETS_MS: tuple[int, ...] = (0, 450, 910, 1360, 1820, 2270, 2730, 3180
 # The one destination the plan requires no-consumption evidence for.
 GOTO_CONSUMPTION_CHECK_TO = 2
 CHARACTERS_ASSET_KEY = "__characters__"
+NO_CLICK_BUILDS_REASON = "destination has no click-driven builds"
+MOVIE_START_EFFECTS = frozenset({"apple:movie-start", "renderMovie"})
 # A completed dissolve build is static, so "did it fire" is judged by pixel content change, never motion.
 CHARACTER_REGION_MAE_MIN = 8.0
 # The area outside every expected movie rect must show a pixel this bright somewhere (never a flat
@@ -263,6 +376,7 @@ STAGE_MAP_FN_JS = r"""
 STAGE_MAP_JS = "(function(){" + STAGE_MAP_FN_JS + "return stageMapOf();})()"
 
 SCENE_ID_JS = "window.__obedLive ? window.__obedLive.snapshot().sceneId : null"
+RUNTIME_SNAPSHOT_JS = "window.__obedLive ? window.__obedLive.snapshot() : null"
 HASH_JS = "String(location.hash || '')"
 
 # Never the oracle handle, its context, `markerBands` or `pause` (Vgl pass only).
@@ -379,19 +493,30 @@ SAMPLER_JS = r"""
   // pin the asset key directly (rect.key) when it queries a rect the fixed
   // footprint table does not classify"). Resolve the key ourselves from the
   // already-public plan object (window.__OBED_CONTINUITY__, never mutated here)
-  // the same way the runtime's own movieAssetKey() does, so ownership can be
+  // by the exact canonical asset name (`canonical_asset_name`; a name two movies
+  // claim is no match, as the core's movieAssetKey), so ownership can be
   // asked about ANY on-screen position, not just the static footprint.
+  function assetNameOf(src){
+    var name = String(src || '').split('?')[0].split('/').pop();
+    var m = /^(.+)-\d+\.\d+-\d+\.\d+\.[A-Za-z0-9]+$/.exec(name);
+    return (m ? m[1] : name).toLowerCase();
+  }
   function movieKeyFor(src){
     try {
       var plan = window.__OBED_CONTINUITY__;
       var movies = (plan && plan.movies) || {};
-      var s = String(src || '').toLowerCase();
+      var name = assetNameOf(src);
+      if (!name) return null;
+      var found = null;
       for (var k in movies) {
         var keys = (movies[k] && movies[k].assetKeys) || [];
         for (var i = 0; i < keys.length; i++) {
-          if (s.indexOf(String(keys[i]).toLowerCase()) >= 0) return k;
+          if (assetNameOf(keys[i]) !== name) continue;
+          if (found !== null && found !== k) return null;
+          found = k;
         }
       }
+      return found;
     } catch (e) {}
     return null;
   }
@@ -405,7 +530,9 @@ SAMPLER_JS = r"""
       return window.__OBED_P2_PRESERVE__.footprintOwnerDecoderId(q);
     } catch (e) { return null; }
   }
-""" + STAGE_MAP_FN_JS + r"""
+""" + STAGE_MAP_FN_JS + paint_instrument.PAINT_READ_FN_JS + paint_instrument.PREPAINT_FN_JS + r"""
+  var meta = {schema: 2, rafTicks: 0, overflow: 0, errors: [], lastTs: null, running: false, startedAt: null, stoppedAt: null};
+  var frameSeq = 0, frameTs = null, prepaint = null;
   function tick(){
     var t = performance.now();
     var state = stateOf();
@@ -418,6 +545,7 @@ SAMPLER_JS = r"""
       videos.push({
         id: idFor(v),
         elId: (v.__obedElId != null ? v.__obedElId : null),
+        instance: (v.__obedInstance != null ? String(v.__obedInstance) : null),
         src: src,
         currentTime: v.currentTime,
         paused: v.paused,
@@ -434,16 +562,75 @@ SAMPLER_JS = r"""
         rect: rect,
         footprintOwner: ownerOf(rect, v.currentSrc || v.src || '', map)
       });
+      prepaint.track(v);
     });
-    samples.push({t: t, scene: state.sceneId, playerState: state.playerState, busy: state.busy, videos: videos, stageMap: map});
-    if (samples.length > MAX_SAMPLES) samples.shift();
-    window.__obedContinuityProbe__.raf = requestAnimationFrame(tick);
+    if (samples.length >= MAX_SAMPLES) { meta.overflow++; return; }
+    samples.push({t: t, scene: state.sceneId, playerState: state.playerState, busy: state.busy, videos: videos, stageMap: map,
+                  seq: frameSeq, ts: frameTs, hash: String(location.hash || ''),
+                  sceneCount: (state.sceneCount != null ? state.sceneCount : null)});
   }
-  window.__obedContinuityProbe__ = {samples: samples};
-  window.__obedContinuityProbe__.raf = requestAnimationFrame(tick);
+  function frame(ts){
+    if (!meta.running) return;
+    probe.raf = requestAnimationFrame(frame);
+    try {
+      frameSeq++;
+      frameTs = ts;
+      meta.rafTicks++;
+      meta.lastTs = ts;
+      var ctl = window.__obedPaintControl__;
+      if (ctl && typeof ctl.tick === 'function') ctl.tick(frameSeq, ts);
+      tick(ts);
+      prepaint.toggle(frameSeq, ts);
+    } catch (e) {
+      if (meta.errors.length < 50) meta.errors.push('frame: ' + String(e && e.message || e));
+    }
+  }
+  function resetMeta(){
+    Object.keys(meta).forEach(function(k){
+      var value = meta[k];
+      if (typeof value === 'number') meta[k] = 0;
+      else if (Array.isArray(value)) value.length = 0;
+      else if (value && typeof value === 'object') Object.keys(value).forEach(function(j){ if (typeof value[j] === 'number') value[j] = 0; });
+    });
+    meta.schema = 2;
+    meta.lastTs = null;
+    meta.stoppedAt = null;
+  }
+  window.__obedContinuityProbe__ = {samples: samples, meta: meta};
+  var probe = window.__obedContinuityProbe__;
+  try { prepaint = installPrepaint(probe); } catch (e) { window.__obedContinuityProbe__ = null; throw e; }
+  probe.start = function(){
+    if (meta.running) return true;
+    resetMeta();
+    meta.running = true;
+    meta.startedAt = performance.now();
+    probe.raf = requestAnimationFrame(frame);
+    return true;
+  };
+  probe.stop = function(){
+    if (probe.raf != null) cancelAnimationFrame(probe.raf);
+    probe.raf = null;
+    if (meta.running) meta.stoppedAt = performance.now();
+    meta.running = false;
+    return true;
+  };
+  probe.drain = function(maxRows){ return samples.splice(0, maxRows); };
+  probe.start();
   return true;
 })();
 """
+SAMPLER_START_JS = "window.__obedContinuityProbe__.start()"
+SAMPLER_STOP_JS = "window.__obedContinuityProbe__.stop()"
+SAMPLER_META_JS = (
+    "(function(){var p=window.__obedContinuityProbe__;"
+    "return p?{meta:JSON.parse(JSON.stringify(p.meta)),now:performance.now()}:null;})()"
+)
+SAMPLER_DRAIN_ROWS = 200
+SAMPLER_DRAIN_JS = f"window.__obedContinuityProbe__.drain({SAMPLER_DRAIN_ROWS})"
+PAINT_CONTROL_READ_JS = (
+    "(function(){var c=window.__obedPaintControl__;"
+    "return c&&c.record?JSON.parse(JSON.stringify(c.record)):null;})()"
+)
 
 ENSURE_PLAYING_JS = (
     "Array.from(document.querySelectorAll('video')).forEach(function(v){"
@@ -622,7 +809,7 @@ def parse_viewport_arg(value: str) -> tuple[int, int]:
     return width, height
 
 
-def parse_strip_arg(value: str) -> tuple[str, int | None]:
+def parse_strip_arg(value: str) -> tuple[str, int | None, str | None]:
     try:
         return parse_strip(value)
     except ValueError as exc:
@@ -637,6 +824,37 @@ def parse_skip_arms(value: str) -> tuple[str, ...]:
             f"invalid --skip-arms {value!r}: expected distinct comma-separated names from {', '.join(SKIPPABLE_ARMS)}"
         )
     return tuple(name for name in SKIPPABLE_ARMS if name in names)
+
+
+def parse_paint_control(value: str) -> dict[str, Any]:
+    """`N:VARIANT:PHASE@SCENE[:late][:depth=K]` (plan §3.10, §4). `ancestor-display` runs only at
+    `settled`, and `settled` needs depth 2 or more; depth defaults to 2 there and 1 elsewhere."""
+    def bad(why: str) -> argparse.ArgumentTypeError:
+        return argparse.ArgumentTypeError(f"invalid --paint-control {value!r}: {why}")
+
+    parts = value.split(":")
+    if len(parts) < 3 or not parts[0].isdigit():
+        raise bad("expected N:VARIANT:PHASE@SCENE[:late][:depth=K]")
+    phase, _, scene = parts[2].partition("@")
+    if parts[1] not in paint_instrument.PAINT_CONTROL_VARIANTS:
+        raise bad(f"variant must be one of {', '.join(paint_instrument.PAINT_CONTROL_VARIANTS)}")
+    if phase not in paint_instrument.PAINT_CONTROL_PHASES or not scene.isdigit() or int(scene) < 1:
+        raise bad(f"expected PHASE@SCENE with PHASE one of {', '.join(paint_instrument.PAINT_CONTROL_PHASES)}")
+    timing, depth = "early", None
+    for extra in parts[3:]:
+        if extra == "late" and timing == "early":
+            timing = "late"
+        elif extra.startswith("depth=") and depth is None and extra[6:].isdigit() and int(extra[6:]) >= 1:
+            depth = int(extra[6:])
+        else:
+            raise bad(f"unexpected {extra!r}")
+    depth = depth if depth is not None else 2 if phase == "settled" else 1
+    if parts[1] == "ancestor-display" and phase != "settled":
+        raise bad("ancestor-display runs only at settled")
+    if phase == "settled" and parts[1] != "element-visibility" and depth < 2:
+        raise bad("settled needs depth 2 or more")
+    return {"raw": value, "n": int(parts[0]), "variant": parts[1], "phase": phase, "atScene": int(scene),
+            "timing": timing, "depth": depth}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -669,7 +887,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--gl-force-fail", metavar="REASON", default=None,
         help="With --gl-replay auto: seed the module's debugForceFail and run only V and a forced Vgl "
-        f"(one of {', '.join(GL_FORCE_FAIL_REASONS)}); status is forced-ok/forced-fail, never pass",
+        f"(one of {', '.join(GL_FORCE_FAIL_REASONS)}); status is forced-ok/forced-fail/inconclusive, never pass",
     )
     parser.add_argument(
         "--force-wrap", type=parse_force_wrap, default=None, metavar="{1to2,3to4}:OFFSET_MS",
@@ -682,9 +900,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "or re-score a --force-wrap artifact offline; exits 1 unless ok / pass",
     )
     parser.add_argument(
-        "--strip", type=parse_strip_arg, default=None, metavar="ACTION[@atScene]",
+        "--strip", type=parse_strip_arg, default=None, metavar="ACTION[@atScene[:KEY]]",
         help="Red arm: one continuity-on arm with the matching runtime-plan entries stripped at injection "
-        "(e.g. bridge@8, retire@2, glReplay@2 with --gl-replay auto), scored against its pre-registered red set",
+        "(e.g. bridge@8, pin@4:movie2, retire@2, glReplay@2 with --gl-replay auto; KEY = movieKey or a src/dst "
+        "objectId), scored against its pre-registered red set",
     )
     parser.add_argument(
         "--core-variant", choices=VARIANTS, default=None,
@@ -705,7 +924,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--carry-cover-null", action="store_true", default=False,
         help="--carry-cover null control: a probe-only style hides every <video> before the bridge press",
     )
+    parser.add_argument(
+        "--paint-control", type=parse_paint_control, default=None, metavar="N:VARIANT:PHASE@SCENE[:late][:depth=K]",
+        help="Positive control: one continuity-on arm that hides the target carry for N frames from the sampler's "
+        "rAF (early) or a later rAF (late); passes only on the exact injected seq set",
+    )
     args = parser.parse_args(argv)
+    if args.paint_control is not None and (
+        args.strip is not None or args.core_variant is not None or args.only_pass is not None or args.attach
+        or args.gl_replay != "off" or args.gl_force_fail is not None or args.force_wrap is not None
+        or args.rescore is not None or args.skip_arms or args.carry_cover or args.carry_cover_null or args.burst_poke
+    ):
+        parser.error("--paint-control runs on its own in launch mode (optionally with --viewport, --fixture, "
+                     "--original-index and --artifact)")
     if args.carry_cover_null and not args.carry_cover:
         parser.error("--carry-cover-null requires --carry-cover")
     if args.carry_cover:
@@ -730,10 +961,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--gl-replay auto scores the hand-back from V and Vgl, so V cannot be skipped")
     if red_arm and (
         (args.strip is not None and args.core_variant is not None) or args.gl_force_fail is not None
-        or args.only_pass is not None or args.force_wrap is not None or args.rescore is not None
+        or (args.only_pass is not None and args.strip is not None) or args.force_wrap is not None
+        or args.rescore is not None
     ):
-        parser.error("--strip / --core-variant run one red arm on its own (one of them; no --pass, "
-                     "--gl-force-fail, --force-wrap or --rescore)")
+        parser.error("--strip / --core-variant run one red arm on its own (one of them; --pass G only with "
+                     "--core-variant; no --gl-force-fail, --force-wrap or --rescore)")
     if args.gl_force_fail is not None and (args.gl_replay != "auto" or args.only_pass is not None):
         parser.error("--gl-force-fail requires --gl-replay auto and the full run")
     if args.force_wrap is not None and (args.gl_force_fail is not None or args.only_pass is not None or args.rescore):
@@ -820,10 +1052,9 @@ def runtime_of(plan: ContinuityPlan) -> dict[str, Any]:
 
 
 def matches_asset_keys(asset: Any, asset_keys: Sequence[str]) -> bool:
-    """The runtime's own `movieAssetKey` test: an asset key is a lowercase substring
-    of the source."""
-    lowered = str(asset or "").lower()
-    return any(key and str(key).lower() in lowered for key in asset_keys)
+    """Exact canonical asset-name equality, never a substring (`a.mov` is not `ba.mov`)."""
+    name = canonical_asset_name(asset)
+    return bool(name) and any(key and canonical_asset_name(key) == name for key in asset_keys)
 
 
 def runtime_asset_keys(runtime: dict[str, Any], movie_key: Any) -> list[str]:
@@ -832,50 +1063,50 @@ def runtime_asset_keys(runtime: dict[str, Any], movie_key: Any) -> list[str]:
     return [str(key).lower() for key in keys] if isinstance(keys, list) else []
 
 
-def retire_fact(
-    plan: ContinuityPlan, runtime: dict[str, Any], boundary_keys: dict[int, str]
-) -> dict[str, Any] | None:
-    """The one `retire` a runtime plan may carry, resolved to the boundary verdict it
-    refuses, the destination slide it lands on, and the asset keys and authored rects
-    its positive check needs. No retire => None, and every expectation below stays
-    exactly what it was before refusals existed."""
-    entries = [
+def entry_object_id(entry: dict[str, Any], end: str) -> str | None:
+    """The lowercased objectId of a schema-2 entry's `src` or `dst`, or None."""
+    value = entry.get(end)
+    object_id = value.get("objectId") if isinstance(value, dict) else None
+    return object_id.lower() if isinstance(object_id, str) and object_id else None
+
+
+def runtime_entries(runtime: dict[str, Any], action: str) -> list[dict[str, Any]]:
+    return [
         boundary for boundary in runtime.get("boundaries") or []
-        if isinstance(boundary, dict) and boundary.get("action") == "retire"
+        if isinstance(boundary, dict) and boundary.get("action") == action
     ]
-    if not entries:
-        return None
-    if len(entries) > 1:
-        raise SystemExit("runtime plan carries more than one retire boundary")
-    entry = entries[0]
-    scene, movie_key = entry.get("atScene"), entry.get("movieKey")
-    boundary_key = boundary_keys.get(scene)
-    if boundary_key is None:
-        raise SystemExit(f"retire boundary at scene {scene!r} is not one of the boundaries under test")
-    asset_keys = runtime_asset_keys(runtime, movie_key)
-    if not asset_keys:
-        raise SystemExit(f"retire boundary names movie key {movie_key!r}, which the plan does not define")
-    player_index = next((p for p, s in plan.scene_index_by_player.items() if s == scene), None)
-    if player_index is None:
-        raise SystemExit(f"retire boundary at scene {scene} has no destination slide")
-    rects = [
-        _authored_rect(rect)
-        for asset, instances in (plan.slide_instances.get(player_index) or {}).items()
-        if matches_asset_keys(asset, asset_keys)
-        for rect in instances
-    ]
-    if not rects:
-        raise SystemExit(f"retired movie {movie_key!r} has no authored instance on player index {player_index}")
-    return {
-        "movieKey": movie_key,
-        "atScene": scene,
-        "boundaryKey": boundary_key,
-        "verdictKey": positive_key(boundary_key, "refused"),
-        "playerIndex": player_index,
-        "originalOrdinal": player_index + 1,
-        "assetKeys": asset_keys,
-        "rects": rects,
-    }
+
+
+def retire_facts(runtime: dict[str, Any], specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every schema-2 `retire` entry bound to the one plan `retire` verdict naming the same
+    (atScene, src objectId), with the destination slide, asset keys and authored rects its
+    positive check needs; fails closed on an entry no verdict (or several) proves."""
+    facts: list[dict[str, Any]] = []
+    for entry in runtime_entries(runtime, "retire"):
+        scene, movie_key, src = entry.get("atScene"), entry.get("movieKey"), entry_object_id(entry, "src")
+        asset_keys = runtime_asset_keys(runtime, movie_key)
+        if not asset_keys:
+            raise SystemExit(f"retire boundary names movie key {movie_key!r}, which the plan does not define")
+        matches = [
+            spec for spec in specs
+            if spec["kind"] == "retire" and spec["atScene"] == scene and spec.get("srcObjectId") == src
+        ]
+        if src is None or len(matches) != 1:
+            raise SystemExit(f"retire at scene {scene!r} of {src!r} matches {len(matches)} plan verdicts")
+        spec = matches[0]
+        if not matches_asset_keys(spec["asset"], asset_keys):
+            raise SystemExit(f"retire at scene {scene!r} names {movie_key!r}, not the plan's {spec['asset']!r}")
+        prefix = spec["id"].rsplit(":", 1)[0]
+        carry = next((s for s in specs if s["kind"] == "carry" and s["id"].rsplit(":", 1)[0] == prefix), None)
+        spec["movieKey"] = movie_key
+        facts.append({
+            "movieKey": movie_key, "atScene": scene, "reason": entry.get("reason"),
+            "srcObjectId": src, "dstObjectId": spec.get("dstObjectId"),
+            "verdictId": spec["id"], "verdictKey": spec_key(spec), "boundaryKey": spec_key(carry or spec),
+            "playerIndex": spec["toPlayer"], "originalOrdinal": spec["toPlayer"] + 1,
+            "assetKeys": asset_keys, "rects": spec["rects"],
+        })
+    return facts
 
 
 def armed_fact(
@@ -927,6 +1158,9 @@ def armed_fact(
     instance_id = entry.get("instanceId")
     if labelled.get(instance_id) != instance_rect:
         raise SystemExit(f"glReplay instance {instance_id!r} is not the authored destination instance it names")
+    src_id, dst_id = entry_object_id(entry, "src"), entry_object_id(entry, "dst")
+    if src_id is None or dst_id is None:
+        raise SystemExit("glReplay boundary names no src/dst objectId")
     return {
         "movieKey": movie_key,
         "atScene": scene,
@@ -941,55 +1175,145 @@ def armed_fact(
         "movieSlot": movie_slot,
         "slotRects": slot_rects,
         "overrideSlots": override_slots,
+        "srcObjectId": src_id,
+        "dstObjectId": dst_id,
     }
 
 
-def rect_expectations(
-    plan: ContinuityPlan, runtime: dict[str, Any], *, continuity_on: bool
-) -> dict[int, dict[str, str]]:
-    """Per slide, per asset: live or dead, derived from the plan alone.
+def plan_instances(plan: ContinuityPlan) -> dict[str, tuple[int, str]]:
+    """Every objectId the plan's movies name (lowercased) -> (player index, `asset#index` label)."""
+    found: dict[str, tuple[int, str]] = {}
+    for boundary in plan.boundaries:
+        for movie in boundary.movies:
+            ends = (
+                (boundary.from_player_index, movie.src_rect, movie.src_object_id),
+                (boundary.to_player_index, movie.dst_rect, movie.dst_object_id),
+            )
+            for player, rect, object_id in ends:
+                if player is None or rect is None or not object_id:
+                    continue
+                bound = (player, instance_label(plan, player, movie.asset, rect))
+                if found.setdefault(object_id.lower(), bound) != bound:
+                    raise SystemExit(f"objectId {object_id} names {found[object_id.lower()]} and {bound}")
+    return found
 
-    The first slide is live. The destination of a restart or a bridge is live in
-    both passes (the export starts a fresh element there). The destination of a
-    RETIRED boundary is dead in both. The destination of a carried (implicit pin)
-    boundary is live with the runtime installed and dead without it -- a
-    geometry-static Magic Move leaves the raw player's movie frozen.
+
+def plan_movie_at(plan: ContinuityPlan, scene: Any, src_object_id: str | None) -> MovieContinuity:
+    """The one plan movie at the boundary landing on `scene` whose source is `src_object_id`; fails closed."""
+    found = [
+        movie for boundary in plan.boundaries
+        if boundary.to_player_index is not None and plan.scene_index_by_player.get(boundary.to_player_index) == scene
+        for movie in boundary.movies
+        if src_object_id is not None and (movie.src_object_id or "").lower() == src_object_id
+    ]
+    if len(found) != 1:
+        raise SystemExit(f"{len(found)} plan movie(s) at scene {scene!r} have source {src_object_id!r}, expected one")
+    return found[0]
+
+
+def rect_expectations(
+    plan: ContinuityPlan, runtime: dict[str, Any], *, continuity_on: bool,
+    arrival: dict[int, dict[str, bool]] | None = None,
+) -> dict[int, dict[str, str]]:
+    """Per slide, per authored instance (`asset#index`): live or dead, from the schema-2
+    runtime plan, each entry bound to its instance by objectId (`plan_instances`).
+
+    An instance the raw player owns reads as it does on arrival: live when its movie starts
+    on arrival (`arrival_starts`), dead when it waits for a click. That covers the first slide,
+    every instance no entry names, a restart's fresh element, and -- with the runtime off -- a
+    carried destination; a `retire` hands its refused pair back to the raw player, so its
+    destination reads the same way (a retire with no paired destination states nothing). With
+    the runtime on, a pin, bridge or glReplay destination is carried and live. Without
+    `arrival` every raw instance counts as started on arrival, except a raw pin or glReplay
+    destination, which the Magic Move leaves frozen (P2's click-started slide 2).
     """
-    retired_by_scene: dict[Any, list[str]] = {}
-    action_by_scene: dict[Any, str] = {}
-    for boundary in runtime.get("boundaries") or []:
-        if not isinstance(boundary, dict):
+    instances = plan_instances(plan)
+
+    def bound(object_id: str | None, entry: dict[str, Any]) -> tuple[int, str]:
+        if object_id is None or object_id not in instances:
+            raise SystemExit(f"{entry.get('action')} at scene {entry.get('atScene')!r} names {object_id!r}, "
+                             "which no plan movie names")
+        return instances[object_id]
+
+    def raw(player: int, label: str, legacy: str = LIVE) -> str:
+        if arrival is None:
+            return legacy
+        return LIVE if (arrival.get(player) or {}).get(label) else DEAD
+
+    stated: dict[int, dict[str, str]] = {}
+    for entry in runtime.get("boundaries") or []:
+        if not isinstance(entry, dict):
             continue
-        scene = boundary.get("atScene")
-        if boundary.get("action") == "retire":
-            retired_by_scene.setdefault(scene, []).extend(runtime_asset_keys(runtime, boundary.get("movieKey")))
+        action = entry.get("action")
+        if action == "retire":
+            movie = plan_movie_at(plan, entry.get("atScene"), entry_object_id(entry, "src"))
+            if movie.dst_rect is None or not movie.dst_object_id:
+                continue
+            player, label = bound(movie.dst_object_id.lower(), entry)
+            state = raw(player, label, LIVE if movie.action == "bridge" else DEAD)
         else:
-            action_by_scene[scene] = str(boundary.get("action"))
+            dst = entry_object_id(entry, "dst")
+            if dst is None:
+                continue
+            player, label = bound(dst, entry)
+            if action == "restart":
+                state = raw(player, label)
+            elif continuity_on:
+                state = LIVE
+            else:
+                state = raw(player, label, LIVE if action == "bridge" else DEAD)
+        stated.setdefault(player, {})[label] = state
     expectations: dict[int, dict[str, str]] = {}
     for position, player_index in enumerate(sorted(plan.scene_index_by_player)):
-        scene = plan.scene_index_by_player[player_index]
-        action = action_by_scene.get(scene)
-        retired = retired_by_scene.get(scene) or []
-        per_asset: dict[str, str] = {}
-        for asset in plan.slide_instances.get(player_index) or {}:
-            if position == 0:
-                per_asset[asset] = LIVE
-            elif matches_asset_keys(asset, retired):
-                per_asset[asset] = DEAD
-            elif action in ("restart", "bridge"):
-                per_asset[asset] = LIVE
-            elif action == "glReplay":
-                per_asset[asset] = LIVE if continuity_on else DEAD
-            else:
-                per_asset[asset] = LIVE if continuity_on else DEAD
-        expectations[player_index] = per_asset
+        per_instance: dict[str, str] = {}
+        for asset, rects in sorted((plan.slide_instances.get(player_index) or {}).items()):
+            for index in range(1, len(rects) + 1):
+                label = f"{asset}#{index}"
+                stated_here = None if position == 0 else (stated.get(player_index) or {}).get(label)
+                per_instance[label] = stated_here or raw(player_index, label)
+        expectations[player_index] = per_instance
     return expectations
 
 
-def visible_expectations(plan: ContinuityPlan, runtime: dict[str, Any]) -> dict[str, dict[int, dict[str, str]]]:
+def movie_start_targets(effects: Any) -> set[str]:
+    """The objectIDs an event's `apple:movie-start` builds start, including builds grouped under
+    another effect (a build "with previous" nests in its leader's `effects`). A build names its
+    movie on itself or on its `renderMovie` child (the committed P2 trim keeps only the child)."""
+    found: set[str] = set()
+    for effect in effects if isinstance(effects, list) else []:
+        if not isinstance(effect, dict):
+            continue
+        if effect.get("name") in MOVIE_START_EFFECTS and isinstance(effect.get("objectID"), str) and effect["objectID"]:
+            found.add(effect["objectID"])
+        found |= movie_start_targets(effect.get("effects"))
+    return found
+
+
+def arrival_starts(export_root: Path, slides: list[dict[str, Any]], plan: ContinuityPlan) -> dict[int, dict[str, bool]]:
+    """Per slide, per authored instance (`asset#index`): whether its movie starts on arrival --
+    its `apple:movie-start` build sits in the slide's first event (`movie_start_targets`) and
+    that event plays automatically (`automaticPlay`). A click-started (or never started) movie
+    is not."""
+    starts: dict[int, dict[str, bool]] = {}
+    nodes = movie_nodes(export_root, slides)
+    for slide in slides:
+        uuid, player = slide["exportedUuid"], slide["playerIndex"]
+        events = json.loads((export_root / "assets" / uuid / f"{uuid}.json").read_text()).get("events") or []
+        first = events[0] if events and isinstance(events[0], dict) else {}
+        on_arrival = movie_start_targets(first.get("effects")) if first.get("automaticPlay") is True else set()
+        for node in nodes:
+            if node["playerIndex"] == player and node["asset"] in (plan.slide_instances.get(player) or {}):
+                label = instance_label(plan, player, node["asset"], node["rect"])
+                starts.setdefault(player, {})[label] = node["objectId"] in on_arrival
+    return starts
+
+
+def visible_expectations(
+    plan: ContinuityPlan, runtime: dict[str, Any], arrival: dict[int, dict[str, bool]] | None = None,
+) -> dict[str, dict[int, dict[str, str]]]:
     return {
-        "V": rect_expectations(plan, runtime, continuity_on=True),
-        "Voff": rect_expectations(plan, runtime, continuity_on=False),
+        "V": rect_expectations(plan, runtime, continuity_on=True, arrival=arrival),
+        "Voff": rect_expectations(plan, runtime, continuity_on=False, arrival=arrival),
     }
 
 
@@ -1011,11 +1335,13 @@ def verdict_specs(plan: ContinuityPlan) -> list[dict[str, Any]]:
     """One verdict per (boundary, movie instance, kind), generated from
     `plan.boundaries[].movies[]` alone, so the scorer never depends on the runtime plan's
     schema. Kinds: `carry` (pin or bridge; True when carried, False when refused, ungated `None`
-    when G2 arms it), `restart`, `retire` (the positive half of a refused carry) and `armed` (a
-    G2-armed refusal); any other action is kept as an `unhandled` verdict that always scores
-    INCONCLUSIVE. The id is `b{from}to{to}:{asset}#{srcIndex}->{asset}#{dstIndex}:{kind}`
-    (player indices; `slide_instances` 1-based indices). A boundary with one movie also gets
-    P2's legacy name (`continue1to2`, `restart2to3`, `refused1to2`, `armed1to2`) as an alias."""
+    when G2 arms it), `restart`, `retire` (the positive half of a refused carry, or a carried
+    decoder the plan ends) and `armed` (a G2-armed refusal); any other action is kept as an
+    `unhandled` verdict that always scores INCONCLUSIVE. The id is
+    `b{from}to{to}:{asset}#{srcIndex}->{asset}#{dstIndex}:{kind}` (player indices;
+    `slide_instances` 1-based indices; `end` when the movie has no destination instance). A
+    boundary with one movie also gets P2's legacy name (`continue1to2`, `restart2to3`,
+    `refused1to2`, `armed1to2`) as an alias."""
     specs: list[dict[str, Any]] = []
     ordered = sorted(plan.scene_index_by_player)
     for boundary in plan.boundaries:
@@ -1028,11 +1354,18 @@ def verdict_specs(plan: ContinuityPlan) -> list[dict[str, Any]]:
         later = [plan.scene_index_by_player[player] for player in ordered if player > destination]
         suffix = f"{source + 1}to{destination + 1}" if len(boundary.movies) == 1 else None
         for movie in boundary.movies:
-            if movie.src_rect is None or movie.dst_rect is None:
+            if movie.src_rect is None or (movie.dst_rect is None and movie.action in ("pin", "bridge")):
                 raise SystemExit(f"{movie.action} of {movie.asset!r} at scene {scene} is missing a rect")
             src = instance_label(plan, source, movie.asset, movie.src_rect)
-            dst = instance_label(plan, destination, movie.asset, movie.dst_rect)
+            dst = "end" if movie.dst_rect is None else instance_label(plan, destination, movie.asset, movie.dst_rect)
             asset_keys = [movie.asset.lower()]
+            dst_rect = movie.dst_rect.as_dict() if movie.dst_rect is not None else None
+            asset_rects = [
+                _authored_rect(rect)
+                for asset, instances in (plan.slide_instances.get(destination) or {}).items()
+                if matches_asset_keys(asset, asset_keys)
+                for rect in instances
+            ]
 
             def add(kind: str, legacy: str | None, expect: bool | None, **detail: Any) -> None:
                 spec_id = f"b{source}to{destination}:{src}->{dst}:{kind}"
@@ -1042,36 +1375,38 @@ def verdict_specs(plan: ContinuityPlan) -> list[dict[str, Any]]:
                     "id": spec_id, "alias": f"{legacy}{suffix}" if suffix and legacy else None, "kind": kind,
                     "expect": expect, "action": movie.action, "asset": movie.asset, "assetKeys": asset_keys,
                     "srcInstance": src, "dstInstance": dst,
+                    "srcObjectId": (movie.src_object_id or "").lower() or None,
+                    "dstObjectId": (movie.dst_object_id or "").lower() or None,
                     "fromPlayer": source, "toPlayer": destination, "atScene": scene, **detail,
                 })
 
             if movie.action in ("pin", "bridge"):
                 if movie.action == "pin":
-                    rect = movie.dst_rect
-                    src_rect, dst_rect, transition = rect, rect, None
+                    src_rect, transition = dst_rect, None
                 else:
-                    src_rect, dst_rect, transition = movie.src_rect, movie.dst_rect, scene - 1
+                    src_rect, transition = movie.src_rect.as_dict(), scene - 1
                 armed = movie.refusal is not None and movie.gl_replay is not None
                 add(
                     "carry", "continue", None if armed else movie.refusal is None,
-                    srcRect=src_rect.as_dict(), dstRect=dst_rect.as_dict(), transitionScene=transition,
+                    srcRect=src_rect, dstRect=dst_rect, transitionScene=transition,
+                    sourceScene=plan.scene_index_by_player.get(source), untilScene=later[0] if later else None,
                 )
                 if armed:
                     add("armed", "armed", True)
                 elif movie.refusal is not None:
                     add(
-                        "retire", "refused", True, originalOrdinal=destination + 1, dstRect=movie.dst_rect.as_dict(),
-                        zoneUntilScene=later[0] if later else None,
-                        rects=[
-                            _authored_rect(rect)
-                            for asset, instances in (plan.slide_instances.get(destination) or {}).items()
-                            if matches_asset_keys(asset, asset_keys)
-                            for rect in instances
-                        ],
+                        "retire", "refused", True, originalOrdinal=destination + 1, dstRect=dst_rect,
+                        zoneUntilScene=later[0] if later else None, rects=asset_rects,
                     )
+            elif movie.action == "retire":
+                add(
+                    "retire", None, True, originalOrdinal=destination + 1, dstRect=None,
+                    zoneUntilScene=later[0] if later else None, rects=[movie.src_rect.as_dict()],
+                )
             elif movie.action == "restart":
                 add(
-                    "restart", "restart", True, srcRect=movie.src_rect.as_dict(), dstRect=movie.dst_rect.as_dict(),
+                    "restart", "restart", True, srcRect=movie.src_rect.as_dict(), dstRect=dst_rect,
+                    dstRects=[dst_rect] if dst_rect is not None else asset_rects,
                     sourceScene=plan.scene_index_by_player.get(source),
                     settleUntilScene=later[0] if later else None,
                 )
@@ -1141,7 +1476,10 @@ def bind_positive_fact(fact: dict[str, Any] | None, specs: list[dict[str, Any]],
     matches = [
         spec for spec in specs
         if spec["kind"] == kind and spec["atScene"] == fact["atScene"] and matches_asset_keys(spec["asset"], fact["assetKeys"])
-        and (kind != "armed" or str(spec["dstInstance"]).lower() == str(fact.get("instanceId")).lower())
+        and (kind != "armed" or (
+            str(spec["dstInstance"]).lower() == str(fact.get("instanceId")).lower()
+            and spec.get("dstObjectId") == fact.get("dstObjectId") and spec.get("srcObjectId") == fact.get("srcObjectId")
+        ))
     ]
     if len(matches) != 1:
         raise SystemExit(f"the runtime's {kind} at scene {fact['atScene']} matches {len(matches)} plan verdicts")
@@ -1152,19 +1490,23 @@ def bind_positive_fact(fact: dict[str, Any] | None, specs: list[dict[str, Any]],
 
 
 def bind_dom_ids(facts: dict[str, Any], nodes: list[dict[str, Any]]) -> None:
-    """Give every retire verdict (and the retire fact it proves) the DOM id the player gives its
-    destination instance (F1: `objectID + "-video"`), from the export's movie nodes."""
+    """Give every retire verdict with a destination instance (and the retire facts it proves) the
+    DOM id the player gives that instance (F1: `objectID + "-video"`), from the export's movie nodes."""
     for spec in facts.get("verdicts") or []:
-        if spec["kind"] == "retire":
+        if spec["kind"] == "retire" and spec.get("dstRect") is not None:
             spec["dstDomId"] = source_instance(nodes, spec["toPlayer"], spec["asset"], spec["dstRect"])["domId"]
-            retire = facts.get("retire")
-            if isinstance(retire, dict) and retire.get("verdictId") == spec["id"]:
-                retire["dstDomId"] = spec["dstDomId"]
+            for retire in [facts.get("retire"), *(facts.get("retires") or [])]:
+                if isinstance(retire, dict) and retire.get("verdictId") == spec["id"]:
+                    retire["dstDomId"] = spec["dstDomId"]
 
 
-def ground_truth_facts(plan: ContinuityPlan, *, armed: bool = False) -> dict[str, Any]:
+def ground_truth_facts(
+    plan: ContinuityPlan, *, armed: bool = False, arrival: dict[int, dict[str, bool]] | None = None,
+) -> dict[str, Any]:
     """Independent, offline ground truth (never injected into the host): the plan-generated
-    `verdicts` (see `verdict_specs`), the retire and armed facts their positive halves need,
+    `verdicts` (see `verdict_specs`), the retire facts (`retires`; `retire` is the first, or
+    None) and the armed fact their positive halves need, the per-instance live/dead
+    expectations (`arrival` from `arrival_starts` when the export is at hand),
     the runtime plan's signature, and -- for a pinned P2 plan only (`P2_PLAN_SHA256`) -- P2's
     legacy slot facts. The `["armed"]` contract is unchanged."""
     specs = verdict_specs(plan)
@@ -1176,12 +1518,12 @@ def ground_truth_facts(plan: ContinuityPlan, *, armed: bool = False) -> dict[str
         spec["atScene"]: spec_key(spec)
         for kind in ("restart", "carry") for spec in specs if spec["kind"] == kind
     }
-    retire = retire_fact(plan, runtime, boundary_keys)
-    bind_positive_fact(retire, specs, "retire")
-    facts["retire"] = retire
-    facts["refusedBoundaries"] = [retire["boundaryKey"]] if retire else []
+    retires = retire_facts(runtime, specs)
+    facts["retires"] = retires
+    facts["retire"] = retires[0] if retires else None
+    facts["refusedBoundaries"] = [retire["boundaryKey"] for retire in retires]
     facts["refusals"] = [dict(item) for item in getattr(plan, "refusals", ()) if isinstance(item, dict)]
-    facts["rectExpectations"] = visible_expectations(plan, runtime)
+    facts["rectExpectations"] = visible_expectations(plan, runtime, arrival)
     if armed:
         facts["armed"] = armed_fact(plan, runtime, boundary_keys)
         bind_positive_fact(facts["armed"], specs, "armed")
@@ -1207,7 +1549,7 @@ def facts_for(
 def check_vgl_expectations(
     v: dict[int, dict[str, str]], vgl: dict[int, dict[str, str]], armed: dict[str, Any]
 ) -> None:
-    """Vgl may differ from V only at the armed movie, dead in V and live in Vgl."""
+    """Vgl may differ from V only at the armed instance, dead in V and live in Vgl."""
     diffs = {
         (index, asset)
         for index in set(v) | set(vgl)
@@ -1215,7 +1557,7 @@ def check_vgl_expectations(
         if (v.get(index) or {}).get(asset) != (vgl.get(index) or {}).get(asset)
     }
     index = armed["playerIndex"]
-    wanted = {(index, asset) for asset in vgl.get(index) or {} if matches_asset_keys(asset, armed["assetKeys"])}
+    wanted = {(index, label) for label in vgl.get(index) or {} if label.lower() == str(armed["instanceId"]).lower()}
     if not wanted or diffs != wanted or any(
         v[i][asset] != DEAD or vgl[i][asset] != LIVE for i, asset in wanted
     ):
@@ -1223,8 +1565,8 @@ def check_vgl_expectations(
 
 
 @contextmanager
-def stripped_runtime(action: str, at_scene: int | None = None) -> Iterator[None]:
-    """Red arm `--strip ACTION[@atScene]`: drop the matching entries (`strip_entries`) from the
+def stripped_runtime(action: str, at_scene: int | None = None, key: str | None = None) -> Iterator[None]:
+    """Red arm `--strip ACTION[@atScene[:KEY]]`: drop the matching entries (`strip_entries`) from the
     runtime plan the host injects, inside this probe PROCESS only -- a monkeypatch of
     `live_host._continuity_plan_script`, the one seam every derivation path reaches (a
     `to_runtime` patch cannot strip `glReplay`: the host would re-derive the flag-off plan and
@@ -1232,7 +1574,7 @@ def stripped_runtime(action: str, at_scene: int | None = None) -> Iterator[None]
     original = live_host_module._continuity_plan_script
 
     def patched(plan: dict[str, Any], canvas: dict[str, int]) -> str:
-        return original(strip_entries(plan, action, at_scene), canvas)
+        return original(strip_entries(plan, action, at_scene, key), canvas)
 
     live_host_module._continuity_plan_script = patched
     try:
@@ -1242,9 +1584,9 @@ def stripped_runtime(action: str, at_scene: int | None = None) -> Iterator[None]
 
 
 def bridge_disabled() -> Any:
-    """Arm C: `--strip bridge`. With no bridge entry the runtime's own `slide4MinHash()` is
-    null, so the 3->4 magic move falls through to the export's native (broken) restart; the
-    pin (1->2) and restart (2->3) behaviour are untouched."""
+    """Arm C: `--strip bridge`. With no bridge entry the runtime carries nothing across that
+    boundary, so each moving Magic Move falls through to the export's native (broken) restart;
+    every other entry is untouched."""
     return stripped_runtime("bridge")
 
 
@@ -1315,20 +1657,23 @@ def drive_and_sample(
     """Advance through every original slide in order (on P2: 2 is the 1->2 magic move, 3 the
     dissolve, which may straddle slide-2 builds, 4 the 3->4 magic move). `observer` is called
     once on each slide, slide 1 included -- the only hook the refusal evidence needs, and never
-    a screenshot. Before the press into a `carry_into` player index (other than the second
-    slide, which follows slide 1's own `CLICK_DELAY_S`), the source slide is let settle and
-    held `CLICK_DELAY_S` (1.5 s, P2's fast-profile `clickDelayS` before its 3->4 press), so
-    the carry's settled-source phase is always sampled."""
+    a screenshot. Slide 1 is held `FIRST_CLICK_DWELL_S` before the first press. Before the press
+    into a `carry_into` player index (other than the second slide, which follows slide 1's own
+    dwell) and before the press out of one, the slide is let settle and held `CLICK_DELAY_S`
+    (1.5 s, P2's fast-profile `clickDelayS` before its 3->4 press), so every carry's settled
+    source and settled destination phases are sampled -- in a chain, a destination is the next
+    carry's source."""
     transport = player._require_transport()
     transport.evaluate(SAMPLER_JS)
     transport.evaluate(ENSURE_PLAYING_JS)
     wait_for_decode(player)
-    time.sleep(CLICK_DELAY_S)
+    time.sleep(FIRST_CLICK_DWELL_S)
     shown = sorted((s for s in player.slides if not s.get("skipped")), key=lambda s: s["originalOrdinal"])
     ordinals = [slide["originalOrdinal"] for slide in shown]
     for index, slide in enumerate(shown):
         ordinal = slide["originalOrdinal"]
-        if index >= 2 and slide.get("playerIndex") in carry_into:
+        leaving = shown[index - 1].get("playerIndex") if index else None
+        if index >= 2 and (slide.get("playerIndex") in carry_into or leaving in carry_into):
             wait_until_settled(player)
             time.sleep(CLICK_DELAY_S)
         if ordinal != ordinals[0]:
@@ -1336,16 +1681,66 @@ def drive_and_sample(
         if observer is not None:
             observer(ordinal)
     time.sleep(POST_ADVANCE_SETTLE_S)
-    samples = transport.evaluate("window.__obedContinuityProbe__.samples")
-    return samples if isinstance(samples, list) else []
+    transport.evaluate(SAMPLER_STOP_JS)
+    return drain_samples(transport)
 
 
-def track_by_id(samples: list[dict[str, Any]], asset_substr: str) -> dict[int, list[dict[str, Any]]]:
+def drain_samples(transport: Any) -> list[dict[str, Any]]:
+    """Every retained sampler row, read `SAMPLER_DRAIN_ROWS` at a time so no CDP payload grows
+    with the run, until an empty chunk. Anything but a list of row objects raises (an arm error)."""
+    rows: list[dict[str, Any]] = []
+    while True:
+        chunk = transport.evaluate(SAMPLER_DRAIN_JS)
+        if not isinstance(chunk, list) or not all(isinstance(row, dict) for row in chunk):
+            raise RuntimeError(f"sampler drain returned {type(chunk).__name__} after {len(rows)} rows, expected a list of rows")
+        if not chunk:
+            return rows
+        rows.extend(chunk)
+
+
+def sampler_record(transport: Any, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """`{schema, meta, selfCheck}` of a stopped sampler, read after its rows were drained; the
+    self-check's read time is the moment the sampler stopped."""
+    read = transport.evaluate(SAMPLER_META_JS)
+    meta = read.get("meta") if isinstance(read, dict) and isinstance(read.get("meta"), dict) else {}
+    read_now = _finite_number(meta.get("stoppedAt"))
+    if read_now is None and isinstance(read, dict):
+        read_now = _finite_number(read.get("now"))
+    return {
+        "schema": meta.get("schema"), "meta": meta,
+        "selfCheck": paint_instrument.sampler_self_check(
+            rows, meta, read_now=math.inf if read_now is None else read_now,
+            max_gap_frames=CARRY_COVER_MAX_GAP_FRAMES,
+        ),
+    }
+
+
+def sampler_problem(entry: Any) -> str | None:
+    """Why an arm's or leg's sampler cannot vouch for its rows (every fresh run needs schema 2
+    with a passing self-check), else None."""
+    sampler = entry.get("sampler") if isinstance(entry, dict) else None
+    if not isinstance(sampler, dict):
+        return "no sampler record"
+    if sampler.get("schema") != paint_instrument.SAMPLER_SCHEMA:
+        return f"sampler schema {sampler.get('schema')!r}, expected {paint_instrument.SAMPLER_SCHEMA}"
+    check = sampler.get("selfCheck")
+    if not (isinstance(check, dict) and check.get("ok") is True):
+        return f"sampler self-check failed: {check!r}"
+    return None
+
+
+def track_by_id(samples: list[dict[str, Any]], asset: str) -> dict[int, list[dict[str, Any]]]:
+    """Every row of each decoder id that names the asset (`matches_asset_keys`) on any row, whatever its
+    src on that row (identity before source): a row whose src was cleared or swapped stays in its track,
+    for `unnamed_rows`."""
+    named = {
+        video["id"] for sample in samples for video in sample.get("videos") or []
+        if matches_asset_keys(video.get("src"), [asset])
+    }
     tracks: dict[int, list[dict[str, Any]]] = {}
     for sample in samples:
         for video in sample.get("videos") or []:
-            src = str(video.get("src") or "").lower()
-            if asset_substr in src:
+            if video.get("id") in named:
                 row = dict(video)
                 row["t"] = sample.get("t")
                 row["scene"] = sample.get("scene")
@@ -1355,24 +1750,50 @@ def track_by_id(samples: list[dict[str, Any]], asset_substr: str) -> dict[int, l
     return tracks
 
 
+def unnamed_rows(
+    tracks: dict[int, list[dict[str, Any]]], asset: str, lo: float = -math.inf, hi: float = math.inf,
+) -> list[dict[str, Any]]:
+    """The tracked rows with `lo <= t <= hi` whose src no longer names the asset (cleared or swapped)."""
+    return [
+        {"t": r["t"], "id": i, "src": r.get("src")} for i, rows in tracks.items() for r in rows
+        if lo <= r["t"] <= hi and not matches_asset_keys(r.get("src"), [asset])
+    ]
+
+
+def _decoded(row: dict[str, Any]) -> bool:
+    return (_finite_number(row.get("readyState")) or 0) >= 2 and (_finite_number(row.get("videoWidth")) or 0) > 0
+
+
+def _maybe_decoded(row: dict[str, Any]) -> bool:
+    """Not proven idle: decoding, or a `readyState` or `videoWidth` that is missing, null or ill-typed."""
+    return _decoded(row) or any(_finite_number(row.get(f)) is None for f in ("readyState", "videoWidth"))
+
+
 def decoded_anywhere(tracks: dict[int, list[dict[str, Any]]]) -> bool:
-    return any(
-        (row.get("readyState") or 0) >= 2 and (row.get("videoWidth") or 0) > 0
-        for rows in tracks.values()
-        for row in rows
-    )
+    return any(_decoded(row) for rows in tracks.values() for row in rows)
 
 
-def stage_map_valid(stage_map: dict[str, Any] | None) -> bool:
-    """Fail-closed: missing `#stage`, a zero box, or a non-uniform scale (`|s -
-    sy| / s` over 0.1%) is invalid, never silently treated as identity."""
-    if not isinstance(stage_map, dict):
-        return False
-    s, sy = stage_map.get("s"), stage_map.get("sy")
-    ow, oh = stage_map.get("offsetWidth"), stage_map.get("offsetHeight")
-    if not all(isinstance(v, (int, float)) and math.isfinite(v) and v > 0 for v in (s, sy, ow, oh)):
-        return False
-    return abs(s - sy) / s <= 0.001
+def unidentified_decoders(
+    samples: list[dict[str, Any]], tracks: dict[int, list[dict[str, Any]]], lo: float, hi: float,
+) -> list[dict[str, Any]]:
+    """Untracked decoding `<video>` rows with `lo <= t <= hi` that name no source at all: a decoder of
+    unknown movie, which may be the one a verdict needs."""
+    return [
+        {"t": s["t"], "id": v.get("id")} for s in samples if lo <= s["t"] <= hi
+        for v in s.get("videos") or [] if v.get("id") not in tracks and v.get("src") == "" and _decoded(v)
+    ]
+
+
+def duplicate_ids(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Samples that list one probe id on two `<video>` rows: which is the decoder cannot be told,
+    so it is never scored by row order."""
+    out = []
+    for s in samples:
+        ids = [v.get("id") for v in s.get("videos") or [] if isinstance(v, dict) and v.get("id") is not None]
+        dupes = sorted({str(i) for i in ids if ids.count(i) > 1})
+        if dupes:
+            out.append({"t": s.get("t"), "ids": dupes})
+    return out
 
 
 def to_authored_rect(rect: dict[str, float], stage_map: dict[str, Any]) -> dict[str, float]:
@@ -1391,7 +1812,9 @@ def convert_samples_to_authored(samples: list[dict[str, Any]]) -> tuple[list[dic
     existing threshold and red control (all authored) applies unchanged. The
     raw screen rect is kept under `rectScreen` for evidence; a missing/invalid
     stage map leaves `rect` as None, a scoring failure (see `stageMapInvalid`
-    in `score_continuity`), never a silent skip."""
+    in `score_continuity`), never a silent skip. Nothing absent or ill-typed is
+    manufactured: a missing field stays missing and a malformed value stays raw,
+    so `sample_schema_errors` sees the raw evidence."""
     converted: list[dict[str, Any]] = []
     invalid_count = 0
     for entry in samples:
@@ -1400,18 +1823,57 @@ def convert_samples_to_authored(samples: list[dict[str, Any]]) -> tuple[list[dic
         if not valid:
             invalid_count += 1
         new_entry = dict(entry)
-        new_videos = []
-        for video_row in entry.get("videos") or []:
-            new_video = dict(video_row)
-            screen_rect = video_row.get("rect")
-            new_video["rectScreen"] = screen_rect
-            new_video["rect"] = to_authored_rect(screen_rect, stage_map) if valid and isinstance(screen_rect, dict) else None
-            new_video["stageMapValid"] = valid
-            new_videos.append(new_video)
-        new_entry["videos"] = new_videos
+        if isinstance(entry.get("videos"), list):
+            new_videos = []
+            for video_row in entry["videos"]:
+                new_video = dict(video_row) if isinstance(video_row, dict) else video_row
+                if isinstance(video_row, dict) and "rect" in video_row:
+                    screen_rect = video_row["rect"]
+                    new_video["rectScreen"] = screen_rect
+                    if _is_rect(screen_rect):
+                        new_video["rect"] = to_authored_rect(screen_rect, stage_map) if valid else None
+                if isinstance(video_row, dict):
+                    new_video["stageMapValid"] = valid
+                new_videos.append(new_video)
+            new_entry["videos"] = new_videos
         new_entry["stageMapValid"] = valid
+        if "pp" in entry:
+            pp = authored_prepaint(entry["pp"])
+            if pp is None:
+                new_entry.pop("pp")
+                new_entry["ppUnreadable"] = entry["pp"]
+            else:
+                new_entry["pp"] = pp
         converted.append(new_entry)
     return converted, invalid_count
+
+
+def authored_prepaint(pp: Any) -> dict[str, Any] | None:
+    """A pre-paint read with every `rect`, `visibleRect` and its `stageBox` in authored px by its
+    own `stageMap` (screen values kept as `*Screen`); None when that map is untrustworthy. Only
+    present, well-formed rects are converted: an absent field stays absent, a null stays null and
+    a malformed value stays raw, so the pre-paint schema still sees it."""
+    if not isinstance(pp, dict) or not stage_map_valid(pp.get("stageMap")):
+        return None
+    stage_map = pp["stageMap"]
+
+    def authored(holder: dict[str, Any], key: str) -> dict[str, Any]:
+        if key not in holder:
+            return {}
+        value = holder[key]
+        return {f"{key}Screen": value, key: to_authored_rect(value, stage_map) if _is_rect(value) else value}
+
+    out = {**pp, **authored(pp, "stageBox")}
+    if isinstance(pp.get("videos"), list):
+        out["videos"] = [
+            {**pv, **authored(pv, "rect"), **authored(pv, "visibleRect")} if isinstance(pv, dict) else pv
+            for pv in pp["videos"]
+        ]
+    return out
+
+
+def _is_rect(value: Any) -> bool:
+    return isinstance(value, dict) and all(_finite_number(value.get(key)) is not None for key in ("x", "y", "w", "h"))
 
 
 def expected_stage_fit(canvas: dict[str, Any], viewport: dict[str, Any]) -> dict[str, float]:
@@ -1504,6 +1966,23 @@ def is_move_sample(row: dict[str, Any], transition_scene: float | None) -> bool:
     )
 
 
+def phase_unreadable(
+    row: dict[str, Any], transition_scene: float | None, source_scene: float | None = None,
+) -> str | None:
+    """Why a row's carry phase cannot be read: no scene, on the transition scene no `playerState`/`busy` to tell
+    the move from move-complete, or on the source scene (`source_scene`, whose settled rows ground the carry and
+    paint windows) no Boolean `busy`. Never defaulted to the source phase."""
+    if _finite_number(row.get("scene")) is None:
+        return "phase: scene unreadable"
+    if transition_scene is not None and row["scene"] == transition_scene and (
+        not isinstance(row.get("playerState"), str) or not isinstance(row.get("busy"), bool)
+    ):
+        return "phase: transition state unreadable"
+    if source_scene is not None and row["scene"] == source_scene and not isinstance(row.get("busy"), bool):
+        return "phase: source settle state unreadable"
+    return None
+
+
 def is_move_complete(row: dict[str, Any], transition_scene: float | None) -> bool:
     """The move has finished but the player has not yet cut to the next scene:
     still `transition_scene`, but no longer the `Playing`+busy move sample. Real
@@ -1554,9 +2033,10 @@ def find_boundary_window(
     with `scene < boundary_scene` to the first settled sample with `scene >=
     boundary_scene`, padded by `pad_s` on each side and clipped to the samples
     actually collected. Returns None if the crossing never happened (both sides of
-    the boundary must be represented and ordered)."""
+    the boundary must be represented and ordered) or cannot be placed: a row after the
+    first placed one with no readable scene may sit on either side (`unplaced_after_start`)."""
     times = [s["t"] for s in samples if s.get("t") is not None]
-    if not times:
+    if not times or unplaced_after_start(samples):
         return None
     before_times = [s["t"] for s in samples if s.get("scene") is not None and s["scene"] < boundary_scene]
     after_times = [s["t"] for s in samples if s.get("scene") is not None and s["scene"] >= boundary_scene]
@@ -1647,12 +2127,23 @@ def _wrap_seek_unowned(rows: list[dict[str, Any]], row: dict[str, Any], wrap_tim
     )
 
 
+def _visit_start(samples: list[dict[str, Any]], scene: float) -> float:
+    """The last row before `scene`'s own visit: the latest on a readable earlier scene (-inf if none)."""
+    return max(
+        (s["t"] for s in samples if (value := _finite_number(s.get("scene"))) is not None and value < scene),
+        default=-math.inf,
+    )
+
+
 def continuity_window(
     samples: list[dict[str, Any]], boundary_scene: float, *, pad_s: float = WINDOW_PAD_S,
     transition_scene: float | None = None,
 ) -> dict[str, float] | None:
     """`score_continuity`'s scoring window: the padded crossing, grounded at the from-slide's
-    first settled sample when a moving transition precedes the boundary."""
+    first settled sample of its own visit (after the last earlier-scene row) when a moving
+    transition precedes the boundary. A row before the grounded
+    start that could have grounded it earlier (on the from-slide's scene with no Boolean `busy`, or
+    after the earlier scenes with no readable scene) is listed in `groundingUnreadable`."""
     window = find_boundary_window(samples, boundary_scene, pad_s=pad_s)
     if window is None or transition_scene is None:
         return window
@@ -1664,10 +2155,11 @@ def continuity_window(
     # missing sample there would be a false failure, not evidence of anything.
     # Grounding here still covers the entire move (which starts later, inside
     # transition_scene) and the settled source phase that precedes it.
+    earlier = _visit_start(samples, transition_scene - 1)
     settled_source_times = [
         s["t"]
         for s in samples
-        if s.get("scene") == transition_scene - 1 and s.get("busy") is False
+        if s["t"] > earlier and s.get("scene") == transition_scene - 1 and s.get("busy") is False
     ]
     if settled_source_times:
         window["start"] = min(window["start"], min(settled_source_times))
@@ -1675,12 +2167,20 @@ def continuity_window(
         move_window = find_boundary_window(samples, transition_scene, pad_s=pad_s)
         if move_window is not None:
             window["start"] = min(window["start"], move_window["start"])
+    unreadable = [
+        s["t"] for s in samples if earlier < s["t"] < window["start"] and (
+            _finite_number(s.get("scene")) is None
+            or s["scene"] == transition_scene - 1 and not isinstance(s.get("busy"), bool)
+        )
+    ]
+    if unreadable:
+        window["groundingUnreadable"] = unreadable[:5]
     return window
 
 
 def score_continuity(
     samples: list[dict[str, Any]],
-    asset_substr: str,
+    asset: str,
     boundary_scene: float,
     src_rect: dict[str, float],
     dst_rect: dict[str, float],
@@ -1695,6 +2195,8 @@ def score_continuity(
     loop_period_s: float | None = None,
     loop_fps: float = WRAP_FPS,
     min_window_start: float | None = None,
+    chain_clip: tuple[float | None, float | None] = (None, None),
+    paint: bool = True,
 ) -> dict[str, Any]:
     """Pure: samples in, verdict dict out. Scores continuity of ONE tracked decoder
     across `boundary_scene`, evaluated only within the crossing window (reviewer
@@ -1710,33 +2212,98 @@ def score_continuity(
       - total clock advance within the window at least `min_advance_s`.
     With `loop_period_s`, the clock is unwrapped across loop wraps (`unwrap_clock`) before
     the drop, stall and advance checks, and `wraps` is reported; `None` is the strict clock.
-    `min_window_start` clips the window's start (a forced wrap's seek stays outside it).
+    `min_window_start` clips the window's start (a forced wrap's seek stays outside it);
+    `chain_clip` (`carry_window_clip`) narrows it to the boundary's own two slides, noted as
+    `chainClipped` only when it does narrow.
+    Schema-2 rows (`seq`) are also scored per frame (`carry_paint`) unless `paint` is False, on
+    every exit once the window is known (the no-spanning-decoder False included): a failing paint
+    score is False and an incomplete one makes the verdict None, whatever the legacy checks said.
+    Any row whose phase is unreadable (`phase_unreadable`, the source scene's settle state included
+    when a transition's or the paint's grounding reads it) in the window before its chain clip, or
+    anywhere back to the source slide's predecessor (where the window's, the clip's or the paint's
+    grounding would reach had it been placed), or that could have grounded the window earlier
+    (`continuity_window`), is INCONCLUSIVE, never dropped from the before/after partition or from
+    grounding; so is a tracked decoder's row there whose source no longer names the asset
+    (`unnamed_rows`, identity before source), or an untracked decoding row that names no source
+    (`unidentified_decoders`), or a row listing one decoder id twice (`duplicate_ids`).
     """
-    tracks = track_by_id(samples, asset_substr)
+    tracks = track_by_id(samples, asset)
     if not decoded_anywhere(tracks):
         return {"verdict": None, "reason": "inconclusive: movie never decoded"}
     window = continuity_window(samples, boundary_scene, pad_s=pad_s, transition_scene=transition_scene)
     if window is None:
-        return {"verdict": False, "reason": "boundary crossing not observed in samples"}
+        return _inconclusive("boundary crossing not observed in samples")
+    if window.get("groundingUnreadable"):
+        return _inconclusive("a row that could ground the carry window has an unreadable phase", window=window)
     if min_window_start is not None:
         window["groundedStart"] = window["start"]
         window["start"] = max(window["start"], min_window_start)
+    clip_start, clip_end = chain_clip
+    clipped = {}
+    if clip_start is not None and clip_start > window["start"]:
+        clipped["start"], window["start"] = window["start"], clip_start
+    if clip_end is not None and clip_end < window["end"]:
+        clipped["end"], window["end"] = window["end"], clip_end
+    if clipped:
+        window["chainClipped"] = clipped
+
+    def paint_gated(scored: dict[str, Any], element_id: Any) -> dict[str, Any]:
+        if not (paint and any("seq" in sample for sample in samples)):
+            return scored
+        floor = [value for value in (clip_start, min_window_start) if value is not None]
+        scored["paint"] = carry_paint(
+            samples, element_id, asset, window, boundary_scene, src_rect, dst_rect,
+            transition_scene=transition_scene, rect_tolerance=rect_tolerance, floor=max(floor) if floor else None,
+            wrap_times=scored.get("wrapTimes") or (),
+        )
+        status = scored["paint"].get("status")
+        if status == "fail":
+            scored["verdict"] = False
+        elif status != "ok":
+            scored["verdict"] = None
+            scored["reason"] = f"inconclusive: paint {'; '.join(map(str, scored['paint'].get('reasons') or [])) or status}"
+        return scored
+
     windowed = {
         element_id: [r for r in rows if window["start"] <= r["t"] <= window["end"]]
         for element_id, rows in tracks.items()
     }
     windowed = {element_id: rows for element_id, rows in windowed.items() if rows}
+    source = (boundary_scene if transition_scene is None else transition_scene) - 1
+    prior = [s["t"] for s in samples if (scene := _finite_number(s.get("scene"))) is not None and scene < source]
+    floor = -math.inf if min_window_start is None else min_window_start
+    reach = min(clipped.get("start", window["start"]), max(max(prior, default=-math.inf), floor))
+    grounded = transition_scene is not None or (paint and any("seq" in sample for sample in samples))
+    unplaced = [
+        {"t": s["t"], "reason": why} for s in samples
+        if reach <= s["t"] <= window["end"] and (why := phase_unreadable(s, transition_scene, source if grounded else None))
+    ]
+    if unplaced:
+        return _inconclusive(
+            "a row the carry window or its grounding reaches has an unreadable phase", unplaced=unplaced[:5], window=window,
+        )
+    unnamed = unnamed_rows(tracks, asset, reach, window["end"])
+    if unnamed:
+        return _inconclusive(
+            "a tracked decoder's row the carry window reaches does not name the asset", unnamed=unnamed[:5], window=window,
+        )
+    unidentified = unidentified_decoders(samples, tracks, reach, window["end"])
+    if unidentified:
+        return _inconclusive("a decoder the carry window reaches names no source", unidentified=unidentified[:5], window=window)
+    doubled = duplicate_ids([s for s in samples if reach <= s["t"] <= window["end"]])
+    if doubled:
+        return _inconclusive("a row the carry window reaches lists one decoder id twice", doubled=doubled[:5], window=window)
     before_ids = {i for i, rows in windowed.items() if any(r["scene"] is not None and r["scene"] < boundary_scene for r in rows)}
     after_ids = {i for i, rows in windowed.items() if any(r["scene"] is not None and r["scene"] >= boundary_scene for r in rows)}
     common = before_ids & after_ids
     if not common:
-        return {
+        return paint_gated({
             "verdict": False,
             "reason": "no decoder id spans the boundary within the window",
             "beforeIds": sorted(before_ids),
             "afterIds": sorted(after_ids),
             "window": window,
-        }
+        }, min(before_ids or after_ids, default=None))
     def _at_expected_rect(row: dict[str, Any]) -> bool:
         if is_move_sample(row, transition_scene):
             return path_progress(row.get("rect"), src_rect, dst_rect, rect_tolerance) is not None
@@ -1744,16 +2311,33 @@ def score_continuity(
         expected = dst_rect if is_move_complete(row, transition_scene) or (scene is not None and scene >= boundary_scene) else src_rect
         return rect_matches(row.get("rect"), expected, rect_tolerance)
 
-    def _candidate_score(rows: list[dict[str, Any]]) -> tuple[int, int, int]:
+    tagged = {i for i, rows in tracks.items() if any(r.get("elId") is not None for r in rows)}
+
+    def _owner_unreadable(row: dict[str, Any]) -> bool:
+        return not isinstance(row.get("footprintOwner"), dict) or row.get("elId") is None and row["id"] in tagged
+
+    def _candidate_score(rows: list[dict[str, Any]], unreadable_owned: bool = False) -> tuple[int, int, int]:
         owned = 0
         if runtime_installed:
             for row in rows:
                 owner = row.get("footprintOwner")
-                if isinstance(owner, dict) and owner.get("elId") is not None and owner.get("elId") == row.get("elId"):
+                if _owner_unreadable(row):
+                    owned += unreadable_owned
+                elif owner.get("elId") is not None and owner.get("elId") == row.get("elId"):
                     owned += 1
         return owned, sum(1 for row in rows if _at_expected_rect(row)), len(rows)
 
     element_id = max(sorted(common), key=lambda i: _candidate_score(windowed[i]))
+    chosen = _candidate_score(windowed[element_id])
+    contested = [
+        i for i in sorted(common) if i != element_id and _candidate_score(windowed[i], True) >= chosen
+        and _candidate_score(windowed[i], True) != _candidate_score(windowed[i])
+    ]
+    if contested:
+        return _inconclusive(
+            "an unreadable footprint owner or element id decides which decoder is the carried one",
+            elementId=element_id, contested=contested, window=window,
+        )
     rows = sorted(windowed[element_id], key=lambda r: r["t"])
     wraps: list[float] | None = None
     if loop_period_s is not None:
@@ -1792,6 +2376,8 @@ def score_continuity(
             owned = isinstance(owner, dict) and owner.get("elId") is not None and owner.get("elId") == r.get("elId")
             if not owned:
                 entry = {"t": r["t"], "footprintOwner": owner, "elId": r.get("elId")}
+                if _owner_unreadable(r):
+                    entry["ownerUnreadable"] = True
                 if wraps is not None and _wrap_seek_unowned(rows, r, wraps):
                     wrap_owner_excused.append(entry)
                 else:
@@ -1840,33 +2426,115 @@ def score_continuity(
     }
     if wraps is not None:
         scored.update(wraps=len(wraps), wrapTimes=wraps, wrapOwnerExcused=wrap_owner_excused)
-    return scored
+    return paint_gated(scored, element_id)
+
+
+def paint_start(
+    samples: list[dict[str, Any]], element_id: Any, boundary_scene: float, window: dict[str, float], floor: float | None,
+) -> float:
+    """The per-frame window's start: back to the first settled row of scene `boundary_scene - 1`'s
+    own visit (`_visit_start`) on which the carried decoder is decoded (so a pin transition longer
+    than the pad is covered, never initial load), never before `floor` (the chain clip / forced-wrap
+    start)."""
+    visit = _visit_start(samples, boundary_scene - 1)
+    decoded = [
+        row["t"] for row in samples
+        if row["t"] > visit and row.get("scene") == boundary_scene - 1 and row.get("busy") is False
+        and any(v.get("id") == element_id and (v.get("readyState") or 0) >= 2 for v in row.get("videos") or [])
+    ]
+    start = min(window["start"], min(decoded)) if decoded else window["start"]
+    return start if floor is None else max(floor, start)
+
+
+def carry_paint(
+    samples: list[dict[str, Any]], element_id: Any, asset: str, window: dict[str, float],
+    boundary_scene: float, src_rect: dict[str, float], dst_rect: dict[str, float], *,
+    transition_scene: float | None, rect_tolerance: float, floor: float | None, wrap_times: Sequence[float] = (),
+) -> dict[str, Any]:
+    """`paint_instrument.score_paint` over a carry's window (`wrap_times`: the classified loop wraps). The slot is the source rect before
+    the move, the destination on move-complete and after rows, and on a bridge's move rows the
+    carried decoder's own pre-paint rect when it lies on the path (else no slot). A row whose
+    phase is unreadable (`phase_unreadable`) is an unreadable frame, never the source phase."""
+
+    def slot_of(row: dict[str, Any]) -> dict[str, float] | None:
+        if is_move_sample(row, transition_scene):
+            pp = row.get("pp") if isinstance(row.get("pp"), dict) else {}
+            rect = next((pv.get("rect") for pv in pp.get("videos") or [] if isinstance(pv, dict) and pv.get("id") == element_id), None)
+            return rect if path_progress(rect, src_rect, dst_rect, rect_tolerance) is not None else None
+        scene = row.get("scene")
+        after = is_move_complete(row, transition_scene) or (scene is not None and scene >= boundary_scene)
+        return dst_rect if after else src_rect
+
+    def stage_box_of(row: dict[str, Any]) -> dict[str, float] | None:
+        pp = row.get("pp")
+        return pp.get("stageBox") if isinstance(pp, dict) and isinstance(pp.get("stageBox"), dict) else None
+
+    source = (boundary_scene if transition_scene is None else transition_scene) - 1
+
+    return paint_instrument.score_paint(
+        samples, element_id, asset,
+        start=paint_start(samples, element_id, boundary_scene, window, floor), end=window["end"],
+        slot_of=slot_of, stage_box_of=stage_box_of, rect_tolerance=rect_tolerance, iou_min=INSTANCE_IOU_MIN,
+        max_gap_frames=CARRY_COVER_MAX_GAP_FRAMES, min_fps=CARRY_COVER_MIN_FPS,
+        unreadable_of=lambda row: phase_unreadable(row, transition_scene, source), wrap_times=wrap_times,
+    )
 
 
 def score_restart(
-    samples: list[dict[str, Any]], asset_substr: str, boundary_scene: float, *, max_start_s: float = RESTART_MAX_START_S
+    samples: list[dict[str, Any]], asset: str, boundary_scene: float, *, max_start_s: float = RESTART_MAX_START_S
 ) -> dict[str, Any]:
     """Pure: samples in, verdict dict out. A restart is a genuinely NEW decoder id
     (never seen anywhere with `scene < boundary_scene`, at any time in the run, not
-    just within a window) whose own clock starts near zero shortly after the cut."""
-    tracks = track_by_id(samples, asset_substr)
+    just within a window) whose own clock starts near zero shortly after the cut. A crossing
+    the samples never span is inconclusive, never a failed restart; so is a row of a decoder not
+    proven present before the boundary that carries no scene (it may be that proof), a tracked
+    decoder's row whose source no longer names the asset (`unnamed_rows`), a decoding row that names
+    no source (`unidentified_decoders`), a row listing one decoder id twice (`duplicate_ids`), and an
+    unreadable start clock."""
+    tracks = track_by_id(samples, asset)
     if not decoded_anywhere(tracks):
         return {"verdict": None, "reason": "inconclusive: movie never decoded"}
-    before_ids = {i for i, rows in tracks.items() if any(r["scene"] is not None and r["scene"] < boundary_scene for r in rows)}
-    after_ids = {i for i, rows in tracks.items() if any(r["scene"] is not None and r["scene"] >= boundary_scene for r in rows)}
+    if find_boundary_window(samples, boundary_scene) is None:
+        return _inconclusive("boundary crossing not observed in samples")
+    unnamed, unidentified = unnamed_rows(tracks, asset), unidentified_decoders(samples, tracks, -math.inf, math.inf)
+    if unnamed or unidentified:
+        return _inconclusive("a decoder's rows do not name the asset", unnamed=unnamed[:5], unidentified=unidentified[:5])
+    doubled = duplicate_ids(samples)
+    if doubled:
+        return _inconclusive("a row lists one decoder id twice", doubled=doubled[:5])
+
+    def placed(rows: list[dict[str, Any]], after: bool) -> list[dict[str, Any]]:
+        return [
+            r for r in rows
+            if (scene := _finite_number(r.get("scene"))) is not None and (scene >= boundary_scene) is after
+        ]
+
+    before_ids = {i for i, rows in tracks.items() if placed(rows, False)}
+    unplaced = sorted(
+        i for i, rows in tracks.items()
+        if i not in before_ids and any(_finite_number(r.get("scene")) is None for r in rows)
+    )
+    if unplaced:
+        return _inconclusive("a decoder not seen before the boundary has rows with no scene", unplacedIds=unplaced)
+    after_ids = {i for i, rows in tracks.items() if placed(rows, True)}
     fresh_ids = after_ids - before_ids
     if not fresh_ids:
         return {"verdict": False, "reason": "no distinct decoder id after the boundary", "beforeIds": sorted(before_ids)}
+    element_id = min(fresh_ids, key=lambda i: min(r["t"] for r in placed(tracks[i], True)))
+    start_time = _finite_number(min(placed(tracks[element_id], True), key=lambda r: r["t"]).get("currentTime"))
+    if start_time is None:
+        return _inconclusive("the fresh decoder's start clock is unreadable", elementId=element_id)
+    return {
+        "verdict": start_time < max_start_s, "elementId": element_id, "startTimeS": start_time,
+        "freshIds": sorted(fresh_ids),
+    }
 
-    def first_after_time(i: int) -> float:
-        rows = [r for r in tracks[i] if r["scene"] is not None and r["scene"] >= boundary_scene]
-        return min((r["t"] for r in rows), default=float("inf"))
 
-    element_id = min(fresh_ids, key=first_after_time)
-    rows = sorted((r for r in tracks[element_id] if r["scene"] is not None and r["scene"] >= boundary_scene), key=lambda r: r["t"])
-    start_time = rows[0]["currentTime"] if rows else None
-    ok = start_time is not None and start_time < max_start_s
-    return {"verdict": ok, "elementId": element_id, "startTimeS": start_time, "freshIds": sorted(fresh_ids)}
+def press_scene_1to2(facts: dict[str, Any]) -> float:
+    """The scene the 1to2 press plays (the source slide's outgoing scene, `onset1to2 - 1`):
+    the sampler's `scene` reaches it at the slide change and rests there until the next press.
+    Since 2026-10-12 (artifacts before it scored 1to2 at `onset1to2`, the next press; see `_stored_matches`)."""
+    return facts["onset1to2"] - 1
 
 
 def score_boundaries(
@@ -1876,7 +2544,7 @@ def score_boundaries(
     """Pure: samples + ground truth in, the three boundary verdicts out."""
     asset = facts["asset"]
     v12 = score_continuity(
-        samples, asset, facts["onset1to2"], facts["pinRect"], facts["pinRect"], runtime_installed,
+        samples, asset, press_scene_1to2(facts), facts["pinRect"], facts["pinRect"], runtime_installed,
         loop_period_s=loop_period_s,
     )
     v23 = score_restart(samples, asset, facts["restartScene"])
@@ -1926,47 +2594,159 @@ def refusal_evidence(transport: Any) -> dict[str, Any]:
     }
 
 
+def facts_retires(facts: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every retire fact; a facts dict from before `retires` existed carries only `retire`."""
+    retires = facts.get("retires")
+    if isinstance(retires, list):
+        return [retire for retire in retires if isinstance(retire, dict)]
+    return [facts["retire"]] if isinstance(facts.get("retire"), dict) else []
+
+
 def refusal_observer(
     player: Any, facts: dict[str, Any], out: dict[str, Any]
 ) -> Callable[[int], None] | None:
-    retire = facts.get("retire")
-    if not retire:
+    retires = facts_retires(facts)
+    if not retires:
         return None
 
     def observe(ordinal: int) -> None:
-        if ordinal != retire["originalOrdinal"]:
+        mine = [retire for retire in retires if retire["originalOrdinal"] == ordinal]
+        if not mine:
             return
         wait_until_settled(player)
         transport = player._require_transport()
-        out[retire["verdictKey"]] = {**refusal_evidence(transport), "coreEvents": transport.evaluate(CORE_EVENTS_JS)}
+        evidence = {**refusal_evidence(transport), "coreEvents": transport.evaluate(CORE_EVENTS_JS)}
+        for retire in mine:
+            out[retire["verdictKey"]] = evidence
 
     return observe
 
 
-def score_refusal(sample: Any, retire: dict[str, Any], runtime_installed: bool) -> dict[str, Any]:
+def retire_instance_ids(retire: dict[str, Any]) -> set[str]:
+    """The retired pair's lowercased objectIds (`srcObjectId`, and `dstObjectId` when it has one)."""
+    return {
+        value.lower() for value in (retire.get("srcObjectId"), retire.get("dstObjectId"))
+        if isinstance(value, str) and value
+    }
+
+
+def instance_decoders(samples: Any, ids: Collection[str]) -> tuple[set[Any], set[Any]] | None:
+    """(linked, foreign) `elId`s from the retained samples' `instance` stamps, resolved by probe id
+    first: a probe id is linked when any of its rows, tagged or not, is stamped with an objectId in
+    `ids`, foreign when every row is stamped with another. An `elId` is linked when any probe id
+    that carried it is linked, foreign when every one is foreign. Neither without `ids` or samples;
+    None when a decoder's stamp is neither absent, null nor a string."""
+    if not ids or not isinstance(samples, list):
+        return set(), set()
+    stamps: dict[Any, set[str | None]] = {}
+    carried: dict[Any, set[Any]] = {}
+    for row in samples:
+        for v in (row.get("videos") or []) if isinstance(row, dict) else []:
+            if not isinstance(v, dict):
+                continue
+            stamp = v.get("instance")
+            if not (stamp is None or isinstance(stamp, str)):
+                return None
+            stamps.setdefault(v.get("id"), set()).add(stamp.lower() if isinstance(stamp, str) and stamp else None)
+            if v.get("elId") is not None:
+                carried.setdefault(v["elId"], set()).add(v.get("id"))
+    linked_ids = {pid for pid, seen in stamps.items() if seen & set(ids)}
+    foreign_ids = {pid for pid, seen in stamps.items() if pid not in linked_ids and None not in seen}
+    linked = {el for el, pids in carried.items() if pids & linked_ids}
+    return linked, {el for el, pids in carried.items() if el not in linked and pids <= foreign_ids}
+
+
+RETIRE_REFUSAL_KINDS = ("preserve-refused", "retire-boundary")
+
+
+def _note_identity_ok(detail: dict[str, Any]) -> bool:
+    """A core note's or pool entry's identity fields, where present, are readable: element ids,
+    an `elIds` list of ids, and string-or-null keys and instance stamps (`instance`, `src`, `dst`)."""
+    return (
+        all(_id_or_null(detail[f]) for f in ("elId", "newElId", "oldElId") if f in detail)
+        and ("elIds" not in detail or isinstance(detail["elIds"], list)
+             and all(v is not None and _id_or_null(v) for v in detail["elIds"]))
+        and all(detail[f] is None or isinstance(detail[f], str) for f in ("key", "movieKey", "instance", "src", "dst") if f in detail)
+    )
+
+
+def instance_stamps(detail: dict[str, Any]) -> set[str]:
+    """A core note's or pool entry's lowercased objectId stamps (`instance`, a carry's `src`/`dst`)."""
+    return {detail[f].lower() for f in ("instance", "src", "dst") if isinstance(detail.get(f), str) and detail[f]}
+
+
+def instance_owner(
+    detail: dict[str, Any], ids: Collection[str], linked: Collection[Any] = (), foreign: Collection[Any] = (),
+) -> str:
+    """Whom a core note or pool entry is proven to concern, against the instance pair `ids` and
+    the decoders `instance_decoders` ties to it (`linked`) or to other instances (`foreign`):
+    "foreign" when its stamps name only other instances (unstamped: every decoder is `foreign`)
+    and no decoder is `linked`; "target" when its stamps name only the pair (unstamped: a decoder
+    is `linked`) and no decoder is `foreign`; else "unknown" (unattributable or conflicting)."""
+    owners = instance_stamps(detail)
+    elements = [detail.get(f) for f in ("elId", "newElId", "oldElId")] + list(detail.get("elIds") or [])
+    elements = [el for el in elements if el is not None]
+    tied = any(el in linked for el in elements)
+    elsewhere = bool(owners and ids and not owners & set(ids)) if owners else bool(elements) and all(el in foreign for el in elements)
+    if elsewhere:
+        return "unknown" if tied else "foreign"
+    if (owners <= set(ids) if owners else tied) and not any(el in foreign for el in elements):
+        return "target"
+    return "unknown"
+
+
+def score_refusal(
+    sample: Any, retire: dict[str, Any], runtime_installed: bool, handed_back: Collection[Any] = (),
+    foreign: Collection[Any] = (), linked: Collection[Any] = (),
+) -> dict[str, Any]:
     """The POSITIVE half of a refused boundary: on the settled destination slide the
     retired movie is back under the raw player -- no painting `<video>` over its
-    authored rect, and nothing pooled or preserved for its asset. "Did not continue"
-    on its own is vacuous, so every way of not knowing is a False here, never a pass."""
+    authored rect other than the raw player's own element for it (`handed_back`: its
+    `__obedElId`s, proven by `score_raw_handback`, while it names the asset -- another asset paints
+    over the rect, no source is INCONCLUSIVE) or another instance's decoder (`foreign`,
+    from `instance_decoders`), and nothing pooled or preserved for its asset that is not proven
+    another instance's (`instance_owner`). A preserved decoder is the movie's by its asset key,
+    its movie key, an instance stamp of the pair or a `linked` decoder id, so a cleared source
+    (`key` "") is still identified by its stamps. "Did not continue" on its own is vacuous, so
+    every way of not knowing (no sample, an untrustworthy stage map, a painting-probe error, an
+    unreadable preserve snapshot or entry -- the core tags every pooled or preserved decoder, so an
+    entry's `elId` must be an integer --, an entry nothing identifies) is INCONCLUSIVE, never a
+    pass and never a red."""
     if not isinstance(sample, dict):
-        return {"verdict": False, "reason": "no refusal evidence was sampled on the destination slide"}
+        return _inconclusive("no refusal evidence was sampled on the destination slide")
     stage_map = sample.get("stageMap")
     if not stage_map_valid(stage_map):
-        return {"verdict": False, "reason": "stage map is missing or untrustworthy at the refusal sample"}
+        return _inconclusive("stage map is missing or untrustworthy at the refusal sample")
     try:
         videos = painting_videos(sample.get("painting"), stage_map)
     except VisiblePassError as exc:
-        return {"verdict": False, "reason": str(exc)}
-    over = [video for video in videos if any(rects_overlap(video["authored"], rect) for rect in retire["rects"])]
+        return _inconclusive(str(exc))
+    over = [
+        video for video in videos
+        if any(rects_overlap(video["authored"], rect) for rect in retire["rects"])
+        and not (video.get("elId") is not None and video["elId"] in foreign)
+        and not (video.get("elId") in handed_back and matches_asset_keys(video.get("src"), retire["assetKeys"]))
+    ]
+    unnamed = [video for video in over if video.get("elId") in handed_back and not video.get("src")]
+    if unnamed:
+        return _inconclusive("a handed-back painter over the retired rect names no source", unidentified=unnamed)
     pooled: list[dict[str, Any]] = []
     if runtime_installed:
         snapshot = sample.get("poolSnapshot")
-        if not isinstance(snapshot, list):
-            return {"verdict": False, "reason": f"preserve snapshot is unreadable: {snapshot!r}"}
-        pooled = [
-            entry for entry in snapshot
-            if isinstance(entry, dict) and matches_asset_keys(entry.get("key"), retire["assetKeys"])
-        ]
+        if not isinstance(snapshot, list) or not all(
+            isinstance(e, dict) and _el_id(e.get("elId")) and _note_identity_ok(e) for e in snapshot
+        ):
+            return _inconclusive(f"preserve snapshot is unreadable: {snapshot!r}")
+        ids = retire_instance_ids(retire)
+        adverse = {
+            index: True if instance_stamps(entry) & ids or entry.get("elId") in linked
+            else _movie_identity(entry, retire["assetKeys"], retire.get("movieKey"))
+            for index, entry in enumerate(snapshot) if instance_owner(entry, ids, linked, foreign) != "foreign"
+        }
+        unknown = [snapshot[index] for index, held in adverse.items() if held is None]
+        if unknown:
+            return _inconclusive("a preserve snapshot entry names no readable movie or instance", unidentified=unknown)
+        pooled = [snapshot[index] for index, held in adverse.items() if held]
     reason = None
     if over:
         reason = f"{len(over)} painting video(s) still overlap the retired movie on its destination slide"
@@ -1980,11 +2760,10 @@ def score_refusal(sample: Any, retire: dict[str, Any], runtime_installed: bool) 
 def score_refusals(
     evidence: dict[str, Any], facts: dict[str, Any], runtime_installed: bool
 ) -> dict[str, Any]:
-    retire = facts.get("retire")
-    if not retire:
-        return {}
-    key = retire["verdictKey"]
-    return {key: score_refusal(evidence.get(key), retire, runtime_installed)}
+    return {
+        retire["verdictKey"]: score_refusal(evidence.get(retire["verdictKey"]), retire, runtime_installed)
+        for retire in facts_retires(facts)
+    }
 
 
 def hash_number(value: Any) -> int | None:
@@ -2061,9 +2840,54 @@ def _notes(state: dict[str, Any], kind: str, source: str = "coreEvents") -> list
     ]
 
 
+def _events_readable(state: Any, source: str = "coreEvents") -> bool:
+    """Whether `_notes` can answer for `state`: its notes are a list of objects each naming its
+    `kind` (the module's `api: null` is a readable, empty `api` source)."""
+    if not isinstance(state, dict):
+        return False
+    if source == "api":
+        api = state.get("api")
+        if api is None:
+            return True
+        events = api.get("events") if isinstance(api, dict) else None
+    else:
+        events = state.get(source)
+    return isinstance(events, list) and all(isinstance(event, dict) and isinstance(event.get("kind"), str) for event in events)
+
+
 def _carried_el_id(state: Any) -> Any:
     carried = _notes(state, "glreplay-carried") if isinstance(state, dict) else []
     return carried[0].get("elId") if len(carried) == 1 else None
+
+
+def _el_id(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _el_id_or_null(value: Any) -> bool:
+    return value is None or _el_id(value)
+
+
+def _carried_named(state: Any) -> bool:
+    """Whether `_carried_el_id` can answer for `state`: its notes are readable and a single
+    glreplay-carried note has an object detail naming an integer `elId` (none, or several, is a
+    readable "no single carried decoder")."""
+    if not _events_readable(state):
+        return False
+    carried = [event for event in state["coreEvents"] if event["kind"] == "glreplay-carried"]
+    return len(carried) != 1 or isinstance(carried[0].get("detail"), dict) and _el_id(carried[0]["detail"].get("elId"))
+
+
+def _movie_identity(entry: dict[str, Any], asset_keys: Sequence[str], movie_key: Any) -> bool | None:
+    """Whether a pool or preserve-snapshot entry holds the movie, by its asset `key` or its
+    `movieKey`; None when its `key` is missing or ill-typed, or when a cleared source (`key` "")
+    carries no movie key to say."""
+    key, movie = entry.get("key"), entry.get("movieKey")
+    if not isinstance(key, str) or not (movie is None or isinstance(movie, str)):
+        return None
+    if matches_asset_keys(key, asset_keys) or (movie is not None and movie == movie_key):
+        return True
+    return False if key or movie else None
 
 
 def _movie_entries(pool: list[Any], armed: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2074,7 +2898,27 @@ def _movie_entries(pool: list[Any], armed: dict[str, Any]) -> list[dict[str, Any
     ]
 
 
-def _armed_live(states: list[dict[str, Any]], armed: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+def _api_unreadable(state: dict[str, Any]) -> bool:
+    """A read whose module state, stand-downs, stats or scene hash cannot be read (`api: null` is a
+    readable "no module published")."""
+    api = state.get("api")
+    if not isinstance(state.get("hash"), str) or hash_number(state["hash"]) is None:
+        return True
+    if api is None:
+        return False
+    if not (isinstance(api, dict) and isinstance(api.get("state"), str) and isinstance(api.get("standDowns"), list)):
+        return True
+    stat = api.get("stats")
+    return stat is not None and not (
+        isinstance(stat, dict) and all(_finite_number(stat.get(key)) is not None for key in ("iter", "uploads", "glErrors"))
+    )
+
+
+def _armed_live(states: list[dict[str, Any]], armed: dict[str, Any]) -> tuple[bool | None, dict[str, Any]]:
+    """Both reads LIVE on the destination, same epoch, strictly progressing; None when a read's
+    module state, stats, hash, time or epoch is unreadable."""
+    if any(_api_unreadable(state) for state in states):
+        return None, {"reason": "a read's module state, stats or hash is unreadable", "states": [s.get("api") for s in states]}
     stats = []
     for state in states:
         api = state.get("api")
@@ -2082,90 +2926,157 @@ def _armed_live(states: list[dict[str, Any]], armed: dict[str, Any]) -> tuple[bo
         if not (
             isinstance(stat, dict) and api.get("state") == "LIVE" and api.get("standDowns") == []
             and stat.get("glErrors") == 0
-            and (hash_number(state.get("hash")) or -1) >= armed["atScene"]
+            and hash_number(state["hash"]) >= armed["atScene"]
         ):
             return False, {"reason": "a read is not LIVE on its destination", "state": api}
         stats.append(stat)
     first, second = stats
     times = [_finite_number(state.get("t")) for state in states]
-    counters = [
-        (_finite_number(first.get(key)), _finite_number(second.get(key))) for key in ("iter", "uploads")
-    ]
+    counters = [(_finite_number(first.get(key)), _finite_number(second.get(key))) for key in ("iter", "uploads")]
+    detail = {"epochs": [first.get("epoch"), second.get("epoch")], "counters": counters, "t": times}
+    if None in times or any(_finite_number(stat.get("epoch")) is None for stat in stats):
+        return None, {**detail, "reason": "a LIVE read's time or epoch is unreadable"}
     ok = (
-        first.get("epoch") is not None and first.get("epoch") == second.get("epoch")
-        and all(a is not None and b is not None and b > a for a, b in counters)
-        and None not in times and times[1] - times[0] >= ARMED_READ_GAP_S * 1000.0
+        first["epoch"] == second["epoch"] and all(b > a for a, b in counters)
+        and times[1] - times[0] >= ARMED_READ_GAP_S * 1000.0
     )
-    return ok, {"epochs": [first.get("epoch"), second.get("epoch")], "counters": counters, "t": times}
+    return ok, detail
 
 
-def _armed_events(state: dict[str, Any], armed: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-    if not isinstance(state.get("coreEvents"), list):
-        return False, {"reason": "runtime notes are unreadable"}
+def _armed_events(state: dict[str, Any], armed: dict[str, Any]) -> tuple[bool | None, dict[str, Any]]:
+    if not _events_readable(state):
+        return None, {"reason": "runtime notes are unreadable"}
     arms, lives = _notes(state, "glreplay-arm"), _notes(state, "glreplay-live")
     zones = [(z.get("from"), z.get("to"), z.get("reason")) for z in _notes(state, "glreplay-zone")]
     carried = _notes(state, "glreplay-carried")
     downs = _notes(state, "glreplay-standdown") + _notes(state, "glreplay-handoff")
-    delta = _finite_number(carried[0].get("delta")) if len(carried) == 1 else None
-    live_hash = hash_number(lives[0].get("sceneHash")) if len(lives) == 1 else None
+    detail = {"arms": arms, "lives": lives, "zones": zones, "carried": carried, "downs": downs}
+    if (
+        (len(arms) == 1 and not (isinstance(arms[0].get("sceneHash"), str) and hash_number(arms[0]["sceneHash"]) is not None))
+        or (len(lives) == 1 and not (isinstance(lives[0].get("sceneHash"), str) and hash_number(lives[0]["sceneHash"]) is not None))
+        or (len(carried) == 1 and _finite_number(carried[0].get("delta")) is None)
+        or any(not isinstance(value, str) for zone in zones for value in zone)
+    ):
+        return None, {**detail, "reason": "a runtime note's scene hash, zone or delta is unreadable"}
+    delta = _finite_number(carried[0]["delta"]) if len(carried) == 1 else None
+    live_hash = hash_number(lives[0]["sceneHash"]) if len(lives) == 1 else None
     at = armed["atScene"]
     ok = (
-        len(arms) == 1 and hash_number(arms[0].get("sceneHash")) == at - 1
+        len(arms) == 1 and hash_number(arms[0]["sceneHash"]) == at - 1
         and live_hash is not None and live_hash >= at - 1
         and not downs
         and zones == [("pending", "armed", "moduleReady")]
         and delta is not None and 0 <= delta <= ARMED_CARRY_DELTA_MAX
     )
-    return ok, {"arms": arms, "lives": lives, "zones": zones, "carried": carried, "downs": downs}
+    return ok, detail
 
 
-def _armed_no_painting(reads: list[dict[str, Any]], armed: dict[str, Any]) -> tuple[bool, list[Any]]:
+def _armed_no_painting(reads: list[Any], armed: dict[str, Any]) -> tuple[bool | None, list[Any]]:
+    """No `<video>` painting over the armed rect; None when a read's stage map or painting probe is unreadable."""
     over: list[Any] = []
     for read in reads:
-        stage_map = read.get("stageMap")
+        stage_map = read.get("stageMap") if isinstance(read, dict) else None
         if not stage_map_valid(stage_map):
-            return False, ["stage map is missing or untrustworthy"]
+            return None, ["stage map is missing or untrustworthy"]
         try:
             videos = painting_videos(read.get("painting"), stage_map)
         except VisiblePassError as exc:
-            return False, [str(exc)]
+            return None, [str(exc)]
         over.extend(v for v in videos if any(rects_overlap(v["authored"], rect) for rect in armed["rects"]))
     return not over, over
 
 
-def _armed_pool(states: list[dict[str, Any]], armed: dict[str, Any], carried: Any) -> tuple[bool, dict[str, Any]]:
-    if carried is None:
-        return False, {"reason": "no single glreplay-carried note names the carried decoder"}
-    clock: list[tuple[float | None, float | None]] = []
+def _armed_pool(
+    states: list[dict[str, Any]], armed: dict[str, Any], carried: Any, carried_readable: bool = True,
+) -> tuple[bool | None, dict[str, Any]]:
+    """The pool is {carried} plus out-of-document siblings, the carried decoding in real time;
+    None when the carried decoder cannot be named (`carried_readable`), a pool field it needs
+    is unreadable (`fromDom` is absent on a pool entry, true on a DOM-preserved one, a movie entry
+    has no integer `elId`), or an entry's movie cannot be told (`_movie_identity`)."""
     for state in states:
         pool = state.get("pool")
-        if not isinstance(pool, list):
-            return False, {"reason": f"pool census is unreadable: {pool!r}"}
-        movie = _movie_entries(pool, armed)
-        mine = [entry for entry in movie if entry.get("elId") == carried]
-        if len(mine) != 1 or any(entry.get("inDocument") is not False or entry.get("fromDom") for entry in movie):
+        if not isinstance(pool, list) or not all(isinstance(entry, dict) for entry in pool):
+            return None, {"reason": f"pool census is unreadable: {pool!r}"}
+        unidentified = [e for e in pool if _movie_identity(e, armed["assetKeys"], armed["movieKey"]) is None]
+        if unidentified:
+            return None, {"reason": "a pooled entry names no readable movie", "unidentified": unidentified}
+        if any(not isinstance(entry.get("inDocument"), bool) for entry in _movie_entries(pool, armed)):
+            return None, {"reason": "a pooled movie entry's inDocument is unreadable"}
+        if any(not _el_id(entry.get("elId")) for entry in _movie_entries(pool, armed)):
+            return None, {"reason": "a pooled movie entry's elId is unreadable"}
+        if any("fromDom" in entry and entry["fromDom"] is not True for entry in pool):
+            return None, {"reason": "a pooled entry's fromDom is neither absent nor true"}
+    if not carried_readable:
+        return None, {"reason": "the runtime notes naming the carried decoder are unreadable"}
+    if carried is None:
+        return False, {"reason": "no single glreplay-carried note names the carried decoder"}
+    mine = [[entry for entry in _movie_entries(state["pool"], armed) if entry.get("elId") == carried] for state in states]
+    if any(
+        len(entries) == 1 and (
+            not isinstance(entries[0].get("paused"), bool) or _finite_number(entries[0].get("readyState")) is None
+            or _finite_number(entries[0].get("currentTime")) is None or _finite_number(state.get("t")) is None
+        )
+        for state, entries in zip(states, mine)
+    ):
+        return None, {"reason": "the carried decoder's state or clock is unreadable", "carried": mine}
+    clock: list[tuple[float, float]] = []
+    for state, entries in zip(states, mine):
+        movie = _movie_entries(state["pool"], armed)
+        if len(entries) != 1 or any(entry["inDocument"] or entry.get("fromDom") for entry in movie):
             return False, {"reason": "pool is not {carried} plus out-of-document siblings", "movie": movie}
-        entry = mine[0]
-        if entry.get("paused") is not False or not ((_finite_number(entry.get("readyState")) or 0) >= 2):
+        entry = entries[0]
+        if entry["paused"] or entry["readyState"] < 2:
             return False, {"reason": "carried decoder is paused or not decoding", "carried": entry}
-        clock.append((_finite_number(state.get("t")), _finite_number(entry.get("currentTime"))))
+        clock.append((float(state["t"]), float(entry["currentTime"])))
     (t0, c0), (t1, c1) = clock
-    if None in (t0, c0, t1, c1) or t1 <= t0:
-        return False, {"reason": "carried clock is unreadable", "clock": clock}
+    if t1 <= t0:
+        return False, {"reason": "the reads are not in time order", "clock": clock}
     rate = (c1 - c0) / ((t1 - t0) / 1000.0)
     low, high = ARMED_CLOCK_RATE
     return (c1 > c0 and low <= rate <= high), {"clock": clock, "rate": rate}
 
 
-def pre_flip_owner_ids(samples: list[dict[str, Any]], armed: dict[str, Any]) -> list[Any]:
-    """Footprint owners resolved at the armed instance rect before the flip (None if unresolved)."""
+def pre_flip_owner_ids(samples: list[dict[str, Any]], armed: dict[str, Any]) -> list[Any] | None:
+    """Footprint owners resolved at the armed instance rect before the flip (None if unresolved);
+    None for the whole census when a row or decoder row cannot be read or placed (no list of
+    videos, no non-null probe id, readable `src` or footprint owner, or for the movie no readable scene, or before
+    the flip no readable rect), never dropped from it. A decoder is the movie's by identity before
+    source (its probe id named the asset on any row), so one whose src no longer names the asset
+    makes the census None; so does a row listing one probe id twice (`duplicate_ids`) and, before
+    the flip, a row that names no source, is not proven idle (`_maybe_decoded`) and is not proven off
+    the instance rect. Such a row that names another asset is an owner of its own (`foreignId`), never
+    the carried decoder, unless it carries no scene (None)."""
+    rows = samples or []
+    if not all(isinstance(s, dict) and isinstance(s.get("videos"), list) for s in rows) or not all(
+        isinstance(v, dict) and isinstance(v.get("src"), str) and _owner_named(v.get("footprintOwner"))
+        and SAMPLE_VIDEO_FIELDS["id"](v.get("id")) for s in rows for v in s["videos"]
+    ):
+        return None
+    if duplicate_ids(rows):
+        return None
+    movie = {v["id"] for s in rows for v in s["videos"] if matches_asset_keys(v["src"], armed["assetKeys"])}
     owners: list[Any] = []
-    for sample in samples or []:
-        scene = sample.get("scene")
-        if not isinstance(scene, (int, float)) or scene >= armed["atScene"]:
+    for sample in rows:
+        scene = _finite_number(sample.get("scene"))
+        if scene is not None and scene >= armed["atScene"]:
             continue
-        for video in sample.get("videos") or []:
-            if matches_asset_keys(video.get("src"), armed["assetKeys"]) and rect_matches(video.get("rect"), armed["instanceRect"]):
+        for video in sample["videos"]:
+            named = matches_asset_keys(video["src"], armed["assetKeys"])
+            if video["src"] == "" and _maybe_decoded(video) and video["id"] not in movie and not (
+                _is_rect(video.get("rect")) and not rects_overlap(video["rect"], armed["instanceRect"])
+            ):
+                return None
+            if not named and video["id"] not in movie:
+                if video["src"] and _maybe_decoded(video) and not (
+                    _is_rect(video.get("rect")) and not rect_matches(video["rect"], armed["instanceRect"])
+                ):
+                    if scene is None or not _is_rect(video.get("rect")) or not _decoded(video):
+                        return None
+                    owners.append({"foreignId": video["id"], "src": video["src"]})
+                continue
+            if not named or scene is None or not _is_rect(video.get("rect")):
+                return None
+            if rect_matches(video.get("rect"), armed["instanceRect"]):
                 owner = video.get("footprintOwner")
                 owners.append(owner.get("elId") if isinstance(owner, dict) else None)
     return owners
@@ -2174,11 +3085,13 @@ def pre_flip_owner_ids(samples: list[dict[str, Any]], armed: dict[str, Any]) -> 
 def score_armed(
     reads: Any, armed: dict[str, Any], continuity: Any, *, owner_ids: Any = None
 ) -> dict[str, Any]:
-    """`armed1to2` (plan g5g6 §3.3): every clause holds; missing is False, never None."""
-    checks = {"mode": False, "live": False, "events": False, "noPainting": False, "pool": False, "owner": False}
+    """`armed1to2` (plan g5g6 §3.3): every clause holds. Each clause is tri-state: an unread or
+    unreadable input (the reads, a stage map or painting probe, the notes, the pool, no resolved
+    pre-flip owner) is None, and any None makes the verdict None before any failed clause."""
+    checks: dict[str, bool | None] = dict.fromkeys(("mode", "live", "events", "noPainting", "pool", "owner"))
     detail: dict[str, Any] = {}
     gl = continuity.get("glReplay") if isinstance(continuity, dict) else None
-    checks["mode"] = (
+    checks["mode"] = None if not isinstance(continuity, dict) else (
         isinstance(gl, dict) and gl.get("mode") == "injected"
         and gl.get("version") == GL_REPLAY_VERSION and gl.get("sha256") == gl_replay_js_sha256()
     )
@@ -2190,18 +3103,17 @@ def score_armed(
         checks["live"], detail["live"] = _armed_live(states, armed)
         checks["events"], detail["events"] = _armed_events(states[-1], armed)
         checks["noPainting"], detail["paintingOverRect"] = _armed_no_painting(reads, armed)
-        carried = _carried_el_id(states[-1])
-        checks["pool"], detail["pool"] = _armed_pool(states, armed, carried)
+        carried, named = _carried_el_id(states[-1]), _carried_named(states[-1])
+        checks["pool"], detail["pool"] = _armed_pool(states, armed, carried, named)
         owners = [o for o in owner_ids if o is not None] if isinstance(owner_ids, list) else []
-        checks["owner"] = carried is not None and bool(owners) and all(o == carried for o in owners)
+        checks["owner"] = None if not named or not owners else carried is not None and all(o == carried for o in owners)
         detail["preFlipOwners"] = sorted({str(o) for o in owners})
     else:
         detail["reason"] = "the armed slide was not read twice"
-    failing = [name for name, ok in checks.items() if not ok]
-    return {
-        "verdict": not failing, "checks": checks, "detail": detail,
-        "reason": f"armed checks failed: {failing}" if failing else None,
-    }
+    unreadable = [name for name, ok in checks.items() if ok is None]
+    failing = [name for name, ok in checks.items() if ok is False]
+    reason = f"armed checks unreadable: {unreadable}" if unreadable else f"armed checks failed: {failing}" if failing else None
+    return {"verdict": combine_verdicts(*checks.values()), "checks": checks, "detail": detail, "reason": reason}
 
 
 def score_positive_halves(
@@ -2218,53 +3130,126 @@ def score_positive_halves(
     return scored
 
 
+def _finite(value: Any) -> bool:
+    return _finite_number(value) is not None
+
+
+def _finite_or_null(value: Any) -> bool:
+    return value is None or _finite(value)
+
+
+def _id_or_null(value: Any) -> bool:
+    return value is None or (not isinstance(value, bool) and isinstance(value, (int, str)))
+
+
+def _owner_ok(value: Any) -> bool:
+    return value is None or paint_instrument.schema_problem(value, SAMPLE_OWNER_FIELDS) is None
+
+
+def _owner_named(value: Any) -> bool:
+    """A footprint owner read that is the explicit null or names its `elId` (a legacy owner carries no `via`)."""
+    return value is None or isinstance(value, dict) and "elId" in value and _id_or_null(value["elId"])
+
+
+SAMPLE_ROW_FIELDS: dict[str, Callable[[Any], bool]] = {
+    "t": _finite,
+    "scene": _finite_or_null,
+    "playerState": lambda value: value is None or isinstance(value, str),
+    "busy": lambda value: value is None or isinstance(value, bool),
+    "videos": lambda value: isinstance(value, list),
+}
+SAMPLE_VIDEO_FIELDS: dict[str, Callable[[Any], bool]] = {
+    "id": lambda value: value is not None and _id_or_null(value),
+    "src": lambda value: isinstance(value, str),
+    "currentTime": _finite,
+    "readyState": _finite,
+    "isConnected": lambda value: isinstance(value, bool),
+    "footprintOwner": lambda value: value is None or isinstance(value, dict),
+}
+SAMPLE_V2_VIDEO_FIELDS: dict[str, Callable[[Any], bool]] = {
+    "elId": _id_or_null,
+    "paused": lambda value: isinstance(value, bool),
+    "loop": lambda value: isinstance(value, bool),
+    "duration": _finite_or_null,
+    "videoWidth": _finite,
+    "rect": lambda value: value is None or _is_rect(value),
+    "footprintOwner": lambda value: _owner_ok(value),
+}
+SAMPLE_OWNER_FIELDS: dict[str, Callable[[Any], bool]] = {
+    "elId": _id_or_null,
+    "via": lambda value: isinstance(value, str),
+}
+SAMPLE_V2_FIELDS: dict[str, Callable[[Any], bool]] = {
+    "seq": lambda value: isinstance(value, int) and not isinstance(value, bool),
+    "ts": _finite,
+    "hash": lambda value: isinstance(value, str),
+    "sceneCount": _finite_or_null,
+}
+SAMPLE_V2_MARKERS = ("seq", "ts", "hash", "sceneCount", "pp", "ppUnreadable")
+
+
 def _sample_problem(row: Any) -> str | None:
-    if not isinstance(row, dict):
-        return "not an object"
-    if _finite_number(row.get("t")) is None:
-        return "t is not a finite number"
-    if row.get("scene") is not None and _finite_number(row.get("scene")) is None:
-        return "scene is neither null nor a finite number"
-    if "playerState" not in row or not (row["playerState"] is None or isinstance(row["playerState"], str)):
-        return "playerState is missing or not a string"
-    if "busy" not in row or not (row["busy"] is None or isinstance(row["busy"], bool)):
-        return "busy is missing or not a boolean"
+    """One raw sampler row against `SAMPLE_ROW_FIELDS` and each decoder against `SAMPLE_VIDEO_FIELDS` (the legacy
+    contract, unchanged, so legacy rows rescore byte-identically). A schema-2 row (any `SAMPLE_V2_MARKERS` key)
+    also needs `SAMPLE_V2_FIELDS`, each decoder `SAMPLE_V2_VIDEO_FIELDS` (a null `footprintOwner` is the explicit
+    unowned reading, an owner object needs `SAMPLE_OWNER_FIELDS`; a null `rect` only on an untrustworthy stage
+    map), and the pre-paint schemas."""
+    problem = paint_instrument.schema_problem(row, SAMPLE_ROW_FIELDS)
+    if problem:
+        return problem
     if "stageMapValid" in row:
         if not isinstance(row["stageMapValid"], bool):
-            return "stageMapValid is not a boolean"
+            return "stageMapValid ill-typed"
     elif "stageMap" not in row or not (row["stageMap"] is None or isinstance(row["stageMap"], dict)):
         return "stageMap is missing or not an object"
-    if not isinstance(row.get("videos"), list):
-        return "videos is not a list"
+    v2 = any(key in row for key in SAMPLE_V2_MARKERS)
     for video in row["videos"]:
-        if not isinstance(video, dict):
-            return "a video row is not an object"
-        video_id = video.get("id")
-        if video_id is None or isinstance(video_id, bool) or not isinstance(video_id, (int, str)):
-            return "a video id is unusable"
-        if not isinstance(video.get("src"), str):
-            return "a video src is not a string"
-        if _finite_number(video.get("currentTime")) is None:
-            return "a video currentTime is not a finite number"
-        rect = video.get("rect")
-        if rect is not None and not (isinstance(rect, dict) and all(_finite_number(rect.get(k)) is not None for k in ("x", "y", "w", "h"))):
-            return "a video rect is unusable"
-        if not isinstance(video.get("isConnected"), bool):
-            return "a video isConnected is not a boolean"
-        if _finite_number(video.get("readyState")) is None:
-            return "a video readyState is not a finite number"
-        if "footprintOwner" not in video or not (video["footprintOwner"] is None or isinstance(video["footprintOwner"], dict)):
-            return "a video footprintOwner is missing or not an object"
+        problem = paint_instrument.schema_problem(video, SAMPLE_VIDEO_FIELDS)
+        if problem:
+            return f"a video {problem}"
         if "stageMapValid" in video and not isinstance(video["stageMapValid"], bool):
-            return "a video stageMapValid is not a boolean"
+            return "a video stageMapValid ill-typed"
+        if not v2:
+            if video.get("rect") is not None and not _is_rect(video["rect"]):
+                return "a video rect ill-typed"
+            continue
+        problem = paint_instrument.schema_problem(video, SAMPLE_V2_VIDEO_FIELDS)
+        if problem:
+            return f"a video {problem}"
+        if video["rect"] is None and video.get("stageMapValid") is not False:
+            return "a video rect is null on a trustworthy stage map"
+    return _prepaint_problem(row) if v2 else None
+
+
+def _prepaint_problem(row: dict[str, Any]) -> str | None:
+    """A schema-2 row: `SAMPLE_V2_FIELDS`, then its `pp` (when read) against `paint_instrument.PP_FIELDS` and each
+    pre-paint decoder against `paint_instrument.PV_FIELDS`."""
+    problem = paint_instrument.schema_problem(row, SAMPLE_V2_FIELDS)
+    if problem:
+        return problem
+    if "pp" not in row:
+        return None
+    problem = paint_instrument.pp_schema_problem(row["pp"])
+    if problem:
+        return f"pp {problem}"
+    for pv in row["pp"]["videos"]:
+        problem = paint_instrument.pv_schema_problem(pv)
+        if problem:
+            return f"a pp video {problem}"
     return None
 
 
-def sample_schema_errors(samples: Any, limit: int = 5) -> list[str]:
-    """The retained sampler rows' schema, checked before any tracking or windowing."""
+def sample_schema_errors(samples: Any, limit: int = 5, *, schema: Any = None) -> list[str]:
+    """The retained sampler rows' schema, checked before any tracking or windowing. A stream from a
+    schema-2 sampler (`schema`) must be schema 2 throughout, never scored as legacy rows."""
     if not isinstance(samples, list):
         return ["samples is not a list"]
     errors: list[str] = []
+    schemas = {any(key in row for key in SAMPLE_V2_MARKERS) for row in samples if isinstance(row, dict)}
+    if len(schemas) > 1:
+        errors.append("rows mix sampler schemas (some carry schema-2 fields, some do not)")
+    if schema == paint_instrument.SAMPLER_SCHEMA and schemas == {False}:
+        errors.append(f"a schema-{schema} sampler's rows carry no schema-2 fields")
     for index, row in enumerate(samples):
         problem = _sample_problem(row)
         if problem:
@@ -2278,13 +3263,21 @@ def _inconclusive(reason: str, **detail: Any) -> dict[str, Any]:
     return {"verdict": None, "reason": f"inconclusive: {reason}", **detail}
 
 
+def _contract_reason(errors: list[str]) -> str:
+    return f"evidence contract: {'; '.join(errors)}"
+
+
+def _contract_inconclusive(errors: list[str]) -> dict[str, Any]:
+    return _inconclusive(_contract_reason(errors), contractErrors=errors)
+
+
 def _carry_integrity_gap(samples: list[dict[str, Any]], scored: dict[str, Any], spec: dict[str, Any]) -> str | None:
     """Why a False carry is not a fully observed contrary behaviour, or None when it is."""
-    if scored.get("reason") == "boundary crossing not observed in samples":
-        return "boundary crossing not observed in samples"
     if scored.get("stageMapInvalid"):
         return f"{len(scored['stageMapInvalid'])} tracked row(s) have no trustworthy stage map"
-    unowned = [m for m in scored.get("ownerMismatches") or [] if not isinstance(m.get("footprintOwner"), dict)]
+    unowned = [
+        m for m in scored.get("ownerMismatches") or [] if not isinstance(m.get("footprintOwner"), dict) or m.get("ownerUnreadable")
+    ]
     if unowned:
         return f"{len(unowned)} row(s) have no readable footprint owner"
     transition, window = spec["transitionScene"], scored.get("window") or {}
@@ -2300,17 +3293,37 @@ def _carry_integrity_gap(samples: list[dict[str, Any]], scored: dict[str, Any], 
     return None
 
 
+def carry_window_clip(samples: list[dict[str, Any]], spec: dict[str, Any]) -> tuple[float | None, float | None]:
+    """A carry's window stays on its own two slides: it starts no earlier than the source slide's
+    first scene (`sourceScene`) and ends before the destination slide's own outgoing transition
+    scene (`untilScene - 1`, when the destination has a scene before it), so a chain's previous
+    or next Magic Move is never scored as this boundary's motion. Specs without the fields
+    (artifacts from before chains) are not clipped."""
+    source, until, scene = spec.get("sourceScene"), spec.get("untilScene"), spec["atScene"]
+    start = end = None
+    if source is not None:
+        at_source = [r["t"] for r in samples if r.get("scene") is not None and r["scene"] >= source]
+        start = min(at_source) if at_source else None
+    if until is not None and until - 1 > scene:
+        leaving = [r["t"] for r in samples if r.get("scene") is not None and r["scene"] >= until - 1]
+        end = min(leaving) - 1e-6 if leaving else None
+    return start, end
+
+
 def score_carry(
     samples: Any, spec: dict[str, Any], runtime_installed: bool, *, loop_period_s: float | None = None,
+    paint: bool = True, schema: Any = None,
 ) -> dict[str, Any]:
-    """`score_continuity` on schema-checked samples; a False that rests on missing evidence
-    (no crossing, no stage map, a sampler gap) is INCONCLUSIVE, never a red."""
-    errors = sample_schema_errors(samples)
+    """`score_continuity` on schema-checked samples (`schema`: the sampler's, see
+    `sample_schema_errors`); a False that rests on missing evidence (no crossing, no stage map, a
+    sampler gap) is INCONCLUSIVE, never a red."""
+    errors = sample_schema_errors(samples, schema=schema)
     if errors:
         return _inconclusive("sample schema is invalid", schemaErrors=errors)
     scored = score_continuity(
         samples, spec["asset"].lower(), spec["atScene"], spec["srcRect"], spec["dstRect"], runtime_installed,
         transition_scene=spec["transitionScene"], loop_period_s=loop_period_s,
+        chain_clip=carry_window_clip(samples, spec), paint=paint,
     )
     if scored.get("verdict") is not False:
         return scored
@@ -2323,56 +3336,106 @@ def score_restart_strict(
     rect_tolerance: float = RECT_TOLERANCE_PX, pad_s: float = WINDOW_PAD_S,
 ) -> dict[str, Any]:
     """A restart inside a validated boundary window: a decoder never seen before the boundary
-    starts near zero at the destination instance's rect, and every decoder seen at the source
+    starts near zero at the destination instance's rect (any of the asset's `dstRects` when the
+    plan names no single destination), and every decoder seen at the source
     instance's rect anywhere on the source slide (`sourceScene` .. the boundary; not bounded by
     the pad window, which a transition scene longer than `WINDOW_PAD_S` with no `<video>` would
-    swallow) is absent or disconnected inside the window after it."""
+    swallow) is absent or disconnected inside the window after it. A connected decoder whose
+    freshness, source membership, destination phase or rect rests on a row of unreadable scene,
+    move state or rect is INCONCLUSIVE, never dropped from those checks; so is any run with a
+    tracked decoder's row whose source no longer names the asset (`unnamed_rows`, identity before
+    source), a decoding row that names no source (`unidentified_decoders`) or a row listing one
+    decoder id twice (`duplicate_ids`)."""
     errors = sample_schema_errors(samples)
     if errors:
         return _inconclusive("sample schema is invalid", schemaErrors=errors)
-    scene, until = spec["atScene"], spec.get("settleUntilScene")
-    tracks = track_by_id(samples, spec["asset"].lower())
+    scene, until, asset = spec["atScene"], spec.get("settleUntilScene"), spec["asset"].lower()
+    tracks = track_by_id(samples, asset)
     if not decoded_anywhere(tracks):
         return _inconclusive("movie never decoded")
     window = find_boundary_window(samples, scene, pad_s=pad_s)
     if window is None:
         return _inconclusive("boundary crossing not observed in samples")
+    unnamed, unidentified = unnamed_rows(tracks, asset), unidentified_decoders(samples, tracks, -math.inf, math.inf)
+    if unnamed or unidentified:
+        return _inconclusive(
+            "a decoder's rows do not name the asset", unnamed=unnamed[:5], unidentified=unidentified[:5], window=window,
+        )
+    doubled = duplicate_ids(samples)
+    if doubled:
+        return _inconclusive("a row lists one decoder id twice", doubled=doubled[:5], window=window)
+    first = spec.get("sourceScene")
+
+    def placed(row: dict[str, Any]) -> bool:
+        return _finite_number(row.get("scene")) is not None
 
     def windowed(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [r for r in rows if window["start"] <= r["t"] <= window["end"] and r.get("scene") is not None]
+        return [r for r in rows if window["start"] <= r["t"] <= window["end"]]
 
-    def settled(row: dict[str, Any]) -> bool:
+    def settled(row: dict[str, Any]) -> bool | None:
         """On the destination slide (`until` = the next slide's first scene, exclusive), never a
-        moving row, and never the slide's own outgoing transition scene when it has one."""
+        moving row, and never the slide's own outgoing transition scene when it has one. None
+        when the row's scene, or on the destination its move state, is unreadable."""
+        if not placed(row):
+            return None
         if row["scene"] < scene or (until is not None and row["scene"] >= until):
             return False
         if until is not None and until - 1 > scene and row["scene"] == until - 1:
             return False
-        return not (row.get("playerState") == "Playing" and row.get("busy") is True)
+        state, busy = row.get("playerState"), row.get("busy")
+        if state == "Playing" and busy is True:
+            return False
+        return True if busy is False or (isinstance(state, str) and state != "Playing") else None
 
-    if not any(settled(r) for r in windowed(samples)):
-        return _inconclusive("no sample on the settled destination scene", window=window)
-    first = spec.get("sourceScene")
-    source_ids = sorted(
-        i for i, rows in tracks.items()
-        if any(
-            r.get("scene") is not None and (first is None or r["scene"] >= first) and r["scene"] < scene
-            and rect_matches(r.get("rect"), spec["srcRect"], rect_tolerance)
-            for r in rows
+    def at_source(row: dict[str, Any]) -> bool | None:
+        """A row at the source instance on the source slide; None when its scene or rect is unreadable."""
+        if placed(row) and not ((first is None or row["scene"] >= first) and row["scene"] < scene):
+            return False
+        if not _is_rect(row.get("rect")):
+            return None
+        return rect_matches(row["rect"], spec["srcRect"], rect_tolerance) if placed(row) else (
+            None if rect_matches(row["rect"], spec["srcRect"], rect_tolerance) else False
         )
-    )
+
+    if not any(settled(r) is True for r in windowed(samples)):
+        return _inconclusive("no sample on the settled destination scene", window=window)
+    source_ids = sorted(i for i, rows in tracks.items() if any(at_source(r) is True for r in rows))
     if not source_ids:
         return _inconclusive("no decoder at the source instance before the boundary", window=window)
+    targets = [spec["dstRect"]] if spec.get("dstRect") is not None else spec.get("dstRects") or []
+    uncertain: list[dict[str, Any]] = []
+    for i, rows in tracks.items():
+        connected = [r for r in windowed(rows) if r.get("isConnected")]
+        if not connected:
+            continue
+        unplaced_after = [r for r in connected if not placed(r)]
+        if i in source_ids or any(at_source(r) is None for r in rows):
+            if unplaced_after or (i not in source_ids and any(r["scene"] >= scene for r in connected if placed(r))):
+                uncertain.append({"id": i, "why": "a possible source decoder is connected on rows of unreadable scene or source"})
+            continue
+        if any(placed(r) and r["scene"] < scene for r in rows):
+            continue
+        if any(not placed(r) for r in rows):
+            uncertain.append({"id": i, "why": "a decoder not seen before the boundary has rows with no scene"})
+        elif any(settled(r) is None for r in connected):
+            uncertain.append({"id": i, "why": "a fresh decoder's destination move state is unreadable"})
+        elif any(settled(r) and not _is_rect(r.get("rect")) for r in connected):
+            uncertain.append({"id": i, "why": "a fresh decoder's destination rect is unreadable"})
+    if uncertain:
+        return _inconclusive("a fresh or source decoder cannot be placed", uncertain=uncertain, sourceIds=source_ids, window=window)
     leaked = [
         {"id": i, "t": r["t"], "scene": r["scene"]}
-        for i in source_ids for r in windowed(tracks[i]) if r["scene"] >= scene and r.get("isConnected")
+        for i in source_ids for r in windowed(tracks[i]) if r.get("isConnected") and r["scene"] >= scene
     ]
     fresh = {
         i: sorted((r for r in windowed(rows) if settled(r) and r.get("isConnected")), key=lambda r: r["t"])
         for i, rows in tracks.items()
-        if not any(r.get("scene") is not None and r["scene"] < scene for r in rows)
+        if not any(r["scene"] < scene for r in rows if placed(r))
     }
-    bound = {i: rows for i, rows in fresh.items() if rows and all(rect_matches(r.get("rect"), spec["dstRect"], rect_tolerance) for r in rows)}
+    bound = {
+        i: rows for i, rows in fresh.items()
+        if rows and all(any(rect_matches(r.get("rect"), t, rect_tolerance) for t in targets) for r in rows)
+    }
     if not bound:
         return {
             "verdict": False, "reason": "no fresh decoder at the destination instance", "freshIds": sorted(fresh),
@@ -2385,10 +3448,48 @@ def score_restart_strict(
         reasons.append(f"fresh decoder starts at {start_time:.3f}s")
     if leaked:
         reasons.append(f"{len(leaked)} source-decoder row(s) still connected after the boundary")
-    return {
+    scored = {
         "verdict": not reasons, "reason": "; ".join(reasons) or None, "elementId": element_id,
         "startTimeS": start_time, "freshIds": sorted(fresh), "sourceIds": source_ids, "leaked": leaked, "window": window,
     }
+    if any("seq" in row for row in samples):
+        scored["slotGap"] = restart_slot_gap(samples, spec, element_id, window, targets)
+    return scored
+
+
+def restart_slot_gap(
+    samples: list[dict[str, Any]], spec: dict[str, Any], element_id: Any, window: dict[str, float],
+    targets: list[dict[str, float]],
+) -> dict[str, Any]:
+    """Report only: the pre-paint frames between the last one on which a decoder of the asset
+    paints the source instance and the first on which the fresh decoder paints its destination."""
+    asset = spec["asset"].lower()
+    rows = sorted(
+        (r for r in samples if isinstance(r.get("pp"), dict) and window["start"] <= r["t"] <= window["end"]),
+        key=lambda r: r["t"],
+    )
+
+    def paints(row: dict[str, Any], rects: list[dict[str, float]], only: Any = None) -> bool:
+        return any(
+            isinstance(pv, dict) and (only is None or pv.get("id") == only)
+            and matches_asset_keys(pv.get("src"), [asset]) and isinstance(pv.get("rect"), dict)
+            and paint_instrument.painted_state(pv, cover=bool(row["pp"].get("cover")))[0] in ("painted", "partial")
+            and any(rect_iou(pv["rect"], rect) >= INSTANCE_IOU_MIN for rect in rects)
+            for pv in row["pp"].get("videos") or []
+        )
+
+    first = next((i for i, row in enumerate(rows) if paints(row, targets, element_id)), None)
+    if first is None:
+        return {"frames": None, "reason": "the fresh decoder never painted its destination"}
+    last = next((i for i in range(first - 1, -1, -1) if paints(rows[i], [spec["srcRect"]])), None)
+    if last is None:
+        return {"frames": None, "reason": "no frame painted the source instance before it"}
+
+    def ts(row: dict[str, Any]) -> float:
+        return row.get("ts") if _finite_number(row.get("ts")) is not None else row["t"]
+
+    t0, t1 = ts(rows[last + 1]) if first > last + 1 else ts(rows[first]), ts(rows[first])
+    return {"frames": first - last - 1, "ms": t1 - t0, "t0": t0, "t1": t1}
 
 
 def _event_scene_of(event: dict[str, Any]) -> int | None:
@@ -2405,7 +3506,13 @@ def score_raw_handback(samples: Any, spec: dict[str, Any]) -> dict[str, Any]:
     zoneUntilScene)` the player's own element for the destination instance (`dstDomId`, F1)
     is connected at `dstRect` on a settled row, was never seen before `atScene`, and is never
     preserved, remounted or facaded. Never DOM-present in the zone (a WebGL poster, or rows
-    from a sampler without `domId`) is INCONCLUSIVE, never False."""
+    from a sampler without `domId`) is INCONCLUSIVE, never False. A retire with no destination
+    instance (`ends`, a refused pairing) hands nothing back: True, marked not applicable. The
+    element is followed by probe id (identity before DOM id): a row of it naming another, no or an
+    unreadable DOM id is INCONCLUSIVE. Its settled rows at `dstRect` must name the asset: another
+    asset is False, no source INCONCLUSIVE."""
+    if spec.get("dstRect") is None:
+        return {"verdict": True, "reason": None, "applicable": False}
     dom_id, lo, hi = spec.get("dstDomId"), spec["atScene"], spec.get("zoneUntilScene")
     if not dom_id:
         return _inconclusive("the retire verdict names no destination DOM id")
@@ -2414,9 +3521,16 @@ def score_raw_handback(samples: Any, spec: dict[str, Any]) -> dict[str, Any]:
         return _inconclusive("sample schema is invalid", schemaErrors=errors)
     if not any("domId" in v for row in samples for v in row["videos"]):
         return _inconclusive("the samples carry no DOM ids")
-    rows = [(row, v) for row in samples for v in row["videos"] if v.get("domId") == dom_id]
+    if any("domId" in v and not (v["domId"] is None or isinstance(v["domId"], str)) for row in samples for v in row["videos"]):
+        return _inconclusive("a sampled decoder's DOM id is unreadable")
+    ids = {v["id"] for row in samples for v in row["videos"] if v.get("domId") == dom_id}
+    rows = [(row, v) for row in samples for v in row["videos"] if v["id"] in ids]
+    if any(v.get("domId") != dom_id for _, v in rows):
+        return _inconclusive(f"a decoder that was {dom_id} has rows naming another or no DOM id")
     if any(any(not isinstance(v.get(flag), bool) for flag in ("preserved", "remounted", "facade")) for _, v in rows):
         return _inconclusive(f"{dom_id} rows carry unreadable preserve/remount/facade flags")
+    if any(_finite_number(row.get("scene")) is None for row, _ in rows):
+        return _inconclusive(f"{dom_id} rows carry no scene, so the retire zone cannot place them")
     before = [row["t"] for row, _ in rows if row.get("scene") is not None and row["scene"] < lo]
     zone = [
         (row, v) for row, v in rows
@@ -2427,26 +3541,99 @@ def score_raw_handback(samples: Any, spec: dict[str, Any]) -> dict[str, Any]:
         (row, v) for row, v in zone
         if row.get("busy") is False and row.get("playerState") != "Playing"
     ]
-    handed = [row["t"] for row, v in settled if v["isConnected"] and rect_matches(v.get("rect"), spec["dstRect"])]
-    detail = {"domId": dom_id, "rowsInZone": len(zone), "settledAtRect": len(handed), "seenBefore": before[:5], "flagged": flagged[:5]}
+    at_rect = [(row, v) for row, v in settled if v["isConnected"] and rect_matches(v.get("rect"), spec["dstRect"])]
+    handed = [row["t"] for row, _ in at_rect]
+    unnamed = [
+        {"t": row["t"], "src": v.get("src")} for row, v in at_rect if not matches_asset_keys(v.get("src"), [spec["asset"]])
+    ]
+    detail = {
+        "domId": dom_id, "rowsInZone": len(zone), "settledAtRect": len(handed), "seenBefore": before[:5],
+        "flagged": flagged[:5], "elIds": sorted({v.get("elId") for _, v in zone if v.get("elId") is not None}),
+        "unnamed": unnamed[:5],
+    }
     if before or flagged:
         return {"verdict": False, "reason": f"{dom_id} was carried (seen before the boundary or preserved/remounted/facaded)", **detail}
+    if any(r["src"] for r in unnamed):
+        return {"verdict": False, "reason": f"{dom_id} at its authored rect names another asset", **detail}
+    if unnamed:
+        return _inconclusive(f"{dom_id} at its authored rect names no source", **detail)
     if handed:
         return {"verdict": True, "reason": None, **detail}
     if not settled:
         return _inconclusive(f"{dom_id} is never DOM-present on a settled row of the retire zone", **detail)
+    if any(not isinstance(row.get("busy"), bool) for row, _ in zone) or any(
+        v["isConnected"] and not _is_rect(v.get("rect")) for _, v in settled
+    ):
+        return _inconclusive(f"{dom_id} zone rows carry an unreadable move state or rect", **detail)
     return {"verdict": False, "reason": f"{dom_id} is present but never connected at its authored rect", **detail}
 
 
+def unplaced_after_start(samples: Any, below: float | None = None) -> bool:
+    """Whether a timed sampler row after the first placed one carries no readable scene or, on a
+    scene before `below`, no Boolean `busy`, so `leave_rest_t` cannot place the rest it may be (the
+    leading rows before the player reports a scene are not)."""
+    rows = sorted(
+        (r for r in samples if isinstance(r, dict) and _finite_number(r.get("t")) is not None), key=lambda r: r["t"],
+    ) if isinstance(samples, list) else []
+    placed = [_finite_number(r.get("scene")) is not None for r in rows]
+    if True not in placed:
+        return False
+    run = rows[placed.index(True):]
+    return not all(placed[placed.index(True):]) or below is not None and any(
+        r["scene"] < below and not isinstance(r.get("busy"), bool) for r in run
+    )
+
+
+def leave_rest_t(samples: Any, transition_scene: int) -> float | None:
+    """When the player leaves its rest for `transition_scene`: the first row after the last settled
+    row (busy False) on an earlier scene. The page hash is no clock for this -- while idle at the
+    end of a scene the player already shows the NEXT scene's hash (main.js
+    `updateNavigationButtons`), so `#transition_scene` appears at rest."""
+    rows = sorted(
+        (r for r in samples if isinstance(r, dict) and _finite_number(r.get("t")) is not None and r.get("scene") is not None),
+        key=lambda r: r["t"],
+    ) if isinstance(samples, list) else []
+    rest = [i for i, r in enumerate(rows) if r["scene"] < transition_scene and r.get("busy") is False]
+    if not rest or rest[-1] + 1 >= len(rows):
+        return None
+    return rows[rest[-1] + 1]["t"]
+
+
+def retire_zone_times(samples: Any, at_scene: int, until_scene: int | None) -> tuple[float, float] | None:
+    """The retire zone in page time: from leaving the source slide's rest for the outgoing
+    transition (`at_scene - 1`) to leaving the destination slide's rest for its own (`until_scene
+    - 1`), open-ended on the last slide. None when the samples cannot place the start (a legacy
+    artifact scores by the notes' scene)."""
+    start = leave_rest_t(samples, at_scene - 1)
+    if start is None:
+        return None
+    end = leave_rest_t(samples, until_scene - 1) if until_scene is not None else None
+    return start, end if end is not None and end > start else math.inf
+
+
 def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, samples: Any = None) -> dict[str, Any]:
-    """The positive half of a refused carry: the raw player's own element for the destination
-    instance (`score_raw_handback`, from the retained samples), `score_refusal`'s settled DOM/pool
+    """The positive half of a refused carry, or of a carried decoder the plan ends: the raw
+    player's own element for the destination instance, if any (`score_raw_handback`, from the
+    retained samples), `score_refusal`'s settled DOM/pool
     checks, and -- when the runtime is installed -- the core's contract (module docstring,
     "retire"): at least one refusal note for the movie in the zone `[atScene - 1, the next
     slide's transition scene)`, `preserve-refused` (key, via, scene) from a declining hook or
     `retire-boundary` (key, elIds, atScene) from the keep-warm sweep of decoders pooled before
-    the zone, and no carry note (`CARRY_EVENT_KINDS`) for its key or elements in that zone.
-    Unreadable evidence is INCONCLUSIVE."""
+    the zone, and no carry note (`CARRY_EVENT_KINDS`) for its key, elements or instance pair in that zone. Every
+    note, pool entry and painter is bound to the retired instance pair, never asset-wide
+    (`instance_owner`, `instance_decoders`): a refusal note counts only when proven the pair's
+    and, stamped, names its source instance; adverse evidence is set aside only when proven
+    another instance's or keyed to another movie, and a decoder tied to the pair outranks a foreign
+    stamp; a carry note in the zone nothing identifies is INCONCLUSIVE. The
+    zone is placed in page time from the samples (`retire_zone_times`) when the notes carry `t`,
+    never by the page hash; a note the zone then cannot place (no readable `t`) is never counted
+    as a refusal and makes a carry note INCONCLUSIVE; with no counted refusal, a refusal note for the movie the
+    zone cannot place or nothing ties to an instance is INCONCLUSIVE when it decides the verdict. Unreadable
+    evidence is INCONCLUSIVE: a note
+    whose identity fields are ill-typed (`_note_identity_ok`), a refusal note for the movie
+    (or of an unreadable or empty key) whose detail, key, via, scene, elIds or atScene cannot be read, and the
+    retained samples, with or without a destination instance (`sample_schema_errors`, a decoder's
+    `instance` stamp)."""
     if not isinstance(sample, dict):
         return _inconclusive("no refusal evidence was sampled on the destination slide")
     if not stage_map_valid(sample.get("stageMap")):
@@ -2455,54 +3642,131 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
         painting_videos(sample.get("painting"), sample["stageMap"])
     except VisiblePassError as exc:
         return _inconclusive(str(exc))
+    events = sample.get("coreEvents")
+    movie_key, scene = spec.get("movieKey"), spec["atScene"]
+    src_ids = {spec["srcObjectId"].lower()} if isinstance(spec.get("srcObjectId"), str) and spec["srcObjectId"] else set()
+    if runtime_installed:
+        if not isinstance(sample.get("poolSnapshot"), list):
+            return _inconclusive(f"preserve snapshot is unreadable: {sample.get('poolSnapshot')!r}")
+        if not _events_readable(sample):
+            return _inconclusive("core events are unreadable")
+        if movie_key is None:
+            return _inconclusive("the retire verdict is bound to no runtime movie key")
+        if not src_ids:
+            return _inconclusive("the retire verdict names no source instance")
+    errors = sample_schema_errors(samples)
+    if errors:
+        return _inconclusive("sample schema is invalid", schemaErrors=errors)
+    ids = retire_instance_ids(spec)
+    decoders = instance_decoders(samples, ids)
+    if decoders is None:
+        return _inconclusive("a sampled decoder's instance stamp is unreadable")
+    linked, foreign = decoders
     handback = score_raw_handback(samples, spec)
-    if handback["verdict"] is False:
-        return {**score_refusal(sample, spec, runtime_installed), "verdict": False, "handback": handback,
-                "reason": handback["reason"]}
     if handback["verdict"] is None:
         return _inconclusive(f"hand-back: {handback['reason']}", handback=handback)
+    handed_back = handback.get("elIds") or () if handback["verdict"] else ()
+    scored = score_refusal(sample, spec, runtime_installed, handed_back, foreign, linked)
+    if scored["verdict"] is None:
+        return {**scored, "handback": handback}
+    if handback["verdict"] is False:
+        return {**scored, "verdict": False, "handback": handback, "reason": handback["reason"]}
     if not runtime_installed:
-        return {**score_refusal(sample, spec, runtime_installed), "handback": handback}
-    events = sample.get("coreEvents")
-    if not isinstance(sample.get("poolSnapshot"), list):
-        return _inconclusive(f"preserve snapshot is unreadable: {sample.get('poolSnapshot')!r}")
-    if not isinstance(events, list) or not all(isinstance(e, dict) for e in events):
-        return _inconclusive("core events are unreadable")
-    movie_key, scene = spec.get("movieKey"), spec["atScene"]
-    if movie_key is None:
-        return _inconclusive("the retire verdict is bound to no runtime movie key")
+        return {**scored, "handback": handback}
+    transitions = [scene - 1, *([spec["zoneUntilScene"] - 1] if spec.get("zoneUntilScene") is not None else [])]
+    if unplaced_after_start(samples, max(transitions)):
+        return _inconclusive(
+            "a sampler row carries no scene, or no move state before the zone's end, so the retire zone cannot be "
+            "placed", handback=handback,
+        )
     zone_end = spec["zoneUntilScene"] - 1 if spec.get("zoneUntilScene") is not None else math.inf
+    timed = retire_zone_times(samples, scene, spec.get("zoneUntilScene"))
 
     def in_zone(value: Any) -> bool:
         return value is not None and scene - 1 <= value < zone_end
+
+    stamped = any("t" in e for e in events)
+
+    def event_in_zone(event: dict[str, Any], scene_value: Any, unplaced: bool = False) -> bool | None:
+        """By page time when the zone is timed and the runtime stamps its notes (a note whose `t` is
+        then missing or unreadable is unplaceable: None); else by the note's scene (a note with
+        neither counts as in the zone when `unplaced`)."""
+        if timed is not None and stamped:
+            t = _finite_number(event.get("t"))
+            return None if t is None else timed[0] <= t < timed[1]
+        return unplaced if scene_value is None else in_zone(scene_value)
+
+    def placed(event: dict[str, Any], detail: dict[str, Any]) -> bool | None:
+        if event["kind"] == "retire-boundary":
+            at = _finite_number(detail.get("atScene"))
+            return None if at is None else at == scene
+        if event["kind"] == "preserve-refused":
+            return event_in_zone(event, _finite_number(detail.get("scene")))
+        return event_in_zone(event, _event_scene_of(event), unplaced=True)
+
+    def refusal_readable(event: dict[str, Any], detail: dict[str, Any]) -> bool:
+        if not isinstance(event.get("detail"), dict) or not (isinstance(detail.get("key"), str) and detail["key"]):
+            return False
+        if event["kind"] == "retire-boundary":
+            return isinstance(detail.get("elIds"), list) and _finite_number(detail.get("atScene")) is not None
+        return (
+            isinstance(detail.get("via"), str) and bool(detail["via"]) and "scene" in detail and _finite_or_null(detail["scene"])
+        )
 
     def keyed(detail: dict[str, Any]) -> bool:
         key = detail.get("key")
         return key == movie_key or (isinstance(key, str) and matches_asset_keys(key, spec["assetKeys"]))
 
-    details = [(e, e.get("detail") if isinstance(e.get("detail"), dict) else {}) for e in events]
+    illtyped = [e for e in events if isinstance(e.get("detail"), dict) and not _note_identity_ok(e["detail"])]
+    if illtyped:
+        return _inconclusive("a core note's key, element ids or instance stamp is unreadable",
+                             unreadable=illtyped[:5], handback=handback)
+    details = [
+        (e, d) for e in events
+        for d in [e.get("detail") if isinstance(e.get("detail"), dict) else {}]
+        if instance_owner(d, ids, linked, foreign) != "foreign"
+    ]
+    refusals = [
+        (e, d) for e, d in details
+        if e["kind"] in RETIRE_REFUSAL_KINDS and (d.get("key") == movie_key or not (isinstance(d.get("key"), str) and d["key"]))
+    ]
+    unreadable = [
+        e for e, d in refusals
+        if not refusal_readable(e, d) and (not isinstance(e.get("detail"), dict) or placed(e, d) is not False)
+    ]
+    if unreadable:
+        return _inconclusive("a refusal note for the movie is unreadable or cannot be placed in the retire zone",
+                             unreadable=unreadable[:5], handback=handback)
     el_ids = {
         value for _, d in details if keyed(d)
         for value in [d.get("elId"), d.get("newElId"), *(d.get("elIds") or [])] if value is not None
     }
     notes = [
-        {"kind": e.get("kind"), **d} for e, d in details
-        if d.get("key") == movie_key and (
-            (e.get("kind") == "retire-boundary" and d.get("atScene") == scene and isinstance(d.get("elIds"), list))
-            or (
-                e.get("kind") == "preserve-refused" and isinstance(d.get("via"), str) and d["via"]
-                and in_zone(_finite_number(d.get("scene")))
-            )
-        )
+        {"kind": e["kind"], **d} for e, d in refusals
+        if instance_owner(d, ids, linked, foreign) == "target"
+        and (not instance_stamps(d) or instance_stamps(d) & src_ids) and placed(e, d) is True
     ]
-    carries = [
-        e for e, d in details
-        if e.get("kind") in CARRY_EVENT_KINDS
-        and (keyed(d) or any(d.get(f) in el_ids for f in ("elId", "newElId") if d.get(f) is not None))
-        and (_event_scene_of(e) is None or in_zone(_event_scene_of(e)))
+    pending = [
+        e for e, d in refusals
+        if (where := placed(e, d)) is None or where and instance_owner(d, ids, linked, foreign) == "unknown"
     ]
-    scored = score_refusal(sample, spec, runtime_installed)
+    held: dict[int, bool | None] = {}
+    for index, (e, d) in enumerate(details):
+        if e["kind"] in CARRY_EVENT_KINDS and (where := placed(e, d)) is not False:
+            mine = True if (
+                keyed(d) or instance_owner(d, ids, linked, foreign) == "target"
+                or any(d.get(f) in el_ids for f in ("elId", "newElId") if d.get(f) is not None)
+            ) else _movie_identity(d, spec["assetKeys"], movie_key)
+            held[index] = None if where is None and mine is not False else mine
+    unknown = [details[index][0] for index, mine in held.items() if mine is None]
+    if unknown:
+        return _inconclusive("a carry note in the retire zone names no readable movie or instance, or cannot be placed",
+                             unidentified=unknown, handback=handback)
+    carries = [details[index][0] for index, mine in held.items() if mine]
     reasons = [scored["reason"]] if scored.get("reason") else []
+    if not notes and pending and not reasons and not carries:
+        return _inconclusive("a refusal note for the movie cannot be placed in the retire zone or tied to its instance",
+                             unplaced=pending[:5], handback=handback)
     if not notes:
         reasons.append(f"no preserve-refused/retire-boundary note for {movie_key} in scenes [{scene - 1}, {zone_end})")
     if carries:
@@ -2510,6 +3774,7 @@ def score_retire(sample: Any, spec: dict[str, Any], runtime_installed: bool, sam
     return {
         **scored, "verdict": not reasons, "reason": "; ".join(reasons) or None,
         "retireNotes": notes, "carryNotes": carries, "handback": handback,
+        "zoneTimes": list(timed) if timed is not None else None,
     }
 
 
@@ -2560,6 +3825,8 @@ def score_armed_strict(reads: Any, armed: dict[str, Any], continuity: Any, sampl
     if not isinstance(continuity, dict):
         return _inconclusive(f"the host continuity read is unreadable: {continuity!r}")
     owners = pre_flip_owner_ids(samples if isinstance(samples, list) else [], armed)
+    if owners is None:
+        return _inconclusive("a sampled decoder row cannot be placed before or after the armed flip")
     if not any(owner is not None for owner in owners):
         return _inconclusive("no pre-flip sample at the armed instance rect resolved an owner")
     return score_armed(reads, armed, continuity, owner_ids=owners)
@@ -2567,15 +3834,22 @@ def score_armed_strict(reads: Any, armed: dict[str, Any], continuity: Any, sampl
 
 def score_verdicts(
     samples: list[dict[str, Any]], evidence: dict[str, Any], facts: dict[str, Any], runtime_installed: bool,
-    continuity: Any, *, loop_period_s: float | None = None,
+    continuity: Any, *, loop_period_s: float | None = None, paint: bool = True, schema: Any = None,
 ) -> dict[str, Any]:
     """Pure: every plan-generated verdict (`facts["verdicts"]`), keyed by id. False only for a
-    fully observed contrary behaviour; every integrity or missing-evidence path is None."""
+    fully observed contrary behaviour; every integrity or missing-evidence path is None. `schema`
+    is the sampler's (a schema-2 stream never scores as legacy). Rows or evidence outside the
+    producer contract make every verdict of the arm None."""
+    errors = contract.first_errors(contract.sample_rows(samples, schema=schema), contract.evidence(evidence))
+    if errors:
+        return {spec["id"]: _contract_inconclusive(errors) for spec in facts.get("verdicts") or []}
     scored: dict[str, Any] = {}
     for spec in facts.get("verdicts") or []:
         kind, scene = spec["kind"], spec["atScene"]
         if kind == "carry":
-            scored[spec["id"]] = score_carry(samples, spec, runtime_installed, loop_period_s=loop_period_s)
+            scored[spec["id"]] = score_carry(
+                samples, spec, runtime_installed, loop_period_s=loop_period_s, paint=paint, schema=schema,
+            )
         elif kind == "restart":
             scored[spec["id"]] = score_restart_strict(samples, spec)
         elif kind == "retire":
@@ -2684,8 +3958,9 @@ def score_census(
     instances (`match_painting_videos`, the visible passes' `unexpectedVideos`). Every slide in
     `player_by_ordinal` needs a list of exactly one readable read. Returns the per-slide records, the red
     ids as a multiset -- one `stray:slide{n}:{asset}` per unexpected painting video (its `elId`
-    kept in the record), one `duplicate:slide{n}:{label}` per doubly-painted instance -- and
-    the `census:slide{n}` reads that were missing, extra or unreadable."""
+    kept in the record), one `duplicate:slide{n}:{label}` per doubly-painted instance, one
+    `foreign:slide{n}:{label}` per instance claimed by another asset's video -- and the
+    `census:slide{n}` reads that were missing, extra or unreadable (a claim naming no source)."""
     records: dict[str, Any] = {}
     red: list[str] = []
     unknown: list[str] = []
@@ -2701,6 +3976,9 @@ def score_census(
                 raise VisiblePassError(f"slide {ordinal} was read {len(slide_reads)} times (extra read)")
             if not isinstance(read, dict):
                 raise VisiblePassError(f"slide {ordinal} has no census read")
+            errors = contract.first_errors(contract.refusal_read(read, f"census.{key}"))
+            if errors:
+                raise VisiblePassError(_contract_reason(errors))
             stage_map = read.get("stageMap")
             if not stage_map_valid(stage_map):
                 raise VisiblePassError("stage map is missing or untrustworthy at the census read")
@@ -2713,7 +3991,47 @@ def score_census(
         records[key] = check
         red.extend(f"stray:slide{ordinal}:{asset_of(video.get('src'), assets)}" for video in check["unexpectedVideos"])
         red.extend(f"duplicate:slide{ordinal}:{dup['label']}" for dup in check["duplicateVideos"])
+        red.extend(f"foreign:slide{ordinal}:{video['label']}" for video in check.get("foreignVideos", ()))
+        if check["verdict"] is None:
+            unknown.append(f"census:slide{ordinal}")
     return records, sorted(red), unknown
+
+
+def record_sampler(result: dict[str, Any], transport: Any, raw_samples: list[dict[str, Any]]) -> None:
+    """The stopped sampler's `{schema, meta, selfCheck}` and, when a paint control ran, its record."""
+    result["sampler"] = sampler_record(transport, raw_samples)
+    control = transport.evaluate(PAINT_CONTROL_READ_JS)
+    if isinstance(control, dict):
+        result["paintControlRecord"] = control
+
+
+def arm_paint_census(samples: list[dict[str, Any]], scored: dict[str, Any], specs: Sequence[dict[str, Any]]) -> Any:
+    """Every painted -> not -> painted run of a carried decoder over the whole arm, each decoder with
+    the windows its carries were scored over (report only)."""
+    carried: dict[Any, list[tuple[float, float]]] = {}
+    asset_by_id: dict[Any, str] = {}
+    for spec in specs:
+        value = scored.get(spec["id"])
+        if spec["kind"] != "carry" or not isinstance(value, dict) or value.get("elementId") is None:
+            continue
+        window = (value.get("paint") or {}).get("window") or value.get("window") or {}
+        windows = carried.setdefault(value["elementId"], [])
+        if _finite_number(window.get("start")) is not None and _finite_number(window.get("end")) is not None:
+            windows.append((window["start"], window["end"]))
+        asset_by_id[value["elementId"]] = spec["asset"].lower()
+    counts = [int(row["sceneCount"]) for row in samples if _finite_number(row.get("sceneCount")) is not None]
+    if not counts:
+        return None
+    return paint_instrument.paint_census(samples, carried, asset_by_id, scene_count=max(counts))
+
+
+def show_output(player: LiveOutputHost, result: dict[str, Any]) -> None:
+    """`show()` before any sampling: it lifts the attach host's inline `#body` opacity 0 and the
+    launch host's black cover, both of which the ancestor-aware owner and paint reads would see.
+    An output that still reads hidden stops the arm."""
+    result["outputVisible"] = player.execute("show").output_visible
+    if result["outputVisible"] is not True:
+        raise RuntimeError(f"output was not visible after show() (outputVisible={result['outputVisible']!r})")
 
 
 def run_arm(
@@ -2727,6 +4045,7 @@ def run_arm(
     try:
         player.start()
         result["continuity"] = player.output["continuity"]
+        show_output(player, result)
         arm_facts = facts_for(result["continuity"], facts, facts_on)
         if facts_on is not None:
             result["factsSet"] = "on" if arm_facts is facts_on else "off"
@@ -2736,6 +4055,7 @@ def run_arm(
             result["censusRaw"] = {}
             observer = census_observer(player, observer, result["censusRaw"])
         raw_samples = drive_and_sample(player, observer=observer, carry_into=carry_destination_players(arm_facts))
+        record_sampler(result, player._require_transport(), raw_samples)
         samples, invalid_count = convert_samples_to_authored(raw_samples)
         result["samples"] = samples
         result["sampleCount"] = len(samples)
@@ -2746,10 +4066,13 @@ def run_arm(
         runtime_installed = result["continuity"].get("mode") == "qualified"
         result["evidence"] = evidence
         result.update(with_aliases(
-            score_verdicts(samples, evidence, arm_facts, runtime_installed, result["continuity"]),
+            score_verdicts(
+                samples, evidence, arm_facts, runtime_installed, result["continuity"], schema=result["sampler"].get("schema"),
+            ),
             arm_facts.get("verdicts") or [],
         ))
         result["verdicts"] = verdict_table(result, arm_facts.get("verdicts") or [])
+        result["paintCensus"] = arm_paint_census(samples, result, arm_facts.get("verdicts") or [])
     finally:
         try:
             player.stop()
@@ -2870,6 +4193,7 @@ def run_attach_arm(
                 if facts_on is not None:
                     result["factsSet"] = "on" if attach_facts is facts_on else "off"
                 result["output"] = {key: value for key, value in output.items() if key != "continuity"}
+                show_output(player, result)
                 transport = player._require_transport()
                 plan_transparent = transport.evaluate(
                     "!!(window.__OBED_CONTINUITY__ && window.__OBED_CONTINUITY__.transparentBackground)"
@@ -2881,6 +4205,7 @@ def run_attach_arm(
                     player, observer=boundary_observer(player, attach_facts, evidence),
                     carry_into=carry_destination_players(attach_facts),
                 )
+                record_sampler(result, transport, raw_samples)
                 samples, invalid_count = convert_samples_to_authored(raw_samples)
                 result["samples"] = samples
                 result["sampleCount"] = len(samples)
@@ -2891,10 +4216,14 @@ def run_attach_arm(
                 runtime_installed = result["continuity"].get("mode") == "qualified"
                 result["evidence"] = evidence
                 result.update(with_aliases(
-                    score_verdicts(samples, evidence, attach_facts, runtime_installed, result["continuity"]),
+                    score_verdicts(
+                        samples, evidence, attach_facts, runtime_installed, result["continuity"],
+                        schema=result["sampler"].get("schema"),
+                    ),
                     attach_facts.get("verdicts") or [],
                 ))
                 result["verdicts"] = verdict_table(result, attach_facts.get("verdicts") or [])
+                result["paintCensus"] = arm_paint_census(samples, result, attach_facts.get("verdicts") or [])
             finally:
                 try:
                     player.stop()
@@ -3008,9 +4337,9 @@ def combine_rect_oracles(entry: dict[str, Any], inpage: dict[str, Any] | None) -
     in-page physical-liveness read (Codex r1 Spec 2). Converts the screenshot
     verdict to physical LIVE/DEAD via `expect`, combines physical liveness,
     then translates the combined physical verdict back to expectation-met.
-    An applicable but INCONCLUSIVE in-page read never lets a met expectation
-    stand uncorroborated (Codex r2 Spec 1): that holds regardless of `expect`,
-    not only when the physical reading happens to be LIVE."""
+    An applicable but INCONCLUSIVE in-page read makes the rect inconclusive
+    whatever the screenshot read (Codex r2 Spec 1, Astra r8 #4), regardless of
+    `expect`; an absent or `n/a` in-page oracle leaves the screenshot verdict."""
     expect = entry.get("expect", LIVE)
     met = entry.get("verdict")
     physical = None if met is None else (met if expect != DEAD else not met)
@@ -3019,7 +4348,7 @@ def combine_rect_oracles(entry: dict[str, Any], inpage: dict[str, Any] | None) -
     combined = combine_oracle_verdicts(screenshot_physical, inpage)
     combined_physical = combined["verdict"]
     reason = combined.get("reason")
-    if met is True and inpage is not None and inpage.get("verdict") is None:
+    if inpage is not None and inpage.get("status") != "n/a" and inpage.get("verdict") is None:
         combined_physical = None
         reason = reason or f"in-page oracle inconclusive: {inpage.get('reason')}"
     if combined_physical is None:
@@ -3107,9 +4436,10 @@ def expected_screen_rects(
     instances: dict[int, dict[str, list[Any]]], player_index: int, stage_map: dict[str, Any],
     expectations: dict[int, dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Each authored instance rect plus the expectation the plan states for it. An
-    asset the expectations do not mention is expected LIVE -- the stricter reading
-    in both passes, and what every rect was before refusals existed."""
+    """Each authored instance rect plus the expectation the plan states for it, by its
+    `asset#index` label (or, in an artifact from before per-instance expectations, by its
+    asset). An instance the expectations do not mention is expected LIVE -- the stricter
+    reading in both passes, and what every rect was before refusals existed."""
     by_asset = instances.get(player_index)
     if by_asset is None:
         raise VisiblePassError(f"plan has no slide_instances for player index {player_index}")
@@ -3118,11 +4448,12 @@ def expected_screen_rects(
     for asset in sorted(by_asset):
         for index, rect in enumerate(by_asset[asset], start=1):
             authored = _authored_rect(rect)
+            label = f"{asset}#{index}"
             rects.append({
-                "label": f"{asset}#{index}",
+                "label": label,
                 "authored": authored,
                 "screen": to_screen_rect(authored, stage_map),
-                "expect": DEAD if stated.get(asset) == DEAD else LIVE,
+                "expect": DEAD if stated.get(label, stated.get(asset)) == DEAD else LIVE,
             })
     return rects
 
@@ -3140,7 +4471,8 @@ def rect_iou(a: dict[str, float], b: dict[str, float]) -> float:
 def painting_videos(raw: Any, stage_map: dict[str, Any]) -> list[dict[str, Any]]:
     """`PAINTING_VIDEOS_JS`'s result in authored px. Anything but a list of
     well-formed rows is an instrument error, never an empty (and therefore
-    silently clean) list."""
+    silently clean) list; a row's identity is well-formed with a string `src` and an
+    `elId` that is present (an explicit null is the untagged reading, a missing one is not)."""
     if not isinstance(raw, list):
         raise VisiblePassError(f"painting-video probe returned {raw!r}")
     videos: list[dict[str, Any]] = []
@@ -3148,7 +4480,7 @@ def painting_videos(raw: Any, stage_map: dict[str, Any]) -> list[dict[str, Any]]
         rect = row.get("rect") if isinstance(row, dict) else None
         if not isinstance(rect, dict) or not all(
             isinstance(rect.get(key), (int, float)) and math.isfinite(rect[key]) for key in ("x", "y", "w", "h")
-        ):
+        ) or not isinstance(row.get("src"), str) or "elId" not in row or not _id_or_null(row["elId"]):
             raise VisiblePassError(f"painting-video probe returned an unusable row: {row!r}")
         screen = {key: float(rect[key]) for key in ("x", "y", "w", "h")}
         videos.append({
@@ -3163,15 +4495,19 @@ def match_painting_videos(videos: list[dict[str, Any]], expected: list[dict[str,
     and no rect may be claimed twice -- the only evidence that separates two
     live movies sharing one rect, which pixels alone cannot. A video painting a
     DEAD-expected rect claims nothing: the plan says that movie is back under the
-    raw player, so a `<video>` there is unexpected however live its pixels are."""
+    raw player, so a `<video>` there is unexpected however live its pixels are. A video that claims
+    an `asset#index` instance must name that asset: another asset is listed in `foreignVideos`
+    (False), no source in `unnamedVideos` (None, before any failure). Instances tied on geometry go to the one
+    whose asset the video names."""
     claims: dict[str, list[dict[str, Any]]] = {}
     unexpected: list[dict[str, Any]] = []
     for video in videos:
         scores = [
-            (rect_iou(video["authored"], item["authored"]), item["label"], item.get("expect", LIVE))
+            (rect_iou(video["authored"], item["authored"]),
+             matches_asset_keys(video.get("src"), [item["label"].rsplit("#", 1)[0]]), item["label"], item.get("expect", LIVE))
             for item in expected
         ]
-        best_iou, best_label, best_expect = max(scores, default=(0.0, None, LIVE))
+        best_iou, _, best_label, best_expect = max(scores, default=(0.0, False, None, LIVE))
         if best_iou >= INSTANCE_IOU_MIN and best_expect != DEAD:
             claims.setdefault(best_label, []).append(video)
         else:
@@ -3179,14 +4515,25 @@ def match_painting_videos(videos: list[dict[str, Any]], expected: list[dict[str,
     duplicates = [
         {"label": label, "videos": claimants} for label, claimants in claims.items() if len(claimants) > 1
     ]
+    named = [
+        {**video, "label": label} for label, claimants in claims.items() for video in claimants
+        if not matches_asset_keys(video.get("src"), [label.rsplit("#", 1)[0]])
+    ]
+    foreign = [video for video in named if video.get("src")]
+    unnamed = [video for video in named if not video.get("src")]
     reason = None
-    if unexpected:
+    if unnamed:
+        reason = f"{len(unnamed)} painting video(s) claim an expected instance but name no source"
+    elif foreign:
+        reason = f"{len(foreign)} painting video(s) claim an expected instance of another asset"
+    elif unexpected:
         reason = f"{len(unexpected)} painting video(s) match no expected movie instance"
     elif duplicates:
         reason = f"{len(duplicates)} expected movie instance(s) are painted by more than one video"
     return {
-        "verdict": not unexpected and not duplicates, "painting": videos,
+        "verdict": None if unnamed else not unexpected and not duplicates and not foreign, "painting": videos,
         "unexpectedVideos": unexpected, "duplicateVideos": duplicates, "reason": reason,
+        **({"foreignVideos": foreign} if foreign else {}), **({"unnamedVideos": unnamed} if unnamed else {}),
     }
 
 
@@ -3336,6 +4683,10 @@ def visible_slide_record(
         "uniqueShas": len(set(shas)), "shas": shas,
     }
 
+    errors = contract.first_errors(contract.stage_map(stage_map, "stageMap"), contract.painting(painting_raw, "painting"))
+    if errors:
+        record.update(reason=_contract_reason(errors), contractErrors=errors)
+        return record
     if not stage_map_valid(stage_map):
         record.update(reason="stage map is missing or untrustworthy at burst time")
         return record
@@ -3375,8 +4726,10 @@ def visible_slide_record(
     )
     if rescore is not None:
         rescore(record, frames)
-    if record["verdict"] is True and not instance_check["verdict"]:
+    if record["verdict"] is True and instance_check["verdict"] is False:
         record.update(verdict=False, status="fail", reason=instance_check["reason"])
+    elif record["verdict"] is True and instance_check["verdict"] is None:
+        record.update(verdict=None, status="inconclusive", reason=instance_check["reason"])
     if evidence is not None and record["verdict"] is not True:
         record["evidence"] = evidence(record, frames)
     return record
@@ -3469,7 +4822,10 @@ def run_visible_pass(
     scored = result.get("slides") or []
     result["stageMap"] = visible_stage_summary(scored, expected_stage)
     result["stageFit"] = score_stage_fit(visible_stage_samples(scored), expected_stage)
-    result["verdict"] = bool(scored) and all(slide.get("verdict") is True for slide in scored)
+    result["verdict"] = (
+        None if any(slide.get("verdict") is None for slide in scored)
+        else bool(scored) and all(slide.get("verdict") is True for slide in scored)
+    )
     return result
 
 
@@ -3537,8 +4893,11 @@ def occlusion_rescorer(armed: dict[str, Any]) -> Callable[[dict[str, Any], list[
 
 
 def score_vgl_armed_slide(entry: Any, armed: dict[str, Any]) -> dict[str, Any]:
-    """Vgl's armed slide (plan g5g6 §3.4): LIVE in both oracles, paused DEAD, no painting video."""
-    checks = {key: False for key in ("slide", "inpageLive", "pausedDead", "screenshotLive", "masked", "noPainting")}
+    """Vgl's armed slide (plan g5g6 §3.4): LIVE in both oracles, paused DEAD, no painting video.
+    Each check is tri-state, and an unreadable one makes the verdict None before any failed one."""
+    checks: dict[str, bool | None] = {
+        key: False for key in ("slide", "inpageLive", "pausedDead", "screenshotLive", "masked", "noPainting")
+    }
     slide = next((s for s in visible_slides_of(entry) if s.get("playerIndex") == armed["playerIndex"]), None)
     rect = next(
         (r for r in (slide or {}).get("perRect") or [] if isinstance(r, dict) and r.get("label") == armed["instanceId"]),
@@ -3546,24 +4905,32 @@ def score_vgl_armed_slide(entry: Any, armed: dict[str, Any]) -> dict[str, Any]:
     )
     if slide is not None and rect is not None:
         oracles = rect.get("oracles") if isinstance(rect.get("oracles"), dict) else {}
-        inpage = oracles.get("inpage") if isinstance(oracles.get("inpage"), dict) else {}
-        paused = ((inpage.get("controls") or {}).get("pausedDecoder") or {}) if isinstance(inpage.get("controls"), dict) else {}
+        inpage = oracles.get("inpage")
+        controls = inpage.get("controls") if isinstance(inpage, dict) and isinstance(inpage.get("controls"), dict) else {}
+        paused = (controls.get("pausedDecoder") or {}).get("verdict")
+        screenshot = oracles.get("screenshot") if isinstance(oracles.get("screenshot"), dict) else {}
         painting = (slide.get("instanceCheck") or {}).get("painting")
         checks.update(
-            slide=slide.get("verdict") is True,
-            inpageLive=inpage.get("verdict") is True,
-            pausedDead=paused.get("verdict") is False,
-            screenshotLive=rect.get("expect") == LIVE and (oracles.get("screenshot") or {}).get("status") == "live"
-            and (oracles.get("screenshot") or {}).get("verdict") is True,
-            masked=(rect.get("occlusion") or {}).get("status") == "ok",
-            noPainting=isinstance(painting, list) and not any(
+            slide=_tri_state(slide.get("verdict")),
+            inpageLive=_tri_state(inpage.get("verdict")) if isinstance(inpage, dict) else False,
+            pausedDead=False if not isinstance(inpage, dict) else None if paused is None else paused is False,
+            screenshotLive=False if rect.get("expect") != LIVE else None if screenshot.get("verdict") is None
+            else screenshot.get("status") == "live" and screenshot.get("verdict") is True,
+            masked=True if (rect.get("occlusion") or {}).get("status") == "ok" else None,
+            noPainting=None if not isinstance(painting, list) else not any(
                 isinstance(v, dict) and isinstance(v.get("authored"), dict)
                 and any(rects_overlap(v["authored"], r) for r in armed["rects"])
                 for v in painting
             ),
         )
-    failing = [key for key, ok in checks.items() if not ok]
-    return {"verdict": not failing, "checks": checks, "reason": f"failed {failing}" if failing else None}
+    unreadable = [key for key, ok in checks.items() if ok is None]
+    failing = [key for key, ok in checks.items() if ok is False]
+    reason = f"unreadable {unreadable}" if unreadable else f"failed {failing}" if failing else None
+    return {"verdict": combine_verdicts(*checks.values()), "checks": checks, "reason": reason}
+
+
+def _tri_state(value: Any) -> bool | None:
+    return None if value is None else value is True
 
 
 def _handback_ready(read: Any, target: int, expect_handoff: bool) -> bool:
@@ -3713,8 +5080,14 @@ def handback_parity(
     v_record: Any, v_frame: np.ndarray | None, g_record: Any, g_frame: np.ndarray | None, armed: dict[str, Any], *,
     poke: bool = False, dilate_px: float = HANDBACK_DILATE_PX,
 ) -> dict[str, Any]:
-    """max|V - Vgl| over every pixel outside both captures' masks must be 0."""
+    """max|V - Vgl| over every pixel outside both captures' masks must be 0. Either record outside the
+    producer contract is None."""
     records = (v_record, g_record)
+    errors = contract.first_errors(*(
+        contract.handback_record(r, f"handback[{index}]") for index, r in enumerate(records) if isinstance(r, dict)
+    ))
+    if errors:
+        return {"verdict": None, "reason": _contract_reason(errors), "contractErrors": errors}
     if any(not isinstance(r, dict) or r.get("status") != "ok" for r in records) or v_frame is None or g_frame is None:
         return {"verdict": None, "reason": "a hand-back capture is inconclusive"}
     if any(not stage_map_valid(r.get("stageMap")) for r in records):
@@ -3766,6 +5139,12 @@ def score_live_ring(
 ) -> dict[str, Any]:
     """N3: max|V - Vgl| over the movie slot's ring while LIVE must be 0."""
     lives = [sink.get("live") if isinstance(sink, dict) else None for sink in (v_sink, g_sink)]
+    errors = contract.first_errors(*(
+        contract.stage_map(live.get("stageMap"), f"live[{index}].stageMap")
+        for index, live in enumerate(lives) if isinstance(live, dict)
+    ))
+    if errors:
+        return {"verdict": None, "reason": _contract_reason(errors), "contractErrors": errors}
     if any(not isinstance(live, dict) or live.get("frame") is None for live in lives):
         reasons = [live.get("reason") for live in lives if isinstance(live, dict) and live.get("reason")]
         return {"verdict": None, "reason": "; ".join(reasons) or "a live capture is missing"}
@@ -3786,53 +5165,96 @@ def score_live_ring(
 
 
 def score_handback_carry(record: Any, armed: dict[str, Any]) -> dict[str, Any]:
-    """Vgl after build 1: carried paints alone, released by hand-off, never remounted."""
-    checks = {"painting": False, "release": False, "noRemount": False, "handoff": False}
+    """Vgl after build 1: carried paints alone, released by hand-off, never remounted. Each check
+    is tri-state: an unread or unreadable read, note list, carried note (`_carried_named`), stage
+    map, painting probe, pool or pool entry identity (a movie entry's integer `elId`), release note,
+    facade list or facade entry (its integer `elId`/`forElId`, explicit nulls readable), or remount note without an object
+    detail naming an integer `elId` is None, and any None makes the verdict None before any
+    failure. A painter is the movie's by identity before source (the carried, a pooled or a
+    facade element) or over the instance rect, then by its src: one of these that names no source is
+    None, and one that names another asset is False."""
+    checks: dict[str, bool | None] = dict.fromkeys(("painting", "release", "noRemount", "handoff"))
     detail: dict[str, Any] = {}
+    errors = contract.first_errors(contract.handback_record(record)) if isinstance(record, dict) else []
+    if errors:
+        return {"verdict": None, "checks": checks, "carried": None, "detail": detail, "reason": _contract_reason(errors),
+                "contractErrors": errors}
     record = record if isinstance(record, dict) else {}
-    after = record.get("after") if isinstance(record.get("after"), dict) else {}
-    checks["handoff"] = _handed_off(after)
-    before = record.get("before") if isinstance(record.get("before"), dict) else {}
-    carried = _carried_el_id(after)
+    after, before = record.get("after"), record.get("before")
+    named = _events_readable(after)
+    carried_ok = named and _carried_named(after)
+    releases = _notes(after, "glreplay-release") if named else []
+    release_unreadable = len(releases) == 1 and (
+        not isinstance(releases[0].get("mode"), str) or not isinstance(releases[0].get("retired"), list)
+    )
+    if named and _events_readable(after, "api") and not release_unreadable:
+        checks["handoff"] = _handed_off(after)
+    carried = _carried_el_id(after) if carried_ok else None
+    none = carried_ok and carried is None
+    pool = before.get("pool") if isinstance(before, dict) else None
+    pool_ok = isinstance(pool, list) and all(
+        isinstance(e, dict) and _movie_identity(e, armed["assetKeys"], armed["movieKey"]) is not None for e in pool
+    ) and all(_el_id(e.get("elId")) for e in _movie_entries(pool, armed))
+    pooled = sorted({e.get("elId") for e in _movie_entries(pool, armed)}, key=str) if pool_ok else None
+    detail.update(pooled=pooled, releases=releases)
+    reads = (before, after)
+    facades_ok = all(
+        isinstance(read, dict) and isinstance(read.get("facades"), list)
+        and all(isinstance(f, dict) and "elId" in f and "forElId" in f and _el_id_or_null(f["elId"])
+                and _el_id_or_null(f["forElId"]) for f in read["facades"])
+        for read in reads
+    )
     stage_map = record.get("stageMap")
-    if carried is not None and stage_map_valid(stage_map):
+    if none:
+        checks["painting"] = False
+    elif carried_ok and stage_map_valid(stage_map):
         try:
             videos = painting_videos(record.get("painting"), stage_map)
         except VisiblePassError as exc:
             videos, detail["painting"] = None, str(exc)
         if videos is not None:
-            movie = [v for v in videos if matches_asset_keys(v.get("src"), armed["assetKeys"])]
+            mine = {carried, *(pooled or ())}
+            if facades_ok:
+                mine |= {f["elId"] for read in reads for f in read["facades"] if f["forElId"] in mine}
+            mine.discard(None)
+            movie = [
+                v for v in videos if matches_asset_keys(v.get("src"), armed["assetKeys"]) or v.get("elId") in mine
+                or rects_overlap(v["authored"], armed["instanceRect"])
+            ]
+            foreign = [v for v in movie if v.get("src") and not matches_asset_keys(v["src"], armed["assetKeys"])]
+            unknown = [v for v in movie if not v.get("src")]
             want = to_screen_rect(armed["instanceRect"], stage_map)
-            detail["painting"] = movie
-            checks["painting"] = len(movie) == 1 and movie[0].get("elId") == carried and all(
-                abs(movie[0]["screen"][k] - want[k]) <= HANDBACK_RECT_TOLERANCE_PX for k in ("x", "y", "w", "h")
-            )
-    pool = before.get("pool")
-    pooled = sorted({e.get("elId") for e in _movie_entries(pool, armed)}, key=str) if isinstance(pool, list) else None
-    releases = _notes(after, "glreplay-release")
-    detail.update(pooled=pooled, releases=releases)
-    if carried is not None and pooled is not None and carried in pooled and len(releases) == 1:
-        release = releases[0]
-        retired = release.get("retired")
-        checks["release"] = (
-            release.get("mode") == "handoff" and isinstance(retired, list)
-            and sorted(retired, key=str) == [e for e in pooled if e != carried]
+            detail.update(painting=movie, unidentifiedPainters=unknown, foreignPainters=foreign)
+            checks["painting"] = None if unknown else not foreign and len(movie) == 1 and (
+                movie[0].get("elId") == carried
+            ) and all(abs(movie[0]["screen"][k] - want[k]) <= HANDBACK_RECT_TOLERANCE_PX for k in ("x", "y", "w", "h"))
+    if none:
+        checks["release"] = False
+    elif carried_ok and pool_ok and not release_unreadable:
+        release = releases[0] if len(releases) == 1 else {}
+        checks["release"] = carried in pooled and len(releases) == 1 and release["mode"] == "handoff" and (
+            sorted(release["retired"], key=str) == [e for e in pooled if e != carried]
         )
-    if carried is not None:
-        facades = [
-            f.get("elId") for read in (before, after) for f in read.get("facades") or []
-            if isinstance(f, dict) and f.get("forElId") == carried
-        ]
+    remount_kinds = ("remount-done", "remount-footprint-rect")
+    remounts_ok = named and all(
+        isinstance(event.get("detail"), dict) and _el_id(event["detail"].get("elId"))
+        for event in after["coreEvents"] if event.get("kind") in remount_kinds
+    )
+    if none:
+        checks["noRemount"] = False
+    elif carried_ok and facades_ok and remounts_ok:
+        facades = [f["elId"] for read in reads for f in read["facades"] if f["forElId"] == carried]
         guarded = {carried, *facades}
         remounts = [
-            {"kind": kind, **note} for kind in ("remount-done", "remount-footprint-rect")
+            {"kind": kind, **note} for kind in remount_kinds
             for note in _notes(after, kind) if note.get("elId") in guarded
         ]
         detail.update(guarded=sorted(guarded, key=str), remounts=remounts)
         checks["noRemount"] = not remounts
-    failing = [key for key, ok in checks.items() if not ok]
-    return {"verdict": not failing, "checks": checks, "carried": carried, "detail": detail,
-            "reason": f"failed {failing}" if failing else None}
+    unreadable = [key for key, ok in checks.items() if ok is None]
+    failing = [key for key, ok in checks.items() if ok is False]
+    return {"verdict": combine_verdicts(*checks.values()), "checks": checks, "carried": carried, "detail": detail,
+            "reason": f"unreadable {unreadable}" if unreadable else f"failed {failing}" if failing else None}
 
 
 def score_handback(
@@ -3841,9 +5263,7 @@ def score_handback(
 ) -> dict[str, Any]:
     parity = handback_parity(v_record, v_frame, g_record, g_frame, armed, poke=poke, dilate_px=dilate_px)
     carry = score_handback_carry(g_record, armed)
-    if parity["verdict"] is None:
-        return {"verdict": None, "parity": parity, "carry": carry, "reason": parity["reason"]}
-    verdict = parity["verdict"] is True and carry["verdict"] is True
+    verdict = combine_verdicts(parity["verdict"], carry["verdict"])
     reason = None if verdict else "; ".join(r for r in (parity.get("reason"), carry.get("reason")) if r)
     return {"verdict": verdict, "parity": parity, "carry": carry, "reason": reason}
 
@@ -3881,32 +5301,72 @@ def forced_fail_seed(reason: str) -> Iterator[dict[str, Any]]:
 
 def score_forced(
     *, v_pass: Any, g_pass: Any, refusal: Any, g_handback: Any, parity: Any, reason: str, splice: Any,
+    refusal_read: Any = None,
 ) -> dict[str, Any]:
-    """`forced-ok` iff the forced page is V's flag-off twin (plan g5g6 §3.8); never `pass`."""
-    after = g_handback.get("after") if isinstance(g_handback, dict) and isinstance(g_handback.get("after"), dict) else None
-    zones = _notes(after, "glreplay-zone") if after else []
+    """`forced-ok` iff the forced page is V's flag-off twin (plan g5g6 §3.8); never `pass`. An
+    unreadable slide, pass, mode, refusal, parity, hand-back read, note list or stand-down list
+    is `inconclusive`, never `forced-fail`; so is a hand-back record or refusal read (`refusal_read`, the
+    evidence `refusal` scored) outside the producer contract."""
+    errors = contract.first_errors(
+        contract.handback_record(g_handback) if isinstance(g_handback, dict) else (),
+        contract.refusal_read(refusal_read, "refusal") if refusal_read is not None else (),
+    )
+    if errors:
+        return {"status": "inconclusive", "checks": {}, "reason": _contract_reason(errors), "contractErrors": errors}
+    after = g_handback.get("after") if isinstance(g_handback, dict) else None
+    api = after.get("api") if isinstance(after, dict) else None
+    notes_ok = _events_readable(after) and _events_readable(after, "api") and (
+        api is None or isinstance(api.get("standDowns"), list)
+    )
+    zones = _notes(after, "glreplay-zone") if notes_ok else []
     last = zones[-1] if zones else {}
-    api = after.get("api") if after and isinstance(after.get("api"), dict) else {}
-    stand_downs = api.get("standDowns") if isinstance(api.get("standDowns"), list) else []
+    stand_downs = api["standDowns"] if notes_ok and isinstance(api, dict) else []
     v_verdicts = [slide.get("verdict") for slide in visible_slides_of(v_pass)]
     g_verdicts = [slide.get("verdict") for slide in visible_slides_of(g_pass)]
-    checks = {
+    v_unknown, g_unknown = _visible_pass_unknown(v_pass), _visible_pass_unknown(g_pass)
+    slides_unread = None in v_verdicts or None in g_verdicts or v_unknown or g_unknown
+    v_mode, g_mode = gl_replay_mode(v_pass), gl_replay_mode(g_pass)
+    checks: dict[str, bool | None] = {
         "splice": isinstance(splice, dict) and splice.get("splices") == 1,
-        "mode": gl_replay_mode(g_pass) == "injected",
-        "slides": bool(g_verdicts) and all(v is True for v in g_verdicts)
+        "mode": None if g_mode is None else g_mode == "injected",
+        "slides": None if g_unknown or None in g_verdicts else all(v is True for v in g_verdicts)
         and not visible_pass_reasons(g_pass, "VglForced", "qualified"),
-        "reference": gl_replay_mode(v_pass) == "off" and not visible_pass_reasons(v_pass, "V", "qualified"),
-        "matchesV": v_verdicts == g_verdicts,
-        "refused": isinstance(refusal, dict) and refusal.get("verdict") is True,
-        "zone": last.get("to") == "retired" and reason in stand_downs and (
+        "reference": None if v_unknown or v_mode is None else v_mode == "off"
+        and not visible_pass_reasons(v_pass, "V", "qualified"),
+        "matchesV": None if slides_unread else v_verdicts == g_verdicts,
+        "refused": _verdict_check(refusal),
+        "zone": None if not notes_ok else last.get("to") == "retired" and reason in stand_downs and (
             (last.get("reason") == "failure" and last.get("standDown") == reason) or last.get("reason") == "moduleRetired"
         ),
-        "noLive": after is not None and not _notes(after, "glreplay-live") and not _notes(after, "glreplay-live", "api"),
-        "parity": isinstance(parity, dict) and parity.get("verdict") is True,
+        "noLive": None if not notes_ok else not _notes(after, "glreplay-live") and not _notes(after, "glreplay-live", "api"),
+        "parity": _verdict_check(parity),
         "knownReason": reason in GL_FORCE_FAIL_REASONS,
     }
+    unreadable = [key for key, ok in checks.items() if ok is None]
+    if unreadable:
+        return {"status": "inconclusive", "checks": checks, "reason": f"unreadable {unreadable}"}
     failing = [key for key, ok in checks.items() if not ok]
     return {"status": "forced-fail" if failing else "forced-ok", "checks": checks, "reason": f"failed {failing}" if failing else None}
+
+
+def _verdict_check(scored: Any) -> bool | None:
+    """A scored dict's verdict as a check; None when it is absent or unreadable."""
+    return _tri_state(scored.get("verdict")) if isinstance(scored, dict) else None
+
+
+def _visible_pass_unknown(entry: Any) -> bool:
+    """A visible pass that is no evidence at all: absent, errored, without a stage-fit record, or
+    with no scored slide (a failed stage fit or a wrong mechanism is readable)."""
+    return (
+        not isinstance(entry, dict) or entry.get("status") == "error" or bool(entry.get("error"))
+        or not isinstance(entry.get("stageFit"), dict) or not visible_slides_of(entry)
+    )
+
+
+def slide_reached(observed: Any, ordinal: int) -> bool | None:
+    """Whether an observation is on `ordinal`; None when its `original_slide` is unreadable."""
+    slide = getattr(observed, "original_slide", None)
+    return slide == ordinal if isinstance(slide, int) and not isinstance(slide, bool) else None
 
 
 def goto_rect_expectations(v_expectations: dict[int, dict[str, str]], *, armed: bool) -> dict[int, dict[str, str]]:
@@ -3972,58 +5432,124 @@ def read_execute_log(log_path: str | Path | None) -> list[dict[str, Any]]:
     return records
 
 
-def find_execute_record(records: list[dict[str, Any]], *, operation: str, slide: int) -> dict[str, Any] | None:
+def find_execute_record(
+    records: list[dict[str, Any]], *, operation: str, slide: int, since: float | None = None,
+) -> dict[str, Any] | None:
+    """The newest matching record, logged at or after `since` (wall clock) when given."""
     for record in reversed(records):
         if record.get("kind") == "execute" and record.get("operation") == operation and record.get("slide") == slide:
-            return record
+            logged = _finite_number(record.get("ts"))
+            if since is None or logged is not None and logged >= since:
+                return record
     return None
 
 
 def wait_for_execute_record(
-    log_path: str | Path | None, *, operation: str, slide: int, timeout_s: float = 2.0,
+    log_path: str | Path | None, *, operation: str, slide: int, since: float | None = None, timeout_s: float = 2.0,
     now: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any] | None:
     """The host's execute log is drained by a background writer thread, so a
     record can lag its call by a few ms -- poll briefly rather than assume it
     is already flushed. Bounded: a record that never lands is `None`, never a
-    hang."""
+    hang; with `since`, an older record never stands in for a dropped one."""
     deadline = now() + timeout_s
     record = None
     while now() < deadline:
-        record = find_execute_record(read_execute_log(log_path), operation=operation, slide=slide)
+        record = find_execute_record(read_execute_log(log_path), operation=operation, slide=slide, since=since)
         if record is not None:
             return record
         sleep(0.05)
     return record
 
 
-def score_no_consumption(
-    observed_scene_id: str | None, expected_scene_id: str | None, execute_record: dict[str, Any] | None,
+def _is_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def score_settled_position(
+    snapshot: Any, onset_scene_id: str | None, slide_index: int | None, leading_count: int,
 ) -> dict[str, Any]:
-    """Pure: the settled scene plus the host's own execute-log evidence in, a
-    verdict out. `autoPlayRunLength`/`autoPlayRunKinds`/`autoPlayFired` are
-    read defensively -- another stream is landing them on `live_host.py`
-    concurrently -- so a record that predates them is INCONCLUSIVE, never a
-    false pass."""
-    scene_ok = observed_scene_id is not None and observed_scene_id == expected_scene_id
-    if not isinstance(execute_record, dict):
-        return {"verdict": None, "sceneOk": scene_ok, "reason": "no execute-log record for this goTo"}
-    run_length, fired = execute_record.get("autoPlayRunLength"), execute_record.get("autoPlayFired")
-    if run_length is None or fired is None:
-        return {
-            "verdict": None, "sceneOk": scene_ok, "autoPlayRunLength": run_length, "autoPlayFired": fired,
-            "reason": "execute log has no autoPlayRunLength/autoPlayFired yet",
-        }
-    log_ok = run_length == 0 and fired is False
-    ok = scene_ok and log_ok
+    """Pure: the consumption detector. After a correct goTo the player has run exactly the
+    destination's leading automatic events: none -> `IdleAtInitialState` at the onset scene k;
+    L >= 1 -> `IdleAtFinalState` at k+L-1 with `nextSceneId` k+L. Either way still on the
+    destination slide. An unreadable snapshot or onset is inconclusive."""
+    onset = int(onset_scene_id) if isinstance(onset_scene_id, str) and onset_scene_id.isdigit() else None
+    if onset is None or not _is_count(slide_index):
+        return {"verdict": None, "reason": "onset scene or destination slide index is unknown"}
+    expected: dict[str, Any] = (
+        {"playerState": "IdleAtInitialState", "sceneId": onset, "exportedSlideIndex": slide_index}
+        if leading_count == 0 else
+        {"playerState": "IdleAtFinalState", "sceneId": onset + leading_count - 1,
+         "nextSceneId": onset + leading_count, "exportedSlideIndex": slide_index}
+    )
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("playerState"), str):
+        return {"verdict": None, "expected": expected, "observed": snapshot, "reason": "no runtime snapshot at the sample"}
+    observed = {key: snapshot.get(key) for key in expected}
+    unreadable = [key for key in expected if key != "playerState" and not _is_count(observed[key])]
+    if unreadable:
+        return {"verdict": None, "expected": expected, "observed": observed,
+                "reason": f"runtime snapshot {', '.join(unreadable)} unreadable"}
+    ok = observed == expected
     return {
-        "verdict": bool(ok), "sceneOk": scene_ok, "logOk": log_ok, "autoPlayRunLength": run_length,
-        "autoPlayRunKinds": execute_record.get("autoPlayRunKinds"), "autoPlayFired": fired,
-        "reason": None if ok else "scene or execute-log evidence contradicts no-consumption",
+        "verdict": ok, "expected": expected, "observed": observed,
+        "reason": None if ok else "settled position is not the destination's leading automatic run",
     }
 
 
-GOTO_TELEMETRY_FIELDS = ("autoPlayRunLength", "autoPlayRunKinds", "autoPlayFired", "autoPlayDeferredReason")
+def score_no_consumption(
+    snapshot: Any, expected_scene_id: str | None, execute_record: dict[str, Any] | None,
+    *, auto_kinds: Sequence[str] | None, slide_index: int | None,
+) -> dict[str, Any]:
+    """Pure: the post-burst runtime snapshot plus the host's own execute-log evidence in, a
+    verdict out. The settled position (`score_settled_position`) is the consumption detector.
+    The log half is a host-vs-JSON agreement check: the host's arrival scan
+    (`autoPlayRunKinds`/`autoPlayRunLength`) must EQUAL the destination's leading automatic
+    events (`leading_auto_kinds`), `autoPlayFired` iff that list is non-empty, and no
+    `autoPlayDeferredReason`. Missing telemetry, unknown `auto_kinds` or a deferred run is
+    INCONCLUSIVE, never a false pass (owner 2026-10-10)."""
+    if not isinstance(execute_record, dict):
+        return {"verdict": None, "reason": "no execute-log record for this goTo"}
+    run_length, fired = execute_record.get("autoPlayRunLength"), execute_record.get("autoPlayFired")
+    run_kinds, deferred = execute_record.get("autoPlayRunKinds"), execute_record.get("autoPlayDeferredReason")
+    fields = {
+        "autoPlayRunLength": run_length, "autoPlayRunKinds": run_kinds, "autoPlayFired": fired,
+        "autoPlayDeferredReason": deferred, "leadingAutoKinds": None if auto_kinds is None else list(auto_kinds),
+    }
+    if auto_kinds is None:
+        return {"verdict": None, **fields, "reason": "destination's leading automatic events are unreadable"}
+    problem = telemetry_problem(execute_record)
+    if problem:
+        return {"verdict": None, **fields, "reason": problem}
+    leading = list(auto_kinds)
+    log_ok = run_length == len(leading) and (run_kinds or []) == leading and fired is (run_length > 0)
+    position = score_settled_position(snapshot, expected_scene_id, slide_index, len(leading))
+    verdict = combine_verdicts(position["verdict"], log_ok)
+    return {
+        "verdict": verdict, "positionOk": position["verdict"], "logOk": log_ok, "position": position, **fields,
+        "reason": None if verdict else (position["reason"] or "execute log disagrees with the destination's leading automatic events"),
+    }
+
+
+GOTO_TELEMETRY_SCHEMA: dict[str, Callable[[Any], bool]] = {
+    "autoPlayRunLength": _is_count,
+    "autoPlayRunKinds": lambda value: value is None or (isinstance(value, list) and all(isinstance(kind, str) for kind in value)),
+    "autoPlayFired": lambda value: isinstance(value, bool),
+    "autoPlayDeferredReason": lambda value: value is None or isinstance(value, str),
+}
+GOTO_TELEMETRY_FIELDS = tuple(GOTO_TELEMETRY_SCHEMA)
+
+
+def telemetry_problem(execute_record: Any) -> str | None:
+    """Why a goTo's autoplay telemetry cannot be compared: a field missing or ill-typed
+    (`GOTO_TELEMETRY_SCHEMA`), a deferred repair, or null kinds on a non-empty run, else None."""
+    problem = paint_instrument.schema_problem(execute_record, GOTO_TELEMETRY_SCHEMA)
+    if problem:
+        return f"execute log {problem}"
+    if execute_record["autoPlayDeferredReason"] is not None:
+        return f"goTo autoplay repair was deferred: {execute_record['autoPlayDeferredReason']}"
+    if execute_record["autoPlayRunKinds"] is None and execute_record["autoPlayRunLength"] != 0:
+        return "execute log has no autoPlayRunKinds for a non-empty run"
+    return None
 
 
 def goto_telemetry(execute_record: dict[str, Any] | None) -> dict[str, Any]:
@@ -4033,11 +5559,10 @@ def goto_telemetry(execute_record: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def telemetry_present(execute_record: dict[str, Any] | None) -> bool | None:
-    """`True` only when the execute-log record carries all four autoplay-repair fields (even if a
-    field's own value is legitimately `null`); otherwise inconclusive, never a silent pass."""
-    if isinstance(execute_record, dict) and all(field in execute_record for field in GOTO_TELEMETRY_FIELDS):
-        return True
-    return None
+    """`True` only when the execute-log telemetry passes `telemetry_problem`; otherwise
+    inconclusive, never a silent pass (every armed destination, with or without the
+    no-consumption check)."""
+    return True if telemetry_problem(execute_record) is None else None
 
 
 def _crop_screen_rect(frame: np.ndarray, rect: dict[str, float]) -> np.ndarray:
@@ -4058,9 +5583,9 @@ def score_region_changed(
     static, so `liveness_mask` alone cannot see it."""
     crop_before, crop_after = _crop_screen_rect(before, rect), _crop_screen_rect(after, rect)
     if crop_before.size == 0 or crop_after.size == 0:
-        return {"verdict": False, "mae": None, "reason": "characters region crop is empty"}
+        return {"verdict": None, "mae": None, "reason": "characters region crop is empty"}
     if crop_before.shape != crop_after.shape:
-        return {"verdict": False, "mae": None, "reason": "characters region crop shape mismatch"}
+        return {"verdict": None, "mae": None, "reason": "characters region crop shape mismatch"}
     mae = float(np.mean(np.abs(crop_before[:, :, :3].astype(np.float64) - crop_after[:, :, :3].astype(np.float64))))
     ok = mae >= min_mae
     return {"verdict": ok, "mae": mae, "minMae": min_mae, "reason": None if ok else "characters region did not change after the advance"}
@@ -4088,7 +5613,7 @@ def score_static_control(
     time.sleep(gap_s)
     second = decode_png(transport.call("Page.captureScreenshot", format="png")["data"])
     if first.size == 0 or first.shape != second.shape:
-        return {"verdict": False, "max": None, "mae": None, "reason": "static control capture is empty or mismatched"}
+        return {"verdict": None, "max": None, "mae": None, "reason": "static control capture is empty or mismatched"}
     mask = _exclusion_mask(first.shape[:2], exclude_rects)
     if not mask.any():
         return {"verdict": None, "max": None, "mae": None, "reason": "no area outside the expected movie rects to measure"}
@@ -4143,38 +5668,99 @@ def _union_rect(rects: Sequence[dict[str, float]]) -> dict[str, float] | None:
     return {"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0}
 
 
+def _slide_events(export_root: Path, slide: dict[str, Any]) -> list[Any] | None:
+    uuid = slide.get("exportedUuid")
+    if not isinstance(uuid, str) or not uuid:
+        return None
+    try:
+        events = json.loads(safe_export_file(export_root, f"assets/{uuid}/{uuid}.json").read_text())["events"]
+    except Exception:  # noqa: BLE001 - an unreadable slide is a valid, checkable answer
+        return None
+    return events if isinstance(events, list) else None
+
+
 def character_region_rect(export_root: Path, slide: dict[str, Any]) -> dict[str, float] | None:
     """The authored bounding box of this slide's own `apple:*character*` builds
     (ground truth read straight from the export's per-slide JSON, the way
     `derive_plan` reads it), or `None` if the slide has none. Pass G's own
     no-consumption evidence: unrelated to any tracked movie asset, so it
     cannot be derived from `plan.slide_instances`."""
-    uuid = slide.get("exportedUuid")
-    if not isinstance(uuid, str) or not uuid:
-        return None
-    try:
-        data = json.loads(safe_export_file(export_root, f"assets/{uuid}/{uuid}.json").read_text())
-        events = data["events"]
-    except Exception:  # noqa: BLE001 - no character region is a valid, checkable answer
-        return None
     rects: list[dict[str, float]] = [
         rect
-        for event in (events if isinstance(events, list) else [])
+        for event in _slide_events(export_root, slide) or []
         if isinstance(event, dict)
         for rect in _walk_character_rects(event.get("effects"))
     ]
     return _union_rect(rects)
 
 
+def leading_auto_kinds(export_root: Path, slide: dict[str, Any]) -> list[str] | None:
+    """The first effect `name` of each of the slide's leading `automaticPlay: true` events (the
+    kinds `autoPlayRunKinds` reports), up to its first click event; `None` if unreadable/malformed
+    or an automatic event leads with a transition (an auto-advancing slide)."""
+    events = _slide_events(export_root, slide)
+    if events is None:
+        return None
+    kinds: list[str] = []
+    for event in events:
+        if not isinstance(event, dict) or not isinstance(event.get("automaticPlay"), bool):
+            return None
+        if event["automaticPlay"] is False:
+            break
+        effects = event.get("effects")
+        first = effects[0] if isinstance(effects, list) and effects else None
+        if not isinstance(first, dict) or not isinstance(first.get("name"), str) or first.get("type") == "transition":
+            return None
+        kinds.append(first["name"])
+    return kinds
+
+
+def _effect_types(effects: Any) -> list[str] | None:
+    if not isinstance(effects, list):
+        return None
+    types: list[str] = []
+    for effect in effects:
+        if not isinstance(effect, dict) or not isinstance(effect.get("type"), str):
+            return None
+        nested = _effect_types(effect.get("effects") or [])
+        if nested is None:
+            return None
+        types += [effect["type"], *nested]
+    return types
+
+
+def has_click_builds(export_root: Path, slide: dict[str, Any]) -> bool | None:
+    """Whether the slide's per-slide JSON has a click-driven build: an event with
+    `automaticPlay` false carrying any effect, nested ones included, other than the outgoing
+    `transition`. `False` only from a fully parsed slide; missing/unreadable or malformed events,
+    and a click event with no effects, are `None`."""
+    events = _slide_events(export_root, slide)
+    if events is None:
+        return None
+    found = False
+    for event in events:
+        if not isinstance(event, dict) or not isinstance(event.get("automaticPlay"), bool):
+            return None
+        types = _effect_types(event.get("effects"))
+        if types is None or (event["automaticPlay"] is False and not types):
+            return None
+        if event["automaticPlay"] is False and any(kind != "transition" for kind in types):
+            found = True
+    return found
+
+
 def score_no_build_consumed(
     player: LiveOutputHost, expected_scene_id: str | None, character_rect: dict[str, float],
-    stage_map: dict[str, Any], *, execute_record: dict[str, Any] | None,
+    stage_map: dict[str, Any], *, execute_record: dict[str, Any] | None, auto_kinds: Sequence[str] | None,
+    slide_index: int | None,
 ) -> dict[str, Any]:
-    """Scene + execute-log evidence the click-driven builds are still pending, plus pixel evidence
-    the characters' region only changes after one more `advance` -- proving it really was pending."""
-    observed = player.observe()
-    consumption = score_no_consumption(observed.scene_id, expected_scene_id, execute_record)
+    """Settled-position + execute-log evidence the click-driven builds are still pending, plus pixel
+    evidence the characters' region only changes after one more `advance` -- proving it really was pending."""
     transport = player._require_transport()
+    consumption = score_no_consumption(
+        transport.evaluate(RUNTIME_SNAPSHOT_JS), expected_scene_id, execute_record,
+        auto_kinds=auto_kinds, slide_index=slide_index,
+    )
     screen_rect = to_screen_rect(character_rect, stage_map)
     before = decode_png(transport.call("Page.captureScreenshot", format="png")["data"])
     player.execute("advance")
@@ -4192,27 +5778,44 @@ def score_no_build_consumed(
 
 def resolve_no_consumption(
     player: LiveOutputHost, expected_scene_id: str | None, character_rect: dict[str, float] | None,
-    stage_map: dict[str, Any] | None, *, execute_record: dict[str, Any] | None,
+    stage_map: dict[str, Any] | None, *, execute_record: dict[str, Any] | None, click_builds: bool | None = None,
+    auto_kinds: Sequence[str] | None = None, slide_index: int | None = None,
 ) -> dict[str, Any]:
     """Fail-closed: missing/unreadable characters geometry or an invalid stage map is inconclusive
-    (never silently `True`) and never touches `player`; only then is the real evidence scored."""
+    (never silently `True`) and never touches `player`; only then is the real evidence scored. A
+    destination parsed as having no click-driven builds (`click_builds is False`, owner 2026-10-10)
+    has nothing for the pixel half to prove: only the settled-position + execute-log half is scored."""
+    if click_builds is False:
+        consumption = score_no_consumption(
+            player._require_transport().evaluate(RUNTIME_SNAPSHOT_JS), expected_scene_id, execute_record,
+            auto_kinds=auto_kinds, slide_index=slide_index,
+        )
+        return {
+            "consumption": consumption,
+            "regionChanged": {"verdict": "n/a", "applicable": False, "reason": NO_CLICK_BUILDS_REASON},
+            "verdict": consumption.get("verdict"),
+        }
     if character_rect is None:
         return {"verdict": None, "reason": "characters region rect is unavailable (missing/unreadable slide geometry)"}
     if not stage_map_valid(stage_map):
         return {"verdict": None, "reason": "stage map invalid at the no-consumption sample"}
-    return score_no_build_consumed(player, expected_scene_id, character_rect, stage_map, execute_record=execute_record)
+    return score_no_build_consumed(
+        player, expected_scene_id, character_rect, stage_map, execute_record=execute_record, auto_kinds=auto_kinds,
+        slide_index=slide_index,
+    )
 
 
 def goto_matrix(specs: Sequence[dict[str, Any]], slide_count: int) -> tuple[tuple[int, ...], ...]:
     """Pass G's cases, derived from the plan: today's P2 cases (`GOTO_MATRIX`) that fit the deck,
-    then, for every carried boundary whose source slide is itself a carry's destination (a
-    mid-chain slide), `(1, source, destination)`: goTo the mid-chain slide, then advance across
-    the next carry. P2 has no mid-chain slide, so its matrix is `GOTO_MATRIX` unchanged."""
+    then, for every expected-True carry, `(f, source, destination)`: goTo `f` (slide 1, or slide
+    2 when the source is slide 1), goTo the source, then advance across the carry, scored per
+    frame (an advance leg)."""
     base = tuple(case for case in GOTO_MATRIX if max(case) <= slide_count)
-    carried = [spec for spec in specs if spec["kind"] == "carry" and spec["expect"] is True]
-    arrivals = {spec["toPlayer"] for spec in carried}
-    mid = [(1, spec["fromPlayer"] + 1, spec["toPlayer"] + 1) for spec in carried if spec["fromPlayer"] in arrivals]
-    return base + tuple(dict.fromkeys(mid))
+    legs = [
+        (1 if spec["fromPlayer"] != 0 else 2, spec["fromPlayer"] + 1, spec["toPlayer"] + 1)
+        for spec in specs if spec["kind"] == "carry" and spec["expect"] is True
+    ]
+    return base + tuple(dict.fromkeys(legs))
 
 
 def run_goto_destination(
@@ -4220,27 +5823,29 @@ def run_goto_destination(
     instances: dict[int, dict[str, list[Any]]], viewport: tuple[int, int], *,
     expectations: dict[int, dict[str, str]], evidence: Callable[..., dict[str, str]] | None,
     expected_scene_id: str | None, character_rect: dict[str, float] | None,
-    armed: bool, require_no_consumption: bool, advance_to: int | None = None,
+    armed: bool, require_no_consumption: bool, advance_to: int | None = None, click_builds: bool | None = None,
+    auto_kinds: Sequence[str] | None = None, leg_specs: Sequence[dict[str, Any]] = (), continuity: Any = None,
 ) -> dict[str, Any]:
     """One goTo, driven for real through `LiveOutputHost.execute`, scored with the same
     `visible_slide_record` the V/Voff passes use -- never a re-derived scorer. With
-    `advance_to`, the destination is then advanced across its carry and that slide is scored
-    the same way."""
+    `advance_to`, the destination is then advanced across its carry, scored per frame as an
+    advance leg (`run_advance_leg`, `leg_specs`) and then as a settled slide the same way."""
     reasons: list[str] = []
     player.execute("goTo", from_ordinal)
     # `execute("goTo")`'s own returned observation is not settled when the autoplay repair is
     # disarmed (it is the bare digit/Enter ack); check the requested slide only AFTER settling.
     wait_until_settled(player)
     from_observed = player.observe()
-    source_reached = from_observed.original_slide == from_ordinal
-    if not source_reached:
+    source_reached = slide_reached(from_observed, from_ordinal)
+    if source_reached is not True:
         reasons.append(f"source goTo did not reach slide {from_ordinal} (landed on {from_observed.original_slide!r})")
     slide = next(s for s in slides if s["originalOrdinal"] == to_ordinal)
+    issued = time.time()
     player.execute("goTo", to_ordinal)
     wait_until_settled(player)
     to_observed = player.observe()
-    destination_reached = to_observed.original_slide == to_ordinal
-    if not destination_reached:
+    destination_reached = slide_reached(to_observed, to_ordinal)
+    if destination_reached is not True:
         reasons.append(f"destination goTo did not reach slide {to_ordinal} (landed on {to_observed.original_slide!r})")
     # `execute("goTo")` settling is a DOM/runtime fact, not a compositor one; give it the same
     # margin `advance_until_original_slide` gives every advance-driven arrival before a burst.
@@ -4252,14 +5857,14 @@ def run_goto_destination(
     transport = player._require_transport()
     video_count = transport.evaluate("document.querySelectorAll('video').length")
     live_expected = any(item.get("expect") == LIVE for item in record.get("expectedRects") or [])
-    video_ok = (not live_expected) or (isinstance(video_count, int) and not isinstance(video_count, bool) and video_count > 0)
+    video_ok = True if not live_expected else (video_count > 0 if _is_count(video_count) else None)
     spaced = spacing_ok(record.get("shotOffsetsMs") or [])
     unique_shas = (record.get("burstProfile") or {}).get("uniqueShas")
     capture_fresh = capture_is_fresh(live_expected, unique_shas)
     if record.get("verdict") is not True:
         reasons.append(f"destination {to_ordinal} rects do not meet expectations (status={record.get('status')!r})")
-    if not video_ok:
-        reasons.append(f"destination {to_ordinal} has a live-expected movie but no <video> element")
+    if video_ok is not True:
+        reasons.append(f"destination {to_ordinal} has a live-expected movie but {video_count!r} <video> elements")
     if spaced is not True:
         reasons.append(f"destination {to_ordinal} burst spacing is unproven or too fast: {record.get('shotOffsetsMs')}")
     if capture_fresh is not True:
@@ -4271,7 +5876,7 @@ def run_goto_destination(
     if static_control.get("verdict") is not True:
         reasons.append(f"destination {to_ordinal} static content control: {static_control}")
 
-    execute_record = wait_for_execute_record(player.output.get("logPath"), operation="goTo", slide=to_ordinal)
+    execute_record = wait_for_execute_record(player.output.get("logPath"), operation="goTo", slide=to_ordinal, since=issued)
     telemetry = goto_telemetry(execute_record)
     telemetry_ok = telemetry_present(execute_record) if armed else True
     if telemetry_ok is not True:
@@ -4281,13 +5886,16 @@ def run_goto_destination(
     if require_no_consumption:
         no_consumption = resolve_no_consumption(
             player, expected_scene_id, character_rect, stage_map, execute_record=execute_record,
+            click_builds=click_builds, auto_kinds=auto_kinds, slide_index=slide.get("playerIndex"),
         )
         if no_consumption.get("verdict") is not True:
             reasons.append(f"no-consumption check for destination {to_ordinal}: {no_consumption}")
 
-    advanced = None
+    advanced = advance_carry = None
     if advance_to is not None:
-        advance_until_original_slide(player, advance_to)
+        advance_carry = run_advance_leg(player, to_ordinal, advance_to, leg_specs, continuity)
+        if advance_carry.get("verdict") is not True:
+            reasons.append(f"advance leg {to_ordinal}->{advance_to}: {advance_carry.get('error') or advance_carry.get('reasons')}")
         advanced = visible_slide_record(
             player, next(s for s in slides if s["originalOrdinal"] == advance_to), instances, viewport,
             scorer=_scorers()[1], evidence=evidence, expectations=expectations, offsets_ms=G_BURST_OFFSETS_MS,
@@ -4295,21 +5903,78 @@ def run_goto_destination(
         if advanced.get("verdict") is not True:
             reasons.append(f"advance {to_ordinal}->{advance_to} rects do not meet expectations (status={advanced.get('status')!r})")
 
-    verdict = combine_verdicts(
+    base_verdict = combine_verdicts(
         record.get("verdict"), video_ok, spaced, capture_fresh, source_reached, destination_reached,
         static_control.get("verdict"), telemetry_ok,
         no_consumption.get("verdict") if require_no_consumption else True,
         advanced.get("verdict") if advanced is not None else True,
     )
+    verdict = combine_verdicts(base_verdict, advance_carry.get("verdict") if advance_carry is not None else True)
     result = {
         "fromOrdinal": from_ordinal, "toOrdinal": to_ordinal, "record": record, "videoElementCount": video_count,
         "sourceReached": source_reached, "destinationReached": destination_reached,
         "staticControl": static_control, "autoPlay": telemetry, "noConsumption": no_consumption,
-        "verdict": verdict, "reasons": reasons,
+        "baseVerdict": base_verdict, "verdict": verdict, "reasons": reasons,
     }
     if advanced is not None:
-        result.update(advanceTo=advance_to, advanced=advanced)
+        result.update(advanceTo=advance_to, advanced=advanced, advanceCarry=advance_carry)
     return result
+
+
+def run_advance_leg(
+    player: LiveOutputHost, from_ordinal: int, to_ordinal: int, specs: Sequence[dict[str, Any]], continuity: Any,
+) -> dict[str, Any]:
+    """Pass G's per-frame advance leg: the session's stopped sampler restarts on the settled
+    source, the advance crosses the carry, and every expected-True carry of that boundary
+    (`specs`) is scored on those rows exactly as a host arm scores it. No matching spec is an
+    error. Every row is kept, and any end of show (`hash >= sceneCount`) in the leg makes every
+    verdict of the leg inconclusive (plan §3.8: the leg reaches `dst` without passing it), reported
+    and never green or red."""
+    if not specs:
+        return {"specs": [], "verdicts": {}, "sampler": None, "verdict": None,
+                "error": f"no expected-True carry matches the advance {from_ordinal}->{to_ordinal}"}
+    transport = player._require_transport()
+    drain_samples(transport)
+    transport.evaluate(SAMPLER_START_JS)
+    time.sleep(CLICK_DELAY_S)
+    advance_until_original_slide(player, to_ordinal)
+    wait_until_settled(player)
+    time.sleep(WINDOW_PAD_S)
+    transport.evaluate(SAMPLER_STOP_JS)
+    raw = drain_samples(transport)
+    sampler = sampler_record(transport, raw)
+    rows = convert_samples_to_authored(raw)[0]
+    blind = [
+        row.get("t") for row in rows
+        if hash_number(row.get("hash")) is None or _finite_number(row.get("sceneCount")) is None
+    ]
+    ended = [row["t"] for row in rows if row.get("t") not in blind and hash_number(row["hash"]) >= row["sceneCount"]]
+    reached = slide_reached(player.observe(), to_ordinal)
+    scored = score_verdicts(
+        rows, {}, {"verdicts": list(specs)}, (continuity or {}).get("mode") == "qualified", continuity,
+        schema=sampler.get("schema") if isinstance(sampler, dict) else None,
+    )
+    end_of_show = {"rows": len(ended), "firstT": min(ended)} if ended else None
+    exit_reason = (
+        f"the leg passed the end of show at t={end_of_show['firstT']}" if end_of_show is not None
+        else f"{len(blind)} leg row(s) have no readable hash/sceneCount" if blind else None
+    )
+    if exit_reason is not None:
+        for spec in specs:
+            scored[spec["id"]] = dict(scored[spec["id"]], verdict=None, reason=f"inconclusive: {exit_reason}")
+    reasons = [f"{spec['id']}={scored[spec['id']].get('verdict')!r}" for spec in specs if scored[spec["id"]].get("verdict") is not True]
+    problem = sampler_problem({"sampler": sampler})
+    if problem is not None:
+        reasons.append(problem)
+    if reached is not True:
+        reasons.append(f"advance did not reach slide {to_ordinal} (reached={reached!r})")
+    return {
+        "specs": list(specs), "verdicts": scored, "sampler": sampler, "endOfShow": end_of_show,
+        "reached": reached, "reasons": reasons,
+        "verdict": combine_verdicts(
+            *(scored[spec["id"]].get("verdict") for spec in specs), reached, None if problem is not None else True,
+        ),
+    }
 
 
 def destinations_of(entry: Any) -> list[dict[str, Any]]:
@@ -4317,6 +5982,16 @@ def destinations_of(entry: Any) -> list[dict[str, Any]]:
         return []
     destinations = entry.get("destinations")
     return [d for d in destinations if isinstance(d, dict)] if isinstance(destinations, list) else []
+
+
+def advance_leg_problem(leg: Any) -> str | None:
+    """Why an advance leg's per-frame score cannot stand (missing, no matching spec, or a sampler
+    that cannot vouch for its rows), else None."""
+    if not isinstance(leg, dict):
+        return "no advance-leg record"
+    if leg.get("error"):
+        return str(leg["error"])
+    return sampler_problem(leg)
 
 
 def overall_status_g(result: dict[str, Any]) -> tuple[str, list[str]]:
@@ -4328,6 +6003,13 @@ def overall_status_g(result: dict[str, Any]) -> tuple[str, list[str]]:
     matrix = result.get("matrix") if isinstance(result.get("matrix"), list) else GOTO_MATRIX
     if len(armed) != len(matrix) or len(off) != len(matrix):
         return "error", ["pass G did not score every goTo destination in both arms"]
+    leg_errors = [
+        f"advance leg {dest.get('toOrdinal')}->{dest.get('advanceTo')}: {problem}"
+        for dest in armed if "advanceTo" in dest
+        for problem in [advance_leg_problem(dest.get("advanceCarry"))] if problem is not None
+    ]
+    if leg_errors:
+        return "error", leg_errors
     reasons: list[str] = []
     for label, entry, group in (("armed", armed_entry, armed), ("null control", off_entry, off)):
         if entry.get("outputVisible") is not True:
@@ -4359,10 +6041,12 @@ def _run_goto_arm(
     export_root: Path, slides: list[dict[str, Any]], *, env: dict[str, str | None], tag: str, armed: bool,
     instances: dict[int, dict[str, list[Any]]], expectations: dict[int, dict[str, str]], viewport: tuple[int, int],
     evidence_dir: Path, character_rect: dict[str, float] | None, onset_scene_id: str, gl_replay: str = "off",
-    matrix: Sequence[Sequence[int]] = GOTO_MATRIX,
+    matrix: Sequence[Sequence[int]] = GOTO_MATRIX, click_builds: bool | None = None,
+    auto_kinds: Sequence[str] | None = None, carry_specs: Sequence[dict[str, Any]] = (),
 ) -> dict[str, Any]:
-    """One armed or null-control goTo session: start, warm up, drive every `matrix` case (the
-    advance leg of a mid-chain case only when armed), stop."""
+    """One armed or null-control goTo session: start, warm up, drive every `matrix` case (an
+    advance leg, scored per frame against the matching `carry_specs`, only when armed), stop.
+    The armed session installs the sampler stopped, once, before its first goTo."""
     result: dict[str, Any] = {}
     evidence = visible_evidence_writer(evidence_dir, tag)
     with env_override(env):
@@ -4372,6 +6056,10 @@ def _run_goto_arm(
             shown = warm_up_for_screenshots(player)
             result["continuity"] = player.output["continuity"]
             result["outputVisible"] = shown.output_visible
+            if armed:
+                transport = player._require_transport()
+                transport.evaluate(SAMPLER_JS)
+                transport.evaluate(SAMPLER_STOP_JS)
             result["destinations"] = [
                 run_goto_destination(
                     player, from_ordinal, to_ordinal, slides, instances, viewport,
@@ -4379,7 +6067,12 @@ def _run_goto_arm(
                     expected_scene_id=onset_scene_id if to_ordinal == GOTO_CONSUMPTION_CHECK_TO else None,
                     character_rect=character_rect, armed=armed,
                     require_no_consumption=armed and to_ordinal == GOTO_CONSUMPTION_CHECK_TO,
-                    advance_to=advance[0] if armed and advance else None,
+                    advance_to=advance[0] if armed and advance else None, click_builds=click_builds,
+                    auto_kinds=auto_kinds, continuity=result["continuity"],
+                    leg_specs=[
+                        spec for spec in carry_specs
+                        if advance and (spec["fromPlayer"] + 1, spec["toPlayer"] + 1) == (to_ordinal, advance[0])
+                    ],
                 )
                 for from_ordinal, to_ordinal, *advance in matrix
             ]
@@ -4398,12 +6091,14 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
     plan_export = prepare_export(args.fixture, args.original_index, root, "pass-g-plan")
     plan_slides = load_slides(plan_export)
     plan = ground_truth_plan(plan_export, plan_slides)
-    facts = ground_truth_facts(plan)
+    facts = ground_truth_facts(plan, arrival=arrival_starts(plan_export, plan_slides, plan))
     instances = slide_instances_of(plan)
     v_expectations = facts["rectExpectations"]["V"]
 
     consumption_slide = next(s for s in plan_slides if s["originalOrdinal"] == GOTO_CONSUMPTION_CHECK_TO)
     character_rect = character_region_rect(plan_export, consumption_slide)
+    click_builds = has_click_builds(plan_export, consumption_slide)
+    auto_kinds = leading_auto_kinds(plan_export, consumption_slide)
     consumption_index = int(consumption_slide["playerIndex"])
 
     instances_g = {index: dict(assets) for index, assets in instances.items()}
@@ -4421,7 +6116,19 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
         "pass": "G", "attach": bool(args.attach), "viewport": {"width": viewport[0], "height": viewport[1]},
         "matrix": [list(case) for case in matrix],
     }
+    if args.core_variant is not None:
+        sha = plan_signature(runtime_of(plan))
+        label = f"core:{args.core_variant}"
+        expected = PASSG_RED_EXPECTATIONS.get((sha, label))
+        result.update(
+            redArm=label, planSha256=sha, expectedCoreSha256=variant_sha(args.core_variant),
+            expectedRedSet=list(expected) if expected is not None else None,
+        )
+        if (sha, label) in PASSG_RED_PAINT_FLOOR:
+            result["paintFloor"] = PASSG_RED_PAINT_FLOOR[(sha, label)]
     with ExitStack() as stack:
+        if args.core_variant is not None:
+            stack.enter_context(injected_core_variant(args.core_variant))
         env: dict[str, str | None] = {}
         if args.attach:
             port = stack.enter_context(attach_chrome(root / "attach-chrome-profile-g", result))
@@ -4434,7 +6141,8 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
             export_armed, load_slides(export_armed), env=env, tag="G", armed=True,
             instances=instances_g, expectations=goto_rect_expectations(expectations_g, armed=True),
             viewport=viewport, evidence_dir=evidence_dir, character_rect=character_rect, onset_scene_id=onset_scene_id,
-            gl_replay=args.gl_replay, matrix=matrix,
+            gl_replay=args.gl_replay, matrix=matrix, click_builds=click_builds, auto_kinds=auto_kinds,
+            carry_specs=[spec for spec in facts["verdicts"] if spec["kind"] == "carry" and spec["expect"] is True],
         )
 
         export_off = prepare_export(args.fixture, args.original_index, root, "pass-g-off")
@@ -4442,11 +6150,94 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
             export_off, load_slides(export_off), env={**env, GOTO_AUTOPLAY_ENV: "off"}, tag="Goff", armed=False,
             instances=instances_g, expectations=goto_rect_expectations(expectations_g, armed=False),
             viewport=viewport, evidence_dir=evidence_dir, character_rect=character_rect, onset_scene_id=onset_scene_id,
-            gl_replay=args.gl_replay, matrix=matrix,
+            gl_replay=args.gl_replay, matrix=matrix, click_builds=click_builds, auto_kinds=auto_kinds,
         )
 
-    result["status"], result["reasons"] = overall_status_g(result)
+    if args.core_variant is not None:
+        result["redSet"], result["unknown"] = passg_red_ids(result)
+        result["status"], result["reasons"] = passg_red_status(result)
+    else:
+        result["status"], result["reasons"] = overall_status_g(result)
     return result
+
+
+def passg_red_ids(result: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """(red ids, unreadable ids) of a Pass G red arm: `G{f}-{to}[-{adv}]:destination` for a
+    destination whose non-leg verdict failed (`Goff…` in the null control), and
+    `G{f}-{to}-{adv}:{specId}` for each advance-leg verdict that differs from its expectation, and
+    `G{f}-{to}-{adv}:reached` for a leg that did not reach its destination."""
+    red: list[str] = []
+    unknown: list[str] = []
+    for label, prefix in (("armed", "G"), ("nullControl", "Goff")):
+        for dest in destinations_of(result.get(label)):
+            case = f"{prefix}{dest.get('fromOrdinal')}-{dest.get('toOrdinal')}"
+            if "advanceTo" in dest:
+                case += f"-{dest.get('advanceTo')}"
+            base = dest.get("baseVerdict", dest.get("verdict"))
+            (unknown if base is None else red if base is not True else []).append(f"{case}:destination")
+            leg = dest.get("advanceCarry") if isinstance(dest.get("advanceCarry"), dict) else {}
+            verdicts = leg.get("verdicts") if isinstance(leg.get("verdicts"), dict) else {}
+            for spec in leg.get("specs") or []:
+                value = (verdicts.get(spec["id"]) or {}).get("verdict")
+                (unknown if value is None else red if value is not spec["expect"] else []).append(f"{case}:{spec['id']}")
+            if leg:
+                reached = leg.get("reached")
+                (unknown if reached is None else red if reached is not True else []).append(f"{case}:reached")
+    return sorted(red), sorted(unknown)
+
+
+def paint_floor_reasons(floor: Any, red: Sequence[str], runs: dict[str, Any], arm: Any = None) -> list[str]:
+    """Decision 3: with a registered `paintFloor`, every red carry id's longest unpainted run (`runs`) must reach it,
+    and the floor itself must be at least `PAINT_FLOOR_MIN_FRAMES`; a `PAINT_RED_ARMS` arm needs one."""
+    if floor is None:
+        return [f"{arm} needs a registered paintFloor of at least {PAINT_FLOOR_MIN_FRAMES}"] if arm in PAINT_RED_ARMS else []
+    if not isinstance(floor, int) or isinstance(floor, bool) or floor < PAINT_FLOOR_MIN_FRAMES:
+        return [f"paintFloor {floor!r} is not a frame count of at least {PAINT_FLOOR_MIN_FRAMES}"]
+    reasons = []
+    for red_id in red:
+        run = runs.get(red_id)
+        if red_id.endswith(":carry") and not (isinstance(run, int) and not isinstance(run, bool) and run >= floor):
+            reasons.append(f"{red_id} longest unpainted run {run!r} below the {floor}-frame floor")
+    return reasons
+
+
+def _longest_run(verdict: Any) -> Any:
+    paint = verdict.get("paint") if isinstance(verdict, dict) else None
+    return paint.get("longestRun") if isinstance(paint, dict) else None
+
+
+def passg_red_status(result: dict[str, Any]) -> tuple[str, list[str]]:
+    """Pure, after `red_arm_status`: both sessions must have run the variant (qualified, its core
+    sha) with a visible output and every advance leg readable; an unreadable verdict is
+    inconclusive; otherwise the red multiset must equal the pre-registered one exactly and every
+    red leg carry must reach the registered `paintFloor`."""
+    for label in ("armed", "nullControl"):
+        entry = result.get(label) if isinstance(result.get(label), dict) else {}
+        continuity = entry.get("continuity") if isinstance(entry.get("continuity"), dict) else {}
+        if continuity.get("mode") != "qualified":
+            return "error", [f"{label} continuity.mode={continuity.get('mode')!r}, expected 'qualified'"]
+        if continuity.get("sha256") != result.get("expectedCoreSha256"):
+            return "error", [f"{label} reports core sha {continuity.get('sha256')!r}, expected {result.get('expectedCoreSha256')!r}"]
+        if entry.get("outputVisible") is not True:
+            return "error", [f"{label} output was not visible after show()"]
+    status, reasons = overall_status_g(result)
+    if status == "error":
+        return status, reasons
+    if status == "inconclusive" or result.get("unknown"):
+        return "inconclusive", [f"unreadable: {', '.join(result.get('unknown') or [])}", *reasons]
+    expected = result.get("expectedRedSet")
+    if expected is None:
+        return "unregistered", [f"no pre-registered Pass G red set for {result.get('redArm')!r} on this deck; red={result.get('redSet')}"]
+    observed, wanted = Counter(result.get("redSet") or []), Counter(expected)
+    reasons = [f"unexpectedly red: {red_id}" for red_id in sorted((observed - wanted).elements())]
+    reasons += [f"expected red but green: {red_id}" for red_id in sorted((wanted - observed).elements())]
+    runs = {
+        f"G{dest.get('fromOrdinal')}-{dest.get('toOrdinal')}-{dest.get('advanceTo')}:{spec_id}": _longest_run(verdict)
+        for dest in destinations_of(result.get("armed")) if isinstance(dest.get("advanceCarry"), dict)
+        for spec_id, verdict in (dest["advanceCarry"].get("verdicts") or {}).items()
+    }
+    reasons += paint_floor_reasons(result.get("paintFloor"), result.get("redSet") or [], runs, result.get("redArm"))
+    return ("fail" if reasons else "pass"), reasons
 
 
 def run_pass_g_cli(args: argparse.Namespace) -> None:
@@ -4465,7 +6256,10 @@ def run_pass_g_cli(args: argparse.Namespace) -> None:
         result["error"] = str(exc)
     finally:
         save()
-    print(json.dumps({"status": result.get("status"), "reasons": result.get("reasons")}, indent=2))
+    print(json.dumps({key: result.get(key) for key in ("status", "reasons", "redArm", "expectedRedSet", "redSet", "unknown")
+                      if key in result}, indent=2, default=str))
+    if args.core_variant is not None and result.get("status") != "pass":
+        raise SystemExit(1)
 
 
 def check_no_leftover_chrome() -> str:
@@ -4538,6 +6332,18 @@ def visible_slides_of(entry: Any) -> list[dict[str, Any]]:
         return []
     slides = entry.get("slides")
     return [slide for slide in slides if isinstance(slide, dict)] if isinstance(slides, list) else []
+
+
+def visible_unknown(result: dict[str, Any]) -> list[str]:
+    """Every scored V/Voff slide whose verdict is unreadable (None): inconclusive in every status,
+    never counted as a failed slide by a later comparison."""
+    visible = result.get("visible") if isinstance(result.get("visible"), dict) else {}
+    skipped = skipped_arms(result)[0]
+    return [
+        f"visible pass {label} slide {slide.get('originalOrdinal')} is inconclusive"
+        for label in ("V", "Voff") if label not in skipped
+        for slide in visible_slides_of(visible.get(label)) if slide.get("verdict") is None
+    ]
 
 
 def visible_pass_reasons(entry: Any, label: str, expected_mode: str) -> list[str]:
@@ -4744,6 +6550,14 @@ def armed_reasons(entry: dict[str, Any], label: str) -> list[str]:
     return [f"{label} armed1to2={value!r}: {scored.get('reason') if isinstance(scored, dict) else None}"]
 
 
+def positive_verdicts(entry: dict[str, Any], armed: bool, refused: Sequence[str]) -> list[bool | None]:
+    """The scored positive verdict an arm's 1->2 expectation also needs: `armed1to2` when armed,
+    the refusal's own verdict when the plan retires that boundary. One never recorded is a
+    failure (`armed_reasons` / `boundary_expectation_reasons`), not an unreadable read."""
+    key = "armed1to2" if armed else REFUSAL_VERDICT_KEY["continue1to2"] if "continue1to2" in refused else None
+    return [entry[key].get("verdict")] if key is not None and isinstance(entry.get(key), dict) else []
+
+
 def gl_requested(result: dict[str, Any]) -> bool:
     gl = result.get("glReplay")
     return isinstance(gl, dict) and gl.get("requested") == "auto"
@@ -4772,16 +6586,24 @@ def gl_replay_reasons(result: dict[str, Any]) -> tuple[list[str], list[str]]:
         return fails + ["groundTruthGl.armed is missing, so nothing armed can be scored"], []
     vgl = (result.get("visible") or {}).get("Vgl")
     vgl_reasons = visible_pass_reasons(vgl, "Vgl", "qualified")
+    unknown: list[str] = []
     if not vgl_reasons:
         vgl_reasons = visible_expectation_reasons(vgl, "Vgl")
+        unknown += [
+            f"visible pass Vgl slide {slide.get('originalOrdinal')} is inconclusive"
+            for slide in visible_slides_of(vgl) if slide.get("verdict") is None
+        ]
         armed_slide = score_vgl_armed_slide(vgl, armed)
-        if armed_slide["verdict"] is not True:
+        if armed_slide["verdict"] is None:
+            unknown.append(f"visible pass Vgl armed slide inconclusive: {armed_slide['reason']}")
+        elif armed_slide["verdict"] is not True:
             vgl_reasons.append(f"visible pass Vgl armed slide: {armed_slide['reason']}")
     fails.extend(vgl_reasons)
     handback = result.get("handback")
     verdict = handback.get("verdict") if isinstance(handback, dict) else None
     reason = handback.get("reason") if isinstance(handback, dict) else "not captured"
-    unknown = [f"hand-back inconclusive: {reason}"] if verdict is None else []
+    if verdict is None:
+        unknown.append(f"hand-back inconclusive: {reason}")
     if verdict is False:
         fails.append(f"hand-back failed: {reason}")
     ring = result.get("liveRing")
@@ -4814,30 +6636,38 @@ def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     ]
     if wrapped:
         return "invalid", wrapped
+    unsampled = [
+        f"{label}: {problem}"
+        for label, entry in [*((f"arm {name}", arm) for name, arm in arms.items()), ("attach", attach)]
+        if isinstance(entry, dict) and entry and (problem := sampler_problem(entry)) is not None
+    ]
+    if unsampled:
+        return "error", unsampled
     ground = result.get("groundTruth")
     if isinstance(ground, dict) and "verdicts" in ground and ground.get("planSha256") not in P2_PLAN_SHA256:
         return generated_status(result)
     a, b, c = arms.get("A", {}), arms.get("B", {}), arms.get("C", {})
     a_armed, c_armed = gl_replay_mode(a) == "injected", gl_replay_mode(c) == "injected"
+    refused = refused_boundaries(result)
     all_gated = [
         *([] if "A" in skipped else [
-            *([] if a_armed else [boundary_verdict(a, "continue1to2")]),
+            *([] if a_armed else [boundary_verdict(a, "continue1to2")]), *positive_verdicts(a, a_armed, refused),
             boundary_verdict(a, "restart2to3"), boundary_verdict(a, "continue3to4"),
         ]),
         *([] if "B" in skipped else [boundary_verdict(b, "continue3to4")]),
         *([] if "C" in skipped else [
-            *([] if c_armed else [boundary_verdict(c, "continue1to2")]), boundary_verdict(c, "continue3to4"),
+            *([] if c_armed else [boundary_verdict(c, "continue1to2")]), *positive_verdicts(c, c_armed, refused),
+            boundary_verdict(c, "continue3to4"),
         ]),
         *([] if "attach" in skipped else [
-            boundary_verdict(attach, "continue1to2"), boundary_verdict(attach, "restart2to3"),
-            boundary_verdict(attach, "continue3to4"),
+            boundary_verdict(attach, "continue1to2"), *positive_verdicts(attach, False, refused),
+            boundary_verdict(attach, "restart2to3"), boundary_verdict(attach, "continue3to4"),
         ]),
     ]
     if any(v is None for v in all_gated):
-        return "inconclusive", ["at least one gated boundary verdict is inconclusive (movie never decoded)"]
+        return "inconclusive", ["at least one gated boundary or positive verdict is inconclusive"]
 
     reasons: list[str] = []
-    refused = refused_boundaries(result)
     a_ok = b_ok = c_ok = attach_ok = True
 
     if "A" not in skipped:
@@ -4911,8 +6741,9 @@ def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     ok = a_ok and b_ok and c_ok and attach_ok and not visible and not gl_fails
     if not ok and not reasons:
         reasons.append("a boundary verdict did not match the expected pattern for its arm")
-    if ok and gl_unknown:
-        return "inconclusive", reasons + gl_unknown
+    unknown = gl_unknown + visible_unknown(result)
+    if unknown:
+        return "inconclusive", unknown + reasons
     return ("pass" if ok else "fail"), reasons
 
 
@@ -5008,12 +6839,11 @@ def generated_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     reasons.extend(visible_reasons(result))
     gl_fails, gl_unknown = gl_replay_reasons(result) if gl_requested(result) else ([], [])
     reasons.extend(gl_fails)
+    unknown += gl_unknown + visible_unknown(result)
     if unknown:
         return "inconclusive", unknown + reasons
     if reasons:
         return "fail", reasons
-    if gl_unknown:
-        return "inconclusive", gl_unknown
     return "pass", []
 
 
@@ -5043,8 +6873,9 @@ def gl_ground_truth(export_root: Path, slides: list[dict[str, Any]], facts: dict
 ]:
     """The flag-on plan, its facts, and Vgl's expectations."""
     plan_on = ground_truth_plan(export_root, slides, gl_replay=True)
-    facts_on = ground_truth_facts(plan_on, armed=True)
-    vgl = rect_expectations(plan_on, runtime_of(plan_on), continuity_on=True)
+    arrival = arrival_starts(export_root, slides, plan_on)
+    facts_on = ground_truth_facts(plan_on, armed=True, arrival=arrival)
+    vgl = rect_expectations(plan_on, runtime_of(plan_on), continuity_on=True, arrival=arrival)
     check_vgl_expectations(facts["rectExpectations"]["V"], vgl, facts_on["armed"])
     return plan_on, facts_on, vgl
 
@@ -5058,7 +6889,7 @@ def run_forced_fail(args: argparse.Namespace) -> dict[str, Any]:
     export_plan = prepare_export(args.fixture, args.original_index, root, "forced-plan")
     plan_slides = load_slides(export_plan)
     plan = ground_truth_plan(export_plan, plan_slides)
-    facts = ground_truth_facts(plan)
+    facts = ground_truth_facts(plan, arrival=arrival_starts(export_plan, plan_slides, plan))
     armed = gl_ground_truth(export_plan, plan_slides, facts)[1]["armed"]
     retire = facts["retire"]
     if not retire or retire["boundaryKey"] != armed["boundaryKey"]:
@@ -5094,29 +6925,31 @@ def run_forced_fail(args: argparse.Namespace) -> dict[str, Any]:
     )
     result["forced"] = score_forced(
         v_pass=result["visible"]["V"], g_pass=g_pass, refusal=result["refused1to2"], g_handback=g_sink.get("record"),
-        parity=result["parity"], reason=reason, splice=splice,
+        parity=result["parity"], reason=reason, splice=splice, refusal_read=g_sink.get("refusal"),
     )
     result["status"] = result["forced"]["status"]
     result["leftoverChrome"] = check_no_leftover_chrome()
     return result
 
 
-def red_arm_label(core_variant: str | None, strip: tuple[str, int | None] | None, runtime: dict[str, Any]) -> str:
-    """`core:NAME`, or `strip:ACTION@SCENE` (the scene filled in when an unscened strip matches one entry)."""
+def red_arm_label(
+    core_variant: str | None, strip: tuple[str, int | None, str | None] | None, runtime: dict[str, Any]
+) -> str:
+    """`core:NAME`, or `strip:ACTION@SCENE[:KEY]` (the scene filled in when an unscened strip matches one entry)."""
     if core_variant is not None:
         return f"core:{core_variant}"
     assert strip is not None
-    action, scene = strip
+    action, scene, key = strip
     if scene is None:
         scenes = {b.get("atScene") for b in runtime.get("boundaries") or [] if isinstance(b, dict) and b.get("action") == action}
         scene = next(iter(scenes)) if len(scenes) == 1 else None
-    return f"strip:{action}" + ("" if scene is None else f"@{scene}")
+    return strip_label(action, scene, key)
 
 
 def red_arm_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     """Pure: an arm that did not run the intended mechanism is an error; an unreadable verdict is
     inconclusive, never a match; otherwise the observed red multiset must equal the
-    pre-registered one exactly."""
+    pre-registered one exactly and every red carry must reach the registered `paintFloor`."""
     arm = result.get("arm") if isinstance(result.get("arm"), dict) else {}
     continuity = arm.get("continuity") if isinstance(arm.get("continuity"), dict) else {}
     if continuity.get("mode") != "qualified":
@@ -5125,6 +6958,9 @@ def red_arm_status(result: dict[str, Any]) -> tuple[str, list[str]]:
         return "error", [f"red arm reports core sha {continuity.get('sha256')!r}, expected {result.get('expectedCoreSha256')!r}"]
     if not stage_fit_ok(arm):
         return "error", [stage_fit_reason(arm, "red arm") or "red arm stage fit failed"]
+    problem = sampler_problem(arm)
+    if problem is not None:
+        return "error", [f"red arm: {problem}"]
     if arm.get("unplannedWraps"):
         return "invalid", [f"red arm sampled {len(arm['unplannedWraps'])} unplanned loop wrap(s); retake"]
     if result.get("unknown"):
@@ -5133,10 +6969,17 @@ def red_arm_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     if expected is None:
         return "unregistered", [f"no pre-registered red set for {result.get('redArm')!r} on this deck; red={result.get('redSet')}"]
     if expected == RECORD:
+        missing = sorted(set(result.get("requiredRed") or []) - set(result.get("redSet") or []))
+        if missing:
+            return "fail", [f"required red but green: {red_id}" for red_id in missing]
         return "recorded", [f"red={result.get('redSet')}"]
     observed, wanted = Counter(result.get("redSet") or []), Counter(expected)
     reasons = [f"unexpectedly red: {red_id}" for red_id in sorted((observed - wanted).elements())]
     reasons += [f"expected red but green: {red_id}" for red_id in sorted((wanted - observed).elements())]
+    red = result.get("redSet") or []
+    reasons += paint_floor_reasons(
+        result.get("paintFloor"), red, {red_id: _longest_run(arm.get(red_id)) for red_id in red}, result.get("redArm"),
+    )
     return ("fail" if reasons else "pass"), reasons
 
 
@@ -5149,7 +6992,7 @@ def run_red_arm(args: argparse.Namespace) -> dict[str, Any]:
     export_plan = prepare_export(args.fixture, args.original_index, root, "red-plan")
     plan_slides = load_slides(export_plan)
     plan = ground_truth_plan(export_plan, plan_slides)
-    facts = ground_truth_facts(plan)
+    facts = ground_truth_facts(plan, arrival=arrival_starts(export_plan, plan_slides, plan))
     bind_dom_ids(facts, movie_nodes(export_plan, plan_slides))
     plan_on, facts_on = gl_ground_truth(export_plan, plan_slides, facts)[:2] if auto else (None, None)
     runtime = runtime_of(plan_on if plan_on is not None else plan)
@@ -5164,9 +7007,12 @@ def run_red_arm(args: argparse.Namespace) -> dict[str, Any]:
     result: dict[str, Any] = {
         "redArm": label, "planSha256": sha,
         "expectedRedSet": list(expected) if isinstance(expected, tuple) else expected,
+        "requiredRed": list(RED_ARM_REQUIRED.get((sha, label, args.gl_replay), ())),
         "expectedCoreSha256": variant_sha(args.core_variant) if args.core_variant else js_sha256(),
         "groundTruth": {key: facts[key] for key in GROUND_TRUTH_KEYS if key in facts},
     }
+    if (sha, label, args.gl_replay) in RED_ARM_PAINT_FLOOR:
+        result["paintFloor"] = RED_ARM_PAINT_FLOOR[(sha, label, args.gl_replay)]
     if facts_on is not None:
         result["groundTruthGl"] = {"armed": facts_on["armed"], "verdicts": facts_on["verdicts"]}
     expected_stage = expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
@@ -5216,6 +7062,137 @@ def run_red_arm_cli(args: argparse.Namespace) -> None:
         for key in ("status", "statusReasons", "redArm", "expectedRedSet", "redSet", "unknown", "error")
     }, indent=2, default=str))
     if result.get("status") not in ("pass", "recorded"):
+        raise SystemExit(1)
+
+
+@contextmanager
+def paint_control_sampler(control_js: str) -> Iterator[None]:
+    """The arm's sampler with the positive-control injector evaluated right after it (probe
+    process only)."""
+    global SAMPLER_JS
+    original = SAMPLER_JS
+    SAMPLER_JS = original + control_js
+    try:
+        yield
+    finally:
+        SAMPLER_JS = original
+
+
+def paint_control_target(specs: Sequence[dict[str, Any]], control: dict[str, Any]) -> dict[str, Any]:
+    """The one expected-True carry the control hides: a pin for `pin`, a bridge for `bridge` and
+    `settled`, at `atScene`; anything else is refused."""
+    action = "pin" if control["phase"] == "pin" else "bridge"
+    found = [
+        spec for spec in specs
+        if spec["kind"] == "carry" and spec["expect"] is True and spec["action"] == action
+        and spec["atScene"] == control["atScene"]
+    ]
+    if len(found) != 1:
+        raise SystemExit(
+            f"--paint-control {control['raw']}: {len(found)} expected-True {action} carries at scene "
+            f"{control['atScene']}, expected exactly one"
+        )
+    return found[0]
+
+
+def paint_control_status(result: dict[str, Any]) -> tuple[str, list[str]]:
+    """Pure: an arm that did not run the shipped core with a vouching sampler, or a control that
+    never armed or aborted, is an error; an unreadable verdict is inconclusive; a pass needs the
+    red set to be exactly the target (empty for N=0) and `score_paint_control` to pass."""
+    arm = result.get("arm") if isinstance(result.get("arm"), dict) else {}
+    continuity = arm.get("continuity") if isinstance(arm.get("continuity"), dict) else {}
+    if continuity.get("mode") != "qualified":
+        return "error", [f"control arm continuity.mode={continuity.get('mode')!r}, expected 'qualified'"]
+    if continuity.get("sha256") != result.get("expectedCoreSha256"):
+        return "error", [f"control arm reports core sha {continuity.get('sha256')!r}, expected {result.get('expectedCoreSha256')!r}"]
+    if not stage_fit_ok(arm):
+        return "error", [stage_fit_reason(arm, "control arm") or "control arm stage fit failed"]
+    problem = sampler_problem(arm)
+    if problem is not None:
+        return "error", [f"control arm: {problem}"]
+    record = result.get("controlRecord")
+    if not isinstance(record, dict):
+        return "error", ["no paint-control record was read back"]
+    if record.get("aborted"):
+        return "error", [f"paint control aborted: {record.get('aborted')!r}"]
+    if arm.get("unplannedWraps"):
+        return "invalid", [f"control arm sampled {len(arm['unplannedWraps'])} unplanned loop wrap(s); retake"]
+    if result.get("unknown"):
+        return "inconclusive", [f"unreadable: {', '.join(result['unknown'])}"]
+    check = result.get("paintControl") if isinstance(result.get("paintControl"), dict) else {}
+    if check.get("status") == "inconclusive":
+        return "inconclusive", [f"paint control check: {check.get('reasons')}"]
+    wanted = [] if (result.get("controlSpec") or {}).get("n") == 0 else [result.get("targetVerdictId")]
+    reasons = [] if sorted(result.get("redSet") or []) == wanted else [f"red set {result.get('redSet')}, expected {wanted}"]
+    if check.get("status") != "pass":
+        reasons.append(f"paint control check {check.get('status')!r}: {check.get('reasons')}")
+    return ("fail" if reasons else "pass"), reasons
+
+
+def run_paint_control(args: argparse.Namespace) -> dict[str, Any]:
+    """`--paint-control`: one continuity-on arm (shipped core) with the injector after the
+    sampler, scored like a host arm plus the control's exact-seq-set check."""
+    control = args.paint_control
+    if os.environ.get(ATTACH_ENV):
+        raise SystemExit("--paint-control refuses attach/alpha mode")
+    viewport = args.viewport
+    root = run_root(args.artifact)
+    export_plan = prepare_export(args.fixture, args.original_index, root, "paint-control-plan")
+    plan_slides = load_slides(export_plan)
+    plan = ground_truth_plan(export_plan, plan_slides)
+    facts = ground_truth_facts(plan, arrival=arrival_starts(export_plan, plan_slides, plan))
+    bind_dom_ids(facts, movie_nodes(export_plan, plan_slides))
+    target = paint_control_target(facts["verdicts"], control)
+    control_js = paint_instrument.paint_control_js(
+        control["n"], control["variant"], control["phase"], control["atScene"],
+        timing=control["timing"], depth=control["depth"],
+    )
+    result: dict[str, Any] = {
+        "controlSpec": control, "targetVerdictId": target["id"], "planSha256": plan_signature(runtime_of(plan)),
+        "expectedCoreSha256": js_sha256(),
+        "groundTruth": {key: facts[key] for key in GROUND_TRUTH_KEYS if key in facts},
+    }
+    expected_stage = expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
+    export_c = prepare_export(args.fixture, args.original_index, root, "paint-control")
+    with paint_control_sampler(control_js):
+        arm = run_arm("P", export_c, load_slides(export_c), facts, viewport, expected_stage)
+    red, unknown = unmet_verdicts(arm, facts["verdicts"])
+    record = arm.get("paintControlRecord")
+    result.update(
+        arm=arm, controlRecord=record, redSet=sorted(red), unknown=unknown,
+        paintControl=paint_instrument.score_paint_control(
+            record, arm.get(target["id"]) or {}, control["n"], control["timing"],
+        ) if isinstance(record, dict) else None,
+    )
+    result["status"], result["statusReasons"] = paint_control_status(result)
+    return result
+
+
+def run_paint_control_cli(args: argparse.Namespace) -> None:
+    artifact = args.artifact
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    result: dict[str, Any] = {
+        "kind": "live-continuity-probe-paint-control", "status": "running", "control": args.paint_control["raw"],
+        "fixture": str(args.fixture), "originalIndex": str(args.original_index),
+        "viewport": {"width": args.viewport[0], "height": args.viewport[1]},
+    }
+
+    def save() -> None:
+        artifact.write_text(json.dumps(result, indent=2, default=str) + "\n")
+
+    save()
+    try:
+        result.update(run_paint_control(args))
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - always leave a readable artifact behind
+        result["status"] = "error"
+        result["error"] = str(exc)
+    finally:
+        result["leftoverChrome"] = check_no_leftover_chrome()
+        save()
+    print(json.dumps({
+        key: result.get(key) for key in ("status", "statusReasons", "control", "targetVerdictId", "redSet", "unknown", "error")
+    }, indent=2, default=str))
+    if result.get("status") != "pass":
         raise SystemExit(1)
 
 
@@ -5301,14 +7278,25 @@ def loop_period_of(nodes: list[dict[str, Any]], asset: str) -> float:
     return periods.pop()
 
 
+def recorder_frames(recorder: Any) -> list[dict[str, Any]] | None:
+    """The wrap recorder's rVFC frames, or None unless every frame has a finite `now` and `mediaTime`."""
+    frames = recorder.get("frames") if isinstance(recorder, dict) else None
+    if not isinstance(frames, list) or not all(
+        isinstance(f, dict) and _finite_number(f.get("now")) is not None and _finite_number(f.get("mediaTime")) is not None
+        for f in frames
+    ):
+        return None
+    return frames
+
+
 def recorded_wrap(recorder: Any) -> dict[str, Any] | None:
     """The first recorder frame after the seek whose media time drops by over half the period."""
     if not isinstance(recorder, dict):
         return None
     period, seeked = _finite_number(recorder.get("duration")), _finite_number(recorder.get("seekedT"))
-    if period is None or seeked is None:
+    if period is None or seeked is None or recorder_frames(recorder) is None:
         return None
-    frames = [f for f in recorder.get("frames") or [] if (_finite_number(f.get("now")) or -1.0) >= seeked]
+    frames = [f for f in recorder["frames"] if f["now"] >= seeked]
     for a, b in zip(frames, frames[1:]):
         if a["mediaTime"] - b["mediaTime"] > period / 2:
             return {"t": b["now"], "from": a["mediaTime"], "to": b["mediaTime"], "fromT": a["now"]}
@@ -5326,6 +7314,8 @@ def force_wrap_invalid(
         return [str(select["error"])]
     if not isinstance(recorder, dict):
         return ["the wrap recorder was not read back"]
+    if recorder_frames(recorder) is None:
+        return ["the wrap recorder's frames are unreadable"]
     reasons: list[str] = []
     seeked = _finite_number(recorder.get("seekedT"))
     press = _finite_number(take.get("pressT"))
@@ -5360,21 +7350,20 @@ def force_wrap_invalid(
 
 def page_errors_in(notes: Any, seeked_t: float | None, window: dict[str, float] | None) -> list[dict[str, Any]] | None:
     """The core's `player-build-error` notes from the seek to the end of the scored window;
-    None when they could not be read."""
+    None when they could not be read, or a note cannot be placed in time."""
     if not isinstance(notes, list) or seeked_t is None:
         return None
+    if not all(isinstance(note, dict) and _finite_number(note.get("t")) is not None for note in notes):
+        return None
     end = window["end"] if window is not None else math.inf
-    return [
-        note for note in notes
-        if isinstance(note, dict) and seeked_t <= (_finite_number(note.get("t")) or -math.inf) <= end
-    ]
+    return [note for note in notes if seeked_t <= note["t"] <= end]
 
 
 def forced_window(
     samples: list[dict[str, Any]], boundary_scene: float, transition_scene: float | None, seeked_t: float
 ) -> dict[str, float] | None:
     window = continuity_window(samples, boundary_scene, transition_scene=transition_scene)
-    if window is None:
+    if window is None or window.get("groundingUnreadable"):
         return None
     window["groundedStart"] = window["start"]
     window["start"] = max(window["start"], seeked_t + FORCE_WRAP_WINDOW_AFTER_SEEK_MS)
@@ -5389,14 +7378,13 @@ def score_recorder_clock(
     other drop, no forward jump beyond wall time by more than `2/fps + max_drop_s`, no
     presentation gap or frozen run over `max_stall_s`, and real advance."""
     if not isinstance(recorder, dict) or window is None:
-        return {"verdict": False, "reason": "no recorder or no window"}
+        return _inconclusive("no recorder or no window")
     period = _finite_number(recorder.get("duration"))
     if period is None:
-        return {"verdict": False, "reason": "the recorded element has no finite duration"}
-    frames = sorted(
-        (f for f in recorder.get("frames") or [] if window["start"] <= (_finite_number(f.get("now")) or -1.0) <= window["end"]),
-        key=lambda f: f["now"],
-    )
+        return _inconclusive("the recorded element has no finite duration")
+    if recorder_frames(recorder) is None:
+        return _inconclusive("the recorder's frames are unreadable")
+    frames = sorted((f for f in recorder["frames"] if window["start"] <= f["now"] <= window["end"]), key=lambda f: f["now"])
     if not frames:
         return {"verdict": False, "reason": "no recorded frame inside the window", "window": window}
     rows, wraps = unwrap_clock([{"t": f["now"], "currentTime": f["mediaTime"]} for f in frames], period, fps)
@@ -5422,31 +7410,37 @@ def score_recorder_clock(
 
 
 def _gl_states(reads: Any) -> list[dict[str, Any]]:
-    if not isinstance(reads, list):
+    """Every read's G2 state, or none when any read has none: a later read is never stood in for by an earlier one."""
+    if not isinstance(reads, list) or not all(
+        isinstance(read, dict) and isinstance(read.get("glReplay"), dict) for read in reads
+    ):
         return []
-    return [read["glReplay"] for read in reads if isinstance(read, dict) and isinstance(read.get("glReplay"), dict)]
+    return [read["glReplay"] for read in reads]
 
 
-def armed_carry(reads: Any, armed: dict[str, Any], recorder: Any) -> tuple[bool, dict[str, Any]]:
+def armed_carry(reads: Any, armed: dict[str, Any], recorder: Any) -> tuple[bool | None, dict[str, Any]]:
     """The armed 1->2 carry held: armed on the source, LIVE after settle with no stand-down,
-    carrying the seeked element, and no `<video>` painting over the armed rect."""
+    carrying the seeked element, and no `<video>` painting over the armed rect. Each check is
+    tri-state; an unread or unreadable input makes the result None before any failed check."""
     states = _gl_states(reads)
-    if len(states) != 2:
-        return False, {"reason": "the destination was not read twice"}
+    if len(states) != 2 or len(reads) != 2:
+        return None, {"reason": "the destination was not read twice"}
+    named, carried_named = _events_readable(states[-1]), _carried_named(states[-1])
     arms = _notes(states[-1], "glreplay-arm")
     downs = _notes(states[-1], "glreplay-standdown") + _notes(states[-1], "glreplay-handoff")
     live, live_detail = _armed_live(states, armed)
     carried = _carried_el_id(states[-1])
     seeked = recorder.get("elId") if isinstance(recorder, dict) else None
     no_painting, painting = _armed_no_painting(reads, armed)
-    checks = {
-        "armSeen": any(hash_number(note.get("sceneHash")) == armed["atScene"] - 1 for note in arms),
+    arm_hashes = [hash_number(note.get("sceneHash")) if isinstance(note.get("sceneHash"), str) else None for note in arms]
+    checks: dict[str, bool | None] = {
+        "armSeen": None if not named else True if armed["atScene"] - 1 in arm_hashes else None if None in arm_hashes else False,
         "live": live,
-        "noStandDown": not downs,
-        "carriesSeeked": carried is not None and carried == seeked,
+        "noStandDown": not downs if named else None,
+        "carriesSeeked": None if not carried_named or seeked is None else carried is not None and carried == seeked,
         "noPainting": no_painting,
     }
-    return all(checks.values()), {
+    return combine_verdicts(*checks.values()), {
         "checks": checks, "live": live_detail, "carriedElId": carried, "seekedElId": seeked, "paintingOverRect": painting,
     }
 
@@ -5459,10 +7453,13 @@ def score_raw_restart(
     if scored.get("verdict") is not True:
         return scored
     rows = sorted(
-        (r for r in track_by_id(samples, asset)[scored["elementId"]] if r["scene"] is not None and r["scene"] >= boundary_scene),
+        (r for r in track_by_id(samples, asset)[scored["elementId"]] if (_finite_number(r.get("scene")) or -math.inf) >= boundary_scene),
         key=lambda r: r["t"],
     )
-    advance = rows[-1]["currentTime"] - rows[0]["currentTime"]
+    clocks = [_finite_number(rows[0].get("currentTime")), _finite_number(rows[-1].get("currentTime"))]
+    if None in clocks:
+        return {**scored, **_inconclusive("the fresh decoder's clock is unreadable")}
+    advance = clocks[1] - clocks[0]
     return {**scored, "verdict": advance >= min_advance_s, "advanceS": round(advance, 3)}
 
 
@@ -5491,23 +7488,48 @@ def fallback_outcome(
 ) -> tuple[str | None, dict[str, Any]]:
     """Which listed fail-closed fallback the take took, if any (OQ-4). On the armed boundary a
     raw restart counts only once G2 is no longer active and its zone is retired (or never
-    opened), so no carried canvas can still be painting."""
+    opened), so no carried canvas can still be painting; every armed fallback needs a readable
+    zone history, and unreadable notes are never "never opened". `detail["unreadable"]` names
+    the applicable fallback evidence that could not be read."""
     states = _gl_states(reads)
-    last = states[-1] if states else {}
-    api = last.get("api") if isinstance(last.get("api"), dict) else {}
-    stand_downs = api.get("standDowns") if isinstance(api.get("standDowns"), list) else None
-    zones = [(z.get("from"), z.get("to"), z.get("reason")) for z in _notes(last, "glreplay-zone")] if last else []
+    last = states[-1] if states else None
+    api = last.get("api") if last is not None else None
+    stand_downs = api.get("standDowns") if isinstance(api, dict) and isinstance(api.get("standDowns"), list) else None
+    state_known = last is not None and (api is None or isinstance(api, dict) and isinstance(api.get("state"), str))
+    g2_state = api.get("state") if isinstance(api, dict) else None
+    zones = (
+        [(z.get("from"), z.get("to"), z.get("reason")) for z in _notes(last, "glreplay-zone")]
+        if last is not None and _events_readable(last) else None
+    )
+    if zones is not None and any(not isinstance(to, str) for _, to, _ in zones):
+        zones = None
     painting, over = preserved_painting(reads, rects)
-    g2_inactive = api.get("state") not in G2_ACTIVE_STATES and (not zones or zones[-1][1] == "retired")
+    if state_known and g2_state in G2_ACTIVE_STATES:
+        g2_inactive: bool | None = False
+    elif not state_known or zones is None:
+        g2_inactive = None
+    else:
+        g2_inactive = not zones or zones[-1][1] == "retired"
+    raw_restart_open = combine_verdicts(_tri_state(restart.get("verdict")), g2_inactive if armed_boundary else True)
+    if restart.get("verdict") is False or (armed_boundary and g2_inactive is False):
+        raw_restart_open = False
     detail = {
         "standDowns": stand_downs, "zones": zones, "restart": restart, "preservedPainting": over,
-        "g2State": api.get("state"), "g2Inactive": g2_inactive,
+        "g2State": g2_state, "g2Inactive": g2_inactive,
+        "unreadable": [
+            *(["stand-downs"] if armed_boundary and stand_downs is None else []),
+            *(["zone history"] if armed_boundary and zones is None else []),
+            *(["G2 state"] if armed_boundary and not state_known else []),
+            *(["preserved painting"] if raw_restart_open is not False and painting is None else []),
+        ],
     }
+    if armed_boundary and zones is None:
+        return None, detail
     if armed_boundary and stand_downs == ["videoNotReady"]:
         return "videoNotReady", detail
     if armed_boundary and stand_downs == [] and any(to == "retired" and why == "notPooled" for _, to, why in zones):
         return "notPooled", detail
-    if restart.get("verdict") is True and painting is False and (g2_inactive or not armed_boundary):
+    if raw_restart_open is True and painting is False:
         return "rawRestart", detail
     return None, detail
 
@@ -5526,11 +7548,15 @@ def score_forced_wrap(
     *, boundary: str, offset_ms: float, take: dict[str, Any], recorder: Any, node_period_s: float,
     continuity: dict[str, Any], clock: dict[str, Any], reads: Any, armed: dict[str, Any] | None,
     restart: dict[str, Any], rects: list[dict[str, float]], page_errors: list[dict[str, Any]] | None,
-    fps: float = WRAP_FPS,
+    fps: float = WRAP_FPS, samples_problem: str | None = None,
 ) -> dict[str, Any]:
     """L2: INVALID (retake), or PASS when the carry held across exactly one wrap or the take
     took a listed fail-closed fallback after a real wrap, else FAIL. Any page error from the
-    seek to the end of the window FAILs, as in the P2 gate (no benign-error allowance)."""
+    seek to the end of the window FAILs, as in the P2 gate (no benign-error allowance). Unreadable
+    sampler rows (`samples_problem`) invalidate a take that rests on them (the standard path, and
+    the armed path's raw-restart fallback); an unreadable continuity, recorder-clock, restart,
+    carry or fallback input is INVALID, never a failed carry. The armed path's own recorder
+    evidence still stands."""
     wrap = recorded_wrap(recorder)
     press = _finite_number(take.get("pressT"))
     result: dict[str, Any] = {
@@ -5546,29 +7572,46 @@ def score_forced_wrap(
     if page_errors:
         return {**result, "status": "fail", "outcome": None, "reasons": [f"{len(page_errors)} page error(s) after the seek"]}
     armed_boundary = armed is not None and armed.get("boundaryKey") == f"continue{boundary}"
+    if samples_problem and not armed_boundary:
+        return {**result, "status": "invalid", "outcome": None, "reasons": [f"sampler rows unreadable: {samples_problem}"]}
+    held: bool | None
     if armed_boundary:
         held, carry = armed_carry(reads, armed, recorder)
-        held = held and clock.get("verdict") is True
+        held = combine_verdicts(held, _tri_state(clock.get("verdict")))
     else:
         tracked = continuity.get("elementId")
         seeked = recorder.get("probeId") if isinstance(recorder, dict) else None
+        wraps = continuity.get("wraps")
         checks = {
-            "continuity": continuity.get("verdict") is True,
-            "oneWrap": continuity.get("wraps") == 1,
-            "recorderClock": clock.get("verdict") is True,
-            "tracksSeeked": tracked is not None and tracked == seeked,
+            "continuity": _tri_state(continuity.get("verdict")),
+            "oneWrap": None if continuity.get("verdict") is True and not _is_count(wraps) else wraps == 1,
+            "recorderClock": _tri_state(clock.get("verdict")),
+            "tracksSeeked": None if seeked is None else tracked is not None and tracked == seeked,
         }
-        held = all(checks.values())
-        carry = {"checks": checks, "wraps": continuity.get("wraps"), "trackedId": tracked, "seekedProbeId": seeked}
+        held = combine_verdicts(*checks.values())
+        carry = {"checks": checks, "wraps": wraps, "trackedId": tracked, "seekedProbeId": seeked}
     result["carry"] = carry
-    if held:
+    if held is True:
         return {**result, "status": "pass", "outcome": "carried", "reasons": []}
+    if wrap is None and held is False:
+        return {**result, "status": "fail", "outcome": None, "reasons": ["no wrap was recorded"]}
     outcome, detail = (None, {}) if wrap is None else fallback_outcome(
         reads, armed_boundary=armed_boundary, restart=restart, rects=rects,
     )
     result["fallback"] = detail
     if outcome is not None:
         return {**result, "status": "pass", "outcome": outcome, "reasons": []}
+    evidence = {"recorder clock": clock.get("verdict"), "restart": restart.get("verdict")}
+    if not armed_boundary:
+        evidence["continuity"] = continuity.get("verdict")
+    unreadable = [name for name, value in evidence.items() if value is None] + detail.get("unreadable", [])
+    if held is None:
+        unreadable.append("carry evidence")
+    if samples_problem:
+        unreadable.append(f"sampler rows ({samples_problem})")
+    if unreadable:
+        return {**result, "status": "invalid", "outcome": None,
+                "reasons": [f"the carry did not hold on unreadable evidence: {', '.join(unreadable)}"]}
     reasons = ["no wrap was recorded" if wrap is None else "the carry did not hold and no listed fallback was taken"]
     return {**result, "status": "fail", "outcome": None, "reasons": reasons}
 
@@ -5614,7 +7657,8 @@ def force_wrap_take(
 
 
 def force_wrap_ground_truth(fixture: Path, original_index: Path, boundary: str, gl_replay: str, root: Path) -> dict[str, Any]:
-    """The boundary's scene, rects and seeked source instance, derived offline from the fixture."""
+    """The boundary's sampler scene, destination hash scene, rects and seeked source instance,
+    derived offline from the fixture."""
     src_ordinal = FORCE_WRAP_BOUNDARIES[boundary][0]
     export = prepare_export(fixture, original_index, root, "force-wrap")
     slides = load_slides(export)
@@ -5622,12 +7666,16 @@ def force_wrap_ground_truth(fixture: Path, original_index: Path, boundary: str, 
     facts = ground_truth_facts(plan)
     facts_on = gl_ground_truth(export, slides, facts)[1] if gl_replay == "auto" else None
     if boundary == "1to2":
-        scene, src_rect, dst_rect, transition = facts["onset1to2"], facts["pinRect"], facts["pinRect"], None
+        destination, scene, src_rect, dst_rect, transition = (
+            facts["onset1to2"], press_scene_1to2(facts), facts["pinRect"], facts["pinRect"], None,
+        )
     else:
-        scene, src_rect, dst_rect, transition = facts["bridgeScene"], facts["bridgeSrcRect"], facts["destRect"], facts["bridgeScene"] - 1
+        destination = scene = facts["bridgeScene"]
+        src_rect, dst_rect, transition = facts["bridgeSrcRect"], facts["destRect"], facts["bridgeScene"] - 1
     src_player = sorted(plan.scene_index_by_player)[src_ordinal - 1]
     return {
         "export": export, "slides": slides, "facts": facts, "factsOn": facts_on, "scene": scene,
+        "destinationScene": destination,
         "srcRect": src_rect, "dstRect": dst_rect, "transition": transition,
         "source": source_instance(movie_nodes(export, slides), src_player, facts["asset"], src_rect),
     }
@@ -5646,7 +7694,16 @@ def armed_recorder_window(recorder: Any, reads: Any) -> dict[str, Any] | None:
 
 
 def score_force_wrap_run(result: dict[str, Any], gt: dict[str, Any], boundary: str, offset_ms: float) -> None:
-    """Score one force-wrap take in place from what it recorded (live, or re-read from its artifact)."""
+    """Score one force-wrap take in place from what it recorded (live, or re-read from its artifact); a take whose
+    evidence is outside the producer contract is invalid."""
+    errors = contract.first_errors(contract.force_wrap(result))
+    if errors:
+        for key in ("continuityVerdict", "recorderClock", "restart"):
+            result[key] = _contract_inconclusive(errors)
+        result["forced"] = {"boundary": boundary, "offsetMs": offset_ms, "wrapFromPressMs": None, "status": "invalid",
+                            "outcome": None, "reasons": [_contract_reason(errors)], "contractErrors": errors}
+        result["status"] = "invalid"
+        return
     facts, source, scene = gt["facts"], gt["source"], gt["scene"]
     arm_facts = facts_for(result.get("continuity"), facts, gt["factsOn"])
     armed = arm_facts.get("armed")
@@ -5656,23 +7713,28 @@ def score_force_wrap_run(result: dict[str, Any], gt: dict[str, Any], boundary: s
     seeked = _finite_number(recorder.get("seekedT")) if isinstance(recorder, dict) else None
     period = _finite_number(recorder.get("duration")) if isinstance(recorder, dict) else None
     installed = continuity_mode(result) == "qualified"
-    result["continuityVerdict"] = score_continuity(
+    schema_errors = sample_schema_errors(samples, schema=(result.get("sampler") or {}).get("schema"))
+    result["continuityVerdict"] = _inconclusive("sample schema is invalid", schemaErrors=schema_errors) if schema_errors else score_continuity(
         samples, facts["asset"], scene, gt["srcRect"], gt["dstRect"], installed, transition_scene=gt["transition"],
         loop_period_s=period or source["periodS"], min_window_start=(seeked or 0.0) + FORCE_WRAP_WINDOW_AFTER_SEEK_MS,
     )
     if armed_boundary:
         window = armed_recorder_window(recorder, result.get("reads"))
     else:
-        window = forced_window(samples, scene, gt["transition"], seeked) if seeked is not None else None
+        window = forced_window(samples, scene, gt["transition"], seeked) if seeked is not None and not schema_errors else None
         if window is not None:
             window["rule"] = "sampler: continuity window, start clipped to seekedT + 1 s"
     result["recorderClock"] = score_recorder_clock(recorder, window)
-    result["restart"] = score_raw_restart(samples, facts["asset"], scene)
+    result["restart"] = (
+        _inconclusive("sample schema is invalid", schemaErrors=schema_errors) if schema_errors
+        else score_raw_restart(samples, facts["asset"], scene)
+    )
     result["forced"] = score_forced_wrap(
         boundary=boundary, offset_ms=offset_ms, take=result.get("take") or {}, recorder=recorder,
         node_period_s=source["periodS"], continuity=result["continuityVerdict"], clock=result["recorderClock"],
         reads=result.get("reads"), armed=armed, restart=result["restart"], rects=[gt["dstRect"]],
         page_errors=page_errors_in(result.get("pageErrorNotes"), seeked, window),
+        samples_problem="; ".join(schema_errors) or None,
     )
     result["status"] = result["forced"]["status"]
 
@@ -5689,6 +7751,7 @@ def run_force_wrap(args: argparse.Namespace) -> dict[str, Any]:
     try:
         player.start()
         result["continuity"] = player.output["continuity"]
+        show_output(player, result)
         transport = player._require_transport()
         transport.evaluate(SAMPLER_JS)
         transport.evaluate(ENSURE_PLAYING_JS)
@@ -5701,26 +7764,37 @@ def run_force_wrap(args: argparse.Namespace) -> dict[str, Any]:
         take = result["take"] = force_wrap_take(player, source["domId"], offset_ms)
         if take.get("pressT") is not None:
             take["reached"] = (
-                wait_for_destination_hash(player, scene) and player.observe().original_slide == dst_ordinal
+                wait_for_destination_hash(player, gt["destinationScene"]) and player.observe().original_slide == dst_ordinal
             )
             result["reads"] = armed_evidence(transport)
         time.sleep(POST_ADVANCE_SETTLE_S)
         result["recorder"] = transport.evaluate(FORCE_WRAP_READ_JS)
         result["pageErrorNotes"] = transport.evaluate(PAGE_ERRORS_JS)
-        raw_samples = transport.evaluate("window.__obedContinuityProbe__.samples")
+        transport.evaluate(SAMPLER_STOP_JS)
+        raw_samples = drain_samples(transport)
+        result["sampler"] = sampler_record(transport, raw_samples)
     finally:
         try:
             player.stop()
         except Exception as exc:  # noqa: BLE001 - record, never mask an earlier failure
             result["stopError"] = str(exc)
-    result["samples"] = convert_samples_to_authored(raw_samples if isinstance(raw_samples, list) else [])[0]
+    result["samples"] = convert_samples_to_authored(raw_samples)[0]
     score_force_wrap_run(result, gt, boundary, offset_ms)
+    apply_sampler_integrity(result)
     result["leftoverChrome"] = check_no_leftover_chrome()
     return result
 
 
+def apply_sampler_integrity(result: dict[str, Any]) -> None:
+    """A take whose sampler cannot vouch for its rows is invalid, whether it scored a pass or a fail."""
+    problem = sampler_problem(result)
+    if problem is not None and result.get("status") in ("pass", "fail"):
+        result["status"], result["samplerReason"] = "invalid", problem
+
+
 def rescore_force_wrap(path: Path) -> dict[str, Any]:
-    """Re-score a saved force-wrap artifact with today's scorer; no browser."""
+    """Re-score a saved force-wrap artifact with today's scorer and the live run's sampler
+    integrity (`apply_sampler_integrity`); no browser."""
     result = json.loads(path.read_text())
     boundary, offset_ms = result["forceWrap"]["boundary"], result["forceWrap"]["offsetMs"]
     gt = force_wrap_ground_truth(
@@ -5729,9 +7803,11 @@ def rescore_force_wrap(path: Path) -> dict[str, Any]:
     )
     before = result.get("status")
     score_force_wrap_run(result, gt, boundary, offset_ms)
+    apply_sampler_integrity(result)
     forced = result["forced"]
     return {
         "artifact": str(path), "statusBefore": before, "status": result["status"], "outcome": forced.get("outcome"),
+        "samplerReason": result.get("samplerReason"),
         "reasons": forced.get("reasons"), "wrapFromPressMs": forced.get("wrapFromPressMs"),
         "carry": forced.get("carry"), "wrapOwnerExcused": result["continuityVerdict"].get("wrapOwnerExcused"),
         "recorderWindow": result["recorderClock"].get("window"),
@@ -5767,6 +7843,20 @@ def run_force_wrap_cli(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def _stored_matches(strict: dict[str, Any], stored: dict[str, Any], at_onset: Callable[[], dict[str, Any]]) -> bool:
+    """Every stored legacy verdict equals today's strict re-score; a `continue1to2` stored before
+    `press_scene_1to2` (its window after today's press crossing) must equal `at_onset()`, its re-score at `onset1to2`."""
+    def same(key: str) -> bool:
+        mine, kept = strict[key], stored.get(key)
+        before = _finite_number(((kept or {}).get("window") or {}).get("lastBeforeT")) if isinstance(kept, dict) else None
+        press = _finite_number((mine.get("window") or {}).get("firstAfterT"))
+        if key == "continue1to2" and before is not None and press is not None and before > press:
+            return json.loads(json.dumps(at_onset(), default=str)) == kept
+        return mine == kept
+
+    return all(same(key) for key in strict)
+
+
 def rescore_artifact(path: Path, period_s: float) -> dict[str, Any]:
     """L2 CvC: re-score a standard host artifact's arms with the strict and the wrap-aware
     scorer; `ok` needs every arm's two re-scores identical and the strict one equal to the
@@ -5779,6 +7869,11 @@ def rescore_artifact(path: Path, period_s: float) -> dict[str, Any]:
         if not isinstance(entry, dict) or not isinstance(entry.get("samples"), list):
             out[label] = {"identical": None, "reason": "no samples"}
             continue
+        sampler = entry.get("sampler") if isinstance(entry.get("sampler"), dict) else {}
+        errors = contract.first_errors(contract.sample_rows(entry["samples"], schema=sampler.get("schema")))
+        if errors:
+            out[label] = {"identical": None, "reason": _contract_reason(errors), "contractErrors": errors}
+            continue
         installed = continuity_mode(entry) == "qualified"
         strict = score_boundaries(entry["samples"], facts, installed)
         aware = score_boundaries(entry["samples"], facts, installed, loop_period_s=period_s)
@@ -5789,7 +7884,9 @@ def rescore_artifact(path: Path, period_s: float) -> dict[str, Any]:
         stored = {key: entry.get(key) for key in strict}
         out[label] = {
             "identical": json.dumps(strict, sort_keys=True, default=str) == json.dumps(aware, sort_keys=True, default=str),
-            "strictMatchesArtifact": json.loads(json.dumps(strict, default=str)) == stored,
+            "strictMatchesArtifact": _stored_matches(json.loads(json.dumps(strict, default=str)), stored, lambda: score_continuity(
+                entry["samples"], facts["asset"], facts["onset1to2"], facts["pinRect"], facts["pinRect"], installed,
+            )),
             "wrapTimes": wraps,
         }
     return {"artifact": str(path), "loopPeriodS": period_s, "arms": out,
@@ -5830,7 +7927,8 @@ def rescore_generated(result: dict[str, Any], facts: dict[str, Any], facts_on: d
     with the stored ones. A verdict the artifact did not retain the raw evidence for is
     reported INCONCLUSIVE (`match: None`), never as reproduced, and the `claim` says how many.
     `ok` needs the complete arm inventory (A, B, attach, and C when the plan has a bridge),
-    every re-derivable verdict reproduced (at least one), every stored legacy verdict to have
+    every re-derivable verdict reproduced (at least one) and none outside the evidence contract (an
+    arm with one is not compared with the legacy scorer), every stored legacy verdict to have
     a generated counterpart, and -- when the artifact carries P2's legacy ground truth -- the
     generated sample verdicts to equal today's `score_boundaries` verdicts."""
     ground = result.get("groundTruth") if isinstance(result.get("groundTruth"), dict) else {}
@@ -5838,7 +7936,7 @@ def rescore_generated(result: dict[str, Any], facts: dict[str, Any], facts_on: d
     required = {"A", "B", *(["C"] if bridge_carry_ids(facts["verdicts"]) else [])}
     entries = [*((f"arm {name}", arms.get(name)) for name in sorted(required | set(arms))), ("attach", result.get("attach"))]
     out: dict[str, Any] = {}
-    counts = {"reproduced": 0, "differ": 0, "notRederivable": 0}
+    counts = {"reproduced": 0, "differ": 0, "notRederivable": 0, "contractRejected": 0}
     for label, entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("samples"), list):
             out[label] = {"reason": "missing, or no samples"}
@@ -5846,25 +7944,34 @@ def rescore_generated(result: dict[str, Any], facts: dict[str, Any], facts_on: d
         arm_facts = facts_on if facts_on is not None and entry.get("factsSet") == "on" else facts
         installed = continuity_mode(entry) == "qualified"
         evidence = entry.get("evidence")
+        sampler = entry.get("sampler") if isinstance(entry.get("sampler"), dict) else {}
         scored = score_verdicts(
             entry["samples"], evidence if isinstance(evidence, dict) else {}, arm_facts, installed, entry.get("continuity"),
+            schema=sampler.get("schema"),
         )
         rows: dict[str, Any] = {}
         for spec in arm_facts["verdicts"]:
             key = spec_key(spec)
             stored = entry.get(key)
             stored_verdict = stored.get("verdict") if isinstance(stored, dict) else None
+            value = scored[spec["id"]]
+            if value.get("contractErrors"):
+                rows[key] = {"id": spec["id"], "match": None, "storedVerdict": stored_verdict, "reason": value["reason"],
+                             "contractErrors": value["contractErrors"]}
+                counts["contractRejected"] += 1
+                continue
             why = _rederivable(spec, evidence, entry["samples"])
             if why is not None:
                 rows[key] = {"id": spec["id"], "match": None, "storedVerdict": stored_verdict, "reason": f"inconclusive: {why}"}
                 counts["notRederivable"] += 1
                 continue
-            verdict = scored[spec["id"]].get("verdict")
+            verdict = value.get("verdict")
             rows[key] = {"id": spec["id"], "match": isinstance(stored, dict) and verdict == stored_verdict,
                          "verdict": verdict, "storedVerdict": stored_verdict}
             counts["reproduced" if rows[key]["match"] else "differ"] += 1
         legacy_scorer = None
-        if all(key in ground for key in ("asset", "onset1to2", "restartScene", "bridgeScene")):
+        rejected = any("contractErrors" in row for row in rows.values())
+        if not rejected and all(key in ground for key in ("asset", "onset1to2", "restartScene", "bridgeScene")):
             by_key = {spec_key(spec): scored[spec["id"]].get("verdict") for spec in arm_facts["verdicts"]}
             legacy = score_boundaries(entry["samples"], ground, installed)
             legacy_scorer = all(by_key.get(key) == value.get("verdict") for key, value in legacy.items())
@@ -5876,12 +7983,12 @@ def rescore_generated(result: dict[str, Any], facts: dict[str, Any], facts_on: d
             "equalsLegacyScorer": legacy_scorer,
         }
     complete = all("verdicts" in item for item in out.values())
-    ok = complete and counts["reproduced"] > 0 and counts["differ"] == 0 and all(
+    ok = complete and counts["reproduced"] > 0 and counts["differ"] == counts["contractRejected"] == 0 and all(
         not item["legacyWithoutGenerated"] and item["equalsLegacyScorer"] is not False for item in out.values()
     )
     claim = (
         f"re-derivable verdicts reproduced: {counts['reproduced']}/{counts['reproduced'] + counts['differ']}; "
-        f"{counts['notRederivable']} not re-derivable (INCONCLUSIVE)"
+        f"{counts['notRederivable']} not re-derivable (INCONCLUSIVE); {counts['contractRejected']} outside the evidence contract"
     )
     return {"arms": out, "counts": counts, "claim": claim, "inventoryComplete": complete, "ok": ok}
 
@@ -5938,6 +8045,7 @@ CARRY_COVER_FADE_SLACK_S = 0.1
 CARRY_COVER_BG_MIN_UNIFORM = 0.99
 CARRY_COVER_BG_MIN_PX = 1000
 CARRY_COVER_SLOT_MATCH_PX = 6.0
+CARRY_COVER_NOTE_MATCH_PX = 0.5
 CARRY_COVER_PREROLL_S = 0.6
 CARRY_COVER_TAIL_S = 1.0
 CARRY_COVER_HIDE_OVERLAY_JS = (
@@ -5972,7 +8080,8 @@ CARRY_COVER_SAMPLER_JS = r"""
       if (v.__obedElId == null) return;
       var r = v.getBoundingClientRect(), cs = getComputedStyle(v);
       vids.push({elId: v.__obedElId, x: r.left, y: r.top, w: r.width, h: r.height, readyState: v.readyState,
-                 opaque: document.contains(v) && cs.visibility === 'visible' && cs.display !== 'none' && opacityOf(v) >= 0.99});
+                 opaque: document.contains(v) && cs.visibility === 'visible' && cs.display !== 'none' && opacityOf(v) >= 0.99,
+                 src: String(v.currentSrc || v.src || '').split('/').pop()});
     });
     return vids;
   }
@@ -6002,7 +8111,7 @@ CARRY_COVER_READ_JS = r"""
   var notes = [];
   try {
     notes = JSON.parse(JSON.stringify(((core && core.events) || []).filter(function(e){
-      return e && e.kind === 'bridge-motion-start';
+      return e && (e.kind === 'bridge-motion-start' || e.kind === 'bridge-clock');
     })));
   } catch (e) {}
   return {rows: cc ? cc.rows : null, notes: notes};
@@ -6095,7 +8204,8 @@ def carry_cover_masks(effect: Any, src_rect: dict[str, float], canvas: dict[str,
 
 
 def carry_cover_bridges(plan: ContinuityPlan, slides: list[dict[str, Any]], export_root: Path) -> list[dict[str, Any]]:
-    """Every bridge carry the plan states, with its source/destination original ordinals and its masks."""
+    """Every bridge carry the plan states, with its source/destination original ordinals, destination scene and its
+    masks."""
     ordinal = {int(s["playerIndex"]): int(s["originalOrdinal"]) for s in slides}
     uuid_of = {int(s["playerIndex"]): s["exportedUuid"] for s in slides}
     out = []
@@ -6109,7 +8219,8 @@ def carry_cover_bridges(plan: ContinuityPlan, slides: list[dict[str, Any]], expo
             entry = {
                 "boundary": f"b{ordinal[boundary.from_player_index]}to{ordinal[boundary.to_player_index]}",
                 "asset": movie.asset, "fromOrdinal": ordinal[boundary.from_player_index],
-                "toOrdinal": ordinal[boundary.to_player_index], "srcRect": src,
+                "toOrdinal": ordinal[boundary.to_player_index],
+                "atScene": plan.scene_index_by_player[boundary.to_player_index], "srcRect": src,
                 "dstRect": movie.dst_rect.as_dict() if movie.dst_rect else None,
                 "durationSeconds": boundary.transition_duration,
             }
@@ -6203,9 +8314,23 @@ def carry_cover_exposure(
 
 def _carried_rect(row: dict[str, Any] | None, el_id: Any, key: str = "vids") -> dict[str, Any] | None:
     for video in (row or {}).get(key) or []:
-        if video.get("elId") == el_id and video.get("w", 0) > 0 and video.get("h", 0) > 0:
+        if isinstance(video, dict) and video.get("elId") == el_id:
             return video
     return None
+
+
+def _carried_twice(row: dict[str, Any] | None, el_id: Any, key: str) -> bool:
+    """Whether a read list names the carried decoder more than once, so which read is its own cannot be told."""
+    reads = (row or {}).get(key)
+    return isinstance(reads, list) and sum(isinstance(v, dict) and v.get("elId") == el_id for v in reads) > 1
+
+
+def _overlay_readable(video: dict[str, Any] | None) -> bool:
+    """A carried read with a finite, non-negative rect (a collapsed overlay is a readable 0) and a Boolean `opaque`."""
+    return (
+        video is not None and _is_rect(video) and video["w"] >= 0 and video["h"] >= 0
+        and isinstance(video.get("opaque"), bool)
+    )
 
 
 def carry_cover_sync_tick(image: np.ndarray) -> int | None:
@@ -6240,46 +8365,112 @@ def _cover_reasons(frames: Sequence[dict[str, Any]], fraction_key: str, strip_ke
     return clean, widest, reasons
 
 
+def _is_bridge_note(note: dict[str, Any], bridge: dict[str, Any]) -> bool:
+    detail, scene = note["detail"], bridge.get("atScene")
+    return (
+        isinstance(scene, int) and hash_number(detail.get("sceneHash")) == scene - 1
+        and rect_matches(detail.get("srcRect"), bridge["srcRect"], CARRY_COVER_NOTE_MATCH_PX)
+        and rect_matches(detail.get("rect"), bridge["dstRect"], CARRY_COVER_NOTE_MATCH_PX)
+    )
+
+
+def carry_cover_clock(notes: Any, bridge: dict[str, Any], el_id: Any) -> dict[str, Any] | None:
+    """The clock this bridge's overlay rode (`{via, lagMs}`, report only): exactly one `bridge-clock` note naming its
+    carried decoder from the source scene's hash, matched on identity, never time; anything else is None."""
+    scene = bridge.get("atScene")
+    if el_id is None or not isinstance(scene, int):
+        return None
+    own = [
+        n["detail"] for n in notes or []
+        if isinstance(n, dict) and n.get("kind") == "bridge-clock" and isinstance(n.get("detail"), dict)
+        and n["detail"].get("elId") == el_id and hash_number(n["detail"].get("sceneHash")) == scene - 1
+    ]
+    return {"via": own[0].get("via"), "lagMs": own[0].get("lagMs")} if len(own) == 1 else None
+
+
 def score_carry_cover(
     frames: Sequence[tuple[float, np.ndarray]], rows: Any, notes: Any, bridge: dict[str, Any], stage_map: Any, *,
     viewport: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
     """`frames`: (page-clock ms, RGB) screencast frames; `rows`: the rAF sampler's rows (`tick`, `pre` read at the
-    tick's start, `vids` read after its frame); `notes`: the core's `bridge-motion-start` notes.
+    tick's start, `vids` read after its frame); `notes`: the core's notes; `bridge-clock` notes are set aside (report
+    only, `carry_cover_clock`) and only `bridge-motion-start` is read.
+
+    The move window starts at this bridge's one note: the source scene's hash and the bridge's source/destination
+    rects within `CARRY_COVER_NOTE_MATCH_PX`. Any other note (an earlier bridge the walk to the source slide rode)
+    must come before the first sampler row.
 
     Each frame is placed at the tick its sync bar names (its timestamp only picks between counter wraps) and scored
     against both reads of that tick's overlay: its post-frame read and the next tick's pre read. A frame whose reads
-    disagree on the cover rule is undecided; when the undecided frames decide the verdict it is INCONCLUSIVE.
+    disagree on the cover rule is undecided; when the undecided frames decide the verdict it is INCONCLUSIVE. A placed
+    frame with only one read, a read list or entry `elId` that cannot be read, a readable pair without the carried
+    decoder, or a read of the carried decoder without a finite, non-negative rect or a Boolean `opaque`, is never
+    scored on what remains or discarded as unsampled: INCONCLUSIVE; so is a read list naming the carried decoder twice,
+    and any sampler row that is not an object with a finite `ts` and an integer `tick` (never dropped before the
+    window, tick index or cadence is computed); a placed frame without the next tick's row has one read at most.
+    Only a frame without a sync tick or its own sampler row is discarded. Every other note must be a readable
+    `bridge-motion-start` (object detail, finite `t`).
+    A read of the carried decoder during the move must name the bridge's `asset`: another asset FAILS, no source is
+    INCONCLUSIVE; a legacy record whose reads carry no `src` keeps the pixel-only scoring.
     PASS: at least `CARRY_COVER_MIN_CLEAN_SHARE` of the scored mid-move frames expose at most
     `CARRY_COVER_MAX_EXPOSED_FRACTION` of the overlay's area and no strip is wider than `CARRY_COVER_MAX_STRIP_PX`.
     Coverage: at least `CARRY_COVER_MIN_FPS` scored frames per second, no stretch of the mid-move window longer than
-    `CARRY_COVER_MAX_GAP_FRAMES` (+ half) rAF ticks without one, and at most `CARRY_COVER_MAX_DISCARDED_SHARE` of its
-    frames unplaceable. Every integrity or coverage gap is INCONCLUSIVE, never a pass."""
+    `CARRY_COVER_MAX_GAP_FRAMES` (+ half) rAF ticks at the local cadence (`local_cadence`) without one, and at most
+    `CARRY_COVER_MAX_DISCARDED_SHARE` of its frames unplaceable. Every integrity or coverage gap is INCONCLUSIVE, never a pass."""
     def inconclusive(*reasons: str, **detail: Any) -> dict[str, Any]:
         return {"verdict": "inconclusive", "reasons": list(reasons), **detail}
 
     if bridge.get("problem"):
         return inconclusive(bridge["problem"])
+    errors = contract.first_errors(contract.carry_cover(rows, notes, stage_map))
+    if errors:
+        return inconclusive(_contract_reason(errors), contractErrors=errors)
     if not stage_map_valid(stage_map):
         return inconclusive("stage map unreadable")
-    motion = [
-        n for n in notes or []
-        if isinstance(n, dict) and n.get("kind") == "bridge-motion-start" and isinstance(n.get("detail"), dict)
-    ]
-    if len(motion) != 1 or not isinstance(motion[0].get("t"), (int, float)):
-        return inconclusive(f"no move window: {len(motion)} bridge-motion-start notes (expected exactly one)")
-    t0, el_id = float(motion[0]["t"]), motion[0]["detail"].get("elId")
+    rows = list(rows or [])
+    if not all(
+        isinstance(r, dict) and _finite_number(r.get("ts")) is not None and _el_id(r.get("tick")) for r in rows
+    ):
+        return inconclusive("a sampler row is unreadable (no object, finite ts or integer tick)")
+    motion = [n for n in notes or [] if not (isinstance(n, dict) and n.get("kind") == "bridge-clock")]
+    if not all(
+        isinstance(n, dict) and n.get("kind") == "bridge-motion-start" and isinstance(n.get("detail"), dict)
+        and _finite_number(n.get("t")) is not None for n in motion
+    ):
+        return inconclusive("a bridge-motion-start note is unreadable (no object, kind, object detail or finite t)")
+    own = [n for n in motion if _is_bridge_note(n, bridge)]
+    if len(own) != 1:
+        return inconclusive(
+            f"no move window: {len(own)} bridge-motion-start notes for this bridge (expected exactly one)"
+        )
+    first_ts = min((r["ts"] for r in rows), default=None)
+    late = [n for n in motion if n is not own[0] and (first_ts is None or n["t"] >= first_ts)]
+    if late:
+        return inconclusive(
+            f"{len(late)} other bridge-motion-start notes during the capture (only this bridge's may be)"
+        )
+    t0, el_id = float(own[0]["t"]), own[0]["detail"].get("elId")
+    if el_id is None or not _id_or_null(el_id):
+        return inconclusive("this bridge's bridge-motion-start note names no carried decoder")
     duration_ms = 1000.0 * float(bridge["durationSeconds"])
-    rows = [
-        r for r in rows or []
-        if isinstance(r, dict) and isinstance(r.get("ts"), (int, float)) and isinstance(r.get("tick"), int)
-    ]
-    in_move = [v for r in rows if t0 <= r["ts"] <= t0 + duration_ms for v in [_carried_rect(r, el_id)] if v]
+    moving = [r for r in rows if t0 <= r["ts"] <= t0 + duration_ms]
+    if any(_carried_twice(r, el_id, key) for r in moving for key in ("vids", "pre")):
+        return inconclusive("a sampler read during the move names the carried decoder twice", elId=el_id)
+    in_move = [v for r in moving for v in [_carried_rect(r, el_id)] if v]
     if not in_move:
         return inconclusive("no carried decoder sampled during the move", elId=el_id)
+    carried = [v for r in moving for key in ("vids", "pre") for v in [_carried_rect(r, el_id, key)] if v and "src" in v]
+    if carried and not bridge.get("asset"):
+        return inconclusive("this bridge names no asset to judge the carried decoder's source by", elId=el_id)
+    if any(not v["src"] for v in carried):
+        return inconclusive("a read of the carried decoder during the move names no source", elId=el_id)
+    foreign = sorted({v["src"] for v in carried if not matches_asset_keys(v["src"], [bridge["asset"]])})
+    if foreign:
+        return {"verdict": "fail", "reasons": [f"the carried decoder names another asset during the move: {foreign}"],
+                "elId": el_id}
     if not any((v.get("readyState") or 0) >= 2 for v in in_move):
         return inconclusive("the carried decoder never decoded during the move", elId=el_id)
-    ticks = [r["ts"] for r in rows if t0 <= r["ts"] <= t0 + duration_ms]
+    ticks = [r["ts"] for r in moving]
     cadence = float(np.median(np.diff(ticks))) if len(ticks) > 1 else math.inf
     if cadence > 1000.0 / CARRY_COVER_MIN_FPS:
         return inconclusive(f"the page's rAF ticked every {cadence:.1f} ms during the move "
@@ -6323,7 +8514,7 @@ def score_carry_cover(
         "midFrames": len(mid), "minFrames": need, "cadenceMs": round(cadence, 2),
     }
     wrap = 1 << CARRY_COVER_SYNC_BITS
-    per_frame = []
+    per_frame, scored_at = [], []
     for at, pts, image, tick, index in mid:
         entry: dict[str, Any] = {"pts": round(pts, 2), "tick": tick}
         if index is None:
@@ -6331,22 +8522,35 @@ def score_carry_cover(
             continue
         row = rows[index]
         after = rows[index + 1] if index + 1 < len(rows) else None
-        if after is not None and after["tick"] != (row["tick"] + 1) % wrap:
-            after = None
-        reads = [
-            (name, v) for name, v in (("post", _carried_rect(row, el_id)), ("pre", _carried_rect(after, el_id, "pre"))) if v
-        ]
-        if not reads:
-            per_frame.append({**entry, "unaligned": "the carried video was not sampled at its tick"})
+        if after is None or after["tick"] != (row["tick"] + 1) % wrap:
+            per_frame.append({**entry, "unreadable": "no sampler row for the next tick (one read at most)"})
+            continue
+        if not all(
+            isinstance(read, list) and all(isinstance(v, dict) and _el_id(v.get("elId")) for v in read)
+            for read in (row.get("vids"), after.get("pre"))
+        ):
+            per_frame.append({**entry, "unreadable": "its post/pre read list or a read's elId is unreadable"})
+            continue
+        if _carried_twice(row, el_id, "vids") or _carried_twice(after, el_id, "pre"):
+            per_frame.append({**entry, "unreadable": "its post/pre read names the carried decoder twice"})
+            continue
+        reads = [("post", _carried_rect(row, el_id)), ("pre", _carried_rect(after, el_id, "pre"))]
+        if all(v is None for _, v in reads):
+            per_frame.append({**entry, "unreadable": "the carried decoder is absent from both readable reads"})
+            continue
+        if not all(_overlay_readable(v) for _, v in reads):
+            per_frame.append({**entry, "unreadable": "its post/pre overlay reads are unpaired or carry no readable rect "
+                                                     "or Boolean opacity"})
             continue
         active = [m["screen"] for m in masks if m["untilS"] is None or at - t0 <= 1000.0 * m["untilS"]]
         scored = []
         for name, video in reads:
             overlay = {k: float(video[k]) for k in ("x", "y", "w", "h")}
-            measured = carry_cover_exposure(image, roi, background["color"], overlay, bool(video.get("opaque")), active)
+            measured = carry_cover_exposure(image, roi, background["color"], overlay, video["opaque"], active)
             scored.append({"read": name, "overlay": {k: round(v, 2) for k, v in overlay.items()}, **measured})
         widths = [max(s["strips"].values()) for s in scored]
         fractions = [s["exposedFraction"] for s in scored]
+        scored_at.append(at)
         per_frame.append({
             **entry, "domTs": round(at, 2), "dt": round(at - t0, 2),
             "exposedPx": max(s["exposedPx"] for s in scored), "exposedFraction": max(fractions),
@@ -6356,23 +8560,32 @@ def score_carry_cover(
             "undecided": len({_cover_ok(f, w) for f, w in zip(fractions, widths)}) > 1, "reads": scored,
         })
     detail["frames"] = per_frame
-    aligned = [f for f in per_frame if "unaligned" not in f]
-    discarded = len(per_frame) - len(aligned)
-    edges = [lo, *sorted({f["domTs"] for f in aligned}), hi]
-    max_gap = max(b - a for a, b in zip(edges, edges[1:]))
-    allowed_gap = (CARRY_COVER_MAX_GAP_FRAMES + 0.5) * cadence
+    aligned = [f for f in per_frame if "unaligned" not in f and "unreadable" not in f]
+    unreadable = sum("unreadable" in f for f in per_frame)
+    discarded = sum("unaligned" in f for f in per_frame)
+    edges = [lo, *sorted(set(scored_at)), hi]
+    tick_ts = sorted(r["ts"] for r in rows)
+    max_gap, local, allowed_gap = max(
+        ((b - a, ref, (CARRY_COVER_MAX_GAP_FRAMES + 0.5) * ref)
+         for a, b in zip(edges, edges[1:]) for ref in [local_cadence(tick_ts, a, b, cadence)]),
+        key=lambda gap: gap[0] / gap[2],
+    )
     detail.update(
-        alignedFrames=len(aligned), discardedFrames=discarded,
+        alignedFrames=len(aligned), discardedFrames=discarded, unreadableFrames=unreadable,
         discardedShare=round(discarded / len(per_frame), 4) if per_frame else None,
-        maxGapMs=round(max_gap, 2), maxGapAllowedMs=round(allowed_gap, 2),
+        maxGapMs=round(max_gap, 2), maxGapAllowedMs=round(allowed_gap, 2), maxGapCadenceMs=round(local, 2),
         undecidedFrames=sum(f["undecided"] for f in aligned),
     )
     gaps = []
+    if not tick_ts or tick_ts[0] > lo or tick_ts[-1] < hi:
+        gaps.append("the sampler's ticks do not span the mid-move window")
+    if unreadable:
+        gaps.append(f"{unreadable} mid-move frames lack a readable pair of overlay reads (rect and Boolean opacity)")
     if len(aligned) < need:
         gaps.append(f"too few aligned mid-move frames ({len(aligned)} < {need})")
     if max_gap > allowed_gap:
         gaps.append(f"a {max_gap:.0f} ms stretch of the mid-move window has no scored frame (max {allowed_gap:.0f} ms: "
-                    f"{CARRY_COVER_MAX_GAP_FRAMES} ticks at the observed {cadence:.1f} ms cadence)")
+                    f"{CARRY_COVER_MAX_GAP_FRAMES} ticks at the local {local:.1f} ms cadence)")
     if per_frame and discarded / len(per_frame) > CARRY_COVER_MAX_DISCARDED_SHARE:
         gaps.append(f"{discarded}/{len(per_frame)} mid-move frames could not be placed at a sampled tick "
                     f"(max {CARRY_COVER_MAX_DISCARDED_SHARE:.0%})")
@@ -6387,6 +8600,21 @@ def score_carry_cover(
     return {"verdict": "fail" if reasons else "pass", "reasons": reasons, **detail}
 
 
+def local_cadence(tick_ts: list[float], start: float, end: float, fallback: float) -> float:
+    """The rAF period a carry-cover gap `start`..`end` is judged at (Chrome drops to 30 Hz while two or more visible
+    videos play). With sampler ticks inside the gap: its length over the rAF intervals it spans, each boundary interval
+    prorated by its overlap, so the gap passes on its elapsed tick count alone, which no long or partly covered
+    interval can stretch. With none (the page ran no rAF), the paint instrument's `local_period` of the tick deltas
+    either side."""
+    deltas = list(zip(tick_ts, tick_ts[1:]))
+    if any(start < t < end for t in tick_ts) and tick_ts[0] <= start and end <= tick_ts[-1]:
+        return (end - start) / sum((min(b, end) - max(a, start)) / (b - a) for a, b in deltas if a < end and b > start)
+    n = paint_instrument.LOCAL_CADENCE_DELTAS
+    return paint_instrument.local_period(
+        [b - a for a, b in deltas if b <= start][-n:], [b - a for a, b in deltas if a >= end][:n], fallback,
+    )
+
+
 def carry_cover_capture_problems(capture: dict[str, Any], bridge: dict[str, Any]) -> list[str]:
     problems = []
     if not capture.get("settled"):
@@ -6399,21 +8627,22 @@ def carry_cover_capture_problems(capture: dict[str, Any], bridge: dict[str, Any]
 
 
 def carry_cover_status(continuity: Any, bridges: Sequence[dict[str, Any]]) -> tuple[str, list[str]]:
-    """Integrity first: no bridge, continuity not installed, or any bridge INCONCLUSIVE is INCONCLUSIVE; else any FAIL
-    is FAIL; else PASS."""
+    """Integrity first: no bridge, continuity not installed, or any bridge whose verdict is not "pass" or "fail"
+    (unmeasured, INCONCLUSIVE or unreadable) is INCONCLUSIVE; else any FAIL is FAIL; else PASS."""
     mode = continuity.get("mode") if isinstance(continuity, dict) else None
     if mode != "qualified":
         return "inconclusive", [f"continuity runtime not installed (mode {mode!r})"]
     if not bridges:
         return "inconclusive", ["the plan carries no bridge"]
-    verdicts = [(b["boundary"], b.get("result") or {"verdict": "inconclusive", "reasons": ["not measured"]}) for b in bridges]
-    for want in ("inconclusive", "fail"):
-        hit = [f"{name}: {why}" for name, r in verdicts if r.get("verdict") == want for why in r.get("reasons") or [want]]
-        if hit:
-            return want, hit
-    if any(r.get("verdict") != "pass" for _, r in verdicts):
-        return "inconclusive", [f"{name}: verdict {r.get('verdict')!r}" for name, r in verdicts]
-    return "pass", []
+    verdicts = [(b.get("boundary"), b.get("result") if isinstance(b.get("result"), dict) else {}) for b in bridges]
+    unknown = [(name, r) for name, r in verdicts if r.get("verdict") not in ("pass", "fail")]
+    if unknown:
+        return "inconclusive", [
+            f"{name}: {why}" for name, r in unknown
+            for why in r.get("reasons") or [f"verdict {r.get('verdict')!r}" if r else "not measured"]
+        ]
+    fails = [f"{name}: {why}" for name, r in verdicts if r["verdict"] == "fail" for why in r.get("reasons") or ["fail"]]
+    return ("fail", fails) if fails else ("pass", [])
 
 
 def _screencast(
@@ -6505,7 +8734,7 @@ def run_carry_cover(args: argparse.Namespace) -> dict[str, Any]:
     result: dict[str, Any] = {"bridges": bridges}
     force_viewport(*args.viewport)
     evidence = evidence_dir_of(args.artifact)
-    continuity: Any = None
+    continuities: list[Any] = []
     with ExitStack() as stack:
         result["coreSha256"] = (
             stack.enter_context(injected_core_variant(args.core_variant)) if args.core_variant else js_sha256()
@@ -6518,7 +8747,7 @@ def run_carry_cover(args: argparse.Namespace) -> dict[str, Any]:
             capture = capture_carry_cover(
                 export, load_slides(export), bridge, args.viewport, hide_overlay=args.carry_cover_null,
             )
-            continuity = capture.get("continuity")
+            continuities.append(capture.get("continuity"))
             frames = capture.pop("frames")
             read = capture.pop("read", None) or {}
             scored = score_carry_cover(frames, read.get("rows"), read.get("notes"), bridge, capture.get("stageMap"),
@@ -6528,6 +8757,7 @@ def run_carry_cover(args: argparse.Namespace) -> dict[str, Any]:
                 scored = {**scored, "verdict": "inconclusive", "reasons": problems, "measured": scored.get("verdict")}
             bridge["capture"] = {**capture, "frameCount": len(frames), "notes": read.get("notes")}
             bridge["result"] = scored
+            bridge["clock"] = carry_cover_clock(read.get("notes"), bridge, scored.get("elId"))
             worst = max((f for f in scored.get("frames") or [] if "exposedPx" in f), key=lambda f: f["exposedPx"], default=None)
             if worst is not None:
                 image = next(img for pts, img in frames if round(pts, 2) == worst["pts"])
@@ -6535,6 +8765,10 @@ def run_carry_cover(args: argparse.Namespace) -> dict[str, Any]:
                 path = evidence / f"carry-cover-{bridge['boundary']}-worst.png"
                 cv2.imwrite(str(path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
                 scored["worstFrame"] = {"path": str(path), "pts": worst["pts"], "exposedPx": worst["exposedPx"]}
+    continuity = next(
+        (c for c in continuities if not (isinstance(c, dict) and c.get("mode") == "qualified")),
+        continuities[-1] if continuities else None,
+    )
     result["continuity"] = continuity
     result["status"], result["reasons"] = carry_cover_status(continuity, bridges)
     return result
@@ -6589,6 +8823,9 @@ def run_cli(args: argparse.Namespace) -> None:
         run_forced_fail_cli(args)
         return
     check_fixture(args)
+    if args.paint_control is not None:
+        run_paint_control_cli(args)
+        return
     if args.rescore is not None:
         run_rescore_cli(args)
         return
@@ -6598,11 +8835,11 @@ def run_cli(args: argparse.Namespace) -> None:
     if args.carry_cover:
         run_carry_cover_cli(args)
         return
-    if args.strip is not None or args.core_variant is not None:
-        run_red_arm_cli(args)
-        return
     if args.only_pass == "G":
         run_pass_g_cli(args)
+        return
+    if args.strip is not None or args.core_variant is not None:
+        run_red_arm_cli(args)
         return
     auto = args.gl_replay == "auto"
     skip = set(args.skip_arms)
@@ -6630,7 +8867,7 @@ def run_cli(args: argparse.Namespace) -> None:
         export_a = prepare_export(args.fixture, args.original_index, root, "arm-a")
         slides_a = load_slides(export_a)
         plan = ground_truth_plan(export_a, slides_a)
-        facts = ground_truth_facts(plan)
+        facts = ground_truth_facts(plan, arrival=arrival_starts(export_a, slides_a, plan))
         bind_dom_ids(facts, movie_nodes(export_a, slides_a))
         result["groundTruth"] = {key: facts[key] for key in GROUND_TRUTH_KEYS if key in facts}
         expected_stage = expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})

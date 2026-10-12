@@ -13,7 +13,7 @@ Hand-back geometry (plan keynote_live_handback_geometry §3.4, W3): the patch-on
 geometry at slot opacity; a patch-on G2 session whose fix did not engage (the pre-fix unproven rest-opacity) makes the
 take INVALID, never a pass or a fail of the fix.
 
-Looping soak fixture (loopMode plan §10 WS-C): `output/p2-loop`, built by `scripts/loop_fixture.py`, must qualify on
+Looping soak fixture (loopMode plan §10 WS-C): `output/fixtures/p2-loop`, built by `scripts/loop_fixture.py`, must qualify on
 product code: the harness no longer splices the continuity allowlist in-process. A fixture is looping iff its
 `fixture.json` carries the `loop` record the builder adds; the P2 family is the P2 base without that key. Pre-check (a)
 is enforced: every slide-1 `untitled.mov` and the handed-back carried element report `video.loop`, and the export
@@ -43,6 +43,7 @@ import binary_counter_movie  # noqa: E402
 import live_continuity_probe as lcp  # noqa: E402
 import loop_fixture  # noqa: E402
 import managed_obs_qualify as q  # noqa: E402
+from obed_edom.fixture_paths import fixture  # noqa: E402
 
 from test_loop_fixture import _binary_manifest, _committed_source  # noqa: E402
 
@@ -260,10 +261,80 @@ def test_g2_take_with_an_unengaged_fix_is_invalid_not_failed(tmp_path):
     assert any("hand-back fix not engaged" in r for r in invalid)
 
 
-def test_g2_take_with_an_engaged_fix_is_not_invalidated(tmp_path):
-    gates = q.g2_gates(m3_run(tmp_path, mm_off_alpha=255, g2_stats=dict(q.EXPECTED_STATS["on"])), ARMED)
+G2_MOVIE_AT = {"x": 109.0, "y": 795.0, "w": 952.0, "h": 268.0}
+
+
+@pytest.mark.parametrize(("painting", "ok", "invalid"), [
+    pytest.param([{"src": "untitled.mov", "elId": 3, "rect": G2_MOVIE_AT}], True, None, id="the-movie-alone-passes"),
+    pytest.param([{"src": "untitled.mov", "elId": 3, "rect": G2_MOVIE_AT},
+                  {"src": "another.mov", "elId": 4, "rect": G2_MOVIE_AT}], False, None, id="another-asset-at-the-rect-fails"),
+    pytest.param([{"src": "", "elId": 3, "rect": G2_MOVIE_AT}], False, "g2: painting at P3 unreadable",
+                 id="an-empty-source-at-the-rect-is-unreadable"),
+    pytest.param([{"src": "untitled.mov", "elId": 3, "rect": G2_MOVIE_AT},
+                  {"src": "another.mov", "elId": 4, "rect": {"x": 1500.0, "y": 20.0, "w": 300.0, "h": 200.0}}], True, None,
+                 id="another-asset-away-from-the-movie-is-not-counted"),
+    pytest.param([{"src": "untitled.mov", "elId": 3, "rect": G2_MOVIE_AT},
+                  {"src": "untitled.mov", "elId": 999, "rect": {"x": 1500.0, "y": 20.0, "w": 300.0, "h": 200.0}}], False, None,
+                 id="r13-a-second-same-asset-painter-away-from-the-rect-still-counts"),
+])
+def test_g2_m2_painters_are_found_by_rect_before_their_source_is_judged(tmp_path, painting, ok, invalid):
+    """Astra r12 #1 sibling: before the fix M2 filtered P3 painters by source first, so a second, other-asset painter at
+    the movie rect vanished (PASS) and an empty source read as zero (FAIL, not INVALID)."""
+    run = m3_run(tmp_path, mm_off_alpha=255)
+    run["sessions"][0]["reads"] = {"after": {**live_read({}), "painting": painting}}
+    gates = q.g2_gates(run, {**ARMED, "rects": [G2_MOVIE_AT]})
+    assert checks_of(gates["M2"])["one painting movie <video> at P3"]["ok"] is ok
+    assert gates["M2"]["invalid"] == invalid
+    reasons: list[str] = []
+    q.arm_gates("g2", run, types.SimpleNamespace(), {**ARMED, "rects": [G2_MOVIE_AT]}, reasons)
+    assert (invalid in reasons) is (invalid is not None)
+
+
+def armed_scores(monkeypatch, run: dict[str, Any], clause: str = "pool", value: bool | None = True,
+                 off_verdict: bool | None = False) -> dict[str, Any]:
+    """Stub `score_armed` to echo each session's `armed` record: G2 with every clause True but `clause` = `value`; g2-off
+    with `live` = `off_verdict` and, as on every real take (no pre-flip owner ids), an unknown report-only owner."""
+    monkeypatch.setattr(q, "score_armed", lambda reads, armed, continuity: reads)
+    checks = {**dict.fromkeys(("mode", "live", "events", "noPainting", "pool", "owner"), True), clause: value}
+    off = {**dict.fromkeys(("mode", "events", "noPainting", "pool"), True), "live": off_verdict, "owner": None}
+    run["sessions"][0]["armed"] = {"verdict": lcp.combine_verdicts(*checks.values()), "checks": checks, "reason": None}
+    run["sessions"][1]["armed"] = {"verdict": None, "checks": off, "reason": "armed checks unreadable: ['owner']"}
+    return run
+
+
+def test_g2_take_with_an_engaged_fix_is_not_invalidated(tmp_path, monkeypatch):
+    run = armed_scores(monkeypatch, m3_run(tmp_path, mm_off_alpha=255, g2_stats=dict(q.EXPECTED_STATS["on"])))
+    gates = q.g2_gates(run, ARMED)
     assert gates["M1"]["invalid"] is None and gates["M3"]["invalid"] is None
     assert checks_of(gates["M1"])["frameLen"]["ok"] and checks_of(gates["M1"])["opacityUnproven"]["ok"]
+
+
+@pytest.mark.parametrize("clause, value, off_verdict, unreadable", [
+    ("pool", None, False, "g2: score_armed clauses unreadable: ['pool']"),
+    ("live", False, False, None),
+    ("pool", True, None, "g2-off: score_armed clauses unreadable: ['live']"),
+    ("owner", None, False, None),
+])
+def test_g2_m1_reads_an_unreadable_score_armed_as_invalid_never_a_failure(tmp_path, monkeypatch, clause, value, off_verdict,
+                                                                         unreadable):
+    # An unknown enforced clause (G2's, or g2-off's in the KB) is evidence never observed: M1 is INVALID, the clause is
+    # not in `failing`, and arm_gates carries the reason into the run. A readable False clause still FAILs M1; the
+    # report-only owner clause never invalidates, on G2 or on g2-off (whose owner is always unknown).
+    run = armed_scores(monkeypatch, m3_run(tmp_path, mm_off_alpha=255, g2_stats=dict(q.EXPECTED_STATS["on"])), clause,
+                       value, off_verdict)
+    m1 = q.g2_gates(run, ARMED)["M1"]
+    invalid: list[str] = []
+    q.arm_gates("g2", run, types.SimpleNamespace(), ARMED, invalid)
+    armed_failing = {c for c in m1["failing"] if "score_armed" in c}
+    if unreadable:
+        assert m1["verdict"] == "INVALID" and unreadable in m1["invalid"]
+        assert not armed_failing
+        assert any(unreadable in r for r in invalid)
+    elif value is False:
+        assert m1["verdict"] == "FAIL" and m1["invalid"] is None
+        assert armed_failing == {f"score_armed.{clause}"}
+    else:
+        assert m1["invalid"] is None and not armed_failing
 
 
 # --- MO-2 masks ------------------------------------------------------------------------------------------------------------
@@ -496,6 +567,14 @@ def test_cvc_reads_zero_on_identical_sessions_and_the_worst_delta_otherwise():
 
 # --- MO-2 / MO-4 gates end to end ------------------------------------------------------------------------------------------
 
+def live_read(stats: dict[str, Any]) -> dict[str, Any]:
+    """`Session.read` on a LIVE G2 page whose module reports `stats`."""
+    api = {"version": 1, "state": "LIVE", "standDowns": [], "events": [],
+           "stats": {"epoch": 1, "iter": 10, "uploads": 10, "glErrors": 0, **stats}}
+    gl = {"t": 1.0, "hash": "#2", "ready": True, "api": api, "coreEvents": [], "pool": [], "facades": []}
+    return {"wall": 1.0, "gl": gl, "painting": [], "videos": []}
+
+
 def mmo_run(tmp_path: Path, rate: int = 25, **over: Any) -> dict[str, Any]:
     kinds = {"g2-on": "on", "g2-mmoff": "off-live", "g2off-on": "on", "g2off-mmoff": "off", "g2-on-2": "on"}
     names = list(kinds)
@@ -514,7 +593,7 @@ def mmo_run(tmp_path: Path, rate: int = 25, **over: Any) -> dict[str, Any]:
         stats = over.get(f"stats:{name}") or dict(q.EXPECTED_STATS[mode])
         sessions.append({"session": name, "decode": {"seriesPath": str(path), "phases": {}}, "shots": shots,
                          "output": {"mmOpacity": {"mode": over.get(f"mode:{name}", mode)}}, "liveWait": {"live": True},
-                         "reads": {"liveEnd": {"gl": {"api": {"stats": stats}}}}})
+                         "reads": {"liveEnd": live_read(stats)}})
     return {"rate": rate, "sessions": sessions}
 
 
@@ -1094,7 +1173,7 @@ class TestFixtureFamily:
         assert q.fixture_loops(looped) is True and q.p2_family(looped) is False
 
     def test_soak_default_is_p2_loop(self) -> None:
-        assert q.SOAK_FIXTURE == q.REPO / "output/p2-loop"
+        assert q.SOAK_FIXTURE == fixture("p2-loop")
 
 
 class TestSpliceGone:
@@ -1180,7 +1259,8 @@ def _session(**over: Any) -> dict[str, Any]:
             {"src": "WA0125.mp4", "loop": False},
         ],
         "handedBack": [{"elId": 7, "loop": True, "isConnected": True, "facade": False, "paused": False, "t": 12.0}],
-        "reads": {"postHandback": {"gl": _post_handback()}},
+        "reads": {"postHandback": {"gl": _post_handback(), "painting": [
+            {"src": "Untitled.mov-0.0000-46.0333.mov", "elId": 7, "rect": {"x": 109.0, "y": 795.0, "w": 952.0, "h": 268.0}}]}},
         "outputAtStop": {"continuity": {"mode": "qualified", "glReplay": {"mode": "injected"}}},
         "samples": [{"t": 2.0 * i, "state": "LIVE", "standDowns": [], "videoEnded": False, "uploads": 100 * (i + 1),
                      "carriedT": t} for i, t in enumerate(times)],
@@ -1212,8 +1292,12 @@ class TestPrecheckA:
         assert result["verdict"] == "FAIL"
         assert result["failing"] == ["(a) video.loop on every slide-1 untitled.mov"]
 
-    def test_no_slide1_movie_read_fails(self, looped: Path) -> None:
-        result = _precheck(_session(slide1Videos=[{"src": "WA0125.mp4", "loop": False}]), looped)
+    @pytest.mark.parametrize("video", [
+        {"src": "WA0125.mp4", "loop": False},
+        pytest.param({"src": "another-untitled.mov", "loop": True}, id="sweep-a-name-containing-the-asset-is-not-the-asset"),
+    ])
+    def test_no_slide1_movie_read_fails(self, looped: Path, video: dict[str, Any]) -> None:
+        result = _precheck(_session(slide1Videos=[video]), looped)
         assert result["failing"] == ["(a) video.loop on every slide-1 untitled.mov"]
 
     @pytest.mark.parametrize("handed", [
@@ -1255,6 +1339,21 @@ class TestPrecheckA:
         """Codex r4 #5: `.loop` on a DOM element proves nothing unless G2 retired by handing off that same element."""
         session = _session(reads={"postHandback": {"gl": post}})
         assert _precheck(session, looped)["failing"] == ["(a) video.loop on the handed-back carried element"]
+
+    @pytest.mark.parametrize(("src", "verdict"), [
+        ("Untitled.mov-0.0000-46.0333.mov", "PASS"), ("foreign.mov", "FAIL"), ("", "INVALID"),
+    ], ids=["the-movie-passes", "a-foreign-source-fails", "an-empty-source-is-invalid"])
+    def test_the_handed_back_elements_source_is_judged(self, looped: Path, src: str, verdict: str) -> None:
+        """Astra r16 #1: the handed-back id kept its loop and hand-off notes after a source reassignment (core 466-491
+        keeps `__obedElId`), so before the fix a foreign or cleared source still PASSed."""
+        session = _session()
+        session["reads"]["postHandback"]["painting"][0]["src"] = src
+        result = _precheck(session, looped)
+        assert result["verdict"] == verdict
+        if verdict == "INVALID":
+            reasons: list[str] = []
+            q.arm_gates("soak", {"sessions": [session]}, types.SimpleNamespace(precheck=True, fixture=looped), None, reasons)
+            assert "precheck INCONCLUSIVE: handed-back element's source unreadable" in reasons
 
     def test_an_extra_differing_json_fails(self, looped: Path) -> None:
         header = looped / "html-unmodified/assets/header.json"
@@ -1331,3 +1430,100 @@ class TestTiming:
     def test_timing_summary_of_a_run_that_never_launched(self) -> None:
         summary = q.timing_summary({"arm": "g2", "take": 1, "timingS": {"quit": 0.5}, "sessions": []})
         assert summary["launch"] is None and summary["script"] == 0 and summary["decode"] == 0
+
+
+# --- Producer contract wiring (plan keynote_live_continuity_contract §3 row 7, §4 N1/N3) ---------------------------------
+
+def _failsafe_run(*, zone_painting: Any = (), bogus_notes: Any = ()) -> dict[str, Any]:
+    """A failsafe run of page reads alone (no shots): `fail-zone`'s painting read and `fail-bogus`'s core notes."""
+    def session(name: str, painting: Any = (), notes: Any = ()) -> dict[str, Any]:
+        after = live_read({})
+        after["painting"] = painting if isinstance(painting, dict) else list(painting)
+        after["gl"]["coreEvents"] = notes if notes is None or isinstance(notes, dict) else list(notes)
+        return {"session": name, "reads": {"after": after}}
+
+    sessions = [session(name) for name in ("off", "off-2", "fail-module", "goto2")]
+    sessions += [session("fail-zone", painting=zone_painting), session("fail-bogus", notes=bogus_notes)]
+    return {"sessions": sessions}
+
+
+def _failsafe_checks(**reads: Any) -> dict[str, dict[str, Any]]:
+    return checks_of(q.failsafe_gates(_failsafe_run(**reads), ARMED)["M5"])
+
+
+def _wired_arm_gates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    run, invalid = mmo_run(tmp_path), []
+    run["sessions"][0]["reads"]["liveEnd"]["gl"]["ready"] = "yes"
+    q.arm_gates("mmo", run, types.SimpleNamespace(), ARMED, invalid)
+    return [reason.split(":")[0] for reason in invalid]
+
+
+def _wired_score_mmo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    (tmp_path / "runs").mkdir()
+    identity = {"manifestSha256": "m", "movieSha256": ["a"]}
+    run = {**mmo_run(tmp_path), "arm": "mmo", "fixture": str(tmp_path / "p2-binary"), "fixtureIdentity": identity,
+           "valid": True, "invalid": [], "checks": []}
+    run["sessions"][0]["reads"]["liveEnd"]["videos"] = [{"src": "untitled.mov", "paused": False, "rs": 5, "t": 1.0, "loop": True}]
+    (tmp_path / "runs" / "mmo-25.json").write_text(json.dumps(run))
+    monkeypatch.setattr(q, "fixture_facts", lambda fixture: ARMED)
+    monkeypatch.setattr(q.binary_counter_movie, "verify_fixture", lambda fixture: identity)
+    q.score_mmo(tmp_path)
+    result = json.loads(next(tmp_path.glob("rescore-*.json")).read_text())[0]
+    return result["verdict"], [reason.split(":")[0] for reason in result["invalid"]]
+
+
+def _wired_n1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    check = "fail-zone: painting movie count == off"
+    return _failsafe_checks()[check]["ok"], _failsafe_checks(zone_painting={"error": "unavailable"})[check]["ok"]
+
+
+def _wired_n3(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    check = "KB: fail-bogus does not read as retired-with-expected-reason"
+    return _failsafe_checks()[check]["ok"], _failsafe_checks(bogus_notes=None)[check]["ok"]
+
+
+@pytest.mark.parametrize(("ingest", "outcome"), [
+    pytest.param(_wired_arm_gates, ["evidence contract"], id="7-arm_gates-invalid"),
+    pytest.param(_wired_score_mmo, ("INVALID", ["evidence contract"]), id="7-score_mmo-invalid"),
+    pytest.param(_wired_n1, (True, False), id="N1-an-error-painting-read-is-no-count"),
+    pytest.param(_wired_n3, (True, False), id="N3-fail-bogus-needs-a-readable-note-list"),
+])
+def test_contract_violations_and_unreadable_reads_never_pass_a_gate(
+    ingest: Any, outcome: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert ingest(tmp_path, monkeypatch) == outcome
+
+
+MOVIE_AT = {"x": 109.0, "y": 795.0, "w": 952.0, "h": 268.0}
+
+
+@pytest.mark.parametrize(("src", "rect", "ok", "verdict"), [
+    pytest.param("untitled.mov", MOVIE_AT, False, "FAIL", id="the-movie-painting-where-off-has-none-fails"),
+    pytest.param("another.mov", MOVIE_AT, False, "FAIL", id="another-asset-at-the-movie-rect-fails-not-vanishes"),
+    pytest.param("", MOVIE_AT, False, "INVALID", id="an-empty-source-at-the-movie-rect-is-unreadable-not-zero"),
+    pytest.param("another.mov", {"x": 1500.0, "y": 20.0, "w": 300.0, "h": 200.0}, True, "FAIL",
+                 id="another-asset-away-from-the-movie-is-not-counted"),
+])
+def test_m5_painters_are_found_by_rect_before_their_source_is_judged(src: str, rect: Any, ok: bool, verdict: str) -> None:
+    """Astra r12 #1: one painter on `fail-zone`, none on `off`. Before the fix the painter was filtered by source first, so
+    an empty or another-asset source read as [0, 0] and the count check passed. The M5 verdict is FAIL even when the
+    count passes (no shots, so P3 parity is unreadable); INVALID only for the unreadable source."""
+    armed = {**ARMED, "rects": [MOVIE_AT]}
+    run = _failsafe_run(zone_painting=[{"src": src, "elId": 7, "rect": rect}])
+    m5 = q.failsafe_gates(run, armed)["M5"]
+    assert checks_of(m5)["fail-zone: painting movie count == off"]["ok"] is ok
+    assert m5["verdict"] == verdict
+
+
+@pytest.mark.parametrize("reads", [
+    pytest.param({"bogus_notes": {"error": "unreadable"}}, id="fail-bogus-coreEvents-error"),
+    pytest.param({"bogus_notes": None}, id="fail-bogus-null-notes"),
+    pytest.param({"zone_painting": {"error": "unavailable"}}, id="fail-zone-painting-error"),
+])
+def test_m5_unreadable_failsafe_containers_make_the_run_invalid(reads: dict[str, Any]) -> None:
+    """Astra r12 #5: producer-legal unreadable containers (`probe` GL_REPLAY_READ_JS null/`{error}` notes,
+    PAINTING_VIDEOS_JS `{error}`) are INVALID in M5 and in the run's validity -- never an exception or a FAIL."""
+    invalid: list[str] = []
+    gates = q.arm_gates("failsafe", _failsafe_run(**reads), types.SimpleNamespace(), ARMED, invalid)
+    assert gates["M5"]["verdict"] == "INVALID"
+    assert len(invalid) == 1 and invalid[0].startswith("M5 INCONCLUSIVE: ")

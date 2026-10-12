@@ -40,19 +40,44 @@ from obed_edom.html_alpha_probe import (
     score_visible_movie_motion,
     score_visible_slide_from_delta,
 )
+from obed_edom.live_continuity import canonical_asset_name
 
 MOVIE1_TOKEN = "Untitled.mov"
 MOVIE2_TOKEN = "WA0125"
+MOVIE_BY_ASSET = {MOVIE1_TOKEN.lower(): "movie1", "vid-20250608-wa0125.mp4": "movie2"}
+LOGICAL_MOVIE_KEYS = frozenset(MOVIE_BY_ASSET.values())
 
 
 def _movie_key(src: str) -> str:
-    s = str(src or "").lower()
-    if MOVIE1_TOKEN.lower() in s:
-        return "movie1"
-    if MOVIE2_TOKEN.lower() in s:
-        return "movie2"
-    # fallback: basename stem
-    return s.rsplit("/", 1)[-1][:40] or "unknown"
+    """The fixture movie a SOURCE is, by exact canonical asset name (never a substring); any other
+    asset is `other:<name>`, so no source reads as a logical movie key."""
+    name = canonical_asset_name(src)
+    return MOVIE_BY_ASSET.get(name) or (f"other:{name[:40]}" if name else "unknown")
+
+
+def _note_movie_key(key: object) -> str:
+    """A note or stamp key, which the runtime writes as a logical movie key or an asset key."""
+    return key if isinstance(key, str) and key in LOGICAL_MOVIE_KEYS else _movie_key(str(key or ""))
+
+
+def _bound_source_problem(
+    samples: list[dict], key: str, decoder_id: object, min_hash: int | None = None
+) -> str | None:
+    """Identity before source for a bound decoder's rows (on/after `min_hash`): `foreign` when one
+    names another asset, `unreadable` when one names no source, else `None`."""
+    problem = None
+    for s in samples:
+        hn = _hash_num(s.get("sceneHash"))
+        if min_hash is not None and (hn is None or hn < min_hash):
+            continue
+        for v in s.get("videos") or []:
+            if v.get("decoderId") != decoder_id:
+                continue
+            if not canonical_asset_name(v.get("src")):
+                problem = "unreadable"
+            elif _movie_key(v.get("src")) != key:
+                return "foreign"
+    return problem
 
 
 def _norm_hash(h: str | None) -> str:
@@ -126,8 +151,10 @@ BRIDGE_EVENT_KIND = "bridge-3to4"
 # placed or swapped back in) — the notes a retire zone must never produce.
 # Event kinds the P2 script fetches from the page (every other kind is dropped before
 # the verdicts see it): the refusal notes, the pool-consuming and engagement notes the
-# 1->2 gates key off, and the glReplay zone/live notes `refusedCarry1to2` reads.
+# 1->2 gates key off, the glReplay zone/live notes `refusedCarry1to2` reads, and the
+# report-only `bridge-clock` note.
 PRESERVE_EVENT_KEEP_KINDS = (
+    "bridge-clock",
     "createElement-video",
     "dom-swap",
     "facade-block-clear",
@@ -486,6 +513,15 @@ def _derive_movie_texids(
     }
 
 
+def _instance(object_id: str, rect: tuple[int, int, int, int]) -> dict:
+    return {"objectId": object_id, "rect": dict(zip(("x", "y", "w", "h"), rect))}
+
+
+SLIDE1_MOVIE1 = _instance("6BB39942-6C61-4763-839D-777C09E7E594", MOVIE_ROI)
+SLIDE2_MOVIE1 = _instance("F9AFED1B-E2D7-47D4-942E-14992C808383", MOVIE_ROI)
+SLIDE3_MOVIE1 = _instance("98D59E27-7807-477D-BEFB-27EB1CF1D185", (198, 797, 952, 268))
+SLIDE4_MOVIE1 = _instance("E4728E7D-2032-4D7F-83D6-8BE0EFB7B7BC", SLIDE4_MOVIE_RECT)
+
 GL_REPLAY_BOUNDARY_1TO2 = {
     "atScene": SLIDE2_MIN_HASH, "action": "glReplay", "movieKey": MOVIE1_KEY, "fallback": "retire",
     "slotSizes": [[1920, 1080], [671, 195], [266, 236], [960, 276], [178, 157]],
@@ -503,11 +539,14 @@ GL_REPLAY_BOUNDARY_1TO2 = {
         "w": 951.54296875, "h": 267.6214599609375,
     },
     "movieSlot": 3,
+    "loop": False,
+    "src": SLIDE1_MOVIE1,
+    "dst": SLIDE2_MOVIE1,
 }
 
 
 def build_continuity_plan(bridge34: bool) -> dict:
-    """The runtime plan injected into the player — equal to
+    """The schema-2 runtime plan injected into the player — equal to
     `derive_plan(..., gl_replay=True).to_runtime()` for this fixture, plus the
     transparent background the P2 export needs. P2 loads no GL module, so the
     `glReplay` 1->2 boundary takes its `retire` fallback in the page.
@@ -517,10 +556,11 @@ def build_continuity_plan(bridge34: bool) -> dict:
     and remounts it at the fallback footprint (the stray 62e1ab7 fixed for the
     product by not naming it). `MOVIE2_ROI` stays a probe-side constant.
 
-    `bridge34=False` removes the 3->4 bridge ONLY; the 1->2 glReplay and the 2->3
-    restart stay, so `--disable-bridge34` turns exactly one finding red.
+    `bridge34=False` removes the 3->4 bridge entry ONLY; the 1->2 glReplay and the
+    2->3 restart stay, so `--disable-bridge34` turns exactly one finding red.
     """
     plan: dict = {
+        "schema": 2,
         "movies": {
             "movie1": {
                 "assetKeys": [MOVIE1_TOKEN.lower()],
@@ -529,18 +569,18 @@ def build_continuity_plan(bridge34: bool) -> dict:
         },
         "boundaries": [
             copy.deepcopy(GL_REPLAY_BOUNDARY_1TO2),
-            {"atScene": SLIDE3_MIN_HASH, "action": "restart"},
+            {
+                "atScene": SLIDE3_MIN_HASH, "action": "restart", "movieKey": MOVIE1_KEY,
+                "src": copy.deepcopy(SLIDE2_MOVIE1), "dst": copy.deepcopy(SLIDE3_MOVIE1),
+            },
         ],
         "transparentBackground": True,
     }
     if bridge34:
         plan["boundaries"].append({
-            "atScene": SLIDE4_MIN_HASH,
-            "action": "bridge",
-            "movieKey": MOVIE1_KEY,
-            "srcRect": {"x": 198, "y": 797, "w": 952, "h": 268},
-            "durationSeconds": TRANS_S,
-            "rect": dict(zip(("x", "y", "w", "h"), SLIDE4_MOVIE_RECT)),
+            "atScene": SLIDE4_MIN_HASH, "action": "bridge", "movieKey": MOVIE1_KEY,
+            "durationSeconds": TRANS_S, "loop": False,
+            "src": copy.deepcopy(SLIDE3_MOVIE1), "dst": copy.deepcopy(SLIDE4_MOVIE1),
         })
     return plan
 
@@ -563,7 +603,7 @@ def _target_elids(events: list[dict], target_key: str) -> set:
         detail = e.get("detail")
         if not isinstance(detail, dict):
             continue
-        if _movie_key(detail.get("key") or "") != target_key:
+        if _note_movie_key(detail.get("key")) != target_key:
             continue
         for field in ("elId", "newElId"):
             if detail.get(field) is not None:
@@ -580,7 +620,7 @@ def refusalEvents(events: list[dict], target_key: str, min_scene: int) -> list[d
         if e.get("kind") not in ("preserve-refused", "retire-boundary"):
             continue
         detail = e.get("detail") if isinstance(e.get("detail"), dict) else {}
-        if _movie_key(detail.get("key") or "") != target_key:
+        if _note_movie_key(detail.get("key")) != target_key:
             continue
         scene = _event_scene(e)
         if scene is None or scene < min_scene:
@@ -603,7 +643,7 @@ def carryEvents(events: list[dict], target_key: str, lo_scene: int, hi_scene: in
         if kind not in CARRY_EVENT_KINDS:
             continue
         detail = e.get("detail") if isinstance(e.get("detail"), dict) else {}
-        keyed = _movie_key(detail.get("key") or "") == target_key
+        keyed = _note_movie_key(detail.get("key")) == target_key
         el_match = any(detail.get(f) in el_ids for f in ("elId", "newElId") if detail.get(f) is not None)
         if not (keyed or el_match):
             continue
@@ -672,7 +712,7 @@ def poolCensusVerdict(
         stamped = e.get("movieKey")
         raw = str(e.get("key") or "")
         if isinstance(stamped, str) and stamped:
-            attributed = _movie_key(stamped)
+            attributed = _note_movie_key(stamped)
         elif raw:
             attributed = _movie_key(raw)
         else:
@@ -1019,7 +1059,7 @@ def _kind_details(preserve_events: list[dict], kind: str) -> list[dict]:
 def _entry_movie_key(entry: dict) -> str | None:
     stamped = entry.get("movieKey")
     if isinstance(stamped, str) and stamped:
-        return _movie_key(stamped)
+        return _note_movie_key(stamped)
     raw = str(entry.get("key") or "")
     return _movie_key(raw) if raw else None
 
@@ -1799,6 +1839,7 @@ def liveContinuity1to2(
             "afterOwner": bound_decoder_id,
         },
         "rvfcAdvance": rvfc,
+        "unreadable": rvfc.get("status") == "inconclusive",
         # Reported for provenance only — NOT a gating sub-condition (aliased pixel
         # crossing-MAE; the crossing IDENTITY fields above ARE gated).
         "motionAcrossFlipOk": motion_ok,
@@ -2138,7 +2179,39 @@ def movingContinuity3to4(
         },
         "crossingIdentity": {"ok": crossing_identity},
         "rvfcMonotonic": rvfc,
+        "unreadable": rvfc.get("status") == "inconclusive",
     }
+
+
+def _restart_observations(samples: list[dict], key: str) -> tuple[list[dict], list[dict]]:
+    """`key`'s restart observations from annotated samples, identity before source: every decoder
+    that names `key` on any sample is the movie's, so one of its rows naming no source or another
+    asset is returned as unnamed (unreadable), never dropped from its history."""
+    named = {
+        m.get("decoderId") for s in samples for m in s.get("movies") or []
+        if m.get("key") == key and m.get("decoderId") is not None
+    }
+    obs: list[dict] = []
+    unnamed: list[dict] = []
+    for s in samples:
+        for m in s.get("movies") or []:
+            if m.get("key") != key:
+                if m.get("decoderId") in named:
+                    unnamed.append({"decoderId": m.get("decoderId"), "key": m.get("key"), "sceneHash": s.get("sceneHash")})
+                continue
+            if m.get("currentTime") is None:
+                continue
+            obs.append(
+                {
+                    "t": float(m["currentTime"]),
+                    "w": m.get("videoWidth"),
+                    "captureOffsetS": float(s.get("captureOffsetS") or 0.0),
+                    "sceneHash": s.get("sceneHash"),
+                    "phase": s.get("phase"),
+                    "decoderId": m.get("decoderId"),
+                }
+            )
+    return obs, unnamed
 
 
 def _times(
@@ -2200,15 +2273,24 @@ def _mae_rgb(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.mean(np.abs(a[:, :, :3].astype(np.float64) - b[:, :, :3].astype(np.float64))))
 
 
-def _presented_time_advances(samples: list[dict], decoder_id: object, min_hash: int) -> dict:
+def _presented_time_advances(
+    samples: list[dict], decoder_id: object, min_hash: int, key: str = MOVIE1_KEY
+) -> dict:
     """rVFC-presented mediaTime advancement for a decoder, on/after min_hash.
 
     An alternate, pixel-independent signal for presentedMotionOk: the decoder
     is genuinely presenting new frames even if the composed-ROI pixel check
-    is inconclusive (e.g. a still moment in the source pattern).
+    is inconclusive (e.g. a still moment in the source pattern). Its sources are
+    judged first (`_bound_source_problem`): another asset fails, no source is
+    inconclusive.
     """
     if decoder_id is None:
         return {"ok": False, "reason": "no decoderId", "n": 0}
+    problem = _bound_source_problem(samples, key, decoder_id, min_hash)
+    if problem == "foreign":
+        return {"ok": False, "reason": "the decoder names another asset", "n": 0}
+    if problem == "unreadable":
+        return {"ok": False, "status": "inconclusive", "reason": "the decoder names no source", "n": 0}
     vals: list[float] = []
     for s in samples:
         hn = _hash_num(s.get("sceneHash"))
@@ -3006,6 +3088,72 @@ def _media_samples_schema_ok(samples: object, bound_decoder: object) -> bool:
     return True
 
 
+_NULL_CONTROL_KEYS = frozenset({
+    "arm", "status", "armedHash", "armedElId", "armedOwnerRect", "movedFromRect", "movedToRect", "obedMotionAtTrigger",
+    "stageOrigin", "stageRectAtArm", "stageRectAtTrigger", "advanceKeyAt", "advanceKeyRejected",
+    "triggerFramesAfterAdvance", "preAdvanceDepartureAt", "preAdvanceDepartureRect", "loopHandedOff", "armedAt",
+    "boundDecoderId", "fellBackToArmOwner", "ownerDisconnectedInWindow", "firedVia", "holdStartedAt", "coverPaintedAt",
+    "pollMaxGapMs", "pollTimes", "motionStartedAt", "motionStartedFrame", "motionStartedMarker", "releaseAt",
+    "staleCurrentTime", "staleIndexExpected", "paintCount", "coverPatchStart", "coverPatchEnd", "coverPatchMean",
+    "ownerReadyState", "ownerAmbiguousInWindow", "holdFrames", "rafLog", "error",
+})
+
+
+def _int_or_none(v: object) -> bool:
+    return v is None or (isinstance(v, int) and not isinstance(v, bool))
+
+
+_RAF_LOG_KEYS = frozenset({"t", "elementFromPointIsCover", "ownerResolved", "coverRect", "measuredRect", "boundDecoderId"})
+
+
+def _raf_entry_problem(entry: object) -> str | None:
+    if not isinstance(entry, dict) or not _RAF_LOG_KEYS <= set(entry):
+        return "keys"
+    if _finite(entry["t"]) is None:
+        return "t"
+    if not isinstance(entry["elementFromPointIsCover"], bool) or not isinstance(entry["ownerResolved"], bool):
+        return "flags"
+    if entry["coverRect"] is not None and _rect_or_none(entry["coverRect"]) is None:
+        return "coverRect"
+    measured = entry["measuredRect"]
+    if measured is not None and not ((m := _rect_or_none(measured)) and m["w"] > 1 and m["h"] > 1):
+        return "measuredRect"
+    return None if _int_or_none(entry["boundDecoderId"]) else "boundDecoderId"
+
+
+def _null_control_problems(nc: object) -> list[str]:
+    """Why the freeze control's read is not what its page's `status()` returns: exactly its 41 keys (40 before
+    `pollTimes` existed) with the typed fields below, else []."""
+    if not isinstance(nc, dict):
+        return ["nullControl:object"]
+    if set(nc) not in (_NULL_CONTROL_KEYS, _NULL_CONTROL_KEYS - {"pollTimes"}):
+        return ["nullControl:keys"]
+    problems = []
+    if nc["preAdvanceDepartureAt"] is not None and _finite(nc["preAdvanceDepartureAt"]) is None:
+        problems.append("nullControl.preAdvanceDepartureAt")
+    if not (nc["error"] is None or isinstance(nc["error"], str)):
+        problems.append("nullControl.error")
+    if nc["advanceKeyRejected"] is None or not _int_or_none(nc["advanceKeyRejected"]):
+        problems.append("nullControl.advanceKeyRejected")
+    trigger, motion = nc["triggerFramesAfterAdvance"], nc["motionStartedFrame"]
+    if not _int_or_none(trigger):
+        problems.append("nullControl.triggerFramesAfterAdvance")
+    if not _int_or_none(motion):
+        problems.append("nullControl.motionStartedFrame")
+    elif motion is not None and _int_or_none(trigger) and trigger is not None and motion > trigger:
+        problems.append("nullControl:motion started after the trigger")
+    polls = nc.get("pollTimes", [])
+    if not (isinstance(polls, list) and all(_finite(t) is not None for t in polls)
+            and all(b > a for a, b in zip(polls, polls[1:]))):
+        problems.append("nullControl.pollTimes")
+    raf_log = nc["rafLog"]
+    if not isinstance(raf_log, list):
+        problems.append("nullControl.rafLog")
+    else:
+        problems.extend(f"nullControl.rafLog.{p}" for p in dict.fromkeys(filter(None, map(_raf_entry_problem, raf_log))))
+    return problems
+
+
 def _sample_schema_failures(snap: dict) -> list[str]:
     """The sample series of one arm that are not schema-sound, by name."""
     return [
@@ -3188,7 +3336,7 @@ def _bridge_engaged(snap: dict) -> bool:
             continue
         gen, old_gen = detail.get("generation"), detail.get("oldGen")
         if (
-            _movie_key(detail.get("key") or "") in EXPECTED_MOVIE_KEYS
+            _note_movie_key(detail.get("key")) in EXPECTED_MOVIE_KEYS
             and (_event_scene(e) if isinstance(e, dict) else None) is not None
             and _event_scene(e) >= SLIDE4_MIN_HASH
             and detail.get("oldElId") is not None
@@ -3408,11 +3556,16 @@ def _bridge_progress(fraction: float, curve: tuple[float, float, float, float]) 
     return _bezier_axis(_bezier_param(fraction, x1, x2), y1, y2)
 
 
+def _bridge_side_rect(bridge: dict, side: str) -> dict | None:
+    entry = bridge.get(side)
+    return _rect_or_none(entry.get("rect")) if isinstance(entry, dict) else None
+
+
 def _bridge_axis_spans_px(bridge: object, scale: float) -> dict[str, float] | None:
-    """Screen-px travel of each axis of a bridge's srcRect -> rect at `scale`, or `None`."""
+    """Screen-px travel of each axis of a bridge's src.rect -> dst.rect at `scale`, or `None`."""
     if not isinstance(bridge, dict):
         return None
-    src, dest = _rect_or_none(bridge.get("srcRect")), _rect_or_none(bridge.get("rect"))
+    src, dest = _bridge_side_rect(bridge, "src"), _bridge_side_rect(bridge, "dst")
     if src is None or dest is None:
         return None
     return {k: abs(dest[k] - src[k]) * scale for k in ("x", "y", "w", "h")}
@@ -3527,7 +3680,7 @@ def _freeze_trigger_expectation(
     ):
         return None
     moved_from = _rect_or_none(nc.get("movedFromRect"))
-    src = _rect_or_none(bridge.get("srcRect"))
+    src = _bridge_side_rect(bridge, "src")
     if moved_from is None or src is None or not src["w"] > 0:
         return None
     scale = moved_from["w"] / src["w"]
@@ -3568,6 +3721,8 @@ def _score_freeze_control(
     checks["armIdentitiesMatchManifest"] = _manifest_arms_ok(
         manifest, {"a1": a1, "b": b, "a2": a2}
     )
+    null_control_problems = _null_control_problems(b.get("nullControl"))
+    checks["nullControlSound"] = not null_control_problems
 
     nc = b.get("nullControl") or {}
 
@@ -4029,7 +4184,7 @@ def _score_freeze_control(
     # and `_freeze_control_blocks_success` blocks `success` on "inconclusive"
     # exactly as it does on "fail".
     integrity_keys = (
-        "sampleSchemaSoundAllArms", "armIdentitiesMatchManifest",
+        "sampleSchemaSoundAllArms", "armIdentitiesMatchManifest", "nullControlSound",
         "firedAtMoveStart", "firedAtRuntimeMotionStart", "firedAfterAdvance",
         "advanceKeySameEventInControl", "noPreAdvanceDeparture", "drainPressesAllLanded", "advanceSinglePressAllArms",
         "coverPaintedAtPresent",
@@ -4063,6 +4218,7 @@ def _score_freeze_control(
         "integrityKeys": list(integrity_keys),
         "integrityFailed": integrity_failed,
         "schemaFailed": {k: v for k, v in schema_failed.items() if v},
+        "nullControlProblems": null_control_problems,
         "verdictFailed": verdict_failed,
         "failed": failed,
         "maxRafGapMs": max_gap_ms,

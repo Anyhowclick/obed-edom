@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from fractions import Fraction
+import re
 import shutil
 import subprocess
 import sys
+from fractions import Fraction
+from pathlib import Path
 
 import pytest
 
@@ -23,31 +25,26 @@ from obed_edom import live_continuity_js
 
 
 def test_continuity_version_is_pinned_int():
-    assert live_continuity_js.CONTINUITY_VERSION == 5
+    assert live_continuity_js.CONTINUITY_VERSION == 6
     assert isinstance(live_continuity_js.CONTINUITY_VERSION, int)
-
-
-def test_js_sha256_matches_pinned_bytes():
-    expected = hashlib.sha256(live_continuity_js.PRESERVE_CORE_JS.encode()).hexdigest()
-    assert live_continuity_js.js_sha256() == expected
-    # Stable across repeated calls (no hidden mutable state feeding the hash).
-    assert live_continuity_js.js_sha256() == live_continuity_js.js_sha256()
 
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "06789fbd6664aeaf802c3275e738622211b38fc9f1a6c95b1124e08115d62a9b"
+PINNED_CORE_SHA256 = "a9e1e66a2445d886ff500bfdc084e31a8f617e5ded2290098904931ae9a48be0"
 
 
-def test_js_sha256_matches_the_pinned_literal():
+def test_js_sha256_hashes_the_core_bytes_and_matches_the_pinned_literal():
+    expected = hashlib.sha256(live_continuity_js.PRESERVE_CORE_JS.encode()).hexdigest()
+    assert live_continuity_js.js_sha256() == expected
+    # Stable across repeated calls (no hidden mutable state feeding the hash).
+    assert live_continuity_js.js_sha256() == live_continuity_js.js_sha256()
     assert live_continuity_js.js_sha256() == PINNED_CORE_SHA256
 
 
 def test_p2_dissolve_live_reexports_the_same_object():
     """`PRESERVE_SCRIPT` must be the shared core, not a second copy of the bytes."""
     import importlib.util
-    import sys
-    from pathlib import Path
 
     repo = Path(__file__).resolve().parent.parent
     for p in (repo / "src", repo / "scripts"):
@@ -63,12 +60,20 @@ def test_p2_dissolve_live_reexports_the_same_object():
     assert mod.PRESERVE_SCRIPT is live_continuity_js.PRESERVE_CORE_JS
 
 
-def _run_core_in_node(*, plan, fail_install=False, call_disable_after=False) -> dict:
-    """Execute PRESERVE_CORE_JS in a minimal DOM-less sandbox and report what
-    it installed. `plan` is JSON-serialisable or None (no plan injected)."""
+def _node_stdout(harness: str) -> str:
     node = shutil.which("node")
     if not node:
         pytest.skip("Node is required to exercise the JS core")
+    result = subprocess.run([node, "-e", harness], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr[-3000:]
+    return result.stdout
+
+
+def _run_core_in_node(*, plan, fail_install=False, call_disable_after=False, before_core="", after_core="") -> dict:
+    """Execute PRESERVE_CORE_JS in a minimal DOM-less sandbox and report what
+    it installed. `plan` is JSON-serialisable or None (no plan injected).
+    `before_core`/`after_core` run around the core; with `after_core` set the
+    report also carries `animFrame()`, which `after_core` must define."""
     plan_js = "undefined" if plan is None else json.dumps(plan)
     harness = f"""
 const events = [];
@@ -99,12 +104,14 @@ const MutationObserver = function() {{
 const requestAnimationFrame = function() {{}};
 const setInterval = function() {{}};
 const setTimeout = function() {{}};
+{before_core}
 let installThrew = null;
 try {{
 {live_continuity_js.PRESERVE_CORE_JS}
 }} catch (e) {{
   installThrew = String(e && e.message || e);
 }}
+{after_core}
 let disableThrew = null, disableReturned = null;
 if ({str(call_disable_after).lower()}) {{
   try {{
@@ -117,33 +124,91 @@ console.log(JSON.stringify({{
   threw: installThrew, installed: !!window.__OBED_P2_PRESERVE__,
   ready: !!(window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.ready),
   disabled: !!(window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.disabled),
-  disableThrew, disableReturned,
+  disableThrew, disableReturned,{" animFrame: animFrame()," if after_core else ""}
 }}));
 """
-    result = subprocess.run([node, "-e", harness], check=True, text=True, capture_output=True)
-    return json.loads(result.stdout.strip().splitlines()[-1])
+    return json.loads(_node_stdout(harness).strip().splitlines()[-1])
 
 
-def test_no_plan_guard_leaves_page_untouched():
-    """Fail-closed: with no `window.__OBED_CONTINUITY__`, the core must install
-    nothing (never even reach the `__OBED_P2_PRESERVE__` idempotency object)."""
-    out = _run_core_in_node(plan=None)
-    assert out == {
-        "threw": None, "installed": False, "ready": False, "disabled": False,
-        "disableThrew": None, "disableReturned": None,
-    }
+_INSTALLED_NOTHING = {
+    "threw": None, "installed": False, "ready": False, "disabled": False,
+    "disableThrew": None, "disableReturned": None,
+}
+_EMPTY_V2_PLAN = {"schema": 2, "movies": {}, "boundaries": []}
+_BRIDGE_ONLY_PLAN = {
+    "schema": 2,
+    "movies": {"movie1": {"assetKeys": ["untitled.mov"], "footprint": {"x": 1, "y": 2, "w": 3, "h": 4}}},
+    "boundaries": [{"atScene": 8, "action": "bridge", "movieKey": "movie1", "loop": False, "durationSeconds": 1.5,
+                    "src": {"objectId": "A3", "rect": {"x": 1, "y": 2, "w": 3, "h": 4}},
+                    "dst": {"objectId": "A4", "rect": {"x": 5, "y": 6, "w": 7, "h": 8}}}],
+}
+# main.js's `requestAnimFrame` already on `window` when the core runs: a plain (configurable) data property, or a
+# non-configurable one the core must leave alone. Either way the page's own call must reach the raw function.
+_RAW_ANIM_FRAME = """
+const rawCalls = [];
+function rawAnimFrame(cb) { rawCalls.push(typeof cb); cb(16); return 7; }
+"""
+_LATE_DATA_ANIM_FRAME = _RAW_ANIM_FRAME + "window.requestAnimFrame = rawAnimFrame;"
+_LOCKED_ANIM_FRAME = _RAW_ANIM_FRAME + (
+    "Object.defineProperty(window, 'requestAnimFrame', {value: rawAnimFrame, writable: true, configurable: false});"
+)
+_CALL_ANIM_FRAME = """
+const hookedAtLoad = window.requestAnimFrame !== rawAnimFrame;
+let ran = false;
+const id = window.requestAnimFrame(function() { ran = true; });
+function animFrame() {
+  return {hookedAtLoad, ran, id, rawCalls, rawNow: window.requestAnimFrame === rawAnimFrame};
+}
+"""
 
 
-def test_with_plan_installs_the_preserve_object():
-    plan = {
-        "movies": {"movie1": {"assetKeys": ["untitled.mov"], "footprint": {"x": 1, "y": 2, "w": 3, "h": 4}}},
-        "boundaries": [{"atScene": 6, "action": "restart"}],
-    }
-    out = _run_core_in_node(plan=plan)
-    assert out == {
-        "threw": None, "installed": True, "ready": True, "disabled": False,
-        "disableThrew": None, "disableReturned": None,
-    }
+@pytest.mark.parametrize(
+    "plan,kwargs,expected",
+    [
+        # Fail-closed: with no `window.__OBED_CONTINUITY__`, the core must install
+        # nothing (never even reach the `__OBED_P2_PRESERVE__` idempotency object).
+        pytest.param(None, {}, _INSTALLED_NOTHING, id="no-plan-guard-leaves-page-untouched"),
+        # Fail closed on the plan's shape: only `schema === 2` installs the core.
+        *[
+            pytest.param({k: v for k, v in {**_EMPTY_V2_PLAN, "schema": schema}.items() if v is not None},
+                         {}, _INSTALLED_NOTHING, id=f"not-schema-2-{label}")
+            for schema, label in ((None, "absent"), (1, "one"), (3, "three"), ("2", "string"))
+        ],
+        pytest.param(
+            {
+                "schema": 2,
+                "movies": {"movie1": {"assetKeys": ["untitled.mov"], "footprint": {"x": 1, "y": 2, "w": 3, "h": 4}}},
+                "boundaries": [{"atScene": 6, "action": "restart", "movieKey": "movie1",
+                                "src": {"objectId": "A2", "rect": {"x": 1, "y": 2, "w": 3, "h": 4}}}],
+            },
+            {}, {**_INSTALLED_NOTHING, "installed": True, "ready": True},
+            id="with-plan-installs-the-preserve-object",
+        ),
+        pytest.param(_EMPTY_V2_PLAN, {"fail_install": True},
+                     {**_INSTALLED_NOTHING, "threw": "install failed", "installed": True},
+                     id="partial-install-never-sets-ready"),
+        # The GL-clock hook wraps a `requestAnimFrame` main.js already assigned: the page's call reaches the raw
+        # function (callback wrapped, return value passed back), and `disable()` hands back the raw function itself.
+        pytest.param(
+            _BRIDGE_ONLY_PLAN,
+            {"before_core": _LATE_DATA_ANIM_FRAME, "after_core": _CALL_ANIM_FRAME, "call_disable_after": True},
+            {**_INSTALLED_NOTHING, "installed": True, "ready": True, "disabled": True, "disableReturned": True,
+             "animFrame": {"hookedAtLoad": True, "ran": True, "id": 7, "rawCalls": ["function"], "rawNow": True}},
+            id="bridge-plan-hooks-a-late-data-anim-frame-and-disable-unhooks-it",
+        ),
+        # A non-configurable `requestAnimFrame` cannot be hooked: the core installs without throwing, leaves it
+        # untouched, and the bridge falls back to today's clock.
+        pytest.param(
+            _BRIDGE_ONLY_PLAN,
+            {"before_core": _LOCKED_ANIM_FRAME, "after_core": _CALL_ANIM_FRAME},
+            {**_INSTALLED_NOTHING, "installed": True, "ready": True,
+             "animFrame": {"hookedAtLoad": False, "ran": True, "id": 7, "rawCalls": ["function"], "rawNow": True}},
+            id="bridge-plan-leaves-a-non-configurable-anim-frame-alone",
+        ),
+    ],
+)
+def test_install_outcome(plan, kwargs, expected):
+    assert _run_core_in_node(plan=plan, **kwargs) == expected
 
 
 def test_transparent_chrome_gated_by_plan_flag():
@@ -163,15 +228,7 @@ def test_preserve_core_js_source_declares_the_fail_closed_guard():
     guard_idx = js.index("window.__OBED_CONTINUITY__")
     preserve_idx = js.index("__OBED_P2_PRESERVE__ = {")
     assert guard_idx < preserve_idx
-    assert "if (!OBED_PLAN) return;" in js
-
-
-def test_partial_install_never_sets_ready():
-    out = _run_core_in_node(plan={"movies": {}, "boundaries": []}, fail_install=True)
-    assert out == {
-        "threw": "install failed", "installed": True, "ready": False, "disabled": False,
-        "disableThrew": None, "disableReturned": None,
-    }
+    assert "if (!OBED_PLAN || OBED_PLAN.schema !== 2) return;" in js
 
 
 def test_disable_survives_a_partial_install():
@@ -179,9 +236,7 @@ def test_disable_survives_a_partial_install():
     still be `disable()`-able without a TDZ ReferenceError — `disabled` (and
     everything else `disable()` touches before its `try`) is hoisted above the
     `window.__OBED_P2_PRESERVE__` assignment."""
-    out = _run_core_in_node(
-        plan={"movies": {}, "boundaries": []}, fail_install=True, call_disable_after=True,
-    )
+    out = _run_core_in_node(plan=_EMPTY_V2_PLAN, fail_install=True, call_disable_after=True)
     assert out["threw"] == "install failed"
     assert out["disableThrew"] is None
     assert out["disableReturned"] is True
@@ -206,6 +261,23 @@ def _stage_map_fragment() -> str:
     start = core.index("  const stageMapWarned = {};")
     end = core.index("  function assetKey(src) {", start)
     return core[start:end]
+
+
+#: The 3->4 bridge every extracted-fragment harness drives.
+_FRAGMENT_BOUNDARY_JS = """const boundary = {
+  atScene: 8, action: 'bridge', movieKey: 'movie1', durationSeconds: 1.5,
+  src: {objectId: 'A3', rect: {x: 198, y: 797, w: 952, h: 268}},
+  dst: {objectId: 'A4', rect: {x: 327, y: 709, w: 1266, h: 356}},
+};"""
+
+
+def _stage_map_el_js(stage: dict) -> str:
+    """The fake `#stage` element `stageMap()` measures, for an extracted-fragment harness."""
+    ow, oh, s, ox, oy = (json.dumps(stage[k]) for k in ("ow", "oh", "s", "ox", "oy"))
+    return f"""const stageMapEl = {{
+  offsetWidth: {ow}, offsetHeight: {oh},
+  getBoundingClientRect: () => ({{left: {ox}, top: {oy}, width: {ow} * {s}, height: {oh} * {s}}})
+}};"""
 
 
 def _ease_in_ease_out_reference(p: float) -> float:
@@ -239,42 +311,30 @@ def _eased_bridge_rect(fraction: float) -> dict:
 
 
 def _run_bridge_motion_in_node(*, stop_before_retry: bool = False, stage: dict = _IDENTITY_STAGE) -> dict:
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("Node is required to exercise the JS core")
     core = live_continuity_js.PRESERVE_CORE_JS
-    start = core.index("  function slide4Rect() {")
+    start = core.index("  function dstRect(entry) {")
     end = core.index("  function keepAtSlot", start)
     motion = _stage_map_fragment() + core[start:end]
     harness = f"""
 let now = 0, connected = false, preserveGeneration = 0;
+let departure = null;
 const frames = [];
-const boundary = {{
-  atScene: 8, movieKey: 'movie1', durationSeconds: 1.5,
-  srcRect: {{x: 198, y: 797, w: 952, h: 268}},
-  rect: {{x: 327, y: 709, w: 1266, h: 356}},
-}};
-const bridgeBoundary = () => boundary;
+{_FRAGMENT_BOUNDARY_JS}
+const nextEntry = (inst) => inst === 'A3' ? boundary : null;
+const instanceOf = (v) => v.__obedInstance;
+const hasDeparted = () => true;
 const currentHashNum = () => 7;
-const movieAssetKey = () => 'movie1';
 const beginMove = () => {{}};
 const note = () => {{}};
 const stage = {{appendChild(v) {{connected = true; v.parentNode = stage;}}}};
-const stageMapEl = {{
-  offsetWidth: {json.dumps(stage["ow"])}, offsetHeight: {json.dumps(stage["oh"])},
-  getBoundingClientRect: () => ({{
-    left: {json.dumps(stage["ox"])}, top: {json.dumps(stage["oy"])},
-    width: {json.dumps(stage["ow"])} * {json.dumps(stage["s"])},
-    height: {json.dumps(stage["oh"])} * {json.dumps(stage["s"])}
-  }})
-}};
+{_stage_map_el_js(stage)}
 const document = {{
   getElementById: (id) => id === 'stage' ? stageMapEl : stage,
   body: stage, contains: () => connected
 }};
 const performance = {{now: () => now}};
 const requestAnimationFrame = frame => frames.push(frame);
-const video = {{style: {{}}, dataset: {{}}, parentNode: null, __obedRemountEpoch: 0}};
+const video = {{style: {{}}, dataset: {{}}, parentNode: null, __obedRemountEpoch: 0, __obedInstance: 'A3'}};
 {motion}
 keepThroughBridge(video);
 now = 500;
@@ -301,8 +361,7 @@ console.log(JSON.stringify({{
   pinningAfterClear: video.__obedMotionPinning,
 }}));
 """
-    result = subprocess.run([node, "-e", harness], check=True, text=True, capture_output=True)
-    return json.loads(result.stdout)
+    return json.loads(_node_stdout(harness))
 
 
 @pytest.mark.parametrize("stop_before_retry", [False, True])
@@ -316,51 +375,42 @@ def test_bridge_redetach_reconnects_without_rewinding_motion(stop_before_retry):
     assert result["afterRetry"] == pytest.approx({
         "left": at["x"], "top": at["y"], "width": at["w"], "height": at["h"],
     })
-
-
-def test_bridge_motion_scaled_stage_maps_authored_rect_to_screen():
-    """`keepThroughBridge` interpolates in AUTHORED space then maps once — at
-    s=4/3, origin (0,0) every written screen px is the identity-case value × s."""
-    identity = _run_bridge_motion_in_node(stage=_IDENTITY_STAGE)
-    scaled = _run_bridge_motion_in_node(stage=_SCALED_STAGE)
-    s = _SCALED_STAGE["s"]
-    assert scaled["beforeDetach"] == pytest.approx(identity["beforeDetach"] * s)
-    for key in ("left", "top", "width", "height"):
-        assert scaled["afterRetry"][key] == pytest.approx(identity["afterRetry"][key] * s)
-
-
-def test_bridge_motion_letterboxed_stage_offsets_the_vertical_origin():
-    """A non-zero stage origin (letterboxed 1600x1000) only shifts y/top —
-    2560x1440 alone (origin (0,0)) can't see an offset-mapping bug."""
-    identity = _run_bridge_motion_in_node(stage=_IDENTITY_STAGE)
-    letterboxed = _run_bridge_motion_in_node(stage=_LETTERBOXED_STAGE)
-    s = _LETTERBOXED_STAGE["s"]
-    oy = _LETTERBOXED_STAGE["oy"]
-    assert letterboxed["beforeDetach"] == pytest.approx(identity["beforeDetach"] * s)
-    assert letterboxed["afterRetry"]["left"] == pytest.approx(identity["afterRetry"]["left"] * s)
-    assert letterboxed["afterRetry"]["top"] == pytest.approx(identity["afterRetry"]["top"] * s + oy)
-    assert letterboxed["afterRetry"]["width"] == pytest.approx(identity["afterRetry"]["width"] * s)
-    assert letterboxed["afterRetry"]["height"] == pytest.approx(identity["afterRetry"]["height"] * s)
-
-
-def test_clear_generation_stops_bridge_motion_callbacks():
-    result = _run_bridge_motion_in_node()
+    # A clear (generation bump) stops the motion callbacks.
     assert result["unchangedAfterClear"] is True
     assert result["pendingFramesAfterClear"] == 0
     assert result["pinningAfterClear"] is False
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        # `keepThroughBridge` interpolates in AUTHORED space then maps once — at
+        # s=4/3, origin (0,0) every written screen px is the identity-case value × s.
+        pytest.param(_SCALED_STAGE, id="scaled-maps-authored-rect-to-screen"),
+        # A non-zero stage origin (letterboxed 1600x1000) only shifts y/top —
+        # 2560x1440 alone (origin (0,0)) can't see an offset-mapping bug.
+        pytest.param(_LETTERBOXED_STAGE, id="letterboxed-offsets-the-vertical-origin"),
+    ],
+)
+def test_bridge_motion_maps_the_identity_motion_onto_the_stage(stage):
+    identity = _run_bridge_motion_in_node(stage=_IDENTITY_STAGE)
+    mapped = _run_bridge_motion_in_node(stage=stage)
+    s, ox, oy = stage["s"], stage["ox"], stage["oy"]
+    assert mapped["beforeDetach"] == pytest.approx(identity["beforeDetach"] * s + ox)
+    assert mapped["afterRetry"]["left"] == pytest.approx(identity["afterRetry"]["left"] * s + ox)
+    assert mapped["afterRetry"]["top"] == pytest.approx(identity["afterRetry"]["top"] * s + oy)
+    assert mapped["afterRetry"]["width"] == pytest.approx(identity["afterRetry"]["width"] * s)
+    assert mapped["afterRetry"]["height"] == pytest.approx(identity["afterRetry"]["height"] * s)
 
 
 def _run_slot_and_bridge34_in_node(*, stage: dict) -> dict:
     """`keepAtSlot` and `bridgeTo34` both place a `<video>` on `document.body`
     (screen px) at the AUTHORED `slide4Rect()` — this exercises both against
     the same stage fixture in one Node process."""
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("Node is required to exercise the JS core")
     core = live_continuity_js.PRESERVE_CORE_JS
-    motion_start = core.index("  function slide4Rect() {")
+    motion_start = core.index("  function dstRect(entry) {")
     motion_end = core.index("  function rectOverlapArea(r, rect) {", motion_start)
-    bridge_start = core.index("  function bridgeTo34(v) {")
+    bridge_start = core.index("  function bridgeTo34(v, entry) {")
     bridge_end = core.index("  function keepSuppressed(el) {", bridge_start)
     fragment = (
         _stage_map_fragment()
@@ -370,24 +420,15 @@ def _run_slot_and_bridge34_in_node(*, stage: dict) -> dict:
     harness = f"""
 let connected = false, preserveGeneration = 0, disabled = false;
 const frames = [];
-const boundary = {{
-  atScene: 8, movieKey: 'movie1', durationSeconds: 1.5,
-  rect: {{x: 327, y: 709, w: 1266, h: 356}},
-}};
-const bridgeBoundary = () => boundary;
-const currentHashNum = () => 7;
-const slide4MinHash = () => null;
+{_FRAGMENT_BOUNDARY_JS}
+const nextEntry = () => null;
+const instanceOf = (v) => v.__obedInstance;
+const hasDeparted = () => true;
+const currentHashNum = () => 9;
 const beginMove = () => {{}};
 const note = () => {{}};
 const stage = {{appendChild(v) {{connected = true; v.parentNode = stage;}}}};
-const stageMapEl = {{
-  offsetWidth: {json.dumps(stage["ow"])}, offsetHeight: {json.dumps(stage["oh"])},
-  getBoundingClientRect: () => ({{
-    left: {json.dumps(stage["ox"])}, top: {json.dumps(stage["oy"])},
-    width: {json.dumps(stage["ow"])} * {json.dumps(stage["s"])},
-    height: {json.dumps(stage["oh"])} * {json.dumps(stage["s"])}
-  }})
-}};
+{_stage_map_el_js(stage)}
 const document = {{
   getElementById: (id) => id === 'stage' ? stageMapEl : stage,
   body: stage, contains: () => connected
@@ -396,10 +437,10 @@ const requestAnimationFrame = frame => frames.push(frame);
 {fragment}
 connected = true;   // real is already attached (bridgeTo34 appends before keepAtSlot runs)
 const real = {{
-  style: {{}}, dataset: {{}}, parentNode: null, ended: false,
+  style: {{}}, dataset: {{}}, parentNode: null, ended: false, __obedHold: boundary,
   getBoundingClientRect: () => ({{left: 0, top: 0, width: 10, height: 10}})
 }};
-keepAtSlot(real);
+keepAtSlot(real, boundary);
 frames.shift()();
 const slotDest = {{left: parseFloat(real.style.left), top: parseFloat(real.style.top),
   width: parseFloat(real.style.width), height: parseFloat(real.style.height)}};
@@ -409,14 +450,13 @@ const bridged = {{
   style: {{}}, dataset: {{}}, parentNode: null, ended: false, paused: true,
   play() {{ this.paused = false; return {{catch(){{}}}}; }}
 }};
-bridgeTo34(bridged);
+bridgeTo34(bridged, boundary);
 const bridgeDest = {{left: parseFloat(bridged.style.left), top: parseFloat(bridged.style.top),
   width: parseFloat(bridged.style.width), height: parseFloat(bridged.style.height)}};
 
 console.log(JSON.stringify({{slotDest, bridgeDest}}));
 """
-    result = subprocess.run([node, "-e", harness], check=True, text=True, capture_output=True)
-    return json.loads(result.stdout)
+    return json.loads(_node_stdout(harness))
 
 
 @pytest.mark.parametrize("stage", [_IDENTITY_STAGE, _SCALED_STAGE, _LETTERBOXED_STAGE], ids=["identity", "scaled", "letterboxed"])
@@ -448,23 +488,18 @@ def _run_slot_detach_in_node(
     rect is derived from its own inline style, so a converged pin is a fixed
     point (a static rect would double every frame).
     """
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("Node is required to exercise the JS core")
     core = live_continuity_js.PRESERVE_CORE_JS
-    start = core.index("  function slide4Rect() {")
+    start = core.index("  function dstRect(entry) {")
     end = core.index("  function rectOverlapArea(r, rect) {", start)
     fragment = _stage_map_fragment() + core[start:end]
     harness = f"""
 let connected = true, disabled = false, preserveGeneration = 0, hash = 9, moves = 0;
 const notes = [], frames = [];
-const boundary = {{
-  atScene: 8, movieKey: 'movie1', durationSeconds: 1.5,
-  rect: {{x: 327, y: 709, w: 1266, h: 356}},
-}};
-const bridgeBoundary = () => boundary;
+{_FRAGMENT_BOUNDARY_JS}
+const nextEntry = () => null;
+const instanceOf = (v) => v.__obedInstance;
+const hasDeparted = () => true;
 const currentHashNum = () => hash;
-const slide4MinHash = () => 8;
 const beginMove = () => {{ moves += 1; }};
 const note = (kind, detail) => notes.push({{kind: kind, detail: detail}});
 const stage = {{
@@ -478,14 +513,7 @@ const stage = {{
     connected = false;
   }}
 }};
-const stageMapEl = {{
-  offsetWidth: {json.dumps(stage["ow"])}, offsetHeight: {json.dumps(stage["oh"])},
-  getBoundingClientRect: () => ({{
-    left: {json.dumps(stage["ox"])}, top: {json.dumps(stage["oy"])},
-    width: {json.dumps(stage["ow"])} * {json.dumps(stage["s"])},
-    height: {json.dumps(stage["oh"])} * {json.dumps(stage["s"])}
-  }})
-}};
+{_stage_map_el_js(stage)}
 const document = {{
   getElementById: (id) => id === 'stage' ? stageMapEl : stage,
   querySelector: () => null, body: stage, contains: () => connected
@@ -496,7 +524,7 @@ const performance = {{now: () => 0}};
 const real = {{
   style: {{left: '0px', top: '0px', width: '10px', height: '10px'}},
   dataset: {{obedRemounted: '1'}}, parentNode: stage, ended: false, paused: true,
-  __obedElId: 7, __obedGen: 0,
+  __obedElId: 7, __obedGen: 0, __obedInstance: 'A4', __obedHold: boundary,
   play() {{ this.paused = false; return {{catch(){{}}}}; }},
   pause() {{ this.paused = true; }},
   getBoundingClientRect() {{
@@ -509,7 +537,7 @@ const real = {{
 const rect = () => Object.fromEntries(
   ['left', 'top', 'width', 'height'].map(key => [key, parseFloat(real.style[key])])
 );
-keepAtSlot(real);
+keepAtSlot(real, boundary);
 frames.shift()();                 // attached frame: the pin converges
 const pinned = rect();
 if ({str(detach).lower()}) {{
@@ -533,8 +561,7 @@ console.log(JSON.stringify({{
   pendingFrames: frames.length,
 }}));
 """
-    result = subprocess.run([node, "-e", harness], check=True, text=True, capture_output=True)
-    return json.loads(result.stdout)
+    return json.loads(_node_stdout(harness))
 
 
 @pytest.mark.parametrize(
@@ -562,31 +589,28 @@ def test_slot_pin_reattaches_a_detached_bridged_video(stage):
     assert result["moves"] == 1              # beginMove() before the append
 
 
-def test_slot_pin_does_not_reattach_after_clear():
-    """`clear()` / `disable()` bump `preserveGeneration` and stamp
-    `__obedGen = -1`; a detach after that must end the loop, not resurrect a
-    retired decoder."""
-    result = _run_slot_detach_in_node(mutate="preserveGeneration += 1; real.__obedGen = -1;")
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        # `clear()` / `disable()` bump `preserveGeneration` and stamp `__obedGen = -1`;
+        # a detach after that must end the loop, not resurrect a retired decoder.
+        pytest.param("preserveGeneration += 1; real.__obedGen = -1;", id="after-clear"),
+        # `retire-on-start-movie` stamps `__obedGen = -1` WITHOUT bumping the
+        # generation — liveness must be read off the element, not a generation
+        # captured at engage time.
+        pytest.param("real.__obedGen = -1;", id="after-a-per-element-retire"),
+        pytest.param("disabled = true;", id="when-disabled"),
+        # Scene left the bridge zone (hash < s4): the loop ends as it always did,
+        # before the re-attach path is even considered.
+        pytest.param("hash = 7;", id="outside-the-bridge-zone"),
+        pytest.param("real.ended = true;", id="an-ended-decoder"),
+    ],
+)
+def test_slot_pin_does_not_reattach_a_detached_decoder(mutate):
+    result = _run_slot_detach_in_node(mutate=mutate)
     assert result["reattachNotes"] == 0
     assert result["failureNotes"] == []
     assert result["connected"] is False
-    assert result["pinning"] is False
-    assert result["pendingFrames"] == 0
-
-
-def test_slot_pin_does_not_reattach_after_a_per_element_retire():
-    """`retire-on-start-movie` stamps `__obedGen = -1` WITHOUT bumping the
-    generation — liveness must be read off the element, not a generation
-    captured at engage time."""
-    result = _run_slot_detach_in_node(mutate="real.__obedGen = -1;")
-    assert result["reattachNotes"] == 0
-    assert result["pinning"] is False
-    assert result["pendingFrames"] == 0
-
-
-def test_slot_pin_does_not_reattach_when_disabled():
-    result = _run_slot_detach_in_node(mutate="disabled = true;")
-    assert result["reattachNotes"] == 0
     assert result["pinning"] is False
     assert result["pendingFrames"] == 0
 
@@ -631,24 +655,6 @@ def test_slot_pin_keeps_holding_a_connected_live_decoder():
     assert result["reattachNotes"] == 0
     assert result["stillRemounted"] is True
     assert result["moves"] == 0
-
-
-def test_slot_pin_does_not_reattach_outside_the_bridge_zone():
-    """Scene left the bridge zone (hash < s4): the loop ends as it always did,
-    before the re-attach path is even considered."""
-    result = _run_slot_detach_in_node(mutate="hash = 7;")
-    assert result["reattachNotes"] == 0
-    assert result["failureNotes"] == []
-    assert result["connected"] is False
-    assert result["pinning"] is False
-    assert result["pendingFrames"] == 0
-
-
-def test_slot_pin_does_not_reattach_an_ended_decoder():
-    result = _run_slot_detach_in_node(mutate="real.ended = true;")
-    assert result["reattachNotes"] == 0
-    assert result["pinning"] is False
-    assert result["pendingFrames"] == 0
 
 
 @pytest.mark.parametrize(
@@ -714,9 +720,16 @@ function makeVideo() {
     }
     return this._rect;
   };
-  v.setAttribute = function(name, val) { if (name === 'style') this.__styleAttr = val; };
+  v.id = '';
+  v.setAttribute = function(name, val) {
+    if (name === 'style') this.__styleAttr = val;
+    if (name === 'id') this.id = val;
+    if (name === 'src') srcStore.set(this, val);
+  };
   v.getAttribute = function(name) { if (name === 'style') return this.__styleAttr || ''; return null; };
   v.removeAttribute = function(name) { return Element.prototype.removeAttribute.call(this, name); };
+  // `detach()` drops only the parent (an in-stage flag can outlive it), so connected = parented AND in the document.
+  Object.defineProperty(v, 'isConnected', {get() { return !!this.parentNode && document.contains(this); }});
   videos.push(v);
   return v;
 }
@@ -792,6 +805,11 @@ function getComputedStyle(el) {
 const hashListeners = [];
 const window = {
   __OBED_CONTINUITY__: __PLAN__,
+  // The player's `updateWindowHistory`: it writes the scene index into the hash.
+  history: {replaceState(state, title, url) {
+    const i = String(url).indexOf('#');
+    if (i >= 0) location.hash = String(url).slice(i);
+  }},
   addEventListener(type, fn) { if (type === 'hashchange') hashListeners.push(fn); },
   removeEventListener(){},
 };
@@ -811,13 +829,22 @@ function detach(v) {
   v.parentNode = null;
   moCallbacks.slice().forEach((cb) => cb([{removedNodes: [v]}]));
 }
+/** A player movie element for export instance `inst`: the id is set before any src (F1). */
+function video(inst) {
+  const v = document.createElement('video');
+  if (inst) v.setAttribute('id', inst + '-video');
+  return v;
+}
 let nowMs = 0;
 const performance = {now: () => nowMs};
 const rafQueue = [];
 const requestAnimationFrame = (fn) => { rafQueue.push(fn); return 0; };
-/** Run the frames queued so far once (each live loop re-queues itself). */
-function flushFrames() { rafQueue.splice(0).forEach((fn) => fn()); }
-const setTimeout = () => 0;
+/** Run every animation frame queued so far, once (the loops re-queue themselves). */
+function pump() { rafQueue.splice(0).forEach((fn) => fn()); }
+const timeouts = [];
+// Timers never run on their own; `flushTimeouts()` fires every pending one (late, as a slow operator would).
+const setTimeout = (fn) => { timeouts.push(fn); return 0; };
+function flushTimeouts() { while (timeouts.length) timeouts.splice(0).forEach((fn) => fn()); }
 const intervals = [];
 const setInterval = (fn) => { intervals.push(fn); return 0; };
 /** Run the core's keep-warm interval once (it drives the retire sweep). */
@@ -835,29 +862,41 @@ __AFTER_CORE__
 _LOADED = "document.readyState = 'complete';"
 
 
-def _run_full_core_in_node(
-    *, plan: dict, stage: dict | None, script: str, after_core: str = _LOADED
-) -> dict:
-    """Run the real `PRESERVE_CORE_JS` IIFE against the fake DOM above, then
+def _full_harness(
+    *, plan: dict, stage: dict | None, script: str, after_core: str = _LOADED, before_core: str = ""
+) -> str:
+    """`before_core` (page scripts that ran first), the real `PRESERVE_CORE_JS` IIFE against the fake DOM above, then
     `after_core` (the rest of the page's inline scripts, then the load), then
     `script` (which must `console.log(JSON.stringify(...))` its result)."""
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("Node is required to exercise the JS core")
-    harness = (
+    return (
         _FULL_HARNESS_PREAMBLE.replace("__STAGE__", json.dumps(stage))
         .replace("__PLAN__", json.dumps(plan))
         .replace("__AFTER_CORE__", after_core)
-        .replace("__CORE__", live_continuity_js.PRESERVE_CORE_JS)
+        .replace("__CORE__", before_core + "\n" + live_continuity_js.PRESERVE_CORE_JS)
         + script
     )
-    result = subprocess.run([node, "-e", harness], check=True, text=True, capture_output=True)
-    return json.loads(result.stdout.strip().splitlines()[-1])
 
 
+def _run_full_core_in_node(
+    *, plan: dict, stage: dict | None, script: str, after_core: str = _LOADED, before_core: str = ""
+) -> dict:
+    harness = _full_harness(plan=plan, stage=stage, script=script, after_core=after_core, before_core=before_core)
+    return json.loads(_node_stdout(harness).strip().splitlines()[-1])
+
+
+def _inst(object_id: str, rect: dict) -> dict:
+    return {"objectId": object_id, "rect": rect}
+
+
+_FOOTPRINT = {"x": 100, "y": 200, "w": 300, "h": 150}
+#: One movie pinned across 1->2: `A1` (slide 1) carries into `A2` (slide 2).
 _MOVIE_PLAN = {
-    "movies": {"movie1": {"assetKeys": ["untitled.mov"], "footprint": {"x": 100, "y": 200, "w": 300, "h": 150}}},
-    "boundaries": [],
+    "schema": 2,
+    "movies": {"movie1": {"assetKeys": ["untitled.mov"], "footprint": _FOOTPRINT}},
+    "boundaries": [
+        {"atScene": 2, "action": "pin", "movieKey": "movie1", "loop": False,
+         "src": _inst("A1", _FOOTPRINT), "dst": _inst("A2", _FOOTPRINT)},
+    ],
 }
 
 
@@ -873,24 +912,32 @@ def test_stage_map_matches_measured_formula(stage):
     })
 
 
-def test_stage_map_null_when_stage_missing():
-    result = _run_full_core_in_node(plan=_MOVIE_PLAN, stage=None, script="console.log(JSON.stringify(P.stageMap()));")
+@pytest.mark.parametrize(
+    "stage",
+    [
+        pytest.param(None, id="stage-missing"),
+        pytest.param(dict(_IDENTITY_STAGE, ow=0), id="box-is-degenerate"),
+        pytest.param(
+            {**{k: v for k, v in _SCALED_STAGE.items() if k != "s"}, "sx": 4 / 3, "sy": 4 / 3 * 1.01},  # > 0.1% apart
+            id="scale-is-non-uniform",
+        ),
+    ],
+)
+def test_stage_map_null_when(stage):
+    result = _run_full_core_in_node(plan=_MOVIE_PLAN, stage=stage, script="console.log(JSON.stringify(P.stageMap()));")
     assert result is None
 
 
-def test_stage_map_null_when_box_is_degenerate():
-    zero_box = dict(_IDENTITY_STAGE, ow=0)
-    result = _run_full_core_in_node(plan=_MOVIE_PLAN, stage=zero_box, script="console.log(JSON.stringify(P.stageMap()));")
-    assert result is None
-
-
-def test_stage_map_null_when_scale_is_non_uniform():
-    non_uniform = dict(_SCALED_STAGE)
-    non_uniform.pop("s")
-    non_uniform["sx"] = 4 / 3
-    non_uniform["sy"] = 4 / 3 * 1.01  # > 0.1% relative difference
-    result = _run_full_core_in_node(plan=_MOVIE_PLAN, stage=non_uniform, script="console.log(JSON.stringify(P.stageMap()));")
-    assert result is None
+def _stash_a1_captured_at(rect_js: str) -> str:
+    """Pool a ready `A1` whose captured rect is `rect_js` (a src clear stashes it), then `remountAll()`."""
+    return r"""
+const v = video('A1');
+v.readyState = 4; v.currentTime = 1;
+v.src = 'https://host/untitled.mov';
+v._rect = __RECT__;
+v.src = '';
+P.remountAll();
+""".replace("__RECT__", rect_js)
 
 
 @pytest.mark.parametrize("stage", [_IDENTITY_STAGE, _SCALED_STAGE, _LETTERBOXED_STAGE], ids=["identity", "scaled", "letterboxed"])
@@ -898,13 +945,7 @@ def test_remount_footprint_fallback_maps_the_authored_footprint(stage):
     """When a preserved `<video>`'s captured rect is degenerate, `tryRemount`
     falls back to the plan footprint — which is AUTHORED px and must be mapped
     to SCREEN px (`box.w > 1 ? box.w : fp.w` mixes it with an already-screen box)."""
-    script = r"""
-const v = document.createElement('video');
-v.readyState = 4; v.currentTime = 1;
-v.src = 'https://host/untitled.mov';
-v._rect = {left: 0, top: 0, width: 0, height: 0};
-v.src = '';
-P.remountAll();
+    script = _stash_a1_captured_at("{left: 0, top: 0, width: 0, height: 0}") + r"""
 const evt = P.events.find(e => e.kind === 'remount-footprint-rect');
 console.log(JSON.stringify(evt && evt.detail && evt.detail.rect));
 """
@@ -919,19 +960,10 @@ def test_remount_footprint_fallback_triggers_at_literal_zero_or_the_live_stage_o
     (0,0) in viewport space regardless of where the stage sits — the real
     1->2 letterboxed-gate regression) OR the live stage origin (Codex's
     zero-layout-attached-parent case via `captureLayout`'s style fallback)."""
-    script = r"""
-const v = document.createElement('video');
-v.readyState = 4; v.currentTime = 1;
-v.src = 'https://host/untitled.mov';
-v._rect = {left: __OX__, top: __OY__, width: 400, height: 200};
-v.src = '';
-P.remountAll();
-const evt = P.events.find(e => e.kind === 'remount-footprint-rect');
-console.log(JSON.stringify(evt && evt.detail && evt.detail.rect));
-"""
-
     def _run(stage, at_x, at_y):
-        js = script.replace("__OX__", json.dumps(at_x)).replace("__OY__", json.dumps(at_y))
+        js = _stash_a1_captured_at(f"{{left: {json.dumps(at_x)}, top: {json.dumps(at_y)}, width: 400, height: 200}}")
+        js += "const evt = P.events.find(e => e.kind === 'remount-footprint-rect');\n"
+        js += "console.log(JSON.stringify(evt && evt.detail && evt.detail.rect));\n"
         return _run_full_core_in_node(plan=_MOVIE_PLAN, stage=stage, script=js)
 
     for stage, box_origin in (
@@ -949,13 +981,7 @@ console.log(JSON.stringify(evt && evt.detail && evt.detail.rect));
 def test_remount_does_not_treat_a_real_off_origin_rect_as_unpositioned():
     """Companion regression guard: a box that is genuinely away from the
     stage origin must NOT be forced through the footprint fallback."""
-    script = r"""
-const v = document.createElement('video');
-v.readyState = 4; v.currentTime = 1;
-v.src = 'https://host/untitled.mov';
-v._rect = {left: 900, top: 450, width: 400, height: 200};
-v.src = '';
-P.remountAll();
+    script = _stash_a1_captured_at("{left: 900, top: 450, width: 400, height: 200}") + r"""
 console.log(JSON.stringify({
   fellBackToFootprint: P.events.some(e => e.kind === 'remount-footprint-rect'),
 }));
@@ -965,13 +991,7 @@ console.log(JSON.stringify({
 
 
 def test_remount_footprint_fallback_notes_once_when_stage_map_unavailable():
-    script = r"""
-const v = document.createElement('video');
-v.readyState = 4; v.currentTime = 1;
-v.src = 'https://host/untitled.mov';
-v._rect = {left: 0, top: 0, width: 0, height: 0};
-v.src = '';
-P.remountAll();
+    script = _stash_a1_captured_at("{left: 0, top: 0, width: 0, height: 0}") + r"""
 P.remountAll();
 const warn = P.events.filter(e => e.kind === 'stage-map-unavailable' && e.detail.consumer === 'remount-footprint-rect');
 console.log(JSON.stringify({warnCount: warn.length, sawRect: P.events.some(e => e.kind === 'remount-footprint-rect')}));
@@ -996,7 +1016,7 @@ canvases.push({
   id: 'posterCanvas1', parentNode: posterParent, nextSibling: null,
   getBoundingClientRect: () => ({left: 500, top: 300, width: 200, height: 100}),
 });
-const v = document.createElement('video');
+const v = video('A1');
 v.readyState = 4; v.currentTime = 1;
 v._rect = {left: 500, top: 300, width: 200, height: 100};
 v.src = 'https://host/untitled.mov';
@@ -1025,7 +1045,7 @@ canvases.push({
   id: 'c1', parentNode: {insertBefore(){}, appendChild(){}}, nextSibling: null,
   getBoundingClientRect: () => ({left: 500 + __DX__, top: 300, width: 200, height: 100}),
 });
-const v = document.createElement('video');
+const v = video('A1');
 v.readyState = 4; v.currentTime = 1;
 v._rect = {left: 500, top: 300, width: 200, height: 100};
 v.src = 'https://host/untitled.mov';
@@ -1043,7 +1063,7 @@ console.log(JSON.stringify({
 
 def test_footprint_owner_decoder_id_resolves_an_authored_rect_via_mapped_screen_rect():
     script = r"""
-const v = document.createElement('video');
+const v = video('A1');
 v.readyState = 4; v.currentTime = 2; v.videoWidth = 640; v.videoHeight = 480;
 v.parentNode = bodyEl;
 v.src = 'https://host/untitled.mov';
@@ -1069,7 +1089,7 @@ console.log(JSON.stringify(P.footprintOwnerDecoderId({x: 100, y: 200, w: 300, h:
 def test_disable_makes_every_hook_a_pass_through():
     script = r"""
 const disableReturned = P.disable();
-const v = document.createElement('video');   // createElement patch itself isn't gated; only its src hook
+const v = video('A1');   // createElement patch itself isn't gated; only its src hook
 v.src = 'https://host/untitled.mov';
 const before = P.events.length;
 v.src = '';   // patched src setter: stash() must NOT run (pass-through instead)
@@ -1096,7 +1116,7 @@ def test_disable_after_a_stash_is_refused():
     is no longer safe (it can't unwind a facade/bridge/suppress loop) — it
     must do nothing and return `false`, leaving every hook still active."""
     script = r"""
-const v = document.createElement('video');
+const v = video('A1');
 v.readyState = 4; v.currentTime = 1;
 v.src = 'https://host/untitled.mov';
 v.src = '';   // stash() pools it -> everPreserved becomes true
@@ -1110,53 +1130,143 @@ console.log(JSON.stringify({
     assert result == {"disableReturned": False, "disabled": False}
 
 
+# --- Detach inside a move's window (detach plan r8 §3 (a1), landed 2026-10-10) ---
+#
+# The measured blink: the core re-homes a pooled decoder (`beginMove` sets
+# `__obedRemounting` until the next macrotask), and the player then tears down
+# the layer it was re-homed into before that flag clears. The detach observer
+# must tell that teardown (node still out of the document at delivery) from a
+# self-move (already re-inserted at delivery): the first is stashed and
+# re-homed inside the same delivery, the second stays refused by the guard.
+
+#: Pool `A1` at its teardown; the synchronous remount re-homes it into the body
+#: and leaves `__obedRemounting` set (the harness never runs timers). At `#0`
+#: the remount re-homes it; at `#1`, its pin's transition scene, the pin hold
+#: does (`pin-hold-start` once, then silently on a re-hoist).
+_REHOMED_A1 = r"""
+const v = video('A1');
+v.readyState = 4; v.currentTime = 1;
+v.parentNode = bodyEl;
+v.src = 'https://host/untitled.mov';
+goToScene(__SCENE__);
+detach(v);
+const rehomed = {connected: v.isConnected, remounting: !!v.__obedRemounting};
+const n0 = P.events.length;
+"""
+_REMOVAL_INSIDE_THE_WINDOW = {
+    "direct": "detach(v);",
+    "subtree": r"""
+const layer = {querySelectorAll: (sel) => (sel === 'video' && v.parentNode === layer ? [v] : [])};
+v.parentNode = layer;
+moCallbacks.slice().forEach((cb) => cb([{removedNodes: [layer]}]));
+""",
+    "self-move": "moCallbacks.slice().forEach((cb) => cb([{removedNodes: [v]}]));",
+}
+_AFTER_REMOVAL = r"""
+console.log(JSON.stringify({
+  rehomed, connected: v.isConnected, parentIsBody: v.parentNode === bodyEl,
+  kinds: P.events.slice(n0).map(e => e.kind),
+}));
+"""
+
+
+@pytest.mark.parametrize("scene", [0, 1], ids=["resting", "pin-transition"])
+@pytest.mark.parametrize("removal", ["direct", "subtree"])
+def test_a_teardown_inside_a_moves_window_is_stashed_and_rehomed_in_the_same_delivery(removal, scene):
+    script = _REHOMED_A1.replace("__SCENE__", str(scene)) + _REMOVAL_INSIDE_THE_WINDOW[removal] + _AFTER_REMOVAL
+    result = _run_full_core_in_node(plan=_MOVIE_PLAN, stage=_IDENTITY_STAGE, script=script)
+    assert result["rehomed"] == {"connected": True, "remounting": True}
+    why = "preserve-on-detach" if removal == "direct" else "preserve-on-detach-subtree"
+    assert result["kinds"] == [why, "remount-scheduled", *(["remount-done"] if scene == 0 else [])]
+    assert result["connected"] and result["parentIsBody"]
+
+
+@pytest.mark.parametrize("scene", [0, 1], ids=["resting", "pin-transition"])
+def test_a_self_move_still_connected_at_delivery_stays_refused_by_the_guard(scene):
+    script = _REHOMED_A1.replace("__SCENE__", str(scene)) + _REMOVAL_INSIDE_THE_WINDOW["self-move"] + _AFTER_REMOVAL
+    result = _run_full_core_in_node(plan=_MOVIE_PLAN, stage=_IDENTITY_STAGE, script=script)
+    assert result["rehomed"] == {"connected": True, "remounting": True}
+    assert result["kinds"] == []
+    assert result["connected"]
+
+
+def test_only_the_detach_observer_passes_the_connectivity_at_delivery_to_stash():
+    """Every other `stash` caller keeps the `__obedRemounting` guard unconditionally."""
+    core = live_continuity_js.PRESERVE_CORE_JS
+    calls = re.findall(r"(?<!function )\bstash\(([^()]*)\)", core)
+    assert [args for args in calls if args.count(",") == 2] == [
+        "node, 'preserve-on-detach', !node.isConnected", "v, 'preserve-on-detach-subtree', !v.isConnected"]
+    assert len(calls) > 2
+    assert core.count("if (v.__obedRemounting && !detached) return;") == 1
+
+
 # --- I2: the retire zone (per-boundary refusal) -------------------------
 #
-# Contract: one `{"atScene": N, "action": "retire", "movieKey": K}` boundary
-# hands K back to the raw player. Measured on the real export (2026-09-20):
-# the player detaches the movie while the hash is still the TRANSITION scene
-# (`N - 1`) and only rewrites it to `N` ~2 s later — and it rewrites the hash
-# WITHOUT ever firing `hashchange`. So the zone is `[N - 1, <next
-# restart/bridge atScene>)` and the sweep is driven by the keep-warm interval.
-# Inside the zone the runtime must be INVISIBLE: nothing pooled, remounted,
-# facaded or reused, and the `src` clear / `removeAttribute('src')` the hooks
-# normally swallow must really happen. Every decline notes `preserve-refused`
-# (once per key+via); the sweep notes `retire-boundary`.
+# Contract (schema 2): `{"atScene": N, "action": "retire", "src": {"objectId": I}}`
+# hands instance I back to the raw player. Measured on the real export
+# (2026-09-20): the player detaches the movie while the hash is still the
+# TRANSITION scene (`N - 1`) and only rewrites it to `N` ~2 s later — and it
+# rewrites the hash WITHOUT ever firing `hashchange`. So the zone opens at
+# `N - 1` and the sweep is driven by the keep-warm interval. The zone names one
+# instance, which lives only on its slide, so it needs no end. Inside it the
+# runtime is INVISIBLE for I: nothing pooled, remounted, facaded or reused, and
+# the `src` clear / `removeAttribute('src')` really happen. Every decline notes
+# `preserve-refused` (once per instance+via); the sweep of a decoder the runtime
+# pooled or holds for I notes `retire-boundary`.
 
-#: The fixture's shape: retire movie1 at scene 2 (so the zone opens at the #1
-#: transition), restart at 6 (zone end), bridge at 8.
+_RECT_S3 = {"x": 198, "y": 797, "w": 952, "h": 268}
+_RECT_S4 = {"x": 327, "y": 709, "w": 1266, "h": 356}
+_W_RECT = {"x": 900, "y": 500, "w": 200, "h": 100}
+_MOVIES = {
+    "movie1": {"assetKeys": ["untitled.mov"], "footprint": _FOOTPRINT},
+    "movie2": {"assetKeys": ["wa0125.mov"], "footprint": _W_RECT},
+}
+#: The P2 shape: movie1 `A1` (slide 1, #0-#1) is refused at 1->2, `A2` (slide 2,
+#: #2-#5) restarts into `A3` (slide 3, #6-#7), which bridges into `A4` (slide 4,
+#: #8+). movie2 `W1` is pinned into `W2` across the same 1->2 cut.
+_RESTART = {"atScene": 6, "action": "restart", "movieKey": "movie1",
+            "src": _inst("A2", _FOOTPRINT), "dst": _inst("A3", _RECT_S3)}
+_BRIDGE = {"atScene": 8, "action": "bridge", "movieKey": "movie1", "durationSeconds": 1.5, "loop": False,
+           "src": _inst("A3", _RECT_S3), "dst": _inst("A4", _RECT_S4)}
+_W_PIN = {"atScene": 2, "action": "pin", "movieKey": "movie2", "loop": False,
+          "src": _inst("W1", _W_RECT), "dst": _inst("W2", _W_RECT)}
 _RETIRE_PLAN = {
-    "movies": {
-        "movie1": {"assetKeys": ["untitled.mov"], "footprint": {"x": 100, "y": 200, "w": 300, "h": 150}},
-        "movie2": {"assetKeys": ["wa0125.mov"], "footprint": {"x": 900, "y": 500, "w": 200, "h": 100}},
-    },
+    "schema": 2,
+    "movies": _MOVIES,
     "boundaries": [
-        {"atScene": 2, "action": "retire", "movieKey": "movie1"},
-        {"atScene": 6, "action": "restart"},
-        {
-            "atScene": 8, "action": "bridge", "movieKey": "movie1",
-            "srcRect": {"x": 198, "y": 797, "w": 952, "h": 268},
-            "rect": {"x": 327, "y": 709, "w": 1266, "h": 356},
-            "durationSeconds": 1.5,
-        },
+        {"atScene": 2, "action": "retire", "movieKey": "movie1", "reason": "refused", "src": _inst("A1", _FOOTPRINT)},
+        _RESTART, _BRIDGE, _W_PIN,
     ],
 }
-#: Same plan with the retire entry removed — the "behaves exactly as today" control.
+#: The same deck with 1->2 pinned instead — the control.
 _NO_RETIRE_PLAN = {
-    "movies": _RETIRE_PLAN["movies"],
-    "boundaries": [b for b in _RETIRE_PLAN["boundaries"] if b["action"] != "retire"],
+    "schema": 2,
+    "movies": _MOVIES,
+    "boundaries": [
+        {"atScene": 2, "action": "pin", "movieKey": "movie1", "loop": False,
+         "src": _inst("A1", _FOOTPRINT), "dst": _inst("A2", _FOOTPRINT)},
+        _RESTART, _BRIDGE, _W_PIN,
+    ],
 }
-#: Scenes the retire zone covers, and the ones just outside it on either side.
+#: A retire of a decoder the runtime HOLDS: `A1` pins into `A2`, which ends at 2->3.
+_HELD_RETIRE_PLAN = {
+    "schema": 2,
+    "movies": _MOVIES,
+    "boundaries": [
+        {"atScene": 2, "action": "pin", "movieKey": "movie1", "loop": False,
+         "src": _inst("A1", _FOOTPRINT), "dst": _inst("A2", _FOOTPRINT)},
+        {"atScene": 4, "action": "retire", "movieKey": "movie1", "reason": "ends", "src": _inst("A2", _FOOTPRINT)},
+    ],
+}
+#: Scenes the `A1` retire zone covers, and the one before it.
 _IN_ZONE = [1, 2, 3, 5]
 _BEFORE_ZONE = [0]
-_AFTER_ZONE = [6, 7]
 
-#: Pool a live `movie1` decoder by driving the player's real teardown path
-#: (detach -> the core's MutationObserver -> `stash`). `__SCENE__`/`__SRC__`
-#: are substituted per test. The scene is ALWAYS set explicitly: the harness's
-#: default hash (`#1`) is itself inside the fixture's zone.
+#: Drive the player's real teardown path (detach -> the core's MutationObserver
+#: -> `stash`) for instance `__INST__`. The scene is ALWAYS set explicitly: the
+#: harness's default hash (`#1`) is itself inside the `A1` zone.
 _MAKE_AND_DETACH = r"""
-const v = document.createElement('video');
+const v = video('__INST__');
 v.readyState = 4; v.currentTime = 1;
 v.parentNode = bodyEl;
 v.src = '__SRC__';
@@ -1174,13 +1284,33 @@ console.log(JSON.stringify({
 }));
 """
 
+#: `A1` pooled at the 1->2 transition, then carried by the fresh `A2` element:
+#: the runtime now HOLDS it (facaded) as instance `A2`.
+_CARRY_A1_INTO_A2 = r"""
+const v = video('A1');
+v.readyState = 4; v.currentTime = 1;
+v.parentNode = bodyEl;
+v.src = 'https://host/untitled.mov';
+goToScene(1);
+detach(v);
+goToScene(2);
+const stub = video('A2');
+stub.setAttribute('src', 'https://host/untitled.mov');
+const elId = v.__obedElId;
+"""
+
 
 def _run_retire(script: str, *, plan: dict = _RETIRE_PLAN) -> dict:
     return _run_full_core_in_node(plan=plan, stage=_IDENTITY_STAGE, script=script)
 
 
-def _detach_script(*, scene: int, src: str = "https://host/untitled.mov") -> str:
-    return _MAKE_AND_DETACH.replace("__SCENE__", f"goToScene({scene});").replace("__SRC__", src)
+def _detach_script(*, scene: int, src: str = "https://host/untitled.mov", inst: str = "A1") -> str:
+    return (_MAKE_AND_DETACH.replace("__SCENE__", f"goToScene({scene});")
+            .replace("__SRC__", src).replace("__INST__", inst))
+
+
+def _refused(scene: int, via: str, inst: str = "A1", key: str = "movie1") -> dict:
+    return {"key": key, "scene": scene, "via": via, "instance": inst, "sceneHash": f"#{scene}"}
 
 
 def test_core_never_relies_on_a_hashchange_event():
@@ -1198,8 +1328,8 @@ console.log(JSON.stringify({hashListeners: hashListeners.length, intervals: inte
 def test_retire_zone_stash_declines_and_notes_once(scene):
     """The player's detach — which really happens at the TRANSITION scene, one
     before `atScene` — must be refused: nothing pooled, no remount scheduled,
-    and `preserve-refused` noted exactly once per (key, via) however many times
-    the player tears the movie down."""
+    and `preserve-refused` noted exactly once per (instance, via) however many
+    times the player tears the movie down."""
     script = _detach_script(scene=scene) + r"""
 detach(v);
 detach(v);
@@ -1208,44 +1338,44 @@ detach(v);
     assert result["poolKeys"] == []
     assert result["pooled"] == 0
     assert result["preserved"] is None
-    assert result["refusals"] == [
-        {"key": "movie1", "scene": scene, "via": "stash", "sceneHash": f"#{scene}"}
-    ]
+    assert result["refusals"] == [_refused(scene, "stash")]
     assert not [k for k in result["kinds"] if k.startswith("remount-")]
 
 
 @pytest.mark.parametrize("scene", _IN_ZONE, ids=[f"scene{s}" for s in _IN_ZONE])
 def test_retire_zone_src_clear_really_clears(scene):
-    """The src hook swallows the clear unconditionally today; inside the zone
-    the REAL setter must run, or the refused movie still deviates from raw."""
+    """Inside the zone the REAL setter must run, or the refused movie still
+    deviates from raw."""
     script = r"""
-const v = document.createElement('video');
+const v = video('A1');
 v.readyState = 4; v.currentTime = 1;
 v.parentNode = bodyEl;
 v.src = 'https://host/untitled.mov';
 goToScene(__SCENE__);
+__LEAVE__
 v.src = '';
 console.log(JSON.stringify({
   src: v.src,
   pooled: P.snapshot().filter(x => !x.fromDom).length,
   refusals: P.events.filter(e => e.kind === 'preserve-refused').map(e => e.detail),
 }));
-""".replace("__SCENE__", str(scene))
+""".replace("__SCENE__", str(scene)).replace("__LEAVE__", "detach(v);" if scene == 1 else "")
     result = _run_retire(script)
     assert result["src"] == ""
     assert result["pooled"] == 0
-    assert result["refusals"] == [
-        {"key": "movie1", "scene": scene, "via": "src-clear", "sceneHash": f"#{scene}"}
-    ]
+    # On the transition scene the zone opens with the player's teardown (RT-B).
+    left = [_refused(scene, "stash")] if scene == 1 else []
+    assert result["refusals"] == left + [_refused(scene, "src-clear")]
 
 
 def test_retire_zone_remove_attribute_really_removes():
     script = r"""
-const v = document.createElement('video');
+const v = video('A1');
 v.readyState = 4; v.currentTime = 1;
 v.parentNode = bodyEl;
 v.src = 'https://host/untitled.mov';
 goToScene(1);
+detach(v);
 v.removeAttribute('src');
 v.removeAttribute('src');
 console.log(JSON.stringify({
@@ -1257,40 +1387,36 @@ console.log(JSON.stringify({
     result = _run_retire(script)
     assert result["removedAttrs"] == ["src", "src"]
     assert result["pooled"] == 0
-    assert result["refusals"] == [
-        {"key": "movie1", "scene": 1, "via": "removeAttribute", "sceneHash": "#1"}
-    ]
+    assert result["refusals"] == [_refused(1, "stash"), _refused(1, "removeAttribute")]
 
 
-def test_retire_zone_blocks_remount_of_a_decoder_pooled_before_the_boundary():
-    """`remountAll()` on a decoder pooled at rest on slide 1 (`#0`) must do
-    nothing once the scene is in the zone. The hash is moved WITHOUT running
-    the interval, so this isolates `tryRemount`'s own guard from the sweep."""
-    script = _detach_script(scene=0) + r"""
-const pooledBefore = P.snapshot().filter(x => !x.fromDom).length;
-location.hash = '#1';
+def test_retire_zone_blocks_remount_of_a_decoder_held_before_the_boundary():
+    """`remountAll()` on a decoder the runtime holds for `A2` must do nothing
+    once the scene is in `A2`'s retire zone — here past `atScene`, where no
+    teardown was seen (a decoder the runtime placed itself). The hash is moved
+    WITHOUT running the interval, so this isolates `tryRemount`'s own guard."""
+    script = _CARRY_A1_INTO_A2 + r"""
+location.hash = '#4';
 const before = JSON.stringify(v.style);
 P.remountAll();
 console.log(JSON.stringify({
-  pooledBefore,
   styleUntouched: JSON.stringify(v.style) === before,
-  remountedInZone: P.events.filter(e => e.kind.indexOf('remount-') === 0 && e.detail.sceneHash === '#1').length,
+  remountedInZone: P.events.filter(e => e.kind.indexOf('remount-') === 0 && e.detail.sceneHash === '#4').length,
   refusals: P.events.filter(e => e.kind === 'preserve-refused').map(e => e.detail),
 }));
 """
-    result = _run_retire(script)
-    assert result["pooledBefore"] == 1
+    result = _run_retire(script, plan=_HELD_RETIRE_PLAN)
     assert result["styleUntouched"] is True
     assert result["remountedInZone"] == 0
-    assert result["refusals"] == [{"key": "movie1", "scene": 1, "via": "remount", "sceneHash": "#1"}]
+    assert result["refusals"] == [_refused(4, "remount", inst="A2")]
 
 
 def test_retire_zone_create_element_does_not_facade_or_reuse():
-    """A fresh element created inside the zone plays natively: no facade, no
-    `reuse-decoder`, and its own `setAttribute('src')` reaches the element."""
-    script = _detach_script(scene=0) + r"""
+    """A fresh element on the far side of a refused boundary plays natively: no
+    facade, no carry note, and its own `setAttribute('src')` reaches it."""
+    script = _detach_script(scene=1) + r"""
 location.hash = '#3';
-const fresh = document.createElement('video');
+const fresh = video('A2');
 fresh.setAttribute('src', 'https://host/untitled.mov');
 console.log(JSON.stringify({
   facade: fresh.dataset.obedFacade || null,
@@ -1306,22 +1432,23 @@ console.log(JSON.stringify({
     assert "retire-on-start-movie" not in result["kinds"]
 
 
-def test_interval_sweep_retires_a_decoder_pooled_before_the_zone():
-    """A decoder legitimately pooled at rest on slide 1 (`#0`) must be retired
-    once the hash reaches the zone — driven by the keep-warm interval, since
-    the player never fires `hashchange`. Pause, out of the DOM, dead for
-    reuse, and said out loud with `retire-boundary`."""
-    script = _detach_script(scene=0) + r"""
-const elId = v.__obedElId;
-const pooledBefore = P.snapshot().filter(x => !x.fromDom).length;
-location.hash = '#1';
+@pytest.mark.parametrize("how", ["teardown", "sweep"])
+def test_a_held_decoder_is_retired_at_the_transition_teardown_or_by_the_sweep(how):
+    """Retire hands back from `atScene - 1` (plan contract): the player's
+    teardown on the transition scene retires the held decoder right there, so
+    the raw player draws the fade-out (live D3 A, D6: it stayed drawn through
+    the move). Past `atScene` with no teardown seen, the keep-warm sweep does
+    it. Pause, out of the DOM, dead for reuse, and said out loud once with
+    `retire-boundary` naming the instance."""
+    script = _CARRY_A1_INTO_A2 + r"""
+const held = P.snapshot().filter(x => x.fromDom).length;
+__LEAVE__
 const sweptBeforeTick = P.events.filter(e => e.kind === 'retire-boundary').length;
 tick();
 tick();
 console.log(JSON.stringify({
-  elId, pooledBefore, sweptBeforeTick,
-  pooledAfter: P.snapshot().filter(x => !x.fromDom).length,
-  poolKeys: P.poolKeys,
+  elId, held, sweptBeforeTick,
+  snapshot: P.snapshot().length,
   paused: v.paused,
   inDocument: document.contains(v),
   preserved: v.dataset.obedPreserved || null,
@@ -1331,85 +1458,147 @@ console.log(JSON.stringify({
   retire: P.events.filter(e => e.kind === 'retire-boundary').map(e => e.detail),
 }));
 """
-    result = _run_retire(script)
-    assert result["pooledBefore"] == 1
-    assert result["sweptBeforeTick"] == 0
-    assert result["pooledAfter"] == 0
-    assert result["poolKeys"] == []
+    leave = "location.hash = '#3';\ndetach(stub);" if how == "teardown" else "location.hash = '#4';"
+    result = _run_retire(script.replace("__LEAVE__", leave), plan=_HELD_RETIRE_PLAN)
+    scene = "#3" if how == "teardown" else "#4"
+    assert result["held"] == 1
+    assert result["sweptBeforeTick"] == (1 if how == "teardown" else 0)
+    assert result["snapshot"] == 0
     assert result["paused"] is True
     assert result["inDocument"] is False
     assert result["preserved"] is None
     assert result["remounted"] is None
     assert result["gen"] == -1
     assert result["epoch"] == -1
-    # Swept once: the second tick finds nothing and must not re-note.
+    # Retired once: a later tick finds nothing and must not re-note.
     assert result["retire"] == [
-        {"key": "movie1", "elIds": [result["elId"]], "atScene": 2, "sceneHash": "#1"}
+        {"key": "movie1", "elIds": [result["elId"]], "atScene": 4, "instance": "A2", "sceneHash": scene}
     ]
 
 
-@pytest.mark.parametrize("scene", _BEFORE_ZONE + _AFTER_ZONE, ids=lambda s: f"scene{s}")
-def test_interval_sweep_is_silent_outside_the_zone(scene):
-    """No `retire-boundary` outside the zone — the note is a positive claim,
-    and the interval runs on every scene of the deck."""
-    script = _detach_script(scene=scene) + r"""
+def test_a_held_decoder_is_not_retired_while_the_player_idles_on_its_slide():
+    """RT-B (live D6: retired 234 ms after scene 6 settled; D3: at scene 2). Idle
+    at the end of the retired instance's slide the hash already reads
+    `atScene - 1`; the held decoder must keep playing (no sweep, no refusal)
+    until the player tears the slide down, and retire then, at `atScene - 1`."""
+    script = _CARRY_A1_INTO_A2 + r"""
+location.hash = '#3';
 tick();
+P.remountAll();
+const idle = {gen: v.__obedGen, paused: v.paused, retire: P.events.filter(e => e.kind === 'retire-boundary').length,
+  refusals: P.events.filter(e => e.kind === 'preserve-refused').length};
+detach(stub);
+tick();
+console.log(JSON.stringify({idle, gen: v.__obedGen,
+  retire: P.events.filter(e => e.kind === 'retire-boundary').map(e => e.detail.sceneHash)}));
+"""
+    result = _run_retire(script, plan=_HELD_RETIRE_PLAN)
+    assert result["idle"] == {"gen": 0, "paused": False, "retire": 0, "refusals": 0}
+    assert result["gen"] == -1
+    assert result["retire"] == ["#3"]
+
+
+def test_a_retire_hands_back_when_the_player_sets_up_the_transition_with_no_video_to_tear_down():
+    """Live D6 (retire@8): the pinned decoder sat where the runtime placed it and
+    the slide had no <video> of the player's, so no teardown marked the
+    transition and the decoder stayed drawn through it (retired at #8). The
+    player writes the hash on entering idle and again when it sets up the
+    transition scene; that second write retires the decoder right there."""
+    script = _CARRY_A1_INTO_A2 + r"""
+window.history.replaceState(null, 'Keynote', 'index.html#3');
+tick();
+P.remountAll();
+const idle = {gen: v.__obedGen, retire: P.events.filter(e => e.kind === 'retire-boundary').length};
+window.history.replaceState(null, 'Keynote', 'index.html#3');
+console.log(JSON.stringify({idle, gen: v.__obedGen, paused: v.paused,
+  retire: P.events.filter(e => e.kind === 'retire-boundary').map(e => [e.detail.instance, e.detail.sceneHash])}));
+"""
+    result = _run_retire(script, plan=_HELD_RETIRE_PLAN)
+    assert result["idle"] == {"gen": 0, "retire": 0}
+    assert result["gen"] == -1
+    assert result["paused"] is True
+    assert result["retire"] == [["A2", "#3"]]
+
+
+@pytest.mark.parametrize(
+    "drive",
+    [
+        # No `retire-boundary` before the zone — the note is a positive claim, and
+        # the interval runs on every scene of the deck.
+        pytest.param("tick();", id="interval-sweep-is-silent-before-the-zone"),
+        # No scene index in the hash: nothing places the player in the zone, so
+        # a held decoder is neither swept nor refused.
+        pytest.param("location.hash = '';\ntick();\nP.remountAll();", id="null-hash-is-allowed"),
+    ],
+)
+def test_a_held_decoder_outside_the_zone_is_neither_swept_nor_refused(drive):
+    script = _CARRY_A1_INTO_A2 + drive + r"""
 console.log(JSON.stringify({
   retire: P.events.filter(e => e.kind === 'retire-boundary').length,
-  pooled: P.snapshot().filter(x => !x.fromDom).length,
+  held: P.snapshot().filter(x => x.fromDom).length,
+  gen: v.__obedGen,
+  refusals: P.events.filter(e => e.kind === 'preserve-refused').length,
 }));
 """
-    result = _run_retire(script)
-    assert result["retire"] == 0
-    assert result["pooled"] == 1
+    result = _run_retire(script, plan=_HELD_RETIRE_PLAN)
+    assert result == {"retire": 0, "held": 1, "gen": 0, "refusals": 0}
 
 
 @pytest.mark.parametrize("scene", _BEFORE_ZONE, ids=lambda s: f"scene{s}")
-def test_before_the_retire_zone_preservation_is_unchanged(scene):
-    """Slide 1 at rest (`#0`) is one scene before the transition: the implicit
-    pin still holds, exactly as today."""
+def test_a_refused_src_is_never_pooled_before_its_zone_either(scene):
+    """Slide 1 at rest (`#0`): `A1`'s next entry carries nothing, so the runtime
+    never touches it — no pool, no remount, and no refusal before the zone."""
     result = _run_retire(_detach_script(scene=scene) + _POOL_REPORT)
-    assert result["poolKeys"] == ["untitled.mov"]
-    assert result["pooled"] == 1
-    assert result["preserved"] == "1"
+    assert result["poolKeys"] == []
+    assert result["pooled"] == 0
+    assert result["preserved"] is None
     assert result["refusals"] == []
-    assert "remount-scheduled" in result["kinds"]
+    assert not [k for k in result["kinds"] if k.startswith("remount-")]
 
 
-@pytest.mark.parametrize("scene", _AFTER_ZONE, ids=["zone-end", "after-zone-end"])
-def test_after_the_zone_end_preservation_works_again(scene):
-    """The restart at scene 6 creates a fresh element the export itself plays;
-    from 6 on the runtime may preserve it again (that is what the 3->4 bridge
-    carries). The zone END keeps the plain `atScene` convention, so the 2->3
-    dissolve scene (#5) is still refused."""
-    result = _run_retire(_detach_script(scene=scene) + _POOL_REPORT)
-    assert result["poolKeys"] == ["untitled.mov"]
-    assert result["pooled"] == 1
-    assert result["preserved"] == "1"
-    assert result["refusals"] == []
+def test_the_refusal_names_one_instance_and_leaves_the_rest_of_the_chain_alone():
+    """`A2` (raw, restarted at 6) passes through untouched; `A3` is the bridge's
+    src and is pooled at its transition — neither is refused by `A1`'s zone."""
+    script = _detach_script(scene=5, inst="A2") + r"""
+const a2 = {pooled: P.snapshot().filter(x => !x.fromDom).length, src: v.src};
+v.src = '';
+a2.cleared = v.src === '';
+const a3 = video('A3');
+a3.readyState = 4; a3.currentTime = 1; a3.parentNode = bodyEl;
+a3.src = 'https://host/untitled.mov';
+goToScene(7);
+detach(a3);
+console.log(JSON.stringify({
+  a2,
+  pooled: P.snapshot().filter(x => !x.fromDom).map(x => x.instance),
+  refusals: P.events.filter(e => e.kind === 'preserve-refused').length,
+}));
+"""
+    result = _run_retire(script)
+    assert result["a2"] == {"pooled": 0, "src": "https://host/untitled.mov", "cleared": True}
+    assert result["pooled"] == ["A3"]
+    assert result["refusals"] == 0
 
 
-def test_bridge_still_engages_at_scene_8_for_the_retired_key():
-    """End to end on the fixture's shape: pooled at `#0`, swept when the
-    transition opens the zone, refused through 1..5, pooled again at 7,
-    bridged at 8 — the retire must not poison the later bridge."""
-    script = _detach_script(scene=0) + r"""
-location.hash = '#1';
+def test_bridge_still_engages_at_scene_8_after_the_refused_1_to_2():
+    """End to end on the fixture's shape: `A1` refused at the 1->2 transition,
+    `A2` raw, `A3` pooled at 7, bridged at 8 — the refusal must not poison the
+    later bridge."""
+    script = _detach_script(scene=1) + r"""
 tick();
 goToScene(3);
-const refused = document.createElement('video');
-refused.readyState = 4; refused.currentTime = 1; refused.parentNode = bodyEl;
-refused.src = 'https://host/untitled.mov';
-detach(refused);
+const raw = video('A2');
+raw.readyState = 4; raw.currentTime = 1; raw.parentNode = bodyEl;
+raw.src = 'https://host/untitled.mov';
 goToScene(7);
-const fresh = document.createElement('video');
+const fresh = video('A3');
 fresh.readyState = 4; fresh.currentTime = 2; fresh.parentNode = bodyEl;
 fresh.src = 'https://host/untitled.mov';
 detach(fresh);
 const pooledAtSeven = P.snapshot().filter(x => !x.fromDom).length;
 goToScene(8);
 tick();
-const bridged = document.createElement('video');
+const bridged = video('A4');
 bridged.setAttribute('src', 'https://host/untitled.mov');
 console.log(JSON.stringify({
   pooledAtSeven,
@@ -1422,7 +1611,7 @@ console.log(JSON.stringify({
 """
     result = _run_retire(script)
     assert result["pooledAtSeven"] == 1
-    assert result["retire"] == 1
+    assert result["retire"] == 0
     assert result["refusalVias"] == ["stash"]
     assert result["bridge"] == [result["freshElId"]]
     assert result["suppressed"] is True
@@ -1440,7 +1629,7 @@ def _bridge_overlay_rects() -> dict:
 const t0 = 1000;
 nowMs = t0;
 goToScene(7);
-const v = document.createElement('video');
+const v = video('A3');
 v.readyState = 4; v.currentTime = 2; v.parentNode = bodyEl;
 v.src = 'https://host/untitled.mov';
 detach(v);
@@ -1450,7 +1639,7 @@ const read = () => Object.fromEntries(
 const rects = [read()];
 __FRACTIONS__.slice(1).forEach((f) => {
   nowMs = t0 + f * 1500;
-  flushFrames();
+  pump();
   rects.push(read());
 });
 console.log(JSON.stringify({
@@ -1490,11 +1679,183 @@ def test_bridge_overlay_is_not_linear_off_the_midpoint():
     assert rects[0.5] == pytest.approx({k: (_BRIDGE_SRC[k] + _BRIDGE_DEST[k]) / 2 for k in _BRIDGE_SRC})
 
 
+#: main.js runs after the core and assigns `requestAnimFrame` (the setter trap keeps it); Keynote's `Date` gets its
+#: own fake wall clock, `dateOffset` ms off `performance.now()`, so a test can step it like `timed` did on green-2.
+_GL_CLOCK_AFTER_CORE = """
+window.requestAnimFrame = requestAnimationFrame;
+let dateOffset = 0;
+Date.now = () => nowMs + dateOffset;
+document.readyState = 'complete';
+"""
+
+#: Interpret a bridge timeline: each op may set `t` (ms on both clocks) first. `detach` is the player's 3->4 teardown
+#: of the carried `A3` decoder (the core's trigger); `oldLoop`/`loop` start a Keynote GL loop whose re-arms run inside
+#: its own callback; `write` is the player's `history.replaceState` of `#hash`; `teardown` detaches an unplanned
+#: `<video>`; `step` steps `Date` only; `detach`, `pump` and `remountAll` record the overlay rect afterwards.
+_GL_CLOCK_SCRIPT = r"""
+const read = (v) => Object.fromEntries(
+  [['x', 'left'], ['y', 'top'], ['w', 'width'], ['h', 'height']].map(([k, css]) => [k, parseFloat(v.style[css])])
+);
+nowMs = 1000;
+goToScene(7);
+const v = video('A3');
+v.readyState = 4; v.currentTime = 2; v.parentNode = bodyEl;
+v.src = 'https://host/untitled.mov';
+const rects = [];
+const loop = () => window.requestAnimFrame(function again() { window.requestAnimFrame(again); });
+__OPS__.forEach((op) => {
+  if (op.t != null) nowMs = op.t;
+  if (op.op === 'detach') detach(v);
+  if (op.op === 'oldLoop' || op.op === 'loop') loop();
+  if (op.op === 'pump') pump();
+  if (op.op === 'write') window.history.replaceState(null, '', '#' + op.hash);
+  if (op.op === 'teardown') { const z = video(); z.parentNode = bodyEl; detach(z); }
+  if (op.op === 'step') dateOffset += op.ms;
+  if (op.op === 'remountAll') P.remountAll();
+  if (['detach', 'pump', 'remountAll'].indexOf(op.op) >= 0) rects.push(read(v));
+});
+console.log(JSON.stringify({
+  rects,
+  clocks: P.events.filter(e => e.kind === 'bridge-clock').map(e => [e.detail.via, e.detail.lagMs]),
+  motionStarts: P.events.filter(e => e.kind === 'bridge-motion-start').length,
+  hooked: typeof window.requestAnimFrame === 'function' && window.requestAnimFrame !== requestAnimationFrame,
+}));
+"""
+
+
+#: A late install: main.js ran first and its loop has a callback queued on the raw `requestAnimFrame`, unwrapped.
+_GL_CLOCK_LATE_INSTALL = """
+window.requestAnimFrame = requestAnimationFrame;
+window.requestAnimFrame(function again() { window.requestAnimFrame(again); });
+"""
+
+
+def _gl_timeline(*steps: tuple) -> tuple[list[dict], list]:
+    """`(op, t, expected)` steps -> (the ops, the expected ms into the move at each recorded rect; None = source)."""
+    ops, expected = [], []
+    for op, t, *rest in steps:
+        ops.append({"op": op, "t": t, **(rest[1] if len(rest) > 1 else {})})
+        if op in ("detach", "pump", "remountAll"):
+            expected.append(rest[0])
+    return ops, expected
+
+
+#: Timeline 1, the pooled path. Keynote's loop starts 7 ms after the core's trigger (1000); a loop already running
+#: before the departure re-arms inside its own callback, so it never stamps. A second teardown before the loop start
+#: and, mid-move, the player's two same-index hash writes and a teardown re-mark the same occurrence (its stamp
+#: reaches the motion; no snap-back), and a -90 ms `Date` step moves the overlay with Keynote's arithmetic. Each
+#: step carries its (gl, no-gl-clock red) expectations.
+_TIMELINE_1 = (
+    ("oldLoop", 1000, (None, None)),
+    ("detach", 1000, (None, None)),
+    ("teardown", 1002, (None, None)),
+    ("pump", 1004, (None, None)),
+    ("loop", 1007, (None, None)),
+    ("pump", 1049, (42, None)),
+    ("pump", 1050, (43, 50)),
+    ("pump", 1382, (375, 382)),
+    ("write", 1382, (None, None), {"hash": 7}),
+    ("write", 1382, (None, None), {"hash": 7}),
+    ("teardown", 1382, (None, None)),
+    ("pump", 1382, (375, 382)),
+    ("pump", 1757, (750, 757)),
+    ("step", None, (None, None), {"ms": -90}),
+    ("pump", 2132, (1035, 1132)),
+    ("pump", 2597, (1500, 1597)),
+)
+
+
+def _pick(timeline: tuple, column: int) -> tuple:
+    return tuple((op, t, expected[column], *extra) for op, t, expected, *extra in timeline)
+
+
+@pytest.mark.parametrize(
+    "variant,before_core,timeline,clocks,motion_starts",
+    [
+        pytest.param(None, "", _gl_timeline(*_pick(_TIMELINE_1, 0)), [["gl", 7]], 1, id="gl"),
+        # No loop start: the overlay holds the source until GL_CLOCK_WAIT_MS on `performance.now()` (a `Date` step
+        # inside the wait does not move the deadline), then runs today's clock from the trigger; a loop start after
+        # the fallback engaged changes nothing.
+        pytest.param(None, "", _gl_timeline(
+            ("detach", 1000, None),
+            ("step", None, None, {"ms": 500}),
+            ("pump", 1020, None),
+            ("pump", 1049, None),
+            ("pump", 1050, 50),
+            ("loop", 1060, None),
+            ("pump", 1060, 60),
+            ("pump", 1375, 375),
+            ("pump", 2500, 1500),
+        ), [["fallback", 50]], 1, id="fallback"),
+        # Mid-move the hash leaves #7 and comes back without `clear()` and with no frame in between, then the second
+        # write: a new occurrence. The same pooled decoder, re-driven by `remountAll()`, starts a new motion that takes
+        # the ride over from the old one, holds the source until its own loop start, and notes its own clock.
+        pytest.param(None, "", _gl_timeline(
+            ("detach", 1000, None),
+            ("loop", 1007, None),
+            ("pump", 1382, 375),
+            ("write", 1382, None, {"hash": 8}),
+            ("write", 1400, None, {"hash": 7}),
+            ("write", 1400, None, {"hash": 7}),
+            ("remountAll", 1400, None),
+            ("pump", 1405, None),
+            ("loop", 1409, None),
+            ("pump", 2159, 750),
+        ), [["gl", 7], ["gl", 9]], 2, id="re-departure"),
+        # A late install: the queued callback of main.js's loop re-arms at +4, before the native frame queued at
+        # install, so that departure cannot tell it from a loop start and falls back although Keynote starts at +7.
+        # Once that frame has run, the loop's re-arms are wrapped, and the next departure stamps its own loop start.
+        pytest.param(None, _GL_CLOCK_LATE_INSTALL, _gl_timeline(
+            ("detach", 1000, None),
+            ("pump", 1004, None),
+            ("loop", 1007, None),
+            ("pump", 1049, None),
+            ("pump", 1050, 50),
+            ("write", 1100, None, {"hash": 8}),
+            ("write", 1110, None, {"hash": 7}),
+            ("write", 1110, None, {"hash": 7}),
+            ("remountAll", 1110, None),
+            ("pump", 1114, None),
+            ("loop", 1117, None),
+            ("pump", 1867, 750),
+        ), [["fallback", 50], ["gl", 7]], 2, id="late-install"),
+        # The D1 red: timeline 1 on the core that never stamps. The overlay holds until +50 ms although Keynote
+        # started at +7, then runs today's clock from the trigger, immune to the `Date` step.
+        pytest.param("no-gl-clock", "", _gl_timeline(*_pick(_TIMELINE_1, 1)), [["fallback", 50]], 1, id="no-gl-clock-red"),
+    ],
+)
+def test_bridge_clock_follows_keynotes_gl_loop_start(monkeypatch, variant, before_core, timeline, clocks, motion_starts):
+    """The carried overlay times its bridge on Keynote's own GL clock: `Date` since the first `requestAnimFrame`
+    call outside a wrapped callback in this departure occurrence, chosen once per motion (`bridge-clock`), else
+    today's `performance.now()` clock after the GL_CLOCK_WAIT_MS hold at the source rect."""
+    if variant is not None:
+        repo = Path(__file__).resolve().parent.parent
+        if str(repo / "scripts") not in sys.path:
+            sys.path.insert(0, str(repo / "scripts"))
+        from continuity_core_variants import variant_core
+
+        monkeypatch.setattr(live_continuity_js, "PRESERVE_CORE_JS", variant_core(variant))
+    ops, expected = timeline
+    result = _run_full_core_in_node(
+        plan=_NO_RETIRE_PLAN, stage=_IDENTITY_STAGE, before_core=before_core, after_core=_GL_CLOCK_AFTER_CORE,
+        script=_GL_CLOCK_SCRIPT.replace("__OPS__", json.dumps(ops)),
+    )
+    assert result["hooked"] is True
+    assert result["clocks"] == clocks
+    assert result["motionStarts"] == motion_starts
+    assert len(result["rects"]) == len(expected)
+    for i, (elapsed, rect) in enumerate(zip(expected, result["rects"])):
+        if elapsed is None:
+            assert rect == _BRIDGE_SRC, i
+        else:
+            assert rect == pytest.approx(_eased_bridge_rect(min(1, elapsed / 1500)), abs=1e-6), (i, elapsed)
+
+
 @pytest.mark.parametrize("scene", _IN_ZONE, ids=[f"scene{s}" for s in _IN_ZONE])
-def test_retire_zone_does_not_touch_another_movie_key(scene):
-    """The refusal is per-movie: a movie the plan does not retire keeps being
-    preserved inside the zone, and the sweep never takes it."""
-    script = _detach_script(scene=scene, src="https://host/WA0125.mov") + r"""
+def test_retire_zone_does_not_touch_another_movie(scene):
+    """The refusal is per-instance: `W1`, pinned across the same cut, keeps being
+    preserved inside `A1`'s zone, and the sweep never takes it."""
+    script = _detach_script(scene=scene, src="https://host/WA0125.mov", inst="W1") + r"""
 tick();
 """ + _POOL_REPORT
     result = _run_retire(script)
@@ -1504,12 +1865,10 @@ tick();
     assert result["refusals"] == []
 
 
-@pytest.mark.parametrize(
-    "scene", _BEFORE_ZONE + _IN_ZONE + _AFTER_ZONE, ids=lambda s: f"scene{s}"
-)
-def test_plan_without_a_retire_behaves_exactly_as_today(scene):
-    """Same scenes, same teardown, retire entry removed: every scene in what
-    WOULD be the zone preserves as before, and the interval sweep is inert."""
+@pytest.mark.parametrize("scene", _BEFORE_ZONE + _IN_ZONE + [6, 7], ids=lambda s: f"scene{s}")
+def test_the_pinned_control_pools_the_same_instance_at_every_scene(scene):
+    """Same scenes, same teardown, 1->2 pinned: `A1` is pooled, a remount is
+    scheduled, and the interval sweep is inert."""
     result = _run_full_core_in_node(
         plan=_NO_RETIRE_PLAN, stage=_IDENTITY_STAGE,
         script=_detach_script(scene=scene) + "tick();\n" + _POOL_REPORT,
@@ -1522,57 +1881,34 @@ def test_plan_without_a_retire_behaves_exactly_as_today(scene):
     assert "remount-scheduled" in result["kinds"]
 
 
-def test_null_hash_is_allowed():
-    """No scene index in the hash: nothing places the player in the zone, so
-    preservation stays allowed (unchanged from today)."""
-    script = _MAKE_AND_DETACH.replace("__SCENE__", "location.hash = '';").replace(
-        "__SRC__", "https://host/untitled.mov"
-    ) + "tick();\n" + _POOL_REPORT
-    result = _run_retire(script)
-    assert result["pooled"] == 1
-    assert result["preserved"] == "1"
-    assert result["refusals"] == []
+# Codex r1 MAJOR: inside the zone the hooks let a REAL `src` clear through, so a
+# decoder the runtime holds loses its src-derived identity exactly when the
+# refusal needs it. The instance is stamped (`__obedInstance`) and the sweep
+# selects by it, so an empty-src decoder is still recognised.
 
-
-# Codex r1 MAJOR: inside the zone the hooks let a REAL `src` clear through, so
-# a decoder pooled before the zone loses its src-derived identity exactly when
-# the refusal needs it. Identity is stamped (`__obedMovieKey`) and the sweep
-# selects from the POOL's key, so an empty-src decoder is still recognised.
-
-#: Pool a movie1 decoder at `#0`, enter the zone, then let the player REALLY
-#: clear the src (the in-zone hooks no longer swallow it). `__CLEAR__` is the
-#: clearing call under test.
-_CLEARED_IN_ZONE = r"""
-const v = document.createElement('video');
-v.readyState = 4; v.currentTime = 1;
-v.parentNode = bodyEl;
-v.src = 'https://host/untitled.mov';
-goToScene(0);
-detach(v);
-const elId = v.__obedElId;
-const pooledBefore = P.snapshot().filter(x => !x.fromDom).length;
-location.hash = '#1';
+#: Carry `A1` into `A2`, enter `A2`'s zone, then REALLY clear the held decoder's
+#: src (the in-zone hooks no longer swallow it). `__CLEAR__` is the call under test.
+_CLEARED_IN_ZONE = _CARRY_A1_INTO_A2 + r"""
+location.hash = '#4';
 __CLEAR__
 const srcAfterClear = v.src || '';
 """
 
 
 def _cleared_in_zone(clear: str, tail: str) -> dict:
-    return _run_retire(_CLEARED_IN_ZONE.replace("__CLEAR__", clear) + tail)
+    return _run_retire(_CLEARED_IN_ZONE.replace("__CLEAR__", clear) + tail, plan=_HELD_RETIRE_PLAN)
 
 
 @pytest.mark.parametrize(
     "clear", ["v.src = '';", "v.removeAttribute('src');"], ids=["src-clear", "removeAttribute"],
 )
-def test_sweep_retires_a_pooled_decoder_whose_src_was_really_cleared(clear):
-    """`movieAssetKey('')` is null, but the pool still knows the asset key —
-    the sweep must select by it, not by the (now empty) live src."""
+def test_sweep_retires_a_held_decoder_whose_src_was_really_cleared(clear):
+    """`movieAssetKey('')` is null, but the instance stamp survives — the sweep
+    must select by it, not by the (now empty) live src."""
     tail = r"""
 tick();
 console.log(JSON.stringify({
-  elId, pooledBefore, srcAfterClear,
-  pooledAfter: P.snapshot().filter(x => !x.fromDom).length,
-  poolKeys: P.poolKeys,
+  elId, srcAfterClear,
   paused: v.paused,
   inDocument: document.contains(v),
   preserved: v.dataset.obedPreserved || null,
@@ -1581,16 +1917,13 @@ console.log(JSON.stringify({
 }));
 """
     result = _cleared_in_zone(clear, tail)
-    assert result["pooledBefore"] == 1
     assert result["srcAfterClear"] == ""
-    assert result["pooledAfter"] == 0
-    assert result["poolKeys"] == []
     assert result["paused"] is True
     assert result["inDocument"] is False
     assert result["preserved"] is None
     assert result["gen"] == -1
     assert result["retire"] == [
-        {"key": "movie1", "elIds": [result["elId"]], "atScene": 2, "sceneHash": "#1"}
+        {"key": "movie1", "elIds": [result["elId"]], "atScene": 4, "instance": "A2", "sceneHash": "#4"}
     ]
 
 
@@ -1599,15 +1932,14 @@ console.log(JSON.stringify({
 )
 def test_pending_remount_of_an_empty_src_decoder_is_refused_in_zone(clear):
     """A retry scheduled before the zone reaches `tryRemount` after the clear:
-    with identity read only off the src it would be allowed to remount. The
-    stamped key must refuse it, with a `preserve-refused` via `remount`."""
+    the stamped instance must refuse it, with a `preserve-refused` via `remount`."""
     tail = r"""
 const styleBefore = JSON.stringify(v.style);
 P.remountAll();
 console.log(JSON.stringify({
   srcAfterClear,
   styleUntouched: JSON.stringify(v.style) === styleBefore,
-  remountedInZone: P.events.filter(e => e.kind.indexOf('remount-') === 0 && e.detail.sceneHash === '#1').length,
+  remountedInZone: P.events.filter(e => e.kind.indexOf('remount-') === 0 && e.detail.sceneHash === '#4').length,
   refusals: P.events.filter(e => e.kind === 'preserve-refused').map(e => e.detail),
 }));
 """
@@ -1615,51 +1947,22 @@ console.log(JSON.stringify({
     assert result["srcAfterClear"] == ""
     assert result["styleUntouched"] is True
     assert result["remountedInZone"] == 0
-    assert {"key": "movie1", "scene": 1, "via": "remount", "sceneHash": "#1"} in result["refusals"]
-
-
-@pytest.mark.parametrize(
-    "clear", ["v.src = '';", "v.removeAttribute('src');"], ids=["src-clear", "removeAttribute"],
-)
-def test_a_stamped_empty_src_decoder_is_free_again_past_the_zone_end(clear):
-    """Companion control that the stamp does not over-reach: the SAME
-    really-cleared, still-stamped decoder, carried past the zone without the
-    interval ever firing inside it, must at the zone end (`#6`, the restart
-    scene — not `#7`, where the bridge motion legitimately takes over) be
-    neither swept nor refused, and may remount again."""
-    tail = r"""
-location.hash = '#6';
-tick();
-P.remountAll();
-console.log(JSON.stringify({
-  srcAfterClear,
-  stamped: v.__obedMovieKey,
-  retire: P.events.filter(e => e.kind === 'retire-boundary').length,
-  refusalsAtSix: P.events.filter(e => e.kind === 'preserve-refused' && e.detail.sceneHash === '#6').length,
-  remountedAtSix: P.events.filter(e => e.kind.indexOf('remount-') === 0 && e.detail.sceneHash === '#6').length,
-}));
-"""
-    result = _cleared_in_zone(clear, tail)
-    assert result["srcAfterClear"] == ""
-    assert result["stamped"] == "movie1"
-    assert result["retire"] == 0      # the sweep never ran inside the zone here
-    assert result["refusalsAtSix"] == 0
-    assert result["remountedAtSix"] >= 1
+    assert _refused(4, "remount", inst="A2") in result["refusals"]
 
 
 # Codex r2 MAJOR 1: identity must also go STALE correctly. An element given a
 # different asset is no longer the movie it was pooled as, so the stamp and the
-# pool membership must follow the new source — otherwise the retire sweep
-# pauses and removes what is now an unplanned clip.
+# pool membership must follow the new source — otherwise a later carry or sweep
+# takes what is now an unplanned clip.
 
-#: Pool a movie1 decoder at `#0`, then re-assign `__NEXT__` to that very
+#: Pool `A1` (the pin's src) at `#1`, then re-assign `__NEXT__` to that very
 #: element (both the `.src` setter and `setAttribute` are exercised).
 _REASSIGN = r"""
-const v = document.createElement('video');
+const v = video('A1');
 v.readyState = 4; v.currentTime = 1;
 v.parentNode = bodyEl;
 v.src = 'https://host/untitled.mov';
-goToScene(0);
+goToScene(1);
 detach(v);
 // `P.poolKeys` is only refreshed by `note()`, so read the live census.
 const poolNow = () => P.snapshot().filter(x => !x.fromDom).map(x => x.key);
@@ -1678,17 +1981,18 @@ def _reassign(via: str, url: str, tail: str) -> dict:
     assign = (
         f"v.src = '{url}';" if via == "setter" else f"v.setAttribute('src', '{url}');"
     )
-    return _run_retire(_REASSIGN.replace("__ASSIGN__", assign) + tail)
+    return _run_retire(_REASSIGN.replace("__ASSIGN__", assign) + tail, plan=_NO_RETIRE_PLAN)
 
 
-_SWEEP_TAIL = r"""
-location.hash = '#1';
-tick();
+_CARRY_TAIL = r"""
+goToScene(2);
+const fresh = video('A2');
+fresh.setAttribute('src', 'https://host/untitled.mov');
 console.log(JSON.stringify(Object.assign(report(), {
   paused: v.paused,
-  inDocument: document.contains(v),
-  gen: v.__obedGen === undefined ? 'unset' : v.__obedGen,
-  retire: P.events.filter(e => e.kind === 'retire-boundary').map(e => e.detail),
+  carried: P.events.filter(e => e.kind === 'reuse-decoder').length,
+  refusals: P.events.filter(e => e.kind === 'preserve-refused').map(e => e.detail.reason),
+  facade: !!fresh.__obedFacadeFor,
 })));
 """
 
@@ -1696,32 +2000,30 @@ console.log(JSON.stringify(Object.assign(report(), {
 @pytest.mark.parametrize("via", ["setter", "setAttribute"])
 def test_reassigning_an_unplanned_asset_drops_pool_membership_and_the_stamp(via):
     """The deliberately unplanned WA0125 clip: the element leaves the pool,
-    loses `obedPreserved` and its stamp is CLEARED — so a later in-zone sweep
-    must not pause or detach it."""
-    result = _reassign(via, "https://host/WA0125-unplanned.mov", _SWEEP_TAIL)
+    loses `obedPreserved` and its stamp is CLEARED — so the pin's destination
+    must not carry it (the boundary is refused as `absent`)."""
+    result = _reassign(via, "https://host/WA0125-unplanned.mov", _CARRY_TAIL)
     assert result["pooledBefore"] == ["untitled.mov"]
     assert result["poolKeys"] == []
     assert result["stamp"] is None
     assert result["preserved"] is None
-    assert result["retire"] == []
+    assert result["carried"] == 0
+    assert result["facade"] is False
+    assert result["refusals"] == ["absent"]
     assert result["paused"] is False
-    assert result["inDocument"] is True
-    assert result["gen"] == 0
 
 
 def test_reassigning_the_same_asset_leaves_the_pool_untouched():
     """The reuse/facade path re-assigns the SAME src on a live decoder (via the
     `.src` setter — `bindFacade` forwards onto `real.src`), and that must not
-    disturb pool membership or the preserved mark. Only the setter path is
-    asserted here: `setAttribute('src')` on an ALREADY-pooled element drains
-    its queue through the pre-existing reuse lookup, which is unrelated to
-    re-identification and is not a path the player takes."""
+    disturb pool membership, the preserved mark or the instance stamp."""
     result = _reassign("setter", "https://host/untitled.mov", r"""
-console.log(JSON.stringify(report()));
+console.log(JSON.stringify(Object.assign(report(), {instance: v.__obedInstance})));
 """)
     assert result["poolKeys"] == ["untitled.mov"]
     assert result["stamp"] == "movie1"
     assert result["preserved"] == "1"
+    assert result["instance"] == "A1"
 
 
 @pytest.mark.parametrize("via", ["setter", "setAttribute"])
@@ -1739,14 +2041,15 @@ console.log(JSON.stringify(report()));
 def test_bind_facade_src_forward_does_not_evict_the_reused_decoder():
     """`bindFacade` forwards `stub.src = url` onto the real decoder; with the
     same asset that must be a no-op for identity (Codex r2: do not break the
-    reuse path)."""
+    reuse path) — the carried decoder keeps its re-stamped instance."""
     script = r"""
-const v = document.createElement('video');
+const v = video('A1');
 v.readyState = 4; v.currentTime = 1; v.parentNode = bodyEl;
 v.src = 'https://host/untitled.mov';
-goToScene(0);
+goToScene(1);
 detach(v);
-const fresh = document.createElement('video');
+goToScene(2);
+const fresh = video('A2');
 fresh.setAttribute('src', 'https://host/untitled.mov');
 const reused = P.events.filter(e => e.kind === 'reuse-decoder').length;
 fresh.src = 'https://host/untitled.mov';   // facade forward onto the real decoder
@@ -1754,13 +2057,15 @@ console.log(JSON.stringify({
   reused,
   facade: fresh.dataset.obedFacade || null,
   realStamp: v.__obedMovieKey,
+  realInstance: v.__obedInstance,
   realPreserved: v.dataset.obedPreserved || null,
 }));
 """
-    result = _run_retire(script)
+    result = _run_retire(script, plan=_NO_RETIRE_PLAN)
     assert result["reused"] == 1
     assert result["facade"] == "1"
     assert result["realStamp"] == "movie1"
+    assert result["realInstance"] == "A2"
     assert result["realPreserved"] == "1"
 
 
@@ -1770,42 +2075,45 @@ console.log(JSON.stringify({
 
 def test_snapshot_reports_a_movie_key_for_a_cleared_src_preserved_element():
     script = r"""
-const v = document.createElement('video');
+const v = video('A1');
 v.readyState = 4; v.currentTime = 1; v.parentNode = bodyEl;
 v.src = 'https://host/untitled.mov';
-goToScene(0);
+goToScene(1);
 detach(v);
 const pooled = P.snapshot().filter(x => !x.fromDom);
-location.hash = '#1';
+goToScene(2);
+const stub = video('A2');
+stub.setAttribute('src', 'https://host/untitled.mov');
+location.hash = '#4';
 v.src = '';
 const dom = P.snapshot().filter(x => x.fromDom);
 console.log(JSON.stringify({
   srcAfterClear: v.src || '',
-  pooledKeys: pooled.map(x => [x.key, x.movieKey]),
-  domKeys: dom.map(x => [x.key, x.movieKey]),
+  pooledKeys: pooled.map(x => [x.key, x.movieKey, x.instance]),
+  domKeys: dom.map(x => [x.key, x.movieKey, x.instance]),
 }));
 """
-    result = _run_retire(script)
+    result = _run_retire(script, plan=_HELD_RETIRE_PLAN)
     assert result["srcAfterClear"] == ""
-    assert result["pooledKeys"] == [["untitled.mov", "movie1"]]
+    assert result["pooledKeys"] == [["untitled.mov", "movie1", "A1"]]
     # `key` stays as-is (back-compat, now empty); `movieKey` still attributes it.
-    assert result["domKeys"] == [["", "movie1"]]
+    assert result["domKeys"] == [["", "movie1", "A2"]]
 
 
 def test_snapshot_movie_key_is_null_for_an_unplanned_preserved_element():
     """`movieKey` is a claim, not a guess: an element the plan does not name
     must report null rather than borrowing a neighbouring key."""
     script = r"""
-const v = document.createElement('video');
+const v = video('A1');
 v.readyState = 4; v.currentTime = 1; v.parentNode = bodyEl;
 v.src = 'https://host/untitled.mov';
-goToScene(0);
+goToScene(1);
 detach(v);
 v.src = 'https://host/WA0125-unplanned.mov';
 v.dataset.obedPreserved = '1';
 console.log(JSON.stringify(P.snapshot().map(x => [x.key, x.movieKey, !!x.fromDom])));
 """
-    result = _run_retire(script)
+    result = _run_retire(script, plan=_NO_RETIRE_PLAN)
     assert result == [["wa0125-unplanned.mov", None, True]]
 
 
@@ -1835,10 +2143,14 @@ _GL_ENTRY = {
     "movieSlot": 1,
     "instanceId": "untitled.mov#1",
     "instanceRect": _GL_INSTANCE,
+    "loop": False,
+    "src": _inst("A1", _FOOTPRINT),
+    "dst": _inst("A2", _FOOTPRINT),
 }
 #: The fixture's retire shape with the retire entry swapped for the flag-on one.
 _GL_PLAN = {
-    "movies": _RETIRE_PLAN["movies"],
+    "schema": 2,
+    "movies": _MOVIES,
     "boundaries": [_GL_ENTRY] + [b for b in _RETIRE_PLAN["boundaries"] if b["action"] != "retire"],
 }
 #: The module as published while it waits in ARM-PRE.
@@ -1860,9 +2172,10 @@ function screenOf(r) {
   const m = P.stageMap();
   return {left: r.x * m.s + m.ox, top: r.y * m.s + m.oy, width: r.w * m.s, height: r.h * m.s};
 }
-/** A playing, attached movie <video> whose own box is `rect` (authored px). */
-function makeMovie(rect, src) {
-  const v = document.createElement('video');
+/** A playing, attached movie <video> of instance `inst` (default the zone's src `A1`)
+ *  whose own box is `rect` (authored px). */
+function makeMovie(rect, src, inst) {
+  const v = video(inst === undefined ? 'A1' : inst);
   v.readyState = 4; v.currentTime = 1; v.paused = false;
   v.parentNode = bodyEl;
   v.src = src || 'https://host/untitled.mov';
@@ -1897,7 +2210,7 @@ function playerDetachSubtree(v) {
 /** The measured 1->2 flow up to G2 arming: rest capture on #1, detach, `glreplay-arm`. */
 function arm() {
   location.hash = '#1';
-  const big = makeMovie(MEASURED), sib = makeMovie(SIBLING);
+  const big = makeMovie(MEASURED), sib = makeMovie(SIBLING, undefined, 'SIB');
   tick();
   const bigLayer = playerDetachSubtree(big);
   playerDetachSubtree(sib);
@@ -2004,7 +2317,7 @@ console.log(JSON.stringify({keys: Object.keys(S).sort(), version: S.version, inP
     assert result == {
         "keys": ["carried", "movieKeyOf", "note", "release", "setKeepWarm", "version"],
         "version": 1,
-        "inPage": 8,
+        "inPage": 9,
     }
 
 
@@ -2080,9 +2393,11 @@ console.log(JSON.stringify({whileLoading, afterLoad: zones()}));
                       + _GL_PLAN["boundaries"][1:]}, "entryInvalid"),
         (_G2_ARMING, {**_GL_PLAN, "boundaries": [{k: v for k, v in _GL_ENTRY.items() if k != "instanceRect"}]
                       + _GL_PLAN["boundaries"][1:]}, "entryInvalid"),
+        (_G2_ARMING, {**_GL_PLAN, "boundaries": [{**_GL_ENTRY, "movieKey": "movie9"}] + _GL_PLAN["boundaries"][1:]},
+         "entryInvalid"),
     ],
     ids=["module-absent", "module-version-2", "module-retired", "fallback-not-retire", "zero-width-rect",
-         "no-instance-rect"],
+         "no-instance-rect", "names-an-unplanned-movie"],
 )
 def test_pending_falls_back_to_retire_when_the_module_or_entry_is_unusable(module, plan, reason):
     result = _run_gl(r"""
@@ -2096,19 +2411,14 @@ console.log(JSON.stringify({zones: zones(), big: census(ctx.big), carried: S.car
     assert "stash" in result["refusals"]
 
 
-def test_entry_naming_an_unplanned_movie_is_invalid():
-    plan = {**_GL_PLAN, "boundaries": [{**_GL_ENTRY, "movieKey": "movie9"}] + _GL_PLAN["boundaries"][1:]}
-    result = _run_gl("tick();\nconsole.log(JSON.stringify(zones()));\n", plan=plan)
-    assert result == [["pending", "retired", "entryInvalid", "#1"]]
-
-
 # --- armed call sites (§1 rows 1-8) ---
 
 
-def test_armed_pools_the_detached_move_scene_decoders_but_never_mounts_them():
-    """Rows 1-2: both same-asset decoders detached on the move scene are pooled
+def test_armed_pools_the_detached_move_scene_decoder_but_never_mounts_it():
+    """Rows 1-2: the zone's src instance detached on the move scene is pooled
     and stamped; the detach remount is held (no epoch, no timers, no hashchange
-    listener), one `glreplay-hold` per key+via, never `preserve-refused`."""
+    listener), one `glreplay-hold` per key+via, never `preserve-refused`. The
+    same-asset sibling is another instance and passes through untouched."""
     result = _run_gl(r"""
 const ctx = arm();
 console.log(JSON.stringify({
@@ -2120,12 +2430,15 @@ console.log(JSON.stringify({
   refusals: notesOf('preserve-refused'),
 }));
 """)
+    assert result["big"]["pooled"] is True
+    assert result["big"]["glPooled"] is True
     for who in ("big", "sib"):
-        assert result[who]["pooled"] is True
-        assert result[who]["glPooled"] is True
         assert result[who]["inDocument"] is False
         assert result[who]["remounted"] is None
         assert result[who]["paused"] is False
+    assert result["sib"]["pooled"] is False
+    assert result["sib"]["glPooled"] is False
+    assert result["sib"]["preserved"] is None
     assert result["epochs"] == [True, True]
     assert result["hashListeners"] == 0
     assert result["holds"] == [{"key": "movie1", "via": "remount", "sceneHash": "#1"}]
@@ -2250,7 +2563,7 @@ def test_armed_create_element_is_raw_and_leaves_the_pool_untouched():
     result = _run_gl(r"""
 const ctx = arm();
 location.hash = '#2';
-const fresh = document.createElement('video');
+const fresh = video('A2');
 fresh.setAttribute('src', 'https://host/untitled.mov');
 console.log(JSON.stringify({
   facade: fresh.dataset.obedFacade || null,
@@ -2261,7 +2574,7 @@ console.log(JSON.stringify({
 """)
     assert result["facade"] is None
     assert result["reuse"] == []
-    assert result["pooled"] == [True, True]
+    assert result["pooled"] == [True, False]
     assert result["holds"] == ["remount", "reuse"]
 
 
@@ -2278,7 +2591,7 @@ console.log(JSON.stringify({big: census(ctx.big), sib: census(ctx.sib),
     assert result["retire"] == 0
     assert result["zones"] == 1
     assert result["big"]["pooled"] is True and result["big"]["paused"] is False
-    assert result["sib"]["pooled"] is True and result["sib"]["paused"] is False
+    assert result["sib"]["pooled"] is False and result["sib"]["paused"] is False
 
 
 def test_keep_warm_skips_only_the_carried_decoder_while_suspended():
@@ -2295,7 +2608,8 @@ S.setKeepWarm(ctx.big, true);
 tick();
 console.log(JSON.stringify({suspended, resumed: ctx.big.paused}));
 """)
-    assert result == {"suspended": {"big": True, "sib": False}, "resumed": False}
+    # The sibling is not ours (never pooled), so keep-warm never touches it.
+    assert result == {"suspended": {"big": True, "sib": True}, "resumed": False}
 
 
 # --- instance selection (§2) ---
@@ -2331,9 +2645,8 @@ console.log(JSON.stringify({
     assert note["delta"] == pytest.approx(0.0121, abs=1e-6)
     assert note["delta"] <= 0.02
     cands = {c["elId"]: c["rect"] for c in note["candidates"]}
-    assert set(cands) == {result["bigId"], result["sibId"]}
+    assert set(cands) == {result["bigId"]}
     assert cands[result["bigId"]] == pytest.approx(_GL_MEASURED)
-    assert cands[result["sibId"]] == pytest.approx(_GL_SIBLING)
 
 
 #: The only rect-matching decoder, pooled armed, then made ineligible (review A7).
@@ -2453,7 +2766,7 @@ console.log(JSON.stringify({
     screen = _screen(_GL_INSTANCE, stage)
     assert result["styleSize"] == pytest.approx([_GL_INSTANCE["w"], _GL_INSTANCE["h"]])
     assert result["out"] == {
-        "ok": True, "reason": None, "mode": "handoff", "elId": result["bigId"], "retired": [result["sibId"]],
+        "ok": True, "reason": None, "mode": "handoff", "elId": result["bigId"], "retired": [],
     }
     assert result["zones"] == [["pending", "armed", "moduleReady", "#1"], ["armed", "released", "handoff", "#2"]]
     assert result["landed"] is True
@@ -2469,7 +2782,7 @@ console.log(JSON.stringify({
     assert result["big"]["inDocument"] is True
     assert result["big"]["paused"] is False
     assert result["big"]["remounted"] == "1"
-    assert result["sib"] == {**result["sib"], "paused": True, "inDocument": False, "gen": -1, "pooled": False}
+    assert result["sib"] == {**result["sib"], "paused": False, "gen": 0, "pooled": False}
     assert result["retire"] == 0
     [note] = result["releaseNotes"]
     assert {k: v for k, v in note.items() if k != "sceneHash"} == result["out"]
@@ -2491,7 +2804,7 @@ console.log(JSON.stringify({zonesBefore, unknown, afterUnknown, first: first.mod
     assert result["unknown"] == {"ok": False, "reason": "unknownMovie", "mode": None, "elId": None, "retired": []}
     assert result["afterUnknown"]["zones"] == result["zonesBefore"]
     assert result["afterUnknown"]["big"]["pooled"] is True
-    assert result["afterUnknown"]["sib"]["pooled"] is True
+    assert result["afterUnknown"]["sib"]["pooled"] is False
     assert result["first"] == "handoff"
     assert result["second"] == {"ok": False, "reason": "notArmed", "mode": None, "elId": None, "retired": []}
 
@@ -2513,10 +2826,11 @@ def _assert_retired_like_today(result: dict, reason: str, **extra) -> None:
     assert (zone["from"], zone["to"], zone["reason"]) == ("armed", "retired", reason)
     for k, v in extra.items():
         assert zone[k] == v
-    for who in ("big", "sib"):
-        c = result[who]
-        assert (c["paused"], c["inDocument"], c["gen"], c["pooled"]) == (True, False, -1, False), (who, c)
-    assert sorted(result["out"]["retired"]) == sorted([result["big"]["elId"], result["sib"]["elId"]])
+    big, sib = result["big"], result["sib"]
+    assert (big["paused"], big["inDocument"], big["gen"], big["pooled"]) == (True, False, -1, False), big
+    # The sibling is another instance: never pooled, so never retired either.
+    assert (sib["paused"], sib["gen"], sib["pooled"], sib["glPooled"]) == (False, 0, False, False), sib
+    assert result["out"]["retired"] == [big["elId"]]
 
 
 _RELEASE_REPORT = r"""
@@ -2527,17 +2841,27 @@ console.log(JSON.stringify({
 """
 
 
+def _live_release(
+    *,
+    stand_downs: tuple | list | None = ("canvasRemoved",),
+    rect: str = "SLOT",
+    before_poster: str = "",
+    before_release: str = "",
+) -> str:
+    """Arm, go LIVE, lay the destination poster at `SLOT`, stand the module down
+    with `stand_downs`, then `release` at `rect` and report."""
+    return (
+        "const ctx = arm();\ngoLive();\n" + before_poster + "posterLayer(SLOT);\n"
+        + f"standDown({json.dumps(None if stand_downs is None else list(stand_downs))});\n"
+        + before_release + f"const out = S.release('movie1', {{rect: {rect}}});\n" + _RELEASE_REPORT
+    )
+
+
 @pytest.mark.parametrize("reason", [r for r in _G2_FAILURES if r != "writebackFailed"])
 def test_release_retires_on_every_primary_failure(reason):
     """Row 4 (OD-1 default): any primary stand-down other than `canvasRemoved`
     — the LAST element of the module's real `standDowns` — retires, even LIVE."""
-    result = _run_gl(r"""
-const ctx = arm();
-goLive();
-posterLayer(SLOT);
-standDown(['__REASON__']);
-const out = S.release('movie1', {rect: SLOT});
-""".replace("__REASON__", reason) + _RELEASE_REPORT)
+    result = _run_gl(_live_release(stand_downs=[reason]))
     _assert_retired_like_today(result, "failure", standDown=reason)
 
 
@@ -2552,13 +2876,7 @@ const out = S.release('movie1', {rect: SLOT});
     ids=["writeback-then-contextLost", "writeback-then-canvasRemoved", "empty", "unreadable"],
 )
 def test_release_reads_the_primary_as_the_last_stand_down(stand_downs, expected):
-    result = _run_gl(r"""
-const ctx = arm();
-goLive();
-posterLayer(SLOT);
-standDown(__LIST__);
-const out = S.release('movie1', {rect: SLOT});
-""".replace("__LIST__", json.dumps(stand_downs)) + _RELEASE_REPORT)
+    result = _run_gl(_live_release(stand_downs=stand_downs))
     mode, stand_down = expected
     if mode == "handoff":
         assert result["out"]["mode"] == "handoff"
@@ -2581,17 +2899,24 @@ const out = S.release('movie1', {rect: SLOT});
     _assert_retired_like_today(result, "notLive")
 
 
-def test_release_off_the_destination_retires():
-    """Row 5: a go-to back off the destination during LIVE (`hn < atScene`)."""
-    result = _run_gl(r"""
-const ctx = arm();
-goLive();
-location.hash = '#1';
-posterLayer(SLOT);
-standDown(['canvasRemoved']);
-const out = S.release('movie1', {rect: SLOT});
-""" + _RELEASE_REPORT)
-    _assert_retired_like_today(result, "notOnDestination")
+@pytest.mark.parametrize(
+    "kwargs,reason,extra",
+    [
+        # Row 5: a go-to back off the destination during LIVE (`hn < atScene`).
+        pytest.param({"before_poster": "location.hash = '#1';\n"}, "notOnDestination", {},
+                     id="row5-off-the-destination"),
+        pytest.param({"before_release": "stageEl.offsetWidth = 0;\n"}, "noStageMap", {}, id="without-a-stage-map"),
+        # §1: `release` evaluates `zoneState()` WITHOUT the `moduleRetired`
+        # watchdog (the module only goes RETIRED after `release` returns). Forced
+        # here by a module that already reads RETIRED: the answer must still be the
+        # row-4 decision, attributed to the module's own primary reason.
+        pytest.param({"stand_downs": ["glError"], "before_release": "G2.state = 'RETIRED';\n"},
+                     "failure", {"standDown": "glError"},
+                     id="s1-decides-by-its-own-rows-not-the-module-retired-watchdog"),
+    ],
+)
+def test_release_retires_when_a_row_check_fails(kwargs, reason, extra):
+    _assert_retired_like_today(_run_gl(_live_release(**kwargs)), reason, **extra)
 
 
 def test_release_past_the_zone_end_finds_the_zone_already_retired():
@@ -2611,9 +2936,9 @@ console.log(JSON.stringify({out, zone: zones().slice(-1)[0], big: census(ctx.big
 """)
     assert result["out"] == {"ok": False, "reason": "notArmed", "mode": None, "elId": None, "retired": []}
     assert result["zone"] == ["armed", "retired", "leftDestination", "#6"]
-    assert result["retired"] == [[result["big"]["elId"], result["sib"]["elId"]]]
-    for who in ("big", "sib"):
-        assert (result[who]["paused"], result[who]["gen"], result[who]["pooled"]) == (True, -1, False)
+    assert result["retired"] == [[result["big"]["elId"]]]
+    assert (result["big"]["paused"], result["big"]["gen"], result["big"]["pooled"]) == (True, -1, False)
+    assert (result["sib"]["paused"], result["sib"]["gen"], result["sib"]["pooled"]) == (False, 0, False)
 
 
 @pytest.mark.parametrize(
@@ -2643,7 +2968,7 @@ console.log(JSON.stringify({out, zone: notesOf('glreplay-zone').slice(-1)[0],
     assert result["out"]["mode"] == "retire"
     assert result["out"]["reason"] == reason
     assert (result["zone"]["from"], result["zone"]["to"], result["zone"]["reason"]) == ("armed", "retired", reason)
-    assert result["sib"]["paused"] is True and result["sib"]["inDocument"] is False
+    assert (result["sib"]["paused"], result["sib"]["gen"], result["sib"]["pooled"]) == (False, 0, False)
     assert result["big"]["inDocument"] is False
 
 
@@ -2660,13 +2985,7 @@ _BAD_RECTS = {
 def test_release_with_a_bad_rect_retires(label):
     rect = _BAD_RECTS[label]
     rect_js = "null" if rect is None else json.dumps(rect)
-    result = _run_gl(r"""
-const ctx = arm();
-goLive();
-posterLayer(SLOT);
-standDown(['canvasRemoved']);
-const out = S.release('movie1', {rect: __RECT__});
-""".replace("__RECT__", rect_js) + _RELEASE_REPORT)
+    result = _run_gl(_live_release(rect=rect_js))
     _assert_retired_like_today(result, "badRect")
 
 
@@ -2688,18 +3007,6 @@ const out = S.release('movie1', {rect: {x: 0.5, y: 0.5, w: 101, h: 51}});
         plan={**_GL_PLAN, "boundaries": [{**_GL_ENTRY, "instanceRect": at_origin}] + _GL_PLAN["boundaries"][1:]},
         instance=at_origin, measured=at_origin)
     _assert_retired_like_today(result, "badRect")
-
-
-def test_release_without_a_stage_map_retires():
-    result = _run_gl(r"""
-const ctx = arm();
-goLive();
-posterLayer(SLOT);
-standDown(['canvasRemoved']);
-stageEl.offsetWidth = 0;
-const out = S.release('movie1', {rect: SLOT});
-""" + _RELEASE_REPORT)
-    _assert_retired_like_today(result, "noStageMap")
 
 
 def test_release_without_the_authored_layer_retires_instead_of_a_top_z_append():
@@ -2732,7 +3039,7 @@ console.log(JSON.stringify({out, zones: zones().map(z => z.slice(0, 3)), big: ce
 """)
     assert result["out"]["mode"] == "retire"
     assert result["out"]["reason"] == "remountFailed"
-    assert sorted(result["out"]["retired"]) == sorted([result["big"]["elId"], result["sib"]["elId"]])
+    assert result["out"]["retired"] == [result["big"]["elId"]]
     assert result["zones"][-2:] == [["armed", "released", "handoff"], ["released", "retired", "remountFailed"]]
     assert (result["big"]["paused"], result["big"]["inDocument"], result["big"]["gen"]) == (True, False, -1)
 
@@ -2757,22 +3064,6 @@ console.log(JSON.stringify({threw, out, zones: zones().map(z => z.slice(0, 3)), 
     assert result["zones"][-1] == ["released", "retired", "releaseError"]
     assert result["lastZone"]["message"] == "layout gone"
     assert (result["big"]["paused"], result["big"]["inDocument"], result["big"]["gen"]) == (True, False, -1)
-
-
-def test_release_decides_by_its_own_rows_not_the_module_retired_watchdog():
-    """§1: `release` evaluates `zoneState()` WITHOUT the `moduleRetired`
-    watchdog (the module only goes RETIRED after `release` returns). Forced
-    here by a module that already reads RETIRED: the answer must still be the
-    row-4 decision, attributed to the module's own primary reason."""
-    result = _run_gl(r"""
-const ctx = arm();
-goLive();
-posterLayer(SLOT);
-standDown(['glError']);
-G2.state = 'RETIRED';
-const out = S.release('movie1', {rect: SLOT});
-""" + _RELEASE_REPORT)
-    _assert_retired_like_today(result, "failure", standDown="glError")
 
 
 def test_release_during_pending_resolves_the_zone_first():
@@ -2807,10 +3098,10 @@ console.log(JSON.stringify({answered, zonesBefore, zone: zones().slice(-1)[0], b
     assert result["answered"] == ("unknownMovie" if released_first else None)
     assert result["zonesBefore"] == 1
     assert result["zone"] == ["armed", "retired", "moduleRetired", "#2"]
-    for who in ("big", "sib"):
-        c = result[who]
-        assert (c["paused"], c["inDocument"], c["gen"], c["pooled"]) == (True, False, -1, False), (who, c)
-    assert result["retired"] == [[result["big"]["elId"], result["sib"]["elId"]]]
+    big = result["big"]
+    assert (big["paused"], big["inDocument"], big["gen"], big["pooled"]) == (True, False, -1, False), big
+    assert (result["sib"]["paused"], result["sib"]["gen"], result["sib"]["pooled"]) == (False, 0, False)
+    assert result["retired"] == [[big["elId"]]]
 
 
 @pytest.mark.parametrize("consult", ["tick", "detach", "seam"])
@@ -2862,7 +3153,7 @@ location.hash = '#6';
 tick();
 const atSix = zones().map(z => z.slice(0, 4));
 goToScene(7);
-const d = makeMovie(MEASURED);
+const d = makeMovie(MEASURED, undefined, 'A3');
 playerDetach(d);
 S.note('glreplay-arm', {canvasId: '1-canvas', atScene: 2});
 const carried = S.carried('movie1').reason;
@@ -2873,7 +3164,7 @@ tick();
 const dAfterRelease = census(d);
 goToScene(8);
 tick();
-const bridged = document.createElement('video');
+const bridged = video('A4');
 bridged.setAttribute('src', 'https://host/untitled.mov');
 console.log(JSON.stringify({
   atSix, carried, out, dAfterRelease, dId: d.__obedElId,
@@ -2912,9 +3203,9 @@ console.log(JSON.stringify({
 }));
 """)
     assert result["zone"] == ["armed", "retired", "moduleRetired", "#0"]
-    assert result["retired"] == [[result["big"]["elId"], result["sib"]["elId"]]]
-    for who in ("big", "sib"):
-        assert (result[who]["paused"], result[who]["gen"]) == (True, -1)
+    assert result["retired"] == [[result["big"]["elId"]]]
+    assert (result["big"]["paused"], result["big"]["gen"]) == (True, -1)
+    assert (result["sib"]["paused"], result["sib"]["gen"], result["sib"]["pooled"]) == (False, 0, False)
     d = result["d"]
     assert (d["pooled"], d["preserved"], d["paused"], d["gen"]) == (True, "1", False, 0)
     assert d["inDocument"] is True
@@ -2934,25 +3225,31 @@ if (handoff.mode !== 'handoff') throw new Error('no hand-off: ' + JSON.stringify
 
 
 def test_released_is_pin_for_the_rest_of_the_destination():
-    """Rows 6-8 in `released` (K16): the keep-warm flag is cleared, a later
-    decoder pooled on the destination survives the interval, and a fresh
-    element reuses the kept decoder exactly as pin does."""
+    """Rows 6-8 in `released` (K16): the keep-warm flag is cleared, the handed-off
+    decoder is re-stamped as the destination instance and held, and a later
+    decoder pooled on the destination survives the interval. The player makes
+    one fresh element per instance per slide (F1), and the destination's was
+    made (raw) while armed, so a later fresh `dst` element is left raw."""
     result = _run_gl(_HANDOFF + r"""
 const noWarm = !!ctx.big.__obedGlNoWarm;
 const e = makeMovie(SIBLING);
 playerDetach(e);
 tick();
 const eAfterTick = census(e);
-const fresh = document.createElement('video');
+const fresh = video('A2');
 fresh.setAttribute('src', 'https://host/untitled.mov');
 console.log(JSON.stringify({noWarm, eAfterTick, retire: notesOf('retire-boundary').length,
-  reuse: notesOf('reuse-decoder').map(x => x.oldElId), bigId: ctx.big.__obedElId,
-  zones: zones().length}));
+  reuse: notesOf('reuse-decoder').map(x => x.oldElId), instance: ctx.big.__obedInstance,
+  held: P.snapshot().filter(x => x.elId === ctx.big.__obedElId).map(x => x.instance),
+  facade: !!fresh.__obedFacadeFor, zones: zones().length}));
 """)
     assert result["noWarm"] is False
     assert result["eAfterTick"]["pooled"] is True
     assert result["retire"] == 0
-    assert result["reuse"] == [result["bigId"]]
+    assert result["instance"] == "A2"
+    assert "A2" in result["held"]
+    assert result["reuse"] == []
+    assert result["facade"] is False
     assert result["zones"] == 2
 
 
@@ -2977,10 +3274,10 @@ P.clear();
 console.log(JSON.stringify({zone: zones().slice(-1)[0].slice(0, 3), big: census(ctx.big), sib: census(ctx.sib)}));
 """)
     assert result["zone"] == [state, "retired", "cleared"]
-    for who in ("big", "sib"):
-        assert result[who]["paused"] is True, who
-        assert result[who]["inDocument"] is False, who
-        assert result[who]["pooled"] is False, who
+    assert result["big"]["paused"] is True
+    assert result["big"]["inDocument"] is False
+    assert result["big"]["pooled"] is False
+    assert (result["sib"]["paused"], result["sib"]["gen"], result["sib"]["pooled"]) == (False, 0, False)
 
 
 def test_seam_note_passes_only_the_modules_own_kinds():
@@ -3027,18 +3324,8 @@ _RETIRE_FAMILY = [
     test_retire_zone_stash_declines_and_notes_once,
     test_retire_zone_src_clear_really_clears,
     test_retire_zone_remove_attribute_really_removes,
-    test_retire_zone_blocks_remount_of_a_decoder_pooled_before_the_boundary,
     test_retire_zone_create_element_does_not_facade_or_reuse,
-    test_interval_sweep_retires_a_decoder_pooled_before_the_zone,
-    test_interval_sweep_is_silent_outside_the_zone,
-    test_before_the_retire_zone_preservation_is_unchanged,
-    test_after_the_zone_end_preservation_works_again,
-    test_bridge_still_engages_at_scene_8_for_the_retired_key,
-    test_retire_zone_does_not_touch_another_movie_key,
-    test_null_hash_is_allowed,
-    test_sweep_retires_a_pooled_decoder_whose_src_was_really_cleared,
-    test_pending_remount_of_an_empty_src_decoder_is_refused_in_zone,
-    test_a_stamped_empty_src_decoder_is_free_again_past_the_zone_end,
+    test_retire_zone_does_not_touch_another_movie,
 ]
 
 
@@ -3075,18 +3362,10 @@ def test_retire_family_holds_on_a_gl_replay_plan_without_a_usable_module(fn, kwa
 tick();
 console.log(JSON.stringify(P.events.filter(e => e.kind === 'glreplay-zone').map(e => e.detail)));
 """
-        node = shutil.which("node")
-        if not node:
-            pytest.skip("Node is required to exercise the JS core")
-        harness = (
-            _FULL_HARNESS_PREAMBLE.replace("__STAGE__", json.dumps(_IDENTITY_STAGE))
-            .replace("__PLAN__", json.dumps(_GL_PLAN))
-            .replace("__AFTER_CORE__", _gl_after_core(seed))
-            .replace("__CORE__", live_continuity_js.PRESERVE_CORE_JS)
-            + script + epilogue
+        harness = _full_harness(
+            plan=_GL_PLAN, stage=_IDENTITY_STAGE, script=script + epilogue, after_core=_gl_after_core(seed)
         )
-        out = subprocess.run([node, "-e", harness], check=True, text=True, capture_output=True)
-        lines = out.stdout.strip().splitlines()
+        lines = _node_stdout(harness).strip().splitlines()
         zone_notes.append(json.loads(lines[-1]))
         return json.loads(lines[-2])
 
@@ -3123,7 +3402,7 @@ location.hash = '#2';
 posterLayer(SLOT);
 standDown(['canvasRemoved']);
 const out = S.release('movie1', {rect: SLOT});
-const fresh = document.createElement('video');
+const fresh = video('A2');
 fresh.setAttribute('src', 'https://host/untitled.mov');
 console.log(JSON.stringify({earlyAtZero, earlyArmed, retiredAtOne, out, earlyId: early.__obedElId,
   bigId: ctx.big.__obedElId, sibId: ctx.sib.__obedElId,
@@ -3135,14 +3414,15 @@ console.log(JSON.stringify({earlyAtZero, earlyArmed, retiredAtOne, out, earlyId:
     assert (e["paused"], e["inDocument"], e["gen"], e["pooled"]) == (True, False, -1, False)
     assert result["retiredAtOne"] == [[[result["earlyId"]], "#1"]]
     assert result["out"]["mode"] == "handoff"
-    assert result["out"]["retired"] == [result["sibId"]]
-    assert result["reuse"] == [result["bigId"]]
+    assert result["out"]["retired"] == []
+    assert result["reuse"] == []
 
 
-def test_release_retires_every_in_zone_same_asset_decoder_except_the_carried_one():
+def test_release_retires_every_in_zone_decoder_of_the_instance_except_the_carried_one():
     """A1(2): the sibling set is every pooled or DOM-preserved decoder of the
-    key except the memo, not only the armed-pooled ones — forced here by a
-    same-asset decoder pooled under pin that the armed sweep has not reached."""
+    zone's instances except the memo, not only the armed-pooled ones — forced
+    here by a src-instance decoder the armed sweep has not reached. Another
+    instance of the same asset is not the zone's and is never taken."""
     result = _run_gl(r"""
 const ctx = arm();
 S.carried('movie1');
@@ -3156,7 +3436,7 @@ const out = S.release('movie1', {rect: SLOT});
 console.log(JSON.stringify({out, other: census(other), otherId: other.__obedElId, sibId: ctx.sib.__obedElId}));
 """)
     assert result["out"]["mode"] == "handoff"
-    assert sorted(result["out"]["retired"]) == sorted([result["sibId"], result["otherId"]])
+    assert result["out"]["retired"] == [result["otherId"]]
     o = result["other"]
     assert (o["paused"], o["inDocument"], o["gen"]) == (True, False, -1)
 
@@ -3164,12 +3444,16 @@ console.log(JSON.stringify({out, other: census(other), otherId: other.__obedElId
 def test_a_natural_facade_stub_is_never_bound():
     """A1(3): a stub `bindFacade` proxies onto a pooled decoder answers the
     candidate checks through the real decoder; it must never be carried."""
+    plan = {**_GL_PLAN, "boundaries": [
+        {"atScene": 1, "action": "pin", "movieKey": "movie1", "loop": False,
+         "src": _inst("A0", _FOOTPRINT), "dst": _inst("A1", _FOOTPRINT)},
+    ] + _GL_PLAN["boundaries"]}
     result = _run_gl(r"""
 location.hash = '#0';
 tick();
-const real = makeMovie(SIBLING);
+const real = makeMovie(SIBLING, undefined, 'A0');
 playerDetach(real);
-const stub = document.createElement('video');
+const stub = video('A1');
 stub.setAttribute('src', 'https://host/untitled.mov');
 if (stub.__obedFacadeFor !== real) throw new Error('no facade');
 stub.parentNode = bodyEl;
@@ -3179,20 +3463,20 @@ tick();
 playerDetach(stub);
 const r = S.carried('movie1');
 console.log(JSON.stringify({reason: r.reason, bound: !!r.video, stubArmedPooled: !!stub.__obedGlPooled}));
-""")
-    assert result == {"reason": "notPooled", "bound": False, "stubArmedPooled": True}
+""", plan=plan)
+    assert result == {"reason": "notPooled", "bound": False, "stubArmedPooled": False}
 
 
 def test_armed_zone_retires_when_the_hash_reaches_the_next_flow():
     """A3: with `armSeen`, an armed zone at `hn >= retireZoneEnd` used to stay
     armed and let the next flow bridge the carried decoder while armed."""
-    plan = {**_GL_PLAN, "boundaries": [b for b in _GL_PLAN["boundaries"] if b["action"] != "restart"]}
+    plan = {**_GL_PLAN, "boundaries": [_GL_ENTRY, {**_BRIDGE, "src": _inst("A2", _FOOTPRINT)}]}
     result = _run_gl(r"""
 const ctx = arm();
 goLive();
 goToScene(8);
 tick();
-const fresh = document.createElement('video');
+const fresh = video('A4');
 fresh.setAttribute('src', 'https://host/untitled.mov');
 console.log(JSON.stringify({zone: zones().slice(-1)[0], big: census(ctx.big),
   bridged: notesOf('bridge-3to4').map(x => x.oldElId), bigId: ctx.big.__obedElId}));
@@ -3332,44 +3616,42 @@ console.log(JSON.stringify({threw, out, big: census(ctx.big), sib: census(ctx.si
     assert result["threw"] is None
     assert result["throwsLeft"] == 0
     assert (result["out"]["ok"], result["out"]["mode"], result["out"]["reason"]) == (True, "retire", "releaseError")
-    for who in ("big", "sib"):
-        c = result[who]
-        assert (c["paused"], c["inDocument"], c["gen"]) == (True, False, -1), (who, c)
+    big = result["big"]
+    assert (big["paused"], big["inDocument"], big["gen"]) == (True, False, -1), big
+    assert (result["sib"]["paused"], result["sib"]["gen"], result["sib"]["pooled"]) == (False, 0, False)
 
 
-def test_facade_swap_never_resurrects_a_retired_decoder():
-    """A13 / K20: a facade bound in `released` whose stub is inserted after the
-    zone retired must not re-insert and play the retired decoder."""
-    result = _run_gl(_HANDOFF + r"""
-const fresh = document.createElement('video');
-fresh.setAttribute('src', 'https://host/untitled.mov');
-if (fresh.__obedFacadeFor !== ctx.big) throw new Error('no facade onto the memo');
+@pytest.mark.parametrize(
+    "tail,expected",
+    [
+        # A13 / K20: a facade whose stub is inserted after its decoder was retired
+        # (here by a go-to `clear()`) must not re-insert and play it.
+        pytest.param("P.clear();", {"swaps": 0, "paused": True, "gen": -1},
+                     id="A13-K20-never-resurrects-a-retired-decoder"),
+        # Control for A13: the liveness gate keeps pin's ordinary facade swap.
+        pytest.param("", {"swaps": 1, "paused": False, "gen": 0}, id="control-still-swaps-a-live-decoder"),
+    ],
+)
+def test_facade_swap_on_stub_insertion(tail, expected):
+    """`A1` pooled at the 1->2 transition and facaded by the fresh `A2` stub, which
+    the player has not inserted yet; `tail` runs before the insertion."""
+    result = _run_full_core_in_node(plan=_NO_RETIRE_PLAN, stage=_IDENTITY_STAGE, script=r"""
+const real = video('A1');
+real.readyState = 4; real.currentTime = 1; real.parentNode = bodyEl;
+real.src = 'https://host/untitled.mov';
 goToScene(1);
-tick();
-fresh.parentNode = bodyEl;
-moCallbacks.slice().forEach((cb) => cb([{removedNodes: []}]));
-console.log(JSON.stringify({big: census(ctx.big), swaps: notesOf('dom-swap').length}));
-""")
-    assert result["swaps"] == 0
-    b = result["big"]
-    assert (b["paused"], b["inDocument"], b["gen"]) == (True, False, -1)
-
-
-def test_facade_swap_still_happens_for_a_live_decoder():
-    """Control for A13: the liveness gate keeps pin's ordinary facade swap."""
-    result = _run_gl(r"""
-location.hash = '#0';
-tick();
-const real = makeMovie(SIBLING);
-playerDetach(real);
-const fresh = document.createElement('video');
+detach(real);
+goToScene(2);
+const fresh = video('A2');
 fresh.setAttribute('src', 'https://host/untitled.mov');
+if (fresh.__obedFacadeFor !== real) throw new Error('no facade');
+""" + tail + r"""
 fresh.parentNode = bodyEl;
 moCallbacks.slice().forEach((cb) => cb([{removedNodes: []}]));
-console.log(JSON.stringify({swaps: notesOf('dom-swap').length}));
+console.log(JSON.stringify({swaps: P.events.filter(e => e.kind === 'dom-swap').length,
+  paused: real.paused, gen: real.__obedGen}));
 """)
-    assert result == {"swaps": 1}
-
+    assert result == expected
 
 
 # --- A2 (owner: option (a) + guard G + the stash rule) -------------------
@@ -3379,32 +3661,37 @@ console.log(JSON.stringify({swaps: notesOf('dom-swap').length}));
 # and a detach must not overwrite its last attached rect.
 
 
-def test_released_memo_and_its_facade_never_take_the_stage_append():
+def test_released_memo_never_takes_the_stage_append_and_no_fresh_element_binds_to_it():
     """Guard G: the 2->3 transition window (hash still #5) has no matching
-    poster canvas; the memo and its facade are held (`glreplay-hold` via
-    `stage`), never appended over the transition."""
+    poster canvas; the memo is held (`glreplay-hold` via `stage`), never
+    appended over the transition. A fresh slide-3 element created while the
+    hash still reads #5 is the restart's `dst`, not a carry's, so it is never
+    bound to the memo."""
     result = _run_gl(_HANDOFF + r"""
-const stub = document.createElement('video');
-stub.setAttribute('src', 'https://host/untitled.mov');
-if (stub.__obedFacadeFor !== ctx.big) throw new Error('no facade onto the memo');
 canvases.length = 0;
 location.hash = '#5';
 settleMoves();
 playerDetachSubtree(ctx.big);
+const stub = video('A3');
+stub.setAttribute('src', 'https://host/untitled.mov');
 stub.parentNode = bodyEl;
+moCallbacks.slice().forEach((cb) => cb([{addedNodes: [stub], removedNodes: []}]));
 playerDetach(stub);
 console.log(JSON.stringify({
-  memoInBody: ctx.big.parentNode === bodyEl, stubInBody: stub.parentNode === bodyEl,
-  memoInDocument: document.contains(ctx.big), stubInDocument: document.contains(stub),
-  stubPooled: census(stub).pooled,
+  facade: !!stub.__obedFacadeFor, swaps: notesOf('dom-swap').length,
+  memoInBody: ctx.big.parentNode === bodyEl, memoInDocument: document.contains(ctx.big),
+  memoPooled: census(ctx.big).pooled,
   done: notesOf('remount-done').map(d => d.elId),
+  footprint: notesOf('remount-footprint-rect').map(d => d.elId),
   holds: notesOf('glreplay-hold').map(d => d.via),
 }));
 """)
-    assert result["stubPooled"] is True
-    assert result["memoInBody"] is False and result["stubInBody"] is False
-    assert result["memoInDocument"] is False and result["stubInDocument"] is False
+    assert result["facade"] is False
+    assert result["swaps"] == 0
+    assert result["memoPooled"] is True
+    assert result["memoInBody"] is False and result["memoInDocument"] is False
     assert result["done"] == []
+    assert result["footprint"] == []
     assert "stage" in result["holds"]
 
 
@@ -3426,7 +3713,7 @@ console.log(JSON.stringify({done: notesOf('remount-done').map(d => d.elId), othe
 def test_released_memo_keeps_its_rect_across_a_subtree_detach(stage):
     """The stash rule: a detach in `released` does not let `captureLayout`'s
     zero-origin style fallback overwrite the memo's rect, so `tryRemount`
-    never reaches the elId-parity footprint fallback for it."""
+    never reaches the resting-rect fallback for it."""
     result = _run_gl(_HANDOFF + r"""
 const before = Object.assign({}, ctx.big.__obedRect);
 location.hash = '#3';
@@ -3447,83 +3734,6 @@ console.log(JSON.stringify({before, after: ctx.big.__obedRect,
 # --- Codex r1 (`git show a56474f3:.agents/reviews/gl-replay-g3/codex-r1.md`) --------------
 
 
-def _insert(node: str, parent: str) -> str:
-    """The player inserts `node` under `parent`; the observers see an insertion record."""
-    return (
-        f"{node}.parentNode = {parent};\n"
-        f"moCallbacks.slice().forEach((cb) => cb([{{addedNodes: [{node}], removedNodes: []}}]));\n"
-    )
-
-
-def test_released_facade_inserted_top_z_never_swaps_the_carried_decoder_in():
-    """G34-01: the 2->3 transition window (#5, no matching poster canvas). The
-    player inserts the fresh stub bound to the carried decoder under `#body`;
-    the facade observer fires while the stub is STILL attached. The swap would
-    move the carried decoder top-z and play it, bypassing guard G."""
-    result = _run_gl(_HANDOFF + r"""
-canvases.length = 0;
-location.hash = '#5';
-settleMoves();
-playerDetachSubtree(ctx.big);
-const stub = document.createElement('video');
-stub.setAttribute('src', 'https://host/untitled.mov');
-if (stub.__obedFacadeFor !== ctx.big) throw new Error('no facade onto the memo');
-""" + _insert("stub", "bodyEl") + r"""
-const ids = [ctx.big.__obedElId, stub.__obedElId];
-const forIds = (kind) => notesOf(kind).filter(d => ids.indexOf(d.elId) >= 0).length;
-console.log(JSON.stringify({
-  swaps: notesOf('dom-swap').length, done: forIds('remount-done'), footprint: forIds('remount-footprint-rect'),
-  memoInBody: ctx.big.parentNode === bodyEl, memoInDocument: document.contains(ctx.big),
-  stubInBody: stub.parentNode === bodyEl,
-  holds: notesOf('glreplay-hold').map(d => d.via),
-}));
-""")
-    assert result["swaps"] == 0
-    assert result["done"] == 0
-    assert result["footprint"] == 0
-    assert result["memoInBody"] is False and result["memoInDocument"] is False
-    assert result["stubInBody"] is False
-    assert "stage" in result["holds"]
-
-
-def test_released_facade_inserted_in_the_poster_layer_still_swaps():
-    """Control for G34-01: a stub the player inserts into the carried decoder's
-    own authored poster layer is swapped exactly as pin does."""
-    result = _run_gl(_HANDOFF + r"""
-const stub = document.createElement('video');
-stub.setAttribute('src', 'https://host/untitled.mov');
-""" + _insert("stub", "canvas.parentNode") + r"""
-console.log(JSON.stringify({swaps: notesOf('dom-swap').map(d => d.elId), bigId: ctx.big.__obedElId,
-  memoInLayer: ctx.big.parentNode === canvas.parentNode}))
-""")
-    assert result["swaps"] == [result["bigId"]]
-    assert result["memoInLayer"] is True
-
-
-def test_released_facade_detached_without_a_rect_uses_the_carried_rect():
-    """G34-01 (copy): a detached, media-less facade has no rect of its own; it
-    must not reach the elId-parity footprint fallback before guard G."""
-    result = _run_gl(_HANDOFF + r"""
-const stub = document.createElement('video');
-stub.setAttribute('src', 'https://host/untitled.mov');
-canvases.length = 0;
-location.hash = '#5';
-stub.parentNode = bodyEl;
-playerDetach(stub);
-console.log(JSON.stringify({
-  footprint: notesOf('remount-footprint-rect').map(d => d.elId),
-  done: notesOf('remount-done').map(d => d.elId),
-  stubRect: stub.__obedRect || null, memoRect: ctx.big.__obedRect,
-  stubInDocument: document.contains(stub), stubPooled: census(stub).pooled,
-}));
-""")
-    assert result["stubPooled"] is True
-    assert result["footprint"] == []
-    assert result["done"] == []
-    assert result["stubRect"] == pytest.approx(result["memoRect"])
-    assert result["stubInDocument"] is False
-
-
 @pytest.mark.parametrize("plan", [_RETIRE_PLAN, _NO_RETIRE_PLAN], ids=["retire", "no-retire"])
 @pytest.mark.parametrize("via", ["setter", "setAttribute"])
 def test_flag_off_source_reassignment_adds_no_gl_expando(plan, via):
@@ -3531,7 +3741,7 @@ def test_flag_off_source_reassignment_adds_no_gl_expando(plan, via):
     own property on the player's videos."""
     assign = (lambda url: f"v.src = '{url}';") if via == "setter" else (lambda url: f"v.setAttribute('src', '{url}');")
     script = (
-        "const v = document.createElement('video');\nv.readyState = 4; v.currentTime = 1; v.parentNode = bodyEl;\n"
+        "const v = video('A1');\nv.readyState = 4; v.currentTime = 1; v.parentNode = bodyEl;\n"
         + assign("https://host/untitled.mov") + "\n" + assign("https://host/WA0125.mov") + "\n"
         + assign("https://host/untitled.mov") + "\n"
         + r"""console.log(JSON.stringify({
@@ -3574,3 +3784,1528 @@ console.log(JSON.stringify({before, after: [Object.prototype.hasOwnProperty.call
   Object.prototype.hasOwnProperty.call(v, '__obedAuthoredRectScene')]}));
 """)
     assert result == {"before": [True, 1], "after": [False, False]}
+
+
+# --- schema 2: per-instance carry, identity and chains -------------------------------------
+#
+# Plan §2.1-§2.2 (`.agents/plans/keynote_live_continuity_generalisation.plan.md`). Identity
+# is the export objectID the player writes into the element's id before its `src` (F1);
+# a carry re-stamps the carried decoder as the entry's `dst`. The decks below are the
+# frozen schema-2 contract `tests/fixtures/live_continuity/runtime_v2_examples.json`
+# (objectIds and rects taken from the real exports).
+
+_CONTRACT = json.loads(
+    (Path(__file__).resolve().parent / "fixtures" / "live_continuity" / "runtime_v2_examples.json").read_text()
+)
+
+
+def _ids(plan: dict) -> list:
+    """Every instance a plan names, in entry order (src before dst)."""
+    out: list = []
+    for b in plan["boundaries"]:
+        for side in ("src", "dst"):
+            if side in b and b[side]["objectId"] not in out:
+                out.append(b[side]["objectId"])
+    return out
+
+
+_CHAIN_PRELUDE = r"""
+const SRC = '__SRC__';
+const ID = __IDS__;
+/** A playing, attached element of instance `inst` that the player built on its slide. */
+function playing(inst, src) {
+  const v = video(inst);
+  v.setAttribute('src', src || SRC);
+  v.readyState = 4; v.currentTime = 1; v.paused = false; v.parentNode = bodyEl;
+  return v;
+}
+/** The fresh element the player builds for instance `inst` on the next slide. */
+function fresh(inst, src) {
+  const v = video(inst);
+  v.setAttribute('src', src || SRC);
+  return v;
+}
+/** The player inserts a built element; the observers see the insertion. */
+function insert(v) {
+  v.parentNode = bodyEl;
+  moCallbacks.slice().forEach((cb) => cb([{addedNodes: [v], removedNodes: []}]));
+}
+function notesOf(kind) { return P.events.filter(e => e.kind === kind).map(e => e.detail); }
+function kinds() { return P.events.map(e => e.kind); }
+// `beginMove`'s flag clears on the next macrotask, which has run by the next slide change.
+const detachNow = detach;
+detach = function(v) {
+  videos.forEach((x) => { x.__obedRemounting = false; });
+  detachNow(v);
+};
+"""
+
+
+def _run_chain(plan: dict, script: str, *, src: str = "https://host/untitled.mov", stage: dict = _IDENTITY_STAGE) -> dict:
+    prelude = _CHAIN_PRELUDE.replace("__SRC__", src).replace("__IDS__", json.dumps(_ids(plan)))
+    return _run_full_core_in_node(plan=plan, stage=stage, script=prelude + script)
+
+
+def test_the_contract_decks_install():
+    for name, plan in _CONTRACT.items():
+        result = _run_chain(plan, "console.log(JSON.stringify({ready: !!P.ready, version: P.version}));",
+                            src="https://host/" + plan["movies"]["movie1"]["assetKeys"][0])
+        assert result == {"ready": True, "version": 9}, name
+
+
+def test_pin_chain_facades_each_destination_onto_the_one_decoder_and_restamps_it():
+    """D5: pin 1->2, pin 2->3. Each fresh `dst` element is facaded onto the SAME
+    decoder, which is re-stamped as each destination instance in turn; the carry
+    note keeps today's fields and adds the entry and diagnostic-only rects."""
+    plan = _CONTRACT["d5"]
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing(ID[0]);
+a._rect = {left: 160, top: 700, width: 640, height: 180};
+goToScene(1);
+detach(a);
+goToScene(2);
+const b = fresh(ID[1]);
+insert(b);
+const afterFirst = {instance: a.__obedInstance, id: a.id, facade: b.__obedFacadeFor === a};
+goToScene(3);
+detach(a);
+goToScene(4);
+const c = fresh(ID[2]);
+console.log(JSON.stringify({
+  afterFirst, instance: a.__obedInstance, facade: c.__obedFacadeFor === a, aId: a.__obedElId,
+  bId: b.__obedElId, cId: c.__obedElId, id: a.id,
+  reuse: notesOf('reuse-decoder'), swaps: notesOf('dom-swap').length,
+  refusals: notesOf('preserve-refused'),
+}));
+""", src="https://host/counter-a.mov")
+    ids = _ids(plan)
+    assert result["afterFirst"] == {"instance": ids[1], "id": ids[1] + "-video", "facade": True}
+    assert result["instance"] == ids[2]
+    assert result["id"] == ids[2] + "-video"
+    assert result["facade"] is True
+    assert result["swaps"] == 1
+    assert result["refusals"] == []
+    first, second = result["reuse"]
+    assert (first["oldElId"], first["newElId"]) == (result["aId"], result["bId"])
+    assert (second["oldElId"], second["newElId"]) == (result["aId"], result["cId"])
+    assert {k: first[k] for k in ("key", "atScene", "src", "dst")} == {
+        "key": "counter-a.mov", "atScene": 2, "src": ids[0], "dst": ids[1]}
+    assert first["srcRect"] == plan["boundaries"][0]["src"]["rect"]
+    assert first["measuredRect"] == pytest.approx({"x": 160, "y": 700, "w": 640, "h": 180})
+    for field in ("preservedT", "paused", "readyState", "oldGen", "generation", "queueLeft", "sceneHash"):
+        assert field in first
+
+
+def test_bridge_to_bridge_to_pin_chain_carries_the_held_overlay():
+    """D1: bridge 1->2, bridge 2->3, pin 3->4. A bridge overlay is never detached by
+    the player, so the next entries must find it among the HELD candidates: the
+    held overlay starts the second move itself, and the pin facades onto it."""
+    plan = _CONTRACT["d1"]
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing(ID[0]);
+goToScene(1);
+detach(a);
+const firstMove = notesOf('bridge-motion-start').slice(-1)[0];
+goToScene(2);
+const b = fresh(ID[1]);
+const afterFirst = {instance: a.__obedInstance, bridged: !!a.__obedBridged34, suppressed: !!b.__obedSuppressed34,
+  inBody: a.parentNode === bodyEl};
+goToScene(3);
+detach(b);
+pump();
+const secondMove = notesOf('bridge-motion-start').slice(-1)[0];
+goToScene(4);
+const c = fresh(ID[2]);
+pump();
+const afterSecond = {instance: a.__obedInstance, suppressed: !!c.__obedSuppressed34};
+goToScene(5);
+pump();
+goToScene(6);
+const d = fresh(ID[3]);
+console.log(JSON.stringify({
+  firstMove, secondMove, afterFirst, afterSecond, aId: a.__obedElId,
+  bridges: notesOf('bridge-3to4').map(n => [n.oldElId, n.src, n.dst]),
+  reuse: notesOf('reuse-decoder').map(n => [n.oldElId, n.src, n.dst]),
+  final: {instance: a.__obedInstance, bridged: !!a.__obedBridged34, epochLive: a.__obedRemountEpoch !== -1,
+    facade: d.__obedFacadeFor === a, id: a.id},
+  refusals: notesOf('preserve-refused'),
+}));
+""", src="https://host/counter-a.mov")
+    ids = _ids(plan)
+    rect = lambda i, side: plan["boundaries"][i][side]["rect"]  # noqa: E731
+    assert (result["firstMove"]["srcRect"], result["firstMove"]["rect"]) == (rect(0, "src"), rect(0, "dst"))
+    assert (result["secondMove"]["srcRect"], result["secondMove"]["rect"]) == (rect(1, "src"), rect(1, "dst"))
+    assert result["afterFirst"] == {"instance": ids[1], "bridged": True, "suppressed": True, "inBody": True}
+    assert result["afterSecond"] == {"instance": ids[2], "suppressed": True}
+    a = result["aId"]
+    assert result["bridges"] == [[a, ids[0], ids[1]], [a, ids[1], ids[2]]]
+    assert result["reuse"] == [[a, ids[2], ids[3]]]
+    assert result["final"] == {"instance": ids[3], "bridged": False, "epochLive": True, "facade": True,
+                               "id": ids[3] + "-video"}
+    assert result["refusals"] == []
+
+
+def test_the_facade_stub_is_never_pooled_or_remounted_after_its_swap():
+    """RT-D (live D5, 6000 ms): the dom-swap takes the facade stub out of the DOM,
+    and the detach observer saw it as a planned decoder (it proxies the carried
+    clock and had its own src loaded), pooled it and remounted it beside the
+    carried decoder: two painters at one rect, which also made the footprint
+    owner ambiguous. The stub must stay out: never pooled, never remounted."""
+    plan = _CONTRACT["d5"]
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing(ID[0]);
+goToScene(1);
+detach(a);
+goToScene(2);
+const b = fresh(ID[1]);
+srcStore.set(b, SRC);
+insert(b);
+moCallbacks.slice().forEach((cb) => cb([{addedNodes: [], removedNodes: [b]}]));
+a.readyState = 4; a.videoWidth = 1920; a._rect = {left: 160, top: 700, width: 640, height: 180};
+console.log(JSON.stringify({
+  swapped: notesOf('dom-swap').length, stubConnected: document.contains(b),
+  stubPooled: P.snapshot().some(x => x.elId === b.__obedElId),
+  stubRemounts: P.events.filter(e => e.kind.indexOf('remount-') === 0 && e.detail.elId === b.__obedElId).length,
+  owner: P.footprintOwnerDecoderId({x: 160, y: 700, w: 640, h: 180}), aId: a.__obedElId,
+}));
+""", src="https://host/counter-a.mov")
+    assert result["swapped"] == 1
+    assert result["stubConnected"] is False
+    assert result["stubPooled"] is False
+    assert result["stubRemounts"] == 0
+    assert result["owner"]["elId"] == result["aId"]
+    assert result["owner"]["via"] == "footprint-video"
+
+
+@pytest.mark.parametrize("sibling", ["unplanned", "planned"])
+def test_footprint_owner_prefers_the_planned_decoder_over_an_unplanned_same_asset_copy(sibling):
+    """RT-C (F5 `footprintOwnerDecoderId`): an unplanned copy of the same asset
+    painting at the carried instance's rect must not make the owner ambiguous;
+    a tie between two planned decoders still fails closed."""
+    plan = _CONTRACT["d5"]
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing(ID[0]);
+goToScene(1);
+detach(a);
+goToScene(2);
+const b = fresh(ID[1]);
+insert(b);
+const copy = playing(__COPY__);
+[a, copy].forEach((v) => { v.readyState = 4; v.videoWidth = 1920;
+  v._rect = {left: 160, top: 700, width: 640, height: 180}; });
+copy.parentNode = bodyEl;
+console.log(JSON.stringify({owner: P.footprintOwnerDecoderId({x: 160, y: 700, w: 640, h: 180}), aId: a.__obedElId}));
+""".replace("__COPY__", "'ENTERING'" if sibling == "unplanned" else "ID[2]"), src="https://host/counter-a.mov")
+    if sibling == "unplanned":
+        assert result["owner"] == {"elId": result["aId"], "key": "movie1", "via": "footprint-video", "contextType": None}
+    else:
+        assert result["owner"] == {"elId": None, "key": None, "via": "ambiguous", "contextType": None}
+
+
+def test_a_held_overlay_waits_for_the_transition_not_the_idle_hash_before_the_next_bridge():
+    """RT-A (live D1 arm A): idle at the end of slide 2 the player already shows
+    `#3` (the next scene) — the second bridge's `atScene - 1`. The held overlay
+    must stay at its slot until the player actually starts the 2->3 transition,
+    i.e. tears down slide 2's suppressed stub, and only then start the move."""
+    plan = _CONTRACT["d1"]
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing(ID[0]);
+goToScene(1);
+detach(a);
+goToScene(2);
+const b = fresh(ID[1]);
+b.parentNode = bodyEl;
+pump();
+location.hash = '#3';
+for (let i = 0; i < 5; i += 1) pump();
+const idle = {moves: notesOf('bridge-motion-start').length, left: a.style.left, width: a.style.width};
+detach(b);
+pump();
+console.log(JSON.stringify({idle, moves: notesOf('bridge-motion-start').map(n => n.rect)}));
+""", src="https://host/counter-a.mov")
+    dst1, dst2 = plan["boundaries"][0]["dst"]["rect"], plan["boundaries"][1]["dst"]["rect"]
+    assert result["idle"] == {"moves": 1, "left": f"{dst1['x']}px", "width": f"{dst1['w']}px"}
+    assert result["moves"] == [dst1, dst2]
+
+
+def test_a_pin_out_of_a_held_bridge_overlay_is_re_homed_into_the_destination_poster_layer():
+    """RT-E (live D1 s4, D3 s3, D4 s3: clock advancing, pixels frozen). After a
+    bridge the carried decoder sits on `#body`; the pin must not swap it into the
+    player's layer under the WebGL poster but re-home it the way a pooled pin is
+    remounted: next to the destination's poster canvas, at `dst.rect`, with the
+    player's stub taken out and no swap."""
+    plan = _CONTRACT["d1"]
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing(ID[0]);
+goToScene(1);
+detach(a);
+goToScene(2);
+const b = fresh(ID[1]);
+b.parentNode = bodyEl;
+goToScene(3);
+detach(b);
+pump();
+goToScene(4);
+const c = fresh(ID[2]);
+c.parentNode = bodyEl;
+goToScene(5);
+detach(c);
+pump();
+goToScene(6);
+const DST = window.__OBED_CONTINUITY__.boundaries[2].dst.rect;
+const layer = {
+  __screenOrigin: {x: 0, y: 0}, __scale: 1,
+  insertBefore(node) { node.parentNode = this; node.__inStage = true; node.previousSibling = poster; },
+  appendChild(node) { node.parentNode = this; node.__inStage = true; },
+  removeChild(node) { node.parentNode = null; node.__inStage = false; },
+};
+const poster = {id: 'dst-canvas', parentNode: layer, nextSibling: null,
+  getBoundingClientRect: () => ({left: DST.x, top: DST.y, width: DST.w, height: DST.h})};
+canvases.push(poster);
+const d = fresh(ID[3]);
+d.parentNode = layer;
+moCallbacks.slice().forEach((cb) => cb([{addedNodes: [d], removedNodes: []}]));
+console.log(JSON.stringify({
+  facade: d.__obedFacadeFor === a, stubConnected: document.contains(d),
+  inLayer: a.parentNode === layer && a.previousSibling === poster,
+  rendered: a.getBoundingClientRect(), id: a.id, swaps: notesOf('dom-swap').length,
+  landed: notesOf('remount-into-authored-layer').map(n => n.elId), aId: a.__obedElId,
+}));
+""", src="https://host/counter-a.mov")
+    dst = plan["boundaries"][2]["dst"]
+    assert result["facade"] is True
+    assert result["stubConnected"] is False
+    assert result["inLayer"] is True
+    assert result["rendered"] == pytest.approx(
+        {"left": dst["rect"]["x"], "top": dst["rect"]["y"], "width": dst["rect"]["w"], "height": dst["rect"]["h"]})
+    assert result["id"] == dst["objectId"] + "-video"
+    assert result["swaps"] == 0
+    assert result["aId"] in result["landed"]
+
+
+#: Pin 1->2 (`A1` -> `A2`), then bridge `A2` -> `A3` at 4.
+_PIN_THEN_BRIDGE_PLAN = {
+    "schema": 2, "movies": _MOVIE_PLAN["movies"],
+    "boundaries": [
+        _MOVIE_PLAN["boundaries"][0],
+        {"atScene": 4, "action": "bridge", "movieKey": "movie1", "durationSeconds": 1.5, "loop": False,
+         "src": _inst("A2", _FOOTPRINT), "dst": _inst("A3", _RECT_S3)},
+    ],
+}
+
+
+def test_a_pinned_decoder_waits_for_the_transition_before_the_next_bridge_moves_it():
+    """RT-A for pinned decoders (live D2 slide 4, D3 slide 3): a pinned decoder's
+    pending remount retries run while the player idles on its slide with the hash
+    already at the next bridge's `atScene - 1`; the move must wait for the
+    player's teardown of the slide."""
+    result = _run_chain(_PIN_THEN_BRIDGE_PLAN, r"""
+goToScene(0);
+const a = playing('A1');
+goToScene(1);
+detach(a);
+goToScene(2);
+const b = fresh('A2');
+insert(b);
+location.hash = '#3';
+P.remountAll();
+pump();
+const idle = {moves: notesOf('bridge-motion-start').length, inBody: a.parentNode === bodyEl};
+a.parentNode = bodyEl;
+detach(a);
+console.log(JSON.stringify({idle, moves: notesOf('bridge-motion-start').map(n => n.rect)}));
+""")
+    assert result["idle"]["moves"] == 0
+    assert result["moves"] == [_RECT_S3]
+
+
+#: D5 pin chain into slide layers with poster canvases: the decoder `a` ends
+#: re-homed after the poster of `dst.layer` (slide 2, or slide 3 when `__SECOND__`).
+_D5_PIN_CHAIN_JS = r"""
+function slideLayer(rect, id) {
+  const layer = {
+    id: id, __screenOrigin: {x: 0, y: 0}, __scale: 1, kids: [],
+    insertBefore(node, ref) {
+      const j = this.kids.indexOf(node);
+      if (j >= 0) this.kids.splice(j, 1);
+      node.parentNode = this; node.__inStage = true;
+      const i = ref ? this.kids.indexOf(ref) : -1; if (i >= 0) this.kids.splice(i, 0, node); else this.kids.push(node); },
+    appendChild(node) { this.insertBefore(node, null); },
+    removeChild(node) { node.parentNode = null; node.__inStage = false; this.kids.splice(this.kids.indexOf(node), 1); },
+  };
+  const poster = {id: id + '-canvas', parentNode: layer, get nextSibling() { return layer.kids[layer.kids.indexOf(poster) + 1] || null; },
+    parentElement: layer, getBoundingClientRect: () => ({left: rect.x, top: rect.y, width: rect.w, height: rect.h})};
+  layer.kids.push(poster);
+  canvases.push(poster);
+  return {layer, poster};
+}
+const B = window.__OBED_CONTINUITY__.boundaries;
+goToScene(0);
+const a = playing(ID[0]);
+goToScene(1);
+detach(a);
+goToScene(2);
+let dst = slideLayer(B[0].dst.rect, 'layer-s2');
+let stub = fresh(ID[1]);
+dst.layer.kids.unshift(stub);
+stub.parentNode = dst.layer;
+stub.nextSibling = dst.poster;
+moCallbacks.slice().forEach((cb) => cb([{addedNodes: [stub], removedNodes: []}]));
+if (__SECOND__) {
+  canvases.length = 0;
+  goToScene(3);
+  dst.layer.removeChild(a);
+  detach(a);
+  goToScene(4);
+  dst = slideLayer(B[1].dst.rect, 'layer-s3');
+  stub = fresh(ID[2]);
+  dst.layer.kids.unshift(stub);
+  stub.parentNode = dst.layer;
+  stub.nextSibling = dst.poster;
+  moCallbacks.slice().forEach((cb) => cb([{addedNodes: [stub], removedNodes: []}]));
+}
+"""
+
+
+@pytest.mark.parametrize("second", [False, True], ids=["first-pin", "second-pin"])
+def test_a_swapped_pin_decoder_is_re_homed_above_the_destination_poster(second):
+    """Live D5 V slide 3 (second pin of a chain): the dom-swap left the carried
+    decoder in the stub's slot, under the destination's WebGL poster (the stub
+    never starts, so the player never reveals it): clock advancing, pixels
+    frozen. After the swap the decoder must sit right after its poster canvas,
+    at `dst.rect`, in the destination layer."""
+    plan = _CONTRACT["d5"]
+    result = _run_chain(plan, (_D5_PIN_CHAIN_JS + r"""
+const kids = dst.layer.kids;
+console.log(JSON.stringify({
+  order: kids.map(k => k === a ? 'decoder' : k === dst.poster ? 'poster' : k === stub ? 'stub' : '?'),
+  rendered: a.getBoundingClientRect(), swaps: notesOf('dom-swap').length,
+}));
+""").replace("__SECOND__", "true" if second else "false"), src="https://host/counter-a.mov")
+    assert result["order"] == ["poster", "decoder"]
+    assert result["rendered"] == pytest.approx({"left": 160, "top": 700, "width": 640, "height": 180})
+    assert result["swaps"] == (2 if second else 1)
+
+
+def test_a_decoder_the_stash_declines_is_never_revived_by_a_pending_remount_retry():
+    """Live D5 #5->#6 (triage-2026-10-10/d5-end-of-show.md): the player tears
+    down slide 3's layer holding the re-homed decoder; its instance has no next
+    entry, so the stash declines it. The retries of earlier `scheduleRemount`s
+    (the slide-2 teardown, the pin re-home) were still pending and, ~2 s after
+    they were scheduled, re-added the decoder on `#body` at #6. While the decoder
+    is still wanted the same retries keep it in its layer (control)."""
+    plan = _CONTRACT["d5"]
+    result = _run_chain(plan, (_D5_PIN_CHAIN_JS + r"""
+const pending = timeouts.length;
+flushTimeouts();
+const wanted = {inLayer: a.parentNode === dst.layer,
+  order: dst.layer.kids.map(k => k === a ? 'decoder' : k === dst.poster ? 'poster' : '?')};
+goToScene(5);
+const before = P.events.length;
+canvases.length = 0;
+dst.layer.removeChild(a);
+detach(a);
+goToScene(6);
+flushTimeouts();
+console.log(JSON.stringify({pending, wanted, inDocument: document.contains(a),
+  after: P.events.slice(before).map(e => e.kind).filter(k => /^remount-(done|into|authored)/.test(k))}));
+""").replace("__SECOND__", "true"), src="https://host/counter-a.mov")
+    assert result["pending"] > 0
+    assert result["wanted"] == {"inLayer": True, "order": ["poster", "decoder"]}
+    assert result["inDocument"] is False
+    assert result["after"] == []
+
+
+def test_a_retire_hands_back_at_the_transition_even_for_a_decoder_the_player_never_tears_down():
+    """Live D3 (retire@4 of movie1 A): A's decoder sat where the runtime put it,
+    so the player's 2->3 teardown never removed it, and it stayed drawn through
+    the whole move until the sweep at #4. Any teardown of the player's own at
+    the transition scene marks it: A is retired right there (`retire-boundary`
+    at #3), and nothing remounts it inside the zone."""
+    plan = _CONTRACT["d3"]
+    result = _run_chain(plan, r"""
+const B = window.__OBED_CONTINUITY__.boundaries;
+goToScene(0);
+const m1 = playing(B[0].src.objectId, 'https://host/counter-a.mov');
+const m2 = playing(B[1].src.objectId, 'https://host/counter-b.mov');
+goToScene(1);
+detach(m1);
+detach(m2);
+goToScene(2);
+const d1 = fresh(B[0].dst.objectId, 'https://host/counter-a.mov');
+const d2 = fresh(B[1].dst.objectId, 'https://host/counter-b.mov');
+d2.parentNode = bodyEl;
+location.hash = '#3';
+tick();
+P.remountAll();
+const idle = {gen: m1.__obedGen, retire: notesOf('retire-boundary').length};
+const before = P.events.length;
+detach(d2);
+const retire = notesOf('retire-boundary').map(n => [n.instance, n.elIds, n.sceneHash]);
+P.remountAll();
+tick();
+console.log(JSON.stringify({idle, retire, m1: {gen: m1.__obedGen, paused: m1.paused, inDocument: document.contains(m1)},
+  m1Id: m1.__obedElId, a: B[2].src.objectId,
+  after: P.events.slice(before).filter(e => /^(remount-|reuse-decoder|dom-swap)/.test(e.kind)
+    && (e.detail.elId === m1.__obedElId || e.detail.oldElId === m1.__obedElId)).map(e => e.kind)}));
+""")
+    assert result["idle"] == {"gen": 0, "retire": 0}
+    assert result["retire"] == [[result["a"], [result["m1Id"]], "#3"]]
+    assert result["m1"] == {"gen": -1, "paused": True, "inDocument": False}
+    assert result["after"] == []
+
+
+def test_the_footprint_hold_of_a_pin_ends_when_the_next_bridge_moves_the_decoder():
+    """Live D2 b3to4: the pin's footprint hold (`keepAtFootprint`) outlived the
+    next bridge's move and, once the hash settled past the transition, dragged
+    the landed decoder back to the source slot at the destination size
+    (960,400 at 640x180). The move must end the hold. The pin's own transition
+    is held on the stage, so the footprint hold starts once the dom-swap re-homes
+    the decoder into the destination layer."""
+    result = _run_chain(_PIN_THEN_BRIDGE_PLAN, r"""
+const posterParent = {__screenOrigin: {x: 0, y: 0}, __scale: 1,
+  insertBefore(node) { node.parentNode = this; node.__inStage = true; },
+  appendChild(node) { node.parentNode = this; node.__inStage = true; },
+  removeChild(node) { node.parentNode = null; node.__inStage = false; }};
+canvases.push({id: 'poster', parentNode: posterParent, nextSibling: null,
+  getBoundingClientRect: () => ({left: 100, top: 200, width: 300, height: 150})});
+goToScene(0);
+const a = playing('A1');
+a._rect = {left: 100, top: 200, width: 300, height: 150};
+goToScene(1);
+detach(a);
+goToScene(2);
+pump();
+const b = fresh('A2');
+b.parentNode = posterParent;
+moCallbacks.slice().forEach((cb) => cb([{addedNodes: [b], removedNodes: []}]));
+const holding = !!a.__obedPinning && a.parentNode === posterParent;
+goToScene(3);
+posterParent.removeChild(a);
+bodyEl.__screenOrigin = {x: 0, y: 0};
+detach(a);
+nowMs = 5000;
+pump();
+const moved = {left: a.style.left, top: a.style.top};
+location.hash = '#4';
+pump(); pump(); pump();
+console.log(JSON.stringify({holding, moved, settled: {left: a.style.left, top: a.style.top},
+  pinning: !!a.__obedPinning, moves: notesOf('bridge-motion-start').length}));
+""")
+    assert result["holding"] is True
+    assert result["moves"] == 1
+    assert result["pinning"] is False
+    assert result["moved"] == {"left": f"{_RECT_S3['x']}px", "top": f"{_RECT_S3['y']}px"}
+    assert result["settled"] == result["moved"]
+
+
+def test_a_re_homed_pin_starts_the_next_bridge_at_the_transition_start():
+    """Live D3 b2to3: movie2 bridges 1->2, pins 2->3 (re-homed out of the
+    overlay) and bridges 3->4. The re-homed decoder is the runtime's own, so the
+    player never tears it down; it stayed frozen at the pin's rect through the
+    whole transition and jumped at the cut. The transition start (the player's
+    second hash write) must start its move."""
+    plan = _CONTRACT["d3"]
+    result = _run_chain(plan, r"""
+const B = window.__OBED_CONTINUITY__.boundaries;
+const SRCB = 'https://host/counter-b.mov';
+goToScene(0);
+const m2 = playing(B[1].src.objectId, SRCB);
+goToScene(1);
+detach(m2);
+goToScene(2);
+const s2 = fresh(B[1].dst.objectId, SRCB);
+s2.parentNode = bodyEl;
+goToScene(3);
+detach(s2);
+pump();
+goToScene(4);
+const s3 = fresh(B[3].dst.objectId, SRCB);
+window.history.replaceState(null, 'Keynote', 'index.html#5');
+pump();
+const idle = notesOf('bridge-motion-start').length;
+window.history.replaceState(null, 'Keynote', 'index.html#5');
+console.log(JSON.stringify({idle, moves: notesOf('bridge-motion-start').map(n => [n.srcRect, n.rect]),
+  instance: m2.__obedInstance, inBody: m2.parentNode === bodyEl}));
+""")
+    b = plan["boundaries"]
+    assert result["idle"] == 1
+    assert result["moves"][-1] == [b[4]["src"]["rect"], b[4]["dst"]["rect"]]
+    assert len(result["moves"]) == 2
+    assert result["instance"] == b[3]["dst"]["objectId"]
+    assert result["inBody"] is True
+
+
+# --- Pin hold (owner decision 2026-10-10) ---------------------------------
+#
+# Measured (pingap, 2026-10-10): the player keeps the source slide's layers at
+# opacity 0 for the whole Magic Move of a transition scene (its WebGL move draws
+# them), ~108 frames. A pin's decoder remounted into that layer — pooled at the
+# player's teardown (after a go-to, or the first pin of a chain) or held there
+# by an earlier pin's re-home — was dark for the whole move. The pin hold rides
+# the transition scene on the stage, static at `src.rect` (= `dst.rect`), and
+# the destination's dom-swap re-homes it into the destination layer as before.
+
+_PIN_HOLD_LAYERS = r"""
+bodyEl.__screenOrigin = {x: 0, y: 0};
+/** A slide layer with its movie's poster canvas at `rect`; the player fades it with `style.opacity`. */
+function slideLayer(rect, id) {
+  const layer = {
+    id: id, style: {opacity: '1'}, __screenOrigin: {x: 0, y: 0}, __scale: 1, __inStage: true, kids: [],
+    insertBefore(node, ref) {
+      const j = this.kids.indexOf(node);
+      if (j >= 0) this.kids.splice(j, 1);
+      node.parentNode = this; node.__inStage = true;
+      const i = ref ? this.kids.indexOf(ref) : -1;
+      if (i >= 0) this.kids.splice(i, 0, node); else this.kids.push(node);
+    },
+    appendChild(node) { this.insertBefore(node, null); },
+    removeChild(node) {
+      node.parentNode = null; node.__inStage = false;
+      const i = this.kids.indexOf(node);
+      if (i >= 0) this.kids.splice(i, 1);
+    },
+  };
+  const poster = {id: id + '-canvas', parentNode: layer, parentElement: layer,
+    get nextSibling() { return layer.kids[layer.kids.indexOf(poster) + 1] || null; },
+    getBoundingClientRect: () => ({left: rect.x, top: rect.y, width: rect.w, height: rect.h})};
+  layer.kids.push(poster);
+  canvases.push(poster);
+  return {layer, poster};
+}
+/** The player's own movie element of `inst`, playing in `slide`'s layer at `rect`. */
+function playingIn(slide, inst, rect) {
+  const v = playing(inst);
+  slide.layer.insertBefore(v, null);
+  v.style.left = rect.x + 'px'; v.style.top = rect.y + 'px';
+  v.style.width = rect.w + 'px'; v.style.height = rect.h + 'px';
+  v._rect = {left: rect.x, top: rect.y, width: rect.w, height: rect.h};
+  return v;
+}
+/** The player builds `inst`'s fresh element into `slide`'s layer, before its poster. */
+function buildInto(slide, inst) {
+  const stub = fresh(inst);
+  slide.layer.kids.unshift(stub);
+  stub.parentNode = slide.layer;
+  stub.nextSibling = slide.poster;
+  moCallbacks.slice().forEach((cb) => cb([{addedNodes: [stub], removedNodes: []}]));
+  return stub;
+}
+/** What the viewer sees of `v`: the product of its and its ancestors' opacities. */
+function effectiveOpacity(v) {
+  let o = 1;
+  for (let n = v; n; n = n.parentNode) {
+    const s = n.style || {};
+    if (s.opacity != null && s.opacity !== '') o *= parseFloat(s.opacity);
+  }
+  return o;
+}
+/** Run `n` animation frames 100 ms apart, sampling `v` after each. */
+function frames(v, n) {
+  const out = [];
+  for (let i = 0; i < n; i += 1) {
+    nowMs += 100;
+    pump();
+    const r = v.getBoundingClientRect();
+    out.push({opacity: effectiveOpacity(v), connected: document.contains(v), onBody: v.parentNode === bodyEl,
+      rect: {x: r.left, y: r.top, w: r.width, h: r.height}});
+  }
+  return out;
+}
+function order(slide, v) {
+  return slide.layer.kids.map(k => k === v ? 'decoder' : k === slide.poster ? 'poster' : 'stub');
+}
+"""
+
+
+def _held_frame(rect: dict) -> dict:
+    return {"opacity": 1, "connected": True, "onBody": True, "rect": rect}
+
+
+def _pooled_pin_after_go_to() -> dict:
+    """D1 `g 3` + advance: the 3->4 transition scene's frames, then the slide-4 landing."""
+    return _run_chain(_CONTRACT["d1"], _PIN_HOLD_LAYERS + r"""
+const B = window.__OBED_CONTINUITY__.boundaries;
+goToScene(4);
+P.clear();
+const slide3 = slideLayer(B[2].src.rect, 'layer-s3');
+const s3 = playingIn(slide3, ID[2], B[2].src.rect);
+goToScene(5);
+slide3.layer.style.opacity = '0';
+slide3.layer.removeChild(s3);
+detach(s3);
+const scene = frames(s3, 6);
+goToScene(6);
+const waiting = frames(s3, 1)[0];
+canvases.length = 0;
+const slide4 = slideLayer(B[2].dst.rect, 'layer-s4');
+const stub = buildInto(slide4, ID[3]);
+const r = s3.getBoundingClientRect();
+console.log(JSON.stringify({
+  scene, waiting, facade: stub.__obedFacadeFor === s3, order: order(slide4, s3),
+  landed: {x: r.left, y: r.top, w: r.width, h: r.height}, opacity: effectiveOpacity(s3),
+  holds: notesOf('pin-hold-start'), moves: notesOf('bridge-motion-start').length, s3Id: s3.__obedElId,
+}));
+""", src="https://host/counter-a.mov")
+
+
+def test_a_pooled_pin_after_a_go_to_rides_its_transition_on_the_stage_and_re_homes_at_the_destination():
+    """Live D1 `g 3` + advance (pingap r1/r3/r4/r7: 108 frames dark). After the go-to
+    the slide-3 movie is the player's fresh element; the 3->4 transition tears it
+    down and pools it. Every frame of the transition scene it must paint on the
+    stage at the pin's rect, never inside the source layer the player holds at
+    opacity 0; at the destination the dom-swap re-homes it above the slide-4
+    poster at `dst.rect`. One `pin-hold-start`, no `bridge-motion-start`."""
+    result = _pooled_pin_after_go_to()
+    pin = _CONTRACT["d1"]["boundaries"][2]
+    assert result["scene"] == [_held_frame(pin["src"]["rect"])] * 6
+    assert result["waiting"] == _held_frame(pin["src"]["rect"])
+    assert result["facade"] is True
+    assert result["order"] == ["poster", "decoder"]
+    assert result["landed"] == pytest.approx(pin["dst"]["rect"])
+    assert result["opacity"] == 1
+    assert result["holds"] == [{"elId": result["s3Id"], "atScene": 6, "srcRect": pin["src"]["rect"],
+                                "rect": pin["src"]["rect"], "sceneHash": "#5"}]
+    assert result["moves"] == 0
+
+
+def test_a_held_re_homed_pin_is_hoisted_for_its_next_pins_transition():
+    """Live D5 (pingap r9: dark #1->#2 and #3->#4). Pin 1->2 then pin 2->3: the
+    first transition pools the player's element (as above); the second finds the
+    decoder re-homed in slide 2's layer, which the player never tears down but
+    fades to 0 for the move. The transition start (the player's second hash
+    write; the first is the idle) hoists it onto the stage for the scene, and
+    the slide-3 dom-swap re-homes it above the slide-3 poster."""
+    plan = _CONTRACT["d5"]
+    result = _run_chain(plan, _PIN_HOLD_LAYERS + r"""
+const B = window.__OBED_CONTINUITY__.boundaries;
+goToScene(0);
+const slide1 = slideLayer(B[0].src.rect, 'layer-s1');
+const a = playingIn(slide1, ID[0], B[0].src.rect);
+goToScene(1);
+slide1.layer.style.opacity = '0';
+slide1.layer.removeChild(a);
+detach(a);
+const first = frames(a, 3);
+goToScene(2);
+pump();
+canvases.length = 0;
+const slide2 = slideLayer(B[0].dst.rect, 'layer-s2');
+buildInto(slide2, ID[1]);
+const rehomed = order(slide2, a);
+window.history.replaceState(null, 'Keynote', 'index.html#3');
+pump();
+const idle = {order: order(slide2, a), holds: notesOf('pin-hold-start').length};
+slide2.layer.style.opacity = '0';
+window.history.replaceState(null, 'Keynote', 'index.html#3');
+const second = frames(a, 6);
+goToScene(4);
+pump();
+canvases.length = 0;
+const slide3 = slideLayer(B[1].dst.rect, 'layer-s3');
+const stub = buildInto(slide3, ID[2]);
+const r = a.getBoundingClientRect();
+console.log(JSON.stringify({
+  first, rehomed, idle, second, facade: stub.__obedFacadeFor === a, order: order(slide3, a),
+  landed: {x: r.left, y: r.top, w: r.width, h: r.height}, opacity: effectiveOpacity(a),
+  holds: notesOf('pin-hold-start').map(n => [n.atScene, n.sceneHash]), moves: notesOf('bridge-motion-start').length,
+  swaps: notesOf('dom-swap').length,
+}));
+""", src="https://host/counter-a.mov")
+    rect = plan["boundaries"][1]["src"]["rect"]
+    assert result["first"] == [_held_frame(plan["boundaries"][0]["src"]["rect"])] * 3
+    assert result["rehomed"] == ["poster", "decoder"]
+    assert result["idle"] == {"order": ["poster", "decoder"], "holds": 1}
+    assert result["second"] == [_held_frame(rect)] * 6
+    assert result["facade"] is True
+    assert result["order"] == ["poster", "decoder"]
+    assert result["landed"] == pytest.approx(plan["boundaries"][1]["dst"]["rect"])
+    assert result["opacity"] == 1
+    assert result["holds"] == [[2, "#1"], [4, "#3"]]
+    assert result["moves"] == 0
+    assert result["swaps"] == 2
+
+
+def test_a_bridged_overlay_is_not_pin_held_its_slot_keeps_it_on_the_stage():
+    """D1 3->4 (bridge, bridge, pin): the overlay `keepAtSlot` holds on the stage
+    is never handed to the pin hold at the pin's transition start; it stays at
+    its slot, bridged, and the pin's dom-swap re-homes it as before."""
+    plan = _CONTRACT["d1"]
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing(ID[0]);
+goToScene(1);
+detach(a);
+goToScene(2);
+const b = fresh(ID[1]);
+b.parentNode = bodyEl;
+goToScene(3);
+detach(b);
+pump();
+goToScene(4);
+const c = fresh(ID[2]);
+c.parentNode = bodyEl;
+pump();
+window.history.replaceState(null, 'Keynote', 'index.html#5');
+window.history.replaceState(null, 'Keynote', 'index.html#5');
+pump(); pump();
+console.log(JSON.stringify({holds: notesOf('pin-hold-start').length, bridged: !!a.__obedBridged34,
+  slot: !!a.__obedSlotPinning, inBody: a.parentNode === bodyEl, left: a.style.left, width: a.style.width}));
+""", src="https://host/counter-a.mov")
+    dst = plan["boundaries"][1]["dst"]["rect"]
+    assert result == {"holds": 0, "bridged": True, "slot": True, "inBody": True,
+                      "left": f"{dst['x']}px", "width": f"{dst['w']}px"}
+
+
+_LAYERED_OWNER = r"""
+const outer = {style: {}, parentNode: bodyEl};
+const inner = {style: {}, parentNode: outer};
+const v = video('A1');
+v.readyState = 4; v.currentTime = 2; v.videoWidth = 640; v.videoHeight = 480;
+v.src = 'https://host/untitled.mov';
+v.parentNode = inner;
+v._rect = {left: 100, top: 200, width: 300, height: 150};
+__MUTATE__;
+console.log(JSON.stringify(P.footprintOwnerDecoderId({x: 100, y: 200, w: 300, h: 150}).via));
+"""
+
+
+@pytest.mark.parametrize(
+    ("mutate", "via"),
+    [
+        ("0", "footprint-video"),
+        ("outer.style.opacity = '0'", "none"),
+        ("inner.style.opacity = '0.1'; outer.style.opacity = '0.1'", "none"),
+        ("inner.style.opacity = '0.5'; outer.style.opacity = '0.5'", "footprint-video"),
+        ("outer.style.display = 'none'", "none"),
+        ("v.style.visibility = 'hidden'", "none"),
+        ("v.style.opacity = '0'", "none"),
+        ("inner.style.visibility = 'hidden'", "footprint-video"),
+        ("delete inner.style", "footprint-video"),
+        ("delete inner.style; outer.style.opacity = '0'", "none"),
+        ("v.__obedSuppressed34 = true", "none"),
+    ],
+    ids=["visible", "ancestor-opacity-0", "opacity-product", "half-opacity-product", "ancestor-display-none",
+         "own-visibility", "own-opacity", "ancestor-visibility-is-inherited-not-walked", "unstyled-ancestor-skipped",
+         "past-an-unstyled-ancestor", "suppressed"],
+)
+def test_a_decoder_inside_a_hidden_ancestor_does_not_own_the_footprint(mutate, via):
+    """`isCompositing` walks the ancestor chain: an effective opacity (the product)
+    <= 0.02 or `display: none` anywhere hides the decoder; visibility is the
+    element's own computed value (inherited, and a `visible` child of a hidden
+    parent still paints), so it is read on the element alone."""
+    script = _LAYERED_OWNER.replace("__MUTATE__", mutate)
+    assert _run_full_core_in_node(plan=_MOVIE_PLAN, stage=_IDENTITY_STAGE, script=script) == via
+
+
+def test_a_suppressed_bridge_destination_really_clears_when_its_slide_ends():
+    """The fresh `dst` element a bridge suppresses decodes hidden; the player's
+    clear at the end of its slide must really run (and a detach must not pool it),
+    or every bridge in a chain leaks a hidden decoder."""
+    plan = _CONTRACT["d1"]
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing(ID[0]);
+goToScene(1);
+detach(a);
+goToScene(2);
+const b = fresh(ID[1]);
+b.readyState = 4; b.currentTime = 2; b.parentNode = bodyEl;
+goToScene(3);
+detach(b);
+b.src = '';
+b.removeAttribute('src');
+console.log(JSON.stringify({
+  suppressed: !!b.__obedSuppressed34, src: b.src, removed: removedAttrs,
+  pooled: P.snapshot().filter(x => x.elId === b.__obedElId).length,
+  refusals: notesOf('preserve-refused').length,
+}));
+""", src="https://host/counter-a.mov")
+    assert result == {"suppressed": True, "src": "", "removed": ["src"], "pooled": 0, "refusals": 0}
+
+
+def test_restart_retires_the_held_src_at_the_fresh_element_not_during_the_dissolve():
+    """A held `src` decoder survives the Dissolve's transition scene (pooled and
+    remounted there, as today), even past a fresh same-movie element built while
+    the hash still reads the transition, and is retired only when the fresh
+    element of the same movie sets `src` at or after `atScene`, with today's two
+    notes."""
+    plan = {
+        "schema": 2, "movies": _MOVIE_PLAN["movies"],
+        "boundaries": [
+            _MOVIE_PLAN["boundaries"][0],
+            {"atScene": 6, "action": "restart", "movieKey": "movie1",
+             "src": _inst("A2", _FOOTPRINT), "dst": _inst("A3", _FOOTPRINT)},
+        ],
+    }
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing('A1');
+goToScene(1);
+detach(a);
+goToScene(2);
+const b = fresh('A2');
+goToScene(5);
+detach(a);
+fresh('A3');
+const duringDissolve = {pooled: P.snapshot().some(x => !x.fromDom && x.elId === a.__obedElId), gen: a.__obedGen,
+  remounted: a.dataset.obedRemounted || null};
+goToScene(6);
+const c = fresh('A3');
+console.log(JSON.stringify({
+  duringDissolve, aId: a.__obedElId, cId: c.__obedElId,
+  skip: notesOf('reuse-skip-boundary'), retire: notesOf('retire-on-start-movie'),
+  a: {paused: a.paused, gen: a.__obedGen, inDocument: document.contains(a)},
+  cFacade: !!c.__obedFacadeFor,
+}));
+""")
+    assert result["duringDissolve"] == {"pooled": True, "gen": 0, "remounted": "1"}
+    assert result["skip"] == [{"key": "untitled.mov", "newElId": result["cId"], "hashNum": 6, "boundary": 6,
+                               "queueLen": 1, "sceneHash": "#6"}]
+    assert result["retire"] == [{"key": "untitled.mov", "elIds": [result["aId"]], "hashNum": 6, "sceneHash": "#6"}]
+    assert result["a"] == {"paused": True, "gen": -1, "inDocument": False}
+    assert result["cFacade"] is False
+
+
+def test_restart_of_a_raw_src_touches_nothing():
+    """P2 flag-off: slide 2's movie was never carried, so the restart has no
+    decoder to retire — no pool, no notes, the export plays itself."""
+    plan = _CONTRACT["p2_off"]
+    result = _run_chain(plan, r"""
+goToScene(2);
+const a = playing(ID[1]);
+goToScene(5);
+detach(a);
+a.src = '';
+goToScene(6);
+const c = fresh(ID[2]);
+console.log(JSON.stringify({pooled: P.snapshot().length, src: a.src, kinds: kinds().filter(k =>
+  ['reuse-skip-boundary', 'retire-on-start-movie', 'preserve-refused', 'reuse-decoder'].indexOf(k) >= 0)}));
+""")
+    assert result == {"pooled": 0, "src": "", "kinds": []}
+
+
+#: Two movies whose canonical asset names overlap: `a.mov` is a substring of
+#: `ba.mov`, and the derivation emits `a.mov` first. movie2 pins B1->B2 and
+#: restarts at scene 6 (B2->B3); movie1 pins A1->A2 and never restarts.
+_OVERLAP_PLAN = {
+    "schema": 2,
+    "movies": {
+        "movie1": {"assetKeys": ["a.mov"], "footprint": _FOOTPRINT},
+        "movie2": {"assetKeys": ["ba.mov"], "footprint": _W_RECT},
+    },
+    "boundaries": [
+        {"atScene": 2, "action": "pin", "movieKey": "movie1", "loop": False,
+         "src": _inst("A1", _FOOTPRINT), "dst": _inst("A2", _FOOTPRINT)},
+        {"atScene": 2, "action": "pin", "movieKey": "movie2", "loop": False,
+         "src": _inst("B1", _W_RECT), "dst": _inst("B2", _W_RECT)},
+        {"atScene": 6, "action": "restart", "movieKey": "movie2",
+         "src": _inst("B2", _W_RECT), "dst": _inst("B3", _W_RECT)},
+    ],
+}
+
+
+def test_restart_of_an_overlapping_asset_name_retires_its_own_carried_decoder():
+    """Codex S2 r1 #3: a fresh `ba.mov` must be classified as `ba.mov`, not as the
+    first plan key it contains (`a.mov`), or `retireRestarted` skips movie2's
+    restart entry and the carried overlay lingers beside the fresh decoder."""
+    result = _run_chain(_OVERLAP_PLAN, r"""
+const A = 'https://host/a.mov', BA = 'https://host/ba.mov';
+goToScene(0);
+const a = playing('A1', A);
+const b = playing('B1', BA);
+goToScene(1);
+detach(a);
+detach(b);
+goToScene(2);
+const a2 = fresh('A2', A);
+const b2 = fresh('B2', BA);
+const carried = {a: a2.__obedFacadeFor === a, b: b2.__obedFacadeFor === b};
+goToScene(5);
+detach(b);
+goToScene(6);
+const c = fresh('B3', BA);
+console.log(JSON.stringify({
+  carried, bId: b.__obedElId,
+  retire: notesOf('retire-on-start-movie'),
+  b: {gen: b.__obedGen, paused: b.paused}, aGen: a.__obedGen, cFacade: !!c.__obedFacadeFor,
+}));
+""")
+    assert result["carried"] == {"a": True, "b": True}
+    assert result["retire"] == [{"key": "ba.mov", "elIds": [result["bId"]], "hashNum": 6, "sceneHash": "#6"}]
+    assert result["b"] == {"gen": -1, "paused": True}
+    assert result["aGen"] == 0
+    assert result["cFacade"] is False
+
+
+@pytest.mark.parametrize("filename", [
+    "Untitled.mov-0.0000-46.0333.mov", "Clip.m4v-0.0000-1.5000.mp4", "Talk.webm-1.0-2.0.webm", "plain.MOV",
+])
+def test_a_src_matches_the_movie_the_derivation_keyed_by_its_canonical_name(filename):
+    """The exact match is against the derivation's own canonical name
+    (`_normalize_asset_key`), so the core must canonicalize a src the same way."""
+    from obed_edom.live_continuity import _normalize_asset_key
+
+    key = _normalize_asset_key({"x": {"url": {"web": "assets/" + filename}}}, "x")
+    plan = {**_MOVIE_PLAN, "movies": {"movie1": {"assetKeys": [key], "footprint": _FOOTPRINT}}}
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing('A1');
+goToScene(1);
+detach(a);
+goToScene(2);
+const a2 = fresh('A2');
+console.log(JSON.stringify({facade: a2.__obedFacadeFor === a, carries: notesOf('reuse-decoder').length}));
+""", src="assets/" + filename)
+    assert result == {"facade": True, "carries": 1}
+
+
+def test_an_asset_name_two_movies_claim_matches_neither():
+    """Fail safe: a src whose canonical name more than one plan movie claims has
+    no movie identity, so it is never pooled for a carry."""
+    plan = {
+        "schema": 2,
+        "movies": {
+            "movie1": {"assetKeys": ["a.mov"], "footprint": _FOOTPRINT},
+            "movie2": {"assetKeys": ["A.mov"], "footprint": _W_RECT},
+        },
+        "boundaries": [
+            {"atScene": 2, "action": "pin", "movieKey": "movie1", "loop": False,
+             "src": _inst("A1", _FOOTPRINT), "dst": _inst("A2", _FOOTPRINT)},
+        ],
+    }
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing('A1', 'https://host/a.mov');
+goToScene(1);
+detach(a);
+goToScene(2);
+const a2 = fresh('A2', 'https://host/a.mov');
+console.log(JSON.stringify({pooled: P.snapshot().filter(x => !x.fromDom).length, facade: !!a2.__obedFacadeFor,
+  carries: notesOf('reuse-decoder').length}));
+""")
+    assert result == {"pooled": 0, "facade": False, "carries": 0}
+
+
+def test_p2_flag_off_contract_end_to_end():
+    """P2 flag-off: 1->2 refused (retire), 2->3 restart of a raw movie, 3->4 bridged."""
+    plan = _CONTRACT["p2_off"]
+    result = _run_chain(plan, r"""
+goToScene(0);
+const s1 = playing(ID[0]);
+goToScene(1);
+detach(s1);
+goToScene(2);
+const s2 = playing(ID[1]);
+goToScene(5);
+detach(s2);
+goToScene(6);
+const s3 = playing(ID[2]);
+goToScene(7);
+detach(s3);
+goToScene(8);
+const s4 = fresh(ID[3]);
+console.log(JSON.stringify({
+  s3Id: s3.__obedElId, s4Id: s4.__obedElId,
+  refusals: notesOf('preserve-refused').map(d => [d.via, d.instance, d.scene]),
+  bridges: notesOf('bridge-3to4').map(d => [d.oldElId, d.newElId, d.atScene]),
+  carries: kinds().filter(k => k === 'reuse-decoder' || k === 'retire-on-start-movie').length,
+  suppressed: !!s4.__obedSuppressed34,
+}));
+""")
+    ids = _ids(plan)
+    assert result["refusals"] == [["stash", ids[0], 1]]
+    assert result["bridges"] == [[result["s3Id"], result["s4Id"], 8]]
+    assert result["carries"] == 0
+    assert result["suppressed"] is True
+
+
+def test_d3_carries_two_movies_at_one_boundary_by_instance():
+    """D3: at 1->2 movie1 pins and movie2 bridges; each fresh `dst` takes its own
+    decoder, whatever order the player detaches or builds them in."""
+    plan = _CONTRACT["d3"]
+    b = plan["boundaries"]
+    result = _run_chain(plan, r"""
+const B = window.__OBED_CONTINUITY__.boundaries;
+goToScene(0);
+const m2 = playing(B[1].src.objectId, 'https://host/counter-b.mov');
+const m1 = playing(B[0].src.objectId, 'https://host/counter-a.mov');
+goToScene(1);
+detach(m2);
+detach(m1);
+goToScene(2);
+const d2 = fresh(B[1].dst.objectId, 'https://host/counter-b.mov');
+const d1 = fresh(B[0].dst.objectId, 'https://host/counter-a.mov');
+console.log(JSON.stringify({
+  pin: notesOf('reuse-decoder').map(n => [n.oldElId, n.newElId]),
+  bridge: notesOf('bridge-3to4').map(n => [n.oldElId, n.newElId]),
+  ids: [m1.__obedElId, m2.__obedElId, d1.__obedElId, d2.__obedElId],
+}));
+""")
+    m1, m2, d1, d2 = result["ids"]
+    assert b[0]["action"] == "pin" and b[1]["action"] == "bridge"
+    assert result["pin"] == [[m1, d1]]
+    assert result["bridge"] == [[m2, d2]]
+
+
+_TWO_INSTANCE_PLAN = {
+    "schema": 2,
+    "movies": {"movie1": {"assetKeys": ["untitled.mov"], "footprint": _FOOTPRINT}},
+    "boundaries": [
+        {"atScene": 2, "action": "pin", "movieKey": "movie1", "loop": False,
+         "src": _inst("NEAR", _FOOTPRINT), "dst": _inst("B-NEAR", _FOOTPRINT)},
+        {"atScene": 2, "action": "pin", "movieKey": "movie1", "loop": False,
+         "src": _inst("FAR", _W_RECT), "dst": _inst("B-FAR", _W_RECT)},
+    ],
+}
+
+
+def test_the_fifo_trap_carries_the_named_instance_not_the_first_pooled():
+    """D4's trap: two instances of one asset, the near one pooled FIRST. Today's
+    FIFO pick would hand the far destination the near decoder; the objectId
+    matcher must carry each destination's own source."""
+    result = _run_chain(_TWO_INSTANCE_PLAN, r"""
+goToScene(0);
+const near = playing('NEAR');
+const far = playing('FAR');
+far.currentTime = 4;
+goToScene(1);
+detach(near);
+detach(far);
+const order = P.snapshot().filter(x => !x.fromDom).map(x => x.instance);
+goToScene(2);
+const bFar = fresh('B-FAR');
+const bNear = fresh('B-NEAR');
+console.log(JSON.stringify({order, farFacade: bFar.__obedFacadeFor === far, nearFacade: bNear.__obedFacadeFor === near,
+  reuse: notesOf('reuse-decoder').map(n => [n.oldElId, n.src]), farId: far.__obedElId, nearId: near.__obedElId}))
+""")
+    assert result["order"] == ["NEAR", "FAR"]
+    assert result["farFacade"] is True
+    assert result["nearFacade"] is True
+    assert result["reuse"] == [[result["farId"], "FAR"], [result["nearId"], "NEAR"]]
+
+
+def test_an_unplanned_sibling_of_the_same_asset_is_never_pooled_or_carried():
+    """Only instances an entry names are touched: the near sibling (no entry)
+    passes through, and the far destination carries only the far decoder."""
+    plan = {**_TWO_INSTANCE_PLAN, "boundaries": _TWO_INSTANCE_PLAN["boundaries"][1:]}
+    result = _run_chain(plan, r"""
+goToScene(0);
+const near = playing('NEAR');
+const far = playing('FAR');
+goToScene(1);
+detach(near);
+near.src = '';
+detach(far);
+goToScene(2);
+const bFar = fresh('B-FAR');
+console.log(JSON.stringify({nearPooled: P.snapshot().some(x => x.elId === near.__obedElId), nearSrc: near.src,
+  farFacade: bFar.__obedFacadeFor === far, refusals: notesOf('preserve-refused').length}));
+""")
+    assert result == {"nearPooled": False, "nearSrc": "", "farFacade": True, "refusals": 0}
+
+
+@pytest.mark.parametrize(
+    "setup,reason",
+    [
+        ("", "absent"),
+        ("const twin = playing('A1'); twin.currentTime = 2; detach(twin);", "ambiguous"),
+        ("a.loop = true;", "loopMismatch"),
+    ],
+    ids=["absent", "ambiguous", "loop-mismatch"],
+)
+def test_a_refused_carry_leaves_the_fresh_element_raw_and_says_why(setup, reason):
+    """Zero candidates, several, or a loop mismatch refuse THAT boundary only:
+    the fresh element plays raw and `preserve-refused` names the reason."""
+    script = r"""
+goToScene(0);
+const a = playing('A1');
+goToScene(1);
+__DETACH__
+__SETUP__
+goToScene(2);
+const b = fresh('A2');
+console.log(JSON.stringify({facade: !!b.__obedFacadeFor, reuse: notesOf('reuse-decoder').length,
+  refusals: notesOf('preserve-refused').map(d => [d.via, d.reason, d.instance, d.atScene, d.src, d.candidates.length])}));
+""".replace("__DETACH__", "" if reason == "absent" else "detach(a);").replace("__SETUP__", setup)
+    result = _run_chain(_MOVIE_PLAN, script)
+    n = {"absent": 0, "ambiguous": 2, "loopMismatch": 1}[reason]
+    assert result == {"facade": False, "reuse": 0, "refusals": [["reuse", reason, "A2", 2, "A1", n]]}
+
+
+def test_a_looping_pair_carries_when_the_loops_agree():
+    plan = {**_MOVIE_PLAN, "boundaries": [{**_MOVIE_PLAN["boundaries"][0], "loop": True}]}
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing('A1');
+a.loop = true;
+goToScene(1);
+detach(a);
+goToScene(2);
+const b = fresh('A2');
+console.log(JSON.stringify({facade: b.__obedFacadeFor === a, refusals: notesOf('preserve-refused').length}));
+""")
+    assert result == {"facade": True, "refusals": 0}
+
+
+# --- A runtime-refused carry hands its source back (S2 review r2 #1) ---------------------
+#
+# Plan §2.2: a carry refused at the fresh `dst` element (`ambiguous` / `loopMismatch` /
+# `absent`) refuses that ONE boundary, and §2.1 says a refused boundary hands `src` back
+# to the raw player the way a derived `retire refused` does. Before the fix `pickCarried`
+# only noted the refusal: every rejected candidate stayed alive — a pooled one remounted
+# at the source footprint, a held bridge overlay pinned at its slot — painting beside
+# the raw destination, kept warm and eligible for remount.
+
+#: Bridge `A1` -> `A2` at 2 (the overlay is HELD as `A2`), then pin `A2` -> `A3` at 4.
+_BRIDGE_THEN_PIN_PLAN = {
+    "schema": 2, "movies": _MOVIE_PLAN["movies"],
+    "boundaries": [
+        {"atScene": 2, "action": "bridge", "movieKey": "movie1", "durationSeconds": 1.5, "loop": False,
+         "src": _inst("A1", _FOOTPRINT), "dst": _inst("A2", _RECT_S3)},
+        {"atScene": 4, "action": "pin", "movieKey": "movie1", "loop": False,
+         "src": _inst("A2", _RECT_S3), "dst": _inst("A3", _RECT_S3)},
+    ],
+}
+#: The same chain whose pin expects a looping decoder: the held overlay does not loop.
+_BRIDGE_THEN_LOOPING_PIN_PLAN = {
+    **_BRIDGE_THEN_PIN_PLAN,
+    "boundaries": [_BRIDGE_THEN_PIN_PLAN["boundaries"][0], {**_BRIDGE_THEN_PIN_PLAN["boundaries"][1], "loop": True}],
+}
+
+#: Each case leaves `cands` (the rejected candidates), `before` (were they painting?) and
+#: the raw destination `d`, built at the refused boundary.
+_REFUSED_CARRY_CASES = {
+    "pooled-ambiguous": (_MOVIE_PLAN, "A1", "A2", 2, r"""
+goToScene(0);
+const a = playing('A1');
+const twin = playing('A1');
+twin.currentTime = 2;
+goToScene(1);
+detach(a);
+detach(twin);
+const cands = [a, twin];
+const before = cands.map(v => document.contains(v) && !v.paused);
+goToScene(2);
+const d = fresh('A2');
+"""),
+    "pooled-loopMismatch": (_MOVIE_PLAN, "A1", "A2", 2, r"""
+goToScene(0);
+const a = playing('A1');
+a.loop = true;
+goToScene(1);
+detach(a);
+const cands = [a];
+const before = cands.map(v => document.contains(v) && !v.paused);
+goToScene(2);
+const d = fresh('A2');
+"""),
+    # A second element claiming the held instance (src set through the property, so it
+    # never reaches the bridge's own carry hook) is pooled beside the held overlay.
+    "held-ambiguous": (_BRIDGE_THEN_PIN_PLAN, "A2", "A3", 4, r"""
+goToScene(0);
+const a = playing('A1');
+goToScene(1);
+detach(a);
+goToScene(2);
+const b = fresh('A2');
+b.parentNode = bodyEl;
+goToScene(3);
+detach(b);
+pump();
+const twin = video('A2');
+twin.src = SRC;
+twin.readyState = 4; twin.currentTime = 2; twin.paused = false; twin.parentNode = bodyEl;
+detach(twin);
+const cands = [a, twin];
+const before = cands.map(v => document.contains(v) && !v.paused);
+goToScene(4);
+const d = fresh('A3');
+"""),
+    "held-loopMismatch": (_BRIDGE_THEN_LOOPING_PIN_PLAN, "A2", "A3", 4, r"""
+goToScene(0);
+const a = playing('A1');
+goToScene(1);
+detach(a);
+goToScene(2);
+const b = fresh('A2');
+b.parentNode = bodyEl;
+goToScene(3);
+detach(b);
+pump();
+const cands = [a];
+const before = cands.map(v => document.contains(v) && !v.paused);
+goToScene(4);
+const d = fresh('A3');
+"""),
+}
+
+_AFTER_REFUSED_CARRY = r"""
+const n0 = P.events.length;
+pump(); pump();
+P.remountAll();
+tick();
+pump();
+console.log(JSON.stringify({
+  before, ids: cands.map(v => v.__obedElId).sort(),
+  raw: {facade: !!d.__obedFacadeFor, suppressed: !!d.__obedSuppressed34},
+  refusals: notesOf('preserve-refused').filter(n => n.via === 'reuse').map(n => [n.reason, n.instance, n.src]),
+  retired: notesOf('retire-boundary').map(n => [n.instance, n.atScene, n.elIds.slice().sort()]),
+  cands: cands.map(v => ({gen: v.__obedGen, paused: v.paused, inDocument: document.contains(v),
+    preserved: v.dataset.obedPreserved || null, remounted: v.dataset.obedRemounted || null})),
+  snapshot: P.snapshot().length,
+  revived: P.events.slice(n0).filter(e => /^(remount-(scheduled|done|authored|into)|reuse-decoder|bridge-3to4|dom-swap|bridge-slot-reattach)/.test(e.kind))
+    .map(e => e.kind),
+}));
+"""
+
+
+@pytest.mark.parametrize("case", list(_REFUSED_CARRY_CASES))
+def test_a_refused_carry_retires_every_rejected_candidate_and_the_destination_plays_raw(case):
+    """Held or pooled, ambiguous or loop-mismatched: each rejected candidate was
+    painting before the refusal; after it, each is retired exactly like a derived
+    `retire refused` (paused, out of the DOM, dead, one `retire-boundary` naming the
+    source instance), nothing keeps it warm or remounts it, and the fresh
+    destination plays raw."""
+    plan, src, dst, at_scene, script = _REFUSED_CARRY_CASES[case]
+    result = _run_chain(plan, script + _AFTER_REFUSED_CARRY)
+    reason = case.split("-", 1)[1]
+    assert all(result["before"]), "the rejected candidates must be painting before the refusal"
+    assert result["raw"] == {"facade": False, "suppressed": False}
+    assert result["refusals"] == [[reason, dst, src]]
+    assert result["retired"] == [[src, at_scene, result["ids"]]]
+    assert result["cands"] == [
+        {"gen": -1, "paused": True, "inDocument": False, "preserved": None, "remounted": None}
+    ] * len(result["ids"])
+    assert result["snapshot"] == 0
+    assert result["revived"] == []
+
+
+@pytest.mark.parametrize(
+    "setup,reason",
+    [
+        ("", "absent"),
+        ("const twin = playing('A1'); twin.currentTime = 2; detach(twin);", "ambiguous"),
+        ("a.loop = true;", "loopMismatch"),
+    ],
+    ids=["absent", "ambiguous", "loop-mismatch"],
+)
+def test_a_refused_source_is_never_stashed_again_not_even_by_a_teardown_inside_a_move(setup, reason):
+    """The refusal persists for the boundary: a source decoder that turns up after it
+    (a late teardown, here inside a move's window so the detach-fix a1 bypass of the
+    `__obedRemounting` guard is taken) is declined at `stash` and never remounted."""
+    script = r"""
+goToScene(0);
+const a = playing('A1');
+goToScene(1);
+__DETACH__
+__SETUP__
+goToScene(2);
+const d = fresh('A2');
+const late = __LATE__;
+late.__obedRemounting = true;
+detachNow(late);
+tick();
+console.log(JSON.stringify({
+  facade: !!d.__obedFacadeFor, pooled: P.snapshot().some(x => x.elId === late.__obedElId),
+  preserved: late.dataset.obedPreserved || null, gen: late.__obedGen,
+  remounts: P.events.filter(e => e.kind.indexOf('remount-') === 0 && e.detail.elId === late.__obedElId).length,
+  stashRefused: notesOf('preserve-refused').filter(n => n.via === 'stash').map(n => [n.instance, n.scene]),
+}));
+""".replace("__DETACH__", "" if reason == "absent" else "detach(a);").replace("__SETUP__", setup).replace(
+        "__LATE__", "a" if reason == "absent" else "playing('A1')")
+    result = _run_chain(_MOVIE_PLAN, script)
+    assert result == {"facade": False, "pooled": False, "preserved": None, "gen": 0, "remounts": 0,
+                      "stashRefused": [["A1", 2]]}
+
+
+def test_a_go_to_clear_lifts_a_runtime_refusal_and_the_boundary_carries_again():
+    """The refusal belongs to the preserve generation it was made in: the host's
+    go-to `clear()` starts a fresh one, so the same boundary carries on the next pass."""
+    result = _run_chain(_MOVIE_PLAN, r"""
+goToScene(0);
+const a = playing('A1');
+const twin = playing('A1');
+goToScene(1);
+detach(a);
+detach(twin);
+goToScene(2);
+const d = fresh('A2');
+P.clear();
+goToScene(0);
+const a2 = playing('A1');
+goToScene(1);
+detach(a2);
+goToScene(2);
+const d2 = fresh('A2');
+console.log(JSON.stringify({first: !!d.__obedFacadeFor, second: d2.__obedFacadeFor === a2,
+  reasons: notesOf('preserve-refused').map(n => n.reason || n.via)}));
+""")
+    assert result == {"first": False, "second": True, "reasons": ["ambiguous"]}
+
+
+def test_go_to_clear_mid_chain_drops_the_held_decoder_and_the_chain_resumes():
+    """D1: a go-to into slide 3 mid-chain `clear()`s. The held overlay is dropped
+    (paused, dead) and never carried; the slide-3 element plays raw (its carry
+    is refused `absent`), and the next boundary carries that fresh element."""
+    plan = _CONTRACT["d1"]
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing(ID[0]);
+goToScene(1);
+detach(a);
+goToScene(2);
+fresh(ID[1]);
+goToScene(4);
+P.clear();
+const s3 = playing(ID[2]);
+const s3Facade = !!s3.__obedFacadeFor;
+goToScene(5);
+detach(s3);
+goToScene(6);
+const s4 = fresh(ID[3]);
+console.log(JSON.stringify({
+  a: {paused: a.paused, gen: a.__obedGen, inDocument: document.contains(a)}, s3Facade,
+  s4Facade: s4.__obedFacadeFor === s3, s3Gen: s3.__obedGen,
+  refusals: notesOf('preserve-refused').map(d => [d.reason, d.instance]),
+  reuse: notesOf('reuse-decoder').map(n => n.oldElId), s3Id: s3.__obedElId,
+  cleared: notesOf('pool-cleared').length,
+}));
+""", src="https://host/counter-a.mov")
+    ids = _ids(plan)
+    assert result["a"] == {"paused": True, "gen": -1, "inDocument": False}
+    assert result["s3Facade"] is False
+    assert result["refusals"] == [["absent", ids[2]]]
+    assert result["s4Facade"] is True
+    assert result["s3Gen"] == 1
+    assert result["reuse"] == [result["s3Id"]]
+    assert result["cleared"] == 1
+
+
+def test_unplanned_videos_pass_through_untouched():
+    """An asset the plan does not name, or a planned asset whose instance no
+    entry names: never pooled, clears really run, no notes beyond creation."""
+    result = _run_chain(_MOVIE_PLAN, r"""
+goToScene(1);
+const other = playing('Z9', 'https://host/wa0125.mov');
+const stray = playing('Z8');
+detach(other); detach(stray);
+other.src = ''; stray.removeAttribute('src');
+console.log(JSON.stringify({pool: P.snapshot().length, src: [other.src, stray.src],
+  notes: kinds().filter(k => ['createElement-video', 'src-accessor-patched', 'src-accessor-missing'].indexOf(k) < 0)}));
+""")
+    assert result == {"pool": 0, "src": ["", ""], "notes": []}
+
+
+# --- F5: the core's instrument API is frozen -----------------------------------------------
+#
+# Scorers read these names (plan §1 F5). One flow exercises every carry action; each
+# name below gets its own test so a rename or a dropped field is its own red.
+
+_F5_PLAN = {
+    "schema": 2,
+    "movies": {"movie1": {"assetKeys": ["untitled.mov"], "footprint": _FOOTPRINT}},
+    "boundaries": [
+        {"atScene": 2, "action": "pin", "movieKey": "movie1", "loop": False,
+         "src": _inst("A1", _FOOTPRINT), "dst": _inst("A2", _FOOTPRINT)},
+        {"atScene": 4, "action": "restart", "movieKey": "movie1",
+         "src": _inst("A2", _FOOTPRINT), "dst": _inst("A3", _RECT_S3)},
+        {"atScene": 6, "action": "bridge", "movieKey": "movie1", "durationSeconds": 1.5, "loop": False,
+         "src": _inst("A3", _RECT_S3), "dst": _inst("A4", _RECT_S4)},
+        {"atScene": 8, "action": "retire", "movieKey": "movie1", "reason": "ends", "src": _inst("A4", _RECT_S4)},
+    ],
+}
+
+_F5_FLOW = r"""
+const props = {};
+goToScene(0);
+const a1 = playing('A1');
+goToScene(1);
+detach(a1);
+props.preserved = a1.dataset.obedPreserved || null;
+props.remounted = a1.dataset.obedRemounted || null;
+props.elId = typeof a1.__obedElId;
+props.gen = a1.__obedGen;
+goToScene(2);
+const s2 = fresh('A2');
+props.facadeFor = s2.__obedFacadeFor === a1;
+insert(s2);
+s2.src = '';
+goToScene(3);
+detach(a1);
+goToScene(4);
+const a3 = playing('A3');
+goToScene(5);
+detach(a3);
+goToScene(6);
+const s4 = fresh('A4');
+props.suppressed = s4.__obedSuppressed34 === true;
+goToScene(7);
+detach(s4);
+s4.src = '';
+P.remountAll();
+tick();
+P.clear();
+console.log(JSON.stringify({props, events: P.events.map(e => [e.kind, Object.keys(e.detail).sort()])}));
+"""
+
+
+@pytest.fixture(scope="module")
+def f5_flow() -> dict:
+    return _run_chain(_F5_PLAN, _F5_FLOW)
+
+
+_F5_NOTES = {
+    "bridge-3to4": ["generation", "key", "newElId", "oldElId", "oldGen", "paused", "preservedT", "queueLeft",
+                    "readyState"],
+    "reuse-decoder": ["generation", "key", "newElId", "oldElId", "oldGen", "paused", "preservedT", "queueLeft",
+                      "readyState"],
+    "reuse-skip-boundary": ["boundary", "hashNum", "key", "newElId", "queueLen"],
+    "retire-on-start-movie": ["elIds", "hashNum", "key"],
+    "retire-boundary": ["atScene", "elIds", "key"],
+    "preserve-refused": ["key", "scene", "via"],
+    "dom-swap": ["elId", "paused", "t"],
+    "facade-block-clear": ["elId", "t"],
+    "remount-scheduled": ["elId", "epoch", "why"],
+    "remount-done": ["elId", "key", "rect"],
+    "pool-cleared": ["preserveGeneration", "remountEpoch"],
+}
+
+
+@pytest.mark.parametrize("kind", list(_F5_NOTES))
+def test_f5_note_kind_and_fields_survive(kind, f5_flow):
+    shapes = [fields for k, fields in f5_flow["events"] if k == kind]
+    assert shapes, f"no {kind} note"
+    for fields in shapes:
+        assert set(_F5_NOTES[kind]) | {"sceneHash"} <= set(fields), (kind, fields)
+
+
+@pytest.mark.parametrize(
+    "prop,expected",
+    [("preserved", "1"), ("remounted", "1"), ("elId", "number"), ("gen", 0), ("facadeFor", True),
+     ("suppressed", True)],
+    ids=["dataset.obedPreserved", "dataset.obedRemounted", "__obedElId", "__obedGen", "__obedFacadeFor",
+         "__obedSuppressed34"],
+)
+def test_f5_element_property_survives(prop, expected, f5_flow):
+    assert f5_flow["props"][prop] == expected
+
+
+def test_f5_glreplay_note_kinds_survive():
+    """The `glreplay-*` family (its field shapes are pinned by `test_g3_note_schemas`)."""
+    result = _run_gl(_HANDOFF + "console.log(JSON.stringify([...new Set(kinds().filter(k => "
+                     "k.indexOf('glreplay-') === 0))].sort()));\n")
+    assert {"glreplay-zone", "glreplay-carried", "glreplay-release", "glreplay-hold"} <= set(result)
+
+
+def test_f5_footprint_owner_reads_the_plan_footprint_through_footprint_key_for_rect():
+    js = live_continuity_js.PRESERVE_CORE_JS
+    assert "footprintOwnerDecoderId: function(rect) {" in js
+    assert "const wantKey = (rect && rect.key) ? rect.key : footprintKeyForRect(rect);" in js
+    assert "const fp = movies[k] && movies[k].footprint;" in js

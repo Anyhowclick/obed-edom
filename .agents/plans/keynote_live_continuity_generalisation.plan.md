@@ -1,11 +1,10 @@
 # Live continuity — generalisation: retire `QUALIFIED_PLAN_SHA256`
 
-Status: **rev 2 + S0, APPROVED by the owner 2026-09-25. OQ-1 is (c), objectID-only runtime identity; every other OQ follows its recommendation (see §6). Nothing implemented.** Read-only against
+Status: **rev 2 + S0, APPROVED by the owner 2026-09-25. OQ-1 is (c), objectID-only runtime identity; every other OQ follows its recommendation (see §6).** **S1 LANDED #237 (`2ee95223`, 2026-09-25); S2 in progress on `claude/continuity-generalisation-s2` (no PR), see §3 S2.** Read-only against
 `386f28f2` (origin/main, #228), `claude/continuity-loopmode` @ `67643332` (local; rev 1 read `b3b57fc8`; the later
 commits are docs only), and `origin/claude/od-2-gl-replay-managed-obs-5bd03f` @ `af76ed97` (rev 1 read `1dd21207`;
 `af76ed97` makes the soak wrap windows length-relative, soak ≥ 3 min, and requires both windows on a looping fixture).
-Supersedes the brief `keynote_live_continuity_generalisation.md` (2026-09-19, stale; keep it until this plan is approved,
-then delete it). Parents: `keynote_live_continuity.plan.md` (policy 3a), `keynote_live_gl_replay_arming.plan.md` §11,
+Supersedes the brief `keynote_live_continuity_generalisation.md` (2026-09-19; deleted, `git show 6fc85b78:.agents/plans/keynote_live_continuity_generalisation.md`). Parents: `keynote_live_continuity.plan.md` (policy 3a), `keynote_live_gl_replay_arming.plan.md` §11,
 `keynote_live_continuity_loopmode.plan.md`, `keynote_live_gl_replay_managed_obs.plan.md`. Style: `~/.AGENTS.md`.
 Citations: `lc` = `src/obed_edom/live_continuity.py`, `js` = `live_continuity_js.py`, `g2` = `live_gl_replay_js.py`.
 
@@ -161,7 +160,7 @@ Change of **granularity**: an ambiguous pairing refuses **one boundary** (retire
 ### 2.4 Loop and glReplay fold-in
 
 - **Loop.** With exact instance identity, the loop branch's every-instance rule narrows to **the carried pair must agree** (src.loop == dst.loop). A carried decoder keeps its source's `loop` until the destination's movie-start build runs `setLoop(true)`. `bindFacade` **forwards** that to the carried decoder (`js:1521`), so only no-loop→loop is ever repaired, and only on a facaded pin (loopMode plan §1). Each pin/bridge/glReplay entry carries `loop`. The runtime checks `decoder.loop === entry.loop` at carry time (mismatch → `preserve-refused loopMismatch`). The **`loops` annex** is Python-emitted and never read by the core (loop branch: `lc:880-894`; no `js` change). It is deleted in S2: per-entry `loop` already makes a looping deck sign differently. `ContinuityPlan.loop_instances` (the probe's force-wrap scorer) stays.
-- **glReplay.** G2 bytes are untouched: `GL_REPLAY_VERSION` stays 1, the sha stays `10a5b36a…`, the seam `glReplay.version` stays 1, and the core's `m.version !== 1` check is unchanged. The entry keeps every field G2 validates, and `src`/`dst`/`loop` are additive (F4). `instanceId` stays `asset#index` (the probe binds it, `live_continuity_probe.py:663`). The armed pooling and `glCarried` select through §2.2 (compared against `src.rect`; `src.rect` and `instanceRect` differ by ≤ 0.5 px on a pin, `lc:31`). `release` still pins at `instanceRect`.
+- **glReplay.** G2 bytes are untouched: `GL_REPLAY_VERSION` stays 1, the sha stays `10a5b36a…`, the seam `glReplay.version` stays 1, and the core's `m.version !== 1` check is unchanged. The entry keeps every field G2 validates, and `src`/`dst`/`loop` are additive (F4). `instanceId` stays `asset#index` (the probe binds it, `live_continuity_probe.py:663`). The armed pooling and `glCarried` filter by objectId (§2.2) and then keep G2's existing ≤ 1 px check against `instanceRect`, unchanged, as §2.2 says. `src.rect` and `instanceRect` differ by ≤ 0.5 px on a pin (`lc:31`). S2 WS-R, 2026-09-25. `release` still pins at `instanceRect`.
 
 ### 2.5 Version and sha consequences (S2)
 
@@ -184,7 +183,7 @@ limited, as for OD-2). Every code PR runs the **full local suites**: `uv run pyt
 worktree pinned to a commit, with at most 3 headless Chromes; OBS only on the owner's word.
 
 ### S0: owner decks and offline verification (no product code; may start now: OQ-3)
-- **Owner** authors D1–D6 (§5). `counter-a.mov` / `counter-b.mov` are already in main-checkout `output/qual-movies/`.
+- **Owner** authors D1–D6 (§5). `counter-a.mov` / `counter-b.mov` are already in main-checkout `output/fixtures/qual-movies/`.
 - **Coordinator** exports-to-fixture layout, and a trimmed `tests/fixtures/live_continuity/<deck>/` per deck.
 - **Checks:**
   - V1: F1 on every deck. Headless, on P2 and D1–D5: every `setAttribute('src')` on a player-created `<video>` sees `el.id === objectID + '-video'` of an instance on the current slide. Not "every `<video>` in the DOM": carried bridge decoders legitimately keep an old id.
@@ -196,7 +195,7 @@ worktree pinned to a commit, with at most 3 headless Chromes; OBS only on the ow
 
 ### S1: instrument first (no product bytes; after loopMode merges, since it shares the probe)
 
-**S1 DONE 2026-09-25 (gates PASS at merge `421b4f39`; record `.agents/reviews/continuity-generalisation/s1-gates-r1.md`).** Unmerged; awaiting owner.
+**S1 DONE 2026-09-25 (gates PASS at merge `421b4f39`; record `.agents/reviews/continuity-generalisation/s1-gates-r1.md`).** Merged as #237 (`2ee95223`).
 
 | WS | Files (exclusive) | Work |
 |---|---|---|
@@ -211,6 +210,8 @@ worktree pinned to a commit, with at most 3 headless Chromes; OBS only on the ow
   **Owner decision 2026-10-09:** the P2 `--strip bridge@8` arm (WS-H) is dropped from `run_gates.sh`: it injects the same plan as `--disable-bridge34`. The host `--strip bridge@8` arm stays.
 
 ### S2: derivation v2 + core v6 (the only runtime-byte stage; after OD-2 and loopMode merge)
+
+**S2 IN PROGRESS** on `claude/s2-detach-fix` (no PR): S2.0 and all four streams, rebased onto #247 with the owner-approved P2 re-registrations (`run_gates.sh`), §4 option (a), detach fix a1 (`keynote_live_continuity_detach_r8.plan.md` §5), review folds, pin hold and bridge timing (R10). State and next steps: the latest `.agents/handovers/keynote-live-continuity-*.md` (now `…-2026-10-10-night.md`).
 
 | WS | Files (exclusive) | Work |
 |---|---|---|
@@ -229,11 +230,15 @@ here, so the §3.4 round runs once.
 |---|---|---|---|
 | Q1 | Full suites | green | — |
 | Q2 | P2 oracle (`run_gates.sh`): fast, slow, `--gl-replay auto` | 15/15 (+ `glReplayCarry1to2` True under auto); every verdict equal to main's S1-scorer table | `--disable-bridge34` red only on `continueThroughMovingMagicMove3to4`; `stash-any` red only on `noStrayVideo` |
-| Q3 | Host probe, 3 viewports, arms A/B/C + attach + V/Voff/Vgl + G (plan-derived go-to, incl. go-to mid-chain then carry) on P2 + D1–D6 | Every plan-generated verdict, `unexpectedVideos` empty | One `--strip` arm per action type (pin, bridge, restart, retire, glReplay), each red **only** on its boundary; `wrong-instance` red on D4's carry verdict (identity instrument); `Voff` red as today. `fifo-reuse` on D4 is recorded (red iff V5 showed A-near pooled first) |
+| Q3 | Host probe, 3 viewports, arms A/B/C + attach + V/Voff/Vgl + G (plan-derived go-to, incl. go-to mid-chain then carry) on P2 + D1–D6 | Every plan-generated verdict, `unexpectedVideos` empty | One `--strip` arm per action type (pin, bridge, restart, retire, glReplay), each red **only** on its boundary plus the documented cascade of its chain (§4); `wrong-instance` red on D4's carry verdict (identity instrument); `Voff` red as today. `fifo-reuse` on D4 is recorded (red iff V5 showed A-near pooled first) |
 | Q4 | G2 seam | cross-module test; Vgl hand-off; `--gl-force-fail` stands down to retire; go-to retires `cleared` | `--gl-force-fail` arm (the failsafe must fire) |
 | Q5 | Loop L1 + L2 (loopMode plan §5, scorer unchanged) on the rebuilt `p2-loop` + D6 | as loop gates-r1 | non-loop fixture "no wrap recorded"; D6 S4→S5 mismatch must retire |
 | Q6 | Managed OBS: `managed_obs_qualify.py` `--arm both`, `g2`, `failsafe`, `soak` at **25 and 30** (both default-on; binary counter gates cadence at both rates; 30 judged relative to same-take native per OD-2 OQ-2; soak on the looping fixture with both wrap windows, `af76ed97`) | OD-2's M1–M6 limits | OD-2's `--kb frozen/oldbytes/latelost` |
 | Q7 | Real OBS (external attach) short pass on D1 + D4; **owner eyeball** in Keyer mode on D1–D5 | no stray, no visible restart where carried | — |
+
+Q3 amendment (owner 2026-10-10): Pass G no-consumption (destination `GOTO_CONSUMPTION_CHECK_TO` only) detects consumption by the post-burst settled position: with k = the destination's onset scene and L = its leading `automaticPlay` events, `IdleAtInitialState` at k when L = 0, else `IdleAtFinalState` at k+L-1 with `nextSceneId` k+L, still on the destination slide. The execute log is a host-vs-JSON agreement check: `autoPlayRunKinds` equals those events' first-effect names, `autoPlayFired` iff L > 0, no `autoPlayDeferredReason` (else inconclusive). A destination parsed as having no click-driven builds (nested effects walked) scores only that half, with the pixel half n/a. Unreadable slide JSON, a click event with no effects, or a leading automatic transition stays inconclusive.
+
+Q3 Pass G runs inside `run_gates.sh` (owner 2026-10-10): full tier, one queued `--pass G` run each on P2 and D1–D6, a pass only on exit 0 and artifact status `pass`.
 
 Gate record: `.agents/reviews/continuity-generalisation/gates-r1.md`. The gate commit keeps in the allowlist only the S2
 shas of P2 off/on, p2-loop off/on, and the decks that passed Q3+Q7. The others are removed before the PR is offered.
@@ -271,6 +276,9 @@ docs PR by the loop session (`output/evidence/<name>`); this plan cites those pa
 - **Docs:** SKILL, `decklink-field-test-runbook.md`, the live handovers the plans still cite, and memory citations
   (coordinator). The worktree convention becomes "nothing to symlink". If some script still needs a relative
   `output/` path, one symlink of `output/fixtures`.
+- **Compat symlinks:** the main checkout keeps `output/<name>` → `output/fixtures/<name>` links because main has no
+  `fixture()` until S2 merges (its scripts and tests still read the old paths). Delete them once S2 has merged and no
+  live branch or session reads the old paths.
 
 **Order inside S2.** Step **S2.0**: one Opus MEDIUM implementer, sequential, BEFORE the parallel work streams. It touches
 files every stream owns, so it cannot run beside them. Its own check is the full suites, plus a resolver smoke (every
@@ -323,6 +331,7 @@ Dissolve). D2-across → none. D4 → the near copy is unpaired, so no finding.
 - **Stray-movie check in both gates.** Host `unexpectedVideos` (exists) and P2 `noStrayVideo` (S1). `noStrayVideo` claims **only** that no painting `<video>` fails to claim an authored instance and no instance is claimed twice. It does **not** score presence (Codex R1-9, closed by narrowing): Magic-Move-settled slides legitimately paint through WebGL, so presence stays with `refusedCarry1to2`/`glReplayCarry1to2`, `deliberateRestart2to3` and `continueThroughMovingMagicMove3to4`. Red: `--core-variant stash-any` on the P2 fixture (WA0125 on slide 4).
 - **Per-boundary verdicts from the plan.** Never from slide positions. The rescore control (G-S1a) proves the new scorer equals the old on stored artifacts before it replaces it.
 - **A red arm per action type.** `--strip ACTION@atScene` must turn exactly its pre-registered set red, and every other verdict must match the unstripped run.
+  **Strip locality (owner, 2026-10-09, option (a)):** a strip arm is red on its own boundary, plus the documented cascade of that chain. Removing one link of a chain legitimately cascades into the chain's later boundaries and slides, so every red outside the stripped boundary's own verdicts (a later carry of the same chain, a `duplicate:` or a `stray:` on any slide) is listed per arm with its reason (`STRIP_CASCADE`, `tests/test_live_continuity_probe.py`). An arm with no listed cascade is red only on its own boundary.
 - **Freeze bracket once per paint path (owner 8b amended, 8a promoted, 2026-10-09).** `freezeControlCaughtByCounter` runs in `--wait-profile fast` (DOM) and `--gl-replay auto` (WebGL) only; every other arm passes `--skip-freeze-bracket` (refused on fast/gl-auto; non-blocking, rendered `**True** (skipped by --skip-freeze-bracket)`, header `Freeze bracket: skipped (--skip-freeze-bracket)`). The at-cut counter `movingIndexRunAtCut` gates `continueThroughMovingMagicMove3to4` in every arm, so "every other verdict must match the unstripped run" excludes the skipped bracket.
 - **Identity red.** `--core-variant wrong-instance` on D4 must fail the carry verdict: the carried clock is A-near's, ~3 s ahead of A-far's (the probe dwells ≥ 3 s on S1 before click 1).
 - **F5 is frozen instrument API.** A core change that drops or renames an F5 name is a finding, even if the suites pass.
@@ -332,7 +341,7 @@ Dissolve). D2-across → none. D4 → the near copy is unpaired, so no finding.
 
 **Common to every deck:**
 - **Canvas:** 1920×1080, the same theme/background as `Minimal Alpha_DSK` (black).
-- **Movies:** `counter-a.mov` (60 s) and `counter-b.mov` (55 s). They are made by `scripts/binary_counter_movie.py` (1920×540 = **32:9**, 30 fps, H.264, binary frame counter; no marker option), sit in main-checkout `output/qual-movies/`, and are distinct files so Keynote keeps two assets. "A" = counter-a, "B" = counter-b. Keep "Constrain proportions" on: every rect below is exactly 32:9.
+- **Movies:** `counter-a.mov` (60 s) and `counter-b.mov` (55 s). They are made by `scripts/binary_counter_movie.py` (1920×540 = **32:9**, 30 fps, H.264, binary frame counter; no marker option), sit in main-checkout `output/fixtures/qual-movies/`, and are distinct files so Keynote keeps two assets. "A" = counter-a, "B" = counter-b. Keep "Constrain proportions" on: every rect below is exactly 32:9.
 - **Labels:** one text label per slide ("D1 S1"…) at x 40, y 40, ≤ 300×60. Nothing else on any slide, and **nothing overlapping a movie rect on any slide** (overlap = a refusal).
 - **Making the "same movie" continue:** duplicate the previous slide (⌘D), then move or resize the movie.
 - **Transitions:** Magic Move 1.5 s, and Dissolve 1.0 s where stated. Each transition sits on the **outgoing** slide. Magic Move match option, Start Movie and "play across slides": **copy exactly what the P2 deck (`Minimal Alpha_DSK`) uses**, and tell the coordinator the wording you saw. This plan does not guess Keynote's menu names.
@@ -341,8 +350,8 @@ Dissolve). D2-across → none. D4 → the near copy is unpaired, so no finding.
 
 **Export (each deck):**
 1. Save as `~/Desktop/Convert wall to 16x9 CGs/qual/Dn.key`.
-2. File ▸ Export To ▸ HTML, same options as the 2026-09-22 `output/gl-decks/` exports, into `~/Desktop/Convert wall to 16x9 CGs/qual/Dn-html/`.
-3. Tell the coordinator. The coordinator copies the export into `output/qual-decks/Dn/` and prepares the `html-player`/`html-unmodified` pair.
+2. File ▸ Export To ▸ HTML, same options as the 2026-09-22 `output/fixtures/gl-decks/` exports, into `~/Desktop/Convert wall to 16x9 CGs/qual/Dn-html/`.
+3. Tell the coordinator. The coordinator copies the export into `output/fixtures/qual-decks/Dn/` and prepares the `html-player`/`html-unmodified` pair.
 
 Rects: coordinator's provisional 32:9 set (2026-09-25), re-checked here: all inside 1920×1080, no movie overlaps a
 label or another movie on its slide, at most one geometry-changing movie per Magic Move. One change, D6's A-extra (§8).
@@ -365,8 +374,8 @@ box at 1763,21, not 40,40). Start = After Transition was patched offline with `i
 D4's A-far, which stays On Click. The decks were exported with `html_preview.export_html`. The owner's `Continuity.key` and
 `Continuity/D1.key` are unchanged (sha verified).
 - **Decks:** `~/Desktop/Convert wall to 16x9 CGs/Continuity/built/Dn.key` + `Dn-html/`.
-- **Exports:** main checkout `output/qual-decks/Dn/html-unmodified/`.
-- **Generator:** `output/qual-decks/author/gen.py` + `decks.json`.
+- **Exports:** main checkout `output/fixtures/qual-decks/Dn/html-unmodified/`.
+- **Generator:** `output/fixtures/qual-decks/author/gen.py` + `decks.json`.
 - **Offline read-back:** every movie rect, repeat, transition and start setting matches the table.
 
 Offline S0 findings:
@@ -436,7 +445,7 @@ form.
 10. **OQ-10 R2.** **OWNER 2026-09-25: rec.** Refuse a boundary whose continuing instance builds in/out. **Rec yes** (unmeasured for movies).
 11. **OQ-11 P2 verdict count.** **OWNER 2026-09-25: rec.** P2 gains `noStrayVideo` (15 findings); `run_gates.sh` updates in S1. **Rec yes.**
 12. **OQ-12 review model.** **OWNER 2026-09-25: rec.** Codex `gpt-5.6-sol` per roster, with Opus as fallback if Codex is limited. **Rec yes.**
-13. **OQ-13 Keynote wording in §5. MOOT (2026-09-25):** the coordinator authored D1–D6 by AppleScript, with start settings patched offline from `Positive Control.key`, so no menu wording is needed. The generator is `output/qual-decks/author/gen.py`.
+13. **OQ-13 Keynote wording in §5. MOOT (2026-09-25):** the coordinator authored D1–D6 by AppleScript, with start settings patched offline from `Positive Control.key`, so no menu wording is needed. The generator is `output/fixtures/qual-decks/author/gen.py`.
 
 15. **OQ-15 read `playsAcrossSlides` from the `.key`.** **OWNER 2026-09-25: rec: scope as recommended; `.key` reading enters continuity only in the follow-up plan.**
     - **Owner 2026-09-25:** AK will import and read the `.key` anyway, so a mismatch between the export and the `.key` is

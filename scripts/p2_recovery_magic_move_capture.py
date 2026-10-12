@@ -26,6 +26,7 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
 from obed_edom.dsk_live import LiveBatch, keynote_app, keynote_running  # noqa: E402
+from obed_edom.fixture_paths import fixture  # noqa: E402
 from obed_edom.html_alpha_probe import (  # noqa: E402
     file_identity,
     inventory_deck,
@@ -60,7 +61,7 @@ from p2_recovery_native_ui import (  # noqa: E402
 )
 
 SOURCE = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Alpha_DSK.key")
-OUT = REPO / "output" / "p2-recovery" / "magic-move-7-8"
+OUT = fixture("p2-recovery") / "magic-move-7-8"
 KEEP = (7, 8)  # source ordinals; nav 5→6 with skips hidden
 FPS = 30
 SYNC_SEGMENT_S = 4.0  # uninterrupted after MM cut

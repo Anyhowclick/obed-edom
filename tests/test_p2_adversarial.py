@@ -20,7 +20,6 @@ import copy
 import fcntl
 import hashlib
 import importlib.metadata
-import importlib.util
 import io
 import json
 import os
@@ -380,8 +379,8 @@ def _advancing_presented(decoder_id="dec-1") -> list[dict]:
     """Media snapshots whose bound decoder's presentedMediaTime advances >0.05
     on/after the flip (`#2`, `#3` are both in-window for hash2 == "#2")."""
     return [
-        {"sceneHash": "#2", "videos": [{"decoderId": decoder_id, "presentedMediaTime": 10.0}]},
-        {"sceneHash": "#3", "videos": [{"decoderId": decoder_id, "presentedMediaTime": 10.5}]},
+        {"sceneHash": "#2", "videos": [{"decoderId": decoder_id, "src": "untitled.mov", "presentedMediaTime": 10.0}]},
+        {"sceneHash": "#3", "videos": [{"decoderId": decoder_id, "src": "untitled.mov", "presentedMediaTime": 10.5}]},
     ]
 
 
@@ -574,8 +573,8 @@ def test_live_continuity_fails_closed_when_presented_time_flat():
     """A stable bound decoder whose presentedMediaTime does NOT advance across
     the cut fails rvfcAdvance in isolation (the freeze this whole probe hunts)."""
     flat = [
-        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.0}]},
-        {"sceneHash": "#3", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.0}]},
+        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 10.0}]},
+        {"sceneHash": "#3", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 10.0}]},
     ]
     verdict = p2.liveContinuity1to2(
         _motion_healthy(), _flip_samples(), flat, "#1", "#2", restart_min_hash=RESTART
@@ -602,8 +601,8 @@ def test_live_continuity_fails_closed_on_rvfc_regression():
     10.0 -> 1.0, a restart/seek) must NOT count as advance: ordered progression is
     required, not max-min (which read the rewind as +9.0)."""
     regress = [
-        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.0}]},
-        {"sceneHash": "#3", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 1.0}]},
+        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 10.0}]},
+        {"sceneHash": "#3", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 1.0}]},
     ]
     verdict = p2.liveContinuity1to2(
         _motion_healthy(), _flip_samples(), regress, "#1", "#2", restart_min_hash=RESTART
@@ -620,10 +619,10 @@ def test_live_continuity_fails_closed_on_a_split_cumulative_rewind():
     RUNNING MAX seen so far, so it catches the -0.08 dip below the prior peak
     (10.00) and fails closed."""
     split_rewind = [
-        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.00}]},
-        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 9.96}]},
-        {"sceneHash": "#3", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 9.92}]},
-        {"sceneHash": "#3", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.10}]},
+        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 10.00}]},
+        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 9.96}]},
+        {"sceneHash": "#3", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 9.92}]},
+        {"sceneHash": "#3", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 10.10}]},
     ]
     verdict = p2.liveContinuity1to2(
         _motion_healthy(), _flip_samples(), split_rewind, "#1", "#2", restart_min_hash=RESTART
@@ -641,15 +640,15 @@ def test_live_continuity_rvfc_bound_to_footprint_decoder_not_sibling():
         {
             "sceneHash": "#2",
             "videos": [
-                {"decoderId": "dec-1", "presentedMediaTime": 10.0},  # bound
-                {"decoderId": "dec-2", "presentedMediaTime": 20.0},  # sibling
+                {"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 10.0},  # bound
+                {"decoderId": "dec-2", "src": "untitled.mov", "presentedMediaTime": 20.0},  # sibling
             ],
         },
         {
             "sceneHash": "#3",
             "videos": [
-                {"decoderId": "dec-1", "presentedMediaTime": 10.0},  # bound STALLED
-                {"decoderId": "dec-2", "presentedMediaTime": 29.0},  # sibling advances
+                {"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 10.0},  # bound STALLED
+                {"decoderId": "dec-2", "src": "untitled.mov", "presentedMediaTime": 29.0},  # sibling advances
             ],
         },
     ]
@@ -666,8 +665,8 @@ def test_live_continuity_ignores_presented_advance_before_flip():
     with a single in-window presented-time sample the advance is unprovable =>
     rvfcAdvance fails closed."""
     presented = [
-        {"sceneHash": "#1", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 5.0}]},
-        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.0}]},
+        {"sceneHash": "#1", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 5.0}]},
+        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 10.0}]},
     ]
     verdict = p2.liveContinuity1to2(
         _motion_healthy(), _flip_samples(), presented, "#1", "#2", restart_min_hash=RESTART
@@ -711,8 +710,8 @@ def test_live_continuity_fails_closed_on_regressive_boundary():
         {"sceneHash": "#0", "decoderId": "dec-1"},
     ]
     regressed_presented = [
-        {"sceneHash": "#0", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.0}]},
-        {"sceneHash": "#0", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.9}]},
+        {"sceneHash": "#0", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 10.0}]},
+        {"sceneHash": "#0", "videos": [{"decoderId": "dec-1", "src": "untitled.mov", "presentedMediaTime": 10.9}]},
     ]
     verdict = p2.liveContinuity1to2(
         _motion_healthy(), regressed_post, regressed_presented, "#1", "#0", restart_min_hash=RESTART
@@ -785,7 +784,7 @@ def _video_entry_34(decoder_id, t, **over):
     decision is re-derived from."""
     box = dict(zip(("x", "y", "w", "h"), _FP_34))
     entry = {
-        "decoderId": decoder_id, "presentedMediaTime": t, "visible": True,
+        "decoderId": decoder_id, "src": "untitled.mov", "presentedMediaTime": t, "visible": True,
         "hiddenBy": None, "suppressed34": False, "rect": dict(box),
         "inDocument": True, "documentHidden": False, "display": "block", "visibility": "visible",
         "opacityProduct": 1.0, "checkVisibility": True,
@@ -803,16 +802,25 @@ def _presented_34(decoder_id=4):
     ]
 
 
-def test_moving_continuity_passes_when_bridged_decoder_continues():
+@pytest.mark.parametrize(("src", "ok", "unreadable"), [
+    ("untitled.mov", True, False),
+    # r14 #3: the bound decoder's sources are judged before its rVFC clock. Another asset
+    # fails -- a path whose name is the logical key `movie1` included -- and no source is
+    # unreadable, never an advancing clock.
+    ("foreign.mov", False, False),
+    ("/media/movie1", False, False),
+    ("", False, True),
+])
+def test_moving_continuity_passes_when_bridged_decoder_continues(src, ok, unreadable):
     """Positive control: the slide-3 decoder (4) owns the slide-4 footprint with a
     monotonic clock => ok, no failures. Proves the gate is not wired to always-fail."""
-    verdict = p2.movingContinuity3to4(
-        _owner_samples_34(4), _presented_34(4), 4, "#7", "#8", S4MIN
-    )
-    assert verdict["ok"] is True
-    assert verdict["failed"] == []
+    presented = _presented_34(4)
+    presented[1]["videos"][0]["src"] = src
+    verdict = p2.movingContinuity3to4(_owner_samples_34(4), presented, 4, "#7", "#8", S4MIN)
+    assert verdict["ok"] is ok
+    assert verdict["failed"] == ([] if ok else ["rvfcMonotonic"])
     assert verdict["slide4Owner"] == 4
-    assert verdict["rvfcMonotonic"]["ok"] is True
+    assert verdict["unreadable"] is unreadable
 
 
 def test_moving_continuity_fails_closed_on_export_restart():
@@ -866,8 +874,8 @@ def test_moving_continuity_fails_closed_on_rvfc_rewind():
     RESETS/rewinds (a restart signature even under the same reported id) => the
     rvfcMonotonic check fails closed."""
     rewind = [
-        {"sceneHash": "#8", "videos": [{"decoderId": 4, "presentedMediaTime": 2.4}]},
-        {"sceneHash": "#9", "videos": [{"decoderId": 4, "presentedMediaTime": 0.05}]},
+        {"sceneHash": "#8", "videos": [{"decoderId": 4, "src": "untitled.mov", "presentedMediaTime": 2.4}]},
+        {"sceneHash": "#9", "videos": [{"decoderId": 4, "src": "untitled.mov", "presentedMediaTime": 0.05}]},
     ]
     verdict = p2.movingContinuity3to4(_owner_samples_34(4), rewind, 4, "#7", "#8", S4MIN)
     assert verdict["ok"] is False
@@ -2765,15 +2773,18 @@ def test_freeze_control_motion_marker_replaced_before_the_trigger_is_inconclusiv
 def test_freeze_control_trigger_within_the_motion_slack_still_passes():
     """...and the slack is real: the marker is stamped inside keepThroughBridge's
     first SYNCHRONOUS frame(), which runs in a task, so the poll can see it a
-    callback before or after the rect visibly departs."""
-    for frames, marker in ((3, 1), (1, 3), (2, 2)):
+    callback before the rect visibly departs. The poll records the marker only
+    while armed (p2_recovery_html_adversarial `poll`), so a marker frame past the
+    trigger frame is no reading of the page: the producer contract voids it."""
+    for frames, marker, verdict_ in ((3, 1, "pass"), (2, 2, "pass"), (1, 3, "inconclusive")):
         b = _freeze_b_snap_34()
         b["nullControl"] = {
             **b["nullControl"], "triggerFramesAfterAdvance": frames,
             "motionStartedFrame": marker,
         }
         verdict = _score_34(_positive_snap_34(), _with_poll_times(b), _a2_snap_34())
-        assert verdict["verdict"] == "pass", (frames, marker, verdict["failed"])
+        assert verdict["verdict"] == verdict_, (frames, marker, verdict["failed"])
+        assert ("nullControlSound" in verdict["integrityFailed"]) is (marker > frames)
 
 
 # --- Eased bridge (8204b87a): the trigger bounds follow the bridge's own curve -- #
@@ -2793,7 +2804,7 @@ def test_freeze_control_trigger_within_the_motion_slack_still_passes():
 # The real fixture is linear-era; these snapshots move only the trigger timing
 # (keydown clock, marker instant, frame counts, departure rect) to real values.
 P2_BRIDGE_SCALE = (
-    _FIXTURE_34["b"]["nullControl"]["movedFromRect"]["w"] / BRIDGE_34["srcRect"]["w"]
+    _FIXTURE_34["b"]["nullControl"]["movedFromRect"]["w"] / BRIDGE_34["src"]["rect"]["w"]
 )
 R3_EASED_DEPARTURE = {"x": 0.334839, "y": -0.31604, "w": 1.234375, "h": 0.59375}
 MAIN_LINEAR_DEPARTURE = {"x": 0.600464, "y": -0.50354, "w": 1.890625, "h": 0.78125}
@@ -2865,7 +2876,8 @@ def test_bridge_departure_latency_and_shifted_bounds_on_p2_geometry(curve, laten
     unchanged), 61.0 ms eased (every ceiling shifted by L - 4.8 = 56.2 ms, i.e.
     4 nominal frames). The verdict's eased curve is pinned to the core's
     EASE_IN_EASE_OUT and its progress line, so a curve change forces recalibration,
-    and its `pollTimes` size bound to the probe's POLL_TIMES_MAX."""
+    the GL-clock fallback wait to W <= L, and its `pollTimes` size bound to the
+    probe's POLL_TIMES_MAX."""
     import re
 
     from obed_edom.live_continuity_js import PRESERVE_CORE_JS
@@ -2904,8 +2916,12 @@ def test_bridge_departure_latency_and_shifted_bounds_on_p2_geometry(curve, laten
     assert match, "the core's EASE_IN_EASE_OUT moved: recalibrate the freeze trigger bounds"
     assert tuple(float(g) for g in match.groups()) == p2.BRIDGE_EASE_IN_EASE_OUT
     assert PRESERVE_CORE_JS.count(
-        "const progress = easeInEaseOut((performance.now() - started) / (1000 * boundary.durationSeconds));"
+        "const progress = easeInEaseOut(bridgeElapsedMs(v, motion) / (1000 * boundary.durationSeconds));"
     ) == 1
+    # The GL-clock fallback holds the source for GL_CLOCK_WAIT_MS, then runs today's clock: its first 1 px
+    # departure frame equals today's only while the wait W stays within the eased latency L (W <= L).
+    assert PRESERVE_CORE_JS.count("const GL_CLOCK_WAIT_MS = 50;") == 1
+    assert 50 <= p2._bridge_departure_latency_ms(BRIDGE_34, P2_BRIDGE_SCALE, p2.BRIDGE_EASE_IN_EASE_OUT)
     probe = (REPO / "scripts" / "p2_recovery_html_adversarial.py").read_text()
     assert probe.count(f"var POLL_TIMES_MAX = {p2.FREEZE_POLL_TIMES_MAX};") == 1
     assert probe.count("if (st.pollTimes.length < POLL_TIMES_MAX) st.pollTimes.push(pollAt);") == 1
@@ -2943,7 +2959,7 @@ _LINEAR_ERA = dict(
     pytest.param(dict(frames=14, marker=12), _EASED, BRIDGE_34, _MOVE_START, id="frame-ceiling+1"),
     pytest.param(dict(delay_ms=247.3), _EASED, BRIDGE_34, _MOVE_START, id="delay-ceiling+1"),
     pytest.param(dict(frames=12, marker=5), _EASED, BRIDGE_34, _MOTION_START, id="frame-lead+1"),
-    pytest.param(dict(frames=10, marker=13), _EASED, BRIDGE_34, _MOTION_START, id="before-marker-3"),
+    pytest.param(dict(frames=10, marker=13), _EASED, BRIDGE_34, ["nullControlSound", *_MOTION_START], id="before-marker-3"),
     pytest.param(_ASTRA_LATE, _EASED, BRIDGE_34, _MOTION_START, id="late-after-slow-startup"),
     pytest.param({**_ASTRA_LATE, "post_cadence_ms": 25.0}, _EASED, BRIDGE_34, _MOTION_START,
                  id="late-after-slow-startup-slow-hold"),
@@ -2958,10 +2974,13 @@ _LINEAR_ERA = dict(
     pytest.param({}, _EASED, {**BRIDGE_34, "atScene": 6}, _BOTH, id="bridge-of-another-boundary"),
     pytest.param({}, _EASED, {k: v for k, v in BRIDGE_34.items() if k != "durationSeconds"}, _BOTH,
                  id="bridge-without-duration"),
-    pytest.param({}, _EASED, {**BRIDGE_34, "srcRect": {**BRIDGE_34["srcRect"], "w": None}}, _BOTH,
+    pytest.param({}, _EASED, {**BRIDGE_34, "src": {**BRIDGE_34["src"], "rect": {**BRIDGE_34["src"]["rect"], "w": None}}}, _BOTH,
                  id="bridge-src-partial"),
-    pytest.param({}, _EASED, {**BRIDGE_34, "rect": dict(BRIDGE_34["srcRect"])}, _BOTH,
-                 id="bridge-without-travel"),
+    pytest.param({}, _EASED, {**BRIDGE_34, "dst": {**BRIDGE_34["dst"], "rect": dict(BRIDGE_34["src"]["rect"])}},
+                 _BOTH, id="bridge-without-travel"),
+    pytest.param({}, _EASED, {**{k: v for k, v in BRIDGE_34.items() if k not in ("src", "dst")},
+                              "srcRect": BRIDGE_34["src"]["rect"], "rect": BRIDGE_34["dst"]["rect"]},
+                 _BOTH, id="bridge-schema-1-shape"),
 ])
 def test_freeze_control_trigger_bounds_follow_the_bridge_curve(timing, curve, bridge, failed):
     """Default timing is r3 `p2--wait-profilefast` (eased core 06789fbd): marker
@@ -3491,17 +3510,24 @@ def test_refused_carry_fails_without_a_positive_refusal_event():
     assert "no preserve-refused/retire-boundary event in the retire zone" in verdict["reasons"]
 
 
-def test_refused_carry_accepts_a_refusal_on_the_transition_scene_alone():
+@pytest.mark.parametrize(("key", "ok"), [
+    ("movie1", True),
+    ("untitled.mov", True),
+    # r13 sweep: the movie is the exact canonical asset name, never a substring — another asset whose name
+    # contains `untitled.mov` does not refuse movie1.
+    ("another-untitled.mov", False),
+])
+def test_refused_carry_accepts_a_refusal_on_the_transition_scene_alone(key, ok):
     """The transition scene (RETIRE_ZONE_MIN_HASH) is inside the zone: a
     `preserve-refused` there satisfies (b) with no `retire-boundary` at all."""
     only_transition = [
         _zone_note(),
         {"kind": "preserve-refused",
-         "detail": {"key": "movie1", "scene": 1, "via": "src-clear", "sceneHash": "#1"}},
+         "detail": {"key": key, "scene": 1, "via": "src-clear", "sceneHash": "#1"}},
     ]
     verdict = _refused(preserve_events=only_transition)
-    assert verdict["ok"] is True
-    assert verdict["refusalEventsN"] == 1
+    assert verdict["ok"] is ok
+    assert verdict["refusalEventsN"] == int(ok)
 
 
 def test_refused_carry_ignores_a_refusal_event_before_the_retire_zone():
@@ -3754,22 +3780,21 @@ def test_the_p2_fetch_filter_substitutes_the_keep_kinds_instead_of_a_literal_lis
 
 
 def _expected_gl_replay_runtime_plan() -> dict:
-    """`EXPECTED_GL_REPLAY_RUNTIME_PLAN` from tests/test_live_continuity.py. Loaded as a
-    module, not `eval`ed: the literal names `REAL_SLOT4_OPACITY`."""
-    spec = importlib.util.spec_from_file_location(
-        "test_live_continuity_for_p2", REPO / "tests" / "test_live_continuity.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return copy.deepcopy(module.EXPECTED_GL_REPLAY_RUNTIME_PLAN)
+    """The frozen schema-2 contract's P2 flag-on plan ("p2_gl"), which
+    tests/test_live_continuity.py pins `derive_plan(..., gl_replay=True).to_runtime()` to."""
+    path = REPO / "tests" / "fixtures" / "live_continuity" / "runtime_v2_examples.json"
+    return json.loads(path.read_text(encoding="utf-8"))["p2_gl"]
 
 
 def test_injected_plan_gl_replays_movie1_before_the_restart_and_bridges_3to4():
     plan = p2.build_continuity_plan(True)
     boundaries = plan["boundaries"]
+    assert plan["schema"] == 2
     assert [b["action"] for b in boundaries] == ["glReplay", "restart", "bridge"]
     assert boundaries[0] == _expected_gl_replay_runtime_plan()["boundaries"][0]
+    assert all(b["movieKey"] == p2.MOVIE1_KEY for b in boundaries)
+    assert boundaries[0]["dst"] == boundaries[1]["src"]
+    assert boundaries[1]["dst"] == boundaries[2]["src"]
     assert boundaries[0]["atScene"] == p2.SLIDE2_MIN_HASH
     assert boundaries[0]["movieKey"] == p2.MOVIE1_KEY
     assert boundaries[0]["fallback"] == "retire"
@@ -3796,8 +3821,8 @@ def test_disable_bridge34_removes_only_the_bridge():
 
 def test_injected_plan_matches_the_derived_flag_on_runtime_plan():
     """The P2 injection must stay equal to `derive_plan(..., gl_replay=True).to_runtime()`
-    for the fixture (tests/test_live_continuity.py pins the other direction), and so
-    carry a qualified plan signature."""
+    for the fixture: both equal the frozen contract's "p2_gl" (tests/test_live_continuity.py
+    pins the derived side), and so carry a qualified plan signature."""
     from obed_edom import live_continuity
 
     derived = _expected_gl_replay_runtime_plan()
@@ -3882,7 +3907,7 @@ def test_never_pooled_route_dies_when_a_decoder_is_still_pooled_on_slide2():
     """A detached movie1 decoder sitting in the pool through slide 2 is never
     reused or remounted — only the census can see it."""
     census = _pool_census([
-        {"key": "movie1", "elId": 1, "inDocument": False, "currentTime": 4.0},
+        {"key": "untitled.mov", "elId": 1, "inDocument": False, "currentTime": 4.0},
     ])
     evidence = p2.neverPooledEvidence(_refusal_events(), _carry_census(), census)
     assert evidence["ok"] is False
@@ -4458,7 +4483,7 @@ def _competitor_entry(rect, visible, decoder) -> dict:
     """An extra `videos` entry whose raw readings AGREE with its paint flag, so
     the attestation is exercised on the overlap rather than on a contradiction."""
     return {
-        "index": 99, "decoderId": decoder, "presentedMediaTime": None,
+        "index": 99, "decoderId": decoder, "src": "untitled.mov", "presentedMediaTime": None,
         "visible": visible,
         "hiddenBy": None if visible else "hidden",
         "suppressed34": False,
@@ -5139,6 +5164,7 @@ def _drop(snap: dict, *path):
 
 # (integrity key, arm, path to delete, does THAT key have to go red?)
 _ABSENCE_CASES = [
+    ("nullControlSound", "b", ("nullControl", "error"), True),
     ("firedAtMoveStart", "b", ("nullControl", "firedVia"), True),
     ("firedAtMoveStart", "b", ("nullControl", "triggerFramesAfterAdvance"), True),
     ("firedAtRuntimeMotionStart", "b", ("nullControl", "motionStartedFrame"), True),
@@ -5747,7 +5773,7 @@ _SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('b', ('mediaSamples', 'videos', 'rect', 'w')): "not read for a NON-painting entry: a rect is compared to the footprint only when `visible` is true, and a visible entry's missing component fails closed",
     ('b', ('mediaSamples', 'videos', 'rect', 'x')): "not read for a NON-painting entry: a rect is compared to the footprint only when `visible` is true, and a visible entry's missing component fails closed",
     ('b', ('mediaSamples', 'videos', 'rect', 'y')): "not read for a NON-painting entry: a rect is compared to the footprint only when `visible` is true, and a visible entry's missing component fails closed",
-    ('b', ('mediaSamples', 'videos', 'src')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('b', ('mediaSamples', 'videos', 'src')): 'read only at the bound decoder AFTER-WINDOW entries (source judged before its rVFC clock, r14 #3); see _SWEEP_PARTIAL_ALLOW',
     ('b', ('mediaSamples', 'videos', 'viewport', 'h')): 'not read for a POOL entry, which is classified by its retained `inDocument` alone; gated at every DOM entry, where the paint decision is re-derived from it',
     ('b', ('mediaSamples', 'videos', 'viewport', 'w')): 'not read for a POOL entry, which is classified by its retained `inDocument` alone; gated at every DOM entry, where the paint decision is re-derived from it',
     ('b', ('mediaSamples', 'videos', 'visibility')): 'not read for a POOL entry, which is classified by its retained `inDocument` alone; gated at every DOM entry, where the paint decision is re-derived from it',
@@ -5795,23 +5821,10 @@ _SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('b', ('movingIndexRunAtCut', 'reason')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
     ('b', ('movingIndexRunAtCut', 'totalProgressAfter')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
     ('b', ('movingIndexRunAtCut', 'totalProgressBefore')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('b', ('nullControl', 'arm')): 'report-only: the arm ack; armResult.ok and the gated arm geometry carry it',
-    ('b', ('nullControl', 'armedAt')): 'report-only: the arm instant; the trigger is timed from the advance keydown',
-    ('b', ('nullControl', 'armedElId')): 'report-only: boundDecoderId is the gated identity',
-    ('b', ('nullControl', 'armedHash')): 'report-only: drain.hashAtArmExact is the gated arm-hash evidence',
     ('b', ('nullControl', 'armedOwnerRect', 'h')): 'report-only: the MEASURED departure, not the armed rect, is gated',
     ('b', ('nullControl', 'armedOwnerRect', 'w')): 'report-only: the MEASURED departure, not the armed rect, is gated',
     ('b', ('nullControl', 'armedOwnerRect', 'x')): 'report-only: the MEASURED departure, not the armed rect, is gated',
     ('b', ('nullControl', 'armedOwnerRect', 'y')): 'report-only: the MEASURED departure, not the armed rect, is gated',
-    ('b', ('nullControl', 'error')): 'negative: green IS absence (noControlError)',
-    ('b', ('nullControl', 'fellBackToArmOwner')): 'report-only: noOwnerAmbiguousInWindow gates the binding',
-    ('b', ('nullControl', 'holdFrames')): 'report-only: the rAF series itself is what loopLive and maxRafGapOk are measured on',
-    ('b', ('nullControl', 'loopHandedOff')): 'report-only: the hand-off is proved by the rafLog itself',
-    ('b', ('nullControl', 'motionStartedAt')): 'redundant: motionStartedMarker.started is the gated instant',
-    ('b', ('nullControl', 'preAdvanceDepartureAt')): 'negative: green IS absence (noPreAdvanceDeparture)',
-    ('b', ('nullControl', 'preAdvanceDepartureRect')): 'negative: forensics for noPreAdvanceDeparture',
-    ('b', ('nullControl', 'rafLog', 't')): 'one frame with no clock widens the gap it sits in; the bound still applies',
-    ('b', ('nullControl', 'staleIndexExpected')): 'report-only: superseded by coverPatchMean',
     ('b', ('ownerSamples', 'captureOffsetS')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash/decoderId/ownerAmbiguous',
     ('b', ('ownerSamples', 'footprint')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash/decoderId/ownerAmbiguous',
     ('b', ('ownerSamples', 'progress')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash/decoderId/ownerAmbiguous',
@@ -6183,6 +6196,9 @@ def _walk(snap: dict, score) -> dict:
 # the shape the round-12 OR-aggregation hid. Each must say which positions are
 # merely diagnostic.
 _SWEEP_PARTIAL_ALLOW: dict[tuple[str, tuple], str] = {
+    ('b', ('mediaSamples', 'videos', 'src')): 'gated at the bound decoder AFTER-WINDOW entries, whose source is judged before its rVFC clock (r14 #3); other decoders and the pre-boundary samples are outside the scored window',
+    ('positive', ('mediaSamples', 'videos', 'src')): 'gated at the bound decoder AFTER-WINDOW entries, whose source is judged before its rVFC clock (r14 #3); other decoders and the pre-boundary samples are outside the scored window',
+    ('positiveA2', ('mediaSamples', 'videos', 'src')): 'gated at the bound decoder AFTER-WINDOW entries, whose source is judged before its rVFC clock (r14 #3); other decoders and the pre-boundary samples are outside the scored window',
     ('b', ('mediaSamples', 'videos', 'clientRect', 'h')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
     ('b', ('mediaSamples', 'videos', 'clientRect', 'w')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
     ('b', ('mediaSamples', 'videos', 'clientRect', 'x')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
@@ -6927,3 +6943,31 @@ def test_absence_sweep_covers_every_integrity_key():
     covered = {case[0] for case in _ABSENCE_CASES}
     assert scored - covered == set(), f"integrity keys with no absence case: {scored - covered}"
     assert covered - scored == set(), f"absence cases for non-keys: {covered - scored}"
+
+
+# --------------------------------------------------------------------------- #
+# r13 sweep — the 2->3 restart observations resolve identity before source.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(("pre_key", "verdict"), [
+    ("movie1", "pass"),  # the old decoder reset backwards on slide 3: a genuine restart
+    # The collector's decoderId is the runtime `__obedElId`, which survives a src clear or
+    # reassignment (core reidentify); dropping those pre-boundary rows made decoder 7 look
+    # first seen at the boundary, a manufactured fresh restart (pass before the fix).
+    ("unknown", "inconclusive"),
+    ("another.mov", "inconclusive"),
+])
+def test_restart_observations_keep_an_identified_decoder_whose_src_cleared(pre_key, verdict):
+    from obed_edom.html_alpha_probe import score_restart_at_slide_boundary, score_restart_movie_from_observations
+
+    def sample(scene: int, offset: float, key: str, t: float) -> dict:
+        movie = {"key": key, "decoderId": 7, "currentTime": t, "videoWidth": 640, "fromPreservePool": False}
+        return {"sceneHash": f"#{scene}", "captureOffsetS": offset, "phase": "drain", "movies": [movie]}
+
+    samples = [sample(5, 0.0, pre_key, 30.0), sample(5, 0.2, pre_key, 30.2),
+               sample(6, 0.6, "movie1", 0.05), sample(6, 1.0, "movie1", 0.45), sample(6, 1.4, "movie1", 0.85)]
+    obs, unnamed = p2._restart_observations(samples, "movie1")
+    per_movie = score_restart_movie_from_observations(obs, slide_min_hash=p2.SLIDE3_MIN_HASH)
+    per_movie.update(presentedMotionOk=True, unnamedRows=unnamed[:6])
+    boundary = score_restart_at_slide_boundary(reached_slide=True, per_movie={"movie1": per_movie}, expected_keys=["movie1"])
+    assert boundary["verdict"] == verdict
+    assert per_movie["ok"] is True

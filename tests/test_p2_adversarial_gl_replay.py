@@ -44,11 +44,13 @@ from test_p2_adversarial_driver import p2 as drv  # noqa: E402
 
 CARRIED, SIBLING = 1, 2
 
-# Pinned BEFORE the G6 edits (worktree at 0ecb3e7c): the flag-off page JS must not move.
-OFF_FETCH_JS_SHA256 = "238e48e6bce74408edaf131b34ac576e0478b90d3e9ec88d92898147a1e5d1f9"
+# Pinned BEFORE the G6 edits (worktree at 0ecb3e7c): the flag-off page JS must not move. The fetch JS was re-pinned
+# for the report-only `bridge-clock` keep kind (gl-clock plan §3.5); without it the bytes hash to the G6 pin 238e48e6.
+OFF_FETCH_JS_SHA256 = "c6cb2135d7b480fa7ee3e1a07a0ec5b6b23cc98a31bd53e4cc98f25789b69953"
 OFF_CARRY_CENSUS_JS_SHA256 = "9de5ef2845830499e63a6db515f8eb7134b4f7c1e2e8c778de3545bb4190ed6e"
 OFF_POOL_CENSUS_JS_SHA256 = "ac6e41307d836be111f6af8267b0c0e35653e7118dc841502633c4c6398d7812"
-OFF_PLAN_SHA256 = "3f5b1e8e4b77e5af276bf9ce58d3ca8530a419082d54935c1bdafd71bc28435f"
+# Re-pinned in S2 for the schema-2 injection (continuity generalisation plan §2.5).
+OFF_PLAN_SHA256 = "756fb1dd6127b52049d2be4054495258af3f9eb389eab45e53f7a5993cf57ac1"
 
 
 # --------------------------------------------------------------------------- #

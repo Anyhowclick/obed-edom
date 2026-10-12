@@ -685,6 +685,39 @@ for the parked `iwa-surgical-write-generator` feature.
 
 ---
 
+## Live continuity contract
+
+`src/obed_edom/live_continuity.py` derives the plan; `live_continuity_js.py` is the core runtime. Plan:
+`.agents/plans/keynote_live_continuity_generalisation.plan.md` (§2). Operator guide: README "Movie continuity".
+
+* **Runtime plan, schema 2** (`CONTINUITY_VERSION` 6). `{schema: 2, movies, boundaries, transparentBackground}`, one
+  flat `boundaries` entry per (boundary, planned instance): `pin`, `bridge`, `restart`, `retire` (`reason`
+  `refused`|`ends`) or `glReplay` (at most one per plan; G2's fields unchanged, plus `src`/`dst`/`loop`). Every entry
+  keeps `movieKey`; `src`/`dst` = `{objectId, rect}`. The core installs nothing unless `schema === 2`.
+* **Chain invariant.** Every `dst` of a pin/bridge/glReplay is the `src` of exactly one entry at the next boundary
+  unless the deck ends; each `src` appears at most once. `to_runtime` enforces it (R6).
+* **Identity.** Runtime: objectID only. The player sets `id = objectID + "-video"` before `src`; a carried decoder
+  is re-stamped to `dst.objectId`. Offline: `to_runtime` checks each objectId and rect name the same export instance;
+  the gates score landing rects. glReplay keeps its ≤ 1 px `instanceRect` check.
+* **Bridge clock.** A bridge overlay moves on Keynote's `Date` from its GL loop start, stamped by a `requestAnimFrame`
+  setter hook that never throws (`main.js` untouched). With no stamp after `GL_CLOCK_WAIT_MS` (50) it holds at the
+  source, then follows `performance.now()` from the core's trigger. One `bridge-clock` note per motion records `via`
+  (`gl`|`fallback`) and `lagMs`. Plan: `.agents/plans/keynote_live_continuity_glclock.plan.md`.
+* **Refusals.** Per (boundary, instance) → `retire refused` + one `ContinuityPlan.refusals` record (`code`,
+  `objectId` of `src`), reported on `output.continuity.notCarried`: `overlap` artwork above on the destination, R1
+  ambiguous pairing (runner-up within 16 authored px), R1b opacity differs, R2 builds in/out, R4 loop mismatch, R7
+  web/image movie, R8 trim differs, R9 not fully opaque (checked after R2), R10 bridge motion not EaseInEaseOut over the whole transition (checked last). Deck-wide → `Unsupported("Rn: …")`: R3 transition not on the outgoing slide's last
+  event, R5 objectID repeats across slides, R6 chain invariant. `retire ends` is not a refusal. Never relax one to
+  qualify a deck.
+* **Allowlist.** `QUALIFIED_PLAN_SHA256` stays in force until S3; a deck joins only after its gates pass.
+* **F5 names are frozen instrument API.** Scorers read note kinds (`bridge-3to4`, `reuse-decoder`,
+  `reuse-skip-boundary`, `retire-on-start-movie`, `retire-boundary`, `preserve-refused`, `dom-swap`,
+  `facade-block-clear`, `remount-*`, `pool-cleared`, `glreplay-*`, `bridge-clock`, `pin-hold-start`, `bridge-motion-start`; the last
+  two are also read by the paint-control injector) with their `detail` fields, element properties
+  (`__obedSuppressed34`, `dataset.obedPreserved`, `dataset.obedRemounted`, `__obedElId`, `__obedGen`,
+  `__obedFacadeFor`) and `footprintOwnerDecoderId` by name. Dropping or renaming one is a finding even if the suites
+  pass.
+
 ## Alpha Keynote managed OBS (Keyer output)
 
 `src/obed_edom/managed_obs.py` (`ManagedObs`, one per dashboard process, owned by `web/live.py`'s
@@ -782,9 +815,11 @@ for the parked `iwa-surgical-write-generator` feature.
   marks it INVALID). Limits at rate 25 (report-only at 30): decodable ≥ 0.9 in both arms; 2× arm native repeat ≤ 0.15;
   null (paused) repeat ≥ 0.95; positive control (source = canvas) repeat ≥ 0.18 and every positive run above every 2×
   run. Lifecycle always enforced: clean quit, `cleanExit` true, user OBS tree and `.sentinel` unchanged. GL replay
-  arms `g2` / `failsafe` take the binary counter fixture explicitly (`--fixture <main>/output/p2-binary`; its
+  arms `g2` / `failsafe` take the binary counter fixture explicitly (`--fixture <main>/output/fixtures/p2-binary`; its
   `fixture.json` movie sha256s are verified at startup and recorded per run); `soak` and `--precheck` take its looping
-  copy `output/p2-loop` (the default; `scripts/loop_fixture.py --source <main>/output/p2-binary`, `fixture.json` `loop`). Binary limits: G2 repeat ≤ 1 % and ≤
+  copy `output/fixtures/p2-loop` (the default; `scripts/loop_fixture.py --source <main>/output/fixtures/p2-binary`, `fixture.json` `loop`).
+  Gate fixtures (`FIXTURE_NAMES`) live only in the main checkout's `output/fixtures/<name>` and resolve from any worktree
+  via `obed_edom.fixture_paths.fixture()`; nothing to symlink. Binary limits: G2 repeat ≤ 1 % and ≤
   native + 1 %; reshow ≤ 2 % and ≤ native + 2 %; distinct ≥ 0.96 × rate; hand-back max step ≤ 3 per elapsed output
   frame with every hand-back frame decodable; 2× native ≤ 1 %; positive ≥ 5 %. Absolute repeat bounds at 25 only;
   distinct (relative to rate), native-relative bounds and 2× vs positive enforced at both rates. `--soak-minutes` ≥ 4;
@@ -802,6 +837,33 @@ for the parked `iwa-surgical-write-generator` feature.
 * **Click mode** waits (bounded) for the slide-number overlay to close before any click (`_await_click_target`);
   `#slideNumberControl` is hidden on output.
 * **Gate G:** `scripts/live_continuity_probe.py --pass G [--viewport WxH | --attach]`; fails closed on missing evidence.
+  `run_gates.sh` (full tier) queues it on P2 and D1–D6; a run passes only on exit 0 with artifact `status` `pass`.
+  Every expected-True carry also gets an advance leg (go to the source, advance across) scored per frame by the
+  painted instrument. Red: `--pass G --core-variant no-pin-hold` on D1 must red exactly the (1,3,4) b2to3 leg.
+* **Painted instrument** (plan `.agents/plans/keynote_live_continuity_instrument.plan.md`): a pre-paint
+  (`ResizeObserver`) sampler reads every candidate decoder each frame (flat-tree opacity product, own `visibility`,
+  `display`, `checkVisibility`, clipped visible rect, decode state); `score_paint` requires the carried decoder to be the
+  only painter of its slot in every frame of every carry window. Zero tolerance for unpainted, partial (opacity < 0.99
+  or clipped), double and substitute frames; a frame gap, a missing pre-paint read or a failed `selfCheck` is
+  INCONCLUSIVE, which fails. `run_gates.sh` (full tier) adds the D5 `no-pin-hold` host red arm, the D1 Pass G red arm
+  and three D5 pin@2 paint controls (N=6 early, N=6 late, N=0 null) whose target must read exactly the injected seq set;
+  it prints per-carry paint counts and counts paint census entries as `findings=N` on the DONE line (report only, every
+  class, `endOfShow` included; the exit is unchanged). The first `no-pin-hold` registrations are predictions pending owner
+  sign-off; D2/D3 `no-pin-hold` arms join only after V3 measures them. **The DOM cannot see:** GL content (poster copies,
+  rubber band, poster lag; carry-cover covers bridges), occlusion by a later canvas or layer (`elementsFromPoint` is
+  blind), frozen or black decoder pixels (clock rules and V/G liveness cover these), ≤ 1 frame compositor vs
+  main-thread skew at CSS animation edges, 3D backface and OBS alpha/throttling (Q6, Q7), and pin mid-move pixels (no
+  pixel gate; one-off V3b spot check).
+* **Carry-cover gate:** `run_gates.sh` (full tier) runs `--carry-cover` on P2 and D1: green must pass; the red
+  (`linear-bridge` on P2, `no-gl-clock` on D1) and the null (`--carry-cover-null`) must fail. Besides the status,
+  `check_cc` requires the deck's own `fixture` and, except on the null, a non-empty `bridges` where every
+  `clock.via` is `gl` (`fallback` on `no-gl-clock`); a missing clock fails. P2 passes on either clock, so `via` is
+  what proves the GL clock there. It prints one line per bridge (verdict, max strip, clean share, clock).
+  No-consumption = the settled position after the go-to (L leading automatic events: L=0 `IdleAtInitialState` at the
+  onset scene, L≥1 `IdleAtFinalState` at onset+L−1, same slide) plus exact host/JSON auto-run kinds; the pixel half is
+  n/a on destinations with no click-driven builds.
+* **Producer contract:** `scripts/live_evidence_contract.py` validates every live record once at ingestion (any
+  violation is INCONCLUSIVE/INVALID); a change to any `*_JS` producer or note payload updates it in the same commit.
 * **Residuals:** a physical input between the R1 re-read and the host's advance can race it (the in-page
   `jumpToSlide(n,true)` answer is deferred); visible auto animations on arrival are not gated. **Unverified lead:** the
   player's `handleClickEvent` ignores clicks whose target is a `<video>`, so a playing movie over the stage centre may

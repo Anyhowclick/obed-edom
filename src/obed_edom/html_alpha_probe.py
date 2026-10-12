@@ -2483,8 +2483,10 @@ def score_restart_at_slide_boundary(
 
     ``per_movie`` maps asset key → {
       slide3ObsN, earliest: {t, w, ...}|None, nearZeroAtBoundary,
-      progressedAfterRestart, decodedWidthAtBoundary, presentedMotionOk, ok
-    }.
+      progressedAfterRestart, decodedWidthAtBoundary, presentedMotionOk, ok,
+      unnamedRows?
+    }. A movie with ``unnamedRows`` (a row of one of its decoders naming no source or
+    another asset) is unreadable, so the verdict is inconclusive, never pass.
 
     ``expected_keys`` is required (never derived from observed keys) — missing
     movies must not silently pass. Decoded width is always required so
@@ -2510,6 +2512,7 @@ def score_restart_at_slide_boundary(
         for k in expected
         if k not in missing and not bool((per_movie.get(k) or {}).get("presentedMotionOk"))
     ]
+    unnamed = [k for k in expected if (per_movie.get(k) or {}).get("unnamedRows")]
     all_ok = bool(expected) and all(
         bool((per_movie.get(k) or {}).get("ok"))
         and bool((per_movie.get(k) or {}).get("presentedMotionOk"))
@@ -2522,7 +2525,7 @@ def score_restart_at_slide_boundary(
         for k in expected
     )
     inconclusive = bool(
-        reached_slide and (missing or width_fail or presented_motion_fail or (not all_ok and late))
+        reached_slide and (missing or width_fail or presented_motion_fail or unnamed or (not all_ok and late))
     )
     ok = bool(
         reached_slide
@@ -2530,6 +2533,7 @@ def score_restart_at_slide_boundary(
         and not missing
         and not width_fail
         and not presented_motion_fail
+        and not unnamed
         and all_ok
         and not canvas_all_identical
     )
@@ -2541,6 +2545,7 @@ def score_restart_at_slide_boundary(
         "missingSlide3Media": missing,
         "missingDecodedWidth": width_fail,
         "missingPresentedMotion": presented_motion_fail,
+        "unnamedMedia": unnamed,
         "allMoviesOk": all_ok,
         "inconclusive": inconclusive,
     }
@@ -3259,9 +3264,10 @@ def write_json(path: Path, data: Any) -> Path:
 _BG_FILL_SOLO = re.compile(
     rb"^q Q q /Cs1 cs 0 0 0 sc 0 1080 m 1920 1080 l 1920 0 l 0 0 l h f Q\s*"
 )
-# Same fill when the trailing Q is deferred (content continues in the same q-block).
+# Same fill when the trailing Q is deferred (content continues in the same q-block): the colour space
+# stays set, since later `sc` fills in that block depend on it.
 _BG_FILL_INLINE = re.compile(
-    rb"^(q Q q) /Cs1 cs 0 0 0 sc 0 1080 m 1920 1080 l 1920 0 l 0 0 l h f "
+    rb"^(q Q q /Cs1 cs 0 0 0 sc) 0 1080 m 1920 1080 l 1920 0 l 0 0 l h f "
 )
 
 

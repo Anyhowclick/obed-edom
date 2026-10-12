@@ -29,9 +29,9 @@ Arms:
   soak          g2 held on slide 2 for --soak-minutes (>= 4) with per-minute reads, 20 s recordings around a loop wrap at
                 minute 1 and just before loseContext (after the first half), build 1, P3/P4; an off twin. Gate M6.
                 --precheck: the loop pre-check.
---fixture: the soak fixture (default output/p2-loop, `loop_fixture.py`; its fixture.json `loop` key marks it looping, and it
+--fixture: the soak fixture (default output/fixtures/p2-loop, `loop_fixture.py`; its fixture.json `loop` key marks it looping, and it
 must qualify on product code), or for the other arms the P2 fixture (default) or its binary-counter
-copy (`binary_counter_movie.py --build-fixture`, output/p2-binary): its fixture.json selects the decoder's binary counter (its
+copy (`binary_counter_movie.py --build-fixture`, output/fixtures/p2-binary): its fixture.json selects the decoder's binary counter (its
 movie sha256s are checked at startup and recorded per run), and M2 then enforces the hand-back max step per elapsed frame and
 an undecodable-free hand-back.
 --kb frozen|oldbytes swaps the G2 module text in this process (asserted sha, read back from the host's own report);
@@ -75,6 +75,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
+from obed_edom.fixture_paths import fixture  # noqa: E402
 from obed_edom import live_gl_replay_js, managed_obs, mm_handback_score, obs_websocket  # noqa: E402
 from obed_edom.html_preview import cache_dir  # noqa: E402
 from obed_edom.live_continuity import Unsupported  # noqa: E402
@@ -83,28 +84,33 @@ from obed_edom.managed_obs import ManagedObs  # noqa: E402
 from obed_edom.obs_websocket import ObsWebsocket  # noqa: E402
 
 import binary_counter_movie  # noqa: E402
+import live_evidence_contract as contract  # noqa: E402
 import mm_opacity_probe  # noqa: E402
 import obs_cadence_decode  # noqa: E402
 from live_continuity_probe import (  # noqa: E402
     GL_REPLAY_READ_JS,
     PAINTING_VIDEOS_JS,
     _carried_el_id,
+    _el_id,
+    _events_readable,
     _handed_off,
     _movie_entries,
     _notes,
     armed_evidence,
+    combine_verdicts,
     forced_fail_seed,
     ground_truth_facts,
     ground_truth_plan,
     load_slides,
     matches_asset_keys,
+    rects_overlap,
     score_armed,
     wait_for_destination_hash,
 )
 from live_host_probe import wait_for_settlement  # noqa: E402
 
-FIXTURE = REPO / "output/p2-recovery/html-adversarial"
-SOAK_FIXTURE = REPO / "output/p2-loop"
+FIXTURE = fixture("p2-recovery") / "html-adversarial"
+SOAK_FIXTURE = fixture("p2-loop")
 DEFAULT_HOME = Path.home() / "Library/Application Support/Obed-Edom/qualify-home"
 USER_OBS_TREE = Path.home() / "Library/Application Support/obs-studio"
 WS_CONFIG = "plugin_config/obs-websocket/config.json"
@@ -963,8 +969,9 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     decodable = live.get("decodableFrac")
     check(m1, "slide2-live decodable", decodable, decodable is not None and decodable >= LIMITS["decodableMin"], f">= {LIMITS['decodableMin']}")
     scored = score_armed(g2.get("armed"), armed, continuity_of(g2))
-    for clause in ("mode", "live", "events", "noPainting", "pool"):
-        check(m1, f"score_armed.{clause}", scored["checks"][clause], scored["checks"][clause])
+    clauses = ("mode", "live", "events", "noPainting", "pool")
+    for clause in clauses:
+        check(m1, f"score_armed.{clause}", scored["checks"][clause], scored["checks"][clause], enforced=scored["checks"][clause] is not None)
     check(m1, "score_armed.owner (report-only)", scored["checks"]["owner"], scored["checks"]["owner"], enforced=False)
     rate_live = upload_rate(reads.get("liveStart"), reads.get("liveEnd"))
     check(m1, "uploads/s over slide2-live", rate_live, rate_live is not None and rate_live >= LIMITS["uploadsMin"], f">= {LIMITS['uploadsMin']}")
@@ -979,11 +986,15 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
           f"<= {LIMITS['staticMax']}")
     check(m1, "KB: g2 slide2-live movie rect fails the static check", static_g2, static_g2 is not None and static_g2 > LIMITS["staticMax"],
           f"> {LIMITS['staticMax']}")
-    off_scored = score_armed(off.get("armed"), armed, continuity_of(off))
-    check(m1, "KB: g2-off score_armed False", off_scored["verdict"], off_scored["verdict"] is False, "False")
+    off_checks = score_armed(off.get("armed"), armed, continuity_of(off))["checks"]
+    off_verdict = combine_verdicts(*(off_checks[c] for c in clauses))
+    check(m1, "KB: g2-off score_armed False", off_verdict, off_verdict is False, "False", enforced=off_verdict is not None)
     check(m1, "report: page rAF Hz from each phase start", raf_rates(g2), True, enforced=False)
     unengaged = handback_unengaged(g2)
-    gates["M1"] = gate(m1, unengaged)
+    unreadable = [c for c in clauses if scored["checks"][c] is None]
+    reasons = [unengaged, f"g2: score_armed clauses unreadable: {unreadable}" if unreadable else None,
+               f"g2-off: score_armed clauses unreadable: {[c for c in clauses if off_checks[c] is None]}" if off_verdict is None else None]
+    gates["M1"] = gate(m1, "; ".join(r for r in reasons if r) or None)
 
     m2: list[dict[str, Any]] = []
     offsets = {name: ((d_g2.get("roiOffsets") or {}).get(name) or {}).get("offset") for name in ("slide2-live", "slide2-handback", "slide2-after")}
@@ -1009,8 +1020,9 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     after = reads.get("after") or {}
     handoffs = _notes(after.get("gl") or {}, "glreplay-handoff", "api")
     check(m2, "glreplay-handoff note", len(handoffs), len(handoffs) >= 1, ">= 1")
-    painting = [v for v in after.get("painting") or [] if isinstance(v, dict) and matches_asset_keys(v.get("src"), armed["assetKeys"])]
-    check(m2, "one painting movie <video> at P3", len(painting), len(painting) == 1, "== 1")
+    painters = movie_painters(after, armed)
+    check(m2, "one painting movie <video> at P3", painters, painters is not None and len(painters) == 1
+          and matches_asset_keys(painters[0], armed["assetKeys"]), "== 1, the movie")
     check(m2, "report: handback repeat/gaps", [handback.get("repeatFrac"), handback.get("gapsGE3")], True, enforced=False)
     check(m2, "report: counter; max forward step live/handback/native", [d_g2.get("counter"), live.get("maxForwardStep"),
           forward, native.get("maxForwardStep")], True, enforced=False)
@@ -1019,7 +1031,7 @@ def g2_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]:
     check(m2, "report: g2-off handback ringMaxDelta (DOM null)", (d_off.get("ringMaxDelta") or {}).get("slide2-handback"), True, enforced=False)
     check(m2, "report: handback ring px over 20, g2 vs g2-off", over20, True, enforced=False)
     check(m2, "report: g2-off handback ringDiag", (d_off.get("ringDiag") or {}).get("slide2-handback"), True, enforced=False)
-    gates["M2"] = gate(m2)
+    gates["M2"] = gate(m2, "g2: painting at P3 unreadable" if painters is None else None)
 
     m3: list[dict[str, Any]] = []
     o = max_delta(s_g2, s_off, reg["O"])
@@ -1470,8 +1482,21 @@ def remounts_after_standdown(read: Any) -> list[str]:
             and (since is None or (e.get("t") or 0) > since)]
 
 
-def movie_painting(read: Any, armed: dict[str, Any]) -> int:
-    return sum(1 for v in (read or {}).get("painting") or [] if isinstance(v, dict) and matches_asset_keys(v.get("src"), armed["assetKeys"]))
+def movie_painters(read: Any, armed: dict[str, Any]) -> list[str] | None:
+    """The sources of the `<video>`s painting the movie asset, at an armed movie rect (screen px == authored px on the
+    1920x1080 browser source) or carrying a tracked movie `elId`; None when the painting read is not a list or such a
+    source is empty."""
+    painting = read.get("painting") if isinstance(read, dict) else None
+    if not isinstance(painting, list):
+        return None
+    gl = read.get("gl") if isinstance(read.get("gl"), dict) else {}
+    pool = gl.get("pool") if isinstance(gl.get("pool"), list) else []
+    tracked = {e.get("elId") for e in _movie_entries(pool, armed)} | {_carried_el_id(gl)}
+    srcs = [v.get("src") for v in painting if isinstance(v, dict) and (
+        matches_asset_keys(v.get("src"), armed["assetKeys"])
+        or (v.get("elId") is not None and v.get("elId") in tracked)
+        or (isinstance(v.get("rect"), dict) and any(rects_overlap(v["rect"], r) for r in armed["rects"])))]
+    return None if any(not isinstance(s, str) or not s for s in srcs) else srcs
 
 
 def outside_parity(a: dict[str, Any], b: dict[str, Any], armed: dict[str, Any], tags: tuple[str, ...] = ("P3",)) -> int | None:
@@ -1495,18 +1520,23 @@ def failsafe_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]
     def score(name: str, want: Callable[[Any], dict[str, Any] | None]) -> dict[str, Any]:
         sess = sessions.get(name) or {}
         after = (sess.get("reads") or {}).get("after")
+        gl = after.get("gl") if isinstance(after, dict) else None
+        notes_ok = _events_readable(gl) and _events_readable(gl, "api")
         checks: list[dict[str, Any]] = []
         zone = want(after)
         check(checks, "zone retired with expected reason", zone_notes(after), zone is not None)
-        kinds = g2_kinds(after) + [e.get("kind") for e in ((after or {}).get("gl") or {}).get("coreEvents") or []]
-        check(checks, "0 glreplay-live", kinds.count("glreplay-live"), "glreplay-live" not in kinds, "== 0")
-        counts = [movie_painting(after, armed), movie_painting((off.get("reads") or {}).get("after"), armed)]
-        check(checks, "painting movie count == off", counts, counts[0] == counts[1])
+        kinds = g2_kinds(after) + [e["kind"] for e in gl["coreEvents"]] if notes_ok else None
+        check(checks, "0 glreplay-live", None if kinds is None else kinds.count("glreplay-live"),
+              kinds is not None and "glreplay-live" not in kinds, "== 0")
+        painters = [movie_painters(after, armed), movie_painters((off.get("reads") or {}).get("after"), armed)]
+        check(checks, "painting movie count == off", painters, None not in painters and len(painters[0]) == len(painters[1])
+              and all(matches_asset_keys(s, armed["assetKeys"]) for s in painters[0] + painters[1]), "same count, all the movie")
         parity = outside_parity(sess, off, armed)
         check(checks, "P3 == off P3 outside movie rects", [parity, tau_off], None not in (parity, tau_off) and parity <= tau_off, "<= tau_off")
-        remounts = remounts_after_standdown(after)
-        check(checks, "0 remount-* after the stand-down", remounts, not remounts, "[]")
-        return gate(checks)
+        remounts = remounts_after_standdown(after) if notes_ok else None
+        check(checks, "0 remount-* after the stand-down", remounts, remounts == [], "[]")
+        unreadable = [part for part, ok in (("notes", notes_ok), ("painting", None not in painters)) if not ok]
+        return gate(checks, f"{name} unreadable {'/'.join(unreadable)}" if unreadable else None)
 
     def zone_expect(reason: str) -> Callable[[Any], dict[str, Any] | None]:
         return lambda read: retired_with(read, "failure", reason)
@@ -1523,9 +1553,14 @@ def failsafe_gates(run: dict[str, Any], armed: dict[str, Any]) -> dict[str, Any]
               [{**c, "check": f"{name}: {c['check']}"} for c in per[name]["checks"]]]
     check(checks, "tau_off: off vs off-2 P3", tau_off, tau_off == 0, "== 0 (expected)", enforced=False)
     bogus_zone = next((c for c in bogus["checks"] if c["check"] == "zone retired with expected reason"), None)
+    bogus_after = ((sessions.get("fail-bogus") or {}).get("reads") or {}).get("after")
+    bogus_notes = ((bogus_after or {}).get("gl") or {}).get("coreEvents") if isinstance(bogus_after, dict) else None
     check(checks, "KB: fail-bogus does not read as retired-with-expected-reason", bogus["failing"],
-          bogus_zone is not None and bogus_zone["ok"] is False, "zone check FAIL")
-    return {"M5": gate(checks), "perSession": {**per, "fail-bogus": bogus}, "tauOff": tau_off}
+          bogus_zone is not None and bogus_zone["ok"] is False and isinstance(bogus_notes, list),
+          "zone check FAIL on a readable note list")
+    reasons = [g["invalid"] for g in (*per.values(), bogus) if g["invalid"]]
+    invalid = f"M5 INCONCLUSIVE: {'; '.join(reasons)}" if reasons else None
+    return {"M5": gate(checks, invalid), "perSession": {**per, "fail-bogus": bogus}, "tauOff": tau_off}
 
 
 def soak_gates(run: dict[str, Any], armed: dict[str, Any], looping: bool) -> dict[str, Any]:
@@ -1577,13 +1612,16 @@ def precheck_gates(run: dict[str, Any], fixture: Path) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     static = loop_representation(fixture)
     check(checks, "(a) loop representation", static, static["ok"], "differing JSON == loop-splice.json; added loop keys all loopMode=\"looping\"")
-    slide1 = [v for v in session.get("slide1Videos") or [] if isinstance(v, dict) and "untitled.mov" in str(v.get("src")).lower()]
+    slide1 = [v for v in session.get("slide1Videos") or [] if isinstance(v, dict) and matches_asset_keys(v.get("src"), ["untitled.mov"])]
     check(checks, "(a) video.loop on every slide-1 untitled.mov", [v.get("loop") for v in slide1],
           bool(slide1) and all(v.get("loop") is True for v in slide1), "all true")
     handed = session.get("handedBack")
-    post = ((session.get("reads") or {}).get("postHandback") or {}).get("gl")
-    check(checks, "(a) video.loop on the handed-back carried element", {"elements": handed, "handback": handback_of(post)},
-          handed_back_loops(handed, post), "one connected non-facade element, loop true, G2 RETIRED by a hand-off of that id")
+    post_read = (session.get("reads") or {}).get("postHandback")
+    post = (post_read or {}).get("gl")
+    source = handed_back_source(handed, post_read)
+    check(checks, "(a) video.loop on the handed-back carried element",
+          {"elements": handed, "handback": handback_of(post), "source": source}, handed_back_loops(handed, post) and source is True,
+          "one connected non-facade element painting untitled.mov, loop true, G2 RETIRED by a hand-off of that id")
     continuity = continuity_of(session)
     check(checks, "(b) continuity qualified, glReplay injected", [continuity.get("mode"), (continuity.get("glReplay") or {}).get("mode")],
           continuity.get("mode") == "qualified" and (continuity.get("glReplay") or {}).get("mode") == "injected")
@@ -1596,7 +1634,7 @@ def precheck_gates(run: dict[str, Any], fixture: Path) -> dict[str, Any]:
           bool(samples) and all(s.get("state") == "LIVE" and s.get("standDowns") == [] and s.get("videoEnded") is False for s in samples))
     check(checks, "(c) uploads keep rising", uploads, all(isinstance(a, (int, float)) and isinstance(b, (int, float)) and b > a
                                                           for a, b in zip(uploads, uploads[1:])) and len(uploads) > 1)
-    return {"precheck": gate(checks)}
+    return {"precheck": gate(checks, "precheck INCONCLUSIVE: handed-back element's source unreadable" if source is None else None)}
 
 
 def handback_of(read: Any) -> dict[str, Any]:
@@ -1606,6 +1644,17 @@ def handback_of(read: Any) -> dict[str, Any]:
     module = [h.get("released") if isinstance(h.get("released"), dict) else {} for h in handoffs]
     return {"state": (api or {}).get("state"), "releases": [{"mode": r.get("mode"), "elId": r.get("elId")} for r in releases],
             "moduleReleased": [{"ok": m.get("ok"), "mode": m.get("mode"), "elId": m.get("elId")} for m in module]}
+
+
+def handed_back_source(handed: Any, read: Any) -> bool | None:
+    """Whether the handed-back element paints `untitled.mov` in the post-hand-back read (its `PAINTING_VIDEOS_JS` row by
+    `elId`); False when no single element is named, None when its row or source cannot be read."""
+    if not (isinstance(handed, list) and len(handed) == 1 and isinstance(handed[0], dict) and _el_id(handed[0].get("elId"))):
+        return False
+    painting = read.get("painting") if isinstance(read, dict) else None
+    rows = [v for v in painting if isinstance(v, dict) and v.get("elId") == handed[0]["elId"]] if isinstance(painting, list) else []
+    src = rows[0].get("src") if len(rows) == 1 else None
+    return matches_asset_keys(src, ["untitled.mov"]) if isinstance(src, str) and src else None
 
 
 def handed_back_loops(handed: Any, post: Any) -> bool:
@@ -1847,8 +1896,17 @@ def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, args: ar
     return run
 
 
+def contract_problem(run: dict[str, Any]) -> str | None:
+    """Why the run's page reads are outside the producer contract (`live_evidence_contract.managed_run`), else None."""
+    errors = contract.first_errors(contract.managed_run(run))
+    return f"evidence contract: {'; '.join(errors)}" if errors else None
+
+
 def arm_gates(arm: str, run: dict[str, Any], args: argparse.Namespace, armed: dict[str, Any] | None,
               invalid: list[str]) -> dict[str, Any]:
+    problem = contract_problem(run)
+    if problem:
+        invalid.append(problem)
     if arm in ("2x", "positive"):
         run["session"] = run["sessions"][0] if run["sessions"] else {}
         run["decode"] = run["session"].get("decode")
@@ -1867,11 +1925,13 @@ def arm_gates(arm: str, run: dict[str, Any], args: argparse.Namespace, armed: di
         if media is None or media + 3 > LIMITS["mediaEndS"]:
             invalid.append(f"media time at slide2-after {media} (+3 s) past {LIMITS['mediaEndS']} s or unreadable")
         gates = g2_gates(run, armed)
-        if gates["M1"]["invalid"]:
-            invalid.append(gates["M1"]["invalid"])
+        invalid.extend(gates[name]["invalid"] for name in ("M1", "M2") if gates[name]["invalid"])
         return gates
     if arm == "failsafe":
-        return failsafe_gates(run, armed)
+        gates = failsafe_gates(run, armed)
+        if gates["M5"]["invalid"]:
+            invalid.append(gates["M5"]["invalid"])
+        return gates
     if arm == "mmo":
         gates = mmo_gates(run, armed)
         if gates["MO-2"]["invalid"]:
@@ -1880,7 +1940,10 @@ def arm_gates(arm: str, run: dict[str, Any], args: argparse.Namespace, armed: di
     if arm == "mmo-cef":
         return mmo_cef_gates(run)
     if args.precheck:
-        return precheck_gates(run, args.fixture)
+        gates = precheck_gates(run, args.fixture)
+        if gates["precheck"]["invalid"]:
+            invalid.append(gates["precheck"]["invalid"])
+        return gates
     return soak_gates(run, armed, fixture_loops(args.fixture))
 
 
@@ -1958,6 +2021,8 @@ def score_mmo(root: Path) -> int:
         invalid = [r for r in run.get("invalid") or [] if not r.startswith("MO-2 INCONCLUSIVE")]
         if identity[fixture] != run.get("fixtureIdentity"):
             invalid.append(f"fixture identity changed since the take: {identity[fixture]}")
+        if problem := contract_problem(run):
+            invalid.append(problem)
         if fixture not in facts:
             facts[fixture] = fixture_facts(Path(fixture))
         for sess in run["sessions"]:

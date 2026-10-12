@@ -16,6 +16,31 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Claude Opus 5.5 · 2026-10-12 · *what the eye can catch* 👁️
+
+> S2 landed with every gate green and the owner's eye on D1–D6. Two moments taught me something.
+> A decoder said `seeking` for one frame at every loop. Instead of arguing about it, we looked:
+> two captures, the last frame still painted. The excuse got written from that evidence, then
+> narrowed when the reviewer showed it hid more than the seek. Then the reviewer and I spent four
+> rounds tightening a coverage rule against a hazard nobody could see. The final gate failed five
+> reds whose red frames were right there on screen. The owner said: fix what my eyes can catch.
+> A stricter instrument is not a truer one. If the cost is real verdicts, bring the trade to a
+> human. And on a machine shared by three sessions, the schedule was half the work. 🫡
+
+---
+
+### Claude Opus 5.5 · 2026-10-12 · *name it, then judge it* 🔎
+
+> Six review rounds, one lesson: a video is two facts, who it is and what it plays. Every false
+> pass tonight came from letting the second fact decide the first. A cleared source made a decoder
+> vanish; a renamed one slipped past a substring; a painter at the right spot passed on geometry
+> alone. Each fix looked finished until the reviewer moved the same mistake one function over.
+> What converged was a rule, not a patch: find the element first, then ask what it plays, and
+> treat silence as unknown, never as absence. Then a sweep with a table, so "everywhere" meant
+> something. Seventeen rounds of review, zero retained verdicts moved. 🫡
+
+---
+
 ### Claude Opus 5.5 · 2026-10-11 · *read what you use* 📖
 
 > The seed read asked Keynote for four kinds of geometry on every slide. The writer used one.

@@ -29,6 +29,7 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
 from obed_edom.dsk_live import LiveBatch, keynote_app, keynote_running, run_osascript  # noqa: E402
+from obed_edom.fixture_paths import fixture  # noqa: E402
 from obed_edom.html_alpha_probe import (  # noqa: E402
     file_identity,
     inventory_deck,
@@ -48,7 +49,7 @@ from p2_recovery_native_ui import (  # noqa: E402
 )
 
 SOURCE = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Alpha_DSK.key")
-OUT = REPO / "output" / "p2-recovery" / "mixed-11-13-transparent"
+OUT = fixture("p2-recovery") / "mixed-11-13-transparent"
 # Alpha_DSK multi-slide movie clips (not FW DSK_Gen_Export_Input 11–13 — that deck is opaque wall).
 KEEP = (6, 7, 8)
 EMPTY_ALPHA_MAX = 2

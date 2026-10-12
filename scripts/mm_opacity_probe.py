@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Headless MO-1 / MO-4 / MO-5 instrument for the Magic Move opacity patch (plan `keynote_live_mm_opacity` §10).
 
-One fresh headless Chrome per arm, driven through `LiveOutputHost` on the binary-counter fixture (`output/p2-binary`) at
+One fresh headless Chrome per arm, driven through `LiveOutputHost` on the binary-counter fixture (`output/fixtures/p2-binary`) at
 1920x1080. An innermost logger (`Page.addScriptToEvaluateOnNewDocument`, true natives) records, per clear-delimited frame,
 every draw's program and the `Opacity` value in effect for it, and at the settle frame of each Magic Move one readPixels pair:
 the settle ROI before slot 4 and the full buffer after the frame's last draw (settle ROI + hash). The logger reads the value
@@ -67,7 +67,9 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
-FIXTURE = Path("/Users/anyhowclick/Desktop/work/obed-edom/output/p2-binary")
+from obed_edom.fixture_paths import fixture  # noqa: E402
+
+FIXTURE = fixture("p2-binary")
 ALPHA = 0.29468628764152527
 VIEWPORT = (1920, 1080)
 SLOT = 4

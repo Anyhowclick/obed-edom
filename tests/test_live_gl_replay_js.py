@@ -78,7 +78,13 @@ GL_REPLAY_ENTRY: dict = {
     "movieSlot": 3,
 }
 
+# Schema 2 (continuity generalisation §2.1): the entry gains `loop`/`src`/`dst`, which G2 ignores.
+_SLIDE1 = {"objectId": "6BB39942-6C61-4763-839D-777C09E7E594", "rect": {"x": 109, "y": 795, "w": 952, "h": 268}}
+_SLIDE2 = {"objectId": "F9AFED1B-E2D7-47D4-942E-14992C808383", "rect": {"x": 109, "y": 795, "w": 952, "h": 268}}
+_SLIDE3 = {"objectId": "98D59E27-7807-477D-BEFB-27EB1CF1D185", "rect": {"x": 198, "y": 797, "w": 952, "h": 268}}
+
 RUNTIME_PLAN: dict = {
+    "schema": 2,
     "movies": {
         "movie1": {
             "assetKeys": ["untitled.mov"],
@@ -86,8 +92,8 @@ RUNTIME_PLAN: dict = {
         }
     },
     "boundaries": [
-        copy.deepcopy(GL_REPLAY_ENTRY),
-        {"atScene": 6, "action": "restart"},
+        {**copy.deepcopy(GL_REPLAY_ENTRY), "loop": False, "src": _SLIDE1, "dst": _SLIDE2},
+        {"atScene": 6, "action": "restart", "movieKey": "movie1", "src": _SLIDE2, "dst": _SLIDE3},
     ],
 }
 
@@ -3294,20 +3300,24 @@ console.log(JSON.stringify({
 
 
 def test_the_real_core_and_module_install_with_the_p2_loop_runtime():
-    """Loopmode plan L0-d: the looping deck's runtime carries a top-level `loops` annex that
-    neither JS module reads. Installed as-is on the real core and the real module, the core
-    must still come up ready and arm the zone, and the module must not stand down on
-    `planUnreadable`; the Python validator must accept its glReplay entry too."""
+    """The looping deck's derived schema-2 runtime (per-entry `loop`, no `loops` annex) on
+    the real core and the real module: the core comes up ready and arms the zone, the
+    module does not stand down on `planUnreadable`, the Python validator accepts its
+    glReplay entry, and the looping source decoder the armed zone pools keeps `loop`."""
     from test_live_continuity import P2_LOOP_GL_REPLAY_PLAN_SHA256, SLIDES, _loop_tree, _resolver
     from test_live_continuity_js import _IDENTITY_STAGE, _run_full_core_in_node
 
-    from obed_edom.live_continuity import derive_plan, plan_signature
+    from obed_edom.live_continuity import QUALIFIED_PLAN_SHA256, derive_plan, plan_signature
 
     plan = derive_plan(_loop_tree(), SLIDES, resolver=_resolver, gl_replay=True)
     runtime = plan.to_runtime()
     assert isinstance(runtime, dict)
     assert plan_signature(runtime) == P2_LOOP_GL_REPLAY_PLAN_SHA256
-    assert len(runtime["loops"]) == 5
+    assert P2_LOOP_GL_REPLAY_PLAN_SHA256 in QUALIFIED_PLAN_SHA256
+    assert runtime["schema"] == 2
+    assert "loops" not in runtime
+    carries = [b for b in runtime["boundaries"] if b["action"] in ("pin", "bridge", "glReplay")]
+    assert carries and all(b["loop"] is True for b in carries)
 
     entry = live_gl_replay_js.validate_gl_replay_entry(runtime)
     assert entry is not None
@@ -3322,18 +3332,72 @@ def test_the_real_core_and_module_install_with_the_p2_loop_runtime():
 const m = window.__OBED_GL_REPLAY__;
 const module = m ? {version: m.version, state: m.state, standDowns: m.standDowns.slice()} : null;
 const ready = P.ready;
+const entry = window.__OBED_CONTINUITY__.boundaries[0];
+location.hash = '#' + (entry.atScene - 1);
 P.glReplay.carried('movie1');
+const src = video(entry.src.objectId);
+src.setAttribute('src', 'https://host/' + window.__OBED_CONTINUITY__.movies.movie1.assetKeys[0]);
+src.readyState = 4; src.currentTime = 1; src.paused = false; src.parentNode = bodyEl;
+src.loop = true;
+detach(src);
 console.log(JSON.stringify({
   ready: ready,
-  loops: window.__OBED_CONTINUITY__.loops.length,
   module: module,
   zones: P.events.filter((e) => e.kind === 'glreplay-zone')
     .map((e) => [e.detail.from, e.detail.to, e.detail.reason]),
+  pooled: P.snapshot().filter((x) => !x.fromDom).map((x) => x.instance),
+  loop: src.loop,
+  srcInstance: entry.src.objectId,
 }));
 """)
     assert result["ready"] is True, result
-    assert result["loops"] == 5, result
     assert result["zones"] == [["pending", "armed", "moduleReady"]], result["zones"]
     assert result["module"] == {
         "version": live_gl_replay_js.GL_REPLAY_VERSION, "state": "IDLE", "standDowns": [],
     }, result["module"]
+    assert result["pooled"] == [result["srcInstance"]], result
+    assert result["loop"] is True
+
+
+@pytest.mark.parametrize("loop,carried", [(True, False), (False, True)], ids=["loop-mismatch", "loop-match"])
+def test_the_real_core_refuses_a_loop_mismatched_carry_and_the_module_falls_back_to_retire(loop, carried):
+    """Codex S2 r1 #6 (plan §2.4): the real core's `carried` compares the source
+    decoder's `loop` with the glReplay entry's, as pin/bridge do. A mismatch is
+    refused before memoisation, so the module's `assetUnbound` stand-down and its
+    `release` retire the zone and the decoder; a matching decoder still binds."""
+    from test_live_continuity_js import _IDENTITY_STAGE, _gl_prelude, _run_full_core_in_node
+
+    entry = RUNTIME_PLAN["boundaries"][0]
+    assert entry["loop"] is False
+    result = _run_full_core_in_node(
+        plan=RUNTIME_PLAN, stage=_IDENTITY_STAGE,
+        after_core=_REAL_MODULE_AFTER_CORE.replace(
+            "__MODULE_SOURCE__", json.dumps(live_gl_replay_js.GL_REPLAY_JS)),
+        script=_gl_prelude(instance=entry["instanceRect"], measured=entry["instanceRect"]) + r"""
+location.hash = '#1';
+const v = makeMovie(INSTANCE, undefined, '__SRC__');
+v.loop = __LOOP__;
+tick();
+playerDetach(v);
+if (!v.__obedGlPooled) throw new Error('not pooled armed');
+S.note('glreplay-arm', {canvasId: '0-canvas', atScene: 2});
+const r = S.carried('movie1');
+const bound = {video: r.video === v, reason: r.reason, memo: S.carried('movie1').video === v,
+  notes: notesOf('glreplay-carried').length};
+if (!r.video) {
+  G2.standDowns.push('assetUnbound');
+  const out = S.release('movie1', {rect: SLOT});
+  console.log(JSON.stringify({bound, out: {ok: out.ok, mode: out.mode, reason: out.reason},
+    zone: zones().slice(-1)[0], v: census(v)}));
+} else {
+  console.log(JSON.stringify({bound, zone: zones().slice(-1)[0]}));
+}
+""".replace("__SRC__", entry["src"]["objectId"]).replace("__LOOP__", json.dumps(loop)))
+    if carried:
+        assert result["bound"] == {"video": True, "reason": None, "memo": True, "notes": 1}
+        assert result["zone"][:3] == ["pending", "armed", "moduleReady"]
+        return
+    assert result["bound"] == {"video": False, "reason": "loopMismatch", "memo": False, "notes": 0}
+    assert result["out"] == {"ok": True, "mode": "retire", "reason": "failure"}
+    assert result["zone"][:3] == ["armed", "retired", "failure"]
+    assert (result["v"]["paused"], result["v"]["gen"], result["v"]["pooled"]) == (True, -1, False)

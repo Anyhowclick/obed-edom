@@ -3,9 +3,9 @@
 Repeat -> Loop key (`"loopMode":"looping"`, the only change such an export carries) spliced
 into the named movies, byte-for-byte everywhere else.
 
-Reads `output/p2-recovery/html-adversarial` or its binary-counter copy `output/p2-binary`
+Reads `output/fixtures/p2-recovery/html-adversarial` or its binary-counter copy `output/fixtures/p2-binary`
 (never written; every source file's sha is asserted equal before and after) and writes
-`output/p2-loop` in the main checkout. A source `fixture.json` is copied with a `loop` key
+`output/fixtures/p2-loop` in the main checkout. A source `fixture.json` is copied with a `loop` key
 added. Refuses to overwrite an existing fixture unless `--force`.
 """
 from __future__ import annotations
@@ -16,7 +16,6 @@ import hashlib
 import json
 import re
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Iterator
@@ -26,14 +25,15 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
 from obed_edom import live_continuity  # noqa: E402
+from obed_edom.fixture_paths import fixture  # noqa: E402
 
 TREES = ("html-player", "html-unmodified")
 FILES = ("asset-replace.json",)
 LOOP_OBJECT_IDS = ("6BB39942", "CBACAF27", "F9AFED1B", "98D59E27", "E4728E7D")
 LOOP_KEY = ',"loopMode":"looping"'
 EXPECTED_PLAN_SHA256 = {
-    "off": "3dc6755853692a178696a35495c1929662005a8173f932607855876bfc299c5d",
-    "on": "2ba6fbed8fc959c804e53d2f21712945230eac6dcbf90d522fe3a6a688bef924",
+    "off": "866de785864ad19b11ecd8cdfb4ad1729798ccf9f1764aa59718de03034ba7a5",
+    "on": "d860a09f4f6a8e24a81e2ad0c3b37bc8a3f2b4ce3947836ca315671031870131",
 }
 RECORD = "loop-splice.json"
 MANIFEST = "fixture.json"
@@ -45,14 +45,6 @@ JSONP = re.compile(r"\A(\w+\(\s*)(.*?)(\s*\)\s*)\Z", re.DOTALL)
 
 class FixtureError(RuntimeError):
     pass
-
-
-def main_checkout() -> Path:
-    common = subprocess.run(
-        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-        cwd=REPO, capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    return Path(common).parent
 
 
 def sha256_file(path: Path) -> str:
@@ -287,10 +279,9 @@ def build(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    main = main_checkout()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--source", type=Path, default=main / "output/p2-recovery/html-adversarial")
-    parser.add_argument("--dest", type=Path, default=main / "output/p2-loop")
+    parser.add_argument("--source", type=Path, default=fixture("p2-recovery") / "html-adversarial")
+    parser.add_argument("--dest", type=Path, default=fixture("p2-loop"))
     parser.add_argument("--force", action="store_true", help="replace an existing destination")
     return parser.parse_args(argv)
 

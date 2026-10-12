@@ -43,7 +43,7 @@ nothing above the movie, and would leave the project with **zero** green fixture
 strictly the fail-closed direction *for the boundary that is unsafe* and leaves the rest as authored.
 
 The minimal honest expression is **one new runtime action, `retire`** — the first slice of the generalisation's
-`pin|bridge|restart|retire` (`keynote_live_continuity_generalisation.md:36-44`) — and **not** making `pin`
+`pin|bridge|restart|retire` (`git show 6fc85b78:.agents/plans/keynote_live_continuity_generalisation.md` lines 36-44) — and **not** making `pin`
 explicit yet. Making pin explicit means teaching the runtime a zone walk (limitations #2/#3) — that is the
 generalisation, not this PR. `retire` alone says exactly what is needed: *at this scene, hand this movie back
 to the player*. The implicit pin zone before the first boundary stays, and stays true (slide 1 is untouched).

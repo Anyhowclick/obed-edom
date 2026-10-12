@@ -3,11 +3,13 @@ from __future__ import annotations
 import copy
 import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from obed_edom import live_continuity
+from obed_edom.fixture_paths import fixture
 from obed_edom.live_continuity import ContinuityPlan, Unsupported, derive_plan
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "live_continuity"
@@ -15,10 +17,10 @@ MINIMAL_ROOT = FIXTURE_ROOT / "minimal_alpha_dsk"
 POSITIVE_ROOT = FIXTURE_ROOT / "positive_control"
 LOOP_ROOT = FIXTURE_ROOT / "minimal_alpha_dsk_loop"
 
-GL_DECKS_ROOT = Path("/Users/anyhowclick/Desktop/work/obed-edom/output/gl-decks")
+GL_DECKS_ROOT = fixture("gl-decks")
 MINIMAL_REAL_ROOT = GL_DECKS_ROOT / "Minimal Alpha_DSK" / "html"
 POSITIVE_REAL_ROOT = GL_DECKS_ROOT / "Positive Control" / "html"
-SOAK_LOOP_REAL_ROOT = Path("/Users/anyhowclick/Desktop/work/obed-edom/output/p2-soak-loop/html-unmodified")
+SOAK_LOOP_REAL_ROOT = fixture("p2-soak-loop") / "html-unmodified"
 
 
 def _resolver(root: Path, relative: str) -> Path:
@@ -46,20 +48,28 @@ def _plan(root: Path, uuids: list[str]) -> ContinuityPlan | Unsupported:
     return derive_plan(root, _slides(uuids), resolver=_resolver)
 
 
+NOT_YET_QUALIFIED = "deck shape is not yet qualified for continuity (only gate-measured plans are)"
+
 MINIMAL_UUIDS = _slide_list(MINIMAL_ROOT)
 POSITIVE_UUIDS = _slide_list(POSITIVE_ROOT)
 LOOP_UUIDS = _slide_list(LOOP_ROOT)
 
 
-def test_minimal_s4_to_s5_pins_with_no_refusal():
-    plan = _plan(MINIMAL_ROOT, MINIMAL_UUIDS[0:2])
+@pytest.mark.parametrize(
+    "slice_, actions, refusals",
+    [pytest.param((0, 2), ["pin"], 0, id="S4-to-S5-pins-with-no-refusal"), pytest.param((2, 4), ["pin", "pin"], 1, id="S6-to-S7-two-pins-one-refusal")],
+)
+def test_minimal_pins_unqualified(slice_, actions, refusals):
+    start, end = slice_
+    plan = _plan(MINIMAL_ROOT, MINIMAL_UUIDS[start:end])
     assert isinstance(plan, ContinuityPlan)
-    assert plan.refusals == ()
+    if refusals:
+        assert len(plan.refusals) == refusals
+    else:
+        assert plan.refusals == ()
     movies = plan.boundaries[0].as_dict()["movies"]
-    assert [m["action"] for m in movies] == ["pin"]
-    assert plan.to_runtime() == Unsupported(
-        "deck shape is not yet qualified for continuity (only P2-measured plans are)"
-    )
+    assert [m["action"] for m in movies] == actions
+    assert plan.to_runtime() == Unsupported(NOT_YET_QUALIFIED)
 
 
 def test_minimal_s4_to_s5_gl_replay_keyword():
@@ -71,17 +81,6 @@ def test_minimal_s4_to_s5_gl_replay_keyword():
     movie = plan.boundaries[0].as_dict()["movies"][0]
     assert "glReplay" not in movie
     assert "glReplayReason" not in movie
-
-
-def test_minimal_s6_to_s7_two_pins_one_refusal():
-    plan = _plan(MINIMAL_ROOT, MINIMAL_UUIDS[2:4])
-    assert isinstance(plan, ContinuityPlan)
-    movies = plan.boundaries[0].as_dict()["movies"]
-    assert [m["action"] for m in movies] == ["pin", "pin"]
-    assert len(plan.refusals) == 1
-    assert plan.to_runtime() == Unsupported(
-        "deck shape is not yet qualified for continuity (only P2-measured plans are)"
-    )
 
 
 def test_minimal_s6_to_s7_gl_replay_refuses_two_movies():
@@ -98,12 +97,15 @@ def test_minimal_s6_to_s7_gl_replay_refuses_two_movies():
 
 
 @pytest.mark.parametrize("slice_", [(4, 6), (0, 6)])
-def test_minimal_ambiguous_ownership_is_unsupported(slice_):
+def test_minimal_geometry_equal_pairings_refuse_only_their_boundary(slice_):
+    """Two instances each side, each geometry-equal to both across the move: the best and
+    runner-up pairings tie, so that boundary is refused (R1), not the deck."""
     start, end = slice_
     plan = _plan(MINIMAL_ROOT, MINIMAL_UUIDS[start:end])
-    assert isinstance(plan, Unsupported)
-    assert "ambiguous" in plan.reason
-    assert "4 geometry-equal pair" in plan.reason
+    assert isinstance(plan, ContinuityPlan)
+    ambiguous = plan.boundaries[-2]
+    assert [(m.action, m.code, m.dst_object_id) for m in ambiguous.movies] == [("retire", "R1", None)] * 2
+    assert "differ by 0.0 px (margin 16 px)" in ambiguous.movies[0].refusal
 
 
 def test_positive_control_actions_and_to_runtime():
@@ -115,9 +117,7 @@ def test_positive_control_actions_and_to_runtime():
         if boundary.as_dict()["movies"]
     ]
     assert actions == ["pin", "bridge", "restart", "restart"]
-    unsupported = plan.to_runtime()
-    assert isinstance(unsupported, Unsupported)
-    assert "bridge boundary precedes" in unsupported.reason
+    assert plan.to_runtime() == Unsupported(NOT_YET_QUALIFIED)
 
 
 @pytest.mark.parametrize(
@@ -140,12 +140,19 @@ def test_positive_control_bridge_passes_the_eased_timing_check(root):
 
 
 @pytest.mark.skipif(not GL_DECKS_ROOT.is_dir(), reason="real gl-deck exports not available")
-def test_minimal_fixture_parity_with_real_export():
-    real = _plan(MINIMAL_REAL_ROOT, MINIMAL_UUIDS)
-    fixture = _plan(MINIMAL_ROOT, MINIMAL_UUIDS)
-    assert isinstance(real, Unsupported)
-    assert isinstance(fixture, Unsupported)
-    assert real.reason == fixture.reason
+@pytest.mark.parametrize(
+    "real_root, fixture_root, uuids",
+    [
+        pytest.param(MINIMAL_REAL_ROOT, MINIMAL_ROOT, MINIMAL_UUIDS, id="minimal"),
+        pytest.param(POSITIVE_REAL_ROOT, POSITIVE_ROOT, POSITIVE_UUIDS, id="positive-control"),
+    ],
+)
+def test_fixture_parity_with_real_export(real_root, fixture_root, uuids):
+    real = _plan(real_root, uuids)
+    fixture = _plan(fixture_root, uuids)
+    assert isinstance(real, ContinuityPlan)
+    assert isinstance(fixture, ContinuityPlan)
+    assert real.as_dict() == fixture.as_dict()
 
 
 @pytest.mark.skipif(not GL_DECKS_ROOT.is_dir(), reason="real gl-deck exports not available")
@@ -161,32 +168,73 @@ def test_minimal_sub_deck_parity_with_real_export(slice_):
     assert dump(real) == dump(fixture)
 
 
-@pytest.mark.skipif(not GL_DECKS_ROOT.is_dir(), reason="real gl-deck exports not available")
-def test_positive_control_fixture_parity_with_real_export():
-    real = _plan(POSITIVE_REAL_ROOT, POSITIVE_UUIDS)
-    fixture = _plan(POSITIVE_ROOT, POSITIVE_UUIDS)
-    assert isinstance(real, ContinuityPlan)
-    assert isinstance(fixture, ContinuityPlan)
-    assert real.as_dict() == fixture.as_dict()
+def _translucent_minimal(tmp_path: Path, where: str) -> Path:
+    """Minimal S4 -> S5 (one instance each side, a clean pin) with both instances at opacity 0.5
+    in one place the export exposes it: the movie node's own layers, or the draw tree."""
+    root = tmp_path / "minimal"
+    shutil.copytree(MINIMAL_ROOT, root)
+    for uuid in MINIMAL_UUIDS[:2]:
+        path = root / "assets" / uuid / f"{uuid}.json"
+        data = json.loads(path.read_text())
+        [node] = _movie_nodes(data["events"])
+        base = node["baseLayer"]
+        if where == "movie layer":
+            base["initialState"]["opacity"] = 0.5
+        elif where == "video layer":
+            next(layer for layer in base["layers"] if layer.get("isVideoLayer"))["initialState"]["opacity"] = 0.5
+        else:
+            slots = [
+                slot
+                for event in data["events"]
+                for slot in event["baseLayer"]["layers"]
+                if slot["layers"] and slot["layers"][0].get("objectID") == node["objectID"]
+            ]
+            assert slots
+            for slot in slots:
+                (slot["layers"][0] if where == "draw slot object" else slot)["initialState"]["opacity"] = 0.5
+        path.write_text(json.dumps(data))
+    return root
+
+
+def _movie_nodes(value) -> list[dict]:
+    if isinstance(value, dict):
+        own = [value] if "movie" in value and "baseLayer" in value else []
+        return own + [node for child in value.values() for node in _movie_nodes(child)]
+    if isinstance(value, list):
+        return [node for child in value for node in _movie_nodes(child)]
+    return []
+
+
+@pytest.mark.parametrize("where", ["movie layer", "video layer", "draw slot object", "draw slot wrapper"])
+@pytest.mark.parametrize("gl_replay", [False, True])
+def test_r9_a_single_translucent_pin_refuses_the_boundary(tmp_path, where, gl_replay):
+    """S2 review r2 #2: with one instance each side R1b has no choice to judge, yet the pin's
+    keep-at-slot hold draws the decoder at opacity 1 outside its authored layers."""
+    plan = derive_plan(
+        _translucent_minimal(tmp_path, where), _slides(MINIMAL_UUIDS[:2]), resolver=_resolver, gl_replay=gl_replay
+    )
+    assert isinstance(plan, ContinuityPlan)
+    [pin] = plan.boundaries[0].movies
+    assert (pin.action, pin.code, pin.gl_replay) == ("pin", "R9", None)
+    assert pin.refusal == (
+        "'untitled.mov' is not fully opaque on the source slide of player index 0 -> 1; "
+        "a carried decoder is drawn at opacity 1"
+    )
+    assert [r["code"] for r in plan.refusals] == ["R9"]
 
 
 # --- looping movies (keynote_live_continuity_loopmode plan sections 2 and 4) ---------------
 #
 # `minimal_alpha_dsk_loop/` is the owner's Repeat -> Loop export of Minimal Alpha_DSK
-# (`output/p2-soak-loop/html-unmodified`), slides 4 and 5 only: both slide JSONs are Keynote's
+# (`output/fixtures/p2-soak-loop/html-unmodified`), slides 4 and 5 only: both slide JSONs are Keynote's
 # bytes verbatim, and the header is trimmed to the two slides like `minimal_alpha_dsk/`'s.
 # Keynote wrote exactly one key for the loop, `movie.loopMode: "looping"`, on each slide's one
 # `untitled.mov` instance; S4 -> S5 is the same Magic Move pin as the non-looping deck.
 
-NOT_YET_QUALIFIED = "deck shape is not yet qualified for continuity (only P2-measured plans are)"
 LOOP_S4_TO_S5_REASON = (
-    "'untitled.mov' does not loop on every instance at player index 0 -> 1; "
+    "'untitled.mov' loops on one side of player index 0 -> 1 only; "
     "a carried decoder keeps its source's loop setting"
 )
-LOOP_S4_TO_S5_LOOPS = [
-    {"scene": 0, "asset": "untitled.mov", "rect": {"x": 327, "y": 698, "w": 1266, "h": 356}},
-    {"scene": 2, "asset": "untitled.mov", "rect": {"x": 327, "y": 698, "w": 1266, "h": 356}},
-]
 
 
 def _signed_runtime(monkeypatch, plan: ContinuityPlan) -> tuple[dict | Unsupported, dict]:
@@ -223,48 +271,51 @@ def test_loop_fixture_is_keynotes_one_key_per_slide():
         assert raw.count('"loopMode":"looping"') == 1
 
 
-def test_loop_s4_to_s5_pins_with_no_refusal_and_signs_a_two_entry_annex(monkeypatch):
-    """L0-a: both sides loop, so the pin carries exactly as the non-looping deck's does; the
-    runtime gains `loops` (one entry per slide) and stays unqualified."""
+def test_loop_s4_to_s5_pins_with_no_refusal_and_a_looping_entry(monkeypatch):
+    """L0-a: both sides loop, so the pin carries exactly as the non-looping deck's does, with
+    `loop: true` on its entry; the runtime stays unqualified."""
     plan = _plan(LOOP_ROOT, LOOP_UUIDS)
     assert isinstance(plan, ContinuityPlan)
     assert plan.refusals == ()
     movies = plan.boundaries[0].as_dict()["movies"]
-    assert [m["action"] for m in movies] == ["pin"]
+    assert [(m["action"], m["loop"]) for m in movies] == [("pin", True)]
     result, runtime = _signed_runtime(monkeypatch, plan)
     assert result == Unsupported(NOT_YET_QUALIFIED)
-    assert runtime["loops"] == LOOP_S4_TO_S5_LOOPS
+    assert [(b["action"], b["loop"]) for b in runtime["boundaries"]] == [("pin", True)]
 
 
-def test_loop_s4_to_s5_as_dict_matches_the_non_looping_deck(monkeypatch):
-    """Everything but the annex is the non-looping export's plan (plan F1: the loop is the only
-    difference on these two slides)."""
+def test_loop_s4_to_s5_differs_from_the_non_looping_deck_only_in_loop(monkeypatch):
+    """Plan F1: the loop is the only difference on these two slides."""
     looping = _plan(LOOP_ROOT, LOOP_UUIDS)
     plain = _plan(MINIMAL_ROOT, MINIMAL_UUIDS[0:2])
     assert isinstance(looping, ContinuityPlan)
     assert isinstance(plain, ContinuityPlan)
-    assert looping.as_dict() == plain.as_dict()
+    assert looping.boundaries[0] == replace(
+        plain.boundaries[0], movies=tuple(replace(m, loop=True) for m in plain.boundaries[0].movies)
+    )
     assert plain.loop_instances == {}
     _, looping_runtime = _signed_runtime(monkeypatch, looping)
     _, plain_runtime = _signed_runtime(monkeypatch, plain)
-    assert "loops" not in plain_runtime
-    assert {k: v for k, v in looping_runtime.items() if k != "loops"} == plain_runtime
+    assert "loops" not in looping_runtime
+    assert looping_runtime == {
+        **plain_runtime, "boundaries": [{**b, "loop": True} for b in plain_runtime["boundaries"]],
+    }
 
 
 @pytest.mark.parametrize("dropped", [0, 1], ids=["S4-plain", "S5-plain"])
 def test_loop_removed_on_one_side_refuses_the_pin(tmp_path, monkeypatch, dropped):
-    """L0-b: a loop difference across the Magic Move refuses that boundary (plan section 2.2);
-    the refused pin becomes the single `retire`, and the remaining looping slide still signs."""
+    """L0-b / R4: a loop difference across the carried pair refuses that boundary, which
+    becomes a `retire` of the source instance."""
     root = _drop_loop_mode(tmp_path, LOOP_UUIDS[dropped])
     plan = _plan(root, LOOP_UUIDS)
     assert isinstance(plan, ContinuityPlan)
     [refusal] = plan.refusals
-    assert refusal["reason"] == LOOP_S4_TO_S5_REASON
-    assert set(refusal) == {"fromPlayer", "toPlayer", "atScene", "asset", "movieKey", "reason"}
+    assert (refusal["reason"], refusal["code"]) == (LOOP_S4_TO_S5_REASON, "R4")
+    assert set(refusal) == {"fromPlayer", "toPlayer", "atScene", "asset", "movieKey", "reason", "code", "objectId"}
     result, runtime = _signed_runtime(monkeypatch, plan)
     assert result == Unsupported(NOT_YET_QUALIFIED)
-    assert runtime["boundaries"] == [{"atScene": 2, "action": "retire", "movieKey": "movie1"}]
-    assert runtime["loops"] == [LOOP_S4_TO_S5_LOOPS[1 - dropped]]
+    assert [(b["atScene"], b["action"], b["reason"]) for b in runtime["boundaries"]] == [(2, "retire", "refused")]
+    assert runtime["boundaries"][0]["src"]["objectId"] == refusal["objectId"]
 
 
 def test_loop_removed_on_one_side_flag_on_names_the_loop_reason(tmp_path):
@@ -303,15 +354,12 @@ def test_loop_fixture_parity_with_the_owner_export_slice(monkeypatch):
 
 
 @pytest.mark.skipif(not SOAK_LOOP_REAL_ROOT.is_dir(), reason="owner loop export not available")
-def test_the_whole_owner_loop_export_is_still_ambiguous():
-    """L0-e / plan F4: accepting `loopMode` gets the owner's deck past the vocabulary, but the
-    9-slide deck still stops at the same ownership ambiguity as the non-looping gl-decks export,
-    so it cannot be a gate fixture."""
+def test_the_whole_owner_loop_export_refuses_only_its_ambiguous_boundary():
+    """L0-e / plan F4: the 9-slide deck's 8 -> 9 move pairs two geometry-equal instances each
+    side, so that boundary alone is refused (R1); the deck still derives."""
     plan = _plan(SOAK_LOOP_REAL_ROOT, _slide_list(SOAK_LOOP_REAL_ROOT))
-    assert plan == Unsupported(
-        "ambiguous 'untitled.mov' ownership at player index 7 -> 8: "
-        "2 instance(s) before, 2 after, 4 geometry-equal pair(s)"
-    )
+    assert isinstance(plan, ContinuityPlan)
+    assert [(r["fromPlayer"], r["code"]) for r in plan.refusals if r["code"] == "R1"] == [(7, "R1"), (7, "R1")]
 
 
 @pytest.mark.skipif(
@@ -334,3 +382,171 @@ def test_owner_loop_export_differs_from_the_plain_export_only_by_loop_mode():
         plain = json.loads((MINIMAL_REAL_ROOT / relative).read_text())
         assert looping != plain
         assert strip(looping) == plain
+
+
+# --- S0 decks D1-D6 (generalisation plan section 5) ----------------------------------------
+#
+# `qual_decks/Dn/` holds each S0 export's header and slide JSONs verbatim (main checkout
+# `output/fixtures/qual-decks/Dn/html-unmodified`); no movie files. D2-across derives exactly as
+# D2 (the export does not encode play-across), so it has no committed copy. D1, D3 and D5 must
+# derive the frozen schema-2 contract examples the core and injection streams test against.
+
+QUAL_ROOT = Path(__file__).parent / "fixtures" / "live_continuity" / "qual_decks"
+QUAL_REAL_ROOT = fixture("qual-decks")
+RUNTIME_V2_EXAMPLES = json.loads((FIXTURE_ROOT / "runtime_v2_examples.json").read_text())
+QUAL_PLAN_SHA256 = {
+    "D1": "4d466b2f0ee035928486dc3e61f23a5d92e3cc4e76d5d02f367e115331cc0b00",
+    "D2": "029a4c427d2f7ebe2cf7410e2010fdc03834f370f5c6d25aeea9e05c2fbc20f7",
+    "D3": "01b74c88f4622e5a0650d334d7721a247a2039a1767f232d792e823405a21b1b",
+    "D4": "e166c385753364cdc159307b8f7d9092979533b71aee93ea4b8ebbea7a366076",
+    "D5": "73d1153f086381996b5490d6f66eae2ee6996eb05b4a1dcd0af0fce70a018f5e",
+    "D6": "149e813cfe68b6bac7c5c4ea0b5829f20e017ee1d0ce742ece3444fd1f60eed1",
+}
+
+
+def _qual_plan(deck: str, *, gl_replay: bool = False, root: Path = QUAL_ROOT) -> ContinuityPlan:
+    deck_root = root / deck if root is QUAL_ROOT else root / deck / "html-unmodified"
+    plan = derive_plan(deck_root, _slides(_slide_list(deck_root)), resolver=_resolver, gl_replay=gl_replay)
+    assert isinstance(plan, ContinuityPlan), plan
+    return plan
+
+
+def _qual_runtime(deck: str, **kwargs) -> dict:
+    runtime = _qual_plan(deck, **kwargs).to_runtime()
+    assert isinstance(runtime, dict), runtime
+    return runtime
+
+
+def _summary(runtime: dict) -> list[tuple]:
+    return [
+        (b["atScene"], b["action"], b["movieKey"], b["src"]["objectId"][:4], (b.get("dst") or {}).get("objectId", "")[:4])
+        for b in runtime["boundaries"]
+    ]
+
+
+@pytest.mark.parametrize("deck", ["D1", "D3", "D5"])
+@pytest.mark.parametrize("gl_replay", [False, True])
+def test_s0_deck_derives_the_contract_example(deck, gl_replay):
+    assert _qual_runtime(deck, gl_replay=gl_replay) == RUNTIME_V2_EXAMPLES[deck.lower()]
+
+
+@pytest.mark.parametrize("deck", sorted(QUAL_PLAN_SHA256))
+@pytest.mark.parametrize("gl_replay", [False, True])
+def test_s0_deck_runtime_is_pinned_and_allowlisted(deck, gl_replay):
+    runtime = _qual_runtime(deck, gl_replay=gl_replay)
+    assert live_continuity.plan_signature(runtime) == QUAL_PLAN_SHA256[deck]
+    assert QUAL_PLAN_SHA256[deck] in live_continuity.QUALIFIED_PLAN_SHA256
+
+
+def test_d2_restarts_after_a_bridge_and_starts_a_new_chain():
+    assert _summary(_qual_runtime("D2")) == [
+        (2, "bridge", "movie1", "D4E3", "2935"),
+        (4, "restart", "movie1", "2935", "DE43"),
+        (6, "pin", "movie1", "DE43", "1D37"),
+        (8, "bridge", "movie1", "1D37", "0815"),
+    ]
+
+
+def test_d4_the_far_instance_bridges_and_the_near_one_gets_no_entry():
+    """A-far (centre distance ~266 px) pairs, not A-near (~994 px); A-near is uncarried, so the
+    runtime never names it and plays it raw."""
+    runtime = _qual_runtime("D4")
+    assert _summary(runtime) == [
+        (3, "bridge", "movie1", "254E", "9E04"),
+        (5, "pin", "movie1", "9E04", "E839"),
+    ]
+    assert "072763EA-8E68-4E62-9855-2BAEF215572B" not in json.dumps(runtime)
+
+
+def test_d6_loops_through_the_chain_and_retires_the_loop_mismatch():
+    plan = _qual_plan("D6")
+    runtime = plan.to_runtime()
+    assert isinstance(runtime, dict)
+    assert _summary(runtime) == [
+        (2, "bridge", "movie1", "41D0", "8A80"),
+        (4, "bridge", "movie1", "8A80", "B275"),
+        (6, "pin", "movie1", "B275", "4478"),
+        (8, "retire", "movie1", "4478", ""),
+    ]
+    assert [b.get("loop") for b in runtime["boundaries"]] == [True, True, True, None]
+    assert runtime["boundaries"][-1]["reason"] == "refused"
+    assert [(r["atScene"], r["code"]) for r in plan.refusals] == [(8, "R4")]
+    assert "70E3E894-8770-4892-B203-870BDB4E665C" not in json.dumps(runtime)
+
+
+def test_d3_ends_the_movie_that_does_not_continue():
+    plan = _qual_plan("D3")
+    ends = [m for b in plan.boundaries for m in b.movies if m.action == "retire"]
+    assert [(m.asset, m.refusal, m.dst_rect) for m in ends] == [("counter-a.mov", None, None)]
+    assert plan.refusals == ()
+
+
+@pytest.mark.skipif(not QUAL_REAL_ROOT.is_dir(), reason="S0 deck exports not available")
+@pytest.mark.parametrize("deck", sorted(QUAL_PLAN_SHA256))
+def test_s0_deck_fixture_is_the_exports_bytes(deck):
+    real = QUAL_REAL_ROOT / deck / "html-unmodified" / "assets"
+    committed = QUAL_ROOT / deck / "assets"
+    assert (committed / "header.json").read_bytes() == (real / "header.json").read_bytes()
+    uuids = _slide_list(QUAL_ROOT / deck)
+    assert sorted(p.name for p in committed.iterdir() if p.is_dir()) == sorted(uuids)
+    for uuid in uuids:
+        assert (committed / uuid / f"{uuid}.json").read_bytes() == (real / uuid / f"{uuid}.json").read_bytes()
+
+
+@pytest.mark.skipif(not QUAL_REAL_ROOT.is_dir(), reason="S0 deck exports not available")
+def test_d2_across_derives_exactly_as_d2():
+    """The HTML export does not encode play-across-slides (plan section 5, S0 investigation)."""
+    assert _qual_plan("D2-across", root=QUAL_REAL_ROOT).as_dict() == _qual_plan("D2").as_dict()
+
+
+def test_d2_with_its_dissolve_exported_as_none_signs_the_same_plan(tmp_path):
+    """A mid-deck `none` cut derives exactly as the Dissolve it replaces, so D2's allowlisted sha
+    is unchanged (no S0 deck has a mid-deck `none`)."""
+    root = tmp_path / "D2"
+    shutil.copytree(QUAL_ROOT / "D2", root)
+    slide2 = _slide_list(root)[1]
+    path = root / "assets" / slide2 / f"{slide2}.json"
+    raw = path.read_text()
+    assert raw.count('"apple:dissolve"') == 1
+    path.write_text(raw.replace('"apple:dissolve"', '"none"'))
+    runtime = derive_plan(root, _slides(_slide_list(root)), resolver=_resolver).to_runtime()
+    assert isinstance(runtime, dict)
+    assert live_continuity.plan_signature(runtime) == QUAL_PLAN_SHA256["D2"]
+
+
+QUAL_BRIDGES = {
+    "D1": ["7469", "565D"],
+    "D2": ["D4E3", "1D37"],
+    "D3": ["F6AC", "1441"],
+    "D4": ["254E"],
+    "D5": [],
+    "D6": ["41D0", "8A80"],
+}
+
+
+@pytest.mark.parametrize("deck", sorted(QUAL_BRIDGES))
+@pytest.mark.parametrize("gl_replay", [False, True])
+def test_every_s0_bridge_passes_the_eased_timing_check_by_rect(deck, gl_replay):
+    """R10 finds the carried movie's transition slot by its start rect because no draw order
+    indexes it: on every S0 bridge the source slide's events that draw the movie have one slot
+    fewer than the boundary transition, so `_drawn_slot_index` would refuse each one ("draws N
+    slots where the boundary transition has N+1"). All nine bridges still qualify."""
+    deck_root = QUAL_ROOT / deck
+    uuids = _slide_list(deck_root)
+    plan = _qual_plan(deck, gl_replay=gl_replay)
+    bridges = [(b, m) for b in plan.boundaries for m in b.movies if m.action == "bridge"]
+    assert [m.src_object_id[:4] for _, m in bridges] == QUAL_BRIDGES[deck]
+    for boundary, movie in bridges:
+        assert (movie.refusal, movie.code, movie.gl_replay_reason) == (None, None, None)
+        source = json.loads((deck_root / "assets" / uuids[boundary.from_player_index] / f"{uuids[boundary.from_player_index]}.json").read_text())
+        (transition,) = [e for event in source["events"] for e in event["effects"] if e.get("type") == "transition"]
+        drawn = {
+            len(event["baseLayer"]["layers"])
+            for event in source["events"]
+            if any(
+                len(slot["layers"]) == 1 and slot["layers"][0].get("objectID") == movie.src_object_id
+                for slot in event["baseLayer"]["layers"]
+            )
+        }
+        assert drawn == {len(transition["baseLayer"]["layers"]) - 1}
+    assert all(record["code"] != "R10" for record in plan.refusals)

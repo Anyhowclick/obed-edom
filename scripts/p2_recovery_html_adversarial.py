@@ -49,6 +49,7 @@ from p2_recovery_html_dissolve_live import (  # noqa: E402
     inject_preserve,
 )
 from obed_edom.dsk_live import keynote_running  # noqa: E402
+from obed_edom.fixture_paths import fixture  # noqa: E402
 from obed_edom.html_alpha_probe import (  # noqa: E402
     analyze_rgba,
     DEAD_RECT_MAX_LIVE_FRAC,
@@ -136,6 +137,7 @@ from obed_edom.p2_verdict import (  # noqa: E402
     _advance_key_clock,
     _advance_press_decision,
     _at_cut_boundary,
+    _bound_source_problem,
     _collector_ok,
     _collector_rows_for,
     _collector_sample_times,
@@ -154,7 +156,9 @@ from obed_edom.p2_verdict import (  # noqa: E402
     _new_advance_press_state,
     _new_bracket_manifest,
     _norm_hash,
+    _note_movie_key,
     _presented_time_advances,
+    _restart_observations,
     _score_freeze_control,
     _score_visible_movie_motion,
     _slide4_settled_window,
@@ -163,7 +167,7 @@ from obed_edom.p2_verdict import (  # noqa: E402
 )
 
 SOURCE = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Minimal Alpha_DSK.key")
-OUT = REPO / "output" / "p2-recovery" / "html-adversarial"
+OUT = fixture("p2-recovery") / "html-adversarial"
 CLICK_DELAY_S = 1.5
 DENSE_FPS = 20
 POST_SETTLE_S = 0.6
@@ -3718,6 +3722,13 @@ async def _run() -> dict:
             dissolve_s=TRANS_S,
             position_eps=1.25,  # MM can take >0.75s before first pooled sample
         )
+        bound_source = (
+            _bound_source_problem(samples_a, EXPECTED_MOVIE_KEYS[0], green_decoder_id)
+            if green_decoder_id is not None else None
+        )
+        if bound_source is not None:
+            cont = {**cont, "continuesThroughDissolve": False if bound_source == "foreign" else None,
+                    "boundSource": bound_source}
         mm_paths = sorted(run_dir.glob("mm12-t*.png"))
         visible_motion = _score_visible_movie_motion(mm_paths, MOVIE_ROI)
         capture_race_frames_a = sum(
@@ -3956,12 +3967,12 @@ async def _run() -> dict:
         reuse_skip_boundary_for_target = [
             e
             for e in reuse_skip_boundary_events
-            if _movie_key((e.get("detail") or {}).get("key") or "") == target_key
+            if _note_movie_key((e.get("detail") or {}).get("key")) == target_key
         ]
         retire_events_for_target = [
             e
             for e in retire_events
-            if _movie_key((e.get("detail") or {}).get("key") or "") == target_key
+            if _note_movie_key((e.get("detail") or {}).get("key")) == target_key
         ]
         # Reuse of a preserved decoder is the LEGITIMATE 1→2 continue mechanism; only a
         # reuse on/after the restart boundary would stitch a fake restart. Scope the ban there.
@@ -3988,34 +3999,21 @@ async def _run() -> dict:
         restart_index_progression = score_index_progression(restart_index_seq)
         per_movie_boundary: dict[str, dict] = {}
         for key in intended_keys:
-            obs = []
-            for s in samples_b:
-                for m in s.get("movies") or []:
-                    if m.get("key") != key or m.get("currentTime") is None:
-                        continue
-                    obs.append(
-                        {
-                            "t": float(m["currentTime"]),
-                            "w": m.get("videoWidth"),
-                            "captureOffsetS": float(s.get("captureOffsetS") or 0.0),
-                            "sceneHash": s.get("sceneHash"),
-                            "phase": s.get("phase"),
-                            "decoderId": m.get("decoderId"),
-                        }
-                    )
+            obs, unnamed = _restart_observations(samples_b, key)
             per_movie_boundary[key] = score_restart_movie_from_observations(
                 obs,
                 slide_min_hash=SLIDE3_MIN_HASH,
                 progression_wall_s=PROGRESSION_WALL_S,
                 progression_media_s=PROGRESSION_MEDIA_S,
             )
+            per_movie_boundary[key]["unnamedRows"] = unnamed[:6]
             # presentedMotionOk: the TARGET decoder's own rVFC mediaTime progression
             # is mandatory (a frozen restart decoder must not pass just because some
             # OTHER movie/animation moves the shared ROI); on-screen progression is
             # required too as corroboration, via the parity-immune burnt-in index
             # counter (pixelMotion stays as a diagnostic only — see above).
             restart_decoder_id = per_movie_boundary[key].get("restartDecoderId")
-            presented_rvfc = _presented_time_advances(samples_b, restart_decoder_id, SLIDE3_MIN_HASH)
+            presented_rvfc = _presented_time_advances(samples_b, restart_decoder_id, SLIDE3_MIN_HASH, key)
             per_movie_boundary[key]["presentedMotionOk"] = bool(
                 presented_rvfc.get("ok") and restart_index_progression.get("ok")
             )
@@ -4041,7 +4039,7 @@ async def _run() -> dict:
         reuse_stitched_restart = [
             e
             for e in reuse_decoder_events
-            if _movie_key((e.get("detail") or {}).get("key") or "") == target_key
+            if _note_movie_key((e.get("detail") or {}).get("key")) == target_key
             and (_hash_num((e.get("detail") or {}).get("sceneHash")) or -1) >= SLIDE3_MIN_HASH
             and (
                 (e.get("detail") or {}).get("newElId") == target_restart_decoder_id

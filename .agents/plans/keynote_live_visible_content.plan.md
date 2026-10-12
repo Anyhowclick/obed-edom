@@ -22,7 +22,7 @@ The stray itself comes from two places: `stash()` admits any video whose src mat
 ### 1.2 Verdicts per settled slide
 Expected rects = **every movie instance the export authors on that slide**, authored px, converted to screen px with the probe's own stage map (`stageMapOf`, `live_continuity_probe.py:135-144`; `to_authored_rect` `:393`), then inset 2 px to drop AA edges.
 1. `liveCoverage` per rect: split into **16 column bands × 8 row bands**; a band is live iff ≥ 5 % of its pixels are live. PASS iff **all 24 bands live** AND `liveFrac ≥ 0.35`. Bands beat a bbox/whole-rect test: an interior opaque occluder (P2 `BLACK_ROI_S2` 134×114 in a 952×268 rect, `:80`) never blanks a full band, while today's 663×186 sub-rect blanks ~6 column and ~2 row bands ⇒ **RED at slide 2 today**.
-2. `noStrayMovie` per slide: liveness mask minus all expected rects dilated by 6 px; `cv2.connectedComponentsWithStats` (cv2 is a dep, `pyproject.toml:15`); any component ≥ 2000 px² ⇒ RED. This is the brief's stray check (`keynote_live_continuity_generalisation.md:58-60`) and re-proves the `stash` plan filter (WA0125 on slide 4).
+2. `noStrayMovie` per slide: liveness mask minus all expected rects dilated by 6 px; `cv2.connectedComponentsWithStats` (cv2 is a dep, `pyproject.toml:15`); any component ≥ 2000 px² ⇒ RED. This is the brief's stray check (`git show 6fc85b78:.agents/plans/keynote_live_continuity_generalisation.md` lines 58-60) and re-proves the `stash` plan filter (WA0125 on slide 4).
 3. `noiseFloor`: 99th-percentile delta over a known-static control region (letterbox bars, or a 40×40 patch at the stage corner) must be `< 6`; otherwise the slide is **INCONCLUSIVE**, never a pass.
 
 ### 1.3 Thresholds and sampling

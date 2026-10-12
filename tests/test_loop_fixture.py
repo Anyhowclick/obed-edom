@@ -3,7 +3,7 @@
 The builder splices Keynote's Repeat -> Loop key into a copy of the P2 export. Keynote's
 JSON does not round-trip through `json.dumps` (it escapes `/` as `\\/`), so the splice is
 textual; these tests pin that every other byte is unchanged, that the read-only source is
-never touched, and that the spliced copy derives the two annexed plan shas the plan pins
+never touched, and that the spliced copy derives the two looping plan shas the plan pins
 (F5). Synthetic sources are built in `tmp_path` from the committed P2 fixture rewritten in
 Keynote's compact form, so no real export is needed; one REAL-gated test runs the real
 export's slide JSON through the same build.
@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+from obed_edom.fixture_paths import fixture, main_checkout
 
 REPO = Path(__file__).resolve().parent.parent
 COMMITTED = REPO / "tests" / "fixtures" / "live_continuity" / "assets"
@@ -125,7 +127,7 @@ class TestSpliceText:
 
 
 class TestBuild:
-    def test_committed_fixture_builds_and_derives_the_pinned_annexed_shas(self, tmp_path: Path) -> None:
+    def test_committed_fixture_builds_and_derives_the_pinned_looping_shas(self, tmp_path: Path) -> None:
         source = _committed_source(tmp_path / "src")
         before = _tree_bytes(source)
         dest = tmp_path / "p2-loop"
@@ -236,7 +238,7 @@ def _binary_manifest(frames: int = 1381) -> dict[str, Any]:
 
 
 class TestBinarySource:
-    """`--source <main>/output/p2-binary`: the same splice, plus the binary-counter manifest carried with a `loop` key."""
+    """`--source <main>/output/fixtures/p2-binary`: the same splice, plus the binary-counter manifest carried with a `loop` key."""
 
     def _source(self, root: Path, manifest: dict[str, Any]) -> Path:
         source = _committed_source(root)
@@ -290,21 +292,19 @@ class TestBinarySource:
             loop_fixture.build(source, tmp_path / "p2-loop")
 
     def test_cli_accepts_a_binary_source(self) -> None:
-        main = loop_fixture.main_checkout()
-        args = loop_fixture.parse_args(["--source", str(main / "output/p2-binary"), "--force"])
-        assert args.source == main / "output/p2-binary" and args.force is True
+        args = loop_fixture.parse_args(["--source", str(fixture("p2-binary")), "--force"])
+        assert args.source == fixture("p2-binary") and args.force is True
 
 
 class TestCli:
-    def test_cli_defaults_point_at_the_main_checkout(self) -> None:
+    def test_cli_defaults_point_at_the_main_checkout_fixtures(self) -> None:
         args = loop_fixture.parse_args([])
-        main = loop_fixture.main_checkout()
-        assert args.source == main / "output/p2-recovery/html-adversarial"
-        assert args.dest == main / "output/p2-loop"
+        assert args.source == main_checkout() / "output/fixtures/p2-recovery/html-adversarial"
+        assert args.dest == main_checkout() / "output/fixtures/p2-loop"
         assert args.force is False
 
 
-REAL_SOURCE = loop_fixture.main_checkout() / "output/p2-recovery/html-adversarial"
+REAL_SOURCE = fixture("p2-recovery") / "html-adversarial"
 
 
 @pytest.mark.skipif(not (REAL_SOURCE / "html-player").is_dir(), reason="real P2 export not available")

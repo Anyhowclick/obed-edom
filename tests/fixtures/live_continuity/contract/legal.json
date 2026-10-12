@@ -1,0 +1,4415 @@
+{
+ "cases": [
+  {
+   "name": "rows-G1-converted",
+   "kind": "rows",
+   "source": "output/evidence/gates-glc/r2/goff/host-1920x1080.json arms.A.samples[0:3]",
+   "schema": null,
+   "record": [
+    {
+     "t": 466.29999999701977,
+     "scene": 0,
+     "playerState": "IdleAtFinalState",
+     "busy": false,
+     "videos": [
+      {
+       "id": 1,
+       "elId": 2,
+       "src": "Untitled.mov-0.0000-46.0333.mov",
+       "currentTime": 0.045637,
+       "paused": false,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "rect": {
+        "x": 1075.7864990234375,
+        "y": 876.2469482421875,
+        "w": 662.78125,
+        "h": 186.40625
+       },
+       "footprintOwner": {
+        "elId": 2,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 1075.7864990234375,
+        "y": 876.2469482421875,
+        "w": 662.78125,
+        "h": 186.40625
+       },
+       "stageMapValid": true
+      },
+      {
+       "id": 2,
+       "elId": 1,
+       "src": "Untitled.mov-0.0000-46.0333.mov",
+       "currentTime": 0.04868,
+       "paused": false,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "rect": {
+        "x": 109.3517074584961,
+        "y": 795.0361938476562,
+        "w": 951.53125,
+        "h": 267.60943603515625
+       },
+       "footprintOwner": {
+        "elId": 1,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 109.3517074584961,
+        "y": 795.0361938476562,
+        "w": 951.53125,
+        "h": 267.60943603515625
+       },
+       "stageMapValid": true
+      }
+     ],
+     "stageMap": {
+      "s": 1,
+      "sy": 1,
+      "ox": 0,
+      "oy": 0,
+      "offsetWidth": 1920,
+      "offsetHeight": 1080
+     },
+     "stageMapValid": true
+    },
+    {
+     "t": 482.8999999985099,
+     "scene": 0,
+     "playerState": "IdleAtFinalState",
+     "busy": false,
+     "videos": [
+      {
+       "id": 1,
+       "elId": 2,
+       "src": "Untitled.mov-0.0000-46.0333.mov",
+       "currentTime": 0.062156,
+       "paused": false,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "rect": {
+        "x": 1075.7864990234375,
+        "y": 876.2469482421875,
+        "w": 662.78125,
+        "h": 186.40625
+       },
+       "footprintOwner": {
+        "elId": 2,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 1075.7864990234375,
+        "y": 876.2469482421875,
+        "w": 662.78125,
+        "h": 186.40625
+       },
+       "stageMapValid": true
+      },
+      {
+       "id": 2,
+       "elId": 1,
+       "src": "Untitled.mov-0.0000-46.0333.mov",
+       "currentTime": 0.06496,
+       "paused": false,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "rect": {
+        "x": 109.3517074584961,
+        "y": 795.0361938476562,
+        "w": 951.53125,
+        "h": 267.60943603515625
+       },
+       "footprintOwner": {
+        "elId": 1,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 109.3517074584961,
+        "y": 795.0361938476562,
+        "w": 951.53125,
+        "h": 267.60943603515625
+       },
+       "stageMapValid": true
+      }
+     ],
+     "stageMap": {
+      "s": 1,
+      "sy": 1,
+      "ox": 0,
+      "oy": 0,
+      "offsetWidth": 1920,
+      "offsetHeight": 1080
+     },
+     "stageMapValid": true
+    },
+    {
+     "t": 499.6000000014901,
+     "scene": 0,
+     "playerState": "IdleAtFinalState",
+     "busy": false,
+     "videos": [
+      {
+       "id": 1,
+       "elId": 2,
+       "src": "Untitled.mov-0.0000-46.0333.mov",
+       "currentTime": 0.078879,
+       "paused": false,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "rect": {
+        "x": 1075.7864990234375,
+        "y": 876.2469482421875,
+        "w": 662.78125,
+        "h": 186.40625
+       },
+       "footprintOwner": {
+        "elId": 2,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 1075.7864990234375,
+        "y": 876.2469482421875,
+        "w": 662.78125,
+        "h": 186.40625
+       },
+       "stageMapValid": true
+      },
+      {
+       "id": 2,
+       "elId": 1,
+       "src": "Untitled.mov-0.0000-46.0333.mov",
+       "currentTime": 0.081707,
+       "paused": false,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "rect": {
+        "x": 109.3517074584961,
+        "y": 795.0361938476562,
+        "w": 951.53125,
+        "h": 267.60943603515625
+       },
+       "footprintOwner": {
+        "elId": 1,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 109.3517074584961,
+        "y": 795.0361938476562,
+        "w": 951.53125,
+        "h": 267.60943603515625
+       },
+       "stageMapValid": true
+      }
+     ],
+     "stageMap": {
+      "s": 1,
+      "sy": 1,
+      "ox": 0,
+      "oy": 0,
+      "offsetWidth": 1920,
+      "offsetHeight": 1080
+     },
+     "stageMapValid": true
+    }
+   ]
+  },
+  {
+   "name": "rows-G2-converted",
+   "kind": "rows",
+   "source": "output/evidence/loop-gates/l1r2/gl-1920x1080.json arms.A.samples[0:3]",
+   "schema": null,
+   "record": [
+    {
+     "t": 502.4000000022352,
+     "scene": 0,
+     "playerState": "IdleAtFinalState",
+     "busy": false,
+     "videos": [
+      {
+       "id": 1,
+       "elId": 2,
+       "src": "Untitled.mov-0.0000-46.0333.mov",
+       "currentTime": 0.048773,
+       "paused": false,
+       "ended": false,
+       "loop": true,
+       "duration": 46.033333,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "rect": {
+        "x": 1075.7864990234375,
+        "y": 876.2469482421875,
+        "w": 662.78125,
+        "h": 186.40625
+       },
+       "footprintOwner": {
+        "elId": 2,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 1075.7864990234375,
+        "y": 876.2469482421875,
+        "w": 662.78125,
+        "h": 186.40625
+       },
+       "stageMapValid": true
+      },
+      {
+       "id": 2,
+       "elId": 1,
+       "src": "Untitled.mov-0.0000-46.0333.mov",
+       "currentTime": 0.048956,
+       "paused": false,
+       "ended": false,
+       "loop": true,
+       "duration": 46.033333,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "rect": {
+        "x": 109.3517074584961,
+        "y": 795.0361938476562,
+        "w": 951.53125,
+        "h": 267.60943603515625
+       },
+       "footprintOwner": {
+        "elId": 1,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 109.3517074584961,
+        "y": 795.0361938476562,
+        "w": 951.53125,
+        "h": 267.60943603515625
+       },
+       "stageMapValid": true
+      }
+     ],
+     "stageMap": {
+      "s": 1,
+      "sy": 1,
+      "ox": 0,
+      "oy": 0,
+      "offsetWidth": 1920,
+      "offsetHeight": 1080
+     },
+     "stageMapValid": true
+    },
+    {
+     "t": 519.1000000014901,
+     "scene": 0,
+     "playerState": "IdleAtFinalState",
+     "busy": false,
+     "videos": [
+      {
+       "id": 1,
+       "elId": 2,
+       "src": "Untitled.mov-0.0000-46.0333.mov",
+       "currentTime": 0.065325,
+       "paused": false,
+       "ended": false,
+       "loop": true,
+       "duration": 46.033333,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "rect": {
+        "x": 1075.7864990234375,
+        "y": 876.2469482421875,
+        "w": 662.78125,
+        "h": 186.40625
+       },
+       "footprintOwner": {
+        "elId": 2,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 1075.7864990234375,
+        "y": 876.2469482421875,
+        "w": 662.78125,
+        "h": 186.40625
+       },
+       "stageMapValid": true
+      },
+      {
+       "id": 2,
+       "elId": 1,
+       "src": "Untitled.mov-0.0000-46.0333.mov",
+       "currentTime": 0.065296,
+       "paused": false,
+       "ended": false,
+       "loop": true,
+       "duration": 46.033333,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "rect": {
+        "x": 109.3517074584961,
+        "y": 795.0361938476562,
+        "w": 951.53125,
+        "h": 267.60943603515625
+       },
+       "footprintOwner": {
+        "elId": 1,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 109.3517074584961,
+        "y": 795.0361938476562,
+        "w": 951.53125,
+        "h": 267.60943603515625
+       },
+       "stageMapValid": true
+      }
+     ],
+     "stageMap": {
+      "s": 1,
+      "sy": 1,
+      "ox": 0,
+      "oy": 0,
+      "offsetWidth": 1920,
+      "offsetHeight": 1080
+     },
+     "stageMapValid": true
+    },
+    {
+     "t": 535.6000000014901,
+     "scene": 0,
+     "playerState": "IdleAtFinalState",
+     "busy": false,
+     "videos": [
+      {
+       "id": 1,
+       "elId": 2,
+       "src": "Untitled.mov-0.0000-46.0333.mov",
+       "currentTime": 0.081963,
+       "paused": false,
+       "ended": false,
+       "loop": true,
+       "duration": 46.033333,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "rect": {
+        "x": 1075.7864990234375,
+        "y": 876.2469482421875,
+        "w": 662.78125,
+        "h": 186.40625
+       },
+       "footprintOwner": {
+        "elId": 2,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 1075.7864990234375,
+        "y": 876.2469482421875,
+        "w": 662.78125,
+        "h": 186.40625
+       },
+       "stageMapValid": true
+      },
+      {
+       "id": 2,
+       "elId": 1,
+       "src": "Untitled.mov-0.0000-46.0333.mov",
+       "currentTime": 0.081956,
+       "paused": false,
+       "ended": false,
+       "loop": true,
+       "duration": 46.033333,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "rect": {
+        "x": 109.3517074584961,
+        "y": 795.0361938476562,
+        "w": 951.53125,
+        "h": 267.60943603515625
+       },
+       "footprintOwner": {
+        "elId": 1,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 109.3517074584961,
+        "y": 795.0361938476562,
+        "w": 951.53125,
+        "h": 267.60943603515625
+       },
+       "stageMapValid": true
+      }
+     ],
+     "stageMap": {
+      "s": 1,
+      "sy": 1,
+      "ox": 0,
+      "oy": 0,
+      "offsetWidth": 1920,
+      "offsetHeight": 1080
+     },
+     "stageMapValid": true
+    }
+   ]
+  },
+  {
+   "name": "rows-G3-converted",
+   "kind": "rows",
+   "source": "output/evidence/main-bridge-easing/final-dcd5b9e4/gates/host-1920x1080.json arms.A.samples[0:3]",
+   "schema": null,
+   "record": [
+    {
+     "t": 518.5999999940395,
+     "scene": 0,
+     "playerState": "IdleAtFinalState",
+     "busy": false,
+     "videos": [
+      {
+       "id": 1,
+       "elId": 2,
+       "src": "Untitled.mov-0.0000-46.0333.mov",
+       "currentTime": 0.029287,
+       "paused": false,
+       "ended": false,
+       "loop": false,
+       "duration": 46.033333,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "domId": "CBACAF27-B918-47C2-AB45-3ED71B6B394B-video",
+       "preserved": false,
+       "remounted": false,
+       "facade": false,
+       "rect": {
+        "x": 1075.7864990234375,
+        "y": 876.2469482421875,
+        "w": 662.78125,
+        "h": 186.40625
+       },
+       "footprintOwner": {
+        "elId": 2,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 1075.7864990234375,
+        "y": 876.2469482421875,
+        "w": 662.78125,
+        "h": 186.40625
+       },
+       "stageMapValid": true
+      },
+      {
+       "id": 2,
+       "elId": 1,
+       "src": "Untitled.mov-0.0000-46.0333.mov",
+       "currentTime": 0.041072,
+       "paused": false,
+       "ended": false,
+       "loop": false,
+       "duration": 46.033333,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "domId": "6BB39942-6C61-4763-839D-777C09E7E594-video",
+       "preserved": false,
+       "remounted": false,
+       "facade": false,
+       "rect": {
+        "x": 109.3517074584961,
+        "y": 795.0361938476562,
+        "w": 951.53125,
+        "h": 267.60943603515625
+       },
+       "footprintOwner": {
+        "elId": 1,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 109.3517074584961,
+        "y": 795.0361938476562,
+        "w": 951.53125,
+        "h": 267.60943603515625
+       },
+       "stageMapValid": true
+      }
+     ],
+     "stageMap": {
+      "s": 1,
+      "sy": 1,
+      "ox": 0,
+      "oy": 0,
+      "offsetWidth": 1920,
+      "offsetHeight": 1080
+     },
+     "stageMapValid": true
+    },
+    {
+     "t": 536.4000000059605,
+     "scene": 0,
+     "playerState": "IdleAtFinalState",
+     "busy": false,
+     "videos": [
+      {
+       "id": 1,
+       "elId": 2,
+       "src": "Untitled.mov-0.0000-46.0333.mov",
+       "currentTime": 0.047034,
+       "paused": false,
+       "ended": false,
+       "loop": false,
+       "duration": 46.033333,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "domId": "CBACAF27-B918-47C2-AB45-3ED71B6B394B-video",
+       "preserved": false,
+       "remounted": false,
+       "facade": false,
+       "rect": {
+        "x": 1075.7864990234375,
+        "y": 876.2469482421875,
+        "w": 662.78125,
+        "h": 186.40625
+       },
+       "footprintOwner": {
+        "elId": 2,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 1075.7864990234375,
+        "y": 876.2469482421875,
+        "w": 662.78125,
+        "h": 186.40625
+       },
+       "stageMapValid": true
+      },
+      {
+       "id": 2,
+       "elId": 1,
+       "src": "Untitled.mov-0.0000-46.0333.mov",
+       "currentTime": 0.058506,
+       "paused": false,
+       "ended": false,
+       "loop": false,
+       "duration": 46.033333,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "domId": "6BB39942-6C61-4763-839D-777C09E7E594-video",
+       "preserved": false,
+       "remounted": false,
+       "facade": false,
+       "rect": {
+        "x": 109.3517074584961,
+        "y": 795.0361938476562,
+        "w": 951.53125,
+        "h": 267.60943603515625
+       },
+       "footprintOwner": {
+        "elId": 1,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 109.3517074584961,
+        "y": 795.0361938476562,
+        "w": 951.53125,
+        "h": 267.60943603515625
+       },
+       "stageMapValid": true
+      }
+     ],
+     "stageMap": {
+      "s": 1,
+      "sy": 1,
+      "ox": 0,
+      "oy": 0,
+      "offsetWidth": 1920,
+      "offsetHeight": 1080
+     },
+     "stageMapValid": true
+    },
+    {
+     "t": 552.5999999940395,
+     "scene": 0,
+     "playerState": "IdleAtFinalState",
+     "busy": false,
+     "videos": [
+      {
+       "id": 1,
+       "elId": 2,
+       "src": "Untitled.mov-0.0000-46.0333.mov",
+       "currentTime": 0.063245,
+       "paused": false,
+       "ended": false,
+       "loop": false,
+       "duration": 46.033333,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "domId": "CBACAF27-B918-47C2-AB45-3ED71B6B394B-video",
+       "preserved": false,
+       "remounted": false,
+       "facade": false,
+       "rect": {
+        "x": 1075.7864990234375,
+        "y": 876.2469482421875,
+        "w": 662.78125,
+        "h": 186.40625
+       },
+       "footprintOwner": {
+        "elId": 2,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 1075.7864990234375,
+        "y": 876.2469482421875,
+        "w": 662.78125,
+        "h": 186.40625
+       },
+       "stageMapValid": true
+      },
+      {
+       "id": 2,
+       "elId": 1,
+       "src": "Untitled.mov-0.0000-46.0333.mov",
+       "currentTime": 0.074731,
+       "paused": false,
+       "ended": false,
+       "loop": false,
+       "duration": 46.033333,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "domId": "6BB39942-6C61-4763-839D-777C09E7E594-video",
+       "preserved": false,
+       "remounted": false,
+       "facade": false,
+       "rect": {
+        "x": 109.3517074584961,
+        "y": 795.0361938476562,
+        "w": 951.53125,
+        "h": 267.60943603515625
+       },
+       "footprintOwner": {
+        "elId": 1,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 109.3517074584961,
+        "y": 795.0361938476562,
+        "w": 951.53125,
+        "h": 267.60943603515625
+       },
+       "stageMapValid": true
+      }
+     ],
+     "stageMap": {
+      "s": 1,
+      "sy": 1,
+      "ox": 0,
+      "oy": 0,
+      "offsetWidth": 1920,
+      "offsetHeight": 1080
+     },
+     "stageMapValid": true
+    }
+   ]
+  },
+  {
+   "name": "rows-G4-converted",
+   "kind": "rows",
+   "source": "output/evidence/s2-dev/decks-4a2ea70f/D6-2560x1440.json arms.A.samples[0:3]",
+   "schema": null,
+   "record": [
+    {
+     "t": 440.1000000014901,
+     "scene": 0,
+     "playerState": "IdleAtFinalState",
+     "busy": false,
+     "videos": [
+      {
+       "id": 1,
+       "elId": 1,
+       "instance": "41D069CE-62DA-4567-8A01-47A0BB35D366",
+       "src": "counter-a.mov-0.0000-60.0000.mov",
+       "currentTime": 0.080056,
+       "paused": false,
+       "ended": false,
+       "loop": true,
+       "duration": 60,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "domId": "41D069CE-62DA-4567-8A01-47A0BB35D366-video",
+       "preserved": false,
+       "remounted": false,
+       "facade": false,
+       "rect": {
+        "x": 160.00000762939453,
+        "y": 700.0000305175781,
+        "w": 640.0000305175781,
+        "h": 180.0
+       },
+       "footprintOwner": {
+        "elId": 1,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 213.33334350585938,
+        "y": 933.3333740234375,
+        "w": 853.3333740234375,
+        "h": 240
+       },
+       "stageMapValid": true
+      },
+      {
+       "id": 2,
+       "elId": 2,
+       "instance": "70E3E894-8770-4892-B203-870BDB4E665C",
+       "src": "counter-a.mov-0.0000-60.0000.mov",
+       "currentTime": 0.077486,
+       "paused": false,
+       "ended": false,
+       "loop": false,
+       "duration": 60,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "domId": "70E3E894-8770-4892-B203-870BDB4E665C-video",
+       "preserved": false,
+       "remounted": false,
+       "facade": false,
+       "rect": {
+        "x": 40.00000190734863,
+        "y": 920.0000610351562,
+        "w": 319.99999237060547,
+        "h": 90.0
+       },
+       "footprintOwner": {
+        "elId": 2,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 53.333335876464844,
+        "y": 1226.666748046875,
+        "w": 426.6666564941406,
+        "h": 120
+       },
+       "stageMapValid": true
+      }
+     ],
+     "stageMap": {
+      "s": 1.3333333333333333,
+      "sy": 1.3333333333333333,
+      "ox": 0,
+      "oy": 0,
+      "offsetWidth": 1920,
+      "offsetHeight": 1080
+     },
+     "stageMapValid": true
+    },
+    {
+     "t": 456.3999999985099,
+     "scene": 0,
+     "playerState": "IdleAtFinalState",
+     "busy": false,
+     "videos": [
+      {
+       "id": 1,
+       "elId": 1,
+       "instance": "41D069CE-62DA-4567-8A01-47A0BB35D366",
+       "src": "counter-a.mov-0.0000-60.0000.mov",
+       "currentTime": 0.096199,
+       "paused": false,
+       "ended": false,
+       "loop": true,
+       "duration": 60,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "domId": "41D069CE-62DA-4567-8A01-47A0BB35D366-video",
+       "preserved": false,
+       "remounted": false,
+       "facade": false,
+       "rect": {
+        "x": 160.00000762939453,
+        "y": 700.0000305175781,
+        "w": 640.0000305175781,
+        "h": 180.0
+       },
+       "footprintOwner": {
+        "elId": 1,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 213.33334350585938,
+        "y": 933.3333740234375,
+        "w": 853.3333740234375,
+        "h": 240
+       },
+       "stageMapValid": true
+      },
+      {
+       "id": 2,
+       "elId": 2,
+       "instance": "70E3E894-8770-4892-B203-870BDB4E665C",
+       "src": "counter-a.mov-0.0000-60.0000.mov",
+       "currentTime": 0.093373,
+       "paused": false,
+       "ended": false,
+       "loop": false,
+       "duration": 60,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "domId": "70E3E894-8770-4892-B203-870BDB4E665C-video",
+       "preserved": false,
+       "remounted": false,
+       "facade": false,
+       "rect": {
+        "x": 40.00000190734863,
+        "y": 920.0000610351562,
+        "w": 319.99999237060547,
+        "h": 90.0
+       },
+       "footprintOwner": {
+        "elId": 2,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 53.333335876464844,
+        "y": 1226.666748046875,
+        "w": 426.6666564941406,
+        "h": 120
+       },
+       "stageMapValid": true
+      }
+     ],
+     "stageMap": {
+      "s": 1.3333333333333333,
+      "sy": 1.3333333333333333,
+      "ox": 0,
+      "oy": 0,
+      "offsetWidth": 1920,
+      "offsetHeight": 1080
+     },
+     "stageMapValid": true
+    },
+    {
+     "t": 473.1000000014901,
+     "scene": 0,
+     "playerState": "IdleAtFinalState",
+     "busy": false,
+     "videos": [
+      {
+       "id": 1,
+       "elId": 1,
+       "instance": "41D069CE-62DA-4567-8A01-47A0BB35D366",
+       "src": "counter-a.mov-0.0000-60.0000.mov",
+       "currentTime": 0.112909,
+       "paused": false,
+       "ended": false,
+       "loop": true,
+       "duration": 60,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "domId": "41D069CE-62DA-4567-8A01-47A0BB35D366-video",
+       "preserved": false,
+       "remounted": false,
+       "facade": false,
+       "rect": {
+        "x": 160.00000762939453,
+        "y": 700.0000305175781,
+        "w": 640.0000305175781,
+        "h": 180.0
+       },
+       "footprintOwner": {
+        "elId": 1,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 213.33334350585938,
+        "y": 933.3333740234375,
+        "w": 853.3333740234375,
+        "h": 240
+       },
+       "stageMapValid": true
+      },
+      {
+       "id": 2,
+       "elId": 2,
+       "instance": "70E3E894-8770-4892-B203-870BDB4E665C",
+       "src": "counter-a.mov-0.0000-60.0000.mov",
+       "currentTime": 0.110106,
+       "paused": false,
+       "ended": false,
+       "loop": false,
+       "duration": 60,
+       "readyState": 4,
+       "videoWidth": 1920,
+       "isConnected": true,
+       "domId": "70E3E894-8770-4892-B203-870BDB4E665C-video",
+       "preserved": false,
+       "remounted": false,
+       "facade": false,
+       "rect": {
+        "x": 40.00000190734863,
+        "y": 920.0000610351562,
+        "w": 319.99999237060547,
+        "h": 90.0
+       },
+       "footprintOwner": {
+        "elId": 2,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       },
+       "rectScreen": {
+        "x": 53.333335876464844,
+        "y": 1226.666748046875,
+        "w": 426.6666564941406,
+        "h": 120
+       },
+       "stageMapValid": true
+      }
+     ],
+     "stageMap": {
+      "s": 1.3333333333333333,
+      "sy": 1.3333333333333333,
+      "ox": 0,
+      "oy": 0,
+      "offsetWidth": 1920,
+      "offsetHeight": 1080
+     },
+     "stageMapValid": true
+    }
+   ]
+  },
+  {
+   "name": "refusal-read-pool-and-fromDom-hold-one-decoder",
+   "kind": "refusalRead",
+   "source": "output/evidence/s2-dev/i1-8207b263/D3.json arms.A.evidence['b1to2:counter-a.mov#1->end:retire']",
+   "record": {
+    "stageMap": {
+     "s": 1,
+     "sy": 1,
+     "ox": 0,
+     "oy": 0,
+     "offsetWidth": 1920,
+     "offsetHeight": 1080
+    },
+    "painting": [
+     {
+      "src": "counter-b.mov-0.0000-55.0000.mov",
+      "elId": 2,
+      "rect": {
+       "x": 1100,
+       "y": 700,
+       "w": 640,
+       "h": 180
+      }
+     },
+     {
+      "src": "counter-b.mov-0.0000-55.0000.mov",
+      "elId": 5,
+      "rect": {
+       "x": 1100,
+       "y": 700,
+       "w": 640,
+       "h": 180
+      }
+     }
+    ],
+    "poolSnapshot": [
+     {
+      "key": "counter-b.mov",
+      "movieKey": "movie2",
+      "instance": "1441C86A-33A3-4C14-9C20-CBD069B12487",
+      "elId": 5,
+      "currentTime": 8.874319,
+      "paused": false,
+      "readyState": 4,
+      "ended": false,
+      "inDocument": true,
+      "videoWidth": 1920,
+      "videoHeight": 540
+     },
+     {
+      "key": "counter-b.mov",
+      "movieKey": "movie2",
+      "instance": "1441C86A-33A3-4C14-9C20-CBD069B12487",
+      "elId": 2,
+      "currentTime": 8.874319,
+      "paused": false,
+      "readyState": 4,
+      "ended": false,
+      "inDocument": true,
+      "videoWidth": 1920,
+      "videoHeight": 540
+     },
+     {
+      "key": "counter-b.mov",
+      "movieKey": "movie2",
+      "instance": "1441C86A-33A3-4C14-9C20-CBD069B12487",
+      "elId": 2,
+      "currentTime": 8.874319,
+      "paused": false,
+      "readyState": 4,
+      "ended": false,
+      "inDocument": true,
+      "fromDom": true,
+      "videoWidth": 1920,
+      "videoHeight": 540
+     },
+     {
+      "key": "counter-b.mov",
+      "movieKey": "movie2",
+      "instance": "1441C86A-33A3-4C14-9C20-CBD069B12487",
+      "elId": 5,
+      "currentTime": 8.874319,
+      "paused": false,
+      "readyState": 4,
+      "ended": false,
+      "inDocument": true,
+      "fromDom": true,
+      "videoWidth": 1920,
+      "videoHeight": 540
+     }
+    ],
+    "coreEvents": [
+     {
+      "kind": "remount-scheduled",
+      "detail": {
+       "elId": 1,
+       "why": "preserve-on-detach-subtree",
+       "epoch": 0,
+       "sceneHash": "#1"
+      },
+      "t": 3599.60000000149
+     },
+     {
+      "kind": "remount-footprint-rect",
+      "detail": {
+       "elId": 1,
+       "rect": {
+        "x": 100,
+        "y": 400,
+        "w": 800,
+        "h": 225
+       },
+       "sceneHash": "#1"
+      },
+      "t": 3599.9000000059605
+     },
+     {
+      "kind": "remount-into-authored-layer",
+      "detail": {
+       "elId": 1,
+       "key": "counter-a.mov",
+       "canvasId": "636833147196CC7D947490110BCD3542",
+       "rect": {
+        "x": 100,
+        "y": 400,
+        "w": 800,
+        "h": 225
+       },
+       "videoWidth": 1920,
+       "currentTime": 3.205395,
+       "inDocument": true,
+       "sceneHash": "#1"
+      },
+      "t": 3600.2000000029802
+     },
+     {
+      "kind": "remount-scheduled",
+      "detail": {
+       "elId": 2,
+       "why": "preserve-on-detach-subtree",
+       "epoch": 0,
+       "sceneHash": "#1"
+      },
+      "t": 3600.3000000044703
+     },
+     {
+      "kind": "remount-into-authored-layer",
+      "detail": {
+       "elId": 1,
+       "key": "counter-a.mov",
+       "canvasId": "636833147196CC7D947490110BCD3542",
+       "rect": {
+        "x": 100,
+        "y": 400,
+        "w": 800,
+        "h": 225
+       },
+       "videoWidth": 1920,
+       "currentTime": 3.256497,
+       "inDocument": true,
+       "sceneHash": "#1"
+      },
+      "t": 3650.7000000029802
+     },
+     {
+      "kind": "remount-into-authored-layer",
+      "detail": {
+       "elId": 1,
+       "key": "counter-a.mov",
+       "canvasId": "636833147196CC7D947490110BCD3542",
+       "rect": {
+        "x": 100,
+        "y": 400,
+        "w": 800,
+        "h": 225
+       },
+       "videoWidth": 1920,
+       "currentTime": 3.406857,
+       "inDocument": true,
+       "sceneHash": "#1"
+      },
+      "t": 3801
+     },
+     {
+      "kind": "remount-into-authored-layer",
+      "detail": {
+       "elId": 1,
+       "key": "counter-a.mov",
+       "canvasId": "636833147196CC7D947490110BCD3542",
+       "rect": {
+        "x": 100,
+        "y": 400,
+        "w": 800,
+        "h": 225
+       },
+       "videoWidth": 1920,
+       "currentTime": 3.706787,
+       "inDocument": true,
+       "sceneHash": "#1"
+      },
+      "t": 4100.9000000059605
+     },
+     {
+      "kind": "remount-into-authored-layer",
+      "detail": {
+       "elId": 1,
+       "key": "counter-a.mov",
+       "canvasId": "636833147196CC7D947490110BCD3542",
+       "rect": {
+        "x": 100,
+        "y": 400,
+        "w": 800,
+        "h": 225
+       },
+       "videoWidth": 1920,
+       "currentTime": 4.107765,
+       "inDocument": true,
+       "sceneHash": "#1"
+      },
+      "t": 4501.9000000059605
+     },
+     {
+      "kind": "remount-into-authored-layer",
+      "detail": {
+       "elId": 1,
+       "key": "counter-a.mov",
+       "canvasId": "636833147196CC7D947490110BCD3542",
+       "rect": {
+        "x": 100,
+        "y": 400,
+        "w": 800,
+        "h": 225
+       },
+       "videoWidth": 1920,
+       "currentTime": 4.607874,
+       "inDocument": true,
+       "sceneHash": "#1"
+      },
+      "t": 5002
+     },
+     {
+      "kind": "remount-scheduled",
+      "detail": {
+       "elId": 1,
+       "why": "preserve-on-detach-subtree",
+       "epoch": 0,
+       "sceneHash": "#2"
+      },
+      "t": 5497.80000000447
+     },
+     {
+      "kind": "remount-footprint-rect",
+      "detail": {
+       "elId": 1,
+       "rect": {
+        "x": 100,
+        "y": 400,
+        "w": 800,
+        "h": 225
+       },
+       "sceneHash": "#2"
+      },
+      "t": 5497.9000000059605
+     },
+     {
+      "kind": "remount-into-authored-layer",
+      "detail": {
+       "elId": 1,
+       "key": "counter-a.mov",
+       "canvasId": "636833147196CC7D947490110BCD3542",
+       "rect": {
+        "x": 100,
+        "y": 400,
+        "w": 800,
+        "h": 225
+       },
+       "videoWidth": 1920,
+       "currentTime": 5.103673,
+       "inDocument": true,
+       "sceneHash": "#2"
+      },
+      "t": 5498.10000000149
+     },
+     {
+      "kind": "reuse-decoder",
+      "detail": {
+       "key": "counter-a.mov",
+       "newElId": 3,
+       "oldElId": 1,
+       "preservedT": 5.104298,
+       "paused": true,
+       "readyState": 4,
+       "oldGen": 0,
+       "generation": 0,
+       "queueLeft": 0,
+       "atScene": 2,
+       "src": "85E62542-449B-4030-BC00-F9616EBFA716",
+       "dst": "0588DA1E-7042-4124-AA51-585D38987F28",
+       "srcRect": {
+        "x": 100,
+        "y": 400,
+        "w": 800,
+        "h": 225
+       },
+       "measuredRect": {
+        "x": 100,
+        "y": 400,
+        "w": 800,
+        "h": 225
+       },
+       "sceneHash": "#2"
+      },
+      "t": 5502.60000000149
+     },
+     {
+      "kind": "dom-swap",
+      "detail": {
+       "elId": 1,
+       "t": 5.104302,
+       "paused": false,
+       "sceneHash": "#2"
+      },
+      "t": 5503.4000000059605
+     },
+     {
+      "kind": "remount-canvas-ambiguous",
+      "detail": {
+       "elId": 1,
+       "box": {
+        "x": 100,
+        "y": 400,
+        "w": 800,
+        "h": 225
+       },
+       "candidateN": 2,
+       "layerMatchN": 0,
+       "sceneHash": "#2"
+      },
+      "t": 5549.10000000149
+     },
+     {
+      "kind": "remount-done",
+      "detail": {
+       "elId": 1,
+       "key": "counter-a.mov",
+       "rect": {
+        "x": 100,
+        "y": 400,
+        "w": 800,
+        "h": 225
+       },
+       "z": "",
+       "videoWidth": 1920,
+       "currentTime": 5.150503,
+       "inDocument": true,
+       "sceneHash": "#2"
+      },
+      "t": 5549.4000000059605
+     },
+     {
+      "kind": "remount-canvas-ambiguous",
+      "detail": {
+       "elId": 1,
+       "box": {
+        "x": 100,
+        "y": 400,
+        "w": 800,
+        "h": 225
+       },
+       "candidateN": 2,
+       "layerMatchN": 0,
+       "sceneHash": "#2"
+      },
+      "t": 5601
+     },
+     {
+      "kind": "remount-done",
+      "detail": {
+       "elId": 1,
+       "key": "counter-a.mov",
+       "rect": {
+        "x": 100,
+        "y": 400,
+        "w": 800,
+        "h": 225
+       },
+       "z": "",
+       "videoWidth": 1920,
+       "currentTime": 5.20228,
+       "inDocument": true,
+       "sceneHash": "#2"
+      },
+      "t": 5601.10000000149
+     },
+     {
+      "kind": "remount-canvas-ambiguous",
+      "detail": {
+       "elId": 1,
+       "box": {
+        "x": 100,
+        "y": 400,
+        "w": 800,
+        "h": 225
+       },
+       "candidateN": 2,
+       "layerMatchN": 0,
+       "sceneHash": "#2"
+      },
+      "t": 5699
+     },
+     {
+      "kind": "remount-done",
+      "detail": {
+       "elId": 1,
+       "key": "counter-a.mov",
+       "rect": {
+        "x": 100,
+        "y": 400,
+        "w": 800,
+        "h": 225
+       },
+       "z": "",
+       "videoWidth": 1920,
+       "currentTime": 5.300193,
+       "inDocument": true,
+       "sceneHash": "#2"
+      },
+      "t": 5699
+     },
+     {
+      "kind": "retire-boundary",
+      "detail": {
+       "key": "movie1",
+       "elIds": [
+        1
+       ],
+       "atScene": 4,
+       "instance": "0588DA1E-7042-4124-AA51-585D38987F28",
+       "sceneHash": "#3"
+      },
+      "t": 5835
+     },
+     {
+      "kind": "preserve-refused",
+      "detail": {
+       "key": "movie1",
+       "scene": 3,
+       "via": "remount",
+       "instance": "0588DA1E-7042-4124-AA51-585D38987F28",
+       "sceneHash": "#3"
+      },
+      "t": 5999
+     },
+     {
+      "kind": "reuse-decoder",
+      "detail": {
+       "key": "counter-b.mov",
+       "newElId": 5,
+       "oldElId": 2,
+       "preservedT": 8.754197,
+       "paused": false,
+       "readyState": 4,
+       "oldGen": 0,
+       "generation": 0,
+       "queueLeft": 0,
+       "atScene": 4,
+       "src": "9528CD4B-9141-4D8F-81E4-A8404EB4DA32",
+       "dst": "1441C86A-33A3-4C14-9C20-CBD069B12487",
+       "srcRect": {
+        "x": 1100,
+        "y": 700,
+        "w": 640,
+        "h": 180
+       },
+       "measuredRect": {
+        "x": 1100,
+        "y": 700,
+        "w": 640,
+        "h": 180
+       },
+       "sceneHash": "#4"
+      },
+      "t": 9149
+     },
+     {
+      "kind": "remount-scheduled",
+      "detail": {
+       "elId": 5,
+       "why": "preserve-on-detach-subtree",
+       "epoch": 0,
+       "sceneHash": "#4"
+      },
+      "t": 9149.70000000298
+     },
+     {
+      "kind": "remount-authored-parent",
+      "detail": {
+       "elId": 5,
+       "key": "counter-b.mov",
+       "layer": "layer113",
+       "z": "auto",
+       "videoWidth": 1920,
+       "currentTime": 8.754197,
+       "inDocument": true,
+       "sceneHash": "#4"
+      },
+      "t": 9149.70000000298
+     },
+     {
+      "kind": "dom-swap",
+      "detail": {
+       "elId": 2,
+       "t": 8.754197,
+       "paused": false,
+       "sceneHash": "#4"
+      },
+      "t": 9149.80000000447
+     },
+     {
+      "kind": "remount-scheduled",
+      "detail": {
+       "elId": 5,
+       "why": "preserve-on-detach",
+       "epoch": 0,
+       "sceneHash": "#4"
+      },
+      "t": 9149.90000000596
+     },
+     {
+      "kind": "remount-authored-parent",
+      "detail": {
+       "elId": 5,
+       "key": "counter-b.mov",
+       "layer": "layer113",
+       "z": "",
+       "videoWidth": 1920,
+       "currentTime": 8.75535,
+       "inDocument": true,
+       "sceneHash": "#4"
+      },
+      "t": 9150
+     },
+     {
+      "kind": "remount-scheduled",
+      "detail": {
+       "elId": 2,
+       "why": "preserve-on-detach",
+       "epoch": 0,
+       "sceneHash": "#4"
+      },
+      "t": 9150.10000000149
+     },
+     {
+      "kind": "remount-authored-parent",
+      "detail": {
+       "elId": 2,
+       "key": "counter-b.mov",
+       "layer": "layer113",
+       "z": "auto",
+       "videoWidth": 1920,
+       "currentTime": 8.75535,
+       "inDocument": true,
+       "sceneHash": "#4"
+      },
+      "t": 9150.10000000149
+     },
+     {
+      "kind": "remount-authored-parent",
+      "detail": {
+       "elId": 5,
+       "key": "counter-b.mov",
+       "layer": "layer113",
+       "z": "",
+       "videoWidth": 1920,
+       "currentTime": 8.806277,
+       "inDocument": true,
+       "sceneHash": "#4"
+      },
+      "t": 9200.90000000596
+     },
+     {
+      "kind": "remount-authored-parent",
+      "detail": {
+       "elId": 5,
+       "key": "counter-b.mov",
+       "layer": "layer113",
+       "z": "",
+       "videoWidth": 1920,
+       "currentTime": 8.806303,
+       "inDocument": true,
+       "sceneHash": "#4"
+      },
+      "t": 9200.90000000596
+     },
+     {
+      "kind": "remount-authored-parent",
+      "detail": {
+       "elId": 2,
+       "key": "counter-b.mov",
+       "layer": "layer113",
+       "z": "auto",
+       "videoWidth": 1920,
+       "currentTime": 8.806331,
+       "inDocument": true,
+       "sceneHash": "#4"
+      },
+      "t": 9200.90000000596
+     }
+    ]
+   }
+  },
+  {
+   "name": "refusal-read-without-core",
+   "kind": "refusalRead",
+   "source": "output/evidence/main-bridge-easing/final-dcd5b9e4/gates/host-1920x1080.json arms.B.evidence.refused1to2",
+   "record": {
+    "stageMap": {
+     "s": 1,
+     "sy": 1,
+     "ox": 0,
+     "oy": 0,
+     "offsetWidth": 1920,
+     "offsetHeight": 1080
+    },
+    "painting": [],
+    "poolSnapshot": null,
+    "coreEvents": null
+   }
+  },
+  {
+   "name": "gl-read-release-elId-null-retire-without-instance",
+   "kind": "gl",
+   "source": "output/evidence/gates-glc/r2/p5f/rvfcUnavailable/probe.json visible.VglForced.handback.after (notes trimmed)",
+   "record": {
+    "t": 13996,
+    "hash": "#3",
+    "ready": true,
+    "api": {
+     "version": 1,
+     "state": "RETIRED",
+     "standDowns": [
+      "rvfcUnavailable"
+     ],
+     "events": [
+      {
+       "kind": "glreplay-standdown",
+       "detail": {
+        "released": {
+         "ok": true,
+         "reason": "failure",
+         "mode": "retire",
+         "elId": null,
+         "retired": [
+          2,
+          1
+         ]
+        },
+        "writebackFailed": false,
+        "posterRestored": null,
+        "completedMs": 0.6000000014901161,
+        "reason": "rvfcUnavailable"
+       },
+       "t": 6407.5999999940395
+      }
+     ],
+     "stats": {
+      "version": 1,
+      "state": "RETIRED",
+      "epoch": 0,
+      "iter": 0,
+      "uploads": 0,
+      "glErrors": 0
+     }
+    },
+    "coreEvents": [
+     {
+      "kind": "glreplay-zone",
+      "detail": {
+       "key": "movie1",
+       "from": "pending",
+       "to": "armed",
+       "reason": "moduleReady",
+       "sceneHash": ""
+      },
+      "t": 233.09999999403954
+     },
+     {
+      "kind": "glreplay-zone",
+      "detail": {
+       "key": "movie1",
+       "from": "armed",
+       "to": "retired",
+       "reason": "failure",
+       "standDown": "rvfcUnavailable",
+       "sceneHash": "#1"
+      },
+      "t": 6407.19999999553
+     },
+     {
+      "kind": "retire-boundary",
+      "detail": {
+       "key": "movie1",
+       "elIds": [
+        2,
+        1
+       ],
+       "atScene": 2,
+       "sceneHash": "#1"
+      },
+      "t": 6407.5
+     },
+     {
+      "kind": "glreplay-release",
+      "detail": {
+       "ok": true,
+       "reason": "failure",
+       "mode": "retire",
+       "elId": null,
+       "retired": [
+        2,
+        1
+       ],
+       "sceneHash": "#1"
+      },
+      "t": 6407.5
+     }
+    ],
+    "pool": [],
+    "facades": []
+   }
+  },
+  {
+   "name": "handback-ok",
+   "kind": "handback",
+   "source": "output/evidence/gates-glc/r2/p5a/1920x1080-rep2/probe.json visible.Vgl.handback (notes trimmed)",
+   "record": {
+    "status": "ok",
+    "reason": null,
+    "targetHash": 3,
+    "expectHandoff": true,
+    "before": {
+     "t": 13430.69999999553,
+     "hash": "#2",
+     "ready": true,
+     "api": {
+      "version": 1,
+      "state": "LIVE",
+      "standDowns": [],
+      "events": [
+       {
+        "kind": "glreplay-arm",
+        "detail": {
+         "canvasId": "0-canvas",
+         "atScene": 2
+        },
+        "t": 6338.79999999702
+       },
+       {
+        "kind": "glreplay-live",
+        "detail": {
+         "canvasId": "0-canvas",
+         "epoch": 1,
+         "frameLen": 88
+        },
+        "t": 7982
+       }
+      ],
+      "stats": {
+       "version": 1,
+       "state": "LIVE",
+       "epoch": 1,
+       "iter": 197,
+       "uploads": 240,
+       "glErrors": 0
+      }
+     },
+     "coreEvents": [
+      {
+       "kind": "glreplay-zone",
+       "detail": {
+        "key": "movie1",
+        "from": "pending",
+        "to": "armed",
+        "reason": "moduleReady",
+        "sceneHash": ""
+       },
+       "t": 232.39999999850988
+      },
+      {
+       "kind": "glreplay-carried",
+       "detail": {
+        "elId": 1,
+        "delta": 0.01202392578125,
+        "candidates": [
+         {
+          "elId": 2,
+          "rect": {
+           "x": 1075.7864990234375,
+           "y": 876.2469482421875,
+           "w": 662.78125,
+           "h": 186.40625
+          }
+         },
+         {
+          "elId": 1,
+          "rect": {
+           "x": 109.3517074584961,
+           "y": 795.0361938476562,
+           "w": 951.53125,
+           "h": 267.60943603515625
+          }
+         }
+        ],
+        "sceneHash": "#1"
+       },
+       "t": 6366.69999999553
+      }
+     ],
+     "pool": [
+      {
+       "key": "untitled.mov",
+       "movieKey": "movie1",
+       "elId": 2,
+       "currentTime": 12.900175,
+       "paused": false,
+       "readyState": 4,
+       "ended": false,
+       "inDocument": false,
+       "videoWidth": 1920,
+       "videoHeight": 540
+      },
+      {
+       "key": "untitled.mov",
+       "movieKey": "movie1",
+       "elId": 1,
+       "currentTime": 12.51927,
+       "paused": false,
+       "readyState": 4,
+       "ended": false,
+       "inDocument": false,
+       "videoWidth": 1920,
+       "videoHeight": 540
+      }
+     ],
+     "facades": []
+    },
+    "stageMap": {
+     "s": 1,
+     "sy": 1,
+     "ox": 0,
+     "oy": 0,
+     "offsetWidth": 1920,
+     "offsetHeight": 1080
+    },
+    "painting": [
+     {
+      "src": "Untitled.mov-0.0000-46.0333.mov",
+      "elId": 1,
+      "rect": {
+       "x": 109.34375,
+       "y": 795.03125,
+       "w": 951.53125,
+       "h": 267.609375
+      }
+     }
+    ],
+    "preserve": [
+     {
+      "key": "untitled.mov",
+      "movieKey": "movie1",
+      "elId": 1,
+      "currentTime": 13.953221,
+      "paused": false,
+      "readyState": 4,
+      "ended": false,
+      "inDocument": true,
+      "videoWidth": 1920,
+      "videoHeight": 540
+     },
+     {
+      "key": "untitled.mov",
+      "movieKey": "movie1",
+      "elId": 1,
+      "currentTime": 13.953221,
+      "paused": false,
+      "readyState": 4,
+      "ended": false,
+      "inDocument": true,
+      "fromDom": true,
+      "videoWidth": 1920,
+      "videoHeight": 540
+     }
+    ],
+    "after": {
+     "t": 14865.19999999553,
+     "hash": "#3",
+     "ready": true,
+     "api": {
+      "version": 1,
+      "state": "RETIRED",
+      "standDowns": [
+       "canvasRemoved"
+      ],
+      "events": [
+       {
+        "kind": "glreplay-arm",
+        "detail": {
+         "canvasId": "0-canvas",
+         "atScene": 2
+        },
+        "t": 6338.79999999702
+       },
+       {
+        "kind": "glreplay-live",
+        "detail": {
+         "canvasId": "0-canvas",
+         "epoch": 1,
+         "frameLen": 88
+        },
+        "t": 7982
+       }
+      ],
+      "stats": {
+       "version": 1,
+       "state": "RETIRED",
+       "epoch": 1,
+       "iter": 201,
+       "uploads": 243,
+       "glErrors": 0
+      }
+     },
+     "coreEvents": [
+      {
+       "kind": "glreplay-zone",
+       "detail": {
+        "key": "movie1",
+        "from": "pending",
+        "to": "armed",
+        "reason": "moduleReady",
+        "sceneHash": ""
+       },
+       "t": 232.39999999850988
+      },
+      {
+       "kind": "glreplay-carried",
+       "detail": {
+        "elId": 1,
+        "delta": 0.01202392578125,
+        "candidates": [
+         {
+          "elId": 2,
+          "rect": {
+           "x": 1075.7864990234375,
+           "y": 876.2469482421875,
+           "w": 662.78125,
+           "h": 186.40625
+          }
+         },
+         {
+          "elId": 1,
+          "rect": {
+           "x": 109.3517074584961,
+           "y": 795.0361938476562,
+           "w": 951.53125,
+           "h": 267.60943603515625
+          }
+         }
+        ],
+        "sceneHash": "#1"
+       },
+       "t": 6366.69999999553
+      },
+      {
+       "kind": "glreplay-zone",
+       "detail": {
+        "key": "movie1",
+        "from": "armed",
+        "to": "released",
+        "reason": "handoff",
+        "sceneHash": "#2"
+       },
+       "t": 13537.10000000149
+      },
+      {
+       "kind": "glreplay-release",
+       "detail": {
+        "ok": true,
+        "reason": null,
+        "mode": "handoff",
+        "elId": 1,
+        "retired": [
+         2
+        ],
+        "sceneHash": "#2"
+       },
+       "t": 13537.89999999851
+      }
+     ],
+     "pool": [
+      {
+       "key": "untitled.mov",
+       "movieKey": "movie1",
+       "elId": 1,
+       "currentTime": 13.953622,
+       "paused": false,
+       "readyState": 4,
+       "ended": false,
+       "inDocument": true,
+       "videoWidth": 1920,
+       "videoHeight": 540
+      },
+      {
+       "key": "untitled.mov",
+       "movieKey": "movie1",
+       "elId": 1,
+       "currentTime": 13.953622,
+       "paused": false,
+       "readyState": 4,
+       "ended": false,
+       "inDocument": true,
+       "fromDom": true,
+       "videoWidth": 1920,
+       "videoHeight": 540
+      }
+     ],
+     "facades": []
+    },
+    "shot": "/Users/anyhowclick/Desktop/work/obed-edom/output/gates-glc/r2/p5a/1920x1080-rep2/visible/Vgl-handback.png"
+   }
+  },
+  {
+   "name": "handback-inconclusive-without-before",
+   "kind": "handback",
+   "source": "capture_handback (probe:4893-4897): an advance that fails before the first read",
+   "record": {
+    "status": "inconclusive",
+    "reason": "advance failed: boom",
+    "targetHash": 3,
+    "expectHandoff": true
+   }
+  },
+  {
+   "name": "force-wrap-take",
+   "kind": "forceWrap",
+   "source": "output/evidence/loop-gates/diag/loop-1to2-3000-4.json (recorder frames and samples trimmed)",
+   "record": {
+    "take": {
+     "domId": "6BB39942-6C61-4763-839D-777C09E7E594-video",
+     "offsetMs": 3000,
+     "leadS": 5.0,
+     "select": {
+      "domId": "6BB39942-6C61-4763-839D-777C09E7E594-video",
+      "count": 1,
+      "t": 3511.2999999998137,
+      "duration": 46.033333,
+      "loop": true,
+      "playbackRate": 1,
+      "seekFrom": 3.077855,
+      "target": 41.033333
+     },
+     "status": {
+      "t": 3957.2999999998137,
+      "seekedT": 3519.399999999907,
+      "framesAfterSeek": 10,
+      "last": {
+       "now": 3942.4,
+       "mediaTime": 41.5,
+       "presentedFrames": 107
+      },
+      "duration": 46.033333,
+      "playbackRate": 1
+     },
+     "plannedWrapT": 8475.732999999998,
+     "plannedPressT": 5475.732999999998,
+     "pressT": 5481.199999999721,
+     "pressReturnedT": 5486.799999999814,
+     "reached": true
+    },
+    "recorder": {
+     "t": 9628.599999999627,
+     "seekedT": 3519.399999999907,
+     "seekFrom": 3.077855,
+     "target": 41.033333,
+     "frames": [
+      {
+       "now": 3542.4,
+       "mediaTime": 41.1,
+       "presentedFrames": 95
+      },
+      {
+       "now": 3575.7,
+       "mediaTime": 41.133333,
+       "presentedFrames": 96
+      },
+      {
+       "now": 3642.4,
+       "mediaTime": 41.166667,
+       "presentedFrames": 97
+      },
+      {
+       "now": 3675.7,
+       "mediaTime": 41.2,
+       "presentedFrames": 98
+      }
+     ],
+     "id": "6BB39942-6C61-4763-839D-777C09E7E594-video",
+     "elId": 1,
+     "probeId": 2,
+     "loop": true,
+     "ended": false,
+     "paused": false,
+     "isConnected": false,
+     "duration": 46.033333,
+     "playbackRate": 1
+    },
+    "pageErrorNotes": [],
+    "samples": [
+     {
+      "t": 509.6999999997206,
+      "scene": 0,
+      "playerState": "IdleAtFinalState",
+      "busy": false,
+      "videos": [
+       {
+        "id": 1,
+        "elId": 2,
+        "src": "Untitled.mov-0.0000-46.0333.mov",
+        "currentTime": 0.07314,
+        "paused": false,
+        "ended": false,
+        "loop": true,
+        "duration": 46.033333,
+        "readyState": 4,
+        "videoWidth": 1920,
+        "isConnected": true,
+        "rect": {
+         "x": 1075.7864990234375,
+         "y": 876.2469482421875,
+         "w": 662.78125,
+         "h": 186.40625
+        },
+        "footprintOwner": {
+         "elId": 2,
+         "key": "movie1",
+         "via": "footprint-video",
+         "contextType": null
+        },
+        "rectScreen": {
+         "x": 1075.7864990234375,
+         "y": 876.2469482421875,
+         "w": 662.78125,
+         "h": 186.40625
+        },
+        "stageMapValid": true
+       },
+       {
+        "id": 2,
+        "elId": 1,
+        "src": "Untitled.mov-0.0000-46.0333.mov",
+        "currentTime": 0.076652,
+        "paused": false,
+        "ended": false,
+        "loop": true,
+        "duration": 46.033333,
+        "readyState": 4,
+        "videoWidth": 1920,
+        "isConnected": true,
+        "rect": {
+         "x": 109.3517074584961,
+         "y": 795.0361938476562,
+         "w": 951.53125,
+         "h": 267.60943603515625
+        },
+        "footprintOwner": {
+         "elId": 1,
+         "key": "movie1",
+         "via": "footprint-video",
+         "contextType": null
+        },
+        "rectScreen": {
+         "x": 109.3517074584961,
+         "y": 795.0361938476562,
+         "w": 951.53125,
+         "h": 267.60943603515625
+        },
+        "stageMapValid": true
+       }
+      ],
+      "stageMap": {
+       "s": 1,
+       "sy": 1,
+       "ox": 0,
+       "oy": 0,
+       "offsetWidth": 1920,
+       "offsetHeight": 1080
+      },
+      "stageMapValid": true
+     },
+     {
+      "t": 526.5999999996275,
+      "scene": 0,
+      "playerState": "IdleAtFinalState",
+      "busy": false,
+      "videos": [
+       {
+        "id": 1,
+        "elId": 2,
+        "src": "Untitled.mov-0.0000-46.0333.mov",
+        "currentTime": 0.089928,
+        "paused": false,
+        "ended": false,
+        "loop": true,
+        "duration": 46.033333,
+        "readyState": 4,
+        "videoWidth": 1920,
+        "isConnected": true,
+        "rect": {
+         "x": 1075.7864990234375,
+         "y": 876.2469482421875,
+         "w": 662.78125,
+         "h": 186.40625
+        },
+        "footprintOwner": {
+         "elId": 2,
+         "key": "movie1",
+         "via": "footprint-video",
+         "contextType": null
+        },
+        "rectScreen": {
+         "x": 1075.7864990234375,
+         "y": 876.2469482421875,
+         "w": 662.78125,
+         "h": 186.40625
+        },
+        "stageMapValid": true
+       },
+       {
+        "id": 2,
+        "elId": 1,
+        "src": "Untitled.mov-0.0000-46.0333.mov",
+        "currentTime": 0.093211,
+        "paused": false,
+        "ended": false,
+        "loop": true,
+        "duration": 46.033333,
+        "readyState": 4,
+        "videoWidth": 1920,
+        "isConnected": true,
+        "rect": {
+         "x": 109.3517074584961,
+         "y": 795.0361938476562,
+         "w": 951.53125,
+         "h": 267.60943603515625
+        },
+        "footprintOwner": {
+         "elId": 1,
+         "key": "movie1",
+         "via": "footprint-video",
+         "contextType": null
+        },
+        "rectScreen": {
+         "x": 109.3517074584961,
+         "y": 795.0361938476562,
+         "w": 951.53125,
+         "h": 267.60943603515625
+        },
+        "stageMapValid": true
+       }
+      ],
+      "stageMap": {
+       "s": 1,
+       "sy": 1,
+       "ox": 0,
+       "oy": 0,
+       "offsetWidth": 1920,
+       "offsetHeight": 1080
+      },
+      "stageMapValid": true
+     },
+     {
+      "t": 543.5,
+      "scene": 0,
+      "playerState": "IdleAtFinalState",
+      "busy": false,
+      "videos": [
+       {
+        "id": 1,
+        "elId": 2,
+        "src": "Untitled.mov-0.0000-46.0333.mov",
+        "currentTime": 0.106796,
+        "paused": false,
+        "ended": false,
+        "loop": true,
+        "duration": 46.033333,
+        "readyState": 4,
+        "videoWidth": 1920,
+        "isConnected": true,
+        "rect": {
+         "x": 1075.7864990234375,
+         "y": 876.2469482421875,
+         "w": 662.78125,
+         "h": 186.40625
+        },
+        "footprintOwner": {
+         "elId": 2,
+         "key": "movie1",
+         "via": "footprint-video",
+         "contextType": null
+        },
+        "rectScreen": {
+         "x": 1075.7864990234375,
+         "y": 876.2469482421875,
+         "w": 662.78125,
+         "h": 186.40625
+        },
+        "stageMapValid": true
+       },
+       {
+        "id": 2,
+        "elId": 1,
+        "src": "Untitled.mov-0.0000-46.0333.mov",
+        "currentTime": 0.110086,
+        "paused": false,
+        "ended": false,
+        "loop": true,
+        "duration": 46.033333,
+        "readyState": 4,
+        "videoWidth": 1920,
+        "isConnected": true,
+        "rect": {
+         "x": 109.3517074584961,
+         "y": 795.0361938476562,
+         "w": 951.53125,
+         "h": 267.60943603515625
+        },
+        "footprintOwner": {
+         "elId": 1,
+         "key": "movie1",
+         "via": "footprint-video",
+         "contextType": null
+        },
+        "rectScreen": {
+         "x": 109.3517074584961,
+         "y": 795.0361938476562,
+         "w": 951.53125,
+         "h": 267.60943603515625
+        },
+        "stageMapValid": true
+       }
+      ],
+      "stageMap": {
+       "s": 1,
+       "sy": 1,
+       "ox": 0,
+       "oy": 0,
+       "offsetWidth": 1920,
+       "offsetHeight": 1080
+      },
+      "stageMapValid": true
+     }
+    ],
+    "reads": [
+     {
+      "stageMap": {
+       "s": 1,
+       "sy": 1,
+       "ox": 0,
+       "oy": 0,
+       "offsetWidth": 1920,
+       "offsetHeight": 1080
+      },
+      "painting": [],
+      "poolSnapshot": [
+       {
+        "key": "untitled.mov",
+        "movieKey": "movie1",
+        "elId": 2,
+        "currentTime": 6.832106,
+        "paused": false,
+        "readyState": 4,
+        "ended": false,
+        "inDocument": false,
+        "videoWidth": 1920,
+        "videoHeight": 540
+       },
+       {
+        "key": "untitled.mov",
+        "movieKey": "movie1",
+        "elId": 1,
+        "currentTime": 44.78296,
+        "paused": false,
+        "readyState": 4,
+        "ended": false,
+        "inDocument": false,
+        "videoWidth": 1920,
+        "videoHeight": 540
+       }
+      ],
+      "glReplay": {
+       "t": 7315.799999999814,
+       "hash": "#2",
+       "ready": true,
+       "api": {
+        "version": 1,
+        "state": "LIVE",
+        "standDowns": [],
+        "events": [
+         {
+          "kind": "glreplay-arm",
+          "detail": {
+           "canvasId": "0-canvas",
+           "atScene": 2
+          },
+          "t": 5596.199999999721
+         },
+         {
+          "kind": "glreplay-live",
+          "detail": {
+           "canvasId": "0-canvas",
+           "epoch": 1,
+           "frameLen": 88
+          },
+          "t": 7245.699999999721
+         }
+        ],
+        "stats": {
+         "version": 1,
+         "state": "LIVE",
+         "epoch": 1,
+         "iter": 4,
+         "frameLen": 88,
+         "uploads": 94,
+         "glErrors": 0,
+         "settleGapMs": 100,
+         "settleToHashMs": 104.10000000009313,
+         "mutationScanMs": null,
+         "posterSnapshotMs": 2.6000000000931323,
+         "loopMode": "rvfc",
+         "videoEnded": false,
+         "pending": null,
+         "occludedBands": 20,
+         "occluderMask": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          1
+         ],
+         "bandCount": 128,
+         "opacityUnproven": [],
+         "restOpacity": [
+          1,
+          0,
+          1,
+          1,
+          1
+         ],
+         "opacityAfterProofs": [
+          1,
+          0,
+          1,
+          1,
+          1
+         ],
+         "programsDistinct": true,
+         "greenAuthored": {
+          "x": 796.725538103768,
+          "y": 680.9158876261134,
+          "w": 337,
+          "h": 101.93103620201157
+         },
+         "greenRoi": {
+          "x": 797,
+          "y": 297,
+          "w": 337,
+          "h": 102
+         },
+         "geometry": {
+          "band": {
+           "x": 109,
+           "y": 17,
+           "w": 952,
+           "h": 268
+          },
+          "control": {
+           "x": 4,
+           "y": 1036,
+           "w": 40,
+           "h": 40
+          },
+          "green": {
+           "x": 797,
+           "y": 297,
+           "w": 337,
+           "h": 102
+          },
+          "greenAuthored": {
+           "x": 796.725538103768,
+           "y": 680.9158876261134,
+           "w": 337,
+           "h": 101.93103620201157
+          }
+         },
+         "canvasId": "0-canvas",
+         "innerRect": {
+          "x": 4,
+          "y": 4,
+          "w": 952,
+          "h": 268
+         }
+        }
+       },
+       "coreEvents": [
+        {
+         "kind": "glreplay-zone",
+         "detail": {
+          "key": "movie1",
+          "from": "pending",
+          "to": "armed",
+          "reason": "moduleReady",
+          "sceneHash": ""
+         },
+         "t": 233.59999999962747
+        },
+        {
+         "kind": "glreplay-hold",
+         "detail": {
+          "key": "movie1",
+          "via": "remount",
+          "sceneHash": "#1"
+         },
+         "t": 5587.5
+        },
+        {
+         "kind": "glreplay-arm",
+         "detail": {
+          "canvasId": "0-canvas",
+          "atScene": 2,
+          "sceneHash": "#1"
+         },
+         "t": 5596.199999999721
+        },
+        {
+         "kind": "glreplay-carried",
+         "detail": {
+          "elId": 1,
+          "delta": 0.01202392578125,
+          "candidates": [
+           {
+            "elId": 2,
+            "rect": {
+             "x": 1075.7864990234375,
+             "y": 876.2469482421875,
+             "w": 662.78125,
+             "h": 186.40625
+            }
+           },
+           {
+            "elId": 1,
+            "rect": {
+             "x": 109.3517074584961,
+             "y": 795.0361938476562,
+             "w": 951.53125,
+             "h": 267.60943603515625
+            }
+           }
+          ],
+          "sceneHash": "#1"
+         },
+         "t": 5611.299999999814
+        },
+        {
+         "kind": "glreplay-live",
+         "detail": {
+          "canvasId": "0-canvas",
+          "epoch": 1,
+          "frameLen": 88,
+          "sceneHash": "#1"
+         },
+         "t": 7245.699999999721
+        }
+       ],
+       "pool": [
+        {
+         "key": "untitled.mov",
+         "movieKey": "movie1",
+         "elId": 2,
+         "currentTime": 6.832822,
+         "paused": false,
+         "readyState": 4,
+         "ended": false,
+         "inDocument": false,
+         "videoWidth": 1920,
+         "videoHeight": 540
+        },
+        {
+         "key": "untitled.mov",
+         "movieKey": "movie1",
+         "elId": 1,
+         "currentTime": 44.783668,
+         "paused": false,
+         "readyState": 4,
+         "ended": false,
+         "inDocument": false,
+         "videoWidth": 1920,
+         "videoHeight": 540
+        }
+       ],
+       "facades": []
+      }
+     },
+     {
+      "stageMap": {
+       "s": 1,
+       "sy": 1,
+       "ox": 0,
+       "oy": 0,
+       "offsetWidth": 1920,
+       "offsetHeight": 1080
+      },
+      "painting": [],
+      "poolSnapshot": [
+       {
+        "key": "untitled.mov",
+        "movieKey": "movie1",
+        "elId": 2,
+        "currentTime": 7.33921,
+        "paused": false,
+        "readyState": 4,
+        "ended": false,
+        "inDocument": false,
+        "videoWidth": 1920,
+        "videoHeight": 540
+       },
+       {
+        "key": "untitled.mov",
+        "movieKey": "movie1",
+        "elId": 1,
+        "currentTime": 45.290065,
+        "paused": false,
+        "readyState": 4,
+        "ended": false,
+        "inDocument": false,
+        "videoWidth": 1920,
+        "videoHeight": 540
+       }
+      ],
+      "glReplay": {
+       "t": 7822.699999999721,
+       "hash": "#2",
+       "ready": true,
+       "api": {
+        "version": 1,
+        "state": "LIVE",
+        "standDowns": [],
+        "events": [
+         {
+          "kind": "glreplay-arm",
+          "detail": {
+           "canvasId": "0-canvas",
+           "atScene": 2
+          },
+          "t": 5596.199999999721
+         },
+         {
+          "kind": "glreplay-live",
+          "detail": {
+           "canvasId": "0-canvas",
+           "epoch": 1,
+           "frameLen": 88
+          },
+          "t": 7245.699999999721
+         }
+        ],
+        "stats": {
+         "version": 1,
+         "state": "LIVE",
+         "epoch": 1,
+         "iter": 19,
+         "frameLen": 88,
+         "uploads": 108,
+         "glErrors": 0,
+         "settleGapMs": 100,
+         "settleToHashMs": 104.10000000009313,
+         "mutationScanMs": null,
+         "posterSnapshotMs": 2.6000000000931323,
+         "loopMode": "raf",
+         "videoEnded": false,
+         "pending": null,
+         "occludedBands": 20,
+         "occluderMask": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          1
+         ],
+         "bandCount": 128,
+         "opacityUnproven": [],
+         "restOpacity": [
+          1,
+          0,
+          1,
+          1,
+          1
+         ],
+         "opacityAfterProofs": [
+          1,
+          0,
+          1,
+          1,
+          1
+         ],
+         "programsDistinct": true,
+         "greenAuthored": {
+          "x": 796.725538103768,
+          "y": 680.9158876261134,
+          "w": 337,
+          "h": 101.93103620201157
+         },
+         "greenRoi": {
+          "x": 797,
+          "y": 297,
+          "w": 337,
+          "h": 102
+         },
+         "geometry": {
+          "band": {
+           "x": 109,
+           "y": 17,
+           "w": 952,
+           "h": 268
+          },
+          "control": {
+           "x": 4,
+           "y": 1036,
+           "w": 40,
+           "h": 40
+          },
+          "green": {
+           "x": 797,
+           "y": 297,
+           "w": 337,
+           "h": 102
+          },
+          "greenAuthored": {
+           "x": 796.725538103768,
+           "y": 680.9158876261134,
+           "w": 337,
+           "h": 101.93103620201157
+          }
+         },
+         "canvasId": "0-canvas",
+         "innerRect": {
+          "x": 4,
+          "y": 4,
+          "w": 952,
+          "h": 268
+         }
+        }
+       },
+       "coreEvents": [
+        {
+         "kind": "glreplay-zone",
+         "detail": {
+          "key": "movie1",
+          "from": "pending",
+          "to": "armed",
+          "reason": "moduleReady",
+          "sceneHash": ""
+         },
+         "t": 233.59999999962747
+        },
+        {
+         "kind": "glreplay-hold",
+         "detail": {
+          "key": "movie1",
+          "via": "remount",
+          "sceneHash": "#1"
+         },
+         "t": 5587.5
+        },
+        {
+         "kind": "glreplay-arm",
+         "detail": {
+          "canvasId": "0-canvas",
+          "atScene": 2,
+          "sceneHash": "#1"
+         },
+         "t": 5596.199999999721
+        },
+        {
+         "kind": "glreplay-carried",
+         "detail": {
+          "elId": 1,
+          "delta": 0.01202392578125,
+          "candidates": [
+           {
+            "elId": 2,
+            "rect": {
+             "x": 1075.7864990234375,
+             "y": 876.2469482421875,
+             "w": 662.78125,
+             "h": 186.40625
+            }
+           },
+           {
+            "elId": 1,
+            "rect": {
+             "x": 109.3517074584961,
+             "y": 795.0361938476562,
+             "w": 951.53125,
+             "h": 267.60943603515625
+            }
+           }
+          ],
+          "sceneHash": "#1"
+         },
+         "t": 5611.299999999814
+        },
+        {
+         "kind": "glreplay-live",
+         "detail": {
+          "canvasId": "0-canvas",
+          "epoch": 1,
+          "frameLen": 88,
+          "sceneHash": "#1"
+         },
+         "t": 7245.699999999721
+        }
+       ],
+       "pool": [
+        {
+         "key": "untitled.mov",
+         "movieKey": "movie1",
+         "elId": 2,
+         "currentTime": 7.339723,
+         "paused": false,
+         "readyState": 4,
+         "ended": false,
+         "inDocument": false,
+         "videoWidth": 1920,
+         "videoHeight": 540
+        },
+        {
+         "key": "untitled.mov",
+         "movieKey": "movie1",
+         "elId": 1,
+         "currentTime": 45.290569,
+         "paused": false,
+         "readyState": 4,
+         "ended": false,
+         "inDocument": false,
+         "videoWidth": 1920,
+         "videoHeight": 540
+        }
+       ],
+       "facades": []
+      }
+     }
+    ],
+    "sampler": {}
+   }
+  },
+  {
+   "name": "carry-cover-notes-with-bridge-clock",
+   "kind": "carryCover",
+   "source": "output/evidence/s2-dev/glclock-v6/GL1/green-1.json bridges[].capture",
+   "record": {
+    "rows": null,
+    "notes": [
+     {
+      "kind": "bridge-motion-start",
+      "detail": {
+       "elId": 1,
+       "durationSeconds": 1.5,
+       "srcRect": {
+        "x": 160,
+        "y": 700,
+        "w": 640,
+        "h": 180
+       },
+       "rect": {
+        "x": 960,
+        "y": 400,
+        "w": 800,
+        "h": 225
+       },
+       "geometrySource": "export-duration-interpolation",
+       "sceneHash": "#1"
+      },
+      "t": 4198
+     },
+     {
+      "kind": "bridge-clock",
+      "detail": {
+       "elId": 1,
+       "via": "gl",
+       "lagMs": 5.799999982118607,
+       "sceneHash": "#1"
+      },
+      "t": 4217
+     }
+    ],
+    "stageMap": {
+     "s": 1,
+     "sy": 1,
+     "ox": 0,
+     "oy": 0,
+     "offsetWidth": 1920,
+     "offsetHeight": 1080
+    }
+   }
+  },
+  {
+   "name": "managed-g2-session",
+   "kind": "managedRun",
+   "source": "output/evidence/handback-geometry/obs-hb3-g2/runs/g2-20260925-195043.json sessions[g2] (reads and notes trimmed)",
+   "record": {
+    "sessions": [
+     {
+      "session": "g2",
+      "reads": {
+       "liveEnd": {
+        "wall": 1790337074.716236,
+        "gl": {
+         "t": 28045.69999999553,
+         "hash": "#2",
+         "ready": true,
+         "api": {
+          "version": 1,
+          "state": "LIVE",
+          "standDowns": [],
+          "events": [
+           {
+            "kind": "glreplay-arm",
+            "detail": {
+             "canvasId": "0-canvas",
+             "atScene": 2
+            },
+            "t": 16817.69999999553
+           },
+           {
+            "kind": "glreplay-opacity-unproven",
+            "detail": {
+             "slot": 4,
+             "reason": "size"
+            },
+            "t": 18465.69999999553
+           }
+          ],
+          "stats": {
+           "version": 1,
+           "state": "LIVE",
+           "epoch": 1,
+           "iter": 287,
+           "uploads": 331,
+           "glErrors": 0
+          }
+         },
+         "coreEvents": [
+          {
+           "kind": "glreplay-zone",
+           "detail": {
+            "key": "movie1",
+            "from": "pending",
+            "to": "armed",
+            "reason": "moduleReady",
+            "sceneHash": ""
+           },
+           "t": 209.19999999552965
+          },
+          {
+           "kind": "glreplay-carried",
+           "detail": {
+            "elId": 1,
+            "delta": 0.01202392578125,
+            "candidates": [
+             {
+              "elId": 2,
+              "rect": {
+               "x": 1075.7864990234375,
+               "y": 876.2469482421875,
+               "w": 662.78125,
+               "h": 186.40625
+              }
+             },
+             {
+              "elId": 1,
+              "rect": {
+               "x": 109.3517074584961,
+               "y": 795.0361938476562,
+               "w": 951.53125,
+               "h": 267.60943603515625
+              }
+             }
+            ],
+            "sceneHash": "#1"
+           },
+           "t": 16830.79999999702
+          }
+         ],
+         "pool": [
+          {
+           "key": "untitled.mov",
+           "movieKey": "movie1",
+           "elId": 2,
+           "currentTime": 24.604432,
+           "paused": false,
+           "readyState": 4,
+           "ended": false,
+           "inDocument": false,
+           "videoWidth": 1920,
+           "videoHeight": 540
+          },
+          {
+           "key": "untitled.mov",
+           "movieKey": "movie1",
+           "elId": 1,
+           "currentTime": 24.607857,
+           "paused": false,
+           "readyState": 4,
+           "ended": false,
+           "inDocument": false,
+           "videoWidth": 1920,
+           "videoHeight": 540
+          }
+         ],
+         "facades": []
+        },
+        "painting": [],
+        "videos": []
+       }
+      },
+      "phases": [
+       {
+        "name": "slide1-native",
+        "perf": 1669.5,
+        "wall": 1790337048.3431702,
+        "hash": "#1",
+        "videos": [
+         {
+          "src": "Untitled.mov-0.0000-46.0333.mov",
+          "paused": false,
+          "rs": 4,
+          "t": 1.247187,
+          "loop": false
+         },
+         {
+          "src": "Untitled.mov-0.0000-46.0333.mov",
+          "paused": false,
+          "rs": 4,
+          "t": 1.25063,
+          "loop": false
+         }
+        ],
+        "raf": [
+         1674.1000000014901,
+         2
+        ]
+       },
+       {
+        "name": "slide1-paused",
+        "perf": 9680.89999999851,
+        "wall": 1790337056.3518112,
+        "hash": "#1",
+        "videos": [
+         {
+          "src": "Untitled.mov-0.0000-46.0333.mov",
+          "paused": true,
+          "rs": 4,
+          "t": 9.253856,
+          "loop": false
+         },
+         {
+          "src": "Untitled.mov-0.0000-46.0333.mov",
+          "paused": true,
+          "rs": 4,
+          "t": 9.257348,
+          "loop": false
+         }
+        ],
+        "raf": [
+         9684.39999999851,
+         242
+        ]
+       }
+      ],
+      "armed": [
+       {
+        "stageMap": {
+         "s": 1,
+         "sy": 1,
+         "ox": 0,
+         "oy": 0,
+         "offsetWidth": 1920,
+         "offsetHeight": 1080
+        },
+        "painting": [],
+        "poolSnapshot": [
+         {
+          "key": "untitled.mov",
+          "movieKey": "movie1",
+          "elId": 2,
+          "currentTime": 15.100939,
+          "paused": false,
+          "readyState": 4,
+          "ended": false,
+          "inDocument": false,
+          "videoWidth": 1920,
+          "videoHeight": 540
+         },
+         {
+          "key": "untitled.mov",
+          "movieKey": "movie1",
+          "elId": 1,
+          "currentTime": 15.104366,
+          "paused": false,
+          "readyState": 4,
+          "ended": false,
+          "inDocument": false,
+          "videoWidth": 1920,
+          "videoHeight": 540
+         }
+        ],
+        "glReplay": {
+         "t": 18542.69999999553,
+         "hash": "#2",
+         "ready": true,
+         "api": {
+          "version": 1,
+          "state": "LIVE",
+          "standDowns": [],
+          "events": [
+           {
+            "kind": "glreplay-arm",
+            "detail": {
+             "canvasId": "0-canvas",
+             "atScene": 2
+            },
+            "t": 16817.69999999553
+           },
+           {
+            "kind": "glreplay-opacity-unproven",
+            "detail": {
+             "slot": 4,
+             "reason": "size"
+            },
+            "t": 18465.69999999553
+           }
+          ],
+          "stats": {
+           "version": 1,
+           "state": "LIVE",
+           "epoch": 1,
+           "iter": 2,
+           "uploads": 48,
+           "glErrors": 0
+          }
+         },
+         "coreEvents": [
+          {
+           "kind": "glreplay-zone",
+           "detail": {
+            "key": "movie1",
+            "from": "pending",
+            "to": "armed",
+            "reason": "moduleReady",
+            "sceneHash": ""
+           },
+           "t": 209.19999999552965
+          },
+          {
+           "kind": "glreplay-carried",
+           "detail": {
+            "elId": 1,
+            "delta": 0.01202392578125,
+            "candidates": [
+             {
+              "elId": 2,
+              "rect": {
+               "x": 1075.7864990234375,
+               "y": 876.2469482421875,
+               "w": 662.78125,
+               "h": 186.40625
+              }
+             },
+             {
+              "elId": 1,
+              "rect": {
+               "x": 109.3517074584961,
+               "y": 795.0361938476562,
+               "w": 951.53125,
+               "h": 267.60943603515625
+              }
+             }
+            ],
+            "sceneHash": "#1"
+           },
+           "t": 16830.79999999702
+          }
+         ],
+         "pool": [
+          {
+           "key": "untitled.mov",
+           "movieKey": "movie1",
+           "elId": 2,
+           "currentTime": 15.101372,
+           "paused": false,
+           "readyState": 4,
+           "ended": false,
+           "inDocument": false,
+           "videoWidth": 1920,
+           "videoHeight": 540
+          },
+          {
+           "key": "untitled.mov",
+           "movieKey": "movie1",
+           "elId": 1,
+           "currentTime": 15.104796,
+           "paused": false,
+           "readyState": 4,
+           "ended": false,
+           "inDocument": false,
+           "videoWidth": 1920,
+           "videoHeight": 540
+          }
+         ],
+         "facades": []
+        }
+       },
+       {
+        "stageMap": {
+         "s": 1,
+         "sy": 1,
+         "ox": 0,
+         "oy": 0,
+         "offsetWidth": 1920,
+         "offsetHeight": 1080
+        },
+        "painting": [],
+        "poolSnapshot": [
+         {
+          "key": "untitled.mov",
+          "movieKey": "movie1",
+          "elId": 2,
+          "currentTime": 15.609264,
+          "paused": false,
+          "readyState": 4,
+          "ended": false,
+          "inDocument": false,
+          "videoWidth": 1920,
+          "videoHeight": 540
+         },
+         {
+          "key": "untitled.mov",
+          "movieKey": "movie1",
+          "elId": 1,
+          "currentTime": 15.612693,
+          "paused": false,
+          "readyState": 4,
+          "ended": false,
+          "inDocument": false,
+          "videoWidth": 1920,
+          "videoHeight": 540
+         }
+        ],
+        "glReplay": {
+         "t": 19051.60000000149,
+         "hash": "#2",
+         "ready": true,
+         "api": {
+          "version": 1,
+          "state": "LIVE",
+          "standDowns": [],
+          "events": [
+           {
+            "kind": "glreplay-arm",
+            "detail": {
+             "canvasId": "0-canvas",
+             "atScene": 2
+            },
+            "t": 16817.69999999553
+           },
+           {
+            "kind": "glreplay-opacity-unproven",
+            "detail": {
+             "slot": 4,
+             "reason": "size"
+            },
+            "t": 18465.69999999553
+           }
+          ],
+          "stats": {
+           "version": 1,
+           "state": "LIVE",
+           "epoch": 1,
+           "iter": 17,
+           "uploads": 61,
+           "glErrors": 0
+          }
+         },
+         "coreEvents": [
+          {
+           "kind": "glreplay-zone",
+           "detail": {
+            "key": "movie1",
+            "from": "pending",
+            "to": "armed",
+            "reason": "moduleReady",
+            "sceneHash": ""
+           },
+           "t": 209.19999999552965
+          },
+          {
+           "kind": "glreplay-carried",
+           "detail": {
+            "elId": 1,
+            "delta": 0.01202392578125,
+            "candidates": [
+             {
+              "elId": 2,
+              "rect": {
+               "x": 1075.7864990234375,
+               "y": 876.2469482421875,
+               "w": 662.78125,
+               "h": 186.40625
+              }
+             },
+             {
+              "elId": 1,
+              "rect": {
+               "x": 109.3517074584961,
+               "y": 795.0361938476562,
+               "w": 951.53125,
+               "h": 267.60943603515625
+              }
+             }
+            ],
+            "sceneHash": "#1"
+           },
+           "t": 16830.79999999702
+          }
+         ],
+         "pool": [
+          {
+           "key": "untitled.mov",
+           "movieKey": "movie1",
+           "elId": 2,
+           "currentTime": 15.610325,
+           "paused": false,
+           "readyState": 4,
+           "ended": false,
+           "inDocument": false,
+           "videoWidth": 1920,
+           "videoHeight": 540
+          },
+          {
+           "key": "untitled.mov",
+           "movieKey": "movie1",
+           "elId": 1,
+           "currentTime": 15.613753,
+           "paused": false,
+           "readyState": 4,
+           "ended": false,
+           "inDocument": false,
+           "videoWidth": 1920,
+           "videoHeight": 540
+          }
+         ],
+         "facades": []
+        }
+       }
+      ],
+      "postHandbackVideos": [
+       {
+        "src": "Untitled.mov-0.0000-46.0333.mov",
+        "paused": false,
+        "rs": 4,
+        "t": 33.264058,
+        "loop": false
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "managed-handed-back-dd9ecc9f-generation",
+   "kind": "managedRun",
+   "source": "output/evidence/loop-gates/l5/runs/soak-20260925-121732.json sessions[precheck].handedBack",
+   "record": {
+    "sessions": [
+     {
+      "session": "precheck",
+      "handedBack": {
+       "elId": 1,
+       "loop": true,
+       "isConnected": true,
+       "paused": false,
+       "t": 20.669376
+      },
+      "samples": [
+       {
+        "t": 0.0,
+        "state": "LIVE",
+        "standDowns": [],
+        "videoEnded": false,
+        "loopMode": "rvfc",
+        "uploads": 48,
+        "carriedT": 3.285625
+       },
+       {
+        "t": 2.03,
+        "state": "LIVE",
+        "standDowns": [],
+        "videoEnded": false,
+        "loopMode": "rvfc",
+        "uploads": 107,
+        "carriedT": 5.299262
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "null-control-40-keys",
+   "kind": "nullControl",
+   "source": "output/evidence/main-bridge-easing/baseline-2026-10-09-main-linear/gates-main-monitor/p2--wait-profilefast--gl-replayauto/gl-replay/report.json freezeControl.snapshots.b.nullControl (rafLog trimmed)",
+   "record": {
+    "advanceKeyAt": 11750.300000011921,
+    "advanceKeyRejected": 0,
+    "arm": "A",
+    "armedAt": 11359.60000000894,
+    "armedElId": 4,
+    "armedHash": "#7",
+    "armedOwnerRect": {
+     "h": 267.609375,
+     "w": 951.53125,
+     "x": 197.9776611328125,
+     "y": 797.0972900390625
+    },
+    "boundDecoderId": 4,
+    "coverPaintedAt": 11882.40000000596,
+    "coverPatchEnd": {
+     "h": 24,
+     "mean": 42.86666666666667,
+     "sum": 185184,
+     "w": 60
+    },
+    "coverPatchMean": 42.86666666666667,
+    "coverPatchStart": {
+     "h": 24,
+     "mean": 42.86666666666667,
+     "sum": 185184,
+     "w": 60
+    },
+    "error": null,
+    "fellBackToArmOwner": false,
+    "firedVia": "moved",
+    "holdFrames": 131,
+    "holdStartedAt": 11881.70000000298,
+    "loopHandedOff": true,
+    "motionStartedAt": 11852.300000011921,
+    "motionStartedFrame": 6,
+    "motionStartedMarker": {
+     "atScene": 8,
+     "generation": 0,
+     "started": 11852.300000011921
+    },
+    "movedFromRect": {
+     "h": 267.609375,
+     "w": 951.53125,
+     "x": 197.9776611328125,
+     "y": 797.0972900390625
+    },
+    "movedToRect": {
+     "h": 268.734375,
+     "w": 954.625,
+     "x": 199.078125,
+     "y": 796.25
+    },
+    "obedMotionAtTrigger": {
+     "atScene": 8,
+     "generation": 0,
+     "started": 11852.300000011921
+    },
+    "ownerAmbiguousInWindow": false,
+    "ownerDisconnectedInWindow": false,
+    "ownerReadyState": 4,
+    "paintCount": 1,
+    "pollMaxGapMs": 33.29999999701977,
+    "preAdvanceDepartureAt": null,
+    "preAdvanceDepartureRect": null,
+    "rafLog": [
+     {
+      "boundDecoderId": 4,
+      "coverRect": {
+       "h": 271.640625,
+       "w": 386,
+       "x": 203.34375,
+       "y": 793.34375
+      },
+      "elementFromPointIsCover": true,
+      "measuredRect": {
+       "h": 271.640625,
+       "w": 965.03125,
+       "x": 203.34375,
+       "y": 793.34375
+      },
+      "ownerResolved": true,
+      "t": 11915
+     },
+     {
+      "boundDecoderId": 4,
+      "coverRect": {
+       "h": 272.609375,
+       "w": 387.390625,
+       "x": 204.765625,
+       "y": 792.375
+      },
+      "elementFromPointIsCover": true,
+      "measuredRect": {
+       "h": 272.609375,
+       "w": 968.484375,
+       "x": 204.765625,
+       "y": 792.375
+      },
+      "ownerResolved": true,
+      "t": 11931.40000000596
+     },
+     {
+      "boundDecoderId": 4,
+      "coverRect": {
+       "h": 273.609375,
+       "w": 388.8125,
+       "x": 206.21875,
+       "y": 791.375
+      },
+      "elementFromPointIsCover": true,
+      "measuredRect": {
+       "h": 273.609375,
+       "w": 972.03125,
+       "x": 206.21875,
+       "y": 791.375
+      },
+      "ownerResolved": true,
+      "t": 11948.300000011921
+     }
+    ],
+    "releaseAt": 14135.90000000596,
+    "stageOrigin": {
+     "x": 0,
+     "y": 0
+    },
+    "stageRectAtArm": {
+     "h": 1080,
+     "w": 1920,
+     "x": 0,
+     "y": 0
+    },
+    "stageRectAtTrigger": {
+     "h": 1080,
+     "w": 1920,
+     "x": 0,
+     "y": 0
+    },
+    "staleCurrentTime": 1.267706,
+    "staleIndexExpected": 54,
+    "status": "released",
+    "triggerFramesAfterAdvance": 7
+   }
+  },
+  {
+   "name": "rows-S2-raw-rare-shapes",
+   "kind": "rows",
+   "source": "SAMPLER_JS (probe:519-551): a runtime-absent first row (stateOf -> {}, probe:465-466); an untagged decoder whose owner names no elId (core:347); pp absent on a frame the ResizeObserver missed (paint:167-168); a pp decoder with a null id (paint:94, a decoder inserted after the tick), a connected one with an unreadable opacity (paint:139) and a disconnected one (paint:104)",
+   "schema": 2,
+   "record": [
+    {
+     "t": 990.0,
+     "videos": [],
+     "stageMap": null,
+     "seq": 1000,
+     "ts": 980.0,
+     "hash": "",
+     "sceneCount": null
+    },
+    {
+     "t": 1016.0,
+     "scene": 1,
+     "playerState": "IdleAtFinalState",
+     "busy": false,
+     "stageMap": {
+      "s": 1.0,
+      "sy": 1.0,
+      "ox": 0.0,
+      "oy": 0.0,
+      "offsetWidth": 1920,
+      "offsetHeight": 1080
+     },
+     "videos": [
+      {
+       "id": 1,
+       "elId": null,
+       "instance": "A1",
+       "src": "movie-a.mov",
+       "currentTime": 1.0,
+       "paused": false,
+       "ended": false,
+       "loop": false,
+       "duration": 10.0,
+       "readyState": 4,
+       "videoWidth": 640,
+       "isConnected": true,
+       "domId": "A1-video",
+       "preserved": false,
+       "remounted": false,
+       "facade": false,
+       "rect": {
+        "x": 100.0,
+        "y": 100.0,
+        "w": 400.0,
+        "h": 225.0
+       },
+       "footprintOwner": {
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       }
+      }
+     ],
+     "seq": 1001,
+     "ts": 1015.0,
+     "hash": "#1",
+     "sceneCount": 12,
+     "pp": {
+      "seq": 1001,
+      "ts": 1015.0,
+      "t": 1016.5,
+      "stageMap": {
+       "s": 1.0,
+       "sy": 1.0,
+       "ox": 0.0,
+       "oy": 0.0,
+       "offsetWidth": 1920,
+       "offsetHeight": 1080
+      },
+      "stageBox": {
+       "x": 100.0,
+       "y": 100.0,
+       "w": 400.0,
+       "h": 225.0
+      },
+      "cover": false,
+      "videos": [
+       {
+        "id": 1,
+        "elId": null,
+        "instance": "A1",
+        "src": "movie-a.mov",
+        "connected": true,
+        "facade": false,
+        "suppressed": false,
+        "readyState": 4,
+        "seeking": false,
+        "videoWidth": 640,
+        "videoHeight": 360,
+        "currentTime": 1.0,
+        "paused": false,
+        "ended": false,
+        "checkVisibility": true,
+        "visibility": "visible",
+        "displayNone": null,
+        "opacity": 1,
+        "hiding": null,
+        "effects": null,
+        "transform": null,
+        "rect": {
+         "x": 100.0,
+         "y": 100.0,
+         "w": 400.0,
+         "h": 225.0
+        },
+        "visibleRect": {
+         "x": 100.0,
+         "y": 100.0,
+         "w": 400.0,
+         "h": 225.0
+        },
+        "clippedBy": null,
+        "parent": "div#layer113",
+        "layer": "layer113"
+       },
+       {
+        "id": 2,
+        "elId": 8,
+        "instance": null,
+        "src": "movie-a.mov",
+        "connected": false,
+        "facade": false,
+        "suppressed": false,
+        "readyState": 4,
+        "seeking": false,
+        "videoWidth": 640,
+        "videoHeight": 360,
+        "currentTime": 1.0,
+        "paused": false,
+        "ended": false,
+        "checkVisibility": null,
+        "visibility": null,
+        "displayNone": null,
+        "opacity": null,
+        "hiding": null,
+        "effects": null,
+        "transform": null,
+        "rect": {
+         "x": 100.0,
+         "y": 100.0,
+         "w": 400.0,
+         "h": 225.0
+        },
+        "visibleRect": null,
+        "clippedBy": null,
+        "parent": null,
+        "layer": null
+       },
+       {
+        "id": null,
+        "elId": 9,
+        "instance": "A1",
+        "src": "movie-a.mov",
+        "connected": true,
+        "facade": false,
+        "suppressed": false,
+        "readyState": 4,
+        "seeking": false,
+        "videoWidth": 640,
+        "videoHeight": 360,
+        "currentTime": 1.0,
+        "paused": false,
+        "ended": false,
+        "checkVisibility": true,
+        "visibility": "visible",
+        "displayNone": null,
+        "opacity": null,
+        "hiding": null,
+        "effects": null,
+        "transform": null,
+        "rect": {
+         "x": 100.0,
+         "y": 100.0,
+         "w": 400.0,
+         "h": 225.0
+        },
+        "visibleRect": {
+         "x": 100.0,
+         "y": 100.0,
+         "w": 400.0,
+         "h": 225.0
+        },
+        "clippedBy": null,
+        "parent": "div#layer113",
+        "layer": "layer113"
+       }
+      ]
+     }
+    },
+    {
+     "t": 1032.0,
+     "scene": 1,
+     "playerState": "IdleAtFinalState",
+     "busy": false,
+     "stageMap": {
+      "s": 1.0,
+      "sy": 1.0,
+      "ox": 0.0,
+      "oy": 0.0,
+      "offsetWidth": 1920,
+      "offsetHeight": 1080
+     },
+     "videos": [
+      {
+       "id": 1,
+       "elId": 7,
+       "instance": "A1",
+       "src": "movie-a.mov",
+       "currentTime": 1.0,
+       "paused": false,
+       "ended": false,
+       "loop": false,
+       "duration": 10.0,
+       "readyState": 4,
+       "videoWidth": 640,
+       "isConnected": true,
+       "domId": "A1-video",
+       "preserved": false,
+       "remounted": false,
+       "facade": false,
+       "rect": {
+        "x": 100.0,
+        "y": 100.0,
+        "w": 400.0,
+        "h": 225.0
+       },
+       "footprintOwner": {
+        "elId": 7,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       }
+      }
+     ],
+     "seq": 1002,
+     "ts": 1031.0,
+     "hash": "#1",
+     "sceneCount": 12
+    },
+    {
+     "t": 1048.0,
+     "scene": 1,
+     "playerState": "IdleAtFinalState",
+     "busy": false,
+     "stageMap": {
+      "s": 1.0,
+      "sy": 1.0,
+      "ox": 0.0,
+      "oy": 0.0,
+      "offsetWidth": 1920,
+      "offsetHeight": 1080
+     },
+     "videos": [
+      {
+       "id": 1,
+       "elId": 7,
+       "instance": "A1",
+       "src": "movie-a.mov",
+       "currentTime": 1.0,
+       "paused": false,
+       "ended": false,
+       "loop": false,
+       "duration": 10.0,
+       "readyState": 4,
+       "videoWidth": 640,
+       "isConnected": true,
+       "domId": "A1-video",
+       "preserved": false,
+       "remounted": false,
+       "facade": false,
+       "rect": {
+        "x": 100.0,
+        "y": 100.0,
+        "w": 400.0,
+        "h": 225.0
+       },
+       "footprintOwner": {
+        "elId": 7,
+        "key": "movie1",
+        "via": "footprint-video",
+        "contextType": null
+       }
+      }
+     ],
+     "seq": 1003,
+     "ts": 1047.0,
+     "hash": "#1",
+     "sceneCount": 12,
+     "pp": {
+      "seq": 1003,
+      "ts": 1047.0,
+      "t": 1048.5,
+      "stageMap": {
+       "s": 1.0,
+       "sy": 1.0,
+       "ox": 0.0,
+       "oy": 0.0,
+       "offsetWidth": 1920,
+       "offsetHeight": 1080
+      },
+      "stageBox": {
+       "x": 100.0,
+       "y": 100.0,
+       "w": 400.0,
+       "h": 225.0
+      },
+      "cover": false,
+      "videos": [
+       {
+        "id": 1,
+        "elId": 7,
+        "instance": "A1",
+        "src": "movie-a.mov",
+        "connected": true,
+        "facade": false,
+        "suppressed": false,
+        "readyState": 4,
+        "seeking": false,
+        "videoWidth": 640,
+        "videoHeight": 360,
+        "currentTime": 1.0,
+        "paused": false,
+        "ended": false,
+        "checkVisibility": true,
+        "visibility": "visible",
+        "displayNone": null,
+        "opacity": 1,
+        "hiding": null,
+        "effects": null,
+        "transform": null,
+        "rect": {
+         "x": 100.0,
+         "y": 100.0,
+         "w": 400.0,
+         "h": 225.0
+        },
+        "visibleRect": {
+         "x": 100.0,
+         "y": 100.0,
+         "w": 400.0,
+         "h": 225.0
+        },
+        "clippedBy": null,
+        "parent": "div#layer113",
+        "layer": "layer113"
+       },
+       {
+        "id": 2,
+        "elId": 8,
+        "instance": null,
+        "src": "movie-a.mov",
+        "connected": false,
+        "facade": false,
+        "suppressed": false,
+        "readyState": 4,
+        "seeking": false,
+        "videoWidth": 640,
+        "videoHeight": 360,
+        "currentTime": 1.0,
+        "paused": false,
+        "ended": false,
+        "checkVisibility": null,
+        "visibility": null,
+        "displayNone": null,
+        "opacity": null,
+        "hiding": null,
+        "effects": null,
+        "transform": null,
+        "rect": {
+         "x": 100.0,
+         "y": 100.0,
+         "w": 400.0,
+         "h": 225.0
+        },
+        "visibleRect": null,
+        "clippedBy": null,
+        "parent": null,
+        "layer": null
+       },
+       {
+        "id": null,
+        "elId": 9,
+        "instance": "A1",
+        "src": "movie-a.mov",
+        "connected": true,
+        "facade": false,
+        "suppressed": false,
+        "readyState": 4,
+        "seeking": false,
+        "videoWidth": 640,
+        "videoHeight": 360,
+        "currentTime": 1.0,
+        "paused": false,
+        "ended": false,
+        "checkVisibility": true,
+        "visibility": "visible",
+        "displayNone": null,
+        "opacity": null,
+        "hiding": null,
+        "effects": null,
+        "transform": null,
+        "rect": {
+         "x": 100.0,
+         "y": 100.0,
+         "w": 400.0,
+         "h": 225.0
+        },
+        "visibleRect": {
+         "x": 100.0,
+         "y": 100.0,
+         "w": 400.0,
+         "h": 225.0
+        },
+        "clippedBy": null,
+        "parent": "div#layer113",
+        "layer": "layer113"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "painting-error",
+   "kind": "painting",
+   "source": "PAINTING_VIDEOS_JS (probe:401-403)",
+   "record": {
+    "error": "checkVisibility is unavailable in this browser"
+   }
+  },
+  {
+   "name": "pool-error",
+   "kind": "pool",
+   "source": "PRESERVE_SNAPSHOT_JS (probe:441)",
+   "record": {
+    "error": "TypeError: boom"
+   }
+  },
+  {
+   "name": "gl-read-no-core",
+   "kind": "gl",
+   "source": "GL_REPLAY_READ_JS (probe:364-385): no core, no module",
+   "record": {
+    "t": 12.5,
+    "hash": "#2",
+    "ready": null,
+    "api": null,
+    "coreEvents": null,
+    "pool": null,
+    "facades": []
+   }
+  },
+  {
+   "name": "refusal-notes-digit-keyed-detail",
+   "kind": "notes:refusal",
+   "source": "core note() (core:746-750) of facade-error (core:1842)",
+   "record": [
+    {
+     "kind": "facade-error",
+     "detail": {
+      "0": "T",
+      "1": "y",
+      "sceneHash": "#2"
+     },
+     "t": 5.0
+    },
+    {
+     "kind": "retire-boundary",
+     "detail": {
+      "key": "movie1",
+      "elIds": [
+       3
+      ],
+      "atScene": 2,
+      "sceneHash": "#1"
+     },
+     "t": 6.0
+    }
+   ]
+  },
+  {
+   "name": "carry-cover-trailing-rows-unread",
+   "kind": "carryCover",
+   "source": "CARRY_COVER_SAMPLER_JS (probe:7937-7948): the post-frame read lands by setTimeout, so the last rows have none yet; tick wraps mod 4096",
+   "record": {
+    "rows": [
+     {
+      "ts": 100.0,
+      "tick": 4095,
+      "pre": [],
+      "vids": [
+       {
+        "elId": 3,
+        "x": 0.0,
+        "y": 0.0,
+        "w": 10.0,
+        "h": 5.0,
+        "readyState": 4,
+        "opaque": true
+       }
+      ],
+      "readAt": 101.0
+     },
+     {
+      "ts": 116.0,
+      "tick": 0,
+      "pre": [
+       {
+        "elId": 3,
+        "x": 0.0,
+        "y": 0.0,
+        "w": 10.0,
+        "h": 5.0,
+        "readyState": 4,
+        "opaque": false
+       }
+      ]
+     },
+     {
+      "ts": 132.0,
+      "tick": 1,
+      "pre": []
+     }
+    ],
+    "notes": [],
+    "stageMap": {
+     "s": 1.0,
+     "sy": 1.0,
+     "ox": 0.0,
+     "oy": 0.0,
+     "offsetWidth": 1920,
+     "offsetHeight": 1080
+    }
+   }
+  },
+  {
+   "name": "armed-reads-hash-never-settled",
+   "kind": "evidence",
+   "source": "boundary_observer (probe:2796)",
+   "record": {
+    "armed1to2": {
+     "reason": "hash never settled at #2 before the first read"
+    }
+   }
+  }
+ ]
+}
