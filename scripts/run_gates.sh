@@ -47,36 +47,32 @@ else
   HOST_RED_ARMS=()
 fi
 # S0 deck arms (plan §3.4 Q3): every (deck, arm) the probe's RED_ARM_EXPECTATIONS registers, run as host red arms at
-# 1920x1080 on the deck's own export (HOST_DECK). Full tier only.
+# 1920x1080 on the deck's own export (HOST_DECK). Full tier only. The `no-pin-hold` arms are the painted instrument's
+# red arms (S2 instrument plan §4/§5, §3.11; decision 11), registered 2026-10-12 (owner) with a paintFloor of 60
+# (decision 3): D2 b2to3 A (108), D3 b0to1 A (107), D5 b0to1 + b1to2 A (108 / 223); D4 reads no red and is not run.
+# Source: main checkout output/evidence/s2-dev/instr-v-277c720b/stage1/V3/{D2,D3,D5}-red-npH.json.
 DECK_ARMS=(
   "D1 --strip bridge@2" "D1 --strip bridge@4" "D1 --strip pin@6"
   "D2 --strip bridge@2" "D2 --strip restart@4" "D2 --strip pin@6" "D2 --strip bridge@8"
+  "D2 --core-variant no-pin-hold"
   "D3 --strip pin@2" "D3 --strip bridge@2" "D3 --strip retire@4" "D3 --strip pin@4" "D3 --strip bridge@6"
+  "D3 --core-variant no-pin-hold"
   "D4 --core-variant wrong-instance" "D4 --core-variant fifo-reuse" "D4 --strip bridge@3" "D4 --strip pin@5"
   "D5 --core-variant stash-any" "D5 --core-variant fifo-reuse" "D5 --strip pin@2" "D5 --strip pin@4"
+  "D5 --core-variant no-pin-hold"
   "D6 --strip bridge@2" "D6 --strip retire@8"
 )
-# Painted-instrument red arm (S2 instrument plan §4/§5, §3.11): the pin hold off on D5. Prediction, PENDING owner
-# sign-off (first registration; probe-owned RED_ARM_EXPECTATIONS, not measured on the landed core until V3): red set
-# exactly (b0to1 A carry, b1to2 A carry), each with a longest unpainted run of at least 60 frames (decision 3; ~108
-# expected at 1920x1080). Source (older core, trace wraps on): main checkout output/evidence/s2-dev/pingap/r9-D5-seq.json
-# (108 frames / 1813 ms at layer16 opacity 0; 107 / 1834 ms at layer78). Until the probe registers it the arm reads
-# unregistered and FAILS.
-# TODO(decision 11): add "D2 --core-variant no-pin-hold" (D2 b2to3, ~108; pingap r10-D2-seq.json) and
-# "D3 --core-variant no-pin-hold" (D3 b0to1 A, ~108; pingap c7-D3seq-ctl.json) only after V3 measures them.
-DECK_ARMS+=("D5 --core-variant no-pin-hold")
 [[ $TIER == full ]] || DECK_ARMS=()
 # Pass G (plan §3.4 Q3; owner 2026-10-10): the plan-derived go-to gate, armed + null control, on P2 and each S0 deck.
 # Full tier only.
 PASSG_FIXTURES=(P2 D1 D2 D3 D4 D5 D6)
 [[ $TIER == full ]] || PASSG_FIXTURES=()
 # Pass G red (S2 instrument plan §3.9/§5, §3.11): "<deck> <probe args>", the advance legs scored per frame under a core
-# variant. Prediction, PENDING owner sign-off (first registration; probe-owned PASSG_RED_EXPECTATIONS, measured on the
-# landed core only at V3): D1 no-pin-hold reds exactly the (1,3,4) leg's b2to3 carry, longest unpainted run at least
-# 60 frames (decision 3; ~108 expected), and leaves (2,1,2) and (1,2,3) green. Source (older core, trace wraps on):
-# main checkout output/evidence/s2-dev/pingap/r1-a2g3-1080.json (108/1814), r3-g3from1-1080.json (108/1811),
-# r4-g3from4-1080.json (108/1811), c1-a2g3-1080-ctl.json (108/1813), r7-a2g3-1440.json (2560: 108/1817); r5-g2-1080.json
-# and c6-g1-ctl-*.json 0. The pre-pin-hold core red runs once outside this script (decision 7). Full tier only.
+# variant. Registered 2026-10-12 (owner; probe-owned PASSG_RED_EXPECTATIONS, paintFloor 60): D1 no-pin-hold reds
+# exactly the (1,3,4) leg's b2to3 carry (longest unpainted run 229) and that leg's destination (the slide-4 rect stays
+# unpainted past arrival), and leaves (2,1,2) and (1,2,3) green. Source: main checkout
+# output/evidence/s2-dev/instr-v-277c720b/stage1/V3/D1-passG-red-npH.json. The pre-pin-hold core red runs once outside
+# this script (decision 7). Full tier only.
 PASSG_RED_ARMS=("D1 --core-variant no-pin-hold")
 [[ $TIER == full ]] || PASSG_RED_ARMS=()
 # Paint floor second guard (decision 3; the probe's red status functions are the first): a host or Pass G red arm of a

@@ -219,6 +219,7 @@ _D1, _D2, _D3, _D4, _D5, _D6 = (DECK_PLAN_SHA256[f"D{n}"] for n in range(1, 7))
 # resumes from it; a facaded pin no entry names is detached at the next slide change and stops;
 # a bridge overlay no entry names is held at its rect indefinitely (a stray on later slides); a
 # retire/restart of a raw (never carried) src is inert apart from `retire`'s preserve-refused notes.
+# `stage1/` below: main checkout output/evidence/s2-dev/instr-v-277c720b/stage1 (measured 2026-10-12 at 277c720b).
 RED_ARM_EXPECTATIONS: dict[tuple[str, str, str], tuple[str, ...] | str] = {
     # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
     (P2_OFF_PLAN_SHA256, "core:stash-any", "off"): (
@@ -234,8 +235,9 @@ RED_ARM_EXPECTATIONS: dict[tuple[str, str, str], tuple[str, ...] | str] = {
     (P2_OFF_PLAN_SHA256, "strip:restart@6", "off"): (),
     (_D1, "strip:bridge@2", "off"): (f"b0to1:{_A}:carry",),
     (_D1, "strip:bridge@4", "off"): (f"b1to2:{_A}:carry", "stray:slide3:counter-a.mov", "stray:slide4:counter-a.mov"),
-    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
-    (_D1, "strip:pin@6", "off"): ("duplicate:slide4:counter-a.mov#1",),
+    # Re-registered 2026-10-12 (owner): the paint instrument reds the stripped pin's own carry (longest run 62); g1h's
+    # duplicate stays. Same set on the pre-fold core (glclock-v6/V4AB). stage1/V4/D1--strippin@6.json.
+    (_D1, "strip:pin@6", "off"): (f"b2to3:{_A}:carry", "duplicate:slide4:counter-a.mov#1"),
     (_D2, "strip:bridge@2", "off"): (f"b0to1:{_A}:carry",),
     # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
     (_D2, "strip:restart@4", "off"): (
@@ -245,6 +247,8 @@ RED_ARM_EXPECTATIONS: dict[tuple[str, str, str], tuple[str, ...] | str] = {
     # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
     (_D2, "strip:pin@6", "off"): (f"b2to3:{_A}:carry",),
     (_D2, "strip:bridge@8", "off"): (f"b3to4:{_A}:carry",),
+    # V3 (owner 2026-10-12): longest unpainted run 108. stage1/V3/D2-red-npH.json.
+    (_D2, "core:no-pin-hold", "off"): (f"b2to3:{_A}:carry",),
     (_D3, "strip:pin@2", "off"): (f"b0to1:{_A}:carry",),
     (_D3, "strip:bridge@2", "off"): (f"b0to1:{_B}:carry",),
     (_D3, "strip:retire@4", "off"): ("b1to2:counter-a.mov#1->end:retire",),
@@ -253,6 +257,8 @@ RED_ARM_EXPECTATIONS: dict[tuple[str, str, str], tuple[str, ...] | str] = {
         f"b1to2:{_B}:carry", f"b2to3:{_B}:carry", "duplicate:slide3:counter-b.mov#1", "stray:slide4:counter-b.mov",
     ),
     (_D3, "strip:bridge@6", "off"): (f"b2to3:{_B}:carry",),
+    # V3 (owner 2026-10-12): longest unpainted run 107. stage1/V3/D3-red-npH.json.
+    (_D3, "core:no-pin-hold", "off"): (f"b0to1:{_A}:carry",),
     # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
     (_D4, "core:wrong-instance", "off"): (
         f"b0to1:{_A_FAR}:carry", f"b1to2:{_A}:carry", "duplicate:slide2:counter-a.mov#1", "duplicate:slide3:counter-a.mov#1",
@@ -262,28 +268,39 @@ RED_ARM_EXPECTATIONS: dict[tuple[str, str, str], tuple[str, ...] | str] = {
         f"b0to1:{_A_FAR}:carry", f"b1to2:{_A}:carry", "duplicate:slide2:counter-a.mov#1", "duplicate:slide3:counter-a.mov#1",
     ),
     (_D4, "strip:bridge@3", "off"): (f"b0to1:{_A_FAR}:carry",),
-    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
-    (_D4, "strip:pin@5", "off"): ("duplicate:slide3:counter-a.mov#1",),
+    # Re-registered 2026-10-12 (owner): the paint instrument reds the stripped pin's own carry (longest run 63); g1h's
+    # duplicate stays. Same set on the pre-fold core (glclock-v6/V4AB). stage1/V4/D4--strippin@5.json.
+    (_D4, "strip:pin@5", "off"): (f"b1to2:{_A}:carry", "duplicate:slide3:counter-a.mov#1"),
     # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
     (_D5, "core:stash-any", "off"): ("stray:slide3:counter-a.mov", "stray:slide3:counter-b.mov"),
-    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
-    (_D5, "core:fifo-reuse", "off"): ("stray:slide3:counter-a.mov",),
+    # Re-registered 2026-10-12 (owner): the reused decoder's carry reds (paint run 59; 59 owner mismatches with paint
+    # off) and duplicates on slide 3 instead of g1h's stray. Same set on the pre-fold core (glclock-v6/V4AB).
+    # stage1/V4/D5--core-variantfifo-reuse.json.
+    (_D5, "core:fifo-reuse", "off"): (f"b1to2:{_A}:carry", "duplicate:slide3:counter-a.mov#1"),
     # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
     (_D5, "strip:pin@2", "off"): (f"b0to1:{_A}:carry",),
     (_D5, "strip:pin@4", "off"): (f"b1to2:{_A}:carry",),
+    # V3 (owner 2026-10-12): longest unpainted runs 108 / 223. stage1/V3/D5-red-npH.json.
+    (_D5, "core:no-pin-hold", "off"): (f"b0to1:{_A}:carry", f"b1to2:{_A}:carry"),
     (_D6, "strip:bridge@2", "off"): (f"b0to1:{_A_FAR}:carry",),
     (_D6, "strip:retire@8", "off"): (f"b3to4:{_A}:retire",),
 }
 # Pass G red arms (`--pass G --core-variant NAME`), keyed by (flag-off runtime plan sha, arm label); ids
-# from `passg_red_ids`. Nothing is registered before V3 measures it on the landed core.
-PASSG_RED_EXPECTATIONS: dict[tuple[str, str], tuple[str, ...]] = {}
+# from `passg_red_ids`. `stage1/` as above.
+PASSG_RED_EXPECTATIONS: dict[tuple[str, str], tuple[str, ...]] = {
+    # V3 (owner 2026-10-12): the (1,3,4) leg's carry (longest unpainted run 229) and its destination (the slide-4 rect
+    # stays unpainted past arrival); the landed core passes this leg. stage1/V3/D1-passG-red-npH.json.
+    (_D1, "core:no-pin-hold"): (f"G1-3-4:b2to3:{_A}:carry", "G1-3-4:destination"),
+}
 # Floor on every red carry's longest unpainted run (frames), carried as `paintFloor` and enforced by the red status
-# functions (decision 3: at least PAINT_FLOOR_MIN_FRAMES). Keyed as the arm's expectations; empty until V3.
+# functions (decision 3: at least PAINT_FLOOR_MIN_FRAMES). Keyed as the arm's expectations.
 PAINT_FLOOR_MIN_FRAMES = 60
 # Red arms whose registered ids only count with a registered floor (the paint-red mechanism, decision 3).
 PAINT_RED_ARMS = ("core:no-pin-hold",)
-RED_ARM_PAINT_FLOOR: dict[tuple[str, str, str], int] = {}
-PASSG_RED_PAINT_FLOOR: dict[tuple[str, str], int] = {}
+RED_ARM_PAINT_FLOOR: dict[tuple[str, str, str], int] = {
+    (deck, "core:no-pin-hold", "off"): PAINT_FLOOR_MIN_FRAMES for deck in (_D2, _D3, _D5)
+}
+PASSG_RED_PAINT_FLOOR: dict[tuple[str, str], int] = {(_D1, "core:no-pin-hold"): PAINT_FLOOR_MIN_FRAMES}
 # Ids an arm must turn red whatever else it registers (plan §3.4 Q2/Q3, §4): the stray red and the
 # identity red. A RECORD arm missing one of these fails; a registered set must contain them.
 RED_ARM_REQUIRED: dict[tuple[str, str, str], tuple[str, ...]] = {
@@ -7719,6 +7736,7 @@ def run_force_wrap(args: argparse.Namespace) -> dict[str, Any]:
     try:
         player.start()
         result["continuity"] = player.output["continuity"]
+        show_output(player, result)
         transport = player._require_transport()
         transport.evaluate(SAMPLER_JS)
         transport.evaluate(ENSURE_PLAYING_JS)

@@ -4558,7 +4558,7 @@ def test_attach_arm_holds_the_viewport_override_session_until_its_chrome_is_torn
     assert events == ["host started, hold closed=False", "hold closed", "chrome terminated"]
 
 
-@pytest.mark.parametrize("arm", ["launch", "attach"])
+@pytest.mark.parametrize("arm", ["launch", "attach", "force-wrap"])
 @pytest.mark.parametrize("visible", [True, False])
 def test_arms_show_the_output_before_sampling(
     arm: str, visible: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -4566,8 +4566,13 @@ def test_arms_show_the_output_before_sampling(
     """Plan §3.3 (B0): `fbba575e`'s ancestor-walking `isCompositing` sees the attach host's inline
     `#body{opacity:0}` (and a paint read sees the launch host's black cover) until `show()` runs, so
     both host arms call `execute("show")` before the sampler is installed, and an output that still
-    reads hidden stops the arm before any sample is taken."""
+    reads hidden stops the arm before any sample is taken. V2b: the force-wrap take too (its sampler is
+    installed in the take itself, not by `drive_and_sample`)."""
     events: list[str] = []
+
+    def evaluate(js: str) -> None:
+        if js == probe.SAMPLER_JS:
+            drive()
 
     class Host:
         output = {"continuity": {"mode": "qualified"}, "logPath": None}
@@ -4583,7 +4588,7 @@ def test_arms_show_the_output_before_sampling(
             return argparse.Namespace(output_visible=visible)
 
         def _require_transport(self) -> Any:
-            return argparse.Namespace(evaluate=lambda js: None)
+            return argparse.Namespace(evaluate=evaluate)
 
         def stop(self) -> None:
             events.append("stop")
@@ -4611,11 +4616,17 @@ def test_arms_show_the_output_before_sampling(
     monkeypatch.setattr(probe, "wait_devtools_active_port", lambda profile, proc: DevToolsEndpoint(1, "/devtools/browser/b"))
     monkeypatch.setattr(probe, "wait_for_cdp", lambda endpoint, proc: None)
     monkeypatch.setattr(probe, "force_exact_viewport", lambda *a: None)
+    monkeypatch.setattr(probe, "force_wrap_ground_truth", lambda *a: {"export": Path("x"), "slides": [], "source": {}, "scene": 1})
     with pytest.raises(RuntimeError, match="stop after drive" if visible else "not visible after show"):
         if arm == "launch":
             probe.run_arm("A", Path("x"), [], {}, (64, 32), {})
-        else:
+        elif arm == "attach":
             probe.run_attach_arm(Path("x"), [], {}, tmp_path, {})
+        else:
+            probe.run_force_wrap(argparse.Namespace(
+                force_wrap={"boundary": "3to4", "offsetMs": 0.0}, fixture=Path("x"), original_index=Path("x"),
+                gl_replay="off", artifact=tmp_path / "fw.json", viewport=(64, 32),
+            ))
     assert events == ["start", "show", *(["drive"] if visible else []), "stop"]
 
 
@@ -6527,8 +6538,9 @@ class _WrapHost:
     def _require_transport(self) -> _WrapTransport:
         return self.transport
 
-    def execute(self, command: str) -> None:
+    def execute(self, command: str) -> Any:
         self.commands.append(command)
+        return argparse.Namespace(output_visible=True)
 
     def observe(self) -> Any:
         return argparse.Namespace(original_slide=4, busy=False)
@@ -6580,7 +6592,7 @@ class TestRunForceWrap:
         args = probe.parse_args(["--force-wrap", "3to4:375", "--fixture", str(tmp_path)])
         result = probe.run_force_wrap(args)
 
-        assert hosts[0].commands == ["to2", "to3", "advance"]
+        assert hosts[0].commands == ["show", "to2", "to3", "advance"] and result["outputVisible"] is True
         seek = next(e for e in hosts[0].transport.evaluations if e.startswith(probe.FORCE_WRAP_SEEK_JS))
         assert seek.endswith('("98D59E27-X-video", 2.375)')
         assert result["take"]["pressT"] == FW_SEEKED + 2000.0 and result["take"]["reached"] is True
@@ -8127,9 +8139,20 @@ def _deck_plan(name: str) -> Any:
 REGISTERED_DECKS = ("P2", "D1", "D2", "D3", "D4", "D5", "D6")
 # Registered post hoc from discovery g1h-089a0393 (2026-09-25): observed, not derived.
 POST_HOC_G1H = {
-    ("P2", "core:stash-any"), ("D1", "strip:pin@6"), ("D2", "strip:restart@4"), ("D2", "strip:pin@6"),
-    ("D3", "strip:pin@4"), ("D4", "core:wrong-instance"), ("D4", "core:fifo-reuse"), ("D4", "strip:pin@5"),
-    ("D5", "core:stash-any"), ("D5", "core:fifo-reuse"), ("D5", "strip:pin@2"),
+    ("P2", "core:stash-any"), ("D2", "strip:restart@4"), ("D2", "strip:pin@6"), ("D3", "strip:pin@4"),
+    ("D4", "core:wrong-instance"), ("D4", "core:fifo-reuse"), ("D5", "core:stash-any"), ("D5", "strip:pin@2"),
+}
+# V3 / V4 (owner 2026-10-12), measured at 277c720b: main checkout
+# `output/evidence/s2-dev/instr-v-277c720b/stage1/V3/{D2,D3,D5}-red-npH.json` and `V4/<deck>--<arm>.json`. The three V4
+# arms re-register g1h ones: the paint instrument also reds their carry. A `no-pin-hold` arm is floored at 60 frames.
+_A1 = "counter-a.mov#1->counter-a.mov#1"
+MEASURED_277C720B = {
+    ("D2", "core:no-pin-hold"): (f"b2to3:{_A1}:carry",),
+    ("D3", "core:no-pin-hold"): (f"b0to1:{_A1}:carry",),
+    ("D5", "core:no-pin-hold"): (f"b0to1:{_A1}:carry", f"b1to2:{_A1}:carry"),
+    ("D1", "strip:pin@6"): (f"b2to3:{_A1}:carry", "duplicate:slide4:counter-a.mov#1"),
+    ("D4", "strip:pin@5"): (f"b1to2:{_A1}:carry", "duplicate:slide3:counter-a.mov#1"),
+    ("D5", "core:fifo-reuse"): (f"b1to2:{_A1}:carry", "duplicate:slide3:counter-a.mov#1"),
 }
 # Plan §4 strip locality (owner, 2026-10-09, option (a)): a strip arm is red on its own boundary, plus the documented
 # cascade of that chain. Every registered red outside the stripped boundary's own `b{from}to{to}:` verdicts, per arm and
@@ -8137,8 +8160,7 @@ POST_HOC_G1H = {
 STRIP_CASCADE = {
     # Derived (WS-R, v6): the bridge overlay no entry names is held at its rect on every later slide.
     ("D1", "strip:bridge@4"): ("stray:slide3:counter-a.mov", "stray:slide4:counter-a.mov"),
-    # Post hoc (g1h): the pin carry itself stays green; two painters claim counter-a.mov#1 on slide 4, the stripped
-    # pin's own destination.
+    # Re-registered (V4): two painters claim counter-a.mov#1 on slide 4, the stripped pin's own destination.
     ("D1", "strip:pin@6"): ("duplicate:slide4:counter-a.mov#1",),
     # Post hoc (g1h): the chain downstream of the stripped restart. Both later carries of the same movie go red, two
     # painters claim counter-a.mov#1 on slides 3 and 4, and an unclaimed counter-a.mov paints on slide 5.
@@ -8151,8 +8173,7 @@ STRIP_CASCADE = {
     ("D3", "strip:pin@4"): (
         "b2to3:counter-b.mov#1->counter-b.mov#1:carry", "duplicate:slide3:counter-b.mov#1", "stray:slide4:counter-b.mov",
     ),
-    # Post hoc (g1h): the pin carry itself stays green; two painters claim counter-a.mov#1 on slide 3, the stripped
-    # pin's own destination.
+    # Re-registered (V4): two painters claim counter-a.mov#1 on slide 3, the stripped pin's own destination.
     ("D4", "strip:pin@5"): ("duplicate:slide3:counter-a.mov#1",),
 }
 
@@ -8259,6 +8280,19 @@ class TestRedArmRegistration:
             "b0to1:counter-a.mov#2->counter-a.mov#1:carry", "b1to2:counter-a.mov#1->counter-a.mov#1:carry",
             "duplicate:slide2:counter-a.mov#1", "duplicate:slide3:counter-a.mov#1",
         )
+
+    @pytest.mark.parametrize(("deck", "label"), sorted(MEASURED_277C720B))
+    def test_the_v3_v4_sets_are_the_measured_sets(self, deck: str, label: str) -> None:
+        key = (probe.DECK_PLAN_SHA256[deck], label, "off")
+        assert probe.RED_ARM_EXPECTATIONS[key] == MEASURED_277C720B[(deck, label)]
+        assert probe.RED_ARM_PAINT_FLOOR.get(key) == (60 if label in probe.PAINT_RED_ARMS else None)
+
+    def test_the_pass_g_red_set_is_v3s_measured_set(self) -> None:
+        """V3 (D1-passG-red-npH.json): the (1,3,4) leg's carry and its unpainted destination, floored at 60."""
+        key = (probe.DECK_PLAN_SHA256["D1"], "core:no-pin-hold")
+        assert probe.PASSG_RED_EXPECTATIONS == {key: (f"G1-3-4:b2to3:{_A1}:carry", "G1-3-4:destination")}
+        assert probe.PASSG_RED_PAINT_FLOOR == {key: 60}
+        assert f"b2to3:{_A1}:carry" in {spec["id"] for spec in probe.verdict_specs(_deck_plan("D1"))}
 
     def test_every_action_type_has_a_pre_registered_strip_arm(self) -> None:
         """Plan §3.4 Q3: one --strip arm per action type (pin, bridge, restart, retire, glReplay)."""
@@ -8371,16 +8405,16 @@ class TestRedArmStatus:
     def test_a_registered_paint_floor_holds_every_red_carry(
         self, build: Any, status_of: Any, verdict_of: Any, floor: int | None, run: int | None, status: str,
     ) -> None:
-        """Astra r1 #5 / decision 3: matching red ids with a one-frame failure never pass a floored arm. The
-        registrations stay empty until V3; any floor is keyed by a registered arm."""
+        """Astra r1 #5 / decision 3: matching red ids with a one-frame failure never pass a floored arm. Every
+        registered paint-red arm, and no other, carries a floor."""
         result = build()
         verdict_of(result)["paint"] = {"status": "fail", "longestRun": run} if run is not None else None
         result.pop("paintFloor", None)
         if floor is not None:
             result["paintFloor"] = floor
         assert status_of(result)[0] == status
-        assert set(probe.RED_ARM_PAINT_FLOOR) <= set(probe.RED_ARM_EXPECTATIONS)
-        assert set(probe.PASSG_RED_PAINT_FLOOR) <= set(probe.PASSG_RED_EXPECTATIONS)
+        assert set(probe.RED_ARM_PAINT_FLOOR) == {k for k in probe.RED_ARM_EXPECTATIONS if k[1] in probe.PAINT_RED_ARMS}
+        assert set(probe.PASSG_RED_PAINT_FLOOR) == {k for k in probe.PASSG_RED_EXPECTATIONS if k[1] in probe.PAINT_RED_ARMS}
 
 
 class TestStrayCensus:

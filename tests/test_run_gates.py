@@ -61,7 +61,7 @@ What is pinned here:
 - the carry-cover gate (gl-clock plan §5): green, red and null arms on P2 and on D1 (each on its deck's own export),
   full tier only, after the paint controls and before the P2 arms; a check fails closed on every unexpected status, a
   foreign core sha, fixture or control, and (but on the null arm) any bridge clock other than the arm's;
-- the painted instrument (S2 instrument plan §5): the D5 `no-pin-hold` deck red arm, one Pass G red arm and three
+- the painted instrument (S2 instrument plan §5): the D2/D3/D5 `no-pin-hold` deck red arms, one Pass G red arm and three
   paint controls run in the full tier only, queued and checked Pass G -> Pass G red -> paint control -> carry-cover;
   each check fails closed on every known-bad shape, a host red artifact without `sampler.selfCheck.ok` fails, and
   paint census entries are printed and counted as `findings=` on the DONE line without changing the exit code.
@@ -473,7 +473,7 @@ def test_the_pattern_cache_is_prewarmed_and_verified_before_the_first_timed_run(
     events = gates["events"]()
     assert events[:2] == ["prewarm html-unmodified", "prewarm html-unmodified"], "the fill, then the verifying lookup"
     assert all(not e.startswith("prewarm") for e in events[2:])
-    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + 23 + 7 + 1 + 3 + 6 + 8
+    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + len(DECK_ARMS) + 7 + 1 + 3 + 6 + 8
     assert f"h264 pattern prewarm 46.0333s: encoded key={'k' * 64}" in done.stdout
     assert f"h264 pattern cache verified 46.0333s: hit key={'k' * 64} sha256={'s' * 64}" in done.stdout
     assert "cache hit" in gates["run"](outdir=gates["tmp"] / "out2").stdout
@@ -622,12 +622,14 @@ DEV_P2_ARMS = [FULL_P2_ARMS[0], FULL_P2_ARMS[1], FULL_P2_ARMS[6]]
 DECK_ARMS = [
     ("D1", "--strip bridge@2"), ("D1", "--strip bridge@4"), ("D1", "--strip pin@6"),
     ("D2", "--strip bridge@2"), ("D2", "--strip restart@4"), ("D2", "--strip pin@6"), ("D2", "--strip bridge@8"),
+    ("D2", "--core-variant no-pin-hold"),
     ("D3", "--strip pin@2"), ("D3", "--strip bridge@2"), ("D3", "--strip retire@4"), ("D3", "--strip pin@4"),
-    ("D3", "--strip bridge@6"),
+    ("D3", "--strip bridge@6"), ("D3", "--core-variant no-pin-hold"),
     ("D4", "--core-variant wrong-instance"), ("D4", "--core-variant fifo-reuse"), ("D4", "--strip bridge@3"),
     ("D4", "--strip pin@5"),
     ("D5", "--core-variant stash-any"), ("D5", "--core-variant fifo-reuse"), ("D5", "--strip pin@2"), ("D5", "--strip pin@4"),
-    ("D6", "--strip bridge@2"), ("D6", "--strip retire@8"), ("D5", "--core-variant no-pin-hold"),
+    ("D5", "--core-variant no-pin-hold"),
+    ("D6", "--strip bridge@2"), ("D6", "--strip retire@8"),
 ]
 DECK_RED_STEMS = [f"host-red{deck}{args.replace(' ', '')}" for deck, args in DECK_ARMS]
 PASSG_FIXTURES = ("P2", "D1", "D2", "D3", "D4", "D5", "D6")
