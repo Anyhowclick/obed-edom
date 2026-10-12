@@ -1,6 +1,6 @@
 # Dissolve and cut over fill-less slides: a true cross-fade, a clean cut, and movies that freeze and fade
 
-**rev 16 — r12 folded, decision 14, for owner review**, 2026-10-12. Rev 1: Opus planner (`8e572864`). Critique r1–r7: GPT-6 Astra
+**rev 17 — decision 15 (split: Chrome host only in this PR), for owner review**, 2026-10-12. Rev 1: Opus planner (`8e572864`). Critique r1–r7: GPT-6 Astra
 high via Codex (not Opus; owner 2026-10-11), 12 + 7 + 11 + 7 + 6 + 4 + 3 findings, all folded (§14). Revs 2–9: Opus planner
 (`cd289a05`, `f3bd8b55`, `4ffcd8ad`, `e5c644bb`, `218308c3`, `cacfe9fb`, `d299b549`, rev 9 = owner GO 2026-10-11 22:10, W1–W4
 implemented on this branch up to `fbe105e0`). Rev 10: Opus planner, after Q0b's five re-plan triggers, the Astra xhigh advisory
@@ -11,12 +11,14 @@ same day; §12); rev 11 = `b4ff2576`. Rev 12: Opus planner, folding GPT-6 Astra 
 Rev 14: Opus planner, folding GPT-6 Astra r11 (geometry coverage matrix, `m-snap-frac` anchor; plan-only, §3.1 unchanged);
 rev 14 = `75a6d4ff`. Rev 15: Opus planner, after Q0b-bis (`q0bbis-2026-10-12/`) found CEF 127 does not snap the video quad, the
 CEF investigation (`cef-frac-2026-10-12/`) and owner decision 13 (~14:10; §12); rev 15 = `95c55e45`. Rev 16: Opus planner, folding
-GPT-6 Astra r12 (6 findings) and owner decision 14 (~14:30: raw export and Build Preview no longer freeze). Owner decisions 1–7 in §12. Plan only: no product code, no commits, no OBS, no Keynote. Base: `main` @ `1589d096`.
+GPT-6 Astra r12 (6 findings) and owner decision 14 (~14:30: raw export and Build Preview no longer freeze); rev 16 = `41ef609b`.
+Rev 17: Opus planner, owner decision 15 (~15:00): this PR freezes only on the Chrome host; CEF/OBS skips; the probe is a
+follow-up PR (§13.1). Owner decisions 1–7 in §12. Plan only: no product code, no commits, no OBS, no Keynote. Base: `main` @ `1589d096`.
 Players: stock `main.js` `e9b2fad4…` and `17c0c938…` (`live_runtime.SUPPORTED_PLAYERS`). Every offset is a **byte** offset,
 read on both players; they are equal below 2331091 (17c0c938 = e9b2fad4 + two 19-byte `,isEvalSupported:!1` at 17c0c938
 offsets 2331091 and 2331362: +19 between them, +38 after; among the listed anchors only R8, D4 and the hook `_ANCHOR` move,
 each by 38). Evidence: main checkout `output/evidence/s2-dev/dissolve-alpha-2026-10-11/` (git-ignored); scratch `x` =
-its `plan-2026-10-11/planner/x`; Q0b = its `q0b-2026-10-11/`; rev-10 prototypes = its `plan-rev10-2026-10-12/`, rev-11 / 12 / 13 / 15 / 16 Node evidence = its `plan-rev1{1,2,3,5,6}-2026-10-12/`; hi-DPI investigation = its `hidpi-2026-10-12/`; Q0b-bis = its `q0bbis-2026-10-12/`; CEF investigation = its `cef-frac-2026-10-12/` (§8). Parents: `keynote_live_mm_opacity.plan.md` (R1–R5, switch, pins),
+its `plan-2026-10-11/planner/x`; Q0b = its `q0b-2026-10-11/`; rev-10 prototypes = its `plan-rev10-2026-10-12/`, rev-11 / 12 / 13 / 15 / 16 / 17 Node evidence = its `plan-rev1{1,2,3,5,6,7}-2026-10-12/`; hi-DPI investigation = its `hidpi-2026-10-12/`; Q0b-bis = its `q0bbis-2026-10-12/`; CEF investigation = its `cef-frac-2026-10-12/` (§8). Parents: `keynote_live_mm_opacity.plan.md` (R1–R5, switch, pins),
 `keynote_live_handback_geometry.plan.md` (R6–R8), `keynote_live_paint_oracle.plan.md` (oracle stays stock).
 
 ## 0. Summary
@@ -37,8 +39,9 @@ its `plan-2026-10-11/planner/x`; Q0b = its `q0b-2026-10-11/`; rev-10 prototypes 
   decision 8), snapshots each `<video>` whose chain is inside a **positive allowlist of the computed styles the player
   generates** (§3.2) onto the **device pixels of the box Chromium paints it at** (decision 9) — only on the geometry where
   that is measured (DPR 1, 1.5 or 2 at stage scale 1, base-layer box = slide, translation-only transforms; decision 12), with
-  the **placement rule a host startup probe measured for the engine** (snapped for Chrome 154, fractional for OBS's CEF 127;
-  none → skip; decision 13; host pages only — raw export and Build Preview keep the jump, decision 14) — with every backing pixel proven
+  the snapped placement **granted by the host only on a Chrome it launched whose engine is qualified** (Chrome 154, GPU
+  compositing; decision 15) — managed OBS/CEF, raw export and Build Preview keep today's jump (decisions 14–15; the CEF placement
+  probe is a follow-up PR, §13.1) — with every backing pixel proven
   opaque, untoned (**identity `L`**, decision 10: the GPU mid-tone step is a known limit), redraws overlying canvases (Q7);
   D3 puts it in the outgoing fading wrapper, or discards it. The `<video>` is never touched; anything outside keeps today's
   look.
@@ -56,7 +59,8 @@ its `plan-2026-10-11/planner/x`; Q0b = its `q0b-2026-10-11/`; rev-10 prototypes 
   CEF (budget 50); the 18-cell DPR × origin × clip matrix PASS under a real `--force-device-scale-factor`. **The trigger:** OBS's
   CEF 127 does not snap the video quad (it draws at x 109.352), so snapped holders miss by up to 183 LSB there; a fractional
   draw over a snapped underlay reads 2 / 0 % in CEF but 183 in Chrome 154 — no single rule fits both engines, and no in-page
-  test tells them apart. Decision 13: a host-side startup probe on composited pixels picks the rule (§3.3).
+  test tells them apart. Decision 13 chose a host-side startup probe; decision 15 splits it out: this PR grants the snapped rule
+  only on the host-launched, qualified Chrome (§3.3), and the probe follows (§13.1).
 - **Switch:** `mm_opacity` (`OBED_LIVE_MM_OPACITY=off` restores today's bytes); every output; `RUNTIME_VERSION` stays 2.
 
 ## 1. Facts (code-read on both players; every anchor count-checked)
@@ -139,29 +143,35 @@ shows both slides (§8). On-disk cuts end on the empty background; a cut between
 
 | # | Where (byte, length) | Before | After |
 |---|---|---|---|
-| D1 (R9) | end of `processEffects` / head of `renderEffects` @2311794 (26 B) | `return B}renderEffects(A){` | `return B}` + `__obedShape`, `__obedDissolveLayer`, `__obedFreezeTake`, `__obedFreeze` + `renderEffects(A){` (10 559 B; rev 15: 10 571; rev 13–14: 10 197; rev 12: 10 195; rev 11: 10 249; rev 10: 10 237; rev 9: 9 225) |
+| D1 (R9) | end of `processEffects` / head of `renderEffects` @2311794 (26 B) | `return B}renderEffects(A){` | `return B}` + `__obedShape`, `__obedDissolveLayer`, `__obedFreezeTake`, `__obedFreeze` + `renderEffects(A){` (10 305 B; rev 16: 10 559; rev 15: 10 571; rev 13–14: 10 197; rev 12: 10 195; rev 11: 10 249; rev 10: 10 237; rev 9: 9 225) |
 | D2 (R10) | base-layer `VB` @2312557 (65 B) | `const A=new VB(C.baseLayer,{name:C.name,type:C.type,objectID:e});` | `const A=new VB(this.__obedDissolveLayer(C),{name:C.name,type:C.type,objectID:e});` |
 | D3 (R11) | after the CSS draw @2313053 (42 B) | `this.cssRenderer.draw(a),a.removeChild(w)}` | `this.cssRenderer.draw(a),this.__obedFreeze(C,A),a.removeChild(w)}` |
 | D4 (R12) | `jumpToScene_partFour` @2353722 / @2353760 (50 B) | `jumpToScene_partFour(A,B){if(this.displayScene(A),` | `jumpToScene_partFour(A,B){if(B&&PB.prototype.__obedFreezeTake(this,A),this.displayScene(A),` |
 
-The methods (rev 15: `plan-rev15-2026-10-12/scripts/r10.py` `methods15()`, built by counted substitution from W1's rev-9
+The methods (rev 17: `plan-rev17-2026-10-12/scripts/r10.py` `methods17()`, built by counted substitution from W1's rev-9
 constants; `node --check` passes on both patched players, `on` and `rendering`; `PB` and the controller share the module
-scope of `TB` and `UC`). Only `__obedFreezeTake` changes against rev 9: the exterior proof `xo` with HTML-`div` witnesses,
-the visible stage `V`, the top-layer refusal, open author shadow roots refused, descendant-paint effects checked before the
-visibility shortcut and no tag exempt by name (decision 8; r8 1–2, r9 1–2); the snapped device-pixel holder (decision 9)
-snapped on the stage-local 1/DPR grid (fix A, decision 12) behind the **geometry guard** — `devicePixelRatio` ∈ {1, 1.5, 2},
-`kx` = `ky` = 1 (the live base-layer box is the slide), `#stage` and every scene transform a pure translation, integer computed
-`left`/`top` on every scene element (r8 4–5, r9 3, decision 13; §3.2); the **placement rule** read from
-the non-configurable getter `window.__obedPlacement` (the host's private calibration channel, §3.3; absent on raw/preview pages): `"snap"` as before, `"frac"` (DPR 1, integer stage origin
-only) adds CEF 127's fractional draw over the snapped underlay, anything else skips (decision 13); identity tone with the alpha scan over **every** backing pixel (decision 10; r8 3; `L`, its table and
-`_FREEZE_TONE_LUT` go); the `fill` aspect test goes. `Q` stays the one qualified tuple (`_FREEZE_QUALIFIED_TUPLES`).
-Candidate digests (W1 re-pins; `off` unchanged): `on` e9b2fad4 `47921782…`, 17c0c938 `ba584294…`; `rendering` e9b2fad4
-`2a671c19…`, 17c0c938 `39c340f6…`.
+scope of `TB` and `UC`). Only `__obedFreezeTake` changes against rev 9:
+- the paint gate: the exterior proof `xo` with HTML-`div` witnesses, the visible stage `V`, the top-layer refusal, open author
+  shadow roots refused, descendant-paint effects checked before the visibility shortcut, and no tag exempt by name (decision 8;
+  r8 1–2, r9 1–2);
+- the snapped device-pixel holder (decision 9), snapped on the stage-local 1/DPR grid (fix A, decision 12);
+- the **geometry guard**: `devicePixelRatio` ∈ {1, 1.5, 2}; `kx` = `ky` = 1 (the live base-layer box is the slide); `#stage` and
+  every scene transform a pure translation; integer computed `left`/`top` on every scene element (r8 4–5, r9 3; §3.2);
+- the **host grant**: the take skips unless the non-configurable getter `window.__obedPlacement` reads `"snap"` (decision 15,
+  §3.3). The host grants it only on a Chrome it launched itself whose engine is qualified. The getter is absent on raw/preview
+  pages, and nothing is granted under managed OBS/CEF;
+- identity tone, with the alpha scan over **every** backing pixel (decision 10; r8 3; `L`, its table and `_FREEZE_TONE_LUT` go);
+- the `fill` aspect test goes.
+
+`Q` stays the one qualified tuple (`_FREEZE_QUALIFIED_TUPLES`). Rev 16's fractional (`frac`) draw is gone (follow-up PR,
+§13.1).
+Candidate digests (W1 re-pins; `off` unchanged): `on` e9b2fad4 `81ac1a33…`, 17c0c938 `a9aa0bde…`; `rendering` e9b2fad4
+`dd0db318…`, 17c0c938 `c6c1eb5e…`.
 
 ```
 __obedShape(C){try{var b=C.baseLayer,K=b.layers,k=1===K.length?K[0]:null,P=k&&k.layers,i=P&&2===P.length?P[0]:null,o=i&&P[1],x=o&&o.animations&&1===o.animations.length?o.animations[0]:null,u="none"===C.name,f=function(l,c){var s=l.initialState,a=s.affineTransform,t=s.sublayerTransform;return!l.isVideoLayer&&!l.isWebVideoPosterLayer&&null==l.objectID&&!s.transform&&0===s.rotation&&1===s.scale&&1===s.opacity&&!s.hidden&&!!a&&6===a.length&&a.every(function(v,j){return v===(j%3?0:1)})&&(c||!!t&&16===t.length&&t.every(function(v,j){return v===(j%5?0:1)}))};return"transition"!==C.type||!u&&"apple:dissolve"!==C.name||!x||b.texture||k.texture||(b.animations||[]).length||(k.animations||[]).length||!f(k,1)||!f(i)||!f(o)||!i.texture||!o.texture||(i.layers||[]).length||(o.layers||[]).length||(i.animations||[]).length||x.keyTimes||x.path||x.animations||(u?"hidden"!==x.property||!1!==x.from.scalar||!0!==x.to.scalar||.001!==x.duration||0!==x.beginTime||"both"!==x.fillMode||x.timingFunction||x.timeOffset||x.repeatCount||x.autoreverses:"opacity"!==x.property||1!==x.from.scalar||0!==x.to.scalar)?null:[b,k,i,o,x,u]}catch(E){return null}}
 __obedDissolveLayer(C){var b=C.baseLayer,n=0,z=this.__obedShape(C);if(!z)return b;try{var k=z[1],i=z[2],o=z[3],x=z[4],u=z[5];if(!u){var S=UC.animationManager.styleSheet,L=function(j){return"#layer"+(TB+j)};S.insertRule(L(1)+"{isolation:isolate}",0),n=1,S.insertRule(L(2)+","+L(3)+"{mix-blend-mode:plus-lighter}",0),n=2;if("isolate"!==S.cssRules[1].style.isolation||"plus-lighter"!==S.cssRules[0].style.mixBlendMode)throw 0}return C.obedDissolve=u?"cut":"dissolve",Object.assign({},b,{layers:[Object.assign({},k,{layers:[Object.assign({},i,{initialState:Object.assign({},i.initialState,u?{hidden:!0}:{opacity:0}),animations:[Object.assign({},x,{from:{scalar:u?!0:0},to:{scalar:u?!1:1}})]}),o]})]})}catch(E){return n&&(TB+=4),b}}
-__obedFreezeTake(U,A){U.__obedFrozen=null;var t0=performance.now();try{var e=U.script.events[A],y=e&&e.effects&&e.effects[0],G=document.getElementById("stage");if(!y||!G||!this.__obedShape(y))return;var R=document.getElementById("layer"+U.playbackController.kpfEvent.baseLayer.layerId).getBoundingClientRect(),kx=U.script.slideWidth/R.width,ky=U.script.slideHeight/R.height,H=[],N=document.getElementsByTagName("*"),Q=["bt709/bt709/bt709/false"],pl=window.__obedPlacement,cs=function(n){return getComputedStyle(n)},dv=function(s,d){return(s||d)===d},bd=function(z){return"none"!==z.borderTopStyle||"none"!==z.borderRightStyle||"none"!==z.borderBottomStyle||"none"!==z.borderLeftStyle},rd=function(z){return"0px"!==z.borderTopLeftRadius||"0px"!==z.borderTopRightRadius||"0px"!==z.borderBottomLeftRadius||"0px"!==z.borderBottomRightRadius},deco=function(z){return!/rgba\(0, 0, 0, 0\)|transparent/.test(z.backgroundColor)||"none"!==z.backgroundImage||"none"!==z.boxShadow||bd(z)||"none"!==z.outlineStyle||!dv(z.backdropFilter,"none")},own=function(n,z){return/^(CANVAS|VIDEO|IMG|SVG|IFRAME|OBJECT|EMBED|INPUT|TEXTAREA|SELECT|BUTTON)$/i.test(n.tagName)||deco(z)||Array.prototype.some.call(n.childNodes,function(c){return 3===c.nodeType&&/\S/.test(c.data)})},bm=function(z){return!deco(z)&&!rd(z)&&"0px"===z.paddingTop&&"0px"===z.paddingRight&&"0px"===z.paddingBottom&&"0px"===z.paddingLeft&&dv(z.objectViewBox,"none")&&dv(z.imageRendering,"auto")},al=function(a){var w=cs(a),s=a===G,u=!s&&a.contains(G),m=w.transform,M;if("block"!==w.display||!dv(w.contain,"none")||!dv(w.contentVisibility,"visible")||"none"!==w.filter||!dv(w.backdropFilter,"none")||"normal"!==w.mixBlendMode||!dv(w.isolation,"auto")||"none"!==w.clipPath||!dv(w.maskImage,"none")||!dv(w.clip,"auto")||"auto"!==w.zIndex||!dv(w.translate,"none")||!dv(w.rotate,"none")||!dv(w.scale,"none")||!dv(w.offsetPath,"none")||!dv(w.willChange,"auto")||!dv(w.zoom,"1")||"none"!==w.outlineStyle||w.overflowX!==w.overflowY||"visible"!==w.overflowX&&!("clip"===w.overflowX&&/^(VIDEO|CANVAS)$/.test(a.tagName))&&("hidden"!==w.overflowX||rd(w)||bd(w)))return!1;if(u)return("static"===w.position||"absolute"===w.position)&&"none"===m;if("absolute"!==w.position||!dv(w.perspective,"none")||!dv(w.backfaceVisibility,"visible")||(s?"preserve-3d"!==w.transformStyle&&"flat"!==w.transformStyle:"flat"!==w.transformStyle&&("preserve-3d"!==w.transformStyle||"none"!==m)||"visible"!==w.visibility))return!1;if(!s&&!(/^-?\d+px$/.test(w.left)&&/^-?\d+px$/.test(w.top)))return!1;if("none"===m)return!0;M=new DOMMatrix(m);return M.is2D&&!M.b&&!M.c&&1===M.a&&1===M.d},xo=function(n){for(var a=n,w,r;!a.contains(G);a=a.parentElement){w=cs(a);if("fixed"===getComputedStyle(a,"::before").position||"fixed"===getComputedStyle(a,"::after").position)return!1;if("div"===a.localName&&"http://www.w3.org/1999/xhtml"===a.namespaceURI&&"hidden"===w.overflowX&&"hidden"===w.overflowY&&"static"!==w.position&&/^(block|flow-root|flex|grid)$/.test(w.display)&&"none"===w.boxShadow&&"none"===w.filter&&dv(w.backdropFilter,"none")&&"none"===w.outlineStyle&&dv(w.borderImageSource,"none")&&dv(w.webkitBoxReflect,"none")&&(r=a.getBoundingClientRect(),r.right<=V[0]||r.left>=V[2]||r.bottom<=V[1]||r.top>=V[3]))return!0;if("fixed"===w.position)return!1}return!1},vp=function(a){var h=document.documentElement;return a===h||a===document.body&&"visible"===cs(h).overflowX},pc=function(n){var t=n.tagName,w=cs(n),b,f;if("contents"===w.display)return!1;if(!n.checkVisibility({opacityProperty:!0}))return!0;b=getComputedStyle(n,"::before").content;f=getComputedStyle(n,"::after").content;if(!/^(normal|none)$/.test(b||"none")||!/^(normal|none)$/.test(f||"none")||!/^(normal|none)$/.test(w.content||"normal")||"list-item"===w.display||Array.prototype.some.call(n.childNodes,function(c){return 3===c.nodeType&&/\S/.test(c.data)})||"none"!==w.filter||!dv(w.backdropFilter,"none")||!dv(w.webkitBoxReflect,"none"))return!1;if("visible"!==w.visibility)return!0;if(!/^(HTML|BODY|DIV|CANVAS|VIDEO)$/.test(t)||/^(CANVAS|VIDEO)$/.test(t)&&("50% 50%"!==w.objectPosition||!dv(w.objectViewBox,"none")||!/^(fill|contain)$/.test(w.objectFit)))return!1;return"none"===w.boxShadow&&"none"===w.outlineStyle&&dv(w.borderImageSource,"none")&&dv(w.columnRuleStyle,"none")};for(var V=[0,0,innerWidth,innerHeight],a=G,w,b;a;a=a.parentElement)w=cs(a),"visible"!==w.overflowX&&(vp(a)||"static"!==w.position)&&(b=vp(a)?{left:0,top:0,right:innerWidth,bottom:innerHeight}:a.getBoundingClientRect(),V=[Math.max(V[0],b.left),Math.max(V[1],b.top),Math.min(V[2],b.right),Math.min(V[3],b.bottom)]);if(!(R.width>0&&R.height>0)||[1,1.5,2].indexOf(devicePixelRatio)<0||"snap"!==pl&&("frac"!==pl||1!==devicePixelRatio||R.left%1||R.top%1)||1!==kx||1!==ky||document.querySelector(":modal,:popover-open,:fullscreen")||!Array.prototype.every.call(N,function(n){return!n.shadowRoot&&(pc(n)||!G.contains(n)&&!n.contains(G)&&xo(n))}))return;var ad=[];Array.prototype.slice.call(document.querySelectorAll("video")).reverse().forEach(function(v){try{if(!G.contains(v)||v.readyState<2||!v.videoWidth||!v.videoHeight||!v.checkVisibility({opacityProperty:!0,visibilityProperty:!0}))return;var z=cs(v),fit=z.objectFit,K;if(!bm(z)||"50% 50%"!==z.objectPosition||"fill"!==fit&&"contain"!==fit)return;try{var vf=new VideoFrame(v),cc=vf.colorSpace;K=[cc.primaries,cc.transfer,cc.matrix,cc.fullRange].join("/");vf.close()}catch(E){return}if(Q.indexOf(K)<0)return;var Y=[],r=v.getBoundingClientRect(),c=[r.left,r.top,r.right,r.bottom],a,q,w,b;for(a=v,q=1;a;a=a.parentElement){if(!al(a))return;w=cs(a);q*=+w.opacity;if(a!==v&&"visible"!==w.overflowX&&(vp(a)||"static"!==w.position)){b=vp(a)?{left:0,top:0,right:innerWidth,bottom:innerHeight}:a.getBoundingClientRect();c=[Math.max(c[0],b.left),Math.max(c[1],b.top),Math.min(c[2],b.right),Math.min(c[3],b.bottom)]}}if(q<.999)return;var vw=v.videoWidth,vh=v.videoHeight,f="fill"===fit?0:Math.min(r.width/vw,r.height/vh),cw=f?vw*f:r.width,ch2=f?vh*f:r.height,cx=r.left+(r.width-cw)/2,cy=r.top+(r.height-ch2)/2;c=[Math.max(c[0],cx),Math.max(c[1],cy),Math.min(c[2],cx+cw),Math.min(c[3],cy+ch2)];if(c[2]-c[0]<1||c[3]-c[1]<1)return;for(var I=Array.prototype.indexOf.call(N,v),i=0,n,o,P,T;i<N.length;i++){n=N[i];if(i===I||n.contains(v))continue;o=n.getBoundingClientRect();if(o.right<=c[0]||o.left>=c[2]||o.bottom<=c[1]||o.top>=c[3]||!n.checkVisibility({opacityProperty:!0,visibilityProperty:!0})||!own(n,cs(n)))continue;for(P=n.parentElement;!P.contains(v);P=P.parentElement);if(P===G||!G.contains(P))return;for(T=n,a=1;T!==P;T=T.parentElement){w=cs(T);if(!al(T)||i>I&&T!==n&&"visible"!==w.overflowX)return;a*=+w.opacity;if(T!==n&&+w.opacity<1&&Array.prototype.some.call(T.getElementsByTagName("*"),function(m){return m!==n&&own(m,cs(m))}))a=0}if(i<I)continue;if("VIDEO"===n.tagName){if(ad.indexOf(n)<0)return;continue}w=cs(n);if("CANVAS"!==n.tagName||!bm(w)||"fill"!==w.objectFit||!a)return;Y.push([n,o,a])}var p=devicePixelRatio||1,sn=function(z,e,k){return Math.round((z-e)*k*p)/p},u0=sn(cx,R.left,kx),v0=sn(cy,R.top,ky),u1=sn(cx+cw,R.left,kx),v1=sn(cy+ch2,R.top,ky),a0=sn(c[0],R.left,kx),b0=sn(c[1],R.top,ky),a1=sn(c[2],R.left,kx),b1=sn(c[3],R.top,ky),ww=Math.round((a1-a0)/kx*p),hh=Math.round((b1-b0)/ky*p),dx=(u0-a0)/kx*p,dy=(v0-b0)/ky*p,dw=(u1-u0)/kx*p,dh=(v1-v0)/ky*p,x,g,d,j;if(ww<1||hh<1)return;x=document.createElement("canvas");x.width=ww,x.height=hh;g=x.getContext("2d");g.drawImage(v,dx,dy,dw,dh);"frac"===pl&&g.drawImage(v,dx+((r.left-R.left)*kx+Math.round((cx-r.left)*kx*p)/p-u0)/kx*p,dy+((r.top-R.top)*ky+Math.round((cy-r.top)*ky*p)/p-v0)/ky*p,Math.round(cw*kx*p)/kx,Math.round(ch2*ky*p)/ky);for(d=g.getImageData(0,0,ww,hh).data,j=3;j<d.length;j+=4)if(d[j]<255)return;Y.forEach(function(y){var l=sn(y[1].left,R.left,kx),m=sn(y[1].top,R.top,ky);g.globalAlpha=y[2],g.drawImage(y[0],(l-a0)/kx*p,(m-b0)/ky*p,(sn(y[1].right,R.left,kx)-l)/kx*p,(sn(y[1].bottom,R.top,ky)-m)/ky*p)}),g.globalAlpha=1;var h=document.createElement("div"),s=h.style,t=x.style;s.position=t.position="absolute",s.overflow="hidden",s.left=a0+"px",s.top=b0+"px",s.width=t.width=a1-a0+"px",s.height=t.height=b1-b0+"px",t.left=t.top="0px",h.appendChild(x),H.push(h),ad.push(v)}catch(E){}}),H.length&&(U.__obedFrozen={scene:A,holders:H.reverse()})}catch(E){U.__obedFrozen=null}finally{window.__obedTakeMs=U.__obedTakeMs=performance.now()-t0}}
+__obedFreezeTake(U,A){U.__obedFrozen=null;var t0=performance.now();try{var e=U.script.events[A],y=e&&e.effects&&e.effects[0],G=document.getElementById("stage");if(!y||!G||!this.__obedShape(y))return;var R=document.getElementById("layer"+U.playbackController.kpfEvent.baseLayer.layerId).getBoundingClientRect(),kx=U.script.slideWidth/R.width,ky=U.script.slideHeight/R.height,H=[],N=document.getElementsByTagName("*"),Q=["bt709/bt709/bt709/false"],pl=window.__obedPlacement,cs=function(n){return getComputedStyle(n)},dv=function(s,d){return(s||d)===d},bd=function(z){return"none"!==z.borderTopStyle||"none"!==z.borderRightStyle||"none"!==z.borderBottomStyle||"none"!==z.borderLeftStyle},rd=function(z){return"0px"!==z.borderTopLeftRadius||"0px"!==z.borderTopRightRadius||"0px"!==z.borderBottomLeftRadius||"0px"!==z.borderBottomRightRadius},deco=function(z){return!/rgba\(0, 0, 0, 0\)|transparent/.test(z.backgroundColor)||"none"!==z.backgroundImage||"none"!==z.boxShadow||bd(z)||"none"!==z.outlineStyle||!dv(z.backdropFilter,"none")},own=function(n,z){return/^(CANVAS|VIDEO|IMG|SVG|IFRAME|OBJECT|EMBED|INPUT|TEXTAREA|SELECT|BUTTON)$/i.test(n.tagName)||deco(z)||Array.prototype.some.call(n.childNodes,function(c){return 3===c.nodeType&&/\S/.test(c.data)})},bm=function(z){return!deco(z)&&!rd(z)&&"0px"===z.paddingTop&&"0px"===z.paddingRight&&"0px"===z.paddingBottom&&"0px"===z.paddingLeft&&dv(z.objectViewBox,"none")&&dv(z.imageRendering,"auto")},al=function(a){var w=cs(a),s=a===G,u=!s&&a.contains(G),m=w.transform,M;if("block"!==w.display||!dv(w.contain,"none")||!dv(w.contentVisibility,"visible")||"none"!==w.filter||!dv(w.backdropFilter,"none")||"normal"!==w.mixBlendMode||!dv(w.isolation,"auto")||"none"!==w.clipPath||!dv(w.maskImage,"none")||!dv(w.clip,"auto")||"auto"!==w.zIndex||!dv(w.translate,"none")||!dv(w.rotate,"none")||!dv(w.scale,"none")||!dv(w.offsetPath,"none")||!dv(w.willChange,"auto")||!dv(w.zoom,"1")||"none"!==w.outlineStyle||w.overflowX!==w.overflowY||"visible"!==w.overflowX&&!("clip"===w.overflowX&&/^(VIDEO|CANVAS)$/.test(a.tagName))&&("hidden"!==w.overflowX||rd(w)||bd(w)))return!1;if(u)return("static"===w.position||"absolute"===w.position)&&"none"===m;if("absolute"!==w.position||!dv(w.perspective,"none")||!dv(w.backfaceVisibility,"visible")||(s?"preserve-3d"!==w.transformStyle&&"flat"!==w.transformStyle:"flat"!==w.transformStyle&&("preserve-3d"!==w.transformStyle||"none"!==m)||"visible"!==w.visibility))return!1;if(!s&&!(/^-?\d+px$/.test(w.left)&&/^-?\d+px$/.test(w.top)))return!1;if("none"===m)return!0;M=new DOMMatrix(m);return M.is2D&&!M.b&&!M.c&&1===M.a&&1===M.d},xo=function(n){for(var a=n,w,r;!a.contains(G);a=a.parentElement){w=cs(a);if("fixed"===getComputedStyle(a,"::before").position||"fixed"===getComputedStyle(a,"::after").position)return!1;if("div"===a.localName&&"http://www.w3.org/1999/xhtml"===a.namespaceURI&&"hidden"===w.overflowX&&"hidden"===w.overflowY&&"static"!==w.position&&/^(block|flow-root|flex|grid)$/.test(w.display)&&"none"===w.boxShadow&&"none"===w.filter&&dv(w.backdropFilter,"none")&&"none"===w.outlineStyle&&dv(w.borderImageSource,"none")&&dv(w.webkitBoxReflect,"none")&&(r=a.getBoundingClientRect(),r.right<=V[0]||r.left>=V[2]||r.bottom<=V[1]||r.top>=V[3]))return!0;if("fixed"===w.position)return!1}return!1},vp=function(a){var h=document.documentElement;return a===h||a===document.body&&"visible"===cs(h).overflowX},pc=function(n){var t=n.tagName,w=cs(n),b,f;if("contents"===w.display)return!1;if(!n.checkVisibility({opacityProperty:!0}))return!0;b=getComputedStyle(n,"::before").content;f=getComputedStyle(n,"::after").content;if(!/^(normal|none)$/.test(b||"none")||!/^(normal|none)$/.test(f||"none")||!/^(normal|none)$/.test(w.content||"normal")||"list-item"===w.display||Array.prototype.some.call(n.childNodes,function(c){return 3===c.nodeType&&/\S/.test(c.data)})||"none"!==w.filter||!dv(w.backdropFilter,"none")||!dv(w.webkitBoxReflect,"none"))return!1;if("visible"!==w.visibility)return!0;if(!/^(HTML|BODY|DIV|CANVAS|VIDEO)$/.test(t)||/^(CANVAS|VIDEO)$/.test(t)&&("50% 50%"!==w.objectPosition||!dv(w.objectViewBox,"none")||!/^(fill|contain)$/.test(w.objectFit)))return!1;return"none"===w.boxShadow&&"none"===w.outlineStyle&&dv(w.borderImageSource,"none")&&dv(w.columnRuleStyle,"none")};for(var V=[0,0,innerWidth,innerHeight],a=G,w,b;a;a=a.parentElement)w=cs(a),"visible"!==w.overflowX&&(vp(a)||"static"!==w.position)&&(b=vp(a)?{left:0,top:0,right:innerWidth,bottom:innerHeight}:a.getBoundingClientRect(),V=[Math.max(V[0],b.left),Math.max(V[1],b.top),Math.min(V[2],b.right),Math.min(V[3],b.bottom)]);if(!(R.width>0&&R.height>0)||[1,1.5,2].indexOf(devicePixelRatio)<0||"snap"!==pl||1!==kx||1!==ky||document.querySelector(":modal,:popover-open,:fullscreen")||!Array.prototype.every.call(N,function(n){return!n.shadowRoot&&(pc(n)||!G.contains(n)&&!n.contains(G)&&xo(n))}))return;var ad=[];Array.prototype.slice.call(document.querySelectorAll("video")).reverse().forEach(function(v){try{if(!G.contains(v)||v.readyState<2||!v.videoWidth||!v.videoHeight||!v.checkVisibility({opacityProperty:!0,visibilityProperty:!0}))return;var z=cs(v),fit=z.objectFit,K;if(!bm(z)||"50% 50%"!==z.objectPosition||"fill"!==fit&&"contain"!==fit)return;try{var vf=new VideoFrame(v),cc=vf.colorSpace;K=[cc.primaries,cc.transfer,cc.matrix,cc.fullRange].join("/");vf.close()}catch(E){return}if(Q.indexOf(K)<0)return;var Y=[],r=v.getBoundingClientRect(),c=[r.left,r.top,r.right,r.bottom],a,q,w,b;for(a=v,q=1;a;a=a.parentElement){if(!al(a))return;w=cs(a);q*=+w.opacity;if(a!==v&&"visible"!==w.overflowX&&(vp(a)||"static"!==w.position)){b=vp(a)?{left:0,top:0,right:innerWidth,bottom:innerHeight}:a.getBoundingClientRect();c=[Math.max(c[0],b.left),Math.max(c[1],b.top),Math.min(c[2],b.right),Math.min(c[3],b.bottom)]}}if(q<.999)return;var vw=v.videoWidth,vh=v.videoHeight,f="fill"===fit?0:Math.min(r.width/vw,r.height/vh),cw=f?vw*f:r.width,ch2=f?vh*f:r.height,cx=r.left+(r.width-cw)/2,cy=r.top+(r.height-ch2)/2;c=[Math.max(c[0],cx),Math.max(c[1],cy),Math.min(c[2],cx+cw),Math.min(c[3],cy+ch2)];if(c[2]-c[0]<1||c[3]-c[1]<1)return;for(var I=Array.prototype.indexOf.call(N,v),i=0,n,o,P,T;i<N.length;i++){n=N[i];if(i===I||n.contains(v))continue;o=n.getBoundingClientRect();if(o.right<=c[0]||o.left>=c[2]||o.bottom<=c[1]||o.top>=c[3]||!n.checkVisibility({opacityProperty:!0,visibilityProperty:!0})||!own(n,cs(n)))continue;for(P=n.parentElement;!P.contains(v);P=P.parentElement);if(P===G||!G.contains(P))return;for(T=n,a=1;T!==P;T=T.parentElement){w=cs(T);if(!al(T)||i>I&&T!==n&&"visible"!==w.overflowX)return;a*=+w.opacity;if(T!==n&&+w.opacity<1&&Array.prototype.some.call(T.getElementsByTagName("*"),function(m){return m!==n&&own(m,cs(m))}))a=0}if(i<I)continue;if("VIDEO"===n.tagName){if(ad.indexOf(n)<0)return;continue}w=cs(n);if("CANVAS"!==n.tagName||!bm(w)||"fill"!==w.objectFit||!a)return;Y.push([n,o,a])}var p=devicePixelRatio||1,sn=function(z,e,k){return Math.round((z-e)*k*p)/p},u0=sn(cx,R.left,kx),v0=sn(cy,R.top,ky),u1=sn(cx+cw,R.left,kx),v1=sn(cy+ch2,R.top,ky),a0=sn(c[0],R.left,kx),b0=sn(c[1],R.top,ky),a1=sn(c[2],R.left,kx),b1=sn(c[3],R.top,ky),ww=Math.round((a1-a0)/kx*p),hh=Math.round((b1-b0)/ky*p),dx=(u0-a0)/kx*p,dy=(v0-b0)/ky*p,dw=(u1-u0)/kx*p,dh=(v1-v0)/ky*p,x,g,d,j;if(ww<1||hh<1)return;x=document.createElement("canvas");x.width=ww,x.height=hh;g=x.getContext("2d");g.drawImage(v,dx,dy,dw,dh);for(d=g.getImageData(0,0,ww,hh).data,j=3;j<d.length;j+=4)if(d[j]<255)return;Y.forEach(function(y){var l=sn(y[1].left,R.left,kx),m=sn(y[1].top,R.top,ky);g.globalAlpha=y[2],g.drawImage(y[0],(l-a0)/kx*p,(m-b0)/ky*p,(sn(y[1].right,R.left,kx)-l)/kx*p,(sn(y[1].bottom,R.top,ky)-m)/ky*p)}),g.globalAlpha=1;var h=document.createElement("div"),s=h.style,t=x.style;s.position=t.position="absolute",s.overflow="hidden",s.left=a0+"px",s.top=b0+"px",s.width=t.width=a1-a0+"px",s.height=t.height=b1-b0+"px",t.left=t.top="0px",h.appendChild(x),H.push(h),ad.push(v)}catch(E){}}),H.length&&(U.__obedFrozen={scene:A,holders:H.reverse()})}catch(E){U.__obedFrozen=null}finally{window.__obedTakeMs=U.__obedTakeMs=performance.now()-t0}}
 __obedFreeze(C,A){var F=UC.__obedFrozen;UC.__obedFrozen=null;if(C.obedDissolve&&F&&F.scene===this.sceneIndex)try{var O=A.layers[0].layers[1],W=document.getElementById("layer"+O.layerId+("cut"===C.obedDissolve?"":"-opacity"));if(!W)return;var Q=document.createDocumentFragment();F.holders.forEach(function(h){Q.appendChild(h)}),W.appendChild(Q)}catch(E){}}
 ```
 
@@ -289,17 +299,12 @@ the intersected rectangles; nothing crops, filters, blends or contains paint; an
   `contain` solve (§13). The alpha scan over every backing pixel, the exterior proof, clipping and foreground preservation
   are mandatory in every admitted class (§9.1 "Geometry classes"); a later model for scaled stages would replace exactly this
   guard and `sn`/`ww`/`hh`/`dx`…`dh`, under the same rule.
-- **Placement rule (decision 13).** The take reads `pl = window.__obedPlacement` once (a lease-checked, read-only getter the
-  host's first-run script installs; page code cannot set it, §3.3). `"snap"`: the snapped draw
-  above (Chrome 154's rule). `"frac"`: admitted only at DPR 1 with the base-layer origin on integer px (the only geometry CEF was
-  measured at); the snapped draw stays as an **underlay** (it makes every backing pixel opaque — a fractional `drawImage` alone
-  antialiases its edge columns and the alpha scan rejects it) and the movie is drawn again on top at CEF 127's unsnapped quad:
-  origin = the video box's own origin (`r.left`, `r.top`, relative to the holder) + the local-snapped `contain` offset, size =
-  the local pre-snapped size `round(cw·DPR)/DPR` (the investigator's `fdrawu`, measured 2 / 0 % in CEF, two launches).
-  Foreground redraws keep their snapped rects under both rules (measured equal on P2). Any other value — absent, `"unknown"`, a
-  typo — skips the take: placement is never guessed in the page. **Integer `left`/`top`:** every scene element (below `#stage`)
-  must have integral computed `left` and `top` in px (`/^-?\d+px$/`), so sub-pixel offsets come only from transforms, which is
-  what the CEF rule's origin term assumes (every export writes `0px`).
+- **Host grant (decision 15).** The take reads `pl = window.__obedPlacement` once and proceeds only if it is `"snap"`, which
+  means the snapped draw above (Chrome 154's measured rule). Anything else — absent, `"invalid"`, any other value — skips the
+  take: placement is never guessed in the page, and OBS's CEF 127, which does not snap (§8.6), keeps today's jump in this PR.
+- **Integer `left`/`top`:** every scene element (below `#stage`) must have integral computed `left` and `top` in px
+  (`/^-?\d+px$/`), so sub-pixel offsets come only from transforms (every export writes `0px`). This is kept from rev 15 as an
+  admission narrowing; it costs nothing on the measured decks.
 - `object-fit: fill` needs no aspect test (the destination is the content box itself).
 - **Snapshot, not move; failure model:** a move is a detach the core observes (`stash` re-plays and remounts it); `drawImage`
   is the exact last presented frame (rVFC). Add-only, per movie, after the cross-fade rules are committed; the `<video>` is
@@ -319,106 +324,62 @@ the intersected rectangles; nothing crops, filters, blends or contains paint; an
   1.5, 2}, stage scale ≠ 1, a scale below the stage; decision 12); top-layer content on the page. **Known limit (frozen, not
   jumping):** the mid-tone step (identity `L`).
 
-### 3.3 Host startup calibration — the placement probe (decisions 13–14; host stream W6)
+### 3.3 Host grant — the placement channel (decisions 13–15; host stream W6, shrunk)
 
-**Why host-side.** The rule depends on how the engine's compositor places a video quad, which a page cannot observe (no pixel
-readback of composited output; `LayerTree` sends nothing in headless=new). The host can: a CDP `Page.captureScreenshot`, or OBS
-`GetSourceScreenshot`.
+**What it decides.** Whether the take may draw with the snapped rule. In this PR the grant comes from host knowledge alone, with
+no probe (decision 15). The host grants `snap` iff:
+- (a) it launched the Chrome process itself, so `LiveOutputHost` is not in attach mode;
+- (b) CDP `Browser.getVersion` reports a qualified engine: `product` `Chrome/154.*` or `HeadlessChrome/154.*` (the measured
+  engine, Chrome 154.0.8037.59; the allowlist is one constant, `QUALIFIED_SNAP_MAJORS = (154,)`); and
+- (c) `SystemInfo.getInfo` reports `gpu_compositing: "enabled"` (the GPU path is the measured one; the software path's holder
+  pixels are unqualified).
 
-**Calibration channel (r12 1: private state, host-only updater).** Before the host navigates the output target, it installs with
-`Page.addScriptToEvaluateOnNewDocument` a first-run script (it runs in every new document before any export script):
+Anything else — attach mode, managed OBS/CEF (always attach), any other major version, a version or `SystemInfo` call that
+fails, software compositing — means no grant: the take skips (today's jump) and `output.placement` records why.
+
+**Channel (r12 1, unforgeable by page code).** Before navigating the output target, the host installs with
+`Page.addScriptToEvaluateOnNewDocument` a first-run script. It runs in every new document before any export script:
 
 ```
-(function(){var T="<128-bit hex, per host session>",now=performance.now.bind(performance),r="invalid",u=0;
-Object.defineProperty(window,"__obedPlacement",{get:function(){return now()<u?r:"invalid"},enumerable:false,configurable:false});
-Object.defineProperty(window,"__obedCalibSet",{value:function(t,v,ms){if(t!==T)return!1;r="snap"===v||"frac"===v?v:"invalid";u="invalid"===r?0:now()+Math.max(0,Math.min(+ms||0,15e3));return!0},enumerable:false,configurable:false,writable:false})})();
+(function(){var T="<128-bit hex, per host session>",r="invalid";Object.defineProperty(window,"__obedPlacement",{get:function(){return r},enumerable:false,configurable:false});Object.defineProperty(window,"__obedGrant",{value:function(t,v){if(t!==T)return!1;r="snap"===v?v:"invalid";return!0},enumerable:false,configurable:false,writable:false})})();
 ```
 
-The state is private to that closure and starts `invalid` in every document. Page code sees only a non-configurable getter and
-an updater that does nothing without the token. The token lives only in the host and in the script text, which page code cannot
-read (`String(__obedCalibSet)` does not contain it). A valid rule is a **lease** of at most 15 s on the clock captured before page
-code runs, so a revocation the host cannot deliver still expires. Checked in Node (`plan-rev16-2026-10-12/calib/`):
-assignment (sloppy and strict), `delete`, accessor redefinition, updater replacement, a wrong token, a tampered
-`performance.now`, lease expiry, revocation, the 15 s cap and unknown values all leave the take reading `invalid` or the host's
-value. A predefined `__obedPlacement` makes the init script throw, so no updater exists. Page scripts cannot run before
-`addScriptToEvaluateOnNewDocument` scripts; only another CDP client or an extension could. The host detects it with a round
-trip after every document creation (set `snap` → read `snap` → set `invalid` → read `invalid`). On failure it reports
-`placement: "channel-compromised"`, keeps the output hidden and refuses `show`. Raw export and Build Preview pages have no init
-script, so the getter is absent and the take skips there (decision 14). Test-only rule forcing (`wrongrule-*`) calls the updater
-with the token through the same privileged CDP channel; page code can never do it.
+The state is private to that closure and starts `invalid` in every document. Page code sees a non-configurable getter and an
+updater that does nothing without the token. The token is not in the updater's source text, and only `"snap"` can be granted.
 
-**Lifecycle (r12 4).** The host keeps one state per output: `invalid` → `probing` → `valid(rule, targetId, uniqueContextId)`.
-- **Context binding.** The uniqueContextId is recorded from `Runtime.executionContextCreated` for the program document. The
-  commit is `Runtime.evaluate({uniqueContextId, expression: "__obedCalibSet(T, rule, 15000)"})` against exactly the context
-  recorded when the probe started. If that context is gone (reload, navigation, source refresh), the evaluate fails and the
-  result is discarded as late.
-- **Lease keep-alive.** A host keep-alive thread renews the lease every 3 s, and once more immediately before every `advance`
-  and `goTo`. It renews only on the same CDP connection and context, and only after re-reading the engine fingerprint (UA, DPR
-  and, where the browser target answers, `SystemInfo.gpu.featureStatus.gpu_compositing`). A changed or newly unreadable
-  fingerprint revokes the lease.
-- **CDP disconnect.** The host state drops to `invalid` at once. On reconnect, before any command is accepted, the host revokes
-  in the page. If that evaluate fails, commands wait until the last lease has provably expired (last renewal + 15 s).
-- **Re-probe.** `probing` is never `valid`: the host revokes before probing. A failed re-probe leaves `invalid`.
-- **Coverage limit.** A GPU-process reset that keeps the document and leaves the fingerprint unchanged is **not covered**: the
-  lease keeps renewing with the old rule. This is a stated limit, not decision 13's reset handling.
+Checked in Node (`plan-rev17-2026-10-12/grant/`):
+- assignment (sloppy and strict), `delete`, accessor redefinition, forging `"snap"` by assignment or redefinition, updater
+  replacement and a wrong token all leave the host's value;
+- a fresh document reads `invalid`;
+- a predefined getter makes the init script throw, so no updater exists.
 
-**Output isolation (r12 2: a verified gate independent of the captured page).** The probe never runs in the program page.
-- **HDMI and headless host.** The probe runs in a second target of the same browser: `Target.createTarget` with a new window,
-  sized 1000×740, at bounds on the operator display (headed) or off-screen (headless), never on the output display. It shares
-  the program's browser, GPU process and compositor. Its `devicePixelRatio` must equal the program page's or the result is
-  unknown. Gate verification: during the probe the host also screenshots the program target. It must equal the pre-probe
-  program screenshot on every pixel; otherwise the result is discarded and the run is reported as an isolation failure.
-- **Managed OBS.** The probe runs in a dedicated browser source `AK-Probe` (1000×740, its own URL served by the host) in a
-  dedicated scene `AK-Calibrate`, which is never the program scene. It is read with `GetSourceScreenshot` on that source.
-  Gate verification: `GetCurrentProgramScene` must be `AK` before and after, and a `GetSourceScreenshot` of the `AK` scene
-  taken during the probe must equal the one taken before. Whether OBS renders a source outside program for
-  `GetSourceScreenshot` is unmeasured. If the probe source yields no frame, calibration is skipped (no flag).
-- **Cleanup on every exit** (success, failure, timeout, exception): the probe target is closed; the `AK-Probe` source is
-  disabled and its URL set to `about:blank`. At host start, leftovers named `AK-Probe` / `AK-Calibrate` are reset. With no
-  verified gate (no second target possible, or no OBS source frame), calibration is skipped.
-- **Timing.** Because the probe is isolated, it may run at host start, on the operator's recalibrate, and after a reconnect or
-  reload even while the show is on air. It takes about 1.5 s off the program path, so the host avoids running it while a
-  transition is in flight.
+**Lifecycle (what r12 4 still requires).**
+- **Context binding.** The grant is bound to the program document's unique execution context. After every
+  `Runtime.executionContextCreated` for it, the host runs the round trip in that context with
+  `Runtime.evaluate({uniqueContextId, …})`: grant `snap`, read `snap`, revoke, read `invalid`. Only then, if (a)–(c) hold,
+  does it commit the grant there. A context that disappears in between fails the evaluate, so the grant is never installed
+  into a replacement document. A reload yields a fresh `invalid` document that is re-granted only after its own round trip.
+- **Fingerprint.** At every `observe()` the host re-reads `gpu_compositing`. If it is no longer `"enabled"` or cannot be read,
+  the host revokes in that context.
+- **Channel failure.** A failed round trip (for example a predefined getter, which page scripts cannot cause because they run
+  after the first-run script) reports `placement: "channel-compromised"`, keeps the output hidden and refuses `show`.
 
-**Probe content and classifier (r12 3).**
-- **Content.** The shipped clip is exactly the measured `p2like.mp4` (144 100 B, sha256 `7b7d66b5…`;
-  `src/obed_edom/data/placement_probe.mp4`). The two poses use fractions (0.352, 0.036) and (0.73, 0.41). Each pose has the
-  composited movie plus a snapped canvas and a fractional canvas drawn from the paused frame.
-- **Captures.** After 6 rAFs + 200 ms the host takes two screenshots, which must be identical.
-- **Per-pose score.** For each pose and canvas c ∈ {snap, frac}: `d = max over R, G, B of |V − M[C]|`. Here V is the composited
-  movie region, C the canvas region and M a tone map. The inner mask is the canvas box eroded by 3·DPR device px.
-  `share_c` = fraction of inner px with d > 4.
-- **Tone maps.** M ranges over the qualified set {identity (software path), analytic `BT709_APPLE` table (GPU path; the
-  decision record's)}. A map is **consistent** for a pose if exactly one rule is clean (≤ 2 %) and the other is wrong (≥ 20 %).
-- **Decision.** One map must be consistent for both poses, with the same rule in both, and no other map consistent with a
-  different rule. Otherwise the result is unknown. Rescored without the tone map, both engines read about 50–60 % on the
-  correct rule (r12 3), so the map is part of the spec.
-- **Flag scope.** The flag is set only for the GPU map. A software-path decision is recorded, but its holder pixels are
-  unqualified, so it means skip; an unsupported tone (no consistent map) also means skip.
-- **Recorded.** DPR, UA, `readyState`, both shares per pose and map, and the chosen map. The chosen map is W5's tone-path
-  observation, recorded only; the take's `L` stays identity.
+**Dropped from rev 16, and why.**
+- *Lease and keep-alive:* they existed so that a probe-measured rule could go stale and still lapse. A version-and-launch
+  grant cannot go stale while its process lives (the version cannot change without a relaunch), and no output command can run
+  without the host's CDP connection.
+- *Probe, isolation gate, recalibrate command, reconnect re-probe:* they move to the follow-up PR (§13.1).
 
-**Failure modes (every one → no valid lease → the take skips):** probe clip not decodable or not paused on its frame; unequal
-screenshot pair; DPR mismatch with the program page; screenshot size ≠ probe viewport × DPR; no consistent map; a share between
-2 % and 20 %; poses disagree; screenshot call fails or times out (2 s); the program context changes during the probe; the gate
-check fails; the channel round trip fails. The cross-fade and cut never read the flag.
+**Residual (stated, as before):** a player-internal automatic transition that runs while CDP is disconnected, after a
+GPU-to-software fallback the host has not yet observed, would use a stale grant. Both conditions must hold.
 
-**Operator recalibrate.** A new command `recalibrate`:
-- `src/obed_edom/web/live.py`: `CommandBody.operation` gains `"recalibrate"` — a change to `web/live.py`, which earlier
-  revisions said stays unchanged.
-- `live_session.py`: routes it like `hide`/`show`.
-- `LiveOutputHost.execute("recalibrate")`: revoke, then probe, then commit.
-- The presenter UI (`dashboard/src/live/LivePresenter.tsx`, `api.ts`) gets a "Recalibrate output" button, so the dashboard
-  suites run.
-- The report carries `output.placement = {state, rule, map, shares, fingerprint, at, isolation}`.
+**Report.** `output.placement = {grant: "snap" | null, reason, product, gpuCompositing, at}`. The reason is one of `granted`,
+`attached` (incl. managed OBS), `unqualified-version`, `software-compositing`, `version-unavailable`, `channel-compromised`,
+`revoked-fingerprint`.
 
-**Files (W6, disjoint from W1–W5):**
-- new: `src/obed_edom/placement_probe.py` (probe page builder, init-script builder, pure classifier, fingerprint);
-  `src/obed_edom/data/placement_probe.mp4`; `tests/test_placement_probe.py`;
-- changed: `src/obed_edom/live_host.py` (init script, probe target, lifecycle, keep-alive, gate verification, report, asset
-  route); `src/obed_edom/managed_obs.py` (the `AK-Calibrate` scene / `AK-Probe` source in the rendered tree, the
-  `source_screenshot(name)` and program-scene checks); `src/obed_edom/live_session.py` and `src/obed_edom/web/live.py` (the
-  `recalibrate` command); `dashboard/src/live/LivePresenter.tsx` and `api.ts` with their UI test.
+**Files (W6):** `src/obed_edom/live_host.py` (init-script builder, grant conditions, context-bound round trip and commit,
+`observe()` fingerprint, report) and `tests/test_live_host.py`. No change to `web/live.py`, `live_session.py`, `managed_obs.py`
+or the dashboard.
 
 ## 4. Switch, pins, report
 
@@ -426,7 +387,7 @@ check fails; the channel round trip fails. The cross-fade and cut never read the
   player pick them up; `mm_opacity=False` stays the hook-only bytes (`7cf00b56…` / `4f9fbffd…`); docstrings say "rendering
   fidelity"; README: `OBED_LIVE_MM_OPACITY=off` also restores the export's dissolve, cut and movie behaviour. **Pins:**
   `(on, off, rendering)` kept; `on`, `rendering` re-pinned. **Report** `output.mmOpacity = {mode, sha256}`; `RUNTIME_VERSION`
-  stays 2; preview inherits the patch (D1/D2; F3 skips there — no host calibration, decision 14); paint oracle stays stock; the report adds
+  stays 2; preview inherits the patch (D1/D2; F3 skips there — no host grant, decision 14); paint oracle stays stock; the report adds
   `output.placement` (§3.3); `web/live.py` unchanged.
 
 ## 5. Scope
@@ -453,7 +414,7 @@ R7 2190367 (36) · R3 2190440 (46) · R4 2192650 (72) · R6 2263321 (52) · R1 2
 replacement contains any anchor, its own included; all 6 orders of R1–R5, R6–R8, D1–D4 give identical bytes; every anchor 0
 times after, every replacement once. **Rev 10 re-check** (`plan-rev10-2026-10-12/scripts/overlap10.py`, both players): the
 anchors and their offsets are unchanged (only D1's replacement changes: 10 237 B in rev 10, 10 249 B in
-rev 11, 10 195 B in rev 12, 10 197 B in revs 13–14, 10 571 B in rev 15, 10 559 B in rev 16); the same
+rev 11, 10 195 B in rev 12, 10 197 B in revs 13–14, 10 571 B in rev 15, 10 559 B in rev 16, 10 305 B in rev 17); the same
 five properties hold on both revisions.
 
 ### 6.2 Subsystems (files outside `live_runtime.py` that change: `scripts/dissolve_probe.py` (new), `scripts/managed_obs_qualify.py`, their tests, docs)
@@ -476,7 +437,7 @@ options: Chrome 121; `VideoFrame(video).colorSpace`: Chrome 94; `:modal` 105, `:
 unsupported selector throws inside the take's `try` and skips). OBS 32.2.2 bundles CEF 127: availability only (compositor,
 tone path and LUT: DX-2). Headless: Chrome 154.0.8037.59, ANGLE Metal; software compositing via `--disable-gpu`.
 
-## 8. Feasibility prototype (Q0; `plan-2026-10-11/planner/`; Q0b; revs 10–16; hi-DPI and CEF investigations; Q0b-bis)
+## 8. Feasibility prototype (Q0; `plan-2026-10-11/planner/`; Q0b; revs 10–17; hi-DPI and CEF investigations; Q0b-bis)
 
 Builders `dpatch3.py` → `dpatch12.py` (rev 9); drivers `proto3.py` → `proto6.py`, `probe7.py` + `diag7{,b}.js` (one
 headless Chrome per arm; `p2cut` = P2 2→3 in Keynote's cut shape, in memory); analysis `analyze_full.py`, `f3analyze.py`,
@@ -730,6 +691,20 @@ and `left: auto` skip, a negative integer `left` admits — on both players, eve
   `invalid` at once, unknown values read `invalid`, the updater's source text does not reveal the token, and a predefined
   getter makes the init script throw (no updater; the host's round trip then fails).
 
+### 8.8 Rev 17 (decision 15; Node; `plan-rev17-2026-10-12/`)
+
+- **Bytes.** `methods17()` is rev 13 plus three things: the grant read `pl=window.__obedPlacement`, the guard `"snap"!==pl`, and
+  integer `left`/`top`. There is no `frac` draw. D1 is 10 305 B; `node --check` passes on all four patched players; §6.1
+  holds. The `m-snap-shift` splice and rev 13's `m-snap-frac` anchor each occur exactly once on both players and twins.
+- **Harness.** W1's committed harness (HEAD `7834624c`) with the placement as a per-row getter: 285 rows (284 checked), 0
+  differ, both players identical, every invariant holding. Every `frac` row and `SNAP` now skip; `snap` rows are unchanged.
+- **Grant channel** (`grant/init.js`, `grant/test.js`, `grant/result.json`):
+  - a fresh document reads `invalid`, and the host round trip reads `true, snap, true, invalid`;
+  - assignment (sloppy and strict), `delete`, accessor redefinition, forging `snap` by assignment or redefinition, updater
+    replacement and a wrong token all leave the host's value;
+  - only `snap` can be granted (`frac` reads `invalid`), and the token is not in the updater's source;
+  - a predefined getter makes the init script throw, leaving no updater.
+
 ## 9. Acceptance
 
 **Rule.** Every blocking check has a positive control that must PASS and a negative control that must FAIL, read before the
@@ -757,32 +732,25 @@ expected FAIL. One headless Chrome at a time; 1-min load < 4 and no other headle
 | Hide / show capture (instrument, r8 8) | `life-hide` (alpha) and `life-hide-screen` twins: transparent / black frames inside the hidden interval, six timestamped mid frames after show | `life-hide-nohide`, `life-hide-noshow` (driver drops the action) FAIL; scorer cases: duplicate frame, timestamp shift → INCONCLUSIVE |
 | Tone match — blocking only if a non-identity `L` returns (W5); report-only under identity | (`m-tone`) | (`m-tone-raw`) |
 | No independent overlay | `m-on` | `m-bridge-off` (stock twin) |
-| Placement probe (instrument, decision 13) | `probe-chrome` → `snap`, `probe-cef` → `frac` (two launches each, the shipped clip); scorer cases: clean snap and frac under the GPU map, both poses agreeing | scorer cases: both low, both high, a share in (2 %, 20 %), poses disagreeing, no consistent tone map, two maps consistent with different rules, unequal screenshot pair, wrong size → unknown; `probe-sw` (Chrome `--disable-gpu`: identity map) → no flag; `probe-undecodable` → no flag → no holder |
-| Calibration channel (r12 1) | Node: host token sets, revokes, lease renews | Node: page assignment / delete / accessor redefinition / updater replacement / wrong token / tampered clock / expired lease / predefinition → `invalid` or no updater; live `channel-predefined` (an extra CDP script defines the getter first) → host refuses `show` |
-| Output isolation (r12 2) | `iso-hdmi`, `iso-obs`: program captures during startup probe and a failed recalibration equal the pre-probe captures | `iso-leak` (instrument variant that injects the probe into the program page) → the gate check FAILs and no lease is committed |
-| Lifecycle (r12 4) | `life-cal-valid`: a committed lease freezes the next take | from a valid lease: `life-cal-reconnect`, `life-cal-reload` (and OBS source refresh), `life-cal-navcommit` (navigation during commit), `life-cal-fingerprint` (changed / unreadable), `life-cal-reprobe-fail` → no holder on the next take; scorer case: late result after a context change discarded |
-| Placement rule (the probed rule is the right one) | `m-snap` on Chrome 154 under `snap`; `m-snap-cef[clip]` in CEF under `frac` (r12 5) | `wrongrule-chrome`, `wrongrule-cef` (other rule forced through the privileged channel) and `m-snap-cef-nooffset[x\|y]` → holder pixels FAIL |
-| Preview / raw scope (decision 14) | — | `m-raw-prod`, `m-preview-prod`: production pages, no channel → no holder (stock movie behaviour), cross-fade model PASS |
+| Grant channel (r12 1; decision 15) | Node: the host token grants and revokes; `grant-chrome` (host-launched Chrome 154, GPU) → `snap` committed after the round trip, the take binds a holder | Node: page assignment / delete / accessor redefinition / forged `snap` / updater replacement / wrong token / predefinition → no grant; `grant-attach` (attach mode), `grant-cef` (managed OBS), unit cases `Chrome/153`, `Chrome/155`, `HeadlessChrome/154` with `gpu_compositing` disabled, version call failing → no grant, no holder, reason recorded; live `channel-predefined` (an extra CDP script defines the getter first) → `channel-compromised`, `show` refused |
+| Grant lifecycle (r12 4) | `life-grant-valid`: the committed grant freezes the next take | `life-grant-reload` (fresh document `invalid` until its own round trip), `life-grant-navcommit` (navigation between round trip and commit → the old context's evaluate fails, nothing installed) → no holder; unit: `gpu_compositing` no longer enabled at `observe()` → revoked |
+| Preview / raw / CEF scope (decisions 14–15) | — | `m-raw-prod`, `m-preview-prod` (production pages, no channel) and `cef-skip` (managed OBS, DX-2) → no holder (stock movie behaviour), reason recorded, cross-fade model PASS |
 | Cost | scorer case: 50 ms; stub rows: total published on success, rejection, exception | scorer case: 50 ms + ε (missing or non-finite → INCONCLUSIVE) |
 
-### 9.0 Q0b-ter — step 0 on the rev-16 bytes and W6 (scratch; before DX-1; windows on request)
+### 9.0 Q0b-ter — step 0 on the rev-17 bytes and W6's grant (scratch; before DX-1; windows on request)
 
 Done: Q0b on rev 9 (§8.1); rev-10 prototypes (§8.2); revs 11–13 Node rows (§8.3–8.5); Q0b-bis and the CEF investigation (§8.6);
-rev 15–16 Node checks (§8.6–8.7). Pending (a miss re-plans):
-1. **Probe and channel on both engines with W6's code:** `probe-chrome` (headless and headed HDMI host) → `snap`, `probe-cef`
-   (managed OBS, `AK-Probe` source) → `frac`, two fresh launches each, the shipped clip; `probe-sw` and `probe-undecodable` → no
-   lease; the channel round trip; probe wall time ≤ 2 s; whether OBS renders `AK-Probe` outside program at all (if not, managed
-   OBS skips calibration and F3 stays off there — re-plan).
-2. **Isolation and lifecycle:** `iso-hdmi`, `iso-obs`, `iso-leak`; the `life-cal-*` rows from a valid lease.
-3. **Holder pixels on the probed rule:** Chrome 154 `m-snap` base cell and `m-snap-shift[1, 1.5, 2]` / `m-snap-frac[1.5, 2]`
-   (the snap path is unchanged since rev 13, so the Q0b-bis matrix carries; its four DPR-1.5 cells re-read with the draw-mapped
-   mask); CEF `m-snap-cef[clip]` (none, near-side x, near-side y, far-side x and y, foreground crossing) ≤ τ_CEF with `perfect`
-   and omit twins; `m-snap-cef-nooffset[x|y]`, `wrongrule-chrome`, `wrongrule-cef` FAIL; CEF DSK 7→8 cost ≤ 50 ms.
-4. **Engagement and scope:** host pages after calibration as in Q0b-bis; `m-raw*` exterior controls through the privileged
-   channel; `m-raw-prod`, `m-preview-prod` no holder with the cross-fade intact.
-5. **Still open from Q0b-bis:** the crop experiment; dry runs of `m-geo-*`, the hide rows, D2 `on`, `m-tone` with its twin; CEF
-   `hevc10` / Keynote-HEVC tone (W5 input). DPR arms run with a real `--force-device-scale-factor` and, at DPR 2, the teardown
-   timer delayed for `perfect`.
+revs 15–17 Node checks (§8.6–8.8). Pending (a miss re-plans):
+1. **Grant on real engines:** `grant-chrome` (headless and headed HDMI host: `snap` committed after the round trip, the take binds
+   a holder); `grant-attach`, `grant-cef` (no grant; reasons `attached`); `channel-predefined` (`show` refused); `life-grant-*`.
+2. **Holder pixels, Chrome 154, exact rev-17 bytes:** `m-snap` base cell and `m-snap-shift[1, 1.5, 2]` / `m-snap-frac[1.5, 2]`
+   (the snapped path is unchanged since rev 13, so the Q0b-bis matrix carries; its four DPR-1.5 cells re-read with the
+   draw-mapped mask).
+3. **Engagement and scope:** host Chrome pages as in Q0b-bis; `m-raw*` exterior controls through the privileged channel;
+   `m-raw-prod`, `m-preview-prod` and CEF `cef-skip` → no holder, cross-fade intact, reasons recorded.
+4. **Still open from Q0b-bis:** the crop experiment; dry runs of `m-geo-*`, the hide rows, D2 `on`, `m-tone` with its twin. DPR
+   arms run with a real `--force-device-scale-factor` and, at DPR 2, the teardown timer delayed for `perfect`. (CEF tone and the
+   CEF holder matrix move to the follow-up PR, §13.1.)
 
 ### 9.1 DX-1 headless gate — `scripts/dissolve_probe.py` (promotes the evidence's `dissolve_ab.py` + hook)
 
@@ -900,11 +868,10 @@ rev 15–16 Node checks (§8.6–8.7). Pending (a miss re-plans):
 | `m-snap[dpr, origin, clip]` (one parametrized arm; + same-frame `m-fg-omit` twin per cell) | `m-paused` over the §9.0 item-5 matrix: DPR {1, 1.5, 2} × origin {integer (1920×1200 CSS, y 60), fractional (1920×1201 CSS, y 60.5)} × clip {none, fractional x, fractional y (in-memory clipping layer)}, 18 cells; plus the 1920×1080 base cell; reference-capture profile; twin = + splice `Y.forEach(` → `[].forEach(` | out-only | holder pixels → PASS; `perfect` → instrument PASS; mask verification PASS | as `on` + one holder | pinned `on` / + splice |
 | `m-snap-frac[dpr]` (+ twin) | as `m-snap` 1920×1080 at DPR 1.5 and 2 (at DPR 1 the unrounded edge is partly covered, the alpha scan rejects it and no holder binds — measured, so it cannot give its FAIL there); one counted splice `sn=function(z,e,k){return Math.round((z-e)*k*p)/p}` → `sn=function(z,e,k){return(z-e)*k}`, exactly once on both players and on their omit twins (checked: 1 → 0, replacement 1; rev 12's anchor occurs 0 times in rev-13 bytes) | out-only | holder pixels → FAIL (displaced edges) | as `m-snap` | base + splice |
 | `m-snap-shift[dpr]` (+ twin) | as `m-snap` 1920×1080 at DPR 1, 1.5 and 2 (real force flag); one counted splice `s.left=a0+"px"` → `s.left=a0+1/p+"px"` (the holder one device px right, every backing pixel still opaque; once on both players and twins) | out-only | holder pixels → FAIL (displaced edges) — the DPR-1 displaced-edge control | as `m-snap` | base + splice |
-| `probe-chrome` / `probe-cef` / `probe-undecodable` | the host's startup probe in headless Chrome 154 (and headed on the HDMI display) / in managed OBS via `GetSourceScreenshot` / with the probe clip replaced by an undecodable file; two fresh launches each | — | placement probe → `snap` / `frac` / unknown (no flag, the next take binds no holder) | — | pinned `on` |
-| `m-snap-cef[clip]` (+ omit twin) | CEF 127 via managed OBS after `probe-cef`, DPR 1, integer origin, P2 2→3 paused at frame 600 with its two redrawn canvases crossing the region: clip {none, fractional near-side x (left edge at 300.37), fractional near-side y (top edge at 850.37), fractional far-side x and y}; reference capture via `GetSourceScreenshot`; edge-inclusive holder pixels, `perfect`, omit twin; DSK 7→8 unclipped | out-only | holder pixels → PASS (≤ τ_CEF) | as `on` + one holder | pinned `on` / + splice |
-| `m-snap-cef-nooffset[x\|y]` | as the near-side clipped `m-snap-cef` cells; one counted splice dropping the clip offset from the fractional draw (`g.drawImage(v,dx+((r.left-R.left)` → `g.drawImage(v,((r.left-R.left)`, or `dy+((r.top-R.top)*ky+Math.round((cy-r.top)` → `((r.top-R.top)*ky+Math.round((cy-r.top)`; each once on both players and twins) | out-only | holder pixels → FAIL (wrong source region; the underlay keeps every pixel opaque, so only RGB scoring sees it). Far-side clips leave `dx = dy = 0`, so the control is only run on near-side clips (Node rows, §8.7) | as `on` + one holder | base + splice |
 | `m-raw-prod` / `m-preview-prod` | the production raw export page / Build Preview (`patch_rendering`) for P2 2→3, no first-run script, no injection | out-only | no holder (stock movie behaviour) and model PASS (decision 14) | as `on` | pinned `rendering` |
-| `wrongrule-chrome` / `wrongrule-cef` | `m-snap` on Chrome 154 / `m-snap-cef` in CEF with the other rule committed through the host's privileged channel | out-only | holder pixels → FAIL (measured 183 / 6.12 % either way) | as `m-snap` | pinned `on` |
+| `grant-chrome` / `grant-attach` / `grant-cef` / `channel-predefined` | the host's grant on its own launched Chrome 154 (headless and headed) / the same host attached to an external Chrome / attached to managed OBS (CEF 127) / an extra CDP `addScriptToEvaluateOnNewDocument` defining `__obedPlacement` before the host's script | — | `output.placement.grant` = `snap` (round trip passed) / null, reason `attached` / null, reason `attached` / `channel-compromised` and `show` refused; the next movie take binds a holder only in the first | — | pinned `on` |
+| `life-grant-valid` / `-reload` / `-navcommit` | from `grant-chrome`: advance / reload the page and advance before and after the host's re-grant / navigate between round trip and commit (the fingerprint case is a unit test, §10) | out-only | holder bound / none before the re-grant, bound after / none (nothing installed) | as `on` | pinned `on` |
+| `cef-skip` | managed OBS (CEF 127), P2 2→3 and DSK 7→8 movie slides | out-only | published take, no holder, `output.placement.reason` = `attached`; cross-fade model PASS | as `on` | pinned `on` |
 | `perfect-shift` | as `m-snap` 1920×1080; the driver's `perfect` overwrite drawn 1 device px right | out-only | reference capture → FAIL (instrument negative) | as `m-snap` | pinned `on` |
 | `m-geo-dpr125` / `m-geo-2560` / `m-geo-scale` / `m-geo-base` | as `m-paused` at DSF 1.25 / 2560×1440 / 1920×1080 with an in-memory `affineTransform` scale 1.5 on the movie's layer / 1920×1080 with the live slide's base layer resized in memory to 960×1080 | out-only | geometry guard → no holder (today's look) | as `on` | pinned `on` |
 | `m-raw-script` / `m-raw-shadow-modal` / `m-raw-shadow-fixed` | as `m-raw` + in-page before the advance: a `script type="application/json"` styled `display: block` at x −60 whose non-wrapping text crosses the movie / an off-stage transparent `div` with an open shadow root holding a `dialog` opened with `showModal()` and a coloured `::backdrop` / the same host with a `position: fixed` coloured overlay in its shadow tree | out-only | exterior gate → FAIL (no holder) | as `on` | pinned `on` |
@@ -940,28 +907,36 @@ qualification: DX-1 runs every row against its stock twin, the go-to/back destin
 ### 9.2 DX-2 inside OBS CEF — `managed_obs_qualify.py --arm dissolve` (unrecorded)
 
 One launch, the managed bridge with DX-1's hook, resolver, integrity rules and scorer (W2), the advance, a `GetSourceScreenshot`
-burst. Sessions: DX-1's P2, `p2cut`, `p2-binary` and tone arms except `screen-*`, `delay-*`, `on-sw` and the lifecycle (tone
-arms report-only under identity `L`), **first the host's startup probe** in the `AK-Probe` source (`probe-cef` must return
-`frac` with `iso-obs` clean; anything else makes the round INCONCLUSIVE), `m-snap-cef[clip]` and `m-snap-cef-nooffset[x|y]`
-(r12 5), `wrongrule-cef` (FAIL expected, privileged channel), plus DSK 7→8 (two bound holders; cost ≤ 50 ms, decision 11) and `m-snap` at the browser
-source's geometry (holder pixels vs a pre-advance source screenshot, tone-compensated with that launch's measured map, ≤ τ_CEF);
-media sessions (not `m-off` or the bridge arms) show a bound D4 holder; all record
-continuity, G2 state, colour tuples and served digest; cut sessions need rAF coverage from DOM insertion to 3 frames after the
-cut and ≥ 1 source screenshot inside (no screencast in CEF). Every control outcome (incl. the `m-bridge-off` FAIL) is read
-before `m-on` and the candidate count; `m-bridge` is reported only. **Calibration fixed before capture, applied without
-clamping:** n = max mid-frame residual of `opaque-off`; τ_CEF = max(4, ⌈n⌉ + 1); complement 2 + ⌈n⌉; no dip 252 − ⌈n⌉; caps
-τ_CEF ≤ 8, complement ≤ 6, no dip ≥ 248, so n > 4 is INCONCLUSIVE. Refuses while `OBED_LIVE_MM_OPACITY` is set.
+burst.
+- **Sessions:** DX-1's P2 cross-fade, `p2cut` and opaque arms, except `screen-*`, `delay-*`, `on-sw` and the lifecycle;
+  plus **`cef-skip`** (decision 15): P2 2→3 and DSK 7→8 movie slides must publish a take, bind **no holder**, and record
+  `output.placement` = `{grant: null, reason: "attached"}`, with the cross-fade model passing. A bound holder in CEF is a
+  FAIL. The media, tone and `m-snap` sessions are not run in CEF in this PR (follow-up PR, §13.1).
+- **Recorded:** every session records continuity, G2 state, colour tuples and served digest.
+- **Cut sessions** need rAF coverage from DOM insertion to 3 frames after the cut and ≥ 1 source screenshot inside (no
+  screencast in CEF).
+- **Controls first:** every control outcome is read before the candidate count.
+- **Calibration fixed before capture, applied without clamping:** n = max mid-frame residual of `opaque-off`;
+  τ_CEF = max(4, ⌈n⌉ + 1); complement 2 + ⌈n⌉; no dip 252 − ⌈n⌉. Caps: τ_CEF ≤ 8, complement ≤ 6, no dip ≥ 248, so n > 4 is
+  INCONCLUSIVE.
+- Refuses while `OBED_LIVE_MM_OPACITY` is set.
 
-### 9.3 DX-3 owner check in real OBS
+### 9.3 DX-3 owner check (real OBS for the cross-fade; the HDMI host for the freeze)
 
 - **Pre-check:** DX-1's texture classifier on the chosen production transition: fill-less outgoing and ≥ 2 000 px in-only →
-  affected, else a regression control. Movie: an H.264 slide that plays live in OBS, preferably with foreground over it.
-- **Where:** Take output (Keyer): stripped P2 2→3, the pre-checked transition, an H.264 movie slide several seconds in.
-- **Pass:** slide 3 fades in from nothing; slide 2 keeps its colours while fading; no darker or more transparent overlap; the
-  movie stops on its current frame and fades out with slide 2, foreground intact; no jump at the hand-off. At the freeze the
-  documented mid-tone step (identity `L`, decision 10) is shown to the owner as the known limit, not a failure.
-  **Null** (affected transitions only): `OBED_LIVE_MM_OPACITY=off` shows the pop-in and the jump.
-- **Report** candidate and null separately with the served mode, `output.mmOpacity.sha256` and the decision record.
+  affected, else a regression control. Movie: an H.264 slide several seconds in, preferably with foreground over it.
+- **Where:**
+  - OBS Take output (Keyer): stripped P2 2→3 and the pre-checked transition.
+  - The Chrome HDMI host (`LiveOutputHost`, `output.placement.grant` = `snap`): the movie slide.
+- **Pass:**
+  - Slide 3 fades in from nothing; slide 2 keeps its colours while fading; no darker or more transparent overlap; no jump at
+    the hand-off.
+  - On the HDMI host the movie stops on its current frame and fades out with slide 2, foreground intact; the documented
+    mid-tone step (identity `L`, decision 10) is shown as the known limit, not a failure.
+  - **In OBS the movie keeps today's jump** (decision 15), shown as expected.
+  - **Null** (affected transitions only): `OBED_LIVE_MM_OPACITY=off` shows the pop-in and the jump.
+- **Report** candidate and null separately with the served mode, `output.mmOpacity.sha256`, `output.placement` and the decision
+  record.
 
 ### 9.4 Regression
 
@@ -1009,21 +984,18 @@ session) `--arm mmo`, `--arm g2`, `--arm mmo-cef`. Root-cause any change.
    the interval FAIL, no content after show FAIL, duplicate frame / timestamp shift / < 6 after-show mid frames →
    INCONCLUSIVE; exterior gate and geometry guard — bound holder PASS, published take without holder FAIL, no published take →
    INCONCLUSIVE; strip decode from a device-scale holder.
-5. **Rev 15 rows** (in the same functions): test 3's harness gives BASE `left`/`top` `0px`, defines `window.__obedPlacement` per row
-   (default `snap`) and allows the underlay (`(vv?(gf*)?)?`); rows (§8.6): flag absent / `unknown` skip; `frac` admits at DPR 1
-   with the second draw at the unsnapped quad (P2's fractional box: (0.352, 0.036), 951×268); `frac` at DPR 1.5 / 2 and at a
-   fractional stage origin skip; fractional `left`/`top` and `left: auto` skip; near-side clipped `frac` rows record the offset
-   quad (§8.7); an absent getter (the production preview/raw path, `patch_rendering` bytes) skips. **New
-   `tests/test_placement_probe.py`, one parametrized function** (W6; no browser): the classifier per §3.3 (tone maps, inner mask,
-   max-over-channels, both poses) — clean snap and frac under the GPU map; identity-map decision (software) → no lease; both low,
-   both high, 2 % + ε / 20 % − ε, poses disagreeing, two maps consistent with different rules, unequal pair, wrong size, DPR
-   mismatch → unknown; the first-run init script under Node (`vm`): the §8.7 tamper rows; the lifecycle state machine with a fake
-   transport — commit bound to the recorded unique context (late result after a context change discarded), revoke on reconnect
-   before commands, the wait-for-expiry path when revoke fails, fingerprint change / unreadable → revoke, failed re-probe stays
-   invalid, keep-alive renews only on the same connection and context; the `recalibrate` command route (`web/live.py`,
-   `live_session.py`) and the report field; the gate checks (program capture changed → result discarded). Test 4
-   (`test_dissolve_probe.py`) adds the `m-snap-shift`, `m-snap-cef*`, wrong-rule, `iso-*`, `life-cal-*` and `*-prod` arms to its
-   arm table rows.
+5. **Rev 17 rows** (in the same functions): test 3's harness gives BASE `left`/`top` `0px` and defines `window.__obedPlacement` per
+   row (default `snap`; the trace pattern stays `(v(gf*)?)?` — one movie draw); rows (§8.8): grant absent / `invalid` / any other
+   value (incl. `frac`, `SNAP`) skip; fractional `left`/`top` and `left: auto` skip, a negative integer `left` admits; an absent
+   getter (the production preview/raw path, `patch_rendering` bytes) skips. **`tests/test_live_host.py`, one new parametrized
+   function** (W6; fake transport, no browser): the grant matrix — launched + `Chrome/154.*` or `HeadlessChrome/154.*` + GPU
+   compositing → `snap`; attach mode, managed OBS, `Chrome/153.*`, `Chrome/155.*`, software compositing, a failing
+   `Browser.getVersion` or `SystemInfo` → no grant with its reason; the round trip committed only into the recorded unique
+   context (a context change between round trip and commit installs nothing); a reload re-grants only after its own round
+   trip; `gpu_compositing` disabled or unreadable at `observe()` → revoke; a failed round trip → `channel-compromised` and
+   `show` refused; the init script under Node (`vm`) with the §8.8 tamper rows; `output.placement`. Test 4
+   (`test_dissolve_probe.py`) adds the `m-snap-shift`, `grant-*`, `life-grant-*`, `cef-skip` and `*-prod` arms to its arm table
+   rows.
 6. **`test_managed_obs_qualify.py`:** the env-refusal test parametrized over the new arm; the calibration test (n = 4 / 4 + ε);
    the session list includes DSK 7→8 and `m-snap`.
 
@@ -1032,14 +1004,14 @@ session) `--arm mmo`, `--arm g2`, `--arm mmo-cef`. Root-cause any change.
 | # | Files | Work |
 |---|---|---|
 | W0 | coordinator | `git cherry-pick 715cb3f1` (done, `7fa7c8dd`) |
-| W1 | `src/obed_edom/live_runtime.py`, `tests/test_live_runtime.py` | rev 15's `__obedFreezeTake` byte-exact to §3.1 (over rev 13: the placement flag read and guard, integer `left`/`top`, the `frac` underlay draw; the 13 rows and harness changes of §8.6, §10 item 5) (`_FREEZE_TONE_LUT` removed; `Q` kept); docstrings (identity tone, device-pixel holder behind the geometry guard, exterior proof, top layer, shadow roots); re-pins; tests 1–3 incl. the shadow-DOM invariant rows |
-| W2 | `scripts/dissolve_probe.py`, `tests/test_dissolve_probe.py` | reference-capture profile (inventory, paused-state and opacity read-backs, stable pairs, `perfect`/`perfect-shift`), holder-pixel scorer with `L_path`, foreground inventory + production mask + missed/excess verification with a twin per reference geometry, tone coverage, device-scale holder paste and strip decode, `m-snap[dpr, origin, clip]` (one parametrized arm over the §9.0 item-5 matrix) and `m-snap-frac[dpr]` with rev 13's anchor, `m-geo-*` (`-dpr125` replaces `-dsf2`) and `m-raw*` arms (raw-page driver and injections), hide-row screencast with timestamps and the dropped-hide/-show twins, both-opaque no-dip class; test 4 |
-| W3 | `scripts/managed_obs_qualify.py`, `tests/test_managed_obs_qualify.py` | DSK 7→8 cost and `m-snap` sessions; the startup probe first (`probe-cef` must say `frac`), `m-snap-cef` under `frac`, `wrongrule-cef`; tone sessions report-only; test 6 |
-| W4 | `README.md`, `.agents/skills/obed-edom/SKILL.md`, `.agents/handovers/keynote-live-dissolve-crossfade-followups.md` | README/SKILL: the identity-tone known limit; DPR 1, 1.5 and 2 freeze; scaled stages (an output not 1920 CSS px wide, e.g. 2560×1440 or 1280×720 at DSF 1) keep today's movie jump; follow-ups handover: W5, the Q6 PR, scaled stages (option B's replica result and why it is not shippable; the local-units `contain` solve a scaled-chain model needs), the optional G2 use of a qualified `L` |
+| W1 | `src/obed_edom/live_runtime.py`, `tests/test_live_runtime.py` | rev 17's `__obedFreezeTake` byte-exact to §3.1 (over rev 13: the grant read (`"snap"!==pl` skips) and integer `left`/`top`; no `frac` draw; the rows and harness changes of §10 item 5) (`_FREEZE_TONE_LUT` removed; `Q` kept); docstrings (identity tone, device-pixel holder behind the geometry guard and the host grant, exterior proof, top layer, shadow roots); re-pins; tests 1–3 incl. the shadow-DOM invariant rows |
+| W2 | `scripts/dissolve_probe.py`, `tests/test_dissolve_probe.py` | reference-capture profile (inventory, paused-state and opacity read-backs, stable pairs, `perfect`/`perfect-shift`), holder-pixel scorer with `L_path`, foreground inventory + production mask + missed/excess verification with a twin per reference geometry, tone coverage, device-scale holder paste and strip decode, `m-snap[dpr, origin, clip]` (one parametrized arm over the §9.0 item-5 matrix) and `m-snap-frac[dpr]` with rev 13's anchor, `m-geo-*` (`-dpr125` replaces `-dsf2`) and `m-raw*` arms (raw-page driver and injections), hide-row screencast with timestamps and the dropped-hide/-show twins, both-opaque no-dip class; test 4; rev 17: the `grant-*`, `life-grant-*`, `cef-skip`, `m-raw-prod`/`m-preview-prod` and `m-snap-shift[dpr]` arms (the follow-up's probe/CEF arms are not built here) |
+| W3 | `scripts/managed_obs_qualify.py`, `tests/test_managed_obs_qualify.py` | DX-2 per §9.2: the cross-fade, cut and opaque sessions plus `cef-skip` (no holder, reason `attached`); media / tone / `m-snap` sessions dropped from CEF in this PR; test 6 |
+| W4 | `README.md`, `.agents/skills/obed-edom/SKILL.md`, `.agents/handovers/keynote-live-dissolve-crossfade-followups.md` | README/SKILL: the identity-tone known limit; the freeze works on the Chrome host (HDMI/headless) at DPR 1, 1.5 and 2 and stage scale 1; **OBS/CEF keeps today's movie jump** (decision 15); raw export and Build Preview keep the jump (decision 14); scaled stages keep the jump; follow-ups handover: the **CEF placement follow-up PR outline** (§13.1), W5, the Q6 PR, scaled stages, the optional G2 use of a qualified `L` |
 | W5 | scratch + evidence only (no tracked file) | **Host-side compositing-path calibration feasibility probe** (decision 10; non-blocking for this PR, needed before Q5 closes): can the host, at startup, identify the compositing path and its map (qualified path + tuple → `L`, unknown → identity) from compositor-painted pixels? Headless `LiveOutputHost` (GPU, `--disable-gpu`) and managed OBS (acceleration on/off), two fresh launches each: the tone movie paused in an off-screen-safe calibration slot, CDP screenshot / `GetSourceScreenshot` vs `drawImage`; repeatability, distinguishability of GPU vs software for the same tuple, invalidation on GPU-state change (GPU process loss, acceleration toggle); a record with a go/no-go and, on go, the player-boundary change it would need (owner decision) |
-| W6 | new: `src/obed_edom/placement_probe.py`, `src/obed_edom/data/placement_probe.mp4`, `tests/test_placement_probe.py`; changed: `src/obed_edom/live_host.py`, `src/obed_edom/managed_obs.py`, `src/obed_edom/live_session.py`, `src/obed_edom/web/live.py`, `dashboard/src/live/LivePresenter.tsx`, `dashboard/src/live/api.ts` (+ its UI test) | **The host startup calibration** (§3.3; decisions 13–14): first-run init script and private channel (token, lease, round trip), isolated probe target / `AK-Probe` source with gate verification and cleanup, classifier per the §3.3 spec, invalid/probing/valid lifecycle bound to target and unique context, keep-alive and fingerprint, `recalibrate` command end to end, `output.placement`; `tone` stays identity (W5 records the map only) |
+| W6 | `src/obed_edom/live_host.py`, `tests/test_live_host.py` | **The host grant** (§3.3; decision 15): first-run init script and private channel (token, round trip), grant conditions (launched, `Browser.getVersion` major in `QUALIFIED_SNAP_MAJORS`, GPU compositing), context-bound commit, re-grant after reload, `observe()` fingerprint revoke, `channel-compromised` handling, `output.placement`; no lease, probe, recalibrate, `managed_obs.py`, `web/live.py`, `live_session.py` or dashboard change |
 | Q0b-bis | done (§8.6) | engagement, cost, matrix, CEF preflight (the trigger) |
-| Q0b-ter | scratch + evidence only | §9.0: probe qualification on both engines, holder pixels on the probed rule (Chrome and CEF), wrong-rule negatives, rev-15 engagement, the open Q0b-bis items |
+| Q0b-ter | scratch + evidence only | §9.0: the grant on real engines, Chrome holder pixels on the exact bytes, engagement and scope (`cef-skip`, `*-prod`), the open Q0b-bis items |
 
 Order: W1 ∥ W2 ∥ W3 ∥ W4 ∥ W6 → Q0b-ter → GPT-6 Astra review (Opus fallback) → fixes → full local suites
 `env -u PYTHONDONTWRITEBYTECODE uv run pytest tests/ -n auto --dist worksteal` (no dashboard files), Python 3.10 floor → DX-1
@@ -1054,10 +1026,10 @@ exterior proof never trusts a failing element's own border box; every pruned sub
 disjoint from `V`. (9) Holder canvas = device pixels of the snapped box; alpha scan over every backing pixel before the redraw; no tone
 write. (10) Top layer and open shadow roots refused first; no tag exempt by name; descendant-paint effects checked before the
 visibility shortcut; witnesses are HTML `div`s; the shadow-DOM invariant is a checked test. (11) Geometry guard: DPR ∈ {1, 1.5, 2}, `kx` = `ky` = 1, stage scale 1,
-translation-only scene transforms, integer `left`/`top`, `sn` on the 1/DPR grid; everything else skips; (12) placement only from
-the host probe's frozen flag (`snap`; `frac` at DPR 1 and an integer stage origin); absent or unknown skips; safety checks never relaxed for a visual allowance.
+translation-only scene transforms, integer `left`/`top`, `sn` on the 1/DPR grid; everything else skips; (12) placement only from the host's grant
+(`snap` on a host-launched, qualified Chrome; never in CEF); absent or anything else skips; safety checks never relaxed for a visual allowance.
 
-## 12. Owner decisions (1–7 2026-10-11, 8–14 2026-10-12, in chat)
+## 12. Owner decisions (1–7 2026-10-11, 8–15 2026-10-12, in chat)
 
 - **Target (movies):** "in Keynote the vid stops playing and dissolves out" — freeze on the current frame, fade with slide 2.
 1. **Switch: fold into `mm_opacity`.** 2. **Scope: every output.** 3. **F1 (`none` cut) in this patch; F2 a separate
@@ -1101,7 +1073,7 @@ the host probe's frozen flag (`snap`; `frac` at DPR 1 and an integer stage origi
     output whose viewport is not 1920 CSS px wide (2560×1440 or 1280×720 at DSF 1) keeps today's baked-frame jump; a 4K output
     at DSF 2 (1920×1080 CSS) freezes. Still to measure (Q0b-bis): DSK 7→8 cost at DSF 2, the CEF source's DSF, clip edges at
     DSF ≠ 1 (all measured since, §8.6).
-13. **Placement rule from a host startup probe (2026-10-12 ~14:10).** OBS's CEF 127 places the video quad unsnapped, Chrome 154
+13. **Placement rule from a host startup probe (2026-10-12 ~14:10; deferred to the follow-up PR by decision 15).** OBS's CEF 127 places the video quad unsnapped, Chrome 154
     snaps; no page-side test separates them. A host-side probe compares composited pixels of a snapped and a fractional canvas
     against a test movie at host start (and on reconnect or GPU reset), off-air, in about 1.5 s; it sets `snap` or `frac`;
     ambiguous or unknown means skip. It is **the** startup calibration: it covers the HDMI/headless host (CDP screenshot) and
@@ -1111,6 +1083,12 @@ the host probe's frozen flag (`snap`; `frac` at DPR 1 and an integer stage origi
     on those pages (stock movie behaviour); the cross-fade and cut still apply. This **supersedes decision 8's preview clause**
     ("preview inherits F3"); decision 8's gate design is otherwise unchanged. Other rev-15 defaults stand: an on-air reconnect
     skips the freeze until the probe re-runs; identity `L` with the tone slot reserved.
+15. **Split (2026-10-12 ~15:00).** This PR ships the freeze only where the snapped rule is proven: the Chrome host
+    (HDMI/headless `LiveOutputHost`). In CEF/OBS the take skips (today's jump). The host grants `snap` from its own knowledge
+    only — it launched the Chrome and `Browser.getVersion` reports a qualified engine — through rev 16's private per-document
+    channel. The placement probe, the `frac` draw, the isolation gate, the OBS calibrate scene, `recalibrate`, the CEF clip
+    matrix and W5's tone map move to a follow-up PR (§13.1), whose first step is the 5-minute OBS feasibility check of
+    whether `GetSourceScreenshot` renders a non-program source.
 
 ## 13. Risks and out of scope
 
@@ -1122,27 +1100,22 @@ the host probe's frozen flag (`snap`; `frac` at DPR 1 and an integer stage origi
   (content width 312.213 vs Blink's 312.656; 249–255 LSB). The translation-only guard keeps such chains out; any future model
   that admits scaled chains must solve `contain` in local units (LayoutUnit-exact) first.
 - **Cost at DSF 2:** four times the device pixels; measured 15.1–18.3 ms for DSK 7→8 (Q0b-bis), within the 50 ms bound.
-- **Placement probe (decisions 13–14).** (a) *Isolation:* the probe runs in a separate target / the `AK-Probe` source with a
-  verified program-capture gate, so it never reaches program; whether OBS renders `AK-Probe` outside program is unmeasured (if
-  not, managed OBS skips calibration and F3 is off there). (b) *Reconnect:* the lease is revoked before commands resume; the
-  freeze returns after the next probe (automatic once no transition is in flight, or the operator's `recalibrate`). (c) *Engine
-  updates:* re-measured at every host start; between starts the fingerprint check revokes on a visible change. **Coverage
-  limit:** a GPU-process reset that keeps the document and leaves the fingerprint unchanged keeps the old rule (W5's
-  "GPU-state invalidation untested" too). (d) *Channel:* page code cannot set or keep a rule; a predefined getter needs code
-  running before the host's first-run script (another CDP client or an extension) and is caught by the round trip, which keeps
-  the output hidden. (e) *Raw export and Build Preview* do not freeze (decision 14); D1/D2 still apply. (f) The probe classifies but does not measure τ (its 1-px synthetic lines
-  leave 32–52 on the correct rule); holder pixels are qualified separately per engine (§9.0 item 2, DX-2).
-- **Tone map on the probe (W5).** Recommendation: keep identity `L` in this patch. W5's GO is indicative (two launches, no
-  GPU-state invalidation test, HEVC tone in CEF unmeasured), a non-identity map needs RGB writes and `putImageData` back in the
-  take (the cost rev 10 removed) and its own blocking tone controls; the probe's `tone: null` slot and fingerprint are the
-  plumbing it would use. Q5 stays open.
-- **Clip edges at DSF ≠ 1** are unmeasured (the investigation used unclipped content boxes); Q0b-bis item 5.
+- **Host grant (decision 15).**
+  - *Version allowlist:* a Chrome auto-update to a new major means no grant (the reason is recorded) until that version is
+    qualified (W1 adds it to `QUALIFIED_SNAP_MAJORS` after an `m-snap` run). A failure here is a skip, never a wrong freeze.
+  - *Coverage limit:* a player-internal automatic transition that runs while the host's CDP connection is down, after a
+    GPU-to-software fallback the host has not yet observed, would use a stale grant.
+  - *Channel:* page code cannot set or keep a grant. A predefined getter needs code running before the host's first-run script
+    (another CDP client or an extension); the round trip catches it and keeps the output hidden.
+  - *Scope:* OBS/CEF, raw export and Build Preview keep today's jump (decisions 14–15).
+- **Tone map (W5).** Identity `L` stays (Q5 open); a host-measured map belongs to the follow-up probe (§13.1).
+- **Clip edges at DSF ≠ 1:** measured in Q0b-bis (all clipped matrix cells at the floor, §8.6).
 - **The snapping model is a measured fit** for the qualified geometry (P2, DSK slides, the hi-DPI replica; §8.2, §8.5), located
   in Chromium's zoom-for-DSF layout snapping (same painter code in M127), not a general rule for scaled chains; a
   future Chromium that snaps differently there would show in `m-snap` (blocking) before release.
 - **Tone:** identity `L` keeps the GPU mid-tone step (≤ +11.3/255, ΔL* ≈ 4.3 at mid-grey) at the freeze; W5 may bring a
   qualified `L` back. Software compositing would freeze exactly, but its untagged-H.264 tuple is outside `Q`.
-- **CEF:** compositor, snapping at the source geometry, tone path and cost unproven until the preflight and DX-2.
+- **CEF:** does not snap the video quad (§8.6); this PR does not freeze there (decision 15); DX-2 proves the skip.
 - **Exterior proof** relies on HTML overflow clipping (positioned `div` clipper, no fixed escape, no descendant-paint effect
   above it, no top layer); a page that adds fixed, unclipped or top-layer chrome later simply skips the take. View-transition
   pseudo-elements also render in the top layer; neither the player nor the host starts one (no `startViewTransition` in either
@@ -1151,7 +1124,25 @@ the host probe's frozen flag (`snap`; `frac` at DPR 1 and an integer stage origi
   them (an extension, a future host script) falls outside the guarantee until the invariant test is extended to it.
 - ids rest on `VB`'s pre-order allocation (proved); production transparency; the bridge/hold (Q6).
 
-Out of scope: F2, GL effects, Keynote-app comparison, S2 and its follow-up.
+Out of scope: F2, GL effects, Keynote-app comparison, S2 and its follow-up, and the CEF placement follow-up below.
+
+### 13.1 Follow-up PR: CEF/OBS placement (decision 15; outline for the follow-ups handover)
+
+Moved out of this PR. The full design is rev 16's §3.3 (`41ef609b`) and §9 (r12 folded).
+1. **First step: the 5-minute OBS feasibility check.** Does `GetSourceScreenshot` render a browser source that is not on program
+   (a dedicated `AK-Calibrate` scene / `AK-Probe` source)? If not, the follow-up re-plans the isolation gate before anything
+   else.
+2. **The placement probe:** an isolated probe target or source; the program-capture gate with cleanup on every exit; the shipped
+   clip (`p2like.mp4`, sha256 `7b7d66b5…`); the classifier per rev 16 §3.3 (tone maps {identity, GPU analytic}, inner mask,
+   max over channels, both poses, ≤ 2 % / ≥ 20 %); the lease, keep-alive and invalid / probing / valid lifecycle; the operator
+   `recalibrate` command (`web/live.py`, `live_session.py`, the presenter UI); reconnect re-probe.
+3. **The `frac` take draw:** a snapped underlay plus CEF 127's unsnapped quad (the investigator's `fdrawu`, +186 B), at DPR 1 and
+   an integer stage origin only. Its grant value joins `snap` in the same channel; this PR's channel and `left`/`top` admission
+   are its base.
+4. **The CEF acceptance:** `m-snap-cef[clip]` (none, near-side and far-side fractional x and y, foreground crossing), the
+   `nooffset[x|y]` controls (only near-side clips move the quad, §8.7), the wrong-rule controls through the privileged channel,
+   `iso-*`, `probe-*`, `life-cal-*`, CEF DSK 7→8 cost with the extra draw, CEF `hevc10` / Keynote-HEVC tone.
+5. **W5's tone-path map** on the same probe (recorded first, applied only after its own qualification).
 
 ## 14. Critique log
 
@@ -1244,3 +1235,13 @@ Raw rounds: `.agents/reviews/dissolve-crossfade/plan-astra-r{1,…,7}.md`. r1–
 | 4 | major / lifecycle | Folded: invalid / probing / valid bound to target and unique execution context; commit by `uniqueContextId` (late results discarded); revoke on reconnect before commands (or wait for lease expiry); keep-alive with fingerprint; `recalibrate` command through `web/live.py` (changed), `live_session.py`, the presenter UI; `life-cal-*` controls; unchanged-fingerprint GPU reset stated as an unresolved coverage limit | §3.3, §9, §10, §11, §13 |
 | 5 | major / acceptance coverage | Folded: `m-snap-cef[clip]` with near-side and far-side fractional clips and foreground crossing, `perfect`, omit twins, edge-inclusive scoring; `m-snap-cef-nooffset[x|y]` wrong-offset controls (Node: only near-side clips move the quad); whole-backing alpha scan stays after both draws | §3.2, §8.7, §9, §9.2 |
 | 6 | major / scope | Folded by decision 14 (supersedes decision 8's preview clause); `m-raw-prod`, `m-preview-prod` production-path arms with no channel expect stock movie behaviour; injected `m-raw*` kept as exterior-gate tests only | §3.3, §9, §12 |
+
+### Rev 17 — decision 15 (owner ~15:00: split)
+
+| Item | Disposition | Where |
+|---|---|---|
+| Take | Rev 13's snapped draw + integer `left`/`top` + the grant read (`"snap"` or skip); `frac` draw removed; D1 10 305 B, digests re-pinned, `node --check`, §6.1 | §3.1, §3.2 |
+| Grant | Host knowledge only: launched Chrome + `Browser.getVersion` major 154 + GPU compositing → `snap`; attach / managed OBS / other versions / software / failures → none, reason recorded; rev 16's private channel kept (token, round trip, context-bound commit, re-grant after reload, `observe()` fingerprint revoke); lease and keep-alive dropped (a version-and-launch grant cannot go stale while its process lives) | §3.3 |
+| Acceptance | Chrome-only qualification; `cef-skip` in DX-2 (no holder, reason recorded); `grant-*`, `life-grant-*`, channel tamper rows kept; `probe-*`, `iso-*`, `life-cal-*`, `m-snap-cef*`, wrong-rule moved; DX-3 checks the freeze on the HDMI host and the jump in OBS | §9, §9.0–9.3 |
+| Streams | W1 rev-17 bytes; W6 shrinks to `live_host.py` + `tests/test_live_host.py`; W2/W3 arms; W4 docs (OBS keeps the jump; follow-up outline) | §10, §11 |
+| Follow-up PR | Probe, `frac`, isolation gate, OBS calibrate scene, recalibrate, CEF clip matrix, W5 tone; first step the 5-minute OBS feasibility check | §13.1 |
