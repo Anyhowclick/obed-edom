@@ -1368,6 +1368,8 @@ DEFAULT = _snapped([109, 795, 952, 268])
 DPR2 = _snapped([109, 795, 952, 268], dpr=2)
 DPR15 = _snapped([109, 795, 952, 268], dpr=1.5)
 DPR15_FILL = _snapped([109, 795, 313, 263], natural=None, dpr=1.5)
+QUARTER_BOX = [109, 795.25, 952, 268]
+DPR2_QUARTER = _snapped(QUARTER_BOX, natural=None, dpr=2)
 DEFAULT_TRACE = DEFAULT[1]
 FILL = _snapped([109, 795, 960, 270], natural=None)
 VIDEO2 = _snapped([600, 800, 400, 200], video="vid2")
@@ -1403,7 +1405,7 @@ def _hidden_parent(**effects) -> dict:
     return {"cs": {"visibility": "hidden", **effects}, "rect": [-300, 0, 200, 1080]}
 
 
-FREEZE_ROW_COUNT = 265
+FREEZE_ROW_COUNT = 266
 # name -> (stub options, expected take/attach count and target, redraws [id, alpha, x, y, w, h], writeback (none on any
 # path: identity tone), geometry).
 FREEZE_ROWS = {
@@ -1572,9 +1574,9 @@ FREEZE_ROWS = {
     "ext_failingStageAncestor": ({"bodyCs": {"filter": DROP_300}}, FREEZE_SKIP),
     "exteriorVideoMeetsRegion": ({"ext": [{"tag": "VIDEO", "rect": [500, 800, 200, 200]}]}, FREEZE_SKIP),
     # Geometry guard and opaque cover (r8 3-5, rev 13 fix A): edges snap to the device grid, so DPR 1.5 `fill` 313x263
-    # backs 469x394 and the P2 box 1428x401, DPR 2 backs 1904x536; DPR 1.25 and 3 (unmeasured), stage scales and a scale
-    # below the stage skip; fractional stage origins and a letterbox at scale 1 admit; a transparent last backing column,
-    # row or pixel skips at every admitted DPR.
+    # backs 469x394 and the P2 box 1428x401, DPR 2 backs 1904x536 (a y 795.25 edge snaps to 795.5); DPR 1.25 and 3
+    # (unmeasured), stage scales and a scale below the stage skip; fractional stage origins and a letterbox at scale 1
+    # admit; a transparent last backing column, row or pixel skips at every admitted DPR.
     "dpr15_fillOpaque": ({"dpr": 1.5, "videoCs": {"objectFit": "fill"}, "vrect": DPR15_BOX, "clip": DPR15_BOX},
                          dict(FREEZE_ADMIT, holders=[DPR15_FILL[0]], traces=[DPR15_FILL[1]])),
     "dpr15_fillLastColumnTransparent": (
@@ -1583,6 +1585,8 @@ FREEZE_ROWS = {
     "dpr1_lastRowTransparent": ({"alphaAt": 952 * 267, "alphaVal": 0}, dict(FREEZE_SKIP, traces=[DEFAULT_TRACE])),
     "dpr1_lastPixelTransparent": ({"alphaAt": 952 * 268 - 1, "alphaVal": 0}, dict(FREEZE_SKIP, traces=[DEFAULT_TRACE])),
     "dpr2": ({"dpr": 2}, dict(FREEZE_ADMIT, holders=[DPR2[0]], traces=[DPR2[1]])),
+    "dpr2_quarterPixelEdge": ({"dpr": 2, "videoCs": {"objectFit": "fill"}, "vrect": QUARTER_BOX, "clip": QUARTER_BOX},
+                              dict(FREEZE_ADMIT, holders=[DPR2_QUARTER[0]], traces=[DPR2_QUARTER[1]])),
     "dpr2_lastPixelTransparent": ({"dpr": 2, "alphaAt": 1904 * 536 - 1, "alphaVal": 0}, dict(FREEZE_SKIP, traces=[DPR2[1]])),
     "dpr15_p2Box": ({"dpr": 1.5}, dict(FREEZE_ADMIT, holders=[DPR15[0]], traces=[DPR15[1]])),
     "dpr15_lastPixelTransparent": ({"dpr": 1.5, "alphaAt": 1428 * 401 - 1, "alphaVal": 0}, dict(FREEZE_SKIP, traces=[DPR15[1]])),
@@ -1854,7 +1858,8 @@ def test_dissolve_real_patched_methods_on_node(tmp_path, sha, case):
         # effect, above-stage, every edge member, refused and ignored tags, decoded size, outside stage, mixed candidates)
         # to 200, then rev 12's 26 r8 rows (exterior proof, top layer, geometry guard, opaque cover) and 8 r9 rows, then
         # impl r1's 26 (one exterior predicate at a time, the last backing pixel, a fractional x origin), then rev 13's 5
-        # (DPR 1.25 and 3 skip, DPR 1.5 on the P2 box, the last backing pixel at DPR 1.5 and 2).
+        # (DPR 1.25 and 3 skip, DPR 1.5 on the P2 box, the last backing pixel at DPR 1.5 and 2) and a DPR 2 quarter-pixel
+        # edge (y 795.25 snaps to 795.5 on the device grid, 795 on the CSS grid).
         assert len(FREEZE_ROWS) == FREEZE_ROW_COUNT
         assert result.pop("guardControl") == FREEZE_GUARD_CONTROL
         assert result.pop("callSites") == FREEZE_CALL_SITES
