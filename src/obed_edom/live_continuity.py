@@ -657,7 +657,7 @@ QUALIFIED_PLAN_SHA256: frozenset[str] = frozenset(
         "2fbf977277a5eef1cde701c12bb157905e40ac2b0a5ed85e30bf1056a3e65c18",  # P2, glReplay on
         "866de785864ad19b11ecd8cdfb4ad1729798ccf9f1764aa59718de03034ba7a5",  # p2-loop, glReplay off
         "d860a09f4f6a8e24a81e2ad0c3b37bc8a3f2b4ce3947836ca315671031870131",  # p2-loop, glReplay on
-        # S2 branch only: the S0 decks (either flag), until the S2 gate keeps those that pass Q3+Q7.
+        # The S0 decks (either flag): each passed Q3 + Q7 (`.agents/reviews/continuity-generalisation/gates-r1.md`).
         "4d466b2f0ee035928486dc3e61f23a5d92e3cc4e76d5d02f367e115331cc0b00",  # D1
         "029a4c427d2f7ebe2cf7410e2010fdc03834f370f5c6d25aeea9e05c2fbc20f7",  # D2 and D2-across
         "01b74c88f4622e5a0650d334d7721a247a2039a1767f232d792e823405a21b1b",  # D3
