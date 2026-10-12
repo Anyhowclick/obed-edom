@@ -166,6 +166,17 @@ Suites: `9d4fbef5` 3.12 10466 / 3.10 floor (probe+run_gates) 1905; `b7e0d760` 3.
      `unwrap_clock`'s classified wrap (no recorder alignment, a manual seek landing on a wrap sample is not excluded).
    - Tools/evidence (scratchpad is wiped on reboot): `output/evidence/s2-dev/instr-v-9d4fbef5/tools/{r21..r25,fc2,
      oracle-vs-9d4fbef5-d411aef9,suite-*.log}`; oracle scripts in `tools/oracle` + `tools/r22/run_oracle.sh` (fix scratch paths).
+   - **Final round, 2026-10-12 afternoon** (evidence `s2-dev/instr-v-8bdaf582/final/`, gate worktree `gate-v-8bdaf582`):
+     C1 `run_gates --tier full` 3-wide `failed=5`, ALL registered reds inconclusive on one 66.6 ms Chrome-throttle-onset gap
+     (red evidence present) — the r23 "fastest nearby delta" rule. **Owner: "fix what my eyes can catch"** → `ecf1b553`
+     reverts paint `local_period` to the slower side's median (partial sides count; window median fallback). Offline
+     rescore at `ecf1b553`: C1 36/36 host/red/paint-control pass; V5 19/19 pass; serial P2 host ×3 + Pass G ×7 pass (live);
+     V2b: kb-1to2 + kb-3to4 FAIL, all green takes pass, 1to2_375/1125 invalid on wrap timing (retake; same as Stage 3).
+     **Q7 PASSED (owner, 2026-10-12 ~17:00):** Q7a external attach in OBS 32.2.2 on D1 + D4; Q7b dashboard Keyer (managed
+     OBS, viewed via chrome://inspect screencast) on D1–D5. D4 S1→S2: the non-carried movie fades out on frame 0 = the
+     export's baked opening frame (dissolve patch F3), owner confirmed not S2. Follow-ups: Show OBS cannot surface the
+     tray-minimised managed OBS ("no available windows"); start the output session visible + green/red Show/Hide button
+     (owner; separate session/PR off main).
    **Next:** (iii) final round at `8bdaf582` (or later head): fresh gate worktree; `run_gates --tier full` 3-wide (must be
    `failed=0`; switch-point coverage inconclusives are now expected more often — re-run serially, never relax), V2b force-wrap
    takes (kb-1to2 must FAIL, kb-3to4 fail, green takes pass), serial P2 host ×3 + Pass G ×7, then Phases D3, D4, D5 L1 hosts
