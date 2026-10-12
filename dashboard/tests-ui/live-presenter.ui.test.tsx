@@ -107,6 +107,7 @@ describe("LivePresenter", () => {
     expect(screen.getByText(detail)).toBeInTheDocument();
     expect(badge).toBeVisible();
     expect(screen.getByRole("button", { name: "Show output" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Show output" })).toHaveClass("live-take-output");
   });
 
   it.each([
@@ -344,6 +345,7 @@ describe("LivePresenter", () => {
     const api = client({ state: vi.fn(async () => state({ status: "busy" })) });
     render(<LivePresenter client={api} pollMs={60_000} />);
     expect(await screen.findByRole("button", { name: "Hide output" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Hide output" })).toHaveClass("live-release-output");
     expect(screen.getByRole("button", { name: "Advance" })).toBeDisabled();
   });
 

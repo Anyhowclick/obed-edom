@@ -286,7 +286,7 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
     <header className="live-heading">
       <div><h1>Alpha Keynote</h1><p className="note" role="status">{connected ? active ? `Player ${snapshot.status} · Output ${snapshot.outputVisible ? "visible" : "hidden"}` : "Add a Keynote, qualify it, then present." : connectionError ? "Disconnected · Reconnecting…" : "Connecting…"}</p></div>
       {active && <div className="actions">
-        <button className="btn secondary" disabled={!!disabledReason(visibilityOperation)} title={disabledReason(visibilityOperation)} onClick={() => void send(visibilityOperation)}>{snapshot.outputVisible ? "Hide output" : "Show output"}</button>
+        <button className={`btn live-output-toggle ${visibilityOperation === "show" ? "live-take-output" : "live-release-output"}`} disabled={!!disabledReason(visibilityOperation)} title={disabledReason(visibilityOperation)} onClick={() => void send(visibilityOperation)}>{snapshot.outputVisible ? "Hide output" : "Show output"}</button>
         <button className="btn secondary" disabled={!!disabledReason("stop")} title={disabledReason("stop")} onClick={() => void send("stop")}>Stop session</button>
       </div>}
     </header>
@@ -314,7 +314,7 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
       </section>
       <section className="live-panel live-start">
         <h2>2. Present</h2>
-        <p className="note">Start with the output hidden, then show it when you are ready.</p>
+        <p className="note">The output is shown as soon as the session starts; hide it any time.</p>
         <button className="btn" disabled={startDisabled} title={engineReason || (!qualified ? "Qualify a Keynote first" : "")} onClick={() => void start()}>Start output session</button>
       </section>
     </div>}
