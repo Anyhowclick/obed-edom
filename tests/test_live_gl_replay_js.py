@@ -3299,7 +3299,7 @@ console.log(JSON.stringify({
     }, result["module"]
 
 
-def test_the_real_core_and_module_install_with_the_p2_loop_runtime():
+def test_the_real_core_and_module_install_with_the_p2_loop_runtime(tmp_path):
     """The looping deck's derived schema-2 runtime (per-entry `loop`, no `loops` annex) on
     the real core and the real module: the core comes up ready and arms the zone, the
     module does not stand down on `planUnreadable`, the Python validator accepts its
@@ -3309,7 +3309,7 @@ def test_the_real_core_and_module_install_with_the_p2_loop_runtime():
 
     from obed_edom.live_continuity import QUALIFIED_PLAN_SHA256, derive_plan, plan_signature
 
-    plan = derive_plan(_loop_tree(), SLIDES, resolver=_resolver, gl_replay=True)
+    plan = derive_plan(_loop_tree(tmp_path), SLIDES, resolver=_resolver, gl_replay=True)
     runtime = plan.to_runtime()
     assert isinstance(runtime, dict)
     assert plan_signature(runtime) == P2_LOOP_GL_REPLAY_PLAN_SHA256
