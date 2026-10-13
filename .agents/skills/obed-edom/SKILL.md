@@ -734,6 +734,16 @@ for the parked `iwa-surgical-write-generator` feature.
   cannot be checked, odd dimensions or unreadable timing fail the prepare (`PreviewError` naming every movie; fix:
   replace it with an opaque movie); never flatten alpha. `load_cached` reuses a cache only when
   `preview_movies.unconverted` is empty. The host codec gate stays for exports that bypass the prepare.
+* **Prepare-time texture repair (Stage T).** `apply_preview` runs `preview_textures.repair_textures` right after
+  `manifest_from_export`, before `convert_movies`, on the cached export only (never the `.key`). It fixes Keynote's
+  per-slide texture-id mis-mapping (a leaf pointing at another object's page: R1/R1b JSON size checks, R4/R6 pixel
+  checks over 50% grey): D1 same-slide text re-point (equal accessibility text), D3 poster re-point by `objectID`,
+  D2 graft of the previous slide's MM `contents.to` page into the slide PDF; donors verified (V1 structure, V3 OCR or
+  correlation), V4 postcondition after the write; `.json`/`.jsonp`/`.pdf`/`.pdfp` rewritten together. Recorded as
+  `manifest.textureRepair` (`version`, `playerDigest`, `repaired[]`, `pdfs[]`; `skipped` for an unsupported player),
+  always written. No verified donor → `PreviewError` naming every slide and object in one message. `load_cached`
+  re-exports once when the record is missing, stale or JSON hits remain. Gates: `scripts/texture_repair_check.py g1`
+  (offline, every export vs plan §4) and `g2` (headless 7e3c; `--no-repair` is the negative control).
 * **F5 names are frozen instrument API.** Scorers read note kinds (`bridge-3to4`, `reuse-decoder`,
   `reuse-skip-boundary`, `retire-on-start-movie`, `retire-boundary`, `preserve-refused`, `dom-swap`,
   `facade-block-clear`, `remount-*`, `pool-cleared`, `glreplay-*`, `bridge-clock`, `pin-hold-start`, `bridge-motion-start`; the last

@@ -5,7 +5,10 @@ import subprocess
 from functools import lru_cache
 from pathlib import Path
 
-FIXTURE_NAMES = ("p2-recovery", "p2-binary", "p2-loop", "p2-loop-grey", "p2-soak-loop", "gl-decks", "qual-decks", "qual-movies")
+FIXTURE_NAMES = (
+    "p2-recovery", "p2-binary", "p2-loop", "p2-loop-grey", "p2-soak-loop", "gl-decks", "qual-decks", "qual-movies",
+    "alpha-dsk-textures",
+)
 
 
 @lru_cache(maxsize=1)
