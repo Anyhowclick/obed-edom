@@ -244,6 +244,7 @@ class Arm:
     grant: str = "driver"
     reason: str | None = None
     regrant: str | None = None
+    min_class_px: int = MIN_CLASS_PX
 
 
 def viewport_of(arm: Arm) -> tuple[int, int]:
@@ -330,7 +331,7 @@ ARMS: dict[str, Arm] = {
     "m-preview-prod": Arm(**_SCOPE, page="preview"),
     "cef-skip": Arm(**{**_SCOPE, "mode": "on"}, reason="attached"),
     "cef-skip-dsk": Arm(**{**_SCOPE, "deck": "dsk", "slide": 7, "movies": "h264", "continuity": "off", "mode": "on", "classes": ("out",)},
-                        decoders=2, reason="attached"),
+                        decoders=2, reason="attached", min_class_px=1000),
     "grant-chrome": Arm(**_ENGAGE, page="screen", grant="host", reason="granted", holders=1, expect={"grant": "PASS"}),
     "grant-attach": Arm(**_ENGAGE, grant="none", reason="attached", expect={"grant": "FAIL"}),
     "channel-predefined": Arm(**{**_ENGAGE, "capture": "channel"}, page="screen", grant="host", reason="channel-compromised",
@@ -1209,9 +1210,12 @@ def block_mask(shape: tuple[int, int], origin: tuple[float, float], scale: float
 
 
 def texture_classes(A: np.ndarray, B: np.ndarray) -> dict[str, np.ndarray]:
-    """out-only, in-only and the both-opaque class (α_A = α_B = 255; no colour filter: α does not depend on colour)."""
+    """out-only, in-only and the both-opaque class (α_A = α_B = 255; no colour filter: α does not depend on colour), each
+    without the 1 px ring around any partial-α pixel of A or B: antialiased edges are rasteriser-dependent (CEF 127 draws
+    an inside AA corner the export texture has at 255 as α 223)."""
     aA, aB = A[..., 3], B[..., 3]
-    return {"out": (aA == 255) & (aB == 0), "in": (aA == 0) & (aB == 255), "overlap": (aA == 255) & (aB == 255)}
+    keep = ~dilate(((aA > 0) & (aA < 255)) | ((aB > 0) & (aB < 255)), 1)
+    return {"out": (aA == 255) & (aB == 0) & keep, "in": (aA == 0) & (aB == 255) & keep, "overlap": (aA == 255) & (aB == 255) & keep}
 
 
 def far_mask(A: np.ndarray, B: np.ndarray) -> np.ndarray:
@@ -1304,7 +1308,7 @@ def complement_error(inside: tuple[float, float], outside: tuple[float, float]) 
 
 def score_fade(frames: list[np.ndarray], A: np.ndarray, B: np.ndarray, *, exclude: list[Iterable[float]] = (),
                classes: Iterable[str] = (), cal: Calibration = Calibration(), screen: bool = False,
-               min_frames: int = MIN_MID_FRAMES) -> dict[str, Any]:
+               min_frames: int = MIN_MID_FRAMES, min_class_px: int = MIN_CLASS_PX) -> dict[str, Any]:
     """Model, complement and no-dip over transition frames (time order); `exclude` = media rects (padded here). The
     complement and overlap-alpha bounds hold for every class pixel of every admitted (fitted transition) frame; the
     model only on mid frames."""
@@ -1315,7 +1319,7 @@ def score_fade(frames: list[np.ndarray], A: np.ndarray, B: np.ndarray, *, exclud
     masks = texture_classes(A, B)
     keep = ~rect_mask(shape, exclude, MEDIA_PAD_PX)
     sizes = {k: int((masks[k] & keep).sum()) for k in masks}
-    problems += [f"class {k}: {sizes[k]} px < {MIN_CLASS_PX}" for k in classes if sizes[k] < MIN_CLASS_PX]
+    problems += [f"class {k}: {sizes[k]} px < {min_class_px}" for k in classes if sizes[k] < min_class_px]
     rows = []
     for F in frames:
         e, res = fit_frame(F, A, B, keep, screen=screen)
@@ -2080,6 +2084,7 @@ class Profile:
     headless: bool = True
     lifecycle: bool = True
     overrides: tuple[tuple[str, tuple[tuple[str, ...], ...]], ...] = ()
+    mid_frames: int = MIN_MID_FRAMES
 
     def arm(self, name: str, identity: bool | None = None) -> Arm:
         arm = ARMS[name]
@@ -2102,7 +2107,7 @@ DX1 = Profile("DX-1", tuple(n for n in ARMS if n not in CEF_ONLY))
 CEF = Profile("CEF", ("opaque-off", "off", "noblend", "on2", "cut-on", "cut-off", "on", "opaque-on", *CEF_ONLY),
               reported=("no_flash", "screen", "geometry", "exterior", "hidden", "shown", "frozen_frame", "frozen_region",
                         "foreground", "tone", "overlay", "cost", "holder_pixels", "reference", "mask", "grant"),
-              headless=False, lifecycle=False, overrides=(("scope", ((), CEF_ONLY)),))
+              headless=False, lifecycle=False, overrides=(("scope", ((), CEF_ONLY)),), mid_frames=5)
 """DX-2 (§9.2): the DX-1 cross-fade, cut and opaque arms OBS can carry plus `cef-skip` (P2 2->3, DSK 7->8): CEF never
 gets the snapped-placement grant (decision 15), so each publishes a take with no holder; checks without a CEF arm are
 reported."""
@@ -2405,7 +2410,7 @@ def capture_problems(record: dict[str, Any], images: Mapping[str, np.ndarray], a
     problems += placement_problems(record, arm, profile)
     if arm.capture in ("reference", "engage"):
         ev = evidence(record, images, arm)
-        problems += class_problems(ev.A, ev.B, ev.media, arm.classes)
+        problems += class_problems(ev.A, ev.B, ev.media, arm.classes, arm.min_class_px)
         if arm.capture == "reference":
             problems += reference_problems(record, images, arm, ev, cal)
     return problems
@@ -2429,14 +2434,15 @@ def placement_problems(record: dict[str, Any], arm: Arm, profile: Profile = DX1)
     return problems
 
 
-def class_problems(A: np.ndarray | None, B: np.ndarray | None, exclude: list[Iterable[float]], classes: Iterable[str]) -> list[str]:
-    """§9.1 spatial completeness, independent of temporal coverage: every required texture class has >= `MIN_CLASS_PX`
-    px outside the media rects (+ `MEDIA_PAD_PX`)."""
+def class_problems(A: np.ndarray | None, B: np.ndarray | None, exclude: list[Iterable[float]], classes: Iterable[str],
+                   min_px: int = MIN_CLASS_PX) -> list[str]:
+    """§9.1 spatial completeness, independent of temporal coverage: every required texture class has >= `min_px` px
+    outside the media rects (+ `MEDIA_PAD_PX`)."""
     if A is None or B is None or A.shape != B.shape:
         return ["no textures for the required classes"]
     keep = ~rect_mask(A.shape[:2], exclude, MEDIA_PAD_PX)
     masks = texture_classes(A, B)
-    return [f"class {k}: {int((masks[k] & keep).sum())} px < {MIN_CLASS_PX}" for k in classes if int((masks[k] & keep).sum()) < MIN_CLASS_PX]
+    return [f"class {k}: {int((masks[k] & keep).sum())} px < {min_px}" for k in classes if int((masks[k] & keep).sum()) < min_px]
 
 
 @dataclass
@@ -2510,9 +2516,10 @@ def evidence(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Arm)
                     [i for i, p in enumerate(phases) if p == "transition"], dsf, media_rects(record, dsf))
 
 
-def _fade_of(ev: Evidence, arm: Arm, cal: Calibration) -> dict[str, Any]:
+def _fade_of(ev: Evidence, arm: Arm, cal: Calibration, min_frames: int = MIN_MID_FRAMES) -> dict[str, Any]:
     frames = [ev.shots[i] for i in ev.transition]
-    return score_fade(frames, ev.A, ev.B, exclude=ev.media, classes=arm.classes, cal=cal, screen=arm.page == "screen")
+    return score_fade(frames, ev.A, ev.B, exclude=ev.media, classes=arm.classes, cal=cal, screen=arm.page == "screen",
+                      min_frames=min_frames, min_class_px=arm.min_class_px)
 
 
 def _handoff_frames(ev: Evidence) -> tuple[np.ndarray | None, np.ndarray | None]:
@@ -2808,7 +2815,7 @@ def _score_arm(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Ar
     checks: dict[str, dict[str, Any]] = {}
     timed = arm.capture not in ("reference", "engage")
     if timed and ev.A is not None and ev.B is not None:
-        fade = _fade_of(ev, arm, cal)
+        fade = _fade_of(ev, arm, cal, profile.mid_frames)
     else:
         fade = {"problems": ["no textures"] if timed else [], "rows": [], "checks": {}}
     problems += fade["problems"] if arm.capture != "cut" else [p for p in fade["problems"] if p.startswith("class ")]
@@ -2826,7 +2833,7 @@ def _score_arm(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Ar
     if "curve" in arm.expect:
         checks["curve"] = score_curve(ev.raf)
     if "monotone" in arm.expect:
-        checks["monotone"] = score_monotone([r["e"] for r in fade["rows"]])
+        checks["monotone"] = score_monotone([r["e"] for r in fade["rows"]], profile.mid_frames)
     if "handoff" in arm.expect:
         checks["handoff"] = score_handoff(*_handoff_frames(ev), exclude=ev.destination, cal=cal)
     masks = texture_classes(ev.A, ev.B) if ev.A is not None and ev.B is not None else None
