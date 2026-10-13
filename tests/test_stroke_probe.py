@@ -1,4 +1,4 @@
-"""Offline stroke-width probe tests (scripts.probe_stroke_patch). No Keynote.
+"""Offline stroke-width patch tests. No Keynote.
 
 Two-member synthetic deck (builders reused from ``test_iwa_write``):
 Index/DocumentStylesheet.iwa carries two MediaStyleArchives — 900 (0.25 white
@@ -27,7 +27,6 @@ from obed_edom.iwa_write import (  # noqa: E402
 from obed_edom.remap_keynote import restore_card_stroke_widths  # noqa: E402
 from test_iwa_write import _arch, _geom, _member  # noqa: E402
 
-from scripts.probe_stroke_patch import border_run, stroke_probe_applescript  # noqa: E402
 from scripts.write_gate_ab import changed_members  # noqa: E402
 
 _WHITE_SOLID_STROKE = {
@@ -291,40 +290,6 @@ def test_patch_refuses_style_id_from_a_different_member(tmp_path):
     assert result["refused"]
     assert "Index/Slide-100.iwa" in result["reason"]
     assert deck.read_bytes() == before
-
-
-def test_border_run_counts_near_white_pixels(tmp_path):
-    from PIL import Image
-
-    px_per_pt = 1.0
-    frame = (10.0, 10.0, 40.0, 30.0)  # x0, y0, x1, y1
-    img = Image.new("RGB", (100, 100), (0, 0, 0))
-    px = img.load()
-    row = int(((frame[1] + frame[3]) / 2.0) * px_per_pt)
-    start_x = int(frame[0] * px_per_pt) - 6
-    for i in range(3):
-        px[start_x + i, row] = (255, 255, 255)
-    white_png = tmp_path / "white.png"
-    img.save(white_png)
-    assert border_run(white_png, frame, px_per_pt) == 3
-
-    black_png = tmp_path / "black.png"
-    Image.new("RGB", (100, 100), (0, 0, 0)).save(black_png)
-    assert border_run(black_png, frame, px_per_pt) == 0
-
-
-def test_stroke_probe_applescript_blocks_balanced_and_save_gated(tmp_path):
-    for save in (False, True):
-        script = stroke_probe_applescript(
-            tmp_path / "deck.key", tmp_path / "out", doc_name="deck_stroke", save=save
-        )
-        lines = [line.strip() for line in script.split("\n")]
-        assert lines.count("with timeout of 3600 seconds") == lines.count("end timeout")
-        assert sum(line.startswith("tell application id") for line in lines) == lines.count("end tell")
-        assert (sum(line.startswith("using terms from application id") for line in lines)
-                == lines.count("end using terms from"))
-        assert ("save theDoc" in lines) == save
-        assert ("close theDoc saving yes" in lines) == save
 
 
 # --- restore_card_stroke_widths (remap_keynote pairing + guard) ------------------
