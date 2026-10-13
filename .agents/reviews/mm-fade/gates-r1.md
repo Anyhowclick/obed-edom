@@ -20,7 +20,7 @@ Implementer: Codex GPT-5.6 Sol high. Reviewer: Opus 5.5 high. r1: changes reques
 | PF-2(b) `mm_handback_probe` | `c0628297` + probe fix | PASS | HB-1 at 1920 / 2560 / 1600: on 0.0 / 0.018 / 0.005 px (KB off 2.78 / 3.74 / 2.42), CvC 0; HB-2 PASS |
 | PF-2(c) continuity on | `c0628297` | PASS | continuity `qualified`; slot 4 ramps to 0.611; hand-back frames keep the box translucent (`pf2c-handback.png`) |
 | PF-3 suites | `c0628297` | PASS | 3.10 floor is the fixture-linked full run: 10819 passed / 36 skipped / 1 xfailed; 3.12 ran before the fixtures were linked: 10770 / 85 / 1; test:ui 321/321; test:maps 542 + 2. The touched files re-ran green on `a9a02773` (973) and after the r2 fold |
-| PF-4 owner eyeball | | owed | Chrome screen output, 6→7 and 7→8 |
+| PF-4 owner eyeball | `05476093` | PASS (owner, 2026-10-13) | Chrome screen output, 6→7 and 7→8: "opacity's fixed" |
 | PF-4b owner eyeball, fade-out | | deferred | after the owner authors the Q-deck (non-blocking) |
 
 ## Notes
