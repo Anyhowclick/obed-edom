@@ -507,7 +507,7 @@ def run_arm(fixture: Path, viewport: tuple[int, int], gl: str, arm: str, out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     probe.force_viewport(*viewport)
     dest = probe.prepare_export(fixture / "html-player", fixture / "html-unmodified" / "index.html",
-                                f"hb-{tag_of(gl, viewport, arm)}")
+                                probe.run_root(out_dir), f"hb-{tag_of(gl, viewport, arm)}")
     record["premise"] = hb.export_texture_rects(dest)
     host = LiveOutputHost(dest, probe.load_slides(dest), headless=True, gl_replay=gl, mm_opacity=ARMS[arm],
                           transport_factory=LoggedCdp)
