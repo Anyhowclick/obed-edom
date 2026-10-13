@@ -39,7 +39,7 @@ GPT-6 Astra, effort high (owner 2026-10-13: the reviewer's model class differs f
   WA0125 poster D3, slide 10 label D2). Suites 3.12 and 3.10: 10799 passed, 36 skipped, 0 failed; `test:ui` 321/321.
 - **Later commits:** prepare status line in the accent colour (`50d3f098`) and an always-on texture-check log line
   (`69e31238`), Codex Sol, Opus 5.5 high review: no findings. Suites on `69e31238`: 3.12 and 3.10 10799 passed, 0 failed;
-  `test:ui` 321/321.
+  `test:ui` 321/321. After merging main (S3 #266) at `4e3b7464`: 3.12 and 3.10 10813 passed, 0 failed; `test:ui` 321/321.
 - **G4 PASS (owner, 2026-10-13, Chrome + managed OBS Keyer, on `e7c75a19`+):** text and pills transited correctly 8→9→10.
   The prepared export happened to have no collisions ("Checked textures" path), so repaired pages were not on air; G2 covers
   repaired-page rendering. Owner observations outside Stage T, filed as separate tasks: continuity off → freeze-frame
