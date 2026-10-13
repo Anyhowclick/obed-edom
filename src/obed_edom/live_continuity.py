@@ -70,7 +70,7 @@ _MOVIE_SUBTREE_KEYS: dict[str, frozenset[str]] = {
         }
     ),
 }
-"""Every object that occurs anywhere under a movie node of the qualified export, keyed by the
+"""Every object that occurs anywhere under a movie node of the measured exports, keyed by the
 key that holds it, with the complete set of keys measured for it. Keys holding no object at all
 (`effects` and `animations` are always empty lists, `texture` is a string, the transforms are
 flat number lists) are deliberately absent: an object appearing under one is unmeasured, and an
@@ -652,26 +652,8 @@ class _Refuse(Exception):
     """Internal control-flow only: carries the reason for an `Unsupported` result."""
 
 
-QUALIFIED_PLAN_SHA256: frozenset[str] = frozenset(
-    {
-        "283f5eecd18c3412172e28a40bc716c69173a7c72bcd37379dcd3d7d6a96dd4e",  # P2, glReplay off
-        "2fbf977277a5eef1cde701c12bb157905e40ac2b0a5ed85e30bf1056a3e65c18",  # P2, glReplay on
-        "866de785864ad19b11ecd8cdfb4ad1729798ccf9f1764aa59718de03034ba7a5",  # p2-loop, glReplay off
-        "d860a09f4f6a8e24a81e2ad0c3b37bc8a3f2b4ce3947836ca315671031870131",  # p2-loop, glReplay on
-        # The S0 decks (either flag): each passed Q3 + Q7 (`.agents/reviews/continuity-generalisation/gates-r1.md`).
-        "4d466b2f0ee035928486dc3e61f23a5d92e3cc4e76d5d02f367e115331cc0b00",  # D1
-        "029a4c427d2f7ebe2cf7410e2010fdc03834f370f5c6d25aeea9e05c2fbc20f7",  # D2 and D2-across
-        "01b74c88f4622e5a0650d334d7721a247a2039a1767f232d792e823405a21b1b",  # D3
-        "e166c385753364cdc159307b8f7d9092979533b71aee93ea4b8ebbea7a366076",  # D4
-        "73d1153f086381996b5490d6f66eae2ee6996eb05b4a1dcd0af0fce70a018f5e",  # D5
-        "149e813cfe68b6bac7c5c4ea0b5829f20e017ee1d0ce742ece3444fd1f60eed1",  # D6
-    }
-)
-
-
 def plan_signature(runtime: dict[str, Any]) -> str:
-    """Until every refusal code is covered by a negative corpus and the S0 decks pass the gates,
-    a plan is trusted only when its runtime shape is one the gates actually measured."""
+    """The runtime plan's content signature: the host reports it and the gate tests pin it."""
     return hashlib.sha256(json.dumps(runtime, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -714,10 +696,10 @@ class MovieContinuity:
     refusal: str | None = None
     """Why this boundary cannot carry the movie, when `action` says it structurally could."""
     gl_replay: dict[str, Any] | None = None
-    """The full `effect_opacity_overrides` result when this refused pin qualified for `glReplay`
+    """The full `effect_opacity_overrides` result when this refused pin met the `glReplay`
     derivation (arming plan section 11), else `None`."""
     gl_replay_reason: str | None = None
-    """Why `gl_replay` derivation was not attempted or did not qualify, else `None`."""
+    """Why `gl_replay` derivation was not attempted or was ineligible, else `None`."""
     gl_replay_slot: int | None = None
     """The carried instance's index in the source slide's draw order; the runtime entry's
     `movieSlot`. Flag-on only."""
@@ -796,7 +778,7 @@ class ContinuityPlan:
         """Translate this plan into the schema-2 shape `PRESERVE_CORE_JS` reads as
         `window.__OBED_CONTINUITY__` (plan section 2.1): one entry per (boundary, planned
         instance). A refused movie becomes `retire` (`reason: "refused"`), or `glReplay` when it
-        qualified -- at most one per plan; an unrefused `retire` ends a carried decoder
+        is eligible -- at most one per plan; an unrefused `retire` ends a carried decoder
         (`reason: "ends"`). Fails closed when an entry cannot name its instances, a bridge has
         no positive export duration, or the chain invariant (R6) does not hold."""
         if not self.boundaries:
@@ -828,10 +810,7 @@ class ContinuityPlan:
             for asset, key in keys.items()
             if key in footprints
         }
-        runtime = {"schema": RUNTIME_SCHEMA, "movies": movies, "boundaries": entries}
-        if plan_signature(runtime) not in QUALIFIED_PLAN_SHA256:
-            return Unsupported("deck shape is not yet qualified for continuity (only gate-measured plans are)")
-        return runtime
+        return {"schema": RUNTIME_SCHEMA, "movies": movies, "boundaries": entries}
 
 
 @dataclass(frozen=True)
@@ -1377,7 +1356,7 @@ def _loops(movie: dict[str, Any], slide_name: str) -> bool:
     if value == "looping":
         return True
     raise _Refuse(
-        f"movie on slide {slide_name} has an unmeasured loopMode {value!r} (only 'looping' is qualified)"
+        f"movie on slide {slide_name} has an unmeasured loopMode {value!r} (only 'looping' is supported)"
     )
 
 
@@ -2057,7 +2036,7 @@ def codec_report(
     with_fps: bool = False,
 ) -> list[dict[str, Any]]:
     """Codec of every movie asset any non-skipped slide's events reference, independent
-    of whether the deck qualifies for continuity (a rotated or ambiguous movie's codec
+    of whether a continuity plan derives (a rotated or ambiguous movie's codec
     is still worth reporting). Unreadable slides or assets are skipped, never raised:
     this report must stay available even when `derive_plan` refuses.
 

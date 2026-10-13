@@ -3822,8 +3822,9 @@ def test_disable_bridge34_removes_only_the_bridge():
 def test_injected_plan_matches_the_derived_flag_on_runtime_plan():
     """The P2 injection must stay equal to `derive_plan(..., gl_replay=True).to_runtime()`
     for the fixture: both equal the frozen contract's "p2_gl" (tests/test_live_continuity.py
-    pins the derived side), and so carry a qualified plan signature."""
+    pins the derived side), and so carry its pinned plan signature."""
     from obed_edom import live_continuity
+    from test_live_continuity import GL_REPLAY_RUNTIME_PLAN_SHA256
 
     derived = _expected_gl_replay_runtime_plan()
     injected = p2.build_continuity_plan(True)
@@ -3833,7 +3834,7 @@ def test_injected_plan_matches_the_derived_flag_on_runtime_plan():
     assert runtime["movies"] == derived["movies"]
     assert runtime == derived
     assert json.dumps(runtime) == json.dumps(derived)
-    assert live_continuity.plan_signature(runtime) in live_continuity.QUALIFIED_PLAN_SHA256
+    assert live_continuity.plan_signature(runtime) == GL_REPLAY_RUNTIME_PLAN_SHA256
 
 
 def test_refused_carry_ignores_a_suppressed_or_errored_remount():

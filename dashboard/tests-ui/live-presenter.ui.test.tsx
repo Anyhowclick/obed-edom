@@ -615,7 +615,7 @@ describe("Alpha Keynote intake and slide grid", () => {
   });
 
   it("starts a deck whose continuity is off and says why, with its moves and converted movies", async () => {
-    const reason = "outside the measured allowlist";
+    const reason = "R3: slide 2's transition is not on its last event";
     const qualification = vi.fn(async (previewJobId: string) => ({
       previewJobId, name: "Minimal.key", slides: 3, sourceDigest: "source", qualified: true,
       continuity: { mode: "unsupported" as const, reason, notCarried: [] },
