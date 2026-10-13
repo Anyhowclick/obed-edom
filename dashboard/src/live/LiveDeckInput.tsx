@@ -98,7 +98,7 @@ export function LiveDeckInput({ disabled, onPrepared, onPreparing }: {
       <button className="btn" type="button" disabled={!file} onClick={() => void prepare()}>Qualify Keynote</button>
     </fieldset>
     {(busy || error || outputReady) && <div className="live-prepare-status">
-      {error ? <p className="live-alert" role="alert">{error}</p> : <p className="note" aria-live="polite">{progress}</p>}
+      {error ? <p className="live-alert" role="alert">{error}</p> : <p className="live-prepare-progress" aria-live="polite">{progress}</p>}
       {outputReady && <button className="btn secondary live-view-output" type="button" onClick={() => setOutputOpen(true)}>View output</button>}
     </div>}
     {outputOpen && file && <PrepareOutputDialog title={`Prepare output — ${file.name}`} logs={logs} error={error} onExited={() => setOutputOpen(false)} />}

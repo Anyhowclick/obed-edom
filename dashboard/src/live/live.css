@@ -42,6 +42,7 @@
 .live-deck-input fieldset:disabled .well { pointer-events: none; opacity: .65; }
 .live-prepare-status { display: flex; align-items: flex-start; gap: 8px; margin-top: 12px; }
 .live-prepare-status p { flex: 1 1 auto; margin: 0; }
+.live-prepare-progress { color: var(--accent-primary); font-weight: 500; }
 .btn.live-view-output { --ctl-h: var(--ctl-h-sm); --ctl-pad: var(--ctl-pad-sm); --ctl-font: var(--ctl-font-sm); flex: 0 0 auto; }
 .confirm-card.prepare-output-card { width: min(680px, 90vw); }
 .log.prepare-output-log { max-height: min(50vh, 420px); overflow-wrap: anywhere; }
