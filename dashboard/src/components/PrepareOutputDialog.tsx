@@ -14,7 +14,6 @@ export function PrepareOutputDialog({ title, logs, error, onExited }: {
     <ModalShell
       titleId={titleId}
       cardClassName="prepare-output-card"
-      onDismiss={() => {}}
       onExited={onExited}
     >
       {(close) => <>

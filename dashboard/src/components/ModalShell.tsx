@@ -22,7 +22,7 @@ export function ModalShell({
   describedBy?: string;
   cardClassName?: string;
   initialFocusRef?: RefObject<HTMLElement>;
-  onDismiss: () => void;
+  onDismiss?: () => void;
   onExited: () => void;
   children: (close: CloseModal) => ReactNode;
 }) {
@@ -64,7 +64,7 @@ export function ModalShell({
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
-        close(true, onDismissRef.current);
+        close(true, () => onDismissRef.current?.());
         return;
       }
       if (event.key !== "Tab") return;
@@ -103,7 +103,7 @@ export function ModalShell({
     <div
       className={`overlay confirm-overlay${phase === "open" ? " is-open" : ""}${phase === "closing" ? " is-closing" : ""}`}
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) close(false, onDismissRef.current);
+        if (event.target === event.currentTarget) close(false, () => onDismissRef.current?.());
       }}
     >
       <div
