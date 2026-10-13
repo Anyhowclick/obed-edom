@@ -122,7 +122,7 @@ movie's asset exactly (without query or trim suffix, case-insensitive).
 
 - **Magic Move, same geometry:** the live decoder is pinned in place.
 - **Magic Move, moving or resizing:** the live decoder moves with the transition.
-  The motion is linear from start to end rect, not Keynote's easing.
+  The motion follows the export's EaseInEaseOut timing over the transition.
 - **Dissolve or no transition:** the movie restarts, as the export plays it.
 - **Movie ends:** a carried movie with no instance on the next slide is handed back
   to the player.
@@ -167,12 +167,12 @@ Deck-wide refusals make the whole deck `unsupported`, with the code at the start
 of the `reason`: `R3` (a transition is not on the slide's last build), `R5` (an
 object ID repeats across slides) and `R6` (the carried instances do not chain from
 slide to slide). A slide with more than one transition, more than one movie
-changing geometry at one cut (one animated bridge per cut), more than one GL
-replay cut, an unreadable header, slide list or slide JSON, a movie without an
-asset ID or object ID, or a plan that fails its own integrity checks also makes
-the deck `unsupported`, as do the host's checks: the stage gate, a runtime
-that fails to install, a movie codec this output cannot play, and
-`OBED_LIVE_CONTINUITY=off` (reported as `off`). The deck still plays.
+changing geometry at one cut (one animated bridge per cut), an unreadable
+header, slide list or slide JSON, a movie without an asset ID or object ID, or a
+plan that fails its own integrity checks also makes the deck `unsupported`, as
+do the host's checks: the stage gate, a runtime that fails to install, a movie
+codec this output cannot play, and `OBED_LIVE_CONTINUITY=off` (reported as
+`off`). The deck still plays.
 
 **Not carried (named residuals).**
 
@@ -215,7 +215,8 @@ destination draws artwork above it, by replaying the player's own WebGL frame
 with the live movie as the texture. It is on by default under **Keyer output** and off
 for screen output and the developer OBS attach path. `OBED_LIVE_GL_REPLAY=off`
 turns it off everywhere; `auto` turns it on for screen output. Any other value
-refuses to start.
+refuses to start. GL replay carries at most one eligible cut per deck; later
+eligible cuts keep their `overlap` refusal.
 `output.continuity.glReplay.mode` reports `off`, `injected`, `notApplicable` or
 `unavailable`; the developer attach path reports `unavailable` ("attach output
 not qualified") when asked for `auto`, and `notCarried` still lists that

@@ -1290,9 +1290,9 @@ class TestPinnedFixtureGate:
         text = HARNESS.read_text()
         assert "plan_signature(runtime) not in P2_PLAN_SHA256" in text
         assert not re.search(r"mock\.patch[^\n]*plan_signature", text)
-        for name in ("build_fixture", "--build-fixture", "--i-have-owner-go"):
+        for name in ("allow_soak_plan", "build_fixture", "--build-fixture", "--i-have-owner-go", "allowlistSplice"):
             assert name not in text.replace("binary_counter_movie.py --build-fixture", ""), name
-        assert not hasattr(q, "build_fixture")
+        assert not hasattr(q, "allow_soak_plan") and not hasattr(q, "build_fixture")
 
     def test_no_path_inequality_looping_inference(self) -> None:
         text = HARNESS.read_text()
@@ -1303,12 +1303,12 @@ class TestPinnedFixtureGate:
         with pytest.raises(SystemExit):
             q.main(["--arm", "soak", "--build-fixture", "x.key"])
 
-    def test_a_fixture_that_does_not_qualify_on_product_code_exits_clearly(self, tmp_path: Path) -> None:
+    def test_a_fixture_that_is_not_a_pinned_p2_plan_exits_clearly(self, tmp_path: Path) -> None:
         """Known-bad: a slides 1-2 splice derives, but is not a pinned P2-family plan."""
         source = _committed_source(tmp_path / "p2")
         partial = tmp_path / "partial-loop"
         loop_fixture.build(source, partial, object_ids=("6BB39942", "CBACAF27", "F9AFED1B"), expected_shas=None)
-        with pytest.raises(SystemExit, match="does not qualify on product code"):
+        with pytest.raises(SystemExit, match="not a pinned P2-family plan"):
             q.fixture_facts(partial)
 
     def test_the_built_loop_fixture_qualifies_on_product_code(self, looped: Path) -> None:

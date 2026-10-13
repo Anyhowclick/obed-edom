@@ -288,8 +288,8 @@ shows only a Keynote-prepared deck (no fixture route, no test-card control) · c
 Forth movie is declined at its moves (R11), not deck-wide · GL replay (Keyer): real footage may step slightly in midtone brightness where GL replay takes
 over and at slide 2's first build (Chromium tone curve on native video only) · the hand-back geometry fix engages only
 when the next slide has rendered at the start of the move (a queued double click keeps the stock look) · after a
-sleep the page renders at the wrong rate until the engine restarts, with no warning · 3→4 motion is linear, Keynote's
-easing is not · audio off · presenter notes unavailable · no native DeckLink sender yet (OBS is the bridge).
+sleep the page renders at the wrong rate until the engine restarts, with no warning · 3→4 motion follows the export's
+EaseInEaseOut timing · audio off · presenter notes unavailable · no native DeckLink sender yet (OBS is the bridge).
 
 ## Managed engine — hardware-day checklist (§0a; plan `keynote_live_managed_obs.plan.md` §6, all UNTESTED)
 - [ ] Desktop Video installed; UltraStudio HD Mini listed in Desktop Video Setup.

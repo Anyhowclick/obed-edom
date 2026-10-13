@@ -1503,6 +1503,7 @@ def test_continuity_stage_gate_failure_disables_runtime(tmp_path, monkeypatch, t
     output.observe()
     assert output._continuity_mode == "unsupported"
     assert output.output["continuity"]["reason"] == reason
+    assert "planSha256" not in output.output["continuity"]
     assert disable_calls
 
 

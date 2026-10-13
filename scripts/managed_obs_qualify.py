@@ -386,10 +386,7 @@ def fixture_facts(fixture: Path) -> dict[str, Any]:
             if isinstance(runtime, Unsupported):
                 raise SystemExit(f"fixture does not qualify on product code (gl_replay={gl}): {runtime.reason}")
             if plan_signature(runtime) not in P2_PLAN_SHA256:
-                raise SystemExit(
-                    f"fixture does not qualify on product code (gl_replay={gl}): "
-                    "runtime is not a pinned P2-family plan"
-                )
+                raise SystemExit(f"fixture is not a pinned P2-family plan (gl_replay={gl})")
         return ground_truth_facts(plans[True], armed=True)["armed"]
     finally:
         shutil.rmtree(dest.parent, ignore_errors=True)
