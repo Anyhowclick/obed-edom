@@ -568,17 +568,29 @@ def _d3(slide: _Slide, group: _Group) -> _Fix | None:
     return _Fix(group, "D3", poster, None)
 
 
-def _d2(slides: list[_Slide], group: _Group, bad_textures: dict[int, set[str]]) -> _Fix | None:
+def _trusted_landing(
+    group: _Group, leaf: _Leaf, to: str, repair_members: set[tuple[int, str]]
+) -> bool:
+    return (group.slide - 1, leaf.key) not in repair_members or to != leaf.texture
+
+
+def _d2(
+    slides: list[_Slide],
+    group: _Group,
+    bad_textures: dict[int, set[str]],
+    repair_members: set[tuple[int, str]],
+) -> _Fix | None:
     if group.slide == 0:
         return None
     previous, slide = slides[group.slide - 1], slides[group.slide]
     keys = {leaf.key for leaf in group.leaves}
     donors = {
         to
-        for _leaf, to, target in _landings(previous, slide)
+        for leaf, to, target in _landings(previous, slide)
         if target.key in keys
         and _fits(previous.texture_entry(to), group.size)
         and to not in bad_textures.get(group.slide - 1, set())
+        and _trusted_landing(group, leaf, to, repair_members)
     }
     if len(donors) != 1:
         return None
@@ -601,15 +613,11 @@ def _d4(
     keys = {leaf.key for leaf in group.leaves}
     landed = set()
     for leaf, to, target in _landings(previous, slide, own=True):
-        contents = _end_rect(leaf)[0]
         if (
             target.key in keys
             and _fits(previous.texture_entry(to), group.size)
             and to not in bad_textures.get(group.slide - 1, set())
-            and (
-                contents not in (None, leaf.texture)
-                or (group.slide - 1, leaf.key) not in repair_members
-            )
+            and _trusted_landing(group, leaf, to, repair_members)
         ):
             landed.add(to)
     donors = {
@@ -698,7 +706,7 @@ def _plan(
         candidates = (
             _d1(slide, group, bad_keys.get(group.slide, set())),
             _d3(slide, group),
-            _d2(slides, group, bad_textures),
+            _d2(slides, group, bad_textures, repair_members),
             _d4(slides, group, bad_textures, repair_members, renderer),
         )
         fix = next((c for c in candidates if c is not None and _verify(slides, c, renderer, scratch)), None)

@@ -217,6 +217,35 @@ def _d2_slides():
     ]
 
 
+def _d2_chained_slides():
+    source, middle, target = (100, 500, 60, 30), (150, 500, 60, 30), (200, 500, 60, 30)
+    text = "Point 1"
+    return [
+        (
+            "S1",
+            {"Y": (60, 30, "L")},
+            [
+                _event([_slot(source, "Y")], texts=[(text, source)]),
+                _event([], [_magic_move(source, "Y", "Y", 50)], texts=[(text, source)]),
+            ],
+        ),
+        (
+            "S2",
+            {"Y": (60, 30, "T"), "Y2": (60, 30, "L")},
+            [
+                _event([_slot(middle, "Y")], texts=[(text, middle)]),
+                _event([_slot(middle, "Y2")], texts=[(text, middle)]),
+                _event([], [_magic_move(middle, "Y", "Y", 50)], texts=[(text, middle)]),
+            ],
+        ),
+        (
+            "S3",
+            {"Y": (60, 30, "L")},
+            [_event([_slot(target, "Y")], texts=[(text, target)])],
+        ),
+    ]
+
+
 def _d4_slides(movie_copy: bool = True):
     tag, landed = (100, 400, 60, 30), (150, 400, 60, 30)
     textures = {"BIG": (400, 300), "CAND": (60, 30, "L")}
@@ -282,6 +311,11 @@ D2_ID = hashlib.sha256(b"S2:S1:TO").hexdigest()[:32].upper()
             _d2_slides,
             {"ordinal": 2, "rule": "D2", "from": "BIG", "to": D2_ID, "donor": {"uuid": "S1", "id": "TO", "page": 2}},
             id="D2-graft-magic-move-landing",
+        ),
+        pytest.param(
+            _d2_chained_slides,
+            {"refused": "slide 3 ('Point 1' label): its texture is mis-mapped and no verified replacement exists"},
+            id="D2-refuses-landing-repointed-in-this-pass",
         ),
         pytest.param(
             _d4_slides,
