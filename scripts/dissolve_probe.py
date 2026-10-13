@@ -651,12 +651,15 @@ HOOK_JS = r"""
       });
       if (!best) return null;
       var r = recs.get(best);
-      X.pause = {id: r.id, frame: frame, state: 'seeking'};
+      var P = X.pause = {id: r.id, frame: frame, state: 'seeking'}, seeked = false, shown = false;
+      var settle = function () { if (X.pause === P) P.state = shown ? 'presented' : 'seeked'; };
       best.pause();
-      best.addEventListener('seeked', function () {
-        X.pause.state = 'seeked';
-        best.requestVideoFrameCallback(function () { X.pause.state = 'presented'; });
-      }, {once: true});
+      best.requestVideoFrameCallback(function cb(now, meta) {
+        if (Math.round(meta.mediaTime * fps) !== frame) { best.requestVideoFrameCallback(cb); return; }
+        shown = true;
+        if (seeked) settle();
+      });
+      best.addEventListener('seeked', function () { seeked = true; settle(); }, {once: true});
       best.currentTime = (frame + 0.5) / fps;
       return r.id;
     },
