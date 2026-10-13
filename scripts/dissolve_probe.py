@@ -778,7 +778,7 @@ def sha256_file(path: Path) -> str:
 
 
 def placement_file_ref(path: Path, run_dir: Path, *, mtime_ns: int | None = None,
-                       saved_by_obs: bool | None = None) -> dict[str, Any]:
+                       saved_by_obs: bool | None = None, retained: bool | None = None) -> dict[str, Any]:
     path, run_dir = path.resolve(), run_dir.resolve()
     try:
         relative = path.relative_to(run_dir)
@@ -791,6 +791,8 @@ def placement_file_ref(path: Path, run_dir: Path, *, mtime_ns: int | None = None
         ref["mtimeNs"] = int(mtime_ns)
     if saved_by_obs is not None:
         ref["savedByObs"] = bool(saved_by_obs)
+    if retained is not None:
+        ref["retained"] = bool(retained)
     return ref
 
 
@@ -805,8 +807,17 @@ def _placement_ref_bytes(ref: Any, run_dir: Path, *, collection: bool = False, l
         path.relative_to(run_dir.resolve())
     except ValueError as exc:
         raise ValueError(f"placement FileRef escapes its run directory: {ref['path']!r}") from exc
-    if not re.fullmatch(r"[0-9a-f]{64}", str(ref["sha256"])) or sha256_file(path) != ref["sha256"]:
+    retained = ref.get("retained", True)
+    if not isinstance(retained, bool):
+        raise ValueError(f"malformed placement FileRef retention: {ref!r}")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(ref["sha256"])):
         raise ValueError(f"placement FileRef digest mismatch: {ref['path']!r}")
+    if path.is_file() and sha256_file(path) != ref["sha256"]:
+        raise ValueError(f"placement FileRef digest mismatch: {ref['path']!r}")
+    if retained and not path.is_file():
+        raise ValueError(f"placement FileRef is missing: {ref['path']!r}")
+    if load and not path.is_file():
+        raise ValueError(f"placement FileRef was not retained: {ref['path']!r}")
     if collection and (not integer(ref.get("mtimeNs")) or not isinstance(ref.get("savedByObs"), bool)):
         raise ValueError(f"malformed placement CollectionRef: {ref!r}")
     return path.read_bytes() if load else b""

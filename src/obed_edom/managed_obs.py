@@ -1231,9 +1231,9 @@ class ManagedObs:
                         errors.append(f"remove-scene-item: {type(exc).__name__}: {exc}")
                 removals = []
                 if install.input_created and install.source_uuid is not None:
-                    removals.append(("RemoveInput", {"inputName": PROBE_SOURCE}))
+                    removals.append(("RemoveInput", {"inputUuid": install.source_uuid}))
                 if install.scene_created and install.scene_uuid is not None:
-                    removals.append(("RemoveScene", {"sceneName": CALIBRATION_SCENE}))
+                    removals.append(("RemoveScene", {"sceneUuid": install.scene_uuid}))
                 for request_type, data in removals:
                     try:
                         request(request_type, data)

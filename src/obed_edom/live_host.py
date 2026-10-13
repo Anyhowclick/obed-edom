@@ -1049,19 +1049,20 @@ class _ProgramGuard:
                 'live=true,last=null,raf=0,mediaMap=new WeakMap(),mediaId=0;function visibility(){s.visibilityEvents++}'
                 'function tick(t){if(last!==null)s.gaps.push(t-last);last=t;s.frames++;'
                 'Array.prototype.forEach.call(document.querySelectorAll("video"),function(v){var m=mediaMap.get(v);'
-                'if(!m){m={id:"video-"+(++mediaId),playing:false,active:false,monotonic:true,lastTime:null,lastAdvanceAt:null,frameMs:null,maxStallMs:0};mediaMap.set(v,m);s.media.push(m)}'
-                'var ct=+v.currentTime;if(v.paused||v.ended||v.readyState<2){m.active=false;m.lastTime=null;m.lastAdvanceAt=null;return}'
-                'm.playing=true;if(!m.active){m.active=true;m.lastTime=ct;m.lastAdvanceAt=null;return}'
-                'if(v.loop&&m.lastTime!==null&&ct+1e-4<m.lastTime){m.lastTime=ct;m.lastAdvanceAt=null;return}'
+                'if(!m){m={id:"video-"+(++mediaId),playing:false,active:false,monotonic:true,lastTime:null,lastAdvanceAt:null,activeAt:null,frameMs:null,maxStallMs:0};mediaMap.set(v,m);s.media.push(m)}'
+                'var ct=+v.currentTime;if(v.paused||v.ended||v.readyState<2){m.active=false;m.lastTime=null;m.lastAdvanceAt=null;m.activeAt=null;return}'
+                'm.playing=true;if(!m.active){m.active=true;m.lastTime=ct;m.lastAdvanceAt=null;m.activeAt=t;return}'
+                'if(v.loop&&m.lastTime!==null&&ct+1e-4<m.lastTime){m.lastTime=ct;m.lastAdvanceAt=null;m.activeAt=t;return}'
                 'if(m.lastTime!==null&&ct+1e-4<m.lastTime)m.monotonic=false;'
                 'if(m.lastTime===null||ct>m.lastTime+1e-4){if(m.lastTime!==null){var fm=(ct-m.lastTime)*1000;m.frameMs=m.frameMs===null?fm:Math.min(m.frameMs,fm);'
-                'if(m.lastAdvanceAt!==null&&m.frameMs>0)m.maxStallMs=Math.max(m.maxStallMs,t-m.lastAdvanceAt-m.frameMs)}m.lastTime=ct;m.lastAdvanceAt=t}'
+                'if(m.lastAdvanceAt!==null&&m.frameMs>0)m.maxStallMs=Math.max(m.maxStallMs,t-m.lastAdvanceAt-m.frameMs)}m.lastTime=ct;m.lastAdvanceAt=t;m.activeAt=null}'
                 'else if(m.lastAdvanceAt!==null&&m.frameMs>0)m.maxStallMs=Math.max(m.maxStallMs,t-m.lastAdvanceAt-m.frameMs)});'
                 'if(live)raf=requestAnimationFrame(tick)}'
                 'function snapshot(){var g=s.gaps.slice().sort(function(a,b){return a-b}),mid=g.length?g[Math.floor(g.length/2)]:null;'
                 'return {visibilityEvents:s.visibilityEvents,frames:s.frames,baselineFrameMs:mid,maxRafGapMs:s.gaps.length?Math.max.apply(Math,s.gaps):null,'
                 'media:s.media.map(function(m){return {id:m.id,playing:m.playing,monotonic:m.monotonic,'
-                'maxStallMs:Math.max(0,m.maxStallMs),frameMs:m.frameMs}})}}'
+                'maxStallMs:Math.max(0,m.maxStallMs),frameMs:m.frameMs,awaitingAdvance:m.active&&m.lastAdvanceAt===null,'
+                'activeWithoutAdvanceMs:m.active&&m.lastAdvanceAt===null&&m.activeAt!==null&&last!==null?Math.max(0,last-m.activeAt):0}})}}'
                 'function finish(){live=false;cancelAnimationFrame(raf);document.removeEventListener("visibilitychange",visibility);var out=snapshot();delete window[k];return out}'
                 'Object.defineProperty(window,k,{value:{snapshot:snapshot,finish:finish},configurable:true});'
                 'document.addEventListener("visibilitychange",visibility);raf=requestAnimationFrame(tick);return true})(' + key + ')'
@@ -1113,7 +1114,18 @@ class _ProgramGuard:
         media = tuple(dict(item) for item in media_raw) if isinstance(media_raw, list) and all(isinstance(item, dict) for item in media_raw) else ()
         if media_raw is None or not isinstance(media_raw, list):
             return ProgramCheck(None, visibility, float(baseline), float(max_gap), (), "program media telemetry unavailable")
-        playing = [item for item in media if item.get("playing") is True and item.get("frameMs") is not None]
+        observed_playing = [item for item in media if item.get("playing") is True]
+        if any(not isinstance(item.get("awaitingAdvance"), bool) for item in observed_playing):
+            return ProgramCheck(None, visibility, float(baseline), float(max_gap), media, "program media telemetry unavailable")
+        unadvanced = [item for item in observed_playing if item["awaitingAdvance"]]
+        if any(
+            not isinstance(item.get("activeWithoutAdvanceMs"), (int, float))
+            or isinstance(item.get("activeWithoutAdvanceMs"), bool)
+            or item["activeWithoutAdvanceMs"] < 0
+            for item in unadvanced
+        ):
+            return ProgramCheck(None, visibility, float(baseline), float(max_gap), media, "program media telemetry unavailable")
+        playing = [item for item in observed_playing if item.get("frameMs") is not None]
         media_known = all(
             item.get("monotonic") is True
             and isinstance(item.get("frameMs"), (int, float))
@@ -1124,7 +1136,10 @@ class _ProgramGuard:
             and item["maxStallMs"] <= item["frameMs"]
             for item in playing
         )
-        ok = visibility == 0 and max_gap <= 2 * baseline and media_known
+        disturbed = visibility != 0 or max_gap > 2 * baseline or not media_known
+        if not disturbed and any(item["activeWithoutAdvanceMs"] > 3 * baseline for item in unadvanced):
+            return ProgramCheck(None, visibility, float(baseline), float(max_gap), media, "program media advancement unavailable")
+        ok = not disturbed
         reason = None if ok else "program cadence or media changed"
         return ProgramCheck(ok, visibility, float(baseline), float(max_gap), media, reason)
 
@@ -1911,7 +1926,8 @@ class LiveOutputHost:
             self._finish_probe_state("probe-failed")
             return
         with self._placement_lock:
-            stale = self._stopped or self._probe_run_id != run_id or self._placement_epoch != epoch
+            stopped = self._stopped
+            stale = stopped or self._probe_run_id != run_id or self._placement_epoch != epoch
             self._probe_starting = False
             current = self._probe_run_id == run_id
             if current:
@@ -1929,7 +1945,7 @@ class LiveOutputHost:
                 )
                 self._probe_thread.start()
         if stale:
-            try: self._calibration.cancel(run_id, timeout_s=0)
+            try: self._calibration.cancel(run_id, timeout_s=5.0 if stopped else 0)
             except Exception: pass
             if not current:
                 def clear_after_cleanup() -> None:
@@ -2513,16 +2529,20 @@ class LiveOutputHost:
         try: calibration_ready = self._calibration is not None and self._calibration.identity() is not None
         except Exception: calibration_ready = False
         recalibrate: dict[str, Any] = {
-            "supported": self._managed_obs and calibration_ready and self._probe_run_id is None,
+            "supported": self._managed_obs and calibration_ready and self._probe_run_id is None and not self._channel_compromised,
         }
         if not recalibrate["supported"]:
             recalibrate["reason"] = (
-                "Calibration is already running."
-                if self._probe_run_id is not None
+                "Calibration unavailable. Movies use the standard transition."
+                if self._channel_compromised
                 else (
-                    "Waiting for connection to output host"
-                    if self._managed_obs and self._calibration is not None
-                    else "Recalibration is available only for managed OBS output."
+                    "Calibration is already running."
+                    if self._probe_run_id is not None
+                    else (
+                        "Waiting for connection to output host"
+                        if self._managed_obs and self._calibration is not None
+                        else "Recalibration is available only for managed OBS output."
+                    )
                 )
             )
         return {
@@ -2627,6 +2647,8 @@ class LiveOutputHost:
         before_revision, before_scene = self._runtime_revision, before.scene_id
         self._last_goto_autoplay = None
         if operation == "recalibrate":
+            if self._channel_compromised:
+                raise PlayerCommandRejected("Calibration unavailable. Movies use the standard transition.")
             if self._calibration is None or not self._managed_obs:
                 raise PlayerCommandRejected("Recalibration is available only for managed OBS output.")
             if self._probe_run_id is not None:

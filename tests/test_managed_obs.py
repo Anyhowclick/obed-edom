@@ -485,7 +485,7 @@ class CalibrationObs:
                 if not self.pending_scene:
                     self.scenes.pop("AK-Calibrate", None)
             rows = [{"sceneName": key, "sceneUuid": value} for key, value in self.scenes.items()]
-            if self.unowned_visible:
+            if self.unowned_visible and "AK-Calibrate" not in self.scenes:
                 rows.append({"sceneName": "AK-Calibrate", "sceneUuid": "unowned-scene"})
             return {"scenes": rows}
         if name == "GetInputList":
@@ -496,7 +496,7 @@ class CalibrationObs:
                     self.probe_url = None
             rows = [{"inputName": key, "inputUuid": value["inputUuid"], "inputKind": value["inputKind"]}
                     for key, value in self.inputs.items()]
-            if self.unowned_visible:
+            if self.unowned_visible and "AK-Probe" not in self.inputs:
                 rows.append({"inputName": "AK-Probe", "inputUuid": "unowned-input", "inputKind": "browser_source"})
             return {"inputs": rows}
         if name == "GetSceneItemList":
@@ -559,12 +559,19 @@ class CalibrationObs:
             self.program_items = [item for item in self.program_items if item["sceneItemId"] != data["sceneItemId"]]
             return {}
         if name == "RemoveInput":
-            if data["inputName"] not in self.inputs:
+            if self.unowned_leftover:
+                self.inputs["AK-Probe"] = {"inputUuid": "unowned-input", "inputKind": "browser_source",
+                                           "inputSettings": {}}
+                self.probe_url = None
+                self.unowned_visible = True
+            input_name = next((key for key, value in self.inputs.items()
+                               if value["inputUuid"] == data["inputUuid"]), None)
+            if input_name is None:
                 raise managed_obs.ObsRequestError(name, 600, managed_obs._INPUT_ABSENT)
             if self.removal == "delayed":
                 self.pending_input = 2
             else:
-                del self.inputs[data["inputName"]]
+                del self.inputs[input_name]
                 self.probe_url = None
             if self.removal == "absent":
                 raise managed_obs.ObsRequestError(name, 600, managed_obs._INPUT_ABSENT)
@@ -572,20 +579,23 @@ class CalibrationObs:
                 raise managed_obs.ObsRequestError(name, 600, "wrong input")
             return {}
         if name == "RemoveScene":
-            if data["sceneName"] not in self.scenes:
+            if self.unowned_leftover:
+                self.scenes["AK-Calibrate"] = "unowned-scene"
+                self.unowned_visible = True
+            scene_name = next((key for key, value in self.scenes.items()
+                               if value == data["sceneUuid"]), None)
+            if scene_name is None:
                 raise managed_obs.ObsRequestError(name, 600, managed_obs._SCENE_ABSENT)
             if self.removal == "delayed":
                 self.pending_scene = 2
             else:
-                del self.scenes[data["sceneName"]]
+                del self.scenes[scene_name]
             if self.removal == "absent":
                 raise managed_obs.ObsRequestError(name, 600, managed_obs._SCENE_ABSENT)
             if self.removal == "wrong":
                 raise managed_obs.ObsRequestError(name, 600, "wrong scene")
             if self.cleanup_program_change:
                 self.program = "Other"
-            if self.unowned_leftover:
-                self.unowned_visible = True
             return {}
         raise AssertionError(name)
 
@@ -2359,7 +2369,16 @@ def test_calibration_transaction_preview_offcanvas_faults_and_fencing(tmp_path, 
             assert guard.phases == ["begin", "before-install", "installed", "before-capture", "after-capture",
                                     "before-cleanup", "restored", "finish"]
             assert obs.connections == 2
-            assert obs.probe_url is None and "AK-Probe" not in obs.inputs and "AK-Calibrate" not in obs.scenes
+            assert obs.probe_url is None
+            remove_input = [data for _, name, data in obs.requests if name == "RemoveInput"]
+            remove_scene = [data for _, name, data in obs.requests if name == "RemoveScene"]
+            assert remove_input == [{"inputUuid": "input-probe"}]
+            assert remove_scene == [{"sceneUuid": "scene-calibrate"}]
+            if outcome == "unowned-leftover":
+                assert obs.inputs["AK-Probe"]["inputUuid"] == "unowned-input"
+                assert obs.scenes["AK-Calibrate"] == "unowned-scene"
+            else:
+                assert "AK-Probe" not in obs.inputs and "AK-Calibrate" not in obs.scenes
             if placement == "preview":
                 assert obs.studio is studio and obs.preview == ("Other" if studio else "AK")
                 restore = next(index for index, (_, name, data) in enumerate(obs.requests)

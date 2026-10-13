@@ -3258,9 +3258,14 @@ def commits(fake, value="snap"):
         ({"visibilityEvents": 0, "frames": 8, "baselineFrameMs": 20.0, "maxRafGapMs": 40.1, "media": []}, None),
         ({"visibilityEvents": 0, "frames": 8, "baselineFrameMs": None, "maxRafGapMs": 20.0, "media": []}, None),
         ({"visibilityEvents": 0, "frames": 8, "baselineFrameMs": 20.0, "maxRafGapMs": 20.0,
-          "media": [{"id": "v", "playing": True, "monotonic": True, "maxStallMs": 33.4, "frameMs": 33.3}]}, False),
+          "media": [{"id": "v", "playing": True, "monotonic": True, "maxStallMs": 33.4, "frameMs": 33.3,
+                     "awaitingAdvance": False}]}, False),
         ({"visibilityEvents": 0, "frames": 8, "baselineFrameMs": 20.0, "maxRafGapMs": 20.0,
-          "media": [{"id": "v", "playing": True, "monotonic": True, "maxStallMs": 0, "frameMs": None}]}, True),
+          "media": [{"id": "v", "playing": True, "monotonic": True, "maxStallMs": 0, "frameMs": None,
+                     "awaitingAdvance": True, "activeWithoutAdvanceMs": 60.0}]}, True),
+        ({"visibilityEvents": 0, "frames": 8, "baselineFrameMs": 20.0, "maxRafGapMs": 20.0,
+          "media": [{"id": "v", "playing": True, "monotonic": True, "maxStallMs": 0, "frameMs": None,
+                     "awaitingAdvance": True, "activeWithoutAdvanceMs": 60.1}]}, None),
         (None, True),
     ],
 )
@@ -3282,11 +3287,13 @@ def test_program_guard_applies_program_liveness_thresholds(telemetry, expected):
             "const c={};c.window=c;c.document={querySelectorAll:()=>videos,addEventListener:()=>{},removeEventListener:()=>{}};"
             "c.requestAnimationFrame=f=>{q.push(f);return q.length};c.cancelAnimationFrame=()=>{};vm.createContext(c);vm.runInContext(BEGIN,c);"
             "const seq=kind==='loop'?[.9,.92,.02,.04,.06]:[.1,.12,.14,.16,.18];"
-            "let count=(kind==='delayed'||kind==='late')?8:seq.length;"
-            "for(let i=0;i<count;i++){if(kind==='delayed'||kind==='late'){videos[0].paused=i<2;videos[0].currentTime=kind==='late'||i<7?0:(i-6)*.04}"
+            "let count=(kind==='delayed'||kind==='late'||kind==='never')?8:seq.length;"
+            "for(let i=0;i<count;i++){if(kind==='delayed'){videos[0].paused=i<2;videos[0].currentTime=i<7?0:(i-6)*.04}"
+            "else if(kind==='late'){videos[0].paused=i<7;videos[0].currentTime=0}"
+            "else if(kind==='never'){videos[0].paused=i<2;videos[0].currentTime=0}"
             "else{videos[0].currentTime=seq[i];if(kind==='end'&&i>=2)videos[0].ended=true}const f=q.shift();f(i*20)}"
             "return vm.runInContext(FINISH,c)}"
-            "console.log(JSON.stringify({shared:run('shared'),loop:run('loop'),end:run('end'),delayed:run('delayed'),late:run('late')}));"
+            "console.log(JSON.stringify({shared:run('shared'),loop:run('loop'),end:run('end'),delayed:run('delayed'),late:run('late'),never:run('never')}));"
         )
         rows = json.loads(subprocess.run([node, "-e", script], check=True, text=True, capture_output=True).stdout)
         assert len(rows["shared"]["media"]) == 2
@@ -3298,15 +3305,17 @@ def test_program_guard_applies_program_liveness_thresholds(telemetry, expected):
         assert rows["delayed"]["media"][0]["maxStallMs"] == 0
         assert rows["delayed"]["media"][0]["frameMs"] > 0
         assert rows["late"]["media"][0]["frameMs"] is None
+        assert rows["late"]["media"][0]["activeWithoutAdvanceMs"] == 0
+        assert rows["never"]["media"][0]["activeWithoutAdvanceMs"] > 60
 
         class NodeTransport:
             def __init__(self, row): self.row = row
             def evaluate_in(self, _context, _expression, deadline_s=None): return self.row
 
-        for kind in ("delayed", "late"):
+        for kind, expected_ok in (("delayed", True), ("late", True), ("never", None)):
             checked = live_host._ProgramGuard(NodeTransport(rows[kind]), "program")
             checked._baseline_frame_ms = 20.0
-            assert checked.finish().ok is not False
+            assert checked.finish().ok is expected_ok
         return
 
     class Transport:
@@ -3685,6 +3694,64 @@ def test_managed_probe_state_machine_renews_suppresses_and_stops(tmp_path, monke
     assert output._renew_thread is renewal_thread
 
 
+def test_stop_racing_probe_start_uses_cleanup_timeout(tmp_path, monkeypatch):
+    class ProbeServer(FakeServer):
+        def set_probe_run(self, spec, *, run_id=None):
+            return None if spec is None else f"http://127.0.0.1:9/__obed_probe/{spec.run_id}/index.html"
+
+    class Adapter:
+        def __init__(self):
+            self.engine = None
+            self.entered = threading.Event()
+            self.release = threading.Event()
+            self.starts = []
+            self.cancelled = []
+
+        def identity(self): return self.engine
+
+        def start(self, request, *, measure, guard):
+            future = Future()
+            self.entered.set()
+            self.release.wait(2)
+            self.starts.append((request, future))
+            return future
+
+        def cancel(self, run_id, *, timeout_s=5.0):
+            self.cancelled.append((run_id, timeout_s))
+            for request, future in self.starts:
+                if request.spec.run_id == run_id and not future.done():
+                    future.set_result(None)
+            return True
+
+    adapter = Adapter()
+    output = attach_host(
+        tmp_path, monkeypatch, bridge="obs-managed", calibration=adapter,
+        server_factory=ProbeServer, output_rate=25,
+    )
+    output.observe()
+    adapter.engine = managed_obs.EngineIdentity(42, 100.0, 3)
+    context = output._program_context()
+    failures = []
+
+    def start_probe():
+        try:
+            output._schedule_probe(context, adapter.engine, manual=True)
+        except Exception as exc:
+            failures.append(exc)
+
+    worker = threading.Thread(target=start_probe)
+    worker.start()
+    assert adapter.entered.wait(2)
+    run_id = output._probe_run_id
+    output.stop()
+    adapter.release.set()
+    worker.join(2)
+
+    assert not worker.is_alive() and not failures
+    assert adapter.cancelled[-1] == (run_id, 5.0)
+    assert adapter.starts[-1][1].done()
+
+
 def test_managed_probe_measure_builds_bound_fresh_serial_evidence(tmp_path, monkeypatch):
     import io
     from PIL import Image
@@ -3979,8 +4046,14 @@ def test_probe_renewal_compromise_stays_latched_and_refuses_show(tmp_path, monke
     assert not output._renew_probe_lease()
     assert output.output["placement"]["reason"] == "channel-compromised"
     assert not fake.visible and output._channel_compromised
+    assert output.capabilities()["recalibrate"] == {
+        "supported": False,
+        "reason": "Calibration unavailable. Movies use the standard transition.",
+    }
     with pytest.raises(live_host.PlayerCommandRejected, match="stays hidden"):
         output.execute("show")
+    with pytest.raises(live_host.PlayerCommandRejected, match="Calibration unavailable"):
+        output.execute("recalibrate")
     assert output.output["placement"]["reason"] == "channel-compromised"
 
 
