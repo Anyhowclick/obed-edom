@@ -928,13 +928,18 @@ def pre_start_gap(kind: str) -> list[str]:
     (no start, ct 0) until t 70: allowed only when the record ending the gap holds the declared initial values (incoming
     0, outgoing 1) and the record starting it shows them too; `incoming` shows incoming 0.2 there, `start-dip` starts the
     gap on a record with the DOM present, no animations yet and outgoing 0.5, `after-start` moves the 70 ms gap past the
-    start."""
+    start; `stock` is the mode-off player (only the outgoing leaf animates, incoming at 1 throughout)."""
     def rec(t: float, e: float, start: float | None) -> dict[str, Any]:
         ct = 0.0 if start is None else t - start
         return {"t": t, "eff": [e, 1 - e], "videos": [], "anims": [{"leaf": "in", "start": start, "ct": ct, "value": e, "state": "running"},
                                                                     {"leaf": "out", "start": start, "ct": ct, "value": 1 - e, "state": "running"}]}
     first = 0.2 if kind == "incoming" else 0.0
     raf = [rec(0.0, 0.0, None), rec(70.0, first, None), *[rec(70.0 + 20 * i, i / 60, 70.0) for i in range(1, 30)]]
+    if kind == "stock":
+        def stock(t: float, e: float, start: float | None) -> dict[str, Any]:
+            return {"t": t, "eff": [1.0, 1 - e], "videos": [], "anims": [
+                {"leaf": "out", "start": start, "ct": 0.0 if start is None else t - start, "value": 1 - e, "state": "running"}]}
+        raf = [stock(0.0, 0.0, None), stock(70.0, 0.0, None), *[stock(70.0 + 20 * i, i / 60, 70.0) for i in range(1, 30)]]
     if kind == "start-dip":
         raf[0] = {"t": 0.0, "eff": [0.0, 0.5], "videos": [], "anims": []}
     if kind == "after-start":
@@ -1218,6 +1223,7 @@ CASES = [
      ["automaticScenes"], [0]),
     ("DX-2 CEF: a 70 ms gap before the start, ending on a pending record at the initial values", lambda: pre_start_gap("pending"), []),
     ("DX-2 CEF: a pre-start gap ending on incoming opacity 0.2", lambda: pre_start_gap("incoming"), ["rAF gap inside the transition"]),
+    ("DX-2 CEF stock player (mode off): a 70 ms pre-start gap at incoming 1, outgoing pending at 1", lambda: pre_start_gap("stock"), []),
     ("Astra r3: a pre-start gap starting on outgoing 0.5 (DOM present, no animations yet)", lambda: pre_start_gap("start-dip"),
      ["rAF gap inside the transition"]),
     ("DX-2 CEF: a 70 ms gap after the animations started", lambda: pre_start_gap("after-start"), ["rAF gap inside the transition"]),

@@ -1425,16 +1425,15 @@ def pending(rec: dict[str, Any]) -> bool:
 
 def raf_gaps(records: list[dict[str, Any]]) -> tuple[list[float], list[float]]:
     """(forbidden, pre-start) rAF gaps > `RAF_GAP_MS`. A gap is pre-start (allowed) only when nothing has started by its
-    end, the record starting it is at the initial opacities (incoming 0, outgoing 1) and the record ending it is
-    `pending`: nothing changes while the animations are pending, so what was painted throughout the gap is the initial
-    state (CEF's first transition frame)."""
+    end, the record ending it is `pending` and the record starting it has the same effective opacities: nothing changed
+    during the gap, so that record is what was painted throughout it (CEF's first transition frame)."""
     forbidden, pre = [], []
     started = False
     for a, b in zip(records, records[1:]):
         started = started or any(isinstance(x, dict) and x.get("start") is not None for r in (a, b) for x in r.get("anims") or [])
         gap = b["t"] - a["t"]
         if gap > RAF_GAP_MS:
-            (pre if not started and pending(b) and leaf_effs(a) == [0.0, 1.0] else forbidden).append(gap)
+            (pre if not started and pending(b) and leaf_effs(a) is not None and leaf_effs(a) == leaf_effs(b) else forbidden).append(gap)
     return forbidden, pre
 
 
