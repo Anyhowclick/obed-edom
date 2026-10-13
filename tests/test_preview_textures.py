@@ -91,9 +91,9 @@ def _movie(oid: str, asset: str, rect: tuple, poster: str) -> dict:
     }
 
 
-def _magic_move(rect: tuple, texture: str, to: str | None, dx: float) -> dict:
+def _magic_move(rect: tuple, texture: str, to: str | None, dx: float, kind: int | None = 6) -> dict:
     """A Magic Move leaf moving right by dx; `to=None` means it has no contents animation."""
-    leaf = _leaf(texture, rect[2], rect[3])
+    leaf = _leaf(texture, rect[2], rect[3], kind)
     animations = [{"property": "transform.translation", "to": {"pointX": dx, "pointY": 0}}]
     if to:
         animations.append({"property": "contents", "from": {"texture": texture}, "to": {"texture": to}})
@@ -217,14 +217,47 @@ def _d2_slides():
     ]
 
 
-def _d4_slides():
+def _d4_slides(movie_copy: bool = True):
     tag, landed = (100, 400, 60, 30), (150, 400, 60, 30)
+    textures = {"BIG": (400, 300), "CAND": (60, 30, "L")}
+    events = [_event([_slot(landed, "BIG", kind=5)]), _event([_slot(landed, "CAND", kind=5)])]
+    if movie_copy:
+        textures["MOVIE_COPY"] = (60, 30, "T")
+        events += [
+            _event([_slot(landed, "MOVIE_COPY", kind=5, oid="M1")], [_movie("M1", "MOVIE", landed, "MOVIE_COPY")]),
+            _event([_flat(landed, "MOVIE_COPY")]),
+        ]
     return [
-        ("S1", {"TAG": (60, 30, "L")}, [_event([_slot(tag, "TAG", kind=5)]), _event([], [_magic_move(tag, "TAG", None, 50)])]),
+        (
+            "S1",
+            {"TAG": (60, 30, "L")},
+            [_event([_slot(tag, "TAG", kind=5)]), _event([], [_magic_move(tag, "TAG", None, 50, kind=5)])],
+        ),
+        ("S2", textures, events),
+    ]
+
+
+def _d4_chained_slides():
+    source, middle, target = (100, 500, 60, 30), (150, 500, 60, 30), (200, 500, 60, 30)
+    return [
+        (
+            "S1",
+            {"LAND": (60, 30, "L")},
+            [_event([_slot(source, "LAND", kind=5)]), _event([], [_magic_move(source, "LAND", "LAND", 50, kind=5)])],
+        ),
         (
             "S2",
-            {"BIG": (400, 300), "CAND": (60, 30, "L")},
-            [_event([_slot(landed, "BIG", kind=5)]), _event([_slot(landed, "CAND", kind=5)])],
+            {"BAD": (60, 30, "T"), "GOOD": (60, 30, "L")},
+            [
+                _event([_slot(middle, "BAD", kind=5)]),
+                _event([_slot(middle, "GOOD", kind=5)]),
+                _event([], [_magic_move(middle, "BAD", None, 50, kind=5)]),
+            ],
+        ),
+        (
+            "S3",
+            {"WRONG": (400, 300), "BAD_COPY": (60, 30, "T")},
+            [_event([_slot(target, "WRONG", kind=5)]), _event([_slot(target, "BAD_COPY", kind=5)])],
         ),
     ]
 
@@ -236,10 +269,14 @@ D2_ID = hashlib.sha256(b"S2:S1:TO").hexdigest()[:32].upper()
     "build, expected",
     [
         pytest.param(
-            _d1_slides, {"ordinal": 1, "rule": "D1", "from": "BAD", "to": "GOOD", "donor": None}, id="D1-same-rect-same-text"
+            _d1_slides,
+            {"ordinal": 1, "rule": "D1", "from": "BAD", "to": "GOOD", "donor": None},
+            id="D1-same-rect-same-text",
         ),
         pytest.param(
-            _d3_slides, {"ordinal": 1, "rule": "D3", "from": "WRONG", "to": "POSTER", "donor": None}, id="D3-poster-by-objectID"
+            _d3_slides,
+            {"ordinal": 1, "rule": "D3", "from": "WRONG", "to": "POSTER", "donor": None},
+            id="D3-poster-by-objectID",
         ),
         pytest.param(
             _d2_slides,
@@ -247,13 +284,37 @@ D2_ID = hashlib.sha256(b"S2:S1:TO").hexdigest()[:32].upper()
             id="D2-graft-magic-move-landing",
         ),
         pytest.param(
-            _d4_slides, {"ordinal": 2, "rule": "D4", "from": "BIG", "to": "CAND", "donor": None, "verify": {"corr": 1.0}},
-            id="D4-image-candidate-agrees-with-no-contents-landing",
+            _d4_slides,
+            {"ordinal": 2, "rule": "D4", "from": "BIG", "to": "CAND", "donor": None, "verify": {"corr": 1.0}},
+            id="D4-ignores-flattened-movie-copy",
+        ),
+        pytest.param(
+            _d4_chained_slides,
+            {"refused": "slide 3 (60×30 image): its texture is mis-mapped and no verified replacement exists"},
+            id="D4-refuses-landing-repointed-in-this-pass",
+        ),
+        pytest.param(
+            lambda: _d4_slides(movie_copy=False),
+            {
+                "refused": "slide 2 (60×30 image): its texture is mis-mapped and no verified replacement exists",
+                "raw_corr": 0.8996,
+            },
+            id="D4-compares-raw-correlation",
         ),
     ],
 )
-def test_repair_picks_the_rule_and_writes_a_consistent_export(tmp_path, build, expected):
+def test_repair_picks_the_rule_and_writes_a_consistent_export(tmp_path, monkeypatch, build, expected):
     slides = _export(tmp_path, build())
+    expected = dict(expected)
+    if (corr := expected.pop("raw_corr", None)) is not None:
+        monkeypatch.setattr(pt, "_corr", lambda _a, _b: corr)
+    if refused := expected.pop("refused", None):
+        before = _snapshot(tmp_path)
+        with pytest.raises(pt.TextureRepairRefused) as raised:
+            _repair(tmp_path, slides)
+        assert str(raised.value) == f"Cannot repair Keynote's HTML export: {refused}"
+        assert _snapshot(tmp_path) == before
+        return
     record, lines = _repair(tmp_path, slides)
 
     [entry] = record["repaired"]

@@ -144,6 +144,7 @@ class _Fix:
     new: str
     donor: tuple[int, str] | None
     verify: dict[str, Any] = field(default_factory=dict)
+    raw_corr: float | None = None
 
 
 def _walk(
@@ -456,16 +457,11 @@ def _groups(slides: list[_Slide], hits: list[_Hit]) -> tuple[list[_Group], list[
         parts: dict[tuple[bool, str | None], list[_Leaf]] = {}
         for leaf in candidates:
             seen.add((hit.slide, leaf.key))
-            bound, oid = _owner(slide, leaf)
-            if bound:
-                parts.setdefault((True, oid), []).append(leaf)
-                continue
-            around = [_owner(slide, other) for other in slide.leaves if _same_object(slide, other, leaf)]
-            owners = {o for b, o in around if b}
-            if len(owners) > 1:
+            owner = _resolved_owner(slide, leaf)
+            if owner is None:
                 ambiguous.append((hit.slide, leaf))
             else:
-                parts.setdefault((bool(owners), next(iter(owners), None)), []).append(leaf)
+                parts.setdefault(owner, []).append(leaf)
         groups.extend(_Group(hit.slide, hit.leaf.texture, sorted(m, key=lambda leaf: leaf.key)) for m in parts.values())
     return groups, ambiguous
 
@@ -511,6 +507,20 @@ def _owner(slide: _Slide, leaf: _Leaf) -> tuple[bool, str | None]:
     if leaf.effects[0] == "apple:movie-start":
         return True, slide.events[leaf.event]["effects"][leaf.path[1]].get("objectID")
     return False, None
+
+
+def _resolved_owner(slide: _Slide, leaf: _Leaf) -> tuple[bool, str | None] | None:
+    owner = _owner(slide, leaf)
+    if owner[0]:
+        return owner
+    owners = {
+        oid
+        for other in slide.leaves
+        if _same_object(slide, other, leaf)
+        for bound, oid in [_owner(slide, other)]
+        if bound
+    }
+    return None if len(owners) > 1 else (bool(owners), next(iter(owners), None))
 
 
 def _group_text(slide: _Slide, group: _Group) -> str | None:
@@ -577,25 +587,34 @@ def _d2(slides: list[_Slide], group: _Group, bad_textures: dict[int, set[str]]) 
     return _Fix(group, "D2", new, (group.slide - 1, donor))
 
 
-def _d4(slides: list[_Slide], group: _Group, bad_textures: dict[int, set[str]], renderer: _Renderer) -> _Fix | None:
+def _d4(
+    slides: list[_Slide],
+    group: _Group,
+    bad_textures: dict[int, set[str]],
+    repair_members: set[tuple[int, str]],
+    renderer: _Renderer,
+) -> _Fix | None:
     slide = slides[group.slide]
     if group.slide == 0 or group.first.kind == TEXT_TYPE or _group_movie(slide, group):
         return None
     previous = slides[group.slide - 1]
     keys = {leaf.key for leaf in group.leaves}
-    landed = {
-        to
-        for _leaf, to, target in _landings(previous, slide, own=True)
-        if target.key in keys
-        and _fits(previous.texture_entry(to), group.size)
-        and to not in bad_textures.get(group.slide - 1, set())
-    }
+    landed = set()
+    for leaf, to, target in _landings(previous, slide, own=True):
+        contents = _end_rect(leaf)[0]
+        if (
+            target.key in keys
+            and _fits(previous.texture_entry(to), group.size)
+            and to not in bad_textures.get(group.slide - 1, set())
+            and (contents is not None or (group.slide - 1, leaf.key) not in repair_members)
+        ):
+            landed.add(to)
     donors = {
         leaf.texture
         for leaf in slide.leaves
         if leaf.kind != TEXT_TYPE
         and leaf.texture != group.old
-        and _owner(slide, leaf) in ((True, None), (False, None))
+        and _resolved_owner(slide, leaf) in ((True, None), (False, None))
         and _consistent(slide, leaf)
         and _close(leaf.rect[:2], group.first.rect[:2], RECT_TOL)
         and _close(leaf.rect[2:], group.size, DONOR_SIZE_TOL)
@@ -604,7 +623,7 @@ def _d4(slides: list[_Slide], group: _Group, bad_textures: dict[int, set[str]], 
         return None
     donor = donors.pop()
     corr = _corr(_thumb(renderer, slide, donor), _thumb(renderer, previous, landed.pop()))
-    return _Fix(group, "D4", donor, None, {"corr": round(corr, 3) if corr is not None else None})
+    return _Fix(group, "D4", donor, None, {"corr": round(corr, 3) if corr is not None else None}, corr)
 
 
 def _mediabox_ok(slide: _Slide, texture: str) -> bool:
@@ -636,7 +655,7 @@ def _verify(slides: list[_Slide], fix: _Fix, renderer: _Renderer, scratch: Path)
     if not _fits(source.texture_entry(texture), fix.group.size) or not _mediabox_ok(source, texture):
         return False
     if fix.rule == "D4":
-        return fix.verify["corr"] is not None and fix.verify["corr"] >= CORR_MATCH
+        return fix.raw_corr is not None and fix.raw_corr >= CORR_MATCH
     if fix.group.first.kind == TEXT_TYPE:
         read = _ocr(renderer, source, texture, scratch)
         fix.verify = {"ocr": read}
@@ -657,6 +676,7 @@ def _plan(
     slides: list[_Slide], hits: list[_Hit], renderer: _Renderer, scratch: Path
 ) -> tuple[list[_Fix], list[tuple[int, str]]]:
     groups, ambiguous = _groups(slides, hits)
+    repair_members = {(group.slide, leaf.key) for group in groups for leaf in group.leaves}
     bad_keys: dict[int, set[str]] = {}
     bad_textures: dict[int, set[str]] = {}
     for hit in hits:
@@ -676,7 +696,7 @@ def _plan(
             _d1(slide, group, bad_keys.get(group.slide, set())),
             _d3(slide, group),
             _d2(slides, group, bad_textures),
-            _d4(slides, group, bad_textures, renderer),
+            _d4(slides, group, bad_textures, repair_members, renderer),
         )
         fix = next((c for c in candidates if c is not None and _verify(slides, c, renderer, scratch)), None)
         if fix is None:
