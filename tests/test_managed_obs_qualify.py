@@ -14,7 +14,7 @@ geometry at slot opacity; a patch-on G2 session whose fix did not engage (the pr
 take INVALID, never a pass or a fail of the fix.
 
 Looping soak fixture (loopMode plan §10 WS-C): `output/fixtures/p2-loop`, built by `scripts/loop_fixture.py`, must qualify on
-product code: the harness no longer splices the continuity allowlist in-process. A fixture is looping iff its
+product code by matching a pinned P2-family plan. A fixture is looping iff its
 `fixture.json` carries the `loop` record the builder adds; the P2 family is the P2 base without that key. Pre-check (a)
 is enforced: every slide-1 `untitled.mov` and the handed-back carried element report `video.loop`, and the export
 differs from P2 only in the spliced files, by `loopMode="looping"` keys. Synthetic fixtures are built from the committed
@@ -1285,14 +1285,14 @@ class TestFixtureFamily:
         assert q.SOAK_FIXTURE == fixture("p2-loop")
 
 
-class TestSpliceGone:
-    def test_harness_never_patches_the_allowlist(self) -> None:
+class TestPinnedFixtureGate:
+    def test_harness_checks_pinned_p2_plans_without_patching_signatures(self) -> None:
         text = HARNESS.read_text()
-        assert "QUALIFIED_PLAN_SHA256" not in text
+        assert "plan_signature(runtime) not in P2_PLAN_SHA256" in text
         assert not re.search(r"mock\.patch[^\n]*plan_signature", text)
-        for name in ("allow_soak_plan", "build_fixture", "--build-fixture", "--i-have-owner-go", "allowlistSplice"):
+        for name in ("build_fixture", "--build-fixture", "--i-have-owner-go"):
             assert name not in text.replace("binary_counter_movie.py --build-fixture", ""), name
-        assert not hasattr(q, "allow_soak_plan") and not hasattr(q, "build_fixture")
+        assert not hasattr(q, "build_fixture")
 
     def test_no_path_inequality_looping_inference(self) -> None:
         text = HARNESS.read_text()
@@ -1304,7 +1304,7 @@ class TestSpliceGone:
             q.main(["--arm", "soak", "--build-fixture", "x.key"])
 
     def test_a_fixture_that_does_not_qualify_on_product_code_exits_clearly(self, tmp_path: Path) -> None:
-        """Known-bad: a splice on slides 1-2 only derives, but its plan sha is not allowlisted (the conftest cache root holds the export)."""
+        """Known-bad: a slides 1-2 splice derives, but is not a pinned P2-family plan."""
         source = _committed_source(tmp_path / "p2")
         partial = tmp_path / "partial-loop"
         loop_fixture.build(source, partial, object_ids=("6BB39942", "CBACAF27", "F9AFED1B"), expected_shas=None)
@@ -1312,7 +1312,7 @@ class TestSpliceGone:
             q.fixture_facts(partial)
 
     def test_the_built_loop_fixture_qualifies_on_product_code(self, looped: Path) -> None:
-        """Control: the full five-movie splice is allowlisted on product code and yields the armed facts."""
+        """Control: the full five-movie splice matches a pinned P2-family plan and yields the armed facts."""
         armed = q.fixture_facts(looped)
         assert {"instanceRect", "movieSlot", "assetKeys"} <= set(armed)
 

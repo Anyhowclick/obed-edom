@@ -197,9 +197,10 @@ Output starts **hidden** (= pure camera). Tick:
 - [ ] `q` → browser source blank, OBS still running; starting the tool again attaches again
 
 ## 3. Movie through Magic Moves (what the owner most wants to see)
-Same tool, continuity `qualified` (only the fixture deck qualifies today — allowlist; any other deck =
-raw player, by design). Watch the striped movie (it flickers black/white every frame — that IS correct
-playback; a frozen grating is the failure).
+Same tool, continuity `qualified` (any deck whose plan derives qualifies; a move it cannot carry is named, code +
+reason, under the dashboard's continuity badge and on `output.continuity.notCarried`, and plays as the export plays
+it; use the fixture deck, the measured one). Watch the striped movie (it flickers black/white every frame — that IS
+correct playback; a frozen grating is the failure).
 **Cadence note:** the fixture movies are ~30 fps (`Untitled.mov` 30.0, `WA0125` 29.98) and the venue is 25p ⇒
 ~5 skipped frames per second, seen as a regular hiccup in the flicker. That is cadence, not a freeze — judge
 freezes by the on-screen counter, never by the flicker feel.
@@ -241,7 +242,7 @@ movie boxes → note it and go back to the field tool. Presenter closing/reopeni
 | attach fails with a DevTools **origin** error | — | relaunch OBS adding `--remote-allow-origins=*` |
 | port 9222 unreachable | OBS launched without the flag | quit + relaunch with the flag (it cannot be added live) |
 | `continuity: unsupported — stage is not the authored size` / `stage scale is non-uniform` | printed viewport ≠ 1920×1080 | Browser source W/H, OBS base+output canvas 1920×1080, no source transform scaling |
-| `continuity: unsupported — deck shape is not yet qualified for continuity` | deck ≠ fixture | expected (allowlist); use the fixture |
+| continuity badge names a move not carried (code + reason) | that move hit a per-move refusal | expected; that cut plays as the export plays it, the rest stays continuous |
 | `continuity: unsupported — runtime failed to install` | log `pageException`/`pageConsole` | record the exception text; run with `OBED_LIVE_CONTINUITY=off` to keep testing alpha |
 | advance does nothing / ack timeout | log `execute` + `cdpSlow`/`cdpTimeout` | retry once; then `OBED_LIVE_ADVANCE=click` (advance by mouse click at stage centre; go-to still needs keys) |
 | movies are blank/black boxes | log per-video `readyState` < 2, `videoWidth` 0, `err` | codec not decoded by OBS's Chromium → use `$FX` fixture (H.264); record the card's Chromium version |
@@ -282,9 +283,9 @@ Venue is **1080p25** and the fixture movies are ~30 fps (cadence hiccup, §3) ·
 geometry-static Magic Move plays only under GL replay = managed engine only; the attach path refuses 1→2 (§3) · OBS's
 Chromium (127) ≠ the desktop Chrome the gates run on (154 since 2026-09-30): P2 results do not transfer automatically ·
 HEVC under OBS (both paths): flagged "may not play", continuity `unsupported`, likely blank · the managed engine
-shows only a Keynote-prepared deck (no fixture route, no test-card control) · continuity: fixture deck only
-(allowlist of P2-measured plans); the OBS Browser Source stays 1920×1080 · Loop movies carry only when every instance across the move loops (else that cut is declined); Back and
-Forth ⇒ `unsupported` · GL replay (Keyer): real footage may step slightly in midtone brightness where GL replay takes
+shows only a Keynote-prepared deck (no fixture route, no test-card control) · continuity: any deck that derives
+(only the gate decks are measured; other decks' declined moves are named under the badge); the OBS Browser Source stays 1920×1080 · Loop movies carry only when every instance across the move loops (else that cut is declined); a Back and
+Forth movie is declined at its moves (R11), not deck-wide · GL replay (Keyer): real footage may step slightly in midtone brightness where GL replay takes
 over and at slide 2's first build (Chromium tone curve on native video only) · the hand-back geometry fix engages only
 when the next slide has rendered at the start of the move (a queued double click keeps the stock look) · after a
 sleep the page renders at the wrong rate until the engine restarts, with no warning · 3→4 motion is linear, Keynote's

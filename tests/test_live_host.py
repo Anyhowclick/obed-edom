@@ -1313,10 +1313,6 @@ def host_with_continuity(
     # The fake CDP transport does not model authored scene counts; this fixture is
     # only exercising continuity resolution, not the build-renderer fallback check.
     monkeypatch.setattr(live_host.LiveOutputHost, "_authored_scene_count", lambda self: None)
-    # The synthetic one-movie export is not a P2-measured plan; the allowlist itself is
-    # covered in tests/test_live_continuity.py, so treat this plan as measured here.
-    from obed_edom import live_continuity
-    monkeypatch.setattr(live_continuity, "plan_signature", lambda _runtime: next(iter(live_continuity.QUALIFIED_PLAN_SHA256)))
     monkeypatch.delenv("OBED_LIVE_GL_REPLAY", raising=False)
     monkeypatch.delenv(live_host.MM_OPACITY_ENV, raising=False)
     FakeCdp.instances.clear()
@@ -1603,16 +1599,27 @@ def test_continuity_go_to_never_clears_when_not_qualified(tmp_path, monkeypatch)
 
 
 def test_continuity_transparent_background_only_in_attach_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        FakeCdp, "evaluate",
+        continuity_ready_evaluate(FakeCdp.evaluate, [stage_geometry(1920, 1080, 0, 0, 1920, 1080)]),
+    )
     hdmi = host_with_continuity(tmp_path, monkeypatch, attach=False)
     hdmi.observe()
     assert hdmi._continuity_runtime_plan is not None
     assert not hdmi._continuity_runtime_plan.get("transparentBackground")
+    hdmi_sha = live_host.plan_signature(hdmi._continuity_runtime_plan)
+    assert hdmi.output["continuity"]["planSha256"] == hdmi_sha
+    assert next(record for record in read_log(hdmi) if record["kind"] == "continuity")["planSha256"] == hdmi_sha
 
     monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
     attach = host_with_continuity(tmp_path, monkeypatch, attach=True)
     attach.observe()
     assert attach._continuity_runtime_plan is not None
     assert attach._continuity_runtime_plan["transparentBackground"] is True
+    signed_runtime = {key: value for key, value in attach._continuity_runtime_plan.items() if key != "transparentBackground"}
+    attach_sha = live_host.plan_signature(signed_runtime)
+    assert attach.output["continuity"]["planSha256"] == attach_sha
+    assert next(record for record in read_log(attach) if record["kind"] == "continuity")["planSha256"] == attach_sha
 
 
 def test_continuity_scripts_injection_order_and_safe_json_embedding(tmp_path):

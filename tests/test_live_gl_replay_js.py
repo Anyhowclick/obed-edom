@@ -3307,13 +3307,12 @@ def test_the_real_core_and_module_install_with_the_p2_loop_runtime(tmp_path):
     from test_live_continuity import P2_LOOP_GL_REPLAY_PLAN_SHA256, SLIDES, _loop_tree, _resolver
     from test_live_continuity_js import _IDENTITY_STAGE, _run_full_core_in_node
 
-    from obed_edom.live_continuity import QUALIFIED_PLAN_SHA256, derive_plan, plan_signature
+    from obed_edom.live_continuity import derive_plan, plan_signature
 
     plan = derive_plan(_loop_tree(tmp_path), SLIDES, resolver=_resolver, gl_replay=True)
     runtime = plan.to_runtime()
     assert isinstance(runtime, dict)
     assert plan_signature(runtime) == P2_LOOP_GL_REPLAY_PLAN_SHA256
-    assert P2_LOOP_GL_REPLAY_PLAN_SHA256 in QUALIFIED_PLAN_SHA256
     assert runtime["schema"] == 2
     assert "loops" not in runtime
     carries = [b for b in runtime["boundaries"] if b["action"] in ("pin", "bridge", "glReplay")]

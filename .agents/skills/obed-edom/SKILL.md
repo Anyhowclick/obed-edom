@@ -714,13 +714,15 @@ for the parked `iwa-surgical-write-generator` feature.
   refuses that carry; a pin/bridge/glReplay carry into a slide whose outgoing transition is unmeasured (not Magic Move,
   Dissolve or none) is refused at the earlier boundary, and the unmeasured boundary has no entries, so no decoder is
   held into it. Scoping is not relaxing: a scoped site only removes carries, R6 still runs on the final entries, and
-  an allowlisted plan stays byte-identical. Deck-wide → `Unsupported` (the deck still plays, continuity off): R3
+  a gate deck's plan stays byte-identical. Deck-wide → `Unsupported` (the deck still plays, continuity off): R3
   transition not on the outgoing slide's last event, more than one transition on a slide, R5 objectID repeats across
   slides (unmeasured instances count), R6 chain invariant, unreadable header/slide list/slide JSON or no events, a
-  movie node without asset id or objectID, more than one movie changing geometry, `to_runtime` integrity checks, the
-  allowlist, and the host's stage gate, runtime install, codec gate and `OBED_LIVE_CONTINUITY=off`. `retire ends` is
+  movie node without asset id or objectID, more than one movie changing geometry, `to_runtime` integrity checks, and
+  the host's stage gate, runtime install, codec gate and `OBED_LIVE_CONTINUITY=off`. `retire ends` is
   not a refusal. Never relax one to qualify a deck.
-* **Allowlist.** `QUALIFIED_PLAN_SHA256` stays in force until S3; a deck joins only after its gates pass.
+* **Regression oracle.** No allowlist since S3: any deck that derives installs. A continuity change is checked by the
+  plan-sha tests (gate decks' runtime plans byte-identical) and the negative corpus (`tests/test_live_continuity_corpus.py`,
+  one synthetic export per refusal code); a new refusal code needs a corpus entry.
 * **Start is never gated on continuity.** The `/api/live/decks/{id}/qualification` response carries `qualified: true`,
   `continuity: {mode: qualified|unsupported|off, reason, notCarried}` (from `_deck_qualification`) (`live_host.not_carried(plan, slides)`) and
   `convertedMovies: [{asset, sourceCodec}]`; only `prepared_deck`'s playability checks (player digest, 16:9, manual
