@@ -237,7 +237,7 @@ def _d4_slides(movie_copy: bool = True):
     ]
 
 
-def _d4_chained_slides():
+def _d4_chained_slides(contents_to=None):
     source, middle, target = (100, 500, 60, 30), (150, 500, 60, 30), (200, 500, 60, 30)
     return [
         (
@@ -251,7 +251,7 @@ def _d4_chained_slides():
             [
                 _event([_slot(middle, "BAD", kind=5)]),
                 _event([_slot(middle, "GOOD", kind=5)]),
-                _event([], [_magic_move(middle, "BAD", None, 50, kind=5)]),
+                _event([], [_magic_move(middle, "BAD", contents_to, 50, kind=5)]),
             ],
         ),
         (
@@ -292,6 +292,11 @@ D2_ID = hashlib.sha256(b"S2:S1:TO").hexdigest()[:32].upper()
             _d4_chained_slides,
             {"refused": "slide 3 (60×30 image): its texture is mis-mapped and no verified replacement exists"},
             id="D4-refuses-landing-repointed-in-this-pass",
+        ),
+        pytest.param(
+            lambda: _d4_chained_slides("BAD"),
+            {"refused": "slide 3 (60×30 image): its texture is mis-mapped and no verified replacement exists"},
+            id="D4-refuses-unchanged-contents-landing-repointed-in-this-pass",
         ),
         pytest.param(
             lambda: _d4_slides(movie_copy=False),

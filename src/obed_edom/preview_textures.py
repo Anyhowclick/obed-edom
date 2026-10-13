@@ -606,7 +606,10 @@ def _d4(
             target.key in keys
             and _fits(previous.texture_entry(to), group.size)
             and to not in bad_textures.get(group.slide - 1, set())
-            and (contents is not None or (group.slide - 1, leaf.key) not in repair_members)
+            and (
+                contents not in (None, leaf.texture)
+                or (group.slide - 1, leaf.key) not in repair_members
+            )
         ):
             landed.add(to)
     donors = {
