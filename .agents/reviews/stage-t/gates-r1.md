@@ -20,7 +20,7 @@ GPT-6 Astra, effort high (owner 2026-10-13: the reviewer's model class differs f
 | G2 | `texture_repair_check.py g2` (headless `LiveOutputHost`, continuity off, GL replay off) on a scratch copy of the full 7e3c export; `--no-repair` arm first | Repair arm: (b) PASS: OCR of slide 8 "Sunday Service", slide 9 "Children's Church" and "Sunday Service" all match. (c) PASS: WA0125 identified in its slot through the whole 9→10 move (mid-frame p 0.54: WA0125 0.943, WA0121 0.083). (a) FAIL by the plan's 0.9: label crops vs Keynote's flattened frame `AF8F0F` 0.836 / 0.823, but the untouched "Bible Study" label (never mis-mapped, the in-frame positive control) scores 0.826 in both arms, so screen-vs-Quartz rendering caps (a) at ≈0.83; by eye the repaired labels equal the oracle. No-repair arm: (a) FAIL measured (−0.017 / −0.123: movie posters inside the labels); (b) FAIL (OCR empty on the two mis-mapped labels); (c) INCONCLUSIVE by the strict r2 rule (no mid-move frame identifies a poster at 0.9 while the wrong poster cross-fades out), though the raw frames identify WA0121 in WA0125's slot at the start of the move (0.946). First proof pdf.js renders grafted pages: the slide 10 labels come from pages grafted from slide 9. |
 | G3 | Plan signatures before/after repair; feed table | PASS. `derive_plan` (gl_replay off and on) on the repaired Alpha copy: `as_dict()` and refusals equal (4 `overlap`); its runtime is still refused by the allowlist on this base, so GL replay cannot run on Alpha until S3 lands. D2 and D2 across-first-build repaired copies keep the qualified signature `029a4c42…`. Fixtures never pass through repair; the 24 clean exports are untouched by it (G1). Stage B feed table (from the repaired JSON, `glfeed/spec.py` walk): draws/regular uploads unchanged, 5to6 5/7, 6to7 9/12, 7to8 12/17; 9→10 changes draw 4 WA0125 `from` 715×402 → 714×402 and draw 8 13×404 → 223×36 (table below). |
 | Suites | `pytest tests/ -n auto --dist worksteal`, 3.12 and the 3.10 floor | Pre-fold (`b9902352`): 3.10 10791 passed, 36 skipped, 0 failed (3.12 before the census fix: 4 census failures from the new fixture, owner-approved exclusion). Final code (`da2a1c24`): 3.12 10791 passed, 36 skipped, 1 xfailed, 0 failed; 3.10 floor the same. No UI change, so no `test:ui`. |
-| G4 | Owner's eye: slides 8, 9 and 10 on air in Chrome and the managed OBS Keyer | Pending (owner). |
+| G4 | Owner's eye: slides 8, 9 and 10 on air in Chrome and the managed OBS Keyer | PASS (see below). |
 
 ## G4 attempt and follow-ups (2026-10-13)
 - **First G4 prepare:** Keynote launch failed with -600 at the script's `activate` (chars 127–135). Not obed-edom code: every
@@ -37,7 +37,14 @@ GPT-6 Astra, effort high (owner 2026-10-13: the reviewer's model class differs f
 - **Re-gated on `e7c75a19`:** G1 PASS over 28 exports (3b9019 now refuses only "slide 10 (287×77 image)": D4 repairs slide 9;
   slide 10 has no same-slide candidate). The 17:02 direct export repairs 3 (slide 9 tag box D4 → `CE49CEF4` corr 1.0, slide 10
   WA0125 poster D3, slide 10 label D2). Suites 3.12 and 3.10: 10799 passed, 36 skipped, 0 failed; `test:ui` 321/321.
-- **G4:** pending a re-run by the owner on `e7c75a19`.
+- **Later commits:** prepare status line in the accent colour (`50d3f098`) and an always-on texture-check log line
+  (`69e31238`), Codex Sol, Opus 5.5 high review: no findings. Suites on `69e31238`: 3.12 and 3.10 10799 passed, 0 failed;
+  `test:ui` 321/321.
+- **G4 PASS (owner, 2026-10-13, Chrome + managed OBS Keyer, on `e7c75a19`+):** text and pills transited correctly 8→9→10.
+  The prepared export happened to have no collisions ("Checked textures" path), so repaired pages were not on air; G2 covers
+  repaired-page rendering. Owner observations outside Stage T, filed as separate tasks: continuity off → freeze-frame
+  fallback (allowlist; S3); pill backgrounds darken in-move; slide 11 plays only the latter stacked video (Stage C G5 fails);
+  non-MM slide changes do not dissolve; MM freeze frames lag a few frames behind the playing frame.
 
 ### Repaired Alpha_DSK feed table (Stage B)
 Regular uploads only (hand-back uploads follow them). `→` = the leaf's `contents` to-texture.
