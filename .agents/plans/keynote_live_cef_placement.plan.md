@@ -901,3 +901,23 @@ Gate names are §5 names; each stores null/positive/candidate IDs in detail. Mis
 FAIL. Feed gate results into existing verdict.json/DX-2 summary; offline rescore calls the same classifier/persistence API.
 No new acceptance scope. Unpinned release data: W2's three asset digests and W1's new patched digests await generation;
 configured-device preview-output behavior remains an explicit field-test qualification, not a guessed contract.
+
+## 12. Implementation status (paused by the owner 2026-10-13 ~18:35)
+
+Branch `claude/cef-obs-placement` (local only, not pushed). Commits: `bd7f354c` skeleton → `ecb1de98` W1–W6 (Codex GPT-5.6 Sol
+high) → `ba3b9ff5` review r1 fold → `eb46413f` review r2 fold. Reviews: Opus 5.5 high, two reviewers (product / probe+harness).
+Raw rounds, implementer briefs and reports: `.agents/reviews/cef-placement-2026-10-13/` (plan critiques under `plan/`).
+
+| Round | Product | Probe + harness |
+|---|---|---|
+| r1 on `ecb1de98` | 1 major, 6 medium, 9 low | 1 blocker (content_box), 4 major, 8 medium, 5 low |
+| r2 on `ba3b9ff5` | 0 major, 4 medium, 4 low (15/16 r1 closed) | 3 major, 4 medium, 7 low (7 fold regressions) |
+
+W2 regenerated the pruned clip byte-for-byte (`7b7d66b582d1…`; identity with the pruned file corroborated by size + prefix
+only, O3 not needed). Coordinator test run on `ba3b9ff5`: all touched files 1203 passed, 1 skipped, 3 known external census
+reds (Stage T fixture). r2 fold `eb46413f`: implementer-reported W3 28/28, W4 348, W6 484 + 1 skipped.
+
+**Resume in this order:** (1) coordinator re-run of all touched test files on `eb46413f` (not yet done: machine was loaded);
+(2) review r3 (final round; same two reviewers, verify r2 closure); (3) full suites on 3.12 and the 3.10 floor + dashboard
+`test:ui` (machine window); (4) live `managed_obs_qualify.py --arm placement` + DX-1 re-run arms (machine window, OBS);
+(5) W7 docs (README, skill, handover); (6) owner check; (7) PR.
