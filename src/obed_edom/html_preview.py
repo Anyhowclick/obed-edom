@@ -1075,17 +1075,24 @@ def apply_preview(
     log("Exporting HTML player from a scratch copy…")
     writer = export_html_fn or export_html
     try:
-        writer(path, html, log=log)
-        manifest = manifest_from_export(
-            html,
-            source=source,
-            source_digest=digest,
-            keynote_version=keynote_app.app_version(),
-            canvas=canvas,
-        )
-        manifest["textureRepair"] = preview_textures.repair_textures(
-            html, manifest["slides"], player_digest=manifest["playerDigest"], log=log
-        )
+        for attempt in range(2):
+            writer(path, html, log=log)
+            manifest = manifest_from_export(
+                html,
+                source=source,
+                source_digest=digest,
+                keynote_version=keynote_app.app_version(),
+                canvas=canvas,
+            )
+            try:
+                manifest["textureRepair"] = preview_textures.repair_textures(
+                    html, manifest["slides"], player_digest=manifest["playerDigest"], log=log
+                )
+                break
+            except preview_textures.TextureRepairRefused:
+                if attempt:
+                    raise
+                log("Keynote's export has textures it cannot repair; exporting once more…")
         conversion = preview_movies.convert_movies(html, manifest["slides"], log=log)
         if conversion["converted"]:
             manifest["movieConversion"] = conversion

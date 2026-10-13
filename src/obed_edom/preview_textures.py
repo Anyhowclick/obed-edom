@@ -47,6 +47,10 @@ def _is_pdf(entry: Any) -> bool:
     return isinstance(entry, dict) and str((entry.get("url") or {}).get("native", "")).endswith(".pdf")
 
 
+class TextureRepairRefused(PreviewError):
+    """No verified replacement exists for at least one mis-mapped texture."""
+
+
 @dataclass(frozen=True)
 class _Leaf:
     event: int
@@ -387,14 +391,16 @@ def _poster_hits(slide: _Slide, index: int, renderer: _Renderer) -> list[_Hit]:
     return hits
 
 
-def _landings(previous: _Slide, slide: _Slide) -> list[tuple[_Leaf, str, _Leaf]]:
-    """(Magic Move leaf, its contents.to, the unique destination event-0 leaf at its end rect)."""
+def _landings(previous: _Slide, slide: _Slide, *, own: bool = False) -> list[tuple[_Leaf, str, _Leaf]]:
+    """(Magic Move leaf, its contents.to, the unique destination event-0 leaf at its end rect). With
+    `own`, a leaf without contents lands its own texture."""
     targets = [leaf for leaf in slide.leaves if leaf.is_base and leaf.event == 0]
     out = []
     for leaf in previous.leaves:
         if not leaf.in_magic_move:
             continue
         to, end = _end_rect(leaf)
+        to = to or (leaf.texture if own else None)
         if not to:
             continue
         found = [target for target in targets if _close(target.rect, end, RECT_TOL)]
@@ -571,6 +577,36 @@ def _d2(slides: list[_Slide], group: _Group, bad_textures: dict[int, set[str]]) 
     return _Fix(group, "D2", new, (group.slide - 1, donor))
 
 
+def _d4(slides: list[_Slide], group: _Group, bad_textures: dict[int, set[str]], renderer: _Renderer) -> _Fix | None:
+    slide = slides[group.slide]
+    if group.slide == 0 or group.first.kind == TEXT_TYPE or _group_movie(slide, group):
+        return None
+    previous = slides[group.slide - 1]
+    keys = {leaf.key for leaf in group.leaves}
+    landed = {
+        to
+        for _leaf, to, target in _landings(previous, slide, own=True)
+        if target.key in keys
+        and _fits(previous.texture_entry(to), group.size)
+        and to not in bad_textures.get(group.slide - 1, set())
+    }
+    donors = {
+        leaf.texture
+        for leaf in slide.leaves
+        if leaf.kind != TEXT_TYPE
+        and leaf.texture != group.old
+        and _owner(slide, leaf) in ((True, None), (False, None))
+        and _consistent(slide, leaf)
+        and _close(leaf.rect[:2], group.first.rect[:2], RECT_TOL)
+        and _close(leaf.rect[2:], group.size, DONOR_SIZE_TOL)
+    }
+    if len(landed) != 1 or len(donors) != 1:
+        return None
+    donor = donors.pop()
+    corr = _corr(_thumb(renderer, slide, donor), _thumb(renderer, previous, landed.pop()))
+    return _Fix(group, "D4", donor, None, {"corr": round(corr, 3) if corr is not None else None})
+
+
 def _mediabox_ok(slide: _Slide, texture: str) -> bool:
     from pypdf import PdfReader  # noqa: PLC0415
 
@@ -599,6 +635,8 @@ def _verify(slides: list[_Slide], fix: _Fix, renderer: _Renderer, scratch: Path)
     source, texture = (slides[fix.donor[0]], fix.donor[1]) if fix.donor else (slide, fix.new)
     if not _fits(source.texture_entry(texture), fix.group.size) or not _mediabox_ok(source, texture):
         return False
+    if fix.rule == "D4":
+        return fix.verify["corr"] is not None and fix.verify["corr"] >= CORR_MATCH
     if fix.group.first.kind == TEXT_TYPE:
         read = _ocr(renderer, source, texture, scratch)
         fix.verify = {"ocr": read}
@@ -638,6 +676,7 @@ def _plan(
             _d1(slide, group, bad_keys.get(group.slide, set())),
             _d3(slide, group),
             _d2(slides, group, bad_textures),
+            _d4(slides, group, bad_textures, renderer),
         )
         fix = next((c for c in candidates if c is not None and _verify(slides, c, renderer, scratch)), None)
         if fix is None:
@@ -814,7 +853,7 @@ def repair_textures(
     with tempfile.TemporaryDirectory(prefix="obed-texture-repair-") as scratch:
         fixes, refused = _plan(loaded, hits, renderer, Path(scratch))
     if refused:
-        raise PreviewError(
+        raise TextureRepairRefused(
             "Cannot repair Keynote's HTML export: "
             + "; ".join(
                 f"slide {ordinal} ({obj}): its texture is mis-mapped and no verified replacement exists"

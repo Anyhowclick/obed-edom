@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 from pypdf import PdfReader, PdfWriter
+from pypdf.generic import DecodedStreamObject
 
 from obed_edom import preview_textures as pt
 from obed_edom.fixture_paths import fixture
@@ -90,16 +91,13 @@ def _movie(oid: str, asset: str, rect: tuple, poster: str) -> dict:
     }
 
 
-def _magic_move(rect: tuple, texture: str, to: str, dx: float) -> dict:
+def _magic_move(rect: tuple, texture: str, to: str | None, dx: float) -> dict:
+    """A Magic Move leaf moving right by dx; `to=None` means it has no contents animation."""
     leaf = _leaf(texture, rect[2], rect[3])
-    leaf["animations"] = [
-        {
-            "animations": [
-                {"property": "transform.translation", "to": {"pointX": dx, "pointY": 0}},
-                {"property": "contents", "from": {"texture": texture}, "to": {"texture": to}},
-            ]
-        }
-    ]
+    animations = [{"property": "transform.translation", "to": {"pointX": dx, "pointY": 0}}]
+    if to:
+        animations.append({"property": "contents", "from": {"texture": texture}, "to": {"texture": to}})
+    leaf["animations"] = [{"animations": animations}]
     return {
         "name": pt.MAGIC_MOVE,
         "type": "transition",
@@ -108,14 +106,15 @@ def _magic_move(rect: tuple, texture: str, to: str, dx: float) -> dict:
 
 
 def _export(root: Path, slides: list[tuple[str, dict, list]]) -> list[dict]:
-    """Write (uuid, textures {id: (w, h)}, events) slides with blank PDF pages; return manifest slides."""
+    """Write (uuid, textures {id: (w, h[, fill])}, events) slides with blank PDF pages, or pages whose
+    left ("L") or top ("T") half is filled black; return manifest slides."""
     for uuid, textures, events in slides:
         folder = root / "assets" / uuid
         (folder / "assets").mkdir(parents=True)
         url = {"native": f"assets/{uuid}.pdf"}
         assets = {
             tid: {"type": "texture", "index": i, "url": url, "width": w, "height": h}
-            for i, (tid, (w, h)) in enumerate(textures.items())
+            for i, (tid, (w, h, *_)) in enumerate(textures.items())
         }
         assets["VIDEO"] = {"type": "texture", "index": 0, "url": {"native": "assets/frame.jpg"}, "width": 400, "height": 200}
         assets["MOVIE"] = {"type": "video", "index": 0, "url": {"native": "assets/Clip.mov-0.0000-5.0000.mov"}}
@@ -123,8 +122,13 @@ def _export(root: Path, slides: list[tuple[str, dict, list]]) -> list[dict]:
         (folder / f"{uuid}.json").write_text(json.dumps(payload))
         (folder / f"{uuid}.jsonp").write_text(f"local_slide( {json.dumps({'name': uuid, 'json': payload})} )")
         writer = PdfWriter()
-        for w, h in textures.values():
-            writer.add_blank_page(w, h)
+        for w, h, *fill in textures.values():
+            page = writer.add_blank_page(w, h)
+            if fill:
+                box = {"L": (0, 0, w / 2, h), "T": (0, h / 2, w, h / 2)}[fill[0]]
+                stream = DecodedStreamObject()
+                stream.set_data(b"0 g %f %f %f %f re f" % box)
+                page.replace_contents(stream)
         pdf = folder / "assets" / f"{uuid}.pdf"
         with pdf.open("wb") as handle:
             writer.write(handle)
@@ -213,6 +217,18 @@ def _d2_slides():
     ]
 
 
+def _d4_slides():
+    tag, landed = (100, 400, 60, 30), (150, 400, 60, 30)
+    return [
+        ("S1", {"TAG": (60, 30, "L")}, [_event([_slot(tag, "TAG", kind=5)]), _event([], [_magic_move(tag, "TAG", None, 50)])]),
+        (
+            "S2",
+            {"BIG": (400, 300), "CAND": (60, 30, "L")},
+            [_event([_slot(landed, "BIG", kind=5)]), _event([_slot(landed, "CAND", kind=5)])],
+        ),
+    ]
+
+
 D2_ID = hashlib.sha256(b"S2:S1:TO").hexdigest()[:32].upper()
 
 
@@ -229,6 +245,10 @@ D2_ID = hashlib.sha256(b"S2:S1:TO").hexdigest()[:32].upper()
             _d2_slides,
             {"ordinal": 2, "rule": "D2", "from": "BIG", "to": D2_ID, "donor": {"uuid": "S1", "id": "TO", "page": 2}},
             id="D2-graft-magic-move-landing",
+        ),
+        pytest.param(
+            _d4_slides, {"ordinal": 2, "rule": "D4", "from": "BIG", "to": "CAND", "donor": None, "verify": {"corr": 1.0}},
+            id="D4-image-candidate-agrees-with-no-contents-landing",
         ),
     ],
 )
@@ -274,7 +294,10 @@ def test_refusal_names_every_unrepairable_object_and_writes_nothing(tmp_path):
     point1, point2 = [("Point 1", TEXT_BOX)], [("Point 2", TEXT_BOX)]
     # The three SHARED slots sit at x offsets 0 / 0.4 / 0.8: M3's slot is outside GROUP_TOL of M2's,
     # so the copy's ambiguity must be judged around the copy itself, not around the hit.
+    # Slide 2 BIGTAG: D4 finds a same-rect image candidate and a no-contents landing, but their pixels
+    # disagree (left half vs top half), so it is refused.
     image, mix, shared = (500, 500, 40, 30), (700, 700, 60, 20), (800, 300, 160, 80)
+    tag, landed = (600, 900, 60, 30), (650, 900, 60, 30)
 
     def nudge(dx: float) -> tuple:
         return (shared[0] + dx, *shared[1:])
@@ -285,20 +308,31 @@ def test_refusal_names_every_unrepairable_object_and_writes_nothing(tmp_path):
                 "S1",
                 {
                     "BAD": (400, 300), "GOOD": (100, 20), "IMGBAD": (400, 300), "IMG": (40, 30), "PTO": (200, 100),
-                    "MIX": (400, 300),
+                    "MIX": (400, 300), "TAG": (60, 30, "L"),
                 },
                 [
                     _event([_slot(LABEL, "BAD"), _slot(image, "IMGBAD", kind=5), _slot(mix, "MIX")], texts=point1),
                     _event([_slot(LABEL, "BAD"), _slot(image, "IMG", kind=5), _slot(mix, "MIX", kind=5)], texts=point2),
-                    _event([_slot(LABEL, "GOOD")], [_magic_move((250, 300, 200, 100), "PTO", "PTO", 50)], texts=point1),
+                    _event(
+                        [_slot(LABEL, "GOOD"), _slot(tag, "TAG", kind=5)],
+                        [_magic_move((250, 300, 200, 100), "PTO", "PTO", 50), _magic_move(tag, "TAG", None, 50)],
+                        texts=point1,
+                    ),
                 ],
             ),
             (
                 "S2",
-                {"WRONG": (1920, 1080), "POSTER": (200, 100), "SHARED": (1920, 1080), "P2": (160, 80), "P3": (160, 80)},
+                {
+                    "WRONG": (1920, 1080), "POSTER": (200, 100), "SHARED": (1920, 1080), "P2": (160, 80), "P3": (160, 80),
+                    "BIGTAG": (400, 300), "CAND": (60, 30, "T"),
+                },
                 [
                     _event(
-                        [_slot(POSTER, "WRONG", kind=5), _slot(shared, "SHARED", kind=5, oid="M2")],
+                        [
+                            _slot(POSTER, "WRONG", kind=5),
+                            _slot(shared, "SHARED", kind=5, oid="M2"),
+                            _slot(landed, "BIGTAG", kind=5),
+                        ],
                         [
                             _movie("M1", "MOVIE", POSTER, "POSTER"),
                             _movie("M2", "MOVIE", shared, "P2"),
@@ -306,13 +340,13 @@ def test_refusal_names_every_unrepairable_object_and_writes_nothing(tmp_path):
                         ],
                     ),
                     _event([_slot(POSTER, "WRONG", kind=5, oid="M1"), _flat(nudge(0.4), "SHARED")]),
-                    _event([_slot(nudge(0.8), "SHARED", kind=5, oid="M3")]),
+                    _event([_slot(nudge(0.8), "SHARED", kind=5, oid="M3"), _slot(landed, "CAND", kind=5)]),
                 ],
             ),
         ],
     )
     before = _snapshot(tmp_path)
-    with pytest.raises(PreviewError) as raised:
+    with pytest.raises(pt.TextureRepairRefused) as raised:
         _repair(tmp_path, slides)
     assert str(raised.value) == (
         "Cannot repair Keynote's HTML export: "
@@ -321,7 +355,8 @@ def test_refusal_names_every_unrepairable_object_and_writes_nothing(tmp_path):
         "slide 1 (60×20 image): its texture is mis-mapped and no verified replacement exists; "
         "slide 1 (60×20 text): its texture is mis-mapped and no verified replacement exists; "
         "slide 2 (160×80 image): its texture is mis-mapped and no verified replacement exists; "
-        "slide 2 (200×100 image): its texture is mis-mapped and no verified replacement exists"
+        "slide 2 (200×100 image): its texture is mis-mapped and no verified replacement exists; "
+        "slide 2 (60×30 image): its texture is mis-mapped and no verified replacement exists"
     )
     assert _snapshot(tmp_path) == before
 

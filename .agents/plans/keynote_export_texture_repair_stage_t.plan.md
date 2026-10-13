@@ -214,3 +214,11 @@ Rules:
 - r5: no major or blocker; loop closed.
 - G2 note: the label-vs-flattened-frame check (a) tops out at ≈0.83 for correct labels (the untouched "Bible Study"
   label scores 0.826), below the 0.9 this plan set; repaired labels 0.836/0.823 vs −0.017/−0.123 unrepaired.
+
+- **Owner decisions at G4 (2026-10-13):** fresh exports of the real Alpha_DSK collide differently each time (3 of 4
+  exports refused on images: slide 9 tag box 288×78, slide 10 582×327). The owner reopened OQ-T4 and OQ-T1:
+  - **D4 now (images only):** re-point a non-text, non-poster image to its same-slide same-rect/size page only when that
+    page correlates ≥ 0.9 with the previous slide's Magic Move landing texture at that rect; no candidate → refuse.
+  - **One re-export as fallback:** on a texture-repair refusal, `apply_preview` re-exports once and repairs again,
+    then refuses.
+  - Prepare output in a modal with red errors (dashboard UI).
