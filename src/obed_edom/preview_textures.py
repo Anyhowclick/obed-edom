@@ -424,27 +424,43 @@ def _detect(slides: list[_Slide], renderer: _Renderer) -> list[_Hit]:
     return hits
 
 
-def _groups(slides: list[_Slide], hits: list[_Hit]) -> list[_Group]:
+def _same_object(slide: _Slide, a: _Leaf, b: _Leaf) -> bool:
+    return (
+        a.texture == b.texture
+        and _close(a.rect, b.rect, GROUP_TOL)
+        and (a.kind == TEXT_TYPE) == (b.kind == TEXT_TYPE)
+        and _text_key(slide, a) == _text_key(slide, b)
+    )
+
+
+def _groups(slides: list[_Slide], hits: list[_Hit]) -> tuple[list[_Group], list[tuple[int, _Leaf]]]:
+    """Partition the bad leaves into groups whose members share slide, old id, rect, category,
+    normalised accessibility text and movie owner. An unbound copy beside more than one owner is
+    ambiguous and returned separately, never grouped."""
     groups: list[_Group] = []
+    ambiguous: list[tuple[int, _Leaf]] = []
+    seen: set[tuple[int, str]] = set()
     for hit in hits:
-        if hit.rule == "R1b" or any(g.slide == hit.slide and hit.leaf in g.leaves for g in groups):
+        if hit.rule == "R1b" or (hit.slide, hit.leaf.key) in seen:
             continue
-        slide, text = slides[hit.slide], _text_key(slides[hit.slide], hit.leaf)
+        slide = slides[hit.slide]
         candidates = [
-            leaf
-            for leaf in slide.leaves
-            if leaf.texture == hit.leaf.texture
-            and _close(leaf.rect, hit.leaf.rect, GROUP_TOL)
-            and _text_key(slide, leaf) == text
+            leaf for leaf in slide.leaves if (hit.slide, leaf.key) not in seen and _same_object(slide, leaf, hit.leaf)
         ]
         owners = {leaf.key: _owner(slide, leaf) for leaf in candidates}
-        fixed = {oid for bound, oid in owners.values() if bound}
-        bound, movie = owners[hit.leaf.key]
-        if not bound:
-            movie = fixed.pop() if len(fixed) == 1 else None
-        members = [leaf for leaf in candidates if not owners[leaf.key][0] or owners[leaf.key][1] == movie]
-        groups.append(_Group(hit.slide, hit.leaf.texture, sorted(members, key=lambda leaf: leaf.key)))
-    return groups
+        movies = {oid for bound, oid in owners.values() if bound}
+        parts: dict[tuple[bool, str | None], list[_Leaf]] = {}
+        for leaf in candidates:
+            seen.add((hit.slide, leaf.key))
+            bound, oid = owners[leaf.key]
+            if bound or len(movies) == 1:
+                parts.setdefault((True, oid if bound else next(iter(movies))), []).append(leaf)
+            elif movies:
+                ambiguous.append((hit.slide, leaf))
+            else:
+                parts.setdefault((False, None), []).append(leaf)
+        groups.extend(_Group(hit.slide, hit.leaf.texture, sorted(m, key=lambda leaf: leaf.key)) for m in parts.values())
+    return groups, ambiguous
 
 
 def _normal(text: str) -> str:
@@ -601,7 +617,7 @@ def _verify(slides: list[_Slide], fix: _Fix, renderer: _Renderer, scratch: Path)
 def _plan(
     slides: list[_Slide], hits: list[_Hit], renderer: _Renderer, scratch: Path
 ) -> tuple[list[_Fix], list[tuple[int, str]]]:
-    groups = _groups(slides, hits)
+    groups, ambiguous = _groups(slides, hits)
     bad_keys: dict[int, set[str]] = {}
     bad_textures: dict[int, set[str]] = {}
     for hit in hits:
@@ -614,6 +630,7 @@ def _plan(
         for h in hits
         if h.rule == "R1b"
     ]
+    refused += [(slides[i].ordinal, _describe(slides[i], _Group(i, leaf.texture, [leaf]))) for i, leaf in ambiguous]
     for group in groups:
         slide = slides[group.slide]
         candidates = (

@@ -62,6 +62,18 @@ EXPECT: dict[str, dict[str, Any]] = {
     "preview/3b9019": {"kind": "refused", "message": REFUSAL_3B9019},
 }
 DEFAULT_EXPECT = {"kind": "0 hits"}
+CLEAN_EXPORTS = (
+    "qual-decks/D1/html-unmodified", "qual-decks/D2-across/html-unmodified", "qual-decks/D3/html-unmodified",
+    "qual-decks/D4/html-unmodified", "qual-decks/D5/html-unmodified", "qual-decks/D6/html-unmodified",
+    "p2-recovery/html-adversarial/gl-replay/html-disposable", "p2-recovery/html-adversarial/gl-replay/html-player",
+    "p2-recovery/html-adversarial/gl-replay/html-unmodified", "p2-recovery/html-adversarial/html-disposable",
+    "p2-recovery/html-adversarial/html-player", "p2-recovery/html-adversarial/html-unmodified",
+    "p2-binary/html-disposable", "p2-binary/html-player", "p2-binary/html-unmodified",
+    "p2-loop/html-player", "p2-loop/html-unmodified", "p2-loop-grey/html-player", "p2-loop-grey/html-unmodified",
+    "p2-soak-loop/html-unmodified", "gl-decks/Minimal Alpha_DSK/html", "gl-decks/Positive Control/html",
+    "minimal-alpha-dsk-17c0c938/html", "preview/59cb",
+)
+EXPECT.update({label: DEFAULT_EXPECT for label in CLEAN_EXPORTS})
 
 G2_EXPORT = PREVIEWS / f"{ALPHA_7E3C}-p3-r1" / "html"
 ORACLE_PREFIX = "AF8F0F"

@@ -51,6 +51,13 @@ def _slot(rect: tuple, texture: str, kind: int | None = 6, oid: str | None = Non
     return {"initialState": _state(0, 0, *CANVAS), "layers": [wrapper]}
 
 
+def _flat(rect: tuple, texture: str, kind: int | None = 5) -> dict:
+    """A flattened slot as later events write it: canvas layer -> leaf at rect, no wrapper."""
+    leaf = _leaf(texture, rect[2], rect[3], kind)
+    leaf["initialState"] = _state(*rect)
+    return {"initialState": _state(0, 0, *CANVAS), "layers": [leaf]}
+
+
 def _event(slots: list, effects: list | None = None, texts: list | None = None) -> dict:
     return {
         "baseLayer": {"initialState": _state(0, 0, *CANVAS), "layers": slots},
@@ -261,26 +268,40 @@ def test_refusal_names_every_unrepairable_object_and_writes_nothing(tmp_path):
     # event 2 "Point 1" donor must not fix it. The Magic Move lands a contents.to on slide 2's
     # non-poster image: D2 has no content check for it, so it is refused. Slide 2 event 1 has movie
     # M1's slot at that image's rect on the same bad id: the image must not borrow M1's poster.
+    # Slide 1 MIX: text without accessibility text (event 0) and an ordinary image (event 1) on one
+    # bad id at one rect are two objects, each refused. Slide 2 SHARED: a flattened copy between
+    # movie M2's slot (event 0) and M3's (event 2) is ambiguous and refused, though D3 fixes both slots.
     point1, point2 = [("Point 1", TEXT_BOX)], [("Point 2", TEXT_BOX)]
-    image = (500, 500, 40, 30)
+    image, mix, shared = (500, 500, 40, 30), (700, 700, 60, 20), (800, 300, 160, 80)
     slides = _export(
         tmp_path,
         [
             (
                 "S1",
-                {"BAD": (400, 300), "GOOD": (100, 20), "IMGBAD": (400, 300), "IMG": (40, 30), "PTO": (200, 100)},
+                {
+                    "BAD": (400, 300), "GOOD": (100, 20), "IMGBAD": (400, 300), "IMG": (40, 30), "PTO": (200, 100),
+                    "MIX": (400, 300),
+                },
                 [
-                    _event([_slot(LABEL, "BAD"), _slot(image, "IMGBAD", kind=5)], texts=point1),
-                    _event([_slot(LABEL, "BAD"), _slot(image, "IMG", kind=5)], texts=point2),
+                    _event([_slot(LABEL, "BAD"), _slot(image, "IMGBAD", kind=5), _slot(mix, "MIX")], texts=point1),
+                    _event([_slot(LABEL, "BAD"), _slot(image, "IMG", kind=5), _slot(mix, "MIX", kind=5)], texts=point2),
                     _event([_slot(LABEL, "GOOD")], [_magic_move((250, 300, 200, 100), "PTO", "PTO", 50)], texts=point1),
                 ],
             ),
             (
                 "S2",
-                {"WRONG": (1920, 1080), "POSTER": (200, 100)},
+                {"WRONG": (1920, 1080), "POSTER": (200, 100), "SHARED": (1920, 1080), "P2": (160, 80), "P3": (160, 80)},
                 [
-                    _event([_slot(POSTER, "WRONG", kind=5)], [_movie("M1", "MOVIE", POSTER, "POSTER")]),
-                    _event([_slot(POSTER, "WRONG", kind=5, oid="M1")]),
+                    _event(
+                        [_slot(POSTER, "WRONG", kind=5), _slot(shared, "SHARED", kind=5, oid="M2")],
+                        [
+                            _movie("M1", "MOVIE", POSTER, "POSTER"),
+                            _movie("M2", "MOVIE", shared, "P2"),
+                            _movie("M3", "MOVIE", shared, "P3"),
+                        ],
+                    ),
+                    _event([_slot(POSTER, "WRONG", kind=5, oid="M1"), _flat(shared, "SHARED")]),
+                    _event([_slot(shared, "SHARED", kind=5, oid="M3")]),
                 ],
             ),
         ],
@@ -292,6 +313,9 @@ def test_refusal_names_every_unrepairable_object_and_writes_nothing(tmp_path):
         "Cannot repair Keynote's HTML export: "
         "slide 1 ('Point 2' label): its texture is mis-mapped and no verified replacement exists; "
         "slide 1 (40×30 image): its texture is mis-mapped and no verified replacement exists; "
+        "slide 1 (60×20 image): its texture is mis-mapped and no verified replacement exists; "
+        "slide 1 (60×20 text): its texture is mis-mapped and no verified replacement exists; "
+        "slide 2 (160×80 image): its texture is mis-mapped and no verified replacement exists; "
         "slide 2 (200×100 image): its texture is mis-mapped and no verified replacement exists"
     )
     assert _snapshot(tmp_path) == before
