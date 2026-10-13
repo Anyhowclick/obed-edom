@@ -143,9 +143,11 @@ def raf_curve(shape: str) -> list[dict[str, Any]]:
         if shape == "duplicate-in":
             anims.append(dict(anims[0], value=0.0))
         rows.append({"t": ct, "eff": [v, 1 - v], "anims": anims})
-    if shape == "pending":
+    if shape in ("pending", "pending-dip"):
         rows[:0] = [{"t": t, "eff": [0, 1], "anims": [{"leaf": leaf, "ct": 0, "start": None, "state": "running", "dur": DURATION_MS,
                                                         "value": value} for leaf, value in (("in", 0), ("out", 1))]} for t in (-30.0, -15.0)]
+    if shape == "pending-dip":
+        rows[0]["eff"][1] = rows[0]["anims"][1]["value"] = 0.5
     return rows
 
 
@@ -957,6 +959,8 @@ CASES = [
     ("curve linear", lambda: probe.score_curve(raf_curve("linear"))["verdict"], "FAIL"),
     ("curve two start times", lambda: probe.score_curve(raf_curve("two-starts"))["verdict"], "FAIL"),
     ("DX-1 curve with leading rAFs whose animations are still pending (ct 0, no start)", lambda: probe.score_curve(raf_curve("pending"))["verdict"], "PASS"),
+    ("Astra r1: a 'pending' rAF (ct 0, no start) at in 0 / out 0.5 is an unvalidated initial dip, not skipped",
+     lambda: probe.score_curve(raf_curve("pending-dip"))["verdict"], "INCONCLUSIVE"),
     ("r1-4 curve with every start None", lambda: probe.score_curve(raf_curve("no-start"))["verdict"], "INCONCLUSIVE"),
     ("r1-4 curve with a later NaN value", lambda: probe.score_curve(raf_curve("late-nan"))["verdict"], "INCONCLUSIVE"),
     ("r1-4 curve with a duplicate incoming animation", lambda: probe.score_curve(raf_curve("duplicate-in"))["verdict"], "INCONCLUSIVE"),
