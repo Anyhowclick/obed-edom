@@ -21,13 +21,15 @@ import threading
 import time
 import urllib.request
 import uuid
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 from websockets.sync.client import connect
 
 from .obs_websocket import ObsRequestError, ObsWebsocket, ObsWebsocketError
+from .placement_probe import ClassifierInput, ProbeSpec
 
 log = logging.getLogger(__name__)
 
@@ -330,6 +332,115 @@ _TRANSIENT_WARNINGS = ("obsWaiting", "obsSafeMode", "obsPageLost", "obsUnreachab
 OUTPUT_MODES = ("screen", "keyer")
 
 
+CALIBRATION_SCENE = "AK-Calibrate"
+PROBE_SOURCE = "AK-Probe"
+PROGRAM_SCENE = "AK"
+OBS_CANVAS = "Main"
+PREVIEW_OUTPUT = "decklink_preview_output"
+
+
+@dataclass(frozen=True)
+class EngineIdentity:
+    pid: int
+    launch_date: float
+    ready_generation: int
+
+
+@dataclass(frozen=True)
+class CalibrationRequest:
+    spec: ProbeSpec
+    url: str
+    engine: EngineIdentity
+    program_target_id: str
+    program_context_id: str
+    connection_generation: int
+    placement: Literal["preview", "offcanvas"] = "preview"
+
+
+@dataclass(frozen=True)
+class ProgramCheck:
+    ok: bool | None
+    visibility_events: int
+    baseline_frame_ms: float | None
+    max_raf_gap_ms: float | None
+    media: tuple[dict[str, object], ...]
+    reason: str | None
+
+
+class ProgramGuard(Protocol):
+    def begin(self) -> None: ...
+    def sample(self, phase: str) -> None: ...
+    def finish(self) -> ProgramCheck: ...
+
+
+class CalibrationIO(Protocol):
+    request: CalibrationRequest
+    source_uuid: str
+    cdp_endpoint: str
+    cancel_event: threading.Event
+    deadline_s: float
+
+    def capture_png(self, *, timeout_s: float = 2.0) -> bytes: ...
+    def check_current(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class CollectionSnapshot:
+    state: dict[str, object]
+    mtime_ns: int
+    saved_by_obs: bool
+
+
+@dataclass(frozen=True)
+class PersistenceRule:
+    path: str
+    before: object
+    after: object
+
+
+@dataclass(frozen=True)
+class PersistenceCheck:
+    phase: str
+    authoritative: bool
+    ok: bool | None
+    differences: tuple[str, ...]
+    allowed: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CalibrationResult:
+    request: CalibrationRequest
+    evidence: ClassifierInput | None
+    program: ProgramCheck | None
+    isolation_ok: bool
+    cleanup_verified: bool
+    restored: bool
+    persistence: PersistenceCheck | None
+    errors: tuple[str, ...]
+    started_s: float
+    finished_s: float
+
+
+class CalibrationAdapter(Protocol):
+    def identity(self) -> EngineIdentity | None: ...
+    def start(self, request: CalibrationRequest, *, measure: Callable[[CalibrationIO], ClassifierInput],
+              guard: ProgramGuard) -> Future[CalibrationResult]: ...
+    def cancel(self, run_id: str, *, timeout_s: float = 5.0) -> bool: ...
+
+
+def read_collection(path: Path, *, saved_by_obs: bool) -> CollectionSnapshot:
+    raise NotImplementedError
+
+
+def persistence_allowlist(null_before: CollectionSnapshot, null_after: CollectionSnapshot) -> tuple[PersistenceRule, ...]:
+    raise NotImplementedError
+
+
+def check_persistence(before: CollectionSnapshot, after: CollectionSnapshot, *, null_allowlist: tuple[PersistenceRule, ...],
+                      phase: Literal["cleanup", "quit"], last_removal_mtime_ns: int) -> PersistenceCheck:
+    raise NotImplementedError
+
+
 class ManagedObs:
     """One per dashboard process. Public actions return at once; the work runs on
     a single engine thread in submission order. `state()` is the dashboard JSON.
@@ -400,6 +511,9 @@ class ManagedObs:
         """True while device setup is queued, in progress, or waiting for Done."""
         with self._lock:
             return self._setup_jobs > 0 or self._setup_rate is not None
+
+    def calibration_adapter(self) -> CalibrationAdapter:
+        raise NotImplementedError
 
     def device(self) -> dict[str, Any] | None:
         return _read_json(self.home / "ak-device.json")
