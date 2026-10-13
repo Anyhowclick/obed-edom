@@ -1,4 +1,4 @@
-# Prepared-deck staleness — plan (rev 2)
+# Prepared-deck staleness — plan (rev 3)
 
 Owner request 2026-10-13: the Live tab must make clear that prepared decks are snapshots and flag a prepared deck whose
 source Keynote was edited afterwards (trigger: `Alpha_DSK.key` edited 18:19 after its 17:53 prepare, export `7e3c9301…`).
@@ -9,7 +9,7 @@ button; no flag during an active show; no package-directory caching. Planner and
 
 **Roster (2026-10-13 override):** plan Codex GPT-6 Astra high + one Astra high critique (r1: 0 blocker/major, 2 medium,
 1 low — folded into rev 1); critique r2 Opus 5.5 high (owner: critic's model family differs from the
-planner's; 0 blocker/major, 3 medium, 6 low — folded into rev 2); implement Codex GPT-5.6 Sol high; review Opus 5.5 high. Status: planned; implementation
+planner's; 0 blocker/major, 3 medium, 6 low — folded into rev 2); owner: a failed **Prepare again** re-selects the stale deck (rev 3); implement Codex GPT-5.6 Sol high; review Opus 5.5 high. Status: planned; implementation
 2026-10-14.
 
 
@@ -126,14 +126,14 @@ For `current`, show neither message.
 
 ```ts
 export type LiveDeckInputHandle = {
-  preparePath(path: string): Promise<void>;
+  preparePath(path: string): Promise<boolean>;
 };
 ```
 
 Convert `LiveDeckInput` to the repo’s React 18 `forwardRef` / `useImperativeHandle` pattern. Refactor its existing preparation function to:
 
 ```ts
-async function prepare(path: string): Promise<void>
+async function prepare(path: string): Promise<boolean>
 ```
 
 Both **Qualify Keynote** and `preparePath` call this function.
@@ -142,19 +142,21 @@ Both **Qualify Keynote** and `preparePath` call this function.
 - Set `working.current` synchronously.
 - Set the displayed `ChosenFile` from the explicit path and pass that same path directly to `startHtmlPreview()`.
 - Preserve `onPrepared("")`, `onPreparing`, polling, conditional apply, progress, logs, error handling, and `onPrepared(done.id)`.
+- Return `true` only when it reached `onPrepared(done.id)`; `false` when guarded out or failed.
 - Expose the current function through the handle so it observes current disabled props.
 
 `LivePresenter` holds the ref and calls:
 
 ```ts
-void inputRef.current?.preparePath(qualification.sourcePath);
+const previous = jobId;
+if (!(await inputRef.current?.preparePath(qualification.sourcePath))) selectDeck(previous);
 ```
 
 Guard the call when no source path is available. Do not invoke the chooser or pass the old digest.
 
 Disable **Prepare again** for `active || pending || checking || preparing` (a `changed` deck always has a path; keep only the TypeScript null narrowing in the click handler). Pass the corresponding external lock to `LiveDeckInput`; its existing working guard prevents duplicate preparation. Active sessions already unmount setup.
 
-Preparation success selects the returned job ID, triggers qualification, and refreshes the list. Preparation failures use the existing error UI; the expected one is apply's 409 "Close Keynote before exporting…" when Keynote is still open. Failure end state (accepted, no extra state): `onPrepared("")` has deselected the deck, so the warning is gone and Start is disabled; the operator retries with **Qualify Keynote** (the path stays in the file well) or re-picks the deck.
+Preparation success selects the returned job ID, triggers qualification, and refreshes the list. Preparation failures use the existing error UI; the expected one is apply's 409 "Close Keynote before exporting…" when Keynote is still open. Failure end state (owner 2026-10-13): the stale deck is re-selected — the presenter calls `selectDeck(previous)` when `preparePath` resolves `false`, which re-runs qualification, so the yellow warning and Start come back while `LiveDeckInput` keeps showing the preparation error.
 
 Clicking the button unmounts it (`onPrepared("")` clears qualification); `preparePath` moves focus to the progress paragraph (give it `tabIndex={-1}`) so keyboard focus is not dropped to `<body>`. Start keeps its existing preparation/session/output checks; `sourceState` never enters its eligibility condition.
 
@@ -184,7 +186,7 @@ Update existing typed fakes with the required fields. Add one scenario using the
 
 1. Load a `changed` deck: assert the option suffix, warning text, `notice warning`, the button’s `tone-alt` class, and Start enabled.
 2. Click **Prepare again**; assert `startHtmlPreview(sourcePath)`, no chooser call, and conditional apply through the existing flow. Hold preparation pending long enough to check that Start and intake controls are disabled.
-3. Complete with a different job ID. Assert that ID is selected and qualified even when the older row remains first.
+3. Make the apply fail once (409 "Close Keynote…"): assert the error shows and the stale deck is re-selected with its warning. Click **Prepare again** again and complete with a different job ID. Assert that ID is selected and qualified even when the older row remains first.
 4. Select a missing-source row; assert the neutral path note and absence of the changed warning.
 
 Keep initial auto-selection covered by the existing start test. Do not duplicate cache-ready and preparation-error tests.
