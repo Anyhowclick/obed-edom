@@ -294,14 +294,13 @@ def unpremultiply(img: np.ndarray) -> np.ndarray:
 
 
 @contextlib.contextmanager
-def source_shots(port: int, password: str, straight: bool = False) -> Iterator[Callable[[], np.ndarray]]:
-    """H x W x 4 RGBA renders of scene `AK` via obs-websocket (an independent scene render, not the DeckLink wire), over one
-    connection; `straight` un-premultiplies them."""
+def source_shots(port: int, password: str) -> Iterator[Callable[[], np.ndarray]]:
+    """H x W x 4 premultiplied RGBA renders of scene `AK` via obs-websocket (an independent scene render, not the DeckLink
+    wire), over one connection."""
     def shot() -> np.ndarray:
         data = ws.request("GetSourceScreenshot", {"sourceName": "AK", "imageFormat": "png", "imageWidth": 1920,
                                                   "imageHeight": 1080})["imageData"]
-        img = np.array(Image.open(io.BytesIO(base64.b64decode(data.split(",", 1)[-1]))).convert("RGBA"))
-        return unpremultiply(img) if straight else img
+        return np.array(Image.open(io.BytesIO(base64.b64decode(data.split(",", 1)[-1]))).convert("RGBA"))
 
     with mock.patch.object(obs_websocket, "_MAX_MESSAGE_BYTES", 64 * 1024 * 1024), ObsWebsocket(port, password, timeout=10.0) as ws:
         yield shot
@@ -739,8 +738,10 @@ def dissolve_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] | 
         record["output"] = {k: host.output.get(k) for k in ("mmOpacity", "continuity", "placement")}
         record["inputLiveS"] = await_input(host._require_transport())
         record["g2"] = ((host._require_transport().evaluate(GL_REPLAY_READ_JS) or {}).get("api") or {}).get("state")
-        with source_shots(*ctx["creds"], straight=True) as shot:
-            driven, images = dissolve_probe.drive(host, arm, resolved.target, shot)
+        raw: dict[int, np.ndarray] = {}
+        with source_shots(*ctx["creds"]) as shot:
+            driven, images = dissolve_probe.drive(host, arm, resolved.target, lambda: raw.setdefault(id(img := shot()), img))
+        images = {k: unpremultiply(v) if raw.get(id(v)) is v else v for k, v in images.items()}
         record.update(driven)
         if arm.capture == "cut":
             record["cast"] = [{"name": s["name"], "t0": s["t0"], "t1": s["t1"]} for s in record.get("shots") or []]
