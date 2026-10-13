@@ -590,6 +590,7 @@ describe("Alpha Keynote intake and slide grid", () => {
     await screen.findByText("Service.key");
     fireEvent.click(screen.getByRole("button", { name: "Qualify Keynote" }));
     await screen.findByText("Deck ready");
+    expect(screen.getByRole("button", { name: "View output" })).toBeEnabled();
     expect(startHtmlPreview).toHaveBeenCalledWith("/Slides/Service.key");
     expect(applyHtmlPreview).toHaveBeenCalledWith("new-deck");
     expect(api.qualification).toHaveBeenCalledWith("new-deck");
@@ -642,17 +643,43 @@ describe("Alpha Keynote intake and slide grid", () => {
     expect(screen.queryByText(/Converted/)).not.toBeInTheDocument();
   });
 
-  it("shows preparation failure without proceeding to qualification", async () => {
-    vi.mocked(startHtmlPreview).mockRejectedValue(new Error("Close Keynote before exporting."));
+  it("shows preparation errors in red and keeps the complete output in an Escape-closeable dialog", async () => {
+    const error = "HTML export failed: Application isn't running. (-600)";
+    const proposal: Job = { id: "proposal", kind: "html-preview", status: "done", logs: ["Inspected 12 slides", "Cannot embed clip.mov"], result: { phase: "review" } };
+    const failed: Job = { ...proposal, status: "error", logs: [...proposal.logs, "Exporting HTML", `Error: ${error}`], error };
+    vi.mocked(startHtmlPreview).mockResolvedValue(proposal);
+    vi.mocked(applyHtmlPreview).mockResolvedValue(failed);
+    vi.mocked(pollJob).mockResolvedValueOnce(proposal).mockResolvedValueOnce(failed);
     const api = client({ decks: vi.fn(async () => []) });
     render(<LivePresenter client={api} pollMs={60_000} />);
     vi.mocked(chooseKeynote).mockResolvedValue({ path: "/Slides/Service.key", name: "Service.key" });
     fireEvent.click(screen.getByRole("button", { name: "Choose on this Mac" }));
     await screen.findByText("Service.key");
     fireEvent.click(screen.getByRole("button", { name: "Qualify Keynote" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Close Keynote before exporting.");
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(error);
+    expect(alert).toHaveClass("live-alert");
     expect(api.qualification).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Start output session" })).toBeDisabled();
+    const viewOutput = screen.getByRole("button", { name: "View output" });
+    viewOutput.focus();
+    fireEvent.click(viewOutput);
+    const dialog = screen.getByRole("dialog", { name: "Prepare output — Service.key" });
+    expect(dialog).toHaveFocus();
+    const log = dialog.querySelector<HTMLElement>(".prepare-output-log")!;
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(log).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(within(dialog).getByRole("button", { name: "Close" })).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(log).toHaveFocus();
+    for (const line of failed.logs) expect(within(dialog).getByText(line)).toBeInTheDocument();
+    expect(within(dialog).getByText("Cannot embed clip.mov")).toHaveClass("live-alert");
+    expect(within(dialog).getByText(`Error: ${error}`)).toHaveClass("live-alert");
+    expect(within(dialog).queryByText(error)).not.toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(viewOutput).toHaveFocus());
   });
 
   it("uses previous playable slide on left arrow, even with a button focused", async () => {
