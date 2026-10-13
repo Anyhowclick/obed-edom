@@ -26,6 +26,16 @@ Arms:
   mmo-cef       MO-3: the MO-1 logger, step loop (`mm_opacity_probe.drive`) and scorer of mm_opacity_probe inside the OBS
                 CEF, unrecorded; GL replay off x arms on, off, off2, sq and auto x those plus the forced stand-down pair fsd,
                 fsdoff (10 sessions, one launch). Binary fixture only.
+  dissolve      DX-2 (dissolve cross-fade plan §9.2): one launch, unrecorded; DX-1's P2 cross-fade, cut and opaque arms
+                (`DISSOLVE_ARMS`: no screen-*, delay-*, on-sw, lifecycle, media, tone or m-snap) plus cef-skip and cef-skip-dsk
+                (P2 2->3 and DSK 7->8 movie slides publish a take with no holder), each a `LiveOutputHost` session with
+                `dissolve_probe`'s resolver, hook and driver, a GetSourceScreenshot burst as the capture (cut sessions score
+                those shots as the screencast), continuity, G2 state, colour tuples and the served digest recorded.
+                opaque-off runs first and fixes the calibration (`dissolve_calibration`) before the other captures;
+                `dissolve_probe`'s integrity rules and scorer then read every control before the candidates. Checks whose
+                controls DX-2 does not run (no flash, screen) are reported, not gated. CEF is attach mode, so every session
+                must record `output.placement` grant null, reason `attached`, and bind no holder (a bound holder is a FAIL
+                even when the round is INCONCLUSIVE). Ignores --fixture.
   soak          g2 held on slide 2 for --soak-minutes (>= 4) with per-minute reads, 20 s recordings around a loop wrap at
                 minute 1 and just before loseContext (after the first half), build 1, P3/P4; an off twin. Gate M6.
                 --precheck: the loop pre-check.
@@ -54,6 +64,7 @@ import hashlib
 import io
 import itertools
 import json
+import math
 import os
 import re
 import shutil
@@ -62,6 +73,7 @@ import sys
 import time
 import traceback
 import types
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -84,6 +96,7 @@ from obed_edom.managed_obs import ManagedObs  # noqa: E402
 from obed_edom.obs_websocket import ObsWebsocket  # noqa: E402
 
 import binary_counter_movie  # noqa: E402
+import dissolve_probe  # noqa: E402
 import live_evidence_contract as contract  # noqa: E402
 import mm_opacity_probe  # noqa: E402
 import obs_cadence_decode  # noqa: E402
@@ -178,6 +191,10 @@ MMO_ALPHA_FLOOR_MAX = 0.1
 MMO_SLIDE1_S = 6.0
 MMO_LIVE_S = 4.0
 MMO_CEF_GL = ("off", "auto")
+DISSOLVE_ARMS = dissolve_probe.CEF.arms
+DX2_TAU_MAX = 8.0
+DX2_COMPLEMENT_MAX = 6.0
+DX2_NO_DIP_MIN = 248.0
 HB_OBS_MAX_PX = 0.25
 HB_OBS_WHITE = 235
 HB_OBS_SIZE = (1920, 1080)
@@ -268,12 +285,30 @@ def wait_engine(engine: ManagedObs, done: tuple[str, ...], timeout_s: float) -> 
         time.sleep(0.1)
 
 
-def obs_screenshot(port: int, password: str) -> np.ndarray:
-    """H x W x 4 RGBA render of scene `AK` via obs-websocket (an independent scene render, not the DeckLink wire)."""
-    with mock.patch.object(obs_websocket, "_MAX_MESSAGE_BYTES", 64 * 1024 * 1024), ObsWebsocket(port, password, timeout=10.0) as ws:
+def unpremultiply(img: np.ndarray) -> np.ndarray:
+    """GetSourceScreenshot's RGB is premultiplied by alpha; straight RGBA (as CDP screenshots) for the dissolve scorer,
+    which premultiplies again (round trip within 0.5)."""
+    a = img[..., 3:4].astype(np.float32)
+    rgb = np.where(a > 0, np.minimum(np.rint(img[..., :3] * 255.0 / np.maximum(a, 1.0)), 255.0), 0.0)
+    return np.concatenate([rgb.astype(np.uint8), img[..., 3:4]], axis=2)
+
+
+@contextlib.contextmanager
+def source_shots(port: int, password: str) -> Iterator[Callable[[], np.ndarray]]:
+    """H x W x 4 premultiplied RGBA renders of scene `AK` via obs-websocket (an independent scene render, not the DeckLink
+    wire), over one connection."""
+    def shot() -> np.ndarray:
         data = ws.request("GetSourceScreenshot", {"sourceName": "AK", "imageFormat": "png", "imageWidth": 1920,
                                                   "imageHeight": 1080})["imageData"]
-    return np.array(Image.open(io.BytesIO(base64.b64decode(data.split(",", 1)[-1]))).convert("RGBA"))
+        return np.array(Image.open(io.BytesIO(base64.b64decode(data.split(",", 1)[-1]))).convert("RGBA"))
+
+    with mock.patch.object(obs_websocket, "_MAX_MESSAGE_BYTES", 64 * 1024 * 1024), ObsWebsocket(port, password, timeout=10.0) as ws:
+        yield shot
+
+
+def obs_screenshot(port: int, password: str) -> np.ndarray:
+    with source_shots(port, password) as shot:
+        return shot()
 
 
 def apply_kb(kind: str) -> dict[str, Any]:
@@ -629,6 +664,111 @@ def mo3_script(gl: str, arm: str, armed: dict[str, Any]) -> Callable[[Session], 
 
 def mo3_arms(gl: str) -> dict[str, str]:
     return mm_opacity_probe.ALL_ARMS if gl == "auto" else mm_opacity_probe.ARMS
+
+
+def dissolve_calibration(n: float | None) -> dissolve_probe.Calibration | None:
+    """DX-2's CEF thresholds from n = opaque-off's max mid-frame residual, unclamped; None (INCONCLUSIVE) past a cap."""
+    if n is None or not math.isfinite(n) or n < 0:
+        return None
+    up = math.ceil(n)
+    cal = dissolve_probe.Calibration(tau=float(max(dissolve_probe.TAU, up + 1)), complement=dissolve_probe.COMPLEMENT_TOL + up,
+                                     no_dip=dissolve_probe.NO_DIP_MIN - up)
+    return cal if cal.tau <= DX2_TAU_MAX and cal.complement <= DX2_COMPLEMENT_MAX and cal.no_dip >= DX2_NO_DIP_MIN else None
+
+
+def opaque_off_calibration(record: dict[str, Any], images: dict[str, np.ndarray]) -> dict[str, Any]:
+    scored = dissolve_probe.score_arm(record, images, dissolve_probe.CEF.arm("opaque-off"), profile=dissolve_probe.CEF)
+    model = scored["checks"].get("model", {}).get("verdict")
+    n = max(scored["midResiduals"]) if model in ("PASS", "FAIL") and scored["midResiduals"] else None
+    cal = dissolve_calibration(n)
+    return {"n": n, "model": model, "problems": scored["problems"], "calibration": asdict(cal) if cal else None}
+
+
+def dissolve_evidence(record: dict[str, Any]) -> list[str]:
+    output = record.get("output") or {}
+    continuity = output.get("continuity") or {}
+    missing = [name for name, value in (("continuity", continuity.get("mode")), ("G2 mode", (continuity.get("glReplay") or {}).get("mode")),
+                                        ("served digest", (output.get("mmOpacity") or {}).get("sha256"))) if not value]
+    if (record.get("g2") is not None) if (continuity.get("glReplay") or {}).get("mode") == "off" else (
+            not isinstance(record.get("g2"), str) or not record["g2"]):
+        missing.append("G2 state")
+    missing += [f"colour tuple of {v.get('src')}" for v in (record.get("dump") or {}).get("vids") or [] if v.get("rv")
+                and not (isinstance(v.get("tuple"), str) and dissolve_probe.COLOUR_TUPLE.fullmatch(v["tuple"]))]
+    return missing
+
+
+def await_input(transport: Any, timeout_s: float = 10.0) -> float:
+    """CEF drops CDP key input for a moment after a new document loads; a lone Shift keyUp (the player handles keydown
+    only) is resent until the page sees one. Returns the seconds it took."""
+    transport.evaluate("window.__obedDxInput=0;document.addEventListener('keyup',function f(e){window.__obedDxInput=1;"
+                       "document.removeEventListener('keyup',f,true)},true)")
+    started = time.monotonic()
+    while not transport.evaluate("window.__obedDxInput"):
+        if time.monotonic() - started > timeout_s:
+            raise RuntimeError(f"page saw no key input within {timeout_s} s")
+        transport.call("Input.dispatchKeyEvent", type="keyUp", key="Shift", code="ShiftLeft", windowsVirtualKeyCode=16)
+        time.sleep(0.1)
+    return round(time.monotonic() - started, 2)
+
+
+def pre_start_gaps(record: dict[str, Any]) -> list[float] | None:
+    """The rAF gaps `dissolve_probe.raf_gaps` allows (pending animations) while the transition DOM is present."""
+    try:
+        return [round(g, 1) for g in dissolve_probe.raf_gaps([r for r in record["dump"]["raf"] if "eff" in r])[1]]
+    except (KeyError, TypeError):
+        return None
+
+
+def dissolve_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] | None) -> dict[str, Any]:
+    """One DX-2 session on the engine page; the record and images go to `<shots>/runs/<name>/` (`dissolve_probe` layout)."""
+    arm = dissolve_probe.ARMS[name]
+    record: dict[str, Any] = {"arm": name, "load": os.getloadavg()[0], "headlessBefore": mm_opacity_probe.headless_chromes()}
+    images: dict[str, np.ndarray] = {}
+    host: LiveOutputHost | None = None
+    started = time.monotonic()
+    try:
+        resolved = dissolve_probe.resolve(arm, ctx["shots"] / "scratch", decision, tag=name)
+        record.update(resolved.fields())
+        host = LiveOutputHost(resolved.root, resolved.slides, resolver=resolved.resolver, transport_factory=dissolve_probe.hooked_transport(),
+                              attach_endpoint=ctx["endpoint"], attach_match=ctx["target"], bridge="obs-managed", output_rate=ctx["rate"],
+                              continuity=arm.continuity, gl_replay="off", mm_opacity="auto" if arm.mode == "on" else "off")
+        with dissolve_probe.serving(arm.splice):
+            host.start()
+        record["page"] = "alpha" if host.output.get("alpha") else "screen"
+        record["output"] = {k: host.output.get(k) for k in ("mmOpacity", "continuity", "placement")}
+        record["inputLiveS"] = await_input(host._require_transport())
+        record["g2"] = ((host._require_transport().evaluate(GL_REPLAY_READ_JS) or {}).get("api") or {}).get("state")
+        raw: dict[int, np.ndarray] = {}
+        with source_shots(*ctx["creds"]) as shot:
+            driven, images = dissolve_probe.drive(host, arm, resolved.target, lambda: raw.setdefault(id(img := shot()), img))
+        images = {k: unpremultiply(v) if raw.get(id(v)) is v else v for k, v in images.items()}
+        record.update(driven)
+        if arm.capture == "cut":
+            record["cast"] = [{"name": s["name"], "t0": s["t0"], "t1": s["t1"]} for s in record.get("shots") or []]
+        missing = dissolve_evidence(record)
+        if missing:
+            record["error"] = f"DX-2 evidence missing: {'; '.join(missing)}"
+    except Exception:
+        record["error"] = traceback.format_exc()
+    finally:
+        if host is not None:
+            try:
+                host.stop()
+            except Exception as exc:
+                record["stopError"] = str(exc)
+    dissolve_probe.save_run(ctx["shots"], name, record, images)
+    out: dict[str, Any] = {"session": name, "runDir": str(ctx["shots"] / "runs" / name), "page": record.get("page"),
+                           "output": record.get("output"), "g2": record.get("g2"),
+                           "colourTuples": [[v.get("src"), v.get("tuple"), v.get("err")] for v in (record.get("dump") or {}).get("vids") or []],
+                           "inputLiveS": record.get("inputLiveS"), "preStartGapsMs": pre_start_gaps(record),
+                           "timingS": {"script": round(time.monotonic() - started, 2)}}
+    if record.get("error"):
+        out["fatal"] = str(record["error"])[-3000:]
+        print(f"    [{name}] {out['fatal']}", flush=True)
+    if name == "opaque-off":
+        out["calibration"] = opaque_off_calibration(record, images)
+        print(f"    [{name}] DX-2 calibration {out['calibration']}", flush=True)
+    return out
 
 
 def hidden_arm_script(s: Session) -> None:
@@ -1415,6 +1555,41 @@ def mmo_cef_gates(run: dict[str, Any]) -> dict[str, Any]:
     return {"MO-3": gate(checks), "probeVerdict": verdict}
 
 
+def dissolve_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dict[str, Any]:
+    sessions = {s["session"]: s for s in run["sessions"]}
+    checks: list[dict[str, Any]] = []
+    check(checks, "every session ran", sorted(sessions), set(sessions) == set(DISSOLVE_ARMS), ",".join(DISSOLVE_ARMS))
+    calibration = (sessions.get("opaque-off") or {}).get("calibration") or {"n": None, "calibration": None}
+    derived = dissolve_calibration(calibration.get("n")) if calibration.get("model") in ("PASS", "FAIL") else None
+    cal = derived if derived is not None and calibration.get("calibration") == asdict(derived) else None
+    check(checks, "calibration (opaque-off n)", calibration, cal is not None,
+          f"n <= 4: tau <= {DX2_TAU_MAX}, complement <= {DX2_COMPLEMENT_MAX}, no dip >= {DX2_NO_DIP_MIN}")
+    runs = {name: (json.loads((Path(s["runDir"]) / "record.json").read_text()), dissolve_probe.RunImages(Path(s["runDir"])))
+            for name, s in sessions.items() if s.get("runDir") and (Path(s["runDir"]) / "record.json").is_file()}
+    held = False
+    for name in DISSOLVE_ARMS:
+        record = runs[name][0] if name in runs else {}
+        placement = (record.get("output") or {}).get("placement") or {}
+        check(checks, f"{name}: output.placement", placement,
+              placement.get("grant") is None and placement.get("reason") == "attached", "grant null, reason attached")
+        holders = ((record.get("dump") or {}).get("first") or {}).get("holders")
+        held |= bool(holders)
+        skip = name.startswith("cef-skip")
+        check(checks, f"{name}: no bound holder", holders, holders == [] if skip else not holders,
+              "[] (a published take)" if skip else "none")
+    verdict = dissolve_probe.score_runs(runs, decision, cal or dissolve_probe.Calibration(), profile=dissolve_probe.CEF)
+    for name, g in verdict["gates"].items():
+        reported = g["verdict"] in ("REPORTED", "N/A")
+        check(checks, name, [g["verdict"], g.get("reasons") or g.get("problems")], g["verdict"] == "PASS" or reported, "PASS",
+              enforced=not reported)
+    for name, outcome in verdict["arms"].items():
+        check(checks, f"arm {name}", outcome, outcome == "MATCH", "MATCH")
+    reasons = ([] if cal else [f"calibration: opaque-off n {calibration['n']}"]) + (
+        ["round INCONCLUSIVE"] if verdict["overall"] == "INCONCLUSIVE" else [])
+    invalid = f"DX-2 INCONCLUSIVE: {'; '.join(reasons)}" if reasons and not held else None
+    return {"DX-2": gate(checks, invalid), "dissolveCalibration": calibration, "dissolveVerdict": verdict}
+
+
 def mmo_summary(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """MO-2 across the per-rate takes: both rates ran, and each rate's own CvC read <= 2 (it gates that take; tau and tau_key
     are per take)."""
@@ -1746,6 +1921,8 @@ def sessions_for(arm: str, ctx: dict[str, Any], args: argparse.Namespace, armed:
                 run_session("off-2", failsafe_script(False), ctx, gl_replay="off")]
     if args.precheck:
         return [run_session("precheck", precheck_script(armed), ctx)]
+    if arm == "dissolve":
+        return [dissolve_session(name, ctx, args.decision) for name in DISSOLVE_ARMS]
     return [run_session("soak", soak_script(args.soak_minutes, armed, fixture_loops(ctx["fixture"])), ctx),
             run_session("soak-off", soak_off_script, ctx, gl_replay="off")]
 
@@ -1939,6 +2116,11 @@ def arm_gates(arm: str, run: dict[str, Any], args: argparse.Namespace, armed: di
         return gates
     if arm == "mmo-cef":
         return mmo_cef_gates(run)
+    if arm == "dissolve":
+        gates = dissolve_gates(run, args.decision)
+        if gates["DX-2"]["invalid"]:
+            invalid.append(gates["DX-2"]["invalid"])
+        return gates
     if args.precheck:
         gates = precheck_gates(run, args.fixture)
         if gates["precheck"]["invalid"]:
@@ -2058,9 +2240,10 @@ def score_mmo(root: Path) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Live qualification of the managed OBS (launches OBS; one OBS at a time).")
-    parser.add_argument("--arm", choices=("2x", "positive", "both", "g2", "failsafe", "soak", "mmo", "mmo-cef"), default="both")
+    parser.add_argument("--arm", choices=("2x", "positive", "both", "g2", "failsafe", "soak", "mmo", "mmo-cef", "dissolve"),
+                        default="both")
     parser.add_argument("--rate", type=int, choices=sorted(managed_obs.RATES), default=25, help=f"ignored for mmo ({MMO_RATES})")
-    parser.add_argument("--takes", type=int, default=2, help="ignored (1) for failsafe, soak, mmo and mmo-cef")
+    parser.add_argument("--takes", type=int, default=2, help="ignored (1) for failsafe, soak, mmo, mmo-cef and dissolve")
     parser.add_argument("--launch", choices=("hidden", "shown", "projector"), default="hidden", help="shown = hidden launch, then Show OBS once ready; projector = hidden launch + a windowed program projector (eyeball)")
     parser.add_argument("--kb", choices=sorted(KB_SHAS), help="known-bad control: frozen|oldbytes (module splice), latelost (g2)")
     parser.add_argument("--fixture", type=Path, help=f"soak fixture root (default {SOAK_FIXTURE}); other arms: {FIXTURE} (default) or "
@@ -2071,9 +2254,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--home", type=Path, default=DEFAULT_HOME, help="scratch ManagedObs home (never under ~/Desktop)")
     parser.add_argument("--keep-recordings", action="store_true", help="keep the lossless recordings (~0.5 GB per session)")
     parser.add_argument("--score", type=Path, metavar="DIR", help="re-score the saved MO-2 takes under DIR/runs (no OBS)")
+    parser.add_argument("--decision", type=Path, help="dissolve: the Q0b decision record JSON (L, counterEncoding, toneEncoding)")
     args = parser.parse_args(argv)
     if args.score is not None:
         return score_mmo(args.score.expanduser().resolve())
+    if args.decision is not None and args.arm != "dissolve":
+        parser.error("--decision applies to --arm dissolve only.")
+    if args.arm == "dissolve" and args.fixture is not None:
+        parser.error("--arm dissolve serves dissolve_probe's own decks; --fixture does not apply.")
+    args.decision = json.loads(args.decision.read_text()) if args.decision else None
     args.kb_splice = None
     if args.arm == "soak":
         args.fixture = (args.fixture or SOAK_FIXTURE).expanduser().resolve()
@@ -2111,7 +2300,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.kb:
         args.kb_splice = apply_kb(args.kb)
     armed = None
-    if args.arm not in ("2x", "positive", "both"):
+    if args.arm not in ("2x", "positive", "both", "dissolve"):
         armed = fixture_facts(args.fixture)
         print("ARMED", json.dumps({k: armed[k] for k in ("instanceRect", "movieSlot", "overrideSlots", "assetKeys")}), flush=True)
         if args.arm == "mmo":
@@ -2120,7 +2309,7 @@ def main(argv: list[str] | None = None) -> int:
             print("MO-2 ROI_top", [int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())], int(top.sum()), "px", flush=True)
     (args.out / "runs").mkdir(parents=True, exist_ok=True)
     arms = ("2x", "positive") if args.arm == "both" else (args.arm,)
-    takes = 1 if args.arm in ("failsafe", "soak", "mmo", "mmo-cef") else args.takes
+    takes = 1 if args.arm in ("failsafe", "soak", "mmo", "mmo-cef", "dissolve") else args.takes
     rates = MMO_RATES if args.arm == "mmo" else (args.rate,)
     awake = subprocess.Popen(["caffeinate", "-dimsu", "-w", str(os.getpid())])
     runs: list[dict[str, Any]] = []

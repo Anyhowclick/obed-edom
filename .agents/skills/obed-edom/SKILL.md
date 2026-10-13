@@ -786,7 +786,19 @@ for the parked `iwa-surgical-write-generator` feature.
   observation-only player. Precedence = ctor `mm_opacity` (`auto`|`off` exact, else `LiveHostError`) → env
   `OBED_LIVE_MM_OPACITY` (trimmed, any case; `off`|`auto`, else refuse) → `auto`, on every output (HDMI, managed OBS,
   external attach), independent of continuity and GL replay. Report: `output.mmOpacity = {mode: on|off, sha256}` (served
-  `main.js`); start log `mmOpacityPreference`. `RUNTIME_VERSION` stays 2. G2 bytes are unchanged; with the patch on the
+  `main.js`); start log `mmOpacityPreference`. `RUNTIME_VERSION` stays 2. Slide transitions
+  (D1–D4, `keynote_live_dissolve_crossfade.plan.md`): the same switch gives Dissolve a true cross-fade, a `none` cut a
+  clean swap (every output, raw export and Build Preview included), and admitted outgoing movies a frozen snapshot of
+  their current frame that fades with the slide; `off` restores the export's pop-in, double slide and jump to the baked
+  opening frame. The freeze needs the host grant `window.__obedPlacement === "snap"` (plan §3.3, decision 15): only a
+  `LiveOutputHost` that launched its Chrome (not attach mode), `Browser.getVersion` major in `QUALIFIED_SNAP_MAJORS`
+  (154) and `gpu_compositing: "enabled"`, through a first-run private channel, context-bound round trip, revoked at
+  `observe()` on fingerprint change. Managed OBS/CEF (attach), raw export and Build Preview (no host, decision 14) keep
+  today's jump; the CEF placement probe is a follow-up PR. The take is identity-tone (the GPU mid-tone step at the
+  freeze is a known limit; Q5 open pending W5) and geometry-guarded: DPR 1, 1.5 or 2, stage scale 1, translation-only
+  chains, integer `left`/`top`; scaled stages keep the jump (plan §3.2, §12). Report `output.placement = {grant, reason,
+  product, gpuCompositing, at}`, reason ∈ `granted`, `attached`, `unqualified-version`, `software-compositing`,
+  `version-unavailable`, `channel-compromised` (output stays hidden, `show` refused), `revoked-fingerprint`. G2 bytes are unchanged; with the patch on the
   P2 fixture reports exactly `opacityUnproven = [{4, "size"}]` (no override: LIVE replays the player's own 0.2947) and
   `occludedBands` 0/128 (patch off: `[]`, 20/128). `frameLen` (settled-frame call count) reads 96 on / 88 off when the
   settle frame carries every uniform write, but the player's uniform cache makes it timing-dependent (headless 85/86 off):

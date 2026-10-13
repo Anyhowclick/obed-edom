@@ -97,7 +97,7 @@ def raw_run(samples, prepaint=None, lifecycle=(), *, variant="V8", served=None, 
 
 def test_variants_slice_the_shipped_table_with_r8_last() -> None:
     table = live_runtime._MM_OPACITY_REPLACEMENTS
-    assert dx.variant_replacements("V8") == tuple(table)
+    assert dx.variant_replacements("V8") == tuple(table[:8])
     assert dx.variant_replacements("V7") == tuple(table[:7])
     assert dx.variant_replacements("V5") == tuple(table[:5])
     assert dx.variant_replacements("V5+8") == tuple(table[:5]) + (table[7],)

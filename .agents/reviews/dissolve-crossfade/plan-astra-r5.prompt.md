@@ -1,0 +1,26 @@
+NON-INTERACTIVE. Do not propose a plan, do not ask for approval, do not edit any file. You are ROUND 5 of the critique on a written implementation plan. Read files, verify claims, output findings only.
+
+# Target
+Plan rev 6 (commit 218308c3; earlier: rev 5 e5c644bb, rev 4 4ffcd8ad, rev 3 f3bd8b55, rev 2 cd289a05, rev 1 8e572864; `git diff e5c644bb 218308c3 -- .agents/plans/keynote_live_dissolve_crossfade.plan.md` shows the latest fold):
+/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/.agents/plans/keynote_live_dissolve_crossfade.plan.md
+Repo worktree (origin/main 1589d096): /Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851
+Your earlier rounds and prompts: .agents/reviews/dissolve-crossfade/plan-astra-r{1,2,3,4}.md in that worktree.
+Main checkout (git-ignored): /Users/anyhowclick/Desktop/work/obed-edom/output/ — players output/fixtures/p2-recovery/html-adversarial/html-unmodified/assets/player/main.js (e9b2fad4) and output/fixtures/keynote-player-17c0c938/main.js (17c0c938); planning scratch (current builder dpatch9.py; dpatch7/8 earlier Q7 variants; Node checks, result JSON) at output/evidence/s2-dev/dissolve-alpha-2026-10-11/plan-2026-10-11/{planner,rootcause,coord}/.
+S2 branch: git refs only (origin/claude/s2-detach-fix).
+
+# Context
+Keynote's export player draws `apple:dissolve` (and the `none` cut) with its CSS renderer over two flattened textures; with fill-less textures the incoming slide pops in (cut: both slides for a frame). The plan: in-memory, count-checked, sha-pinned `patch_player` replacements D1–D4 (owner rule: never modify main.js on disk; unknown players refused): commit-before-construct cross-fade (verified `plus-lighter`/`isolation` rules for the ids the player will allocate + mirrored incoming fade), a mirrored cut, and F3 — the outgoing movie freezes on its current frame and fades with its slide (owner's observation of the Keynote app), taken by drawImage snapshot in `jumpToScene_partFour` (D4) and attached inside the outgoing fading wrapper (D3), add-only, never touching the <video>.
+Owner decisions 1–7 are FINAL (see §12): fold into mm_opacity; every output; F1 cut in this patch, F2 follow-up; F3 in this patch, splitting declined; Q5 remove the ~11/255 mid-tone freeze step player-only via a fixed per-channel tone map `L` with a measured decision rule and an identity fallback (moving the live <video> deferred until after S2); Q6 player-only on main, stopping main's bridged / S2's held decoder at the outgoing transition start is a follow-up PR after S2 merges (m-bridge report-only here); Q7 redraw overlying plain canvases into the snapshot under a narrow whitelist. Do not relitigate them; DO flag if the plan implements one incorrectly or if its decision rule cannot be evaluated as written.
+Owner rules: minimal tests (max coverage, fewest tests, parametrized); null + positive controls for every instrument; integrity failures INCONCLUSIVE and never satisfy an expected FAIL; keep it simple — prefer conservative skips (documented residuals) over reproducing complex cases.
+The owner plans to stop this critique loop at round 7. Prioritise: findings that would make the implementation wrong, unsafe, or the acceptance unable to detect a failure come first; do not re-raise closed items or relitigate final owner decisions; mark pure polish as nit.
+
+# Your job
+A. Status of every round-4 finding (r4-1 … r4-7) under rev 6: closed / partly closed / open / regressed, with evidence.
+B. NEW findings on rev 6, verified against primary sources (re-run cheap checks in memory/stdout only: anchor counts in both players, containment including self, order independence of R1–R5 / R6–R8 / D1–D4, `node --check` of the patched players from dpatch9.py). Focus on what rev 6 added: the narrowed plain-bitmap whitelist and paint-order rule (any remaining admitted case a drawImage snapshot does not reproduce? any rule that would wrongly reject every real movie?), the planner's three stated departures from the coordinator's steer (decoration bans on the movie/redrawn canvases only, not ancestors; admitted later movie may overlap an earlier one; non-BT.709 movies skipped), the tone map `L` (math, where it is applied relative to the opacity check and redraw, colour-space detection in the browser, the Q0b decision rule and its controls), the foreground-preservation reference (`m-fg`, `m-fg-omit`) and its independence, the total-D4-time budget, `m-bridge-off` in DX-2, the cut gate wording, test/stream disjointness and the minimal-tests rule.
+C. CLOSING SWEEP: one inventory table over every verifiable claim class in rev 6 with status VERIFIED / FINDING # / NOT VERIFIABLE STATICALLY (what measurement settles it; scheduled where).
+
+# Output format
+Part A: table r4 # | status | evidence | remaining fix wording.
+Part B: numbered NEW findings, most severe first: **Severity** (blocker / major / minor / nit), **Class** (new class / closed class / edge case), plan section, claim, evidence (file:line or byte offset, command summary), exact fix wording.
+Part C: the inventory table.
+End with a one-line verdict: ready for owner review / ready for owner review after listed fixes / needs another planning pass.

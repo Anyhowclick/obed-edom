@@ -1,0 +1,59 @@
+**Re-plan before qualification, keeping F3 in this patch.** The analytic LUT is contradicted by the software-path evidence; CEF agreement alone cannot make it universal. Preserve owner decisions 1–7, including the identity fallback and the separate bridge follow-up. References below use the [rev-9 plan](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/.agents/plans/keynote_live_dissolve_crossfade.plan.md) and [Q0b evidence index](/Users/anyhowclick/Desktop/work/obed-edom/output/evidence/s2-dev/dissolve-alpha-2026-10-11/q0b-2026-10-11/README.md).
+
+**1. Cost: optimise before changing the 50 ms bound.** Four of five accepted DSK 7→8 takes exceed it. The debug per-movie figures identify expensive candidates, but do not isolate drawing, readback, LUT and foreground costs.
+
+- **A — Preserve the algorithm, remove unnecessary work.** In §3.2/code, identity `L` skips RGB assignments and `putImageData`; retain `getImageData` and the alpha scan. Prototype a source-resolution crop of the admitted region, preserving sampling coordinates and necessary edge padding. §9 retains ≤50 ms. **Risk:** cropping may save little when the entire movie is visible. **Validate:** separate stage timings in debug builds; compare pixels, alpha rejection, foreground order and frame index; benchmark exact release bytes over repeated fresh launches.
+- **B — Move the LUT into a canvas/SVG filter.** Replace the RGB loop with a qualified `feComponentTransfer` table, applied to the movie before foreground redraw; retain opacity verification. Revise §3’s construction and §9’s tone/performance controls. **Risk:** different filtering, rounding and deferred GPU work; lower `__obedTakeMs` may merely move cost into presentation. Explicitly use sRGB: SVG filters default to linearRGB. **Validate:** full tone chart, software/CEF paths, first-frame latency and foreground invariance. [Filter specification](https://www.w3.org/TR/filter-effects-1/#feComponentTransferElement)
+- **C — Raise the bound after measuring presentation impact.** Change §9.0/§9.1 and scorer boundaries; §3’s algorithm remains unchanged. **Risk:** accepting a longer synchronous stall—50 ms already spans three 60 Hz intervals. **Validate:** repeated cold/warm takes, actual advance-to-first-transition latency and missed output frames in CEF; choose the bound from those results, not “51.9 rounded up.”
+
+**Recommendation: A first, retaining 50 ms.** Identity gives a low-risk optimisation, although savings remain unmeasured. Do not skip opacity readback merely because `L` is identity: it currently proves the opaque-cover invariant ([implementation](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/src/obed_edom/live_runtime.py:136)). Worker-based OffscreenCanvas would require changing the same-task take/attach contract; per-movie skipping weakens F3 and cannot interrupt an already expensive synchronous call.
+
+**2. Gate miss: preserve preview coverage with a bounded exterior-paint rule.** The [raw-page scan](/Users/anyhowclick/Desktop/work/obed-edom/output/evidence/s2-dev/dissolve-alpha-2026-10-11/q0b-2026-10-11/runs/eng/p2-r9dbg-scan/rec.json) confirms visible navigator text/images outside the viewport.
+
+- **A — Stage admission plus conservative exterior checking.** Revise §3.2/code to validate stage content and ancestors, while retaining an exterior occlusion pass. Prune an outside subtree only when its **paint extent** is proved disjoint from the visible stage, for example through a validated clipping ancestor. §9 adds raw, Build Preview and host engagement cases. **Risk:** border-box nonintersection alone misses overflowing text, shadows, pseudo-elements and escaping descendants. **Validate:** navigator closed/open, transformed descendants, overflowing paint, and an overlapping video outside `#stage`.
+- **B — Hide the navigator in preview as the host does.** Add equivalent preview CSS; retain the whole-page gate. Update §§3–4 and §9’s preview expectations. **Risk:** removes preview navigation UI and does not solve other harmless off-screen subtrees. **Validate:** preview navigation through supported controls and real holder engagement.
+- **C — Make F3 host-only.** Keep current admission behaviour; revise §§3–5/§9 to state that preview receives D1/D2 but retains stock movie-frame behaviour. **Risk:** contradicts the owner’s every-output scope and creates preview/output divergence. **Validate:** explicit expected admission/non-admission on both surfaces.
+
+**Recommendation: A.** It preserves §4 and owner decision 2. The exterior check must retain the protection required by §§1.4/6.2: a bare `#stage` scan could overlook main’s bridged decoder. Q0b establishes the navigator’s location, not yet the complete confinement proof.
+
+**3. Holder edges: try matching the output sampling grid before relaxing acceptance.** Geometry is close, but the pixel mismatch is real. Its magnitude at larger geometries is not yet a calibrated allowance: [geom_analyze.py](/Users/anyhowclick/Desktop/work/obed-edom/output/evidence/s2-dev/dissolve-alpha-2026-10-11/q0b-2026-10-11/scripts/geom_analyze.py:1) approximates incoming-texture scaling with Pillow and estimates progress inside the movie region.
+
+- **A — Adopt a measured resampling criterion.** Leave §3’s holder representation unchanged. Replace §9.0’s universal pixel bound with flat-area ≤τ, plus an independently calibrated edge envelope covering kernel, scale and subpixel phase differences. Bound edge width, displacement and affected area as well as amplitude. **Risk:** a permissive envelope can conceal shifted or damaged foreground. **Validate:** derive the model from separate calibration patterns; test held-out scales and footage; shifted, omitted, doubled and swapped foreground must still fail.
+- **B — Render the snapshot onto the device-pixel content grid.** Change §3/code from natural-size backing plus CSS scaling to backing dimensions derived from the screen content box and DPR, preserving fractional origin, clips and foreground coordinates. Keep §9’s strict criterion initially. **Risk:** native video and canvas may still use different sampling/conversion orders; DSF 2 increases work and memory. Preserve the existing source-alpha proof unless separately replaced. **Validate:** paused live versus browser-rendered holder at 1080, letterbox, 2560 and DSF 2, followed by the cost gate.
+
+**Recommendation: B first.** It may reduce both downscaling work and edge mismatch. It cannot promise native equivalence: the canvas specification leaves scaling algorithms implementation-dependent. [Canvas specification](https://html.spec.whatwg.org/multipage/canvas.html)
+
+Before deciding whether A is necessary, replace approximate reference resampling with browser-rendered reference captures and obtain progress outside media, as §9.1 specifies. Use screenshot-domain residuals, or propagate demixing uncertainty by `1/(1−e)`. Do not turn the observed 183/250 LSB maxima into thresholds. The [geometry results](/Users/anyhowclick/Desktop/work/obed-edom/output/evidence/s2-dev/dissolve-alpha-2026-10-11/q0b-2026-10-11/runs/geom_analysis.jsonl) also contain flat-area failures that edge masking alone cannot resolve.
+
+**4. Tone path: identity is the presently justified fallback.** The [decision record](/Users/anyhowclick/Desktop/work/obed-edom/output/evidence/s2-dev/dissolve-alpha-2026-10-11/q0b-2026-10-11/runs/decision_record_q0b1.json) assigns the same tagged-H.264 tuple to two paths requiring different corrections.
+
+- **A — Qualify a compositing-path selector.** Replace tuple→`L` with qualified path+tuple→`L`, defaulting unknown paths to identity. A credible implementation could use host-side compositor captures during startup calibration and pass the result into the player. Revise §§3/9 and the player-only boundary. **Risk:** calibration lifetime, fallback after GPU changes, and preview parity. **Validate:** two fresh launches per supported path, acceleration on/off, all decodable encodings, and invalidation when path state changes.
+- **B — Use a page-side feature or tiny pixel probe.** Add a selector before taking the snapshot; §9 must test deliberate misclassification. **Risk:** WebGL availability does not identify native-video compositing, and another `drawImage` samples the snapshot path—not compositor-painted live pixels. Chromium supports software-backed WebGL. **Validate:** require agreement with independent compositor captures; reject the approach if it cannot distinguish tagged H.264 GPU/software. [Chromium GPU modes](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/content/browser/gpu/fallback.md)
+- **C — Ship identity `L`.** Set the constant accordingly, use the identity fast path, retain conservative `Q`, and apply §9.1’s report-only tone row. **Risk:** the measured GPU midtone step remains. **Validate:** software stays unchanged; GPU residual is recorded and shown under §9.3; freeze index, fading and foreground remain blocking.
+
+**Recommendation: C for the current patch.** This uses the explicitly accepted §12.5 fallback while retaining F3. Because Q5 prioritises removing the step, give A a focused feasibility measurement before finalising that decision; do not substitute B’s heuristic or treat two successful accelerated CEF launches as evidence for software compositing. OBS acceleration-off equivalence remains a hypothesis.
+
+**5. CEF: characterise early, qualify final bytes later.**
+
+- **A — Early preflight, then final DX-2.** Extend §9.0 measurements now; leave §3 provisional until the results are recorded. After implementation, run §9.2 on final hashes. **Risk:** requires another session, but exposes design-changing results before further implementation.
+- **B — Finish the identity-based revision, then run CEF once as a complete qualification phase.** No new §3 mechanism; retain final §9.2 coverage and report tone. **Risk:** CEF-specific admission, sampling or cost failures arrive late and force another re-plan.
+
+**Recommendation: A.** The preflight and final gate must establish:
+
+- Actual OBS/CEF version, acceleration configuration, served digest, continuity/G2 state and codec provenance.
+- Tone behaviour across the required encodings and **two fresh launches**; any non-identity selector must distinguish software/unknown paths. Undecodable HEVC needs decode evidence.
+- Real holder engagement, last-presented-frame binding, foreground order, geometry and **DSK 7→8 cost**—add that worst case explicitly to CEF coverage.
+- The §9.2 candidate/control outcomes and calibration caps; `n > 4` remains INCONCLUSIVE. Keep bridge failure as the documented Q6 residual.
+- The separate §9.3 owner-visible check. Headless success does not replace it.
+
+The **owner’s re-plan decisions** are the revised gate proof or preview scope; holder representation or edge acceptance; alternative LUT machinery/path calibration; and any changed latency bound or budget-based skipping. Product changes must be reflected in byte-exact §3 and re-pinned.
+
+**Measurement-only follow-ups** include stage-level profiling, browser-native reference captures, resampling calibration, CEF characterisation and completing existing controls. Selecting identity `L` is already authorised by §12.5; it is not a fresh scope concession.
+
+For the next session:
+
+1. Bind the starting bytes and evidence hashes; retain the five failures as open.
+2. Run CEF preflight and targeted cost/reference measurements on current bytes.
+3. Record the owner’s revised design: gate, sampling strategy, tone policy and unchanged-or-justified cost bound.
+4. Implement the selected changes, regenerate pins and update §9 controls.
+5. Repeat Q0b on final bytes, then DX-1, regressions, DX-2 and DX-3. Close the recorded D2 class-count INCONCLUSIVE and incomplete lifecycle/stock-twin comparisons; the dry run is not complete qualification.

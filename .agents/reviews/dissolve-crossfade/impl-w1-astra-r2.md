@@ -1,0 +1,41 @@
+Reviewed `dc4dad8b`; product bytes are unchanged from `debfc685`. No tests run. Mutation survivors below are static predictions for the behavioral checks, assuming injection after patching or corresponding repinning.
+
+**Round 1 closures**
+
+| Finding | Status | Evidence |
+|---|---|---|
+| 1. Video guard | **NOT CLOSED** | Style writes and both videos are now guarded, but the method list remains finite; unknown calls can disappear into the product’s catch. [test_live_runtime.py:1038](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/tests/test_live_runtime.py:1038), [test_live_runtime.py:1053](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/tests/test_live_runtime.py:1053). Concrete survivor: S1 below. |
+| 2. Copied timing | **CLOSED** | Every accepted incoming animation is compared with the whole outgoing animation with reversed endpoints; duration, begin-time and fill-mode controls are asserted. [test_live_runtime.py:918](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/tests/test_live_runtime.py:918), [test_live_runtime.py:1400](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/tests/test_live_runtime.py:1400). |
+| 3. Optional fixtures suppress mandatory coverage | **CLOSED** | Construction uses 16 committed transitions plus the inline cut; freeze-deck cases load the committed fixture. Only census depends on ignored exports. [test_live_runtime.py:1388](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/tests/test_live_runtime.py:1388), [test_live_runtime.py:1410](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/tests/test_live_runtime.py:1410), [test_live_runtime.py:1440](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/tests/test_live_runtime.py:1440). |
+| 4. Scene/engagement attachment guards | **CLOSED** | `attachOtherScene` and `attachUnengaged` require no attachment; every row asserts slot clearing. [test_live_runtime.py:1149](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/tests/test_live_runtime.py:1149), [test_live_runtime.py:1436](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/tests/test_live_runtime.py:1436). |
+| 5. True 2560 viewport | **CLOSED** | Separate clipping and 2560×1440 rows now exist; the latter requires the full 267.75-pixel holder height. [test_live_runtime.py:1134](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/tests/test_live_runtime.py:1134), [test_live_runtime.py:1142](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/tests/test_live_runtime.py:1142). |
+
+**CLOSING SWEEP**
+
+**S1 — major; carried r1 #1. Unstubbed video methods remain invisible.**  
+At [test_live_runtime.py:1040](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/tests/test_live_runtime.py:1040), only existing function-valued members are recorded. Append `v.toggleAttribute("hidden",true)` after `ad.push(v)` in the product at `src/obed_edom/live_runtime.py:143`. In the stub, the undefined method throws after the holder is retained; the catch swallows it. In a browser, it mutates the video. **Rows:** `success`, `overlappingVideos`. **Exact fix:** record unknown video/style member access before it can throw, provide missing method stubs, and add this end-of-take forbidden-call control.
+
+**S2 — major; CLASS: new class. Accepted-copy validation omits the copied content.**  
+[test_live_runtime.py:925](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/tests/test_live_runtime.py:925) checks animation, selected initial-state fields and outgoing identity. Add `texture:o.texture` to the incoming copy at `src/obed_edom/live_runtime.py:76`: the incoming displays the outgoing texture while every recorded construction result remains unchanged. **Rows:** committed accepted Dissolves and inline cut. **Exact fix:** deep-compare the entire returned tree with an independently constructed expected tree permitting only the specified incoming state and animation changes; retain the outgoing-reference assertion.
+
+**S3 — major; CLASS: closed class. Geometry assertions omit the snapshot canvas.**  
+Only holder geometry is returned at [test_live_runtime.py:1081](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/tests/test_live_runtime.py:1081) and [test_live_runtime.py:1291](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/tests/test_live_runtime.py:1291). Change `t.width=cw*kx+"px"` to `t.width=cw*kx/2+"px"` at product line 143: the snapshot shrinks without changing any assertion. **Rows:** `stage2560`, `letterboxedVideo`, `clippedPanel`. **Exact fix:** assert every holder’s child-canvas intrinsic dimensions and CSS position/size, plus holder position and overflow; add an altered-canvas-width control.
+
+**S4 — major; CLASS: new class. Tone output observes only one red sample.**  
+[test_live_runtime.py:1073](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/tests/test_live_runtime.py:1073) records only `D.data[0]`. Remove the green and blue LUT assignments at product lines 138–139: `lutGrey128` still reports 139, while the image acquires a color cast. **Row:** `lutGrey128`. **Exact fix:** inspect all RGBA channels across multiple pixels, including a non-neutral sample; add controls omitting each channel’s conversion.
+
+**S5 — major; CLASS: new class. `realCut` never takes a cut snapshot.**  
+[test_live_runtime.py:1146](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/tests/test_live_runtime.py:1146) changes attachment kind only; the take still receives the common Dissolve effect at line 1078. Add `||"none"===y.name` to the take’s early-return condition at product line 79: all freeze cases still pass. **Row:** `realCut`. **Exact fix:** supply `_cut_from(effect)` to that row’s take and attach using its constructed engagement kind.
+
+**S6 — major; CLASS: closed class. Clearing a previous take is untested.**  
+Every row creates a fresh controller at [test_live_runtime.py:1078](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/tests/test_live_runtime.py:1078). Delete the initial `U.__obedFrozen=null` at product line 78: all current results remain unchanged, but a rejected subsequent take can retain an old snapshot. **Rows:** `notReady` or `clippedAway`, following a successful take. **Exact fix:** reuse one controller for success→rejection and seed a same-scene stale snapshot; assert clearing immediately after the rejected take and zero attachment.
+
+**S7 — minor; CLASS: edge case. Atomic attachment has no multi-holder failure control.**  
+`appendThrows` contains one holder and throws on the first append; [test_live_runtime.py:1148](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/tests/test_live_runtime.py:1148). Move `W.appendChild(Q)` inside the holder loop at product line 148: every row still passes, but attachment becomes incremental. **Rows:** `appendThrows`, `overlappingVideos`. **Exact fix:** assert exactly one target append containing a fragment for multiple holders; add a second-append rejection control that detects partial attachment.
+
+**S8 — major; CLASS: new class. The behavioral test bypasses D2–D4 call sites.**  
+[test_live_runtime.py:1383](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/brave-goodall-bd9851/tests/test_live_runtime.py:1383) extracts the helper methods; construction and freeze invoke them directly. Changing D3’s `this.__obedFreeze(C,A)` to `void this.__obedFreeze`, or removing D4’s `B&&`, leaves these behavioral assertions unchanged. **Cases:** `construction`, `freeze_stub`. **Exact fix:** exercise the extracted patched call sites with spies: construction must consume the returned copy, take must precede teardown only when `B` is true, and attachment must follow draw.
+
+Standards: no actionable findings. Spec: one carried finding and seven additional weaknesses.
+
+**Verdict: Changes required — four r1 findings close; the video guard and seven further behavioral controls remain incomplete.**
