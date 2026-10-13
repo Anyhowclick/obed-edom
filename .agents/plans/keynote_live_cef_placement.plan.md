@@ -1,6 +1,6 @@
 # Alpha Keynote: CEF/OBS placement calibration and the fractional movie freeze
 
-**rev 2 — 2026-10-13; r1 folded, owner decisions O1–O5 recorded in §8.** Base: rev 1 `db11b278` on `claude/cef-obs-placement-plan`.
+**rev 3 — 2026-10-13; r1–r2 folded, owner decisions O1–O5 unchanged in §8.** Base: rev 2 `d72238ac` on `claude/cef-obs-placement-plan`.
 Plan only: overwrite the scratch plan for coordinator copy; no product edits, commit, OBS, Chrome or Keynote run.
 Parent: `keynote_live_dissolve_crossfade.plan.md` **rev 17**, landed #262; its §12 decisions 1–16 govern except where
 today's explicit follow-up request restores probe work. Earlier probe design: `git show 41ef609b:.agents/plans/keynote_live_dissolve_crossfade.plan.md`,
@@ -93,8 +93,10 @@ existing serialized transport. Stop holds no lock needed by cleanup. Observation
 Before any mutation, snapshot Studio Mode, preview scene, program scene, canvas dimensions, transition state and relevant
 scene items/transforms/order. Require the owned ready engine and expected program `AK`; reject a transition already in
 flight. Before enabling Studio Mode, read back current transition = `Cut` and no DeckLink preview output active;
-otherwise no probe, including when either check is unreadable. Record identities as well as names. Never operate on a
-colliding object whose ownership is unproved.
+otherwise no probe. Step 0 records the exact response for an unconfigured DeckLink preview output. That response
+(and only it) means absent = pass; any other error or timeout = unreadable = no probe. Record the request/response route
+for both checks; do not guess a not-found code. Record identities as well as names. Never operate on a colliding object
+whose ownership is unproved.
 
 **Primary:** create `AK-Calibrate` and its enabled `AK-Probe` without adding either to `AK`. Enable Studio Mode if needed,
 select `AK-Calibrate` as preview, and verify program is unchanged, source active=false/showing=true, correct target and
@@ -102,9 +104,10 @@ visible probe document. Never call a transition-to-program operation. Keep OBS i
 use `isHidden()` alone as proof (feasibility report, **Ranked product recommendation**). Use the program browser's source
 FPS, source dimensions and measured DPR; initially qualify 1920×1080/DPR 1 in managed OBS.
 
-Evaluate seeding `SceneDuplicationMode=false` in managed `user.ini` through `render_tree` (W3; existing seed at
-`src/obed_edom/managed_obs.py:150`). Read back its effective value before enabling Studio Mode; establish its effect on
-the pinned OBS version in §5's moving-program gate. Do not assume the static feasibility recording proves no stutter.
+Seed `SceneDuplicationMode=false` in managed `user.ini` through `render_tree` (W3; existing seed at
+`src/obed_edom/managed_obs.py:150`) only if step 0 shows the default duplicates and fails the moving-program gate.
+Its readback is the seeded `user.ini` value verified on disk after launch plus the step-0 behavioral result. Do not
+require a runtime API readback unless step 0 finds one. Static feasibility recording does not prove no stutter.
 
 **Fallback, selected at qualification:** create the calibration scene reference in `AK` **disabled**, with the probe
 still silent. Set a translation beyond the current canvas (positive margin), identity scale/rotation, no crop/bounds
@@ -124,13 +127,19 @@ poll enumerations for absence and read back Studio Mode/preview/program. Attempt
 transition `AK-Calibrate` to program. If an unexpected program change occurs, invalidate and report isolation failure;
 restore the saved program directly only while managed ownership is still established. A transient leak still fails the gate.
 
-**Persistence (O5, measure first):** implementation step 0 measures `AK.json` and `AK.json.bak` before/during the transaction,
-after cleanup and after clean quit. Mid-transaction saves are accepted if the saved `AK.json` collection state is verified
-identical to pre-probe after cleanup and after quit: compare complete parsed state, not just absence of the probe names.
-No calibration seed entries or persisted grant; restore through OBS, never rewrite live JSON or copy scratch post-exit
-restoration into product. `_seed` rewrites `AK.json` before every launch (F5), covering a crash mid-transaction.
-It does **not** rewrite/remove `AK.json.bak`; record that residual. Per owner O5, OBS reads that backup only if `AK.json`
-is damaged. Measure the backup too, but do not claim reseeding sanitizes it or add backup mutation in this PR.
+**Persistence (O5, measure first):** step 0 measures `AK.json` and `AK.json.bak` before/during the transaction, after
+cleanup and after clean quit. Baseline = parsed `AK.json` as saved by OBS before the transaction; step 0 records whether
+a pre-transaction save exists; if not, use the seeded file normalized by the same parser. Compare a normalized scene
+graph: the set of sources and scenes with ids/uuids/names/settings, each scene's items with transforms/visibility/order,
+`current_scene`, `current_program_scene`, transitions. Ignore only an explicit allowlist that step 0 justifies field by
+field (e.g. `id_counter` monotonic increase, OBS-added keys present in both); no blanket settings/module exclusions.
+The authoritative checkpoint is after clean quit. The after-cleanup read is authoritative only if its mtime postdates
+the last removal; otherwise it is diagnostic. Mid-transaction saves are accepted only with normalized restoration at
+these checkpoints; stale saved files never prove cleanup. No calibration seed entries or persisted grant; restore
+through OBS, never rewrite live JSON or copy scratch post-exit restoration into product. `_seed` rewrites `AK.json`
+before every launch (F5), covering a crash mid-transaction. `AK.json.bak` may hold mid-transaction state. It is unreachable
+by managed launches because `_seed` writes a valid primary first; record it, no mutation. Per O5, OBS reads the backup
+only if the primary is damaged; do not claim the backup is sanitized.
 
 ### 2.3 Chrome boundary and program verification
 
@@ -145,6 +154,9 @@ is not the program wire (§1.2). During every transaction, through the existing 
 rAF gap ≤2 observed frame periods, no video stall beyond one frame. Record the pre-transaction cadence; missing or unstable
 baseline is INCONCLUSIVE. Compare a no-transaction null; in scratch, toggling `Program` off/on must FAIL. A failure revokes
 and prevents qualification for on-air use; static pixel equality cannot substitute for this moving-program gate.
+A runtime moving-program or isolation failure revokes, records the reason, and disables automatic probes for that engine
+launch identity; only an operator `recalibrate` may retry. A new engine launch re-enables them. A manual retry on the same
+launch does not clear automatic-probe suppression.
 
 On-air calibration must not pause a live program to manufacture a static reference. With natural program motion, compare
 structural isolation invariants and record captures as diagnostic, not a false byte-equality PASS. Permit on-air operation
@@ -200,7 +212,8 @@ Do not infer `frac` from a CEF UA. Record every share/map, tuple, readiness, DPR
 
 Restore rev 16's **invalid → probing → valid** lifecycle for managed-OBS probe-derived grants. A managed-OBS host probes
 once its first program context is grant-eligible, then on reload/reconnect/engine change and on `recalibrate`; defer while
-a transition is in flight. Calibration never blocks Take output or presentation startup; output may run with invalid
+a transition is in flight. Reload/reconnect/engine-change triggers respect §2.3's launch-scoped suppression; only a new
+engine launch resets it. Calibration never blocks Take output or presentation startup; output may run with invalid
 placement. `valid` means a successful classifier, verified isolation and completed cleanup for the same engine/connection/
 program context. Revoke before starting every
 probe. Commit only to its original `uniqueContextId`, after rechecking generation/fingerprint; late completion never grants
@@ -213,15 +226,22 @@ or `snap` from a CEF probe) carries a **lease of at most 15 s** on a clock bound
 knowledge/probe mode at installation: a missing/invalid TTL in probe mode cannot create an indefinite grant. Knowledge
 eligibility/revocation stays unchanged. Node tamper rows cover both modes. Retain eligibility-before-round-trip (r13 #2):
 one context-bound synchronous set/read/revoke/read with revocation in `finally`, then verified commit. Test rule forcing
-uses the privileged channel, never page assignment; a harness may use probe mode for `wrongrule-chrome` without altering
-Chrome's product grant policy.
+uses the privileged channel, never page assignment. The mode is a `LiveOutputHost` constructor argument used only by
+`scripts/`; the product router never passes it. Product mode is selected from host ownership. `wrongrule-chrome` selects
+probe mode at construction and forces leased `frac` through the token; a Node row verifies expiry and fixed mode.
+Chrome's product knowledge channel still admits only indefinite `snap`; no Chrome product lease or probe is introduced.
 
 **CEF renewal (O4):** every 3 s and immediately before advance/goTo, require the same CDP connection/context and managed
 engine launch identity (pid, launch date, ready generation), with UA and DPR re-read and unchanged. Unreadable or changed
 inputs revoke. Do not require unavailable CEF browser-target `SystemInfo` (F4), invent an attached route, or re-run the
 probe periodically. Initial classification still requires the GPU map. An unchanged-fingerprint CEF GPU fallback may
 keep renewing the old rule indefinitely: accepted residual, as for Chrome r13 #3. Observed reset/change re-probes.
-Keep-alive maintains the lease; the calibration source is removed after measurement.
+Keep-alive maintains the lease; the calibration source is removed after measurement. W4 renewal runs on a host-owned
+timer thread, started on the first probe-derived grant and stopped in `stop()`, independent of session/UI polling.
+It uses `evaluate_in` with a deadline below the remaining lease. Budget lock acquisition too: a queued renewal must not
+execute after its budget. A missed renewal lets the lease lapse and is logged (`leaseLapsed`), never extended. The current
+CDP lock covers the reply wait and its default is 15 s (`src/obed_edom/live_host.py:653`, `:654`, `:661`); renewal must
+not inherit that timeout. These scheduling deadlines do not establish page-side expiry (§2.5 reconnect rule).
 
 On managed CDP/OBS connection loss, drop host state immediately and cancel renewal. Reconnect must successfully revoke
 in the program document (or verify a fresh invalid context), then re-probe before granting again. If revocation cannot
@@ -324,9 +344,9 @@ is a substitute for a fresh gate on final bytes.
 | `iso-obs-preview`, `iso-obs-offcanvas` | Static program/no-transaction null: sampled full-frame RGBA unchanged, program identity unchanged. Startup and failed on-air recalibration, both prior Studio states. OBS inactive/no on-screen windows. Moving-program leg records zero visibility events, rAF gap ≤2 frame periods, monotonic playing-video time/no stall >1 frame throughout (§2.3). | `iso-leak` visible-origin/on-program and behind-transparent-Program → FAIL. Scratch `SetSceneItemEnabled(Program)` off/on → liveness FAIL. No painting or missing baseline is INCONCLUSIVE. Select the passing placement at qualification; runtime failure never changes placement. |
 | Program-wire integrity | Continuous **lossless actual program recording**, started before install and stopped after verified cleanup/restoration: every decoded frame byte-identical to the static baseline; all PCM samples silent. Run both placements, success, failure and cancellation. | One-frame visible flash and brief audio injection detected. A missing/truncated recording, uncovered transaction interval or encoder mismatch is INCONCLUSIVE. Compare decoded frame bytes, not container-file hashes. |
 | Alpha integrity | Transparent and half-transparent static baseline; raw OBS RGBA equality in all four channels, zero tolerance, sampled before/install/each capture/cleanup/restore. Supplements the recording, which may drop alpha. | Behind-Program leak and alpha-only change held across a sample → FAIL. Preserve raw PNGs; no unpremultiplication for equality. A transient alpha-only flash between samples remains a stated residual; closing it costs an alpha-preserving recorder. |
-| `life-cal-*`, channel | Managed valid grant → next take engages. Reload/source refresh/reconnect/reprobe failure/changed or unreadable O4 inputs/expiry/cancel/Stop → invalid until fresh probe. Prior Studio/preview state restored. Chrome knowledge grant remains indefinite; recalibrate unsupported there. | Navigation during commit, late result, lost renewal reply, delayed callback, tampered clock/updater/token/getter and failed restore. Expiry never inferred from host time; fake-clock suspension row, no live sleep/wake gate. Reconnect requires revoke/fresh invalid context. Repeat cleanup; absent/delayed-delete rows verify absence. |
-| Persistence/worker | Step-0 before/during/after-cleanup/after-quit AK.json/backup records; post-cleanup and post-quit saved collection equals pre-probe state. No-transaction null. Calibration thread leaves engine liveness running and quit/restart/setup cancel/drain within 5 s. | Leftover saved source/scene or other state difference → FAIL. Inject missing input, delayed deletion, quit/restart while capture blocks and old-generation completion → no grant. Crash/relaunch model proves `_seed` rewrites AK.json; backup residual recorded, never claimed sanitized. |
-| `m-snap-cef[clip]` | DPR1/integer origin, P2 paused current frame: none, near/far fractional x and y clips, foreground crossing; DSK 7→8 two holders. Each cell has browser-rendered live reference, stable pairs, `perfect`, same-frame omit twin, verified mask, interior **and edge** scoring. | `m-snap-cef-nooffset[x\|y]` on near-side clips → RGB FAIL with opaque backing; far-side nooffset is not a meaningful red. `wrongrule-cef`/`wrongrule-chrome`, forced through privileged channel → pixel FAIL. Shifted holder/`perfect-shift` → FAIL. Fractional-only underlay-omission → alpha refusal. |
+| `life-cal-*`, channel | Managed valid grant → next take engages. Reload/source refresh/reconnect/reprobe failure/changed or unreadable O4 inputs/expiry/cancel/Stop → invalid until fresh probe, subject to launch-scoped suppression. Prior Studio/preview state restored. Chrome knowledge grant remains indefinite; recalibrate unsupported there. | Navigation during commit, late result, lost renewal reply, delayed callback, lock contention/missed timer → `leaseLapsed`, tampered clock/updater/token/getter and failed restore. Runtime moving/isolation failure suppresses automatic retries across reload/reconnect; only manual retry or a new launch probes. Expiry never inferred from host time; fake-clock suspension row, no live sleep/wake gate. Reconnect requires revoke/fresh invalid context. Repeat cleanup; absent/delayed-delete rows verify absence. |
+| Persistence/worker | Step-0 before/during/after-cleanup/after-quit AK.json/backup records; normalized graph equals the OBS-saved baseline (seed normalized if no save), with a field-justified allowlist (§2.2). Clean quit is authoritative; cleanup read only if mtime postdates last removal. No-transaction null. Calibration thread leaves liveness running; quit/restart/setup cancel/drain within 5 s. | Leftover saved source/scene or non-allowlisted difference → FAIL; stale cleanup read cannot pass. Inject missing input, delayed deletion, quit/restart while capture blocks and old-generation completion → no grant. Crash/relaunch proves `_seed` writes valid AK.json first; backup recorded, unreachable by managed launch, untouched. |
+| `m-snap-cef[clip]` | DPR1/integer origin, P2 paused current frame: none, near/far fractional x and y clips, foreground crossing; DSK 7→8 two holders. Each cell has browser-rendered live reference, stable pairs, `perfect`, same-frame omit twin, verified mask, interior **and edge** scoring. | `m-snap-cef-nooffset[x\|y]` on near-side clips → RGB FAIL with opaque backing; far-side nooffset is not a meaningful red. `wrongrule-cef`/`wrongrule-chrome`, forced through privileged channel (Chrome uses script-only probe-mode constructor, leased frac) → pixel FAIL. Shifted holder/`perfect-shift` → FAIL. Fractional-only underlay-omission → alpha refusal. |
 | Geometry/foreground | CEF frac translation-only/integer-origin positives and every clip cell engage, opaque backing and foreground intact. W1 byte inspection proves snap draw/admission unchanged apart from shared `pl` admission. Chrome regression is the DX-1 arms that passed at merge plus `wrongrule-chrome`. | Frac DPR1.5/2, fractional origin; scaled stage/nested scale/mismatched base/fractional scene left/top → published take/no holder. Transparent backing-edge pixels skip; foreground omit/swap fail. Run Chrome's 18-cell real-DSF matrix only if snap draw/admission changed; prior DPR1.5 INCONCLUSIVEs stay recorded, not waived. |
 | DX-2/DX-1 fidelity and cost | CEF dissolve/cut/opaque/frozen-frame/foreground gates with calibrated grant; CEF DSK 7→8 total take ≤50 ms including extra draw, two holders, plus all measured DSK transitions. Chrome regression scope as above. | Off/baked-frame, hold-at-full-strength, no-blend and 50 ms+ε controls. `cef-skip` becomes an invalid-probe/unsupported-geometry control, not a blanket attached expectation (F9). |
 | Raw/preview scope | Existing `m-raw-prod` / `m-preview-prod`, no host script: retain cross-fade/cut and stock movie behavior. Assignment and non-configurable-getter forgeries of snap/frac each bind no holder. | Current rendering variant is the known-bad forgery control. Never substitute a harness-installed channel for these production-path arms. |
@@ -358,13 +378,18 @@ transaction/fault table, one presenter calibration interaction table. Avoid dupl
   and shipped full-digest validation. Use crafted
   inputs whose correct result is independently specified, including edge-only vs inner defects.
 - Extend host placement tests (`tests/test_live_host.py:3223`, `:3263`, `:3305`, `:3325`, `:3356`, `:3431`) with fake clocks,
-  transport/context generations, managed lease cap/expiry, cancellation races, O4 renewal and managed reconnect/reprobe.
-  Node exercises assignment/delete/getters/wrong-token/clock changes, both values and indefinite-knowledge/leased-probe
-  modes. Retain existing Chrome knowledge/revocation tests; no new Chrome GPU-fallback or probe lifecycle scope.
+  transport/context generations, managed lease cap/expiry, cancellation races, O4 timer ownership/stop/lock contention,
+  `leaseLapsed`, and managed reconnect/reprobe. Runtime moving/isolation failure suppresses reload/reconnect probes; manual
+  retry is allowed without clearing suppression; new launch resets it. Node exercises assignment/delete/getters/wrong-token/
+  clock changes, both values and indefinite-knowledge/leased-probe modes. Add a script-only Chrome probe-mode row: token
+  forces leased frac, expiry clears it, mode cannot change; product knowledge mode rejects frac. Retain existing Chrome
+  knowledge/revocation tests; no new Chrome GPU-fallback or product probe lifecycle scope.
 - Add one parameterized managed transaction test in `tests/test_managed_obs.py` for preview/fallback sequences and every
-  partial-failure boundary, wrong ownership, absent object, delayed disappearance, O5 persistence/readback, Cut/preview-output
-  preconditions, duplication setting, audio and Stop. Include blocked capture with liveness still running, cancellation's
-  5 s bound, generation replacement and no runtime placement fallback. Extend seed/lifetime tests (`:108`, `:126`, `:1322`)
+  partial-failure boundary, wrong ownership, absent object, delayed disappearance, O5 normalized baseline/allowlist and
+  mtime checkpoints, Cut/preview-output preconditions (exact measured unconfigured response passes; other errors/timeouts
+  fail), conditional duplication seed/on-disk readback plus behavioral result, audio and Stop. Include blocked capture
+  with liveness still running, cancellation's 5 s bound, generation replacement and no runtime placement fallback.
+  Extend seed/lifetime tests (`:108`, `:126`, `:1322`)
   for no calibration seed entries, AK.json crash reseed/untouched backup and bounded cleanup before quit. Extend
   WebSocket tests (`tests/test_obs_websocket.py:113`, `:135`, `:144`, `:163`) for bounded image size/timeouts/errors without
   credential leakage; do not add another generic client.
@@ -395,20 +420,24 @@ before parallel work; ownership transfers are explicit, never concurrent edits t
 | W1 player | `src/obed_edom/live_runtime.py`, `tests/test_live_runtime.py` | Frac draw/guards/pins; bounded O1 take/attachment removal from rendering, two rendering re-pins and equivalence-test rewrite; unchanged snap byte proof. |
 | W2 probe | new `src/obed_edom/placement_probe.py`, `src/obed_edom/data/placement_probe.mp4`, `placement_motion.mp4`, `placement_probe.json` (all under `data/`), new `scripts/generate_placement_probe.py`, `tests/test_placement_probe.py`; `pyproject.toml` | Reproducible assets, freshness protocol, pure classifier, schema, packaging; W5 map observation. |
 | W3 OBS | `src/obed_edom/managed_obs.py`, `src/obed_edom/obs_websocket.py`, `tests/test_managed_obs.py`, `tests/test_obs_websocket.py` | Separate transaction thread/WebSocket, generation/cancel contract, qualification-selected placement, Cut/preview-output and duplication checks, restore/cleanup/O5 persistence, narrow adapter. |
-| W4 host | `src/obed_edom/live_host.py`, `tests/test_live_host.py` | Managed probe state machine, leased-vs-knowledge channel, O4 renewal, Program liveness sampling, cancellation/context binding/report. Chrome grant unchanged; no Chrome product probe. |
+| W4 host | `src/obed_edom/live_host.py`, `tests/test_live_host.py` | Managed probe state machine, leased-vs-knowledge channel, script-only mode override, O4 host timer/lock-budget/leaseLapsed, launch-scoped retry suppression, Program liveness, cancellation/context binding/report. Chrome product grant unchanged. |
 | W5 command/UI | `src/obed_edom/web/live.py`, `src/obed_edom/live_session.py`, `tests/test_live_api.py`, `tests/test_live_session.py`, `dashboard/src/live/api.ts`, `dashboard/src/live/LivePresenter.tsx`, `dashboard/tests-ui/live-presenter.ui.test.tsx` | Adapter wiring and recalibrate lifecycle/capabilities/status, no visibility misrouting. This stream label is distinct from the parent W5 tone investigation. |
 | W6 qualification | `scripts/dissolve_probe.py`, `scripts/managed_obs_qualify.py`, `tests/test_dissolve_probe.py`, `tests/test_managed_obs_qualify.py` | Step-0 persistence measurement; freshness/isolation/lifecycle, moving-program/null controls, continuous recording+sampled RGBA, CEF clips/tone/cost, harness-only Chrome classifier/W5, O1 forged rows, offline rescore. |
 | W7 docs/coordinator | `README.md`, `.agents/skills/obed-edom/SKILL.md`, `.agents/handovers/keynote-live-dissolve-crossfade-followups.md`, this plan | Operator behavior, residuals, gate evidence/owner dispositions. Update skill under its writing rules during implementation. |
 
 **Step 0, before implementation fan-out:** W6 measures persisted `AK.json`/`AK.json.bak` before/during one transaction,
-after cleanup and after clean quit. Apply decided O5; report exact state differences and the backup residual. Also measure
-Studio toggle effects with the moving Program and duplication setting before selecting the placement. This is future
+after cleanup and after clean quit. Establish the OBS-saved (or normalized seed) baseline, field-by-field allowlist and
+mtime checkpoints (§2.2); apply O5 and record the untouched backup. Record the exact request/response for an unconfigured
+DeckLink preview output and transition check. Measure Studio toggle effects on moving Program under the default
+duplication setting; seed false only if default duplication fails that gate, then verify disk value and behavior. Record
+any available runtime readback route, without requiring one. Select placement only after these results. This is future
 implementation work, not a browser/OBS run authorized by this plan-writing task.
 
 Order: step 0/contracts → W1–W6 (within concurrency) → exact-adapter asset/probe/cleanup gates → integration/review →
 targeted/full suites → previously passing DX-1 arms plus required controls → CEF preflight/DX-2 → regressions/owner check →
-coordinator's PR. Failed isolation or post-cleanup persistence blocks that placement. W5 observation rides these captures;
-tone-application failure does not block identity-tone placement. Only rerun the 18-cell Chrome matrix if snap bytes changed.
+coordinator's PR. Failed isolation or authoritative persistence check (§2.2) blocks that placement. W5 observation rides
+these captures; tone-application failure does not block identity-tone placement. Only rerun the 18-cell Chrome matrix if
+snap bytes changed.
 
 ## 8. Owner decisions (2026-10-13; no open questions)
 
@@ -423,16 +452,19 @@ tone-application failure does not block identity-tone placement. Only rerun the 
 4. **O4 = YES CEF renewal.** Renew on unchanged connection, context, engine launch identity, UA and DPR. Accept and state
    the unchanged-fingerprint GPU-fallback residual, as for Chrome r13 #3; no periodic on-air re-probe.
 5. **O5 = Measure first.** Mid-transaction scene saves are accepted if the saved collection is verified identical to
-   pre-probe state after cleanup. Also verify after clean quit. Crash leftovers in `AK.json` are covered by `_seed` on
-   each launch. `AK.json.bak` remains untouched and is read only if `AK.json` is damaged: explicit residual, not sanitized.
+   pre-probe state after cleanup, using §2.2's normalized graph/baseline and explicit allowlist. Clean quit is authoritative;
+   cleanup reads are authoritative only if newer than the last removal. Crash leftovers in `AK.json` are covered by
+   `_seed` on each launch. `AK.json.bak` may hold mid-transaction state but is unreachable by managed launches because
+   `_seed` writes a valid primary first. Record it, no mutation; OBS reads it only if the primary is damaged.
 
 Today's primary preview, qualified off-canvas fallback, pixel freshness, hidden OBS and restoration decisions also stand.
 
 ## 9. Risks / out of scope
 
 - Feasibility did not prove live cleanup absence or saved-state restoration. O5 accepts mid-transaction saves, not failed
-  cleanup. Never report clean without live absence and saved-state verification. Crash recovery reseeds AK.json; a stale
-  AK.json.bak remains a residual if the primary is damaged (F5, O5).
+  cleanup. Never report clean without live absence and saved-state verification at §2.2's authoritative checkpoints.
+  AK.json.bak may hold mid-transaction state; it is unreachable by managed launches because `_seed` writes a valid primary
+  first (F5, O5). Record it, no mutation; no claim that the backup is sanitized.
 - Preview and program source compositors may diverge after a GPU change. Challenge freshness proves a live probe, not
   equivalence of every program video path. Final holder gates and explicit fallback residuals remain necessary.
 - Screenshot cost/load can exceed the old probe estimate. Deadlines fail closed; no overlapping screenshot burst or
@@ -468,3 +500,16 @@ Source: scratch `critique-r1.md`; all 16 findings addressed. Owner O1–O5 decis
 | 14 | low | Folded: package list at pyproject.toml:58, lossless setting at managed_obs.py:146, foreground drawn into backing at live_runtime.py:148–150 (§1.1). |
 | 15 | low | Folded: probe requires DPR1, other DPR unknown; fractional erosion machinery removed (§2.4–§2.5, §5–§6). |
 | 16 | low | Folded: before Studio Mode, verify current transition Cut and no active DeckLink preview output; unreadable/failed precondition means no probe (§2.2, §6–§7). |
+
+### r2 — Opus 5.5 high, on rev 2 d72238ac
+
+Source: scratch `critique-r2.md`; all six findings folded, none refuted. O1–O5 and scope unchanged.
+
+| # | Severity | Disposition |
+|---|---|---|
+| 1 | medium | Folded: OBS-saved/normalized-seed baseline, normalized scene graph and field-justified allowlist; clean quit authoritative, cleanup read authoritative only when mtime postdates last removal (§2.2, §5–§8). |
+| 2 | medium | Folded: step 0 pins the exact unconfigured-preview response, absent passes while other errors/timeouts fail; duplication seed only after default fails moving gate, disk value plus behavioral readback, no invented runtime API (§2.2, §6–§7). |
+| 3 | medium | Folded: runtime moving/isolation failure revokes and suppresses automatic probes for that launch; operator recalibrate may retry, new launch resets suppression (§2.3, §2.5, §5–§7). |
+| 4 | low | Folded: W4 host-owned renewal timer starts on first probe grant, stops in stop(); evaluate_in deadline below remaining lease includes lock wait, missed renewal logs leaseLapsed and never extends (§2.5, §5–§7). CDP lock/default verified at live_host.py:653–661. |
+| 5 | low | Folded, option (b): script-only LiveOutputHost constructor mode override; product router never passes it, Chrome product remains indefinite snap only. wrongrule-chrome forces leased frac in harness probe mode; Node fixed-mode/expiry row (§2.5, §5–§7). |
+| 6 | low | Folded: backup may retain transaction state but managed launch reseeds valid primary first, so backup is unreachable there; record without mutation (§2.2, §5, §8–§9; managed_obs.py:889, :914, :920–921). |
