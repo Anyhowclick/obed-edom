@@ -15,6 +15,7 @@ import mimetypes
 import os
 import queue
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -49,6 +50,13 @@ GOTO_AUTOPLAY_DEFERRED_NOTE = "Movies idle until next advance"
 _UNSET = object()
 _CDP_MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 _CHROME_START_TIMEOUT_S = 15.0
+QUALIFIED_SNAP_MAJORS = (154,)
+_PLACEMENT_INIT_JS = (
+    '(function(){var T="%s",r="invalid";Object.defineProperty(window,"__obedPlacement",{get:function(){return r},'
+    'enumerable:false,configurable:false});Object.defineProperty(window,"__obedGrant",{value:function(t,v){if(t!==T)return!1;'
+    'r="snap"===v?v:"invalid";return!0},enumerable:false,configurable:false,writable:false})})();'
+)
+_PLACEMENT_ROUND_TRIP = ["true", "snap", "true", "invalid"]
 _CONTINUITY_STAGE_GATE_EXPR = (
     "(()=>{var s=document.getElementById('stage');var r=s?s.getBoundingClientRect():null;"
     "return {ready:!!(window.__OBED_P2_PRESERVE__&&window.__OBED_P2_PRESERVE__.ready===true),"
@@ -68,6 +76,50 @@ def derive_runtime(export_root: Path, slides: list[dict[str, Any]], *, resolver=
     except Exception as exc:  # noqa: BLE001 - fail closed, never let derivation crash the host
         return Unsupported(str(exc))
     return runtime if isinstance(runtime, Unsupported) else (plan, runtime)
+
+
+def not_carried(plan: ContinuityPlan, slides: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One entry per (boundary, movie instance) continuity declines to carry, in operator
+    terms: original slide ordinals rather than the plan's player indices, with the
+    refusal code and the source instance's objectID."""
+    ordinals = {
+        slide.get("playerIndex"): slide.get("originalOrdinal")
+        for slide in slides
+        if not slide.get("skipped")
+    }
+    return [
+        {
+            "fromSlide": ordinals.get(refusal["fromPlayer"]),
+            "toSlide": ordinals.get(refusal["toPlayer"]),
+            "asset": refusal["asset"],
+            "objectId": refusal["objectId"],
+            "code": refusal["code"],
+            "reason": refusal["reason"],
+        }
+        for refusal in plan.refusals
+    ]
+
+
+def placement_init_script(token: str) -> str:
+    """The first-run placement channel (§3.3): a private per-document grant only `token` can change."""
+    if not re.fullmatch(r"[0-9a-f]{32}", token):
+        raise ValueError("Placement token must be 128-bit lowercase hex.")
+    return _PLACEMENT_INIT_JS % token
+
+
+def _placement_round_trip_expr(token: str) -> str:
+    """Grant, read, revoke and read in one synchronous evaluation; the revoke always runs."""
+    return (
+        f'(function(){{var o=[],g=window.__obedGrant,T="{token}";try{{try{{o.push(String(g(T,"snap")),String(window.__obedPlacement))}}'
+        'finally{o.push(String(g(T,"invalid")),String(window.__obedPlacement))}}catch(e){o.push(null)}return o})()'
+    )
+
+
+def _placement_set_expr(token: str, value: str) -> str:
+    return (
+        f'(function(){{try{{return window.__obedGrant("{token}",{json.dumps(value)})===true?window.__obedPlacement:null}}'
+        'catch(e){return null}})()'
+    )
 
 
 def _continuity_plan_script(plan: dict[str, Any], canvas: dict[str, int]) -> str:
@@ -485,6 +537,11 @@ class ChromeCdp:
         self._target_ws_url: str | None = None
         self._blank_url = "about:blank"
         self._blanked = False
+        self._contexts: dict[str, dict[str, Any]] = {}
+        self._browser_ws_url: str | None = None
+        self._browser_ws: Any = None
+        self._browser_id = 0
+        self._browser_lock = threading.Lock()
 
     def _log(self, kind: str, **fields: Any) -> None:
         if self.logger is None: return
@@ -531,6 +588,7 @@ class ChromeCdp:
         try: endpoint = wait_devtools_active_port(self.profile, self.proc, _CHROME_START_TIMEOUT_S)
         except RuntimeError as exc: self._abort_start(f"Chrome CDP did not start: {exc}", exc)
         self.port = endpoint.port
+        self._browser_ws_url = f"ws://127.0.0.1:{endpoint.port}{endpoint.browser_path}"
         deadline = time.monotonic() + _CHROME_START_TIMEOUT_S
         while time.monotonic() < deadline:
             self._abort_start_if_exited()
@@ -626,9 +684,54 @@ class ChromeCdp:
         elif method == "Runtime.exceptionThrown": self._log("pageException", detail=params.get("exceptionDetails"))
         elif method == "Runtime.consoleAPICalled" and params.get("type") in ("error", "warning"):
             self._log("pageConsole", level=params.get("type"), args=params.get("args"))
+        elif method == "Runtime.executionContextCreated":
+            context = params.get("context") or {}
+            aux = context.get("auxData") or {}
+            if aux.get("isDefault") is True and isinstance(aux.get("frameId"), str) and isinstance(context.get("uniqueId"), str):
+                self._contexts[aux["frameId"]] = {"id": context.get("id"), "uniqueId": context["uniqueId"], "origin": context.get("origin")}
+        elif method == "Runtime.executionContextDestroyed":
+            unique, context_id = params.get("executionContextUniqueId"), params.get("executionContextId")
+            for frame, entry in list(self._contexts.items()):
+                if (entry["uniqueId"] == unique) if unique is not None else (entry["id"] == context_id):
+                    del self._contexts[frame]
+        elif method == "Runtime.executionContextsCleared":
+            self._contexts.clear()
+
+    def main_context(self, frame_id: str) -> dict[str, Any] | None:
+        """The frame's current default execution context as last reported by CDP events."""
+        entry = self._contexts.get(frame_id)
+        return dict(entry) if entry is not None else None
+
+    def browser_call(self, method: str, deadline_s: float = 5.0, **params: Any) -> dict[str, Any]:
+        """A call on the launched Chrome's browser target, on its own socket and lock."""
+        with self._browser_lock:
+            if self._stopped or not self._browser_ws_url:
+                raise LiveHostError("Program browser target is unavailable.")
+            deadline = time.monotonic() + deadline_s
+            try:
+                if self._browser_ws is None:
+                    self._browser_ws = connect(self._browser_ws_url, open_timeout=max(.1, deadline - time.monotonic()), max_size=_CDP_MAX_MESSAGE_BYTES)
+                self._browser_id += 1
+                self._browser_ws.send(json.dumps({"id": self._browser_id, "method": method, "params": params}))
+                return self._recv_matching(self._browser_ws, self._browser_id, deadline)
+            except Exception as exc:
+                ws, self._browser_ws = self._browser_ws, None
+                if ws is not None:
+                    try: ws.close()
+                    except Exception: pass
+                raise LiveHostError(f"Program browser target did not answer {method}.") from exc
 
     def evaluate(self, expression: str, deadline_s: float | None = None) -> Any:
-        result = self.call("Runtime.evaluate", deadline_s=deadline_s, expression=expression, returnByValue=True, awaitPromise=False)
+        return self._evaluate(expression, deadline_s)
+
+    def evaluate_in(self, context: str, expression: str, deadline_s: float | None = None) -> Any:
+        """Evaluate only in the execution context with this `uniqueId`; a vanished context fails."""
+        if not isinstance(context, str) or not context:
+            raise LiveHostError("A unique execution context is required.")
+        return self._evaluate(expression, deadline_s, uniqueContextId=context)
+
+    def _evaluate(self, expression: str, deadline_s: float | None, **target: Any) -> Any:
+        result = self.call("Runtime.evaluate", deadline_s=deadline_s, expression=expression, returnByValue=True, awaitPromise=False, **target)
         if result.get("exceptionDetails"): raise LiveHostError("Program browser evaluation failed.")
         return (result.get("result") or {}).get("value")
 
@@ -734,12 +837,14 @@ class ChromeCdp:
                         errors.append(exc)
                 if errors: raise LiveHostError("Program browser did not fully stop.")
                 return
-            if self.ws is None and self.proc is None: return
+            if self.ws is None and self.proc is None and self._browser_ws is None: return
             errors: list[Exception] = []
-            if self.ws is not None:
-                try: self.ws.close()
-                except Exception as exc: errors.append(exc)
-                else: self.ws = None
+            for name in ("ws", "_browser_ws"):
+                ws = getattr(self, name)
+                if ws is not None:
+                    try: ws.close()
+                    except Exception as exc: errors.append(exc)
+                    else: setattr(self, name, None)
             proc = self.proc
             if proc is not None:
                 if proc.poll() is None:
@@ -848,6 +953,12 @@ class LiveOutputHost:
         self._gl_replay_script = ""
         self._codec_report: list[dict[str, Any]] = []
         self._codec_warnings: list[str] = []
+        self._placement_token = ""
+        self._placement_frame: str | None = None
+        self._placement_origin: str | None = None
+        self._placement_context: str | None = None
+        self._placement_version_reason: str | None = "version-unavailable"
+        self._placement: dict[str, Any] = {"grant": None, "reason": None, "product": None, "gpuCompositing": None, "at": None}
 
     def _resolve_codecs(self) -> tuple[list[dict[str, Any]], list[str]]:
         """Codec of every movie the export's slides reference, independent of continuity:
@@ -891,7 +1002,7 @@ class LiveOutputHost:
                 if self._gl_replay_mode == "injected":
                     self._gl_replay_mode, self._gl_replay_reason, self._gl_replay_script = "unavailable", "continuity unsupported", ""
                 return "unsupported", f"movie codec is not playable in this output: {asset} ({display})", None
-        self._continuity_not_carried = self._not_carried(plan)
+        self._continuity_not_carried = not_carried(plan, self.slides)
         if self._attach_endpoint:
             runtime = {**runtime, "transparentBackground": True}
         return "pending", None, runtime
@@ -916,27 +1027,6 @@ class LiveOutputHost:
         if not script:
             return "unavailable", "GL replay entry is not usable", None, ""
         return "injected", None, derived, script
-
-    def _not_carried(self, plan: ContinuityPlan) -> list[dict[str, Any]]:
-        """One entry per (boundary, movie instance) continuity declines to carry, in operator
-        terms: original slide ordinals rather than the plan's player indices, with the
-        refusal code and the source instance's objectID."""
-        ordinals = {
-            slide.get("playerIndex"): slide.get("originalOrdinal")
-            for slide in self.slides
-            if not slide.get("skipped")
-        }
-        return [
-            {
-                "fromSlide": ordinals.get(refusal["fromPlayer"]),
-                "toSlide": ordinals.get(refusal["toPlayer"]),
-                "asset": refusal["asset"],
-                "objectId": refusal["objectId"],
-                "code": refusal["code"],
-                "reason": refusal["reason"],
-            }
-            for refusal in plan.refusals
-        ]
 
     def _stage_gate_outcome(self, stage: Any) -> tuple[str, str | None, float | None]:
         """Fail-closed judgement of one stage-geometry reading against the authored canvas."""
@@ -1033,6 +1123,7 @@ class LiveOutputHost:
         if self._mm_opacity_info is not None:
             result["mmOpacity"] = dict(self._mm_opacity_info)
         result["continuity"] = self._continuity_info()
+        result["placement"] = dict(self._placement)
         result["codecs"] = list(self._codec_report)
         result["codecWarnings"] = list(self._codec_warnings)
         if self._output_rate is not None:
@@ -1104,6 +1195,7 @@ class LiveOutputHost:
             try: version = self._transport.call("Browser.getVersion")
             except Exception: version = None
             self._logger.log("browserVersion", result=version)
+            self._install_placement_channel(version, url)
             self._transport.goto(url)
             stage_geometry: dict[str, Any] | None = None
             if self._continuity_mode == "pending":
@@ -1126,6 +1218,96 @@ class LiveOutputHost:
             try: self.stop()
             except Exception: pass
             raise
+
+    def _install_placement_channel(self, version: Any, url: str) -> None:
+        """Install the first-run channel before navigation; in launch mode also fix the
+        grant's immutable inputs (engine version, program main frame and origin)."""
+        self._placement_token = secrets.token_hex(16)
+        product = version.get("product") if isinstance(version, dict) else None
+        self._placement["product"] = product if isinstance(product, str) else None
+        if isinstance(product, str):
+            match = re.fullmatch(r"(?:Headless)?Chrome/(\d+)\.[\d.]+", product)
+            self._placement_version_reason = None if match and int(match.group(1)) in QUALIFIED_SNAP_MAJORS else "unqualified-version"
+        try:
+            self._transport.call("Page.addScriptToEvaluateOnNewDocument", source=placement_init_script(self._placement_token))
+            if not self._attach_endpoint:
+                frame = self._transport.call("Page.getFrameTree")["frameTree"]["frame"]["id"]
+                if not isinstance(frame, str): raise LiveHostError("Program main frame is unreadable.")
+                self._placement_frame = frame
+        except Exception as exc:
+            if self._attach_endpoint:
+                self._logger.log("placementChannel", error=str(exc))
+            else:
+                self._set_placement(None, "channel-compromised")
+                return
+        if self._attach_endpoint:
+            self._set_placement(None, "attached")
+        parts = urlsplit(url)
+        self._placement_origin = f"{parts.scheme}://{parts.netloc}"
+
+    def _set_placement(self, grant: str | None, reason: str, gpu: str | None = None) -> None:
+        self._placement.update(grant=grant, reason=reason, gpuCompositing=gpu, at=time.time())
+        if self._logger is not None:
+            self._logger.log("placement", **self._placement)
+
+    def _gpu_compositing(self) -> str | None:
+        try: info = self._require_transport().browser_call("SystemInfo.getInfo")
+        except Exception: return None
+        gpu = info.get("gpu") if isinstance(info, dict) else None
+        status = gpu.get("featureStatus") if isinstance(gpu, dict) else None
+        value = status.get("gpu_compositing") if isinstance(status, dict) else None
+        return value if isinstance(value, str) else None
+
+    def _revoke_placement(self, context: str) -> None:
+        try: self._require_transport().evaluate_in(context, _placement_set_expr(self._placement_token, "invalid"))
+        except LiveHostError: pass
+
+    def _sync_placement(self) -> None:
+        """Bind the grant to the program document's unique context (§3.3). Eligibility is
+        decided before anything exposes `snap`; an eligible document is verified by one
+        context-bound round trip, then committed by a second context-bound evaluation.
+        A granted document is revoked once GPU compositing is no longer readably enabled."""
+        if self._attach_endpoint or self._placement_frame is None or self._placement["reason"] == "channel-compromised":
+            return
+        transport = self._require_transport()
+        entry = transport.main_context(self._placement_frame)
+        context = entry["uniqueId"] if entry is not None and entry.get("origin") == self._placement_origin else None
+        if context != self._placement_context:
+            self._placement_context = None
+            self._placement["grant"] = None
+        if context is None:
+            return
+        if context == self._placement_context:
+            if self._placement["grant"] == "snap":
+                gpu = self._gpu_compositing()
+                if gpu != "enabled":
+                    self._revoke_placement(context)
+                    self._set_placement(None, "revoked-fingerprint", gpu)
+            return
+        self._placement_context = context
+        reason, gpu = self._placement_version_reason, None
+        if reason is None:
+            gpu = self._gpu_compositing()
+            if gpu != "enabled": reason = "software-compositing"
+        if reason is not None:
+            self._revoke_placement(context)
+            self._set_placement(None, reason, gpu)
+            return
+        committed = None
+        try:
+            trip = transport.evaluate_in(context, _placement_round_trip_expr(self._placement_token))
+            if trip == _PLACEMENT_ROUND_TRIP:
+                committed = transport.evaluate_in(context, _placement_set_expr(self._placement_token, "snap"))
+        except LiveHostError:
+            self._placement_context = None
+            return
+        if committed != "snap":
+            self._revoke_placement(context)
+            self._set_placement(None, "channel-compromised", gpu)
+            try: transport.evaluate("window.__obedOutput.hide()")
+            except LiveHostError: pass
+            return
+        self._set_placement("snap", "granted", gpu)
 
     def _validate_export(self) -> None:
         header_path = self.resolver(self.export_root, "assets/header.json")
@@ -1217,6 +1399,7 @@ class LiveOutputHost:
             and scene_count != self._expected_scene_count
         ):
             raise LiveHostError("Player fell back from the authored build renderer.")
+        self._sync_placement()
         visible_expr = (
             "getComputedStyle(document.getElementById('body')).opacity!=='0'"
             if self._attach_endpoint
@@ -1314,7 +1497,10 @@ class LiveOutputHost:
             for digit in str(player_index + 1): transport.key(digit, "Digit" + digit, ord(digit))
             transport.key("Enter", "Enter", 13)
         elif operation == "hide": transport.evaluate("window.__obedOutput.hide()")
-        elif operation == "show": transport.evaluate("window.__obedOutput.show()")
+        elif operation == "show":
+            if self._placement["reason"] == "channel-compromised":
+                raise PlayerCommandRejected("Output stays hidden: the placement channel failed its check.")
+            transport.evaluate("window.__obedOutput.show()")
         else: raise LiveHostError("Unsupported player operation.")
         if operation in ("hide", "show"):
             return self.observe()

@@ -872,6 +872,8 @@ def load_cached(
     source_digest: str,
     source: Sequence[SourceSlide],
 ) -> tuple[dict[str, Any], Path, int] | None:
+    from obed_edom import preview_movies
+
     try:
         folder, html = reject_unresolved_cache_symlinks(source_digest)
     except PreviewError:
@@ -886,6 +888,8 @@ def load_cached(
         if not player.is_file() or file_sha256(player) != manifest.get("playerDigest"):
             return None
         discover_export_assets(html, header_slide_list(load_header(html)[0]))
+        if preview_movies.unconverted(html, manifest["slides"]):
+            return None
     except (PreviewError, OSError, json.JSONDecodeError):
         return None
     return manifest, html, tree_bytes(html)
@@ -1009,6 +1013,8 @@ def apply_preview(
     log: Callable[[str], None] = print,
     export_html_fn: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
+    from obed_edom import preview_movies
+
     path = Path(str(proposal.get("path") or "")).expanduser()
     if not path.exists():
         raise PreviewError("The deck has moved since proposing the preview.")
@@ -1043,6 +1049,9 @@ def apply_preview(
             keynote_version=keynote_app.app_version(),
             canvas=canvas,
         )
+        conversion = preview_movies.convert_movies(html, manifest["slides"], log=log)
+        if conversion["converted"]:
+            manifest["movieConversion"] = conversion
         write_manifest(folder / "manifest.json", manifest)
     except Exception:
         if html.exists():

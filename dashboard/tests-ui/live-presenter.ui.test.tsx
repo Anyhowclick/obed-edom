@@ -53,7 +53,7 @@ function client(overrides: Partial<LiveClient> = {}): LiveClient {
   return {
     state: vi.fn(async () => null),
     decks: vi.fn(async () => [{ previewJobId: "prepared-1", name: "Sunday service", slides: 3, sourceDigest: "source" }]),
-    qualification: vi.fn(async (previewJobId) => ({ previewJobId, name: "Sunday service", slides: 3, sourceDigest: "source", qualified: true, reason: null })),
+    qualification: vi.fn(async (previewJobId) => ({ previewJobId, name: "Sunday service", slides: 3, sourceDigest: "source", qualified: true, continuity: { mode: "qualified" as const, reason: null, notCarried: [] }, convertedMovies: [] })),
     displays: vi.fn(async () => [{ id: "screen-2", name: "HDMI projector", width: 1920, height: 1080, x: 0, y: 0, primary: true }]),
     start: vi.fn(async () => state()),
     command: vi.fn(async (_sessionId: string, command: LiveCommand): Promise<LiveResult> => ({ requestId: command.requestId, outcome: "completed", state: state() })),
@@ -89,15 +89,15 @@ describe("LivePresenter", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Start output session" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Start output session" }));
     await waitFor(() => expect(api.start).toHaveBeenCalledWith("prepared-1", "screen-2"));
-    expect(await screen.findByText("Movie continuity · Qualified")).toBeInTheDocument();
+    expect(await screen.findByText("Movie continuity · On")).toBeInTheDocument();
     expect(screen.queryByRole("checkbox", { name: "Enable movie continuity when qualified" })).not.toBeInTheDocument();
     expect(api.command).not.toHaveBeenCalled();
   });
 
   it.each([
-    ["qualified", "Qualified", "Enabled for this deck."],
-    ["unsupported", "Unsupported", "stage is not the authored size"],
-    ["off", "Off", "Using the deck’s native movie playback."],
+    ["qualified", "On", "Enabled for this deck."],
+    ["unsupported", "Off for this deck", "stage is not the authored size"],
+    ["off", "Off for this deck", "Using the deck’s native movie playback."],
     ["pending", "Checking", "Checking this deck and output size."],
   ] as const)("shows observed %s continuity alongside Show output", async (mode, label, detail) => {
     const continuity: LiveContinuity = { mode, ...(mode === "unsupported" ? { reason: detail } : {}) };
@@ -118,7 +118,7 @@ describe("LivePresenter", () => {
     const continuity: LiveContinuity = { mode: "qualified", ...(scale === undefined ? {} : { scale }) };
     const api = client({ state: vi.fn(async () => state({ outputVisible: false, continuity })) });
     render(<LivePresenter client={api} pollMs={60_000} />);
-    await screen.findByText("Movie continuity · Qualified");
+    await screen.findByText("Movie continuity · On");
     expect(screen.getByText(detail)).toBeInTheDocument();
   });
 
@@ -127,7 +127,7 @@ describe("LivePresenter", () => {
     render(<LivePresenter client={api} pollMs={60_000} />);
     expect(await screen.findByText("Movie continuity · Unavailable")).toBeInTheDocument();
     expect(screen.getByText("This session has not reported movie continuity status.")).toBeInTheDocument();
-    expect(screen.queryByText("Movie continuity · Qualified")).not.toBeInTheDocument();
+    expect(screen.queryByText("Movie continuity · On")).not.toBeInTheDocument();
   });
 
   it("says nothing about codecs when the host omits the fields", async () => {
@@ -172,8 +172,8 @@ describe("LivePresenter", () => {
   it("says nothing about declined cuts when the host reports none", async () => {
     const api = client({ state: vi.fn(async () => state({ continuity: { mode: "qualified" } })) });
     render(<LivePresenter client={api} pollMs={60_000} />);
-    await screen.findByText("Movie continuity · Qualified");
-    expect(screen.queryByText(/movie not carried/)).not.toBeInTheDocument();
+    await screen.findByText("Movie continuity · On");
+    expect(screen.queryByText(/not carried/)).not.toBeInTheDocument();
   });
 
   it("names a cut continuity declines under the continuity badge", async () => {
@@ -183,25 +183,23 @@ describe("LivePresenter", () => {
     };
     const api = client({ state: vi.fn(async () => state({ continuity })) });
     render(<LivePresenter client={api} pollMs={60_000} />);
-    await screen.findByText("Movie continuity · Qualified");
-    expect(screen.getByText("Slide 3 → 4: movie not carried — artwork overlaps the carried movie")).toBeInTheDocument();
-    expect(screen.queryByText(/^\+\d+ more$/)).not.toBeInTheDocument();
+    await screen.findByText("Movie continuity · On · 1 not carried");
+    expect(screen.getByText("Slide 3 → 4 · clip.mov · artwork overlaps the carried movie")).toBeInTheDocument();
+    expect(screen.queryByText(/^\d+ more$/)).not.toBeInTheDocument();
   });
 
-  it("caps the declined-cut list at three and counts the rest", async () => {
+  it("lists three declined cuts and folds the rest into an expandable list", async () => {
     const notCarried = Array.from({ length: 5 }, (_, index) => ({
       fromSlide: index + 1, toSlide: index + 2, asset: `clip-${index + 1}.mov`, reason: `reason ${index + 1}`,
     }));
     const api = client({ state: vi.fn(async () => state({ continuity: { mode: "qualified", notCarried } })) });
     render(<LivePresenter client={api} pollMs={60_000} />);
-    await screen.findByText("Movie continuity · Qualified");
-    for (const entry of notCarried.slice(0, 3)) {
-      expect(screen.getByText(`Slide ${entry.fromSlide} → ${entry.toSlide}: movie not carried — ${entry.reason}`)).toBeInTheDocument();
-    }
-    for (const entry of notCarried.slice(3)) {
-      expect(screen.queryByText(`Slide ${entry.fromSlide} → ${entry.toSlide}: movie not carried — ${entry.reason}`)).not.toBeInTheDocument();
-    }
-    expect(screen.getByText("+2 more")).toBeInTheDocument();
+    await screen.findByText("Movie continuity · On · 5 not carried");
+    const line = (entry: (typeof notCarried)[number]) => screen.getByText(`Slide ${entry.fromSlide} → ${entry.toSlide} · ${entry.asset} · ${entry.reason}`);
+    for (const entry of notCarried.slice(0, 3)) expect(line(entry)).toBeVisible();
+    for (const entry of notCarried.slice(3)) expect(line(entry)).not.toBeVisible();
+    fireEvent.click(screen.getByText("2 more"));
+    for (const entry of notCarried.slice(3)) expect(line(entry)).toBeVisible();
   });
 
   it("does not move the presenter until a delayed command returns observed state", async () => {
@@ -591,7 +589,7 @@ describe("Alpha Keynote intake and slide grid", () => {
     }
     await screen.findByText("Service.key");
     fireEvent.click(screen.getByRole("button", { name: "Qualify Keynote" }));
-    await screen.findByText("Deck qualified");
+    await screen.findByText("Deck ready");
     expect(startHtmlPreview).toHaveBeenCalledWith("/Slides/Service.key");
     expect(applyHtmlPreview).toHaveBeenCalledWith("new-deck");
     expect(api.qualification).toHaveBeenCalledWith("new-deck");
@@ -611,19 +609,37 @@ describe("Alpha Keynote intake and slide grid", () => {
     fireEvent.click(screen.getByRole("button", { name: "Choose on this Mac" }));
     await screen.findByText("Cached.key");
     fireEvent.click(screen.getByRole("button", { name: "Qualify Keynote" }));
-    await screen.findByText("Deck qualified");
+    await screen.findByText("Deck ready");
     expect(applyHtmlPreview).not.toHaveBeenCalled();
   });
 
-  it("blocks unqualified decks and can recheck", async () => {
-    const api = client({ qualification: vi.fn(async (previewJobId) => ({ previewJobId, name: "Unqualified.key", slides: 3, sourceDigest: "source", qualified: false, reason: "Deck is outside the current allowlist." })) });
+  it("starts a deck whose continuity is off and says why, with its moves and converted movies", async () => {
+    const reason = "outside the measured allowlist";
+    const qualification = vi.fn(async (previewJobId: string) => ({
+      previewJobId, name: "Minimal.key", slides: 3, sourceDigest: "source", qualified: true,
+      continuity: { mode: "unsupported" as const, reason, notCarried: [] },
+      convertedMovies: [{ asset: "untitled.mov", sourceCodec: "HEVC" }, { asset: "clip-10-1000001.mov", sourceCodec: "ProRes" }],
+    }));
+    const api = client({ qualification });
     render(<LivePresenter client={api} pollMs={60_000} />);
-    await screen.findByText("Not qualified yet");
-    expect(screen.getByText("Deck is outside the current allowlist.")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Start output session" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "Check qualification again" }));
-    await waitFor(() => expect(api.qualification).toHaveBeenCalledTimes(2));
-    expect(api.start).not.toHaveBeenCalled();
+    await screen.findByText("Deck ready");
+    expect(screen.getByText(`Movie continuity off for this deck: ${reason}`)).toBeVisible();
+    expect(screen.getByText("Converted 2 movies to H.264 for playback: untitled.mov (HEVC), clip-10-1000001.mov (ProRes).")).toBeVisible();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Start output session" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Start output session" }));
+    await waitFor(() => expect(api.start).toHaveBeenCalledWith("prepared-1", "screen-2"));
+  });
+
+  it("lists the moves continuity will not carry before the deck starts", async () => {
+    const notCarried = [{ fromSlide: 6, toSlide: 8, asset: "vid-20250608-wa0125.mp4", reason: "later-authored artwork overlaps" }];
+    const api = client({ qualification: vi.fn(async (previewJobId: string) => ({
+      previewJobId, name: "Sunday service", slides: 3, sourceDigest: "source", qualified: true,
+      continuity: { mode: "qualified" as const, reason: null, notCarried }, convertedMovies: [],
+    })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    expect(await screen.findByText("Movie continuity on · 1 move not carried")).toBeVisible();
+    expect(screen.getByText("Slide 6 → 8 · vid-20250608-wa0125.mp4 · later-authored artwork overlaps")).toBeVisible();
+    expect(screen.queryByText(/Converted/)).not.toBeInTheDocument();
   });
 
   it("shows preparation failure without proceeding to qualification", async () => {

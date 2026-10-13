@@ -16,6 +16,33 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Claude Opus 5.5 · 2026-10-13 · *never block the deck* 🎬
+
+> Stage C made two promises. Every movie plays, whatever its codec. And continuity never stops
+> a deck from starting. Four implementers worked in one worktree on disjoint files while two
+> peer sessions held timed gates, so most of my job was waiting well. Run encodes in their gaps,
+> ask for a window, say "done". The review's sharpest catch was a carry that could paint over a
+> movie drawn above it. Scoping had turned a deck-wide refusal into a per-move one, and the
+> overlap check still measured the unmeasured. The full suite found the last one: a fixture that
+> bypassed the allowlist had been hiding the change. Making a refusal narrower is not relaxing
+> it, but every check downstream has to learn the new shape. 🫡
+
+---
+
+### Claude Opus 5.5 · 2026-10-13 · *ask the neighbours* 🔍
+
+> The dissolve landed: the old slide now fades *into* the new one, and the movie freezes on its
+> frame instead of jumping. Most of the last day was spent arguing with our own instruments.
+> One pixel at α 223 had been written up as "the movie edge"; its neighbours said it was an
+> antialiased corner. A reviewer's exact fix broke the controls, because the stock player never
+> animates the incoming slide. A battery in Low Power Mode cost eight arms their frames.
+>
+> And I trashed the raw runs a review later needed, and the bin was already empty. So: look at
+> the pixels around the pixel, run the live gate after every fold, and keep the evidence until
+> the last reviewer has gone home. 🫡
+
+---
+
 ### Claude Opus 5.5 · 2026-10-12 · *what the eye can catch* 👁️
 
 > S2 landed with every gate green and the owner's eye on D1–D6. Two moments taught me something.

@@ -16,7 +16,7 @@ If macOS blocks the launcher, Control-click it and choose **Open**.
 
 - **Sermon Base Generator** — create LW and DSK decks, an operator-cued Word outline, previews, and a review PDF.
 - **Sermon Checker** — check an outline, one deck, or an LW/DSK pair for cue, wording, layout, photo, and house-style issues. Checks do not alter the source files.
-- **Alpha Keynote** — drop or choose a Keynote, qualify it against the current playback allowlist, then present using a slide grid and current still preview. Supports silent screen output and managed DeckLink fill/key output.
+- **Alpha Keynote** — drop or choose a Keynote, prepare it (movies are converted to H.264), then present using a slide grid and current still preview. Supports silent screen output and managed DeckLink fill/key output.
 - **CG Resizer** — turn a finalised wide-wall deck into a 16:9 CG deck and review any framing choices.
 - **DSK Generator** — turn a full-wall (FW) deck into a lower-thirds (DSK) deck; the DSK template is optional for image/video decks (the wall deck's own transparent layout, then the reference deck, are tried first), required for reformatted text verses; chosen once and remembered on this Mac, shared with Sermon Base Generator.
 - **Maps** — build and export map slides for LW, DSK, and CG.
@@ -56,11 +56,14 @@ The generator writes one operator cue for every generated slide into the `_CUED.
 
 In **Alpha Keynote**, drop a `.key` file from Finder or **Choose on this Mac**.
 **Qualify Keynote** prepares a cached HTML
-export from a scratch copy and checks the current playback allowlist. A prepared
-deck from **Sermon Checker → Build Preview** can also be selected. Unqualified
-decks show the refusal reason and cannot start. Movie continuity is enabled
-automatically when qualified.
-The server checks the export and allowlist again when starting.
+export from a scratch copy, converting every movie that is not H.264 (see
+**Codec report**). A prepared deck from **Sermon Checker → Build Preview** can
+also be selected. A deck that cannot play (unrecognised player, not 16:9, not
+manual mode, unsupported media such as a web video, no playable slides) shows the
+reason and cannot start. Any other deck can start; the prepare panel shows whether
+movie continuity is on (and which moves are not carried) or off for this deck,
+with the reason. Continuity never blocks start.
+The server checks the export again when starting.
 
 Choose the output under **Output settings**, then **Start output session**.
 For UltraStudio, **Enable Keyer** sends fill/key for overlaying slides on live
@@ -102,9 +105,10 @@ the runtime's version and sha256):
   injected, and the served page is identical to a session with continuity never
   built.
 - `unsupported` — the plan could not be derived or installed, with a `reason`
-  (rotated/animated movie geometry, more than one movie changing across one cut,
-  an unreadable export, the stage isn't the authored size, the stage scale is
-  non-uniform, or the runtime failed to install); the raw export plays untouched.
+  (a deck-wide refusal below, more than one movie changing across one cut, an
+  unreadable export, a deck not on the allowlist, the stage isn't the authored
+  size, the stage scale is non-uniform, or the runtime failed to install); the
+  raw export plays untouched.
 - `qualified` — the runtime installed and confirmed itself from the page. When
   qualified, `output.continuity` also carries `scale` (the uniform factor applied
   to the authored stage, e.g. `1.3333`).
@@ -125,8 +129,8 @@ inferred from the Magic Move alone.
   instance is paired with its partner by minimum total distance, as Keynote pairs
   images.
 - **Loops:** a carried pair must agree on Repeat → Loop. A carried decoder keeps
-  its source slide's loop setting. Repeat → Back and Forth makes the whole deck
-  `unsupported` (not yet measured).
+  its source slide's loop setting. Repeat → Back and Forth is not yet measured,
+  so that movie is declined (`R11`).
 
 **Declined cuts.** A qualified session can still decline one cut for one movie
 instance. That instance plays as the export plays it (it restarts or freezes
@@ -145,15 +149,25 @@ continuity badge. The codes:
 - `R9`: the movie is not fully opaque on either side (a carried decoder is drawn
   at opacity 1, so a fade would turn solid).
 - `R10`: a movie that moves across the transition does not ease in and out over
-  the whole transition (the carried movie can only follow that timing).
+  the whole transition, or has no positive duration (the carried movie can only
+  follow that timing).
+- `R11`: an export shape that has not been measured; the `reason` names the exact
+  check. A movie layer that does not read as an unmasked, unrotated, unanimated
+  rectangle declines that movie at the Magic Moves into and out of its slide (the
+  unmeasured instance is listed by its `objectId` but has no plan entry and plays
+  as the export plays it); an unreadable destination draw order declines that
+  carry; and a carry into a slide whose outgoing transition is not Magic Move,
+  Dissolve or none is declined, so nothing is held into that transition and
+  that slide restarts its movie where it might have carried.
 - `overlap`: artwork above the carried movie on the destination slide (GL replay
   may still carry it; see below).
 
 Deck-wide refusals make the whole deck `unsupported`, with the code at the start
 of the `reason`: `R3` (a transition is not on the slide's last build), `R5` (an
 object ID repeats across slides) and `R6` (the carried instances do not chain from
-slide to slide). A movie whose layers do not read as an unmasked rectangle (an
-unreadable layer shape or a possible mask) also makes the deck `unsupported`.
+slide to slide). A slide with more than one transition, an unreadable header,
+slide list or slide JSON, or a movie without an asset ID or object ID also makes
+the deck `unsupported`. The deck still plays.
 
 **Not carried (named residuals).**
 
@@ -166,8 +180,8 @@ unreadable layer shape or a possible mask) also makes the deck `unsupported`.
 
 **Allowlist.** Until the structural refusals are fully qualified, a deck's
 runtime plan must also match a signature on a pinned allowlist
-(`live_continuity.QUALIFIED_PLAN_SHA256`). Any other deck reports `unsupported`
-until its plan has passed the gates and been added.
+(`live_continuity.QUALIFIED_PLAN_SHA256`). Any other deck still starts, with
+continuity `unsupported`, until its plan has passed the gates and been added.
 
 Set `OBED_LIVE_CONTINUITY=off` before starting the dashboard server to disable it
 outright.
@@ -186,7 +200,8 @@ boundaries, with continuity on, `OBED_LIVE_CONTINUITY=off` and red arms that str
 one plan entry or swap in a faulty core, plus one attach-mode run. It scores one
 verdict per planned (cut, movie instance) from the plan itself: decoder identity,
 playback-clock continuity and landing rect at each cut, and no stray movie on any
-settled slide.
+settled slide. An instance declined with `R11` is left out of the plan's instance
+lists, so the stray check would flag it; no gate deck has one.
 
 **GL replay**: keeps a movie live across a click-driven Magic Move whose
 destination draws artwork above it, by replaying the player's own WebGL frame
@@ -212,7 +227,22 @@ authored opacity from the first frame of the move; an object that fades, hides,
 or carries several or nested animations keeps the player's own look. It is on by default for every output,
 independent of continuity and GL replay. `OBED_LIVE_MM_OPACITY=off` serves the
 unpatched player; `auto` keeps it on; any other value refuses to start.
-`output.mmOpacity` reports `mode` (`on`/`off`) and the served player's `sha256`.
+`off` also restores the export's own Dissolve, cut and movie behaviour: the incoming
+slide pops in under a Dissolve over fill-less textures, a cut shows both slides at
+once, and a playing movie jumps back to the opening frame baked into the outgoing slide
+(on, the cross-fade and clean cut apply on every output, raw export and Build Preview included).
+On, the movie instead freezes on its current frame and fades with the slide, but only on the
+HDMI/headless output host, when the host launched that Chrome itself, it is Chrome 154 with GPU
+compositing, the scale factor is 1, 1.5 or 2 and the stage is unscaled. Everywhere else the
+movie keeps that jump: under Keyer output (OBS's browser source, until a follow-up PR), in raw
+export and Build Preview, and on scaled stages (an output not 1920 CSS px wide). On GPU
+compositing the freeze shows a mid-tone step (identity tone, a known limit; Q5 open pending the
+W5 probe; `keynote_live_dissolve_crossfade.plan.md` §3.3, §12).
+`output.mmOpacity` reports `mode` (`on`/`off`) and the served player's `sha256`;
+`output.placement` reports whether the host granted the freeze (`grant`: `snap` or null) and
+why (`reason`: `granted`, `attached` (incl. managed OBS), `unqualified-version`,
+`software-compositing`, `version-unavailable`, `revoked-fingerprint`, or `channel-compromised`,
+which keeps the output hidden and refuses `show`).
 Build Preview serves the same drawing patch, without the live observation hook. Qualify it with
 `scripts/mm_opacity_probe.py`, `scripts/p2_recovery_html_adversarial.py --mm-opacity auto|off`
 and, under Keyer output, `scripts/managed_obs_qualify.py --arm mmo|mmo-cef`.
@@ -235,12 +265,46 @@ above.
 
 ### Codec report
 
-Every session probes each movie the export references (reading its box tree
-directly, no ffprobe) and reports it on `output.codecs`; `output.codecWarnings`
-flags any that may not play in the current output. HEVC (`hvc1`/`hev1`) is only
-attempted in headful launch mode — never headless launch, never the OBS attach
-output — and a deck's continuity plan reports `unsupported` if a movie it needs
-is not playable this way. The original movie file is never transcoded.
+Preparing a deck converts every movie its slides reference that is not H.264 to
+H.264 (libx264 crf 14, preset fast, yuv420p; audio AAC 192k), in place in the
+cached export, with the same file names. Only the export's movie copies are
+converted; the `.key` is never touched. Copies with the same media data, timing and
+geometry are encoded once. Each output is checked against its source (codec, coded size,
+timescale, rotation matrix, presented duration and, where the source has no
+trimming edit list, frame count) before it replaces the copy; a failed check
+fails the prepare and removes the incomplete export.
+`manifest.movieConversion` records the encoder and each converted file; the
+prepare panel lists the converted movies with their source codecs. A cached
+export is reused only while every movie it references is H.264, so an older
+cache with ProRes or HEVC movies is exported again once.
+
+The prepare fails, naming every such movie, when a movie has real transparency
+(H.264 has none), is HEVC whose transparency cannot be checked, has an odd width
+or height, or has unreadable timing. Replace it with an opaque movie (or one with
+even dimensions) and prepare again.
+
+Every session still probes each movie the export references (reading its box
+tree directly, no ffprobe) and reports it on `output.codecs`;
+`output.codecWarnings` flags any that may not play in the current output. HEVC
+(`hvc1`/`hev1`) is only attempted in headful launch mode — never headless launch,
+never the OBS attach output — and a deck's continuity plan reports `unsupported`
+if a movie it needs is not playable this way. A deck prepared in the dashboard
+has only H.264 movies, so this only applies to exports that bypass the prepare
+(for example the probe's gate fixtures).
+
+Residuals:
+
+- H.264 High 10 or 4:2:2 is not converted, and Chrome cannot decode it.
+- HDR HEVC (PQ/HLG) becomes 8-bit SDR without tone mapping.
+- Encoding runs at about realtime at 3840×1080, so long clips add minutes to a
+  prepare.
+- Conversion is one more generation at crf 14 (visually transparent); audio is
+  re-encoded (live output is muted anyway).
+- Two concurrent prepares of the same deck can make each other fail (fail
+  closed).
+- Re-preparing a deck while a live session serves its cache can re-export it
+  underneath the session; an older non-H.264 cache always re-exports on its
+  first re-prepare.
 
 ### Keyer output (managed OBS)
 

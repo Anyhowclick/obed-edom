@@ -706,10 +706,34 @@ for the parked `iwa-surgical-write-generator` feature.
 * **Refusals.** Per (boundary, instance) → `retire refused` + one `ContinuityPlan.refusals` record (`code`,
   `objectId` of `src`), reported on `output.continuity.notCarried`: `overlap` artwork above on the destination, R1
   ambiguous pairing (runner-up within 16 authored px), R1b opacity differs, R2 builds in/out, R4 loop mismatch, R7
-  web/image movie, R8 trim differs, R9 not fully opaque (checked after R2), R10 bridge motion not EaseInEaseOut over the whole transition (checked last). Deck-wide → `Unsupported("Rn: …")`: R3 transition not on the outgoing slide's last
-  event, R5 objectID repeats across slides, R6 chain invariant. `retire ends` is not a refusal. Never relax one to
-  qualify a deck.
+  web/image movie, R8 trim differs, R9 not fully opaque (checked after R2), R10 bridge motion not EaseInEaseOut over the whole transition or no positive duration (checked last), R11 unmeasured export shape (`reason` names the exact check).
+  R11 scopes what used to fail the deck: a movie layer outside the measured vocabulary (mask, rotation/affine/anchor,
+  ≠1 video sub-layer, animated geometry, not contained, unreadable rect, Back and Forth) refuses that asset at both
+  Magic Moves of its slide, and the unmeasured instance gets a record only (its `objectId` has no runtime entry; it is
+  left out of `slide_instances`/`slide_rects`/`loop_instances` and plays raw); an unreadable destination draw order
+  refuses that carry; a pin/bridge/glReplay carry into a slide whose outgoing transition is unmeasured (not Magic Move,
+  Dissolve or none) is refused at the earlier boundary, and the unmeasured boundary has no entries, so no decoder is
+  held into it. Scoping is not relaxing: a scoped site only removes carries, R6 still runs on the final entries, and
+  an allowlisted plan stays byte-identical. Deck-wide → `Unsupported` (the deck still plays, continuity off): R3
+  transition not on the outgoing slide's last event, more than one transition on a slide, R5 objectID repeats across
+  slides (unmeasured instances count), R6 chain invariant, unreadable header/slide list/slide JSON or no events, a
+  movie node without asset id or objectID, more than one movie changing geometry, `to_runtime` integrity checks, the
+  allowlist, and the host's stage gate, runtime install, codec gate and `OBED_LIVE_CONTINUITY=off`. `retire ends` is
+  not a refusal. Never relax one to qualify a deck.
 * **Allowlist.** `QUALIFIED_PLAN_SHA256` stays in force until S3; a deck joins only after its gates pass.
+* **Start is never gated on continuity.** The `/api/live/decks/{id}/qualification` response carries `qualified: true`,
+  `continuity: {mode: qualified|unsupported|off, reason, notCarried}` (from `_deck_qualification`) (`live_host.not_carried(plan, slides)`) and
+  `convertedMovies: [{asset, sourceCodec}]`; only `prepared_deck`'s playability checks (player digest, 16:9, manual
+  mode, unsupported media, no playable slides) block start.
+* **Prepare-time conversion.** `html_preview.apply_preview` runs `preview_movies.convert_movies` before writing the
+  manifest: every referenced `.mov`/`.mp4`/`.m4v` that is not H.264 is re-encoded in the cached export (never the
+  `.key`) with `dsk_movie_export._crop_encoder_args("h264")` + AAC 192k, one encode per group with identical `mdat`, timing and geometry,
+  verified by box reads (avc1; coded size, timescale, tkhd matrix, presented duration; stts count when the source has
+  no trimming edit list) before `os.replace`. Recorded as `manifest.movieConversion` (`encoder`, `converted[]`:
+  `path`, `asset`, `sourceCodec`, `sourceSha256`, `sha256`, `bytes`). Real transparency, HEVC whose transparency
+  cannot be checked, odd dimensions or unreadable timing fail the prepare (`PreviewError` naming every movie; fix:
+  replace it with an opaque movie); never flatten alpha. `load_cached` reuses a cache only when
+  `preview_movies.unconverted` is empty. The host codec gate stays for exports that bypass the prepare.
 * **F5 names are frozen instrument API.** Scorers read note kinds (`bridge-3to4`, `reuse-decoder`,
   `reuse-skip-boundary`, `retire-on-start-movie`, `retire-boundary`, `preserve-refused`, `dom-swap`,
   `facade-block-clear`, `remount-*`, `pool-cleared`, `glreplay-*`, `bridge-clock`, `pin-hold-start`, `bridge-motion-start`; the last
@@ -786,7 +810,19 @@ for the parked `iwa-surgical-write-generator` feature.
   observation-only player. Precedence = ctor `mm_opacity` (`auto`|`off` exact, else `LiveHostError`) → env
   `OBED_LIVE_MM_OPACITY` (trimmed, any case; `off`|`auto`, else refuse) → `auto`, on every output (HDMI, managed OBS,
   external attach), independent of continuity and GL replay. Report: `output.mmOpacity = {mode: on|off, sha256}` (served
-  `main.js`); start log `mmOpacityPreference`. `RUNTIME_VERSION` stays 2. G2 bytes are unchanged; with the patch on the
+  `main.js`); start log `mmOpacityPreference`. `RUNTIME_VERSION` stays 2. Slide transitions
+  (D1–D4, `keynote_live_dissolve_crossfade.plan.md`): the same switch gives Dissolve a true cross-fade, a `none` cut a
+  clean swap (every output, raw export and Build Preview included), and admitted outgoing movies a frozen snapshot of
+  their current frame that fades with the slide; `off` restores the export's pop-in, double slide and jump to the baked
+  opening frame. The freeze needs the host grant `window.__obedPlacement === "snap"` (plan §3.3, decision 15): only a
+  `LiveOutputHost` that launched its Chrome (not attach mode), `Browser.getVersion` major in `QUALIFIED_SNAP_MAJORS`
+  (154) and `gpu_compositing: "enabled"`, through a first-run private channel, context-bound round trip, revoked at
+  `observe()` on fingerprint change. Managed OBS/CEF (attach), raw export and Build Preview (no host, decision 14) keep
+  today's jump; the CEF placement probe is a follow-up PR. The take is identity-tone (the GPU mid-tone step at the
+  freeze is a known limit; Q5 open pending W5) and geometry-guarded: DPR 1, 1.5 or 2, stage scale 1, translation-only
+  chains, integer `left`/`top`; scaled stages keep the jump (plan §3.2, §12). Report `output.placement = {grant, reason,
+  product, gpuCompositing, at}`, reason ∈ `granted`, `attached`, `unqualified-version`, `software-compositing`,
+  `version-unavailable`, `channel-compromised` (output stays hidden, `show` refused), `revoked-fingerprint`. G2 bytes are unchanged; with the patch on the
   P2 fixture reports exactly `opacityUnproven = [{4, "size"}]` (no override: LIVE replays the player's own 0.2947) and
   `occludedBands` 0/128 (patch off: `[]`, 20/128). `frameLen` (settled-frame call count) reads 96 on / 88 off when the
   settle frame carries every uniform write, but the player's uniform cache makes it timing-dependent (headless 85/86 off):

@@ -158,7 +158,7 @@ def client_for(tmp_path, monkeypatch, engine=None, events=None, player=OLD_PLAYE
     monkeypatch.setattr(live, 'safe_export_file', lambda *_: thumb)
     monkeypatch.setattr(live, 'file_sha256', lambda *_: player)
     monkeypatch.setattr(live, 'load_header', lambda *_: ({'slideWidth': 1920, 'slideHeight': 1080, 'showMode': 0}, 'header.json'))
-    monkeypatch.setattr(live, 'derive_runtime', lambda *args, **kwargs: (None, {}))
+    monkeypatch.setattr(live, 'derive_runtime', lambda *args, **kwargs: (SimpleNamespace(refusals=()), {}))
     claims, releases = [], []
     events = events if events is not None else []
 
@@ -678,39 +678,48 @@ def test_routes_only_use_engine_attributes_the_real_managed_obs_has():
     assert list(inspect.signature(ManagedObs.apply_settings).parameters)[1:] == ["mode", "rate", "keyer"]
 
 
-def test_deck_qualification_checks_allowlist_without_starting_output(tmp_path, monkeypatch):
-    client, claims, _, _, adapters, _ = client_for(tmp_path, monkeypatch)
+def test_deck_qualification_reports_continuity_and_conversions_without_starting_output(tmp_path, monkeypatch):
+    client, claims, _, job, adapters, _ = client_for(tmp_path, monkeypatch)
+    monkeypatch.delenv('OBED_LIVE_CONTINUITY', raising=False)
+    refusal = {'fromPlayer': 0, 'toPlayer': 1, 'atScene': 2, 'asset': 'vid-20250608-wa0125.mp4', 'movieKey': 'm1',
+               'objectId': 'instance-without-runtime-entry', 'code': 'R11', 'reason': 'R11: unmeasured export shape'}
+    monkeypatch.setattr(live, 'derive_runtime', lambda *args, **kwargs: (SimpleNamespace(refusals=(refusal,)), {}))
+    job.result['slides'].append({'originalOrdinal': 2, 'playerIndex': 1, 'skipped': False})
+    converted = [{'path': f'assets/{folder}/assets/untitled.mov', 'asset': 'untitled.mov', 'sourceCodec': 'HEVC',
+                  'sourceSha256': 'a', 'sha256': 'b', 'bytes': 1} for folder in ('s1', 's2')]
+    job.result['manifest']['movieConversion'] = {'encoder': 'libx264 crf14 fast yuv420p; aac 192k', 'converted': converted}
     response = client.get('/api/live/decks/prepared/qualification')
     assert response.status_code == 200
     assert response.json() == {
-        'previewJobId': 'prepared', 'name': 'deck.key', 'sourceDigest': 'source',
-        'slides': 1, 'qualified': True, 'reason': None,
+        'previewJobId': 'prepared', 'name': 'deck.key', 'sourceDigest': 'source', 'slides': 2, 'qualified': True,
+        'continuity': {'mode': 'qualified', 'reason': None, 'notCarried': [{
+            'fromSlide': 1, 'toSlide': 2, 'asset': 'vid-20250608-wa0125.mp4', 'objectId': 'instance-without-runtime-entry',
+            'code': 'R11', 'reason': 'R11: unmeasured export shape'}]},
+        'convertedMovies': [{'asset': 'untitled.mov', 'sourceCodec': 'HEVC'}],
     }
+    monkeypatch.setenv('OBED_LIVE_CONTINUITY', 'off')
+    job.result['manifest']['movieConversion']['converted'] = []
+    report = client.get('/api/live/decks/prepared/qualification').json()
+    assert report['continuity'] == {'mode': 'off', 'reason': 'OBED_LIVE_CONTINUITY is off.', 'notCarried': []}
+    assert report['convertedMovies'] == []
     assert not claims
     assert not adapters
     assert client.get('/api/live').json() is None
 
 
-def test_qualification_refusal_also_blocks_start_even_with_continuity_off(tmp_path, monkeypatch):
+@pytest.mark.parametrize('continuity', ['auto', 'off'])
+def test_unsupported_continuity_is_reported_and_never_blocks_start(tmp_path, monkeypatch, continuity):
     client, claims, _, _, adapters, _ = client_for(tmp_path, monkeypatch)
+    monkeypatch.delenv('OBED_LIVE_CONTINUITY', raising=False)
     monkeypatch.setattr(live, 'derive_runtime', lambda *args, **kwargs: live.Unsupported('outside the measured allowlist'))
     report = client.get('/api/live/decks/prepared/qualification').json()
-    assert report['qualified'] is False
-    assert report['reason'] == 'outside the measured allowlist'
-    response = client.post('/api/live', json={'previewJobId': 'prepared', 'continuity': 'off'})
-    assert response.status_code == 409
-    assert 'outside the measured allowlist' in response.json()['detail']
-    assert not adapters
-    assert not claims
-
-
-def test_start_rechecks_qualification_instead_of_trusting_prior_result(tmp_path, monkeypatch):
-    client, claims, _, _, adapters, _ = client_for(tmp_path, monkeypatch)
-    assert client.get('/api/live/decks/prepared/qualification').json()['qualified']
-    monkeypatch.setattr(live, 'derive_runtime', lambda *args, **kwargs: live.Unsupported('export changed'))
-    assert client.post('/api/live', json={'previewJobId': 'prepared'}).status_code == 409
-    assert not adapters
-    assert not claims
+    assert report['qualified'] is True
+    assert report['continuity'] == {'mode': 'unsupported', 'reason': 'outside the measured allowlist', 'notCarried': []}
+    response = client.post('/api/live', json={'previewJobId': 'prepared', 'continuity': continuity})
+    assert response.status_code == 200
+    assert response.json()['outputVisible']
+    assert [adapter.continuity for adapter in adapters] == [continuity]
+    assert len(claims) == 1
 
 
 @pytest.mark.parametrize('invalid', ['player', 'canvas', 'mode', 'media', 'slides'])
@@ -736,12 +745,13 @@ def test_keyer_qualification_uses_gl_plan_and_native_fallback(tmp_path, monkeypa
     client, _, _, _, _, _ = client_for(tmp_path, monkeypatch)
     settings_mod.save_settings({'akOutputMode': 'keyer'}, validate_dir=False)
     monkeypatch.delenv('OBED_LIVE_GL_REPLAY', raising=False)
+    monkeypatch.delenv('OBED_LIVE_CONTINUITY', raising=False)
     calls = []
 
     def derive(*args, **kwargs):
         calls.append(kwargs.get('gl_replay', False))
-        return live.Unsupported('no GL plan') if kwargs.get('gl_replay') else (None, {})
+        return live.Unsupported('no GL plan') if kwargs.get('gl_replay') else (SimpleNamespace(refusals=()), {})
 
     monkeypatch.setattr(live, 'derive_runtime', derive)
-    assert client.get('/api/live/decks/prepared/qualification').json()['qualified']
+    assert client.get('/api/live/decks/prepared/qualification').json()['continuity']['mode'] == 'qualified'
     assert calls == [True, False]

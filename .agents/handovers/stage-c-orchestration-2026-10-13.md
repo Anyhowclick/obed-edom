@@ -1,5 +1,7 @@
 # Handover: Stage C orchestration (2026-10-13)
 
+**Status (2026-10-13):** implemented on `claude/stage-c-orchestration`; Astra r1 1 major (folded), r2 clean; G1–G4 PASS (`.agents/reviews/stage-c/gates-r1.md`); integration PR open, awaiting the owner's G5.
+
 Read this first, then the plan. You coordinate Stage C in your own worktree; the S2 follow-ups session
 (branch `claude/s2-followups-dsk-deck-902af1`) keeps Stage B (tag-dip alternatives) and must not be disturbed.
 
