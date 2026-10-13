@@ -463,6 +463,13 @@ def mm_verdict(scored: list[dict[str, Any]]) -> dict[str, Any]:
     return {"frames": scored, "chosen": chosen, "verdict": verdict}
 
 
+def scratch_resolver(root: Path, relative: str) -> Path:
+    path = (root / relative).resolve()
+    if root.resolve() not in path.parents or not path.is_file():
+        raise PreviewError(f"not in the scratch export: {relative}")
+    return path
+
+
 def run_g2(args: argparse.Namespace) -> int:
     from obed_edom import preview_textures
 
@@ -479,7 +486,7 @@ def run_g2(args: argparse.Namespace) -> int:
         result["servedJsonHits"] = preview_textures.json_hits(root, slides)
         width, height = VIEWPORT
         live_host.choose_display = lambda *_a, **_k: live_host.OutputDisplay(0, 0, 0, width, height + HEADLESS_HEIGHT_PAD, True)
-        host = live_host.LiveOutputHost(root, slides, headless=True, continuity="off", gl_replay="off")
+        host = live_host.LiveOutputHost(root, slides, headless=True, continuity="off", gl_replay="off", resolver=scratch_resolver)
         host.start()
         try:
             transport = host._require_transport()
