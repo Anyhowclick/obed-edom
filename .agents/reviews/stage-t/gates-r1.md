@@ -22,6 +22,23 @@ GPT-6 Astra, effort high (owner 2026-10-13: the reviewer's model class differs f
 | Suites | `pytest tests/ -n auto --dist worksteal`, 3.12 and the 3.10 floor | Pre-fold (`b9902352`): 3.10 10791 passed, 36 skipped, 0 failed (3.12 before the census fix: 4 census failures from the new fixture, owner-approved exclusion). Final code (`da2a1c24`): 3.12 10791 passed, 36 skipped, 1 xfailed, 0 failed; 3.10 floor the same. No UI change, so no `test:ui`. |
 | G4 | Owner's eye: slides 8, 9 and 10 on air in Chrome and the managed OBS Keyer | Pending (owner). |
 
+## G4 attempt and follow-ups (2026-10-13)
+- **First G4 prepare:** Keynote launch failed with -600 at the script's `activate` (chars 127–135). Not obed-edom code: every
+  launch path worked once Keynote had been launched once via `open -b` (pane, Terminal, both Pythons, direct export,
+  dashboard). One-off macOS launch state; nothing changed.
+- **Second prepare refused** "slide 10 (582×327 image)" (export deleted, not inspectable). A direct export at 17:02 refused
+  "slide 9 (288×78 image)". Fresh exports of the same deck collide differently. Owner reopened OQ-T4 + OQ-T1 (plan §7 note).
+- **D4 + one re-export** (`8fb590af`, Opus implementers), reviewed by Codex GPT-6 Astra high r1 (1 major: D4 trusted a landing
+  the same pass re-points; 1 medium; 1 low). Folds by Codex GPT-5.6 Sol high (owner: next-round folds by Sol), reviewed by
+  Opus 5.5 high: r2 1 medium (from == to landings), r3 1 major (same class in D2: `_trusted_landing` shared by D2/D4),
+  r4 no major/blocker, loop closed. Commits `3ac983b3`, `335f4f4e`, `e7c75a19`.
+- **Prepare output modal** (Codex Sol; Opus 5.5 high review r1: 1 major duplicated logs, 3 medium, 4 low; r2: 1 medium CSS
+  cascade, 1 low; folded): errors red, output lines in the accent colour (owner). Commits `12120fa1`, `7c64d5a1`, `eb6612a0`.
+- **Re-gated on `e7c75a19`:** G1 PASS over 28 exports (3b9019 now refuses only "slide 10 (287×77 image)": D4 repairs slide 9;
+  slide 10 has no same-slide candidate). The 17:02 direct export repairs 3 (slide 9 tag box D4 → `CE49CEF4` corr 1.0, slide 10
+  WA0125 poster D3, slide 10 label D2). Suites 3.12 and 3.10: 10799 passed, 36 skipped, 0 failed; `test:ui` 321/321.
+- **G4:** pending a re-run by the owner on `e7c75a19`.
+
 ### Repaired Alpha_DSK feed table (Stage B)
 Regular uploads only (hand-back uploads follow them). `→` = the leaf's `contents` to-texture.
 
