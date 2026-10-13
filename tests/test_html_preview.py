@@ -421,6 +421,97 @@ def test_apply_records_conversions_and_reuse_needs_h264(tmp_path, monkeypatch):
     assert hp.load_cached(DIGEST, _source()) is None
 
 
+@pytest.mark.parametrize(
+    ("record", "hits", "reused"),
+    [
+        (None, [], False),
+        ({"version": "next", "repaired": [], "pdfs": []}, [], False),
+        ({"version": "current", "repaired": [], "pdfs": []}, ["slide 3 texture hit"], False),
+        ({"version": "current", "repaired": [], "pdfs": []}, [], True),
+        ({"version": "current", "skipped": "unsupported player", "repaired": [], "pdfs": []}, ["ignored"], True),
+    ],
+    ids=["no-record", "wrong-version", "json-hits", "current", "skipped-player"],
+)
+def test_load_cached_requires_a_current_texture_repair_record(tmp_path, monkeypatch, record, hits, reused):
+    from obed_edom import preview_textures
+
+    hp, deck = _stub_deck(tmp_path, monkeypatch)
+    ready = apply_preview(propose_preview(deck, job_id="job-a"), job_id="job-a", export_html_fn=_fake_export)
+    assert ready["manifest"]["textureRepair"]["skipped"] == "unsupported player"
+    manifest_path = hp.cache_dir(DIGEST) / "manifest.json"
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    data.pop("textureRepair")
+    if record is not None:
+        version = preview_textures.TEXTURE_REPAIR_VERSION
+        data["textureRepair"] = {**record, "version": version if record["version"] == "current" else version + 1}
+    manifest_path.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(preview_textures, "json_hits", lambda *_a: hits)
+    assert (hp.load_cached(DIGEST, _source()) is not None) is reused
+
+
+REFUSAL = "Cannot repair Keynote's HTML export: slide 3 (288×78 image): refused"
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "expected_calls", "error"),
+    [
+        (["ok"], ["export", "repair", "convert"], None),
+        (["refuse", "ok"], ["export", "repair", "export", "repair", "convert"], None),
+        (["refuse", "refuse"], ["export", "repair", "export", "repair"], "Cannot repair Keynote's HTML export"),
+        (["error"], ["export", "repair"], "unrelated failure"),
+    ],
+    ids=["repaired", "re-export-repaired", "re-export-refused", "other-error-no-retry"],
+)
+def test_apply_repairs_textures_before_conversion_with_one_re_export(
+    tmp_path, monkeypatch, outcomes, expected_calls, error
+):
+    from obed_edom import preview_movies, preview_textures
+
+    hp, deck = _stub_deck(tmp_path, monkeypatch)
+    calls: list[str] = []
+    lines: list[str] = []
+    pending = iter(outcomes)
+    record = {"version": preview_textures.TEXTURE_REPAIR_VERSION, "playerDigest": "p", "repaired": [], "pdfs": []}
+
+    def _export(deck_path, dest, **kwargs):
+        calls.append("export")
+        if Path(dest).exists():
+            shutil.rmtree(dest)
+        _fake_export(deck_path, dest, **kwargs)
+
+    def _repair(export_root, slides, *, player_digest, log):
+        calls.append("repair")
+        assert (export_root / PLAYER_JS).is_file()
+        assert [slide["exportedUuid"] for slide in slides if not slide["skipped"]] == ["aaa", "ccc"]
+        assert player_digest == file_sha256(export_root / PLAYER_JS)
+        outcome = next(pending)
+        if outcome == "refuse":
+            raise preview_textures.TextureRepairRefused(REFUSAL)
+        if outcome == "error":
+            raise PreviewError("unrelated failure")
+        return record
+
+    def _convert(*_a, **_k):
+        calls.append("convert")
+        return {"converted": []}
+
+    monkeypatch.setattr(preview_textures, "repair_textures", _repair)
+    monkeypatch.setattr(preview_movies, "convert_movies", _convert)
+    proposal = propose_preview(deck, job_id="job-a")
+    retry_line = "Keynote's export has textures it cannot repair; exporting once more…"
+    if error is None:
+        ready = apply_preview(proposal, job_id="job-a", export_html_fn=_export, log=lines.append)
+        assert ready["manifest"]["textureRepair"] == record
+        assert json.loads((hp.cache_dir(DIGEST) / "manifest.json").read_text())["textureRepair"] == record
+    else:
+        with pytest.raises(PreviewError, match=error):
+            apply_preview(proposal, job_id="job-a", export_html_fn=_export, log=lines.append)
+        assert not (hp.cache_dir(DIGEST) / "html").exists()
+        assert not (hp.cache_dir(DIGEST) / "manifest.json").exists()
+    assert calls == expected_calls
+    assert lines.count(retry_line) == (outcomes[0] == "refuse")
+
+
 def test_cleanup_does_not_delete_another_jobs_cache(tmp_path, monkeypatch):
     hp, deck = _stub_deck(tmp_path, monkeypatch)
     first = apply_preview(

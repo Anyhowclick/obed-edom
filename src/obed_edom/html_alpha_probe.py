@@ -38,6 +38,7 @@ from obed_edom.html_preview import (
     load_header,
     player_hash,
     read_jsonish,
+    rewrite_pdfp_from_pdf,
     source_slides,
     tree_bytes,
     validate_export_contract,
@@ -3313,35 +3314,6 @@ def strip_pdf_page_bg_fill(page: Any) -> dict[str, Any]:
         "stripped": False,
         "reason": "leading ops do not match identified bg fill",
         "prefix": raw[:90].decode("latin1", "replace"),
-    }
-
-
-def rewrite_pdfp_from_pdf(pdf_path: Path, pdfp_path: Path) -> dict[str, Any]:
-    """Embed current PDF bytes into the file:// local_pdf companion."""
-    import base64
-
-    pdf_path = Path(pdf_path)
-    pdfp_path = Path(pdfp_path)
-    if not pdfp_path.is_file():
-        return {"rewrote": False, "reason": "pdfp missing"}
-    pdf = pdf_path.read_bytes()
-    text = pdfp_path.read_text(encoding="utf-8")
-    m = re.match(r"local_pdf\(\s*(\{.*\})\s*\);?\s*$", text, re.S)
-    if not m:
-        return {"rewrote": False, "reason": "unexpected pdfp format", "head": text[:80]}
-    obj = json.loads(m.group(1))
-    before = base64.b64decode(obj["pdf"])
-    obj["pdf"] = base64.b64encode(pdf).decode("ascii")
-    pdfp_path.write_text("local_pdf( " + json.dumps(obj, indent=2) + " );\n", encoding="utf-8")
-    after = base64.b64decode(
-        json.loads(re.match(r"local_pdf\(\s*(\{.*\})\s*\);?\s*$", pdfp_path.read_text(), re.S).group(1))["pdf"]
-    )
-    return {
-        "rewrote": True,
-        "beforeSha256": hashlib.sha256(before).hexdigest(),
-        "afterSha256": hashlib.sha256(after).hexdigest(),
-        "matchesPdf": after == pdf,
-        "bytes": len(after),
     }
 
 

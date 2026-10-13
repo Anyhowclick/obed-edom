@@ -16,7 +16,7 @@ If macOS blocks the launcher, Control-click it and choose **Open**.
 
 - **Sermon Base Generator** — create LW and DSK decks, an operator-cued Word outline, previews, and a review PDF.
 - **Sermon Checker** — check an outline, one deck, or an LW/DSK pair for cue, wording, layout, photo, and house-style issues. Checks do not alter the source files.
-- **Alpha Keynote** — drop or choose a Keynote, prepare it (movies are converted to H.264), then present using a slide grid and current still preview. Supports silent screen output and managed DeckLink fill/key output.
+- **Alpha Keynote** — drop or choose a Keynote, prepare it (movies are converted to H.264 and mis-mapped export textures are repaired), then present using a slide grid and current still preview. Supports silent screen output and managed DeckLink fill/key output.
 - **CG Resizer** — turn a finalised wide-wall deck into a 16:9 CG deck and review any framing choices.
 - **DSK Generator** — turn a full-wall (FW) deck into a lower-thirds (DSK) deck; the DSK template is optional for image/video decks (the wall deck's own transparent layout, then the reference deck, are tried first), required for reformatted text verses; chosen once and remembered on this Mac, shared with Sermon Base Generator.
 - **Maps** — build and export map slides for LW, DSK, and CG.
@@ -290,6 +290,19 @@ The prepare fails, naming every such movie, when a movie has real transparency
 (H.264 has none), is HEVC whose transparency cannot be checked, has an odd width
 or height, or has unreadable timing. Replace it with an opaque movie (or one with
 even dimensions) and prepare again.
+
+Preparing a deck also repairs Keynote's HTML-export texture mis-mapping: Keynote
+sometimes points a label, tag box or movie poster at another object's image (for
+example a label drawn as a stretched video poster). Before movies are converted,
+each such object is re-pointed to its correct image in the same slide, or that
+image is copied in from the previous slide's Magic Move, and the copy is checked
+(size, OCR or pixels) before it is written. Only the cached export changes; the
+`.key` is never touched. `manifest.textureRepair` records every repaired object
+(slide, rule, old and new texture, donor) and every rewritten PDF, and is written
+even when nothing needed repair. When an object has no verified replacement the
+prepare fails, naming each slide and object (for example `slide 10 (287×77
+image)`); re-export the deck. A cached export without a current
+`manifest.textureRepair` is exported again once.
 
 Every session still probes each movie the export references (reading its box
 tree directly, no ffprobe) and reports it on `output.codecs`;

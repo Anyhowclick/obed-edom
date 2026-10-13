@@ -22,6 +22,7 @@ from tests.test_live_runtime import (
     EFFECT_1_TO_2,
     FIXTURE_ROOT,
     MAIN_OUTPUT,
+    _corpus_headers,
     REAL_PLAYER,
     _cut,
     _hook_only,
@@ -395,7 +396,7 @@ def test_handback_census_mirror_affects_only_p2_1_to_2_slots_2_and_4_in_committe
 
 @pytest.mark.skipif(not MAIN_OUTPUT.is_dir(), reason="main checkout output/ not available")
 def test_handback_census_mirror_affects_only_p2_1_to_2_slots_2_and_4_across_real_exports():
-    roots = sorted(header.parent for header in MAIN_OUTPUT.rglob("assets/header.json"))
+    roots = sorted(header.parent for header in _corpus_headers(MAIN_OUTPUT))
     pairs = _magic_moves(roots)
     if not pairs:
         pytest.skip("no real exports under output/")
