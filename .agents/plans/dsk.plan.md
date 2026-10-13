@@ -314,8 +314,8 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
 - Two concurrent Keynote scripts collide destructively; hold an `fcntl.flock` for the batch.
   Detect the process by `CFBundleExecutable` (`Keynote`), not the app name.
 - Peak RSS: 1.18–1.41 GB on a 242 MB deck, 1.83–2.3 GB on the 669 MB GW deck, **3.21 GB on the
-  6.7 GB FRC Wall deck (r18, 2-slide generate; its export 1.50 GB)**; watchdog default 3.0 GB —
-  the FRC deck BREACHES it, so launch the dashboard with `OBED_DSK_RSS_LIMIT_GB=8` (r18 used 8 on
+  6.7 GB FRC Wall deck (r18, 2-slide generate; its export 1.50 GB)**; watchdog default 6.0 GB (was 3.0 —
+  the FRC deck breached it; r18 launched the dashboard with `OBED_DSK_RSS_LIMIT_GB=8` on
   a 17 GB machine). A breach now names itself in the job error. `-600` = Keynote not running; `-1712` = AppleEvent timeout (retry re-copies the
   pristine scratch, so NEVER retry a pass ≥ 2 — it would run against an unwritten deck).
 - Keynote does NOT purge unreferenced `Data/` on save: the DSK output was 94.7% of the 669 MB
