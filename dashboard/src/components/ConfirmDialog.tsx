@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { createPortal } from "react-dom";
+import { ModalShell } from "./ModalShell";
 
 export type ConfirmOptions = {
   title: string;
@@ -10,12 +10,6 @@ export type ConfirmOptions = {
 };
 
 type Pending = ConfirmOptions & { resolve: (ok: boolean) => void };
-
-const CLOSE_MS = 150;
-
-function prefersReducedMotion(): boolean {
-  return typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-}
 
 export function useConfirm(): [(opts: ConfirmOptions) => Promise<boolean>, ReactNode] {
   const [pending, setPending] = useState<Pending | null>(null);
@@ -71,91 +65,20 @@ export function ConfirmDialog({
 }) {
   const titleId = useId();
   const bodyId = useId();
-  const cardRef = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
-  const settled = useRef(false);
-  const closeTimer = useRef<number | null>(null);
-  const reduce = prefersReducedMotion();
-  const [phase, setPhase] = useState<"enter" | "open" | "closing">(reduce ? "open" : "enter");
   const onResolveRef = useRef(onResolve);
-  const onExitedRef = useRef(onExited);
   onResolveRef.current = onResolve;
-  onExitedRef.current = onExited;
 
-  const finish = useCallback((ok: boolean, instant: boolean) => {
-    if (settled.current) return;
-    settled.current = true;
-    onResolveRef.current(ok);
-    if (instant || prefersReducedMotion()) {
-      onExitedRef.current();
-      return;
-    }
-    setPhase("closing");
-    closeTimer.current = window.setTimeout(() => onExitedRef.current(), CLOSE_MS);
-  }, []);
-
-  useEffect(() => {
-    if (reduce) return;
-    const id = window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => setPhase((current) => (current === "enter" ? "open" : current)));
-    });
-    return () => window.cancelAnimationFrame(id);
-  }, [reduce]);
-
-  useEffect(() => {
-    const prev = document.activeElement as HTMLElement | null;
-    (danger ? cancelRef : confirmRef).current?.focus();
-
-    function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        finish(false, true);
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const first = cancelRef.current;
-      const last = confirmRef.current;
-      if (!first || !last) return;
-      const active = document.activeElement;
-      if (event.shiftKey && active === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && active === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    }
-
-    document.addEventListener("keydown", onKey, true);
-    return () => {
-      document.removeEventListener("keydown", onKey, true);
-      prev?.focus?.();
-    };
-  }, [danger, finish]);
-
-  useEffect(() => {
-    return () => {
-      if (closeTimer.current != null) window.clearTimeout(closeTimer.current);
-    };
-  }, []);
-
-  return createPortal(
-    <div
-      className={`overlay confirm-overlay${phase === "open" ? " is-open" : ""}${phase === "closing" ? " is-closing" : ""}`}
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) finish(false, false);
-      }}
+  return (
+    <ModalShell
+      titleId={titleId}
+      describedBy={body ? bodyId : undefined}
+      initialFocusRef={danger ? cancelRef : confirmRef}
+      onDismiss={() => onResolveRef.current(false)}
+      onExited={onExited}
     >
-      <div
-        ref={cardRef}
-        className="overlay-card confirm-card"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-describedby={body ? bodyId : undefined}
-      >
+      {(close) => <>
         <h2 id={titleId}>{title}</h2>
         {body ? (
           <p id={bodyId} className="note">
@@ -163,20 +86,19 @@ export function ConfirmDialog({
           </p>
         ) : null}
         <div className="confirm-actions">
-          <button ref={cancelRef} className="btn secondary" type="button" onClick={() => finish(false, false)}>
+          <button ref={cancelRef} className="btn secondary" type="button" onClick={() => close(false, () => onResolveRef.current(false))}>
             {cancelLabel}
           </button>
           <button
             ref={confirmRef}
             className={danger ? "btn run-checks" : "btn"}
             type="button"
-            onClick={() => finish(true, false)}
+            onClick={() => close(false, () => onResolveRef.current(true))}
           >
             {confirmLabel}
           </button>
         </div>
-      </div>
-    </div>,
-    document.body
+      </>}
+    </ModalShell>
   );
 }

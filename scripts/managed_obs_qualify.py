@@ -92,7 +92,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 from obed_edom.fixture_paths import fixture  # noqa: E402
 from obed_edom import live_gl_replay_js, live_runtime, managed_obs, mm_handback_score, obs_websocket, placement_probe  # noqa: E402
 from obed_edom.html_preview import cache_dir  # noqa: E402
-from obed_edom.live_continuity import Unsupported  # noqa: E402
+from obed_edom.live_continuity import Unsupported, plan_signature  # noqa: E402
 from obed_edom.live_host import GL_REPLAY_ENV, MM_OPACITY_ENV, ChromeCdp, LiveOutputHost, _ProgramGuard  # noqa: E402
 from obed_edom.managed_obs import ManagedObs  # noqa: E402
 from obed_edom.obs_websocket import ObsWebsocket  # noqa: E402
@@ -105,6 +105,7 @@ import obs_cadence_decode  # noqa: E402
 from live_continuity_probe import (  # noqa: E402
     GL_REPLAY_READ_JS,
     PAINTING_VIDEOS_JS,
+    P2_PLAN_SHA256,
     _carried_el_id,
     _el_id,
     _events_readable,
@@ -1279,6 +1280,8 @@ def fixture_facts(fixture: Path) -> dict[str, Any]:
             runtime = plan.to_runtime()
             if isinstance(runtime, Unsupported):
                 raise SystemExit(f"fixture does not qualify on product code (gl_replay={gl}): {runtime.reason}")
+            if plan_signature(runtime) not in P2_PLAN_SHA256:
+                raise SystemExit(f"fixture is not a pinned P2-family plan (gl_replay={gl})")
         return ground_truth_facts(plans[True], armed=True)["armed"]
     finally:
         shutil.rmtree(dest.parent, ignore_errors=True)

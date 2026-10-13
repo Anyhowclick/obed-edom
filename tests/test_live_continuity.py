@@ -363,16 +363,16 @@ def _boundary_records(plan: ContinuityPlan, index: int) -> list[dict]:
 def _scoped_r11_reason(tmp_path: Path, uuid: str, transform, *, gl_replay: bool = False, partnered: bool = True):
     """Stage C scoping (plan section 3.1): an unmeasured movie shape, or a draw order that cannot
     be read for one carry, no longer refuses the deck. The plan derives and its runtime passes
-    every integrity check (only the allowlist may still withhold it). At the mutated slide's
-    Magic Move every movie is refused (a runtime `retire`) and every record is R11 with one reason,
-    which is returned; every other boundary, and its records, is the unmutated plan's. An
+    every integrity check. At the mutated slide's Magic Move every movie is refused (a runtime
+    `retire`) and every record is R11 with one reason, which is returned; every other boundary,
+    and its records, is the unmutated plan's. An
     unmeasured instance with no partner across a Magic Move (`partnered=False`) changes no
     boundary at all."""
     plan = derive_plan(_mutate_slide(tmp_path, uuid, transform), SLIDES, resolver=_resolver, gl_replay=gl_replay)
     base = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=gl_replay)
     assert isinstance(plan, ContinuityPlan), plan
     runtime = plan.to_runtime()
-    assert isinstance(runtime, dict) or runtime.reason == NOT_YET_QUALIFIED, runtime
+    assert isinstance(runtime, dict), runtime
     affected = _MAGIC_MOVE_OF[uuid] if partnered else None
     for index, (boundary, before) in enumerate(zip(plan.boundaries, base.boundaries, strict=True)):
         if index != affected:
@@ -629,7 +629,7 @@ def test_to_runtime_refuses_bridge_without_an_instance(field, end):
 
 
 @pytest.mark.parametrize("duration", [None, 0, -1, True, "1.5", float("nan"), float("inf")])
-def test_r10_a_bridge_without_positive_export_duration_refuses_at_derivation(duration, monkeypatch, tmp_path):
+def test_r10_a_bridge_without_positive_export_duration_refuses_at_derivation(duration, tmp_path):
     """Stage C: the carry is refused (R10) when the plan is derived, so the deck's other boundaries
     stand and the runtime retires the bridge instead of `to_runtime` refusing the deck."""
     def change_duration(data):
@@ -648,29 +648,23 @@ def test_r10_a_bridge_without_positive_export_duration_refuses_at_derivation(dur
     assert (bridge.action, bridge.code) == ("bridge", "R10")
     assert "the transition has no finite positive export duration" in bridge.refusal
     assert plan.boundaries[:2] == _plan().boundaries[:2]
-    entries = {entry["atScene"]: entry for entry in _signed(monkeypatch, plan)["boundaries"]}
+    entries = {entry["atScene"]: entry for entry in _runtime(plan)["boundaries"]}
     assert (entries[8]["action"], entries[8]["reason"]) == ("retire", "refused")
 
 
-def test_to_runtime_refuses_unqualified_export_duration():
+def test_to_runtime_carries_a_changed_valid_export_duration():
     plan = _plan()
     bridge = replace(plan.boundaries[2], transition_duration=2.5)
     result = replace(plan, boundaries=(*plan.boundaries[:2], bridge, plan.boundaries[3])).to_runtime()
-    assert isinstance(result, Unsupported)
-    assert "not yet qualified" in result.reason
+    assert isinstance(result, dict)
+    [carried] = [entry for entry in result["boundaries"] if entry["action"] == "bridge"]
+    assert carried["durationSeconds"] == 2.5
 
 
-def _signed(monkeypatch, plan: ContinuityPlan) -> dict:
-    """The runtime `to_runtime()` signed, whether or not the allowlist then withholds it."""
-    from obed_edom import live_continuity
-
-    signed: list[dict] = []
-    real = live_continuity.plan_signature
-    monkeypatch.setattr(live_continuity, "plan_signature", lambda runtime: (signed.append(runtime), real(runtime))[1])
-    plan.to_runtime()
-    monkeypatch.setattr(live_continuity, "plan_signature", real)
-    assert len(signed) == 1
-    return signed[0]
+def _runtime(plan: ContinuityPlan) -> dict:
+    runtime = plan.to_runtime()
+    assert isinstance(runtime, dict)
+    return runtime
 
 
 # --- R10: a bridged movie must move with the overlay's eased timing --------------------------
@@ -851,9 +845,9 @@ R10_CASES = [
 
 
 @pytest.mark.parametrize(("mutation", "detail"), R10_CASES)
-def test_r10_bridge_refuses_motion_the_overlay_does_not_ease(monkeypatch, mutation, detail, tmp_path):
+def test_r10_bridge_refuses_motion_the_overlay_does_not_ease(mutation, detail, tmp_path):
     """Only slide 3's transition changes: geometry, opacity and the transition's own duration are
-    untouched, so before the timing check each case derived the qualified bridge. A refusal retires
+    untouched, so before the timing check each case derived the valid bridge. A refusal retires
     that boundary alone; an unreadable field refuses, it never raises."""
     plan = _plan(_mutate_slide(tmp_path, SLIDE3, mutation))
     assert isinstance(plan, ContinuityPlan)
@@ -861,7 +855,7 @@ def test_r10_bridge_refuses_motion_the_overlay_does_not_ease(monkeypatch, mutati
     assert (movie.action, movie.code) == ("bridge", "R10")
     assert movie.refusal == R10_PREFIX + detail
     assert _refusal_codes(plan) == [(1, "overlap"), (3, "R10")]
-    runtime = _signed(monkeypatch, plan)
+    runtime = _runtime(plan)
     assert runtime["boundaries"][2] == {
         "atScene": 8, "action": "retire", "movieKey": "movie1", "reason": "refused",
         "src": EXPECTED_RUNTIME_PLAN["boundaries"][2]["src"],
@@ -994,7 +988,7 @@ def test_r6_an_instance_that_is_the_source_of_two_entries_is_refused():
     assert result == Unsupported(f"R6: instance {P2_OBJECT_IDS['slide3']} is the source of more than one entry")
 
 
-def test_a_chain_of_carries_after_a_restart_and_a_bridge_is_expressible(monkeypatch):
+def test_a_chain_of_carries_after_a_restart_and_a_bridge_is_expressible():
     """Today's one-bridge / nothing-after-a-bridge limits are gone: the P2 bridge followed by a
     pin onto a fifth slide signs as a chain."""
     plan = _plan()
@@ -1007,7 +1001,7 @@ def test_a_chain_of_carries_after_a_restart_and_a_bridge_is_expressible(monkeypa
         scene_index_by_player={**plan.scene_index_by_player, 4: 10},
         boundaries=(*plan.boundaries[:3], replace(plan.boundaries[3], to_player_index=4, movies=(pin,))),
     )
-    runtime = _signed(monkeypatch, extended)
+    runtime = _runtime(extended)
     assert [(b["atScene"], b["action"]) for b in runtime["boundaries"]] == [
         (2, "retire"), (6, "restart"), (8, "bridge"), (10, "pin"),
     ]
@@ -1132,12 +1126,8 @@ def _clone_second_instance_onto_slide2(data):
     return {**data, "events": events}
 
 
-def test_only_p2_measured_plans_are_qualified():
-    # Codex (2026-09-19): the runtime keeps every decoded movie, honours only the first
-    # restart and the first bridge, and picks same-asset instances in DOM order. Until it
-    # is boundary-specific a deck is trusted only if its runtime plan is byte-for-byte one
-    # the P2 gate measured. The fixture is; the same deck with a different slide-4
-    # destination is a different, unmeasured plan and must fall back to the raw player.
+def test_runtime_plans_are_not_limited_to_gate_measured_signatures():
+    """An internally valid plan derives even when its content signature is not a gate pin."""
     from dataclasses import replace
 
     from obed_edom import live_continuity
@@ -1145,7 +1135,7 @@ def test_only_p2_measured_plans_are_qualified():
     plan = _plan()
     runtime = plan.to_runtime()
     assert isinstance(runtime, dict)
-    assert live_continuity.plan_signature(runtime) in live_continuity.QUALIFIED_PLAN_SHA256
+    assert live_continuity.plan_signature(runtime) == EXPECTED_PLAN_SHA256
 
     boundaries = list(plan.boundaries)
     index = next(i for i, b in enumerate(boundaries) if any(m.action == "bridge" for m in b.movies))
@@ -1155,8 +1145,10 @@ def test_only_p2_measured_plans_are_qualified():
     )
     boundaries[index] = replace(boundaries[index], movies=moved)
     unmeasured = replace(plan, boundaries=tuple(boundaries)).to_runtime()
-    assert isinstance(unmeasured, Unsupported)
-    assert "not yet qualified" in unmeasured.reason
+    assert isinstance(unmeasured, dict)
+    assert live_continuity.plan_signature(unmeasured) != EXPECTED_PLAN_SHA256
+    [bridge] = [entry for entry in unmeasured["boundaries"] if entry["action"] == "bridge"]
+    assert bridge["dst"]["rect"]["x"] == runtime["boundaries"][-1]["dst"]["rect"]["x"] + 40
 
 
 def test_an_entry_that_names_no_instance_cannot_be_expressed():
@@ -1263,15 +1255,8 @@ def test_green_square_authored_below_the_movie_does_not_refuse(tmp_path):
     assert all(m.refusal is None for b in plan.boundaries for m in b.movies)
 
 
-def test_no_retire_is_emitted_when_nothing_is_refused(monkeypatch, tmp_path):
-    from obed_edom import live_continuity
-
+def test_no_retire_is_emitted_when_nothing_is_refused(tmp_path):
     plan = _plan_with_green_square_below(tmp_path)
-    # that plan is the pre-baseline shape, which the allowlist no longer carries; the assertion
-    # here is about the derived boundaries, not about qualification.
-    monkeypatch.setattr(
-        live_continuity, "plan_signature", lambda _runtime: next(iter(live_continuity.QUALIFIED_PLAN_SHA256))
-    )
     runtime = plan.to_runtime()
     assert isinstance(runtime, dict)
     assert [b["action"] for b in runtime["boundaries"]] == ["pin", "restart", "bridge"]
@@ -1445,20 +1430,16 @@ def test_an_unmeasured_movie_encoding_is_refused_as_a_possible_mask(place, expec
 
 
 @pytest.mark.parametrize("gl_replay", [False, True])
-def test_a_mask_object_on_the_bridge_movie_cannot_qualify(gl_replay, monkeypatch, tmp_path):
+def test_a_mask_object_on_the_bridge_movie_cannot_be_carried(gl_replay, tmp_path):
     """Codex r1's blocker, verbatim: `effects: [{"maskLayer": ...}]` on slide 4's bridge movie
     moves no checked key and no geometry, so a shallow rule leaves the runtime plan -- and its
-    allowlisted signature -- intact, and the runtime carries and paints the full UNMASKED video.
-    Scoped (Stage C): even with the signature check disabled entirely, no carry may name the
-    masked instance -- the bridge onto it retires (R11) and it is in no `slide_instances`."""
-    from obed_edom import live_continuity
+    signature -- intact, and the runtime carries and paints the full UNMASKED video. Scoped
+    (Stage C): no carry may name the masked instance -- the bridge onto it retires (R11) and it
+    is in no `slide_instances`."""
 
     def mask(node):
         node["effects"] = [{"maskLayer": {"opacity": 1}}]
 
-    monkeypatch.setattr(
-        live_continuity, "plan_signature", lambda _runtime: next(iter(live_continuity.QUALIFIED_PLAN_SHA256))
-    )
     tree = _mutate_slide(tmp_path, SLIDE4, lambda data: _map_movie_nodes(data, mask))
     plan = derive_plan(tree, SLIDES, resolver=_resolver, gl_replay=gl_replay)
     assert isinstance(plan, ContinuityPlan)
@@ -1627,9 +1608,8 @@ def _measured_subtree_vocabulary(root: Path) -> dict[str, set[str]]:
 
 
 def test_the_measured_vocabulary_does_not_refuse_todays_fixture():
-    """The allowlist is only honest if it is a measurement: every object the fixture actually
-    contains, at every depth, must be in the table, or the rule would refuse the deck P2
-    qualified."""
+    """Every object the measured fixture contains, at every depth, must be in the table, or the
+    rule would refuse a shape P2 exercises."""
     from obed_edom import live_continuity
 
     measured = _measured_subtree_vocabulary(FIXTURE_ROOT)
@@ -1672,13 +1652,13 @@ def _refused_pin(plan: ContinuityPlan, boundary_index: int, **changes):
     )
 
 
-def test_a_refused_bridge_retires_only_its_own_boundary(monkeypatch):
+def test_a_refused_bridge_retires_only_its_own_boundary():
     """Refusals are per boundary (plan section 2.3): a refused bridge becomes a `retire` of its
     source instance and the rest of the deck is still planned."""
     plan = _plan()
     assert isinstance(plan, ContinuityPlan)
     refused_bridge = _refused_pin(plan, 2)
-    runtime = _signed(monkeypatch, replace(plan, boundaries=(*plan.boundaries[:2], refused_bridge, plan.boundaries[3])))
+    runtime = _runtime(replace(plan, boundaries=(*plan.boundaries[:2], refused_bridge, plan.boundaries[3])))
     assert runtime["boundaries"][2] == {
         "atScene": 8, "action": "retire", "movieKey": "movie1", "reason": "refused",
         "src": EXPECTED_RUNTIME_PLAN["boundaries"][2]["src"],
@@ -1686,7 +1666,7 @@ def test_a_refused_bridge_retires_only_its_own_boundary(monkeypatch):
     assert runtime["boundaries"][:2] == EXPECTED_RUNTIME_PLAN["boundaries"][:2]
 
 
-def test_a_refused_bridge_derived_from_the_export_retires_its_boundary(monkeypatch, tmp_path):
+def test_a_refused_bridge_derived_from_the_export_retires_its_boundary(tmp_path):
     """The same thing end to end: put an object over the movie on slide 4, the 3->4 bridge's
     destination, and that boundary alone is refused."""
 
@@ -1701,17 +1681,17 @@ def test_a_refused_bridge_derived_from_the_export_retires_its_boundary(monkeypat
     assert [(r["toPlayer"], r["code"], r["objectId"]) for r in plan.refusals] == [
         (1, "overlap", P2_OBJECT_IDS["slide1"]), (3, "overlap", P2_OBJECT_IDS["slide3"]),
     ]
-    runtime = _signed(monkeypatch, plan)
+    runtime = _runtime(plan)
     assert [(b["atScene"], b["action"], b.get("reason")) for b in runtime["boundaries"]] == [
         (2, "retire", "refused"), (6, "restart", None), (8, "retire", "refused"),
     ]
 
 
-def test_a_refusal_on_a_restart_boundary_becomes_a_retire(monkeypatch):
+def test_a_refusal_on_a_restart_boundary_becomes_a_retire():
     plan = _plan()
     assert isinstance(plan, ContinuityPlan)
     refused_restart = _refused_pin(plan, 1)
-    runtime = _signed(monkeypatch, replace(plan, boundaries=(plan.boundaries[0], refused_restart, *plan.boundaries[2:])))
+    runtime = _runtime(replace(plan, boundaries=(plan.boundaries[0], refused_restart, *plan.boundaries[2:])))
     assert [(b["atScene"], b["action"], b.get("reason")) for b in runtime["boundaries"]] == [
         (2, "retire", "refused"), (6, "retire", "refused"), (8, "bridge", None),
     ]
@@ -1930,7 +1910,7 @@ def test_slide_instances_defaults_to_empty_so_positional_construction_still_work
 
 def test_slide_instances_does_not_move_the_runtime_plan_or_its_signature():
     """The visible-content ground truth is additive: `to_runtime()` must not learn about it,
-    so the allowlisted signature (and P2's injected plan) stay exactly where they are."""
+    so the pinned signature (and P2's injected plan) stay exactly where they are."""
     from obed_edom import live_continuity
 
     plan = _plan()
@@ -1942,7 +1922,6 @@ def test_slide_instances_does_not_move_the_runtime_plan_or_its_signature():
     assert "slideInstances" not in json.dumps(runtime)
     assert "slide_instances" not in json.dumps(runtime)
     assert live_continuity.plan_signature(runtime) == EXPECTED_PLAN_SHA256
-    assert live_continuity.plan_signature(runtime) in live_continuity.QUALIFIED_PLAN_SHA256
     # an emptied field must not change the runtime either.
     assert replace(plan, slide_instances={}).to_runtime() == runtime
 
@@ -2715,7 +2694,7 @@ def test_gl_replay_flag_on_derives_the_slot4_override():
     assert refusal["opacityExcluded"] == [{"slot": 1, "reason": "fade"}]
 
 
-def test_gl_replay_flag_on_runtime_plan_is_pinned_and_qualified():
+def test_gl_replay_flag_on_runtime_plan_is_pinned():
     plan = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=True)
     assert isinstance(plan, ContinuityPlan)
     runtime = plan.to_runtime()
@@ -2732,7 +2711,6 @@ def test_gl_replay_flag_on_runtime_plan_is_pinned_and_qualified():
     from obed_edom import live_continuity
 
     assert live_continuity.plan_signature(runtime) == GL_REPLAY_RUNTIME_PLAN_SHA256
-    assert GL_REPLAY_RUNTIME_PLAN_SHA256 in live_continuity.QUALIFIED_PLAN_SHA256
 
 
 def _add_second_continuing_movie(tmp: Path) -> None:
@@ -3073,13 +3051,13 @@ def test_flag_off_as_dict_and_json_have_no_gl_replay_keys():
 # `renderMovie` node (plan F1). The player turns it into `HTMLVideoElement.loop = true` on its
 # own fresh element per slide; our runtime instead carries a decoder across a Magic Move and
 # keeps the SOURCE element's `loop`. So:
-#   - "looping" is the only qualified value; anything else is unmeasured vocabulary and
+#   - "looping" is the only supported value; anything else is unmeasured vocabulary and
 #     refuses the whole deck (section 2.1);
 #   - a Magic Move boundary whose carried pair disagrees on loop is refused on its own (R4),
 #     like an overlap; with exact instance identity only the carried pair matters
 #     (generalisation plan section 2.4);
 #   - every carry entry names its `loop`, so a looping deck can never reuse its non-looping
-#     twin's allowlisted sha.
+#     twin's pinned signature.
 #
 # `P2-loop` is the committed P2 fixture with the key spliced onto the same objectIDs
 # `scripts/loop_fixture.py` splices (plan section 4): every `untitled.mov` instance, never
@@ -3097,9 +3075,6 @@ P2_WA0125_OBJECT_ID = "2FE5195A-F8CF-459A-8E20-B6DF91C0047A"
 # Qualified by gates L1/L2/L4/L5 on `output/fixtures/p2-loop`; re-pinned for the schema-2 runtime.
 P2_LOOP_PLAN_SHA256 = "866de785864ad19b11ecd8cdfb4ad1729798ccf9f1764aa59718de03034ba7a5"
 P2_LOOP_GL_REPLAY_PLAN_SHA256 = "d860a09f4f6a8e24a81e2ad0c3b37bc8a3f2b4ce3947836ca315671031870131"
-
-NOT_YET_QUALIFIED = "deck shape is not yet qualified for continuity (only gate-measured plans are)"
-
 
 def _set_loop_mode(object_ids, value):
     """A slide transform setting `movie.loopMode` on every movie node whose objectID is listed."""
@@ -3153,7 +3128,7 @@ def test_non_looping_p2_fixture_is_unchanged_and_loops_nowhere():
 
 def test_p2_loop_derives_the_p2_plan_with_every_carry_looping(tmp_path):
     """L0-d: every `untitled.mov` instance loops, so every carried pair agrees -- the plan and its
-    refusals are P2's apart from `loop`, and the runtime signs as its own allowlist entry."""
+    refusals are P2's apart from `loop`, and the runtime keeps its own pinned signature."""
     from obed_edom import live_continuity
 
     plan = derive_plan(_loop_tree(tmp_path), SLIDES, resolver=_resolver)
@@ -3179,7 +3154,6 @@ def test_p2_loop_derives_the_p2_plan_with_every_carry_looping(tmp_path):
     runtime = plan.to_runtime()
     assert runtime == _looping(EXPECTED_RUNTIME_PLAN)
     assert live_continuity.plan_signature(runtime) == P2_LOOP_PLAN_SHA256
-    assert P2_LOOP_PLAN_SHA256 in live_continuity.QUALIFIED_PLAN_SHA256
     assert P2_LOOP_PLAN_SHA256 != EXPECTED_PLAN_SHA256
 
 
@@ -3194,7 +3168,6 @@ def test_p2_loop_flag_on_arms_gl_replay_and_signs_its_own_sha(tmp_path):
     runtime = plan.to_runtime()
     assert runtime == _looping(EXPECTED_GL_REPLAY_RUNTIME_PLAN)
     assert live_continuity.plan_signature(runtime) == P2_LOOP_GL_REPLAY_PLAN_SHA256
-    assert P2_LOOP_GL_REPLAY_PLAN_SHA256 in live_continuity.QUALIFIED_PLAN_SHA256
     assert P2_LOOP_GL_REPLAY_PLAN_SHA256 != GL_REPLAY_RUNTIME_PLAN_SHA256
 
 
@@ -3258,7 +3231,7 @@ def test_an_unmeasured_loop_mode_value_is_never_carried(object_ids, uuid, value,
     partnered = uuid == SLIDE1
     reason = _scoped_r11_reason(tmp_path, uuid, _set_loop_mode(object_ids, value), partnered=partnered)
     if partnered:
-        assert reason == f"movie on slide {uuid} has an unmeasured loopMode {value!r} (only 'looping' is qualified)"
+        assert reason == f"movie on slide {uuid} has an unmeasured loopMode {value!r} (only 'looping' is supported)"
 
 
 def test_an_object_valued_loop_mode_is_refused_as_a_possible_mask(tmp_path):
@@ -3286,7 +3259,7 @@ def _loop_reason(from_index: int, to_index: int) -> str:
 
 
 @pytest.mark.parametrize("gl_replay", [False, True])
-def test_r4_a_loop_difference_on_the_bridge_retires_that_boundary(gl_replay, monkeypatch, tmp_path):
+def test_r4_a_loop_difference_on_the_bridge_retires_that_boundary(gl_replay, tmp_path):
     """L0-b / R4: slide 3 loops, slide 4 does not. The 3->4 bridge is refused on its own and
     becomes a `retire`. 2->3 is a dissolve (fresh element each side), so it is not checked."""
     tree = _loop_tree(tmp_path, (P2_OBJECT_IDS["slide3"],))
@@ -3296,7 +3269,7 @@ def test_r4_a_loop_difference_on_the_bridge_retires_that_boundary(gl_replay, mon
     assert (bridge.action, bridge.refusal, bridge.code) == ("bridge", _loop_reason(2, 3), "R4")
     assert [(r["toPlayer"], r["code"]) for r in plan.refusals] == [(1, "overlap"), (3, "R4")]
     assert all(m.refusal is None for m in plan.boundaries[1].movies)
-    runtime = _signed(monkeypatch, plan)
+    runtime = _runtime(plan)
     assert runtime["boundaries"][-1] == {
         "atScene": 8, "action": "retire", "reason": "refused", "movieKey": "movie1",
         "src": {"objectId": P2_OBJECT_IDS["slide3"], "rect": P2_SLIDE3_MOVIE_RECT},
@@ -3798,7 +3771,7 @@ def test_a_mid_deck_none_transition_is_a_cut_like_a_dissolve(tmp_path):
         ],
     ],
 )
-def test_no_decoder_is_held_into_an_unmeasured_transition(uuid, name, detail, gl_replay, monkeypatch, tmp_path):
+def test_no_decoder_is_held_into_an_unmeasured_transition(uuid, name, detail, gl_replay, tmp_path):
     """Stage C (plan section 3.1): the unmeasured boundary itself plans nothing, so every movie
     plays as the export plays it; every carry INTO that slide retires (R11) at its own Magic Move,
     which also keeps GL replay off it; every other boundary is the unmutated plan's."""
@@ -3820,7 +3793,7 @@ def test_no_decoder_is_held_into_an_unmeasured_transition(uuid, name, detail, gl
         if index not in (unmeasured, carried_in):
             assert boundary == before
             assert _boundary_records(plan, index) == _boundary_records(base, index)
-    runtime = _signed(monkeypatch, plan)
+    runtime = _runtime(plan)
     scene = plan.scene_index_by_player[unmeasured + 1]
     assert [entry for entry in runtime["boundaries"] if entry["atScene"] == scene] == []
     assert all(entry["action"] not in ("pin", "bridge", "glReplay") for entry in runtime["boundaries"] if entry["atScene"] < scene)
@@ -3978,12 +3951,9 @@ def test_r7_a_cut_from_a_carried_video_onto_a_web_destination_refuses_instead_of
     assert (1, "R7") in [(r["fromPlayer"], r["code"]) for r in plan.refusals]
 
 
-def test_r7_a_cut_onto_a_web_destination_retires_in_the_runtime_plan(monkeypatch, tmp_path):
-    from obed_edom import live_continuity
-
+def test_r7_a_cut_onto_a_web_destination_retires_in_the_runtime_plan(tmp_path):
     plan = _plan(_web_slide3_after_a_clean_1_to_2_pin(tmp_path))
     assert isinstance(plan, ContinuityPlan)
-    monkeypatch.setattr(live_continuity, "plan_signature", lambda _runtime: next(iter(live_continuity.QUALIFIED_PLAN_SHA256)))
     runtime = plan.to_runtime()
     assert isinstance(runtime, dict)
     at_scene_6 = [b for b in runtime["boundaries"] if b["atScene"] == 6]

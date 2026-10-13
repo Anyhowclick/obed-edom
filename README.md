@@ -16,7 +16,7 @@ If macOS blocks the launcher, Control-click it and choose **Open**.
 
 - **Sermon Base Generator** — create LW and DSK decks, an operator-cued Word outline, previews, and a review PDF.
 - **Sermon Checker** — check an outline, one deck, or an LW/DSK pair for cue, wording, layout, photo, and house-style issues. Checks do not alter the source files.
-- **Alpha Keynote** — drop or choose a Keynote, prepare it (movies are converted to H.264), then present using a slide grid and current still preview. Supports silent screen output and managed DeckLink fill/key output.
+- **Alpha Keynote** — drop or choose a Keynote, prepare it (movies are converted to H.264 and mis-mapped export textures are repaired), then present using a slide grid and current still preview. Supports silent screen output and managed DeckLink fill/key output.
 - **CG Resizer** — turn a finalised wide-wall deck into a 16:9 CG deck and review any framing choices.
 - **DSK Generator** — turn a full-wall (FW) deck into a lower-thirds (DSK) deck; the DSK template is optional for image/video decks (the wall deck's own transparent layout, then the reference deck, are tried first), required for reformatted text verses; chosen once and remembered on this Mac, shared with Sermon Base Generator.
 - **Maps** — build and export map slides for LW, DSK, and CG.
@@ -106,9 +106,8 @@ the runtime's version and sha256):
   built.
 - `unsupported` — the plan could not be derived or installed, with a `reason`
   (a deck-wide refusal below, more than one movie changing across one cut, an
-  unreadable export, a deck not on the allowlist, the stage isn't the authored
-  size, the stage scale is non-uniform, or the runtime failed to install); the
-  raw export plays untouched.
+  unreadable export, the stage isn't the authored size, the stage scale is
+  non-uniform, or the runtime failed to install); the raw export plays untouched.
 - `qualified` — the runtime installed and confirmed itself from the page. When
   qualified, `output.continuity` also carries `scale` (the uniform factor applied
   to the authored stage, e.g. `1.3333`).
@@ -117,11 +116,13 @@ the runtime's version and sha256):
 carried, whether or not its geometry changes. Continuity follows each movie
 instance through the deck, so a movie can be carried across several Magic Moves in
 a row. Keynote's "Play across slides" is not in the export, so the carry is
-inferred from the Magic Move alone.
+inferred from the Magic Move alone. Each instance is identified by its object ID
+only, and a `<video>` belongs to a movie only when its file name matches the
+movie's asset exactly (without query or trim suffix, case-insensitive).
 
 - **Magic Move, same geometry:** the live decoder is pinned in place.
 - **Magic Move, moving or resizing:** the live decoder moves with the transition.
-  The motion is linear from start to end rect, not Keynote's easing.
+  The motion follows the export's EaseInEaseOut timing over the transition.
 - **Dissolve or no transition:** the movie restarts, as the export plays it.
 - **Movie ends:** a carried movie with no instance on the next slide is handed back
   to the player.
@@ -165,9 +166,13 @@ continuity badge. The codes:
 Deck-wide refusals make the whole deck `unsupported`, with the code at the start
 of the `reason`: `R3` (a transition is not on the slide's last build), `R5` (an
 object ID repeats across slides) and `R6` (the carried instances do not chain from
-slide to slide). A slide with more than one transition, an unreadable header,
-slide list or slide JSON, or a movie without an asset ID or object ID also makes
-the deck `unsupported`. The deck still plays.
+slide to slide). A slide with more than one transition, more than one movie
+changing geometry at one cut (one animated bridge per cut), an unreadable
+header, slide list or slide JSON, a movie without an asset ID or object ID, or a
+plan that fails its own integrity checks also makes the deck `unsupported`, as
+do the host's checks: the stage gate, a runtime that fails to install, a movie
+codec this output cannot play, and `OBED_LIVE_CONTINUITY=off` (reported as
+`off`). The deck still plays.
 
 **Not carried (named residuals).**
 
@@ -178,10 +183,12 @@ the deck `unsupported`. The deck still plays.
 - `R-res-3`: a Magic Move out of a movie with "Play across slides" off restarts
   midway in Keynote. Here it is carried. Validation flags it as an authoring error.
 
-**Allowlist.** Until the structural refusals are fully qualified, a deck's
-runtime plan must also match a signature on a pinned allowlist
-(`live_continuity.QUALIFIED_PLAN_SHA256`). Any other deck still starts, with
-continuity `unsupported`, until its plan has passed the gates and been added.
+**Coverage.** Every deck whose plan derives gets continuity. Only the gate
+decks (P2, p2-loop and D1–D6) have been measured end to end; any other deck
+shape is installed on derivation alone, trusting the refusals above.
+`tests/test_live_continuity_corpus.py` holds one synthetic export per refusal
+code and proves each still fires. `output.continuity.planSha256` is the runtime
+plan's signature: equal to a gate deck's means the same plan the gates measured.
 
 Set `OBED_LIVE_CONTINUITY=off` before starting the dashboard server to disable it
 outright.
@@ -208,7 +215,8 @@ destination draws artwork above it, by replaying the player's own WebGL frame
 with the live movie as the texture. It is on by default under **Keyer output** and off
 for screen output and the developer OBS attach path. `OBED_LIVE_GL_REPLAY=off`
 turns it off everywhere; `auto` turns it on for screen output. Any other value
-refuses to start.
+refuses to start. GL replay carries at most one eligible cut per deck; later
+eligible cuts keep their `overlap` refusal.
 `output.continuity.glReplay.mode` reports `off`, `injected`, `notApplicable` or
 `unavailable`; the developer attach path reports `unavailable` ("attach output
 not qualified") when asked for `auto`, and `notCarried` still lists that
@@ -282,6 +290,19 @@ The prepare fails, naming every such movie, when a movie has real transparency
 (H.264 has none), is HEVC whose transparency cannot be checked, has an odd width
 or height, or has unreadable timing. Replace it with an opaque movie (or one with
 even dimensions) and prepare again.
+
+Preparing a deck also repairs Keynote's HTML-export texture mis-mapping: Keynote
+sometimes points a label, tag box or movie poster at another object's image (for
+example a label drawn as a stretched video poster). Before movies are converted,
+each such object is re-pointed to its correct image in the same slide, or that
+image is copied in from the previous slide's Magic Move, and the copy is checked
+(size, OCR or pixels) before it is written. Only the cached export changes; the
+`.key` is never touched. `manifest.textureRepair` records every repaired object
+(slide, rule, old and new texture, donor) and every rewritten PDF, and is written
+even when nothing needed repair. When an object has no verified replacement the
+prepare fails, naming each slide and object (for example `slide 10 (287×77
+image)`); re-export the deck. A cached export without a current
+`manifest.textureRepair` is exported again once.
 
 Every session still probes each movie the export references (reading its box
 tree directly, no ffprobe) and reports it on `output.codecs`;

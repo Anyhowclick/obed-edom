@@ -57,6 +57,7 @@ def test_fixture_resolves_under_the_main_checkout_output_fixtures() -> None:
 def test_the_fixture_set_is_the_plans() -> None:
     assert FIXTURE_NAMES == (
         "p2-recovery", "p2-binary", "p2-loop", "p2-loop-grey", "p2-soak-loop", "gl-decks", "qual-decks", "qual-movies",
+        "alpha-dsk-textures",
     )
 
 

@@ -1,6 +1,6 @@
 # Live continuity — generalisation: retire `QUALIFIED_PLAN_SHA256`
 
-Status: **rev 2 + S0, APPROVED by the owner 2026-09-25. OQ-1 is (c), objectID-only runtime identity; every other OQ follows its recommendation (see §6).** **S1 LANDED #237 (`2ee95223`, 2026-09-25); S2 LANDED #259 (`1a169482`, 2026-10-12; gate record `.agents/reviews/continuity-generalisation/gates-r1.md`). Next: S3 (owner's call, OQ-8).** Read-only against
+Status: **rev 2 + S0, APPROVED by the owner 2026-09-25. OQ-1 is (c), objectID-only runtime identity; every other OQ follows its recommendation (see §6).** **S1 LANDED #237 (`2ee95223`, 2026-09-25); S2 LANDED #259 (`1a169482`, 2026-10-12; gate record `.agents/reviews/continuity-generalisation/gates-r1.md`). S3 gated on `claude/s3-allowlist-delete` (owner's call, OQ-8; gate record `.agents/reviews/s3/gates-r1.md`), PR open, owner merges.** Read-only against
 `386f28f2` (origin/main, #228), `claude/continuity-loopmode` @ `67643332` (local; rev 1 read `b3b57fc8`; the later
 commits are docs only), and `origin/claude/od-2-gl-replay-managed-obs-5bd03f` @ `af76ed97` (rev 1 read `1dd21207`;
 `af76ed97` makes the soak wrap windows length-relative, soak ≥ 3 min, and requires both windows on a looping fixture).
@@ -253,7 +253,7 @@ shas of P2 off/on, p2-loop off/on, and the decks that passed Q3+Q7. The others a
 - Owner reverted the r21–r23 paint coverage tightening to the slower-side median (`ecf1b553`: "fix what my eyes can
   catch") after it failed five registered reds on a throttle-onset gap. Final diff **r26 APPROVE**.
 
-### S3: delete the allowlist (owner's call, OQ-8; Python + docs only, no JS bytes → no re-qualification)
+### S3: delete the allowlist (owner's call, OQ-8; Python + docs only, no JS bytes → no re-qualification; gate record `.agents/reviews/s3/gates-r1.md`)
 - **WS-D:** remove `QUALIFIED_PLAN_SHA256` and its `to_runtime` check. Keep `plan_signature` as a reported field (`output.continuity.planSha256`). WS-P updates `tests/test_p2_adversarial*.py`/`tests/test_live_host.py` uses of the allowlist.
 - **Tests:** a negative corpus, one synthetic export per refusal code, derives the named reason.
 - **WS-P:** README states plainly what is and is not carried.

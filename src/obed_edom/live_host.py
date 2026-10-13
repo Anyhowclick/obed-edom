@@ -36,7 +36,7 @@ from websockets.sync.client import connect
 
 from .devtools_port import DEVTOOLS_ACTIVE_PORT, ForeignDevToolsEndpoint, verify_devtools_owner, wait_devtools_active_port
 from .html_preview import preview_root, safe_export_file
-from .live_continuity import ContinuityPlan, Unsupported, codec_report, derive_plan
+from .live_continuity import ContinuityPlan, Unsupported, codec_report, derive_plan, plan_signature
 from .live_continuity_js import CONTINUITY_VERSION, PRESERVE_CORE_JS, js_sha256
 from .live_gl_replay_js import GL_REPLAY_VERSION, gl_replay_script
 from .live_gl_replay_js import js_sha256 as gl_replay_js_sha256
@@ -1193,6 +1193,7 @@ class LiveOutputHost:
         self._continuity_mode: str = "off"
         self._continuity_reason: str | None = None
         self._continuity_runtime_plan: dict[str, Any] | None = None
+        self._continuity_plan_sha256: str | None = None
         self._continuity_scale: float | None = None
         self._continuity_not_carried: list[dict[str, Any]] = []
         self._gl_replay_mode = "off"
@@ -1255,6 +1256,7 @@ class LiveOutputHost:
         `pending` means a runtime plan was derived and must still be confirmed truthfully
         from the page (the stage gate check only the page can perform, once the player has
         laid the stage out)."""
+        self._continuity_plan_sha256 = None
         if self._continuity_preference == "off" or os.environ.get(CONTINUITY_ENV) == "off":
             return "off", None, None
         derived = None
@@ -1277,6 +1279,7 @@ class LiveOutputHost:
                     self._gl_replay_mode, self._gl_replay_reason, self._gl_replay_script = "unavailable", "continuity unsupported", ""
                 return "unsupported", f"movie codec is not playable in this output: {asset} ({display})", None
         self._continuity_not_carried = not_carried(plan, self.slides)
+        self._continuity_plan_sha256 = plan_signature(runtime)
         if self._attach_endpoint:
             runtime = {**runtime, "transparentBackground": True}
         return "pending", None, runtime
@@ -1362,6 +1365,8 @@ class LiveOutputHost:
             info["reason"] = self._continuity_reason
         if self._continuity_mode == "qualified" and self._continuity_scale is not None:
             info["scale"] = round(self._continuity_scale, 4)
+        if self._continuity_mode == "qualified" and self._continuity_plan_sha256 is not None:
+            info["planSha256"] = self._continuity_plan_sha256
         if self._continuity_not_carried:
             info["notCarried"] = [dict(entry) for entry in self._continuity_not_carried]
         info["glReplay"] = self._gl_replay_info()
@@ -1482,7 +1487,9 @@ class LiveOutputHost:
             self._logger.log(
                 "continuity", mode=self._continuity_mode, reason=self._continuity_reason,
                 runtimePlan=self._continuity_runtime_plan, stage=stage_geometry, scale=self._continuity_scale,
-                notCarried=self._continuity_not_carried, glReplay=self._gl_replay_info(),
+                planSha256=(self._continuity_plan_sha256 if self._continuity_mode == "qualified" else None),
+                notCarried=self._continuity_not_carried,
+                glReplay=self._gl_replay_info(),
             )
             observed = self._wait_settled()
             try: dpr = self._transport.evaluate("window.devicePixelRatio")

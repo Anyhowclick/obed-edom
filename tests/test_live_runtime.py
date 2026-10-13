@@ -157,6 +157,8 @@ console.log(JSON.stringify(results));
 
 
 MAIN_OUTPUT = main_checkout() / "output"
+# Stage T's texture-repair fixture is a real deck added for texture repair only; the census corpora below predate it.
+TEXTURE_FIXTURE = fixture("alpha-dsk-textures")
 REAL_PLAYER = fixture("p2-binary") / "html-player" / "assets" / "player" / "main.js"
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "live_continuity"
 EFFECT_1_TO_2 = FIXTURE_ROOT / "effect_1_to_2.json"
@@ -965,6 +967,10 @@ def _census(json_paths) -> tuple[dict[str, int], set[tuple[bool, int]]]:
     return stats, changed
 
 
+def _corpus_headers(root: Path, pattern: str = "assets/header.json") -> list[Path]:
+    return sorted(header for header in root.rglob(pattern) if TEXTURE_FIXTURE not in header.parents)
+
+
 def test_mm_opacity_census_mirror_changes_only_p2_1_to_2_slot_4_in_committed_fixtures():
     effect = json.loads(EFFECT_1_TO_2.read_text())
     rows = _mirror(effect)
@@ -979,7 +985,7 @@ def test_mm_opacity_census_mirror_changes_only_p2_1_to_2_slot_4_in_committed_fix
 
 @pytest.mark.skipif(not MAIN_OUTPUT.is_dir(), reason="main checkout output/ not available")
 def test_mm_opacity_census_mirror_changes_only_p2_1_to_2_slot_4_across_real_exports():
-    roots = sorted(header.parent.parent for header in MAIN_OUTPUT.rglob("assets/header.json"))
+    roots = sorted(header.parent.parent for header in _corpus_headers(MAIN_OUTPUT))
     paths = [path for root in roots for path in sorted((root / "assets").glob("*/*.json"))]
     if not paths:
         pytest.skip("no real exports under output/")
@@ -1183,7 +1189,7 @@ DISSOLVE_CONSTRUCTION_FAILURES = {
 def _transitions(*roots: Path) -> list[dict]:
     """Every exported transition effect under the export roots (each `header.json`'s slides), in a stable order."""
     effects = []
-    for header in sorted(header for root in roots for header in root.rglob("header.json")):
+    for header in sorted(header for root in roots for header in _corpus_headers(root, "header.json")):
         for sid in json.loads(header.read_text())["slideList"]:
             path = header.parent / sid / f"{sid}.json"
             if path.is_file():
