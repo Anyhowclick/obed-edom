@@ -938,11 +938,15 @@ class ManagedObs:
 
     def _install_calibration(self, run: _CalibrationRun, ws: ObsWebsocket, snapshot: _CalibrationSnapshot,
                              install: _CalibrationInstall, deadline_s: float) -> None:
-        if not snapshot.studio_enabled:
+        if run.request.placement == "preview":
+            if not snapshot.studio_enabled:
+                install.studio_changed = True
+                self._calibration_request(run, ws, "SetStudioModeEnabled", {"studioModeEnabled": True}, deadline_s)
+                preview = self._calibration_request(run, ws, "GetCurrentPreviewScene", None, deadline_s)
+                snapshot.preview_name, snapshot.preview_uuid = self._scene_identity(preview, "currentPreview")
+        elif snapshot.studio_enabled:
             install.studio_changed = True
-            self._calibration_request(run, ws, "SetStudioModeEnabled", {"studioModeEnabled": True}, deadline_s)
-            preview = self._calibration_request(run, ws, "GetCurrentPreviewScene", None, deadline_s)
-            snapshot.preview_name, snapshot.preview_uuid = self._scene_identity(preview, "currentPreview")
+            self._calibration_request(run, ws, "SetStudioModeEnabled", {"studioModeEnabled": False}, deadline_s)
         install.scene_created = True
         try:
             created = self._calibration_request(run, ws, "CreateScene", {"sceneName": CALIBRATION_SCENE}, deadline_s)
@@ -1236,7 +1240,8 @@ class ManagedObs:
                             snapshot.preview_name, snapshot.preview_uuid = self._scene_identity(preview, "currentPreview")
                     except Exception as exc:
                         errors.append(f"restore-preview-snapshot: {type(exc).__name__}: {exc}")
-                if snapshot is not None and snapshot.preview_name is not None:
+                if (snapshot is not None and snapshot.preview_name is not None
+                        and run.request.placement == "preview"):
                     try:
                         studio = request("GetStudioModeEnabled")
                         if studio.get("studioModeEnabled") is not True:
@@ -1306,6 +1311,9 @@ class ManagedObs:
                             request("SetStudioModeEnabled", {"studioModeEnabled": True})
                         elif not snapshot.studio_enabled and studio_now:
                             request("SetStudioModeEnabled", {"studioModeEnabled": False})
+                        if (run.request.placement == "offcanvas" and snapshot.studio_enabled
+                                and snapshot.preview_name is not None):
+                            request("SetCurrentPreviewScene", {"sceneName": snapshot.preview_name})
                     except Exception as exc:
                         errors.append(f"restore-studio: {type(exc).__name__}: {exc}")
                     try:

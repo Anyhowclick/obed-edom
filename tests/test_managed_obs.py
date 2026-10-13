@@ -401,6 +401,7 @@ class CalibrationObs:
         self.active_after = active_after
         self.active_reads = 0
         self.active_results: list[dict[str, bool]] = []
+        self.offcanvas_program_active = False
         self.unowned_visible = False
         self.pending_input = self.pending_scene = 0
         self.scenes = {"AK": "scene-ak", "Other": "scene-other"}
@@ -548,14 +549,14 @@ class CalibrationObs:
             return {"sceneItemTransform": dict(self.program_items[1]["sceneItemTransform"])}
         if name == "SetSceneItemEnabled":
             next(item for item in self.program_items if item["sceneItemId"] == data["sceneItemId"])["sceneItemEnabled"] = data["sceneItemEnabled"]
+            self.offcanvas_program_active = data["sceneItemEnabled"] and not self.studio
             return {}
         if name == "GetSourceActive":
             self.active_reads += 1
             if self.active_after is None or self.active_reads < self.active_after:
                 result = {"videoActive": False, "videoShowing": False}
             else:
-                active = any(item["sourceName"] == "AK-Calibrate" and item["sceneItemEnabled"]
-                             for item in self.program_items)
+                active = self.offcanvas_program_active
                 result = {"videoActive": active,
                           "videoShowing": active or (self.studio and self.preview == "AK-Calibrate")}
             self.active_results.append(result)
@@ -568,6 +569,7 @@ class CalibrationObs:
             return {"imageData": "data:image/png;base64,iVBORw0KGgo=" if self.screenshot == "png" else "broken"}
         if name == "RemoveSceneItem":
             self.program_items = [item for item in self.program_items if item["sceneItemId"] != data["sceneItemId"]]
+            self.offcanvas_program_active = False
             return {}
         if name == "RemoveInput":
             if self.unowned_leftover:
@@ -2227,6 +2229,7 @@ def test_persistence_contract_pins_step0_null_and_fails_closed(tmp_path):
 @pytest.mark.parametrize(
     "placement,studio,outcome",
     [("preview", False, "success"), ("preview", True, "success"), ("offcanvas", False, "success"),
+     ("offcanvas", True, "success"),
      ("preview", False, "late-activation"), ("offcanvas", False, "late-activation"),
      ("preview", False, "never-active"), ("offcanvas", False, "never-active"),
      ("preview", False, "output-inactive"), ("preview", False, "absent-removal"),
@@ -2414,6 +2417,18 @@ def test_calibration_transaction_preview_offcanvas_faults_and_fencing(tmp_path, 
                 enable = next(index for index, (_, name, data) in enumerate(obs.requests)
                               if name == "SetSceneItemEnabled" and data["sceneItemEnabled"] is True)
                 assert create < transform < enable
+                studio_changes = [(index, data["studioModeEnabled"])
+                                  for index, (_, name, data) in enumerate(obs.requests)
+                                  if name == "SetStudioModeEnabled"]
+                if studio:
+                    remove = next(index for index, (_, name, _) in enumerate(obs.requests)
+                                  if name == "RemoveSceneItem")
+                    assert [enabled for _, enabled in studio_changes] == [False, True]
+                    assert studio_changes[0][0] < create < remove < studio_changes[1][0]
+                    assert obs.studio is True and obs.preview == "Other"
+                else:
+                    assert studio_changes == []
+                    assert obs.studio is False and obs.preview is None
             if outcome == "success":
                 assert identity_checks == 3
             if outcome == "late-activation":
