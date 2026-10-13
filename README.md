@@ -227,7 +227,22 @@ authored opacity from the first frame of the move; an object that fades, hides,
 or carries several or nested animations keeps the player's own look. It is on by default for every output,
 independent of continuity and GL replay. `OBED_LIVE_MM_OPACITY=off` serves the
 unpatched player; `auto` keeps it on; any other value refuses to start.
-`output.mmOpacity` reports `mode` (`on`/`off`) and the served player's `sha256`.
+`off` also restores the export's own Dissolve, cut and movie behaviour: the incoming
+slide pops in under a Dissolve over fill-less textures, a cut shows both slides at
+once, and a playing movie jumps back to the opening frame baked into the outgoing slide
+(on, the cross-fade and clean cut apply on every output, raw export and Build Preview included).
+On, the movie instead freezes on its current frame and fades with the slide, but only on the
+HDMI/headless output host, when the host launched that Chrome itself, it is Chrome 154 with GPU
+compositing, the scale factor is 1, 1.5 or 2 and the stage is unscaled. Everywhere else the
+movie keeps that jump: under Keyer output (OBS's browser source, until a follow-up PR), in raw
+export and Build Preview, and on scaled stages (an output not 1920 CSS px wide). On GPU
+compositing the freeze shows a mid-tone step (identity tone, a known limit; Q5 open pending the
+W5 probe; `keynote_live_dissolve_crossfade.plan.md` §3.3, §12).
+`output.mmOpacity` reports `mode` (`on`/`off`) and the served player's `sha256`;
+`output.placement` reports whether the host granted the freeze (`grant`: `snap` or null) and
+why (`reason`: `granted`, `attached` (incl. managed OBS), `unqualified-version`,
+`software-compositing`, `version-unavailable`, `revoked-fingerprint`, or `channel-compromised`,
+which keeps the output hidden and refuses `show`).
 Build Preview serves the same drawing patch, without the live observation hook. Qualify it with
 `scripts/mm_opacity_probe.py`, `scripts/p2_recovery_html_adversarial.py --mm-opacity auto|off`
 and, under Keyer output, `scripts/managed_obs_qualify.py --arm mmo|mmo-cef`.

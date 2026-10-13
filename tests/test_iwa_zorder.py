@@ -1,7 +1,7 @@
 """Pure-logic tests for ``obed_edom.iwa_zorder`` (``w-zorder-patch`` piece 1).
 
 Keynote-free. Deck builders reuse ``_arch``/``_member``/``_shape_super`` from
-``tests/test_iwa_write.py``, the way ``tests/test_probe_zorder_patch.py`` does.
+``tests/test_iwa_write.py``.
 """
 from __future__ import annotations
 

@@ -69,14 +69,123 @@ def checks_of(gate: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 # --- env refusal ---------------------------------------------------------------------------------------------------------
 
-def test_main_refuses_while_the_mm_opacity_env_is_set(monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize("arm", ["g2", "dissolve"])
+def test_main_refuses_while_the_mm_opacity_env_is_set(monkeypatch, tmp_path, capsys, arm):
     monkeypatch.delenv(q.GL_REPLAY_ENV, raising=False)
     monkeypatch.setenv(q.MM_OPACITY_ENV, "off")
     monkeypatch.setattr(q, "obs_running", lambda: pytest.fail("must refuse before looking for OBS"))
     with pytest.raises(SystemExit) as exc:
-        q.main(["--arm", "g2", "--out", str(tmp_path)])
+        q.main(["--arm", arm, "--out", str(tmp_path)])
     assert exc.value.code == 2
     assert "OBED_LIVE_MM_OPACITY is set" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("n, want", [
+    (0.0, (4.0, 2.0, 252.0)),
+    (1.3, (4.0, 4.0, 250.0)),
+    (4.0, (5.0, 6.0, 248.0)),
+    (4.0 + 1e-9, None),
+    (float("nan"), None),
+    (None, None),
+])
+def test_dissolve_calibration_is_the_unclamped_formula_and_inconclusive_past_n_4(n, want):
+    # DX-2 (plan §9.2): tau = max(4, ceil(n) + 1), complement = 2 + ceil(n), no dip = 252 - ceil(n); a cap breach
+    # (complement > 6 first, at n > 4) is INCONCLUSIVE (None), never clamped. n = 0 reproduces DX-1's thresholds.
+    cal = q.dissolve_calibration(n)
+    assert (None if cal is None else (cal.tau, cal.complement, cal.no_dip)) == want
+
+
+def test_dissolve_sessions_are_the_p2_crossfade_cut_and_opaque_arms_plus_cef_skip():
+    # DX-2 (plan §9.2, rev 17): opaque-off first (it fixes the calibration); DX-1's P2 cross-fade, cut and opaque arms
+    # minus screen-*, delay-*, on-sw and the lifecycle, plus cef-skip (P2 2->3) and cef-skip-dsk (DSK 7->8): each publishes
+    # a take with no holder.
+    # CEF never gets the snapped-placement grant (decision 15), so the media, tone and m-snap sessions (and m-dsk78's
+    # two holders) are not run in CEF in this PR.
+    sessions = q.DISSOLVE_ARMS
+    assert sessions[0] == "opaque-off"
+    assert {"off", "on", "on2", "cut-on", "cut-off", "opaque-on", "cef-skip", "cef-skip-dsk"} <= set(sessions)
+    assert not [s for s in sessions if s.startswith(("m-", "screen-", "delay-", "life-", "grant-", "perfect")) or s == "on-sw"]
+
+
+@pytest.mark.parametrize("g2_mode, g2, missing", [("off", None, False), ("off", "IDLE", True), ("injected", "IDLE", False),
+                                                    ("injected", None, True)])
+def test_dissolve_evidence_reads_g2_state_only_where_the_module_is_injected(g2_mode, g2, missing):
+    # DX-2 sessions run gl_replay="off": the host injects no G2 module, so the page has no __OBED_GL_REPLAY__ and the
+    # recorded state must be None; a state there (or none where the module is injected) is missing evidence.
+    record = {"g2": g2, "output": {"continuity": {"mode": "off", "glReplay": {"mode": g2_mode}}, "mmOpacity": {"sha256": "ab"}}}
+    assert ("G2 state" in q.dissolve_evidence(record)) is missing
+
+
+def test_await_input_resends_a_lone_shift_keyup_until_the_page_sees_one():
+    # Live CEF (2026-10-12): key input sent within ~0.5 s of a new document is dropped (no keydown reaches the page) and
+    # the advance is never acknowledged. The player has no keyup handler, so a lone Shift keyUp probes the route safely.
+    class Page:
+        sent: list[dict[str, Any]] = []
+
+        def evaluate(self, expression: str) -> Any:
+            return len(self.sent) >= 2 if expression == "window.__obedDxInput" else None
+
+        def call(self, method: str, **params: Any) -> None:
+            self.sent.append({"method": method, **params})
+
+    page = Page()
+    q.await_input(page)
+    assert page.sent == [{"method": "Input.dispatchKeyEvent", "type": "keyUp", "key": "Shift", "code": "ShiftLeft",
+                          "windowsVirtualKeyCode": 16}] * 2
+
+
+def test_unpremultiply_gives_the_dissolve_scorer_straight_rgba_it_re_premultiplies_within_half_a_level():
+    # Live DX-2 (2026-10-12): GetSourceScreenshot's RGB is premultiplied (|shot - premul(texture)| 0.1 vs |shot - texture|
+    # 53 on translucent pixels), and the scorer premultiplies again, so the patched cross-fade read a residual of ~70.
+    rng = np.random.default_rng(7)
+    straight = rng.integers(0, 256, (64, 64, 4)).astype(np.uint8)
+    straight[0, :, 3], straight[1, :, 3] = 0, 255
+    shot = straight.copy()
+    shot[..., :3] = np.rint(straight[..., :3] * (straight[..., 3:4] / 255.0)).astype(np.uint8)
+    back = q.unpremultiply(shot)
+    assert np.array_equal(back[..., 3], straight[..., 3]) and not back[0, :, :3].any()
+    assert np.array_equal(back[1], straight[1])
+    assert np.abs(q.dissolve_probe.premul(back)[..., :3] - shot[..., :3]).max() <= 0.5 + 1e-4
+
+
+ATTACHED = {"grant": None, "reason": "attached", "product": "Chrome/127.0.6533.120", "gpuCompositing": True, "at": 1.0}
+
+
+def dissolve_run(tmp_path: Path, records: dict[str, dict[str, Any]], n: float | None = 1.0) -> dict[str, Any]:
+    sessions = []
+    for name in q.DISSOLVE_ARMS:
+        run_dir = tmp_path / "runs" / name
+        run_dir.mkdir(parents=True)
+        holders = [] if name.startswith("cef-skip") else None
+        record = {"arm": name, "output": {"placement": ATTACHED}, "dump": {"first": {"holders": holders}}}
+        (run_dir / "record.json").write_text(json.dumps({**record, **records.get(name, {})}))
+        sessions.append({"session": name, "runDir": str(run_dir)})
+    cal = q.dissolve_calibration(n)
+    sessions[0]["calibration"] = {"n": n, "model": "PASS", "calibration": q.asdict(cal) if cal else None}
+    return {"sessions": sessions}
+
+
+@pytest.mark.parametrize("records, n, verdict, failing", [
+    ({}, 1.0, "PASS", []),
+    ({"on": {"output": {"placement": {**ATTACHED, "grant": "snap", "reason": "granted"}}}}, 1.0, "FAIL", ["on: output.placement"]),
+    ({"off": {"output": {}}}, 1.0, "FAIL", ["off: output.placement"]),
+    ({"cef-skip": {"dump": {"first": None}}}, 1.0, "FAIL", ["cef-skip: no bound holder"]),
+    ({"cef-skip-dsk": {"dump": {"first": None}}}, 1.0, "FAIL", ["cef-skip-dsk: no bound holder"]),
+    ({"cef-skip": {"dump": {"first": {"holders": [{"rect": [0, 0, 60, 40]}]}}}}, 1.0, "FAIL", ["cef-skip: no bound holder"]),
+    ({"cef-skip-dsk": {"dump": {"first": {"holders": [{"rect": [0, 0, 60, 40]}]}}}}, 1.0, "FAIL", ["cef-skip-dsk: no bound holder"]),
+    ({}, 4.5, "INVALID", ["calibration (opaque-off n)"]),
+    ({"on": {"dump": {"first": {"holders": [{"rect": [0, 0, 60, 40]}]}}}}, 4.5, "FAIL",
+     ["calibration (opaque-off n)", "on: no bound holder"]),
+])
+def test_dissolve_gates_require_the_attached_placement_and_no_holder_in_every_cef_session(monkeypatch, tmp_path, records, n,
+                                                                                        verdict, failing):
+    # DX-2 (plan §9.2, decision 15): managed OBS is attach mode, so every session records output.placement with grant null
+    # and reason `attached`; cef-skip and cef-skip-dsk must publish a take (dump.first present) whose holder list is empty, and no other
+    # session may bind one. A bound holder is a hard FAIL even when the calibration makes the round INCONCLUSIVE.
+    monkeypatch.setattr(q.dissolve_probe, "score_runs", lambda runs, decision, cal, profile: {
+        "overall": "PASS", "gates": {}, "arms": {}})
+    gate = q.dissolve_gates(dissolve_run(tmp_path, records, n), None)["DX-2"]
+    assert (gate["verdict"], gate["failing"]) == (verdict, failing)
 
 
 def test_main_refuses_mmo_arms_on_a_grey_counter_fixture(monkeypatch, tmp_path, capsys):
