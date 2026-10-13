@@ -253,11 +253,11 @@ above.
 Preparing a deck converts every movie its slides reference that is not H.264 to
 H.264 (libx264 crf 14, preset fast, yuv420p; audio AAC 192k), in place in the
 cached export, with the same file names. Only the export's movie copies are
-converted; the `.key` is never touched. Copies with the same media data are
-encoded once. Each output is checked against its source (codec, coded size,
+converted; the `.key` is never touched. Copies with the same media data, timing and
+geometry are encoded once. Each output is checked against its source (codec, coded size,
 timescale, rotation matrix, presented duration and, where the source has no
 trimming edit list, frame count) before it replaces the copy; a failed check
-fails the prepare and leaves the copy as it was.
+fails the prepare and removes the incomplete export.
 `manifest.movieConversion` records the encoder and each converted file; the
 prepare panel lists the converted movies with their source codecs. A cached
 export is reused only while every movie it references is H.264, so an older

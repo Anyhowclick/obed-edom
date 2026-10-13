@@ -414,7 +414,10 @@ def test_apply_records_conversions_and_reuse_needs_h264(tmp_path, monkeypatch):
     again = propose_preview(deck, job_id="job-b")
     assert (again["phase"], again["reused"]) == ("ready", True)
 
-    shutil.copyfile(prores, Path(ready["exportRoot"]) / converted[0]["path"])
+    movie = Path(ready["exportRoot"]) / converted[0]["path"]
+    movie.unlink()
+    assert hp.load_cached(DIGEST, _source()) is None
+    shutil.copyfile(prores, movie)
     assert hp.load_cached(DIGEST, _source()) is None
 
 

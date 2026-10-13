@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -25,7 +26,7 @@ from obed_edom.live_codec import (
     movie_geometry,
     movie_timing,
 )
-from obed_edom.live_continuity import _referenced_movies
+from obed_edom.live_continuity import _referenced_movies, canonical_asset_name
 from obed_edom.maps_movie import ffmpeg_exe
 
 ENCODER = "libx264 crf14 fast yuv420p; aac 192k"
@@ -38,6 +39,7 @@ _ALPHA_PIX_FMT_RE = re.compile(r"^(?:yuva|gbrap|ya\d|rgba|bgra|argb|abgr|pal8)")
 _VIDEO_STREAM_RE = re.compile(r"Stream #0:\d+.*?: Video: [^,(]+(?:\([^)]*\)\s*)*, ([a-z0-9_]+)")
 _YMIN_RE = re.compile(r"lavfi\.signalstats\.YMIN=(\d+(?:\.\d+)?)")
 _OUT_TIME_RE = re.compile(r"^out_time_us=(\d+)$")
+_WEB_URL_RE = re.compile(r"^[a-z]+://", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -49,23 +51,41 @@ class _Movie:
     geometry: MovieGeometry | None
 
 
-def _referenced(export_root: Path, slides: list[dict[str, Any]]) -> list[tuple[str, Path]]:
-    found = _referenced_movies(export_root, slides, resolver=safe_export_file)
-    return [
+def _referenced(export_root: Path, slides: list[dict[str, Any]]) -> tuple[list[tuple[str, Path]], list[str]]:
+    """Referenced local movie files, plus the export-relative paths of local movies that do not
+    resolve to a file (web movies are not files and are left out of both)."""
+    missing: list[str] = []
+
+    def resolver(root: Path, relative: str) -> Path:
+        try:
+            return safe_export_file(root, relative)
+        except PreviewError:
+            url = relative.split("/", 2)[-1]
+            if Path(relative).suffix.lower() in MOVIE_SUFFIXES and not _WEB_URL_RE.match(url):
+                missing.append(relative)
+            raise
+
+    found = _referenced_movies(export_root, slides, resolver=resolver)
+    files = [
         (asset, path)
         for asset, paths in sorted(found.items())
         for path in paths
         if path is not None and path.suffix.lower() in MOVIE_SUFFIXES
     ]
+    return files, sorted(set(missing))
 
 
 def unconverted(export_root: Path, slides: list[dict[str, Any]]) -> list[str]:
-    """Export-relative paths of referenced movie files that are not H.264."""
+    """Export-relative paths of referenced movie files that are missing or not H.264."""
     root = export_root.resolve()
+    files, missing = _referenced(export_root, slides)
     return sorted(
-        path.relative_to(root).as_posix()
-        for _asset, path in _referenced(export_root, slides)
-        if codec_family(movie_codec(path)) != "h264"
+        [
+            path.relative_to(root).as_posix()
+            for _asset, path in files
+            if codec_family(movie_codec(path)) != "h264"
+        ]
+        + missing
     )
 
 
@@ -161,21 +181,22 @@ def _encode(exe: str, movie: _Movie, tmp: Path, log: Callable[[str], None]) -> N
     label = f"Converting {movie.asset} to H.264"
     log(f"{label} · 0 / {total} s")
     last = time.monotonic()
-    proc = subprocess.Popen(
-        _encode_argv(exe, movie.path, tmp, movie.timing.timescale),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    assert proc.stdout is not None and proc.stderr is not None
-    for line in proc.stdout:
-        match = _OUT_TIME_RE.match(line.strip())
-        if match and time.monotonic() - last >= PROGRESS_INTERVAL_S:
-            last = time.monotonic()
-            log(f"{label} · {int(match.group(1)) // 1_000_000} / {total} s")
-    stderr = proc.stderr.read()
-    if proc.wait() != 0:
-        raise PreviewError(f"{movie.asset}: H.264 conversion failed: {stderr.strip()[-500:]}")
+    with tempfile.TemporaryFile(mode="w+") as errors:
+        proc = subprocess.Popen(
+            _encode_argv(exe, movie.path, tmp, movie.timing.timescale),
+            stdout=subprocess.PIPE,
+            stderr=errors,
+            text=True,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            match = _OUT_TIME_RE.match(line.strip())
+            if match and time.monotonic() - last >= PROGRESS_INTERVAL_S:
+                last = time.monotonic()
+                log(f"{label} · {int(match.group(1)) // 1_000_000} / {total} s")
+        if proc.wait() != 0:
+            errors.seek(0)
+            raise PreviewError(f"{movie.asset}: H.264 conversion failed: {errors.read().strip()[-500:]}")
 
 
 def _verify(movie: _Movie, tmp: Path) -> str | None:
@@ -218,21 +239,22 @@ def convert_movies(
     raised together before anything is written; an encode or verify failure leaves the
     original untouched. Returns the manifest's `movieConversion` record."""
     root = export_root.resolve()
+    files, missing = _referenced(export_root, slides)
     movies = [
         _Movie(asset, path, codec, movie_timing(path), movie_geometry(path))
-        for asset, path in _referenced(export_root, slides)
+        for asset, path in files
         if codec_family(codec := movie_codec(path)) != "h264"
     ]
     record: dict[str, Any] = {"encoder": ENCODER, "converted": []}
-    if not movies:
+    refused = {canonical_asset_name(relative): "its file is missing from the export" for relative in missing}
+    if not movies and not refused:
         return record
     exe = ffmpeg_exe()
-    if not exe:
+    if movies and not exe:
         raise PreviewError("ffmpeg is needed to convert movies to H.264 and was not found")
     groups: dict[tuple[Any, ...], list[_Movie]] = {}
     for movie in movies:
         groups.setdefault((_media_data_sha256(movie.path), movie.timing, movie.geometry), []).append(movie)
-    refused: dict[str, str] = {}
     for key, members in groups.items():
         reason = "its media data cannot be read" if key[0] is None else _refusal(exe, members[0])
         if reason:
@@ -245,19 +267,24 @@ def convert_movies(
         )
     for members in groups.values():
         first = members[0]
-        source_shas = {movie.path: file_sha256(movie.path) for movie in members}
         tmp = _temp_sibling(first.path, "h264")
         try:
+            source_shas = {movie.path: file_sha256(movie.path) for movie in members}
             _encode(exe, first, tmp, log)
             problem = _verify(first, tmp)
             if problem:
                 raise PreviewError(f"{first.asset}: {problem}")
             os.replace(tmp, first.path)
+            sha, size = file_sha256(first.path), first.path.stat().st_size
+        except OSError as exc:
+            raise PreviewError(f"{first.asset}: H.264 conversion failed: {exc}") from exc
         finally:
             tmp.unlink(missing_ok=True)
         for movie in members[1:]:
-            _swap_copy(first.path, movie.path)
-        sha, size = file_sha256(first.path), first.path.stat().st_size
+            try:
+                _swap_copy(first.path, movie.path)
+            except OSError as exc:
+                raise PreviewError(f"{movie.asset}: H.264 conversion failed: {exc}") from exc
         record["converted"].extend(
             {
                 "path": movie.path.relative_to(root).as_posix(),

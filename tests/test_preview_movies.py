@@ -157,11 +157,13 @@ def test_converts_every_non_h264_copy_in_place_with_identical_timing(tmp_path, m
         ("alpha_real", "it has transparency, and H.264 has none; replace it with an opaque movie"),
         ("odd", "its size 319×180 is odd"),
         ("dropped", "the converted file plays"),
+        ("missing", "its file is missing from the export"),
+        ("disk_full", r"H\.264 conversion failed: \[Errno 28\] No space left on device"),
     ],
 )
 def test_refuses_by_name_and_leaves_the_export_untouched(tmp_path, monkeypatch, clips, bad, match):
-    clip = clips["alpha_const"] if bad == "dropped" else clips[bad]
-    export, slides, _paths = export_with(tmp_path, monkeypatch, [
+    clip = clips.get(bad, clips["alpha_const"])
+    export, slides, paths = export_with(tmp_path, monkeypatch, [
         ("S1", clips["prores"], "fine.mov"),
         ("S2", clip, "bad.mov"),
     ])
@@ -173,10 +175,19 @@ def test_refuses_by_name_and_leaves_the_export_untouched(tmp_path, monkeypatch, 
             return [*argv[:-1], "-frames:v", "20", argv[-1]]
 
         monkeypatch.setattr(pm, "_encode_argv", dropping_argv)
+    if bad == "disk_full":
+        def full_disk(*_args):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(pm.os, "replace", full_disk)
+    missing = []
+    if bad == "missing":
+        paths[("S2", "bad.mov")].unlink()
+        missing = [paths[("S2", "bad.mov")].relative_to(export).as_posix()]
     before = tree_shas(export)
 
     with pytest.raises(PreviewError, match=rf"bad\.mov: {match}"):
         pm.convert_movies(export, slides, log=lambda _line: None)
 
     assert tree_shas(export) == before
-    assert pm.unconverted(export, slides) == [p for p in sorted(before) if p.endswith(".mov")]
+    assert pm.unconverted(export, slides) == sorted([p for p in before if p.endswith(".mov")] + missing)

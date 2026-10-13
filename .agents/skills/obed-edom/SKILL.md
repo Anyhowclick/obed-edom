@@ -721,13 +721,13 @@ for the parked `iwa-surgical-write-generator` feature.
   allowlist, and the host's stage gate, runtime install, codec gate and `OBED_LIVE_CONTINUITY=off`. `retire ends` is
   not a refusal. Never relax one to qualify a deck.
 * **Allowlist.** `QUALIFIED_PLAN_SHA256` stays in force until S3; a deck joins only after its gates pass.
-* **Start is never gated on continuity.** `web/live.py` `_deck_qualification` returns `qualified: true` plus
-  `continuity: {mode: qualified|unsupported|off, reason, notCarried}` (`live_host.not_carried(plan, slides)`) and
+* **Start is never gated on continuity.** The `/api/live/decks/{id}/qualification` response carries `qualified: true`,
+  `continuity: {mode: qualified|unsupported|off, reason, notCarried}` (from `_deck_qualification`) (`live_host.not_carried(plan, slides)`) and
   `convertedMovies: [{asset, sourceCodec}]`; only `prepared_deck`'s playability checks (player digest, 16:9, manual
   mode, unsupported media, no playable slides) block start.
 * **Prepare-time conversion.** `html_preview.apply_preview` runs `preview_movies.convert_movies` before writing the
   manifest: every referenced `.mov`/`.mp4`/`.m4v` that is not H.264 is re-encoded in the cached export (never the
-  `.key`) with `dsk_movie_export._crop_encoder_args("h264")` + AAC 192k, one encode per identical-`mdat` group,
+  `.key`) with `dsk_movie_export._crop_encoder_args("h264")` + AAC 192k, one encode per group with identical `mdat`, timing and geometry,
   verified by box reads (avc1; coded size, timescale, tkhd matrix, presented duration; stts count when the source has
   no trimming edit list) before `os.replace`. Recorded as `manifest.movieConversion` (`encoder`, `converted[]`:
   `path`, `asset`, `sourceCodec`, `sourceSha256`, `sha256`, `bytes`). Real transparency, HEVC whose transparency

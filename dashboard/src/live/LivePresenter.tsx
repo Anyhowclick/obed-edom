@@ -325,7 +325,7 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
           {checking ? <p>Checking deck qualification…</p> : qualification && qualified && <DeckReady qualification={qualification} />}
           {!!jobId && !checking && !qualified && <button className="btn secondary" type="button" onClick={() => selectDeck(jobId)}>Check qualification again</button>}
         </div>
-        <p className="note">Any prepared deck can be presented; movie continuity turns on only for moves it has measured. Preparation works from a copy of your Keynote.</p>
+        <p className="note">Playable prepared decks can be presented even when movie continuity is off; continuity turns on only for moves it has measured. Preparation works from a copy of your Keynote.</p>
       </section>
       <section className="live-panel live-start">
         <h2>2. Present</h2>
