@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import collections
+import copy
 import hashlib
 import itertools
 import json
@@ -157,13 +158,15 @@ console.log(JSON.stringify(results));
 
 
 MAIN_OUTPUT = main_checkout() / "output"
-# Stage T's texture-repair fixture is a real deck added for texture repair only; the census corpora below predate it.
+# Stage T's texture-repair fixture is a real deck added for texture repair only; the original census corpus predates it.
 TEXTURE_FIXTURE = fixture("alpha-dsk-textures")
 REAL_PLAYER = fixture("p2-binary") / "html-player" / "assets" / "player" / "main.js"
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "live_continuity"
 EFFECT_1_TO_2 = FIXTURE_ROOT / "effect_1_to_2.json"
+EFFECT_7_TO_8 = FIXTURE_ROOT / "effect_7_to_8.json"
 SOURCE_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Minimal Alpha_DSK.key")
 SLOT4_ALPHA = 0.29468628764152527
+ALPHA_DSK_OPACITY = 0.6117682456970215
 EB_EFFECTS = {"apple:magic-move-implied-motion-path", "apple:ca-text-shimmer", "apple:ca-text-sparkle"}
 
 
@@ -282,17 +285,17 @@ def test_mm_opacity_anchors_are_unique_on_the_real_player():
 # and old True 21476f78... with R1-R5. New False: recorded when the new player was admitted.
 REAL_PATCHED_SHA256 = {
     OLD_PLAYER_SHA256: {
-        True: "81ac1a33bee3d2e8eb62fab183876d0c17ce2e372819a7416a0720073f8a9475",
+        True: "553676be908d6a1737d17bc8ed8219bf14231eb870afc790b9f63e3fcf6386f9",
         False: "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
     },
     NEW_PLAYER_SHA256: {
-        True: "a9aa0bde8cf3f8f0c69a0292cb421caf8f733b7924a2ec825828ab331c40fe18",
+        True: "baf2c9a3102d9e459cf195fc0fdb351c4230ba2894a94a960dffa02f38babed9",
         False: "4f9fbffd95e4649543142b2e95586babd9d75f0a0d9a4974e21d6f33c8389e3b",
     },
 }
 REAL_RENDERING_SHA256 = {
-    OLD_PLAYER_SHA256: "dd0db318d9ef06371bebe4d0ea8368e81d6d83799d60318f7abf1995e7feb648",
-    NEW_PLAYER_SHA256: "c6c1eb5e368ae5e54e9b7bb94d8a9545522c34eeaca34c5c05fe396bc63841e9",
+    OLD_PLAYER_SHA256: "fbeb10d5d4e5749d5512730b6b5554e0189d0ac4bba4b7a0cf28579da1984db1",
+    NEW_PLAYER_SHA256: "0368fff55efa7e41d8acd3d20fae8dc9f11dbea9a61224907fa1a9414efbaca0",
 }
 
 
@@ -363,8 +366,8 @@ def test_patched_output_must_match_its_pin(monkeypatch, pin):
 # Hand-back geometry (keynote_live_handback_geometry.plan.md §3.2) is R6-R8; the dissolve cross-fade
 # (keynote_live_dissolve_crossfade.plan.md §3.1, §6.1) is D1-D4 = R9-R12. Their anchors' byte offsets on the old and
 # new stock players: R8 and D4 sit after both `isEvalSupported` insertions, so they move by 38.
-HANDBACK = slice(5, 8)
-DISSOLVE = slice(8, 12)
+HANDBACK = slice(6, 9)
+DISSOLVE = slice(9, 13)
 ANCHOR_OFFSETS = {
     b"B[g].toTexture=R.createTexture(this.gl,i)}}return B}": (2263321, 2263321),
     b'case"contents":C=e.toTexture}}var T=': (2190367, 2190367),
@@ -378,7 +381,7 @@ ANCHOR_OFFSETS = {
 
 def test_handback_and_dissolve_replacements_follow_the_opacity_ones():
     replacements = live_runtime._MM_OPACITY_REPLACEMENTS
-    assert len(replacements) == 12
+    assert len(replacements) == 13
     assert [before for before, _ in replacements[HANDBACK.start : DISSOLVE.stop]] == list(ANCHOR_OFFSETS)
 
 
@@ -400,10 +403,10 @@ def test_handback_and_dissolve_anchors_sit_at_their_offsets_on_the_real_player(s
     for before, offsets in ANCHOR_OFFSETS.items():
         assert player.count(before) == 1
         assert player.find(before) == offsets[column]
-    # §6.1: the hook and all twelve anchors are 13 disjoint byte intervals of the stock player.
+    # §6.1: the hook and all thirteen anchors are 14 disjoint byte intervals of the stock player.
     anchors = [live_runtime._ANCHOR] + [before for before, _ in live_runtime._MM_OPACITY_REPLACEMENTS]
     intervals = sorted((player.find(anchor), player.find(anchor) + len(anchor)) for anchor in anchors)
-    assert len(intervals) == 13
+    assert len(intervals) == 14
     assert all(end <= start for (_, end), (start, _) in zip(intervals, intervals[1:]))
     patched = live_runtime.patch_player(player)
     for before, after in live_runtime._MM_OPACITY_REPLACEMENTS[HANDBACK.start : DISSOLVE.stop]:
@@ -561,7 +564,7 @@ SWAP_HIDE_DEFERRED = b"setTimeout(this.handleAnimateEffectDidBegin"
 
 def test_mm_opacity_hides_the_swapped_node_synchronously_on_the_real_player():
     player = _real_player()
-    before, after = live_runtime._MM_OPACITY_REPLACEMENTS[4]
+    before, after = live_runtime._MM_OPACITY_REPLACEMENTS[5]
     assert before == b"Q&&setTimeout(this.handleAnimateEffectDidBegin.bind(this,Q),0)"
     assert player.count(before) == 1 and player.count(after) == 0
     assert player.count(SWAP_HIDE_DEFERRED) == 1
@@ -675,9 +678,17 @@ def _player_texture_tree(node: dict) -> dict:
     }
 
 
-def _run_extracted(node: str, player: str, patched: bool, effect: dict) -> list[list[float]]:
+def _run_extracted(
+    node: str,
+    player: str,
+    patched: bool,
+    effect: dict,
+    sample_times: tuple[float, ...] | None = None,
+) -> list[list[float]]:
     # Easing is stubbed linear (`kA.doubleForAnimationCurve`) and the matrix helpers (`u`) are identity:
     # only the Opacity uniform is observed.
+    duration = effect["duration"]
+    percents = [time / duration for time in sample_times] if sample_times is not None else [0, 0.5, 1]
     script = """
 class kA{doubleForAnimationCurve(n,x){return x}}
 class KA{}
@@ -685,24 +696,73 @@ const u={translateMatrix4:(m)=>m,rotateMatrix4AboutXYZ:(m)=>m,scaleMatrix4:(m)=>
 %s
 const root=%s;
 const out=[];
-for (const percent of [0,0.5,1]){
+for (const percent of %s){
   const textures=[];
-  new F().textureInfoFromEffect(root,'x',{pointX:0,pointY:0},root.initialState.opacity,textures);
+  new F().textureInfoFromEffect(root,'x',{pointX:0,pointY:0},root.initialState.opacity,textures,undefined,%s);
   const values=[];
   for (const t of textures){
     let opacity=null;
     const shader={setGLFloat:(v,n)=>{if(n==='Opacity')opacity=v},setMat4WithTransform3D(){}};
     const gl={blendFunc(){},activeTexture(){},bindTexture(){},ONE:1,ONE_MINUS_SRC_ALPHA:2,TEXTURE0:0,TEXTURE1:1,TEXTURE_2D:3};
     if(!t.animations.length){opacity=noAnimation(t,root.initialState.opacity);}
-    else {new QB(gl).renderFrameWithContext(shader,{drawWithShader(){}},{textureInfo:t,effectDuration:1500,baseTransform:[],percent,isBlending:false});}
+    else {new QB(gl).renderFrameWithContext(shader,{drawWithShader(){}},{textureInfo:t,effectDuration:%s,baseTransform:[],percent,isBlending:false});}
     values.push(opacity);
   }
   out.push(values);
 }
 console.log(JSON.stringify(out));
-""" % (_extracted_methods(player, patched), json.dumps(_player_texture_tree(effect["baseLayer"])))
+""" % (
+        _extracted_methods(player, patched),
+        json.dumps(_player_texture_tree(effect["baseLayer"])),
+        json.dumps(percents),
+        1000 * duration,
+        1000 * duration,
+    )
     result = subprocess.run([node, "-e", script], check=True, text=True, capture_output=True)
     return json.loads(result.stdout)
+
+
+def _texture_leaves(node: dict) -> list[dict]:
+    if node.get("texture"):
+        return [node]
+    return [leaf for child in node.get("layers") or [] for leaf in _texture_leaves(child)]
+
+
+def _fade_variant(
+    effect: dict,
+    *,
+    model: float,
+    initial_hidden: bool,
+    start: float,
+    end: float,
+    fill: str,
+    begin: float,
+    duration: float,
+    hidden: tuple[bool, bool, float, float] | None,
+) -> dict:
+    variant = copy.deepcopy(effect)
+    leaf = _texture_leaves(variant["baseLayer"])[4]
+    leaf["initialState"]["opacity"] = model
+    leaf["initialState"]["hidden"] = initial_hidden
+    source = leaf["animations"][0]["animations"]
+    opacity = copy.deepcopy(next(animation for animation in source if animation["property"] == "opacity"))
+    opacity.update({"from": {"scalar": start}, "to": {"scalar": end}, "fillMode": fill, "beginTime": begin, "duration": duration})
+    animations = [opacity]
+    if hidden is not None:
+        hidden_start, hidden_end, hidden_begin, hidden_duration = hidden
+        visibility = copy.deepcopy(next(animation for animation in source if animation["property"] == "hidden"))
+        visibility.update(
+            {
+                "from": {"scalar": hidden_start},
+                "to": {"scalar": hidden_end},
+                "fillMode": "forwards",
+                "beginTime": hidden_begin,
+                "duration": hidden_duration,
+            }
+        )
+        animations.append(visibility)
+    leaf["animations"][0]["animations"] = animations
+    return variant
 
 
 def test_mm_opacity_real_patched_methods_draw_the_authored_opacity_on_p2_1_to_2():
@@ -721,6 +781,95 @@ def test_mm_opacity_real_patched_methods_draw_the_authored_opacity_on_p2_1_to_2(
     # The Python mirror below agrees with the real bytes on every slot and point.
     assert [[new for _, new in row] for row in _mirror(effect)] == patched
     assert [[old for old, _ in row] for row in _mirror(effect)] == stock
+
+    fade_in = json.loads(EFFECT_7_TO_8.read_text())
+    fade_out = _fade_variant(
+        fade_in,
+        model=1,
+        initial_hidden=False,
+        start=1,
+        end=0,
+        fill="forwards",
+        begin=0,
+        duration=0.5,
+        hidden=(True, True, 0.5, 1.0),
+    )
+    partial = _fade_variant(
+        fade_in,
+        model=0.3,
+        initial_hidden=False,
+        start=0.3,
+        end=0.8,
+        fill="forwards",
+        begin=0.5,
+        duration=0.5,
+        hidden=None,
+    )
+
+    def check(candidate, times, stock_values, patched_values):
+        stock_rows = _run_extracted(node, _hook_only(player).decode(), False, candidate, times)
+        patched_rows = _run_extracted(node, live_runtime.patch_player(player).decode(), True, candidate, times)
+        assert [row[4] for row in stock_rows] == pytest.approx(stock_values)
+        assert [row[4] for row in patched_rows] == pytest.approx(patched_values)
+        mirror = _mirror(candidate, times)
+        assert [[old for old, _ in row] for row in mirror] == stock_rows
+        assert [[new for _, new in row] for row in mirror] == patched_rows
+
+    check(
+        fade_in,
+        (0.5, 1.00005, 1.250025, 1.5),
+        (0, 0, 0.5, 1),
+        (0, 0, ALPHA_DSK_OPACITY * 0.5, ALPHA_DSK_OPACITY),
+    )
+    check(
+        fade_out,
+        (0, 0.25, 0.5, 1.5),
+        (1, 0.5, 0, 0),
+        (ALPHA_DSK_OPACITY, ALPHA_DSK_OPACITY * 0.5, 0, 0),
+    )
+    check(
+        partial,
+        (0.25, 0.5, 0.75, 1.0, 1.5),
+        (0.3, 0.3, 0.55, 0.8, 0.8),
+        tuple(ALPHA_DSK_OPACITY * value for value in (0.3, 0.3, 0.55, 0.8, 0.8)),
+    )
+
+    model_mismatch = copy.deepcopy(partial)
+    _texture_leaves(model_mismatch["baseLayer"])[4]["initialState"]["opacity"] = 0.2
+    hidden_unpaired = copy.deepcopy(fade_in)
+    hidden_animation = next(
+        animation
+        for animation in _texture_leaves(hidden_unpaired["baseLayer"])[4]["animations"][0]["animations"]
+        if animation["property"] == "hidden"
+    )
+    hidden_animation["beginTime"] += 0.1
+    full_move_fade_out = _fade_variant(
+        fade_in,
+        model=1,
+        initial_hidden=False,
+        start=1,
+        end=0,
+        fill="forwards",
+        begin=0,
+        duration=1.5,
+        hidden=(True, True, 1.4985, 0.0015),
+    )
+    delayed_full_duration = _fade_variant(
+        fade_in,
+        model=0.3,
+        initial_hidden=False,
+        start=0.3,
+        end=0.8,
+        fill="forwards",
+        begin=0.5,
+        duration=1.5,
+        hidden=None,
+    )
+    check(model_mismatch, (0.25, 0.5, 0.75, 1.0, 1.5), (0.3, 0.3, 0.55, 0.8, 0.8),
+          (0.3, 0.3, 0.55, 0.8, 0.8))
+    check(hidden_unpaired, (0.5, 1.00005, 1.250025, 1.5), (0, 0, 0.5, 1), (0, 0, 0.5, 1))
+    check(full_move_fade_out, (0, 0.75, 1.5), (1, 0.5, 0), (1, 0.5, 0))
+    check(delayed_full_duration, (0, 0.75, 1.5), (0.3, 0.55, 0.8), (0.3, 0.55, 0.8))
 
 
 def _anim(prop: str, start, end, fill: str = "both") -> dict:
@@ -774,11 +923,11 @@ SYNTHETIC_TREES = {
         ])]),
         [None, None, 1 * 0.4 * 0.5],
     ),
-    # Decision 5 residual: a leaf fade under a translucent constant wrapper keeps the stock fade.
+    # The fade extension multiplies the stock 1 -> 0 ramp by the constant wrapper's 0.4.
     "leaf-fade-under-constant-wrapper": (
         _layer(layers=[_layer(0.4, [_group(_anim("opacity", 0.4, 0.4))],
                               [_layer(0.5, [_group(_anim("opacity", 1, 0))], texture="leaf")])]),
-        [None],
+        [(0.4, 0.2, 0)],
     ),
 }
 
@@ -796,13 +945,15 @@ def test_mm_opacity_real_patched_methods_agree_with_the_mirror_on_synthetic_tree
     mirror = _mirror(effect)
     assert [[old for old, _ in row] for row in mirror] == stock
     assert [[new for _, new in row] for row in mirror] == patched
-    for stock_row, patched_row in zip(stock, patched):
-        assert patched_row == [old if want is None else want for old, want in zip(stock_row, expected)]
+    for row_index, (stock_row, patched_row) in enumerate(zip(stock, patched)):
+        assert patched_row == [
+            old if want is None else want[row_index] if isinstance(want, tuple) else want
+            for old, want in zip(stock_row, expected)
+        ]
 
 
-# §5 census mirror: old vs new Opacity per eB-drawn leaf, in Python, following the player's arithmetic
-# (`fB.textureInfoFromEffect`, `QB.renderFrameWithContext`, `eB.drawFrame`) and R1-R4. Easing is taken
-# as linear: it only feeds from != to animations, and those never reach a non-null chain value.
+# §5 census mirror: stock, today's patch, and the fade extension per eB-drawn leaf, following
+# `fB.textureInfoFromEffect`, `QB.renderFrameWithContext`, `eB.drawFrame`, and R1-R4 with linear easing.
 
 _UNDEFINED = object()
 PERCENTS = (0, 0.5, 1)
@@ -843,13 +994,72 @@ def _chain_opacity(parent, node: dict):
     return None if value is None else (1 if parent is _UNDEFINED else parent) * value
 
 
-def _texture_infos(node: dict, parent, out: list) -> list:
+def _fade(node: dict, effect_duration: float) -> bool:
+    try:
+        state = node["initialState"]
+        groups = node.get("animations") or []
+        if len(groups) != 1 or not isinstance(groups[0].get("animations"), list):
+            return False
+        opacity = None
+        hidden = None
+        opacity_count = hidden_count = 0
+        for animation in groups[0]["animations"]:
+            if animation.get("animations") is not None:
+                return False
+            if animation.get("property") == "opacity":
+                opacity, opacity_count = animation, opacity_count + 1
+            elif animation.get("property") == "hidden":
+                hidden, hidden_count = animation, hidden_count + 1
+        if opacity_count != 1 or hidden_count > 1:
+            return False
+        start, end = opacity["from"]["scalar"], opacity["to"]["scalar"]
+        fill = opacity.get("fillMode")
+        if (
+            isinstance(start, bool)
+            or isinstance(end, bool)
+            or not isinstance(start, (int, float))
+            or not isinstance(end, (int, float))
+            or not math.isfinite(start)
+            or not math.isfinite(end)
+            or not 0 <= start <= 1
+            or not 0 <= end <= 1
+            or start == end
+            or fill not in ("both", "forwards")
+            or fill == "forwards" and state.get("opacity") != start
+            or effect_duration == 1000 * opacity["duration"] and opacity["beginTime"] != 0
+        ):
+            return False
+        if state.get("hidden") is False:
+            return hidden is None or (
+                end == 0
+                and hidden["from"]["scalar"] is True
+                and hidden["to"]["scalar"] is True
+                and hidden.get("fillMode") == "forwards"
+                and hidden["beginTime"] + 1e-9 >= opacity["beginTime"] + opacity["duration"]
+            )
+        if state.get("hidden") is True:
+            return (
+                start == 0
+                and hidden is not None
+                and hidden["from"]["scalar"] is False
+                and hidden["to"]["scalar"] is False
+                and hidden.get("fillMode") == "forwards"
+                and abs(hidden["beginTime"] - opacity["beginTime"]) <= 1e-9
+                and abs(hidden["duration"] - opacity["duration"]) <= 1e-9
+            )
+        return False
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _texture_infos(node: dict, parent, effect_duration: float, out: list) -> list:
     obed = None if parent is _UNDEFINED else _chain_opacity(parent, node)
+    fade_parent = parent if node.get("texture") and parent not in (_UNDEFINED, None) and _fade(node, effect_duration) else None
     if node.get("texture"):
-        out.append((node, obed))
+        out.append((node, obed, fade_parent))
     else:
         for child in node.get("layers") or []:
-            _texture_infos(child, _chain_opacity(parent, node), out)
+            _texture_infos(child, _chain_opacity(parent, node), effect_duration, out)
     return out
 
 
@@ -875,19 +1085,29 @@ def _old_opacity(leaf: dict, parent_opacity: float, percent: float, effect_durat
     return value
 
 
-def _mirror(effect: dict) -> list[list[tuple[float, float]]]:
-    """[[(old, new) per leaf] per percent] for one eB-drawn effect."""
+def _opacity_rows(effect: dict, sample_times: tuple[float, ...] | None = None) -> list[list[tuple[float, float, float]]]:
     base = effect["baseLayer"]
     parent_opacity = base["initialState"]["opacity"]
-    leaves = _texture_infos(base, _UNDEFINED, [])
+    effect_duration = 1000 * effect["duration"]
+    leaves = _texture_infos(base, _UNDEFINED, effect_duration, [])
+    percents = [time / effect["duration"] for time in sample_times] if sample_times is not None else PERCENTS
     rows = []
-    for percent in PERCENTS:
+    for percent in percents:
         row = []
-        for leaf, obed in leaves:
-            old = _old_opacity(leaf, parent_opacity, percent, 1000 * effect["duration"])
-            row.append((old, old if obed is None else obed))
+        for leaf, obed, fade_parent in leaves:
+            old = _old_opacity(leaf, parent_opacity, percent, effect_duration)
+            today = old if obed is None else obed
+            new = today
+            if obed is None and fade_parent is not None and parent_opacity == 1:
+                new = old * fade_parent
+            row.append((old, today, new))
         rows.append(row)
     return rows
+
+
+def _mirror(effect: dict, sample_times: tuple[float, ...] | None = None) -> list[list[tuple[float, float]]]:
+    """[[(stock, extended) per leaf] per sample] for one eB-drawn effect."""
+    return [[(old, new) for old, _, new in row] for row in _opacity_rows(effect, sample_times)]
 
 
 def _effects(node):
@@ -910,10 +1130,23 @@ def _signature(node):
     return node
 
 
-def _census(json_paths) -> tuple[dict[str, int], set[tuple[bool, int]]]:
-    """Stats and the changed set {(is P2 1->2, leaf index)} over distinct eB-drawn transitions."""
+def _effect_fingerprint(effect: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(_signature(effect), sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+P2_1_TO_2_FINGERPRINT = "f040174b9998ecdd9011d8d7b91c01b2146c2f319700c07950de00103ab98ccf"
+ALPHA_DSK_6_TO_7_FINGERPRINT = "53b5f2b2482eb4d08418c84b416a2ac9cc5e065682feb1ec79dbfbcce6665669"
+ALPHA_DSK_7_TO_8_FINGERPRINT = "4d87c01a586e6596a2ccb2499c3e65c50acd5c4f7975136bf3442e910a8a133b"
+
+
+def _census(json_paths) -> tuple[dict[str, int], set[tuple[str, int]], set[tuple[str, int]]]:
+    """Stats, stock-to-today changes, and today's-patch-to-extension changes by fingerprint and leaf."""
     reference = _signature(json.loads(EFFECT_1_TO_2.read_text()))
-    seen, stats, changed = set(), {"effects": 0, "leaves": 0, "one_to_two": 0}, set()
+    seen = set()
+    stats = {"effects": 0, "leaves": 0, "one_to_two": 0, "magic_move": 0, "shimmer": 0, "sparkle": 0}
+    stock_changed, extension_changed = set(), set()
     for path in json_paths:
         try:
             data = json.loads(Path(path).read_text())
@@ -922,47 +1155,69 @@ def _census(json_paths) -> tuple[dict[str, int], set[tuple[bool, int]]]:
         for effect in _effects(data):
             if effect["type"] != "transition" or effect["name"] not in EB_EFFECTS:
                 continue
-            digest = hashlib.sha1(json.dumps(effect, sort_keys=True).encode()).hexdigest()
-            if digest in seen:
+            fingerprint = _effect_fingerprint(effect)
+            if fingerprint in seen:
                 continue
-            seen.add(digest)
+            seen.add(fingerprint)
             is_one_to_two = _signature(effect) == reference
             stats["effects"] += 1
             stats["one_to_two"] += is_one_to_two
-            rows = _mirror(effect)
+            stats[{"apple:magic-move-implied-motion-path": "magic_move",
+                   "apple:ca-text-shimmer": "shimmer", "apple:ca-text-sparkle": "sparkle"}[effect["name"]]] += 1
+            rows = _opacity_rows(effect)
             stats["leaves"] += len(rows[0])
             for row in rows:
-                for index, (old, new) in enumerate(row):
-                    if old != new:
-                        changed.add((is_one_to_two, index))
-    return stats, changed
+                for index, (old, today, new) in enumerate(row):
+                    if old != today:
+                        stock_changed.add((fingerprint, index))
+                    if today != new:
+                        extension_changed.add((fingerprint, index))
+    return stats, stock_changed, extension_changed
 
 
 def _corpus_headers(root: Path, pattern: str = "assets/header.json") -> list[Path]:
     return sorted(header for header in root.rglob(pattern) if TEXTURE_FIXTURE not in header.parents)
 
 
-def test_mm_opacity_census_mirror_changes_only_p2_1_to_2_slot_4_in_committed_fixtures():
+def test_mm_opacity_census_mirror_changes_only_expected_slots_in_committed_fixtures():
     effect = json.loads(EFFECT_1_TO_2.read_text())
     rows = _mirror(effect)
     for row in rows:
         assert [old == new for old, new in row] == [True, True, True, True, False]
         assert row[4] == (1, SLOT4_ALPHA)
     paths = sorted(FIXTURE_ROOT.rglob("*.json"))
-    stats, changed = _census(paths)
+    stats, stock_changed, extension_changed = _census(paths)
     assert stats["one_to_two"] >= 1 and stats["effects"] > stats["one_to_two"]
-    assert changed == {(True, 4)}
+    assert stats["shimmer"] == stats["sparkle"] == 0
+    assert _effect_fingerprint(effect) == P2_1_TO_2_FINGERPRINT
+    assert _effect_fingerprint(json.loads(EFFECT_7_TO_8.read_text())) == ALPHA_DSK_7_TO_8_FINGERPRINT
+    assert stock_changed == {
+        (P2_1_TO_2_FINGERPRINT, 4),
+        (ALPHA_DSK_7_TO_8_FINGERPRINT, 6),
+    }
+    assert extension_changed == {(ALPHA_DSK_7_TO_8_FINGERPRINT, 4), (ALPHA_DSK_7_TO_8_FINGERPRINT, 8)}
 
 
 @pytest.mark.skipif(not MAIN_OUTPUT.is_dir(), reason="main checkout output/ not available")
-def test_mm_opacity_census_mirror_changes_only_p2_1_to_2_slot_4_across_real_exports():
-    roots = sorted(header.parent.parent for header in _corpus_headers(MAIN_OUTPUT))
-    paths = [path for root in roots for path in sorted((root / "assets").glob("*/*.json"))]
-    if not paths:
+def test_mm_opacity_census_mirror_changes_only_expected_slots_across_real_exports():
+    original_roots = sorted(header.parent.parent for header in _corpus_headers(MAIN_OUTPUT))
+    original_paths = [path for root in original_roots for path in sorted((root / "assets").glob("*/*.json"))]
+    if not original_paths:
         pytest.skip("no real exports under output/")
-    stats, changed = _census(paths)
+    stats, stock_changed, _ = _census(original_paths)
     assert stats["one_to_two"] >= 1
-    assert changed == {(True, 4)}
+    assert stats["shimmer"] == stats["sparkle"] == 0
+    assert stock_changed == {(P2_1_TO_2_FINGERPRINT, 4)}
+
+    texture_roots = sorted(header.parent.parent for header in TEXTURE_FIXTURE.rglob("assets/header.json"))
+    texture_paths = [path for root in texture_roots for path in sorted((root / "assets").glob("*/*.json"))]
+    incremental_stats, _, extension_changed = _census([*original_paths, *texture_paths])
+    assert incremental_stats["shimmer"] == incremental_stats["sparkle"] == 0
+    assert extension_changed == {
+        (ALPHA_DSK_6_TO_7_FINGERPRINT, 3),
+        (ALPHA_DSK_7_TO_8_FINGERPRINT, 4),
+        (ALPHA_DSK_7_TO_8_FINGERPRINT, 8),
+    }
 
 
 @pytest.mark.skipif(not SOURCE_DECK.is_file(), reason="P2 source deck (Minimal Alpha_DSK.key) not available")
