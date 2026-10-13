@@ -1352,7 +1352,8 @@ def score_curve(raf: list[dict[str, Any]], min_frames: int = MIN_MID_FRAMES) -> 
     """Every rAF with a running transition animation has exactly two, one per leaf, with finite start, currentTime,
     value and a positive duration; one start time; |in + out - 1| and |in - ease-in-out(ct / T)| within tolerance.
     rAFs where both are still pending (running, ct 0, no start time yet, as `anim_problem` admits) carry no timing and
-    are not curve samples, but only when `pending` confirms their initial values and effective opacities."""
+    are not curve samples, but only before any timed sample and when `pending` confirms their initial values and effective
+    opacities."""
     both, problems = [], []
     for r in raf:
         for a in r.get("anims") or []:
@@ -1366,8 +1367,8 @@ def score_curve(raf: list[dict[str, Any]], min_frames: int = MIN_MID_FRAMES) -> 
             problems.append(f"rAF at {r.get('t')}: animations {[a.get('leaf') for a in anims]} (need one per leaf)")
             continue
         if all(a.get("start") is None and a.get("ct") == 0 for a in anims):
-            if not pending(r):
-                problems.append(f"rAF at {r.get('t')}: pending animations off their initial values (eff {r.get('eff')})")
+            if both or not pending(r):
+                problems.append(f"rAF at {r.get('t')}: pending animations after timed samples or off their initial values (eff {r.get('eff')})")
             continue
         if not all(number(a.get(k)) for a in anims for k in ("start", "ct", "dur", "value")) or not all(a["dur"] > 0 for a in anims):
             problems.append(f"rAF at {r.get('t')}: malformed animation record")
