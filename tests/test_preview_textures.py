@@ -171,7 +171,7 @@ def test_json_hits_flag_a_missized_leaf_but_not_a_scaled_movie_frame(tmp_path):
     before = _snapshot(tmp_path)
     record, lines = _repair(tmp_path, slides, player="0" * 64)
     assert record == {"version": 1, "playerDigest": "0" * 64, "skipped": "unsupported player", "repaired": [], "pdfs": []}
-    assert lines == [] and _snapshot(tmp_path) == before
+    assert lines == ["Texture check skipped: unsupported player"] and _snapshot(tmp_path) == before
 
 
 def _d1_slides():
@@ -506,8 +506,11 @@ def test_detector_finds_nothing_on_consistent_exports(relative):
     root = FIXTURES / relative
     if not root.is_dir():
         pytest.skip(f"{relative} not available")
-    slides = pt._load(root, _header_slides(root))
-    assert pt._detect(slides, pt._Renderer()) == []
+    slides = _header_slides(root)
+    assert pt._detect(pt._load(root, slides), pt._Renderer()) == []
+    record, lines = _repair(root, slides)
+    assert record["repaired"] == [] and record["pdfs"] == []
+    assert lines == ["Checked textures: none mis-mapped"]
 
 
 D2_S2 = ("636833147196CC7D947490110BCD3542", "E606C252A387C4E3EAAB06B7C19B5A46")

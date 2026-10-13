@@ -875,11 +875,13 @@ def repair_textures(
     manifest.textureRepair. Raises PreviewError on refusal or a failed postcondition."""
     record: dict[str, Any] = {"version": TEXTURE_REPAIR_VERSION, "playerDigest": player_digest}
     if player_digest not in SUPPORTED_PLAYERS:
+        log("Texture check skipped: unsupported player")
         return record | {"skipped": "unsupported player", "repaired": [], "pdfs": []}
     loaded = _load(export_root, slides)
     renderer = _Renderer()
     hits = _detect(loaded, renderer)
     if not hits:
+        log("Checked textures: none mis-mapped")
         return record | {"repaired": [], "pdfs": []}
     with tempfile.TemporaryDirectory(prefix="obed-texture-repair-") as scratch:
         fixes, refused = _plan(loaded, hits, renderer, Path(scratch))
