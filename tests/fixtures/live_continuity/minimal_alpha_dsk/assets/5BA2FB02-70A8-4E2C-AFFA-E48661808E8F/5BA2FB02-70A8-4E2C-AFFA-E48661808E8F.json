@@ -19,6 +19,15 @@
    },
    "width": 1282,
    "height": 1080
+  },
+  "SANITIZED-TEXTURE-0": {
+   "type": "texture",
+   "index": 1,
+   "url": {
+    "native": "assets/5BA2FB02-70A8-4E2C-AFFA-E48661808E8F.pdf"
+   },
+   "width": 476,
+   "height": 271
   }
  },
  "events": [

@@ -11643,3 +11643,174 @@ def test_a_goto_execute_record_is_this_calls_or_none(tmp_path: Path) -> None:
     fresh = dict(older, ts=150.0, autoPlayFired=False)
     log.write_text(json.dumps(older) + "\n" + json.dumps(fresh) + "\n")
     assert probe.wait_for_execute_record(log, operation="goTo", slide=3, since=150.0, now=clock.now, sleep=clock.sleep) == fresh
+
+
+def _feed_live() -> dict[str, Any]:
+    return {
+        "mode": "continuous", "usableContext": True, "boundTextures": True,
+        "interval": {"start": 500.0, "end": 2000.0}, "advancing": True,
+        "continuousCoverage": True, "maxInterFeedGapMs": 32.0, "maxInterFeedGapLimitMs": 50.0,
+        "reads": [
+            {"progress": progress, "patchInside": True, "coveredByLaterDraw": False,
+             "kind": "alpha", "dVideo": 4.0, "dPoster": 20.0}
+            for progress in probe.mm_feed_instrument.READ_PROGRESS
+        ],
+    }
+
+
+def _hold_frame(mode: str = "departure") -> dict[str, Any]:
+    record = {
+        "mode": mode, "usableContext": True, "boundTextures": True,
+        "interval": {"start": 500.0, "end": 2000.0}, "lastPresentedBeforeDeparture": 42,
+        "lastUploadedFrame": 41, "successfulFeed": True, "advancedDecoder": True,
+        "reuploadAfterStandDown": False,
+        "reads": [{"phase": phase, "bestFrame": 42 if mode == "departure" else 41,
+                   "matchMargin": 8.0, "requiredMargin": 4.0} for phase in ("first", "middle", "last")],
+    }
+    return record
+
+
+@pytest.mark.parametrize(("mutate", "expected"), [
+    (lambda r: None, True),
+    (lambda r: r["reads"][1].update(dVideo=12.0), False),
+    (lambda r: r["reads"][1].update(dPoster=2.0), None),
+])
+def test_feed_live_pass_fail_inconclusive(mutate: Any, expected: bool | None) -> None:
+    record = _feed_live()
+    mutate(record)
+    assert probe.score_feed_live(record)["verdict"] is expected
+
+
+@pytest.mark.parametrize(("rows", "expected"), [
+    ([{"visible": True, "intersectsCanvas": True, "opacityProduct": 0.0}], True),
+    ([{"visible": True, "intersectsCanvas": True, "opacityProduct": 1.0}], False),
+    ([], None),
+])
+def test_no_rider_above_canvas_pass_fail_inconclusive(rows: list[dict[str, Any]], expected: bool | None) -> None:
+    assert probe.score_no_rider_above_canvas({"riders": rows})["verdict"] is expected
+
+
+@pytest.mark.parametrize(("spread", "slope", "expected"), [(30.0, .39, True), (30.0, .8, False), (20.0, .39, None)])
+def test_labels_over_feed_pass_fail_inconclusive(spread: float, slope: float, expected: bool | None) -> None:
+    record = {"labels": [{"opacity": .61, "spread": spread, "slope": slope}]}
+    assert probe.score_labels_over_feed(record)["verdict"] is expected
+
+
+@pytest.mark.parametrize(("mutate", "expected"), [
+    (lambda r: None, True),
+    (lambda r: r["reads"][-1].update(bestFrame=0), False),
+    (lambda r: r["reads"][-1].update(matchMargin=1.0), None),
+    (lambda r: r.update(usableContext=False), None),
+])
+def test_hold_frame_pass_fail_inconclusive(mutate: Any, expected: bool | None) -> None:
+    record = _hold_frame()
+    mutate(record)
+    assert probe.score_hold_frame(record)["verdict"] is expected
+
+
+def _poster_hold(mode: str = "departure") -> dict[str, Any]:
+    return {"mode": mode, "pauseTime": 1.0, "settleTime": 2.5, "pauseCurrentTime": 5.0,
+            "settleCurrentTime": 5.0, "pauseFrame": 42, "firstAfterFrame": 43, "seeked": False,
+            "resumedFromZero": False, "lastUploadedFrame": 41}
+
+
+@pytest.mark.parametrize(("mutate", "expected"), [
+    (lambda r: None, True),
+    (lambda r: r.update(firstAfterFrame=44), False),
+    (lambda r: r.pop("pauseFrame"), None),
+])
+def test_departure_poster_hold_pass_fail_inconclusive(mutate: Any, expected: bool | None) -> None:
+    record = _poster_hold()
+    mutate(record)
+    assert probe.score_poster_hold(record)["verdict"] is expected
+
+
+def test_post_feed_stand_down_reports_resumption_discontinuity_without_claiming_held_plus_one() -> None:
+    record = _poster_hold("standDown")
+    scored = probe.score_poster_hold(record)
+    assert scored["verdict"] is True
+    assert scored["resumptionDiscontinuity"] == 1
+    assert scored["exactHeldPlusOne"] is False
+
+
+@pytest.mark.parametrize(("reads", "expected"), [
+    ([{"artworkAbove": True}], True), ([{"artworkAbove": False}], False), ([], None),
+])
+def test_artwork_above_pass_fail_inconclusive(reads: list[dict[str, Any]], expected: bool | None) -> None:
+    assert probe.score_artwork_above({"reads": reads})["verdict"] is expected
+
+
+def test_gl_interval_exempts_only_the_hidden_move_rows() -> None:
+    rows = moving_boundary_samples()
+    moving = [row for row in rows if row["playerState"] == "Playing"]
+    for row in moving:
+        row["videos"][0]["footprintOwner"] = None
+    interval = {"start": moving[0]["t"], "end": moving[-1]["t"]}
+    assert probe.score_continuity(
+        rows, ASSET, 8, SRC_RECT, DST_RECT, True, transition_scene=7, paint=False, gl_interval=interval,
+    )["verdict"] is True
+    rows[0]["videos"][0]["rect"] = dict(DST_RECT)
+    assert probe.score_continuity(
+        rows, ASSET, 8, SRC_RECT, DST_RECT, True, transition_scene=7, paint=False, gl_interval=interval,
+    )["verdict"] is False
+
+
+def test_feed_off_can_hold_exactly_but_still_reds_an_explicit_continuous_expectation() -> None:
+    hold = probe.score_hold_frame(_hold_frame())
+    feed = _feed_live()
+    feed["mode"] = "once"
+    assert hold["verdict"] is True
+    assert probe.score_feed_live(feed, continuous_expected=True)["verdict"] is False
+
+
+def test_gl_interval_splits_paint_without_waiving_a_pre_move_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    rows = _v2(moving_boundary_samples())
+    moving = [row for row in rows if row["playerState"] == "Playing"]
+    intervals: list[tuple[float, float]] = []
+
+    def score_paint(_rows: Any, _element_id: Any, _asset: str, **kwargs: Any) -> dict[str, Any]:
+        intervals.append((kwargs["start"], kwargs["end"]))
+        status = "fail" if kwargs["end"] < moving[0]["t"] else "ok"
+        return {"status": status, "verdict": status == "ok", "reasons": ["pre"] if status == "fail" else [],
+                "longestRun": 1 if status == "fail" else 0}
+
+    monkeypatch.setattr(probe.paint_instrument, "score_paint", score_paint)
+    result = probe.score_continuity(
+        rows, ASSET, 8, SRC_RECT, DST_RECT, True, transition_scene=7,
+        gl_interval={"start": moving[0]["t"], "end": moving[-1]["t"]},
+    )
+    assert result["verdict"] is False
+    assert len(intervals) == 2
+    assert all(end < moving[0]["t"] or start > moving[-1]["t"] for start, end in intervals)
+
+
+def test_feed_gate_registrations_are_data_and_run_gates_names_every_control() -> None:
+    expected = {
+        "feed-on", "feed-off", "attach-once", "hold-upload-killed", "ordinal", "after-feed",
+        "from-only-crossfade", "from-only-single", "overlay-ride", "settle-on-stage",
+        "no-pause", "mm-opacity-off",
+    }
+    assert set(probe.MM_FEED_GATE_EXPECTATIONS) == expected
+    text = (REPO / "scripts" / "run_gates.sh").read_text()
+    block = text.split("MM_FEED_ARMS=(", 1)[1].split("\n)", 1)[0]
+    for label in expected - {"feed-on", "feed-off", "attach-once", "from-only-crossfade", "from-only-single"}:
+        assert f" {label} " in block
+    assert all(block.count(f" feed-on-{viewport} ") == 3 for viewport in ("2560", "1600", "1920"))
+    assert all(f" feed-off-{dwell}s " in block for dwell in (2, 5, 12))
+    assert block.count(" attach-once ") == 2
+    assert "--feed-variant from-only" in block
+    assert "strip-bridge14-movie2 --strip bridge@14:movie2" in block
+    assert probe.MM_FEED_STRIP_EXPECTATIONS[(
+        probe.ALPHA_DSK_PLAN_SHA256, "strip:bridge@14:movie2", "off",
+    )] == ("b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry",)
+    assert probe.MM_FEED_READ_EXPECTATIONS[("D7", "crossfade")] == {0.25: True, 0.5: False, 0.75: False}
+    assert probe.MM_FEED_READ_EXPECTATIONS[("Alpha_DSK", "first-crossfade")] == {0.5: False, 0.75: True}
+
+
+def test_feed_control_cli_registers_both_tampers_and_kill_switch() -> None:
+    after = probe.parse_args(["--feed-tamper", "after-feed", "--skip-arms", "B,C,V,Voff,attach"])
+    killed = probe.parse_args(["--hold-upload-kill-switch", "--mm-feed", "off", "--feed-dwell", "12"])
+    variant = probe.parse_args(["--feed-variant", "from-only", "--mm-opacity", "off"])
+    assert after.feed_tamper == "after-feed"
+    assert killed.hold_upload_kill_switch is True and killed.mm_feed == "off" and killed.feed_dwell == 12
+    assert variant.feed_variant == "from-only" and variant.mm_opacity == "off"

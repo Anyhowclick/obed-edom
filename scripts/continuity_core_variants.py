@@ -21,13 +21,26 @@ if str(REPO / "src") not in sys.path:
 
 from obed_edom.live_continuity_js import PRESERVE_CORE_JS  # noqa: E402
 
-VARIANTS: tuple[str, ...] = ("stash-any", "wrong-instance", "fifo-reuse", "linear-bridge", "no-pin-hold", "no-gl-clock")
+VARIANTS: tuple[str, ...] = (
+    "stash-any",
+    "wrong-instance",
+    "fifo-reuse",
+    "linear-bridge",
+    "no-pin-hold",
+    "no-gl-clock",
+    "overlay-ride",
+    "settle-on-stage",
+    "no-pause",
+)
 
 _POOL_PLANNED_ONLY = "    if (!armedPool && !poolable(v)) return;\n"
 _PICK_SRC_ONLY = "      if (c === el || !isCarrySource(c, entry)) return;\n"
 _PICK_SAME_ASSET = "      if (c === el || movieKeyFor(c, c.currentSrc || c.src || '') !== entry.movieKey) return;\n"
 _PICK_VERDICT = "    const reason = found.length === 0 ? 'absent'\n"
 _BRIDGE_PROGRESS = "const progress = easeInEaseOut(bridgeElapsedMs(v, motion) / (1000 * boundary.durationSeconds));"
+_HIDDEN_BRIDGE = "    }, 'keepThroughBridge', !!boundary.underArtwork);\n"
+_SETTLE_REHOME = "    if (bridge && !entry.underArtwork) {\n"
+_POSTER_PAUSE = "    if (boundary.underArtwork) try { v.pause(); } catch (e) {}\n"
 
 _TRANSFORMS: dict[str, tuple[tuple[str, str], ...]] = {
     # Pool every decoder: neither the plan-asset filter nor the planned-instance filter.
@@ -60,6 +73,9 @@ _TRANSFORMS: dict[str, tuple[tuple[str, str], ...]] = {
     # Keep the requestAnimFrame hook but never stamp a GL loop start: every bridge takes the fallback, today's
     # `performance.now()` clock after the GL_CLOCK_WAIT_MS hold. The D1 carry-cover red.
     "no-gl-clock": (("    departure.gl = {date: Date.now(), perf: performance.now()};\n", ""),),
+    "overlay-ride": ((_HIDDEN_BRIDGE, "    }, 'keepThroughBridge', false);\n"),),
+    "settle-on-stage": ((_SETTLE_REHOME, "    if (bridge) {\n"),),
+    "no-pause": ((_POSTER_PAUSE, ""),),
 }
 
 

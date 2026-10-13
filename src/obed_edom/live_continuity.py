@@ -709,6 +709,9 @@ class MovieContinuity:
     """The source instance's loop setting, which a carried decoder keeps."""
     code: str | None = None
     """The refusal's code (`overlap`, `R1`, `R1b`, `R2`, `R4`, `R7`, `R8`, `R9`, `R10`, `R11`) when `refusal` is set."""
+    under_artwork: bool = False
+    feed: dict[str, Any] | None = None
+    feed_reason: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         result = {
@@ -725,6 +728,10 @@ class MovieContinuity:
         if self.gl_replay is not None or self.gl_replay_reason is not None:
             result["glReplay"] = self.gl_replay is not None
             result["glReplayReason"] = self.gl_replay_reason
+        if self.under_artwork:
+            result["underArtwork"] = True
+        if self.feed is not None:
+            result["feed"] = self.feed
         return result
 
 
@@ -760,6 +767,8 @@ class ContinuityPlan:
     loop_instances: dict[int, dict[str, list[dict[str, float]]]] = field(default_factory=dict)
     """The looping subset of `slide_instances`, same shape and order. Not in `as_dict()` or
     `to_runtime()`: each runtime entry carries its own `loop`."""
+    artwork_above: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
+    feed_draws: dict[int, dict[str, Any]] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -861,13 +870,18 @@ def _runtime_entry(
         return Unsupported(f"{movie.action} of {where} does not name its destination instance")
     if movie.refusal is not None:
         return _gl_replay_entry(plan, boundary, movie, {**base, "dst": dst, "loop": movie.loop})
+    carry = {"dst": dst, "loop": movie.loop}
+    if movie.under_artwork:
+        carry["underArtwork"] = True
+        if movie.feed is not None:
+            carry["feed"] = movie.feed
     if movie.action == "pin":
-        return {**base, "action": "pin", "dst": dst, "loop": movie.loop}
+        return {**base, "action": "pin", **carry}
     if movie.action == "bridge":
         if not _positive_duration(boundary.transition_duration):
             return Unsupported("bridge transition has no finite positive export duration")
         return {
-            **base, "action": "bridge", "dst": dst, "loop": movie.loop,
+            **base, "action": "bridge", **carry,
             "durationSeconds": boundary.transition_duration,
         }
     return Unsupported(f"unknown action '{movie.action}' for {where}")
@@ -1211,6 +1225,7 @@ def _overlap_refusal(
     if instance.object_id is None:
         raise _Refuse(f"movie '{asset}' on slide {slide_name} has no object id")
     drawn = False
+    overlap: tuple[str, str] | None = None
     for event in events:
         slots = _draw_slots(event, slide_name)
         movie_slot = _movie_slot_index(slots, instance.object_id, slide_name)
@@ -1231,14 +1246,64 @@ def _overlap_refusal(
                     f"slide (player index {to_player_index}, draw slot {index})"
                 )
             state = _object_state(children[0], where, slide_name)
-            if _overlaps(_state_rect(state, where, slide_name), instance.rect):
-                return "overlap", (
+            if overlap is None and _overlaps(_state_rect(state, where, slide_name), instance.rect):
+                overlap = "overlap", (
                     f"later-authored artwork overlaps the carried '{asset}' on the destination "
                     f"slide (player index {to_player_index}, draw slot {index})"
                 )
     if not drawn:
         raise _Refuse(f"movie '{asset}' has no draw slot on slide {slide_name}")
-    return None
+    return overlap
+
+
+def _settles_into_dom(events: list[Any]) -> bool:
+    if len(events) != 2 or not isinstance(events[0], dict) or events[0].get("automaticPlay") is not True:
+        return False
+
+    def measured(effects: Any) -> bool:
+        if not isinstance(effects, list) or not effects:
+            return False
+        for effect in effects:
+            if not isinstance(effect, dict) or effect.get("name") not in {_MOVIE_START_BUILD, _RENDER_MOVIE_BUILD}:
+                return False
+            nested = effect.get("effects")
+            if nested not in (None, []) and not measured(nested):
+                return False
+        return True
+
+    return measured(events[0].get("effects"))
+
+
+def _artwork_above_facts(
+    events: list[Any], instance: "_MovieInstance", asset: str, slide_name: str
+) -> list[dict[str, Any]]:
+    if instance.object_id is None:
+        return []
+    found: list[dict[str, Any]] = []
+    seen: set[tuple[int, float, float, float, float]] = set()
+    for event in events:
+        slots = _draw_slots(event, slide_name)
+        movie_slot = _movie_slot_index(slots, instance.object_id, slide_name)
+        if movie_slot is None:
+            continue
+        for index in range(movie_slot + 1, len(slots)):
+            children = slots[index]["layers"]
+            if len(children) != 1 or not isinstance(children[0], dict):
+                continue
+            try:
+                rect = _state_rect(children[0]["initialState"], f"draw slot {index}", slide_name)
+            except (KeyError, _Refuse):
+                continue
+            if not _overlaps(rect, instance.rect):
+                continue
+            key = (index, rect.x, rect.y, rect.w, rect.h)
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append(
+                {"objectId": instance.object_id, "asset": asset, "slot": index, "rect": rect.as_dict()}
+            )
+    return found
 
 
 def _asset_url(assets_table: dict[str, Any], asset_id: str) -> str:
@@ -1552,11 +1617,7 @@ def _gl_replay_attempt(
     return replace(movie, gl_replay=result, gl_replay_reason=None, gl_replay_slot=slot)
 
 
-def _bridge_slot_chain(transition: dict[str, Any], src: "_MovieInstance", slide_name: str) -> list[dict[str, Any]]:
-    """The carried movie's layer chain in the transition: the one slot whose top-level layer starts
-    at the source movie layer's rect within `_GEOMETRY_TOLERANCE`. The transition's layers carry no
-    `objectID`, and a slide whose builds add objects draws fewer slots on its earlier events, so no
-    draw order indexes the slot reliably; Keynote copies the movie layer's frame onto the slot."""
+def _bridge_slot(transition: dict[str, Any], src: "_MovieInstance", slide_name: str) -> dict[str, Any]:
     if src.layer_rect is None:
         raise _Refuse("the carried movie has no readable layer rect")
     base_layer = transition.get("baseLayer")
@@ -1583,7 +1644,184 @@ def _bridge_slot_chain(transition: dict[str, Any], src: "_MovieInstance", slide_
         raise _Refuse("no transition slot starts at the carried movie's rect")
     if len(matches) > 1:
         raise _Refuse(f"transition slots {matches} all start at the carried movie's rect")
-    return _effect_chain(slots[matches[0]], matches[0])
+    return slots[matches[0]]
+
+
+def _bridge_slot_chain(transition: dict[str, Any], src: "_MovieInstance", slide_name: str) -> list[dict[str, Any]]:
+    """The carried movie's layer chain in the transition: the one slot whose top-level layer starts
+    at the source movie layer's rect within `_GEOMETRY_TOLERANCE`. The transition's layers carry no
+    `objectID`, and a slide whose builds add objects draws fewer slots on its earlier events, so no
+    draw order indexes the slot reliably; Keynote copies the movie layer's frame onto the slot."""
+    slot = _bridge_slot(transition, src, slide_name)
+    slots = transition["baseLayer"]["layers"]
+    index = next(index for index, candidate in enumerate(slots) if candidate is slot)
+    return _effect_chain(slot, index)
+
+
+def _layer_offset(layer: dict[str, Any], slide_name: str) -> tuple[float, float]:
+    state = _object_state(layer, "transition layer", slide_name)
+    width = _number(state, "width", where="transition layer", slide_name=slide_name)
+    height = _number(state, "height", where="transition layer", slide_name=slide_name)
+    x = _number(state, "position", "pointX", where="transition layer", slide_name=slide_name)
+    y = _number(state, "position", "pointY", where="transition layer", slide_name=slide_name)
+    ax = _number(state, "anchorPoint", "pointX", where="transition layer", slide_name=slide_name)
+    ay = _number(state, "anchorPoint", "pointY", where="transition layer", slide_name=slide_name)
+    return x - ax * width, y - ay * height
+
+
+def _transition_leaves(
+    layer: Any, slide_name: str, origin: tuple[float, float] = (0.0, 0.0)
+) -> list[tuple[dict[str, Any], tuple[float, float]]]:
+    if not isinstance(layer, dict):
+        raise _Refuse("the transition has an unreadable layer")
+    ox, oy = _layer_offset(layer, slide_name)
+    here = origin[0] + ox, origin[1] + oy
+    texture = layer.get("texture")
+    if isinstance(texture, str) and texture:
+        state = _object_state(layer, "transition leaf", slide_name)
+        width = _number(state, "width", where="transition leaf", slide_name=slide_name)
+        height = _number(state, "height", where="transition leaf", slide_name=slide_name)
+        return [(layer, (here[0] + width / 2, here[1] + height / 2))]
+    children = layer.get("layers")
+    if not isinstance(children, list):
+        raise _Refuse("the transition has an unreadable layer list")
+    return [leaf for child in children for leaf in _transition_leaves(child, slide_name, here)]
+
+
+def _contents_to(leaf: dict[str, Any]) -> str | None:
+    found = [
+        animation.get("to", {}).get("texture")
+        for animation in _effect_leaves(leaf)
+        if animation.get("property") == "contents"
+    ]
+    if len(found) > 1 or (found and (not isinstance(found[0], str) or not found[0])):
+        raise _Refuse("the movie leaf has an unreadable contents animation")
+    return found[0] if found else None
+
+
+def _texture_size(assets: dict[str, Any], texture: str) -> list[int]:
+    entry = assets.get(texture)
+    if not isinstance(entry, dict):
+        raise _Refuse(f"texture {texture!r} is absent from the slide asset table")
+    values = entry.get("width"), entry.get("height")
+    if any(
+        isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+        for value in values
+    ):
+        raise _Refuse(f"texture {texture!r} has no readable size")
+    width, height = (round(float(value)) for value in values)
+    if width <= 0 or height <= 0:
+        raise _Refuse(f"texture {texture!r} has a non-positive size")
+    return [width, height]
+
+
+def _label_box_opacity(leaf: dict[str, Any]) -> float | None:
+    if (leaf.get("initialState") or {}).get("hidden") is True:
+        return None
+    values = []
+    for animation in _effect_leaves(leaf):
+        if animation.get("property") != "opacity":
+            continue
+        before = (animation.get("from") or {}).get("scalar")
+        after = (animation.get("to") or {}).get("scalar")
+        if (
+            isinstance(before, (int, float)) and not isinstance(before, bool)
+            and isinstance(after, (int, float)) and not isinstance(after, bool)
+            and math.isfinite(before) and before == after and before < 1
+        ):
+            values.append(float(before))
+    return values[0] if len(values) == 1 else None
+
+
+def _feed_table(
+    transition: dict[str, Any] | None, assets: dict[str, Any], slide_name: str
+) -> tuple[list[dict[str, Any]], int]:
+    base_layer = transition.get("baseLayer") if isinstance(transition, dict) else None
+    if not isinstance(base_layer, dict):
+        raise _Refuse("the transition has no readable base layer")
+    rows: list[dict[str, Any]] = []
+    upload = 0
+    for draw, (leaf, centre) in enumerate(_transition_leaves(base_layer, slide_name), start=1):
+        texture = leaf["texture"]
+        upload += 1
+        row: dict[str, Any] = {
+            "draw": draw,
+            "leaf": leaf,
+            "centre": centre,
+            "from": {"upload": upload, "texture": texture},
+            "layerSize": [
+                _number(leaf["initialState"], "width", where="transition leaf", slide_name=slide_name),
+                _number(leaf["initialState"], "height", where="transition leaf", slide_name=slide_name),
+            ],
+            "labelBoxOpacity": _label_box_opacity(leaf),
+        }
+        to_texture = _contents_to(leaf)
+        if to_texture is not None:
+            upload += 1
+            row["to"] = {"upload": upload, "texture": to_texture}
+        else:
+            row["to"] = None
+        rows.append(row)
+    if not rows:
+        raise _Refuse("the transition has no textured leaves")
+    return rows, upload
+
+
+def _unit_scale_leaf(leaf: dict[str, Any]) -> bool:
+    if (leaf.get("initialState") or {}).get("scale") != 1:
+        return False
+    for animation in _effect_leaves(leaf):
+        if animation.get("property") not in {"transform.scale.x", "transform.scale.y"}:
+            continue
+        for side in ("from", "to"):
+            value = (animation.get(side) or {}).get("scalar")
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value != 1:
+                return False
+    return True
+
+
+def _feed_binding(
+    transition: dict[str, Any] | None,
+    source: "_Slide",
+    src: "_MovieInstance",
+) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        if not isinstance(transition, dict):
+            raise _Refuse("no transition effect")
+        slot = _bridge_slot(transition, src, source.uuid)
+        leaves = _transition_leaves(slot, source.uuid)
+        if len(leaves) != 1:
+            raise _Refuse(f"movie slot has {len(leaves)} textured leaves")
+        leaf = leaves[0][0]
+        rows, _upload_count = _feed_table(transition, source.assets, source.uuid)
+        matches = [row for row in rows if row["leaf"] is leaf]
+        if len(matches) != 1:
+            raise _Refuse(f"movie leaf matches {len(matches)} transition draws")
+        row = matches[0]
+        if src.layer_rect is None or math.dist(row["centre"], src.layer_rect.centre()) > 2:
+            raise _Refuse("movie leaf centre differs from the source movie centre by more than 2 px")
+        if row["to"] is None and not _unit_scale_leaf(leaf):
+            return None, "hand-back leaf"
+        from_texture = row["from"]["texture"]
+        to_texture = row["to"]["texture"] if row["to"] is not None else None
+        return {
+            "draw": row["draw"],
+            "drawCount": len(rows),
+            "from": {
+                "upload": row["from"]["upload"],
+                "size": _texture_size(source.assets, from_texture),
+            },
+            "to": (
+                {
+                    "upload": row["to"]["upload"],
+                    "size": _texture_size(source.assets, to_texture),
+                }
+                if to_texture is not None
+                else None
+            ),
+        }, None
+    except _Refuse as exc:
+        return None, str(exc)
 
 
 def _bridge_timing_refusal(
@@ -1695,6 +1933,7 @@ class _Slide:
     instances: dict[str, list[_MovieInstance]]
     unmeasured: dict[str, list[tuple[str, str]]]
     """Instances outside the measured vocabulary, as (objectID, reason) per asset: never carried."""
+    assets: dict[str, Any] = field(default_factory=dict)
 
 
 def _carry(asset: str, src: _MovieInstance, dst: _MovieInstance) -> MovieContinuity:
@@ -1756,6 +1995,71 @@ def _carry_refusal(
     )
 
 
+def _rects_stay_separated(first: MovieContinuity, second: MovieContinuity) -> bool:
+    if first.src_rect is None or first.dst_rect is None or second.src_rect is None or second.dst_rect is None:
+        return False
+
+    def ordered(a: Rect, b: Rect, axis: str) -> bool:
+        if axis == "x":
+            return a.x + a.w <= b.x + _OVERLAP_MIN_PX
+        return a.y + a.h <= b.y + _OVERLAP_MIN_PX
+
+    return any(
+        ordered(a_src, b_src, axis) and ordered(a_dst, b_dst, axis)
+        for axis in ("x", "y")
+        for a_src, b_src, a_dst, b_dst in (
+            (first.src_rect, second.src_rect, first.dst_rect, second.dst_rect),
+            (second.src_rect, first.src_rect, second.dst_rect, first.dst_rect),
+        )
+    )
+
+
+def _destination_slot(slide: _Slide, object_id: str | None) -> int:
+    if not object_id:
+        raise _Refuse("a crossing carry has no destination object id")
+    for event in slide.events:
+        index = _movie_slot_index(_draw_slots(event, slide.uuid), object_id, slide.uuid)
+        if index is not None:
+            return index
+    raise _Refuse(f"movie object {object_id} has no draw slot on slide {slide.uuid}")
+
+
+def _crossing_carries(
+    planned: list[tuple[MovieContinuity, _MovieInstance, _MovieInstance]], destination: _Slide, desc: str
+) -> list[tuple[MovieContinuity, _MovieInstance, _MovieInstance]]:
+    clean = [index for index, (movie, _src, _dst) in enumerate(planned) if movie.refusal is None]
+    crossing: list[tuple[int, int]] = []
+    for position, first_index in enumerate(clean):
+        for second_index in clean[position + 1:]:
+            if not _rects_stay_separated(planned[first_index][0], planned[second_index][0]):
+                crossing.append((first_index, second_index))
+    if not crossing:
+        return planned
+    if _settles_into_dom(destination.events):
+        partners: dict[int, list[str]] = {}
+        for first, second in crossing:
+            partners.setdefault(first, []).append(planned[second][0].asset)
+            partners.setdefault(second, []).append(planned[first][0].asset)
+        for index, assets in partners.items():
+            movie, src, dst = planned[index]
+            planned[index] = (
+                replace(movie, under_artwork=True, feed_reason=f"crosses {assets[0]!r}"),
+                src,
+                dst,
+            )
+        return planned
+    for first, second in crossing:
+        candidates = [index for index in (first, second) if planned[index][0].refusal is None]
+        if len(candidates) < 2:
+            continue
+        lower = min(candidates, key=lambda index: _destination_slot(destination, planned[index][0].dst_object_id))
+        other = second if lower == first else first
+        movie, src, dst = planned[lower]
+        reason = f"'{movie.asset}' crosses '{planned[other][0].asset}' at {desc}"
+        planned[lower] = (replace(movie, refusal=reason, code="overlap"), src, dst)
+    return planned
+
+
 def _magic_move_movies(
     source: _Slide,
     destination: _Slide,
@@ -1787,6 +2091,7 @@ def _magic_move_movies(
         for src, dst in pairs:
             carried.append((_carry(asset, src, dst), src, dst))
         movies.extend(_retire(asset, src) for src in outgoing if id(src) not in paired and src.object_id in held)
+    planned: list[tuple[MovieContinuity, _MovieInstance, _MovieInstance]] = []
     for movie, src, dst in carried:
         try:
             refusal = (
@@ -1795,6 +2100,9 @@ def _magic_move_movies(
             )
         except _Refuse as exc:
             refusal = ("R11", str(exc))
+        if refusal is not None and refusal[0] == "overlap" and _settles_into_dom(destination.events):
+            movie = replace(movie, under_artwork=True, feed_reason=refusal[1])
+            refusal = None
         if refusal is None and movie.action == "bridge":
             timing = _bridge_timing_refusal(transition, src, source.uuid, movie.asset, desc)
             refusal = ("R10", timing) if timing is not None else None
@@ -1811,8 +2119,17 @@ def _magic_move_movies(
                     source.events, src, source.uuid, destination.events,
                 )
                 gl_replay_used = movie.gl_replay is not None
-        movies.append(movie)
-    if sum(m.action == "bridge" and (m.refusal is None or m.gl_replay is not None) for m in movies) > 1:
+        planned.append((movie, src, dst))
+    planned = _crossing_carries(planned, destination, desc)
+    for index, (movie, src, dst) in enumerate(planned):
+        if movie.under_artwork and movie.refusal is None:
+            feed, reason = _feed_binding(transition, source, src)
+            planned[index] = (replace(movie, feed=feed, feed_reason=reason), src, dst)
+    movies.extend(movie for movie, _src, _dst in planned)
+    if sum(
+        m.action == "bridge" and not m.under_artwork and (m.refusal is None or m.gl_replay is not None)
+        for m in movies
+    ) > 1:
         raise _Refuse(f"more than one movie changes geometry at {desc}")
     return sorted(movies, key=lambda movie: movie.asset)
 
@@ -1847,6 +2164,74 @@ def _held_after(movies: list[MovieContinuity]) -> set[str]:
         if movie.action in ("pin", "bridge") and (movie.refusal is None or movie.gl_replay is not None)
         and movie.dst_object_id
     }
+
+
+def _instance_by_id(slide: _Slide, object_id: str | None) -> _MovieInstance | None:
+    return next(
+        (
+            instance
+            for instances in slide.instances.values()
+            for instance in instances
+            if instance.object_id == object_id
+        ),
+        None,
+    )
+
+
+def _probe_facts(
+    boundaries: list[SlideBoundary],
+    parsed: list[_Slide],
+    transitions: list[dict[str, Any] | None],
+    scene_index_by_player: dict[int, int],
+) -> tuple[dict[int, list[dict[str, Any]]], dict[int, dict[str, Any]]]:
+    artwork_above: dict[int, list[dict[str, Any]]] = {}
+    feed_draws: dict[int, dict[str, Any]] = {}
+    by_player = {slide.player_index: slide for slide in parsed}
+    for index, boundary in enumerate(boundaries):
+        if boundary.to_player_index is None:
+            continue
+        source = by_player[boundary.from_player_index]
+        destination = by_player[boundary.to_player_index]
+        under = [movie for movie in boundary.movies if movie.under_artwork and movie.refusal is None]
+        for movie in under:
+            instance = _instance_by_id(destination, movie.dst_object_id)
+            if instance is None:
+                continue
+            artwork_above.setdefault(destination.player_index, []).extend(
+                _artwork_above_facts(destination.events, instance, movie.asset, destination.uuid)
+            )
+        fed = [movie for movie in under if movie.feed is not None]
+        if not fed:
+            continue
+        rows, upload_count = _feed_table(transitions[index], source.assets, source.uuid)
+        object_ids = {
+            movie.feed["draw"]: movie.src_object_id
+            for movie in fed
+            if movie.feed is not None and movie.src_object_id is not None
+        }
+        feed_draws[scene_index_by_player[destination.player_index]] = {
+            "fromPlayer": source.player_index,
+            "toPlayer": destination.player_index,
+            "drawCount": len(rows),
+            "uploadCount": upload_count,
+            "draws": [
+                {
+                    "draw": row["draw"],
+                    "layerSize": row["layerSize"],
+                    "labelBoxOpacity": row["labelBoxOpacity"],
+                    **(
+                        {"objectId": object_ids[row["draw"]]}
+                        if row["draw"] in object_ids
+                        else {}
+                    ),
+                }
+                for row in rows
+            ],
+        }
+    return (
+        {player: facts for player, facts in artwork_above.items() if facts},
+        feed_draws,
+    )
 
 
 def derive_plan(
@@ -1890,7 +2275,17 @@ def derive_plan(
         scene_index_by_player[player_index] = cumulative
         cumulative += len(events)
         try:
-            parsed.append(_Slide(player_index, uuid, events, *_slide_movie_instances(events, assets_table, uuid)))
+            instances, unmeasured = _slide_movie_instances(events, assets_table, uuid)
+            parsed.append(
+                _Slide(
+                    player_index=player_index,
+                    uuid=uuid,
+                    events=events,
+                    instances=instances,
+                    unmeasured=unmeasured,
+                    assets=assets_table,
+                )
+            )
         except _Refuse as exc:
             return Unsupported(str(exc))
 
@@ -1951,6 +2346,10 @@ def derive_plan(
         )
         records.append(record_only)
 
+    try:
+        artwork_above, feed_draws = _probe_facts(boundaries, parsed, transitions, scene_index_by_player)
+    except _Refuse as exc:
+        return Unsupported(str(exc))
     plan = ContinuityPlan(
         canvas=canvas,
         scene_index_by_player=scene_index_by_player,
@@ -1967,6 +2366,8 @@ def derive_plan(
             for slide in parsed
             if any(instance.loop for found in slide.instances.values() for instance in found)
         },
+        artwork_above=artwork_above,
+        feed_draws=feed_draws,
     )
     movie_keys = _movie_keys(plan)
     return replace(

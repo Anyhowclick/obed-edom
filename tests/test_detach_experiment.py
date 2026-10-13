@@ -144,7 +144,11 @@ def test_served_sha_is_the_sha_of_exactly_the_variants_replacements(monkeypatch,
     applied = set(dx.VARIANT_INDICES[variant])
     for index, (before, after) in enumerate(live_runtime._MM_OPACITY_REPLACEMENTS):
         assert (after in served) is (index in applied)
-        assert (before in served) is (index not in applied)
+        if index == len(live_runtime._MM_OPACITY_REPLACEMENTS) - 1:
+            assert before not in served
+            assert live_runtime._CONTINUITY_TAKE_REPLACEMENT in served
+        else:
+            assert (before in served) is (index not in applied)
     assert dx.served_sha256(player, variant) == hashlib.sha256(served).hexdigest()
 
 

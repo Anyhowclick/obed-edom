@@ -1102,6 +1102,31 @@ def test_mmo_cef_arm_runs_every_probe_arm_per_gl_mode_with_the_logger(monkeypatc
         assert not c.get("record")
 
 
+def test_feed_arm_registers_continuous_and_qualification_only_once_sessions(monkeypatch):
+    calls = captured_sessions(monkeypatch, "feed")
+    assert [call["name"] for call in calls] == ["feed", "feed-off"]
+    assert calls[0]["mm_feed"] == "on" and not calls[0].get("mm_feed_qualify_once")
+    assert calls[1]["mm_feed"] == "off" and calls[1]["mm_feed_qualify_once"] is True
+
+
+def test_feed_gate_requires_continuous_green_and_feed_off_exact_hold_green_with_continuous_red() -> None:
+    spec_id = "b5to6:a->a:carry"
+    facts = {"verdicts": [{"id": spec_id, "underArtwork": True}]}
+    common = {"noRiderAboveCanvas": {"verdict": True}, "artworkAbove": {"verdict": True}}
+    run = {"sessions": [
+        {"session": "feed", "feedVerdicts": {spec_id: {"underArtwork": {
+            **common, "feedLive": {"verdict": True}, "labelsOverFeed": {"verdict": True},
+        }}}},
+        {"session": "feed-off", "feedVerdicts": {spec_id: {"underArtwork": {
+            **common, "feedLive": {"verdict": False}, "holdFrame": {"verdict": True},
+            "posterHold": {"verdict": True},
+        }}}},
+    ]}
+    assert q.feed_gates(run, facts)["feed"]["verdict"] == "PASS"
+    run["sessions"][1]["feedVerdicts"][spec_id]["underArtwork"]["holdFrame"]["verdict"] = None
+    assert q.feed_gates(run, facts)["feed"]["verdict"] == "FAIL"
+
+
 class FakeTransport:
     HASHES = ["#1", "#2", "#3", "#4", "#5", "#7", "#8"]
 

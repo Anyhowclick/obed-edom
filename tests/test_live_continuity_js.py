@@ -25,13 +25,13 @@ from obed_edom import live_continuity_js
 
 
 def test_continuity_version_is_pinned_int():
-    assert live_continuity_js.CONTINUITY_VERSION == 6
+    assert live_continuity_js.CONTINUITY_VERSION == 7
     assert isinstance(live_continuity_js.CONTINUITY_VERSION, int)
 
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "a9e1e66a2445d886ff500bfdc084e31a8f617e5ded2290098904931ae9a48be0"
+PINNED_CORE_SHA256 = "49574c942d10ba7cf6244cf773e6ffa6f1c21c2badb208677ff4b50e710d34cf"
 
 
 def test_js_sha256_hashes_the_core_bytes_and_matches_the_pinned_literal():
@@ -2317,7 +2317,7 @@ console.log(JSON.stringify({keys: Object.keys(S).sort(), version: S.version, inP
     assert result == {
         "keys": ["carried", "movieKeyOf", "note", "release", "setKeepWarm", "version"],
         "version": 1,
-        "inPage": 9,
+        "inPage": 10,
     }
 
 
@@ -3846,11 +3846,169 @@ def _run_chain(plan: dict, script: str, *, src: str = "https://host/untitled.mov
     return _run_full_core_in_node(plan=plan, stage=stage, script=prelude + script)
 
 
+_FEED = {"draw": 2, "drawCount": 4, "from": {"upload": 3, "size": [640, 360]}, "to": None}
+_UNDER_ARTWORK_BRIDGE_PLAN = {
+    "schema": 2,
+    "movies": _MOVIE_PLAN["movies"],
+    "boundaries": [
+        {
+            "atScene": 2,
+            "action": "bridge",
+            "movieKey": "movie1",
+            "durationSeconds": 1.5,
+            "loop": False,
+            "underArtwork": True,
+            "feed": _FEED,
+            "src": _inst("A1", _FOOTPRINT),
+            "dst": _inst("A2", _RECT_S3),
+        }
+    ],
+}
+
+
+def test_under_artwork_bridge_holds_hidden_then_rehomes_without_loading_the_stub():
+    result = _run_chain(_UNDER_ARTWORK_BRIDGE_PLAN, r"""
+const calls = [], ops = [];
+window.__OBED_MM_FEED__ = {once(objectId) { calls.push({objectId, paused: a.paused, t: a.currentTime}); return true; }};
+goToScene(0);
+const a = playing('A1');
+a.currentTime = 4.25;
+const rawPlay = a.play, rawPause = a.pause;
+a.play = function(){ ops.push(['play', this.currentTime]); return rawPlay.call(this); };
+a.pause = function(){ ops.push(['pause', this.currentTime]); return rawPause.call(this); };
+goToScene(1);
+a.pause();
+detach(a);
+const during = {paused: a.paused, opacity: a.style.opacity, inBody: a.parentNode === bodyEl, t: a.currentTime};
+tick();
+P.remountAll();
+const held = {paused: a.paused, plays: ops.filter(x => x[0] === 'play').length, t: a.currentTime};
+goToScene(2);
+const layer = {
+  __screenOrigin: {x: 0, y: 0}, __scale: 1, kids: [],
+  insertBefore(node, ref) { node.parentNode = this; node.__inStage = true; node.previousSibling = poster; this.kids.push(node); },
+  appendChild(node) { this.insertBefore(node, null); },
+  removeChild(node) { node.parentNode = null; node.__inStage = false; },
+};
+const R = window.__OBED_CONTINUITY__.boundaries[0].dst.rect;
+const poster = {id: 'poster', parentNode: layer, parentElement: layer, nextSibling: null,
+  getBoundingClientRect: () => ({left: R.x, top: R.y, width: R.w, height: R.h})};
+canvases.push(poster);
+const b = fresh('A2');
+b.parentNode = layer;
+moCallbacks.slice().forEach((cb) => cb([{addedNodes: [b], removedNodes: []}]));
+console.log(JSON.stringify({
+  feedKeys: Object.keys(P.feed).sort(), feedVersion: P.feed.version,
+  during, held, calls, ops, stubSrc: srcStore.get(b) || null,
+  landed: a.parentNode === layer && a.previousSibling === poster,
+  resumed: !a.paused, t: a.currentTime, opacity: a.style.opacity,
+  notes: notesOf('poster-hold'), resumes: notesOf('poster-resume'),
+}));
+""")
+    assert result["feedKeys"] == ["claim", "decoderFor", "note", "onStandDown", "version"]
+    assert result["feedVersion"] == 1
+    assert result["during"] == {"paused": True, "opacity": "0", "inBody": True, "t": 4.25}
+    assert result["held"] == {"paused": True, "plays": 1, "t": 4.25}
+    assert result["calls"] == [{"objectId": "A1", "paused": True, "t": 4.25}]
+    assert result["ops"][:3] == [["pause", 4.25], ["play", 4.25], ["pause", 4.25]]
+    assert result["ops"][-1] == ["play", 4.25]
+    assert result["stubSrc"] is None
+    assert result["landed"] and result["resumed"] and result["opacity"] == "1"
+    assert result["t"] == 4.25
+    assert result["notes"][0]["reason"] is None
+    assert result["resumes"] == [{"elId": result["notes"][0]["elId"], "t": 4.25, "sceneHash": "#2"}]
+
+
+def test_claim_keeps_the_hidden_decoder_playing_and_stand_down_pauses_without_reupload():
+    result = _run_chain(_UNDER_ARTWORK_BRIDGE_PLAN, r"""
+let once = 0, plays = 0;
+window.__OBED_MM_FEED__ = {once() { once += 1; return true; }};
+goToScene(0);
+const a = playing('A1');
+a.currentTime = 3.5;
+const rawPlay = a.play;
+a.play = function(){ plays += 1; return rawPlay.call(this); };
+const decoder = P.feed.decoderFor('A1') === a;
+const claimed = P.feed.claim('A1');
+goToScene(1);
+a.pause();
+detach(a);
+const riding = {paused: a.paused, opacity: a.style.opacity, once, plays};
+const stoodDown = P.feed.onStandDown('A1', 'ordinal');
+const reclaimed = P.feed.claim('A1');
+tick();
+P.remountAll();
+console.log(JSON.stringify({decoder, claimed, riding, stoodDown, reclaimed, paused: a.paused, once, plays,
+  holds: notesOf('poster-hold')}));
+""")
+    assert result["decoder"] and result["claimed"] and result["stoodDown"]
+    assert not result["reclaimed"]
+    assert result["riding"] == {"paused": False, "opacity": "0", "once": 0, "plays": 1}
+    assert result["paused"] and result["once"] == 0 and result["plays"] == 1
+    assert result["holds"][0]["reason"] == "ordinal"
+
+
+def test_feed_seam_is_absent_when_no_runtime_entry_has_feed():
+    result = _run_chain(_MOVIE_PLAN, "console.log(JSON.stringify({feed: P.feed || null}));")
+    assert result == {"feed": None}
+
+
+def test_overlay_bridge_hands_an_under_artwork_pin_to_the_hidden_ride():
+    first = {
+        "atScene": 2, "action": "bridge", "movieKey": "movie1", "durationSeconds": 1.5, "loop": False,
+        "src": _inst("A1", _FOOTPRINT), "dst": _inst("A2", _RECT_S3),
+    }
+    second = {
+        "atScene": 4, "action": "pin", "movieKey": "movie1", "loop": False,
+        "underArtwork": True, "feed": _FEED,
+        "src": _inst("A2", _RECT_S3), "dst": _inst("A3", _RECT_S3),
+    }
+    plan = {"schema": 2, "movies": _MOVIE_PLAN["movies"], "boundaries": [first, second]}
+    result = _run_chain(plan, r"""
+goToScene(0);
+const a = playing('A1');
+goToScene(1);
+detach(a);
+goToScene(2);
+const b = fresh('A2');
+b.parentNode = bodyEl;
+goToScene(3);
+detach(b);
+pump();
+const during = {bridged: !!a.__obedBridged34, hidden: a.style.opacity, paused: a.paused};
+goToScene(4);
+const layer = {
+  __screenOrigin: {x: 0, y: 0}, __scale: 1,
+  insertBefore(node) { node.parentNode = this; node.__inStage = true; node.previousSibling = poster; },
+  appendChild(node) { this.insertBefore(node); },
+  removeChild(node) { node.parentNode = null; node.__inStage = false; },
+};
+const poster = {id: 'poster', parentNode: layer, parentElement: layer, nextSibling: null,
+  getBoundingClientRect: () => ({left: 198, top: 797, width: 952, height: 268})};
+canvases.push(poster);
+const c = fresh('A3');
+c.parentNode = layer;
+moCallbacks.slice().forEach((cb) => cb([{addedNodes: [c], removedNodes: []}]));
+console.log(JSON.stringify({during, bridged: !!a.__obedBridged34, landed: a.parentNode === layer,
+  paused: a.paused, stubSrc: srcStore.get(c) || null,
+  holds: notesOf('pin-hold-start'), onceReason: notesOf('poster-hold')[0].reason}));
+""")
+    assert result == {
+        "during": {"bridged": True, "hidden": "0", "paused": True},
+        "bridged": False,
+        "landed": True,
+        "paused": False,
+        "stubSrc": None,
+        "holds": [{"elId": 1, "atScene": 4, "srcRect": _RECT_S3, "rect": _RECT_S3, "sceneHash": "#3"}],
+        "onceReason": "module-absent",
+    }
+
+
 def test_the_contract_decks_install():
     for name, plan in _CONTRACT.items():
         result = _run_chain(plan, "console.log(JSON.stringify({ready: !!P.ready, version: P.version}));",
                             src="https://host/" + plan["movies"]["movie1"]["assetKeys"][0])
-        assert result == {"ready": True, "version": 9}, name
+        assert result == {"ready": True, "version": 10}, name
 
 
 def test_pin_chain_facades_each_destination_onto_the_one_decoder_and_restamps_it():

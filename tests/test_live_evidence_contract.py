@@ -331,3 +331,61 @@ console.log(JSON.stringify({held: held, events: P.events, after: P.snapshot()}))
         contract.pool(core["held"], "held"), contract.pool(core["after"], "after"),
         contract.notes(core["events"], "events"), contract.notes(refused["events"], "events"), limit=20,
     ) == []
+
+
+def _mm_feed_report() -> dict[str, Any]:
+    return {
+        "kind": "mm-feed", "version": 1, "config": {}, "holds": [], "media": [], "errors": [], "module": None,
+        "tamper": None, "killedOnce": [{"objectId": "movie-a", "t": 3.0}],
+        "contexts": [{"serial": 1, "id": "0-canvas", "createdAt": 1.0, "lost": False}],
+        "frames": [{
+            "serial": 1, "n": 1, "t": 2.0, "draws": 1, "uploads": 2, "labels": [], "riders": [],
+            "glErrors": [], "module": None,
+            "rows": [{"objectId": "movie-a", "draw": 1, "t": 2.0, "quad": None, "patch": None,
+                      "mixFactor": .5, "decoder": None,
+                      "textures": [{"unit": 0, "ordinal": 1, "size": [640, 360], "video": False}, None]}],
+        }],
+    }
+
+
+def test_mm_feed_frame_and_poster_feed_note_producers_meet_the_contract() -> None:
+    assert contract.first_errors(contract.mm_feed_report(_mm_feed_report()), limit=20) == []
+    notes = [
+        {"kind": "poster-hold", "detail": {"elId": 3, "objectId": "movie-a", "t": 2.0, "reason": None}, "t": 2.0},
+        {"kind": "poster-resume", "detail": {"elId": 3, "t": 3.5}, "t": 3.5},
+        {"kind": "mm-feed-stand-down", "detail": {"objectId": "movie-a", "reason": "binding",
+                                                       "usableContext": True, "boundTextures": True}, "t": 4.0},
+    ]
+    assert contract.first_errors(contract.notes(notes, "notes", contract.MM_FEED_NOTE_KINDS, module=True), limit=20) == []
+
+
+@pytest.mark.parametrize(("mutate", "clause"), [
+    (lambda r: r["contexts"][0].pop("lost"), "mmFeed.context.lost:missing"),
+    (lambda r: r["frames"][0].update(t="late"), "mmFeed.frame.t"),
+    (lambda r: r["frames"][0]["rows"][0]["textures"][0].update(size=[640]), "mmFeed.texture.size"),
+])
+def test_mm_feed_contract_rejects_required_field_and_generation_breaks(mutate: Any, clause: str) -> None:
+    report = _mm_feed_report()
+    mutate(report)
+    assert clause in [problem.split(" at ")[0] for problem in contract.mm_feed_report(report)]
+
+
+def _feed_verdict_record() -> dict[str, Any]:
+    return {
+        "mode": "continuous", "usableContext": True, "boundTextures": True,
+        "interval": {"start": 1.0, "end": 2.0},
+        "feed": {"usableContext": True, "boundTextures": True, "reads": [{
+            "progress": .25, "patchInside": True, "coveredByLaterDraw": False,
+            "kind": "alpha", "dVideo": 2.0, "dPoster": 20.0,
+        }]},
+        "rider": {"riders": []}, "labels": {"labels": []}, "artwork": {"reads": []},
+    }
+
+
+def test_feed_verdict_contract_checks_applicable_nested_producer_generation() -> None:
+    record = _feed_verdict_record()
+    assert list(contract.feed_verdict_record(record)) == []
+    record["feed"]["reads"][0].pop("kind")
+    assert "feedVerdict.feed.read.kind:missing" in [
+        problem.split(" at ")[0] for problem in contract.feed_verdict_record(record)
+    ]

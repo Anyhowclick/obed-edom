@@ -8,6 +8,7 @@ the authority for whether an input has settled.
 from __future__ import annotations
 
 import hashlib
+import importlib
 import ipaddress
 import json
 import math
@@ -45,12 +46,14 @@ ATTACH_MATCH_ENV = "OBED_LIVE_ATTACH_MATCH"
 ADVANCE_ENV = "OBED_LIVE_ADVANCE"
 CONTINUITY_ENV = "OBED_LIVE_CONTINUITY"
 GL_REPLAY_ENV = "OBED_LIVE_GL_REPLAY"
+MM_FEED_ENV = "OBED_LIVE_MM_FEED"
 GOTO_AUTOPLAY_ENV = "OBED_LIVE_GOTO_AUTOPLAY"
 GOTO_AUTOPLAY_DEFERRED_NOTE = "Movies idle until next advance"
 _UNSET = object()
 _CDP_MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 _CHROME_START_TIMEOUT_S = 15.0
 QUALIFIED_SNAP_MAJORS = (154,)
+MM_FEED_MANAGED_OBS = False
 _PLACEMENT_INIT_JS = (
     '(function(){var T="%s",r="invalid";Object.defineProperty(window,"__obedPlacement",{get:function(){return r},'
     'enumerable:false,configurable:false});Object.defineProperty(window,"__obedGrant",{value:function(t,v){if(t!==T)return!1;'
@@ -148,6 +151,26 @@ def _continuity_core_script() -> str:
 
 def _continuity_scripts(plan: dict[str, Any], canvas: dict[str, int]) -> str:
     return _continuity_plan_script(plan, canvas) + _continuity_core_script()
+
+
+def _load_mm_feed_module() -> Any | None:
+    try:
+        return importlib.import_module(".live_mm_feed_js", __package__)
+    except ModuleNotFoundError as exc:
+        if exc.name in {f"{__package__}.live_mm_feed_js", "live_mm_feed_js"}:
+            return None
+        raise
+
+
+def _mm_feed_renderer(version: Any) -> str | None:
+    product = version.get("product") if isinstance(version, dict) else None
+    user_agent = version.get("userAgent") if isinstance(version, dict) else None
+    fingerprint = " ".join(value for value in (product, user_agent) if isinstance(value, str))
+    if re.search(r"(?:^|[\s;/])(?:OBS|CEF)/", fingerprint, re.IGNORECASE):
+        return "cef"
+    if isinstance(product, str) and re.fullmatch(r"(?:Headless)?Chrome/[\d.]+", product):
+        return "chrome"
+    return None
 
 
 def _codec_supported(family: str, *, attach: bool, headless: bool) -> bool:
@@ -889,13 +912,17 @@ def _rate_warnings(report: list[dict[str, Any]], rate: int) -> list[str]:
 
 
 class LiveOutputHost:
-    def __init__(self, export_root: Path, slides: list[dict[str, Any]], *, display_id: int | None = None, chrome_path: Path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"), headless: bool = False, transport_factory: Callable[..., ChromeCdp] = ChromeCdp, server_factory: Callable[..., _AssetServer] = _AssetServer, resolver: Callable[[Path, str], Path] = safe_export_file, timeout_s: float = 12.0, attach_endpoint: str | None = _UNSET, attach_match: str | None = None, continuity: str = "auto", gl_replay: str = _UNSET, mm_opacity: str = _UNSET, bridge: str | None = None, output_rate: int | None = None) -> None:
+    def __init__(self, export_root: Path, slides: list[dict[str, Any]], *, display_id: int | None = None, chrome_path: Path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"), headless: bool = False, transport_factory: Callable[..., ChromeCdp] = ChromeCdp, server_factory: Callable[..., _AssetServer] = _AssetServer, resolver: Callable[[Path, str], Path] = safe_export_file, timeout_s: float = 12.0, attach_endpoint: str | None = _UNSET, attach_match: str | None = None, continuity: str = "auto", gl_replay: str = _UNSET, mm_opacity: str = _UNSET, mm_feed: str = _UNSET, mm_feed_qualify_once: bool = False, bridge: str | None = None, output_rate: int | None = None) -> None:
         if continuity not in ("auto", "off"):
             raise LiveHostError("Continuity must be auto or off.")
         if gl_replay is not _UNSET and gl_replay not in ("auto", "off"):
             raise LiveHostError("GL replay must be auto or off.")
         if mm_opacity is not _UNSET and mm_opacity not in ("auto", "off"):
             raise LiveHostError("Magic Move opacity must be auto or off.")
+        if mm_feed is not _UNSET and mm_feed not in ("auto", "off", "on"):
+            raise LiveHostError("Magic Move feed must be auto, off or on.")
+        if not isinstance(mm_feed_qualify_once, bool):
+            raise LiveHostError("Magic Move one-shot qualification must be boolean.")
         self._continuity_preference = continuity
         self._bridge = bridge if bridge is not None else "obs-cdp"
         self._output_rate = output_rate
@@ -904,6 +931,16 @@ class LiveOutputHost:
         self._mm_opacity_request = mm_opacity
         self._mm_opacity_preference = "auto"
         self._mm_opacity_info: dict[str, str] | None = None
+        self._mm_feed_request = mm_feed
+        self._mm_feed_preference = "auto"
+        self._mm_feed_qualify_once = mm_feed_qualify_once
+        self._mm_feed_mode = "off"
+        self._mm_feed_reason: str | None = None
+        self._mm_feed_script = ""
+        self._mm_feed_continuous = False
+        self._mm_feed_once = False
+        self._mm_feed_module: Any | None = None
+        self._poster_holds: list[dict[str, Any]] = []
         self.export_root, self.slides = export_root, slides
         if attach_endpoint is _UNSET:
             attach_endpoint = os.environ.get(ATTACH_ENV) or None
@@ -949,6 +986,7 @@ class LiveOutputHost:
         self._continuity_plan_sha256: str | None = None
         self._continuity_scale: float | None = None
         self._continuity_not_carried: list[dict[str, Any]] = []
+        self._continuity_plan: ContinuityPlan | None = None
         self._gl_replay_mode = "off"
         self._gl_replay_reason: str | None = None
         self._gl_replay_script = ""
@@ -993,6 +1031,7 @@ class LiveOutputHost:
         if isinstance(derived, Unsupported):
             return "unsupported", derived.reason, None
         plan, runtime = derived
+        self._continuity_plan = plan
         codec_by_asset = {entry["asset"]: entry for entry in self._codec_report}
         attach = self._attach_endpoint is not None
         for movie in runtime["movies"].values():
@@ -1030,6 +1069,119 @@ class LiveOutputHost:
         if not script:
             return "unavailable", "GL replay entry is not usable", None, ""
         return "injected", None, derived, script
+
+    def _resolve_mm_feed(self, version: Any) -> tuple[str, str | None, str]:
+        runtime = self._continuity_runtime_plan
+        if runtime is None:
+            return "notApplicable", None, ""
+        entries = [entry for entry in runtime.get("boundaries", []) if isinstance(entry, dict) and "feed" in entry]
+        if not entries:
+            return "notApplicable", None, ""
+
+        renderer = _mm_feed_renderer(version)
+        attached = self._attach_endpoint is not None
+        continuous = False
+        continuous_reason: str | None = None
+        if self._mm_feed_preference == "off":
+            continuous_reason = "continuous feed disabled"
+        elif attached and not self._managed_obs:
+            continuous_reason = "attach output not qualified"
+        elif renderer == "chrome":
+            continuous = True
+        elif renderer == "cef" and self._managed_obs and (
+            MM_FEED_MANAGED_OBS or self._mm_feed_preference == "on"
+        ):
+            continuous = True
+        elif renderer == "cef":
+            continuous_reason = "CEF upload path not qualified"
+        else:
+            continuous_reason = "renderer upload path not qualified"
+
+        once = renderer == "chrome" or (
+            renderer == "cef" and (MM_FEED_MANAGED_OBS or self._mm_feed_qualify_once)
+        )
+        if not continuous and not once:
+            self._mm_feed_continuous = False
+            self._mm_feed_once = False
+            return "unavailable", continuous_reason or "renderer upload path not qualified", ""
+
+        module = _load_mm_feed_module()
+        self._mm_feed_module = module
+        if module is None:
+            self._mm_feed_continuous = False
+            self._mm_feed_once = False
+            return "unavailable", "Magic Move feed module unavailable", ""
+        builder = getattr(module, "mm_feed_script", None)
+        if not callable(builder):
+            self._mm_feed_continuous = False
+            self._mm_feed_once = False
+            return "unavailable", "Magic Move feed module unavailable", ""
+        script = builder(runtime, continuous=continuous, once=once)
+        if not isinstance(script, str) or not script:
+            self._mm_feed_continuous = False
+            self._mm_feed_once = False
+            return "unavailable", "Magic Move feed entry is not usable", ""
+        self._mm_feed_continuous = continuous
+        self._mm_feed_once = once
+        return "injected", None, script
+
+    def _poster_hold_lines(self) -> list[dict[str, Any]]:
+        runtime = self._continuity_runtime_plan
+        if runtime is None:
+            return []
+        scene_index_by_player = getattr(self._continuity_plan, "scene_index_by_player", {})
+        scene_to_player = {scene: player for player, scene in scene_index_by_player.items()}
+        movies = runtime.get("movies", {})
+        lines = []
+        for entry in runtime.get("boundaries", []):
+            if not isinstance(entry, dict) or entry.get("underArtwork") is not True:
+                continue
+            feed_bound = "feed" in entry
+            if feed_bound and self._mm_feed_continuous:
+                continue
+            to_player = scene_to_player.get(entry.get("atScene"))
+            if to_player is None and isinstance(entry.get("atScene"), int):
+                to_player = entry["atScene"] - 1
+            from_player = to_player - 1 if isinstance(to_player, int) else None
+            movie = movies.get(entry.get("movieKey"), {}) if isinstance(movies, dict) else {}
+            assets = movie.get("assetKeys", []) if isinstance(movie, dict) else []
+            planned_movie = next(
+                (
+                    planned
+                    for boundary in getattr(self._continuity_plan, "boundaries", ())
+                    if boundary.to_player_index == to_player
+                    for planned in boundary.movies
+                    if planned.src_object_id == (entry.get("src") or {}).get("objectId")
+                ),
+                None,
+            )
+            exact = feed_bound and self._mm_feed_once
+            reason = (
+                "continuous feed unavailable; holding the frame shown at departure"
+                if exact
+                else getattr(planned_movie, "feed_reason", None) or self._mm_feed_reason or "texture binding unavailable"
+            )
+            lines.append({
+                "fromSlide": self._original_by_player.get(from_player),
+                "toSlide": self._original_by_player.get(to_player),
+                "movie": getattr(planned_movie, "asset", None) or (assets[0] if assets else entry.get("movieKey")),
+                "objectId": (entry.get("src") or {}).get("objectId"),
+                "mode": "exact" if exact else "baked",
+                "reason": reason,
+            })
+        return lines
+
+    def _mm_feed_info(self) -> dict[str, Any]:
+        info: dict[str, Any] = {"mode": self._mm_feed_mode}
+        if self._mm_feed_reason is not None:
+            info["reason"] = self._mm_feed_reason
+        module = self._mm_feed_module or _load_mm_feed_module()
+        if self._mm_feed_module is None and module is not None:
+            self._mm_feed_module = module
+        info["version"] = getattr(module, "MM_FEED_VERSION", 1)
+        digest = getattr(module, "js_sha256", None)
+        info["sha256"] = digest() if callable(digest) else None
+        return info
 
     def _stage_gate_outcome(self, stage: Any) -> tuple[str, str | None, float | None]:
         """Fail-closed judgement of one stage-geometry reading against the authored canvas."""
@@ -1095,7 +1247,10 @@ class LiveOutputHost:
             info["planSha256"] = self._continuity_plan_sha256
         if self._continuity_not_carried:
             info["notCarried"] = [dict(entry) for entry in self._continuity_not_carried]
+        if self._poster_holds:
+            info["posterHold"] = [dict(entry) for entry in self._poster_holds]
         info["glReplay"] = self._gl_replay_info()
+        info["mmFeed"] = self._mm_feed_info()
         return info
 
     def _gl_replay_info(self) -> dict[str, Any]:
@@ -1157,6 +1312,13 @@ class LiveOutputHost:
             if env_mm_opacity not in ("", "off", "auto"):
                 raise LiveHostError("OBED_LIVE_MM_OPACITY must be off or auto.")
             self._mm_opacity_preference = env_mm_opacity or "auto"
+        if self._mm_feed_request is not _UNSET:
+            self._mm_feed_preference = self._mm_feed_request
+        else:
+            env_mm_feed = os.environ.get(MM_FEED_ENV, "").strip().lower()
+            if env_mm_feed not in ("", "off", "auto"):
+                raise LiveHostError("OBED_LIVE_MM_FEED must be off or auto.")
+            self._mm_feed_preference = env_mm_feed or "auto"
         self._goto_autoplay_mode = "off" if os.environ.get(GOTO_AUTOPLAY_ENV, "").strip().lower() == "off" else "on"
         self._log_path = _new_log_path()
         self._logger = _SessionLogger(self._log_path)
@@ -1167,7 +1329,8 @@ class LiveOutputHost:
             attachEndpoint=self._attach_endpoint, attachMatch=self._attach_match,
             headless=self.headless, advanceMode=self._advance_mode,
             goToAutoplayMode=self._goto_autoplay_mode, glReplayPreference=self._gl_replay_preference,
-            mmOpacityPreference=self._mm_opacity_preference,
+            mmOpacityPreference=self._mm_opacity_preference, mmFeedPreference=self._mm_feed_preference,
+            mmFeedQualifyOnce=self._mm_feed_qualify_once,
         )
         try:
             self._validate_export()
@@ -1181,16 +1344,6 @@ class LiveOutputHost:
             except LiveRuntimeUnsupported as exc: raise LiveHostError(str(exc)) from exc
             self._mm_opacity_info = {"mode": "on" if mm_opacity_on else "off", "sha256": hashlib.sha256(patched).hexdigest()}
             self._profile = Path(tempfile.mkdtemp(prefix="obed-live-chrome-"))
-            continuity_script = (
-                _continuity_scripts(self._continuity_runtime_plan, self._canvas) + self._gl_replay_script
-                if self._continuity_runtime_plan is not None
-                else ""
-            )
-            self._server = self.server_factory(
-                self.export_root, patched, self.resolver, alpha=bool(self._attach_endpoint),
-                continuity_script=continuity_script,
-            )
-            url = self._server.start()
             self._transport = self.transport_factory(
                 self.chrome_path, self._profile, self.display, headless=self.headless,
                 attach_endpoint=self._attach_endpoint, attach_match=self._attach_match,
@@ -1200,6 +1353,18 @@ class LiveOutputHost:
             try: version = self._transport.call("Browser.getVersion")
             except Exception: version = None
             self._logger.log("browserVersion", result=version)
+            self._mm_feed_mode, self._mm_feed_reason, self._mm_feed_script = self._resolve_mm_feed(version)
+            self._poster_holds = self._poster_hold_lines()
+            continuity_script = (
+                _continuity_scripts(self._continuity_runtime_plan, self._canvas) + self._gl_replay_script + self._mm_feed_script
+                if self._continuity_runtime_plan is not None
+                else ""
+            )
+            self._server = self.server_factory(
+                self.export_root, patched, self.resolver, alpha=bool(self._attach_endpoint),
+                continuity_script=continuity_script,
+            )
+            url = self._server.start()
             self._install_placement_channel(version, url)
             self._transport.goto(url)
             stage_geometry: dict[str, Any] | None = None
@@ -1209,12 +1374,17 @@ class LiveOutputHost:
                 )
                 if self._continuity_mode != "qualified" and self._gl_replay_mode == "injected":
                     self._gl_replay_mode, self._gl_replay_reason, self._gl_replay_script = "unavailable", "continuity unsupported", ""
+                if self._continuity_mode != "qualified":
+                    if self._mm_feed_mode == "injected":
+                        self._mm_feed_mode, self._mm_feed_reason, self._mm_feed_script = "unavailable", "continuity unsupported", ""
+                    self._poster_holds = []
             self._logger.log(
                 "continuity", mode=self._continuity_mode, reason=self._continuity_reason,
                 runtimePlan=self._continuity_runtime_plan, stage=stage_geometry, scale=self._continuity_scale,
                 planSha256=(self._continuity_plan_sha256 if self._continuity_mode == "qualified" else None),
                 notCarried=self._continuity_not_carried,
                 glReplay=self._gl_replay_info(),
+                mmFeed=self._mm_feed_info(), posterHold=self._poster_holds,
             )
             observed = self._wait_settled()
             try: dpr = self._transport.evaluate("window.devicePixelRatio")

@@ -24,7 +24,17 @@ from obed_edom.live_continuity_js import PRESERVE_CORE_JS, js_sha256  # noqa: E4
 
 
 def test_the_variant_names_are_the_shared_contract() -> None:
-    assert variants.VARIANTS == ("stash-any", "wrong-instance", "fifo-reuse", "linear-bridge", "no-pin-hold", "no-gl-clock")
+    assert variants.VARIANTS == (
+        "stash-any",
+        "wrong-instance",
+        "fifo-reuse",
+        "linear-bridge",
+        "no-pin-hold",
+        "no-gl-clock",
+        "overlay-ride",
+        "settle-on-stage",
+        "no-pause",
+    )
 
 
 ANCHORS = [(name, anchor) for name in variants.VARIANTS for anchor, _ in variants._TRANSFORMS[name]]
@@ -120,6 +130,20 @@ def test_no_pin_hold_leaves_a_pooled_pin_in_the_hidden_source_layer_in_the_real_
     assert [f["opacity"] for f in result["scene"]] == [0] * 6
     assert not any(f["onBody"] for f in result["scene"])
     assert result["holds"] == []
+
+
+def test_stage_b_variants_each_restore_only_the_registered_failure() -> None:
+    overlay = variants.variant_core("overlay-ride")
+    assert "}, 'keepThroughBridge', false);" in overlay
+    assert "}, 'keepThroughBridge', !!boundary.underArtwork);" not in overlay
+
+    settle = variants.variant_core("settle-on-stage")
+    assert "if (bridge) {" in settle
+    assert "if (bridge && !entry.underArtwork) {" not in settle
+
+    no_pause = variants.variant_core("no-pause")
+    start = no_pause.index("function posterHold(v, boundary, reason, requestOnce)")
+    assert "boundary.underArtwork) try { v.pause(); }" not in no_pause[start : start + 400]
 
 
 @pytest.mark.parametrize(("name", "anchor"), ANCHORS)

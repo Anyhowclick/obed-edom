@@ -434,35 +434,64 @@ def test_an_unmeasured_shape_or_draw_order_refuses_only_its_magic_move(uuid, tra
     assert _scoped_r11_reason(tmp_path, uuid, transform) == reason
 
 
-@pytest.mark.parametrize("overlap_the_clone", [False, True])
-def test_only_unrefused_geometry_changes_count_towards_the_one_per_boundary_limit(overlap_the_clone, tmp_path, monkeypatch):
-    """Two movies change geometry across 3->4. With both carries clean the deck is refused (the
-    runtime animates one bridge per boundary). Artwork above the WA0125 clone refuses that carry
-    instead: a refused bridge retires (the raw player's restart), so only Untitled.mov animates and
-    the deck derives. The fixture's transition has no motion slot for the clone, so R10 is stubbed
-    out to isolate the count."""
+@pytest.mark.parametrize("case", ["clean-unflagged", "settling-overlap", "nonsettling-overlap"])
+def test_only_unrefused_geometry_changes_count_towards_the_one_per_boundary_limit(case, tmp_path, monkeypatch):
     from obed_edom import live_continuity
 
     monkeypatch.setattr(live_continuity, "_bridge_timing_refusal", lambda *args: None)
+    monkeypatch.setattr(live_continuity, "_settles_into_dom", lambda _events: case != "nonsettling-overlap")
 
     def transform(data):
         data = _add_wa0125_to_slide4(data)
-        if overlap_the_clone:
+        if case == "clean-unflagged":
+            clone = next(e for e in data["events"][0]["effects"][0]["effects"] if e.get("objectID") == "CLONE-WA0125")
+            clone["baseLayer"]["initialState"]["position"] = {"pointX": 2300, "pointY": 900}
+        else:
             clone = next(e for e in data["events"][0]["effects"][0]["effects"] if e.get("objectID") == "CLONE-WA0125")
             state = clone["baseLayer"]["initialState"]
             right = state["position"]["pointX"] + state["width"] / 2
             bottom = state["position"]["pointY"] + state["height"] / 2
             _draw_slots(data, 0).append(_authored_slot(right - 40, bottom - 40, 30.0, 30.0, object_id="OVER"))
+            if case == "nonsettling-overlap":
+                data["events"][0]["automaticPlay"] = False
         return data
 
     plan = _plan(_mutate_slide(tmp_path, SLIDE4, transform))
-    if not overlap_the_clone:
+    if case == "clean-unflagged":
         assert plan == Unsupported("more than one movie changes geometry at player index 2 -> 3")
         return
     assert isinstance(plan, ContinuityPlan)
+    if case == "settling-overlap":
+        movies = plan.boundaries[2].movies
+        assert all(movie.under_artwork and movie.refusal is None for movie in movies)
+        assert _refusal_codes(plan) == []
+        return
     assert _refusal_codes(plan) == [(1, "overlap"), (3, "overlap")]
     actions = {(m["asset"], m["action"], m.get("code")) for m in _boundary(plan, 2)["movies"]}
     assert actions == {("untitled.mov", "bridge", None), ("vid-20250608-wa0125.mp4", "bridge", "overlap")}
+
+
+@pytest.mark.parametrize("settling", [True, False])
+def test_crossing_carries_are_both_flagged_or_the_lower_one_is_refused(settling, tmp_path, monkeypatch):
+    from obed_edom import live_continuity
+
+    monkeypatch.setattr(live_continuity, "_bridge_timing_refusal", lambda *args: None)
+    monkeypatch.setattr(live_continuity, "_settles_into_dom", lambda _events: settling)
+
+    def transform(data):
+        data = _add_wa0125_to_slide4(data)
+        if not settling:
+            data["events"][0]["automaticPlay"] = False
+        return data
+
+    plan = _plan(_mutate_slide(tmp_path, SLIDE4, transform))
+    assert isinstance(plan, ContinuityPlan)
+    movies = {movie.asset: movie for movie in plan.boundaries[2].movies}
+    if settling:
+        assert all(movie.under_artwork and movie.refusal is None for movie in movies.values())
+        return
+    assert movies["vid-20250608-wa0125.mp4"].code == "overlap"
+    assert movies["untitled.mov"].refusal is None
 
 
 @pytest.mark.parametrize("ancestor_change", [None, "position", "rotation", "animation"])
@@ -1666,25 +1695,33 @@ def test_a_refused_bridge_retires_only_its_own_boundary():
     assert runtime["boundaries"][:2] == EXPECTED_RUNTIME_PLAN["boundaries"][:2]
 
 
-def test_a_refused_bridge_derived_from_the_export_retires_its_boundary(tmp_path):
-    """The same thing end to end: put an object over the movie on slide 4, the 3->4 bridge's
-    destination, and that boundary alone is refused."""
-
+@pytest.mark.parametrize("arrival", ["settling", "click", "extra-event"])
+def test_artwork_overlap_is_lifted_only_when_the_destination_settles_into_dom(arrival, tmp_path):
     def cover_the_movie(data):
         movie_id = _slot_object(data, 0, 1)["objectID"]
         assert movie_id == P2_OBJECT_IDS["slide4"]
         _draw_slots(data, 0).append(_authored_slot(*SLIDE4_UNTITLED, object_id="COVER"))
+        if arrival == "click":
+            data["events"][0]["automaticPlay"] = False
+        elif arrival == "extra-event":
+            extra = copy.deepcopy(data["events"][0])
+            extra["effects"] = []
+            extra["automaticPlay"] = False
+            data["events"].insert(1, extra)
         return data
 
     plan = _plan(_mutate_slide(tmp_path, SLIDE4, cover_the_movie))
     assert isinstance(plan, ContinuityPlan)
-    assert [(r["toPlayer"], r["code"], r["objectId"]) for r in plan.refusals] == [
-        (1, "overlap", P2_OBJECT_IDS["slide1"]), (3, "overlap", P2_OBJECT_IDS["slide3"]),
-    ]
-    runtime = _runtime(plan)
-    assert [(b["atScene"], b["action"], b.get("reason")) for b in runtime["boundaries"]] == [
-        (2, "retire", "refused"), (6, "restart", None), (8, "retire", "refused"),
-    ]
+    later = plan.boundaries[2].movies[0]
+    if arrival == "settling":
+        assert (later.refusal, later.code, later.under_artwork) == (None, None, True)
+        assert [r["toPlayer"] for r in plan.refusals] == [1]
+        runtime = _runtime(plan)
+        entry = next(item for item in runtime["boundaries"] if item["atScene"] == P2_SLIDE4_MIN_HASH)
+        assert entry["underArtwork"] is True
+        return
+    assert (later.code, later.under_artwork) == ("overlap", False)
+    assert [r["toPlayer"] for r in plan.refusals] == [1, 3]
 
 
 def test_a_refusal_on_a_restart_boundary_becomes_a_retire():

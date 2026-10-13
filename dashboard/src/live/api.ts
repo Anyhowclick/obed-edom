@@ -8,7 +8,8 @@ export type LiveQualification = LivePreparedDeck & { qualified: boolean; continu
 export type LiveDisplay = { id: string; name: string; width: number; height: number; x: number; y: number; primary: boolean };
 export type LiveCodec = { asset: string; codec: string | null; family: "h264" | "hevc" | "prores" | "av1" | "vp9" | "other" };
 export type LiveNotCarried = { fromSlide: number; toSlide: number; asset: string; reason: string };
-export type LiveContinuity ={ mode: "qualified" | "unsupported" | "off" | "pending"; reason?: string; version?: number; sha256?: string; scale?: number; notCarried?: LiveNotCarried[] };
+export type LivePosterHold = { fromSlide: number | null; toSlide: number | null; movie: string; objectId: string | null; mode: "exact" | "baked" | "unavailable"; reason: string };
+export type LiveContinuity ={ mode: "qualified" | "unsupported" | "off" | "pending"; reason?: string; version?: number; sha256?: string; scale?: number; notCarried?: LiveNotCarried[]; posterHold?: LivePosterHold[]; mmFeed?: { mode: "off" | "injected" | "notApplicable" | "unavailable"; reason?: string; version: number; sha256: string | null } };
 export type LiveSnapshot = {
   sessionId: string;
   revision: number;

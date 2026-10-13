@@ -38,6 +38,7 @@ GL_NOTE_KINDS = re.compile(r"^(glreplay-|remount-|preserve-refused|retire)")
 REFUSAL_NOTE_KINDS = re.compile(r"^(remount-|reuse-|dom-swap|facade-|preserve-refused|retire)")
 PAGE_ERROR_NOTE_KINDS = re.compile(r"^player-build-error$")
 CARRY_COVER_NOTE_KINDS = re.compile(r"^(bridge-motion-start|bridge-clock)$")
+MM_FEED_NOTE_KINDS = re.compile(r"^(mm-feed-|feed-|poster-)")
 CARRY_COVER_TICKS = 4096
 REFUSE_VIAS = frozenset({"stash", "remount", "src-clear", "removeAttribute", "reuse"})
 ZONE_FROM = frozenset({"pending", "armed", "released"})
@@ -452,6 +453,13 @@ NOTE_PAYLOADS: dict[str, dict[str, Any]] = {
     "bridge-clock": {"via": lambda v: v in ("gl", "fallback"), "lagMs": _finite},
     "player-build-error": {"errorType": lambda v: v in ("error", "unhandledrejection"),
                            "message": lambda v: isinstance(v, str)},
+    "poster-hold": {"elId": _id, "objectId": _non_empty_str,
+                    "t": lambda v: _finite(v) and v >= 0, "reason": _str_or_null},
+    "poster-resume": {"elId": _id, "t": lambda v: _finite(v) and v >= 0},
+    "mm-feed-claim": {"objectId": _non_empty_str, "mode": lambda v: v == "continuous"},
+    "mm-feed-stand-down": {"objectId": _non_empty_str, "reason": _non_empty_str,
+                            "usableContext": lambda v: isinstance(v, bool),
+                            "boundTextures": lambda v: isinstance(v, bool)},
 }
 NOTE_PAYLOADS["bridge-3to4"] = NOTE_PAYLOADS["reuse-decoder"]
 
@@ -615,6 +623,171 @@ def evidence(value: Any, path: str = "evidence") -> Iterator[str]:
             yield from armed_reads(item, where)
         else:
             yield from refusal_read(item, where)
+
+
+MM_FEED_CONTEXT_FIELDS = {
+    "serial": _id, "id": _non_empty_str, "createdAt": _finite, "lost": lambda v: isinstance(v, bool),
+}
+MM_FEED_TEXTURE_FIELDS = {
+    "unit": lambda v: _int(v) and v in (0, 1), "ordinal": _count,
+    "size": lambda v: isinstance(v, list) and len(v) == 2 and all(_count(n) for n in v),
+    "video": lambda v: isinstance(v, bool),
+}
+MM_FEED_DECODER_FIELDS = {
+    "objectId": _non_empty_str, "elId": _id_or_null, "currentTime": lambda v: _finite(v) and v >= 0,
+    "paused": lambda v: isinstance(v, bool), "readyState": _ready_state,
+    "opacityProduct": lambda v: _finite(v) and v >= 0, "visible": lambda v: isinstance(v, bool),
+}
+
+
+def _mm_feed_texture(value: Any, path: str) -> Iterator[str]:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        yield f"mmFeed.texture:object at {path}"
+        return
+    yield from _fields(value, "mmFeed.texture", path, MM_FEED_TEXTURE_FIELDS)
+    for key in ("presentedFrames", "mediaTime"):
+        if key in value and value[key] is not None and not _finite(value[key]):
+            yield f"mmFeed.texture.{key} at {path}"
+
+
+def _mm_feed_decoder(value: Any, path: str) -> Iterator[str]:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        yield f"mmFeed.decoder:object at {path}"
+        return
+    yield from _fields(value, "mmFeed.decoder", path, MM_FEED_DECODER_FIELDS)
+    for key in ("presentedFrames", "mediaTime"):
+        if key in value and value[key] is not None and not _finite(value[key]):
+            yield f"mmFeed.decoder.{key} at {path}"
+
+
+def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
+    """`mm_feed_instrument.INSTRUMENT_JS` report and its decoder/GL frame producers."""
+    if not isinstance(value, dict):
+        yield f"mmFeed:object at {path}"
+        return
+    if value.get("kind") != "mm-feed" or value.get("version") != 1:
+        yield f"mmFeed:version at {path}"
+    for key in ("contexts", "frames", "holds", "media", "errors", "killedOnce"):
+        if not isinstance(value.get(key), list):
+            yield f"mmFeed.{key}:list at {path}"
+    for index, context in enumerate(value.get("contexts") or []):
+        where = f"{path}.contexts[{index}]"
+        if not isinstance(context, dict):
+            yield f"mmFeed.context:object at {where}"
+        else:
+            yield from _fields(context, "mmFeed.context", where, MM_FEED_CONTEXT_FIELDS)
+    previous = None
+    for index, frame in enumerate(value.get("frames") or []):
+        where = f"{path}.frames[{index}]"
+        if not isinstance(frame, dict):
+            yield f"mmFeed.frame:object at {where}"
+            continue
+        yield from _fields(frame, "mmFeed.frame", where, {
+            "serial": _id, "n": _id, "t": _finite, "draws": _count, "uploads": _count,
+            "rows": lambda v: isinstance(v, list), "labels": lambda v: isinstance(v, list),
+            "riders": lambda v: isinstance(v, list), "glErrors": lambda v: isinstance(v, list) and all(_int(e) for e in v),
+        })
+        if previous is not None and _finite(frame.get("t")) and frame["t"] < previous:
+            yield f"mmFeed.frame:t decreasing at {where}"
+        if _finite(frame.get("t")):
+            previous = frame["t"]
+        for rindex, row in enumerate(frame.get("rows") or []):
+            rwhere = f"{where}.rows[{rindex}]"
+            if not isinstance(row, dict):
+                yield f"mmFeed.row:object at {rwhere}"
+                continue
+            yield from _fields(row, "mmFeed.row", rwhere, {
+                "objectId": _non_empty_str, "draw": _id, "t": _finite,
+                "textures": lambda v: isinstance(v, list) and len(v) == 2,
+            })
+            yield from _mm_feed_decoder(row.get("decoder"), f"{rwhere}.decoder")
+            for tindex, texture in enumerate(row.get("textures") or []):
+                yield from _mm_feed_texture(texture, f"{rwhere}.textures[{tindex}]")
+    for index, entry in enumerate(value.get("killedOnce") or []):
+        where = f"{path}.killedOnce[{index}]"
+        if not isinstance(entry, dict):
+            yield f"mmFeed.killedOnce:object at {where}"
+        else:
+            yield from _fields(entry, "mmFeed.killedOnce", where, {"objectId": _non_empty_str, "t": _finite})
+    for index, entry in enumerate(value.get("media") or []):
+        where = f"{path}.media[{index}]"
+        if not isinstance(entry, dict):
+            yield f"mmFeed.media:object at {where}"
+            continue
+        yield from _fields(entry, "mmFeed.media", where, {
+            "kind": lambda v: v in ("pause", "play", "seeking", "videoFrame"), "t": _finite,
+            "objectId": lambda v: v is None or _non_empty_str(v), "elId": _id_or_null,
+            "currentTime": lambda v: _finite(v) and v >= 0, "paused": lambda v: isinstance(v, bool),
+        })
+        if entry.get("kind") == "videoFrame":
+            yield from _fields(entry, "mmFeed.media", where, {
+                "presentedFrames": _count, "mediaTime": lambda v: _finite(v) and v >= 0,
+            })
+
+
+def feed_verdict_record(value: Any, path: str = "feedVerdict") -> Iterator[str]:
+    """The scorer-facing feed/hold record assembled from the in-frame producer."""
+    if not isinstance(value, dict):
+        yield f"feedVerdict:object at {path}"
+        return
+    if value.get("mode") not in ("continuous", "once", "departure", "standDown"):
+        yield f"feedVerdict.mode at {path}"
+    for key in ("usableContext", "boundTextures"):
+        if not isinstance(value.get(key), bool):
+            yield f"feedVerdict.{key} at {path}"
+    interval = value.get("interval")
+    if interval is not None and not (
+        isinstance(interval, dict) and _finite(interval.get("start")) and _finite(interval.get("end"))
+        and interval["end"] > interval["start"]
+    ):
+        yield f"feedVerdict.interval at {path}"
+    if "notes" in value:
+        yield from notes(value["notes"], f"{path}.notes", MM_FEED_NOTE_KINDS, module=True, readable=False)
+    required = ("feed", "rider", "labels", "artwork") if value.get("mode") == "continuous" else (
+        "hold", "poster", "rider", "artwork"
+    )
+    if value.get("continuousExpected") is True and "feed" not in required:
+        required = (*required, "feed")
+    for key in required:
+        if not isinstance(value.get(key), dict):
+            yield f"feedVerdict.{key}:object at {path}"
+    for key in ("feed", "hold"):
+        record = value.get(key)
+        if not isinstance(record, dict):
+            continue
+        for field in ("usableContext", "boundTextures"):
+            if not isinstance(record.get(field), bool):
+                yield f"feedVerdict.{key}.{field} at {path}"
+        if not isinstance(record.get("reads"), list):
+            yield f"feedVerdict.{key}.reads:list at {path}"
+    feed = value.get("feed")
+    for index, read in enumerate(feed.get("reads") or [] if isinstance(feed, dict) else []):
+        where = f"{path}.feed.reads[{index}]"
+        if not isinstance(read, dict):
+            yield f"feedVerdict.feed.read:object at {where}"
+            continue
+        yield from _fields(read, "feedVerdict.feed.read", where, {
+            "progress": _finite, "patchInside": lambda v: isinstance(v, bool),
+            "coveredByLaterDraw": lambda v: isinstance(v, bool), "kind": lambda v: v in ("counter", "alpha"),
+        })
+    hold = value.get("hold")
+    for index, read in enumerate(hold.get("reads") or [] if isinstance(hold, dict) else []):
+        where = f"{path}.hold.reads[{index}]"
+        if not isinstance(read, dict):
+            yield f"feedVerdict.hold.read:object at {where}"
+            continue
+        yield from _fields(read, "feedVerdict.hold.read", where, {
+            "phase": lambda v: v in ("first", "middle", "last"), "bestFrame": _count,
+            "matchMargin": _finite, "requiredMargin": lambda v: _finite(v) and v >= 0,
+        })
+    for key, list_key in (("rider", "riders"), ("labels", "labels"), ("artwork", "reads")):
+        record = value.get(key)
+        if isinstance(record, dict) and not isinstance(record.get(list_key), list):
+            yield f"feedVerdict.{key}.{list_key}:list at {path}"
 
 
 HANDBACK_FIELDS = {"status": lambda v: v in ("ok", "inconclusive"), "reason": _str_or_null, "targetHash": _int,

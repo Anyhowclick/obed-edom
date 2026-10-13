@@ -21,6 +21,8 @@ or any `schema` other than 2 => the core installs nothing):
          "dst": {"objectId": ..., "rect": ...},        // pin/bridge/glReplay; restart optional
          "loop": <bool>,                               // pin/bridge/glReplay
          "durationSeconds": <positive exported duration>,   // bridge
+         "underArtwork": true,                         // hidden GL-fed/poster-held carry
+         "feed": {"draw", "drawCount", "from", "to"}, // present only when bound
          "reason": "refused" | "ends"}                 // retire
       ],
       "transparentBackground": <bool, optional, default false>
@@ -94,7 +96,7 @@ from __future__ import annotations
 
 import hashlib
 
-CONTINUITY_VERSION = 6
+CONTINUITY_VERSION = 7
 
 PRESERVE_CORE_JS = r"""
 (function(){
@@ -106,7 +108,7 @@ PRESERVE_CORE_JS = r"""
   let disabled = false;
   let everPreserved = false;
   window.__OBED_P2_PRESERVE__ = {
-    version: 9,
+    version: 10,
     mode: 'decoder-preserve',
     events: [],
     poolKeys: [],
@@ -494,6 +496,8 @@ PRESERVE_CORE_JS = r"""
   // Decoders the runtime carries (facaded pin, bridge overlay, released glReplay):
   // the player never detaches them, so they never reach `stash`.
   const held = [];
+  const feedClaims = new Map();
+  const feedStandDown = new Map();
   const GL = ENTRIES.filter(function(b) { return b.action === 'glReplay'; })
     .reduce(function(a, b) { return a && a.atScene <= b.atScene ? a : b; }, null);
   const GL_NOTE_KINDS = ['glreplay-arm', 'glreplay-live', 'glreplay-standdown', 'glreplay-handoff',
@@ -972,7 +976,7 @@ PRESERVE_CORE_JS = r"""
       paused: v.paused, readyState: v.readyState, srcTail: String(src).slice(-60)
     });
     // Keep decoder warm even if destroy()/detach paused it.
-    if (v.paused && !v.ended) {
+    if (v.paused && !v.ended && !v.__obedPosterHeld) {
       const p = v.play();
       if (p && p.catch) p.catch(function(){});
     }
@@ -1146,7 +1150,34 @@ PRESERVE_CORE_JS = r"""
    * the stage, above authored content, at `rectAt()` (authored px). False when
    * `owner`'s ride is already running; another owner's ride hands the decoder over.
    */
-  function rideTransition(v, owner, boundary, rectAt, caller) {
+  function feedClaimed(v, boundary) {
+    const claimed = feedClaims.get(boundary.src.objectId);
+    return !!claimed && claimed.generation === preserveGeneration
+      && claimed.boundary === boundary && claimed.decoder === v;
+  }
+  function posterHold(v, boundary, reason, requestOnce) {
+    if (!boundary.underArtwork || v.__obedPosterBoundary === boundary) return;
+    v.__obedPosterBoundary = boundary;
+    v.__obedPosterHeld = true;
+    if (boundary.underArtwork) try { v.pause(); } catch (e) {}
+    let why = reason || null;
+    if (requestOnce && !boundary.feed) {
+      why = 'feed-unbound';
+    } else if (requestOnce && (!window.__OBED_MM_FEED__ || typeof window.__OBED_MM_FEED__.once !== 'function')) {
+      why = 'module-absent';
+    } else if (requestOnce) {
+      try {
+        if (window.__OBED_MM_FEED__.once(boundary.src.objectId) === false) why = 'once-refused';
+      } catch (e) {
+        why = 'once-error';
+      }
+    }
+    note('poster-hold', {
+      elId: v.__obedElId, objectId: boundary.src.objectId,
+      t: v.currentTime, reason: why
+    });
+  }
+  function rideTransition(v, owner, boundary, rectAt, caller, hidden) {
     // The ride owns the decoder now: end any footprint hold, or it drags the
     // landed decoder back to the source slot once the hash settles (live D2).
     if (v.__obedPinning) {
@@ -1164,7 +1195,7 @@ PRESERVE_CORE_JS = r"""
     v.style.position = 'absolute';
     v.style.visibility = 'visible';
     v.style.display = 'block';
-    v.style.opacity = '1';
+    v.style.opacity = hidden ? '0' : '1';
     v.style.pointerEvents = 'none';
     v.dataset.obedRemounted = '1';
     function frame() {
@@ -1186,6 +1217,7 @@ PRESERVE_CORE_JS = r"""
       }
       requestAnimationFrame(frame);
     }
+    if (hidden && !feedClaimed(v, boundary)) posterHold(v, boundary, null, true);
     frame();
     return true;
   }
@@ -1213,7 +1245,7 @@ PRESERVE_CORE_JS = r"""
         w: src.w + (dest.w - src.w) * progress,
         h: src.h + (dest.h - src.h) * progress
       };
-    }, 'keepThroughBridge');
+    }, 'keepThroughBridge', !!boundary.underArtwork);
     if (moving) {
       note('bridge-motion-start', {elId: v.__obedElId, durationSeconds: boundary.durationSeconds,
         srcRect: src, rect: dest, geometrySource: 'export-duration-interpolation'});
@@ -1229,9 +1261,10 @@ PRESERVE_CORE_JS = r"""
   function keepThroughPin(v) {
     const boundary = nextEntry(instanceOf(v));
     if (!boundary || boundary.action !== 'pin' || currentHashNum() !== boundary.atScene - 1
-        || !boundary.src.rect || v.__obedBridged34 || !hasDeparted(instanceOf(v))) return false;
+        || !boundary.src.rect || (v.__obedBridged34 && !boundary.underArtwork)
+        || !hasDeparted(instanceOf(v))) return false;
     const rect = boundary.src.rect;
-    if (rideTransition(v, boundary, boundary, function() { return rect; }, 'keepThroughPin')) {
+    if (rideTransition(v, boundary, boundary, function() { return rect; }, 'keepThroughPin', !!boundary.underArtwork)) {
       note('pin-hold-start', {elId: v.__obedElId, atScene: boundary.atScene, srcRect: rect, rect: rect});
     }
     return true;
@@ -1288,7 +1321,7 @@ PRESERVE_CORE_JS = r"""
       return false;
     }
     note('bridge-slot-reattach', {elId: real.__obedElId});
-    if (real.paused && !real.ended) {
+    if (real.paused && !real.ended && !real.__obedPosterHeld) {
       const p = real.play();
       if (p && p.catch) p.catch(function(){});
     }
@@ -1309,9 +1342,10 @@ PRESERVE_CORE_JS = r"""
       // A held overlay is never detached, so the next bridge's move starts here,
       // once the player has left the slide (not while it idles on it).
       const next = nextEntry(instanceOf(real));
-      if (next && next.action === 'bridge' && hn === next.atScene - 1 && hasDeparted(instanceOf(real))) {
+      if (next && (next.action === 'bridge' || (next.action === 'pin' && next.underArtwork))
+          && hn === next.atScene - 1 && hasDeparted(instanceOf(real))) {
         real.__obedSlotPinning = false;
-        keepThroughBridge(real);
+        if (next.action === 'bridge') keepThroughBridge(real); else keepThroughPin(real);
         return;
       }
       if (!document.contains(real) && !reattachToSlot(real)) {
@@ -1398,7 +1432,7 @@ PRESERVE_CORE_JS = r"""
       v.style.opacity = '1';
       v.style.pointerEvents = 'none';
       v.dataset.obedRemounted = '1';
-      if (v.paused && !v.ended) {
+      if (v.paused && !v.ended && !v.__obedPosterHeld) {
         const p = v.play();
         if (p && p.catch) p.catch(function(){});
       }
@@ -1649,7 +1683,7 @@ PRESERVE_CORE_JS = r"""
         } else {
           v.style.removeProperty('z-index');
         }
-        if (v.paused && !v.ended) {
+        if (v.paused && !v.ended && !v.__obedPosterHeld) {
           const p = v.play();
           if (p && p.catch) p.catch(function(){});
         }
@@ -1735,7 +1769,7 @@ PRESERVE_CORE_JS = r"""
         v.style.opacity = '1';
         v.style.pointerEvents = 'none';
         v.style.removeProperty('z-index');
-        if (v.paused && !v.ended) {
+        if (v.paused && !v.ended && !v.__obedPosterHeld) {
           const p = v.play();
           if (p && p.catch) p.catch(function(){});
         }
@@ -1787,7 +1821,7 @@ PRESERVE_CORE_JS = r"""
         beginMove(v);
         stage.appendChild(v);
       }
-      if (v.paused && !v.ended) {
+      if (v.paused && !v.ended && !v.__obedPosterHeld) {
         const p = v.play();
         if (p && p.catch) p.catch(function(){});
       }
@@ -1874,7 +1908,7 @@ PRESERVE_CORE_JS = r"""
           if (next) parent.insertBefore(real, next); else parent.appendChild(real);
           real.style.visibility = 'visible';
           real.style.display = '';
-          if (real.paused && !real.ended) {
+          if (real.paused && !real.ended && !real.__obedPosterHeld) {
             const p = real.play();
             if (p && p.catch) p.catch(function(){});
           }
@@ -1978,7 +2012,7 @@ PRESERVE_CORE_JS = r"""
     pool.forEach(function(q){
       (q || []).forEach(function(v){
         try {
-          if (v && v.paused && !v.ended && !v.__obedGlNoWarm) {
+          if (v && v.paused && !v.ended && !v.__obedGlNoWarm && !v.__obedPosterHeld) {
             const p = v.play();
             if (p && p.catch) p.catch(function(){});
           }
@@ -2137,7 +2171,12 @@ PRESERVE_CORE_JS = r"""
       atScene: entry.atScene, src: entry.src.objectId, dst: entry.dst.objectId,
       srcRect: entry.src.rect || null, measuredRect: authoredOfScreen(preserved.__obedRect)
     });
-    if (bridge) {
+    if (entry.underArtwork && preserved.__obedPosterHeld) {
+      preserved.__obedPosterHeld = false;
+      note('poster-resume', {elId: preserved.__obedElId, t: preserved.currentTime});
+    }
+    if (entry.underArtwork) delete preserved.__obedPosterBoundary;
+    if (bridge && !entry.underArtwork) {
       bridgeTo34(preserved, entry);
       el.__obedSuppressed34 = true;
       keepSuppressed(el);
@@ -2147,7 +2186,7 @@ PRESERVE_CORE_JS = r"""
     // WebGL poster (live D1/D3/D4: clock advancing, pixels frozen), so re-home
     // the decoder the way a pooled pin is remounted: into the destination
     // poster's authored layer, measure-and-corrected at `dst.rect`.
-    const rehome = !!preserved.__obedBridged34;
+    const rehome = !!entry.underArtwork || !!preserved.__obedBridged34;
     if (rehome) {
       preserved.__obedBridged34 = false;
       preserved.__obedRemountEpoch = remountEpoch;
@@ -2208,7 +2247,7 @@ PRESERVE_CORE_JS = r"""
       const preserved = entry ? pickCarried(el, value, entry) : null;
       if (!preserved) return origSA(attr, value);
       carry(el, value, preserved, entry);
-      if (entry.action === 'bridge') return origSA(attr, value);
+      if (entry.action === 'bridge' && !entry.underArtwork) return origSA(attr, value);
     };
     return el;
   };
@@ -2232,6 +2271,41 @@ PRESERVE_CORE_JS = r"""
         if (kind === 'glreplay-live') liveSeen = true;
         note(kind, detail);
       }
+    };
+  }
+  if (ENTRIES.some(function(b) { return !!b.feed; })) {
+    function decoderFor(objectId) {
+      const found = [];
+      function take(v) {
+        if (!v || v.__obedFacadeFor || !isLive(v) || instanceOf(v) !== objectId || found.indexOf(v) >= 0) return;
+        found.push(v);
+      }
+      document.querySelectorAll('video').forEach(take);
+      pool.forEach(function(q) { (q || []).forEach(take); });
+      held.forEach(take);
+      return found.length === 1 ? found[0] : null;
+    }
+    window.__OBED_P2_PRESERVE__.feed = {
+      version: 1,
+      decoderFor: decoderFor,
+      claim: function(objectId) {
+        const boundary = nextEntry(objectId);
+        const decoder = decoderFor(objectId);
+        const stoodDown = feedStandDown.get(objectId);
+        if ((stoodDown && stoodDown.generation === preserveGeneration && stoodDown.departure === departure)
+            || !boundary || !boundary.underArtwork || !boundary.feed || !decoder) return false;
+        feedClaims.set(objectId, {generation: preserveGeneration, boundary: boundary, decoder: decoder});
+        return true;
+      },
+      onStandDown: function(objectId, reason) {
+        const claimed = feedClaims.get(objectId);
+        if (!claimed || claimed.generation !== preserveGeneration) return false;
+        feedClaims.delete(objectId);
+        feedStandDown.set(objectId, {generation: preserveGeneration, departure: departure});
+        posterHold(claimed.decoder, claimed.boundary, reason || 'stand-down', false);
+        return true;
+      },
+      note: function(kind, detail) { note(kind, detail); }
     };
   }
   window.__OBED_P2_PRESERVE__.ready = true;

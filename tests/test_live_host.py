@@ -21,6 +21,8 @@ from obed_edom.fixture_paths import fixture
 
 class FakeCdp:
     instances: list["FakeCdp"] = []
+    product_default = "HeadlessChrome/154.0.8037.59"
+    user_agent_default = "Mozilla/5.0 HeadlessChrome/154.0.0.0 Safari/537.36"
 
     def __init__(self, chrome, profile, display, *, headless=False, attach_endpoint=None, attach_match=None, logger=None, log_path=None):
         self.chrome, self.profile, self.display, self.headless = chrome, profile, display, headless
@@ -41,7 +43,8 @@ class FakeCdp:
         self.runtime_version = 2
         self.space_rejects: bool = False
         self.slide_number_showing = False
-        self.product: str | None = "HeadlessChrome/154.0.8037.59"
+        self.product: str | None = self.product_default
+        self.user_agent: str | None = self.user_agent_default
         self.gpu: Any = "enabled"
         self.sysinfo_fails = False
         self.predefined = False
@@ -69,7 +72,7 @@ class FakeCdp:
         self.calls.append(method)
         if method == "Browser.getVersion":
             if self.product is None: raise live_host.LiveHostError("CDP Browser.getVersion failed: boom")
-            return {"product": self.product}
+            return {"product": self.product, "userAgent": self.user_agent}
         if method == "Page.addScriptToEvaluateOnNewDocument":
             self.token = re.search(r'var T="([0-9a-f]{32})"', params["source"]).group(1)
             return {"identifier": "1"}
@@ -155,6 +158,7 @@ def host(tmp_path, monkeypatch, **kwargs: Any) -> live_host.LiveOutputHost:
     monkeypatch.setitem(live_runtime.SUPPORTED_PLAYERS, hashlib.sha256(player_bytes()).hexdigest(), (ANY,) * 3)
     monkeypatch.setattr(live_host, "choose_display", lambda *_args, **_kwargs: live_host.OutputDisplay(9, 10, 20, 2560, 1440))
     monkeypatch.delenv(live_host.MM_OPACITY_ENV, raising=False)
+    monkeypatch.delenv(live_host.MM_FEED_ENV, raising=False)
     FakeCdp.instances.clear()
     return live_host.LiveOutputHost(tmp_path, [{"originalOrdinal": 1, "playerIndex": 0, "skipped": False}, {"originalOrdinal": 2, "playerIndex": 1, "skipped": False}, {"originalOrdinal": 3, "skipped": True}], headless=True, transport_factory=FakeCdp, server_factory=FakeServer, resolver=resolver, **kwargs)
 
@@ -1315,6 +1319,7 @@ def host_with_continuity(
     monkeypatch.setattr(live_host.LiveOutputHost, "_authored_scene_count", lambda self: None)
     monkeypatch.delenv("OBED_LIVE_GL_REPLAY", raising=False)
     monkeypatch.delenv(live_host.MM_OPACITY_ENV, raising=False)
+    monkeypatch.delenv(live_host.MM_FEED_ENV, raising=False)
     FakeCdp.instances.clear()
     kwargs: dict[str, Any] = {"attach_endpoint": "http://127.0.0.1:9222"} if attach else {}
     if gl_replay is not None:
@@ -1656,10 +1661,10 @@ def test_continuity_output_shape(tmp_path, monkeypatch):
     output = host_with_continuity(tmp_path, monkeypatch)
     output.observe()
     continuity = output.output["continuity"]
-    assert set(continuity) <= {"mode", "reason", "version", "sha256", "scale", "glReplay"}
+    assert set(continuity) <= {"mode", "reason", "version", "sha256", "scale", "glReplay", "mmFeed"}
     assert continuity["mode"] == "unsupported"
-    assert continuity["version"] == live_host.CONTINUITY_VERSION == 6
-    assert isinstance(continuity["sha256"], str) and len(continuity["sha256"]) == 64
+    assert continuity["version"] == live_host.CONTINUITY_VERSION == 7
+    assert continuity["sha256"] == live_host.js_sha256() == "49574c942d10ba7cf6244cf773e6ffa6f1c21c2badb208677ff4b50e710d34cf"
 
 
 def test_observe_logs_only_on_change(tmp_path, monkeypatch):
@@ -2405,6 +2410,31 @@ def _fake_runtime(*, gl: bool) -> dict[str, Any]:
     }
 
 
+def _feed_runtime() -> dict[str, Any]:
+    return {
+        "schema": 2,
+        "movies": {"movie1": {"assetKeys": ["movie.mov"], "footprint": {"x": 150, "y": 150, "w": 100, "h": 100}}},
+        "boundaries": [{
+            "atScene": 2,
+            "action": "bridge",
+            "movieKey": "movie1",
+            "src": {"objectId": "movie-object", "rect": {"x": 150, "y": 150, "w": 100, "h": 100}},
+            "dst": {"objectId": "movie-object-s2", "rect": {"x": 150, "y": 150, "w": 100, "h": 100}},
+            "duration": 1.5,
+            "underArtwork": True,
+            "feed": {"draw": 1, "drawCount": 1, "from": {"upload": 1, "size": [100, 100]}, "to": None},
+        }],
+    }
+
+
+def fake_feed_module(calls: list[tuple[bool, bool]]) -> Any:
+    def script(_runtime, *, continuous, once):
+        calls.append((continuous, once))
+        return '<script id="obed-mm-feed"></script>\n'
+
+    return SimpleNamespace(MM_FEED_VERSION=1, js_sha256=lambda: "f" * 64, mm_feed_script=script)
+
+
 class _FakePlan:
     refusals: list[dict[str, Any]] = []
 
@@ -2467,6 +2497,130 @@ def served_html(output: live_host.LiveOutputHost, tmp_path: Path) -> str:
 
 def ready(monkeypatch) -> None:
     monkeypatch.setattr(FakeCdp, "evaluate", continuity_ready_evaluate(FakeCdp.evaluate, [stage_geometry(1920, 1080, 0, 0, 1920, 1080)]))
+
+
+@pytest.mark.parametrize(
+    ("product", "user_agent", "renderer"),
+    [
+        ("Chrome/127.0.6533.120", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.120 OBS/32.2.2 Safari/537.36", "cef"),
+        ("Chrome/155.0.8059.40", "Mozilla/5.0 Chrome/155.0.8059.40 Safari/537.36", "chrome"),
+        ("Chrome/154.0.8037.59", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/154.0.0.0 Safari/537.36", "chrome"),
+    ],
+)
+def test_mm_feed_renderer_uses_the_recorded_fingerprints_and_checks_obs_first(product, user_agent, renderer):
+    assert live_host.MM_FEED_MANAGED_OBS is False
+    assert live_host._mm_feed_renderer({"product": product, "userAgent": user_agent}) == renderer
+
+
+@pytest.mark.parametrize(
+    ("kind", "preference", "qualify_once", "qualified_cef", "expected", "mode"),
+    [
+        ("attach-chrome", "on", False, False, (False, True), "exact"),
+        ("attach-chrome", "off", False, False, (False, True), "exact"),
+        ("managed-cef", "auto", False, False, None, "baked"),
+        ("managed-cef", "on", False, False, (True, False), None),
+        ("managed-cef", "off", True, False, (False, True), "exact"),
+        ("attach-cef", "off", False, True, (False, True), "exact"),
+    ],
+)
+def test_mm_feed_resolves_continuous_and_once_independently(
+    tmp_path, monkeypatch, kind, preference, qualify_once, qualified_cef, expected, mode,
+):
+    monkeypatch.setattr(live_host, "MM_FEED_MANAGED_OBS", qualified_cef)
+    if kind.endswith("cef"):
+        monkeypatch.setattr(FakeCdp, "product_default", "Chrome/127.0.6533.120")
+        monkeypatch.setattr(FakeCdp, "user_agent_default", "Mozilla/5.0 Chrome/127.0.6533.120 OBS/32.2.2")
+    else:
+        monkeypatch.setattr(FakeCdp, "product_default", "Chrome/155.0.8059.40")
+        monkeypatch.setattr(FakeCdp, "user_agent_default", "Mozilla/5.0 Chrome/155.0.8059.40 Safari/537.36")
+    calls: list[tuple[bool, bool]] = []
+    monkeypatch.setattr(live_host, "_load_mm_feed_module", lambda: fake_feed_module(calls))
+    output = host_with_continuity(
+        tmp_path,
+        monkeypatch,
+        attach=True,
+        bridge="obs-managed" if kind == "managed-cef" else "obs-cdp",
+        gl_replay="off",
+        mm_feed=preference,
+        mm_feed_qualify_once=qualify_once,
+    )
+    fake_plan_pair(monkeypatch, off=_feed_runtime())
+    ready(monkeypatch)
+    output.start()
+
+    assert calls == ([] if expected is None else [expected])
+    info = output.output["continuity"]["mmFeed"]
+    assert info["mode"] == ("unavailable" if expected is None else "injected")
+    if expected is None:
+        assert info["reason"] == "CEF upload path not qualified"
+        assert 'id="obed-mm-feed"' not in output._server.continuity_script
+    else:
+        assert info == {"mode": "injected", "version": 1, "sha256": "f" * 64}
+        assert output._server.continuity_script.index('id="obed-continuity-core"') < output._server.continuity_script.index('id="obed-mm-feed"')
+    poster = output.output["continuity"].get("posterHold", [])
+    if mode is None:
+        assert poster == []
+    else:
+        assert len(poster) == 1
+        assert poster[0] == {
+            "fromSlide": 1,
+            "toSlide": 2,
+            "movie": "movie.mov",
+            "objectId": "movie-object",
+            "mode": mode,
+            "reason": "continuous feed unavailable; holding the frame shown at departure" if mode == "exact" else "CEF upload path not qualified",
+        }
+
+
+def test_mm_feed_renderer_is_resolved_before_script_selection_and_navigation(tmp_path, monkeypatch):
+    order: list[str] = []
+    module = fake_feed_module([])
+    real_builder = module.mm_feed_script
+
+    def builder(*args, **kwargs):
+        order.append("script")
+        return real_builder(*args, **kwargs)
+
+    module.mm_feed_script = builder
+    monkeypatch.setattr(live_host, "_load_mm_feed_module", lambda: module)
+    real_call = FakeCdp.call
+    real_goto = FakeCdp.goto
+
+    def call(self, method, *args, **kwargs):
+        if method == "Browser.getVersion":
+            order.append("version")
+        return real_call(self, method, *args, **kwargs)
+
+    def goto(self, url):
+        order.append("navigate")
+        return real_goto(self, url)
+
+    monkeypatch.setattr(FakeCdp, "call", call)
+    monkeypatch.setattr(FakeCdp, "goto", goto)
+    output = host_with_continuity(tmp_path, monkeypatch)
+    fake_plan_pair(monkeypatch, off=_feed_runtime())
+    ready(monkeypatch)
+    output.start()
+
+    assert order.index("version") < order.index("script") < order.index("navigate")
+
+
+def test_mm_feed_never_injects_without_continuity_or_a_feed_entry(tmp_path, monkeypatch):
+    calls: list[tuple[bool, bool]] = []
+    monkeypatch.setattr(live_host, "_load_mm_feed_module", lambda: fake_feed_module(calls))
+    continuity_off = host_with_continuity(
+        tmp_path / "off", monkeypatch, continuity="off", mm_feed="on", mm_feed_qualify_once=True,
+    )
+    continuity_off.start()
+    assert continuity_off._server.continuity_script == ""
+    assert continuity_off.output["continuity"]["mmFeed"]["mode"] == "notApplicable"
+
+    no_feed = host_with_continuity(tmp_path / "no-feed", monkeypatch, mm_feed="auto")
+    ready(monkeypatch)
+    no_feed.start()
+    assert 'id="obed-mm-feed"' not in no_feed._server.continuity_script
+    assert no_feed.output["continuity"]["mmFeed"]["mode"] == "notApplicable"
+    assert calls == []
 
 
 @pytest.mark.parametrize("version", [4, 5])
@@ -2775,10 +2929,11 @@ def test_gl_replay_env_name_is_the_documented_one():
 
 def hook_only_player() -> bytes:
     """Today's served bytes: the observation hook alone, nothing else rewritten."""
-    return player_bytes().replace(
+    hooked = player_bytes().replace(
         live_runtime._ANCHOR,
         b"UC=new Eg," + live_runtime._INSTALL + b",UC.displayManager.showWaitingIndicator()",
     )
+    return live_runtime._apply_continuity_take(hooked)
 
 
 def mm_opacity_host(kind, tmp_path, monkeypatch, **kwargs):
@@ -2870,7 +3025,7 @@ def test_mm_opacity_is_reported_only_once_the_player_is_patched(tmp_path, monkey
 
 def test_mm_opacity_anchor_missing_refuses_the_session(tmp_path, monkeypatch):
     output = mm_opacity_host("hdmi", tmp_path, monkeypatch)
-    broken = b"before;" + live_runtime._ANCHOR + b";after"
+    broken = b"before;" + live_runtime._ANCHOR + b";" + live_runtime._CONTINUITY_TAKE_ANCHOR + b";after"
     (tmp_path / "main.js").write_bytes(broken)
     monkeypatch.setitem(live_runtime.SUPPORTED_PLAYERS, hashlib.sha256(broken).hexdigest(), (ANY,) * 3)
     with pytest.raises(live_host.LiveHostError, match="Magic Move opacity anchor"):
@@ -2903,6 +3058,7 @@ def attach_host(tmp_path, monkeypatch, **kwargs):
     (tmp_path / "header.json").write_text('{"slideWidth":1920,"slideHeight":1080,"showMode":0}')
     monkeypatch.setitem(live_runtime.SUPPORTED_PLAYERS, hashlib.sha256(player_bytes()).hexdigest(), (ANY,) * 3)
     monkeypatch.delenv(live_host.MM_OPACITY_ENV, raising=False)
+    monkeypatch.delenv(live_host.MM_FEED_ENV, raising=False)
     FakeCdp.instances.clear()
     return live_host.LiveOutputHost(
         tmp_path, [], attach_endpoint="http://127.0.0.1:9222", transport_factory=FakeCdp, server_factory=FakeServer, resolver=resolver, **kwargs,

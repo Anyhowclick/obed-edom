@@ -36,6 +36,8 @@ Arms:
                 controls DX-2 does not run (no flash, screen) are reported, not gated. CEF is attach mode, so every session
                 must record `output.placement` grant null, reason `attached`, and bind no holder (a bound holder is a FAIL
                 even when the round is INCONCLUSIVE). Ignores --fixture.
+  feed          Stage B Q6: continuous `mm_feed="on"` and qualification-only one-shot `mm_feed="off"` sessions on an
+                Alpha/D7 fixture, gated on in-frame feed plus exact poster-hold verdicts. One take, unrecorded.
   soak          g2 held on slide 2 for --soak-minutes (>= 4) with per-minute reads, 20 s recordings around a loop wrap at
                 minute 1 and just before loseContext (after the first half), build 1, P3/P4; an off twin. Gate M6.
                 --precheck: the loop pre-check.
@@ -119,6 +121,9 @@ from live_continuity_probe import (  # noqa: E402
     matches_asset_keys,
     rects_overlap,
     score_armed,
+    score_verdicts,
+    convert_samples_to_authored,
+    drive_and_sample,
     wait_for_destination_hash,
 )
 from live_host_probe import wait_for_settlement  # noqa: E402
@@ -349,7 +354,8 @@ def make_export(tag: str, fixture: Path) -> tuple[Path, list[dict[str, Any]]]:
 
 
 def fixture_counter(fixture: Path) -> str:
-    return binary_counter_movie.read_manifest(fixture).get("counter", "grey")
+    manifest = fixture / "fixture.json"
+    return binary_counter_movie.read_manifest(fixture).get("counter", "grey") if manifest.exists() else "grey"
 
 
 def p2_family(fixture: Path) -> bool:
@@ -359,7 +365,7 @@ def p2_family(fixture: Path) -> bool:
 
 
 def fixture_loops(fixture: Path) -> bool:
-    return "loop" in binary_counter_movie.read_manifest(fixture)
+    return (fixture / "fixture.json").exists() and "loop" in binary_counter_movie.read_manifest(fixture)
 
 
 def check_loop_frames(fixture: Path) -> None:
@@ -392,6 +398,17 @@ def fixture_facts(fixture: Path) -> dict[str, Any]:
         shutil.rmtree(dest.parent, ignore_errors=True)
 
 
+def feed_fixture_facts(fixture: Path) -> dict[str, Any]:
+    dest, slides = make_export("feed-facts", fixture)
+    try:
+        facts = ground_truth_facts(ground_truth_plan(dest, slides))
+        if not any(spec.get("underArtwork") is True for spec in facts.get("verdicts") or []):
+            raise SystemExit("feed fixture derives no under-artwork carries")
+        return facts
+    finally:
+        shutil.rmtree(dest.parent, ignore_errors=True)
+
+
 def hex_of(phase: str) -> str:
     return "#%02x%02x%02x" % obs_cadence_decode.PHASES[phase]
 
@@ -418,7 +435,9 @@ class Session:
     """One `LiveOutputHost` session on the engine's page; records phases, page reads and OBS screenshots."""
 
     def __init__(self, name: str, host: LiveOutputHost, ctx: dict[str, Any]) -> None:
-        self.name, self.host, self.creds, self.shots, self.engine_state = name, host, ctx["creds"], ctx["shots"], ctx["engineState"]
+        self.name, self.host, self.creds, self.shots, self.engine_state, self.ctx = (
+            name, host, ctx["creds"], ctx["shots"], ctx["engineState"], ctx,
+        )
         self.out: dict[str, Any] = {"session": name, "phases": [], "reads": {}, "shots": {}}
 
     def ev(self, js: str) -> Any:
@@ -483,14 +502,19 @@ class LoggedCdp(ChromeCdp):
 
 def run_session(name: str, script: Callable[[Session], None], ctx: dict[str, Any], *, gl_replay: str | None = None,
                 mm_opacity: str = "auto", seed: str | None = None, record: bool = False, logger: bool = False,
-                square: bool = False) -> dict[str, Any]:
+                square: bool = False, mm_feed: str | None = None, mm_feed_qualify_once: bool = False) -> dict[str, Any]:
     fixture = ctx["fixture"]
     dest, slides = make_export(f"{ctx['tag']}-{name}", fixture)
     kwargs: dict[str, Any] = {"mm_opacity": mm_opacity} if gl_replay is None else {"gl_replay": gl_replay, "mm_opacity": mm_opacity}
     if logger:
         kwargs["transport_factory"] = LoggedCdp
+    if mm_feed is not None:
+        kwargs["mm_feed"] = mm_feed
+    if mm_feed_qualify_once:
+        kwargs["mm_feed_qualify_once"] = True
     session: Session | None = None
-    out: dict[str, Any] = {"session": name, "glReplayArg": gl_replay, "mmOpacityArg": mm_opacity, "seed": seed, "square": square}
+    out: dict[str, Any] = {"session": name, "glReplayArg": gl_replay, "mmOpacityArg": mm_opacity, "mmFeedArg": mm_feed,
+                           "mmFeedQualifyOnce": mm_feed_qualify_once, "seed": seed, "square": square}
     try:
         with contextlib.ExitStack() as stack:
             stack.enter_context(mm_opacity_probe.square_player(square))
@@ -612,6 +636,27 @@ def g2_script(kb: str | None, armed: dict[str, Any]) -> Callable[[Session], None
         hold(started, 3)
         s.shot("P3")
         s.ev(MARK_JS % UNMEASURED_MARK)
+    return script
+
+
+def feed_script(continuous_expected: bool) -> Callable[[Session], None]:
+    def script(s: Session) -> None:
+        facts = s.ctx["feedFacts"]
+        sink: dict[str, Any] = {}
+        s.host.execute("show")
+        raw = drive_and_sample(
+            s.host, carry_into={spec["toPlayer"] for spec in facts["verdicts"] if spec["kind"] == "carry"},
+            feed_facts=facts, feed_sink=sink,
+        )
+        samples = convert_samples_to_authored(raw)[0]
+        for record in (sink.get("verdicts") or {}).values():
+            if isinstance(record, dict):
+                record["continuousExpected"] = continuous_expected
+        s.out["feedEvidence"] = sink
+        s.out["feedVerdicts"] = score_verdicts(
+            samples, {}, facts, True, s.host.output.get("continuity"), schema=2, feed_evidence=sink,
+        )
+        s.out["samples"] = samples
     return script
 
 
@@ -1915,6 +1960,11 @@ def sessions_for(arm: str, ctx: dict[str, Any], args: argparse.Namespace, armed:
         return [run_session(f"mo3-{gl}-{name}", mo3_script(gl, name, armed), ctx, gl_replay=gl, mm_opacity=kwarg, logger=True,
                             square=name == "sq", seed=mm_opacity_probe.FSD_REASON if name in mm_opacity_probe.FSD_ARMS else None)
                 for gl in MMO_CEF_GL for name, kwarg in mo3_arms(gl).items()]
+    if arm == "feed":
+        return [
+            run_session("feed", feed_script(True), ctx, gl_replay="off", mm_feed="on"),
+            run_session("feed-off", feed_script(True), ctx, gl_replay="off", mm_feed="off", mm_feed_qualify_once=True),
+        ]
     if arm == "failsafe":
         return [run_session("fail-module", failsafe_script(False), ctx, seed="planUnreadable"),
                 run_session("fail-zone", failsafe_script(False), ctx, seed="posterAmbiguous"),
@@ -2000,6 +2050,8 @@ def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, args: ar
         ctx = {"endpoint": engine.cdp_endpoint, "target": engine.target_id, "rate": rate, "creds": creds, "shots": shots,
                "fixture": args.fixture, "tag": f"{arm}{rate}{take}{ts}",
                "engineState": lambda: {k: engine.state().get(k) for k in ("state", "warnings")}}
+        if arm == "feed":
+            ctx["feedFacts"] = armed
         run["sessions"] = sessions_for(arm, ctx, args, armed)
     except Exception:
         run["fatal"] = traceback.format_exc()[-3000:]
@@ -2032,7 +2084,7 @@ def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, args: ar
     loop_frames = SOAK_LOOP_FRAMES if fixture_loops(args.fixture) else None
     rings = [rect_tuple(armed["instanceRect"])] if arm == "g2" else None
     ring_exclude = ring_exclusions(armed) if arm == "g2" else []
-    counter, geometry = run["counter"], movie_geometry(armed)
+    counter, geometry = run["counter"], movie_geometry(None if arm == "feed" else armed)
     masks = mmo_masks(armed, (1080, 1920)) if arm == "mmo" else None
     for session in run["sessions"]:
         t = time.monotonic()
@@ -2119,6 +2171,8 @@ def arm_gates(arm: str, run: dict[str, Any], args: argparse.Namespace, armed: di
         return gates
     if arm == "mmo-cef":
         return mmo_cef_gates(run)
+    if arm == "feed":
+        return feed_gates(run, armed)
     if arm == "dissolve":
         gates = dissolve_gates(run, args.decision)
         if gates["DX-2"]["invalid"]:
@@ -2130,6 +2184,29 @@ def arm_gates(arm: str, run: dict[str, Any], args: argparse.Namespace, armed: di
             invalid.append(gates["precheck"]["invalid"])
         return gates
     return soak_gates(run, armed, fixture_loops(args.fixture))
+
+
+def feed_gates(run: dict[str, Any], facts: dict[str, Any] | None) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+    sessions = {session.get("session"): session for session in run.get("sessions") or []}
+    expected = [spec["id"] for spec in (facts or {}).get("verdicts") or [] if spec.get("underArtwork") is True]
+    for name in ("feed", "feed-off"):
+        session = sessions.get(name) or {}
+        verdicts = session.get("feedVerdicts") if isinstance(session.get("feedVerdicts"), dict) else {}
+        for spec_id in expected:
+            carry = verdicts.get(spec_id) if isinstance(verdicts.get(spec_id), dict) else {}
+            under = carry.get("underArtwork") if isinstance(carry.get("underArtwork"), dict) else {}
+            if name == "feed":
+                wanted = {"feedLive": True, "noRiderAboveCanvas": True, "labelsOverFeed": True, "artworkAbove": True}
+            else:
+                wanted = {"feedLive": False, "holdFrame": True, "posterHold": True,
+                          "noRiderAboveCanvas": True, "artworkAbove": True}
+            for verdict, value in wanted.items():
+                actual = (under.get(verdict) or {}).get("verdict") if isinstance(under.get(verdict), dict) else None
+                check(checks, f"{name} {spec_id} {verdict}", actual, actual is value, f"is {value}")
+    if not expected:
+        check(checks, "under-artwork carries", 0, False, ">= 1")
+    return {"feed": gate(checks)}
 
 
 def timing_summary(run: dict[str, Any]) -> dict[str, Any]:
@@ -2243,14 +2320,14 @@ def score_mmo(root: Path) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Live qualification of the managed OBS (launches OBS; one OBS at a time).")
-    parser.add_argument("--arm", choices=("2x", "positive", "both", "g2", "failsafe", "soak", "mmo", "mmo-cef", "dissolve"),
+    parser.add_argument("--arm", choices=("2x", "positive", "both", "g2", "failsafe", "soak", "mmo", "mmo-cef", "dissolve", "feed"),
                         default="both")
     parser.add_argument("--rate", type=int, choices=sorted(managed_obs.RATES), default=25, help=f"ignored for mmo ({MMO_RATES})")
-    parser.add_argument("--takes", type=int, default=2, help="ignored (1) for failsafe, soak, mmo, mmo-cef and dissolve")
+    parser.add_argument("--takes", type=int, default=2, help="ignored (1) for failsafe, soak, mmo, mmo-cef, dissolve and feed")
     parser.add_argument("--launch", choices=("hidden", "shown", "projector"), default="hidden", help="shown = hidden launch, then Show OBS once ready; projector = hidden launch + a windowed program projector (eyeball)")
     parser.add_argument("--kb", choices=sorted(KB_SHAS), help="known-bad control: frozen|oldbytes (module splice), latelost (g2)")
-    parser.add_argument("--fixture", type=Path, help=f"soak fixture root (default {SOAK_FIXTURE}); other arms: {FIXTURE} (default) or "
-                        f"its binary-counter copy ({binary_counter_movie.BINARY_FIXTURE})")
+    parser.add_argument("--fixture", type=Path, help=f"feed: Alpha/D7 root with html-player and html-unmodified; soak: "
+                        f"loop root (default {SOAK_FIXTURE}); other arms: {FIXTURE} or {binary_counter_movie.BINARY_FIXTURE}")
     parser.add_argument("--precheck", action="store_true", help="soak: the loop pre-check instead of the soak")
     parser.add_argument("--soak-minutes", type=int, default=5, help=f">= {SOAK_MIN_MINUTES}; 20 before a show")
     parser.add_argument("--out", type=Path, help="writes <out>/runs/<arm>-<ts>.json, <out>/shots/ and a summary")
@@ -2270,9 +2347,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.arm == "soak":
         args.fixture = (args.fixture or SOAK_FIXTURE).expanduser().resolve()
         check_loop_frames(args.fixture)
+    elif args.arm == "feed" and args.fixture is None:
+        parser.error("--arm feed requires an Alpha/D7 --fixture")
     elif args.fixture is not None:
         args.fixture = args.fixture.expanduser().resolve()
-        if not p2_family(args.fixture):
+        if args.arm != "feed" and not p2_family(args.fixture):
             parser.error(f"--fixture for --arm {args.arm} must be {FIXTURE} or a non-looping binary_counter_movie.py copy of it.")
     else:
         args.fixture = FIXTURE
@@ -2299,20 +2378,26 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("An OBS is already running; quit it first (one OBS at a time).")
     if not (args.fixture / "html-player").is_dir() or not (args.fixture / "html-unmodified/index.html").is_file():
         parser.error(f"fixture missing: {args.fixture}")
-    args.fixture_identity = binary_counter_movie.verify_fixture(args.fixture)
+    args.fixture_identity = (
+        {"headerSha256": hashlib.sha256((args.fixture / "html-player/assets/header.json").read_bytes()).hexdigest()}
+        if args.arm == "feed" else binary_counter_movie.verify_fixture(args.fixture)
+    )
     if args.kb:
         args.kb_splice = apply_kb(args.kb)
     armed = None
     if args.arm not in ("2x", "positive", "both", "dissolve"):
-        armed = fixture_facts(args.fixture)
-        print("ARMED", json.dumps({k: armed[k] for k in ("instanceRect", "movieSlot", "overrideSlots", "assetKeys")}), flush=True)
+        armed = feed_fixture_facts(args.fixture) if args.arm == "feed" else fixture_facts(args.fixture)
+        if args.arm == "feed":
+            print("FEED", json.dumps([spec["id"] for spec in armed["verdicts"] if spec.get("underArtwork")]), flush=True)
+        else:
+            print("ARMED", json.dumps({k: armed[k] for k in ("instanceRect", "movieSlot", "overrideSlots", "assetKeys")}), flush=True)
         if args.arm == "mmo":
             top = mmo_masks(armed, (1080, 1920))["top"]
             ys, xs = np.nonzero(top)
             print("MO-2 ROI_top", [int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())], int(top.sum()), "px", flush=True)
     (args.out / "runs").mkdir(parents=True, exist_ok=True)
     arms = ("2x", "positive") if args.arm == "both" else (args.arm,)
-    takes = 1 if args.arm in ("failsafe", "soak", "mmo", "mmo-cef", "dissolve") else args.takes
+    takes = 1 if args.arm in ("failsafe", "soak", "mmo", "mmo-cef", "dissolve", "feed") else args.takes
     rates = MMO_RATES if args.arm == "mmo" else (args.rate,)
     awake = subprocess.Popen(["caffeinate", "-dimsu", "-w", str(os.getpid())])
     runs: list[dict[str, Any]] = []

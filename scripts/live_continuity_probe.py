@@ -62,6 +62,8 @@ import argparse
 import base64
 import fcntl
 import hashlib
+import importlib
+import inspect
 import json
 import math
 import os
@@ -73,7 +75,7 @@ import threading
 import time
 import urllib.request
 from collections import Counter
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Callable, Collection, Iterator, Sequence
 
@@ -121,6 +123,7 @@ except ImportError:  # pragma: no cover - stream B is landing this constant conc
 import live_host_probe  # noqa: E402 - reuse the headless window-size compensation
 from continuity_core_variants import VARIANTS, parse_strip, strip_entries, strip_label, variant_core, variant_sha  # noqa: E402
 import paint_instrument  # noqa: E402
+import mm_feed_instrument  # noqa: E402
 import live_evidence_contract as contract  # noqa: E402
 from live_evidence_contract import stage_map_valid  # noqa: E402
 
@@ -193,6 +196,7 @@ RECORD = "record"
 # for P2 off/on, D1, D3, D5; the rest derived from the S0 exports). D2 and D2-across derive the same plan:
 # the export does not encode play-across (plan §5, R-res-1).
 P2_OFF_PLAN_SHA256 = "283f5eecd18c3412172e28a40bc716c69173a7c72bcd37379dcd3d7d6a96dd4e"
+ALPHA_DSK_PLAN_SHA256 = "3baebab35009248015988fc0e9955e93f687117c58f5f74f9b5a88acbef316e6"
 # The pinned P2 runtime plans (off, gl-replay on; p2-loop off, on): the only decks whose status
 # is P2's legacy slot table. Every other deck is scored by `generated_status`.
 P2_PLAN_SHA256 = frozenset({
@@ -311,6 +315,7 @@ GROUND_TRUTH_KEYS = (
     "asset", "onset1to2", "boundaryPlayerIndex", "restartScene", "bridgeScene",
     "pinRect", "bridgeSrcRect", "destRect", "canvas",
     "retire", "retires", "refusedBoundaries", "refusals", "rectExpectations", "verdicts", "planSha256",
+    "feedDraws", "artworkAbove",
 )
 # A painting `<video>` overlaps a retired movie's rect when it does so by more
 # than this in authored px -- edge-touching and AA seams are not an overlap.
@@ -333,6 +338,37 @@ EXPECTED_GL_MODES = (
 )
 SKIPPABLE_ARMS = ("A", "B", "C", "V", "Voff", "attach")
 POSITIVE_ARMS = ("A", "V", "attach")
+FEED_CONTROL: dict[str, Any] = {}
+MM_FEED_REQUEST = "auto"
+MM_OPACITY_REQUEST = "auto"
+FEED_DWELL_S: float | None = None
+
+MM_FEED_GATE_EXPECTATIONS: dict[str, dict[str, bool | None]] = {
+    "feed-on": {"feedLive": True, "holdFrame": None, "noRiderAboveCanvas": True,
+                "labelsOverFeed": True, "artworkAbove": True},
+    "feed-off": {"feedLive": False, "holdFrame": True, "posterHold": True},
+    "attach-once": {"holdFrame": True, "posterHold": True,
+                    "noRiderAboveCanvas": True, "artworkAbove": True},
+    "hold-upload-killed": {"holdFrame": False},
+    "ordinal": {"feedLive": False, "holdFrame": None, "posterHold": True},
+    "after-feed": {"feedLive": False, "holdFrame": True, "posterHold": True},
+    "from-only-crossfade": {"feedLive": False},
+    "from-only-single": {"feedLive": True},
+    "overlay-ride": {"noRiderAboveCanvas": False, "labelsOverFeed": True},
+    "settle-on-stage": {"artworkAbove": False},
+    "no-pause": {"posterHold": False},
+    "mm-opacity-off": {"labelsOverFeed": False},
+}
+MM_FEED_STRIP_EXPECTATIONS = {
+    (ALPHA_DSK_PLAN_SHA256, "strip:bridge@14:movie2", "off"): (
+        "b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry",
+    ),
+}
+MM_FEED_READ_EXPECTATIONS = {
+    ("D7", "crossfade"): {0.25: True, 0.5: False, 0.75: False},
+    ("D7s", "crossfade"): {0.25: True, 0.5: False, 0.75: False},
+    ("Alpha_DSK", "first-crossfade"): {0.5: False, 0.75: True},
+}
 
 # Pass G (goTo autoplay repair): (fromOriginalOrdinal, toOriginalOrdinal) pairs.
 GOTO_MATRIX: tuple[tuple[int, int], ...] = ((1, 2), (1, 3), (1, 4), (3, 1), (4, 3))
@@ -929,11 +965,40 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Positive control: one continuity-on arm that hides the target carry for N frames from the sampler's "
         "rAF (early) or a later rAF (late); passes only on the exact injected seq set",
     )
+    parser.add_argument(
+        "--feed-tamper", choices=("ordinal", "after-feed"), default=None,
+        help="Probe control: corrupt the first feed binding before the move, or force stand-down after a successful feed",
+    )
+    parser.add_argument(
+        "--mm-feed", choices=("off", "auto", "on"), default="auto",
+        help="Magic Move texture feed preference; off retains an eligible one-shot hold",
+    )
+    parser.add_argument(
+        "--mm-opacity", choices=("off", "auto"), default="auto",
+        help="Magic Move opacity preference; the off arm proves label compositing is load-bearing",
+    )
+    parser.add_argument(
+        "--feed-variant", choices=("from-only",), default=None,
+        help="Probe-only feed module variant; from-only leaves the destination texture baked",
+    )
+    parser.add_argument(
+        "--feed-dwell", choices=(2.0, 5.0, 12.0), type=float, default=None,
+        help="Exact-frame arm source dwell in seconds",
+    )
+    parser.add_argument(
+        "--hold-upload-kill-switch", action="store_true",
+        help="Probe control: suppress the departure one-shot upload so holdFrame must show the baked poster",
+    )
     args = parser.parse_args(argv)
+    if args.feed_variant is not None and (args.feed_tamper is not None or args.hold_upload_kill_switch):
+        parser.error("--feed-variant, --feed-tamper and --hold-upload-kill-switch run as separate controls")
+    if args.hold_upload_kill_switch and args.mm_feed != "off":
+        parser.error("--hold-upload-kill-switch requires --mm-feed off")
     if args.paint_control is not None and (
         args.strip is not None or args.core_variant is not None or args.only_pass is not None or args.attach
         or args.gl_replay != "off" or args.gl_force_fail is not None or args.force_wrap is not None
         or args.rescore is not None or args.skip_arms or args.carry_cover or args.carry_cover_null or args.burst_poke
+        or args.feed_tamper is not None or args.hold_upload_kill_switch or args.feed_variant is not None
     ):
         parser.error("--paint-control runs on its own in launch mode (optionally with --viewport, --fixture, "
                      "--original-index and --artifact)")
@@ -945,7 +1010,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         if (
             args.strip is not None or args.only_pass is not None or args.attach or args.gl_replay != "off"
             or args.gl_force_fail is not None or args.force_wrap is not None or args.rescore is not None
-            or args.skip_arms or args.burst_poke
+            or args.skip_arms or args.burst_poke or args.feed_tamper is not None or args.hold_upload_kill_switch
+            or args.feed_variant is not None
         ):
             parser.error("--carry-cover runs on its own (optionally with --core-variant or --carry-cover-null, "
                          "--viewport, --fixture, --original-index and --artifact)")
@@ -972,6 +1038,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--force-wrap runs on its own (no --pass, --gl-force-fail or --rescore)")
     if args.rescore is not None and (args.gl_force_fail is not None or args.only_pass is not None):
         parser.error("--rescore runs on its own (no --pass or --gl-force-fail)")
+    if (args.feed_tamper is not None or args.hold_upload_kill_switch or args.feed_variant is not None) and (
+        red_arm or args.only_pass is not None or args.gl_force_fail is not None or args.force_wrap is not None
+        or args.rescore is not None or args.gl_replay != "off"
+    ):
+        parser.error("feed controls run in a standard host arm with --gl-replay off")
     return args
 
 
@@ -1032,6 +1103,12 @@ def load_slides(export_root: Path) -> list[dict[str, Any]]:
 def force_viewport(width: int, height: int) -> None:
     forced = OutputDisplay(0, 0, 0, width, height + _HEIGHT_PAD, True)
     live_host_module.choose_display = lambda *_a, **_k: forced
+
+
+def feed_host_kwargs() -> dict[str, Any]:
+    parameters = inspect.signature(LiveOutputHost).parameters
+    values = {"mm_feed": MM_FEED_REQUEST, "mm_opacity": MM_OPACITY_REQUEST}
+    return {key: value for key, value in values.items() if key in parameters}
 
 
 def ground_truth_plan(export_root: Path, slides: list[dict[str, Any]], *, gl_replay: bool = False) -> ContinuityPlan:
@@ -1524,11 +1601,72 @@ def ground_truth_facts(
     facts["refusedBoundaries"] = [retire["boundaryKey"] for retire in retires]
     facts["refusals"] = [dict(item) for item in getattr(plan, "refusals", ()) if isinstance(item, dict)]
     facts["rectExpectations"] = visible_expectations(plan, runtime, arrival)
+    feed_draws = getattr(plan, "feed_draws", None)
+    artwork_above = getattr(plan, "artwork_above", None)
+    if feed_draws:
+        facts["feedDraws"] = json.loads(json.dumps(feed_draws, default=lambda value: value.as_dict()))
+    if artwork_above:
+        facts["artworkAbove"] = json.loads(json.dumps(artwork_above, default=lambda value: value.as_dict()))
+    for spec in specs:
+        if spec["kind"] != "carry":
+            continue
+        entries = [
+            entry for entry in runtime.get("boundaries") or []
+            if isinstance(entry, dict) and entry.get("atScene") == spec["atScene"]
+            and entry_object_id(entry, "src") == spec.get("srcObjectId")
+            and entry.get("action") in ("pin", "bridge")
+        ]
+        if len(entries) != 1:
+            continue
+        entry = entries[0]
+        if entry.get("underArtwork") is True:
+            spec["underArtwork"] = True
+        if isinstance(entry.get("feed"), dict):
+            spec["feed"] = entry["feed"]
+        for source, key in ((feed_draws, "feedDraws"), (artwork_above, "artworkAbove")):
+            matched = _probe_fact_for_spec(source, spec)
+            if matched is not None:
+                spec[key] = matched
     if armed:
         facts["armed"] = armed_fact(plan, runtime, boundary_keys)
         bind_positive_fact(facts["armed"], specs, "armed")
         facts["armedBoundaries"] = [facts["armed"]["boundaryKey"]]
     return facts
+
+
+def _probe_fact_for_spec(source: Any, spec: dict[str, Any]) -> Any:
+    """Read WS-D's probe-only fact table without constraining its map/list container."""
+    grouped = isinstance(source, dict) and isinstance(source.get(spec.get("toPlayer")), (list, tuple))
+    if isinstance(source, dict):
+        candidates: list[Any] = []
+        for key in (
+            spec["id"], spec.get("srcObjectId"), spec.get("dstObjectId"), spec.get("toPlayer"),
+            f"{spec['fromPlayer']}to{spec['toPlayer']}", str(spec["atScene"]), spec["atScene"],
+        ):
+            if key in source:
+                value = source[key]
+                candidates.extend(value if isinstance(value, (list, tuple)) else [value])
+        for value in source.values():
+            candidates.extend(value if isinstance(value, (list, tuple)) else [value])
+    elif isinstance(source, (list, tuple)):
+        candidates = list(source)
+    else:
+        return None
+    matched = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        scene = item.get("atScene", item.get("scene"))
+        object_id = str(item.get("objectId", item.get("srcObjectId", ""))).lower()
+        object_ids = {str(spec.get(key) or "").lower() for key in ("srcObjectId", "dstObjectId")}
+        if (scene is None or scene == spec["atScene"]) and (
+            not object_id or object_id in object_ids
+        ):
+            matched.append(item)
+    if grouped:
+        unique = {json.dumps(item, sort_keys=True): item for item in matched}
+        return list(unique.values()) or None
+    return matched[0] if matched else None
 
 
 def gl_replay_mode(entry: Any) -> str | None:
@@ -1581,6 +1719,68 @@ def stripped_runtime(action: str, at_scene: int | None = None, key: str | None =
         yield
     finally:
         live_host_module._continuity_plan_script = original
+
+
+@contextmanager
+def tampered_feed_ordinal() -> Iterator[None]:
+    """Probe-only binding control: corrupt exactly the first regular upload ordinal."""
+    original = live_host_module._continuity_plan_script
+
+    def patched(plan: dict[str, Any], canvas: dict[str, int]) -> str:
+        changed = json.loads(json.dumps(plan))
+        for entry in changed.get("boundaries") or []:
+            feed = entry.get("feed") if isinstance(entry, dict) else None
+            source = feed.get("from") if isinstance(feed, dict) else None
+            if isinstance(source, dict) and isinstance(source.get("upload"), int):
+                source["upload"] += 1000
+                break
+        return original(changed, canvas)
+
+    live_host_module._continuity_plan_script = patched
+    try:
+        yield
+    finally:
+        live_host_module._continuity_plan_script = original
+
+
+@contextmanager
+def injected_feed_variant(name: str | None) -> Iterator[None]:
+    if name is None:
+        yield
+        return
+    variants = importlib.import_module("mm_feed_variants")
+    module = live_host_module._load_mm_feed_module()
+    if module is None or not callable(getattr(module, "mm_feed_script", None)):
+        raise RuntimeError("feed variant requested but the feed module is unavailable")
+    transform = next(
+        (getattr(variants, key, None) for key in ("variant_script", "variant_feed", "feed_variant")
+         if callable(getattr(variants, key, None))),
+        None,
+    )
+    if transform is None:
+        raise RuntimeError("mm_feed_variants exposes no variant transform")
+    original = module.mm_feed_script
+
+    def patched(*args: Any, **kwargs: Any) -> str:
+        source = original(*args, **kwargs)
+        for call in (
+            lambda: transform(name, source),
+            lambda: transform(name, script=source),
+            lambda: transform(name, source=source),
+        ):
+            try:
+                changed = call()
+            except TypeError:
+                continue
+            if isinstance(changed, str) and changed:
+                return changed
+        raise RuntimeError(f"feed variant {name!r} did not produce script bytes")
+
+    module.mm_feed_script = patched
+    try:
+        yield
+    finally:
+        module.mm_feed_script = original
 
 
 def bridge_disabled() -> Any:
@@ -1653,6 +1853,8 @@ def carry_destination_players(facts: dict[str, Any]) -> frozenset[int]:
 def drive_and_sample(
     player: LiveOutputHost, *, observer: Callable[[int], None] | None = None,
     carry_into: Collection[int] = (),
+    feed_facts: dict[str, Any] | None = None, feed_sink: dict[str, Any] | None = None,
+    feed_continuous_expected: bool = True,
 ) -> list[dict[str, Any]]:
     """Advance through every original slide in order (on P2: 2 is the 1->2 magic move, 3 the
     dissolve, which may straddle slide-2 builds, 4 the 3->4 magic move). `observer` is called
@@ -1665,9 +1867,26 @@ def drive_and_sample(
     carry's source."""
     transport = player._require_transport()
     transport.evaluate(SAMPLER_JS)
+    feed_specs = [
+        {
+            "id": spec["id"], "objectId": spec.get("srcObjectId"), "dstObjectId": spec.get("dstObjectId"),
+            "atScene": spec.get("atScene"), "feed": spec.get("feed"), "draws": spec.get("feedDraws"),
+            "artwork": spec.get("artworkAbove"),
+        }
+        for spec in (feed_facts or {}).get("verdicts") or []
+        if spec.get("underArtwork") is True and isinstance(spec.get("feed"), dict)
+    ]
+    if feed_specs:
+        transport.evaluate(mm_feed_instrument.INSTRUMENT_JS)
+        transport.evaluate(
+            "window.__obedMmFeedProbe.configure(" + json.dumps({
+                "entries": feed_specs, "tamper": FEED_CONTROL.get("tamper"),
+                "killHoldUpload": FEED_CONTROL.get("killHoldUpload", False),
+            }) + ")"
+        )
     transport.evaluate(ENSURE_PLAYING_JS)
     wait_for_decode(player)
-    time.sleep(FIRST_CLICK_DWELL_S)
+    time.sleep(FEED_DWELL_S if FEED_DWELL_S is not None else FIRST_CLICK_DWELL_S)
     shown = sorted((s for s in player.slides if not s.get("skipped")), key=lambda s: s["originalOrdinal"])
     ordinals = [slide["originalOrdinal"] for slide in shown]
     for index, slide in enumerate(shown):
@@ -1675,13 +1894,21 @@ def drive_and_sample(
         leaving = shown[index - 1].get("playerIndex") if index else None
         if index >= 2 and (slide.get("playerIndex") in carry_into or leaving in carry_into):
             wait_until_settled(player)
-            time.sleep(CLICK_DELAY_S)
+            time.sleep(FEED_DWELL_S if FEED_DWELL_S is not None else CLICK_DELAY_S)
         if ordinal != ordinals[0]:
             advance_until_original_slide(player, ordinal)
         if observer is not None:
             observer(ordinal)
     time.sleep(POST_ADVANCE_SETTLE_S)
     transport.evaluate(SAMPLER_STOP_JS)
+    if feed_sink is not None and feed_specs:
+        report = transport.evaluate("window.__obedMmFeedProbe.report()")
+        feed_sink.update({
+            "producer": report,
+            "verdicts": mm_feed_instrument.verdict_records(
+                report, feed_specs, continuous_expected=feed_continuous_expected,
+            ),
+        })
     return drain_samples(transport)
 
 
@@ -2197,6 +2424,8 @@ def score_continuity(
     min_window_start: float | None = None,
     chain_clip: tuple[float | None, float | None] = (None, None),
     paint: bool = True,
+    gl_interval: dict[str, float] | None = None,
+    poster_held: bool = False,
 ) -> dict[str, Any]:
     """Pure: samples in, verdict dict out. Scores continuity of ONE tracked decoder
     across `boundary_scene`, evaluated only within the crossing window (reviewer
@@ -2227,6 +2456,11 @@ def score_continuity(
     (`unnamed_rows`, identity before source), or an untracked decoding row that names no source
     (`unidentified_decoders`), or a row listing one decoder id twice (`duplicate_ids`).
     """
+    if not (
+        isinstance(gl_interval, dict) and _finite_number(gl_interval.get("start")) is not None
+        and _finite_number(gl_interval.get("end")) is not None and gl_interval["end"] > gl_interval["start"]
+    ):
+        gl_interval = None
     tracks = track_by_id(samples, asset)
     if not decoded_anywhere(tracks):
         return {"verdict": None, "reason": "inconclusive: movie never decoded"}
@@ -2251,10 +2485,11 @@ def score_continuity(
         if not (paint and any("seq" in sample for sample in samples)):
             return scored
         floor = [value for value in (clip_start, min_window_start) if value is not None]
-        scored["paint"] = carry_paint(
+        paint_floor = max(floor) if floor else None
+        scored["paint"] = carry_paint_outside_gl(
             samples, element_id, asset, window, boundary_scene, src_rect, dst_rect,
-            transition_scene=transition_scene, rect_tolerance=rect_tolerance, floor=max(floor) if floor else None,
-            wrap_times=scored.get("wrapTimes") or (),
+            transition_scene=transition_scene, rect_tolerance=rect_tolerance, floor=paint_floor,
+            wrap_times=scored.get("wrapTimes") or (), gl_interval=gl_interval,
         )
         status = scored["paint"].get("status")
         if status == "fail":
@@ -2362,7 +2597,9 @@ def score_continuity(
 
     move_rows = [r for r in before_rows if is_move_sample(r, transition_scene)]
     completed_move_rows = [r for r in before_rows if is_move_complete(r, transition_scene)]
-    motion = score_motion(move_rows, src_rect, dst_rect, rect_tolerance) if transition_scene is not None else None
+    in_gl = lambda row: bool(gl_interval and gl_interval["start"] <= row["t"] <= gl_interval["end"])
+    dom_move_rows = [row for row in move_rows if not in_gl(row)]
+    motion = score_motion(dom_move_rows, src_rect, dst_rect, rect_tolerance) if transition_scene is not None and not gl_interval else None
     if motion is not None and not any(
         r.get("busy") is False and not is_move_complete(r, transition_scene) for r in before_rows
     ):
@@ -2372,6 +2609,8 @@ def score_continuity(
     wrap_owner_excused: list[dict[str, Any]] = []
     if runtime_installed:
         for r in [*move_rows, *completed_move_rows, *after_rows]:
+            if in_gl(r):
+                continue
             owner = r.get("footprintOwner")
             owned = isinstance(owner, dict) and owner.get("elId") is not None and owner.get("elId") == r.get("elId")
             if not owned:
@@ -2385,6 +2624,8 @@ def score_continuity(
 
     rect_mismatches: list[dict[str, Any]] = []
     for r in before_rows:
+        if in_gl(r):
+            continue
         if not (r.get("isConnected") and _at_expected_rect(r)):
             rect_mismatches.append({"t": r["t"], "phase": "before", "rect": r.get("rect"), "isConnected": r.get("isConnected")})
     for r in after_rows:
@@ -2401,8 +2642,8 @@ def score_continuity(
 
     ok = (
         max_drop <= max_drop_s
-        and advance >= min_advance_s
-        and not stall["stalled"]
+        and (poster_held or advance >= min_advance_s)
+        and (poster_held or not stall["stalled"])
         and not owner_mismatches
         and not rect_mismatches
         and not missing_samples
@@ -2424,6 +2665,10 @@ def score_continuity(
         "motion": motion,
         "window": window,
     }
+    if gl_interval is not None:
+        scored["glInterval"] = gl_interval
+    if poster_held:
+        scored["posterHeld"] = True
     if wraps is not None:
         scored.update(wraps=len(wraps), wrapTimes=wraps, wrapOwnerExcused=wrap_owner_excused)
     return paint_gated(scored, element_id)
@@ -2450,6 +2695,7 @@ def carry_paint(
     samples: list[dict[str, Any]], element_id: Any, asset: str, window: dict[str, float],
     boundary_scene: float, src_rect: dict[str, float], dst_rect: dict[str, float], *,
     transition_scene: float | None, rect_tolerance: float, floor: float | None, wrap_times: Sequence[float] = (),
+    segment: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     """`paint_instrument.score_paint` over a carry's window (`wrap_times`: the classified loop wraps). The slot is the source rect before
     the move, the destination on move-complete and after rows, and on a bridge's move rows the
@@ -2471,13 +2717,64 @@ def carry_paint(
 
     source = (boundary_scene if transition_scene is None else transition_scene) - 1
 
+    start = paint_start(samples, element_id, boundary_scene, window, floor)
+    end = window["end"]
+    if segment is not None:
+        start, end = max(start, segment[0]), min(end, segment[1])
+    if end < start:
+        return {"status": "n/a", "verdict": True, "reasons": [], "window": {"start": start, "end": end}, "frames": 0}
     return paint_instrument.score_paint(
         samples, element_id, asset,
-        start=paint_start(samples, element_id, boundary_scene, window, floor), end=window["end"],
+        start=start, end=end,
         slot_of=slot_of, stage_box_of=stage_box_of, rect_tolerance=rect_tolerance, iou_min=INSTANCE_IOU_MIN,
         max_gap_frames=CARRY_COVER_MAX_GAP_FRAMES, min_fps=CARRY_COVER_MIN_FPS,
         unreadable_of=lambda row: phase_unreadable(row, transition_scene, source), wrap_times=wrap_times,
     )
+
+
+def carry_paint_outside_gl(
+    samples: list[dict[str, Any]], element_id: Any, asset: str, window: dict[str, float],
+    boundary_scene: float, src_rect: dict[str, float], dst_rect: dict[str, float], *,
+    transition_scene: float | None, rect_tolerance: float, floor: float | None,
+    wrap_times: Sequence[float], gl_interval: dict[str, float] | None,
+) -> dict[str, Any]:
+    if gl_interval is None:
+        return carry_paint(
+            samples, element_id, asset, window, boundary_scene, src_rect, dst_rect,
+            transition_scene=transition_scene, rect_tolerance=rect_tolerance, floor=floor, wrap_times=wrap_times,
+        )
+    epsilon = 1e-6
+    segments = [
+        (window["start"], min(window["end"], gl_interval["start"] - epsilon)),
+        (max(window["start"], gl_interval["end"] + epsilon), window["end"]),
+    ]
+    scored = [
+        carry_paint(
+            samples, element_id, asset, window, boundary_scene, src_rect, dst_rect,
+            transition_scene=transition_scene, rect_tolerance=rect_tolerance, floor=floor,
+            wrap_times=wrap_times, segment=segment,
+        )
+        for segment in segments if segment[1] >= segment[0]
+        and any(segment[0] <= row.get("t", -math.inf) <= segment[1] for row in samples)
+    ]
+    applicable = [row for row in scored if row.get("status") != "n/a"]
+    if not applicable:
+        return {"status": "inconclusive", "verdict": None, "reasons": ["no pre/post GL paint segment"],
+                "segments": scored, "glInterval": gl_interval}
+    status = "fail" if any(row.get("status") == "fail" for row in applicable) else (
+        "ok" if all(row.get("status") == "ok" for row in applicable) else "inconclusive"
+    )
+    lists = ("unobserved", "unreadable", "unpaintedSeqs", "partialSeqs")
+    counts = ("frames", "unpaintedFrames", "partialFrames", "doubleFrames", "substituteFrames")
+    return {
+        "status": status, "verdict": False if status == "fail" else True if status == "ok" else None,
+        "reasons": [reason for row in applicable for reason in row.get("reasons") or []],
+        "segments": scored, "glInterval": gl_interval,
+        "longestRun": max((row.get("longestRun") or 0 for row in applicable), default=0),
+        "coverage": {"segments": [row.get("coverage") for row in applicable]},
+        **{key: [value for row in applicable for value in row.get(key) or []] for key in lists},
+        **{key: sum(row.get(key) or 0 for row in applicable) for key in counts},
+    }
 
 
 def score_restart(
@@ -3312,7 +3609,7 @@ def carry_window_clip(samples: list[dict[str, Any]], spec: dict[str, Any]) -> tu
 
 def score_carry(
     samples: Any, spec: dict[str, Any], runtime_installed: bool, *, loop_period_s: float | None = None,
-    paint: bool = True, schema: Any = None,
+    paint: bool = True, schema: Any = None, feed_evidence: Any = None,
 ) -> dict[str, Any]:
     """`score_continuity` on schema-checked samples (`schema`: the sampler's, see
     `sample_schema_errors`); a False that rests on missing evidence (no crossing, no stage map, a
@@ -3320,15 +3617,96 @@ def score_carry(
     errors = sample_schema_errors(samples, schema=schema)
     if errors:
         return _inconclusive("sample schema is invalid", schemaErrors=errors)
+    under = score_under_artwork(feed_evidence, spec) if spec.get("underArtwork") is True else None
+    interval = under.get("interval") if isinstance(under, dict) else None
+    poster_held = bool(under and under.get("posterHold", {}).get("verdict") is True)
     scored = score_continuity(
         samples, spec["asset"].lower(), spec["atScene"], spec["srcRect"], spec["dstRect"], runtime_installed,
         transition_scene=spec["transitionScene"], loop_period_s=loop_period_s,
-        chain_clip=carry_window_clip(samples, spec), paint=paint,
+        chain_clip=carry_window_clip(samples, spec), paint=paint, gl_interval=interval, poster_held=poster_held,
     )
+    if under is not None:
+        scored["underArtwork"] = under
+        base, substituted = scored.get("verdict"), under.get("verdict")
+        scored["verdict"] = False if False in (base, substituted) else (
+            None if None in (base, substituted) else True
+        )
+        if base is not False and substituted is not True and under.get("reason"):
+            scored["reason"] = under["reason"]
     if scored.get("verdict") is not False:
         return scored
     gap = _carry_integrity_gap(samples, scored, spec)
     return {**scored, "verdict": None, "integrity": gap} if gap else scored
+
+
+def _feed_record_for_spec(evidence: Any, spec: dict[str, Any]) -> Any:
+    if not isinstance(evidence, dict):
+        return None
+    verdicts = evidence.get("verdicts") if isinstance(evidence.get("verdicts"), dict) else evidence
+    for key in (spec["id"], spec.get("srcObjectId"), spec.get("dstObjectId")):
+        if key is not None and isinstance(verdicts.get(key), dict):
+            return verdicts[key]
+    return None
+
+
+def score_feed_live(record: Any, *, continuous_expected: bool = True) -> dict[str, Any]:
+    return mm_feed_instrument.score_feed_live(record, continuous_expected=continuous_expected)
+
+
+def score_no_rider_above_canvas(record: Any) -> dict[str, Any]:
+    return mm_feed_instrument.score_no_rider_above_canvas(record)
+
+
+def score_labels_over_feed(record: Any) -> dict[str, Any]:
+    return mm_feed_instrument.score_labels_over_feed(record)
+
+
+def score_hold_frame(record: Any) -> dict[str, Any]:
+    return mm_feed_instrument.score_hold_frame(record)
+
+
+def score_poster_hold(record: Any) -> dict[str, Any]:
+    return mm_feed_instrument.score_poster_hold(record)
+
+
+def score_artwork_above(record: Any) -> dict[str, Any]:
+    return mm_feed_instrument.score_artwork_above(record)
+
+
+def score_under_artwork(evidence: Any, spec: dict[str, Any]) -> dict[str, Any]:
+    """All applicable GL/hold verdicts for one flagged carry and its evidenced substitution interval."""
+    record = _feed_record_for_spec(evidence, spec)
+    if not isinstance(record, dict):
+        return _inconclusive("no in-frame GL evidence for an under-artwork carry")
+    mode = record.get("mode")
+    rider = score_no_rider_above_canvas(record.get("rider"))
+    artwork = score_artwork_above(record.get("artwork"))
+    results: dict[str, Any] = {"noRiderAboveCanvas": rider, "artworkAbove": artwork}
+    if mode == "continuous":
+        primary = score_feed_live(record.get("feed"), continuous_expected=record.get("continuousExpected", True) is True)
+        labels = score_labels_over_feed(record.get("labels"))
+        results.update(feedLive=primary, labelsOverFeed=labels)
+        applicable = (primary, rider, labels, artwork)
+        interval = mm_feed_instrument.feed_interval(record.get("feed"))
+    elif mode in ("once", "departure", "standDown"):
+        hold = score_hold_frame(record.get("hold"))
+        poster = score_poster_hold(record.get("poster"))
+        results.update(holdFrame=hold, posterHold=poster)
+        if record.get("continuousExpected") is True:
+            results["feedLive"] = score_feed_live(record.get("feed"), continuous_expected=True)
+            applicable = (results["feedLive"], hold, poster, rider, artwork)
+        else:
+            applicable = (hold, poster, rider, artwork)
+        interval = mm_feed_instrument.feed_interval(record.get("hold"))
+    else:
+        return _inconclusive(f"unknown under-artwork evidence mode {mode!r}")
+    value = mm_feed_instrument.combine(*applicable)
+    failing = [name for name, row in results.items() if row.get("verdict") is False]
+    unknown = [name for name, row in results.items() if row.get("verdict") is None]
+    reason = f"under-artwork verdicts failed: {failing}" if failing else (
+        f"inconclusive: under-artwork verdicts unreadable: {unknown}" if unknown else None
+    )
+    return {"verdict": value, "reason": reason, "mode": mode, "interval": interval, **results}
 
 
 def score_restart_strict(
@@ -3835,12 +4213,19 @@ def score_armed_strict(reads: Any, armed: dict[str, Any], continuity: Any, sampl
 def score_verdicts(
     samples: list[dict[str, Any]], evidence: dict[str, Any], facts: dict[str, Any], runtime_installed: bool,
     continuity: Any, *, loop_period_s: float | None = None, paint: bool = True, schema: Any = None,
+    feed_evidence: Any = None,
 ) -> dict[str, Any]:
     """Pure: every plan-generated verdict (`facts["verdicts"]`), keyed by id. False only for a
     fully observed contrary behaviour; every integrity or missing-evidence path is None. `schema`
     is the sampler's (a schema-2 stream never scores as legacy). Rows or evidence outside the
     producer contract make every verdict of the arm None."""
-    errors = contract.first_errors(contract.sample_rows(samples, schema=schema), contract.evidence(evidence))
+    feed_streams: list[Iterator[str]] = []
+    if isinstance(feed_evidence, dict):
+        if "producer" in feed_evidence:
+            feed_streams.append(contract.mm_feed_report(feed_evidence["producer"]))
+        records = feed_evidence.get("verdicts") if isinstance(feed_evidence.get("verdicts"), dict) else {}
+        feed_streams.extend(contract.feed_verdict_record(row, f"feedEvidence.verdicts.{key}") for key, row in records.items())
+    errors = contract.first_errors(contract.sample_rows(samples, schema=schema), contract.evidence(evidence), *feed_streams)
     if errors:
         return {spec["id"]: _contract_inconclusive(errors) for spec in facts.get("verdicts") or []}
     scored: dict[str, Any] = {}
@@ -3849,6 +4234,7 @@ def score_verdicts(
         if kind == "carry":
             scored[spec["id"]] = score_carry(
                 samples, spec, runtime_installed, loop_period_s=loop_period_s, paint=paint, schema=schema,
+                feed_evidence=feed_evidence,
             )
         elif kind == "restart":
             scored[spec["id"]] = score_restart_strict(samples, spec)
@@ -4040,7 +4426,7 @@ def run_arm(
     gl_replay: str = "off", facts_on: dict[str, Any] | None = None, census: bool = False,
 ) -> dict[str, Any]:
     force_viewport(*viewport)
-    player = LiveOutputHost(export_root, slides, headless=True, gl_replay=gl_replay)
+    player = LiveOutputHost(export_root, slides, headless=True, gl_replay=gl_replay, **feed_host_kwargs())
     result: dict[str, Any] = {"arm": name}
     try:
         player.start()
@@ -4050,11 +4436,15 @@ def run_arm(
         if facts_on is not None:
             result["factsSet"] = "on" if arm_facts is facts_on else "off"
         evidence: dict[str, Any] = {}
+        feed_evidence: dict[str, Any] = {}
         observer = boundary_observer(player, arm_facts, evidence)
         if census:
             result["censusRaw"] = {}
             observer = census_observer(player, observer, result["censusRaw"])
-        raw_samples = drive_and_sample(player, observer=observer, carry_into=carry_destination_players(arm_facts))
+        raw_samples = drive_and_sample(
+            player, observer=observer, carry_into=carry_destination_players(arm_facts),
+            feed_facts=arm_facts, feed_sink=feed_evidence, feed_continuous_expected=True,
+        )
         record_sampler(result, player._require_transport(), raw_samples)
         samples, invalid_count = convert_samples_to_authored(raw_samples)
         result["samples"] = samples
@@ -4065,9 +4455,12 @@ def run_arm(
         result["stageFit"] = score_stage_fit(samples, expected_stage)
         runtime_installed = result["continuity"].get("mode") == "qualified"
         result["evidence"] = evidence
+        if feed_evidence:
+            result["feedEvidence"] = feed_evidence
         result.update(with_aliases(
             score_verdicts(
                 samples, evidence, arm_facts, runtime_installed, result["continuity"], schema=result["sampler"].get("schema"),
+                feed_evidence=feed_evidence,
             ),
             arm_facts.get("verdicts") or [],
         ))
@@ -4184,7 +4577,7 @@ def run_attach_arm(
     result: dict[str, Any] = {"arm": "attach", "attachViewport": {"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT}}
     with attach_chrome(scratch / "attach-chrome-profile", result) as port:
         with env_override({ATTACH_ENV: f"http://127.0.0.1:{port}"}):
-            player = LiveOutputHost(export_root, slides, headless=True, gl_replay=gl_replay)
+            player = LiveOutputHost(export_root, slides, headless=True, gl_replay=gl_replay, **feed_host_kwargs())
             try:
                 player.start()
                 output = player.output
@@ -4201,9 +4594,11 @@ def run_attach_arm(
                 computed_background = transport.evaluate("getComputedStyle(document.documentElement).backgroundColor")
                 result["transparentBackground"] = {"plan": bool(plan_transparent), "computedBackground": computed_background}
                 evidence: dict[str, Any] = {}
+                feed_evidence: dict[str, Any] = {}
                 raw_samples = drive_and_sample(
                     player, observer=boundary_observer(player, attach_facts, evidence),
                     carry_into=carry_destination_players(attach_facts),
+                    feed_facts=attach_facts, feed_sink=feed_evidence, feed_continuous_expected=False,
                 )
                 record_sampler(result, transport, raw_samples)
                 samples, invalid_count = convert_samples_to_authored(raw_samples)
@@ -4215,10 +4610,12 @@ def run_attach_arm(
                 result["stageFit"] = score_stage_fit(samples, expected_stage)
                 runtime_installed = result["continuity"].get("mode") == "qualified"
                 result["evidence"] = evidence
+                if feed_evidence:
+                    result["feedEvidence"] = feed_evidence
                 result.update(with_aliases(
                     score_verdicts(
                         samples, evidence, attach_facts, runtime_installed, result["continuity"],
-                        schema=result["sampler"].get("schema"),
+                        schema=result["sampler"].get("schema"), feed_evidence=feed_evidence,
                     ),
                     attach_facts.get("verdicts") or [],
                 ))
@@ -7003,7 +7400,9 @@ def run_red_arm(args: argparse.Namespace) -> dict[str, Any]:
             raise SystemExit(str(exc)) from None
     sha = plan_signature(runtime_of(plan))
     label = red_arm_label(args.core_variant, args.strip, runtime)
-    expected = RED_ARM_EXPECTATIONS.get((sha, label, args.gl_replay))
+    expected = RED_ARM_EXPECTATIONS.get(
+        (sha, label, args.gl_replay), MM_FEED_STRIP_EXPECTATIONS.get((sha, label, args.gl_replay)),
+    )
     result: dict[str, Any] = {
         "redArm": label, "planSha256": sha,
         "expectedRedSet": list(expected) if isinstance(expected, tuple) else expected,
@@ -8813,9 +9212,22 @@ def run_carry_cover_cli(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    global FEED_CONTROL, MM_FEED_REQUEST, MM_OPACITY_REQUEST, FEED_DWELL_S
     args = parse_args()
-    with run_scope(args.rescore if args.rescore is not None else args.artifact):
-        run_cli(args)
+    FEED_CONTROL = {"tamper": args.feed_tamper, "killHoldUpload": args.hold_upload_kill_switch}
+    MM_FEED_REQUEST = args.mm_feed
+    MM_OPACITY_REQUEST = args.mm_opacity
+    FEED_DWELL_S = args.feed_dwell
+    try:
+        with run_scope(args.rescore if args.rescore is not None else args.artifact), (
+            tampered_feed_ordinal() if args.feed_tamper == "ordinal" else nullcontext()
+        ), injected_feed_variant(args.feed_variant):
+            run_cli(args)
+    finally:
+        FEED_CONTROL = {}
+        MM_FEED_REQUEST = "auto"
+        MM_OPACITY_REQUEST = "auto"
+        FEED_DWELL_S = None
 
 
 def run_cli(args: argparse.Namespace) -> None:

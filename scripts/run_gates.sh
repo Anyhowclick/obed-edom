@@ -94,6 +94,37 @@ PAINT_CONTROL_ARMS=("D5 6:ancestor-opacity:pin@2" "D5 6:ancestor-opacity:pin@2:l
 CARRY_COVER_ARMS=("P2 pass" "P2 fail --core-variant linear-bridge" "P2 fail --carry-cover-null"
                   "D1 pass" "D1 fail --core-variant no-gl-clock" "D1 fail --carry-cover-null")
 [[ $TIER == full ]] || CARRY_COVER_ARMS=()
+# Stage B texture-feed registrations (§5.3): "deck expectation-label probe args". Each ordinary/control capture selects
+# its relevant A or attach arm; core variants already run one red arm. Expectations live in probe data, so the
+# shell queue contains no duplicated verdict table. Alpha is repaired into this round's outdir before any timed run.
+MM_FEED_ARMS=(
+  "D7 feed-on-2560 --mm-feed on --viewport 2560x1440 --skip-arms B,C,V,Voff,attach"
+  "D7 feed-on-1600 --mm-feed on --viewport 1600x1000 --skip-arms B,C,V,Voff,attach"
+  "D7 feed-on-1920 --mm-feed on --viewport 1920x1080 --skip-arms B,C,V,Voff,attach"
+  "D7 from-only --mm-feed on --feed-variant from-only --skip-arms B,C,V,Voff,attach"
+  "D7 attach-once --mm-feed off --feed-dwell 5 --skip-arms A,B,C,V,Voff"
+  "D7s feed-on-2560 --mm-feed on --viewport 2560x1440 --skip-arms B,C,V,Voff,attach"
+  "D7s feed-on-1600 --mm-feed on --viewport 1600x1000 --skip-arms B,C,V,Voff,attach"
+  "D7s feed-on-1920 --mm-feed on --viewport 1920x1080 --skip-arms B,C,V,Voff,attach"
+  "D7s from-only --mm-feed on --feed-variant from-only --skip-arms B,C,V,Voff,attach"
+  "Alpha_DSK feed-on-2560 --mm-feed on --viewport 2560x1440 --skip-arms B,C,V,Voff,attach"
+  "Alpha_DSK feed-on-1600 --mm-feed on --viewport 1600x1000 --skip-arms B,C,V,Voff,attach"
+  "Alpha_DSK feed-on-1920 --mm-feed on --viewport 1920x1080 --skip-arms B,C,V,Voff,attach"
+  "Alpha_DSK feed-off-2s --mm-feed off --feed-dwell 2 --skip-arms B,C,V,Voff,attach"
+  "Alpha_DSK feed-off-5s --mm-feed off --feed-dwell 5 --skip-arms B,C,V,Voff,attach"
+  "Alpha_DSK feed-off-12s --mm-feed off --feed-dwell 12 --skip-arms B,C,V,Voff,attach"
+  "Alpha_DSK attach-once --mm-feed off --feed-dwell 5 --skip-arms A,B,C,V,Voff"
+  "Alpha_DSK hold-upload-killed --mm-feed off --hold-upload-kill-switch --skip-arms B,C,V,Voff,attach"
+  "Alpha_DSK ordinal --feed-tamper ordinal --skip-arms B,C,V,Voff,attach"
+  "Alpha_DSK after-feed --feed-tamper after-feed --skip-arms B,C,V,Voff,attach"
+  "Alpha_DSK from-only --mm-feed on --feed-variant from-only --skip-arms B,C,V,Voff,attach"
+  "Alpha_DSK overlay-ride --core-variant overlay-ride"
+  "Alpha_DSK settle-on-stage --core-variant settle-on-stage"
+  "Alpha_DSK no-pause --mm-feed off --core-variant no-pause"
+  "Alpha_DSK mm-opacity-off --mm-opacity off --skip-arms B,C,V,Voff,attach"
+  "Alpha_DSK strip-bridge14-movie2 --strip bridge@14:movie2"
+)
+[[ $TIER == full ]] || MM_FEED_ARMS=()
 # P2 arms: p2 <tier> "<expected red>" "<expected inconclusive>" <args>; tier dev runs in both tiers, full only in full.
 # --skip-freeze-bracket goes on every arm but the two positive bracket arms, which must run it. As in P2 itself, the flag
 # is refused on any arm that is not a red arm (--core-variant, --strip, --disable-bridge34) unless it is a DOM
@@ -152,7 +183,27 @@ fi
 PY=/Users/anyhowclick/Desktop/work/obed-edom/.venv/bin/python; cd $G || exit 1; mkdir -p $O
 export PYTHONPATH=$G/src; F=$($PY -c 'from obed_edom.fixture_paths import fixture; print(fixture("p2-recovery"))')/html-adversarial
 Q=$($PY -c 'from obed_edom.fixture_paths import fixture; print(fixture("qual-decks"))')
+ALPHA_SOURCE=$($PY -c 'from obed_edom.fixture_paths import fixture; print(fixture("alpha-dsk-textures"))')
+ALPHA_GATE=$O/alpha-dsk-repaired
 [[ -d $F ]] || { echo "no P2 fixture at $F; no run launched" >&2; exit 2; }
+if (( ${#MM_FEED_ARMS} )); then
+  [[ -d $Q/D7/html-unmodified && -d $Q/D7s/html-unmodified ]] || {
+    echo "D7/D7s qualification fixtures are missing under $Q; no run launched" >&2; exit 2; }
+  $PY - "$ALPHA_SOURCE" "$ALPHA_GATE" <<'PYEOF' || { echo "Alpha texture repair FAILED; no run launched"; exit 2; }
+import json,shutil,sys
+from pathlib import Path
+from obed_edom import preview_textures
+source,dest=Path(sys.argv[1]),Path(sys.argv[2])
+manifest=json.loads((source/"manifest.json").read_text())
+shutil.copytree(source/"html-unmodified",dest)
+record=preview_textures.repair_textures(dest,manifest["slides"],player_digest=manifest["playerDigest"],log=print)
+if not record.get("repaired"):
+    raise SystemExit("Alpha repair changed no textures; the registered fixture is not the unrepaired input")
+if preview_textures._detect(preview_textures._load(dest,manifest["slides"]),preview_textures._Renderer()):
+    raise SystemExit("Alpha repair left detector hits")
+print("Alpha repaired fixture",dest)
+PYEOF
+fi
 if (( ALLOW_RECORD )); then
   echo "################################################################################"
   echo "## --allow-record: DISCOVERY RUN. RECORD arms are not gated; this is NOT a pass. ##"
@@ -613,6 +664,74 @@ sys.exit(1 if problems else 0)
 PYEOF
 }
 for A in $CARRY_COVER_ARMS; do run_cc ${=A}; done
+# Texture-feed gates accept the probe's normal 0/1 exit only when every registered per-verdict expectation matches.
+# `from-only` is entry-sensitive: a crossfade (`feed.to` non-null) must red feedLive, while a single-texture entry stays
+# green. The artifact keeps the complete producer and scorer records for exact-frame review.
+mm_feed_fixture(){ fix=$Q/$1/html-unmodified; [[ $1 == Alpha_DSK ]] && fix=$ALPHA_GATE; }
+run_mm_feed(){ local deck=$1 label=$2; shift 2; mm_feed_fixture $deck
+  local n=$deck-$label
+  queue $O/mm-feed-$n $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $fix/index.html \
+    --viewport 1920x1080 --artifact $O/mm-feed-$n.json "$@"; }
+check_mm_feed(){ local deck=$1 label=$2; shift 2; local n=$deck-$label rc=$(status_of $O/mm-feed-$deck-$label)
+  $PY - "$O/mm-feed-$n.json" "$rc" "$deck" "$label" <<'PYEOF' || fail "MM-FEED $deck $label"
+import json,sys
+sys.path.insert(0,"scripts")
+from live_continuity_probe import MM_FEED_GATE_EXPECTATIONS, MM_FEED_READ_EXPECTATIONS, MM_FEED_STRIP_EXPECTATIONS
+path,rc,deck,label=sys.argv[1:]
+try: artifact=json.load(open(path))
+except Exception as exc: print(f"[MM-FEED {deck} {label}] no artifact ({exc}) exit={rc}"); sys.exit(1)
+if label=="strip-bridge14-movie2":
+    ground=artifact.get("groundTruth") or {}
+    key=(ground.get("planSha256"),artifact.get("redArm"),"off")
+    wanted=MM_FEED_STRIP_EXPECTATIONS.get(key)
+    got=artifact.get("redSet")
+    problems=[]
+    if artifact.get("status")!="pass": problems.append(f"status {artifact.get('status')!r} != 'pass'")
+    if got!=list(wanted or ()): problems.append(f"redSet {got!r} != {list(wanted or ())!r}")
+    if artifact.get("unknown")!=[]: problems.append(f"unknown {artifact.get('unknown')!r} != []")
+    print(f"[MM-FEED {deck} {label}] exit={rc} redSet={got}")
+    for problem in problems: print("    MISMATCH:",problem)
+    sys.exit(1 if rc!="0" or problems else 0)
+rows=[]
+def walk(value,path="result"):
+    if isinstance(value,dict):
+        under=value.get("underArtwork")
+        if isinstance(under,dict) and "verdict" in under: rows.append((path,under))
+        for key,child in value.items(): walk(child,f"{path}.{key}")
+    elif isinstance(value,list):
+        for index,child in enumerate(value): walk(child,f"{path}[{index}]")
+walk(artifact)
+unique={json.dumps(row,sort_keys=True,default=str):(path,row) for path,row in rows}
+rows=list(unique.values())
+problems=[]
+if not rows: problems.append("no under-artwork verdict records")
+facts=[value for value in (artifact.get("groundTruth") or {}).get("verdicts") or [] if isinstance(value,dict)]
+first_feed_scene=min((value.get("atScene") for value in facts if isinstance(value.get("feed"),dict)),default=None)
+for path,row in rows:
+    expectation="feed-off" if label.startswith("feed-off-") else "feed-on" if label.startswith("feed-on-") else label
+    if label=="from-only":
+        record=None
+        for value in facts:
+            if isinstance(value,dict) and value.get("id") in path:
+                record=value; break
+        crossfade=isinstance((record or {}).get("feed"),dict) and (record["feed"].get("to") is not None)
+        expectation="from-only-crossfade" if crossfade else "from-only-single"
+        read_key=(deck,"first-crossfade") if deck=="Alpha_DSK" and (record or {}).get("atScene")==first_feed_scene else (deck,"crossfade")
+        want_reads=MM_FEED_READ_EXPECTATIONS.get(read_key) if crossfade else None
+        if want_reads:
+            checks={(check.get("progress")):check.get("ok") for check in (row.get("feedLive") or {}).get("checks") or []}
+            for progress,want in want_reads.items():
+                if checks.get(progress) is not want: problems.append(f"{path}.feedLive[{progress}] {checks.get(progress)!r} != {want!r}")
+    wanted=MM_FEED_GATE_EXPECTATIONS[expectation]
+    for name,want in wanted.items():
+        actual=(row.get(name) or {}).get("verdict") if isinstance(row.get(name),dict) else None
+        if actual is not want: problems.append(f"{path}.{name} {actual!r} != {want!r}")
+print(f"[MM-FEED {deck} {label}] exit={rc} records={len(rows)} status={artifact.get('status')}")
+for problem in problems: print("    MISMATCH:",problem)
+sys.exit(1 if rc not in ("0","1") or problems else 0)
+PYEOF
+  paint_report "$O/mm-feed-$n.json" "MM-FEED $deck $label"; }
+for A in "${MM_FEED_ARMS[@]}"; do run_mm_feed ${=A}; done
 # Each P2 arm runs in its own --out-dir.
 run_p2(){ shift 2; n=$(echo "$*" | tr -d ' ')
   queue "$O/p2$n" $PY scripts/p2_recovery_html_adversarial.py --reuse-export --disposable --out-dir "$O/p2$n" "$@"; }
@@ -626,6 +745,7 @@ for P in $PASSG_FIXTURES; do check_passg $P; done
 for PR in "${PASSG_RED_ARMS[@]}"; do check_passg_red ${=PR}; done
 for PC in "${PAINT_CONTROL_ARMS[@]}"; do check_paint_control ${=PC}; done
 for A in $CARRY_COVER_ARMS; do check_cc ${=A}; done
+for A in "${MM_FEED_ARMS[@]}"; do check_mm_feed ${=A}; done
 for A in "${P2_ARMS[@]}"; do check_p2 "${(@Q)${(z)A}}"; done
 $PY -c "from obed_edom.live_continuity_js import js_sha256; print('runtime sha at end', js_sha256())"
 pgrep -fl obed-live-chrome | cut -c1-80 | head -2

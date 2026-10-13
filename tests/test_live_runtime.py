@@ -33,11 +33,13 @@ def test_patch_requires_exactly_one_hook(monkeypatch):
 
 
 def test_patch_preserves_surrounding_player(monkeypatch):
-    player = b"before;" + live_runtime._ANCHOR + b";after"
+    player = b"before;" + live_runtime._ANCHOR + b";" + live_runtime._CONTINUITY_TAKE_ANCHOR + b";after"
     monkeypatch.setitem(live_runtime.SUPPORTED_PLAYERS, hashlib.sha256(player).hexdigest(), (ANY,) * 3)
     patched = live_runtime.patch_player(player, mm_opacity=False)
     assert patched.startswith(b"before;UC=new Eg,")
-    assert patched.endswith(b",UC.displayManager.showWaitingIndicator();after")
+    assert b",UC.displayManager.showWaitingIndicator();" in patched
+    assert patched.endswith(b";after")
+    assert patched.count(live_runtime._CONTINUITY_TAKE_REPLACEMENT) == 1
 
 
 def test_observation_tracks_automatic_chain_and_actual_slide():
@@ -168,11 +170,15 @@ EB_EFFECTS = {"apple:magic-move-implied-motion-path", "apple:ca-text-shimmer", "
 
 
 def _hook_only(player: bytes) -> bytes:
-    """Today's (pre-mm_opacity) output, built independently of patch_player."""
+    """The observation-hook output, built independently of patch_player."""
     return player.replace(
         live_runtime._ANCHOR,
         b"UC=new Eg," + live_runtime._INSTALL + b",UC.displayManager.showWaitingIndicator()",
     )
+
+
+def _base_live_output(player: bytes) -> bytes:
+    return live_runtime._apply_continuity_take(_hook_only(player))
 
 
 def _synthetic_player(anchors: list[bytes] | None = None) -> bytes:
@@ -184,11 +190,11 @@ def _pin(monkeypatch, player: bytes) -> None:
     monkeypatch.setitem(live_runtime.SUPPORTED_PLAYERS, hashlib.sha256(player).hexdigest(), (ANY,) * 3)
 
 
-def test_mm_opacity_off_is_byte_identical_to_the_hook_only_output(monkeypatch):
+def test_mm_opacity_off_is_the_hook_plus_the_continuity_take(monkeypatch):
     player = _synthetic_player()
     _pin(monkeypatch, player)
     off = live_runtime.patch_player(player, mm_opacity=False)
-    assert hashlib.sha256(off).hexdigest() == hashlib.sha256(_hook_only(player)).hexdigest()
+    assert hashlib.sha256(off).hexdigest() == hashlib.sha256(_base_live_output(player)).hexdigest()
     on = live_runtime.patch_player(player)
     assert on != off
     # Undoing exactly the replacements on the default (on) output gives the off output back.
@@ -196,7 +202,7 @@ def test_mm_opacity_off_is_byte_identical_to_the_hook_only_output(monkeypatch):
     for before, after in live_runtime._MM_OPACITY_REPLACEMENTS:
         assert on.count(after) == 1
         reverted = reverted.replace(after, before)
-    assert hashlib.sha256(reverted).hexdigest() == hashlib.sha256(off).hexdigest()
+    assert hashlib.sha256(live_runtime._apply_continuity_take(reverted)).hexdigest() == hashlib.sha256(off).hexdigest()
 
 
 def test_patch_rendering_is_the_live_output_minus_the_observation_hook(monkeypatch):
@@ -211,6 +217,43 @@ def test_patch_rendering_is_the_live_output_minus_the_observation_hook(monkeypat
         assert rendering.count(before) == 0 and rendering.count(after) == 1
 
 
+@pytest.mark.parametrize("mm_opacity", [True, False])
+def test_continuity_take_runs_before_teardown_and_releases_its_fallback_frame(mm_opacity):
+    method = (
+        live_runtime._MM_OPACITY_REPLACEMENTS[-1][1]
+        if mm_opacity
+        else live_runtime._CONTINUITY_TAKE_REPLACEMENT
+    ).decode() + "0){}}"
+    script = f"""
+const events = [];
+const window = {{__OBED_MM_FEED__: {{take(controller, scene) {{
+  events.push(['take', controller.name, scene]);
+  const frame = new VideoFrame();
+  events.push(['captured', frame.closed]);
+  frame.close();
+  events.push(['released', frame.closed]);
+}}}}}};
+const PB = {{prototype: {{__obedFreezeTake(controller, scene) {{ events.push(['freeze', controller.name, scene]); }}}}}};
+class VideoFrame {{ constructor() {{ this.closed = false; }} close() {{ this.closed = true; }} }}
+class Player {{ {method} }}
+const controller = {{name: 'player', displayScene(scene) {{ events.push(['display', scene]); }}}};
+Player.prototype.jumpToScene_partFour.call(controller, 7, true);
+Player.prototype.jumpToScene_partFour.call(controller, 8, false);
+window.__OBED_MM_FEED__.take = function() {{ events.push(['throw']); throw new Error('take'); }};
+Player.prototype.jumpToScene_partFour.call(controller, 9, true);
+console.log(JSON.stringify(events));
+"""
+    result = json.loads(subprocess.run([_node(), "-e", script], check=True, text=True, capture_output=True).stdout)
+    expected = [["take", "player", 7], ["captured", False], ["released", True]]
+    if mm_opacity:
+        expected.append(["freeze", "player", 7])
+    expected.extend([["display", 7], ["display", 8], ["throw"]])
+    if mm_opacity:
+        expected.append(["freeze", "player", 9])
+    expected.append(["display", 9])
+    assert result == expected
+
+
 # Each patcher that applies the Magic Move opacity replacements: live output and the dashboard preview.
 MM_PATCHERS = {"patch_player": live_runtime.patch_player, "patch_rendering": live_runtime.patch_rendering}
 
@@ -223,10 +266,14 @@ def test_mm_opacity_refuses_a_missing_or_duplicated_anchor(monkeypatch, index, c
     anchors[index : index + 1] = [anchors[index]] * count
     player = _synthetic_player(anchors)
     _pin(monkeypatch, player)
-    with pytest.raises(live_runtime.LiveRuntimeUnsupported, match="Magic Move opacity anchor"):
+    message = "continuity-take anchor" if index == len(live_runtime._MM_OPACITY_REPLACEMENTS) - 1 else "Magic Move opacity anchor"
+    with pytest.raises(live_runtime.LiveRuntimeUnsupported, match=message):
         MM_PATCHERS[patcher](player)
-    # The off path never looks at these anchors.
-    assert live_runtime.patch_player(player, mm_opacity=False) == _hook_only(player)
+    if index == len(live_runtime._MM_OPACITY_REPLACEMENTS) - 1:
+        with pytest.raises(live_runtime.LiveRuntimeUnsupported, match="continuity-take anchor"):
+            live_runtime.patch_player(player, mm_opacity=False)
+    else:
+        assert live_runtime.patch_player(player, mm_opacity=False) == _base_live_output(player)
 
 
 @pytest.mark.parametrize("patcher", MM_PATCHERS)
@@ -270,11 +317,11 @@ def test_mm_opacity_anchors_are_unique_on_the_real_player():
     for before, after in live_runtime._MM_OPACITY_REPLACEMENTS:
         assert patched.count(before) == 0
         assert patched.count(after) == 1
-    assert live_runtime.patch_player(player, mm_opacity=False) == _hook_only(player)
+    assert live_runtime.patch_player(player, mm_opacity=False) == _base_live_output(player)
 
 
 # sha256 of patch_player(real, mm_opacity=...) and patch_rendering(real), per stock player.
-# Old False: recorded on 3eb3b0fe (hook only, unchanged since). True and rendering: with the dissolve replacements
+# False includes the Stage B continuity-take callback. True and rendering include it with the dissolve replacements
 # D1-D4 = R9-R12 at plan rev 17 (keynote_live_dissolve_crossfade.plan.md); rev 13's D1 gave 409a0395... / 53ee23db... (old)
 # and 5dd3997e... / b366bd91... (new); rev 12's D1 gave bfeb9377... / a211b1c3... (old)
 # and 6c941ac1... / 50231d3c... (new); rev 9's D1 gave 49d56adc... / 117fd39d... (old)
@@ -282,17 +329,17 @@ def test_mm_opacity_anchors_are_unique_on_the_real_player():
 # and old True 21476f78... with R1-R5. New False: recorded when the new player was admitted.
 REAL_PATCHED_SHA256 = {
     OLD_PLAYER_SHA256: {
-        True: "81ac1a33bee3d2e8eb62fab183876d0c17ce2e372819a7416a0720073f8a9475",
-        False: "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
+        True: "dfcf5e9b5af150715ba0fb8addab325deeb161e937ae0cca69b4934678e214e2",
+        False: "aa7d69241c2c4b7b5adbdbca19af36f2ec73bf9fad48eb2c3f6a2aeda66f2243",
     },
     NEW_PLAYER_SHA256: {
-        True: "a9aa0bde8cf3f8f0c69a0292cb421caf8f733b7924a2ec825828ab331c40fe18",
-        False: "4f9fbffd95e4649543142b2e95586babd9d75f0a0d9a4974e21d6f33c8389e3b",
+        True: "ad0a7ca3c33685fe8f78e5223bfde0fb79ac66d44d2e49f22040a7ce16e949d7",
+        False: "322d7419c4c3814e67b169ae69c291f671c16e1807ec21760b5160514976ceee",
     },
 }
 REAL_RENDERING_SHA256 = {
-    OLD_PLAYER_SHA256: "dd0db318d9ef06371bebe4d0ea8368e81d6d83799d60318f7abf1995e7feb648",
-    NEW_PLAYER_SHA256: "c6c1eb5e368ae5e54e9b7bb94d8a9545522c34eeaca34c5c05fe396bc63841e9",
+    OLD_PLAYER_SHA256: "354212ac25f215b3fa8057ea6bbb27cd52c5e8f769204a3d6bd5ffa4970beba4",
+    NEW_PLAYER_SHA256: "67ea6cad3c6d4a06acc0340aee9eae35d2d4713bf4d211f807ad7fb948cd243b",
 }
 
 
@@ -948,7 +995,7 @@ def test_mm_opacity_census_mirror_changes_only_p2_1_to_2_slot_4_in_committed_fix
     for row in rows:
         assert [old == new for old, new in row] == [True, True, True, True, False]
         assert row[4] == (1, SLOT4_ALPHA)
-    paths = sorted(FIXTURE_ROOT.rglob("*.json"))
+    paths = sorted(path for path in FIXTURE_ROOT.rglob("*.json") if "alpha_dsk_repaired" not in path.parts)
     stats, changed = _census(paths)
     assert stats["one_to_two"] >= 1 and stats["effects"] > stats["one_to_two"]
     assert changed == {(True, 4)}
@@ -1816,9 +1863,10 @@ def _full_shape(effect: dict) -> bool:
 # construction: committed transitions plus one cut, the near-misses, failures and ids (mandatory); census: the 133
 # transitions on disk (needs the main checkout's output/fixtures).
 DISSOLVE_NODE_CASES = ("construction", "census", "freeze_stub", "freeze_decks")
-# The committed exports §8 counts. `qual_decks/` (S2) holds verbatim copies of exports already under OUTPUT_FIXTURES, so
-# the census would count them twice.
-DISSOLVE_COMMITTED_EXPORTS = tuple(p for p in sorted(FIXTURE_ROOT.iterdir()) if p.is_dir() and p.name != "qual_decks")
+# The committed exports §8 counts. Qualification and Stage B's repaired Alpha fixture are separate test corpora.
+DISSOLVE_COMMITTED_EXPORTS = tuple(
+    p for p in sorted(FIXTURE_ROOT.iterdir()) if p.is_dir() and p.name not in {"qual_decks", "alpha_dsk_repaired"}
+)
 
 
 @pytest.mark.parametrize("case", DISSOLVE_NODE_CASES)

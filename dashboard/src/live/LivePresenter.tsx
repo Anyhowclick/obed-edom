@@ -23,6 +23,7 @@ function NotCarried({ entries }: { entries: LiveNotCarried[] }) {
 function ContinuityStatus({ continuity }: { continuity?: LiveContinuity }) {
   const mode = continuity?.mode;
   const notCarried = continuity?.notCarried ?? [];
+  const posterHold = continuity?.posterHold ?? [];
   const label = mode === "qualified" ? `On${notCarried.length ? ` · ${notCarried.length} not carried` : ""}` : mode === "unsupported" || mode === "off" ? "Off for this deck" : mode === "pending" ? "Checking" : "Unavailable";
   const detail = continuity?.reason || (mode === "qualified"
     ? (continuity?.scale && continuity.scale !== 1 ? `Enabled for this deck (stage scaled ×${continuity.scale.toFixed(2)}).` : "Enabled for this deck.")
@@ -34,6 +35,7 @@ function ContinuityStatus({ continuity }: { continuity?: LiveContinuity }) {
   return <div className="live-continuity" aria-live="polite">
     <span className="live-continuity-badge" data-mode={mode || "unknown"}>Movie continuity · {label}</span>
     <p className="note">{detail}</p>
+    {posterHold.length > 0 && <p className="note">Poster hold · {posterHold.map((entry) => `${entry.fromSlide ?? "?"} → ${entry.toSlide ?? "?"} · ${entry.movie} · ${entry.mode === "exact" ? "exact departure frame" : entry.mode === "unavailable" ? "unavailable" : "baked poster"}${entry.reason ? ` (${entry.reason})` : ""}`).join("; ")}</p>}
     <NotCarried entries={notCarried} />
   </div>;
 }

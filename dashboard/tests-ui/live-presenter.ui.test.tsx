@@ -188,6 +188,20 @@ describe("LivePresenter", () => {
     expect(screen.queryByText(/^\d+ more$/)).not.toBeInTheDocument();
   });
 
+  it("shows poster holds on one line under the continuity badge", async () => {
+    const continuity: LiveContinuity = {
+      mode: "qualified",
+      posterHold: [
+        { fromSlide: 6, toSlide: 7, movie: "clip-a.mov", objectId: "a", mode: "exact", reason: "continuous feed disabled" },
+        { fromSlide: 7, toSlide: 8, movie: "clip-b.mov", objectId: "b", mode: "baked", reason: "CEF upload path not qualified" },
+      ],
+    };
+    const api = client({ state: vi.fn(async () => state({ continuity })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    await screen.findByText("Movie continuity · On");
+    expect(screen.getByText("Poster hold · 6 → 7 · clip-a.mov · exact departure frame (continuous feed disabled); 7 → 8 · clip-b.mov · baked poster (CEF upload path not qualified)")).toBeVisible();
+  });
+
   it("lists three declined cuts and folds the rest into an expandable list", async () => {
     const notCarried = Array.from({ length: 5 }, (_, index) => ({
       fromSlide: index + 1, toSlide: index + 2, asset: `clip-${index + 1}.mov`, reason: `reason ${index + 1}`,

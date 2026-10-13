@@ -13,6 +13,7 @@ from obed_edom.live_continuity import ContinuityPlan, Unsupported, derive_plan
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "live_continuity"
 MINIMAL_ROOT = FIXTURE_ROOT / "minimal_alpha_dsk"
+ALPHA_ROOT = FIXTURE_ROOT / "alpha_dsk_repaired"
 POSITIVE_ROOT = FIXTURE_ROOT / "positive_control"
 LOOP_ROOT = FIXTURE_ROOT / "minimal_alpha_dsk_loop"
 
@@ -50,13 +51,14 @@ def _plan(root: Path, uuids: list[str]) -> ContinuityPlan | Unsupported:
 MINIMAL_UUIDS = _slide_list(MINIMAL_ROOT)
 POSITIVE_UUIDS = _slide_list(POSITIVE_ROOT)
 LOOP_UUIDS = _slide_list(LOOP_ROOT)
+ALPHA_UUIDS = _slide_list(ALPHA_ROOT)
 
 
 @pytest.mark.parametrize(
     "slice_, actions, refusal_codes, runtime_actions",
     [
         pytest.param((0, 2), ["pin"], [], ["pin"], id="S4-to-S5-pins-with-no-refusal"),
-        pytest.param((2, 4), ["pin", "pin"], ["overlap"], ["retire", "pin"], id="S6-to-S7-two-pins-one-refusal"),
+        pytest.param((2, 4), ["pin", "pin"], [], ["pin", "pin"], id="S6-to-S7-lifts-the-settling-overlap"),
     ],
 )
 def test_minimal_pins_derive_a_runtime(slice_, actions, refusal_codes, runtime_actions):
@@ -82,17 +84,94 @@ def test_minimal_s4_to_s5_gl_replay_keyword():
     assert "glReplayReason" not in movie
 
 
-def test_minimal_s6_to_s7_gl_replay_refuses_two_movies():
+def test_minimal_s6_to_s7_lifts_only_the_overlapping_pin():
     plan = derive_plan(MINIMAL_ROOT, _slides(MINIMAL_UUIDS[2:4]), resolver=_resolver, gl_replay=True)
     assert isinstance(plan, ContinuityPlan)
-    refused = [r for r in plan.refusals if r["reason"]]
-    assert len(refused) == 1
     movies = plan.boundaries[0].as_dict()["movies"]
-    refused_movie = next(m for m in movies if m["asset"] == refused[0]["asset"])
-    assert refused_movie["glReplay"] is False
-    assert refused_movie["glReplayReason"] == (
-        "2 movies are carried across the boundary, expected exactly 1"
-    )
+    lifted = next(movie for movie in movies if movie["asset"] == "clip-10-1000001.mov")
+    plain = next(movie for movie in movies if movie["asset"] == "clip-10-1000002.mov")
+    assert lifted["underArtwork"] is True
+    assert lifted["feed"] == {
+        "draw": 2,
+        "drawCount": 9,
+        "from": {"upload": 3, "size": [476, 271]},
+        "to": None,
+    }
+    assert "underArtwork" not in plain and "feed" not in plain
+    assert plan.refusals == ()
+
+
+def test_repaired_alpha_slice_derives_live_feed_bindings_from_its_json():
+    plan = _plan(ALPHA_ROOT, ALPHA_UUIDS)
+    assert isinstance(plan, ContinuityPlan)
+    runtime = plan.to_runtime()
+    assert isinstance(runtime, dict)
+    entries = runtime["boundaries"]
+    assert [(entry["atScene"], entry["action"], entry["movieKey"]) for entry in entries] == [
+        (2, "bridge", "movie1"),
+        (4, "restart", "movie1"),
+        (6, "bridge", "movie3"),
+        (8, "bridge", "movie3"),
+        (10, "bridge", "movie2"),
+        (10, "bridge", "movie3"),
+    ]
+    fed = [entry for entry in entries if entry.get("feed")]
+    assert [(entry["atScene"], entry["feed"]) for entry in fed] == [
+        (
+            6,
+            {
+                "draw": 3,
+                "drawCount": 5,
+                "from": {"upload": 4, "size": [484, 272]},
+                "to": {"upload": 5, "size": [824, 463]},
+            },
+        ),
+        (
+            8,
+            {
+                "draw": 4,
+                "drawCount": 9,
+                "from": {"upload": 5, "size": [824, 463]},
+                "to": {"upload": 6, "size": [714, 402]},
+            },
+        ),
+        (
+            10,
+            {
+                "draw": 2,
+                "drawCount": 12,
+                "from": {"upload": 3, "size": [715, 402]},
+                "to": {"upload": 4, "size": [582, 327]},
+            },
+        ),
+        (
+            10,
+            {
+                "draw": 4,
+                "drawCount": 12,
+                "from": {"upload": 6, "size": [714, 402]},
+                "to": {"upload": 7, "size": [582, 327]},
+            },
+        ),
+    ]
+    assert all(entry["underArtwork"] is True for entry in fed)
+    assert {
+        scene: (facts["drawCount"], facts["uploadCount"])
+        for scene, facts in plan.feed_draws.items()
+    } == {6: (5, 7), 8: (9, 12), 10: (12, 17)}
+    assert [
+        (row["draw"], row.get("objectId"))
+        for row in plan.feed_draws[10]["draws"]
+        if row.get("objectId")
+    ] == [
+        (2, "0F9F4FEF-B316-430B-8DEB-67D6545A9B50"),
+        (4, "A94D1E57-C316-45EF-B304-54634FFBAD16"),
+    ]
+    assert [
+        (row["draw"], row["labelBoxOpacity"])
+        for row in plan.feed_draws[10]["draws"]
+        if row["labelBoxOpacity"] is not None
+    ] == [(5, pytest.approx(0.6117682456970215)), (7, pytest.approx(0.6117682456970215)), (11, pytest.approx(0.6117682456970215))]
 
 
 @pytest.mark.parametrize("slice_", [(4, 6), (0, 6)])

@@ -10,14 +10,14 @@ MM_OPACITY_ENV = "OBED_LIVE_MM_OPACITY"
 # 17c0c938 is e9b2fad4 plus two `,isEvalSupported:!1` PDF.js options, outside every anchor.
 SUPPORTED_PLAYERS = {
     "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354": (
-        "81ac1a33bee3d2e8eb62fab183876d0c17ce2e372819a7416a0720073f8a9475",
-        "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
-        "dd0db318d9ef06371bebe4d0ea8368e81d6d83799d60318f7abf1995e7feb648",
+        "dfcf5e9b5af150715ba0fb8addab325deeb161e937ae0cca69b4934678e214e2",
+        "aa7d69241c2c4b7b5adbdbca19af36f2ec73bf9fad48eb2c3f6a2aeda66f2243",
+        "354212ac25f215b3fa8057ea6bbb27cd52c5e8f769204a3d6bd5ffa4970beba4",
     ),
     "17c0c938caa49d5c70bd83bd5b84f57381faa51602932ca733aa965055026d91": (
-        "a9aa0bde8cf3f8f0c69a0292cb421caf8f733b7924a2ec825828ab331c40fe18",
-        "4f9fbffd95e4649543142b2e95586babd9d75f0a0d9a4974e21d6f33c8389e3b",
-        "c6c1eb5e368ae5e54e9b7bb94d8a9545522c34eeaca34c5c05fe396bc63841e9",
+        "ad0a7ca3c33685fe8f78e5223bfde0fb79ac66d44d2e49f22040a7ce16e949d7",
+        "322d7419c4c3814e67b169ae69c291f671c16e1807ec21760b5160514976ceee",
+        "67ea6cad3c6d4a06acc0340aee9eae35d2d4713bf4d211f807ad7fb948cd243b",
     ),
 }
 _ANCHOR = b"UC=new Eg,UC.displayManager.showWaitingIndicator()"
@@ -53,6 +53,12 @@ _MM_HANDBACK_METHOD = (
     b"(e.toTexture=R.createTexture(this.gl,D.textureAssets[m[0].t]),e.obedMix=!0)}}catch(E){}}"
 )
 _FREEZE_QUALIFIED_TUPLES = b'["bt709/bt709/bt709/false"]'
+_CONTINUITY_TAKE_ANCHOR = b"jumpToScene_partFour(A,B){if(this.displayScene(A),"
+_CONTINUITY_TAKE_CALL = (
+    b'B&&function(){try{var M=window.__OBED_MM_FEED__;M&&"function"==typeof M.take&&M.take(this,A)}'
+    b'catch(E){}}.call(this),'
+)
+_CONTINUITY_TAKE_REPLACEMENT = b"jumpToScene_partFour(A,B){if(" + _CONTINUITY_TAKE_CALL + b"this.displayScene(A),"
 _DISSOLVE_METHODS = (
     b"__obedShape(C){try{var b=C.baseLayer,K=b.layers,k=1===K.length?K[0]:null,P=k&&k.layers,i=P&&2===P.length?P[0]:null,"
     b'o=i&&P[1],x=o&&o.animations&&1===o.animations.length?o.animations[0]:null,u="none"===C.name,f=function(l,'
@@ -207,8 +213,9 @@ _MM_OPACITY_REPLACEMENTS = (
         b"this.cssRenderer.draw(a),this.__obedFreeze(C,A),a.removeChild(w)}",
     ),
     (
-        b"jumpToScene_partFour(A,B){if(this.displayScene(A),",
-        b"jumpToScene_partFour(A,B){if(B&&PB.prototype.__obedFreezeTake(this,A),this.displayScene(A),",
+        _CONTINUITY_TAKE_ANCHOR,
+        b"jumpToScene_partFour(A,B){if(" + _CONTINUITY_TAKE_CALL
+        + b"B&&PB.prototype.__obedFreezeTake(this,A),this.displayScene(A),",
     ),
 )
 
@@ -308,7 +315,7 @@ def patch_player(player: bytes, *, mm_opacity: bool = True) -> bytes:
     `left`/`top`), with no top-layer element and no open shadow root on the page, and when every element passes the paint
     gate or, outside the stage, is clipped by an HTML `div` proven disjoint from the visible stage. Supported pages
     create no author shadow roots (a checked invariant), since a closed one cannot be detected; anything else keeps
-    today's look."""
+    today's look. Both modes expose the existing pre-teardown call site to an optional MM-feed frame take."""
     pins = SUPPORTED_PLAYERS.get(hashlib.sha256(player).hexdigest())
     if pins is None:
         raise LiveRuntimeUnsupported("This Keynote HTML player version is not supported for live output.")
@@ -318,7 +325,7 @@ def patch_player(player: bytes, *, mm_opacity: bool = True) -> bytes:
         _ANCHOR,
         b"UC=new Eg," + _INSTALL + b",UC.displayManager.showWaitingIndicator()",
     )
-    return _pinned(_apply_mm_opacity(patched), pins[0]) if mm_opacity else _pinned(patched, pins[1])
+    return _pinned(_apply_mm_opacity(patched), pins[0]) if mm_opacity else _pinned(_apply_continuity_take(patched), pins[1])
 
 
 def patch_rendering(player: bytes) -> bytes:
@@ -336,10 +343,22 @@ def _pinned(patched: bytes, expected: str) -> bytes:
 
 
 def _apply_mm_opacity(player: bytes) -> bytes:
+    player = _apply_continuity_take(player)
     for before, after in _MM_OPACITY_REPLACEMENTS:
+        if before == _CONTINUITY_TAKE_ANCHOR:
+            before = _CONTINUITY_TAKE_REPLACEMENT
         if player.count(before) != 1:
             raise LiveRuntimeUnsupported("The supported player Magic Move opacity anchor is missing or ambiguous.")
         player = player.replace(before, after)
         if player.count(after) != 1:
             raise LiveRuntimeUnsupported("The supported player Magic Move opacity patch is ambiguous.")
+    return player
+
+
+def _apply_continuity_take(player: bytes) -> bytes:
+    if player.count(_CONTINUITY_TAKE_ANCHOR) != 1:
+        raise LiveRuntimeUnsupported("The supported player continuity-take anchor is missing or ambiguous.")
+    player = player.replace(_CONTINUITY_TAKE_ANCHOR, _CONTINUITY_TAKE_REPLACEMENT)
+    if player.count(_CONTINUITY_TAKE_REPLACEMENT) != 1:
+        raise LiveRuntimeUnsupported("The supported player continuity-take patch is ambiguous.")
     return player
