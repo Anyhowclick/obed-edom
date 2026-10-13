@@ -272,7 +272,12 @@ def test_refusal_names_every_unrepairable_object_and_writes_nothing(tmp_path):
     # bad id at one rect are two objects, each refused. Slide 2 SHARED: a flattened copy between
     # movie M2's slot (event 0) and M3's (event 2) is ambiguous and refused, though D3 fixes both slots.
     point1, point2 = [("Point 1", TEXT_BOX)], [("Point 2", TEXT_BOX)]
+    # The three SHARED slots sit at x offsets 0 / 0.4 / 0.8: M3's slot is outside GROUP_TOL of M2's,
+    # so the copy's ambiguity must be judged around the copy itself, not around the hit.
     image, mix, shared = (500, 500, 40, 30), (700, 700, 60, 20), (800, 300, 160, 80)
+
+    def nudge(dx: float) -> tuple:
+        return (shared[0] + dx, *shared[1:])
     slides = _export(
         tmp_path,
         [
@@ -300,8 +305,8 @@ def test_refusal_names_every_unrepairable_object_and_writes_nothing(tmp_path):
                             _movie("M3", "MOVIE", shared, "P3"),
                         ],
                     ),
-                    _event([_slot(POSTER, "WRONG", kind=5, oid="M1"), _flat(shared, "SHARED")]),
-                    _event([_slot(shared, "SHARED", kind=5, oid="M3")]),
+                    _event([_slot(POSTER, "WRONG", kind=5, oid="M1"), _flat(nudge(0.4), "SHARED")]),
+                    _event([_slot(nudge(0.8), "SHARED", kind=5, oid="M3")]),
                 ],
             ),
         ],

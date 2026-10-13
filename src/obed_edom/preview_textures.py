@@ -435,8 +435,8 @@ def _same_object(slide: _Slide, a: _Leaf, b: _Leaf) -> bool:
 
 def _groups(slides: list[_Slide], hits: list[_Hit]) -> tuple[list[_Group], list[tuple[int, _Leaf]]]:
     """Partition the bad leaves into groups whose members share slide, old id, rect, category,
-    normalised accessibility text and movie owner. An unbound copy beside more than one owner is
-    ambiguous and returned separately, never grouped."""
+    normalised accessibility text and movie owner. An unbound copy joins the one owner among the
+    compatible leaves around itself; beside more than one it is ambiguous and returned separately."""
     groups: list[_Group] = []
     ambiguous: list[tuple[int, _Leaf]] = []
     seen: set[tuple[int, str]] = set()
@@ -447,18 +447,19 @@ def _groups(slides: list[_Slide], hits: list[_Hit]) -> tuple[list[_Group], list[
         candidates = [
             leaf for leaf in slide.leaves if (hit.slide, leaf.key) not in seen and _same_object(slide, leaf, hit.leaf)
         ]
-        owners = {leaf.key: _owner(slide, leaf) for leaf in candidates}
-        movies = {oid for bound, oid in owners.values() if bound}
         parts: dict[tuple[bool, str | None], list[_Leaf]] = {}
         for leaf in candidates:
             seen.add((hit.slide, leaf.key))
-            bound, oid = owners[leaf.key]
-            if bound or len(movies) == 1:
-                parts.setdefault((True, oid if bound else next(iter(movies))), []).append(leaf)
-            elif movies:
+            bound, oid = _owner(slide, leaf)
+            if bound:
+                parts.setdefault((True, oid), []).append(leaf)
+                continue
+            around = [_owner(slide, other) for other in slide.leaves if _same_object(slide, other, leaf)]
+            owners = {o for b, o in around if b}
+            if len(owners) > 1:
                 ambiguous.append((hit.slide, leaf))
             else:
-                parts.setdefault((False, None), []).append(leaf)
+                parts.setdefault((bool(owners), next(iter(owners), None)), []).append(leaf)
         groups.extend(_Group(hit.slide, hit.leaf.texture, sorted(m, key=lambda leaf: leaf.key)) for m in parts.values())
     return groups, ambiguous
 
