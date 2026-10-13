@@ -81,6 +81,10 @@ _PLACEMENT_RENEW_S = 3.0
 _PROBE_CAPTURE_SETTLE_S = .3
 _PROBE_CAPTURE_INTERVAL_S = .2
 _PROBE_MEASURE_S = 15.0
+_PROGRAM_BASELINE_GAPS = 6
+_PROGRAM_BASELINE_TIMEOUT_S = 1.0
+_PROGRAM_BASELINE_TOLERANCE = .1
+_PROGRAM_CADENCE_SETTLE_S = 1.0
 _TONE_UNSET = object()
 _CONTINUITY_STAGE_GATE_EXPR = (
     "(()=>{var s=document.getElementById('stage');var r=s?s.getBoundingClientRect():null;"
@@ -1035,11 +1039,13 @@ def _rate_warnings(report: list[dict[str, Any]], rate: int) -> list[str]:
 
 
 class _ProgramGuard:
-    def __init__(self, transport: ChromeCdp, context: str) -> None:
+    def __init__(self, transport: ChromeCdp, context: str, *, not_before_s: float = 0.0) -> None:
         self._transport = transport
         self._context = context
         self._key = "__obedProgramGuard_" + secrets.token_hex(8)
         self._baseline_frame_ms: float | None = None
+        self._baseline_reason = "program cadence baseline unavailable"
+        self._not_before_s = not_before_s
 
     def _expr(self, operation: str) -> str:
         key = json.dumps(self._key)
@@ -1058,36 +1064,47 @@ class _ProgramGuard:
                 'if(m.lastAdvanceAt!==null&&m.frameMs>0)m.maxStallMs=Math.max(m.maxStallMs,t-m.lastAdvanceAt-m.frameMs)}m.lastTime=ct;m.lastAdvanceAt=t;m.activeAt=null}'
                 'else if(m.lastAdvanceAt!==null&&m.frameMs>0)m.maxStallMs=Math.max(m.maxStallMs,t-m.lastAdvanceAt-m.frameMs)});'
                 'if(live)raf=requestAnimationFrame(tick)}'
-                'function snapshot(){var g=s.gaps.slice().sort(function(a,b){return a-b}),mid=g.length?g[Math.floor(g.length/2)]:null;'
-                'return {visibilityEvents:s.visibilityEvents,frames:s.frames,baselineFrameMs:mid,maxRafGapMs:s.gaps.length?Math.max.apply(Math,s.gaps):null,'
+                'function snapshot(){var gaps=s.gaps.slice(),g=gaps.slice().sort(function(a,b){return a-b}),mid=g.length?g[Math.floor(g.length/2)]:null;'
+                'return {visibilityEvents:s.visibilityEvents,frames:s.frames,gaps:gaps,baselineFrameMs:mid,maxRafGapMs:gaps.length?Math.max.apply(Math,gaps):null,'
                 'media:s.media.map(function(m){return {id:m.id,playing:m.playing,monotonic:m.monotonic,'
                 'maxStallMs:Math.max(0,m.maxStallMs),frameMs:m.frameMs,awaitingAdvance:m.active&&m.lastAdvanceAt===null,'
                 'activeWithoutAdvanceMs:m.active&&m.lastAdvanceAt===null&&m.activeAt!==null&&last!==null?Math.max(0,last-m.activeAt):0}})}}'
+                'function arm(){s.visibilityEvents=0;s.frames=0;s.gaps=[];s.media=[];last=null;mediaMap=new WeakMap();mediaId=0;return true}'
                 'function finish(){live=false;cancelAnimationFrame(raf);document.removeEventListener("visibilitychange",visibility);var out=snapshot();delete window[k];return out}'
-                'Object.defineProperty(window,k,{value:{snapshot:snapshot,finish:finish},configurable:true});'
+                'Object.defineProperty(window,k,{value:{snapshot:snapshot,arm:arm,finish:finish},configurable:true});'
                 'document.addEventListener("visibilitychange",visibility);raf=requestAnimationFrame(tick);return true})(' + key + ')'
             )
-        method = "finish" if operation == "finish" else "snapshot"
+        method = operation if operation in ("arm", "finish") else "snapshot"
         return f'(function(k){{var g=window[k];return g&&g.{method}?g.{method}():null}})({key})'
 
     def begin(self) -> None:
         if self._transport.evaluate_in(self._context, self._expr("begin"), deadline_s=1.0) is not True:
             raise LiveHostError("Program guard could not start.")
-        deadline = time.monotonic() + .25
+        started = time.monotonic()
+        deadline = max(started + _PROGRAM_BASELINE_TIMEOUT_S, self._not_before_s + .35)
+        saw_cadence = False
         while time.monotonic() < deadline:
             value = self._transport.evaluate_in(self._context, self._expr("sample"), deadline_s=.5)
             sample = value if isinstance(value, dict) else None
-            if sample is not None and sample.get("frames", 0) >= 4:
-                baseline = sample.get("baselineFrameMs")
-                max_gap = sample.get("maxRafGapMs")
-                if (
-                    isinstance(baseline, (int, float)) and not isinstance(baseline, bool) and baseline > 0
-                    and isinstance(max_gap, (int, float)) and not isinstance(max_gap, bool)
-                    and max_gap <= 2 * baseline
-                ):
-                    self._baseline_frame_ms = float(baseline)
-                return
+            gaps = sample.get("gaps") if sample is not None else None
+            recent = gaps[-_PROGRAM_BASELINE_GAPS:] if isinstance(gaps, list) else []
+            if (
+                len(recent) == _PROGRAM_BASELINE_GAPS
+                and all(isinstance(gap, (int, float)) and not isinstance(gap, bool) and gap > 0 for gap in recent)
+            ):
+                saw_cadence = True
+                ordered = sorted(float(gap) for gap in recent)
+                baseline = ordered[len(ordered) // 2]
+                stable = max(abs(gap - baseline) for gap in ordered) <= baseline * _PROGRAM_BASELINE_TOLERANCE
+                if stable and time.monotonic() >= self._not_before_s:
+                    if self._transport.evaluate_in(self._context, self._expr("arm"), deadline_s=.5) is True:
+                        self._baseline_frame_ms = baseline
+                    return
             time.sleep(.01)
+        if saw_cadence:
+            self._baseline_reason = "program cadence baseline unstable"
+        try: self._transport.evaluate_in(self._context, self._expr("arm"), deadline_s=.5)
+        except Exception: pass
 
     def sample(self, phase: str) -> None:
         value = self._transport.evaluate_in(self._context, self._expr("sample"), deadline_s=1.0)
@@ -1108,7 +1125,7 @@ class _ProgramGuard:
         if not isinstance(visibility, int) or isinstance(visibility, bool):
             return ProgramCheck(None, 0, None, None, (), "visibility telemetry unavailable")
         if not isinstance(baseline, (int, float)) or isinstance(baseline, bool) or baseline <= 0:
-            return ProgramCheck(None, visibility, None, None, (), "program cadence baseline unavailable")
+            return ProgramCheck(None, visibility, None, None, (), self._baseline_reason)
         if not isinstance(max_gap, (int, float)) or isinstance(max_gap, bool):
             return ProgramCheck(None, visibility, float(baseline), None, (), "program cadence unavailable")
         media = tuple(dict(item) for item in media_raw) if isinstance(media_raw, list) and all(isinstance(item, dict) for item in media_raw) else ()
@@ -1242,6 +1259,7 @@ class LiveOutputHost:
         self._placement_channel_absent_context: str | None = None
         self._placement_epoch = 0
         self._player_busy = True
+        self._program_guard_not_before_s = 0.0
         self._placement: dict[str, Any] = {
             "state": "invalid", "grant": None, "reason": None, "at": None,
             "product": None, "gpuCompositing": None, "method": None,
@@ -1492,6 +1510,7 @@ class LiveOutputHost:
             self._logger.log("browserVersion", result=version)
             self._install_placement_channel(version, url)
             self._transport.goto(url)
+            self._defer_program_guard()
             stage_geometry: dict[str, Any] | None = None
             if self._continuity_mode == "pending":
                 self._continuity_mode, self._continuity_reason, stage_geometry, self._continuity_scale = (
@@ -1676,6 +1695,7 @@ class LiveOutputHost:
             self._transport = replacement
             self._placement_frame = frame
             self._placement_context = context
+            self._defer_program_guard()
             self._connection_generation += 1
             product = version.get("product") if isinstance(version, dict) else None
             self._placement["product"] = product if isinstance(product, str) else None
@@ -1770,6 +1790,12 @@ class LiveOutputHost:
             return None
         return value[0], float(value[1]), value[2], value[3]
 
+    def _defer_program_guard(self) -> None:
+        self._program_guard_not_before_s = max(
+            self._program_guard_not_before_s,
+            time.monotonic() + _PROGRAM_CADENCE_SETTLE_S,
+        )
+
     def _cancel_probe(self, reason: str) -> None:
         with self._placement_lock:
             run_id = self._probe_run_id
@@ -1818,6 +1844,7 @@ class LiveOutputHost:
             self._engine_identity = engine
         if context != self._placement_context:
             old_context = self._placement_context
+            self._defer_program_guard()
             if old_context is not None:
                 revoke = self._revoke_placement(old_context)
                 if revoke != "revoked":
@@ -1919,7 +1946,11 @@ class LiveOutputHost:
             request = CalibrationRequest(
                 spec, url, engine, target_id, context, self._connection_generation,
             )
-            guard = _ProgramGuard(self._require_transport(), context)
+            guard = _ProgramGuard(
+                self._require_transport(),
+                context,
+                not_before_s=self._program_guard_not_before_s,
+            )
             future = self._calibration.start(request, measure=self._measure_probe, guard=guard)
         except Exception as exc:
             if self._logger is not None: self._logger.log("placementProbeStart", probeId=run_id, error=str(exc))
@@ -1962,6 +1993,7 @@ class LiveOutputHost:
         *,
         suppress: bool = False,
         tone: str | None | object = _TONE_UNSET,
+        errors: tuple[str, ...] = (),
         expected_run_id: str | None = None,
         expected_epoch: int | None = None,
     ) -> bool:
@@ -1987,7 +2019,13 @@ class LiveOutputHost:
                 self._placement["automaticProbesDisabled"] = True
             self._set_placement(None, reason, state="invalid", tone=tone)
         if self._logger is not None:
-            self._logger.log("placementProbeRejected", probeId=probe_id, reason=reason, suppressed=suppress)
+            self._logger.log(
+                "placementProbeRejected",
+                probeId=probe_id,
+                reason=reason,
+                suppressed=suppress,
+                errors=list(errors),
+            )
         return True
 
     @staticmethod
@@ -2222,6 +2260,7 @@ class LiveOutputHost:
                 reason,
                 suppress=suppress,
                 tone=tone,
+                errors=result.errors if result is not None else (),
                 expected_run_id=run_id,
                 expected_epoch=epoch,
             )
@@ -2702,12 +2741,14 @@ class LiveOutputHost:
         if operation == "advance":
             self._await_click_target()
             self._prepare_navigation_placement()
+            self._defer_program_guard()
             self._send_advance_input(transport)
         elif operation == "goTo":
             if slide is None: raise PlayerCommandRejected("A slide number is required.")
             player_index = next((int(s["playerIndex"]) for s in self.slides if s.get("originalOrdinal") == slide and not s.get("skipped")), None)
             if player_index is None: raise PlayerCommandRejected("Original slide is unavailable or skipped.")
             self._prepare_navigation_placement()
+            self._defer_program_guard()
             transport.evaluate("window.focus();document.body.focus()")
             if self._continuity_mode == "qualified":
                 transport.evaluate("window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.clear && window.__OBED_P2_PRESERVE__.clear()")
@@ -2717,6 +2758,7 @@ class LiveOutputHost:
         elif operation == "show":
             if self._channel_compromised:
                 raise PlayerCommandRejected("Output stays hidden: the placement channel failed its check.")
+            self._defer_program_guard()
             transport.evaluate("window.__obedOutput.show()")
         else: raise LiveHostError("Unsupported player operation.")
         if operation in ("hide", "show"):

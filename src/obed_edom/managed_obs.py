@@ -1005,7 +1005,8 @@ class ManagedObs:
                                       {"sceneName": PROGRAM_SCENE, "sceneItemId": ref_id,
                                        "sceneItemEnabled": True}, deadline_s)
         install.target_id = self._await_probe_target(run, deadline_s, present=True)
-        self._verify_calibration_isolation(run, ws, snapshot, source_uuid, install.ref_id, deadline_s)
+        self._verify_calibration_isolation(
+            run, ws, snapshot, source_uuid, install.ref_id, deadline_s, settle_active=True)
 
     def _verify_probe_source(self, run: _CalibrationRun, ws: ObsWebsocket, source_uuid: str, scene_uuid: str,
                              tracks: dict[str, bool], deadline_s: float) -> None:
@@ -1075,9 +1076,24 @@ class ManagedObs:
                 raise ManagedObsError(f"Calibration CDP target did not {wanted}.")
             self._sleep(self._poll_s)
 
+    def _await_calibration_active(self, run: _CalibrationRun, ws: ObsWebsocket, deadline_s: float) -> None:
+        expected_active = run.request.placement == "offcanvas"
+        message = "Calibration source is not active in the selected isolated placement."
+        while True:
+            try:
+                active = self._calibration_request(
+                    run, ws, "GetSourceActive", {"sourceName": PROBE_SOURCE}, deadline_s)
+            except _CalibrationTimeout:
+                raise _CalibrationIsolationViolation(message) from None
+            if active.get("videoActive") is expected_active and active.get("videoShowing") is True:
+                return
+            if self._clock() + self._poll_s >= deadline_s:
+                raise _CalibrationIsolationViolation(message)
+            self._sleep(self._poll_s)
+
     def _verify_calibration_isolation(self, run: _CalibrationRun, ws: ObsWebsocket,
                                       snapshot: _CalibrationSnapshot, source_uuid: str, ref_id: int | None,
-                                      deadline_s: float) -> None:
+                                      deadline_s: float, *, settle_active: bool = False) -> None:
         transition = self._calibration_request(run, ws, "GetCurrentSceneTransition", None, deadline_s)
         cursor = self._calibration_request(run, ws, "GetCurrentSceneTransitionCursor", None, deadline_s)
         if (transition.get("transitionName"), transition.get("transitionKind"), cursor.get("transitionCursor")) != (
@@ -1118,10 +1134,14 @@ class ManagedObs:
                 or tracks.get("inputAudioTracks") != {str(index): False for index in range(1, 7)}
                 or monitor.get("monitorType") != "OBS_MONITORING_TYPE_NONE"):
             raise _CalibrationIsolationViolation("Calibration source audio isolation changed.")
-        active = self._calibration_request(run, ws, "GetSourceActive", {"sourceName": PROBE_SOURCE}, deadline_s)
-        expected_active = run.request.placement == "offcanvas"
-        if active.get("videoActive") is not expected_active or active.get("videoShowing") is not True:
-            raise _CalibrationIsolationViolation("Calibration source is not active in the selected isolated placement.")
+        if settle_active:
+            self._await_calibration_active(run, ws, deadline_s)
+        else:
+            active = self._calibration_request(run, ws, "GetSourceActive", {"sourceName": PROBE_SOURCE}, deadline_s)
+            expected_active = run.request.placement == "offcanvas"
+            if active.get("videoActive") is not expected_active or active.get("videoShowing") is not True:
+                raise _CalibrationIsolationViolation(
+                    "Calibration source is not active in the selected isolated placement.")
         items = self._calibration_request(run, ws, "GetSceneItemList", {"sceneName": PROGRAM_SCENE}, deadline_s).get("sceneItems")
         if run.request.placement == "preview":
             studio = self._calibration_request(run, ws, "GetStudioModeEnabled", None, deadline_s)

@@ -384,7 +384,7 @@ class CalibrationObs:
                  transition_cursor: float = 1.0, preview_unreadable: bool = False,
                  cleanup_program_change: bool = False, collision: bool = False,
                  race_collision: bool = False, cleanup_poll_timeout: bool = False,
-                 unowned_leftover: bool = False) -> None:
+                 unowned_leftover: bool = False, active_after: int | None = 1) -> None:
         self.studio = studio
         self.preview = "Other" if studio else None
         self.program = "AK"
@@ -398,6 +398,9 @@ class CalibrationObs:
         self.cleanup_poll_timeout = cleanup_poll_timeout
         self.unowned_leftover = unowned_leftover
         self.race_collision = race_collision
+        self.active_after = active_after
+        self.active_reads = 0
+        self.active_results: list[dict[str, bool]] = []
         self.unowned_visible = False
         self.pending_input = self.pending_scene = 0
         self.scenes = {"AK": "scene-ak", "Other": "scene-other"}
@@ -547,8 +550,16 @@ class CalibrationObs:
             next(item for item in self.program_items if item["sceneItemId"] == data["sceneItemId"])["sceneItemEnabled"] = data["sceneItemEnabled"]
             return {}
         if name == "GetSourceActive":
-            active = any(item["sourceName"] == "AK-Calibrate" and item["sceneItemEnabled"] for item in self.program_items)
-            return {"videoActive": active, "videoShowing": active or (self.studio and self.preview == "AK-Calibrate")}
+            self.active_reads += 1
+            if self.active_after is None or self.active_reads < self.active_after:
+                result = {"videoActive": False, "videoShowing": False}
+            else:
+                active = any(item["sourceName"] == "AK-Calibrate" and item["sceneItemEnabled"]
+                             for item in self.program_items)
+                result = {"videoActive": active,
+                          "videoShowing": active or (self.studio and self.preview == "AK-Calibrate")}
+            self.active_results.append(result)
+            return result
         if name == "GetSourceScreenshot":
             if self.disturb_program:
                 self.program = "Other"
@@ -628,7 +639,8 @@ def calibration_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, obs: Cal
     write_tree(tree, render_tree(_cfg()))
     launcher = FakeLauncher()
     launcher.add(4242, 1000.0, home)
-    engine = ManagedObs(home, launcher=launcher, clock=time.monotonic, sleep=lambda _: None, poll_s=0.001, liveness_s=3600)
+    clock = FakeClock()
+    engine = ManagedObs(home, launcher=launcher, clock=clock, sleep=clock.sleep, poll_s=0.1, liveness_s=3600)
     engine._pid = 4242
     engine._launch_date = 1000.0
     engine._ready_generation = 7
@@ -2215,6 +2227,8 @@ def test_persistence_contract_pins_step0_null_and_fails_closed(tmp_path):
 @pytest.mark.parametrize(
     "placement,studio,outcome",
     [("preview", False, "success"), ("preview", True, "success"), ("offcanvas", False, "success"),
+     ("preview", False, "late-activation"), ("offcanvas", False, "late-activation"),
+     ("preview", False, "never-active"), ("offcanvas", False, "never-active"),
      ("preview", False, "output-inactive"), ("preview", False, "absent-removal"),
      ("preview", False, "delayed-removal"), ("preview", False, "wrong-removal"),
      ("preview", False, "bad-output"), ("preview", False, "bad-screenshot"),
@@ -2242,7 +2256,8 @@ def test_calibration_transaction_preview_offcanvas_faults_and_fencing(tmp_path, 
                          cleanup_program_change=outcome == "cleanup-change", collision=outcome == "collision",
                          race_collision=outcome == "race-collision",
                          cleanup_poll_timeout=outcome == "cleanup-timeout",
-                         unowned_leftover=outcome == "unowned-leftover")
+                         unowned_leftover=outcome == "unowned-leftover",
+                         active_after=None if outcome == "never-active" else 3 if outcome == "late-activation" else 1)
     engine = calibration_engine(tmp_path, monkeypatch, obs)
     identity_checks = 0
     real_identity = engine._identity
@@ -2347,7 +2362,7 @@ def test_calibration_transaction_preview_offcanvas_faults_and_fencing(tmp_path, 
                                for connection, name, _ in obs.requests)
                 assert obs.target_reads == 0
         elif outcome in ("bad-screenshot", "timeout", "bad-evidence", "bad-target", "program-change", "cleanup-change",
-                          "cleanup-timeout", "slow-target", "wrong-removal"):
+                          "cleanup-timeout", "slow-target", "wrong-removal", "never-active"):
             assert result.cleanup_verified is (outcome not in ("cleanup-timeout", "slow-target", "wrong-removal"))
             assert result.restored is True and result.errors
             assert result.isolation_ok is (outcome in ("bad-screenshot", "timeout", "cleanup-timeout", "slow-target",
@@ -2358,11 +2373,18 @@ def test_calibration_transaction_preview_offcanvas_faults_and_fencing(tmp_path, 
                 assert any(error.startswith("absence-poll: ObsWebsocketTimeout") for error in result.errors)
             elif outcome == "slow-target":
                 assert any(error.startswith("target-cleanup:") for error in result.errors)
+            elif outcome == "never-active":
+                assert result.evidence is None and obs.active_reads > 1
+                expected = ("isolation: _CalibrationIsolationViolation: "
+                            "Calibration source is not active in the selected isolated placement.")
+                assert expected in result.errors
+                assert not any(error.startswith("timeout:") for error in result.errors)
             elif outcome in ("bad-evidence", "bad-target", "program-change", "cleanup-change"):
                 assert any(error.startswith("isolation:") for error in result.errors)
             if outcome in ("program-change", "cleanup-change"):
                 assert obs.program == "AK"
-            assert not any(name == "CreateSceneItem" for _, name, _ in obs.requests)
+            if outcome != "never-active" or placement == "preview":
+                assert not any(name == "CreateSceneItem" for _, name, _ in obs.requests)
         else:
             assert result.isolation_ok is True and result.cleanup_verified is True and result.restored is True
             assert result.errors == () and result.program is not None and result.program.ok is True
@@ -2394,6 +2416,17 @@ def test_calibration_transaction_preview_offcanvas_faults_and_fencing(tmp_path, 
                 assert create < transform < enable
             if outcome == "success":
                 assert identity_checks == 3
+            if outcome == "late-activation":
+                settled = {"videoActive": placement == "offcanvas", "videoShowing": True}
+                first_settled = next(index for index, result in enumerate(obs.active_results, 1)
+                                     if result == settled)
+                screenshot = next(index for index, (_, name, _) in enumerate(obs.requests)
+                                  if name == "GetSourceScreenshot")
+                active_before = [name for _, name, _ in obs.requests[:screenshot] if name == "GetSourceActive"]
+                active_after = [name for _, name, _ in obs.requests[screenshot + 1:] if name == "GetSourceActive"]
+                assert first_settled == 3
+                assert len(active_before) == 4 and active_after == ["GetSourceActive"]
+                assert all(result == settled for result in obs.active_results[first_settled - 1:])
             if outcome == "unowned-leftover":
                 assert obs.unowned_visible is True
         assert adapter.cancel(run_id, timeout_s=5.0) is (result.cleanup_verified and result.restored)

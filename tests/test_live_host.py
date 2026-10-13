@@ -3255,7 +3255,7 @@ def commits(fake, value="snap"):
     [
         ({"visibilityEvents": 0, "frames": 8, "baselineFrameMs": 20.0, "maxRafGapMs": 40.0, "media": []}, True),
         ({"visibilityEvents": 1, "frames": 8, "baselineFrameMs": 20.0, "maxRafGapMs": 20.0, "media": []}, False),
-        ({"visibilityEvents": 0, "frames": 8, "baselineFrameMs": 20.0, "maxRafGapMs": 40.1, "media": []}, None),
+        ({"visibilityEvents": 0, "frames": 8, "baselineFrameMs": 20.0, "maxRafGapMs": 40.1, "media": []}, False),
         ({"visibilityEvents": 0, "frames": 8, "baselineFrameMs": None, "maxRafGapMs": 20.0, "media": []}, None),
         ({"visibilityEvents": 0, "frames": 8, "baselineFrameMs": 20.0, "maxRafGapMs": 20.0,
           "media": [{"id": "v", "playing": True, "monotonic": True, "maxStallMs": 33.4, "frameMs": 33.3,
@@ -3269,7 +3269,7 @@ def commits(fake, value="snap"):
         (None, True),
     ],
 )
-def test_program_guard_applies_program_liveness_thresholds(telemetry, expected):
+def test_program_guard_applies_program_liveness_thresholds(telemetry, expected, monkeypatch):
     if telemetry is None:
         import shutil
         import subprocess
@@ -3319,17 +3319,87 @@ def test_program_guard_applies_program_liveness_thresholds(telemetry, expected):
         return
 
     class Transport:
+        def __init__(self):
+            self.arms = 0
+
         def evaluate_in(self, _context, expression, deadline_s=None):
             if "guard exists" in expression:
                 return True
-            return dict(telemetry)
+            if "g.arm" in expression:
+                self.arms += 1
+                return True
+            row = dict(telemetry)
+            baseline = row["baselineFrameMs"]
+            row["gaps"] = (
+                [20.0, 33.4, 20.0, 33.4, 20.0, 33.4]
+                if baseline is None else [baseline] * live_host._PROGRAM_BASELINE_GAPS
+            )
+            return row
 
-    guard = live_host._ProgramGuard(Transport(), "program")
+    clock = [0.0]
+    monkeypatch.setattr(live_host.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(live_host.time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+
+    transport = Transport()
+    guard = live_host._ProgramGuard(transport, "program")
     guard.begin()
     guard.sample("installed")
     result = guard.finish()
     assert result.ok is expected
     assert result.visibility_events == telemetry["visibilityEvents"]
+    assert transport.arms == 1
+
+    if telemetry["baselineFrameMs"] == 20.0 and telemetry["maxRafGapMs"] == 40.0:
+        class SettlingTransport:
+            def __init__(self, *, settles):
+                self.settles = settles
+                self.samples = 0
+                self.arms = 0
+
+            def evaluate_in(self, _context, expression, deadline_s=None):
+                if "guard exists" in expression:
+                    return True
+                if "g.arm" in expression:
+                    self.arms += 1
+                    return True
+                if "g.finish" in expression:
+                    return {
+                        "visibilityEvents": 0,
+                        "frames": 8,
+                        "baselineFrameMs": 33.4,
+                        "maxRafGapMs": 70.0,
+                        "media": [],
+                    }
+                self.samples += 1
+                gaps = (
+                    [20.0, 33.4, 20.0, 33.4, 20.0, 33.4]
+                    if not self.settles or self.samples < 3 else [33.4] * live_host._PROGRAM_BASELINE_GAPS
+                )
+                return {
+                    "visibilityEvents": 0,
+                    "frames": len(gaps) + 1,
+                    "gaps": gaps,
+                    "baselineFrameMs": 33.4,
+                    "maxRafGapMs": max(gaps),
+                    "media": [],
+                }
+
+        clock[0] = 0.0
+        settling = SettlingTransport(settles=True)
+        settled_guard = live_host._ProgramGuard(settling, "program", not_before_s=.05)
+        settled_guard.begin()
+        assert settled_guard._baseline_frame_ms == pytest.approx(33.4)
+        assert settling.samples >= 5 and settling.arms == 1
+        assert settled_guard.finish().ok is False
+
+        clock[0] = 0.0
+        unstable = SettlingTransport(settles=False)
+        unstable_guard = live_host._ProgramGuard(unstable, "program")
+        unstable_guard.begin()
+        inconclusive = unstable_guard.finish()
+        assert inconclusive.ok is None
+        assert inconclusive.reason == "program cadence baseline unstable"
+        assert unstable.arms == 1
 
 
 def test_managed_probe_state_machine_renews_suppresses_and_stops(tmp_path, monkeypatch):
@@ -3399,6 +3469,7 @@ def test_managed_probe_state_machine_renews_suppresses_and_stops(tmp_path, monke
     assert observed.output["placement"]["state"] == "probing"
     assert observed.output["placement"]["reason"] == "calibrating"
     first = adapter.starts[-1]
+    assert first[2]._not_before_s == output._program_guard_not_before_s > 0
     first[3].set_result(result(first[0]))
     output._probe_thread.join(2)
     placement = output.output["placement"]
@@ -3528,10 +3599,17 @@ def test_managed_probe_state_machine_renews_suppresses_and_stops(tmp_path, monke
     output.observe()
     assert len(adapter.starts) == starts + 1
     relaunched = adapter.starts[-1]
-    relaunched[3].set_result(result(relaunched[0], with_evidence=False))
+    freshness_error = "Probe capture freshness could not be verified."
+    relaunched[3].set_result(result(
+        relaunched[0],
+        program=None,
+        errors=(freshness_error,),
+        with_evidence=False,
+    ))
     output._probe_thread.join(2)
     assert output.output["placement"]["reason"] == "probe-failed"
     assert output.output["placement"]["automaticProbesDisabled"] is False
+    relaunched_id = relaunched[0].spec.run_id
 
     fake.reload()
     output.observe()
@@ -3689,6 +3767,14 @@ def test_managed_probe_state_machine_renews_suppresses_and_stops(tmp_path, monke
     assert output._probe_thread is None or not output._probe_thread.is_alive()
     assert output._renew_thread is None or not output._renew_thread.is_alive()
     assert output.output["placement"]["reason"] == "stopped"
+    records = [json.loads(line) for line in output._log_path.read_text().splitlines()]
+    rejection = next(
+        row for row in records
+        if row["kind"] == "placementProbeRejected" and row["probeId"] == relaunched_id
+    )
+    assert rejection["reason"] == "probe-failed"
+    assert rejection["suppressed"] is False
+    assert rejection["errors"] == [freshness_error]
     renewal_thread = output._renew_thread
     output._start_renewal_thread()
     assert output._renew_thread is renewal_thread
