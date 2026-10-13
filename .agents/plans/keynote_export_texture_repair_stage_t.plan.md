@@ -1,6 +1,6 @@
 # Repair Keynote HTML-export texture mis-mapping at prepare time (Stage T)
 
-Status: **rev 2 APPROVED by the owner 2026-10-13 — every OQ per its recommendation: OQ-T1 fail the prepare and name the slide/object; OQ-T2 repair text and posters; OQ-T3 refuse only on a confident OCR contradiction; OQ-T4 deferred; OQ-T5 add the `alpha-dsk-textures` fixture; OQ-T6 C (merged #264) → T → B, S3 in parallel. Implementing in a separate session.** **DRAFT rev 2 (2026-10-13), planning only. Read-only investigation.**
+Status: **rev 2 APPROVED by the owner 2026-10-13 — every OQ per its recommendation: OQ-T1 fail the prepare and name the slide/object; OQ-T2 repair text and posters; OQ-T3 refuse only on a confident OCR contradiction; OQ-T4 deferred; OQ-T5 add the `alpha-dsk-textures` fixture; OQ-T6 C (merged #264) → T → B, S3 in parallel. **IMPLEMENTED 2026-10-13 on `claude/stage-t-orchestration`** (review r1–r5 Codex GPT-6 Astra high, loop closed; gates in `.agents/reviews/stage-t/gates-r1.md`; G4 owner-pending).** **DRAFT rev 2 (2026-10-13), planning only. Read-only investigation.**
 - **Critique r1 (rev 2):** (M1) D1 used rect-only identity. Export text/image leaves carry no `objectID`, and OCR similarity ≥ 0.8 passes one-glyph differences, so an in-place swap could donate the wrong texture. D1 is now text-only and gated on the slot's accessibility text being equal in both events. (M2) D3's rect fallback is dropped: every movie slot carries its `objectID`. (M3) The flattened-frame oracle leaves V3 and becomes a G2 measure. Every page-vs-page correlation renders over 50% grey, and R6 gets a measured threshold. Evidence was added for (b)–(e) in §1.4–1.5: no-contents MM landings change text, Stage B sizes, fixtures. 3b9019 is now refused at slides 9 and 10.
 
 Read against `claude/s2-followups-dsk-deck-902af1` @ `1138e220` and `claude/stage-c-orchestration` @ `ac847ba1` (PR #264). It implements the owner's decision of 2026-10-13: fix Keynote's texture-id mis-mapping in the cached export copy when the deck is prepared, and never touch the `.key`. Scratch evidence is in `SCRATCH/textures/`:
@@ -204,3 +204,13 @@ Rules:
    - Images are eligible later only with independent pixel agreement. One source is the destination-slide D1 candidate. 3b9019's slide 9 `CE49CEF4` matches slide 8's landing at 1.00, and the slide 10 tag box has slide 9's `CE49CEF4` landing at residual 0.000.
 5. **OQ-T5: fixture.** Rec: yes, add `output/fixtures/alpha-dsk-textures` (7e3c JSON, PDF and pdfp, no movies, about 40 MB) to `FIXTURE_NAMES`.
 6. **OQ-T6: order.** Rec: C → T (stacked) → B, with S3 in parallel. Old caches re-export once rather than being repaired in place.
+
+## 7. Review log (implementation, Codex GPT-6 Astra high)
+- r1: 1 major (grouping let one event's text identity donate to a swapped label), 4 medium, 1 low; folded `d6142d66`.
+- r2: 1 major (an unattributed image borrowed a movie's identity), 3 medium; folded `4f276c27`.
+- r3: 2 major (same class: a copy in two movie groups; text and image in one group), 1 low; fixed by class (groups
+  partitioned into provably one object; ambiguous copies refused by name); folded `d8431485`.
+- r4: 1 major (hit-centred ownership check); folded `d1e73254`.
+- r5: no major or blocker; loop closed.
+- G2 note: the label-vs-flattened-frame check (a) tops out at ≈0.83 for correct labels (the untouched "Bible Study"
+  label scores 0.826), below the 0.9 this plan set; repaired labels 0.836/0.823 vs −0.017/−0.123 unrepaired.
