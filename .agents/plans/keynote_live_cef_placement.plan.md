@@ -1,6 +1,6 @@
 # Alpha Keynote: CEF/OBS placement calibration and the fractional movie freeze
 
-**rev 3.2 — 2026-10-13; r1–r3 folded, step 0 recorded (§7), owner decisions O1–O5 unchanged in §8.** Base: rev 2 `d72238ac` on `claude/cef-obs-placement-plan`.
+**rev 3.3 — 2026-10-13; contracts frozen (§11), step 0 recorded (§7), owner decisions O1–O5 unchanged in §8.** Base: rev 3.2 `ace08c4e` on `claude/cef-obs-placement-plan`.
 Plan only: overwrite the scratch plan for coordinator copy; no product edits, commit, OBS, Chrome or Keynote run.
 Parent: `keynote_live_dissolve_crossfade.plan.md` **rev 17**, landed #262; its §12 decisions 1–16 govern except where
 today's explicit follow-up request restores probe work. Earlier probe design: `git show 41ef609b:.agents/plans/keynote_live_dissolve_crossfade.plan.md`,
@@ -541,3 +541,363 @@ Source: scratch `critique-r2.md`; all six findings folded, none refuted. O1–O5
 | # | Severity | Disposition |
 |---|---|---|
 | 1 | low | Folded by the coordinator (rev 3.1): the persistence allowlist is the no-transaction null run's difference set plus `id_counter`; any difference beyond the null's FAILs (§2.2). |
+
+## 11. Frozen contracts
+
+New interfaces below are implementation contracts, not claims of existing APIs. Anchors verified at `ace08c4e`.
+Records are Python 3.10 `@dataclass(frozen=True)`; tuples are immutable, bytes are raw bytes, times ending `_s` are
+host monotonic seconds unless stated otherwise. JSON uses the field names shown; enums serialize to their string values.
+`S0` = §7's step-0 evidence directory. Selected product placement: **preview**, OBS **32.2.2**, no duplication seed.
+Off-canvas remains harness qualification only; no runtime fallback. O1–O5, existing acceptance gates and file ownership stand.
+
+### 11.1 W2 → W3/W4/W6: assets, page and classifier
+
+Existing seams: package data `pyproject.toml:58`; loopback server/range serving `live_host.py:385`, `:394`, `:433`;
+probe layout/analysis `E/cef-frac-2026-10-12/scripts/probe.js` and `probeana.py`; latency `S0/README.md:16`.
+
+```python
+class ProbeVerdict(str, Enum):
+    SNAP = "snap"; FRAC = "frac"; UNKNOWN = "unknown"
+class ToneMap(str, Enum):
+    IDENTITY = "identity"; GPU_ANALYTIC = "gpu_analytic"
+
+@dataclass(frozen=True)
+class ProbeAsset:
+    name: str; sha256: str; data: bytes
+@dataclass(frozen=True)
+class ProbeAssets:
+    manifest_sha256: str; pattern: ProbeAsset; motion: ProbeAsset
+@dataclass(frozen=True)
+class ProbeSpec:
+    run_id: str; width: int; height: int; fps: int; dpr: float
+@dataclass(frozen=True)
+class ProbeIdentity:
+    run_id: str; source_uuid: str | None; target_id: str; context_id: str
+    connection_generation: int; ua: str; dpr: float
+@dataclass(frozen=True)
+class ProbeCapture:
+    identity: ProbeIdentity; sequence: int; nonce: str
+    phase: str; pose: int | None; png: bytes
+    paint_observed_s: float; capture_started_s: float; capture_finished_s: float
+@dataclass(frozen=True)
+class PoseGeometry:
+    pose: int; rect: tuple[float, float, float, float]
+    content_box: tuple[float, float, float, float]; box: tuple[int, int, int, int]
+    snap_dy: int; frac_dy: int
+@dataclass(frozen=True)
+class ClassifierInput:
+    spec: ProbeSpec; assets_sha256: tuple[str, str, str]  # manifest, pattern, motion
+    identity: ProbeIdentity; ready_state: int; video_size: tuple[int, int]
+    color_tuple: tuple[str, str, str, bool]  # primaries, transfer, matrix, fullRange
+    freshness: tuple[ProbeCapture, ...]; poses: tuple[PoseGeometry, ...]
+    captures: tuple[ProbeCapture, ...]  # pose 0 pair, then pose 1 pair
+@dataclass(frozen=True)
+class PoseScore:
+    pose: int; tone_map: ToneMap; snap_share: float; frac_share: float; inner_pixels: int
+@dataclass(frozen=True)
+class ProbeResult:
+    verdict: ProbeVerdict; tone_map: ToneMap | None; grant_eligible: bool
+    reason: str; scores: tuple[PoseScore, ...]
+
+def load_probe_assets() -> ProbeAssets: ...
+def render_probe_page(spec: ProbeSpec) -> bytes: ...
+def classify_probe(data: ClassifierInput) -> ProbeResult: ...
+```
+
+- Package paths: `obed_edom/data/{placement_probe.mp4,placement_motion.mp4,placement_probe.json}`.
+  W2 exports `PATTERN_SHA256`, `MOTION_SHA256`, `MANIFEST_SHA256`: full lowercase 64-hex release pins. `load_probe_assets`
+  hashes bytes against these pins, verifies manifest agreement, raises `ValueError` before serving on any mismatch.
+  **Literal digests unpinned:** old pattern full digest unavailable; motion not generated. W2 supplies them after §2.4/O3
+  generation and qualification. No prefix, null, placeholder or mutable manifest alone can authorize a runtime asset.
+- Manifest schema: `{schemaVersion:1, pattern:{file,sha256,bytes,width:1920,height:540,fps:30,durationS:3,
+  frameTimeS:1,colorTuple}, motion:{file,sha256,bytes,width,height,fps,durationS},
+  generator:{sha256,python,numpy,pillow,ffmpeg,x264,argv:string[],pngSha256,repeatSha256}}`.
+  `repeatSha256` equals pattern hash from the second generation; motion is silent with a changing binary frame counter.
+- W4 `_AssetServer.set_probe_run(spec: ProbeSpec | None) -> str | None` registers/clears one active run.
+  URL `http://127.0.0.1:<port>/__obed_probe/<run_id>/index.html`; sibling MP4 filenames above, correct MIME/range handling.
+  Only registered 32-hex `run_id` and the three fixed paths (page/two clips) resolve; no export-root resolution for them.
+  Page uses relative URLs. Closing the run makes all three 404. No password or grant token in URLs/page/manifest.
+- Page API: `window.__obedProbe.command({runId,sequence,nonce,phase,pose}) -> boolean` queues work;
+  `snapshot() -> {runId,sequence,paintedSequence,phase,pose,readyState,videoSize,colorTuple,dpr,ua,geometry,error}`.
+  `phase` is `motion|pattern`; `pose` null for motion, 0 or 1 for pattern. New sequence must increase; one pending command;
+  wrong run/repeated sequence/malformed nonce returns false. Async work is polled, not returned as a Promise through
+  `evaluate_in` (current `awaitPromise=False`, `live_host.py:733`). `geometry` is `PoseGeometry` with camelCase keys or null.
+- Host generates a fresh `secrets.token_hex(16)` nonce for **every** capture; 128 bits, MSB-first, row-major 16×8 grid of
+  8px cells at `(1600,16)`, opaque black/white, outside all movie/candidate ROIs. Decode central 2×2 pixels per cell:
+  all RGB ≤32 means 0, all RGB ≥223 means 1, otherwise invalid; alpha must be 255. Decoded bits must equal nonce exactly.
+  `paintedSequence` advances after painting and a subsequent rAF; it is supporting telemetry, never freshness proof.
+- Wait from host observation of matching `paintedSequence` **≥300 ms before capture starts**, even after six rAFs;
+  this supersedes §2.4's 200 ms settle minimum. Hold nonce/pose unchanged until capture returns. Serial captures,
+  starts ≥200 ms apart, each deadline ≤2 s, total measurement ≤15 s; source dimensions 1920×1080, DPR1 only.
+  Require ≥3 motion captures with distinct nonces and distinct video-ROI hashes, then switch the same video to the
+  pinned pattern, seek/pause at 1.0 s; ≥6 rAFs and ≥300 ms paint wait for each of two captures per pose.
+- Geometry preserves retained probe: two translation ancestors `(6+fx/2,4+fy/2)` and `(4+fx/2,6+fy/2)`, video CSS
+  `480.53125×135.140625`; poses `(fx,fy)=(.352,.036),(.73,.41)`. Box floor near edges/ceil far edges +1;
+  snap canvas at box y+140, frac at y+280. Candidate pixels use same paused frame; background `#404040`.
+  Host validates bounds/nonoverlap, expected poses, target/context/source, decode tuple/size, full asset pins and timing.
+  `source_uuid=None` is allowed only for W6's Chrome harness. Motion video ROI = the same visible video box; counter
+  changes must affect it. Still pairs require identical video/snap/frac ROI bytes, excluding the separate nonce grid.
+- Classifier is pure, never grants or owns CDP. Shares are fractions `[0,1]`, four scores (2 poses × 2 maps), §2.4 exact
+  mask/max-channel/4-LSB/≤.02/≥.20 rules. Unknown → `tone_map=None,grant_eligible=False`; uniquely classified identity
+  may return snap/frac but `grant_eligible=False`; GPU analytic uniquely classified → true. Reasons:
+  `classified|invalid-evidence|stale-capture|unstable-capture|unsupported-dpr|ambiguous|software-map`.
+
+### 11.2 W3 → W4/W6: managed calibration transaction and persistence
+
+Current ownership/queue/error seams: `managed_obs.py:383`, `:388`, `:480`, `:484`, `:495`, `:586`, `:607`, `:914`;
+`obs_websocket.py:36`, `:39`, `:52`, `:93`. W3 owns the following records/protocols in `managed_obs.py`, importing W2;
+no import of `live_host`. W4 passes this adapter; no other stream touches W3 internals.
+
+```python
+@dataclass(frozen=True)
+class EngineIdentity:
+    pid: int; launch_date: float; ready_generation: int
+@dataclass(frozen=True)
+class CalibrationRequest:
+    spec: ProbeSpec; url: str; engine: EngineIdentity
+    program_target_id: str; program_context_id: str; connection_generation: int
+    placement: Literal["preview", "offcanvas"] = "preview"
+@dataclass(frozen=True)
+class ProgramCheck:
+    ok: bool | None; visibility_events: int; baseline_frame_ms: float | None
+    max_raf_gap_ms: float | None; media: tuple[dict[str, object], ...]
+    reason: str | None
+class ProgramGuard(Protocol):
+    def begin(self) -> None: ...
+    def sample(self, phase: str) -> None: ...
+    def finish(self) -> ProgramCheck: ...
+class CalibrationIO(Protocol):
+    request: CalibrationRequest
+    source_uuid: str
+    cdp_endpoint: str
+    cancel_event: threading.Event
+    deadline_s: float
+    def capture_png(self, *, timeout_s: float = 2.0) -> bytes: ...
+    def check_current(self) -> None: ...
+@dataclass(frozen=True)
+class CollectionSnapshot:
+    state: dict[str, object]; mtime_ns: int; saved_by_obs: bool
+@dataclass(frozen=True)
+class PersistenceRule:
+    path: str; before: object; after: object  # JSON values; missing uses {"$absent": True}
+@dataclass(frozen=True)
+class PersistenceCheck:
+    phase: str; authoritative: bool; ok: bool | None
+    differences: tuple[str, ...]; allowed: tuple[str, ...]
+@dataclass(frozen=True)
+class CalibrationResult:
+    request: CalibrationRequest; evidence: ClassifierInput | None; program: ProgramCheck | None
+    isolation_ok: bool; cleanup_verified: bool; restored: bool
+    persistence: PersistenceCheck | None; errors: tuple[str, ...]
+    started_s: float; finished_s: float
+class CalibrationAdapter(Protocol):
+    def identity(self) -> EngineIdentity | None: ...
+    def start(self, request: CalibrationRequest, *,
+              measure: Callable[[CalibrationIO], ClassifierInput],
+              guard: ProgramGuard) -> Future[CalibrationResult]: ...
+    def cancel(self, run_id: str, *, timeout_s: float = 5.0) -> bool: ...
+
+def read_collection(path: Path, *, saved_by_obs: bool) -> CollectionSnapshot: ...
+def persistence_allowlist(null_before: CollectionSnapshot,
+                          null_after: CollectionSnapshot) -> tuple[PersistenceRule, ...]: ...
+def check_persistence(before: CollectionSnapshot, after: CollectionSnapshot, *,
+                      null_allowlist: tuple[PersistenceRule, ...], phase: Literal["cleanup", "quit"],
+                      last_removal_mtime_ns: int) -> PersistenceCheck: ...
+# ManagedObs.calibration_adapter() -> CalibrationAdapter
+```
+
+- `start` returns immediately; W3 creates one dedicated thread/OBS WebSocket, rejects concurrent runs with
+  `ManagedObsError("Calibration is already running.")`. Validates engine/program and URL before mutation. Worker calls
+  guard.begin → install → measure(io) → cleanup/restore → guard.finish → resolves future **after all cleanup attempts**.
+  `guard.sample` phases: `before-install|installed|before-capture|after-capture|before-cleanup|restored`.
+  `media` entries: `{id:str,playing:bool,monotonic:bool,maxStallMs:float,frameMs:float}`; unknown baseline/media → ok null.
+  W4 implements guard on existing Program CDP, and measure on a separate probe CDP transport discovered by exact URL.
+  The probe transport registers `io.cancel_event`; W4 closes it in measure-finally. Server run clears only after cleanup.
+  Captured evidence must retain W3's source UUID and original program/connection binding from request.
+- `check_current` before/after each short mutation/capture checks cancellation, generation, ownership and deadline;
+  raises `ManagedObsError` on failure. No grant in callbacks/W3. Exceptions become `errors`, evidence may be null;
+  guard/cleanup errors still resolve a failed result. `capture_png` rechecks isolation and returns raw decoded PNG bytes,
+  never unpremultiplies; WebSocket max message = 16 MiB, per-request timeout ≤remaining budget. Existing other calls retain
+  their defaults. Cancellation closes measurement transports; cleanup gets its own ≤5 s budget/connection if needed.
+- `cancel` sets event, waits at most timeout (capped 5 s), returns verified cleanup success; absent finished run is idempotent.
+  Quit/restart/setup cancel before generation change; fence/close old transports before replacement. Old worker cannot
+  mutate new engine. No `_submit` job, session-lock hold, CDP event callback work, or future wait on the request thread.
+- Exact prechecks/constants (`S0/README.md:17–21`, `preview/result.json`):
+  `CALIBRATION_SCENE="AK-Calibrate"`, `PROBE_SOURCE="AK-Probe"`, `PROGRAM_SCENE="AK"`, `OBS_CANVAS="Main"`;
+  `PREVIEW_OUTPUT="decklink_preview_output"`; `GetCurrentSceneTransition` must return
+  `{transitionName:"Cut",transitionKind:"cut_transition"}`. `GetOutputStatus({outputName:PREVIEW_OUTPUT})` must return
+  `outputActive:false`, or `ObsRequestError` with request_type `GetOutputStatus`, code **600**, comment exactly
+  `No output was found with the name \`decklink_preview_output\`.`. No other name/error/timeout means absent.
+  `GetCurrentPreviewScene` **506** is expected only while Studio Mode is off (measured comment null); snapshot off,
+  enable Studio, then capture the retained preview before switching it. A 506 while on is failure, not absence.
+- Removal absence constants: `(RemoveInput,600,"No source was found by the name of \`AK-Probe\` within the canvas \`Main\`.")`
+  and `(RemoveScene,600,"No source was found by the name of \`AK-Calibrate\` within the canvas \`Main\`.")` only.
+  Still poll scene/input/item lists to prove absence. No generic code-600 catch; unmeasured RemoveSceneItem errors fail.
+  Restore saved preview before disabling Studio; restore Studio/program and verify ownership/identity, attempt every
+  cleanup step despite earlier errors. Collision with unowned names fails before creation. Never transition to program.
+- O5 compare source/scene sets by UUID/name, item order/visibility/transforms and remaining state; preserve UUIDs within
+  the transaction. Only null-run derivation canonicalizes cross-launch UUIDs by original source/scene names, never drops
+  new sources/refs. `last_removal_mtime_ns` is the wall-clock ns checkpoint at final removal acknowledgement, not monotonic.
+  Cleanup authoritative iff `after.mtime_ns > last_removal_mtime_ns`; otherwise ok null. Quit always authoritative;
+  missing/malformed file is failure. W6 supplies quit snapshot; product never quits merely to complete calibration.
+  A non-authoritative cleanup file does not block a grant after live cleanup and already-qualified persistence gates;
+  an authoritative mismatch blocks it. Backups are recorded separately, never restored/mutated by this API.
+- Null allowlist is exact **before→after values**, not wildcard deletion. `STEP0_NULL_ALLOWLIST` comes from
+  `S0/null/{0-ready,5-quit}-AK.json`: missing modules `auto-scene-switcher`
+  `{interval:300,non_matching_scene:"",switch_if_not_matching:false,active:false,switches:[]}`,
+  `output-timer` (streamTimerHours/Minutes/Seconds and recordTimerHours/Minutes/Seconds all 0,
+  autoStartStreamTimer/autoStartRecordTimer/pauseRecordTimer false), `scripts-tool=[]`; missing `virtual-camera={type2:3}`;
+  `scaling_level:0→-49`; missing Program hotkeys `ObsBrowser.Refresh`, `libobs.{mute,unmute,push-to-mute,push-to-talk}`
+  and AK hotkeys `OBSBasic.SelectScene`, `libobs.{hide,show}_scene_item.1`, each `[]`;
+  original Program item additions `bounds_rel={x:3.555555582046509,y:2}`, `pos_rel={x:-1.7777777910232544,y:-1}`,
+  `scale_rel={x:1,y:1}`. Already-normalized baseline fields must stay equal. Plus only original scene `settings/id_counter`
+  may increase monotonically; item membership/order still equal. New keys/values outside these measured transitions fail.
+  W3 pins exact null records in its existing test file; W6 remeasures for a changed OBS version, never expands allowlist silently.
+
+### 11.3 W4 → W1/W5/W6: host, grant and status
+
+Seams: `LiveOutputHost.__init__` at `live_host.py:892`; private channel `:54`, `:103`, `:110`, `:118`;
+context evaluation `:727`; output `:961`, `:1126`, `:1248`; stop `:1614`.
+
+```python
+# Add keyword-only constructor parameters (all existing arguments preserved):
+calibration: CalibrationAdapter | None = None
+placement_mode: Literal["knowledge", "probe"] | None = None
+# placement_mode is script/test-only; router never supplies it.
+# None resolves to probe iff calibration exists + bridge == "obs-managed", otherwise knowledge.
+def placement_init_script(token: str, *, mode: Literal["knowledge", "probe"] = "knowledge") -> str: ...
+def _placement_set_expr(token: str, value: str, ms: int | None = None) -> str: ...
+def _placement_round_trip_expr(token: str, *, mode: Literal["knowledge", "probe"] = "knowledge") -> str: ...
+```
+
+| Channel contract | Exact behavior |
+|---|---|
+| `window.__obedPlacement` | Getter → `"snap"|"frac"|"invalid"`; initially invalid; no setter, nonconfigurable/nonenumerable. W1 reads once per take. |
+| `window.__obedGrant(token,value,ms)` | Nonwritable/nonconfigurable/nonenumerable function → boolean; wrong token false/no mutation. Correct token + invalid revokes, true. Unknown value or invalid lease revokes, false. |
+| Knowledge mode | Only snap without ms grants indefinitely (same Chrome eligibility); frac or supplied ms invalid. No timer/probe on Chrome product. |
+| Probe mode | snap/frac requires finite integer `0 < ms <= 15000`; store private `{value,leaseMs,expiresAt}` using a bound pre-page monotonic clock. Getter returns invalid at/after expiry, never trusts page time functions. |
+| Installation/round trip | Install before navigation; mode immutable. Probe round trip uses ms=15000, synchronous grant/read/finally-revoke/read; commit original uniqueContextId only. No token in product JSON. |
+| Renewal | Host timer every3s/pre-navigation, O4 fingerprint unchanged; deadline/lock budget below remaining lease. Miss → leaseLapsed, no delayed extension. Stop joins/cancels timer and calibration before releasing server/transport. |
+
+Product JSON (W4 publishes; W5 types/passes through; `at`/`leaseExpiresAt` are Unix seconds, expiry is advisory only):
+
+```typescript
+type Placement = {
+  state: "invalid" | "probing" | "valid";
+  grant: "snap" | "frac" | null;
+  reason: string | null;
+  at: number | null;
+  product: string | null;
+  gpuCompositing: string | null;
+  method: "knowledge" | "probe" | null;
+  probeId: string | null;
+  leaseMs: number | null;
+  leaseExpiresAt: number | null;
+  tone: { observed: "identity" | "gpu_analytic" | null; applied: "identity" };
+  automaticProbesDisabled: boolean;
+}; // output.placement; additive to existing output fields
+```
+
+`grant=null` is JSON invalid; state probing never advertises a grant. Knowledge lease fields null. Host timestamps never
+prove document expiry; reconnect requires revoke/fresh context. `probeId` is latest scheduled run, retained on failure;
+no source UUIDs, tokens or nonce pixels in product JSON. Detailed records are logs/W6 only.
+
+| Event | Transition/action |
+|---|---|
+| First eligible managed context; reload/source refresh/reconnect/observed engine or GPU change | invalid → probing after revoke, subject to launch suppression; defer while player transition busy; allocate run ID once. |
+| Valid result | Only same engine/context/connection + GPU eligible classifier + program.ok=true + isolation/cleanup/restore true + no errors/authoritative persistence failure → valid, lease commit. |
+| Failed/cancelled/stale result; changed/unreadable fingerprint; expiry | → invalid, no old grant restoration. Reason published; late generation ignored. |
+| Runtime moving/isolation failure | invalid + automaticProbesDisabled=true until new engine launch; record reason. |
+| Operator recalibrate | invalid/valid → probing even when automatic probes disabled; duplicate probing request rejected; manual success does not clear suppression. |
+| Stop | invalid, cancel/drain; late completion ignored. No new session status enum. |
+
+Managed reason vocabulary: `not-calibrated|waiting-for-transition|calibrating|granted|unsupported|probe-failed|
+program-disturbed|isolation-failed|cleanup-failed|persistence-failed|cancelled|stale-result|revoked-fingerprint|
+leaseLapsed|disconnected|stopped|channel-compromised`. Existing Chrome reason strings remain unchanged.
+W4 consumes W2 classify result after W3 future; logs result and every rejected commit. Script-only `placement_mode="probe"`
+permits leased wrong-rule forcing on Chrome; it does not schedule a Chrome probe or enable recalibrate without adapter.
+
+### 11.4 W5 ↔ W4: command and presenter
+
+Existing wire/adapter contract: `web/live.py:48`, `:279`, `:301`; `live_session.py:32`, `:112`, `:128`, `:280`, `:379`;
+`dashboard/src/live/api.ts:1`, `:29`, `:41`; presenter sender/status `LivePresenter.tsx:204`, `:215`, `:230`, `:305`.
+
+```text
+POST /api/live/{session_id}/commands
+request  = {requestId:string, operation:"recalibrate"}   # no slide (null tolerated as existing default)
+response = {requestId, outcome:"completed"|"rejected", reason?:string, state:LiveSnapshot}
+capabilities.recalibrate = {supported:boolean, reason?:string}
+host.execute("recalibrate", None) -> PlayerObservation
+router managed-host construction: calibration=engine.calibration_adapter()  # existing managed engine instance
+```
+
+- `completed` acknowledges **scheduling**, not successful calibration; `state.output.placement.state="probing"` and probeId
+  identify that run (possibly waiting for a transition). Return cached scheduling observation without waiting for capture.
+  Preserve scene/build/visibility/player status; increment session revision for status publication. Never add to
+  `pending_navigation`/`pending_visibility`; normal request-ID replay/conflict handling remains. Stop stays prompt.
+- Capability supported only for owned ready managed OBS, live session, not already probing; automatic suppression does
+  not disable manual recalibrate. Chrome/headless/external attach → false. Include key in loading/default/apply capability
+  lists and TS `LiveOperation`. Do not add a route or change the `PlayerAdapter` protocol.
+- Extend output with optional `placement?: Placement` for older snapshots. Button `Recalibrate output`; probing status
+  `Calibrating…`; valid `Output calibrated`; initial invalid `Output not calibrated`; failed invalid
+  `Calibration unavailable. Movies use the standard transition.`; suppressed `Calibration paused. Recalibrate output to retry.`
+  Unsupported reason `Recalibration is available only for managed OBS output.`; probing rejection `Calibration is already running.`
+  Deferred reason `Waiting for the current transition to finish.`; disconnected `Waiting for connection to output host`.
+  Shared connection/session/Stop guards remain; disable recalibrate during its run, not navigation/Hide/Stop for 15 seconds.
+  Scheduling completed does not set presenter awaiting-navigation state; observe status through existing polling.
+
+### 11.5 W1 ← W4: take admission and rendering split
+
+Verified seams: `live_runtime.py:74`, `:79`, `:120`, `:125`, `:141–156`, `:298`, `:324`, `:338`;
+`tests/test_live_runtime.py:312`. No new Python public player arguments.
+
+```text
+input pl = window.__obedPlacement (one read)
+shared = existing tuple Q / paint / visibility / layer / clip / translation guards AND kx=ky=1
+snap = pl=="snap" AND DPR in {1,1.5,2} AND shared                 # existing snap draw unchanged
+frac = pl=="frac" AND DPR==1 AND integer(R.left,R.top) AND shared
+other = skip; still publish __obedTakeMs
+frac draw = existing snapped underlay THEN drawImage(v,fx,fy,round(cw),round(ch2))
+fx = dx+(r.left-R.left)+round(cx-r.left)-u0
+fy = dy+(r.top-R.top)+round(cy-r.top)-v0
+then whole-backing alpha==255 scan; then existing foreground draw / D3 holder attach
+patch_player(stock, mm_opacity=True) = rendering fidelity + freeze take/attachment + observation
+patch_player(stock, mm_opacity=False) = existing byte-identical off variant
+patch_rendering(stock) = rendering fidelity only (no observation, executable freeze take or D3 attachment entry)
+```
+
+W1 consumes no lease metadata, tone map, probe DOM or UA; getter is sole grant input. `SUPPORTED_PLAYERS[*][0]` and `[2]`
+re-pin final bytes for both stock digests; `[1]` unchanged. Rendering/live-minus-hook-minus-take/attachment equivalence
+is intentional. Crossfade/cut and non-freeze composition remain unchanged; no disk `main.js` edits or `html_preview.py` edit.
+
+### 11.6 W6 ← W1–W5: evidence and gates
+
+Consume W2 assets/page/capture/classifier; W3 adapter/guard-result/persistence API; W4 constructor/channel/status;
+W5 recalibrate wire; W1 final pinned bytes. Chrome uses harness CDP and script-only mode, never product calibration.
+Keep existing run/gate formats (`dissolve_probe.py:1267`, `:3774`, `:3916`; `managed_obs_qualify.py:2235`). Add:
+
+```text
+runs/<arm>/record.json.placementCalibration = {
+  schemaVersion:1, backend:"cef"|"chrome-harness", placement:"preview"|"offcanvas"|null,
+  obsVersion:string|null, engine:EngineIdentity|null, request:CalibrationRequest|null,
+  assets:{manifestSha256,patternSha256,motionSha256}, player:{stockSha256,liveSha256,renderingSha256},
+  input:ClassifierInput|null, classification:ProbeResult|null, transaction:CalibrationResult|null,
+  events:[{at:number,event:string,placement:Placement}],
+  persistence:{baseline:CollectionRef,nullBefore:CollectionRef,nullAfter:CollectionRef,cleanup:CollectionRef|null,
+               quit:CollectionRef|null,backup:FileRef[],lastRemovalMtimeNs:number,checks:PersistenceCheck[]}|null,
+  integrity:{recording:FileRef|null,rgba:FileRef[],telemetry:FileRef|null},
+  gates:{[name]:{verdict:"PASS"|"FAIL"|"INCONCLUSIVE"|"REPORTED",problems:string[],detail:object}}
+}
+FileRef = {path:string,sha256:string}  # relative to run, full digest; no secrets/absolute credentials
+CollectionRef = FileRef & {mtimeNs:number,savedByObs:boolean}  # original file metadata, not copied-file mtime
+```
+
+Dataclasses serialize recursively with snake_case fields/enum values; replace each `ProbeCapture.png` with FileRef to
+raw lossless PNG, never stringify bytes. Non-null transaction `evidence` serializes as
+`{"$ref":"#/placementCalibration/input"}`; offline reader resolves it to the same ClassifierInput.
+`at` is Unix seconds; capture timing retains monotonic fields. Raw collection snapshots, manifest, code versions and
+player digests are retained with hashes. No unsupported object via `default=str` in this new record.
+Gate names are §5 names; each stores null/positive/candidate IDs in detail. Missing evidence → INCONCLUSIVE, never expected
+FAIL. Feed gate results into existing verdict.json/DX-2 summary; offline rescore calls the same classifier/persistence API.
+No new acceptance scope. Unpinned release data: W2's three asset digests and W1's new patched digests await generation;
+configured-device preview-output behavior remains an explicit field-test qualification, not a guessed contract.
