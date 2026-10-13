@@ -1,6 +1,6 @@
 # Alpha Keynote: CEF/OBS placement calibration and the fractional movie freeze
 
-**rev 3.1 — 2026-10-13; r1–r3 folded, owner decisions O1–O5 unchanged in §8.** Base: rev 2 `d72238ac` on `claude/cef-obs-placement-plan`.
+**rev 3.2 — 2026-10-13; r1–r3 folded, step 0 recorded (§7), owner decisions O1–O5 unchanged in §8.** Base: rev 2 `d72238ac` on `claude/cef-obs-placement-plan`.
 Plan only: overwrite the scratch plan for coordinator copy; no product edits, commit, OBS, Chrome or Keynote run.
 Parent: `keynote_live_dissolve_crossfade.plan.md` **rev 17**, landed #262; its §12 decisions 1–16 govern except where
 today's explicit follow-up request restores probe work. Earlier probe design: `git show 41ef609b:.agents/plans/keynote_live_dissolve_crossfade.plan.md`,
@@ -434,6 +434,26 @@ DeckLink preview output and transition check. Measure Studio toggle effects on m
 duplication setting; seed false only if default duplication fails that gate, then verify disk value and behavior. Record
 any available runtime readback route, without requiring one. Select placement only after these results. This is future
 implementation work, not a browser/OBS run authorized by this plan-writing task.
+
+**Step 0 results (2026-10-13, coordinator, 3 managed launches; evidence
+`output/evidence/s2-dev/dissolve-alpha-2026-10-11/cef-placement-step0-2026-10-13/README.md`):**
+- **Placement: preview selected.** Studio Mode on/off with the default `SceneDuplicationMode=true`, create, preview, shots,
+  restore and removal left the moving Program page at baseline (0 `visibilitychange`, rAF max gap 20.1 ms at 50 fps, rVFC max
+  60 ms, 0 skipped frames); program `AK` unchanged; probe active=false/showing=true. **No duplication seed.** The off-canvas
+  fallback measured equally clean (x 2048 read back exactly); it stays the qualification fallback only.
+- **Moving-program positive control:** `Program` item off 1 s → on gives 2 `visibilitychange`, rAF gap 1020 ms → FAIL, as required.
+- **Freshness latency:** the OBS screenshot trails the page's rAF counter by ~10 frames (~200 ms at 50 fps); a challenge must
+  be painted ≥ 300 ms before the capture that must show it.
+- **Preconditions:** transition → `GetCurrentSceneTransition` `transitionKind` `cut_transition`. DeckLink with no device:
+  `GetOutputStatus("decklink_preview_output")` → code 600 "No output was found with the name `decklink_preview_output`."
+  This is the only absent=pass response; it is identical for any unknown name, so the name is a pinned constant. Behaviour
+  with a configured device is untested (DeckLink field test). `GetCurrentPreviewScene` outside Studio Mode → 506. No websocket
+  route reads `SceneDuplicationMode`; OBS writes it to `user.ini` at launch.
+- **Persistence (O5):** OBS saves `AK.json` on every create/remove (the mid-transaction file holds `AK-Probe`) and rotates the
+  previous file to `.bak`; after clean quit both are the cleaned state. Null-run allowlist (seed → quit, uuids stripped):
+  `modules/{auto-scene-switcher,output-timer,scripts-tool}`, `virtual-camera`, `scaling_level`, per-source `hotkeys/*`,
+  scene-item `{bounds,pos,scale}_rel`. Preview quit = null quit; off-canvas differs only by `AK` `settings/id_counter` 1 → 2.
+  Repeat removal of an absent object → 600 "No source was found by the name of `<name>` within the canvas `Main`."
 
 Order: step 0/contracts → W1–W6 (within concurrency) → exact-adapter asset/probe/cleanup gates → integration/review →
 targeted/full suites → previously passing DX-1 arms plus required controls → CEF preflight/DX-2 → regressions/owner check →
