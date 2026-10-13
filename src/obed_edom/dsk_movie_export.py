@@ -143,7 +143,7 @@ def _crop_encoder_args(codec: str) -> list[str]:
     decodes a clip re-encoded from a 10-bit 4:2:2 ProRes intermediate."""
     if codec in _PRORES_PROFILES:
         return ["prores_ks", "-profile:v", _PRORES_PROFILES[codec]]
-    return ["libx264", "-crf", "18", "-preset", "fast", "-pix_fmt", "yuv420p"]
+    return ["libx264", "-crf", "14", "-preset", "fast", "-pix_fmt", "yuv420p"]
 
 
 def _keynote_export_codec(codec: str) -> str:

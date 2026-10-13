@@ -85,7 +85,7 @@ Citation prefixes:
   - **Odd width or height:** refused, because 4:2:0 needs even sizes.
   - **Source timing unreadable:** refused.
 - **Encode.** argv: `ffmpeg -nostdin -y -v error -noautorotate -i SRC -map 0:v:0 -map 0:a? -c:v <_crop_encoder_args("h264")> -fps_mode passthrough -video_track_timescale <source mdhd timescale> -c:a aac -b:a 192k -progress pipe:1 -nostats TMP`.
-  - The video arguments are `dsk_movie_export._crop_encoder_args("h264")` (`:140-146`): libx264, crf 18, preset fast, yuv420p.
+  - The video arguments are `dsk_movie_export._crop_encoder_args("h264")` (`:140-146`): libx264, crf 14 (owner 2026-10-13: extra headroom), preset fast, yuv420p.
   - TMP is a hidden sibling file with the same extension, so ffmpeg picks the right muxer.
   - Progress goes to the job log about every 5 s: "Converting untitled.mov to H.264 · 12 / 46 s". `LiveDeckInput` already shows the last log line.
 - **Verify.** Box reads only, no ffprobe. The output must be `avc1`, and these must equal the source's: coded size, mdhd timescale, the tkhd matrix, and the **presented** video duration (the video track's edit-list duration, or its mdhd duration when it has no edit list) to within half a frame. The stts sample count must also match when the source's edit list is absent or the identity (one entry, `media_time` 0). Raw stts totals are not compared: libx264 always writes a B-frame edit list, and an edit-listed source legitimately loses its skipped samples (§1.1). A dropped frame still fails. Only then `os.replace`. Any failure raises `PreviewError` naming the movie and the reason; the temp file is removed and the original is untouched.
@@ -241,7 +241,7 @@ Rejected: keeping the gate with an override button. The owner said never block.
 
 ## 5. Frozen contract (set before the streams launch)
 1. **`manifest.movieConversion`** (optional; absent means nothing was converted):
-   - `encoder`: `"libx264 crf18 fast yuv420p; aac 192k"`;
+   - `encoder`: `"libx264 crf14 fast yuv420p; aac 192k"`;
    - `converted`: a list of entries, each with `path`, `asset`, `sourceCodec`, `sourceSha256`, `sha256` and `bytes`.
 2. **`preview_movies` functions:**
    - `convert_movies(export_root, slides, *, log) -> dict`, which raises `PreviewError` naming every refused asset;
@@ -295,7 +295,7 @@ After S3 (outside C): the probe on the partial Alpha_DSK plan, plus the owner's 
 - HDR HEVC (PQ/HLG) becomes 8-bit SDR without tone mapping.
 - Encoding runs at about realtime at 3840×1080, so long clips add minutes to a prepare.
 - Movies with odd dimensions are refused.
-- There is a quality-generation loss at crf 18. Audio is re-encoded to AAC 192k (live output is muted anyway).
+- There is a quality-generation loss at crf 14 (visually transparent: crf 16 measured 45–46 dB average PSNR). Audio is re-encoded to AAC 192k (live output is muted anyway).
 - `slide_instances` leaves out R11 instances, so the probe's stray check would flag them; no gate deck has one.
 - Two concurrent prepares of the same deck can make each other fail. This fails closed: the manifest is written last, and reuse requires H.264.
 - Re-preparing a deck while a live session serves its cache is an existing hazard. C makes it reachable once more per old non-H.264 cache (its first re-prepare re-exports).
