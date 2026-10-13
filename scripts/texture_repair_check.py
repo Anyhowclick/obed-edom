@@ -52,7 +52,6 @@ G1_FIXTURES = ("alpha-dsk-textures", "qual-decks", "p2-recovery", "p2-binary", "
 UNNAMED_FIXTURES = ("minimal-alpha-dsk-17c0c938",)
 REFUSAL_3B9019 = (
     "Cannot repair Keynote's HTML export: "
-    "slide 9 (288×78 image): its texture is mis-mapped and no verified replacement exists; "
     "slide 10 (287×77 image): its texture is mis-mapped and no verified replacement exists"
 )
 EXPECT: dict[str, dict[str, Any]] = {
