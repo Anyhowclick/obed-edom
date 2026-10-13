@@ -817,7 +817,10 @@ for the parked `iwa-surgical-write-generator` feature.
   count-checked, in-memory replacements on a `SUPPORTED_PLAYERS` player (stock `e9b2fad4…` or `17c0c938…`, each with
   pinned on/off/rendering outputs; else `LiveRuntimeUnsupported`). R1–R4:
   each `eB` leaf draws at its chain opacity (per node, a constant `both` opacity animation's value, else the model value);
-  a fade, `hidden`, several or nested animations leave the subtree at today's value. R5: the swapped DOM node hides in
+  a fade, `hidden`, several or nested animations leave the subtree at today's value, except a leaf fade under constant
+  ancestors (`keynote_live_mm_opacity_fade.plan.md`): an admitted fade-in, short fade-out or partial fade keeps the
+  player's ramp × the ancestor product (R1 `__obedFade`/`obedParentOpacity`, R3 multiply, R13 passes the effect
+  duration from `setupTexture`); on disk only Alpha_DSK 6→7/3 and 7→8/4, 8 change. R5: the swapped DOM node hides in
   the same task as the first GL draw (no one-frame DOM+GL double image). `mm_opacity=False` is byte-identical to the
   observation-only player. Precedence = ctor `mm_opacity` (`auto`|`off` exact, else `LiveHostError`) → env
   `OBED_LIVE_MM_OPACITY` (trimmed, any case; `off`|`auto`, else refuse) → `auto`, on every output (HDMI, managed OBS,

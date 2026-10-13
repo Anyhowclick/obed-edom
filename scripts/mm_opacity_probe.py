@@ -756,7 +756,8 @@ def run_arm(fixture: Path, gl: str, arm: str) -> dict[str, Any]:
 
     record: dict[str, Any] = {"gl": gl, "arm": arm, "mmOpacityKwarg": ALL_ARMS[arm], "steps": []}
     probe.force_viewport(*VIEWPORT)
-    dest = probe.prepare_export(fixture / "html-player", fixture / "html-unmodified" / "index.html", f"mmo-{gl}-{arm}")
+    dest = probe.prepare_export(fixture / "html-player", fixture / "html-unmodified" / "index.html", probe.run_root(Path(__file__)),
+                                f"mmo-{gl}-{arm}")
     slides = probe.load_slides(dest)
     record["masks"] = movie_masks(probe.runtime_of(probe.ground_truth_plan(dest, slides, gl_replay=True)))
     record["roi"] = settle_roi()
