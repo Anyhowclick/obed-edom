@@ -31,6 +31,7 @@ class FakeEngine:
         self.rate, self.keyer = 25, 'external'
         self.reason = None
         self.setup = None
+        self.calibration = object()
 
     def _call(self, *call):
         self.calls.append(call)
@@ -99,6 +100,9 @@ class FakeEngine:
         self.status = 'stopped'
         return True
 
+    def calibration_adapter(self):
+        return self.calibration
+
     def actions(self):
         return [call[0] for call in self.calls if call[0] not in ('configure', 'has_orphan')]
 
@@ -114,12 +118,28 @@ class Adapter:
         self.wait: Event | None = None
         self.release: Event | None = None
         self.stopped = False
+        self.placement = None
+        self.recalibrate_calls = 0
 
     def capabilities(self):
-        return {op: {'supported': True} for op in ('advance', 'goTo', 'hide', 'show')}
+        capabilities = {op: {'supported': True} for op in ('advance', 'goTo', 'hide', 'show')}
+        if self.kwargs.get('bridge') == 'obs-managed' and self.kwargs.get('calibration') is not None:
+            capabilities['recalibrate'] = (
+                {'supported': False, 'reason': 'Calibration is already running.'}
+                if self.placement and self.placement['state'] == 'probing'
+                else {'supported': True}
+            )
+        else:
+            capabilities['recalibrate'] = {
+                'supported': False,
+                'reason': 'Recalibration is available only for managed OBS output.',
+            }
+        return capabilities
 
     def observe(self):
-        return PlayerObservation(original_slide=1 + self.clicks, scene_id=str(self.clicks), output_visible=self.visible)
+        output = {**self.output, 'placement': self.placement} if self.placement else None
+        return PlayerObservation(original_slide=1 + self.clicks, scene_id=str(self.clicks), output_visible=self.visible,
+                                 output=output)
 
     def execute(self, operation, slide=None):
         if self.wait:
@@ -132,6 +152,14 @@ class Adapter:
             self.clicks += 1
         elif operation in ('hide', 'show'):
             self.visible = operation == 'show'
+        elif operation == 'recalibrate':
+            self.recalibrate_calls += 1
+            self.placement = {
+                'state': 'probing', 'grant': None, 'reason': 'calibrating', 'at': None,
+                'product': 'Chrome/127.0.0.0', 'gpuCompositing': None, 'method': 'probe',
+                'probeId': 'probe-1', 'leaseMs': None, 'leaseExpiresAt': None,
+                'tone': {'observed': None, 'applied': 'identity'}, 'automaticProbesDisabled': False,
+            }
         return self.observe()
 
     def stop(self):
@@ -523,8 +551,40 @@ def test_keyer_start_attaches_to_the_engine_target_and_ignores_display(tmp_path,
     assert adapters[-1].kwargs == {
         'display_id': None, 'continuity': 'auto', 'attach_endpoint': 'http://127.0.0.1:9333',
         'attach_match': 'TARGET-1', 'bridge': 'obs-managed', 'output_rate': 30,
+        'calibration': engine.calibration,
     }
+    assert response.json()['capabilities']['recalibrate'] == {'supported': True}
     assert engine.actions() == []
+
+
+def test_managed_recalibrate_schedules_once_and_replays_without_navigation_or_visibility_ack(tmp_path, monkeypatch):
+    client, engine, adapters, _ = engine_client(tmp_path, monkeypatch, akOutputMode='keyer')
+    engine.status = 'ready'
+    state = client.post('/api/live', json={'previewJobId': 'prepared'}).json()
+    session = state['sessionId']
+    command = {'requestId': 'cal-1', 'operation': 'recalibrate', 'slide': None}
+
+    first = client.post(f'/api/live/{session}/commands', json=command).json()
+    replay = client.post(f'/api/live/{session}/commands', json=command).json()
+    concurrent = client.post(
+        f'/api/live/{session}/commands', json={'requestId': 'cal-2', 'operation': 'recalibrate'},
+    ).json()
+    with_slide = client.post(
+        f'/api/live/{session}/commands', json={'requestId': 'cal-3', 'operation': 'recalibrate', 'slide': 1},
+    ).json()
+
+    assert first == replay
+    assert first['outcome'] == 'completed'
+    assert first['state']['status'] == 'ready'
+    assert first['state']['originalSlide'] == state['originalSlide']
+    assert first['state']['outputVisible'] == state['outputVisible']
+    assert first['state']['output']['placement']['state'] == 'probing'
+    assert first['state']['output']['placement']['probeId'] == 'probe-1'
+    assert concurrent['outcome'] == 'rejected'
+    assert concurrent['reason'] == 'Calibration is already running.'
+    assert with_slide['outcome'] == 'rejected'
+    assert with_slide['reason'] == 'Only goTo accepts a slide number.'
+    assert adapters[-1].recalibrate_calls == 1
 
 
 def test_screen_start_passes_no_engine_kwargs(tmp_path, monkeypatch):
@@ -532,6 +592,10 @@ def test_screen_start_passes_no_engine_kwargs(tmp_path, monkeypatch):
     engine.status = 'ready'
     assert client.post('/api/live', json={'previewJobId': 'prepared', 'displayId': '42'}).status_code == 200
     assert adapters[-1].kwargs == {'display_id': 42, 'continuity': 'auto'}
+    state = client.get('/api/live').json()
+    assert state['capabilities']['recalibrate'] == {
+        'supported': False, 'reason': 'Recalibration is available only for managed OBS output.',
+    }
     assert engine.actions() == []
 
 

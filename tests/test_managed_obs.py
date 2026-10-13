@@ -29,6 +29,7 @@ from obed_edom.managed_obs import (
     write_tree,
 )
 from obed_edom.obs_websocket import ObsWebsocketTimeout
+from obed_edom.placement_probe import ClassifierInput, ProbeIdentity
 from tests.test_obs_websocket import FakeObsWebsocket
 
 # ---------------------------------------------------------------------------
@@ -138,7 +139,10 @@ def test_render_tree_page_url_uuids_port_and_password():
 def test_render_tree_has_no_audio_capture_sources():
     collection = json.loads(render_tree(_cfg())["basic/scenes/AK.json"])
     assert [source["id"] for source in collection["sources"]] == ["browser_source", "scene"]
+    assert [source["name"] for source in collection["sources"]] == ["Program", "AK"]
+    assert "AK-Probe" not in json.dumps(collection) and "AK-Calibrate" not in json.dumps(collection)
     assert collection["sources"][0]["settings"]["reroute_audio"] is False
+    assert "SceneDuplicationMode" not in render_tree(_cfg())["user.ini"].decode()
 
 
 @pytest.mark.parametrize("rate, canvas, source", [(25, "25 PAL", 50), (30, "30", 60)])
@@ -174,10 +178,13 @@ def test_decklink_keyer_value(keyer, value):
 def test_write_tree_writes_only_the_given_files(tmp_path):
     (tmp_path / ".sentinel").mkdir()
     (tmp_path / ".sentinel" / "run_1").write_bytes(b"x")
+    (tmp_path / "basic/scenes").mkdir(parents=True)
+    (tmp_path / "basic/scenes/AK.json.bak").write_bytes(b"untouched backup")
     write_tree(tmp_path, {"a/b.ini": b"1", "c.json": b"2"})
     assert (tmp_path / "a/b.ini").read_bytes() == b"1"
     assert (tmp_path / "c.json").read_bytes() == b"2"
     assert (tmp_path / ".sentinel" / "run_1").read_bytes() == b"x"
+    assert (tmp_path / "basic/scenes/AK.json.bak").read_bytes() == b"untouched backup"
 
 
 # --- fakes ------------------------------------------------------------------
@@ -368,6 +375,233 @@ class Rig:
             engine.close()
         self.cdp.close()
         self.ws.close()
+
+
+class CalibrationObs:
+    def __init__(self, *, studio: bool = False,
+                 output_error: tuple[int, str | None] | None = (600, managed_obs._PREVIEW_OUTPUT_ABSENT),
+                 removal: str = "normal", screenshot: str = "png", disturb_program: bool = False,
+                 transition_cursor: float = 1.0, preview_unreadable: bool = False) -> None:
+        self.studio = studio
+        self.preview = "Other" if studio else None
+        self.program = "AK"
+        self.output_error = output_error
+        self.removal = removal
+        self.screenshot = screenshot
+        self.disturb_program = disturb_program
+        self.transition_cursor = transition_cursor
+        self.preview_unreadable = preview_unreadable
+        self.pending_input = self.pending_scene = 0
+        self.scenes = {"AK": "scene-ak", "Other": "scene-other"}
+        self.inputs = {"Program": {"inputUuid": "input-program", "inputKind": "browser_source",
+                                   "inputSettings": {"width": 1920, "height": 1080, "fps": 50,
+                                                     "fps_custom": True}}}
+        self.program_items = [{"sceneItemId": 1, "sceneItemIndex": 0, "sourceName": "Program", "sourceUuid": "input-program",
+                               "sceneItemEnabled": True, "sceneItemBlendMode": "OBS_BLEND_NORMAL", "isGroup": None}]
+        self.audio_tracks: dict[str, bool] = {}
+        self.muted = False
+        self.monitor = ""
+        self.probe_url: str | None = None
+        self.requests: list[tuple[int, str, dict[str, Any] | None]] = []
+        self.connections = 0
+
+    def websocket(self, *_: Any, **kwargs: Any):
+        assert kwargs["max_message_bytes"] == managed_obs.CALIBRATION_MAX_MESSAGE_BYTES
+        self.connections += 1
+        connection = self.connections
+        owner = self
+
+        class Connection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_: Any) -> None:
+                self.close()
+
+            def close(self) -> None:
+                pass
+
+            def request(self, request_type: str, data: dict[str, Any] | None = None, *, timeout: float | None = None):
+                assert timeout is not None and 0 < timeout <= managed_obs.CALIBRATION_DEADLINE_S
+                owner.requests.append((connection, request_type, data))
+                return owner.request(request_type, data or {})
+
+        return Connection()
+
+    def targets(self, program_target: str) -> list[dict[str, Any]]:
+        rows = [{"id": program_target, "type": "page", "url": PAGE_URL}]
+        if self.probe_url is not None:
+            rows.append({"id": "probe-target", "type": "page", "url": self.probe_url})
+        return rows
+
+    def request(self, name: str, data: dict[str, Any]) -> dict[str, Any]:
+        if name == "GetCurrentSceneTransition":
+            return {"transitionName": "Cut", "transitionKind": "cut_transition", "transitionUuid": "transition-cut"}
+        if name == "GetCurrentSceneTransitionCursor":
+            return {"transitionCursor": self.transition_cursor}
+        if name == "GetOutputStatus":
+            if self.output_error is None:
+                return {"outputActive": False}
+            raise managed_obs.ObsRequestError(name, *self.output_error)
+        if name == "GetCurrentProgramScene":
+            return {"currentProgramSceneName": self.program, "currentProgramSceneUuid": self.scenes[self.program]}
+        if name == "SetCurrentProgramScene":
+            self.program = data["sceneName"]
+            return {}
+        if name == "GetStudioModeEnabled":
+            return {"studioModeEnabled": self.studio}
+        if name == "SetStudioModeEnabled":
+            self.studio = data["studioModeEnabled"]
+            if self.studio and self.preview is None:
+                self.preview = "AK"
+            return {}
+        if name == "GetCurrentPreviewScene":
+            if not self.studio or self.preview_unreadable:
+                raise managed_obs.ObsRequestError(name, 506, None)
+            return {"currentPreviewSceneName": self.preview, "currentPreviewSceneUuid": self.scenes[self.preview]}
+        if name == "SetCurrentPreviewScene":
+            self.preview = data["sceneName"]
+            return {}
+        if name == "GetVideoSettings":
+            return {"baseWidth": 1920, "baseHeight": 1080, "outputWidth": 1920, "outputHeight": 1080,
+                    "fpsNumerator": 25, "fpsDenominator": 1}
+        if name == "GetSceneList":
+            if self.pending_scene:
+                self.pending_scene -= 1
+                if not self.pending_scene:
+                    self.scenes.pop("AK-Calibrate", None)
+            return {"scenes": [{"sceneName": key, "sceneUuid": value} for key, value in self.scenes.items()]}
+        if name == "GetInputList":
+            if self.pending_input:
+                self.pending_input -= 1
+                if not self.pending_input:
+                    self.inputs.pop("AK-Probe", None)
+                    self.probe_url = None
+            return {"inputs": [{"inputName": key, "inputUuid": value["inputUuid"], "inputKind": value["inputKind"]}
+                               for key, value in self.inputs.items()]}
+        if name == "GetSceneItemList":
+            return {"sceneItems": json.loads(json.dumps(self.program_items)) if data["sceneName"] == "AK" else []}
+        if name == "CreateScene":
+            self.scenes[data["sceneName"]] = "scene-calibrate"
+            return {"sceneUuid": "scene-calibrate"}
+        if name == "CreateInput":
+            self.inputs[data["inputName"]] = {"inputUuid": "input-probe", "inputKind": data["inputKind"],
+                                               "inputSettings": dict(data["inputSettings"])}
+            self.probe_url = data["inputSettings"]["url"]
+            return {"inputUuid": "input-probe", "sceneItemId": 1}
+        if name == "GetInputSettings":
+            value = self.inputs[data["inputName"]]
+            return {"inputKind": value["inputKind"], "inputSettings": dict(value["inputSettings"])}
+        if name == "SetInputMute":
+            self.muted = data["inputMuted"]
+            return {}
+        if name == "GetInputMute":
+            return {"inputMuted": self.muted}
+        if name == "SetInputAudioTracks":
+            self.audio_tracks = dict(data["inputAudioTracks"])
+            return {}
+        if name == "GetInputAudioTracks":
+            return {"inputAudioTracks": dict(self.audio_tracks)}
+        if name == "SetInputAudioMonitorType":
+            self.monitor = data["monitorType"]
+            return {}
+        if name == "GetInputAudioMonitorType":
+            return {"monitorType": self.monitor}
+        if name == "GetSourceFilterList":
+            return {"filters": []}
+        if name == "CreateSceneItem":
+            self.program_items.append({"sceneItemId": 2, "sceneItemIndex": 1, "sourceName": "AK-Calibrate",
+                                       "sourceUuid": "scene-calibrate", "sceneItemEnabled": data["sceneItemEnabled"],
+                                       "sceneItemBlendMode": "OBS_BLEND_NORMAL", "isGroup": False,
+                                       "sceneItemTransform": self.transform(0.0)})
+            return {"sceneItemId": 2}
+        if name == "SetSceneItemTransform":
+            self.program_items[1]["sceneItemTransform"] = self.transform(data["sceneItemTransform"]["positionX"])
+            return {}
+        if name == "GetSceneItemTransform":
+            return {"sceneItemTransform": dict(self.program_items[1]["sceneItemTransform"])}
+        if name == "SetSceneItemEnabled":
+            next(item for item in self.program_items if item["sceneItemId"] == data["sceneItemId"])["sceneItemEnabled"] = data["sceneItemEnabled"]
+            return {}
+        if name == "GetSourceActive":
+            active = any(item["sourceName"] == "AK-Calibrate" and item["sceneItemEnabled"] for item in self.program_items)
+            return {"videoActive": active, "videoShowing": active or (self.studio and self.preview == "AK-Calibrate")}
+        if name == "GetSourceScreenshot":
+            if self.disturb_program:
+                self.program = "Other"
+            return {"imageData": "data:image/png;base64,iVBORw0KGgo=" if self.screenshot == "png" else "broken"}
+        if name == "RemoveSceneItem":
+            self.program_items = [item for item in self.program_items if item["sceneItemId"] != data["sceneItemId"]]
+            return {}
+        if name == "RemoveInput":
+            if data["inputName"] not in self.inputs:
+                raise managed_obs.ObsRequestError(name, 600, managed_obs._INPUT_ABSENT)
+            if self.removal == "delayed":
+                self.pending_input = 2
+            else:
+                del self.inputs[data["inputName"]]
+                self.probe_url = None
+            if self.removal == "absent":
+                raise managed_obs.ObsRequestError(name, 600, managed_obs._INPUT_ABSENT)
+            if self.removal == "wrong":
+                raise managed_obs.ObsRequestError(name, 600, "wrong input")
+            return {}
+        if name == "RemoveScene":
+            if data["sceneName"] not in self.scenes:
+                raise managed_obs.ObsRequestError(name, 600, managed_obs._SCENE_ABSENT)
+            if self.removal == "delayed":
+                self.pending_scene = 2
+            else:
+                del self.scenes[data["sceneName"]]
+            if self.removal == "absent":
+                raise managed_obs.ObsRequestError(name, 600, managed_obs._SCENE_ABSENT)
+            if self.removal == "wrong":
+                raise managed_obs.ObsRequestError(name, 600, "wrong scene")
+            return {}
+        raise AssertionError(name)
+
+    @staticmethod
+    def transform(x: float) -> dict[str, Any]:
+        return {"alignment": 5, "boundsAlignment": 0, "boundsHeight": 0.0, "boundsType": "OBS_BOUNDS_NONE",
+                "boundsWidth": 0.0, "cropBottom": 0, "cropLeft": 0, "cropRight": 0, "cropToBounds": False,
+                "cropTop": 0, "height": 1080.0, "positionX": x, "positionY": 0.0, "rotation": 0.0,
+                "scaleX": 1.0, "scaleY": 1.0, "sourceHeight": 1080.0, "sourceWidth": 1920.0, "width": 1920.0}
+
+
+class CalibrationGuard:
+    def __init__(self) -> None:
+        self.phases: list[str] = []
+
+    def begin(self) -> None:
+        self.phases.append("begin")
+
+    def sample(self, phase: str) -> None:
+        self.phases.append(phase)
+
+    def finish(self):
+        self.phases.append("finish")
+        return managed_obs.ProgramCheck(True, 0, 20.0, 20.0, (), None)
+
+
+def calibration_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, obs: CalibrationObs) -> ManagedObs:
+    home = tmp_path / "calibration-home"
+    tree = home / managed_obs.TREE_RELPATH
+    write_tree(tree, render_tree(_cfg()))
+    launcher = FakeLauncher()
+    launcher.add(4242, 1000.0, home)
+    engine = ManagedObs(home, launcher=launcher, clock=time.monotonic, sleep=lambda _: None, poll_s=0.001, liveness_s=3600)
+    engine._pid = 4242
+    engine._launch_date = 1000.0
+    engine._ready_generation = 7
+    engine._state = "ready"
+    engine._target_id = "program-target"
+    engine._launched = (25, "external")
+    engine._cdp_port = 1
+    engine._ws_port = 2
+    engine._ws_password = "private-password"
+    monkeypatch.setattr(managed_obs, "ObsWebsocket", obs.websocket)
+    monkeypatch.setattr(engine, "_target_rows", lambda timeout_s=1.0: obs.targets("program-target"))
+    return engine
 
 
 @pytest.fixture
@@ -1879,3 +2113,186 @@ def test_appkit_env_marker_on_real_processes(tmp_path):
     finally:
         child.kill()
         child.wait()
+
+
+def test_persistence_contract_pins_step0_null_and_fails_closed(tmp_path):
+    before_value = json.loads(render_tree(_cfg())["basic/scenes/AK.json"])
+    after_value = json.loads(json.dumps(before_value))
+    by_name = {source["name"]: source for source in after_value["sources"]}
+    by_name["Program"]["uuid"] = "program-after"
+    by_name["AK"]["uuid"] = "scene-after"
+    by_name["AK"]["settings"]["items"][0]["source_uuid"] = "program-after"
+    after_value["modules"] = {
+        "auto-scene-switcher": {"interval": 300, "non_matching_scene": "", "switch_if_not_matching": False,
+                                "active": False, "switches": []},
+        "output-timer": {"streamTimerHours": 0, "streamTimerMinutes": 0, "streamTimerSeconds": 0,
+                         "recordTimerHours": 0, "recordTimerMinutes": 0, "recordTimerSeconds": 0,
+                         "autoStartStreamTimer": False, "autoStartRecordTimer": False, "pauseRecordTimer": False},
+        "scripts-tool": [],
+    }
+    after_value["virtual-camera"] = {"type2": 3}
+    after_value["scaling_level"] = -49
+    by_name["Program"]["hotkeys"] = {"ObsBrowser.Refresh": [], "libobs.mute": [], "libobs.unmute": [],
+                                      "libobs.push-to-mute": [], "libobs.push-to-talk": []}
+    by_name["AK"]["hotkeys"] = {"OBSBasic.SelectScene": [], "libobs.hide_scene_item.1": [],
+                                  "libobs.show_scene_item.1": []}
+    item = by_name["AK"]["settings"]["items"][0]
+    item["bounds_rel"] = {"x": 3.555555582046509, "y": 2.0}
+    item["pos_rel"] = {"x": -1.7777777910232544, "y": -1.0}
+    item["scale_rel"] = {"x": 1.0, "y": 1.0}
+    before_path, after_path = tmp_path / "before.json", tmp_path / "after.json"
+    before_path.write_text(json.dumps(before_value))
+    after_path.write_text(json.dumps(after_value))
+    before = managed_obs.read_collection(before_path, saved_by_obs=False)
+    after = managed_obs.read_collection(after_path, saved_by_obs=True)
+    derived = managed_obs.persistence_allowlist(before, after)
+    assert sorted(derived, key=lambda rule: rule.path) == sorted(managed_obs.STEP0_NULL_ALLOWLIST, key=lambda rule: rule.path)
+    transaction_state = json.loads(json.dumps(after.state))
+    transaction_state["sources"]["Program"]["uuid"] = before.state["sources"]["Program"]["uuid"]
+    transaction_state["sources"]["AK"]["uuid"] = before.state["sources"]["AK"]["uuid"]
+    transaction_state["sources"]["AK"]["settings"]["items"][0]["source_uuid"] = before.state["sources"]["Program"]["uuid"]
+    transaction_after = managed_obs.CollectionSnapshot(transaction_state, after.mtime_ns, True)
+    passed = managed_obs.check_persistence(before, transaction_after, null_allowlist=managed_obs.STEP0_NULL_ALLOWLIST,
+                                           phase="quit", last_removal_mtime_ns=after.mtime_ns + 1)
+    assert passed.authoritative is True and passed.ok is True and passed.differences == ()
+    changed = json.loads(json.dumps(transaction_after.state))
+    changed["sources"]["AK"]["settings"]["id_counter"] += 1
+    monotonic = managed_obs.CollectionSnapshot(changed, after.mtime_ns, True)
+    assert managed_obs.check_persistence(before, monotonic, null_allowlist=managed_obs.STEP0_NULL_ALLOWLIST,
+                                         phase="quit", last_removal_mtime_ns=0).ok is True
+    changed["sources"]["leftover"] = {"name": "AK-Probe", "uuid": "leftover", "id": "browser_source"}
+    leftover = managed_obs.CollectionSnapshot(changed, after.mtime_ns, True)
+    failed = managed_obs.check_persistence(before, leftover, null_allowlist=managed_obs.STEP0_NULL_ALLOWLIST,
+                                           phase="quit", last_removal_mtime_ns=0)
+    assert failed.ok is False and "/sources/leftover" in failed.differences
+    stale = managed_obs.check_persistence(before, leftover, null_allowlist=managed_obs.STEP0_NULL_ALLOWLIST,
+                                          phase="cleanup", last_removal_mtime_ns=after.mtime_ns)
+    assert stale.authoritative is False and stale.ok is None
+    (tmp_path / "bad.json").write_text("[]")
+    with pytest.raises(ManagedObsError, match="not a JSON object"):
+        managed_obs.read_collection(tmp_path / "bad.json", saved_by_obs=False)
+
+
+@pytest.mark.parametrize(
+    "placement,studio,outcome",
+    [("preview", False, "success"), ("preview", True, "success"), ("offcanvas", False, "success"),
+     ("preview", False, "output-inactive"), ("preview", False, "absent-removal"),
+     ("preview", False, "delayed-removal"), ("preview", False, "wrong-removal"),
+     ("preview", False, "bad-output"), ("preview", False, "bad-screenshot"),
+     ("preview", False, "bad-evidence"), ("preview", False, "bad-target"),
+     ("preview", False, "program-change"),
+     ("preview", False, "transition-active"), ("preview", True, "preview-unreadable"),
+     ("preview", False, "stale-identity"),
+     ("preview", False, "cancel"), ("preview", False, "quit"),
+     ("preview", False, "restart"), ("preview", False, "setup")],
+)
+def test_calibration_transaction_preview_offcanvas_faults_and_fencing(tmp_path, monkeypatch, placement, studio, outcome):
+    output_error = (601, "wrong") if outcome == "bad-output" else None if outcome == "output-inactive" else (
+        600, managed_obs._PREVIEW_OUTPUT_ABSENT)
+    removal = ("absent" if outcome == "absent-removal" else "delayed" if outcome == "delayed-removal"
+               else "wrong" if outcome == "wrong-removal" else "normal")
+    obs = CalibrationObs(studio=studio, output_error=output_error, removal=removal,
+                         screenshot="bad" if outcome == "bad-screenshot" else "png",
+                         disturb_program=outcome == "program-change",
+                         transition_cursor=0.5 if outcome == "transition-active" else 1.0,
+                         preview_unreadable=outcome == "preview-unreadable")
+    engine = calibration_engine(tmp_path, monkeypatch, obs)
+    adapter = engine.calibration_adapter()
+    identity = adapter.identity()
+    assert identity == managed_obs.EngineIdentity(4242, 1000.0, 7)
+    run_id = "0123456789abcdef0123456789abcdef"
+    request = managed_obs.CalibrationRequest(
+        managed_obs.ProbeSpec(run_id, 1920, 1080, 50, 1.0),
+        f"http://127.0.0.1:9911/__obed_probe/{run_id}/index.html", identity,
+        "program-target", "program-context", 4, placement)
+    if outcome == "stale-identity":
+        request = managed_obs.CalibrationRequest(request.spec, request.url,
+                                                 managed_obs.EngineIdentity(4242, 1000.0, 6),
+                                                 request.program_target_id, request.program_context_id,
+                                                 request.connection_generation, request.placement)
+        with pytest.raises(ManagedObsError, match="stale or not ready"):
+            adapter.start(request, measure=lambda _: None, guard=CalibrationGuard())
+        engine.close()
+        return
+    guard = CalibrationGuard()
+    entered = threading.Event()
+
+    def measure(io):
+        entered.set()
+        if outcome in ("cancel", "quit", "restart", "setup"):
+            assert io.cancel_event.wait(2)
+            io.check_current()
+        png = io.capture_png()
+        assert png == b"\x89PNG\r\n\x1a\n"
+        probe_identity = ProbeIdentity(run_id, io.source_uuid, "probe-target", "probe-context", 4, "Mozilla/5.0", 1.0)
+        if outcome == "bad-evidence":
+            probe_identity = ProbeIdentity(run_id, "wrong-source", "probe-target", "probe-context", 4,
+                                           "Mozilla/5.0", 1.0)
+        elif outcome == "bad-target":
+            probe_identity = ProbeIdentity(run_id, io.source_uuid, "wrong-target", "probe-context", 4,
+                                           "Mozilla/5.0", 1.0)
+        return ClassifierInput(request.spec, ("manifest", "pattern", "motion"), probe_identity, 4, (1920, 540),
+                               ("bt709", "bt709", "bt709", False), (), (), ())
+
+    future = adapter.start(request, measure=measure, guard=guard)
+    if outcome in ("cancel", "quit", "restart", "setup"):
+        assert entered.wait(2)
+        with engine._lock:
+            calibration_thread = engine._calibration_run.thread if engine._calibration_run is not None else None
+        assert calibration_thread is not None and calibration_thread.name.startswith("managed-obs-calibration-")
+        assert engine._thread is None and engine._jobs.empty()
+        with pytest.raises(ManagedObsError, match="already running"):
+            adapter.start(request, measure=measure, guard=CalibrationGuard())
+        if outcome == "cancel":
+            assert adapter.cancel(run_id, timeout_s=5.0) is True
+        else:
+            launches: list[tuple[int, str, bool]] = []
+            monkeypatch.setattr(engine, "_launch", lambda rate, keyer, *, hidden: launches.append((rate, keyer, hidden)))
+            if outcome == "quit":
+                engine.quit()
+            elif outcome == "restart":
+                engine.restart(25, "external")
+            else:
+                engine.setup_device_begin(25)
+            assert engine.wait_idle(3)
+            if outcome != "quit":
+                assert launches == [(25, "external", outcome == "restart")]
+        result = future.result(2)
+        assert result.cleanup_verified is True and result.restored is True
+        assert any("cancelled" in error.lower() for error in result.errors)
+    else:
+        result = future.result(2)
+        assert engine._thread is None and engine._jobs.empty()
+        if outcome in ("bad-output", "transition-active", "preview-unreadable"):
+            assert result.evidence is None and result.isolation_ok is False
+            expected = {"bad-output": "preview output state is unreadable", "transition-active": "transition is in flight",
+                        "preview-unreadable": "preview state is unreadable"}[outcome]
+            assert any(expected in error for error in result.errors)
+            assert all(name not in ("CreateScene", "CreateInput") for _, name, _ in obs.requests)
+        elif outcome in ("bad-screenshot", "bad-evidence", "bad-target", "program-change", "wrong-removal"):
+            assert result.cleanup_verified is (outcome != "wrong-removal") and result.restored is True and result.errors
+            if outcome == "program-change":
+                assert result.isolation_ok is False and obs.program == "AK"
+            assert not any(name == "CreateSceneItem" for _, name, _ in obs.requests)
+        else:
+            assert result.isolation_ok is True and result.cleanup_verified is True and result.restored is True
+            assert result.errors == () and result.program is not None and result.program.ok is True
+            assert guard.phases == ["begin", "before-install", "installed", "before-capture", "after-capture",
+                                    "before-cleanup", "restored", "finish"]
+            assert obs.connections == 2
+            assert obs.probe_url is None and "AK-Probe" not in obs.inputs and "AK-Calibrate" not in obs.scenes
+            if placement == "preview":
+                assert obs.studio is studio and obs.preview == ("Other" if studio else "AK")
+                restore = next(index for index, (_, name, data) in enumerate(obs.requests)
+                               if name == "SetCurrentPreviewScene" and data["sceneName"] != "AK-Calibrate")
+                studio_off = next((index for index, (_, name, data) in enumerate(obs.requests)
+                                   if name == "SetStudioModeEnabled" and data["studioModeEnabled"] is False), len(obs.requests))
+                assert restore < studio_off
+            else:
+                create = next(index for index, (_, name, _) in enumerate(obs.requests) if name == "CreateSceneItem")
+                transform = next(index for index, (_, name, _) in enumerate(obs.requests) if name == "SetSceneItemTransform")
+                enable = next(index for index, (_, name, data) in enumerate(obs.requests)
+                              if name == "SetSceneItemEnabled" and data["sceneItemEnabled"] is True)
+                assert create < transform < enable
+        assert adapter.cancel(run_id, timeout_s=5.0) is (result.cleanup_verified and result.restored)
+    engine.close()

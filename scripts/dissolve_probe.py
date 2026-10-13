@@ -41,6 +41,7 @@ import json
 import math
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -50,7 +51,8 @@ import time
 import traceback
 import urllib.request
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +67,7 @@ import binary_counter_movie as binary  # noqa: E402
 import mm_opacity_probe as mmo  # noqa: E402
 from obs_cadence_decode import read_strip  # noqa: E402
 
-from obed_edom import live_runtime  # noqa: E402
+from obed_edom import live_runtime, placement_probe  # noqa: E402
 
 FIXTURES = REPO / "output" / "fixtures"
 CHROME = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
@@ -123,6 +125,8 @@ TONE_CELL_PX = 16
 DARK_MAX = 2.0
 VERDICTS = ("PASS", "FAIL", "INCONCLUSIVE", "REPORTED", "N/A")
 MOVIE_SUFFIXES = (".mov", ".mp4", ".m4v")
+PLACEMENT_SCHEMA_VERSION = 1
+PLACEMENT_BACKENDS = ("cef", "chrome-harness")
 
 
 @dataclass(frozen=True)
@@ -165,6 +169,10 @@ SPLICES = {
     "lut-identity": (b"d[j]=L[d[j]],d[j+1]=L[d[j+1]],d[j+2]=L[d[j+2]]", b"d[j]=d[j],d[j+1]=d[j+1],d[j+2]=d[j+2]", 1),
     "sn-frac": (b"sn=function(z,e,k){return Math.round((z-e)*k*p)/p}", b"sn=function(z,e,k){return(z-e)*k}", 1),
     "snap-shift": (b's.left=a0+"px"', b's.left=a0+1/p+"px"', 1),
+    "frac-nooffset-x": (b"fx=dx+(r.left-R.left)+Math.round(cx-r.left)-u0",
+                         b"fx=dx+Math.round(cx-r.left)-u0", 1),
+    "frac-nooffset-y": (b"fy=dy+(r.top-R.top)+Math.round(cy-r.top)-v0",
+                         b"fy=dy+Math.round(cy-r.top)-v0", 1),
 }
 
 RAW_STYLE = '<style id="obed-dx-transparent">html,body,#body{background:transparent!important}</style>'
@@ -242,6 +250,9 @@ class Arm:
     decoders: int = 1
     letterbox: int = 0
     grant: str = "driver"
+    forgery: str | None = None
+    placement_value: str | None = None
+    placement_mode: str | None = None
     reason: str | None = None
     regrant: str | None = None
     min_class_px: int = MIN_CLASS_PX
@@ -345,6 +356,16 @@ ARMS: dict[str, Arm] = {
     "on-sw": Arm("p2", 2, movies="player", gpu=False, classes=_ALL, expect=_ON_EXPECT),
 }
 
+FORGERIES = {
+    f"{value}-{kind}": (value, kind)
+    for value in ("snap", "frac")
+    for kind in ("assignment", "getter")
+}
+for _page in ("raw", "preview"):
+    for _tag in FORGERIES:
+        _base = f"m-{_page}-prod"
+        ARMS[f"{_base}-forge-{_tag}"] = replace(ARMS[_base], forgery=_tag)
+
 LIFECYCLE: dict[str, dict[str, Any]] = {
     "advance": {},
     "replay": {"replay": True},
@@ -381,6 +402,41 @@ for _d, _dpr in SNAP_DPR.items():
             SNAPS.append(_name)
             ARMS[_name] = Arm(**_cell, expect=_SNAP_EXPECT | {"geometry": "PASS"}, twin=f"{_name}-twin")
             ARMS[f"{_name}-twin"] = Arm(**_cell, splice="fg-omit")
+
+ARMS["wrongrule-chrome"] = replace(ARMS["m-snap"], placement_value="frac", placement_mode="probe",
+                                           expect={**_SNAP_EXPECT, "holder_pixels": "FAIL"}, twin="wrongrule-chrome-twin")
+ARMS["wrongrule-chrome-twin"] = replace(ARMS["m-snap-twin"], placement_value="frac", placement_mode="probe")
+
+_CEF_SNAP_ROWS = {
+    "m-snap-cef": ARMS["m-snap"],
+    "m-snap-cef-far-x": ARMS["m-snap-clipx"],
+    "m-snap-cef-far-y": ARMS["m-snap-clipy"],
+    "m-snap-cef-near-x": replace(ARMS["m-snap"], overrides=("clipnearx",)),
+    "m-snap-cef-near-y": replace(ARMS["m-snap"], overrides=("clipneary",)),
+}
+for _name, _arm in _CEF_SNAP_ROWS.items():
+    ARMS[_name] = replace(_arm, placement_value="frac", twin=f"{_name}-twin")
+    ARMS[f"{_name}-twin"] = replace(_arm, placement_value="frac", splice="fg-omit", expect={}, twin=None)
+ARMS["m-paused-cef"] = replace(ARMS["m-paused"], placement_value="frac")
+ARMS["m-off-cef"] = replace(ARMS["m-off"], placement_value="frac")
+ARMS["m-hold-cef"] = replace(ARMS["m-hold"], placement_value="frac")
+ARMS["m-fg-cef"] = replace(ARMS["m-fg"], placement_value="frac")
+ARMS["m-fg-omit-cef"] = replace(ARMS["m-fg-omit"], placement_value="frac")
+ARMS["m-fg-swap-cef"] = replace(ARMS["m-fg-swap"], placement_value="frac")
+ARMS["m-tone-cef"] = replace(ARMS["m-tone"], placement_value="frac", twin="m-tone-cef-twin")
+ARMS["m-tone-cef-twin"] = replace(ARMS["m-tone-twin"], placement_value="frac")
+ARMS["m-tone-raw-cef"] = replace(ARMS["m-tone-raw"], placement_value="frac")
+ARMS["wrongrule-cef"] = replace(ARMS["m-snap"], placement_value="snap", expect={**_SNAP_EXPECT, "holder_pixels": "FAIL"},
+                                      twin="wrongrule-cef-twin")
+ARMS["wrongrule-cef-twin"] = replace(ARMS["m-snap-twin"], placement_value="snap")
+ARMS["m-snap-cef-nooffset-x"] = replace(ARMS["m-snap-cef-near-x"], splice="frac-nooffset-x",
+                                              expect={**_SNAP_EXPECT, "holder_pixels": "FAIL"}, twin="m-snap-cef-nooffset-x-twin")
+ARMS["m-snap-cef-nooffset-x-twin"] = replace(ARMS["m-snap-cef-near-x-twin"], splice="frac-nooffset-x+fg-omit")
+ARMS["m-snap-cef-nooffset-y"] = replace(ARMS["m-snap-cef-near-y"], splice="frac-nooffset-y",
+                                              expect={**_SNAP_EXPECT, "holder_pixels": "FAIL"}, twin="m-snap-cef-nooffset-y-twin")
+ARMS["m-snap-cef-nooffset-y-twin"] = replace(ARMS["m-snap-cef-near-y-twin"], splice="frac-nooffset-y+fg-omit")
+ARMS["m-snap-cef-dsk"] = replace(ARMS["cef-skip-dsk"], placement_value="frac", grant="driver", holders=2,
+                                        expect={"frozen_frame": "PASS", "frozen_region": "PASS", "cost": "PASS", "geometry": "PASS"})
 DISPLACED = {"frac": ("sn-frac", ("m-snap-dpr15", "m-snap-dpr2")), "shift": ("snap-shift", ("m-snap", "m-snap-dpr15", "m-snap-dpr2"))}
 """Displaced-edge FAIL controls on the 1920x1080 cells: `sn` unrounded at DPR 1.5 and 2 (at DPR 1 the alpha scan rejects
 it, no holder) and the holder one device px right at every DPR."""
@@ -409,7 +465,7 @@ CONTROLS: dict[str, tuple[tuple[str, ...], ...]] = {
     "tone": (("m-tone",), ("m-tone-raw",)),
     "overlay": (("m-on",), ("m-bridge-off",)),
     "cost": (("case:cost-50",), ("case:cost-50-eps",)),
-    "holder_pixels": (tuple(SNAPS), (*FAILS, "case:holder-shift")),
+    "holder_pixels": (tuple(SNAPS), (*FAILS, "wrongrule-chrome", "case:holder-shift")),
     "reference": ((*SNAPS, *FAILS, "case:reference-valid"), ("perfect-shift",),
                   ("case:reference-stale", "case:reference-extra", "case:reference-unpaused")),
     "mask": ((*SNAPS, *FAILS, "m-tone", "case:mask-production"), (),
@@ -420,7 +476,7 @@ CONTROLS: dict[str, tuple[tuple[str, ...], ...]] = {
     "hidden": (("life-hide-twin", "life-hide-screen-twin"), ("life-hide-nohide",), ("case:hide-duplicate", "case:hide-shift")),
     "shown": (("life-hide-twin", "life-hide-screen-twin"), ("life-hide-noshow",)),
     "grant": (("grant-chrome",), ("grant-attach", "channel-predefined")),
-    "scope": ((), ("m-raw-prod", "m-preview-prod")),
+    "scope": ((), tuple(n for n in ARMS if n == "m-raw-prod" or n == "m-preview-prod" or "-prod-forge-" in n)),
 }
 """Per gated check: (positive controls -> PASS, negative controls -> FAIL[, scorer cases that must be INCONCLUSIVE])."""
 
@@ -673,11 +729,250 @@ STAGE_JS = mmo.STAGE_JS
 PLACEMENT_JS = "('__obedPlacement' in window)?String(window.__obedPlacement):null"
 PREDEFINE_JS = ("Object.defineProperty(window,'__obedPlacement',{get:function(){return 'snap'},enumerable:false,"
                 "configurable:false})")
+FORGERY_JS = {
+    f"{value}-assignment": ("(function(){window.__obedPlacement=%s;var d=Object.getOwnPropertyDescriptor(window,'__obedPlacement');"
+                              "return {read:String(window.__obedPlacement),kind:'assignment',configurable:d.configurable,"
+                              "enumerable:d.enumerable,writable:d.writable===true}})()") % json.dumps(value)
+    for value in ("snap", "frac")
+} | {
+    f"{value}-getter": ("(function(){Object.defineProperty(window,'__obedPlacement',{get:function(){return %s},enumerable:false,"
+                          "configurable:false});var d=Object.getOwnPropertyDescriptor(window,'__obedPlacement');"
+                          "return {read:String(window.__obedPlacement),kind:'getter',configurable:d.configurable,"
+                          "enumerable:d.enumerable,writable:false}})()") % json.dumps(value)
+    for value in ("snap", "frac")
+}
 """`channel-predefined`: a forged `snap` getter defined before the host's first-run script, which then throws."""
 
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def placement_file_ref(path: Path, run_dir: Path, *, mtime_ns: int | None = None,
+                       saved_by_obs: bool | None = None) -> dict[str, Any]:
+    path, run_dir = path.resolve(), run_dir.resolve()
+    try:
+        relative = path.relative_to(run_dir)
+    except ValueError as exc:
+        raise ValueError(f"placement evidence must be below its run directory: {path}") from exc
+    if not path.is_file():
+        raise ValueError(f"placement evidence file is missing: {path}")
+    ref: dict[str, Any] = {"path": relative.as_posix(), "sha256": sha256_bytes(path.read_bytes())}
+    if mtime_ns is not None:
+        ref["mtimeNs"] = int(mtime_ns)
+    if saved_by_obs is not None:
+        ref["savedByObs"] = bool(saved_by_obs)
+    return ref
+
+
+def _placement_ref_bytes(ref: Any, run_dir: Path, *, collection: bool = False) -> bytes:
+    if not isinstance(ref, dict) or set(("path", "sha256")) - set(ref):
+        raise ValueError(f"malformed placement FileRef: {ref!r}")
+    relative = Path(ref["path"])
+    if relative.is_absolute() or ".." in relative.parts or relative.as_posix() != ref["path"]:
+        raise ValueError(f"placement FileRef is not a normalized relative path: {ref.get('path')!r}")
+    path = (run_dir / relative).resolve()
+    try:
+        path.relative_to(run_dir.resolve())
+    except ValueError as exc:
+        raise ValueError(f"placement FileRef escapes its run directory: {ref['path']!r}") from exc
+    data = path.read_bytes()
+    if not re.fullmatch(r"[0-9a-f]{64}", str(ref["sha256"])) or sha256_bytes(data) != ref["sha256"]:
+        raise ValueError(f"placement FileRef digest mismatch: {ref['path']!r}")
+    if collection and (not integer(ref.get("mtimeNs")) or not isinstance(ref.get("savedByObs"), bool)):
+        raise ValueError(f"malformed placement CollectionRef: {ref!r}")
+    return data
+
+
+def _placement_capture_name(capture: placement_probe.ProbeCapture, trail: tuple[str, ...]) -> str:
+    label = "-".join(re.sub(r"[^a-zA-Z0-9_.-]", "-", part) for part in trail if part) or "capture"
+    pose = "none" if capture.pose is None else str(capture.pose)
+    return f"{label}-{capture.phase}-{pose}-{capture.sequence}.png"
+
+
+def serialize_placement_calibration(value: Any, run_dir: Path) -> dict[str, Any]:
+    """Strict §11.6 JSON conversion. Probe PNG bytes become digest-bound files; transaction evidence references input."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    capture_dir = run_dir / "placement"
+    root_input = value.get("input") if isinstance(value, dict) else None
+
+    def convert(item: Any, trail: tuple[str, ...]) -> Any:
+        if isinstance(item, Enum):
+            return item.value
+        if isinstance(item, placement_probe.ProbeCapture):
+            capture_dir.mkdir(parents=True, exist_ok=True)
+            path = capture_dir / _placement_capture_name(item, trail)
+            if path.exists() and path.read_bytes() != item.png:
+                raise ValueError(f"two placement captures map to {path.name}")
+            path.write_bytes(item.png)
+            return {f.name: placement_file_ref(path, run_dir) if f.name == "png" else convert(getattr(item, f.name), (*trail, f.name))
+                    for f in fields(item)}
+        if is_dataclass(item):
+            return {f.name: ({"$ref": "#/placementCalibration/input"}
+                              if f.name == "evidence" and getattr(item, f.name) is root_input and root_input is not None
+                              else convert(getattr(item, f.name), (*trail, f.name))) for f in fields(item)}
+        if isinstance(item, dict):
+            if not all(isinstance(k, str) for k in item):
+                raise TypeError(f"placement record keys must be strings at {trail!r}")
+            return {k: convert(v, (*trail, k)) for k, v in item.items()}
+        if isinstance(item, (tuple, list)):
+            return [convert(v, (*trail, str(i))) for i, v in enumerate(item)]
+        if isinstance(item, bytes):
+            raise TypeError(f"raw bytes are allowed only as ProbeCapture.png at {trail!r}")
+        if isinstance(item, Path):
+            raise TypeError(f"Path is not a placement record value; use a FileRef at {trail!r}")
+        if item is None or isinstance(item, (str, int, float, bool)):
+            if isinstance(item, float) and not math.isfinite(item):
+                raise TypeError(f"non-finite placement record number at {trail!r}")
+            return item
+        raise TypeError(f"unsupported placement record value {type(item).__name__} at {trail!r}")
+
+    encoded = convert(value, ())
+    if not isinstance(encoded, dict):
+        raise TypeError("placementCalibration must be a record")
+    return encoded
+
+
+def _probe_identity(value: dict[str, Any]) -> placement_probe.ProbeIdentity:
+    return placement_probe.ProbeIdentity(**value)
+
+
+def _probe_capture(value: dict[str, Any], run_dir: Path) -> placement_probe.ProbeCapture:
+    return placement_probe.ProbeCapture(identity=_probe_identity(value["identity"]), sequence=value["sequence"], nonce=value["nonce"],
+                                        phase=value["phase"], pose=value["pose"], png=_placement_ref_bytes(value["png"], run_dir),
+                                        paint_observed_s=value["paint_observed_s"], capture_started_s=value["capture_started_s"],
+                                        capture_finished_s=value["capture_finished_s"])
+
+
+def placement_classifier_input(value: dict[str, Any], run_dir: Path) -> placement_probe.ClassifierInput:
+    return placement_probe.ClassifierInput(
+        spec=placement_probe.ProbeSpec(**value["spec"]), assets_sha256=tuple(value["assets_sha256"]),
+        identity=_probe_identity(value["identity"]), ready_state=value["ready_state"], video_size=tuple(value["video_size"]),
+        color_tuple=tuple(value["color_tuple"]), freshness=tuple(_probe_capture(v, run_dir) for v in value["freshness"]),
+        poses=tuple(placement_probe.PoseGeometry(pose=v["pose"], rect=tuple(v["rect"]), content_box=tuple(v["content_box"]),
+                                                  box=tuple(v["box"]), snap_dy=v["snap_dy"], frac_dy=v["frac_dy"])
+                    for v in value["poses"]),
+        captures=tuple(_probe_capture(v, run_dir) for v in value["captures"]),
+    )
+
+
+def placement_probe_result(value: dict[str, Any]) -> placement_probe.ProbeResult:
+    return placement_probe.ProbeResult(
+        verdict=placement_probe.ProbeVerdict(value["verdict"]),
+        tone_map=None if value.get("tone_map") is None else placement_probe.ToneMap(value["tone_map"]),
+        grant_eligible=value["grant_eligible"], reason=value["reason"],
+        scores=tuple(placement_probe.PoseScore(pose=s["pose"], tone_map=placement_probe.ToneMap(s["tone_map"]),
+                                               snap_share=s["snap_share"], frac_share=s["frac_share"],
+                                               inner_pixels=s["inner_pixels"]) for s in value["scores"]),
+    )
+
+
+def deserialize_placement_calibration(value: dict[str, Any], run_dir: Path) -> dict[str, Any]:
+    """Resolve §11.6 dataclasses and verify every capture/FileRef for Keynote-free rescoring."""
+    from obed_edom import managed_obs
+
+    decoded = dict(value)
+    input_value = value.get("input")
+    evidence = placement_classifier_input(input_value, run_dir) if isinstance(input_value, dict) else None
+    decoded["input"] = evidence
+    if isinstance(value.get("classification"), dict):
+        decoded["classification"] = placement_probe_result(value["classification"])
+    if isinstance(value.get("engine"), dict):
+        decoded["engine"] = managed_obs.EngineIdentity(**value["engine"])
+
+    def request(item: Any) -> Any:
+        if not isinstance(item, dict):
+            return None
+        return managed_obs.CalibrationRequest(spec=placement_probe.ProbeSpec(**item["spec"]), url=item["url"],
+                                              engine=managed_obs.EngineIdentity(**item["engine"]),
+                                              program_target_id=item["program_target_id"],
+                                              program_context_id=item["program_context_id"],
+                                              connection_generation=item["connection_generation"],
+                                              placement=item.get("placement", "preview"))
+
+    decoded["request"] = request(value.get("request"))
+    tx = value.get("transaction")
+    if isinstance(tx, dict):
+        program = managed_obs.ProgramCheck(**{**tx["program"], "media": tuple(tx["program"]["media"])}) if isinstance(tx.get("program"), dict) else None
+        persistence = managed_obs.PersistenceCheck(**{**tx["persistence"], "differences": tuple(tx["persistence"]["differences"]),
+                                                       "allowed": tuple(tx["persistence"]["allowed"])}) if isinstance(tx.get("persistence"), dict) else None
+        tx_evidence = evidence if tx.get("evidence") == {"$ref": "#/placementCalibration/input"} else None
+        decoded["transaction"] = managed_obs.CalibrationResult(
+            request=request(tx.get("request")), evidence=tx_evidence, program=program,
+            isolation_ok=tx["isolation_ok"], cleanup_verified=tx["cleanup_verified"], restored=tx["restored"],
+            persistence=persistence, errors=tuple(tx["errors"]), started_s=tx["started_s"], finished_s=tx["finished_s"])
+    return decoded
+
+
+def placement_schema_problems(value: Any, run_dir: Path) -> list[str]:
+    required = {"schemaVersion", "backend", "placement", "obsVersion", "engine", "request", "assets", "player", "input",
+                "classification", "transaction", "events", "persistence", "integrity", "gates"}
+    if not isinstance(value, dict):
+        return ["placementCalibration is not a record"]
+    problems = [f"placementCalibration missing {name}" for name in sorted(required - set(value))]
+    problems += [f"placementCalibration has unsupported {name}" for name in sorted(set(value) - required)]
+    if value.get("schemaVersion") != PLACEMENT_SCHEMA_VERSION:
+        problems.append(f"schemaVersion {value.get('schemaVersion')!r} != {PLACEMENT_SCHEMA_VERSION}")
+    if value.get("backend") not in PLACEMENT_BACKENDS:
+        problems.append(f"backend {value.get('backend')!r} is not one of {PLACEMENT_BACKENDS}")
+    asset_fields = {"manifestSha256", "patternSha256", "motionSha256"}
+    player_fields = {"stockSha256", "liveSha256", "renderingSha256"}
+    assets = value.get("assets") if isinstance(value.get("assets"), dict) else {}
+    player = value.get("player") if isinstance(value.get("player"), dict) else {}
+    if set(assets) != asset_fields:
+        problems.append(f"assets fields {sorted(assets)} != {sorted(asset_fields)}")
+    if set(player) != player_fields:
+        problems.append(f"player fields {sorted(player)} != {sorted(player_fields)}")
+    for name, digest in [*(assets.items()), *(player.items())]:
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            problems.append(f"{name} is not a full sha256")
+    try:
+        decoded = deserialize_placement_calibration(value, run_dir)
+        transaction_value = value.get("transaction")
+        if transaction_value is not None and (
+                not isinstance(transaction_value, dict)
+                or transaction_value.get("evidence") != {"$ref": "#/placementCalibration/input"}
+                or value.get("input") is None):
+            problems.append("non-null transaction evidence is not the input reference")
+        if decoded.get("transaction") is not None and decoded["transaction"].evidence is not decoded.get("input"):
+            problems.append("transaction evidence does not resolve to placementCalibration.input")
+        persistence = value.get("persistence")
+        if isinstance(persistence, dict):
+            persistence_fields = {"baseline", "nullBefore", "nullAfter", "cleanup", "quit", "backup",
+                                  "lastRemovalMtimeNs", "checks"}
+            if set(persistence) != persistence_fields:
+                problems.append(f"persistence fields {sorted(persistence)} != {sorted(persistence_fields)}")
+            if not integer(persistence.get("lastRemovalMtimeNs")):
+                problems.append("persistence lastRemovalMtimeNs is not an integer")
+            for name in ("baseline", "nullBefore", "nullAfter", "cleanup", "quit"):
+                if persistence.get(name) is not None:
+                    _placement_ref_bytes(persistence[name], run_dir, collection=True)
+            for ref in persistence.get("backup") or []:
+                _placement_ref_bytes(ref, run_dir)
+        integrity = value.get("integrity") if isinstance(value.get("integrity"), dict) else {}
+        if set(integrity) != {"recording", "rgba", "telemetry"}:
+            problems.append("integrity fields are not recording/rgba/telemetry")
+        if integrity.get("recording") is not None:
+            _placement_ref_bytes(integrity["recording"], run_dir)
+        for ref in integrity.get("rgba") or []:
+            _placement_ref_bytes(ref, run_dir)
+        if integrity.get("telemetry") is not None:
+            _placement_ref_bytes(integrity["telemetry"], run_dir)
+        events = value.get("events")
+        if not isinstance(events, list) or any(not isinstance(event, dict) or set(event) != {"at", "event", "placement"}
+                                              or not number(event["at"]) or not isinstance(event["event"], str)
+                                              or not isinstance(event["placement"], dict) for event in events):
+            problems.append("events are malformed")
+        gates = value.get("gates")
+        if not isinstance(gates, dict) or any(not isinstance(gate, dict)
+                                              or set(gate) != {"verdict", "problems", "detail"}
+                                              or gate["verdict"] not in ("PASS", "FAIL", "INCONCLUSIVE", "REPORTED")
+                                              or not isinstance(gate["problems"], list) or not isinstance(gate["detail"], dict)
+                                              for gate in gates.values()):
+            problems.append("gates are malformed")
+    except (KeyError, TypeError, ValueError) as exc:
+        problems.append(f"placementCalibration malformed: {type(exc).__name__}: {exc}")
+    return problems
 
 
 def counted_splice(player: bytes, before: bytes, after: bytes, count: int) -> bytes:
@@ -1018,6 +1313,23 @@ def _clip(axis: str) -> Callable[[dict[str, Any], int], None]:
     return edit
 
 
+def _clip_near(axis: str) -> Callable[[dict[str, Any], int], None]:
+    def edit(doc: dict[str, Any], event: int) -> None:
+        builds = list(_effects(doc["events"]))
+        hits = [(n, p) for b in builds for n, p in _layers(b["baseLayer"]) if n.get("isVideoLayer")]
+        if len(hits) != 1 or hits[0][1] is None:
+            raise ValueError("expected one video layer with a parent in the slide's renderMovie builds")
+        video, parent = (h["initialState"] for h in hits[0])
+        size, coord = ("width", "pointX") if axis == "x" else ("height", "pointY")
+        near = video["position"][coord] - video["anchorPoint"][coord] * video[size]
+        far = parent["position"][coord] + (1 - parent["anchorPoint"][coord]) * parent[size]
+        new_near = near + 0.4 * video[size] + 0.37
+        parent[size] = far - new_near
+        parent["position"] = {**parent["position"], coord: new_near + parent["anchorPoint"][coord] * parent[size]}
+        parent["masksToBounds"] = True
+    return edit
+
+
 def _scale(doc: dict[str, Any], event: int) -> None:
     _video_layer(doc)["initialState"]["affineTransform"] = [1.5, 0, 0, 1.5, 0, 0]
 
@@ -1030,7 +1342,8 @@ def _base(doc: dict[str, Any], event: int) -> None:
 
 
 SLIDE_OVERRIDES: dict[str, Callable[[dict[str, Any], int], None]] = {"cut": _cut, "automatic": _automatic, "fg": _foreground,
-                                                                    "scale": _scale, "base": _base, "clipx": _clip("x"), "clipy": _clip("y")}
+                                                                    "scale": _scale, "base": _base, "clipx": _clip("x"), "clipy": _clip("y"),
+                                                                    "clipnearx": _clip_near("x"), "clipneary": _clip_near("y")}
 HEADER_OVERRIDES: dict[str, Callable[[dict[str, Any]], None]] = {"loop": lambda header: header.update(loopSlideshow=1)}
 
 
@@ -2093,6 +2406,7 @@ class Profile:
     lifecycle: bool = True
     overrides: tuple[tuple[str, tuple[tuple[str, ...], ...]], ...] = ()
     mid_frames: int = MIN_MID_FRAMES
+    placement: str | None = None
 
     def arm(self, name: str, identity: bool | None = None) -> Arm:
         arm = ARMS[name]
@@ -2111,7 +2425,8 @@ class Profile:
 
 
 CEF_ONLY = ("cef-skip", "cef-skip-dsk")
-DX1 = Profile("DX-1", tuple(n for n in ARMS if n not in CEF_ONLY))
+CEF_PLACEMENT_ONLY = tuple(n for n in ARMS if "cef" in n and n not in CEF_ONLY)
+DX1 = Profile("DX-1", tuple(n for n in ARMS if n not in (*CEF_ONLY, *CEF_PLACEMENT_ONLY)))
 CEF = Profile("CEF", ("opaque-off", "off", "noblend", "on2", "cut-on", "cut-off", "on", "opaque-on", *CEF_ONLY),
               reported=("no_flash", "screen", "geometry", "exterior", "hidden", "shown", "frozen_frame", "frozen_region",
                         "foreground", "tone", "overlay", "cost", "holder_pixels", "reference", "mask", "grant"),
@@ -2119,6 +2434,37 @@ CEF = Profile("CEF", ("opaque-off", "off", "noblend", "on2", "cut-on", "cut-off"
 """DX-2 (§9.2): the DX-1 cross-fade, cut and opaque arms OBS can carry plus `cef-skip` (P2 2->3, DSK 7->8): CEF never
 gets the snapped-placement grant (decision 15), so each publishes a take with no holder; checks without a CEF arm are
 reported."""
+
+CEF_PLACEMENT_POSITIVES = tuple(_CEF_SNAP_ROWS)
+CEF_PLACEMENT_ARMS = (
+    "opaque-off", "off", "noblend", "on2", "cut-on", "cut-off", "on", "opaque-on",
+    *CEF_PLACEMENT_POSITIVES,
+    *(f"{name}-twin" for name in CEF_PLACEMENT_POSITIVES),
+    "m-paused-cef", "m-off-cef", "m-hold-cef", "m-fg-cef", "m-fg-omit-cef", "m-fg-swap-cef",
+    "m-tone-cef", "m-tone-cef-twin", "m-tone-raw-cef", "m-snap-cef-dsk", "wrongrule-cef", "wrongrule-cef-twin",
+    "m-snap-cef-nooffset-x", "m-snap-cef-nooffset-x-twin", "m-snap-cef-nooffset-y", "m-snap-cef-nooffset-y-twin",
+    "perfect-shift", "m-geo-dpr125", "m-geo-2560", "m-geo-scale", "m-geo-base",
+)
+CEF_PLACEMENT = Profile(
+    "CEF-placement", CEF_PLACEMENT_ARMS,
+    reported=("no_flash", "screen", "exterior", "hidden", "shown", "overlay", "scope", "grant"),
+    headless=False, lifecycle=False, placement="frac",
+    overrides=(
+        ("frozen_frame", (("m-paused-cef",), ("m-off-cef",))),
+        ("frozen_region", (("m-snap-cef",), ("m-hold-cef",))),
+        ("foreground", (("m-fg-cef",), ("m-fg-omit-cef", "m-fg-swap-cef", "case:fg-shifted", "case:fg-double", "case:fg-swapped"))),
+        ("tone", (("m-tone-cef",), ("m-tone-raw-cef",))),
+        ("holder_pixels", (CEF_PLACEMENT_POSITIVES,
+                           ("m-snap-cef-nooffset-x", "m-snap-cef-nooffset-y", "wrongrule-cef", "case:holder-shift"))),
+        ("reference", ((*CEF_PLACEMENT_POSITIVES, "case:reference-valid"), ("perfect-shift",),
+                       ("case:reference-stale", "case:reference-extra", "case:reference-unpaused"))),
+        ("mask", ((*CEF_PLACEMENT_POSITIVES, "m-tone-cef", "case:mask-production"), (),
+                  ("case:mask-whole", "case:mask-shift3", "case:mask-empty"))),
+        ("geometry", ((*CEF_PLACEMENT_POSITIVES, "m-snap-cef-dsk"),
+                      ("m-geo-dpr125", "m-geo-2560", "m-geo-scale", "m-geo-base"))),
+    ),
+    mid_frames=5,
+)
 
 
 ANIM_STATES = ("idle", "running", "paused", "finished")
@@ -2430,8 +2776,23 @@ def placement_problems(record: dict[str, Any], arm: Arm, profile: Profile = DX1)
     (the first-run script is always installed) and absent on the production raw/preview page; a reload row also reads
     `invalid` in the fresh document before the host's re-grant and `snap` after it."""
     read = record.get("placement", "missing")
+    if arm.forgery:
+        value, kind = FORGERIES[arm.forgery]
+        forged = record.get("forgery")
+        problems = []
+        if not isinstance(forged, dict) or forged.get("read") != value or forged.get("kind") != kind:
+            problems.append(f"forgery {arm.forgery!r} did not take effect: {forged!r}")
+        if kind == "getter" and (forged or {}).get("configurable") is not False:
+            problems.append(f"forged getter is configurable: {forged!r}")
+        if read != value:
+            problems.append(f"page placement {read!r} != forged {value!r} before the advance")
+        return problems
     if arm.grant == "none":
         want = None if arm.page in ("raw", "preview") else "invalid"
+    elif arm.placement_value is not None:
+        want = arm.placement_value
+    elif profile.placement is not None:
+        want = profile.placement
     elif profile.headless:
         want = "snap"
     else:
@@ -3258,6 +3619,135 @@ def pending_scene(snapshot: dict[str, Any] | None) -> int | None:
     return snapshot.get("scene") if snapshot.get("state") == "IdleAtInitialState" else snapshot.get("next")
 
 
+def measure_placement_probe(*, spec: placement_probe.ProbeSpec, identity: placement_probe.ProbeIdentity,
+                            evaluate: Callable[[str], Any], capture_png: Callable[[], bytes],
+                            check_current: Callable[[], None] = lambda: None,
+                            clock: Callable[[], float] = time.monotonic,
+                            sleep: Callable[[float], None] = time.sleep) -> placement_probe.ClassifierInput:
+    """Drive §11.1's page API. OBS and Chrome harnesses supply only their capture boundary and identity."""
+    assets = placement_probe.load_probe_assets()
+    sequence = 0
+    previous_start: float | None = None
+    freshness: list[placement_probe.ProbeCapture] = []
+    captures: list[placement_probe.ProbeCapture] = []
+    poses: dict[int, placement_probe.PoseGeometry] = {}
+    last_snapshot: dict[str, Any] | None = None
+    deadline = clock() + 15.0
+
+    def one(phase: str, pose: int | None) -> placement_probe.ProbeCapture:
+        nonlocal sequence, previous_start, last_snapshot
+        sequence += 1
+        nonce = secrets.token_hex(16)
+        command = {"runId": spec.run_id, "sequence": sequence, "nonce": nonce, "phase": phase, "pose": pose}
+        if evaluate(f"window.__obedProbe.command({json.dumps(command, separators=(',', ':'))})") is not True:
+            raise RuntimeError(f"probe page rejected sequence {sequence}")
+        while True:
+            check_current()
+            if clock() >= deadline:
+                raise TimeoutError("placement probe exceeded 15 seconds")
+            snapshot = evaluate("window.__obedProbe.snapshot()")
+            if (isinstance(snapshot, dict) and snapshot.get("runId") == spec.run_id
+                    and snapshot.get("sequence") == sequence and snapshot.get("paintedSequence") == sequence
+                    and snapshot.get("phase") == phase and snapshot.get("pose") == pose):
+                last_snapshot = snapshot
+                break
+            sleep(0.01)
+        observed = clock()
+        start_not_before = max(observed + 0.3, (previous_start + 0.2) if previous_start is not None else observed)
+        sleep(max(0.0, start_not_before - clock()))
+        check_current()
+        started = clock()
+        png = capture_png()
+        finished = clock()
+        if finished - started > 2.0:
+            raise TimeoutError(f"placement capture {sequence} exceeded 2 seconds")
+        previous_start = started
+        return placement_probe.ProbeCapture(identity=identity, sequence=sequence, nonce=nonce, phase=phase, pose=pose, png=png,
+                                            paint_observed_s=observed, capture_started_s=started, capture_finished_s=finished)
+
+    for _ in range(3):
+        freshness.append(one("motion", None))
+    for pose in (0, 1):
+        for _ in range(2):
+            captures.append(one("pattern", pose))
+        geometry = (last_snapshot or {}).get("geometry")
+        if not isinstance(geometry, dict):
+            raise RuntimeError(f"probe pose {pose} did not publish geometry")
+        poses[pose] = placement_probe.PoseGeometry(
+            pose=geometry["pose"], rect=tuple(geometry["rect"]), content_box=tuple(geometry["contentBox"]),
+            box=tuple(geometry["box"]), snap_dy=geometry["snapDy"], frac_dy=geometry["fracDy"])
+    if last_snapshot is None:
+        raise RuntimeError("probe page published no snapshot")
+    return placement_probe.ClassifierInput(
+        spec=spec, assets_sha256=(assets.manifest_sha256, assets.pattern.sha256, assets.motion.sha256), identity=identity,
+        ready_state=last_snapshot["readyState"], video_size=tuple(last_snapshot["videoSize"]),
+        color_tuple=tuple(last_snapshot["colorTuple"]), freshness=tuple(freshness), poses=(poses[0], poses[1]),
+        captures=tuple(captures),
+    )
+
+
+def run_chrome_placement_probe(*, gpu: bool) -> dict[str, Any]:
+    from obed_edom.live_host import ChromeCdp, _AssetServer
+
+    profile = Path(tempfile.mkdtemp(prefix="placement-chrome-"))
+    proc = transport = server = None
+    try:
+        spec = placement_probe.ProbeSpec(secrets.token_hex(16), 1920, 1080, 60, 1.0)
+        server = _AssetServer(REPO, b"")
+        server.start()
+        url = server.set_probe_run(spec)
+        if url is None:
+            raise RuntimeError("probe server did not publish a URL")
+        proc, port, args = start_chrome(profile, gpu=gpu, viewport=(1920, 1080), dsf=1.0)
+        transport = ChromeCdp(CHROME, profile, None, headless=True, attach_endpoint=f"http://127.0.0.1:{port}")
+        transport.start()
+        transport.call("Emulation.setDeviceMetricsOverride", width=1920, height=1080, deviceScaleFactor=1, mobile=False)
+        transport.goto(url)
+        deadline = time.monotonic() + 10.0
+        snapshot = None
+        while time.monotonic() < deadline:
+            snapshot = transport.evaluate("window.__obedProbe&&window.__obedProbe.snapshot?window.__obedProbe.snapshot():null")
+            if isinstance(snapshot, dict):
+                break
+            time.sleep(0.05)
+        frame = transport.call("Page.getFrameTree")["frameTree"]["frame"]["id"]
+        context = transport.main_context(frame)
+        context_id = context.get("uniqueId") if isinstance(context, dict) else None
+        target_id = getattr(transport, "target_id", None)
+        if not isinstance(context_id, str) or not isinstance(target_id, str):
+            raise RuntimeError("Chrome probe identity is unavailable")
+        identity = placement_probe.ProbeIdentity(spec.run_id, None, target_id, context_id, 0,
+                                                  str(transport.evaluate("navigator.userAgent")),
+                                                  float(transport.evaluate("window.devicePixelRatio")))
+
+        def capture() -> bytes:
+            encoded = transport.call("Page.captureScreenshot", format="png", fromSurface=True)["data"]
+            return base64.b64decode(encoded, validate=True)
+
+        evidence = measure_placement_probe(spec=spec, identity=identity, evaluate=transport.evaluate, capture_png=capture)
+        result = placement_probe.classify_probe(evidence)
+        return {"input": evidence, "classification": result,
+                "launch": {"gpu": gpu, "chromeArgs": args[1:], "runId": spec.run_id},
+                "classifierControls": {"passed": result.verdict == placement_probe.ProbeVerdict.SNAP,
+                                       "problems": [] if result.verdict == placement_probe.ProbeVerdict.SNAP else
+                                       [f"Chrome classified {result.verdict.value}, expected snap"]},
+                "toneRows": {"complete": False, "observed": result.tone_map.value if result.tone_map else None,
+                             "applied": "identity", "problems": ["extended W5 ramp/patch/skin rows not captured"]}}
+    finally:
+        if transport is not None:
+            with contextlib.suppress(Exception):
+                transport.stop()
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=8)
+            if proc.poll() is None:
+                proc.kill()
+        if server is not None and server.httpd is not None:
+            server.httpd.shutdown()
+        shutil.rmtree(profile, ignore_errors=True)
+
+
 def wait_ready(evaluate: Callable[[str], Any], timeout_s: float = 30.0, snapshot_js: str = SNAPSHOT_JS) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -3657,10 +4147,10 @@ class RawHost:
 GRANT_WAIT_S = 10.0
 
 
-def commit_grant(evaluate: Callable[[str], Any], token: str | None) -> dict[str, Any]:
-    """The privileged channel: `__obedGrant(token, "snap")` with the token the first-run script was built from (never by
-    assigning the property), read back."""
-    ok = evaluate(f"window.__obedGrant({json.dumps(token)},'snap')") if token else None
+def commit_grant(evaluate: Callable[[str], Any], token: str | None, value: str = "snap", ms: int | None = None) -> dict[str, Any]:
+    """Use the privileged channel, including the script-only leased wrong-rule controls."""
+    args = f"{json.dumps(token)},{json.dumps(value)}" + ("" if ms is None else f",{ms}")
+    ok = evaluate(f"window.__obedGrant({args})") if token else None
     return {"committed": ok is True, "read": evaluate(PLACEMENT_JS)}
 
 
@@ -3713,9 +4203,10 @@ def run_arm(name: str, scratch: Path, decision: dict[str, Any] | None = None) ->
             host.start(width, height, arm.dsf)
         else:
             before = PREDEFINE_JS if arm.capture == "channel" else None
+            extra = {"placement_mode": arm.placement_mode} if arm.placement_mode else {}
             host = LiveOutputHost(resolved.root, resolved.slides, headless=True, resolver=resolved.resolver,
                                   transport_factory=hooked_transport(before=before), attach_endpoint=attach, continuity=arm.continuity,
-                                  gl_replay="off", mm_opacity="auto" if arm.mode == "on" else "off")
+                                  gl_replay="off", mm_opacity="auto" if arm.mode == "on" else "off", **extra)
             with serving(arm.splice):
                 host.start()
         transport = host._require_transport()
@@ -3735,11 +4226,15 @@ def run_arm(name: str, scratch: Path, decision: dict[str, Any] | None = None) ->
         if arm.page in ("alpha", "raw", "preview"):
             transport.call("Emulation.setDefaultBackgroundColorOverride", color={"r": 0, "g": 0, "b": 0, "a": 0})
         if arm.grant == "driver":
-            record["grant"] = commit_grant(transport.evaluate, getattr(host, "placement_token", None) or host._placement_token)
+            value = arm.placement_value or "snap"
+            record["grant"] = commit_grant(transport.evaluate, getattr(host, "placement_token", None) or host._placement_token,
+                                             value, 15_000 if arm.placement_mode == "probe" else None)
         elif arm.grant == "host":
             record["grant"] = {"read": host_grant(host, transport.evaluate)}
             if arm.regrant == "reload":
                 record["reload"] = regrant_after_reload(host, transport)
+        if arm.forgery:
+            record["forgery"] = transport.evaluate(FORGERY_JS[arm.forgery])
         record["output"] = {k: host.output.get(k) for k in ("mmOpacity", "continuity", "page", "indexSha256", "placement")
                             if k in host.output}
         port = port or transport.port
@@ -3776,7 +4271,10 @@ def save_run(out: Path, name: str, record: dict[str, Any], images: Mapping[str, 
     run.mkdir(parents=True, exist_ok=True)
     for key, img in images.items():
         Image.fromarray(img).save(run / f"{key}.png")
-    (run / "record.json").write_text(json.dumps(record, default=str))
+    saved = dict(record)
+    if "placementCalibration" in saved:
+        saved["placementCalibration"] = serialize_placement_calibration(saved["placementCalibration"], run)
+    (run / "record.json").write_text(json.dumps(saved, default=str))
 
 
 class RunImages(Mapping):
@@ -3817,12 +4315,13 @@ def launch_lut(runs: Mapping[str, tuple[dict[str, Any], Mapping[str, np.ndarray]
     """`L_path` measured in this launch (§9.2): the `m-tone` session's holder (the `drawImage` snapshot) against its
     `S_live` (the compositor) on the verified exposed tone cells, through `build_lut`; the session must be complete,
     its mask verified against `m-tone-twin` and its coverage met. None, with the reasons, otherwise."""
-    arm = profile.arm("m-tone")
-    detail: dict[str, Any] = {"source": "m-tone (this launch)", "kind": None, "samples": 0, "problems": []}
-    if "m-tone" not in runs:
-        detail["problems"] = ["no m-tone session in this launch"]
+    tone_name = "m-tone-cef" if profile.placement == "frac" else "m-tone"
+    arm = profile.arm(tone_name)
+    detail: dict[str, Any] = {"source": f"{tone_name} (this launch)", "kind": None, "samples": 0, "problems": []}
+    if tone_name not in runs:
+        detail["problems"] = [f"no {tone_name} session in this launch"]
         return None, detail
-    record, images = runs["m-tone"]
+    record, images = runs[tone_name]
     try:
         decoder, _, problems = media_integrity(record, images, arm, [])
         problems = capture_problems(record, images, arm, profile, cal) + problems

@@ -47,7 +47,7 @@ class OutputSettingsBody(BaseModel):
 
 class CommandBody(BaseModel):
     requestId: str = Field(min_length=1, max_length=200)
-    operation: Literal["advance", "goTo", "hide", "show", "stop"]
+    operation: Literal["advance", "goTo", "hide", "show", "recalibrate", "stop"]
     slide: int | None = Field(default=None, strict=True)
 
 
@@ -277,7 +277,8 @@ def live_router(runner, *, service=None, host_factory=None, displays=None, engin
                         blocks = [item["text"] for item in status["warnings"] if item["severity"] == "block"]
                         raise HTTPException(409, blocks[0] if blocks else ENGINE_NOT_READY)
                     host = make_host(root, slides, display_id=None, continuity=body.continuity, attach_endpoint=endpoint,
-                                     attach_match=target, bridge="obs-managed", output_rate=settings["akOutputRate"])
+                                     attach_match=target, bridge="obs-managed", output_rate=settings["akOutputRate"],
+                                     calibration=managed.calibration_adapter())
                 else:
                     host = make_host(root, slides, display_id=int(body.displayId) if body.displayId else None, continuity=body.continuity)
                 identity = {

@@ -70,10 +70,12 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import types
-from dataclasses import asdict
+from concurrent.futures import Future
+from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -88,10 +90,10 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
 from obed_edom.fixture_paths import fixture  # noqa: E402
-from obed_edom import live_gl_replay_js, managed_obs, mm_handback_score, obs_websocket  # noqa: E402
+from obed_edom import live_gl_replay_js, live_runtime, managed_obs, mm_handback_score, obs_websocket, placement_probe  # noqa: E402
 from obed_edom.html_preview import cache_dir  # noqa: E402
 from obed_edom.live_continuity import Unsupported  # noqa: E402
-from obed_edom.live_host import GL_REPLAY_ENV, MM_OPACITY_ENV, ChromeCdp, LiveOutputHost  # noqa: E402
+from obed_edom.live_host import GL_REPLAY_ENV, MM_OPACITY_ENV, ChromeCdp, LiveOutputHost, _ProgramGuard  # noqa: E402
 from obed_edom.managed_obs import ManagedObs  # noqa: E402
 from obed_edom.obs_websocket import ObsWebsocket  # noqa: E402
 
@@ -192,12 +194,27 @@ MMO_SLIDE1_S = 6.0
 MMO_LIVE_S = 4.0
 MMO_CEF_GL = ("off", "auto")
 DISSOLVE_ARMS = dissolve_probe.CEF.arms
+_PLACEMENT_CONTROL_ARMS = tuple(dict.fromkeys(
+    name for sides in dissolve_probe.CEF_PLACEMENT.controls().values() for side in sides for name in side
+    if name in dissolve_probe.CEF_PLACEMENT.arms
+))
+PLACEMENT_ARMS = (*_PLACEMENT_CONTROL_ARMS,
+                  *(name for name in dissolve_probe.CEF_PLACEMENT.arms if name not in _PLACEMENT_CONTROL_ARMS))
 DX2_TAU_MAX = 8.0
 DX2_COMPLEMENT_MAX = 6.0
 DX2_NO_DIP_MIN = 248.0
 HB_OBS_MAX_PX = 0.25
 HB_OBS_WHITE = 235
 HB_OBS_SIZE = (1920, 1080)
+PLACEMENT_GATE_NAMES = (
+    "probe-cef", "probe-chrome-harness", "harness-classifier-control", "iso-obs-preview", "iso-obs-offcanvas",
+    "program-wire-integrity", "alpha-integrity", "life-cal-preview", "life-cal-offcanvas", "persistence-worker", "W5",
+)
+PLACEMENT_ALPHA_JS = (
+    "addEventListener('DOMContentLoaded',function(){var n=document.createElement('div');n.id='obed-placement-alpha';"
+    "n.style.cssText='position:fixed;left:64px;top:64px;width:128px;height:128px;background:rgba(255,128,0,.5);"
+    "z-index:2147483646;pointer-events:none';document.documentElement.appendChild(n)},{once:true})"
+)
 
 G2_SHA = "10a5b36a1f6008a3213bd90729915f6c15284448406f2a62dbc74ae884fe5288"
 KB_SHAS = {"frozen": "413a00ba4e36dd5edf9c07425ab3c92589eb23d51c60914448621b7a456b8b67",
@@ -250,6 +267,421 @@ def snapshot_diff(before: dict[str, list[int]], after: dict[str, list[int]], lim
     changed = sorted(k for k in before.keys() & after.keys() if before[k] != after[k])
     added, removed = sorted(after.keys() - before.keys()), sorted(before.keys() - after.keys())
     return {"unchanged": not (changed or added or removed), "changed": changed[:limit], "added": added[:limit], "removed": removed[:limit]}
+
+
+def calibration_gate(verdict: str, problems: list[str] | tuple[str, ...] = (), **detail: Any) -> dict[str, Any]:
+    if verdict not in ("PASS", "FAIL", "INCONCLUSIVE", "REPORTED"):
+        raise ValueError(f"unknown calibration gate verdict {verdict!r}")
+    return {"verdict": verdict, "problems": list(problems), "detail": detail}
+
+
+def _jsonable(value: Any) -> Any:
+    if hasattr(value, "value") and isinstance(value.value, str):
+        return value.value
+    if hasattr(value, "__dataclass_fields__"):
+        return {name: _jsonable(getattr(value, name)) for name in value.__dataclass_fields__}
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_jsonable(v) for v in value]
+    return value
+
+
+def _read_ref_json(ref: Any, run_dir: Path, *, collection: bool = False) -> Any:
+    return json.loads(dissolve_probe._placement_ref_bytes(ref, run_dir, collection=collection))
+
+
+def _snapshot(ref: Any, run_dir: Path) -> managed_obs.CollectionSnapshot:
+    _read_ref_json(ref, run_dir, collection=True)
+    path = run_dir / ref["path"]
+    snapshot = managed_obs.read_collection(path, saved_by_obs=ref["savedByObs"])
+    return managed_obs.CollectionSnapshot(snapshot.state, ref["mtimeNs"], ref["savedByObs"])
+
+
+def capture_collection(path: Path, run_dir: Path, name: str, *, saved_by_obs: bool) -> tuple[managed_obs.CollectionSnapshot, dict[str, Any]]:
+    snapshot = managed_obs.read_collection(path, saved_by_obs=saved_by_obs)
+    dest = run_dir / "placement" / "collections" / f"{name}.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(path.read_bytes())
+    return snapshot, dissolve_probe.placement_file_ref(dest, run_dir, mtime_ns=snapshot.mtime_ns, saved_by_obs=snapshot.saved_by_obs)
+
+
+def _program_check(check: managed_obs.ProgramCheck | None) -> tuple[bool | None, list[str], dict[str, Any]]:
+    if check is None:
+        return None, ["ProgramCheck missing"], {}
+    problems = []
+    if check.ok is not True:
+        problems.append(f"ProgramCheck.ok is {check.ok!r}: {check.reason}")
+    if check.visibility_events != 0:
+        problems.append(f"visibility events {check.visibility_events} != 0")
+    if check.baseline_frame_ms is None or check.baseline_frame_ms <= 0 or check.max_raf_gap_ms is None:
+        problems.append("rAF baseline/gap unreadable")
+    elif check.max_raf_gap_ms > 2 * check.baseline_frame_ms:
+        problems.append(f"rAF max gap {check.max_raf_gap_ms} > two frame periods {2 * check.baseline_frame_ms}")
+    if not check.media:
+        problems.append("playing-media baseline missing")
+    for media in check.media:
+        required = {"id", "playing", "monotonic", "maxStallMs", "frameMs"}
+        if not isinstance(media, dict) or required - set(media):
+            problems.append(f"media row malformed: {media!r}")
+            continue
+        if media["playing"] is not True or media["monotonic"] is not True:
+            problems.append(f"media {media['id']} was not playing monotonically")
+        if not isinstance(media["frameMs"], (int, float)) or media["frameMs"] <= 0 or not isinstance(media["maxStallMs"], (int, float)):
+            problems.append(f"media {media['id']} timing unreadable")
+        elif media["maxStallMs"] > media["frameMs"]:
+            problems.append(f"media {media['id']} stall {media['maxStallMs']} > frame {media['frameMs']}")
+    return (None if check.ok is None or any("missing" in p or "unreadable" in p or "malformed" in p for p in problems)
+            else not problems), problems, _jsonable(check)
+
+
+def _telemetry(calibration: dict[str, Any], run_dir: Path) -> dict[str, Any] | None:
+    integrity = calibration.get("integrity") if isinstance(calibration.get("integrity"), dict) else {}
+    try:
+        return _read_ref_json(integrity.get("telemetry"), run_dir) if integrity.get("telemetry") is not None else None
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _persistence_gates(calibration: dict[str, Any], run_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    evidence = calibration.get("persistence")
+    if not isinstance(evidence, dict):
+        return calibration_gate("INCONCLUSIVE", ["persistence evidence missing"]), []
+    required = ("baseline", "nullBefore", "nullAfter", "quit")
+    if any(evidence.get(name) is None for name in required) or not isinstance(evidence.get("lastRemovalMtimeNs"), int):
+        return calibration_gate("INCONCLUSIVE", ["persistence baseline/null/quit/last-removal evidence incomplete"]), []
+    try:
+        baseline = _snapshot(evidence["baseline"], run_dir)
+        null_before = _snapshot(evidence["nullBefore"], run_dir)
+        null_after = _snapshot(evidence["nullAfter"], run_dir)
+        allowlist = managed_obs.persistence_allowlist(null_before, null_after)
+        checks = []
+        if evidence.get("cleanup") is not None:
+            checks.append(managed_obs.check_persistence(baseline, _snapshot(evidence["cleanup"], run_dir), null_allowlist=allowlist,
+                                                        phase="cleanup", last_removal_mtime_ns=evidence["lastRemovalMtimeNs"]))
+        checks.append(managed_obs.check_persistence(baseline, _snapshot(evidence["quit"], run_dir), null_allowlist=allowlist,
+                                                    phase="quit", last_removal_mtime_ns=evidence["lastRemovalMtimeNs"]))
+    except (OSError, ValueError, KeyError, json.JSONDecodeError, NotImplementedError) as exc:
+        return calibration_gate("INCONCLUSIVE", [f"persistence rescore failed: {type(exc).__name__}: {exc}"]), []
+    problems = []
+    unknown = False
+    for row in checks:
+        if row.ok is False:
+            problems.append(f"{row.phase}: {', '.join(row.differences) or 'mismatch'}")
+        elif row.ok is None:
+            unknown = True
+    verdict = "FAIL" if problems else "INCONCLUSIVE" if unknown or not any(r.phase == "quit" and r.authoritative for r in checks) else "PASS"
+    return calibration_gate(verdict, problems or (["persistence check is non-authoritative"] if verdict == "INCONCLUSIVE" else []),
+                            allowlist=_jsonable(allowlist), checks=_jsonable(checks)), [_jsonable(c) for c in checks]
+
+
+def score_placement_calibration(calibration: Any, run_dir: Path) -> dict[str, Any]:
+    """Keynote/OBS-free §5 rescore. The classifier and persistence decisions call the product APIs used live."""
+    schema = dissolve_probe.placement_schema_problems(calibration, run_dir)
+    if schema:
+        gates = {name: calibration_gate("INCONCLUSIVE", schema) for name in PLACEMENT_GATE_NAMES}
+        return {"overall": "INCONCLUSIVE", "classification": None, "gates": gates, "problems": schema}
+    try:
+        decoded = dissolve_probe.deserialize_placement_calibration(calibration, run_dir)
+    except (TypeError, ValueError, KeyError) as exc:
+        problems = [f"placement decode failed: {type(exc).__name__}: {exc}"]
+        gates = {name: calibration_gate("INCONCLUSIVE", problems) for name in PLACEMENT_GATE_NAMES}
+        return {"overall": "INCONCLUSIVE", "classification": None, "gates": gates, "problems": problems}
+
+    gates: dict[str, Any] = {}
+    classified = None
+    classify_problems = []
+    if decoded.get("input") is None:
+        classify_problems.append("ClassifierInput missing")
+    else:
+        try:
+            classified = placement_probe.classify_probe(decoded["input"])
+        except (TypeError, ValueError, NotImplementedError) as exc:
+            classify_problems.append(f"classifier failed: {type(exc).__name__}: {exc}")
+    recorded = decoded.get("classification")
+    if classified is not None and recorded is not None and _jsonable(classified) != _jsonable(recorded):
+        classify_problems.append("recorded classification differs from offline classifier")
+    backend = calibration["backend"]
+    if backend == "cef":
+        controls = (_telemetry(calibration, run_dir) or {}).get("classifierControls")
+        if not isinstance(controls, dict):
+            classify_problems.append("classifier controls missing")
+        elif controls.get("passed") is not True:
+            classify_problems.extend(list(controls.get("problems") or ["classifier controls failed"]))
+        ok = (classified is not None and classified.verdict == placement_probe.ProbeVerdict.FRAC
+              and classified.tone_map == placement_probe.ToneMap.GPU_ANALYTIC and classified.grant_eligible)
+        verdict = "INCONCLUSIVE" if classify_problems or classified is None or classified.verdict == placement_probe.ProbeVerdict.UNKNOWN else "PASS" if ok else "FAIL"
+        gates["probe-cef"] = calibration_gate(verdict, classify_problems, candidate=calibration.get("request"), result=_jsonable(classified))
+        gates["probe-chrome-harness"] = calibration_gate("REPORTED", [], result=None)
+        gates["harness-classifier-control"] = calibration_gate("REPORTED", [], result=None)
+    else:
+        ok = classified is not None and classified.verdict == placement_probe.ProbeVerdict.SNAP
+        verdict = "INCONCLUSIVE" if classify_problems or classified is None or classified.verdict == placement_probe.ProbeVerdict.UNKNOWN else "PASS" if ok else "FAIL"
+        gates["probe-chrome-harness"] = calibration_gate(verdict, classify_problems, result=_jsonable(classified))
+        controls = (_telemetry(calibration, run_dir) or {}).get("classifierControls")
+        gates["harness-classifier-control"] = calibration_gate(
+            "INCONCLUSIVE" if not isinstance(controls, dict) else "PASS" if controls.get("passed") is True else "FAIL",
+            ["classifier controls missing"] if not isinstance(controls, dict) else list(controls.get("problems") or []), controls=controls)
+        gates["probe-cef"] = calibration_gate("REPORTED", [], result=None)
+
+    transaction = decoded.get("transaction")
+    tx_problems = []
+    tx_unknown = transaction is None
+    if transaction is not None:
+        if not transaction.isolation_ok:
+            tx_problems.append("transaction isolation failed")
+        if not transaction.cleanup_verified:
+            tx_problems.append("transaction cleanup was not verified")
+        if not transaction.restored:
+            tx_problems.append("transaction state was not restored")
+        tx_problems += list(transaction.errors)
+    program_ok, program_problems, program_detail = _program_check(transaction.program if transaction else None)
+    tx_problems += program_problems
+    placement = calibration.get("placement")
+    for name in ("preview", "offcanvas"):
+        if placement != name:
+            gates[f"iso-obs-{name}"] = calibration_gate("REPORTED", [], placement=placement)
+            continue
+        verdict = "INCONCLUSIVE" if tx_unknown or program_ok is None else "FAIL" if tx_problems else "PASS"
+        gates[f"iso-obs-{name}"] = calibration_gate(verdict, tx_problems, transaction=calibration.get("transaction"),
+                                                     program=program_detail)
+
+    telemetry = _telemetry(calibration, run_dir)
+    guard = telemetry.get("programGuard") if isinstance(telemetry, dict) else None
+    guard_problems = []
+    if not isinstance(guard, dict) or not all(k in guard for k in ("null", "candidate", "toggle")):
+        gates["program-wire-integrity"] = calibration_gate("INCONCLUSIVE", ["null/candidate/Program-toggle telemetry missing"])
+    else:
+        null_ok = guard["null"].get("ok") is True
+        candidate_ok = guard["candidate"].get("ok") is True
+        toggle_failed = guard["toggle"].get("ok") is False
+        if not null_ok:
+            guard_problems.append("no-transaction null did not pass")
+        if not candidate_ok:
+            guard_problems.append("candidate disturbed Program")
+        if not toggle_failed:
+            guard_problems.append("Program-toggle positive control did not fail")
+        gates["program-wire-integrity"] = calibration_gate("PASS" if not guard_problems else "FAIL", guard_problems, **guard)
+
+    recording = telemetry.get("programRecording") if isinstance(telemetry, dict) else None
+    if not isinstance(recording, dict):
+        recording_gate = calibration_gate("INCONCLUSIVE", ["continuous program recording analysis missing"])
+    else:
+        required = ("lossless", "continuous", "decodedFrames", "identicalFrames", "audioSilent")
+        missing = [k for k in required if k not in recording]
+        ok = (not missing and recording["lossless"] is True and recording["continuous"] is True
+              and isinstance(recording["decodedFrames"], int) and recording["decodedFrames"] > 0
+              and recording["identicalFrames"] == recording["decodedFrames"] and recording["audioSilent"] is True)
+        recording_gate = calibration_gate("INCONCLUSIVE" if missing else "PASS" if ok else "FAIL",
+                                          [f"recording evidence missing {k}" for k in missing], recording=recording)
+    gates["program-wire-integrity"] = calibration_gate(
+        "FAIL" if "FAIL" in (gates["program-wire-integrity"]["verdict"], recording_gate["verdict"]) else
+        "INCONCLUSIVE" if "INCONCLUSIVE" in (gates["program-wire-integrity"]["verdict"], recording_gate["verdict"]) else "PASS",
+        gates["program-wire-integrity"]["problems"] + recording_gate["problems"],
+        guard=gates["program-wire-integrity"]["detail"], recording=recording_gate["detail"])
+
+    alpha = telemetry.get("alpha") if isinstance(telemetry, dict) else None
+    if not isinstance(alpha, dict):
+        gates["alpha-integrity"] = calibration_gate("INCONCLUSIVE", ["sampled RGBA analysis missing"])
+    else:
+        required = ("transparent", "halfTransparent", "sampleCount", "allChannelsEqual", "allPhasesCovered")
+        missing = [k for k in required if k not in alpha]
+        ok = not missing and alpha["transparent"] and alpha["halfTransparent"] and alpha["sampleCount"] > 0 and alpha["allChannelsEqual"] and alpha["allPhasesCovered"]
+        gates["alpha-integrity"] = calibration_gate("INCONCLUSIVE" if missing else "PASS" if ok else "FAIL",
+                                                    [f"alpha evidence missing {k}" for k in missing], alpha=alpha)
+
+    events = calibration.get("events")
+    states = [((e.get("placement") or {}).get("state")) for e in events] if isinstance(events, list) else []
+    for name in ("preview", "offcanvas"):
+        if placement != name:
+            gates[f"life-cal-{name}"] = calibration_gate("REPORTED", [], placement=placement)
+            continue
+        missing = [] if "probing" in states and "valid" in states else [f"placement event sequence lacks probing→valid: {states}"]
+        gates[f"life-cal-{name}"] = calibration_gate("PASS" if not missing else "INCONCLUSIVE", missing, states=states)
+
+    gates["persistence-worker"], persistence_checks = _persistence_gates(calibration, run_dir)
+    tone_rows = telemetry.get("toneRows") if isinstance(telemetry, dict) else None
+    if not isinstance(tone_rows, dict):
+        gates["W5"] = calibration_gate("INCONCLUSIVE", ["W5 tone rows missing"])
+    else:
+        problems = list(tone_rows.get("problems") or [])
+        complete = tone_rows.get("complete") is True and tone_rows.get("applied") == "identity"
+        gates["W5"] = calibration_gate("REPORTED" if complete and not problems else "INCONCLUSIVE", problems or ([] if complete else ["W5 rows incomplete"]), rows=tone_rows)
+
+    if backend == "chrome-harness":
+        for name in ("iso-obs-preview", "iso-obs-offcanvas", "program-wire-integrity", "alpha-integrity",
+                     "life-cal-preview", "life-cal-offcanvas", "persistence-worker"):
+            gates[name] = calibration_gate("REPORTED", [], backend=backend)
+
+    blocking = [g["verdict"] for name, g in gates.items() if name != "W5" and g["verdict"] != "REPORTED"]
+    overall = "FAIL" if "FAIL" in blocking else "INCONCLUSIVE" if "INCONCLUSIVE" in blocking or not blocking else "PASS"
+    return {"overall": overall, "classification": _jsonable(classified), "gates": gates,
+            "persistenceChecks": persistence_checks, "problems": classify_problems}
+
+
+def write_placement_json(run_dir: Path, name: str, value: Any) -> dict[str, Any]:
+    path = run_dir / "placement" / f"{name}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=1))
+    return dissolve_probe.placement_file_ref(path, run_dir)
+
+
+def placement_player_digests(stock_sha256: str) -> dict[str, str]:
+    pins = live_runtime.SUPPORTED_PLAYERS.get(stock_sha256)
+    if pins is None:
+        raise ValueError(f"unsupported stock player {stock_sha256}")
+    return {"stockSha256": stock_sha256, "liveSha256": pins[0], "renderingSha256": pins[2]}
+
+
+def placement_record(*, backend: str, placement: str | None, obs_version: str | None,
+                     engine: managed_obs.EngineIdentity | None, request: managed_obs.CalibrationRequest | None,
+                     evidence: placement_probe.ClassifierInput | None, classification: placement_probe.ProbeResult | None,
+                     transaction: managed_obs.CalibrationResult | None, events: list[dict[str, Any]],
+                     persistence: dict[str, Any] | None, integrity: dict[str, Any], stock_sha256: str,
+                     gates: dict[str, Any] | None = None) -> dict[str, Any]:
+    assets = placement_probe.load_probe_assets()
+    if backend not in dissolve_probe.PLACEMENT_BACKENDS:
+        raise ValueError(f"unsupported placement backend {backend!r}")
+    return {
+        "schemaVersion": dissolve_probe.PLACEMENT_SCHEMA_VERSION,
+        "backend": backend,
+        "placement": placement,
+        "obsVersion": obs_version,
+        "engine": engine,
+        "request": request,
+        "assets": {"manifestSha256": assets.manifest_sha256, "patternSha256": assets.pattern.sha256,
+                   "motionSha256": assets.motion.sha256},
+        "player": placement_player_digests(stock_sha256),
+        "input": evidence,
+        "classification": classification,
+        "transaction": transaction,
+        "events": events,
+        "persistence": persistence,
+        "integrity": integrity,
+        "gates": gates or {},
+    }
+
+
+def classifier_controls(evidence: placement_probe.ClassifierInput, result: placement_probe.ProbeResult,
+                        expected: placement_probe.ProbeVerdict) -> dict[str, Any]:
+    replay = list(evidence.freshness)
+    replay[1] = replace(replay[1], nonce=replay[0].nonce)
+    stale = placement_probe.classify_probe(replace(evidence, freshness=tuple(replay)))
+    dpr = placement_probe.classify_probe(replace(evidence, identity=replace(evidence.identity, dpr=1.5)))
+    wrong = placement_probe.ProbeVerdict.SNAP if expected == placement_probe.ProbeVerdict.FRAC else placement_probe.ProbeVerdict.FRAC
+    problems = []
+    if result.verdict != expected:
+        problems.append(f"candidate {result.verdict.value} != {expected.value}")
+    if stale.verdict != placement_probe.ProbeVerdict.UNKNOWN:
+        problems.append(f"replayed challenge classified {stale.verdict.value}")
+    if dpr.verdict != placement_probe.ProbeVerdict.UNKNOWN:
+        problems.append(f"DPR control classified {dpr.verdict.value}")
+    if result.verdict == wrong:
+        problems.append(f"wrong candidate rule {wrong.value} was accepted")
+    return {"passed": not problems, "problems": problems,
+            "candidate": _jsonable(result), "replay": _jsonable(stale), "dpr": _jsonable(dpr), "wrong": wrong.value}
+
+
+def analyze_program_recording(path: Path, *, covered: bool) -> dict[str, Any]:
+    result: dict[str, Any] = {"lossless": False, "continuous": bool(covered), "decodedFrames": 0,
+                              "identicalFrames": 0, "audioSilent": None}
+    try:
+        meta, frames = obs_cadence_decode.read_frames(path)
+        obs_cadence_decode.check_lossless(meta)
+        result.update(lossless=True, codec=meta.get("codec"), pixFmt=meta.get("pix_fmt"), size=list(meta.get("size") or ()))
+        reference = None
+        for frame in frames:
+            digest = hashlib.sha256(frame.tobytes()).digest()
+            reference = digest if reference is None else reference
+            result["decodedFrames"] += 1
+            result["identicalFrames"] += digest == reference
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        audio = subprocess.run([ffmpeg, "-v", "error", "-i", str(path), "-map", "0:a:0?", "-f", "s16le", "-"],
+                               capture_output=True, timeout=30, check=True).stdout
+        result["audioBytes"] = len(audio)
+        result["audioSilent"] = all(byte == 0 for byte in audio)
+    except (OSError, ValueError, subprocess.SubprocessError, obs_cadence_decode.NotLossless) as exc:
+        result["error"] = f"{type(exc).__name__}: {exc}"
+    return result
+
+
+def analyze_rgba_samples(paths: list[Path], phases: list[str]) -> dict[str, Any]:
+    result: dict[str, Any] = {"transparent": False, "halfTransparent": False, "sampleCount": len(paths),
+                              "allChannelsEqual": False, "allPhasesCovered": False, "phases": phases}
+    try:
+        images = [np.asarray(Image.open(path).convert("RGBA")) for path in paths]
+        if not images or any(image.shape != images[0].shape for image in images):
+            return {**result, "error": "RGBA samples missing or dimensions differ"}
+        alpha = images[0][..., 3]
+        result["transparent"] = bool((alpha == 0).any())
+        result["halfTransparent"] = bool(((alpha > 0) & (alpha < 255)).any())
+        result["allChannelsEqual"] = all(np.array_equal(images[0], image) for image in images[1:])
+        required = {"before-install", "installed", "before-capture", "after-capture", "before-cleanup", "restored"}
+        result["allPhasesCovered"] = required <= set(phases)
+        result["sha256"] = [hashlib.sha256(image.tobytes()).hexdigest() for image in images]
+    except (OSError, ValueError) as exc:
+        result["error"] = f"{type(exc).__name__}: {exc}"
+    return result
+
+
+class QualificationCalibrationAdapter:
+    def __init__(self, adapter: managed_obs.CalibrationAdapter,
+                 sample: Callable[[str], None] | None = None, *, placement: str = "preview") -> None:
+        self.adapter = adapter
+        self.sample = sample or (lambda _phase: None)
+        self.placement = placement
+        self.request: managed_obs.CalibrationRequest | None = None
+        self.result: managed_obs.CalibrationResult | None = None
+        self.events: list[dict[str, Any]] = []
+        self.phase_times_ns: dict[str, int] = {}
+        self.done = threading.Event()
+
+    def identity(self) -> managed_obs.EngineIdentity | None:
+        return self.adapter.identity()
+
+    def start(self, request: managed_obs.CalibrationRequest, *, measure: Callable[[managed_obs.CalibrationIO], placement_probe.ClassifierInput],
+              guard: managed_obs.ProgramGuard) -> Any:
+        recorder = self
+
+        class Guard:
+            def begin(self) -> None:
+                guard.begin()
+
+            def sample(self, phase: str) -> None:
+                guard.sample(phase)
+                recorder.phase_times_ns[phase] = time.time_ns()
+                recorder.sample(phase)
+
+            def finish(self) -> managed_obs.ProgramCheck:
+                return guard.finish()
+
+        actual_request = replace(request, placement=self.placement)
+        self.request = actual_request
+        future = self.adapter.start(actual_request, measure=measure, guard=Guard())
+        host_future: Future[managed_obs.CalibrationResult] = Future()
+
+        def finished(value: Any) -> None:
+            try:
+                self.result = value.result()
+                event = "complete"
+                host_future.set_result(replace(self.result, request=request))
+            except Exception:
+                event = "error"
+                host_future.set_exception(RuntimeError("qualification calibration failed"))
+            placement = self.events[-1]["placement"] if self.events else {}
+            self.events.append({"at": time.time(), "event": event, "placement": placement})
+            self.done.set()
+
+        future.add_done_callback(finished)
+        return host_future
+
+    def cancel(self, run_id: str, *, timeout_s: float = 5.0) -> bool:
+        return self.adapter.cancel(run_id, timeout_s=timeout_s)
+
+    def placement_event(self, placement: dict[str, Any]) -> None:
+        previous = self.events[-1].get("placement") if self.events else None
+        if previous != placement:
+            self.events.append({"at": time.time(), "event": "placement", "placement": json.loads(json.dumps(placement))})
 
 
 def sleep_events(since: datetime, until: datetime) -> list[str]:
@@ -711,6 +1143,50 @@ def await_input(transport: Any, timeout_s: float = 10.0) -> float:
     return round(time.monotonic() - started, 2)
 
 
+def program_guard_controls(host: LiveOutputHost, creds: tuple[int, str]) -> dict[str, Any]:
+    transport = host._require_transport()
+    context = host._program_context()
+    if context is None:
+        return {"null": {"ok": None, "reason": "program context unavailable"},
+                "toggle": {"ok": None, "reason": "program context unavailable"}}
+
+    def run(toggle: bool) -> managed_obs.ProgramCheck:
+        guard = _ProgramGuard(transport, context)
+        item_id = None
+        finished = False
+        try:
+            guard.begin()
+            if toggle:
+                with ObsWebsocket(*creds) as ws:
+                    items = ws.request("GetSceneItemList", {"sceneName": managed_obs.PROGRAM_SCENE}).get("sceneItems") or []
+                    item = next((row for row in items if row.get("sourceName") == "Program"), None)
+                    if not isinstance(item, dict) or not isinstance(item.get("sceneItemId"), int):
+                        raise RuntimeError("Program scene item unavailable")
+                    item_id = item["sceneItemId"]
+                    ws.request("SetSceneItemEnabled", {"sceneName": managed_obs.PROGRAM_SCENE,
+                                                       "sceneItemId": item_id, "sceneItemEnabled": False})
+                    time.sleep(0.1)
+                    ws.request("SetSceneItemEnabled", {"sceneName": managed_obs.PROGRAM_SCENE,
+                                                       "sceneItemId": item_id, "sceneItemEnabled": True})
+            time.sleep(0.35)
+            guard.sample("control")
+            result = guard.finish()
+            finished = True
+            return result
+        except Exception as exc:
+            return managed_obs.ProgramCheck(None, 0, None, None, (), f"{type(exc).__name__}: {exc}")
+        finally:
+            if not finished:
+                with contextlib.suppress(Exception):
+                    guard.finish()
+            if toggle and item_id is not None:
+                with contextlib.suppress(Exception), ObsWebsocket(*creds) as ws:
+                    ws.request("SetSceneItemEnabled", {"sceneName": managed_obs.PROGRAM_SCENE,
+                                                       "sceneItemId": item_id, "sceneItemEnabled": True})
+
+    return {"null": _jsonable(run(False)), "toggle": _jsonable(run(True))}
+
+
 def pre_start_gaps(record: dict[str, Any]) -> list[float] | None:
     """The rAF gaps `dissolve_probe.raf_gaps` allows (pending animations) while the transition DOM is present."""
     try:
@@ -768,6 +1244,185 @@ def dissolve_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] | 
     if name == "opaque-off":
         out["calibration"] = opaque_off_calibration(record, images)
         print(f"    [{name}] DX-2 calibration {out['calibration']}", flush=True)
+    return out
+
+
+def placement_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] | None) -> dict[str, Any]:
+    arm = dissolve_probe.ARMS[name]
+    record: dict[str, Any] = {"arm": name, "load": os.getloadavg()[0], "headlessBefore": mm_opacity_probe.headless_chromes()}
+    images: dict[str, np.ndarray] = {}
+    samples: list[tuple[str, np.ndarray]] = []
+    sample_lock = threading.Lock()
+    host: LiveOutputHost | None = None
+    recording: str | None = None
+    recording_started = False
+    started = time.monotonic()
+    run_dir = ctx["shots"] / "runs" / name
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    def sample(phase: str) -> None:
+        image = obs_screenshot(*ctx["creds"])
+        with sample_lock:
+            samples.append((phase, image))
+
+    adapter = QualificationCalibrationAdapter(ctx["calibration"], sample,
+                                              placement="offcanvas" if name == "opaque-off" else "preview")
+    try:
+        resolved = dissolve_probe.resolve(arm, ctx["shots"] / "scratch", decision, tag=name)
+        record.update(resolved.fields())
+        collection_path = ctx["collectionPath"]
+        _baseline, baseline_ref = capture_collection(collection_path, run_dir, "baseline", saved_by_obs=True)
+        _null_before, null_before_ref = capture_collection(collection_path, run_dir, "null-before", saved_by_obs=True)
+        time.sleep(0.1)
+        _null_after, null_after_ref = capture_collection(collection_path, run_dir, "null-after", saved_by_obs=True)
+        start_record(*ctx["creds"])
+        recording_started = True
+        host = LiveOutputHost(
+            resolved.root, resolved.slides, resolver=resolved.resolver,
+            transport_factory=dissolve_probe.hooked_transport(before=PLACEMENT_ALPHA_JS),
+            attach_endpoint=ctx["endpoint"], attach_match=ctx["target"], bridge="obs-managed", output_rate=ctx["rate"],
+            continuity=arm.continuity, gl_replay="off", mm_opacity="auto" if arm.mode == "on" else "off",
+            calibration=adapter, placement_mode="probe",
+        )
+        with dissolve_probe.serving(arm.splice):
+            host.start()
+        deadline = time.monotonic() + 35.0
+        while time.monotonic() < deadline:
+            host.observe()
+            placement = host.output.get("placement") or {}
+            adapter.placement_event(placement)
+            if adapter.done.is_set() and placement.get("state") != "probing":
+                break
+            time.sleep(0.05)
+        if recording_started:
+            recording = stop_record(*ctx["creds"])
+            recording_started = False
+        result = adapter.result
+        placement = host.output.get("placement") or {}
+        if result is None:
+            raise RuntimeError("managed placement calibration did not complete")
+        _cleanup, cleanup_ref = capture_collection(collection_path, run_dir, "cleanup", saved_by_obs=True)
+        controls = program_guard_controls(host, ctx["creds"])
+        controls["candidate"] = _jsonable(result.program)
+        sample("null")
+        record["page"] = "alpha" if host.output.get("alpha") else "screen"
+        record["output"] = {k: host.output.get(k) for k in ("mmOpacity", "continuity", "placement")}
+        record["inputLiveS"] = await_input(host._require_transport())
+        if arm.placement_value is not None and arm.placement_value != placement.get("grant"):
+            record["forcedPlacement"] = dissolve_probe.commit_grant(
+                host._require_transport().evaluate, host._placement_token, arm.placement_value, 15_000)
+        host._require_transport().evaluate("(function(){var n=document.getElementById('obed-placement-alpha');if(n)n.remove()})()")
+        record["g2"] = ((host._require_transport().evaluate(GL_REPLAY_READ_JS) or {}).get("api") or {}).get("state")
+        raw: dict[int, np.ndarray] = {}
+        with source_shots(*ctx["creds"]) as shot:
+            driven, images = dissolve_probe.drive(host, arm, resolved.target, lambda: raw.setdefault(id(img := shot()), img))
+        images = {key: unpremultiply(value) if raw.get(id(value)) is value else value for key, value in images.items()}
+        record.update(driven)
+
+        rgba_paths = []
+        phases = []
+        with sample_lock:
+            captured = list(samples)
+        for index, (phase, image) in enumerate(captured):
+            path = run_dir / "placement" / "rgba" / f"{index:02d}-{phase}.png"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(image).save(path)
+            rgba_paths.append(path)
+            phases.append(phase)
+        recording_ref = None
+        recording_analysis = None
+        if recording and Path(recording).is_file():
+            path = run_dir / "placement" / "program" / Path(recording).name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(recording, path)
+            recording_ref = dissolve_probe.placement_file_ref(path, run_dir)
+            recording_analysis = analyze_program_recording(path, covered=True)
+        classification = placement_probe.classify_probe(result.evidence) if result.evidence is not None else None
+        telemetry = {
+            "programGuard": controls,
+            "programRecording": recording_analysis,
+            "alpha": analyze_rgba_samples(rgba_paths, phases),
+            "classifierControls": classifier_controls(result.evidence, classification, placement_probe.ProbeVerdict.FRAC)
+            if result.evidence is not None and classification is not None else None,
+            "toneRows": {"complete": False, "applied": "identity", "problems": ["W5 rows require both fresh launches"]},
+        }
+        telemetry_ref = write_placement_json(run_dir, "telemetry", telemetry)
+        record["placementCalibration"] = placement_record(
+            backend="cef", placement=result.request.placement, obs_version=ctx.get("obsVersion"),
+            engine=result.request.engine, request=result.request, evidence=result.evidence, classification=classification,
+            transaction=result, events=adapter.events,
+            persistence={"baseline": baseline_ref, "nullBefore": null_before_ref, "nullAfter": null_after_ref,
+                         "cleanup": cleanup_ref, "quit": None, "backup": [],
+                         "lastRemovalMtimeNs": adapter.phase_times_ns.get("before-cleanup"),
+                         "checks": [_jsonable(result.persistence)] if result.persistence is not None else []},
+            integrity={"recording": recording_ref, "rgba": [dissolve_probe.placement_file_ref(path, run_dir) for path in rgba_paths],
+                       "telemetry": telemetry_ref},
+            stock_sha256=resolved.served["stockSha256"],
+        )
+        missing = dissolve_evidence(record)
+        if missing:
+            record["error"] = f"placement evidence missing: {'; '.join(missing)}"
+    except Exception:
+        record["error"] = traceback.format_exc()
+    finally:
+        if recording_started:
+            with contextlib.suppress(Exception):
+                recording = stop_record(*ctx["creds"])
+        if host is not None:
+            try:
+                host.stop()
+            except Exception as exc:
+                record["stopError"] = str(exc)
+    dissolve_probe.save_run(ctx["shots"], name, record, images)
+    saved_path = run_dir / "record.json"
+    if saved_path.is_file():
+        saved = json.loads(saved_path.read_text())
+        calibration = saved.get("placementCalibration")
+        if isinstance(calibration, dict):
+            calibration["gates"] = score_placement_calibration(calibration, run_dir)["gates"]
+            saved_path.write_text(json.dumps(saved))
+    out: dict[str, Any] = {"session": name, "runDir": str(run_dir), "page": record.get("page"),
+                           "output": record.get("output"), "timingS": {"script": round(time.monotonic() - started, 2)}}
+    if record.get("error"):
+        out["fatal"] = str(record["error"])[-3000:]
+    if name == "opaque-off":
+        out["calibration"] = opaque_off_calibration(record, images)
+    return out
+
+
+def chrome_placement_session(name: str, ctx: dict[str, Any], *, gpu: bool) -> dict[str, Any]:
+    run_dir = ctx["shots"] / "runs" / name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    record: dict[str, Any] = {"arm": name}
+    try:
+        measured = dissolve_probe.run_chrome_placement_probe(gpu=gpu)
+        telemetry_ref = write_placement_json(
+            run_dir, "telemetry",
+            {"classifierControls": classifier_controls(measured["input"], measured["classification"],
+                                                       placement_probe.ProbeVerdict.SNAP),
+             "toneRows": measured["toneRows"]},
+        )
+        stock = (dissolve_probe.DECKS["p2"].unmodified / "assets/player/main.js").read_bytes()
+        record["launch"] = measured["launch"]
+        record["placementCalibration"] = placement_record(
+            backend="chrome-harness", placement=None, obs_version=None, engine=None, request=None,
+            evidence=measured["input"], classification=measured["classification"], transaction=None, events=[],
+            persistence=None, integrity={"recording": None, "rgba": [], "telemetry": telemetry_ref},
+            stock_sha256=hashlib.sha256(stock).hexdigest(),
+        )
+    except Exception:
+        record["error"] = traceback.format_exc()
+    dissolve_probe.save_run(ctx["shots"], name, record, {})
+    record_path = run_dir / "record.json"
+    if record_path.is_file():
+        saved = json.loads(record_path.read_text())
+        calibration = saved.get("placementCalibration")
+        if isinstance(calibration, dict):
+            calibration["gates"] = score_placement_calibration(calibration, run_dir)["gates"]
+            record_path.write_text(json.dumps(saved))
+    out = {"session": name, "runDir": str(run_dir), "timingS": {"script": 0.0}}
+    if record.get("error"):
+        out["fatal"] = str(record["error"])[-3000:]
     return out
 
 
@@ -1590,6 +2245,56 @@ def dissolve_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dict
     return {"DX-2": gate(checks, invalid), "dissolveCalibration": calibration, "dissolveVerdict": verdict}
 
 
+def placement_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dict[str, Any]:
+    sessions = {s["session"]: s for s in run["sessions"]}
+    checks: list[dict[str, Any]] = []
+    expected = {*PLACEMENT_ARMS, "probe-chrome-gpu", "probe-chrome-software"}
+    check(checks, "every placement session ran", sorted(sessions), set(sessions) == expected, ",".join(sorted(expected)))
+    calibration = (sessions.get("opaque-off") or {}).get("calibration") or {"n": None, "calibration": None}
+    derived = dissolve_calibration(calibration.get("n")) if calibration.get("model") in ("PASS", "FAIL") else None
+    cal = derived if derived is not None and calibration.get("calibration") == asdict(derived) else None
+    check(checks, "calibration (opaque-off n)", calibration, cal is not None,
+          f"n <= 4: tau <= {DX2_TAU_MAX}, complement <= {DX2_COMPLEMENT_MAX}, no dip >= {DX2_NO_DIP_MIN}")
+    runs = {name: (json.loads((Path(session["runDir"]) / "record.json").read_text()),
+                   dissolve_probe.RunImages(Path(session["runDir"])))
+            for name, session in sessions.items()
+            if session.get("runDir") and (Path(session["runDir"]) / "record.json").is_file()}
+    lut, lut_detail = dissolve_probe.launch_lut(runs, cal or dissolve_probe.Calibration(), profile=dissolve_probe.CEF_PLACEMENT)
+    check(checks, "CEF placement tone observation", lut_detail, lut is not None, "measured identity/analytic/table map")
+    tone_rows = {"complete": lut is not None, "applied": "identity", "observed": lut_detail.get("kind"),
+                 "samples": lut_detail.get("samples"), "problems": list(lut_detail.get("problems") or [])}
+    for name in PLACEMENT_ARMS:
+        record, images = runs.get(name) or ({}, None)
+        encoded = record.get("placementCalibration") or {}
+        run_dir = Path(sessions.get(name, {}).get("runDir", "."))
+        integrity = encoded.get("integrity") if isinstance(encoded, dict) else None
+        telemetry_ref = integrity.get("telemetry") if isinstance(integrity, dict) else None
+        if isinstance(telemetry_ref, dict):
+            telemetry = _read_ref_json(telemetry_ref, run_dir)
+            telemetry["toneRows"] = tone_rows
+            integrity["telemetry"] = write_placement_json(run_dir, "telemetry", telemetry)
+        rescored = score_placement_calibration(encoded, run_dir)
+        if isinstance(encoded, dict):
+            encoded["gates"] = rescored["gates"]
+            (run_dir / "record.json").write_text(json.dumps(record))
+        check(checks, f"{name}: placement evidence", rescored.get("overall"), rescored.get("overall") == "PASS", "PASS")
+    for name in ("probe-chrome-gpu", "probe-chrome-software"):
+        encoded = (runs.get(name) or ({}, None))[0].get("placementCalibration") or {}
+        rescored = score_placement_calibration(encoded, Path(sessions.get(name, {}).get("runDir", ".")))
+        observed = ((rescored.get("gates") or {}).get("probe-chrome-harness") or {}).get("verdict")
+        check(checks, f"{name}: classifier", observed, observed == "PASS", "PASS")
+    verdict = dissolve_probe.score_runs(runs, decision, cal or dissolve_probe.Calibration(),
+                                        profile=dissolve_probe.CEF_PLACEMENT, lut=lut)
+    for name, result in verdict["gates"].items():
+        reported = result["verdict"] in ("REPORTED", "N/A")
+        check(checks, name, [result["verdict"], result.get("reasons") or result.get("problems")],
+              result["verdict"] == "PASS" or reported, "PASS", enforced=not reported)
+    for name, outcome in verdict["arms"].items():
+        check(checks, f"arm {name}", outcome, outcome == "MATCH", "MATCH")
+    invalid = None if cal is not None else f"placement INCONCLUSIVE: calibration opaque-off n {calibration['n']}"
+    return {"CEF-placement": gate(checks, invalid), "dissolveCalibration": calibration, "placementVerdict": verdict}
+
+
 def mmo_summary(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """MO-2 across the per-rate takes: both rates ran, and each rate's own CvC read <= 2 (it gates that take; tau and tau_key
     are per take)."""
@@ -1923,6 +2628,10 @@ def sessions_for(arm: str, ctx: dict[str, Any], args: argparse.Namespace, armed:
         return [run_session("precheck", precheck_script(armed), ctx)]
     if arm == "dissolve":
         return [dissolve_session(name, ctx, args.decision) for name in DISSOLVE_ARMS]
+    if arm == "placement":
+        return [chrome_placement_session("probe-chrome-gpu", ctx, gpu=True),
+                chrome_placement_session("probe-chrome-software", ctx, gpu=False),
+                *(placement_session(name, ctx, args.decision) for name in PLACEMENT_ARMS)]
     return [run_session("soak", soak_script(args.soak_minutes, armed, fixture_loops(ctx["fixture"])), ctx),
             run_session("soak-off", soak_off_script, ctx, gl_replay="off")]
 
@@ -1996,6 +2705,8 @@ def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, args: ar
         timing["launch"] = round(time.monotonic() - t, 2)
         ctx = {"endpoint": engine.cdp_endpoint, "target": engine.target_id, "rate": rate, "creds": creds, "shots": shots,
                "fixture": args.fixture, "tag": f"{arm}{rate}{take}{ts}",
+               "calibration": engine.calibration_adapter(), "obsVersion": run.get("obsVersion"),
+               "collectionPath": engine.tree / "basic/scenes/AK.json",
                "engineState": lambda: {k: engine.state().get(k) for k in ("state", "warnings")}}
         run["sessions"] = sessions_for(arm, ctx, args, armed)
     except Exception:
@@ -2008,6 +2719,8 @@ def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, args: ar
         timing["quit"] = round(time.monotonic() - t, 2)
         run["engineAfterQuit"] = engine.state()
         engine.close()
+    if arm == "placement":
+        finalize_placement_persistence(run["sessions"], engine.tree / "basic/scenes/AK.json")
     ended = datetime.now()
     record = json.loads((home / "ak-engine.json").read_text()) if (home / "ak-engine.json").exists() else {}
     run["lifecycle"] = {"readyS": run.get("readyS"), "stateAfterQuit": run["engineAfterQuit"]["state"],
@@ -2121,6 +2834,8 @@ def arm_gates(arm: str, run: dict[str, Any], args: argparse.Namespace, armed: di
         if gates["DX-2"]["invalid"]:
             invalid.append(gates["DX-2"]["invalid"])
         return gates
+    if arm == "placement":
+        return placement_gates(run, args.decision)
     if args.precheck:
         gates = precheck_gates(run, args.fixture)
         if gates["precheck"]["invalid"]:
@@ -2238,9 +2953,84 @@ def score_mmo(root: Path) -> int:
     return 0 if results and all(r["verdict"] == "PASS" for r in results) else 1
 
 
+def score_placement_runs(root: Path) -> int | None:
+    paths = sorted(set(root.glob("**/runs/*/record.json")))
+    paths += [p for p in sorted((root / "runs").glob("*.json")) if p not in paths]
+    results = []
+    for path in paths:
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        calibration = record.get("placementCalibration")
+        if not isinstance(calibration, dict):
+            continue
+        run_dir = path.parent
+        rescored = score_placement_calibration(calibration, run_dir)
+        results.append({"run": str(path.relative_to(root)), "backend": calibration.get("backend"),
+                        "engine": calibration.get("engine"), "launch": record.get("launch"),
+                        "probeIdentity": (calibration.get("input") or {}).get("identity"), **rescored})
+        print(f"[placement {path.parent.name}] {rescored['overall']}", flush=True)
+        for name, result in rescored["gates"].items():
+            print(f"    {name}: {result['verdict']} {result['problems'] or ''}", flush=True)
+    if not results:
+        return None
+    cef_launches = {json.dumps(row["engine"], sort_keys=True) for row in results
+                    if row["backend"] == "cef" and isinstance(row.get("engine"), dict)}
+    chrome_launches = {
+        gpu: {str((row.get("probeIdentity") or {}).get("target_id")) for row in results
+              if row["backend"] == "chrome-harness" and (row.get("launch") or {}).get("gpu") is gpu
+              and (row.get("probeIdentity") or {}).get("target_id")}
+        for gpu in (True, False)
+    }
+    for row in results:
+        problem = None
+        gate = None
+        if row["backend"] == "cef" and len(cef_launches) < 2:
+            problem, gate = f"only {len(cef_launches)} fresh CEF launch(es); need 2", "probe-cef"
+        elif row["backend"] == "chrome-harness":
+            gpu = (row.get("launch") or {}).get("gpu")
+            if gpu not in chrome_launches or len(chrome_launches[gpu]) < 2:
+                problem, gate = f"only {len(chrome_launches.get(gpu, set()))} fresh Chrome launch(es) for gpu={gpu}; need 2", "probe-chrome-harness"
+        if problem and gate:
+            row["gates"][gate] = calibration_gate("INCONCLUSIVE", [problem])
+            row["overall"] = "INCONCLUSIVE" if row["overall"] == "PASS" else row["overall"]
+    dest = root / f"placement-rescore-{stamp()}.json"
+    dest.write_text(json.dumps(results, indent=1))
+    print(f"-> {dest}", flush=True)
+    return 0 if all(row["overall"] == "PASS" for row in results) else 1
+
+
+def finalize_placement_persistence(sessions: list[dict[str, Any]], collection_path: Path) -> None:
+    for session in sessions:
+        run_dir = Path(session.get("runDir") or "")
+        record_path = run_dir / "record.json"
+        if not record_path.is_file() or not collection_path.is_file():
+            continue
+        record = json.loads(record_path.read_text())
+        calibration = record.get("placementCalibration")
+        persistence = calibration.get("persistence") if isinstance(calibration, dict) else None
+        if not isinstance(persistence, dict):
+            continue
+        _quit, persistence["quit"] = capture_collection(collection_path, run_dir, "quit", saved_by_obs=True)
+        backups = []
+        for index, source in enumerate(sorted(collection_path.parent.glob("AK.json.bak*"))):
+            if not source.is_file():
+                continue
+            dest = run_dir / "placement" / "collections" / f"backup-{index}{source.suffix}"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, dest)
+            backups.append(dissolve_probe.placement_file_ref(dest, run_dir))
+        persistence["backup"] = backups
+        rescored = score_placement_calibration(calibration, run_dir)
+        persistence["checks"] = rescored.get("persistenceChecks", [])
+        calibration["gates"] = rescored["gates"]
+        record_path.write_text(json.dumps(record))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Live qualification of the managed OBS (launches OBS; one OBS at a time).")
-    parser.add_argument("--arm", choices=("2x", "positive", "both", "g2", "failsafe", "soak", "mmo", "mmo-cef", "dissolve"),
+    parser.add_argument("--arm", choices=("2x", "positive", "both", "g2", "failsafe", "soak", "mmo", "mmo-cef", "dissolve", "placement"),
                         default="both")
     parser.add_argument("--rate", type=int, choices=sorted(managed_obs.RATES), default=25, help=f"ignored for mmo ({MMO_RATES})")
     parser.add_argument("--takes", type=int, default=2, help="ignored (1) for failsafe, soak, mmo, mmo-cef and dissolve")
@@ -2253,15 +3043,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, help="writes <out>/runs/<arm>-<ts>.json, <out>/shots/ and a summary")
     parser.add_argument("--home", type=Path, default=DEFAULT_HOME, help="scratch ManagedObs home (never under ~/Desktop)")
     parser.add_argument("--keep-recordings", action="store_true", help="keep the lossless recordings (~0.5 GB per session)")
-    parser.add_argument("--score", type=Path, metavar="DIR", help="re-score the saved MO-2 takes under DIR/runs (no OBS)")
+    parser.add_argument("--score", type=Path, metavar="DIR", help="re-score saved placement or MO-2 takes under DIR/runs (no OBS)")
     parser.add_argument("--decision", type=Path, help="dissolve: the Q0b decision record JSON (L, counterEncoding, toneEncoding)")
     args = parser.parse_args(argv)
     if args.score is not None:
-        return score_mmo(args.score.expanduser().resolve())
-    if args.decision is not None and args.arm != "dissolve":
-        parser.error("--decision applies to --arm dissolve only.")
-    if args.arm == "dissolve" and args.fixture is not None:
-        parser.error("--arm dissolve serves dissolve_probe's own decks; --fixture does not apply.")
+        root = args.score.expanduser().resolve()
+        placement_status = score_placement_runs(root)
+        return placement_status if placement_status is not None else score_mmo(root)
+    if args.decision is not None and args.arm not in ("dissolve", "placement"):
+        parser.error("--decision applies to --arm dissolve or placement only.")
+    if args.arm in ("dissolve", "placement") and args.fixture is not None:
+        parser.error(f"--arm {args.arm} serves dissolve_probe's own decks; --fixture does not apply.")
     args.decision = json.loads(args.decision.read_text()) if args.decision else None
     args.kb_splice = None
     if args.arm == "soak":
@@ -2300,7 +3092,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.kb:
         args.kb_splice = apply_kb(args.kb)
     armed = None
-    if args.arm not in ("2x", "positive", "both", "dissolve"):
+    if args.arm not in ("2x", "positive", "both", "dissolve", "placement"):
         armed = fixture_facts(args.fixture)
         print("ARMED", json.dumps({k: armed[k] for k in ("instanceRect", "movieSlot", "overrideSlots", "assetKeys")}), flush=True)
         if args.arm == "mmo":
@@ -2310,7 +3102,7 @@ def main(argv: list[str] | None = None) -> int:
     (args.out / "runs").mkdir(parents=True, exist_ok=True)
     arms = ("2x", "positive") if args.arm == "both" else (args.arm,)
     takes = 1 if args.arm in ("failsafe", "soak", "mmo", "mmo-cef", "dissolve") else args.takes
-    rates = MMO_RATES if args.arm == "mmo" else (args.rate,)
+    rates = MMO_RATES if args.arm in ("mmo", "placement") else (args.rate,)
     awake = subprocess.Popen(["caffeinate", "-dimsu", "-w", str(os.getpid())])
     runs: list[dict[str, Any]] = []
     try:

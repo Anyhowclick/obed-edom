@@ -496,7 +496,13 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
     }
     if spec.capture in ("paused", "reference"):
         record["paused"] = {"state": "presented", "frame": REFERENCE, "id": 0}
-    record["placement"] = (None if spec.page in ("raw", "preview") else "invalid") if spec.grant == "none" else "snap"
+    record["placement"] = (None if spec.page in ("raw", "preview") else "invalid") if spec.grant == "none" else (
+        spec.placement_value or "snap")
+    if spec.forgery:
+        value, kind = probe.FORGERIES[spec.forgery]
+        record["placement"] = value
+        record["forgery"] = {"read": value, "kind": kind, "configurable": kind != "getter",
+                             "enumerable": kind == "assignment", "writable": kind == "assignment"}
     if spec.reason:
         record["output"]["placement"] = {"grant": "snap" if spec.reason == "granted" else None, "reason": spec.reason,
                                          "product": "HeadlessChrome/154.0.8037.59", "gpuCompositing": "enabled", "at": 1.0}
@@ -873,6 +879,12 @@ def launch_map(mutate: str | None, drop: bool = False) -> tuple[bool, float | No
     return lut is not None, None if lut is None else int(lut[128])
 
 
+def cef_launch_map() -> tuple[bool, str | None]:
+    runs = {name: media_run(name) for name in ("m-tone-cef", "m-tone-cef-twin")}
+    lut, detail = probe.launch_lut(runs, CAL, profile=probe.CEF_PLACEMENT)
+    return lut is not None, detail.get("source")
+
+
 def stale_patch_blank_in() -> str:
     """Astra impl r3: F50/B are copies of A0 but for a 10x10 patch (red -10 / -20) where incoming = outgoing; the main
     incoming texture is blank."""
@@ -1168,6 +1180,7 @@ CASES = [
     ("r12-8 m-tone identity with < 50 % tone coverage", lambda: tone_identity("tone-small-cells"), "INCONCLUSIVE"),
     ("r12-9 DX-2 L_path measured in the launch (tone step -> 139 at 128) / identity / no m-tone session",
      lambda: (launch_map("tone-step"), launch_map(None), launch_map(None, drop=True)), ((True, 139), (True, 128), (False, None))),
+    ("placement CEF L_path reads the CEF tone row and twin", cef_launch_map, (True, "m-tone-cef (this launch)")),
     ("r12b-1 m-raw-nav-open with the sidebar below the viewport", lambda: arm_outcome("m-raw-nav-open", holder=False, mutate="nav-offscreen"), "INCONCLUSIVE"),
     ("r12b-2 m-raw-caption with zeroed textures", lambda: arm_outcome("m-raw-caption", holder=False, mutate="tex-zero"), "INCONCLUSIVE"),
     ("r12b-2 m-geo-scale with zeroed textures", lambda: arm_outcome("m-geo-scale", holder=False, mutate="tex-zero"), "INCONCLUSIVE"),
@@ -1202,6 +1215,14 @@ CASES = [
     ("r17 life-grant-reload: invalid until the re-grant, then a holder", lambda: arm_outcome("life-grant-reload"), "MATCH"),
     ("r17 life-grant-reload already snap before the re-grant", lambda: arm_outcome("life-grant-reload", mutate="reload-snap"), "INCONCLUSIVE"),
     *[(f"r17 {n}: no channel, no holder, cross-fade model", lambda n=n: arm_outcome(n, holder=False), "MATCH") for n in ("m-raw-prod", "m-preview-prod")],
+    *[(f"placement O1 {n}: forged production page binds no holder", lambda n=n: arm_outcome(n, holder=False), "MATCH")
+      for n in sorted(name for name in probe.ARMS if "-prod-forge-" in name)],
+    ("placement O1 forged production page binding a holder",
+     lambda: arm_outcome("m-raw-prod-forge-frac-getter", holder=True), "MISMATCH"),
+    ("placement CEF profile carries clips, tone, nooffset reds, wrong-rule and DSK cost",
+     lambda: ({"m-snap-cef", "m-snap-cef-near-x", "m-snap-cef-near-y", "m-snap-cef-far-x", "m-snap-cef-far-y",
+               "m-tone-cef", "m-tone-raw-cef", "m-snap-cef-nooffset-x", "m-snap-cef-nooffset-y", "wrongrule-cef",
+               "m-snap-cef-dsk"} <= set(probe.CEF_PLACEMENT.arms), probe.CEF_PLACEMENT.placement), (True, "frac")),
     ("DX-1 m-raw-prod: the destination's movies after the hand-off do not empty the in-only class",
      lambda: arm_outcome("m-raw-prod", holder=False, mutate="dest-video"), "MATCH"),
     ("r17 m-raw-prod binding a holder", lambda: arm_check("m-raw-prod", "scope"), "PASS"),
