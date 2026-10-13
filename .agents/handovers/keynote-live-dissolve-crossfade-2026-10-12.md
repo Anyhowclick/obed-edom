@@ -1,14 +1,16 @@
 # Dissolve cross-fade — implementation handover (updated 2026-10-12 afternoon)
 
-## READ FIRST — 2026-10-13 (supersedes the 22:30 section; the draft PR is up)
+## READ FIRST — 2026-10-13 (supersedes the 22:30 section; draft PR #262 is up)
 
-Branch merged with `origin/main` `93963f4c` and pushed. The draft PR body has the gate table. DX-1 F3 round PASS at `2a5d7f2d`
-(16/16 MATCH); DX-2 PASS at `cbca19fa` (10/10 MATCH, calibration n 0.58). Full suites on the merge: 3.12 and 3.10 each 10829
-passed / 36 skipped / 1 xfailed (the 8 extra skips vs 10-12 are local deck digest drift / uncached JXA payloads, unrelated).
-Instrument fixes today: `7e11eaa1` (AA-edge-eroded texture classes, CEF 5 mid frames, `cef-skip-dsk` class min 1000),
-`2a5d7f2d` (paused reference arms rVFC before the seek), `cbca19fa` (un-premultiply OBS shots after the burst). Results:
-`output/evidence/s2-dev/dissolve-alpha-2026-10-11/dx-2026-10-13/README.md`. Run gates on AC power: battery + Low Power Mode
-throttles capture to 4–5 mid frames. Next: owner review of the draft PR; follow-ups in `keynote-live-dissolve-crossfade-followups.md`.
+Draft PR #262 (never merge without the owner). Final gates on HEAD: DX-1 F3 round PASS at `f8058937` (16/16 MATCH;
+four capture-coverage reruns retired), DX-2 PASS at `9c00e529` (10/10 MATCH, calibration n 0.67), full suites 3.12 and
+3.10 each 10833 passed / 36 skipped / 1 xfailed (the extra skips vs 10-12 are local deck digest drift / uncached JXA
+payloads, unrelated). GPT-6 Astra high reviewed the post-APPROVE harness diff (`impl-instrument-astra-r1..r5.md`): three
+mediums folded (`9c283f78`, `32f36c35`, `f8058937`); live DX-2 showed the r3 fold rejected the stock-player controls,
+corrected by `9c00e529` (a pre-start gap starts at the pending record's own opacities); r5 APPROVE. Earlier fixes today:
+`7e11eaa1`, `2a5d7f2d`, `cbca19fa`. Results: `output/evidence/s2-dev/dissolve-alpha-2026-10-11/dx-2026-10-13/README.md`.
+Run gates on AC power (battery + Low Power Mode throttles capture). Next: owner review of #262; follow-ups in
+`keynote-live-dissolve-crossfade-followups.md`.
 
 ## READ FIRST — end of day 2026-10-12 ~22:30 (supersedes everything below; resume here)
 
