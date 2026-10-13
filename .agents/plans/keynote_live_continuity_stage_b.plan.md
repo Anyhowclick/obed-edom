@@ -1,6 +1,7 @@
 # Live continuity, Stage B: carry under artwork via the GL texture feed, N carries per boundary, qualify Alpha_DSK
 
-Status: **DRAFT rev 3 (2026-10-13), planning only.**
+Status: **DRAFT rev 3.1 (2026-10-13), planning only.**
+- **Critique r2 (rev 3.1):** (B1) the seam gains `claim()`: the core cannot otherwise tell a fed entry from a poster hold when the host does not inject the module. (M1) the hidden ride and poster hold live inside `keepThroughBridge`/`keepThroughPin`, and every `play()` site respects the hold. (M2) the binding uses the regular ordinals only, which are the same in both player variants, because limit 5 is explained. `to: null` requires the single-texture program. (M3) limit 6 is explained. `labelsOverFeed` and Alpha `feedLive` are defined in-frame and in a single run, and two red controls are corrected. (M4) the stall fallback is replaced, because the player makes a fresh GL context per transition. (M5) Q6 gets a way to inject the module, plus a CEF dev-loop step. (M6) the tone-curve step is now in "What the owner sees" and the residuals. Post-C `lc` citations are fixed.
 - **Order is C → S3 → B** (Stage C OQ-C2). B rebases onto C (PR #264) and then S3. After S3 the allowlist is gone, so B's oracle is the plan-sha tests plus S3's negative corpus.
 - **OQ-B1 RESOLVED (owner):** the GL texture feed is proven, and B is built around it. The **poster hold** is the fallback whenever the feed is unavailable or stands down. Rev 2's "bridge hold under artwork" is dropped.
 - **Still open from rev 2:** OQ-B2 is "probably" yes and is confirmed here (§7). OQ-B6 = yes.
@@ -42,13 +43,18 @@ Status: **DRAFT rev 3 (2026-10-13), planning only.**
   - **Result:** the player itself draws the movie in slot order, with Keynote's easing. Labels and the divider stay on top. The 0.61 tag boxes composite over live video (coefficient k median 0.385–0.387 against an expected 0.388). 0 GL errors, and every video frame was delivered.
   - **Cost:** 0.3–0.7 ms p95 per frame, against 6–10 ms for 2D-canvas staging.
   - **Binding:** by draw index plus the upload ordinals and sizes of unit0/unit1 taken from the export JSON, re-keyed on texture identity after the first feed. **Never by texture id:** 9→10 WA0125's outgoing texture `309718…` is WA0121's poster, and a label draw uses the 13×404 divider texture.
-- **Experiment limits that B must close:**
-  1. It fed a **separate** muted `<video>`, not the carried decoder.
-  2. It ran mostly on a virtual clock.
-  3. It ran only in headless Chrome. OBS CEF 127 was not tested.
-  4. One 357 ms first-feed stall occurred in 1 of 6 runs.
-  5. Observed upload counts exceeded the JSON's (13/12, 20/17 `sizeMismatch`). The extra uploads came after the movie ordinals there. The likely source is the MM-opacity hand-back crossfade in the served player, but this is unexplained.
-  6. On 9→10, label draw 7 straddles both movies and the divider, and read k 0.07–0.34. It must be explained before any threshold is registered.
+- **Experiment limits (rev 3.1 status):**
+  1. It fed a **separate** muted `<video>`, not the carried decoder. **Open → closed by Q3** (D7/D7s `feedLive` on the carried decoder). The contract does not depend on it.
+  2. It ran mostly on a virtual clock. **Closed:** the real-clock direct runs (`out/run2-direct-realclock`) show 0 refusals, feed p95 0.4–0.7 ms, rAF max 33 ms and 0 GL errors on all three moves.
+  3. It ran only in headless Chrome. **Open → dev-loop step + Q6** (§2.1 Host). CEF evidence in the repo: G2 already runs WebGL with `drawImage(video)` → `texSubImage2D(canvas)` in OBS 32.2.2 / CEF 127 (`.agents/reviews/gl-replay-managed/gates-r1.md`, M1–M6). Direct `texImage2D(HTMLVideoElement)` is unproven there.
+  4. One 357 ms stall in 1 of 6 runs (`run2-cmp/direct/6to7`). The first feed itself took 0.1 ms at 26 ms; the next rAF came at 382.6 ms, so the stall is a whole-page gap, not upload time. Under a real clock the whole Keynote move would jump ~21 frames. **Open → dev loop** (§2.1 warm-up).
+  5. Upload counts 13/12 and 20/17. **Closed:** every extra upload is a MM-opacity hand-back texture. `__obedHandbackTextures` (`live_runtime.py:34-54`, called at `:83`) runs after `setupTexture`'s loop and `createTexture`s a next-slide texture for each scaled leaf that has no `contents`.
+     - 8→9: #13 266×59 for label box d7.
+     - 9→10: #18–20 (287×77, 259×58, 189×91) for label boxes d5/d7/d11.
+     - These uploads always follow every regular upload. They are also runtime-conditional: the hand-back returns early unless the next slide's texture cache is loaded.
+  6. 9→10 label draw 7 at k 0.07–0.34. **Closed:** draw 8 (the label text leaf, whose outgoing texture is the 13×404 divider, a texture-id defect) is drawn over it.
+     - On draw 7's pixels not covered by any later quad, k = 0.388–0.390 in both arms at all three reads.
+     - On the covered pixels, k tracks draw 8's mixFactor: 0.13 / 0.50 / 0.88 → k 0.054 / 0.193 / 0.338 (scratch `critic-r2/k7.py`).
 
 ## 2. Design
 
@@ -62,51 +68,81 @@ Status: **DRAFT rev 3 (2026-10-13), planning only.**
 - **Binding data (`feed`)**, emitted on each under-artwork entry when it can be bound:
   - `{"draw": d, "drawCount": n, "from": {"upload": i, "size": [w, h]}, "to": {"upload": j, "size": [w, h]} | null}`.
   - Built by walking the boundary transition's leaves in player order (`textureInfoFromEffect`; port `glfeed/spec.py` `_leaves`, one draw per textured leaf, uploads = leaf texture then its `contents` to-texture).
-  - The movie leaf is found **by geometry, not texture id**: the one transition slot that starts at the source movie layer's rect (the `_bridge_slot_chain` rule, `lc:1545-1576`), cross-checked against the movie centre within 2 px.
-  - `to` is null only when the leaf has no `contents` animation (a pin with an identical texture). Then only unit0 is fed.
-  - Ordinals are computed **for the player variant served** (MM-opacity on/off). The hand-back crossfade's extra uploads are modelled from the same export rule `live_runtime` applies. The 13/12 and 20/17 counts must match exactly before the contract freezes.
+  - The movie leaf is found **by geometry, not texture id**:
+    - take the one transition slot that starts at the source movie layer's rect (the `_bridge_slot_chain` rule, post-C `lc:1576-1609`);
+    - that slot's subtree must hold exactly one textured leaf;
+    - its centre must match the movie centre within 2 px.
+  - **Ordinals are the regular uploads only** (leaf texture, then its `contents` to-texture). They are the same in both player variants, because the hand-back uploads always come after them (limit 5). Nothing models the hand-back.
+  - `to` is the leaf's `contents` to-texture.
+    - `to: null` (from-only) is allowed only for a leaf whose scale stays 1→1, because `live_runtime`'s hand-back skips `1===sx&&1===sy`.
+    - The player then draws that leaf with the single-texture program: `isBlending = !!toTexture` (main.js `prepareAnimationWithContext`), so no `mixFactor` is set.
+    - A scaled movie leaf without `contents` is not bound (reason `hand-back leaf`): the hand-back could crossfade it into a next-slide texture.
   - Not uniquely bindable → the entry keeps `underArtwork` with no `feed` (poster hold), recorded per entry with a reason.
 - **Probe-only facts** (not in `to_runtime()`): `ContinuityPlan.artwork_above` (rev 2) and `ContinuityPlan.feed_draws` (per fed boundary: draw table with layer sizes, label-box opacities, and the fed leaves' objectIds).
 
 **Feed module (new sibling, WS-F): `src/obed_edom/live_mm_feed_js.py`**
 - Like G2: its own `MM_FEED_VERSION = 1` and pinned sha, so its bytes never ride on the continuity sha. Injected by the host only when the runtime plan has a `feed` key.
 - **Hooks:** `getContext` for `/^\d+-canvas$/` WebGL contexts (G2's `CANVAS_ID_RE`; chains with G2's wrapper). On that instance it wraps the texture, bind, pixelStore, program, uniform, clear and draw calls.
-- **Arming:** for each fed entry, only on its transition scene (`atScene-1`, after departure).
+- **Arming and claim:**
+  - When the hash reads `atScene-1` with the player idle on the source slide, resolve `seam.feed.decoderFor(objectId)`, warm up, and call `seam.feed.claim(objectId)`.
+  - Only a claimed entry is fed. Contexts are wrapped only while one of the module's entries is armed, so a G2 context is never touched.
 - **Per frame:**
   - Count uploads and draws.
-  - At draw `d`, verify unit0 (and unit1) were uploaded in this move with the planned ordinal and size, the active unit is 0, and `mixFactor` is set.
-  - Then `texImage2D(decoder)` into both textures under each texture's own FLIP_Y/PREMULTIPLY state, and restore GL state.
-  - The first good feed records texture identity. Any later change, a `getError` after the frame's last draw, a binding mismatch, a lost context, or a decoder with no single identity match → **stand down** for that entry: stop feeding and call `seam.onStandDown(objectId, reason)`. The textures keep the last fed frame, which is the "one-time paused-frame upload" for free when GL already ran.
-  - `readyState < 2` at a draw (e.g. the decision-14 wrap) skips that draw's feed only.
-- **Warm-up (the 357 ms stall):** on source-slide entry, upload each planned decoder once into a module-owned scratch texture. If the dev loop (≥ 10 runs) still shows a first-feed stall, warm inside the player's context on the first transition frame.
+  - At draw `d`, verify that unit0 (and unit1 when `to` is set) were uploaded in this move with the planned ordinal and size, and that the active unit is 0.
+  - Then check the program: with `to` set, `mixFactor` must be set; with `to: null`, the active program must have no `mixFactor`.
+  - Then `texImage2D(decoder)` into the planned textures under each texture's own FLIP_Y/PREMULTIPLY state, and restore GL state.
+  - The first good feed records texture identity.
+  - Any of the following → **stand down** for that entry until the next go-to: a later identity change, two fed leaves sharing a texture object, a `getError` after the frame's last draw, a binding mismatch, no feed by the end of the first frame that has draws, a lost context, or a decoder with no single identity match. Standing down means: stop feeding and call `seam.onStandDown(objectId, reason)`.
+  - The textures keep the last fed frame, which is the "one-time paused-frame upload" for free when GL already ran.
+  - `readyState < 2` at a draw (e.g. the decision-14 wrap) skips that draw's feed only. The inter-feed gap excuses that frame.
+- **Warm-up (limit 4):**
+  - The player creates a **fresh GL context per transition** (one `0-canvas` context per move, at 1542 / 6050 / 10097 ms in `run2-cmp/direct`). So no warm-up inside the player's context can precede the first feed.
+  - Warm up at the claim by uploading each claimed decoder once into a texture in a **module-owned** WebGL context.
+  - Dev loop: ≥ 10 real-clock runs per Alpha move. If any first-feed gap over 2 frames remains, bring its rate and measured hitch to the owner before the contract freezes. There is no in-player fallback.
 - **Publishes** `window.__OBED_MM_FEED__`: per-entry state `armed|fed|stoodDown(reason)`, frames fed, max inter-feed gap, p95 ms.
 
 **Core (`js`, WS-R)**
-- **Hidden ride.** For an `underArtwork` entry, wherever the core starts a ride (`markTransition` `js:789-794`, `keepThroughBridge`/`keepThroughPin`, `keepAtSlot`'s next-bridge hand-off `js:1311-1315`), call `rideHidden(v, entry)` instead of `rideTransition`. It keeps the decoder attached on `#body` at `opacity: 0`, which is still decoding: the experiment's opacity-0 video delivered every frame.
-  - If `seam.feed` claims the entry (module injected and the decoder resolved), the decoder keeps playing.
-  - Otherwise it enters **poster hold**: `pause()` at departure, `__obedPosterHeld = true` (exempt from the 200 ms keep-warm `play()`, `js:1973-1988`), note `poster-hold {elId, t}`. `onStandDown` mid-move does the same.
+- **Hidden ride.** For an `underArtwork` entry, the branch lives **inside `keepThroughBridge`/`keepThroughPin`**. Every ride start funnels through them: `markTransition` `js:791-796`, `keepAtSlot` `js:1311-1315`, every `tryRemount` retry `js:1633`, and the departure path stash → `scheduleRemount`.
+  - The branch is a `hidden` flag on `rideTransition` that sets `opacity: '0'` and keeps its ownership token, so no visible ride can take the decoder over. The decoder stays attached on `#body`, still decoding: the experiment's opacity-0 video delivered every frame.
+  - `keepAtSlot` hands off for a next entry with `underArtwork` whether it is a **bridge or a pin**. Otherwise a held overlay keeps `opacity: '1'` every frame (`js:1336-1338`), and `keepThroughPin` refuses `__obedBridged34` (`js:1231`).
+  - **Claimed** (`seam.feed.claim` before departure): the decoder keeps playing.
+  - **Otherwise poster hold.** At hidden-ride start, `pause()` and set `__obedPosterHeld = true`, then note `poster-hold {elId, t}`. `onStandDown` mid-move does the same.
+  - While the flag is set, every core `play()` site skips the decoder:
+    - stash's keep-warm `js:974-977`, which runs at departure **after** `noteDeparture`;
+    - the 200 ms sweep `js:1973-1988`;
+    - `tryRemount` `js:1651-1654`, `:1737-1740`, `:1789-1792`;
+    - the `bindFacade` swap `js:1876-1879`;
+    - `bridgeTo34`.
 - **Settle re-home (kept from rev 2).** The `underArtwork` bridge keeps the `bridge-3to4` note and then takes the pin re-home path:
   - `rehome = !!entry.underArtwork || !!preserved.__obedBridged34`;
   - `bindFacade(el, preserved, true)` + `scheduleRemount('pin-rehome')`;
-  - no `src` on the stub (`js:2211`).
-  - After that, `play()` if poster-held, with note `poster-resume {elId, t}`. Pins already re-home.
-- **Seam.** `window.__OBED_P2_PRESERVE__.feed = {version: 1, decoderFor(objectId), onStandDown(objectId, reason), note(kind, detail)}`. Installed only for a plan with a `feed` key. G2's seam is unchanged.
+  - no `src` on the stub (`js:2211`);
+  - `carry()`'s bridge branch becomes `bridge && !entry.underArtwork`.
+  - `carry()` clears `__obedPosterHeld` before `scheduleRemount('pin-rehome')`, with note `poster-resume {elId, t}`. The re-home's own `play()` then resumes the decoder. Pins already re-home.
+- **Seam.** `window.__OBED_P2_PRESERVE__.feed = {version: 1, decoderFor(objectId), claim(objectId), onStandDown(objectId, reason), note(kind, detail)}`.
+  - It is installed for every plan with a `feed` key, whatever the host resolved. The plan sha does not depend on the output.
+  - With the module absent, nothing claims, so every flagged entry gets the poster hold.
+  - G2's seam is unchanged.
 - **Versions.** `CONTINUITY_VERSION` 6→7, `__OBED_P2_PRESERVE__.version` 9→10, re-pin `PINNED_CORE_SHA256` and its mirrors.
 
 **Host (`host`, WS-H)**
 - `_resolve_mm_feed()` mirrors `_resolve_gl_replay` (`host:902-918`): `injected | notApplicable | unavailable(reason)`.
   - External attach is refused ("attach output not qualified").
-  - Managed OBS is allowed only after the Q6 feed arm passes; until then it is `unavailable` → poster hold.
-- `OBED_LIVE_MM_FEED=off|auto` plus a constructor flag.
+  - Managed OBS under `auto` reads `MM_FEED_MANAGED_OBS = False`, which means `unavailable` → poster hold. The Q6 gate-record commit flips it before Q7.
+- `OBED_LIVE_MM_FEED=off|auto`, plus a constructor flag `off|auto|on`.
+  - `on` exists for qualification only. It injects in managed OBS regardless of the constant, so the Q6 feed arm can run. It is still refused for external attach.
+- **CEF dev-loop step** (before WS-F starts, owner's OBS go): run `glfeed/instrument.js`'s `direct` arm on Alpha 9→10 inside managed OBS through the existing `mmo-cef` harness, unrecorded.
+  - A fail moves to OQ-B10 early, and Q6's feed arm is not built.
 - `output.continuity.mmFeed {mode, reason, version, sha256}`, and per-entry `posterHold` lines (slides, movie, reason) next to `notCarried`.
 
 **What the owner sees**
-- **Feed on** (headless or visible Chrome; managed OBS once Q6 passes): the movie keeps playing inside Keynote's own move, with Keynote's easing. Tags and the divider stay on top, and the 0.61 tag boxes tint the live video. At settle it continues seamlessly in its layer with the labels above.
+- **Feed on** (headless or visible Chrome; managed OBS once Q6 passes): the movie keeps playing inside Keynote's own move, with Keynote's easing. Tags and the divider stay on top, and the 0.61 tag boxes tint the live video. At settle it continues in its layer with the labels above, with no time jump.
+  - There is a small midtone brightness step at departure and at settle. Chromium draws a native `<video>` through a tone curve that `texImage2D` does not get (up to +11/255 in the midtones; gl-replay-managed gates-r1 finding 1, the same residual as G2).
 - **Poster hold** (external attach, feed off, or a stand-down): Keynote's move plays with labels on top, over the export's baked still (the clip's frame 0, open item 2, unless the feed had already run). At settle the video resumes from the frame it showed when the move began. There is no restart, and the movie's clock is held for the move's 1.5 s.
 
 ### 2.2 (2) N carries per boundary, authored stacking
 - **Fed carries are unlimited per boundary.** The player draws them in slot order, so video-on-video overlap (the owner's sliver) renders as authored **in the move**. The settled re-home keeps that order once the slide settles.
-- **Overlay-ridden (unflagged) bridges keep the one-per-boundary guard** (`lc:1779-1780` as fixed by `87ab7240`, now counting only unflagged bridges). No deck qualifies two overlay rides at once, so B does not lift it.
+- **Overlay-ridden (unflagged) bridges keep the one-per-boundary guard** (post-C `lc:1836-1837` as fixed by `87ab7240`, now counting only unflagged bridges). Checked on post-C `lc` (scratch `critic-r2/r10.py`): with the lift and this counting, Alpha_DSK 5→6, 6→7 and 7→8 all carry, and R10 still applies and passes. No deck qualifies two overlay rides at once, so B does not lift it.
 - **Crossing rule (replaces rev 2's `zOrder`).** Two carries at one boundary may intersect in flight unless they are separated along a common axis, on the same side, at both ends (exact for linear edges under a shared progress; separation margin `_OVERLAP_MIN_PX`).
   - If they can cross and the destination settles into DOM → **both** become `under_artwork` (fed or poster-held; reason "crosses `<asset>`").
   - Otherwise the lower one (earlier destination slot) is refused `overlap`.
@@ -126,8 +162,8 @@ Status: **DRAFT rev 3 (2026-10-13), planning only.**
   - **P2, p2-loop and D1–D6 stay byte-identical.** Their plan-sha tests must pass unedited; that is B's regression oracle after S3.
     - P2's 1→2 destination is click-driven.
     - D1–D6 have no artwork overlap.
-    - D3's pin+bridge pair is x-separated.
-  - These plans inject no module and run no new core branch.
+    - D3's pin+bridge pair is x-separated (pin x 100–900, bridge x 1020→1100). It is the only D-deck boundary with two carries, so the crossing rule changes nothing there.
+  - These plans inject no module and run no new core branch. The plan sha hashes the runtime JSON only (post-C `lc:672-675`, `:831`), so the core version and sha bumps do not touch it.
 - **Plans that change:** the Minimal Alpha_DSK family (the `clip-10-1000001` pin becomes `underArtwork` under OQ-B2).
 - **Tests and corpus that change on purpose:**
   - Rev 2 §3 list.
@@ -139,17 +175,18 @@ Status: **DRAFT rev 3 (2026-10-13), planning only.**
 - `underArtwork`;
 - `feed` shape;
 - `feed_draws` / `artwork_above` shapes;
-- seam `feed` v1;
+- seam `feed` v1 (with `claim`);
+- `MM_FEED_MANAGED_OBS` and the `on` constructor mode;
 - `__OBED_MM_FEED__` fields;
 - variant names `overlay-ride`, `settle-on-stage`, `no-pause` (core) and `from-only` (feed);
 - probe tamper `--feed-tamper ordinal`.
 
 | WS | Files (exclusive) | Work | Minimal tests |
 |---|---|---|---|
-| D | `lc`, `tests/test_live_continuity.py`, `tests/test_live_continuity_decks.py`, `tests/fixtures/live_continuity/**` (trimmed Alpha p3–p8 JSON; S3 corpus edits) | settle-into-DOM lift, crossing rule, guard counting, `feed` binding for the served variant, probe facts | (1) the Alpha fixture derives the expected entries and `feed` (draw/ordinals/sizes equal the experiment's measured 5/9/12 draws, uploads explained); (2) parametrised overlap: settling → `underArtwork`, click-driven / extra event → `overlap`, R11 unchanged; (3) crossing → both flagged / lower refused |
-| R | `js`, `tests/test_live_continuity_js.py`, `scripts/continuity_core_variants.py` (+ test), re-pins in `tests/test_live_gl_replay_js.py`, `scripts/detach_experiment.py`, `tests/test_detach_experiment.py` | hidden ride, poster hold pause/resume and keep-warm exemption, settle re-home, seam, versions, 3 variants | Node: (1) a fed bridge never paints during the move and lands in the poster layer, with no `src` on the stub; (1b) a held plain-bridge overlay → `underArtwork` lands in the layer; (2) poster hold: paused at departure, not re-played by keep-warm, resumes at the paused time; (3) stand-down mid-move → pause |
-| F | **new** `src/obed_edom/live_mm_feed_js.py`, **new** `tests/test_live_mm_feed_js.py`, **new** `scripts/mm_feed_variants.py` | the module (§2.1), warm-up, telemetry, `from-only` | Node with a fake GL: binding accept/refuse (ordinal, size, unit, no `mixFactor`), identity re-key, state restored, two fed leaves in one frame, from-only leaf, `getContext` chain with G2 |
-| H | `host`, `tests/test_live_host.py` (incl. its core-sha re-pin) | `_resolve_mm_feed`, env/flag, output fields, `posterHold` reporting | (1) attach → `unavailable` + poster hold; (2) injected only with a `feed` key |
+| D | `lc`, `tests/test_live_continuity.py`, `tests/test_live_continuity_decks.py`, `tests/fixtures/live_continuity/**` (trimmed Alpha p3–p8 JSON; S3 corpus edits) | settle-into-DOM lift, crossing rule, guard counting, `feed` binding for the served variant, probe facts | (1) the Alpha fixture derives the expected entries and `feed` (draws and regular ordinals/sizes equal the experiment's: 5/9/12 draws; 7/12/17 regular uploads); (2) parametrised overlap: settling → `underArtwork`, click-driven / extra event → `overlap`, R11 unchanged; (3) crossing → both flagged / lower refused |
+| R | `js`, `tests/test_live_continuity_js.py`, `scripts/continuity_core_variants.py` (+ test), re-pins in `tests/test_live_gl_replay_js.py`, `scripts/detach_experiment.py`, `tests/test_detach_experiment.py` | hidden ride, poster hold pause/resume and keep-warm exemption, settle re-home, seam, versions, 3 variants | Node: (1) a fed bridge never paints during the move and lands in the poster layer, with no `src` on the stub; (1b) a held plain-bridge overlay → `underArtwork` lands in the layer; (2) poster hold: paused at departure **including stash's play-then-remount order**, not re-played by keep-warm or `tryRemount`, resumes at the paused time; (3) stand-down mid-move → pause; (4) claimed → keeps playing, unclaimed with a `feed` key → poster hold; (5) overlay bridge → `underArtwork` pin hands off hidden |
+| F | **new** `src/obed_edom/live_mm_feed_js.py`, **new** `tests/test_live_mm_feed_js.py`, **new** `scripts/mm_feed_variants.py` | the module (§2.1), warm-up, telemetry, `from-only` | Node with a fake GL: binding accept/refuse (ordinal, size, unit, `mixFactor` present/absent per `to`), claim at idle, identity re-key, state restored, two fed leaves in one frame, from-only leaf, `getContext` chain with G2 |
+| H | `host`, `tests/test_live_host.py` (incl. its core-sha re-pin) | `_resolve_mm_feed`, env/flag, output fields, `posterHold` reporting | (1) attach → `unavailable` + poster hold, even with `on`; (2) injected only with a `feed` key; (3) managed OBS: `auto` → `unavailable` until the constant flips, `on` → injected |
 | G | `probe`, `tests/test_live_continuity_probe.py`, `scripts/run_gates.sh`, **new** `scripts/mm_feed_instrument.py` (probe-only in-frame GL reader, from `glfeed/instrument.js`), `scripts/managed_obs_qualify.py` + its test | verdicts and arms (§5.2), registrations | scorer units for each new verdict (pass/fail/inconclusive); registrations as data |
 | P | `README.md`, `.agents/skills/obed-edom/SKILL.md` | "What is carried" (feed, poster hold, N carries); contract keys; module table | — |
 
@@ -160,7 +197,7 @@ Full suites on 3.12 (`uv run pytest tests/ -n auto --dist loadfile`, `npm run te
 ### 5.1 What reopens, precisely
 - **Core bytes change, so §4's rule reopens Q2–Q6.** P2, p2-loop and D1–D6 run none of the new branches and inject no module. Their verdict tables must **equal S3's**, which is a regression check, not new qualification.
 - **The new module is qualified only where it is injected:** D7, D7s and Alpha_DSK in Q3, the new Q6 feed arm, and Q7.
-- **G2 bytes are unchanged.** Q4 reruns only because the seam object gained a sibling.
+- **G2 bytes are unchanged.** Q4 reruns only because the core bytes changed. G2 decks have no `feed` key, so their seam object is unchanged.
 
 ### 5.2 Decks
 - D7 and D7s keep rev 2's geometry and draw order (A, B, TA solid green, TB white 61 %, DV), and every movie starts After Transition.
@@ -174,12 +211,21 @@ Full suites on 3.12 (`uv run pytest tests/ -n auto --dist loadfile`, `npm run te
 
 ### 5.3 Gates and verdicts
 **New verdicts (WS-G):**
-- **`feedLive`** (per fed carry, read in frame at progress 0.25/0.5/0.75): a readPixels patch at the leaf's projected centre (MVP from the draw), compared with the decoder's frame at that tick.
-  - D7/D7s: the decoded counter must equal the decoder's frame ±1.
-  - Alpha: closer to the live frame than to the poster (`tP < 0.5`), INCONCLUSIVE when live and poster do not differ (wa0121's bright poster).
+- **`feedLive`** (per fed carry, read in frame at progress 0.25/0.5/0.75, single run):
+  - The patch lies inside the fed leaf's projected quad (MVP from the draw) and is **not covered by any later draw's quad** (grow 2 px).
+  - The reference is the decoder drawn into a canvas at the leaf texture's size **in the same task**, sampled over the patch's UV footprint.
+  - D7/D7s: the decoded counter must equal the reference's counter ±1.
+  - Alpha: green when dV ≤ dP/2, where dP is the export poster over the same footprint. INCONCLUSIVE when dP is below a floor.
+    - Register the floor by re-scoring `run2-cmp/direct`: all 9 reads must score green or inconclusive.
+    - The rev 3 centre-patch rule scores 6→8 at 0.5 as tP 0.556 (dV 13.1, dP 10.5) on a working feed. 9→10 wa0121 at 0.75 reads a label box over the centre (dV 13.1).
   - Plus a max inter-feed gap under the paint-coverage rule (slower side's cadence), which catches the 357 ms stall.
-- **`noRiderAboveCanvas`:** on every rAF of a fed or poster-held move, no carried decoder composites above the GL canvas (`opacityProduct > 0.02`, visible, intersecting).
-- **`labelsOverFeed`:** for each label-box draw over a fed leaf, the median k inside a single leaf's quad is within ±0.02 of 1−opacity. Draw 7 on 9→10 stays excluded until explained.
+- **`noRiderAboveCanvas`:** on every rAF of a fed or poster-held move, no carried decoder composites while it intersects the GL canvas (`opacityProduct > 0.02`, visible). The player hides the source layers during the move, so any compositing decoder is above the canvas.
+- **`labelsOverFeed`:** for each label-box draw over a fed leaf, computed in frame from a single run.
+  - Read under = `readPixels` just before the label draw, and final = after the frame's last draw.
+  - Use the box's pixels inside its quad (grow −3) that are not covered by later quads (grow 2).
+  - k = the least-squares slope of final on under. It must be within ±0.02 of 1−opacity. INCONCLUSIVE when the spread of under is below 24.
+  - The rev 3 cross-arm k (`analyze.py:97-123`) needs a paired off-arm frame at identical geometry, which exists only under the virtual clock.
+  - Draw 7 is included (limit 6). The uncovered k measured 0.388–0.390 against an expected 0.388.
 - **`posterHold`:** for a poster-held carry, the clock is still for the move, resumes within 1 frame of the pause point, and does not go back to 0. It replaces the carry verdict's stall rule for that entry only.
 - **`artworkAbove`** (settled, rev 2): unchanged.
 
@@ -187,11 +233,11 @@ Full suites on 3.12 (`uv run pytest tests/ -n auto --dist loadfile`, `npm run te
 |---|---|---|---|
 | Q1 | Suites | green | — |
 | Q2 | P2 `run_gates` fast/slow/auto | equal to S3's table | existing |
-| Q3 | Host probe ×3 viewports, arms A/B/C, attach, V/Voff/Vgl, Pass G; P2 + D1–D6 (equal to S3) + D7, D7s, Alpha_DSK; plus an MM-opacity-off arm on Alpha | all verdicts; attach arm scored with poster-hold facts | `feed-off` (`--mm-feed off`) → `feedLive` red; the same capture scored as poster hold is green. `from-only` → `feedLive` red at the 0.75 read only. `overlay-ride` → `noRiderAboveCanvas` + `labelsOverFeed` red. `settle-on-stage` → `artworkAbove` red. `no-pause` under feed-off → `posterHold` red (~1.5 s jump). `--feed-tamper ordinal` → stand-down note, `feedLive` red, `posterHold` green (proves binding fails closed). MM-opacity off → `labelsOverFeed` red (boxes solid). `--strip bridge@14:movie2` → only wa0121 b7to8 red |
+| Q3 | Host probe ×3 viewports, arms A/B/C, attach, V/Voff/Vgl, Pass G; P2 + D1–D6 (equal to S3) + D7, D7s, Alpha_DSK; plus an MM-opacity-off arm on Alpha | all verdicts; attach arm scored with poster-hold facts | `feed-off` (`--mm-feed off`) → `feedLive` red; the same capture scored as poster hold is green. `from-only` (scored on D7/D7s only) → `feedLive` red at the 0.5 and 0.75 reads, green at 0.25. On Alpha the run1 `from` arm read 0.75 green and 0.5 red. `overlay-ride` → `noRiderAboveCanvas` red only; `labelsOverFeed` stays green, since it reads the GL buffer, which a DOM overlay does not touch. `settle-on-stage` → `artworkAbove` red. `no-pause` under feed-off → `posterHold` red (~1.5 s jump). `--feed-tamper ordinal` → stand-down note, `feedLive` red, `posterHold` green (proves binding fails closed). MM-opacity off → `labelsOverFeed` red (boxes solid). `--strip bridge@14:movie2` → only wa0121 b7to8 red |
 | Q4 | G2 seam (Vgl, `--gl-force-fail` ×4) | as S2 | `--gl-force-fail` |
 | Q5 | Loop L1 (+ L2 per rule, OQ-B5) | as S2 | as S2 |
-| Q6 | Managed OBS arms at 25/30 + **new `feed` arm** (Alpha 6→8, 9→10 in CEF) + `feed-off` poster-hold arm (owner's go) | M1–M6; feed verdicts green in CEF | OD-2 `--kb` arms; `feed-off` |
-| Q7 | Owner: managed OBS Keyer (feed) on D7, D7s, Alpha; external attach (poster hold) on Alpha; D1 spot | labels on top in the move and settled; no visible restart; poster hold as described | — |
+| Q6 | Managed OBS arms at 25/30 + **new `feed` arm** (constructor `mm_feed="on"`; Alpha 6→8, 9→10 in CEF) + `feed-off` poster-hold arm (owner's go); a pass flips `MM_FEED_MANAGED_OBS` | M1–M6; feed verdicts green in CEF | OD-2 `--kb` arms; `feed-off` |
+| Q7 | Owner: managed OBS Keyer (feed) on D7, D7s, Alpha; external attach (poster hold) on Alpha; D1 spot | labels on top in the move and settled; no visible restart; poster hold as described; the midtone step at departure and settle is acceptable | — |
 
 ## 6. Sequencing
 - **Order: C (#264) → S3 → B.**
@@ -211,6 +257,7 @@ Full suites on 3.12 (`uv run pytest tests/ -n auto --dist loadfile`, `npm run te
 
 ## 8. Residuals (README)
 - Poster hold shows the export's baked still (frame 0) during the move when the feed never ran (external attach).
+- A fed move shows a small midtone brightness step at departure and settle (the native `<video>` tone curve, as G2).
 - Overlay-ridden carries with no artwork overlapping them on the destination still paint above artwork they cross mid-flight, and follow R10 eased interpolation.
 - One overlay bridge per boundary.
 - Overlap on click-driven or multi-build destinations stays refused.
