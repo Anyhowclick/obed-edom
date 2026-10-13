@@ -105,8 +105,6 @@ from obed_edom.maps_reveal import REVEAL_FPS, reveal_movie_fingerprint
 from obed_edom.maps_movie import movie_path
 from obed_edom.web.jobs import Job
 
-from scripts.probe_maps_shared_plate import build_probe, main as probe_main
-
 
 def _camera(lat: float, lon: float, zoom: float = 8.0, bearing: float = 0.0) -> dict:
     return {"lat": lat, "lon": lon, "zoom": zoom, "bearing": bearing, "pitch": 0.0}
@@ -1308,27 +1306,6 @@ def test_inspect_keynote_terminates_blocked_jxa_when_cancelled(monkeypatch, tmp_
     assert not thread.is_alive()
     assert proc.terminated
     assert result == ["Export cancelled."]
-
-
-def test_probe_dry_run_prints_script(tmp_path: Path, capsys):
-    code = probe_main(["--dry-run", "--out", str(tmp_path / "probe")])
-    assert code == 0
-    printed = capsys.readouterr().out
-    assert 'tell application id "' in printed
-    assert 'tell application "Keynote"' not in printed
-    assert "with timeout of 3600 seconds" in printed
-    assert "duplicate slide" in printed
-    assert "set theDoc to document 1" in printed
-    assert "set position of image 1 to" in printed
-    assert "set width of image 1 to" in printed
-    assert "magic move" in printed
-    dest, script_path, script = build_probe(tmp_path / "probe")
-    assert script_path.is_file()
-    assert MAP_BG_RE.search(script)
-    built = build_shared_plate_probe_script(dest, tmp_path / "probe" / "map BG_probe.png")
-    assert "file:imgFile" in built
-    assert "set position of image 1 to" in built
-    assert "set width of image 1 to" in built
 
 
 def test_plan_deck_morph_duplicates(tmp_path: Path):

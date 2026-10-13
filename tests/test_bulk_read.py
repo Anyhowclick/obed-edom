@@ -328,7 +328,7 @@ def test_legacy_cross_serves_offline_and_jxa_readers_alike(cached_deck, monkeypa
 
 # --- bulk_geometry(): keep_open plumbing + default close behaviour for other
 # callers (offline_write.py, remap_keynote.py, offline_inspect.py's non-folded
-# path, scripts/probe_nested_bulk.py) -----------------------------------------
+# path) ---------------------------------------------------------------------------
 
 
 def _capture_bulk_plan(monkeypatch, *, kept_open: bool):

@@ -1,9 +1,12 @@
 # Dissolve cross-fade — follow-ups (handover)
 
-**2026-10-12.** Patch: `claude/keynote-live-dissolve-crossfade`, plan `.agents/plans/keynote_live_dissolve_crossfade.plan.md`
+**2026-10-12; landed in #262 (`c6f37e5e`) 2026-10-13.** Patch: `claude/keynote-live-dissolve-crossfade`, plan `.agents/plans/keynote_live_dissolve_crossfade.plan.md`
 (rev 17, cited as §n). It ships D1–D4 under `mm_opacity` (§0, §4); the movie freeze only on the host-launched, qualified
 Chrome (`LiveOutputHost`, Chrome 154, GPU compositing; §3.3, decision 15). Everything below is deliberately **not** in that PR.
-Evidence: main checkout `output/evidence/s2-dev/dissolve-alpha-2026-10-11/` (git-ignored).
+Evidence kept (main checkout, git-ignored, pruned 2026-10-13): `output/evidence/s2-dev/dissolve-alpha-2026-10-11/` —
+`q0b-2026-10-11/runs/decision_record_q0b1.json` (the `--decision` input of every DX run), `dx1-2026-10-12/dx1_paced.py` (the
+load-paced DX-1 runner), `cef-frac-2026-10-12/` and `q0bbis-2026-10-12/` (README, results, probe scripts: CEF placement and
+W5), `hidpi-2026-10-12/` (README, scripts: scaled stages). Everything else was removed.
 
 ## CEF/OBS placement — follow-up PR (decision 15; §13.1)
 
@@ -23,7 +26,7 @@ Today managed OBS/CEF keeps the movie jump (`output.placement.reason = "attached
 
 ## Open review items not folded (GPT-6 Astra r13 on rev 17; owner: no rev 18, discover after implementation)
 
-Source: `.agents/reviews/dissolve-crossfade/plan-astra-r13.md`. Check each against the implemented bytes before the PR.
+Source: GPT-6 Astra r13 on rev 17 (plan §14). Both remain open in the merged bytes.
 - **r13 #1 — raw/preview forgery (major).** Raw export and Build Preview have no host channel, so page code assigning
   `window.__obedPlacement = "snap"` (or a non-configurable getter returning it) on an unqualified engine (e.g. a manually
   configured CEF source) enables the freeze with Chrome's snapped rule. Proposed fix: no executable freeze entry point outside
@@ -37,7 +40,7 @@ Source: `.agents/reviews/dissolve-crossfade/plan-astra-r13.md`. Check each again
 
 `Q` = `["bt709/bt709/bt709/false"]` · `L` = identity (owner decision 10, §12; §3.2 "Tone"). Q0b 1 found software compositing
 (`--disable-gpu`) live == snapshot for the same tagged tuple, while GPU compositing carries the `BT709_APPLE` step (mid-grey
-128 → 139), so the tuple cannot select `L` (§1.4; `keynote-live-dissolve-crossfade-2026-10-12.md`). The GPU mid-tone step at
+128 → 139), so the tuple cannot select `L` (§1.4). The GPU mid-tone step at
 the freeze is a known limit; Q5 stays open until W5 reports.
 
 ## W5 — host-side compositing-path calibration feasibility (non-blocking; needed before Q5 closes)
@@ -83,3 +86,17 @@ show:" already names the G2 step). A qualified `L` (W5 go plus owner decision) c
 
 Other CSS transitions the player special-cases and smart/action builds (0 on disk today; fill-less behaviour unknown):
 a separate PR with an owner Q-deck (owner decision 3, §12; §5 table; §13 out of scope).
+
+## Qualification — re-running the gates, and what is still INCONCLUSIVE
+
+- **Re-run** (unsandboxed, on AC power — battery + Low Power Mode throttles capture below the mid-frame minimum; send "need
+  window" to peer sessions first; keep the raw run dirs until any review of them closes). From a worktree pinned to the commit
+  under test, with `D=<that worktree>`, `E=<main>/output/evidence/s2-dev/dissolve-alpha-2026-10-11`:
+  - DX-1: `PYTHONPATH=$D/src <main>/.venv/bin/python $E/dx1-2026-10-12/dx1_paced.py <out> <scratch> $E/q0b-2026-10-11/runs/decision_record_q0b1.json grant-chrome,grant-attach,channel-predefined,life-grant-reload,opaque-off,off,noblend,on,on2,m-paused,m-off,m-on,m-hold,m-raw,m-raw-prod,m-preview-prod`,
+    then `scripts/dissolve_probe.py --score <out> --decision <same>`. It waits for load < 3.5 per arm; an arm INCONCLUSIVE only
+    for capture coverage ("N mid frames < 6") is retired (move its run dir out) and re-run.
+  - DX-2: `scripts/managed_obs_qualify.py --arm dissolve --out <out> --decision <same>` (`--score` does not re-score dissolve
+    sessions; call `managed_obs_qualify.dissolve_gates` on the saved run instead).
+- **DX-1 checks outside the F3 scope, still INCONCLUSIVE at merge:** reference capture ("null timing while paused": all
+  `m-snap*`, `m-tone`), the DPR arms (window opens 1920×993), `m-geo*`, `life-*`, cut, `overlay` (`m-bridge-off` is the S2
+  bridge, item (a)). Never dry-run: `m-geo-*`, hide rows (need per-frame screencast cadence), D2, `m-tone-twin`, the crop A/B.

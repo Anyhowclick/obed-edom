@@ -1,10 +1,10 @@
 # Dissolve and cut over fill-less slides: a true cross-fade, a clean cut, and movies that freeze and fade
 
-**rev 17 — decision 15 (split: Chrome host only in this PR), for owner review**, 2026-10-12. Rev 1: Opus planner (`8e572864`). Critique r1–r7: GPT-6 Astra
+**rev 17 — decision 15 (split: Chrome host only) — LANDED in #262 (`c6f37e5e`, 2026-10-13).** Open items: `.agents/handovers/keynote-live-dissolve-crossfade-followups.md`. Raw review rounds and most evidence were removed after the merge; the evidence paths below are provenance only (the kept set is listed in the follow-ups handover). Written 2026-10-12. Rev 1: Opus planner (`8e572864`). Critique r1–r7: GPT-6 Astra
 high via Codex (not Opus; owner 2026-10-11), 12 + 7 + 11 + 7 + 6 + 4 + 3 findings, all folded (§14). Revs 2–9: Opus planner
 (`cd289a05`, `f3bd8b55`, `4ffcd8ad`, `e5c644bb`, `218308c3`, `cacfe9fb`, `d299b549`, rev 9 = owner GO 2026-10-11 22:10, W1–W4
 implemented on this branch up to `fbe105e0`). Rev 10: Opus planner, after Q0b's five re-plan triggers, the Astra xhigh advisory
-(`.agents/reviews/dissolve-crossfade/replan-astra-xhigh.md`) and owner decisions 8–11 (2026-10-12, §12); rev 10 = `891e4f40`. Rev 11:
+(§14 Rev 10) and owner decisions 8–11 (2026-10-12, §12); rev 10 = `891e4f40`. Rev 11:
 Opus planner, folding GPT-6 Astra r8 on rev 10 (9 findings, CHANGES REQUIRED; §14) and decision 12 (made, then reversed the
 same day; §12); rev 11 = `b4ff2576`. Rev 12: Opus planner, folding GPT-6 Astra r9 on rev 11 (3 false admissions + 1 wording;
 §14). Rev 13: Opus planner, adopting the hi-DPI investigation's fix A (owner decision 12, resolved ~11:45; §12); rev 13 = `54000459`.
@@ -1150,7 +1150,7 @@ Moved out of this PR. The full design is rev 16's §3.3 (`41ef609b`) and §9 (r1
 
 ## 14. Critique log
 
-Raw rounds: `.agents/reviews/dissolve-crossfade/plan-astra-r{1,…,7}.md`. r1–r5 (12, 7, 11, 7, 6): folded, rows in `4ffcd8ad` /
+Raw rounds were removed at merge (git history before `c6f37e5e`). r1–r5 (12, 7, 11, 7, 6): folded, rows in `4ffcd8ad` /
 `e5c644bb` / `218308c3` / `cacfe9fb` §14. r6 (4, on rev 7) and the first real-DOM probe, folded in `d299b549` §14: UA
 `overflow: clip` leaves, viewport-propagated `body` overflow, the paint gate, `preserve-3d` build wrappers. Owner answers: §12.
 
@@ -1258,3 +1258,13 @@ Raw rounds: `.agents/reviews/dissolve-crossfade/plan-astra-r{1,…,7}.md`. r1–
 | 2 | major / grant lifecycle (grant before eligibility) | Folded into W6: eligibility first; one context-bound grant/read/revoke/read evaluate, revoke in `finally`; then commit | `live_host.py` |
 | 3 | medium / lifecycle (lease-drop residual understated) | Ignored (≤ medium); residual restated in decision 16 | §12 |
 | g | W6 transport | Folded into W6: context tracking, `uniqueContextId` evaluate, browser-target `SystemInfo`, deferred grant work | `live_host.py` |
+
+### Implementation reviews — GPT-6 Astra high (Codex), F3 scope
+
+- W1 r1–r6 (stub-DOM mutation hunting, fixed by class), W2/W3 r1–r5, rev-12 W1 r1–r2 and W2/W3 r1–r3: folded; rev 17 impl r1
+  on the whole diff (major/blocker only): **APPROVE** (`ac008f88`).
+- Post-APPROVE harness/scorer diff (`2b77681a..9c00e529`, scripts + tests only), 2026-10-13: r1–r3 (mediums allowed by the
+  owner) found 3 mediums, all folded — pending curve records unvalidated (`9c283f78`), a late pending reset skipped
+  (`32f36c35`), a pre-start rAF gap judged only by its end (`f8058937`); r4 APPROVE; live DX-2 then showed the r3 fold rejected
+  the stock-player controls (incoming leaf unanimated at 1), corrected by `9c00e529` (the gap starts at the pending record's own
+  opacities); r5 (major/blocker only) APPROVE.
