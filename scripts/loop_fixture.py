@@ -19,7 +19,6 @@ import shutil
 import sys
 from pathlib import Path
 from typing import Any, Iterator
-from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
@@ -205,26 +204,17 @@ def read_manifest(source: Path) -> dict[str, Any] | None:
 
 
 def plan_shas(export_root: Path) -> dict[str, str]:
-    """Both flag states' runtime-plan shas, whether or not the allowlist admits them yet."""
+    """Both flag states' runtime-plan content signatures."""
     slides = load_slides(export_root)
-    real = live_continuity.plan_signature
     shas: dict[str, str] = {}
     for name, gl in (("off", False), ("on", True)):
-        seen: list[str] = []
-
-        def record(runtime: dict[str, Any]) -> str:
-            seen.append(real(runtime))
-            return seen[-1]
-
         plan = live_continuity.derive_plan(export_root, slides, resolver=_resolve, gl_replay=gl)
         if isinstance(plan, live_continuity.Unsupported):
             raise FixtureError(f"{export_root.name} does not derive (gl_replay={gl}): {plan.reason}")
-        with mock.patch.object(live_continuity, "plan_signature", record):
-            runtime = plan.to_runtime()
-        if len(seen) != 1:
-            reason = runtime.reason if isinstance(runtime, live_continuity.Unsupported) else "signature not taken once"
-            raise FixtureError(f"{export_root.name} runtime has no signature (gl_replay={gl}): {reason}")
-        shas[name] = seen[0]
+        runtime = plan.to_runtime()
+        if isinstance(runtime, live_continuity.Unsupported):
+            raise FixtureError(f"{export_root.name} runtime does not derive (gl_replay={gl}): {runtime.reason}")
+        shas[name] = live_continuity.plan_signature(runtime)
     return shas
 
 

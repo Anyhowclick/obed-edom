@@ -711,10 +711,10 @@ def test_deck_qualification_reports_continuity_and_conversions_without_starting_
 def test_unsupported_continuity_is_reported_and_never_blocks_start(tmp_path, monkeypatch, continuity):
     client, claims, _, _, adapters, _ = client_for(tmp_path, monkeypatch)
     monkeypatch.delenv('OBED_LIVE_CONTINUITY', raising=False)
-    monkeypatch.setattr(live, 'derive_runtime', lambda *args, **kwargs: live.Unsupported('outside the measured allowlist'))
+    monkeypatch.setattr(live, 'derive_runtime', lambda *args, **kwargs: live.Unsupported("R3: slide 2's transition is not on its last event"))
     report = client.get('/api/live/decks/prepared/qualification').json()
     assert report['qualified'] is True
-    assert report['continuity'] == {'mode': 'unsupported', 'reason': 'outside the measured allowlist', 'notCarried': []}
+    assert report['continuity'] == {'mode': 'unsupported', 'reason': "R3: slide 2's transition is not on its last event", 'notCarried': []}
     response = client.post('/api/live', json={'previewJobId': 'prepared', 'continuity': continuity})
     assert response.status_code == 200
     assert response.json()['outputVisible']

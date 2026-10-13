@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import json
 import shutil
 from dataclasses import replace
@@ -48,28 +47,28 @@ def _plan(root: Path, uuids: list[str]) -> ContinuityPlan | Unsupported:
     return derive_plan(root, _slides(uuids), resolver=_resolver)
 
 
-NOT_YET_QUALIFIED = "deck shape is not yet qualified for continuity (only gate-measured plans are)"
-
 MINIMAL_UUIDS = _slide_list(MINIMAL_ROOT)
 POSITIVE_UUIDS = _slide_list(POSITIVE_ROOT)
 LOOP_UUIDS = _slide_list(LOOP_ROOT)
 
 
 @pytest.mark.parametrize(
-    "slice_, actions, refusals",
-    [pytest.param((0, 2), ["pin"], 0, id="S4-to-S5-pins-with-no-refusal"), pytest.param((2, 4), ["pin", "pin"], 1, id="S6-to-S7-two-pins-one-refusal")],
+    "slice_, actions, refusal_codes, runtime_actions",
+    [
+        pytest.param((0, 2), ["pin"], [], ["pin"], id="S4-to-S5-pins-with-no-refusal"),
+        pytest.param((2, 4), ["pin", "pin"], ["overlap"], ["retire", "pin"], id="S6-to-S7-two-pins-one-refusal"),
+    ],
 )
-def test_minimal_pins_unqualified(slice_, actions, refusals):
+def test_minimal_pins_derive_a_runtime(slice_, actions, refusal_codes, runtime_actions):
     start, end = slice_
     plan = _plan(MINIMAL_ROOT, MINIMAL_UUIDS[start:end])
     assert isinstance(plan, ContinuityPlan)
-    if refusals:
-        assert len(plan.refusals) == refusals
-    else:
-        assert plan.refusals == ()
     movies = plan.boundaries[0].as_dict()["movies"]
     assert [m["action"] for m in movies] == actions
-    assert plan.to_runtime() == Unsupported(NOT_YET_QUALIFIED)
+    runtime = plan.to_runtime()
+    assert isinstance(runtime, dict)
+    assert [entry["action"] for entry in runtime["boundaries"]] == runtime_actions
+    assert [refusal["code"] for refusal in plan.refusals] == refusal_codes
 
 
 def test_minimal_s4_to_s5_gl_replay_keyword():
@@ -117,7 +116,10 @@ def test_positive_control_actions_and_to_runtime():
         if boundary.as_dict()["movies"]
     ]
     assert actions == ["pin", "bridge", "restart", "restart"]
-    assert plan.to_runtime() == Unsupported(NOT_YET_QUALIFIED)
+    runtime = plan.to_runtime()
+    assert isinstance(runtime, dict)
+    assert [entry["action"] for entry in runtime["boundaries"]] == ["pin", "bridge", "restart"]
+    assert plan.refusals == ()
 
 
 @pytest.mark.parametrize(
@@ -237,20 +239,10 @@ LOOP_S4_TO_S5_REASON = (
 )
 
 
-def _signed_runtime(monkeypatch, plan: ContinuityPlan) -> tuple[dict | Unsupported, dict]:
-    """`to_runtime()` and the runtime dict it signed (withheld when unqualified)."""
-    signed: list[dict] = []
-    real_signature = live_continuity.plan_signature
-
-    def recording(runtime):
-        signed.append(copy.deepcopy(runtime))
-        return real_signature(runtime)
-
-    monkeypatch.setattr(live_continuity, "plan_signature", recording)
-    result = plan.to_runtime()
-    monkeypatch.setattr(live_continuity, "plan_signature", real_signature)
-    assert len(signed) == 1, signed
-    return result, signed[0]
+def _runtime(plan: ContinuityPlan) -> dict:
+    runtime = plan.to_runtime()
+    assert isinstance(runtime, dict)
+    return runtime
 
 
 def _drop_loop_mode(tmp_path: Path, uuid: str) -> Path:
@@ -271,20 +263,19 @@ def test_loop_fixture_is_keynotes_one_key_per_slide():
         assert raw.count('"loopMode":"looping"') == 1
 
 
-def test_loop_s4_to_s5_pins_with_no_refusal_and_a_looping_entry(monkeypatch):
+def test_loop_s4_to_s5_pins_with_no_refusal_and_a_looping_entry():
     """L0-a: both sides loop, so the pin carries exactly as the non-looping deck's does, with
-    `loop: true` on its entry; the runtime stays unqualified."""
+    `loop: true` on its entry."""
     plan = _plan(LOOP_ROOT, LOOP_UUIDS)
     assert isinstance(plan, ContinuityPlan)
     assert plan.refusals == ()
     movies = plan.boundaries[0].as_dict()["movies"]
     assert [(m["action"], m["loop"]) for m in movies] == [("pin", True)]
-    result, runtime = _signed_runtime(monkeypatch, plan)
-    assert result == Unsupported(NOT_YET_QUALIFIED)
+    runtime = _runtime(plan)
     assert [(b["action"], b["loop"]) for b in runtime["boundaries"]] == [("pin", True)]
 
 
-def test_loop_s4_to_s5_differs_from_the_non_looping_deck_only_in_loop(monkeypatch):
+def test_loop_s4_to_s5_differs_from_the_non_looping_deck_only_in_loop():
     """Plan F1: the loop is the only difference on these two slides."""
     looping = _plan(LOOP_ROOT, LOOP_UUIDS)
     plain = _plan(MINIMAL_ROOT, MINIMAL_UUIDS[0:2])
@@ -294,8 +285,8 @@ def test_loop_s4_to_s5_differs_from_the_non_looping_deck_only_in_loop(monkeypatc
         plain.boundaries[0], movies=tuple(replace(m, loop=True) for m in plain.boundaries[0].movies)
     )
     assert plain.loop_instances == {}
-    _, looping_runtime = _signed_runtime(monkeypatch, looping)
-    _, plain_runtime = _signed_runtime(monkeypatch, plain)
+    looping_runtime = _runtime(looping)
+    plain_runtime = _runtime(plain)
     assert "loops" not in looping_runtime
     assert looping_runtime == {
         **plain_runtime, "boundaries": [{**b, "loop": True} for b in plain_runtime["boundaries"]],
@@ -303,7 +294,7 @@ def test_loop_s4_to_s5_differs_from_the_non_looping_deck_only_in_loop(monkeypatc
 
 
 @pytest.mark.parametrize("dropped", [0, 1], ids=["S4-plain", "S5-plain"])
-def test_loop_removed_on_one_side_refuses_the_pin(tmp_path, monkeypatch, dropped):
+def test_loop_removed_on_one_side_refuses_the_pin(tmp_path, dropped):
     """L0-b / R4: a loop difference across the carried pair refuses that boundary, which
     becomes a `retire` of the source instance."""
     root = _drop_loop_mode(tmp_path, LOOP_UUIDS[dropped])
@@ -312,8 +303,7 @@ def test_loop_removed_on_one_side_refuses_the_pin(tmp_path, monkeypatch, dropped
     [refusal] = plan.refusals
     assert (refusal["reason"], refusal["code"]) == (LOOP_S4_TO_S5_REASON, "R4")
     assert set(refusal) == {"fromPlayer", "toPlayer", "atScene", "asset", "movieKey", "reason", "code", "objectId"}
-    result, runtime = _signed_runtime(monkeypatch, plan)
-    assert result == Unsupported(NOT_YET_QUALIFIED)
+    runtime = _runtime(plan)
     assert [(b["atScene"], b["action"], b["reason"]) for b in runtime["boundaries"]] == [(2, "retire", "refused")]
     assert runtime["boundaries"][0]["src"]["objectId"] == refusal["objectId"]
 
@@ -339,7 +329,7 @@ def test_loop_fixture_is_the_owner_exports_bytes():
 
 
 @pytest.mark.skipif(not SOAK_LOOP_REAL_ROOT.is_dir(), reason="owner loop export not available")
-def test_loop_fixture_parity_with_the_owner_export_slice(monkeypatch):
+def test_loop_fixture_parity_with_the_owner_export_slice():
     """L0-e: the committed slice derives exactly what the owner's export derives for S4-S5."""
     real = _plan(SOAK_LOOP_REAL_ROOT, LOOP_UUIDS)
     fixture = _plan(LOOP_ROOT, LOOP_UUIDS)
@@ -347,9 +337,8 @@ def test_loop_fixture_parity_with_the_owner_export_slice(monkeypatch):
     assert isinstance(fixture, ContinuityPlan)
     assert real.as_dict() == fixture.as_dict()
     assert real.loop_instances == fixture.loop_instances
-    real_result, real_runtime = _signed_runtime(monkeypatch, real)
-    fixture_result, fixture_runtime = _signed_runtime(monkeypatch, fixture)
-    assert real_result == fixture_result == Unsupported(NOT_YET_QUALIFIED)
+    real_runtime = _runtime(real)
+    fixture_runtime = _runtime(fixture)
     assert real_runtime == fixture_runtime
 
 
@@ -432,10 +421,9 @@ def test_s0_deck_derives_the_contract_example(deck, gl_replay):
 
 @pytest.mark.parametrize("deck", sorted(QUAL_PLAN_SHA256))
 @pytest.mark.parametrize("gl_replay", [False, True])
-def test_s0_deck_runtime_is_pinned_and_allowlisted(deck, gl_replay):
+def test_s0_deck_runtime_is_pinned(deck, gl_replay):
     runtime = _qual_runtime(deck, gl_replay=gl_replay)
     assert live_continuity.plan_signature(runtime) == QUAL_PLAN_SHA256[deck]
-    assert QUAL_PLAN_SHA256[deck] in live_continuity.QUALIFIED_PLAN_SHA256
 
 
 def test_d2_restarts_after_a_bridge_and_starts_a_new_chain():
@@ -500,7 +488,7 @@ def test_d2_across_derives_exactly_as_d2():
 
 
 def test_d2_with_its_dissolve_exported_as_none_signs_the_same_plan(tmp_path):
-    """A mid-deck `none` cut derives exactly as the Dissolve it replaces, so D2's allowlisted sha
+    """A mid-deck `none` cut derives exactly as the Dissolve it replaces, so D2's pinned sha
     is unchanged (no S0 deck has a mid-deck `none`)."""
     root = tmp_path / "D2"
     shutil.copytree(QUAL_ROOT / "D2", root)
