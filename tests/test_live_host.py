@@ -1362,14 +1362,16 @@ def test_continuity_without_refusals_reports_no_not_carried(tmp_path, monkeypatc
     assert "notCarried" not in output.output["continuity"]
 
 
-def test_possibly_masked_movie_is_unsupported_with_no_continuity_script(tmp_path, monkeypatch):
+def test_possibly_masked_movie_is_not_carried_with_r11(tmp_path, monkeypatch):
+    """Stage C scopes a possible mask to that movie's Magic Moves: the deck keeps
+    continuity, and the masked move is named as not carried with R11."""
     output = host_with_continuity(tmp_path, monkeypatch, masked=True)
+    monkeypatch.setattr(FakeCdp, "evaluate", continuity_ready_evaluate(FakeCdp.evaluate, [stage_geometry(1920, 1080, 0, 0, 1920, 1080)]))
     output.observe()
-    assert output._continuity_mode == "unsupported"
-    assert "possible mask" in output.output["continuity"]["reason"]
-    assert "masksToBounds" in output.output["continuity"]["reason"]
-    assert "notCarried" not in output.output["continuity"]
-    assert output._server.continuity_script == ""
+    assert output._continuity_mode == "qualified"
+    not_carried = output.output["continuity"]["notCarried"]
+    assert not_carried and {entry["code"] for entry in not_carried} == {"R11"}
+    assert all("possible mask" in entry["reason"] and "masksToBounds" in entry["reason"] for entry in not_carried)
 
 
 def stage_geometry(offset_width, offset_height, left, top, width, height):
