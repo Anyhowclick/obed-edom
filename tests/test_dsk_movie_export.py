@@ -922,9 +922,16 @@ def test_export_slide_clips_happy_path(monkeypatch, tmp_path):
 
     calls = _stub_live(monkeypatch, tmp_path)
     _patch_build_export_script_capture(monkeypatch)
+    # The default publishes h264, re-encoded from a ProRes LT Keynote export (Keynote's own
+    # H.264 export is unproven at the 7680 px wall width).
+    seen = {}
+    build, publish = dme._build_export_script, dme._ffmpeg_process
+    monkeypatch.setattr(dme, "_build_export_script", lambda **kw: (seen.setdefault("keynote", kw["codec"]), build(**kw))[1])
+    monkeypatch.setattr(dme, "_ffmpeg_process", lambda raw, dest, **kw: (seen.setdefault("publish", kw["codec"]), publish(raw, dest, **kw))[1])
 
     results = dme.export_slide_clips(fw, [17, 32], out_dir, log=lambda *_: None)
 
+    assert seen == {"keynote": "AppleProRes422LT", "publish": "h264"}
     assert calls["osascript"] == 2  # export batch + final quit
     assert {r.slide for r in results} == {17, 32}
     for r in results:
@@ -1528,12 +1535,15 @@ def test_ffmpeg_process_crop_uses_prores_ks_for_prores_codec(monkeypatch, tmp_pa
     assert "-map" in cmd and "0:v:0" in cmd and "0:a?" in cmd
 
 
-def test_ffmpeg_process_crop_uses_libx264_for_h264_codec(monkeypatch, tmp_path):
-    _size, cmd, _dest = _ffmpeg_cmd(
-        monkeypatch, tmp_path, raw_w=3840, crop_rect=Rect(0, 0, 100, 100), wall_w=3840, codec="h264"
-    )
+@pytest.mark.parametrize("crop_rect", [Rect(0, 0, 100, 100), None])
+def test_ffmpeg_process_h264_always_reencodes_to_chrome_decodable_libx264(crop_rect, monkeypatch, tmp_path):
+    """The raw export is a 10-bit 4:2:2 ProRes LT intermediate, so an h264 clip is
+    re-encoded even uncropped, at 8-bit 4:2:0."""
+    _size, cmd, _dest = _ffmpeg_cmd(monkeypatch, tmp_path, raw_w=3840, crop_rect=crop_rect, wall_w=3840, codec="h264")
     assert "libx264" in cmd
     assert "prores_ks" not in cmd
+    assert cmd[cmd.index("-pix_fmt") + 1] == "yuv420p"
+    assert ("-vf" in cmd) == (crop_rect is not None)
 
 
 def test_ffmpeg_process_rejects_raw_dims_mismatching_native_wall_size(monkeypatch, tmp_path):

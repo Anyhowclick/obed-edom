@@ -138,11 +138,18 @@ def fps_rational(fps: float) -> float:
 
 
 def _crop_encoder_args(codec: str) -> list[str]:
-    """ffmpeg re-encode args for the crop path: prores_ks for ProRes codecs, libx264
-    otherwise (h264/HEVC), matching the maps_movie ladder shape."""
+    """ffmpeg re-encode args for the publish step: prores_ks for ProRes codecs, libx264
+    otherwise (h264/HEVC), matching the maps_movie ladder shape. 8-bit 4:2:0 so Chrome
+    decodes a clip re-encoded from a 10-bit 4:2:2 ProRes intermediate."""
     if codec in _PRORES_PROFILES:
         return ["prores_ks", "-profile:v", _PRORES_PROFILES[codec]]
-    return ["libx264", "-crf", "18", "-preset", "fast"]
+    return ["libx264", "-crf", "18", "-preset", "fast", "-pix_fmt", "yuv420p"]
+
+
+def _keynote_export_codec(codec: str) -> str:
+    """Keynote's codec for the raw export. An h264 clip is published by ffmpeg from a
+    ProRes LT intermediate: Keynote's H.264 export is unproven at the 7680 px wall width."""
+    return "AppleProRes422LT" if codec == "h264" else codec
 
 
 @dataclass(frozen=True)
@@ -742,7 +749,7 @@ def export_dsk_slide_clips(
     slides: Sequence[int],
     out_dir: Path,
     *,
-    codec: str = "AppleProRes422LT",
+    codec: str = "h264",
     fps: float = 30,
     log: Callable[[str], None] = print,
     rss_limit_bytes: int = DEFAULT_RSS_LIMIT_BYTES,
@@ -783,7 +790,7 @@ def export_dsk_slide_clips(
         assert batch.scratch is not None and batch.work is not None
         per_slide = [(n, ordinals[n], require_m4v(batch.work / f"tmp.{n:04d}.m4v")) for n in keep]
         script = _build_dsk_export_script(
-            scratch_path=batch.scratch, per_slide=per_slide, codec=codec, fps=fps
+            scratch_path=batch.scratch, per_slide=per_slide, codec=_keynote_export_codec(codec), fps=fps
         )
         script_path = _osascript_path(script, batch.work)
         proc = batch.run(script_path, on_progress=on_progress)
@@ -903,8 +910,9 @@ def _run_ffmpeg_stage(cmd: list[str]) -> None:
 def _ffmpeg_process(
     raw: Path, dest: Path, *, crop_rect: Rect | None, wall_w: int, wall_h: int, codec: str
 ) -> tuple[int, int]:
-    """Publishes `raw` to `dest` (a `.mov`): `-c copy` remux when there's no crop, else an
-    even-normalised crop + re-encode. Returns the expected `(width, height)` of `dest`."""
+    """Publishes `raw` to `dest` (a `.mov`): an even-normalised crop + re-encode, or a
+    `-c copy` remux when there's no crop and `raw` is already in `codec` (an h264 clip always
+    re-encodes its ProRes intermediate). Returns the expected `(width, height)` of `dest`."""
     exe = ffmpeg_exe()
     if not exe:
         raise RuntimeError("ffmpeg executable not found")
@@ -912,15 +920,14 @@ def _ffmpeg_process(
     raw_w, raw_h, _raw_fps, _raw_duration = _ffprobe(raw)
     if (raw_w, raw_h) != (wall_w, wall_h):
         raise RuntimeError(f"Raw export {raw} is {raw_w}x{raw_h}, expected native wall size {wall_w}x{wall_h}")
-    if crop_rect is None:
+    x, y, w, h = _clamp_crop(crop_rect, wall_w, wall_h) if crop_rect is not None else (0, 0, wall_w, wall_h)
+    full = x == 0 and y == 0 and w == wall_w and h == wall_h
+    if full and _keynote_export_codec(codec) == codec:
         _run_ffmpeg_stage([exe, "-y", "-i", str(raw), "-c", "copy", str(dest)])
         return wall_w, wall_h
-    x, y, w, h = _clamp_crop(crop_rect, wall_w, wall_h)
-    if x == 0 and y == 0 and w == wall_w and h == wall_h:
-        _run_ffmpeg_stage([exe, "-y", "-i", str(raw), "-c", "copy", str(dest)])
-        return wall_w, wall_h
-    x, y, w, h = _normalize_even_crop(x, y, w, h, wall_w, wall_h)
-    flt = crop_filter(Rect(x, y, w, h), wall_w, wall_h)
+    if not full:
+        x, y, w, h = _normalize_even_crop(x, y, w, h, wall_w, wall_h)
+    flt = None if full else crop_filter(Rect(x, y, w, h), wall_w, wall_h)
     encoder, *extra = _crop_encoder_args(codec)
     _run_ffmpeg_stage(
         [
@@ -932,8 +939,7 @@ def _ffmpeg_process(
             "0:v:0",
             "-map",
             "0:a?",
-            "-vf",
-            flt,
+            *(["-vf", flt] if flt else []),
             "-c:v",
             encoder,
             *extra,
@@ -1162,7 +1168,7 @@ def export_slide_clips(
     out_dir: Path,
     *,
     include_side: Collection[int] = (),
-    codec: str = "AppleProRes422LT",
+    codec: str = "h264",
     fps: float = 30,
     crop_rects: Mapping[int, Rect] | None = None,
     delete_ids: Mapping[int, Collection[ItemId]] | None = None,
@@ -1366,7 +1372,7 @@ def export_slide_clips(
             stem=fw_deck.stem,
             layout_template=resolved_template,
             per_slide=per_slide,
-            codec=codec,
+            codec=_keynote_export_codec(codec),
             fps=fps,
             black_layout_names=resolved_black_names,
         )
