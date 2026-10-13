@@ -711,7 +711,7 @@ def test_cli_requires_exactly_one_mode_and_known_arms():
 def test_cli_runs_the_forced_stand_down_arms_under_gl_auto_only(monkeypatch, tmp_path):
     ran: list[tuple[str, str]] = []
     monkeypatch.setattr(probe, "headless_chromes", lambda: 0)
-    monkeypatch.setattr(probe, "run_arm", lambda fixture, gl, arm: ran.append((gl, arm)) or {"gl": gl, "arm": arm, "error": "x"})
+    monkeypatch.setattr(probe, "run_arm", lambda fixture, gl, arm, out: ran.append((gl, arm)) or {"gl": gl, "arm": arm, "error": "x"})
     probe.main(["--out", str(tmp_path), "--arms", "on,fsd,fsdoff"])
     assert ran == [("off", "on"), ("auto", "on"), ("auto", "fsd"), ("auto", "fsdoff")]
 

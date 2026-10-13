@@ -744,7 +744,7 @@ def drive(host: Any, record: dict[str, Any], extra: dict[str, dict[str, Any]], s
     record["log"] = evaluate(LOG_READ_JS, deadline_s=60)
 
 
-def run_arm(fixture: Path, gl: str, arm: str) -> dict[str, Any]:
+def run_arm(fixture: Path, gl: str, arm: str, out: Path) -> dict[str, Any]:
     import live_continuity_probe as probe
 
     from obed_edom.live_host import ChromeCdp, LiveOutputHost
@@ -756,8 +756,7 @@ def run_arm(fixture: Path, gl: str, arm: str) -> dict[str, Any]:
 
     record: dict[str, Any] = {"gl": gl, "arm": arm, "mmOpacityKwarg": ALL_ARMS[arm], "steps": []}
     probe.force_viewport(*VIEWPORT)
-    dest = probe.prepare_export(fixture / "html-player", fixture / "html-unmodified" / "index.html", probe.run_root(Path(__file__)),
-                                f"mmo-{gl}-{arm}")
+    dest = probe.prepare_export(fixture / "html-player", fixture / "html-unmodified" / "index.html", probe.run_root(out), f"mmo-{gl}-{arm}")
     slides = probe.load_slides(dest)
     record["masks"] = movie_masks(probe.runtime_of(probe.ground_truth_plan(dest, slides, gl_replay=True)))
     record["roi"] = settle_roi()
@@ -821,7 +820,7 @@ def main(argv: list[str] | None = None) -> int:
                 running = headless_chromes()
                 if running >= MAX_HEADLESS:
                     raise SystemExit(f"{running} headless Chromes already running (limit {MAX_HEADLESS}); refusing to start another")
-                record = run_arm(args.fixture, gl, arm)
+                record = run_arm(args.fixture, gl, arm, out)
                 (out / "runs" / f"{gl}-{arm}.json").write_text(json.dumps(record))
                 print(f"{gl}-{arm}: {'error' if record.get('error') else 'ok'}", flush=True)
     verdict = score_all(load_runs(out))

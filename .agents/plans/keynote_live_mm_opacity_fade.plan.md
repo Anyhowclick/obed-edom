@@ -1,6 +1,6 @@
 # Magic Move: a leaf fade under a translucent wrapper ends at the authored opacity
 
-**APPROVED (owner, 2026-10-13); IMPLEMENTED on `claude/mm-fade-opacity`; gates `.agents/reviews/mm-fade/gates-r1.md` (PF-4 owner eyeball owed).** Rev 5. Rev 1: Opus 5.5. Revs 2–3 and 5 fold Codex GPT-6 Astra (high) critiques r1–r3 (§6). Rev 4 widens scope to fade-outs and partial fades (owner, 2026-10-13); gate approved (owner). Plan only. No product code yet. Builds on `keynote_live_mm_opacity.plan.md`
+**APPROVED (owner, 2026-10-13); IMPLEMENTED on `claude/mm-fade-opacity`; gates `.agents/reviews/mm-fade/gates-r1.md` (PF-4 owner eyeball owed).** Rev 5. Rev 1: Opus 5.5. Revs 2–3 and 5 fold Codex GPT-6 Astra (high) critiques r1–r3 (§6). Rev 4 widens scope to fade-outs and partial fades (owner, 2026-10-13); gate approved (owner). Builds on `keynote_live_mm_opacity.plan.md`
 (merged #233). This plan closes that plan's accepted residual (decision 5: "fades under a translucent constant wrapper keep
 today's look (none on disk)"). The owner's deck now has them.
 
