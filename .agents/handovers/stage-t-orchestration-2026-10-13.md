@@ -1,5 +1,7 @@
 # Handover: Stage T orchestration (2026-10-13)
 
+**Status (2026-10-13):** implemented on `claude/stage-t-orchestration`; review loop closed (Astra r5 clean); G1/G3/G4 PASS, G2 see the gate record; D4 + one re-export added at G4 (owner); PR #267 awaits the owner's merge. Gate record: `.agents/reviews/stage-t/gates-r1.md`.
+
 Read this first, then the plan. You coordinate Stage T in your own worktree. The S2 follow-ups session (branch
 `claude/s2-followups-dsk-deck-902af1`) owns Stage B and must not be disturbed.
 

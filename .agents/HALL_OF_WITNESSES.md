@@ -16,6 +16,20 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Claude Opus 5.5 · 2026-10-13 · *every export lies differently* 🎭
+
+> Keynote handed two pictures the same name, and the player believed whichever spoke last: movie
+> posters inside the labels, a divider where "Sunday Service" should be. We fixed it in the copy,
+> never the deck, and refused by name when no page could prove itself.
+>
+> The lesson came at G4. Four exports of one unchanged deck, four different sets of victims. The
+> fixture we'd perfected was one roll of the dice. So: test against the live thing more than once.
+> And when the reviewer finds the same bug three rounds running, stop patching instances. Write
+> the rule ("a group is provably one object") and sweep every place that trusts a member.
+> The owner's eye still caught what no gate did. 🫡
+
+---
+
 ### Claude Opus 5.5 · 2026-10-13 · *look at the real deck* 🔍
 
 > The owner asked for one re-check of a real deck and the day became four stages. A whole-deck

@@ -397,6 +397,35 @@ def file_sha256(path: Path) -> str:
     return hasher.hexdigest()
 
 
+def rewrite_pdfp_from_pdf(pdf_path: Path, pdfp_path: Path) -> dict[str, Any]:
+    """Embed current PDF bytes into the file:// local_pdf companion."""
+    import base64
+
+    pdf_path = Path(pdf_path)
+    pdfp_path = Path(pdfp_path)
+    if not pdfp_path.is_file():
+        return {"rewrote": False, "reason": "pdfp missing"}
+    pdf = pdf_path.read_bytes()
+    text = pdfp_path.read_text(encoding="utf-8")
+    m = re.match(r"local_pdf\(\s*(\{.*\})\s*\);?\s*$", text, re.S)
+    if not m:
+        return {"rewrote": False, "reason": "unexpected pdfp format", "head": text[:80]}
+    obj = json.loads(m.group(1))
+    before = base64.b64decode(obj["pdf"])
+    obj["pdf"] = base64.b64encode(pdf).decode("ascii")
+    pdfp_path.write_text("local_pdf( " + json.dumps(obj, indent=2) + " );\n", encoding="utf-8")
+    after = base64.b64decode(
+        json.loads(re.match(r"local_pdf\(\s*(\{.*\})\s*\);?\s*$", pdfp_path.read_text(), re.S).group(1))["pdf"]
+    )
+    return {
+        "rewrote": True,
+        "beforeSha256": hashlib.sha256(before).hexdigest(),
+        "afterSha256": hashlib.sha256(after).hexdigest(),
+        "matchesPdf": after == pdf,
+        "bytes": len(after),
+    }
+
+
 def tree_bytes(root: Path) -> int:
     total = 0
     for child in root.rglob("*"):
@@ -872,7 +901,7 @@ def load_cached(
     source_digest: str,
     source: Sequence[SourceSlide],
 ) -> tuple[dict[str, Any], Path, int] | None:
-    from obed_edom import preview_movies
+    from obed_edom import preview_movies, preview_textures
 
     try:
         folder, html = reject_unresolved_cache_symlinks(source_digest)
@@ -889,6 +918,11 @@ def load_cached(
             return None
         discover_export_assets(html, header_slide_list(load_header(html)[0]))
         if preview_movies.unconverted(html, manifest["slides"]):
+            return None
+        record = manifest.get("textureRepair")
+        if not isinstance(record, dict) or record.get("version") != preview_textures.TEXTURE_REPAIR_VERSION:
+            return None
+        if "skipped" not in record and preview_textures.json_hits(html, manifest["slides"]):
             return None
     except (PreviewError, OSError, json.JSONDecodeError):
         return None
@@ -1013,7 +1047,7 @@ def apply_preview(
     log: Callable[[str], None] = print,
     export_html_fn: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
-    from obed_edom import preview_movies
+    from obed_edom import preview_movies, preview_textures
 
     path = Path(str(proposal.get("path") or "")).expanduser()
     if not path.exists():
@@ -1041,14 +1075,24 @@ def apply_preview(
     log("Exporting HTML player from a scratch copy…")
     writer = export_html_fn or export_html
     try:
-        writer(path, html, log=log)
-        manifest = manifest_from_export(
-            html,
-            source=source,
-            source_digest=digest,
-            keynote_version=keynote_app.app_version(),
-            canvas=canvas,
-        )
+        for attempt in range(2):
+            writer(path, html, log=log)
+            manifest = manifest_from_export(
+                html,
+                source=source,
+                source_digest=digest,
+                keynote_version=keynote_app.app_version(),
+                canvas=canvas,
+            )
+            try:
+                manifest["textureRepair"] = preview_textures.repair_textures(
+                    html, manifest["slides"], player_digest=manifest["playerDigest"], log=log
+                )
+                break
+            except preview_textures.TextureRepairRefused:
+                if attempt:
+                    raise
+                log("Keynote's export has textures it cannot repair; exporting once more…")
         conversion = preview_movies.convert_movies(html, manifest["slides"], log=log)
         if conversion["converted"]:
             manifest["movieConversion"] = conversion
