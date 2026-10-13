@@ -10,14 +10,14 @@ MM_OPACITY_ENV = "OBED_LIVE_MM_OPACITY"
 # 17c0c938 is e9b2fad4 plus two `,isEvalSupported:!1` PDF.js options, outside every anchor.
 SUPPORTED_PLAYERS = {
     "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354": (
-        "553676be908d6a1737d17bc8ed8219bf14231eb870afc790b9f63e3fcf6386f9",
+        "eaae4e8008ca711c5c1e07973b807a16102bcc218f8dff6aa7e84f4d1f1fe039",
         "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
-        "fbeb10d5d4e5749d5512730b6b5554e0189d0ac4bba4b7a0cf28579da1984db1",
+        "57ade7af1cad32a7071214e5a1a64deab180f0189887e7c0beecd966762869c8",
     ),
     "17c0c938caa49d5c70bd83bd5b84f57381faa51602932ca733aa965055026d91": (
-        "baf2c9a3102d9e459cf195fc0fdb351c4230ba2894a94a960dffa02f38babed9",
+        "228f5ace2a59d313735999924dc997c54affbe3c65b3597cba9053564f820a66",
         "4f9fbffd95e4649543142b2e95586babd9d75f0a0d9a4974e21d6f33c8389e3b",
-        "0368fff55efa7e41d8acd3d20fae8dc9f11dbea9a61224907fa1a9414efbaca0",
+        "b9ab9f7e8a542f9a243cfa1f524f46f6764a8d705d4ffcb1fab5be78f00899f3",
     ),
 }
 _ANCHOR = b"UC=new Eg,UC.displayManager.showWaitingIndicator()"
@@ -28,7 +28,7 @@ _MM_OPACITY_NODE = (
     b':("hidden"===t[i].property||t[i].animations)&&(C=2);var o=B.hidden||C>1?null:g?'
     b'g.from.scalar===g.to.scalar&&"both"===g.fillMode?g.to.scalar:null:B.opacity;'
     b'return"number"==typeof o&&isFinite(o)?o:null}catch(E){return null}}'
-    b'__obedFade(A){try{var B=A.initialState,g=A.animations||[],C=arguments[1],Q=null,e=null,t=0,i=0;'
+    b'__obedFade(A,C){try{var B=A.initialState,g=A.animations||[],Q=null,e=null,t=0,i=0;'
     b'if(1!==g.length||!Array.isArray(g[0].animations))return!1;for(var o=g[0].animations,E=0;E<o.length;E++){'
     b'var w=o[E];if(w.animations)return!1;"opacity"===w.property?(Q=w,t++):"hidden"===w.property&&(e=w,i++)}'
     b'if(1!==t||i>1)return!1;var a=Q.from.scalar,I=Q.to.scalar,s=Q.fillMode;if("number"!=typeof a||'
@@ -181,11 +181,6 @@ _MM_OPACITY_REPLACEMENTS = (
         b"this.textureInfoFromEffect(A.layers[E],B,e.offset,e.parentOpacity,Q,this.__obedChainOpacity(X,A),D)",
     ),
     (
-        b"this.textureInfoFromEffect(A.kpfLayer,A.name,{pointX:0,pointY:0},A.baseLayer.initialState.opacity,B);",
-        b"this.textureInfoFromEffect(A.kpfLayer,A.name,{pointX:0,pointY:0},A.baseLayer.initialState.opacity,B,"
-        b"void 0,1e3*A.duration);",
-    ),
-    (
         b'd!==U&&(T=d+(U-d)*K),A.setGLFloat(T,"Opacity")',
         b'd!==U&&(T=d+(U-d)*K),null!=e.obedOpacity?T=e.obedOpacity:null!=e.obedParentOpacity&&'
         b'1===e.parentOpacity&&(T*=e.obedParentOpacity),A.setGLFloat(T,"Opacity")',
@@ -226,6 +221,11 @@ _MM_OPACITY_REPLACEMENTS = (
     (
         b"jumpToScene_partFour(A,B){if(this.displayScene(A),",
         b"jumpToScene_partFour(A,B){if(B&&PB.prototype.__obedFreezeTake(this,A),this.displayScene(A),",
+    ),
+    (
+        b"this.textureInfoFromEffect(A.kpfLayer,A.name,{pointX:0,pointY:0},A.baseLayer.initialState.opacity,B);",
+        b"this.textureInfoFromEffect(A.kpfLayer,A.name,{pointX:0,pointY:0},A.baseLayer.initialState.opacity,B,"
+        b"void 0,1e3*A.duration);",
     ),
 )
 

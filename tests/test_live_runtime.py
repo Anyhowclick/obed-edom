@@ -277,7 +277,8 @@ def test_mm_opacity_anchors_are_unique_on_the_real_player():
 
 
 # sha256 of patch_player(real, mm_opacity=...) and patch_rendering(real), per stock player.
-# Old False: recorded on 3eb3b0fe (hook only, unchanged since). True and rendering: with the dissolve replacements
+# Old False: recorded on 3eb3b0fe (hook only, unchanged since). R1-R3 changed and R13 was added for mm-fade,
+# replacing True 81ac1a33... / a9aa0bde... and rendering dd0db318... / c6c1eb5e.... With the dissolve replacements
 # D1-D4 = R9-R12 at plan rev 17 (keynote_live_dissolve_crossfade.plan.md); rev 13's D1 gave 409a0395... / 53ee23db... (old)
 # and 5dd3997e... / b366bd91... (new); rev 12's D1 gave bfeb9377... / a211b1c3... (old)
 # and 6c941ac1... / 50231d3c... (new); rev 9's D1 gave 49d56adc... / 117fd39d... (old)
@@ -285,17 +286,17 @@ def test_mm_opacity_anchors_are_unique_on_the_real_player():
 # and old True 21476f78... with R1-R5. New False: recorded when the new player was admitted.
 REAL_PATCHED_SHA256 = {
     OLD_PLAYER_SHA256: {
-        True: "553676be908d6a1737d17bc8ed8219bf14231eb870afc790b9f63e3fcf6386f9",
+        True: "eaae4e8008ca711c5c1e07973b807a16102bcc218f8dff6aa7e84f4d1f1fe039",
         False: "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
     },
     NEW_PLAYER_SHA256: {
-        True: "baf2c9a3102d9e459cf195fc0fdb351c4230ba2894a94a960dffa02f38babed9",
+        True: "228f5ace2a59d313735999924dc997c54affbe3c65b3597cba9053564f820a66",
         False: "4f9fbffd95e4649543142b2e95586babd9d75f0a0d9a4974e21d6f33c8389e3b",
     },
 }
 REAL_RENDERING_SHA256 = {
-    OLD_PLAYER_SHA256: "fbeb10d5d4e5749d5512730b6b5554e0189d0ac4bba4b7a0cf28579da1984db1",
-    NEW_PLAYER_SHA256: "0368fff55efa7e41d8acd3d20fae8dc9f11dbea9a61224907fa1a9414efbaca0",
+    OLD_PLAYER_SHA256: "57ade7af1cad32a7071214e5a1a64deab180f0189887e7c0beecd966762869c8",
+    NEW_PLAYER_SHA256: "b9ab9f7e8a542f9a243cfa1f524f46f6764a8d705d4ffcb1fab5be78f00899f3",
 }
 
 
@@ -364,10 +365,11 @@ def test_patched_output_must_match_its_pin(monkeypatch, pin):
 
 
 # Hand-back geometry (keynote_live_handback_geometry.plan.md §3.2) is R6-R8; the dissolve cross-fade
-# (keynote_live_dissolve_crossfade.plan.md §3.1, §6.1) is D1-D4 = R9-R12. Their anchors' byte offsets on the old and
-# new stock players: R8 and D4 sit after both `isEvalSupported` insertions, so they move by 38.
-HANDBACK = slice(6, 9)
-DISSOLVE = slice(9, 13)
+# (keynote_live_dissolve_crossfade.plan.md §3.1, §6.1) is D1-D4 = R9-R12; mm-fade's setupTexture carrier is R13.
+# Their anchors' byte offsets on the old and new stock players: R8 and D4 sit after both `isEvalSupported` insertions,
+# so they move by 38.
+HANDBACK = slice(5, 8)
+DISSOLVE = slice(8, 12)
 ANCHOR_OFFSETS = {
     b"B[g].toTexture=R.createTexture(this.gl,i)}}return B}": (2263321, 2263321),
     b'case"contents":C=e.toTexture}}var T=': (2190367, 2190367),
@@ -554,7 +556,11 @@ def test_opacity_handback_and_dissolve_replacements_compose_in_every_order(monke
     for _, after in replacements:
         for before, _ in replacements:
             assert before not in after
-    groups = (replacements[: HANDBACK.start], replacements[HANDBACK], replacements[DISSOLVE])
+    groups = (
+        replacements[: HANDBACK.start] + replacements[DISSOLVE.stop :],
+        replacements[HANDBACK],
+        replacements[DISSOLVE],
+    )
     outputs = {_apply_in_order(player, [r for group in order for r in group]) for order in itertools.permutations(groups)}
     assert outputs == {live_runtime.patch_rendering(player)}
 
@@ -564,7 +570,7 @@ SWAP_HIDE_DEFERRED = b"setTimeout(this.handleAnimateEffectDidBegin"
 
 def test_mm_opacity_hides_the_swapped_node_synchronously_on_the_real_player():
     player = _real_player()
-    before, after = live_runtime._MM_OPACITY_REPLACEMENTS[5]
+    before, after = live_runtime._MM_OPACITY_REPLACEMENTS[4]
     assert before == b"Q&&setTimeout(this.handleAnimateEffectDidBegin.bind(this,Q),0)"
     assert player.count(before) == 1 and player.count(after) == 0
     assert player.count(SWAP_HIDE_DEFERRED) == 1
@@ -653,10 +659,10 @@ def _cut(source: str, start: str, end: str) -> str:
 
 
 def _extracted_methods(player: str, patched: bool) -> str:
-    """The real `QB` class, `fB`'s node/chain helpers + `textureInfoFromEffect`, and `eB.drawFrame`'s
-    no-animation Opacity expression, cut verbatim out of the player (patched or stock)."""
+    """The real `QB` class, `fB.setupTexture` through `textureInfoFromEffect`, and `eB.drawFrame`'s no-animation
+    Opacity expression, cut verbatim out of the player (patched or stock)."""
     qb = _cut(player, "class QB{", "class eB{")
-    tie = _cut(player, "__obedNodeOpacity(A){" if patched else "textureInfoFromEffect(A,B,g,C,Q){", "draw(A){if(A.baseLayer)")
+    tie = _cut(player, "setupTexture(A){", "draw(A){if(A.baseLayer)")
     no_animation = _cut(player, "var w=e.initialState.hidden?0:", ";t.setGLFloat(w") + ";"
     return (
         qb
@@ -693,12 +699,15 @@ def _run_extracted(
 class kA{doubleForAnimationCurve(n,x){return x}}
 class KA{}
 const u={translateMatrix4:(m)=>m,rotateMatrix4AboutXYZ:(m)=>m,scaleMatrix4:(m)=>m};
+const R={createTexture(){return null}};
+const textureAssets={};
 %s
 const root=%s;
 const out=[];
 for (const percent of %s){
-  const textures=[];
-  new F().textureInfoFromEffect(root,'x',{pointX:0,pointY:0},root.initialState.opacity,textures,undefined,%s);
+  const renderer=new F();
+  renderer.textureAssets=textureAssets;
+  const textures=renderer.setupTexture({kpfLayer:root,name:'x',baseLayer:{initialState:root.initialState},duration:%s});
   const values=[];
   for (const t of textures){
     let opacity=null;
@@ -715,7 +724,7 @@ console.log(JSON.stringify(out));
         _extracted_methods(player, patched),
         json.dumps(_player_texture_tree(effect["baseLayer"])),
         json.dumps(percents),
-        1000 * duration,
+        duration,
         1000 * duration,
     )
     result = subprocess.run([node, "-e", script], check=True, text=True, capture_output=True)

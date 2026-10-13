@@ -264,7 +264,7 @@ function walk(A, X){
 }
 walk(%s, undefined);
 console.log(JSON.stringify(out));
-""" % (methods.decode().replace("}__obedChainOpacity", "},__obedChainOpacity"), json.dumps(effect["baseLayer"]))
+""" % (methods.decode().replace("}__obed", "},__obed"), json.dumps(effect["baseLayer"]))
         return json.loads(subprocess.run([node, "-e", script], check=True, text=True, capture_output=True).stdout)
 
     good, bad = leaves(live_runtime._MM_OPACITY_NODE), leaves(probe.square_splice(live_runtime._MM_OPACITY_NODE))
