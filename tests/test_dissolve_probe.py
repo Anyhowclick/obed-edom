@@ -1245,6 +1245,8 @@ CASES = [
      lambda: (set(("m-geo-dpr125", "m-geo-2560", "m-geo-frac-origin-cef")) & set(probe.CEF_PLACEMENT.arms),
               set(("m-geo-frac-origin-chrome", "m-geo-frac-dpr15", "m-geo-frac-dpr2")) <= set(probe.DX1.arms)),
      (set(), True)),
+    ("placement raw tone control uses the current identity-tone player bytes",
+     lambda: probe.ARMS["m-tone-raw-cef"].splice, None),
     ("DX-1 m-raw-prod: the destination's movies after the hand-off do not empty the in-only class",
      lambda: arm_outcome("m-raw-prod", holder=False, mutate="dest-video"), "MATCH"),
     ("r17 m-raw-prod binding a holder", lambda: arm_check("m-raw-prod", "scope"), "PASS"),

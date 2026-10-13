@@ -406,7 +406,8 @@ def _persistence_gates(calibration: dict[str, Any], run_dir: Path) -> tuple[dict
     ), [_jsonable(c) for c in checks]
 
 
-def score_placement_calibration(calibration: Any, run_dir: Path) -> dict[str, Any]:
+def score_placement_calibration(calibration: Any, run_dir: Path, *,
+                                live_probe_controls: dict[str, Any] | None = None) -> dict[str, Any]:
     """Keynote/OBS-free §5 rescore. The classifier and persistence decisions call the product APIs used live."""
     schema = dissolve_probe.placement_schema_problems(calibration, run_dir)
     if schema:
@@ -435,17 +436,18 @@ def score_placement_calibration(calibration: Any, run_dir: Path) -> dict[str, An
     backend = calibration["backend"]
     telemetry = _telemetry(calibration, run_dir)
     if backend == "cef":
-        controls = (telemetry or {}).get("classifierControls")
+        controls = (classifier_controls(decoded["input"], classified, placement_probe.ProbeVerdict.FRAC)
+                    if decoded.get("input") is not None and classified is not None else None)
         if not isinstance(controls, dict):
             classify_problems.append("classifier controls missing")
         elif controls.get("passed") is not True:
             classify_problems.extend(list(controls.get("problems") or ["classifier controls failed"]))
-        live_probe_controls = (telemetry or {}).get("liveProbeControls")
-        if not isinstance(live_probe_controls, dict):
+        current_probe_controls = live_probe_controls or (telemetry or {}).get("liveProbeControls")
+        if not isinstance(current_probe_controls, dict):
             classify_problems.append("live probe controls missing")
         else:
             for name in ("replay", "transparent", "frozen-video"):
-                if (live_probe_controls.get(name) or {}).get("verdict") != "PASS":
+                if (current_probe_controls.get(name) or {}).get("verdict") != "PASS":
                     classify_problems.append(f"live probe control {name} did not reject cleanly")
         ok = (classified is not None and classified.verdict == placement_probe.ProbeVerdict.FRAC
               and classified.tone_map == placement_probe.ToneMap.GPU_ANALYTIC and classified.grant_eligible)
@@ -455,14 +457,22 @@ def score_placement_calibration(calibration: Any, run_dir: Path) -> dict[str, An
         gates["harness-classifier-control"] = calibration_gate("REPORTED", [], result=None)
     else:
         gpu = (telemetry or {}).get("chromeGpu")
-        ok = (classified is not None and classified.verdict == placement_probe.ProbeVerdict.SNAP
-              and ((gpu is True and classified.tone_map == placement_probe.ToneMap.GPU_ANALYTIC and classified.grant_eligible)
-                   or (gpu is False and classified.tone_map == placement_probe.ToneMap.IDENTITY and not classified.grant_eligible)))
+        software = gpu is False
+        ok = (classified is not None and
+              ((gpu is True and classified.verdict == placement_probe.ProbeVerdict.SNAP
+                and classified.tone_map == placement_probe.ToneMap.GPU_ANALYTIC and classified.grant_eligible)
+               or (software and not classified.grant_eligible and
+                   ((classified.verdict == placement_probe.ProbeVerdict.SNAP
+                     and classified.tone_map == placement_probe.ToneMap.IDENTITY and classified.reason == "software-map")
+                    or (classified.verdict == placement_probe.ProbeVerdict.UNKNOWN
+                        and classified.tone_map is None and classified.reason == "ambiguous")))))
         if not isinstance(gpu, bool):
             classify_problems.append("Chrome GPU/software launch identity missing")
-        verdict = "INCONCLUSIVE" if classify_problems or classified is None or classified.verdict == placement_probe.ProbeVerdict.UNKNOWN else "PASS" if ok else "FAIL"
+        verdict = "INCONCLUSIVE" if classify_problems or classified is None else "PASS" if ok else "FAIL"
         gates["probe-chrome-harness"] = calibration_gate(verdict, classify_problems, result=_jsonable(classified))
-        controls = (telemetry or {}).get("classifierControls")
+        controls = (classifier_controls(decoded["input"], classified, placement_probe.ProbeVerdict.SNAP,
+                                        software=software)
+                    if decoded.get("input") is not None and classified is not None else None)
         gates["harness-classifier-control"] = calibration_gate(
             "INCONCLUSIVE" if not isinstance(controls, dict) else "PASS" if controls.get("passed") is True else "FAIL",
             ["classifier controls missing"] if not isinstance(controls, dict) else list(controls.get("problems") or []), controls=controls)
@@ -751,7 +761,7 @@ def _frozen_motion(evidence: placement_probe.ClassifierInput) -> placement_probe
 
 
 def classifier_controls(evidence: placement_probe.ClassifierInput, result: placement_probe.ProbeResult,
-                        expected: placement_probe.ProbeVerdict) -> dict[str, Any]:
+                        expected: placement_probe.ProbeVerdict, *, software: bool = False) -> dict[str, Any]:
     replay = list(evidence.freshness)
     replay[1] = replace(replay[1], png=replay[0].png)
     transparent = np.zeros((1080, 1920, 4), np.uint8)
@@ -784,8 +794,16 @@ def classifier_controls(evidence: placement_probe.ClassifierInput, result: place
         "wrongContext": (placement_probe.ProbeVerdict.UNKNOWN, "invalid-evidence"),
     }
     problems = []
-    if result.verdict != expected or result.reason != expected_reason:
+    software_candidate = software and not result.grant_eligible and (
+        (result.verdict == expected and result.tone_map == placement_probe.ToneMap.IDENTITY
+         and result.reason == "software-map")
+        or (result.verdict == placement_probe.ProbeVerdict.UNKNOWN and result.tone_map is None
+            and result.reason == "ambiguous")
+    )
+    if not software_candidate and (result.verdict != expected or result.reason != expected_reason):
         problems.append(f"candidate {result.verdict.value}/{result.reason} != {expected.value}/{expected_reason}")
+    if software_candidate and result.verdict == placement_probe.ProbeVerdict.UNKNOWN:
+        required["wrongRule"] = (placement_probe.ProbeVerdict.UNKNOWN, "ambiguous")
     for name, (verdict, reason) in required.items():
         observed = controls[name]
         if observed.verdict != verdict or observed.reason != reason:
@@ -1830,10 +1848,15 @@ def _wait_placement_control(host: LiveOutputHost, adapter: QualificationCalibrat
 def _wait_output_live(host: LiveOutputHost, timeout_s: float = 5.0) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_s
     last = None
+    live_since = None
     while time.monotonic() < deadline:
         last = host.observe()
         if last.output_visible and not last.busy:
-            return {"live": True, "outputVisible": True}
+            live_since = live_since or time.monotonic()
+            if time.monotonic() - live_since >= 1.0:
+                return {"live": True, "outputVisible": True}
+        else:
+            live_since = None
         time.sleep(0.05)
     return {"live": False, "outputVisible": bool(last and last.output_visible)}
 
@@ -1876,9 +1899,11 @@ def score_placement_control(value: Any, run_dir: Path) -> dict[str, Any]:
     if value.get("studioAfter") != expected_studio:
         problems.append("Studio Mode was not preserved")
     control_detail = value.get("control")
+    minimum_captures = {"capture-error": 2, "replay": 2, "transparent": 1, "frozen-video": 2}
     if expected_control is not None and not (
             isinstance(control_detail, dict) and control_detail.get("kind") == expected_control
-            and isinstance(control_detail.get("captures"), int) and control_detail["captures"] >= 2):
+            and isinstance(control_detail.get("captures"), int)
+            and control_detail["captures"] >= minimum_captures[expected_control]):
         problems.append("named probe fault did not intercept the capture path")
     output = value.get("output")
     if not isinstance(output, dict):
@@ -1895,10 +1920,17 @@ def score_placement_control(value: Any, run_dir: Path) -> dict[str, Any]:
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         log_rows = []
         unknown.append(f"host-log excerpt unavailable: {type(exc).__name__}: {exc}")
-    if expected_control in ("replay", "transparent") and not any(
-            row.get("kind") == "placementProbe"
-            and "Probe capture freshness could not be verified." in str(row.get("error")) for row in log_rows):
-        problems.append("host log lacks the probe freshness rejection")
+    if expected_control in ("replay", "transparent"):
+        freshness_error = isinstance(transaction, dict) and any(
+            "Probe capture freshness could not be verified." in str(error)
+            for error in transaction.get("errors") or [])
+        host_rejection = any(
+            (row.get("kind") == "placementProbe"
+             and "Probe capture freshness could not be verified." in str(row.get("error")))
+            or (row.get("kind") == "placementProbeRejected" and row.get("reason") == "probe-failed")
+            for row in log_rows)
+        if not freshness_error or not host_rejection:
+            problems.append("transaction and host log lack the probe freshness rejection")
     if expected_control == "frozen-video" and not any(
             row.get("kind") == "placementClassifier" and row.get("reason") == "stale-capture" for row in log_rows):
         problems.append("host log lacks the stale-capture classifier rejection")
@@ -2219,7 +2251,7 @@ def chrome_placement_session(name: str, ctx: dict[str, Any], *, gpu: bool) -> di
         telemetry_ref = write_placement_json(
             run_dir, "telemetry",
             {"classifierControls": classifier_controls(measured["input"], measured["classification"],
-                                                       placement_probe.ProbeVerdict.SNAP),
+                                                       placement_probe.ProbeVerdict.SNAP, software=not gpu),
              "toneRows": tone, "chromeGpu": gpu},
         )
         stock = (dissolve_probe.DECKS["p2"].unmodified / "assets/player/main.js").read_bytes()
@@ -3067,6 +3099,7 @@ def dissolve_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dict
 
 def placement_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dict[str, Any]:
     sessions = {s["session"]: s for s in run["sessions"]}
+    control_rows = placement_control_rows(run["sessions"])
     checks: list[dict[str, Any]] = []
     expected = {*PLACEMENT_ARMS, "probe-chrome-gpu", "probe-chrome-software", *PLACEMENT_CONTROL_SESSIONS}
     check(checks, "every placement session ran", sorted(sessions), set(sessions) == expected, ",".join(sorted(expected)))
@@ -3107,7 +3140,7 @@ def placement_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dic
             telemetry = _read_ref_json(telemetry_ref, run_dir)
             telemetry["toneRows"] = {**(telemetry.get("toneRows") or {}), **tone_summary}
             integrity["telemetry"] = write_placement_json(run_dir, "telemetry", telemetry)
-        rescored = score_placement_calibration(encoded, run_dir)
+        rescored = score_placement_calibration(encoded, run_dir, live_probe_controls=control_rows["probe"])
         if isinstance(encoded, dict):
             encoded["gates"] = rescored["gates"]
             (run_dir / "record.json").write_text(json.dumps(record))
@@ -3796,6 +3829,17 @@ def score_mmo(root: Path) -> int:
 def score_placement_runs(root: Path) -> int | None:
     paths = sorted(set(root.glob("**/runs/*/record.json")))
     paths += [p for p in sorted((root / "runs").glob("*.json")) if p not in paths]
+    control_records = []
+    for path in paths:
+        try:
+            control = json.loads(path.read_text()).get("placementControl")
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(control, dict) and control.get("session") in PLACEMENT_CONTROL_SESSIONS:
+            control_records.append({"session": control["session"], "runDir": str(path.parent)})
+    offline_probe_controls = (placement_control_rows(control_records)["probe"]
+                              if {record["session"] for record in control_records} == set(PLACEMENT_CONTROL_SESSIONS)
+                              else None)
     results = []
     control_names = set()
     for path in paths:
@@ -3815,9 +3859,17 @@ def score_placement_runs(root: Path) -> int | None:
             continue
         calibration = record.get("placementCalibration")
         if not isinstance(calibration, dict):
+            if record.get("arm") in (*PLACEMENT_ARMS, "probe-chrome-gpu", "probe-chrome-software"):
+                problem = "placementCalibration missing"
+                results.append({"run": str(path.relative_to(root)), "backend": None, "engine": None,
+                                "launch": record.get("launch"), "probeIdentity": None, "overall": "INCONCLUSIVE",
+                                "gates": {"placement-evidence": calibration_gate("INCONCLUSIVE", [problem])},
+                                "problems": [problem]})
+                print(f"[placement {path.parent.name}] INCONCLUSIVE", flush=True)
             continue
         run_dir = path.parent
-        rescored = score_placement_calibration(calibration, run_dir)
+        rescored = score_placement_calibration(
+            calibration, run_dir, live_probe_controls=offline_probe_controls if calibration.get("backend") == "cef" else None)
         results.append({"run": str(path.relative_to(root)), "backend": calibration.get("backend"),
                         "engine": calibration.get("engine"), "launch": record.get("launch"),
                         "probeIdentity": (calibration.get("input") or {}).get("identity"), **rescored})

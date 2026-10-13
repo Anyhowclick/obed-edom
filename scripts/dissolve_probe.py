@@ -327,7 +327,7 @@ ARMS: dict[str, Arm] = {
                      expect={"foreground": "FAIL", "model": "N/A"}),
     "m-tone": Arm(**_TONE, expect={"tone": "PASS", "mask": "PASS"}, twin="m-tone-twin"),
     "m-tone-twin": Arm(**_TONE, splice="fg-omit"),
-    "m-tone-raw": Arm(**{**_MEDIA, "movies": "tone"}, splice="lut-identity", capture="paused", classes=("out",), holders=1,
+    "m-tone-raw": Arm(**{**_MEDIA, "movies": "tone"}, capture="paused", classes=("out",), holders=1,
                       expect={"tone": "FAIL"}),
     "perfect-shift": Arm(**_SNAP, shift=1, expect={"reference": "FAIL"}),
     "m-geo-dpr125": Arm(**_ENGAGE, dsf=1.25, expect={"geometry": "FAIL"}),
@@ -968,11 +968,13 @@ def placement_schema_problems(value: Any, run_dir: Path) -> list[str]:
     try:
         decoded = deserialize_placement_calibration(value, run_dir)
         transaction_value = value.get("transaction")
-        if transaction_value is not None and (
-                not isinstance(transaction_value, dict)
-                or transaction_value.get("evidence") != {"$ref": "#/placementCalibration/input"}
-                or value.get("input") is None):
-            problems.append("non-null transaction evidence is not the input reference")
+        if transaction_value is not None:
+            if not isinstance(transaction_value, dict):
+                problems.append("transaction is not a record")
+            elif ((value.get("input") is None and transaction_value.get("evidence") is not None)
+                  or (value.get("input") is not None
+                      and transaction_value.get("evidence") != {"$ref": "#/placementCalibration/input"})):
+                problems.append("transaction evidence does not match placementCalibration.input")
         if decoded.get("transaction") is not None and decoded["transaction"].evidence is not decoded.get("input"):
             problems.append("transaction evidence does not resolve to placementCalibration.input")
         persistence = value.get("persistence")

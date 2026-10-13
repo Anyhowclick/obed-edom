@@ -1729,7 +1729,7 @@ def _placement_control(tmp_path: Path, name: str, *, host_reason: bool = True) -
     placement, studio, measure = q.PLACEMENT_CONTROL_SPECS[name]
     rows = []
     if measure in ("replay", "transparent") and host_reason:
-        rows.append({"kind": "placementProbe", "error": "Probe capture freshness could not be verified."})
+        rows.append({"kind": "placementProbeRejected", "reason": "probe-failed"})
     if measure == "frozen-video" and host_reason:
         rows.append({"kind": "placementClassifier", "reason": "stale-capture"})
     control = {
@@ -1737,8 +1737,11 @@ def _placement_control(tmp_path: Path, name: str, *, host_reason: bool = True) -
         "output": ({"state": "valid", "grant": "frac", "method": "probe"} if measure is None else
                    {"state": "invalid", "grant": None, "reason": "probe-failed"}),
         "transaction": {"isolationOk": True, "cleanupVerified": True, "restored": True,
-                        "program": {"ok": True}, "errors": [], "evidencePresent": measure is None},
-        "control": {"kind": measure, "captures": 2}, "studioAfter": studio,
+                        "program": {"ok": True},
+                        "errors": (["calibration: LiveHostError: Probe capture freshness could not be verified."]
+                                   if measure in ("replay", "transparent") else []),
+                        "evidencePresent": measure is None},
+        "control": {"kind": measure, "captures": 1 if measure == "transparent" else 2}, "studioAfter": studio,
         "hostLog": q.write_placement_json(run_dir, "host-log", rows),
     }
     if name == "failed-preview-off":
