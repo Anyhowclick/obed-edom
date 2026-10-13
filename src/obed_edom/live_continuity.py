@@ -1757,8 +1757,6 @@ def _magic_move_movies(
         for src, dst in pairs:
             carried.append((_carry(asset, src, dst), src, dst))
         movies.extend(_retire(asset, src) for src in outgoing if id(src) not in paired and src.object_id in held)
-    if sum(movie.action == "bridge" for movie, _, _ in carried) > 1:
-        raise _Refuse(f"more than one movie changes geometry at {desc}")
     for movie, src, dst in carried:
         refusal = _carry_refusal(movie.asset, src, dst, source, destination, desc)
         if refusal is None and movie.action == "bridge":
@@ -1778,6 +1776,8 @@ def _magic_move_movies(
                 )
                 gl_replay_used = movie.gl_replay is not None
         movies.append(movie)
+    if sum(m.action == "bridge" and (m.refusal is None or m.gl_replay is not None) for m in movies) > 1:
+        raise _Refuse(f"more than one movie changes geometry at {desc}")
     return sorted(movies, key=lambda movie: movie.asset)
 
 

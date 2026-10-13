@@ -247,23 +247,22 @@ def test_refuses_an_unreadable_export_file(relative, text, reason, tmp_path):
 
 
 def _add_wa0125_to_slide4(data):
-    """Slide 3 already carries a WA0125 instance; add a matching one on slide 4 so it also
-    "continues" (with different geometry) across the 3->4 magic move alongside Untitled.mov."""
+    """Slide 3 already carries a WA0125 instance; add a matching one (same trim) on slide 4 so it
+    also "continues" (with different geometry) across the 3->4 magic move alongside Untitled.mov."""
     events = copy.deepcopy(data["events"])
     movie_nodes = _find_movie_nodes(events)
     assert movie_nodes
     clone = copy.deepcopy(movie_nodes[0])
     clone["movie"] = {
         "startTime": 0,
-        "volume": 1,
-        "endTime": 45.1,
+        "volume": 0,
+        "endTime": 45.13814163208008,
         "isStreaming": False,
         "isAudioOnly": False,
         "asset": "VID-20250608-WA0125.mp4-0.0000-45.1381",
     }
     state = clone["baseLayer"]["initialState"]
-    state["position"]["pointX"] += 80
-    state["position"]["pointY"] += 80
+    state["position"]["pointY"] = 200
     clone_id = "CLONE-WA0125"
     events[0]["effects"][0]["effects"] = events[0]["effects"][0].get("effects", []) + [
         {
@@ -273,7 +272,7 @@ def _add_wa0125_to_slide4(data):
     ]
     data = {**data, "events": events}
     # the overlap rule reads the destination slide's draw order, so the clone needs a slot
-    # of its own; put it BELOW the existing movie so it adds no overlap of its own.
+    # of its own, clear of the existing movie so neither carry is refused for overlap.
     rect = (state["position"]["pointX"] - state["width"] / 2,
             state["position"]["pointY"] - state["height"] / 2, state["width"], state["height"])
     _draw_slots(data, 0).insert(1, _authored_slot(*rect, object_id=clone_id))
@@ -332,10 +331,6 @@ _MOVIE_LAYER_TRANSFORMED = "has a rotated, transformed, or off-center anchor"
             ),
             f"movie layer on slide {SLIDE1} {_MOVIE_LAYER_TRANSFORMED}", id="non-identity-affine-transform",
         ),
-        pytest.param(
-            SLIDE4, _add_wa0125_to_slide4, "more than one movie changes geometry at player index 2 -> 3",
-            id="two-geometry-changing-movies-on-one-boundary",
-        ),
         # The draw order (see the overlap section below) must be readable for every movie.
         pytest.param(
             SLIDE2, _drop_every_movie_slot, f"movie 'untitled.mov' has no draw slot on slide {SLIDE2}",
@@ -362,6 +357,37 @@ _MOVIE_LAYER_TRANSFORMED = "has a rotated, transformed, or off-center anchor"
 )
 def test_refuses_the_deck(uuid, transform, reason, tmp_path):
     assert _plan(_mutate_slide(tmp_path, uuid, transform)) == Unsupported(reason)
+
+
+@pytest.mark.parametrize("overlap_the_clone", [False, True])
+def test_only_unrefused_geometry_changes_count_towards_the_one_per_boundary_limit(overlap_the_clone, tmp_path, monkeypatch):
+    """Two movies change geometry across 3->4. With both carries clean the deck is refused (the
+    runtime animates one bridge per boundary). Artwork above the WA0125 clone refuses that carry
+    instead: a refused bridge retires (the raw player's restart), so only Untitled.mov animates and
+    the deck derives. The fixture's transition has no motion slot for the clone, so R10 is stubbed
+    out to isolate the count."""
+    from obed_edom import live_continuity
+
+    monkeypatch.setattr(live_continuity, "_bridge_timing_refusal", lambda *args: None)
+
+    def transform(data):
+        data = _add_wa0125_to_slide4(data)
+        if overlap_the_clone:
+            clone = next(e for e in data["events"][0]["effects"][0]["effects"] if e.get("objectID") == "CLONE-WA0125")
+            state = clone["baseLayer"]["initialState"]
+            right = state["position"]["pointX"] + state["width"] / 2
+            bottom = state["position"]["pointY"] + state["height"] / 2
+            _draw_slots(data, 0).append(_authored_slot(right - 40, bottom - 40, 30.0, 30.0, object_id="OVER"))
+        return data
+
+    plan = _plan(_mutate_slide(tmp_path, SLIDE4, transform))
+    if not overlap_the_clone:
+        assert plan == Unsupported("more than one movie changes geometry at player index 2 -> 3")
+        return
+    assert isinstance(plan, ContinuityPlan)
+    assert _refusal_codes(plan) == [(1, "overlap"), (3, "overlap")]
+    actions = {(m["asset"], m["action"], m.get("code")) for m in _boundary(plan, 2)["movies"]}
+    assert actions == {("untitled.mov", "bridge", None), ("vid-20250608-wa0125.mp4", "bridge", "overlap")}
 
 
 @pytest.mark.parametrize("ancestor_change", [None, "position", "rotation", "animation"])
