@@ -1,6 +1,6 @@
 # Magic Move movie still: hold the frame that was on screen
 
-Status: **DRAFT rev 1 (2026-10-13), planning only. Awaiting owner review.** Read-only against main `e9db8284`.
+Status: **APPROVED rev 1 (2026-10-13): owner took every OQ per rec (OQ-F1 fold into Stage B, OQ-F2 continuity off unchanged, OQ-F3 hold the frame on screen at move start).** Implementation lands with Stage B, not as its own PR. Read-only against main `e9db8284`.
 Owner report (Stage T G4, 2026-10-13): on `Alpha_DSK.key` 8→9→10 with continuity off, the movie's still during the
 Magic Move is "a few frames behind" the frame that was playing at the press. The owner wants it seamless.
 
@@ -86,7 +86,7 @@ Rejected:
 - **Q7 (owner):** external attach on Alpha. At the press the movie stops on the frame that was showing, travels with
   the move, and resumes from it.
 
-## 5. Owner questions
+## 5. Owner questions (resolved 2026-10-13: all per rec)
 1. **OQ-F1: fold this into Stage B as the poster hold's one-shot upload (§3)?** **Rec: yes.** It turns B's documented
    frame-0 residual into an exact hold and reuses B's binding and gates.
 2. **OQ-F2: continuity off keeps the stock frame-0 still plus restart.** **Rec: yes.** Off is the escape hatch. An
