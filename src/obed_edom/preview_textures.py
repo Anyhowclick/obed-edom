@@ -429,10 +429,13 @@ def _groups(slides: list[_Slide], hits: list[_Hit]) -> list[_Group]:
     for hit in hits:
         if hit.rule == "R1b" or any(g.slide == hit.slide and hit.leaf in g.leaves for g in groups):
             continue
+        slide, text = slides[hit.slide], _leaf_text(slides[hit.slide], hit.leaf)
         members = [
             leaf
-            for leaf in slides[hit.slide].leaves
-            if leaf.texture == hit.leaf.texture and _close(leaf.rect, hit.leaf.rect, GROUP_TOL)
+            for leaf in slide.leaves
+            if leaf.texture == hit.leaf.texture
+            and _close(leaf.rect, hit.leaf.rect, GROUP_TOL)
+            and _leaf_text(slide, leaf) == text
         ]
         groups.append(_Group(hit.slide, hit.leaf.texture, sorted(members, key=lambda leaf: leaf.key)))
     return groups
@@ -459,8 +462,12 @@ def _slot_text(slide: _Slide, event: int, rect: tuple[float, ...]) -> str | None
     return found[0] if len(found) == 1 else None
 
 
+def _leaf_text(slide: _Slide, leaf: _Leaf) -> str | None:
+    return _slot_text(slide, leaf.event, leaf.rect) if leaf.kind == TEXT_TYPE else None
+
+
 def _group_text(slide: _Slide, group: _Group) -> str | None:
-    return _slot_text(slide, group.first.event, group.first.rect) if group.first.kind == TEXT_TYPE else None
+    return _leaf_text(slide, group.first)
 
 
 def _group_movie(slide: _Slide, group: _Group) -> str | None:
@@ -564,7 +571,7 @@ def _verify(slides: list[_Slide], fix: _Fix, renderer: _Renderer, scratch: Path)
         corr = _corr(_thumb(renderer, source, texture), _thumb(renderer, slide, slide.movies[oid][1]))
         fix.verify = {"corr": round(corr, 3) if corr is not None else None}
         return corr is not None and corr >= CORR_MATCH
-    return True
+    return False
 
 
 def _plan(
@@ -575,7 +582,8 @@ def _plan(
     bad_textures: dict[int, set[str]] = {}
     for hit in hits:
         bad_keys.setdefault(hit.slide, set()).add(hit.leaf.key)
-        bad_textures.setdefault(hit.slide, set()).add(hit.leaf.texture)
+        if hit.rule != "R1":
+            bad_textures.setdefault(hit.slide, set()).add(hit.leaf.texture)
     fixes: list[_Fix] = []
     refused = [
         (slides[h.slide].ordinal, _describe(slides[h.slide], _Group(h.slide, h.leaf.texture, [h.leaf])))
@@ -737,8 +745,7 @@ def _postcondition(
             donor = renderer.thumb(source.pdf_path, source.page_index(fix.donor[1]))
             if grafted is None or donor is None or not np.array_equal(grafted, donor):
                 return f"slide {slide.ordinal} grafted page {fix.new[:8]} does not render as its donor"
-    for index in sorted({fix.group.slide for fix in fixes}):
-        slide = after[index]
+    for slide in after:
         jsonp = slide.json_path.with_suffix(".jsonp")
         if jsonp.is_file() and read_jsonish(jsonp).get("json") != slide.payload:
             return f"slide {slide.ordinal} .jsonp differs from its .json"

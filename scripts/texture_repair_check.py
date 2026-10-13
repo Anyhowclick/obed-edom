@@ -9,7 +9,8 @@ g2 (headless, continuity off, GL replay off): a temp copy of the Alpha 7e3c expo
   (a) settled slide 10: each label crop correlates >= 0.9 with the same crop of Keynote's flattened frame (AF8F0F);
   (b) slides 8 and 9: Vision OCR of each label crop equals the slide's accessibility text;
   (c) a mid-frame of the 9->10 Magic Move: WA0125's slot correlates >= 0.9 with WA0125's poster, < 0.5 with WA0121's.
-`--no-repair` is the negative control: it must FAIL (a) and (c).
+`--no-repair` is the negative control: it must FAIL (a) and (c). Flat crops, missing poster references or no measurable
+mid-frame make a check INCONCLUSIVE, and any INCONCLUSIVE makes the run INCONCLUSIVE (exit 3) in both arms.
 
 usage: uv run python scripts/texture_repair_check.py g1 --out RESULT.json
        uv run python scripts/texture_repair_check.py g2 --out DIR [--no-repair] [--export HTML --manifest MANIFEST.json]
@@ -56,8 +57,8 @@ REFUSAL_3B9019 = (
 )
 EXPECT: dict[str, dict[str, Any]] = {
     "alpha-dsk-textures/html-unmodified": {"kind": "repaired", "rules": {"D1": 1, "D2": 3, "D3": 1}},
-    "qual-decks/D2/html-unmodified": {"kind": "repaired", "rules": {"D3": None}},
-    "qual-decks/D2/html-unmodified.across-first-build": {"kind": "repaired", "rules": {"D3": None}},
+    "qual-decks/D2/html-unmodified": {"kind": "repaired", "rules": {"D3": 2}},
+    "qual-decks/D2/html-unmodified.across-first-build": {"kind": "repaired", "rules": {"D3": 1}},
     "preview/3b9019": {"kind": "refused", "message": REFUSAL_3B9019},
 }
 DEFAULT_EXPECT = {"kind": "0 hits"}
@@ -73,6 +74,8 @@ BURST_S = 2.0
 CORR_PASS, CORR_OTHER_MAX = 0.9, 0.5
 FLAT_STD = 2.0
 IOU_MIN = 0.5
+PASS, FAIL, INCONCLUSIVE = "PASS", "FAIL", "INCONCLUSIVE"
+EXIT_INCONCLUSIVE = 3
 MAX_LOAD, LOAD_PATIENCE_S = 3.0, 60.0
 STAGE_MAP_JS = (
     "(function(){var el=document.getElementById('stage');if(!el)return null;var r=el.getBoundingClientRect();"
@@ -143,9 +146,7 @@ def matches(outcome: dict[str, Any], expected: dict[str, Any], hits_after: list[
     if expected["kind"] == "refused":
         return outcome["message"] == expected["message"]
     if expected["kind"] == "repaired":
-        if hits_after or set(outcome["rules"]) != set(expected["rules"]):
-            return False
-        return all(count is None or outcome["rules"][rule] == count for rule, count in expected["rules"].items())
+        return not hits_after and outcome["rules"] == expected["rules"]
     return True
 
 
@@ -181,6 +182,10 @@ def run_g1(out: Path) -> int:
         before_n = "-" if row["hitsBefore"] is None else len(row["hitsBefore"])
         after_n = "-" if row["hitsAfter"] is None else len(row["hitsAfter"])
         print(f"{'ok  ' if row['ok'] else 'FAIL'} {label}: hits before {before_n} | {describe(row['outcome'])} | hits after {after_n}", flush=True)
+    for label in sorted(set(EXPECT) - {row["export"] for row in rows}):
+        rows.append({"export": label, "outcome": {"kind": "missing"}, "expected": EXPECT[label], "ok": False})
+        failed += 1
+        print(f"FAIL {label}: expected export not found", flush=True)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"gate": "G1", "rows": rows, "failed": failed}, indent=1, ensure_ascii=False, default=str))
     print(f"G1: {'PASS' if not failed else f'FAIL ({failed} unexpected)'}")
@@ -313,6 +318,12 @@ def render_page(pdf: Path, index: int, size: tuple[int, int], *, crop: tuple[flo
     return np.frombuffer(data, np.uint8).reshape(h, Quartz.CGImageGetBytesPerRow(image))[:, :w].astype(float)
 
 
+def combine(verdicts: list[str]) -> str:
+    if not verdicts or INCONCLUSIVE in verdicts:
+        return INCONCLUSIVE
+    return PASS if all(v == PASS for v in verdicts) else FAIL
+
+
 def corr(a: np.ndarray, b: np.ndarray) -> float | None:
     if a.std() < FLAT_STD or b.std() < FLAT_STD:
         return None
@@ -350,8 +361,9 @@ def check_labels_vs_oracle(root: Path, slides: list[dict[str, Any]], shot: Image
         save_grey(screen, out / f"a-slide{LABEL_SLIDE}-label{k}-screen.png")
         save_grey(oracle, out / f"a-slide{LABEL_SLIDE}-label{k}-oracle.png")
         value = corr(screen, oracle)
-        rows.append({**label, "corr": None if value is None else round(value, 3), "pass": value is not None and value >= CORR_PASS})
-    return {"labels": rows, "pass": bool(rows) and all(r["pass"] for r in rows)}
+        verdict = INCONCLUSIVE if value is None else PASS if value >= CORR_PASS else FAIL
+        rows.append({**label, "corr": None if value is None else round(value, 3), "verdict": verdict})
+    return {"labels": rows, "verdict": combine([r["verdict"] for r in rows])}
 
 
 def check_labels_ocr(root: Path, slides: list[dict[str, Any]], ordinal: int, shot: Image.Image, stage: dict[str, float], out: Path) -> dict[str, Any]:
@@ -365,14 +377,22 @@ def check_labels_ocr(root: Path, slides: list[dict[str, Any]], ordinal: int, sho
         crop = screen_crop(shot, stage, (x - pad, y - pad, w + 2 * pad, h + 2 * pad), (3 * (w + 2 * pad), 3 * (h + 2 * pad)))
         png = out / f"b-slide{ordinal}-label{k}.png"
         save_grey(crop, png)
+        if crop.std() < FLAT_STD:
+            rows.append({**label, "ocr": None, "verdict": INCONCLUSIVE, "reason": "flat crop"})
+            continue
         text = ocr.ocr_text(png)
-        rows.append({**label, "ocr": text, "pass": norm_text(text) == norm_text(label["text"])})
-    return {"ordinal": ordinal, "labels": rows, "pass": bool(rows) and all(r["pass"] for r in rows)}
+        if ocr.vision_error():
+            rows.append({**label, "ocr": None, "verdict": INCONCLUSIVE, "reason": ocr.vision_error()})
+            continue
+        rows.append({**label, "ocr": text, "verdict": PASS if norm_text(text) == norm_text(label["text"]) else FAIL})
+    return {"ordinal": ordinal, "labels": rows, "verdict": combine([r["verdict"] for r in rows])}
 
 
 def check_mm_midframe(root: Path, slides: list[dict[str, Any]], host: Any, stage: dict[str, float], out: Path) -> dict[str, Any]:
     uuid, payload = slide_payload(root, slides, MM_SLIDE)
     posters = movie_posters(payload)
+    if not {MOVIE, OTHER_MOVIE} <= set(posters):
+        return {"verdict": INCONCLUSIVE, "reason": f"missing poster reference: {sorted({MOVIE, OTHER_MOVIE} - set(posters))}"}
     path = mm_slot_path(payload, posters[MOVIE]["objectID"])
     pdf = root / "assets" / uuid / "assets" / f"{uuid}.pdf"
     probe = (64, 36)
@@ -393,14 +413,19 @@ def check_mm_midframe(root: Path, slides: list[dict[str, Any]], host: Any, stage
         for p in np.linspace(0.0, 1.0, 51):
             crop = screen_crop(frame, stage, rect_at(path, p), probe, origin)
             values = {name: corr(crop, ref) for name, ref in refs.items()}
-            score = max((v for v in values.values() if v is not None), default=-1.0)
+            if None in values.values():
+                continue
+            score = max(values.values())
             if best is None or score > best[0]:
                 best = (score, float(p), values)
-        scored.append({"t": t, "p": round(best[1], 2), "corr": {k: None if v is None else round(v, 3) for k, v in best[2].items()}})
-    mid = [s for s in scored if 0.25 <= s["p"] <= 0.75]
+        if best is None:
+            scored.append({"t": t, "p": None, "corr": None})
+            continue
+        scored.append({"t": t, "p": round(best[1], 2), "corr": {k: round(v, 3) for k, v in best[2].items()}})
+    mid = [s for s in scored if s["p"] is not None and 0.25 <= s["p"] <= 0.75]
     record: dict[str, Any] = {"path": path, "frames": scored}
     if not mid:
-        return {**record, "pass": False, "reason": "no burst frame between 25% and 75% of the Magic Move"}
+        return {**record, "verdict": INCONCLUSIVE, "reason": "no measurable burst frame between 25% and 75% of the Magic Move"}
     chosen = min(mid, key=lambda s: abs(s["p"] - 0.5))
     k = scored.index(chosen)
     frames[k][1].save(out / "c-mm-midframe.png")
@@ -408,8 +433,7 @@ def check_mm_midframe(root: Path, slides: list[dict[str, Any]], host: Any, stage
     size = (round(full[2]), round(full[3]))
     save_grey(screen_crop(frames[k][1], stage, full, size, origin), out / "c-mm-slot.png")
     own, other = chosen["corr"][MOVIE], chosen["corr"][OTHER_MOVIE]
-    ok = own is not None and other is not None and own >= CORR_PASS and other < CORR_OTHER_MAX
-    return {**record, "chosen": chosen, "pass": ok}
+    return {**record, "chosen": chosen, "verdict": PASS if own >= CORR_PASS and other < CORR_OTHER_MAX else FAIL}
 
 
 def run_g2(args: argparse.Namespace) -> int:
@@ -454,17 +478,26 @@ def run_g2(args: argparse.Namespace) -> int:
             checks["c"] = check_mm_midframe(root, slides, host, stage, out)
         finally:
             host.stop()
-    verdicts = {"a": checks["a"]["pass"], "b": all(b["pass"] for b in checks["b"]), "c": checks["c"]["pass"]}
+    verdicts = {"a": checks["a"]["verdict"], "b": combine([b["verdict"] for b in checks["b"]]), "c": checks["c"]["verdict"]}
+    overall = combine(list(verdicts.values()))
     result.update(checks=checks, verdicts=verdicts, uptimeEnd=uptime())
+    for name, verdict in verdicts.items():
+        print(f"({name}) {verdict}")
+    if INCONCLUSIVE in verdicts.values():
+        result["overall"] = INCONCLUSIVE
+        print("G2: INCONCLUSIVE — invalid or missing evidence; nothing is confirmed")
+        code = EXIT_INCONCLUSIVE
+    elif args.no_repair:
+        confirmed = verdicts["a"] == FAIL and verdicts["c"] == FAIL
+        result["overall"] = "negative control confirmed" if confirmed else "negative control NOT confirmed"
+        print(f"negative control: {'confirmed ((a) and (c) measured FAIL)' if confirmed else 'NOT confirmed — the instrument does not see the defect'}")
+        code = 0 if confirmed else 1
+    else:
+        result["overall"] = overall
+        print(f"G2: {overall}")
+        code = 0 if overall == PASS else 1
     (out / "result.json").write_text(json.dumps(result, indent=1, ensure_ascii=False, default=str))
-    for name, ok in verdicts.items():
-        print(f"({name}) {'PASS' if ok else 'FAIL'}")
-    if args.no_repair:
-        confirmed = not verdicts["a"] and not verdicts["c"]
-        print(f"negative control: {'confirmed ((a) and (c) FAIL)' if confirmed else 'NOT confirmed — the instrument does not see the defect'}")
-        return 0 if confirmed else 1
-    print(f"G2: {'PASS' if all(verdicts.values()) else 'FAIL'}")
-    return 0 if all(verdicts.values()) else 1
+    return code
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

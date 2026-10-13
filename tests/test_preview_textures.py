@@ -249,16 +249,21 @@ def test_repair_picks_the_rule_and_writes_a_consistent_export(tmp_path, build, e
 
 
 def test_refusal_names_every_unrepairable_object_and_writes_nothing(tmp_path):
-    swap = [("Point 1", TEXT_BOX)]
+    # Event 1 swaps the label's text in place under the same bad id: it is its own group, and the
+    # event 2 "Point 1" donor must not fix it. The Magic Move lands a contents.to on slide 2's
+    # non-poster image: D2 has no content check for it, so it is refused.
+    point1, point2 = [("Point 1", TEXT_BOX)], [("Point 2", TEXT_BOX)]
+    image = (500, 500, 40, 30)
     slides = _export(
         tmp_path,
         [
             (
                 "S1",
-                {"BAD": (400, 300), "POINT2": (100, 20), "IMGBAD": (400, 300), "IMG": (40, 30)},
+                {"BAD": (400, 300), "GOOD": (100, 20), "IMGBAD": (400, 300), "IMG": (40, 30), "PTO": (200, 100)},
                 [
-                    _event([_slot(LABEL, "BAD"), _slot((500, 500, 40, 30), "IMGBAD", kind=5)], texts=swap),
-                    _event([_slot(LABEL, "POINT2"), _slot((500, 500, 40, 30), "IMG", kind=5)], texts=[("Point 2", TEXT_BOX)]),
+                    _event([_slot(LABEL, "BAD"), _slot(image, "IMGBAD", kind=5)], texts=point1),
+                    _event([_slot(LABEL, "BAD"), _slot(image, "IMG", kind=5)], texts=point2),
+                    _event([_slot(LABEL, "GOOD")], [_magic_move((250, 300, 200, 100), "PTO", "PTO", 50)], texts=point1),
                 ],
             ),
             (
@@ -273,7 +278,7 @@ def test_refusal_names_every_unrepairable_object_and_writes_nothing(tmp_path):
         _repair(tmp_path, slides)
     assert str(raised.value) == (
         "Cannot repair Keynote's HTML export: "
-        "slide 1 ('Point 1' label): its texture is mis-mapped and no verified replacement exists; "
+        "slide 1 ('Point 2' label): its texture is mis-mapped and no verified replacement exists; "
         "slide 1 (40×30 image): its texture is mis-mapped and no verified replacement exists; "
         "slide 2 (200×100 image): its texture is mis-mapped and no verified replacement exists"
     )
