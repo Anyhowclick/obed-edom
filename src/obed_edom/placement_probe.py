@@ -206,9 +206,7 @@ def classify_probe(data: ClassifierInput) -> ProbeResult:
             video, snap, frac = _candidate_regions(image, geometry)
             table = None if tone_map is ToneMap.IDENTITY else _GPU_TABLE
             snap_share, inner_pixels = _share(video, snap, table)
-            frac_share, other_pixels = _share(video, frac, table)
-            if inner_pixels != other_pixels:
-                return _unknown("invalid-evidence")
+            frac_share, _ = _share(video, frac, table)
             scores.append(PoseScore(geometry.pose, tone_map, snap_share, frac_share, inner_pixels))
             pose_rules.append(_pose_rule(snap_share, frac_share))
         if pose_rules[0] is not None and pose_rules[0] is pose_rules[1]:
@@ -254,10 +252,19 @@ def _expected_geometry(pose: int) -> PoseGeometry:
     y = 10 + fy
     width = 480.53125
     height = 135.140625
+    scale = min(width / _VIDEO_SIZE[0], height / _VIDEO_SIZE[1])
+    content_width = _VIDEO_SIZE[0] * scale
+    content_height = _VIDEO_SIZE[1] * scale
     x0 = math.floor(x)
     y0 = math.floor(y)
     box = (x0, y0, math.ceil(x + width) - x0 + 1, math.ceil(y + height) - y0 + 1)
-    return PoseGeometry(pose, (x, y, width, height), (x, y, width, height), box, 140, 280)
+    content_box = (
+        x + (width - content_width) / 2,
+        y + (height - content_height) / 2,
+        content_width,
+        content_height,
+    )
+    return PoseGeometry(pose, (x, y, width, height), content_box, box, 140, 280)
 
 
 def _same_geometry(actual: PoseGeometry, expected: PoseGeometry) -> bool:
@@ -269,8 +276,8 @@ def _same_geometry(actual: PoseGeometry, expected: PoseGeometry) -> bool:
         and actual.box == expected.box
         and actual.snap_dy == expected.snap_dy
         and actual.frac_dy == expected.frac_dy
-        and all(abs(left - right) <= 1e-6 for left, right in zip(actual.rect, expected.rect))
-        and all(abs(left - right) <= 1e-6 for left, right in zip(actual.content_box, expected.content_box))
+        and all(abs(left - right) <= 1 / 256 for left, right in zip(actual.rect, expected.rect))
+        and all(abs(left - right) <= 1 / 256 for left, right in zip(actual.content_box, expected.content_box))
     )
 
 

@@ -905,6 +905,18 @@ def snap_shift() -> list[int]:
     return counts
 
 
+def frac_underlay_omit() -> list[int]:
+    counts = []
+    for stock in live_runtime.SUPPORTED_PLAYERS:
+        player = next((f.read_bytes() for f in probe.FIXTURES.glob("**/assets/player/main.js")
+                       if probe.sha256_bytes(f.read_bytes()) == stock), None)
+        if player is None:
+            pytest.skip("supported player export not available")
+        served = probe.served_player(player, "on", "frac-underlay-omit")
+        counts.append(served.count(b'g=x.getContext("2d");if("frac"===pl)'))
+    return counts
+
+
 def raw_navigate(ack: bool) -> tuple[str, int]:
     """`navigate` on a fake raw page (hash 4 idle, target 5): the hash stays stale for a while after Space (it is
     rewritten only at the next idle), so one press must wait for it to move instead of pressing again (the live
@@ -1203,6 +1215,7 @@ CASES = [
      lambda: [int(v) for v in probe.coverage_support(np.eye(1, 40, 3, dtype=bool), (1, 60))[0].nonzero()[0]], [4, 5]),
     ("r12 round: perfect-shift passing invalidates the reference gate", lambda: round_gate(("perfect-shift", "reference", "PASS"), "reference"), "INCONCLUSIVE"),
     ("r17 m-snap-shift moves the holder one device px right, once on every supported player and its omit twin", snap_shift, [1, 1]),
+    ("placement CEF underlay omission splice matches once on both pinned players", frac_underlay_omit, [1, 1]),
     ("r17 DX-1 alpha arm whose page never received the grant", lambda: arm_outcome("m-on", mutate="placement-invalid"), "INCONCLUSIVE"),
     ("r17 grant-chrome: host-committed snap binds a holder", lambda: arm_check("grant-chrome", "grant"), "PASS"),
     ("r17 grant-attach: no grant (attached), published take without a holder", lambda: arm_outcome("grant-attach", holder=False), "MATCH"),
@@ -1216,13 +1229,15 @@ CASES = [
     ("r17 life-grant-reload already snap before the re-grant", lambda: arm_outcome("life-grant-reload", mutate="reload-snap"), "INCONCLUSIVE"),
     *[(f"r17 {n}: no channel, no holder, cross-fade model", lambda n=n: arm_outcome(n, holder=False), "MATCH") for n in ("m-raw-prod", "m-preview-prod")],
     *[(f"placement O1 {n}: forged production page binds no holder", lambda n=n: arm_outcome(n, holder=False), "MATCH")
-      for n in sorted(name for name in probe.ARMS if "-prod-forge-" in name)],
+      for n in sorted(name for name in probe.ARMS if "-prod-forge-" in name and not name.endswith("-kb"))],
+    ("placement O1 live known-bad forged raw page binds a holder",
+     lambda: arm_outcome("m-raw-prod-forge-snap-getter-kb"), "MATCH"),
     ("placement O1 forged production page binding a holder",
      lambda: arm_outcome("m-raw-prod-forge-frac-getter", holder=True), "MISMATCH"),
-    ("placement CEF profile carries clips, tone, nooffset reds, wrong-rule and DSK cost",
-     lambda: ({"m-snap-cef", "m-snap-cef-near-x", "m-snap-cef-near-y", "m-snap-cef-far-x", "m-snap-cef-far-y",
-               "m-tone-cef", "m-tone-raw-cef", "m-snap-cef-nooffset-x", "m-snap-cef-nooffset-y", "wrongrule-cef",
-               "m-snap-cef-dsk"} <= set(probe.CEF_PLACEMENT.arms), probe.CEF_PLACEMENT.placement), (True, "frac")),
+    ("placement CEF fractional-only underlay omission refuses the holder",
+     lambda: arm_outcome("m-snap-cef-underlay-omit", holder=False), "MATCH"),
+    ("placement CEF fractional stage origin publishes no holder",
+     lambda: arm_outcome("m-geo-frac-origin-cef", holder=False), "MATCH"),
     ("DX-1 m-raw-prod: the destination's movies after the hand-off do not empty the in-only class",
      lambda: arm_outcome("m-raw-prod", holder=False, mutate="dest-video"), "MATCH"),
     ("r17 m-raw-prod binding a holder", lambda: arm_check("m-raw-prod", "scope"), "PASS"),

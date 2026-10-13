@@ -236,8 +236,10 @@ def test_stop_only_stops_owned_resources_and_refuses_restart(tmp_path, monkeypat
     output = host(tmp_path, monkeypatch)
     output.observe()
     fake = FakeCdp.instances[0]
+    placement = dict(output.output["placement"])
     output.stop()
     assert fake.stopped
+    assert output.output["placement"] == placement
     with pytest.raises(live_host.LiveHostError, match="stopped"):
         output.observe()
 
@@ -781,7 +783,11 @@ def test_program_html_injects_overlay_first_and_fit_once(tmp_path, monkeypatch):
     assert probe_url == f"http://127.0.0.1:1234/__obed_probe/{spec.run_id}/index.html"
     assert server._probe_asset(f"__obed_probe/{spec.run_id}/index.html") == (f"run={spec.run_id}".encode(), "text/html")
     assert server._probe_asset(f"__obed_probe/{spec.run_id}/placement_probe.mp4") == (b"pattern", "video/mp4")
-    server.set_probe_run(None)
+    replacement = placement_probe.ProbeSpec("2" * 32, 1920, 1080, 50, 1.0)
+    server.set_probe_run(replacement)
+    server.set_probe_run(None, run_id=spec.run_id)
+    assert server._probe_asset(f"__obed_probe/{replacement.run_id}/index.html") == (f"run={replacement.run_id}".encode(), "text/html")
+    server.set_probe_run(None, run_id=replacement.run_id)
     assert server._probe_asset(f"__obed_probe/{spec.run_id}/index.html") is None
     server.httpd = None
 
@@ -3245,9 +3251,40 @@ def commits(fake, value="snap"):
         ({"visibilityEvents": 0, "frames": 8, "baselineFrameMs": None, "maxRafGapMs": 20.0, "media": []}, None),
         ({"visibilityEvents": 0, "frames": 8, "baselineFrameMs": 20.0, "maxRafGapMs": 20.0,
           "media": [{"id": "v", "playing": True, "monotonic": True, "maxStallMs": 33.4, "frameMs": 33.3}]}, False),
+        (None, True),
     ],
 )
 def test_program_guard_applies_program_liveness_thresholds(telemetry, expected):
+    if telemetry is None:
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            pytest.skip("Node is required to exercise Program guard media tracking")
+        probe = live_host._ProgramGuard(None, "program")
+        script = (
+            "const vm=require('vm');const BEGIN=" + json.dumps(probe._expr("begin"))
+            + ";const FINISH=" + json.dumps(probe._expr("finish")) + ";"
+            "function run(kind){let q=[],videos=[];"
+            "function video(paused,loop){return {id:'same',currentSrc:'asset.mp4',paused:paused,ended:false,loop:loop,readyState:4,currentTime:0}}"
+            "if(kind==='shared')videos=[video(false,false),video(true,false)];else videos=[video(false,kind==='loop')];"
+            "const c={};c.window=c;c.document={querySelectorAll:()=>videos,addEventListener:()=>{},removeEventListener:()=>{}};"
+            "c.requestAnimationFrame=f=>{q.push(f);return q.length};c.cancelAnimationFrame=()=>{};vm.createContext(c);vm.runInContext(BEGIN,c);"
+            "const seq=kind==='loop'?[.9,.92,.02,.04,.06]:[.1,.12,.14,.16,.18];"
+            "for(let i=0;i<seq.length;i++){videos[0].currentTime=seq[i];if(kind==='end'&&i>=2)videos[0].ended=true;const f=q.shift();f(i*20)}"
+            "return vm.runInContext(FINISH,c)}"
+            "console.log(JSON.stringify({shared:run('shared'),loop:run('loop'),end:run('end')}));"
+        )
+        rows = json.loads(subprocess.run([node, "-e", script], check=True, text=True, capture_output=True).stdout)
+        assert len(rows["shared"]["media"]) == 2
+        assert len({item["id"] for item in rows["shared"]["media"]}) == 2
+        assert rows["shared"]["media"][0]["monotonic"] is True
+        assert rows["shared"]["media"][1]["playing"] is False
+        assert rows["loop"]["media"][0]["monotonic"] is True
+        assert rows["end"]["media"][0]["monotonic"] is True
+        return
+
     class Transport:
         def evaluate_in(self, _context, expression, deadline_s=None):
             if "guard exists" in expression:
@@ -3269,7 +3306,9 @@ def test_managed_probe_state_machine_renews_suppresses_and_stops(tmp_path, monke
             self.run = None
             self.runs = []
 
-        def set_probe_run(self, spec):
+        def set_probe_run(self, spec, *, run_id=None):
+            if spec is None and run_id is not None and (self.run is None or self.run.run_id != run_id):
+                return None
             self.run = spec
             self.runs.append(spec.run_id if spec else None)
             return None if spec is None else f"http://127.0.0.1:9/__obed_probe/{spec.run_id}/index.html"
@@ -3305,11 +3344,11 @@ def test_managed_probe_state_machine_renews_suppresses_and_stops(tmp_path, monke
             ("bt709", "bt709", "bt709", False), (), (), (),
         )
 
-    def result(request, *, program=True, errors=(), persistence=None):
+    def result(request, *, program=True, errors=(), persistence=None, with_evidence=True, isolation=True):
         return managed_obs.CalibrationResult(
-            request, evidence(request),
+            request, evidence(request) if with_evidence else None,
             managed_obs.ProgramCheck(program, 0, 20.0, 40.0, (), None),
-            True, True, True, persistence, errors, 1.0, 2.0,
+            isolation, True, True, persistence, errors, 1.0, 2.0,
         )
 
     adapter = Adapter()
@@ -3361,6 +3400,30 @@ def test_managed_probe_state_machine_renews_suppresses_and_stops(tmp_path, monke
     output._probe_thread.join(2)
     assert output.output["placement"]["grant"] == "frac"
 
+    current = FakeCdp.instances[-1]
+    current_evaluate = current.evaluate
+    execute_disconnected = False
+
+    def disconnect_execute_once(expression, deadline_s=None):
+        nonlocal execute_disconnected
+        if not execute_disconnected and "__obedLive" in expression:
+            execute_disconnected = True
+            raise live_host.LiveHostError("Program browser CDP connection failed.")
+        return current_evaluate(expression, deadline_s)
+
+    current.evaluate = disconnect_execute_once
+    advanced = output.execute("advance")
+    replacement = FakeCdp.instances[-1]
+    assert advanced.scene_id == "0" and replacement is not current
+    assert replacement.keys == [" "]
+    assert adapter.cancelled and output.output["placement"]["reason"] == "cancelled"
+
+    output.observe()
+    after_advance = adapter.starts[-1]
+    after_advance[3].set_result(result(after_advance[0]))
+    output._probe_thread.join(2)
+    assert output.output["placement"]["grant"] == "frac"
+
     output._lease_deadline_s = time.monotonic() - 1
     assert not output._renew_probe_lease()
     assert output.output["placement"]["reason"] == "leaseLapsed"
@@ -3368,22 +3431,98 @@ def test_managed_probe_state_machine_renews_suppresses_and_stops(tmp_path, monke
     fake = FakeCdp.instances[-1]
     fake.reload()
     output.observe()
-    disturbed = adapter.starts[-1]
-    disturbed[3].set_result(result(disturbed[0], program=False))
-    output._probe_thread.join(2)
-    assert output.output["placement"]["automaticProbesDisabled"] is True
-    starts = len(adapter.starts)
+    stale = adapter.starts[-1]
+    classifier_entered = threading.Event()
+    classifier_release = threading.Event()
+
+    def blocking_classifier(_data):
+        classifier_entered.set()
+        classifier_release.wait(2)
+        return classified
+
+    monkeypatch.setattr(live_host, "classify_probe", blocking_classifier)
+    stale[3].set_result(result(stale[0]))
+    assert classifier_entered.wait(2)
     fake.reload()
     output.observe()
+    classifier_release.set()
+    output._probe_thread.join(2)
+    assert output.output["placement"]["grant"] is None
+    monkeypatch.setattr(live_host, "classify_probe", lambda _data: classified)
+    output.observe()
+    disturbed = adapter.starts[-1]
+    disturbed[3].set_result(result(disturbed[0], program=False, with_evidence=False))
+    output._probe_thread.join(2)
+    assert output.output["placement"]["reason"] == "program-disturbed"
+    assert output.output["placement"]["automaticProbesDisabled"] is True
+    starts = len(adapter.starts)
+
+    same_engine = adapter.engine
+    adapter.engine = None
+    output.observe()
+    assert output.output["placement"]["automaticProbesDisabled"] is True
+    fake.reload()
+    adapter.engine = same_engine
+    output.observe()
     assert len(adapter.starts) == starts
+    assert output.output["placement"]["automaticProbesDisabled"] is True
 
     adapter.engine = managed_obs.EngineIdentity(43, 101.0, 4)
     output.observe()
     assert len(adapter.starts) == starts + 1
     relaunched = adapter.starts[-1]
-    relaunched[3].set_result(result(relaunched[0], program=False))
+    relaunched[3].set_result(result(relaunched[0], with_evidence=False))
     output._probe_thread.join(2)
+    assert output.output["placement"]["reason"] == "probe-failed"
+    assert output.output["placement"]["automaticProbesDisabled"] is False
+
+    fake.reload()
+    output.observe()
+    isolation = adapter.starts[-1]
+    isolation[3].set_result(result(isolation[0], with_evidence=False, isolation=False))
+    output._probe_thread.join(2)
+    assert output.output["placement"]["reason"] == "isolation-failed"
     assert output.output["placement"]["automaticProbesDisabled"] is True
+
+    suppressed = FakeCdp.instances[-1]
+    suppressed_evaluate = suppressed.evaluate
+    suppressed_failed = False
+
+    def reconnect_while_suppressed(expression, deadline_s=None):
+        nonlocal suppressed_failed
+        if not suppressed_failed and "__obedLive" in expression:
+            suppressed_failed = True
+            raise live_host.LiveHostError("Program browser CDP connection failed.")
+        return suppressed_evaluate(expression, deadline_s)
+
+    suppressed.evaluate = reconnect_while_suppressed
+    timed_out = []
+
+    def timeout_factory(*args, **kwargs):
+        replacement = reconnect_factory(*args, **kwargs)
+        replacement.visible = True
+        evaluate_in = replacement.evaluate_in
+
+        def timeout_revoke(context, expression, deadline_s=None):
+            if expression == live_host._placement_set_expr(replacement.token, "invalid"):
+                raise live_host.LiveHostError("Program browser did not answer CDP Runtime.evaluate in time.")
+            return evaluate_in(context, expression, deadline_s)
+
+        replacement.evaluate_in = timeout_revoke
+        timed_out.append((replacement, evaluate_in))
+        return replacement
+
+    output.transport_factory = timeout_factory
+    with pytest.raises(live_host.LiveHostError, match="connection failed"):
+        output.observe()
+    replacement, replacement_evaluate_in = timed_out[-1]
+    assert output.output["placement"]["reason"] == "disconnected"
+    assert replacement.visible and output._reconnect_revoke_required
+    replacement.evaluate_in = replacement_evaluate_in
+    reconnected = output.observe()
+    assert reconnected.output["placement"]["reason"] == "not-calibrated"
+    assert reconnected.output["placement"]["automaticProbesDisabled"] is True
+    fake = FakeCdp.instances[-1]
 
     scheduled = output.execute("recalibrate")
     assert scheduled.output["placement"]["state"] == "probing"
@@ -3405,6 +3544,45 @@ def test_managed_probe_state_machine_renews_suppresses_and_stops(tmp_path, monke
     output.execute("advance")
     assert sum(expression == leased for expression, _context in fake.targeted) == renewals + 1
 
+    entered = threading.Event()
+    release = threading.Event()
+    evaluate_in = fake.evaluate_in
+
+    def blocked_renew(context, expression, deadline_s=None):
+        if expression == leased:
+            entered.set()
+            release.wait(2)
+        return evaluate_in(context, expression, deadline_s)
+
+    fake.evaluate_in = blocked_renew
+    renewal = threading.Thread(target=output._renew_probe_lease)
+    renewal.start()
+    assert entered.wait(2)
+    output.execute("recalibrate")
+    release.set()
+    renewal.join(2)
+    assert (output.output["placement"]["state"], output.output["placement"]["reason"]) == ("probing", "calibrating")
+    assert output.output["placement"]["grant"] is None
+    pending = adapter.starts[-1]
+    pending[3].set_result(result(pending[0], with_evidence=False))
+    output._probe_thread.join(2)
+
+    fake.evaluate_in = evaluate_in
+    starts = len(adapter.starts)
+
+    def revoke_timeout(context, expression, deadline_s=None):
+        if expression == live_host._placement_set_expr(fake.token, "invalid"):
+            raise live_host.LiveHostError("Program browser did not answer CDP Runtime.evaluate in time.")
+        return evaluate_in(context, expression, deadline_s)
+
+    fake.evaluate_in = revoke_timeout
+    with pytest.raises(live_host.PlayerCommandRejected, match="Waiting for connection"):
+        output.execute("recalibrate")
+    assert len(adapter.starts) == starts
+    assert output._reconnect_revoke_required
+    assert output.output["placement"]["reason"] == "disconnected"
+    fake.evaluate_in = evaluate_in
+
     output.execute("recalibrate")
     pending_id = output.output["placement"]["probeId"]
     output.stop()
@@ -3412,6 +3590,9 @@ def test_managed_probe_state_machine_renews_suppresses_and_stops(tmp_path, monke
     assert output._probe_thread is None or not output._probe_thread.is_alive()
     assert output._renew_thread is None or not output._renew_thread.is_alive()
     assert output.output["placement"]["reason"] == "stopped"
+    renewal_thread = output._renew_thread
+    output._start_renewal_thread()
+    assert output._renew_thread is renewal_thread
 
 
 def test_managed_probe_measure_builds_bound_fresh_serial_evidence(tmp_path, monkeypatch):
@@ -3433,6 +3614,7 @@ def test_managed_probe_measure_builds_bound_fresh_serial_evidence(tmp_path, monk
             self.target_url = attach_match
             self.command = None
             self.stopped = False
+            self.detached = False
 
         def start(self): pass
 
@@ -3454,7 +3636,8 @@ def test_managed_probe_measure_builds_bound_fresh_serial_evidence(tmp_path, monk
                 pose = self.command["pose"]
                 rect = (10.352, 10.036, 480.53125, 135.140625) if pose == 0 else (10.73, 10.41, 480.53125, 135.140625)
                 geometry = {
-                    "pose": pose, "rect": list(rect), "contentBox": list(rect),
+                    "pose": pose, "rect": list(rect),
+                    "contentBox": [rect[0] + 0.015625, rect[1], 480.5, 135.140625],
                     "box": [10, 10, 482 if pose == 0 else 483, 137], "snapDy": 140, "fracDy": 280,
                 }
             return {
@@ -3465,7 +3648,7 @@ def test_managed_probe_measure_builds_bound_fresh_serial_evidence(tmp_path, monk
                 "ua": "CEF/127", "geometry": geometry, "error": None,
             }
 
-        def stop(self): self.stopped = True
+        def detach(self): self.detached = True
 
     class Channel:
         def __init__(self):
@@ -3509,7 +3692,7 @@ def test_managed_probe_measure_builds_bound_fresh_serial_evidence(tmp_path, monk
     assert [capture.sequence for capture in (*measured.freshness, *measured.captures)] == list(range(1, 8))
     assert len({capture.nonce for capture in (*measured.freshness, *measured.captures)}) == 7
     assert tuple(item.pose for item in measured.poses) == (0, 1)
-    assert channel.transport.stopped
+    assert channel.transport.detached and not channel.transport.stopped
 
     channel.cancel_event.set()
     with pytest.raises(live_host.LiveHostError, match="cancelled"):
@@ -3698,7 +3881,7 @@ const PSRC={json.dumps(live_host.placement_init_script(token, mode="probe"))};
 const PTRIP={json.dumps(live_host._placement_round_trip_expr(token, mode="probe"))};
 const PFRAC={json.dumps(live_host._placement_set_expr(token, "frac", 15000))};
 const PRENEW={json.dumps(live_host._placement_renew_expr(token, "frac", 15000))};
-function doc(src=SRC,pre){{const ctx={{clock:0}};ctx.window=ctx;ctx.performance={{now:()=>ctx.clock}};vm.createContext(ctx);if(pre)vm.runInContext(pre,ctx);let err=null;try{{vm.runInContext(src,ctx)}}catch(e){{err=String(e)}}
+function doc(src=SRC,pre){{const ctx={{clock:0}};ctx.window=ctx;ctx.Performance=function(){{}};ctx.Performance.prototype.now=()=>ctx.clock;ctx.performance=new ctx.Performance();vm.createContext(ctx);if(pre)vm.runInContext(pre,ctx);let err=null;try{{vm.runInContext(src,ctx)}}catch(e){{err=String(e)}}
   return {{err,page:c=>{{try{{return vm.runInContext(c,ctx)}}catch(e){{return 'threw:'+e.constructor.name}}}},run:c=>vm.runInContext(c,ctx),get:()=>vm.runInContext('window.__obedPlacement',ctx)}}}}
 const R={{}};let d=doc();R.newDocument=d.get();R.roundTrip=d.run(TRIP);R.afterTrip=d.get();R.commit=d.run(SNAP);
 d.page('window.__obedPlacement="invalid"');R.assignment=d.get();d.page('"use strict";window.__obedPlacement="x"');R.strictAssignment=d.get();
@@ -3711,8 +3894,10 @@ let p=doc(SRC,'Object.defineProperty(window,"__obedPlacement",{{get(){{return "s
 R.predefinedTrip=p.run(TRIP);R.predefinedCommit=p.run(SNAP);
 let q=doc(PSRC);R.probeRoundTrip=q.run(PTRIP);R.probeCommit=q.run(PFRAC);q.page('clock=14999');R.beforeExpiry=q.get();q.page('clock=15000');R.atExpiry=q.get();
 let q2=doc(PSRC);R.missingLease=q2.page('window.__obedGrant("{token}","frac")');R.afterMissing=q2.get();R.longLease=q2.page('window.__obedGrant("{token}","snap",15001)');R.afterLong=q2.get();
-q2.page('window.M="knowledge"');R.fixedMode=q2.page('window.__obedGrant("{token}","snap")');R.afterFixed=q2.get();
+q2.page('window.__obedPlacement="snap"');R.probeStillNeedsLease=q2.page('window.__obedGrant("{token}","snap")');R.afterProbeMutation=q2.get();
+R.knowledgeRejectsLeasedFrac=d.page('window.__obedGrant("{token}","frac",15000)');R.afterKnowledgeFrac=d.get();
 let q3=doc(PSRC);q3.run(PFRAC);q3.page('clock=15000');R.expiredRenew=q3.run(PRENEW);R.afterExpiredRenew=q3.get();
+let q4=doc(PSRC);q4.run(PFRAC);q4.page('performance.now=()=>0;Performance.prototype.now=()=>0;clock=15000');R.tamperedClockExpiry=q4.get();
 console.log(JSON.stringify(R));
 """
     result = json.loads(subprocess.run([node, "-e", harness], check=True, text=True, capture_output=True).stdout)
@@ -3727,8 +3912,10 @@ console.log(JSON.stringify(R));
         "probeRoundTrip": ["true", "snap", "true", "invalid"], "probeCommit": "frac",
         "beforeExpiry": "frac", "atExpiry": "invalid", "missingLease": False,
         "afterMissing": "invalid", "longLease": False, "afterLong": "invalid",
-        "fixedMode": False, "afterFixed": "invalid",
+        "probeStillNeedsLease": False, "afterProbeMutation": "invalid",
+        "knowledgeRejectsLeasedFrac": False, "afterKnowledgeFrac": "invalid",
         "expiredRenew": None, "afterExpiredRenew": "invalid",
+        "tamperedClockExpiry": "invalid",
     }
     assert live_host._PLACEMENT_ROUND_TRIP == result["roundTrip"]
 

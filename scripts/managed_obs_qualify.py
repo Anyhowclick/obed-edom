@@ -215,6 +215,11 @@ PLACEMENT_ALPHA_JS = (
     "n.style.cssText='position:fixed;left:64px;top:64px;width:128px;height:128px;background:rgba(255,128,0,.5);"
     "z-index:2147483646;pointer-events:none';document.documentElement.appendChild(n)},{once:true})"
 )
+CALIBRATION_FAULT_TESTS = (
+    "tests/test_managed_obs.py::test_calibration_transaction_preview_offcanvas_faults_and_fencing",
+    "tests/test_managed_obs.py::test_crash_after_launch_before_record_is_quit_before_seeding",
+    "tests/test_live_host.py::test_managed_probe_state_machine_renews_suppresses_and_stops",
+)
 
 G2_SHA = "10a5b36a1f6008a3213bd90729915f6c15284448406f2a62dbc74ae884fe5288"
 KB_SHAS = {"frozen": "413a00ba4e36dd5edf9c07425ab3c92589eb23d51c60914448621b7a456b8b67",
@@ -306,6 +311,13 @@ def capture_collection(path: Path, run_dir: Path, name: str, *, saved_by_obs: bo
     return snapshot, dissolve_probe.placement_file_ref(dest, run_dir, mtime_ns=snapshot.mtime_ns, saved_by_obs=snapshot.saved_by_obs)
 
 
+def collection_saved_by_obs(path: Path) -> bool:
+    state = json.loads(path.read_text())
+    modules = state.get("modules") if isinstance(state, dict) else None
+    return (isinstance(modules, dict) and any(name in modules for name in ("auto-scene-switcher", "output-timer", "scripts-tool"))) or (
+        isinstance(state, dict) and state.get("scaling_level") == -49)
+
+
 def _program_check(check: managed_obs.ProgramCheck | None) -> tuple[bool | None, list[str], dict[str, Any]]:
     if check is None:
         return None, ["ProgramCheck missing"], {}
@@ -352,9 +364,9 @@ def _persistence_gates(calibration: dict[str, Any], run_dir: Path) -> tuple[dict
         return calibration_gate("INCONCLUSIVE", ["persistence baseline/null/quit/last-removal evidence incomplete"]), []
     try:
         baseline = _snapshot(evidence["baseline"], run_dir)
-        null_before = _snapshot(evidence["nullBefore"], run_dir)
-        null_after = _snapshot(evidence["nullAfter"], run_dir)
-        allowlist = managed_obs.persistence_allowlist(null_before, null_after)
+        _snapshot(evidence["nullBefore"], run_dir)
+        _snapshot(evidence["nullAfter"], run_dir)
+        allowlist = managed_obs.STEP0_NULL_ALLOWLIST
         checks = []
         if evidence.get("cleanup") is not None:
             checks.append(managed_obs.check_persistence(baseline, _snapshot(evidence["cleanup"], run_dir), null_allowlist=allowlist,
@@ -371,8 +383,11 @@ def _persistence_gates(calibration: dict[str, Any], run_dir: Path) -> tuple[dict
         elif row.ok is None:
             unknown = True
     verdict = "FAIL" if problems else "INCONCLUSIVE" if unknown or not any(r.phase == "quit" and r.authoritative for r in checks) else "PASS"
-    return calibration_gate(verdict, problems or (["persistence check is non-authoritative"] if verdict == "INCONCLUSIVE" else []),
-                            allowlist=_jsonable(allowlist), checks=_jsonable(checks)), [_jsonable(c) for c in checks]
+    return calibration_gate(
+        verdict,
+        problems or (["persistence check is non-authoritative"] if verdict == "INCONCLUSIVE" else []),
+        allowlist=_jsonable(allowlist), checks=_jsonable(checks), coverage="live subset", unitTests=list(CALIBRATION_FAULT_TESTS),
+    ), [_jsonable(c) for c in checks]
 
 
 def score_placement_calibration(calibration: Any, run_dir: Path) -> dict[str, Any]:
@@ -402,8 +417,9 @@ def score_placement_calibration(calibration: Any, run_dir: Path) -> dict[str, An
     if classified is not None and recorded is not None and _jsonable(classified) != _jsonable(recorded):
         classify_problems.append("recorded classification differs from offline classifier")
     backend = calibration["backend"]
+    telemetry = _telemetry(calibration, run_dir)
     if backend == "cef":
-        controls = (_telemetry(calibration, run_dir) or {}).get("classifierControls")
+        controls = (telemetry or {}).get("classifierControls")
         if not isinstance(controls, dict):
             classify_problems.append("classifier controls missing")
         elif controls.get("passed") is not True:
@@ -415,10 +431,15 @@ def score_placement_calibration(calibration: Any, run_dir: Path) -> dict[str, An
         gates["probe-chrome-harness"] = calibration_gate("REPORTED", [], result=None)
         gates["harness-classifier-control"] = calibration_gate("REPORTED", [], result=None)
     else:
-        ok = classified is not None and classified.verdict == placement_probe.ProbeVerdict.SNAP
+        gpu = (telemetry or {}).get("chromeGpu")
+        ok = (classified is not None and classified.verdict == placement_probe.ProbeVerdict.SNAP
+              and ((gpu is True and classified.tone_map == placement_probe.ToneMap.GPU_ANALYTIC and classified.grant_eligible)
+                   or (gpu is False and classified.tone_map == placement_probe.ToneMap.IDENTITY and not classified.grant_eligible)))
+        if not isinstance(gpu, bool):
+            classify_problems.append("Chrome GPU/software launch identity missing")
         verdict = "INCONCLUSIVE" if classify_problems or classified is None or classified.verdict == placement_probe.ProbeVerdict.UNKNOWN else "PASS" if ok else "FAIL"
         gates["probe-chrome-harness"] = calibration_gate(verdict, classify_problems, result=_jsonable(classified))
-        controls = (_telemetry(calibration, run_dir) or {}).get("classifierControls")
+        controls = (telemetry or {}).get("classifierControls")
         gates["harness-classifier-control"] = calibration_gate(
             "INCONCLUSIVE" if not isinstance(controls, dict) else "PASS" if controls.get("passed") is True else "FAIL",
             ["classifier controls missing"] if not isinstance(controls, dict) else list(controls.get("problems") or []), controls=controls)
@@ -438,15 +459,27 @@ def score_placement_calibration(calibration: Any, run_dir: Path) -> dict[str, An
     program_ok, program_problems, program_detail = _program_check(transaction.program if transaction else None)
     tx_problems += program_problems
     placement = calibration.get("placement")
+    live_controls = telemetry.get("liveControls") if isinstance(telemetry, dict) else None
+    isolation_controls = live_controls.get("isolation") if isinstance(live_controls, dict) else None
+    isolation_control_problems = []
+    if not isinstance(isolation_controls, dict):
+        isolation_control_problems.append("live isolation controls missing")
+    else:
+        for control, want in (("null", "PASS"), ("startup", "PASS"), ("priorStudioStates", "PASS"),
+                              ("visibleOrigin", "FAIL"), ("behindTransparentProgram", "FAIL"), ("failedOnAir", "FAIL")):
+            if (isolation_controls.get(control) or {}).get("verdict") != want:
+                isolation_control_problems.append(f"isolation control {control} did not {want}")
     for name in ("preview", "offcanvas"):
         if placement != name:
             gates[f"iso-obs-{name}"] = calibration_gate("REPORTED", [], placement=placement)
             continue
-        verdict = "INCONCLUSIVE" if tx_unknown or program_ok is None else "FAIL" if tx_problems else "PASS"
-        gates[f"iso-obs-{name}"] = calibration_gate(verdict, tx_problems, transaction=calibration.get("transaction"),
-                                                     program=program_detail)
+        verdict = ("INCONCLUSIVE" if tx_unknown or program_ok is None or isolation_control_problems else
+                   "FAIL" if tx_problems else "PASS")
+        gates[f"iso-obs-{name}"] = calibration_gate(
+            verdict, tx_problems + isolation_control_problems, transaction=calibration.get("transaction"),
+            program=program_detail, controls=isolation_controls, coverage="live subset", unitTests=list(CALIBRATION_FAULT_TESTS),
+        )
 
-    telemetry = _telemetry(calibration, run_dir)
     guard = telemetry.get("programGuard") if isinstance(telemetry, dict) else None
     guard_problems = []
     if not isinstance(guard, dict) or not all(k in guard for k in ("null", "candidate", "toggle")):
@@ -455,30 +488,55 @@ def score_placement_calibration(calibration: Any, run_dir: Path) -> dict[str, An
         null_ok = guard["null"].get("ok") is True
         candidate_ok = guard["candidate"].get("ok") is True
         toggle_failed = guard["toggle"].get("ok") is False
+        control_failed = False
         if not null_ok:
             guard_problems.append("no-transaction null did not pass")
+            control_failed = True
         if not candidate_ok:
             guard_problems.append("candidate disturbed Program")
         if not toggle_failed:
             guard_problems.append("Program-toggle positive control did not fail")
-        gates["program-wire-integrity"] = calibration_gate("PASS" if not guard_problems else "FAIL", guard_problems, **guard)
+            control_failed = True
+        gates["program-wire-integrity"] = calibration_gate(
+            "INCONCLUSIVE" if control_failed else "FAIL" if not candidate_ok else "PASS", guard_problems, **guard)
 
     recording = telemetry.get("programRecording") if isinstance(telemetry, dict) else None
     if not isinstance(recording, dict):
         recording_gate = calibration_gate("INCONCLUSIVE", ["continuous program recording analysis missing"])
     else:
-        required = ("lossless", "continuous", "decodedFrames", "identicalFrames", "audioSilent")
+        required = ("lossless", "continuous", "decodedFrames", "identicalFrames", "frameCountComplete", "audioPresent", "audioSilent")
         missing = [k for k in required if k not in recording]
-        ok = (not missing and recording["lossless"] is True and recording["continuous"] is True
-              and isinstance(recording["decodedFrames"], int) and recording["decodedFrames"] > 0
-              and recording["identicalFrames"] == recording["decodedFrames"] and recording["audioSilent"] is True)
-        recording_gate = calibration_gate("INCONCLUSIVE" if missing else "PASS" if ok else "FAIL",
-                                          [f"recording evidence missing {k}" for k in missing], recording=recording)
+        incomplete = (missing or recording.get("lossless") is not True or recording.get("continuous") is not True
+                      or recording.get("frameCountComplete") is not True or recording.get("audioPresent") is not True
+                      or not isinstance(recording.get("decodedFrames"), int) or recording.get("decodedFrames", 0) <= 0)
+        changed = (not incomplete and (recording.get("identicalFrames") != recording.get("decodedFrames")
+                                      or recording.get("audioSilent") is not True))
+        recording_gate = calibration_gate(
+            "INCONCLUSIVE" if incomplete else "FAIL" if changed else "PASS",
+            [f"recording evidence missing {k}" for k in missing]
+            + ([] if recording.get("continuous") is True else ["recording does not cover the transaction"])
+            + ([] if recording.get("frameCountComplete") is True else ["recording frame count is truncated"])
+            + ([] if recording.get("audioPresent") is True else ["recording audio stream is missing"]),
+            recording=recording,
+        )
+    recording_controls = telemetry.get("recordingControls") if isinstance(telemetry, dict) else None
+    flash = recording_controls.get("flash") if isinstance(recording_controls, dict) else None
+    audio = recording_controls.get("audio") if isinstance(recording_controls, dict) else None
+    control_problems = []
+    if not isinstance(flash, dict) or flash.get("verdict") != "FAIL":
+        control_problems.append("live one-frame flash control did not FAIL")
+    if not isinstance(audio, dict) or audio.get("verdict") not in ("FAIL", "REPORTED"):
+        control_problems.append("live audio control missing or invalid")
+    elif audio.get("verdict") == "REPORTED" and not audio.get("reason"):
+        control_problems.append("reported audio control has no reason")
+    control_gate = calibration_gate("INCONCLUSIVE" if control_problems else "PASS", control_problems,
+                                    flash=flash, audio=audio)
     gates["program-wire-integrity"] = calibration_gate(
-        "FAIL" if "FAIL" in (gates["program-wire-integrity"]["verdict"], recording_gate["verdict"]) else
-        "INCONCLUSIVE" if "INCONCLUSIVE" in (gates["program-wire-integrity"]["verdict"], recording_gate["verdict"]) else "PASS",
-        gates["program-wire-integrity"]["problems"] + recording_gate["problems"],
-        guard=gates["program-wire-integrity"]["detail"], recording=recording_gate["detail"])
+        "FAIL" if "FAIL" in (gates["program-wire-integrity"]["verdict"], recording_gate["verdict"], control_gate["verdict"]) else
+        "INCONCLUSIVE" if "INCONCLUSIVE" in (gates["program-wire-integrity"]["verdict"], recording_gate["verdict"],
+                                               control_gate["verdict"]) else "PASS",
+        gates["program-wire-integrity"]["problems"] + recording_gate["problems"] + control_gate["problems"],
+        guard=gates["program-wire-integrity"]["detail"], recording=recording_gate["detail"], controls=control_gate["detail"])
 
     alpha = telemetry.get("alpha") if isinstance(telemetry, dict) else None
     if not isinstance(alpha, dict):
@@ -486,9 +544,21 @@ def score_placement_calibration(calibration: Any, run_dir: Path) -> dict[str, An
     else:
         required = ("transparent", "halfTransparent", "sampleCount", "allChannelsEqual", "allPhasesCovered")
         missing = [k for k in required if k not in alpha]
+        alpha_controls = live_controls.get("alpha") if isinstance(live_controls, dict) else None
+        control_problems = []
+        if not isinstance(alpha_controls, dict):
+            control_problems.append("live alpha controls missing")
+        else:
+            for control, want in (("null", "PASS"), ("behindProgramLeak", "FAIL"), ("alphaOnly", "FAIL")):
+                if (alpha_controls.get(control) or {}).get("verdict") != want:
+                    control_problems.append(f"alpha control {control} did not {want}")
+        product_timing = (telemetry or {}).get("samplingMode") == "product-timing"
         ok = not missing and alpha["transparent"] and alpha["halfTransparent"] and alpha["sampleCount"] > 0 and alpha["allChannelsEqual"] and alpha["allPhasesCovered"]
-        gates["alpha-integrity"] = calibration_gate("INCONCLUSIVE" if missing else "PASS" if ok else "FAIL",
-                                                    [f"alpha evidence missing {k}" for k in missing], alpha=alpha)
+        verdict = ("REPORTED" if product_timing else "INCONCLUSIVE" if missing or control_problems else "PASS" if ok else "FAIL")
+        gates["alpha-integrity"] = calibration_gate(
+            verdict, [f"alpha evidence missing {k}" for k in missing] + control_problems,
+            alpha=alpha, controls=alpha_controls, samplingMode=(telemetry or {}).get("samplingMode"),
+        )
 
     events = calibration.get("events")
     states = [((e.get("placement") or {}).get("state")) for e in events] if isinstance(events, list) else []
@@ -496,8 +566,22 @@ def score_placement_calibration(calibration: Any, run_dir: Path) -> dict[str, An
         if placement != name:
             gates[f"life-cal-{name}"] = calibration_gate("REPORTED", [], placement=placement)
             continue
-        missing = [] if "probing" in states and "valid" in states else [f"placement event sequence lacks probing→valid: {states}"]
-        gates[f"life-cal-{name}"] = calibration_gate("PASS" if not missing else "INCONCLUSIVE", missing, states=states)
+        probing = next((index for index, state in enumerate(states) if state == "probing"), None)
+        valid = next((index for index, state in enumerate(states) if state == "valid" and probing is not None and index > probing), None)
+        final = (events[valid].get("placement") if valid is not None else {}) if isinstance(events, list) else {}
+        drive = (telemetry or {}).get("drivePlacement") or final
+        missing = []
+        if probing is None or valid is None:
+            missing.append(f"placement event sequence lacks ordered probing→valid: {states}")
+        if classified is None or drive.get("grant") != classified.verdict.value or drive.get("method") != "probe":
+            missing.append("drive-time placement does not match the probe classification")
+        if classified is None or ((drive.get("tone") or {}).get("observed") !=
+                                  (classified.tone_map.value if classified.tone_map else None)):
+            missing.append("drive-time tone observation does not match the probe classification")
+        gates[f"life-cal-{name}"] = calibration_gate(
+            "PASS" if not missing else "INCONCLUSIVE", missing, states=states, final=final, drive=drive,
+            coverage="live subset", unitTests=list(CALIBRATION_FAULT_TESTS),
+        )
 
     gates["persistence-worker"], persistence_checks = _persistence_gates(calibration, run_dir)
     tone_rows = telemetry.get("toneRows") if isinstance(telemetry, dict) else None
@@ -505,7 +589,8 @@ def score_placement_calibration(calibration: Any, run_dir: Path) -> dict[str, An
         gates["W5"] = calibration_gate("INCONCLUSIVE", ["W5 tone rows missing"])
     else:
         problems = list(tone_rows.get("problems") or [])
-        complete = tone_rows.get("complete") is True and tone_rows.get("applied") == "identity"
+        complete = (tone_rows.get("complete") is True and tone_rows.get("applied") == "identity"
+                    and not tone_rows.get("missingRows"))
         gates["W5"] = calibration_gate("REPORTED" if complete and not problems else "INCONCLUSIVE", problems or ([] if complete else ["W5 rows incomplete"]), rows=tone_rows)
 
     if backend == "chrome-harness":
@@ -562,29 +647,137 @@ def placement_record(*, backend: str, placement: str | None, obs_version: str | 
     }
 
 
+def _png_array(data: bytes) -> np.ndarray:
+    return np.asarray(Image.open(io.BytesIO(data)).convert("RGBA")).copy()
+
+
+def _png_bytes(image: np.ndarray) -> bytes:
+    output = io.BytesIO()
+    Image.fromarray(image, "RGBA").save(output, format="PNG")
+    return output.getvalue()
+
+
+def _swap_candidate_rules(evidence: placement_probe.ClassifierInput) -> placement_probe.ClassifierInput:
+    captures = []
+    geometries = {geometry.pose: geometry for geometry in evidence.poses}
+    for capture in evidence.captures:
+        geometry = geometries[capture.pose]
+        image = _png_array(capture.png)
+        x, y, width, height = geometry.box
+        snap = image[y + geometry.snap_dy:y + geometry.snap_dy + height, x:x + width].copy()
+        frac = image[y + geometry.frac_dy:y + geometry.frac_dy + height, x:x + width].copy()
+        image[y + geometry.snap_dy:y + geometry.snap_dy + height, x:x + width] = frac
+        image[y + geometry.frac_dy:y + geometry.frac_dy + height, x:x + width] = snap
+        captures.append(replace(capture, png=_png_bytes(image)))
+    return replace(evidence, captures=tuple(captures))
+
+
+def _frozen_motion(evidence: placement_probe.ClassifierInput) -> placement_probe.ClassifierInput:
+    freshness = list(evidence.freshness)
+    geometry = evidence.poses[0]
+    x, y, width, height = geometry.box
+    first = _png_array(freshness[0].png)
+    second = _png_array(freshness[1].png)
+    second[y:y + height, x:x + width] = first[y:y + height, x:x + width]
+    freshness[1] = replace(freshness[1], png=_png_bytes(second))
+    return replace(evidence, freshness=tuple(freshness))
+
+
 def classifier_controls(evidence: placement_probe.ClassifierInput, result: placement_probe.ProbeResult,
                         expected: placement_probe.ProbeVerdict) -> dict[str, Any]:
     replay = list(evidence.freshness)
-    replay[1] = replace(replay[1], nonce=replay[0].nonce)
-    stale = placement_probe.classify_probe(replace(evidence, freshness=tuple(replay)))
-    dpr = placement_probe.classify_probe(replace(evidence, identity=replace(evidence.identity, dpr=1.5)))
+    replay[1] = replace(replay[1], png=replay[0].png)
+    controls = {
+        "wrongRule": placement_probe.classify_probe(_swap_candidate_rules(evidence)),
+        "replay": placement_probe.classify_probe(replace(evidence, freshness=tuple(replay))),
+        "dpr": placement_probe.classify_probe(replace(evidence, spec=replace(evidence.spec, dpr=1.5),
+                                                        identity=replace(evidence.identity, dpr=1.5))),
+        "undecodable": placement_probe.classify_probe(
+            replace(evidence, captures=(replace(evidence.captures[0], png=b"not-a-png"), *evidence.captures[1:]))),
+        "frozenMotion": placement_probe.classify_probe(_frozen_motion(evidence)),
+        "dormant": placement_probe.classify_probe(replace(evidence, ready_state=1)),
+        "wrongContext": placement_probe.classify_probe(
+            replace(evidence, captures=(replace(evidence.captures[0], identity=replace(evidence.identity, context_id="prior-run")),
+                                        *evidence.captures[1:]))),
+    }
     wrong = placement_probe.ProbeVerdict.SNAP if expected == placement_probe.ProbeVerdict.FRAC else placement_probe.ProbeVerdict.FRAC
+    expected_reason = "classified" if result.grant_eligible else "software-map"
+    required = {
+        "wrongRule": (wrong, "classified" if result.grant_eligible else "software-map"),
+        "replay": (placement_probe.ProbeVerdict.UNKNOWN, "stale-capture"),
+        "dpr": (placement_probe.ProbeVerdict.UNKNOWN, "unsupported-dpr"),
+        "undecodable": (placement_probe.ProbeVerdict.UNKNOWN, "invalid-evidence"),
+        "frozenMotion": (placement_probe.ProbeVerdict.UNKNOWN, "stale-capture"),
+        "dormant": (placement_probe.ProbeVerdict.UNKNOWN, "invalid-evidence"),
+        "wrongContext": (placement_probe.ProbeVerdict.UNKNOWN, "invalid-evidence"),
+    }
     problems = []
-    if result.verdict != expected:
-        problems.append(f"candidate {result.verdict.value} != {expected.value}")
-    if stale.verdict != placement_probe.ProbeVerdict.UNKNOWN:
-        problems.append(f"replayed challenge classified {stale.verdict.value}")
-    if dpr.verdict != placement_probe.ProbeVerdict.UNKNOWN:
-        problems.append(f"DPR control classified {dpr.verdict.value}")
-    if result.verdict == wrong:
-        problems.append(f"wrong candidate rule {wrong.value} was accepted")
-    return {"passed": not problems, "problems": problems,
-            "candidate": _jsonable(result), "replay": _jsonable(stale), "dpr": _jsonable(dpr), "wrong": wrong.value}
+    if result.verdict != expected or result.reason != expected_reason:
+        problems.append(f"candidate {result.verdict.value}/{result.reason} != {expected.value}/{expected_reason}")
+    for name, (verdict, reason) in required.items():
+        observed = controls[name]
+        if observed.verdict != verdict or observed.reason != reason:
+            problems.append(f"{name} {observed.verdict.value}/{observed.reason} != {verdict.value}/{reason}")
+    return {"passed": not problems, "problems": problems, "candidate": _jsonable(result),
+            **{name: _jsonable(value) for name, value in controls.items()}}
 
 
-def analyze_program_recording(path: Path, *, covered: bool) -> dict[str, Any]:
-    result: dict[str, Any] = {"lossless": False, "continuous": bool(covered), "decodedFrames": 0,
-                              "identicalFrames": 0, "audioSilent": None}
+def probe_tone_rows(evidence: placement_probe.ClassifierInput, result: placement_probe.ProbeResult) -> dict[str, Any]:
+    if result.verdict not in (placement_probe.ProbeVerdict.SNAP, placement_probe.ProbeVerdict.FRAC):
+        return {"ramp": [], "patches": [], "problems": ["classifier has no unique candidate rule"]}
+    capture = evidence.captures[0]
+    geometry = next((row for row in evidence.poses if row.pose == capture.pose), None)
+    if geometry is None:
+        return {"ramp": [], "patches": [], "problems": ["capture geometry missing"]}
+    image = _png_array(capture.png)
+    video, snap, frac = placement_probe._candidate_regions(image, geometry)
+    candidate = snap if result.verdict == placement_probe.ProbeVerdict.SNAP else frac
+    x, y, _, _ = geometry.box
+    cx, cy, cw, ch = geometry.content_box
+    rx, ry, _, _ = geometry.rect
+    video_origin = (cx - x, cy - y)
+    candidate_origin = ((round(cx) if result.verdict == placement_probe.ProbeVerdict.SNAP else rx + round(cx - rx)) - x,
+                        (round(cy) if result.verdict == placement_probe.ProbeVerdict.SNAP else ry + round(cy - ry)) - y)
+    candidate_size = (round(cw), round(ch))
+
+    def sample(region: np.ndarray, origin: tuple[float, float], size: tuple[float, float], source: tuple[int, int, int, int]) -> list[int]:
+        sx, sy, sw, sh = source
+        x0 = math.ceil(origin[0] + sx * size[0] / 1920) + 1
+        y0 = math.ceil(origin[1] + sy * size[1] / 540) + 1
+        x1 = math.floor(origin[0] + (sx + sw) * size[0] / 1920) - 1
+        y1 = math.floor(origin[1] + (sy + sh) * size[1] / 540) - 1
+        pixels = region[max(0, y0):min(region.shape[0], y1), max(0, x0):min(region.shape[1], x1), :3]
+        if not pixels.size:
+            raise ValueError("tone cell has no eroded pixels")
+        return [int(round(value)) for value in np.median(pixels.reshape(-1, 3), axis=0)]
+
+    def row(kind: str, index: int, source: tuple[int, int, int, int]) -> dict[str, Any]:
+        observed = sample(video, video_origin, (cw, ch), source)
+        reference = sample(candidate, candidate_origin, candidate_size, source)
+        return {"kind": kind, "index": index, "source": reference, "observed": observed,
+                "maxDelta": max(abs(left - right) for left, right in zip(observed, reference))}
+
+    try:
+        ramp = [row("ramp", index, (index * 40, 270, 40, 270)) for index in range(16)]
+        patches = [row("patch", index, (640 + index * 80, 270, 80, 270)) for index in range(8)]
+    except ValueError as exc:
+        return {"ramp": [], "patches": [], "problems": [str(exc)]}
+    return {"ramp": ramp, "patches": patches, "problems": []}
+
+
+def analyze_program_recording(path: Path, *, started_s: float | None, stopped_s: float | None,
+                              transaction_started_s: float | None, transaction_finished_s: float | None,
+                              fps: int) -> dict[str, Any]:
+    covered = (started_s is not None and stopped_s is not None and transaction_started_s is not None
+               and transaction_finished_s is not None and started_s <= transaction_started_s
+               and stopped_s >= transaction_finished_s)
+    duration = stopped_s - started_s if started_s is not None and stopped_s is not None else None
+    minimum_frames = max(0, math.ceil(duration * fps) - 1) if duration is not None and duration >= 0 else None
+    result: dict[str, Any] = {
+        "lossless": False, "continuous": covered, "decodedFrames": 0, "identicalFrames": 0, "audioSilent": None,
+        "audioPresent": None, "startedAt": started_s, "stoppedAt": stopped_s, "transactionStartedS": transaction_started_s,
+        "transactionFinishedS": transaction_finished_s, "fps": fps, "minimumFrames": minimum_frames,
+    }
     try:
         meta, frames = obs_cadence_decode.read_frames(path)
         obs_cadence_decode.check_lossless(meta)
@@ -595,11 +788,20 @@ def analyze_program_recording(path: Path, *, covered: bool) -> dict[str, Any]:
             reference = digest if reference is None else reference
             result["decodedFrames"] += 1
             result["identicalFrames"] += digest == reference
+        result["frameCountComplete"] = minimum_frames is not None and result["decodedFrames"] >= minimum_frames
         ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-        audio = subprocess.run([ffmpeg, "-v", "error", "-i", str(path), "-map", "0:a:0?", "-f", "s16le", "-"],
+        audio = subprocess.run([ffmpeg, "-v", "error", "-i", str(path), "-map", "0:a:0", "-f", "s16le", "-"],
                                capture_output=True, timeout=30, check=True).stdout
         result["audioBytes"] = len(audio)
+        result["audioPresent"] = True
         result["audioSilent"] = all(byte == 0 for byte in audio)
+    except subprocess.CalledProcessError as exc:
+        detail = exc.stderr.decode(errors="replace")[-300:] if exc.stderr else str(exc)
+        if "does not contain any stream" in detail or "matches no streams" in detail:
+            result["audioPresent"] = False
+            result["error"] = f"missing audio stream: {detail}"
+        else:
+            result["error"] = f"CalledProcessError: {detail}"
     except (OSError, ValueError, subprocess.SubprocessError, obs_cadence_decode.NotLossless) as exc:
         result["error"] = f"{type(exc).__name__}: {exc}"
     return result
@@ -626,14 +828,28 @@ def analyze_rgba_samples(paths: list[Path], phases: list[str]) -> dict[str, Any]
 
 class QualificationCalibrationAdapter:
     def __init__(self, adapter: managed_obs.CalibrationAdapter,
-                 sample: Callable[[str], None] | None = None, *, placement: str = "preview") -> None:
+                 sample: Callable[[str], None] | None = None, *, placement: str = "preview",
+                 settle: Callable[[], dict[str, Any]] | None = None,
+                 start_recording: Callable[[], None] | None = None,
+                 stop_recording: Callable[[], str | None] | None = None,
+                 sample_capture_phases: bool = True) -> None:
         self.adapter = adapter
         self.sample = sample or (lambda _phase: None)
         self.placement = placement
+        self.settle = settle
+        self.start_recording = start_recording
+        self.stop_recording = stop_recording
+        self.sample_capture_phases = sample_capture_phases
         self.request: managed_obs.CalibrationRequest | None = None
         self.result: managed_obs.CalibrationResult | None = None
         self.events: list[dict[str, Any]] = []
         self.phase_times_ns: dict[str, int] = {}
+        self.sample_costs: list[dict[str, Any]] = []
+        self.settle_detail: dict[str, Any] | None = None
+        self.recording: str | None = None
+        self.recording_started_s: float | None = None
+        self.recording_stopped_s: float | None = None
+        self.recording_error: str | None = None
         self.done = threading.Event()
 
     def identity(self) -> managed_obs.EngineIdentity | None:
@@ -650,13 +866,24 @@ class QualificationCalibrationAdapter:
             def sample(self, phase: str) -> None:
                 guard.sample(phase)
                 recorder.phase_times_ns[phase] = time.time_ns()
-                recorder.sample(phase)
+                sampled = recorder.sample_capture_phases or phase not in ("before-capture", "after-capture")
+                started = time.monotonic()
+                if sampled:
+                    recorder.sample(phase)
+                recorder.sample_costs.append({"phase": phase, "sampled": sampled,
+                                              "costMs": round((time.monotonic() - started) * 1000, 3)})
 
             def finish(self) -> managed_obs.ProgramCheck:
                 return guard.finish()
 
         actual_request = replace(request, placement=self.placement)
         self.request = actual_request
+        self.events.append({"at": time.time(), "event": "calibration-start", "placement": {"state": "probing"}})
+        if self.settle is not None:
+            self.settle_detail = self.settle()
+        if self.start_recording is not None:
+            self.start_recording()
+            self.recording_started_s = time.monotonic()
         future = self.adapter.start(actual_request, measure=measure, guard=Guard())
         host_future: Future[managed_obs.CalibrationResult] = Future()
 
@@ -668,6 +895,13 @@ class QualificationCalibrationAdapter:
             except Exception:
                 event = "error"
                 host_future.set_exception(RuntimeError("qualification calibration failed"))
+            finally:
+                if self.recording_started_s is not None and self.recording_stopped_s is None and self.stop_recording is not None:
+                    try:
+                        self.recording = self.stop_recording()
+                    except Exception as exc:
+                        self.recording_error = f"{type(exc).__name__}: {exc}"
+                    self.recording_stopped_s = time.monotonic()
             placement = self.events[-1]["placement"] if self.events else {}
             self.events.append({"at": time.time(), "event": event, "placement": placement})
             self.done.set()
@@ -677,6 +911,15 @@ class QualificationCalibrationAdapter:
 
     def cancel(self, run_id: str, *, timeout_s: float = 5.0) -> bool:
         return self.adapter.cancel(run_id, timeout_s=timeout_s)
+
+    def close_recording(self) -> None:
+        if self.recording_started_s is None or self.recording_stopped_s is not None or self.stop_recording is None:
+            return
+        try:
+            self.recording = self.stop_recording()
+        except Exception as exc:
+            self.recording_error = f"{type(exc).__name__}: {exc}"
+        self.recording_stopped_s = time.monotonic()
 
     def placement_event(self, placement: dict[str, Any]) -> None:
         previous = self.events[-1].get("placement") if self.events else None
@@ -741,6 +984,116 @@ def source_shots(port: int, password: str) -> Iterator[Callable[[], np.ndarray]]
 def obs_screenshot(port: int, password: str) -> np.ndarray:
     with source_shots(port, password) as shot:
         return shot()
+
+
+def _color_control(ws: ObsWebsocket, name: str, color: int, *, behind: bool) -> int:
+    created = ws.request(
+        "CreateInput",
+        {"sceneName": managed_obs.PROGRAM_SCENE, "inputName": name, "inputKind": "color_source_v3",
+         "inputSettings": {"width": 1920, "height": 1080, "color": color}, "sceneItemEnabled": True},
+    )
+    item_id = int(created["sceneItemId"])
+    if behind:
+        ws.request("SetSceneItemIndex", {"sceneName": managed_obs.PROGRAM_SCENE, "sceneItemId": item_id, "sceneItemIndex": 0})
+    return item_id
+
+
+def live_integrity_controls(creds: tuple[int, str]) -> dict[str, Any]:
+    baseline = obs_screenshot(*creds)
+    repeated = obs_screenshot(*creds)
+    controls: dict[str, Any] = {
+        "isolation": {"null": {"verdict": "PASS" if np.array_equal(baseline, repeated) else "FAIL"},
+                      "startup": {"verdict": "PASS" if np.array_equal(baseline, repeated) else "FAIL"}},
+        "alpha": {"null": {"verdict": "PASS" if np.array_equal(baseline, repeated) else "FAIL"}},
+    }
+    try:
+        with ObsWebsocket(*creds) as ws:
+            initial = bool(ws.request("GetStudioModeEnabled").get("studioModeEnabled"))
+            ws.request("SetStudioModeEnabled", {"studioModeEnabled": not initial})
+            alternate = bool(ws.request("GetStudioModeEnabled").get("studioModeEnabled"))
+            ws.request("SetStudioModeEnabled", {"studioModeEnabled": initial})
+            restored = bool(ws.request("GetStudioModeEnabled").get("studioModeEnabled"))
+        controls["isolation"]["priorStudioStates"] = {
+            "verdict": "PASS" if alternate is not initial and restored is initial else "FAIL",
+            "initial": initial, "alternate": alternate, "restored": restored,
+        }
+    except Exception as exc:
+        controls["isolation"]["priorStudioStates"] = {"verdict": "INCONCLUSIVE", "reason": f"{type(exc).__name__}: {exc}"}
+
+    def injected(name: str, color: int, *, behind: bool) -> dict[str, Any]:
+        try:
+            with ObsWebsocket(*creds) as ws:
+                _color_control(ws, name, color, behind=behind)
+            changed = obs_screenshot(*creds)
+            return {"verdict": "FAIL" if not np.array_equal(baseline, changed) else "PASS",
+                    "changedPixels": int(np.count_nonzero(np.any(baseline != changed, axis=2)))}
+        except Exception as exc:
+            return {"verdict": "INCONCLUSIVE", "reason": f"{type(exc).__name__}: {exc}"}
+        finally:
+            with contextlib.suppress(Exception), ObsWebsocket(*creds) as ws:
+                ws.request("RemoveInput", {"inputName": name})
+
+    controls["isolation"]["visibleOrigin"] = injected("AK-Control-Visible", 0xFF0000FF, behind=False)
+    controls["isolation"]["behindTransparentProgram"] = injected("AK-Control-Behind", 0xFF00FF00, behind=True)
+    controls["isolation"]["failedOnAir"] = controls["isolation"]["visibleOrigin"]
+    controls["alpha"]["behindProgramLeak"] = controls["isolation"]["behindTransparentProgram"]
+    controls["alpha"]["alphaOnly"] = injected("AK-Control-Alpha", 0x40000000, behind=True)
+    return controls
+
+
+def recording_positive_controls(creds: tuple[int, str], run_dir: Path, fps: int) -> dict[str, Any]:
+    sine = run_dir / "placement" / "program" / "audio-positive.wav"
+    sine.parent.mkdir(parents=True, exist_ok=True)
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    audio_reason = None
+    try:
+        subprocess.run([ffmpeg, "-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=1000:duration=0.4",
+                        "-c:a", "pcm_s16le", str(sine)], capture_output=True, timeout=10, check=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        audio_reason = f"audio fixture unavailable: {type(exc).__name__}: {exc}"
+    started_s = time.monotonic()
+    start_record(*creds)
+    recording = None
+    try:
+        time.sleep(0.2)
+        with ObsWebsocket(*creds) as ws:
+            _color_control(ws, "AK-Control-Flash", 0xFFFFFFFF, behind=False)
+        time.sleep(1 / fps)
+        with contextlib.suppress(Exception), ObsWebsocket(*creds) as ws:
+            ws.request("RemoveInput", {"inputName": "AK-Control-Flash"})
+        if audio_reason is None:
+            with ObsWebsocket(*creds) as ws:
+                ws.request(
+                    "CreateInput",
+                    {"sceneName": managed_obs.PROGRAM_SCENE, "inputName": "AK-Control-Audio", "inputKind": "ffmpeg_source",
+                     "inputSettings": {"is_local_file": True, "local_file": str(sine), "looping": False,
+                                       "restart_on_activate": True}, "sceneItemEnabled": True},
+                )
+            time.sleep(0.5)
+        else:
+            time.sleep(0.5)
+    finally:
+        for input_name in ("AK-Control-Flash", "AK-Control-Audio"):
+            with contextlib.suppress(Exception), ObsWebsocket(*creds) as ws:
+                ws.request("RemoveInput", {"inputName": input_name})
+        recording = stop_record(*creds)
+    stopped_s = time.monotonic()
+    path = Path(recording)
+    retained = run_dir / "placement" / "program" / f"control-{path.name}"
+    shutil.copy2(path, retained)
+    analysis = analyze_program_recording(
+        retained, started_s=started_s, stopped_s=stopped_s, transaction_started_s=started_s,
+        transaction_finished_s=stopped_s, fps=fps,
+    )
+    flash = {"verdict": "FAIL" if analysis.get("decodedFrames", 0) > analysis.get("identicalFrames", 0) else "PASS",
+             "recording": dissolve_probe.placement_file_ref(retained, run_dir)}
+    if audio_reason is not None:
+        audio = {"verdict": "REPORTED", "reason": audio_reason}
+    elif analysis.get("audioPresent") is not True:
+        audio = {"verdict": "REPORTED", "reason": "seeded Program has reroute_audio=false; page audio bypasses the OBS mix"}
+    else:
+        audio = {"verdict": "FAIL" if analysis.get("audioSilent") is False else "PASS"}
+    return {"flash": flash, "audio": audio, "analysis": analysis}
 
 
 def apply_kb(kind: str) -> dict[str, Any]:
@@ -1165,7 +1518,7 @@ def program_guard_controls(host: LiveOutputHost, creds: tuple[int, str]) -> dict
                     item_id = item["sceneItemId"]
                     ws.request("SetSceneItemEnabled", {"sceneName": managed_obs.PROGRAM_SCENE,
                                                        "sceneItemId": item_id, "sceneItemEnabled": False})
-                    time.sleep(0.1)
+                    time.sleep(1.0)
                     ws.request("SetSceneItemEnabled", {"sceneName": managed_obs.PROGRAM_SCENE,
                                                        "sceneItemId": item_id, "sceneItemEnabled": True})
             time.sleep(0.35)
@@ -1254,8 +1607,7 @@ def placement_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] |
     samples: list[tuple[str, np.ndarray]] = []
     sample_lock = threading.Lock()
     host: LiveOutputHost | None = None
-    recording: str | None = None
-    recording_started = False
+    preflight: dict[str, Any] = {}
     started = time.monotonic()
     run_dir = ctx["shots"] / "runs" / name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -1265,18 +1617,35 @@ def placement_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] |
         with sample_lock:
             samples.append((phase, image))
 
-    adapter = QualificationCalibrationAdapter(ctx["calibration"], sample,
-                                              placement="offcanvas" if name == "opaque-off" else "preview")
+    def settle() -> dict[str, Any]:
+        if host is None:
+            raise RuntimeError("placement host unavailable")
+        input_live_s = await_input(host._require_transport())
+        preflight["liveControls"] = live_integrity_controls(ctx["creds"])
+        preflight["recordingControls"] = recording_positive_controls(ctx["creds"], run_dir, managed_obs.RATES[ctx["rate"]][1])
+        first = obs_screenshot(*ctx["creds"])
+        second = obs_screenshot(*ctx["creds"])
+        with sample_lock:
+            samples.extend((("settled-0", first), ("settled-1", second)))
+        if not np.array_equal(first, second):
+            raise RuntimeError("Program did not settle to two equal OBS samples")
+        preflight["programGuard"] = program_guard_controls(host, ctx["creds"])
+        return {"inputLiveS": input_live_s, "equalProgramSamples": True}
+
+    sampled = name != "m-snap-cef"
+    adapter = QualificationCalibrationAdapter(
+        ctx["calibration"], sample, placement="offcanvas" if name == "opaque-off" else "preview",
+        settle=settle, start_recording=lambda: start_record(*ctx["creds"]),
+        stop_recording=lambda: stop_record(*ctx["creds"]), sample_capture_phases=sampled,
+    )
     try:
         resolved = dissolve_probe.resolve(arm, ctx["shots"] / "scratch", decision, tag=name)
         record.update(resolved.fields())
         collection_path = ctx["collectionPath"]
-        _baseline, baseline_ref = capture_collection(collection_path, run_dir, "baseline", saved_by_obs=True)
-        _null_before, null_before_ref = capture_collection(collection_path, run_dir, "null-before", saved_by_obs=True)
-        time.sleep(0.1)
-        _null_after, null_after_ref = capture_collection(collection_path, run_dir, "null-after", saved_by_obs=True)
-        start_record(*ctx["creds"])
-        recording_started = True
+        baseline_saved = collection_saved_by_obs(collection_path)
+        _baseline, baseline_ref = capture_collection(collection_path, run_dir, "baseline", saved_by_obs=baseline_saved)
+        _null_before, null_before_ref = capture_collection(collection_path, run_dir, "null-before", saved_by_obs=baseline_saved)
+        _null_after, null_after_ref = capture_collection(collection_path, run_dir, "null-after", saved_by_obs=baseline_saved)
         host = LiveOutputHost(
             resolved.root, resolved.slides, resolver=resolved.resolver,
             transport_factory=dissolve_probe.hooked_transport(before=PLACEMENT_ALPHA_JS),
@@ -1294,21 +1663,20 @@ def placement_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] |
             if adapter.done.is_set() and placement.get("state") != "probing":
                 break
             time.sleep(0.05)
-        if recording_started:
-            recording = stop_record(*ctx["creds"])
-            recording_started = False
         result = adapter.result
         placement = host.output.get("placement") or {}
         if result is None:
             raise RuntimeError("managed placement calibration did not complete")
         _cleanup, cleanup_ref = capture_collection(collection_path, run_dir, "cleanup", saved_by_obs=True)
-        controls = program_guard_controls(host, ctx["creds"])
+        controls = preflight.get("programGuard") or {}
         controls["candidate"] = _jsonable(result.program)
         sample("null")
         record["page"] = "alpha" if host.output.get("alpha") else "screen"
         record["output"] = {k: host.output.get(k) for k in ("mmOpacity", "continuity", "placement")}
-        record["inputLiveS"] = await_input(host._require_transport())
-        if arm.placement_value is not None and arm.placement_value != placement.get("grant"):
+        record["inputLiveS"] = (adapter.settle_detail or {}).get("inputLiveS")
+        drive_placement = json.loads(json.dumps(placement))
+        expected_value = placement_probe.classify_probe(result.evidence).verdict.value if result.evidence else None
+        if arm.placement_value is not None and arm.placement_value != expected_value:
             record["forcedPlacement"] = dissolve_probe.commit_grant(
                 host._require_transport().evaluate, host._placement_token, arm.placement_value, 15_000)
         host._require_transport().evaluate("(function(){var n=document.getElementById('obed-placement-alpha');if(n)n.remove()})()")
@@ -1331,20 +1699,38 @@ def placement_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] |
             phases.append(phase)
         recording_ref = None
         recording_analysis = None
-        if recording and Path(recording).is_file():
-            path = run_dir / "placement" / "program" / Path(recording).name
+        if adapter.recording and Path(adapter.recording).is_file():
+            path = run_dir / "placement" / "program" / Path(adapter.recording).name
             path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(recording, path)
+            shutil.copy2(adapter.recording, path)
             recording_ref = dissolve_probe.placement_file_ref(path, run_dir)
-            recording_analysis = analyze_program_recording(path, covered=True)
+            recording_analysis = analyze_program_recording(
+                path, started_s=adapter.recording_started_s, stopped_s=adapter.recording_stopped_s,
+                transaction_started_s=result.started_s, transaction_finished_s=result.finished_s,
+                fps=managed_obs.RATES[ctx["rate"]][1],
+            )
         classification = placement_probe.classify_probe(result.evidence) if result.evidence is not None else None
+        tone = probe_tone_rows(result.evidence, classification) if result.evidence is not None and classification is not None else {
+            "ramp": [], "patches": [], "problems": ["classifier evidence missing"]}
+        tone.update({"complete": False, "applied": "identity", "observed": classification.tone_map.value
+                     if classification and classification.tone_map else None,
+                     "missingRows": ["second fresh launch acceleration-on", "second fresh launch acceleration-off", "hevc10",
+                                     "Keynote-HEVC", "skin tones", "reset/invalidation controls"]})
         telemetry = {
             "programGuard": controls,
             "programRecording": recording_analysis,
+            "recordingError": adapter.recording_error,
+            "recordingControls": preflight.get("recordingControls"),
             "alpha": analyze_rgba_samples(rgba_paths, phases),
             "classifierControls": classifier_controls(result.evidence, classification, placement_probe.ProbeVerdict.FRAC)
             if result.evidence is not None and classification is not None else None,
-            "toneRows": {"complete": False, "applied": "identity", "problems": ["W5 rows require both fresh launches"]},
+            "toneRows": tone,
+            "liveControls": preflight.get("liveControls"),
+            "drivePlacement": drive_placement,
+            "samplingMode": "sampled-alpha" if sampled else "product-timing",
+            "sampleCosts": adapter.sample_costs,
+            "settle": adapter.settle_detail,
+            "persistenceNull": "running-file stability only; STEP0_NULL_ALLOWLIST scores persistence",
         }
         telemetry_ref = write_placement_json(run_dir, "telemetry", telemetry)
         record["placementCalibration"] = placement_record(
@@ -1353,7 +1739,7 @@ def placement_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] |
             transaction=result, events=adapter.events,
             persistence={"baseline": baseline_ref, "nullBefore": null_before_ref, "nullAfter": null_after_ref,
                          "cleanup": cleanup_ref, "quit": None, "backup": [],
-                         "lastRemovalMtimeNs": adapter.phase_times_ns.get("before-cleanup"),
+                         "lastRemovalMtimeNs": adapter.phase_times_ns.get("restored"),
                          "checks": [_jsonable(result.persistence)] if result.persistence is not None else []},
             integrity={"recording": recording_ref, "rgba": [dissolve_probe.placement_file_ref(path, run_dir) for path in rgba_paths],
                        "telemetry": telemetry_ref},
@@ -1365,9 +1751,7 @@ def placement_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] |
     except Exception:
         record["error"] = traceback.format_exc()
     finally:
-        if recording_started:
-            with contextlib.suppress(Exception):
-                recording = stop_record(*ctx["creds"])
+        adapter.close_recording()
         if host is not None:
             try:
                 host.stop()
@@ -1396,11 +1780,16 @@ def chrome_placement_session(name: str, ctx: dict[str, Any], *, gpu: bool) -> di
     record: dict[str, Any] = {"arm": name}
     try:
         measured = dissolve_probe.run_chrome_placement_probe(gpu=gpu)
+        tone = probe_tone_rows(measured["input"], measured["classification"])
+        tone.update({"complete": False, "applied": "identity",
+                     "observed": measured["classification"].tone_map.value if measured["classification"].tone_map else None,
+                     "missingRows": ["second fresh launch", "hevc10", "Keynote-HEVC", "skin tones",
+                                     "reset/invalidation controls"]})
         telemetry_ref = write_placement_json(
             run_dir, "telemetry",
             {"classifierControls": classifier_controls(measured["input"], measured["classification"],
                                                        placement_probe.ProbeVerdict.SNAP),
-             "toneRows": measured["toneRows"]},
+             "toneRows": tone, "chromeGpu": gpu},
         )
         stock = (dissolve_probe.DECKS["p2"].unmodified / "assets/player/main.js").read_bytes()
         record["launch"] = measured["launch"]
@@ -2261,8 +2650,10 @@ def placement_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dic
             if session.get("runDir") and (Path(session["runDir"]) / "record.json").is_file()}
     lut, lut_detail = dissolve_probe.launch_lut(runs, cal or dissolve_probe.Calibration(), profile=dissolve_probe.CEF_PLACEMENT)
     check(checks, "CEF placement tone observation", lut_detail, lut is not None, "measured identity/analytic/table map")
-    tone_rows = {"complete": lut is not None, "applied": "identity", "observed": lut_detail.get("kind"),
-                 "samples": lut_detail.get("samples"), "problems": list(lut_detail.get("problems") or [])}
+    tone_summary = {"complete": False, "applied": "identity", "observed": lut_detail.get("kind"),
+                    "samples": lut_detail.get("samples"), "problems": list(lut_detail.get("problems") or []),
+                    "missingRows": ["second fresh CEF launch acceleration-on", "second fresh CEF launch acceleration-off",
+                                    "hevc10", "Keynote-HEVC", "skin tones", "reset/invalidation controls"]}
     for name in PLACEMENT_ARMS:
         record, images = runs.get(name) or ({}, None)
         encoded = record.get("placementCalibration") or {}
@@ -2271,7 +2662,7 @@ def placement_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dic
         telemetry_ref = integrity.get("telemetry") if isinstance(integrity, dict) else None
         if isinstance(telemetry_ref, dict):
             telemetry = _read_ref_json(telemetry_ref, run_dir)
-            telemetry["toneRows"] = tone_rows
+            telemetry["toneRows"] = {**(telemetry.get("toneRows") or {}), **tone_summary}
             integrity["telemetry"] = write_placement_json(run_dir, "telemetry", telemetry)
         rescored = score_placement_calibration(encoded, run_dir)
         if isinstance(encoded, dict):

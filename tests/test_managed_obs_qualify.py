@@ -47,6 +47,7 @@ from obed_edom import live_runtime, managed_obs, placement_probe  # noqa: E402
 from obed_edom.fixture_paths import fixture  # noqa: E402
 
 from test_loop_fixture import _binary_manifest, _committed_source  # noqa: E402
+from test_placement_probe import _input as placement_input  # noqa: E402
 
 SHAPE = (1080, 1920)
 ARMED = {
@@ -1641,30 +1642,22 @@ def test_m5_unreadable_failsafe_containers_make_the_run_invalid(reads: dict[str,
     assert len(invalid) == 1 and invalid[0].startswith("M5 INCONCLUSIVE: ")
 
 
-def _placement_calibration(tmp_path: Path, backend: str, *, omit: str | None = None) -> tuple[dict[str, Any], placement_probe.ProbeResult]:
+def _placement_calibration(tmp_path: Path, backend: str, *, omit: str | None = None,
+                           gpu: bool = False) -> tuple[dict[str, Any], placement_probe.ProbeResult]:
     run_dir = tmp_path / backend
     run_dir.mkdir()
-    spec = placement_probe.ProbeSpec("1" * 32, 1920, 1080, 60, 1.0)
-    identity = placement_probe.ProbeIdentity(spec.run_id, "source" if backend == "cef" else None,
-                                              "target", "context", 1, "ua", 1.0)
-    captures = tuple(
-        placement_probe.ProbeCapture(identity, index + 1, f"{index + 2:032x}", "motion" if index < 3 else "pattern",
-                                     None if index < 3 else (index - 3) // 2, b"png", index * 0.4,
-                                     index * 0.4 + 0.3, index * 0.4 + 0.31)
-        for index in range(7)
-    )
-    evidence = placement_probe.ClassifierInput(
-        spec, (placement_probe.MANIFEST_SHA256, placement_probe.PATTERN_SHA256, placement_probe.MOTION_SHA256), identity,
-        4, (1920, 540), ("bt709", "bt709", "bt709", False), captures[:3],
-        (placement_probe.PoseGeometry(0, (10.0, 10.0, 480.0, 135.0), (10.0, 10.0, 480.0, 135.0), (10, 10, 482, 137), 140, 280),
-         placement_probe.PoseGeometry(1, (10.0, 10.0, 480.0, 135.0), (10.0, 10.0, 480.0, 135.0), (10, 10, 482, 137), 140, 280)),
-        captures[3:],
-    )
-    result = placement_probe.ProbeResult(
-        placement_probe.ProbeVerdict.FRAC if backend == "cef" else placement_probe.ProbeVerdict.SNAP,
-        placement_probe.ToneMap.GPU_ANALYTIC if backend == "cef" else placement_probe.ToneMap.IDENTITY,
-        backend == "cef", "classified", (),
-    )
+    evidence = placement_input("gpu-frac")
+    if backend == "chrome-harness" and gpu:
+        evidence = q._swap_candidate_rules(evidence)
+    elif backend == "chrome-harness":
+        evidence = placement_input("software-snap")
+    if backend == "chrome-harness":
+        identity = q.replace(evidence.identity, source_uuid=None)
+        evidence = q.replace(evidence, identity=identity,
+                             freshness=tuple(q.replace(capture, identity=identity) for capture in evidence.freshness),
+                             captures=tuple(q.replace(capture, identity=identity) for capture in evidence.captures))
+    result = placement_probe.classify_probe(evidence)
+    spec = evidence.spec
     engine = managed_obs.EngineIdentity(7, 8.0, 1)
     request = managed_obs.CalibrationRequest(spec, f"http://127.0.0.1:1/__obed_probe/{spec.run_id}/index.html",
                                              engine, "program", "context", 1)
@@ -1683,11 +1676,23 @@ def _placement_calibration(tmp_path: Path, backend: str, *, omit: str | None = N
     telemetry = {
         "programGuard": {"null": {"ok": True}, "candidate": {"ok": True}, "toggle": {"ok": False}},
         "programRecording": {"lossless": True, "continuous": True, "decodedFrames": 5, "identicalFrames": 5,
-                             "audioSilent": True},
+                             "frameCountComplete": True, "audioPresent": True, "audioSilent": True},
+        "recordingControls": {"flash": {"verdict": "FAIL"},
+                              "audio": {"verdict": "REPORTED", "reason": "seeded Program reroute_audio=false"}},
         "alpha": {"transparent": True, "halfTransparent": True, "sampleCount": 6, "allChannelsEqual": True,
                   "allPhasesCovered": True},
-        "classifierControls": {"passed": True, "problems": []},
+        "classifierControls": q.classifier_controls(evidence, result, result.verdict),
+        "liveControls": {
+            "isolation": {name: {"verdict": verdict} for name, verdict in (
+                ("null", "PASS"), ("startup", "PASS"), ("priorStudioStates", "PASS"), ("visibleOrigin", "FAIL"),
+                ("behindTransparentProgram", "FAIL"), ("failedOnAir", "FAIL"))},
+            "alpha": {name: {"verdict": verdict} for name, verdict in (
+                ("null", "PASS"), ("behindProgramLeak", "FAIL"), ("alphaOnly", "FAIL"))},
+        },
         "toneRows": {"complete": True, "applied": "identity", "problems": []},
+        "chromeGpu": gpu if backend == "chrome-harness" else None,
+        "drivePlacement": {"state": "valid", "grant": result.verdict.value, "method": "probe",
+                           "tone": {"observed": result.tone_map.value if result.tone_map else None, "applied": "identity"}},
     }
     telemetry_ref = q.write_placement_json(run_dir, "telemetry", telemetry)
     stock = next(iter(live_runtime.SUPPORTED_PLAYERS))
@@ -1697,7 +1702,7 @@ def _placement_calibration(tmp_path: Path, backend: str, *, omit: str | None = N
         evidence=None if omit == "input" else evidence, classification=result,
         transaction=transaction if backend == "cef" else None,
         events=[{"at": 1.0, "event": "placement", "placement": {"state": "probing"}},
-                {"at": 2.0, "event": "placement", "placement": {"state": "valid"}}] if backend == "cef" else [],
+                {"at": 2.0, "event": "placement", "placement": telemetry["drivePlacement"]}] if backend == "cef" else [],
         persistence={**refs, "backup": [], "lastRemovalMtimeNs": 1, "checks": []} if backend == "cef" else None,
         integrity={"recording": None, "rgba": [], "telemetry": None if omit == "telemetry" else telemetry_ref},
         stock_sha256=stock,
@@ -1705,21 +1710,24 @@ def _placement_calibration(tmp_path: Path, backend: str, *, omit: str | None = N
     return q.dissolve_probe.serialize_placement_calibration(record, run_dir), result
 
 
-@pytest.mark.parametrize(("backend", "omit", "verdict", "gate"), [
-    pytest.param("cef", None, "PASS", "probe-cef", id="cef-complete"),
-    pytest.param("chrome-harness", None, "PASS", "probe-chrome-harness", id="chrome-complete"),
-    pytest.param("cef", "telemetry", "INCONCLUSIVE", "program-wire-integrity", id="missing-telemetry"),
-    pytest.param("cef", "input", "INCONCLUSIVE", "probe-cef", id="missing-classifier-input"),
+@pytest.mark.parametrize(("backend", "gpu", "omit", "verdict", "gate"), [
+    pytest.param("cef", False, None, "PASS", "probe-cef", id="cef-complete"),
+    pytest.param("chrome-harness", False, None, "PASS", "probe-chrome-harness", id="chrome-software-complete"),
+    pytest.param("chrome-harness", True, None, "PASS", "probe-chrome-harness", id="chrome-gpu-complete"),
+    pytest.param("cef", False, "telemetry", "INCONCLUSIVE", "program-wire-integrity", id="missing-telemetry"),
+    pytest.param("cef", False, "input", "INCONCLUSIVE", "probe-cef", id="missing-classifier-input"),
 ])
 def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, backend: str,
-                                                       omit: str | None, verdict: str, gate: str) -> None:
-    calibration, classified = _placement_calibration(tmp_path, backend, omit=omit)
-    monkeypatch.setattr(q.placement_probe, "classify_probe", lambda _evidence: classified)
+                                                       gpu: bool, omit: str | None, verdict: str, gate: str) -> None:
+    calibration, classified = _placement_calibration(tmp_path, backend, omit=omit, gpu=gpu)
     scored = q.score_placement_calibration(calibration, tmp_path / backend)
     assert scored["overall"] == verdict
     assert scored["gates"][gate]["verdict"] == verdict
     if omit is None:
         decoded = q.dissolve_probe.deserialize_placement_calibration(calibration, tmp_path / backend)
+        assert placement_probe.classify_probe(decoded["input"]) == classified
+        tone = q.probe_tone_rows(decoded["input"], classified)
+        assert (len(tone["ramp"]), len(tone["patches"]), tone["problems"]) == (16, 8, [])
         if decoded["transaction"] is not None:
             assert decoded["transaction"].evidence is decoded["input"]
             delegate_future: q.Future[managed_obs.CalibrationResult] = q.Future()
@@ -1728,8 +1736,12 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
                 def identity(self) -> managed_obs.EngineIdentity:
                     return decoded["engine"]
 
-                def start(self, request: managed_obs.CalibrationRequest, **_kwargs: Any) -> q.Future[managed_obs.CalibrationResult]:
+                def start(self, request: managed_obs.CalibrationRequest, **kwargs: Any) -> q.Future[managed_obs.CalibrationResult]:
                     assert request.placement == "offcanvas"
+                    kwargs["guard"].begin()
+                    kwargs["guard"].sample("before-install")
+                    kwargs["guard"].sample("restored")
+                    kwargs["guard"].finish()
                     delegate_future.set_result(q.replace(decoded["transaction"], request=request))
                     return delegate_future
 
@@ -1741,10 +1753,17 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
                 def sample(self, _phase: str) -> None: pass
                 def finish(self) -> managed_obs.ProgramCheck: return decoded["transaction"].program
 
-            adapter = q.QualificationCalibrationAdapter(Delegate(), placement="offcanvas")
+            recording_order = []
+            adapter = q.QualificationCalibrationAdapter(
+                Delegate(), placement="offcanvas", settle=lambda: recording_order.append("settled") or {"equal": True},
+                start_recording=lambda: recording_order.append("started"),
+                stop_recording=lambda: recording_order.append("stopped") or "program.mkv",
+            )
             host_future = adapter.start(decoded["request"], measure=lambda _channel: decoded["input"], guard=Guard())
             assert host_future.result().request.placement == "preview"
             assert adapter.result is not None and adapter.result.request.placement == "offcanvas"
+            assert recording_order == ["settled", "started", "stopped"]
+            assert adapter.phase_times_ns["restored"] >= adapter.phase_times_ns["before-install"]
             offline = tmp_path / "offline"
             for index in range(2):
                 source = tmp_path / f"source-{index}"
@@ -1774,10 +1793,31 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
             monkeypatch.setattr(q.obs_cadence_decode, "read_frames", lambda _path: ({"codec": "ffv1", "pix_fmt": "yuv444p", "size": (2, 2)}, iter(frames)))
             monkeypatch.setattr(q.obs_cadence_decode, "check_lossless", lambda _meta: None)
             monkeypatch.setattr(q.subprocess, "run", lambda *_args, **_kwargs: types.SimpleNamespace(stdout=b"\0\0"))
-            recording = q.analyze_program_recording(tmp_path / "program.mkv", covered=True)
+            recording = q.analyze_program_recording(
+                tmp_path / "program.mkv", started_s=1.0, stopped_s=1.05,
+                transaction_started_s=1.01, transaction_finished_s=1.04, fps=25)
             assert (recording["lossless"], recording["continuous"], recording["decodedFrames"],
                     recording["identicalFrames"], recording["audioSilent"]) == (True, True, 2, 2, True)
             frames[1][0, 0, 0] = 1
             monkeypatch.setattr(q.subprocess, "run", lambda *_args, **_kwargs: types.SimpleNamespace(stdout=b"\0\1"))
-            injected = q.analyze_program_recording(tmp_path / "program-control.mkv", covered=True)
+            injected = q.analyze_program_recording(
+                tmp_path / "program-control.mkv", started_s=1.0, stopped_s=1.05,
+                transaction_started_s=1.01, transaction_finished_s=1.04, fps=25)
             assert (injected["identicalFrames"], injected["audioSilent"]) == (1, False)
+            missing_audio = q.subprocess.CalledProcessError(1, ["ffmpeg"], stderr=b"does not contain any stream")
+            monkeypatch.setattr(q.subprocess, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(missing_audio))
+            absent = q.analyze_program_recording(
+                tmp_path / "program-no-audio.mkv", started_s=1.0, stopped_s=1.05,
+                transaction_started_s=1.01, transaction_finished_s=1.04, fps=25)
+            assert absent["audioPresent"] is False
+            monkeypatch.setattr(q.subprocess, "run", lambda *_args, **_kwargs: types.SimpleNamespace(stdout=b"\0\0"))
+            truncated = q.analyze_program_recording(
+                tmp_path / "program-short.mkv", started_s=1.0, stopped_s=2.0,
+                transaction_started_s=1.1, transaction_finished_s=1.9, fps=25)
+            assert truncated["frameCountComplete"] is False
+
+            seed = tmp_path / "seed.json"
+            seed.write_text(json.dumps({"modules": {}, "scaling_level": 0}))
+            assert q.collection_saved_by_obs(seed) is False
+            seed.write_text(json.dumps({"modules": {"scripts-tool": []}, "scaling_level": -49}))
+            assert q.collection_saved_by_obs(seed) is True

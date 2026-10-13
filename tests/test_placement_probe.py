@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 import shutil
+import subprocess
 from dataclasses import replace
 
 import numpy as np
@@ -34,11 +36,19 @@ def _geometry(pose: int) -> PoseGeometry:
     height = 135.140625
     x = 10 + fx
     y = 10 + fy
+    scale = min(width / 1920, height / 540)
+    content_width = 1920 * scale
+    content_height = 540 * scale
     return PoseGeometry(
         pose=pose,
         rect=(x, y, width, height),
-        content_box=(x, y, width, height),
-        box=(10, 10, math_ceil(x + width) - 9, math_ceil(y + height) - 9),
+        content_box=(
+            x + (width - content_width) / 2,
+            y + (height - content_height) / 2,
+            content_width,
+            content_height,
+        ),
+        box=(10, 10, math.ceil(x + width) - 9, math.ceil(y + height) - 9),
         snap_dy=140,
         frac_dy=280,
     )
@@ -112,13 +122,27 @@ def _regions(case: str, pose: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         _set_pixels(frac, pixels // 10, 100)
         video = _gpu(frac)
         snap.fill(220)
-    elif case in {"unknown", "stale", "unstable", "dpr"}:
+    elif case in {
+        "unknown",
+        "stale",
+        "unstable",
+        "dpr",
+        "repeated-motion",
+        "short-settle",
+        "fast-pacing",
+        "wrong-size",
+        "identity-mismatch",
+    }:
         snap.fill(220)
+    elif case == "maps-disagree":
+        video.fill(111)
+        snap.fill(111)
+        frac.fill(100)
     elif case.startswith("boundary"):
         snap.fill(100)
         frac.fill(100)
         snap_bad = pixels * 2 // 100
-        frac_bad = math_ceil(pixels * 20 / 100)
+        frac_bad = math.ceil(pixels * 20 / 100)
         if case == "boundary-2-fail":
             snap_bad += 1
         if case == "boundary-20-fail":
@@ -132,11 +156,6 @@ def _regions(case: str, pose: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         frac.fill(100)
         frac[inner][..., 2] = 106
     return video, snap, frac
-
-
-def math_ceil(value: float) -> int:
-    integer = int(value)
-    return integer if integer == value else integer + 1
 
 
 def _input(case: str) -> ClassifierInput:
@@ -169,7 +188,63 @@ def _input(case: str) -> ClassifierInput:
         data = replace(data, captures=(captures[0], replace(captures[1], png=_png(changed)), *captures[2:]))
     elif case == "dpr":
         data = replace(data, spec=replace(spec, dpr=1.5), identity=replace(identity, dpr=1.5))
+    elif case == "repeated-motion":
+        repeated = _capture(identity, 2, "motion", None, _motion(7))
+        data = replace(data, freshness=(freshness[0], repeated, freshness[2]))
+    elif case == "short-settle":
+        first = captures[0]
+        data = replace(
+            data,
+            captures=(replace(first, paint_observed_s=first.capture_started_s - 0.299), *captures[1:]),
+        )
+    elif case == "fast-pacing":
+        second = freshness[1]
+        started = freshness[0].capture_started_s + 0.199
+        second = replace(
+            second,
+            paint_observed_s=started - 0.31,
+            capture_started_s=started,
+            capture_finished_s=started + 0.01,
+        )
+        data = replace(data, freshness=(freshness[0], second, freshness[2]))
+    elif case == "wrong-size":
+        with Image.open(io.BytesIO(captures[0].png)) as source:
+            image = np.asarray(source.convert("RGBA"))[:, :-1].copy()
+        data = replace(data, captures=(replace(captures[0], png=_png(image)), *captures[1:]))
+    elif case == "identity-mismatch":
+        foreign = replace(identity, context_id="other-context")
+        data = replace(data, captures=(replace(captures[0], identity=foreign), *captures[1:]))
     return data
+
+
+def _page_geometries(page: str) -> tuple[PoseGeometry, ...]:
+    geometry_source = next(line for line in page.splitlines() if line.startswith("function geometry("))
+    script = f"""
+let rect;
+const video={{videoWidth:1920,videoHeight:540,getBoundingClientRect(){{return rect}}}};
+{geometry_source}
+const poses=[[.352,.036],[.73,.41]];
+const values=poses.map((pose,index)=>{{
+  rect={{left:10+pose[0],top:10+pose[1],width:480.53125,height:135.140625}};
+  rect.right=rect.left+rect.width;
+  rect.bottom=rect.top+rect.height;
+  return geometry(index);
+}});
+process.stdout.write(JSON.stringify(values));
+"""
+    process = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    values = json.loads(process.stdout)
+    return tuple(
+        PoseGeometry(
+            pose=value["pose"],
+            rect=tuple(value["rect"]),
+            content_box=tuple(value["contentBox"]),
+            box=tuple(value["box"]),
+            snap_dy=value["snapDy"],
+            frac_dy=value["fracDy"],
+        )
+        for value in values
+    )
 
 
 @pytest.mark.parametrize(
@@ -178,12 +253,19 @@ def _input(case: str) -> ClassifierInput:
         ("assets", None, None, None, None),
         ("asset-tamper", None, None, None, None),
         ("page", None, None, None, None),
+        ("page-geometry", None, None, None, None),
         ("snap", ProbeVerdict.SNAP, ToneMap.IDENTITY, False, "software-map"),
         ("gpu-frac", ProbeVerdict.FRAC, ToneMap.GPU_ANALYTIC, True, "classified"),
         ("unknown", ProbeVerdict.UNKNOWN, None, False, "ambiguous"),
         ("stale", ProbeVerdict.UNKNOWN, None, False, "stale-capture"),
         ("unstable", ProbeVerdict.UNKNOWN, None, False, "unstable-capture"),
         ("dpr", ProbeVerdict.UNKNOWN, None, False, "unsupported-dpr"),
+        ("repeated-motion", ProbeVerdict.UNKNOWN, None, False, "stale-capture"),
+        ("short-settle", ProbeVerdict.UNKNOWN, None, False, "invalid-evidence"),
+        ("fast-pacing", ProbeVerdict.UNKNOWN, None, False, "invalid-evidence"),
+        ("wrong-size", ProbeVerdict.UNKNOWN, None, False, "invalid-evidence"),
+        ("identity-mismatch", ProbeVerdict.UNKNOWN, None, False, "invalid-evidence"),
+        ("maps-disagree", ProbeVerdict.UNKNOWN, None, False, "ambiguous"),
         ("boundary-pass", ProbeVerdict.SNAP, ToneMap.IDENTITY, False, "software-map"),
         ("boundary-2-fail", ProbeVerdict.UNKNOWN, None, False, "ambiguous"),
         ("boundary-20-fail", ProbeVerdict.UNKNOWN, None, False, "ambiguous"),
@@ -222,6 +304,19 @@ def test_placement_probe_contract(case, verdict, tone_map, eligible, reason, mon
         assert "video.muted=true" in page and "BigInt(127-i)" in page
         with pytest.raises(ValueError, match="run_id"):
             render_probe_page(ProbeSpec("wrong", 1920, 1080, 50, 1))
+        return
+    if case == "page-geometry":
+        page = render_probe_page(ProbeSpec("a" * 32, 1920, 1080, 50, 1)).decode()
+        actual = _page_geometries(page)
+        expected = tuple(placement_probe._expected_geometry(pose) for pose in range(2))
+        assert [geometry.content_box for geometry in actual] == pytest.approx(
+            [
+                (10.367625, 10.036, 480.5, 135.140625),
+                (10.745625, 10.41, 480.5, 135.140625),
+            ],
+            abs=1 / 256,
+        )
+        assert all(placement_probe._same_geometry(left, right) for left, right in zip(actual, expected))
         return
     result = classify_probe(_input(case))
     assert (result.verdict, result.tone_map, result.grant_eligible, result.reason) == (

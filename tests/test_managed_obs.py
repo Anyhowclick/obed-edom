@@ -381,7 +381,8 @@ class CalibrationObs:
     def __init__(self, *, studio: bool = False,
                  output_error: tuple[int, str | None] | None = (600, managed_obs._PREVIEW_OUTPUT_ABSENT),
                  removal: str = "normal", screenshot: str = "png", disturb_program: bool = False,
-                 transition_cursor: float = 1.0, preview_unreadable: bool = False) -> None:
+                 transition_cursor: float = 1.0, preview_unreadable: bool = False,
+                 cleanup_program_change: bool = False) -> None:
         self.studio = studio
         self.preview = "Other" if studio else None
         self.program = "AK"
@@ -391,6 +392,7 @@ class CalibrationObs:
         self.disturb_program = disturb_program
         self.transition_cursor = transition_cursor
         self.preview_unreadable = preview_unreadable
+        self.cleanup_program_change = cleanup_program_change
         self.pending_input = self.pending_scene = 0
         self.scenes = {"AK": "scene-ak", "Other": "scene-other"}
         self.inputs = {"Program": {"inputUuid": "input-program", "inputKind": "browser_source",
@@ -529,6 +531,8 @@ class CalibrationObs:
         if name == "GetSourceScreenshot":
             if self.disturb_program:
                 self.program = "Other"
+            if self.screenshot == "timeout":
+                raise ObsWebsocketTimeout("screenshot timed out")
             return {"imageData": "data:image/png;base64,iVBORw0KGgo=" if self.screenshot == "png" else "broken"}
         if name == "RemoveSceneItem":
             self.program_items = [item for item in self.program_items if item["sceneItemId"] != data["sceneItemId"]]
@@ -557,6 +561,8 @@ class CalibrationObs:
                 raise managed_obs.ObsRequestError(name, 600, managed_obs._SCENE_ABSENT)
             if self.removal == "wrong":
                 raise managed_obs.ObsRequestError(name, 600, "wrong scene")
+            if self.cleanup_program_change:
+                self.program = "Other"
             return {}
         raise AssertionError(name)
 
@@ -2179,8 +2185,9 @@ def test_persistence_contract_pins_step0_null_and_fails_closed(tmp_path):
      ("preview", False, "output-inactive"), ("preview", False, "absent-removal"),
      ("preview", False, "delayed-removal"), ("preview", False, "wrong-removal"),
      ("preview", False, "bad-output"), ("preview", False, "bad-screenshot"),
+     ("preview", False, "timeout"),
      ("preview", False, "bad-evidence"), ("preview", False, "bad-target"),
-     ("preview", False, "program-change"),
+     ("preview", False, "program-change"), ("preview", False, "cleanup-change"),
      ("preview", False, "transition-active"), ("preview", True, "preview-unreadable"),
      ("preview", False, "stale-identity"),
      ("preview", False, "cancel"), ("preview", False, "quit"),
@@ -2191,15 +2198,26 @@ def test_calibration_transaction_preview_offcanvas_faults_and_fencing(tmp_path, 
         600, managed_obs._PREVIEW_OUTPUT_ABSENT)
     removal = ("absent" if outcome == "absent-removal" else "delayed" if outcome == "delayed-removal"
                else "wrong" if outcome == "wrong-removal" else "normal")
+    screenshot = "bad" if outcome == "bad-screenshot" else "timeout" if outcome == "timeout" else "png"
     obs = CalibrationObs(studio=studio, output_error=output_error, removal=removal,
-                         screenshot="bad" if outcome == "bad-screenshot" else "png",
-                         disturb_program=outcome == "program-change",
+                         screenshot=screenshot, disturb_program=outcome == "program-change",
                          transition_cursor=0.5 if outcome == "transition-active" else 1.0,
-                         preview_unreadable=outcome == "preview-unreadable")
+                         preview_unreadable=outcome == "preview-unreadable",
+                         cleanup_program_change=outcome == "cleanup-change")
     engine = calibration_engine(tmp_path, monkeypatch, obs)
+    identity_checks = 0
+    real_identity = engine._identity
+
+    def counted_identity(pid, launch_date):
+        nonlocal identity_checks
+        identity_checks += 1
+        return real_identity(pid, launch_date)
+
+    monkeypatch.setattr(engine, "_identity", counted_identity)
     adapter = engine.calibration_adapter()
     identity = adapter.identity()
     assert identity == managed_obs.EngineIdentity(4242, 1000.0, 7)
+    assert identity_checks == 0
     run_id = "0123456789abcdef0123456789abcdef"
     request = managed_obs.CalibrationRequest(
         managed_obs.ProbeSpec(run_id, 1920, 1080, 50, 1.0),
@@ -2259,20 +2277,29 @@ def test_calibration_transaction_preview_offcanvas_faults_and_fencing(tmp_path, 
                 assert launches == [(25, "external", outcome == "restart")]
         result = future.result(2)
         assert result.cleanup_verified is True and result.restored is True
-        assert any("cancelled" in error.lower() for error in result.errors)
+        assert result.isolation_ok is True
+        assert any(error.startswith("cancelled:") for error in result.errors)
     else:
         result = future.result(2)
         assert engine._thread is None and engine._jobs.empty()
         if outcome in ("bad-output", "transition-active", "preview-unreadable"):
-            assert result.evidence is None and result.isolation_ok is False
+            assert result.evidence is None and result.isolation_ok is True
             expected = {"bad-output": "preview output state is unreadable", "transition-active": "transition is in flight",
                         "preview-unreadable": "preview state is unreadable"}[outcome]
             assert any(expected in error for error in result.errors)
+            assert any(error.startswith("refused:") for error in result.errors)
             assert all(name not in ("CreateScene", "CreateInput") for _, name, _ in obs.requests)
-        elif outcome in ("bad-screenshot", "bad-evidence", "bad-target", "program-change", "wrong-removal"):
-            assert result.cleanup_verified is (outcome != "wrong-removal") and result.restored is True and result.errors
-            if outcome == "program-change":
-                assert result.isolation_ok is False and obs.program == "AK"
+        elif outcome in ("bad-screenshot", "timeout", "bad-evidence", "bad-target", "program-change", "cleanup-change",
+                          "wrong-removal"):
+            assert result.cleanup_verified is (outcome != "wrong-removal")
+            assert result.restored is True and result.errors
+            assert result.isolation_ok is (outcome in ("bad-screenshot", "timeout", "wrong-removal"))
+            if outcome == "timeout":
+                assert any(error.startswith("timeout:") for error in result.errors)
+            elif outcome in ("bad-evidence", "bad-target", "program-change", "cleanup-change"):
+                assert any(error.startswith("isolation:") for error in result.errors)
+            if outcome in ("program-change", "cleanup-change"):
+                assert obs.program == "AK"
             assert not any(name == "CreateSceneItem" for _, name, _ in obs.requests)
         else:
             assert result.isolation_ok is True and result.cleanup_verified is True and result.restored is True
@@ -2294,5 +2321,7 @@ def test_calibration_transaction_preview_offcanvas_faults_and_fencing(tmp_path, 
                 enable = next(index for index, (_, name, data) in enumerate(obs.requests)
                               if name == "SetSceneItemEnabled" and data["sceneItemEnabled"] is True)
                 assert create < transform < enable
+            if outcome == "success":
+                assert identity_checks == 3
         assert adapter.cancel(run_id, timeout_s=5.0) is (result.cleanup_verified and result.restored)
     engine.close()

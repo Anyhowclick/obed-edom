@@ -31,7 +31,7 @@ from urllib.parse import urlsplit
 
 from websockets.sync.client import connect
 
-from .obs_websocket import ObsRequestError, ObsWebsocket, ObsWebsocketError
+from .obs_websocket import ObsRequestError, ObsWebsocket, ObsWebsocketError, ObsWebsocketTimeout
 from .placement_probe import ClassifierInput, ProbeSpec
 
 log = logging.getLogger(__name__)
@@ -70,6 +70,22 @@ WARNINGS: dict[str, tuple[str, str, str | None]] = {
 
 class ManagedObsError(RuntimeError):
     """The managed OBS could not be launched or controlled."""
+
+
+class _CalibrationRefused(ManagedObsError):
+    pass
+
+
+class _CalibrationCancelled(ManagedObsError):
+    pass
+
+
+class _CalibrationTimeout(ManagedObsError):
+    pass
+
+
+class _CalibrationIsolationViolation(ManagedObsError):
+    pass
 
 
 def last_version(version: str) -> int:
@@ -611,7 +627,6 @@ class _CalibrationIO:
         self.deadline_s = deadline_s
         self._engine, self._run, self._ws = engine, run, ws
         self._snapshot, self._ref_id, self._guard = snapshot, ref_id, guard
-        self.isolation_ok = True
 
     def check_current(self) -> None:
         self._engine._calibration_check_current(self._run, self.deadline_s)
@@ -619,6 +634,7 @@ class _CalibrationIO:
     def capture_png(self, *, timeout_s: float = 2.0) -> bytes:
         self._guard.sample("before-capture")
         try:
+            self._engine._calibration_verify_ownership(self._run, self.deadline_s)
             self._engine._verify_calibration_isolation(self._run, self._ws, self._snapshot, self.source_uuid, self._ref_id,
                                                        self.deadline_s)
             data = self._engine._calibration_request(
@@ -637,9 +653,6 @@ class _CalibrationIO:
             self._engine._verify_calibration_isolation(self._run, self._ws, self._snapshot, self.source_uuid, self._ref_id,
                                                        self.deadline_s)
             return png
-        except Exception:
-            self.isolation_ok = False
-            raise
         finally:
             self._guard.sample("after-capture")
 
@@ -741,10 +754,7 @@ class ManagedObs:
         with self._lock:
             if self._state != "ready" or self._pid is None or self._launch_date is None or self._ready_generation <= 0:
                 return None
-            pid, launch_date, generation = self._pid, self._launch_date, self._ready_generation
-        if self._identity(pid, launch_date) != "ours":
-            return None
-        return EngineIdentity(pid, launch_date, generation)
+            return EngineIdentity(self._pid, self._launch_date, self._ready_generation)
 
     @staticmethod
     def _validate_calibration_url(request: CalibrationRequest) -> None:
@@ -824,9 +834,9 @@ class ManagedObs:
 
     def _calibration_check_current(self, run: _CalibrationRun, deadline_s: float, *, cancelled: bool = True) -> None:
         if cancelled and run.cancel_event.is_set():
-            raise ManagedObsError("Calibration was cancelled.")
+            raise _CalibrationCancelled("Calibration was cancelled.")
         if self._clock() >= deadline_s:
-            raise ManagedObsError("Calibration deadline elapsed.")
+            raise _CalibrationTimeout("Calibration deadline elapsed.")
         with self._lock:
             current = self._calibration_run is run
             identity = (self._pid, self._launch_date, self._ready_generation)
@@ -834,8 +844,13 @@ class ManagedObs:
         expected = run.request.engine
         if not current or not ready or identity != (expected.pid, expected.launch_date, expected.ready_generation):
             raise ManagedObsError("Calibration engine generation changed.")
+
+    def _calibration_verify_ownership(self, run: _CalibrationRun, deadline_s: float, *, cancelled: bool = True) -> None:
+        self._calibration_check_current(run, deadline_s, cancelled=cancelled)
+        expected = run.request.engine
         if self._identity(expected.pid, expected.launch_date) != "ours":
             raise ManagedObsError("Calibration engine ownership could not be verified.")
+        self._calibration_check_current(run, deadline_s, cancelled=cancelled)
 
     def _calibration_request(self, run: _CalibrationRun, ws: ObsWebsocket, request_type: str,
                              data: dict[str, Any] | None, deadline_s: float, *, timeout_s: float | None = None,
@@ -859,26 +874,26 @@ class ManagedObs:
                               deadline_s: float) -> tuple[_CalibrationSnapshot, CollectionSnapshot]:
         transition = self._calibration_request(run, ws, "GetCurrentSceneTransition", None, deadline_s)
         if transition.get("transitionName") != "Cut" or transition.get("transitionKind") != "cut_transition":
-            raise ManagedObsError("Calibration requires the Cut scene transition.")
+            raise _CalibrationRefused("Calibration requires the Cut scene transition.")
         log.info("calibration precheck GetCurrentSceneTransition: %s/%s",
                  transition.get("transitionName"), transition.get("transitionKind"))
         cursor = self._calibration_request(run, ws, "GetCurrentSceneTransitionCursor", None, deadline_s)
         if float(cursor.get("transitionCursor", -1.0)) != 1.0:
-            raise ManagedObsError("Calibration cannot start while a scene transition is in flight.")
+            raise _CalibrationRefused("Calibration cannot start while a scene transition is in flight.")
         try:
             output = self._calibration_request(run, ws, "GetOutputStatus", {"outputName": PREVIEW_OUTPUT}, deadline_s)
         except ObsRequestError as exc:
             if (exc.request_type, exc.code, exc.comment) != ("GetOutputStatus", 600, _PREVIEW_OUTPUT_ABSENT):
-                raise ManagedObsError("DeckLink preview output state is unreadable.") from exc
+                raise _CalibrationRefused("DeckLink preview output state is unreadable.") from exc
             log.info("calibration precheck GetOutputStatus(%s): absent code %s", PREVIEW_OUTPUT, exc.code)
         else:
             if output.get("outputActive") is not False:
-                raise ManagedObsError("DeckLink preview output is active.")
+                raise _CalibrationRefused("DeckLink preview output is active.")
             log.info("calibration precheck GetOutputStatus(%s): inactive", PREVIEW_OUTPUT)
         program = self._calibration_request(run, ws, "GetCurrentProgramScene", None, deadline_s)
         program_name, program_uuid = self._scene_identity(program, "currentProgram")
         if program_name != PROGRAM_SCENE:
-            raise ManagedObsError("Managed OBS program scene is not AK.")
+            raise _CalibrationRefused("Managed OBS program scene is not AK.")
         studio = self._calibration_request(run, ws, "GetStudioModeEnabled", None, deadline_s)
         studio_enabled = studio.get("studioModeEnabled") is True
         preview_name = preview_uuid = None
@@ -886,32 +901,32 @@ class ManagedObs:
             preview = self._calibration_request(run, ws, "GetCurrentPreviewScene", None, deadline_s)
         except ObsRequestError as exc:
             if studio_enabled or (exc.request_type, exc.code, exc.comment) != ("GetCurrentPreviewScene", 506, None):
-                raise ManagedObsError("Studio preview state is unreadable.") from exc
+                raise _CalibrationRefused("Studio preview state is unreadable.") from exc
         else:
             if not studio_enabled:
-                raise ManagedObsError("OBS returned a preview scene while Studio Mode was off.")
+                raise _CalibrationRefused("OBS returned a preview scene while Studio Mode was off.")
             preview_name, preview_uuid = self._scene_identity(preview, "currentPreview")
         video = self._calibration_request(run, ws, "GetVideoSettings", None, deadline_s)
         if (video.get("baseWidth"), video.get("baseHeight"), video.get("outputWidth"), video.get("outputHeight")) != (
                 1920, 1080, 1920, 1080):
-            raise ManagedObsError("Managed OBS canvas dimensions changed.")
+            raise _CalibrationRefused("Managed OBS canvas dimensions changed.")
         program_input = self._calibration_request(run, ws, "GetInputSettings", {"inputName": "Program"}, deadline_s)
         program_settings = program_input.get("inputSettings") or {}
         if (program_input.get("inputKind") != "browser_source"
                 or (program_settings.get("width"), program_settings.get("height"), program_settings.get("fps"),
                     program_settings.get("fps_custom")) != (1920, 1080, run.request.spec.fps, True)):
-            raise ManagedObsError("Calibration geometry does not match the managed program source.")
+            raise _CalibrationRefused("Calibration geometry does not match the managed program source.")
         scenes = self._calibration_request(run, ws, "GetSceneList", None, deadline_s).get("scenes")
         inputs = self._calibration_request(run, ws, "GetInputList", None, deadline_s).get("inputs")
         items = self._calibration_request(run, ws, "GetSceneItemList", {"sceneName": PROGRAM_SCENE}, deadline_s).get("sceneItems")
         if not isinstance(scenes, list) or not isinstance(inputs, list) or not isinstance(items, list):
-            raise ManagedObsError("OBS scene graph is unreadable.")
+            raise _CalibrationRefused("OBS scene graph is unreadable.")
         if any(scene.get("sceneName") == CALIBRATION_SCENE for scene in scenes if isinstance(scene, dict)):
-            raise ManagedObsError("An unowned AK-Calibrate scene already exists.")
+            raise _CalibrationRefused("An unowned AK-Calibrate scene already exists.")
         if any(source.get("inputName") == PROBE_SOURCE for source in inputs if isinstance(source, dict)):
-            raise ManagedObsError("An unowned AK-Probe input already exists.")
+            raise _CalibrationRefused("An unowned AK-Probe input already exists.")
         if any(item.get("sourceName") == CALIBRATION_SCENE for item in items if isinstance(item, dict)):
-            raise ManagedObsError("An unowned AK-Calibrate program item already exists.")
+            raise _CalibrationRefused("An unowned AK-Calibrate program item already exists.")
         path = self.tree / "basic/scenes/AK.json"
         stat = path.stat()
         saved_by_obs = self._launch_date is not None and stat.st_mtime_ns > int(self._launch_date * 1_000_000_000)
@@ -933,7 +948,7 @@ class ManagedObs:
             raise
         scene_uuid = created.get("sceneUuid")
         if not isinstance(scene_uuid, str):
-            raise ManagedObsError("OBS did not return the calibration scene UUID.")
+            raise _CalibrationIsolationViolation("OBS did not return the calibration scene UUID.")
         install.input_created = True
         try:
             source = self._calibration_request(
@@ -948,7 +963,7 @@ class ManagedObs:
             raise
         source_uuid = source.get("inputUuid")
         if not isinstance(source_uuid, str):
-            raise ManagedObsError("OBS did not return the calibration source UUID.")
+            raise _CalibrationIsolationViolation("OBS did not return the calibration source UUID.")
         install.source_uuid = source_uuid
         log.info("installed calibration scene %s and source %s for run %s", scene_uuid, source_uuid,
                  run.request.spec.run_id)
@@ -972,7 +987,7 @@ class ManagedObs:
                 raise
             ref_id = item.get("sceneItemId")
             if not isinstance(ref_id, int):
-                raise ManagedObsError("OBS did not return the calibration scene item ID.")
+                raise _CalibrationIsolationViolation("OBS did not return the calibration scene item ID.")
             install.ref_id = ref_id
             x = float(snapshot.video["baseWidth"]) + 128.0
             transform = {"positionX": x, "positionY": 0.0, "rotation": 0.0, "scaleX": 1.0, "scaleY": 1.0,
@@ -995,22 +1010,22 @@ class ManagedObs:
         source_rows = [item for item in inputs or [] if item.get("inputName") == PROBE_SOURCE]
         scene_rows = [item for item in scenes or [] if item.get("sceneName") == CALIBRATION_SCENE]
         if len(source_rows) != 1 or source_rows[0].get("inputUuid") != source_uuid:
-            raise ManagedObsError("Calibration source identity did not read back.")
+            raise _CalibrationIsolationViolation("Calibration source identity did not read back.")
         if len(scene_rows) != 1 or scene_rows[0].get("sceneUuid") != scene_uuid:
-            raise ManagedObsError("Calibration scene identity did not read back.")
+            raise _CalibrationIsolationViolation("Calibration scene identity did not read back.")
         settings = self._calibration_request(run, ws, "GetInputSettings", {"inputName": PROBE_SOURCE}, deadline_s)
         expected = {"url": run.request.url, "width": 1920, "height": 1080, "fps": run.request.spec.fps,
                     "fps_custom": True, "shutdown": False, "reroute_audio": True}
         actual = settings.get("inputSettings") or {}
         if settings.get("inputKind") != "browser_source" or any(actual.get(key) != value for key, value in expected.items()):
-            raise ManagedObsError("Calibration browser settings did not read back.")
+            raise _CalibrationIsolationViolation("Calibration browser settings did not read back.")
         muted = self._calibration_request(run, ws, "GetInputMute", {"inputName": PROBE_SOURCE}, deadline_s)
         audio_tracks = self._calibration_request(run, ws, "GetInputAudioTracks", {"inputName": PROBE_SOURCE}, deadline_s)
         monitor = self._calibration_request(run, ws, "GetInputAudioMonitorType", {"inputName": PROBE_SOURCE}, deadline_s)
         filters = self._calibration_request(run, ws, "GetSourceFilterList", {"sourceName": PROBE_SOURCE}, deadline_s)
         if (muted.get("inputMuted") is not True or audio_tracks.get("inputAudioTracks") != tracks
                 or monitor.get("monitorType") != "OBS_MONITORING_TYPE_NONE" or filters.get("filters") != []):
-            raise ManagedObsError("Calibration source audio or filters are not isolated.")
+            raise _CalibrationIsolationViolation("Calibration source audio or filters are not isolated.")
 
     def _verify_offcanvas_transform(self, run: _CalibrationRun, ws: ObsWebsocket, ref_id: int,
                                     snapshot: _CalibrationSnapshot, deadline_s: float, *, enabled: bool) -> None:
@@ -1024,15 +1039,15 @@ class ManagedObs:
                  "boundsHeight": 0.0, "boundsAlignment": 0, "alignment": 5,
                  "sourceWidth": 1920.0, "sourceHeight": 1080.0, "width": 1920.0, "height": 1080.0}
         if any(transform.get(key) != value for key, value in fixed.items()):
-            raise ManagedObsError("Off-canvas calibration transform changed.")
+            raise _CalibrationIsolationViolation("Off-canvas calibration transform changed.")
         x, width = transform.get("positionX"), transform.get("width")
         if not isinstance(x, (int, float)) or not isinstance(width, (int, float)) or width <= 0 or x < snapshot.video["baseWidth"]:
-            raise ManagedObsError("Off-canvas calibration bounds intersect the canvas.")
+            raise _CalibrationIsolationViolation("Off-canvas calibration bounds intersect the canvas.")
         items = self._calibration_request(run, ws, "GetSceneItemList", {"sceneName": PROGRAM_SCENE}, deadline_s).get("sceneItems")
         row = next((item for item in items or [] if item.get("sceneItemId") == ref_id), None)
         if (row is None or row.get("sourceName") != CALIBRATION_SCENE or row.get("sceneItemEnabled") is not enabled
                 or row.get("sceneItemBlendMode") != "OBS_BLEND_NORMAL" or row.get("isGroup") is not False):
-            raise ManagedObsError("Off-canvas calibration scene item state changed.")
+            raise _CalibrationIsolationViolation("Off-canvas calibration scene item state changed.")
 
     def _target_rows(self, timeout_s: float = 1.0) -> list[dict[str, Any]]:
         with self._lock:
@@ -1049,7 +1064,7 @@ class ManagedObs:
                 raise ManagedObsError("Calibration CDP targets are unreadable.") from exc
             if (len(rows) == 1) is present:
                 if present and str(rows[0].get("id")) == run.request.program_target_id:
-                    raise ManagedObsError("Calibration target collided with the program target.")
+                    raise _CalibrationIsolationViolation("Calibration target collided with the program target.")
                 return str(rows[0].get("id")) if present else None
             if self._clock() + self._poll_s >= deadline_s:
                 wanted = "appear" if present else "disappear"
@@ -1063,7 +1078,7 @@ class ManagedObs:
         cursor = self._calibration_request(run, ws, "GetCurrentSceneTransitionCursor", None, deadline_s)
         if (transition.get("transitionName"), transition.get("transitionKind"), cursor.get("transitionCursor")) != (
                 "Cut", "cut_transition", 1.0):
-            raise ManagedObsError("Calibration transition state changed.")
+            raise _CalibrationIsolationViolation("Calibration transition state changed.")
         try:
             output = self._calibration_request(run, ws, "GetOutputStatus", {"outputName": PREVIEW_OUTPUT}, deadline_s)
         except ObsRequestError as exc:
@@ -1071,18 +1086,18 @@ class ManagedObs:
                 raise ManagedObsError("DeckLink preview output state changed or became unreadable.") from exc
         else:
             if output.get("outputActive") is not False:
-                raise ManagedObsError("DeckLink preview output became active.")
+                raise _CalibrationIsolationViolation("DeckLink preview output became active.")
         program = self._calibration_request(run, ws, "GetCurrentProgramScene", None, deadline_s)
         if self._scene_identity(program, "currentProgram") != (snapshot.program_name, snapshot.program_uuid):
-            raise ManagedObsError("Calibration changed the program scene.")
+            raise _CalibrationIsolationViolation("Calibration changed the program scene.")
         video = self._calibration_request(run, ws, "GetVideoSettings", None, deadline_s)
         if any(video.get(key) != snapshot.video.get(key) for key in ("baseWidth", "baseHeight", "outputWidth", "outputHeight")):
-            raise ManagedObsError("Calibration canvas dimensions changed.")
+            raise _CalibrationIsolationViolation("Calibration canvas dimensions changed.")
         targets = self._target_rows(deadline_s - self._clock())
         if run.request.program_target_id not in {str(row.get("id")) for row in targets}:
-            raise ManagedObsError("Calibration lost the program CDP target.")
+            raise _CalibrationIsolationViolation("Calibration lost the program CDP target.")
         if len([row for row in targets if row.get("type") == "page" and row.get("url") == run.request.url]) != 1:
-            raise ManagedObsError("Calibration probe target identity changed.")
+            raise _CalibrationIsolationViolation("Calibration probe target identity changed.")
         inputs = self._calibration_request(run, ws, "GetInputList", None, deadline_s).get("inputs") or []
         source_rows = [row for row in inputs if isinstance(row, dict) and row.get("inputName") == PROBE_SOURCE]
         settings = self._calibration_request(run, ws, "GetInputSettings", {"inputName": PROBE_SOURCE}, deadline_s)
@@ -1091,33 +1106,33 @@ class ManagedObs:
                 or settings.get("inputKind") != "browser_source"
                 or (source_settings.get("url"), source_settings.get("width"), source_settings.get("height"),
                     source_settings.get("fps")) != (run.request.url, 1920, 1080, run.request.spec.fps)):
-            raise ManagedObsError("Calibration source identity or geometry changed.")
+            raise _CalibrationIsolationViolation("Calibration source identity or geometry changed.")
         muted = self._calibration_request(run, ws, "GetInputMute", {"inputName": PROBE_SOURCE}, deadline_s)
         tracks = self._calibration_request(run, ws, "GetInputAudioTracks", {"inputName": PROBE_SOURCE}, deadline_s)
         monitor = self._calibration_request(run, ws, "GetInputAudioMonitorType", {"inputName": PROBE_SOURCE}, deadline_s)
         if (muted.get("inputMuted") is not True
                 or tracks.get("inputAudioTracks") != {str(index): False for index in range(1, 7)}
                 or monitor.get("monitorType") != "OBS_MONITORING_TYPE_NONE"):
-            raise ManagedObsError("Calibration source audio isolation changed.")
+            raise _CalibrationIsolationViolation("Calibration source audio isolation changed.")
         active = self._calibration_request(run, ws, "GetSourceActive", {"sourceName": PROBE_SOURCE}, deadline_s)
         expected_active = run.request.placement == "offcanvas"
         if active.get("videoActive") is not expected_active or active.get("videoShowing") is not True:
-            raise ManagedObsError("Calibration source is not active in the selected isolated placement.")
+            raise _CalibrationIsolationViolation("Calibration source is not active in the selected isolated placement.")
         items = self._calibration_request(run, ws, "GetSceneItemList", {"sceneName": PROGRAM_SCENE}, deadline_s).get("sceneItems")
         if run.request.placement == "preview":
             studio = self._calibration_request(run, ws, "GetStudioModeEnabled", None, deadline_s)
             preview = self._calibration_request(run, ws, "GetCurrentPreviewScene", None, deadline_s)
             if studio.get("studioModeEnabled") is not True or self._scene_identity(preview, "currentPreview")[0] != CALIBRATION_SCENE:
-                raise ManagedObsError("Calibration preview placement changed.")
+                raise _CalibrationIsolationViolation("Calibration preview placement changed.")
             if items != snapshot.program_items:
-                raise ManagedObsError("Calibration changed the program scene graph.")
+                raise _CalibrationIsolationViolation("Calibration changed the program scene graph.")
         elif ref_id is None:
-            raise ManagedObsError("Off-canvas calibration reference is missing.")
+            raise _CalibrationIsolationViolation("Off-canvas calibration reference is missing.")
         else:
             self._verify_offcanvas_transform(run, ws, ref_id, snapshot, deadline_s, enabled=True)
             original = [item for item in items or [] if item.get("sceneItemId") != ref_id]
             if original != snapshot.program_items:
-                raise ManagedObsError("Calibration changed an existing program scene item.")
+                raise _CalibrationIsolationViolation("Calibration changed an existing program scene item.")
 
     @staticmethod
     def _remove_absent(exc: ObsRequestError, request_type: str) -> bool:
@@ -1126,15 +1141,18 @@ class ManagedObs:
 
     def _cleanup_calibration(self, run: _CalibrationRun, snapshot: _CalibrationSnapshot | None,
                              install: _CalibrationInstall, baseline: CollectionSnapshot | None,
-                             guard: ProgramGuard, errors: list[str]) -> tuple[bool, bool, PersistenceCheck | None]:
+                             guard: ProgramGuard, errors: list[str]) -> tuple[bool, bool, PersistenceCheck | None, bool]:
         deadline_s = self._clock() + CALIBRATION_CLEANUP_S
         cleanup_ok = False
         restored = (snapshot is None and not install.scene_created and not install.input_created
                     and not install.ref_requested and install.ref_id is None)
         absent = False
+        isolation_violation = False
+        isolation_reasons: list[str] = []
         cleanup_error_count = len(errors)
         last_removal_mtime_ns = time.time_ns()
         try:
+            self._calibration_verify_ownership(run, deadline_s, cancelled=False)
             with ObsWebsocket(self._ws_port, self._ws_password, timeout=min(2.0, CALIBRATION_CLEANUP_S),
                               max_message_bytes=CALIBRATION_MAX_MESSAGE_BYTES) as ws:
                 def request(name: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1148,6 +1166,7 @@ class ManagedObs:
                             install.ref_id = refs[0]
                         elif refs:
                             errors.append("cleanup-reference: calibration scene item identity is ambiguous")
+                            isolation_violation = True
                     except Exception as exc:
                         errors.append(f"cleanup-reference: {type(exc).__name__}: {exc}")
                 if snapshot is not None and install.ref_id is not None:
@@ -1206,15 +1225,20 @@ class ManagedObs:
                     self._sleep(min(0.1, max(0.0, deadline_s - self._clock())))
                 if not absent:
                     errors.append("absence-poll: calibration resources remain")
+                    isolation_violation = True
                 try:
                     self._await_probe_target(run, deadline_s, present=False)
                 except Exception as exc:
                     errors.append(f"target-cleanup: {type(exc).__name__}: {exc}")
                     absent = False
+                    if "did not disappear" in str(exc):
+                        isolation_violation = True
                 if snapshot is not None:
                     try:
                         current = request("GetCurrentProgramScene")
                         if self._scene_identity(current, "currentProgram") != (snapshot.program_name, snapshot.program_uuid):
+                            isolation_violation = True
+                            isolation_reasons.append("isolation: program scene changed during cleanup")
                             request("SetCurrentProgramScene", {"sceneName": snapshot.program_name})
                     except Exception as exc:
                         errors.append(f"restore-program: {type(exc).__name__}: {exc}")
@@ -1243,11 +1267,15 @@ class ManagedObs:
                                 preview_ok = False
                         restored = (studio == snapshot.studio_enabled and program == (snapshot.program_name, snapshot.program_uuid)
                                     and current_items == snapshot.program_items and preview_ok)
+                        if not restored:
+                            isolation_violation = True
+                            errors.append("isolation: restored OBS state did not match snapshot")
                     except Exception as exc:
                         errors.append(f"restore-readback: {type(exc).__name__}: {exc}")
         except Exception as exc:
             errors.append(f"cleanup-connection: {type(exc).__name__}: {exc}")
         cleanup_ok = absent and len(errors) == cleanup_error_count
+        errors.extend(isolation_reasons)
         try:
             guard.sample("restored")
         except Exception as exc:
@@ -1264,7 +1292,7 @@ class ManagedObs:
                     errors.append("persistence: scene collection differs after cleanup")
             except Exception as exc:
                 errors.append(f"persistence: {type(exc).__name__}: {exc}")
-        return cleanup_ok, restored, persistence
+        return cleanup_ok, restored, persistence, isolation_violation
 
     def _calibration_worker(self, run: _CalibrationRun, measure: Callable[[CalibrationIO], ClassifierInput],
                             guard: ProgramGuard) -> None:
@@ -1272,7 +1300,7 @@ class ManagedObs:
         deadline_s = started_s + CALIBRATION_DEADLINE_S
         evidence = None
         program = None
-        isolation_ok = False
+        isolation_ok = True
         io: _CalibrationIO | None = None
         errors: list[str] = []
         snapshot = None
@@ -1287,11 +1315,11 @@ class ManagedObs:
                     if self._calibration_run is run:
                         run.measurement_ws = ws
                 snapshot, baseline = self._snapshot_calibration(run, ws, deadline_s)
+                self._calibration_verify_ownership(run, deadline_s)
                 self._install_calibration(run, ws, snapshot, install, deadline_s)
-                isolation_ok = True
                 guard.sample("installed")
                 if install.source_uuid is None:
-                    raise ManagedObsError("Calibration source was not installed.")
+                    raise _CalibrationIsolationViolation("Calibration source was not installed.")
                 io = _CalibrationIO(self, run, ws, snapshot, install.source_uuid, install.ref_id, guard, deadline_s)
                 evidence = measure(io)
                 if (not isinstance(evidence, ClassifierInput) or evidence.spec != run.request.spec
@@ -1301,12 +1329,19 @@ class ManagedObs:
                         or evidence.identity.connection_generation != run.request.connection_generation
                         or not evidence.identity.target_id or evidence.identity.target_id == run.request.program_target_id
                         or not evidence.identity.context_id or evidence.identity.dpr != run.request.spec.dpr):
-                    raise ManagedObsError("Calibration evidence identity does not match the installed probe.")
-                isolation_ok = io.isolation_ok
+                    raise _CalibrationIsolationViolation("Calibration evidence identity does not match the installed probe.")
+        except _CalibrationIsolationViolation as exc:
+            isolation_ok = False
+            errors.append(f"isolation: {type(exc).__name__}: {exc}")
+        except _CalibrationCancelled as exc:
+            errors.append(f"cancelled: {type(exc).__name__}: {exc}")
+        except (_CalibrationTimeout, ObsWebsocketTimeout) as exc:
+            errors.append(f"timeout: {type(exc).__name__}: {exc}")
+        except _CalibrationRefused as exc:
+            errors.append(f"refused: {type(exc).__name__}: {exc}")
         except Exception as exc:
-            if io is not None and not io.isolation_ok:
-                isolation_ok = False
-            errors.append(f"calibration: {type(exc).__name__}: {exc}")
+            reason = "refused" if not any((install.scene_created, install.input_created, install.ref_requested)) else "calibration"
+            errors.append(f"{reason}: {type(exc).__name__}: {exc}")
         finally:
             with self._lock:
                 if self._calibration_run is run:
@@ -1315,8 +1350,9 @@ class ManagedObs:
                 guard.sample("before-cleanup")
             except Exception as exc:
                 errors.append(f"guard-before-cleanup: {type(exc).__name__}: {exc}")
-            cleanup_verified, restored, persistence = self._cleanup_calibration(
+            cleanup_verified, restored, persistence, cleanup_isolation_violation = self._cleanup_calibration(
                 run, snapshot, install, baseline, guard, errors)
+            isolation_ok = isolation_ok and not cleanup_isolation_violation
             try:
                 program = guard.finish()
             except Exception as exc:

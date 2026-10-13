@@ -173,6 +173,8 @@ SPLICES = {
                          b"fx=dx+Math.round(cx-r.left)-u0", 1),
     "frac-nooffset-y": (b"fy=dy+(r.top-R.top)+Math.round(cy-r.top)-v0",
                          b"fy=dy+Math.round(cy-r.top)-v0", 1),
+    "frac-underlay-omit": (b'g=x.getContext("2d");g.drawImage(v,dx,dy,dw,dh);if("frac"===pl)',
+                             b'g=x.getContext("2d");if("frac"===pl)', 1),
 }
 
 RAW_STYLE = '<style id="obed-dx-transparent">html,body,#body{background:transparent!important}</style>'
@@ -365,6 +367,10 @@ for _page in ("raw", "preview"):
     for _tag in FORGERIES:
         _base = f"m-{_page}-prod"
         ARMS[f"{_base}-forge-{_tag}"] = replace(ARMS[_base], forgery=_tag)
+ARMS["m-raw-prod-forge-snap-getter-kb"] = replace(
+    ARMS["m-raw-prod"], mode="on", forgery="snap-getter", holders=1,
+    expect={"model": "PASS", "scope": "PASS"},
+)
 
 LIFECYCLE: dict[str, dict[str, Any]] = {
     "advance": {},
@@ -437,6 +443,14 @@ ARMS["m-snap-cef-nooffset-y"] = replace(ARMS["m-snap-cef-near-y"], splice="frac-
 ARMS["m-snap-cef-nooffset-y-twin"] = replace(ARMS["m-snap-cef-near-y-twin"], splice="frac-nooffset-y+fg-omit")
 ARMS["m-snap-cef-dsk"] = replace(ARMS["cef-skip-dsk"], placement_value="frac", grant="driver", holders=2,
                                         expect={"frozen_frame": "PASS", "frozen_region": "PASS", "cost": "PASS", "geometry": "PASS"})
+ARMS["m-snap-cef-underlay-omit"] = replace(
+    ARMS["m-snap-cef"], splice="frac-underlay-omit", capture="engage", holders=0, twin=None,
+    expect={"holder_pixels": "FAIL"},
+)
+ARMS["m-geo-frac-origin-cef"] = replace(
+    ARMS["m-snap-lbfrac"], placement_value="frac", capture="engage", holders=0, twin=None,
+    expect={"geometry": "FAIL"},
+)
 DISPLACED = {"frac": ("sn-frac", ("m-snap-dpr15", "m-snap-dpr2")), "shift": ("snap-shift", ("m-snap", "m-snap-dpr15", "m-snap-dpr2"))}
 """Displaced-edge FAIL controls on the 1920x1080 cells: `sn` unrounded at DPR 1.5 and 2 (at DPR 1 the alpha scan rejects
 it, no holder) and the holder one device px right at every DPR."""
@@ -476,7 +490,9 @@ CONTROLS: dict[str, tuple[tuple[str, ...], ...]] = {
     "hidden": (("life-hide-twin", "life-hide-screen-twin"), ("life-hide-nohide",), ("case:hide-duplicate", "case:hide-shift")),
     "shown": (("life-hide-twin", "life-hide-screen-twin"), ("life-hide-noshow",)),
     "grant": (("grant-chrome",), ("grant-attach", "channel-predefined")),
-    "scope": ((), tuple(n for n in ARMS if n == "m-raw-prod" or n == "m-preview-prod" or "-prod-forge-" in n)),
+    "scope": (("m-raw-prod-forge-snap-getter-kb",),
+              tuple(n for n in ARMS if (n in ("m-raw-prod", "m-preview-prod") or "-prod-forge-" in n)
+                    and n != "m-raw-prod-forge-snap-getter-kb")),
 }
 """Per gated check: (positive controls -> PASS, negative controls -> FAIL[, scorer cases that must be INCONCLUSIVE])."""
 
@@ -729,6 +745,7 @@ STAGE_JS = mmo.STAGE_JS
 PLACEMENT_JS = "('__obedPlacement' in window)?String(window.__obedPlacement):null"
 PREDEFINE_JS = ("Object.defineProperty(window,'__obedPlacement',{get:function(){return 'snap'},enumerable:false,"
                 "configurable:false})")
+"""`channel-predefined`: a forged `snap` getter defined before the host's first-run script, which then throws."""
 FORGERY_JS = {
     f"{value}-assignment": ("(function(){window.__obedPlacement=%s;var d=Object.getOwnPropertyDescriptor(window,'__obedPlacement');"
                               "return {read:String(window.__obedPlacement),kind:'assignment',configurable:d.configurable,"
@@ -741,7 +758,6 @@ FORGERY_JS = {
                           "enumerable:d.enumerable,writable:false}})()") % json.dumps(value)
     for value in ("snap", "frac")
 }
-"""`channel-predefined`: a forged `snap` getter defined before the host's first-run script, which then throws."""
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -2443,7 +2459,8 @@ CEF_PLACEMENT_ARMS = (
     "m-paused-cef", "m-off-cef", "m-hold-cef", "m-fg-cef", "m-fg-omit-cef", "m-fg-swap-cef",
     "m-tone-cef", "m-tone-cef-twin", "m-tone-raw-cef", "m-snap-cef-dsk", "wrongrule-cef", "wrongrule-cef-twin",
     "m-snap-cef-nooffset-x", "m-snap-cef-nooffset-x-twin", "m-snap-cef-nooffset-y", "m-snap-cef-nooffset-y-twin",
-    "perfect-shift", "m-geo-dpr125", "m-geo-2560", "m-geo-scale", "m-geo-base",
+    "m-snap-cef-underlay-omit", "perfect-shift", "m-geo-dpr125", "m-geo-2560", "m-geo-scale", "m-geo-base",
+    "m-geo-frac-origin-cef",
 )
 CEF_PLACEMENT = Profile(
     "CEF-placement", CEF_PLACEMENT_ARMS,
@@ -2455,13 +2472,14 @@ CEF_PLACEMENT = Profile(
         ("foreground", (("m-fg-cef",), ("m-fg-omit-cef", "m-fg-swap-cef", "case:fg-shifted", "case:fg-double", "case:fg-swapped"))),
         ("tone", (("m-tone-cef",), ("m-tone-raw-cef",))),
         ("holder_pixels", (CEF_PLACEMENT_POSITIVES,
-                           ("m-snap-cef-nooffset-x", "m-snap-cef-nooffset-y", "wrongrule-cef", "case:holder-shift"))),
+                           ("m-snap-cef-nooffset-x", "m-snap-cef-nooffset-y", "m-snap-cef-underlay-omit", "wrongrule-cef",
+                            "case:holder-shift"))),
         ("reference", ((*CEF_PLACEMENT_POSITIVES, "case:reference-valid"), ("perfect-shift",),
                        ("case:reference-stale", "case:reference-extra", "case:reference-unpaused"))),
         ("mask", ((*CEF_PLACEMENT_POSITIVES, "m-tone-cef", "case:mask-production"), (),
                   ("case:mask-whole", "case:mask-shift3", "case:mask-empty"))),
         ("geometry", ((*CEF_PLACEMENT_POSITIVES, "m-snap-cef-dsk"),
-                      ("m-geo-dpr125", "m-geo-2560", "m-geo-scale", "m-geo-base"))),
+                      ("m-geo-dpr125", "m-geo-2560", "m-geo-scale", "m-geo-base", "m-geo-frac-origin-cef"))),
     ),
     mid_frames=5,
 )
@@ -3157,6 +3175,8 @@ def score_arm(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Arm
 def verified_mask(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Arm, profile: Profile, cal: Calibration,
                   twin: tuple[dict[str, Any], Mapping[str, np.ndarray]] | None) -> tuple[np.ndarray | None, list[str]]:
     """The production mask of the arm's one holder, verified against its twin (§9.1); problems are shared integrity."""
+    if arm.holders == 0 and arm.expect == {"holder_pixels": "FAIL"}:
+        return None, []
     if arm.twin is None:
         return None, (["no twin to verify the production mask"] if {"holder_pixels", "tone", "mask"} & set(arm.expect) else [])
     if twin is None:
@@ -3226,7 +3246,8 @@ def _score_arm(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Ar
         holders = ((record.get("dump") or {}).get("first") or {}).get("holders") or []
         box = device_box(holders[0]["rect"], arm.dsf) if holders and quad(holders[0].get("rect")) else None
         live = images.get("live-0")
-        checks["holder_pixels"] = score_holder_pixels(images.get("ref-A0-0"), live, box, mask, lut, cal)
+        checks["holder_pixels"] = (result(False, alphaRefusal=True) if arm.holders == 0 and not holders
+                                    else score_holder_pixels(images.get("ref-A0-0"), live, box, mask, lut, cal))
         checks["reference"] = score_perfect(images.get("ref-perfect-0"), live, box, cal)
         checks["mask"] = result(mask is not None, [] if mask is not None else ["production mask not verified"])
     for name in ("geometry", "exterior", "scope"):
@@ -3624,7 +3645,7 @@ def measure_placement_probe(*, spec: placement_probe.ProbeSpec, identity: placem
                             check_current: Callable[[], None] = lambda: None,
                             clock: Callable[[], float] = time.monotonic,
                             sleep: Callable[[float], None] = time.sleep) -> placement_probe.ClassifierInput:
-    """Drive §11.1's page API. OBS and Chrome harnesses supply only their capture boundary and identity."""
+    """Drive §11.1's page API for the Chrome harness."""
     assets = placement_probe.load_probe_assets()
     sequence = 0
     previous_start: float | None = None
@@ -3728,9 +3749,6 @@ def run_chrome_placement_probe(*, gpu: bool) -> dict[str, Any]:
         result = placement_probe.classify_probe(evidence)
         return {"input": evidence, "classification": result,
                 "launch": {"gpu": gpu, "chromeArgs": args[1:], "runId": spec.run_id},
-                "classifierControls": {"passed": result.verdict == placement_probe.ProbeVerdict.SNAP,
-                                       "problems": [] if result.verdict == placement_probe.ProbeVerdict.SNAP else
-                                       [f"Chrome classified {result.verdict.value}, expected snap"]},
                 "toneRows": {"complete": False, "observed": result.tone_map.value if result.tone_map else None,
                              "applied": "identity", "problems": ["extended W5 ramp/patch/skin rows not captured"]}}
     finally:

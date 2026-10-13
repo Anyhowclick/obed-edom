@@ -43,6 +43,7 @@ from .live_gl_replay_js import js_sha256 as gl_replay_js_sha256
 from .live_runtime import MM_OPACITY_ENV, RUNTIME_VERSION, LiveRuntimeUnsupported, patch_player
 from .live_session import PlayerCommandRejected, PlayerObservation
 from .managed_obs import (
+    RATES,
     CalibrationAdapter,
     CalibrationIO,
     CalibrationRequest,
@@ -472,9 +473,11 @@ class _AssetServer:
         self.thread.start()
         return f"http://127.0.0.1:{self.httpd.server_port}/program.html"
 
-    def set_probe_run(self, spec: ProbeSpec | None) -> str | None:
+    def set_probe_run(self, spec: ProbeSpec | None, *, run_id: str | None = None) -> str | None:
         if spec is None:
             with self._probe_lock:
+                if run_id is not None and self._probe_run_id != run_id:
+                    return None
                 self._probe_run_id = None
                 self._probe_files = {}
             return None
@@ -1036,27 +1039,28 @@ class _ProgramGuard:
         self._transport = transport
         self._context = context
         self._key = "__obedProgramGuard_" + secrets.token_hex(8)
-        self._last: dict[str, Any] | None = None
         self._baseline_frame_ms: float | None = None
 
     def _expr(self, operation: str) -> str:
         key = json.dumps(self._key)
         if operation == "begin":
             return (
-                f'(function(k){{if(window[k])throw Error("guard exists");var s={{visibilityEvents:0,frames:0,gaps:[],media:{{}}}},'
-                'live=true,last=null,raf=0;function visibility(){s.visibilityEvents++}'
+                f'(function(k){{if(window[k])throw Error("guard exists");var s={{visibilityEvents:0,frames:0,gaps:[],media:[]}},'
+                'live=true,last=null,raf=0,mediaMap=new WeakMap(),mediaId=0;function visibility(){s.visibilityEvents++}'
                 'function tick(t){if(last!==null)s.gaps.push(t-last);last=t;s.frames++;'
-                'Array.prototype.forEach.call(document.querySelectorAll("video"),function(v,i){var id=v.id||v.currentSrc||("video-"+i),'
-                'm=s.media[id]||(s.media[id]={id:id,playing:false,monotonic:true,lastTime:null,lastAdvanceAt:null,frameMs:null,maxStallMs:0});'
-                'if(!v.paused&&v.readyState>=2){m.playing=true;var ct=+v.currentTime;if(m.lastTime!==null&&ct+1e-4<m.lastTime)m.monotonic=false;'
+                'Array.prototype.forEach.call(document.querySelectorAll("video"),function(v){var m=mediaMap.get(v);'
+                'if(!m){m={id:"video-"+(++mediaId),playing:false,active:false,monotonic:true,lastTime:null,lastAdvanceAt:null,frameMs:null,maxStallMs:0};mediaMap.set(v,m);s.media.push(m)}'
+                'var ct=+v.currentTime;if(v.paused||v.ended||v.readyState<2){m.active=false;m.lastTime=null;m.lastAdvanceAt=null;return}'
+                'm.playing=true;if(!m.active){m.active=true;m.lastTime=ct;m.lastAdvanceAt=t;return}'
+                'if(v.loop&&m.lastTime!==null&&ct+1e-4<m.lastTime){m.lastTime=ct;m.lastAdvanceAt=t;return}'
+                'if(m.lastTime!==null&&ct+1e-4<m.lastTime)m.monotonic=false;'
                 'if(m.lastTime===null||ct>m.lastTime+1e-4){if(m.lastTime!==null){var fm=(ct-m.lastTime)*1000;m.frameMs=m.frameMs===null?fm:Math.min(m.frameMs,fm);'
                 'if(m.lastAdvanceAt!==null&&m.frameMs>0)m.maxStallMs=Math.max(m.maxStallMs,t-m.lastAdvanceAt-m.frameMs)}m.lastTime=ct;m.lastAdvanceAt=t}'
-                'else if(m.lastAdvanceAt!==null&&m.frameMs>0)m.maxStallMs=Math.max(m.maxStallMs,t-m.lastAdvanceAt-m.frameMs)}'
-                'else if(m.playing)m.monotonic=false});'
+                'else if(m.lastAdvanceAt!==null&&m.frameMs>0)m.maxStallMs=Math.max(m.maxStallMs,t-m.lastAdvanceAt-m.frameMs)});'
                 'if(live)raf=requestAnimationFrame(tick)}'
                 'function snapshot(){var g=s.gaps.slice().sort(function(a,b){return a-b}),mid=g.length?g[Math.floor(g.length/2)]:null;'
                 'return {visibilityEvents:s.visibilityEvents,frames:s.frames,baselineFrameMs:mid,maxRafGapMs:s.gaps.length?Math.max.apply(Math,s.gaps):null,'
-                'media:Object.keys(s.media).map(function(id){var m=s.media[id];return {id:m.id,playing:m.playing,monotonic:m.monotonic,'
+                'media:s.media.map(function(m){return {id:m.id,playing:m.playing,monotonic:m.monotonic,'
                 'maxStallMs:Math.max(0,m.maxStallMs),frameMs:m.frameMs}})}}'
                 'function finish(){live=false;cancelAnimationFrame(raf);document.removeEventListener("visibilitychange",visibility);var out=snapshot();delete window[k];return out}'
                 'Object.defineProperty(window,k,{value:{snapshot:snapshot,finish:finish},configurable:true});'
@@ -1071,10 +1075,10 @@ class _ProgramGuard:
         deadline = time.monotonic() + .25
         while time.monotonic() < deadline:
             value = self._transport.evaluate_in(self._context, self._expr("sample"), deadline_s=.5)
-            self._last = value if isinstance(value, dict) else None
-            if self._last is not None and self._last.get("frames", 0) >= 4:
-                baseline = self._last.get("baselineFrameMs")
-                max_gap = self._last.get("maxRafGapMs")
+            sample = value if isinstance(value, dict) else None
+            if sample is not None and sample.get("frames", 0) >= 4:
+                baseline = sample.get("baselineFrameMs")
+                max_gap = sample.get("maxRafGapMs")
                 if (
                     isinstance(baseline, (int, float)) and not isinstance(baseline, bool) and baseline > 0
                     and isinstance(max_gap, (int, float)) and not isinstance(max_gap, bool)
@@ -1088,7 +1092,6 @@ class _ProgramGuard:
         value = self._transport.evaluate_in(self._context, self._expr("sample"), deadline_s=1.0)
         if not isinstance(value, dict):
             raise LiveHostError(f"Program guard sample {phase} is unavailable.")
-        self._last = value
 
     def finish(self) -> ProgramCheck:
         try:
@@ -1207,16 +1210,18 @@ class LiveOutputHost:
         self._probe_future: Future[CalibrationResult] | None = None
         self._probe_thread: threading.Thread | None = None
         self._probe_run_id: str | None = None
+        self._probe_cancelled = False
         self._probe_context: str | None = None
-        self._probe_manual = False
         self._probe_engine: EngineIdentity | None = None
         self._engine_identity: EngineIdentity | None = None
+        self._last_engine: EngineIdentity | None = None
         self._probe_fingerprint: tuple[str, float, int, int] | None = None
         self._automatic_probe_key: tuple[EngineIdentity, int, str] | None = None
         self._lease_deadline_s: float | None = None
         self._renew_stop = threading.Event()
         self._renew_thread: threading.Thread | None = None
         self._reconnect_revoke_required = False
+        self._placement_epoch = 0
         self._player_busy = True
         self._placement: dict[str, Any] = {
             "state": "invalid", "grant": None, "reason": None, "at": None,
@@ -1555,13 +1560,28 @@ class LiveOutputHost:
         value = status.get("gpu_compositing") if isinstance(status, dict) else None
         return value if isinstance(value, str) else None
 
-    def _revoke_placement(self, context: str) -> bool:
+    def _revoke_placement(self, context: str) -> Literal["revoked", "compromised", "disconnected"]:
+        with self._placement_lock:
+            self._placement_epoch += 1
         try:
-            return self._require_transport().evaluate_in(
+            result = self._require_transport().evaluate_in(
                 context, _placement_set_expr(self._placement_token, "invalid"), deadline_s=1.0,
-            ) == "invalid"
-        except LiveHostError:
-            return False
+            )
+        except Exception:
+            return "disconnected"
+        return "revoked" if result == "invalid" else "compromised"
+
+    def _handle_revoke_failure(self, context: str, result: str) -> None:
+        if result == "revoked":
+            return
+        with self._placement_lock:
+            if context == self._placement_context:
+                self._reconnect_revoke_required = True
+        reason = "channel-compromised" if result == "compromised" else "disconnected"
+        self._set_placement(None, reason, state="invalid")
+        if result == "compromised":
+            try: self._require_transport().evaluate("window.__obedOutput.hide()", deadline_s=1.0)
+            except Exception: pass
 
     def _sync_placement(self) -> None:
         if self._placement["reason"] == "channel-compromised":
@@ -1577,6 +1597,8 @@ class LiveOutputHost:
         old = self._transport
         if old is None:
             return False
+        with self._placement_lock:
+            self._placement_epoch += 1
         self._cancel_probe("disconnected")
         try:
             if hasattr(old, "detach"):
@@ -1618,13 +1640,12 @@ class LiveOutputHost:
             self._connection_generation += 1
             product = version.get("product") if isinstance(version, dict) else None
             self._placement["product"] = product if isinstance(product, str) else None
-            if not self._revoke_placement(context):
-                self._set_placement(None, "channel-compromised", state="invalid")
-                try: replacement.evaluate("window.__obedOutput.hide()", deadline_s=1.0)
-                except Exception: pass
+            revoke = self._revoke_placement(context)
+            if revoke != "revoked":
+                self._handle_revoke_failure(context, revoke)
                 return False
             self._reconnect_revoke_required = False
-            self._set_placement(None, "disconnected", state="invalid")
+            self._set_placement(None, "not-calibrated", state="invalid")
             if self._logger is not None:
                 self._logger.log("placementReconnect", connectionGeneration=self._connection_generation, context=context)
             return True
@@ -1713,10 +1734,14 @@ class LiveOutputHost:
     def _cancel_probe(self, reason: str) -> None:
         with self._placement_lock:
             run_id = self._probe_run_id
+            self._placement_epoch += 1
+            if run_id is not None:
+                self._probe_cancelled = True
         if run_id is not None and self._calibration is not None:
             try: self._calibration.cancel(run_id, timeout_s=0)
             except Exception: pass
-        self._set_placement(None, reason, state="invalid")
+        if self._placement["reason"] != "channel-compromised":
+            self._set_placement(None, reason, state="invalid")
 
     def _sync_probe_placement(self) -> None:
         if self._calibration is None or not self._managed_obs:
@@ -1724,20 +1749,39 @@ class LiveOutputHost:
         context = self._program_context()
         try: engine = self._calibration.identity()
         except Exception: engine = None
-        if engine != self._engine_identity:
+        if engine is None:
             if self._engine_identity is not None:
                 if context is not None:
-                    self._reconnect_revoke_required = not self._revoke_placement(context)
-                self._cancel_probe("disconnected" if engine is None else "revoked-fingerprint")
+                    revoke = self._revoke_placement(context)
+                    self._reconnect_revoke_required = revoke != "revoked"
+                    if revoke != "revoked":
+                        self._handle_revoke_failure(context, revoke)
+                self._automatic_probe_key = None
+                self._cancel_probe("disconnected")
+        elif engine != self._last_engine:
+            if self._last_engine is not None:
+                if context is not None:
+                    revoke = self._revoke_placement(context)
+                    self._reconnect_revoke_required = revoke != "revoked"
+                    if revoke != "revoked":
+                        self._handle_revoke_failure(context, revoke)
+                self._cancel_probe("revoked-fingerprint")
+            self._last_engine = engine
             self._engine_identity = engine
+            self._automatic_probe_key = None
             with self._placement_lock:
                 self._placement["automaticProbesDisabled"] = False
+        else:
+            self._engine_identity = engine
         if context != self._placement_context:
             old_context = self._placement_context
             if old_context is not None:
-                self._revoke_placement(old_context)
+                revoke = self._revoke_placement(old_context)
+                if revoke != "revoked":
+                    self._handle_revoke_failure(old_context, revoke)
             self._placement_context = context
-            self._reconnect_revoke_required = False
+            if old_context is None:
+                self._reconnect_revoke_required = False
             if self._probe_run_id is not None:
                 self._cancel_probe("stale-result")
             elif self._placement["grant"] is not None:
@@ -1747,15 +1791,20 @@ class LiveOutputHost:
                 self._set_placement(None, "disconnected", state="invalid")
             return
         if self._reconnect_revoke_required:
-            if not self._revoke_placement(context):
-                self._set_placement(None, "disconnected", state="invalid")
+            revoke = self._revoke_placement(context)
+            if revoke != "revoked":
+                self._handle_revoke_failure(context, revoke)
                 return
             self._reconnect_revoke_required = False
+            if self._placement["reason"] == "disconnected":
+                self._set_placement(None, "not-calibrated", state="invalid")
         if self._placement["state"] == "valid":
             fingerprint = self._probe_fingerprint_read(context)
             if fingerprint != self._probe_fingerprint:
-                if not self._revoke_placement(context):
+                revoke = self._revoke_placement(context)
+                if revoke != "revoked":
                     self._reconnect_revoke_required = True
+                    self._handle_revoke_failure(context, revoke)
                 self._automatic_probe_key = None
                 self._set_placement(None, "revoked-fingerprint", state="invalid")
             return
@@ -1769,27 +1818,37 @@ class LiveOutputHost:
             return
         self._schedule_probe(context, engine, manual=False)
 
-    def _schedule_probe(self, context: str, engine: EngineIdentity, *, manual: bool) -> None:
+    def _schedule_probe(self, context: str, engine: EngineIdentity, *, manual: bool) -> bool:
         if self._probe_run_id is not None:
             raise PlayerCommandRejected("Calibration is already running.")
+        revoke = self._revoke_placement(context)
+        if revoke != "revoked":
+            self._handle_revoke_failure(context, revoke)
+            return False
         run_id = secrets.token_hex(16)
-        self._probe_run_id = run_id
-        self._probe_context = context
-        self._probe_manual = manual
-        self._probe_engine = engine
-        if not manual:
-            self._automatic_probe_key = (engine, self._connection_generation, context)
-        self._placement["probeId"] = run_id
-        self._revoke_placement(context)
-        if self._player_busy:
-            self._set_placement(None, "waiting-for-transition", state="probing")
-            return
+        with self._placement_lock:
+            self._placement_epoch += 1
+            self._probe_run_id = run_id
+            self._probe_cancelled = False
+            self._probe_context = context
+            self._probe_engine = engine
+            if not manual:
+                self._automatic_probe_key = (engine, self._connection_generation, context)
+            self._placement["probeId"] = run_id
+            waiting = self._player_busy
+            if waiting:
+                self._set_placement(None, "waiting-for-transition", state="probing")
+        if waiting:
+            return True
         self._start_scheduled_probe()
+        return True
 
     def _start_scheduled_probe(self) -> None:
-        run_id, context, engine = self._probe_run_id, self._probe_context, self._probe_engine
-        if run_id is None or context is None or engine is None or self._probe_future is not None:
-            return
+        with self._placement_lock:
+            run_id, context, engine = self._probe_run_id, self._probe_context, self._probe_engine
+            epoch = self._placement_epoch
+            if self._stopped or run_id is None or context is None or engine is None or self._probe_future is not None:
+                return
         if self._server is None or not hasattr(self._server, "set_probe_run"):
             self._finish_probe_state("probe-failed")
             return
@@ -1797,7 +1856,7 @@ class LiveOutputHost:
         if fingerprint is None or fingerprint[1:] != (1.0, 1920, 1080):
             self._finish_probe_state("revoked-fingerprint")
             return
-        spec = ProbeSpec(run_id, 1920, 1080, (self._output_rate or 25) * 2, 1.0)
+        spec = ProbeSpec(run_id, 1920, 1080, RATES[self._output_rate or 25][1], 1.0)
         try:
             url = self._server.set_probe_run(spec)
             if not isinstance(url, str):
@@ -1812,34 +1871,59 @@ class LiveOutputHost:
             future = self._calibration.start(request, measure=self._measure_probe, guard=guard)
         except Exception as exc:
             if self._logger is not None: self._logger.log("placementProbeStart", probeId=run_id, error=str(exc))
-            try: self._server.set_probe_run(None)
-            except Exception: pass
             self._finish_probe_state("probe-failed")
             return
-        self._probe_fingerprint = fingerprint
-        self._probe_future = future
-        self._set_placement(None, "calibrating", state="probing")
-        self._probe_thread = threading.Thread(
-            target=self._await_probe_result,
-            args=(run_id, request, future),
-            name="obed-placement-probe",
-            daemon=True,
-        )
-        self._probe_thread.start()
-
-    def _finish_probe_state(self, reason: str, *, suppress: bool = False, tone: str | None | object = _TONE_UNSET) -> None:
         with self._placement_lock:
+            stale = self._stopped or self._probe_run_id != run_id or self._placement_epoch != epoch
+            if not stale:
+                self._probe_fingerprint = fingerprint
+                self._probe_future = future
+                self._set_placement(None, "calibrating", state="probing")
+                self._probe_thread = threading.Thread(
+                    target=self._await_probe_result,
+                    args=(run_id, request, future),
+                    name="obed-placement-probe",
+                    daemon=True,
+                )
+                self._probe_thread.start()
+        if stale:
+            try: self._calibration.cancel(run_id, timeout_s=0)
+            except Exception: pass
+            try: self._server.set_probe_run(None, run_id=run_id)
+            except Exception: pass
+
+    def _finish_probe_state(
+        self,
+        reason: str,
+        *,
+        suppress: bool = False,
+        tone: str | None | object = _TONE_UNSET,
+        expected_run_id: str | None = None,
+        expected_epoch: int | None = None,
+    ) -> bool:
+        with self._placement_lock:
+            if (
+                expected_run_id is not None and self._probe_run_id != expected_run_id
+                or expected_epoch is not None and self._placement_epoch != expected_epoch
+            ):
+                return False
             probe_id = self._probe_run_id
+            server = self._server
+            if probe_id is not None and server is not None and hasattr(server, "set_probe_run"):
+                try: server.set_probe_run(None, run_id=probe_id)
+                except Exception: pass
+            self._placement_epoch += 1
             self._probe_run_id = None
+            self._probe_cancelled = False
             self._probe_context = None
             self._probe_engine = None
             self._probe_future = None
-            self._probe_manual = False
             if suppress:
                 self._placement["automaticProbesDisabled"] = True
+            self._set_placement(None, reason, state="invalid", tone=tone)
         if self._logger is not None:
             self._logger.log("placementProbeRejected", probeId=probe_id, reason=reason, suppressed=suppress)
-        self._set_placement(None, reason, state="invalid", tone=tone)
+        return True
 
     @staticmethod
     def _probe_geometry(value: Any) -> PoseGeometry:
@@ -1877,10 +1961,10 @@ class LiveOutputHost:
     def _probe_nonce_matches(png: bytes, nonce: str) -> bool:
         try:
             with Image.open(io.BytesIO(png)) as source:
+                if source.size != (1920, 1080):
+                    return False
                 image = source.convert("RGBA")
         except Exception:
-            return False
-        if image.size != (1920, 1080):
             return False
         bits = f"{int(nonce, 16):0128b}"
         pixels = image.load()
@@ -1927,7 +2011,7 @@ class LiveOutputHost:
             target_id = getattr(transport, "target_id", None)
             if not isinstance(target_id, str):
                 raise LiveHostError("Probe target identity is unavailable.")
-            target_url = getattr(transport, "target_url", channel.request.url)
+            target_url = getattr(transport, "target_url", None)
             if target_url != channel.request.url:
                 raise LiveHostError("Probe target URL does not match the registered run.")
             frame = transport.call("Page.getFrameTree", deadline_s=min(1.0, deadline - time.monotonic()))["frameTree"]["frame"]["id"]
@@ -2043,7 +2127,7 @@ class LiveOutputHost:
                 tuple(still),
             )
         finally:
-            try: transport.stop()
+            try: transport.detach()
             except Exception: pass
 
     def _await_probe_result(self, run_id: str, request: CalibrationRequest, future: Future[CalibrationResult]) -> None:
@@ -2053,55 +2137,80 @@ class LiveOutputHost:
             if self._logger is not None: self._logger.log("placementProbe", probeId=run_id, error=str(exc))
             result = None
         try:
-            try:
-                self._complete_probe(run_id, request, result)
-            except Exception as exc:
-                if self._logger is not None: self._logger.log("placementProbe", probeId=run_id, error=str(exc))
-                with self._placement_lock:
-                    current = run_id == self._probe_run_id and not self._stopped
-                if current:
-                    self._finish_probe_state("probe-failed")
-        finally:
-            server = self._server
-            if server is not None and hasattr(server, "set_probe_run"):
-                try: server.set_probe_run(None)
-                except Exception: pass
+            self._complete_probe(run_id, request, result)
+        except Exception as exc:
+            if self._logger is not None: self._logger.log("placementProbe", probeId=run_id, error=str(exc))
+            with self._placement_lock:
+                current = run_id == self._probe_run_id and not self._stopped
+            if current:
+                self._finish_probe_state("probe-failed")
 
     def _complete_probe(self, run_id: str, request: CalibrationRequest, result: CalibrationResult | None) -> None:
         with self._placement_lock:
             if self._stopped or run_id != self._probe_run_id:
                 return
+            epoch = self._placement_epoch
+            cancelled = self._probe_cancelled
+
+        def finish(reason: str, *, suppress: bool = False, tone: str | None | object = _TONE_UNSET) -> bool:
+            completed = self._finish_probe_state(
+                reason,
+                suppress=suppress,
+                tone=tone,
+                expected_run_id=run_id,
+                expected_epoch=epoch,
+            )
+            if completed:
+                return True
+            with self._placement_lock:
+                if self._probe_run_id != run_id:
+                    return False
+                server = self._server
+                if server is not None and hasattr(server, "set_probe_run"):
+                    try: server.set_probe_run(None, run_id=run_id)
+                    except Exception: pass
+                self._placement_epoch += 1
+                self._probe_run_id = None
+                self._probe_cancelled = False
+                self._probe_context = None
+                self._probe_engine = None
+                self._probe_future = None
+            return False
+
+        if cancelled:
+            finish("cancelled")
+            return
         if result is None:
-            self._finish_probe_state("probe-failed")
+            finish("probe-failed")
             return
         if result.request != request:
-            self._finish_probe_state("stale-result")
+            finish("stale-result")
             return
         if any("cancel" in item.lower() for item in result.errors):
-            self._finish_probe_state("cancelled")
+            finish("cancelled")
             return
-        if result.evidence is None:
-            self._finish_probe_state("probe-failed")
-            return
-        if result.program is None or result.program.ok is not True:
-            self._finish_probe_state("program-disturbed" if result.program is not None and result.program.ok is False else "probe-failed", suppress=result.program is not None and result.program.ok is False)
+        if result.program is not None and result.program.ok is False:
+            finish("program-disturbed", suppress=True)
             return
         if not result.isolation_ok:
-            self._finish_probe_state("isolation-failed", suppress=True)
+            finish("isolation-failed", suppress=True)
+            return
+        if result.evidence is None or result.program is None or result.program.ok is not True:
+            finish("probe-failed")
             return
         if not result.cleanup_verified or not result.restored:
-            self._finish_probe_state("cleanup-failed")
+            finish("cleanup-failed")
             return
         if result.persistence is not None and result.persistence.authoritative and result.persistence.ok is not True:
-            self._finish_probe_state("persistence-failed")
+            finish("persistence-failed")
             return
         if result.errors:
-            self._finish_probe_state("probe-failed")
+            finish("probe-failed")
             return
         try: classified = classify_probe(result.evidence)
         except Exception as exc:
             if self._logger is not None: self._logger.log("placementClassifier", probeId=run_id, error=str(exc))
-            self._finish_probe_state("probe-failed")
+            finish("probe-failed")
             return
         if self._logger is not None:
             self._logger.log(
@@ -2125,7 +2234,7 @@ class LiveOutputHost:
                 durationMs=round((result.finished_s - result.started_s) * 1000, 1),
             )
         if not classified.grant_eligible or classified.tone_map != ToneMap.GPU_ANALYTIC or classified.verdict not in (ProbeVerdict.SNAP, ProbeVerdict.FRAC):
-            self._finish_probe_state(
+            finish(
                 "probe-failed",
                 tone=classified.tone_map.value if classified.tone_map is not None else None,
             )
@@ -2143,15 +2252,21 @@ class LiveOutputHost:
             or result.evidence.identity.run_id != run_id
             or result.evidence.identity.connection_generation != request.connection_generation
         ):
-            self._finish_probe_state("stale-result")
+            finish("stale-result")
             return
         fingerprint = self._probe_fingerprint_read(context)
         expected = (result.evidence.identity.ua, result.evidence.identity.dpr, 1920, 1080)
         if fingerprint != expected or fingerprint != self._probe_fingerprint:
-            self._revoke_placement(context)
-            self._finish_probe_state("revoked-fingerprint")
+            revoke = self._revoke_placement(context)
+            epoch += 1
+            if revoke != "revoked":
+                self._handle_revoke_failure(context, revoke)
+            finish("revoked-fingerprint")
             return
         grant = classified.verdict.value
+        with self._placement_lock:
+            if self._stopped or run_id != self._probe_run_id or epoch != self._placement_epoch:
+                return
         try:
             trip = self._require_transport().evaluate_in(
                 context,
@@ -2166,28 +2281,51 @@ class LiveOutputHost:
                 deadline_s=1.0,
             )
         except Exception:
-            self._revoke_placement(context)
-            self._finish_probe_state("stale-result")
+            revoke = self._revoke_placement(context)
+            epoch += 1
+            if revoke != "revoked":
+                self._handle_revoke_failure(context, revoke)
+            finish("stale-result")
             return
         if committed != grant:
-            self._revoke_placement(context)
-            self._finish_probe_state("channel-compromised")
+            revoke = self._revoke_placement(context)
+            epoch += 1
+            if revoke != "revoked":
+                self._handle_revoke_failure(context, revoke)
+            finish("channel-compromised")
             try: self._require_transport().evaluate("window.__obedOutput.hide()")
             except Exception: pass
             return
-        self._reconnect_revoke_required = False
         with self._placement_lock:
-            self._probe_run_id = None
-            self._probe_context = None
-            self._probe_engine = None
-            self._probe_future = None
-            self._probe_manual = False
-        self._probe_fingerprint = fingerprint
-        self._set_placement(grant, "granted", tone=classified.tone_map.value, lease_ms=_PLACEMENT_LEASE_MS)
+            if self._stopped or run_id != self._probe_run_id or epoch != self._placement_epoch:
+                stale = True
+            else:
+                stale = False
+                server = self._server
+                if server is not None and hasattr(server, "set_probe_run"):
+                    try: server.set_probe_run(None, run_id=run_id)
+                    except Exception: pass
+                self._placement_epoch += 1
+                self._reconnect_revoke_required = False
+                self._probe_run_id = None
+                self._probe_cancelled = False
+                self._probe_context = None
+                self._probe_engine = None
+                self._probe_future = None
+                self._probe_fingerprint = fingerprint
+                self._set_placement(grant, "granted", tone=classified.tone_map.value, lease_ms=_PLACEMENT_LEASE_MS)
+        if stale:
+            revoke = self._revoke_placement(context)
+            if revoke != "revoked":
+                self._handle_revoke_failure(context, revoke)
+            finish("stale-result")
+            return
         self._start_renewal_thread()
 
     def _start_renewal_thread(self) -> None:
         with self._placement_lock:
+            if self._stopped:
+                return
             if self._renew_thread is not None and self._renew_thread.is_alive():
                 return
             self._renew_stop.clear()
@@ -2202,6 +2340,7 @@ class LiveOutputHost:
         with self._placement_lock:
             if self._stopped or self._placement["state"] != "valid" or self._placement["method"] != "probe":
                 return False
+            epoch = self._placement_epoch
             context = self._placement_context
             deadline = self._lease_deadline_s
             grant = self._placement["grant"]
@@ -2210,23 +2349,42 @@ class LiveOutputHost:
             return False
         remaining = deadline - time.monotonic()
         if remaining <= .2:
-            self._set_placement(None, "leaseLapsed", state="invalid")
+            with self._placement_lock:
+                if not self._stopped and epoch == self._placement_epoch:
+                    self._set_placement(None, "leaseLapsed", state="invalid")
             return False
         current_engine = None
         try: current_engine = self._calibration.identity() if self._calibration is not None else None
         except Exception: pass
-        current_context = self._program_context()
+        try: current_context = self._program_context()
+        except Exception:
+            current_context = None
         fingerprint = self._probe_fingerprint_read(context, deadline_s=min(1.0, remaining / 2)) if current_context == context else None
         if current_engine != engine or fingerprint != self._probe_fingerprint:
+            with self._placement_lock:
+                if self._stopped or epoch != self._placement_epoch:
+                    return False
             revoked = self._revoke_placement(context)
-            if not revoked:
+            if revoked != "revoked":
                 self._reconnect_revoke_required = True
-            self._set_placement(None, "revoked-fingerprint" if current_engine is not None else "disconnected", state="invalid")
+                self._handle_revoke_failure(context, revoked)
+            with self._placement_lock:
+                if not self._stopped and self._placement_epoch == epoch + 1:
+                    self._set_placement(None, "revoked-fingerprint" if current_engine is not None else "disconnected", state="invalid")
             return False
         remaining = deadline - time.monotonic()
         if remaining <= .2:
-            self._set_placement(None, "leaseLapsed", state="invalid")
+            with self._placement_lock:
+                if not self._stopped and epoch == self._placement_epoch:
+                    self._set_placement(None, "leaseLapsed", state="invalid")
             return False
+        with self._placement_lock:
+            if (
+                self._stopped or epoch != self._placement_epoch
+                or self._placement["state"] != "valid" or self._placement["grant"] != grant
+                or self._placement_context != context
+            ):
+                return False
         try:
             committed = self._require_transport().evaluate_in(
                 context,
@@ -2234,12 +2392,21 @@ class LiveOutputHost:
                 deadline_s=min(1.0, remaining / 2),
             )
         except Exception:
-            self._set_placement(None, "leaseLapsed", state="invalid")
+            with self._placement_lock:
+                if not self._stopped and epoch == self._placement_epoch:
+                    self._set_placement(None, "leaseLapsed", state="invalid")
             return False
-        if committed != grant:
-            self._set_placement(None, "leaseLapsed", state="invalid")
-            return False
-        self._set_placement(grant, "granted", tone=ToneMap.GPU_ANALYTIC.value, lease_ms=_PLACEMENT_LEASE_MS)
+        with self._placement_lock:
+            if (
+                self._stopped or epoch != self._placement_epoch
+                or self._placement["state"] != "valid" or self._placement["grant"] != grant
+                or self._placement_context != context
+            ):
+                return False
+            if committed != grant:
+                self._set_placement(None, "leaseLapsed", state="invalid")
+                return False
+            self._set_placement(grant, "granted", tone=ToneMap.GPU_ANALYTIC.value, lease_ms=_PLACEMENT_LEASE_MS)
         return True
 
     def _validate_export(self) -> None:
@@ -2403,9 +2570,9 @@ class LiveOutputHost:
             return None
 
     def execute(self, operation: str, slide: int | None = None) -> PlayerObservation:
-        transport = self._require_transport()
         started = time.monotonic()
         before = self.observe()
+        transport = self._require_transport()
         before_revision, before_scene = self._runtime_revision, before.scene_id
         self._last_goto_autoplay = None
         if operation == "recalibrate":
@@ -2418,7 +2585,8 @@ class LiveOutputHost:
             except Exception: engine = None
             if context is None or engine is None:
                 raise PlayerCommandRejected("Waiting for connection to output host")
-            self._schedule_probe(context, engine, manual=True)
+            if not self._schedule_probe(context, engine, manual=True):
+                raise PlayerCommandRejected("Waiting for connection to output host")
             observed = replace(before, output=self.output)
             self._last_observation = observed
             self._log_execute(operation, slide, "ok", started, before_revision, before_revision, before_scene, before_scene, None, transport)
@@ -2486,9 +2654,15 @@ class LiveOutputHost:
         return observed
 
     def _prepare_navigation_placement(self) -> None:
+        if self._probe_run_id is not None:
+            self._automatic_probe_key = None
+            self._cancel_probe("cancelled")
         if self._reconnect_revoke_required:
             context = self._program_context()
-            if context is None or not self._revoke_placement(context):
+            revoke = self._revoke_placement(context) if context is not None else "disconnected"
+            if context is None or revoke != "revoked":
+                if context is not None:
+                    self._handle_revoke_failure(context, revoke)
                 raise PlayerCommandRejected("Waiting for connection to output host")
             self._reconnect_revoke_required = False
         if self._placement["state"] == "valid" and self._placement["method"] == "probe":
@@ -2606,9 +2780,10 @@ class LiveOutputHost:
         actually released, so a raising stop can be retried and only redoes what is
         still held."""
         with self._stop_lock:
-            self._stopped = True
-            self._renew_stop.set()
             with self._placement_lock:
+                self._stopped = True
+                self._placement_epoch += 1
+                self._renew_stop.set()
                 run_id = self._probe_run_id
                 probe_thread = self._probe_thread
                 renew_thread = self._renew_thread
@@ -2625,9 +2800,12 @@ class LiveOutputHost:
                     thread.join(timeout=max(0.0, placement_stop_deadline - time.monotonic()))
                     if thread.is_alive() and cancellation_error is None:
                         cancellation_error = LiveHostError("Placement worker did not stop.")
-            if self._placement_context is not None and self._transport is not None:
-                self._revoke_placement(self._placement_context)
-            self._set_placement(None, "stopped", state="invalid")
+            if self._placement_mode == "probe":
+                if self._placement_context is not None and self._transport is not None:
+                    revoke = self._revoke_placement(self._placement_context)
+                    if revoke != "revoked":
+                        self._handle_revoke_failure(self._placement_context, revoke)
+                self._set_placement(None, "stopped", state="invalid")
             self._probe_run_id = None
             self._probe_future = None
             if not self._transport and not self._server and not self._profile:
