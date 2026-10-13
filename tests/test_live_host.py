@@ -1347,7 +1347,7 @@ def test_not_carried_lists_each_refused_instance_of_one_boundary(tmp_path, monke
          "objectId": object_id, "code": code, "reason": reason}
         for object_id, code, reason in (("near", "R1", "R1: ambiguous pairing"), ("far", "R1b", "R1b: opacity differs"))
     )
-    entries = output._not_carried(SimpleNamespace(refusals=refusals))
+    entries = live_host.not_carried(SimpleNamespace(refusals=refusals), output.slides)
     assert entries == [
         {"fromSlide": 1, "toSlide": 2, "asset": "movie.mov", "objectId": "near", "code": "R1", "reason": "R1: ambiguous pairing"},
         {"fromSlide": 1, "toSlide": 2, "asset": "movie.mov", "objectId": "far", "code": "R1b", "reason": "R1b: opacity differs"},

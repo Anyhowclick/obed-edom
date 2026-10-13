@@ -32,7 +32,8 @@ git-ignored `output/evidence/`.
    frame into the transition texture; Keynote freezes on the current frame. Dissolve patch F3. Not S2.
 3. **End of show** (deferred by owner): D1–D3 hold the carried movie at end of show; D5 ends empty. Resume options: a
    scene count in the schema-2 plan, or read `__obedLive`.
-4. **Dashboard gating** (owner: keep): a continuity-refused deck cannot start even with continuity off. The fresh
+4. **SUPERSEDED by Stage C (owner, 2026-10-13):** start is never gated on continuity; see
+   `.agents/plans/keynote_live_continuity_stage_c.plan.md` §3.3. Was: **Dashboard gating** (owner: keep): a continuity-refused deck cannot start even with continuity off. The fresh
    `Minimal Alpha_DSK` export refused on main before S2 ("ambiguous 'untitled.mov' ownership at 7 -> 8"); re-check it on
    the S2 qualifier before treating it as still blocked.
 5. **Show OBS cannot surface the tray-minimised managed OBS** ("no available windows"; the button only appears on

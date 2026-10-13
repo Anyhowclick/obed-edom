@@ -70,6 +70,28 @@ def derive_runtime(export_root: Path, slides: list[dict[str, Any]], *, resolver=
     return runtime if isinstance(runtime, Unsupported) else (plan, runtime)
 
 
+def not_carried(plan: ContinuityPlan, slides: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One entry per (boundary, movie instance) continuity declines to carry, in operator
+    terms: original slide ordinals rather than the plan's player indices, with the
+    refusal code and the source instance's objectID."""
+    ordinals = {
+        slide.get("playerIndex"): slide.get("originalOrdinal")
+        for slide in slides
+        if not slide.get("skipped")
+    }
+    return [
+        {
+            "fromSlide": ordinals.get(refusal["fromPlayer"]),
+            "toSlide": ordinals.get(refusal["toPlayer"]),
+            "asset": refusal["asset"],
+            "objectId": refusal["objectId"],
+            "code": refusal["code"],
+            "reason": refusal["reason"],
+        }
+        for refusal in plan.refusals
+    ]
+
+
 def _continuity_plan_script(plan: dict[str, Any], canvas: dict[str, int]) -> str:
     """Embed the runtime plan as `window.__OBED_CONTINUITY__`, always installed:
     footprints are authored-size pixels and the shared runtime maps authored to
@@ -891,7 +913,7 @@ class LiveOutputHost:
                 if self._gl_replay_mode == "injected":
                     self._gl_replay_mode, self._gl_replay_reason, self._gl_replay_script = "unavailable", "continuity unsupported", ""
                 return "unsupported", f"movie codec is not playable in this output: {asset} ({display})", None
-        self._continuity_not_carried = self._not_carried(plan)
+        self._continuity_not_carried = not_carried(plan, self.slides)
         if self._attach_endpoint:
             runtime = {**runtime, "transparentBackground": True}
         return "pending", None, runtime
@@ -916,27 +938,6 @@ class LiveOutputHost:
         if not script:
             return "unavailable", "GL replay entry is not usable", None, ""
         return "injected", None, derived, script
-
-    def _not_carried(self, plan: ContinuityPlan) -> list[dict[str, Any]]:
-        """One entry per (boundary, movie instance) continuity declines to carry, in operator
-        terms: original slide ordinals rather than the plan's player indices, with the
-        refusal code and the source instance's objectID."""
-        ordinals = {
-            slide.get("playerIndex"): slide.get("originalOrdinal")
-            for slide in self.slides
-            if not slide.get("skipped")
-        }
-        return [
-            {
-                "fromSlide": ordinals.get(refusal["fromPlayer"]),
-                "toSlide": ordinals.get(refusal["toPlayer"]),
-                "asset": refusal["asset"],
-                "objectId": refusal["objectId"],
-                "code": refusal["code"],
-                "reason": refusal["reason"],
-            }
-            for refusal in plan.refusals
-        ]
 
     def _stage_gate_outcome(self, stage: Any) -> tuple[str, str | None, float | None]:
         """Fail-closed judgement of one stage-geometry reading against the authored canvas."""

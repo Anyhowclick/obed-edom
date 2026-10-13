@@ -7,11 +7,13 @@ headers, seeking past `mdat` payloads rather than loading them, and returns
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Callable, TypeVar
 
 _T = TypeVar("_T")
-_VideoTrak = tuple[str, tuple[int, int], tuple[int, int]]
+_Span = tuple[int, int]
+_VideoTrak = tuple[str, _Span, _Span, _Span, _Span]
 
 _HEADER_SIZE = 8
 _EXTENDED_HEADER_SIZE = 16
@@ -114,7 +116,7 @@ def _first_sample_fourcc(f: BinaryIO, start: int, end: int) -> str | None:
     return fourcc.decode("ascii").lower()
 
 
-def _video_trak(f: BinaryIO, start: int, end: int, budget: list[int]) -> _VideoTrak | None:
+def _video_trak(f: BinaryIO, start: int, end: int, budget: list[int], moov: _Span) -> _VideoTrak | None:
     mdia = _find_box(f, b"mdia", start, end, budget)
     if mdia is None:
         return None
@@ -133,7 +135,7 @@ def _video_trak(f: BinaryIO, start: int, end: int, budget: list[int]) -> _VideoT
     fourcc = _first_sample_fourcc(f, *stsd)
     if fourcc is None:
         return None
-    return fourcc, mdia, stbl
+    return fourcc, mdia, stbl, (start, end), moov
 
 
 def _mdhd_timescale(f: BinaryIO, start: int, end: int) -> int | None:
@@ -191,6 +193,121 @@ def _trak_fps(f: BinaryIO, mdia: tuple[int, int], stbl: tuple[int, int], budget:
     return samples * timescale / duration
 
 
+def _read_at(f: BinaryIO, start: int, end: int, offset: int, length: int) -> bytes | None:
+    if offset < 0 or start + offset + length > end:
+        return None
+    f.seek(start + offset)
+    raw = f.read(length)
+    return raw if len(raw) == length else None
+
+
+def _header_duration(f: BinaryIO, start: int, end: int) -> int | None:
+    """`mvhd`/`mdhd` duration, right after the timescale (4 bytes in version 0, 8 in version 1)."""
+    version = _read_at(f, start, end, 0, 1)
+    if version is None or version[0] not in (0, 1):
+        return None
+    size = 8 if version[0] == 1 else 4
+    raw = _read_at(f, start, end, 4 + 2 * size + 4, size)
+    return int.from_bytes(raw, "big") if raw is not None else None
+
+
+def _elst_entries(f: BinaryIO, start: int, end: int) -> tuple[tuple[int, int, float], ...] | None:
+    """`elst` payload: version+flags(4) entry_count(4), then (segment_duration, media_time,
+    media_rate 16.16) per entry, with 8-byte duration and time in version 1."""
+    head = _read_at(f, start, end, 0, 8)
+    if head is None or head[0] not in (0, 1):
+        return None
+    size = 8 if head[0] == 1 else 4
+    count = int.from_bytes(head[4:8], "big")
+    table = _read_at(f, start, end, 8, count * (2 * size + 4))
+    if table is None:
+        return None
+    entries = []
+    for i in range(0, len(table), 2 * size + 4):
+        duration = int.from_bytes(table[i : i + size], "big")
+        media_time = int.from_bytes(table[i + size : i + 2 * size], "big", signed=True)
+        rate = int.from_bytes(table[i + 2 * size : i + 2 * size + 4], "big", signed=True) / 65536
+        entries.append((duration, media_time, rate))
+    return tuple(entries)
+
+
+@dataclass(frozen=True)
+class MovieTiming:
+    timescale: int
+    samples: int
+    stts_duration: int
+    edits: tuple[tuple[int, int, float], ...]
+    presented_s: float
+
+    @property
+    def identity_edits(self) -> bool:
+        return not self.edits or (len(self.edits) == 1 and self.edits[0][1] == 0)
+
+
+@dataclass(frozen=True)
+class MovieGeometry:
+    width: int
+    height: int
+    depth: int
+    matrix: tuple[int, ...]
+
+
+def _trak_timing(f: BinaryIO, video: _VideoTrak, budget: list[int]) -> MovieTiming | None:
+    _fourcc, mdia, stbl, trak, moov = video
+    mdhd = _find_box(f, b"mdhd", *mdia, budget)
+    stts = _find_box(f, b"stts", *stbl, budget)
+    if mdhd is None or stts is None:
+        return None
+    timescale = _mdhd_timescale(f, *mdhd)
+    totals = _stts_totals(f, *stts)
+    if not timescale or totals is None or not totals[0] or not totals[1]:
+        return None
+    edits: tuple[tuple[int, int, float], ...] = ()
+    edts = _find_box(f, b"edts", *trak, budget)
+    elst = _find_box(f, b"elst", *edts, budget) if edts is not None else None
+    if elst is not None:
+        read = _elst_entries(f, *elst)
+        if read is None:
+            return None
+        edits = read
+    if edits:
+        mvhd = _find_box(f, b"mvhd", *moov, budget)
+        movie_scale = _mdhd_timescale(f, *mvhd) if mvhd is not None else None
+        if not movie_scale:
+            return None
+        presented = sum(entry[0] for entry in edits) / movie_scale
+    else:
+        duration = _header_duration(f, *mdhd)
+        if not duration:
+            return None
+        presented = duration / timescale
+    return MovieTiming(timescale, totals[0], totals[1], edits, presented)
+
+
+def _trak_geometry(f: BinaryIO, video: _VideoTrak, budget: list[int]) -> MovieGeometry | None:
+    """Visual sample entry: coded width/height at 24 bytes into its payload and depth at 74;
+    `tkhd` matrix after the version-sized times, track id, duration and 16 fixed bytes."""
+    _fourcc, _mdia, stbl, trak, _moov = video
+    stsd = _find_box(f, b"stsd", *stbl, budget)
+    tkhd = _find_box(f, b"tkhd", *trak, budget)
+    if stsd is None or tkhd is None:
+        return None
+    entry = _read_at(f, *stsd, 8, 86)
+    version = _read_at(f, *tkhd, 0, 1)
+    if entry is None or version is None or version[0] not in (0, 1):
+        return None
+    raw_matrix = _read_at(f, *tkhd, (36 if version[0] == 1 else 24) + 16, 36)
+    if raw_matrix is None:
+        return None
+    matrix = tuple(int.from_bytes(raw_matrix[i : i + 4], "big", signed=True) for i in range(0, 36, 4))
+    return MovieGeometry(
+        int.from_bytes(entry[32:34], "big"),
+        int.from_bytes(entry[34:36], "big"),
+        int.from_bytes(entry[82:84], "big"),
+        matrix,
+    )
+
+
 def _probe_video_trak(path: Path, read: Callable[[BinaryIO, _VideoTrak, list[int]], _T]) -> _T | None:
     try:
         with open(path, "rb") as f:
@@ -200,7 +317,7 @@ def _probe_video_trak(path: Path, read: Callable[[BinaryIO, _VideoTrak, list[int
             if moov is None:
                 return None
             for trak_start, trak_end in _each_box(f, b"trak", *moov, budget):
-                video = _video_trak(f, trak_start, trak_end, budget)
+                video = _video_trak(f, trak_start, trak_end, budget, moov)
                 if video is not None:
                     return read(f, video, budget)
     except OSError:
@@ -218,6 +335,17 @@ def movie_fps(path: Path) -> float | None:
     """Frame rate of the track `movie_codec` reads, from its `mdhd` timescale and `stts`
     sample table, or `None` when either is missing, unreadable or zero. Never raises."""
     return _probe_video_trak(path, lambda f, video, budget: _trak_fps(f, video[1], video[2], budget))
+
+
+def movie_timing(path: Path) -> MovieTiming | None:
+    """Video track timing: `mdhd` timescale, `stts` totals, edit list and the presented
+    duration in seconds (the edit list's, else `mdhd`'s), or `None` when unreadable."""
+    return _probe_video_trak(path, _trak_timing)
+
+
+def movie_geometry(path: Path) -> MovieGeometry | None:
+    """Video track's sample-entry coded size and depth plus its `tkhd` matrix, or `None`."""
+    return _probe_video_trak(path, _trak_geometry)
 
 
 def codec_family(fourcc: str | None) -> str:

@@ -386,6 +386,38 @@ def test_cached_preview_invalidates_after_renderer_contract_change(tmp_path, mon
     assert again["phase"] == "review"
 
 
+def test_apply_records_conversions_and_reuse_needs_h264(tmp_path, monkeypatch):
+    from obed_edom import preview_movies
+    from tests.test_preview_movies import LAVFI, PRORES_LT, add_movie, ffmpeg
+
+    hp, deck = _stub_deck(tmp_path, monkeypatch)
+    prores = tmp_path / "prores.mov"
+    ffmpeg(*LAVFI, *PRORES_LT, prores)
+
+    def export_with_movie(deck_path, dest, **kwargs):
+        _fake_export(deck_path, dest, **kwargs)
+        add_movie(Path(dest), "aaa", prores, "clip.mov")
+
+    lines: list[str] = []
+    ready = apply_preview(
+        propose_preview(deck, job_id="job-a"), job_id="job-a", export_html_fn=export_with_movie, log=lines.append
+    )
+    converted = ready["manifest"]["movieConversion"]["converted"]
+    assert [(entry["asset"], entry["sourceCodec"]) for entry in converted] == [("clip.mov", "ProRes")]
+    assert json.loads((hp.cache_dir(DIGEST) / "manifest.json").read_text())["movieConversion"]["converted"] == converted
+    assert any(line.startswith("Converting clip.mov to H.264") for line in lines)
+
+    def _no_conversion(*_a, **_k):
+        raise AssertionError("a reused cache must not convert again")
+
+    monkeypatch.setattr(preview_movies, "convert_movies", _no_conversion)
+    again = propose_preview(deck, job_id="job-b")
+    assert (again["phase"], again["reused"]) == ("ready", True)
+
+    shutil.copyfile(prores, Path(ready["exportRoot"]) / converted[0]["path"])
+    assert hp.load_cached(DIGEST, _source()) is None
+
+
 def test_cleanup_does_not_delete_another_jobs_cache(tmp_path, monkeypatch):
     hp, deck = _stub_deck(tmp_path, monkeypatch)
     first = apply_preview(

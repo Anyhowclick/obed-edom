@@ -9,11 +9,12 @@ Keynote's own fresh-decoder behaviour is correct), or `retire` (a carried instan
 continues). Repeated instances of one asset pair across a Magic Move by minimum total centre
 distance, as Keynote pairs them. Geometry is derived from the export's authored layer tree
 (`renderMovie` node baseLayer + `isVideoLayer` sub-layer, centre-anchored), never measured on
-screen. Anything the export encodes in a way this module cannot map exactly (rotation, animated
-geometry, an unknown transition kind) fails closed to `Unsupported` instead of guessing. A
-boundary that is structurally carryable but cannot be carried safely (an ambiguous pairing,
-artwork drawn over the movie, a build, a loop or trim mismatch, a movie with no `<video>`) is
-refused on its own, as a `retire`, and the rest of the deck stays as authored.
+screen. A movie or transition the export encodes in a way this module cannot map exactly
+(rotation, animated geometry, an unknown transition kind) is never carried (R11), and anything
+that breaks the plan's premises (an unreadable slide, a repeated objectID) fails closed to
+`Unsupported`. A boundary that is structurally carryable but cannot be carried safely (an
+ambiguous pairing, artwork drawn over the movie, a build, a loop or trim mismatch, a movie with
+no `<video>`) is refused on its own, as a `retire`, and the rest of the deck stays as authored.
 """
 
 from __future__ import annotations
@@ -725,7 +726,7 @@ class MovieContinuity:
     loop: bool = False
     """The source instance's loop setting, which a carried decoder keeps."""
     code: str | None = None
-    """The refusal's code (`overlap`, `R1`, `R1b`, `R2`, `R4`, `R7`, `R8`, `R9`, `R10`) when `refusal` is set."""
+    """The refusal's code (`overlap`, `R1`, `R1b`, `R2`, `R4`, `R7`, `R8`, `R9`, `R10`, `R11`) when `refusal` is set."""
 
     def as_dict(self) -> dict[str, Any]:
         result = {
@@ -1369,8 +1370,10 @@ def _loops(movie: dict[str, Any], slide_name: str) -> bool:
 
 def _slide_movie_instances(
     events: list[Any], assets_table: dict[str, Any], slide_name: str
-) -> dict[str, list[_MovieInstance]]:
+) -> tuple[dict[str, list[_MovieInstance]], dict[str, list[tuple[str, str]]]]:
+    """The slide's measured instances per asset, and its unmeasured ones as (objectID, reason)."""
     instances: dict[str, list[_MovieInstance]] = {}
+    unmeasured: dict[str, list[tuple[str, str]]] = {}
     for node in _find_movie_nodes(events):
         movie = node["movie"]
         asset_id = movie.get("asset")
@@ -1379,18 +1382,23 @@ def _slide_movie_instances(
         object_id = node.get("objectID")
         if not isinstance(object_id, str) or not object_id:
             raise _Refuse(f"movie on slide {slide_name} has no object id")
-        rect = _movie_rect(node, slide_name)
-        layer_rect = _state_rect(node["baseLayer"]["initialState"], "movie layer", slide_name)
+        try:
+            rect = _movie_rect(node, slide_name)
+            layer_rect = _state_rect(node["baseLayer"]["initialState"], "movie layer", slide_name)
+            loops = _loops(movie, slide_name)
+        except _Refuse as exc:
+            unmeasured.setdefault(_normalize_asset_key(assets_table, asset_id), []).append((object_id, str(exc)))
+            continue
         url = _asset_url(assets_table, asset_id)
         instances.setdefault(_normalize_asset_key(assets_table, asset_id), []).append(
             _MovieInstance(
-                rect, object_id, _loops(movie, slide_name), _movie_opacity(node),
+                rect, object_id, loops, _movie_opacity(node),
                 _movie_kind(movie, url), _movie_trim(movie, url), _opaque(node, object_id, events), layer_rect,
             )
         )
     for found in instances.values():
         found.sort(key=lambda i: (i.rect.x, i.rect.y, i.rect.w, i.rect.h))
-    return instances
+    return instances, unmeasured
 
 
 def _sorted_rects(
@@ -1429,6 +1437,16 @@ def _boundary_transition(events: list[Any], slide_name: str) -> dict[str, Any] |
             "atScene-1 convention would name the wrong scene"
         )
     return transitions[0] if transitions else None
+
+
+def _unmeasured_transition(transition: dict[str, Any] | None) -> str | None:
+    """Why no decoder may be held into this transition, or None when it is measured."""
+    name = transition.get("name") if transition else None
+    if name is not None and not isinstance(name, str):
+        return f"the next transition name {name!r} is unreadable"
+    if name in _CUT_TRANSITIONS or name.startswith("apple:magic-move"):
+        return None
+    return f"the next transition '{name}' is unmeasured"
 
 
 def _boundary_transition_off_last_event(events: list[Any], transition: dict[str, Any]) -> bool:
@@ -1582,12 +1600,11 @@ def _bridge_timing_refusal(
     """R10: the bridge overlay eases the carried movie with EaseInEaseOut from the transition's
     start over its `duration`, so every motion animation on the movie's transition slot must run
     exactly that. Only the fields read here are validated, failing closed when one is missing or
-    ill-typed; the glReplay vocabulary does not apply. A missing or non-positive duration is left
-    to `to_runtime`, which refuses it."""
+    ill-typed; the glReplay vocabulary does not apply."""
     duration = transition.get("duration") if transition else None
-    if not _positive_duration(duration):
-        return None
     try:
+        if not _positive_duration(duration):
+            raise _Refuse(f"the transition has no finite positive export duration ({duration!r})")
         begin = transition.get("beginTime")
         _v_finite_number(begin, "the transition's beginTime")
         if begin != 0:
@@ -1684,6 +1701,8 @@ class _Slide:
     uuid: str
     events: list[Any]
     instances: dict[str, list[_MovieInstance]]
+    unmeasured: dict[str, list[tuple[str, str]]]
+    """Instances outside the measured vocabulary, as (objectID, reason) per asset: never carried."""
 
 
 def _carry(asset: str, src: _MovieInstance, dst: _MovieInstance) -> MovieContinuity:
@@ -1698,6 +1717,17 @@ def _retire(asset: str, src: _MovieInstance, refusal: tuple[str, str] | None = N
     return MovieContinuity(
         asset, "retire", src.rect, None, refusal=reason, src_object_id=src.object_id, loop=src.loop, code=code
     )
+
+
+def _unmeasured_records(source: _Slide, destination: _Slide) -> list[MovieContinuity]:
+    """Record-only R11 refusals for the source's unmeasured instances a Magic Move could pair:
+    they never get a runtime entry, so the player plays them as exported."""
+    return [
+        MovieContinuity(asset, "retire", None, None, refusal=reason, src_object_id=object_id, code="R11")
+        for asset, found in sorted(source.unmeasured.items())
+        if asset in destination.instances or asset in destination.unmeasured
+        for object_id, reason in found
+    ]
 
 
 def _carry_refusal(
@@ -1742,12 +1772,19 @@ def _magic_move_movies(
     transition_name: str | None,
     gl_replay: bool,
     gl_replay_used: bool,
+    onward: str | None = None,
 ) -> list[MovieContinuity]:
+    """`onward` is why the destination's own outgoing transition is unmeasured: then no carry
+    may hold a decoder into it (R11)."""
     movies: list[MovieContinuity] = []
     carried: list[tuple[MovieContinuity, _MovieInstance, _MovieInstance]] = []
     building = _build_targets(source.events, "buildOut")[0] | _build_targets(destination.events, "buildIn")[0]
     for asset, outgoing in sorted(source.instances.items()):
         incoming = destination.instances.get(asset)
+        unmeasured = [*source.unmeasured.get(asset, ()), *destination.unmeasured.get(asset, ())]
+        if unmeasured and (incoming or asset in destination.unmeasured):
+            movies.extend(_retire(asset, src, ("R11", unmeasured[0][1])) for src in outgoing)
+            continue
         pairs, refusal = _pair_instances(outgoing, incoming, building) if incoming else ([], None)
         if refusal is not None:
             code, reason = refusal
@@ -1758,7 +1795,13 @@ def _magic_move_movies(
             carried.append((_carry(asset, src, dst), src, dst))
         movies.extend(_retire(asset, src) for src in outgoing if id(src) not in paired and src.object_id in held)
     for movie, src, dst in carried:
-        refusal = _carry_refusal(movie.asset, src, dst, source, destination, desc)
+        try:
+            refusal = (
+                ("R11", f"'{movie.asset}' at {desc}: {onward}") if onward is not None
+                else _carry_refusal(movie.asset, src, dst, source, destination, desc)
+            )
+        except _Refuse as exc:
+            refusal = ("R11", str(exc))
         if refusal is None and movie.action == "bridge":
             timing = _bridge_timing_refusal(transition, src, source.uuid, movie.asset, desc)
             refusal = ("R10", timing) if timing is not None else None
@@ -1854,32 +1897,36 @@ def derive_plan(
         scene_index_by_player[player_index] = cumulative
         cumulative += len(events)
         try:
-            parsed.append(_Slide(player_index, uuid, events, _slide_movie_instances(events, assets_table, uuid)))
+            parsed.append(_Slide(player_index, uuid, events, *_slide_movie_instances(events, assets_table, uuid)))
         except _Refuse as exc:
             return Unsupported(str(exc))
 
     seen: dict[str, int] = {}
     for slide in parsed:
-        for found in slide.instances.values():
-            for instance in found:
-                if instance.object_id in seen:
-                    return Unsupported(
-                        f"R5: movie object {instance.object_id} appears on player index "
-                        f"{seen[instance.object_id]} and {slide.player_index}"
-                    )
-                seen[instance.object_id] = slide.player_index
+        object_ids = [instance.object_id for found in slide.instances.values() for instance in found]
+        object_ids += [object_id for found in slide.unmeasured.values() for object_id, _ in found]
+        for object_id in object_ids:
+            if object_id in seen:
+                return Unsupported(
+                    f"R5: movie object {object_id} appears on player index {seen[object_id]} and {slide.player_index}"
+                )
+            seen[object_id] = slide.player_index
+
+    try:
+        transitions = [_boundary_transition(slide.events, slide.uuid) for slide in parsed]
+    except _Refuse as exc:
+        return Unsupported(str(exc))
+    unmeasured_next = [_unmeasured_transition(transition) for transition in transitions[1:-1]] + [None]
 
     boundaries: list[SlideBoundary] = []
+    records: list[list[MovieContinuity]] = []
     held: set[str] = set()
     gl_replay_used = False
-    for index, source in enumerate(parsed):
-        try:
-            transition = _boundary_transition(source.events, source.uuid)
-        except _Refuse as exc:
-            return Unsupported(str(exc))
+    for index, (source, transition) in enumerate(zip(parsed, transitions)):
         transition_name = transition.get("name") if transition else None
         transition_duration = transition.get("duration") if transition else None
         destination = parsed[index + 1] if index + 1 < len(parsed) else None
+        record_only: list[MovieContinuity] = []
 
         if destination is None:
             movies = tuple(
@@ -1887,20 +1934,21 @@ def derive_plan(
                 for asset, found in sorted(source.instances.items())
             )
             boundaries.append(SlideBoundary(source.player_index, None, movies, transition_duration))
+            records.append(record_only)
             continue
 
         desc = f"player index {source.player_index} -> {destination.player_index}"
-        if transition_name is not None and not isinstance(transition_name, str):
-            return Unsupported(f"unreadable transition name at {desc}")
         try:
-            if transition_name is not None and transition_name.startswith("apple:magic-move"):
+            if _unmeasured_transition(transition) is not None:
+                movies_list = []
+            elif transition_name is not None and transition_name.startswith("apple:magic-move"):
                 movies_list = _magic_move_movies(
-                    source, destination, held, desc, transition, transition_name, gl_replay, gl_replay_used
+                    source, destination, held, desc, transition, transition_name, gl_replay, gl_replay_used,
+                    unmeasured_next[index],
                 )
-            elif transition_name in _CUT_TRANSITIONS:
-                movies_list = _cut_movies(source, destination, held, desc)
+                record_only = _unmeasured_records(source, destination)
             else:
-                return Unsupported(f"unsupported transition '{transition_name}' at {desc}")
+                movies_list = _cut_movies(source, destination, held, desc)
         except _Refuse as exc:
             return Unsupported(str(exc))
         gl_replay_used = gl_replay_used or any(movie.gl_replay is not None for movie in movies_list)
@@ -1908,6 +1956,7 @@ def derive_plan(
         boundaries.append(
             SlideBoundary(source.player_index, destination.player_index, tuple(movies_list), transition_duration)
         )
+        records.append(record_only)
 
     plan = ContinuityPlan(
         canvas=canvas,
@@ -1931,8 +1980,8 @@ def derive_plan(
         plan,
         refusals=tuple(
             _refusal_record(boundary, movie, scene_index_by_player, movie_keys)
-            for boundary in plan.boundaries
-            for movie in boundary.movies
+            for boundary, record_only in zip(plan.boundaries, records)
+            for movie in (*boundary.movies, *record_only)
             if movie.refusal is not None
         ),
     )
