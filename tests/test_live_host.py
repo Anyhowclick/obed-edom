@@ -3251,6 +3251,8 @@ def commits(fake, value="snap"):
         ({"visibilityEvents": 0, "frames": 8, "baselineFrameMs": None, "maxRafGapMs": 20.0, "media": []}, None),
         ({"visibilityEvents": 0, "frames": 8, "baselineFrameMs": 20.0, "maxRafGapMs": 20.0,
           "media": [{"id": "v", "playing": True, "monotonic": True, "maxStallMs": 33.4, "frameMs": 33.3}]}, False),
+        ({"visibilityEvents": 0, "frames": 8, "baselineFrameMs": 20.0, "maxRafGapMs": 20.0,
+          "media": [{"id": "v", "playing": True, "monotonic": True, "maxStallMs": 0, "frameMs": None}]}, True),
         (None, True),
     ],
 )
@@ -3272,9 +3274,11 @@ def test_program_guard_applies_program_liveness_thresholds(telemetry, expected):
             "const c={};c.window=c;c.document={querySelectorAll:()=>videos,addEventListener:()=>{},removeEventListener:()=>{}};"
             "c.requestAnimationFrame=f=>{q.push(f);return q.length};c.cancelAnimationFrame=()=>{};vm.createContext(c);vm.runInContext(BEGIN,c);"
             "const seq=kind==='loop'?[.9,.92,.02,.04,.06]:[.1,.12,.14,.16,.18];"
-            "for(let i=0;i<seq.length;i++){videos[0].currentTime=seq[i];if(kind==='end'&&i>=2)videos[0].ended=true;const f=q.shift();f(i*20)}"
+            "let count=(kind==='delayed'||kind==='late')?8:seq.length;"
+            "for(let i=0;i<count;i++){if(kind==='delayed'||kind==='late'){videos[0].paused=i<2;videos[0].currentTime=kind==='late'||i<7?0:(i-6)*.04}"
+            "else{videos[0].currentTime=seq[i];if(kind==='end'&&i>=2)videos[0].ended=true}const f=q.shift();f(i*20)}"
             "return vm.runInContext(FINISH,c)}"
-            "console.log(JSON.stringify({shared:run('shared'),loop:run('loop'),end:run('end')}));"
+            "console.log(JSON.stringify({shared:run('shared'),loop:run('loop'),end:run('end'),delayed:run('delayed'),late:run('late')}));"
         )
         rows = json.loads(subprocess.run([node, "-e", script], check=True, text=True, capture_output=True).stdout)
         assert len(rows["shared"]["media"]) == 2
@@ -3283,6 +3287,18 @@ def test_program_guard_applies_program_liveness_thresholds(telemetry, expected):
         assert rows["shared"]["media"][1]["playing"] is False
         assert rows["loop"]["media"][0]["monotonic"] is True
         assert rows["end"]["media"][0]["monotonic"] is True
+        assert rows["delayed"]["media"][0]["maxStallMs"] == 0
+        assert rows["delayed"]["media"][0]["frameMs"] > 0
+        assert rows["late"]["media"][0]["frameMs"] is None
+
+        class NodeTransport:
+            def __init__(self, row): self.row = row
+            def evaluate_in(self, _context, _expression, deadline_s=None): return self.row
+
+        for kind in ("delayed", "late"):
+            checked = live_host._ProgramGuard(NodeTransport(rows[kind]), "program")
+            checked._baseline_frame_ms = 20.0
+            assert checked.finish().ok is not False
         return
 
     class Transport:
@@ -3374,6 +3390,27 @@ def test_managed_probe_state_machine_renews_suppresses_and_stops(tmp_path, monke
     assert output._renew_probe_lease()
 
     original = FakeCdp.instances[0]
+    original.busy = True
+    original.reload()
+    starts = len(adapter.starts)
+    deferred = output.observe()
+    deferred_id = deferred.output["placement"]["probeId"]
+    assert deferred.output["placement"]["reason"] == "waiting-for-transition"
+    assert len(adapter.starts) == starts
+    output._prepare_navigation_placement()
+    assert output.output["placement"]["reason"] == "cancelled"
+    assert output._probe_run_id is None and output._server.run is None
+    original.busy = False
+    output.observe()
+    assert len(adapter.starts) == starts + 1
+    output.observe()
+    assert len(adapter.starts) == starts + 1
+    fresh = adapter.starts[-1]
+    assert fresh[0].spec.run_id != deferred_id
+    fresh[3].set_result(result(fresh[0]))
+    output._probe_thread.join(2)
+    assert output.output["placement"]["grant"] == "frac"
+
     original_evaluate = original.evaluate
     failed = False
 
@@ -3461,6 +3498,9 @@ def test_managed_probe_state_machine_renews_suppresses_and_stops(tmp_path, monke
     adapter.engine = None
     output.observe()
     assert output.output["placement"]["automaticProbesDisabled"] is True
+    revokes = len(commits(fake, "invalid"))
+    output.observe()
+    assert len(commits(fake, "invalid")) == revokes
     fake.reload()
     adapter.engine = same_engine
     output.observe()
@@ -3513,16 +3553,51 @@ def test_managed_probe_state_machine_renews_suppresses_and_stops(tmp_path, monke
         return replacement
 
     output.transport_factory = timeout_factory
-    with pytest.raises(live_host.LiveHostError, match="connection failed"):
-        output.observe()
+    disconnected = output.observe()
     replacement, replacement_evaluate_in = timed_out[-1]
-    assert output.output["placement"]["reason"] == "disconnected"
+    assert disconnected.output["placement"]["reason"] == "disconnected"
     assert replacement.visible and output._reconnect_revoke_required
     replacement.evaluate_in = replacement_evaluate_in
     reconnected = output.observe()
     assert reconnected.output["placement"]["reason"] == "not-calibrated"
     assert reconnected.output["placement"]["automaticProbesDisabled"] is True
     fake = FakeCdp.instances[-1]
+
+    absent_evaluate = fake.evaluate
+    absent_failed = False
+
+    def disconnect_before_absent_reconnect(expression, deadline_s=None):
+        nonlocal absent_failed
+        if not absent_failed and "__obedLive" in expression:
+            absent_failed = True
+            raise live_host.LiveHostError("Program browser CDP connection failed.")
+        return absent_evaluate(expression, deadline_s)
+
+    def absent_factory(*args, **kwargs):
+        replacement = reconnect_factory(*args, **kwargs)
+        replacement.visible = True
+        evaluate_in = replacement.evaluate_in
+
+        def absent_revoke(context, expression, deadline_s=None):
+            if context == "doc-reconnected" and expression == live_host._placement_set_expr(replacement.token, "invalid"):
+                return "absent"
+            return evaluate_in(context, expression, deadline_s)
+
+        replacement.evaluate_in = absent_revoke
+        return replacement
+
+    fake.evaluate = disconnect_before_absent_reconnect
+    output.transport_factory = absent_factory
+    output._placement["automaticProbesDisabled"] = False
+    starts = len(adapter.starts)
+    absent = output.observe()
+    fake = FakeCdp.instances[-1]
+    assert absent.output["placement"]["reason"] == "not-calibrated"
+    assert len(adapter.starts) == starts
+    assert fake.visible and not output._channel_compromised
+    output._placement["automaticProbesDisabled"] = True
+    fake.reload()
+    output.observe()
 
     scheduled = output.execute("recalibrate")
     assert scheduled.output["placement"]["state"] == "probing"
@@ -3531,6 +3606,13 @@ def test_managed_probe_state_machine_renews_suppresses_and_stops(tmp_path, monke
     manual[3].set_result(result(manual[0], persistence=failed_persistence))
     output._probe_thread.join(2)
     assert output.output["placement"]["reason"] == "persistence-failed"
+
+    output._output_rate = 24
+    starts = len(adapter.starts)
+    unsupported = output.execute("recalibrate")
+    assert unsupported.output["placement"]["reason"] == "probe-failed"
+    assert len(adapter.starts) == starts
+    output._output_rate = 25
 
     output.execute("recalibrate")
     manual = adapter.starts[-1]
@@ -3859,6 +3941,41 @@ def test_placement_channel_failure_keeps_output_hidden_and_refuses_show(tmp_path
     assert commits(fake, "invalid") == ([] if failure == "install" else ["doc-1"])
 
 
+def test_probe_renewal_compromise_stays_latched_and_refuses_show(tmp_path, monkeypatch):
+    engine = managed_obs.EngineIdentity(42, 100.0, 3)
+
+    class Adapter:
+        def identity(self): return engine
+        def start(self, request, *, measure, guard): return Future()
+        def cancel(self, run_id, *, timeout_s=5.0): return True
+
+    output = attach_host(
+        tmp_path, monkeypatch, bridge="obs-managed", calibration=Adapter(), output_rate=25,
+    )
+    output.observe()
+    fake = FakeCdp.instances[0]
+    output._engine_identity = engine
+    output._probe_fingerprint = ("Fake/1", 1.0, 1920, 1080)
+    output._set_placement("frac", "granted", tone="gpu_analytic", lease_ms=live_host._PLACEMENT_LEASE_MS)
+    fake.visible = True
+    evaluate_in = fake.evaluate_in
+
+    def changed_fingerprint_and_compromised_revoke(context, expression, deadline_s=None):
+        if expression == "[navigator.userAgent,window.devicePixelRatio,window.innerWidth,window.innerHeight]":
+            return ["Fake/2", 1, 1920, 1080]
+        if expression == live_host._placement_set_expr(fake.token, "invalid"):
+            return "wrong"
+        return evaluate_in(context, expression, deadline_s)
+
+    fake.evaluate_in = changed_fingerprint_and_compromised_revoke
+    assert not output._renew_probe_lease()
+    assert output.output["placement"]["reason"] == "channel-compromised"
+    assert not fake.visible and output._channel_compromised
+    with pytest.raises(live_host.PlayerCommandRejected, match="stays hidden"):
+        output.execute("show")
+    assert output.output["placement"]["reason"] == "channel-compromised"
+
+
 def test_placement_init_script_resists_page_tampering_in_node():
     """§8.8 tamper rows on the real init script and the host's own round-trip and grant
     expressions: page code cannot set, keep or forge a grant; a fresh document starts
@@ -3908,7 +4025,7 @@ console.log(JSON.stringify(R));
         "forgeRedefine": "threw:TypeError", "afterForge": "invalid", "updaterUnchangedAfterReplace": True,
         "wrongToken": False, "afterWrongToken": "invalid", "tokenInSource": False, "onlySnap": "invalid",
         "reloadedDocument": "invalid", "predefinedInitThrows": True, "predefinedHasUpdater": "undefined",
-        "predefinedTrip": [None], "predefinedCommit": None,
+            "predefinedTrip": [None], "predefinedCommit": "absent",
         "probeRoundTrip": ["true", "snap", "true", "invalid"], "probeCommit": "frac",
         "beforeExpiry": "frac", "atExpiry": "invalid", "missingLease": False,
         "afterMissing": "invalid", "longLease": False, "afterLong": "invalid",

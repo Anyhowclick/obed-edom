@@ -23,10 +23,13 @@ P2 slide JSON with the real builder, so the representation check reads Keynote-s
 from __future__ import annotations
 
 import functools
+import io
 import json
 import re
 import shutil
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 from typing import Any
@@ -1650,7 +1653,7 @@ def _placement_calibration(tmp_path: Path, backend: str, *, omit: str | None = N
     if backend == "chrome-harness" and gpu:
         evidence = q._swap_candidate_rules(evidence)
     elif backend == "chrome-harness":
-        evidence = placement_input("software-snap")
+        evidence = placement_input("snap")
     if backend == "chrome-harness":
         identity = q.replace(evidence.identity, source_uuid=None)
         evidence = q.replace(evidence, identity=identity,
@@ -1682,10 +1685,11 @@ def _placement_calibration(tmp_path: Path, backend: str, *, omit: str | None = N
         "alpha": {"transparent": True, "halfTransparent": True, "sampleCount": 6, "allChannelsEqual": True,
                   "allPhasesCovered": True},
         "classifierControls": q.classifier_controls(evidence, result, result.verdict),
+        "liveProbeControls": {name: {"verdict": "PASS"} for name in ("replay", "transparent", "frozen-video")},
         "liveControls": {
             "isolation": {name: {"verdict": verdict} for name, verdict in (
                 ("null", "PASS"), ("startup", "PASS"), ("priorStudioStates", "PASS"), ("visibleOrigin", "FAIL"),
-                ("behindTransparentProgram", "FAIL"), ("failedOnAir", "FAIL"))},
+                ("behindTransparentProgram", "FAIL"), ("failedOnAir", "PASS"))},
             "alpha": {name: {"verdict": verdict} for name, verdict in (
                 ("null", "PASS"), ("behindProgramLeak", "FAIL"), ("alphaOnly", "FAIL"))},
         },
@@ -1729,6 +1733,29 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
         tone = q.probe_tone_rows(decoded["input"], classified)
         assert (len(tone["ramp"]), len(tone["patches"]), tone["problems"]) == (16, 8, [])
         if decoded["transaction"] is not None:
+            non_authoritative_root = tmp_path / "non-authoritative"
+            non_authoritative_root.mkdir()
+            non_authoritative, _ = _placement_calibration(non_authoritative_root, "cef")
+            non_authoritative["persistence"]["lastRemovalMtimeNs"] = 6
+            persistence = q.score_placement_calibration(
+                non_authoritative, tmp_path / "non-authoritative" / "cef")["gates"]["persistence-worker"]
+            assert persistence["verdict"] == "PASS"
+            assert persistence["detail"]["checks"][0]["authoritative"] is False
+            null_path = non_authoritative_root / "cef" / non_authoritative["persistence"]["nullAfter"]["path"]
+            null_path.write_text(json.dumps({"changed": True}))
+            non_authoritative["persistence"]["nullAfter"] = q.dissolve_probe.placement_file_ref(
+                null_path, non_authoritative_root / "cef", mtime_ns=4, saved_by_obs=True)
+            unstable = q.score_placement_calibration(
+                non_authoritative, non_authoritative_root / "cef")["gates"]["persistence-worker"]
+            assert unstable["verdict"] == "FAIL" and unstable["detail"]["nullStable"] is False
+
+            fake_order = json.loads(json.dumps(calibration))
+            fake_order["events"] = [
+                {"at": 1.0, "event": "calibration-start", "placement": {"state": "probing"}},
+                {"at": 2.0, "event": "placement", "placement": fake_order["events"][-1]["placement"]},
+            ]
+            assert q.score_placement_calibration(fake_order, tmp_path / backend)["gates"]["life-cal-preview"]["verdict"] == "INCONCLUSIVE"
+
             assert decoded["transaction"].evidence is decoded["input"]
             delegate_future: q.Future[managed_obs.CalibrationResult] = q.Future()
 
@@ -1764,6 +1791,65 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
             assert adapter.result is not None and adapter.result.request.placement == "offcanvas"
             assert recording_order == ["settled", "started", "stopped"]
             assert adapter.phase_times_ns["restored"] >= adapter.phase_times_ns["before-install"]
+
+            control_rows = q.placement_control_rows([
+                {"session": "startup-preview-on", "studioEnabled": True, "verdict": "PASS"},
+                {"session": "startup-offcanvas-on", "studioEnabled": True, "verdict": "PASS"},
+                {"session": "failed-preview-off", "studioEnabled": False, "verdict": "PASS"},
+                {"session": "failed-offcanvas-on", "studioEnabled": True, "verdict": "PASS"},
+                *({"session": f"probe-{name}", "studioEnabled": False, "verdict": "PASS"}
+                  for name in ("replay", "transparent", "frozen-video")),
+            ])
+            assert {name: row["verdict"] for name, row in control_rows["isolation"].items()} == {
+                "startup": "PASS", "failedOnAir": "PASS", "priorStudioStates": "PASS"}
+            assert all(row["verdict"] == "PASS" for row in control_rows["probe"].values())
+
+            source_png = q._png_bytes(np.full((2, 2, 4), 255, np.uint8))
+
+            class ControlChannel:
+                request = decoded["request"]
+                source_uuid = "source"
+                cdp_endpoint = "http://127.0.0.1:1"
+                cancel_event = threading.Event()
+                deadline_s = time.monotonic() + 30
+
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                def check_current(self) -> None: pass
+
+                def capture_png(self, *, timeout_s: float = 2.0) -> bytes:
+                    self.calls += 1
+                    return source_png + bytes([self.calls])
+
+            class ControlDelegate(Delegate):
+                def __init__(self, channel: ControlChannel, capture: Any) -> None:
+                    self.channel, self.capture = channel, capture
+
+                def start(self, request: managed_obs.CalibrationRequest, **kwargs: Any) -> q.Future[managed_obs.CalibrationResult]:
+                    future: q.Future[managed_obs.CalibrationResult] = q.Future()
+                    try:
+                        self.capture(kwargs["measure"](self.channel))
+                        future.set_result(q.replace(decoded["transaction"], request=request))
+                    except Exception as exc:
+                        future.set_exception(exc)
+                    return future
+
+            observed: list[Any] = []
+            replay = q.QualificationCalibrationAdapter(ControlDelegate(ControlChannel(), observed.append), measure_control="replay")
+            assert replay.start(decoded["request"], measure=lambda io: (io.capture_png(), io.capture_png()), guard=Guard()).result()
+            assert observed.pop() == (source_png + b"\x01", source_png + b"\x01")
+            transparent = q.QualificationCalibrationAdapter(ControlDelegate(ControlChannel(), observed.append), measure_control="transparent")
+            assert transparent.start(decoded["request"], measure=lambda io: io.capture_png(), guard=Guard()).result()
+            assert np.asarray(Image.open(io.BytesIO(observed.pop()))).shape == (1080, 1920, 4)
+            frozen_calls = []
+            monkeypatch.setattr(q, "freeze_probe_video", lambda _channel: frozen_calls.append(True))
+            frozen = q.QualificationCalibrationAdapter(ControlDelegate(ControlChannel(), observed.append), measure_control="frozen-video")
+            assert frozen.start(decoded["request"], measure=lambda io: io.capture_png(), guard=Guard()).result()
+            assert frozen_calls == [True] and frozen.control_detail["videoPaused"] is True
+            failed = q.QualificationCalibrationAdapter(ControlDelegate(ControlChannel(), observed.append), measure_control="capture-error")
+            with pytest.raises(RuntimeError, match="qualification calibration failed"):
+                failed.start(decoded["request"], measure=lambda io: (io.capture_png(), io.capture_png()), guard=Guard()).result()
             offline = tmp_path / "offline"
             for index in range(2):
                 source = tmp_path / f"source-{index}"
@@ -1804,6 +1890,7 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
                 tmp_path / "program-control.mkv", started_s=1.0, stopped_s=1.05,
                 transaction_started_s=1.01, transaction_finished_s=1.04, fps=25)
             assert (injected["identicalFrames"], injected["audioSilent"]) == (1, False)
+            assert injected["flashDetected"] is False
             missing_audio = q.subprocess.CalledProcessError(1, ["ffmpeg"], stderr=b"does not contain any stream")
             monkeypatch.setattr(q.subprocess, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(missing_audio))
             absent = q.analyze_program_recording(
@@ -1816,8 +1903,31 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
                 transaction_started_s=1.1, transaction_finished_s=1.9, fps=25)
             assert truncated["frameCountComplete"] is False
 
+            canvas_frames = [np.zeros((2, 2, 3), np.uint8) for _ in range(25)]
+            canvas_frames[11][1, 1] = 255
+            canvas_frames[12][1, 1] = 255
+            monkeypatch.setattr(q.obs_cadence_decode, "read_frames",
+                                lambda _path: ({"codec": "ffv1", "pix_fmt": "yuv444p", "size": (2, 2)}, iter(canvas_frames)))
+            complete = q.analyze_program_recording(
+                tmp_path / "program-25fps.mkv", started_s=1.0, stopped_s=2.0,
+                transaction_started_s=1.1, transaction_finished_s=1.9, fps=25)
+            assert complete["frameCountComplete"] is True
+            assert complete["flashDetected"] is True and complete["flashFrames"] == [11, 12]
+            assert q.canvas_fps({"fpsNumerator": 25, "fpsDenominator": 1}, 25) == 25
+
             seed = tmp_path / "seed.json"
             seed.write_text(json.dumps({"modules": {}, "scaling_level": 0}))
             assert q.collection_saved_by_obs(seed) is False
             seed.write_text(json.dumps({"modules": {"scripts-tool": []}, "scaling_level": -49}))
             assert q.collection_saved_by_obs(seed) is True
+
+            monkeypatch.setattr(q.shutil, "disk_usage", lambda _path: types.SimpleNamespace(free=10 ** 15))
+            disk = q.placement_disk_preflight(tmp_path, tmp_path / "home", 1)
+            assert disk["recordings"] == len(q.PLACEMENT_ARMS) * len(q.MMO_RATES) * 2
+            monkeypatch.setattr(q.shutil, "disk_usage", lambda _path: types.SimpleNamespace(free=1))
+            with pytest.raises(RuntimeError, match="placement needs about"):
+                q.placement_disk_preflight(tmp_path, tmp_path / "home", 1)
+            large = tmp_path / "large-recording.mkv"
+            large.write_bytes(b"x" * (2 * 1024 * 1024 + 1))
+            large_ref = q.dissolve_probe.placement_file_ref(large, tmp_path)
+            assert q.dissolve_probe._placement_ref_bytes(large_ref, tmp_path, load=False) == b""

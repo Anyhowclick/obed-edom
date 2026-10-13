@@ -447,10 +447,15 @@ ARMS["m-snap-cef-underlay-omit"] = replace(
     ARMS["m-snap-cef"], splice="frac-underlay-omit", capture="engage", holders=0, twin=None,
     expect={"holder_pixels": "FAIL"},
 )
-ARMS["m-geo-frac-origin-cef"] = replace(
-    ARMS["m-snap-lbfrac"], placement_value="frac", capture="engage", holders=0, twin=None,
+ARMS["m-geo-frac-origin-chrome"] = replace(
+    ARMS["m-snap-lbfrac"], placement_value="frac", placement_mode="probe", capture="engage", holders=0, twin=None,
     expect={"geometry": "FAIL"},
 )
+for _tag in ("dpr15", "dpr2"):
+    ARMS[f"m-geo-frac-{_tag}"] = replace(
+        ARMS[f"m-snap-{_tag}"], placement_value="frac", placement_mode="probe", capture="engage", holders=0, twin=None,
+        expect={"geometry": "FAIL"},
+    )
 DISPLACED = {"frac": ("sn-frac", ("m-snap-dpr15", "m-snap-dpr2")), "shift": ("snap-shift", ("m-snap", "m-snap-dpr15", "m-snap-dpr2"))}
 """Displaced-edge FAIL controls on the 1920x1080 cells: `sn` unrounded at DPR 1.5 and 2 (at DPR 1 the alpha scan rejects
 it, no holder) and the holder one device px right at every DPR."""
@@ -764,6 +769,14 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def placement_file_ref(path: Path, run_dir: Path, *, mtime_ns: int | None = None,
                        saved_by_obs: bool | None = None) -> dict[str, Any]:
     path, run_dir = path.resolve(), run_dir.resolve()
@@ -773,7 +786,7 @@ def placement_file_ref(path: Path, run_dir: Path, *, mtime_ns: int | None = None
         raise ValueError(f"placement evidence must be below its run directory: {path}") from exc
     if not path.is_file():
         raise ValueError(f"placement evidence file is missing: {path}")
-    ref: dict[str, Any] = {"path": relative.as_posix(), "sha256": sha256_bytes(path.read_bytes())}
+    ref: dict[str, Any] = {"path": relative.as_posix(), "sha256": sha256_file(path)}
     if mtime_ns is not None:
         ref["mtimeNs"] = int(mtime_ns)
     if saved_by_obs is not None:
@@ -781,7 +794,7 @@ def placement_file_ref(path: Path, run_dir: Path, *, mtime_ns: int | None = None
     return ref
 
 
-def _placement_ref_bytes(ref: Any, run_dir: Path, *, collection: bool = False) -> bytes:
+def _placement_ref_bytes(ref: Any, run_dir: Path, *, collection: bool = False, load: bool = True) -> bytes:
     if not isinstance(ref, dict) or set(("path", "sha256")) - set(ref):
         raise ValueError(f"malformed placement FileRef: {ref!r}")
     relative = Path(ref["path"])
@@ -792,12 +805,11 @@ def _placement_ref_bytes(ref: Any, run_dir: Path, *, collection: bool = False) -
         path.relative_to(run_dir.resolve())
     except ValueError as exc:
         raise ValueError(f"placement FileRef escapes its run directory: {ref['path']!r}") from exc
-    data = path.read_bytes()
-    if not re.fullmatch(r"[0-9a-f]{64}", str(ref["sha256"])) or sha256_bytes(data) != ref["sha256"]:
+    if not re.fullmatch(r"[0-9a-f]{64}", str(ref["sha256"])) or sha256_file(path) != ref["sha256"]:
         raise ValueError(f"placement FileRef digest mismatch: {ref['path']!r}")
     if collection and (not integer(ref.get("mtimeNs")) or not isinstance(ref.get("savedByObs"), bool)):
         raise ValueError(f"malformed placement CollectionRef: {ref!r}")
-    return data
+    return path.read_bytes() if load else b""
 
 
 def _placement_capture_name(capture: placement_probe.ProbeCapture, trail: tuple[str, ...]) -> str:
@@ -969,7 +981,7 @@ def placement_schema_problems(value: Any, run_dir: Path) -> list[str]:
         if set(integrity) != {"recording", "rgba", "telemetry"}:
             problems.append("integrity fields are not recording/rgba/telemetry")
         if integrity.get("recording") is not None:
-            _placement_ref_bytes(integrity["recording"], run_dir)
+            _placement_ref_bytes(integrity["recording"], run_dir, load=False)
         for ref in integrity.get("rgba") or []:
             _placement_ref_bytes(ref, run_dir)
         if integrity.get("telemetry") is not None:
@@ -2459,8 +2471,7 @@ CEF_PLACEMENT_ARMS = (
     "m-paused-cef", "m-off-cef", "m-hold-cef", "m-fg-cef", "m-fg-omit-cef", "m-fg-swap-cef",
     "m-tone-cef", "m-tone-cef-twin", "m-tone-raw-cef", "m-snap-cef-dsk", "wrongrule-cef", "wrongrule-cef-twin",
     "m-snap-cef-nooffset-x", "m-snap-cef-nooffset-x-twin", "m-snap-cef-nooffset-y", "m-snap-cef-nooffset-y-twin",
-    "m-snap-cef-underlay-omit", "perfect-shift", "m-geo-dpr125", "m-geo-2560", "m-geo-scale", "m-geo-base",
-    "m-geo-frac-origin-cef",
+    "m-snap-cef-underlay-omit", "perfect-shift", "m-geo-scale", "m-geo-base",
 )
 CEF_PLACEMENT = Profile(
     "CEF-placement", CEF_PLACEMENT_ARMS,
@@ -2479,7 +2490,7 @@ CEF_PLACEMENT = Profile(
         ("mask", ((*CEF_PLACEMENT_POSITIVES, "m-tone-cef", "case:mask-production"), (),
                   ("case:mask-whole", "case:mask-shift3", "case:mask-empty"))),
         ("geometry", ((*CEF_PLACEMENT_POSITIVES, "m-snap-cef-dsk"),
-                      ("m-geo-dpr125", "m-geo-2560", "m-geo-scale", "m-geo-base", "m-geo-frac-origin-cef"))),
+                      ("m-geo-scale", "m-geo-base"))),
     ),
     mid_frames=5,
 )
@@ -3246,8 +3257,16 @@ def _score_arm(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Ar
         holders = ((record.get("dump") or {}).get("first") or {}).get("holders") or []
         box = device_box(holders[0]["rect"], arm.dsf) if holders and quad(holders[0].get("rect")) else None
         live = images.get("live-0")
-        checks["holder_pixels"] = (result(False, alphaRefusal=True) if arm.holders == 0 and not holders
-                                    else score_holder_pixels(images.get("ref-A0-0"), live, box, mask, lut, cal))
+        if arm.holders == 0 and not holders:
+            insert = next((row["t"] for row in ev.raf if row.get("eff") is not None), None)
+            refusal_problems = list(score_cost((record.get("dump") or {}).get("takes") or [],
+                                               record.get("advanceAt"), insert)["problems"])
+            if record.get("placement") != "frac":
+                refusal_problems.append(f"page placement {record.get('placement')!r} did not exercise frac")
+            checks["holder_pixels"] = result(None if refusal_problems else False, refusal_problems,
+                                               alphaRefusal=not refusal_problems)
+        else:
+            checks["holder_pixels"] = score_holder_pixels(images.get("ref-A0-0"), live, box, mask, lut, cal)
         checks["reference"] = score_perfect(images.get("ref-perfect-0"), live, box, cal)
         checks["mask"] = result(mask is not None, [] if mask is not None else ["production mask not verified"])
     for name in ("geometry", "exterior", "scope"):

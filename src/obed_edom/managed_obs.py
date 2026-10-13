@@ -609,11 +609,13 @@ class _CalibrationSnapshot:
 @dataclass
 class _CalibrationInstall:
     scene_created: bool = False
+    scene_uuid: str | None = None
     input_created: bool = False
     source_uuid: str | None = None
     ref_requested: bool = False
     ref_id: int | None = None
     target_id: str | None = None
+    studio_changed: bool = False
 
 
 class _CalibrationIO:
@@ -937,6 +939,7 @@ class ManagedObs:
     def _install_calibration(self, run: _CalibrationRun, ws: ObsWebsocket, snapshot: _CalibrationSnapshot,
                              install: _CalibrationInstall, deadline_s: float) -> None:
         if not snapshot.studio_enabled:
+            install.studio_changed = True
             self._calibration_request(run, ws, "SetStudioModeEnabled", {"studioModeEnabled": True}, deadline_s)
             preview = self._calibration_request(run, ws, "GetCurrentPreviewScene", None, deadline_s)
             snapshot.preview_name, snapshot.preview_uuid = self._scene_identity(preview, "currentPreview")
@@ -949,6 +952,7 @@ class ManagedObs:
         scene_uuid = created.get("sceneUuid")
         if not isinstance(scene_uuid, str):
             raise _CalibrationIsolationViolation("OBS did not return the calibration scene UUID.")
+        install.scene_uuid = scene_uuid
         install.input_created = True
         try:
             source = self._calibration_request(
@@ -1144,9 +1148,12 @@ class ManagedObs:
                              guard: ProgramGuard, errors: list[str]) -> tuple[bool, bool, PersistenceCheck | None, bool]:
         deadline_s = self._clock() + CALIBRATION_CLEANUP_S
         cleanup_ok = False
+        installed_attempted = any((install.scene_created, install.input_created, install.ref_requested))
+        target_attempted = install.input_created
+        mutated = installed_attempted or install.studio_changed
         restored = (snapshot is None and not install.scene_created and not install.input_created
-                    and not install.ref_requested and install.ref_id is None)
-        absent = False
+                    and not install.ref_requested and install.ref_id is None and not install.studio_changed)
+        absent = not installed_attempted
         isolation_violation = False
         isolation_reasons: list[str] = []
         cleanup_error_count = len(errors)
@@ -1158,15 +1165,42 @@ class ManagedObs:
                 def request(name: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
                     return self._calibration_request(run, ws, name, data, deadline_s, cancelled=False)
 
+                if install.scene_created and install.scene_uuid is None:
+                    try:
+                        scenes = request("GetSceneList").get("scenes") or []
+                        matches = [row for row in scenes if row.get("sceneName") == CALIBRATION_SCENE]
+                        if len(matches) == 1 and isinstance(matches[0].get("sceneUuid"), str):
+                            install.scene_uuid = matches[0]["sceneUuid"]
+                        elif not matches:
+                            install.scene_created = False
+                        else:
+                            errors.append("cleanup-scene: calibration scene identity is ambiguous")
+                    except Exception as exc:
+                        errors.append(f"cleanup-scene: {type(exc).__name__}: {exc}")
+                if install.input_created and install.source_uuid is None:
+                    try:
+                        inputs = request("GetInputList").get("inputs") or []
+                        matches = [row for row in inputs if row.get("inputName") == PROBE_SOURCE]
+                        if len(matches) == 1 and isinstance(matches[0].get("inputUuid"), str):
+                            install.source_uuid = matches[0]["inputUuid"]
+                        elif not matches:
+                            install.input_created = False
+                        else:
+                            errors.append("cleanup-input: calibration input identity is ambiguous")
+                    except Exception as exc:
+                        errors.append(f"cleanup-input: {type(exc).__name__}: {exc}")
                 if snapshot is not None and install.ref_requested and install.ref_id is None:
                     try:
                         items = request("GetSceneItemList", {"sceneName": PROGRAM_SCENE}).get("sceneItems") or []
-                        refs = [item.get("sceneItemId") for item in items if item.get("sourceName") == CALIBRATION_SCENE]
+                        refs = [item.get("sceneItemId") for item in items
+                                if install.scene_uuid is not None and item.get("sourceUuid") == install.scene_uuid]
                         if len(refs) == 1 and isinstance(refs[0], int):
                             install.ref_id = refs[0]
                         elif refs:
                             errors.append("cleanup-reference: calibration scene item identity is ambiguous")
                             isolation_violation = True
+                        else:
+                            install.ref_requested = False
                     except Exception as exc:
                         errors.append(f"cleanup-reference: {type(exc).__name__}: {exc}")
                 if snapshot is not None and install.ref_id is not None:
@@ -1196,9 +1230,9 @@ class ManagedObs:
                     except Exception as exc:
                         errors.append(f"remove-scene-item: {type(exc).__name__}: {exc}")
                 removals = []
-                if install.input_created:
+                if install.input_created and install.source_uuid is not None:
                     removals.append(("RemoveInput", {"inputName": PROBE_SOURCE}))
-                if install.scene_created:
+                if install.scene_created and install.scene_uuid is not None:
                     removals.append(("RemoveScene", {"sceneName": CALIBRATION_SCENE}))
                 for request_type, data in removals:
                     try:
@@ -1209,36 +1243,40 @@ class ManagedObs:
                     except Exception as exc:
                         errors.append(f"{request_type}: {type(exc).__name__}: {exc}")
                 last_removal_mtime_ns = time.time_ns()
-                while self._clock() < deadline_s:
-                    try:
-                        inputs = request("GetInputList").get("inputs") or []
-                        scenes = request("GetSceneList").get("scenes") or []
-                        items = request("GetSceneItemList", {"sceneName": PROGRAM_SCENE}).get("sceneItems") or []
-                        absent = (not any(row.get("inputName") == PROBE_SOURCE for row in inputs)
-                                  and not any(row.get("sceneName") == CALIBRATION_SCENE for row in scenes)
-                                  and not any(row.get("sourceName") == CALIBRATION_SCENE for row in items))
-                        if absent:
+                if installed_attempted:
+                    while self._clock() < deadline_s:
+                        try:
+                            inputs = request("GetInputList").get("inputs") or []
+                            scenes = request("GetSceneList").get("scenes") or []
+                            items = request("GetSceneItemList", {"sceneName": PROGRAM_SCENE}).get("sceneItems") or []
+                            input_present = (install.source_uuid is not None
+                                             and any(row.get("inputUuid") == install.source_uuid for row in inputs))
+                            scene_present = (install.scene_uuid is not None
+                                             and any(row.get("sceneUuid") == install.scene_uuid for row in scenes))
+                            ref_present = (install.ref_id is not None
+                                           and any(row.get("sceneItemId") == install.ref_id for row in items))
+                            absent = not any((input_present, scene_present, ref_present))
+                            if absent:
+                                break
+                        except Exception as exc:
+                            errors.append(f"absence-poll: {type(exc).__name__}: {exc}")
                             break
+                        self._sleep(min(0.1, max(0.0, deadline_s - self._clock())))
+                    if not absent:
+                        errors.append("absence-poll: calibration resources remain")
+                if target_attempted:
+                    try:
+                        self._await_probe_target(run, deadline_s, present=False)
                     except Exception as exc:
-                        errors.append(f"absence-poll: {type(exc).__name__}: {exc}")
-                        break
-                    self._sleep(min(0.1, max(0.0, deadline_s - self._clock())))
-                if not absent:
-                    errors.append("absence-poll: calibration resources remain")
-                    isolation_violation = True
-                try:
-                    self._await_probe_target(run, deadline_s, present=False)
-                except Exception as exc:
-                    errors.append(f"target-cleanup: {type(exc).__name__}: {exc}")
-                    absent = False
-                    if "did not disappear" in str(exc):
-                        isolation_violation = True
+                        errors.append(f"target-cleanup: {type(exc).__name__}: {exc}")
+                        absent = False
                 if snapshot is not None:
                     try:
                         current = request("GetCurrentProgramScene")
                         if self._scene_identity(current, "currentProgram") != (snapshot.program_name, snapshot.program_uuid):
-                            isolation_violation = True
-                            isolation_reasons.append("isolation: program scene changed during cleanup")
+                            if mutated:
+                                isolation_violation = True
+                                isolation_reasons.append("isolation: program scene changed during cleanup")
                             request("SetCurrentProgramScene", {"sceneName": snapshot.program_name})
                     except Exception as exc:
                         errors.append(f"restore-program: {type(exc).__name__}: {exc}")
@@ -1267,7 +1305,7 @@ class ManagedObs:
                                 preview_ok = False
                         restored = (studio == snapshot.studio_enabled and program == (snapshot.program_name, snapshot.program_uuid)
                                     and current_items == snapshot.program_items and preview_ok)
-                        if not restored:
+                        if not restored and mutated:
                             isolation_violation = True
                             errors.append("isolation: restored OBS state did not match snapshot")
                     except Exception as exc:

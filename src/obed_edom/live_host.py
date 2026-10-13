@@ -155,7 +155,7 @@ def _placement_round_trip_expr(token: str, *, mode: Literal["knowledge", "probe"
 def _placement_set_expr(token: str, value: str, ms: int | None = None) -> str:
     suffix = "" if ms is None else f",{ms}"
     return (
-        f'(function(){{try{{return window.__obedGrant("{token}",{json.dumps(value)}{suffix})===true?window.__obedPlacement:null}}'
+        f'(function(){{if(typeof window.__obedGrant!=="function")return "absent";try{{return window.__obedGrant("{token}",{json.dumps(value)}{suffix})===true?window.__obedPlacement:null}}'
         'catch(e){return null}})()'
     )
 
@@ -1051,8 +1051,8 @@ class _ProgramGuard:
                 'Array.prototype.forEach.call(document.querySelectorAll("video"),function(v){var m=mediaMap.get(v);'
                 'if(!m){m={id:"video-"+(++mediaId),playing:false,active:false,monotonic:true,lastTime:null,lastAdvanceAt:null,frameMs:null,maxStallMs:0};mediaMap.set(v,m);s.media.push(m)}'
                 'var ct=+v.currentTime;if(v.paused||v.ended||v.readyState<2){m.active=false;m.lastTime=null;m.lastAdvanceAt=null;return}'
-                'm.playing=true;if(!m.active){m.active=true;m.lastTime=ct;m.lastAdvanceAt=t;return}'
-                'if(v.loop&&m.lastTime!==null&&ct+1e-4<m.lastTime){m.lastTime=ct;m.lastAdvanceAt=t;return}'
+                'm.playing=true;if(!m.active){m.active=true;m.lastTime=ct;m.lastAdvanceAt=null;return}'
+                'if(v.loop&&m.lastTime!==null&&ct+1e-4<m.lastTime){m.lastTime=ct;m.lastAdvanceAt=null;return}'
                 'if(m.lastTime!==null&&ct+1e-4<m.lastTime)m.monotonic=false;'
                 'if(m.lastTime===null||ct>m.lastTime+1e-4){if(m.lastTime!==null){var fm=(ct-m.lastTime)*1000;m.frameMs=m.frameMs===null?fm:Math.min(m.frameMs,fm);'
                 'if(m.lastAdvanceAt!==null&&m.frameMs>0)m.maxStallMs=Math.max(m.maxStallMs,t-m.lastAdvanceAt-m.frameMs)}m.lastTime=ct;m.lastAdvanceAt=t}'
@@ -1113,7 +1113,7 @@ class _ProgramGuard:
         media = tuple(dict(item) for item in media_raw) if isinstance(media_raw, list) and all(isinstance(item, dict) for item in media_raw) else ()
         if media_raw is None or not isinstance(media_raw, list):
             return ProgramCheck(None, visibility, float(baseline), float(max_gap), (), "program media telemetry unavailable")
-        playing = [item for item in media if item.get("playing") is True]
+        playing = [item for item in media if item.get("playing") is True and item.get("frameMs") is not None]
         media_known = all(
             item.get("monotonic") is True
             and isinstance(item.get("frameMs"), (int, float))
@@ -1211,6 +1211,7 @@ class LiveOutputHost:
         self._probe_thread: threading.Thread | None = None
         self._probe_run_id: str | None = None
         self._probe_cancelled = False
+        self._probe_starting = False
         self._probe_context: str | None = None
         self._probe_engine: EngineIdentity | None = None
         self._engine_identity: EngineIdentity | None = None
@@ -1221,6 +1222,8 @@ class LiveOutputHost:
         self._renew_stop = threading.Event()
         self._renew_thread: threading.Thread | None = None
         self._reconnect_revoke_required = False
+        self._channel_compromised = False
+        self._placement_channel_absent_context: str | None = None
         self._placement_epoch = 0
         self._player_busy = True
         self._placement: dict[str, Any] = {
@@ -1534,6 +1537,10 @@ class LiveOutputHost:
     ) -> None:
         with self._placement_lock:
             resolved_state = state or ("valid" if grant is not None else "invalid")
+            if reason == "channel-compromised":
+                self._channel_compromised = True
+            elif self._channel_compromised and reason != "stopped":
+                resolved_state, grant, reason = "invalid", None, "channel-compromised"
             self._placement.update(
                 state=resolved_state,
                 grant=grant if resolved_state == "valid" else None,
@@ -1569,7 +1576,15 @@ class LiveOutputHost:
             )
         except Exception:
             return "disconnected"
-        return "revoked" if result == "invalid" else "compromised"
+        if result == "absent":
+            with self._placement_lock:
+                self._placement_channel_absent_context = context
+            return "revoked"
+        if result == "invalid":
+            with self._placement_lock:
+                self._placement_channel_absent_context = None
+            return "revoked"
+        return "compromised"
 
     def _handle_revoke_failure(self, context: str, result: str) -> None:
         if result == "revoked":
@@ -1577,6 +1592,8 @@ class LiveOutputHost:
         with self._placement_lock:
             if context == self._placement_context:
                 self._reconnect_revoke_required = True
+            if result == "compromised":
+                self._channel_compromised = True
         reason = "channel-compromised" if result == "compromised" else "disconnected"
         self._set_placement(None, reason, state="invalid")
         if result == "compromised":
@@ -1584,7 +1601,7 @@ class LiveOutputHost:
             except Exception: pass
 
     def _sync_placement(self) -> None:
-        if self._placement["reason"] == "channel-compromised":
+        if self._channel_compromised:
             return
         if self._placement_mode == "probe":
             self._sync_probe_placement()
@@ -1643,7 +1660,7 @@ class LiveOutputHost:
             revoke = self._revoke_placement(context)
             if revoke != "revoked":
                 self._handle_revoke_failure(context, revoke)
-                return False
+                return revoke == "disconnected"
             self._reconnect_revoke_required = False
             self._set_placement(None, "not-calibrated", state="invalid")
             if self._logger is not None:
@@ -1734,6 +1751,9 @@ class LiveOutputHost:
     def _cancel_probe(self, reason: str) -> None:
         with self._placement_lock:
             run_id = self._probe_run_id
+            if run_id is not None and self._probe_future is None and not self._probe_starting:
+                self._finish_probe_state(reason, expected_run_id=run_id)
+                return
             self._placement_epoch += 1
             if run_id is not None:
                 self._probe_cancelled = True
@@ -1758,6 +1778,7 @@ class LiveOutputHost:
                         self._handle_revoke_failure(context, revoke)
                 self._automatic_probe_key = None
                 self._cancel_probe("disconnected")
+                self._engine_identity = None
         elif engine != self._last_engine:
             if self._last_engine is not None:
                 if context is not None:
@@ -1825,6 +1846,11 @@ class LiveOutputHost:
         if revoke != "revoked":
             self._handle_revoke_failure(context, revoke)
             return False
+        if self._placement_channel_absent_context == context:
+            if not manual:
+                self._automatic_probe_key = (engine, self._connection_generation, context)
+            self._set_placement(None, "not-calibrated", state="invalid")
+            return False
         run_id = secrets.token_hex(16)
         with self._placement_lock:
             self._placement_epoch += 1
@@ -1849,6 +1875,10 @@ class LiveOutputHost:
             epoch = self._placement_epoch
             if self._stopped or run_id is None or context is None or engine is None or self._probe_future is not None:
                 return
+            if self._probe_cancelled:
+                self._finish_probe_state("cancelled", expected_run_id=run_id)
+                return
+            self._probe_starting = True
         if self._server is None or not hasattr(self._server, "set_probe_run"):
             self._finish_probe_state("probe-failed")
             return
@@ -1856,8 +1886,8 @@ class LiveOutputHost:
         if fingerprint is None or fingerprint[1:] != (1.0, 1920, 1080):
             self._finish_probe_state("revoked-fingerprint")
             return
-        spec = ProbeSpec(run_id, 1920, 1080, RATES[self._output_rate or 25][1], 1.0)
         try:
+            spec = ProbeSpec(run_id, 1920, 1080, RATES[self._output_rate or 25][1], 1.0)
             url = self._server.set_probe_run(spec)
             if not isinstance(url, str):
                 raise LiveHostError("Probe URL is unavailable.")
@@ -1875,10 +1905,15 @@ class LiveOutputHost:
             return
         with self._placement_lock:
             stale = self._stopped or self._probe_run_id != run_id or self._placement_epoch != epoch
-            if not stale:
+            self._probe_starting = False
+            current = self._probe_run_id == run_id
+            if current:
                 self._probe_fingerprint = fingerprint
                 self._probe_future = future
-                self._set_placement(None, "calibrating", state="probing")
+                if stale:
+                    self._probe_cancelled = True
+                else:
+                    self._set_placement(None, "calibrating", state="probing")
                 self._probe_thread = threading.Thread(
                     target=self._await_probe_result,
                     args=(run_id, request, future),
@@ -1889,8 +1924,14 @@ class LiveOutputHost:
         if stale:
             try: self._calibration.cancel(run_id, timeout_s=0)
             except Exception: pass
-            try: self._server.set_probe_run(None, run_id=run_id)
-            except Exception: pass
+            if not current:
+                def clear_after_cleanup() -> None:
+                    try: future.result()
+                    except Exception: pass
+                    try: self._server.set_probe_run(None, run_id=run_id)
+                    except Exception: pass
+
+                threading.Thread(target=clear_after_cleanup, name="obed-placement-probe-cleanup", daemon=True).start()
 
     def _finish_probe_state(
         self,
@@ -1915,6 +1956,7 @@ class LiveOutputHost:
             self._placement_epoch += 1
             self._probe_run_id = None
             self._probe_cancelled = False
+            self._probe_starting = False
             self._probe_context = None
             self._probe_engine = None
             self._probe_future = None
@@ -2172,6 +2214,7 @@ class LiveOutputHost:
                 self._placement_epoch += 1
                 self._probe_run_id = None
                 self._probe_cancelled = False
+                self._probe_starting = False
                 self._probe_context = None
                 self._probe_engine = None
                 self._probe_future = None
@@ -2309,6 +2352,7 @@ class LiveOutputHost:
                 self._reconnect_revoke_required = False
                 self._probe_run_id = None
                 self._probe_cancelled = False
+                self._probe_starting = False
                 self._probe_context = None
                 self._probe_engine = None
                 self._probe_future = None
@@ -2642,7 +2686,7 @@ class LiveOutputHost:
             transport.key("Enter", "Enter", 13)
         elif operation == "hide": transport.evaluate("window.__obedOutput.hide()")
         elif operation == "show":
-            if self._placement["reason"] == "channel-compromised":
+            if self._channel_compromised:
                 raise PlayerCommandRejected("Output stays hidden: the placement channel failed its check.")
             transport.evaluate("window.__obedOutput.show()")
         else: raise LiveHostError("Unsupported player operation.")

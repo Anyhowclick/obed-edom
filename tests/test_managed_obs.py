@@ -382,7 +382,9 @@ class CalibrationObs:
                  output_error: tuple[int, str | None] | None = (600, managed_obs._PREVIEW_OUTPUT_ABSENT),
                  removal: str = "normal", screenshot: str = "png", disturb_program: bool = False,
                  transition_cursor: float = 1.0, preview_unreadable: bool = False,
-                 cleanup_program_change: bool = False) -> None:
+                 cleanup_program_change: bool = False, collision: bool = False,
+                 race_collision: bool = False, cleanup_poll_timeout: bool = False,
+                 unowned_leftover: bool = False) -> None:
         self.studio = studio
         self.preview = "Other" if studio else None
         self.program = "AK"
@@ -393,8 +395,14 @@ class CalibrationObs:
         self.transition_cursor = transition_cursor
         self.preview_unreadable = preview_unreadable
         self.cleanup_program_change = cleanup_program_change
+        self.cleanup_poll_timeout = cleanup_poll_timeout
+        self.unowned_leftover = unowned_leftover
+        self.race_collision = race_collision
+        self.unowned_visible = False
         self.pending_input = self.pending_scene = 0
         self.scenes = {"AK": "scene-ak", "Other": "scene-other"}
+        if collision:
+            self.scenes["AK-Calibrate"] = "unowned-scene"
         self.inputs = {"Program": {"inputUuid": "input-program", "inputKind": "browser_source",
                                    "inputSettings": {"width": 1920, "height": 1080, "fps": 50,
                                                      "fps_custom": True}}}
@@ -406,6 +414,7 @@ class CalibrationObs:
         self.probe_url: str | None = None
         self.requests: list[tuple[int, str, dict[str, Any] | None]] = []
         self.connections = 0
+        self.target_reads = 0
 
     def websocket(self, *_: Any, **kwargs: Any):
         assert kwargs["max_message_bytes"] == managed_obs.CALIBRATION_MAX_MESSAGE_BYTES
@@ -426,11 +435,14 @@ class CalibrationObs:
             def request(self, request_type: str, data: dict[str, Any] | None = None, *, timeout: float | None = None):
                 assert timeout is not None and 0 < timeout <= managed_obs.CALIBRATION_DEADLINE_S
                 owner.requests.append((connection, request_type, data))
+                if owner.cleanup_poll_timeout and connection == 2 and request_type == "GetInputList":
+                    raise ObsWebsocketTimeout("cleanup poll timed out")
                 return owner.request(request_type, data or {})
 
         return Connection()
 
     def targets(self, program_target: str) -> list[dict[str, Any]]:
+        self.target_reads += 1
         rows = [{"id": program_target, "type": "page", "url": PAGE_URL}]
         if self.probe_url is not None:
             rows.append({"id": "probe-target", "type": "page", "url": self.probe_url})
@@ -472,18 +484,27 @@ class CalibrationObs:
                 self.pending_scene -= 1
                 if not self.pending_scene:
                     self.scenes.pop("AK-Calibrate", None)
-            return {"scenes": [{"sceneName": key, "sceneUuid": value} for key, value in self.scenes.items()]}
+            rows = [{"sceneName": key, "sceneUuid": value} for key, value in self.scenes.items()]
+            if self.unowned_visible:
+                rows.append({"sceneName": "AK-Calibrate", "sceneUuid": "unowned-scene"})
+            return {"scenes": rows}
         if name == "GetInputList":
             if self.pending_input:
                 self.pending_input -= 1
                 if not self.pending_input:
                     self.inputs.pop("AK-Probe", None)
                     self.probe_url = None
-            return {"inputs": [{"inputName": key, "inputUuid": value["inputUuid"], "inputKind": value["inputKind"]}
-                               for key, value in self.inputs.items()]}
+            rows = [{"inputName": key, "inputUuid": value["inputUuid"], "inputKind": value["inputKind"]}
+                    for key, value in self.inputs.items()]
+            if self.unowned_visible:
+                rows.append({"inputName": "AK-Probe", "inputUuid": "unowned-input", "inputKind": "browser_source"})
+            return {"inputs": rows}
         if name == "GetSceneItemList":
             return {"sceneItems": json.loads(json.dumps(self.program_items)) if data["sceneName"] == "AK" else []}
         if name == "CreateScene":
+            if self.race_collision:
+                self.scenes[data["sceneName"]] = "unowned-scene"
+                raise managed_obs.ObsRequestError(name, 601, "scene name became occupied")
             self.scenes[data["sceneName"]] = "scene-calibrate"
             return {"sceneUuid": "scene-calibrate"}
         if name == "CreateInput":
@@ -563,6 +584,8 @@ class CalibrationObs:
                 raise managed_obs.ObsRequestError(name, 600, "wrong scene")
             if self.cleanup_program_change:
                 self.program = "Other"
+            if self.unowned_leftover:
+                self.unowned_visible = True
             return {}
         raise AssertionError(name)
 
@@ -2188,6 +2211,9 @@ def test_persistence_contract_pins_step0_null_and_fails_closed(tmp_path):
      ("preview", False, "timeout"),
      ("preview", False, "bad-evidence"), ("preview", False, "bad-target"),
      ("preview", False, "program-change"), ("preview", False, "cleanup-change"),
+     ("preview", False, "cleanup-timeout"), ("preview", False, "slow-target"),
+     ("preview", False, "collision"), ("preview", False, "race-collision"),
+     ("preview", False, "unowned-leftover"),
      ("preview", False, "transition-active"), ("preview", True, "preview-unreadable"),
      ("preview", False, "stale-identity"),
      ("preview", False, "cancel"), ("preview", False, "quit"),
@@ -2203,7 +2229,10 @@ def test_calibration_transaction_preview_offcanvas_faults_and_fencing(tmp_path, 
                          screenshot=screenshot, disturb_program=outcome == "program-change",
                          transition_cursor=0.5 if outcome == "transition-active" else 1.0,
                          preview_unreadable=outcome == "preview-unreadable",
-                         cleanup_program_change=outcome == "cleanup-change")
+                         cleanup_program_change=outcome == "cleanup-change", collision=outcome == "collision",
+                         race_collision=outcome == "race-collision",
+                         cleanup_poll_timeout=outcome == "cleanup-timeout",
+                         unowned_leftover=outcome == "unowned-leftover")
     engine = calibration_engine(tmp_path, monkeypatch, obs)
     identity_checks = 0
     real_identity = engine._identity
@@ -2214,6 +2243,15 @@ def test_calibration_transaction_preview_offcanvas_faults_and_fencing(tmp_path, 
         return real_identity(pid, launch_date)
 
     monkeypatch.setattr(engine, "_identity", counted_identity)
+    if outcome == "slow-target":
+        await_target = engine._await_probe_target
+
+        def slow_target(run, deadline_s, *, present):
+            if not present:
+                raise ManagedObsError("Calibration CDP target did not disappear.")
+            return await_target(run, deadline_s, present=present)
+
+        monkeypatch.setattr(engine, "_await_probe_target", slow_target)
     adapter = engine.calibration_adapter()
     identity = adapter.identity()
     assert identity == managed_obs.EngineIdentity(4242, 1000.0, 7)
@@ -2282,20 +2320,34 @@ def test_calibration_transaction_preview_offcanvas_faults_and_fencing(tmp_path, 
     else:
         result = future.result(2)
         assert engine._thread is None and engine._jobs.empty()
-        if outcome in ("bad-output", "transition-active", "preview-unreadable"):
+        if outcome in ("bad-output", "transition-active", "preview-unreadable", "collision", "race-collision"):
             assert result.evidence is None and result.isolation_ok is True
             expected = {"bad-output": "preview output state is unreadable", "transition-active": "transition is in flight",
-                        "preview-unreadable": "preview state is unreadable"}[outcome]
+                        "preview-unreadable": "preview state is unreadable",
+                        "collision": "unowned AK-Calibrate scene already exists",
+                        "race-collision": "CreateScene failed"}[outcome]
             assert any(expected in error for error in result.errors)
             assert any(error.startswith("refused:") for error in result.errors)
-            assert all(name not in ("CreateScene", "CreateInput") for _, name, _ in obs.requests)
+            if outcome == "race-collision":
+                assert not any(name == "CreateInput" for _, name, _ in obs.requests)
+            else:
+                assert all(name not in ("CreateScene", "CreateInput") for _, name, _ in obs.requests)
+            if outcome in ("collision", "race-collision"):
+                assert not any(connection == 2 and name in ("GetInputList", "GetSceneList")
+                               for connection, name, _ in obs.requests)
+                assert obs.target_reads == 0
         elif outcome in ("bad-screenshot", "timeout", "bad-evidence", "bad-target", "program-change", "cleanup-change",
-                          "wrong-removal"):
-            assert result.cleanup_verified is (outcome != "wrong-removal")
+                          "cleanup-timeout", "slow-target", "wrong-removal"):
+            assert result.cleanup_verified is (outcome not in ("cleanup-timeout", "slow-target", "wrong-removal"))
             assert result.restored is True and result.errors
-            assert result.isolation_ok is (outcome in ("bad-screenshot", "timeout", "wrong-removal"))
+            assert result.isolation_ok is (outcome in ("bad-screenshot", "timeout", "cleanup-timeout", "slow-target",
+                                                       "wrong-removal"))
             if outcome == "timeout":
                 assert any(error.startswith("timeout:") for error in result.errors)
+            elif outcome == "cleanup-timeout":
+                assert any(error.startswith("absence-poll: ObsWebsocketTimeout") for error in result.errors)
+            elif outcome == "slow-target":
+                assert any(error.startswith("target-cleanup:") for error in result.errors)
             elif outcome in ("bad-evidence", "bad-target", "program-change", "cleanup-change"):
                 assert any(error.startswith("isolation:") for error in result.errors)
             if outcome in ("program-change", "cleanup-change"):
@@ -2323,5 +2375,7 @@ def test_calibration_transaction_preview_offcanvas_faults_and_fencing(tmp_path, 
                 assert create < transform < enable
             if outcome == "success":
                 assert identity_checks == 3
+            if outcome == "unowned-leftover":
+                assert obs.unowned_visible is True
         assert adapter.cancel(run_id, timeout_s=5.0) is (result.cleanup_verified and result.restored)
     engine.close()
