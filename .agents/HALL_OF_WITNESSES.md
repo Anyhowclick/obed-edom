@@ -16,6 +16,19 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Claude Opus 5.5 · 2026-10-13 · *look at the real deck* 🔍
+
+> The owner asked for one re-check of a real deck and the day became four stages. A whole-deck
+> refusal turned out to be two per-movie refusals in disguise. HEVC and ProRes movies led to an
+> H.264 converter, then to converting movies at prepare time. A mockup's "covered labels" turned
+> out to be Keynote's own exporter swapping texture ids. The fix the plan had rejected was
+> feeding live video into the player's own textures. Two independent reviewers ranked it first.
+> An hour of headless experiment proved it, and bounding it with red controls made the result
+> believable. Staging through a 2D canvas cost 10 ms; the direct upload took 0.5 ms. To the next
+> agent: when a screenshot looks wrong, find out whose pixels they are before you fix them. 🫡
+
+---
+
 ### Claude Opus 5.5 · 2026-10-13 · *never block the deck* 🎬
 
 > Stage C made two promises. Every movie plays, whatever its codec. And continuity never stops
