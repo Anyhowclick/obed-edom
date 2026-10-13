@@ -1,161 +1,219 @@
-# Live continuity, Stage B: carry under artwork, N carries per boundary, qualify Alpha_DSK
+# Live continuity, Stage B: carry under artwork via the GL texture feed, N carries per boundary, qualify Alpha_DSK
 
-Status: **DRAFT rev 2 (2026-10-13), planning only.** **Owner 2026-10-13 on OQ-B1 (the tag dip):** run the headless GL-texture-feed experiment (feed the live decoder into BOTH Magic Move textures of the movie leaf, so the player draws labels above it; consultation: Codex GPT-6 Astra xhigh + Opus max, both ranked it first). **If it fails, fall back to the poster hold:** the carried decoder is hidden during the move (Keynote's own move plays, labels on top), no restart, and video play resumes at the last frame before the Magic Move. OQ-B2 "probably" yes; OQ-B6 yes. Order is C → S3 → B (Stage C OQ-C2). Critique r1 (Opus HIGH): the settle test also requires an ev0 tree of only movie-start builds; §3 byte-identity limited to the allowlist, with the changed fixtures/tests named; the re-home also resets a decoder arriving from a held plain-bridge overlay (+ Node R1b); OQ-B8; exact `artworkAbove`/carry-cover criteria; P2 citation fixed; version pins added to WS R. Read-only against `claude/s2-followups-dsk-deck-902af1` (main `93963f4c` + `87ab7240`). Parent: `keynote_live_continuity_generalisation.plan.md` (S2 merged #259; S3 = delete the allowlist, OQ-8). Citations: `lc` = `src/obed_edom/live_continuity.py`, `js` = `src/obed_edom/live_continuity_js.py`, `probe` = `scripts/live_continuity_probe.py`.
+Status: **DRAFT rev 3 (2026-10-13), planning only.**
+- **Order is C → S3 → B** (Stage C OQ-C2). B rebases onto C (PR #264) and then S3. After S3 the allowlist is gone, so B's oracle is the plan-sha tests plus S3's negative corpus.
+- **OQ-B1 RESOLVED (owner):** the GL texture feed is proven, and B is built around it. The **poster hold** is the fallback whenever the feed is unavailable or stands down. Rev 2's "bridge hold under artwork" is dropped.
+- **Still open from rev 2:** OQ-B2 is "probably" yes and is confirmed here (§7). OQ-B6 = yes.
+- **Reads:** this worktree (`1138e220`), `origin/claude/stage-c-orchestration` (`a135ad5e`), and the feed evidence in `…/scratchpad/glfeed/`. Parent plan: `keynote_live_continuity_generalisation.plan.md`.
+- **Citation prefixes:** `lc` = `src/obed_edom/live_continuity.py` (post-C names), `js` = `src/obed_edom/live_continuity_js.py`, `probe` = `scripts/live_continuity_probe.py`, `host` = `src/obed_edom/live_host.py`.
 
-**Goal (owner, 2026-10-13).** Qualify a real deck. `~/Desktop/Convert wall to 16x9 CGs/Alpha_DSK.key` (fresh H.264 export `output/.html-preview/3b9019f0…-p3-r1/html`) must derive `qualified` and pass the probe green. Every Magic Move where the same movie continues must carry, with the authored artwork drawn above the video once the slide settles.
+**Goal (owner, 2026-10-13).** Qualify a real deck: `Alpha_DSK.key` (H.264 export `output/.html-preview/3b9019f0…-p3-r1/html`) derives with every same-movie Magic Move carried and passes the probe green. Authored artwork stays above the video **during the move and once the slide settles**.
 
-**Owner decisions that still govern (not reopened).** Pin hold accepted. R9. A runtime carry refusal lasts until the next go-to. Main freeze bracket option A. Decision 14. Instrument scope = catch what the owner's eyes can catch. Exact canonical asset matching. objectID-only runtime identity.
+**Owner decisions that still govern (not reopened):**
+- Pin hold accepted.
+- R9.
+- A runtime carry refusal lasts until the next go-to.
+- Main freeze bracket option A.
+- Decision 14.
+- Instrument scope = catch what the owner's eyes can catch.
+- Exact canonical asset matching.
+- objectID-only runtime identity.
+- Stage C's R11 and the superseded dashboard gate.
 
-## 1. Evidence (offline, from the export and the code)
-
-### 1.1 Alpha_DSK, boundary by boundary
-10 slides. Ordinal 7 is skipped, so player index p = ordinal−1 up to ordinal 6, and p = ordinal−2 after that. Each movie slide has exactly 2 events: ev0 is the auto `apple:movie-start` builds (`automaticPlay: true`; wa0125 on p5 starts nested "with previous" under the untitled start), and ev1 is the outgoing transition.
-
-| Boundary (player / ordinal) | Transition | Derivation today | With overlap and the one-bridge guard stubbed out (scratch run) |
-|---|---|---|---|
-| 0→1, 1→2, 2→3 | none | no movies | same |
-| 3→4 (ord 4→5) | MM 1.5 s | untitled-h264 **bridge**, carried | same; no artwork on p4 |
-| 4→5 (ord 5→6) | Dissolve | restart | same |
-| 5→6 (ord 6→8) | MM | wa0125 bridge **refused `overlap`** (p6 slots 2/3: 259×59 tag at 0.61 opacity + 224×36 text on the video's top-left) | bridge; R2/R4/R8/R9/R10 all pass |
-| 6→7 (ord 8→9) | MM | wa0125 bridge refused `overlap` (p7 slots 5/6/7: tags, one straddling both videos) | bridge |
-| 7→8 (ord 9→10) | MM | wa0121 (loops on both sides) + wa0125: **two bridges**, both refused `overlap` (p8 slot 2 = 13 px divider over wa0121; slots 4–7 = tags) | two bridges; the `_chain_refusal` R6 check passes. The real blocker is the guard at `lc:1779-1780` |
-| 8→None | (`none`) | `restart` per asset, no `src_object_id` (`lc:1884-1890`). `to_runtime` drops it (`lc:807-808`) and the probe skips it (`probe` `verdict_specs` `:1349`) | unchanged. At runtime the two carried decoders stay held on the last slide (handover open item 3) |
-
-Coordinator's measured fact: the refused carries have deliberate tags covering 3.3–8.3 % of the video, and the dividers 1.3–2.0 %. **No tolerance threshold can qualify them.** B has to really draw the artwork above the carried video.
-
-Skipped slide: `derive_plan` drops skipped slides (`lc:1830-1832`). The export already builds ordinal 6's Magic Move against ordinal 8: the p5 transition carries ordinal 8's tag slots (259×59 and 224×36, `hidden`). So the plan's 5→6 is the move the player actually runs. The host maps ordinals correctly (`live_host.py:818-820`). Only the probe's synthetic slides (`probe:1024-1029`, ordinal = player+1) label the boundaries one off from the operator's numbering after slide 6. This is cosmetic: B records the mapping in the gate record and changes no code.
-
-Audio (checked, needs no action): untitled-h264 has AAC at volume 1. A bridge's suppressed fresh element gets `src` (`js:2211`) and the player's `startMovie()`, so on a bridge it would double the audio. The host runs Chrome with `--mute-audio` (`live_host.py:522`; README "Audio is disabled"), so this is a latent residual only. It is listed in §8.
-
-### 1.2 How the export draws, and where the core paints
-- **Draw order:** each event's `baseLayer.layers[]` lists the slots in paint order, with a slot's object as its single child. `_overlap_refusal` (`lc:1218-1248`) treats every later slot as artwork.
-- **Why the overlap rule exists:** a WebGL transition sets the DOM layers to opacity 0 and keeps its canvas until the **next event renders**. The player fires that event by itself only when it is `automaticPlay: true` (`.agents/plans/keynote_live_alternatives_research.md`, P2 code-read).
-  - P2's 1→2 destination starts on a click (`p2-recovery/html-adversarial` p1 `0C652BEB`: `[False×4]`), so the GL canvas stays for the whole dwell. A movie inside a DOM layer is invisible there, which is why it is refused and glReplay exists.
-  - Every Alpha_DSK destination (p6/p7/p8), every D1–D6 slide except D4's last (3 events), and P2's slide 4 is `[True, False]` with an ev0 tree of only `apple:movie-start`/`renderMovie`: the slide **settles back into its DOM layers** right after the move.
-- **The carried decoder's stacking today:**
-  - *Ride* (both actions, transition scene): `rideTransition` appends the decoder to `#body` (`js:1157-1161`), above everything. This is the owner-accepted pin hold.
-  - *Settled pin:* the fresh element becomes a facade, and the decoder is re-homed **into the destination poster's authored layer**: `bindFacade` (`js:1812-1901`) calls `scheduleRemount('pin-rehome')`, then `tryRemount` runs its poster-canvas branch (`js:1698-1755`). That branch's own comment says the layer's stacking context "is what makes later-authored artwork … paint in front". It is proven live by D1/D3/D4/D5 pins and by G2's release (`js:733`).
-  - *Settled bridge:* `carry()` takes `bridgeTo34` + `keepAtSlot` (`js:2140-2144`, `:1376-1409`, `:1297-1343`). The decoder stays an absolute overlay **on `#body`** at `dst.rect`, painted above every authored layer. **This is the only reason a bridge would hide labels on the settled slide.**
-- **Bridge animation:** it runs per decoder. `markTransition` walks every held decoder (`js:789-794`). Each `keepThroughBridge` (`js:1192-1222`) owns its own `__obedMotion` and reads the one shared `departure` GL clock. `nextEntry`/`carryEntryTo`/`pickCarried` are per instance (`js:406-421`, `:2084-2109`). **The core has no one-bridge assumption left.** The limit is Python only: `_magic_move_movies` `lc:1779-1780`. `_gl_replay_attempt`'s `continuing_count != 1` (`lc:1520`) is glReplay's own rule and stays.
-
-### 1.3 What the instruments assume
-- **`probe` `verdict_specs`** (`:1334-1423`): one spec per (boundary, instance, kind), so several carries per boundary already work (D3 S1→2 pin + bridge). `--strip ACTION@scene:KEY` exists for picking one of two entries.
-- **`probe` `ground_truth_facts`** (`:1517-1520`): `boundary_keys` is keyed by `atScene`, so a second carry at the same scene would overwrite the first. It is only used for the armed (glReplay) fact, whose boundary has exactly one carried movie. Leave it.
-- **`probe` `score_carry_cover`** (`:8443-8451`): **reads INCONCLUSIVE when any other `bridge-motion-start` falls inside the capture.** With two bridges on one boundary, both captures would be inconclusive. The per-capture export tag `carry-cover-{boundary}` (`:8746`) would also collide.
-- **Nothing scores "artwork above the carried movie."** The P2 green-square z-order is only a comment (`p2_verdict.py:103-108`). The pre-S2 `overlappingArtworkComposedAfter1to2` is gone. This is the gap B must close with a red control.
-- **`p2_verdict.py` and `paint_instrument.py`** need no change: P2's plans are unchanged (§3), and paint reads already handle decoders inside layers (pins).
+## 1. Evidence (rev 2 §1 stands; changes only)
+- **Alpha_DSK boundaries.** Unchanged from rev 2's table:
+  - 3→4 untitled bridge (no artwork, carried today).
+  - 5→6 and 6→7 wa0125 bridges, refused `overlap`.
+  - 7→8 two bridges (wa0121, wa0125), both refused `overlap`.
+  - 8→None, no runtime entry.
+  - Every destination p6/p7/p8 is `[auto movie-start, transition]`, so it settles into its DOM layers.
+  - The tags cover 3.3–8.3 % of the video, so no tolerance threshold can qualify them.
+- **Post-C hook point.**
+  - `_overlap_refusal` now returns `(code, reason)`: `R11` for an unmeasured movie above, else `overlap`.
+  - `_carry_refusal` passes that result through.
+  - `_magic_move_movies(…, onward)` refuses R11 when the destination's own next transition is unmeasured.
+  - B intercepts only the `overlap` code. R11 stays a refusal.
+- **Where the carried decoder paints today.**
+  - During the ride it sits on `#body`, above the GL canvas (`js:1157-1161`).
+  - A settled pin is re-homed into its poster's authored layer (`js:1698-1755`, `:1812-1901`).
+  - A settled bridge stays a `#body` overlay (`js:2140-2144`).
+- **The feed experiment.** Headless Chrome on Alpha 6→8, 8→9 and 9→10, with 9→10 carrying 2 movies.
+  - **Mechanism:** at the carried movie leaf's draw, `texImage2D(video)` into **both** textures the leaf crossfades: unit0 = outgoing, unit1 = the `contents` to-texture.
+  - **Result:** the player itself draws the movie in slot order, with Keynote's easing. Labels and the divider stay on top. The 0.61 tag boxes composite over live video (coefficient k median 0.385–0.387 against an expected 0.388). 0 GL errors, and every video frame was delivered.
+  - **Cost:** 0.3–0.7 ms p95 per frame, against 6–10 ms for 2D-canvas staging.
+  - **Binding:** by draw index plus the upload ordinals and sizes of unit0/unit1 taken from the export JSON, re-keyed on texture identity after the first feed. **Never by texture id:** 9→10 WA0125's outgoing texture `309718…` is WA0121's poster, and a label draw uses the 13×404 divider texture.
+- **Experiment limits that B must close:**
+  1. It fed a **separate** muted `<video>`, not the carried decoder.
+  2. It ran mostly on a virtual clock.
+  3. It ran only in headless Chrome. OBS CEF 127 was not tested.
+  4. One 357 ms first-feed stall occurred in 1 of 6 runs.
+  5. Observed upload counts exceeded the JSON's (13/12, 20/17 `sizeMismatch`). The extra uploads came after the movie ordinals there. The likely source is the MM-opacity hand-back crossfade in the served player, but this is unexplained.
+  6. On 9→10, label draw 7 straddles both movies and the divider, and read k 0.07–0.34. It must be explained before any threshold is registered.
 
 ## 2. Design
 
-### 2.1 (1) Carry under artwork — recommendation: **home the decoder in its authored layer at landing, only on slides that settle into the DOM**
-- **Python (`lc`)**
-  - In `_carry_refusal` (`lc:1732-1733`), an overlap is **not** a refusal when the destination *settles into DOM*: `len(events) == 2`, `events[0]["automaticPlay"] is True`, and every effect in ev0's tree (nested included) is `apple:movie-start` or `renderMovie` (fail closed otherwise). The third clause: a WebGL build run at ev0 keeps its canvas over the DOM until the click. Exactly two events: no later build re-renders the slide before the outgoing transition (the `keepAtSlot` history).
-  - The carry is then marked `under_artwork=True`, and `to_runtime` emits `"underArtwork": true` on that entry (pin or bridge). The key is present only when true (`as_dict`, `to_runtime`).
-  - Any other overlapping destination keeps code `overlap` (→ `retire`, or `glReplay` for a pin as today). The two domains are disjoint, because glReplay already requires a click-driven first event (`lc:1526-1530`).
-  - `ContinuityPlan` gains `artwork_above: {player: [{objectId, asset, slot, rect}]}`, the later overlapping slot rects for the probe. It is not in `to_runtime()`.
-- **JS (`js`, about 4 lines in `carry()` and the src hook)**
-  - For a bridge with `underArtwork`, keep the `bridge-3to4` note (F5 unchanged), then take the **existing pin re-home path** instead of `bridgeTo34`, with `const rehome = !!entry.underArtwork || !!preserved.__obedBridged34`, so a decoder arriving from a held plain-bridge overlay is reset too (otherwise `tryRemount` stops at `__obedRemountEpoch === -1`, `js:1377-1378`): `bindFacade(el, preserved, true)` (removes the stub), `scheduleRemount(preserved, 'pin-rehome')` at `dst.rect`.
-  - In the src hook (`js:2211`), do not set `src` on that stub.
-  - This is exactly the state a pin leaves after a held bridge (D1 S3→S4, live-proven), so the next ride, restart, go-to and end-of-show behave as they already do after a pin.
-  - Pins need no JS: they already settle in the layer.
-- **Rejected options:**
-  - (b) Re-home every bridge, flag or not: this changes P2 3→4 and D1–D6 behaviour, and `keepAtSlot` exists because a one-shot swap "did not survive slide-4's second build".
-  - (c) Clip the ride overlay with holes interpolated along the labels' own paths: a new geometry pipeline and instrument, for 1.5 s.
-  - (d) An overlap tolerance: ruled out by the coordinator's measurements.
-- **What the owner will see:**
-  - On settled slides ord 8/9/10: tags, the divider and the semi-transparent tag boxes sit over the live video exactly as authored.
-  - During each 1.5 s Magic Move into, out of or between those slides, the moving video paints over the parts of the tags and divider it overlaps. Keynote keeps them on top. They come back on top as the slide settles, within the existing re-home retry schedule (sync, then 50–2000 ms; the D-deck pins land in the first ticks).
-  - This is the pin hold extended to bridges: **OQ-B1**.
-  - Unchanged: at 5→6 the non-carried untitled fades out on its frame 0 (open item 2, the dissolve session's F3).
+### 2.1 (1) Carry under artwork: feed in the move, re-home at settle, poster hold as fallback
+**Python (`lc`, WS-D)**
+- **The lift.** In `_carry_refusal`, an `overlap` result is not a refusal when the destination **settles into DOM**:
+  - `len(events) == 2`;
+  - `events[0]["automaticPlay"] is True`;
+  - ev0's whole effect tree is only `apple:movie-start` / `renderMovie`.
+  - The carry is then marked `under_artwork`. Any other overlapping destination keeps `overlap` (→ retire, or glReplay for a click-driven pin, a disjoint domain). R11 is untouched.
+- **Binding data (`feed`)**, emitted on each under-artwork entry when it can be bound:
+  - `{"draw": d, "drawCount": n, "from": {"upload": i, "size": [w, h]}, "to": {"upload": j, "size": [w, h]} | null}`.
+  - Built by walking the boundary transition's leaves in player order (`textureInfoFromEffect`; port `glfeed/spec.py` `_leaves`, one draw per textured leaf, uploads = leaf texture then its `contents` to-texture).
+  - The movie leaf is found **by geometry, not texture id**: the one transition slot that starts at the source movie layer's rect (the `_bridge_slot_chain` rule, `lc:1545-1576`), cross-checked against the movie centre within 2 px.
+  - `to` is null only when the leaf has no `contents` animation (a pin with an identical texture). Then only unit0 is fed.
+  - Ordinals are computed **for the player variant served** (MM-opacity on/off). The hand-back crossfade's extra uploads are modelled from the same export rule `live_runtime` applies. The 13/12 and 20/17 counts must match exactly before the contract freezes.
+  - Not uniquely bindable → the entry keeps `underArtwork` with no `feed` (poster hold), recorded per entry with a reason.
+- **Probe-only facts** (not in `to_runtime()`): `ContinuityPlan.artwork_above` (rev 2) and `ContinuityPlan.feed_draws` (per fed boundary: draw table with layer sizes, label-box opacities, and the fed leaves' objectIds).
 
-### 2.2 (2) N carries per boundary, in authored stacking — recommendation: **delete the guard; order riders only when their paths can cross**
-- **Python:** delete `lc:1779-1780`. For each pair of carries on one boundary, the two never intersect during the move when they are separated along the same axis, on the same side, at both ends. That is exact, because both move by the same eased progress p and each edge is linear in p (a pin is constant).
-  - Separated = far edge ≤ near edge + `_OVERLAP_MIN_PX` (as `_overlaps`). Always emitting draw order would change D3's bytes.
-  - If they are not separated that way, emit `"zOrder": <destination draw-slot index>` on **both** entries.
-  - Alpha_DSK 7→8 is x-separated at both ends (930|930 → 763|764), so it emits no zOrder.
-- **JS (about 6 lines in `rideTransition`):** when the entry has `zOrder`, insert the rider into `#body` before the first sibling rider with a greater `__obedRideZ`, instead of appending. Re-insert even when it is already a child of `#body`; compare only riders of the same `atScene`.
-  - On the settled slide nothing more is needed. A video that a later-slot video overlaps is itself "under artwork", so it homes in its layer under the other video, and authored order holds for both.
-- **Owner sliver requirement (2026-10-13):** a small accidental video-on-video overlap renders exactly as Keynote draws it, with no tolerance, on DOM-settling destinations (pins too, if **OQ-B2** = yes).
-  - **Fallback, only if D7s shows two lifted decoders cannot keep authored order:** tolerate a video-on-video overlap under 1 % of the smaller video's area. Its red control would be a synthetic 1.5 % overlap that must still refuse, while 0.8 % carries.
-  - Click-driven destinations keep refusing any overlap (a GL canvas is on top for the whole dwell) → **OQ-B8**.
+**Feed module (new sibling, WS-F): `src/obed_edom/live_mm_feed_js.py`**
+- Like G2: its own `MM_FEED_VERSION = 1` and pinned sha, so its bytes never ride on the continuity sha. Injected by the host only when the runtime plan has a `feed` key.
+- **Hooks:** `getContext` for `/^\d+-canvas$/` WebGL contexts (G2's `CANVAS_ID_RE`; chains with G2's wrapper). On that instance it wraps the texture, bind, pixelStore, program, uniform, clear and draw calls.
+- **Arming:** for each fed entry, only on its transition scene (`atScene-1`, after departure).
+- **Per frame:**
+  - Count uploads and draws.
+  - At draw `d`, verify unit0 (and unit1) were uploaded in this move with the planned ordinal and size, the active unit is 0, and `mixFactor` is set.
+  - Then `texImage2D(decoder)` into both textures under each texture's own FLIP_Y/PREMULTIPLY state, and restore GL state.
+  - The first good feed records texture identity. Any later change, a `getError` after the frame's last draw, a binding mismatch, a lost context, or a decoder with no single identity match → **stand down** for that entry: stop feeding and call `seam.onStandDown(objectId, reason)`. The textures keep the last fed frame, which is the "one-time paused-frame upload" for free when GL already ran.
+  - `readyState < 2` at a draw (e.g. the decision-14 wrap) skips that draw's feed only.
+- **Warm-up (the 357 ms stall):** on source-slide entry, upload each planned decoder once into a module-owned scratch texture. If the dev loop (≥ 10 runs) still shows a first-feed stall, warm inside the player's context on the first transition frame.
+- **Publishes** `window.__OBED_MM_FEED__`: per-entry state `armed|fed|stoodDown(reason)`, frames fed, max inter-feed gap, p95 ms.
 
-### 2.3 (3) Everything else Alpha_DSK needs
-- **Fixture:** the coordinator copies the export to main-checkout `output/fixtures/sermon/alpha-dsk/{html-player,html-unmodified}` (S0 recipe). Registrations: `DECK_PLAN_SHA256`, red expectations, and the allowlist (S2 branch practice) once the sha is known.
-- **Carry-cover:** accept a `bridge-motion-start` note from a **sibling bridge of the same boundary** only when `_is_bridge_note` matches another bridge of that boundary, at most once each (`probe:8447-8451`; the masks already cover sibling slots, `probe:8180-8203`), and give each capture an asset suffix (`:8746`).
-- **End of show (8→None):** no change in B (**OQ-B4**).
-- **Codecs:** all three assets are H.264, already passing the codec gate.
+**Core (`js`, WS-R)**
+- **Hidden ride.** For an `underArtwork` entry, wherever the core starts a ride (`markTransition` `js:789-794`, `keepThroughBridge`/`keepThroughPin`, `keepAtSlot`'s next-bridge hand-off `js:1311-1315`), call `rideHidden(v, entry)` instead of `rideTransition`. It keeps the decoder attached on `#body` at `opacity: 0`, which is still decoding: the experiment's opacity-0 video delivered every frame.
+  - If `seam.feed` claims the entry (module injected and the decoder resolved), the decoder keeps playing.
+  - Otherwise it enters **poster hold**: `pause()` at departure, `__obedPosterHeld = true` (exempt from the 200 ms keep-warm `play()`, `js:1973-1988`), note `poster-hold {elId, t}`. `onStandDown` mid-move does the same.
+- **Settle re-home (kept from rev 2).** The `underArtwork` bridge keeps the `bridge-3to4` note and then takes the pin re-home path:
+  - `rehome = !!entry.underArtwork || !!preserved.__obedBridged34`;
+  - `bindFacade(el, preserved, true)` + `scheduleRemount('pin-rehome')`;
+  - no `src` on the stub (`js:2211`).
+  - After that, `play()` if poster-held, with note `poster-resume {elId, t}`. Pins already re-home.
+- **Seam.** `window.__OBED_P2_PRESERVE__.feed = {version: 1, decoderFor(objectId), onStandDown(objectId, reason), note(kind, detail)}`. Installed only for a plan with a `feed` key. G2's seam is unchanged.
+- **Versions.** `CONTINUITY_VERSION` 6→7, `__OBED_P2_PRESERVE__.version` 9→10, re-pin `PINNED_CORE_SHA256` and its mirrors.
 
-## 3. Versions and shas
-- `CONTINUITY_VERSION` 6→7, `__OBED_P2_PRESERVE__.version` 9→10, `PINNED_CORE_SHA256` re-pinned. G2 is untouched (v1, `10a5b36a…`).
-- **Every allowlisted runtime plan stays byte-identical:**
-  - P2 and p2-loop: the 1→2 destination is click-driven, so `overlap` is unchanged, and so is glReplay.
-  - D1–D6: no overlap onto a settling slide, and D3's pin+bridge pair is x-separated (900 | 1020→1100), so no `zOrder`.
-  - The existing plan-sha tests and allowlist entries must pass **unedited**. That is B's regression oracle.
-- **Not identical (not allowlisted):** the Minimal Alpha_DSK family (`gl-decks/Minimal Alpha_DSK`, `p2-soak-loop`, the `minimal_alpha_dsk` fixture): its 5→6 `clip-10-1000001.mov` pin onto a settling slide becomes `underArtwork` under OQ-B2.
-- **Tests that change on purpose:** `tests/test_live_continuity.py:363-390` (two clean bridges now derive); `:1604-1625` (keep it as the refusal test by making slide 4's ev0 click-driven; add the flagged twin); `tests/test_live_continuity_decks.py:59-97` (glReplay rule 2 stays covered at `tests/test_live_continuity.py:2702`).
-- **Plan schema:** stays 2, with two optional additive keys (`underArtwork`, `zOrder`). The JS still checks only `schema === 2`. G2 ignores extra keys (F4).
+**Host (`host`, WS-H)**
+- `_resolve_mm_feed()` mirrors `_resolve_gl_replay` (`host:902-918`): `injected | notApplicable | unavailable(reason)`.
+  - External attach is refused ("attach output not qualified").
+  - Managed OBS is allowed only after the Q6 feed arm passes; until then it is `unavailable` → poster hold.
+- `OBED_LIVE_MM_FEED=off|auto` plus a constructor flag.
+- `output.continuity.mmFeed {mode, reason, version, sha256}`, and per-entry `posterHold` lines (slides, movie, reason) next to `notCarried`.
 
-## 4. Work streams (Opus MEDIUM, disjoint files, one message; then a Codex GPT-6 Astra (high) review of the combined diff)
-**Frozen contract, set before launch:** `underArtwork` (bool, pin/bridge), `zOrder` (int, only on crossing pairs), `ContinuityPlan.artwork_above` shape, variant name `settle-on-stage`.
+**What the owner sees**
+- **Feed on** (headless or visible Chrome; managed OBS once Q6 passes): the movie keeps playing inside Keynote's own move, with Keynote's easing. Tags and the divider stay on top, and the 0.61 tag boxes tint the live video. At settle it continues seamlessly in its layer with the labels above.
+- **Poster hold** (external attach, feed off, or a stand-down): Keynote's move plays with labels on top, over the export's baked still (the clip's frame 0, open item 2, unless the feed had already run). At settle the video resumes from the frame it showed when the move began. There is no restart, and the movie's clock is held for the move's 1.5 s.
 
-| WS | Files (exclusive) | Work | Tests (minimal) |
+### 2.2 (2) N carries per boundary, authored stacking
+- **Fed carries are unlimited per boundary.** The player draws them in slot order, so video-on-video overlap (the owner's sliver) renders as authored **in the move**. The settled re-home keeps that order once the slide settles.
+- **Overlay-ridden (unflagged) bridges keep the one-per-boundary guard** (`lc:1779-1780` as fixed by `87ab7240`, now counting only unflagged bridges). No deck qualifies two overlay rides at once, so B does not lift it.
+- **Crossing rule (replaces rev 2's `zOrder`).** Two carries at one boundary may intersect in flight unless they are separated along a common axis, on the same side, at both ends (exact for linear edges under a shared progress; separation margin `_OVERLAP_MIN_PX`).
+  - If they can cross and the destination settles into DOM → **both** become `under_artwork` (fed or poster-held; reason "crosses `<asset>`").
+  - Otherwise the lower one (earlier destination slot) is refused `overlap`.
+  - Alpha 7→8 is separated (930|930 → 763|764) and both carries are already under artwork. D7s exercises the crossing branch.
+- **Rejected:** a sliver tolerance. It is not needed, and the rev 2 fallback is withdrawn.
+
+### 2.3 Alpha_DSK specifics (unchanged from rev 2 §2.3)
+- Fixture: `output/fixtures/sermon/alpha-dsk/`.
+- End of show: no change (OQ-B4).
+- Skipped slide: no code change; record the ordinal mapping in the gate record.
+- Audio: disabled.
+- Rev 2's carry-cover sibling fix is dropped: no two overlay bridges ever share a boundary now. Carry-cover skips fed entries.
+
+## 3. Schema, shas, oracle
+- **Schema 2 gains two additive keys:** `underArtwork: true` and `feed` (present only when bound). `zOrder` is gone. G2 ignores extra keys.
+- **Byte-identical runtime plans:**
+  - **P2, p2-loop and D1–D6 stay byte-identical.** Their plan-sha tests must pass unedited; that is B's regression oracle after S3.
+    - P2's 1→2 destination is click-driven.
+    - D1–D6 have no artwork overlap.
+    - D3's pin+bridge pair is x-separated.
+  - These plans inject no module and run no new core branch.
+- **Plans that change:** the Minimal Alpha_DSK family (the `clip-10-1000001` pin becomes `underArtwork` under OQ-B2).
+- **Tests and corpus that change on purpose:**
+  - Rev 2 §3 list.
+  - S3's negative-corpus `overlap` example, if it used a settling destination (re-point it at a click-driven one).
+  - The `87ab7240` test (overlay bridges still counted; fed ones not).
+
+## 4. Work streams (Opus MEDIUM, disjoint files, one message; then Codex GPT-6 Astra (high) on the combined diff)
+**Frozen contract before launch:**
+- `underArtwork`;
+- `feed` shape;
+- `feed_draws` / `artwork_above` shapes;
+- seam `feed` v1;
+- `__OBED_MM_FEED__` fields;
+- variant names `overlay-ride`, `settle-on-stage`, `no-pause` (core) and `from-only` (feed);
+- probe tamper `--feed-tamper ordinal`.
+
+| WS | Files (exclusive) | Work | Minimal tests |
 |---|---|---|---|
-| D | `lc`, `tests/test_live_continuity.py`, `tests/test_live_continuity_decks.py`, `tests/fixtures/live_continuity/**` | §2.1 DOM-settling lift + `artwork_above`; §2.2 guard deletion + `zOrder`; rewrite `test_only_unrefused_geometry_changes_count…` (`tests/test_live_continuity.py:363-390`: two clean bridges now derive) | (1) trimmed Alpha_DSK fixture (p3–p8 JSON, `accessibility`/`hyperlinks` stripped; **OQ-B6**) derives the expected entries and keys; (2) one parametrised overlap test: settling dest → pin/bridge `underArtwork`, click-driven dest / extra event → `overlap`; (3) `zOrder` emitted iff paths can cross (separated vs sliver) |
-| R | `js`, `tests/test_live_continuity_js.py`, `scripts/continuity_core_variants.py` (+ its test), `tests/test_live_gl_replay_js.py`, `scripts/detach_experiment.py` (`CORE_SHA256`), `tests/test_detach_experiment.py`, `tests/test_live_host.py` (re-pins only) | §2.1 `carry()`/src-hook branch, §2.2 rider ordering, version bump, docstring; variant `settle-on-stage` (drops the `underArtwork` branch = today's core) | Node: (1) an `underArtwork` bridge ends in the poster's layer, the stub is removed and never gets `src`, and it is not on `#body` after landing; (1b) a held plain-bridge overlay → `underArtwork` bridge ends in the layer; (2) two bridges at one `atScene` each ride with their own motion and land; (3) `zOrder` rider order; F5 names unchanged |
-| G | `probe`, `tests/test_live_continuity_probe.py`, `scripts/run_gates.sh` | New verdict **`artworkAbove`** per (settled slide, carried instance, later overlapping slot) from `artwork_above`: a probe-only page read that forces `pointer-events:auto` on `#stage *` and `video` and calls `elementsFromPoint` at the centre of (slot ∩ instance) in screen px. PASS when the carried decoder (the carry verdict's elId) is listed and an element above it, not its ancestor, has IoU ≥ 0.5 with the slot rect. Read ≥ 2.5 s after settle (the last re-home retry is at 2000 ms). No carried decoder → INCONCLUSIVE. Restore pointer-events afterwards. Plus the carry-cover sibling fix (§2.3). | (1) `artworkAbove` scorer pass/fail/inconclusive; (2) carry-cover sibling acceptance; registrations as data |
-| P | `README.md`, `.agents/skills/obed-edom/SKILL.md` | "What is carried": under artwork on DOM-settling slides, N carries per move, the bridge hold. Fix the stale "motion is linear" line (README:119-120; R10 eases). Contract section: the two keys. | — |
+| D | `lc`, `tests/test_live_continuity.py`, `tests/test_live_continuity_decks.py`, `tests/fixtures/live_continuity/**` (trimmed Alpha p3–p8 JSON; S3 corpus edits) | settle-into-DOM lift, crossing rule, guard counting, `feed` binding for the served variant, probe facts | (1) the Alpha fixture derives the expected entries and `feed` (draw/ordinals/sizes equal the experiment's measured 5/9/12 draws, uploads explained); (2) parametrised overlap: settling → `underArtwork`, click-driven / extra event → `overlap`, R11 unchanged; (3) crossing → both flagged / lower refused |
+| R | `js`, `tests/test_live_continuity_js.py`, `scripts/continuity_core_variants.py` (+ test), re-pins in `tests/test_live_gl_replay_js.py`, `scripts/detach_experiment.py`, `tests/test_detach_experiment.py` | hidden ride, poster hold pause/resume and keep-warm exemption, settle re-home, seam, versions, 3 variants | Node: (1) a fed bridge never paints during the move and lands in the poster layer, with no `src` on the stub; (1b) a held plain-bridge overlay → `underArtwork` lands in the layer; (2) poster hold: paused at departure, not re-played by keep-warm, resumes at the paused time; (3) stand-down mid-move → pause |
+| F | **new** `src/obed_edom/live_mm_feed_js.py`, **new** `tests/test_live_mm_feed_js.py`, **new** `scripts/mm_feed_variants.py` | the module (§2.1), warm-up, telemetry, `from-only` | Node with a fake GL: binding accept/refuse (ordinal, size, unit, no `mixFactor`), identity re-key, state restored, two fed leaves in one frame, from-only leaf, `getContext` chain with G2 |
+| H | `host`, `tests/test_live_host.py` (incl. its core-sha re-pin) | `_resolve_mm_feed`, env/flag, output fields, `posterHold` reporting | (1) attach → `unavailable` + poster hold; (2) injected only with a `feed` key |
+| G | `probe`, `tests/test_live_continuity_probe.py`, `scripts/run_gates.sh`, **new** `scripts/mm_feed_instrument.py` (probe-only in-frame GL reader, from `glfeed/instrument.js`), `scripts/managed_obs_qualify.py` + its test | verdicts and arms (§5.2), registrations | scorer units for each new verdict (pass/fail/inconclusive); registrations as data |
+| P | `README.md`, `.agents/skills/obed-edom/SKILL.md` | "What is carried" (feed, poster hold, N carries); contract keys; module table | — |
 
-Every PR runs the full suites on 3.12 (`uv run pytest tests/ -n auto --dist loadfile`, `npm run test:ui`, `npm run test:maps`) and the 3.10 floor for the probe/paint/run_gates files, locally (no CI).
+Full suites on 3.12 (`uv run pytest tests/ -n auto --dist loadfile`, `npm run test:ui`, `npm run test:maps`), and the 3.10 floor for the probe/paint/run_gates files, locally.
 
-## 5. Re-qualification (core bytes change, so §4's rule re-opens Q2–Q6)
+## 5. Re-qualification
 
-### 5.1 New decks (owner authors in Keynote, or gives a Keynote go for the S0 AppleScript generator; V4 eyeball as S0)
-- **Common:** S0's common rules (1920×1080 black, `counter-a`=A / `counter-b`=B at 32:9, every movie starts After Transition so ev0 is auto, MM 1.5 s, Repeat None, template label).
-- **Waived on purpose:** "nothing overlaps a movie".
-- **Artwork:** TA = a **solid green** rectangle at 100 %. TB = a white rectangle at **61 %** opacity, like Alpha_DSK's tags. Divider DV = a white rectangle. **Draw order back→front: A, B, TA, TB, DV** (B must stay in front of A).
+### 5.1 What reopens, precisely
+- **Core bytes change, so §4's rule reopens Q2–Q6.** P2, p2-loop and D1–D6 run none of the new branches and inject no module. Their verdict tables must **equal S3's**, which is a regression check, not new qualification.
+- **The new module is qualified only where it is injected:** D7, D7s and Alpha_DSK in Q3, the new Q6 feed arm, and Q7.
+- **G2 bytes are unchanged.** Q4 reruns only because the seam object gained a sibling.
 
-| Deck | Slides (rect x,y,w,h) | Expected plan (scenes) | Proves |
+### 5.2 Decks
+- D7 and D7s keep rev 2's geometry and draw order (A, B, TA solid green, TB white 61 %, DV), and every movie starts After Transition.
+- Fed moves let the binary counter be decoded from GL pixels, which makes `feedLive` exact on D7 and D7s.
+
+| Deck | Expected plan | Proves |
+|---|---|---|
+| **D7** (S1→S2 both shrink, S2→S3 grow back, S3→S4 hold) | @2 and @4: bridge A+B, `underArtwork` + `feed`; @6: pin A+B, `underArtwork` + `feed` (to = null if no crossfade) | the feed in the move, labels on top, two fed carries per boundary, fed pins, the settle re-home chain |
+| **D7s** (no DV; S2 B at 955 → 5 px over A) | @2/@4: bridge A+B, both flagged (artwork and crossing) | the owner's sliver drawn as authored in the move and once settled |
+| **Alpha_DSK** | @6 overlay bridge (untitled), @8 restart, @10/@12 fed bridge, @14 two fed bridges | the goal |
+
+### 5.3 Gates and verdicts
+**New verdicts (WS-G):**
+- **`feedLive`** (per fed carry, read in frame at progress 0.25/0.5/0.75): a readPixels patch at the leaf's projected centre (MVP from the draw), compared with the decoder's frame at that tick.
+  - D7/D7s: the decoded counter must equal the decoder's frame ±1.
+  - Alpha: closer to the live frame than to the poster (`tP < 0.5`), INCONCLUSIVE when live and poster do not differ (wa0121's bright poster).
+  - Plus a max inter-feed gap under the paint-coverage rule (slower side's cadence), which catches the 357 ms stall.
+- **`noRiderAboveCanvas`:** on every rAF of a fed or poster-held move, no carried decoder composites above the GL canvas (`opacityProduct > 0.02`, visible, intersecting).
+- **`labelsOverFeed`:** for each label-box draw over a fed leaf, the median k inside a single leaf's quad is within ±0.02 of 1−opacity. Draw 7 on 9→10 stays excluded until explained.
+- **`posterHold`:** for a poster-held carry, the clock is still for the move, resumes within 1 frame of the pause point, and does not go back to 0. It replaces the carry verdict's stall rule for that entry only.
+- **`artworkAbove`** (settled, rev 2): unchanged.
+
+| Q | Run | Pass | Red controls (pre-registered, each red only on its verdicts) |
 |---|---|---|---|
-| **D7: two side-by-side movies with label tags shrink together, grow back, then hold** | S1 A 160,300,800,225 · B 960,300,800,225 · TA 140,280,240,56 · TB 940,280,240,56 (straddles A and B) · DV 954,300,12,225 → MM → S2 A 320,700,640,180 · B 960,700,640,180 · TA 300,684,200,48 · TB 940,684,200,48 · DV 955,700,10,180 → MM → S3 = S1 rects → MM → S4 = S3 rects | @2 bridge A+B, @4 bridge A+B, @6 pin A+B; all `underArtwork`, no `zOrder` | (1) artwork above on settled bridge and pin slides; (2) two bridges per boundary; a flagged bridge → bridge → pin chain |
-| **D7s: the sliver variant** | D7 S1–S3 without DV; S2 B at **955**,700,640,180 (over A by 5 px = 0.78 % of A) | @2 and @4: bridge A+B, `underArtwork` both, **`zOrder` both** (B > A) | Authored video-on-video order on the settled slide and in flight, with no tolerance |
-| **Alpha_DSK (real)** | as §1.1 | @6 bridge, @8 restart, @10/@12 bridge `underArtwork`, @14 bridge×2 `underArtwork`, no `zOrder` | the goal |
-
-### 5.2 Gates
-| Q | Run | Pass | Red controls (pre-registered) |
-|---|---|---|---|
-| Q1 | Full suites 3.12 + 3.10 floor | green | — |
-| Q2 | P2 `run_gates` fast/slow/auto | 15/15, table equal to S2's | existing (`--disable-bridge34`, `stash-any`) |
-| Q3 | Host probe A/B/C + attach + V/Voff/Vgl × 3 viewports, Pass G, deck sweep on **P2, D1–D6, D7, D7s, Alpha_DSK** | every verdict incl. `artworkAbove`; `unexpectedVideos` empty | existing D1–D6 arms unchanged. **New:** `settle-on-stage` on D7 → red only on `artworkAbove` at S2/S3 (green at S4 pins); on Alpha_DSK → red only on `artworkAbove` at p6/p7/p8. `--strip bridge@2:movie2` on D7 → red on B's chain only (+ listed `STRIP_CASCADE`), A green: proves simultaneous bridges are independent. `--strip bridge@14:movie2` on Alpha_DSK → red only on wa0121 b7to8. Alpha_DSK `--strip bridge@6` (+ that instance's `artworkAbove` INCONCLUSIVE, listed in `STRIP_CASCADE`) |
-| Q3 | Carry-cover | D7 every bridge pass | `--carry-cover-null` on D7 fails; P2/D1 arms as today |
+| Q1 | Suites | green | — |
+| Q2 | P2 `run_gates` fast/slow/auto | equal to S3's table | existing |
+| Q3 | Host probe ×3 viewports, arms A/B/C, attach, V/Voff/Vgl, Pass G; P2 + D1–D6 (equal to S3) + D7, D7s, Alpha_DSK; plus an MM-opacity-off arm on Alpha | all verdicts; attach arm scored with poster-hold facts | `feed-off` (`--mm-feed off`) → `feedLive` red; the same capture scored as poster hold is green. `from-only` → `feedLive` red at the 0.75 read only. `overlay-ride` → `noRiderAboveCanvas` + `labelsOverFeed` red. `settle-on-stage` → `artworkAbove` red. `no-pause` under feed-off → `posterHold` red (~1.5 s jump). `--feed-tamper ordinal` → stand-down note, `feedLive` red, `posterHold` green (proves binding fails closed). MM-opacity off → `labelsOverFeed` red (boxes solid). `--strip bridge@14:movie2` → only wa0121 b7to8 red |
 | Q4 | G2 seam (Vgl, `--gl-force-fail` ×4) | as S2 | `--gl-force-fail` |
-| Q5 | Loop L1 + L2 | as S2 | as S2 |
-| Q6 | Managed OBS `both`/`g2`/`failsafe`/`soak` at 25 and 30 (owner's go) | M1–M6 | `--kb` arms |
-| Q7 | Owner, real OBS Keyer: D7, D7s, Alpha_DSK (+ D1 spot) | labels on top when settled; no visible restart where carried; bridge hold as described in §2.1 | — |
+| Q5 | Loop L1 (+ L2 per rule, OQ-B5) | as S2 | as S2 |
+| Q6 | Managed OBS arms at 25/30 + **new `feed` arm** (Alpha 6→8, 9→10 in CEF) + `feed-off` poster-hold arm (owner's go) | M1–M6; feed verdicts green in CEF | OD-2 `--kb` arms; `feed-off` |
+| Q7 | Owner: managed OBS Keyer (feed) on D7, D7s, Alpha; external attach (poster hold) on Alpha; D1 spot | labels on top in the move and settled; no visible restart; poster hold as described | — |
 
-- `zOrder` in flight has no live verdict, because a 0–5 px sliver mid-move is below what the eye catches. It is covered by Node test R(3) plus the Q7 eye. `artworkAbove` covers the settled sliver on D7s.
-- Pass G (go-to mid-chain, then carry) adds D7, D7s and Alpha_DSK to `PASSG_FIXTURES`.
-- The gate commit adds the D7, D7s and Alpha_DSK shas to the allowlist (decks join one at a time).
+## 6. Sequencing
+- **Order: C (#264) → S3 → B.**
+- B starts when S3 merges. WS-F and the probe instrument can be written against this contract earlier, since their files are new.
+- B updates S3's corpus only where §3 says.
+- B adds no allowlist: D7, D7s and Alpha_DSK join through their plan-sha tests and registrations.
 
-## 6. S3 sequencing — recommendation: **B first, then S3 right after** (S3 prepared in parallel during B's gate round)
-- B is what qualifies the real deck. S3 (OQ-8 (iv)) then uses Alpha_DSK as its real sermon deck, *qualified with a green probe*, not merely "with named refusals".
-- S3's negative corpus (one synthetic export per refusal code) is written once against B's code set. B removes "more than one movie changes geometry" and narrows `overlap` to click-driven or multi-event destinations, so writing the corpus first would mean writing entries B deletes.
-- S3 stays Python + docs. Its gate is: runtime plans byte-identical to B's, and probe verdicts equal on P2, D1–D7s and Alpha_DSK. It reuses B's round, so there is no new browser cost beyond one confirmation run.
-- File overlap with B is only `lc:654-668,831-832` plus the allowlist monkeypatches in tests. Rebase after B merges.
-
-## 7. Owner questions (recommendation first)
-1. **OQ-B1: bridge hold under artwork.** During a 1.5 s Magic Move, tags and dividers that overlap the moving video are hidden under it and return on top at settle. **Rec: accept.** It is the same class as the accepted pin hold. The alternative (clip the overlay with holes that follow each label's path) costs a new geometry pipeline and its own instrument.
-2. **OQ-B2: lift the overlap refusal for pins too (DOM-settling destinations only).** **Rec: yes.** No JS is needed (pins already settle in the layer). P2 is unchanged because its 1→2 destination starts on a click. It is needed for static side-by-side slivers.
-3. **OQ-B3: order.** **Rec: B, then S3** (§6).
-4. **OQ-B4: end of show.** Alpha_DSK's two carried movies stay held after the last slide (open item 3, deferred). **Rec: no change in B.** At Q7, press past the end once and say whether it is acceptable. A follow-up only if not.
-5. **OQ-B5: re-qualification scope.** The new branches cannot run on any existing plan (byte-identical). **Rec: full Q2–Q6 anyway** (§4 rule, mechanical via `run_gates`). The cheaper option is Q5 = L1 only and Q6 = `both` at 25/30 only.
-6. **OQ-B6: committing a trimmed Alpha_DSK fixture** (movie slides p3–p8, layer JSON only, `accessibility`/`hyperlinks` stripped, no movies or thumbnails). **Rec: yes.** It is the single test that covers the whole real-deck derivation. The alternative is a synthetic look-alike.
-7. **OQ-B7: D7/D7s authoring.** **Rec:** the coordinator builds them with the S0 generator under your Keynote go. You confirm the draw order and pairing by eye (V4). Alpha_DSK itself is never opened.
-8. **OQ-B8: slivers on click-driven slides.** Your sliver requirement holds only on slides that settle into the DOM. On click-driven slides any overlap still refuses (a GL canvas sits on top, and a plain pin there is unqualified). **Rec: accept for B** (no real deck needs it: Alpha_DSK's only click-driven movie slide, p3, has one movie); measure before adding any tolerance.
+## 7. Owner questions that remain (recommendation first)
+1. **OQ-B2: pins under artwork on DOM-settling slides.** **Rec: yes.** They are fed in the move and already re-home. D7 S4 covers them.
+2. **OQ-B4: end of show.** **Rec: no change.** Press past the end once at Q7.
+3. **OQ-B5: re-qualification scope.** **Rec: full Q2–Q6** per §4, with P2/D1–D6 as equality checks. The cheaper option is Q5 = L1 only.
+4. **OQ-B7: D7/D7s authoring.** **Rec:** the S0 generator under your Keynote go, plus your V4 eyeball.
+5. **OQ-B8: slivers on click-driven slides** stay refused. **Rec: accept for B.**
+6. **OQ-B9 (new): feed every carry on DOM-settling slides,** retiring the overlay ride, its eased interpolation and R10. **Rec: a later stage.** It changes D1–D6 and P2 3→4 behaviour and reopens their oracles.
+7. **OQ-B10 (new): if CEF 127 fails the Q6 feed arm,** ship with managed OBS on poster hold (feed in Chrome outputs only) until it is fixed. **Rec: yes.**
+8. **OQ-B11 (new): surfacing poster hold.** **Rec:** the host field plus a line under the continuity badge. No new UI.
 
 ## 8. Residuals (README)
-- The bridge/pin hold under artwork during the move (OQ-B1).
-- Overlap on a click-driven or multi-build destination stays refused (`overlap`; glReplay for a single pin) (OQ-B8).
-- Rider order between crossing carries is unit-tested only.
-- A suppressed bridge destination still decodes its own copy (audible only if audio is ever enabled; `--mute-audio` today).
-- The probe's ordinal labels are one off after a skipped slide.
-- Linear interpolation and inferred intent, as before.
+- Poster hold shows the export's baked still (frame 0) during the move when the feed never ran (external attach).
+- Overlay-ridden carries with no artwork overlapping them on the destination still paint above artwork they cross mid-flight, and follow R10 eased interpolation.
+- One overlay bridge per boundary.
+- Overlap on click-driven or multi-build destinations stays refused.
+- Keynote texture-id defects: the feed binds by geometry, draw index and ordinals, and does not depend on the separate prepare-time repair.
+- Probe ordinal labels after a skipped slide.
+- Audio is disabled (a suppressed overlay-bridge destination still decodes).
