@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { liveClient, type LiveClient, type LiveContinuity, type LiveDisplay, type LiveEngine, type LiveOperation, type LiveOutputSettings, type LivePreparedDeck, type LiveQualification, type LiveSlide, type LiveSnapshot } from "./api";
+import { liveClient, type LiveClient, type LiveContinuity, type LiveDisplay, type LiveEngine, type LiveNotCarried, type LiveOperation, type LiveOutputSettings, type LivePreparedDeck, type LiveQualification, type LiveSlide, type LiveSnapshot } from "./api";
 import { engineBlocks, OutputEngine } from "./OutputEngine";
 import { LiveDeckInput } from "./LiveDeckInput";
 import { IconChevronLeft } from "../components/icons";
@@ -11,9 +11,19 @@ function Still({ slide, lazy = false }: { slide?: LiveSlide; lazy?: boolean }) {
     : <div className="live-placeholder">{slide?.skipped ? "Skipped" : slide ? "Still unavailable" : "No slide"}</div>;
 }
 
+function NotCarried({ entries }: { entries: LiveNotCarried[] }) {
+  if (!entries.length) return null;
+  const line = (entry: LiveNotCarried, index: number) => <li key={`${index}-${entry.asset}`}>Slide {entry.fromSlide} → {entry.toSlide} · {entry.asset} · {entry.reason}</li>;
+  return <ul className="note live-continuity-not-carried">
+    {entries.slice(0, 3).map(line)}
+    {entries.length > 3 && <li><details><summary>{entries.length - 3} more</summary><ul>{entries.slice(3).map(line)}</ul></details></li>}
+  </ul>;
+}
+
 function ContinuityStatus({ continuity }: { continuity?: LiveContinuity }) {
   const mode = continuity?.mode;
-  const label = mode === "qualified" ? "Qualified" : mode === "unsupported" ? "Unsupported" : mode === "off" ? "Off" : mode === "pending" ? "Checking" : "Unavailable";
+  const notCarried = continuity?.notCarried ?? [];
+  const label = mode === "qualified" ? `On${notCarried.length ? ` · ${notCarried.length} not carried` : ""}` : mode === "unsupported" || mode === "off" ? "Off for this deck" : mode === "pending" ? "Checking" : "Unavailable";
   const detail = continuity?.reason || (mode === "qualified"
     ? (continuity?.scale && continuity.scale !== 1 ? `Enabled for this deck (stage scaled ×${continuity.scale.toFixed(2)}).` : "Enabled for this deck.")
     : mode === "unsupported" || mode === "off"
@@ -21,17 +31,25 @@ function ContinuityStatus({ continuity }: { continuity?: LiveContinuity }) {
       : mode === "pending"
         ? "Checking this deck and output size."
         : "This session has not reported movie continuity status.");
-  const notCarried = continuity?.notCarried ?? [];
-  const visible = notCarried.slice(0, 3);
-  const hidden = notCarried.length - visible.length;
   return <div className="live-continuity" aria-live="polite">
     <span className="live-continuity-badge" data-mode={mode || "unknown"}>Movie continuity · {label}</span>
     <p className="note">{detail}</p>
-    {notCarried.length > 0 && <ul className="note live-continuity-not-carried">
-      {visible.map((entry, index) => <li key={`${index}-${entry.asset}`}>Slide {entry.fromSlide} → {entry.toSlide}: movie not carried — {entry.reason}</li>)}
-      {hidden > 0 && <li>+{hidden} more</li>}
-    </ul>}
+    <NotCarried entries={notCarried} />
   </div>;
+}
+
+function DeckReady({ qualification }: { qualification: LiveQualification }) {
+  const { continuity, convertedMovies } = qualification;
+  const count = continuity.notCarried.length;
+  return <>
+    <strong className="live-qualified">Deck ready</strong>
+    <p className="note">{qualification.name} · {qualification.slides} slides. Output is checked when the session starts.</p>
+    <p className="note">{continuity.mode === "qualified"
+      ? `Movie continuity on${count ? ` · ${count} move${count === 1 ? "" : "s"} not carried` : "."}`
+      : `Movie continuity off for this deck${continuity.reason ? `: ${continuity.reason}` : "."}`}</p>
+    <NotCarried entries={continuity.notCarried} />
+    {convertedMovies.length > 0 && <p className="note">Converted {convertedMovies.length} movie{convertedMovies.length === 1 ? "" : "s"} to H.264 for playback: {convertedMovies.map((movie) => `${movie.asset} (${movie.sourceCodec})`).join(", ")}.</p>}
+  </>;
 }
 
 function MovieWarnings({ warnings, heading }: { warnings?: string[]; heading: string }) {
@@ -304,13 +322,10 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
           </select>
         </label>}
         <div className="live-qualification" aria-live="polite">
-          {checking ? <p>Checking deck qualification…</p> : qualification && <>
-            <strong className={qualified ? "live-qualified" : "live-unqualified"}>{qualified ? "Deck qualified" : "Not qualified yet"}</strong>
-            <p className="note">{qualified ? `${qualification.name} · ${qualification.slides} slides. Output is checked when the session starts.` : qualification.reason}</p>
-          </>}
+          {checking ? <p>Checking deck qualification…</p> : qualification && qualified && <DeckReady qualification={qualification} />}
           {!!jobId && !checking && !qualified && <button className="btn secondary" type="button" onClick={() => selectDeck(jobId)}>Check qualification again</button>}
         </div>
-        <p className="note">Qualification uses the current playback allowlist. Preparation works from a copy of your Keynote.</p>
+        <p className="note">Playable prepared decks can be presented even when movie continuity is off; continuity turns on only for moves it has measured. Preparation works from a copy of your Keynote.</p>
       </section>
       <section className="live-panel live-start">
         <h2>2. Present</h2>

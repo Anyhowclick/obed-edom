@@ -23,7 +23,7 @@ from obed_edom.html_preview import (
 )
 from obed_edom.live_runtime import RUNTIME_VERSION, SUPPORTED_PLAYERS
 from obed_edom.live_continuity import Unsupported
-from obed_edom.live_host import GL_REPLAY_ENV, derive_runtime
+from obed_edom.live_host import CONTINUITY_ENV, GL_REPLAY_ENV, derive_runtime, not_carried
 from obed_edom.live_session import LiveSessionService
 from obed_edom.settings import load_settings, save_settings
 
@@ -64,14 +64,25 @@ def _output_settings(settings: dict) -> dict:
     return {key: settings[key] for key in ("akOutputMode", "akOutputRate", "akKeyer")}
 
 
-def _deck_qualification(root: Path, slides: list[dict], settings: dict) -> str | None:
+def _deck_qualification(root: Path, slides: list[dict], settings: dict) -> dict:
+    if os.environ.get(CONTINUITY_ENV) == "off":
+        return {"mode": "off", "reason": f"{CONTINUITY_ENV} is off.", "notCarried": []}
     preference = os.environ.get(GL_REPLAY_ENV, "auto" if settings["akOutputMode"] == "keyer" else "off")
     if preference not in ("auto", "off"):
-        return "GL replay must be auto or off."
+        return {"mode": "unsupported", "reason": "GL replay must be auto or off.", "notCarried": []}
     derived = derive_runtime(root, slides, gl_replay=preference == "auto")
     if isinstance(derived, Unsupported) and preference == "auto":
         derived = derive_runtime(root, slides)
-    return derived.reason if isinstance(derived, Unsupported) else None
+    if isinstance(derived, Unsupported):
+        return {"mode": "unsupported", "reason": derived.reason, "notCarried": []}
+    return {"mode": "qualified", "reason": None, "notCarried": not_carried(derived[0], slides)}
+
+
+def _converted_movies(manifest: dict) -> list[dict]:
+    movies: dict[str, dict] = {}
+    for entry in (manifest.get("movieConversion") or {}).get("converted", []):
+        movies.setdefault(entry["asset"], {"asset": entry["asset"], "sourceCodec": entry["sourceCodec"]})
+    return list(movies.values())
 
 
 def live_router(runner, *, service=None, host_factory=None, displays=None, engine_factory=None) -> APIRouter:
@@ -185,14 +196,14 @@ def live_router(runner, *, service=None, host_factory=None, displays=None, engin
     def qualification(job_id: str):
         try:
             result, root, _digest, _header, slides = prepared_deck(job_id)
-            reason = _deck_qualification(root, slides, load_settings())
             return {
                 "previewJobId": job_id,
                 "name": Path(result.get("path", "")).name,
                 "sourceDigest": result["sourceDigest"],
                 "slides": len(slides),
-                "qualified": reason is None,
-                "reason": reason,
+                "qualified": True,
+                "continuity": _deck_qualification(root, slides, load_settings()),
+                "convertedMovies": _converted_movies(result.get("manifest") or {}),
             }
         except (PreviewError, ValueError, OSError, RuntimeError) as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -258,9 +269,6 @@ def live_router(runner, *, service=None, host_factory=None, displays=None, engin
                 result, root, digest, header, slides = prepared_deck(body.previewJobId)
                 width, height = header.get("slideWidth", 0), header.get("slideHeight", 0)
                 settings = load_settings()
-                reason = _deck_qualification(root, slides, settings)
-                if reason:
-                    raise ValueError(f"This deck is not qualified yet: {reason}")
                 if settings["akOutputMode"] == "keyer":
                     managed = engine()
                     status = managed.state()

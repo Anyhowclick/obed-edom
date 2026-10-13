@@ -706,10 +706,34 @@ for the parked `iwa-surgical-write-generator` feature.
 * **Refusals.** Per (boundary, instance) → `retire refused` + one `ContinuityPlan.refusals` record (`code`,
   `objectId` of `src`), reported on `output.continuity.notCarried`: `overlap` artwork above on the destination, R1
   ambiguous pairing (runner-up within 16 authored px), R1b opacity differs, R2 builds in/out, R4 loop mismatch, R7
-  web/image movie, R8 trim differs, R9 not fully opaque (checked after R2), R10 bridge motion not EaseInEaseOut over the whole transition (checked last). Deck-wide → `Unsupported("Rn: …")`: R3 transition not on the outgoing slide's last
-  event, R5 objectID repeats across slides, R6 chain invariant. `retire ends` is not a refusal. Never relax one to
-  qualify a deck.
+  web/image movie, R8 trim differs, R9 not fully opaque (checked after R2), R10 bridge motion not EaseInEaseOut over the whole transition or no positive duration (checked last), R11 unmeasured export shape (`reason` names the exact check).
+  R11 scopes what used to fail the deck: a movie layer outside the measured vocabulary (mask, rotation/affine/anchor,
+  ≠1 video sub-layer, animated geometry, not contained, unreadable rect, Back and Forth) refuses that asset at both
+  Magic Moves of its slide, and the unmeasured instance gets a record only (its `objectId` has no runtime entry; it is
+  left out of `slide_instances`/`slide_rects`/`loop_instances` and plays raw); an unreadable destination draw order
+  refuses that carry; a pin/bridge/glReplay carry into a slide whose outgoing transition is unmeasured (not Magic Move,
+  Dissolve or none) is refused at the earlier boundary, and the unmeasured boundary has no entries, so no decoder is
+  held into it. Scoping is not relaxing: a scoped site only removes carries, R6 still runs on the final entries, and
+  an allowlisted plan stays byte-identical. Deck-wide → `Unsupported` (the deck still plays, continuity off): R3
+  transition not on the outgoing slide's last event, more than one transition on a slide, R5 objectID repeats across
+  slides (unmeasured instances count), R6 chain invariant, unreadable header/slide list/slide JSON or no events, a
+  movie node without asset id or objectID, more than one movie changing geometry, `to_runtime` integrity checks, the
+  allowlist, and the host's stage gate, runtime install, codec gate and `OBED_LIVE_CONTINUITY=off`. `retire ends` is
+  not a refusal. Never relax one to qualify a deck.
 * **Allowlist.** `QUALIFIED_PLAN_SHA256` stays in force until S3; a deck joins only after its gates pass.
+* **Start is never gated on continuity.** The `/api/live/decks/{id}/qualification` response carries `qualified: true`,
+  `continuity: {mode: qualified|unsupported|off, reason, notCarried}` (from `_deck_qualification`) (`live_host.not_carried(plan, slides)`) and
+  `convertedMovies: [{asset, sourceCodec}]`; only `prepared_deck`'s playability checks (player digest, 16:9, manual
+  mode, unsupported media, no playable slides) block start.
+* **Prepare-time conversion.** `html_preview.apply_preview` runs `preview_movies.convert_movies` before writing the
+  manifest: every referenced `.mov`/`.mp4`/`.m4v` that is not H.264 is re-encoded in the cached export (never the
+  `.key`) with `dsk_movie_export._crop_encoder_args("h264")` + AAC 192k, one encode per group with identical `mdat`, timing and geometry,
+  verified by box reads (avc1; coded size, timescale, tkhd matrix, presented duration; stts count when the source has
+  no trimming edit list) before `os.replace`. Recorded as `manifest.movieConversion` (`encoder`, `converted[]`:
+  `path`, `asset`, `sourceCodec`, `sourceSha256`, `sha256`, `bytes`). Real transparency, HEVC whose transparency
+  cannot be checked, odd dimensions or unreadable timing fail the prepare (`PreviewError` naming every movie; fix:
+  replace it with an opaque movie); never flatten alpha. `load_cached` reuses a cache only when
+  `preview_movies.unconverted` is empty. The host codec gate stays for exports that bypass the prepare.
 * **F5 names are frozen instrument API.** Scorers read note kinds (`bridge-3to4`, `reuse-decoder`,
   `reuse-skip-boundary`, `retire-on-start-movie`, `retire-boundary`, `preserve-refused`, `dom-swap`,
   `facade-block-clear`, `remount-*`, `pool-cleared`, `glreplay-*`, `bridge-clock`, `pin-hold-start`, `bridge-motion-start`; the last

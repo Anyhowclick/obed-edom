@@ -138,12 +138,19 @@ def test_slide3_authored_y_differs_from_p2s_measured_constant_within_tolerance()
     assert abs(src["y"] - p2_measured_y) < 10
 
 
-def test_r5_an_object_id_repeated_across_slides_refuses_the_deck(tmp_path):
+@pytest.mark.parametrize("unmeasured", [False, True])
+def test_r5_an_object_id_repeated_across_slides_refuses_the_deck(unmeasured, tmp_path):
     """Slide 2 gains a copy of slide 1's small instance, objectID and all: the runtime keys every
-    carry on `objectID`, so a repeated id cannot be expressed (plan R5)."""
-    tmp = _mutate_slide(tmp_path, 
-        SLIDE2, lambda data: _with_object_id(P2_OBJECT_IDS["slide1_small"], _clone_second_instance_onto_slide2(data))
-    )
+    carry on `objectID`, so a repeated id cannot be expressed (plan R5). A refusal record names
+    an unmeasured (here rotated) instance by objectID too, so its id counts the same."""
+
+    def clone(data):
+        data = _with_object_id(P2_OBJECT_IDS["slide1_small"], _clone_second_instance_onto_slide2(data))
+        if unmeasured:
+            data["events"][-1]["effects"][0]["effects"][-1]["baseLayer"]["initialState"]["rotation"] = 5
+        return data
+
+    tmp = _mutate_slide(tmp_path, SLIDE2, clone)
     plan = derive_plan(tmp, SLIDES, resolver=_resolver)
     assert plan == Unsupported(
         f"R5: movie object {P2_OBJECT_IDS['slide1_small']} appears on player index 0 and 1"
@@ -247,23 +254,22 @@ def test_refuses_an_unreadable_export_file(relative, text, reason, tmp_path):
 
 
 def _add_wa0125_to_slide4(data):
-    """Slide 3 already carries a WA0125 instance; add a matching one on slide 4 so it also
-    "continues" (with different geometry) across the 3->4 magic move alongside Untitled.mov."""
+    """Slide 3 already carries a WA0125 instance; add a matching one (same trim) on slide 4 so it
+    also "continues" (with different geometry) across the 3->4 magic move alongside Untitled.mov."""
     events = copy.deepcopy(data["events"])
     movie_nodes = _find_movie_nodes(events)
     assert movie_nodes
     clone = copy.deepcopy(movie_nodes[0])
     clone["movie"] = {
         "startTime": 0,
-        "volume": 1,
-        "endTime": 45.1,
+        "volume": 0,
+        "endTime": 45.13814163208008,
         "isStreaming": False,
         "isAudioOnly": False,
         "asset": "VID-20250608-WA0125.mp4-0.0000-45.1381",
     }
     state = clone["baseLayer"]["initialState"]
-    state["position"]["pointX"] += 80
-    state["position"]["pointY"] += 80
+    state["position"]["pointY"] = 200
     clone_id = "CLONE-WA0125"
     events[0]["effects"][0]["effects"] = events[0]["effects"][0].get("effects", []) + [
         {
@@ -273,7 +279,7 @@ def _add_wa0125_to_slide4(data):
     ]
     data = {**data, "events": events}
     # the overlap rule reads the destination slide's draw order, so the clone needs a slot
-    # of its own; put it BELOW the existing movie so it adds no overlap of its own.
+    # of its own, clear of the existing movie so neither carry is refused for overlap.
     rect = (state["position"]["pointX"] - state["width"] / 2,
             state["position"]["pointY"] - state["height"] / 2, state["width"], state["height"])
     _draw_slots(data, 0).insert(1, _authored_slot(*rect, object_id=clone_id))
@@ -301,6 +307,24 @@ def _strip_base_layer(data):
     return data
 
 
+def _add_scaled_movie_above_the_bridge(data):
+    """Codex/Astra r1: a distinct movie drawn above slide 4's bridge destination, authored
+    200x200 at (1700, 600) with `scale: 2`. Unscaled it clears the bridge; painted at 400x400 it
+    overlaps it by about 93 x 91 px, so its unmeasured bounds cannot clear the carry."""
+    clone = copy.deepcopy(_find_movie_nodes(data["events"])[0])
+    clone["objectID"] = "SCALED-ABOVE"
+    clone["movie"] = {**clone["movie"], "asset": "Other.mov-0.0000-10.0000"}
+    clone["baseLayer"]["initialState"].update(position={"pointX": 1700, "pointY": 600}, width=200, height=200, scale=2)
+    for layer in clone["baseLayer"]["layers"]:
+        layer["initialState"].update(position={"pointX": 100, "pointY": 100}, width=200, height=200)
+    data["events"][0]["effects"].append(clone)
+    slot = _authored_slot(1600, 500, 200, 200, object_id="SCALED-ABOVE")
+    slot["layers"][0]["initialState"]["scale"] = 2
+    _draw_slots(data, 0).append(slot)
+    data["assets"]["Other.mov-0.0000-10.0000"] = {"type": "video", "url": {"web": "assets/Other.mov-0.0000-10.0000.mov"}}
+    return data
+
+
 def _tamper_slot_layers(slot_index: int, layers):
     def tamper(data):
         slot = _draw_slots(data, 0)[slot_index]
@@ -317,10 +341,56 @@ _MOVIE_LAYER_TRANSFORMED = "has a rotated, transformed, or off-center anchor"
     "uuid, transform, reason",
     [
         pytest.param(SLIDE1, lambda data: {**data, "events": []}, "slide at player index 0 has no events", id="no-events"),
+        # Without an objectID the movie cannot be named at all, so not even a refusal can name it.
         pytest.param(
-            SLIDE1, lambda data: _map_transitions(data, lambda _name: "apple:cube"),
-            "unsupported transition 'apple:cube' at player index 0 -> 1", id="unknown-transition-on-a-magic-move",
+            SLIDE2, lambda data: _map_movie_nodes(data, lambda node: node.pop("objectID")),
+            f"movie on slide {SLIDE2} has no object id", id="movie-node-without-an-object-id",
         ),
+    ],
+)
+def test_refuses_the_deck(uuid, transform, reason, tmp_path):
+    assert _plan(_mutate_slide(tmp_path, uuid, transform)) == Unsupported(reason)
+
+
+_MAGIC_MOVE_OF = {SLIDE1: 0, SLIDE2: 0, SLIDE3: 2, SLIDE4: 2}
+"""The fixture's one Magic Move into or out of each slide (2 -> 3 is a Dissolve)."""
+
+
+def _boundary_records(plan: ContinuityPlan, index: int) -> list[dict]:
+    return [r for r in plan.refusals if r["fromPlayer"] == plan.boundaries[index].from_player_index]
+
+
+def _scoped_r11_reason(tmp_path: Path, uuid: str, transform, *, gl_replay: bool = False, partnered: bool = True):
+    """Stage C scoping (plan section 3.1): an unmeasured movie shape, or a draw order that cannot
+    be read for one carry, no longer refuses the deck. The plan derives and its runtime passes
+    every integrity check (only the allowlist may still withhold it). At the mutated slide's
+    Magic Move every movie is refused (a runtime `retire`) and every record is R11 with one reason,
+    which is returned; every other boundary, and its records, is the unmutated plan's. An
+    unmeasured instance with no partner across a Magic Move (`partnered=False`) changes no
+    boundary at all."""
+    plan = derive_plan(_mutate_slide(tmp_path, uuid, transform), SLIDES, resolver=_resolver, gl_replay=gl_replay)
+    base = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=gl_replay)
+    assert isinstance(plan, ContinuityPlan), plan
+    runtime = plan.to_runtime()
+    assert isinstance(runtime, dict) or runtime.reason == NOT_YET_QUALIFIED, runtime
+    affected = _MAGIC_MOVE_OF[uuid] if partnered else None
+    for index, (boundary, before) in enumerate(zip(plan.boundaries, base.boundaries, strict=True)):
+        if index != affected:
+            assert boundary == before
+            assert _boundary_records(plan, index) == _boundary_records(base, index)
+    if affected is None:
+        return None
+    assert all(m.code == "R11" and m.gl_replay is None for m in plan.boundaries[affected].movies)
+    reasons = {(r["code"], r["reason"]) for r in _boundary_records(plan, affected)}
+    assert len(reasons) == 1, reasons
+    [(code, reason)] = reasons
+    assert code == "R11"
+    return reason
+
+
+@pytest.mark.parametrize(
+    "uuid, transform, reason",
+    [
         pytest.param(
             SLIDE1, lambda data: _map_movie_nodes(data, lambda node: node["baseLayer"]["initialState"].__setitem__("rotation", 5)),
             f"movie layer on slide {SLIDE1} {_MOVIE_LAYER_TRANSFORMED}", id="rotated-movie-layer",
@@ -331,10 +401,6 @@ _MOVIE_LAYER_TRANSFORMED = "has a rotated, transformed, or off-center anchor"
                 data, lambda node: node["baseLayer"]["initialState"].__setitem__("affineTransform", [1, 0.2, 0, 1, 0, 0])
             ),
             f"movie layer on slide {SLIDE1} {_MOVIE_LAYER_TRANSFORMED}", id="non-identity-affine-transform",
-        ),
-        pytest.param(
-            SLIDE4, _add_wa0125_to_slide4, "more than one movie changes geometry at player index 2 -> 3",
-            id="two-geometry-changing-movies-on-one-boundary",
         ),
         # The draw order (see the overlap section below) must be readable for every movie.
         pytest.param(
@@ -352,16 +418,51 @@ _MOVIE_LAYER_TRANSFORMED = "has a rotated, transformed, or off-center anchor"
         pytest.param(
             SLIDE2, _strip_base_layer, f"slide {SLIDE2} declares no readable draw order", id="no-draw-order-at-all",
         ),
-        # Without an objectID the movie cannot be located in the draw order at all, so its
-        # z-position is unknown and nothing may be carried across the boundary.
         pytest.param(
-            SLIDE2, lambda data: _map_movie_nodes(data, lambda node: node.pop("objectID")),
-            f"movie on slide {SLIDE2} has no object id", id="movie-node-without-an-object-id",
+            SLIDE4, _add_scaled_movie_above_the_bridge,
+            "an unmeasured movie 'other.mov' is drawn above the carried 'untitled.mov' on the destination "
+            "slide (player index 3, draw slot 2)",
+            id="unmeasured-movie-drawn-above-the-carry",
         ),
     ],
 )
-def test_refuses_the_deck(uuid, transform, reason, tmp_path):
-    assert _plan(_mutate_slide(tmp_path, uuid, transform)) == Unsupported(reason)
+def test_an_unmeasured_shape_or_draw_order_refuses_only_its_magic_move(uuid, transform, reason, tmp_path):
+    """Slide 1's rotated or transformed movies are left out and recorded (record-only R11: no
+    runtime entry names them, so the player plays them as exported); slide 2's unreadable draw
+    order, or an unmeasured movie drawn above slide 4's destination, retires the one carry that
+    needed it."""
+    assert _scoped_r11_reason(tmp_path, uuid, transform) == reason
+
+
+@pytest.mark.parametrize("overlap_the_clone", [False, True])
+def test_only_unrefused_geometry_changes_count_towards_the_one_per_boundary_limit(overlap_the_clone, tmp_path, monkeypatch):
+    """Two movies change geometry across 3->4. With both carries clean the deck is refused (the
+    runtime animates one bridge per boundary). Artwork above the WA0125 clone refuses that carry
+    instead: a refused bridge retires (the raw player's restart), so only Untitled.mov animates and
+    the deck derives. The fixture's transition has no motion slot for the clone, so R10 is stubbed
+    out to isolate the count."""
+    from obed_edom import live_continuity
+
+    monkeypatch.setattr(live_continuity, "_bridge_timing_refusal", lambda *args: None)
+
+    def transform(data):
+        data = _add_wa0125_to_slide4(data)
+        if overlap_the_clone:
+            clone = next(e for e in data["events"][0]["effects"][0]["effects"] if e.get("objectID") == "CLONE-WA0125")
+            state = clone["baseLayer"]["initialState"]
+            right = state["position"]["pointX"] + state["width"] / 2
+            bottom = state["position"]["pointY"] + state["height"] / 2
+            _draw_slots(data, 0).append(_authored_slot(right - 40, bottom - 40, 30.0, 30.0, object_id="OVER"))
+        return data
+
+    plan = _plan(_mutate_slide(tmp_path, SLIDE4, transform))
+    if not overlap_the_clone:
+        assert plan == Unsupported("more than one movie changes geometry at player index 2 -> 3")
+        return
+    assert isinstance(plan, ContinuityPlan)
+    assert _refusal_codes(plan) == [(1, "overlap"), (3, "overlap")]
+    actions = {(m["asset"], m["action"], m.get("code")) for m in _boundary(plan, 2)["movies"]}
+    assert actions == {("untitled.mov", "bridge", None), ("vid-20250608-wa0125.mp4", "bridge", "overlap")}
 
 
 @pytest.mark.parametrize("ancestor_change", [None, "position", "rotation", "animation"])
@@ -384,13 +485,11 @@ def test_refuses_video_below_an_intermediate_layer(ancestor_change, tmp_path):
                 ancestor["animations"] = [{"property": "position", "duration": 1.5}]
             base["layers"][index] = ancestor
 
-    tmp = _mutate_slide(tmp_path, SLIDE1, lambda data: _map_movie_nodes(data, nest_video))
-    plan = _plan(tmp)
-    assert isinstance(plan, Unsupported)
+    reason = _scoped_r11_reason(tmp_path, SLIDE1, lambda data: _map_movie_nodes(data, nest_video))
     # the export's `animations` lists are always empty, so an animation entry is an object the
     # mask vocabulary has never measured and is refused before the nesting is even reached.
     expected = "possible mask" if ancestor_change == "animation" else "not a direct child"
-    assert expected in plan.reason
+    assert expected in reason
 
 
 @pytest.mark.parametrize(
@@ -530,7 +629,9 @@ def test_to_runtime_refuses_bridge_without_an_instance(field, end):
 
 
 @pytest.mark.parametrize("duration", [None, 0, -1, True, "1.5", float("nan"), float("inf")])
-def test_to_runtime_refuses_bridge_without_positive_export_duration(duration, tmp_path):
+def test_r10_a_bridge_without_positive_export_duration_refuses_at_derivation(duration, monkeypatch, tmp_path):
+    """Stage C: the carry is refused (R10) when the plan is derived, so the deck's other boundaries
+    stand and the runtime retires the bridge instead of `to_runtime` refusing the deck."""
     def change_duration(data):
         for event in data["events"]:
             for effect in event["effects"]:
@@ -543,9 +644,12 @@ def test_to_runtime_refuses_bridge_without_positive_export_duration(duration, tm
 
     plan = _plan(_mutate_slide(tmp_path, SLIDE3, change_duration))
     assert isinstance(plan, ContinuityPlan)
-    result = plan.to_runtime()
-    assert isinstance(result, Unsupported)
-    assert "no finite positive export duration" in result.reason
+    [bridge] = plan.boundaries[2].movies
+    assert (bridge.action, bridge.code) == ("bridge", "R10")
+    assert "the transition has no finite positive export duration" in bridge.refusal
+    assert plan.boundaries[:2] == _plan().boundaries[:2]
+    entries = {entry["atScene"]: entry for entry in _signed(monkeypatch, plan)["boundaries"]}
+    assert (entries[8]["action"], entries[8]["reason"]) == ("retire", "refused")
 
 
 def test_to_runtime_refuses_unqualified_export_duration():
@@ -1246,11 +1350,10 @@ def test_movie_slot_absent_in_one_event_is_skipped_not_refused(tmp_path):
 # rect, so the rule lives in `_movie_rect` and applies to every movie node.
 
 
-def _mask_reason_plan(tmp_path: Path, uuid: str, transform) -> Unsupported:
-    plan = _plan(_mutate_slide(tmp_path, uuid, transform))
-    assert isinstance(plan, Unsupported), plan
-    assert "possible mask" in plan.reason, plan.reason
-    return plan
+def _mask_reason(tmp_path: Path, uuid: str, transform) -> str:
+    reason = _scoped_r11_reason(tmp_path, uuid, transform)
+    assert "possible mask" in reason, reason
+    return reason
 
 
 def test_a_contents_rect_within_the_measurement_tolerance_is_not_refused(tmp_path):
@@ -1338,15 +1441,16 @@ def test_a_contents_rect_within_the_measurement_tolerance_is_not_refused(tmp_pat
     ],
 )
 def test_an_unmeasured_movie_encoding_is_refused_as_a_possible_mask(place, expected, tmp_path):
-    plan = _mask_reason_plan(tmp_path, SLIDE1, lambda data: _map_movie_nodes(data, place))
-    assert plan.reason.endswith(expected)
+    assert _mask_reason(tmp_path, SLIDE1, lambda data: _map_movie_nodes(data, place)).endswith(expected)
 
 
-def test_a_mask_object_on_the_bridge_movie_cannot_qualify(monkeypatch, tmp_path):
+@pytest.mark.parametrize("gl_replay", [False, True])
+def test_a_mask_object_on_the_bridge_movie_cannot_qualify(gl_replay, monkeypatch, tmp_path):
     """Codex r1's blocker, verbatim: `effects: [{"maskLayer": ...}]` on slide 4's bridge movie
     moves no checked key and no geometry, so a shallow rule leaves the runtime plan -- and its
     allowlisted signature -- intact, and the runtime carries and paints the full UNMASKED video.
-    It must be `Unsupported` even with the signature check disabled entirely."""
+    Scoped (Stage C): even with the signature check disabled entirely, no carry may name the
+    masked instance -- the bridge onto it retires (R11) and it is in no `slide_instances`."""
     from obed_edom import live_continuity
 
     def mask(node):
@@ -1355,9 +1459,18 @@ def test_a_mask_object_on_the_bridge_movie_cannot_qualify(monkeypatch, tmp_path)
     monkeypatch.setattr(
         live_continuity, "plan_signature", lambda _runtime: next(iter(live_continuity.QUALIFIED_PLAN_SHA256))
     )
-    plan = _plan(_mutate_slide(tmp_path, SLIDE4, lambda data: _map_movie_nodes(data, mask)))
-    assert isinstance(plan, Unsupported)
-    assert "possible mask" in plan.reason
+    tree = _mutate_slide(tmp_path, SLIDE4, lambda data: _map_movie_nodes(data, mask))
+    plan = derive_plan(tree, SLIDES, resolver=_resolver, gl_replay=gl_replay)
+    assert isinstance(plan, ContinuityPlan)
+    assert [(m.action, m.code) for m in plan.boundaries[2].movies] == [("retire", "R11")]
+    assert "possible mask" in plan.boundaries[2].movies[0].refusal
+    assert plan.slide_instances[3] == {}
+    runtime = plan.to_runtime()
+    assert isinstance(runtime, dict)
+    assert not [
+        entry for entry in runtime["boundaries"]
+        if entry["action"] in ("pin", "bridge", "glReplay") and entry["dst"]["objectId"] == P2_OBJECT_IDS["slide4"]
+    ]
 
 
 @pytest.mark.parametrize("name", ["maskLayer", "maskPath", "clipRect", "shouldClip", "shapePathRef"])
@@ -1368,8 +1481,7 @@ def test_a_key_that_reads_like_clipping_is_refused_wherever_it_appears(name, tmp
     def tamper(node):
         node["movie"][name] = 1
 
-    plan = _mask_reason_plan(tmp_path, SLIDE1, lambda data: _map_movie_nodes(data, tamper))
-    assert plan.reason.endswith(f"<movie node>.movie.{name}")
+    assert _mask_reason(tmp_path, SLIDE1, lambda data: _map_movie_nodes(data, tamper)).endswith(f"<movie node>.movie.{name}")
 
 
 def test_the_only_mask_named_keys_exempted_are_ones_the_export_really_carries():
@@ -1390,8 +1502,7 @@ def test_a_contents_rect_that_is_not_the_unit_object_is_refused(value, tmp_path)
     def tamper(node):
         node["baseLayer"]["layers"][0]["initialState"]["contentsRect"] = value
 
-    plan = _mask_reason_plan(tmp_path, SLIDE1, lambda data: _map_movie_nodes(data, tamper))
-    assert plan.reason.endswith("initialState.contentsRect")
+    assert _mask_reason(tmp_path, SLIDE1, lambda data: _map_movie_nodes(data, tamper)).endswith("initialState.contentsRect")
 
 
 @pytest.mark.parametrize("value", [True, False, 1, 0, "false", None])
@@ -1403,11 +1514,10 @@ def test_masks_to_bounds_must_be_exactly_false(value, tmp_path):
         plan = _plan(_mutate_slide(tmp_path, SLIDE1, lambda data: _map_movie_nodes(data, tamper)))
         assert isinstance(plan, ContinuityPlan)
         return
-    plan = _mask_reason_plan(tmp_path, SLIDE1, lambda data: _map_movie_nodes(data, tamper))
-    assert plan.reason.endswith("initialState.masksToBounds")
+    assert _mask_reason(tmp_path, SLIDE1, lambda data: _map_movie_nodes(data, tamper)).endswith("initialState.masksToBounds")
 
 
-# --- malformed shapes fail closed, they never raise ----------------------------------------
+# --- malformed shapes fail closed (R11), they never raise ----------------------------------
 
 
 @pytest.mark.parametrize(
@@ -1428,13 +1538,13 @@ def test_masks_to_bounds_must_be_exactly_false(value, tmp_path):
         pytest.param(lambda state: state.__setitem__("initialState", []), id="list-initialState"),
     ],
 )
-def test_a_malformed_slot_above_the_movie_is_unsupported_not_an_exception(tamper, tmp_path):
+def test_a_malformed_slot_above_the_movie_is_refused_not_an_exception(tamper, tmp_path):
     def break_the_green_square(data):
         tamper(_slot_object(data, 0, SLIDE2_GREEN_SLOT))
         return data
 
-    plan = _plan(_mutate_slide(tmp_path, SLIDE2, break_the_green_square))
-    assert isinstance(plan, Unsupported)
+    reason = _scoped_r11_reason(tmp_path, SLIDE2, break_the_green_square)
+    assert reason.startswith(f"draw slot {SLIDE2_GREEN_SLOT} on slide {SLIDE2} ")
 
 
 @pytest.mark.parametrize(
@@ -1448,9 +1558,8 @@ def test_a_malformed_slot_above_the_movie_is_unsupported_not_an_exception(tamper
         pytest.param(lambda layer: layer.__setitem__("layers", "not a list"), id="text-layers"),
     ],
 )
-def test_a_malformed_movie_layer_is_unsupported_not_an_exception(tamper, tmp_path):
-    plan = _plan(_mutate_slide(tmp_path, SLIDE1, lambda data: _map_movie_nodes(data, lambda n: tamper(n["baseLayer"]))))
-    assert isinstance(plan, Unsupported)
+def test_a_malformed_movie_layer_is_refused_not_an_exception(tamper, tmp_path):
+    assert _scoped_r11_reason(tmp_path, SLIDE1, lambda data: _map_movie_nodes(data, lambda n: tamper(n["baseLayer"])))
 
 
 @pytest.mark.parametrize(
@@ -1483,14 +1592,13 @@ def test_a_malformed_movie_layer_is_unsupported_not_an_exception(tamper, tmp_pat
         ),
     ],
 )
-def test_a_malformed_transform_or_anchor_is_unsupported_not_an_exception(tamper, tmp_path):
+def test_a_malformed_transform_or_anchor_is_refused_not_an_exception(tamper, tmp_path):
     """Python's `json` parses NaN and Infinity, and a NaN compares false against every bound, so
     a plain `abs(value - unit) > tol` check would wave it straight through. Every number in the
     geometry path is read as a finite number or not at all."""
-    plan = _plan(
-        _mutate_slide(tmp_path, SLIDE1, lambda data: _map_movie_nodes(data, lambda n: tamper(n["baseLayer"]["initialState"])))
+    assert _scoped_r11_reason(
+        tmp_path, SLIDE1, lambda data: _map_movie_nodes(data, lambda n: tamper(n["baseLayer"]["initialState"]))
     )
-    assert isinstance(plan, Unsupported)
 
 
 def test_python_json_really_does_accept_nan_so_the_guard_is_not_theoretical():
@@ -2959,21 +3067,6 @@ def test_flag_off_as_dict_and_json_have_no_gl_replay_keys():
         }
 
 
-@pytest.mark.parametrize("bad_name", [42, [1, 2], {"nested": "object"}])
-def test_gl_replay_rejects_unreadable_transition_name_instead_of_raising(bad_name, tmp_path):
-    """Finding 2 (Medium): a JSON-valid non-string transition `name` must not raise at
-    `.startswith()` or at the `_GL_REPLAY_TRANSITIONS` membership test (an unhashable `list`/
-    `dict` raises `TypeError` there) -- it must fail closed to `Unsupported`."""
-    tmp = _mutate_slide(tmp_path, SLIDE1, lambda data: _map_transitions(data, lambda _name: bad_name))
-    plan = derive_plan(tmp, SLIDES, resolver=_resolver, gl_replay=True)
-    assert isinstance(plan, Unsupported)
-    assert "unreadable transition name" in plan.reason
-
-    plan_off = derive_plan(tmp, SLIDES, resolver=_resolver, gl_replay=False)
-    assert isinstance(plan_off, Unsupported)
-    assert "unreadable transition name" in plan_off.reason
-
-
 # --- looping movies: `movie.loopMode` (keynote_live_continuity_loopmode plan section 2) -----
 #
 # Keynote's Repeat -> Loop writes exactly one key, `movie.loopMode: "looping"`, on the
@@ -3158,24 +3251,22 @@ def test_real_p2_export_spliced_the_same_way_signs_the_same_two_shas(tmp_path):
         pytest.param((P2_WA0125_OBJECT_ID,), SLIDE3, "loopBackAndForth", id="wa0125-no-boundary-carries"),
     ],
 )
-def test_an_unmeasured_loop_mode_value_refuses_the_whole_deck(object_ids, uuid, value, tmp_path):
+def test_an_unmeasured_loop_mode_value_is_never_carried(object_ids, uuid, value, tmp_path):
     """L0-c (plan section 2.1): only "looping" was ever measured. The player also honours
-    "loopBackAndForth" (as a plain loop), but no export has shown it, so it refuses like every
-    other unmeasured vocabulary."""
-    plan = derive_plan(_loop_tree(tmp_path, object_ids, value), SLIDES, resolver=_resolver)
-    assert isinstance(plan, Unsupported)
-    assert plan.reason == (
-        f"movie on slide {uuid} has an unmeasured loopMode {value!r} (only 'looping' is qualified)"
-    )
+    "loopBackAndForth" (as a plain loop), but no export has shown it, so it is refused (R11) like
+    every other unmeasured vocabulary. WA0125 has no Magic Move partner, so nothing changes."""
+    partnered = uuid == SLIDE1
+    reason = _scoped_r11_reason(tmp_path, uuid, _set_loop_mode(object_ids, value), partnered=partnered)
+    if partnered:
+        assert reason == f"movie on slide {uuid} has an unmeasured loopMode {value!r} (only 'looping' is qualified)"
 
 
 def test_an_object_valued_loop_mode_is_refused_as_a_possible_mask(tmp_path):
     """An object under `loopMode` never reaches the value check: the generic walk refuses it as
     unmeasured structure first."""
-    plan = derive_plan(_loop_tree(tmp_path, P2_LOOP_OBJECT_IDS[:1], {"mode": "looping"}), SLIDES, resolver=_resolver)
-    assert isinstance(plan, Unsupported)
-    assert "possible mask" in plan.reason
-    assert "movie.loopMode" in plan.reason
+    assert _mask_reason(tmp_path, SLIDE1, _set_loop_mode(P2_LOOP_OBJECT_IDS[:1], {"mode": "looping"})).endswith(
+        "<movie node>.movie.loopMode"
+    )
 
 
 def test_a_looping_movie_no_entry_names_leaves_the_runtime_alone(tmp_path):
@@ -3328,16 +3419,21 @@ _ABSENT_LOOP_MODE = object()
 )
 def test_an_audio_only_movie_is_refused_upstream_whatever_its_loop_mode(loop_mode, gl_replay, tmp_path):
     """Codex r1 F7: audio-only movies stay unmeasured (plan section 8 risk 3). They are refused
-    before any loop rule runs -- `_movie_rect` needs exactly one video sub-layer -- so no loop
-    value on one, qualified or not, can reach a runtime. The object value trips the vocabulary
-    walk even earlier, which is also a whole-deck refusal."""
-    tree = _mutate_slide(tmp_path, SLIDE1, _add_audio_only_movie(loop_mode))
-    plan = derive_plan(tree, SLIDES, resolver=_resolver, gl_replay=gl_replay)
-    assert isinstance(plan, Unsupported)
+    before any loop rule runs -- `_movie_rect` needs exactly one video sub-layer, and an object
+    value trips the vocabulary walk even earlier -- so no loop value on one, qualified or not, can
+    reach a runtime. It has no Magic Move partner, so the plan is otherwise unchanged."""
+    from obed_edom.live_continuity import _slide_movie_instances
+
+    _scoped_r11_reason(tmp_path, SLIDE1, _add_audio_only_movie(loop_mode), gl_replay=gl_replay, partnered=False)
+    data = _add_audio_only_movie(loop_mode)(json.loads((FIXTURE_ROOT / "assets" / SLIDE1 / f"{SLIDE1}.json").read_text()))
+    instances, unmeasured = _slide_movie_instances(data["events"], data["assets"], SLIDE1)
+    assert "audio.m4a" not in instances
+    [(object_id, reason)] = unmeasured["audio.m4a"]
+    assert object_id == "SYNTHETIC-AUDIO-ONLY"
     if isinstance(loop_mode, dict):
-        assert plan.reason.endswith("(possible mask): <movie node>.movie.loopMode")
+        assert reason.endswith("(possible mask): <movie node>.movie.loopMode")
     else:
-        assert plan.reason == f"movie node on slide {SLIDE1} has 0 video sub-layers, expected 1"
+        assert reason == f"movie node on slide {SLIDE1} has 0 video sub-layers, expected 1"
 
 
 def test_the_synthetic_audio_node_derives_when_its_video_sub_layer_is_kept(tmp_path):
@@ -3600,7 +3696,7 @@ def _parsed_slide(player_index: int, uuid: str, root: Path = FIXTURE_ROOT):
     from obed_edom.live_continuity import _Slide, _slide_movie_instances
 
     data = json.loads((root / "assets" / uuid / f"{uuid}.json").read_text())
-    return _Slide(player_index, uuid, data["events"], _slide_movie_instances(data["events"], data["assets"], uuid))
+    return _Slide(player_index, uuid, data["events"], *_slide_movie_instances(data["events"], data["assets"], uuid))
 
 
 def test_a_later_gl_replay_eligible_boundary_retires_instead():
@@ -3688,9 +3784,46 @@ def test_a_mid_deck_none_transition_is_a_cut_like_a_dissolve(tmp_path):
     assert plan.to_runtime() == EXPECTED_RUNTIME_PLAN
 
 
-def test_an_unknown_transition_name_still_refuses_the_deck(tmp_path):
-    plan = _plan(_mutate_slide(tmp_path, SLIDE2, lambda data: _map_transitions(data, lambda _name: "apple:cube")))
-    assert plan == Unsupported("unsupported transition 'apple:cube' at player index 1 -> 2")
+@pytest.mark.parametrize("gl_replay", [False, True])
+@pytest.mark.parametrize(
+    "uuid, name, detail",
+    [
+        pytest.param(SLIDE1, "apple:cube", "the next transition 'apple:cube' is unmeasured", id="cube-out-of-the-first-slide"),
+        pytest.param(SLIDE2, "apple:cube", "the next transition 'apple:cube' is unmeasured", id="cube-after-a-magic-move"),
+        # A JSON-valid non-string name must not raise at `.startswith()` or at a set membership
+        # test (an unhashable list or dict raises `TypeError` there).
+        *[
+            pytest.param(SLIDE2, name, f"the next transition name {name!r} is unreadable", id=f"unreadable-{type(name).__name__}")
+            for name in (42, [1, 2], {"nested": "object"})
+        ],
+    ],
+)
+def test_no_decoder_is_held_into_an_unmeasured_transition(uuid, name, detail, gl_replay, monkeypatch, tmp_path):
+    """Stage C (plan section 3.1): the unmeasured boundary itself plans nothing, so every movie
+    plays as the export plays it; every carry INTO that slide retires (R11) at its own Magic Move,
+    which also keeps GL replay off it; every other boundary is the unmutated plan's."""
+    tree = _mutate_slide(tmp_path, uuid, lambda data: _map_transitions(data, lambda _name: name))
+    plan = derive_plan(tree, SLIDES, resolver=_resolver, gl_replay=gl_replay)
+    base = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=gl_replay)
+    assert isinstance(plan, ContinuityPlan)
+    unmeasured = SLIDES[[s["exportedUuid"] for s in SLIDES].index(uuid)]["playerIndex"]
+    assert plan.boundaries[unmeasured].movies == ()
+    assert _boundary_records(plan, unmeasured) == []
+    carried_in = unmeasured - 1
+    if carried_in >= 0:
+        assert [(m.action, m.code, m.src_object_id, m.gl_replay) for m in plan.boundaries[carried_in].movies] == [
+            ("pin", "R11", P2_OBJECT_IDS["slide1"], None)
+        ]
+        desc = f"player index {carried_in} -> {unmeasured}"
+        assert plan.boundaries[carried_in].movies[0].refusal == f"'untitled.mov' at {desc}: {detail}"
+    for index, (boundary, before) in enumerate(zip(plan.boundaries, base.boundaries, strict=True)):
+        if index not in (unmeasured, carried_in):
+            assert boundary == before
+            assert _boundary_records(plan, index) == _boundary_records(base, index)
+    runtime = _signed(monkeypatch, plan)
+    scene = plan.scene_index_by_player[unmeasured + 1]
+    assert [entry for entry in runtime["boundaries"] if entry["atScene"] == scene] == []
+    assert all(entry["action"] not in ("pin", "bridge", "glReplay") for entry in runtime["boundaries"] if entry["atScene"] < scene)
 
 
 def test_r2_an_unattributed_build_says_it_cannot_be_ruled_out(tmp_path):

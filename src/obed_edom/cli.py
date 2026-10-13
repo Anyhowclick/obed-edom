@@ -124,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         "--include-side",
         help="Slides to export at full wall width with side content kept, e.g. 44 or 44,46.",
     )
-    dsk_export.add_argument("--codec", default="AppleProRes422LT", help="Keynote movie codec for the export.")
+    dsk_export.add_argument("--codec", default="h264", help="Published clip codec (h264 re-encodes a ProRes LT export).")
     dsk_export.add_argument("--fps", type=float, default=30, help="Export framerate.")
     dsk_export_stages = sub.add_parser(
         "dsk-export-stages",

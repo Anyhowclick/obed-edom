@@ -19,7 +19,7 @@ function engineState(overrides: Partial<LiveEngine> = {}): LiveEngine {
 
 function client(overrides: Partial<LiveClient> = {}): LiveClient {
   return {
-    qualification: vi.fn(async (previewJobId) => ({ previewJobId, name: "Sunday service", slides: 3, sourceDigest: "source", qualified: true, reason: null })),
+    qualification: vi.fn(async (previewJobId) => ({ previewJobId, name: "Sunday service", slides: 3, sourceDigest: "source", qualified: true, continuity: { mode: "qualified" as const, reason: null, notCarried: [] }, convertedMovies: [] })),
     state: vi.fn(async () => null),
     decks: vi.fn(async () => []),
     displays: vi.fn(async () => []),
