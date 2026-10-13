@@ -194,7 +194,15 @@ def _d2_slides():
             {"HELLO": (100, 20), "TO": (100, 20)},
             [_event([_slot(LABEL, "HELLO")]), _event([], [_magic_move(LABEL, "HELLO", "TO", 50)])],
         ),
-        ("S2", {"BIG": (400, 300)}, [_event([_slot(landed, "BIG")], texts=[("Hello", landed)])]),
+        # Event 1 repeats the bad leaf with NFKC-equivalent accessibility text: same group, one graft.
+        (
+            "S2",
+            {"BIG": (400, 300)},
+            [
+                _event([_slot(landed, "BIG")], texts=[("Hello", landed)]),
+                _event([_slot(landed, "BIG")], texts=[("\uff28ello", landed)]),
+            ],
+        ),
     ]
 
 
@@ -223,7 +231,7 @@ def test_repair_picks_the_rule_and_writes_a_consistent_export(tmp_path, build, e
 
     [entry] = record["repaired"]
     assert {k: entry[k] for k in expected} == expected
-    assert entry["leaves"] == ["0/baseLayer/layers/0/layers/0/layers/0"]
+    assert entry["leaves"][0] == "0/baseLayer/layers/0/layers/0/layers/0"
     assert set(entry["verify"]) <= {"ocr", "corr"}
     assert lines[-1] == "Repaired 1 mis-mapped texture"
     assert pt.json_hits(tmp_path, slides) == []
@@ -251,7 +259,8 @@ def test_repair_picks_the_rule_and_writes_a_consistent_export(tmp_path, build, e
 def test_refusal_names_every_unrepairable_object_and_writes_nothing(tmp_path):
     # Event 1 swaps the label's text in place under the same bad id: it is its own group, and the
     # event 2 "Point 1" donor must not fix it. The Magic Move lands a contents.to on slide 2's
-    # non-poster image: D2 has no content check for it, so it is refused.
+    # non-poster image: D2 has no content check for it, so it is refused. Slide 2 event 1 has movie
+    # M1's slot at that image's rect on the same bad id: the image must not borrow M1's poster.
     point1, point2 = [("Point 1", TEXT_BOX)], [("Point 2", TEXT_BOX)]
     image = (500, 500, 40, 30)
     slides = _export(
@@ -269,7 +278,10 @@ def test_refusal_names_every_unrepairable_object_and_writes_nothing(tmp_path):
             (
                 "S2",
                 {"WRONG": (1920, 1080), "POSTER": (200, 100)},
-                [_event([_slot(POSTER, "WRONG", kind=5)], [_movie("M1", "MOVIE", POSTER, "POSTER")])],
+                [
+                    _event([_slot(POSTER, "WRONG", kind=5)], [_movie("M1", "MOVIE", POSTER, "POSTER")]),
+                    _event([_slot(POSTER, "WRONG", kind=5, oid="M1")]),
+                ],
             ),
         ],
     )

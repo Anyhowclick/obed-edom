@@ -429,14 +429,20 @@ def _groups(slides: list[_Slide], hits: list[_Hit]) -> list[_Group]:
     for hit in hits:
         if hit.rule == "R1b" or any(g.slide == hit.slide and hit.leaf in g.leaves for g in groups):
             continue
-        slide, text = slides[hit.slide], _leaf_text(slides[hit.slide], hit.leaf)
-        members = [
+        slide, text = slides[hit.slide], _text_key(slides[hit.slide], hit.leaf)
+        candidates = [
             leaf
             for leaf in slide.leaves
             if leaf.texture == hit.leaf.texture
             and _close(leaf.rect, hit.leaf.rect, GROUP_TOL)
-            and _leaf_text(slide, leaf) == text
+            and _text_key(slide, leaf) == text
         ]
+        owners = {leaf.key: _owner(slide, leaf) for leaf in candidates}
+        fixed = {oid for bound, oid in owners.values() if bound}
+        bound, movie = owners[hit.leaf.key]
+        if not bound:
+            movie = fixed.pop() if len(fixed) == 1 else None
+        members = [leaf for leaf in candidates if not owners[leaf.key][0] or owners[leaf.key][1] == movie]
         groups.append(_Group(hit.slide, hit.leaf.texture, sorted(members, key=lambda leaf: leaf.key)))
     return groups
 
@@ -464,6 +470,24 @@ def _slot_text(slide: _Slide, event: int, rect: tuple[float, ...]) -> str | None
 
 def _leaf_text(slide: _Slide, leaf: _Leaf) -> str | None:
     return _slot_text(slide, leaf.event, leaf.rect) if leaf.kind == TEXT_TYPE else None
+
+
+def _text_key(slide: _Slide, leaf: _Leaf) -> str | None:
+    text = _leaf_text(slide, leaf)
+    return None if text is None else _normal(text)
+
+
+def _owner(slide: _Slide, leaf: _Leaf) -> tuple[bool, str | None]:
+    """Whether a leaf is bound to one movie identity, and which: base leaves under a slot wrapper
+    through it (None for an ordinary slot), movie-start copies through the effect's objectID. A
+    flattened slot (the leaf itself at the wrapper's place, as in later events) carries none."""
+    if leaf.is_base and (len(leaf.path) > 5 or leaf.node.get("objectID")):
+        return True, _movie_of(slide, leaf)
+    if leaf.is_base:
+        return False, None
+    if leaf.effects[0] == "apple:movie-start":
+        return True, slide.events[leaf.event]["effects"][leaf.path[1]].get("objectID")
+    return False, None
 
 
 def _group_text(slide: _Slide, group: _Group) -> str | None:
@@ -582,8 +606,8 @@ def _plan(
     bad_textures: dict[int, set[str]] = {}
     for hit in hits:
         bad_keys.setdefault(hit.slide, set()).add(hit.leaf.key)
-        if hit.rule != "R1":
-            bad_textures.setdefault(hit.slide, set()).add(hit.leaf.texture)
+        if hit.rule == "R1b":
+            bad_textures.setdefault(hit.slide, set()).add(_end_rect(hit.leaf)[0])
     fixes: list[_Fix] = []
     refused = [
         (slides[h.slide].ordinal, _describe(slides[h.slide], _Group(h.slide, h.leaf.texture, [h.leaf])))

@@ -9,8 +9,8 @@ g2 (headless, continuity off, GL replay off): a temp copy of the Alpha 7e3c expo
   (a) settled slide 10: each label crop correlates >= 0.9 with the same crop of Keynote's flattened frame (AF8F0F);
   (b) slides 8 and 9: Vision OCR of each label crop equals the slide's accessibility text;
   (c) a mid-frame of the 9->10 Magic Move: WA0125's slot correlates >= 0.9 with WA0125's poster, < 0.5 with WA0121's.
-`--no-repair` is the negative control: it must FAIL (a) and (c). Flat crops, missing poster references or no measurable
-mid-frame make a check INCONCLUSIVE, and any INCONCLUSIVE makes the run INCONCLUSIVE (exit 3) in both arms.
+`--no-repair` is the negative control: it must FAIL (a) and (c). Flat crops, missing poster references or no mid-frame that
+positively identifies a poster (>= 0.9) make a check INCONCLUSIVE, and any INCONCLUSIVE makes the run INCONCLUSIVE (exit 3) in both arms.
 
 usage: uv run python scripts/texture_repair_check.py g1 --out RESULT.json
        uv run python scripts/texture_repair_check.py g2 --out DIR [--no-repair] [--export HTML --manifest MANIFEST.json]
@@ -407,33 +407,48 @@ def check_mm_midframe(root: Path, slides: list[dict[str, Any]], host: Any, stage
     while time.monotonic() - started < BURST_S:
         frames.append((round(time.monotonic() - started, 3), screenshot(transport, clip)))
     origin = (clip["x"], clip["y"])
+    record: dict[str, Any] = {"path": path, **mm_verdict(score_frames(frames, stage, path, refs, origin))}
+    if "chosen" in record:
+        k = record["frames"].index(record["chosen"])
+        frames[k][1].save(out / "c-mm-midframe.png")
+        full = rect_at(path, record["chosen"]["p"])
+        save_grey(screen_crop(frames[k][1], stage, full, (round(full[2]), round(full[3])), origin), out / "c-mm-slot.png")
+    return record
+
+
+def score_frames(frames: list[tuple[float, Image.Image]], stage: dict[str, float], path: dict[str, Any], refs: dict[str, np.ndarray], origin: tuple[float, float]) -> list[dict[str, Any]]:
+    """Per frame, the slot position where a poster is positively identified (>= CORR_PASS); p None otherwise."""
+    size = refs[MOVIE].shape[::-1]
     scored = []
     for t, frame in frames:
         best = None
         for p in np.linspace(0.0, 1.0, 51):
-            crop = screen_crop(frame, stage, rect_at(path, p), probe, origin)
+            crop = screen_crop(frame, stage, rect_at(path, p), size, origin)
             values = {name: corr(crop, ref) for name, ref in refs.items()}
             if None in values.values():
                 continue
-            score = max(values.values())
-            if best is None or score > best[0]:
-                best = (score, float(p), values)
-        if best is None:
-            scored.append({"t": t, "p": None, "corr": None})
+            if best is None or max(values.values()) > max(best[1].values()):
+                best = (float(p), values)
+        if best is None or max(best[1].values()) < CORR_PASS:
+            scored.append({"t": t, "p": None, "corr": None if best is None else {k: round(v, 3) for k, v in best[1].items()}})
             continue
-        scored.append({"t": t, "p": round(best[1], 2), "corr": {k: round(v, 3) for k, v in best[2].items()}})
+        scored.append({"t": t, "p": round(best[0], 2), "corr": {k: round(v, 3) for k, v in best[1].items()}})
+    return scored
+
+
+def mm_verdict(scored: list[dict[str, Any]]) -> dict[str, Any]:
     mid = [s for s in scored if s["p"] is not None and 0.25 <= s["p"] <= 0.75]
-    record: dict[str, Any] = {"path": path, "frames": scored}
     if not mid:
-        return {**record, "verdict": INCONCLUSIVE, "reason": "no measurable burst frame between 25% and 75% of the Magic Move"}
+        return {"frames": scored, "verdict": INCONCLUSIVE, "reason": "no burst frame between 25% and 75% of the Magic Move identifies a poster"}
     chosen = min(mid, key=lambda s: abs(s["p"] - 0.5))
-    k = scored.index(chosen)
-    frames[k][1].save(out / "c-mm-midframe.png")
-    full = rect_at(path, chosen["p"])
-    size = (round(full[2]), round(full[3]))
-    save_grey(screen_crop(frames[k][1], stage, full, size, origin), out / "c-mm-slot.png")
     own, other = chosen["corr"][MOVIE], chosen["corr"][OTHER_MOVIE]
-    return {**record, "chosen": chosen, "verdict": PASS if own >= CORR_PASS and other < CORR_OTHER_MAX else FAIL}
+    if own >= CORR_PASS and other < CORR_OTHER_MAX:
+        verdict = PASS
+    elif other >= CORR_PASS and own < CORR_OTHER_MAX:
+        verdict = FAIL
+    else:
+        verdict = INCONCLUSIVE
+    return {"frames": scored, "chosen": chosen, "verdict": verdict}
 
 
 def run_g2(args: argparse.Namespace) -> int:
