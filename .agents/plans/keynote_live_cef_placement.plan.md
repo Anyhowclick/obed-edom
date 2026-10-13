@@ -1,6 +1,6 @@
 # Alpha Keynote: CEF/OBS placement calibration and the fractional movie freeze
 
-**rev 3 — 2026-10-13; r1–r2 folded, owner decisions O1–O5 unchanged in §8.** Base: rev 2 `d72238ac` on `claude/cef-obs-placement-plan`.
+**rev 3.1 — 2026-10-13; r1–r3 folded, owner decisions O1–O5 unchanged in §8.** Base: rev 2 `d72238ac` on `claude/cef-obs-placement-plan`.
 Plan only: overwrite the scratch plan for coordinator copy; no product edits, commit, OBS, Chrome or Keynote run.
 Parent: `keynote_live_dissolve_crossfade.plan.md` **rev 17**, landed #262; its §12 decisions 1–16 govern except where
 today's explicit follow-up request restores probe work. Earlier probe design: `git show 41ef609b:.agents/plans/keynote_live_dissolve_crossfade.plan.md`,
@@ -132,7 +132,9 @@ cleanup and after clean quit. Baseline = parsed `AK.json` as saved by OBS before
 a pre-transaction save exists; if not, use the seeded file normalized by the same parser. Compare a normalized scene
 graph: the set of sources and scenes with ids/uuids/names/settings, each scene's items with transforms/visibility/order,
 `current_scene`, `current_program_scene`, transitions. Ignore only an explicit allowlist that step 0 justifies field by
-field (e.g. `id_counter` monotonic increase, OBS-added keys present in both); no blanket settings/module exclusions.
+field: the allowlist is the difference set of the no-transaction null run (seed → clean quit, which also covers keys OBS adds
+to a seed baseline) plus `id_counter` monotonic increase; a candidate FAILs on any difference beyond the null's. No blanket
+settings/module exclusions.
 The authoritative checkpoint is after clean quit. The after-cleanup read is authoritative only if its mtime postdates
 the last removal; otherwise it is diagnostic. Mid-transaction saves are accepted only with normalized restoration at
 these checkpoints; stale saved files never prove cleanup. No calibration seed entries or persisted grant; restore
@@ -513,3 +515,9 @@ Source: scratch `critique-r2.md`; all six findings folded, none refuted. O1–O5
 | 4 | low | Folded: W4 host-owned renewal timer starts on first probe grant, stops in stop(); evaluate_in deadline below remaining lease includes lock wait, missed renewal logs leaseLapsed and never extends (§2.5, §5–§7). CDP lock/default verified at live_host.py:653–661. |
 | 5 | low | Folded, option (b): script-only LiveOutputHost constructor mode override; product router never passes it, Chrome product remains indefinite snap only. wrongrule-chrome forces leased frac in harness probe mode; Node fixed-mode/expiry row (§2.5, §5–§7). |
 | 6 | low | Folded: backup may retain transaction state but managed launch reseeds valid primary first, so backup is unreachable there; record without mutation (§2.2, §5, §8–§9; managed_obs.py:889, :914, :920–921). |
+
+### r3 — Opus 5.5 high, on rev 3 091a366c — READY (1 low)
+
+| # | Severity | Disposition |
+|---|---|---|
+| 1 | low | Folded by the coordinator (rev 3.1): the persistence allowlist is the no-transaction null run's difference set plus `id_counter`; any difference beyond the null's FAILs (§2.2). |
