@@ -307,6 +307,24 @@ def _strip_base_layer(data):
     return data
 
 
+def _add_scaled_movie_above_the_bridge(data):
+    """Codex/Astra r1: a distinct movie drawn above slide 4's bridge destination, authored
+    200x200 at (1700, 600) with `scale: 2`. Unscaled it clears the bridge; painted at 400x400 it
+    overlaps it by about 93 x 91 px, so its unmeasured bounds cannot clear the carry."""
+    clone = copy.deepcopy(_find_movie_nodes(data["events"])[0])
+    clone["objectID"] = "SCALED-ABOVE"
+    clone["movie"] = {**clone["movie"], "asset": "Other.mov-0.0000-10.0000"}
+    clone["baseLayer"]["initialState"].update(position={"pointX": 1700, "pointY": 600}, width=200, height=200, scale=2)
+    for layer in clone["baseLayer"]["layers"]:
+        layer["initialState"].update(position={"pointX": 100, "pointY": 100}, width=200, height=200)
+    data["events"][0]["effects"].append(clone)
+    slot = _authored_slot(1600, 500, 200, 200, object_id="SCALED-ABOVE")
+    slot["layers"][0]["initialState"]["scale"] = 2
+    _draw_slots(data, 0).append(slot)
+    data["assets"]["Other.mov-0.0000-10.0000"] = {"type": "video", "url": {"web": "assets/Other.mov-0.0000-10.0000.mov"}}
+    return data
+
+
 def _tamper_slot_layers(slot_index: int, layers):
     def tamper(data):
         slot = _draw_slots(data, 0)[slot_index]
@@ -400,12 +418,19 @@ def _scoped_r11_reason(tmp_path: Path, uuid: str, transform, *, gl_replay: bool 
         pytest.param(
             SLIDE2, _strip_base_layer, f"slide {SLIDE2} declares no readable draw order", id="no-draw-order-at-all",
         ),
+        pytest.param(
+            SLIDE4, _add_scaled_movie_above_the_bridge,
+            "an unmeasured movie 'other.mov' is drawn above the carried 'untitled.mov' on the destination "
+            "slide (player index 3, draw slot 2)",
+            id="unmeasured-movie-drawn-above-the-carry",
+        ),
     ],
 )
 def test_an_unmeasured_shape_or_draw_order_refuses_only_its_magic_move(uuid, transform, reason, tmp_path):
     """Slide 1's rotated or transformed movies are left out and recorded (record-only R11: no
     runtime entry names them, so the player plays them as exported); slide 2's unreadable draw
-    order retires the one carry that needed it."""
+    order, or an unmeasured movie drawn above slide 4's destination, retires the one carry that
+    needed it."""
     assert _scoped_r11_reason(tmp_path, uuid, transform) == reason
 
 

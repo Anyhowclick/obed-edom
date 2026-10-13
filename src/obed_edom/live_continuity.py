@@ -1217,11 +1217,18 @@ def _movie_slot_index(slots: list[Any], object_id: str, slide_name: str) -> int 
 
 
 def _overlap_refusal(
-    events: list[Any], instance: _MovieInstance, asset: str, to_player_index: int, slide_name: str
-) -> str | None:
+    events: list[Any],
+    instance: _MovieInstance,
+    asset: str,
+    to_player_index: int,
+    slide_name: str,
+    unmeasured: dict[str, list[tuple[str, str]]],
+) -> tuple[str, str] | None:
     """Whether any object authored ABOVE the movie's draw slot overlaps its painted rect, on any
     event of the destination slide. Opacity and `hidden` are deliberately ignored: the export does
-    not mark a not-yet-built object, so every higher slot counts as artwork."""
+    not mark a not-yet-built object, so every higher slot counts as artwork. An unmeasured movie
+    above it has no painted bounds to compare (R11)."""
+    unmeasured_assets = {object_id: name for name, found in unmeasured.items() for object_id, _ in found}
     if instance.object_id is None:
         raise _Refuse(f"movie '{asset}' on slide {slide_name} has no object id")
     drawn = False
@@ -1238,9 +1245,15 @@ def _overlap_refusal(
                 raise _Refuse(
                     f"unrecognised slide layer shape on slide {slide_name} ({where})"
                 )
+            above = unmeasured_assets.get(children[0].get("objectID"))
+            if above is not None:
+                return "R11", (
+                    f"an unmeasured movie '{above}' is drawn above the carried '{asset}' on the destination "
+                    f"slide (player index {to_player_index}, draw slot {index})"
+                )
             state = _object_state(children[0], where, slide_name)
             if _overlaps(_state_rect(state, where, slide_name), instance.rect):
-                return (
+                return "overlap", (
                     f"later-authored artwork overlaps the carried '{asset}' on the destination "
                     f"slide (player index {to_player_index}, draw slot {index})"
                 )
@@ -1759,8 +1772,9 @@ def _carry_refusal(
             )
     if src.loop != dst.loop:
         return "R4", f"'{asset}' loops on one side of {desc} only; a carried decoder keeps its source's loop setting"
-    overlap = _overlap_refusal(destination.events, dst, asset, destination.player_index, destination.uuid)
-    return ("overlap", overlap) if overlap is not None else None
+    return _overlap_refusal(
+        destination.events, dst, asset, destination.player_index, destination.uuid, destination.unmeasured
+    )
 
 
 def _magic_move_movies(
