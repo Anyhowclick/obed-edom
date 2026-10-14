@@ -1,4 +1,4 @@
-# Keynote live: Line Draw builds draw along their path (plan, rev 6: owner go 2026-10-13; implemented on `claude/keynote-live-line-draw`)
+# Keynote live: Line Draw builds draw along their path (plan, rev 6: merged in #270, `ab8fa67b`, 2026-10-14)
 
 ## 1. Finding (2026-10-13)
 
@@ -230,6 +230,16 @@ Minimal, pixel-based. Every check is made on captured frames, never on the patch
 - **Q3:** the arrowhead is there from the start of the line's build, travelling at the tip, after the box (native frame
   in the session). See §2 "Arrowhead".
 - **Q4:** shares the `mm_opacity` switch.
+
+## 4a. Open follow-ups (optional, after #270)
+
+- **Native comparison.** The owner compares slide 2 against Keynote's native playback.
+- **Deterministic probe timing.** `scripts/line_draw_probe.py` maps screencast timestamps onto the player's animation
+  clock, and the mapping can land one frame off from run to run. That is why `hold-p1` reveal timing is report-only.
+  Stamping each captured frame with the page's own animation time would make the reveal-timing checks deterministic.
+- **Keyer re-checks.** The managed-OBS screenshot driver used for the Keyer gate was scratch-only. Rebuild it from
+  `managed_obs_qualify`'s `launch_engine`, `source_shots` and `unpremultiply` with the scratch `DEFAULT_HOME`, and retry
+  `goTo` after attach (CEF drops key input just after load).
 
 ## 5. Critique log
 
