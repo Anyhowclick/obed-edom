@@ -286,17 +286,17 @@ def test_mm_opacity_anchors_are_unique_on_the_real_player():
 # and old True 21476f78... with R1-R5. New False: recorded when the new player was admitted.
 REAL_PATCHED_SHA256 = {
     OLD_PLAYER_SHA256: {
-        True: "eaae4e8008ca711c5c1e07973b807a16102bcc218f8dff6aa7e84f4d1f1fe039",
+        True: "aa0ae4bb655cf347878a2394cf9eadf199126f41e97ca85e968dc46afdc2dfc1",
         False: "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
     },
     NEW_PLAYER_SHA256: {
-        True: "228f5ace2a59d313735999924dc997c54affbe3c65b3597cba9053564f820a66",
+        True: "134114e01b14f76914e06c563d1d0672b08e60ae432d18806e7bf5671e929d2f",
         False: "4f9fbffd95e4649543142b2e95586babd9d75f0a0d9a4974e21d6f33c8389e3b",
     },
 }
 REAL_RENDERING_SHA256 = {
-    OLD_PLAYER_SHA256: "57ade7af1cad32a7071214e5a1a64deab180f0189887e7c0beecd966762869c8",
-    NEW_PLAYER_SHA256: "b9ab9f7e8a542f9a243cfa1f524f46f6764a8d705d4ffcb1fab5be78f00899f3",
+    OLD_PLAYER_SHA256: "416613aa2cbcc0a4d9397d1cb291cb5b0a8d58450255a426cc5ce5de04875330",
+    NEW_PLAYER_SHA256: "7d9eb308cadd02908732575a71e6eff437b63bc4d7ef46418805362905aa68dd",
 }
 
 
@@ -370,6 +370,7 @@ def test_patched_output_must_match_its_pin(monkeypatch, pin):
 # so they move by 38.
 HANDBACK = slice(5, 8)
 DISSOLVE = slice(8, 12)
+LINE_DRAW = slice(13, 19)
 ANCHOR_OFFSETS = {
     b"B[g].toTexture=R.createTexture(this.gl,i)}}return B}": (2263321, 2263321),
     b'case"contents":C=e.toTexture}}var T=': (2190367, 2190367),
@@ -378,13 +379,214 @@ ANCHOR_OFFSETS = {
     b"const A=new VB(C.baseLayer,{name:C.name,type:C.type,objectID:e});": (2312557, 2312557),
     b"this.cssRenderer.draw(a),a.removeChild(w)}": (2313053, 2313053),
     b"jumpToScene_partFour(A,B){if(this.displayScene(A),": (2353722, 2353760),
+    b"else M.appendChild(Z);L&&(L.isFirstRendered?": (2300286, 2300286),
+    b"return Q}hideElement(A){": (2300960, 2300960),
+    b"}}animateContentsWillBegin(A){var B=A.canvasId,": (2307740, 2307740),
+    b"animateEffect(A){var B=A.canvasId,g=A.nodeToSwapId;if(B){": (2316295, 2316295),
+    b"handleEffectDidComplete(A){for(var B=this.renderEffects(A.effects),": (2317143, 2317143),
+    b"destroy(){this.textureId=null,this.nativeWidth=null,this.nativeHeight=null,": (2293600, 2293600),
 }
 
 
 def test_handback_and_dissolve_replacements_follow_the_opacity_ones():
     replacements = live_runtime._MM_OPACITY_REPLACEMENTS
-    assert len(replacements) == 13
-    assert [before for before, _ in replacements[HANDBACK.start : DISSOLVE.stop]] == list(ANCHOR_OFFSETS)
+    assert len(replacements) == 19
+    assert [before for before, _ in replacements[HANDBACK.start : DISSOLVE.stop] + replacements[LINE_DRAW]] == list(
+        ANCHOR_OFFSETS
+    )
+
+
+def test_line_draw_methods_declare_every_assigned_identifier():
+    token_re = re.compile(
+        r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[A-Za-z_$][\w$]*|===|!==|=>|\+\+|--|'''
+        r'''\+=|-=|\*=|/=|%=|&&=|\|\|=|\?\?=|==|!=|<=|>=|\*\*|&&|\|\||\?\.|.''',
+        re.DOTALL,
+    )
+    identifier = re.compile(r"^[A-Za-z_$][\w$]*$")
+
+    def tokenize(source):
+        return [token for token in token_re.findall(source) if not token.isspace()]
+
+    def split_methods(source):
+        tokens = tokenize(source)
+        methods = {}
+        cursor = 0
+        while cursor < len(tokens):
+            name = tokens[cursor]
+            start = cursor
+            assert identifier.fullmatch(name) and tokens[cursor + 1] == "("
+            cursor += 2
+            depth = 1
+            while depth:
+                depth += (tokens[cursor] == "(") - (tokens[cursor] == ")")
+                cursor += 1
+            assert tokens[cursor] == "{"
+            depth = 1
+            cursor += 1
+            while depth:
+                depth += (tokens[cursor] == "{") - (tokens[cursor] == "}")
+                cursor += 1
+            methods[name] = tokens[start:cursor]
+        return methods
+
+    def matching(tokens, cursor, left, right):
+        assert tokens[cursor] == left
+        depth = 1
+        while depth:
+            cursor += 1
+            depth += (tokens[cursor] == left) - (tokens[cursor] == right)
+        return cursor
+
+    def undeclared(tokens):
+        params_end = matching(tokens, 1, "(", ")")
+        body_start = params_end + 1
+
+        def function_scopes(start, end, inherited):
+            declared = set(inherited)
+            for token in tokens[2:params_end] if start == body_start else []:
+                if identifier.fullmatch(token):
+                    declared.add(token)
+            nested = []
+            cursor = start + 1
+            while cursor < end:
+                if tokens[cursor] != "function":
+                    cursor += 1
+                    continue
+                param = cursor + 1
+                name = None
+                if tokens[param] != "(":
+                    name = tokens[param]
+                    param += 1
+                param_end = matching(tokens, param, "(", ")")
+                child_start = param_end + 1
+                child_end = matching(tokens, child_start, "{", "}")
+                child_params = {token for token in tokens[param + 1:param_end] if identifier.fullmatch(token)}
+                if name:
+                    child_params.add(name)
+                nested.append((cursor, child_end, child_start, child_params))
+                cursor = child_end + 1
+            hidden = {(left, right) for left, right, _, _ in nested}
+            hidden_starts = {left: right for left, right in hidden}
+
+            def visible(index):
+                return not any(left <= index <= right for left, right in hidden)
+
+            cursor = start + 1
+            while cursor < end:
+                if not visible(cursor) or tokens[cursor] not in ("var", "let", "const"):
+                    cursor += 1
+                    continue
+                cursor += 1
+                stack = []
+                expects_name = True
+                while cursor < end:
+                    if cursor in hidden_starts:
+                        cursor = hidden_starts[cursor] + 1
+                        continue
+                    if not visible(cursor):
+                        cursor += 1
+                        continue
+                    candidate = tokens[cursor]
+                    if not stack and candidate == ";":
+                        break
+                    if expects_name and identifier.fullmatch(candidate):
+                        declared.add(candidate)
+                        expects_name = False
+                    if candidate in ("(", "[", "{"):
+                        stack.append(candidate)
+                    elif candidate in (")", "]", "}"):
+                        if not stack:
+                            break
+                        stack.pop()
+                    elif not stack and candidate == ",":
+                        expects_name = True
+                    cursor += 1
+            assigned = set()
+            assignment = {"=", "+=", "-=", "*=", "/=", "%=", "&&=", "||=", "??="}
+            for cursor, token in enumerate(tokens[start + 1:end], start + 1):
+                if not visible(cursor) or not identifier.fullmatch(token) or tokens[cursor - 1] in (".", "?."):
+                    continue
+                previous = tokens[cursor - 1]
+                following = tokens[cursor + 1] if cursor + 1 < len(tokens) else None
+                if following in assignment or following in ("++", "--") or previous in ("++", "--"):
+                    assigned.add(token)
+            missing = assigned - declared
+            for _, _, child_start, child_params in nested:
+                child_end = matching(tokens, child_start, "{", "}")
+                missing |= function_scopes(child_start, child_end, declared | child_params)
+            return missing
+
+        return function_scopes(body_start, matching(tokens, body_start, "{", "}"), set())
+
+    source = live_runtime._LINE_DRAW_METHODS.decode()
+    methods = split_methods(source)
+    assert {name: undeclared(tokens) for name, tokens in methods.items()} == {name: set() for name in methods}
+    broken = source.replace("var e=null,t=null,i=null,o=null,d,U,K;", "var e=null,t=null,i=null,o=null;", 1)
+    assert undeclared(split_methods(broken)["__obedLineDrawApply"]) == {"d", "U", "K"}
+    nested = source.replace("var e=null,t=null,i=null,o=null,d,U,K;",
+                            "function(x){}try{}catch(err){}x=1;err=1;var e=null,t=null,i=null,o=null,d,U,K;", 1)
+    assert undeclared(split_methods(nested)["__obedLineDrawApply"]) == {"x", "err"}
+
+
+@pytest.mark.parametrize("case,expected", [("positive-line", True), ("positive-arrow", True), ("fill", False),
+                                             ("second-contour", False), ("key-times", False), ("direction", False),
+                                             ("ancestor-animation", False), ("tail-arrow", False)])
+def test_line_draw_admission_table(case, expected):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required to exercise Line Draw admission")
+    identity = {
+        "masksToBounds": False, "affineTransform": [1, 0, 0, 1, 0, 0],
+        "sublayerTransform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+        "scale": 1, "rotation": 0, "contentsRect": {"x": 0, "y": 0, "width": 1, "height": 1},
+    }
+    child = lambda prop, start, end, **extra: {
+        "property": prop, "from": {"scalar": start}, "to": {"scalar": end}, "beginTime": 0,
+        "timeOffset": 0, "repeatCount": 0, "autoreverses": False, "additive": False, "duration": 0.8, **extra,
+    }
+    leaf = {
+        "initialState": identity, "layers": [],
+        "animations": [{"beginTime": 0, "duration": 0.8, "timeOffset": 0, "repeatCount": 0,
+                        "autoreverses": False,
+                        "animations": [child("opacity", 0, 1, timingFunction="EaseInEaseOut"),
+                                       child("hidden", False, False)]}],
+        "texturedRectangle": {
+            "textureType": 5, "isBackgroundTexture": True,
+            "shapePath": {"elements": [
+                {"type": "MoveToPoint", "points": [[0, 0]]}, {"type": "AddLine", "points": [[10, 0]]},
+                {"type": "AddLine", "points": [[10, 10]]}, {"type": "AddLine", "points": [[0, 10]]},
+                {"type": "CloseSubpath"}, {"type": "MoveToPoint", "points": [[0, 0]]},
+            ]},
+            "repGenerationDictionary": {"strokePattern": [], "strokeWidth": 2},
+        },
+    }
+    effect = {"name": "com.apple.iWork.Keynote.LineDraw", "type": "buildIn", "duration": 0.8,
+              "attributes": {"direction": 31, "sfx-action-acceleration": 3},
+              "kpfLayer": {"initialState": identity, "layers": [leaf]}}
+    mutations = {
+        "positive-line": "",
+        "positive-arrow": "e.name='com.apple.iWork.Keynote.LineDrawForLine';e.attributes={direction:51,'sfx-action-acceleration':3,KNBuildCustomAttributesIncludeEndpoints:true};e.kpfLayer.layers[0].texturedRectangle.shapePath.elements.splice(4,2);e.kpfLayer.layers[0].texturedRectangle.repGenerationDictionary.headLineEndIdentifier='filled arrow';",
+        "fill": "",
+        "second-contour": "e.kpfLayer.layers[0].texturedRectangle.shapePath.elements.splice(2,0,{type:'MoveToPoint',points:[[3,3]]});",
+        "key-times": "e.kpfLayer.layers[0].animations[0].animations[0].keyTimes=[0,1];",
+        "direction": "e.attributes.direction=17;",
+        "ancestor-animation": "e.kpfLayer.animations=[{property:'opacity'}];",
+        "tail-arrow": "e.name='com.apple.iWork.Keynote.LineDrawForLine';e.attributes={direction:51,'sfx-action-acceleration':3,KNBuildCustomAttributesIncludeEndpoints:true};e.kpfLayer.layers[0].texturedRectangle.shapePath.elements.splice(4,2);e.kpfLayer.layers[0].texturedRectangle.repGenerationDictionary.headLineEndIdentifier='filled arrow';e.kpfLayer.layers[0].texturedRectangle.repGenerationDictionary.tailLineEndIdentifier='filled arrow';",
+    }
+    coverage = ""
+    if case == "fill":
+        coverage = "var d=new Uint8Array(11*11*4);for(var i=3;i<d.length;i+=4)d[i]=255;ok=!!t.__obedLinePixels(e.__obedLineDraw.geo,d,11,11,1,2.5,false);"
+    script = (
+        "class T{" + live_runtime._LINE_DRAW_METHODS.decode() + "}"
+        f"const e={json.dumps(effect)};const p={{}},l=e.kpfLayer.layers[0];"
+        "l.__obedLineCanvas={parentNode:p};l.__obedLineWrapper=p;"
+        + mutations[case]
+        + "const t=new T;t.__obedLineDrawAdmit(e);var ok=!!e.__obedLineDraw;"
+        + coverage
+        + "console.log(JSON.stringify(ok));"
+    )
+    result = subprocess.run([node, "-e", script], check=True, text=True, capture_output=True)
+    assert json.loads(result.stdout) is expected
 
 
 def test_handback_anchors_are_unique_on_the_synthetic_player(monkeypatch):
@@ -405,10 +607,10 @@ def test_handback_and_dissolve_anchors_sit_at_their_offsets_on_the_real_player(s
     for before, offsets in ANCHOR_OFFSETS.items():
         assert player.count(before) == 1
         assert player.find(before) == offsets[column]
-    # §6.1: the hook and all thirteen anchors are 14 disjoint byte intervals of the stock player.
+    # The hook and all nineteen anchors are twenty disjoint byte intervals of the stock player.
     anchors = [live_runtime._ANCHOR] + [before for before, _ in live_runtime._MM_OPACITY_REPLACEMENTS]
     intervals = sorted((player.find(anchor), player.find(anchor) + len(anchor)) for anchor in anchors)
-    assert len(intervals) == 14
+    assert len(intervals) == 20
     assert all(end <= start for (_, end), (start, _) in zip(intervals, intervals[1:]))
     patched = live_runtime.patch_player(player)
     for before, after in live_runtime._MM_OPACITY_REPLACEMENTS[HANDBACK.start : DISSOLVE.stop]:
@@ -418,7 +620,8 @@ def test_handback_and_dissolve_anchors_sit_at_their_offsets_on_the_real_player(s
     assert b"0===tx" not in patched
     # The qualified colour tuple is spliced in once; identity tone (decision 10) adds no tone table and no pixel writeback.
     assert patched.count(b"Q=" + live_runtime._FREEZE_QUALIFIED_TUPLES + b",") == 1
-    assert b"__obedLut" not in patched and patched.count(b"putImageData") == player.count(b"putImageData")
+    assert b"__obedLut" not in patched
+    assert patched.count(b"putImageData") == player.count(b"putImageData") + live_runtime._LINE_DRAW_METHODS.count(b"putImageData")
     off = live_runtime.patch_player(player, mm_opacity=False)
     for marker in (b"obedMix", b"__obedHandbackTextures", b"obedDissolve", b"__obedFreeze", b"__obedShape"):
         assert marker not in off
@@ -557,9 +760,10 @@ def test_opacity_handback_and_dissolve_replacements_compose_in_every_order(monke
         for before, _ in replacements:
             assert before not in after
     groups = (
-        replacements[: HANDBACK.start] + replacements[DISSOLVE.stop :],
+        replacements[: HANDBACK.start] + replacements[DISSOLVE.stop : LINE_DRAW.start],
         replacements[HANDBACK],
         replacements[DISSOLVE],
+        replacements[LINE_DRAW],
     )
     outputs = {_apply_in_order(player, [r for group in order for r in group]) for order in itertools.permutations(groups)}
     assert outputs == {live_runtime.patch_rendering(player)}
