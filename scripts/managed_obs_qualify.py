@@ -3276,9 +3276,16 @@ def placement_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dic
             parent_path.write_text(json.dumps(parent))
         check(checks, f"{name}: every capture attempt", attempts, attempts["verdict"] == "PASS", "PASS")
     for name in ("probe-chrome-gpu", "probe-chrome-software"):
-        encoded = (runs.get(name) or ({}, None))[0].get("placementCalibration") or {}
-        rescored = score_placement_calibration(encoded, Path(sessions.get(name, {}).get("runDir", ".")))
-        observed = ((rescored.get("gates") or {}).get("probe-chrome-harness") or {}).get("verdict")
+        observed = "INCONCLUSIVE"
+        run_dir_value = (sessions.get(name) or {}).get("runDir")
+        if run_dir_value:
+            run_dir = Path(run_dir_value)
+            try:
+                record = json.loads((run_dir / "record.json").read_text())
+                rescored = score_placement_calibration(record.get("placementCalibration") or {}, run_dir)
+                observed = ((rescored.get("gates") or {}).get("probe-chrome-harness") or {}).get("verdict")
+            except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError, AttributeError):
+                pass
         check(checks, f"{name}: classifier", observed, observed == "PASS", "PASS")
     verdict = dissolve_probe.score_runs(runs, decision, cal or dissolve_probe.Calibration(),
                                         profile=dissolve_probe.CEF_PLACEMENT, lut=lut)

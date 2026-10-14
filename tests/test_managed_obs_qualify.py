@@ -2231,7 +2231,12 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
             for name in (*q.PLACEMENT_ARMS, "probe-chrome-gpu", "probe-chrome-software"):
                 session_dir = gate_root / name
                 session_dir.mkdir(parents=True, exist_ok=True)
-                if name == "m-snap-cef-dsk":
+                if name.startswith("probe-chrome-"):
+                    encoded, _ = _placement_calibration(
+                        session_dir, "chrome-harness", gpu=name == "probe-chrome-gpu")
+                    session_dir /= "chrome-harness"
+                    (session_dir / "record.json").write_text(json.dumps({"placementCalibration": encoded}))
+                elif name == "m-snap-cef-dsk":
                     attempts = []
                     for attempt in (1, 2):
                         attempt_dir = session_dir / f"attempt-{attempt}"
@@ -2249,9 +2254,11 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
             with monkeypatch.context() as gate_patch:
                 rescored_paths = []
 
-                def passing_calibration(_encoded, run_dir, **_kwargs):
+                def passing_calibration(encoded, run_dir, **_kwargs):
                     rescored_paths.append(Path(run_dir))
-                    return {"overall": "PASS", "gates": {"probe-chrome-harness": {"verdict": "PASS"}}}
+                    chrome = Path(run_dir).name not in q.PLACEMENT_ARMS and not Path(run_dir).name.startswith("attempt-")
+                    verdict = "PASS" if not chrome or encoded.get("backend") == "chrome-harness" else "INCONCLUSIVE"
+                    return {"overall": verdict, "gates": {"probe-chrome-harness": {"verdict": verdict}}}
 
                 gate_patch.setattr(q.dissolve_probe, "launch_lut",
                                    lambda *_args, **_kwargs: ({}, {"kind": "identity", "samples": 1, "problems": []}))
@@ -2261,6 +2268,11 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
                 gate_patch.setattr(q.dissolve_probe, "score_runs", lambda *_args, **_kwargs: {
                     "gates": {}, "arms": {name: "MATCH" for name in q.PLACEMENT_ARMS}, "overall": "PASS"})
                 placement_gate = q.placement_gates({"sessions": gate_sessions}, None)["CEF-placement"]
+                missing_chrome_record = [dict(session) for session in gate_sessions]
+                next(session for session in missing_chrome_record
+                     if session["session"] == "probe-chrome-gpu")["runDir"] = str(gate_root / "missing-chrome")
+                missing_chrome_gate = q.placement_gates(
+                    {"sessions": missing_chrome_record}, None)["CEF-placement"]
                 missing_run_dir = [dict(session) for session in gate_sessions]
                 next(session for session in missing_run_dir
                      if session["session"] == q.PLACEMENT_ARMS[0]).pop("runDir")
@@ -2270,6 +2282,12 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
                 q.placement_gates({"sessions": missing_run_dir}, None)
             assert placement_gate["verdict"] == "PASS"
             assert checks_of(placement_gate)["every placement session ran"]["ok"] is True
+            assert checks_of(placement_gate)["probe-chrome-gpu: classifier"]["value"] == "PASS"
+            assert checks_of(placement_gate)["probe-chrome-software: classifier"]["value"] == "PASS"
+            assert checks_of(missing_chrome_gate)["probe-chrome-gpu: classifier"] == {
+                "check": "probe-chrome-gpu: classifier", "value": "INCONCLUSIVE", "limit": "PASS",
+                "ok": False, "enforced": True,
+            }
             assert {path.name for path in rescored_paths if path.parent.name == "m-snap-cef-dsk"} == {
                 "attempt-1", "attempt-2"}
             assert not (empty_cwd / "record.json").exists()
