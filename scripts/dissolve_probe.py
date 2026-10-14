@@ -238,7 +238,8 @@ DSK_PLAYER_SRC_ANCHORS = (
     (b'A.setAttribute("src",this.src),this.showControls', 1),
     (b'const Q=C.url.native;return null!=Q', 2),
 )
-NOOFFSET_Y_DISPLACEMENT = 125.0
+NOOFFSET_X_DISPLACEMENT = -80.0
+NOOFFSET_Y_DISPLACEMENT = -80.0
 
 
 @dataclass(frozen=True)
@@ -454,10 +455,12 @@ ARMS["wrongrule-cef"] = replace(ARMS["m-snap-cef"], placement_value="snap", expe
                                       twin="wrongrule-cef-twin")
 ARMS["wrongrule-cef-twin"] = replace(ARMS["m-snap-cef-twin"], placement_value="snap")
 ARMS["m-snap-cef-nooffset-x"] = replace(ARMS["m-snap-cef-near-x"], splice="frac-nooffset-x",
+                                              overrides=("nooffsetx",),
                                               counter_strip="displaced-x",
                                               expect={**_SNAP_EXPECT, "holder_pixels": "FAIL"}, twin="m-snap-cef-nooffset-x-twin")
 ARMS["m-snap-cef-nooffset-x-twin"] = replace(
-    ARMS["m-snap-cef-near-x-twin"], splice="frac-nooffset-x+fg-omit", counter_strip="displaced-x"
+    ARMS["m-snap-cef-near-x-twin"], overrides=("nooffsetx",), splice="frac-nooffset-x+fg-omit",
+    counter_strip="displaced-x"
 )
 ARMS["m-snap-cef-nooffset-y"] = replace(ARMS["m-snap-cef-near-y"], splice="frac-nooffset-y",
                                               overrides=("nooffsety",),
@@ -1456,15 +1459,24 @@ def _dsk_counter(doc: dict[str, Any], event: int) -> None:
                 urls["web"] = urls["native"]
 
 
-def _nooffset_y(doc: dict[str, Any], event: int) -> None:
-    _clip_near("y")(doc, event)
+def _nooffset(doc: dict[str, Any], event: int, axis: str, displacement: float) -> None:
+    _clip_near(axis)(doc, event)
     hits = [(n, p) for b in _effects(doc["events"]) for n, p in _layers(b["baseLayer"]) if n.get("isVideoLayer")]
     if len(hits) != 1 or hits[0][1] is None:
         raise ValueError("expected one video layer with a parent in the slide's renderMovie builds")
     video, parent = (node["initialState"] for node in hits[0])
-    parent_top = parent["position"]["pointY"] - parent["anchorPoint"]["pointY"] * parent["height"]
-    video_top = parent_top + video["position"]["pointY"] - video["anchorPoint"]["pointY"] * video["height"]
-    parent["position"] = {**parent["position"], "pointY": parent["position"]["pointY"] + NOOFFSET_Y_DISPLACEMENT - video_top}
+    size, coord = ("width", "pointX") if axis == "x" else ("height", "pointY")
+    parent_near = parent["position"][coord] - parent["anchorPoint"][coord] * parent[size]
+    video_near = parent_near + video["position"][coord] - video["anchorPoint"][coord] * video[size]
+    parent["position"] = {**parent["position"], coord: parent["position"][coord] + displacement - video_near}
+
+
+def _nooffset_x(doc: dict[str, Any], event: int) -> None:
+    _nooffset(doc, event, "x", NOOFFSET_X_DISPLACEMENT)
+
+
+def _nooffset_y(doc: dict[str, Any], event: int) -> None:
+    _nooffset(doc, event, "y", NOOFFSET_Y_DISPLACEMENT)
 
 
 def _scale(doc: dict[str, Any], event: int) -> None:
@@ -1481,6 +1493,7 @@ def _base(doc: dict[str, Any], event: int) -> None:
 SLIDE_OVERRIDES: dict[str, Callable[[dict[str, Any], int], None]] = {"cut": _cut, "automatic": _automatic, "fg": _foreground,
                                                                     "edgefg": _edge_foreground,
                                                                     "dskcounter": _dsk_counter,
+                                                                    "nooffsetx": _nooffset_x,
                                                                     "nooffsety": _nooffset_y,
                                                                     "scale": _scale, "base": _base, "clipx": _clip("x"), "clipy": _clip("y"),
                                                                     "clipnearx": _clip_near("x"), "clipneary": _clip_near("y")}
@@ -2029,6 +2042,10 @@ def score_frozen(holder_index: int | None, reference: int | None, demixed: list[
     return result(ok, problems, holder=holder_index, reference=reference, demixed=demixed)
 
 
+def _demix_limit(cal: Calibration, e: float) -> float:
+    return cal.tau / (1 - e)
+
+
 def score_region(regions: list[np.ndarray], es: list[float], cal: Calibration = Calibration()) -> dict[str, Any]:
     """Ô (unclipped premultiplied RGBA) over the movie region constant across admitted frames: per frame
     max |Ô - median| <= tau / (1 - e) on every channel, alpha included."""
@@ -2039,15 +2056,20 @@ def score_region(regions: list[np.ndarray], es: list[float], cal: Calibration = 
         return result(None, ["empty or non-finite demixed region"])
     med = np.median(stack, axis=0)
     spreads = [float(np.abs(s - med).max()) for s in stack]
-    return result(all(s <= cal.tau / (1 - e) for s, e in zip(spreads, es)), spreads=spreads)
+    return result(all(s <= _demix_limit(cal, e) for s, e in zip(spreads, es)), spreads=spreads)
 
 
 def score_foreground(candidates: list[np.ndarray], s_live: np.ndarray, mask: np.ndarray,
-                     cal: Calibration = Calibration()) -> dict[str, Any]:
+                     cal: Calibration = Calibration(), *, demix_es: list[float] | None = None) -> dict[str, Any]:
     if not mask.any():
         return result(None, ["no counter-block pixel under the foreground"])
-    worst = max(float(np.abs(c[..., :3].astype(np.float32) - s_live[..., :3])[mask].max()) for c in candidates)
-    return result(worst <= cal.tau, worst=worst, pixels=int(mask.sum()))
+    es = demix_es or []
+    if len(candidates) != len(es) + 1 or not all(number(e) and 0 <= e < 1 for e in es):
+        return result(None, ["foreground candidates do not match finite demix progress"])
+    worsts = [float(np.abs(c[..., :3].astype(np.float32) - s_live[..., :3])[mask].max()) for c in candidates]
+    limits = [cal.tau, *(_demix_limit(cal, e) for e in es)]
+    return result(all(worst <= limit for worst, limit in zip(worsts, limits)), worst=max(worsts), worsts=worsts,
+                  limits=limits, pixels=int(mask.sum()))
 
 
 def score_tone(holder: np.ndarray, s_live: np.ndarray, s_live2: np.ndarray, mask: np.ndarray, *, identity: bool) -> dict[str, Any]:
@@ -2329,8 +2351,9 @@ def score_displaced_holder(a0: np.ndarray | None, live: np.ndarray | None, holde
     index = 0 if axis == "x" else 1
     displacement_css = decoder["rect"][index] - stage[axis]
     displacement_px = displacement_css * dsf
-    if displacement_px <= 0:
-        return result(None, [f"predicted {axis} displacement is not positive"], displacementCss=displacement_css)
+    if abs(displacement_px) < 1:
+        return result(None, [f"predicted {axis} displacement is less than one device pixel"],
+                      displacementCss=displacement_css, displacementPx=displacement_px)
     canvas = holder["canvasRect"]
     shifted = list(decoder["content"])
     shifted[index] -= displacement_css
@@ -3421,7 +3444,8 @@ def score_media(record: dict[str, Any], images: Mapping[str, np.ndarray], ev: Ev
     fg_rects = device_rects([c["rect"] for c in later if c.get("id") in (*FOREGROUND_TEXTURES, FOREGROUND_SQUARE)], arm.dsf)
     fg_mask = block_mask(shape, origin, scale) & rect_mask(shape, fg_rects)
     pair = [r for r in fg_rects if any(overlaps(r, q) for q in fg_rects if q is not r)]
-    fg = score_foreground([ev.holders[0], *[straight(o) for o in demixed]], live, fg_mask, cal)
+    fg = score_foreground([ev.holders[0], *[straight(o) for o in demixed]], live, fg_mask, cal,
+                          demix_es=[es[i] for i in idx] if ev.B is not None else [])
     if not (rect_mask(shape, pair) & fg_mask).any():
         fg = result(None, ["foreground layers do not overlap over the counter blocks"] + fg["problems"])
     out["foreground"] = _voided(fg, problems)

@@ -308,13 +308,14 @@ def test_mm_opacity_anchors_are_unique_on_the_real_player():
 # and old True 21476f78... with R1-R5. New False: recorded when the new player was admitted.
 # Line Draw (R14-R20) merged with CEF frac placement: main had aa0ae4bb... / 134114e0... and rendering 416613aa... /
 # 7d9eb308...; the placement branch had 63c328b2... / 7b0af749... and rendering a117b3ee... / 2432c819....
+# The frac boundary repair replaces True e57025c3... / bff8f5ae...; False and rendering remain unchanged.
 REAL_PATCHED_SHA256 = {
     OLD_PLAYER_SHA256: {
-        True: "e57025c3047b2d842fdb10ff550851d1609c65707f0b9b59663cd9146e583b5b",
+        True: "d3ddd770dae1cd4aeb67a68a7e6aa12ef3d890b5ce4cd1cb19db81ec5e709d54",
         False: "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
     },
     NEW_PLAYER_SHA256: {
-        True: "bff8f5ae786e0f8ce15b955b4f21e3c06556be2ae44b988d60b9711a4b64021d",
+        True: "1036a8e26fae661c0cde23291f1726643bfb7aa0e781b7f95da1739c7cda3732",
         False: "4f9fbffd95e4649543142b2e95586babd9d75f0a0d9a4974e21d6f33c8389e3b",
     },
 }
@@ -649,10 +650,18 @@ def test_handback_and_dissolve_anchors_sit_at_their_offsets_on_the_real_player(s
     assert patched.count(b"putImageData") == player.count(b"putImageData") + live_runtime._LINE_DRAW_METHODS.count(b"putImageData")
     assert patched.count(b"pl=window.__obedPlacement") == 1
     snap_draw = b'g=x.getContext("2d");g.drawImage(v,dx,dy,dw,dh);'
-    frac_draw = b'g.drawImage(v,fx,fy,Math.round(cw),Math.round(ch2))}'
+    frac_draw = b'g.drawImage(v,fx,fy,fw,fh)}'
     alpha_scan = b"for(d=g.getImageData(0,0,ww,hh).data,j=3;j<d.length;"
-    assert patched.count(snap_draw) == patched.count(frac_draw) == patched.count(alpha_scan) == 1
+    boundary_draw = b"g.drawImage(v,0,sy[ei],vw,1,fx,ey[ei],fw,1)"
+    foreground_draw = b"Y.forEach(function(y)"
+    centre_guard = b"if(fx>.5||fy>.5||fx+fw<ww-.5||fy+fh<hh-.5)return;"
+    partial_cells = b"if(ei<fx||ei+1>fx+fw)ex.push(ei)"
+    assert all(patched.count(marker) == 1 for marker in (
+        snap_draw, frac_draw, alpha_scan, boundary_draw, foreground_draw, centre_guard, partial_cells
+    ))
     assert patched.index(snap_draw) < patched.index(frac_draw) < patched.index(alpha_scan)
+    assert patched.index(alpha_scan) < patched.index(boundary_draw) < patched.index(foreground_draw)
+    assert b"ei===0||ei===ww-1" not in patched and b"ei===0||ei===hh-1" not in patched
     off = live_runtime.patch_player(player, mm_opacity=False)
     for marker in (b"obedMix", b"__obedHandbackTextures", b"obedDissolve", b"__obedFreeze", b"__obedShape"):
         assert marker not in off
@@ -1873,9 +1882,25 @@ def _fractional(vrect, clip=(0, 0, 1920, 1080), natural=(1920, 540), video="vid"
     u0, v0 = _round(cx), _round(cy)
     a0, b0 = _round(max(clip[0], cx)), _round(max(clip[1], cy))
     dx, dy = u0 - a0, v0 - b0
-    fx = round(dx + vrect[0] + _round(cx - vrect[0]) - u0, 6)
-    fy = round(dy + vrect[1] + _round(cy - vrect[1]) - v0, 6)
-    trace.insert(1, ["video", video, fx, fy, _round(cw), _round(ch)])
+    fx = dx + vrect[0] + _round(cx - vrect[0]) - u0
+    fy = dy + vrect[1] + _round(cy - vrect[1]) - v0
+    fw, fh = _round(cw), _round(ch)
+    snapped, scan = trace
+    ww, hh = scan[3:]
+    if fx > 0.5 or fy > 0.5 or fx + fw < ww - 0.5 or fy + fh < hh - 0.5:
+        return [], [snapped]
+    def r6(value: float) -> float:
+        return math.floor(value * 1e6 + 0.5) / 1e6
+
+    trace = [snapped, ["video", video, r6(fx), r6(fy), fw, fh], scan]
+    ex = [e for e in range(ww) if e < fx or e + 1 > fx + fw]
+    ey = [e for e in range(hh) if e < fy or e + 1 > fy + fh]
+    sx = [r6(max(0, min(natural[0] - 1, (e + 0.5 - fx) * natural[0] / fw - 0.5))) for e in ex]
+    sy = [r6(max(0, min(natural[1] - 1, (e + 0.5 - fy) * natural[1] / fh - 0.5))) for e in ey]
+    trace.extend([["video", video, 0, sy[i], natural[0], 1, r6(fx), e, fw, 1] for i, e in enumerate(ey)])
+    trace.extend([["video", video, sx[i], 0, 1, natural[1], e, r6(fy), 1, fh] for i, e in enumerate(ex)])
+    trace.extend([["video", video, sx[i], sy[j], 1, 1, x, y, 1, 1]
+                  for i, x in enumerate(ex) for j, y in enumerate(ey)])
     return holder, trace
 
 
@@ -1887,9 +1912,23 @@ def _redraw(element: str, rect, alpha=1, origin=(109, 795)) -> list:
 
 DEFAULT = _snapped([109, 795, 952, 268])
 FRAC_DEFAULT = _fractional([109, 795, 952, 268])
-FRAC_BOX = [109.352, 795.036, 952, 268]
+FRAC_BOX = [109.3517074584961, 795.0361938476562, 951.53125, 267.60943603515625]
 FRAC = _fractional(FRAC_BOX)
 FRAC_CLIP = _fractional(FRAC_BOX, [300, 850, 500, 150])
+FRAC_OUTSIDE_CENTRE_BOX = [108.53, 795, 952.45, 267.6065625]
+FRAC_OUTSIDE_CENTRE = _fractional(FRAC_OUTSIDE_CENTRE_BOX)
+FRAC_RIGHT_BOTTOM_BOX = [108.7, 794.7, 952, 268]
+FRAC_RIGHT_BOTTOM = (
+    ["absolute/hidden", "109,795,952,268", "952x268", "absolute", "0,0,952,268"],
+    [
+        ["video", "vid", 0, 0, 952, 268],
+        ["video", "vid", -0.3, -0.3, 952, 268],
+        ["get", 0, 0, 952, 268],
+        ["video", "vid", 0, 539, 1920, 1, -0.3, 267, 952, 1],
+        ["video", "vid", 1919, 0, 1, 540, 951, -0.3, 1, 268],
+        ["video", "vid", 1919, 539, 1, 1, 951, 267, 1, 1],
+    ],
+)
 DPR2 = _snapped([109, 795, 952, 268], dpr=2)
 DPR15 = _snapped([109, 795, 952, 268], dpr=1.5)
 DPR15_FILL = _snapped([109, 795, 313, 263], natural=None, dpr=1.5)
@@ -1930,7 +1969,7 @@ def _hidden_parent(**effects) -> dict:
     return {"cs": {"visibility": "hidden", **effects}, "rect": [-300, 0, 200, 1080]}
 
 
-FREEZE_ROW_COUNT = 283
+FREEZE_ROW_COUNT = 286
 # name -> (stub options, expected take/attach count and target, redraws [id, alpha, x, y, w, h], writeback (none on any
 # path: identity tone), geometry).
 FREEZE_ROWS = {
@@ -2141,8 +2180,16 @@ FREEZE_ROWS = {
     "gate_grantInvalid": ({"placement": "invalid"}, FREEZE_SKIP),
     "gate_grantFrac": ({"placement": "frac"}, dict(FREEZE_ADMIT, traces=[FRAC_DEFAULT[1]])),
     "gate_grantUpperSnap": ({"placement": "SNAP"}, FREEZE_SKIP),
-    "fracFractionalXY": ({"placement": "frac", "vrect": FRAC_BOX},
-                           dict(FREEZE_ADMIT, holders=[FRAC[0]], traces=[FRAC[1]])),
+    "fracFractionalXY": ({"placement": "frac", "vrect": FRAC_BOX, "fg": _fg()},
+                           dict(FREEZE_ADMIT, holders=[FRAC[0]], draws=[FG_REDRAW[1:]],
+                                traces=[FRAC[1] + [FG_REDRAW]])),
+    "fracOutsidePixelCentre": ({"placement": "frac", "vrect": FRAC_OUTSIDE_CENTRE_BOX},
+                                dict(FREEZE_SKIP, traces=[FRAC_OUTSIDE_CENTRE[1]])),
+    "fracRightBottomRepair": ({"placement": "frac", "vrect": FRAC_RIGHT_BOTTOM_BOX},
+                                dict(FREEZE_ADMIT, holders=[FRAC_RIGHT_BOTTOM[0]],
+                                     traces=[FRAC_RIGHT_BOTTOM[1]])),
+    "fracAlphaRejected": ({"placement": "frac", "vrect": FRAC_BOX, "alphaAt": 0, "alphaVal": 0},
+                           dict(FREEZE_SKIP, traces=[FRAC[1][:3]])),
     "fracClipNearXY": ({"placement": "frac", "vrect": FRAC_BOX,
                          "layerCs": {"overflowX": "hidden", "overflowY": "hidden"}, "clip": [300, 850, 500, 150]},
                         dict(FREEZE_ADMIT, holders=[FRAC_CLIP[0]], traces=[FRAC_CLIP[1]])),
@@ -2427,11 +2474,18 @@ def test_dissolve_real_patched_methods_on_node(tmp_path, sha, case):
             assert not row["placeChanged"] and row["badHolders"] == 0, name
             # The cost is the take's whole deterministic work (every style read, frame, draw, readback and redraw).
             assert row["ms"] == row["windowMs"] == row["work"], name
-            # Each snapshot canvas runs video draw -> whole-backing readback -> foreground redraws, in that order, and
-            # never writes pixels back (identity tone).
+            # Each snapshot canvas keeps the snapped/frac draws before the whole-backing readback. Frac repair draws
+            # follow a successful readback and precede foreground redraws; alpha rejection performs no repair draws.
             for trace in row["traces"]:
                 kinds = "".join({"video": "v", "get": "g", "put": "p", "fg": "f"}[op[0]] for op in trace)
-                assert re.fullmatch(r"(v{1,2}(gf*)?)?", kinds), (name, kinds)
+                if name == "fracFractionalXY":
+                    assert kinds == "vvgvvvf", (name, kinds)
+                elif name == "fracRightBottomRepair":
+                    assert kinds == "vvgvvv", (name, kinds)
+                elif name == "fracAlphaRejected":
+                    assert kinds == "vvg", (name, kinds)
+                else:
+                    assert re.fullmatch(r"(v{1,2}(gf*)?)?", kinds), (name, kinds)
             assert row["put"] is None and row["partialReads"] == 0, name
             assert row["slotCleared"] and row["vfOpened"] == row["vfClosed"], name
             if name.startswith(("gate_grant", "frac")) and name != "gate_grantAbsent":

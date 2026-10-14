@@ -10,12 +10,12 @@ MM_OPACITY_ENV = "OBED_LIVE_MM_OPACITY"
 # 17c0c938 is e9b2fad4 plus two `,isEvalSupported:!1` PDF.js options, outside every anchor.
 SUPPORTED_PLAYERS = {
     "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354": (
-        "e57025c3047b2d842fdb10ff550851d1609c65707f0b9b59663cd9146e583b5b",
+        "d3ddd770dae1cd4aeb67a68a7e6aa12ef3d890b5ce4cd1cb19db81ec5e709d54",
         "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
         "8202717a2699a2e4691aac6848675e3636f5d26ac1336f9ae6faba0a48cc72dd",
     ),
     "17c0c938caa49d5c70bd83bd5b84f57381faa51602932ca733aa965055026d91": (
-        "bff8f5ae786e0f8ce15b955b4f21e3c06556be2ae44b988d60b9711a4b64021d",
+        "1036a8e26fae661c0cde23291f1726643bfb7aa0e781b7f95da1739c7cda3732",
         "4f9fbffd95e4649543142b2e95586babd9d75f0a0d9a4974e21d6f33c8389e3b",
         "c0faaa3c99c88705931f686d96d4e891a8d10b6b59aa2da62faae5cf56b2c4fc",
     ),
@@ -156,9 +156,15 @@ _DISSOLVE_METHODS = (
     b"ww=Math.round((a1-a0)/kx*p),hh=Math.round((b1-b0)/ky*p),dx=(u0-a0)/kx*p,dy=(v0-b0)/ky*p,dw=(u1-u0)/kx*p,"
     b'dh=(v1-v0)/ky*p,x,g,d,j;if(ww<1||hh<1)return;x=document.createElement("canvas");x.width=ww,x.height=hh;'
     b'g=x.getContext("2d");g.drawImage(v,dx,dy,dw,dh);if("frac"===pl){var fx=dx+(r.left-R.left)'
-    b'+Math.round(cx-r.left)-u0,fy=dy+(r.top-R.top)+Math.round(cy-r.top)-v0;'
-    b'g.drawImage(v,fx,fy,Math.round(cw),Math.round(ch2))}for(d=g.getImageData(0,0,ww,hh).data,j=3;j<d.length;'
-    b"j+=4)if(d[j]<255)return;Y.forEach(function(y){var l=sn(y[1].left,R.left,kx),m=sn(y[1].top,R.top,ky);"
+    b'+Math.round(cx-r.left)-u0,fy=dy+(r.top-R.top)+Math.round(cy-r.top)-v0,fw=Math.round(cw),'
+    b'fh=Math.round(ch2);if(fx>.5||fy>.5||fx+fw<ww-.5||fy+fh<hh-.5)return;g.drawImage(v,fx,fy,fw,fh)}'
+    b'for(d=g.getImageData(0,0,ww,hh).data,j=3;j<d.length;j+=4)if(d[j]<255)return;if("frac"===pl){var ex=[],'
+    b'ey=[],ei,ej;for(ei=0;ei<ww;ei++)if(ei<fx||ei+1>fx+fw)ex.push(ei);for(ei=0;ei<hh;ei++)if(ei<fy||'
+    b'ei+1>fy+fh)ey.push(ei);var sx=ex.map(function(e){return Math.max(0,Math.min(vw-1,(e+.5-fx)*vw/fw-.5))}),'
+    b'sy=ey.map(function(e){return Math.max(0,Math.min(vh-1,(e+.5-fy)*vh/fh-.5))});for(ei=0;ei<ey.length;'
+    b'ei++)g.drawImage(v,0,sy[ei],vw,1,fx,ey[ei],fw,1);for(ei=0;ei<ex.length;ei++)g.drawImage(v,sx[ei],0,1,'
+    b'vh,ex[ei],fy,1,fh);for(ei=0;ei<ex.length;ei++)for(ej=0;ej<ey.length;ej++)g.drawImage(v,sx[ei],sy[ej],'
+    b'1,1,ex[ei],ey[ej],1,1)}Y.forEach(function(y){var l=sn(y[1].left,R.left,kx),m=sn(y[1].top,R.top,ky);'
     b"g.globalAlpha=y[2],g.drawImage(y[0],(l-a0)/kx*p,(m-b0)/ky*p,(sn(y[1].right,R.left,kx)-l)/kx*p,(sn(y[1].bottom,"
     b'R.top,ky)-m)/ky*p)}),g.globalAlpha=1;var h=document.createElement("div"),s=h.style,t=x.style;'
     b's.position=t.position="absolute",s.overflow="hidden",s.left=a0+"px",s.top=b0+"px",s.width=t.width=a1-a0+"px",'
@@ -405,9 +411,10 @@ def patch_player(player: bytes, *, mm_opacity: bool = True) -> bytes:
     It also draws admitted Line Draw builds along their authored path with a moving filled arrowhead when present.
 
     A freeze is a snapshot of the decoded frame at identity tone (no pixel writes), drawn first with every edge snapped
-    to the device grid (1/DPR px). A `frac` grant at DPR 1 overlays the unsnapped compositor quad. Every backing pixel
-    must then be opaque. The geometry guard requires the base layer to equal the slide, translation-only stage and scene
-    transforms, and integer scene `left`/`top`; `frac` additionally requires an integer stage origin. The take also
+    to the device grid (1/DPR px). A `frac` grant at DPR 1 overlays the unsnapped compositor quad, checks opacity, then
+    redraws its partially covered boundary cells from the video. The geometry guard requires the base layer to equal
+    the slide, translation-only stage and scene transforms, and integer scene `left`/`top`; `frac` additionally requires
+    an integer stage origin. The take also
     requires no top-layer element and no open shadow root on the page, and every element must pass the paint
     gate or, outside the stage, is clipped by an HTML `div` proven disjoint from the visible stage. Supported pages
     create no author shadow roots (a checked invariant), since a closed one cannot be detected; anything else keeps

@@ -242,6 +242,35 @@ def foreground(variant: str) -> str:
     return probe.score_foreground([candidate], live, mask, CAL)["verdict"]
 
 
+def foreground_demix_amplification() -> tuple[Any, ...]:
+    e = 0.7994
+    live = np.full((2, 2, 4), (180, 180, 180, 255), np.uint8)
+    incoming = np.full((2, 2, 4), (60, 60, 60, 255), np.uint8)
+    frame = unpremul((1 - e) * probe.premul(live) + e * probe.premul(incoming))
+    frame[0, 0, 1] += 1
+    noisy = probe.straight(probe.demix(frame, incoming, e))
+    defect = live.copy()
+    defect[0, 0, 1] += 25
+    direct = live.copy()
+    direct[0, 0, 1] += 5
+    mask = np.ones(live.shape[:2], bool)
+    noise = probe.score_foreground([live, noisy], live, mask, CAL, demix_es=[e])
+    broken = probe.score_foreground([live, defect], live, mask, CAL, demix_es=[e])
+    holder = probe.score_foreground([direct], live, mask, CAL)
+    return (noise["verdict"], noise["detail"]["worsts"], [round(value, 6) for value in noise["detail"]["limits"]],
+            broken["verdict"], holder["verdict"])
+
+
+def foreground_without_incoming() -> tuple[str, list[float]]:
+    record, images = media_run("m-fg")
+    arm = probe.ARMS["m-fg"]
+    ev = probe.evidence(record, images, arm)
+    fade = probe._fade_of(ev, arm, CAL)
+    ev.B = None
+    foreground = probe.score_media(record, images, ev, arm, fade, CAL, identity=None)[0]["foreground"]
+    return foreground["verdict"], foreground["detail"]["limits"]
+
+
 def tone(variant: str) -> str:
     live = np.full((40, 40, 4), 139, np.uint8)
     live[..., 3] = 255
@@ -406,9 +435,11 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         out[top:top + up.shape[0]] = up[:vh - top]
         return out
 
+    content_x = (probe.NOOFFSET_X_DISPLACEMENT * CONTENT[2] / 951.54296875
+                 if "nooffsetx" in spec.overrides else 10.0)
     content_y = (probe.NOOFFSET_Y_DISPLACEMENT * CONTENT[3] / 267.6214599609375
                  if "nooffsety" in spec.overrides else 10.0)
-    left = 10 + 0.4 * CONTENT[2] + 0.37 if "clipnearx" in spec.overrides else 10.0
+    left = content_x + 0.4 * CONTENT[2] + 0.37 if {"clipnearx", "nooffsetx"} & set(spec.overrides) else content_x
     top_local = content_y + 0.4 * CONTENT[3] + 0.37 if {"clipneary", "nooffsety"} & set(spec.overrides) else content_y
     top_css = top_local + dy
     right = 310.37 if "clipx" in spec.overrides else 490.0
@@ -417,20 +448,21 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
     x0, y0, x1, y1 = box
     in_box = np.zeros((vh, vw, 1), bool)
     in_box[y0:y1, x0:x1] = True
-    local_content = [10.0, content_y, 480.0, 135.0]
-    content = [10.0, content_y + dy, 480.0, 135.0]
+    local_content = [content_x, content_y, 480.0, 135.0]
+    content = [content_x, content_y + dy, 480.0, 135.0]
     region = [left, top_css, right - left, bottom - top_css]
     css_box = [left, top_css, (x1 - x0) / k, (y1 - y0) / k]
     foreground_local = [max(FG_RECT[0], left + 10), max(FG_RECT[1], top_local + 10), FG_RECT[2], FG_RECT[3]]
     foreground_rect = [foreground_local[0], foreground_local[1] + dy, foreground_local[2], foreground_local[3]]
     frame = strip_frame(REFERENCE, bw=bw)
+    if mutate == "holder-y-nooffset":
+        frame[..., 1] = (80 + np.arange(frame.shape[0]) % 120)[:, None]
     placed = probe.place(frame, local_content, local_content, (H, W))
     movie = placed.copy()
     if mutate in ("holder-shift", "holder-shift-undecodable"):
         movie[10:145, 11:490] = placed[10:145, 10:489]
     elif mutate == "holder-y-nooffset":
-        movie[:-1] = placed[1:]
-        movie[-1] = 0
+        movie[..., :3] = np.roll(placed[..., :3], round(abs(content_y)), axis=0)
     omit = "fg-omit" in (spec.splice or "")
     if "edgefg" in spec.overrides:
         live_placed, holder_placed = paint_edge_foreground(placed), movie if omit else paint_edge_foreground(movie)
@@ -966,21 +998,69 @@ def near_clip_rejections() -> tuple[str, str, str]:
     return tuple(results)
 
 
-def nooffset_y_real_geometry() -> tuple[Any, ...]:
+def nooffset_real_geometry(axis: str) -> tuple[Any, ...]:
     root = probe.DECKS["p2bin"].unmodified
     header = probe.read_doc(root / "assets/header.json")
     doc = probe.read_doc(root / probe.slide_doc_path(header["slideList"][1]))
-    probe._nooffset_y(doc, probe.transition_event(doc))
+    event_index = probe.transition_event(doc)
+    override = probe._nooffset_x if axis == "x" else probe._nooffset_y
+    override(doc, event_index)
     video_node, parent_node = [(n, p) for b in probe._effects(doc["events"])
                                for n, p in probe._layers(b["baseLayer"]) if n.get("isVideoLayer")][0]
     video, parent = video_node["initialState"], parent_node["initialState"]
+    parent_left = parent["position"]["pointX"] - parent["anchorPoint"]["pointX"] * parent["width"]
     parent_top = parent["position"]["pointY"] - parent["anchorPoint"]["pointY"] * parent["height"]
+    video_left = parent_left + video["position"]["pointX"] - video["anchorPoint"]["pointX"] * video["width"]
     video_top = parent_top + video["position"]["pointY"] - video["anchorPoint"]["pointY"] * video["height"]
-    strip_bottom = video_top + binary.STRIP_RECT[3] * video["width"] / binary.WIDTH
-    overrides = tuple(probe.ARMS[name].overrides for name in
-                      ("m-snap-cef-nooffset-y", "m-snap-cef-nooffset-y-twin"))
-    return (round(video_top, 6), video["height"], round(parent_top - video_top, 6), strip_bottom <= parent_top,
-            parent["masksToBounds"], overrides)
+    visible = [max(parent_left, video_left), max(parent_top, video_top),
+               min(parent_left + parent["width"], video_left + video["width"]),
+               min(parent_top + parent["height"], video_top + video["height"])]
+    visible = [visible[0], visible[1], visible[2] - visible[0], visible[3] - visible[1]]
+    strip_far = ((video_left + binary.STRIP_RECT[2] * video["width"] / binary.WIDTH) if axis == "x"
+                 else (video_top + binary.STRIP_RECT[3] * video["width"] / binary.WIDTH))
+
+    def texture_rects(node: dict[str, Any], left: float = 0.0, top: float = 0.0) -> list[tuple[str, list[float]]]:
+        state = node["initialState"]
+        x = left + state["position"]["pointX"] - state["anchorPoint"]["pointX"] * state["width"]
+        y = top + state["position"]["pointY"] - state["anchorPoint"]["pointY"] * state["height"]
+        found = [(node["texture"], [x, y, state["width"], state["height"]])] if node.get("texture") else []
+        return found + [item for child in node.get("layers") or [] for item in texture_rects(child, x, y)]
+
+    later = [item for event in doc["events"][:event_index] for effect in event.get("effects") or []
+             for item in texture_rects(effect["baseLayer"])]
+    displacement = video_left if axis == "x" else video_top
+    content = [video_left, video_top, video["width"], video["height"]]
+    shifted = list(content)
+    target = list(visible)
+    index = 0 if axis == "x" else 1
+    shifted[index] -= displacement
+    target[index] -= displacement
+    overlap = [max(visible[0], shifted[0], target[0]), max(visible[1], shifted[1], target[1]),
+               min(visible[0] + visible[2], shifted[0] + shifted[2], target[0] + target[2]),
+               min(visible[1] + visible[3], shifted[1] + shifted[3], target[1] + target[3])]
+    overlap_size = [overlap[2] - overlap[0], overlap[3] - overlap[1]]
+    names = (f"m-snap-cef-nooffset-{axis}", f"m-snap-cef-nooffset-{axis}-twin")
+    size = video["width"] if axis == "x" else video["height"]
+    displacement_constant = probe.NOOFFSET_X_DISPLACEMENT if axis == "x" else probe.NOOFFSET_Y_DISPLACEMENT
+    near = video_left if axis == "x" else video_top
+    visible_near = visible[index]
+    u0, v0 = probe.jround(video_left), probe.jround(video_top)
+    a0, b0 = probe.jround(visible[0]), probe.jround(visible[1])
+    a1, b1 = probe.jround(visible[0] + visible[2]), probe.jround(visible[1] + visible[3])
+    ww, hh = round(a1 - a0), round(b1 - b0)
+    dx, dy = u0 - a0, v0 - b0
+    fx = dx - u0 if axis == "x" else dx + video_left - u0
+    fy = dy - v0 if axis == "y" else dy + video_top - v0
+    fw, fh = round(video["width"]), round(video["height"])
+    containment_guard = fx > 0.5 or fy > 0.5 or fx + fw < ww - 0.5 or fy + fh < hh - 0.5
+    return (round(near, 6), size, abs(displacement_constant) < size,
+            tuple(round(value, 6) for value in visible),
+            tuple((texture, tuple(round(value, 6) for value in rect)) for texture, rect in later),
+            not any(probe.overlaps(visible, rect) for _, rect in later), round(strip_far, 6),
+            strip_far <= visible_near, tuple(round(value, 6) for value in overlap_size),
+            all(value > 0 for value in overlap_size), parent["masksToBounds"],
+            tuple(probe.ARMS[name].overrides for name in names),
+            (round(fx, 6), round(fy, 6), fw, fh, ww, hh, containment_guard))
 
 
 def nooffset_y_outcomes() -> tuple[str, str, str, str, str]:
@@ -1178,7 +1258,7 @@ def edge_fixture_layout() -> tuple[tuple[str, ...], int | None, dict[str, float 
             probe.holder_strip(images["holder-0"], holder, decoder, arm.dsf), split, crosses)
 
 
-def displaced_attribution() -> tuple[str, str, str, str, tuple[int, int], tuple[str, str]]:
+def displaced_attribution() -> tuple[str, str, str, str, str, tuple[int, int], tuple[str, str]]:
     rng = np.random.default_rng(17)
     live = rng.integers(0, 256, (20, 40, 4), dtype=np.uint8)
     live[..., 3] = 255
@@ -1197,9 +1277,11 @@ def displaced_attribution() -> tuple[str, str, str, str, tuple[int, int], tuple[
                                           {**decoder, "rect": [30.37, 0.0, 30.0, 20.0],
                                            "content": [30.0, 0.0, 30.0, 20.0]},
                                           {"x": 0.0}, mask, IDENTITY_LUT, "x", 1.0)
+    subpixel = probe.score_displaced_holder(shifted, live, holder, {**decoder, "rect": [0.5, 0.0, 30.0, 20.0]},
+                                             {"x": 0.0}, mask, IDENTITY_LUT, "x", 1.0)
     twins = tuple(probe.ARMS[name].counter_strip for name in
                   ("m-snap-cef-nooffset-x-twin", "m-snap-cef-nooffset-y-twin"))
-    return (matched["verdict"], minus["verdict"], plus["verdict"], empty["verdict"],
+    return (matched["verdict"], minus["verdict"], plus["verdict"], empty["verdict"], subpixel["verdict"],
             tuple(matched["detail"]["sampleOffsetsPx"]), twins)
 
 
@@ -1398,6 +1480,10 @@ CASES = [
     ("foreground shifted 2 px", lambda: foreground("shifted"), "FAIL"),
     ("foreground double-painted", lambda: foreground("double"), "FAIL"),
     ("foreground swapped", lambda: foreground("swapped"), "FAIL"),
+    ("placement foreground demix scales only the amplified candidates at e=0.7994",
+     foreground_demix_amplification, ("PASS", [0.0, 5.0], [4.0, 19.940179], "FAIL", "FAIL")),
+    ("placement foreground with no incoming texture scores only the holder candidate",
+     foreground_without_incoming, ("PASS", [4.0])),
     ("tone within 2", lambda: tone("within"), "PASS"),
     ("tone untoned (-11)", lambda: tone("untoned"), "FAIL"),
     ("tone identity decision: reported only", lambda: tone("identity"), "REPORTED"),
@@ -1612,13 +1698,27 @@ CASES = [
      edge_fixture_layout, (("edgefg", "edgefg", "edgefg", "edgefg"), REFERENCE, {"interior": 0.0, "edge": 0.0}, True)),
     ("placement nooffset defect remains a valid FAIL when its holder strip is undecodable",
      negative_strip_problems, [[], []]),
+    ("placement nooffset-x override keeps a near clip at a useful real-fixture displacement",
+     lambda: nooffset_real_geometry("x"),
+     (-80.0, 951.54296875, True, (300.987187, 795.036194, 570.555781, 267.62146),
+      (("3652165F1CC62CFCEB8D764941CC3950", (1208.0, 624.0, 354, 313)),
+       ("74EE7166AEA70C8FD2FEDE82CCDC7157", (1286.0, 133.0, 354, 313)),
+       ("18B86872E5CD75C18A5696F17F574999", (740.0, 190.0, 353, 313))),
+      True, 260.969564, True, (490.555781, 267.62146), True, True,
+      (("nooffsetx",), ("nooffsetx",)), (-301, 0.036194, 952, 268, 571, 268, False))),
     ("placement nooffset-y override keeps a near clip at a useful real-fixture displacement",
-     nooffset_y_real_geometry,
-     (125.0, 267.6214599609375, 107.418584, True, True, (("nooffsety",), ("nooffsety",)))),
+     lambda: nooffset_real_geometry("y"),
+     (-80.0, 267.6214599609375, True, (109.351707, 27.418584, 951.542969, 160.202876),
+      (("3652165F1CC62CFCEB8D764941CC3950", (1208.0, 624.0, 354, 313)),
+       ("74EE7166AEA70C8FD2FEDE82CCDC7157", (1286.0, 133.0, 354, 313)),
+       ("18B86872E5CD75C18A5696F17F574999", (740.0, 190.0, 353, 313))),
+      True, -56.211426, True, (951.542969, 80.202876), True, True,
+      (("nooffsety",), ("nooffsety",)), (0.351707, -27, 952, 268, 952, 161, False))),
     ("placement nooffset-y correct holder passes pixels and therefore mismatches the negative arm",
      nooffset_y_outcomes, ("PASS", "PASS", "MISMATCH", "FAIL", "MATCH")),
     ("placement nooffset attribution binds the explicit displaced strip mode",
-     displaced_attribution, ("PASS", "FAIL", "FAIL", "INCONCLUSIVE", (5, 6), ("displaced-x", "displaced-y"))),
+     displaced_attribution,
+     ("PASS", "FAIL", "FAIL", "INCONCLUSIVE", "INCONCLUSIVE", (5, 6), ("displaced-x", "displaced-y"))),
     ("placement DSK uses one pinned counter, a real media fragment, and h264 copies for other movies", "dsk-counter",
      (2, 1, (0.0, 0.0),
       ("assets/clip-10-1000001.mov-0.0000-20.8000.mov", "assets/clip-10-1000002.mov-0.0000-50.2000.mov#t=5"),
