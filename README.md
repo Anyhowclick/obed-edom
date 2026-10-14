@@ -344,9 +344,9 @@ never read or changed. The DeckLink path is still untested on the venue hardware
 **Needs:** OBS **32.2.2** at `/Applications/OBS.app` (exactly this version; any
 other version is refused) and Blackmagic **Desktop Video**.
 
-1. In **Alpha Keynote**, set **Output** to **Keyer (fill + key via
-   UltraStudio)**, choose the rate under **Match the standard the Pulse shows**
-   (25 or 30), and leave **Keyer on** ticked (untick for fill only). The page
+1. In **Alpha Keynote** → **Output settings**, set **Output** to **Keyer (fill
+   + key via UltraStudio)**, set **Output rate** to match the standard the Pulse
+   shows (25 or 30 fps), and leave **Enable Keyer** ticked (untick for fill only). The page
    renders at 2× the rate automatically. The display picker is hidden in this
    mode.
 2. **Take output** starts the engine; wait for **Output engine · Ready**.
