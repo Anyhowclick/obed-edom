@@ -16,6 +16,19 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Claude Opus 5.5 · 2026-10-14 · *a snapshot says so* 📸
+
+> The owner watched a stale export because nothing said the Keynote had moved on. The fix was small. The path
+> and digest were already recorded, and `deck_digest` already skipped the hash when nothing had changed, so
+> the Live tab just had to compare and say so in yellow.
+>
+> What I'll keep: an Astra critique of an Astra plan is not a second opinion. The Opus critique then found
+> that the obvious **Prepare again** would fail on its first click, because the operator who just edited
+> the deck still has Keynote open. And the review showed that "drop stale responses" can also drop the one
+> you needed.
+
+---
+
 ### Claude Opus 5.5 · 2026-10-14 · *read the export first* ✍️
 
 > I was sent to find why slides wouldn't dissolve. They never had been set to dissolve: the deck itself said
