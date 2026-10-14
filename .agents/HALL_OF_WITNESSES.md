@@ -16,6 +16,33 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Claude Opus 5.5 · 2026-10-14 · *a snapshot says so* 📸
+
+> The owner watched a stale export because nothing said the Keynote had moved on. The fix was small. The path
+> and digest were already recorded, and `deck_digest` already skipped the hash when nothing had changed, so
+> the Live tab just had to compare and say so in yellow.
+>
+> What I'll keep: an Astra critique of an Astra plan is not a second opinion. The Opus critique then found
+> that the obvious **Prepare again** would fail on its first click, because the operator who just edited
+> the deck still has Keynote open. And the review showed that "drop stale responses" can also drop the one
+> you needed.
+
+---
+
+### Claude Opus 5.5 · 2026-10-14 · *read the export first* ✍️
+
+> I was sent to find why slides wouldn't dissolve. They never had been set to dissolve: the deck itself said
+> `none`. The real bug was next door: Keynote's exporter flattens Line Draw into a fade but keeps the vector
+> path, so we taught the player to draw it, with the arrowhead riding the tip.
+>
+> The lessons were mostly about instruments. The same arrow rasterised 31 on Chrome and 39 on the Keyer,
+> so a bar calibrated on one engine faded the arrow on the other. A pose check that couldn't tell a 2 px
+> shift at capture size wasn't a check at all, and the owner's eye did that job better. When the same pixels
+> pass and fail, suspect the clock before you suspect the code. Astra sharpened the plan, Sol built it, and
+> Opus kept us honest. 🫡
+
+---
+
 ### Claude Opus 5.5 · 2026-10-13 · *ask which move* 🔢
 
 > A translucent tag box darkened mid-move, and I spent an hour proving that it didn't. Every frame

@@ -723,7 +723,11 @@ for the parked `iwa-surgical-write-generator` feature.
 * **Regression oracle.** No allowlist since S3: any deck that derives installs. A continuity change is checked by the
   plan-sha tests (gate decks' runtime plans byte-identical) and the negative corpus (`tests/test_live_continuity_corpus.py`,
   one synthetic export per refusal code); a new refusal code needs a corpus entry.
-* **Start is never gated on continuity.** The `/api/live/decks/{id}/qualification` response carries `qualified: true`,
+* **Start is never gated on continuity or source freshness.** The `/api/live/decks/{id}/qualification` response (and each
+  `/api/live/decks` row) carries `sourceState: current|changed|missing` + `sourcePath` (the prepare job's recorded `.key`,
+  compared by `deck_digest` against the job's `sourceDigest`): a prepared deck is a snapshot, so a `changed` source gets a
+  yellow warning + **Prepare again** (re-prepares from `sourcePath`; a failure re-selects the stale deck) and `missing`
+  a neutral note — both warning-only. The qualification response also carries `qualified: true`,
   `continuity: {mode: qualified|unsupported|off, reason, notCarried}` (from `_deck_qualification`) (`live_host.not_carried(plan, slides)`) and
   `convertedMovies: [{asset, sourceCodec}]`; only `prepared_deck`'s playability checks (player digest, 16:9, manual
   mode, unsupported media, no playable slides) block start.
