@@ -11,13 +11,14 @@ import base64
 import hashlib
 import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import DecodedStreamObject
 
-from obed_edom import preview_textures as pt
+from obed_edom import live_continuity as lc, preview_textures as pt
 from obed_edom.fixture_paths import fixture
 from obed_edom.html_preview import PreviewError, file_sha256
 from obed_edom.live_continuity import derive_plan
@@ -580,6 +581,69 @@ def test_alpha_export_round_trip_repairs_every_hit_and_keeps_the_plan(tmp_path):
         "D4A1DF22-D248-4A45-8125-8C2288F5AB11", "DAC21D01-4C0B-4292-A009-8B511D36F68D",
     ]
     assert lines[-1] == "Repaired 5 mis-mapped textures"
-    assert derive_plan(root, slides, resolver=lambda r, rel: r / rel) == plan_before
+    plan_after = derive_plan(root, slides, resolver=lambda r, rel: r / rel)
+
+    def normalise_feed_sizes(plan):
+        def normalise_movie(movie):
+            if movie.feed is None:
+                return movie
+            feed = {
+                **movie.feed,
+                "from": {**movie.feed["from"], "size": None},
+                "to": {**movie.feed["to"], "size": None} if movie.feed["to"] is not None else None,
+            }
+            return replace(movie, feed=feed)
+
+        return replace(
+            plan,
+            boundaries=tuple(
+                replace(boundary, movies=tuple(normalise_movie(movie) for movie in boundary.movies))
+                for boundary in plan.boundaries
+            ),
+        )
+
+    assert normalise_feed_sizes(plan_after) == normalise_feed_sizes(plan_before)
+
+    def feed_entries(plan):
+        return {
+            (boundary.from_player_index, movie.src_object_id): movie.feed
+            for boundary in plan.boundaries
+            for movie in boundary.movies
+            if movie.feed is not None
+        }
+
+    before_feeds = feed_entries(plan_before)
+    after_feeds = feed_entries(plan_after)
+
+    def ordinals(feed):
+        return (
+            feed["draw"],
+            feed["drawCount"],
+            feed["from"]["upload"],
+            feed["to"]["upload"] if feed["to"] is not None else None,
+        )
+
+    assert {key: ordinals(feed) for key, feed in after_feeds.items()} == {
+        key: ordinals(feed) for key, feed in before_feeds.items()
+    }
+
+    slides_by_player = {slide["playerIndex"]: slide for slide in slides if not slide["skipped"]}
+    for (from_player, _object_id), feed in after_feeds.items():
+        slide = slides_by_player[from_player]
+        payload = json.loads((root / slide["assetPaths"]["payload"]).read_text())
+        transition = lc._boundary_transition(payload["events"], slide["exportedUuid"])
+        rows, _ = lc._feed_table(transition, payload["assets"], slide["exportedUuid"])
+        row = next(row for row in rows if row["draw"] == feed["draw"])
+
+        def json_size(texture):
+            asset = payload["assets"][texture]
+            return [asset["width"], asset["height"]]
+
+        assert feed["from"]["size"] == json_size(row["from"]["texture"])
+        if feed["to"] is not None:
+            assert row["to"] is not None
+            assert feed["to"]["size"] == json_size(row["to"]["texture"])
+        else:
+            assert row["to"] is None
     assert pt._detect(pt._load(root, slides), pt._Renderer()) == []
     assert _repair(root, slides, player=manifest["playerDigest"])[0]["repaired"] == []

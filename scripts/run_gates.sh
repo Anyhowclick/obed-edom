@@ -182,28 +182,7 @@ if (( START_LOAD > GATE_MAX_START_LOAD )); then
 fi
 PY=/Users/anyhowclick/Desktop/work/obed-edom/.venv/bin/python; cd $G || exit 1; mkdir -p $O
 export PYTHONPATH=$G/src; F=$($PY -c 'from obed_edom.fixture_paths import fixture; print(fixture("p2-recovery"))')/html-adversarial
-Q=$($PY -c 'from obed_edom.fixture_paths import fixture; print(fixture("qual-decks"))')
-ALPHA_SOURCE=$($PY -c 'from obed_edom.fixture_paths import fixture; print(fixture("alpha-dsk-textures"))')
-ALPHA_GATE=$O/alpha-dsk-repaired
 [[ -d $F ]] || { echo "no P2 fixture at $F; no run launched" >&2; exit 2; }
-if (( ${#MM_FEED_ARMS} )); then
-  [[ -d $Q/D7/html-unmodified && -d $Q/D7s/html-unmodified ]] || {
-    echo "D7/D7s qualification fixtures are missing under $Q; no run launched" >&2; exit 2; }
-  $PY - "$ALPHA_SOURCE" "$ALPHA_GATE" <<'PYEOF' || { echo "Alpha texture repair FAILED; no run launched"; exit 2; }
-import json,shutil,sys
-from pathlib import Path
-from obed_edom import preview_textures
-source,dest=Path(sys.argv[1]),Path(sys.argv[2])
-manifest=json.loads((source/"manifest.json").read_text())
-shutil.copytree(source/"html-unmodified",dest)
-record=preview_textures.repair_textures(dest,manifest["slides"],player_digest=manifest["playerDigest"],log=print)
-if not record.get("repaired"):
-    raise SystemExit("Alpha repair changed no textures; the registered fixture is not the unrepaired input")
-if preview_textures._detect(preview_textures._load(dest,manifest["slides"]),preview_textures._Renderer()):
-    raise SystemExit("Alpha repair left detector hits")
-print("Alpha repaired fixture",dest)
-PYEOF
-fi
 if (( ALLOW_RECORD )); then
   echo "################################################################################"
   echo "## --allow-record: DISCOVERY RUN. RECORD arms are not gated; this is NOT a pass. ##"
@@ -356,6 +335,36 @@ while LAUNCH_LOAD=$(load1) && (( LAUNCH_LOAD > GATE_MAX_START_LOAD )); do
 done
 [[ -n $LAUNCH_LOAD ]] || { echo "cannot read the 1-minute load average (sysctl -n vm.loadavg); no run launched" >&2; exit 2; }
 echo "load average (1 min) at launch $LAUNCH_LOAD"
+Q=$($PY -c 'from obed_edom.fixture_paths import fixture; print(fixture("qual-decks"))')
+ALPHA_SOURCE=$($PY -c 'from obed_edom.fixture_paths import fixture; print(fixture("alpha-dsk-textures"))')
+ALPHA_GATE=$O/alpha-dsk-repaired
+QUAL_B_SOURCE=${QUAL_B_SOURCE:-"$HOME/Desktop/Convert wall to 16x9 CGs/Continuity"}
+if (( ${#MM_FEED_ARMS} )); then
+  [[ -d $QUAL_B_SOURCE/D7-html && -d $QUAL_B_SOURCE/D7s-html ]] || {
+    echo "D7/D7s qualification exports are missing under QUAL_B_SOURCE=$QUAL_B_SOURCE; no run launched" >&2; exit 2; }
+  $PY - "$QUAL_B_SOURCE" "$O" <<'PYEOF' || { echo "D7/D7s qualification export staging FAILED; no run launched"; exit 2; }
+import shutil,sys
+from pathlib import Path
+source,out=Path(sys.argv[1]),Path(sys.argv[2])
+for name in ("D7-html","D7s-html"):
+    shutil.copytree(source/name,out/name)
+    print("Qualification B fixture",out/name)
+PYEOF
+  $PY - "$ALPHA_SOURCE" "$ALPHA_GATE" <<'PYEOF' || { echo "Alpha texture repair FAILED; no run launched"; exit 2; }
+import json,shutil,sys
+from pathlib import Path
+from obed_edom import preview_textures
+source,dest=Path(sys.argv[1]),Path(sys.argv[2])
+manifest=json.loads((source/"manifest.json").read_text())
+shutil.copytree(source/"html-unmodified",dest)
+record=preview_textures.repair_textures(dest,manifest["slides"],player_digest=manifest["playerDigest"],log=print)
+if not record.get("repaired"):
+    raise SystemExit("Alpha repair changed no textures; the registered fixture is not the unrepaired input")
+if preview_textures._detect(preview_textures._load(dest,manifest["slides"]),preview_textures._Renderer()):
+    raise SystemExit("Alpha repair left detector hits")
+print("Alpha repaired fixture",dest)
+PYEOF
+fi
 for V in $HOST_VIEWPORTS; do
   queue $O/host-$V $PY -u scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport $V --artifact $O/host-$V.json ${HOST_SKIP[$V]:+--skip-arms} ${HOST_SKIP[$V]}
 done
@@ -667,7 +676,7 @@ for A in $CARRY_COVER_ARMS; do run_cc ${=A}; done
 # Texture-feed gates accept the probe's normal 0/1 exit only when every registered per-verdict expectation matches.
 # `from-only` is entry-sensitive: a crossfade (`feed.to` non-null) must red feedLive, while a single-texture entry stays
 # green. The artifact keeps the complete producer and scorer records for exact-frame review.
-mm_feed_fixture(){ fix=$Q/$1/html-unmodified; [[ $1 == Alpha_DSK ]] && fix=$ALPHA_GATE; }
+mm_feed_fixture(){ fix=$O/$1-html; [[ $1 == Alpha_DSK ]] && fix=$ALPHA_GATE; }
 run_mm_feed(){ local deck=$1 label=$2; shift 2; mm_feed_fixture $deck
   local n=$deck-$label
   queue $O/mm-feed-$n $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $fix/index.html \

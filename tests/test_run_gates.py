@@ -111,9 +111,23 @@ def act(mode, out_stem_path):
         time.sleep(1)
         sys.exit(0)
     if mode == "hang":
-        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)", os.environ["STUB_MARKER"]])
-        Path(os.environ["STUB_MARKER"], f"child-{child.pid}").touch()
-        time.sleep(600)
+        stub_marker = Path(os.environ["STUB_MARKER"], f"stub-{os.getpid()}")
+        stub_marker.touch()
+        def stop(*_): raise SystemExit(0)
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP): signal.signal(sig, stop)
+        child_code = """
+import os, signal, sys, time
+from pathlib import Path
+marker = Path(sys.argv[1], f"child-{os.getpid()}")
+marker.touch()
+def stop(*_): raise SystemExit(0)
+for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP): signal.signal(sig, stop)
+try: time.sleep(600)
+finally: marker.unlink(missing_ok=True)
+"""
+        subprocess.Popen([sys.executable, "-c", child_code, os.environ["STUB_MARKER"]])
+        try: time.sleep(600)
+        finally: stub_marker.unlink(missing_ok=True)
 '''
 
 PROBE_STUB = _STUB_COMMON + r'''
@@ -316,6 +330,11 @@ def gates(tmp_path: Path):
     marker = tmp_path / "marker"
     marker.mkdir()
     events = tmp_path / "events.txt"
+    qual_b_source = tmp_path / "qual-b-source"
+    for name in ("D7-html", "D7s-html"):
+        export = qual_b_source / name
+        (export / "assets").mkdir(parents=True)
+        (export / "index.html").write_text(name)
     stub_bin = tmp_path / "bin"
     stub_bin.mkdir()
     (stub_bin / "sysctl").write_text(SYSCTL_STUB)
@@ -325,10 +344,14 @@ def gates(tmp_path: Path):
         drop = (
             "GATE_JOBS", "GATE_MAX_START_LOAD", "OBED_H264_PATTERN_CACHE", "STUB_MODES", "STUB_DEFAULT", "STUB_PREWARM",
             "STUB_P2_RED", "STUB_P2_FREEZE", "STUB_LOAD", "STUB_LOAD_AFTER_PREWARM", "GATE_SETTLE_S",
+            "QUAL_B_SOURCE",
         )
         base = {k: v for k, v in os.environ.items() if k not in drop}
         base["PATH"] = f"{stub_bin}{os.pathsep}{base.get('PATH', '')}"
-        return {**base, "STUB_EVENTS": str(events), "STUB_MARKER": str(marker), **extra}
+        return {
+            **base, "STUB_EVENTS": str(events), "STUB_MARKER": str(marker),
+            "QUAL_B_SOURCE": str(qual_b_source), **extra,
+        }
 
     def run(
         *args: str, timeout: float = 120, script: Path = SCRIPT, outdir: Path = out, **extra: str,
@@ -362,7 +385,7 @@ def gates(tmp_path: Path):
 
     yield {
         "g": g, "out": out, "marker": marker, "run": run, "start": start, "events": events_list, "survivors": survivors,
-        "patched": patched, "tmp": tmp_path,
+        "patched": patched, "tmp": tmp_path, "qual_b_source": qual_b_source,
     }
     subprocess.run(["pkill", "-KILL", "-f", str(tmp_path)], capture_output=True)
 
@@ -414,6 +437,25 @@ def test_positive_control_an_existing_empty_outdir_is_accepted(gates) -> None:
     gates["out"].mkdir()
     done = gates["run"]()
     assert "round nonce " in done.stdout and "HOST 1920x1080: pass" in done.stdout, done.stdout + done.stderr
+    args = _probe_args(gates["events"]())
+    for deck in ("D7", "D7s"):
+        expected = gates["out"] / f"{deck}-html"
+        fixture, index, _ = args[f"mm-feed-{deck}-feed-on-2560"]
+        assert Path(fixture) == expected and index == f"{expected}/index.html"
+        assert (expected / "index.html").read_text() == f"{deck}-html"
+
+
+def test_missing_qual_b_source_is_refused_only_when_feed_arms_are_requested(gates) -> None:
+    missing = gates["qual_b_source"] / "D7s-html"
+    missing.rename(gates["tmp"] / "D7s-html-missing")
+    done = gates["run"](timeout=20)
+    assert done.returncode == 2
+    assert f"D7/D7s qualification exports are missing under QUAL_B_SOURCE={gates['qual_b_source']}" in done.stderr
+    assert gates["events"]() == ["prewarm html-unmodified", "prewarm html-unmodified"]
+
+    dev = gates["run"]("--tier", "dev", outdir=gates["tmp"] / "dev-out")
+    assert dev.returncode != 2
+    assert "QUAL_B_SOURCE" not in dev.stderr
 
 
 def test_a_run_that_writes_no_status_fails_closed_even_with_a_passing_artifact(gates) -> None:
@@ -473,7 +515,7 @@ def test_the_pattern_cache_is_prewarmed_and_verified_before_the_first_timed_run(
     events = gates["events"]()
     assert events[:2] == ["prewarm html-unmodified", "prewarm html-unmodified"], "the fill, then the verifying lookup"
     assert all(not e.startswith("prewarm") for e in events[2:])
-    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + len(DECK_ARMS) + 7 + 1 + 3 + 6 + 8
+    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + len(DECK_ARMS) + 7 + 1 + 3 + 6 + 25 + 8
     assert f"h264 pattern prewarm 46.0333s: encoded key={'k' * 64}" in done.stdout
     assert f"h264 pattern cache verified 46.0333s: hit key={'k' * 64} sha256={'s' * 64}" in done.stdout
     assert "cache hit" in gates["run"](outdir=gates["tmp"] / "out2").stdout
@@ -721,8 +763,8 @@ def test_known_bad_the_dev_tier_is_held_to_the_same_coverage(gates) -> None:
         "typeset -A HOST_SKIP=(2560x1440 attach,B,Voff 1600x1000 attach,B,Voff 1920x1080 C)",
         "typeset -A HOST_SKIP=(2560x1440 attach,B,Voff 1600x1000 attach,B,Voff,C 1920x1080 C)",
     )
-    assert gates["run"](script=script, timeout=20).returncode != 2, "full still runs C at 2560x1440"
-    done = gates["run"]("--tier", "dev", script=script, timeout=20, outdir=gates["tmp"] / "dev-out")
+    assert gates["run"](script=script, timeout=40).returncode != 2, "full still runs C at 2560x1440"
+    done = gates["run"]("--tier", "dev", script=script, timeout=40, outdir=gates["tmp"] / "dev-out")
     assert done.returncode == 2 and "host arm C runs in no dev-tier host gate" in done.stderr
 
 
@@ -959,7 +1001,7 @@ def test_known_bad_arguments_are_refused_before_anything_runs(gates, args: list[
 # Carry-cover gate (rubber band, 2026-10-10; D1 with the GL clock, gl-clock plan §5): on P2 and on D1 the GREEN default
 # core must pass with every bridge on the GL clock, RED (P2 `--core-variant linear-bridge`, D1 `--core-variant
 # no-gl-clock` with every bridge on the fallback) and NULL `--carry-cover-null` must fail; full tier only, queued after
-# the paint controls, fail-closed.
+# the paint controls and before the texture-feed arms, fail-closed.
 # --------------------------------------------------------------------------
 
 CC_DECKS = ["P2", "P2", "P2", "D1", "D1", "D1"]
@@ -982,8 +1024,12 @@ def test_carry_cover_runs_its_three_controls_on_p2_and_d1_through_the_queue_in_o
     events = gates["events"]()
     starts = [e.split()[1] for e in events if e.endswith(" start")]
     assert [s for s in starts if s.startswith("carry-cover")] == CC_STEMS
+    feed_starts = [s for s in starts if s.startswith("mm-feed-")]
     first_p2 = next(i for i, s in enumerate(starts) if s.startswith("p2"))
-    assert starts.index(CC_STEMS[0]) == starts.index(PC_STEMS[-1]) + 1 and starts.index(CC_STEMS[-1]) + 1 == first_p2
+    assert len(feed_starts) == 25
+    assert starts.index(CC_STEMS[0]) == starts.index(PC_STEMS[-1]) + 1
+    assert starts.index(CC_STEMS[-1]) + 1 == starts.index(feed_starts[0])
+    assert starts.index(feed_starts[-1]) + 1 == first_p2
     out = str(gates["out"].resolve())
     args = _probe_args(events)
     assert _cc_argvs(events) == [
