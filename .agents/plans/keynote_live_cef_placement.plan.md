@@ -910,12 +910,23 @@ configured-device preview-output behavior remains an explicit field-test qualifi
 
 Branch `claude/cef-obs-placement` (local only, not pushed). Commits: `bd7f354c` skeleton → `ecb1de98` W1–W6 (Codex GPT-5.6 Sol
 high) → `ba3b9ff5` review r1 fold → `eb46413f` review r2 fold. Reviews: Opus 5.5 high, two reviewers (product / probe+harness).
-Raw rounds, implementer briefs and reports: `.agents/reviews/cef-placement-2026-10-13/` (plan critiques under `plan/`).
+Raw rounds, briefs and implementer reports were removed at merge (#278); the review log below keeps one line per round.
 
 | Round | Product | Probe + harness |
 |---|---|---|
 | r1 on `ecb1de98` | 1 major, 6 medium, 9 low | 1 blocker (content_box), 4 major, 8 medium, 5 low |
 | r2 on `ba3b9ff5` | 0 major, 4 medium, 4 low (15/16 r1 closed) | 3 major, 4 medium, 7 low (7 fold regressions) |
+
+Review log after r2 (Opus 5.5 high unless noted; implementers Codex GPT-5.6 Sol high):
+- r3 (final), r4/r4b on the live fixes: 0 major/blocker.
+- live3 (2A analysis) r1–r5 on the W6 harness folds: r1 1 major (near clip cuts the strip), r2 1 blocker (edge foreground over
+  the strip) + 1 major (integer-shift attribution), r3 2 blockers (manufactured nooffset-y FAIL; inert DSK seek), r4 1 blocker
+  (DSK timing record vs bound decoders), r5 0 blocker/major (owner extended medium folding to r4–r5).
+- Edge fix: plan GPT-6 Astra high, critique r1 approve-with-changes (pixel-centre rule on all four edges; exterior-centre refusal);
+  code r1 1 blocker (containment guard refused nooffset-x), r2 0 blocker/major.
+- live5 (DSK identity, recapture, ownership, frozen_region control): r1 1 blocker (rVFC expectedDisplayTime ≠ drawn frame) +
+  1 major (recapture hid defects), r2 1 major (retry never fired), r3 1 major (forward-only re-drive), r4 0 blocker/major.
+- Chrome classifier rows (fold-4 regression found live): coordinator review.
 
 W2 regenerated the pruned clip byte-for-byte (`7b7d66b582d1…`; identity with the pruned file corroborated by size + prefix
 only, O3 not needed). Coordinator test run on `ba3b9ff5`: all touched files 1203 passed, 1 skipped, 3 known external census
