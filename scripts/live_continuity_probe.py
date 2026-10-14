@@ -352,7 +352,7 @@ MM_FEED_GATE_EXPECTATIONS: dict[str, dict[str, bool | None]] = {
     "attach-once": {"holdFrame": True, "posterHold": True,
                     "noRiderAboveCanvas": True, "artworkAbove": True},
     "hold-upload-killed": {"holdFrame": False},
-    "ordinal": {"feedLive": False, "holdFrame": None, "posterHold": True},
+    "ordinal": {"feedLive": False, "holdFrame": False, "posterHold": True},
     "after-feed": {"feedLive": False, "holdFrame": True, "posterHold": True},
     "from-only-crossfade": {"feedLive": False},
     "from-only-single": {"feedLive": True},
@@ -1113,8 +1113,12 @@ def force_viewport(width: int, height: int) -> None:
     live_host_module.choose_display = lambda *_a, **_k: forced
 
 
-def feed_host_kwargs() -> dict[str, Any]:
-    return {"mm_feed": MM_FEED_REQUEST, "mm_opacity": MM_OPACITY_REQUEST}
+def feed_host_kwargs(facts: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "mm_feed": MM_FEED_REQUEST,
+        "mm_opacity": MM_OPACITY_REQUEST,
+        "pre_navigation_scripts": feed_instrument_pre_navigation_scripts(facts),
+    }
 
 
 def ground_truth_plan(export_root: Path, slides: list[dict[str, Any]], *, gl_replay: bool = False) -> ContinuityPlan:
@@ -1704,6 +1708,7 @@ def tampered_feed_ordinal(at_scene: int | None = None) -> Iterator[None]:
 
     def patched(plan: dict[str, Any], canvas: dict[str, int]) -> str:
         changed = json.loads(json.dumps(plan))
+        applied = False
         for entry in changed.get("boundaries") or []:
             if at_scene is not None and entry.get("atScene") != at_scene:
                 continue
@@ -1711,7 +1716,10 @@ def tampered_feed_ordinal(at_scene: int | None = None) -> Iterator[None]:
             source = feed.get("from") if isinstance(feed, dict) else None
             if isinstance(source, dict) and isinstance(source.get("upload"), int):
                 source["upload"] += 1000
+                applied = True
                 break
+        if not applied:
+            raise RuntimeError(f"no feed boundary matched ordinal tamper scene {at_scene!r}")
         return original(changed, canvas)
 
     live_host_module._continuity_plan_script = patched
@@ -1738,18 +1746,18 @@ def injected_feed_variant(name: str | None) -> Iterator[None]:
 
         def __init__(self) -> None:
             self._sha: str | None = None
+            self._shipped_sha = module.js_sha256()
 
         def mm_feed_script(self, *, continuous: bool, once: bool) -> str:
             changed = mm_feed_variant_script(name, module.mm_feed_script(continuous=continuous, once=once))
             if not isinstance(changed, str) or not changed:
                 raise RuntimeError(f"feed variant {name!r} did not produce script bytes")
-            self._sha = hashlib.sha256(changed.encode()).hexdigest()
+            match = re.fullmatch(r"\s*<script(?:\s[^>]*)?>(.*)</script>\s*", changed, re.DOTALL)
+            self._sha = hashlib.sha256((match.group(1) if match else changed).encode()).hexdigest()
             return changed
 
         def js_sha256(self) -> str:
-            if self._sha is None:
-                raise RuntimeError("feed variant sha requested before script selection")
-            return self._sha
+            return self._sha or self._shipped_sha
 
     variant = VariantModule()
     live_host_module._load_mm_feed_module = lambda: variant
@@ -1838,24 +1846,16 @@ def feed_specs_for(facts: dict[str, Any] | None) -> list[dict[str, Any]]:
     ]
 
 
-def install_feed_instrument_before_navigation(player: LiveOutputHost, facts: dict[str, Any] | None) -> None:
+def feed_instrument_pre_navigation_scripts(facts: dict[str, Any] | None) -> tuple[str, ...]:
     entries = feed_specs_for(facts)
     if not entries:
-        return
+        return ()
     config = {
         "entries": entries, "tamper": FEED_CONTROL.get("tamper"), "tamperScene": FEED_CONTROL.get("tamperScene"),
         "killHoldUpload": FEED_CONTROL.get("killHoldUpload", False),
     }
     source = mm_feed_instrument.INSTRUMENT_JS + "\nwindow.__obedMmFeedProbe.bootstrap(" + json.dumps(config) + ");"
-    original = player._install_placement_channel
-
-    def install(version: Any, url: str) -> None:
-        player._require_transport().call(
-            "Page.addScriptToEvaluateOnNewDocument", source=source,
-        )
-        original(version, url)
-
-    player._install_placement_channel = install
+    return (source,)
 
 
 def drive_and_sample(
@@ -1877,6 +1877,8 @@ def drive_and_sample(
     transport.evaluate(SAMPLER_JS)
     feed_specs = feed_specs_for(feed_facts)
     if feed_specs:
+        if transport.evaluate("!!window.__obedMmFeedProbe") is not True:
+            raise RuntimeError("Magic Move feed instrument was not installed before page scripts")
         transport.evaluate(
             "window.__obedMmFeedProbe.configure(" + json.dumps({
                 "entries": feed_specs, "tamper": FEED_CONTROL.get("tamper"),
@@ -3665,9 +3667,8 @@ def score_under_artwork(evidence: Any, spec: dict[str, Any]) -> dict[str, Any]:
     visits = record.get("visits")
     if isinstance(visits, list):
         scored = [score_under_artwork({spec["id"]: visit}, spec) for visit in visits]
-        values = [row.get("verdict") for row in scored]
-        value = False if False in values else None if None in values else True
-        return {"verdict": value, "reason": "repeated visits are scored independently", "visits": scored}
+        return {"verdict": None, "reason": "inconclusive: repeated visits require per-visit continuity intervals",
+                "visits": scored}
     mode = record.get("mode")
     if mode == "unavailable":
         return _inconclusive(record.get("reason") or "the under-artwork feed mode is unavailable")
@@ -4211,13 +4212,7 @@ def score_verdicts(
     fully observed contrary behaviour; every integrity or missing-evidence path is None. `schema`
     is the sampler's (a schema-2 stream never scores as legacy). Rows or evidence outside the
     producer contract make every verdict of the arm None."""
-    feed_streams: list[Iterator[str]] = []
-    if isinstance(feed_evidence, dict):
-        if "producer" in feed_evidence:
-            feed_streams.append(contract.mm_feed_report(feed_evidence["producer"]))
-        records = feed_evidence.get("verdicts") if isinstance(feed_evidence.get("verdicts"), dict) else {}
-        feed_streams.extend(contract.feed_verdict_record(row, f"feedEvidence.verdicts.{key}") for key, row in records.items())
-    errors = contract.first_errors(contract.sample_rows(samples, schema=schema), contract.evidence(evidence), *feed_streams)
+    errors = contract.first_errors(contract.sample_rows(samples, schema=schema), contract.evidence(evidence))
     if errors:
         return {spec["id"]: _contract_inconclusive(errors) for spec in facts.get("verdicts") or []}
     scored: dict[str, Any] = {}
@@ -4418,8 +4413,9 @@ def run_arm(
     gl_replay: str = "off", facts_on: dict[str, Any] | None = None, census: bool = False,
 ) -> dict[str, Any]:
     force_viewport(*viewport)
-    player = LiveOutputHost(export_root, slides, headless=True, gl_replay=gl_replay, **feed_host_kwargs())
-    install_feed_instrument_before_navigation(player, facts_on or facts)
+    player = LiveOutputHost(
+        export_root, slides, headless=True, gl_replay=gl_replay, **feed_host_kwargs(facts_on or facts),
+    )
     result: dict[str, Any] = {"arm": name}
     try:
         player.start()
@@ -4570,8 +4566,9 @@ def run_attach_arm(
     result: dict[str, Any] = {"arm": "attach", "attachViewport": {"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT}}
     with attach_chrome(scratch / "attach-chrome-profile", result) as port:
         with env_override({ATTACH_ENV: f"http://127.0.0.1:{port}"}):
-            player = LiveOutputHost(export_root, slides, headless=True, gl_replay=gl_replay, **feed_host_kwargs())
-            install_feed_instrument_before_navigation(player, facts_on or facts)
+            player = LiveOutputHost(
+                export_root, slides, headless=True, gl_replay=gl_replay, **feed_host_kwargs(facts_on or facts),
+            )
             try:
                 player.start()
                 output = player.output

@@ -336,7 +336,8 @@ console.log(JSON.stringify({held: held, events: P.events, after: P.snapshot()}))
 def _mm_feed_report() -> dict[str, Any]:
     return {
         "kind": "mm-feed", "version": 1, "config": {}, "media": [], "mediaOverflow": 0, "artwork": [],
-        "errors": [], "module": None, "uploads": [], "claims": [], "standDowns": [], "departures": [],
+        "errors": [], "module": None, "uploads": [], "claims": [], "standDowns": [],
+        "departures": [{"t": 1.5, "serial": None, "atScene": 2, "entryId": "carry-a"}],
         "callbackCostP95Ms": None,
         "tamper": None, "killedOnce": [{"objectId": "movie-a", "t": 3.0}],
         "contexts": [{"serial": 1, "id": "0-canvas", "createdAt": 1.0, "atScene": 2,
@@ -348,7 +349,8 @@ def _mm_feed_report() -> dict[str, Any]:
             "rows": [{"serial": 1, "atScene": 2, "entryId": "carry-a", "objectId": "movie-a",
                       "dstObjectId": "movie-b", "draw": 1, "t": 2.0, "quad": None,
                       "mixFactor": .5, "decoder": None,
-                      "textures": [{"unit": 0, "ordinal": 1, "size": [640, 360], "video": False,
+                      "textures": [{"unit": 0, "ordinal": 1, "size": [640, 360],
+                                    "uploadedSize": [1280, 720], "video": True,
                                     "flip": True}, None],
                       "feedRead": {"patchInside": True, "coveredByLaterDraw": False, "kind": "alpha",
                                    "dVideo": 2.0, "dPoster": 20.0, "dSep": 20.0}}],
@@ -371,6 +373,8 @@ def test_mm_feed_frame_and_poster_feed_note_producers_meet_the_contract() -> Non
     (lambda r: r["contexts"][0].pop("lost"), "mmFeed.context.lost:missing"),
     (lambda r: r["frames"][0].update(t="late"), "mmFeed.frame.t"),
     (lambda r: r["frames"][0]["rows"][0]["textures"][0].update(size=[640]), "mmFeed.texture.size"),
+    (lambda r: r["frames"][0]["rows"][0]["textures"][0].update(uploadedSize=[1280]),
+     "mmFeed.texture.uploadedSize"),
 ])
 def test_mm_feed_contract_rejects_required_field_and_generation_breaks(mutate: Any, clause: str) -> None:
     report = _mm_feed_report()

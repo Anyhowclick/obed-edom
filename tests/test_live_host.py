@@ -54,6 +54,7 @@ class FakeCdp:
         self.placement = "invalid"
         self.snap_exposed_outside_trip = False
         self.calls: list[str] = []
+        self.new_document_scripts: list[str] = []
         self.targeted: list[tuple[str, str]] = []
         self.before_targeted: Any = None
         self.__class__.instances.append(self)
@@ -74,7 +75,10 @@ class FakeCdp:
             if self.product is None: raise live_host.LiveHostError("CDP Browser.getVersion failed: boom")
             return {"product": self.product, "userAgent": self.user_agent}
         if method == "Page.addScriptToEvaluateOnNewDocument":
-            self.token = re.search(r'var T="([0-9a-f]{32})"', params["source"]).group(1)
+            self.new_document_scripts.append(params["source"])
+            match = re.search(r'var T="([0-9a-f]{32})"', params["source"])
+            if match:
+                self.token = match.group(1)
             return {"identifier": "1"}
         if method == "Page.getFrameTree": return {"frameTree": {"frame": {"id": "MAIN"}}}
         return {}
@@ -2575,6 +2579,7 @@ def test_mm_feed_resolves_continuous_and_once_independently(
 
 def test_mm_feed_renderer_is_resolved_before_script_selection_and_navigation(tmp_path, monkeypatch):
     order: list[str] = []
+    pre_navigation_scripts = ("window.__probeOne = true;", "window.__probeTwo = true;")
     module = fake_feed_module([])
     real_builder = module.mm_feed_script
 
@@ -2584,26 +2589,40 @@ def test_mm_feed_renderer_is_resolved_before_script_selection_and_navigation(tmp
 
     module.mm_feed_script = builder
     monkeypatch.setattr(live_host, "_load_mm_feed_module", lambda: module)
+    real_start = FakeCdp.start
     real_call = FakeCdp.call
     real_goto = FakeCdp.goto
+
+    def start(self):
+        order.append("transport")
+        return real_start(self)
 
     def call(self, method, *args, **kwargs):
         if method == "Browser.getVersion":
             order.append("version")
+        elif method == "Page.addScriptToEvaluateOnNewDocument":
+            source = kwargs["source"]
+            order.append(f"pre-{pre_navigation_scripts.index(source) + 1}" if source in pre_navigation_scripts else "placement")
         return real_call(self, method, *args, **kwargs)
 
     def goto(self, url):
         order.append("navigate")
         return real_goto(self, url)
 
+    monkeypatch.setattr(FakeCdp, "start", start)
     monkeypatch.setattr(FakeCdp, "call", call)
     monkeypatch.setattr(FakeCdp, "goto", goto)
-    output = host_with_continuity(tmp_path, monkeypatch)
+    for invalid in ("window.bad = true;", ("",), ("window.good = true;", 1)):
+        with pytest.raises(live_host.LiveHostError, match="sequence of non-empty strings"):
+            host_with_continuity(tmp_path / f"invalid-{len(order)}-{len(str(invalid))}", monkeypatch, pre_navigation_scripts=invalid)
+    output = host_with_continuity(tmp_path, monkeypatch, pre_navigation_scripts=pre_navigation_scripts)
     fake_plan_pair(monkeypatch, off=_feed_runtime())
     ready(monkeypatch)
     output.start()
 
     assert order.index("version") < order.index("script") < order.index("navigate")
+    assert order.index("transport") < order.index("pre-1") < order.index("pre-2") < order.index("placement") < order.index("navigate")
+    assert FakeCdp.instances[0].new_document_scripts[:2] == list(pre_navigation_scripts)
 
 
 def test_mm_feed_never_injects_without_continuity_or_a_feed_entry(tmp_path, monkeypatch):

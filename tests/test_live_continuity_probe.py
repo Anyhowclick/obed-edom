@@ -11717,6 +11717,7 @@ def test_a_readable_red_label_is_not_masked_by_an_inconclusive_label() -> None:
     (lambda r: None, True),
     (lambda r: r["reads"][-1].update(bestFrame=0), False),
     (lambda r: r["reads"][-1].update(matchMargin=1.0), None),
+    (lambda r: r["reads"][0].pop("bestFrame"), None),
     (lambda r: r.update(usableContext=False), None),
 ])
 def test_hold_frame_pass_fail_inconclusive(mutate: Any, expected: bool | None) -> None:
@@ -11739,6 +11740,8 @@ def _poster_hold(mode: str = "departure") -> dict[str, Any]:
     (lambda r: r.update(firstAfterMediaTime=5.0 + 2 / 30), False),
     (lambda r: r.update(clockToleranceS=1 / 60), None),
     (lambda r: r.pop("pauseFrame"), None),
+    (lambda r: r.update(holdPauseMissing=True), None),
+    (lambda r: r.update(complete=False), None),
 ])
 def test_departure_poster_hold_pass_fail_inconclusive(mutate: Any, expected: bool | None) -> None:
     record = _poster_hold()
@@ -11829,10 +11832,11 @@ def test_report_shaped_feed_evidence_scores_each_leaf_and_feed_off_red() -> None
         "contexts": [{"serial": 1, "id": "0-canvas", "createdAt": .5, "atScene": 2,
                       "lost": False, "entryIds": [entry["id"]]}],
         "frames": frames,
-        "uploads": [{"serial": 1, "atScene": 2, "t": float(index + 1), "frameN": index + 1,
+        "uploads": [{"serial": 1, "atScene": 2, "t": float(index + 1) + .003, "frameN": index + 1,
                      "textureOrdinal": 1, "presentedFrames": index + 10, "mediaTime": index / 30}
                     for index in range(4)],
-        "claims": [{"objectId": "movie-a", "entryId": entry["id"], "atScene": 2, "t": .75, "claimed": True}],
+        "claims": [{"objectId": "movie-a", "entryId": entry["id"], "serial": 1,
+                    "atScene": 2, "t": .75, "claimed": True}],
         "standDowns": [], "departures": [],
         "artwork": [{"entryId": entry["id"], "serial": 1, "atScene": 2, "artworkAbove": True}],
         "module": {"entries": {"movie-a": {"mode": "continuous", "state": "fed", "framesFed": 4,
@@ -11846,6 +11850,8 @@ def test_report_shaped_feed_evidence_scores_each_leaf_and_feed_off_red() -> None
     assert all(scored[name]["verdict"] is not None for name in (
         "feedLive", "noRiderAboveCanvas", "labelsOverFeed", "artworkAbove",
     ))
+    repeated = {entry["id"]: {"mode": "continuous", "visits": [record, copy.deepcopy(record)]}}
+    assert probe.score_under_artwork(repeated, entry)["verdict"] is None
     failing_entry = {
         "id": "b1to2:movie-c:carry", "objectId": "movie-c", "dstObjectId": "movie-d", "atScene": 2,
         "feed": {"draw": 2, "from": {"upload": 2, "size": [640, 360]}, "to": None},
@@ -11871,18 +11877,42 @@ def test_report_shaped_feed_evidence_scores_each_leaf_and_feed_off_red() -> None
     report["uploads"].extend({"serial": 1, "atScene": 2, "t": float(index + 1), "frameN": index + 1,
                               "textureOrdinal": 2, "presentedFrames": index + 20, "mediaTime": index / 30}
                              for index in range(4))
-    report["claims"].append({"objectId": "movie-c", "entryId": failing_entry["id"], "atScene": 2,
+    report["claims"].append({"objectId": "movie-c", "entryId": failing_entry["id"], "serial": 1, "atScene": 2,
                              "t": .75, "claimed": True})
     per_leaf = probe.mm_feed_instrument.verdict_records(
         report, [entry, failing_entry], continuous_expected=True,
     )
     assert probe.score_feed_live(per_leaf[entry["id"]]["feed"])["verdict"] is True
     assert probe.score_feed_live(per_leaf[failing_entry["id"]]["feed"])["verdict"] is False
+    partial = copy.deepcopy(report)
+    next(row for row in partial["uploads"] if row["textureOrdinal"] == 2)["serial"] = None
+    isolated = probe.mm_feed_instrument.verdict_records(
+        partial, [entry, failing_entry], continuous_expected=True,
+    )
+    assert probe.score_feed_live(isolated[entry["id"]]["feed"])["verdict"] is True
+    assert probe.score_feed_live(isolated[failing_entry["id"]]["feed"])["verdict"] is None
+    partial = copy.deepcopy(report)
+    partial["artwork"][0].pop("entryId")
+    isolated = probe.mm_feed_instrument.verdict_records(partial, [entry], continuous_expected=True)[entry["id"]]
+    assert probe.score_feed_live(isolated["feed"])["verdict"] is True
+    assert probe.score_artwork_above(isolated["artwork"])["verdict"] is None
+    partial = copy.deepcopy(report)
+    partial["frames"][0]["serial"] = None
+    isolated = probe.mm_feed_instrument.verdict_records(partial, [entry], continuous_expected=True)[entry["id"]]
+    assert probe.score_feed_live(isolated["feed"])["verdict"] is None
+    assert probe.score_artwork_above(isolated["artwork"])["verdict"] is True
     report["claims"][0]["claimed"] = False
     report["departures"].append({"objectId": "movie-a", "entryId": entry["id"], "atScene": 2,
                                  "serial": 1, "t": .8})
     off = probe.mm_feed_instrument.verdict_records(report, [entry], continuous_expected=True)[entry["id"]]
     assert probe.score_feed_live(off["feed"], continuous_expected=True)["verdict"] is False
+    report["departures"][0]["serial"] = None
+    unattributed = probe.mm_feed_instrument.verdict_records(report, [entry], continuous_expected=True)[entry["id"]]
+    assert unattributed["mode"] == "unavailable"
+    report["departures"][0]["serial"] = 1
+    report["tamper"] = {"kind": "ordinal", "atScene": 2, "applied": False}
+    unapplied = probe.mm_feed_instrument.verdict_records(report, [entry], continuous_expected=True)[entry["id"]]
+    assert unapplied["mode"] == "unavailable"
 
 
 def test_poster_pairing_uses_the_move_anchored_hold_pause() -> None:
@@ -11890,7 +11920,7 @@ def test_poster_pairing_uses_the_move_anchored_hold_pause() -> None:
              "feed": {"draw": 1, "from": {"upload": 1, "size": [100, 100]}, "to": None}}
     frames = []
     for index, t in enumerate((10.0, 20.0, 30.0)):
-        frames.append({"serial": 1, "atScene": 2, "t": t, "rows": [{
+        frames.append({"serial": 1, "atScene": 2, "n": index + 1, "t": t, "rows": [{
             "entryId": "carry-a", "t": t, "textures": [{"ordinal": 1, "size": [100, 100]}, None],
             "decoder": {"paused": True, "currentTime": 5.0, "presentedFrames": 42},
         }], "riders": [], "labels": [], "labelExpected": []})
@@ -11906,6 +11936,10 @@ def test_poster_pairing_uses_the_move_anchored_hold_pause() -> None:
     record = probe.mm_feed_instrument.verdict_records(report, [entry], continuous_expected=False)["carry-a"]
     assert record["poster"]["pauseTime"] == 9
     assert probe.score_poster_hold(record["poster"])["verdict"] is True
+    report["media"][0]["serial"] = None
+    partial = probe.mm_feed_instrument.verdict_records(report, [entry], continuous_expected=False)["carry-a"]
+    assert probe.score_poster_hold(partial["poster"])["verdict"] is None
+    report["media"][0]["serial"] = 1
     report["media"] = [row for row in rows if not (row["kind"] == "pause" and row["t"] == 9)]
     for index, frame in enumerate(report["frames"]):
         frame["rows"][0]["decoder"].update(paused=False, currentTime=5 + index / 30, presentedFrames=42 + index)
@@ -11913,49 +11947,75 @@ def test_poster_pairing_uses_the_move_anchored_hold_pause() -> None:
     assert probe.score_poster_hold(broken["poster"])["verdict"] is False
 
 
-def test_instrument_js_runs_fake_gl_end_to_end_and_marks_late_frames_unreadable() -> None:
+def test_instrument_js_runs_realistic_fake_gl_end_to_end() -> None:
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is not available")
     instrument = json.dumps(probe.mm_feed_instrument.INSTRUMENT_JS)
-    script = f"""
+    script = r"""
 let clock=0, raf=[];
-global.window=global; global.location={{hash:'#1'}}; global.performance={{now:()=>++clock}};
-global.requestAnimationFrame=(fn)=>(raf.push(fn),raf.length); global.getComputedStyle=()=>({{opacity:'1',display:'block',visibility:'visible'}});
-class Media {{ pause(){{this.paused=true}} play(){{this.paused=false;return Promise.resolve()}} }}
-class Video extends Media {{
-  constructor(id,dst,x){{super();this.__obedInstance=id;this.__obedDst=dst;this.__obedElId=x+1;this.__x=x;this.currentTime=1;this.paused=false;this.readyState=4;this.videoWidth=100;this.videoHeight=100;this.width=100;this.height=100;this.isConnected=true;this.nodeType=1;this.parentElement=null;this.listeners={{}}}}
-  addEventListener(k,f){{this.listeners[k]=f}} requestVideoFrameCallback(f){{this.cb=f}} checkVisibility(){{return true}}
-  getBoundingClientRect(){{return {{x:this.__x*30,y:0,left:this.__x*30,top:0,right:this.__x*30+25,bottom:25,width:25,height:25}}}}
-  contains(n){{return n===this}}
-}}
+global.window=global; global.location={hash:'#1'}; global.performance={now:()=>++clock};
+global.requestAnimationFrame=(fn)=>(raf.push(fn),raf.length);
+class Media {pause(){this.paused=true} play(){this.paused=false;return Promise.resolve()}}
+class Video extends Media {
+  constructor(id,dst,w,h,rect,counter=false){super();this.__obedInstance=id;this.__obedDst=dst;this.__obedElId=id.length;this.currentTime=1;this.paused=false;this.readyState=4;this.videoWidth=w;this.videoHeight=h;this.width=w;this.height=h;this.rect=rect;this.counter=counter;this.isConnected=true;this.nodeType=1;this.parentElement=null;this.listeners={}}
+  addEventListener(k,f){this.listeners[k]=f} requestVideoFrameCallback(f){this.cb=f} checkVisibility(){return true}
+  getBoundingClientRect(){return this.rect} contains(n){return n===this}
+  pixel(x,y){
+    if(this.counter){const bits=[1,0,0,0,0,0,0,0,1,0,1,0,1,0,1,0,1],yy=24/540*this.videoHeight;
+      for(let j=0;j<17;j++){const xx=(24+40*j)/1920*this.videoWidth;if(Math.abs(x-xx)<7&&Math.abs(y-yy)<7)return bits[j]?240:10}}
+    const u=Math.max(0,Math.min(.999,x/this.videoWidth)),v=Math.max(0,Math.min(.999,y/this.videoHeight));
+    return 55+Math.floor(u*10)*15+Math.floor(v*8)*4;
+  }
+}
+class ImageSource {constructor(w,h,value){this.width=w;this.height=h;this.naturalWidth=w;this.naturalHeight=h;this.value=value}pixel(){return this.value}}
 global.HTMLMediaElement=Media; global.HTMLVideoElement=Video;
-function ctx2d(){{return {{source:null,clearRect(){{}},drawImage(s){{this.source=s}},getImageData(x,y,w,h){{let v=this.source&&this.source.live?100:0,a=new Uint8ClampedArray(w*h*4);for(let i=0;i<a.length;i+=4){{a[i]=a[i+1]=a[i+2]=v;a[i+3]=255}}return {{data:a}}}}}}}}
-class Canvas {{constructor(id='',gl=null){{this.id=id;this._gl=gl;this._2d=ctx2d();this.isConnected=true;this.listeners={{}}}}getContext(t){{return t==='2d'?this._2d:this._gl}}addEventListener(k,f){{this.listeners[k]=f}}getBoundingClientRect(){{return {{left:0,top:0,right:100,bottom:100,width:100,height:100}}}}}}
+class Context2D {
+  constructor(canvas){this.canvas=canvas;this.data=new Uint8ClampedArray(81*30*4)}
+  clearRect(){this.data.fill(0)}
+  drawImage(s,sx,sy,sw,sh,dx,dy,dw,dh){for(let y=0;y<dh;y++)for(let x=0;x<dw;x++){const px=sx+(x+.5)*sw/dw,py=sy+(y+.5)*sh/dh,v=s.pixel(px,py),i=((dy+y)*81+dx+x)*4;this.data[i]=this.data[i+1]=this.data[i+2]=v;this.data[i+3]=255}}
+  getImageData(x,y,w,h){const out=new Uint8ClampedArray(w*h*4);for(let yy=0;yy<h;yy++)for(let xx=0;xx<w;xx++){const a=((y+yy)*81+x+xx)*4,b=(yy*w+xx)*4;out.set(this.data.slice(a,a+4),b)}return {data:out}}
+}
+class Canvas {constructor(id='',gl=null){this.id=id;this._gl=gl;this._2d=new Context2D(this);this.isConnected=true;this.listeners={};this.nodeType=1;this.parentElement=null}getContext(t){return t==='2d'?this._2d:this._gl}addEventListener(k,f){this.listeners[k]=f}getBoundingClientRect(){return {x:0,y:0,left:0,top:0,right:1920,bottom:540,width:1920,height:540}}}
 global.HTMLCanvasElement=Canvas;
-const styleParent={{appendChild(n){{n.parentNode=this}},removeChild(n){{n.parentNode=null}}}},stage={{getBoundingClientRect:()=>({{x:0,y:0,width:100,height:100}})}};
-const art={{contains:()=>false,getBoundingClientRect:()=>({{left:0,top:0,right:100,bottom:100}})}};
-const videos={{a:new Video('a','da',0),b:new Video('b','db',1),c:new Video('c','dc',2)}};
-global.document={{head:styleParent,documentElement:styleParent,createElement:(k)=>k==='canvas'?new Canvas():{{textContent:'',parentNode:null}},getElementById:(id)=>id==='stage'?stage:null,elementsFromPoint:(x)=>x<30?[videos.a]:x<60?[art,videos.b]:[art]}};
-const seam={{decoderFor:(id)=>videos[id]||null,claim:()=>true,onStandDown:()=>true}}; global.__OBED_P2_PRESERVE__={{feed:seam}};
-const drawTable={{drawCount:2,draws:[{{draw:1,layerSize:[100,100],labelBoxOpacity:null}},{{draw:2,layerSize:[20,20],labelBoxOpacity:.61}}]}};
-const boundaries=['a','b','c'].map((id,i)=>({{atScene:2,underArtwork:true,src:{{objectId:id}},dst:{{objectId:'d'+id}},feed:{{draw:1,from:{{upload:1,size:[100,100]}},to:null}}}}));
-global.__OBED_CONTINUITY__={{boundaries}}; global.__OBED_CONTINUITY_INFO__={{authoredWidth:100,authoredHeight:100}};
-eval({instrument});
-const entries=['a','b','c'].map((id,i)=>({{id:'carry-'+id,objectId:id,dstObjectId:'d'+id,atScene:2,feed:boundaries[i].feed,draws:drawTable,artwork:[{{rect:{{x:i*30,y:0,w:25,h:25}}}}]}}));
-window.__obedMmFeedProbe.configure({{entries}}); raf.shift()(); ['a','b','c'].forEach(id=>seam.claim(id));
-let draws=0, program={{}}, matrixLoc={{}}, mixLoc={{}};
-const gl={{canvas:null,TEXTURE0:100,TEXTURE_2D:2,UNPACK_FLIP_Y_WEBGL:3,UNPACK_PREMULTIPLY_ALPHA_WEBGL:4,RGBA:5,UNSIGNED_BYTE:6,drawingBufferWidth:100,drawingBufferHeight:100,
- activeTexture(){{}},bindTexture(){{}},pixelStorei(){{}},useProgram(){{}},getUniformLocation(p,n){{return n==='MVPMatrix'?matrixLoc:mixLoc}},uniform1f(){{}},uniformMatrix4fv(){{}},clear(){{draws=0}},drawArrays(){{draws++}},drawElements(){{draws++}},
- texImage2D(){{}},readPixels(x,y,w,h,f,t,a){{for(let i=0;i<a.length;i+=4){{let px=x+(i/4)%w,base=80+px*3,v=draws>=2&&px<20&&y+Math.floor((i/4)/w)<20?Math.round(base*.39):base;a[i]=a[i+1]=a[i+2]=v;a[i+3]=255}}}}}};
+global.getComputedStyle=(el)=>({opacity:el instanceof Video?'0':'1',display:'block',visibility:'visible'});
+const styleParent={appendChild(n){n.parentNode=this},removeChild(n){n.parentNode=null}},stage={getBoundingClientRect:()=>({x:0,y:0,width:1920,height:540})};
+const overlay={nodeType:1,parentElement:null,contains:()=>false,getBoundingClientRect:()=>({left:0,top:0,right:1920,bottom:540})},labelNode={nodeType:1,parentElement:null,contains:()=>false,getBoundingClientRect:()=>({left:50,top:50,right:250,bottom:150})};
+const videos={alpha:new Video('alpha','dalpha',160,90,{x:0,y:0,left:0,top:0,right:500,bottom:540,width:500,height:540}),broken:new Video('broken','dbroken',160,90,{x:550,y:0,left:550,top:0,right:1050,bottom:540,width:500,height:540}),counter:new Video('counter','dcounter',960,270,{x:1100,y:0,left:1100,top:0,right:1920,bottom:540,width:820,height:540},true)};
+global.document={head:styleParent,documentElement:styleParent,createElement:(k)=>k==='canvas'?new Canvas():{textContent:'',parentNode:null,nodeType:1,parentElement:null},getElementById:(id)=>id==='stage'?stage:null,elementsFromPoint:(x)=>x<500?[overlay,labelNode,videos.alpha]:[overlay,videos.broken]};
+const seam={decoderFor:(id)=>videos[id]||null,claim:()=>true,onStandDown:()=>true};global.__OBED_P2_PRESERVE__={feed:seam};
+const drawTable={drawCount:4,draws:[{draw:1,layerSize:[100,100],labelBoxOpacity:null},{draw:2,layerSize:[100,100],labelBoxOpacity:null},{draw:3,layerSize:[1920,540],labelBoxOpacity:null},{draw:4,layerSize:[20,20],labelBoxOpacity:.61}]};
+const entries=[['alpha',1,[100,100]],['broken',2,[100,100]],['counter',3,[1920,540]]].map(([id,draw,size])=>({id:'carry-'+id,objectId:id,dstObjectId:'d'+id,atScene:2,feed:{draw,from:{upload:draw,size},to:null},draws:drawTable,artwork:[]}));
+entries[0].artwork=[{rect:{x:50,y:50,w:200,h:100}}];entries[1].artwork=[{rect:{x:600,y:50,w:200,h:100}}];
+const boundaries=entries.map(e=>({atScene:2,underArtwork:true,src:{objectId:e.objectId},dst:{objectId:e.dstObjectId},feed:e.feed}));
+global.__OBED_CONTINUITY_INFO__={authoredWidth:1920,authoredHeight:540};
+""" + "\neval(" + instrument + ");\n" + r"""
+window.__obedMmFeedProbe.bootstrap({entries});
+window.__OBED_CONTINUITY__={boundaries};
+videos.alpha.__obedPosterHeld=true;videos.alpha.pause();
+let active=100,bound={},sources=new WeakMap(),matrix=null,drawNo=0,program={},matrixLoc={},mixLoc={},pixels=new Uint8ClampedArray(1920*540*4);
+function rectFor(m,size){const x=((m[12]+1)/2)*1920,y=((m[13]+1)/2)*540,w=m[0]*size[0]/2*1920,h=m[5]*size[1]/2*540;return {x:Math.round(x),y:Math.round(y),w:Math.round(w),h:Math.round(h)}}
+function paintSource(source,rect){for(let y=0;y<rect.h;y++)for(let x=0;x<rect.w;x++){const v=source.pixel((x+.5)/rect.w*(source.videoWidth||source.width),(y+.5)/rect.h*(source.videoHeight||source.height)),i=((rect.y+y)*1920+rect.x+x)*4;pixels[i]=pixels[i+1]=pixels[i+2]=v;pixels[i+3]=255}}
+function paintLabel(rect){for(let y=0;y<rect.h;y++)for(let x=0;x<rect.w;x++){const i=((rect.y+y)*1920+rect.x+x)*4;pixels[i]=pixels[i+1]=pixels[i+2]=Math.round(pixels[i]*.39);pixels[i+3]=255}}
+const gl={canvas:null,TEXTURE0:100,TEXTURE_2D:2,UNPACK_FLIP_Y_WEBGL:3,UNPACK_PREMULTIPLY_ALPHA_WEBGL:4,RGBA:5,UNSIGNED_BYTE:6,drawingBufferWidth:1920,drawingBufferHeight:540,
+ activeTexture(u){active=u},bindTexture(t,texture){bound[active]=texture},pixelStorei(){},useProgram(){},getUniformLocation(p,n){return n==='MVPMatrix'?matrixLoc:mixLoc},uniform1f(){},uniformMatrix4fv(l,t,v){matrix=Array.from(v)},
+ clear(){drawNo=0;pixels.fill(0)},drawElements(){this.drawArrays()},drawArrays(){drawNo++;const sizes=[[100,100],[100,100],[1920,540],[20,20]],r=rectFor(matrix,sizes[drawNo-1]);if(drawNo===4)paintLabel(r);else paintSource(sources.get(bound[active]),r)},
+ texImage2D(){sources.set(bound[active],arguments[5])},readPixels(x,y,w,h,f,t,a){for(let yy=0;yy<h;yy++)for(let xx=0;xx<w;xx++){const src=((y+yy)*1920+x+xx)*4,dst=(yy*w+xx)*4;a.set(pixels.slice(src,src+4),dst)}}};
 const canvas=new Canvas('0-canvas',gl);gl.canvas=canvas;canvas.getContext('webgl');
-const tex={{}},poster={{width:100,height:100,live:false}};gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,tex);gl.texImage2D(0,0,0,0,0,poster);
-const matrix=[.02,0,0,0,0,.02,0,0,0,0,1,0,-1,-1,0,1];
-gl.useProgram(program);let m=gl.getUniformLocation(program,'MVPMatrix');
-for(let n=1;n<=4;n++){{Object.values(videos).forEach(v=>{{v.__obedPresentedFrames=n+9;v.__obedMediaTime=n/30;v.live=true;v.cb&&v.cb(clock,{{presentedFrames:n+9,mediaTime:n/30}})}});gl.clear();gl.texImage2D(0,0,0,0,0,videos.a);gl.uniformMatrix4fv(m,false,matrix);gl.drawArrays();gl.uniformMatrix4fv(m,false,matrix);gl.drawArrays();raf.shift()()}}
-gl.clear();gl.uniformMatrix4fv(m,false,matrix);gl.drawArrays();raf.shift()();
-let report=window.__obedMmFeedProbe.report();Object.values(videos).forEach(v=>v.__obedInstance=v.__obedDst);raf.shift()();report=window.__obedMmFeedProbe.report();
-console.log(JSON.stringify(report));
+const textures={alpha:{},broken:{},counter:{}},posters={alpha:new ImageSource(100,100,8),broken:new ImageSource(100,100,8),counter:new ImageSource(1920,540,8)};
+for(const id of ['alpha','broken','counter']){gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,textures[id]);gl.texImage2D(0,0,0,0,0,posters[id])}
+raf.shift()();for(const id of Object.keys(videos))seam.claim(id);videos.alpha.play();
+const matrices={alpha:[.005208333,0,0,0,0,.02,0,0,0,0,1,0,-1,-1,0,1],broken:[.005208333,0,0,0,0,.02,0,0,0,0,1,0,-.427083333,-1,0,1],counter:[.0004448785,0,0,0,0,.0037037037,0,0,0,0,1,0,.145833333,-1,0,1],label:[.010416667,0,0,0,0,.018518519,0,0,0,0,1,0,-.947916667,-.814814815,0,1]};
+gl.useProgram(program);const m=gl.getUniformLocation(program,'MVPMatrix');
+for(let n=1;n<=4;n++){
+  for(const v of Object.values(videos)){v.__obedPresentedFrames=n+9;v.__obedMediaTime=n/30;v.currentTime=n/30;if(v.cb)v.cb(clock,{presentedFrames:n+9,mediaTime:n/30})}
+  gl.clear();gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,textures.alpha);gl.texImage2D(0,0,0,0,0,videos.alpha);gl.uniformMatrix4fv(m,false,matrices.alpha);gl.drawArrays();
+  gl.bindTexture(gl.TEXTURE_2D,textures.broken);gl.uniformMatrix4fv(m,false,matrices.broken);gl.drawArrays();
+  gl.bindTexture(gl.TEXTURE_2D,textures.counter);gl.texImage2D(0,0,0,0,0,videos.counter);gl.uniformMatrix4fv(m,false,matrices.counter);gl.drawArrays();
+  gl.uniformMatrix4fv(m,false,matrices.label);gl.drawArrays();raf.shift()();
+}
+window.__obedMmFeedProbe.report();videos.alpha.__obedInstance='dalpha';videos.broken.__obedInstance='dbroken';raf.shift()();
+console.log(JSON.stringify(window.__obedMmFeedProbe.report()));
 """
     completed = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=10)
     assert completed.returncode == 0, completed.stderr
@@ -11963,17 +12023,26 @@ console.log(JSON.stringify(report));
     assert probe.contract.first_errors(probe.contract.mm_feed_report(report), limit=20) == []
     entries = [
         {"id": f"carry-{name}", "objectId": name, "dstObjectId": f"d{name}", "atScene": 2,
-         "feed": {"draw": 1, "from": {"upload": 1, "size": [100, 100]}, "to": None}}
-        for name in "abc"
+         "feed": {"draw": draw, "from": {"upload": draw, "size": size}, "to": None}}
+        for name, draw, size in (("alpha", 1, [100, 100]), ("broken", 2, [100, 100]),
+                                 ("counter", 3, [1920, 540]))
     ]
     records = probe.mm_feed_instrument.verdict_records(report, entries, continuous_expected=True)
-    assert probe.score_feed_live(records["carry-a"]["feed"])["verdict"] is not None
-    label_score = probe.score_labels_over_feed(records["carry-a"]["labels"])
-    assert label_score["verdict"] is not None, json.dumps({"record": records["carry-a"]["labels"], "score": label_score})
-    assert any(row["feedRead"] == {"patchInside": False, "coveredByLaterDraw": False, "kind": None, "late": True}
-               for row in report["frames"][-1]["rows"])
-    artwork = {row["entryId"]: row["artworkAbove"] for row in report["artwork"]}
-    assert artwork == {"carry-a": False, "carry-b": True, "carry-c": None}
+    assert probe.score_feed_live(records["carry-alpha"]["feed"])["verdict"] is True
+    assert probe.score_feed_live(records["carry-broken"]["feed"])["verdict"] is False
+    assert probe.score_feed_live(records["carry-counter"]["feed"])["verdict"] is True
+    assert probe.score_no_rider_above_canvas(records["carry-alpha"]["rider"])["verdict"] is True
+    assert probe.score_labels_over_feed(records["carry-alpha"]["labels"])["verdict"] is True
+    assert probe.score_artwork_above(records["carry-alpha"]["artwork"])["verdict"] is True
+    assert probe.score_artwork_above(records["carry-broken"]["artwork"])["verdict"] is False
+    assert probe.score_hold_frame(records["carry-alpha"]["hold"])["verdict"] is None
+    assert all(read["kind"] == "counter" for read in records["carry-counter"]["feed"]["reads"]), json.dumps(
+        records["carry-counter"]["feed"]["reads"]
+    )
+    alpha_texture = report["frames"][-1]["rows"][0]["textures"][0]
+    assert alpha_texture["size"] == [100, 100] and alpha_texture["uploadedSize"] == [160, 90]
+    assert report["departures"][0]["serial"] == 1
+    assert records["carry-alpha"]["feed"]["framesFed"] == 4
 
 
 def test_feed_ordinal_tamper_changes_the_host_injected_plan_script() -> None:
@@ -11991,38 +12060,39 @@ def test_feed_ordinal_tamper_is_limited_to_the_requested_scene() -> None:
     with probe.tampered_feed_ordinal(10):
         script = probe.live_host_module._continuity_plan_script(runtime, {"width": 1920, "height": 1080})
     assert '"upload": 7' in script and '"upload": 1009' in script
+    with probe.tampered_feed_ordinal(12), pytest.raises(RuntimeError, match="no feed boundary matched"):
+        probe.live_host_module._continuity_plan_script(runtime, {"width": 1920, "height": 1080})
 
 
 def test_feed_instrument_is_registered_before_navigation() -> None:
-    calls: list[tuple[str, dict[str, Any]]] = []
-    player = type("Player", (), {})()
-    player._require_transport = lambda: type("Transport", (), {
-        "call": lambda self, method, **kwargs: calls.append((method, kwargs)),
-    })()
-    player._install_placement_channel = lambda version, url: calls.append(("placement", {"url": url}))
     facts = {"verdicts": [{"id": "carry-a", "srcObjectId": "a", "dstObjectId": "b", "atScene": 2,
                            "underArtwork": True, "feed": {"draw": 1}, "feedDraws": {}, "artworkAbove": []}]}
-    probe.install_feed_instrument_before_navigation(player, facts)
-    player._install_placement_channel({}, "http://example.test")
-    assert calls[0][0] == "Page.addScriptToEvaluateOnNewDocument"
-    assert calls[0][1]["source"].startswith(probe.mm_feed_instrument.INSTRUMENT_JS)
-    assert "window.__obedMmFeedProbe.bootstrap(" in calls[0][1]["source"]
-    assert calls[1][0] == "placement"
+    kwargs = probe.feed_host_kwargs(facts)
+    assert kwargs["pre_navigation_scripts"][0].startswith(probe.mm_feed_instrument.INSTRUMENT_JS)
+    assert "window.__obedMmFeedProbe.bootstrap(" in kwargs["pre_navigation_scripts"][0]
+    assert probe.feed_host_kwargs()["pre_navigation_scripts"] == ()
+    absent = type("Absent", (), {
+        "_require_transport": lambda self: type("Transport", (), {"evaluate": lambda self, expression: False})(),
+    })()
+    with pytest.raises(RuntimeError, match="not installed before page scripts"):
+        probe.drive_and_sample(absent, feed_facts=facts)
 
 
 def test_feed_variant_patches_the_host_binding_and_reports_the_variant_sha(monkeypatch: pytest.MonkeyPatch) -> None:
     module = type("FeedModule", (), {
         "MM_FEED_VERSION": 1,
         "mm_feed_script": staticmethod(lambda *, continuous, once: f"source:{continuous}:{once}"),
+        "js_sha256": staticmethod(lambda: "a" * 64),
     })()
     calls: list[tuple[str, str]] = []
     monkeypatch.setattr(probe.live_host_module, "_load_mm_feed_module", lambda: module)
     monkeypatch.setattr(probe, "mm_feed_variant_script",
-                        lambda name, source: calls.append((name, source)) or source + ":variant")
+                        lambda name, source: calls.append((name, source)) or f"<script>{source}:variant</script>")
     with probe.injected_feed_variant("from-only"):
         variant = probe.live_host_module._load_mm_feed_module()
+        assert variant.js_sha256() == "a" * 64
         source = variant.mm_feed_script(continuous=True, once=False)
-        assert variant.js_sha256() == probe.hashlib.sha256(source.encode()).hexdigest()
+        assert variant.js_sha256() == probe.hashlib.sha256(b"source:True:False:variant").hexdigest()
     assert calls == [("from-only", "source:True:False")]
 
 
@@ -12062,6 +12132,7 @@ def test_feed_gate_registrations_are_data_and_run_gates_names_every_control() ->
     assert all(f" feed-off-{dwell}s " in block for dwell in (2, 5, 12))
     assert block.count(" attach-once ") == 2
     assert "--feed-variant from-only" in block
+    assert "ordinal --feed-tamper ordinal --feed-tamper-scene 10" in block
     assert "strip-bridge14-movie2 --strip bridge@14:movie2" in block
     assert probe.MM_FEED_STRIP_EXPECTATIONS[(
         probe.ALPHA_DSK_PLAN_SHA256, "strip:bridge@14:movie2", "off",

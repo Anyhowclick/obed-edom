@@ -117,6 +117,7 @@ from live_continuity_probe import (  # noqa: E402
     forced_fail_seed,
     ground_truth_facts,
     ground_truth_plan,
+    feed_instrument_pre_navigation_scripts,
     load_slides,
     matches_asset_keys,
     rects_overlap,
@@ -512,6 +513,8 @@ def run_session(name: str, script: Callable[[Session], None], ctx: dict[str, Any
         kwargs["mm_feed"] = mm_feed
     if mm_feed_qualify_once:
         kwargs["mm_feed_qualify_once"] = True
+    if ctx.get("feedFacts"):
+        kwargs["pre_navigation_scripts"] = feed_instrument_pre_navigation_scripts(ctx["feedFacts"])
     session: Session | None = None
     out: dict[str, Any] = {"session": name, "glReplayArg": gl_replay, "mmOpacityArg": mm_opacity, "mmFeedArg": mm_feed,
                            "mmFeedQualifyOnce": mm_feed_qualify_once, "seed": seed, "square": square}

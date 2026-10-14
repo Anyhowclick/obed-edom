@@ -1215,6 +1215,28 @@ def test_run_session_passes_mm_opacity_explicitly_and_the_logger_transport(monke
     assert squares == [False]
 
 
+def test_run_session_installs_feed_instrument_before_managed_host_start(monkeypatch, tmp_path):
+    events: list[str] = []
+    FakeHost.made = []
+
+    class FeedHost(FakeHost):
+        def observe(self) -> None:
+            events.append("start")
+
+    monkeypatch.setattr(q, "LiveOutputHost", FeedHost)
+    monkeypatch.setattr(q, "make_export", lambda tag, fixture: (tmp_path / "x" / "html", []))
+    monkeypatch.setattr(q, "start_log", lambda host: None)
+    monkeypatch.setattr(q, "feed_instrument_pre_navigation_scripts",
+                        lambda facts: events.append("build") or ("instrument",))
+    monkeypatch.setattr(q.mm_opacity_probe, "square_player",
+                        lambda active: __import__("contextlib").nullcontext())
+    ctx = {"fixture": q.FIXTURE, "tag": "t", "endpoint": "http://127.0.0.1:9", "target": "x", "rate": 25,
+           "creds": (1, "p"), "shots": tmp_path, "engineState": lambda: {}, "feedFacts": {"verdicts": []}}
+    q.run_session("feed", lambda session: None, ctx)
+    assert FakeHost.made[0]["pre_navigation_scripts"] == ("instrument",)
+    assert events[:2] == ["build", "start"]
+
+
 def test_run_session_enters_the_alpha_squared_splice_for_sq(monkeypatch, tmp_path):
     squares: list[bool] = []
     monkeypatch.setattr(q, "LiveOutputHost", FakeHost)

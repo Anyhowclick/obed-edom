@@ -650,6 +650,11 @@ def _mm_feed_texture(value: Any, path: str) -> Iterator[str]:
         yield f"mmFeed.texture:object at {path}"
         return
     yield from _fields(value, "mmFeed.texture", path, MM_FEED_TEXTURE_FIELDS)
+    if value.get("uploadedSize") is not None and not (
+        isinstance(value["uploadedSize"], list) and len(value["uploadedSize"]) == 2
+        and all(_count(n) for n in value["uploadedSize"])
+    ):
+        yield f"mmFeed.texture.uploadedSize at {path}"
     for key in ("presentedFrames", "mediaTime"):
         if key in value and value[key] is not None and not _finite(value[key]):
             yield f"mmFeed.texture.{key} at {path}"
@@ -797,9 +802,11 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
     event_fields = {
         "uploads": {"serial": _id, "atScene": _count, "t": _finite, "frameN": _id_or_null,
                     "textureOrdinal": _id_or_null},
-        "claims": {"objectId": _non_empty_str, "t": _finite, "claimed": lambda v: isinstance(v, bool)},
-        "standDowns": {"objectId": _non_empty_str, "t": _finite, "accepted": lambda v: isinstance(v, bool)},
-        "departures": {"t": _finite, "serial": _id, "atScene": _count, "entryId": _non_empty_str},
+        "claims": {"objectId": _non_empty_str, "entryId": _non_empty_str, "serial": _id,
+                   "atScene": _count, "t": _finite, "claimed": lambda v: isinstance(v, bool)},
+        "standDowns": {"objectId": _non_empty_str, "entryId": _non_empty_str, "serial": _id,
+                       "atScene": _count, "t": _finite, "accepted": lambda v: isinstance(v, bool)},
+        "departures": {"t": _finite, "serial": _id_or_null, "atScene": _count, "entryId": _non_empty_str},
     }
     for key, fields in event_fields.items():
         for index, entry in enumerate(value.get(key) or []):

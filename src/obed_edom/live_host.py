@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from collections.abc import Sequence
 from urllib.parse import unquote, urlsplit
 from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -913,7 +914,7 @@ def _rate_warnings(report: list[dict[str, Any]], rate: int) -> list[str]:
 
 
 class LiveOutputHost:
-    def __init__(self, export_root: Path, slides: list[dict[str, Any]], *, display_id: int | None = None, chrome_path: Path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"), headless: bool = False, transport_factory: Callable[..., ChromeCdp] = ChromeCdp, server_factory: Callable[..., _AssetServer] = _AssetServer, resolver: Callable[[Path, str], Path] = safe_export_file, timeout_s: float = 12.0, attach_endpoint: str | None = _UNSET, attach_match: str | None = None, continuity: str = "auto", gl_replay: str = _UNSET, mm_opacity: str = _UNSET, mm_feed: str = _UNSET, mm_feed_qualify_once: bool = False, bridge: str | None = None, output_rate: int | None = None) -> None:
+    def __init__(self, export_root: Path, slides: list[dict[str, Any]], *, display_id: int | None = None, chrome_path: Path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"), headless: bool = False, transport_factory: Callable[..., ChromeCdp] = ChromeCdp, server_factory: Callable[..., _AssetServer] = _AssetServer, resolver: Callable[[Path, str], Path] = safe_export_file, timeout_s: float = 12.0, attach_endpoint: str | None = _UNSET, attach_match: str | None = None, continuity: str = "auto", gl_replay: str = _UNSET, mm_opacity: str = _UNSET, mm_feed: str = _UNSET, mm_feed_qualify_once: bool = False, bridge: str | None = None, output_rate: int | None = None, pre_navigation_scripts: Sequence[str] = ()) -> None:
         if continuity not in ("auto", "off"):
             raise LiveHostError("Continuity must be auto or off.")
         if gl_replay is not _UNSET and gl_replay not in ("auto", "off"):
@@ -924,6 +925,12 @@ class LiveOutputHost:
             raise LiveHostError("Magic Move feed must be auto, off or on.")
         if not isinstance(mm_feed_qualify_once, bool):
             raise LiveHostError("Magic Move one-shot qualification must be boolean.")
+        if (
+            isinstance(pre_navigation_scripts, (str, bytes))
+            or not isinstance(pre_navigation_scripts, Sequence)
+            or any(not isinstance(source, str) or not source for source in pre_navigation_scripts)
+        ):
+            raise LiveHostError("Pre-navigation scripts must be a sequence of non-empty strings.")
         self._continuity_preference = continuity
         self._bridge = bridge if bridge is not None else "obs-cdp"
         self._output_rate = output_rate
@@ -942,6 +949,7 @@ class LiveOutputHost:
         self._mm_feed_once = False
         self._mm_feed_module: Any | None = None
         self._poster_holds: list[dict[str, Any]] = []
+        self._pre_navigation_scripts = tuple(pre_navigation_scripts)
         self.export_root, self.slides = export_root, slides
         if attach_endpoint is _UNSET:
             attach_endpoint = os.environ.get(ATTACH_ENV) or None
@@ -1345,6 +1353,8 @@ class LiveOutputHost:
                 logger=self._logger, log_path=self._log_path,
             )
             self._transport.start()
+            for source in self._pre_navigation_scripts:
+                self._transport.call("Page.addScriptToEvaluateOnNewDocument", source=source)
             try: version = self._transport.call("Browser.getVersion")
             except Exception: version = None
             self._logger.log("browserVersion", result=version)
