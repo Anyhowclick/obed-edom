@@ -15,7 +15,7 @@ from unittest.mock import ANY
 import pytest
 
 from fake_chrome import FakeChromeProcess, FakeTime
-from obed_edom import devtools_port, html_preview, live_gl_replay_js, live_host, live_runtime
+from obed_edom import devtools_port, html_preview, live_gl_replay_js, live_host, live_mm_feed_js, live_runtime
 from obed_edom.fixture_paths import fixture
 
 
@@ -2431,12 +2431,12 @@ def _feed_runtime() -> dict[str, Any]:
     }
 
 
-def fake_feed_module(calls: list[tuple[bool, bool]]) -> Any:
+def fake_feed_script(calls: list[tuple[bool, bool]]):
     def script(*, continuous, once):
         calls.append((continuous, once))
         return '<script id="obed-mm-feed"></script>\n'
 
-    return SimpleNamespace(MM_FEED_VERSION=1, js_sha256=lambda: "f" * 64, mm_feed_script=script)
+    return script
 
 
 class _FakePlan:
@@ -2539,7 +2539,7 @@ def test_mm_feed_resolves_continuous_and_once_independently(
         monkeypatch.setattr(FakeCdp, "product_default", "Chrome/154.0.8037.59")
         monkeypatch.setattr(FakeCdp, "user_agent_default", "Mozilla/5.0 Chrome/154.0.8037.59 Safari/537.36")
     calls: list[tuple[bool, bool]] = []
-    monkeypatch.setattr(live_host, "_load_mm_feed_module", lambda: fake_feed_module(calls))
+    monkeypatch.setattr(live_host, "mm_feed_script", fake_feed_script(calls))
     output = host_with_continuity(
         tmp_path,
         monkeypatch,
@@ -2556,11 +2556,17 @@ def test_mm_feed_resolves_continuous_and_once_independently(
     assert calls == ([] if expected is None else [expected])
     info = output.output["continuity"]["mmFeed"]
     assert info["mode"] == ("unavailable" if expected is None else "injected")
+    assert info["version"] == live_mm_feed_js.MM_FEED_VERSION
+    assert info["sha256"] == live_mm_feed_js.js_sha256()
     if expected is None:
         assert info["reason"] == "CEF upload path not qualified"
         assert 'id="obed-mm-feed"' not in output._server.continuity_script
     else:
-        assert info == {"mode": "injected", "version": 1, "sha256": "f" * 64}
+        assert info == {
+            "mode": "injected",
+            "version": live_mm_feed_js.MM_FEED_VERSION,
+            "sha256": live_mm_feed_js.js_sha256(),
+        }
         assert output._server.continuity_script.index('id="obed-continuity-core"') < output._server.continuity_script.index('id="obed-mm-feed"')
     poster = output.output["continuity"].get("posterHold", [])
     if mode is None:
@@ -2580,15 +2586,13 @@ def test_mm_feed_resolves_continuous_and_once_independently(
 def test_mm_feed_renderer_is_resolved_before_script_selection_and_navigation(tmp_path, monkeypatch):
     order: list[str] = []
     pre_navigation_scripts = ("window.__probeOne = true;", "window.__probeTwo = true;")
-    module = fake_feed_module([])
-    real_builder = module.mm_feed_script
+    real_builder = fake_feed_script([])
 
     def builder(*args, **kwargs):
         order.append("script")
         return real_builder(*args, **kwargs)
 
-    module.mm_feed_script = builder
-    monkeypatch.setattr(live_host, "_load_mm_feed_module", lambda: module)
+    monkeypatch.setattr(live_host, "mm_feed_script", builder)
     real_start = FakeCdp.start
     real_call = FakeCdp.call
     real_goto = FakeCdp.goto
@@ -2627,7 +2631,7 @@ def test_mm_feed_renderer_is_resolved_before_script_selection_and_navigation(tmp
 
 def test_mm_feed_never_injects_without_continuity_or_a_feed_entry(tmp_path, monkeypatch):
     calls: list[tuple[bool, bool]] = []
-    monkeypatch.setattr(live_host, "_load_mm_feed_module", lambda: fake_feed_module(calls))
+    monkeypatch.setattr(live_host, "mm_feed_script", fake_feed_script(calls))
     continuity_off = host_with_continuity(
         tmp_path / "off", monkeypatch, continuity="off", mm_feed="on", mm_feed_qualify_once=True,
     )
@@ -2639,28 +2643,16 @@ def test_mm_feed_never_injects_without_continuity_or_a_feed_entry(tmp_path, monk
     ready(monkeypatch)
     no_feed.start()
     assert 'id="obed-mm-feed"' not in no_feed._server.continuity_script
-    assert no_feed.output["continuity"]["mmFeed"]["mode"] == "notApplicable"
+    assert no_feed.output["continuity"]["mmFeed"] == {
+        "mode": "notApplicable",
+        "version": live_mm_feed_js.MM_FEED_VERSION,
+        "sha256": live_mm_feed_js.js_sha256(),
+    }
     assert calls == []
 
-    monkeypatch.setattr(live_host, "_load_mm_feed_module", lambda: None)
-    module_absent = host_with_continuity(tmp_path / "module-absent", monkeypatch)
-    fake_plan_pair(monkeypatch, off=_feed_runtime())
-    ready(monkeypatch)
-    module_absent.start()
-    assert module_absent.output["continuity"]["mmFeed"] == {
-        "mode": "unavailable",
-        "reason": "Magic Move feed module unavailable",
-    }
-    assert module_absent.output["continuity"]["posterHold"] == [{
-        "fromSlide": 1,
-        "toSlide": 2,
-        "movie": "movie.mov",
-        "objectId": "movie-object",
-        "mode": "baked",
-        "reason": "Magic Move feed module unavailable",
-    }]
-    module_absent._continuity_plan.scene_index_by_player = {}
-    missing_scene_line = module_absent._poster_hold_lines()[0]
+    no_feed._continuity_runtime_plan = _feed_runtime()
+    no_feed._continuity_plan = SimpleNamespace(scene_index_by_player={})
+    missing_scene_line = no_feed._poster_hold_lines()[0]
     assert (missing_scene_line["fromSlide"], missing_scene_line["toSlide"]) == (None, None)
 
 

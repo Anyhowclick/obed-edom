@@ -8,7 +8,6 @@ the authority for whether an input has settled.
 from __future__ import annotations
 
 import hashlib
-import importlib
 import ipaddress
 import json
 import math
@@ -39,6 +38,8 @@ from .live_continuity import ContinuityPlan, Unsupported, codec_report, derive_p
 from .live_continuity_js import CONTINUITY_VERSION, PRESERVE_CORE_JS, js_sha256
 from .live_gl_replay_js import GL_REPLAY_VERSION, gl_replay_script
 from .live_gl_replay_js import js_sha256 as gl_replay_js_sha256
+from .live_mm_feed_js import MM_FEED_VERSION, mm_feed_script
+from .live_mm_feed_js import js_sha256 as mm_feed_js_sha256
 from .live_runtime import MM_OPACITY_ENV, RUNTIME_VERSION, LiveRuntimeUnsupported, patch_player
 from .live_session import PlayerCommandRejected, PlayerObservation
 
@@ -152,15 +153,6 @@ def _continuity_core_script() -> str:
 
 def _continuity_scripts(plan: dict[str, Any], canvas: dict[str, int]) -> str:
     return _continuity_plan_script(plan, canvas) + _continuity_core_script()
-
-
-def _load_mm_feed_module() -> Any | None:
-    try:
-        return importlib.import_module(".live_mm_feed_js", __package__)
-    except ModuleNotFoundError as exc:
-        if exc.name in {f"{__package__}.live_mm_feed_js", "live_mm_feed_js"}:
-            return None
-        raise
 
 
 def _mm_feed_renderer(version: Any) -> str | None:
@@ -947,7 +939,6 @@ class LiveOutputHost:
         self._mm_feed_script = ""
         self._mm_feed_continuous = False
         self._mm_feed_once = False
-        self._mm_feed_module: Any | None = None
         self._poster_holds: list[dict[str, Any]] = []
         self._pre_navigation_scripts = tuple(pre_navigation_scripts)
         self.export_root, self.slides = export_root, slides
@@ -1114,13 +1105,7 @@ class LiveOutputHost:
             self._mm_feed_once = False
             return "unavailable", continuous_reason or "renderer upload path not qualified", ""
 
-        module = _load_mm_feed_module()
-        self._mm_feed_module = module
-        if module is None:
-            self._mm_feed_continuous = False
-            self._mm_feed_once = False
-            return "unavailable", "Magic Move feed module unavailable", ""
-        script = module.mm_feed_script(continuous=continuous, once=once)
+        script = mm_feed_script(continuous=continuous, once=once)
         if not isinstance(script, str) or not script:
             self._mm_feed_continuous = False
             self._mm_feed_once = False
@@ -1177,13 +1162,8 @@ class LiveOutputHost:
         info: dict[str, Any] = {"mode": self._mm_feed_mode}
         if self._mm_feed_reason is not None:
             info["reason"] = self._mm_feed_reason
-        module = self._mm_feed_module or _load_mm_feed_module()
-        if module is None:
-            return info
-        if self._mm_feed_module is None and module is not None:
-            self._mm_feed_module = module
-        info["version"] = module.MM_FEED_VERSION
-        info["sha256"] = module.js_sha256()
+        info["version"] = MM_FEED_VERSION
+        info["sha256"] = mm_feed_js_sha256()
         return info
 
     def _stage_gate_outcome(self, stage: Any) -> tuple[str, str | None, float | None]:

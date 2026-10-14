@@ -87,6 +87,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 from obed_edom.fixture_paths import fixture  # noqa: E402
 from obed_edom import live_host as live_host_module  # noqa: E402
+from obed_edom import live_mm_feed_js  # noqa: E402
 from obed_edom import live_continuity as live_continuity_module  # noqa: E402
 from obed_edom.html_preview import cache_dir, safe_export_file  # noqa: E402
 from obed_edom.live_continuity import (  # noqa: E402
@@ -120,10 +121,7 @@ except ImportError:  # pragma: no cover - stream B is landing this constant conc
 
 import live_host_probe  # noqa: E402 - reuse the headless window-size compensation
 from continuity_core_variants import VARIANTS, parse_strip, strip_entries, strip_label, variant_core, variant_sha  # noqa: E402
-try:
-    from mm_feed_variants import variant_script as mm_feed_variant_script  # noqa: E402
-except ModuleNotFoundError:
-    mm_feed_variant_script = None
+import mm_feed_variants  # noqa: E402
 import paint_instrument  # noqa: E402
 import mm_feed_instrument  # noqa: E402
 import live_evidence_contract as contract  # noqa: E402
@@ -984,7 +982,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Magic Move opacity preference; the off arm proves label compositing is load-bearing",
     )
     parser.add_argument(
-        "--feed-variant", choices=("from-only",), default=None,
+        "--feed-variant", choices=mm_feed_variants.VARIANTS, default=None,
         help="Probe-only feed module variant; from-only leaves the destination texture baked",
     )
     parser.add_argument(
@@ -1730,41 +1728,25 @@ def tampered_feed_ordinal(at_scene: int | None = None) -> Iterator[None]:
 
 
 @contextmanager
-def injected_feed_variant(name: str | None) -> Iterator[None]:
+def injected_feed_variant(name: str | None) -> Iterator[str | None]:
     if name is None:
-        yield
+        yield None
         return
-    module = live_host_module._load_mm_feed_module()
-    if module is None or not callable(getattr(module, "mm_feed_script", None)):
-        raise RuntimeError("feed variant requested but the feed module is unavailable")
-    if not callable(mm_feed_variant_script):
-        raise RuntimeError("mm_feed_variants.variant_script is unavailable")
-    original_loader = live_host_module._load_mm_feed_module
+    original_script = live_host_module.mm_feed_script
+    original_sha = live_host_module.mm_feed_js_sha256
+    variant_source = mm_feed_variants.variant_script(name, live_mm_feed_js.MM_FEED_JS)
+    sha = hashlib.sha256(variant_source.encode()).hexdigest()
 
-    class VariantModule:
-        MM_FEED_VERSION = module.MM_FEED_VERSION
+    def patched(*, continuous: bool, once: bool) -> str:
+        return mm_feed_variants.variant_script(name, original_script(continuous=continuous, once=once))
 
-        def __init__(self) -> None:
-            self._sha: str | None = None
-            self._shipped_sha = module.js_sha256()
-
-        def mm_feed_script(self, *, continuous: bool, once: bool) -> str:
-            changed = mm_feed_variant_script(name, module.mm_feed_script(continuous=continuous, once=once))
-            if not isinstance(changed, str) or not changed:
-                raise RuntimeError(f"feed variant {name!r} did not produce script bytes")
-            match = re.fullmatch(r"\s*<script(?:\s[^>]*)?>(.*)</script>\s*", changed, re.DOTALL)
-            self._sha = hashlib.sha256((match.group(1) if match else changed).encode()).hexdigest()
-            return changed
-
-        def js_sha256(self) -> str:
-            return self._sha or self._shipped_sha
-
-    variant = VariantModule()
-    live_host_module._load_mm_feed_module = lambda: variant
+    live_host_module.mm_feed_script = patched
+    live_host_module.mm_feed_js_sha256 = lambda: sha
     try:
-        yield
+        yield sha
     finally:
-        live_host_module._load_mm_feed_module = original_loader
+        live_host_module.mm_feed_script = original_script
+        live_host_module.mm_feed_js_sha256 = original_sha
 
 
 def bridge_disabled() -> Any:

@@ -12183,21 +12183,23 @@ def test_feed_instrument_is_registered_before_navigation() -> None:
 
 
 def test_feed_variant_patches_the_host_binding_and_reports_the_variant_sha(monkeypatch: pytest.MonkeyPatch) -> None:
-    module = type("FeedModule", (), {
-        "MM_FEED_VERSION": 1,
-        "mm_feed_script": staticmethod(lambda *, continuous, once: f"source:{continuous}:{once}"),
-        "js_sha256": staticmethod(lambda: "a" * 64),
-    })()
+    original_script = lambda *, continuous, once: f"source:{continuous}:{once}"
+    original_sha = lambda: "a" * 64
     calls: list[tuple[str, str]] = []
-    monkeypatch.setattr(probe.live_host_module, "_load_mm_feed_module", lambda: module)
-    monkeypatch.setattr(probe, "mm_feed_variant_script",
+    monkeypatch.setattr(probe.live_host_module, "mm_feed_script", original_script)
+    monkeypatch.setattr(probe.live_host_module, "mm_feed_js_sha256", original_sha)
+    monkeypatch.setattr(probe.live_mm_feed_js, "MM_FEED_JS", "template")
+    monkeypatch.setattr(probe.mm_feed_variants, "variant_script",
                         lambda name, source: calls.append((name, source)) or f"<script>{source}:variant</script>")
-    with probe.injected_feed_variant("from-only"):
-        variant = probe.live_host_module._load_mm_feed_module()
-        assert variant.js_sha256() == "a" * 64
-        source = variant.mm_feed_script(continuous=True, once=False)
-        assert variant.js_sha256() == probe.hashlib.sha256(b"source:True:False:variant").hexdigest()
-    assert calls == [("from-only", "source:True:False")]
+    expected_sha = probe.hashlib.sha256(b"<script>template:variant</script>").hexdigest()
+    with probe.injected_feed_variant("from-only") as sha:
+        assert sha == expected_sha == probe.live_host_module.mm_feed_js_sha256()
+        assert probe.live_host_module.mm_feed_script(continuous=True, once=False) == (
+            "<script>source:True:False:variant</script>"
+        )
+    assert calls == [("from-only", "template"), ("from-only", "source:True:False")]
+    assert probe.live_host_module.mm_feed_script is original_script
+    assert probe.live_host_module.mm_feed_js_sha256 is original_sha
 
 
 def test_gl_interval_splits_paint_without_waiving_a_pre_move_failure(monkeypatch: pytest.MonkeyPatch) -> None:

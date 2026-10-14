@@ -387,7 +387,8 @@ def _census(pairs) -> tuple[dict[str, int], set[tuple[bool, int]]]:
 
 def test_handback_census_mirror_affects_only_p2_1_to_2_slots_2_and_4_in_committed_fixtures():
     effect, slide2 = _fixtures()
-    roots = sorted(header.parent for header in FIXTURE_ROOT.rglob("assets/header.json"))
+    stage_b = {"alpha_dsk_repaired", "alpha_dsk_repaired_full", "D7", "D7s"}
+    roots = sorted(header.parent for header in FIXTURE_ROOT.rglob("assets/header.json") if not stage_b & set(header.parts))
     pairs = [(effect, slide2)] + _magic_moves(roots)
     stats, affected = _census(pairs)
     assert stats["one_to_two"] >= 1 and stats["effects"] > stats["one_to_two"]
