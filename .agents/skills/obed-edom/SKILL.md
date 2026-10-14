@@ -690,21 +690,56 @@ for the parked `iwa-surgical-write-generator` feature.
 `src/obed_edom/live_continuity.py` derives the plan; `live_continuity_js.py` is the core runtime. Plan:
 `.agents/plans/keynote_live_continuity_generalisation.plan.md` (§2). Operator guide: README "Movie continuity".
 
-* **Runtime plan, schema 2** (`CONTINUITY_VERSION` 6). `{schema: 2, movies, boundaries, transparentBackground}`, one
-  flat `boundaries` entry per (boundary, planned instance): `pin`, `bridge`, `restart`, `retire` (`reason`
-  `refused`|`ends`) or `glReplay` (at most one per plan; G2's fields unchanged, plus `src`/`dst`/`loop`). Every entry
-  keeps `movieKey`; `src`/`dst` = `{objectId, rect}`. The core installs nothing unless `schema === 2`.
+* **Runtime plan, schema 2** (`CONTINUITY_VERSION` 7; `__OBED_P2_PRESERVE__.version` 10).
+  `{schema: 2, movies, boundaries, transparentBackground}`, one flat `boundaries` entry per (boundary, planned
+  instance): `pin`, `bridge`, `restart`, `retire` (`reason` `refused`|`ends`) or `glReplay` (at most one per plan;
+  G2's fields unchanged, plus `src`/`dst`/`loop`). Every entry keeps `movieKey`; `src`/`dst` = `{objectId, rect}`.
+  Schema 2's additive Stage B keys are `underArtwork: true` and, only for a unique binding, `feed: {draw,
+  drawCount, from: {upload, size: [w, h]}, to: {upload, size: [w, h]} | null}`. The core installs nothing unless
+  `schema === 2`.
 * **Chain invariant.** Every `dst` of a pin/bridge/glReplay is the `src` of exactly one entry at the next boundary
   unless the deck ends; each `src` appears at most once. `to_runtime` enforces it (R6).
 * **Identity.** Runtime: objectID only. The player sets `id = objectID + "-video"` before `src`; a carried decoder
   is re-stamped to `dst.objectId`. Offline: `to_runtime` checks each objectId and rect name the same export instance;
   the gates score landing rects. glReplay keeps its ≤ 1 px `instanceRect` check.
+* **Under-artwork carries.** Artwork overlap is lifted only when the destination has exactly an automatic
+  movie-start event followed by the transition. The decoder is hidden above the stage, fed through the player's GL
+  texture in authored draw order, then re-homed into the authored movie layer at settle; N fed carries may share one
+  boundary. A boundary otherwise retains the one-overlay-bridge guard. Click-driven/multi-build overlap remains
+  `overlap`; R11 is unchanged. An unbound or unavailable feed pauses the decoder and uses the baked poster; a
+  qualified one-shot uploads the exact departure picture and resumes from the pause point without seeking.
 * **Bridge clock.** A bridge overlay moves on Keynote's `Date` from its GL loop start, stamped by a `requestAnimFrame`
   setter hook that never throws (`main.js` untouched). With no stamp after `GL_CLOCK_WAIT_MS` (50) it holds at the
   source, then follows `performance.now()` from the core's trigger. One `bridge-clock` note per motion records `via`
   (`gl`|`fallback`) and `lagMs`. Landed in S2 (#259); a `--core-variant no-gl-clock` red arm and the D1 carry-cover arms gate it.
+* **Feed seam v1.** For any plan containing `feed`, the core publishes
+  `__OBED_P2_PRESERVE__.feed = {version: 1, decoderFor(objectId), claim(objectId), onStandDown(objectId, reason),
+  note(kind, detail)}`. `claim` is continuous-only. The hidden ride pauses an unclaimed decoder before calling the
+  module's `once`; a mid-move stand-down pauses without re-uploading. `live_runtime` calls the module's `take` hook
+  before Magic Move teardown with MM opacity on or off.
+* **Feed module.** `live_mm_feed_js.py` exports `MM_FEED_VERSION = 1`, `MM_FEED_JS`, `js_sha256()` and
+  `PINNED_MM_FEED_SHA256 = f1fe0dd644359962c4c71cce46424ac3e24eb4ac42d1f9053a103d24463b81bf`;
+  `mm_feed_script(*, continuous: bool, once: bool) -> str` is the sole builder. It reads bindings only from the
+  served `window.__OBED_CONTINUITY__`, and the host imports it statically like G2. Its writable page API is
+  `window.__OBED_MM_FEED__ = {version: 1, once(objectId) -> boolean, take(controller, scene), entries}` with
+  `entries[src.objectId] = {mode: continuous|once, state: armed|fed|held|stoodDown, reason, hold:
+  exact|baked|unavailable|null, framesFed, maxInterFeedGapMs, p95Ms}`. It re-resolves `decoderFor` on every fed draw
+  and looks up `claim`/`onStandDown` at call time. Probe scripts install through `pre_navigation_scripts` before any
+  page code; page order is plan → core → G2 when applicable → feed, and each `getContext` wrapper chains the one
+  already installed.
+* **Feed eligibility and reporting.** `_mm_feed_renderer` checks `product` plus `userAgent`, classifies OBS/CEF before
+  generic Chrome, and admits Chrome only at a major in `QUALIFIED_SNAP_MAJORS` (currently 154).
+  `MM_FEED_MANAGED_OBS = False` until Q6 qualifies CEF, so normal CEF has neither upload path; managed OBS may use
+  constructor `mm_feed="on"` for continuous qualification, and `mm_feed_qualify_once=True` is the constructor-only Q6
+  override for one-shot qualification. Continuous and one-shot eligibility are separate: external attach never gets
+  continuous feed, while qualified attached Chrome keeps one-shot. `OBED_LIVE_MM_FEED=off|auto`; `off` disables
+  continuous feeding but retains a qualified one-shot, and continuity off injects neither. Report
+  `output.continuity.mmFeed {mode, reason?, version, sha256}` plus per-entry
+  `output.continuity.posterHold {fromSlide, toSlide, movie, objectId, mode: exact|baked, reason}`; the UI renders one
+  summary line under the continuity badge.
 * **Refusals.** Per (boundary, instance) → `retire refused` + one `ContinuityPlan.refusals` record (`code`,
-  `objectId` of `src`), reported on `output.continuity.notCarried`: `overlap` artwork above on the destination, R1
+  `objectId` of `src`), reported on `output.continuity.notCarried`: `overlap` artwork above on a click-driven or
+  multi-build destination, R1
   ambiguous pairing (runner-up within 16 authored px), R1b opacity differs, R2 builds in/out, R4 loop mismatch, R7
   web/image movie, R8 trim differs, R9 not fully opaque (checked after R2), R10 bridge motion not EaseInEaseOut over the whole transition or no positive duration (checked last), R11 unmeasured export shape (`reason` names the exact check).
   R11 scopes what used to fail the deck: a movie layer outside the measured vocabulary (mask, rotation/affine/anchor,
@@ -717,8 +752,8 @@ for the parked `iwa-surgical-write-generator` feature.
   a gate deck's plan stays byte-identical. Deck-wide → `Unsupported` (the deck still plays, continuity off): R3
   transition not on the outgoing slide's last event, more than one transition on a slide, R5 objectID repeats across
   slides (unmeasured instances count), R6 chain invariant, unreadable header/slide list/slide JSON or no events, a
-  movie node without asset id or objectID, more than one movie changing geometry, `to_runtime` integrity checks, and
-  the host's stage gate, runtime install, codec gate and `OBED_LIVE_CONTINUITY=off`. `retire ends` is
+  movie node without asset id or objectID, more than one ordinary overlay movie changing geometry, `to_runtime`
+  integrity checks, and the host's stage gate, runtime install, codec gate and `OBED_LIVE_CONTINUITY=off`. `retire ends` is
   not a refusal. Never relax one to qualify a deck.
 * **Regression oracle.** No allowlist since S3: any deck that derives installs. A continuity change is checked by the
   plan-sha tests (gate decks' runtime plans byte-identical) and the negative corpus (`tests/test_live_continuity_corpus.py`,
@@ -752,11 +787,24 @@ for the parked `iwa-surgical-write-generator` feature.
   (offline, every export vs plan §4) and `g2` (headless 7e3c; `--no-repair` is the negative control).
 * **F5 names are frozen instrument API.** Scorers read note kinds (`bridge-3to4`, `reuse-decoder`,
   `reuse-skip-boundary`, `retire-on-start-movie`, `retire-boundary`, `preserve-refused`, `dom-swap`,
-  `facade-block-clear`, `remount-*`, `pool-cleared`, `glreplay-*`, `bridge-clock`, `pin-hold-start`, `bridge-motion-start`; the last
-  two are also read by the paint-control injector) with their `detail` fields, element properties
+  `facade-block-clear`, `remount-*`, `pool-cleared`, `glreplay-*`, `bridge-clock`, `pin-hold-start`, `bridge-motion-start`,
+  `poster-hold`, `poster-resume`; `pin-hold-start` and `bridge-motion-start` are also read by the paint-control
+  injector) with their `detail` fields, element properties
   (`__obedSuppressed34`, `dataset.obedPreserved`, `dataset.obedRemounted`, `__obedElId`, `__obedGen`,
   `__obedFacadeFor`) and `footprintOwnerDecoderId` by name. Dropping or renaming one is a finding even if the suites
   pass.
+* **Feed probe controls and verdicts.** `live_continuity_probe.py` exposes `--mm-feed off|auto|on`,
+  `--feed-tamper ordinal|after-feed`, `--feed-tamper-scene N`, `--feed-variant from-only` and
+  `--hold-upload-kill-switch` (`--mm-feed off` only). The in-page instrument is the verdict authority, not module
+  telemetry. Ordinal tampering patches the served continuity-plan script, so core and feed module read the same
+  binding source. `feedLive` proves same-task decoder pixels, advancing frames and continuous coverage;
+  `noRiderAboveCanvas` excludes a visible decoder above the GL canvas; `labelsOverFeed` proves later label-box
+  compositing; `holdFrame` matches the retained GL picture to the departure/last-upload target; `posterHold` proves a
+  paused clock and no-seek resume; `artworkAbove` checks the settled authored stack. Carry scoring substitutes these
+  GL facts only inside the evidenced move interval. Current instrument thresholds are provisional pending a
+  new-instrument re-bank: `ALPHA_POSTER_FLOOR = 2.5`, `MAX_INTER_FEED_GAP_MS = 50`,
+  `ALPHA_HOLD_MARGIN = 6`, `COUNTER_HOLD_MARGIN = 1`. Paused-element trials matched the last rVFC target 38/40 times
+  and were one frame newer 2/40, so the zero-tolerance exact-hold gate remains owner-gated.
 
 ## Alpha Keynote managed OBS (Keyer output)
 

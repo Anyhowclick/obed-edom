@@ -111,9 +111,10 @@ the runtime's version and sha256):
   injected, and the served page is identical to a session with continuity never
   built.
 - `unsupported` — the plan could not be derived or installed, with a `reason`
-  (a deck-wide refusal below, more than one movie changing across one cut, an
-  unreadable export, the stage isn't the authored size, the stage scale is
-  non-uniform, or the runtime failed to install); the raw export plays untouched.
+  (a deck-wide refusal below, more than one ordinary overlay movie changing
+  across one cut, an unreadable export, the stage isn't the authored size, the
+  stage scale is non-uniform, or the runtime failed to install); the raw export
+  plays untouched.
 - `qualified` — the runtime installed and confirmed itself from the page. When
   qualified, `output.continuity` also carries `scale` (the uniform factor applied
   to the authored stage, e.g. `1.3333`).
@@ -129,6 +130,18 @@ movie's asset exactly (without query or trim suffix, case-insensitive).
 - **Magic Move, same geometry:** the live decoder is pinned in place.
 - **Magic Move, moving or resizing:** the live decoder moves with the transition.
   The motion follows the export's EaseInEaseOut timing over the transition.
+- **Artwork above the movie:** when the destination has only its automatic movie
+  start before settling into the DOM, the carried decoder feeds Keynote's own GL
+  texture during the move, then returns to the destination's authored movie layer
+  at settle. Tags, dividers and other later-authored objects stay above it. Every
+  fed carry at that boundary is drawn in authored order, so several movies can be
+  carried together.
+- **Poster hold fallback:** when continuous feeding is off or unavailable, a
+  uniquely bound movie pauses and carries the exact frame on screen when the move
+  starts, then resumes from that pause point without seeking. If the binding is
+  not unique or the renderer's upload path is not qualified, Keynote's baked
+  poster travels instead. A boundary may have any number of fed or poster-held
+  carries, but still only one ordinary overlay bridge.
 - **Dissolve or no transition:** the movie restarts, as the export plays it.
 - **Movie ends:** a carried movie with no instance on the next slide is handed back
   to the player.
@@ -138,6 +151,18 @@ movie's asset exactly (without query or trim suffix, case-insensitive).
 - **Loops:** a carried pair must agree on Repeat → Loop. A carried decoder keeps
   its source slide's loop setting. Repeat → Back and Forth is not yet measured,
   so that movie is declined (`R11`).
+
+`OBED_LIVE_MM_FEED=auto` enables continuous texture feeding on qualified outputs.
+`off` disables continuous feeding but keeps the qualified one-shot upload used for
+an exact poster hold; continuity itself must remain on. Any other environment value
+refuses to start. `output.continuity.mmFeed` reports the feed `mode`, optional
+`reason`, module `version` and `sha256`. `output.continuity.posterHold` has one line
+per affected entry with its slides, movie, object ID, `exact` or `baked` mode and
+reason; the presenter shows the same summary directly under the continuity badge.
+
+Native Chromium video applies a small midtone tone curve that GL texture uploads do
+not. A continuously fed movie can therefore step slightly in brightness at
+departure and settle even though its timing remains continuous.
 
 **Declined cuts.** A qualified session can still decline one cut for one movie
 instance. That instance plays as the export plays it (it restarts or freezes
@@ -166,19 +191,20 @@ continuity badge. The codes:
   carry; and a carry into a slide whose outgoing transition is not Magic Move,
   Dissolve or none is declined, so nothing is held into that transition and
   that slide restarts its movie where it might have carried.
-- `overlap`: artwork above the carried movie on the destination slide (GL replay
-  may still carry it; see below).
+- `overlap`: artwork above the carried movie on a click-driven or multi-build
+  destination. A destination that settles directly into its movie layer uses the
+  under-artwork feed or poster hold instead. `R11` remains unchanged. GL replay may
+  still carry an eligible click-driven cut; see below.
 
 Deck-wide refusals make the whole deck `unsupported`, with the code at the start
 of the `reason`: `R3` (a transition is not on the slide's last build), `R5` (an
 object ID repeats across slides) and `R6` (the carried instances do not chain from
-slide to slide). A slide with more than one transition, more than one movie
-changing geometry at one cut (one animated bridge per cut), an unreadable
-header, slide list or slide JSON, a movie without an asset ID or object ID, or a
-plan that fails its own integrity checks also makes the deck `unsupported`, as
-do the host's checks: the stage gate, a runtime that fails to install, a movie
-codec this output cannot play, and `OBED_LIVE_CONTINUITY=off` (reported as
-`off`). The deck still plays.
+slide to slide). A slide with more than one transition, more than one ordinary
+overlay movie changing geometry at one cut, an unreadable header, slide list or
+slide JSON, a movie without an asset ID or object ID, or a plan that fails its own
+integrity checks also makes the deck `unsupported`, as do the host's checks: the
+stage gate, a runtime that fails to install, a movie codec this output cannot
+play, and `OBED_LIVE_CONTINUITY=off` (reported as `off`). The deck still plays.
 
 **Not carried (named residuals).**
 
@@ -188,6 +214,29 @@ codec this output cannot play, and `OBED_LIVE_CONTINUITY=off` (reported as
   the carried clock in Keynote but plays from 0 here.
 - `R-res-3`: a Magic Move out of a movie with "Play across slides" off restarts
   midway in Keynote. Here it is carried. Validation flags it as an authoring error.
+- `B-res-1` (exact-hold availability): an exact poster hold needs one unique GL
+  binding and a qualified upload path. An unbound or initially unavailable path,
+  including the currently unqualified managed-OBS/CEF path, uses the baked poster
+  and reports why. A mid-move stand-down retains the last upload only while its GL
+  context and bindings remain usable; otherwise it reports an unavailable path.
+  It resumes from the actual pause point without seeking or re-uploading, and
+  reports a discontinuity instead of claiming held+1 when that point has advanced.
+- `B-res-2` (tone curve): a fed move has the small midtone brightness step described
+  above at departure and settle.
+- `B-res-3` (overlay crossing): an ordinary overlay carry can still pass above
+  artwork that it crosses only during the move; it retains R10 easing.
+- `B-res-4` (overlay capacity): only one ordinary overlay bridge is carried at a
+  boundary. Fed and poster-held under-artwork carries are not subject to this limit.
+- `B-res-5` (non-settling overlap): overlap on click-driven or multi-build
+  destinations is still declined.
+- `B-res-6` (export binding): texture IDs can change on every Keynote export. The
+  binding is rebuilt from the served, repaired export by geometry, draw index,
+  regular-upload ordinal and current texture size; Stage T must repair those bytes
+  first. Old unrepaired texture sizes are not an oracle.
+- `B-res-7` (skipped ordinals): probe ordinal labels after a skipped slide remain a
+  known diagnostic limitation.
+- `B-res-8` (audio): audio stays disabled, including for a suppressed overlay
+  bridge whose destination decoder continues to decode.
 
 **Coverage.** Every deck whose plan derives gets continuity. Only the gate
 decks (P2, p2-loop and D1–D6) have been measured end to end; any other deck
