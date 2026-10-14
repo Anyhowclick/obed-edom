@@ -12021,8 +12021,9 @@ global.getComputedStyle=(el)=>({opacity:el instanceof Video?'0':'1',display:'blo
 const styleParent={appendChild(n){n.parentNode=this},removeChild(n){n.parentNode=null}},stage={getBoundingClientRect:()=>({x:0,y:0,width:1920,height:540})};
 const overlay={nodeType:1,parentElement:null,contains:()=>false,getBoundingClientRect:()=>({left:0,top:0,right:1920,bottom:540})},labelNode={nodeType:1,parentElement:null,contains:()=>false,getBoundingClientRect:()=>({left:50,top:50,right:250,bottom:150})};
 const videos={alpha:new Video('alpha','dalpha',160,90,{x:0,y:0,left:0,top:0,right:500,bottom:540,width:500,height:540}),broken:new Video('broken','dbroken',160,90,{x:550,y:0,left:550,top:0,right:1050,bottom:540,width:500,height:540}),counter:new Video('counter','dcounter',960,270,{x:1100,y:0,left:1100,top:0,right:1920,bottom:540,width:820,height:540},true),hold:new Video('hold','dhold',160,90,{x:0,y:0,left:0,top:0,right:500,bottom:540,width:500,height:540}),killed:new Video('killed','dkilled',160,90,{x:0,y:0,left:0,top:0,right:500,bottom:540,width:500,height:540})};
+const decoders={...videos,'alpha-hop':videos.alpha,'alpha-final':videos.alpha};
 global.document={head:styleParent,documentElement:styleParent,createElement:(k)=>k==='canvas'?new Canvas():{textContent:'',parentNode:null,nodeType:1,parentElement:null},getElementById:(id)=>id==='stage'?stage:null,elementsFromPoint:(x)=>x<500?[overlay,labelNode,videos.alpha]:[overlay,videos.broken]};
-const seam={decoderFor:(id)=>videos[id]||null,claim:()=>true,onStandDown:()=>true};global.__OBED_P2_PRESERVE__={feed:seam};
+const seam={decoderFor:(id)=>decoders[id]||null,claim:()=>true,onStandDown:()=>true};global.__OBED_P2_PRESERVE__={feed:seam};
 global.__OBED_MM_FEED__={once:()=>true,entries:{}};
 const drawTable={drawCount:4,draws:[{draw:1,layerSize:[100,100],labelBoxOpacity:null},{draw:2,layerSize:[100,100],labelBoxOpacity:null},{draw:3,layerSize:[1920,540],labelBoxOpacity:null},{draw:4,layerSize:[20,20],labelBoxOpacity:.61}]};
 const entries=[['alpha',1,[100,100]],['broken',2,[100,100]],['counter',3,[1920,540]]].map(([id,draw,size])=>({id:'carry-'+id,objectId:id,dstObjectId:'d'+id,atScene:2,feed:{draw,from:{upload:draw,size},to:null},draws:drawTable,artwork:[]}));
@@ -12030,8 +12031,9 @@ entries[0].artwork=[{rect:{x:50,y:50,w:200,h:100}}];entries[1].artwork=[{rect:{x
 const simpleDraws={drawCount:1,draws:[{draw:1,layerSize:[100,100],labelBoxOpacity:null}]};
 entries.push({id:'carry-hold',objectId:'hold',dstObjectId:'dhold',atScene:4,feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
 entries.push({id:'carry-killed',objectId:'killed',dstObjectId:'dkilled',atScene:6,feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
-entries.push({id:'chain-10',objectId:'alpha',dstObjectId:'dalpha',atScene:10,feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
-entries.push({id:'chain-12',objectId:'alpha',dstObjectId:'dalpha',atScene:12,feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
+entries.push({id:'chain-10',objectId:'alpha',dstObjectId:'alpha-hop',atScene:10,feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
+entries.push({id:'chain-12',objectId:'alpha-hop',dstObjectId:'alpha-final',atScene:12,feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
+entries.push({id:'chain-14',objectId:'alpha-final',dstObjectId:'alpha-end',atScene:14,feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
 const boundaries=entries.map(e=>({atScene:e.atScene,underArtwork:true,src:{objectId:e.objectId},dst:{objectId:e.dstObjectId},feed:e.feed}));
 global.__OBED_CONTINUITY_INFO__={authoredWidth:1920,authoredHeight:540};
 """ + "\neval(" + instrument + ");\n" + r"""
@@ -12046,7 +12048,7 @@ function paintLabel(rect){for(let y=0;y<rect.h;y++)for(let x=0;x<rect.w;x++){con
 function makeGl(){active=100;bound={};sources=new WeakMap();matrix=null;drawNo=0;pixels=new Uint8ClampedArray(1920*540*4);return {canvas:null,TEXTURE0:100,TEXTURE_2D:2,UNPACK_FLIP_Y_WEBGL:3,UNPACK_PREMULTIPLY_ALPHA_WEBGL:4,RGBA:5,UNSIGNED_BYTE:6,drawingBufferWidth:1920,drawingBufferHeight:540,
  activeTexture(u){active=u},bindTexture(t,texture){bound[active]=texture},pixelStorei(){},useProgram(){},getUniformLocation(p,n){return n==='MVPMatrix'?matrixLoc:mixLoc},uniform1f(){},uniformMatrix4fv(l,t,v){matrix=Array.from(v)},
  clear(){drawNo=0;pixels.fill(0)},drawElements(){this.drawArrays()},drawArrays(){drawNo++;const sizes=[[100,100],[100,100],[1920,540],[20,20]],r=rectFor(matrix,sizes[drawNo-1]);if(drawNo===4)paintLabel(r);else paintSource(sources.get(bound[active]),r)},
- texImage2D(){const source=arguments[5];sources.set(bound[active],source.drawSource||source)},readPixels(x,y,w,h,f,t,a){for(let yy=0;yy<h;yy++)for(let xx=0;xx<w;xx++){const src=((y+yy)*1920+x+xx)*4,dst=(yy*w+xx)*4;a.set(pixels.slice(src,src+4),dst)}}}}
+ texImage2D(){const source=arguments[5],s0=source.drawSource||source;sources.set(bound[active],Object.create(s0,{__obedPresentedFrames:{value:s0.__obedPresentedFrames}}))},readPixels(x,y,w,h,f,t,a){for(let yy=0;yy<h;yy++)for(let xx=0;xx<w;xx++){const src=((y+yy)*1920+x+xx)*4,dst=(yy*w+xx)*4;a.set(pixels.slice(src,src+4),dst)}}}}
 const gl=makeGl();
 const canvas=new Canvas('0-canvas',gl);gl.canvas=canvas;canvas.getContext('webgl');
 const textures={alpha:{},broken:{},counter:{}},posters={alpha:new ImageSource(100,100,8),broken:new ImageSource(100,100,8),counter:new ImageSource(1920,540,8)};
@@ -12069,8 +12071,9 @@ location.hash='#3';for(const frame of [31,32,33])present(videos.hold,frame);seam
 const holdMove=openContext('1-canvas'),holdTexture=posterTexture(holdMove,new ImageSource(100,100,8));drawHeld(holdMove,holdTexture,videos.hold,true);videos.hold.play();present(videos.hold,34);
 location.hash='#5';for(const frame of [41,42,43])present(videos.killed,frame);videos.killed.__obedPosterHeld=true;videos.killed.pause();window.__OBED_MM_FEED__.once('killed');
 const killedMove=openContext('2-canvas'),killedTexture=posterTexture(killedMove,new ImageSource(100,100,8));drawHeld(killedMove,killedTexture,videos.killed,false);videos.killed.play();present(videos.killed,44);
-function runChain(atScene,startFrame,id){location.hash='#'+(atScene-1);seam.claim('alpha');const move=openContext(id),texture=posterTexture(move,new ImageSource(100,100,8));for(let n=0;n<4;n++){present(videos.alpha,startFrame+n);move.gl.clear();move.gl.activeTexture(move.gl.TEXTURE0);move.gl.bindTexture(move.gl.TEXTURE_2D,texture);move.gl.texImage2D(0,0,0,0,0,videos.alpha);move.gl.uniformMatrix4fv(move.m,false,matrices.alpha);move.gl.drawArrays();tick()}}
-videos.broken.drawSource=null;runChain(10,51,'3-canvas');runChain(12,61,'4-canvas');
+function runChain(atScene,startFrame,id,objectId,dstObjectId){location.hash='#'+(atScene-1);seam.claim(objectId);location.hash='#'+atScene;const move=openContext(id),texture=posterTexture(move,new ImageSource(100,100,8));for(let n=0;n<4;n++){present(videos.alpha,startFrame+n);move.gl.clear();move.gl.activeTexture(move.gl.TEXTURE0);move.gl.bindTexture(move.gl.TEXTURE_2D,texture);move.gl.texImage2D(0,0,0,0,0,videos.alpha);move.gl.uniformMatrix4fv(move.m,false,matrices.alpha);move.gl.drawArrays();tick()}videos.alpha.__obedInstance=dstObjectId}
+function runMidMoveStandDown(){location.hash='#13';for(const frame of [69,70])present(videos.alpha,frame);seam.claim('alpha-final');location.hash='#14';const move=openContext('5-canvas'),texture=posterTexture(move,new ImageSource(100,100,8));for(const frame of [71,72]){present(videos.alpha,frame);move.gl.clear();move.gl.activeTexture(move.gl.TEXTURE0);move.gl.bindTexture(move.gl.TEXTURE_2D,texture);move.gl.texImage2D(0,0,0,0,0,videos.alpha);move.gl.uniformMatrix4fv(move.m,false,matrices.alpha);move.gl.drawArrays();tick()}present(videos.alpha,73);seam.onStandDown('alpha-final','after-feed');videos.alpha.__obedPosterHeld=true;videos.alpha.pause();for(let n=0;n<2;n++){move.gl.clear();move.gl.activeTexture(move.gl.TEXTURE0);move.gl.bindTexture(move.gl.TEXTURE_2D,texture);move.gl.uniformMatrix4fv(move.m,false,matrices.alpha);move.gl.drawArrays();tick()}window.__obedMmFeedProbe.report();videos.alpha.play();present(videos.alpha,74);videos.alpha.__obedInstance='alpha-end'}
+videos.broken.drawSource=null;runChain(10,51,'3-canvas','alpha','alpha-hop');runChain(12,61,'4-canvas','alpha-hop','alpha-final');runMidMoveStandDown();
 window.__obedMmFeedProbe.report();videos.alpha.__obedInstance='dalpha';videos.broken.__obedInstance='dbroken';tick();
 console.log(JSON.stringify(window.__obedMmFeedProbe.report()));
 """
@@ -12085,21 +12088,27 @@ console.log(JSON.stringify(window.__obedMmFeedProbe.report()));
                                  ("counter", 3, [1920, 540]))
     ]
     continuous_entries.extend({
-        "id": f"chain-{scene}", "objectId": "alpha", "dstObjectId": "dalpha", "atScene": scene,
+        "id": f"chain-{scene}", "objectId": object_id, "dstObjectId": dst_id, "atScene": scene,
         "feed": {"draw": 1, "from": {"upload": 1, "size": [100, 100]}, "to": None},
-    } for scene in (10, 12))
+    } for scene, object_id, dst_id in ((10, "alpha", "alpha-hop"), (12, "alpha-hop", "alpha-final")))
+    stand_entry = [{
+        "id": "chain-14", "objectId": "alpha-final", "dstObjectId": "alpha-end", "atScene": 14,
+        "feed": {"draw": 1, "from": {"upload": 1, "size": [100, 100]}, "to": None},
+    }]
     hold_entries = [{
         "id": f"carry-{name}", "objectId": name, "dstObjectId": f"d{name}", "atScene": scene,
         "feed": {"draw": 1, "from": {"upload": 1, "size": [100, 100]}, "to": None},
     } for name, scene in (("hold", 4), ("killed", 6))]
     records = probe.mm_feed_instrument.verdict_records(report, continuous_entries, continuous_expected=True)
     hold_records = probe.mm_feed_instrument.verdict_records(report, hold_entries, continuous_expected=False)
+    stand_records = probe.mm_feed_instrument.verdict_records(report, stand_entry, continuous_expected=True)
     assert probe.score_feed_live(records["carry-alpha"]["feed"])["verdict"] is True
     assert probe.score_feed_live(records["carry-broken"]["feed"])["verdict"] is False
     assert records["carry-broken"]["feed"]["continuousCoverage"] is True
     assert probe.score_feed_live(records["carry-counter"]["feed"])["verdict"] is True
     assert probe.score_feed_live(records["chain-10"]["feed"])["verdict"] is True
     assert probe.score_feed_live(records["chain-12"]["feed"])["verdict"] is True
+    assert probe.score_feed_live(stand_records["chain-14"]["feed"])["verdict"] is False
     assert probe.score_no_rider_above_canvas(records["carry-alpha"]["rider"])["verdict"] is True
     assert probe.score_labels_over_feed(records["carry-alpha"]["labels"])["verdict"] is True
     assert probe.score_artwork_above(records["carry-alpha"]["artwork"])["verdict"] is True
@@ -12109,6 +12118,11 @@ console.log(JSON.stringify(window.__obedMmFeedProbe.report()));
     assert probe.score_poster_hold(hold_records["carry-hold"]["poster"])["verdict"] is True
     assert probe.score_hold_frame(hold_records["carry-killed"]["hold"])["verdict"] is False
     assert probe.score_poster_hold(hold_records["carry-killed"]["poster"])["verdict"] is True
+    assert probe.score_hold_frame(stand_records["chain-14"]["hold"])["verdict"] is True
+    stand_poster = probe.score_poster_hold(stand_records["chain-14"]["poster"])
+    assert stand_poster["verdict"] is True
+    assert stand_poster["resumptionDiscontinuity"] == 1
+    assert stand_poster["exactHeldPlusOne"] is False
     assert all(read["kind"] == "counter" for read in records["carry-counter"]["feed"]["reads"]), json.dumps(
         records["carry-counter"]["feed"]["reads"]
     )
@@ -12117,11 +12131,14 @@ console.log(JSON.stringify(window.__obedMmFeedProbe.report()));
     assert alpha_texture["size"] == [100, 100] and alpha_texture["uploadedSize"] == [160, 90]
     assert [(row["entryId"], row["serial"]) for row in report["claims"]] == [
         ("carry-alpha", 1), ("carry-broken", 1), ("carry-counter", 1), ("chain-10", 4), ("chain-12", 5),
+        ("chain-14", 6),
     ]
     assert [(row["entryId"], row["serial"]) for row in report["departures"]] == [
-        ("carry-hold", 2), ("carry-killed", 3),
+        ("carry-hold", 2), ("carry-killed", 3), ("chain-14", 6),
     ]
-    assert report["standDowns"][0]["serial"] == 2
+    assert [(row["entryId"], row["serial"]) for row in report["standDowns"]] == [
+        ("carry-hold", 2), ("chain-14", 6),
+    ]
     assert [row["objectId"] for row in report["killedOnce"]] == ["killed"]
     assert report["mediaDropped"] == []
     assert report["tamper"]["applied"] is True and "attempts" not in report["tamper"]
