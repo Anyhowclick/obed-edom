@@ -1247,13 +1247,67 @@ def hevc_movie_bytes() -> bytes:
     return _movie_bytes(b"hvc1")
 
 
+def _layer_state(x: float, y: float, w: float, h: float) -> dict[str, Any]:
+    return {
+        "affineTransform": [1, 0, 0, 1, 0, 0],
+        "anchorPoint": {"pointX": 0.5, "pointY": 0.5},
+        "contentsRect": {"x": 0, "y": 0, "width": 1, "height": 1},
+        "edgeAntialiasingMask": 0,
+        "height": h,
+        "hidden": False,
+        "masksToBounds": False,
+        "opacity": 1,
+        "position": {"pointX": x, "pointY": y},
+        "rotation": 0,
+        "scale": 1,
+        "sublayerTransform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+        "width": w,
+    }
+
+
+def _texture_leaf(x: float, y: float, w: float, h: float, texture: str) -> dict[str, Any]:
+    return {
+        "animations": [],
+        "initialState": _layer_state(x, y, w, h),
+        "layers": [],
+        "texture": texture,
+        "texturedRectangle": {
+            "isBackgroundTexture": True,
+            "isVerticalText": False,
+            "singleTextureOpacity": 1,
+            "textBaseline": 0,
+            "textXHeight": 0,
+            "textureType": 1,
+        },
+    }
+
+
+def _draw_root(slots: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"animations": [], "initialState": _layer_state(960, 540, 1920, 1080), "layers": slots}
+
+
 def _draw_slot(object_id: str | None, x: float, y: float, w: float, h: float) -> dict[str, Any]:
-    """One slide draw slot, as the real export encodes it: a wrapper layer holding a single
-    object whose `initialState` carries the slide-space centre and size."""
-    child: dict[str, Any] = {"initialState": {"position": {"pointX": x, "pointY": y}, "width": w, "height": h}}
+    """One measured destination path: canvas wrapper, object, then textured leaf."""
+    child: dict[str, Any] = {
+        "animations": [],
+        "initialState": _layer_state(x, y, w, h),
+        "layers": [_texture_leaf(w / 2, h / 2, w, h, f"{object_id or 'art'}-texture")],
+    }
     if object_id is not None:
         child["objectID"] = object_id
-    return {"layers": [child]}
+    return {
+        "animations": [],
+        "initialState": _layer_state(960, 540, 1920, 1080),
+        "layers": [child],
+    }
+
+
+def _transition_slot(x: float, y: float, w: float, h: float) -> dict[str, Any]:
+    return {
+        "animations": [],
+        "initialState": _layer_state(x, y, w, h),
+        "layers": [_texture_leaf(w / 2, h / 2, w, h, "transition-texture")],
+    }
 
 
 def write_one_movie_export(
@@ -1318,12 +1372,19 @@ def write_one_movie_export(
     slots_s2 = [background] + ([extra_slot] if extra_slot is not None else []) + [_draw_slot("movie-object-s2", 200.0, 200.0, 100.0, 100.0)]
     if artwork_above_on_s2:
         slots_s2.append(_draw_slot(None, 200.0, 200.0, 80.0, 80.0))
+    transition = {
+        "beginTime": 0,
+        "duration": 1,
+        "name": "apple:magic-move-implied-motion-path",
+        "type": "transition",
+        "baseLayer": _draw_root([_transition_slot(200.0, 200.0, 100.0, 100.0)]),
+    }
     events_s1 = [{
-        "baseLayer": {"layers": [background, _draw_slot("movie-object", 200.0, 200.0, 100.0, 100.0)]},
-        "effects": [movie_node("movie-object"), {"type": "transition", "name": "apple:magic-move"}],
+        "baseLayer": _draw_root([background, _draw_slot("movie-object", 200.0, 200.0, 100.0, 100.0)]),
+        "effects": [movie_node("movie-object"), transition],
     }]
     events_s2 = [{
-        "baseLayer": {"layers": slots_s2},
+        "baseLayer": _draw_root(slots_s2),
         "effects": [movie_node("movie-object-s2")] + ([extra_movie_node] if extra_movie_node is not None else []),
     }]
     (assets_dir / "s1" / "s1.json").write_text(json.dumps({"events": events_s1, "assets": assets}))

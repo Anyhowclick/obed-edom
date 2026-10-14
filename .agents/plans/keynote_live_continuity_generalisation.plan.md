@@ -116,6 +116,8 @@ Rules the runtime relies on. `to_runtime` enforces them and the JS re-checks onl
 
 ### 2.2 Instance identity: objectID at runtime, rect offline (OQ-1 (c))
 
+> Superseded for repeated-movie pairing and multiple-bridge refusal scoping by `keynote_live_continuity_refusal_scoping.plan.md`.
+
 - **Plan side.** Each entry names `src`/`dst` by `objectId` (the export's `objectID`, already on `_MovieInstance.object_id`) and authored rect.
 - **Runtime side.** `v.__obedInstance` is set from `el.id` (strip `-video`) when the fresh element sets `src` (F1: the id
   is set first). **On carry it is re-stamped to `entry.dst.objectId`**: the carried decoder now *is* the destination
@@ -140,6 +142,8 @@ Rules the runtime relies on. `to_runtime` enforces them and the JS re-checks onl
   - At a Dissolve / no transition, every carry-capable outgoing instance gets `restart` if its asset is on the far side, else `retire ends`.
 
 ### 2.3 Refusals: extended, never relaxed
+
+> Superseded for repeated-movie pairing and multiple-bridge refusal scoping by `keynote_live_continuity_refusal_scoping.plan.md`.
 
 Kept: rotation or a non-identity affine, nested video layers, masks/contentsRect, unknown transition kinds, >1 movie changing geometry in one move, missing/non-positive duration, overlap above the destination (→ retire or glReplay), and the codec gate.
 

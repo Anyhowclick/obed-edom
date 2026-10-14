@@ -703,23 +703,28 @@ for the parked `iwa-surgical-write-generator` feature.
   setter hook that never throws (`main.js` untouched). With no stamp after `GL_CLOCK_WAIT_MS` (50) it holds at the
   source, then follows `performance.now()` from the core's trigger. One `bridge-clock` note per motion records `via`
   (`gl`|`fallback`) and `lagMs`. Landed in S2 (#259); a `--core-variant no-gl-clock` red arm and the D1 carry-cover arms gate it.
-* **Refusals.** Per (boundary, instance) → `retire refused` + one `ContinuityPlan.refusals` record (`code`,
-  `objectId` of `src`), reported on `output.continuity.notCarried`: `overlap` artwork above on the destination, R1
-  ambiguous pairing (runner-up within 16 authored px), R1b opacity differs, R2 builds in/out, R4 loop mismatch, R7
-  web/image movie, R8 trim differs, R9 not fully opaque (checked after R2), R10 bridge motion not EaseInEaseOut over the whole transition or no positive duration (checked last), R11 unmeasured export shape (`reason` names the exact check).
-  R11 scopes what used to fail the deck: a movie layer outside the measured vocabulary (mask, rotation/affine/anchor,
-  ≠1 video sub-layer, animated geometry, not contained, unreadable rect, Back and Forth) refuses that asset at both
-  Magic Moves of its slide, and the unmeasured instance gets a record only (its `objectId` has no runtime entry; it is
-  left out of `slide_instances`/`slide_rects`/`loop_instances` and plays raw); an unreadable destination draw order
-  refuses that carry; a pin/bridge/glReplay carry into a slide whose outgoing transition is unmeasured (not Magic Move,
-  Dissolve or none) is refused at the earlier boundary, and the unmeasured boundary has no entries, so no decoder is
-  held into it. Scoping is not relaxing: a scoped site only removes carries, R6 still runs on the final entries, and
-  a gate deck's plan stays byte-identical. Deck-wide → `Unsupported` (the deck still plays, continuity off): R3
-  transition not on the outgoing slide's last event, more than one transition on a slide, R5 objectID repeats across
-  slides (unmeasured instances count), R6 chain invariant, unreadable header/slide list/slide JSON or no events, a
-  movie node without asset id or objectID, more than one movie changing geometry, `to_runtime` integrity checks, and
-  the host's stage gate, runtime install, codec gate and `OBED_LIVE_CONTINUITY=off`. `retire ends` is
-  not a refusal. Never relax one to qualify a deck.
+* **Refusals.** Per (boundary, instance) → `retire refused` + one `ContinuityPlan.refusals` record (`code`, `objectId`
+  of `src`), reported on `output.continuity.notCarried`: `overlap` artwork above on the destination, R1 missing or
+  ambiguous Magic Move transition correspondence (there is no distance fallback), R2 the carried instance itself builds
+  out or in (including a destination hidden at its first event), or either slide has a build that names no object, R4
+  loop mismatch, R7 web/image movie, R8 trim differs, R9 not fully opaque (checked after R2), R10 bridge motion not
+  EaseInEaseOut over the whole transition or no positive duration (checked last), R11 unmeasured export shape (`reason`
+  names the exact check), and R12 more than one otherwise admissible bridge at one boundary. R1b is retired. R12 refuses
+  every otherwise admissible moving instance at that cut; independent pins remain eligible. Scoped refusals are applied
+  before held-state propagation, and R6 still validates the final entries. R11 scopes what used to fail the deck: a
+  movie layer outside the measured vocabulary (mask, rotation/affine/anchor, ≠1 video sub-layer, animated geometry, not
+  contained, unreadable rect, Back and Forth) refuses that asset at both Magic Moves of its slide, and the unmeasured
+  instance gets a record only (its `objectId` has no runtime entry; it is left out of
+  `slide_instances`/`slide_rects`/`loop_instances` and plays raw); an unreadable destination draw order or unrecognised
+  Magic Move variant refuses that affected asset; a pin/bridge/glReplay carry into a slide whose outgoing transition is
+  unmeasured (not Magic Move, Dissolve or none) is refused at the earlier boundary, and the unmeasured boundary has no
+  entries, so no decoder is held into it. Scoping is not relaxing: a scoped site only removes carries, R6 still runs on
+  the final entries, and a gate deck's plan stays byte-identical. Deck-wide → `Unsupported` (the deck still plays,
+  continuity off): R3 transition not on the outgoing slide's last event, more than one transition on a slide, R5
+  objectID repeats across slides (unmeasured instances count), R6 chain invariant, unreadable header/slide list/slide
+  JSON or no events, a movie node without asset id or objectID, `to_runtime` integrity checks, and the host's stage
+  gate, runtime install, codec gate and `OBED_LIVE_CONTINUITY=off`. `retire ends` is not a refusal. Never relax one to
+  qualify a deck.
 * **Regression oracle.** No allowlist since S3: any deck that derives installs. A continuity change is checked by the
   plan-sha tests (gate decks' runtime plans byte-identical) and the negative corpus (`tests/test_live_continuity_corpus.py`,
   one synthetic export per refusal code); a new refusal code needs a corpus entry.
