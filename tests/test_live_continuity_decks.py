@@ -10,10 +10,12 @@ import pytest
 from obed_edom import live_continuity
 from obed_edom.fixture_paths import fixture
 from obed_edom.live_continuity import ContinuityPlan, Unsupported, derive_plan
+from scripts.live_continuity_probe import ALPHA_DSK_PLAN_SHA256
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "live_continuity"
 MINIMAL_ROOT = FIXTURE_ROOT / "minimal_alpha_dsk"
 ALPHA_ROOT = FIXTURE_ROOT / "alpha_dsk_repaired"
+ALPHA_FULL_ROOT = FIXTURE_ROOT / "alpha_dsk_repaired_full"
 POSITIVE_ROOT = FIXTURE_ROOT / "positive_control"
 LOOP_ROOT = FIXTURE_ROOT / "minimal_alpha_dsk_loop"
 
@@ -52,6 +54,7 @@ MINIMAL_UUIDS = _slide_list(MINIMAL_ROOT)
 POSITIVE_UUIDS = _slide_list(POSITIVE_ROOT)
 LOOP_UUIDS = _slide_list(LOOP_ROOT)
 ALPHA_UUIDS = _slide_list(ALPHA_ROOT)
+ALPHA_FULL_UUIDS = _slide_list(ALPHA_FULL_ROOT)
 
 
 @pytest.mark.parametrize(
@@ -172,6 +175,14 @@ def test_repaired_alpha_slice_derives_live_feed_bindings_from_its_json():
         for row in plan.feed_draws[10]["draws"]
         if row["labelBoxOpacity"] is not None
     ] == [(5, pytest.approx(0.6117682456970215)), (7, pytest.approx(0.6117682456970215)), (11, pytest.approx(0.6117682456970215))]
+
+
+def test_repaired_full_alpha_runtime_plan_is_pinned():
+    plan = _plan(ALPHA_FULL_ROOT, ALPHA_FULL_UUIDS)
+    assert isinstance(plan, ContinuityPlan)
+    runtime = plan.to_runtime()
+    assert isinstance(runtime, dict)
+    assert live_continuity.plan_signature(runtime) == ALPHA_DSK_PLAN_SHA256
 
 
 @pytest.mark.parametrize("slice_", [(4, 6), (0, 6)])

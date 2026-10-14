@@ -1664,7 +1664,7 @@ def test_continuity_output_shape(tmp_path, monkeypatch):
     assert set(continuity) <= {"mode", "reason", "version", "sha256", "scale", "glReplay", "mmFeed"}
     assert continuity["mode"] == "unsupported"
     assert continuity["version"] == live_host.CONTINUITY_VERSION == 7
-    assert continuity["sha256"] == live_host.js_sha256() == "49574c942d10ba7cf6244cf773e6ffa6f1c21c2badb208677ff4b50e710d34cf"
+    assert continuity["sha256"] == live_host.js_sha256() == "6c687c470dc58c6f68838a577913302bf097c5daf69dc5c8c1fd1e8be0f838a7"
 
 
 def test_observe_logs_only_on_change(tmp_path, monkeypatch):
@@ -2428,7 +2428,7 @@ def _feed_runtime() -> dict[str, Any]:
 
 
 def fake_feed_module(calls: list[tuple[bool, bool]]) -> Any:
-    def script(_runtime, *, continuous, once):
+    def script(*, continuous, once):
         calls.append((continuous, once))
         return '<script id="obed-mm-feed"></script>\n'
 
@@ -2440,6 +2440,7 @@ class _FakePlan:
 
     def __init__(self, runtime):
         self._runtime = runtime
+        self.scene_index_by_player = {1: 2}
 
     def to_runtime(self):
         return copy.deepcopy(self._runtime)
@@ -2503,7 +2504,7 @@ def ready(monkeypatch) -> None:
     ("product", "user_agent", "renderer"),
     [
         ("Chrome/127.0.6533.120", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.120 OBS/32.2.2 Safari/537.36", "cef"),
-        ("Chrome/155.0.8059.40", "Mozilla/5.0 Chrome/155.0.8059.40 Safari/537.36", "chrome"),
+        ("Chrome/155.0.8059.40", "Mozilla/5.0 Chrome/155.0.8059.40 Safari/537.36", None),
         ("Chrome/154.0.8037.59", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/154.0.0.0 Safari/537.36", "chrome"),
     ],
 )
@@ -2531,8 +2532,8 @@ def test_mm_feed_resolves_continuous_and_once_independently(
         monkeypatch.setattr(FakeCdp, "product_default", "Chrome/127.0.6533.120")
         monkeypatch.setattr(FakeCdp, "user_agent_default", "Mozilla/5.0 Chrome/127.0.6533.120 OBS/32.2.2")
     else:
-        monkeypatch.setattr(FakeCdp, "product_default", "Chrome/155.0.8059.40")
-        monkeypatch.setattr(FakeCdp, "user_agent_default", "Mozilla/5.0 Chrome/155.0.8059.40 Safari/537.36")
+        monkeypatch.setattr(FakeCdp, "product_default", "Chrome/154.0.8037.59")
+        monkeypatch.setattr(FakeCdp, "user_agent_default", "Mozilla/5.0 Chrome/154.0.8037.59 Safari/537.36")
     calls: list[tuple[bool, bool]] = []
     monkeypatch.setattr(live_host, "_load_mm_feed_module", lambda: fake_feed_module(calls))
     output = host_with_continuity(
@@ -2621,6 +2622,27 @@ def test_mm_feed_never_injects_without_continuity_or_a_feed_entry(tmp_path, monk
     assert 'id="obed-mm-feed"' not in no_feed._server.continuity_script
     assert no_feed.output["continuity"]["mmFeed"]["mode"] == "notApplicable"
     assert calls == []
+
+    monkeypatch.setattr(live_host, "_load_mm_feed_module", lambda: None)
+    module_absent = host_with_continuity(tmp_path / "module-absent", monkeypatch)
+    fake_plan_pair(monkeypatch, off=_feed_runtime())
+    ready(monkeypatch)
+    module_absent.start()
+    assert module_absent.output["continuity"]["mmFeed"] == {
+        "mode": "unavailable",
+        "reason": "Magic Move feed module unavailable",
+    }
+    assert module_absent.output["continuity"]["posterHold"] == [{
+        "fromSlide": 1,
+        "toSlide": 2,
+        "movie": "movie.mov",
+        "objectId": "movie-object",
+        "mode": "baked",
+        "reason": "Magic Move feed module unavailable",
+    }]
+    module_absent._continuity_plan.scene_index_by_player = {}
+    missing_scene_line = module_absent._poster_hold_lines()[0]
+    assert (missing_scene_line["fromSlide"], missing_scene_line["toSlide"]) == (None, None)
 
 
 @pytest.mark.parametrize("version", [4, 5])

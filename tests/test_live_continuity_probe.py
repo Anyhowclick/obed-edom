@@ -11711,12 +11711,14 @@ def test_hold_frame_pass_fail_inconclusive(mutate: Any, expected: bool | None) -
 def _poster_hold(mode: str = "departure") -> dict[str, Any]:
     return {"mode": mode, "pauseTime": 1.0, "settleTime": 2.5, "pauseCurrentTime": 5.0,
             "settleCurrentTime": 5.0, "pauseFrame": 42, "firstAfterFrame": 43, "seeked": False,
-            "resumedFromZero": False, "lastUploadedFrame": 41}
+            "pauseMediaTime": 5.0, "firstAfterMediaTime": 5.0 + 1 / 30, "frameDurationS": 1 / 30,
+            "clockToleranceS": .49 / 30, "resumedFromZero": False, "lastUploadedFrame": 41}
 
 
 @pytest.mark.parametrize(("mutate", "expected"), [
     (lambda r: None, True),
-    (lambda r: r.update(firstAfterFrame=44), False),
+    (lambda r: r.update(firstAfterMediaTime=5.0 + 2 / 30), False),
+    (lambda r: r.update(clockToleranceS=1 / 60), None),
     (lambda r: r.pop("pauseFrame"), None),
 ])
 def test_departure_poster_hold_pass_fail_inconclusive(mutate: Any, expected: bool | None) -> None:
@@ -11761,6 +11763,81 @@ def test_feed_off_can_hold_exactly_but_still_reds_an_explicit_continuous_expecta
     feed["mode"] = "once"
     assert hold["verdict"] is True
     assert probe.score_feed_live(feed, continuous_expected=True)["verdict"] is False
+
+
+def test_report_shaped_feed_evidence_scores_each_leaf_and_feed_off_red() -> None:
+    entry = {
+        "id": "b1to2:movie-a:carry", "objectId": "movie-a", "dstObjectId": "movie-b", "atScene": 2,
+        "feed": {"draw": 1, "from": {"upload": 1, "size": [640, 360]}, "to": None},
+    }
+    frames = []
+    for index in range(4):
+        frames.append({
+            "serial": 1, "atScene": 2, "n": index + 1, "t": float(index + 1), "draws": 1, "uploads": 1,
+            "module": {"entries": {"movie-a": {"mode": "continuous", "state": "fed", "framesFed": index + 1}}},
+            "rows": [{
+                "serial": 1, "atScene": 2, "entryId": entry["id"], "objectId": "movie-a", "dstObjectId": "movie-b",
+                "draw": 1, "t": float(index + 1), "quad": None, "mixFactor": None,
+                "decoder": {"objectId": "movie-a", "instance": "movie-a", "elId": 7, "currentTime": index / 30,
+                            "paused": False, "readyState": 4, "presentedFrames": index + 10,
+                            "mediaTime": index / 30, "opacityProduct": 0.0, "visible": False, "rect": None},
+                "textures": [{"unit": 0, "ordinal": 1, "size": [640, 360], "video": False, "flip": True}, None],
+                "feedRead": {"patchInside": True, "coveredByLaterDraw": False, "kind": "alpha",
+                             "dVideo": 2.0, "dPoster": 40.0},
+            }],
+            "labels": [{"entryId": entry["id"], "serial": 1, "atScene": 2,
+                        "opacity": .61, "spread": 30.0, "slope": .39}],
+            "riders": [{"entryId": entry["id"], "serial": 1, "atScene": 2, "instance": "movie-a",
+                        "visible": False, "opacityProduct": 0.0, "intersectsCanvas": True}],
+            "glErrors": [],
+        })
+    report = {
+        "kind": "mm-feed", "version": 1, "config": {}, "holds": [], "media": [], "errors": [], "killedOnce": [],
+        "contexts": [{"serial": 1, "id": "0-canvas", "createdAt": .5, "atScene": 2,
+                      "lost": False, "entryIds": [entry["id"]]}],
+        "frames": frames,
+        "artwork": [{"entryId": entry["id"], "serial": 1, "atScene": 2, "artworkAbove": True}],
+        "module": {"entries": {"movie-a": {"mode": "continuous", "state": "fed", "framesFed": 4,
+                                                   "maxInterFeedGapMs": 32.0, "maxInterFeedGapLimitMs": 50.0}}},
+        "tamper": None,
+    }
+    assert probe.contract.first_errors(probe.contract.mm_feed_report(report), limit=20) == []
+    record = probe.mm_feed_instrument.verdict_records(report, [entry], continuous_expected=True)[entry["id"]]
+    scored = probe.score_under_artwork({entry["id"]: record}, entry)
+    assert scored["verdict"] is True
+    assert all(scored[name]["verdict"] is not None for name in (
+        "feedLive", "noRiderAboveCanvas", "labelsOverFeed", "artworkAbove",
+    ))
+    failing_entry = {
+        "id": "b1to2:movie-c:carry", "objectId": "movie-c", "dstObjectId": "movie-d", "atScene": 2,
+        "feed": {"draw": 2, "from": {"upload": 2, "size": [640, 360]}, "to": None},
+    }
+    report["contexts"][0]["entryIds"].append(failing_entry["id"])
+    report["module"]["entries"]["movie-c"] = {
+        "mode": "continuous", "state": "fed", "framesFed": 4,
+        "maxInterFeedGapMs": 32.0, "maxInterFeedGapLimitMs": 50.0,
+    }
+    for frame in report["frames"]:
+        row = copy.deepcopy(frame["rows"][0])
+        row.update(entryId=failing_entry["id"], objectId="movie-c", dstObjectId="movie-d", draw=2)
+        row["textures"][0]["ordinal"] = 2
+        row["feedRead"].update(dVideo=6.0, dPoster=10.0)
+        frame["rows"].append(row)
+    per_leaf = probe.mm_feed_instrument.verdict_records(
+        report, [entry, failing_entry], continuous_expected=True,
+    )
+    assert probe.score_feed_live(per_leaf[entry["id"]]["feed"])["verdict"] is True
+    assert probe.score_feed_live(per_leaf[failing_entry["id"]]["feed"])["verdict"] is False
+    report["module"]["entries"]["movie-a"]["mode"] = "once"
+    off = probe.mm_feed_instrument.verdict_records(report, [entry], continuous_expected=True)[entry["id"]]
+    assert probe.score_feed_live(off["feed"], continuous_expected=True)["verdict"] is False
+
+
+def test_feed_ordinal_tamper_changes_the_host_injected_plan_script() -> None:
+    runtime = {"boundaries": [{"feed": {"from": {"upload": 7}}}]}
+    with probe.tampered_feed_ordinal():
+        script = probe.live_host_module._continuity_plan_script(runtime, {"width": 1920, "height": 1080})
+    assert '"upload": 1007' in script
 
 
 def test_gl_interval_splits_paint_without_waiving_a_pre_move_failure(monkeypatch: pytest.MonkeyPatch) -> None:

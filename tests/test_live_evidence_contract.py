@@ -335,15 +335,22 @@ console.log(JSON.stringify({held: held, events: P.events, after: P.snapshot()}))
 
 def _mm_feed_report() -> dict[str, Any]:
     return {
-        "kind": "mm-feed", "version": 1, "config": {}, "holds": [], "media": [], "errors": [], "module": None,
+        "kind": "mm-feed", "version": 1, "config": {}, "holds": [], "media": [], "artwork": [],
+        "errors": [], "module": None,
         "tamper": None, "killedOnce": [{"objectId": "movie-a", "t": 3.0}],
-        "contexts": [{"serial": 1, "id": "0-canvas", "createdAt": 1.0, "lost": False}],
+        "contexts": [{"serial": 1, "id": "0-canvas", "createdAt": 1.0, "atScene": 2,
+                      "lost": False, "entryIds": ["carry-a"]}],
         "frames": [{
-            "serial": 1, "n": 1, "t": 2.0, "draws": 1, "uploads": 2, "labels": [], "riders": [],
+            "serial": 1, "atScene": 2, "n": 1, "t": 2.0, "draws": 1, "uploads": 2,
+            "labels": [], "riders": [],
             "glErrors": [], "module": None,
-            "rows": [{"objectId": "movie-a", "draw": 1, "t": 2.0, "quad": None, "patch": None,
+            "rows": [{"serial": 1, "atScene": 2, "entryId": "carry-a", "objectId": "movie-a",
+                      "dstObjectId": "movie-b", "draw": 1, "t": 2.0, "quad": None,
                       "mixFactor": .5, "decoder": None,
-                      "textures": [{"unit": 0, "ordinal": 1, "size": [640, 360], "video": False}, None]}],
+                      "textures": [{"unit": 0, "ordinal": 1, "size": [640, 360], "video": False,
+                                    "flip": True}, None],
+                      "feedRead": {"patchInside": True, "coveredByLaterDraw": False, "kind": "alpha",
+                                   "dVideo": 2.0, "dPoster": 20.0}}],
         }],
     }
 

@@ -218,7 +218,7 @@ def test_patch_rendering_is_the_live_output_minus_the_observation_hook(monkeypat
 
 
 @pytest.mark.parametrize("mm_opacity", [True, False])
-def test_continuity_take_runs_before_teardown_and_releases_its_fallback_frame(mm_opacity):
+def test_continuity_take_runs_before_teardown_with_mm_opacity_on_and_off(mm_opacity):
     method = (
         live_runtime._MM_OPACITY_REPLACEMENTS[-1][1]
         if mm_opacity
@@ -228,13 +228,8 @@ def test_continuity_take_runs_before_teardown_and_releases_its_fallback_frame(mm
 const events = [];
 const window = {{__OBED_MM_FEED__: {{take(controller, scene) {{
   events.push(['take', controller.name, scene]);
-  const frame = new VideoFrame();
-  events.push(['captured', frame.closed]);
-  frame.close();
-  events.push(['released', frame.closed]);
 }}}}}};
 const PB = {{prototype: {{__obedFreezeTake(controller, scene) {{ events.push(['freeze', controller.name, scene]); }}}}}};
-class VideoFrame {{ constructor() {{ this.closed = false; }} close() {{ this.closed = true; }} }}
 class Player {{ {method} }}
 const controller = {{name: 'player', displayScene(scene) {{ events.push(['display', scene]); }}}};
 Player.prototype.jumpToScene_partFour.call(controller, 7, true);
@@ -244,7 +239,7 @@ Player.prototype.jumpToScene_partFour.call(controller, 9, true);
 console.log(JSON.stringify(events));
 """
     result = json.loads(subprocess.run([_node(), "-e", script], check=True, text=True, capture_output=True).stdout)
-    expected = [["take", "player", 7], ["captured", False], ["released", True]]
+    expected = [["take", "player", 7]]
     if mm_opacity:
         expected.append(["freeze", "player", 7])
     expected.extend([["display", 7], ["display", 8], ["throw"]])
@@ -995,7 +990,7 @@ def test_mm_opacity_census_mirror_changes_only_p2_1_to_2_slot_4_in_committed_fix
     for row in rows:
         assert [old == new for old, new in row] == [True, True, True, True, False]
         assert row[4] == (1, SLOT4_ALPHA)
-    paths = sorted(path for path in FIXTURE_ROOT.rglob("*.json") if "alpha_dsk_repaired" not in path.parts)
+    paths = sorted(path for path in FIXTURE_ROOT.rglob("*.json") if not {"alpha_dsk_repaired", "alpha_dsk_repaired_full"} & set(path.parts))
     stats, changed = _census(paths)
     assert stats["one_to_two"] >= 1 and stats["effects"] > stats["one_to_two"]
     assert changed == {(True, 4)}
@@ -1865,7 +1860,7 @@ def _full_shape(effect: dict) -> bool:
 DISSOLVE_NODE_CASES = ("construction", "census", "freeze_stub", "freeze_decks")
 # The committed exports §8 counts. Qualification and Stage B's repaired Alpha fixture are separate test corpora.
 DISSOLVE_COMMITTED_EXPORTS = tuple(
-    p for p in sorted(FIXTURE_ROOT.iterdir()) if p.is_dir() and p.name not in {"qual_decks", "alpha_dsk_repaired"}
+    p for p in sorted(FIXTURE_ROOT.iterdir()) if p.is_dir() and p.name not in {"qual_decks", "alpha_dsk_repaired", "alpha_dsk_repaired_full"}
 )
 
 

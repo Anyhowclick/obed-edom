@@ -168,7 +168,8 @@ def _mm_feed_renderer(version: Any) -> str | None:
     fingerprint = " ".join(value for value in (product, user_agent) if isinstance(value, str))
     if re.search(r"(?:^|[\s;/])(?:OBS|CEF)/", fingerprint, re.IGNORECASE):
         return "cef"
-    if isinstance(product, str) and re.fullmatch(r"(?:Headless)?Chrome/[\d.]+", product):
+    match = re.fullmatch(r"(?:Headless)?Chrome/(\d+)\.[\d.]+", product) if isinstance(product, str) else None
+    if match and int(match.group(1)) in QUALIFIED_SNAP_MAJORS:
         return "chrome"
     return None
 
@@ -1111,12 +1112,7 @@ class LiveOutputHost:
             self._mm_feed_continuous = False
             self._mm_feed_once = False
             return "unavailable", "Magic Move feed module unavailable", ""
-        builder = getattr(module, "mm_feed_script", None)
-        if not callable(builder):
-            self._mm_feed_continuous = False
-            self._mm_feed_once = False
-            return "unavailable", "Magic Move feed module unavailable", ""
-        script = builder(runtime, continuous=continuous, once=once)
+        script = module.mm_feed_script(continuous=continuous, once=once)
         if not isinstance(script, str) or not script:
             self._mm_feed_continuous = False
             self._mm_feed_once = False
@@ -1140,8 +1136,6 @@ class LiveOutputHost:
             if feed_bound and self._mm_feed_continuous:
                 continue
             to_player = scene_to_player.get(entry.get("atScene"))
-            if to_player is None and isinstance(entry.get("atScene"), int):
-                to_player = entry["atScene"] - 1
             from_player = to_player - 1 if isinstance(to_player, int) else None
             movie = movies.get(entry.get("movieKey"), {}) if isinstance(movies, dict) else {}
             assets = movie.get("assetKeys", []) if isinstance(movie, dict) else []
@@ -1176,11 +1170,12 @@ class LiveOutputHost:
         if self._mm_feed_reason is not None:
             info["reason"] = self._mm_feed_reason
         module = self._mm_feed_module or _load_mm_feed_module()
+        if module is None:
+            return info
         if self._mm_feed_module is None and module is not None:
             self._mm_feed_module = module
-        info["version"] = getattr(module, "MM_FEED_VERSION", 1)
-        digest = getattr(module, "js_sha256", None)
-        info["sha256"] = digest() if callable(digest) else None
+        info["version"] = module.MM_FEED_VERSION
+        info["sha256"] = module.js_sha256()
         return info
 
     def _stage_gate_outcome(self, stage: Any) -> tuple[str, str | None, float | None]:

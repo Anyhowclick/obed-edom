@@ -62,8 +62,6 @@ import argparse
 import base64
 import fcntl
 import hashlib
-import importlib
-import inspect
 import json
 import math
 import os
@@ -122,6 +120,10 @@ except ImportError:  # pragma: no cover - stream B is landing this constant conc
 
 import live_host_probe  # noqa: E402 - reuse the headless window-size compensation
 from continuity_core_variants import VARIANTS, parse_strip, strip_entries, strip_label, variant_core, variant_sha  # noqa: E402
+try:
+    from mm_feed_variants import variant_script as mm_feed_variant_script  # noqa: E402
+except ModuleNotFoundError:
+    mm_feed_variant_script = None
 import paint_instrument  # noqa: E402
 import mm_feed_instrument  # noqa: E402
 import live_evidence_contract as contract  # noqa: E402
@@ -196,7 +198,7 @@ RECORD = "record"
 # for P2 off/on, D1, D3, D5; the rest derived from the S0 exports). D2 and D2-across derive the same plan:
 # the export does not encode play-across (plan §5, R-res-1).
 P2_OFF_PLAN_SHA256 = "283f5eecd18c3412172e28a40bc716c69173a7c72bcd37379dcd3d7d6a96dd4e"
-ALPHA_DSK_PLAN_SHA256 = "3baebab35009248015988fc0e9955e93f687117c58f5f74f9b5a88acbef316e6"
+ALPHA_DSK_PLAN_SHA256 = "c9e546551300e44ff1765147def49257916f14f1c139fcee704d9accad7411d6"
 # The pinned P2 runtime plans (off, gl-replay on; p2-loop off, on): the only decks whose status
 # is P2's legacy slot table. Every other deck is scored by `generated_status`.
 P2_PLAN_SHA256 = frozenset({
@@ -1106,9 +1108,7 @@ def force_viewport(width: int, height: int) -> None:
 
 
 def feed_host_kwargs() -> dict[str, Any]:
-    parameters = inspect.signature(LiveOutputHost).parameters
-    values = {"mm_feed": MM_FEED_REQUEST, "mm_opacity": MM_OPACITY_REQUEST}
-    return {key: value for key, value in values.items() if key in parameters}
+    return {"mm_feed": MM_FEED_REQUEST, "mm_opacity": MM_OPACITY_REQUEST}
 
 
 def ground_truth_plan(export_root: Path, slides: list[dict[str, Any]], *, gl_replay: bool = False) -> ContinuityPlan:
@@ -1623,50 +1623,20 @@ def ground_truth_facts(
             spec["underArtwork"] = True
         if isinstance(entry.get("feed"), dict):
             spec["feed"] = entry["feed"]
-        for source, key in ((feed_draws, "feedDraws"), (artwork_above, "artworkAbove")):
-            matched = _probe_fact_for_spec(source, spec)
-            if matched is not None:
-                spec[key] = matched
+        if isinstance(feed_draws, dict) and isinstance(feed_draws.get(spec["atScene"]), dict):
+            spec["feedDraws"] = feed_draws[spec["atScene"]]
+        if isinstance(artwork_above, dict) and isinstance(artwork_above.get(spec["toPlayer"]), (list, tuple)):
+            matched = [
+                row for row in artwork_above[spec["toPlayer"]]
+                if isinstance(row, dict) and row.get("objectId") == spec.get("dstObjectId")
+            ]
+            if matched:
+                spec["artworkAbove"] = matched
     if armed:
         facts["armed"] = armed_fact(plan, runtime, boundary_keys)
         bind_positive_fact(facts["armed"], specs, "armed")
         facts["armedBoundaries"] = [facts["armed"]["boundaryKey"]]
     return facts
-
-
-def _probe_fact_for_spec(source: Any, spec: dict[str, Any]) -> Any:
-    """Read WS-D's probe-only fact table without constraining its map/list container."""
-    grouped = isinstance(source, dict) and isinstance(source.get(spec.get("toPlayer")), (list, tuple))
-    if isinstance(source, dict):
-        candidates: list[Any] = []
-        for key in (
-            spec["id"], spec.get("srcObjectId"), spec.get("dstObjectId"), spec.get("toPlayer"),
-            f"{spec['fromPlayer']}to{spec['toPlayer']}", str(spec["atScene"]), spec["atScene"],
-        ):
-            if key in source:
-                value = source[key]
-                candidates.extend(value if isinstance(value, (list, tuple)) else [value])
-        for value in source.values():
-            candidates.extend(value if isinstance(value, (list, tuple)) else [value])
-    elif isinstance(source, (list, tuple)):
-        candidates = list(source)
-    else:
-        return None
-    matched = []
-    for item in candidates:
-        if not isinstance(item, dict):
-            continue
-        scene = item.get("atScene", item.get("scene"))
-        object_id = str(item.get("objectId", item.get("srcObjectId", ""))).lower()
-        object_ids = {str(spec.get(key) or "").lower() for key in ("srcObjectId", "dstObjectId")}
-        if (scene is None or scene == spec["atScene"]) and (
-            not object_id or object_id in object_ids
-        ):
-            matched.append(item)
-    if grouped:
-        unique = {json.dumps(item, sort_keys=True): item for item in matched}
-        return list(unique.values()) or None
-    return matched[0] if matched else None
 
 
 def gl_replay_mode(entry: Any) -> str | None:
@@ -1748,33 +1718,19 @@ def injected_feed_variant(name: str | None) -> Iterator[None]:
     if name is None:
         yield
         return
-    variants = importlib.import_module("mm_feed_variants")
     module = live_host_module._load_mm_feed_module()
     if module is None or not callable(getattr(module, "mm_feed_script", None)):
         raise RuntimeError("feed variant requested but the feed module is unavailable")
-    transform = next(
-        (getattr(variants, key, None) for key in ("variant_script", "variant_feed", "feed_variant")
-         if callable(getattr(variants, key, None))),
-        None,
-    )
-    if transform is None:
-        raise RuntimeError("mm_feed_variants exposes no variant transform")
+    if not callable(mm_feed_variant_script):
+        raise RuntimeError("mm_feed_variants.variant_script is unavailable")
     original = module.mm_feed_script
 
     def patched(*args: Any, **kwargs: Any) -> str:
         source = original(*args, **kwargs)
-        for call in (
-            lambda: transform(name, source),
-            lambda: transform(name, script=source),
-            lambda: transform(name, source=source),
-        ):
-            try:
-                changed = call()
-            except TypeError:
-                continue
-            if isinstance(changed, str) and changed:
-                return changed
-        raise RuntimeError(f"feed variant {name!r} did not produce script bytes")
+        changed = mm_feed_variant_script(name, source)
+        if not isinstance(changed, str) or not changed:
+            raise RuntimeError(f"feed variant {name!r} did not produce script bytes")
+        return changed
 
     module.mm_feed_script = patched
     try:
@@ -3649,28 +3605,12 @@ def _feed_record_for_spec(evidence: Any, spec: dict[str, Any]) -> Any:
     return None
 
 
-def score_feed_live(record: Any, *, continuous_expected: bool = True) -> dict[str, Any]:
-    return mm_feed_instrument.score_feed_live(record, continuous_expected=continuous_expected)
-
-
-def score_no_rider_above_canvas(record: Any) -> dict[str, Any]:
-    return mm_feed_instrument.score_no_rider_above_canvas(record)
-
-
-def score_labels_over_feed(record: Any) -> dict[str, Any]:
-    return mm_feed_instrument.score_labels_over_feed(record)
-
-
-def score_hold_frame(record: Any) -> dict[str, Any]:
-    return mm_feed_instrument.score_hold_frame(record)
-
-
-def score_poster_hold(record: Any) -> dict[str, Any]:
-    return mm_feed_instrument.score_poster_hold(record)
-
-
-def score_artwork_above(record: Any) -> dict[str, Any]:
-    return mm_feed_instrument.score_artwork_above(record)
+score_feed_live = mm_feed_instrument.score_feed_live
+score_no_rider_above_canvas = mm_feed_instrument.score_no_rider_above_canvas
+score_labels_over_feed = mm_feed_instrument.score_labels_over_feed
+score_hold_frame = mm_feed_instrument.score_hold_frame
+score_poster_hold = mm_feed_instrument.score_poster_hold
+score_artwork_above = mm_feed_instrument.score_artwork_above
 
 
 def score_under_artwork(evidence: Any, spec: dict[str, Any]) -> dict[str, Any]:

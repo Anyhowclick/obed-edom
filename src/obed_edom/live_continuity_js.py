@@ -1159,7 +1159,7 @@ PRESERVE_CORE_JS = r"""
     if (!boundary.underArtwork || v.__obedPosterBoundary === boundary) return;
     v.__obedPosterBoundary = boundary;
     v.__obedPosterHeld = true;
-    if (boundary.underArtwork) try { v.pause(); } catch (e) {}
+    try { v.pause(); } catch (e) {}
     let why = reason || null;
     if (requestOnce && !boundary.feed) {
       why = 'feed-unbound';
@@ -2292,7 +2292,7 @@ PRESERVE_CORE_JS = r"""
         const boundary = nextEntry(objectId);
         const decoder = decoderFor(objectId);
         const stoodDown = feedStandDown.get(objectId);
-        if ((stoodDown && stoodDown.generation === preserveGeneration && stoodDown.departure === departure)
+        if ((stoodDown && stoodDown.generation === preserveGeneration)
             || !boundary || !boundary.underArtwork || !boundary.feed || !decoder) return false;
         feedClaims.set(objectId, {generation: preserveGeneration, boundary: boundary, decoder: decoder});
         return true;
@@ -2301,7 +2301,8 @@ PRESERVE_CORE_JS = r"""
         const claimed = feedClaims.get(objectId);
         if (!claimed || claimed.generation !== preserveGeneration) return false;
         feedClaims.delete(objectId);
-        feedStandDown.set(objectId, {generation: preserveGeneration, departure: departure});
+        feedStandDown.set(objectId, {generation: preserveGeneration});
+        if (!hasDeparted(instanceOf(claimed.decoder))) return true;
         posterHold(claimed.decoder, claimed.boundary, reason || 'stand-down', false);
         return true;
       },

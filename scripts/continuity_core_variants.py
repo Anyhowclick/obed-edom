@@ -40,7 +40,10 @@ _PICK_VERDICT = "    const reason = found.length === 0 ? 'absent'\n"
 _BRIDGE_PROGRESS = "const progress = easeInEaseOut(bridgeElapsedMs(v, motion) / (1000 * boundary.durationSeconds));"
 _HIDDEN_BRIDGE = "    }, 'keepThroughBridge', !!boundary.underArtwork);\n"
 _SETTLE_REHOME = "    if (bridge && !entry.underArtwork) {\n"
-_POSTER_PAUSE = "    if (boundary.underArtwork) try { v.pause(); } catch (e) {}\n"
+_POSTER_PAUSE = (
+    "    v.__obedPosterHeld = true;\n"
+    "    try { v.pause(); } catch (e) {}\n"
+)
 
 _TRANSFORMS: dict[str, tuple[tuple[str, str], ...]] = {
     # Pool every decoder: neither the plan-asset filter nor the planned-instance filter.
@@ -75,7 +78,7 @@ _TRANSFORMS: dict[str, tuple[tuple[str, str], ...]] = {
     "no-gl-clock": (("    departure.gl = {date: Date.now(), perf: performance.now()};\n", ""),),
     "overlay-ride": ((_HIDDEN_BRIDGE, "    }, 'keepThroughBridge', false);\n"),),
     "settle-on-stage": ((_SETTLE_REHOME, "    if (bridge) {\n"),),
-    "no-pause": ((_POSTER_PAUSE, ""),),
+    "no-pause": ((_POSTER_PAUSE, "    v.__obedPosterHeld = true;\n"),),
 }
 
 

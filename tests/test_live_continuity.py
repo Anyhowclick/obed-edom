@@ -484,13 +484,19 @@ def test_crossing_carries_are_both_flagged_or_the_lower_one_is_refused(settling,
             data["events"][0]["automaticPlay"] = False
         return data
 
-    plan = _plan(_mutate_slide(tmp_path, SLIDE4, transform))
+    root = _mutate_slide(tmp_path, SLIDE4, transform)
+    plan = derive_plan(root, SLIDES[2:], resolver=_resolver, gl_replay=True)
     assert isinstance(plan, ContinuityPlan)
-    movies = {movie.asset: movie for movie in plan.boundaries[2].movies}
+    movies = {movie.asset: movie for movie in plan.boundaries[0].movies}
     if settling:
         assert all(movie.under_artwork and movie.refusal is None for movie in movies.values())
         return
-    assert movies["vid-20250608-wa0125.mp4"].code == "overlap"
+    refused = movies["vid-20250608-wa0125.mp4"]
+    assert (refused.code, refused.gl_replay, refused.gl_replay_reason) == (
+        "overlap",
+        None,
+        "2 movies are carried across the boundary, expected exactly 1",
+    )
     assert movies["untitled.mov"].refusal is None
 
 
@@ -1695,7 +1701,7 @@ def test_a_refused_bridge_retires_only_its_own_boundary():
     assert runtime["boundaries"][:2] == EXPECTED_RUNTIME_PLAN["boundaries"][:2]
 
 
-@pytest.mark.parametrize("arrival", ["settling", "click", "extra-event"])
+@pytest.mark.parametrize("arrival", ["settling", "click", "extra-event", "r11"])
 def test_artwork_overlap_is_lifted_only_when_the_destination_settles_into_dom(arrival, tmp_path):
     def cover_the_movie(data):
         movie_id = _slot_object(data, 0, 1)["objectID"]
@@ -1708,6 +1714,8 @@ def test_artwork_overlap_is_lifted_only_when_the_destination_settles_into_dom(ar
             extra["effects"] = []
             extra["automaticPlay"] = False
             data["events"].insert(1, extra)
+        elif arrival == "r11":
+            data = _add_scaled_movie_above_the_bridge(data)
         return data
 
     plan = _plan(_mutate_slide(tmp_path, SLIDE4, cover_the_movie))
@@ -1720,7 +1728,7 @@ def test_artwork_overlap_is_lifted_only_when_the_destination_settles_into_dom(ar
         entry = next(item for item in runtime["boundaries"] if item["atScene"] == P2_SLIDE4_MIN_HASH)
         assert entry["underArtwork"] is True
         return
-    assert (later.code, later.under_artwork) == ("overlap", False)
+    assert (later.code, later.under_artwork) == (("R11" if arrival == "r11" else "overlap"), False)
     assert [r["toPlayer"] for r in plan.refusals] == [1, 3]
 
 

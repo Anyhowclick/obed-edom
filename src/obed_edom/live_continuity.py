@@ -2109,18 +2109,23 @@ def _magic_move_movies(
         if refusal is not None:
             code, reason = refusal
             movie = replace(movie, refusal=reason, code=code)
-            if gl_replay and code != "overlap":
-                movie = replace(movie, gl_replay_reason=reason)
-            elif gl_replay and gl_replay_used:
+        planned.append((movie, src, dst))
+    planned = _crossing_carries(planned, destination, desc)
+    if gl_replay:
+        for index, (movie, src, dst) in enumerate(planned):
+            if movie.refusal is None:
+                continue
+            if movie.code != "overlap":
+                movie = replace(movie, gl_replay_reason=movie.refusal)
+            elif gl_replay_used:
                 movie = replace(movie, gl_replay_reason="a glReplay boundary is already planned (one per plan)")
-            elif gl_replay:
+            else:
                 movie = _gl_replay_attempt(
                     movie, transition, transition_name, len(carried),
                     source.events, src, source.uuid, destination.events,
                 )
                 gl_replay_used = movie.gl_replay is not None
-        planned.append((movie, src, dst))
-    planned = _crossing_carries(planned, destination, desc)
+            planned[index] = (movie, src, dst)
     for index, (movie, src, dst) in enumerate(planned):
         if movie.under_artwork and movie.refusal is None:
             feed, reason = _feed_binding(transition, source, src)

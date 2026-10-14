@@ -143,14 +143,14 @@ def test_stage_b_variants_each_restore_only_the_registered_failure() -> None:
 
     no_pause = variants.variant_core("no-pause")
     start = no_pause.index("function posterHold(v, boundary, reason, requestOnce)")
-    assert "boundary.underArtwork) try { v.pause(); }" not in no_pause[start : start + 400]
+    assert "try { v.pause(); }" not in no_pause[start : start + 400]
 
 
 @pytest.mark.parametrize(("name", "anchor"), ANCHORS)
 def test_a_core_without_an_anchor_raises_naming_variant_and_anchor(name: str, anchor: str) -> None:
     with pytest.raises(ValueError) as caught:
         variants.variant_core(name, PRESERVE_CORE_JS.replace(anchor, ""))
-    assert name in str(caught.value) and anchor.strip() in str(caught.value)
+    assert name in str(caught.value) and repr(anchor.strip()) in str(caught.value)
 
 
 @pytest.mark.parametrize(("name", "anchor"), ANCHORS)

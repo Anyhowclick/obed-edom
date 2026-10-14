@@ -31,7 +31,7 @@ def test_continuity_version_is_pinned_int():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "49574c942d10ba7cf6244cf773e6ffa6f1c21c2badb208677ff4b50e710d34cf"
+PINNED_CORE_SHA256 = "6c687c470dc58c6f68838a577913302bf097c5daf69dc5c8c1fd1e8be0f838a7"
 
 
 def test_js_sha256_hashes_the_core_bytes_and_matches_the_pinned_literal():
@@ -3919,7 +3919,8 @@ console.log(JSON.stringify({
     assert result["resumes"] == [{"elId": result["notes"][0]["elId"], "t": 4.25, "sceneHash": "#2"}]
 
 
-def test_claim_keeps_the_hidden_decoder_playing_and_stand_down_pauses_without_reupload():
+@pytest.mark.parametrize("before_departure", [False, True], ids=["during-move", "before-departure"])
+def test_claim_keeps_the_hidden_decoder_playing_and_stand_down_pauses_without_reupload(before_departure):
     result = _run_chain(_UNDER_ARTWORK_BRIDGE_PLAN, r"""
 let once = 0, plays = 0;
 window.__OBED_MM_FEED__ = {once() { once += 1; return true; }};
@@ -3930,22 +3931,34 @@ const rawPlay = a.play;
 a.play = function(){ plays += 1; return rawPlay.call(this); };
 const decoder = P.feed.decoderFor('A1') === a;
 const claimed = P.feed.claim('A1');
+let stoodDown = null, beforeDeparture = null;
+if (__BEFORE__) {
+  stoodDown = P.feed.onStandDown('A1', 'ordinal');
+  beforeDeparture = {paused: a.paused, once, plays};
+}
 goToScene(1);
 a.pause();
 detach(a);
 const riding = {paused: a.paused, opacity: a.style.opacity, once, plays};
-const stoodDown = P.feed.onStandDown('A1', 'ordinal');
+if (!__BEFORE__) stoodDown = P.feed.onStandDown('A1', 'ordinal');
 const reclaimed = P.feed.claim('A1');
 tick();
 P.remountAll();
-console.log(JSON.stringify({decoder, claimed, riding, stoodDown, reclaimed, paused: a.paused, once, plays,
+console.log(JSON.stringify({decoder, claimed, beforeDeparture, riding, stoodDown, reclaimed, paused: a.paused, once, plays,
   holds: notesOf('poster-hold')}));
-""")
+""".replace("__BEFORE__", json.dumps(before_departure)))
     assert result["decoder"] and result["claimed"] and result["stoodDown"]
     assert not result["reclaimed"]
-    assert result["riding"] == {"paused": False, "opacity": "0", "once": 0, "plays": 1}
-    assert result["paused"] and result["once"] == 0 and result["plays"] == 1
-    assert result["holds"][0]["reason"] == "ordinal"
+    if before_departure:
+        assert result["beforeDeparture"] == {"paused": False, "once": 0, "plays": 0}
+        assert result["riding"] == {"paused": True, "opacity": "0", "once": 1, "plays": 1}
+        assert result["paused"] and result["once"] == 1 and result["plays"] == 1
+        assert result["holds"][0]["reason"] is None
+    else:
+        assert result["beforeDeparture"] is None
+        assert result["riding"] == {"paused": False, "opacity": "0", "once": 0, "plays": 1}
+        assert result["paused"] and result["once"] == 0 and result["plays"] == 1
+        assert result["holds"][0]["reason"] == "ordinal"
 
 
 def test_feed_seam_is_absent_when_no_runtime_entry_has_feed():
@@ -3953,16 +3966,20 @@ def test_feed_seam_is_absent_when_no_runtime_entry_has_feed():
     assert result == {"feed": None}
 
 
-def test_overlay_bridge_hands_an_under_artwork_pin_to_the_hidden_ride():
+@pytest.mark.parametrize("second_action", ["pin", "bridge"])
+def test_overlay_bridge_hands_an_under_artwork_carry_to_the_hidden_ride(second_action):
     first = {
         "atScene": 2, "action": "bridge", "movieKey": "movie1", "durationSeconds": 1.5, "loop": False,
         "src": _inst("A1", _FOOTPRINT), "dst": _inst("A2", _RECT_S3),
     }
+    second_dst = _FOOTPRINT if second_action == "bridge" else _RECT_S3
     second = {
-        "atScene": 4, "action": "pin", "movieKey": "movie1", "loop": False,
+        "atScene": 4, "action": second_action, "movieKey": "movie1", "loop": False,
         "underArtwork": True, "feed": _FEED,
-        "src": _inst("A2", _RECT_S3), "dst": _inst("A3", _RECT_S3),
+        "src": _inst("A2", _RECT_S3), "dst": _inst("A3", second_dst),
     }
+    if second_action == "bridge":
+        second["durationSeconds"] = 1.5
     plan = {"schema": 2, "movies": _MOVIE_PLAN["movies"], "boundaries": [first, second]}
     result = _run_chain(plan, r"""
 goToScene(0);
@@ -3983,25 +4000,33 @@ const layer = {
   appendChild(node) { this.insertBefore(node); },
   removeChild(node) { node.parentNode = null; node.__inStage = false; },
 };
+const R = window.__OBED_CONTINUITY__.boundaries[1].dst.rect;
 const poster = {id: 'poster', parentNode: layer, parentElement: layer, nextSibling: null,
-  getBoundingClientRect: () => ({left: 198, top: 797, width: 952, height: 268})};
+  getBoundingClientRect: () => ({left: R.x, top: R.y, width: R.w, height: R.h})};
 canvases.push(poster);
 const c = fresh('A3');
 c.parentNode = layer;
 moCallbacks.slice().forEach((cb) => cb([{addedNodes: [c], removedNodes: []}]));
 console.log(JSON.stringify({during, bridged: !!a.__obedBridged34, landed: a.parentNode === layer,
   paused: a.paused, stubSrc: srcStore.get(c) || null,
-  holds: notesOf('pin-hold-start'), onceReason: notesOf('poster-hold')[0].reason}));
+  pinHolds: notesOf('pin-hold-start'), bridgeHolds: notesOf('bridge-motion-start'),
+  onceReason: notesOf('poster-hold')[0].reason}));
 """)
-    assert result == {
-        "during": {"bridged": True, "hidden": "0", "paused": True},
-        "bridged": False,
-        "landed": True,
-        "paused": False,
-        "stubSrc": None,
-        "holds": [{"elId": 1, "atScene": 4, "srcRect": _RECT_S3, "rect": _RECT_S3, "sceneHash": "#3"}],
-        "onceReason": "module-absent",
-    }
+    assert result["during"] == {"bridged": True, "hidden": "0", "paused": True}
+    assert not result["bridged"]
+    assert result["landed"] and not result["paused"]
+    assert result["stubSrc"] is None
+    assert result["onceReason"] == "module-absent"
+    if second_action == "pin":
+        assert result["pinHolds"] == [
+            {"elId": 1, "atScene": 4, "srcRect": _RECT_S3, "rect": _RECT_S3, "sceneHash": "#3"}
+        ]
+        assert len(result["bridgeHolds"]) == 1
+    else:
+        assert result["pinHolds"] == []
+        assert len(result["bridgeHolds"]) == 2
+        assert result["bridgeHolds"][-1]["srcRect"] == _RECT_S3
+        assert result["bridgeHolds"][-1]["rect"] == _FOOTPRINT
 
 
 def test_the_contract_decks_install():
