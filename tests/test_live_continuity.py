@@ -278,16 +278,25 @@ def _add_wa0125_to_slide4(data):
     return data
 
 
-def _add_wa0125_clear_of_the_carry_to_slide4(data):
-    """`_add_wa0125_to_slide4` with the clone moved clear of Untitled.mov, so the two bridges do not
-    cross (`_crossing_carries` would refuse the lower one) and both stay otherwise admissible."""
+WA0125_BESIDE_SHIFT_PX = 430.0
+"""How far right of `_add_wa0125_to_slide4`'s draw position the clone lands so its destination
+(x 1603..2087, partly on the 1920 canvas) clears Untitled.mov's (right edge ~1593)."""
+
+
+def _add_wa0125_beside_the_carry_to_slide4(data):
+    """`_add_wa0125_to_slide4` with the clone's movie node and draw object moved together beside
+    Untitled.mov, so the two bridges never cross (`_crossing_carries` would refuse the lower one) and
+    both stay otherwise admissible. Pair it with `_turn_wa0125_fade_beside_the_carry` on slide 3."""
     data = _add_wa0125_to_slide4(data)
+    slot = next(slot for slot in _draw_slots(data, 0) if slot["layers"][0].get("objectID") == "CLONE-WA0125")
+    drawn = slot["layers"][0]["initialState"]["position"]
+    drawn["pointX"] += WA0125_BESIDE_SHIFT_PX
     clone = next(e for e in data["events"][0]["effects"][0]["effects"] if e.get("objectID") == "CLONE-WA0125")
-    clone["baseLayer"]["initialState"]["position"] = {"pointX": 2300, "pointY": 900}
+    clone["baseLayer"]["initialState"]["position"] = dict(drawn)
     return data
 
 
-def _turn_wa0125_fade_into_bridge(data):
+def _turn_wa0125_fade_into_bridge(data, shift_x=20.0):
     slots = _transition(data)["baseLayer"]["layers"]
     slot = next(
         slot for slot in slots
@@ -308,9 +317,13 @@ def _turn_wa0125_fade_into_bridge(data):
         animation for animation in group["animations"]
         if animation["property"] == "transform.translation"
     ]
-    group["animations"][0]["to"] = {"pointX": 20, "pointY": 0}
+    group["animations"][0]["to"] = {"pointX": shift_x, "pointY": 0}
     leaf["animations"] = [group]
     return data
+
+
+def _turn_wa0125_fade_beside_the_carry(data):
+    return _turn_wa0125_fade_into_bridge(data, shift_x=20.0 + WA0125_BESIDE_SHIFT_PX)
 
 
 def _drop_every_movie_slot(data):
@@ -461,7 +474,6 @@ def test_only_unrefused_geometry_changes_count_towards_the_one_per_boundary_limi
     from obed_edom import live_continuity
 
     real_settles = live_continuity._settles_into_dom
-    monkeypatch.setattr(live_continuity, "_bridge_timing_refusal", lambda *args: None)
     # Only the overlapped destination (slide 4, marked by the "OVER" slot) is forced; every other slide keeps the real
     # answer, so slide 3's fade-turned-bridge stays a glReplay candidate.
     monkeypatch.setattr(
@@ -471,7 +483,7 @@ def test_only_unrefused_geometry_changes_count_towards_the_one_per_boundary_limi
 
     def transform(data):
         if case == "clean":
-            return _add_wa0125_clear_of_the_carry_to_slide4(data)
+            return _add_wa0125_beside_the_carry_to_slide4(data)
         data = _add_wa0125_to_slide4(data)
         clone = next(e for e in data["events"][0]["effects"][0]["effects"] if e.get("objectID") == "CLONE-WA0125")
         state = clone["baseLayer"]["initialState"]
@@ -482,12 +494,20 @@ def test_only_unrefused_geometry_changes_count_towards_the_one_per_boundary_limi
             data["events"][0]["automaticPlay"] = False
         return data
 
-    root = _mutate_slide(tmp_path, SLIDE3, _turn_wa0125_fade_into_bridge)
+    slide3 = _turn_wa0125_fade_beside_the_carry if case == "clean" else _turn_wa0125_fade_into_bridge
+    root = _mutate_slide(tmp_path, SLIDE3, slide3)
     _rewrite_slide_json(root, SLIDE4, transform)
     plan = derive_plan(root, SLIDES, resolver=_resolver, gl_replay=True)
     assert isinstance(plan, ContinuityPlan)
     assert plan.boundaries[0].movies[0].gl_replay is not None
     if case == "clean":
+        # A visible, coherent pair: both destinations are on the 1920x1080 canvas, so R12 is proven on the real
+        # overlay-capacity case rather than an off-canvas structural bridge (merge review r1).
+        assert all(
+            movie.dst_rect.x < 1920 and movie.dst_rect.x + movie.dst_rect.w > 0
+            and movie.dst_rect.y < 1080 and movie.dst_rect.y + movie.dst_rect.h > 0
+            for movie in plan.boundaries[2].movies
+        )
         assert [(movie.action, movie.code) for movie in plan.boundaries[2].movies] == [
             ("bridge", "R12"), ("bridge", "R12")
         ]

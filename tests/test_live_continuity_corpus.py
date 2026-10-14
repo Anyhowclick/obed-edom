@@ -37,7 +37,7 @@ from tests.test_live_continuity import (
     SLIDES,
     _add_build,
     _add_scaled_movie_above_the_bridge,
-    _add_wa0125_clear_of_the_carry_to_slide4,
+    _add_wa0125_beside_the_carry_to_slide4,
     _add_wa0125_to_slide4,
     _clone_second_instance_onto_slide2,
     _copy_fixture_tree,
@@ -50,7 +50,7 @@ from tests.test_live_continuity import (
     _set_loop_mode,
     _set_movie_field,
     _set_opacity,
-    _turn_wa0125_fade_into_bridge,
+    _turn_wa0125_fade_beside_the_carry,
     _with_object_id,
 )
 
@@ -133,7 +133,7 @@ PER_MOVE = [
         "an unmeasured movie 'other.mov' is drawn above the carried 'untitled.mov'", (), id="R11-unmeasured-movie-above",
     ),
     pytest.param(
-        "R12", [_CLEAN, (SLIDE3, _turn_wa0125_fade_into_bridge), (SLIDE4, _add_wa0125_clear_of_the_carry_to_slide4)], 2,
+        "R12", [_CLEAN, (SLIDE3, _turn_wa0125_fade_beside_the_carry), (SLIDE4, _add_wa0125_beside_the_carry_to_slide4)], 2,
         ("slide3", "slide3_wa0125"), ("untitled.mov", "vid-20250608-wa0125.mp4"),
         "more than one otherwise admissible movie changes geometry", (), id="R12",
     ),
