@@ -921,3 +921,7 @@ reds (Stage T fixture). r2 fold `eb46413f`: implementer-reported W3 28/28, W4 34
 (2) review r3 (final round; same two reviewers, verify r2 closure); (3) full suites on 3.12 and the 3.10 floor + dashboard
 `test:ui` (machine window); (4) live `managed_obs_qualify.py --arm placement` + DX-1 re-run arms (machine window, OBS);
 (5) W7 docs (README, skill, handover); (6) owner check; (7) PR.
+
+**Update 2026-10-14:** resumed, merged main, r3 (final) folded, full suites green on `4c5771b6`, three live qualification
+runs (product bugs found live and fixed in `3eae0fde`/`ae1c0f63`, r4/r4b 0 major). Current state, open items and resume order:
+`.agents/handovers/cef-placement-2026-10-13.md`.
