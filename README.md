@@ -251,7 +251,8 @@ On, the movie instead freezes on its current frame and fades with the slide on a
 - **Keyer output (managed OBS):** after the host calibrates OBS's browser source. It loads a probe page in a hidden Studio
   Mode preview scene (`AK-Calibrate`, never on program), proves the capture is fresh, measures which rule OBS's renderer
   uses, then removes everything it added and restores Studio Mode and preview. A pass grants `frac` (OBS 32.2.2 / CEF 127
-  draws the movie at its unsnapped position) for 15 s, renewed while the connection, page, OBS launch, browser and scale
+  draws the movie at its unsnapped position; the freeze redraws partly covered edge pixels from the movie and is refused
+  when an edge pixel's centre falls outside it) for 15 s, renewed while the connection, page, OBS launch, browser and scale
   factor stay the same; DPR 1 and an integer stage origin only. Calibration runs when the output first connects and after a
   reload or reconnect; the presenter's **Recalibrate output** retries it. A calibration that disturbs the program stops
   automatic calibration until OBS restarts.

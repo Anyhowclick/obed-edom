@@ -860,7 +860,11 @@ other = skip; still publish __obedTakeMs
 frac draw = existing snapped underlay THEN drawImage(v,fx,fy,round(cw),round(ch2))
 fx = dx+(r.left-R.left)+round(cx-r.left)-u0
 fy = dy+(r.top-R.top)+round(cy-r.top)-v0
-then whole-backing alpha==255 scan; then existing foreground draw / D3 holder attach
+frac refuses (no holder) when any holder cell centre lies outside the quad: fx>.5||fy>.5||fx+fw<ww-.5||fy+fh<hh-.5
+then whole-backing alpha==255 scan
+frac then redraws only partially covered boundary rows/columns (and their intersections) from the video at the frac
+  mapping's pixel centres, clamped to edge texels: sx=clamp((e+.5-fx)*vw/fw-.5,0,vw-1), likewise sy   # amended 2026-10-14
+then existing foreground draw / D3 holder attach
 patch_player(stock, mm_opacity=True) = rendering fidelity + freeze take/attachment + observation
 patch_player(stock, mm_opacity=False) = existing byte-identical off variant
 patch_rendering(stock) = rendering fidelity only (no observation, executable freeze take or D3 attachment entry)
@@ -923,5 +927,15 @@ reds (Stage T fixture). r2 fold `eb46413f`: implementer-reported W3 28/28, W4 34
 (5) W7 docs (README, skill, handover); (6) owner check; (7) PR.
 
 **Update 2026-10-14:** resumed, merged main, r3 (final) folded, full suites green on `4c5771b6`, three live qualification
-runs (product bugs found live and fixed in `3eae0fde`/`ae1c0f63`, r4/r4b 0 major). Current state, open items and resume order:
-`.agents/handovers/cef-placement-2026-10-13.md`.
+runs (product bugs found live and fixed in `3eae0fde`/`ae1c0f63`, r4/r4b 0 major); that handover is superseded by
+`.agents/handovers/cef-placement-2026-10-14.md`.
+
+**Update 2026-10-14 (evening): live-qualified.** Pass 2A's INCONCLUSIVEs came from an inherited paused-animation validator
+bug that masked harness defects (fixed `1638a085`). Live passes then found a frac top-edge residual (9 LSB, τ 4) — owner chose a
+product fix: the §11.5 boundary redraw above (`2d64a25e`, Astra plan, Opus critique + reviews). Harness/scorer folds
+`f8059380`/`398ddd1d`: DSK frame identity from the drawn VideoFrame, session-level DSK recapture on a sole coverage shortfall,
+`m-fg-cef` as the CEF frozen_region positive control (a paused-capture control can never produce it), transient "unknown" OBS
+ownership retried within the deadline, Chrome classifier rows read their own records. `cut` and `tone` are REPORTED for this PR
+(owner; identity take). Final live run on `f8059380`/`398ddd1d`: 25 fps ×2 and 30 fps ×2, all valid; 30 fps PASS live, 25 fps
+PASS on offline rescore with the Chrome-row fix (29/29 arms MATCH each). Evidence: `E/cef-placement-live-2026-10-14/`. Open items
+and resume order: `.agents/handovers/cef-placement-2026-10-14.md`.

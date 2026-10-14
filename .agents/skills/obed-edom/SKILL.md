@@ -848,7 +848,9 @@ for the parked `iwa-surgical-write-generator` feature.
   product, gpuCompositing, at, method, probeId, leaseMs, leaseExpiresAt, tone, automaticProbesDisabled}` (§11.3); knowledge reason ∈ `granted`, `attached`, `unqualified-version`, `software-compositing`,
   `version-unavailable`, `channel-compromised` (output stays hidden, `show` refused), `revoked-fingerprint`. Probe reasons: §11.3 vocabulary.
   Qualify Keyer placement with `managed_obs_qualify.py --arm placement` (CEF gates, persistence, program-wire integrity,
-  live freshness controls; recordings kept only for non-PASS sessions). G2 bytes are unchanged; with the patch on the
+  live freshness controls; recordings kept only for non-PASS sessions; DSK identity comes from the drawn VideoFrame and a sole
+  mid-frame shortfall reruns the DSK session up to 3 times, every attempt kept and scored; ~23 min per rate, both rates
+  hard-coded — a scratch wrapper setting `MMO_RATES` runs one rate). G2 bytes are unchanged; with the patch on the
   P2 fixture reports exactly `opacityUnproven = [{4, "size"}]` (no override: LIVE replays the player's own 0.2947) and
   `occludedBands` 0/128 (patch off: `[]`, 20/128). `frameLen` (settled-frame call count) reads 96 on / 88 off when the
   settle frame carries every uniform write, but the player's uniform cache makes it timing-dependent (headless 85/86 off):
