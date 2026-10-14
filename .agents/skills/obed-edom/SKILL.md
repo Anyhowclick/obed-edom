@@ -847,6 +847,20 @@ for the parked `iwa-surgical-write-generator` feature.
   Harnesses: `scripts/mm_opacity_probe.py` (headless MO-1/4/5 + forced stand-down), `managed_obs_qualify.py --arm mmo`
   (MO-2; `--score` rescores) / `--arm mmo-cef` (MO-3), `p2_recovery_html_adversarial.py --mm-opacity auto|off` (non-GL
   arms run `--disable-gpu`, so only the GL arm exercises it).
+* **Line Draw builds** (`keynote_live_line_draw.plan.md`).
+  * **Export.** Keynote's HTML export bakes `com.apple.iWork.Keynote.LineDraw` / `…LineDrawForLine` as a plain opacity
+    fade.
+  * **Patch.** It rides the same `mm_opacity` switch (live and Build Preview; `off` = stock). An admitted build reveals
+    Keynote's own texture along `texturedRectangle.shapePath` on one owned overlay canvas. The clock is the player's own
+    `layerN-opacity` CSS Animation, and a head-end `filled arrow` rides the tip as a rigid piece.
+  * **Admission (fail-closed, §2.1).** Anything not measured keeps the fade:
+    * Clockwise closed shapes, or Start-to-End lines.
+    * Ease In & Out.
+    * At most 2e6 texture pixels and at most 5000 path segments.
+    * An arrow head-shape symmetric difference of at most 48. The owner's arrow measures 31 on Chrome 155 and 39 on
+      CEF 127. Engines rasterise differently, so recalibrate on every qualified engine.
+  * **Gate.** `scripts/line_draw_probe.py` (headless, `--score DIR` re-scores offline). The arrowhead pose is an owner
+    eye gate, because the probe cannot measure a 12 px head at headless capture size.
 * **Magic Move hand-back geometry** (`keynote_live_handback_geometry.plan.md`): Keynote encodes a scaled MM leaf as its
   slide-1 texture plus a padded-texture scale ratio, so the GL settle lands 2–3 px smaller and off-centre from the slide-2
   DOM (the authored geometry) and snaps at build 1. R6–R8, appended to the same replacement tuple (same switch; `off` =
