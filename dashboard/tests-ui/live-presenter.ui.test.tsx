@@ -52,8 +52,8 @@ const keyerSettings: LiveOutputSettings = { akOutputMode: "keyer", akOutputRate:
 function client(overrides: Partial<LiveClient> = {}): LiveClient {
   return {
     state: vi.fn(async () => null),
-    decks: vi.fn(async () => [{ previewJobId: "prepared-1", name: "Sunday service", slides: 3, sourceDigest: "source" }]),
-    qualification: vi.fn(async (previewJobId) => ({ previewJobId, name: "Sunday service", slides: 3, sourceDigest: "source", qualified: true, continuity: { mode: "qualified" as const, reason: null, notCarried: [] }, convertedMovies: [] })),
+    decks: vi.fn(async () => [{ previewJobId: "prepared-1", name: "Sunday service", slides: 3, sourceDigest: "source", sourceState: "current" as const, sourcePath: "/Slides/Sunday service.key" }]),
+    qualification: vi.fn(async (previewJobId) => ({ previewJobId, name: "Sunday service", slides: 3, sourceDigest: "source", sourceState: "current" as const, sourcePath: "/Slides/Sunday service.key", qualified: true, continuity: { mode: "qualified" as const, reason: null, notCarried: [] }, convertedMovies: [] })),
     displays: vi.fn(async () => [{ id: "screen-2", name: "HDMI projector", width: 1920, height: 1080, x: 0, y: 0, primary: true }]),
     start: vi.fn(async () => state()),
     command: vi.fn(async (_sessionId: string, command: LiveCommand): Promise<LiveResult> => ({ requestId: command.requestId, outcome: "completed", state: state() })),
@@ -628,10 +628,74 @@ describe("Alpha Keynote intake and slide grid", () => {
     expect(applyHtmlPreview).not.toHaveBeenCalled();
   });
 
+  it("warns about changed and missing sources and can prepare a changed Keynote again", async () => {
+    const sourcePath = "/Slides/Sunday service.key";
+    const missingPath = "/Archive/Missing.key";
+    const stale = { previewJobId: "prepared-1", name: "Sunday service", slides: 3, sourceDigest: "old", sourceState: "changed" as const, sourcePath };
+    const missing = { previewJobId: "missing-1", name: "Missing", slides: 2, sourceDigest: "missing", sourceState: "missing" as const, sourcePath: missingPath };
+    const qualification = vi.fn(async (previewJobId: string) => ({
+      ...(previewJobId === "prepared-1" ? stale : previewJobId === "missing-1" ? missing : {
+        previewJobId, name: "Sunday service", slides: 3, sourceDigest: "new", sourceState: "current" as const, sourcePath,
+      }),
+      qualified: true,
+      continuity: { mode: "qualified" as const, reason: null, notCarried: [] },
+      convertedMovies: [],
+    }));
+    const api = client({ decks: vi.fn(async () => [stale, missing]), qualification });
+    const proposal1: Job = { id: "reprepare-1", kind: "html-preview", status: "done", logs: [], result: { phase: "review" } };
+    const proposal2: Job = { id: "prepared-2", kind: "html-preview", status: "done", logs: [], result: { phase: "review" } };
+    const ready2: Job = { ...proposal2, result: { phase: "ready" } };
+    let resolveProposal!: (job: Job) => void;
+    vi.mocked(startHtmlPreview).mockResolvedValueOnce(proposal1).mockResolvedValueOnce(proposal2);
+    vi.mocked(applyHtmlPreview).mockRejectedValueOnce(new Error("Close Keynote before exporting a build preview (strictly serial).")).mockResolvedValueOnce(ready2);
+    vi.mocked(pollJob)
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveProposal = resolve; }))
+      .mockResolvedValueOnce(proposal2)
+      .mockResolvedValueOnce(ready2);
+
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    const warningText = "This Keynote was edited after this deck was prepared. This deck still plays the old version. Save and close Keynote, then prepare again to pick up the edits.";
+    const warning = await screen.findByText(warningText);
+    expect(screen.getByRole("option", { name: "Sunday service · 3 slides · Keynote changed — re-prepare" })).toBeInTheDocument();
+    expect(warning.closest(".notice")).toHaveClass("warning");
+    const prepareAgain = screen.getByRole("button", { name: "Prepare again" });
+    expect(prepareAgain).toHaveClass("tone-alt");
+    expect(screen.getByRole("button", { name: "Start output session" })).toBeEnabled();
+
+    fireEvent.click(prepareAgain);
+    await waitFor(() => expect(startHtmlPreview).toHaveBeenCalledWith(sourcePath));
+    await waitFor(() => expect(document.activeElement).toHaveClass("live-prepare-progress"));
+    expect(chooseKeynote).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Start output session" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Choose on this Mac" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Qualify Keynote" })).toBeDisabled();
+    await act(async () => resolveProposal(proposal1));
+    expect(applyHtmlPreview).toHaveBeenCalledWith("reprepare-1");
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Close Keynote before exporting a build preview (strictly serial).");
+    expect(document.activeElement).toBe(alert);
+    await screen.findByText(warningText);
+    expect(alert).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Prepared deck" })).toHaveValue("prepared-1");
+    expect(screen.getByRole("button", { name: "Start output session" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Prepare again" }));
+    await waitFor(() => expect(startHtmlPreview).toHaveBeenLastCalledWith(sourcePath));
+    await waitFor(() => expect(applyHtmlPreview).toHaveBeenLastCalledWith("prepared-2"));
+    await waitFor(() => expect(qualification).toHaveBeenCalledWith("prepared-2"));
+    expect(screen.getByRole("combobox", { name: "Prepared deck" })).toHaveValue("prepared-2");
+    expect(await screen.findByText("Sunday service · 3 slides. Output is checked when the session starts.")).toBeVisible();
+    expect(screen.queryByText(warningText)).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Prepared deck" }), { target: { value: "missing-1" } });
+    expect(await screen.findByText(`Original Keynote not found or can't be read at ${missingPath} — can't check for edits.`)).toHaveClass("path-note");
+    expect(screen.queryByText(warningText)).not.toBeInTheDocument();
+  });
+
   it("starts a deck whose continuity is off and says why, with its moves and converted movies", async () => {
     const reason = "R3: slide 2's transition is not on its last event";
     const qualification = vi.fn(async (previewJobId: string) => ({
-      previewJobId, name: "Minimal.key", slides: 3, sourceDigest: "source", qualified: true,
+      previewJobId, name: "Minimal.key", slides: 3, sourceDigest: "source", sourceState: "current" as const, sourcePath: "/Slides/Minimal.key", qualified: true,
       continuity: { mode: "unsupported" as const, reason, notCarried: [] },
       convertedMovies: [{ asset: "untitled.mov", sourceCodec: "HEVC" }, { asset: "clip-10-1000001.mov", sourceCodec: "ProRes" }],
     }));
@@ -648,7 +712,7 @@ describe("Alpha Keynote intake and slide grid", () => {
   it("lists the moves continuity will not carry before the deck starts", async () => {
     const notCarried = [{ fromSlide: 6, toSlide: 8, asset: "vid-20250608-wa0125.mp4", reason: "later-authored artwork overlaps" }];
     const api = client({ qualification: vi.fn(async (previewJobId: string) => ({
-      previewJobId, name: "Sunday service", slides: 3, sourceDigest: "source", qualified: true,
+      previewJobId, name: "Sunday service", slides: 3, sourceDigest: "source", sourceState: "current" as const, sourcePath: "/Slides/Sunday service.key", qualified: true,
       continuity: { mode: "qualified" as const, reason: null, notCarried }, convertedMovies: [],
     })) });
     render(<LivePresenter client={api} pollMs={60_000} />);

@@ -68,20 +68,20 @@ SERVINGS = ("off", *VARIANT_INDICES)
 R8_SERVINGS = frozenset({"V8", "V5+8"})
 SERVED_SHA256 = {
     "off": "aa7d69241c2c4b7b5adbdbca19af36f2ec73bf9fad48eb2c3f6a2aeda66f2243",
-    "V5": "2ca4fb42d8a8891943b2cc6035a6914805033fdb6b4216672f7a1ed235eab5f2",
-    "V7": "d5e3ba6c120dbd33f9855a6cb418ed941caef3aff1152f5d56d8a84c05143825",
-    "V8": "27401a8a4d603da0e7288e33d0fbc6f7ea35c37ce68f9893c03701bb91cd6e54",
-    "V5+8": "d6bd9a54afc8029344870bef0171ffdc0ec141ac0f0cb56c087ecfcba3e45681",
+    "V5": "677baf7b247614f7ec8f46b845ee4df4fb06adace0b5b5de9e468a55c64c2dd1",
+    "V7": "43e36c0be2737055d852d807711a1a19a05297c744ea0655698fe45cc8c00360",
+    "V8": "adf6285a401120d9623172e7a78683c37aad1f245d7fdaa1f5a8f396680f52aa",
+    "V5+8": "17c227926de4246b2208b22de89098709b29be0b5833e4b368a70f6553bf22fd",
 }
 CORE_SHA256 = "6c687c470dc58c6f68838a577913302bf097c5daf69dc5c8c1fd1e8be0f838a7"
 L2_INSTALL_ANCHOR = b"(function(controller) {\n"
 L2_INSTALL_REPLACEMENT = L2_INSTALL_ANCHOR + b"  Object.defineProperty(window, '__obedDebugController', {value: controller});\n"
 L2_SERVED_SHA256 = {
     "off": "a22641911a204d5b7b4b9f883cd8951ef9ae74f5deb5c12e662b48be8190f678",
-    "V5": "37628e472860756f1cfbc03cee979231748642822aeb9b050a29d0eba6e5ab3b",
-    "V7": "c795f4a0d69eed66525546b07c4b243eaae60737b0b510fb6c4690868516dd13",
-    "V8": "5882f468c9019a3ac7041c2e3395a45e5a9fbf701b0e7e196cfd4611cf5971f1",
-    "V5+8": "a06b28ff6379ecebad109c38499bd84380b2aacbecc6e310b9c107dd3fbde291",
+    "V5": "abfad9750ce2e43a147ade3df6cc2b7c818b91c5c97cfb83bcfc84b47e5bac19",
+    "V7": "e33b6d97a6a8f67f2d129b59ad99420a7e381d2c4c4c098eeafa0057fb8ed626",
+    "V8": "1f8fc5945e720291a66d0767bf0a361d356ed2b3433833593da0148f1ba99f09",
+    "V5+8": "55705c66667dbf9ef56216ab5a3da7705cda2cd70b0da65a0d3b09efcc1f790a",
 }
 
 BLOCK_VARIANTS = ("V8", "V7", "V5")

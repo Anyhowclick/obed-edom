@@ -723,7 +723,11 @@ for the parked `iwa-surgical-write-generator` feature.
 * **Regression oracle.** No allowlist since S3: any deck that derives installs. A continuity change is checked by the
   plan-sha tests (gate decks' runtime plans byte-identical) and the negative corpus (`tests/test_live_continuity_corpus.py`,
   one synthetic export per refusal code); a new refusal code needs a corpus entry.
-* **Start is never gated on continuity.** The `/api/live/decks/{id}/qualification` response carries `qualified: true`,
+* **Start is never gated on continuity or source freshness.** The `/api/live/decks/{id}/qualification` response (and each
+  `/api/live/decks` row) carries `sourceState: current|changed|missing` + `sourcePath` (the prepare job's recorded `.key`,
+  compared by `deck_digest` against the job's `sourceDigest`): a prepared deck is a snapshot, so a `changed` source gets a
+  yellow warning + **Prepare again** (re-prepares from `sourcePath`; a failure re-selects the stale deck) and `missing`
+  a neutral note — both warning-only. The qualification response also carries `qualified: true`,
   `continuity: {mode: qualified|unsupported|off, reason, notCarried}` (from `_deck_qualification`) (`live_host.not_carried(plan, slides)`) and
   `convertedMovies: [{asset, sourceCodec}]`; only `prepared_deck`'s playability checks (player digest, 16:9, manual
   mode, unsupported media, no playable slides) block start.
@@ -817,7 +821,10 @@ for the parked `iwa-surgical-write-generator` feature.
   count-checked, in-memory replacements on a `SUPPORTED_PLAYERS` player (stock `e9b2fad4…` or `17c0c938…`, each with
   pinned on/off/rendering outputs; else `LiveRuntimeUnsupported`). R1–R4:
   each `eB` leaf draws at its chain opacity (per node, a constant `both` opacity animation's value, else the model value);
-  a fade, `hidden`, several or nested animations leave the subtree at today's value. R5: the swapped DOM node hides in
+  a fade, `hidden`, several or nested animations leave the subtree at today's value, except a leaf fade under constant
+  ancestors (`keynote_live_mm_opacity_fade.plan.md`): an admitted fade-in, short fade-out or partial fade keeps the
+  player's ramp × the ancestor product (R1 `__obedFade`/`obedParentOpacity`, R3 multiply, R13 passes the effect
+  duration from `setupTexture`); on disk only Alpha_DSK 6→7/3 and 7→8/4, 8 change. R5: the swapped DOM node hides in
   the same task as the first GL draw (no one-frame DOM+GL double image). `mm_opacity=False` is byte-identical to the
   observation-only player. Precedence = ctor `mm_opacity` (`auto`|`off` exact, else `LiveHostError`) → env
   `OBED_LIVE_MM_OPACITY` (trimmed, any case; `off`|`auto`, else refuse) → `auto`, on every output (HDMI, managed OBS,
@@ -844,6 +851,20 @@ for the parked `iwa-surgical-write-generator` feature.
   Harnesses: `scripts/mm_opacity_probe.py` (headless MO-1/4/5 + forced stand-down), `managed_obs_qualify.py --arm mmo`
   (MO-2; `--score` rescores) / `--arm mmo-cef` (MO-3), `p2_recovery_html_adversarial.py --mm-opacity auto|off` (non-GL
   arms run `--disable-gpu`, so only the GL arm exercises it).
+* **Line Draw builds** (`keynote_live_line_draw.plan.md`).
+  * **Export.** Keynote's HTML export bakes `com.apple.iWork.Keynote.LineDraw` / `…LineDrawForLine` as a plain opacity
+    fade.
+  * **Patch.** It rides the same `mm_opacity` switch (live and Build Preview; `off` = stock). An admitted build reveals
+    Keynote's own texture along `texturedRectangle.shapePath` on one owned overlay canvas. The clock is the player's own
+    `layerN-opacity` CSS Animation, and a head-end `filled arrow` rides the tip as a rigid piece.
+  * **Admission (fail-closed, §2.1).** Anything not measured keeps the fade:
+    * Clockwise closed shapes, or Start-to-End lines.
+    * Ease In & Out.
+    * At most 2e6 texture pixels and at most 5000 path segments.
+    * An arrow head-shape symmetric difference of at most 48. The owner's arrow measures 31 on Chrome 155 and 39 on
+      CEF 127. Engines rasterise differently, so recalibrate on every qualified engine.
+  * **Gate.** `scripts/line_draw_probe.py` (headless, `--score DIR` re-scores offline). The arrowhead pose is an owner
+    eye gate, because the probe cannot measure a 12 px head at headless capture size.
 * **Magic Move hand-back geometry** (`keynote_live_handback_geometry.plan.md`): Keynote encodes a scaled MM leaf as its
   slide-1 texture plus a padded-texture scale ratio, so the GL settle lands 2–3 px smaller and off-centre from the slide-2
   DOM (the authored geometry) and snaps at build 1. R6–R8, appended to the same replacement tuple (same switch; `off` =

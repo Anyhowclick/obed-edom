@@ -10,14 +10,14 @@ MM_OPACITY_ENV = "OBED_LIVE_MM_OPACITY"
 # 17c0c938 is e9b2fad4 plus two `,isEvalSupported:!1` PDF.js options, outside every anchor.
 SUPPORTED_PLAYERS = {
     "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354": (
-        "dfcf5e9b5af150715ba0fb8addab325deeb161e937ae0cca69b4934678e214e2",
+        "bf2c36d187cdd7d802b52d22f901b608aa7014c7c1866f46584c5dc4c315fe4d",
         "aa7d69241c2c4b7b5adbdbca19af36f2ec73bf9fad48eb2c3f6a2aeda66f2243",
-        "354212ac25f215b3fa8057ea6bbb27cd52c5e8f769204a3d6bd5ffa4970beba4",
+        "ae7f10404a9eafac678655bb452ef0530c6a49f42def0284e374b0acd543815d",
     ),
     "17c0c938caa49d5c70bd83bd5b84f57381faa51602932ca733aa965055026d91": (
-        "ad0a7ca3c33685fe8f78e5223bfde0fb79ac66d44d2e49f22040a7ce16e949d7",
+        "6d3a3d91c1dedbcab077098cef6a04e8dcce1cc6ac20fd73704f7b526325fe7f",
         "322d7419c4c3814e67b169ae69c291f671c16e1807ec21760b5160514976ceee",
-        "67ea6cad3c6d4a06acc0340aee9eae35d2d4713bf4d211f807ad7fb948cd243b",
+        "467fa3324e4cbea6aa53a56b55a8ae84dbaea8dbc469acaed736d7254eba07ab",
     ),
 }
 _ANCHOR = b"UC=new Eg,UC.displayManager.showWaitingIndicator()"
@@ -28,6 +28,16 @@ _MM_OPACITY_NODE = (
     b':("hidden"===t[i].property||t[i].animations)&&(C=2);var o=B.hidden||C>1?null:g?'
     b'g.from.scalar===g.to.scalar&&"both"===g.fillMode?g.to.scalar:null:B.opacity;'
     b'return"number"==typeof o&&isFinite(o)?o:null}catch(E){return null}}'
+    b'__obedFade(A,C){try{var B=A.initialState,g=A.animations||[],Q=null,e=null,t=0,i=0;'
+    b'if(1!==g.length||!Array.isArray(g[0].animations))return!1;for(var o=g[0].animations,E=0;E<o.length;E++){'
+    b'var w=o[E];if(w.animations)return!1;"opacity"===w.property?(Q=w,t++):"hidden"===w.property&&(e=w,i++)}'
+    b'if(1!==t||i>1)return!1;var a=Q.from.scalar,I=Q.to.scalar,s=Q.fillMode;if("number"!=typeof a||'
+    b'"number"!=typeof I||!isFinite(a)||!isFinite(I)||a<0||a>1||I<0||I>1||a===I||'
+    b'"both"!==s&&"forwards"!==s||"forwards"===s&&B.opacity!==a||C===1e3*Q.duration&&0!==Q.beginTime)return!1;'
+    b'if(!1===B.hidden)return null===e||0===I&&null!==e&&!0===e.from.scalar&&!0===e.to.scalar&&'
+    b'"forwards"===e.fillMode&&e.beginTime+1e-9>=Q.beginTime+Q.duration;if(!0===B.hidden)return 0===a&&'
+    b'null!==e&&!1===e.from.scalar&&!1===e.to.scalar&&"forwards"===e.fillMode&&'
+    b'Math.abs(e.beginTime-Q.beginTime)<=1e-9&&Math.abs(e.duration-Q.duration)<=1e-9;return!1}catch(n){return!1}}'
     b"__obedChainOpacity(X,A){if(null===X)return null;var B=this.__obedNodeOpacity(A);"
     b"return null===B?null:(void 0===X?1:X)*B}"
 )
@@ -162,22 +172,74 @@ _DISSOLVE_METHODS = (
     b'W=document.getElementById("layer"+O.layerId+("cut"===C.obedDissolve?"":"-opacity"));if(!W)return;'
     b"var Q=document.createDocumentFragment();F.holders.forEach(function(h){Q.appendChild(h)}),W.appendChild(Q)}catch(E){}}"
 )
+_LINE_DRAW_METHODS = (
+    b"__obedLineDrawNode(A,B,C){A.__obedLineCanvas=B,A.__obedLineWrapper=C}"
+    b"__obedLineGeometry(A){var B=A[0].points[0],g={x:B[0],y:B[1]},C={x:g.x,y:g.y},Q=[{x:g.x,y:g.y,s:0}],"
+    b"e=[],t=0,i=typeof Path2D!==\"undefined\"?new Path2D:null;i&&i.moveTo(g.x,g.y);for(var o=1;o<A.length;o++){var E=A[o],w=E.type;"
+    b"if(\"AddLine\"===w){var a=E.points[0],I={x:a[0],y:a[1]},s=Math.hypot(I.x-C.x,I.y-C.y);"
+    b"e.push({a:C,b:I,s:t,e:t+s}),t+=s,Q.push({x:I.x,y:I.y,s:t}),i&&i.lineTo(I.x,I.y),C=I}"
+    b"else if(\"AddCurve\"===w){var n=E.points,G={x:n[0][0],y:n[0][1]},r={x:n[1][0],y:n[1][1]},D={x:n[2][0],y:n[2][1]},h=C;"
+    b"i&&i.bezierCurveTo(G.x,G.y,r.x,r.y,D.x,D.y);for(var l=1;l<=48;l++){var Y=l/48,c=1-Y,M={x:c*c*c*C.x+3*c*c*Y*G.x+3*c*Y*Y*r.x+Y*Y*Y*D.x,y:c*c*c*C.y+3*c*c*Y*G.y+3*c*Y*Y*r.y+Y*Y*Y*D.y},F=Math.hypot(M.x-h.x,M.y-h.y);"
+    b"e.push({a:h,b:M,s:t,e:t+F}),t+=F,Q.push({x:M.x,y:M.y,s:t}),h=M}C=D}"
+    b"else if(\"CloseSubpath\"===w){var d=Math.hypot(g.x-C.x,g.y-C.y);d&&(e.push({a:C,b:g,s:t,e:t+d}),t+=d,Q.push({x:g.x,y:g.y,s:t})),i&&i.closePath(),C=g}}"
+    b"return{path:i,points:Q,segs:e,length:t,start:g,end:C}}"
+    b"__obedLineAt(A,B){B=Math.max(0,Math.min(A.length,B));for(var g=0;g<A.segs.length;g++){var C=A.segs[g];if(B<=C.e||g===A.segs.length-1){var Q=C.e>C.s?(B-C.s)/(C.e-C.s):0;return{x:C.a.x+(C.b.x-C.a.x)*Q,y:C.a.y+(C.b.y-C.a.y)*Q,a:Math.atan2(C.b.y-C.a.y,C.b.x-C.a.x)}}}return{x:A.start.x,y:A.start.y,a:0}}"
+    b"__obedLineNear(A,B,g){for(var C=1/0,Q=0,e=0;e<A.segs.length;e++){var t=A.segs[e];if(B<Math.min(t.a.x,t.b.x)-C||B>Math.max(t.a.x,t.b.x)+C||g<Math.min(t.a.y,t.b.y)-C||g>Math.max(t.a.y,t.b.y)+C)continue;var i=t.b.x-t.a.x,o=t.b.y-t.a.y,E=i*i+o*o,w=E?Math.max(0,Math.min(1,((B-t.a.x)*i+(g-t.a.y)*o)/E)):0,a=t.a.x+w*i,I=t.a.y+w*o,s=Math.hypot(B-a,g-I);s<C&&(C=s,Q=t.s+w*(t.e-t.s))}return{d:C,s:Q}}"
+    b"__obedLineInside(A,B,g){for(var C=!1,Q=0,e=A.length-1;Q<A.length;e=Q++){var t=A[Q],i=A[e];((t.y>g)!==(i.y>g))&&B<(i.x-t.x)*(g-t.y)/(i.y-t.y)+t.x&&(C=!C)}return C}"
+    b"__obedLineHull(A){A.sort(function(a,b){return a.x===b.x?a.y-b.y:a.x-b.x});var B=function(a,b,c){return(b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x)},g=[];for(var C=0;C<A.length;C++){var Q=A[C];if(C&&Q.x===A[C-1].x&&Q.y===A[C-1].y)continue;for(;g.length>1&&B(g[g.length-2],g[g.length-1],Q)<=0;)g.pop();g.push(Q)}var e=g.length+1;for(C=A.length-2;C>=0;C--){Q=A[C];for(;g.length>=e&&B(g[g.length-2],g[g.length-1],Q)<=0;)g.pop();g.push(Q)}return g.pop(),g}"
+    b"__obedLinePixels(A,B,g,C,Q,e,t){var i=[],o=new Uint8Array(g*C),E=new Float64Array(g*C);for(var w=0;w<C;w++)for(var a=0;a<g;a++){var I=w*g+a,s=4*I;if(!B[s+3])continue;var n=this.__obedLineNear(A,(a+.5)/Q,(w+.5)/Q);E[I]=n.s,n.d<=e?o[I]=1:i.push([a,w])}return!t&&i.length?null:{wings:i,band:o,arc:E}}"
+    b"__obedLineDrawAdmit(A){try{if(!A||\"buildIn\"!==A.type||[\"com.apple.iWork.Keynote.LineDraw\",\"com.apple.iWork.Keynote.LineDrawForLine\"].indexOf(A.name)<0||!(A.duration>0&&isFinite(A.duration))||!A.kpfLayer)return;"
+    b"var B=A.attributes||{},g=\"com.apple.iWork.Keynote.LineDrawForLine\"===A.name,C=g?[\"KNBuildCustomAttributesIncludeEndpoints\",\"direction\",\"sfx-action-acceleration\"]:[\"direction\",\"sfx-action-acceleration\"];"
+    b"if(Object.keys(B).sort().join(\"|\")!==C.sort().join(\"|\")||3!==B[\"sfx-action-acceleration\"]||B.direction!==(g?51:31)||g&&!0!==B.KNBuildCustomAttributesIncludeEndpoints)return;"
+    b"var Q=[],e=!0,t=function l(x){var s=x&&x.initialState,N=x&&x.layers||[];s&&!0!==s.masksToBounds||(e=!1),x&&!x.texturedRectangle&&x.animations&&x.animations.length&&(e=!1),x&&x.texturedRectangle&&Q.push(x),N.length||x&&x.texturedRectangle||(e=!1);for(var n=0;n<N.length;n++)l(N[n])};t(A.kpfLayer);if(!e||1!==Q.length)return;"
+    b"var i=Q[0],o=i.initialState,E=i.texturedRectangle,w=E&&E.repGenerationDictionary,a=E&&E.shapePath,I=o&&o.contentsRect,s=function(v,n){return Array.isArray(v)&&v.length===n&&v.every(function(x,j){return x===(j%(n===6?3:5)?0:1)})};"
+    b"if(!E||5!==E.textureType||!0!==E.isBackgroundTexture||!I||0!==I.x||0!==I.y||1!==I.width||1!==I.height||!s(o.affineTransform,6)||!s(o.sublayerTransform,16)||1!==o.scale||0!==o.rotation||!i.__obedLineCanvas||i.__obedLineCanvas.parentNode!==i.__obedLineWrapper)return;"
+    b"var n=i.animations;if(!Array.isArray(n)||1!==n.length)return;var G=n[0],r=G.animations;if(!isFinite(G.beginTime)||G.beginTime<0||G.beginTime>1e-6||G.duration!==A.duration||0!==G.timeOffset||0!==G.repeatCount||!1!==G.autoreverses||!Array.isArray(r)||2!==r.length)return;"
+    b"var D=r.filter(function(x){return\"opacity\"===x.property}),h=r.filter(function(x){return\"hidden\"===x.property});if(1!==D.length||1!==h.length)return;var l=function(x){return 0===x.beginTime&&0===x.timeOffset&&0===x.repeatCount&&!1===x.autoreverses&&!1===x.additive&&null==x.keyTimes&&null==x.path&&!(x.animations&&x.animations.length)&&x.duration===G.duration};"
+    b"if(!l(D[0])||0!==D[0].from.scalar||1!==D[0].to.scalar||\"EaseInEaseOut\"!==D[0].timingFunction||!l(h[0])||!1!==h[0].from.scalar||!1!==h[0].to.scalar)return;"
+    b"if(!w||!Array.isArray(w.strokePattern)||w.strokePattern.length||!(w.strokeWidth>0&&isFinite(w.strokeWidth))||!a||!Array.isArray(a.elements)||a.elements.length<2)return;var Y=a.elements,c=Y.length,M=Y[0];if(\"MoveToPoint\"!==M.type||!M.points||1!==M.points.length)return;"
+    b"var F=!1;\"MoveToPoint\"===Y[c-1].type&&c--;c>1&&\"CloseSubpath\"===Y[c-1].type&&(F=!0,c--);for(var d=1;d<c;d++){var U=Y[d],K=\"AddLine\"===U.type?1:\"AddCurve\"===U.type?3:0;if(!K||!U.points||U.points.length!==K)return}if(c<2)return;"
+    b"for(d=0;d<Y.length;d++)for(var k=Y[d].points||[],J=0;J<k.length;J++)if(!Array.isArray(k[J])||2!==k[J].length||!isFinite(k[J][0])||!isFinite(k[J][1]))return;"
+    b"var H=w.headLineEndIdentifier,m=w.tailLineEndIdentifier,p=null!=H||null!=m;if(g?H!==\"filled arrow\"||null!=m||!p:null!=H||null!=m||p||null!=B.KNBuildCustomAttributesIncludeEndpoints)return;if(g&&F||!g&&!F)return;"
+    b"var S=this.__obedLineGeometry(Y.slice(0,F?c+1:c)),R=0;for(d=1;d<S.points.length;d++)R+=S.points[d-1].x*S.points[d].y-S.points[d].x*S.points[d-1].y;if(!g&&!(R>0))return;A.__obedLineDraw={leaf:i,geo:S,stroke:w.strokeWidth,arrow:g}}catch(x){}}"
+    b"__obedLineEase(A){var B=A,g;for(var C=0;C<8;C++){var Q=1-B,e=3*Q*Q*B*.42+3*Q*B*B*.58+B*B*B-A,t=3*Q*Q*.42+6*Q*B*(.58-.42)+3*B*B*(1-.58);if(Math.abs(e)<1e-7||!t)break;B=Math.max(0,Math.min(1,B-e/t))}g=1-B;return 3*g*B*B+B*B*B}"
+    b"__obedLineRule(A){for(var B=0;B<document.styleSheets.length;B++)try{for(var g=document.styleSheets[B].cssRules,C=0;C<g.length;C++)if(g[C].name===A)return g[C]}catch(Q){}return null}"
+    b"__obedLineMask(A,B,g){var C=A.reveal,Q=C.getContext(\"2d\"),e=A.mask,t=e.getContext(\"2d\");Q.globalCompositeOperation=\"source-over\",Q.clearRect(0,0,C.width,C.height),Q.drawImage(A.body,0,0),t.clearRect(0,0,e.width,e.height);if(g)t.fillStyle=\"#fff\",t.fillRect(0,0,e.width,e.height);else if(B>0){t.save(),t.scale(A.k,A.k),t.strokeStyle=\"#fff\",t.lineWidth=A.band*2,t.lineCap=\"butt\",t.lineJoin=\"round\",t.setLineDash([B,A.geo.length*2+1]),t.stroke(A.geo.path),t.beginPath(),t.arc(A.geo.start.x,A.geo.start.y,A.band,0,2*Math.PI),t.fillStyle=\"#fff\",t.fill(),t.restore()}Q.globalCompositeOperation=\"destination-in\",Q.drawImage(e,0,0),Q.globalCompositeOperation=\"source-over\"}"
+    b"__obedLineFrame(A,B){if(A.done)return;var g=A.source;if(!g.isConnected)return void this.__obedLineDrawDrop(A);var C=A.animation.currentTime;if(null==C)return void(A.raf=requestAnimationFrame(A.frame));var Q=Math.max(0,Math.min(1,C/(1e3*A.effect.duration))),e=this.__obedLineEase(Q),t=e*A.geo.length,i=A.arrow?Math.max(t,A.d):t,o=A.arrow?i-A.d:i;this.__obedLineMask(A,o,o>=A.bodyEnd-1e-6);var E=A.overlay.getContext(\"2d\");E.clearRect(0,0,A.overlay.width,A.overlay.height),E.drawImage(A.reveal,-A.minX*A.k,-A.minY*A.k);if(A.arrow){var w=this.__obedLineAt(A.geo,i),a=w.a-A.endAngle;E.save(),E.setTransform(A.k,0,0,A.k,-A.minX*A.k,-A.minY*A.k),E.translate(w.x,w.y),E.rotate(a),E.translate(-A.geo.end.x,-A.geo.end.y),E.drawImage(A.head,0,0,A.width,A.height),E.restore()}A.overlay.__obedLineDraws=(A.overlay.__obedLineDraws||0)+1,A.raf=requestAnimationFrame(A.frame)}"
+    b"__obedLineDrawDrop(A){if(!A||A.done)return;A.done=!0,A.raf&&cancelAnimationFrame(A.raf);try{A.animation.removeEventListener(\"finish\",A.finish),A.animation.removeEventListener(\"cancel\",A.cancel),A.animation.cancel()}catch(B){}A.overlay&&A.overlay.remove(),A.source&&(A.source.style.visibility=A.visibility);var g=A.effect;g&&delete g.__obedLineDraw;var C=A.leaf;C&&(delete C.__obedLineCanvas,delete C.__obedLineWrapper);this.__obedLineDrawStates&&(this.__obedLineDrawStates=this.__obedLineDrawStates.filter(function(x){return x!==A}))}"
+    b"__obedLineDrawComplete(A){A&&A.__obedLineDraw&&A.__obedLineDraw.state&&this.__obedLineDrawDrop(A.__obedLineDraw.state)}"
+    b"__obedLineDrawDestroy(){for(var A=(this.__obedLineDrawStates||[]).slice(),B=0;B<A.length;B++)this.__obedLineDrawDrop(A[B])}"
+    b"__obedLineDrawApply(A,B,g,C){var Q=C&&C.__obedLineDraw;if(!Q||Q.leaf!==B)return;var e=null,t=null,i=null,o=null,d,U,K;try{var E=B.__obedLineCanvas,w=B.__obedLineWrapper;if(!E||!w||!E.isConnected||E.parentNode!==w||!Q.geo.path)throw 0;var a=E.width,I=E.height,s=B.bounds.width,n=B.bounds.height,G=a/s;if(!(a>0&&I>0&&s>0&&n>0&&isFinite(G)&&Math.abs(I/n-G)<1e-6))throw 0;"
+    b"if(a*I>2e6||Q.geo.segs.length>5e3)throw 0;var r=E.getContext(\"2d\"),D=r.getImageData(0,0,a,I),h=D.data,l=Q.stroke/2+1.5,Y=[],P=this.__obedLinePixels(Q.geo,h,a,I,G,l,Q.arrow),v0=E.style.visibility;if(!P)throw 0;var c=P.wings,M=P.band,F=P.arc;"
+    b"var H=null,m=null,p=null,S=null,R=0,u=Q.geo.end,f=Q.geo.segs[Q.geo.segs.length-1],Z=Math.hypot(f.b.x-f.a.x,f.b.y-f.a.y),Lx=(f.b.x-f.a.x)/Z,Ly=(f.b.y-f.a.y)/Z;"
+    b"if(Q.arrow){if(c.length<3)throw 0;for(d=0;d<c.length;d++){U=c[d][0],K=c[d][1],Y.push({x:U/G,y:K/G},{x:(U+1)/G,y:K/G},{x:(U+1)/G,y:(K+1)/G},{x:U/G,y:(K+1)/G})}H=this.__obedLineHull(Y);if(H.length<3)throw 0;var x0=!1,ent=0,ex=0,inside=this.__obedLineInside(H,Q.geo.start.x,Q.geo.start.y);for(d=0;d<Q.geo.segs.length;d++){var q=Q.geo.segs[d],inside2=this.__obedLineInside(H,q.b.x,q.b.y);if(!inside&&inside2){ent++;var lo=0,hi=1;for(U=0;U<18;U++){var md=(lo+hi)/2,xx=q.a.x+(q.b.x-q.a.x)*md,yy=q.a.y+(q.b.y-q.a.y)*md;this.__obedLineInside(H,xx,yy)?hi=md:lo=md}R=q.s+(q.e-q.s)*hi,x0=!0}else inside&&!inside2&&ex++;inside=inside2}if(1!==ent||ex||!x0)throw 0;var entry=R;R=Q.geo.length-entry;if(!(R>0&&R<Q.geo.length))throw 0;"
+    b"for(d=0;d<I;d++)for(U=0;U<a;U++){K=d*a+U;if(M[K]&&this.__obedLineInside(H,(U+.5)/G,(d+.5)/G)&&F[K]<entry-Q.stroke)throw 0}var nx=-Ly,ny=Lx,ap=H[0],r1=H[0],r2=H[0],apv=-1/0,r1v=1/0,r2v=-1/0;for(d=0;d<H.length;d++){var vx=H[d].x-u.x,vy=H[d].y-u.y,du=vx*Lx+vy*Ly,dn=vx*nx+vy*ny;du>apv&&(apv=du,ap=H[d]),dn<r1v&&(r1v=dn,r1=H[d]),dn>r2v&&(r2v=dn,r2=H[d])}if(!(apv>0&&r1v<0&&r2v>0&&Math.abs((ap.x-u.x)*nx+(ap.y-u.y)*ny)<=1))throw 0;"
+    b"const OBED_LINE_DRAW_HEAD_DIFF_MAX=48;var tri=[ap,r1,r2],diff=0;for(d=0;d<I;d++)for(U=0;U<a;U++){K=d*a+U;var px=(U+.5)/G,py=(d+.5)/G;if(!this.__obedLineInside(H,px,py))continue;var src=!!h[4*K+3],ref=this.__obedLineInside(tri,px,py)||this.__obedLineNear(Q.geo,px,py).d<=l;src!==ref&&diff++}if(diff>OBED_LINE_DRAW_HEAD_DIFF_MAX)throw 0;S={hull:H,d:R,endAngle:Math.atan2(Ly,Lx)}}"
+    b"var body=document.createElement(\"canvas\"),head=document.createElement(\"canvas\"),bd=body.getContext(\"2d\").createImageData(a,I),hd=head.getContext(\"2d\").createImageData(a,I);body.width=head.width=a,body.height=head.height=I;for(d=0;d<a*I;d++){var inHead=Q.arrow&&this.__obedLineInside(H,(d%a+.5)/G,(Math.floor(d/a)+.5)/G);for(U=0;U<4;U++)(inHead?hd.data:bd.data)[4*d+U]=h[4*d+U]}body.getContext(\"2d\").putImageData(bd,0,0),head.getContext(\"2d\").putImageData(hd,0,0);"
+    b"var rec=document.createElement(\"canvas\");rec.width=a,rec.height=I;var rc=rec.getContext(\"2d\");rc.drawImage(body,0,0),rc.drawImage(head,0,0);var rd=rc.getImageData(0,0,a,I).data;for(d=0;d<h.length;d++)if(rd[d]!==h[d])throw 0;"
+    b"var minX=0,minY=0,maxX=s,maxY=n;if(Q.arrow)for(d=0;d<Q.geo.segs.length;d++){q=Q.geo.segs[d];if(q.e<R)continue;var ang=Math.atan2(q.b.y-q.a.y,q.b.x-q.a.x)-S.endAngle,co=Math.cos(ang),si=Math.sin(ang);for(var ep=0;ep<2;ep++){var at=ep?q.b:q.a;for(U=0;U<H.length;U++){var hx=H[U].x-u.x,hy=H[U].y-u.y,tx=at.x+co*hx-si*hy,ty=at.y+si*hx+co*hy;minX=Math.min(minX,tx),minY=Math.min(minY,ty),maxX=Math.max(maxX,tx),maxY=Math.max(maxY,ty)}}}minX=Math.floor(minX*G)/G,minY=Math.floor(minY*G)/G,maxX=Math.ceil(maxX*G)/G,maxY=Math.ceil(maxY*G)/G;"
+    b"e=document.createElement(\"canvas\"),e.width=Math.round((maxX-minX)*G),e.height=Math.round((maxY-minY)*G),e.dataset.obedLineDraw=C.objectID||\"\",e.__obedLineHeadDiff=Q.arrow?diff:null;var es=e.style;es.position=\"absolute\",es.pointerEvents=\"none\",es.left=minX+\"px\",es.top=minY+\"px\",es.width=maxX-minX+\"px\",es.height=maxY-minY+\"px\";"
+    b"t=document.createElement(\"canvas\"),t.width=a,t.height=I,i=document.createElement(\"canvas\"),i.width=a,i.height=I;var state={effect:C,leaf:B,source:E,visibility:v0,overlay:e,body:body,head:head,reveal:t,mask:i,width:s,height:n,k:G,band:l,geo:Q.geo,arrow:Q.arrow,d:Q.arrow?S.d:0,endAngle:Q.arrow?S.endAngle:0,bodyEnd:Q.arrow?Q.geo.length-S.d:Q.geo.length,minX:minX,minY:minY,animation:null,frame:null,raf:0,done:!1};state.frame=this.__obedLineFrame.bind(this,state),this.__obedLineMask(state,state.bodyEnd,!0);var full=t.getContext(\"2d\").getImageData(0,0,a,I).data,bcheck=body.getContext(\"2d\").getImageData(0,0,a,I).data;for(d=0;d<full.length;d++)if(full[d]!==bcheck[d])throw 0;"
+    b"var name=\"layer\"+B.layerId+\"-opacity\",el=document.getElementById(name),an=el&&el.getAnimations().filter(function(x){return x.animationName===name});if(!an||1!==an.length)throw 0;state.animation=an[0];o=this.__obedLineRule(name);if(!o)throw 0;var old=[];for(d=0;d<o.cssRules.length;d++)old.push(o.cssRules[d].cssText);for(;o.cssRules.length;)o.deleteRule(o.cssRules[0].keyText);o.appendRule(\"0% { opacity: 1; }\"),o.appendRule(\"100% { opacity: 1; }\");if(2!==o.cssRules.length)throw 0;w.appendChild(e),E.style.visibility=\"hidden\";if(\"hidden\"!==E.style.visibility||e.parentNode!==w)throw 0;state.finish=this.__obedLineDrawDrop.bind(this,state),state.cancel=this.__obedLineDrawDrop.bind(this,state),state.animation.addEventListener(\"finish\",state.finish),state.animation.addEventListener(\"cancel\",state.cancel),(this.__obedLineDrawStates||(this.__obedLineDrawStates=[])).push(state),Q.state=state,state.raf=requestAnimationFrame(state.frame)}catch(err){if(o&&old)try{for(;o.cssRules.length;)o.deleteRule(o.cssRules[0].keyText);for(var z=0;z<old.length;z++)o.appendRule(old[z])}catch(no){}e&&e.remove(),Q&&Q.leaf&&Q.leaf.__obedLineCanvas&&(Q.leaf.__obedLineCanvas.style.visibility=v0||\"\"),C&&delete C.__obedLineDraw}}"
+)
 _MM_OPACITY_REPLACEMENTS = (
     (
         b"textureInfoFromEffect(A,B,g,C,Q){var e={};if(e.offset={pointX:g.pointX+A.bounds.offset.pointX,"
         b"pointY:g.pointY+A.bounds.offset.pointY},e.parentOpacity=C,A.textureId){",
         _MM_OPACITY_NODE
-        + b"textureInfoFromEffect(A,B,g,C,Q,X){var e={};if(e.offset={pointX:g.pointX+A.bounds.offset.pointX,"
+        + b"textureInfoFromEffect(A,B,g,C,Q,X,D){var e={};if(e.offset={pointX:g.pointX+A.bounds.offset.pointX,"
         b"pointY:g.pointY+A.bounds.offset.pointY},e.parentOpacity=C,"
-        b"e.obedOpacity=void 0===X?null:this.__obedChainOpacity(X,A),A.textureId){",
+        b"e.obedOpacity=void 0===X?null:this.__obedChainOpacity(X,A),"
+        b"e.obedParentOpacity=A.textureId&&null!=X&&this.__obedFade(A,D)?X:null,A.textureId){",
     ),
     (
         b"this.textureInfoFromEffect(A.layers[E],B,e.offset,e.parentOpacity,Q)",
-        b"this.textureInfoFromEffect(A.layers[E],B,e.offset,e.parentOpacity,Q,this.__obedChainOpacity(X,A))",
+        b"this.textureInfoFromEffect(A.layers[E],B,e.offset,e.parentOpacity,Q,this.__obedChainOpacity(X,A),D)",
     ),
     (
         b'd!==U&&(T=d+(U-d)*K),A.setGLFloat(T,"Opacity")',
-        b'd!==U&&(T=d+(U-d)*K),null!=e.obedOpacity&&(T=e.obedOpacity),A.setGLFloat(T,"Opacity")',
+        b'd!==U&&(T=d+(U-d)*K),null!=e.obedOpacity?T=e.obedOpacity:null!=e.obedParentOpacity&&'
+        b'1===e.parentOpacity&&(T*=e.obedParentOpacity),A.setGLFloat(T,"Opacity")',
     ),
     (
         b"var w=e.initialState.hidden?0:this.parentOpacity*e.initialState.opacity;",
@@ -216,6 +278,35 @@ _MM_OPACITY_REPLACEMENTS = (
         _CONTINUITY_TAKE_ANCHOR,
         b"jumpToScene_partFour(A,B){if(" + _CONTINUITY_TAKE_CALL
         + b"B&&PB.prototype.__obedFreezeTake(this,A),this.displayScene(A),",
+    ),
+    (
+        b"this.textureInfoFromEffect(A.kpfLayer,A.name,{pointX:0,pointY:0},A.baseLayer.initialState.opacity,B);",
+        b"this.textureInfoFromEffect(A.kpfLayer,A.name,{pointX:0,pointY:0},A.baseLayer.initialState.opacity,B,"
+        b"void 0,1e3*A.duration);",
+    ),
+    (
+        b"else M.appendChild(Z);L&&(L.isFirstRendered?",
+        b"else M.appendChild(Z),this.__obedLineDrawNode(g,Z,M);L&&(L.isFirstRendered?",
+    ),
+    (
+        b"return Q}hideElement(A){",
+        b"return Q}" + _LINE_DRAW_METHODS + b"hideElement(A){",
+    ),
+    (
+        b"}}animateContentsWillBegin(A){var B=A.canvasId,",
+        b"}this.__obedLineDrawApply(A,B,g,C)}animateContentsWillBegin(A){var B=A.canvasId,",
+    ),
+    (
+        b"animateEffect(A){var B=A.canvasId,g=A.nodeToSwapId;if(B){",
+        b"animateEffect(A){this.cssRenderer.__obedLineDrawAdmit(A);var B=A.canvasId,g=A.nodeToSwapId;if(B){",
+    ),
+    (
+        b"handleEffectDidComplete(A){for(var B=this.renderEffects(A.effects),",
+        b"handleEffectDidComplete(A){this.cssRenderer.__obedLineDrawComplete(A);for(var B=this.renderEffects(A.effects),",
+    ),
+    (
+        b"destroy(){this.textureId=null,this.nativeWidth=null,this.nativeHeight=null,",
+        b"destroy(){this.__obedLineDrawDestroy(),this.textureId=null,this.nativeWidth=null,this.nativeHeight=null,",
     ),
 )
 
@@ -307,6 +398,7 @@ def patch_player(player: bytes, *, mm_opacity: bool = True) -> bytes:
     opacity, hide each swapped DOM node in the same task that queues its first GL draw, crossfade each scaled leaf
     without a `contents` animation to its matched next-slide texture so the settled frame lands on the DOM, cross-fade
     Dissolves and swap cuts without showing both slides, and freeze admitted outgoing movies into the transition.
+    It also draws admitted Line Draw builds along their authored path with a moving filled arrowhead when present.
 
     A freeze is a snapshot of the decoded frame at identity tone (no pixel writes), drawn into the movie's content box
     with every edge snapped to the device grid (1/DPR px) and kept only if every backing pixel is opaque. It is taken

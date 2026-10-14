@@ -264,7 +264,7 @@ function walk(A, X){
 }
 walk(%s, undefined);
 console.log(JSON.stringify(out));
-""" % (methods.decode().replace("}__obedChainOpacity", "},__obedChainOpacity"), json.dumps(effect["baseLayer"]))
+""" % (methods.decode().replace("}__obed", "},__obed"), json.dumps(effect["baseLayer"]))
         return json.loads(subprocess.run([node, "-e", script], check=True, text=True, capture_output=True).stdout)
 
     good, bad = leaves(live_runtime._MM_OPACITY_NODE), leaves(probe.square_splice(live_runtime._MM_OPACITY_NODE))
@@ -711,7 +711,7 @@ def test_cli_requires_exactly_one_mode_and_known_arms():
 def test_cli_runs_the_forced_stand_down_arms_under_gl_auto_only(monkeypatch, tmp_path):
     ran: list[tuple[str, str]] = []
     monkeypatch.setattr(probe, "headless_chromes", lambda: 0)
-    monkeypatch.setattr(probe, "run_arm", lambda fixture, gl, arm: ran.append((gl, arm)) or {"gl": gl, "arm": arm, "error": "x"})
+    monkeypatch.setattr(probe, "run_arm", lambda fixture, gl, arm, out: ran.append((gl, arm)) or {"gl": gl, "arm": arm, "error": "x"})
     probe.main(["--out", str(tmp_path), "--arms", "on,fsd,fsdoff"])
     assert ran == [("off", "on"), ("auto", "on"), ("auto", "fsd"), ("auto", "fsdoff")]
 

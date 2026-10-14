@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { liveClient, type LiveClient, type LiveContinuity, type LiveDisplay, type LiveEngine, type LiveNotCarried, type LiveOperation, type LiveOutputSettings, type LivePreparedDeck, type LiveQualification, type LiveSlide, type LiveSnapshot } from "./api";
 import { engineBlocks, OutputEngine } from "./OutputEngine";
-import { LiveDeckInput } from "./LiveDeckInput";
+import { LiveDeckInput, type LiveDeckInputHandle } from "./LiveDeckInput";
 import { IconChevronLeft } from "../components/icons";
 import "./live.css";
 
@@ -40,12 +40,23 @@ function ContinuityStatus({ continuity }: { continuity?: LiveContinuity }) {
   </div>;
 }
 
-function DeckReady({ qualification }: { qualification: LiveQualification }) {
+function DeckReady({ qualification, onPrepareAgain, prepareDisabled }: {
+  qualification: LiveQualification;
+  onPrepareAgain: () => void;
+  prepareDisabled: boolean;
+}) {
   const { continuity, convertedMovies } = qualification;
   const count = continuity.notCarried.length;
   return <>
     <strong className="live-qualified">Deck ready</strong>
     <p className="note">{qualification.name} · {qualification.slides} slides. Output is checked when the session starts.</p>
+    {qualification.sourceState === "changed" && <div className="notice warning">
+      <p>This Keynote was edited after this deck was prepared. This deck still plays the old version. Save and close Keynote, then prepare again to pick up the edits.</p>
+      <div className="actions"><button className="btn secondary tone-alt" type="button" disabled={prepareDisabled} onClick={onPrepareAgain}>Prepare again</button></div>
+    </div>}
+    {qualification.sourceState === "missing" && <p className="note path-note">{qualification.sourcePath
+      ? `Original Keynote not found or can't be read at ${qualification.sourcePath} — can't check for edits.`
+      : "Original Keynote path unavailable — can't check for edits."}</p>}
     <p className="note">{continuity.mode === "qualified"
       ? `Movie continuity on${count ? ` · ${count} move${count === 1 ? "" : "s"} not carried` : "."}`
       : `Movie continuity off for this deck${continuity.reason ? `: ${continuity.reason}` : "."}`}</p>
@@ -77,6 +88,7 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
   const stopInFlight = useRef(false);
   const generation = useRef(0);
   const mounted = useRef(false);
+  const inputRef = useRef<LiveDeckInputHandle>(null);
   const [connectionError, setConnectionError] = useState("");
   const [message, setMessage] = useState("");
   const [awaitingObservation, setAwaitingObservation] = useState(false);
@@ -91,6 +103,7 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
   const [qualificationAttempt, setQualificationAttempt] = useState(0);
   const [preparing, setPreparing] = useState(false);
   const selectionTouched = useRef(false);
+  const decksRequest = useRef(0);
   const [outputSettings, setOutputSettings] = useState<LiveOutputSettings | null>(null);
   const [savingSettings, setSavingSettings] = useState(false);
   const [engine, setEngine] = useState<LiveEngine | null>(null);
@@ -140,14 +153,24 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
   }, [accept, client, pollMs]);
 
   useEffect(() => {
+    if (active) return;
+    const request = ++decksRequest.current;
+    client.decks().then((nextDecks) => {
+      if (request !== decksRequest.current) return;
+      setDecks(nextDecks);
+      if (!selectionTouched.current) setJobId((selected) => nextDecks.some((deck) => deck.previewJobId === selected) ? selected : nextDecks[0]?.previewJobId || "");
+    }).catch((error) => {
+      if (request === decksRequest.current) setMessage(error instanceof Error ? error.message : String(error));
+    });
+  }, [active, client, qualificationAttempt]);
+
+  useEffect(() => {
     let cancelled = false;
-    async function loadChoices() {
+    async function loadDisplays() {
       try {
-        const [nextDecks, nextDisplays] = await Promise.all([client.decks(), client.displays()]);
+        const nextDisplays = await client.displays();
         if (cancelled) return;
-        setDecks(nextDecks);
         setDisplays(nextDisplays);
-        if (!selectionTouched.current) setJobId((selected) => nextDecks.some((deck) => deck.previewJobId === selected) ? selected : nextDecks[0]?.previewJobId || "");
         setDisplayId((selected) => {
           if (nextDisplays.some((display) => display.id === selected)) return selected;
           return nextDisplays.find((display) => !display.primary)?.id || nextDisplays[0]?.id || "";
@@ -156,7 +179,7 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
         if (!cancelled) setMessage(error instanceof Error ? error.message : String(error));
       }
     }
-    void loadChoices();
+    void loadDisplays();
     return () => { cancelled = true; };
   }, [client]);
 
@@ -290,6 +313,13 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
     } finally { inFlight.current = false; if (mounted.current) setPending(false); }
   }
 
+  async function prepareAgain() {
+    const sourcePath = qualification?.sourcePath;
+    if (!sourcePath) return;
+    const previous = jobId;
+    if (!(await inputRef.current?.preparePath(sourcePath))) selectDeck(previous);
+  }
+
   const current = snapshot?.slides.find((slide) => slide.originalOrdinal === snapshot.originalSlide);
   const available = snapshot?.slides.filter((slide) => !slide.skipped) || [];
   const currentIndex = available.findIndex((slide) => slide.originalOrdinal === snapshot?.originalSlide);
@@ -315,19 +345,19 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
     {!active && <div className="live-setup">
       <section className="live-panel live-intake">
         <h2>1. Add & qualify</h2>
-        <LiveDeckInput disabled={pending || checking} onPrepared={selectDeck} onPreparing={setPreparing} />
+        <LiveDeckInput ref={inputRef} disabled={active || pending || checking} onPrepared={selectDeck} onPreparing={setPreparing} />
         {decks.length > 0 && <label className="live-prepared">Or use a prepared deck
           <select aria-label="Prepared deck" value={jobId} disabled={preparing || pending || checking} onChange={(event) => selectDeck(event.target.value)}>
             <option value="">Choose a prepared deck</option>
-            {decks.map((deck) => <option key={deck.previewJobId} value={deck.previewJobId}>{deck.name} · {deck.slides} slides</option>)}
+            {decks.map((deck) => <option key={deck.previewJobId} value={deck.previewJobId}>{deck.name} · {deck.slides} slides{deck.sourceState === "changed" ? " · Keynote changed — re-prepare" : ""}</option>)}
             {!!jobId && !decks.some((deck) => deck.previewJobId === jobId) && <option value={jobId}>{qualification?.name || "Selected Keynote"}</option>}
           </select>
         </label>}
         <div className="live-qualification" aria-live="polite">
-          {checking ? <p>Checking deck qualification…</p> : qualification && qualified && <DeckReady qualification={qualification} />}
+          {checking ? <p>Checking deck qualification…</p> : qualification && qualified && <DeckReady qualification={qualification} onPrepareAgain={() => void prepareAgain()} prepareDisabled={active || pending || checking || preparing} />}
           {!!jobId && !checking && !qualified && <button className="btn secondary" type="button" onClick={() => selectDeck(jobId)}>Check qualification again</button>}
         </div>
-        <p className="note">Playable prepared decks can be presented even when movie continuity is off; continuity turns on only for moves it has measured. Preparation works from a copy of your Keynote.</p>
+        <p className="note">Playable prepared decks can be presented even when movie continuity is off; continuity turns on only for moves it has measured. A prepared deck is a snapshot: editing the Keynote afterwards does not update it. Prepare it again after edits.</p>
       </section>
       <section className="live-panel live-start">
         <h2>2. Present</h2>

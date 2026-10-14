@@ -65,6 +65,12 @@ movie continuity is on (and which moves are not carried) or off for this deck,
 with the reason. Continuity never blocks start.
 The server checks the export again when starting.
 
+Prepared decks are saved snapshots; later Keynote edits do not update them. Alpha
+Keynote checks freshness when prepared decks load, are selected, and are qualified.
+A yellow warning and **Prepare again** button appear when the source changed; a
+neutral note appears when the original Keynote is missing or unreadable. These are
+warnings only, not continuous monitoring, and do not block starting the saved deck.
+
 Choose the output under **Output settings**, then **Start output session**.
 For UltraStudio, **Enable Keyer** sends fill/key for overlaying slides on live
 video. **Take output** turns into **Release output** once the engine is running.
@@ -338,9 +344,9 @@ never read or changed. The DeckLink path is still untested on the venue hardware
 **Needs:** OBS **32.2.2** at `/Applications/OBS.app` (exactly this version; any
 other version is refused) and Blackmagic **Desktop Video**.
 
-1. In **Alpha Keynote**, set **Output** to **Keyer (fill + key via
-   UltraStudio)**, choose the rate under **Match the standard the Pulse shows**
-   (25 or 30), and leave **Keyer on** ticked (untick for fill only). The page
+1. In **Alpha Keynote** → **Output settings**, set **Output** to **Keyer (fill
+   + key via UltraStudio)**, set **Output rate** to match the standard the Pulse
+   shows (25 or 30 fps), and leave **Enable Keyer** ticked (untick for fill only). The page
    renders at 2× the rate automatically. The display picker is hidden in this
    mode.
 2. **Take output** starts the engine; wait for **Output engine · Ready**.

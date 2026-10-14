@@ -144,7 +144,7 @@ def test_served_sha_is_the_sha_of_exactly_the_variants_replacements(monkeypatch,
     applied = set(dx.VARIANT_INDICES[variant])
     for index, (before, after) in enumerate(live_runtime._MM_OPACITY_REPLACEMENTS):
         assert (after in served) is (index in applied)
-        if index == len(live_runtime._MM_OPACITY_REPLACEMENTS) - 1:
+        if before == live_runtime._CONTINUITY_TAKE_ANCHOR:
             assert before not in served
             assert live_runtime._CONTINUITY_TAKE_REPLACEMENT in served
         else:
