@@ -12348,8 +12348,9 @@ def test_ground_truth_feed_facts_are_keyed_by_scene_and_destination_object(monke
     plan = type("Plan", (), {
         "canvas": {"width": 100, "height": 100}, "refusals": (),
         "feed_draws": {2: {"drawCount": 2}, 4: {"drawCount": 9}},
-        "artwork_above": {1: [{"objectId": "dst-a", "rect": {"x": 1}},
-                               {"objectId": "dst-b", "rect": {"x": 2}}]},
+        # Plan rows keep the export's case; verdict specs carry lowercased objectIds (Q7 follow-up).
+        "artwork_above": {1: [{"objectId": "DST-A", "rect": {"x": 1}},
+                               {"objectId": "DST-B", "rect": {"x": 2}}]},
     })()
     monkeypatch.setattr(probe, "verdict_specs", lambda _plan: [spec])
     monkeypatch.setattr(probe, "runtime_of", lambda _plan: runtime)
@@ -12358,7 +12359,7 @@ def test_ground_truth_feed_facts_are_keyed_by_scene_and_destination_object(monke
     monkeypatch.setattr(probe, "visible_expectations", lambda *_args: {})
     facts = probe.ground_truth_facts(plan)
     assert facts["verdicts"][0]["feedDraws"] == {"drawCount": 2}
-    assert facts["verdicts"][0]["artworkAbove"] == [{"objectId": "dst-a", "rect": {"x": 1}}]
+    assert facts["verdicts"][0]["artworkAbove"] == [{"objectId": "DST-A", "rect": {"x": 1}}]
 
 
 def test_feed_control_cli_registers_both_tampers_and_kill_switch() -> None:

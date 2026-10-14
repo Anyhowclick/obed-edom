@@ -47,9 +47,9 @@ INSTRUMENT_JS = r"""
   }
   function decoderForEntry(entry){
     var state=entryState[entry.id],v=state&&state.decoder;
-    if(v&&((v.__obedInstance===entry.objectId)||(v.__obedInstance===entry.dstObjectId)))return v;
-    v=decoderFor(entry.objectId);
-    if(!v&&entry.dstObjectId)v=decoderFor(entry.dstObjectId);
+    if(v&&(sameId(v.__obedInstance,entry.objectId)||sameId(v.__obedInstance,entry.dstObjectId)))return v;
+    v=decoderFor(entry.planObjectId);
+    if(!v&&entry.planDstObjectId)v=decoderFor(entry.planDstObjectId);
     if(v)armDecoder(v,entry);
     return v;
   }
@@ -98,11 +98,13 @@ INSTRUMENT_JS = r"""
     return s.display!=='none'&&s.visibility==='visible'&&r.width>0&&r.height>0&&(!el.checkVisibility||el.checkVisibility({opacityProperty:true,visibilityProperty:true}));
   }
   function entries(){return S.entries}
-  function runtimeFeed(entry){
+  // Facts carry lowercased objectIds; the plan, core seam and player use the export's spelling.
+  function sameId(a,b){return typeof a==='string'&&typeof b==='string'&&a.toLowerCase()===b.toLowerCase()}
+  function planRow(entry){
     var plan=window.__OBED_CONTINUITY__,rows=plan&&Array.isArray(plan.boundaries)?plan.boundaries:[];
-    var found=rows.filter(function(row){return row&&row.atScene===entry.atScene&&row.src&&row.src.objectId===entry.objectId&&
-      (!entry.dstObjectId||row.dst&&row.dst.objectId===entry.dstObjectId)});
-    return found.length===1&&found[0].feed&&typeof found[0].feed==='object'?JSON.parse(JSON.stringify(found[0].feed)):null;
+    var found=rows.filter(function(row){return row&&row.atScene===entry.atScene&&row.src&&sameId(row.src.objectId,entry.objectId)&&
+      (!entry.dstObjectId||row.dst&&sameId(row.dst.objectId,entry.dstObjectId))});
+    return found.length===1?found[0]:null;
   }
   function entriesAt(atScene){return entries().filter(function(e){return e.atScene===atScene})}
   function resolveAtScene(){
@@ -301,8 +303,8 @@ INSTRUMENT_JS = r"""
   function configure(config){
     if(S.config)return true;
     S.config=config||{};S.tamper=S.config.tamper?{kind:S.config.tamper,atScene:Number.isInteger(S.config.tamperScene)?S.config.tamperScene:null,applied:false}:null;
-    S.entries=(Array.isArray(S.config.entries)?S.config.entries:[]).map(function(source){var e=JSON.parse(JSON.stringify(source)),planned=JSON.stringify(e.feed),runtime=runtimeFeed(e);e.feed=runtime;if(S.tamper&&S.tamper.kind==='ordinal'&&(!Number.isInteger(S.tamper.atScene)||e.atScene===S.tamper.atScene)&&planned!==JSON.stringify(runtime))S.tamper.applied=true;return e});
-    entries().forEach(function(e){entryState[e.id]={ring:[]};var v=decoderFor(e.objectId);if(v)armDecoder(v,e)});
+    S.entries=(Array.isArray(S.config.entries)?S.config.entries:[]).map(function(source){var e=JSON.parse(JSON.stringify(source)),planned=JSON.stringify(e.feed),row=planRow(e),runtime=row&&row.feed&&typeof row.feed==='object'?JSON.parse(JSON.stringify(row.feed)):null;e.planObjectId=row?row.src.objectId:e.objectId;e.planDstObjectId=row&&row.dst?row.dst.objectId:e.dstObjectId;e.feed=runtime;if(S.tamper&&S.tamper.kind==='ordinal'&&(!Number.isInteger(S.tamper.atScene)||e.atScene===S.tamper.atScene)&&planned!==JSON.stringify(runtime))S.tamper.applied=true;return e});
+    entries().forEach(function(e){entryState[e.id]={ring:[]};var v=decoderFor(e.planObjectId);if(v)armDecoder(v,e)});
     S.live.forEach(function(pair){var G=pair[1],atScene=resolveAtScene(),active=entriesAt(atScene),context=S.contexts.filter(function(c){return c.serial===G.serial})[0];G.atScene=atScene;G.entries=active;if(context){context.atScene=atScene;context.entryIds=active.map(function(e){return e.id})}active.forEach(function(e){entryState[e.id].serial=G.serial;var v=decoderForEntry(e);if(v)decoderState.get(v).move={serial:G.serial,atScene:atScene,entryId:e.id,objectId:e.objectId}})});
     installKillSwitch();
     if(S.tamper&&S.tamper.kind==='after-feed')requestAnimationFrame(afterFeedTamper);
@@ -317,7 +319,7 @@ INSTRUMENT_JS = r"""
     if(!S.tamper||S.tamper.applied===true||S.tamper.failed===true)return;
     var target=S.live.filter(function(pair){var G=pair[1];return !G.closed&&(!Number.isInteger(S.tamper.atScene)||G.atScene===S.tamper.atScene)})[0],G=target&&target[1];
     if(!G){requestAnimationFrame(afterFeedTamper);return}
-    var found=entries().filter(function(e){return S.tamper&&(!Number.isInteger(S.tamper.atScene)||e.atScene===S.tamper.atScene)&&S.uploads.some(function(u){return u.serial===G.serial&&u.atScene===e.atScene&&[e.feed&&e.feed.from,e.feed&&e.feed.to].some(function(p){return p&&p.upload===u.textureOrdinal})})})[0];found=found&&found.objectId;
+    var found=entries().filter(function(e){return S.tamper&&(!Number.isInteger(S.tamper.atScene)||e.atScene===S.tamper.atScene)&&S.uploads.some(function(u){return u.serial===G.serial&&u.atScene===e.atScene&&[e.feed&&e.feed.from,e.feed&&e.feed.to].some(function(p){return p&&p.upload===u.textureOrdinal})})})[0];found=found&&found.planObjectId;
     if(found){
       var v=decoderFor(found),start=v&&v.__obedPresentedFrames;
       if(v&&typeof v.requestVideoFrameCallback==='function')v.requestVideoFrameCallback(function(){
@@ -332,7 +334,7 @@ INSTRUMENT_JS = r"""
     requestAnimationFrame(afterFeedTamper);
   }
   function entryForObject(objectId){
-    var found=entries().filter(function(e){return e.objectId===objectId}),current=scene(),next=found.filter(function(e){return e.atScene===current+1});
+    var found=entries().filter(function(e){return sameId(e.objectId,objectId)}),current=scene(),next=found.filter(function(e){return e.atScene===current+1});
     if(next.length===1)return next[0];var here=found.filter(function(e){return e.atScene===current});if(here.length===1)return here[0];return found.length===1?found[0]:null;
   }
   function armSeam(){
@@ -351,7 +353,7 @@ INSTRUMENT_JS = r"""
   function rectMatchesFact(node,fact){for(var n=node;n&&n.nodeType===1;n=n.parentElement){var r=n.getBoundingClientRect&&n.getBoundingClientRect();if(r&&Math.abs(r.left-fact.x)<=2&&Math.abs(r.top-fact.y)<=2&&Math.abs(r.right-(fact.x+fact.w))<=2&&Math.abs(r.bottom-(fact.y+fact.h))<=2)return true}return false}
   function settledArtwork(){
     entries().forEach(function(e){var state=entryState[e.id];if(!state||state.artworkDone||!state.serial||S.live.some(function(pair){return pair[1].serial===state.serial&&pair[1].frame})||!Array.isArray(e.artwork)||!e.artwork.length)return;var v=decoderForEntry(e);
-      if(!v||String(v.__obedInstance)!==String(e.dstObjectId)||!visible(v))return;var vr=v.getBoundingClientRect(),stage=document.getElementById('stage'),sr=stage&&stage.getBoundingClientRect(),info=window.__OBED_CONTINUITY_INFO__;
+      if(!v||!sameId(v.__obedInstance,e.dstObjectId)||!visible(v))return;var vr=v.getBoundingClientRect(),stage=document.getElementById('stage'),sr=stage&&stage.getBoundingClientRect(),info=window.__OBED_CONTINUITY_INFO__;
       if(!sr||!info||!info.authoredWidth||!info.authoredHeight)return;var serial=state.serial||null,rows=[];
       e.artwork.forEach(function(fact){var r=fact.rect;if(!r)return;var ar={x:sr.x+r.x*sr.width/info.authoredWidth,y:sr.y+r.y*sr.height/info.authoredHeight,w:r.w*sr.width/info.authoredWidth,h:r.h*sr.height/info.authoredHeight};
         var left=Math.max(vr.left,ar.x),right=Math.min(vr.right,ar.x+ar.w),top=Math.max(vr.top,ar.y),bottom=Math.min(vr.bottom,ar.y+ar.h);if(right<=left||bottom<=top)return;

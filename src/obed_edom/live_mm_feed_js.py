@@ -107,13 +107,17 @@ MM_FEED_JS = r"""
     catch (e) { return null; }
   }
 
+  function pendingScene(value){
+    if (value.playerState === 'IdleAtInitialState') return value.sceneId;
+    if (value.playerState === 'IdleAtFinalState') return value.nextSceneId;
+    return null;
+  }
+
   function idleAtSource(record){
-    if (currentScene() !== record.boundary.atScene - 1) return false;
+    var source = record.boundary.atScene - 1;
+    if (currentScene() !== source) return false;
     var value = snapshot();
-    if (!value) return false;
-    if (value.busy === true) return false;
-    if (typeof value.playerState !== 'string' || value.playerState.indexOf('IdleAt') !== 0) return false;
-    return value.sceneId == null || value.sceneId === record.boundary.atScene - 1;
+    return !!value && value.busy === false && pendingScene(value) === source;
   }
 
   function feedSeam(){
@@ -281,16 +285,27 @@ MM_FEED_JS = r"""
     return !!values && Object.prototype.hasOwnProperty.call(values, 'mixFactor');
   }
 
-  function knowsMixFactor(state){
-    var names = state.programNames.get(state.program);
-    return !!names && names.mixFactor === true;
+  function mixFactorValue(state){
+    var gl = state.gl;
+    if (typeof gl.getUniform !== 'function') return NaN;
+    state.internal += 1;
+    try {
+      var location = state.original.getUniformLocation.call(gl, state.program, 'mixFactor');
+      if (location === null) return 0;
+      var value = gl.getUniform(state.program, location);
+      return typeof value === 'number' ? value : NaN;
+    } catch (e) {
+      return NaN;
+    } finally {
+      state.internal -= 1;
+    }
   }
 
   function bindingAtDraw(state, record){
     var gl = state.gl;
     var binding = record.binding;
     if (state.unit !== gl.TEXTURE0 || !state.program) return null;
-    if (binding.to ? !hasMixFactor(state) : (hasMixFactor(state) || knowsMixFactor(state))) return null;
+    if (binding.to ? !hasMixFactor(state) : mixFactorValue(state) !== 0) return null;
     var fromTexture = state.bindings.get(gl.TEXTURE0);
     var fromMeta = fromTexture && state.textureInfo.get(fromTexture);
     if (!fromTexture || !sameSize(fromMeta, binding.from)) return null;
@@ -437,7 +452,6 @@ MM_FEED_JS = r"""
       textureOwners: new WeakMap(),
       program: gl.getParameter(gl.CURRENT_PROGRAM),
       locationNames: new Map(),
-      programNames: new Map(),
       programValues: new Map(),
       regularUploads: 0,
       draws: 0,
@@ -465,12 +479,7 @@ MM_FEED_JS = r"""
     };
     gl.getUniformLocation = function(program, name){
       var location = original.getUniformLocation.apply(gl, arguments);
-      if (!state.internal && location !== null){
-        state.locationNames.set(location, name);
-        var known = state.programNames.get(program) || {};
-        known[name] = true;
-        state.programNames.set(program, known);
-      }
+      if (!state.internal && location !== null) state.locationNames.set(location, name);
       return location;
     };
     function uniform(name, args){
@@ -583,7 +592,7 @@ def js_sha256() -> str:
     return hashlib.sha256(MM_FEED_JS.encode()).hexdigest()
 
 
-PINNED_MM_FEED_SHA256 = "f1fe0dd644359962c4c71cce46424ac3e24eb4ac42d1f9053a103d24463b81bf"
+PINNED_MM_FEED_SHA256 = "554053b70a070bef6245b79050cf0cb0308a63b69750aa34e03132ddde1bbba6"
 
 
 def mm_feed_script(*, continuous: bool, once: bool) -> str:

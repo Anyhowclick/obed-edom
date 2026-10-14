@@ -1844,6 +1844,7 @@ PRESERVE_CORE_JS = r"""
    * overlay), so an inserted stub is only taken out, never swapped for `real`.
    */
   function bindFacade(stub, real, rehomed) {
+    const facade = real.__obedFacade = {};
     stub.__obedFacadeFor = real;
     stub.dataset.obedFacade = '1';
     stub.play = function(){ return real.play(); };
@@ -1878,11 +1879,22 @@ PRESERVE_CORE_JS = r"""
     const mo = new MutationObserver(function(){
       if (stub.parentNode && real !== stub && real.__obedGen === preserveGeneration && real.__obedRemountEpoch !== -1) {
         if (rehomed) {
+          // The player appends the destination stub into the movie's own authored layer (live D7:
+          // beside one of two same-rect canvases); a re-homed decoder otherwise still carries its
+          // source slide's layer, so the canvas tie-break cannot pick the destination slot.
+          const layer = nearestLayer(stub.parentNode);
           try {
             beginMove(stub);
             stub.parentNode.removeChild(stub);
           } catch (e) {}
           mo.disconnect();
+          if (layer && layer !== real.__obedLayer && real.__obedFacade === facade) {
+            const canvas = findMovieCanvas(real.__obedRect, {__obedElId: real.__obedElId, __obedLayer: layer});
+            if (canvas && nearestLayer(canvas.parentElement) === layer) {
+              real.__obedLayer = layer;
+              scheduleRemount(real, 'pin-rehome');
+            }
+          }
           return;
         }
         if (GL && zone === 'released' && real === carriedMemo) {

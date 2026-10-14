@@ -31,7 +31,7 @@ def test_continuity_version_is_pinned_int():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "6c687c470dc58c6f68838a577913302bf097c5daf69dc5c8c1fd1e8be0f838a7"
+PINNED_CORE_SHA256 = "00b9a823bd84d8b5d0073b80111e4fc33444bb3db65daa3f94bc2ee34a66a32e"
 
 
 def test_js_sha256_hashes_the_core_bytes_and_matches_the_pinned_literal():
@@ -3966,8 +3966,15 @@ def test_feed_seam_is_absent_when_no_runtime_entry_has_feed():
     assert result == {"feed": None}
 
 
-@pytest.mark.parametrize("second_action", ["pin", "bridge"])
-def test_overlay_bridge_hands_an_under_artwork_carry_to_the_hidden_ride(second_action):
+@pytest.mark.parametrize(("second_action", "tied"), [
+    ("pin", None), ("bridge", None), ("pin", "stub-layer"), ("pin", "unrelated-layer"), ("pin", "stale-facade"),
+], ids=["pin", "bridge", "pin-tied-canvases", "pin-tied-stub-elsewhere", "pin-tied-stale-facade"])
+def test_overlay_bridge_hands_an_under_artwork_carry_to_the_hidden_ride(second_action, tied):
+    """`tied`, measured headless on D7 (Q7 follow-up): the destination movie exports two same-rect canvases in sibling
+    layers and the player appends its stub into the second; the re-homed decoder still carries its source layer, so
+    only the stub's layer (stamped when the stub arrives) picks the slot. Without it every remount fell back to the
+    root, above all later-authored labels. The stamp is refused (review r5) when the stub lands in a layer holding no
+    canvas for the destination rect, or when a newer facade has replaced the one whose stub arrived."""
     first = {
         "atScene": 2, "action": "bridge", "movieKey": "movie1", "durationSeconds": 1.5, "loop": False,
         "src": _inst("A1", _FOOTPRINT), "dst": _inst("A2", _RECT_S3),
@@ -4001,20 +4008,34 @@ const layer = {
   removeChild(node) { node.parentNode = null; node.__inStage = false; },
 };
 const R = window.__OBED_CONTINUITY__.boundaries[1].dst.rect;
-const poster = {id: 'poster', parentNode: layer, parentElement: layer, nextSibling: null,
-  getBoundingClientRect: () => ({left: R.x, top: R.y, width: R.w, height: R.h})};
-canvases.push(poster);
+const rectOf = () => ({left: R.x, top: R.y, width: R.w, height: R.h});
+const poster = {id: 'poster', parentNode: layer, parentElement: layer, nextSibling: null, getBoundingClientRect: rectOf};
+const TIED = __TIED__;
+const overlayLayer = TIED ? Object.assign(Object.create(layer), {id: 'layer97'}) : layer;
+const stubLayer = TIED === 'unrelated-layer' ? Object.assign(Object.create(layer), {id: 'layer98'}) : overlayLayer;
+if (TIED) {
+  layer.id = 'layer96';
+  canvases.push(poster, {id: 'overlay', parentNode: overlayLayer, parentElement: overlayLayer, nextSibling: null,
+    getBoundingClientRect: rectOf});
+} else {
+  canvases.push(poster);
+}
 const c = fresh('A3');
-c.parentNode = layer;
+c.parentNode = stubLayer;
+if (TIED === 'stale-facade') a.__obedFacade = {};
 moCallbacks.slice().forEach((cb) => cb([{addedNodes: [c], removedNodes: []}]));
-console.log(JSON.stringify({during, bridged: !!a.__obedBridged34, landed: a.parentNode === layer,
+pump();
+console.log(JSON.stringify({during, bridged: !!a.__obedBridged34, landed: a.parentNode === overlayLayer,
+  ambiguous: notesOf('remount-canvas-ambiguous').length, stamped: a.__obedLayer ? a.__obedLayer.id || null : null,
   paused: a.paused, stubSrc: srcStore.get(c) || null,
   pinHolds: notesOf('pin-hold-start'), bridgeHolds: notesOf('bridge-motion-start'),
   onceReason: notesOf('poster-hold')[0].reason}));
-""")
+""".replace("__TIED__", json.dumps(tied)))
     assert result["during"] == {"bridged": True, "hidden": "0", "paused": True}
     assert not result["bridged"]
-    assert result["landed"] and not result["paused"]
+    assert result["landed"] is (tied in (None, "stub-layer")) and not result["paused"]
+    if tied:
+        assert result["stamped"] == ("layer97" if tied == "stub-layer" else None)
     assert result["stubSrc"] is None
     assert result["onceReason"] == "module-absent"
     if second_action == "pin":

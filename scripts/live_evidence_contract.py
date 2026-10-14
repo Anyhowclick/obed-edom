@@ -1120,7 +1120,7 @@ def _handed_back(value: Any, path: str) -> Iterator[str]:
 
 def managed_session(session: Any, path: str) -> Iterator[str]:
     """One `managed_obs_qualify` session: its page reads (`Session.read`), phase records, armed reads, hand-back and
-    video reads, context-loss result and precheck samples."""
+    video reads, context-loss result, precheck samples and feed-arm sampler rows."""
     if not isinstance(session, dict):
         yield f"managed:session object at {path}"
         return
@@ -1159,6 +1159,8 @@ def managed_session(session: Any, path: str) -> Iterator[str]:
         yield f"managed.loseContext at {path}"
     if "samples" in session:
         yield from _managed_list(session["samples"], f"{path}.samples", "managed.sample", MANAGED_SAMPLE_FIELDS)
+    if "sampleRows" in session:
+        yield from sample_rows(session["sampleRows"], schema=2, path=f"{path}.sampleRows")
 
 
 def managed_run(run: Any) -> Iterator[str]:

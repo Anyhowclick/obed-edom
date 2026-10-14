@@ -1638,7 +1638,7 @@ def ground_truth_facts(
         if isinstance(artwork_above, dict) and isinstance(artwork_above.get(spec["toPlayer"]), (list, tuple)):
             matched = [
                 row for row in artwork_above[spec["toPlayer"]]
-                if isinstance(row, dict) and row.get("objectId") == spec.get("dstObjectId")
+                if isinstance(row, dict) and str(row.get("objectId") or "").lower() == spec.get("dstObjectId")
             ]
             if matched:
                 spec["artworkAbove"] = matched

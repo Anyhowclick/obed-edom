@@ -38,6 +38,12 @@ _CLEARED = copy.deepcopy(LEGAL["refusal-read-pool-and-fromDom-hold-one-decoder"]
 _CLEARED.update(name="refusal-read-fromDom-cleared-src-keeps-its-stamp", source="core:185-190")
 _CLEARED["record"]["poolSnapshot"][-1]["key"] = ""
 LEGAL[_CLEARED["name"]] = _CLEARED
+#: Q7 attempt 1: the managed feed arm's sampler rows sat under `samples` and failed the G2 precheck table; they are
+#: `sampleRows` now, held to the schema-2 sampler-row contract (managed_obs_qualify.feed_script).
+_FEED_ROWS = copy.deepcopy(LEGAL["managed-g2-session"])
+_FEED_ROWS.update(name="managed-feed-session-sample-rows", source="managed_obs_qualify.feed_script")
+_FEED_ROWS["record"]["sessions"][0]["sampleRows"] = copy.deepcopy(LEGAL["rows-S2-raw-rare-shapes"]["record"])
+LEGAL[_FEED_ROWS["name"]] = _FEED_ROWS
 
 
 def _load_probe():
@@ -204,6 +210,8 @@ VIOLATIONS = [
     ("managed-raf", MANAGED, _set(lambda r: r["sessions"][0]["phases"][0], raf=None), "managed.raf"),
     ("managed-handed-back-facade", MANAGED, _set(lambda r: r["sessions"][0], handedBack=[
         {"elId": 3, "loop": True, "isConnected": True, "facade": None, "paused": False, "t": 1.0}]), "managed.handedBack.facade"),
+    ("managed-feed-sample-rows", _FEED_ROWS["name"], _set(lambda r: r["sessions"][0]["sampleRows"][1], busy=None),
+     "row.busy"),
     ("null-control-keys", NC, _drop(lambda r: r, "error"), "nullControl:keys"),
     ("null-control-poll-times-not-increasing", NC, _set(lambda r: r, pollTimes=[2.0, 1.0]), "nullControl.pollTimes"),
     ("null-control-motion-after-trigger", NC, _set(lambda r: r, triggerFramesAfterAdvance=1, motionStartedFrame=2),

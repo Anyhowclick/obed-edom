@@ -659,7 +659,7 @@ def feed_script(continuous_expected: bool) -> Callable[[Session], None]:
         s.out["feedVerdicts"] = score_verdicts(
             samples, {}, facts, True, s.host.output.get("continuity"), schema=2, feed_evidence=sink,
         )
-        s.out["samples"] = samples
+        s.out["sampleRows"] = samples
     return script
 
 

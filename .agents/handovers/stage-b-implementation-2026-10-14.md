@@ -13,34 +13,45 @@ Read with the 2026-10-13 handover in this folder (history, Phase 0 detail) and t
 | Phase 0 | Done: no first-feed stall (30 real-clock runs); paused-element upload = presented frame (no VideoFrame fallback); CEF 127 accepts direct video uploads (46/48 fed). Evidence main `output/evidence/stage-b-2026-10-13/{phase0,cef-step}/`. |
 | Provisional | `ALPHA_POSTER_FLOOR` 2.5 (dSep), hold margins, `MAX_INTER_FEED_GAP_MS` 50 — re-bank from the first headless captures with the product module + instrument, before any gate verdict counts. |
 
-## Q7 attempt 1 FAILED (2026-10-14 ~17:46) — resume here
-Owner watched managed OBS (projector, Q6 qualification flags) on D7: "labels aren't always on top". Root finding: **the
-feed module never engaged with the real player** — in both `feed` and `feed-off` sessions every entry stayed at the
-default `state: armed` with `framesFed 0`, the instrument saw 0 feed uploads, 0 claims, 0 departures, 3 normal `0-canvas`
-move contexts (8 draws/frame). So no continuous feed, no exact hold: the core fell back to its plain poster hold and the
-host still reported the planned `exact` (no runtime outcome ever arrived). Unit + joint tests all pass → the fakes again
-diverge from the real player. Evidence: main `output/evidence/stage-b-2026-10-13/q7-attempt1/` (OBS run JSON + summary,
-headless Chrome probe artifact).
-**Leads (unverified):** `public.state: "armed"` is only `reset()`'s default — `record.armed` is set solely by
-`idleAtSource()` (`live_mm_feed_js.py` ~110), which needs hash scene == `atScene-1`, `snapshot().busy !== true`,
-`playerState` starting `IdleAt`, and `sceneId == null || sceneId === atScene-1`. Real snapshot (`live_runtime.py` ~324):
-`busy = !ready`, `ready` needs `showMode 0` and no `automaticPending` (D7 destinations open with an automatic
-movie-start; check the SOURCE slide state at idle), and `sceneId = controller.currentSceneIndex` — check whether that is the
-same index space as the hash/`atScene` (possible off-by-one). The Node test fakes `{playerState:'IdleAtFinalState',
-busy:false, sceneId:snapshotScene}` (`tests/test_live_mm_feed_js.py` ~162-170), never the real controller. Debug live in
-headless Chrome: log `idleAtSource` inputs per rAF on D7 S1/S2 before deciding the fix; then a test that drives the REAL
-`__obedLive.snapshot` (patched player) rather than a fake.
-**Also found:** Chrome auto-updated to **155.0.8059.79**; `_mm_feed_renderer` qualifies only `QUALIFIED_SNAP_MAJORS =
-(154,)` → every Chrome output reports `mmFeed unavailable: renderer upload path not qualified` (baked holds). Re-measure on
-155 after the fix, then the owner decides whether to qualify 155 (same tuple gates snap placement). For debugging use a
-scratch-only monkeypatch, never edit the tuple without the owner.
-**Harness:** the managed `feed` arm's records were INVALID (evidence contract: `managed.sample.{state,standDowns,
-videoEnded,uploads,carriedT}` missing at `sessions[feed].samples[0]`) — first live use of that arm; fix with the module.
+## Q7 fix round (2026-10-14 evening) — resume here
+Q7 attempt 1 (~17:46, managed OBS, D7: "labels aren't always on top") had three stacked real-player bugs, all hidden by
+fakes; each was reproduced headless on the real D7 player, fixed, and re-measured. Headless D7 feed-on with the final
+code (core `00b9a823`, feed `554053b7`): 6 claims, 0 stand-downs, every leaf fed 87–89 frames (worst gap ≤ 47 ms) on all
+three boundaries; `noRiderAboveCanvas`, `labelsOverFeed` and `artworkAbove` (15/15 settled reads) green.
+1. **Feed never armed.** At the D7 source idle the hash already reads `#atScene-1` while the player sits at
+   `IdleAtFinalState` with `sceneId` one behind (automatic movie start on the slide). `idleAtSource` now matches the
+   player's PENDING scene (`sceneId` at IdleAtInitialState, `nextSceneId` at IdleAtFinalState). The Node harness now runs
+   the REAL `live_runtime._INSTALL` snapshot over a controller in the measured shape (old module → 19/19 tests fail).
+2. **Single-texture move (D7 boundary 3) stood down `binding-mismatch`.** The player draws it with its mix program,
+   `mixFactor` looked up but never set (GL default 0). Owner decision: a from-only binding feeds when the LIVE uniform
+   (`getUniform`) is 0; any other value still stands down.
+3. **Labels under the movie after settle.** The core's re-home found two same-rect canvases per movie slot (sibling layers
+   of one `layerNN-contents`) and the decoder's recorded layer is its source slide's, so every remount fell back to
+   `#body` above all labels (HEAD core: final parent `#body`). Fix (review r4): `bindFacade`'s rehomed observer stamps
+   the destination stub's layer when the player appends it (measured: the stub lands beside one of the two canvases) and
+   reschedules the remount; the existing exact layer tie-break then resolves. `findMovieCanvas` is unchanged from HEAD
+   (an interim owner-approved "same `-contents` → last canvas" rule was dropped after r3/r4 showed groups defeat it).
+   The first remount still ties 2 ms before the stub arrives (root for ≤ 1 frame), then lands.
+Also: instrument/probe objectId case (facts lowercased, plan/player uppercase → every claim unattributed, artwork facts
+never attached) fixed case-insensitively; the managed `feed` arm's rows moved to `sampleRows` (sampler-row contract).
+Reviews: Sol (gpt-5.6-sol high) r1–r6, r6 no blocker/major (implementer Opus 5.5). Full suite (3.12) on the final code:
+11007 passed + the known load-only `test_the_settle_wait_never_sleeps_past_its_deadline` (passes alone); the 3.10 floor and
+dashboard suites are not rerun yet (do before the PR). Raw runs: session scratchpad only (not evidence).
+**Open (next):**
+- **Rebase (owner decision 2026-10-14):** the deck-refusal-rules branch (`claude/deck-refusal-rules-alpha-1686c7`) merges
+  FIRST; Stage B rebases `_magic_move_movies` onto it: deck-wide "more than one movie changes geometry" raise → R12
+  (per-boundary, before `_held_after`; exclude `under_artwork` bridges from its count as our raise did); `_pair_instances`
+  pairs from per-slot end points; `_gl_replay_attempt` continuing_count = Σmin(out, in); `write_one_movie_export` emits
+  transition/draw evidence. That session sends the PR link.
+- `feedLive` unreadable: `counterFromGl` decodes null at both orientations on the real player (instrument coordinate bug).
+- Chrome **155.0.8059.79** still unqualified (`QUALIFIED_SNAP_MAJORS = (154,)`): headless runs used a scratch-only wrapper;
+  qualifying 155 stays the owner's call.
 **Q7 setup that stays valid:** worktree `.claude/worktrees/stage-b-q7` (detached `c104d5a3`; rebuild it at the fix
 commit), edited Alpha prepared there (`bf1c093f…-p3-r1`, plan `c9e54655…`, ordinals 10→p8, 11→p9), fixtures in
 `~/Desktop/Convert wall to 16x9 CGs/Continuity/q7-fixtures/{D7,D7s,Alpha}`, runbook `stage-b-q7-runbook.md`. Owner
 decisions: Q7 first then Q2–Q6; managed OBS uses the Q6 qualification flags; measure holdFrame exactness before choosing a
-tolerance. Machine: the CEF/OBS placement session ran its pass B after the abort; ask it before heavy work.
+tolerance. Attempt-1 evidence: main `output/evidence/stage-b-2026-10-13/q7-attempt1/`. Machine: coordinate with the
+CEF/OBS placement session ("need window"/"done").
 
 ## Open for the owner
 1. `holdFrame` exactness: ~1/20 paused uploads land one frame newer than the instrument's last-rVFC target (Phase 0). Measure in the real move first, then decide tolerance (instrument scope: gate cost).

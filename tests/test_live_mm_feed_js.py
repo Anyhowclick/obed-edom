@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from obed_edom import live_mm_feed_js
+from obed_edom import live_mm_feed_js, live_runtime
 
 REPO = Path(__file__).resolve().parent.parent
 if str(REPO / "scripts") not in sys.path:
@@ -22,7 +22,7 @@ import mm_feed_variants  # noqa: E402
 import mm_feed_instrument  # noqa: E402
 
 NODE = shutil.which("node")
-PINNED_MM_FEED_SHA256 = "f1fe0dd644359962c4c71cce46424ac3e24eb4ac42d1f9053a103d24463b81bf"
+PINNED_MM_FEED_SHA256 = "554053b70a070bef6245b79050cf0cb0308a63b69750aa34e03132ddde1bbba6"
 
 
 def _entry(
@@ -117,7 +117,10 @@ function makeGl(name){
     },
     useProgram(program){ this.program=program; },
     getUniformLocation(program,uniform){ return {program,uniform}; },
-    uniform1f(){}, uniform1fv(){}, uniformMatrix4fv(){},
+    uniformValues:new Map(),
+    storeUniform(loc,v){ const vals=this.uniformValues.get(loc.program)||{}; vals[loc.uniform]=v; this.uniformValues.set(loc.program,vals); },
+    uniform1f(loc,v){ this.storeUniform(loc,v); }, uniform1fv(loc,v){ this.storeUniform(loc,v[0]); }, uniformMatrix4fv(){},
+    getUniform(program,loc){ const v=(this.uniformValues.get(program)||{})[loc.uniform]; return v===undefined?0:v; },
     clear(){ this.calls.push(['clear']); },
     drawArrays(){ this.calls.push(['drawArrays']); },
     drawElements(){ this.calls.push(['drawElements']); },
@@ -159,7 +162,21 @@ global.document = {
 const decoders = {A:new Video('A'), B:new Video('B')};
 const calls = {decoder:[],claim:[],stand:[]};
 let claimResult = true;
-let snapshotScene = 1, snapshotBusy = false, snapshotState = 'IdleAtFinalState';
+// The real `__obedLive` install (live_runtime._INSTALL) over a controller in the shape measured on D7 in OBS
+// (Q7 attempt 1): idle at the source, the hash already reads the transition scene while the player sits at the
+// FINAL state of the scene before it, so `sceneId` is one behind and `nextSceneId` names the transition.
+const controller = {
+  state:'IdleAtFinalState', currentSceneIndex:0, nextSceneIndex:1, queuedUserAction:null, slideNumberController:null,
+  script:{showMode:0, events:[{},{},{},{},{}], slideIndexFromSceneIndexLookup:[0,0,1,1,2]},
+  changeState(){}, setCurrentSceneIndexTo(){}
+};
+function idleAt(scene){
+  location.hash='#'+scene; controller.state='IdleAtFinalState';
+  controller.currentSceneIndex=scene-1; controller.nextSceneIndex=scene;
+}
+const liveInstall = LIVE_INSTALL.replace(/\(UC\)$/, '(controller)');
+assert.notStrictEqual(liveInstall, LIVE_INSTALL);
+eval(liveInstall);
 global.__OBED_P2_PRESERVE__ = {feed:{
   version:1,
   decoderFor(id){ calls.decoder.push(id); return decoders[id]||null; },
@@ -167,7 +184,6 @@ global.__OBED_P2_PRESERVE__ = {feed:{
   onStandDown(id,reason){ calls.stand.push({id,reason,late:false}); return true; },
   note(){}
 }};
-global.__obedLive = {snapshot(){ return {playerState:snapshotState,busy:snapshotBusy,sceneId:snapshotScene}; }};
 global.__OBED_CONTINUITY__ = PLAN;
 
 function texture(name){ return {name}; }
@@ -183,6 +199,8 @@ function program(gl,mix){
   const value={mix}; gl.useProgram(value);
   if(mix==='present'){ const loc=gl.getUniformLocation(value,'mixFactor'); gl.uniform1f(loc,0.5); }
   if(mix==='known'){ gl.getUniformLocation(value,'mixFactor'); }
+  if(mix==='zero'){ const loc=gl.getUniformLocation(value,'mixFactor'); gl.uniform1f(loc,0); }
+  if(mix==='zero-fv'){ const loc=gl.getUniformLocation(value,'mixFactor'); gl.uniform1fv(loc,new Float32Array([0])); }
   return value;
 }
 function idleTick(){ const fn=raf.shift(); assert(fn); fn(); }
@@ -205,7 +223,9 @@ def _run_node(
     match = re.fullmatch(r'<script id="obed-mm-feed">(.*)</script>\n', source, re.DOTALL)
     assert match
     code = (
-        "const PLAN="
+        "const LIVE_INSTALL="
+        + json.dumps(live_runtime._INSTALL.decode())
+        + ";\nconst PLAN="
         + json.dumps(plan, separators=(",", ":"))
         + ";\nconst MODULE="
         + json.dumps(match.group(1))
@@ -306,8 +326,8 @@ api.extra='writable';
 assert.strictEqual(api.extra,'writable');
 assert(calls.decoder.filter(x=>x==='A').length>=3);
 assert.deepStrictEqual(calls.stand,[]);
-location.hash='#2'; snapshotScene=2; idleTick();
-location.hash='#1'; snapshotScene=1; idleTick();
+location.hash='#2'; idleTick();
+idleAt(1); idleTick();
 assert.deepStrictEqual(calls.claim.map(x=>x.id),['A','B','A','B']);
 assert.strictEqual(api.entries.A.framesFed,0);
 const nextGl=makeGl('next'),nextCanvas=new Canvas('1-canvas',nextGl); nextCanvas.getContext('webgl');
@@ -326,8 +346,9 @@ def test_real_instrument_observes_module_uploads_after_zero_draw_frame() -> None
     probe_entry = {
         "id": "entry-A",
         "atScene": 2,
-        "objectId": "A",
-        "dstObjectId": "A2",
+        # Probe facts carry lowercased objectIds; the plan, seam and decoders keep the export's case (Q7 follow-up).
+        "objectId": "a",
+        "dstObjectId": "a2",
         "feed": entry["feed"],
         "draws": {"drawCount": 1, "draws": []},
     }
@@ -356,6 +377,7 @@ assert.deepStrictEqual(report.uploads.map(x=>x.textureOrdinal),[1,1]);
 assert.strictEqual(report.claims.length,1);
 assert.strictEqual(report.claims[0].claimed,true);
 assert.strictEqual(report.claims[0].serial,1);
+assert.strictEqual(report.claims[0].entryId,'entry-A');
 """,
         before_module=before_module,
         constants={"INSTRUMENT": mm_feed_instrument.INSTRUMENT_JS},
@@ -372,12 +394,44 @@ const cold=makeGl('cold'),coldCanvas=new Canvas('0-canvas',cold),coldDraw=cold.d
 coldCanvas.getContext('webgl');
 assert.strictEqual(cold.drawArrays,coldDraw);
 assert.deepStrictEqual(calls.claim,[]);
-location.hash='#2'; snapshotScene=2; idleTick();
+idleAt(2); idleTick();
 assert.deepStrictEqual(calls.claim.map(x=>x.id),['A']);
 const hot=makeGl('hot'),hotCanvas=new Canvas('1-canvas',hot),hotDraw=hot.drawArrays;
 hotCanvas.getContext('webgl');
 assert.notStrictEqual(hot.drawArrays,hotDraw);
 """,
+    )
+
+
+@pytest.mark.parametrize(
+    "not_idle",
+    [
+        pytest.param("controller.currentSceneIndex=1; controller.nextSceneIndex=2;", id="final-of-source-scene"),
+        pytest.param("controller.script.events[1].automaticPlay=true;", id="automatic-pending"),
+        pytest.param("controller.queuedUserAction={};", id="queued-action"),
+        pytest.param("controller.state='Playing';", id="playing"),
+        pytest.param("controller.script.showMode=1;", id="not-manual"),
+        pytest.param("controller.state='IdleAtInitialState'; controller.currentSceneIndex=0;", id="initial-of-previous"),
+    ],
+)
+def test_arms_only_when_the_real_snapshot_is_idle_with_the_source_pending(not_idle: str) -> None:
+    """Drives the REAL `__obedLive.snapshot` (live_runtime._INSTALL), not a fake. Q7 attempt 1: on D7 the source idle
+    reads hash `#atScene-1` at IdleAtFinalState with `sceneId` one behind; the old `sceneId === atScene-1` check never
+    armed. Each case is a real-snapshot state that must not arm; restoring the measured source idle then arms. Also
+    pins the IdleAtInitialState branch (a goTo lands there with the source scene current)."""
+    _run_node(
+        _plan(_entry("A")),
+        r"""
+assert.deepStrictEqual(calls.claim,[]);
+idleTick();
+assert.deepStrictEqual(calls.claim,[]);
+controller.state='IdleAtInitialState'; controller.currentSceneIndex=1; controller.nextSceneIndex=-1;
+controller.script.events[1]={}; controller.queuedUserAction=null; controller.script.showMode=0;
+idleTick();
+assert.deepStrictEqual(calls.claim.map(x=>[x.id,x.scene,x.snapshot.busy,x.snapshot.playerState]),
+  [['A','#1',false,'IdleAtInitialState']]);
+""",
+        before_module=not_idle,
     )
 
 
@@ -390,7 +444,7 @@ def test_context_accepts_hash_already_advanced_for_continuous_and_once(
         _plan(_entry("A")),
         f"""
 {request_once}
-location.hash='#2'; snapshotScene=2;
+location.hash='#2';
 const gl=makeGl('player'),canvas=new Canvas('0-canvas',gl),originalDraw=gl.drawArrays;
 canvas.getContext('webgl');
 assert.notStrictEqual(gl.drawArrays,originalDraw);
@@ -408,6 +462,52 @@ assert.deepStrictEqual(calls.stand,[]);
 """,
         continuous=continuous,
         once=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("program_mode", "pre_wrap_mix", "fed"),
+    [
+        pytest.param("known", None, True, id="unset"),
+        pytest.param("zero", None, True, id="uniform1f-zero"),
+        pytest.param("zero-fv", None, True, id="uniform1fv-zero"),
+        pytest.param("absent", 0.5, False, id="set-before-wrap"),
+    ],
+)
+def test_from_only_binding_feeds_only_when_the_live_mix_factor_is_zero(
+    program_mode: str, pre_wrap_mix: float | None, fed: bool
+) -> None:
+    """Measured headless on D7 boundary 3 (Q7 follow-up): a single-texture leaf draws with the player's mix program,
+    `mixFactor` looked up but never set in that context (GL default 0) and a stale texture left on unit 1. Mix 0
+    shows only unit 0, so the from-only binding feeds. The module reads the live uniform (`getUniform`), so a value
+    set before it wrapped the context still stands down (review r3), as does a set non-zero mix (`mix-present`)."""
+    before_wrap = (
+        "" if pre_wrap_mix is None else
+        f"const early=program(gl,'absent'); gl.uniform1f(gl.getUniformLocation(early,'mixFactor'),{pre_wrap_mix});"
+    )
+    draw_program = "gl.useProgram(early);" if pre_wrap_mix is not None else f"program(gl,{json.dumps(program_mode)});"
+    _run_node(
+        _plan(_entry("A")),
+        f"""
+const gl=makeGl('player');
+{before_wrap}
+const canvas=new Canvas('0-canvas',gl); canvas.getContext('webgl');
+const a0=texture('a0'),stale=texture('stale');
+upload(gl,a0,[320,180],0,true,false); upload(gl,stale,[1920,1080],1,true,false);
+gl.clear(); bind(gl,a0,0); bind(gl,stale,1); gl.activeTexture(gl.TEXTURE0);
+{draw_program}
+gl.drawArrays(4,0,6);
+const entry=global.__OBED_MM_FEED__.entries.A;
+if ({json.dumps(fed)}) {{
+  assert.strictEqual(entry.state,'fed');
+  assert.deepStrictEqual(gl.videoUploads.map(x=>[x.source.name,x.texture.name]),[['A','a0']]);
+  assert.deepStrictEqual(calls.stand,[]);
+}} else {{
+  assert.strictEqual(entry.state,'stoodDown');
+  assert.strictEqual(entry.reason,'binding-mismatch');
+  assert.deepStrictEqual(gl.videoUploads,[]);
+}}
+""",
     )
 
 

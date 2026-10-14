@@ -73,7 +73,7 @@ SERVED_SHA256 = {
     "V8": "adf6285a401120d9623172e7a78683c37aad1f245d7fdaa1f5a8f396680f52aa",
     "V5+8": "17c227926de4246b2208b22de89098709b29be0b5833e4b368a70f6553bf22fd",
 }
-CORE_SHA256 = "6c687c470dc58c6f68838a577913302bf097c5daf69dc5c8c1fd1e8be0f838a7"
+CORE_SHA256 = "00b9a823bd84d8b5d0073b80111e4fc33444bb3db65daa3f94bc2ee34a66a32e"
 L2_INSTALL_ANCHOR = b"(function(controller) {\n"
 L2_INSTALL_REPLACEMENT = L2_INSTALL_ANCHOR + b"  Object.defineProperty(window, '__obedDebugController', {value: controller});\n"
 L2_SERVED_SHA256 = {

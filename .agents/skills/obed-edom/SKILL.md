@@ -719,7 +719,7 @@ for the parked `iwa-surgical-write-generator` feature.
   module's `once`; a mid-move stand-down pauses without re-uploading. `live_runtime` calls the module's `take` hook
   before Magic Move teardown with MM opacity on or off.
 * **Feed module.** `live_mm_feed_js.py` exports `MM_FEED_VERSION = 1`, `MM_FEED_JS`, `js_sha256()` and
-  `PINNED_MM_FEED_SHA256 = f1fe0dd644359962c4c71cce46424ac3e24eb4ac42d1f9053a103d24463b81bf`;
+  `PINNED_MM_FEED_SHA256 = 554053b70a070bef6245b79050cf0cb0308a63b69750aa34e03132ddde1bbba6`;
   `mm_feed_script(*, continuous: bool, once: bool) -> str` is the sole builder. It reads bindings only from the
   served `window.__OBED_CONTINUITY__`, and the host imports it statically like G2. Its writable page API is
   `window.__OBED_MM_FEED__ = {version: 1, once(objectId) -> boolean, take(controller, scene), entries}` with
