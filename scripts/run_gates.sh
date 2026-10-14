@@ -292,6 +292,7 @@ PYEOF
 # check. The checks run and print in the listed order once every run has finished. Exit, HUP, INT or TERM stops the running groups (TERM, then KILL after 5 s).
 NONCE="$$-$(date +%s)-$RANDOM"; PIDS=(); echo "round nonce $NONCE"
 zmodload zsh/parameter
+zmodload zsh/datetime
 stop_jobs(){ local s g n live=(); for s in $jobstates; do [[ $s == running:* ]] && live+=(${${(s.:.)${s#*:*:}}%%=*}); done; (( ${#live} )) || return 0
   for g in $live; do kill -TERM -$g $g 2>/dev/null; done
   for n in {1..20}; do for g in $live; do kill -0 -$g 2>/dev/null && break; done || break; sleep 0.25; done
@@ -326,15 +327,7 @@ for r in first:
 PYEOF
 GATE_SETTLE_S=${GATE_SETTLE_S:-300}
 [[ $GATE_SETTLE_S == <-> ]] || { echo "GATE_SETTLE_S must be a whole number of seconds, got '$GATE_SETTLE_S'" >&2; exit 2; }
-settle_deadline=$((SECONDS + GATE_SETTLE_S))
-while LAUNCH_LOAD=$(load1) && (( LAUNCH_LOAD > GATE_MAX_START_LOAD )); do
-  (( SECONDS >= settle_deadline )) && {
-    echo "1-minute load average $LAUNCH_LOAD still exceeds GATE_MAX_START_LOAD=$GATE_MAX_START_LOAD ${GATE_SETTLE_S}s after" \
-      "the prewarm; no timed run launched." >&2; exit 2; }
-  sleep $(( settle_deadline - SECONDS < 5 ? settle_deadline - SECONDS : 5 ))
-done
-[[ -n $LAUNCH_LOAD ]] || { echo "cannot read the 1-minute load average (sysctl -n vm.loadavg); no run launched" >&2; exit 2; }
-echo "load average (1 min) at launch $LAUNCH_LOAD"
+settle_deadline=$((EPOCHREALTIME + GATE_SETTLE_S))
 Q=$($PY -c 'from obed_edom.fixture_paths import fixture; print(fixture("qual-decks"))')
 ALPHA_SOURCE=$($PY -c 'from obed_edom.fixture_paths import fixture; print(fixture("alpha-dsk-textures"))')
 ALPHA_GATE=$O/alpha-dsk-repaired
@@ -342,13 +335,32 @@ QUAL_B_SOURCE=${QUAL_B_SOURCE:-"$HOME/Desktop/Convert wall to 16x9 CGs/Continuit
 if (( ${#MM_FEED_ARMS} )); then
   [[ -d $QUAL_B_SOURCE/D7-html && -d $QUAL_B_SOURCE/D7s-html ]] || {
     echo "D7/D7s qualification exports are missing under QUAL_B_SOURCE=$QUAL_B_SOURCE; no run launched" >&2; exit 2; }
-  $PY - "$QUAL_B_SOURCE" "$O" <<'PYEOF' || { echo "D7/D7s qualification export staging FAILED; no run launched"; exit 2; }
-import shutil,sys
+  $PY - "$QUAL_B_SOURCE" "$O" "$G/scripts/live_continuity_probe.py" <<'PYEOF' || { echo "D7/D7s qualification export staging FAILED; no run launched"; exit 2; }
+import ast,json,shutil,sys
 from pathlib import Path
-source,out=Path(sys.argv[1]),Path(sys.argv[2])
-for name in ("D7-html","D7s-html"):
-    shutil.copytree(source/name,out/name)
-    print("Qualification B fixture",out/name)
+from obed_edom.live_continuity import Unsupported,derive_plan,plan_signature
+source,out,probe_source=map(Path,sys.argv[1:])
+names={"D7_PLAN_SHA256","D7S_PLAN_SHA256"}
+pins={}
+for node in ast.parse(probe_source.read_text()).body:
+    if isinstance(node,ast.Assign) and len(node.targets)==1 and isinstance(node.targets[0],ast.Name) and node.targets[0].id in names:
+        pins[node.targets[0].id]=ast.literal_eval(node.value)
+for deck,pin_name in (("D7","D7_PLAN_SHA256"),("D7s","D7S_PLAN_SHA256")):
+    dest=out/f"{deck}-html"
+    shutil.copytree(source/f"{deck}-html",dest)
+    header=json.loads((dest/"assets/header.json").read_text())
+    slides=[{"originalOrdinal":i+1,"playerIndex":i,"exportedUuid":uuid,"skipped":False}
+            for i,uuid in enumerate(header["slideList"])]
+    plan=derive_plan(dest,slides,resolver=lambda base,relative:base/relative)
+    if isinstance(plan,Unsupported):
+        raise SystemExit(f"{deck} runtime plan is unavailable ({plan.reason}); no run launched")
+    runtime=plan.to_runtime()
+    if isinstance(runtime,Unsupported):
+        raise SystemExit(f"{deck} runtime plan is unavailable ({runtime.reason}); no run launched")
+    actual,wanted=plan_signature(runtime),pins[pin_name]
+    if actual!=wanted:
+        raise SystemExit(f"{deck} runtime plan sha256 {actual} does not match pinned {wanted}; no run launched")
+    print("Qualification B fixture",dest,"plan sha256",actual)
 PYEOF
   $PY - "$ALPHA_SOURCE" "$ALPHA_GATE" <<'PYEOF' || { echo "Alpha texture repair FAILED; no run launched"; exit 2; }
 import json,shutil,sys
@@ -365,6 +377,15 @@ if preview_textures._detect(preview_textures._load(dest,manifest["slides"]),prev
 print("Alpha repaired fixture",dest)
 PYEOF
 fi
+while LAUNCH_LOAD=$(load1) && (( LAUNCH_LOAD > GATE_MAX_START_LOAD )); do
+  remaining=$((settle_deadline - EPOCHREALTIME))
+  (( remaining <= 0 )) && {
+    echo "1-minute load average $LAUNCH_LOAD still exceeds GATE_MAX_START_LOAD=$GATE_MAX_START_LOAD ${GATE_SETTLE_S}s after" \
+      "the prewarm; no timed run launched." >&2; exit 2; }
+  sleep $(( remaining < 5 ? remaining : 5 ))
+done
+[[ -n $LAUNCH_LOAD ]] || { echo "cannot read the 1-minute load average (sysctl -n vm.loadavg); no run launched" >&2; exit 2; }
+echo "load average (1 min) at launch $LAUNCH_LOAD"
 for V in $HOST_VIEWPORTS; do
   queue $O/host-$V $PY -u scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport $V --artifact $O/host-$V.json ${HOST_SKIP[$V]:+--skip-arms} ${HOST_SKIP[$V]}
 done

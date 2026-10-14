@@ -72,6 +72,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import time
@@ -131,6 +132,8 @@ finally: marker.unlink(missing_ok=True)
 '''
 
 PROBE_STUB = _STUB_COMMON + r'''
+D7_PLAN_SHA256 = "0e2570925a56dc69204657fc5d1001e87ad4407eb3fed62e271f1d7c94b5b584"
+D7S_PLAN_SHA256 = "3d1a0bd159e0e2dc91e2533d167cc5cdacd6aa5412891bd1661c6114a12a8577"
 artifact = Path(arg("--artifact"))
 stem = artifact.stem
 event(f"probe {stem} viewport={arg('--viewport')} skip={arg('--skip-arms')} start")
@@ -331,10 +334,10 @@ def gates(tmp_path: Path):
     marker.mkdir()
     events = tmp_path / "events.txt"
     qual_b_source = tmp_path / "qual-b-source"
-    for name in ("D7-html", "D7s-html"):
-        export = qual_b_source / name
-        (export / "assets").mkdir(parents=True)
-        (export / "index.html").write_text(name)
+    for deck in ("D7", "D7s"):
+        export = qual_b_source / f"{deck}-html"
+        shutil.copytree(REPO / "tests" / "fixtures" / "live_continuity" / "qual_decks" / deck, export)
+        (export / "index.html").write_text(f"{deck}-html")
     stub_bin = tmp_path / "bin"
     stub_bin.mkdir()
     (stub_bin / "sysctl").write_text(SYSCTL_STUB)
@@ -372,6 +375,7 @@ def gates(tmp_path: Path):
         return events.read_text().splitlines() if events.exists() else []
 
     def survivors() -> list[str]:
+        # Deliberately global: catch every leaked descendant under tmp_path, not only stub PIDs.
         found = subprocess.run(["pgrep", "-fl", str(tmp_path)], capture_output=True, text=True).stdout
         return [line for line in found.splitlines() if line.strip()]
 
@@ -443,6 +447,26 @@ def test_positive_control_an_existing_empty_outdir_is_accepted(gates) -> None:
         fixture, index, _ = args[f"mm-feed-{deck}-feed-on-2560"]
         assert Path(fixture) == expected and index == f"{expected}/index.html"
         assert (expected / "index.html").read_text() == f"{deck}-html"
+
+    slide_path = (
+        gates["qual_b_source"]
+        / "D7-html/assets/D4A1DF22-D248-4A45-8125-8C2288F5AB11/D4A1DF22-D248-4A45-8125-8C2288F5AB11.json"
+    )
+    slide_path.write_text(
+        slide_path.read_text().replace(
+            "E5DB73EC-A7BE-4DC0-BB24-AA6E74CD573D",
+            "E5DB73EC-A7BE-4DC0-BB24-AA6E74CD573E",
+        )
+    )
+    before = len(gates["events"]())
+    mismatch = gates["run"](outdir=gates["tmp"] / "sha-mismatch")
+    message = re.search(
+        r"D7 runtime plan sha256 ([0-9a-f]{64}) does not match pinned "
+        r"(0e2570925a56dc69204657fc5d1001e87ad4407eb3fed62e271f1d7c94b5b584); no run launched",
+        mismatch.stderr,
+    )
+    assert mismatch.returncode == 2 and message and message.group(1) != message.group(2)
+    assert gates["events"]()[before:] == ["prewarm html-unmodified", "prewarm html-unmodified"]
 
 
 def test_missing_qual_b_source_is_refused_only_when_feed_arms_are_requested(gates) -> None:

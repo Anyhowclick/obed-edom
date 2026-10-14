@@ -137,8 +137,9 @@ movie's asset exactly (without query or trim suffix, case-insensitive).
   fed carry at that boundary is drawn in authored order, so several movies can be
   carried together.
 - **Poster hold fallback:** when continuous feeding is off or unavailable, a
-  uniquely bound movie pauses and carries the exact frame on screen when the move
-  starts, then resumes from that pause point without seeking. If the binding is
+  uniquely bound movie pauses and carries the picture showing when the move starts,
+  then resumes from that pause point without seeking. Phase 0 matched the last
+  presented frame in 38/40 trials and one frame newer in 2/40. If the binding is
   not unique or the renderer's upload path is not qualified, Keynote's baked
   poster travels instead. A boundary may have any number of fed or poster-held
   carries, but still only one ordinary overlay bridge.
@@ -154,11 +155,13 @@ movie's asset exactly (without query or trim suffix, case-insensitive).
 
 `OBED_LIVE_MM_FEED=auto` enables continuous texture feeding on qualified outputs.
 `off` disables continuous feeding but keeps the qualified one-shot upload used for
-an exact poster hold; continuity itself must remain on. Any other environment value
+a poster hold; continuity itself must remain on. Any other environment value
 refuses to start. `output.continuity.mmFeed` reports the feed `mode`, optional
-`reason`, module `version` and `sha256`. `output.continuity.posterHold` has one line
-per affected entry with its slides, movie, object ID, `exact` or `baked` mode and
-reason; the presenter shows the same summary directly under the continuity badge.
+`reason`, module `version` and `sha256`. Each `output.continuity.posterHold` line
+includes the selected `planned` path (`continuous`, `exact` one-shot, or `baked`)
+and the runtime `mode` (`exact`, `baked`, or `unavailable`). The host refreshes the
+mode and runtime reason from the page on every observation. The presenter line
+under the continuity badge shows the outcome and, when different, the planned path.
 
 Native Chromium video applies a small midtone tone curve that GL texture uploads do
 not. A continuously fed movie can therefore step slightly in brightness at
@@ -214,13 +217,15 @@ play, and `OBED_LIVE_CONTINUITY=off` (reported as `off`). The deck still plays.
   the carried clock in Keynote but plays from 0 here.
 - `R-res-3`: a Magic Move out of a movie with "Play across slides" off restarts
   midway in Keynote. Here it is carried. Validation flags it as an authoring error.
-- `B-res-1` (exact-hold availability): an exact poster hold needs one unique GL
-  binding and a qualified upload path. An unbound or initially unavailable path,
+- `B-res-1` (one-shot hold availability): the planned `exact` path needs one unique
+  GL binding and a qualified upload path. An unbound or initially unavailable path,
   including the currently unqualified managed-OBS/CEF path, uses the baked poster
-  and reports why. A mid-move stand-down retains the last upload only while its GL
-  context and bindings remain usable; otherwise it reports an unavailable path.
-  It resumes from the actual pause point without seeking or re-uploading, and
-  reports a discontinuity instead of claiming held+1 when that point has advanced.
+  as its planned path and reports that planned reason. Runtime failures refresh the
+  outcome to `baked` or `unavailable` with the page's reason. A mid-move stand-down
+  retains the last upload only while its GL context and bindings remain usable;
+  otherwise the runtime outcome is `unavailable`. It resumes from the actual pause
+  point without seeking or re-uploading; probe evidence reports a discontinuity
+  instead of claiming held+1 when that point has advanced.
 - `B-res-2` (tone curve): a fed move has the small midtone brightness step described
   above at departure and settle.
 - `B-res-3` (overlay crossing): an ordinary overlay carry can still pass above

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { liveClient, type LiveClient, type LiveContinuity, type LiveDisplay, type LiveEngine, type LiveNotCarried, type LiveOperation, type LiveOutputSettings, type LivePreparedDeck, type LiveQualification, type LiveSlide, type LiveSnapshot } from "./api";
+import { liveClient, type LiveClient, type LiveContinuity, type LiveDisplay, type LiveEngine, type LiveNotCarried, type LiveOperation, type LiveOutputSettings, type LivePosterHold, type LivePreparedDeck, type LiveQualification, type LiveSlide, type LiveSnapshot } from "./api";
 import { engineBlocks, OutputEngine } from "./OutputEngine";
 import { LiveDeckInput, type LiveDeckInputHandle } from "./LiveDeckInput";
 import { IconChevronLeft } from "../components/icons";
@@ -20,6 +20,15 @@ function NotCarried({ entries }: { entries: LiveNotCarried[] }) {
   </ul>;
 }
 
+function posterHoldLabel(mode: LivePosterHold["mode"] | LivePosterHold["planned"]) {
+  return mode === "continuous" ? "continuous feed" : mode === "exact" ? "exact departure frame" : mode === "unavailable" ? "unavailable" : "baked poster";
+}
+
+function posterHoldText(entry: LivePosterHold) {
+  const details = [entry.planned !== entry.mode ? `planned ${posterHoldLabel(entry.planned)}` : null, entry.reason].filter(Boolean);
+  return `${entry.fromSlide ?? "?"} → ${entry.toSlide ?? "?"} · ${entry.movie} · ${posterHoldLabel(entry.mode)}${details.length ? ` (${details.join("; ")})` : ""}`;
+}
+
 function ContinuityStatus({ continuity }: { continuity?: LiveContinuity }) {
   const mode = continuity?.mode;
   const notCarried = continuity?.notCarried ?? [];
@@ -35,7 +44,7 @@ function ContinuityStatus({ continuity }: { continuity?: LiveContinuity }) {
   return <div className="live-continuity" aria-live="polite">
     <span className="live-continuity-badge" data-mode={mode || "unknown"}>Movie continuity · {label}</span>
     <p className="note">{detail}</p>
-    {posterHold.length > 0 && <p className="note">Poster hold · {posterHold.map((entry) => `${entry.fromSlide ?? "?"} → ${entry.toSlide ?? "?"} · ${entry.movie} · ${entry.mode === "exact" ? "exact departure frame" : entry.mode === "unavailable" ? "unavailable" : "baked poster"}${entry.reason ? ` (${entry.reason})` : ""}`).join("; ")}</p>}
+    {posterHold.length > 0 && <p className="note">Poster hold · {posterHold.map(posterHoldText).join("; ")}</p>}
     <NotCarried entries={notCarried} />
   </div>;
 }

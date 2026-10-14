@@ -197,6 +197,8 @@ RECORD = "record"
 # the export does not encode play-across (plan §5, R-res-1).
 P2_OFF_PLAN_SHA256 = "283f5eecd18c3412172e28a40bc716c69173a7c72bcd37379dcd3d7d6a96dd4e"
 ALPHA_DSK_PLAN_SHA256 = "c9e546551300e44ff1765147def49257916f14f1c139fcee704d9accad7411d6"
+D7_PLAN_SHA256 = "0e2570925a56dc69204657fc5d1001e87ad4407eb3fed62e271f1d7c94b5b584"
+D7S_PLAN_SHA256 = "3d1a0bd159e0e2dc91e2533d167cc5cdacd6aa5412891bd1661c6114a12a8577"
 # The pinned P2 runtime plans (off, gl-replay on; p2-loop off, on): the only decks whose status
 # is P2's legacy slot table. Every other deck is scored by `generated_status`.
 P2_PLAN_SHA256 = frozenset({

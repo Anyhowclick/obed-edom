@@ -70,6 +70,12 @@ _CONTINUITY_STAGE_GATE_EXPR = (
     "stage:s?{offsetWidth:s.offsetWidth,offsetHeight:s.offsetHeight,"
     "rect:{left:r.left,top:r.top,width:r.width,height:r.height}}:null};})()"
 )
+_LIVE_SNAPSHOT_EXPR = (
+    "(()=>{var s=window.__obedLive?window.__obedLive.snapshot():null;if(!s||typeof s!=='object')return s;"
+    "var o={};Object.keys(s).forEach(function(k){o[k]=s[k]});try{var a=window.__OBED_MM_FEED__,e=a&&a.entries;"
+    "if(e&&typeof e==='object'){var t={};Object.keys(e).forEach(function(k){var v=e[k];if(v&&typeof v==='object')"
+    "t[k]={mode:v.mode,state:v.state,reason:v.reason,hold:v.hold}});o.__obedMmFeedEntries=t}}catch(x){}return o})()"
+)
 
 
 def derive_runtime(export_root: Path, slides: list[dict[str, Any]], *, resolver=safe_export_file, **kwargs: Any) -> tuple[ContinuityPlan, dict[str, Any]] | Unsupported:
@@ -939,6 +945,7 @@ class LiveOutputHost:
         self._mm_feed_script = ""
         self._mm_feed_continuous = False
         self._mm_feed_once = False
+        self._poster_hold_candidates: list[dict[str, Any]] = []
         self._poster_holds: list[dict[str, Any]] = []
         self._pre_navigation_scripts = tuple(pre_navigation_scripts)
         self.export_root, self.slides = export_root, slides
@@ -1126,8 +1133,6 @@ class LiveOutputHost:
             if not isinstance(entry, dict) or entry.get("underArtwork") is not True:
                 continue
             feed_bound = "feed" in entry
-            if feed_bound and self._mm_feed_continuous:
-                continue
             to_player = scene_to_player.get(entry.get("atScene"))
             from_player = to_player - 1 if isinstance(to_player, int) else None
             movie = movies.get(entry.get("movieKey"), {}) if isinstance(movies, dict) else {}
@@ -1142,21 +1147,44 @@ class LiveOutputHost:
                 ),
                 None,
             )
-            exact = feed_bound and self._mm_feed_once
-            reason = (
-                "continuous feed unavailable; holding the frame shown at departure"
-                if exact
-                else getattr(planned_movie, "feed_reason", None) or self._mm_feed_reason or "texture binding unavailable"
-            )
+            if feed_bound and self._mm_feed_continuous:
+                planned, reason = "continuous", None
+            elif feed_bound and self._mm_feed_once:
+                planned, reason = "exact", "continuous feed unavailable; holding the frame shown at departure"
+            else:
+                planned = "baked"
+                reason = getattr(planned_movie, "feed_reason", None) or self._mm_feed_reason or "texture binding unavailable"
             lines.append({
                 "fromSlide": self._original_by_player.get(from_player),
                 "toSlide": self._original_by_player.get(to_player),
                 "movie": getattr(planned_movie, "asset", None) or (assets[0] if assets else entry.get("movieKey")),
                 "objectId": (entry.get("src") or {}).get("objectId"),
-                "mode": "exact" if exact else "baked",
+                "planned": planned,
                 "reason": reason,
             })
         return lines
+
+    def _refresh_poster_holds(self, entries: Any) -> None:
+        runtime_entries = entries if isinstance(entries, dict) else {}
+        lines = []
+        for candidate in self._poster_hold_candidates:
+            line = dict(candidate)
+            outcome = runtime_entries.get(line.get("objectId"))
+            hold = outcome.get("hold") if isinstance(outcome, dict) else None
+            if hold in {"exact", "baked", "unavailable"}:
+                line["mode"] = hold
+                reason = outcome.get("reason")
+                if isinstance(reason, str) and reason:
+                    line["reason"] = reason
+                else:
+                    line.pop("reason", None)
+                lines.append(line)
+            elif line["planned"] != "continuous":
+                line["mode"] = line["planned"]
+                if line.get("reason") is None:
+                    line.pop("reason", None)
+                lines.append(line)
+        self._poster_holds = lines
 
     def _mm_feed_info(self) -> dict[str, Any]:
         info: dict[str, Any] = {"mode": self._mm_feed_mode}
@@ -1339,7 +1367,8 @@ class LiveOutputHost:
             except Exception: version = None
             self._logger.log("browserVersion", result=version)
             self._mm_feed_mode, self._mm_feed_reason, self._mm_feed_script = self._resolve_mm_feed(version)
-            self._poster_holds = self._poster_hold_lines()
+            self._poster_hold_candidates = self._poster_hold_lines()
+            self._refresh_poster_holds(None)
             continuity_script = (
                 _continuity_scripts(self._continuity_runtime_plan, self._canvas) + self._gl_replay_script + self._mm_feed_script
                 if self._continuity_runtime_plan is not None
@@ -1362,6 +1391,7 @@ class LiveOutputHost:
                 if self._continuity_mode != "qualified":
                     if self._mm_feed_mode == "injected":
                         self._mm_feed_mode, self._mm_feed_reason, self._mm_feed_script = "unavailable", "continuity unsupported", ""
+                    self._poster_hold_candidates = []
                     self._poster_holds = []
             self._logger.log(
                 "continuity", mode=self._continuity_mode, reason=self._continuity_reason,
@@ -1527,10 +1557,9 @@ class LiveOutputHost:
         if not self._transport:
             self.start()
         transport = self._require_transport()
-        value = transport.evaluate(
-            "window.__obedLive ? window.__obedLive.snapshot() : null"
-        )
+        value = transport.evaluate(_LIVE_SNAPSHOT_EXPR)
         if not isinstance(value, dict): raise LiveHostError("Recognised player observation is unavailable.")
+        self._refresh_poster_holds(value.get("__obedMmFeedEntries"))
         revision = value.get("revision")
         self._runtime_revision = revision if isinstance(revision, int) and not isinstance(revision, bool) else None
         self._can_advance = bool(value.get("canAdvance"))

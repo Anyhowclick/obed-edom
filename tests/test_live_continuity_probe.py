@@ -12325,6 +12325,8 @@ def test_feed_gate_registrations_are_data_and_run_gates_names_every_control() ->
     )] == ("b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry",)
     assert probe.MM_FEED_READ_EXPECTATIONS[("D7", "crossfade")] == {0.25: True, 0.5: False, 0.75: False}
     assert probe.MM_FEED_READ_EXPECTATIONS[("Alpha_DSK", "first-crossfade")] == {0.5: False, 0.75: True}
+    assert probe.D7_PLAN_SHA256 == "0e2570925a56dc69204657fc5d1001e87ad4407eb3fed62e271f1d7c94b5b584"
+    assert probe.D7S_PLAN_SHA256 == "3d1a0bd159e0e2dc91e2533d167cc5cdacd6aa5412891bd1661c6114a12a8577"
 
 
 def test_repaired_full_alpha_runtime_plan_is_pinned() -> None:

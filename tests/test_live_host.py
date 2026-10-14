@@ -41,6 +41,7 @@ class FakeCdp:
         self.auto_play_run_length: int | None = None
         self.auto_play_run_kinds: list | None = None
         self.runtime_version = 2
+        self.mm_feed_entries: Any = None
         self.space_rejects: bool = False
         self.slide_number_showing = False
         self.product: str | None = self.product_default
@@ -127,12 +128,15 @@ class FakeCdp:
         if "__OBED_CONTINUITY_INFO__" in expression:
             return {"ready": False, "present": False, "info": {"installed": True}, "stage": None}
         if "__obedLive" in expression:
-            return {
+            snapshot = {
                 "exportedSlideIndex": self.index, "sceneId": self.index, "buildIndex": None, "revision": self.revision,
                 "canAdvance": self.can_advance, "canGoTo": not self.busy, "ready": not self.busy, "busy": self.busy,
                 "autoPlayRunLength": self.auto_play_run_length, "autoPlayRunKinds": self.auto_play_run_kinds,
                 "runtimeVersion": self.runtime_version, "slideNumberShowing": self.slide_number_showing,
             }
+            if self.mm_feed_entries is not None:
+                snapshot["__obedMmFeedEntries"] = self.mm_feed_entries
+            return snapshot
         if ".hide()" in expression: self.visible = False; return None
         if ".show()" in expression: self.visible = True; return None
         return self.visible
@@ -2578,9 +2582,54 @@ def test_mm_feed_resolves_continuous_and_once_independently(
             "toSlide": 2,
             "movie": "movie.mov",
             "objectId": "movie-object",
+            "planned": mode,
             "mode": mode,
             "reason": "continuous feed unavailable; holding the frame shown at departure" if mode == "exact" else "CEF upload path not qualified",
         }
+    fake = FakeCdp.instances[0]
+    if kind == "attach-chrome" and preference == "off":
+        fake.mm_feed_entries = {
+            "movie-object": {"mode": "once", "state": "held", "reason": None, "hold": "exact"},
+        }
+        output.observe()
+        assert output.output["continuity"]["posterHold"] == [{
+            "fromSlide": 1,
+            "toSlide": 2,
+            "movie": "movie.mov",
+            "objectId": "movie-object",
+            "planned": "exact",
+            "mode": "exact",
+        }]
+        fake.mm_feed_entries = {
+            "movie-object": {"mode": "once", "state": "stoodDown", "reason": "one-shot upload refused", "hold": "baked"},
+        }
+        output.observe()
+        assert output.output["continuity"]["posterHold"][0] == {
+            "fromSlide": 1,
+            "toSlide": 2,
+            "movie": "movie.mov",
+            "objectId": "movie-object",
+            "planned": "exact",
+            "mode": "baked",
+            "reason": "one-shot upload refused",
+        }
+        fake.mm_feed_entries = None
+        output.observe()
+        assert output.output["continuity"]["posterHold"][0] == poster[0]
+    if kind == "managed-cef" and preference == "on":
+        fake.mm_feed_entries = {
+            "movie-object": {"mode": "continuous", "state": "stoodDown", "reason": "WebGL context lost", "hold": "unavailable"},
+        }
+        output.observe()
+        assert output.output["continuity"]["posterHold"] == [{
+            "fromSlide": 1,
+            "toSlide": 2,
+            "movie": "movie.mov",
+            "objectId": "movie-object",
+            "planned": "continuous",
+            "mode": "unavailable",
+            "reason": "WebGL context lost",
+        }]
 
 
 def test_mm_feed_renderer_is_resolved_before_script_selection_and_navigation(tmp_path, monkeypatch):

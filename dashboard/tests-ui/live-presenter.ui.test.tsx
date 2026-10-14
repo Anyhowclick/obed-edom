@@ -192,14 +192,14 @@ describe("LivePresenter", () => {
     const continuity: LiveContinuity = {
       mode: "qualified",
       posterHold: [
-        { fromSlide: 6, toSlide: 7, movie: "clip-a.mov", objectId: "a", mode: "exact", reason: "continuous feed disabled" },
-        { fromSlide: 7, toSlide: 8, movie: "clip-b.mov", objectId: "b", mode: "baked", reason: "CEF upload path not qualified" },
+        { fromSlide: 6, toSlide: 7, movie: "clip-a.mov", objectId: "a", planned: "exact", mode: "baked", reason: "one-shot upload refused" },
+        { fromSlide: 7, toSlide: 8, movie: "clip-b.mov", objectId: "b", planned: "continuous", mode: "unavailable", reason: "WebGL context lost" },
       ],
     };
     const api = client({ state: vi.fn(async () => state({ continuity })) });
     render(<LivePresenter client={api} pollMs={60_000} />);
     await screen.findByText("Movie continuity · On");
-    expect(screen.getByText("Poster hold · 6 → 7 · clip-a.mov · exact departure frame (continuous feed disabled); 7 → 8 · clip-b.mov · baked poster (CEF upload path not qualified)")).toBeVisible();
+    expect(screen.getByText("Poster hold · 6 → 7 · clip-a.mov · baked poster (planned exact departure frame; one-shot upload refused); 7 → 8 · clip-b.mov · unavailable (planned continuous feed; WebGL context lost)")).toBeVisible();
   });
 
   it("lists three declined cuts and folds the rest into an expandable list", async () => {

@@ -707,7 +707,8 @@ for the parked `iwa-surgical-write-generator` feature.
   texture in authored draw order, then re-homed into the authored movie layer at settle; N fed carries may share one
   boundary. A boundary otherwise retains the one-overlay-bridge guard. Click-driven/multi-build overlap remains
   `overlap`; R11 is unchanged. An unbound or unavailable feed pauses the decoder and uses the baked poster; a
-  qualified one-shot uploads the exact departure picture and resumes from the pause point without seeking.
+  qualified one-shot uploads the departure picture and resumes from the pause point without seeking; zero-tolerance
+  precision remains owner-gated.
 * **Bridge clock.** A bridge overlay moves on Keynote's `Date` from its GL loop start, stamped by a `requestAnimFrame`
   setter hook that never throws (`main.js` untouched). With no stamp after `GL_CLOCK_WAIT_MS` (50) it holds at the
   source, then follows `performance.now()` from the core's trigger. One `bridge-clock` note per motion records `via`
@@ -735,8 +736,11 @@ for the parked `iwa-surgical-write-generator` feature.
   continuous feed, while qualified attached Chrome keeps one-shot. `OBED_LIVE_MM_FEED=off|auto`; `off` disables
   continuous feeding but retains a qualified one-shot, and continuity off injects neither. Report
   `output.continuity.mmFeed {mode, reason?, version, sha256}` plus per-entry
-  `output.continuity.posterHold {fromSlide, toSlide, movie, objectId, mode: exact|baked, reason}`; the UI renders one
-  summary line under the continuity badge.
+  `output.continuity.posterHold {fromSlide, toSlide, movie, objectId, planned:
+  continuous|exact|baked, mode: exact|baked|unavailable, reason?}`. `planned` is the selected path (`exact` requests
+  the qualified one-shot; `baked` means no unique binding or qualified upload path). `mode` and `reason` are refreshed
+  from `__OBED_MM_FEED__.entries[src.objectId]` on every `observe()` and report the runtime outcome. The UI shows the
+  outcome and adds the planned path when they differ.
 * **Refusals.** Per (boundary, instance) → `retire refused` + one `ContinuityPlan.refusals` record (`code`,
   `objectId` of `src`), reported on `output.continuity.notCarried`: `overlap` artwork above on a click-driven or
   multi-build destination, R1
@@ -805,6 +809,11 @@ for the parked `iwa-surgical-write-generator` feature.
   new-instrument re-bank: `ALPHA_POSTER_FLOOR = 2.5`, `MAX_INTER_FEED_GAP_MS = 50`,
   `ALPHA_HOLD_MARGIN = 6`, `COUNTER_HOLD_MARGIN = 1`. Paused-element trials matched the last rVFC target 38/40 times
   and were one frame newer 2/40, so the zero-tolerance exact-hold gate remains owner-gated.
+* **Stage B gate inputs.** With feed arms enabled, `run_gates.sh` reads `QUAL_B_SOURCE` (default
+  `~/Desktop/Convert wall to 16x9 CGs/Continuity`) and requires `D7-html` and `D7s-html`. After the H.264 prewarm and
+  before the load/settle gate, it copies both exports into the gate output, derives each runtime plan, and refuses the
+  run unless the signatures match `D7_PLAN_SHA256` and `D7S_PLAN_SHA256` beside `ALPHA_DSK_PLAN_SHA256` in
+  `live_continuity_probe.py`. Keep these source exports outside the main `output/`; the main real-export censuses scan it.
 
 ## Alpha Keynote managed OBS (Keyer output)
 
